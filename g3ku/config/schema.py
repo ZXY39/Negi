@@ -1192,12 +1192,11 @@ class UpdateCheckConfig(Base):
 
 
 class ContextRefreshConfig(Base):
-    """Idle boundary for the context carriers that are otherwise pinned.
+    """Legacy idle-refresh settings (kept for config compatibility).
 
-    `tools[]` and the frontdoor memory snapshot only change bytes where the reusable
-    prefix is already broken. Measured provider hits do not decay with idle length (the
-    residual is a shared head other traffic keeps warm), so this caps how long a revoked
-    tool name may stay declared; it does not buy a guaranteed free refresh.
+    Idle time is no longer a reprint boundary: pinned heads reprint only at compaction,
+    and changes between reprints are delivered as one-time `[RUNTIME_NOTICE]` messages.
+    The section remains so existing config files and the admin API keep loading.
     """
 
     enabled: bool = True

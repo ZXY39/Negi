@@ -726,7 +726,7 @@ async def test_message_builder_keeps_callable_and_candidate_tools_separate() -> 
 
 
 @pytest.mark.asyncio
-async def test_message_builder_renders_candidate_tools_as_structured_tool_id_and_description_items() -> None:
+async def test_message_builder_does_not_append_runtime_tool_contract_tail() -> None:
     prompt_builder = _PromptBuilder()
     memory_manager = _MemoryManager(response="")
 
@@ -772,19 +772,8 @@ async def test_message_builder_renders_candidate_tools_as_structured_tool_id_and
         and is_frontdoor_tool_contract_message(item)
     ]
 
-    assert len(contract_messages) == 1  # 一份稳定契约 + 一份活状态块
-    payload = frontdoor_tool_contract_payload_from_message(contract_messages[0])
-    assert isinstance(payload, dict)
-    assert sorted(payload["candidate_tools"], key=lambda item: item["tool_id"]) == [
-        {
-            "tool_id": "filesystem_edit",
-            "description": "Edit one file in text-replace or line-range mode.",
-        },
-        {
-            "tool_id": "filesystem_write",
-            "description": "Write file content to disk.",
-        },
-    ]
+    # 尾块退役：候选数据由发送前的单生产者投递，装配层不再追加合同消息。
+    assert contract_messages == []
 
 
 @pytest.mark.asyncio
@@ -1058,7 +1047,8 @@ async def test_message_builder_exposes_dynamic_appendix_messages_for_prompt_cach
         "## 长期记忆写入提示" in str(item.get("content") or "")
         for item in dynamic_appendix_messages
     )
-    assert any(
+    # 尾块退役：动态附录不再承载 runtime tool contract。
+    assert not any(
         "frontdoor_runtime_tool_contract" in str(item.get("content") or "")
         for item in dynamic_appendix_messages
     )
@@ -1068,7 +1058,7 @@ async def test_message_builder_exposes_dynamic_appendix_messages_for_prompt_cach
 
 
 @pytest.mark.asyncio
-async def test_message_builder_appends_frontdoor_runtime_tool_contract_to_dynamic_appendix() -> None:
+async def test_message_builder_keeps_runtime_contract_out_of_dynamic_appendix() -> None:
     prompt_builder = _SplitPromptBuilder()
     memory_manager = _MemoryManager(response="")
     builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
@@ -1084,7 +1074,7 @@ async def test_message_builder_appends_frontdoor_runtime_tool_contract_to_dynami
             ],
             "tool_names": ["exec", "filesystem_write", "load_tool_context"],
         },
-        persisted_session=None,
+        persisted_session=Session(key="web:shared"),
         contract_present_tool_names=["filesystem_write"],
     )
 
@@ -1095,29 +1085,16 @@ async def test_message_builder_appends_frontdoor_runtime_tool_contract_to_dynami
         and is_frontdoor_tool_contract_message(item)
     ]
 
-    assert len(contract_messages) == 1  # 一份同形尾块：稳定契约与活状态都在里面
-    contract_message = contract_messages[0]
-    contract_text = str(contract_message.get("content") or "")
-
-    assert contract_message["role"] == "user"
-    assert contract_text.startswith("## Runtime Tool Contract")
-    assert '"message_type"' not in contract_text
-    assert '"callable_tool_names"' not in contract_text
-    # D11：callable 面不再渲染成行（水合不再拦路 ⇒ 该行无信息量），名字只由 `tools[]`
-    # 与请求视图里的契约块承载。
-    assert "callable_tools:" not in contract_text
-    assert "denied_tools" not in contract_text
-    assert "stage_summary:" not in contract_text
-    assert 'load_tool_context(tool_id="filesystem_write")' not in contract_text
-    # 候选整表不再重列：这份样本里 filesystem_write 已经 callable、池子为空，所以候选行
-    # 一条都不该出现（旧形状会固定打一行 `candidate_tools: none`）。
-    assert "candidate_tools:" not in contract_text
-    assert "undeclared_candidates" not in contract_text
-    assert "To use one, call" not in contract_text
+    # 尾块退役：合同只以头部快照存在，装配层不再追加动态合同消息。
+    assert contract_messages == []
+    head_text = str(result.stable_messages[0].get("content") or "")
+    assert "## Runtime Contract (pinned)" in head_text
+    assert "snapshot_note:" in head_text
+    assert "## Runtime Tool Contract" not in head_text
 
 
 @pytest.mark.asyncio
-async def test_message_builder_appends_frontdoor_runtime_tool_contract_with_exec_runtime_policy() -> None:
+async def test_message_builder_pins_exec_runtime_policy_in_head_instead_of_tail() -> None:
     prompt_builder = _SplitPromptBuilder()
     memory_manager = _MemoryManager(response="")
     loop = _loop(memory_manager)
@@ -1140,7 +1117,7 @@ async def test_message_builder_appends_frontdoor_runtime_tool_contract_with_exec
             ],
             "tool_names": ["exec", "load_tool_context"],
         },
-        persisted_session=None,
+        persisted_session=Session(key="web:shared"),
     )
 
     contract_messages = [
@@ -1150,18 +1127,15 @@ async def test_message_builder_appends_frontdoor_runtime_tool_contract_with_exec
         and is_frontdoor_tool_contract_message(item)
     ]
 
-    assert len(contract_messages) == 1  # 一份稳定契约 + 一份活状态块
-    contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
-
-    assert contract_messages[0]["role"] == "user"
-    assert contract_text.startswith("## Runtime Tool Contract")
-    assert "exec_runtime_policy:" in contract_text
-    assert "mode=full_access" in contract_text
-    assert "guardrails_enabled=False" in contract_text
-    assert "exec will execute shell commands without exec-side guardrails." in contract_text
+    assert contract_messages == []
+    head_text = str(result.stable_messages[0].get("content") or "")
+    assert "exec_runtime_policy:" in head_text
+    assert "mode=full_access" in head_text
+    assert "guardrails_enabled=False" in head_text
+    assert "exec will execute shell commands without exec-side guardrails." in head_text
 
 
-def test_frontdoor_dynamic_appendix_records_prefer_state_tool_contract_over_stale_message() -> None:
+def test_frontdoor_dynamic_appendix_records_strip_legacy_contract_messages() -> None:
     runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
 
     records = runner._dynamic_appendix_message_records_for_state(
@@ -1196,25 +1170,8 @@ def test_frontdoor_dynamic_appendix_records_prefer_state_tool_contract_over_stal
         if is_frontdoor_tool_contract_message(item)
     ]
 
-    assert len(contract_messages) == 1  # 一份稳定契约 + 一份活状态块
-    contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
-    assert contract_messages[0]["role"] == "user"
-    assert contract_text.startswith("## Runtime Tool Contract")
-    # callable 由 state 重算：`filesystem_write` 的契约块在 `messages` 里 ⇒ 在场 ⇒ 进名单；
-    # 陈旧尾块消息自报的 `exec` 不被采信。D11 后这一面不再渲染成行，判据落在消息自带的
-    # 载荷上（装配层算出的那份，而不是文本）。
-    contract_payload = contract_messages[0].get("_frontdoor_tool_contract_payload") or {}
-    assert list(contract_payload.get("callable_tool_names") or []) == ["filesystem_write", "silent"]
-    assert "callable_tools:" not in contract_text
-    # 空池不再打 `candidate_tools: none` 这一行占位
-    assert "candidate_tools:" not in contract_text
-    assert "undeclared_candidates" not in contract_text
-    # skill 名单不再进尾块（头部钉住块承载全量名单；此用例未钉，模型侧信号由
-    # new_readable_skills 注入行承载）；加载规则只在基础提示词里。
-    assert "candidate_skills" not in contract_text
-    assert "new_readable_skills" not in contract_text
-    assert "Skills listed in `candidate_skills` do not hydrate" not in contract_text
-    assert 'Call `load_skill_context(skill_id="<skill_id>")`' not in contract_text
+    # 尾块退役：state 里的历史合同消息被剥离，不再重建成新尾块。
+    assert contract_messages == []
 
 
 def test_frontdoor_dynamic_appendix_records_require_canonical_tool_state_fields() -> None:
@@ -1248,7 +1205,7 @@ def test_message_builder_detects_chinese_memory_write_phrases(
     assert expected_terms.issubset(matched)
 
 
-def test_frontdoor_tool_contract_upsert_accepts_legacy_dict_and_writes_summary_text() -> None:
+def test_frontdoor_tool_contract_upsert_only_strips_legacy_messages() -> None:
     contract = build_frontdoor_tool_contract(
         callable_tool_names=["filesystem_stat", "filesystem_write"],
         candidate_tool_names=["agent_browser"],
@@ -1271,33 +1228,9 @@ def test_frontdoor_tool_contract_upsert_accepts_legacy_dict_and_writes_summary_t
     assert is_frontdoor_tool_contract_message(legacy_message)
     assert is_frontdoor_tool_contract_message(contract.to_message())
 
+    # 尾块退役：upsert 只剥离历史里的旧合同消息，不再写入新尾块。
     updated = upsert_frontdoor_tool_contract_message([legacy_message], contract)
-    assert len(updated) == 1  # upsert 一次写入稳定契约 + 活状态块
-    assert is_frontdoor_tool_contract_message(updated[0])
-    assert updated[0]["role"] == "user"
-    assert isinstance(updated[0]["content"], str)
-    assert str(updated[0]["content"] or "").startswith("## Runtime Tool Contract")
-    assert '"message_type"' not in str(updated[0]["content"] or "")
-    # D11：callable 名单不再渲染成行，装配层算出的那份只留在载荷里（执行准入读它，模型侧
-    # 由请求视图里的契约块决定）。
-    assert "callable_tools:" not in str(updated[0]["content"] or "")
-    upserted_payload = updated[0].get("_frontdoor_tool_contract_payload") or {}
-    assert list(upserted_payload.get("callable_tool_names") or []) == [
-        "filesystem_stat",
-        "filesystem_write",
-    ]
-    stable_text = str(updated[0]["content"] or "")
-    assert "candidate_tools:" in stable_text
-    assert "candidate_skills" not in stable_text
-    # 静态规则与逐条描述都不再进正文：规则归基础提示词，描述归 provider tools[]
-    assert "Skills listed in `candidate_skills` do not hydrate" not in stable_text
-    assert "`agent_browser`" in stable_text
-    assert "`agent_browser`: Browser automation" not in stable_text
-    assert (
-        'To use one, call `load_tool_context(tool_id="<tool_id>")` first and wait for the next round before calling it directly.'
-        not in stable_text
-    )
-    assert 'load_tool_context(tool_id="agent_browser")' not in stable_text
+    assert updated == []
     payload = contract.to_message_payload()
     assert payload["callable_tool_names"] == ["filesystem_stat", "filesystem_write"]
     assert payload["candidate_tools"] == [
@@ -1384,7 +1317,7 @@ def test_frontdoor_tool_contract_renders_repair_required_sections_separately() -
         contract_revision="frontdoor:v1",
     )
 
-    updated = upsert_frontdoor_tool_contract_message([], contract)
+    updated = [contract.to_message()]
     payload = contract.to_message_payload()
 
     assert payload["candidate_tools"] == []
@@ -1449,7 +1382,7 @@ def test_frontdoor_tool_contract_renders_attachment_reopen_targets() -> None:
         ],
     )
 
-    updated = upsert_frontdoor_tool_contract_message([], contract)
+    updated = [contract.to_message()]
     payload = contract.to_message_payload()
     contract_text = str(updated[0]["content"] or "")
 
@@ -1538,30 +1471,8 @@ async def test_message_builder_surfaces_current_and_historical_attachment_reopen
         if is_frontdoor_tool_contract_message(item)
     ]
 
-    assert len(contract_messages) == 1  # 一份稳定契约 + 一份活状态块
-    payload = frontdoor_tool_contract_payload_from_message(contract_messages[0])
-    assert payload is not None
-    assert payload["attachment_reopen_targets"] == [
-        {
-            "name": current_path.name,
-            "kind": "image",
-            "mime_type": "image/png",
-            "path": str(current_path),
-        },
-        {
-            "name": history_path.name,
-            "kind": "file",
-            "mime_type": "application/pdf",
-            "path": str(history_path),
-        },
-    ]
-    contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
-    assert "attachment_reopen_targets:" in contract_text
-    assert str(current_path) in contract_text
-    assert str(history_path) in contract_text
-    assert "create_async_task.file_targets" not in contract_text
-    assert "authoritative reopen lane" not in contract_text
-    assert "copy the exact `path:` or `ref:` into `create_async_task.task`" not in contract_text
+    # 尾块退役：附件句柄由发送前的单生产者投递，装配层不再追加合同消息。
+    assert contract_messages == []
 
 
 def test_frontdoor_tool_contract_drops_audio_attachment_reopen_targets() -> None:
@@ -1592,7 +1503,7 @@ def test_frontdoor_tool_contract_drops_audio_attachment_reopen_targets() -> None
     )
 
     payload = contract.to_message_payload()
-    contract_text = str(upsert_frontdoor_tool_contract_message([], contract)[0]["content"] or "")
+    contract_text = str(contract.to_message()["content"] or "")
 
     assert payload["attachment_reopen_targets"] == [
         {
@@ -1673,23 +1584,8 @@ async def test_message_builder_excludes_voice_clip_from_attachment_reopen_target
         for item in list(result.dynamic_appendix_messages or [])
         if is_frontdoor_tool_contract_message(item)
     ]
-    assert contract_messages
-    payload = frontdoor_tool_contract_payload_from_message(contract_messages[0])
-    assert payload is not None
-    assert payload["attachment_reopen_targets"] == [
-        {
-            "name": current_file.name,
-            "kind": "file",
-            "mime_type": "text/plain",
-            "path": str(current_file),
-        }
-    ]
-    contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
-    assert current_voice.name not in contract_text
-    assert str(current_voice) not in contract_text
-    assert history_voice.name not in contract_text
-    assert str(history_voice) not in contract_text
-    assert str(current_file) in contract_text
+    # 尾块退役：音频过滤发生在上游 state 里，装配层不再追加合同消息。
+    assert contract_messages == []
 
 
 def test_web_ceo_uploaded_files_note_skips_voice_clip() -> None:
@@ -1864,7 +1760,7 @@ async def test_message_builder_includes_retrieval_and_full_transcript_without_du
     assert "## Capability Exposure Snapshot" in contents[0]
     assert "## 本轮候选工具" not in "\n\n".join(contents)
     assert "## 本轮最相关的技能" not in "\n\n".join(contents)
-    assert "frontdoor_runtime_tool_contract" in contents[1]
+    assert not any("frontdoor_runtime_tool_contract" in content for content in contents)
     plain_contents = [strip_arrival_time_stamp(item) for item in contents]
     assert plain_contents.count("follow up question") == 1
     assert plain_contents[-1] == "follow up question"

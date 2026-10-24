@@ -53,7 +53,13 @@ def _frontdoor_runner(live_skills: list[dict[str, str]]):
         list_effective_tool_names=lambda *, actor_role, session_id: ["exec", "filesystem_stat"],
         _current_exec_runtime_policy_payload=lambda: {},
     )
-    return create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=service))
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(main_task_service=service)
+    )
+    # 这些用例只测 skill 通知；合同分节（临时目录等）另有专门用例。头部是 roster-only，
+    # 不在这条链上，所以把临时目录置空，避免首跳多出一条合同通知。
+    runner._ceo_session_temp_dir = lambda _session_key: ""
+    return runner
 
 
 def _notice_texts(messages: list[dict]) -> list[str]:
@@ -465,25 +471,32 @@ def test_restore_without_the_notice_key_keeps_the_ledger() -> None:
     assert notice.notice_context_for(SCOPE)["records"] == []
 
 
-def test_manual_compression_carry_appends_to_the_durable_baseline() -> None:
-    """手动压缩那一跳：仍可读的名字要补回 durable 基线，读不到的不补。"""
+def test_manual_compression_strips_old_notice_and_resets_the_baseline() -> None:
+    """手动压缩那一跳：旧通知从 durable 基线剥掉，台账清空，下一跳按新头部重投。"""
     runner = _frontdoor_runner([_item("beta")])
-    context, _ = notice.record_live_skills({}, [_item("beta"), _item("gone")], now="2026-10-19T10:00:00+08:00")
-    context = notice.mark_records_delivered(context, ["beta", "gone"], now="2026-10-19T10:00:01+08:00")
+    context, _ = notice.record_live_skills({}, [_item("beta")], now="2026-10-19T10:00:00+08:00")
+    context = notice.mark_records_delivered(context, ["beta"], now="2026-10-19T10:00:01+08:00")
+    context, _ = notice.record_contract_sections(
+        context, {"denied_tools": "`gone`"}, now="2026-10-19T10:00:02+08:00"
+    )
     notice.set_notice_context(SCOPE, context)
     session = SimpleNamespace(
-        _frontdoor_request_body_messages=[{"role": "user", "content": "hi"}],
+        _frontdoor_request_body_messages=[
+            {"role": "user", "content": "hi"},
+            {"role": "user", "content": notice.render_notice_text([_item("beta")])},
+        ],
         _active_turn_id="turn-manual-1",
     )
 
     runner._carry_manual_compression_notice_into_baseline(session=session, session_key=SESSION_KEY)
 
     baseline = list(session._frontdoor_request_body_messages)
-    assert len(baseline) == 2 and str(baseline[-1]["content"]).startswith(MARKER)
-    assert "beta" in baseline[-1]["content"] and "gone" not in baseline[-1]["content"]
-    # 同一次压缩不再补第二份
+    assert len(baseline) == 1
+    assert not any(str(item.get("content") or "").startswith(MARKER) for item in baseline)
+    assert notice.notice_context_for(SCOPE)["contract_sections"] == {}
+    # 同一次压缩不再改动基线
     runner._carry_manual_compression_notice_into_baseline(session=session, session_key=SESSION_KEY)
-    assert len(session._frontdoor_request_body_messages) == 2
+    assert len(session._frontdoor_request_body_messages) == 1
 
 
 def test_frontdoor_delivery_publishes_one_internal_row_event() -> None:
@@ -542,21 +555,25 @@ def test_notice_copy_is_english_and_scope_bounded() -> None:
     assert "load_skill_context" not in carried
 
 
-def test_node_compression_carry_appends_after_compacted_baseline() -> None:
+def test_node_compression_strips_old_notice_and_resets_ledger() -> None:
     loop = _node_loop()
     node = _node()
     scope = f"node:{node.task_id}:{node.node_id}"
     context, _ = notice.record_live_skills({}, [_item("beta")], now="2026-10-19T10:00:00+08:00")
     context = notice.mark_records_delivered(context, ["beta"], now="2026-10-19T10:00:01+08:00")
+    context, _ = notice.record_contract_sections(
+        context, {"denied_tools": "`gone`"}, now="2026-10-19T10:00:02+08:00"
+    )
     notice.set_notice_context(scope, context)
 
-    baseline = [{"role": "system", "content": "node system"}, {"role": "user", "content": "[TOKEN_COMPACT_V2] 摘要"}]
-    carried = loop._carry_node_skill_roster_notice_on_compaction(
-        baseline, node=node, skill_roster_items=[_item("beta")]
-    )
-    assert len(carried) == len(baseline) + 1
-    assert notice.SKILL_ROSTER_CARRIED_HEADING in carried[-1]["content"]
-    again = loop._carry_node_skill_roster_notice_on_compaction(
-        baseline, node=node, skill_roster_items=[_item("beta")]
-    )
-    assert len(again) == len(baseline)
+    baseline = [
+        {"role": "system", "content": "node system"},
+        {"role": "user", "content": notice.render_notice_text([_item("beta")])},
+        {"role": "user", "content": "[TOKEN_COMPACT_V2] 摘要"},
+    ]
+    stripped = loop._reset_node_runtime_notice_after_compaction(baseline, node=node)
+    assert len(stripped) == 2
+    assert not any(str(item.get("content") or "").startswith(MARKER) for item in stripped)
+    assert notice.notice_context_for(scope)["contract_sections"] == {}
+    again = loop._reset_node_runtime_notice_after_compaction(stripped, node=node)
+    assert len(again) == len(stripped)

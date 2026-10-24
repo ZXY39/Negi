@@ -352,10 +352,14 @@ def upsert_node_dynamic_contract_message(
     messages: list[dict[str, Any]],
     contract: NodeRuntimeToolContract,
 ) -> list[dict[str, Any]]:
-    """尾部恰好一份回合内契约。"""
-    updated = strip_node_dynamic_contract_messages(messages)
-    updated.append(contract.to_message())
-    return updated
+    """剥离历史里的旧合同块，不再追加新尾块。
+
+    尾块已退役：exec 策略与路径锚进节点头部快照，denied/candidate/repair 变化由一次性
+    `[RUNTIME_NOTICE]` 投递。保留函数是为了所有既有装配点零改动地停在"只剥离"语义上；
+    `contract` 参数只为兼容调用方。
+    """
+    _ = contract
+    return strip_node_dynamic_contract_messages(messages)
 
 
 def strip_node_dynamic_contract_messages(messages: list[dict[str, Any]] | None) -> list[dict[str, Any]]:

@@ -16,7 +16,7 @@ from main.runtime.node_prompt_contract import (
 )
 
 
-def test_upsert_node_dynamic_contract_message_replaces_existing_contract_message() -> None:
+def test_upsert_node_dynamic_contract_message_only_strips_existing_contract_message() -> None:
     base_messages = [
         {"role": "system", "content": "system"},
         {"role": "user", "content": json.dumps({"prompt": "stable bootstrap"}, ensure_ascii=False)},
@@ -47,10 +47,12 @@ def test_upsert_node_dynamic_contract_message_replaces_existing_contract_message
 
     updated = upsert_node_dynamic_contract_message(base_messages, contract)
 
-    assert len(updated) == 3  # 原 2 条（旧契约被替换）+ 运行时契约
-    assert updated[-1]["role"] == "user"
-    assert updated[-1]["content"].startswith("## Runtime Tool Contract")
-    assert '"message_type"' not in updated[-1]["content"]
+    # 尾块退役：旧合同被剥离，不再追加新尾块。
+    assert len(updated) == 2
+    assert all(
+        not str(item.get("content") or "").startswith("## Runtime Tool Contract")
+        for item in updated
+    )
     payload = contract.to_message_payload()
     assert payload["message_type"] == NODE_DYNAMIC_CONTRACT_KIND
     assert payload["callable_tool_names"] == ["filesystem_write"]
@@ -189,7 +191,7 @@ def test_node_runtime_contract_renders_repair_required_sections_separately() -> 
     assert "`writing-skills`" in fragment
 
 
-def test_inject_node_dynamic_contract_message_appends_contract_to_request_tail() -> None:
+def test_inject_node_dynamic_contract_message_strips_legacy_without_appending_tail() -> None:
     contract = NodeRuntimeToolContract(
         node_id="node-1",
         node_kind="execution",
@@ -212,13 +214,8 @@ def test_inject_node_dynamic_contract_message_appends_contract_to_request_tail()
         contract,
     )
 
-    assert [item["role"] for item in injected] == ["system", "user", "assistant", "user"]
-    assert injected[-1]["content"].startswith("## Runtime Tool Contract")
-    assert '"message_type"' not in injected[-1]["content"]
-    payload = extract_node_dynamic_contract_payload(injected)
-    assert payload is not None
-    assert payload["candidate_skills"] == [{"skill_id": "tmux", "description": "terminal workflow"}]
-    assert "hydrated_executor_names" not in payload
+    assert [item["role"] for item in injected] == ["system", "user", "assistant"]
+    assert extract_node_dynamic_contract_payload(injected) is None
 
 
 def test_model_echo_of_contract_heading_with_tool_calls_is_not_a_contract_message() -> None:

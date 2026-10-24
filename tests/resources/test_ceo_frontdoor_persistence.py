@@ -19,10 +19,21 @@ from g3ku.runtime.frontdoor.state_models import (
     CeoRuntimeContext,
 )
 from g3ku.runtime.frontdoor.tool_contract import (
+    clear_pinned_contract_stores,
     frontdoor_tool_contract_payload_from_message,
     is_frontdoor_tool_contract_message,
 )
+from g3ku.runtime.skill_roster_notice import clear_skill_roster_notice_stores
 from g3ku.session.manager import SessionManager
+
+
+@pytest.fixture(autouse=True)
+def _isolate_runtime_contract_stores():
+    clear_pinned_contract_stores()
+    clear_skill_roster_notice_stores()
+    yield
+    clear_pinned_contract_stores()
+    clear_skill_roster_notice_stores()
 
 
 def _frontdoor_tool_contract_payload(message: dict[str, object]) -> dict[str, object] | None:
@@ -30,6 +41,20 @@ def _frontdoor_tool_contract_payload(message: dict[str, object]) -> dict[str, ob
     if not isinstance(payload, dict):
         return None
     return dict(payload)
+
+
+def _without_pinned_head(messages):
+    """比较持久化正文时剥掉 system 首条上的头部快照块（P0 之后它总会存在）。"""
+    from g3ku.runtime.frontdoor.tool_contract import split_pinned_contract_from_system_text
+
+    normalized = []
+    for item in list(messages or []):
+        if isinstance(item, dict) and str(item.get("role") or "").strip() == "system":
+            base, _pinned = split_pinned_contract_from_system_text(item.get("content"))
+            normalized.append({**item, "content": base})
+        else:
+            normalized.append(item)
+    return normalized
 
 
 def test_ceo_snapshot_attaches_turn_ledger_and_compression_payloads() -> None:
@@ -324,13 +349,8 @@ def test_ceo_frontdoor_refresh_dynamic_contract_state_keeps_repair_required_list
     )
 
     contract_messages = [dict(message) for message in list(refreshed["dynamic_appendix_messages"] or [])]
-    assert len(contract_messages) == 1  # 运行时工具合同只有一份
-    assert is_frontdoor_tool_contract_message(contract_messages[0])
-    assert "repair_required_tools:" in str(contract_messages[0]["content"] or "")
-    assert "agent_browser" in str(contract_messages[0]["content"] or "")
-    # skill 的 repair 行已删：payload 仍带条目（机器状态），渲染交给 load 回执
-    assert "repair_required_skills:" not in str(contract_messages[0]["content"] or "")
-    assert "writing-skills" not in str(contract_messages[0]["content"] or "")
+    # 尾块退役：repair 列表留在 state（机器状态），不再渲染成合同消息。
+    assert contract_messages == []
     assert refreshed["repair_required_tool_items"] == [
         {
             "tool_id": "agent_browser",
@@ -1050,7 +1070,8 @@ async def test_ceo_frontdoor_call_model_rebuilds_request_messages_from_stable_an
     )
 
     request_messages = list(captured["messages"] or [])
-    assert any(is_frontdoor_tool_contract_message(dict(message)) for message in request_messages)
+    # 尾块退役：历史里的旧合同被剥离，新请求不再追加合同消息。
+    assert not any(is_frontdoor_tool_contract_message(dict(message)) for message in request_messages)
     assert any(str(message.get("content") or "").startswith("## Retrieved Context") for message in request_messages)
     assert not any(
         "System note for this turn only:\n## Retrieved Context" in str(message.get("content") or "")
@@ -1438,6 +1459,7 @@ async def test_ceo_frontdoor_call_model_keeps_request_messages_append_only_insid
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runner = CeoFrontDoorRunner(loop=SimpleNamespace())
+    runner._ceo_session_temp_dir = lambda _session_key: ""
 
     monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **kwargs: [])
     monkeypatch.setattr(
@@ -1545,7 +1567,7 @@ async def test_ceo_frontdoor_call_model_keeps_request_messages_append_only_insid
     ]
     # The tool contract is turn-only and must never be persisted into state messages:
     # the stale contract carried inside the live body is dropped before the state update.
-    assert replaced_body_messages == expected_body_messages
+    assert _without_pinned_head(replaced_body_messages) == expected_body_messages
     assert all(not is_frontdoor_tool_contract_message(dict(item)) for item in replaced_body_messages)
     assert all(
         str(item.get("content") or "") != contract_text
@@ -1558,6 +1580,7 @@ async def test_ceo_frontdoor_call_model_keeps_provider_tool_schema_set_stable_wh
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runner = CeoFrontDoorRunner(loop=SimpleNamespace())
+    runner._ceo_session_temp_dir = lambda _session_key: ""
 
     # 这份用例的合同是"阶段要切换时，交给 `tools[]` 渲染器的名字集合不塌"。单源化之后渲染器
     # 就是唯一的参数表来源（预检不再另渲一份），所以探针打在渲染器收到的名单上——打在哪一份
@@ -1635,7 +1658,7 @@ async def test_ceo_frontdoor_call_model_keeps_provider_tool_schema_set_stable_wh
     replaced_messages = [dict(item) for item in list(update["messages"] or []) if isinstance(item, dict)]
     # Turn-only tool contract must not be persisted into state messages, even when a
     # stage transition is required; the latest request still exposes it at its tail.
-    assert replaced_messages == [
+    assert _without_pinned_head(replaced_messages) == [
         {"role": "system", "content": "stable system"},
         {"role": "user", "content": "hello"},
     ]
@@ -1836,6 +1859,7 @@ async def test_ceo_frontdoor_prepare_turn_keeps_messages_uncompacted(
         ),
     )
     runner = CeoFrontDoorRunner(loop=loop)
+    runner._ceo_session_temp_dir = lambda _session_key: ""
 
     async def _resolve_for_actor(*, actor_role: str, session_id: str):
         _ = actor_role, session_id
@@ -1882,8 +1906,8 @@ async def test_ceo_frontdoor_prepare_turn_keeps_messages_uncompacted(
     )
 
     messages = list(state_update["messages"] or [])
-    assert messages[0] == {"role": "system", "content": "SYSTEM PROMPT"}
-    assert messages == [
+    assert _without_pinned_head(messages)[0] == {"role": "system", "content": "SYSTEM PROMPT"}
+    assert _without_pinned_head(messages) == [
         {"role": "system", "content": "SYSTEM PROMPT"},
         {"role": "user", "content": "question one"},
         {"role": "assistant", "content": "answer one"},
@@ -1896,7 +1920,7 @@ async def test_ceo_frontdoor_prepare_turn_keeps_messages_uncompacted(
         for message in list(state_update["dynamic_appendix_messages"] or [])
         if isinstance(message, dict) and is_frontdoor_tool_contract_message(dict(message))
     ]
-    assert len(contract_payloads) == 1  # 运行时工具合同只有一份
+    assert contract_payloads == []
     assert "callable_tools:" not in "\n".join(
         str(item.get("content") or "") for item in contract_payloads
     )
@@ -2265,7 +2289,7 @@ async def test_graph_prepare_turn_real_session_path_drops_summary_fields(
         runtime=runtime,
     )
 
-    assert list(result["messages"] or []) == [
+    assert _without_pinned_head(result["messages"] or []) == [
         {"role": "system", "content": "SYSTEM PROMPT"},
         {"role": "user", "content": "question one"},
         {"role": "assistant", "content": "answer one"},
@@ -2278,10 +2302,7 @@ async def test_graph_prepare_turn_real_session_path_drops_summary_fields(
         for message in list(result["dynamic_appendix_messages"] or [])
         if isinstance(message, dict) and is_frontdoor_tool_contract_message(dict(message))
     ]
-    assert len(contract_payloads) == 1  # 运行时工具合同只有一份
-    assert "callable_tools:" not in "\n".join(
-        str(item.get("content") or "") for item in contract_payloads
-    )
+    assert contract_payloads == []
     assert "summary_text" not in result
     assert "summary_payload" not in result
     assert "summary_model_key" not in result

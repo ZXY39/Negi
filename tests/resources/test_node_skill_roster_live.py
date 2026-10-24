@@ -14,7 +14,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from g3ku.runtime.frontdoor.tool_contract import clear_pinned_contract_stores
+from g3ku.runtime.frontdoor.tool_contract import (
+    bump_skill_roster_epoch,
+    clear_pinned_contract_stores,
+)
 from g3ku.runtime.skill_roster_notice import (
     RUNTIME_NOTICE_MARKER,
     clear_skill_roster_notice_stores,
@@ -319,3 +322,58 @@ def test_notice_marker_keeps_reading_the_versioned_legacy_spelling() -> None:
     assert is_skill_roster_notice_text(current)
     assert strip_skill_roster_notice_echo("答完了。\n\n" + legacy) == "答完了。"
     assert strip_skill_roster_notice_echo("答完了。\n\n" + current) == "答完了。"
+
+
+def test_node_head_pins_exec_policy_and_temp_and_freezes_until_the_epoch_moves() -> None:
+    """节点头部快照也承载 exec 策略/临时目录；重印判据只有 epoch，策略变化不提前重印。"""
+    loop = _loop()
+    task_id, node_id = "task-head-extras", "node-head-extras"
+    scope = f"node:{task_id}:{node_id}"
+    base = [
+        {"role": "system", "content": "node system"},
+        {"role": "user", "content": '{"prompt":"demo"}'},
+    ]
+    governed = {
+        "mode": "governed",
+        "guardrails_enabled": True,
+        "summary": "exec will enforce exec-side guardrails.",
+    }
+    full_access = {
+        "mode": "full_access",
+        "guardrails_enabled": False,
+        "summary": "exec will execute shell commands without exec-side guardrails.",
+    }
+
+    first = loop._apply_node_skill_roster_head(
+        list(base),
+        scope_key=scope,
+        skill_items=[_item("alpha")],
+        exec_runtime_policy=governed,
+        session_temp_dir="C:/task/temp",
+    )
+    head = str(first[0]["content"])
+    assert "exec_runtime_policy: mode=governed" in head
+    assert "guardrails_enabled=True" in head
+    assert "session_temp_dir: C:/task/temp" in head
+    assert "path_anchor:" in head
+
+    # 策略变了但 epoch 没动：头部逐字节冻结（缓存优先），变化靠一次性通知纠正。
+    frozen = loop._apply_node_skill_roster_head(
+        list(base),
+        scope_key=scope,
+        skill_items=[_item("alpha")],
+        exec_runtime_policy=full_access,
+        session_temp_dir="C:/task/temp",
+    )
+    assert str(frozen[0]["content"]) == head
+
+    # 重印边界到了：新策略随头部刷新。
+    bump_skill_roster_epoch(None, session_key=scope)
+    repinned = loop._apply_node_skill_roster_head(
+        list(base),
+        scope_key=scope,
+        skill_items=[_item("alpha")],
+        exec_runtime_policy=full_access,
+        session_temp_dir="C:/task/temp",
+    )
+    assert "exec_runtime_policy: mode=full_access" in str(repinned[0]["content"])

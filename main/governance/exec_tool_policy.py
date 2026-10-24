@@ -82,6 +82,27 @@ def exec_runtime_policy_payload(
     }
 
 
+def render_exec_runtime_policy_body(payload: dict[str, Any] | None) -> str:
+    """单行正文（不含 `exec_runtime_policy:` 前缀）：头部合同与一次性通知共用。
+
+    空载荷返回空串——调用方据此把"exec 不在本轮暴露面"当作没有这一节，而不是
+    渲染成 `none` 去污染每次通知。
+    """
+    data = dict(payload or {})
+    if not data:
+        return ''
+    parts: list[str] = []
+    mode = str(data.get('mode') or '').strip()
+    if mode:
+        parts.append(f'mode={mode}')
+    if 'guardrails_enabled' in data:
+        parts.append(f'guardrails_enabled={bool(data.get("guardrails_enabled"))}')
+    summary = str(data.get('summary') or '').strip()
+    if summary:
+        parts.append(f'summary={summary}')
+    return '; '.join(parts)
+
+
 def resolve_exec_runtime_policy_payload(
     *,
     record: Any | None = None,

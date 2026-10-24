@@ -17,7 +17,6 @@ from typing import Any
 from loguru import logger
 
 from g3ku.agent.tools.base import Tool
-from g3ku.config.context_refresh import idle_boundary_exceeded
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.content import content_summary_and_ref, parse_content_envelope
 from g3ku.providers.base import (
@@ -50,6 +49,12 @@ from g3ku.runtime.frontdoor.tool_contract import (
 )
 from g3ku.runtime.frontdoor.tool_contract import (
     merge_pinned_contract_into_system_text as _merge_pinned_contract_into_system_text,
+)
+from g3ku.runtime.frontdoor.tool_contract import (
+    pinned_contract_section_values as _pinned_contract_section_values,
+)
+from g3ku.runtime.frontdoor.tool_contract import (
+    pinned_contract_state as _pinned_contract_state,
 )
 from g3ku.runtime.frontdoor.tool_contract import (
     pinned_head_carrier as _pinned_head_carrier,
@@ -121,7 +126,7 @@ from main.errors import (
     describe_exception,
     is_runtime_self_fault,
 )
-from main.governance.exec_tool_policy import EXEC_TOOL_ID
+from main.governance.exec_tool_policy import EXEC_TOOL_ID, render_exec_runtime_policy_body
 from main.governance.tool_context import apply_runtime_tool_context_projection
 from main.models import (
     RESULT_SCHEMA_VERSION,
@@ -389,10 +394,6 @@ class ReActToolLoop:
         message_history = list(messages or [])
         fresh_turn_request_seed_messages = self._prompt_message_records(request_body_seed_messages)
         previous_actual_request_messages: list[dict[str, Any]] = []
-        # 上一跳发出去的墙钟，与"本跳是不是空闲边界"——判据必须在本跳把墙钟推前之前取，
-        # 否则每一跳看到的都是刚写上去的当下值。
-        previous_send_at: str = ""
-        hop_idle_boundary: bool = False
         pending_request_delta_messages: list[dict[str, Any]] = []
         request_seed_source = ''
         request_seed_message_count = 0
@@ -519,18 +520,14 @@ class ReActToolLoop:
                 node_id=str(node.node_id),
                 scope_key=skill_roster_scope,
             )
+            node_exec_runtime_policy = self._node_exec_runtime_policy_payload(runtime_context)
+            node_task_temp_dir = str(runtime_context.get('task_temp_dir') or '').strip()
             model_messages = self._apply_node_skill_roster_head(
                 model_messages,
                 scope_key=skill_roster_scope,
                 skill_items=skill_roster_items,
-            )
-            # 新增可读 skill 的一次性提示：节点每跳只在这里检测与投递（与会话道同口径）。
-            # 投递的那条同时落进 message_history，让它活过重启/续跑的历史重建。
-            model_messages = self._apply_node_skill_roster_notice(
-                model_messages,
-                node=node,
-                message_history=message_history,
-                skill_roster_items=skill_roster_items,
+                exec_runtime_policy=node_exec_runtime_policy,
+                session_temp_dir=node_task_temp_dir or None,
             )
             # 每跳只算一次在场索引（D12），下传给这一跳的所有消费点（执行准入、冲动投递、
             # 观测读数）。各消费点各自重算会造出"同一轮里两个答案"，那正是本次要消灭的漂移。
@@ -585,6 +582,24 @@ class ReActToolLoop:
                 skill_roster_items=skill_roster_items,
             )
             dynamic_contract_payload = dynamic_contract.to_message_payload()
+            # 运行时合同的一次性通知：与 skill 通知同一条消息、同一个单生产者。
+            # 放在选择结果之后，才能拿到当跳的 denied/candidate/repair。
+            model_messages = self._apply_node_skill_roster_notice(
+                model_messages,
+                node=node,
+                message_history=message_history,
+                skill_roster_items=skill_roster_items,
+                contract_sections=self._node_contract_notice_sections(
+                    payload=dynamic_contract_payload,
+                    tool_schema_selection=tool_schema_selection,
+                    runtime_context=runtime_context,
+                    exec_runtime_policy=node_exec_runtime_policy,
+                    task_temp_dir=node_task_temp_dir,
+                ),
+                covered_contract_sections=_pinned_contract_section_values(
+                    _pinned_contract_state(None, session_key=skill_roster_scope)[0]
+                ),
+            )
             selected_skill_ids = self._normalized_name_list(
                 [
                     item.get('skill_id')
@@ -656,8 +671,6 @@ class ReActToolLoop:
                     request_seed_source = 'fallback_seed_empty'
                 else:
                     request_seed_source = self._fallback_source_from_state(seed_state_for_source)
-            hop_idle_boundary = idle_boundary_exceeded(previous_send_at)
-            previous_send_at = now_iso()
             previous_actual_request_messages = self._prompt_message_records(request_messages)
             pending_request_delta_messages = []
             repair_overlay_text = None
@@ -738,31 +751,32 @@ class ReActToolLoop:
                 token_preflight_diagnostics,
             )
             if adopted_compacted_baseline is not None:
-                # 压缩把整份正文重写了，一次性提示可能随之离开上下文；那一跳可复用前缀
-                # 反正已经断在这里，把仍可读的名字带到压缩产物之后不额外付缓存。
-                adopted_compacted_baseline = self._carry_node_skill_roster_notice_on_compaction(
+                # 压缩整段重写正文：旧的一次性通知随之退役，头部已用当刻值重印。
+                # 剥离通知并清空合同台账，下一跳由单生产者按新头部重投状态快照。
+                adopted_compacted_baseline = self._reset_node_runtime_notice_after_compaction(
                     adopted_compacted_baseline,
                     node=node,
-                    skill_roster_items=skill_roster_items,
                 )
+                # durable 历史里的旧通知也一并剥掉：下一跳的历史重建不再把它们带回来。
+                message_history[:] = _skill_roster_notice.strip_runtime_notice_messages(message_history)
                 previous_actual_request_messages = adopted_compacted_baseline
                 request_seed_source = 'same_turn_token_compacted'
             bundle_recommit_reason = self._node_bundle_recommit_reason(
                 history_shrink_reason=str(history_shrink_reason or ''),
-                idle_boundary=hop_idle_boundary,
             )
             if bundle_recommit_reason:
-                # 清单的重新提交点只有这两条：token 压缩（正文这一跳已被 `[TOKEN_COMPACT_V2]`
-                # 全量重写，可复用前缀反正已经断在这里，重印说明书不额外破缓存）与空闲边界
-                # （距上次发送超过 `context_refresh.idle_minutes`，见 `g3ku/config/context_refresh.py`）。
-                # 空闲那一档确实会重付头部那一截，它是"被收回的名字不必等到下次压缩才退场"的价。
-                # 之后的跳按重印后的清单继续钉住。
+                # 清单的唯一重新提交点：token 压缩（正文这一跳已被 `[TOKEN_COMPACT_V2]`
+                # 全量重写，可复用前缀反正已经断在这里，重印说明书不额外破缓存）。
+                # 其它任何变化（策略、临时目录、可见集）都不许提前重印头部：缓存命中第一，
+                # 变化由一次性 `[RUNTIME_NOTICE]` 消息纠正，下次压缩再统一刷新。
                 # skill 头部名单与 tools[] 同源：同一个边界、同一个跳上重印。
                 _bump_skill_roster_epoch(None, session_key=skill_roster_scope)
                 request_messages = self._apply_node_skill_roster_head(
                     request_messages,
                     scope_key=skill_roster_scope,
                     skill_items=skill_roster_items,
+                    exec_runtime_policy=node_exec_runtime_policy,
+                    session_temp_dir=node_task_temp_dir or None,
                 )
                 compression_provider_tool_names = self._normalized_name_list(
                     list(tool_schema_selection.get('pinned_provider_tool_names') or [])
@@ -3594,8 +3608,14 @@ class ReActToolLoop:
         *,
         scope_key: str,
         skill_items: list[dict[str, str]],
+        exec_runtime_policy: dict[str, Any] | None = None,
+        session_temp_dir: str | None = None,
     ) -> list[dict[str, Any]]:
-        """把 skill 名单钉进 system 首条；名单没变时逐字节幂等，追加链不受扰。"""
+        """把静态声明钉进 system 首条；名单/策略没变时逐字节幂等，追加链不受扰。
+
+        头部是快照：只在重印边界（token 压缩）用当刻值重渲；两次重印之间 exec 策略
+        变化不重印，由一次性通知纠正。临时目录/路径锚与 skill 名单同在一份块里。
+        """
         base_messages = list(messages or [])
         if not base_messages:
             return base_messages
@@ -3606,11 +3626,11 @@ class ReActToolLoop:
         roster_text = _frontdoor_pinned_contract_text(
             None,
             skill_items=skill_items,
-            exec_runtime_policy=None,
-            session_temp_dir=None,
+            exec_runtime_policy=exec_runtime_policy,
+            session_temp_dir=session_temp_dir,
             skill_roster_epoch=epoch,
             session_key=scope_key,
-            include_extras=False,
+            include_extras=True,
         )
         if not roster_text:
             return base_messages
@@ -3619,6 +3639,21 @@ class ReActToolLoop:
         if new_head['content'] == head.get('content'):
             return base_messages
         return [new_head, *base_messages[1:]]
+
+    @staticmethod
+    def _node_exec_runtime_policy_payload(runtime_context: dict[str, Any] | None) -> dict[str, Any] | None:
+        """节点道的 exec 策略取数口：由 runtime_service 经 side-channel 递进来。
+
+        每跳实时读治理记录（无缓存）；拿不到就返回 None，头部渲染 `exec_runtime_policy: none`。
+        """
+        supplier = (runtime_context or {}).get('exec_runtime_policy_supplier')
+        if not callable(supplier):
+            return None
+        try:
+            payload = supplier()
+        except Exception:
+            return None
+        return dict(payload) if isinstance(payload, dict) else None
 
     def _build_node_dynamic_contract(
         self,
@@ -3822,8 +3857,10 @@ class ReActToolLoop:
         node,
         message_history: list[dict[str, Any]] | None = None,
         skill_roster_items: list[dict[str, str]] | None = None,
+        contract_sections: dict[str, str] | None = None,
+        covered_contract_sections: dict[str, str] | None = None,
     ) -> list[dict[str, Any]]:
-        """新增可读 skill 的一次性提示：落在本轮历史末尾（运行时块之前），投过就不再投。
+        """一次性提示：落在本轮历史末尾，投过就不再投。skill 与合同增量共用一条。
 
         检测与投递只在这一处发生（与会话道同口径）。旧机制的失效原因就是一条回合内
         多个装配点共用一次消耗式读，先跑的把差集领走、落请求体那处永远拿空。
@@ -3843,6 +3880,8 @@ class ReActToolLoop:
             now=now_iso(),
             # 头部钉住块那份名单算"已宣布"：否则节点第一跳会重播整份名单。
             covered_skill_ids=_pinned_skill_ids_for(None, session_key=scope),
+            contract_sections=contract_sections,
+            covered_contract_sections=covered_contract_sections,
         )
         if message is None:
             return base_messages
@@ -3851,43 +3890,76 @@ class ReActToolLoop:
             message_history.append(dict(message))
         return [*base_messages, message]
 
-    def _carry_node_skill_roster_notice_on_compaction(
+    def _node_contract_notice_sections(
+        self,
+        *,
+        payload: dict[str, Any],
+        tool_schema_selection: dict[str, Any],
+        runtime_context: dict[str, Any] | None,
+        exec_runtime_policy: dict[str, Any] | None,
+        task_temp_dir: str,
+    ) -> dict[str, str]:
+        """节点头部的当刻合同值（单行正文）。空字符串表示这一节当前没有内容。"""
+        declared_names = {
+            str(name or '').strip()
+            for name in list((tool_schema_selection or {}).get('provider_tool_names') or [])
+            if str(name or '').strip()
+        }
+        candidate_names = [
+            str(item.get('tool_id') or '').strip()
+            for item in list(payload.get('candidate_tools') or [])
+            if isinstance(item, dict)
+            and str(item.get('tool_id') or '').strip()
+            and str(item.get('tool_id') or '').strip() not in declared_names
+        ]
+        repair_rows: list[str] = []
+        for item in list(payload.get('repair_required_tools') or []):
+            if not isinstance(item, dict):
+                continue
+            tool_id = str(item.get('tool_id') or '').strip()
+            if tool_id:
+                reason = str(item.get('reason') or '').strip()
+                repair_rows.append(f'`{tool_id}`' + (f' ({reason})' if reason else ''))
+        for item in list(payload.get('repair_required_skills') or []):
+            if not isinstance(item, dict):
+                continue
+            skill_id = str(item.get('skill_id') or '').strip()
+            if skill_id:
+                repair_rows.append(f'skill `{skill_id}`')
+        denied_names = [
+            str(name or '').strip()
+            for name in list((runtime_context or {}).get('declared_denied_tool_names') or [])
+            if str(name or '').strip()
+        ]
+        return {
+            'exec_runtime_policy': render_exec_runtime_policy_body(exec_runtime_policy),
+            'session_temp_dir': str(task_temp_dir or '').strip(),
+            'denied_tools': ', '.join(f'`{name}`' for name in denied_names),
+            'candidate_tools': ', '.join(f'`{name}`' for name in candidate_names),
+            'repair_required': '; '.join(repair_rows),
+            'attachment_targets': '',
+        }
+
+    def _reset_node_runtime_notice_after_compaction(
         self,
         baseline: list[dict[str, Any]],
         *,
         node,
-        skill_roster_items: list[dict[str, str]] | None,
     ) -> list[dict[str, Any]]:
-        """压缩跳：把仍可读的新增 skill 名单带到压缩产物之后，不可读的在那一跳退场。
+        """压缩跳：剥离旧 `[RUNTIME_NOTICE]`，清空合同台账与记忆游标。
 
-        压缩段号取压缩产物自身的形状签名——同一次压缩被反复沿用不会搬第二份，
-        而真的又压了一次（正文再次整段重写）会再搬一遍，那正是需要的行为。
+        头部已被当刻值重印（skill 名单 + exec 策略 + 临时目录 + 路径锚）；下一跳的单
+        生产者会把头部覆盖项按新头部初始化，非头部项（denied/candidate/repair）若非空
+        则投一条状态快照。旧通知不再搬运。
         """
         base_messages = list(baseline or [])
         scope = self._node_skill_roster_notice_scope(node)
         if not scope or not base_messages:
             return base_messages
-        signature = '|'.join(
-            f"{str((item or {}).get('role') or '')}:{len(str((item or {}).get('content') or ''))}"
-            for item in base_messages
-        )
-        segment_id = f"comp:{hashlib.sha1(signature.encode('utf-8')).hexdigest()[:12]}"
         self._hydrate_node_skill_roster_notice(node=node)
-        readable_items = _skill_roster_notice.readable_skill_items(list(skill_roster_items or []))
-        message = _skill_roster_notice.carry_for_scope(
-            scope,
-            compression_stage_id=segment_id,
-            readable_skill_ids=[
-                str((item or {}).get('skill_id') or '').strip()
-                for item in readable_items
-                if isinstance(item, dict) and str((item or {}).get('skill_id') or '').strip()
-            ],
-            now=now_iso(),
-        )
-        if message is None:
-            return base_messages
+        _skill_roster_notice.reset_contract_sections_for_compaction(scope, now=now_iso())
         self._persist_node_skill_roster_notice(node=node)
-        return [*base_messages, message]
+        return _skill_roster_notice.strip_runtime_notice_messages(base_messages)
 
     def _refresh_node_dynamic_contract_message(
         self,
@@ -6804,15 +6876,15 @@ class ReActToolLoop:
         return {}
 
     @staticmethod
-    def _node_bundle_recommit_reason(*, history_shrink_reason: str, idle_boundary: bool) -> str:
-        """本跳是否要重印 provider tools[]，以及是哪条边界逼出来的。
+    def _node_bundle_recommit_reason(*, history_shrink_reason: str) -> str:
+        """本跳是否要重印 provider tools[]。
 
-        token 压缩排前面：它正文已被整段重写，重印不额外破缓存；空闲那一档确实要重付头部
-        那一截，两条都命中时报压缩那一条（缓存侧按那条读数）。
+        只有 token 压缩这一条边界：正文已被整段重写，重印不额外破缓存。空闲时间不再
+        作为重印点（缓存命中第一）；被收回的名字由一次性通知点名，清单留到下次压缩。
         """
         if str(history_shrink_reason or '').strip() == 'token_compression':
             return 'token_compression'
-        return 'idle_refresh' if idle_boundary else ''
+        return ''
 
     @staticmethod
     def _node_send_baseline_after_compaction(

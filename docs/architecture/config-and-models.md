@@ -93,7 +93,7 @@
 
 ### `context_refresh`
 
-定义**空闲刷新边界**：`enabled`（默认 `true`）与 `idleMinutes`（默认 `120`，`ge=1`，刻意不设上限——上限没有可推导的约束）。它给的是"钉住类上下文载体最迟多久允许被重印一次"，两侧车道共用 `g3ku/config/context_refresh.py` 这一份判据；重印与采纳的完整边界清单归 `tool-and-skill-system.md`「Provider Tool Surface」与 `runtime-overview.md`「Memory Runtime State」，本节只记配置形状。
+`context_refresh` 是**遗留配置段**（`enabled` 默认 `true`、`idleMinutes` 默认 `120`、`ge=1`），只为存量配置文件与管理接口兼容而保留。运行时已不再把空闲时长当作重印边界：钉住的头部只在压缩/手动压缩时重印，两次重印之间的变化由一次性 `[RUNTIME_NOTICE]` 消息投递（见 `context-and-cache-troubleshooting.md`「运行时合同：头部快照 + 一次性通知」）。
 
 读法只有一个入口：`get_runtime_config()` 按 `config.json` 的 mtime 重载，前门与节点都在各自的发送点现读，所以改完不需要重启、也不需要给 worker 单独发信令。判据读不到配置时**按不刷新处理**（回落到钉住行为），因为刷新是收紧缓存代价的动作，读失败把它打开会让每一跳都变成重印。
 

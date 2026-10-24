@@ -3057,6 +3057,11 @@ class NodeRunner:
                 if callable(getattr(self, '_skill_roster_supplier', None))
                 else None
             ),
+            'exec_runtime_policy_supplier': (
+                (lambda: self._exec_runtime_policy_supplier())
+                if callable(getattr(self, '_exec_runtime_policy_supplier', None))
+                else None
+            ),
         }
 
     def _tool_watchdog_runtime_config(self) -> dict[str, Any]:

@@ -4259,7 +4259,7 @@ async def test_load_tool_context_direct_read_guard_allows_refresh_when_fingerpri
     assert violations == []
 
 
-def test_refresh_node_dynamic_contract_restores_skill_candidates_from_frame_after_stage_compaction() -> None:
+def test_node_dynamic_contract_state_restores_skill_candidates_from_frame_after_stage_compaction() -> None:
     log_service = _FakeLogService()
     loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=log_service, max_iterations=2)
     task_id = "task-stage-skill-restore"
@@ -4349,8 +4349,21 @@ def test_refresh_node_dynamic_contract_restores_skill_candidates_from_frame_afte
     )
 
     payload = extract_node_dynamic_contract_payload(refreshed)
-    assert payload is not None
-    assert payload["candidate_skills"] == [
+    # 尾块退役：refresh 只剥离历史合同，状态从 frame 重建在构建层验证。
+    assert payload is None
+    contract = loop._build_node_dynamic_contract(
+        node=node,
+        message_history=prepared,
+        tool_schema_selection={
+            "tool_names": ["filesystem_stat", "load_skill_context"],
+            "candidate_tool_names": ["content"],
+            "lightweight_tool_ids": [],
+            "trace": {},
+        },
+        runtime_context={"task_id": task_id, "node_id": node.node_id},
+    )
+    restored_payload = contract.to_message_payload()
+    assert restored_payload["candidate_skills"] == [
         {
             "skill_id": "tmux",
             "description": "terminal workflow",
@@ -4358,7 +4371,7 @@ def test_refresh_node_dynamic_contract_restores_skill_candidates_from_frame_afte
     ]
 
 
-def test_node_dynamic_contract_injection_keeps_request_only_message_after_bootstrap_prefix() -> None:
+def test_node_dynamic_contract_injection_only_strips_legacy_messages() -> None:
     contract = NodeRuntimeToolContract(
         node_id="node-1",
         node_kind="execution",
@@ -4397,17 +4410,8 @@ def test_node_dynamic_contract_injection_keeps_request_only_message_after_bootst
         contract,
     )
 
-    assert [item["role"] for item in injected[:4]] == ["system", "user", "assistant", "user"]
-    payload = extract_node_dynamic_contract_payload(injected)
-    assert payload is not None
-    assert payload["candidate_skills"] == [
-        {
-            "skill_id": "tmux",
-            "description": "terminal workflow",
-        }
-    ]
-    assert payload["callable_tool_names"] == ["filesystem_stat"]
-    assert "model_visible_tool_selection_trace" not in payload
+    assert [item["role"] for item in injected] == ["system", "user", "assistant"]
+    assert extract_node_dynamic_contract_payload(injected) is None
 
 
 def test_node_token_compaction_keeps_append_notice_tail_before_compact_block() -> None:
@@ -4997,41 +5001,8 @@ async def test_enrich_node_messages_injects_all_visible_skills_without_memory_ov
         }
     ]
     assert retrieve_block_calls == []
-    dynamic_payload = extract_node_dynamic_contract_payload(enriched)
-    assert dynamic_payload is not None
-    assert dynamic_payload["message_type"] == "node_runtime_tool_contract"
-    assert dynamic_payload["candidate_skills"] == [
-        {
-            "skill_id": "skill-creator",
-            "description": "skill creator",
-        },
-        {
-            "skill_id": "tmux",
-            "description": "terminal workflow",
-        },
-    ]
-    assert dynamic_payload["contract_visible_skill_ids"] == ["skill-creator", "tmux"]
-    assert dynamic_payload["skill_visibility_diagnostics"] == {
-        "registry_skill_ids": ["skill-creator", "tmux"],
-        "entries": [
-            {
-                "skill_id": "skill-creator",
-                "enabled": True,
-                "available": True,
-                "allowed_for_actor_role": True,
-                "policy_effect": "",
-                "included_in_contract_visible": True,
-            },
-            {
-                "skill_id": "tmux",
-                "enabled": True,
-                "available": True,
-                "allowed_for_actor_role": True,
-                "policy_effect": "",
-                "included_in_contract_visible": True,
-            },
-        ],
-    }
+    # 尾块退役：enrichment 仍计算选择结果，但不再把合同消息写进正文。
+    assert extract_node_dynamic_contract_payload(enriched) is None
     assert enriched[0]["content"] == "base prompt"
 
 
@@ -5091,25 +5062,8 @@ async def test_enrich_node_messages_uses_selector_narrowed_skills_without_memory
     )
 
     assert retrieve_block_calls == []
-    dynamic_payload = extract_node_dynamic_contract_payload(enriched)
-    assert dynamic_payload is not None
-    assert dynamic_payload["message_type"] == "node_runtime_tool_contract"
-    assert dynamic_payload["candidate_skills"] == [
-        {
-            "skill_id": "tmux",
-            "description": "terminal workflow",
-        },
-        {
-            "skill_id": "skill-creator",
-            "description": "skill creator",
-        }
-    ]
-    assert dynamic_payload["candidate_tools"] == [
-        {
-            "tool_id": "content_open",
-            "description": "",
-        }
-    ]
+    # 尾块退役：选择结果仍由 enrichment 计算，模型面不再注入合同消息。
+    assert extract_node_dynamic_contract_payload(enriched) is None
     assert enriched[0]["content"] == "base prompt"
 
 
@@ -5174,21 +5128,8 @@ async def test_enrich_node_messages_keeps_contract_absent_tools_out_of_callable_
         ],
     )
 
-    dynamic_payload = extract_node_dynamic_contract_payload(enriched)
-    assert dynamic_payload is not None
-    assert dynamic_payload["message_type"] == "node_runtime_tool_contract"
-    # 请求视图里没有契约块，callable 只剩常驻内置 loader
-    assert dynamic_payload["callable_tool_names"] == ["load_tool_context"]
-    assert dynamic_payload["candidate_tools"] == [
-        {
-            "tool_id": "content_open",
-            "description": "",
-        },
-        {
-            "tool_id": "filesystem_write",
-            "description": "",
-        },
-    ]
+    # 尾块退役：准入判据仍在 enrichment 内计算，合同消息不再注入正文。
+    assert extract_node_dynamic_contract_payload(enriched) is None
 
 
 @pytest.mark.asyncio
@@ -5252,12 +5193,9 @@ async def test_enrich_node_messages_includes_exec_runtime_policy_in_dynamic_cont
     )
 
     dynamic_payload = extract_node_dynamic_contract_payload(enriched)
-    assert dynamic_payload is not None
-    assert dynamic_payload["exec_runtime_policy"] == {
-        'mode': 'full_access',
-        'guardrails_enabled': False,
-        'summary': 'exec will execute shell commands without exec-side guardrails.',
-    }
+    # 尾块已退役：exec 策略由节点头部快照（react_loop 重印边界）承载，
+    # enrichment 不再追加合同消息。
+    assert dynamic_payload is None
 
 
 
@@ -5325,21 +5263,8 @@ async def test_enrich_node_messages_never_injects_memory_retrieval_overlay(
         if message.get("role") == "user" and not is_node_dynamic_contract_message(message)
     ]
     assert len(user_messages) == 1
-    payload = extract_node_dynamic_contract_payload(enriched)
-    assert payload is not None
-    assert payload["message_type"] == "node_runtime_tool_contract"
-    assert payload["candidate_skills"] == [
-        {
-            "skill_id": "tmux",
-            "description": "terminal workflow",
-        }
-    ]
-    assert payload["candidate_tools"] == [
-        {
-            "tool_id": "filesystem",
-            "description": "",
-        }
-    ]
+    # 尾块退役：不再有动态合同消息；真实用户消息仍然只有一条。
+    assert extract_node_dynamic_contract_payload(enriched) is None
     assert retrieve_block_calls == []
 
 
@@ -5399,21 +5324,8 @@ async def test_enrich_node_messages_still_applies_selector_when_unified_context_
         ],
     )
 
-    dynamic_payload = extract_node_dynamic_contract_payload(enriched)
-    assert dynamic_payload is not None
-    assert dynamic_payload["message_type"] == "node_runtime_tool_contract"
-    assert dynamic_payload["candidate_skills"] == [
-        {
-            "skill_id": "tmux",
-            "description": "terminal workflow",
-        }
-    ]
-    assert dynamic_payload["candidate_tools"] == [
-        {
-            "tool_id": "content",
-            "description": "",
-        }
-    ]
+    # 尾块退役：选择结果仍在 enrichment 内计算，合同消息不再注入正文。
+    assert extract_node_dynamic_contract_payload(enriched) is None
     assert retrieve_block_calls == []
 
 @pytest.mark.asyncio
@@ -7783,9 +7695,9 @@ def test_node_preflight_falls_back_to_preview_when_observed_truth_hash_mismatche
 
 @pytest.mark.asyncio
 async def test_node_second_tool_round_request_carries_no_stale_contract_or_note() -> None:
-    """End-to-end: two tool rounds in one `run()` must keep exactly one contract and
-    at most one turn-only note at the tail; the carried prefix must not retain the
-    stale note/contract from the previous round."""
+    """End-to-end: two tool rounds in one `run()` must carry zero runtime-contract
+    tail messages and at most one turn-only note; the carried prefix must not retain
+    the stale note from the previous round."""
     from main.runtime.turn_overlay import is_turn_only_system_note_message
 
     calls: list[list[dict[str, object]]] = []
@@ -7864,7 +7776,7 @@ async def test_node_second_tool_round_request_carries_no_stale_contract_or_note(
         return sum(1 for item in messages if is_turn_only_system_note_message(item))
 
     for request_messages in calls:
-        assert _contract_count(request_messages) == 1
+        assert _contract_count(request_messages) == 0
         assert _note_count(request_messages) <= 1
 
     second_request = calls[-1]
@@ -7876,9 +7788,8 @@ async def test_node_second_tool_round_request_carries_no_stale_contract_or_note(
         for tool_call in list(message.get("tool_calls") or [])
     )
     assert any(str(item.get("name") or "").strip() == "record_one" for item in tool_turns)
-    # The carried prefix must not retain the previous round's note/contract.
-    # 尾部是两份运行时块（稳定契约 + 活状态块），所以非尾段按 -2 起算。
-    non_tail = second_request[:-2]
+    # The carried prefix must not retain the previous round's note.
+    non_tail = second_request
     assert _contract_count(non_tail) == 0
     assert _note_count(non_tail) == 0
 

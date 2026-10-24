@@ -159,7 +159,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 相邻跳 provider `tools[]` 成员在变、且没有真实授权变化（缓存命中随之掉）→ `tool-and-skill-system.md`「Provider Tool Surface」+ `context-and-cache-troubleshooting.md`「跨普通 fresh turn 的 tool schema churn」
 - 前缀与 `tools[]` 逐字相同而命中掉了、要数"这一跳跳了几档/为什么跳"，或日志里按 `Model route selected` 统计档位却读出 0 次跨档 → `context-and-cache-troubleshooting.md`「跨档跳的未命中按台账的档位归属读」；组名与成员对不上先读 `GET /api/models/load-balance/status` 的 `group_drift_count`
 - 重启后第一跳把头部名单或 `tools[]` 重铺了一遍（停机期间增删过 skill/工具，该跳非缓存 input 冲高、下一跳就回血）→ `context-and-cache-troubleshooting.md`「重启后继续，不能退回 transcript/history fallback」+ `tool-and-skill-system.md`「Pinned Static Declarations」
-- 工具被收回后模型仍带着那份参数表，或想知道这个滞后最长多久才消 → `tool-and-skill-system.md`「Provider Tool Surface」（钉住全冻结，增删都落在压缩或空闲边界）+ `config-and-models.md`「context_refresh」
+- 工具被收回后模型仍带着那份参数表，或想知道这个滞后最长多久才消 → `tool-and-skill-system.md`「Provider Tool Surface」（钉住全冻结，增删都落在压缩边界；两次重印之间的变化由一次性通知点名）
 - 在 Tool Admin 改了一颗工具的参数定义、在跑会话与在飞节点这一跳还是旧字节 → `tool-and-skill-system.md`「参数表的来源」（参数表的字节由钉住整表供出，编辑到重印边界才被吸收）+ `tool-hydration-and-callable-chain.md`「钉住的 `tools[]` 与它的滞后出口」
 - 升级旧实例后，某条工具的角色/启停看起来回到默认，或工具停用后没有任何东西把它捞回来 → `tool-and-skill-system.md`「Tool Admin RBAC」（一次性展开迁移；核心工具允许停用、禁止删除，且没有自动拉起）
 - 前门改了尾块运行时契约的一个字段却不出现在请求体里 → `tool-and-skill-system.md`「Provider Tool Surface」（发送前会用 state 重建契约块，装配层那份会被覆盖）

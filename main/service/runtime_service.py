@@ -798,6 +798,9 @@ class MainRuntimeService:
         # 节点道 skill 名单的每跳取数口：react_loop 无 service 引用，只能由这里递进去
         # （与 `_tool_snapshot_supplier` 同一条 side-channel）。
         self.node_runner._skill_roster_supplier = self._node_skill_roster_supplier
+        # 节点头部快照与一次性通知的 exec 策略取数口：节点不持 service 引用，
+        # 与 skill 取数口同一条 side-channel；每跳实时读治理记录（无缓存）。
+        self.node_runner._exec_runtime_policy_supplier = self._current_exec_runtime_policy_payload
         # 节点侧 `send_message` 的投递口：NodeRunner 没有 service 引用，走同一条 side-channel。
         self.node_runner.node_message_delivery_callback = self._deliver_node_message_from_node
         # 节点侧 `manage_child_nodes` 的控制口：暂停/恢复/终止需要 dispatcher、暂停账本
@@ -11036,13 +11039,13 @@ class MainRuntimeService:
             raise RuntimeError('运行时工具合同损坏/缺失：节点运行时 frame 的 callable_tool_names 为空')
         candidate_skill_items = [
             dict(item)
-            for item in list(dynamic_contract_payload.get('candidate_skills') or [])
+            for item in list(frame.get('candidate_skill_items') or [])
             if isinstance(item, dict)
         ]
         if not candidate_skill_items:
             candidate_skill_items = [
                 dict(item)
-                for item in list(frame.get('candidate_skill_items') or [])
+                for item in list(dynamic_contract_payload.get('candidate_skills') or [])
                 if isinstance(item, dict)
             ]
         if not candidate_skill_items:
@@ -11063,13 +11066,13 @@ class MainRuntimeService:
         candidate_tool_names = self._normalized_tool_name_list(list(frame.get('candidate_tool_names') or []))
         candidate_tool_items = [
             dict(item)
-            for item in list(dynamic_contract_payload.get('candidate_tools') or [])
+            for item in list(frame.get('candidate_tool_items') or [])
             if isinstance(item, dict)
         ]
         if not candidate_tool_items:
             candidate_tool_items = [
                 dict(item)
-                for item in list(frame.get('candidate_tool_items') or [])
+                for item in list(dynamic_contract_payload.get('candidate_tools') or [])
                 if isinstance(item, dict)
             ]
         visible_tool_names = list(
