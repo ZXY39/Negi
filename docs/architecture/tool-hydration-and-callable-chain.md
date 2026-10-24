@@ -34,6 +34,7 @@
 
 - 指纹 `tool_context_fingerprint`（形如 `tcf:<16 hex>`）由**源字节**算出：`tool_id` / 契约正文 / 参数契约 markdown / 必填项 / 示例 / warnings / errors / exec 运行模式。它同时是块头的一部分，所以在场判据与"这份正文变过没有"用同一个号。刻意不含 `callable`、`available`、`callable_now` 这些本轮视角——掺进去会让同一份正文每轮算出不同指纹，重复读守卫与"块是否过期"的判定一起失效。
 - `load_tool_context` 的成功 payload 自带一行 `promotion` 结论（`promoted_next_turn` / `already_callable` / `not_in_this_turn_candidates` / `not_promotable`）与 `promotion_help`：`ok:true` 不承载"不承诺"。`callable_this_turn` 表示这一跳真能调用（读的是本轮 callable 视图，不回退到"已授权"名单），`callable_now` 只表示"该执行器对这个角色可调用"（治理层视图）——新维护者最常把这两者混为一谈，混了就会反复给模型"说它可用、调它报错"的回执。
+- **说明可读性 ≠ 调用授权**：请求的名字不在本角色可见集里，但只要它注册过 toolskill（`ResourceManager.load_toolskill_body` 有正文），load 照常返回正文，并带 `documentation_only: true`、`callable/callable_now: false` 与一条 warning「本角色不可调用该工具，本次仅返回说明正文」。典型是 `exec`：节点道的常驻内置、同时带 `tools/exec/toolskills`，验收角色不可调用它却需要读契约判断子节点命令是否合规。旧门槛把"不可调用"误答成"没有可加载的 toolskill"（实盘 `task:d657c1f554e3` / `node:6c826522f86f`）。**说明在场不会让名字变可调用**：`contract_present_tool_names_for_node` 仍按 `list_effective_tool_names` 过滤。
 - 重复读守卫按块头指纹跨轮比对：块已在场且指纹未变时软拦截重读，提示模型复用既有 toolskill；指纹变了，或旧结果已被 `token_compression` 移出上下文，则放行重读。
 
 ### 入参暂存与 `reuse_args` 批量执行

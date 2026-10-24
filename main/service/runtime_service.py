@@ -8011,11 +8011,16 @@ class MainRuntimeService:
                 )
             return {'ok': False, 'error': 'tool_id_or_search_query_required'}
         visible = self._visible_tool_map(actor_role=actor_role, session_id=session_id)
-        if tool_name not in visible:
-            return {'ok': False, 'error': f'Tool not visible: {tool_id}'}
         if self._resource_manager is None:
             return {'ok': False, 'error': 'Resource manager unavailable'}
         toolskill = self.get_tool_toolskill(tool_name) or {}
+        # 说明可读性与调用授权分开：本角色不可调用的工具，只要注册过 toolskill，
+        # 仍返回正文（callable_this_turn 如实为 false）。exec 就是这类——它是节点
+        # 道的常驻内置，同时带 tools/exec/toolskills；验收节点读它的契约来判断子
+        # 节点的命令是否合规，旧闸门把"不可调用"误答成"没有 toolskill"。
+        documentation_only = tool_name not in visible and bool(str(toolskill.get('content') or '').strip())
+        if tool_name not in visible and not documentation_only:
+            return {'ok': False, 'error': f'Tool not visible: {tool_id}'}
         content = str(toolskill.get('content') or '')
         resolved_tool_id = str(toolskill.get('tool_id') or tool_name)
         contract_payload = self._tool_context_contract_payload(
@@ -8023,23 +8028,27 @@ class MainRuntimeService:
             session_id=session_id,
             requested_tool_id=tool_name,
             resolved_tool_id=resolved_tool_id,
-            callable_value=toolskill.get('callable'),
-            available_value=toolskill.get('available'),
+            callable_value=toolskill.get('callable') if not documentation_only else False,
+            available_value=toolskill.get('available') if not documentation_only else False,
         )
+        warnings = list(toolskill.get('warnings') or [])
+        if documentation_only:
+            warnings.append('本角色不可调用该工具，本次仅返回说明正文')
         payload = {
             'ok': True,
             'tool_id': resolved_tool_id,
             'content': content,
             'tool_type': toolskill.get('tool_type'),
             'install_dir': toolskill.get('install_dir'),
-            'callable': toolskill.get('callable'),
-            'available': toolskill.get('available'),
+            'callable': toolskill.get('callable') if not documentation_only else False,
+            'available': toolskill.get('available') if not documentation_only else False,
+            'documentation_only': documentation_only,
             'repair_required': bool(toolskill.get('repair_required')),
             'parameters_schema': toolskill.get('parameters_schema') or {'type': 'object', 'properties': {}, 'required': []},
             'required_parameters': list(toolskill.get('required_parameters') or []),
             'parameter_contract_markdown': str(toolskill.get('parameter_contract_markdown') or ''),
             'example_arguments': toolskill.get('example_arguments') or {},
-            'warnings': list(toolskill.get('warnings') or []),
+            'warnings': warnings,
             'errors': list(toolskill.get('errors') or []),
             'exec_runtime_policy': toolskill.get('exec_runtime_policy'),
             **contract_payload,
@@ -8070,11 +8079,14 @@ class MainRuntimeService:
                 )
             return {'ok': False, 'error': 'tool_id_or_search_query_required'}
         visible = self._visible_tool_map(actor_role=actor_role, session_id=session_id)
-        if tool_name not in visible:
-            return {'ok': False, 'error': f'Tool not visible: {tool_id}'}
         if self._resource_manager is None:
             return {'ok': False, 'error': 'Resource manager unavailable'}
         toolskill = self.get_tool_toolskill(tool_name) or {}
+        # 说明可读性与调用授权分开：本角色不可调用的工具，只要注册过 toolskill，
+        # 仍返回正文（callable_this_turn 如实为 false）。见 load_tool_context。
+        documentation_only = tool_name not in visible and bool(str(toolskill.get('content') or '').strip())
+        if tool_name not in visible and not documentation_only:
+            return {'ok': False, 'error': f'Tool not visible: {tool_id}'}
         content = str(toolskill.get('content') or '')
         resolved_tool_id = str(toolskill.get('tool_id') or tool_name)
         contract_payload = self._tool_context_contract_payload(
@@ -8082,8 +8094,8 @@ class MainRuntimeService:
             session_id=session_id,
             requested_tool_id=tool_name,
             resolved_tool_id=resolved_tool_id,
-            callable_value=toolskill.get('callable'),
-            available_value=toolskill.get('available'),
+            callable_value=toolskill.get('callable') if not documentation_only else False,
+            available_value=toolskill.get('available') if not documentation_only else False,
         )
         layered_payload = layered_body_payload(
             body=content,
@@ -8091,6 +8103,9 @@ class MainRuntimeService:
             description=str(toolskill.get('description') or ''),
             path=str(toolskill.get('path') or ''),
         )
+        warnings = list(toolskill.get('warnings') or [])
+        if documentation_only:
+            warnings.append('本角色不可调用该工具，本次仅返回说明正文')
         payload = {
             'ok': True,
             'tool_id': resolved_tool_id,
@@ -8102,14 +8117,15 @@ class MainRuntimeService:
             'path': layered_payload['path'],
             'tool_type': toolskill.get('tool_type'),
             'install_dir': toolskill.get('install_dir'),
-            'callable': toolskill.get('callable'),
-            'available': toolskill.get('available'),
+            'callable': toolskill.get('callable') if not documentation_only else False,
+            'available': toolskill.get('available') if not documentation_only else False,
+            'documentation_only': documentation_only,
             'repair_required': bool(toolskill.get('repair_required')),
             'parameters_schema': toolskill.get('parameters_schema') or {'type': 'object', 'properties': {}, 'required': []},
             'required_parameters': list(toolskill.get('required_parameters') or []),
             'parameter_contract_markdown': str(toolskill.get('parameter_contract_markdown') or ''),
             'example_arguments': toolskill.get('example_arguments') or {},
-            'warnings': list(toolskill.get('warnings') or []),
+            'warnings': warnings,
             'errors': list(toolskill.get('errors') or []),
             'exec_runtime_policy': toolskill.get('exec_runtime_policy'),
             **contract_payload,

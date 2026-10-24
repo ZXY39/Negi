@@ -128,6 +128,40 @@ async def test_snapshot_hit_skips_live_probe():
 
 
 @pytest.mark.asyncio
+async def test_gate_serves_a_registered_toolskill_even_when_the_role_cannot_call_it():
+    """验收节点读 exec 的契约做判据时不看调用授权，只看说明正文是否存在。
+
+    实盘 task:d657c1f554e3 / node:6c826522f86f：11:52:35 加载 exec 被答成
+    "常驻内置工具…没有可加载的 toolskill"，而 tools/exec/toolskills 是存在的，
+    只是 inspection 角色不在它的 RBAC 可见集里。可读性与可调用性必须分开：
+    正文照常返回，callable_this_turn 如实为 false。
+    """
+
+    class _DocService(_StubService):
+        def get_tool_toolskill(self, tool_id: str):
+            return {"content": "# exec contract"} if tool_id == "exec" else None
+
+    payload = {
+        "ok": True,
+        "tool_id": "exec",
+        "content": "# exec contract",
+        "callable": False,
+        "available": False,
+        "documentation_only": True,
+    }
+    service = _DocService(live_visible=[], payload=payload)
+    tool = _make_tool(service)
+    runtime = {**RUNTIME_CONTRACT, "callable_tool_names": ["load_tool_context"], "actor_role": "inspection"}
+
+    result = await tool.execute(tool_id="exec", **_runtime_kwargs(runtime))
+
+    assert service.v2_calls, "说明存在时不许在门槛层拒掉"
+    assert service.v2_calls[0]["tool_id"] == "exec"
+    assert "# exec contract" in result
+    assert "没有可加载的 toolskill" not in result
+
+
+@pytest.mark.asyncio
 async def test_gate_error_preserved_when_contract_not_enforced():
     # Without an enforced contract the gate never triggers; load proceeds.
     service = _StubService(live_visible=[], payload={"ok": True, "tool_id": "any"})

@@ -61,6 +61,24 @@ def _candidate_gate_error(
     return f"Error: 当前运行时{label}未包含 `{target}`，只能加载本轮候选{label}" + (f"；{group}" if group else "")
 
 
+def _toolskill_available_for_documentation(service: Any, tool_id: str) -> bool:
+    """是否有一份可读的 toolskill 正文，哪怕本角色不可调用该工具。
+
+    可加载性与可调用性是两件事：`exec` 是节点道的常驻内置，同时又是一份带
+    `tools/exec/toolskills` 的资源。验收节点读它的契约来判断子节点命令是否合规，
+    旧闸门把"不可调用"误答成"没有可加载的 toolskill"，模型只能凭猜测继续。
+    正文存在即可读；是否可调用由载荷里的 callable_this_turn / callable 如实给出。
+    """
+    getter = getattr(service, "get_tool_toolskill", None)
+    if not callable(getter):
+        return False
+    try:
+        payload = getter(str(tool_id or "").strip()) or {}
+    except Exception:
+        return False
+    return bool(str((payload if isinstance(payload, dict) else {}).get("content") or "").strip())
+
+
 def _live_registered_tool_visible(
     service: Any,
     *,
@@ -111,6 +129,7 @@ def _loadable_tool_gate_error(
         return ""
     candidate_list = _normalized_runtime_names(payload.get("candidate_tool_names"))
     visible_list = _normalized_runtime_names(payload.get("rbac_visible_tool_names"))
+    callable_list = _normalized_runtime_names(payload.get("callable_tool_names"))
     candidates = set(candidate_list)
     visible = set(visible_list)
     if target in candidates or target in visible:
@@ -126,9 +145,15 @@ def _loadable_tool_gate_error(
     # 只说"加载不了"而不列名单，模型只能换个名字再撞一次。候选集与 RBAC 可见集是
     # 两份不同的名单（前者是本轮可提升的，后者是治理放行的），所以两级名单都要给。
     parts = [f"Error: 当前运行时未将 `{target}` 暴露为可加载工具"]
-    no_load = no_load_needed_hint(requested=target, actor_role=_runtime_actor_role(runtime))
-    parts.append(no_load or "只能加载本轮候选工具或本角色 RBAC 可见的工具")
-    text = "；".join(parts)
+    # 只有真的可直接调用时才说"无需加载"：不可调用的内置工具（例如验收角色下的
+    # exec）说这句会让模型以为可以绕过 RBAC 直接调。
+    no_load = (
+        no_load_needed_hint(requested=target, actor_role=_runtime_actor_role(runtime))
+        if ("callable_tool_names" not in payload or target in callable_list)
+        else ""
+    )
+    parts.append(no_load or "只能加载本轮候选工具、本角色 RBAC 可见的工具，或已注册且带 toolskill 的工具说明")
+    text = "；".join(parts).rstrip("。")
     tail = "；".join(
         [
             item
@@ -259,7 +284,9 @@ class LoadToolContextTool(_MainRuntimeTool):
                     session_id=_runtime_session_key(__g3ku_runtime),
                     tool_id=tool_name,
                 )
-                if not live_visible_via_fallback:
+                if not live_visible_via_fallback and not _toolskill_available_for_documentation(
+                    service, tool_name
+                ):
                     return gate_error
         if hasattr(service, "load_tool_context_v2"):
             kwargs_v2: dict[str, Any] = {

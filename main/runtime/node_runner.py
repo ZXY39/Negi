@@ -2028,6 +2028,17 @@ class NodeRunner:
             latest_rejection_feedback_summary='',
             latest_execution_submission_id=str(submission_id or '').strip(),
         )
+        # 「等待验收」必须落成帧相位：它在语义上是停靠（回合已结束、不再跑模型），
+        # 而不是 running。旧实现不写这一格，于是 (1) 看门狗把它当运行中，10 分钟
+        # 无事件就判停（实盘 task:a0d1bd9bc9fa：14:29:36 提交、14:42:52 被看门狗
+        # 判停，验收其实还在跑）；(2) 投递唤醒把裁决消息当 in-flight 吞掉，只能靠
+        # 可派发扫描兜底。写入时机在提交工具回执之后、回合收尾之外，不会被
+        # react_loop 的 waiting_tool_results 覆盖。
+        self._log_service.update_frame(
+            task_id,
+            execution_node_id,
+            lambda frame: {**frame, 'phase': 'waiting_acceptance'},
+        )
         task = self._store.get_task(task_id)
         acceptance = self._store.get_node(acceptance_node_id)
         if task is not None and acceptance is not None and self._acceptance_updates_task_final_acceptance(task=task, execution=execution, acceptance=acceptance):

@@ -638,3 +638,82 @@ class TestVerdictContext:
                 await service.close()
 
             asyncio.run(_cleanup())
+
+
+class _GateDispatcher:
+    """派发扫描的最小替身：只回答"这个节点此刻是否被驱动"。"""
+
+    def __init__(self, driven: dict[str, bool] | None = None) -> None:
+        self.scheduled: list[str] = []
+        self.driven = dict(driven or {})
+
+    def node_is_being_driven(self, node_id: str):
+        return self.driven.get(node_id)
+
+    def schedule_node(self, node_id: str) -> None:
+        self.scheduled.append(node_id)
+
+
+class TestAcceptanceActivationGate:
+    @pytest.mark.asyncio
+    async def test_submission_parks_the_execution_node_in_waiting_acceptance(self, tmp_path, monkeypatch):
+        """提交即停靠：帧相位必须写成 waiting_acceptance。
+
+        旧实现留成 waiting_tool_results，看门狗于是把"等验收"当"运行中"，
+        10 分钟无事件就判停（实盘 task:a0d1bd9bc9fa：14:29:36 提交 → 14:42:52 判停，
+        验收其实还在跑）。
+        """
+        service = _service(tmp_path)
+        _seed(service)
+
+        async def noop_wake(*, task_id: str, node_id: str) -> str:
+            return 'resumed'
+
+        monkeypatch.setattr(service, 'wake_node_on_message', noop_wake)
+        task = service.store.get_task(TASK)
+        result = NodeFinalResult(
+            status='success',
+            delivery_status='final',
+            summary='done',
+            answer='a',
+            evidence=[],
+            remaining_work=[],
+            blocking_reason='',
+            submission_id='submission:park',
+        )
+
+        returned = await service.node_runner._maybe_start_acceptance_handshake(
+            task=task,
+            node=service.store.get_node(CHILD),
+            result=result,
+        )
+
+        assert returned is not None and returned.delivery_status == 'partial'
+        frame = service.log_service.read_runtime_frame(TASK, CHILD)
+        assert (frame or {}).get('phase') == 'waiting_acceptance'
+
+    @pytest.mark.asyncio
+    async def test_acceptance_does_not_start_while_the_subject_runs(self, tmp_path):
+        service = _service(tmp_path)
+        _seed(service)
+        dispatcher = _GateDispatcher({CHILD: True})
+
+        assert await service.task_actor_service._dispatch_runnable_nodes(TASK, dispatcher) is False
+        assert dispatcher.scheduled == []
+
+        dispatcher = _GateDispatcher({CHILD: False})
+        assert await service.task_actor_service._dispatch_runnable_nodes(TASK, dispatcher) is True
+        assert dispatcher.scheduled == [ACCEPTANCE]
+
+    @pytest.mark.asyncio
+    async def test_acceptance_does_not_start_for_a_paused_subject(self, tmp_path):
+        service = _service(tmp_path)
+        _seed(service)
+        service.store.update_node(
+            CHILD,
+            lambda record: record.model_copy(update={'is_paused': True, 'pause_reason': 'error'}),
+        )
+        dispatcher = _GateDispatcher({CHILD: False})
+
+        assert await service.task_actor_service._dispatch_runnable_nodes(TASK, dispatcher) is False
+        assert dispatcher.scheduled == []

@@ -1192,6 +1192,17 @@ class TaskActorService:
                     continue
                 if str(getattr(execution, 'status', '') or '').strip().lower() in {'success', 'failed'}:
                     continue
+                if bool(getattr(execution, 'is_paused', False)) or bool(
+                    getattr(execution, 'pause_requested', False)
+                ):
+                    # 被验节点处于暂停（看门狗/人工）：它这一轮没有结束，验收不得先跑。
+                    # 实盘 task:a0d1bd9bc9fa：执行节点 14:42:52 被判停后，验收仍在跑。
+                    continue
+                if dispatcher.node_is_being_driven(execution.node_id) is True:
+                    # 被验节点此刻在跑（可能被别的消息重新激活）：派发验收只会去审一份
+                    # 它正在改写中的旧提交。等它停靠（waiting_acceptance）或再次提交
+                    # （握手 ref 变化）后再派。
+                    continue
                 handshake = normalize_acceptance_handshake(
                     (execution.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY)
                 )

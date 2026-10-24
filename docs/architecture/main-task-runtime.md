@@ -19,6 +19,8 @@
 
 - 验收节点只提交 `{"verdict": "pass|reject|reject_no_progress", "feedback": "..."}`；执行节点提交 `{summary, answer, evidence, remaining_work}`，提交即「本轮完成」。工具回执是 `{outcome, submission_id, acceptance_node_id}`。
 - `pass`：被验执行节点转成功；验收节点回到等待下一次提交（复用同一个节点，不重建）。**pass 不投递 `acceptance_verdict`**：收件人随即终局，消息只会变成一封永远读不到的未读；提交绑定落在握手 `latest_execution_submission_id`（验收节点的裁决载荷同样保留）。
+- **提交即停靠**：执行节点提交后帧相位写 `waiting_acceptance`（`_set_execution_waiting_acceptance_state`）。它是停靠态：看门狗按 `PARKED_PHASES` 跳过它（旧实现留成 `waiting_tool_results`，等验收 10 分钟就会被判 `no_new_events`，实盘 `task:a0d1bd9bc9fa`），投递裁决走停靠唤醒而不是 in-flight。
+- **验收激活的三条前置**（`_dispatch_runnable_nodes` 验收分支）：握手 `waiting_acceptance` 且有当前提交引用（消息/交接单已入箱）；被验节点**此刻没有被驱动**（`dispatcher.node_is_being_driven` 非 True）；被验节点不处于暂停。被验节点终态时验收由 T15 随其收口，不派发。"被验节点终态才允许检验"不能按字面实现——正常提交后被验节点停在 `in_progress + waiting_acceptance`，按终态卡会把整条验收链锁死。
 - `reject`：把 `feedback` 投给执行节点、双方复活继续下一轮；**没有拒收次数上限**。
 - `reject_no_progress`：被验节点转**暂停·异常**（`pause_reason='error'`），父节点收到 high 级 `child_abnormal_pause`（附验收方理由），由人或父节点决定恢复/重派/终止。**首轮禁止**：运行时在 `NodeRunner._submit_final_result` 直接拒绝，尾块也会写明。
 - 每轮验收回合的尾块从 `metadata.rejection_history` 派生「历次验收裁定」（机器派生、可截断），并从被验节点的 consumed + pending 通知里拉追加要求——**任何层级都读，不再只对根节点开放**（决策 J）。这使压缩/重启后的验收判断不依赖残留上下文。

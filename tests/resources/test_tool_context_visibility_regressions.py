@@ -114,6 +114,64 @@ def test_decorated_tool_exposes_repair_required_metadata_and_toolskill_flag():
     assert 'toolskill_source_name' not in payload
 
 
+def test_load_tool_context_returns_a_registered_toolskill_for_a_non_visible_tool():
+    """说明可读性与调用授权分开：不可见但注册过 toolskill 的工具照常返回正文。
+
+    exec 在节点道是常驻内置、又带 tools/exec/toolskills；inspection 角色不可调用它，
+    但验收节点需要读契约来判断子节点的命令是否合规。
+    """
+    service = object.__new__(MainRuntimeService)
+    service._resource_manager = SimpleNamespace()
+    service._visible_tool_map = lambda **kwargs: {}
+    service.get_tool_toolskill = lambda tool_id: (
+        {
+            'tool_id': tool_id,
+            'content': '# exec contract',
+            'description': 'exec',
+            'path': 'tools/exec/toolskills/SKILL.md',
+            'callable': True,
+            'available': True,
+            'parameters_schema': {'type': 'object', 'properties': {}, 'required': []},
+        }
+        if tool_id == 'exec'
+        else None
+    )
+    service._tool_context_contract_payload = lambda **kwargs: {
+        'callable_now': False,
+        'will_be_hydrated_next_turn': False,
+        'hydration_targets': [],
+        'exec_runtime_policy': None,
+    }
+
+    payload = service.load_tool_context_v2(
+        actor_role='inspection',
+        session_id='web:shared',
+        tool_id='exec',
+    )
+
+    assert payload['ok'] is True
+    assert payload['content'] == '# exec contract'
+    assert payload['callable'] is False and payload['available'] is False
+    assert payload['callable_now'] is False
+    assert payload['documentation_only'] is True
+    assert any('仅返回说明正文' in item for item in payload['warnings'])
+
+
+def test_load_tool_context_still_rejects_a_non_visible_tool_without_a_toolskill():
+    service = object.__new__(MainRuntimeService)
+    service._resource_manager = SimpleNamespace()
+    service._visible_tool_map = lambda **kwargs: {}
+    service.get_tool_toolskill = lambda tool_id: None
+
+    payload = service.load_tool_context_v2(
+        actor_role='inspection',
+        session_id='web:shared',
+        tool_id='nope',
+    )
+
+    assert payload == {'ok': False, 'error': 'Tool not visible: nope'}
+
+
 @pytest.mark.asyncio
 async def test_load_skill_context_tool_requires_known_visible_skill_id():
     class _Service:

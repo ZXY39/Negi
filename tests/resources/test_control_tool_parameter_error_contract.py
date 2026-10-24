@@ -324,6 +324,23 @@ def test_loadable_tool_gate_error_names_builtin_and_lists_candidates() -> None:
     assert 'RBAC 可见工具：content_search' in text
 
 
+def test_loadable_tool_gate_error_does_not_claim_direct_call_for_a_non_callable_builtin() -> None:
+    """exec 不在本跳可调用名单里时，不能说"无需加载即可直接调用"。"""
+    runtime = {
+        'tool_contract_enforced': True,
+        'actor_role': 'inspection',
+        'candidate_tool_names': [],
+        'rbac_visible_tool_names': ['content_search'],
+        'callable_tool_names': ['submit_final_result', 'load_tool_context'],
+    }
+
+    text = _loadable_tool_gate_error(runtime=runtime, requested_id='exec')
+
+    assert '是常驻内置工具' not in text
+    assert '已注册且带 toolskill 的工具说明' in text
+    assert '。。' not in text
+
+
 def test_candidate_gate_error_enumerates_the_candidates_it_demands() -> None:
     runtime = {
         'tool_contract_enforced': True,
