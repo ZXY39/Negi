@@ -156,8 +156,8 @@ class _CreateAsyncTaskHandler(Tool):
             return _duplicate_rejection_text(precheck)
         if decision == 'reject_use_append_notice':
             return (
-                f'任务未创建：现有任务 {matched_task_id} 需要追加通知而不是新建。'
-                f'请改用 task_append_notice。原因：{reason}'
+                f'任务未创建：现有任务 {matched_task_id} 已经覆盖这次要求。'
+                f'请对该任务用 manage_task_nodes 继续推进（例如 resume），不要新建重复任务。原因：{reason}'
             )
         revalidate = getattr(self._service, 'revalidate_async_task_creation_before_create', None)
         if callable(revalidate):
@@ -176,8 +176,9 @@ class _CreateAsyncTaskHandler(Tool):
                 return _duplicate_rejection_text(dict(create_guard or {}))
             if guard_decision == 'reject_use_append_notice':
                 return (
-                    f'任务未创建：现有任务 {guard_task_id} 需要追加通知而不是新建。'
-                    f'请改用 task_append_notice。原因：{guard_reason}'
+                    f'任务未创建：现有任务 {guard_task_id} 已经覆盖这次要求。'
+                    f'请对该任务用 manage_task_nodes 继续推进（例如 resume），不要新建重复任务。'
+                    f'原因：{guard_reason}'
                 )
         record = await self._service.create_task(
             str(task or ''),

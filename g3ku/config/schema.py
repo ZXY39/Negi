@@ -784,7 +784,6 @@ class MemoryAssemblyConfig(Base):
             'create_async_task',
             'manage_task_nodes',
             'perf_inspect',
-            'task_append_notice',
             'task_delete',
             'task_failed_nodes',
             'task_list',

@@ -4,7 +4,6 @@ from typing import Any
 
 CEO_FIXED_BUILTIN_TOOL_NAMES: tuple[str, ...] = (
     "create_async_task",
-    "task_append_notice",
     "task_summary",
     "task_list",
     "task_progress",

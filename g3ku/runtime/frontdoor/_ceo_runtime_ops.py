@@ -6566,16 +6566,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 "rejection_kind": "",
             }
         if text.startswith("任务未创建："):
-            # The duplicate-rejection text also mentions task_append_notice as
-            # guidance, so only the dedicated append-notice phrasing (which
-            # starts with "现有任务") counts as the append-notice decision.
-            rejection_kind = "duplicate"
-            if text.startswith("任务未创建：现有任务") and ("task_append_notice" in text or "追加通知" in text):
-                rejection_kind = "append_notice"
+            # 追加通知那条车道已随节点树重构删除（决策 M/O）；模型现在被引导去
+            # resume 既有任务，所以任何「任务未创建」都只是重复判定，不再分档。
             return {
                 "created": False,
                 "created_task_ids": [],
-                "rejection_kind": rejection_kind,
+                "rejection_kind": "duplicate",
             }
         return {
             "created": False,
