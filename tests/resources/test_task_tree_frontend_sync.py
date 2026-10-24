@@ -3106,6 +3106,7 @@ def test_build_node_message_list_steps_keeps_only_time_status_and_preview() -> N
           message_list: [
             {
               notification_id: "notif:1",
+              source_node_id: "node:parent-1",
               message: "改成男性角色Top20",
               received_at: "2026-04-19T20:28:17+08:00",
               status: "pending",
@@ -3125,6 +3126,7 @@ def test_build_node_message_list_steps_keeps_only_time_status_and_preview() -> N
         console.log(JSON.stringify({
           traceKeys: steps.map((item) => item.traceKey),
           titles: steps.map((item) => item.title),
+          leadHtml: steps[0]?.leadHtml || "",
           status: steps[0]?.status || "",
           bodyHtml: steps[0]?.bodyHtml || "",
         }));
@@ -3132,14 +3134,22 @@ def test_build_node_message_list_steps_keeps_only_time_status_and_preview() -> N
     )
 
     assert result["traceKeys"] == ["message:notif:1"]
-    # 折叠态 = 时间 · 状态 · 一行内容预览。
-    assert "2026-04-19T20:28:17+08:00" in result["titles"][0]
-    assert "待处理" in result["titles"][0]
-    assert "改成男性角色Top20" in result["titles"][0]
+    # 折叠态：状态图标在最左，然后是时间、来自节点药丸、一行内容预览，不用 · 分隔。
+    assert result["titles"][0] == "改成男性角色Top20"
+    assert "task-message-status" in result["leadHtml"]
+    assert 'data-status="pending"' in result["leadHtml"]
+    assert "待处理" in result["leadHtml"]
+    assert "2026-04-19T20:28:17+08:00" in result["leadHtml"]
+    assert "来自" in result["leadHtml"]
+    assert 'data-node-jump="node:parent-1"' in result["leadHtml"]
+    # 展示时去掉 node: 前缀。
+    assert "<span>parent-1</span>" in result["leadHtml"]
+    assert ">node:parent-1<" not in result["leadHtml"]
+    assert " · " not in result["leadHtml"]
     assert result["status"] == "warning"
     # 展开态只留消息正文：状态/接收时间/消费时间/并入时间/分发情况全部下掉。
     assert result["bodyHtml"].strip() == '<div class="task-trace-message-body">改成男性角色Top20</div>'
-    for removed in ["child one", "未下发", "分发情况", "接收时间", "消费时间", "并入上下文时间", "task-trace-label"]:
+    for removed in ["child one", "未下发", "分发情况", "接收时间", "消费时间", "已并入上下文", "task-trace-label"]:
         assert removed not in result["bodyHtml"]
 
 
@@ -3174,8 +3184,8 @@ def test_build_node_sent_message_list_steps_shows_target_and_message_only() -> N
               message: "给子节点的要求",
               received_at: "2026-04-19T20:30:00+08:00",
               consumed_at: "2026-04-19T20:31:00+08:00",
-              merged_at: "",
-              status: "consumed",
+              merged_at: "2026-04-19T20:31:00+08:00",
+              status: "merged",
             },
           ],
         });
@@ -3183,15 +3193,27 @@ def test_build_node_sent_message_list_steps_shows_target_and_message_only() -> N
         console.log(JSON.stringify({
           traceKeys: steps.map((item) => item.traceKey),
           title: steps[0]?.title || "",
+          leadHtml: steps[0]?.leadHtml || "",
           bodyHtml: steps[0]?.bodyHtml || "",
         }));
         """
     )
 
     assert result["traceKeys"] == ["sent-message:notif:sent-1"]
-    assert "已消费" in result["title"]
-    assert "child one" in result["title"]
-    assert "给子节点的要求" in result["title"]
+    # merged 与 consumed 同显示「已消费」；状态图标在最左，随后时间、发送至节点药丸、预览。
+    assert result["title"] == "给子节点的要求"
+    assert "已消费" in result["leadHtml"]
+    assert "已并入上下文" not in result["leadHtml"]
+    assert 'data-status="merged"' in result["leadHtml"]
+    assert 'data-lucide="circle-check"' in result["leadHtml"]
+    assert "2026-04-19T20:30:00+08:00" in result["leadHtml"]
+    assert "发送至" in result["leadHtml"]
+    assert 'data-node-jump="node:child-1"' in result["leadHtml"]
+    assert "<span>child-1</span>" in result["leadHtml"]
+    assert ">node:child-1<" not in result["leadHtml"]
+    # 节点标题不再出现在消息行里，只用 id 药丸指路。
+    assert "child one" not in result["leadHtml"]
+    assert " · " not in result["leadHtml"]
     assert result["bodyHtml"].strip() == '<div class="task-trace-message-body">给子节点的要求</div>'
 
 
@@ -3310,9 +3332,15 @@ def test_build_spawn_review_trace_steps_lists_nodes_with_mode_and_details() -> N
     assert "专注" in result["body"]
     assert 'data-lucide="layers"' in result["body"]
     assert 'data-lucide="target"' in result["body"]
-    # 点开节点后给跳转按钮、提示词与验收结果。
-    assert 'data-spawn-jump="node:child-1"' in result["body"]
-    assert 'data-spawn-jump="node:child-2"' in result["body"]
+    # 节点 id 药丸就是跳转入口（去 node: 前缀），不再有单独的跳转按钮。
+    assert 'data-node-jump="node:child-1"' in result["body"]
+    assert 'data-node-jump="node:child-2"' in result["body"]
+    assert "<span>child-1</span>" in result["body"]
+    assert "<span>child-2</span>" in result["body"]
+    assert ">node:child-1<" not in result["body"]
+    assert "跳转到节点详情" not in result["body"]
+    assert result["body"].count('class="task-node-ref"') == 2
+    # 点开节点后给提示词与验收结果。
     assert "coverage prompt" in result["body"]
     assert "focus prompt" in result["body"]
     assert "验收通过：四个角色全部接好" in result["body"]

@@ -146,14 +146,15 @@ function contextLoadBodyFromStep(step) {
 
 // 消息状态标签的唯一映射：分发链路上的每一档都从这里出，前端不再各自写字面量。
 // received/frozen 是投递前的视图层投影（后端 message_list 直接给这两档），
-// pending/consumed/merged 是既有三态，判定源仍是后端账本。
+// pending/consumed/merged 是既有三态，判定源仍是后端账本；merged 在消息行上
+// 与 consumed 同显示「已消费」（内容是否已并入由账本表达，不再分两个词）。
 // 原始账本 token（delivered 等）一律不得作为标签外泄，未知值走中性「待确认」。
 const MESSAGE_STATUS_LABELS = {
     received: "已接收",
     frozen: "已冻结待释放",
     pending: "待处理",
     consumed: "已消费",
-    merged: "已并入上下文",
+    merged: "已消费",
     skipped: "未下发",
 };
 
@@ -451,11 +452,11 @@ function bindTaskTraceListInteractions(traceList) {
             event.preventDefault();
             return;
         }
-        const jumpButton = target.closest("[data-spawn-jump]");
-        if (jumpButton instanceof HTMLElement) {
+        const nodeRef = target.closest("[data-node-jump]");
+        if (nodeRef instanceof HTMLElement) {
             event.preventDefault();
             event.stopPropagation();
-            void jumpToSpawnedNode(jumpButton.dataset.spawnJump || "");
+            void jumpToTaskNodeDetail(nodeRef.dataset.nodeJump || "");
         }
     });
 }
@@ -612,12 +613,12 @@ function messageStatusDescriptor(status) {
 
 function messageListStatusDescriptor(status) {
     const descriptor = messageStatusDescriptor(status);
-    // 列表条目上的 key 是**视觉档位**（warning/info），与「分发情况」行用的语义 key
-    // 是两套词表：这里只做映射，不得把两套并成一套，否则徽标配色合同会被改掉。
-    if (["pending", "received", "frozen"].includes(descriptor.key)) {
-        return { key: "warning", label: descriptor.label };
-    }
-    return { key: "info", label: descriptor.label };
+    // 列表条目上的 key 是**视觉档位**（warning/info），与语义 key 是两套词表：
+    // 这里只做映射，不得把两套并成一套，否则徽标配色合同会被改掉。
+    const key = ["pending", "received", "frozen"].includes(descriptor.key) ? "warning" : "info";
+    // merged 与 consumed 共用「已消费」文案，图标也统一成勾选，避免同义词两套图形。
+    const icon = descriptor.key === "merged" ? "circle-check" : descriptor.icon;
+    return { key, statusKey: descriptor.key, label: descriptor.label, icon };
 }
 
 function taskMessagePreviewText(message, maxChars = 140) {
@@ -637,17 +638,45 @@ function renderTaskMessageBody(message) {
     return `<div class="task-trace-message-body">${esc(String(message || "").trim() || "暂无消息内容")}</div>`;
 }
 
+function taskNodeDisplayId(nodeId) {
+    const raw = String(nodeId || "").trim();
+    return raw.startsWith("node:") ? raw.slice("node:".length) : raw;
+}
+
+// 节点 id 药丸：去 node: 前缀、带图标，点击直接打开该节点详情（消息行与派生记录共用）。
+function renderTaskNodeRef(nodeId, { icon = "circle-dot" } = {}) {
+    const raw = String(nodeId || "").trim();
+    if (!raw) return "";
+    return `<button type="button" class="task-node-ref" data-node-jump="${esc(raw)}" title="打开节点 ${esc(raw)} 的详情"><i data-lucide="${esc(icon)}"></i><span>${esc(taskNodeDisplayId(raw))}</span></button>`;
+}
+
+function renderTaskMessageStatus(status) {
+    const label = String(status?.label || "").trim();
+    const icon = String(status?.icon || "circle").trim() || "circle";
+    return `<span class="task-message-status" data-status="${esc(status?.statusKey || "unknown")}" data-tone="${esc(status?.key || "info")}" title="${esc(label)}" aria-label="${esc(label)}"><i data-lucide="${esc(icon)}"></i></span>`;
+}
+
 function buildNodeMessageListSteps(node = {}) {
     const entries = Array.isArray(node?.message_list) ? node.message_list : [];
     return entries.map((entry, index) => {
         const status = messageListStatusDescriptor(entry?.status);
+        const sourceNodeId = String(entry?.source_node_id || "").trim();
+        const leadHtml = [
+            renderTaskMessageStatus(status),
+            `<span class="task-message-time">${esc(taskMessageTimeText(entry))}</span>`,
+            sourceNodeId
+                ? `<span class="task-message-direction">来自</span>${renderTaskNodeRef(sourceNodeId, { icon: "arrow-down-left" })}`
+                : "",
+        ].join("");
         return {
             traceKey: `message:${String(entry?.notification_id || entry?.epoch_id || index).trim() || index}`,
-            // 折叠态只留三样：时间、状态、一行内容预览；展开态只给消息正文。
-            title: `${taskMessageTimeText(entry)} · ${status.label} · ${taskMessagePreviewText(entry?.message)}`,
+            // 折叠态一行：状态图标 · 时间 · 来自节点 id · 内容预览；展开态只给消息正文。
+            title: taskMessagePreviewText(entry?.message),
+            leadHtml,
             status: status.key,
             showStatus: false,
             open: index === 0,
+            extraClass: "task-trace-step--message",
             bodyHtml: renderTaskMessageBody(entry?.message),
         };
     });
@@ -657,13 +686,22 @@ function buildNodeSentMessageListSteps(node = {}) {
     const entries = Array.isArray(node?.sent_message_list) ? node.sent_message_list : [];
     return entries.map((entry, index) => {
         const status = messageListStatusDescriptor(entry?.status);
-        const target = String(entry?.target_title || entry?.target_node_id || "").trim() || "未知节点";
+        const targetNodeId = String(entry?.target_node_id || "").trim();
+        const leadHtml = [
+            renderTaskMessageStatus(status),
+            `<span class="task-message-time">${esc(taskMessageTimeText(entry))}</span>`,
+            targetNodeId
+                ? `<span class="task-message-direction">发送至</span>${renderTaskNodeRef(targetNodeId, { icon: "arrow-up-right" })}`
+                : "",
+        ].join("");
         return {
             traceKey: `sent-message:${String(entry?.notification_id || index).trim() || index}`,
-            title: `${taskMessageTimeText(entry)} · ${status.label} · → ${target} · ${taskMessagePreviewText(entry?.message)}`,
+            title: taskMessagePreviewText(entry?.message),
+            leadHtml,
             status: status.key,
             showStatus: false,
             open: index === 0,
+            extraClass: "task-trace-step--message",
             bodyHtml: renderTaskMessageBody(entry?.message),
         };
     });
@@ -696,18 +734,15 @@ function renderSpawnNodeItem(entry = {}, spec = null, childResult = null) {
     const mode = spawnSpecModeDescriptor(spec);
     const prompt = String(spec?.prompt || "").trim() || "暂无提示词";
     const acceptance = String(childResult?.check_result || "").trim() || "暂无验收结果";
-    const jumpButton = childNodeId
-        ? `<button type="button" class="toolbar-btn ghost small spawn-node-jump" data-spawn-jump="${esc(childNodeId)}">跳转到节点详情</button>`
-        : "";
+    const nodeRef = renderTaskNodeRef(childNodeId);
     return `
         <details class="spawn-node" data-spawn-node-id="${esc(childNodeId)}">
             <summary class="spawn-node-summary">
                 <span class="spawn-node-mode spawn-node-mode--${mode.key}"><i data-lucide="${mode.icon}"></i>${mode.label}</span>
                 <span class="spawn-node-goal">${esc(goal)}</span>
-                <span class="spawn-node-id">${esc(childNodeId || "未派生")}</span>
+                ${nodeRef || '<span class="spawn-node-id">未派生</span>'}
             </summary>
             <div class="spawn-node-body">
-                ${jumpButton ? `<div class="spawn-node-actions">${jumpButton}</div>` : ""}
                 <div class="spawn-node-field">
                     <span class="spawn-node-label">提示词</span>
                     <div class="spawn-node-text">${esc(prompt)}</div>
@@ -761,7 +796,7 @@ function buildSpawnReviewTraceSteps(rounds = [], childResults = []) {
     });
 }
 
-function jumpToSpawnedNode(nodeId) {
+function jumpToTaskNodeDetail(nodeId) {
     const key = String(nodeId || "").trim();
     if (!key) return;
     const node = (typeof findTreeNode === "function" ? findTreeNode(S.treeView, key) : null)
@@ -855,6 +890,8 @@ function renderMessageList(node, { viewState = null } = {}) {
             : `<div class="empty-state task-trace-empty">${esc(emptyText)}</div>`;
         traceList.dataset.renderSignature = renderSignature;
         traceList.dataset.renderNodeId = renderNodeId;
+        // 状态图标与节点 id 药丸是 lucide 占位，重建后立即水合（切 tab 时 showAgent 不会再兜底）。
+        if (typeof icons === "function") icons();
     }
     bindTaskMessageTabs();
     bindTaskTraceListInteractions(traceList);
@@ -908,6 +945,7 @@ function renderSpawnReviewTrace(node, { viewState = null } = {}) {
             : '<div class="empty-state task-trace-empty">当前节点暂无派生记录。</div>';
         traceList.dataset.renderSignature = renderSignature;
         traceList.dataset.renderNodeId = renderNodeId;
+        if (typeof icons === "function") icons();
     }
     bindTaskTraceListInteractions(traceList);
     renderSpawnReviewHeading(stepDescriptors.length);

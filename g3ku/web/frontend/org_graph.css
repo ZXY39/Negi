@@ -17063,11 +17063,6 @@ textarea {
     padding: 0 var(--space-3) var(--space-3);
 }
 
-.spawn-node-actions {
-    display: flex;
-    justify-content: flex-end;
-}
-
 .spawn-node-field {
     display: grid;
     gap: 4px;
@@ -17088,4 +17083,109 @@ textarea {
     font-size: 0.84rem;
     line-height: 1.6;
     color: var(--text-primary);
+}
+
+/* 消息行折叠摘要：状态图标 + 时间 + 来自/发送至节点药丸 + 一行预览，不用分隔符。 */
+.task-trace-step--message .interaction-step-lead {
+    flex: 1 1 auto;
+    overflow: hidden;
+    gap: 8px;
+}
+
+.task-trace-step--message .interaction-step-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-weight: 500;
+}
+
+.task-message-status {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    width: 20px;
+    height: 20px;
+    border-radius: var(--radius-full);
+    background: color-mix(in srgb, var(--text-tertiary) 14%, transparent);
+    color: var(--text-secondary);
+}
+
+.task-message-status svg {
+    width: 12px;
+    height: 12px;
+}
+
+.task-message-status[data-status="pending"],
+.task-message-status[data-status="received"],
+.task-message-status[data-status="frozen"] {
+    background: var(--status-pending-bg);
+    color: var(--status-pending-text);
+}
+
+.task-message-status[data-status="consumed"],
+.task-message-status[data-status="merged"] {
+    background: var(--status-success-bg);
+    color: var(--status-success-text);
+}
+
+.task-message-status[data-status="skipped"] {
+    background: color-mix(in srgb, var(--text-tertiary) 14%, transparent);
+    color: var(--text-tertiary);
+}
+
+.task-message-time {
+    flex: none;
+    color: var(--text-tertiary);
+    font-size: 0.78rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.task-message-direction {
+    flex: none;
+    color: var(--text-tertiary);
+    font-size: 0.76rem;
+}
+
+/* 节点 id 药丸：去掉 node: 前缀，点击打开对应节点详情（消息行 / 派生记录共用）。 */
+.task-node-ref {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex: none;
+    max-width: 100%;
+    padding: 1px 8px;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-full);
+    background: color-mix(in srgb, var(--bg-app) 80%, transparent);
+    color: var(--text-secondary);
+    font-family: var(--font-mono, monospace);
+    font-size: 0.72rem;
+    line-height: 1.6;
+    cursor: pointer;
+}
+
+.task-node-ref svg {
+    width: 11px;
+    height: 11px;
+    flex: none;
+}
+
+.task-node-ref span {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.task-node-ref:hover {
+    border-color: color-mix(in srgb, var(--brand-primary) 55%, var(--border-color));
+    background: color-mix(in srgb, var(--brand-primary) 10%, transparent);
+    color: var(--brand-primary);
+}
+
+.task-node-ref:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--brand-primary) 68%, transparent);
+    outline-offset: 2px;
 }
