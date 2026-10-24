@@ -82,6 +82,7 @@ function renderTree() {
         if (inspectionBlock) button.classList.add("is-inspection");
         button.dataset.id = node.node_id;
         button.dataset.kind = node.kind || "execution";
+        button.dataset.treeChips = treeNodeChipSignature(node);
         button.dataset.status = nodeStatus;
         button.dataset.paused = effectivePaused ? "true" : "false";
         button.dataset.pausedReason = String(node.pause_reason || "");

@@ -1011,7 +1011,16 @@ function treeRoundSelectId(nodeId) {
 
 
 function refreshTreeViewFromSnapshot() {
-    S.treeView = buildExecutionTreeFromSnapshot(S.treeRootNodeId, S.treeSelectedRoundByNodeId);
+    // 第二参数是递归用的 seen 集合：传轮次选择对象会让 `seen.has` 抛错，
+    // 整条"就地刷新徽章"链路从第一行就死掉（树只在整树重建时才会更新）。
+    S.treeView = buildExecutionTreeFromSnapshot(
+        S.treeRootNodeId,
+        new Set(),
+        taskPauseDisplayActive(),
+        treeShowTerminalEffective(),
+        true,
+        treeExpandedNodeIds(),
+    );
     return S.treeView;
 }
 
@@ -1720,9 +1729,19 @@ function refreshRenderedTreeNodeStatuses() {
             .map((button) => [String(button.dataset.id || "").trim(), button])
             .filter(([nodeId]) => !!nodeId),
     );
+    // 就地刷新改不了"节点行上该不该有 ▸N / 未读角标"，也给不出新折叠/展开的分支：
+    // 一旦新模型与已渲染的 DOM 在挂件签名或节点数上对不上，就退回整树重建。
+    let needsRebuild = false;
+    let modelNodeCount = 0;
     const walk = (node) => {
         if (!node) return;
+        modelNodeCount += 1;
         const button = buttons.get(String(node.node_id || "").trim());
+        if (!(button instanceof HTMLElement)) {
+            needsRebuild = true;
+        } else if (String(button.dataset.treeChips || "") !== treeNodeChipSignature(node)) {
+            needsRebuild = true;
+        }
         if (button instanceof HTMLElement) {
             const title = String(node.title || node.node_id || "");
             const fullTitle = String(node.fullTitle || title);
@@ -1756,6 +1775,11 @@ function refreshRenderedTreeNodeStatuses() {
         treeViewChildren(node).forEach(walk);
     };
     walk(nextTreeView);
+    if (buttons.size !== modelNodeCount) needsRebuild = true;
+    if (needsRebuild) {
+        renderTree();
+        return;
+    }
     syncSelectedTaskNodeDetailStatus(nextTreeView);
 }
 

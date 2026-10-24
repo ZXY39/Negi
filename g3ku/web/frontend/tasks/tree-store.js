@@ -76,6 +76,18 @@ function treeShowTerminalEffective() {
     return treeTaskIsTerminal();
 }
 
+// 节点行内小挂件（未读角标 / 展开钮）的渲染签名。就地刷新只能改文字与 class，
+// 增删这些元素要重排 DOM；签名一变就说明必须整树重建一次。
+function treeNodeChipSignature(node) {
+    return [
+        node?.expandable ? "1" : "0",
+        treeNormalizeInt(node?.hidden_child_count, 0),
+        node?.expanded ? "1" : "0",
+        treeNormalizeInt(node?.pending_notice_count, 0),
+        node?.kind === "acceptance" ? "1" : "0",
+    ].join("|");
+}
+
 function treeExpandedNodeIds() {
     if (!(S.treeExpandedNodeIds instanceof Set)) S.treeExpandedNodeIds = new Set();
     return S.treeExpandedNodeIds;
