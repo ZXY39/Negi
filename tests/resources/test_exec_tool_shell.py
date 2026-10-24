@@ -583,24 +583,42 @@ async def test_exec_tool_streaming_reader_keeps_output_bounded(monkeypatch, tmp_
     assert payload['stdout_captured_bytes'] > 0
 
 
-def test_exec_tool_model_description_reflects_full_access_mode() -> None:
-    class _Service:
-        def get_tool(self, tool_id: str):
-            if tool_id != 'exec':
-                return None
-            return type(
-                'ToolRecord',
-                (),
-                {
-                    'tool_id': 'exec',
-                    'metadata': {'execution_mode': 'full_access'},
-                },
-            )()
+def test_exec_tool_model_description_is_mode_invariant() -> None:
+    """`tools[]` 是钉住整表，exec 说明不承载 mode/授权：权威只在运行时合同。"""
 
-    tool = ExecTool(main_task_service=_Service())
+    def _tool(mode: str) -> ExecTool:
+        class _Service:
+            def get_tool(self, tool_id: str):
+                if tool_id != 'exec':
+                    return None
+                return type(
+                    'ToolRecord',
+                    (),
+                    {
+                        'tool_id': 'exec',
+                        'metadata': {'execution_mode': mode},
+                    },
+                )()
 
-    assert 'without exec-side guardrails' in tool.model_description
-    assert 'read-only' not in tool.model_description.lower()
+        return ExecTool(main_task_service=_Service())
+
+    governed = _tool('governed')
+    full_access = _tool('full_access')
+
+    assert governed.model_description == full_access.model_description
+    description = governed.model_description
+    assert 'exec_runtime_policy' in description
+    for forbidden in (
+        'full_access',
+        'governed',
+        'allowed_roles',
+        'without exec-side guardrails',
+        'with exec-side guardrails',
+    ):
+        assert forbidden not in description
+    # 切模式的行为仍然生效，只是不再由 `tools[]` 的说明文字承载。
+    assert governed._resolve_execution_mode() == 'governed'
+    assert full_access._resolve_execution_mode() == 'full_access'
 
 
 @pytest.mark.asyncio
