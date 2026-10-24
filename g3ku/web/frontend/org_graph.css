@@ -889,10 +889,87 @@ textarea {
     position: absolute;
     top: 12px;
     right: 12px;
-    z-index: 5;
+    z-index: 7;
     display: flex;
+    align-items: center;
+    gap: var(--space-2);
     justify-content: flex-end;
     pointer-events: none;
+}
+
+.execution-tree-toolbar {
+    display: flex;
+    align-items: center;
+    pointer-events: auto;
+}
+
+.execution-tree-filter {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 34px;
+    padding: 0 12px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 88%, transparent);
+    border-radius: var(--radius-full);
+    background: color-mix(in srgb, var(--bg-panel) 94%, var(--bg-app) 6%);
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+    white-space: nowrap;
+    cursor: pointer;
+    user-select: none;
+    box-shadow: 0 16px 32px -26px color-mix(in srgb, var(--text-primary) 40%, transparent);
+}
+
+.execution-tree-filter:hover {
+    color: var(--text-primary);
+    border-color: color-mix(in srgb, var(--brand-primary) 42%, var(--border-color));
+}
+
+.execution-tree-filter {
+    cursor: pointer;
+}
+
+/* 节点行上"展开已结束子节点"的入口：默认过滤把子节点藏起来时必须留下这个入口。 */
+.execution-tree-expand {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    flex: 0 0 auto;
+    padding: 1px 6px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
+    border-radius: var(--radius-full);
+    color: var(--text-muted);
+    font-size: 0.76rem;
+    line-height: 1.4;
+    cursor: pointer;
+}
+
+.execution-tree-expand:hover,
+.execution-tree-expand:focus-visible {
+    color: var(--text-primary);
+    border-color: color-mix(in srgb, var(--brand-primary) 46%, var(--border-color));
+    outline: none;
+}
+
+.execution-tree-expand-count {
+    font-variant-numeric: tabular-nums;
+}
+
+.execution-tree-unread {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: var(--radius-full);
+    background: var(--brand-primary);
+    color: var(--text-on-brand, #fff);
+    font-size: 0.72rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
 }
 
 .task-tree-floating-reset {

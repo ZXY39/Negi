@@ -20,6 +20,8 @@ function resetTaskTreeSnapshotState({ clearDirty = true } = {}) {
     S.treeView = null;
     S.treeLargeMode = false;
     S.treeSelectedRoundByNodeId = {};
+    S.treeShowTerminal = null;
+    S.treeExpandedNodeIds = new Set();
     S.treeBranchSyncTokenById = {};
     S.treeBranchSyncInFlightById = {};
     S.treeBranchSyncQueuedById = {};
@@ -1110,6 +1112,17 @@ async function handleTreeNodePauseAction(node, event) {
 }
 
 
+function taskTreeTopOverlayInset(viewport) {
+    let inset = 0;
+    [U.taskTreeSearch, U.treeFloatingTools].forEach((element) => {
+        if (!(element instanceof Element)) return;
+        const rect = element.getBoundingClientRect();
+        if (!rect.height || !rect.width) return;
+        inset = Math.max(inset, rect.bottom - viewport.top + 8);
+    });
+    return Math.min(Math.max(0, inset), viewport.height * 0.6);
+}
+
 function fitTaskTreeToView({ marginPx = 40 } = {}) {
     if (!U.tree) return false;
     const wrapper = U.tree.querySelector(".execution-tree");
@@ -1126,14 +1139,23 @@ function fitTaskTreeToView({ marginPx = 40 } = {}) {
     // 布局位置在变换下是不变量。变换只缩放内容在包装器内的偏移,
     // 包装器自身的布局偏移不参与缩放,须分开计算:
     // W = 包装器相对视口的布局偏移;C = 内容相对包装器的布局偏移。
-    const W = (wrapRect.left - viewport.left - state.offsetX) / state.scale;
-    const T = (wrapRect.top - viewport.top - state.offsetY) / state.scale;
+    // 包装器自身的布局偏移不参与 scale（transform-origin 0 0 下 rendered = layout + offset），
+    // 只有容器内部的 C/D 与树尺寸需要除以 scale。此前 W/T 也被除了一次，布局偏移因此
+    // 被放大 1/scale 倍——内边距一变大，树就被推离视口（整棵树看起来是空的）。
+    const W = wrapRect.left - viewport.left - state.offsetX;
+    const T = wrapRect.top - viewport.top - state.offsetY;
     const C = (contentRect.left - wrapRect.left) / state.scale;
     const D = (contentRect.top - wrapRect.top) / state.scale;
     const treeW = contentRect.width / state.scale;
     const treeH = contentRect.height / state.scale;
-    const availW = viewport.width - marginPx * 2;
-    const availH = viewport.height - marginPx * 2;
+    // 悬浮搜索框与悬浮工具钉在树容器的上半部，适配时把它们的高度从可用区域里扣掉：
+    // 否则树按整块容器居中，第一行会正好压在搜索框底下（顶部越挤越明显）。
+    const topInset = taskTreeTopOverlayInset(viewport);
+    const areaTop = viewport.top + topInset;
+    const areaHeight = viewport.height - topInset;
+    const margin = Math.min(marginPx, Math.max(8, areaHeight * 0.1));
+    const availW = viewport.width - margin * 2;
+    const availH = areaHeight - margin * 2;
     if (availW <= 0 || availH <= 0 || treeW <= 0 || treeH <= 0) return false;
     const fitScale = Math.min(availW / treeW, availH / treeH, 1);
     const nextScale = clamp(fitScale, TREE_SCALE_MIN, TREE_SCALE_MAX);
@@ -1148,7 +1170,7 @@ function fitTaskTreeToView({ marginPx = 40 } = {}) {
         ? U.tree.querySelector(executionTreeNodeSelector(anchorRootId))
         : null;
     const nextOffsetX = viewport.width / 2 - W - nextScale * (C + treeW / 2);
-    const nextOffsetY = viewport.height / 2 - T - nextScale * (D + treeH / 2);
+    const nextOffsetY = (areaTop - viewport.top) + areaHeight / 2 - T - nextScale * (D + treeH / 2);
     if (!anchorButton
         && Math.abs(nextScale - state.scale) < 0.001
         && Math.abs(nextOffsetX - state.offsetX) < 0.5
@@ -1294,6 +1316,9 @@ async function locateTaskNode(targetId, { scale = null } = {}) {
     for (const parentId of path.slice(1).reverse()) {
         const parent = treeSnapshotNode(parentId);
         const childId = path[path.indexOf(parentId) - 1];
+        // 定位一个被默认过滤藏起来的终态节点：把它所在的每一级父节点展开，
+        // 否则命中后仍无处高亮，只能退回到最近的可见祖先。
+        treeExpandedNodeIds().add(parentId);
         const round = (Array.isArray(parent?.rounds) ? parent.rounds : []).find((item) => Array.isArray(item?.child_ids) && item.child_ids.includes(childId));
         if (round?.round_id) S.treeSelectedRoundByNodeId[parentId] = round.round_id;
         if (typeof ensureTaskTreeSubtree === "function") {

@@ -222,6 +222,8 @@ def test_task_pause_projects_over_non_terminal_tree_nodes_without_mutating_node_
           treeRootNodeId: "root",
           treeNodesById: {},
           treeSnapshotVersion: "",
+          // 该用例要用终态节点做对照，显式打开"显示已结束节点"。
+          treeShowTerminal: true,
           treeView: null,
           treeLargeMode: false,
           treeDirtyParentsById: {},
@@ -252,6 +254,7 @@ def test_task_pause_projects_over_non_terminal_tree_nodes_without_mutating_node_
               node_kind: "execution",
               rounds: [{ round_id: "r1", label: "Round 1", is_latest: true, child_ids: ["running", "done", "locally-paused"] }],
               auxiliary_child_ids: [],
+              all_child_ids: ["running", "done", "locally-paused"],
             },
             running: {
               node_id: "running",
@@ -317,9 +320,10 @@ def test_task_pause_projects_over_non_terminal_tree_nodes_without_mutating_node_
     assert result["paused"]["done"] == ["SUCCESS", False]
     assert result["paused"]["local"] == ["\u4efb\u52a1\u6682\u505c", True, True]
     assert result["resumed"]["root"] == ["等待中", False]
-    assert result["resumed"]["running"] == ["运行中", False]
+    # 恢复后该节点处在 waiting_tool_results，派生显示态是"运行中（工具在途）"。
+    assert result["resumed"]["running"] == ["运行中（工具在途）", False]
     assert result["resumed"]["done"] == ["SUCCESS", False]
-    assert result["resumed"]["local"] == ["\u5df2\u6682\u505c\uff08manual\uff09", True, True]
+    assert result["resumed"]["local"] == ["\u6682\u505c\u00b7\u666e\u901a", True, True]
 
 
 def test_ensure_task_tree_subtree_uses_new_snapshot_endpoint() -> None:
@@ -406,7 +410,7 @@ def test_ensure_task_tree_subtree_uses_new_snapshot_endpoint() -> None:
           console.log(JSON.stringify({
             requestCount,
             dirtyCleared: taskTreeParentIsDirty("root") === false,
-            childIds: S.treeNodesById.root.auxiliary_child_ids,
+            childIds: S.treeNodesById.root.all_child_ids,
             returnedRoot: payload.root_node_id,
           }));
         });
@@ -3076,1090 +3080,6 @@ def test_handle_task_terminal_refreshes_selected_node_detail() -> None:
     assert result["forceRefresh"] is True
 
 
-def test_render_tree_shows_distribution_notice_and_scoped_connector_mode() -> None:
-    result = _run_node_script(
-        """
-        const fs = require("fs");
-        const vm = require("vm");
-
-        class StubClassList {
-          constructor(owner) {
-            this.owner = owner;
-            this.tokens = new Set();
-          }
-          add(...tokens) {
-            tokens.filter(Boolean).forEach((token) => this.tokens.add(String(token)));
-            this.owner.className = [...this.tokens].join(" ");
-          }
-          remove(...tokens) {
-            tokens.filter(Boolean).forEach((token) => this.tokens.delete(String(token)));
-            this.owner.className = [...this.tokens].join(" ");
-          }
-          contains(token) {
-            return this.tokens.has(String(token));
-          }
-          toggle(token, force) {
-            const normalized = String(token);
-            const shouldAdd = force === undefined ? !this.tokens.has(normalized) : !!force;
-            if (shouldAdd) this.tokens.add(normalized);
-            else this.tokens.delete(normalized);
-            this.owner.className = [...this.tokens].join(" ");
-            return shouldAdd;
-          }
-        }
-
-        class StubElement {
-          constructor(tagName = "div") {
-            this.tagName = String(tagName || "div").toUpperCase();
-            this.children = [];
-            this.dataset = {};
-            this.style = {};
-            this.hidden = false;
-            this.disabled = false;
-            this.className = "";
-            this.classList = new StubClassList(this);
-            this.attributes = {};
-            this.innerHTML = "";
-            this.textContent = "";
-            this.parentNode = null;
-            this.title = "";
-          }
-          appendChild(child) {
-            if (child && typeof child === "object") child.parentNode = this;
-            this.children.push(child);
-            return child;
-          }
-          setAttribute(name, value) {
-            this.attributes[String(name)] = String(value);
-          }
-          addEventListener() {}
-          querySelector() { return null; }
-          querySelectorAll() { return []; }
-        }
-
-        global.window = global;
-        global.HTMLElement = StubElement;
-        global.Element = StubElement;
-        global.HTMLButtonElement = StubElement;
-        global.HTMLInputElement = StubElement;
-        global.HTMLSelectElement = StubElement;
-        global.DocumentFragment = StubElement;
-        global.document = {
-          createElement(tagName) { return new StubElement(tagName); },
-        };
-        global.S = {
-          currentTaskId: "task:test",
-          currentTask: { metadata: {} },
-          taskSummary: { active_node_count: 0, runnable_node_count: 0, waiting_node_count: 0 },
-          taskRuntimeSummary: {
-            distribution: {
-              active_epoch_id: "epoch:demo",
-              state: "distributing",
-              frontier_node_ids: ["root"],
-              queued_epoch_count: 0,
-              pending_mailbox_count: 0,
-            },
-          },
-          treeRootNodeId: "root",
-          treeNodesById: {
-            root: {
-              node_id: "root",
-              title: "Root",
-              status: "in_progress",
-              node_kind: "execution",
-              rounds: [],
-              auxiliary_child_ids: [],
-              default_round_id: "",
-            },
-          },
-          treeView: null,
-          treeSelectedRoundByNodeId: {},
-          treePan: {
-            offsetX: 0,
-            offsetY: 0,
-            scale: 1,
-            suppressClickNodeId: null,
-          },
-          selectedNodeId: null,
-          taskNodeDetails: {},
-          treeLargeMode: false,
-        };
-        global.U = {
-          tree: new StubElement("div"),
-          tdActiveCount: new StubElement("span"),
-          taskTreeResetRounds: new StubElement("button"),
-          taskSelectionEmpty: new StubElement("div"),
-          detail: new StubElement("div"),
-          nodeEmpty: new StubElement("div"),
-        };
-        global.normalizeInt = (value, fallback = 0) => {
-          const parsed = Number.parseInt(String(value ?? ""), 10);
-          return Number.isFinite(parsed) ? parsed : fallback;
-        };
-        global.treeNormalizeInt = global.normalizeInt;
-        global.esc = (value) => String(value ?? "");
-        global.icons = () => {};
-        global.setTaskDetailOpen = () => {};
-        global.captureTaskDetailViewState = () => ({});
-        global.stashTaskDetailViewState = () => {};
-        global.scheduleTaskDetailSessionPersist = () => {};
-        global.findTreeNode = () => null;
-        global.resolveExecutionTreeDensity = () => ({ mode: "default", stats: { totalItems: 1, maxBreadth: 1 } });
-        global.hasManualTreeRoundSelections = () => false;
-        global.showAgent = () => Promise.resolve();
-        global.enhanceResourceSelects = () => {};
-        global.formatTokenCount = (value) => String(value ?? "");
-        global.readableText = (value, { emptyText = "" } = {}) => {
-          const text = String(value ?? "").trim();
-          return text || emptyText;
-        };
-        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
-        vm.runInThisContext(code);
-
-        renderTree();
-
-        const wrapper = U.tree.children.find((item) => item instanceof StubElement && String(item.className || "").includes("execution-tree"));
-        const notice = U.tree.children.find((item) => item instanceof StubElement && String(item.className || "").includes("task-tree-distribution-bubble"));
-        console.log(JSON.stringify({
-          hasWrapper: !!wrapper,
-          wrapperClassName: wrapper?.className || "",
-          noticeText: notice?.textContent || "",
-          childCount: U.tree.children.length,
-        }));
-        """
-    )
-
-    assert result["hasWrapper"] is True
-    assert "execution-tree--distribution-active" in result["wrapperClassName"]
-    assert result["noticeText"] == "新消息分发中"
-
-
-def test_render_tree_marks_only_affected_subtree_connectors_during_distribution() -> None:
-    result = _run_node_script(
-        """
-        const fs = require("fs");
-        const vm = require("vm");
-
-        class StubClassList {
-          constructor(owner) {
-            this.owner = owner;
-            this.tokens = new Set();
-          }
-          add(...tokens) {
-            tokens.filter(Boolean).forEach((token) => this.tokens.add(String(token)));
-            this.owner.className = [...this.tokens].join(" ");
-          }
-          remove(...tokens) {
-            tokens.filter(Boolean).forEach((token) => this.tokens.delete(String(token)));
-            this.owner.className = [...this.tokens].join(" ");
-          }
-          contains(token) {
-            return this.tokens.has(String(token));
-          }
-          toggle(token, force) {
-            const normalized = String(token);
-            const shouldAdd = force === undefined ? !this.tokens.has(normalized) : !!force;
-            if (shouldAdd) this.tokens.add(normalized);
-            else this.tokens.delete(normalized);
-            this.owner.className = [...this.tokens].join(" ");
-            return shouldAdd;
-          }
-        }
-
-        class StubElement {
-          constructor(tagName = "div") {
-            this.tagName = String(tagName || "div").toUpperCase();
-            this.children = [];
-            this.dataset = {};
-            this.style = {};
-            this.hidden = false;
-            this.disabled = false;
-            this.className = "";
-            this.classList = new StubClassList(this);
-            this.attributes = {};
-            this.innerHTML = "";
-            this.textContent = "";
-            this.parentNode = null;
-            this.title = "";
-          }
-          appendChild(child) {
-            if (child && typeof child === "object") child.parentNode = this;
-            this.children.push(child);
-            return child;
-          }
-          setAttribute(name, value) {
-            this.attributes[String(name)] = String(value);
-          }
-          addEventListener() {}
-          querySelector() { return null; }
-          querySelectorAll() { return []; }
-        }
-
-        global.window = global;
-        global.HTMLElement = StubElement;
-        global.Element = StubElement;
-        global.HTMLButtonElement = StubElement;
-        global.HTMLInputElement = StubElement;
-        global.HTMLSelectElement = StubElement;
-        global.DocumentFragment = StubElement;
-        global.document = {
-          createElement(tagName) { return new StubElement(tagName); },
-        };
-        const makeNode = (nodeId, childIds = []) => ({
-          node_id: nodeId,
-          title: nodeId,
-          status: "in_progress",
-          node_kind: "execution",
-          rounds: childIds.length ? [{ round_id: "r1", child_ids: childIds }] : [],
-          auxiliary_child_ids: [],
-          default_round_id: "",
-        });
-        global.S = {
-          currentTaskId: "task:test",
-          currentTask: { metadata: {} },
-          taskSummary: { active_node_count: 0, runnable_node_count: 0, waiting_node_count: 0 },
-          taskRuntimeSummary: {
-            distribution: {
-              mode: "subtree_barrier",
-              active_epoch_id: "epoch:demo",
-              state: "distributing",
-              target_node_ids: ["childA"],
-              frontier_node_ids: ["childA"],
-              blocked_node_ids: ["childA"],
-              pending_notice_node_ids: [],
-              queued_epoch_count: 0,
-              pending_mailbox_count: 0,
-            },
-          },
-          treeRootNodeId: "root",
-          treeNodesById: {
-            root: makeNode("root", ["childA", "childB"]),
-            childA: makeNode("childA", ["childA1"]),
-            childA1: makeNode("childA1"),
-            childB: makeNode("childB"),
-          },
-          treeView: null,
-          treeSelectedRoundByNodeId: {},
-          treePan: {
-            offsetX: 0,
-            offsetY: 0,
-            scale: 1,
-            suppressClickNodeId: null,
-          },
-          selectedNodeId: null,
-          taskNodeDetails: {},
-          treeLargeMode: false,
-        };
-        global.U = {
-          tree: new StubElement("div"),
-          tdActiveCount: new StubElement("span"),
-          taskTreeResetRounds: new StubElement("button"),
-          taskSelectionEmpty: new StubElement("div"),
-          detail: new StubElement("div"),
-          nodeEmpty: new StubElement("div"),
-        };
-        global.normalizeInt = (value, fallback = 0) => {
-          const parsed = Number.parseInt(String(value ?? ""), 10);
-          return Number.isFinite(parsed) ? parsed : fallback;
-        };
-        global.treeNormalizeInt = global.normalizeInt;
-        global.esc = (value) => String(value ?? "");
-        global.icons = () => {};
-        global.setTaskDetailOpen = () => {};
-        global.captureTaskDetailViewState = () => ({});
-        global.stashTaskDetailViewState = () => {};
-        global.scheduleTaskDetailSessionPersist = () => {};
-        global.findTreeNode = () => null;
-        global.resolveExecutionTreeDensity = () => ({ mode: "default", stats: { totalItems: 4, maxBreadth: 2 } });
-        global.hasManualTreeRoundSelections = () => false;
-        global.showAgent = () => Promise.resolve();
-        global.enhanceResourceSelects = () => {};
-        global.formatTokenCount = (value) => String(value ?? "");
-        global.readableText = (value, { emptyText = "" } = {}) => {
-          const text = String(value ?? "").trim();
-          return text || emptyText;
-        };
-        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
-        vm.runInThisContext(code);
-
-        renderTree();
-
-        // 收集每个节点对应的 li（item 类名）与其子列表 ul（branch 类名）。
-        const report = {};
-        const visit = (el) => {
-          if (!(el instanceof StubElement)) return;
-          if (el.tagName === "LI") {
-            let nodeId = "";
-            let branch = null;
-            const stack = (el.children || []).find(
-              (child) => child instanceof StubElement && child.tagName === "DIV",
-            );
-            const findButton = (node) => {
-              if (node instanceof StubElement && node.tagName === "BUTTON" && node.dataset.id) {
-                nodeId = String(node.dataset.id);
-              }
-              (node.children || []).forEach(findButton);
-            };
-            if (stack) findButton(stack);
-            (el.children || []).forEach((child) => {
-              if (child instanceof StubElement && child.tagName === "UL") branch = child;
-            });
-            if (nodeId) {
-              report[nodeId] = {
-                itemAffected: el.classList.contains("execution-tree-item--distribution-affected"),
-                branchAffected: branch ? branch.classList.contains("execution-tree-list--distribution-affected") : null,
-              };
-            }
-          }
-          (el.children || []).forEach(visit);
-        };
-        visit(U.tree);
-        const wrapper = U.tree.children.find((item) => item instanceof StubElement && String(item.className || "").includes("execution-tree"));
-        console.log(JSON.stringify({
-          wrapperClassName: wrapper?.className || "",
-          report,
-        }));
-        """
-    )
-    assert "execution-tree--distribution-active" in result["wrapperClassName"]
-    report = result["report"]
-    # 子树根 childA 与孙节点 childA1 被标记；root 与旁支 childB 不被标记。
-    assert report["childA"]["itemAffected"] is True
-    assert report["childA1"]["itemAffected"] is True
-    assert report["root"]["itemAffected"] is False
-    assert report["childB"]["itemAffected"] is False
-    # root（未受影响）→ childA 的边界连线不染黄：root 的子列表不带染色资格；
-    # childA（受影响）→ childA1 的内部连线染黄：childA 的子列表带染色资格。
-    assert report["root"]["branchAffected"] is False
-    assert report["childA"]["branchAffected"] is True
-    assert report["childB"]["branchAffected"] is None
-
-
-def test_render_tree_shows_failed_distribution_notice_with_red_variant() -> None:
-    result = _run_node_script(
-        """
-        const fs = require("fs");
-        const vm = require("vm");
-
-        class StubClassList {
-          constructor(owner) {
-            this.owner = owner;
-            this.tokens = new Set();
-          }
-          add(...tokens) {
-            tokens.filter(Boolean).forEach((token) => this.tokens.add(String(token)));
-            this.owner.className = [...this.tokens].join(" ");
-          }
-          remove(...tokens) {
-            tokens.filter(Boolean).forEach((token) => this.tokens.delete(String(token)));
-            this.owner.className = [...this.tokens].join(" ");
-          }
-          contains(token) {
-            return this.tokens.has(String(token));
-          }
-          toggle(token, force) {
-            const normalized = String(token);
-            const shouldAdd = force === undefined ? !this.tokens.has(normalized) : !!force;
-            if (shouldAdd) this.tokens.add(normalized);
-            else this.tokens.delete(normalized);
-            this.owner.className = [...this.tokens].join(" ");
-            return shouldAdd;
-          }
-        }
-
-        class StubElement {
-          constructor(tagName = "div") {
-            this.tagName = String(tagName || "div").toUpperCase();
-            this.children = [];
-            this.dataset = {};
-            this.style = {};
-            this.hidden = false;
-            this.disabled = false;
-            this.className = "";
-            this.classList = new StubClassList(this);
-            this.attributes = {};
-            this.innerHTML = "";
-            this.textContent = "";
-            this.parentNode = null;
-            this.title = "";
-          }
-          appendChild(child) {
-            if (child && typeof child === "object") child.parentNode = this;
-            this.children.push(child);
-            return child;
-          }
-          setAttribute(name, value) {
-            this.attributes[String(name)] = String(value);
-          }
-          addEventListener() {}
-          querySelector() { return null; }
-          querySelectorAll() { return []; }
-        }
-
-        global.window = global;
-        global.HTMLElement = StubElement;
-        global.Element = StubElement;
-        global.HTMLButtonElement = StubElement;
-        global.HTMLInputElement = StubElement;
-        global.HTMLSelectElement = StubElement;
-        global.DocumentFragment = StubElement;
-        global.document = {
-          createElement(tagName) { return new StubElement(tagName); },
-        };
-        global.S = {
-          currentTaskId: "task:test",
-          currentTask: { metadata: {} },
-          taskSummary: { active_node_count: 0, runnable_node_count: 0, waiting_node_count: 0 },
-          taskRuntimeSummary: {
-            distribution: {
-              active_epoch_id: "epoch:failed-demo",
-              state: "failed",
-              frontier_node_ids: [],
-              queued_epoch_count: 0,
-              pending_mailbox_count: 0,
-              error_text: "distribution_decision_missing_child_decisions",
-            },
-          },
-          treeRootNodeId: "root",
-          treeNodesById: {
-            root: {
-              node_id: "root",
-              title: "Root",
-              status: "in_progress",
-              node_kind: "execution",
-              rounds: [],
-              auxiliary_child_ids: [],
-              default_round_id: "",
-            },
-          },
-          treeView: null,
-          treeSelectedRoundByNodeId: {},
-          treePan: {
-            offsetX: 0,
-            offsetY: 0,
-            scale: 1,
-            suppressClickNodeId: null,
-          },
-          selectedNodeId: null,
-          taskNodeDetails: {},
-          treeLargeMode: false,
-        };
-        global.U = {
-          tree: new StubElement("div"),
-          tdActiveCount: new StubElement("span"),
-          taskTreeResetRounds: new StubElement("button"),
-          taskSelectionEmpty: new StubElement("div"),
-          detail: new StubElement("div"),
-          nodeEmpty: new StubElement("div"),
-        };
-        global.normalizeInt = (value, fallback = 0) => {
-          const parsed = Number.parseInt(String(value ?? ""), 10);
-          return Number.isFinite(parsed) ? parsed : fallback;
-        };
-        global.treeNormalizeInt = global.normalizeInt;
-        global.esc = (value) => String(value ?? "");
-        global.icons = () => {};
-        global.setTaskDetailOpen = () => {};
-        global.captureTaskDetailViewState = () => ({});
-        global.stashTaskDetailViewState = () => {};
-        global.scheduleTaskDetailSessionPersist = () => {};
-        global.findTreeNode = () => null;
-        global.resolveExecutionTreeDensity = () => ({ mode: "default", stats: { totalItems: 1, maxBreadth: 1 } });
-        global.hasManualTreeRoundSelections = () => false;
-        global.showAgent = () => Promise.resolve();
-        global.enhanceResourceSelects = () => {};
-        global.formatTokenCount = (value) => String(value ?? "");
-        global.readableText = (value, { emptyText = "" } = {}) => {
-          const text = String(value ?? "").trim();
-          return text || emptyText;
-        };
-        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
-        vm.runInThisContext(code);
-
-        renderTree();
-
-        const wrapper = U.tree.children.find((item) => item instanceof StubElement && String(item.className || "").includes("execution-tree"));
-        const notice = U.tree.children.find((item) => item instanceof StubElement && String(item.className || "").includes("task-tree-distribution-bubble"));
-        console.log(JSON.stringify({
-          hasWrapper: !!wrapper,
-          wrapperClassName: wrapper?.className || "",
-          noticeClassName: notice?.className || "",
-          noticeText: notice?.textContent || "",
-        }));
-        """
-    )
-
-    assert result["hasWrapper"] is True
-    # 分发失败后子树仍冻结（失败杠杆）：保留包装类，配合受影响标记仅对
-    # 冻结子树内部连线染色；本夹具无 blocked 快照，因此实际无连线被染色。
-    assert "execution-tree--distribution-active" in result["wrapperClassName"]
-    assert "task-tree-distribution-bubble--failed" in result["noticeClassName"]
-    assert "消息分发失败" in result["noticeText"]
-    assert "distribution_decision_missing_child_decisions" in result["noticeText"]
-    assert "任务保持暂停" in result["noticeText"]
-
-
-def test_render_tree_hides_distribution_notice_when_only_node_pending_notice_remains() -> None:
-    result = _run_node_script(
-        """
-        const fs = require("fs");
-        const vm = require("vm");
-        global.window = global;
-        class StubElement {
-          constructor(tag = "div") {
-            this.tagName = tag.toUpperCase();
-            this.children = [];
-            this.className = "";
-            this.dataset = {};
-            this.style = {};
-            this.hidden = false;
-            this.attributes = {};
-            this.parentNode = null;
-            this.textContent = "";
-            this.classList = {
-              add: (...tokens) => {
-                const set = new Set(String(this.className || "").split(/\\s+/).filter(Boolean));
-                tokens.forEach((token) => set.add(String(token || "")));
-                this.className = [...set].join(" ");
-              },
-              remove: (...tokens) => {
-                const blocked = new Set(tokens.map((token) => String(token || "")));
-                this.className = String(this.className || "")
-                  .split(/\\s+/)
-                  .filter((token) => token && !blocked.has(token))
-                  .join(" ");
-              },
-              contains: (token) => String(this.className || "").split(/\\s+/).includes(String(token || "")),
-              toggle: (token, force) => {
-                const shouldAdd = force == null ? !this.classList.contains(token) : !!force;
-                if (shouldAdd) this.classList.add(token);
-                else this.classList.remove(token);
-                return shouldAdd;
-              },
-            };
-          }
-          appendChild(child) { this.children.push(child); child.parentNode = this; return child; }
-          setAttribute(name, value) { this.attributes[name] = String(value); }
-          querySelector() { return null; }
-          querySelectorAll() { return []; }
-          addEventListener() {}
-          closest() { return null; }
-        }
-        global.Element = StubElement;
-        global.HTMLElement = StubElement;
-        global.document = {
-          createElement: (tag) => new StubElement(tag),
-        };
-        global.S = {
-          treeRootNodeId: "root",
-          treeNodesById: {
-            root: {
-              node_id: "root",
-              title: "root",
-              status: "in_progress",
-              node_kind: "execution",
-              default_round_id: "",
-              rounds: [],
-              auxiliary_child_ids: [],
-              pending_notice_count: 1,
-            },
-          },
-          treeSelectedRoundByNodeId: {},
-          treeView: {
-            node_id: "root",
-            title: "root",
-            fullTitle: "root",
-            state: "in_progress",
-            visual_state: "in_progress",
-            display_state: "进行中",
-            rounds: [],
-            children: [],
-            selectedRoundId: "",
-          },
-          taskRuntimeSummary: { distribution: { active_epoch_id: "", state: "" } },
-          treePan: { offsetX: 0, offsetY: 0, scale: 1 },
-          selectedNodeId: "",
-        };
-        global.U = { tree: new StubElement("div") };
-        global.ApiClient = {};
-        global.showToast = () => {};
-        global.isAbortLike = () => false;
-        global.renderTree = () => {};
-        global.normalizeInt = (value, fallback = 0) => {
-          const parsed = Number.parseInt(String(value ?? ""), 10);
-          return Number.isFinite(parsed) ? parsed : fallback;
-        };
-        global.treeNormalizeInt = global.normalizeInt;
-        global.esc = (value) => String(value ?? "");
-        global.icons = () => {};
-        global.setTaskDetailOpen = () => {};
-        global.captureTaskDetailViewState = () => ({});
-        global.stashTaskDetailViewState = () => {};
-        global.scheduleTaskDetailSessionPersist = () => {};
-        global.findTreeNode = () => null;
-        global.resolveExecutionTreeDensity = () => ({ mode: "default", stats: { totalItems: 1, maxBreadth: 1 } });
-        global.hasManualTreeRoundSelections = () => false;
-        global.showAgent = () => Promise.resolve();
-        global.enhanceResourceSelects = () => {};
-        global.formatTokenCount = (value) => String(value ?? "");
-        global.readableText = (value, { emptyText = "" } = {}) => {
-          const text = String(value ?? "").trim();
-          return text || emptyText;
-        };
-        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
-        vm.runInThisContext(code);
-
-        renderTree();
-
-        const notice = U.tree.children.find((item) => item instanceof StubElement && String(item.className || "").includes("task-tree-distribution-bubble"));
-        console.log(JSON.stringify({
-          noticeText: notice?.textContent || "",
-        }));
-        """
-    )
-
-    assert result["noticeText"] == ""
-
-
-
-
-def test_render_tree_hides_resume_ready_notice_after_pending_message_lands_on_node() -> None:
-    result = _run_node_script(
-        """
-        const fs = require("fs");
-        const vm = require("vm");
-        global.window = global;
-        class StubElement {
-          constructor(tag = "div") {
-            this.tagName = tag.toUpperCase();
-            this.children = [];
-            this.className = "";
-            this.dataset = {};
-            this.style = {};
-            this.hidden = false;
-            this.attributes = {};
-            this.parentNode = null;
-            this.textContent = "";
-            this.classList = {
-              add: (...tokens) => {
-                const set = new Set(String(this.className || "").split(/\\s+/).filter(Boolean));
-                tokens.forEach((token) => set.add(String(token || "")));
-                this.className = [...set].join(" ");
-              },
-              remove: (...tokens) => {
-                const blocked = new Set(tokens.map((token) => String(token || "")));
-                this.className = String(this.className || "")
-                  .split(/\\s+/)
-                  .filter((token) => token && !blocked.has(token))
-                  .join(" ");
-              },
-              contains: (token) => String(this.className || "").split(/\\s+/).includes(String(token || "")),
-              toggle: (token, force) => {
-                const shouldAdd = force == null ? !this.classList.contains(token) : !!force;
-                if (shouldAdd) this.classList.add(token);
-                else this.classList.remove(token);
-                return shouldAdd;
-              },
-            };
-          }
-          appendChild(child) { this.children.push(child); child.parentNode = this; return child; }
-          setAttribute(name, value) { this.attributes[name] = String(value); }
-          querySelector() { return null; }
-          querySelectorAll() { return []; }
-          addEventListener() {}
-          closest() { return null; }
-        }
-        global.Element = StubElement;
-        global.HTMLElement = StubElement;
-        global.document = {
-          createElement: (tag) => new StubElement(tag),
-        };
-        global.S = {
-          currentTaskId: "task:test",
-          currentTask: { metadata: {} },
-          taskSummary: { active_node_count: 0, runnable_node_count: 0, waiting_node_count: 0 },
-          taskRuntimeSummary: {
-            distribution: {
-              active_epoch_id: "epoch:demo",
-              mode: "task_wide_barrier",
-              state: "resume_ready",
-              frontier_node_ids: [],
-              blocked_node_ids: [],
-              pending_notice_node_ids: ["root"],
-              queued_epoch_count: 0,
-              pending_mailbox_count: 0,
-            },
-          },
-          treeRootNodeId: "root",
-          treeNodesById: {
-            root: {
-              node_id: "root",
-              title: "Root",
-              status: "in_progress",
-              node_kind: "execution",
-              rounds: [],
-              auxiliary_child_ids: [],
-              default_round_id: "",
-              pending_notice_count: 1,
-            },
-          },
-          treeView: null,
-          treeSelectedRoundByNodeId: {},
-          treePan: {
-            offsetX: 0,
-            offsetY: 0,
-            scale: 1,
-            suppressClickNodeId: null,
-          },
-          selectedNodeId: null,
-          taskNodeDetails: {},
-          treeLargeMode: false,
-        };
-        global.U = {
-          tree: new StubElement("div"),
-          tdActiveCount: new StubElement("span"),
-          taskTreeResetRounds: new StubElement("button"),
-          taskSelectionEmpty: new StubElement("div"),
-          detail: new StubElement("div"),
-          nodeEmpty: new StubElement("div"),
-        };
-        global.normalizeInt = (value, fallback = 0) => {
-          const parsed = Number.parseInt(String(value ?? ""), 10);
-          return Number.isFinite(parsed) ? parsed : fallback;
-        };
-        global.treeNormalizeInt = global.normalizeInt;
-        global.esc = (value) => String(value ?? "");
-        global.icons = () => {};
-        global.setTaskDetailOpen = () => {};
-        global.captureTaskDetailViewState = () => ({});
-        global.stashTaskDetailViewState = () => {};
-        global.scheduleTaskDetailSessionPersist = () => {};
-        global.findTreeNode = () => null;
-        global.resolveExecutionTreeDensity = () => ({ mode: "default", stats: { totalItems: 1, maxBreadth: 1 } });
-        global.hasManualTreeRoundSelections = () => false;
-        global.showAgent = () => Promise.resolve();
-        global.enhanceResourceSelects = () => {};
-        global.formatTokenCount = (value) => String(value ?? "");
-        global.readableText = (value, { emptyText = "" } = {}) => {
-          const text = String(value ?? "").trim();
-          return text || emptyText;
-        };
-        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
-        vm.runInThisContext(code);
-
-        renderTree();
-
-        const notice = U.tree.children.find((item) => item instanceof StubElement && String(item.className || "").includes("task-tree-distribution-bubble"));
-        console.log(JSON.stringify({
-          noticeText: notice?.textContent || "",
-        }));
-        """
-    )
-
-    assert result["noticeText"] == ""
-
-
-def test_render_tree_shows_pending_notice_banner_for_resume_ready_without_mode() -> None:
-    result = _run_node_script(
-        """
-        const fs = require("fs");
-        const vm = require("vm");
-        global.window = global;
-        class StubElement {
-          constructor(tag = "div") {
-            this.tagName = tag.toUpperCase();
-            this.children = [];
-            this.className = "";
-            this.dataset = {};
-            this.style = {};
-            this.hidden = false;
-            this.attributes = {};
-            this.parentNode = null;
-            this.textContent = "";
-            this.classList = {
-              add: (...tokens) => {
-                const set = new Set(String(this.className || "").split(/\\s+/).filter(Boolean));
-                tokens.forEach((token) => set.add(String(token || "")));
-                this.className = [...set].join(" ");
-              },
-              remove: (...tokens) => {
-                const blocked = new Set(tokens.map((token) => String(token || "")));
-                this.className = String(this.className || "")
-                  .split(/\\s+/)
-                  .filter((token) => token && !blocked.has(token))
-                  .join(" ");
-              },
-              contains: (token) => String(this.className || "").split(/\\s+/).includes(String(token || "")),
-              toggle: (token, force) => {
-                const shouldAdd = force == null ? !this.classList.contains(token) : !!force;
-                if (shouldAdd) this.classList.add(token);
-                else this.classList.remove(token);
-                return shouldAdd;
-              },
-            };
-          }
-          appendChild(child) { this.children.push(child); child.parentNode = this; return child; }
-          setAttribute(name, value) { this.attributes[name] = String(value); }
-          querySelector() { return null; }
-          querySelectorAll() { return []; }
-          addEventListener() {}
-          closest() { return null; }
-        }
-        global.Element = StubElement;
-        global.HTMLElement = StubElement;
-        global.document = {
-          createElement: (tag) => new StubElement(tag),
-        };
-        global.S = {
-          currentTaskId: "task:test",
-          currentTask: { metadata: {} },
-          taskSummary: { active_node_count: 0, runnable_node_count: 0, waiting_node_count: 0 },
-          taskRuntimeSummary: {
-            distribution: {
-              active_epoch_id: "epoch:demo",
-              state: "resume_ready",
-              frontier_node_ids: [],
-              blocked_node_ids: [],
-              pending_notice_node_ids: ["root"],
-              queued_epoch_count: 0,
-              pending_mailbox_count: 0,
-            },
-          },
-          treeRootNodeId: "root",
-          treeNodesById: {
-            root: {
-              node_id: "root",
-              title: "Root",
-              status: "in_progress",
-              node_kind: "execution",
-              rounds: [],
-              auxiliary_child_ids: [],
-              default_round_id: "",
-              pending_notice_count: 0,
-            },
-          },
-          treeView: null,
-          treeSelectedRoundByNodeId: {},
-          treePan: {
-            offsetX: 0,
-            offsetY: 0,
-            scale: 1,
-            suppressClickNodeId: null,
-          },
-          selectedNodeId: null,
-          taskNodeDetails: {},
-          treeLargeMode: false,
-        };
-        global.U = {
-          tree: new StubElement("div"),
-          tdActiveCount: new StubElement("span"),
-          taskTreeResetRounds: new StubElement("button"),
-          taskSelectionEmpty: new StubElement("div"),
-          detail: new StubElement("div"),
-          nodeEmpty: new StubElement("div"),
-        };
-        global.normalizeInt = (value, fallback = 0) => {
-          const parsed = Number.parseInt(String(value ?? ""), 10);
-          return Number.isFinite(parsed) ? parsed : fallback;
-        };
-        global.treeNormalizeInt = global.normalizeInt;
-        global.esc = (value) => String(value ?? "");
-        global.icons = () => {};
-        global.setTaskDetailOpen = () => {};
-        global.captureTaskDetailViewState = () => ({});
-        global.stashTaskDetailViewState = () => {};
-        global.scheduleTaskDetailSessionPersist = () => {};
-        global.findTreeNode = () => null;
-        global.resolveExecutionTreeDensity = () => ({ mode: "default", stats: { totalItems: 1, maxBreadth: 1 } });
-        global.hasManualTreeRoundSelections = () => false;
-        global.showAgent = () => Promise.resolve();
-        global.enhanceResourceSelects = () => {};
-        global.formatTokenCount = (value) => String(value ?? "");
-        global.readableText = (value, { emptyText = "" } = {}) => {
-          const text = String(value ?? "").trim();
-          return text || emptyText;
-        };
-        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
-        vm.runInThisContext(code);
-
-        renderTree();
-
-        const notice = U.tree.children.find((item) => item instanceof StubElement && String(item.className || "").includes("task-tree-distribution-bubble"));
-        console.log(JSON.stringify({
-          noticeText: notice?.textContent || "",
-        }));
-        """
-    )
-
-    assert result["noticeText"] == "\u63a5\u6536\u5230\u65b0\u6d88\u606f\uff0c\u7b49\u5f85\u8282\u70b9\u5904\u7406"
-
-
-def test_render_tree_marks_barrier_blocked_nodes() -> None:
-    result = _run_node_script(
-        """
-        const fs = require("fs");
-        const vm = require("vm");
-
-        class StubClassList {
-          constructor(owner) {
-            this.owner = owner;
-            this.tokens = new Set();
-          }
-          add(...tokens) {
-            tokens.filter(Boolean).forEach((token) => this.tokens.add(String(token)));
-            this.owner.className = [...this.tokens].join(" ");
-          }
-          remove(...tokens) {
-            tokens.filter(Boolean).forEach((token) => this.tokens.delete(String(token)));
-            this.owner.className = [...this.tokens].join(" ");
-          }
-          contains(token) {
-            return this.tokens.has(String(token));
-          }
-          toggle(token, force) {
-            const normalized = String(token);
-            const shouldAdd = force === undefined ? !this.tokens.has(normalized) : !!force;
-            if (shouldAdd) this.tokens.add(normalized);
-            else this.tokens.delete(normalized);
-            this.owner.className = [...this.tokens].join(" ");
-            return shouldAdd;
-          }
-        }
-
-        class StubElement {
-          constructor(tagName = "div") {
-            this.tagName = String(tagName || "div").toUpperCase();
-            this.children = [];
-            this.dataset = {};
-            this.style = {};
-            this.hidden = false;
-            this.disabled = false;
-            this.className = "";
-            this.classList = new StubClassList(this);
-            this.attributes = {};
-            this.innerHTML = "";
-            this.textContent = "";
-            this.parentNode = null;
-            this.title = "";
-          }
-          appendChild(child) {
-            if (child && typeof child === "object") child.parentNode = this;
-            this.children.push(child);
-            return child;
-          }
-          setAttribute(name, value) {
-            this.attributes[String(name)] = String(value);
-          }
-          addEventListener() {}
-          querySelector() { return null; }
-          querySelectorAll() { return []; }
-        }
-
-        function findByDatasetId(node, nodeId) {
-          if (!node || typeof node !== "object") return null;
-          if (String(node?.dataset?.id || "") === String(nodeId || "")) return node;
-          for (const child of Array.isArray(node.children) ? node.children : []) {
-            const found = findByDatasetId(child, nodeId);
-            if (found) return found;
-          }
-          return null;
-        }
-
-        global.window = global;
-        global.HTMLElement = StubElement;
-        global.Element = StubElement;
-        global.HTMLButtonElement = StubElement;
-        global.HTMLInputElement = StubElement;
-        global.HTMLSelectElement = StubElement;
-        global.DocumentFragment = StubElement;
-        global.document = {
-          createElement(tagName) { return new StubElement(tagName); },
-        };
-        global.S = {
-          currentTaskId: "task:test",
-          currentTask: { metadata: {} },
-          taskSummary: { active_node_count: 0, runnable_node_count: 0, waiting_node_count: 0 },
-          taskRuntimeSummary: {
-            distribution: {
-              active_epoch_id: "epoch:demo",
-              mode: "task_wide_barrier",
-              state: "barrier_draining",
-              frontier_node_ids: [],
-              blocked_node_ids: ["root"],
-              pending_notice_node_ids: ["root"],
-              queued_epoch_count: 0,
-              pending_mailbox_count: 0,
-            },
-          },
-          treeRootNodeId: "root",
-          treeNodesById: {
-            root: {
-              node_id: "root",
-              title: "Root",
-              status: "in_progress",
-              node_kind: "execution",
-              rounds: [],
-              auxiliary_child_ids: [],
-              default_round_id: "",
-              distribution_status: "barrier_blocked",
-            },
-          },
-          treeView: null,
-          treeSelectedRoundByNodeId: {},
-          treePan: {
-            offsetX: 0,
-            offsetY: 0,
-            scale: 1,
-            suppressClickNodeId: null,
-          },
-          selectedNodeId: null,
-          taskNodeDetails: {},
-          treeLargeMode: false,
-        };
-        global.U = {
-          tree: new StubElement("div"),
-          tdActiveCount: new StubElement("span"),
-          taskTreeResetRounds: new StubElement("button"),
-          taskSelectionEmpty: new StubElement("div"),
-          detail: new StubElement("div"),
-          nodeEmpty: new StubElement("div"),
-        };
-        global.normalizeInt = (value, fallback = 0) => {
-          const parsed = Number.parseInt(String(value ?? ""), 10);
-          return Number.isFinite(parsed) ? parsed : fallback;
-        };
-        global.treeNormalizeInt = global.normalizeInt;
-        global.esc = (value) => String(value ?? "");
-        global.icons = () => {};
-        global.setTaskDetailOpen = () => {};
-        global.captureTaskDetailViewState = () => ({});
-        global.stashTaskDetailViewState = () => {};
-        global.scheduleTaskDetailSessionPersist = () => {};
-        global.findTreeNode = () => null;
-        global.resolveExecutionTreeDensity = () => ({ mode: "default", stats: { totalItems: 1, maxBreadth: 1 } });
-        global.hasManualTreeRoundSelections = () => false;
-        global.showAgent = () => Promise.resolve();
-        global.enhanceResourceSelects = () => {};
-        global.formatTokenCount = (value) => String(value ?? "");
-        global.readableText = (value, { emptyText = "" } = {}) => {
-          const text = String(value ?? "").trim();
-          return text || emptyText;
-        };
-        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
-        vm.runInThisContext(code);
-
-        renderTree();
-
-        const rootButton = findByDatasetId(U.tree, "root");
-        console.log(JSON.stringify({
-          className: rootButton?.className || "",
-        }));
-        """
-    )
-
-    assert "execution-tree-node--distribution-blocked" in result["className"]
-
-
 def test_build_node_message_list_steps_renders_message_and_distribution_details() -> None:
     result = _run_node_script(
         """
@@ -4359,6 +3279,7 @@ def test_build_execution_tree_from_snapshot_keeps_undispatched_acceptance_visibl
               title: "root",
               rounds: [{ round_id: "round-1", is_latest: true, child_ids: ["node:child"] }],
               auxiliary_child_ids: ["node:acceptance"],
+              all_child_ids: ["node:child", "node:acceptance"],
               parent_visible: true,
             },
             "node:child": {
@@ -4437,6 +3358,7 @@ def test_build_execution_tree_from_snapshot_keeps_activated_acceptance_visible_a
               title: "root",
               rounds: [{ round_id: "round-1", is_latest: true, child_ids: ["node:child"] }],
               auxiliary_child_ids: [],
+              all_child_ids: ["node:child"],
               parent_visible: true,
             },
             "node:child": {
@@ -4447,6 +3369,7 @@ def test_build_execution_tree_from_snapshot_keeps_activated_acceptance_visible_a
               title: "child",
               rounds: [],
               auxiliary_child_ids: ["node:acceptance"],
+              all_child_ids: ["node:acceptance"],
               parent_visible: false,
               acceptance_handshake_state: "waiting_execution_retry",
             },
@@ -4516,10 +3439,12 @@ def test_build_execution_tree_from_snapshot_labels_nodes_by_live_turn_activity()
             "node:root": node("node:root", {
               parent_node_id: null,
               rounds: [{ round_id: "r1", is_latest: true, child_ids: ["node:submitted", "node:busy", "node:idle", "node:spawn", "node:stalled", "node:requesting", "node:postprocess"] }],
+              all_child_ids: ["node:submitted", "node:busy", "node:idle", "node:spawn", "node:stalled", "node:requesting", "node:postprocess"],
             }),
             "node:submitted": node("node:submitted", {
               status: "success",
               auxiliary_child_ids: ["node:acc-running", "node:acc-queued", "node:acc-requesting"],
+              all_child_ids: ["node:acc-running", "node:acc-queued", "node:acc-requesting"],
             }),
             "node:acc-running": node("node:acc-running", {
               parent_node_id: "node:submitted",
@@ -4669,6 +3594,7 @@ def test_sync_selected_task_node_detail_status_follows_live_frames() -> None:
               title: "root",
               rounds: [{ round_id: "r1", is_latest: true, child_ids: ["node:acc"] }],
               auxiliary_child_ids: [],
+              all_child_ids: ["node:acc"],
               parent_visible: true,
             },
             "node:acc": {
@@ -5640,58 +4566,6 @@ def test_fit_task_tree_anchors_root_when_tree_cannot_fit() -> None:
     assert abs(float(result["rootCenterY"]) - float(result["viewCenter"][1])) < 1.0
 
 
-def test_distribution_progress_denominator_excludes_terminal_blocked_nodes() -> None:
-    """已停步的分母要剔掉应冻集里已终态的分支，否则分子涨不满、尾句把"已成功"说成"在飞未落"。
-
-    实盘 task:1d9cddf9858e / epoch:949c69fef214：blocked 235 里有 69 个 success，
-    frozen 172∩235=166 ⇒ 横幅恒显「已停步 166/235 · 其余节点仍有在飞请求未落」且永远不动。
-    """
-    result = _run_node_script(
-        """
-        const fs = require("fs");
-        const vm = require("vm");
-        global.window = global;
-        global.S = {
-          treeNodesById: {
-            "node:a": { node_id: "node:a", status: "in_progress" },
-            "node:b": { node_id: "node:b", status: "success" },
-            "node:c": { node_id: "node:c", status: "in_progress" },
-          },
-        };
-        vm.runInThisContext(["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n"));
-        const summary = summarizeDistributionProgress({
-          state: "distributing",
-          blocked_node_ids: ["node:a", "node:b", "node:c"],
-          frozen_node_ids: ["node:a", "node:b", "node:c"],
-        });
-        const unknown = summarizeDistributionProgress({
-          state: "barrier_draining",
-          blocked_node_ids: ["node:x", "node:y"],
-          frozen_node_ids: ["node:x"],
-        });
-        global.S = { treeNodesById: null };
-        const noTree = summarizeDistributionProgress({
-          state: "barrier_draining",
-          blocked_node_ids: ["node:x", "node:y"],
-          frozen_node_ids: ["node:x", "node:y"],
-        });
-        console.log(JSON.stringify({ summary, unknown, noTree }));
-        """
-    )
-
-    summary = result["summary"]
-    assert summary["blockedCount"] == 2, "node:b 已 success，不该留在分母"
-    assert summary["frozenCount"] == 2, "终态节点也不该贡献分子"
-    assert summary["text"] == "新消息分发中 · 已停步 2/2 · 已进入分发决策回合"
-
-    # 账本里有、但已不在应冻集快照里的节点仍然被交集挡掉
-    assert result["unknown"]["frozenCount"] == 1
-    assert result["unknown"]["blockedCount"] == 2
-    # 树状态未知时退回快照口径，不猜
-    assert result["noTree"]["blockedCount"] == 2
-    assert result["noTree"]["frozenCount"] == 2
-
-
 def test_render_task_token_stats_marks_aborted_stream_rows_as_no_usage() -> None:
     result = _run_node_script(
         """
@@ -5797,3 +4671,93 @@ def test_render_task_token_stats_marks_aborted_stream_rows_as_no_usage() -> None
     assert result["abortedCellCarriesReason"] is True
     assert result["normalRowStillNumbers"] is True
     assert result["normalHasNoAbortReason"] is True
+
+
+def test_terminal_task_shows_whole_tree_and_hidden_children_stay_reachable() -> None:
+    # 任务结束后默认过滤不能再把整棵树藏成一根节点；运行中藏起来的终态子节点
+    # 必须留展开入口，终态节点下的存活后代必须连同祖先链一起显示。
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = {
+          currentTaskId: "task:test",
+          currentTask: { task_id: "task:test", status: "success" },
+          treeRootNodeId: "root",
+          treeNodesById: {},
+          liveFrameMap: {},
+        };
+        global.U = {};
+        vm.runInThisContext(fs.readFileSync("g3ku/web/frontend/tasks/tree-store.js", "utf8"));
+
+        const raw = {
+          root: { node_id: "root", node_kind: "execution", status: "success", title: "root", auxiliary_child_ids: ["work", "root-acc"], pending_notice_count: 2 },
+          work: { node_id: "work", parent_node_id: "root", node_kind: "execution", status: "success", title: "work", auxiliary_child_ids: ["leaf", "work-acc"] },
+          leaf: { node_id: "leaf", parent_node_id: "work", node_kind: "execution", status: "success", title: "leaf", auxiliary_child_ids: [] },
+          "work-acc": { node_id: "work-acc", parent_node_id: "work", node_kind: "acceptance", status: "success", title: "acc", auxiliary_child_ids: [] },
+          "root-acc": { node_id: "root-acc", parent_node_id: "root", node_kind: "acceptance", status: "success", title: "acc", auxiliary_child_ids: [] },
+        };
+        const load = () => {
+          S.treeNodesById = {};
+          Object.entries(raw).forEach(([id, value]) => {
+            S.treeNodesById[id] = normalizeTaskTreeSnapshotNode(value, null);
+          });
+          return buildExecutionTreeFromSnapshot();
+        };
+        const walk = (node, visit) => {
+          if (!node) return;
+          visit(node);
+          (node.inspectionNodes || []).forEach((child) => walk(child, visit));
+          (node.children || []).forEach((child) => walk(child, visit));
+        };
+        const ids = (tree) => {
+          const out = [];
+          walk(tree, (node) => out.push(node.node_id));
+          return out.sort();
+        };
+        const find = (tree, id) => {
+          let hit = null;
+          walk(tree, (node) => { if (node.node_id === id) hit = node; });
+          return hit;
+        };
+
+        const terminalIds = ids(load());
+
+        S.currentTask = { task_id: "task:test", status: "in_progress" };
+        S.treeShowTerminal = null;
+        S.treeExpandedNodeIds = new Set();
+        const runningTree = load();
+        const runningIds = ids(runningTree);
+        const runningRoot = find(runningTree, "root");
+
+        S.treeExpandedNodeIds = new Set(["root"]);
+        const expandedIds = ids(load());
+
+        raw.leaf.status = "in_progress";
+        S.treeExpandedNodeIds = new Set();
+        const liveIds = ids(load());
+
+        console.log(JSON.stringify({
+          terminalIds,
+          runningIds,
+          runningRootHiddenCount: runningRoot.hidden_child_count,
+          runningRootExpandable: runningRoot.expandable,
+          expandedIds,
+          liveIds,
+          runningRootUnread: runningRoot.pending_notice_count,
+        }));
+        """
+    )
+
+    all_ids = ["leaf", "root", "root-acc", "work", "work-acc"]
+    assert result["terminalIds"] == all_ids
+    # 运行中：终态分支折叠，验收节点无条件附着（root-acc 随根一起显示）。
+    assert result["runningIds"] == ["root", "root-acc"]
+    assert result["runningRootHiddenCount"] == 1
+    assert result["runningRootExpandable"] is True
+    # 节点行上的展开钮放出该节点的全部直属子节点（逐层展开，不越级）。
+    assert result["expandedIds"] == ["root", "root-acc", "work", "work-acc"]
+    # 终态 work 底下还有存活的 leaf：祖先链必须一起可见。
+    assert result["liveIds"] == ["leaf", "root", "root-acc", "work", "work-acc"]
+    assert result["runningRootUnread"] == 2

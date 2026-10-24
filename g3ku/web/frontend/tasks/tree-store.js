@@ -55,6 +55,36 @@ function treeSnapshotNode(nodeId) {
     return S.treeNodesById?.[key] || null;
 }
 
+function treeTaskIsTerminal(task = S.currentTask) {
+    const status = String(task?.status || "").trim().toLowerCase();
+    return status === "success" || status === "failed";
+}
+
+// 默认只看非终态（决策 C）的前提是任务还在跑：任务本身已结束时不存在"活跃视图"，
+// 再按终态过滤只会剩下一根节点。用户手动切换过则以手动值为准（null/undefined = 自动）。
+function treeShowTerminalEffective() {
+    if (S.treeShowTerminal === true || S.treeShowTerminal === false) return S.treeShowTerminal;
+    return treeTaskIsTerminal();
+}
+
+function treeExpandedNodeIds() {
+    if (!(S.treeExpandedNodeIds instanceof Set)) S.treeExpandedNodeIds = new Set();
+    return S.treeExpandedNodeIds;
+}
+
+// 节点行上的展开钮：展开后显示该节点的全部直属子节点（任意状态）。
+function toggleTreeNodeExpanded(nodeId) {
+    const key = String(nodeId || "").trim();
+    if (!key) return false;
+    const expanded = treeExpandedNodeIds();
+    if (expanded.has(key)) {
+        expanded.delete(key);
+    } else {
+        expanded.add(key);
+    }
+    return expanded.has(key);
+}
+
 function snapshotNodeDefaultRoundId(node) {
     return "";
 }
@@ -96,8 +126,9 @@ function buildExecutionTreeFromSnapshot(
     nodeId = S.treeRootNodeId,
     seen = new Set(),
     taskPaused = taskPauseDisplayActive(),
-    showTerminal = !!S.treeShowTerminal,
+    showTerminal = treeShowTerminalEffective(),
     isRoot = true,
+    expandedNodeIds = treeExpandedNodeIds(),
 ) {
     const normalizedNodeId = String(nodeId || "").trim();
     if (!normalizedNodeId || seen.has(normalizedNodeId)) return null;
@@ -107,19 +138,27 @@ function buildExecutionTreeFromSnapshot(
     const kind = String(snapshotNode.node_kind || "execution").trim().toLowerCase() || "execution";
     const status = String(snapshotNode.status || "unknown").trim().toLowerCase() || "unknown";
     const title = resolveNodeTitle(snapshotNode, snapshotNode);
-    const visibleChildren = snapshotNodeVisibleChildIds(snapshotNode)
-        .map((childId) => buildExecutionTreeFromSnapshot(childId, seen, taskPaused, showTerminal, false))
+    const expanded = expandedNodeIds.has(normalizedNodeId);
+    const builtChildren = snapshotNodeVisibleChildIds(snapshotNode)
+        .map((childId) => buildExecutionTreeFromSnapshot(childId, seen, taskPaused, showTerminal, false, expandedNodeIds))
         .filter(Boolean);
     const inspectionNodes = [];
     const childNodes = [];
-    visibleChildren.forEach((child) => {
+    let hiddenChildCount = 0;
+    builtChildren.forEach((child) => {
         if (isAcceptanceNodeKind(child?.kind)) {
             // 验收节点无条件附着在被验收节点上：不参与默认过滤。
             inspectionNodes.push(child);
-        } else if (showTerminal || !isTerminalTreeNodeStatus(child?.state)) {
+        } else if (expanded || showTerminal || child?.contains_live) {
+            // contains_live：终态节点底下还有存活后代时必须显示，否则那些
+            // 非终态节点连同祖先链一起消失，违反"非终态全部可见"与祖先链规则。
             childNodes.push(child);
+        } else {
+            hiddenChildCount += 1;
         }
     });
+    const containsLive = !isTerminalTreeNodeStatus(status)
+        || builtChildren.some((child) => !!child?.contains_live);
     const inspectionPending = inspectionNodes.some((child) => !isTerminalTreeNodeStatus(child?.state));
     const effectiveIsPaused = effectiveTreeNodePaused(snapshotNode, taskPaused);
     const liveFrame = S.liveFrameMap?.[normalizedNodeId] || null;
@@ -138,7 +177,7 @@ function buildExecutionTreeFromSnapshot(
     // 都会被计入头部计数。
     const isActiveNode = !isTerminalTreeNodeStatus(status) && (inTurn || effectiveIsPaused);
     const activeNodeCount = (isActiveNode ? 1 : 0)
-        + visibleChildren.reduce((sum, child) => sum + treeNormalizeInt(child?.activeNodeCount, 0), 0);
+        + builtChildren.reduce((sum, child) => sum + treeNormalizeInt(child?.activeNodeCount, 0), 0);
     return {
         node_id: snapshotNode.node_id,
         parent_node_id: snapshotNode.parent_node_id,
@@ -152,6 +191,11 @@ function buildExecutionTreeFromSnapshot(
         inspectionNodes,
         children: childNodes,
         activeNodeCount,
+        contains_live: containsLive,
+        expanded,
+        pending_notice_count: Math.max(0, treeNormalizeInt(snapshotNode.pending_notice_count, 0)),
+        hidden_child_count: hiddenChildCount,
+        expandable: hiddenChildCount > 0 || (expanded && builtChildren.some((child) => !isAcceptanceNodeKind(child?.kind))),
         parent_visible: snapshotNode.parent_visible !== false,
         acceptance_handshake_state: String(snapshotNode.acceptance_handshake_state || "").trim(),
         task_paused: taskPaused,

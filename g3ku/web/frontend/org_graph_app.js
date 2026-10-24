@@ -639,6 +639,7 @@ const U = {
     taskTreeSearchInput: document.getElementById("task-tree-search-input"),
     taskTreeSearchResults: document.getElementById("task-tree-search-results"),
     tree: document.getElementById("org-tree-container"),
+    treeFloatingTools: document.getElementById("task-tree-floating-tools"),
     taskSelectionEmpty: document.getElementById("task-selection-empty-inline"),
     taskDetailBackdrop: document.getElementById("task-detail-backdrop"),
     taskDetailDrawer: document.getElementById("task-detail-drawer"),

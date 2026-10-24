@@ -13,8 +13,9 @@ function renderTree() {
         S.treeRootNodeId,
         new Set(),
         taskPauseDisplayActive(),
-        !!S.treeShowTerminal,
+        treeShowTerminalEffective(),
         true,
+        treeExpandedNodeIds(),
     );
     syncTaskTreeHeaderState(S.treeView);
     if (!S.treeView) {
@@ -92,10 +93,36 @@ function renderTree() {
         const acceptanceBadge = String(node.kind || "").trim().toLowerCase() === "acceptance"
             ? '<span class="status-badge acceptance-badge" data-status="acceptance">\u9a8c\u6536</span>'
             : "";
-        button.innerHTML = `<span class="execution-tree-node-head"><span class="execution-tree-node-title">${esc(title)}</span>${acceptanceBadge}<span class="status-badge" data-status="${esc(node.visual_state || node.state || "")}">${esc(displayState)}</span></span>${pauseAction}`;
+        // 折叠的已结束子节点必须留出入口：默认过滤把它们藏起来后，节点行上看不出
+        // 底下还有东西，任务结束后整棵树只剩根节点。
+        const hiddenChildCount = treeNormalizeInt(node.hidden_child_count, 0);
+        const expandAction = node.expandable
+            ? `<span class="execution-tree-expand${node.expanded ? " is-expanded" : ""}" data-node-expand-action="true" role="button" tabindex="0" title="${node.expanded ? "\u6536\u8d77\u5df2\u7ed3\u675f\u5b50\u8282\u70b9" : `\u5c55\u5f00 ${hiddenChildCount} \u4e2a\u5df2\u7ed3\u675f\u5b50\u8282\u70b9`}">${node.expanded ? "\u25be" : "\u25b8"}${hiddenChildCount > 0 ? `<span class="execution-tree-expand-count">${hiddenChildCount}</span>` : ""}</span>`
+            : "";
+        // 未读消息角标（设计 §10）：信箱里有待并入的消息时，节点行必须自己说出来，
+        // 否则用户只能靠进详情页才发现"它在等一条没人看的消息"。
+        const unreadCount = treeNormalizeInt(node.pending_notice_count, 0);
+        const unreadBadge = unreadCount > 0
+            ? `<span class="execution-tree-unread" title="\u672a\u8bfb\u6d88\u606f ${unreadCount} \u6761">${unreadCount}</span>`
+            : "";
+        button.innerHTML = `<span class="execution-tree-node-head"><span class="execution-tree-node-title">${esc(title)}</span>${unreadBadge}${expandAction}${acceptanceBadge}<span class="status-badge" data-status="${esc(node.visual_state || node.state || "")}">${esc(displayState)}</span></span>${pauseAction}`;
         button.addEventListener("click", (event) => {
             if (event.target instanceof Element && event.target.closest("[data-node-pause-action]")) return;
+            if (event.target instanceof Element && event.target.closest("[data-node-expand-action]")) return;
             handleTreeNodeClick(node, event);
+        });
+        const expandEl = button.querySelector("[data-node-expand-action]");
+        expandEl?.addEventListener("click", (event) => {
+            event.stopPropagation();
+            toggleTreeNodeExpanded(node.node_id);
+            renderTree();
+        });
+        expandEl?.addEventListener("keydown", (event) => {
+            if (event.key !== "Enter" && event.key !== " ") return;
+            event.preventDefault();
+            event.stopPropagation();
+            toggleTreeNodeExpanded(node.node_id);
+            renderTree();
         });
         const pauseEl = button.querySelector("[data-node-pause-action]");
         pauseEl?.addEventListener("click", (event) => handleTreeNodePauseAction(node, event));
@@ -133,7 +160,7 @@ function renderTree() {
     wrapper.style.transformOrigin = "0 0";
     wrapper.style.transform = `translate(${Math.round(S.treePan.offsetX)}px, ${Math.round(S.treePan.offsetY)}px) scale(${S.treePan.scale})`;
     U.tree.innerHTML = "";
-    U.tree.appendChild(buildTerminalFilterToggle());
+    mountTerminalFilterToggle();
     U.tree.appendChild(wrapper);
     if (typeof enhanceResourceSelects === "function") enhanceResourceSelects();
     if (typeof restoreOpenResourceSelect === "function") restoreOpenResourceSelect(U.tree);
@@ -160,16 +187,39 @@ function buildTerminalFilterToggle() {
     const bar = document.createElement("div");
     bar.className = "execution-tree-toolbar";
     const label = document.createElement("label");
-    label.className = "execution-tree-filter";
+    label.className = "ui-checkbox-row execution-tree-filter";
     const input = document.createElement("input");
     input.type = "checkbox";
-    input.checked = !!S.treeShowTerminal;
+    input.className = "ui-checkbox-input";
+    input.checked = treeShowTerminalEffective();
     input.addEventListener("change", () => {
         S.treeShowTerminal = !!input.checked;
         renderTree();
     });
-    label.appendChild(input);
-    label.appendChild(document.createTextNode(" 显示已结束节点"));
+    const box = document.createElement("span");
+    box.className = "ui-checkbox-box";
+    box.setAttribute("aria-hidden", "true");
+    const text = document.createElement("span");
+    text.textContent = "显示已结束节点";
+    label.append(input, box, text);
     bar.appendChild(label);
     return bar;
+}
+
+// 悬浮在树容器右上角：容器左上角被悬浮搜索框占着（更高 z-index），放在容器
+// 内容流首行会被完整遮住——这正是"看不见子节点也无法切换显示"的成因。
+function mountTerminalFilterToggle() {
+    const host = U.treeFloatingTools;
+    if (!host) {
+        U.tree.appendChild(buildTerminalFilterToggle());
+        return;
+    }
+    let toolbar = host.querySelector(".execution-tree-toolbar");
+    if (!toolbar) {
+        toolbar = buildTerminalFilterToggle();
+        host.appendChild(toolbar);
+        return;
+    }
+    const input = toolbar.querySelector(".execution-tree-filter input");
+    if (input) input.checked = treeShowTerminalEffective();
 }
