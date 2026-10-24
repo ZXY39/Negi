@@ -4075,10 +4075,6 @@ textarea {
     box-shadow: var(--shadow-sm);
 }
 
-.task-trace-text-block {
-    padding: var(--space-2) var(--space-3);
-}
-
 .task-trace-step--notice {
     border-color: color-mix(in srgb, #f59e0b 42%, transparent);
     background: color-mix(in srgb, #f59e0b 10%, var(--bg-app));
@@ -13187,14 +13183,6 @@ textarea {
 
 .ceo-timeline .interaction-flow {
     order: -1;
-    border: 0;
-    background: transparent;
-    border-radius: 0;
-    overflow: visible;
-}
-
-.ceo-timeline .interaction-flow-summary {
-    display: none;
 }
 
 /* 跟进消息打断标记:归档半截回合里被补充消息拦腰打断的那个阶段标题用警示色提示 */
@@ -17237,4 +17225,130 @@ textarea {
     border-color: color-mix(in srgb, var(--brand-primary) 55%, var(--border-color));
     background: color-mix(in srgb, var(--brand-primary) 10%, var(--bg-panel));
     color: var(--brand-primary);
+}
+
+/* ---- 执行流程总框：整段流程共用一张卡，内部条目扁平化 ---- */
+.task-flow-box {
+    border: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
+    border-radius: 18px;
+    background: color-mix(in srgb, var(--bg-app) 72%, transparent);
+    padding: 0;
+}
+
+/* 收起态与单个中途文本卡片同尺寸：外边距/内边距都沿用 .task-trace-step。 */
+.task-flow-box > #ad-input {
+    padding: 0 var(--space-3) var(--space-3);
+}
+
+.task-initial-prompt {
+    margin-bottom: var(--space-3);
+}
+
+.task-flow-summary {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: var(--space-3) var(--space-3) var(--space-3) calc(var(--space-4) + 2px);
+    cursor: pointer;
+    list-style: none;
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.task-flow-summary::-webkit-details-marker {
+    display: none;
+}
+
+.task-flow-summary::after {
+    content: "";
+    width: 8px;
+    height: 8px;
+    flex: none;
+    border-right: 2px solid currentColor;
+    border-bottom: 2px solid currentColor;
+    transform: rotate(45deg);
+    transition: transform var(--transition-fast);
+}
+
+.task-flow-box[open] > .task-flow-summary::after {
+    transform: rotate(-135deg);
+}
+
+.task-flow-box[open] {
+    box-shadow: var(--shadow-sm);
+}
+
+.task-flow-usage {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.interaction-flow {
+    border-color: color-mix(in srgb, var(--border-color) 78%, transparent);
+    border-radius: 18px;
+    background: color-mix(in srgb, var(--bg-app) 72%, transparent);
+}
+
+.interaction-flow-usage {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
+}
+
+/* 外层框是唯一卡片：内部条目只留内容，不再各画一层卡。 */
+.task-flow-box .task-trace-step,
+.interaction-flow-list .task-trace-step {
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+    border-radius: 10px;
+    padding: var(--space-2) var(--space-2);
+}
+
+/* 每条中途文本最左侧的「>」：只折叠这一条正文，展开成 16.5 行视窗。 */
+.task-trace-turn-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    width: 16px;
+    height: 16px;
+    color: var(--text-tertiary);
+    font-size: 0.95rem;
+    line-height: 1;
+    transition: transform 0.15s ease;
+}
+
+.task-trace-step--turn-text[open] > .task-trace-summary .task-trace-turn-toggle {
+    transform: rotate(90deg);
+    color: var(--text-secondary);
+}
+
+/* 执行流程框与初始提示词框保持原来的横向内缩，不扩大到抽屉整宽。 */
+.task-initial-prompt,
+.task-flow-box {
+    margin-left: 6px;
+    margin-right: 6px;
+}
+
+/* 节点用量行与中途文本同款：0.85rem / 600 / 主文字色。 */
+.task-flow-usage,
+.interaction-flow-usage {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+/* 外层框内不再画每条的轨道状态点；可折叠的只有中途文本的「>」。 */
+.task-flow-box .task-trace-step::before,
+.interaction-flow-list .task-trace-step::before {
+    display: none;
 }

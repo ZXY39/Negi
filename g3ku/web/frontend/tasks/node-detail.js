@@ -39,14 +39,7 @@ function formatNodeDetailHeading(node, { maxChars = 72, compact = true } = {}) {
     return `${nodeId} | ${heading}`;
 }
 
-function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = "", open = false, bodyHtml = "", showRuntime = true, showStatus = true, extraClass = "", leadHtml = "", textOnly = false, text = "", turnText = "" }) {
-    if (textOnly) {
-        return `
-        <section class="interaction-step task-trace-step task-trace-text-block" data-trace-key="${esc(traceKey)}">
-            <div class="task-trace-round-text">${esc(text)}</div>
-        </section>
-    `;
-    }
+function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = "", open = false, bodyHtml = "", showRuntime = true, showStatus = true, extraClass = "", leadHtml = "", turnText = "" }) {
     const classes = ["interaction-step", "task-trace-step", esc(status)];
     const normalizedExtraClass = String(extraClass || "").trim();
     if (normalizedExtraClass) classes.push(esc(normalizedExtraClass));
@@ -61,9 +54,14 @@ function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = 
         const label = String(statusLabel || "").trim() || traceStatusLabel(status);
         sideParts.push(`<span class="interaction-step-status">${esc(label)}</span>`);
     }
+    // 中途正文行最左侧的展开钮：折叠时是「>」，展开后转 90°。
+    const turnToggle = assistantText
+        ? '<span class="task-trace-turn-toggle" aria-hidden="true">&gt;</span>'
+        : "";
     return `
         <details class="${classes.join(" ")}" data-trace-key="${esc(traceKey)}" data-default-open="${open ? "true" : "false"}"${open ? " open" : ""}>
             <summary class="task-trace-summary">
+                ${turnToggle}
                 <span class="interaction-step-lead">
                     ${leadHtml}
                     <span class="interaction-step-title"${assistantText ? ` title="${esc(assistantText)}"` : ""}>${esc(title)}</span>
@@ -529,9 +527,13 @@ function buildTurnGroupDescriptors(turns) {
         }
         steps.push({
             traceKey: `turn:${entry.seq}`,
+            title: entry.text,
+            turnText: entry.text,
             textOnly: true,
-            text: entry.text,
             status: "info",
+            open: false,
+            tools: [],
+            bodyHtml: "",
         });
     });
     return steps;
@@ -1265,6 +1267,29 @@ function buildTraceRenderSignature(stepDescriptors) {
     ].join("\u0002")).join("\u0001");
 }
 
+function renderInitialPromptBox(step, node) {
+    if (!U.adInitialPrompt || !step) return false;
+    const nodeKey = `${S.currentTaskId || ""}:${node?.node_id || ""}`;
+    const existing = U.adInitialPrompt.querySelector("details");
+    const keepOpen = U.adInitialPrompt.dataset.renderNodeId === nodeKey && existing
+        ? !!existing.open
+        : false;
+    const html = renderTraceStep({ ...step, open: keepOpen });
+    if (U.adInitialPrompt.dataset.renderSignature === html
+        && U.adInitialPrompt.dataset.renderNodeId === nodeKey) {
+        return false;
+    }
+    U.adInitialPrompt.innerHTML = html;
+    U.adInitialPrompt.dataset.renderSignature = html;
+    U.adInitialPrompt.dataset.renderNodeId = nodeKey;
+    const details = U.adInitialPrompt.querySelector("details");
+    details?.addEventListener("toggle", () => {
+        if (U.adInitialPrompt?.dataset.renderNodeId !== nodeKey) return;
+        U.adInitialPrompt.dataset.open = details.open ? "true" : "false";
+    });
+    return true;
+}
+
 function renderExecutionTrace(node, { viewState = null } = {}) {
     if (!U.adFlow) return;
     const effectiveViewState = normalizeTaskDetailViewState(viewState || captureTaskDetailViewState());
@@ -1272,7 +1297,15 @@ function renderExecutionTrace(node, { viewState = null } = {}) {
     const liveFrameMap = liveFramesByNodeId();
     const fallbackLiveFrame = liveFrameMap.get(String(node?.node_id || "").trim()) || null;
     const trace = node?.executionTrace || buildNodeExecutionTrace(node, node, fallbackLiveFrame);
-    const stepDescriptors = buildExecutionTraceSteps(trace, node);
+    const allStepDescriptors = buildExecutionTraceSteps(trace, node);
+    const initialPromptStep = allStepDescriptors.find((step) => String(step?.traceKey || "") === "initial_prompt") || null;
+    // 初始提示词独立成框，Execution Flow 只装中途文本与工具调用。
+    // 没有独立宿主（旧页面/单测桩）时仍留在列表里，行为与改造前一致。
+    const splitInitialPrompt = !!(U.adInitialPrompt && initialPromptStep);
+    if (splitInitialPrompt) renderInitialPromptBox(initialPromptStep, node);
+    const stepDescriptors = splitInitialPrompt
+        ? allStepDescriptors.filter((step) => step !== initialPromptStep)
+        : allStepDescriptors;
     const steps = stepDescriptors.map((step, index) => renderTraceStep({
         ...step,
         open: resolveTraceStepOpenState(step, effectiveViewState, index),
@@ -1289,11 +1322,13 @@ function renderExecutionTrace(node, { viewState = null } = {}) {
     const shouldReplace = traceList.dataset.renderSignature !== renderSignature
         || traceList.dataset.renderNodeId !== renderNodeId;
     if (shouldReplace) {
-        traceList.innerHTML = steps.join("");
+        traceList.innerHTML = steps.length
+            ? steps.join("")
+            : '<div class="empty-state task-trace-empty">暂无执行流程。</div>';
         traceList.dataset.renderSignature = renderSignature;
         traceList.dataset.renderNodeId = renderNodeId;
     }
-    renderFlowHeading(stepDescriptors.length);
+    renderFlowHeading();
     const traceItems = Array.from(traceList.querySelectorAll(".task-trace-step"));
     traceItems.forEach((item) => {
         if (!(item instanceof HTMLElement)) return;

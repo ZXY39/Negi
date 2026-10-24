@@ -1825,6 +1825,15 @@ async function reconcileTaskTreeForNode(nodeId) {
 }
 
 
+function taskFlowUsageText(node, trace) {
+    const parts = typeof buildTokenUsageParts === "function" ? buildTokenUsageParts(node?.token_usage) : [];
+    const turnCount = Array.isArray(trace?.turns) ? trace.turns.length : 0;
+    if (turnCount > 0 && !parts.some((part) => String(part).startsWith("轮数"))) {
+        parts.push(`轮数 ${turnCount}`);
+    }
+    return parts.join(" · ") || "暂无用量";
+}
+
 async function showAgent(node, { preserveViewState = true, forceRefresh = false } = {}) {
     const nodeId = String(node?.node_id || "").trim();
     if (!nodeId) return;
@@ -1833,6 +1842,7 @@ async function showAgent(node, { preserveViewState = true, forceRefresh = false 
     const previousDetailNodeId = String(S.currentNodeDetail?.node_id || "").trim();
     const hadVisibleCurrentDetail = U.detail?.style?.display !== "none"
         && String(S.currentNodeDetail?.node_id || "").trim() === nodeId;
+    const nodeChanged = !hadVisibleCurrentDetail || previousDetailNodeId !== nodeId;
     const entryViewState = consumePendingTaskDetailRestore(nodeId)
         || (preserveViewState ? captureTaskDetailViewState() : getStoredTaskDetailViewState(S.currentTaskId, nodeId));
     if (!S.taskNodeDetails[nodeId] && !hadVisibleCurrentDetail) showTaskNodeLoadingState(node);
@@ -1863,7 +1873,10 @@ async function showAgent(node, { preserveViewState = true, forceRefresh = false 
     if (U.adRole) U.adRole.hidden = true;
     renderTaskNodeDetailStatus(mergedNode);
     renderTaskNodeModelRetryToast(mergedNode);
-    if (U.adTokenSummary) U.adTokenSummary.textContent = buildTokenUsageParts(mergedNode.token_usage).join(" · ");
+    if (U.adTokenSummary) {
+        U.adTokenSummary.textContent = taskFlowUsageText(mergedNode, mergedNode.executionTrace);
+    }
+    if (nodeChanged && U.taskFlowBox) U.taskFlowBox.open = false;
     // 同一节点刷新时，展开态取渲染前 DOM 的当下状态：入口那次捕获在请求之前，
     // 在飞窗口里用户刚点开的卡片和工具面板不在里面，沿用会把它们折回上一次的样子。
     const liveViewState = hadVisibleCurrentDetail ? captureTaskDetailViewState() : null;
@@ -1882,7 +1895,6 @@ async function showAgent(node, { preserveViewState = true, forceRefresh = false 
     U.feedTitle.title = formatNodeDetailHeading(mergedNode, { compact: false });
     setTaskDetailOpen(true);
     icons();
-    const nodeChanged = !hadVisibleCurrentDetail || previousDetailNodeId !== nodeId;
     if (U.nodeContextDisclosure) {
         if (nodeChanged) {
             U.nodeContextDisclosure.open = false;

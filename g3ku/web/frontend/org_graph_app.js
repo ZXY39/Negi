@@ -655,6 +655,8 @@ const U = {
     adRole: document.getElementById("ad-role"),
     adStatus: document.getElementById("ad-status"),
     adTokenSummary: document.getElementById("ad-token-summary"),
+    adInitialPrompt: document.getElementById("ad-initial-prompt"),
+    taskFlowBox: document.getElementById("task-flow-box"),
     adFlow: document.getElementById("ad-input"),
     adMessages: document.getElementById("ad-messages"),
     adMessageTabs: document.getElementById("ad-message-tabs"),
@@ -2359,8 +2361,9 @@ function renderTaskSectionHeading(heading, { icon, label, count = 0 } = {}) {
     `;
 }
 
-function renderFlowHeading(count = 0) {
-    renderTaskSectionHeading(U.adFlowHeading, { icon: "workflow", label: "执行流程", count });
+function renderFlowHeading() {
+    if (!(U.adFlowHeading instanceof HTMLElement)) return;
+    U.adFlowHeading.innerHTML = '<i data-lucide="workflow"></i><span>执行流程</span>';
     icons();
 }
 
@@ -3427,7 +3430,6 @@ function finalizePausedCeoTurn(text = "已暂停", { source = null, landTranscri
             turn.textEl.classList.remove("pending");
             if (turn.steps > 0) {
                 turn.flowEl.hidden = false;
-                turn.flowEl.open = true;
                 updateCeoTurnMeta(turn, "已暂停");
             } else {
                 turn.flowEl.hidden = true;
@@ -3501,7 +3503,6 @@ function holdApprovalPausedCeoTurnLegacy(text = "", { source = "", turnId = "" }
         turn.finalized = false;
         if (turn.steps > 0) {
             turn.flowEl.hidden = false;
-            turn.flowEl.open = true;
         }
         updateCeoTurnMeta(turn, "绛夊緟瀹℃壒");
     }, { scrollMode: "preserve" });
@@ -4865,7 +4866,7 @@ function renderCeoToolEventsIntoTurn(turn, toolEvents = [], { source = "" } = {}
     if (events.length) syncCeoTurnLoadingOnlyState(turn, false);
     if (events.length) {
         turn.flowEl.hidden = false;
-        turn.flowEl.open = wasFlowOpen;
+        // 外层执行流程框常开；可折叠的只有内部每条中途文本。
     }
     if (!events.length) updateCeoTurnMeta(turn, "等待工具开始...");
     return events.length;
@@ -4975,6 +4976,40 @@ function sliceCeoRailTurns(turns, turn) {
     });
 }
 
+function ceoTraceElapsedSeconds(turns = []) {
+    let elapsedTotal = 0;
+    let hasElapsed = false;
+    let startMs = null;
+    let endMs = null;
+    (Array.isArray(turns) ? turns : []).forEach((turnItem) => {
+        (Array.isArray(turnItem?.tools) ? turnItem.tools : []).forEach((tool) => {
+            const seconds = Number(tool?.elapsed_seconds);
+            if (Number.isFinite(seconds) && seconds > 0) {
+                elapsedTotal += seconds;
+                hasElapsed = true;
+            }
+            const started = Date.parse(String(tool?.started_at || ""));
+            const finished = Date.parse(String(tool?.finished_at || ""));
+            if (Number.isFinite(started)) startMs = startMs === null ? started : Math.min(startMs, started);
+            if (Number.isFinite(finished)) endMs = endMs === null ? finished : Math.max(endMs, finished);
+        });
+    });
+    if (hasElapsed) return elapsedTotal;
+    if (startMs !== null) return Math.max(0, ((endMs !== null ? endMs : Date.now()) - startMs) / 1000);
+    return 0;
+}
+
+function formatCeoExecutionSeconds(seconds) {
+    const value = Number(seconds);
+    if (!Number.isFinite(value) || value <= 0) return "";
+    if (value >= 60) {
+        const minutes = Math.floor(value / 60);
+        const rest = Math.round(value % 60);
+        return `${minutes}m${rest}s`;
+    }
+    return `${value >= 10 ? Math.round(value) : value.toFixed(1)}s`;
+}
+
 function renderCeoTurnsIntoTurn(turn, turns = [], { interruptedMarker = false } = {}) {
     if (!turn?.listEl || !turn?.flowEl) return 0;
     if (typeof buildTurnGroupDescriptors !== "function" || typeof renderTraceStep !== "function") return 0;
@@ -5008,7 +5043,13 @@ function renderCeoTurnsIntoTurn(turn, turns = [], { interruptedMarker = false } 
     turn.railMetaLabel = ceoRailMetaLabel(turn, visibleTurns) || `${descriptors.length} 组`;
     turn.lastExecutionTraceSummary = { turns: descriptors };
     turn.flowEl.hidden = false;
-    turn.flowEl.open = true;
+    // 框默认折叠；用户此前展开过的话由 applyCeoTurnTraceViewState 按 flowOpen 还原。
+    if (turn.flowUsageEl) {
+        const elapsedSeconds = ceoTraceElapsedSeconds(visibleTurns);
+        turn.flowUsageEl.textContent = elapsedSeconds > 0
+            ? `耗时 ${formatCeoExecutionSeconds(elapsedSeconds)}`
+            : "耗时 --";
+    }
     applyCeoTurnTraceViewState(turn, turnViewState);
     // 整帧重建换掉了 listEl，实时行先躲在容器里；这一帧账本已经画上的调用让它退场，
     // 还在跑的挂回新的组体内——同一件事不再因为换帧而改变位置。
@@ -5195,7 +5236,6 @@ function holdApprovalPausedCeoTurn({ source = "", turnId = "", text = "" } = {})
         turn.finalized = false;
         if (turn.steps > 0) {
             turn.flowEl.hidden = false;
-            turn.flowEl.open = true;
         }
         updateCeoTurnMeta(turn, "等待审批");
         icons();
@@ -5339,7 +5379,6 @@ function renderPersistedCeoAssistantTurn(item = {}, options = {}) {
         else renderCeoAssistantTextIntoTurn(turn, content || (status === "paused" ? "已暂停" : ""), { status });
         renderCeoTurnsIntoTurn(turn, turns, { interruptedMarker: isFollowUpArchive });
         turn.flowEl.hidden = false;
-        turn.flowEl.open = true;
         setCeoTurnUsage(turn, historyUsage, { completedAt: historyTimestamp });
         setCeoTurnUsageCollapsed(turn, true);
         renderCeoThinkingSummaryFromSnapshot(turn.el, item?.thinking);
@@ -5631,8 +5670,9 @@ function createPendingCeoTurn(source = "user", { scrollMode = "preserve" } = {})
                 </div>
                 <details class="interaction-flow" hidden>
                     <summary class="interaction-flow-summary">
-                        <span class="interaction-flow-title">Interaction Flow</span>
-                        <span class="interaction-flow-meta">等待工具开始...</span>
+                        <span class="interaction-flow-title">执行流程</span>
+                        <span class="interaction-flow-usage" data-flow-usage></span>
+                        <span class="interaction-flow-meta" hidden>等待工具开始...</span>
                     </summary>
                     <div class="interaction-flow-list" role="list"></div>
                     <div class="interaction-flow-footer" hidden>
@@ -5648,6 +5688,7 @@ function createPendingCeoTurn(source = "user", { scrollMode = "preserve" } = {})
             textEl: el.querySelector(".assistant-text"),
             usageEl: el.querySelector(".ceo-turn-usage"),
             flowEl: el.querySelector(".interaction-flow"),
+            flowUsageEl: el.querySelector("[data-flow-usage]"),
             metaEl: el.querySelector(".interaction-flow-meta"),
             listEl: el.querySelector(".interaction-flow-list"),
             footerEl: el.querySelector(".interaction-flow-footer"),
@@ -7057,9 +7098,7 @@ function finalizeCeoTurn(text, meta = {}) {
             if (turn.steps > 0) {
                 const hasRunningStep = hasRunningCeoToolStep(turn);
                 turn.flowEl.hidden = false;
-                // 轨道的展开态已由 renderCeoTurnsIntoTurn 按用户选择还原,
-                // 收尾不再强制展开;仅无轨道(纯工具事件回合)保留默认展开旧行为。
-                if (!finalTurns.length) turn.flowEl.open = true;
+                // 执行流程框默认折叠，收尾也不再强制展开。
                 updateCeoTurnMeta(
                     turn,
                     turn.hasError
@@ -7138,9 +7177,7 @@ function finalizeCeoTurn(text, meta = {}) {
             if (turn.steps > 0) {
                 const hasRunningStep = hasRunningCeoToolStep(turn);
                 turn.flowEl.hidden = false;
-                // 轨道的展开态已由 renderCeoTurnsIntoTurn 按用户选择还原,
-                // 收尾不再强制展开;仅无轨道(纯工具事件回合)保留默认展开旧行为。
-                if (!finalTurns.length) turn.flowEl.open = true;
+                // 执行流程框默认折叠，收尾也不再强制展开。
                 updateCeoTurnMeta(
                     turn,
                     turn.hasError

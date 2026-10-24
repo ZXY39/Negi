@@ -901,7 +901,6 @@
                             <div class="agent-detail-header">
                                 <div class="agent-detail-header-copy">
                                     <h3 id="ad-role" hidden>节点</h3>
-                                    <div id="ad-token-summary" class="agent-detail-subtitle"></div>
                                 </div>
                                 <span class="status-badge" id="ad-status">STATUS</span>
                                 <button class="toolbar-btn ghost small" id="close-agent-btn" type="button"
@@ -919,7 +918,13 @@
 
                             <div class="agent-detail-section">
                                 <h4><i data-lucide="arrow-down-to-line"></i> 输入</h4>
-                                <div class="code-block" id="ad-input">-</div>
+                                <div id="ad-initial-prompt" class="task-initial-prompt"></div>
+                                <details id="task-flow-box" class="task-flow-box">
+                                    <summary class="task-flow-summary">
+                                        <span id="ad-token-summary" class="task-flow-usage"></span>
+                                    </summary>
+                                    <div class="task-trace-host" id="ad-input">-</div>
+                                </details>
                             </div>
 
                             <div class="agent-detail-section">

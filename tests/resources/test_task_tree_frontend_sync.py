@@ -4899,3 +4899,8 @@ def test_detail_boxes_are_line_capped_and_outputs_have_copy_buttons() -> None:
     html = (REPO_ROOT / "g3ku/web/frontend/org_graph.html").read_text(encoding="utf-8")
     assert 'id="ad-output-copy"' in html
     assert 'id="ad-check-copy"' in html
+    # 初始提示词独立成框；执行流程总框是可折叠 details，标题行放节点用量。
+    assert 'id="ad-initial-prompt"' in html
+    assert 'id="task-flow-box" class="task-flow-box"' in html
+    assert 'class="task-flow-summary"' in html
+    assert 'id="ad-token-summary" class="task-flow-usage"' in html

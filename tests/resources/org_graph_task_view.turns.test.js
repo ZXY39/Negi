@@ -89,7 +89,9 @@ test("turns group by progress text and keep the tools that follow", () => {
     assert.equal((steps[2].bodyHtml.match(/task-trace-round-group/g) || []).length, 2);
     assert.equal(steps[3].traceKey, "turn:4");
     assert.equal(steps[3].textOnly, true);
-    assert.equal(steps[3].text, "纯文本进展");
+    // 纯文本 turn 也走同一条「一行 + > 展开」的车道。
+    assert.equal(steps[3].title, "纯文本进展");
+    assert.equal(steps[3].turnText, "纯文本进展");
     assert.equal(steps[4].traceKey, "turn:5");
     assert.match(steps[4].bodyHtml, /submit_final_result/);
     // 末组带中途正文（「最终检查」）也默认收起：摘要一行，点击才展开全文。
@@ -117,6 +119,7 @@ test("turn text expands in place without a duplicate block or a status badge", (
     const html = renderTraceStep({ ...turnStep, open: false });
     // 展开只是原文本换形态：体内不再重复一份正文，右侧也不再挂成功/失败状态。
     assert.match(html, /task-trace-step--turn-text/);
+    assert.match(html, /task-trace-turn-toggle/);
     assert.doesNotMatch(html, /task-trace-turn-text/);
     assert.doesNotMatch(html, /interaction-step-status/);
     assert.ok(html.includes(longText));
