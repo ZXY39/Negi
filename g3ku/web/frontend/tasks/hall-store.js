@@ -320,6 +320,12 @@ function handleTaskEvent(payload) {
         S.currentTask = { ...(S.currentTask || {}), ...payload.data.task };
         S.taskSummary = { ...(S.taskSummary || {}), ...payload.data.task };
         renderTaskTokenStats();
+        // 终态改变树的默认过滤（任务结束后默认展开整棵树）：详情页开着时必须
+        // 重建树模型，否则被折叠的终态子节点要等到下一次整树刷新才出现。
+        if (String(S.currentTaskId || "").trim() === String(payload.data.task.task_id || "").trim()
+            && typeof renderTree === "function") {
+            renderTree();
+        }
         const selectedNodeId = String(S.selectedNodeId || "").trim();
         if (selectedNodeId && typeof renderTaskNodeModelRetryToast === "function") {
             renderTaskNodeModelRetryToast(null);

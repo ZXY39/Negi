@@ -4673,6 +4673,39 @@ def test_render_task_token_stats_marks_aborted_stream_rows_as_no_usage() -> None
     assert result["normalHasNoAbortReason"] is True
 
 
+def test_node_patch_merge_keeps_children_from_prior_normalized_node() -> None:
+    # task.node.patch 只带状态字段、不带子节点列表：合并进缓存后子节点不能丢。
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = { currentTaskId: "task:test", currentTask: { status: "in_progress" }, treeRootNodeId: "root", treeNodesById: {}, liveFrameMap: {} };
+        global.U = {};
+        vm.runInThisContext(fs.readFileSync("g3ku/web/frontend/tasks/tree-store.js", "utf8"));
+
+        const snapshotNode = normalizeTaskTreeSnapshotNode(
+          { node_id: "root", node_kind: "execution", status: "in_progress", title: "root", auxiliary_child_ids: ["a", "b"] },
+          null,
+        );
+        // 补丁帧形状：只有 node_id/status/title 等，没有 auxiliary_child_ids / rounds。
+        const patchNode = { node_id: "root", node_kind: "execution", status: "success", title: "root" };
+        const merged = normalizeTaskTreeSnapshotNode({ ...snapshotNode, ...patchNode }, snapshotNode);
+        // 快照显式给出空列表时以快照为准。
+        const cleared = normalizeTaskTreeSnapshotNode({ ...snapshotNode, auxiliary_child_ids: [] }, snapshotNode);
+        console.log(JSON.stringify({
+          kept: merged.all_child_ids,
+          keptStatus: merged.status,
+          explicitEmpty: cleared.all_child_ids,
+        }));
+        """
+    )
+
+    assert result["kept"] == ["a", "b"]
+    assert result["keptStatus"] == "success"
+    assert result["explicitEmpty"] == []
+
+
 def test_terminal_task_shows_whole_tree_and_hidden_children_stay_reachable() -> None:
     # 任务结束后默认过滤不能再把整棵树藏成一根节点；运行中藏起来的终态子节点
     # 必须留展开入口，终态节点下的存活后代必须连同祖先链一起显示。

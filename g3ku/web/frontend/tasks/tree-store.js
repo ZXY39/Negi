@@ -10,7 +10,16 @@ function treeNormalizeInt(value, fallback = 0) {
 function normalizeTaskTreeSnapshotNode(value = {}, existing = null) {
     const prior = existing && typeof existing === "object" ? existing : {};
     const rounds = (Array.isArray(value?.rounds) ? value.rounds : Array.isArray(prior?.rounds) ? prior.rounds : []);
-    const auxiliary = (Array.isArray(value?.auxiliary_child_ids) ? value.auxiliary_child_ids : Array.isArray(prior?.auxiliary_child_ids) ? prior.auxiliary_child_ids : [])
+    // `task.node.patch` 只带状态字段，不带任何子节点列表：合并时必须回退到既有
+    // 归一化结果里的 all_child_ids，否则每一次状态补丁都会把这个节点的子节点
+    // 从浏览器缓存里抹掉（树枝凭空消失，且 children_fingerprint 没变、不会触发
+    // 分支重拉）。
+    const priorChildIds = Array.isArray(prior?.auxiliary_child_ids)
+        ? prior.auxiliary_child_ids
+        : Array.isArray(prior?.all_child_ids)
+            ? prior.all_child_ids
+            : [];
+    const auxiliary = (Array.isArray(value?.auxiliary_child_ids) ? value.auxiliary_child_ids : priorChildIds)
         .map((item) => String(item || "").trim())
         .filter(Boolean);
     const seenChildIds = new Set();
