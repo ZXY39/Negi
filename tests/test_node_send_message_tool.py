@@ -31,9 +31,9 @@ class TestSurface:
         assert to_schema['type'] == ['string', 'array']
         assert to_schema['items'] == {'type': 'string'}
 
-    def test_intent_enum_is_the_three_declared_words(self):
-        schema = _tool([]).parameters['properties']['intent_kind']
-        assert schema['enum'] == ['进展', '请求', '指令']
+    def test_only_declared_fields_are_exposed(self):
+        schema = _tool([]).parameters
+        assert set(schema['properties']) == {'to', 'content', 'ref'}
 
     def test_timeout_parameter_hidden(self):
         # 内部协议工具不向模型暴露 timeout_seconds。
@@ -50,18 +50,14 @@ class TestExecution:
         record: list[dict] = []
         raw = await _tool(record).execute(
             to=['a', 'b'],
-            intent_kind='请求',
             content='把结果发我',
             ref='artifact:1',
-            in_reply_to='notif:9',
         )
         assert record == [
             {
                 'to': ['a', 'b'],
-                'intent_kind': '请求',
                 'content': '把结果发我',
                 'ref': 'artifact:1',
-                'in_reply_to': 'notif:9',
             }
         ]
         payload = json.loads(raw)
@@ -73,12 +69,12 @@ class TestExecution:
         async def deliver(**payload):
             return {
                 'ok': False,
-                'results': [{'target': 'x', 'status': 'rejected', 'reason': 'not_a_direct_child'}],
+                'results': [{'target': 'x', 'status': 'rejected', 'reason': 'not_messageable'}],
                 'legal_targets': ['parent', 'c1'],
             }
 
-        raw = await SendMessageTool(deliver).execute(to='x', intent_kind='进展', content='hi')
+        raw = await SendMessageTool(deliver).execute(to='x', content='hi')
         payload = json.loads(raw)
         assert payload['ok'] is False
-        assert payload['results'][0]['reason'] == 'not_a_direct_child'
+        assert payload['results'][0]['reason'] == 'not_messageable'
         assert payload['legal_targets'] == ['parent', 'c1']

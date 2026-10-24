@@ -91,6 +91,7 @@ from main.governance.tool_context import (
 )
 from main.ids import new_command_id, new_node_id, new_task_id, new_worker_id
 from main.models import (
+    FrontdoorNodeMessage,
     NodeRecord,
     TaskArtifactRecord,
     TaskNodeNotification,
@@ -120,10 +121,14 @@ from main.runtime.internal_tools import build_detail_level_schema
 from main.runtime.model_key_concurrency import ModelKeyConcurrencyController
 from main.runtime.model_load_balancer import ModelLoadBalancer, quota_bucket_key
 from main.runtime.model_route import build_model_route_plan
-from main.runtime.node_mailbox import message_fingerprint, normalize_targets, plan_delivery
+from main.runtime.node_mailbox import (
+    message_fingerprint,
+    normalize_targets,
+    notification_is_held,
+    plan_delivery,
+)
 from main.runtime.node_message_kind import (
-    INTENT_INSTRUCTION,
-    INTENT_PROGRESS,
+    KIND_ACCEPTANCE_VERDICT,
     KIND_CHILD_ABNORMAL_PAUSE,
     KIND_CHILD_FINAL,
     PRIORITY_HIGH,
@@ -137,16 +142,22 @@ from main.runtime.node_prompt_contract import (
     extract_node_dynamic_contract_payload,
     inject_node_dynamic_contract_message,
 )
+from main.runtime.node_relationships import (
+    is_descendant as node_is_descendant,
+)
+from main.runtime.node_relationships import (
+    message_relation as node_message_relation,
+)
+from main.runtime.node_relationships import (
+    messageable_target_ids as node_messageable_target_ids,
+)
 from main.runtime.node_runner import NodeRunner
 from main.runtime.node_seed_contracts import seed_drop_reason, trim_seed_contracts
 from main.runtime.node_turn_controller import NodeTurnController
 from main.runtime.node_wake import (
-    WAKE_ON_ALL_CHILDREN,
     WakeDeps,
     node_park_state,
-    wait_inputs,
     wake_parked_node,
-    wake_ready,
 )
 from main.runtime.node_watchdog import NodeWatchdog
 from main.runtime.react_loop import ReActToolLoop
@@ -1059,6 +1070,7 @@ class MainRuntimeService:
                     self.store.mark_shutdown_pause_entry_consumed(kind='task', ref_id=ref_id)
             self.task_stall_notifier.bootstrap_running_tasks()
             self.node_watchdog.bootstrap_running_tasks()
+            await self._reconcile_wait_all_batches()
         if self.execution_mode in {'embedded', 'worker'}:
             # 磁盘治理（P1）：任务大小对账循环（每小时增量纠偏 + 终态即时对账）。
             if self._task_disk_reconcile_task is None or self._task_disk_reconcile_task.done():
@@ -4367,8 +4379,6 @@ class MainRuntimeService:
     # 节点信箱直投 + R2 唤醒（不走 distribution epoch）
     # ------------------------------------------------------------------
 
-    NODE_WAIT_WAKE_ON_KEY = 'node_wait_wake_on'
-
     def _frame_phase(self, task_id: str, node_id: str) -> str:
         try:
             frame = self.store.get_task_runtime_frame(task_id, node_id)
@@ -4433,31 +4443,13 @@ class MainRuntimeService:
         priority: str,
         park_state: str = '',
     ) -> bool:
-        """高优先级无条件唤醒；暂停与验收待决采用最大宽容；其余按 `wake_on`。
+        """停靠策略只有一个：任何可注入未读都会唤醒。
 
-        `wake_on` 只约束 `等待·explicit`（设计 §2.3 的两套策略）。暂停态与
-        `等待·acceptance` 是"任意满足投递矩阵的未读均唤醒"——`manage_child_nodes(resume)`
-        的消息必须能叫醒一个此前用 `all_children` 停靠过的暂停节点，否则恢复会静默失效。
+        `priority` / `park_state` 保留在签名里是因为调用方与测试仍按投递判定
+        传值；批次等待是落箱时的 held 状态，不在这里判。
         """
-        if str(priority or '').strip() == PRIORITY_HIGH:
-            return True
-        if str(park_state or '').strip() in {'paused', 'waiting_acceptance'}:
-            return True
-        metadata = dict(getattr(node, 'metadata', {}) or {})
-        policy = str(metadata.get(self.NODE_WAIT_WAKE_ON_KEY) or '').strip()
-        if policy != WAKE_ON_ALL_CHILDREN:
-            return True
-        children, finals = wait_inputs(
-            children=list(self.store.list_nodes(task_id) or []),
-            notifications=list(self.store.list_task_node_notifications(task_id, node_id) or []),
-            parent_node_id=node_id,
-        )
-        return wake_ready(
-            wake_on=policy,
-            unread_count=1,
-            children=children,
-            unread_final_sources=finals,
-        )
+        _ = task_id, node_id, node, priority, park_state
+        return True
 
     async def deliver_node_message(
         self,
@@ -4469,13 +4461,13 @@ class MainRuntimeService:
         relation: str = '',
         system_kind: str = '',
         source_node_id: str = '',
-        intent_kind: str = '',
         verdict: str = '',
         ref: str = '',
-        in_reply_to: str = '',
         submission_id: str = '',
         epoch_id: str = '',
         wake: bool = True,
+        held: bool = False,
+        batch_id: str = '',
     ) -> dict[str, Any]:
         """一条定向投递：判定矩阵 → 机械推导 → 指纹去重 → 落箱 → 唤醒。
 
@@ -4484,6 +4476,8 @@ class MainRuntimeService:
         `wake=False` 用于「必须留痕、但不得叫醒收件人」的系统消息：pass 裁决的
         收件人即将终局，reject_no_progress 裁决的收件人刚被判暂停（唤醒会立刻清掉
         暂停位）。消息照常落箱并带 kind/priority，只是不触发 R2 唤醒。
+        `held=True` 用于 wait_all_children 批次：行照常落箱，但在批次释放前既不
+        计入待注入也不唤醒。
         """
         normalized_task_id = self.normalize_task_id(task_id)
         normalized_node_id = self.normalize_node_id(str(target_node_id or '').strip())
@@ -4491,12 +4485,33 @@ class MainRuntimeService:
         if node is None:
             return {'target': normalized_node_id, 'status': 'rejected', 'reason': 'target_missing'}
 
+        target_kind = str(getattr(node, 'node_kind', '') or '').strip().lower()
+        handshake = normalize_acceptance_handshake(
+            ((node.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY) if isinstance(node.metadata, dict) else {})
+        )
+        target_under_acceptance = (
+            target_kind == 'execution'
+            and str(handshake.get('state') or '').strip() == ACCEPTANCE_STATE_WAITING_ACCEPTANCE
+        )
+        if target_under_acceptance and not str(system_kind or '').strip():
+            return {
+                'target': normalized_node_id,
+                'status': 'rejected',
+                'reason': 'target_under_acceptance',
+            }
+        # 验收节点是运行时的裁决车道：模型消息照常落箱，但不唤醒它起新回合。
+        # 被检验节点只放行裁决；在途系统消息排队，等裁决把它带回执行态。
+        suppress_wake = (
+            (target_kind == 'acceptance' and not str(system_kind or '').strip())
+            or (target_under_acceptance and str(system_kind or '').strip() != KIND_ACCEPTANCE_VERDICT)
+        )
+
         accepted, reason = plan_delivery(target_park_state=park_state, sender_origin=origin)
         if not accepted:
             return {'target': normalized_node_id, 'status': 'rejected', 'reason': reason}
 
         kind = derive_message_kind(origin=origin, relation=relation, system_kind=system_kind)
-        priority = derive_priority(kind=kind, intent_kind=intent_kind, verdict=verdict)
+        priority = derive_priority(kind=kind, verdict=verdict)
         body = str(message or '').strip()
         fingerprint = message_fingerprint(
             kind=kind, source_node_id=source_node_id, message=body, ref=ref
@@ -4511,12 +4526,17 @@ class MainRuntimeService:
                 and str(item.fingerprint or '').strip() == fingerprint
             ):
                 wake_outcome = ''
-                if wake and self._delivery_wakes_target(
-                    task_id=normalized_task_id,
-                    node_id=normalized_node_id,
-                    node=node,
-                    priority=priority,
-                    park_state=park_state,
+                if (
+                    wake
+                    and not notification_is_held(item)
+                    and not suppress_wake
+                    and self._delivery_wakes_target(
+                        task_id=normalized_task_id,
+                        node_id=normalized_node_id,
+                        node=node,
+                        priority=priority,
+                        park_state=park_state,
+                    )
                 ):
                     try:
                         wake_outcome = await self.wake_node_on_message(
@@ -4548,19 +4568,20 @@ class MainRuntimeService:
                 consumed_at='',
                 kind=kind,
                 priority=priority,
-                intent_kind=str(intent_kind or '').strip(),
                 fingerprint=fingerprint,
-                in_reply_to=str(in_reply_to or '').strip(),
                 ref=str(ref or '').strip(),
                 submission_id=str(submission_id or '').strip(),
                 verdict=str(verdict or '').strip(),
+                batch_id=str(batch_id or '').strip(),
+                held_at=now_iso() if held else '',
+                released_at='',
                 payload={},
             )
         )
         self.log_service.refresh_task_view(normalized_task_id, mark_unread=True)
 
         wake_outcome = ''
-        if wake and self._delivery_wakes_target(
+        if wake and not held and not suppress_wake and self._delivery_wakes_target(
             task_id=normalized_task_id,
             node_id=normalized_node_id,
             node=node,
@@ -4610,12 +4631,10 @@ class MainRuntimeService:
         sender_node_id: str,
         sender_is_root: bool,
         to: Any,
-        intent_kind: str = '',
         content: str = '',
         ref: str = '',
-        in_reply_to: str = '',
     ) -> dict[str, Any]:
-        """`send_message` 的寻址层：把 `parent` / `frontdoor` / 子节点 id 解析成投递。
+        """`send_message` 的寻址层：把 `parent` / `frontdoor` / 节点 id 解析成投递。
 
         越址不抛异常，而是在回执里给出合法目标集合——只告诉模型"不允许"会让它
         再猜一轮；告诉它"可以发给谁"只需要一次往返。
@@ -4625,14 +4644,13 @@ class MainRuntimeService:
         if sender is None:
             return {'ok': False, 'error': 'sender_missing', 'results': [], 'legal_targets': []}
 
-        children = [
-            str(child.node_id or '').strip()
-            for child in list(self.store.list_nodes(normalized_task_id) or [])
-            if str(getattr(child, 'parent_node_id', '') or '').strip() == sender_node_id
-        ]
-        legal_targets: list[str] = ['parent', *children]
-        if sender_is_root:
-            legal_targets.append('frontdoor')
+        records = list(self.store.list_nodes(normalized_task_id) or [])
+        node_map = {str(item.node_id or '').strip(): item for item in records}
+        legal_targets, legal_truncated = self._messageable_targets(
+            sender=sender,
+            node_map=node_map,
+            sender_is_root=sender_is_root,
+        )
 
         requested = normalize_targets(to)
         if not requested:
@@ -4641,33 +4659,20 @@ class MainRuntimeService:
                 'error': 'no_targets',
                 'results': [],
                 'legal_targets': legal_targets,
+                'legal_targets_truncated': legal_truncated,
             }
 
         results: list[dict[str, Any]] = []
-        for target in requested:
-            if target == 'parent':
-                parent_id = str(getattr(sender, 'parent_node_id', '') or '').strip()
-                if not parent_id:
+        for requested_target in requested:
+            target_id = requested_target
+            if requested_target == 'parent':
+                target_id = str(getattr(sender, 'parent_node_id', '') or '').strip()
+                if not target_id:
                     results.append(
                         {'target': 'parent', 'status': 'rejected', 'reason': 'sender_has_no_parent'}
                     )
                     continue
-                results.append(
-                    await self.deliver_node_message(
-                        task_id=normalized_task_id,
-                        target_node_id=parent_id,
-                        message=content,
-                        origin='node',
-                        # 收件人是我的父 ⇒ 我在这一对里是 child ⇒ child_progress（子→父）。
-                        relation=RELATION_CHILD,
-                        source_node_id=sender_node_id,
-                        intent_kind=intent_kind,
-                        ref=ref,
-                        in_reply_to=in_reply_to,
-                    )
-                )
-                continue
-            if target == 'frontdoor':
+            elif requested_target == 'frontdoor':
                 if not sender_is_root:
                     results.append(
                         {
@@ -4677,32 +4682,46 @@ class MainRuntimeService:
                         }
                     )
                     continue
-                # 根节点 → 前门通道尚未落地：宁可报错，也不假装送达。
                 results.append(
-                    {
-                        'target': 'frontdoor',
-                        'status': 'rejected',
-                        'reason': 'frontdoor_channel_not_implemented',
-                    }
+                    await self.deliver_frontdoor_message(
+                        task_id=normalized_task_id,
+                        source_node_id=str(sender.node_id or '').strip(),
+                        content=content,
+                        ref=ref,
+                    )
                 )
                 continue
-            if target not in children:
+
+            target = node_map.get(str(target_id or '').strip())
+            if target is None:
                 results.append(
-                    {'target': target, 'status': 'rejected', 'reason': 'not_a_direct_child'}
+                    {'target': requested_target, 'status': 'rejected', 'reason': 'target_missing'}
+                )
+                continue
+            relation, reject_reason = self._node_message_relation(
+                sender=sender,
+                target=target,
+                node_map=node_map,
+            )
+            if reject_reason:
+                results.append(
+                    {
+                        'target': requested_target,
+                        'status': 'rejected',
+                        'reason': reject_reason,
+                        'sender_node_id': sender_node_id,
+                    }
                 )
                 continue
             results.append(
                 await self.deliver_node_message(
                     task_id=normalized_task_id,
-                    target_node_id=target,
+                    target_node_id=target.node_id,
                     message=content,
                     origin='node',
-                    # 收件人是我的直接子节点 ⇒ 我是 parent ⇒ parent_notice（父→子）。
-                    relation=RELATION_PARENT,
+                    relation=relation,
                     source_node_id=sender_node_id,
-                    intent_kind=intent_kind,
                     ref=ref,
-                    in_reply_to=in_reply_to,
                 )
             )
 
@@ -4710,7 +4729,146 @@ class MainRuntimeService:
             'ok': bool(results) and all(item.get('status') != 'rejected' for item in results),
             'results': results,
             'legal_targets': legal_targets,
+            'legal_targets_truncated': legal_truncated,
         }
+
+    @staticmethod
+    def _is_descendant_node(target: Any, ancestor_id: str, node_map: dict[str, Any]) -> bool:
+        return node_is_descendant(target, ancestor_id, node_map)
+
+    def _node_message_relation(
+        self,
+        *,
+        sender: Any,
+        target: Any,
+        node_map: dict[str, Any],
+    ) -> tuple[str, str]:
+        return node_message_relation(sender=sender, target=target, node_map=node_map)
+
+    def _messageable_targets(
+        self,
+        *,
+        sender: Any,
+        node_map: dict[str, Any],
+        sender_is_root: bool,
+    ) -> tuple[list[str], bool]:
+        return node_messageable_target_ids(
+            sender=sender,
+            node_map=node_map,
+            sender_is_root=sender_is_root,
+        )
+
+    async def deliver_frontdoor_message(
+        self,
+        *,
+        task_id: str,
+        source_node_id: str,
+        content: str,
+        ref: str = '',
+    ) -> dict[str, Any]:
+        """Root node → frontdoor/session inbox (durable, signed)."""
+        normalized_task_id = self.normalize_task_id(task_id)
+        task = self.store.get_task(normalized_task_id)
+        node = self.store.get_node(str(source_node_id or '').strip())
+        if task is None or node is None:
+            return {'target': 'frontdoor', 'status': 'rejected', 'reason': 'source_missing'}
+        if str(getattr(node, 'node_id', '') or '').strip() != str(getattr(task, 'root_node_id', '') or '').strip():
+            return {'target': 'frontdoor', 'status': 'rejected', 'reason': 'frontdoor_root_only'}
+        body = str(content or '').strip()
+        if not body:
+            return {'target': 'frontdoor', 'status': 'rejected', 'reason': 'content_required'}
+        session_id = str(getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared'
+        message_id = new_command_id().replace('command:', 'fdmsg:', 1)
+        record = FrontdoorNodeMessage(
+            message_id=message_id,
+            session_id=session_id,
+            task_id=normalized_task_id,
+            source_node_id=str(node.node_id or '').strip(),
+            content=body,
+            ref=str(ref or '').strip(),
+            status='pending',
+            created_at=now_iso(),
+        )
+        self.store.upsert_frontdoor_node_message(record)
+        return {
+            'target': 'frontdoor',
+            'status': 'delivered',
+            'message_id': message_id,
+            'kind': 'frontdoor_notice',
+            'priority': PRIORITY_HIGH,
+            'wake': 'session_inbox',
+            'reason': '',
+        }
+
+    async def deliver_frontdoor_node_message(
+        self,
+        *,
+        session_id: str,
+        to: Any,
+        content: str,
+        ref: str = '',
+    ) -> dict[str, Any]:
+        """Frontdoor → execution nodes in tasks owned by this session."""
+        normalized_session = str(session_id or '').strip()
+        body = str(content or '').strip()
+        if not normalized_session:
+            return {'ok': False, 'error': 'session_required', 'results': [], 'legal_targets': []}
+        if not body:
+            return {'ok': False, 'error': 'content_required', 'results': [], 'legal_targets': []}
+        requested = normalize_targets(to)
+        if not requested:
+            return {'ok': False, 'error': 'no_targets', 'results': [], 'legal_targets': []}
+        results: list[dict[str, Any]] = []
+        for target in requested:
+            node = self.store.get_node(str(target or '').strip())
+            if node is None:
+                results.append({'target': target, 'status': 'rejected', 'reason': 'target_missing'})
+                continue
+            task = self.store.get_task(str(getattr(node, 'task_id', '') or '').strip())
+            if task is None or str(getattr(task, 'session_id', '') or '').strip() != normalized_session:
+                results.append(
+                    {'target': target, 'status': 'rejected', 'reason': 'not_session_task'}
+                )
+                continue
+            if str(getattr(node, 'node_kind', '') or '').strip().lower() == 'acceptance':
+                results.append(
+                    {
+                        'target': target,
+                        'status': 'rejected',
+                        'reason': 'acceptance_node_not_messageable',
+                    }
+                )
+                continue
+            results.append(
+                await self.deliver_node_message(
+                    task_id=str(getattr(node, 'task_id', '') or '').strip(),
+                    target_node_id=str(node.node_id or '').strip(),
+                    message=body,
+                    origin='frontdoor',
+                    ref=ref,
+                )
+            )
+        return {
+            'ok': bool(results) and all(item.get('status') != 'rejected' for item in results),
+            'results': results,
+            'legal_targets': [],
+        }
+
+    def list_frontdoor_node_messages(self, session_id: str) -> list[FrontdoorNodeMessage]:
+        return list(self.store.list_frontdoor_node_messages(str(session_id or '').strip()) or [])
+
+    def mark_frontdoor_node_messages_consumed(self, message_ids: list[str]) -> None:
+        consumed_at = now_iso()
+        for message_id in list(message_ids or []):
+            normalized = str(message_id or '').strip()
+            if not normalized:
+                continue
+            try:
+                self.store.mark_frontdoor_node_message_consumed(
+                    normalized, consumed_at=consumed_at
+                )
+            except Exception:
+                continue
 
     async def _deliver_child_final_message(self, *, task_id: str, node_id: str) -> dict[str, Any]:
         """子节点终局 → 父节点信箱。内容取自主节点自己提交的结果载荷。
@@ -4742,7 +4900,8 @@ class MainRuntimeService:
         goal = str(getattr(node, 'goal', '') or '').strip()
         verdict_word = '完成' if status == 'success' else '失败'
         body = f'子节点「{goal or node.node_id}」已{verdict_word}：{summary[:1200]}'
-        return await self.deliver_node_message(
+        wait_all, batch_id = self._spawn_batch_wait_policy(node=node)
+        delivered = await self.deliver_node_message(
             task_id=normalized_task_id,
             target_node_id=parent_node_id,
             message=body,
@@ -4751,9 +4910,68 @@ class MainRuntimeService:
             relation=RELATION_CHILD,
             system_kind=KIND_CHILD_FINAL,
             source_node_id=str(node.node_id or '').strip(),
-            intent_kind=INTENT_PROGRESS,
             ref=ref,
+            held=wait_all,
+            batch_id=batch_id,
         )
+        if wait_all and str(delivered.get('status') or '') in {'delivered', 'deduplicated'}:
+            await self._release_wait_all_batch_if_settled(
+                task_id=normalized_task_id,
+                parent_node_id=parent_node_id,
+                batch_id=batch_id,
+            )
+        return delivered
+
+    def _spawn_batch_wait_policy(self, *, node: Any) -> tuple[bool, str]:
+        """Return `(wait_all_children, batch_id)` for the child's spawn round."""
+        parent_node_id = str(getattr(node, 'parent_node_id', '') or '').strip()
+        metadata = getattr(node, 'metadata', None)
+        round_id = str((metadata or {}).get('spawn_owner_round_id') or '').strip() if isinstance(metadata, dict) else ''
+        if not parent_node_id or not round_id:
+            return False, round_id
+        parent = self.store.get_node(parent_node_id)
+        parent_metadata = getattr(parent, 'metadata', None) if parent is not None else None
+        operations = (parent_metadata or {}).get('spawn_operations') if isinstance(parent_metadata, dict) else {}
+        payload = operations.get(round_id) if isinstance(operations, dict) else None
+        return bool((payload or {}).get('wait_all_children')), round_id
+
+    async def _release_wait_all_batch_if_settled(
+        self,
+        *,
+        task_id: str,
+        parent_node_id: str,
+        batch_id: str,
+    ) -> bool:
+        release = getattr(self.node_runner, 'release_wait_all_batch_if_settled', None)
+        if not callable(release):
+            return False
+        released = bool(
+            release(
+                task_id=task_id,
+                parent_node_id=parent_node_id,
+                batch_id=batch_id,
+            )
+        )
+        if released:
+            parent = self.store.get_node(parent_node_id)
+            handshake = normalize_acceptance_handshake(
+                ((parent.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY)
+                 if parent is not None and isinstance(parent.metadata, dict) else {})
+            )
+            if str(handshake.get('state') or '').strip() == ACCEPTANCE_STATE_WAITING_ACCEPTANCE:
+                # 被检验节点只放行裁决；释放的行排队，等裁决把它带回执行态。
+                return released
+            try:
+                await self.wake_node_on_message(task_id=task_id, node_id=parent_node_id)
+            except Exception as exc:  # noqa: BLE001 - 行已释放，唤醒失败由调度扫描兜底
+                logger.warning(
+                    'wait_all batch release wake failed: task={} node={} error={!r}',
+                    task_id,
+                    parent_node_id,
+                    exc,
+                )
+        return released
+
 
     async def _notify_wait_cycle(self, *, task_id: str, node_id: str, reason: str) -> dict[str, Any]:
         """等待图环检测的系统通知：以 frontdoor 身份投递（必唤醒，可外部破环）。"""
@@ -4763,6 +4981,106 @@ class MainRuntimeService:
             message=str(reason or '').strip(),
             origin='frontdoor',
         )
+
+    async def _reconcile_wait_all_batches(self) -> None:
+        """Release held child_final rows whose batch settled while the process was down."""
+        held_rows = list(self.store.list_held_task_node_notifications() or [])
+        groups: dict[tuple[str, str, str], int] = {}
+        for item in held_rows:
+            key = (
+                str(getattr(item, 'task_id', '') or '').strip(),
+                str(getattr(item, 'node_id', '') or '').strip(),
+                str(getattr(item, 'batch_id', '') or '').strip(),
+            )
+            if all(key):
+                groups[key] = groups.get(key, 0) + 1
+        for (task_id, parent_node_id, batch_id), count in groups.items():
+            released = await self._release_wait_all_batch_if_settled(
+                task_id=task_id,
+                parent_node_id=parent_node_id,
+                batch_id=batch_id,
+            )
+            if not released:
+                logger.warning(
+                    'held child_final batch not releasable at startup: task={} parent={} batch={} rows={}',
+                    task_id,
+                    parent_node_id,
+                    batch_id,
+                    count,
+                )
+
+    def _subtree_node_ids(self, task_id: str, root_node_id: str) -> list[str]:
+        records = list(self.store.list_nodes(str(task_id or '').strip()) or [])
+        children_by_parent: dict[str, list[str]] = {}
+        depths: dict[str, int] = {}
+        for item in records:
+            node_id = str(getattr(item, 'node_id', '') or '').strip()
+            if not node_id:
+                continue
+            depths[node_id] = int(getattr(item, 'depth', 0) or 0)
+            parent_id = str(getattr(item, 'parent_node_id', '') or '').strip()
+            if parent_id:
+                children_by_parent.setdefault(parent_id, []).append(node_id)
+        root_id = str(root_node_id or '').strip()
+        ordered: list[str] = []
+        queue = [root_id] if root_id else []
+        seen: set[str] = set()
+        while queue:
+            current = queue.pop(0)
+            if not current or current in seen:
+                continue
+            seen.add(current)
+            ordered.append(current)
+            queue.extend(children_by_parent.get(current) or [])
+        ordered.sort(key=lambda item: (depths.get(item, 0), item))
+        return ordered
+
+    async def _terminate_subtree(
+        self,
+        *,
+        task_id: str,
+        root_node_id: str,
+        reason: str,
+    ) -> list[str]:
+        subtree_ids = self._subtree_node_ids(task_id, root_node_id)
+        owned: set[str] = set()
+        dispatcher = self.task_actor_service._dispatchers.get(task_id)
+        if dispatcher is not None and subtree_ids:
+            try:
+                owned = set(await dispatcher.cancel_nodes(subtree_ids, reason))
+            except Exception as exc:  # noqa: BLE001 - 取消失败仍要把行落定，避免孤儿
+                logger.warning(
+                    'subtree terminate cancel failed: task={} root={} error={!r}',
+                    task_id,
+                    root_node_id,
+                    exc,
+                )
+        terminated: list[str] = []
+        for node_id in subtree_ids:
+            if node_id in owned:
+                terminated.append(node_id)
+                continue
+            node = self.store.get_node(node_id)
+            if node is None:
+                continue
+            if str(getattr(node, 'status', '') or '').strip().lower() in {'success', 'failed'}:
+                continue
+            try:
+                self.node_runner.fail_paused_node(
+                    task_id,
+                    node_id,
+                    reason,
+                    notify_parent=False,
+                )
+                terminated.append(node_id)
+            except Exception as exc:  # noqa: BLE001 - 单行失败不阻断其余子树
+                logger.warning(
+                    'subtree terminate fail_node failed: task={} node={} error={!r}',
+                    task_id,
+                    node_id,
+                    exc,
+                )
+        return terminated
 
     async def _deliver_child_abnormal_pause(
         self,
@@ -4795,7 +5113,6 @@ class MainRuntimeService:
             relation=RELATION_CHILD,
             system_kind=KIND_CHILD_ABNORMAL_PAUSE,
             source_node_id=str(node.node_id or '').strip(),
-            intent_kind=INTENT_PROGRESS,
         )
 
     async def resend_lost_abnormal_pause_escalations(self, task_id: str) -> list[str]:
@@ -4866,8 +5183,11 @@ class MainRuntimeService:
             for child in list(self.store.list_nodes(normalized_task_id) or [])
             if str(getattr(child, 'parent_node_id', '') or '').strip() == str(sender.node_id or '').strip()
         }
-        legal_targets = list(children)
-        dispatcher = self.task_actor_service._dispatchers.get(normalized_task_id)
+        legal_targets = [
+            node_id
+            for node_id, child in children.items()
+            if str(getattr(child, 'node_kind', '') or '').strip().lower() != 'acceptance'
+        ]
         items: list[dict[str, Any]] = []
 
         for raw in list(ops or []):
@@ -4886,6 +5206,16 @@ class MainRuntimeService:
             if action not in {'pause', 'resume', 'terminate'}:
                 items.append(
                     {'node_id': node_id, 'action': action, 'result': 'rejected', 'reason': 'invalid_action'}
+                )
+                continue
+            if str(getattr(child, 'node_kind', '') or '').strip().lower() == 'acceptance':
+                items.append(
+                    {
+                        'node_id': node_id,
+                        'action': action,
+                        'result': 'rejected',
+                        'reason': 'acceptance_node_not_controllable',
+                    }
                 )
                 continue
             if str(child.status or '').strip().lower() in {'success', 'failed'}:
@@ -4937,7 +5267,6 @@ class MainRuntimeService:
                     # 我是发送方、也是收件人的父 ⇒ relation='parent' ⇒ parent_notice。
                     relation=RELATION_PARENT,
                     source_node_id=str(sender.node_id or '').strip(),
-                    intent_kind=INTENT_INSTRUCTION,
                 )
                 if str(delivered.get('status') or '') in {'delivered', 'deduplicated'}:
                     items.append(
@@ -4968,22 +5297,20 @@ class MainRuntimeService:
                     {'node_id': node_id, 'action': action, 'result': 'rejected', 'reason': 'reason_required'}
                 )
                 continue
-            if not paused:
-                self.log_service.set_node_pause_state(
-                    normalized_task_id,
-                    node_id,
-                    pause_requested=True,
-                    is_paused=bool(getattr(child, 'is_paused', False)),
-                    pause_reason='agent',
-                    remark=reason,
-                )
-            if dispatcher is not None:
-                await dispatcher.fail_node(node_id, reason, notify_parent=False)
-            else:
-                self.node_runner.fail_paused_node(
-                    normalized_task_id, node_id, reason, notify_parent=False
-                )
-            items.append({'node_id': node_id, 'action': action, 'result': 'terminated'})
+            # terminate: 目标子树整体终止（含验收节点）；终态行保留原结果。
+            terminated_ids = await self._terminate_subtree(
+                task_id=normalized_task_id,
+                root_node_id=node_id,
+                reason=reason,
+            )
+            items.append(
+                {
+                    'node_id': node_id,
+                    'action': action,
+                    'result': 'terminated',
+                    'terminated_node_ids': terminated_ids,
+                }
+            )
 
         return {
             'ok': bool(items) and all(str(item.get('result') or '') != 'rejected' for item in items),

@@ -14,7 +14,6 @@ from main.runtime.node_mailbox import (
     REJECT_UNKNOWN_TARGET_STATE,
     message_fingerprint,
     normalize_targets,
-    normalize_wake_on,
     plan_delivery,
 )
 
@@ -88,17 +87,3 @@ class TestNormalizeTargets:
 
     def test_accepts_set(self):
         assert sorted(normalize_targets({'a', 'b'})) == ['a', 'b']
-
-
-class TestNormalizeWakeOn:
-    def test_default_is_any(self):
-        assert normalize_wake_on(None) == 'any'
-        assert normalize_wake_on('') == 'any'
-
-    def test_known_values(self):
-        assert normalize_wake_on('any') == 'any'
-        assert normalize_wake_on('all_children') == 'all_children'
-
-    def test_unknown_rejected(self):
-        with pytest.raises(ValueError):
-            normalize_wake_on('later')

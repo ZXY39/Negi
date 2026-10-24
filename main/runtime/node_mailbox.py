@@ -17,11 +17,6 @@ from __future__ import annotations
 import hashlib
 from typing import Final
 
-from main.runtime.node_wake import (
-    WAKE_ON_ALL_CHILDREN,
-    WAKE_ON_ANY,
-)
-
 PARK_TERMINAL: Final = 'terminal'
 PARK_PAUSED: Final = 'paused'
 PARK_WAITING: Final = 'waiting'
@@ -79,6 +74,17 @@ def message_fingerprint(
     return digest[:16]
 
 
+def notification_is_held(record: object) -> bool:
+    """True while a batch-held child_final must not be injected or wake anyone."""
+    if isinstance(record, dict):
+        held_at = record.get('held_at')
+        released_at = record.get('released_at')
+    else:
+        held_at = getattr(record, 'held_at', '')
+        released_at = getattr(record, 'released_at', '')
+    return bool(str(held_at or '').strip()) and not str(released_at or '').strip()
+
+
 def normalize_targets(raw: object) -> list[str]:
     """Flatten ``to`` into an ordered, de-duplicated target list.
 
@@ -97,10 +103,3 @@ def normalize_targets(raw: object) -> list[str]:
         seen.add(value)
         ordered.append(value)
     return ordered
-
-
-def normalize_wake_on(raw: object) -> str:
-    value = str(raw or '').strip() or WAKE_ON_ANY
-    if value not in {WAKE_ON_ANY, WAKE_ON_ALL_CHILDREN}:
-        raise ValueError(f'unknown_wake_on:{value}')
-    return value

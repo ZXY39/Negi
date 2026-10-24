@@ -139,7 +139,7 @@ Negi 并不是所有问题都在 CEO 单次对话内完成。frontdoor 的职责
 - 判断当前这轮能直接回答，还是需要走任务运行时
 - 在必要时触发任务工具，如 `create_async_task`
 
-`create_async_task` 的完整工具契约与守卫（重复预检与重验、`file_targets` reopen 车道、拒绝语义）详见 `tool-and-skill-system.md`「fixed builtin tools」。追加要求不走工具：节点之间用 `send_message`，用户补充走会话（`task_append_notice` 已删除）。运行时记账与任务级控制合同要点如下：
+`create_async_task` 的完整工具契约与守卫（重复预检与重验、`file_targets` reopen 车道、拒绝语义）详见 `tool-and-skill-system.md`「fixed builtin tools」。节点之间用 `send_message`（`to/content/ref`）；根节点可用同一个工具向 `frontdoor` 发送签名消息，落入 `frontdoor_node_messages` 并由 `frontdoor_message_scanner.py` 唤醒会话；前门用同名资源工具回投执行节点，`view_message_history` 读取自己的 inbox。`task_append_notice` 不注册。运行时记账与任务级控制合同要点如下：
 
 - frontdoor dispatch 记账必须区分“工具调用发生了”与“新任务真的创建了”：只有显式成功形式才算已核实派发；拒绝消息里提到的旧 `task:...` id 不算新建任务。同一可见轮可以多次调用 `create_async_task`，是否真正创建由 `MainRuntimeService` 的唯一创建路径决定。
 

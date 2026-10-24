@@ -10,13 +10,12 @@ that a sender cannot mislabel a message to wake a parked node, nor label an
 ordinary notice as a terminal result. That guarantee only holds if there is
 exactly one place that computes it.
 
-Priority rule (design invariant P6) — "does the sender park because of this
-message", not "what type is it":
+Priority rule (design invariant P6) — the runtime needs the recipient to act:
 
-* a sender that keeps working after sending (progress / instruction)  -> normal
-* a sender that parks waiting for an answer (``intent_kind=请求``)      -> high
-* the runtime needs the recipient to act (abnormal pause, user, front door,
-  and a ``reject_no_progress`` verdict)                                -> high
+* a human / front-door / abnormal pause / a ``reject_no_progress`` verdict
+  wakes the recipient unconditionally;
+* every ordinary node-authored message is ``normal``. The recipient's own
+  ``enter_wait`` (always "any") decides whether normal mail starts a turn.
 """
 
 from __future__ import annotations
@@ -30,7 +29,6 @@ KIND_CHILD_PROGRESS: Final = 'child_progress'
 KIND_CHILD_FINAL: Final = 'child_final'
 KIND_CHILD_ABNORMAL_PAUSE: Final = 'child_abnormal_pause'
 KIND_ACCEPTANCE_VERDICT: Final = 'acceptance_verdict'
-# 预留：跨非父子节点的投递。地址空间已经就位，本期只在投递前加一道父子关系校验。
 KIND_PEER_NOTICE: Final = 'peer_notice'
 
 ORIGIN_USER: Final = 'user'
@@ -40,11 +38,7 @@ ORIGIN_SYSTEM: Final = 'system'
 
 RELATION_PARENT: Final = 'parent'
 RELATION_CHILD: Final = 'child'
-
-INTENT_PROGRESS: Final = '进展'
-INTENT_REQUEST: Final = '请求'
-INTENT_INSTRUCTION: Final = '指令'
-INTENT_KINDS: Final = frozenset({INTENT_PROGRESS, INTENT_REQUEST, INTENT_INSTRUCTION})
+RELATION_PEER: Final = 'peer'
 
 PRIORITY_HIGH: Final = 'high'
 PRIORITY_NORMAL: Final = 'normal'
@@ -82,15 +76,9 @@ def derive_message_kind(
     the endpoint relationship, so a model-sent message can never claim to be a
     terminal result or a verdict.
 
-    ``relation`` 是**发送方相对收件人的角色**，既不是消息的流动方向，也不是
-    "收件人相对发送人的角色"：
-
-    * 我发给自己的父节点 ⇒ 我是 ``child`` ⇒ ``child_progress``（子 → 父）；
-    * 我发给自己的子节点 ⇒ 我是 ``parent`` ⇒ ``parent_notice``（父 → 子）。
-
-    传参前问"我是收件人的谁"。问成"收件人是我的谁"就会把上行标成下行、
-    把下行标成上行——方向与取证都反了，而优先级只看 ``intent_kind``，不会
-    因此报错（实盘 bug，2026-10-24）。
+    ``relation`` 是**发送方相对收件人的角色**：发给父节点是 ``child``，
+    发给子节点/后代是 ``parent``，发给同级是 ``peer``。服务层按
+    ``parent_node_id`` 现算，模型无法声明。
     """
     normalized_origin = str(origin or '').strip().lower()
     normalized_system = str(system_kind or '').strip()
@@ -109,17 +97,18 @@ def derive_message_kind(
         return KIND_PARENT_NOTICE
     if normalized_relation == RELATION_CHILD:
         return KIND_CHILD_PROGRESS
+    if normalized_relation == RELATION_PEER:
+        return KIND_PEER_NOTICE
     raise MessageClassificationError(f'unknown_relation:{normalized_relation or "<empty>"}')
 
 
 def derive_priority(
     *,
     kind: str,
-    intent_kind: str = '',
     verdict: str = '',
 ) -> str:
     """Return ``high`` when the message must wake the recipient regardless of
-    its ``wake_on`` policy, ``normal`` otherwise."""
+    its ``enter_wait`` policy, ``normal`` otherwise."""
     normalized_kind = str(kind or '').strip()
     if not normalized_kind:
         raise MessageClassificationError('kind_required')
@@ -132,22 +121,7 @@ def derive_priority(
             if str(verdict or '').strip() == VERDICT_REJECT_NO_PROGRESS
             else PRIORITY_NORMAL
         )
-    if normalized_kind in {KIND_PARENT_NOTICE, KIND_CHILD_PROGRESS}:
-        return (
-            PRIORITY_HIGH
-            if str(intent_kind or '').strip() == INTENT_REQUEST
-            else PRIORITY_NORMAL
-        )
     return PRIORITY_NORMAL
-
-
-def validate_intent_kind(intent_kind: str) -> str:
-    normalized = str(intent_kind or '').strip()
-    if not normalized:
-        return INTENT_PROGRESS
-    if normalized not in INTENT_KINDS:
-        raise MessageClassificationError(f'unknown_intent_kind:{normalized}')
-    return normalized
 
 
 def validate_verdict(verdict: str) -> str:
@@ -162,10 +136,9 @@ def classify(
     origin: str,
     relation: str = '',
     system_kind: str = '',
-    intent_kind: str = '',
     verdict: str = '',
 ) -> tuple[str, str]:
     """Convenience: derive ``(kind, priority)`` in one call."""
     kind = derive_message_kind(origin=origin, relation=relation, system_kind=system_kind)
-    priority = derive_priority(kind=kind, intent_kind=intent_kind, verdict=verdict)
+    priority = derive_priority(kind=kind, verdict=verdict)
     return kind, priority

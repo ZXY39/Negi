@@ -10594,7 +10594,7 @@ function bindTaskHall() {
         if (S.taskNodeErrorHistories) delete S.taskNodeErrorHistories[`${taskId}:${nodeId}`];
         void renderNodeErrorHistory({ node_id: nodeId }, { force: true });
     });
-    // 消息列表标题右侧的定向通知输入框（效果 = task_append_notice 定向通知）。
+    // 消息列表标题右侧的节点消息输入框（投递到该节点的信箱）。
     U.adNoticeSend?.addEventListener("click", () => { void submitNodeNoticeComposer(); });
     U.adNoticeInput?.addEventListener("keydown", (event) => {
         if (event.key === "Enter" && !event.isComposing) {

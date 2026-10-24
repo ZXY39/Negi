@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from main.runtime.node_message_text import strip_node_message_prefix
+
 APPEND_NOTICE_CONTEXT_KEY = 'append_notice_context'
 PENDING_APPEND_NOTICE_RECORDS_KEY = 'pending_append_notice_records'
 APPEND_NOTICE_TAIL_PREFIX = '[NOTICE_TAIL]'
@@ -452,7 +454,11 @@ def build_append_notice_tail_messages(
     visible_user_messages: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     normalized = normalize_append_notice_context(context)
-    visible_texts = {str(item or '').strip() for item in list(visible_user_messages or []) if str(item or '').strip()}
+    visible_texts = {
+        strip_node_message_prefix(item)
+        for item in list(visible_user_messages or [])
+        if str(item or '').strip()
+    }
     messages: list[dict[str, Any]] = []
     for segment in list(normalized.get('compression_segments') or []):
         payload = {

@@ -31,7 +31,6 @@ def _node(
     kind: str,
     depth: int,
     phase: str,
-    wake_on: str = 'any',
 ) -> WaitNode:
     return WaitNode(
         node_id=node_id,
@@ -40,7 +39,6 @@ def _node(
         node_kind=kind,
         status='in_progress',
         phase=phase,
-        wake_on=wake_on,
     )
 
 
@@ -52,7 +50,6 @@ def test_cycle_between_subject_and_parked_acceptance_is_detected() -> None:
         node_kind='execution',
         status='in_progress',
         phase='waiting_acceptance',
-        wake_on='any',
         acceptance_node_id=ACCEPTANCE,
         handshake_state=ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
     )
@@ -74,16 +71,11 @@ def test_cycle_between_subject_and_parked_acceptance_is_detected() -> None:
 
 
 def test_normal_parking_is_not_a_cycle() -> None:
-    # 1) 根 `any` 停靠：有外部唤醒源。
-    root_any = _node(ROOT, parent='', kind='execution', depth=0, phase='waiting_explicit', wake_on='any')
+    # 根停靠：任意消息都可唤醒，不构成闭合等待。
+    root_any = _node(ROOT, parent='', kind='execution', depth=0, phase='waiting_explicit')
     assert find_wait_cycles([root_any]) == []
 
-    # 2) 父等全部子节点，但子节点是 `any` 停靠（可被消息唤醒）。
-    parent = _node(ROOT, parent='', kind='execution', depth=0, phase='waiting_explicit', wake_on='all_children')
-    child = _node(CHILD, parent=ROOT, kind='execution', depth=1, phase='waiting_explicit', wake_on='any')
-    assert find_wait_cycles([parent, child]) == []
-
-    # 3) 验收已给出结论（握手 accepted），验收节点等待下一次提交：正常长寿命停靠。
+    # 验收已给出结论（握手 accepted），验收节点等待下一次提交：正常长寿命停靠。
     subject = WaitNode(
         node_id=CHILD,
         parent_node_id=ROOT,
@@ -91,7 +83,6 @@ def test_normal_parking_is_not_a_cycle() -> None:
         node_kind='execution',
         status='in_progress',
         phase='before_model',
-        wake_on='any',
         acceptance_node_id=ACCEPTANCE,
         handshake_state=ACCEPTANCE_STATE_ACCEPTED,
     )

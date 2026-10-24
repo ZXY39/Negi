@@ -1843,6 +1843,29 @@ class TaskLogService:
             force=force,
         )
 
+    def externalize_node_artifact(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        content: str,
+        display_name: str,
+        source_kind: str,
+    ) -> tuple[str, str]:
+        """Write a node-readable artifact and return `(summary, artifact_ref)`.
+
+        The ref is empty when the content store is unavailable; callers must
+        report that honestly rather than pretending the artifact exists.
+        """
+        return self._summarize_content(
+            str(content or ''),
+            task_id=str(task_id or '').strip(),
+            node_id=str(node_id or '').strip(),
+            display_name=str(display_name or 'node-artifact').strip(),
+            source_kind=str(source_kind or 'node_artifact').strip(),
+            force=True,
+        )
+
     def _summarize_node_input(self, *, task_id: str, node_id: str, content: str) -> tuple[str, str]:
         """节点 input 的存储形态：超过内联阈值就外置成 `input_ref`，消息列表也不例外。
 

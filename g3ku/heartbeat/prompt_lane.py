@@ -574,6 +574,49 @@ def shutdown_resume_lines() -> list[str]:
     ]
 
 
+def _frontdoor_node_message_lines(
+    event: dict[str, Any],
+    retrieval_parts: list[str],
+    *,
+    output_inline_limit: int,
+    externalizer: EventTextExternalizer | None,
+) -> list[str]:
+    task_id = _non_empty_text(event.get("task_id"))
+    task_title = _non_empty_text(event.get("task_title") or task_id) or "task"
+    node_id = _non_empty_text(event.get("source_node_id"))
+    node_goal = _non_empty_text(event.get("source_goal") or node_id) or "node"
+    content = _non_empty_text(event.get("content"))
+    ref = _non_empty_text(event.get("ref"))
+    body, retrieval = _long_text_body(
+        content or '<empty>',
+        inline_limit=max(1000, int(output_inline_limit or 0)),
+        event=event,
+        externalizer=externalizer,
+        continuation_indent="    ",
+    )
+    _append_retrieval_parts(
+        retrieval_parts,
+        "frontdoor_node_message",
+        task_title,
+        task_id,
+        node_goal,
+        node_id,
+        retrieval,
+    )
+    lines = [
+        f"- Node message from task {task_title} ({task_id})",
+        f"  Node: {node_goal} ({node_id})",
+        f"  Message: {body}",
+    ]
+    if ref:
+        lines.append(f"  Ref: {ref}")
+    lines.append(
+        f"  Reply with send_message(to=\"{node_id}\", content=...); the message is signed, "
+        'so use the node id rather than guessing.'
+    )
+    return lines
+
+
 def _event_bundle_content(
     events: list[dict[str, Any]],
     *,
@@ -589,6 +632,16 @@ def _event_bundle_content(
         reason = _non_empty_text(event.get("event_reason") or event.get("kind") or event.get("reason")).lower()
         if reason == "task_stall":
             lines.extend(_task_stall_lines(event, retrieval_parts))
+            continue
+        if reason == "frontdoor_node_message":
+            lines.extend(
+                _frontdoor_node_message_lines(
+                    event,
+                    retrieval_parts,
+                    output_inline_limit=output_inline_limit,
+                    externalizer=externalizer,
+                )
+            )
             continue
         if reason == "task_node_error":
             lines.extend(

@@ -1,0 +1,37 @@
+schema_version: 1
+kind: tool
+display_name: "查看前门消息"
+name: view_message_history
+description: Read every node message this frontdoor session has received as a JSON artifact reference you can open with content_open/content_search.
+tool_result_delivery_contract: runtime_managed
+source:
+  type: ''
+  url: ''
+  ref: ''
+current_version:
+  summary: Frontdoor inbox history; signed node messages, artifact reference.
+  compare_rule: Treat manifest, main/, parameter contract, or returned payload changes as version-relevant.
+  source_of_truth: resource.yaml and main/tool.py define the effective behavior.
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties: {}
+  required: []
+governance:
+  display_name: View Frontdoor Messages
+  description: Read the frontdoor's node-message inbox.
+  risk_level: low
+  destructive: false
+  allowed_roles:
+    - ceo
+exposure:
+  agent: true
+  main_runtime: false
+toolskill:
+  enabled: false

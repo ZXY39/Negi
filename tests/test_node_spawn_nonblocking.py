@@ -9,7 +9,6 @@ from types import SimpleNamespace
 import pytest
 
 from main.models import (
-    NodeFinalResult,
     NodeRecord,
     SpawnChildResult,
     SpawnChildSpec,
@@ -160,7 +159,8 @@ class TestCreationReceipts:
 class TestToolReturnShape:
     @pytest.mark.asyncio
     async def test_returns_created_and_rejected_not_results(self):
-        async def spawn(specs, call_id):
+        async def spawn(specs, call_id, wait_all_children):
+            _ = call_id, wait_all_children
             return [
                 SpawnChildResult(goal='a', state='created', child_node_id=CHILD_A),
                 SpawnChildResult(
@@ -184,6 +184,7 @@ class TestToolReturnShape:
         ]
         assert payload['rejected'] == [{'goal': 'b', 'gate': 'review', 'reason': '重复'}]
         assert 'child_final' in payload['summary']
+        assert 'enter_wait' in payload['summary']
         assert 'children' not in payload
 
     def test_no_longer_exempts_the_universal_timeout(self):
@@ -276,61 +277,6 @@ class TestRunnableScan:
         dispatcher = _FakeDispatcher()
         assert await service.task_actor_service._dispatch_runnable_nodes(TASK, dispatcher) is True
         assert dispatcher.scheduled == [CHILD_B]
-
-    @pytest.mark.asyncio
-    async def test_all_children_root_is_not_revived_by_the_first_child(self, tmp_path):
-        # 实盘 task:eb3f3a7753f7：A 回执 10:38:38，根 10:38:43 就起了一轮，B 还在跑。
-        service = _service(tmp_path)
-        _seed(service)
-        for node_id in (ROOT, CHILD_A, CHILD_B):
-            service.store.upsert_task_runtime_frame(
-                TaskProjectionRuntimeFrameRecord(task_id=TASK, node_id=node_id, phase='waiting_explicit')
-            )
-        service.store.update_node(
-            ROOT,
-            lambda record: record.model_copy(
-                update={'metadata': {**dict(record.metadata or {}), 'node_wait_wake_on': 'all_children'}}
-            ),
-        )
-        service.store.update_node(CHILD_A, lambda record: record.model_copy(update={'status': 'success'}))
-        _mail(service, node_id=ROOT, source_node_id=CHILD_A)
-        dispatcher = _FakeDispatcher()
-
-        assert await service.task_actor_service._dispatch_runnable_nodes(TASK, dispatcher) is False
-        assert dispatcher.scheduled == []
-
-        service.store.update_node(CHILD_B, lambda record: record.model_copy(update={'status': 'success'}))
-        _mail(service, node_id=ROOT, source_node_id=CHILD_B)
-
-        assert await service.task_actor_service._dispatch_runnable_nodes(TASK, dispatcher) is True
-        assert dispatcher.scheduled == [ROOT]
-
-    @pytest.mark.asyncio
-    async def test_high_priority_mail_bypasses_all_children(self, tmp_path):
-        service = _service(tmp_path)
-        _seed(service)
-        for node_id in (ROOT, CHILD_A, CHILD_B):
-            service.store.upsert_task_runtime_frame(
-                TaskProjectionRuntimeFrameRecord(task_id=TASK, node_id=node_id, phase='waiting_explicit')
-            )
-        service.store.update_node(
-            ROOT,
-            lambda record: record.model_copy(
-                update={'metadata': {**dict(record.metadata or {}), 'node_wait_wake_on': 'all_children'}}
-            ),
-        )
-        service.store.update_node(CHILD_A, lambda record: record.model_copy(update={'status': 'success'}))
-        _mail(
-            service,
-            node_id=ROOT,
-            source_node_id=CHILD_A,
-            kind='child_abnormal_pause',
-            priority='high',
-        )
-        dispatcher = _FakeDispatcher()
-
-        assert await service.task_actor_service._dispatch_runnable_nodes(TASK, dispatcher) is True
-        assert dispatcher.scheduled == [ROOT]
 
     @pytest.mark.asyncio
     async def test_running_child_is_left_alone(self, tmp_path):
@@ -505,74 +451,6 @@ class TestOrphanReaperAdaptation:
         assert child.is_paused is True
 
 
-class TestAllChildrenWake:
-    @pytest.mark.asyncio
-    async def test_wakes_only_after_every_child_reported(self, tmp_path, monkeypatch):
-        service = _service(tmp_path)
-        _seed(service)
-        service.store.upsert_task_runtime_frame(
-            TaskProjectionRuntimeFrameRecord(task_id=TASK, node_id=ROOT, phase='waiting_explicit')
-        )
-        service.store.update_node(
-            ROOT,
-            lambda record: record.model_copy(
-                update={'metadata': {**dict(record.metadata or {}), 'node_wait_wake_on': 'all_children'}}
-            ),
-        )
-        wakes: list[str] = []
-
-        async def wake(*, task_id: str, node_id: str) -> str:
-            wakes.append(node_id)
-            return 'resumed'
-
-        monkeypatch.setattr(service, 'wake_node_on_message', wake)
-
-        def finish(node_id: str) -> None:
-            service.store.update_node(
-                node_id,
-                lambda record: record.model_copy(
-                    update={
-                        'status': 'success',
-                        'metadata': {
-                            **dict(record.metadata or {}),
-                            'result_payload': NodeFinalResult(
-                                status='success',
-                                delivery_status='final',
-                                summary='done',
-                                answer='',
-                                evidence=[],
-                                remaining_work=[],
-                                blocking_reason='',
-                            ).model_dump(mode='json'),
-                        },
-                    }
-                ),
-            )
-
-        finish(CHILD_A)
-        await service.deliver_node_message(
-            task_id=TASK,
-            target_node_id=ROOT,
-            message='a done',
-            origin='node',
-            relation='parent',
-            system_kind='child_final',
-            source_node_id=CHILD_A,
-        )
-        assert wakes == []
-
-        finish(CHILD_B)
-        await service.deliver_node_message(
-            task_id=TASK,
-            target_node_id=ROOT,
-            message='b done',
-            origin='node',
-            relation='parent',
-            system_kind='child_final',
-            source_node_id=CHILD_B,
-        )
-        assert wakes == [ROOT]
-
-
-async def _noop(specs, call_id):
+async def _noop(specs, call_id, wait_all_children=False):
+    _ = specs, call_id, wait_all_children
     return []

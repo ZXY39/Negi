@@ -1,0 +1,50 @@
+schema_version: 1
+kind: tool
+display_name: "发送节点消息"
+name: send_message
+description: Send a message from the frontdoor to execution nodes in tasks owned by this session. Each target is judged on its own; terminal or under-acceptance targets reject with a reason.
+tool_result_delivery_contract: runtime_managed
+source:
+  type: ''
+  url: ''
+  ref: ''
+current_version:
+  summary: Frontdoor-lane node messaging; same to/content/ref shape as the node-side tool, execution-node targets only.
+  compare_rule: Treat manifest, main/, parameter contract, or returned payload changes as version-relevant.
+  source_of_truth: resource.yaml and main/tool.py define the effective behavior.
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    to:
+      type: [string, array]
+      items:
+        type: string
+      description: Execution node id, or a list of them, in a task owned by this session.
+      minLength: 1
+    content:
+      type: string
+      minLength: 1
+      description: Message body.
+    ref:
+      type: string
+      description: Optional pointer to a large artifact; keep content a summary then.
+  required: [to, content]
+governance:
+  display_name: Send Message
+  description: Send a frontdoor message to execution nodes.
+  risk_level: low
+  destructive: false
+  allowed_roles:
+    - ceo
+exposure:
+  agent: true
+  main_runtime: false
+toolskill:
+  enabled: false

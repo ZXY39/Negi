@@ -128,28 +128,38 @@ class ViewNodeTreeTool(Tool):
     @property
     def description(self) -> str:
         return (
-            'One line per node for the whole subtree under you, so you can orient before delegating '
-            'or messaging. Depth and total node count are both bounded; when a tree is too large the '
-            'result says so and gives a pointer instead of half a tree.'
+            'One line per node, with goal, id, state, kind, acceptance status and whether you may '
+            'message or control it. `scope=subtree` walks your descendants; `scope=family` also '
+            'shows your parent and your direct siblings. Acceptance nodes stay visible but are '
+            'marked non-messageable/non-controllable. Depth and total node count are bounded; when '
+            'the result is too large it says so and gives a pointer instead of half a tree.'
         )
 
     @property
     def model_description(self) -> str:
-        return 'First line per node for your whole subtree, bounded in depth and size.'
+        return 'Bounded tree/contacts view: parent, self, siblings and descendants, with messageable/controllable flags.'
 
     @property
     def parameters(self) -> dict[str, Any]:
         return {
             'type': 'object',
             'properties': {
+                'scope': {
+                    'type': 'string',
+                    'enum': ['subtree', 'family'],
+                    'description': (
+                        'subtree = your descendants only; family = parent + self + direct siblings + '
+                        'your descendants.'
+                    ),
+                },
                 'depth': {'type': 'integer', 'minimum': 1, 'description': 'How deep to walk.'},
             },
             'required': [],
         }
 
-    async def execute(self, depth: Any = None, **kwargs: Any) -> str:
+    async def execute(self, depth: Any = None, scope: str = 'subtree', **kwargs: Any) -> str:
         _ = kwargs
-        payload = await self._view_tree(depth=depth)
+        payload = await self._view_tree(depth=depth, scope=scope)
         return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
@@ -176,13 +186,13 @@ class ManageChildNodesTool(Tool):
     @property
     def description(self) -> str:
         return (
-            'Pause, resume, or terminate your direct child nodes in one batch. `pause` is '
+            'Pause, resume, or terminate your direct execution child nodes in one batch. `pause` is '
             'cooperative: the child finishes the tool call it is in and starts no new turn. '
             '`resume` writes a message to the child and wakes it — put the fix or instruction in '
             '`note`; it is rejected for a child that is merely waiting (a waiting node continues '
-            'when its own wake source delivers). `terminate` moves any non-terminal child to '
-            'failed and requires `reason`. Results are per item and independent. Terminating a '
-            'node does not terminate its children; list them too if that is what you want.'
+            'when its own wake source delivers). `terminate` ends the child and its whole subtree, '
+            'including descendant acceptance nodes, and requires `reason`. Acceptance children are '
+            'not controllable here. Results are per item and independent.'
         )
 
     @property

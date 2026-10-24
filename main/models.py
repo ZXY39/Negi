@@ -242,11 +242,12 @@ class TaskNodeNotification(Model):
     # 消息三态：consumed_at=控制/决策回合处理过；merged_at=内容真正并入模型上下文。
     # consumed 而未 merged 显示「已消费」，merged 后显示「已并入上下文」。
     merged_at: str = ''
-    # 以下七格由 `main/runtime/node_message_kind.py` 机械推导，发送方不能自报：
-    # kind/priority 决定投递与唤醒，intent_kind 是模型唯一可声明的意图词。
+    # 以下字段由 `main/runtime/node_message_kind.py` 机械推导，发送方不能自报：
+    # kind/priority 决定投递与唤醒。
     # 全部带默认值，存量行（payload_json 里没有这些键）照旧解析。
     kind: str = ''
     priority: str = ''
+    # 存量字段：新代码不再写入/读取，只为旧行解析保留。
     intent_kind: str = ''
     fingerprint: str = ''
     in_reply_to: str = ''
@@ -255,6 +256,26 @@ class TaskNodeNotification(Model):
     # 仅 acceptance_verdict：绑定被验的那一份提交（迟到裁决规则唯一判据）。
     submission_id: str = ''
     verdict: str = ''
+    # `spawn_child_nodes.wait_all_children=true` 的批次：child_final 先落箱、
+    # held_at 非空且 released_at 为空时既不注入也不唤醒，批次全部终局后一起释放。
+    batch_id: str = ''
+    held_at: str = ''
+    released_at: str = ''
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class FrontdoorNodeMessage(Model):
+    """A root-node message addressed to the frontdoor/session inbox."""
+
+    message_id: str
+    session_id: str
+    task_id: str
+    source_node_id: str = ''
+    content: str = ''
+    ref: str = ''
+    status: str = 'pending'
+    created_at: str = ''
+    consumed_at: str = ''
     payload: dict[str, Any] = Field(default_factory=dict)
 
 

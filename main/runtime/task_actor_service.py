@@ -21,8 +21,9 @@ from main.runtime.acceptance_handshake import (
     ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
     normalize_acceptance_handshake,
 )
+from main.runtime.node_mailbox import notification_is_held
 from main.runtime.node_runner import SKIPPED_CHECK_RESULT
-from main.runtime.node_wake import PARKED_PHASES, WAKE_ON_ALL_CHILDREN, wait_inputs, wake_ready
+from main.runtime.node_wake import PARKED_PHASES
 from main.runtime.wait_graph import build_wait_nodes, find_wait_cycles
 from main.types import KIND_ACCEPTANCE
 
@@ -1049,7 +1050,7 @@ class TaskActorService:
                 # 旧管线（或本函数的上一次运行）已经落过账，只差把执行节点行收尾：
                 # 握手 accepted / rejected_terminal 且执行节点仍非终态，是旧模型把
                 # "结果"记在 spawn entry 上、节点行没动留下的形态。补上终态才会
-                # 触发 child_final，也才会让父节点的 all_children 满足。
+                # 触发 child_final，也才会让父节点的批次完成判据满足。
                 if execution_terminal:
                     continue
                 if bool(getattr(execution, 'is_paused', False)) or bool(
@@ -1133,6 +1134,7 @@ class TaskActorService:
                 item
                 for item in list(self._store.list_task_node_notifications(task_id, node_id) or [])
                 if str(item.status or '').strip() == 'delivered'
+                and not notification_is_held(item)
             ]
         except Exception:
             return []
@@ -1148,31 +1150,9 @@ class TaskActorService:
         unread_rows: list[Any],
         records: list[Any],
     ) -> bool:
-        """停靠中的节点按自己的 `wake_on` 复派，与投递唤醒共用同一判据。
-
-        可派发扫描原先把「信箱有未读」当作唯一条件，于是 `wake_on=all_children`
-        的父节点在第一个子节点回执到达时就被复派——实盘 `task:eb3f3a7753f7`：
-        子节点 A 于 10:38:38 回执，根节点 10:38:43 就起了一轮，而 B 还在跑。
-        高优先级未读仍无条件放行（P6 的必唤醒集合）。
-        """
-        metadata = node.metadata if isinstance(getattr(node, 'metadata', None), dict) else {}
-        policy = str(metadata.get('node_wait_wake_on') or '').strip() or 'any'
-        if policy != WAKE_ON_ALL_CHILDREN:
-            return True
-        children, finals = wait_inputs(
-            children=records,
-            notifications=list(self._store.list_task_node_notifications(task_id, node.node_id) or []),
-            parent_node_id=str(getattr(node, 'node_id', '') or '').strip(),
-        )
-        return wake_ready(
-            wake_on=policy,
-            unread_count=len(unread_rows),
-            has_high_priority=any(
-                str(getattr(item, 'priority', '') or '').strip() == 'high' for item in unread_rows
-            ),
-            children=children,
-            unread_final_sources=finals,
-        )
+        """停靠中的节点只要有可注入未读就复派；批次等待不再参与停靠判据。"""
+        _ = task_id, node, records
+        return bool(unread_rows)
 
     async def _dispatch_runnable_nodes(self, task_id: str, dispatcher: 'TaskNodeDispatcher') -> bool:
         """把"现在就该跑、却没人跑"的节点交给调度器。
@@ -1181,8 +1161,7 @@ class TaskActorService:
 
         * 执行节点：信箱有未读，或**还没有任何运行帧**（刚创建、第一次起跑）。
           有帧且无未读 = 停靠中（等待消息/等验收），再派发只会让它空转一回合。
-          停靠中的节点还必须过 `wake_on` 判据：`all_children` 不能靠一封子节点
-          回执就复派。
+          停靠中的节点只要有可注入未读就复派；批次 held 行不计入未读。
         * 验收节点：握手处于待裁决且登记了可解析的提交引用；或有未读消息。
           被验节点已终态时不派发（没有可检验的对象；T15 的联动由 P4 收口）。
 
@@ -1340,8 +1319,8 @@ class TaskActorService:
     async def _break_wait_cycles(self, task_id: str) -> bool:
         """等待图环检测（P6 兜底）：命中则强制唤醒环里最靠近根的节点。
 
-        判据只读持久事实：节点行 + 帧相位 + 握手状态 + `wake_on`。`wake_on=any`
-        的停靠被视为有外部唤醒源，不参与成环；终态节点会发出终局消息，也不参与。
+        判据只读持久事实：节点行 + 帧相位 + 握手状态。停靠节点可被任意消息唤醒，
+        不参与成环；终态节点会发出终局消息，也不参与。
         """
         task = self._store.get_task(task_id)
         if task is None:

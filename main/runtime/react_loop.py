@@ -157,6 +157,10 @@ from main.runtime.model_route import (
     LEASE_OUTCOME_SUCCESS,
     RouteCandidateFilters,
 )
+from main.runtime.node_message_kind import (
+    KIND_CHILD_ABNORMAL_PAUSE,
+    KIND_CHILD_FINAL,
+)
 from main.runtime.node_prompt_contract import (
     NodeRuntimeToolContract,
     extract_node_dynamic_contract_payload,
@@ -1515,6 +1519,21 @@ class ReActToolLoop:
                     )
                     continue
                 if final_result_turn:
+                    if str(getattr(node, 'node_kind', '') or '').strip().lower() == 'execution':
+                        blockers = self._final_submission_blockers(task=task, node=node)
+                        if blockers.get('non_terminal_node_ids') or blockers.get('pending_message_ids'):
+                            blocked_text = self._final_submission_blocked_text(blockers)
+                            message_history = self._record_rejected_tool_turn(
+                                task=task,
+                                node=node,
+                                response=response,
+                                response_tool_calls=response_tool_calls,
+                                message_history=message_history,
+                                runtime_context=runtime_context,
+                                error_content=blocked_text,
+                            )
+                            repair_overlay_text = blocked_text
+                            continue
                     terminal_result, next_history, contract_violations, protocol_error = await self._handle_final_result_tool_turn(
                         task=task,
                         node=node,
@@ -7498,6 +7517,99 @@ class ReActToolLoop:
             attempt_limit=attempt_limit,
             latest_issue=latest_issue,
         )
+
+    def _final_submission_blockers(self, *, task, node) -> dict[str, list[str]]:
+        """Children that must settle (or be terminated) before this node submits.
+
+        Two questions, both needed: no non-terminal execution descendant, and no
+        unread/unmerged child result from a direct child. The second closes the
+        asynchronous-delivery race that the first cannot see.
+        """
+        store = getattr(self._log_service, '_store', None)
+        list_nodes = getattr(store, 'list_nodes', None)
+        list_notifications = getattr(store, 'list_task_node_notifications', None)
+        if not callable(list_nodes) or not callable(list_notifications):
+            return {'non_terminal_node_ids': [], 'pending_message_ids': []}
+        try:
+            records = {
+                str(getattr(item, 'node_id', '') or '').strip(): item
+                for item in list(list_nodes(task.task_id) or [])
+            }
+        except Exception:
+            return {'non_terminal_node_ids': [], 'pending_message_ids': []}
+        node_id = str(getattr(node, 'node_id', '') or '').strip()
+
+        def is_descendant(candidate: Any) -> bool:
+            current = str(getattr(candidate, 'parent_node_id', '') or '').strip()
+            seen: set[str] = set()
+            while current and current not in seen:
+                if current == node_id:
+                    return True
+                seen.add(current)
+                parent = records.get(current)
+                if parent is None:
+                    return False
+                current = str(getattr(parent, 'parent_node_id', '') or '').strip()
+            return False
+
+        non_terminal: list[str] = []
+        for record_id, record in records.items():
+            if not record_id or record_id == node_id:
+                continue
+            if str(getattr(record, 'node_kind', '') or '').strip().lower() != 'execution':
+                continue
+            if str(getattr(record, 'status', '') or '').strip().lower() in {'success', 'failed'}:
+                continue
+            if is_descendant(record):
+                non_terminal.append(record_id)
+
+        direct_children = {
+            record_id
+            for record_id, record in records.items()
+            if str(getattr(record, 'parent_node_id', '') or '').strip() == node_id
+        }
+        pending_messages: list[str] = []
+        try:
+            notifications = list(list_notifications(task.task_id, node_id) or [])
+        except Exception:
+            notifications = []
+        for item in notifications:
+            if str(getattr(item, 'kind', '') or '').strip() not in {
+                KIND_CHILD_FINAL,
+                KIND_CHILD_ABNORMAL_PAUSE,
+            }:
+                continue
+            if str(getattr(item, 'source_node_id', '') or '').strip() not in direct_children:
+                continue
+            status = str(getattr(item, 'status', '') or '').strip()
+            merged = str(getattr(item, 'merged_at', '') or '').strip()
+            if status == 'delivered' or (status == 'consumed' and not merged):
+                pending_messages.append(str(getattr(item, 'notification_id', '') or '').strip())
+        return {
+            'non_terminal_node_ids': sorted(non_terminal),
+            'pending_message_ids': [item for item in pending_messages if item],
+        }
+
+    @staticmethod
+    def _final_submission_blocked_text(blockers: dict[str, list[str]]) -> str:
+        parts = ['最终提交被拒绝：']
+        non_terminal = list(blockers.get('non_terminal_node_ids') or [])
+        pending = list(blockers.get('pending_message_ids') or [])
+        if non_terminal:
+            parts.append(
+                '仍有未终态执行后代：'
+                + ', '.join(non_terminal[:20])
+                + (' …' if len(non_terminal) > 20 else '')
+                + '。先等它们结束，或用 manage_child_nodes(terminate) 结束对应子树。'
+            )
+        if pending:
+            parts.append(
+                '仍有未读/未合并的子节点结果：'
+                + ', '.join(pending[:20])
+                + (' …' if len(pending) > 20 else '')
+                + '。先处理这些消息再提交。'
+            )
+        return ' '.join(parts)
 
     async def _handle_final_result_tool_turn(
         self,

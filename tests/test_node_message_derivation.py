@@ -1,8 +1,8 @@
 """机械推导 contract for node-mailbox messages.
 
-These cases pin the two guarantees the derivation exists for:
+These cases pin the guarantees the derivation exists for:
 1. a model-sent message can never claim to be a terminal result or a verdict;
-2. priority follows "did the sender park", not "what type is it".
+2. priority is the runtime's judgement, not a sender-declared field.
 """
 
 from __future__ import annotations
@@ -11,15 +11,13 @@ import pytest
 
 from main.models import TaskNodeNotification
 from main.runtime.node_message_kind import (
-    INTENT_INSTRUCTION,
-    INTENT_PROGRESS,
-    INTENT_REQUEST,
     KIND_ACCEPTANCE_VERDICT,
     KIND_CHILD_ABNORMAL_PAUSE,
     KIND_CHILD_FINAL,
     KIND_CHILD_PROGRESS,
     KIND_FRONTDOOR_NOTICE,
     KIND_PARENT_NOTICE,
+    KIND_PEER_NOTICE,
     KIND_USER_DIRECT,
     ORIGIN_FRONTDOOR,
     ORIGIN_NODE,
@@ -28,6 +26,7 @@ from main.runtime.node_message_kind import (
     PRIORITY_NORMAL,
     RELATION_CHILD,
     RELATION_PARENT,
+    RELATION_PEER,
     VERDICT_PASS,
     VERDICT_REJECT,
     VERDICT_REJECT_NO_PROGRESS,
@@ -35,7 +34,6 @@ from main.runtime.node_message_kind import (
     classify,
     derive_message_kind,
     derive_priority,
-    validate_intent_kind,
     validate_verdict,
 )
 
@@ -48,6 +46,7 @@ class TestDeriveKind:
             (ORIGIN_FRONTDOOR, '', KIND_FRONTDOOR_NOTICE),
             (ORIGIN_NODE, RELATION_PARENT, KIND_PARENT_NOTICE),
             (ORIGIN_NODE, RELATION_CHILD, KIND_CHILD_PROGRESS),
+            (ORIGIN_NODE, RELATION_PEER, KIND_PEER_NOTICE),
         ],
     )
     def test_origin_and_relation(self, origin, relation, expected):
@@ -64,6 +63,7 @@ class TestDeriveKind:
         # 模型只有 origin/relation 可声明；这条钉住它拿不到终局与裁决两类。
         assert derive_message_kind(origin=ORIGIN_NODE, relation=RELATION_CHILD) == KIND_CHILD_PROGRESS
         assert derive_message_kind(origin=ORIGIN_NODE, relation=RELATION_PARENT) == KIND_PARENT_NOTICE
+        assert derive_message_kind(origin=ORIGIN_NODE, relation=RELATION_PEER) == KIND_PEER_NOTICE
 
     def test_unknown_system_kind_rejected(self):
         with pytest.raises(MessageClassificationError):
@@ -97,17 +97,12 @@ class TestDerivePriority:
             == PRIORITY_HIGH
         )
 
-    @pytest.mark.parametrize('kind', [KIND_PARENT_NOTICE, KIND_CHILD_PROGRESS])
-    def test_request_intent_is_high(self, kind):
-        assert derive_priority(kind=kind, intent_kind=INTENT_REQUEST) == PRIORITY_HIGH
-
-    @pytest.mark.parametrize('intent', [INTENT_PROGRESS, INTENT_INSTRUCTION, ''])
-    @pytest.mark.parametrize('kind', [KIND_PARENT_NOTICE, KIND_CHILD_PROGRESS])
-    def test_non_request_intents_are_normal(self, kind, intent):
-        assert derive_priority(kind=kind, intent_kind=intent) == PRIORITY_NORMAL
-
-    def test_terminal_result_is_normal(self):
-        assert derive_priority(kind=KIND_CHILD_FINAL) == PRIORITY_NORMAL
+    @pytest.mark.parametrize(
+        'kind',
+        [KIND_PARENT_NOTICE, KIND_CHILD_PROGRESS, KIND_PEER_NOTICE, KIND_CHILD_FINAL],
+    )
+    def test_node_messages_are_normal(self, kind):
+        assert derive_priority(kind=kind) == PRIORITY_NORMAL
 
     def test_empty_kind_rejected(self):
         with pytest.raises(MessageClassificationError):
@@ -115,17 +110,6 @@ class TestDerivePriority:
 
 
 class TestValidators:
-    def test_intent_defaults_to_progress(self):
-        assert validate_intent_kind('') == INTENT_PROGRESS
-
-    @pytest.mark.parametrize('intent', [INTENT_PROGRESS, INTENT_REQUEST, INTENT_INSTRUCTION])
-    def test_known_intents(self, intent):
-        assert validate_intent_kind(intent) == intent
-
-    def test_unknown_intent_rejected(self):
-        with pytest.raises(MessageClassificationError):
-            validate_intent_kind('索要')
-
     @pytest.mark.parametrize('verdict', [VERDICT_PASS, VERDICT_REJECT, VERDICT_REJECT_NO_PROGRESS])
     def test_known_verdicts(self, verdict):
         assert validate_verdict(verdict) == verdict
@@ -137,9 +121,14 @@ class TestValidators:
 
 
 def test_classify_pairs_kind_and_priority():
-    assert classify(
-        origin=ORIGIN_NODE, relation=RELATION_PARENT, intent_kind=INTENT_REQUEST
-    ) == (KIND_PARENT_NOTICE, PRIORITY_HIGH)
+    assert classify(origin=ORIGIN_NODE, relation=RELATION_PARENT) == (
+        KIND_PARENT_NOTICE,
+        PRIORITY_NORMAL,
+    )
+    assert classify(origin=ORIGIN_NODE, relation=RELATION_PEER) == (
+        KIND_PEER_NOTICE,
+        PRIORITY_NORMAL,
+    )
     assert classify(origin=ORIGIN_USER) == (KIND_USER_DIRECT, PRIORITY_HIGH)
     assert classify(
         origin='system', system_kind=KIND_ACCEPTANCE_VERDICT, verdict=VERDICT_REJECT
@@ -161,8 +150,12 @@ class TestNotificationModel:
         )
         assert record.kind == ''
         assert record.priority == ''
+        assert record.intent_kind == ''
         assert record.submission_id == ''
         assert record.verdict == ''
+        assert record.batch_id == ''
+        assert record.held_at == ''
+        assert record.released_at == ''
 
     def test_round_trip_keeps_derived_fields(self):
         record = TaskNodeNotification(
@@ -176,9 +169,13 @@ class TestNotificationModel:
             priority=PRIORITY_HIGH,
             submission_id='sub:9',
             verdict=VERDICT_REJECT_NO_PROGRESS,
+            batch_id='call:9',
+            held_at='2026-10-23T00:00:01+00:00',
         )
         restored = TaskNodeNotification.model_validate_json(record.model_dump_json())
         assert restored.kind == KIND_ACCEPTANCE_VERDICT
         assert restored.priority == PRIORITY_HIGH
         assert restored.submission_id == 'sub:9'
         assert restored.verdict == VERDICT_REJECT_NO_PROGRESS
+        assert restored.batch_id == 'call:9'
+        assert restored.held_at == '2026-10-23T00:00:01+00:00'

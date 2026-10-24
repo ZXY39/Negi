@@ -6,14 +6,12 @@ closed waiting cycle:
 
 * an execution node waiting for an acceptance verdict while the acceptance node
   is itself parked waiting for the next submission (a verdict nobody will
-  produce), or
-* a parent parked on ``all_children`` while a child is parked on
-  ``all_children`` and both closures only point at each other.
+  produce).
 
-Nodes parked with ``wake_on=any`` are treated as having an external wake source
-(any sender may deliver a message), so they never form an edge. Terminal nodes
-settle and therefore also break the chain. The detector is deliberately
-conservative: a false positive would wake a legitimately parked node.
+Every parked node is externally wakeable by any mailbox message, so spawn-batch
+waits are a tree-shaped chain rather than a cycle. Terminal nodes settle and
+therefore also break the chain. The detector is deliberately conservative: a
+false positive would wake a legitimately parked node.
 """
 
 from __future__ import annotations
@@ -33,7 +31,6 @@ class WaitNode:
     node_kind: str
     status: str
     phase: str
-    wake_on: str = 'any'
     acceptance_node_id: str = ''
     subject_node_id: str = ''
     handshake_state: str = ''
@@ -65,7 +62,6 @@ def build_wait_nodes(
                 node_kind=node_kind,
                 status=str(getattr(record, 'status', '') or '').strip().lower(),
                 phase=str(frame.get('phase') or '').strip(),
-                wake_on=str(metadata.get('node_wait_wake_on') or 'any').strip() or 'any',
                 acceptance_node_id=str(handshake.get('acceptance_node_id') or '').strip(),
                 subject_node_id=str(metadata.get('accepted_node_id') or getattr(record, 'parent_node_id', '') or '').strip(),
                 handshake_state=str(handshake.get('state') or '').strip(),
@@ -82,7 +78,7 @@ def _is_parked(node: WaitNode) -> bool:
     return node.phase in PARKED_PHASES
 
 
-def _wait_edges(nodes_by_id: dict[str, WaitNode], children_by_parent: dict[str, list[str]]) -> dict[str, list[str]]:
+def _wait_edges(nodes_by_id: dict[str, WaitNode]) -> dict[str, list[str]]:
     edges: dict[str, list[str]] = {}
     for node in nodes_by_id.values():
         if _is_terminal(node) or not _is_parked(node):
@@ -105,14 +101,6 @@ def _wait_edges(nodes_by_id: dict[str, WaitNode], children_by_parent: dict[str, 
                 and _is_parked(subject)
             ):
                 out.append(subject.node_id)
-        if node.node_kind == 'execution' and node.wake_on == 'all_children':
-            for child_id in list(children_by_parent.get(node.node_id) or []):
-                child = nodes_by_id.get(child_id)
-                if child is None or _is_terminal(child) or child.node_kind != 'execution':
-                    continue
-                # `any` 停靠有外部唤醒源；只有同样 `all_children` 的子节点才构成闭合等待。
-                if _is_parked(child) and child.wake_on == 'all_children':
-                    out.append(child.node_id)
         if out:
             edges[node.node_id] = list(dict.fromkeys(out))
     return edges
@@ -121,11 +109,7 @@ def _wait_edges(nodes_by_id: dict[str, WaitNode], children_by_parent: dict[str, 
 def find_wait_cycles(nodes: list[WaitNode]) -> list[list[str]]:
     """Return the strongly-connected waiting components that form a cycle."""
     nodes_by_id = {node.node_id: node for node in list(nodes or [])}
-    children_by_parent: dict[str, list[str]] = {}
-    for node in nodes_by_id.values():
-        if node.parent_node_id:
-            children_by_parent.setdefault(node.parent_node_id, []).append(node.node_id)
-    edges = _wait_edges(nodes_by_id, children_by_parent)
+    edges = _wait_edges(nodes_by_id)
 
     index_counter = 0
     indexes: dict[str, int] = {}

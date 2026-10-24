@@ -8,6 +8,7 @@ READ_CHILD_PROGRESS_TOOL_NAME = "read_child_progress"
 SEND_MESSAGE_TOOL_NAME = "send_message"
 SPAWN_CHILD_NODES_TOOL_NAME = "spawn_child_nodes"
 SILENT_TOOL_NAME = "silent"
+VIEW_MESSAGE_HISTORY_TOOL_NAME = "view_message_history"
 VIEW_NODE_TREE_TOOL_NAME = "view_node_tree"
 
 
@@ -20,5 +21,6 @@ __all__ = [
     "SEND_MESSAGE_TOOL_NAME",
     "SPAWN_CHILD_NODES_TOOL_NAME",
     "SILENT_TOOL_NAME",
+    "VIEW_MESSAGE_HISTORY_TOOL_NAME",
     "VIEW_NODE_TREE_TOOL_NAME",
 ]

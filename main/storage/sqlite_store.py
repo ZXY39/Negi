@@ -19,6 +19,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 from main.models import (
+    FrontdoorNodeMessage,
     NodeRecord,
     TaskArtifactRecord,
     TaskErrorLogRecord,
@@ -298,6 +299,18 @@ class SQLiteTaskStore:
                 epoch_id TEXT NOT NULL,
                 status TEXT NOT NULL,
                 created_at TEXT NOT NULL,
+                payload_json TEXT NOT NULL
+            )
+            ''',
+            '''
+            CREATE TABLE IF NOT EXISTS frontdoor_node_messages (
+                message_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                source_node_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                consumed_at TEXT NOT NULL,
                 payload_json TEXT NOT NULL
             )
             ''',
@@ -2211,8 +2224,97 @@ class SQLiteTaskStore:
     # 所以整任务只解一次，不逐节点回表。
     _NOTIFICATION_AWAITS_INJECTION_SQL = (
         "(TRIM(status) = 'delivered' OR (TRIM(status) = 'consumed' "
-        "AND TRIM(COALESCE(json_extract(payload_json, '$.merged_at'), '')) = ''))"
+        "AND TRIM(COALESCE(json_extract(payload_json, '$.merged_at'), '')) = '')) "
+        "AND (COALESCE(json_extract(payload_json, '$.held_at'), '') = '' "
+        "OR COALESCE(json_extract(payload_json, '$.released_at'), '') != '')"
     )
+
+    def upsert_frontdoor_node_message(
+        self,
+        payload: FrontdoorNodeMessage | dict[str, Any],
+    ) -> FrontdoorNodeMessage:
+        record = (
+            payload
+            if isinstance(payload, FrontdoorNodeMessage)
+            else FrontdoorNodeMessage.model_validate(payload)
+        )
+        payload_json = record.model_dump_json()
+
+        def operation(conn: sqlite3.Connection) -> FrontdoorNodeMessage:
+            conn.execute(
+                'INSERT INTO frontdoor_node_messages '
+                '(message_id, session_id, task_id, source_node_id, status, created_at, consumed_at, payload_json) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?) '
+                'ON CONFLICT(message_id) DO UPDATE SET '
+                'session_id = excluded.session_id, task_id = excluded.task_id, '
+                'source_node_id = excluded.source_node_id, status = excluded.status, '
+                'created_at = excluded.created_at, consumed_at = excluded.consumed_at, '
+                'payload_json = excluded.payload_json',
+                (
+                    record.message_id,
+                    record.session_id,
+                    record.task_id,
+                    record.source_node_id,
+                    record.status,
+                    record.created_at,
+                    record.consumed_at,
+                    payload_json,
+                ),
+            )
+            return record
+
+        return self._run_write(operation)
+
+    def list_frontdoor_node_messages(
+        self,
+        session_id: str,
+        *,
+        status: str = '',
+    ) -> list[FrontdoorNodeMessage]:
+        normalized_session = str(session_id or '').strip()
+        normalized_status = str(status or '').strip()
+        if normalized_status:
+            rows = self._fetchall(
+                'SELECT payload_json FROM frontdoor_node_messages '
+                'WHERE session_id = ? AND status = ? ORDER BY created_at ASC, message_id ASC',
+                (normalized_session, normalized_status),
+            )
+        else:
+            rows = self._fetchall(
+                'SELECT payload_json FROM frontdoor_node_messages '
+                'WHERE session_id = ? ORDER BY created_at ASC, message_id ASC',
+                (normalized_session,),
+            )
+        return [self._parse(row['payload_json'], FrontdoorNodeMessage) for row in rows]
+
+    def list_pending_frontdoor_node_messages(self, *, limit: int = 500) -> list[FrontdoorNodeMessage]:
+        rows = self._fetchall(
+            "SELECT payload_json FROM frontdoor_node_messages WHERE status = 'pending' "
+            'ORDER BY created_at ASC, message_id ASC LIMIT ?',
+            (max(1, int(limit or 500)),),
+        )
+        return [self._parse(row['payload_json'], FrontdoorNodeMessage) for row in rows]
+
+    def mark_frontdoor_node_message_consumed(
+        self,
+        message_id: str,
+        *,
+        consumed_at: str,
+    ) -> None:
+        record = None
+        rows = self._fetchall(
+            'SELECT payload_json FROM frontdoor_node_messages WHERE message_id = ?',
+            (str(message_id or '').strip(),),
+        )
+        if rows:
+            record = self._parse(rows[0]['payload_json'], FrontdoorNodeMessage)
+        if record is None:
+            return
+        self.upsert_frontdoor_node_message(
+            record.model_copy(
+                update={'status': 'consumed', 'consumed_at': str(consumed_at or '').strip()}
+            )
+        )
 
     def count_task_notifications_awaiting_injection(self, task_id: str) -> int:
         """整任务「还等在飞信箱里的通知」条数，一条 SQL 一个整数。
@@ -2249,7 +2351,9 @@ class SQLiteTaskStore:
         实盘 1227 节点的任务测得 4.64 s，换成这里的一次读是 17 ms。
         """
         rows = self._fetchall(
-            "SELECT payload_json FROM task_node_notifications WHERE task_id = ? AND TRIM(status) = 'delivered'",
+            "SELECT payload_json FROM task_node_notifications WHERE task_id = ? AND TRIM(status) = 'delivered' "
+            "AND (COALESCE(json_extract(payload_json, '$.held_at'), '') = '' "
+            "OR COALESCE(json_extract(payload_json, '$.released_at'), '') != '')",
             (str(task_id or '').strip(),),
         )
         return [self._parse(row['payload_json'], TaskNodeNotification) for row in rows]
@@ -2259,6 +2363,15 @@ class SQLiteTaskStore:
         rows = self._fetchall(
             'SELECT payload_json FROM task_node_notifications WHERE task_id = ? ORDER BY created_at ASC, notification_id ASC',
             (str(task_id or '').strip(),),
+        )
+        return [self._parse(row['payload_json'], TaskNodeNotification) for row in rows]
+
+    def list_held_task_node_notifications(self) -> list[TaskNodeNotification]:
+        """All currently held child_final rows (wait_all_children batches)."""
+        rows = self._fetchall(
+            "SELECT payload_json FROM task_node_notifications WHERE "
+            "COALESCE(json_extract(payload_json, '$.held_at'), '') != '' AND "
+            "COALESCE(json_extract(payload_json, '$.released_at'), '') = ''"
         )
         return [self._parse(row['payload_json'], TaskNodeNotification) for row in rows]
 

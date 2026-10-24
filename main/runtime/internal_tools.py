@@ -16,6 +16,7 @@ from main.runtime.tool_names import (
     FINAL_RESULT_TOOL_NAME,
     SEND_MESSAGE_TOOL_NAME,
     SILENT_TOOL_NAME,
+    VIEW_MESSAGE_HISTORY_TOOL_NAME,
 )
 
 
@@ -131,14 +132,12 @@ class SilentTool(Tool):
 
 
 class EnterWaitTool(Tool):
-    """主动停靠，等一条消息把自己叫醒。
+    """停靠直到收到一条消息。
 
-    这是节点"现在没活可干、但在等某件事"的唯一表达方式：调用它之后本回合就结束，
-    节点进入等待，直到信箱里出现满足 `wake_on` 的未读消息才被唤醒。
-
-    防丢唤醒：调用时若已经有满足条件的未读，不会入睡——未读立即注入、回合继续，
-    工具回执说明"有未读消息，未进入等待"。这条把"最后一条完成消息在入睡前到达"
-    的竞态从机制上消灭，因此不需要调用方先查一遍信箱。
+    判据只有一条：信箱里有符合条件的未读时**不睡**，立即把它们注入本回合；
+    否则本回合结束、节点进入 `waiting_explicit`，任意一条后续消息都会唤醒它。
+    子节点的 `child_final` 是否攒齐由 `spawn_child_nodes.wait_all_children`
+    决定，停靠本身不再选策略。
     """
 
     hide_universal_timeout_parameter = True
@@ -153,59 +152,41 @@ class EnterWaitTool(Tool):
     @property
     def description(self) -> str:
         return (
-            'Stop this turn and wait until a message wakes you. Use `all_children` when you have '
-            'finished your own work and only the children\'s results are outstanding: it wakes you '
-            'once every direct execution child has settled and its terminal message is already in '
-            'your mailbox, so you are not woken once per child. Use `any` when any single message '
-            'should bring you back. If qualifying mail is already waiting, this does not park you — '
-            'it injects that mail and the turn continues. `note` is echoed back to you on wake so '
-            'you remember what you were waiting for. Do not call this while you still have work you '
-            'can do now.'
+            'Stop this turn and wait until a message wakes you. If qualifying mail is already '
+            'waiting, this does not park you — it injects that mail and the turn continues. '
+            '`note` is echoed back to you once on wake so you remember what you were waiting for. '
+            'Do not call this while you still have work you can do now.'
         )
 
     @property
     def model_description(self) -> str:
-        return 'Park until a message wakes you. all_children waits for every direct child to report.'
+        return 'Park until a message wakes you. `note` is echoed once on wake.'
 
     @property
     def parameters(self) -> dict[str, Any]:
         return {
             'type': 'object',
             'properties': {
-                'wake_on': {
-                    'type': 'string',
-                    'enum': ['any', 'all_children'],
-                    'description': (
-                        'any = first qualifying message wakes you; all_children = every direct '
-                        'execution child settled and reported.'
-                    ),
-                },
                 'note': {
                     'type': 'string',
-                    'description': 'What you are waiting for. Echoed back when you wake.',
+                    'description': 'What you are waiting for. Echoed back once when you wake.',
                 },
             },
             'required': [],
         }
 
-    async def execute(self, wake_on: str = 'any', note: str = '', **kwargs: Any) -> str:
+    async def execute(self, note: str = '', **kwargs: Any) -> str:
         _ = kwargs
-        result = await self._park(
-            wake_on=str(wake_on or '').strip() or 'any',
-            note=str(note or '').strip(),
-        )
+        result = await self._park(note=str(note or '').strip())
         return json.dumps(result, ensure_ascii=False, sort_keys=True)
 
 
 class SendMessageTool(Tool):
-    """给父节点、直接子节点、或（仅根节点）前门 agent 发一条消息。
+    """给父节点、子节点/后代、同级节点、或（仅根节点）前门 agent 发一条消息。
 
-    一次可发给多个直接子节点；投递逐目标独立判定。`intent_kind=请求` 表示发完就要
-    停靠等回应，因此收件人会被立即唤醒；`进展` / `指令` 只在收件人自己的等待策略
-    允许时才唤醒它。
-
-    工具本身不做寻址判定：合法目标集合与父/子关系由运行时的投递入口算，越址时
-    回执里会带上可用的地址，避免模型只能靠猜。
+    一次可发给多个目标；投递逐目标独立判定。发送本身不会让发送方停靠；需要等
+    回应时另行调用 `enter_wait`。工具不做寻址判定：合法目标集合与关系由运行时的
+    投递入口算，越址时回执里会带上可用的地址。
     """
 
     hide_universal_timeout_parameter = True
@@ -220,18 +201,17 @@ class SendMessageTool(Tool):
     @property
     def description(self) -> str:
         return (
-            'Send a message to your parent node, to one or more of your direct children, or (root '
-            'node only) to the front-door agent. Each target is judged on its own: a terminal target '
-            'rejects and says so, a paused target still accepts a machine message (that is how it '
-            'gets unstuck), and an out-of-scope target is rejected with the addresses you may use. '
-            'Use `请求` when you are about to park waiting for an answer — it wakes the recipient '
-            'immediately; `进展` and `指令` only wake a recipient whose own wait policy says so. '
-            'Large bodies belong in `ref`; the message itself should stay a summary.'
+            'Send a message to your parent node, to execution nodes below you, to a sibling, to a '
+            'descendant acceptance node, or (root node only) to the front-door agent. Each target is '
+            'judged on its own: a terminal target rejects and says so, a paused target still accepts '
+            'a machine message (that is how it gets unstuck), and an out-of-scope target is rejected '
+            'with the addresses you may use. Sending does not make you wait; call `enter_wait` when '
+            'you need a reply. Large bodies belong in `ref`; the message itself should stay a summary.'
         )
 
     @property
     def model_description(self) -> str:
-        return 'Message your parent, children, or the front door. Use 请求 when you will wait for an answer.'
+        return 'Message your parent, execution descendants, a sibling, a descendant verifier, or the front door (root only).'
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -242,24 +222,15 @@ class SendMessageTool(Tool):
                     'type': ['string', 'array'],
                     'items': {'type': 'string'},
                     'description': (
-                        "`parent`, `frontdoor` (root only), a direct child node id, or a list of them."
+                        "`parent`, `frontdoor` (root only), a node id you may message, or a list of them."
                     ),
                     'minLength': 1,
-                },
-                'intent_kind': {
-                    'type': 'string',
-                    'enum': ['进展', '请求', '指令'],
-                    'description': (
-                        '进展 = report without expecting a reply; 请求 = you will park and wait for an '
-                        'answer; 指令 = tell someone below you what to do.'
-                    ),
                 },
                 'content': {'type': 'string', 'minLength': 1, 'description': 'Message body.'},
                 'ref': {
                     'type': 'string',
                     'description': 'Optional pointer to a large artifact; keep `content` a summary then.',
                 },
-                'in_reply_to': {'type': 'string', 'description': 'Optional id of the message answered.'},
             },
             'required': ['to', 'content'],
         }
@@ -273,20 +244,52 @@ class SendMessageTool(Tool):
     async def execute(
         self,
         to: Any = None,
-        intent_kind: str = '',
         content: str = '',
         ref: str = '',
-        in_reply_to: str = '',
         **kwargs: Any,
     ) -> str:
         _ = kwargs
         result = await self._deliver(
             to=to,
-            intent_kind=str(intent_kind or '').strip(),
             content=str(content or '').strip(),
             ref=str(ref or '').strip(),
-            in_reply_to=str(in_reply_to or '').strip(),
         )
+        return json.dumps(result, ensure_ascii=False, sort_keys=True)
+
+
+class ViewMessageHistoryTool(Tool):
+    """本节点收到的全部消息台账（只读，返回可 content_open 的引用）。"""
+
+    hide_universal_timeout_parameter = True
+
+    def __init__(self, history: Callable[..., Awaitable[dict[str, Any]]]) -> None:
+        self._history = history
+
+    @property
+    def name(self) -> str:
+        return VIEW_MESSAGE_HISTORY_TOOL_NAME
+
+    @property
+    def description(self) -> str:
+        return (
+            'Read every message this node has received since it was created, as a JSON artifact '
+            'reference you can open with content_open/content_search. Each record carries the '
+            'receive time, sender relationship and node id, message id, content and status. '
+            'Messages held by a wait_all_children batch appear as status=held without content '
+            'until the batch settles.'
+        )
+
+    @property
+    def model_description(self) -> str:
+        return 'Message history for this node; returns an artifact ref.'
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {'type': 'object', 'properties': {}, 'required': []}
+
+    async def execute(self, **kwargs: Any) -> str:
+        _ = kwargs
+        result = await self._history()
         return json.dumps(result, ensure_ascii=False, sort_keys=True)
 
 
@@ -300,7 +303,9 @@ class SpawnChildNodesTool(Tool):
 
     def __init__(
         self,
-        spawn_callback: Callable[[list[SpawnChildSpec], str | None], Awaitable[list[SpawnChildResult]]],
+        spawn_callback: Callable[
+            [list[SpawnChildSpec], str | None, bool], Awaitable[list[SpawnChildResult]]
+        ],
     ) -> None:
         self._spawn_callback = spawn_callback
 
@@ -313,8 +318,10 @@ class SpawnChildNodesTool(Tool):
         return (
             'Create child nodes and hand them to the scheduler. The call returns as soon as they '
             'exist — it does NOT wait for them, and it does not contain their results. Each child '
-            'reports its terminal result to you as a child_final message; call enter_wait with '
-            'wake_on=all_children (or any) to be woken when they are in. Only mutually independent '
+            'reports its terminal result to you as a child_final message; call enter_wait to be '
+            'woken when a message arrives. `wait_all_children=true` holds this batch\'s child_final '
+            'messages until every created execution child in the batch is terminal, then delivers '
+            'them together; default false delivers each result as it lands. Only mutually independent '
             'branches belong in one batch; a node that consumes its siblings\' outputs must be '
             'created in a later call, after you have received those siblings\' results. Use '
             'requires_acceptance for per-child acceptance; the acceptance node is created with the '
@@ -325,10 +332,11 @@ class SpawnChildNodesTool(Tool):
     def model_description(self) -> str:
         return (
             'Create child nodes for delegated work and return immediately with their ids. One call = '
-            'one batch (no ordering); results arrive later as child_final messages — wait with '
-            'enter_wait(all_children). Never put a node that consumes its siblings’ outputs in the '
-            'same batch; create it after you have their results. Optional per-child `seed_tools` '
-            'seeds those tool contracts into the child’s first request.'
+            'one batch (no ordering); results arrive later as child_final messages — call enter_wait '
+            'to wait for mail. Set `wait_all_children` to deliver the batch\'s results only after all '
+            'its children finish. Never put a node that consumes its siblings’ outputs in the same '
+            'batch; create it after you have their results. Optional per-child `seed_tools` seeds '
+            'those tool contracts into the child’s first request.'
         )
 
     @property
@@ -397,6 +405,14 @@ class SpawnChildNodesTool(Tool):
                     'items': child_schema,
                     'minItems': 1,
                 },
+                'wait_all_children': {
+                    'type': 'boolean',
+                    'description': (
+                        'When true, hold this batch\'s child_final messages until every created execution '
+                        'child in the batch is terminal, then deliver them together. Default false: each '
+                        'child result is delivered as it arrives.'
+                    ),
+                },
             },
             'required': ['children'],
         }
@@ -432,6 +448,7 @@ class SpawnChildNodesTool(Tool):
                     'items': child_schema,
                     'minItems': 1,
                 },
+                'wait_all_children': {'type': 'boolean'},
             },
             'required': ['children'],
         }
@@ -447,10 +464,24 @@ class SpawnChildNodesTool(Tool):
                 errors.append(f'children[{index}].acceptance_prompt is required when requires_acceptance=true')
         return errors
 
-    async def execute(self, children: list[dict[str, Any]], __g3ku_runtime: dict[str, Any] | None = None, **kwargs: Any) -> str:
+    async def execute(
+        self,
+        children: list[dict[str, Any]],
+        wait_all_children: bool = False,
+        __g3ku_runtime: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> str:
         runtime = __g3ku_runtime if isinstance(__g3ku_runtime, dict) else {}
+        if not runtime:
+            fallback = kwargs.get('__g3ku_runtime')
+            runtime = fallback if isinstance(fallback, dict) else {}
         specs = [SpawnChildSpec.model_validate(item) for item in list(children or [])]
-        results = await self._spawn_callback(specs, runtime.get('current_tool_call_id'))
+        batch_id = str(runtime.get('current_tool_call_id') or '')
+        results = await self._spawn_callback(
+            specs,
+            batch_id or None,
+            bool(wait_all_children),
+        )
         created: list[dict[str, Any]] = []
         rejected: list[dict[str, Any]] = []
         for index, item in enumerate(results):
@@ -471,16 +502,28 @@ class SpawnChildNodesTool(Tool):
                     'acceptance_node_id': str(item.acceptance_node_id or '').strip(),
                 }
             )
-        summary = (
-            f'已创建 {len(created)} 个子节点，结果会以 child_final 消息送达；'
-            '需要等它们全部结束时调用 enter_wait(wake_on="all_children")，不要轮询。'
-            if created
-            else '没有创建任何子节点。'
-        )
+        if created and wait_all_children:
+            summary = (
+                f'已创建 {len(created)} 个子节点；本批结果会在全部子节点结束后一起以 child_final 送达，'
+                '需要停靠时调用 enter_wait，不要轮询。'
+            )
+        elif created:
+            summary = (
+                f'已创建 {len(created)} 个子节点；结果会随每个子节点结束逐条以 child_final 送达，'
+                '需要停靠时调用 enter_wait，不要轮询。'
+            )
+        else:
+            summary = '没有创建任何子节点。'
         if rejected:
             summary += f' 另有 {len(rejected)} 个候选被拒绝（见 rejected）。'
         return json.dumps(
-            {'created': created, 'rejected': rejected, 'summary': summary},
+            {
+                'created': created,
+                'rejected': rejected,
+                'batch_id': batch_id,
+                'wait_all_children': bool(wait_all_children),
+                'summary': summary,
+            },
             ensure_ascii=False,
         )
 

@@ -102,19 +102,18 @@ class TestDelivery:
             origin='node',
             relation='parent',
             source_node_id=ROOT,
-            intent_kind='请求',
         )
 
         assert result['status'] == 'delivered'
         assert result['kind'] == 'parent_notice'
-        assert result['priority'] == 'high'
+        assert result['priority'] == 'normal'
         assert result['wake'] == 'resumed'
         assert calls == [(TASK, CHILD)]
 
         stored = service.store.list_task_node_notifications(TASK, CHILD)
         assert len(stored) == 1
         assert stored[0].kind == 'parent_notice'
-        assert stored[0].priority == 'high'
+        assert stored[0].priority == 'normal'
         assert stored[0].fingerprint
 
     @pytest.mark.asyncio

@@ -238,6 +238,25 @@ async def get_task_node_tree_subtree(
     return payload
 
 
+@router.post('/tasks/{task_id}/nodes/{node_id}/notice')
+async def post_task_node_notice(task_id: str, node_id: str, payload: dict | None = Body(default=None)):
+    task_id = _ensure_task_route_id(task_id)
+    service = _service()
+    await service.startup()
+    message = str((payload or {}).get('message') or '').strip()
+    if not message:
+        raise HTTPException(status_code=400, detail='message_required')
+    result = await service.deliver_node_message(
+        task_id=service.normalize_task_id(task_id),
+        target_node_id=node_id,
+        message=message,
+        origin='user',
+    )
+    if str(result.get('status') or '') == 'rejected':
+        raise HTTPException(status_code=400, detail=str(result.get('reason') or 'notice_rejected'))
+    return result
+
+
 @router.post('/tasks/{task_id}/nodes/{node_id}/pause')
 async def pause_task_node(task_id: str, node_id: str, payload: dict | None = Body(default=None)):
     task_id = _ensure_task_route_id(task_id)

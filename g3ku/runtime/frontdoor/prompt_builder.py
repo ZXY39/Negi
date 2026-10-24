@@ -12,8 +12,10 @@ from g3ku.runtime.tool_visibility import CEO_FIXED_BUILTIN_TOOL_NAMES
 from main.prompts import INCLUDE_RE, load_prompt
 from main.runtime.tool_names import (
     FINAL_RESULT_TOOL_NAME,
+    SEND_MESSAGE_TOOL_NAME,
     SILENT_TOOL_NAME,
     SPAWN_CHILD_NODES_TOOL_NAME,
+    VIEW_MESSAGE_HISTORY_TOOL_NAME,
 )
 
 # 提示词只点名前门真会曝光的工具：`stop_tool_execution` / `wait_tool_execution` 没有
@@ -21,8 +23,10 @@ from main.runtime.tool_names import (
 # 一个发不出的动作。
 _CEO_ADVERTISABLE_TOOL_NAMES = frozenset(CEO_FIXED_BUILTIN_TOOL_NAMES) | {
     FINAL_RESULT_TOOL_NAME,
+    SEND_MESSAGE_TOOL_NAME,
     SPAWN_CHILD_NODES_TOOL_NAME,
     SILENT_TOOL_NAME,
+    VIEW_MESSAGE_HISTORY_TOOL_NAME,
 }
 
 

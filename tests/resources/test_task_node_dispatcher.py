@@ -936,7 +936,6 @@ async def test_task_actor_service_rejection_loop_completes_across_run_task_round
             origin="node",
             relation="parent",
             source_node_id=root.node_id,
-            intent_kind="指令",
             wake=False,
         )
         _set_pending([acceptance.node_id])

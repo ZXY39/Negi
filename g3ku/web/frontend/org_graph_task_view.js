@@ -792,14 +792,14 @@ function syncNoticeComposerState() {
         send.disabled = !usable;
     }
     input.placeholder = !nodeId
-        ? "选择节点后可追加定向通知…"
+        ? "选择节点后可发送消息…"
         : isAcceptance
-            ? "验收节点不能作为通知目标"
+            ? "验收节点不接收消息"
             : nodeTerminal
-                ? "终态节点不接收通知"
+                ? "终态节点不接收消息"
                 : taskDone
                     ? "任务已结束"
-                    : "向该节点子树追加定向通知…";
+                    : "向该节点发送消息…";
 }
 
 
@@ -817,8 +817,8 @@ async function submitNodeNoticeComposer() {
         await ApiClient.appendTaskNodeNotice(taskId, nodeId, message);
         input.value = "";
         showToast({
-            title: "定向通知已提交",
-            text: `已对节点 ${nodeId} 的子树发起消息分发`,
+            title: "消息已发送",
+            text: `已向节点 ${nodeId} 发送消息`,
             kind: "success",
         });
         await loadTaskTreeSnapshot(taskId);
@@ -829,7 +829,7 @@ async function submitNodeNoticeComposer() {
         // 启动局部 settle 轮询，新消息一经记账即局部刷新展示（见下方实现）。
         settleTaskNoticeAfterSend(taskId, nodeId, message);
     } catch (error) {
-        showToast({ title: "定向通知提交失败", text: error?.message || "提交未完成", kind: "error" });
+        showToast({ title: "消息发送失败", text: error?.message || "提交未完成", kind: "error" });
     } finally {
         send.dataset.busy = "";
         syncNoticeComposerState();

@@ -53,6 +53,7 @@ from main.runtime.append_notice_context import (
     APPEND_NOTICE_CONTEXT_KEY,
     PENDING_APPEND_NOTICE_RECORDS_KEY,
     consume_pending_append_notice_records,
+    is_system_relay_notice,
     normalize_append_notice_context,
     normalize_pending_append_notice_records,
     record_consumed_notifications,
@@ -69,17 +70,26 @@ from main.runtime.internal_tools import (
     SendMessageTool,
     SpawnChildNodesTool,
     SubmitFinalResultTool,
+    ViewMessageHistoryTool,
 )
+from main.runtime.node_mailbox import notification_is_held
 from main.runtime.node_message_kind import (
-    INTENT_INSTRUCTION,
-    INTENT_PROGRESS,
     KIND_ACCEPTANCE_VERDICT,
+    KIND_USER_DIRECT,
     RELATION_CHILD,
     RELATION_PARENT,
 )
+from main.runtime.node_message_text import message_label, render_node_message_text
 from main.runtime.node_prompt_contract import extract_node_dynamic_contract_payload
+from main.runtime.node_relationships import (
+    accepted_node_id,
+    execution_has_acceptance,
+    message_relation,
+)
+from main.runtime.node_relationships import (
+    node_kind as relationship_node_kind,
+)
 from main.runtime.node_wake import (
-    WAKE_ON_ALL_CHILDREN,
     enter_wait_verdict,
 )
 from main.runtime.pending_notice_state import (
@@ -96,6 +106,7 @@ from main.runtime.tool_names import (
     MANAGE_CHILD_NODES_TOOL_NAME,
     READ_CHILD_PROGRESS_TOOL_NAME,
     SEND_MESSAGE_TOOL_NAME,
+    VIEW_MESSAGE_HISTORY_TOOL_NAME,
     VIEW_NODE_TREE_TOOL_NAME,
 )
 from main.service.create_async_task_contract import normalize_create_async_task_file_targets
@@ -199,11 +210,33 @@ def _notification_awaits_injection(item: Any) -> bool:
 
     delivered = 待处理；consumed 且 merged_at 为空 = 已被控制/决策回合处理、
     等待恢复路径并入（显示「已消费」）；两者都需要被恢复/在途刷新路径看到。
+    held 的行（wait_all_children 批次未齐）既不注入也不唤醒。
     """
+    if notification_is_held(item):
+        return False
     status = str(getattr(item, 'status', '') or '').strip()
     if status == 'delivered':
         return True
     return status == 'consumed' and not str(getattr(item, 'merged_at', '') or '').strip()
+
+
+def _notification_rendered_text(notice: Any) -> str:
+    if isinstance(notice, dict):
+        kind = str(notice.get('kind') or '').strip()
+        source = str(notice.get('source_node_id') or '').strip()
+        message = str(notice.get('message') or '').strip()
+    else:
+        kind = str(getattr(notice, 'kind', '') or '').strip()
+        source = str(getattr(notice, 'source_node_id', '') or '').strip()
+        message = str(getattr(notice, 'message', '') or '').strip()
+    if not message:
+        return ''
+    return render_node_message_text(
+        kind=kind or KIND_USER_DIRECT,
+        source_node_id=source,
+        message=message,
+        system_relay=is_system_relay_notice(notice),
+    )
 
 
 _UNSET = object()
@@ -894,22 +927,29 @@ class NodeRunner:
     async def _resume_react_state(self, *, task, node: NodeRecord) -> dict[str, Any]:
         notifications = self._pending_node_notifications(task_id=task.task_id, node_id=node.node_id)
         pending_root_notice_records = self._pending_root_notice_records(node=node)
+        wait_note = self._take_wait_note_message(node_id=node.node_id)
         request_body_seed_messages, request_seed_state = self._latest_actual_request_seed_messages(
             task=task,
             node=node,
         )
+
+        def with_note(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            if wait_note is None:
+                return messages
+            return [*messages, wait_note]
+
         if notifications or pending_root_notice_records:
             if self._pending_notice_waits_for_children(node=node):
                 frame = self._log_service.read_runtime_frame(task.task_id, node.node_id) or {}
                 if isinstance(frame.get('messages'), list) and frame.get('messages'):
                     return {
-                        'messages': list(frame.get('messages') or []),
+                        'messages': with_note(list(frame.get('messages') or [])),
                         'message_source': 'restored_frame',
                         'request_body_seed_messages': request_body_seed_messages,
                         'request_seed_state': request_seed_state,
                     }
                 return {
-                    'messages': await self._build_messages(task=task, node=node),
+                    'messages': with_note(await self._build_messages(task=task, node=node)),
                     'message_source': 'fresh',
                     'request_body_seed_messages': request_body_seed_messages,
                     'request_seed_state': request_seed_state,
@@ -919,7 +959,7 @@ class NodeRunner:
             messages = self._append_notice_messages(messages=messages, notices=pending_root_notice_records)
             self._close_active_round_for_message_consumption(task_id=task.task_id, node_id=node.node_id)
             return {
-                'messages': messages,
+                'messages': with_note(messages),
                 'message_source': 'notice',
                 'pending_notification_ids': [str(item.notification_id or '').strip() for item in notifications],
                 'pending_root_notice_ids': [
@@ -933,16 +973,34 @@ class NodeRunner:
         frame = self._log_service.read_runtime_frame(task.task_id, node.node_id) or {}
         if isinstance(frame.get('messages'), list) and frame.get('messages'):
             return {
-                'messages': list(frame.get('messages') or []),
+                'messages': with_note(list(frame.get('messages') or [])),
                 'message_source': 'restored_frame',
                 'request_body_seed_messages': request_body_seed_messages,
                 'request_seed_state': request_seed_state,
             }
         return {
-            'messages': await self._build_messages(task=task, node=node),
+            'messages': with_note(await self._build_messages(task=task, node=node)),
             'message_source': 'fresh',
             'request_body_seed_messages': request_body_seed_messages,
             'request_seed_state': request_seed_state,
+        }
+
+    def _take_wait_note_message(self, *, node_id: str) -> dict[str, Any] | None:
+        node = self._store.get_node(str(node_id or '').strip())
+        metadata = dict(getattr(node, 'metadata', None) or {}) if node is not None else {}
+        note = str(metadata.get(self.NODE_WAIT_NOTE_KEY) or '').strip()
+        if not note:
+            return None
+
+        def _mutate(current: dict[str, Any]) -> dict[str, Any]:
+            next_metadata = dict(current or {})
+            next_metadata.pop(self.NODE_WAIT_NOTE_KEY, None)
+            return next_metadata
+
+        self._log_service.update_node_metadata(node_id, _mutate)
+        return {
+            'role': 'user',
+            'content': f'[WAIT_NOTE] 你上次停靠时在等：{note[:500]}',
         }
 
     def _pending_node_notifications(self, *, task_id: str, node_id: str) -> list[Any]:
@@ -953,6 +1011,108 @@ class NodeRunner:
             for item in list(self._store.list_task_node_notifications(task_id, node_id) or [])
             if _notification_awaits_injection(item)
         ]
+
+    def release_wait_all_batch_if_settled(
+        self,
+        *,
+        task_id: str,
+        parent_node_id: str,
+        batch_id: str,
+    ) -> bool:
+        """Release held child_final rows once every created child in the batch is terminal."""
+        normalized_task_id = str(task_id or '').strip()
+        normalized_parent_id = str(parent_node_id or '').strip()
+        normalized_batch_id = str(batch_id or '').strip()
+        if not normalized_task_id or not normalized_parent_id or not normalized_batch_id:
+            return False
+        parent = self._store.get_node(normalized_parent_id)
+        if parent is None:
+            return False
+        operations = (parent.metadata or {}).get('spawn_operations') if isinstance(parent.metadata, dict) else {}
+        payload = operations.get(normalized_batch_id) if isinstance(operations, dict) else None
+        if not isinstance(payload, dict):
+            return False
+        entries = [item for item in list(payload.get('entries') or []) if isinstance(item, dict)]
+        created_child_ids = [
+            str(item.get('child_node_id') or '').strip()
+            for item in entries
+            if str(item.get('child_node_id') or '').strip()
+        ]
+        if not created_child_ids:
+            return False
+        for child_id in created_child_ids:
+            child = self._store.get_node(child_id)
+            if child is None:
+                return False
+            if self._normalized_status(getattr(child, 'status', '')) not in {STATUS_SUCCESS, STATUS_FAILED}:
+                return False
+        held = [
+            item
+            for item in list(
+                self._store.list_task_node_notifications(normalized_task_id, normalized_parent_id) or []
+            )
+            if str(getattr(item, 'batch_id', '') or '').strip() == normalized_batch_id
+            and notification_is_held(item)
+        ]
+        if not held:
+            return False
+        released_at = now_iso()
+        for item in held:
+            self._store.upsert_task_node_notification(
+                item.model_copy(update={'released_at': released_at})
+            )
+        self._log_service.refresh_task_view(normalized_task_id, mark_unread=True)
+        return True
+
+    async def _view_message_history(self, *, task, node: NodeRecord) -> dict[str, Any]:
+        rows = list(
+            self._store.list_task_node_notifications(task.task_id, node.node_id) or []
+        )
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            held = notification_is_held(row)
+            kind = str(getattr(row, 'kind', '') or '').strip()
+            items.append(
+                {
+                    'message_id': str(getattr(row, 'notification_id', '') or '').strip(),
+                    'received_at': str(getattr(row, 'created_at', '') or '').strip(),
+                    'source_node_id': str(getattr(row, 'source_node_id', '') or '').strip(),
+                    'from': message_label(kind, system_relay=is_system_relay_notice(row)),
+                    'kind': kind,
+                    'status': 'held' if held else str(getattr(row, 'status', '') or '').strip(),
+                    'content': '' if held else str(getattr(row, 'message', '') or '').strip(),
+                    'ref': '' if held else str(getattr(row, 'ref', '') or '').strip(),
+                }
+            )
+        if not items:
+            return {'ok': True, 'count': 0, 'ref': '', 'summary': 'no messages received', 'latest_at': ''}
+        artifact_text = json.dumps(
+            {'node_id': node.node_id, 'messages': items},
+            ensure_ascii=False,
+            indent=2,
+        )
+        summary, ref = self._log_service.externalize_node_artifact(
+            task_id=task.task_id,
+            node_id=node.node_id,
+            content=artifact_text,
+            display_name=f'message-history:{node.node_id}',
+            source_kind='node_message_history',
+        )
+        if not str(ref or '').strip():
+            return {
+                'ok': False,
+                'error': 'history_artifact_unavailable',
+                'count': len(items),
+                'summary': '',
+                'latest_at': items[-1]['received_at'],
+            }
+        return {
+            'ok': True,
+            'count': len(items),
+            'ref': str(ref).strip(),
+            'summary': str(summary or '')[:500],
+            'latest_at': items[-1]['received_at'],
+        }
 
     def _notifications_by_ids(self, *, task_id: str, node_id: str, notification_ids: list[str]) -> list[dict[str, Any]]:
         ids = {str(item or '').strip() for item in list(notification_ids or []) if str(item or '').strip()}
@@ -1094,7 +1254,7 @@ class NodeRunner:
     def _append_mailbox_messages(self, *, messages: list[dict[str, Any]], notifications: list[Any]) -> list[dict[str, Any]]:
         appended = [dict(item) for item in list(messages or []) if isinstance(item, dict)]
         for notification in list(notifications or []):
-            text = str(getattr(notification, 'message', '') or '').strip()
+            text = _notification_rendered_text(notification)
             if not text:
                 continue
             appended.append({'role': 'user', 'content': text})
@@ -1103,10 +1263,7 @@ class NodeRunner:
     def _append_notice_messages(self, *, messages: list[dict[str, Any]], notices: list[Any]) -> list[dict[str, Any]]:
         appended = [dict(item) for item in list(messages or []) if isinstance(item, dict)]
         for notice in list(notices or []):
-            if isinstance(notice, dict):
-                text = str(notice.get('message') or '').strip()
-            else:
-                text = str(getattr(notice, 'message', '') or '').strip()
+            text = _notification_rendered_text(notice)
             if not text:
                 continue
             appended.append({'role': 'user', 'content': text})
@@ -1116,10 +1273,7 @@ class NodeRunner:
     def _notice_delta_messages(*, notices: list[Any]) -> list[dict[str, Any]]:
         delta_messages: list[dict[str, Any]] = []
         for notice in list(notices or []):
-            if isinstance(notice, dict):
-                text = str(notice.get('message') or '').strip()
-            else:
-                text = str(getattr(notice, 'message', '') or '').strip()
+            text = _notification_rendered_text(notice)
             if not text:
                 continue
             delta_messages.append({'role': 'user', 'content': text})
@@ -2095,7 +2249,6 @@ class NodeRunner:
             relation=RELATION_CHILD,
             system_kind=KIND_ACCEPTANCE_VERDICT,
             source_node_id=str(acceptance.node_id or '').strip(),
-            intent_kind=INTENT_PROGRESS,
             verdict=verdict,
             submission_id=submission_id,
             wake=wake,
@@ -2162,7 +2315,6 @@ class NodeRunner:
             origin='node',
             relation=RELATION_PARENT,
             source_node_id=str(node.node_id or '').strip(),
-            intent_kind=INTENT_INSTRUCTION,
             wake=False,
         )
         if str(delivered.get('status') or '') not in {'delivered', 'deduplicated'}:
@@ -2499,7 +2651,11 @@ class NodeRunner:
             rows = list(self._store.list_task_node_notifications(task_id, node_id) or [])
         except Exception:
             return 0
-        return sum(1 for item in rows if str(item.status or '').strip() == 'delivered')
+        return sum(
+            1
+            for item in rows
+            if str(item.status or '').strip() == 'delivered' and not notification_is_held(item)
+        )
 
     @staticmethod
     def _node_state_label(node: NodeRecord, phase: str) -> str:
@@ -2539,12 +2695,21 @@ class NodeRunner:
             else set()
         )
         rows: list[dict[str, Any]] = []
+        records = self._task_node_records(task_id)
+        node_map = {str(item.node_id or '').strip(): item for item in records}
         for child in self._direct_child_records(task_id, node.node_id):
             brief = self._node_brief(task_id, child)
             if wanted and brief['state'] not in wanted:
                 continue
             if settled is not None and bool(brief['settled']) != bool(settled):
                 continue
+            _, reject_reason = message_relation(sender=node, target=child, node_map=node_map)
+            brief['acceptance'] = (
+                relationship_node_kind(child) == 'acceptance'
+                or execution_has_acceptance(child, node_map)
+            )
+            brief['messageable'] = not reject_reason
+            brief['controllable'] = relationship_node_kind(child) == 'execution'
             rows.append(brief)
         return {'children': rows, 'count': len(rows)}
 
@@ -2609,48 +2774,97 @@ class NodeRunner:
         task_id: str,
         node: NodeRecord,
         depth: Any = None,
+        scope: str = 'subtree',
     ) -> dict[str, Any]:
         try:
             limit_depth = max(1, int(depth)) if depth is not None else 3
         except (TypeError, ValueError):
             limit_depth = 3
-        nodes = self._task_node_records(task_id)
+        records = self._task_node_records(task_id)
+        node_map = {str(item.node_id or '').strip(): item for item in records}
         lines: list[dict[str, Any]] = []
         truncated = False
+        normalized_scope = str(scope or 'subtree').strip().lower()
+        if normalized_scope not in {'subtree', 'family'}:
+            normalized_scope = 'subtree'
+        sender_id = str(node.node_id or '').strip()
 
-        def walk(parent_id: str, level: int) -> None:
+        def line_for(item: NodeRecord, *, level: int, relation: str) -> dict[str, Any]:
+            brief = self._node_brief(task_id, item)
+            item_kind = relationship_node_kind(item)
+            _, reject_reason = message_relation(sender=node, target=item, node_map=node_map)
+            is_self = str(item.node_id or '').strip() == sender_id
+            acceptance = item_kind == 'acceptance' or execution_has_acceptance(item, node_map)
+            return {
+                'node_id': brief['node_id'],
+                'level': level,
+                'relation': 'self' if is_self else relation,
+                'is_self': is_self,
+                'state': brief['state'],
+                'node_kind': brief['node_kind'],
+                'goal': brief['goal'][:80],
+                'unread_count': brief['unread_count'],
+                'acceptance': acceptance,
+                'accepted_node_id': accepted_node_id(item) if item_kind == 'acceptance' else '',
+                'messageable': is_self is False and not reject_reason,
+                'controllable': (
+                    item_kind == 'execution'
+                    and str(getattr(item, 'parent_node_id', '') or '').strip() == sender_id
+                ),
+            }
+
+        def append_line(item: NodeRecord, *, level: int, relation: str) -> None:
             nonlocal truncated
-            if level > limit_depth or truncated:
+            if truncated:
                 return
-            for child in nodes:
+            if len(lines) >= self.MAX_TREE_NODES:
+                truncated = True
+                return
+            lines.append(line_for(item, level=level, relation=relation))
+
+        def walk(parent_id: str, level: int, max_level: int) -> None:
+            nonlocal truncated
+            if level > max_level or truncated:
+                return
+            for child in records:
                 if str(getattr(child, 'parent_node_id', '') or '').strip() != parent_id:
                     continue
-                if len(lines) >= self.MAX_TREE_NODES:
-                    truncated = True
-                    return
-                brief = self._node_brief(task_id, child)
-                lines.append(
-                    {
-                        'node_id': brief['node_id'],
-                        'level': level,
-                        'state': brief['state'],
-                        'node_kind': brief['node_kind'],
-                        'goal': brief['goal'][:80],
-                    }
+                append_line(
+                    child,
+                    level=level,
+                    relation='child' if level == 1 else 'descendant',
                 )
-                walk(str(child.node_id or ''), level + 1)
+                walk(str(child.node_id or ''), level + 1, max_level)
 
-        walk(str(node.node_id or ''), 1)
+        parent_id = str(getattr(node, 'parent_node_id', '') or '').strip()
+        if normalized_scope == 'family' and parent_id:
+            parent = node_map.get(parent_id)
+            if parent is not None:
+                append_line(parent, level=0, relation='parent')
+            for sibling in records:
+                sibling_parent_id = str(getattr(sibling, 'parent_node_id', '') or '').strip()
+                if sibling_parent_id != parent_id:
+                    continue
+                append_line(sibling, level=1, relation='sibling')
+            walk(sender_id, 1, limit_depth)
+        else:
+            for item in records:
+                if str(getattr(item, 'node_id', '') or '').strip() != sender_id:
+                    continue
+                append_line(item, level=0, relation='self')
+                break
+            walk(sender_id, 1, limit_depth)
+
         return {
             'ok': True,
-            'root': str(node.node_id or ''),
+            'root': sender_id,
+            'scope': normalized_scope,
             'depth': limit_depth,
             'nodes': lines,
             'truncated': truncated,
             'pointer': 'use read_child_progress on a node_id for detail' if truncated else '',
         }
 
-    NODE_WAIT_WAKE_ON_KEY = 'node_wait_wake_on'
     NODE_WAIT_NOTE_KEY = 'node_wait_note'
 
     async def _enter_wait(
@@ -2658,51 +2872,19 @@ class NodeRunner:
         *,
         task_id: str,
         node: NodeRecord,
-        wake_on: str = 'any',
         note: str = '',
     ) -> dict[str, Any]:
         """记下停靠意图；真正的停靠由回合结束表达（见 react_loop 的 _park_requested）。
 
-        防丢唤醒（R3）：入睡前先看有没有已经满足条件的未读。有就**不睡**——未读立即
-        进入上下文、回合继续，因此不存在"最后一条完成消息在入睡前到达"的竞态。
+        防丢唤醒（R3）：入睡前先看有没有待注入的未读。有就**不睡**——未读立即
+        进入上下文、回合继续，因此不存在"最后一条消息在入睡前到达"的竞态。
+        批次等待由 spawn 的 `wait_all_children` 控制，停靠本身不再选策略。
         """
-        policy = str(wake_on or '').strip() or 'any'
-        if policy not in {'any', WAKE_ON_ALL_CHILDREN}:
-            return {'status': 'rejected', 'reason': f'unknown_wake_on:{policy}'}
-
-        unread = [
-            item
-            for item in list(self._store.list_task_node_notifications(task_id, node.node_id) or [])
-            if str(item.status or '').strip() == 'delivered'
-        ]
-        children: list[dict[str, Any]] = []
-        if policy == WAKE_ON_ALL_CHILDREN:
-            children = [
-                {
-                    'node_id': str(child.node_id or ''),
-                    'status': str(child.status or ''),
-                    'node_kind': str(child.node_kind or ''),
-                }
-                for child in list(self._store.list_nodes(task_id) or [])
-                if str(getattr(child, 'parent_node_id', '') or '').strip() == node.node_id
-            ]
-        finals = [
-            str(item.source_node_id or '').strip()
-            for item in unread
-            if str(item.kind or '').strip() == 'child_final'
-        ]
-        may_park, refusal = enter_wait_verdict(
-            wake_on=policy,
-            unread_count=len(unread),
-            children=children,
-            unread_final_sources=finals,
-        )
+        unread = self._pending_node_notifications(task_id=task_id, node_id=node.node_id)
+        may_park, refusal = enter_wait_verdict(unread_count=len(unread))
         if not may_park:
-            if refusal.startswith('unknown_wake_on'):
-                return {'status': 'rejected', 'reason': refusal}
             return {
                 'status': 'not_parked_unread_present',
-                'wake_on': policy,
                 'unread_injected': len(unread),
                 'reason': refusal,
             }
@@ -2713,7 +2895,6 @@ class NodeRunner:
                 update={
                     'metadata': {
                         **dict(record.metadata or {}),
-                        self.NODE_WAIT_WAKE_ON_KEY: policy,
                         self.NODE_WAIT_NOTE_KEY: str(note or '').strip(),
                     }
                 }
@@ -2726,7 +2907,6 @@ class NodeRunner:
         )
         return {
             'status': 'parked',
-            'wake_on': policy,
             'note': str(note or '').strip(),
             'unread_injected': 0,
         }
@@ -2737,10 +2917,8 @@ class NodeRunner:
         task_id: str,
         node: NodeRecord,
         to: Any,
-        intent_kind: str = '',
         content: str = '',
         ref: str = '',
-        in_reply_to: str = '',
     ) -> dict[str, Any]:
         """`send_message` 的运行时侧：寻址与投递都由服务层裁定，这里只转交。
 
@@ -2756,10 +2934,8 @@ class NodeRunner:
             sender_is_root=str(node.node_id or '').strip()
             == str(node.root_node_id or '').strip(),
             to=to,
-            intent_kind=str(intent_kind or '').strip() or INTENT_PROGRESS,
             content=content,
             ref=ref,
-            in_reply_to=in_reply_to,
         )
 
     async def _mailbox_deliver(self, **payload: Any) -> dict[str, Any]:
@@ -2800,7 +2976,11 @@ class NodeRunner:
             str(child.node_id or '').strip(): child
             for child in self._direct_child_records(task_id, node.node_id)
         }
-        legal_targets = [node_id for node_id in children if node_id]
+        legal_targets = [
+            node_id
+            for node_id, child in children.items()
+            if relationship_node_kind(child) == 'execution'
+        ]
         normalized_ops: list[dict[str, Any]] = []
         results: list[dict[str, Any]] = []
         for raw in list(ops or []) if isinstance(ops, (list, tuple)) else []:
@@ -2814,6 +2994,16 @@ class NodeRunner:
                         'action': action,
                         'result': 'rejected',
                         'reason': 'not_a_direct_child',
+                    }
+                )
+                continue
+            if relationship_node_kind(children[node_id]) == 'acceptance':
+                results.append(
+                    {
+                        'node_id': node_id,
+                        'action': action,
+                        'result': 'rejected',
+                        'reason': 'acceptance_node_not_controllable',
                     }
                 )
                 continue
@@ -2852,15 +3042,14 @@ class NodeRunner:
                 )
             )
             tools[VIEW_NODE_TREE_TOOL_NAME] = ViewNodeTreeTool(
-                lambda depth=None: self._view_tree(
-                    task_id=task.task_id, node=node, depth=depth
+                lambda depth=None, scope='subtree': self._view_tree(
+                    task_id=task.task_id, node=node, depth=depth, scope=scope
                 )
             )
             tools[ENTER_WAIT_TOOL_NAME] = EnterWaitTool(
-                lambda wake_on='any', note='': self._enter_wait(
+                lambda note='': self._enter_wait(
                     task_id=task.task_id,
                     node=node,
-                    wake_on=wake_on,
                     note=note,
                 )
             )
@@ -2871,6 +3060,9 @@ class NodeRunner:
                     **payload,
                 )
             )
+            tools[VIEW_MESSAGE_HISTORY_TOOL_NAME] = ViewMessageHistoryTool(
+                lambda: self._view_message_history(task=task, node=node)
+            )
             tools[MANAGE_CHILD_NODES_TOOL_NAME] = ManageChildNodesTool(
                 lambda ops=None: self._manage_child_nodes(
                     task_id=task.task_id,
@@ -2880,11 +3072,12 @@ class NodeRunner:
             )
             if node.can_spawn_children:
                 tools['spawn_child_nodes'] = SpawnChildNodesTool(
-                    lambda children, call_id=None: self._spawn_children(
+                    lambda children, call_id=None, wait_all_children=False: self._spawn_children(
                         task_id=task.task_id,
                         parent_node_id=node.node_id,
                         specs=children,
                         call_id=call_id,
+                        wait_all_children=wait_all_children,
                     )
                 )
             else:
@@ -3193,6 +3386,7 @@ class NodeRunner:
         parent_node_id: str,
         specs: list[SpawnChildSpec],
         call_id: str | None,
+        wait_all_children: bool = False,
     ) -> list[SpawnChildResult]:
         cache_key = self._spawn_round_cache_key(specs=specs, call_id=call_id)
         async with self._spawn_operation_lock(parent_node_id):
@@ -3202,6 +3396,7 @@ class NodeRunner:
                     parent_node_id=parent_node_id,
                     specs=specs,
                     call_id=call_id,
+                    wait_all_children=wait_all_children,
                 )
             except (TaskPausedError, NodePausedError):
                 # 冻结类控制信号照旧上抛，绝不改写成一次交付（见 main-task-runtime
@@ -3774,6 +3969,7 @@ class NodeRunner:
         parent_node_id: str,
         specs: list[SpawnChildSpec],
         call_id: str | None,
+        wait_all_children: bool = False,
     ) -> list[SpawnChildResult]:
         task = self._store.get_task(task_id)
         parent = self._store.get_node(parent_node_id)
@@ -3833,8 +4029,12 @@ class NodeRunner:
             'specs': [item.model_dump(mode='json') for item in specs],
             'entries': [],
             'completed': False,
+            'wait_all_children': bool(wait_all_children),
         }
         cached_payload['specs'] = [item.model_dump(mode='json') for item in specs]
+        cached_payload['wait_all_children'] = bool(
+            cached_payload.get('wait_all_children', wait_all_children)
+        )
         entries = list(cached_payload.get('entries') or [])
         while len(entries) < len(specs):
             entries.append({})
@@ -3920,7 +4120,8 @@ class NodeRunner:
                     )
         # 拆掉阻塞承诺：这里只做创建 + 交棒给调度器 + 立即返回。轮次 completed 由
         # `reconcile_spawn_round_completion` 按节点行派生，不再由本协程宣布；子节点的
-        # 结果走 `child_final` 消息，父节点用 `enter_wait(all_children)` 等它们。
+        # 结果走 `child_final` 消息，父节点用 `enter_wait` 等它们；是否攒齐由
+        # `wait_all_children` 在派发时决定。
         self._save_spawn_cache(task.task_id, parent.node_id, cache_key, cached_payload)
         receipts = self._spawn_creation_receipts(specs=specs, entries=list(cached_payload.get('entries') or []))
         self._emit_spawn_diagnostic(
@@ -6874,8 +7075,7 @@ class NodeRunner:
         """终局 → 父节点 `child_final`：唯一上报点，异步但不丢。
 
         P1「终局必上报」要求每个执行节点的终局都有一条机器消息抵达父节点；这是
-        `all_children` 唤醒判据与父节点"子节点到底怎么了"的唯一来源，所以只在这一处
-        产出，模型既伪造不了也漏发不了。验收节点不发（T15：它随被验收节点终局）。
+        父节点"子节点到底怎么了"的唯一来源，所以只在这一处产出，模型既伪造不了也漏发不了。验收节点不发（T15：它随被验收节点终局）。
         父节点自己发起的 terminate 由调用方传 `notify_parent=False` 抑制（设计 §4.4：
         终止者在同一个工具返回里已经知道了结果）。
 
