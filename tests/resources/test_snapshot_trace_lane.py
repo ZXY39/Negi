@@ -86,6 +86,7 @@ def _service(monkeypatch) -> tuple[TaskQueryService, list[str]]:
 
     monkeypatch.setattr(service, '_resolve_execution_trace', _spy_resolve)
     monkeypatch.setattr(service, '_node_message_list', lambda **kwargs: [])
+    monkeypatch.setattr(service, '_node_sent_message_list', lambda **kwargs: [])
     monkeypatch.setattr(service, '_hydrate_execution_trace_output_texts', lambda trace: trace)
     return service, calls
 
@@ -104,7 +105,8 @@ def test_snapshot_lane_drops_body_but_keeps_summary_contents(monkeypatch) -> Non
     assert calls == ['resolve'], '正文照旧解析——摘要里的 latest_tool_calls_full 依它而造'
     assert not detail.execution_trace, '正文不外发'
     summary = detail.execution_trace_summary or {}
-    assert summary.get('stages'), '摘要仍在'
+    # 轮次投影已停写：摘要只保留 turns/tool_steps，不再携带 stages。
+    assert not summary.get('stages'), '旧分轮字段不应再出现在摘要里'
     assert [item.get('tool_name') for item in summary.get('latest_tool_calls_full') or []] == ['exec'], (
         'summary 档附带的「最新一批」完整入参/出参必须保持有货'
     )

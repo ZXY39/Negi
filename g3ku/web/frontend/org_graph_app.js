@@ -657,6 +657,7 @@ const U = {
     adTokenSummary: document.getElementById("ad-token-summary"),
     adFlow: document.getElementById("ad-input"),
     adMessages: document.getElementById("ad-messages"),
+    adMessageTabs: document.getElementById("ad-message-tabs"),
     adNoticeComposer: document.getElementById("ad-notice-composer"),
     adNoticeInput: document.getElementById("ad-notice-input"),
     adNoticeSend: document.getElementById("ad-notice-send"),
@@ -4995,6 +4996,7 @@ function renderCeoTurnsIntoTurn(turn, turns = [], { interruptedMarker = false } 
     })).join("");
     if (typeof bindTraceRoundToolStrips === "function") bindTraceRoundToolStrips(turn.listEl);
     if (typeof bindTraceFieldCopyActions === "function") bindTraceFieldCopyActions(turn.listEl);
+    if (typeof bindTaskTraceListInteractions === "function") bindTaskTraceListInteractions(turn.listEl);
     turn.steps = descriptors.length;
     turn.railTurns = visibleTurns;
     turn.railMetaLabel = ceoRailMetaLabel(turn, visibleTurns) || `${descriptors.length} 组`;
@@ -7225,7 +7227,7 @@ function configureTaskDetailSections() {
     renderMessageHeading(0);
     renderSpawnReviewHeading(0);
     renderArtifactHeading(0);
-    if (U.adOutputHeading) U.adOutputHeading.innerHTML = '<i data-lucide="arrow-up-from-line"></i> 最终输出';
+    if (U.adOutputHeading) U.adOutputHeading.innerHTML = '<i data-lucide="arrow-up-from-line"></i> 提交输出';
     if (U.adOutput) U.adOutput.classList.add("task-trace-output");
     if (U.adAcceptanceHeading) U.adAcceptanceHeading.innerHTML = '<i data-lucide="shield-check"></i> 验收结果';
     if (U.adFlow) {
@@ -7241,7 +7243,8 @@ function configureTaskDetailSections() {
         U.adSpawnReviews.classList.add("task-trace-host");
     }
     if (U.adAcceptance) U.adAcceptance.classList.add("task-trace-acceptance");
-    if (U.nodeEmpty) U.nodeEmpty.textContent = "选择任务树中的节点后，这里会显示执行流程、最终输出、验收结果和工件。";
+    if (U.nodeEmpty) U.nodeEmpty.textContent = "选择任务树中的节点后，这里会显示执行流程、提交输出、验收结果和工件。";
+    if (typeof bindTaskMessageTabs === "function") bindTaskMessageTabs();
     if (U.adOutputSection) U.adOutputSection.hidden = false;
     if (U.adLogsSection) U.adLogsSection.hidden = true;
     icons();

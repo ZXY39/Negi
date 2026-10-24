@@ -1320,6 +1320,11 @@ class NodeRunner:
                 notification_ids=pending_root_notice_ids,
             )
         self._clear_pending_notice_state_if_idle(node_id=node_id)
+        # 并入上下文 = 徽标该减了：主动补一帧 node.patch（含 pending_notice_count），
+        # 不再等下一次整树快照。
+        publish_node_state = getattr(self._log_service, 'publish_node_state', None)
+        if callable(publish_node_state):
+            publish_node_state(task_id, node_id)
 
     def _required_acceptance_node(self, *, task, node: NodeRecord) -> NodeRecord | None:
         if str(getattr(node, 'node_kind', '') or '').strip().lower() != KIND_EXECUTION:
@@ -2124,6 +2129,10 @@ class NodeRunner:
             # 让正常握手重新核验本次提交（旧裁决先存入 rejection_history）。
             acceptance = self._reset_terminal_acceptance_for_reverify(task=task, acceptance=acceptance)
         result_ref = self._persist_acceptance_candidate_result(task_id=task.task_id, node_id=node.node_id, result=result)
+        # 提交即展示：verify 还要等一轮，但「提交输出」此刻就该是这份内容。
+        update_node_output = getattr(self._log_service, 'update_node_output', None)
+        if callable(update_node_output):
+            update_node_output(task.task_id, node.node_id, result.output)
         self._set_execution_waiting_acceptance_state(
             task_id=task.task_id,
             execution_node_id=node.node_id,

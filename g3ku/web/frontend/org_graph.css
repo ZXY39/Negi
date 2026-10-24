@@ -3877,8 +3877,8 @@ textarea {
     min-width: 0;
 }
 
-/* 模型中途输出：摘要行只占一行并向右溢出（省略号），完整原文放进展开后的
-   固定高度滚动框。以前按 80 字硬截断，后半段要求直接看不见。 */
+/* 模型中途输出：折叠时摘要行只占一行并向右溢出（省略号）；展开后仍是同一段原文，
+   换成固定高度可滚动。正文框不铺底色、不描边，看起来就是原文本本身。 */
 .task-trace-step--turn-text .interaction-step-lead {
     flex: 1 1 auto;
     overflow: hidden;
@@ -3891,20 +3891,19 @@ textarea {
     text-overflow: ellipsis;
 }
 
-.task-trace-turn-text {
-    max-height: 180px;
-    overflow-y: auto;
-    overscroll-behavior: contain;
-    padding: 10px 12px;
-    border: 1px solid var(--ui-border, var(--border-color));
-    border-radius: 10px;
-    background: var(--ui-bg-subtle, var(--bg-app));
-    color: var(--text-primary);
-    font-size: 0.88rem;
-    line-height: 1.6;
+.task-trace-step--turn-text[open] .interaction-step-title {
+    display: block;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     word-break: break-word;
+    text-overflow: clip;
+    max-height: 180px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    background: transparent;
+    border: 0;
+    line-height: 1.6;
+    cursor: text;
 }
 
 .interaction-step-status {
@@ -16945,4 +16944,148 @@ textarea {
        -webkit-line-clamp 在这里不生效，用高度硬约束）。 */
     max-height: 4.35em;
     overflow: hidden;
+}
+
+/* ---- 节点详情：消息列表收发分栏 / 派生记录节点列表 ---- */
+.ad-message-tabs {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    flex: none;
+    padding: 2px;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-full);
+    background: color-mix(in srgb, var(--bg-app) 82%, transparent);
+}
+
+.ad-message-tab {
+    border: 0;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 0.76rem;
+    line-height: 1.5;
+    padding: 3px 12px;
+    border-radius: var(--radius-full);
+    cursor: pointer;
+}
+
+.ad-message-tab:hover {
+    color: var(--text-primary);
+}
+
+.ad-message-tab.is-active {
+    background: var(--bg-panel);
+    color: var(--text-primary);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+
+/* 消息条目展开后只留正文：不铺底、不描边，框就是文字本身。 */
+.task-trace-message-body {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    color: var(--text-primary);
+    font-size: 0.86rem;
+    line-height: 1.65;
+    max-height: 320px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+.spawn-node-list {
+    display: grid;
+    gap: var(--space-2);
+}
+
+.spawn-node {
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    background: color-mix(in srgb, var(--bg-panel) 70%, var(--bg-app));
+    overflow: hidden;
+}
+
+.spawn-node-summary {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    cursor: pointer;
+    list-style: none;
+}
+
+.spawn-node-summary::-webkit-details-marker {
+    display: none;
+}
+
+.spawn-node-mode {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex: none;
+    padding: 1px 8px;
+    border-radius: var(--radius-full);
+    font-size: 0.72rem;
+    line-height: 1.6;
+    background: color-mix(in srgb, var(--brand-primary) 12%, transparent);
+    color: var(--brand-primary);
+}
+
+.spawn-node-mode--coverage {
+    background: color-mix(in srgb, var(--status-running-text) 14%, transparent);
+    color: var(--status-running-text);
+}
+
+.spawn-node-mode svg {
+    width: 12px;
+    height: 12px;
+}
+
+.spawn-node-goal {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: 0.84rem;
+    color: var(--text-primary);
+}
+
+.spawn-node-id {
+    flex: none;
+    font-family: var(--font-mono, monospace);
+    font-size: 0.7rem;
+    color: var(--text-tertiary);
+}
+
+.spawn-node-body {
+    display: grid;
+    gap: var(--space-2);
+    padding: 0 var(--space-3) var(--space-3);
+}
+
+.spawn-node-actions {
+    display: flex;
+    justify-content: flex-end;
+}
+
+.spawn-node-field {
+    display: grid;
+    gap: 4px;
+}
+
+.spawn-node-label {
+    font-size: 0.72rem;
+    color: var(--text-tertiary);
+}
+
+.spawn-node-text {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    max-height: 220px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    font-size: 0.84rem;
+    line-height: 1.6;
+    color: var(--text-primary);
 }

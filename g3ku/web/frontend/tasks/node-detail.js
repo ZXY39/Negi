@@ -50,16 +50,14 @@ function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = 
     const classes = ["interaction-step", "task-trace-step", esc(status)];
     const normalizedExtraClass = String(extraClass || "").trim();
     if (normalizedExtraClass) classes.push(esc(normalizedExtraClass));
-    // 模型中途输出：摘要行只显示一行并向右溢出（CSS 省略号），点击展开后在
-    // 固定高度的滚动框里给完整原文，不再把正文截成固定字数的 "..."。
+    // 模型中途输出：折叠时摘要行只占一行向右溢出；展开后仍是同一段原文，
+    // 只是换成固定高度可滚动，体内不再重复一遍正文。状态徽标也不挂在正文右侧。
     const assistantText = String(turnText || "").trim();
     if (assistantText) classes.push("task-trace-step--turn-text");
-    const bodyContent = assistantText
-        ? `<div class="task-trace-turn-text">${esc(assistantText)}</div>${bodyHtml}`
-        : bodyHtml;
+    const bodyContent = bodyHtml;
     const sideParts = [];
     if (showRuntime) sideParts.push('<span class="task-trace-runtime" hidden></span>');
-    if (showStatus) {
+    if (showStatus && !assistantText) {
         const label = String(statusLabel || "").trim() || traceStatusLabel(status);
         sideParts.push(`<span class="interaction-step-status">${esc(label)}</span>`);
     }
@@ -442,6 +440,26 @@ function bindTraceOutputAutoLoad(traceList) {
     }, true);
 }
 
+function bindTaskTraceListInteractions(traceList) {
+    if (!(traceList instanceof HTMLElement) || traceList.dataset.traceUiBindings === "true") return;
+    traceList.dataset.traceUiBindings = "true";
+    traceList.addEventListener("click", (event) => {
+        const target = event.target instanceof Element ? event.target : null;
+        if (!target) return;
+        // 展开态的中途输出正文要能滚动、能选中：点正文本身不再触发 <details> 收起。
+        if (target.closest(".task-trace-step--turn-text[open] .interaction-step-title")) {
+            event.preventDefault();
+            return;
+        }
+        const jumpButton = target.closest("[data-spawn-jump]");
+        if (jumpButton instanceof HTMLElement) {
+            event.preventDefault();
+            event.stopPropagation();
+            void jumpToSpawnedNode(jumpButton.dataset.spawnJump || "");
+        }
+    });
+}
+
 function buildTurnGroupDescriptors(turns) {
     const entries = [];
     (Array.isArray(turns) ? turns : []).forEach((turn) => {
@@ -602,87 +620,21 @@ function messageListStatusDescriptor(status) {
     return { key: "info", label: descriptor.label };
 }
 
-function formatRequestInFlightSuffix(status, nodeId) {
-    if (String(status || "").trim().toLowerCase() !== "received") return "";
-    const frame = (S.liveFrameMap || {})[String(nodeId || "").trim()] || null;
-    if (!isModelRequestInFlightFrame(frame)) return "";
-    const startedAt = Date.parse(String(frame.await_started_at || ""));
-    if (Number.isNaN(startedAt)) return " · 请求中";
-    const seconds = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
-    return ` · 请求中(已等 ${seconds}s)`;
+function taskMessagePreviewText(message, maxChars = 140) {
+    const text = String(message || "").replace(/\s+/g, " ").trim();
+    if (!text) return "（无内容）";
+    const chars = Array.from(text);
+    return chars.length > maxChars ? `${chars.slice(0, maxChars).join("")}…` : text;
 }
 
-function formatMessageListTitle(entry, index) {
-    const time = String(entry?.received_at || entry?.consumed_at || "").trim();
-    const formattedTime = time ? formatCompactTime(time) : `消息 ${index + 1}`;
-    const status = messageListStatusDescriptor(entry?.status);
-    return `${formattedTime} · ${status.label}${formatRequestInFlightSuffix(entry?.status, S.selectedNodeId)}`;
+function taskMessageTimeText(entry) {
+    const time = String(entry?.received_at || entry?.consumed_at || entry?.merged_at || "").trim();
+    if (!time) return "暂无时间";
+    return typeof formatCompactTime === "function" ? formatCompactTime(time) : time;
 }
 
-function messageDeliveryStatusDescriptor(delivery = {}) {
-    const decision = String(delivery?.decision || "").trim().toLowerCase();
-    if (decision === "skipped") {
-        return { key: "skipped", label: "未下发", icon: "circle-slash" };
-    }
-    const status = String(delivery?.status || "").trim().toLowerCase();
-    const mergedAt = String(delivery?.merged_at || "").trim();
-    if (status === "delivered") {
-        return { key: "delivered", label: "已分发·待处理", icon: "inbox" };
-    }
-    if (status === "consumed") {
-        if (mergedAt) {
-            return { key: "merged", label: "已并入上下文", icon: "merge" };
-        }
-        return { key: "consumed", label: "已消费", icon: "circle-check" };
-    }
-    return messageStatusDescriptor(status);
-}
-
-function renderMessageDeliveriesField(deliveries = []) {
-    const items = Array.isArray(deliveries) ? deliveries : [];
-    const labelHtml = `<div class="task-trace-label">${esc("分发情况")}</div>`;
-    if (!items.length) {
-        return `
-        <div class="task-trace-field">
-            ${labelHtml}
-            <div class="code-block task-trace-code">${esc("无")}</div>
-        </div>
-    `;
-    }
-    const rows = items.map((item) => {
-        const descriptor = messageDeliveryStatusDescriptor(item);
-        const skipped = String(item?.decision || "").trim().toLowerCase() === "skipped";
-        const targetTitle = String(item?.target_title || item?.target_node_id || "").trim() || "未命名节点";
-        const targetNodeId = String(item?.target_node_id || "").trim();
-        const showNodeId = targetNodeId && targetNodeId !== targetTitle;
-        // 分发情况只展示节点信息与分发状态：distributed 行不再重复消息正文
-        // （正文已在条目「消息内容」区展示）；skipped 行保留跳过原因。
-        const detail = skipped
-            ? (String(item?.reason || "").trim() || "暂无跳过原因")
-            : "";
-        const detailHtml = detail
-            ? `<span class="notice-delivery-detail">${esc(detail)}</span>`
-            : "";
-        return `
-            <div class="notice-delivery-item notice-delivery-item--${esc(descriptor.key)}">
-                <span class="notice-delivery-icon" aria-hidden="true"><i data-lucide="${esc(descriptor.icon)}"></i></span>
-                <span class="notice-delivery-main">
-                    <span class="notice-delivery-head">
-                        <span class="notice-delivery-target">${esc(targetTitle)}</span>
-                        ${showNodeId ? `<span class="notice-delivery-node-id">${esc(targetNodeId)}</span>` : ""}
-                        <span class="notice-delivery-status">${esc(descriptor.label)}</span>
-                    </span>
-                    ${detailHtml}
-                </span>
-            </div>
-        `;
-    }).join("");
-    return `
-        <div class="task-trace-field">
-            ${labelHtml}
-            <div class="notice-delivery-list">${rows}</div>
-        </div>
-    `;
+function renderTaskMessageBody(message) {
+    return `<div class="task-trace-message-body">${esc(String(message || "").trim() || "暂无消息内容")}</div>`;
 }
 
 function buildNodeMessageListSteps(node = {}) {
@@ -691,20 +643,36 @@ function buildNodeMessageListSteps(node = {}) {
         const status = messageListStatusDescriptor(entry?.status);
         return {
             traceKey: `message:${String(entry?.notification_id || entry?.epoch_id || index).trim() || index}`,
-            title: formatMessageListTitle(entry, index),
+            // 折叠态只留三样：时间、状态、一行内容预览；展开态只给消息正文。
+            title: `${taskMessageTimeText(entry)} · ${status.label} · ${taskMessagePreviewText(entry?.message)}`,
             status: status.key,
             showStatus: false,
             open: index === 0,
-            bodyHtml: [
-                renderTraceField("状态", status.label, "已接收"),
-                renderTraceField("接收时间", entry?.received_at || entry?.consumed_at, "暂无时间"),
-                entry?.consumed_at ? renderTraceField("消费时间", entry?.consumed_at, "") : "",
-                entry?.merged_at ? renderTraceField("并入上下文时间", entry?.merged_at, "") : "",
-                renderTraceField("消息内容", entry?.message, "暂无消息内容"),
-                renderMessageDeliveriesField(entry?.deliveries),
-            ].join(""),
+            bodyHtml: renderTaskMessageBody(entry?.message),
         };
     });
+}
+
+function buildNodeSentMessageListSteps(node = {}) {
+    const entries = Array.isArray(node?.sent_message_list) ? node.sent_message_list : [];
+    return entries.map((entry, index) => {
+        const status = messageListStatusDescriptor(entry?.status);
+        const target = String(entry?.target_title || entry?.target_node_id || "").trim() || "未知节点";
+        return {
+            traceKey: `sent-message:${String(entry?.notification_id || index).trim() || index}`,
+            title: `${taskMessageTimeText(entry)} · ${status.label} · → ${target} · ${taskMessagePreviewText(entry?.message)}`,
+            status: status.key,
+            showStatus: false,
+            open: index === 0,
+            bodyHtml: renderTaskMessageBody(entry?.message),
+        };
+    });
+}
+
+function activeTaskMessageListSteps(node) {
+    return S.taskMessageViewMode === "outbox"
+        ? buildNodeSentMessageListSteps(node)
+        : buildNodeMessageListSteps(node);
 }
 
 function spawnReviewRoundStatus(round = {}) {
@@ -716,89 +684,150 @@ function spawnReviewRoundStatus(round = {}) {
     return "info";
 }
 
-function spawnSpecHasIndependentAcceptance(spec = null) {
-    // 新载荷按 runtime_nodes 判（一个元素=运行时创建的一个独立节点）；历史轮次与
-    // log_service 回落到原始 spec 投影片段时，只能照 requires_acceptance 的推断读。
-    if (Array.isArray(spec?.runtime_nodes)) {
-        return spec.runtime_nodes.some((node) => String(node?.node_kind || "").trim() === "acceptance");
-    }
-    if (typeof spec?.requires_acceptance === "boolean") {
-        return spec.requires_acceptance;
-    }
-    return String(spec?.acceptance_prompt || "").trim() !== "";
+function spawnSpecModeDescriptor(spec = null) {
+    const mode = String(spec?.execution_policy?.mode || "").trim().toLowerCase();
+    if (mode === "coverage") return { key: "coverage", label: "全面", icon: "layers" };
+    return { key: "focus", label: "专注", icon: "target" };
 }
 
-function summarizeRequestedSpawnSpecs(specs = []) {
-    const lines = (Array.isArray(specs) ? specs : []).map((spec, index) => {
-        const goal = String(spec?.goal || "").trim() || `spec ${index + 1}`;
-        const mode = String(spec?.execution_policy?.mode || "").trim() || "focus";
-        const acceptance = spawnSpecHasIndependentAcceptance(spec) ? " [独立验收]" : "";
-        return `#${index + 1} ${goal} [${mode}]${acceptance}`;
-    });
-    return lines.join("\n");
+function renderSpawnNodeItem(entry = {}, spec = null, childResult = null) {
+    const childNodeId = String(entry?.child_node_id || "").trim();
+    const goal = String(entry?.goal || spec?.goal || childNodeId || "未命名节点").trim();
+    const mode = spawnSpecModeDescriptor(spec);
+    const prompt = String(spec?.prompt || "").trim() || "暂无提示词";
+    const acceptance = String(childResult?.check_result || "").trim() || "暂无验收结果";
+    const jumpButton = childNodeId
+        ? `<button type="button" class="toolbar-btn ghost small spawn-node-jump" data-spawn-jump="${esc(childNodeId)}">跳转到节点详情</button>`
+        : "";
+    return `
+        <details class="spawn-node" data-spawn-node-id="${esc(childNodeId)}">
+            <summary class="spawn-node-summary">
+                <span class="spawn-node-mode spawn-node-mode--${mode.key}"><i data-lucide="${mode.icon}"></i>${mode.label}</span>
+                <span class="spawn-node-goal">${esc(goal)}</span>
+                <span class="spawn-node-id">${esc(childNodeId || "未派生")}</span>
+            </summary>
+            <div class="spawn-node-body">
+                ${jumpButton ? `<div class="spawn-node-actions">${jumpButton}</div>` : ""}
+                <div class="spawn-node-field">
+                    <span class="spawn-node-label">提示词</span>
+                    <div class="spawn-node-text">${esc(prompt)}</div>
+                </div>
+                <div class="spawn-node-field">
+                    <span class="spawn-node-label">验收结果</span>
+                    <div class="spawn-node-text">${esc(acceptance)}</div>
+                </div>
+            </div>
+        </details>
+    `;
 }
 
-function summarizeAllowedSpawnEntries(entries = []) {
-    const lines = (Array.isArray(entries) ? entries : [])
-        .filter((entry) => String(entry?.review_decision || "").trim().toLowerCase() === "allowed")
-        .map((entry, index) => {
-            const goal = String(entry?.goal || "").trim() || `allowed ${index + 1}`;
-            const childNodeId = String(entry?.child_node_id || "").trim();
-            return childNodeId ? `${goal} -> ${childNodeId}` : goal;
-        });
-    return lines.join("\n");
-}
-
-function summarizeBlockedSpawnEntries(entries = []) {
-    const lines = (Array.isArray(entries) ? entries : [])
-        .filter((entry) => String(entry?.review_decision || "").trim().toLowerCase() === "blocked")
-        .map((entry, index) => {
-            const goal = String(entry?.goal || "").trim() || `blocked ${index + 1}`;
-            const reason = String(entry?.blocked_reason || "").trim() || "暂无拦截原因";
-            return `${goal}: ${reason}`;
-        });
-    return lines.join("\n");
-}
-
-function summarizeBlockedSpawnSuggestions(entries = []) {
-    const lines = (Array.isArray(entries) ? entries : [])
-        .filter((entry) => String(entry?.review_decision || "").trim().toLowerCase() === "blocked")
-        .map((entry, index) => {
-            const goal = String(entry?.goal || "").trim() || `blocked ${index + 1}`;
-            const suggestion = String(entry?.blocked_suggestion || "").trim() || "暂无操作建议";
-            return `${goal}: ${suggestion}`;
-        });
-    return lines.join("\n");
-}
-
-function buildSpawnReviewTraceSteps(rounds = []) {
+function buildSpawnReviewTraceSteps(rounds = [], childResults = []) {
+    const results = Array.isArray(childResults) ? childResults : [];
     return (Array.isArray(rounds) ? rounds : []).map((round, index) => {
         const reviewedAt = String(round?.reviewed_at || "").trim();
         const formattedReviewedAt = reviewedAt
             ? (typeof formatCompactTime === "function" ? formatCompactTime(reviewedAt) : reviewedAt)
             : "";
         const titleSuffix = formattedReviewedAt ? ` · ${formattedReviewedAt}` : ` · 第${index + 1}轮`;
+        const specs = Array.isArray(round?.requested_specs) ? round.requested_specs : [];
+        const specByIndex = new Map(
+            specs.map((spec, specIndex) => [
+                Number.isFinite(Number(spec?.index)) ? Number(spec.index) : specIndex,
+                spec,
+            ]),
+        );
+        const allowedEntries = (Array.isArray(round?.entries) ? round.entries : [])
+            .filter((entry) => String(entry?.review_decision || "").trim().toLowerCase() === "allowed");
+        const nodeItems = allowedEntries.map((entry, entryIndex) => {
+            const specIndex = Number.isFinite(Number(entry?.index)) ? Number(entry.index) : entryIndex;
+            const childNodeId = String(entry?.child_node_id || "").trim();
+            const childResult = results.find((item) => (
+                String(item?.child_node_id || "").trim() === childNodeId
+            )) || null;
+            return renderSpawnNodeItem(entry, specByIndex.get(specIndex) || null, childResult);
+        }).join("");
         return {
             traceKey: `spawn-review:${String(round?.round_id || index).trim() || index}`,
-            title: `派生记录${titleSuffix}`,
+            title: nodeItems
+                ? `派生记录${titleSuffix} · ${allowedEntries.length} 个节点`
+                : `派生记录${titleSuffix}`,
             status: spawnReviewRoundStatus(round),
             showStatus: false,
             open: false,
-            bodyHtml: [
-                renderTraceField("原始请求", summarizeRequestedSpawnSpecs(round?.requested_specs), "本轮无原始派生请求"),
-                renderTraceField("放行结果", summarizeAllowedSpawnEntries(round?.entries), "本轮无放行派生"),
-                renderTraceField("被拦截原因", summarizeBlockedSpawnEntries(round?.entries), "本轮无被拦截项"),
-                renderTraceField("操作建议", summarizeBlockedSpawnSuggestions(round?.entries), "本轮无额外建议"),
-            ].join(""),
+            bodyHtml: nodeItems
+                ? `<div class="spawn-node-list">${nodeItems}</div>`
+                : '<div class="empty-state task-trace-empty">本轮无派生节点。</div>',
         };
     });
+}
+
+function jumpToSpawnedNode(nodeId) {
+    const key = String(nodeId || "").trim();
+    if (!key) return;
+    const node = (typeof findTreeNode === "function" ? findTreeNode(S.treeView, key) : null)
+        || (typeof treeSnapshotNode === "function" ? treeSnapshotNode(key) : null)
+        || S.taskNodeDetails?.[key]
+        || null;
+    if (!node) {
+        if (typeof showToast === "function") {
+            showToast({ title: "无法打开节点", text: `节点 ${key} 当前不在任务树中`, kind: "warn" });
+        }
+        return;
+    }
+    const previousNodeId = String(S.selectedNodeId || "").trim();
+    if (previousNodeId && previousNodeId !== key && typeof stashTaskDetailViewState === "function") {
+        stashTaskDetailViewState({ nodeId: previousNodeId });
+    }
+    S.selectedNodeId = key;
+    if (typeof syncExecutionTreeSelection === "function") syncExecutionTreeSelection(previousNodeId, key);
+    if (typeof showAgent === "function") void showAgent(node, { preserveViewState: false, forceRefresh: true });
+    // 详情先开；定位/居中在后台做，不阻塞抽屉（隐藏窗口里 rAF 可能不跑）。
+    if (typeof locateTaskNode === "function") {
+        void locateTaskNode(key).catch(() => null);
+    }
+}
+
+function syncTaskMessageTabs() {
+    const tabs = U.adMessageTabs;
+    if (!tabs) return;
+    const mode = S.taskMessageViewMode === "outbox" ? "outbox" : "inbox";
+    tabs.querySelectorAll("[data-message-tab]").forEach((button) => {
+        const active = String(button.dataset.messageTab || "") === mode;
+        button.classList.toggle("is-active", active);
+        button.setAttribute("aria-selected", active ? "true" : "false");
+    });
+}
+
+function setTaskMessageViewMode(mode) {
+    const next = String(mode || "").trim() === "outbox" ? "outbox" : "inbox";
+    if ((S.taskMessageViewMode === "outbox" ? "outbox" : "inbox") === next) return;
+    S.taskMessageViewMode = next;
+    syncTaskMessageTabs();
+    if (S.currentNodeDetail) renderMessageList(S.currentNodeDetail);
+}
+
+function bindTaskMessageTabs() {
+    const tabs = U.adMessageTabs;
+    if (!tabs || tabs.dataset.bound === "true") {
+        syncTaskMessageTabs();
+        return;
+    }
+    tabs.dataset.bound = "true";
+    tabs.addEventListener("click", (event) => {
+        const button = event.target instanceof Element ? event.target.closest("[data-message-tab]") : null;
+        if (!(button instanceof HTMLElement)) return;
+        setTaskMessageViewMode(button.dataset.messageTab);
+    });
+    syncTaskMessageTabs();
 }
 
 function renderMessageList(node, { viewState = null } = {}) {
     if (!U.adMessages) return false;
     const effectiveViewState = normalizeTaskDetailViewState(viewState || captureTaskDetailViewState());
     const preservedScrollTop = Number(effectiveViewState?.messageScrollTop || 0);
-    const stepDescriptors = buildNodeMessageListSteps(node);
+    const stepDescriptors = activeTaskMessageListSteps(node);
+    const isOutbox = S.taskMessageViewMode === "outbox";
+    const emptyText = isOutbox ? "当前节点暂无发出消息。" : "当前节点暂无消息。";
     const steps = stepDescriptors.map((step, index) => renderTraceStep({
         ...step,
         open: resolveTraceStepOpenState(
@@ -816,17 +845,19 @@ function renderMessageList(node, { viewState = null } = {}) {
         U.adMessages.innerHTML = "";
         U.adMessages.appendChild(traceList);
     }
-    const renderSignature = buildTraceRenderSignature(stepDescriptors);
+    const renderSignature = `${isOutbox ? "outbox" : "inbox"}:${buildTraceRenderSignature(stepDescriptors)}`;
     const renderNodeId = String(node?.node_id || "").trim();
     const shouldReplace = traceList.dataset.renderSignature !== renderSignature
         || traceList.dataset.renderNodeId !== renderNodeId;
     if (shouldReplace) {
         traceList.innerHTML = steps.length
             ? steps.join("")
-            : '<div class="empty-state task-trace-empty">当前节点暂无消息。</div>';
+            : `<div class="empty-state task-trace-empty">${esc(emptyText)}</div>`;
         traceList.dataset.renderSignature = renderSignature;
         traceList.dataset.renderNodeId = renderNodeId;
     }
+    bindTaskMessageTabs();
+    bindTaskTraceListInteractions(traceList);
     renderMessageHeading(stepDescriptors.length);
     syncNoticeComposerState();
     if (shouldReplace) {
@@ -849,7 +880,7 @@ function renderSpawnReviewTrace(node, { viewState = null } = {}) {
     const effectiveViewState = normalizeTaskDetailViewState(viewState || captureTaskDetailViewState());
     const preservedScrollTop = Number(effectiveViewState?.spawnReviewScrollTop || 0);
     const rounds = Array.isArray(node?.spawn_review_rounds) ? node.spawn_review_rounds : [];
-    const stepDescriptors = buildSpawnReviewTraceSteps(rounds);
+    const stepDescriptors = buildSpawnReviewTraceSteps(rounds, node?.direct_child_results);
     const steps = stepDescriptors.map((step, index) => renderTraceStep({
         ...step,
         open: resolveTraceStepOpenState(
@@ -878,6 +909,7 @@ function renderSpawnReviewTrace(node, { viewState = null } = {}) {
         traceList.dataset.renderSignature = renderSignature;
         traceList.dataset.renderNodeId = renderNodeId;
     }
+    bindTaskTraceListInteractions(traceList);
     renderSpawnReviewHeading(stepDescriptors.length);
     if (shouldReplace) {
         const restoreScroll = () => {
@@ -1163,6 +1195,7 @@ function renderExecutionTrace(node, { viewState = null } = {}) {
     bindTraceRoundToolStrips(traceList);
     bindTraceOutputAutoLoad(traceList);
     bindTraceFieldCopyActions(traceList);
+    bindTaskTraceListInteractions(traceList);
     traceItems.filter((item) => item instanceof HTMLElement && item.open).forEach((item) => hydrateTraceOutputBlocks(item));
     refreshTaskDetailScrollRegions();
     if (effectiveViewState && shouldReplace) {
@@ -1183,7 +1216,7 @@ function renderExecutionTrace(node, { viewState = null } = {}) {
 
 function renderFinalOutput(text) {
     if (!U.adOutput) return;
-    const nextText = readableText(text, { decodeEscapes: true, emptyText: "暂无最终输出" });
+    const nextText = readableText(text, { decodeEscapes: true, emptyText: "暂无提交输出" });
     const changed = U.adOutput.textContent !== nextText;
     if (changed) U.adOutput.textContent = nextText;
     return changed;

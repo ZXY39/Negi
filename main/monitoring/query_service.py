@@ -455,6 +455,57 @@ class TaskQueryService:
         )
         return entries
 
+    def _node_sent_message_list(self, *, task_id: str, node_id: str) -> list[dict[str, Any]]:
+        """本节点发出的消息：通知台账里 source_node_id=本节点的行。
+
+        `node_id` 列是收件人，发送方只在 payload 里，所以这里按任务读一次再过滤；
+        节点详情是低频页，一次任务级读取可接受（(task_id) 索引见建表段）。
+        """
+        normalized_node_id = str(node_id or '').strip()
+        if not normalized_node_id:
+            return []
+        node_titles = {
+            str(item.node_id or '').strip(): str(item.title or item.node_id or '').strip()
+            for item in list(self._store.list_task_nodes(task_id) or [])
+        }
+        entries: list[dict[str, Any]] = []
+        for item in list(self._store.list_task_notifications(task_id) or []):
+            if str(item.source_node_id or '').strip() != normalized_node_id:
+                continue
+            message = str(item.message or '').strip()
+            if not message or is_system_relay_notice(item):
+                continue
+            target_node_id = str(item.node_id or '').strip()
+            ledger_status = str(item.status or '').strip()
+            consumed_at = str(item.consumed_at or '').strip()
+            merged_at = str(item.merged_at or '').strip()
+            if ledger_status == 'consumed':
+                display_status = 'merged' if merged_at else 'consumed'
+            elif ledger_status == 'delivered':
+                display_status = 'pending'
+            else:
+                display_status = ledger_status or 'pending'
+            entries.append(
+                {
+                    'notification_id': str(item.notification_id or '').strip(),
+                    'target_node_id': target_node_id,
+                    'target_title': str(node_titles.get(target_node_id) or target_node_id).strip(),
+                    'message': message,
+                    'received_at': str(item.delivered_at or item.created_at or '').strip(),
+                    'consumed_at': consumed_at,
+                    'merged_at': merged_at,
+                    'status': display_status,
+                }
+            )
+        entries.sort(
+            key=lambda entry: (
+                str(entry.get('received_at') or entry.get('consumed_at') or ''),
+                str(entry.get('notification_id') or ''),
+            ),
+            reverse=True,
+        )
+        return entries
+
     def get_tasks(self, session_id: str | None, task_type: int) -> list[TaskListItem]:
         # 窄读路径优先：json_extract 摘要避免逐任务全量解析 payload_json；
         # 窄读不可用（老 sqlite 无 json1 等）时回退整包 TaskRecord 解析。
@@ -478,8 +529,13 @@ class TaskQueryService:
             disk_usages = self._store.get_task_disk_usages([item.task_id for item in items])
         except Exception:
             disk_usages = {}
+        try:
+            node_counts = self._store.count_task_nodes_by_task([item.task_id for item in items])
+        except Exception:
+            node_counts = {}
         for item in items:
             item.disk_usage_bytes = int(disk_usages.get(item.task_id, 0) or 0)
+            item.node_count = int(node_counts.get(item.task_id, 0) or 0)
         return items
 
     def _task_list_item_from_record(self, item: Any) -> TaskListItem:
@@ -850,6 +906,10 @@ class TaskQueryService:
             node_id=node_id,
             runtime_node=runtime_node,
         )
+        sent_message_list = self._node_sent_message_list(
+            task_id=task_id,
+            node_id=node_id,
+        )
         append_notice_messages = [
             {
                 'notification_id': str(item.get('notification_id') or '').strip(),
@@ -921,6 +981,7 @@ class TaskQueryService:
             latest_spawn_round_id=str(payload.get('latest_spawn_round_id') or ''),
             append_notice_messages=append_notice_messages,
             message_list=message_list,
+            sent_message_list=sent_message_list,
             direct_child_results=[
                 dict(item)
                 for item in list(payload.get('direct_child_results') or [])

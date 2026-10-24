@@ -3080,7 +3080,7 @@ def test_handle_task_terminal_refreshes_selected_node_detail() -> None:
     assert result["forceRefresh"] is True
 
 
-def test_build_node_message_list_steps_renders_message_and_distribution_details() -> None:
+def test_build_node_message_list_steps_keeps_only_time_status_and_preview() -> None:
     result = _run_node_script(
         """
         const fs = require("fs");
@@ -3117,12 +3117,6 @@ def test_build_node_message_list_steps_renders_message_and_distribution_details(
                   status: "delivered",
                   decision: "distributed",
                 },
-                {
-                  target_node_id: "node:child-2",
-                  target_title: "child two",
-                  reason: "该子节点不受影响",
-                  decision: "skipped",
-                },
               ],
             },
           ],
@@ -3138,27 +3132,72 @@ def test_build_node_message_list_steps_renders_message_and_distribution_details(
     )
 
     assert result["traceKeys"] == ["message:notif:1"]
+    # 折叠态 = 时间 · 状态 · 一行内容预览。
     assert "2026-04-19T20:28:17+08:00" in result["titles"][0]
+    assert "待处理" in result["titles"][0]
+    assert "改成男性角色Top20" in result["titles"][0]
     assert result["status"] == "warning"
-    assert "改成男性角色Top20" in result["bodyHtml"]
-    assert "child one" in result["bodyHtml"]
-    assert "未下发" in result["bodyHtml"]
-    assert "child two" in result["bodyHtml"]
-    assert "该子节点不受影响" in result["bodyHtml"]
-    # 分发结果不再显示原始账本状态文本，改用语义标签 + 图标。
-    assert "[delivered]" not in result["bodyHtml"]
-    assert "[consumed]" not in result["bodyHtml"]
-    assert "已分发·待处理" in result["bodyHtml"]
-    assert 'data-lucide="inbox"' in result["bodyHtml"]
-    assert 'data-lucide="circle-slash"' in result["bodyHtml"]
-    # 分发情况不再重复展示消息正文（正文已由条目「消息内容」区展示），
-    # skipped 行的跳过原因保留显示。
-    assert "改成男性角色Top20并补充证据" not in result["bodyHtml"]
+    # 展开态只留消息正文：状态/接收时间/消费时间/并入时间/分发情况全部下掉。
+    assert result["bodyHtml"].strip() == '<div class="task-trace-message-body">改成男性角色Top20</div>'
+    for removed in ["child one", "未下发", "分发情况", "接收时间", "消费时间", "并入上下文时间", "task-trace-label"]:
+        assert removed not in result["bodyHtml"]
+
+
+def test_build_node_sent_message_list_steps_shows_target_and_message_only() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = {};
+        global.U = {};
+        global.normalizeInt = (value, fallback = 0) => {
+          const parsed = Number.parseInt(String(value ?? ""), 10);
+          return Number.isFinite(parsed) ? parsed : fallback;
+        };
+        global.treeNormalizeInt = global.normalizeInt;
+        global.esc = (value) => String(value ?? "");
+        global.readableText = (value, { emptyText = "" } = {}) => {
+          const text = String(value ?? "").trim();
+          return text || emptyText;
+        };
+        global.formatCompactTime = (value) => String(value || "");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
+        vm.runInThisContext(code);
+
+        const steps = buildNodeSentMessageListSteps({
+          sent_message_list: [
+            {
+              notification_id: "notif:sent-1",
+              target_node_id: "node:child-1",
+              target_title: "child one",
+              message: "给子节点的要求",
+              received_at: "2026-04-19T20:30:00+08:00",
+              consumed_at: "2026-04-19T20:31:00+08:00",
+              merged_at: "",
+              status: "consumed",
+            },
+          ],
+        });
+
+        console.log(JSON.stringify({
+          traceKeys: steps.map((item) => item.traceKey),
+          title: steps[0]?.title || "",
+          bodyHtml: steps[0]?.bodyHtml || "",
+        }));
+        """
+    )
+
+    assert result["traceKeys"] == ["sent-message:notif:sent-1"]
+    assert "已消费" in result["title"]
+    assert "child one" in result["title"]
+    assert "给子节点的要求" in result["title"]
+    assert result["bodyHtml"].strip() == '<div class="task-trace-message-body">给子节点的要求</div>'
 
 
 
 
-def test_build_spawn_review_trace_steps_formats_blocked_and_allowed_results() -> None:
+def test_build_spawn_review_trace_steps_lists_nodes_with_mode_and_details() -> None:
     result = _run_node_script(
         """
         const fs = require("fs");
@@ -3175,6 +3214,7 @@ def test_build_spawn_review_trace_steps_formats_blocked_and_allowed_results() ->
           const text = String(value ?? "").trim();
           return text || emptyText;
         };
+        global.formatCompactTime = (value) => String(value || "");
         const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
@@ -3184,6 +3224,7 @@ def test_build_spawn_review_trace_steps_formats_blocked_and_allowed_results() ->
             reviewed_at: "2026-04-06T12:00:00+08:00",
             requested_specs: [
               {
+                index: 0,
                 goal: "blocked branch",
                 prompt: "blocked prompt",
                 execution_policy: { mode: "focus" },
@@ -3191,23 +3232,25 @@ def test_build_spawn_review_trace_steps_formats_blocked_and_allowed_results() ->
                 runtime_nodes: [{ node_kind: "execution" }],
               },
               {
-                goal: "allowed branch",
-                prompt: "allowed prompt",
+                index: 1,
+                goal: "coverage branch",
+                prompt: "coverage prompt",
                 execution_policy: { mode: "coverage" },
                 requires_acceptance: true,
                 runtime_nodes: [
                   { node_kind: "execution" },
-                  { node_kind: "acceptance", goal: "accept:allowed branch", acceptance_prompt: "独立核磁盘" },
+                  { node_kind: "acceptance", goal: "accept:coverage branch", acceptance_prompt: "独立核磁盘" },
                 ],
               },
               {
-                goal: "legacy branch",
-                prompt: "legacy prompt",
+                index: 2,
+                goal: "focus branch",
+                prompt: "focus prompt",
                 execution_policy: { mode: "focus" },
-                requires_acceptance: true,
+                requires_acceptance: false,
               },
             ],
-            allowed_indexes: [1],
+            allowed_indexes: [1, 2],
             blocked_specs: [
               {
                 index: 0,
@@ -3222,16 +3265,23 @@ def test_build_spawn_review_trace_steps_formats_blocked_and_allowed_results() ->
                 review_decision: "blocked",
                 blocked_reason: "拆分过细，偏离当前父节点目标",
                 blocked_suggestion: "请由父节点直接执行，或收缩为更聚焦的单一派生",
-                synthetic_result_summary: "派生已被拦截：拆分过细，偏离当前父节点目标",
               },
               {
                 index: 1,
-                goal: "allowed branch",
+                goal: "coverage branch",
                 review_decision: "allowed",
                 child_node_id: "node:child-1",
               },
+              {
+                index: 2,
+                goal: "focus branch",
+                review_decision: "allowed",
+                child_node_id: "node:child-2",
+              },
             ],
           },
+        ], [
+          { child_node_id: "node:child-1", check_result: "验收通过：四个角色全部接好" },
         ]);
         const html = renderTraceStep({
           ...steps[0],
@@ -3249,15 +3299,26 @@ def test_build_spawn_review_trace_steps_formats_blocked_and_allowed_results() ->
 
     assert result["count"] == 1
     assert "派生记录" in result["title"]
-    assert "blocked branch" in result["body"]
-    assert "allowed branch" in result["body"]
-    assert "拆分过细，偏离当前父节点目标" in result["body"]
-    assert "请由父节点直接执行" in result["body"]
-    assert "杩斿洖鎽樿" not in result["body"]
-    assert "娲剧敓宸茶鎷︽埅锛氭媶鍒嗚繃缁嗭紝鍋忕褰撳墠鐖惰妭鐐圭洰鏍?" not in result["body"]
-    # 带独立验收的候选要在「原始请求」里可辨：解析视图与历史/原始 spec 两条回落都要覆盖。
-    assert result["body"].count("[独立验收]") == 2
-    assert result["body"].count('class="task-trace-label"') == 4
+    assert "2 个节点" in result["title"]
+    # 轮次体内只列派生出来的节点；被拦截候选不占节点列表。
+    assert "coverage branch" in result["body"]
+    assert "focus branch" in result["body"]
+    assert "blocked branch" not in result["body"]
+    assert "拆分过细" not in result["body"]
+    # 节点用图标标记专注 / 全面。
+    assert "全面" in result["body"]
+    assert "专注" in result["body"]
+    assert 'data-lucide="layers"' in result["body"]
+    assert 'data-lucide="target"' in result["body"]
+    # 点开节点后给跳转按钮、提示词与验收结果。
+    assert 'data-spawn-jump="node:child-1"' in result["body"]
+    assert 'data-spawn-jump="node:child-2"' in result["body"]
+    assert "coverage prompt" in result["body"]
+    assert "focus prompt" in result["body"]
+    assert "验收通过：四个角色全部接好" in result["body"]
+    assert "暂无验收结果" in result["body"]
+    assert result["body"].count('class="spawn-node"') == 2
+    assert 'class="task-trace-label"' not in result["body"]
     assert result["showStatus"] is False
     assert result["hasStatusBadge"] is False
 

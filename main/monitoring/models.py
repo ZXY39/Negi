@@ -195,6 +195,8 @@ class TaskListItem(Model):
     token_usage: TokenUsageSummary = Field(default_factory=TokenUsageSummary)
     # 磁盘治理（P1）：任务磁盘占用（增量记账 + 每小时/终态对账，展示允许 ≤1h 延迟）。
     disk_usage_bytes: int = 0
+    # 任务卡片「节点数」：task_nodes 投影行数（一次分组计数，见 get_tasks）。
+    node_count: int = 0
 
 
 class TaskRuntimeSummary(Model):
@@ -246,6 +248,8 @@ class TaskNodeDetail(Model):
     latest_spawn_round_id: str = ''
     append_notice_messages: list[dict[str, Any]] = Field(default_factory=list)
     message_list: list[dict[str, Any]] = Field(default_factory=list)
+    # 节点发出的消息（通知台账里 source_node_id=本节点的行），供「发出」分栏。
+    sent_message_list: list[dict[str, Any]] = Field(default_factory=list)
     direct_child_results: list[dict[str, Any]] = Field(default_factory=list)
     spawn_review_rounds: list[dict[str, Any]] = Field(default_factory=list)
     artifacts_preview: list[dict[str, Any]] = Field(default_factory=list)

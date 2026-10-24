@@ -3803,6 +3803,119 @@ def test_task_node_patch_persists_when_only_updated_at_changes(tmp_path: Path, m
     assert len(node_events) == 2
 
 
+def test_task_node_patch_carries_pending_notice_badge_count(tmp_path: Path, monkeypatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    import asyncio
+
+    record = asyncio.run(_create_web_task(service))
+    task = service.get_task(record.task_id)
+    root = service.get_node(record.root_node_id)
+    assert task is not None
+    assert root is not None
+    child = service.node_runner._create_execution_child(
+        task=task,
+        parent=root,
+        spec=SpawnChildSpec(goal="badge child", prompt="badge prompt", execution_policy=_execution_policy()),
+    )
+    assert child is not None
+
+    stamped_at = now_iso()
+    service.store.upsert_task_node_notification(
+        TaskNodeNotification(
+            notification_id="notif:badge-1",
+            task_id=record.task_id,
+            node_id=child.node_id,
+            epoch_id="",
+            source_node_id=root.node_id,
+            message="hello badge",
+            status="delivered",
+            created_at=stamped_at,
+            delivered_at=stamped_at,
+        )
+    )
+
+    captured = []
+    original_dispatch = service.log_service._dispatch_live_event_locked
+    monkeypatch.setattr(
+        service.log_service,
+        "_dispatch_live_event_locked",
+        lambda **kwargs: (captured.append(kwargs), original_dispatch(**kwargs))[1],
+    )
+
+    def _latest_badge() -> int:
+        patches = [
+            kwargs["data"]["node"]
+            for kwargs in captured
+            if kwargs.get("event_type") == "task.node.patch"
+            and str((((kwargs.get("data") or {}).get("node") or {}).get("node_id") or "")).strip() == child.node_id
+        ]
+        assert patches
+        return int(patches[-1].get("pending_notice_count"))
+
+    service.log_service.publish_node_state(record.task_id, child.node_id)
+    assert _latest_badge() == 1
+
+    delivered = service.store.list_task_node_notifications(record.task_id, child.node_id)[0]
+    service.store.upsert_task_node_notification(
+        delivered.model_copy(update={"status": "consumed", "consumed_at": stamped_at, "merged_at": stamped_at})
+    )
+    service.log_service.publish_node_state(record.task_id, child.node_id)
+    # 并入上下文后徽标必须立即归零，不等下一次整树快照。
+    assert _latest_badge() == 0
+
+
+def test_update_node_output_publishes_submission_without_terminal_status(tmp_path: Path, monkeypatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    import asyncio
+
+    record = asyncio.run(_create_web_task(service))
+    root = service.get_node(record.root_node_id)
+    assert root is not None
+    assert root.status == "in_progress"
+
+    captured = []
+    original_dispatch = service.log_service._dispatch_live_event_locked
+    monkeypatch.setattr(
+        service.log_service,
+        "_dispatch_live_event_locked",
+        lambda **kwargs: (captured.append(kwargs), original_dispatch(**kwargs))[1],
+    )
+
+    service.log_service.update_node_output(record.task_id, root.node_id, "submitted body")
+
+    latest = service.get_node(root.node_id)
+    assert latest is not None
+    assert latest.final_output == "submitted body"
+    # 提交只写输出：等待验收期间状态仍是 in_progress。
+    assert latest.status == "in_progress"
+    patches = [
+        kwargs["data"]["node"]
+        for kwargs in captured
+        if kwargs.get("event_type") == "task.node.patch"
+        and str((((kwargs.get("data") or {}).get("node") or {}).get("node_id") or "")).strip() == root.node_id
+    ]
+    assert patches
+    assert patches[-1].get("final_output") == "submitted body"
+
+
 def test_task_node_patch_includes_terminal_output_summary_fields(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
@@ -12657,6 +12770,7 @@ async def test_resume_react_state_injects_pending_notice_once_active_round_is_go
 @pytest.mark.asyncio
 async def test_consuming_last_pending_notice_clears_pending_notice_state(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
@@ -12698,12 +12812,29 @@ async def test_consuming_last_pending_notice_clears_pending_notice_state(
             },
         )
 
+        captured = []
+        original_dispatch = service.log_service._dispatch_live_event_locked
+        monkeypatch.setattr(
+            service.log_service,
+            "_dispatch_live_event_locked",
+            lambda **kwargs: (captured.append(kwargs), original_dispatch(**kwargs))[1],
+        )
         service.node_runner._consume_inflight_notice_ids(
             task_id=record.task_id,
             node_id=root.node_id,
             pending_notification_ids=[],
             pending_root_notice_ids=["root-notice:1"],
         )
+
+        root_patches = [
+            kwargs["data"]["node"]
+            for kwargs in captured
+            if kwargs.get("event_type") == "task.node.patch"
+            and str((((kwargs.get("data") or {}).get("node") or {}).get("node_id") or "")).strip() == root.node_id
+        ]
+        # 并入上下文即推徽标帧：角标数字不必等下一次整树快照。
+        assert root_patches
+        assert int(root_patches[-1].get("pending_notice_count")) == 0
 
         root_after = service.get_node(root.node_id)
         metadata = dict((root_after.metadata or {})) if root_after is not None else {}

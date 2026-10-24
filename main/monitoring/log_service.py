@@ -60,6 +60,7 @@ from main.runtime.acceptance_handshake import (
 )
 from main.runtime.append_notice_context import (
     PENDING_APPEND_NOTICE_RECORDS_KEY,
+    is_system_relay_notice,
     normalize_pending_append_notice_records,
 )
 from main.runtime.chat_backend import build_actual_request_diagnostics
@@ -1457,6 +1458,41 @@ class TaskLogService:
             updated = self._store.update_node(
                 node_id,
                 lambda record: record.model_copy(update={'check_result': text, 'check_result_ref': ref, 'updated_at': changed_at}),
+            )
+            task = self._store.get_task(task_id)
+            if updated is not None and task is not None:
+                self._sync_node_read_models_locked(updated)
+                self._publish_task_node_patch_locked(task=task, node=updated)
+                self._notify_task_visible_output(task_id, occurred_at=_precise_now_iso())
+            self.refresh_task_view(task_id, mark_unread=True)
+            return updated
+
+    def update_node_output(self, task_id: str, node_id: str, final_output: str) -> NodeRecord | None:
+        """提交输出落账（submit_final_result）：只写输出，不动状态与结束时间。
+
+        执行节点等验收时状态仍是 in_progress，但用户此刻就该看到本次提交内容；
+        终态由后续裁决/收尾照旧写。
+        """
+        with self._task_lock(task_id):
+            changed_at = now_iso()
+            final_text, final_ref = self._summarize_content(
+                final_output,
+                task_id=task_id,
+                node_id=node_id,
+                display_name=f'final-output:{node_id}',
+                source_kind='node_final_output',
+            )
+            if not final_text:
+                return self._store.get_node(node_id)
+            updated = self._store.update_node(
+                node_id,
+                lambda record: record.model_copy(
+                    update={
+                        'final_output': final_text,
+                        'final_output_ref': final_ref,
+                        'updated_at': changed_at,
+                    }
+                ),
             )
             task = self._store.get_task(task_id)
             if updated is not None and task is not None:
@@ -4516,7 +4552,11 @@ class TaskLogService:
         return next_task
 
     def _publish_task_summary_patch_locked(self, *, task: TaskRecord, previous_task: TaskRecord | None = None) -> bool:
-        payload_task = self._task_summary_payload(task, disk_usage_bytes=self._safe_task_disk_usage(task.task_id))
+        payload_task = self._task_summary_payload(
+            task,
+            disk_usage_bytes=self._safe_task_disk_usage(task.task_id),
+            node_count=self._safe_task_node_count(task.task_id),
+        )
         fingerprint = self._task_summary_fingerprint(task)
         runtime_meta = dict(self._store.get_task_runtime_meta(task.task_id) or self._default_runtime_meta())
         previous_fingerprint = str(runtime_meta.get('summary_fingerprint') or '').strip()
@@ -4539,6 +4579,26 @@ class TaskLogService:
             dispatch_immediate=self._summary_dispatch_immediate(task=task, previous_task=previous_task),
         )
         return True
+
+    def _node_pending_notice_badge_count(self, *, task_id: str, node: NodeRecord) -> int:
+        """树上未读徽标：待处理根通知 + 子节点转上来的 delivered 行。
+
+        与 tree-snapshot 的 pending_notice_count 同口径（转述族不抬徽标）。
+        `(task_id, node_id)` 索引下每条 node.patch 只读本节点自己的少量通知行。
+        """
+        pending_root = len(
+            normalize_pending_append_notice_records(
+                (node.metadata or {}).get(PENDING_APPEND_NOTICE_RECORDS_KEY)
+            )
+        )
+        delivered = 0
+        for item in list(self._store.list_task_node_notifications(task_id, node.node_id) or []):
+            if str(item.status or '').strip() != 'delivered':
+                continue
+            if is_system_relay_notice(item):
+                continue
+            delivered += 1
+        return pending_root + delivered
 
     def _publish_task_node_patch_locked(self, *, task: TaskRecord, node: NodeRecord) -> None:
         projected = self._store.get_task_node(node.node_id)
@@ -4563,6 +4623,12 @@ class TaskLogService:
                     getattr(projected, 'children_fingerprint', '')
                     or ((getattr(projected, 'payload', None) or {}).get('children_fingerprint') if projected is not None else '')
                     or ''
+                ),
+                # 徽标数字随状态帧一起下发：消息投递/消费/并入后，树上的未读数
+                # 不必等下一次整树快照。
+                'pending_notice_count': self._node_pending_notice_badge_count(
+                    task_id=task.task_id,
+                    node=node,
                 ),
             }
         }
@@ -4598,7 +4664,13 @@ class TaskLogService:
         self._dispatch_live_event_locked(task=task, event_type='task.live.patch', data=payload)
 
     def _publish_task_terminal_locked(self, *, task: TaskRecord) -> None:
-        payload = {'task': self._task_summary_payload(task, disk_usage_bytes=self._safe_task_disk_usage(task.task_id))}
+        payload = {
+            'task': self._task_summary_payload(
+                task,
+                disk_usage_bytes=self._safe_task_disk_usage(task.task_id),
+                node_count=self._safe_task_node_count(task.task_id),
+            )
+        }
         self._append_task_event(task=task, event_type='task.terminal', data=payload)
         self._dispatch_live_event_locked(task=task, event_type='task.terminal', data=payload)
         status = str(getattr(task, 'status', '') or '').strip().lower()
@@ -4869,7 +4941,12 @@ class TaskLogService:
             return False
 
     @staticmethod
-    def _task_summary_payload(task: TaskRecord, *, disk_usage_bytes: int | None = None) -> dict[str, Any]:
+    def _task_summary_payload(
+        task: TaskRecord,
+        *,
+        disk_usage_bytes: int | None = None,
+        node_count: int | None = None,
+    ) -> dict[str, Any]:
         metadata = dict(task.metadata or {})
         payload: dict[str, Any] = {
             'task_id': task.task_id,
@@ -4888,6 +4965,10 @@ class TaskLogService:
             'max_depth': int(task.max_depth or 0),
             'token_usage': task.token_usage.model_dump(mode='json'),
         }
+        # 任务卡片的「节点数」随增量 patch 下发；取不到时省略字段
+        # （前端合并语义下缺字段不清空旧值）。
+        if node_count is not None:
+            payload['node_count'] = int(max(0, int(node_count or 0)))
         # 磁盘治理：任务总占用（目录+DB 明细，对账口径，延迟 ≤1h）随增量 patch
         # 下发；取不到时省略字段（前端合并语义下缺字段不清空旧值）。
         if disk_usage_bytes is not None:
@@ -4897,6 +4978,12 @@ class TaskLogService:
     def _safe_task_disk_usage(self, task_id: str) -> int | None:
         try:
             return int(self._store.get_task_disk_usage(task_id) or 0)
+        except Exception:
+            return None
+
+    def _safe_task_node_count(self, task_id: str) -> int | None:
+        try:
+            return int(self._store.count_task_nodes(task_id) or 0)
         except Exception:
             return None
 

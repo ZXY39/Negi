@@ -96,7 +96,7 @@ test("turns group by progress text and keep the tools that follow", () => {
     assert.equal(steps[2].open, false);
 });
 
-test("turn text is kept whole and rendered as a one-line summary plus a scroll box", () => {
+test("turn text expands in place without a duplicate block or a status badge", () => {
     const { buildExecutionTraceSteps, renderTraceStep } = load();
     const longText = `${"模型中途输出".repeat(20)}——最后一句要求：必须把四个角色全部接好。`;
     const trace = {
@@ -114,11 +114,21 @@ test("turn text is kept whole and rendered as a one-line summary plus a scroll b
     assert.doesNotMatch(turnStep.title, /\.\.\.$/);
 
     const html = renderTraceStep({ ...turnStep, open: false });
-    // 摘要行靠 class 收成一行省略号；完整原文进固定高度滚动框。
+    // 展开只是原文本换形态：体内不再重复一份正文，右侧也不再挂成功/失败状态。
     assert.match(html, /task-trace-step--turn-text/);
-    assert.match(html, /class="task-trace-turn-text"/);
+    assert.doesNotMatch(html, /task-trace-turn-text/);
+    assert.doesNotMatch(html, /interaction-step-status/);
     assert.ok(html.includes(longText));
     assert.match(html, /title="[^"]*最后一句要求/);
+    assert.match(html, /tool-b/);
+
+    // 展开态的固定高度滚动框就是标题自身，且不铺底色。
+    const css = fs.readFileSync(path.join(FRONTEND, "..", "org_graph.css"), "utf8");
+    assert.match(
+        css,
+        /\.task-trace-step--turn-text\[open\] \.interaction-step-title \{[^}]*max-height:\s*180px[^}]*overflow-y:\s*auto[^}]*background:\s*transparent/
+    );
+    assert.doesNotMatch(css, /\.task-trace-turn-text\s*\{/);
 });
 
 test("textless rounds stay separate sections instead of one merged strip", () => {

@@ -516,6 +516,8 @@ class SQLiteTaskStore:
             'CREATE INDEX IF NOT EXISTS idx_task_commands_task_id ON task_commands(task_id)',
             'CREATE INDEX IF NOT EXISTS idx_task_nodes_task_id_sort_key ON task_nodes(task_id, sort_key)',
             'CREATE INDEX IF NOT EXISTS idx_task_nodes_parent_node_id ON task_nodes(parent_node_id)',
+            'CREATE INDEX IF NOT EXISTS idx_task_node_notifications_task_id ON task_node_notifications(task_id)',
+            'CREATE INDEX IF NOT EXISTS idx_task_node_notifications_task_node ON task_node_notifications(task_id, node_id)',
             'CREATE INDEX IF NOT EXISTS idx_task_node_details_task_id ON task_node_details(task_id)',
             'CREATE INDEX IF NOT EXISTS idx_task_runtime_frames_task_id ON task_runtime_frames(task_id)',
             'CREATE INDEX IF NOT EXISTS idx_task_node_tool_results_task_node_order ON task_node_tool_results(task_id, node_id, order_index)',
@@ -2252,6 +2254,14 @@ class SQLiteTaskStore:
         )
         return [self._parse(row['payload_json'], TaskNodeNotification) for row in rows]
 
+    def list_task_notifications(self, task_id: str) -> list[TaskNodeNotification]:
+        """整任务通知台账（发出侧按 payload.source_node_id 过滤用）。"""
+        rows = self._fetchall(
+            'SELECT payload_json FROM task_node_notifications WHERE task_id = ? ORDER BY created_at ASC, notification_id ASC',
+            (str(task_id or '').strip(),),
+        )
+        return [self._parse(row['payload_json'], TaskNodeNotification) for row in rows]
+
     def list_task_node_notifications(
         self,
         task_id: str,
@@ -3215,6 +3225,23 @@ class SQLiteTaskStore:
             (str(task_id or '').strip(),),
         )
         return int(row['total']) if row is not None else 0
+
+    def count_task_nodes_by_task(self, task_ids: list[str] | None = None) -> dict[str, int]:
+        """任务大厅卡片上的「节点数」：一次分组计数，不逐任务回表。"""
+        wanted = [str(item or '').strip() for item in list(task_ids or []) if str(item or '').strip()]
+        if not wanted:
+            return {}
+        counts: dict[str, int] = {}
+        for start in range(0, len(wanted), 500):
+            chunk = wanted[start:start + 500]
+            placeholders = ','.join('?' for _ in chunk)
+            rows = self._fetchall_light(
+                f'SELECT task_id, COUNT(*) AS total FROM task_nodes WHERE task_id IN ({placeholders}) GROUP BY task_id',
+                tuple(chunk),
+            )
+            for row in rows:
+                counts[str(row['task_id'])] = int(row['total'] or 0)
+        return counts
 
     def count_task_node_rounds(self, task_id: str) -> int:
         """同上：轮次条数不靠整表建模。"""

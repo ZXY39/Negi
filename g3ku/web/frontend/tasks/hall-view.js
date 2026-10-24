@@ -111,7 +111,7 @@ function renderTasks() {
             </div>
             <div class="pc-header"><div class="pc-header-left"><h3 class="pc-title" data-task-title title="${esc(task.title || taskId)}">${esc(task.title || taskId)}</h3></div></div>
             <div class="pc-created-at"><span class="pc-field-label">开始</span><span class="pc-field-value">${esc(taskCreatedAtText(task))}</span>${taskIsTerminal(task) ? `<span class="pc-field-label pc-field-label--end">结束</span><span class="pc-field-value" data-task-finished-at>${esc(taskFinishedAtText(task))}</span>` : ""}</div>
-            <div class="pc-created-at"><span class="pc-field-label">占用大小</span><span class="pc-field-value" data-task-disk-usage>${esc(formatTaskBytes(task?.disk_usage_bytes))}</span><span class="pc-field-value pc-elapsed" data-task-elapsed title="总耗时">${esc(taskElapsedText(task))}</span></div>
+            <div class="pc-created-at"><span class="pc-field-label">占用大小</span><span class="pc-field-value" data-task-disk-usage>${esc(formatTaskBytes(task?.disk_usage_bytes))}</span><span class="pc-field-label pc-field-label--end">节点数</span><span class="pc-field-value" data-task-node-count>${esc(formatTaskNodeCount(task?.node_count))}</span><span class="pc-field-value pc-elapsed" data-task-elapsed title="总耗时">${esc(taskElapsedText(task))}</span></div>
             <div class="pc-metrics">${metricsMarkup}</div>
             ${taskPauseHintMarkup(taskId)}
         `;

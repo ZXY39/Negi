@@ -28,6 +28,10 @@ function patchTaskCardElement(taskId) {
     if (diskUsageEl) {
         diskUsageEl.textContent = formatTaskBytes(task?.disk_usage_bytes);
     }
+    const nodeCountEl = card.querySelector("[data-task-node-count]");
+    if (nodeCountEl) {
+        nodeCountEl.textContent = formatTaskNodeCount(task?.node_count);
+    }
     // 总耗时随增量补丁刷新：运行中卡片走该路径避免整网格重建（防滚动清零），
     // 只有在这里同步数字，运行中任务的耗时才会逐分钟推进；暂停/终态卡片
     // taskElapsedText 返回定格值，重复写入也恒定。

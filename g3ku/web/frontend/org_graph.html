@@ -925,6 +925,12 @@
                             <div class="agent-detail-section">
                                 <div class="agent-detail-section-header">
                                     <h4><i data-lucide="inbox"></i> 消息列表</h4>
+                                    <div id="ad-message-tabs" class="ad-message-tabs" role="tablist" aria-label="消息方向">
+                                        <button type="button" class="ad-message-tab is-active" role="tab"
+                                            data-message-tab="inbox" aria-selected="true">接收</button>
+                                        <button type="button" class="ad-message-tab" role="tab"
+                                            data-message-tab="outbox" aria-selected="false">发出</button>
+                                    </div>
                                     <div class="ad-notice-composer" id="ad-notice-composer">
                                         <input id="ad-notice-input" type="text" maxlength="4000"
                                             placeholder="向该节点子树追加定向通知…" aria-label="向该节点子树追加定向通知" />
@@ -940,7 +946,7 @@
                             </div>
 
                             <div class="agent-detail-section">
-                                <h4><i data-lucide="arrow-up-from-line"></i> 输出</h4>
+                                <h4><i data-lucide="arrow-up-from-line"></i> 提交输出</h4>
                                 <div class="code-block" id="ad-output">-</div>
                             </div>
 
