@@ -752,9 +752,8 @@ class ReActToolLoop:
                     node=node,
                 )
                 # durable 历史里的旧通知也一并剥掉：下一跳的历史重建不再把它们带回来。
-                message_history[:] = _mid_insert.strip_for_stage(
+                message_history[:] = _mid_insert.strip_after_compaction(
                     message_history,
-                    stage=_mid_insert.STAGE_POST_COMPACTION,
                     lane=_mid_insert.LANE_NODE,
                 )
                 previous_actual_request_messages = adopted_compacted_baseline
@@ -3886,7 +3885,12 @@ class ReActToolLoop:
         self._persist_node_skill_roster_notice(node=node)
         if isinstance(message_history, list):
             message_history.append(dict(message))
-        return [*base_messages, message]
+        return _mid_insert.insert_mid_messages(
+            base_messages,
+            items=[message],
+            position=_mid_insert.POSITION_TAIL,
+            lane=_mid_insert.LANE_NODE,
+        )
 
     def _node_contract_notice_sections(
         self,
@@ -3957,9 +3961,8 @@ class ReActToolLoop:
         self._hydrate_node_skill_roster_notice(node=node)
         _skill_roster_notice.reset_contract_sections_for_compaction(scope, now=now_iso())
         self._persist_node_skill_roster_notice(node=node)
-        return _mid_insert.strip_for_stage(
+        return _mid_insert.strip_after_compaction(
             base_messages,
-            stage=_mid_insert.STAGE_POST_COMPACTION,
             lane=_mid_insert.LANE_NODE,
         )
 
@@ -6063,8 +6066,13 @@ class ReActToolLoop:
         ]
         # 请求尾部的 turn-only note 先暂存，压缩后按原顺序放回。
         trailing_note: list[dict[str, Any]] = []
-        if normalized and _mid_insert.classify_message(normalized[-1]) == _mid_insert.KIND_TURN_ONLY_NOTE:
-            trailing_note.append(normalized.pop())
+        if normalized:
+            trailing_kind = _mid_insert.classify_message(normalized[-1])
+            if (
+                trailing_kind == _mid_insert.KIND_TURN_ONLY_NOTE
+                and _mid_insert.compaction_policy(trailing_kind) == "drop"
+            ):
+                trailing_note.append(normalized.pop())
 
         system_prefix: list[dict[str, Any]] = []
         while normalized and str(normalized[0].get("role") or "").strip().lower() == "system":
@@ -6075,7 +6083,9 @@ class ReActToolLoop:
             bootstrap_user.append(normalized.pop(0))
 
         append_notice_tail: list[dict[str, Any]] = []
-        while normalized and _mid_insert.classify_message(normalized[0]) == _mid_insert.KIND_APPEND_NOTICE:
+        while normalized and _mid_insert.compaction_policy(
+            _mid_insert.classify_message(normalized[0]) or ""
+        ) == "carry":
             append_notice_tail.append(normalized.pop(0))
 
         body_messages = list(normalized)
@@ -9233,10 +9243,12 @@ class ReActToolLoop:
             existing_messages=normalized_messages,
         )
         return (
-            [
-                *notice_tail_messages,
-                *normalized_messages,
-            ],
+            _mid_insert.insert_mid_messages(
+                normalized_messages,
+                items=notice_tail_messages,
+                position=_mid_insert.POSITION_AFTER_BOOTSTRAP_USER,
+                lane=_mid_insert.LANE_NODE,
+            ),
             {},
         )
 
@@ -9444,7 +9456,12 @@ class ReActToolLoop:
         overlay_message = build_turn_only_system_note_message(overlay_text)
         if overlay_message is None:
             return base_messages
-        return [*base_messages, overlay_message]
+        return _mid_insert.insert_mid_messages(
+            base_messages,
+            items=[overlay_message],
+            position=_mid_insert.POSITION_TAIL,
+            lane=_mid_insert.LANE_NODE,
+        )
 
     def _externalize_message_content(
         self,

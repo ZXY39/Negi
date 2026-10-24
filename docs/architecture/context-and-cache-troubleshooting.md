@@ -315,6 +315,34 @@ Heartbeat / cron 不在主 CEO/frontdoor 路径上使用单独的短 `ceo_heartb
 - `[NOTICE_TAIL]` — 追加通知的未消费窗口（`raw_notice_window`）与必须逐条保留的追加要求段，结构见 `main-task-runtime.md`「节点信箱与唤醒（现行）」；它随 `frame.messages` 回写，装配期按逐字节内容去重，同一份只插一次。
 - 存量转录里以 `[STAGE_*]` 开头的消息按普通历史消息处理：读侧没有对应的识别端，不会剥离、去重或重渲染，它们随所在历史一起参与 `token_compression`。
 
+### 4.6 中途插入消息的家族、位置与生命周期
+
+“从哪个安全边界进入上下文”与“能活多久”是两条独立的轴：中途插入的消息有的只活一轮，有的活到下一次压缩，有的跨压缩保留，有的长期驻留。`main/runtime/mid_insert.py` 是这两条轴的唯一注册表；新增一类运行时消息只改这一处并补 `tests/resources/test_mid_insert_registry.py` 的家族用例，剥离点统一读表。
+
+调用面固定为：`classify_message`（整条消息家族，metadata 优先）、`scan_markers`（消息正文里的 marker，不改变消息归属）、`strip_for_stage(stage, lane)`（按表剥离，`families=` 供单族子站点覆盖）、`keeps_record_for_stage`（逐条投影）、`insert_mid_messages`（identity 去重、固定优先级、位置安全）、`compaction_policy` / `strip_after_compaction`（压缩分派与压缩后下车钩子）。`stage` 取 `durable` / `prompt_tail` / `compaction` / `post_compaction` / `projection`，`lane` 取 `frontdoor` / `node`。
+
+| family | 载体 | 插入位置 | 寿命 | 压缩策略 | generic strip 的落点 |
+|---|---|---|---|---|---|
+| `runtime_notice` | `[RUNTIME_NOTICE]` user 消息（skill 名单 / 记忆增量 / 合同增量） | 请求尾部；前门排在当轮 user 之后、turn-only 之前，节点排在历史末尾 | 活到下一次压缩 | `drop` + 下一跳状态快照 | `post_compaction` |
+| `turn_only_note` | `System note for this turn only:` user 消息 | 请求尾部，每跳重建，单例 | 只活一轮 | `drop` | `durable` / `prompt_tail` / `projection` |
+| `append_notice` | `[NOTICE_TAIL]` + JSON user 消息 | 节点 bootstrap user 之后（system 保持首位） | 压缩免疫 | `carry`；深层 `raw_notice_window` 由压缩切分原样捞出 | 任何 generic strip 都不许碰 |
+| `retrieval_memory_snapshot` | `## 长期记忆\n` assistant 消息 | stable index 1（system 之后、历史之前） | 每轮重建 | `rebuild` | `durable` / `compaction` / `projection`；`prompt_tail` 保留 |
+| `retrieval_overlay` | `## 长期记忆写入提示` / `## 已检索记忆使用提示` assistant 消息 | 由装配层逐轮重建 | 每轮重建 | `rebuild` | 只在 `projection` |
+| `hidden_internal_event` | metadata `internal_prompt_kind`，内容前缀 `This is a background heartbeat` / `# Heartbeat Rules` / `[SESSION EVENTS]` / `[CRON INTERNAL EVENT]` | 心跳 / cron 的规则行与事件束 | 持久 | `keep`；durable 基线按 `(kind, content)` 折叠重复副本 | 任何 generic strip 都不许碰 |
+| `legacy_runtime_contract` | `## Runtime Tool Contract` 整条消息（前门与节点头抬同形） | 已退役，只保留识别与剥离 | 无 | `drop` | `durable` / `prompt_tail` / `compaction` / `projection` |
+| `tool_contract_block`（marker） | 嵌在 `role=tool` 结果里的 `[TOOL_CONTRACT:<id>:<fp>]` 块 | 随工具结果进入 | 随工具结果活到压缩 | `keep`；压缩掉工具结果即离场，下次 `load` 重新水合 | 不剥整条工具结果 |
+| `silent_trace`（marker） | assistant 的 `silent` tool_call 行 + 它声明的 tool 结果 | 作为普通回合记录进入 | 到 `subject=task:<id>` 终态为止 | `conditional`：同一 assistant 行的全部 task subject 都 success/failed 才整组退休；非终态、非 task id、读取失败一律保留 | 只整组摘出，不单独摘行 |
+| `system_relay_notice` | 以 `【任务收到用户定向通知】` 等前缀开头的 user 消息 | 通知投递时追加到目标节点历史 | 持久 | `keep` | 任何 generic strip 都不许碰 |
+
+维护者容易误读的四点：
+
+- **识别只认块形，不认正文里提到的字符串**：`[TOOL_CONTRACT]` 只认工具结果开头的块，正文里举例的假块头不构成在场；用户正文中段提到 `[RUNTIME_NOTICE]` 或 `[NOTICE_TAIL]` 不会被剥。
+- **旧合同两族合并**：前门与节点的 `## Runtime Tool Contract` 抬头相同，识别函数对同一字节都成立；注册表只登记一个 `legacy_runtime_contract` 家族，避免“一条消息被两族认领”。
+- **hidden event 的 metadata 会丢**：`sanitize_provider_messages` 与 durable 基线只保留 `role` / `content`，重启后靠内容前缀识别；新增内部提示形态时两处都要能认出它。
+- **silent 组必须整组同进同出**：只搬 assistant 行会留下无声明方的 tool 结果，只搬 tool 行会留下悬空声明；同一 assistant 行混合 silent 与非 silent 调用时，非 silent 结果不在这组里，家族测试要覆盖这种边界。
+
+改动任一家族的插入位置、寿命或压缩策略时，先跑 `tests/resources/test_mid_insert_registry.py` 的 family × stage 矩阵，再用 actual-request artifact 核对两条车道的顺序：前门是 `system → 记忆快照 → 历史 → 当轮 user → runtime notice → turn-only`，节点是 `system → bootstrap user → append notice → runtime notice → turn-only`。
+
 ## 5. 排查流程
 
 ### 5.1 先画时间线

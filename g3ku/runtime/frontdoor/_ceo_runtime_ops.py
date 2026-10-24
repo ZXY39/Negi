@@ -757,11 +757,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             },
         )
 
-    @staticmethod
-    def _is_frontdoor_dynamic_overlay_record(record: dict[str, Any] | None) -> bool:
-        """长期记忆写入提示 / 已检索记忆使用提示等动态 overlay（按块头常量识别）。"""
-        return _mid_insert.classify_message(record) == _mid_insert.KIND_RETRIEVAL_OVERLAY
-
     @classmethod
     def _strip_frontdoor_dynamic_overlays(
         cls,
@@ -797,10 +792,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             stage=_mid_insert.STAGE_PROJECTION,
             lane=_mid_insert.LANE_FRONTDOOR,
         )
-
-    @staticmethod
-    def _is_frontdoor_memory_snapshot_record(record: dict[str, Any] | None) -> bool:
-        return _mid_insert.classify_message(record) == _mid_insert.KIND_RETRIEVAL_MEMORY_SNAPSHOT
 
     @classmethod
     def _split_request_body_and_tool_contract_messages(
@@ -3671,7 +3662,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if message is None:
             return base_messages
         self._emit_frontdoor_skill_roster_notice_event(session_key=session_key, records=delivered)
-        return [*base_messages, message]
+        # 现有顺序是"当轮 user → 通知 → turn-only"：通知排在 live 请求尾部，
+        # 网关只做去重与位置安全，不把它前移到 user 之前。
+        return _mid_insert.insert_mid_messages(
+            base_messages,
+            items=[message],
+            position=_mid_insert.POSITION_TAIL,
+            lane=_mid_insert.LANE_FRONTDOOR,
+        )
 
     def _frontdoor_contract_notice_sections(
         self,
@@ -3846,9 +3844,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if not scope or not base_messages or not stage_id:
             return base_messages
         _skill_roster_notice.reset_contract_sections_for_compaction(scope, now=now_iso())
-        return _mid_insert.strip_for_stage(
+        return _mid_insert.strip_after_compaction(
             base_messages,
-            stage=_mid_insert.STAGE_POST_COMPACTION,
             lane=_mid_insert.LANE_FRONTDOOR,
         )
 

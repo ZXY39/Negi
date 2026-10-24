@@ -122,6 +122,7 @@ def test_marker_scan_ignores_plain_assistant_text() -> None:
 
 
 def test_strip_matrix_keeps_append_notice_and_system_relay_everywhere() -> None:
+    hidden = {"role": "user", "content": "# Heartbeat Rules\n- ping"}
     fixture = [
         {"role": "system", "content": "system"},
         MEMORY,
@@ -131,6 +132,7 @@ def test_strip_matrix_keeps_append_notice_and_system_relay_everywhere() -> None:
         NOTICE,
         APPEND,
         RELAY,
+        hidden,
         USER,
     ]
     for lane in mi.LANES:
@@ -139,7 +141,7 @@ def test_strip_matrix_keeps_append_notice_and_system_relay_everywhere() -> None:
             kinds = [mi.classify_message(item) for item in kept]
             assert mi.KIND_APPEND_NOTICE in kinds
             assert mi.KIND_SYSTEM_RELAY_NOTICE in kinds
-            assert mi.KIND_HIDDEN_INTERNAL_EVENT not in kinds
+            assert mi.KIND_HIDDEN_INTERNAL_EVENT in kinds
 
 
 def test_strip_matrix_family_presence_per_stage() -> None:
@@ -203,6 +205,98 @@ def test_strip_matrix_family_presence_per_stage() -> None:
     }
 
 
+def test_retrieval_overlay_heading_classification() -> None:
+    retrieved_hint = {
+        "role": "assistant",
+        "content": "## 已检索记忆使用提示\n- use it",
+    }
+    assert mi.classify_message(HINT) == mi.KIND_RETRIEVAL_OVERLAY
+    assert mi.classify_message(retrieved_hint) == mi.KIND_RETRIEVAL_OVERLAY
+    assert mi.classify_message(MEMORY) == mi.KIND_RETRIEVAL_MEMORY_SNAPSHOT
+
+
+def test_tool_contract_marker_survives_message_strips() -> None:
+    block = (
+        "[TOOL_CONTRACT:filesystem_edit:tcf:01234546789abcdef]\n"
+        "body\n"
+        "[/TOOL_CONTRACT]"
+    )
+    tool_message = {
+        "role": "tool",
+        "tool_call_id": "c1",
+        "name": "filesystem_edit",
+        "content": block,
+    }
+    for lane in mi.LANES:
+        for stage in mi.STAGES:
+            kept = mi.strip_for_stage([tool_message], stage=stage, lane=lane)
+            assert kept == [tool_message]
+    assert mi.scan_markers(kept[0])[0].kind == mi.KIND_TOOL_CONTRACT_BLOCK
+
+
+def test_tool_contract_marker_leaves_with_compressed_history() -> None:
+    block = (
+        "[TOOL_CONTRACT:filesystem_edit:tcf:01234546789abcdef]\n"
+        "body\n"
+        "[/TOOL_CONTRACT]"
+    )
+    request_messages = [
+        {"role": "system", "content": "node system"},
+        {"role": "user", "content": '{"task_id":"task-1"}'},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "filesystem_edit", "arguments": "{}"}}],
+        },
+        {"role": "tool", "tool_call_id": "c1", "name": "filesystem_edit", "content": block},
+        {"role": "assistant", "content": "recent"},
+    ]
+    rewritten, payload = ReActToolLoop._rewrite_request_messages_for_token_compaction(
+        node_id="node-1",
+        request_messages=request_messages,
+        compressed_text="summary",
+        recent_tail_count=1,
+    )
+    assert "[TOOL_CONTRACT:" not in "\n".join(
+        str(item.get("content") or "") for item in rewritten
+    )
+    assert all(mi.scan_markers(item) == () for item in rewritten)
+    assert payload["history_message_count"] == 2
+
+
+def test_compaction_policy_matrix() -> None:
+    assert mi.compaction_policy(mi.KIND_RUNTIME_NOTICE) == "drop"
+    assert mi.compaction_policy(mi.KIND_TURN_ONLY_NOTE) == "drop"
+    assert mi.compaction_policy(mi.KIND_LEGACY_RUNTIME_CONTRACT) == "drop"
+    assert mi.compaction_policy(mi.KIND_APPEND_NOTICE) == "carry"
+    assert mi.compaction_policy(mi.KIND_RETRIEVAL_MEMORY_SNAPSHOT) == "rebuild"
+    assert mi.compaction_policy(mi.KIND_RETRIEVAL_OVERLAY) == "rebuild"
+    assert mi.compaction_policy(mi.KIND_HIDDEN_INTERNAL_EVENT) == "keep"
+    assert mi.compaction_policy(mi.KIND_SYSTEM_RELAY_NOTICE) == "keep"
+    assert mi.compaction_policy(mi.KIND_TOOL_CONTRACT_BLOCK) == "keep"
+    assert mi.compaction_policy(mi.KIND_SILENT_TRACE) == "conditional"
+    assert mi.compaction_policy("unknown_family") == "keep"
+
+
+def test_strip_after_compaction_is_the_unified_drop_hook() -> None:
+    fixture = [
+        {"role": "system", "content": "system"},
+        dict(NOTICE),
+        dict(APPEND),
+        dict(RELAY),
+        dict(CONTRACT),
+        dict(TURN_ONLY),
+    ]
+    stripped = mi.strip_after_compaction(fixture, lane=mi.LANE_FRONTDOOR)
+    assert stripped == [
+        {"role": "system", "content": "system"},
+        APPEND,
+        RELAY,
+        CONTRACT,
+        TURN_ONLY,
+    ]
+
+
 def test_keeps_record_matches_strip_for_projection() -> None:
     for item in [MEMORY, HINT, CONTRACT, TURN_ONLY, NOTICE, APPEND, RELAY, USER]:
         kept = mi.keeps_record_for_stage(item, stage=mi.STAGE_PROJECTION, lane=mi.LANE_FRONTDOOR)
@@ -222,6 +316,22 @@ def test_runtime_notice_family_carries_echo_guard() -> None:
     family = mi.family_for(mi.KIND_RUNTIME_NOTICE)
     assert family is not None
     assert family.echo_guard is not None
+
+
+def test_family_identity_is_stable_for_reconstructed_messages() -> None:
+    import json
+
+    family = mi.family_for(mi.KIND_RUNTIME_NOTICE)
+    assert family is not None
+    reconstructed = json.loads(json.dumps(NOTICE))
+    assert family.identity(NOTICE) == family.identity(reconstructed)
+
+
+def test_runtime_notice_echo_guard_keeps_plain_prose() -> None:
+    family = mi.family_for(mi.KIND_RUNTIME_NOTICE)
+    assert family is not None and family.echo_guard is not None
+    prose = "回答：日志里的 [RUNTIME_NOTICE] 是内部提示。"
+    assert family.echo_guard(prose) == prose
 
 
 def test_frontdoor_durable_baseline_unchanged() -> None:
@@ -316,6 +426,59 @@ def test_node_compaction_split_unchanged() -> None:
     assert trailing["trailing_note"] == [TURN_ONLY]
 
 
+def test_insert_positions_before_current_user_and_body_front() -> None:
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": '{"task_id":"task-1"}'},
+        dict(ASSISTANT),
+        {"role": "user", "content": "current user"},
+    ]
+    body_front = mi.insert_mid_messages(
+        messages,
+        items=[dict(APPEND)],
+        position=mi.POSITION_BODY_FRONT,
+        lane=mi.LANE_NODE,
+    )
+    assert body_front == [
+        {"role": "system", "content": "system"},
+        APPEND,
+        {"role": "user", "content": '{"task_id":"task-1"}'},
+        ASSISTANT,
+        {"role": "user", "content": "current user"},
+    ]
+    before_current = mi.insert_mid_messages(
+        messages,
+        items=[dict(TURN_ONLY)],
+        position=mi.POSITION_BEFORE_CURRENT_USER,
+        lane=mi.LANE_FRONTDOOR,
+    )
+    assert before_current == [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": '{"task_id":"task-1"}'},
+        ASSISTANT,
+        TURN_ONLY,
+        {"role": "user", "content": "current user"},
+    ]
+
+
+def test_insert_stable_slot_lands_after_system() -> None:
+    messages = [
+        {"role": "system", "content": "system"},
+        dict(ASSISTANT),
+    ]
+    inserted = mi.insert_mid_messages(
+        messages,
+        items=[dict(MEMORY)],
+        position=mi.POSITION_STABLE_SLOT,
+        lane=mi.LANE_FRONTDOOR,
+    )
+    assert inserted == [
+        {"role": "system", "content": "system"},
+        MEMORY,
+        ASSISTANT,
+    ]
+
+
 def test_insert_after_bootstrap_user_lands_behind_bootstrap() -> None:
     messages = [
         {"role": "system", "content": "system"},
@@ -356,6 +519,13 @@ def test_insert_dedupes_same_identity_and_singleton_turn_only() -> None:
         APPEND,
         TURN_ONLY,
     ]
+    notices = mi.insert_mid_messages(
+        messages,
+        items=[dict(NOTICE), dict(NOTICE)],
+        position=mi.POSITION_TAIL,
+        lane=mi.LANE_FRONTDOOR,
+    )
+    assert notices.count(NOTICE) == 1
 
 
 def test_insert_refuses_between_tool_call_and_results() -> None:
@@ -399,4 +569,49 @@ def test_node_prepare_strips_contract_and_turn_only() -> None:
         {"role": "user", "content": '{"task_id":"task-1","goal":"demo"}'},
         ASSISTANT,
         TOOL,
+    ]
+
+
+def test_node_prepare_inserts_append_notice_after_bootstrap_user() -> None:
+    loop = object.__new__(ReActToolLoop)
+    loop._append_notice_tail_messages = lambda **kwargs: [dict(APPEND)]
+    prepared, _parts = loop._prepare_messages_with_parts(
+        [
+            {"role": "system", "content": "node system"},
+            {"role": "user", "content": '{"task_id":"task-1","goal":"demo"}'},
+            dict(NODE_CONTRACT),
+            dict(TURN_ONLY),
+            dict(ASSISTANT),
+            dict(TOOL),
+        ],
+        runtime_context={},
+    )
+    assert prepared == [
+        {"role": "system", "content": "node system"},
+        {"role": "user", "content": '{"task_id":"task-1","goal":"demo"}'},
+        APPEND,
+        ASSISTANT,
+        TOOL,
+    ]
+
+
+def test_insert_after_bootstrap_skips_legacy_leading_notices() -> None:
+    messages = [
+        dict(NOTICE),
+        {"role": "system", "content": "node system"},
+        {"role": "user", "content": '{"task_id":"task-1"}'},
+        dict(ASSISTANT),
+    ]
+    inserted = mi.insert_mid_messages(
+        messages,
+        items=[dict(APPEND)],
+        position=mi.POSITION_AFTER_BOOTSTRAP_USER,
+        lane=mi.LANE_NODE,
+    )
+    assert inserted == [
+        NOTICE,
+        {"role": "system", "content": "node system"},
+        {"role": "user", "content": '{"task_id":"task-1"}'},
+        APPEND,
+        ASSISTANT,
     ]

@@ -183,10 +183,6 @@ def silent_trace_call_ids(message: dict[str, Any]) -> tuple[str, ...]:
     return tuple(call_ids)
 
 
-def is_silent_trace_message(message: dict[str, Any]) -> bool:
-    return bool(silent_trace_call_ids(message))
-
-
 MID_INSERT_FAMILIES: tuple[MidInsertFamily, ...] = (
     MidInsertFamily(
         kind=KIND_HIDDEN_INTERNAL_EVENT,
@@ -451,10 +447,19 @@ def compaction_policy(kind: str) -> str:
     return family.compaction if family is not None else "keep"
 
 
+def strip_after_compaction(
+    messages: Iterable[Any] | None,
+    *,
+    lane: str,
+) -> list[dict[str, Any]]:
+    """压缩跳的统一下车钩子：所有 `compaction=drop` 的家族在这里离场。"""
+    return strip_for_stage(messages, stage=STAGE_POST_COMPACTION, lane=lane)
+
+
 def split_runtime_contract_messages(
     messages: Iterable[Any] | None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """拆出旧合同消息与其余正文（含内存快照的正文侧不过滤）。"""
+    """拆出旧合同消息与其余正文。"""
     body: list[dict[str, Any]] = []
     contracts: list[dict[str, Any]] = []
     for item in list(messages or []):
@@ -465,25 +470,6 @@ def split_runtime_contract_messages(
         else:
             body.append(dict(item))
     return body, contracts
-
-
-def split_runtime_contract_and_snapshot_messages(
-    messages: Iterable[Any] | None,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """拆出旧合同与内存快照，其余是正文（前门压缩请求的输入形态）。"""
-    body: list[dict[str, Any]] = []
-    removed: list[dict[str, Any]] = []
-    for item in list(messages or []):
-        if not isinstance(item, dict):
-            continue
-        if classify_message(item) in {
-            KIND_LEGACY_RUNTIME_CONTRACT,
-            KIND_RETRIEVAL_MEMORY_SNAPSHOT,
-        }:
-            removed.append(dict(item))
-        else:
-            body.append(dict(item))
-    return body, removed
 
 
 def _insertion_index(messages: list[dict[str, Any]], position: str) -> int:
@@ -497,9 +483,18 @@ def _insertion_index(messages: list[dict[str, Any]], position: str) -> int:
     if position == POSITION_STABLE_SLOT:
         return 1 if system_end else 0
     if position == POSITION_AFTER_BOOTSTRAP_USER:
-        if system_end < len(messages) and _message_role(messages[system_end]) == "user":
-            return system_end + 1
-        return system_end
+        # 旧帧可能把通知前插在 system 之前；跳过所有 mid-insert 家族后找真正的
+        # bootstrap user，保证新块仍落在它之后而不是叠在 system 前。
+        for index, item in enumerate(messages):
+            if _message_role(item) == "user" and classify_message(item) is None:
+                return index + 1
+        index = 0
+        while index < len(messages) and (
+            _message_role(messages[index]) == "system"
+            or classify_message(messages[index]) is not None
+        ):
+            index += 1
+        return index
     if position == POSITION_BEFORE_CURRENT_USER:
         for index in range(len(messages) - 1, -1, -1):
             if _message_role(messages[index]) != "user":
@@ -624,12 +619,11 @@ __all__ = [
     "compaction_policy",
     "family_for",
     "insert_mid_messages",
-    "is_silent_trace_message",
     "keeps_record_for_stage",
     "scan_markers",
     "silent_trace_call_ids",
-    "split_runtime_contract_and_snapshot_messages",
     "split_runtime_contract_messages",
+    "strip_after_compaction",
     "strip_for_stage",
     "strip_turn_only_notes",
 ]

@@ -475,7 +475,14 @@ class CeoFrontDoorSupport:
         overlay_message = build_turn_only_system_note_message(overlay_text)
         if overlay_message is None:
             return base_messages
-        return [*base_messages, overlay_message]
+        from main.runtime import mid_insert as _mid_insert
+
+        return _mid_insert.insert_mid_messages(
+            base_messages,
+            items=[overlay_message],
+            position=_mid_insert.POSITION_TAIL,
+            lane=_mid_insert.LANE_FRONTDOOR,
+        )
 
     @staticmethod
     def _render_tool_result(result: Any) -> str:
