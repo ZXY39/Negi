@@ -3703,21 +3703,24 @@ textarea {
 .interaction-flow-summary::-webkit-details-marker {
     display: none;
 }
+.task-flow-chevron,
 .interaction-flow-chevron {
     display: inline-flex;
     align-items: center;
     justify-content: center;
     flex: none;
-    width: 1em;
-    height: 1em;
-    font-size: 0.9rem;
+    width: 16px;
+    height: 16px;
+    font-size: 0.95rem;
     line-height: 1;
     color: var(--text-tertiary);
-    transition: transform var(--transition-fast);
+    transition: transform 0.18s ease;
 }
 
+.task-flow-box[open] > .task-flow-summary .task-flow-chevron,
 .interaction-flow[open] .interaction-flow-chevron {
     transform: rotate(90deg);
+    color: var(--text-secondary);
 }
 
 .interaction-flow-meta {
@@ -17243,8 +17246,10 @@ textarea {
 .task-flow-summary {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: var(--space-3) var(--space-3) var(--space-3) calc(var(--space-4) + 2px);
+    gap: 12px;
+    /* 26px = 宿主 12px + 列表 6px + 条目 8px：箭头与内部中途文本的「>」同轴，
+       统计文字与内部正文左对齐。 */
+    padding: var(--space-3) var(--space-3) var(--space-3) 26px;
     cursor: pointer;
     list-style: none;
     color: var(--text-secondary);
@@ -17254,21 +17259,6 @@ textarea {
 
 .task-flow-summary::-webkit-details-marker {
     display: none;
-}
-
-.task-flow-summary::after {
-    content: "";
-    width: 8px;
-    height: 8px;
-    flex: none;
-    border-right: 2px solid currentColor;
-    border-bottom: 2px solid currentColor;
-    transform: rotate(45deg);
-    transition: transform var(--transition-fast);
-}
-
-.task-flow-box[open] > .task-flow-summary::after {
-    transform: rotate(-135deg);
 }
 
 .task-flow-box[open] {
@@ -17291,9 +17281,10 @@ textarea {
 }
 
 .interaction-flow-summary {
-    /* 秒数与展开箭头相邻，不再把箭头推到最右。 */
+    /* 箭头在秒数左侧，且与内部中途文本的「>」同一条竖轴。 */
     justify-content: flex-start;
-    gap: 8px;
+    gap: 12px;
+    padding-left: 14px;
 }
 
 .interaction-flow-usage {
@@ -17353,7 +17344,51 @@ textarea {
     display: none;
 }
 
-/* 前门：秒数与箭头和上方回答文本同一条左基线。 */
-.ceo-timeline .interaction-flow-summary {
-    padding-left: 0;
+/* 展开时从箭头向下延伸的细线：收起态 scaleY(0)，展开过渡到满高。 */
+.task-flow-box,
+.interaction-flow {
+    position: relative;
+}
+
+.task-flow-guide,
+.interaction-flow-guide {
+    position: absolute;
+    top: 24px;
+    bottom: var(--space-3);
+    width: 1px;
+    background: color-mix(in srgb, var(--text-tertiary) 42%, transparent);
+    transform: scaleY(0);
+    transform-origin: top;
+    transition: transform 0.22s ease;
+    pointer-events: none;
+}
+
+/* 竖线从各自箭头的中心往下降。 */
+.task-flow-guide {
+    left: 34px;
+}
+
+.interaction-flow-guide {
+    left: 22px;
+}
+
+.task-flow-box[open] .task-flow-guide,
+.interaction-flow[open] .interaction-flow-guide {
+    transform: scaleY(1);
+}
+
+@keyframes taskFlowBodyIn {
+    from {
+        opacity: 0;
+        transform: translateY(-4px);
+    }
+    to {
+        opacity: 1;
+        transform: none;
+    }
+}
+
+.task-flow-box[open] > #ad-input,
+.interaction-flow[open] .interaction-flow-list {
+    animation: taskFlowBodyIn 0.18s ease-out;
 }
