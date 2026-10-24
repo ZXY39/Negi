@@ -794,6 +794,13 @@ class TaskActorService:
         task_record = self._store.get_task(task_id)
         if task_record is None:
             return
+        blocker = getattr(self, 'web_role_blocked', None)
+        if callable(blocker) and blocker():
+            # web 进程在 worker 在线时没有任务执行体。这里若放行，web 与 worker 会
+            # 同时驱动同一棵树：web 侧新建的 dispatcher 看不到 worker 在跑的子节点，
+            # 孤儿收尸器会把健康子节点暂停（2026-10-25 前门唤醒实盘）。
+            logger.warning('task actor refused in web runtime role: task={}', task_id)
+            return
         if self._stall_notifier is not None and hasattr(self._stall_notifier, 'start_task'):
             self._stall_notifier.start_task(task_id)
         if self.node_watchdog is not None and hasattr(self.node_watchdog, 'start_task'):

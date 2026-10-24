@@ -19,7 +19,7 @@ SESSION = 'web:frontdoor'
 STAMP = '2026-10-25T00:00:00+08:00'
 
 
-def _service(tmp_path: Path) -> MainRuntimeService:
+def _service(tmp_path: Path, *, execution_mode: str = 'web') -> MainRuntimeService:
     return MainRuntimeService(
         chat_backend=SimpleNamespace(),
         workspace_root=tmp_path,
@@ -27,7 +27,7 @@ def _service(tmp_path: Path) -> MainRuntimeService:
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
         governance_store_path=tmp_path / 'governance.sqlite3',
-        execution_mode='web',
+        execution_mode=execution_mode,
     )
 
 
@@ -108,7 +108,7 @@ async def test_non_root_cannot_write_frontdoor_inbox(tmp_path):
 
 @pytest.mark.asyncio
 async def test_frontdoor_can_message_execution_node_only(tmp_path):
-    service = _service(tmp_path)
+    service = _service(tmp_path, execution_mode='worker')
     _seed(service)
 
     result = await service.deliver_frontdoor_node_message(
@@ -125,7 +125,7 @@ async def test_frontdoor_can_message_execution_node_only(tmp_path):
 
 @pytest.mark.asyncio
 async def test_frontdoor_rejects_wrong_session_and_under_acceptance(tmp_path):
-    service = _service(tmp_path)
+    service = _service(tmp_path, execution_mode='worker')
     _seed(service)
     wrong = await service.deliver_frontdoor_node_message(
         session_id='web:other', to=CHILD, content='x'

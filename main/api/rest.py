@@ -246,7 +246,7 @@ async def post_task_node_notice(task_id: str, node_id: str, payload: dict | None
     message = str((payload or {}).get('message') or '').strip()
     if not message:
         raise HTTPException(status_code=400, detail='message_required')
-    result = await service.deliver_node_message(
+    result = await service.deliver_control_node_message(
         task_id=service.normalize_task_id(task_id),
         target_node_id=node_id,
         message=message,

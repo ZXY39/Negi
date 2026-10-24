@@ -251,6 +251,24 @@ _TASK_TERMINAL_OUTBOX_ATTEMPT_LIMIT = 10
 _TASK_TERMINAL_DELIVERY_MAX_INFLIGHT = 8
 _WORKER_RUNTIME_REFRESH_TIMEOUT_SECONDS = 5.0
 _WORKER_RUNTIME_REFRESH_POLL_SECONDS = 0.1
+_WORKER_NODE_MESSAGE_TIMEOUT_SECONDS = 10.0
+_WORKER_NODE_MESSAGE_POLL_SECONDS = 0.05
+_WORKER_NODE_MESSAGE_FIELDS = (
+    'task_id',
+    'target_node_id',
+    'message',
+    'origin',
+    'relation',
+    'system_kind',
+    'source_node_id',
+    'verdict',
+    'ref',
+    'submission_id',
+    'epoch_id',
+    'wake',
+    'held',
+    'batch_id',
+)
 _WORKER_LEASE_ROLE = 'task_worker'
 _WORKER_LEASE_TTL_SECONDS = 20.0
 _TASK_SUMMARY_DEBOUNCE_SECONDS = 0.5
@@ -845,6 +863,18 @@ class MainRuntimeService:
             max_concurrent_tasks=None if execution_runtime_enabled else 4,
             per_task_limit=1,
         )
+        # web 角色只有控制面：worker 在线时 `run_task` 在这里必须拒绝，否则会与
+        # worker 并发驱动同一棵树。判据绑 worker 在线状态，离线时保留本地执行语义
+        # （没有 worker 就没有可并发的另一个驱动者）。
+        def _web_role_blocks_local_actors() -> bool:
+            if self.execution_mode != 'web':
+                return False
+            try:
+                return self.worker_state() != _WORKER_STATE_OFFLINE
+            except Exception:
+                return True
+
+        self.task_actor_service.web_role_blocked = _web_role_blocks_local_actors
         self.task_actor_service.node_watchdog = self.node_watchdog
 
         def _notify_wait_cycle(**kwargs: Any) -> None:
@@ -1478,6 +1508,20 @@ class MainRuntimeService:
                         force=True,
                     )
                 success = True
+            elif command_type == 'send_node_message':
+                target_node_id = self.normalize_node_id(str(payload.get('target_node_id') or '').strip())
+                delivery = {
+                    key: payload[key]
+                    for key in _WORKER_NODE_MESSAGE_FIELDS
+                    if key in payload
+                }
+                delivery['task_id'] = task_id
+                delivery['target_node_id'] = target_node_id
+                if task_id and target_node_id:
+                    result_payload = await self.deliver_node_message(**delivery)
+                    success = True
+                else:
+                    error_text = 'send_node_message_missing_target'
             elif command_type == 'refresh_runtime_config':
                 changed = self.ensure_runtime_config_current(
                     force=True,
@@ -4427,6 +4471,24 @@ class MainRuntimeService:
         )
 
     async def wake_node_on_message(self, *, task_id: str, node_id: str) -> str:
+        blocker = getattr(self.task_actor_service, 'web_role_blocked', None)
+        if self.execution_mode == 'web' and callable(blocker) and blocker():
+            # web 角色在 worker 在线时没有任务执行体：本地 enqueue 会拉起第二个
+            # task actor，与 worker 并发驱动同一棵树。唤醒命令交给 worker 执行。
+            task = self.get_task(task_id)
+            command_id = self._enqueue_task_command(
+                command_type='resume_node',
+                task_id=task_id,
+                session_id=self._task_origin_session_id(task),
+                payload={'node_ids': [node_id]},
+            )
+            logger.info(
+                'node wake delegated to worker: task={} node={} command={}',
+                task_id,
+                node_id,
+                command_id,
+            )
+            return 'delegated_worker'
         outcome = await wake_parked_node(task_id=task_id, node_id=node_id, deps=self.node_wake_deps())
         try:
             logger.info('node wake: task={} node={} outcome={}', task_id, node_id, outcome)
@@ -4614,6 +4676,70 @@ class MainRuntimeService:
             'wake': wake_outcome,
             'reason': '',
         }
+
+    async def deliver_control_node_message(self, **payload: Any) -> dict[str, Any]:
+        """控制面投递：web 角色把写箱与唤醒交给 worker，绝不本地起 task actor。
+
+        web 进程与 worker 各有一个 `MainRuntimeService`，但只有 worker 拥有任务执行体。
+        在 web 进程本地写通知并唤醒，会同时拉起一个 web 侧 task actor；它的 dispatcher
+        看不到 worker 正在跑的子节点，孤儿收尸器会把健康子节点暂停（2026-10-25 实盘）。
+        因此 web 角色统一走 `send_node_message` 命令，由 worker 执行同一次
+        `deliver_node_message`，回执原样带回。
+        """
+        if self.execution_mode != 'web':
+            return await self.deliver_node_message(**payload)
+        normalized_task_id = self.normalize_task_id(str(payload.get('task_id') or '').strip())
+        target_node_id = self.normalize_node_id(str(payload.get('target_node_id') or '').strip())
+        if not target_node_id:
+            return {'target': target_node_id, 'status': 'rejected', 'reason': 'target_missing'}
+        try:
+            self._assert_worker_available()
+        except ValueError as exc:
+            return {'target': target_node_id, 'status': 'rejected', 'reason': str(exc)}
+        task = self.get_task(normalized_task_id) if normalized_task_id else None
+        session_id = self._task_origin_session_id(task)
+        command_payload = {
+            key: payload[key]
+            for key in _WORKER_NODE_MESSAGE_FIELDS
+            if key in payload
+        }
+        command_payload['task_id'] = normalized_task_id
+        command_payload['target_node_id'] = target_node_id
+        command_id = self._enqueue_task_command(
+            command_type='send_node_message',
+            task_id=normalized_task_id or None,
+            session_id=session_id,
+            payload=command_payload,
+        )
+        deadline = time.monotonic() + _WORKER_NODE_MESSAGE_TIMEOUT_SECONDS
+        while True:
+            current = self.store.get_task_command(command_id)
+            status = str((current or {}).get('status') or '').strip().lower()
+            if status in {'completed', 'failed'}:
+                if status == 'failed':
+                    return {
+                        'target': target_node_id,
+                        'status': 'rejected',
+                        'reason': str((current or {}).get('error_text') or 'worker_delivery_failed'),
+                        'worker_command_id': command_id,
+                    }
+                result = (
+                    dict((current or {}).get('result') or {})
+                    if isinstance((current or {}).get('result'), dict)
+                    else {}
+                )
+                result.setdefault('target', target_node_id)
+                result.setdefault('status', 'delivered')
+                result['worker_command_id'] = command_id
+                return result
+            if time.monotonic() >= deadline:
+                return {
+                    'target': target_node_id,
+                    'status': 'queued',
+                    'reason': 'worker_delivery_pending',
+                    'worker_command_id': command_id,
+                }
+            await asyncio.sleep(_WORKER_NODE_MESSAGE_POLL_SECONDS)
 
     async def _deliver_structural_node_message(self, **payload: Any) -> dict[str, Any]:
         """NodeRunner 的结构性消息投递口（交接单 / 验收裁决）。
@@ -4840,7 +4966,7 @@ class MainRuntimeService:
                 )
                 continue
             results.append(
-                await self.deliver_node_message(
+                await self.deliver_control_node_message(
                     task_id=str(getattr(node, 'task_id', '') or '').strip(),
                     target_node_id=str(node.node_id or '').strip(),
                     message=body,
