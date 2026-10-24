@@ -136,6 +136,7 @@ from main.models import (
 )
 from main.protocol import now_iso
 from main.runtime import chat_backend as runtime_chat_backend
+from main.runtime import mid_insert as _mid_insert
 from main.runtime import send_token_preflight as runtime_send_token_preflight
 from main.runtime.append_notice_context import (
     APPEND_NOTICE_CONTEXT_KEY,
@@ -146,9 +147,6 @@ from main.runtime.append_notice_context import (
     roll_append_notice_context_for_compression_stage,
     score_append_notice_preservation,
     select_uncovered_append_notices,
-)
-from main.runtime.append_notice_context import (
-    is_append_notice_tail_message as _shared_is_append_notice_tail_message,
 )
 from main.runtime.chat_backend import (
     build_actual_request_diagnostics,
@@ -164,7 +162,6 @@ from main.runtime.node_prompt_contract import (
     extract_node_dynamic_contract_payload,
     inject_node_dynamic_contract_message,
     is_node_dynamic_contract_echo_text,
-    strip_node_dynamic_contract_messages,
     upsert_node_dynamic_contract_message,
 )
 from main.runtime.node_turn_controller import NodeTurnUnservableError
@@ -190,8 +187,6 @@ from main.runtime.tool_names import (
 )
 from main.runtime.turn_overlay import (
     build_turn_only_system_note_message,
-    is_turn_only_system_note_message,
-    strip_turn_only_system_note_messages,
 )
 
 _ARTIFACT_REF_PATTERN = re.compile(r'artifact:(?:artifact:)?[A-Za-z0-9_-]+')
@@ -757,7 +752,11 @@ class ReActToolLoop:
                     node=node,
                 )
                 # durable 历史里的旧通知也一并剥掉：下一跳的历史重建不再把它们带回来。
-                message_history[:] = _skill_roster_notice.strip_runtime_notice_messages(message_history)
+                message_history[:] = _mid_insert.strip_for_stage(
+                    message_history,
+                    stage=_mid_insert.STAGE_POST_COMPACTION,
+                    lane=_mid_insert.LANE_NODE,
+                )
                 previous_actual_request_messages = adopted_compacted_baseline
                 request_seed_source = 'same_turn_token_compacted'
             bundle_recommit_reason = self._node_bundle_recommit_reason(
@@ -3958,7 +3957,11 @@ class ReActToolLoop:
         self._hydrate_node_skill_roster_notice(node=node)
         _skill_roster_notice.reset_contract_sections_for_compaction(scope, now=now_iso())
         self._persist_node_skill_roster_notice(node=node)
-        return _skill_roster_notice.strip_runtime_notice_messages(base_messages)
+        return _mid_insert.strip_for_stage(
+            base_messages,
+            stage=_mid_insert.STAGE_POST_COMPACTION,
+            lane=_mid_insert.LANE_NODE,
+        )
 
     def _refresh_node_dynamic_contract_message(
         self,
@@ -6027,10 +6030,6 @@ class ReActToolLoop:
         )
 
     @staticmethod
-    def _is_append_notice_tail_message(message: dict[str, Any]) -> bool:
-        return _shared_is_append_notice_tail_message(message)
-
-    @staticmethod
     def _append_notice_window_kind(message: dict[str, Any]) -> str:
         content = str((message or {}).get("content") or "").strip()
         matched_prefix = append_notice_tail_prefix_match(message)
@@ -6064,7 +6063,7 @@ class ReActToolLoop:
         ]
         # 请求尾部的 turn-only note 先暂存，压缩后按原顺序放回。
         trailing_note: list[dict[str, Any]] = []
-        if normalized and is_turn_only_system_note_message(normalized[-1]):
+        if normalized and _mid_insert.classify_message(normalized[-1]) == _mid_insert.KIND_TURN_ONLY_NOTE:
             trailing_note.append(normalized.pop())
 
         system_prefix: list[dict[str, Any]] = []
@@ -6076,7 +6075,7 @@ class ReActToolLoop:
             bootstrap_user.append(normalized.pop(0))
 
         append_notice_tail: list[dict[str, Any]] = []
-        while normalized and cls._is_append_notice_tail_message(normalized[0]):
+        while normalized and _mid_insert.classify_message(normalized[0]) == _mid_insert.KIND_APPEND_NOTICE:
             append_notice_tail.append(normalized.pop(0))
 
         body_messages = list(normalized)
@@ -6938,11 +6937,15 @@ class ReActToolLoop:
         previous_tool_schemas: list[dict[str, Any]],
         current_tool_schemas: list[dict[str, Any]],
     ) -> tuple[int, bool]:
-        previous_records = strip_turn_only_system_note_messages(
-            strip_node_dynamic_contract_messages(self._prompt_message_records(previous_request_messages))
+        previous_records = _mid_insert.strip_for_stage(
+            self._prompt_message_records(previous_request_messages),
+            stage=_mid_insert.STAGE_PROMPT_TAIL,
+            lane=_mid_insert.LANE_NODE,
         )
-        current_records = strip_turn_only_system_note_messages(
-            strip_node_dynamic_contract_messages(self._prompt_message_records(current_request_messages))
+        current_records = _mid_insert.strip_for_stage(
+            self._prompt_message_records(current_request_messages),
+            stage=_mid_insert.STAGE_PROMPT_TAIL,
+            lane=_mid_insert.LANE_NODE,
         )
         if not previous_records or len(current_records) < len(previous_records):
             return 0, False
@@ -9214,7 +9217,11 @@ class ReActToolLoop:
         *,
         runtime_context: dict[str, Any],
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        normalized_messages = strip_turn_only_system_note_messages(strip_node_dynamic_contract_messages(messages))
+        normalized_messages = _mid_insert.strip_for_stage(
+            messages,
+            stage=_mid_insert.STAGE_PROMPT_TAIL,
+            lane=_mid_insert.LANE_NODE,
+        )
         visible_user_messages = [
             str(item.get('content') or '').strip()
             for item in normalized_messages
@@ -9339,8 +9346,10 @@ class ReActToolLoop:
           seed（崩溃在 artifact 落盘与帧更新之间）时更早的锚点自然命中、delta 收敛
           为空或仅含新记录。delta 超限或与 seed 尾段重叠按 misaligned 回退。
         """
-        seed_records = strip_turn_only_system_note_messages(
-            strip_node_dynamic_contract_messages(cls._prompt_message_records(seed_request_messages))
+        seed_records = _mid_insert.strip_for_stage(
+            cls._prompt_message_records(seed_request_messages),
+            stage=_mid_insert.STAGE_PROMPT_TAIL,
+            lane=_mid_insert.LANE_NODE,
         )
         while seed_records and cls._is_content_open_image_overlay_record(seed_records[-1]):
             seed_records.pop()
@@ -9396,11 +9405,15 @@ class ReActToolLoop:
         current_records = cls._prompt_message_records(current_model_messages)
         tail_records = cls._prompt_message_records(request_tail_messages)
         live_records = [*current_records, *tail_records]
-        previous_records = strip_turn_only_system_note_messages(
-            strip_node_dynamic_contract_messages(cls._prompt_message_records(previous_request_messages))
+        previous_records = _mid_insert.strip_for_stage(
+            cls._prompt_message_records(previous_request_messages),
+            stage=_mid_insert.STAGE_PROMPT_TAIL,
+            lane=_mid_insert.LANE_NODE,
         )
-        delta_records = strip_turn_only_system_note_messages(
-            strip_node_dynamic_contract_messages(cls._prompt_message_records(pending_delta_messages))
+        delta_records = _mid_insert.strip_for_stage(
+            cls._prompt_message_records(pending_delta_messages),
+            stage=_mid_insert.STAGE_PROMPT_TAIL,
+            lane=_mid_insert.LANE_NODE,
         )
         if not previous_records or not delta_records:
             return live_records, 'same_turn_reassembled'

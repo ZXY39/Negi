@@ -3,19 +3,18 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from g3ku.runtime.frontdoor.tool_contract import is_frontdoor_tool_contract_message
+from main.runtime import mid_insert as _mid_insert
 from main.runtime.chat_backend import (
     build_prompt_cache_diagnostics,
     build_session_prompt_cache_key,
     sanitize_provider_messages,
 )
-from main.runtime.turn_overlay import is_turn_only_system_note_message
 
 DEFAULT_CACHE_FAMILY_REVISION = "ceo_frontdoor:stable-prefix:v1"
 
 
 def _is_frontdoor_runtime_tool_contract_record(record: dict[str, Any]) -> bool:
-    return is_frontdoor_tool_contract_message(record)
+    return _mid_insert.classify_message(record) == _mid_insert.KIND_LEGACY_RUNTIME_CONTRACT
 
 
 def _dynamic_appendix_overlap_records(dynamic_appendix_messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -71,12 +70,11 @@ def _with_dynamic_appendix_at_tail(
     # Tail placement matches the node lane
     # (`upsert_node_dynamic_contract_message`); a contract echoed at the
     # continuation point is caught by `_TOOL_CONTRACT_ECHO_REPAIR_MESSAGE`.
-    stripped_request_messages = [
-        dict(item)
-        for item in normalized_request_messages
-        if not _is_frontdoor_runtime_tool_contract_record(dict(item))
-        and not is_turn_only_system_note_message(item)
-    ]
+    stripped_request_messages = _mid_insert.strip_for_stage(
+        normalized_request_messages,
+        stage=_mid_insert.STAGE_PROMPT_TAIL,
+        lane=_mid_insert.LANE_FRONTDOOR,
+    )
     merged_request_messages = list(stripped_request_messages)
     if non_contract_messages:
         merged_request_messages = _strip_first_slice(merged_request_messages, non_contract_messages)

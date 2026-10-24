@@ -62,8 +62,6 @@ from g3ku.runtime.context.image_metrics import bmp_dimensions, webp_dimensions
 from g3ku.runtime.context.summarizer import estimate_tokens
 from g3ku.runtime.frontdoor import pinned_tool_bundle
 from g3ku.runtime.frontdoor.message_builder import (
-    MEMORY_WRITE_HINT_HEADER,
-    RETRIEVED_MEMORY_HINT_HEADER,
     memory_snapshot_provenance,
 )
 from g3ku.runtime.frontdoor.token_preflight_compaction import (
@@ -129,6 +127,7 @@ from main.governance.exec_tool_policy import render_exec_runtime_policy_body
 from main.governance.tool_context import apply_runtime_tool_context_projection
 from main.models import normalize_execution_policy_metadata
 from main.protocol import build_envelope, now_iso
+from main.runtime import mid_insert as _mid_insert
 from main.runtime.chat_backend import (
     build_actual_request_diagnostics,
     build_prompt_cache_diagnostics,
@@ -149,10 +148,6 @@ from main.runtime.tool_call_repair import (
     recover_tool_calls_from_json_payload,
 )
 from main.runtime.tool_names import SILENT_TOOL_NAME
-from main.runtime.turn_overlay import (
-    is_turn_only_system_note_message,
-    strip_turn_only_system_note_messages,
-)
 from main.service.create_async_task_contract import (
     normalize_create_async_task_file_targets,
     normalize_create_async_task_seed_tools,
@@ -176,7 +171,6 @@ from .tool_contract import (
     bump_skill_roster_epoch,
     frontdoor_pinned_contract_text,
     is_frontdoor_tool_contract_echo_text,
-    is_frontdoor_tool_contract_message,
     normalize_frontdoor_candidate_tool_items,
     pinned_contract_is_carried_by_head,
     pinned_contract_section_values,
@@ -746,37 +740,39 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
     @staticmethod
     def _is_frontdoor_tool_contract_record(record: dict[str, Any] | None) -> bool:
-        return is_frontdoor_tool_contract_message(dict(record or {}))
+        return _mid_insert.classify_message(record) == _mid_insert.KIND_LEGACY_RUNTIME_CONTRACT
 
     @classmethod
     def _strip_frontdoor_turn_only_artifacts(
         cls,
         messages: list[dict[str, Any]] | None,
     ) -> list[dict[str, Any]]:
-        return [
-            dict(item)
-            for item in list(messages or [])
-            if isinstance(item, dict)
-            and not cls._is_frontdoor_tool_contract_record(item)
-            and not is_turn_only_system_note_message(item)
-        ]
+        return _mid_insert.strip_for_stage(
+            messages,
+            stage=_mid_insert.STAGE_DURABLE,
+            lane=_mid_insert.LANE_FRONTDOOR,
+            families={
+                _mid_insert.KIND_LEGACY_RUNTIME_CONTRACT,
+                _mid_insert.KIND_TURN_ONLY_NOTE,
+            },
+        )
 
     @staticmethod
     def _is_frontdoor_dynamic_overlay_record(record: dict[str, Any] | None) -> bool:
         """长期记忆写入提示 / 已检索记忆使用提示等动态 overlay（按块头常量识别）。"""
-        content = str((record or {}).get("content") or "").strip()
-        return content.startswith(MEMORY_WRITE_HINT_HEADER) or content.startswith(RETRIEVED_MEMORY_HINT_HEADER)
+        return _mid_insert.classify_message(record) == _mid_insert.KIND_RETRIEVAL_OVERLAY
 
     @classmethod
     def _strip_frontdoor_dynamic_overlays(
         cls,
         messages: list[dict[str, Any]] | None,
     ) -> list[dict[str, Any]]:
-        return [
-            dict(item)
-            for item in list(messages or [])
-            if isinstance(item, dict) and not cls._is_frontdoor_dynamic_overlay_record(item)
-        ]
+        return _mid_insert.strip_for_stage(
+            messages,
+            stage=_mid_insert.STAGE_PROJECTION,
+            lane=_mid_insert.LANE_FRONTDOOR,
+            families={_mid_insert.KIND_RETRIEVAL_OVERLAY},
+        )
 
     @classmethod
     def _frontdoor_comparable_request_records(
@@ -796,43 +792,28 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
     @classmethod
     def _frontdoor_adoption_projection_record_kept(cls, record: dict[str, Any] | None) -> bool:
         """scaffold 采纳探针的逐条投影判定（只整条丢弃、不改写内容，保持原始下标可反映射）。"""
-        if not isinstance(record, dict):
-            return False
-        if cls._is_frontdoor_tool_contract_record(record):
-            return False
-        if is_turn_only_system_note_message(record):
-            return False
-        if cls._is_frontdoor_memory_snapshot_record(record):
-            return False
-        if cls._is_frontdoor_dynamic_overlay_record(record):
-            return False
-        return True
+        return _mid_insert.keeps_record_for_stage(
+            record,
+            stage=_mid_insert.STAGE_PROJECTION,
+            lane=_mid_insert.LANE_FRONTDOOR,
+        )
 
     @staticmethod
     def _is_frontdoor_memory_snapshot_record(record: dict[str, Any] | None) -> bool:
-        if not isinstance(record, dict):
-            return False
-        if str(record.get("role") or "").strip().lower() != "assistant":
-            return False
-        return str(record.get("content") or "").strip().startswith("## 长期记忆\n")
+        return _mid_insert.classify_message(record) == _mid_insert.KIND_RETRIEVAL_MEMORY_SNAPSHOT
 
     @classmethod
     def _split_request_body_and_tool_contract_messages(
         cls,
         request_messages: list[dict[str, Any]] | None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        body_messages: list[dict[str, Any]] = []
-        contract_messages: list[dict[str, Any]] = []
-        for item in list(request_messages or []):
-            if not isinstance(item, dict):
-                continue
-            record = dict(item)
-            if cls._is_frontdoor_memory_snapshot_record(record):
-                continue
-            if cls._is_frontdoor_tool_contract_record(record):
-                contract_messages.append(record)
-                continue
-            body_messages.append(record)
+        body_messages, contract_messages = _mid_insert.split_runtime_contract_messages(request_messages)
+        body_messages = _mid_insert.strip_for_stage(
+            body_messages,
+            stage=_mid_insert.STAGE_DURABLE,
+            lane=_mid_insert.LANE_FRONTDOOR,
+            families={_mid_insert.KIND_RETRIEVAL_MEMORY_SNAPSHOT},
+        )
         return body_messages, contract_messages
 
     @classmethod
@@ -863,17 +844,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         request_messages: list[dict[str, Any]] | None,
     ) -> list[dict[str, Any]]:
         durable = strip_multimodal_blocks_from_message_records(
-            cls._strip_frontdoor_turn_only_artifacts(
-                cls._request_body_messages_without_tool_contracts(request_messages)
+            _mid_insert.strip_for_stage(
+                request_messages,
+                stage=_mid_insert.STAGE_DURABLE,
+                lane=_mid_insert.LANE_FRONTDOOR,
             )
         )
-        # 不变量：durable 基线永不含 frontdoor 运行时工具契约块。
-        # 若混入（旧版本遗留/回归），直接丢弃，避免污染跨回合基线。
-        durable = [
-            item
-            for item in durable
-            if not cls._is_frontdoor_tool_contract_record(item)
-        ]
         # 折叠重复的内部提示词（心跳规则/事件束）。续跑基线每个请求都从 request_messages
         # 提交（含失败回合，见 _persist_frontdoor_actual_request），且基线只存 {role,content}
         # 无 metadata；warm 路径不经 prompt_history_messages，故 1.2 的折叠够不到这里。在基线
@@ -2314,15 +2290,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         for index, item in enumerate(records):
             if str(item.get("role") or "").strip().lower() != "assistant":
                 continue
-            call_ids = {
-                extract_call_id((call or {}).get("id"))
-                for call in list(item.get("tool_calls") or [])
-                if str(
-                    ((call or {}).get("function") or {}).get("name") or (call or {}).get("name") or ""
-                ).strip()
-                == SILENT_TOOL_NAME
-            }
-            call_ids.discard("")
+            call_ids = set(_mid_insert.silent_trace_call_ids(item))
             if not call_ids:
                 continue
             preserved_indexes.add(index)
@@ -2389,18 +2357,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
     @staticmethod
     def _silent_call_ids(item: dict[str, Any]) -> set[str]:
-        call_ids: set[str] = set()
-        for call in list(item.get("tool_calls") or []):
-            if not isinstance(call, dict):
-                continue
-            function = call.get("function") if isinstance(call.get("function"), dict) else {}
-            name = str(function.get("name") or call.get("name") or "").strip()
-            if name != SILENT_TOOL_NAME:
-                continue
-            call_id = str(call.get("id") or "").strip()
-            if call_id:
-                call_ids.add(call_id)
-        return call_ids
+        return set(_mid_insert.silent_trace_call_ids(item))
 
     def _retire_terminal_silent_messages(
         self,
@@ -3889,7 +3846,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if not scope or not base_messages or not stage_id:
             return base_messages
         _skill_roster_notice.reset_contract_sections_for_compaction(scope, now=now_iso())
-        return _skill_roster_notice.strip_runtime_notice_messages(base_messages)
+        return _mid_insert.strip_for_stage(
+            base_messages,
+            stage=_mid_insert.STAGE_POST_COMPACTION,
+            lane=_mid_insert.LANE_FRONTDOOR,
+        )
 
     def _carry_manual_compression_notice_into_baseline(self, *, session: Any, session_key: str) -> None:
         """手动压缩跑在回合外，够不到发送路径那一次剥离；在消费待重印标记的这一跳补。
@@ -7476,21 +7437,23 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             # 被误判为「无理由收缩」而永久冻结。
             previous_tokens = estimate_message_tokens(
                 CeoMessageBuilder._request_body_seed_records(
-                    strip_turn_only_system_note_messages(
+                    _mid_insert.strip_turn_only_notes(
                         self._without_pinned_contract_head(
                             self._request_body_messages_without_tool_contracts(
                                 session_request_body_messages
                             )
-                        )
+                        ),
+                        lane=_mid_insert.LANE_FRONTDOOR,
                     )
                 )
             )
             next_tokens = estimate_message_tokens(
                 CeoMessageBuilder._request_body_seed_records(
-                    strip_turn_only_system_note_messages(
+                    _mid_insert.strip_turn_only_notes(
                         self._without_pinned_contract_head(
                             self._request_body_messages_without_tool_contracts(persisted_messages)
-                        )
+                        ),
+                        lane=_mid_insert.LANE_FRONTDOOR,
                     )
                 )
             )

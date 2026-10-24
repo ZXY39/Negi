@@ -319,20 +319,18 @@ class RuntimeAgentSession:
     def _restorable_frontdoor_request_body_messages(
         request_messages: list[dict[str, Any]] | None,
     ) -> list[dict[str, Any]]:
-        from g3ku.runtime.frontdoor.tool_contract import is_frontdoor_tool_contract_message
         from g3ku.runtime.web_ceo_sessions import strip_multimodal_blocks_from_message_records
-        from main.runtime.turn_overlay import is_turn_only_system_note_message
+        from main.runtime import mid_insert as _mid_insert
 
-        body_messages: list[dict[str, Any]] = []
-        for item in list(request_messages or []):
-            if not isinstance(item, dict):
-                continue
-            record = dict(item)
-            if is_frontdoor_tool_contract_message(record):
-                continue
-            if is_turn_only_system_note_message(record):
-                continue
-            body_messages.append(record)
+        body_messages = _mid_insert.strip_for_stage(
+            request_messages,
+            stage=_mid_insert.STAGE_DURABLE,
+            lane=_mid_insert.LANE_FRONTDOOR,
+            families={
+                _mid_insert.KIND_LEGACY_RUNTIME_CONTRACT,
+                _mid_insert.KIND_TURN_ONLY_NOTE,
+            },
+        )
         return strip_multimodal_blocks_from_message_records(body_messages)
 
     @staticmethod
