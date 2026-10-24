@@ -17386,3 +17386,14 @@ textarea {
 .interaction-flow-list .task-trace-step > .task-trace-body {
     padding-left: calc(16px + var(--space-3));
 }
+
+/* 第一段叙述之前的纯工具块没有标题行，时间/工具仍对齐正文列。 */
+.task-trace-step--bare {
+    border: 0;
+    background: transparent;
+}
+
+.task-flow-box .task-trace-step--bare,
+.interaction-flow-list .task-trace-step--bare {
+    padding-left: calc(var(--space-2) + 16px + var(--space-3));
+}

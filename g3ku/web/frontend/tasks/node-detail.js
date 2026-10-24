@@ -39,7 +39,12 @@ function formatNodeDetailHeading(node, { maxChars = 72, compact = true } = {}) {
     return `${nodeId} | ${heading}`;
 }
 
-function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = "", open = false, bodyHtml = "", showRuntime = true, showStatus = true, extraClass = "", leadHtml = "", turnText = "" }) {
+function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = "", open = false, bodyHtml = "", showRuntime = true, showStatus = true, extraClass = "", leadHtml = "", turnText = "", bare = false }) {
+    if (bare) {
+        return `
+        <div class="task-trace-step task-trace-step--bare" data-trace-key="${esc(traceKey)}">${bodyHtml}</div>
+    `;
+    }
     const classes = ["interaction-step", "task-trace-step", esc(status)];
     const normalizedExtraClass = String(extraClass || "").trim();
     if (normalizedExtraClass) classes.push(esc(normalizedExtraClass));
@@ -501,9 +506,11 @@ function buildTurnGroupDescriptors(turns) {
     entries.forEach((entry) => {
         const tools = entry.rounds.flatMap((round) => round.tools);
         if (entry.kind === "preamble") {
+            // 第一段叙述之前的工具轮不再编一个「开始执行」标题，直接铺工具。
             steps.push({
                 traceKey: "turn:preamble",
-                title: "开始执行",
+                title: "",
+                bare: true,
                 status: roundTraceStatus({ tools }),
                 open: false,
                 tools,

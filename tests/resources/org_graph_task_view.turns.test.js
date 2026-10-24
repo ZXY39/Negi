@@ -60,7 +60,7 @@ function turn(seq, text, tools = []) {
 }
 
 test("turns group by progress text and keep the tools that follow", () => {
-    const { buildExecutionTraceSteps } = load();
+    const { buildExecutionTraceSteps, renderTraceStep } = load();
     const trace = {
         initial_prompt: "initial",
         turns: [
@@ -79,7 +79,13 @@ test("turns group by progress text and keep the tools that follow", () => {
     assert.equal(steps.length, 5);
     assert.equal(steps[0].traceKey, "initial_prompt");
     assert.equal(steps[1].traceKey, "turn:preamble");
-    assert.equal(steps[1].title, "开始执行");
+    // 首个叙述前的工具轮直接铺开，不再自动加「开始执行」标题。
+    assert.equal(steps[1].title, "");
+    assert.equal(steps[1].bare, true);
+    const preambleHtml = renderTraceStep(steps[1]);
+    assert.match(preambleHtml, /task-trace-step--bare/);
+    assert.doesNotMatch(preambleHtml, /开始执行/);
+    assert.doesNotMatch(preambleHtml, /task-trace-summary/);
     assert.equal(steps[2].traceKey, "turn:2");
     assert.equal(steps[2].title, "第一批完成");
     assert.match(steps[2].bodyHtml, /tool-b/);
