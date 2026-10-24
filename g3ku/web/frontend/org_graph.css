@@ -3703,29 +3703,25 @@ textarea {
 .interaction-flow-summary::-webkit-details-marker {
     display: none;
 }
-.task-flow-chevron,
+/* 前门展开钮是一个 8px 圆点（#39c5bb），16px 盒子用来对齐点击区。 */
 .interaction-flow-chevron {
+    position: relative;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     flex: none;
     width: 16px;
     height: 16px;
-    font-size: 0.95rem;
+    font-size: 0;
     line-height: 1;
-    color: var(--text-tertiary);
-    transition: transform 0.18s ease;
 }
 
-.task-flow-chevron {
+.interaction-flow-chevron::before {
+    content: "";
     width: 8px;
-    font-size: 0.9rem;
-}
-
-.task-flow-box[open] > .task-flow-summary .task-flow-chevron,
-.interaction-flow[open] .interaction-flow-chevron {
-    transform: rotate(90deg);
-    color: var(--text-secondary);
+    height: 8px;
+    border-radius: var(--radius-full);
+    background: #39c5bb;
 }
 
 .interaction-flow-meta {
@@ -17248,26 +17244,14 @@ textarea {
     margin-bottom: var(--space-3);
 }
 
-.task-flow-summary {
+/* 节点流程框常开、无展开箭头：统计行与上方初始提示词正文左对齐。 */
+.task-flow-header {
     display: flex;
     align-items: center;
-    gap: 0;
-    /* 外箭头与初始提示词正文左对齐（18px = 卡片正文内缩）；统计文字
-       紧跟其后，正好落到内部中途文本「>」的竖轴（18 + 8）。 */
     padding: var(--space-3) var(--space-3) var(--space-3) 18px;
-    cursor: pointer;
-    list-style: none;
     color: var(--text-secondary);
     font-size: 0.8rem;
     font-variant-numeric: tabular-nums;
-}
-
-.task-flow-summary::-webkit-details-marker {
-    display: none;
-}
-
-.task-flow-box[open] {
-    box-shadow: var(--shadow-sm);
 }
 
 .task-flow-usage {
@@ -17349,35 +17333,24 @@ textarea {
     display: none;
 }
 
-/* 展开时从箭头向下延伸的细线：收起态 scaleY(0)，展开过渡到满高。 */
-.task-flow-box,
+/* 前门展开时从圆点向下延伸的细线：收起态 scaleY(0)，展开过渡到满高。 */
 .interaction-flow {
     position: relative;
 }
 
-.task-flow-guide,
 .interaction-flow-guide {
     position: absolute;
+    left: 8px;
     top: 24px;
     bottom: var(--space-3);
     width: 1px;
-    background: color-mix(in srgb, var(--text-secondary) 55%, transparent);
+    background: #39c5bb;
     transform: scaleY(0);
     transform-origin: top;
     transition: transform 0.22s ease;
     pointer-events: none;
 }
 
-/* 竖线从各自箭头的中心往下降。 */
-.task-flow-guide {
-    left: 22px;
-}
-
-.interaction-flow-guide {
-    left: 8px;
-}
-
-.task-flow-box[open] .task-flow-guide,
 .interaction-flow[open] .interaction-flow-guide {
     transform: scaleY(1);
 }
@@ -17393,7 +17366,11 @@ textarea {
     }
 }
 
-.task-flow-box[open] > #ad-input,
 .interaction-flow[open] .interaction-flow-list {
     animation: taskFlowBodyIn 0.18s ease-out;
+}
+
+/* 中途文本内部：时间行与工具条和正文同一条左基线（16px 箭头 + 12px 间距）。 */
+.task-trace-step--turn-text > .task-trace-body {
+    padding-left: calc(16px + var(--space-3));
 }

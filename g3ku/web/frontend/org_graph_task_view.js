@@ -1876,7 +1876,6 @@ async function showAgent(node, { preserveViewState = true, forceRefresh = false 
     if (U.adTokenSummary) {
         U.adTokenSummary.textContent = taskFlowUsageText(mergedNode, mergedNode.executionTrace);
     }
-    if (nodeChanged && U.taskFlowBox) U.taskFlowBox.open = false;
     // 同一节点刷新时，展开态取渲染前 DOM 的当下状态：入口那次捕获在请求之前，
     // 在飞窗口里用户刚点开的卡片和工具面板不在里面，沿用会把它们折回上一次的样子。
     const liveViewState = hadVisibleCurrentDetail ? captureTaskDetailViewState() : null;

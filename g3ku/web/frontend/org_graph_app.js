@@ -656,7 +656,6 @@ const U = {
     adStatus: document.getElementById("ad-status"),
     adTokenSummary: document.getElementById("ad-token-summary"),
     adInitialPrompt: document.getElementById("ad-initial-prompt"),
-    taskFlowBox: document.getElementById("task-flow-box"),
     adFlow: document.getElementById("ad-input"),
     adMessages: document.getElementById("ad-messages"),
     adMessageTabs: document.getElementById("ad-message-tabs"),
@@ -5668,7 +5667,7 @@ function createPendingCeoTurn(source = "user", { scrollMode = "preserve" } = {})
                 </div>
                 <details class="interaction-flow" hidden>
                     <summary class="interaction-flow-summary">
-                        <span class="interaction-flow-chevron" aria-hidden="true">&gt;</span>
+                        <span class="interaction-flow-chevron" aria-hidden="true"></span>
                         <span class="interaction-flow-usage" data-flow-usage></span>
                         <span class="interaction-flow-meta" hidden>等待工具开始...</span>
                         <span class="interaction-flow-guide" aria-hidden="true"></span>

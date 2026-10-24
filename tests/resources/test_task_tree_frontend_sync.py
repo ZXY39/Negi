@@ -4902,5 +4902,9 @@ def test_detail_boxes_are_line_capped_and_outputs_have_copy_buttons() -> None:
     # 初始提示词独立成框；执行流程总框是可折叠 details，标题行放节点用量。
     assert 'id="ad-initial-prompt"' in html
     assert 'id="task-flow-box" class="task-flow-box"' in html
-    assert 'class="task-flow-summary"' in html
+    # 节点流程框常开、无展开箭头与引导线；统计行单独成头部。
+    assert 'class="task-flow-header"' in html
+    assert 'task-flow-chevron' not in html
     assert 'id="ad-token-summary" class="task-flow-usage"' in html
+    # 前门展开钮与引导线使用 #39c5bb。
+    assert "background: #39c5bb" in css
