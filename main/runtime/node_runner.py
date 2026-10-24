@@ -6801,6 +6801,16 @@ class NodeRunner:
         notify_parent: bool = True,
     ) -> NodeFinalResult:
         task = self._store.get_task(task_id)
+        node = self._store.get_node(node_id)
+        if node is not None and self._normalized_status(getattr(node, 'status', '')) in {
+            STATUS_SUCCESS,
+            STATUS_FAILED,
+        }:
+            # 终态吸收：迟到的在飞回合不得改写已落定的行。实盘 task:a0d1bd9bc9fa：
+            # 15:53:09 最终验收通过、15:53:10 任务 success，而 15:48 resume 出来的根
+            # 回合在 15:53:15 才走到检查点，一句 "task already completed" 把根写成
+            # failed，refresh_task_view 随即把成功任务翻成失败。终态只由裁决/终局写一次。
+            return self._result_from_record(node)
         self._forget_node_route_binding(node_id)
         if (
             task is not None
@@ -6813,7 +6823,6 @@ class NodeRunner:
                     capture_retry_snapshot(task_id, node_id, failure_reason=result.failure_text)
                 except Exception:
                     pass
-        node = self._store.get_node(node_id)
         if (
             node is not None
             and str(getattr(node, 'node_kind', '') or '').strip().lower() == KIND_EXECUTION

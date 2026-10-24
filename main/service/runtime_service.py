@@ -106,6 +106,11 @@ from main.monitoring.mem_probe import start_mem_probe
 from main.monitoring.query_service_v2 import TaskQueryServiceV2
 from main.prompts import load_prompt
 from main.protocol import build_envelope, now_iso
+from main.runtime.acceptance_handshake import (
+    ACCEPTANCE_HANDSHAKE_KEY,
+    ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
+    normalize_acceptance_handshake,
+)
 from main.runtime.adaptive_tool_budget import AdaptiveToolBudgetController
 from main.runtime.chat_backend import ChatBackend
 from main.runtime.debug_recorder import RuntimeDebugRecorder
@@ -1965,6 +1970,15 @@ class MainRuntimeService:
                 pause_reason='',
                 remark='',
             )
+            handshake = normalize_acceptance_handshake(
+                ((updated.metadata if updated is not None else node.metadata) or {}).get(ACCEPTANCE_HANDSHAKE_KEY)
+            )
+            if str(handshake.get('state') or '').strip() == ACCEPTANCE_STATE_WAITING_ACCEPTANCE:
+                # 已提交、裁决在途：清暂停位就够了。再起一个执行回合会与正在跑的验收
+                # 并行（实盘 task:a0d1bd9bc9fa：15:48 resume 根节点后它和最终验收同时
+                # 跑到 15:53；验收通过把任务置 success，迟到的回合随后把根改写成 failed）。
+                results.append({'node_id': node_id, 'result': 'deferred', 'reason': 'waiting_acceptance'})
+                continue
             if dispatcher is not None and updated is not None:
                 # 走 TaskActorService 的复活入口：清标志不等于复活，必须留下活执行器
                 # 或把现场落进日志，并由延迟校验兜底（见 resume_node_entry）。

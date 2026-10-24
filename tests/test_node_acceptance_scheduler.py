@@ -717,3 +717,58 @@ class TestAcceptanceActivationGate:
 
         assert await service.task_actor_service._dispatch_runnable_nodes(TASK, dispatcher) is False
         assert dispatcher.scheduled == []
+
+    @pytest.mark.asyncio
+    async def test_resume_is_deferred_while_a_verdict_is_pending(self, tmp_path, monkeypatch):
+        """已提交、裁决在途的节点：resume 只清暂停位，不起新执行回合。
+
+        实盘 task:a0d1bd9bc9fa：15:48 resume 根节点后，它与仍在核验的最终验收同时
+        跑到 15:53，验收通过把任务置 success，迟到的执行回合又被写成 failed。
+        """
+        service = _service(tmp_path)
+        _seed(service)
+        service.store.update_node(
+            CHILD,
+            lambda record: record.model_copy(update={'is_paused': True, 'pause_reason': 'error'}),
+        )
+        resumed: list[str] = []
+
+        async def fake_resume(task_id: str, node_id: str, **_kwargs) -> str:
+            resumed.append(node_id)
+            return 'resumed'
+
+        monkeypatch.setattr(service.task_actor_service, 'resume_node_entry', fake_resume)
+
+        result = await service._apply_resume_node_command(TASK, node_ids=[CHILD])
+
+        assert result['items'] == [
+            {'node_id': CHILD, 'result': 'deferred', 'reason': 'waiting_acceptance'}
+        ]
+        assert resumed == []
+        # 暂停位照常清掉：节点不再"暂停"，但仍在等裁决。
+        assert service.store.get_node(CHILD).is_paused is False
+
+
+class TestTerminalIsAbsorbing:
+    @pytest.mark.asyncio
+    async def test_a_late_turn_failure_does_not_rewrite_a_successful_node(self, tmp_path):
+        """验收通过后，迟到的执行回合不得把已 success 的节点改成 failed。
+
+        实盘 task:a0d1bd9bc9fa：15:53:09 最终验收通过 → 15:53:10 任务 success；
+        15:53:15 那个 15:48 resume 出来的根回合撞上 "task already completed"，
+        旧实现把它写成了 failed，任务随之翻成失败。
+        """
+        service = _service(tmp_path)
+        _seed(service)
+        service.store.update_node(
+            CHILD,
+            lambda record: record.model_copy(update={'status': 'success', 'final_output': 'accepted'}),
+        )
+
+        returned = service.node_runner._mark_failed(TASK, CHILD, reason='task already completed')
+
+        kept = service.store.get_node(CHILD)
+        assert kept.status == 'success'
+        assert kept.final_output == 'accepted'
+        assert kept.failure_reason == ''
+        assert returned.status == 'success'
