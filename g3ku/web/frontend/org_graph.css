@@ -17193,10 +17193,20 @@ textarea {
 }
 
 /* 节点详情：消息列表 / 派生记录各自在 10.5 条处封顶，内部滚动；
-   max-height 不留预占位，条目不足 11 条时按内容自适应。 */
-#ad-messages,
-#ad-spawn-reviews {
+   max-height 不留预占位，条目不足 11 条时按内容自适应。
+   封的是 .task-trace-list（滚动位置由详情视图状态按它捕获/还原）。 */
+#ad-messages .task-trace-list,
+#ad-spawn-reviews .task-trace-list {
     max-height: calc(10.5 * 48px + 10 * var(--space-3));
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+/* 中途输出列表：节点详情与 CEO 回合轨各在 16.5 条处封顶，
+   条目再多只在框内滚动，不再把整页刷长。 */
+#ad-input .task-trace-list,
+.interaction-flow-list.task-trace-list {
+    max-height: calc(16.5 * 48px + 16 * var(--space-3));
     overflow-y: auto;
     overscroll-behavior: contain;
 }

@@ -4892,6 +4892,8 @@ def test_detail_boxes_are_line_capped_and_outputs_have_copy_buttons() -> None:
     css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
     # 消息列表 / 派生记录：10.5 条封顶；max-height 让不足 11 条时不预占空白。
     assert "max-height: calc(10.5 * 48px + 10 * var(--space-3))" in css
+    # 中途输出列表（节点详情与 CEO 回合轨）：16.5 条封顶。
+    assert "max-height: calc(16.5 * 48px + 16 * var(--space-3))" in css
     # 提交输出 / 验收结果：15 行封顶。
     assert "max-height: calc(15 * 1.65em)" in css
     html = (REPO_ROOT / "g3ku/web/frontend/org_graph.html").read_text(encoding="utf-8")
