@@ -375,16 +375,9 @@ async def test_selector_precompute_is_shared_by_tool_exposure_and_message_enrich
     # selection 只决定 callable，不决定字典上界。
     assert list(provided) == ["content", "filesystem_stat"]
     assert len(selector_calls) == 1
-    contract_payload = extract_node_dynamic_contract_payload(enriched)
-    assert contract_payload is not None
-    assert contract_payload["callable_tool_names"] == ["content"]
-    assert contract_payload["candidate_skills"] == [
-        {
-            "skill_id": "tmux",
-            "description": "terminal workflow",
-        }
-    ]
-    assert contract_payload["candidate_tools"] == []
+    # 尾块退役：enrichment 仍计算选择结果，但不再把合同消息写进正文。
+    assert extract_node_dynamic_contract_payload(enriched) is None
+    assert enriched[0]["content"] == "base prompt"
 
 
 @pytest.mark.asyncio
@@ -444,6 +437,21 @@ async def test_enrich_node_messages_moves_repair_required_tools_and_skills_into_
         _fake_build_node_context_selection,
     )
 
+    # 尾块退役后 enrichment 不再把合同写进正文，选择/修复分档仍在 enrichment 内计算，
+    # 所以在本应的装配点截一份合同下来断言分档结果。
+    captured = {}
+    real_inject = runtime_service_module.inject_node_dynamic_contract_message
+
+    def _capturing_inject(messages, contract):
+        captured["contract"] = contract
+        return real_inject(messages, contract)
+
+    monkeypatch.setattr(
+        runtime_service_module,
+        "inject_node_dynamic_contract_message",
+        _capturing_inject,
+    )
+
     enriched = await service._enrich_node_messages(
         task=task,
         node=node,
@@ -453,8 +461,10 @@ async def test_enrich_node_messages_moves_repair_required_tools_and_skills_into_
         ],
     )
 
-    contract_payload = extract_node_dynamic_contract_payload(enriched)
-    assert contract_payload is not None
+    assert extract_node_dynamic_contract_payload(enriched) is None
+    assert enriched[0]["content"] == "base prompt"
+
+    contract_payload = captured["contract"].to_message_payload()
     assert contract_payload["candidate_tools"] == []
     assert contract_payload["candidate_skills"] == []
     assert contract_payload["repair_required_tools"] == [

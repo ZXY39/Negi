@@ -3427,18 +3427,16 @@ async def test_execution_node_messages_include_visible_skill_inventory(tmp_path:
 
         messages = await service.node_runner._build_messages(task=task, node=node)
         bootstrap_payload = json.loads(messages[1]['content'])
-        contract_payload = extract_node_dynamic_contract_payload(messages)
+        runtime_context = service.node_runner._runtime_context(task=task, node=node)
 
         assert 'visible_skills' not in bootstrap_payload
         assert 'execution_stage' not in bootstrap_payload
-        assert contract_payload is not None
-        assert contract_payload['message_type'] == 'node_runtime_tool_contract'
-        assert contract_payload['candidate_skills'] == [
-            {
-                'skill_id': 'demo_visible_skill',
-                'description': 'Demo skill for resource smoke tests.',
-            }
-        ]
+        # 契约尾块已退役：可见名单钉进 system 首条，重印点之间的变化由一次性通知投递。
+        assert extract_node_dynamic_contract_payload(messages) is None
+
+        supplier = runtime_context.get('live_skill_roster_supplier')
+        assert callable(supplier)
+        assert [item['skill_id'] for item in supplier()] == ['demo_visible_skill']
     finally:
         await service.close()
         manager.close()
