@@ -196,3 +196,14 @@ def test_llm_detail_editor_renders_image_multimodal_before_concurrency_button_in
     assert 'class="resource-field llm-image-checkbox-field"' in result["html"]
 
 
+def test_memory_role_fixed_concurrency_reuses_segmented_label_shell_styling() -> None:
+    app_js = "\n".join(
+        (REPO_ROOT / name).read_text(encoding="utf-8")
+        for name in ("g3ku/web/frontend/org_graph_app.js", "g3ku/web/frontend/models/role-view.js")
+    )
+    app_css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
+
+    assert "model-role-limit-fixed-track" in app_js
+    assert "llm-segmented-label model-role-limit-fixed-pill" in app_js
+    assert "grid-column: 2 / 3;" in app_css
+    assert ".model-role-limit-fixed-pill {" in app_css

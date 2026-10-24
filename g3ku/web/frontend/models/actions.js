@@ -241,6 +241,39 @@ function bindContextRefreshDialog() {
     });
 }
 
+async function loadModels() {
+    S.modelCatalog.loading = true;
+    S.modelCatalog.error = "";
+    renderModelCatalog();
+    try {
+        const data = await ApiClient.getOrgGraphModels();
+        applyModelCatalog(data, { preserveRoleDrafts: !!S.modelCatalog.roleEditing });
+    } catch (e) {
+        S.modelCatalog.error = e.message || "load failed";
+    } finally {
+        S.modelCatalog.loading = false;
+        renderModelCatalog();
+    }
+}
+
+function openModel(key) {
+    S.modelCatalog.mode = "view";
+    S.modelCatalog.selectedModelKey = String(key || "").trim();
+    renderModelCatalog();
+}
+
+function startCreateModel() {
+    S.modelCatalog.mode = "create";
+    S.modelCatalog.selectedModelKey = "";
+    renderModelCatalog();
+}
+
+function clearModelSelection() {
+    S.modelCatalog.mode = "view";
+    S.modelCatalog.selectedModelKey = "";
+    renderModelCatalog();
+}
+
 function clearModelDragDecorations() {
     [U.modelRoleEditors, U.modelList].filter(Boolean).forEach((root) => {
         root.querySelectorAll('.is-drop-target').forEach((item) => item.classList.remove('is-drop-target'));
@@ -450,6 +483,7 @@ function updateRoleChainDraft(scope, nextChain) {
     renderModelHint();
     renderModelRoleEditors();
     renderModelList();
+    syncModelDetailScopeToggles();
 }
 
 function updateRoleIterationDraft(scope, value, { render = true } = {}) {
@@ -469,8 +503,7 @@ function updateRoleIterationDraft(scope, value, { render = true } = {}) {
 }
 
 function syncRoleIterationDraftsFromInputs({ requireValid = false } = {}) {
-    ensureModelRoleDraftSession();
-    const roots = [U.modelRoleEditors].filter(Boolean);
+    const roots = [U.modelRoleLimitsBar, U.modelRoleEditors].filter(Boolean);
     const groups = roots.flatMap((root) => [...root.querySelectorAll("[data-model-role-limit-kind][data-model-role-limit-scope]")]);
     if (!groups.length) return false;
     let changed = false;

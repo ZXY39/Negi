@@ -61,16 +61,9 @@ function loadApp(elements = {}, globals = {}) {
     const context = baseContext(elements);
     context.window = context;
     vm.createContext(context);
-    // 模型页的四个视图入口现在只由 org_graph_llm.js 提供；app 侧用例只测逻辑，
-    // 这里按名字补空实现，让动作处理器能跑完，不改变被测行为。
-    const viewStubs = {
-        renderModelCatalog: () => {},
-        renderModelRoleEditors: () => {},
-        renderModelList: () => {},
-        renderModelDetail: () => {},
-        renderModelHint: () => {},
-    };
-    Object.entries({ ...viewStubs, ...globals }).forEach(([name, value]) => { context[name] = value; });
+    // bind() 的尾巴上会调到别的模块提供的渲染函数；这里只按名字补空实现，
+    // 让事件绑定能跑完，不改变被测处理器的行为。
+    Object.entries(globals).forEach(([name, value]) => { context[name] = value; });
     vm.runInContext(
         `${APP_CODE}\nthis.__exports = {
             S,

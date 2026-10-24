@@ -64,26 +64,6 @@ function _applyExternalPayload(payload) {
     EXTERNAL_API_VIEW_STATE.loaded = true;
 }
 
-function _externalTokenGroups(items) {
-    const groups = new Map();
-    const push = (key, label, item) => {
-        if (!groups.has(key)) groups.set(key, { label, items: [] });
-        groups.get(key).items.push(item);
-    };
-    for (const item of items) {
-        const bridgeId = String(item.bridge_id || "");
-        const qqAccount = /^qq-official-(.+)$/.exec(bridgeId);
-        if (qqAccount) {
-            const appId = qqAccount[1];
-            const account = (QQ_BOT_STATE.rows || []).find((row) => String(row.app_id || "").trim() === appId);
-            push(`qq:${appId}`, `QQ 机器人 · ${account && account.label ? account.label : appId}`, item);
-            continue;
-        }
-        push("bridges", "桥接应用", item);
-    }
-    return [...groups.values()];
-}
-
 function renderExternalTokenList() {
     const listEl = _externalListEl();
     if (!listEl) return;
@@ -97,18 +77,10 @@ function renderExternalTokenList() {
         return;
     }
     listEl.innerHTML = "";
-    for (const group of _externalTokenGroups(items)) {
-        const section = document.createElement("section");
-        section.className = "external-token-group";
-        const title = document.createElement("h4");
-        title.className = "external-token-group-title";
-        title.textContent = group.label;
-        const rows = document.createElement("div");
-        rows.className = "external-token-group-rows";
-        for (const item of group.items) {
-            const row = document.createElement("div");
-            row.className = "resource-list-item external-token-item";
-            row.innerHTML = `
+    for (const item of items) {
+        const row = document.createElement("div");
+        row.className = "resource-list-item external-token-item";
+        row.innerHTML = `
             <div class="external-token-head">
                 <div class="external-token-main">
                     <div class="resource-list-title">${esc(item.bridge_id)}</div>
@@ -123,10 +95,10 @@ function renderExternalTokenList() {
                 </button>
             </div>
             <div class="external-token-actions">
-                <span class="external-row-scope"><span class="external-row-scope-text">会话范围</span>
+                <span class="external-row-scope"><span class="external-row-scope-text">可会话范围</span>
                     <select id="external-scope-${esc(item.bridge_id)}" class="resource-select external-scope-select"
                         data-bridge="${esc(item.bridge_id)}" data-action="scope"
-                        data-resource-select-label="会话范围" data-resource-select-portal="true"
+                        data-resource-select-label="可会话范围" data-resource-select-portal="true"
                         aria-label="${esc(item.bridge_id)} 的会话范围">
                         <option value="allow"${item.cross_session !== false ? " selected" : ""}>全部会话</option>
                         <option value="deny"${item.cross_session === false ? " selected" : ""}>仅本桥</option>
@@ -137,11 +109,7 @@ function renderExternalTokenList() {
                     <button class="toolbar-btn ghost danger small" data-action="delete" data-bridge="${esc(item.bridge_id)}" type="button">删除</button>
                 </div>
             </div>`;
-            rows.appendChild(row);
-        }
-        section.appendChild(title);
-        section.appendChild(rows);
-        listEl.appendChild(section);
+        listEl.appendChild(row);
     }
     // 整块 innerHTML 重建会把上一次定制出来的下拉壳一起清掉，重绘后必须重新水合，
     // 否则这一列又退回原生 <select>（应用里没有第二处原生下拉是可见的）。
@@ -259,25 +227,18 @@ async function toggleExternalTokenEnabled(bridgeId, enabled) {
     }
 }
 
-function regenerateExternalToken(bridgeId) {
-    openConfirm({
-        title: "重新生成 token",
-        text: `重新生成后 ${bridgeId} 的旧 token 立即失效，正在使用它的桥接应用需要同步更新。确定继续？`,
-        confirmLabel: "重新生成",
-        onConfirm: async () => {
-            _externalBusy(true);
-            try {
-                const payload = await ApiClient.updateExternalApiToken(bridgeId, { regenerate: true });
-                _applyExternalPayload(payload);
-                renderExternalTokenList();
-                _showExternalTokenOnce(payload.bridge_id || bridgeId, payload.token);
-            } catch (error) {
-                showToast({ title: "重新生成失败", text: ApiClient.friendlyErrorMessage(error), kind: "error" });
-            } finally {
-                _externalBusy(false);
-            }
-        },
-    });
+async function regenerateExternalToken(bridgeId) {
+    _externalBusy(true);
+    try {
+        const payload = await ApiClient.updateExternalApiToken(bridgeId, { regenerate: true });
+        _applyExternalPayload(payload);
+        renderExternalTokenList();
+        _showExternalTokenOnce(payload.bridge_id || bridgeId, payload.token);
+    } catch (error) {
+        showToast({ title: "重新生成失败", text: ApiClient.friendlyErrorMessage(error), kind: "error" });
+    } finally {
+        _externalBusy(false);
+    }
 }
 
 async function deleteExternalToken(bridgeId) {
@@ -399,7 +360,7 @@ function initExternalApiView() {
 }
 
 // ---- 官方 QQ 机器人面板：一个 AppID 一行账号 ----
-const QQ_BOT_STATE = { loaded: false, busy: false, enabled: false, rows: [], dirty: false };
+const QQ_BOT_STATE = { loaded: false, busy: false, enabled: false, rows: [] };
 
 function _qqBotListEl() {
     return document.getElementById("qq-bot-accounts");
@@ -445,27 +406,14 @@ function renderQqBotAccounts() {
     listEl.innerHTML = "";
     QQ_BOT_STATE.rows.forEach((row, index) => {
         const status = _qqBotRowStatus(row);
-        // 配置态由行开关表达；徽标只在运行态需要说明时出现，避免「本号已停用」与开关重复。
-        const showBadge = ["connected", "connecting", "error", "not_configured"].includes(status.state);
-        const appId = String(row.app_id || "").trim();
-        const title = String(row.label || "").trim() || appId || "新账号";
-        const el = document.createElement("details");
+        const el = document.createElement("div");
         el.className = "resource-list-item qq-bot-account-row";
         el.dataset.index = String(index);
-        if (!appId) el.open = true;
         el.innerHTML = `
-            <summary class="qq-bot-account-head">
-                <span class="qq-bot-account-caret" aria-hidden="true">▸</span>
-                <span class="qq-bot-account-title">${esc(title)}</span>
-                ${appId && title !== appId ? `<span class="qq-bot-account-meta">${esc(appId)}</span>` : ""}
-                ${showBadge ? `<span class="status-badge qq-bot-account-status" data-status="${esc(status.badge)}" title="${esc(status.text)}">${esc(status.text)}</span>` : ""}
-                <button class="tool-governance-switch qq-bot-row-switch" type="button"
-                    aria-pressed="${row.enabled ? "true" : "false"}" aria-label="切换该号启用状态">
-                    <span class="tool-governance-switch-track" aria-hidden="true"><span class="tool-governance-switch-thumb"></span></span>
-                    <span class="tool-governance-switch-label">${row.enabled ? "已启用" : "已停用"}</span>
-                </button>
-                <button class="toolbar-btn ghost danger small" data-action="remove" type="button">删除</button>
-            </summary>
+            <div class="qq-bot-account-head">
+                <span class="status-badge qq-bot-account-status" data-status="${esc(status.badge)}"
+                    title="${esc(status.text)}">${esc(status.text)}</span>
+            </div>
             <div class="llm-form-grid qq-bot-account-fields">
                 <label class="resource-field"><span class="resource-field-label">AppID</span>
                     <input class="resource-search qq-bot-appid" type="text" value="${esc(row.app_id || "")}" autocomplete="off"></label>
@@ -477,18 +425,18 @@ function renderQqBotAccounts() {
                 <div class="resource-field qq-bot-sandbox-field"><span class="resource-field-label">环境</span>
                     <label class="qq-bot-sandbox"><input class="qq-bot-sandbox-input" type="checkbox"
                         ${row.sandbox ? "checked" : ""}>沙箱</label></div>
+            </div>
+            <div class="external-token-actions">
+                <button class="tool-governance-switch qq-bot-row-switch" type="button"
+                    aria-pressed="${row.enabled ? "true" : "false"}" aria-label="切换该号启用状态">
+                    <span class="tool-governance-switch-track" aria-hidden="true"><span class="tool-governance-switch-thumb"></span></span>
+                    <span class="tool-governance-switch-label">${row.enabled ? "已启用" : "已停用"}</span>
+                </button>
+                <button class="toolbar-btn ghost danger small" data-action="remove" type="button">删除</button>
             </div>`;
         listEl.appendChild(el);
     });
     _renderQqBotStatus();
-}
-
-function _markQqBotDirty(dirty) {
-    QQ_BOT_STATE.dirty = !!dirty;
-    const saveBtn = document.getElementById("qq-bot-save-btn");
-    if (!saveBtn) return;
-    saveBtn.classList.toggle("is-dirty", QQ_BOT_STATE.dirty);
-    saveBtn.textContent = QQ_BOT_STATE.dirty ? "保存并连接 *" : "保存并连接";
 }
 
 function _renderQqBotStatus() {
@@ -504,7 +452,7 @@ function _renderQqBotStatus() {
     }
     const rows = QQ_BOT_STATE.rows.filter((row) => row.enabled);
     if (!rows.length) {
-        el.textContent = "暂无启用账号";
+        el.textContent = "没有启用中的账号";
         return;
     }
     const connected = rows.filter((row) => String((row.service || {}).state || "").toLowerCase() === "connected").length;
@@ -567,7 +515,6 @@ function _applyQqBotPayload(payload) {
         service: row.service || null,
     }));
     QQ_BOT_STATE.loaded = true;
-    _markQqBotDirty(false);
     _setExternalSwitch(document.getElementById("qq-bot-enabled-toggle"), QQ_BOT_STATE.enabled, QQ_BOT_STATE.enabled ? "已启用" : "已停用");
 }
 
@@ -576,8 +523,6 @@ async function loadQqBotView() {
     try {
         _applyQqBotPayload(await ApiClient.getQqBotSettings());
         renderQqBotAccounts();
-        // token 分组要按账号备注命名，QQ 账号先到就先重画一遍。
-        if (EXTERNAL_API_VIEW_STATE.loaded) renderExternalTokenList();
     } catch (error) {
         showToast({ title: "加载 QQ 机器人配置失败", text: ApiClient.friendlyErrorMessage(error), kind: "error" });
     }
@@ -629,7 +574,6 @@ function _addQqBotAccountRow() {
     if (rows) QQ_BOT_STATE.rows = rows;
     QQ_BOT_STATE.rows.push({ app_id: "", app_secret: "", label: "", sandbox: false, enabled: true, has_secret: false, service: null });
     renderQqBotAccounts();
-    _markQqBotDirty(true);
     const listEl = _qqBotListEl();
     const inputs = listEl ? listEl.querySelectorAll(".qq-bot-appid") : [];
     const last = inputs[inputs.length - 1];
@@ -660,12 +604,7 @@ function initQqBotView() {
     const toggle = document.getElementById("qq-bot-enabled-toggle");
     if (toggle) toggle.addEventListener("click", () => void toggleQqBotEnabled(toggle.getAttribute("aria-pressed") !== "true"));
     const form = document.getElementById("qq-bot-settings-form");
-    if (form) {
-        form.addEventListener("submit", (event) => void saveQqBotSettings(event));
-        // 文本类改动走整表保存，必须先让用户看见「还没保存」。
-        form.addEventListener("input", () => _markQqBotDirty(true));
-        form.addEventListener("change", () => _markQqBotDirty(true));
-    }
+    if (form) form.addEventListener("submit", (event) => void saveQqBotSettings(event));
     const addBtn = document.getElementById("qq-bot-account-add-btn");
     if (addBtn) addBtn.addEventListener("click", (event) => {
         event.preventDefault();
@@ -678,20 +617,10 @@ function initQqBotView() {
             if (!rowEl) return;
             const index = Number(rowEl.dataset.index);
             if (event.target.closest("[data-action='remove']")) {
-                event.preventDefault();
                 void _removeQqBotAccountRow(index);
                 return;
             }
-            if (event.target.closest(".qq-bot-row-switch")) {
-                // 按钮在 summary 里：不拦默认行为会顺带折叠/展开这张卡。
-                event.preventDefault();
-                void _toggleQqBotRowEnabled(index);
-            }
+            if (event.target.closest(".qq-bot-row-switch")) void _toggleQqBotRowEnabled(index);
         });
     }
-    window.addEventListener("beforeunload", (event) => {
-        if (!QQ_BOT_STATE.dirty) return;
-        event.preventDefault();
-        event.returnValue = "";
-    });
 }

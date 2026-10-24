@@ -29,7 +29,7 @@ def test_org_graph_app_blocks_role_chain_save_until_required_scopes_are_filled()
         const fs = require("fs");
         const vm = require("vm");
 
-        const APP_CODE = ["g3ku/web/frontend/resources/store.js", "g3ku/web/frontend/models/role-store.js", "g3ku/web/frontend/models/group-view.js", "g3ku/web/frontend/models/dialog-view.js", "g3ku/web/frontend/models/actions.js", "g3ku/web/frontend/org_graph_app.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
+        const APP_CODE = ["g3ku/web/frontend/resources/store.js", "g3ku/web/frontend/models/role-store.js", "g3ku/web/frontend/models/role-view.js", "g3ku/web/frontend/models/actions.js", "g3ku/web/frontend/org_graph_app.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
 
         class StubElement {
           constructor(id = "") {
@@ -151,13 +151,6 @@ def test_org_graph_app_blocks_role_chain_save_until_required_scopes_are_filled()
             },
           },
           icons: () => {},
-          // 模型页视图入口由 org_graph_llm.js 提供；该用例只验证保存拦截逻辑。
-          loadModels: async () => {},
-          renderModelCatalog: () => {},
-          renderModelRoleEditors: () => {},
-          renderModelList: () => {},
-          renderModelDetail: () => {},
-          renderModelHint: () => {},
           renderPendingCeoUploads: () => {},
           syncCeoAttachButton: () => {},
           syncCeoSessionActions: () => {},

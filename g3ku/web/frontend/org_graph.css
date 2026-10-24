@@ -897,6 +897,38 @@ textarea {
     pointer-events: none;
 }
 
+.execution-tree-toolbar {
+    display: flex;
+    align-items: center;
+    pointer-events: auto;
+}
+
+.execution-tree-filter {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 34px;
+    padding: 0 12px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 88%, transparent);
+    border-radius: var(--radius-full);
+    background: color-mix(in srgb, var(--bg-panel) 94%, var(--bg-app) 6%);
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+    white-space: nowrap;
+    cursor: pointer;
+    user-select: none;
+    box-shadow: 0 16px 32px -26px color-mix(in srgb, var(--text-primary) 40%, transparent);
+}
+
+.execution-tree-filter:hover {
+    color: var(--text-primary);
+    border-color: color-mix(in srgb, var(--brand-primary) 42%, var(--border-color));
+}
+
+.execution-tree-filter {
+    cursor: pointer;
+}
+
 /* 节点行上"展开已结束子节点"的入口：默认过滤把子节点藏起来时必须留下这个入口。 */
 .execution-tree-expand {
     display: inline-flex;
@@ -6785,7 +6817,7 @@ textarea {
 
 .llm-page-layout {
     display: grid;
-    grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
+    grid-template-columns: minmax(220px, 260px) minmax(240px, 300px) minmax(0, 1fr);
     gap: var(--space-6);
     padding: var(--ui-space-5) var(--ui-space-3) var(--ui-space-6);
     min-height: calc(100vh - 120px);
@@ -6901,7 +6933,16 @@ textarea {
     border-color: color-mix(in srgb, var(--danger, #d64545) 55%, var(--border-color));
 }
 
-@media (max-width: 960px) {
+@media (max-width: 1440px) {
+    .llm-page-layout {
+        grid-template-columns: minmax(220px, 260px) minmax(240px, 300px);
+    }
+
+    .llm-routes-panel {
+        grid-column: 1 / -1;
+    }
+}
+
 .llm-editor-panel {
     position: fixed;
     top: 50%;
@@ -7496,15 +7537,9 @@ textarea {
 
 .model-routing-grid {
     display: grid;
-    /* 角色卡 2×2；窄屏单列，避免四张窄卡并排。 */
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    /* 四条角色链固定一排四张，不换行；宽度不足时靠模型页让出左侧列宽解决。 */
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: var(--space-6);
-}
-
-@media (max-width: 1200px) {
-    .model-routing-grid {
-        grid-template-columns: minmax(0, 1fr);
-    }
 }
 
 .model-chain-card {
@@ -7519,16 +7554,18 @@ textarea {
     box-shadow: var(--shadow-sm);
 }
 
-.model-chain-card .card-header {
+.model-role-section {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-3);
+    flex-direction: column;
+    gap: var(--space-2);
 }
 
-.model-chain-card .card-header h3 {
-    margin: 0;
-    min-width: 0;
+.model-role-section-title {
+    font-size: 0.82rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    color: var(--text-muted);
+    text-transform: uppercase;
 }
 
 .model-chain-list,
@@ -7596,6 +7633,38 @@ textarea {
     pointer-events: none;
 }
 
+.model-chain-handle {
+    width: 40px;
+    min-height: 100%;
+    border-radius: 12px;
+    border: 1px dashed color-mix(in srgb, var(--brand-primary) 28%, var(--border-color));
+    background-color: var(--bg-app);
+    color: var(--brand-primary);
+    cursor: grab;
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease, background-color 0.16s ease;
+}
+
+.model-chain-handle:hover {
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-sm);
+    border-color: color-mix(in srgb, var(--brand-primary) 44%, var(--border-color));
+}
+
+.model-chain-handle:active {
+    cursor: grabbing;
+}
+
+.model-chain-grip {
+    font-size: 1.15rem;
+    line-height: 1;
+    letter-spacing: -1px;
+    filter: drop-shadow(0 1px 0 rgba(255, 255, 255, 0.18));
+}
+
 .model-chain-main,
 .model-available-main {
     flex: 1;
@@ -7607,59 +7676,8 @@ textarea {
     text-align: left;
 }
 
-/* 模型页紧凑条目：序号即链序，副标题统一 provider_model，归属在右侧。 */
-.model-chain-slide,
-.model-available-item {
-    padding: var(--space-2) var(--space-3);
-    align-items: center;
-    gap: var(--space-2);
-    border-radius: 12px;
-}
-
-.model-chain-index {
-    flex: 0 0 auto;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 22px;
-    height: 22px;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--brand-primary) 12%, transparent);
-    color: var(--brand-primary);
-    font-size: 12px;
-    font-weight: 600;
-    line-height: 1;
-}
-
-.model-available-meta {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-2);
-    width: 100%;
-    min-width: 0;
-}
-
-.model-attribution {
-    flex: 1 1 auto;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--text-secondary);
-    font-size: 12px;
-}
-
-.model-attribution.is-empty {
-    opacity: 0.6;
-}
-
-.model-chain-main .resource-list-subtitle,
-.model-available-main .resource-list-subtitle {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 100%;
+.model-available-item.is-in-chain {
+    opacity: 0.78;
 }
 
 .model-detail-panel .resource-detail-shell {
@@ -8711,6 +8729,13 @@ textarea {
     align-items: flex-start;
 }
 
+.model-chain-card-meta {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 10px;
+}
+
 .model-role-iterations-field {
     display: flex;
     align-items: center;
@@ -8774,6 +8799,33 @@ textarea {
     gap: 2px;
     align-items: center;
     min-width: 148px;
+}
+
+.model-role-limit-fixed-track {
+    grid-column: 2 / 3;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 148px;
+}
+
+.model-role-limit-fixed-pill {
+    width: 100%;
+    background: var(--bg-panel);
+    color: var(--text-primary);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.model-role-limits-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-3) var(--space-6);
+    width: 100%;
+    margin-top: var(--space-3);
+    padding: var(--space-2) var(--space-4) var(--space-3);
+    border: 1px dashed color-mix(in srgb, var(--border-color) 72%, transparent);
+    border-radius: 14px;
+    background-color: color-mix(in srgb, var(--bg-panel) 72%, transparent);
 }
 
 .model-role-limit-group {
@@ -8960,6 +9012,13 @@ textarea {
 
 .model-shared-list > .empty-state {
     grid-column: 1 / -1;
+}
+
+.model-shared-item-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--space-3);
 }
 
 .model-available-item {
@@ -12317,6 +12376,11 @@ textarea {
     min-height: 0;
 }
 
+.model-role-section {
+    flex: 1;
+    min-height: 0;
+}
+
 .model-chain-list {
     min-height: 0;
     max-height: min(42dvh, 420px);
@@ -12385,6 +12449,23 @@ textarea {
 .model-chain-remove svg {
     width: 14px;
     height: 14px;
+}
+
+.model-iterations-toolbar-input {
+    width: 76px;
+    min-height: 34px;
+    padding: 0 10px;
+    border-radius: 10px;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-surface-inner);
+    color: var(--text-primary);
+    font: inherit;
+    text-align: center;
+}
+
+.model-iterations-toolbar-input.is-invalid {
+    border-color: color-mix(in srgb, #ef4444 56%, var(--border-strong));
+    box-shadow: 0 0 0 3px color-mix(in srgb, #ef4444 14%, transparent);
 }
 
 @media (max-width: 1200px) {
@@ -13588,110 +13669,6 @@ textarea {
     align-items: center;
     gap: var(--space-2);
     flex: 0 0 auto;
-}
-
-/* QQ 账号：默认一行只读摘要，点开才进入编辑；配置态只由行开关表达。 */
-.qq-bot-account-row {
-    padding: 0;
-}
-
-.qq-bot-account-row > summary {
-    list-style: none;
-}
-
-.qq-bot-account-head {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 10px 12px;
-    cursor: pointer;
-    list-style: none;
-}
-
-.qq-bot-account-head::-webkit-details-marker {
-    display: none;
-}
-
-.qq-bot-account-row[open] > summary {
-    border-bottom: 1px solid var(--border-color);
-}
-
-.qq-bot-account-caret {
-    color: var(--text-muted);
-    transition: transform 0.16s ease;
-}
-
-.qq-bot-account-row[open] .qq-bot-account-caret {
-    transform: rotate(90deg);
-}
-
-.qq-bot-account-title {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-weight: 600;
-}
-
-.qq-bot-account-meta {
-    color: var(--text-secondary);
-    font-size: 12px;
-}
-
-.qq-bot-account-head .qq-bot-account-status,
-.qq-bot-account-head .qq-bot-row-switch:first-of-type {
-    margin-left: auto;
-}
-
-.qq-bot-account-head .qq-bot-account-status + .qq-bot-row-switch {
-    margin-left: 0;
-}
-
-.qq-bot-account-fields {
-    margin: 0;
-    padding: 12px;
-}
-
-/* 面板头一行：计数摘要 + 总开关 */
-.qq-bot-panel-head {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-}
-
-.qq-bot-status {
-    color: var(--text-secondary);
-    font-size: 12px;
-}
-
-.toolbar-btn.is-dirty {
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand-primary) 20%, transparent);
-}
-
-/* 桥接 token 按来源分组：QQ 账号一组，其余桥接应用一组。 */
-.external-token-group {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-}
-
-.external-token-group + .external-token-group {
-    margin-top: var(--space-4);
-}
-
-.external-token-group-title {
-    margin: 0;
-    color: var(--text-muted);
-    font-size: 12px;
-    font-weight: 700;
-    letter-spacing: 0.03em;
-    text-transform: uppercase;
-}
-
-.external-token-group-rows {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
 }
 
 .qq-bot-status {
@@ -15305,7 +15282,7 @@ textarea {
     transform: none;
 }
 
-/* 窄屏单列；≥1024px 是「资源库 / 角色链」两栏主从。 */
+/* 窄屏单列；≥1024px 是「模型组 / 模型目录 / 角色链」三列。 */
 .llm-page-layout {
     grid-template-columns: minmax(0, 1fr);
     gap: var(--ui-space-4);
@@ -15313,36 +15290,9 @@ textarea {
 
 @media (min-width: 1024px) {
     .llm-page-layout.llm-page-layout {
-        grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
+        grid-template-columns: 240px 280px minmax(0, 1fr);
         gap: var(--ui-space-5);
     }
-}
-
-/* 资源库：模型列表在上（主，吃剩余高度），负载均衡组在下（按内容排高）。 */
-.llm-library-panel {
-    display: flex;
-    flex-direction: column;
-    gap: var(--ui-space-4);
-    min-width: 0;
-    min-height: 0;
-}
-
-.llm-library-panel .llm-bindings-panel {
-    display: flex;
-    flex-direction: column;
-    flex: 1 1 auto;
-    min-height: 0;
-}
-
-.llm-library-panel .llm-groups-panel {
-    display: flex;
-    flex-direction: column;
-    flex: 0 0 auto;
-    min-height: 0;
-}
-
-.llm-library-panel .model-group-list {
-    max-height: 240px;
 }
 
 /* 左侧目录与模型列表取消面板壳：只有列表本身是可见的面。 */
@@ -16856,128 +16806,4 @@ textarea {
 #view-external .qq-bot-account-row .external-token-actions {
     padding-top: 0;
     border-top: 0;
-}
-
-/* ===== 任务卡片顶行 / 大厅筛选 / 详情头部（2026-10-24） ===== */
-
-/* 卡片顶行：状态胶囊、任务 ID 胶囊、更多按钮同高；未进多选态时勾选位不占位，
-   状态贴卡片左缘而不是被空槽挤到 ID 旁边。 */
-.pc-topbar .status-badge {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    height: 30px;
-    min-height: 30px;
-    padding: 0 10px;
-    flex: 0 0 auto;
-}
-
-.pc-topbar .pc-task-id-chip {
-    height: 30px;
-    min-height: 30px;
-    padding: 0 10px;
-    font: inherit;
-    text-align: left;
-    cursor: pointer;
-}
-
-.pc-topbar .pc-task-id-chip:hover {
-    border-color: color-mix(in srgb, var(--brand-primary) 34%, var(--border-color));
-    background: color-mix(in srgb, var(--brand-primary) 8%, var(--bg-panel));
-}
-
-.pc-topbar .pc-task-id-chip:focus-visible {
-    outline: 2px solid color-mix(in srgb, var(--brand-primary) 60%, transparent);
-    outline-offset: 2px;
-}
-
-/* 复制入口并进 ID 胶囊：复制图标常驻，整颗胶囊可点。 */
-.pc-task-id-copy {
-    width: 14px;
-    height: 14px;
-    flex: 0 0 auto;
-    color: var(--text-muted);
-}
-
-.pc-task-id-chip:hover .pc-task-id-copy {
-    color: var(--brand-primary);
-}
-
-.pc-topbar .pc-card-menu-trigger.pc-card-menu-trigger {
-    width: 30px;
-    min-width: 30px;
-    height: 30px;
-    min-height: 30px;
-}
-
-.pc-topbar .project-select-toggle:not(.is-visible) {
-    display: none;
-}
-
-/* 排序 / 树深度：标签居中，去掉右侧箭头（当前值本来就不在按钮上展示）。 */
-.task-depth-setting-main.task-depth-setting-main {
-    justify-content: center;
-    padding: 0 var(--ui-space-3);
-}
-
-.task-depth-setting .resource-select-icon,
-.task-sort-setting .resource-select-icon {
-    display: none;
-}
-
-/* 树深度“自定义”：这一行本身就是输入位。 */
-.resource-select-option--custom {
-    cursor: text;
-}
-
-.resource-select-option--custom .resource-select-option-label {
-    flex: 0 0 auto;
-}
-
-.task-depth-inline-input {
-    flex: 1 1 auto;
-    min-width: 56px;
-    height: 30px;
-    padding: 0 8px;
-    border: 1px solid var(--ui-border);
-    border-radius: 8px;
-    background: var(--ui-bg-surface);
-    color: var(--ui-text);
-    font: inherit;
-    font-weight: 600;
-}
-
-.task-depth-inline-input:focus-visible {
-    outline: 0;
-    border-color: var(--ui-brand);
-}
-
-.task-depth-inline-apply {
-    flex: 0 0 auto;
-    height: 30px;
-}
-
-/* 详情头部：提示词收紧到一行可读宽度，“展开全部”紧贴活跃节点，错误日志留在最右。 */
-.task-detail-header .task-prompt-disclosure {
-    flex: 1 1 auto;
-    max-width: 460px;
-}
-
-.task-detail-header .header-actions {
-    margin-left: auto;
-}
-
-.task-detail-header .task-detail-toggle {
-    cursor: pointer;
-    user-select: none;
-}
-
-.task-detail-header .task-detail-toggle .ui-checkbox-box {
-    width: 16px;
-    height: 16px;
-}
-
-.task-detail-header .task-detail-toggle:hover {
-    border-color: var(--ui-border-strong);
-    background: var(--ui-neutral-soft);
 }

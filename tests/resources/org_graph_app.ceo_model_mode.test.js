@@ -161,12 +161,6 @@ function loadApp(apiClientOverrides = {}) {
         addEventListener() {},
         removeEventListener() {},
         ApiClient,
-        // 模型页视图入口由 org_graph_llm.js 提供；app-only 用例只测逻辑，按名字补空实现。
-        renderModelCatalog: () => {},
-        renderModelRoleEditors: () => {},
-        renderModelList: () => {},
-        renderModelDetail: () => {},
-        renderModelHint: () => {},
     };
     context.window = context;
     vm.createContext(context);
@@ -175,7 +169,6 @@ function loadApp(apiClientOverrides = {}) {
         this.__testExports = {
             S,
             U,
-            applyModelCatalog,
             syncCeoModelModeControl,
             syncCeoModelModePanelUsage,
             resetCeoModelSelection,
@@ -217,11 +210,6 @@ function loadApp(apiClientOverrides = {}) {
     );
     const exported = context.__testExports;
     exported.calls = calls;
-    // loadModels 的实现在 org_graph_llm.js；app-only 用例按旧行为补一个目录重读垫片。
-    context.loadModels = async () => {
-        const data = await ApiClient.getOrgGraphModels();
-        exported.applyModelCatalog(data, { preserveRoleDrafts: !!exported.S.modelCatalog.roleEditing });
-    };
     return exported;
 }
 
