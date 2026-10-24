@@ -4,6 +4,9 @@
 `kind=''`，因为它们绕开 `deliver_node_message` 直写通知表。这里跑一条最小的
 「执行 → 交接 → 打回 → 重交 → 通过 → 终局」流程，然后逐行断言：
 **任何一行通知都不允许缺类型**——直写通知表的老路径不得再回来。
+
+pass 裁决不投递：收件人随即终局，投递只会留下一封永远读不到的未读。通过绑定
+改由握手 `latest_execution_submission_id` 保存，断言一并盯住。
 """
 
 from __future__ import annotations
@@ -145,7 +148,7 @@ class TestEveryNotificationIsTyped:
                 result=_verdict('缺少第 2 节', verdict='reject', submission_id='submission:1'),
             )
 
-            # 重交 → 再一张交接单；通过 → 第二条 acceptance_verdict。
+            # 重交 → 再一张交接单；通过 → 不投递裁决，绑定落进握手。
             await service.node_runner._maybe_start_acceptance_handshake(
                 task=task,
                 node=service.store.get_node(CHILD),
@@ -156,6 +159,15 @@ class TestEveryNotificationIsTyped:
                 acceptance=service.store.get_node(ACCEPTANCE),
                 result=_verdict('验收通过', verdict='pass', submission_id='submission:2'),
             )
+            pass_rows = [
+                item
+                for item in service.store.list_task_node_notifications(TASK, CHILD)
+                if item.kind == 'acceptance_verdict' and item.verdict == 'pass'
+            ]
+            assert pass_rows == [], 'pass 不得回流被验收节点'
+            handshake = service.store.get_node(CHILD).metadata['acceptance_handshake']
+            assert handshake['state'] == 'accepted'
+            assert handshake['latest_execution_submission_id'] == 'submission:2'
 
             # 执行节点终局 → child_final（系统消息，路径不变）。
             service.node_runner._mark_finished(
@@ -178,8 +190,8 @@ class TestEveryNotificationIsTyped:
             assert {'parent_notice', 'acceptance_verdict', 'child_final'} <= kinds
 
             verdicts = [item for item in rows if item.kind == 'acceptance_verdict']
-            assert {item.verdict for item in verdicts} == {'reject', 'pass'}
-            assert {item.submission_id for item in verdicts} == {'submission:1', 'submission:2'}
+            assert {item.verdict for item in verdicts} == {'reject'}
+            assert {item.submission_id for item in verdicts} == {'submission:1'}
 
             # 直写通知表的老路径必须已删除（否则无类型行还会回来）。
             assert not hasattr(service.node_runner, '_persist_node_notification_direct')

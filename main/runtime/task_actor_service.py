@@ -22,6 +22,7 @@ from main.runtime.acceptance_handshake import (
     normalize_acceptance_handshake,
 )
 from main.runtime.node_runner import SKIPPED_CHECK_RESULT
+from main.runtime.node_wake import WAKE_ON_ALL_CHILDREN, wait_inputs, wake_ready
 from main.runtime.wait_graph import build_wait_nodes, find_wait_cycles
 from main.types import KIND_ACCEPTANCE
 
@@ -1093,14 +1094,52 @@ class TaskActorService:
             return ''
         return str((frame or {}).get('phase') or '') if isinstance(frame, dict) else ''
 
-    def _node_has_unread(self, task_id: str, node_id: str) -> bool:
+    def _unread_rows(self, task_id: str, node_id: str) -> list[Any]:
         try:
-            return any(
-                str(item.status or '').strip() == 'delivered'
+            return [
+                item
                 for item in list(self._store.list_task_node_notifications(task_id, node_id) or [])
-            )
+                if str(item.status or '').strip() == 'delivered'
+            ]
         except Exception:
-            return False
+            return []
+
+    def _node_has_unread(self, task_id: str, node_id: str) -> bool:
+        return bool(self._unread_rows(task_id, node_id))
+
+    def _wake_policy_allows_dispatch(
+        self,
+        *,
+        task_id: str,
+        node: Any,
+        unread_rows: list[Any],
+        records: list[Any],
+    ) -> bool:
+        """停靠中的节点按自己的 `wake_on` 复派，与投递唤醒共用同一判据。
+
+        可派发扫描原先把「信箱有未读」当作唯一条件，于是 `wake_on=all_children`
+        的父节点在第一个子节点回执到达时就被复派——实盘 `task:eb3f3a7753f7`：
+        子节点 A 于 10:38:38 回执，根节点 10:38:43 就起了一轮，而 B 还在跑。
+        高优先级未读仍无条件放行（P6 的必唤醒集合）。
+        """
+        metadata = node.metadata if isinstance(getattr(node, 'metadata', None), dict) else {}
+        policy = str(metadata.get('node_wait_wake_on') or '').strip() or 'any'
+        if policy != WAKE_ON_ALL_CHILDREN:
+            return True
+        children, finals = wait_inputs(
+            children=records,
+            notifications=list(self._store.list_task_node_notifications(task_id, node.node_id) or []),
+            parent_node_id=str(getattr(node, 'node_id', '') or '').strip(),
+        )
+        return wake_ready(
+            wake_on=policy,
+            unread_count=len(unread_rows),
+            has_high_priority=any(
+                str(getattr(item, 'priority', '') or '').strip() == 'high' for item in unread_rows
+            ),
+            children=children,
+            unread_final_sources=finals,
+        )
 
     async def _dispatch_runnable_nodes(self, task_id: str, dispatcher: 'TaskNodeDispatcher') -> bool:
         """把"现在就该跑、却没人跑"的节点交给调度器。
@@ -1109,6 +1148,8 @@ class TaskActorService:
 
         * 执行节点：信箱有未读，或**还没有任何运行帧**（刚创建、第一次起跑）。
           有帧且无未读 = 停靠中（等待消息/等验收），再派发只会让它空转一回合。
+          停靠中的节点还必须过 `wake_on` 判据：`all_children` 不能靠一封子节点
+          回执就复派。
         * 验收节点：握手处于待裁决且登记了可解析的提交引用；或有未读消息。
           被验节点已终态时不派发（没有可检验的对象；T15 的联动由 P4 收口）。
 
@@ -1119,7 +1160,8 @@ class TaskActorService:
             return False
         root_node_id = str(getattr(task, 'root_node_id', '') or '').strip()
         dispatched = False
-        for node in list(self._store.list_nodes(task_id) or []):
+        records = list(self._store.list_nodes(task_id) or [])
+        for node in records:
             node_id = str(getattr(node, 'node_id', '') or '').strip()
             if not node_id:
                 continue
@@ -1129,12 +1171,17 @@ class TaskActorService:
                 continue
             if dispatcher.node_is_being_driven(node_id) is True:
                 continue
-            unread = self._node_has_unread(task_id, node_id)
+            unread_rows = self._unread_rows(task_id, node_id)
+            unread = bool(unread_rows)
             if node_id == root_node_id:
                 # 根的第一回合由 run_task 显式驱动；这里只处理"根停靠着、信箱里有未读"
                 # 的复活（投递时唤醒可能已失败，或消息是在进程重启前落箱的）。没有
                 # 未读就不能重派：那会让一个等待中的根空转一回合。
                 if not unread:
+                    continue
+                if not self._wake_policy_allows_dispatch(
+                    task_id=task_id, node=node, unread_rows=unread_rows, records=records
+                ):
                     continue
                 dispatcher.schedule_node(node_id)
                 dispatched = True
@@ -1172,6 +1219,10 @@ class TaskActorService:
                     frame = None
                 if frame is not None:
                     continue
+            if unread and not self._wake_policy_allows_dispatch(
+                task_id=task_id, node=node, unread_rows=unread_rows, records=records
+            ):
+                continue
             dispatcher.schedule_node(node_id)
             dispatched = True
         return dispatched

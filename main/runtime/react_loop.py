@@ -2556,6 +2556,13 @@ class ReActToolLoop:
 
         只比对运行时会等价收敛的那四个面，其余差异（`success` 清空 remaining_work、
         证据自动回挂等策略性改写）不算补齐。
+
+        判据是"模型真给过、运行时收敛了"：`submit_final_result` 的 schema 只暴露
+        summary/answer/evidence/remaining_work（验收节点只有 verdict/feedback），
+        status/delivery_status 由运行时无条件推导。把它们从空补成值再记一笔补齐，
+        等于每次提交都记一笔——实盘 audit 125/125 全是 `delivery_from_status`，
+        基线因此失去意义。只有旧形状（崩溃恢复重放的历史调用）真的带了 `status`
+        时，由它推导 delivery_status 才算一次等价补齐。
         """
         tags: list[str] = []
         if not isinstance(raw_payload, dict) or not isinstance(normalized_payload, dict):
@@ -2564,7 +2571,7 @@ class ReActToolLoop:
             raw_value = str(raw_payload.get(field) or '').strip()
             norm_value = str(normalized_payload.get(field) or '').strip()
             if not raw_value and norm_value:
-                if field == 'delivery_status':
+                if field == 'delivery_status' and 'status' in raw_payload:
                     tags.append('delivery_from_status')
                 continue
             if raw_value and norm_value and raw_value != norm_value:

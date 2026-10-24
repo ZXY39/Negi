@@ -191,6 +191,32 @@ class TestToolReturnShape:
         assert getattr(tool, 'exempt_universal_timeout', False) is False
 
 
+def _mail(
+    service: MainRuntimeService,
+    *,
+    node_id: str,
+    source_node_id: str,
+    kind: str = 'child_final',
+    priority: str = 'normal',
+    status: str = 'delivered',
+) -> None:
+    service.store.upsert_task_node_notification(
+        {
+            'notification_id': f'notif:{node_id}:{source_node_id}:{kind}',
+            'task_id': TASK,
+            'node_id': node_id,
+            'epoch_id': '',
+            'source_node_id': source_node_id,
+            'message': f'{source_node_id} done',
+            'status': status,
+            'created_at': STAMP,
+            'delivered_at': STAMP,
+            'kind': kind,
+            'priority': priority,
+        }
+    )
+
+
 class _FakeDispatcher:
     def __init__(self) -> None:
         self.scheduled: list[str] = []
@@ -250,6 +276,61 @@ class TestRunnableScan:
         dispatcher = _FakeDispatcher()
         assert await service.task_actor_service._dispatch_runnable_nodes(TASK, dispatcher) is True
         assert dispatcher.scheduled == [CHILD_B]
+
+    @pytest.mark.asyncio
+    async def test_all_children_root_is_not_revived_by_the_first_child(self, tmp_path):
+        # 实盘 task:eb3f3a7753f7：A 回执 10:38:38，根 10:38:43 就起了一轮，B 还在跑。
+        service = _service(tmp_path)
+        _seed(service)
+        for node_id in (ROOT, CHILD_A, CHILD_B):
+            service.store.upsert_task_runtime_frame(
+                TaskProjectionRuntimeFrameRecord(task_id=TASK, node_id=node_id, phase='waiting_explicit')
+            )
+        service.store.update_node(
+            ROOT,
+            lambda record: record.model_copy(
+                update={'metadata': {**dict(record.metadata or {}), 'node_wait_wake_on': 'all_children'}}
+            ),
+        )
+        service.store.update_node(CHILD_A, lambda record: record.model_copy(update={'status': 'success'}))
+        _mail(service, node_id=ROOT, source_node_id=CHILD_A)
+        dispatcher = _FakeDispatcher()
+
+        assert await service.task_actor_service._dispatch_runnable_nodes(TASK, dispatcher) is False
+        assert dispatcher.scheduled == []
+
+        service.store.update_node(CHILD_B, lambda record: record.model_copy(update={'status': 'success'}))
+        _mail(service, node_id=ROOT, source_node_id=CHILD_B)
+
+        assert await service.task_actor_service._dispatch_runnable_nodes(TASK, dispatcher) is True
+        assert dispatcher.scheduled == [ROOT]
+
+    @pytest.mark.asyncio
+    async def test_high_priority_mail_bypasses_all_children(self, tmp_path):
+        service = _service(tmp_path)
+        _seed(service)
+        for node_id in (ROOT, CHILD_A, CHILD_B):
+            service.store.upsert_task_runtime_frame(
+                TaskProjectionRuntimeFrameRecord(task_id=TASK, node_id=node_id, phase='waiting_explicit')
+            )
+        service.store.update_node(
+            ROOT,
+            lambda record: record.model_copy(
+                update={'metadata': {**dict(record.metadata or {}), 'node_wait_wake_on': 'all_children'}}
+            ),
+        )
+        service.store.update_node(CHILD_A, lambda record: record.model_copy(update={'status': 'success'}))
+        _mail(
+            service,
+            node_id=ROOT,
+            source_node_id=CHILD_A,
+            kind='child_abnormal_pause',
+            priority='high',
+        )
+        dispatcher = _FakeDispatcher()
+
+        assert await service.task_actor_service._dispatch_runnable_nodes(TASK, dispatcher) is True
+        assert dispatcher.scheduled == [ROOT]
 
     @pytest.mark.asyncio
     async def test_running_child_is_left_alone(self, tmp_path):

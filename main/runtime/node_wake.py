@@ -127,6 +127,78 @@ def wait_satisfied(
     return all_children_satisfied(children, unread_final_sources=unread_final_sources)
 
 
+def wake_ready(
+    *,
+    wake_on: str,
+    unread_count: int,
+    has_high_priority: bool = False,
+    children: Iterable[Mapping[str, Any]] = (),
+    unread_final_sources: Iterable[str] = (),
+) -> bool:
+    """The one judgement every revival path must share.
+
+    Two callers used to decide independently whether a parked node may run:
+    delivery-time wake (``runtime_service._delivery_wakes_target``) and the
+    dispatch-time runnable scan (``task_actor_service._dispatch_runnable_nodes``).
+    The scan only asked "is there unread mail", so a parent parked on
+    ``all_children`` was re-dispatched the moment its first child reported while
+    the second was still running (live ``task:eb3f3a7753f7``: child A reported
+    at 10:38:38, the root ran a turn at 10:38:43, child B finished at 10:45:36).
+
+    ``has_high_priority`` is the P6 bypass: mail the recipient must act on
+    (user / front door / abnormal pause / reject_no_progress) wakes regardless
+    of the node's own policy. Everything else follows ``wake_on``.
+    """
+    if has_high_priority:
+        return True
+    return wait_satisfied(
+        wake_on=wake_on,
+        unread_count=unread_count,
+        children=children,
+        unread_final_sources=unread_final_sources,
+    )
+
+
+def wait_inputs(
+    *,
+    children: Iterable[Any],
+    notifications: Iterable[Any],
+    parent_node_id: str = '',
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Build the two ``wait_satisfied`` inputs from store rows.
+
+    ``children`` are node records; ``notifications`` are mailbox rows. A
+    child_final counts as "reported" once it is in the box — delivered or
+    already consumed — because consuming the message is exactly what a waking
+    turn does, and a re-park must not then treat the same child as unreported.
+    """
+    wanted_parent = str(parent_node_id or '').strip()
+    child_rows: list[dict[str, Any]] = []
+    for child in list(children or []):
+        child_node_id = str(getattr(child, 'node_id', '') or '').strip()
+        if not child_node_id:
+            continue
+        if wanted_parent and str(getattr(child, 'parent_node_id', '') or '').strip() != wanted_parent:
+            continue
+        child_rows.append(
+            {
+                'node_id': child_node_id,
+                'status': str(getattr(child, 'status', '') or ''),
+                'node_kind': str(getattr(child, 'node_kind', '') or ''),
+            }
+        )
+    final_sources: list[str] = []
+    for item in list(notifications or []):
+        if str(getattr(item, 'kind', '') or '').strip() != 'child_final':
+            continue
+        if str(getattr(item, 'status', '') or '').strip() not in {'delivered', 'consumed'}:
+            continue
+        source = str(getattr(item, 'source_node_id', '') or '').strip()
+        if source:
+            final_sources.append(source)
+    return child_rows, final_sources
+
+
 @dataclass(frozen=True)
 class WakeDeps:
     """Everything :func:`wake_parked_node` needs, injected for testability."""

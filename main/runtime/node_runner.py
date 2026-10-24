@@ -1810,6 +1810,9 @@ class NodeRunner:
             latest_execution_result_summary=str(current.get('latest_execution_result_summary') or '').strip(),
             latest_rejection_feedback_ref='',
             latest_rejection_feedback_summary='',
+            # pass 不再投递裁决消息，提交绑定改由握手保存——否则"哪一份提交
+            # 被通过"只剩验收节点的载荷，执行节点一侧断链。
+            latest_execution_submission_id=str(result.submission_id or '').strip(),
         )
         if self._acceptance_updates_task_final_acceptance(task=task, execution=execution, acceptance=acceptance):
             self._set_task_final_acceptance_state(
@@ -1912,20 +1915,10 @@ class NodeRunner:
         except Exception as exc:  # 审计是旁路：记账失败绝不影响验收控制流
             logger.debug(f'acceptance evidence audit skipped: {acceptance.node_id}: {describe_exception(exc)}')
         if str(result.status or '').strip() == STATUS_SUCCESS:
-            # 三档裁决都发消息（设计 §3.2）：pass 也要留一条带 submission_id 的
-            # 绑定记录，否则"这一份提交被通过"只存在于握手字段里，取证时对不上。
-            # `wake=False`：被验节点紧接着就被收尾成成功，叫醒它只会多跑一回合。
-            await self._deliver_acceptance_verdict(
-                task=task,
-                acceptance=acceptance,
-                execution=execution,
-                result=result,
-                verdict='pass',
-                message=node_message_body(
-                    str(result.summary or result.answer or '').strip() or '验收通过',
-                ),
-                wake=False,
-            )
+            # pass 不回流被验收节点：它随这次裁定立即终局，投递只会在一个终态
+            # 节点上留下永远读不到的未读消息（还会把树上的未读徽标长期挂住）。
+            # "这一份提交被通过"的绑定由握手 latest_execution_submission_id 与
+            # 验收节点自己的裁决载荷保存，取证链不断。
             self._finalize_acceptance_pass(task=task, execution=execution, acceptance=acceptance, result=result)
             return NodeFinalResult(
                 status=STATUS_SUCCESS,
@@ -2056,14 +2049,17 @@ class NodeRunner:
         message: str,
         wake: bool,
     ) -> dict[str, Any]:
-        """验收裁决 → 被验节点信箱（`acceptance_verdict`，三档都发）。
+        """驳回裁决 → 被验节点信箱（`acceptance_verdict`，只发 reject 两档）。
+
+        pass 不投递：收件人随即终局，消息只会变成一封永远读不到的未读；
+        通过绑定由握手 `latest_execution_submission_id` 保存。
 
         `submission_id` 把裁决绑定到"这一份提交"（迟到裁决规则的唯一判据）。
         载荷里没带时退回握手上登记的提交 id——旧库里的裁决载荷没有这个字段，
         丢绑定会让迟到裁决作用到新提交上。
 
-        `wake` 由档位决定：reject 要唤醒被验节点继续干（T6）；pass 的收件人即将
-        终局、reject_no_progress 的收件人刚被暂停，都不该叫醒。
+        `wake` 由档位决定：reject 要唤醒被验节点继续干（T6）；reject_no_progress
+        的收件人刚被暂停，不该叫醒。
         """
         if execution is None:
             return {'status': 'skipped', 'reason': 'no_execution_node'}

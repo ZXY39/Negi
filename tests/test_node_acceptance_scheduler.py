@@ -161,6 +161,8 @@ class TestVerdictDrain:
                             evidence=[],
                             remaining_work=[],
                             blocking_reason='',
+                            verdict='pass',
+                            submission_id='submission:pass',
                         ).model_dump(mode='json'),
                     },
                 }
@@ -179,12 +181,10 @@ class TestVerdictDrain:
         assert finals, 'child_final must be delivered to the parent'
         assert finals[0]['target_node_id'] == ROOT
         assert finals[0]['source_node_id'] == CHILD
-        # pass 也留一条带绑定信息的裁决消息（发回被验节点，不唤醒）。
+        # pass 不回流：收件人随即终局，投递只会留下永远读不到的未读裁决。
         verdicts = [item for item in deliveries if item.get('system_kind') == 'acceptance_verdict']
-        assert verdicts and verdicts[0]['target_node_id'] == CHILD
-        assert verdicts[0]['verdict'] == 'pass'
-        assert 'submission_id' in verdicts[0]
-        assert verdicts[0]['wake'] is False
+        assert verdicts == []
+        assert handshake['latest_execution_submission_id'] == 'submission:pass'
         assert wakes == [ROOT]
 
     @pytest.mark.asyncio

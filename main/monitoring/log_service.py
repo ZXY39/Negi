@@ -787,17 +787,27 @@ class TaskLogService:
             entries = list(payload.get('entries') or [])
             if normalized_entry_index < 0 or normalized_entry_index >= len(entries) or not isinstance(entries[normalized_entry_index], dict):
                 raise ValueError('spawn entry missing during child bind')
-            entry = dict(entries[normalized_entry_index] or {})
-            entry['child_node_id'] = persisted_child.node_id
-            entries[normalized_entry_index] = entry
-            payload['entries'] = entries
-            operations[normalized_cache_key] = payload
-            next_parent_metadata = dict(parent.metadata or {})
-            next_parent_metadata['spawn_operations'] = operations
-            persisted_parent = self._store.update_node(
-                normalized_parent_node_id,
-                lambda record: record.model_copy(update={'metadata': next_parent_metadata, 'updated_at': now_iso()}),
-            )
+            def _bind_entry(record: NodeRecord) -> NodeRecord:
+                # 必须在写锁内重读 metadata：用进入函数时的 parent 快照整块覆盖，
+                # 会把这两次读写之间写入的其它键（例如 enter_wait 的
+                # node_wait_wake_on）静默抹掉，唤醒策略随即退化成「任意消息都醒」。
+                metadata = dict(record.metadata or {})
+                current_operations = dict(metadata.get('spawn_operations') or {})
+                current_payload = dict(current_operations.get(normalized_cache_key) or {})
+                current_entries = list(current_payload.get('entries') or [])
+                if (
+                    0 <= normalized_entry_index < len(current_entries)
+                    and isinstance(current_entries[normalized_entry_index], dict)
+                ):
+                    current_entry = dict(current_entries[normalized_entry_index] or {})
+                    current_entry['child_node_id'] = persisted_child.node_id
+                    current_entries[normalized_entry_index] = current_entry
+                    current_payload['entries'] = current_entries
+                    current_operations[normalized_cache_key] = current_payload
+                    metadata['spawn_operations'] = current_operations
+                return record.model_copy(update={'metadata': metadata, 'updated_at': now_iso()})
+
+            persisted_parent = self._store.update_node(normalized_parent_node_id, _bind_entry)
 
             self._sync_node_read_models_locked(persisted_child)
             if persisted_parent is not None:

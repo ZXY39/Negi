@@ -138,9 +138,10 @@ from main.runtime.node_turn_controller import NodeTurnController
 from main.runtime.node_wake import (
     WAKE_ON_ALL_CHILDREN,
     WakeDeps,
-    all_children_satisfied,
     node_park_state,
+    wait_inputs,
     wake_parked_node,
+    wake_ready,
 )
 from main.runtime.node_watchdog import NodeWatchdog
 from main.runtime.react_loop import ReActToolLoop
@@ -4423,23 +4424,17 @@ class MainRuntimeService:
         policy = str(metadata.get(self.NODE_WAIT_WAKE_ON_KEY) or '').strip()
         if policy != WAKE_ON_ALL_CHILDREN:
             return True
-        children = [
-            {
-                'node_id': str(child.node_id or ''),
-                'status': str(child.status or ''),
-                'node_kind': str(child.node_kind or ''),
-            }
-            for child in list(self.store.list_nodes(task_id) or [])
-            if str(getattr(child, 'parent_node_id', '') or '').strip() == node_id
-        ]
-        finals: list[str] = []
-        for item in list(self.store.list_task_node_notifications(task_id, node_id) or []):
-            if str(item.kind or '').strip() != 'child_final':
-                continue
-            if str(item.status or '').strip() not in {'delivered', 'consumed'}:
-                continue
-            finals.append(str(item.source_node_id or '').strip())
-        return all_children_satisfied(children, unread_final_sources=finals)
+        children, finals = wait_inputs(
+            children=list(self.store.list_nodes(task_id) or []),
+            notifications=list(self.store.list_task_node_notifications(task_id, node_id) or []),
+            parent_node_id=node_id,
+        )
+        return wake_ready(
+            wake_on=policy,
+            unread_count=1,
+            children=children,
+            unread_final_sources=finals,
+        )
 
     async def deliver_node_message(
         self,
