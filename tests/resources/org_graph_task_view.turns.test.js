@@ -92,7 +92,8 @@ test("turns group by progress text and keep the tools that follow", () => {
     assert.equal(steps[3].text, "纯文本进展");
     assert.equal(steps[4].traceKey, "turn:5");
     assert.match(steps[4].bodyHtml, /submit_final_result/);
-    assert.equal(steps[4].open, true);
+    // 末组带中途正文（「最终检查」）也默认收起：摘要一行，点击才展开全文。
+    assert.equal(steps[4].open, false);
     assert.equal(steps[2].open, false);
 });
 
@@ -126,7 +127,7 @@ test("turn text expands in place without a duplicate block or a status badge", (
     const css = fs.readFileSync(path.join(FRONTEND, "..", "org_graph.css"), "utf8");
     assert.match(
         css,
-        /\.task-trace-step--turn-text\[open\] \.interaction-step-title \{[^}]*max-height:\s*180px[^}]*overflow-y:\s*auto[^}]*background:\s*transparent/
+        /\.task-trace-step--turn-text\[open\] \.interaction-step-title \{[^}]*max-height:\s*calc\(16\.5 \* 1\.6em\)[^}]*overflow-y:\s*auto[^}]*background:\s*transparent/
     );
     assert.doesNotMatch(css, /\.task-trace-turn-text\s*\{/);
 });

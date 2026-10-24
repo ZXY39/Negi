@@ -3897,7 +3897,8 @@ textarea {
     overflow-wrap: anywhere;
     word-break: break-word;
     text-overflow: clip;
-    max-height: 180px;
+    /* 16.5 行视窗：max-height 而不是 height，短正文不预占空白。 */
+    max-height: calc(16.5 * 1.6em);
     overflow-y: auto;
     overscroll-behavior: contain;
     background: transparent;
@@ -17189,4 +17190,41 @@ textarea {
 .task-node-ref:focus-visible {
     outline: 2px solid color-mix(in srgb, var(--brand-primary) 68%, transparent);
     outline-offset: 2px;
+}
+
+/* 节点详情：消息列表 / 派生记录各自在 10.5 条处封顶，内部滚动；
+   max-height 不留预占位，条目不足 11 条时按内容自适应。 */
+#ad-messages,
+#ad-spawn-reviews {
+    max-height: calc(10.5 * 48px + 10 * var(--space-3));
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+/* 提交输出 / 验收结果：15 行视窗，右上角常驻复制按钮（滚动时浮在框上）。 */
+.task-output-shell {
+    position: relative;
+}
+
+.task-output-shell > .code-block {
+    max-height: calc(15 * 1.65em);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding-right: 46px;
+}
+
+.task-output-copy {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    width: 30px;
+    height: 30px;
+    background: color-mix(in srgb, var(--bg-panel) 88%, transparent);
+    border: 1px solid color-mix(in srgb, var(--border-color) 80%, transparent);
+}
+
+.task-output-copy:hover {
+    border-color: color-mix(in srgb, var(--brand-primary) 55%, var(--border-color));
+    background: color-mix(in srgb, var(--brand-primary) 10%, var(--bg-panel));
+    color: var(--brand-primary);
 }

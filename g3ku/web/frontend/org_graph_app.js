@@ -663,7 +663,9 @@ const U = {
     adNoticeSend: document.getElementById("ad-notice-send"),
     adSpawnReviews: document.getElementById("ad-spawn-reviews"),
     adOutput: document.getElementById("ad-output"),
+    adOutputCopy: document.getElementById("ad-output-copy"),
     adAcceptance: document.getElementById("ad-check"),
+    adAcceptanceCopy: document.getElementById("ad-check-copy"),
     adErrorHistory: document.getElementById("ad-error-history"),
     adErrorHistoryRefresh: document.getElementById("ad-error-history-refresh"),
     adFlowHeading: document.getElementById("ad-input")?.closest(".agent-detail-section")?.querySelector("h4"),
@@ -4989,9 +4991,13 @@ function renderCeoTurnsIntoTurn(turn, turns = [], { interruptedMarker = false } 
     descriptors.forEach((step, index) => {
         if (!step.textOnly) lastGroupIndex = index;
     });
+    // 末组带中途正文时默认收起（与节点详情一致）：摘要只留一行，点击展开全文；
+    // 无正文的末组（纯工具轮）仍保持原来的自动展开。
+    const autoOpenLast = lastGroupIndex >= 0
+        && !String(descriptors[lastGroupIndex]?.turnText || "").trim();
     turn.listEl.innerHTML = descriptors.map((step, index) => renderTraceStep({
         ...step,
-        open: index === lastGroupIndex,
+        open: index === lastGroupIndex ? autoOpenLast : false,
         extraClass: interruptedMarker && index === descriptors.length - 1 ? "ceo-turn-interrupted" : "",
     })).join("");
     if (typeof bindTraceRoundToolStrips === "function") bindTraceRoundToolStrips(turn.listEl);
@@ -7245,6 +7251,7 @@ function configureTaskDetailSections() {
     if (U.adAcceptance) U.adAcceptance.classList.add("task-trace-acceptance");
     if (U.nodeEmpty) U.nodeEmpty.textContent = "选择任务树中的节点后，这里会显示执行流程、提交输出、验收结果和工件。";
     if (typeof bindTaskMessageTabs === "function") bindTaskMessageTabs();
+    if (typeof bindTaskOutputCopyActions === "function") bindTaskOutputCopyActions();
     if (U.adOutputSection) U.adOutputSection.hidden = false;
     if (U.adLogsSection) U.adLogsSection.hidden = true;
     icons();

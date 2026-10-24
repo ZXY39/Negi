@@ -553,7 +553,8 @@ function renderTurnRoundBlock(round) {
 function buildTurnTraceSteps(turns, initialPromptStep) {
     const steps = [initialPromptStep, ...buildTurnGroupDescriptors(turns)];
     const last = steps[steps.length - 1];
-    if (last && !last.textOnly) last.open = true;
+    // 中途输出默认只占一行；带正文的末组也不再自动展开，点击才看全文。
+    if (last && !last.textOnly && !String(last.turnText || "").trim()) last.open = true;
     return steps;
 }
 
@@ -1100,6 +1101,45 @@ function flashTraceCopyButton(button, succeeded = true) {
         setTraceCopyButtonIcon(button, "copy");
         button.classList.remove("is-copied", "is-copy-failed");
     }, 1400));
+}
+
+function bindTaskOutputCopyActions() {
+    const targets = [
+        { targetId: "ad-output", buttonId: "ad-output-copy", label: "提交输出", emptyText: "暂无提交输出" },
+        { targetId: "ad-check", buttonId: "ad-check-copy", label: "验收结果", emptyText: "暂无验收结果" },
+    ];
+    targets.forEach(({ targetId, buttonId, label, emptyText }) => {
+        const button = document.getElementById(buttonId);
+        if (!(button instanceof HTMLButtonElement) || button.dataset.copyBound === "true") return;
+        button.dataset.copyBound = "true";
+        button.addEventListener("click", async (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const target = document.getElementById(targetId);
+            const text = String(target?.textContent || "").trim();
+            if (!text || text === emptyText) {
+                flashTraceCopyButton(button, false);
+                if (typeof showToast === "function") {
+                    showToast({ title: "没有可复制的内容", text: `${label}当前为空。`, kind: "error" });
+                }
+                return;
+            }
+            let copied = false;
+            try {
+                copied = typeof copyTextToClipboard === "function" && await copyTextToClipboard(text);
+            } catch {
+                copied = false;
+            }
+            flashTraceCopyButton(button, !!copied);
+            if (typeof showToast === "function") {
+                showToast({
+                    title: copied ? "已复制" : "复制失败",
+                    text: copied ? `${label}已复制到剪贴板。` : "请手动选中文本后复制。",
+                    kind: copied ? "success" : "error",
+                });
+            }
+        });
+    });
 }
 
 async function resolveTraceFieldCopyText(code) {
