@@ -104,7 +104,7 @@ Cron job delivery is claim-before-dispatch with a bounded, self-finalizing dispa
 
 ## Task Distribution Error Delivery（车道已休眠）
 
-> **2026-10 起 distribution epoch 与降级分发均已删除**：没有代码再产生 `task_distribution_error` / `task_distribution_skipped` 事件，下面的 outbox 与渲染路径只作为历史合同保留（存量 outbox 行仍可投完）。现行异常暂停走 `task_node_error`（仅根节点）或父节点信箱的 `child_abnormal_pause`。
+> **distribution epoch 与降级分发均已删除**：没有代码再产生 `task_distribution_error` / `task_distribution_skipped` 事件，下面的 outbox 与渲染路径只作为历史合同保留（存量 outbox 行仍可投完）。现行异常暂停走 `task_node_error`（仅根节点）或父节点信箱的 `child_abnormal_pause`。
 
 - A node error pause is escalated to the session only when the paused node is the task root. Non-root abnormal pauses (`reject_no_progress`, watchdog) go to the parent node's mailbox as `child_abnormal_pause`; if the parent does not act, the frontend 「暂停·异常」 badge is the only visible surface. This deliberately removes the old "any depth error pause wakes the session" path.
 
