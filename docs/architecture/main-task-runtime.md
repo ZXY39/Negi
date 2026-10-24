@@ -9,6 +9,7 @@
 - **三种消息来源**：用户（`origin=user`）、前门/会话 agent（`origin=frontdoor`）、节点（`origin=node`，只允许发给父或子）。运行时另有三类系统消息，模型无法伪造：`child_final`、`child_abnormal_pause`、`acceptance_verdict`（`main/runtime/node_message_kind.py` 是 kind/priority 的单一作者）。
 - **投递入口**：`MainRuntimeService.deliver_node_message(...)`。它先过停靠判定矩阵（`plan_delivery`），再做指纹去重、落箱、唤醒。同一指纹只在“还没被处理”时去重；消费过的重复是一条新意图。
 - **投递即唤醒（R2）**：收件人处于停靠（`waiting_explicit`）时，投递路径直接复活它的执行器；在跑时消息留在信箱，由下一个安全边界并入。`node_wake.py` 维护 `wake_on=any|all_children` 判据；`all_children` 不计验收节点（验收节点随被验节点终局，否则永远等不齐）。
+- **唤醒判据只有一个**：`node_wake.wake_ready(...)` 同时服务投递唤醒与**可派发扫描**（`_dispatch_runnable_nodes`）。扫描原先只看“信箱有未读”就复派，`wake_on=all_children` 的父节点会被第一封 `child_final` 提前叫醒（实盘 `task:eb3f3a7753f7`：A 10:38:38 回执，根 10:38:43 起了一轮，B 还在跑）。现在两条路径都按 `wake_on` 判定，`priority=high` 的未读仍无条件放行（P6）。
 - **信箱三态**：`delivered`（待处理）→ `consumed`（回合看过，`consumed_at` 落账，`merged_at` 为空）→ 内容真正并入上下文时补 `merged_at`。节点详情的「已消费」读的就是这一列。
 - **停靠的唯一持久判据**是帧相位 `waiting_explicit`。任何新的相位写入点都必须先看 `park_requested`：把它覆盖成 `waiting_tool_results` 会让唤醒把停靠节点当 in-flight 吞掉（零 ERROR、零告警）。
 - **终局上报**：执行节点转终局时 `NodeRunner.schedule_terminal_child_message` 向父节点发 `child_final`（`notify_parent=False` 的清扫路径抑制）。验收节点**不发** `child_final`（T15）。
@@ -17,7 +18,7 @@
 ## 1.1 验收三档裁决（P4）
 
 - 验收节点只提交 `{"verdict": "pass|reject|reject_no_progress", "feedback": "..."}`；执行节点提交 `{summary, answer, evidence, remaining_work}`，提交即「本轮完成」。工具回执是 `{outcome, submission_id, acceptance_node_id}`。
-- `pass`：被验执行节点转成功；验收节点回到等待下一次提交（复用同一个节点，不重建）。
+- `pass`：被验执行节点转成功；验收节点回到等待下一次提交（复用同一个节点，不重建）。**pass 不投递 `acceptance_verdict`**：收件人随即终局，消息只会变成一封永远读不到的未读；提交绑定落在握手 `latest_execution_submission_id`（验收节点的裁决载荷同样保留）。
 - `reject`：把 `feedback` 投给执行节点、双方复活继续下一轮；**没有拒收次数上限**。
 - `reject_no_progress`：被验节点转**暂停·异常**（`pause_reason='error'`），父节点收到 high 级 `child_abnormal_pause`（附验收方理由），由人或父节点决定恢复/重派/终止。**首轮禁止**：运行时在 `NodeRunner._submit_final_result` 直接拒绝，尾块也会写明。
 - 每轮验收回合的尾块从 `metadata.rejection_history` 派生「历次验收裁定」（机器派生、可截断），并从被验节点的 consumed + pending 通知里拉追加要求——**任何层级都读，不再只对根节点开放**（决策 J）。这使压缩/重启后的验收判断不依赖残留上下文。
