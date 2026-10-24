@@ -16941,8 +16941,8 @@ textarea {
 
 .execution-tree-node-title {
     min-width: min(10em, 100%);
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 3;
+    /* 行高 1.45 × 3 行：标题最多占三行（flex 子项会被 blockify，
+       -webkit-line-clamp 在这里不生效，用高度硬约束）。 */
+    max-height: 4.35em;
     overflow: hidden;
 }
