@@ -98,8 +98,6 @@
     U.llmEditorShell = document.getElementById("llm-editor-shell");
     U.llmEditorBackdrop = document.getElementById("llm-editor-backdrop");
     U.modelRolesCancel = document.getElementById("model-roles-cancel-btn");
-    U.modelIterationsToggle = document.getElementById("model-iterations-toggle-btn");
-    U.modelIterationsInput = document.getElementById("model-iterations-value-input");
     U.modelList = U.llmBindingsList || U.modelList;
   }
 
@@ -294,7 +292,7 @@
     if (state.error) return hint(`模型配置出错：${state.error}`, true);
     if (!state.bindings.length) return hint("还没有保存的配置。点击“添加配置”开始添加。", false);
     if (S.modelCatalog.rolesDirty) return hint("模型链有未保存的修改，点“保存”提交，或点“取消修改”放弃。", false);
-    return hint("点击左侧配置可查看对应 JSON 配置；点击“添加配置”可新建配置。", false);
+    return hint("把左侧模型拖进右侧角色链即可编排；点击模型可查看配置。", false);
   }
 
   async function ensureTemplate(providerId) {
@@ -374,11 +372,11 @@
     state.editor.validation = await ApiClient.validateLlmDraft(draft);
     if (!state.editor.validation?.valid) {
       state.editor.probe = null;
-      renderAll();
+      renderModelCatalog();
       return false;
     }
     state.editor.probe = await ApiClient.probeLlmDraft(draft);
-    renderAll();
+    renderModelCatalog();
     return !!state.editor.probe?.success;
   }
 
@@ -433,7 +431,7 @@
       requestTimeoutSeconds: trim(draft?.parameters?.request_timeout_seconds),
       initialRequestTimeoutSeconds: trim(draft?.parameters?.request_timeout_seconds),
     };
-    renderAll();
+    renderModelCatalog();
   }
 
   async function openDetailModal(modelKey) {
@@ -481,12 +479,12 @@
       requestTimeoutSeconds: trim(binding.request_timeout_seconds ?? draft?.parameters?.request_timeout_seconds),
       initialRequestTimeoutSeconds: trim(binding.request_timeout_seconds ?? draft?.parameters?.request_timeout_seconds),
     };
-    renderAll();
+    renderModelCatalog();
   }
 
   function closeEditor() {
     llmState().editor = emptyEditorState();
-    renderAll();
+    renderModelCatalog();
   }
 
   function renderStatus(target = llmState().editor) {
@@ -1195,7 +1193,7 @@
       : '<p class="llm-muted">没有匹配的模型。</p>';
   }
 
-  function renderEditor() {
+  function renderModelDetail() {
     refs();
     const state = llmState();
     if (!U.llmEditorShell || !U.llmEditorPanel || !U.llmEditorBackdrop) return;
@@ -1313,13 +1311,30 @@
     icons();
   }
 
-  function renderBindings() {
+  function modelAttributionLabels(modelKey) {
+    const key = trim(modelKey);
+    if (!key) return [];
+    // 单项渲染用例可能只加载本模块；缺页面级取数口时按「无归属」处理，不抛错。
+    if (typeof modelScopeChain !== "function" || typeof activeLoadBalanceGroups !== "function") return [];
+    const groups = activeLoadBalanceGroups() || {};
+    const labels = [];
+    MODEL_SCOPES.forEach((scope) => {
+      const chain = modelScopeChain(scope.key);
+      const direct = chain.includes(key);
+      const viaGroup = !direct && chain.some((ref) => isGroupRef(ref)
+        && ((groups[groupKeyFromRef(ref)] || {}).model_keys || []).includes(key));
+      if (direct || viaGroup) labels.push(SCOPE_LABELS[scope.key] || scope.label || scope.key);
+    });
+    return labels;
+  }
+
+  function renderModelList() {
     refs();
     if (!U.llmBindingsList) return;
     const query = trim(S.modelCatalog.search || "").toLowerCase();
     const items = [...llmState().bindings]
       .filter((item) => String(item.capability || "chat") === "chat")
-      .filter((item) => !query || [item.key, item.provider_model, item.default_model, item.api_base, item.description].join("\n").toLowerCase().includes(query))
+      .filter((item) => !query || [item.key, item.name, item.provider_model, item.default_model, item.api_base, item.description].join("\n").toLowerCase().includes(query))
       .sort((a, b) => String(bindingTitle(a) || a.key || "").localeCompare(String(bindingTitle(b) || b.key || "")));
 
     if (!items.length) {
@@ -1328,28 +1343,45 @@
     }
 
     U.llmBindingsList.innerHTML = items.map((item) => {
+      const attribution = modelAttributionLabels(item.key);
+      const attributionText = attribution.length ? attribution.join(" · ") : "未加入链";
       const metaRow = item.record_missing
-        ? '<div class="model-inline-meta"><span class="policy-chip risk-high">凭据记录缺失</span></div>'
+        ? '<span class="policy-chip risk-high">凭据记录缺失</span>'
         : "";
       return `
         <article class="llm-binding-card model-available-item${trim(item.key) === trim(llmState().editor.bindingKey) ? " is-selected" : ""}" data-model-available-key="${escv(item.key)}" data-model-open="${escv(item.key)}" draggable="true">
           <button type="button" class="model-available-main" data-model-open="${escv(item.key)}">
             <span class="resource-list-title">${escv(bindingTitle(item))}</span>
-            <span class="resource-list-subtitle">${escv(item.api_base || "")}</span>
+            <span class="resource-list-subtitle">${escv(item.provider_model || item.default_model || item.key)}</span>
           </button>
-          ${metaRow}
+          <div class="model-available-meta">
+            ${metaRow}
+            <span class="model-attribution${attribution.length ? "" : " is-empty"}" title="${escv(attribution.join("、") || "未加入角色链")}">${escv(attributionText)}</span>
+            <button type="button" class="toolbar-btn ghost small" data-model-open="${escv(item.key)}">配置</button>
+          </div>
         </article>`;
     }).join("");
   }
 
-  function renderRoutes() {
+  function renderModelRoleEditors() {
     if (!U.modelRoleEditors) return;
+    const iterationSource = S.modelCatalog.roleEditing ? "draft" : "active";
     U.modelRoleEditors.innerHTML = MODEL_SCOPES.map((scope) => {
       const chain = modelScopeChain(scope.key);
+      const iterations = modelScopeIterations(scope.key, iterationSource);
       return `
         <section class="model-chain-card">
           <div class="card-header">
             <h3>${escv(SCOPE_LABELS[scope.key] || scope.key)}</h3>
+            <label class="model-role-iterations-field" title="最大轮数；-1 代表不限制">
+              <span class="model-role-iterations-label">最大轮数</span>
+              <input class="model-role-iterations-input spinless-number-input" type="number" min="-1" step="1"
+                inputmode="numeric" value="${escv(String(iterations ?? -1))}"
+                data-model-role-limit-kind="iterations"
+                data-model-role-limit-scope="${escv(scope.key)}"
+                data-model-role-limit-input="iterations"
+                aria-label="${escv(SCOPE_LABELS[scope.key] || scope.key)} 最大轮数">
+            </label>
           </div>
           <div class="role-chain-section">
             <div class="model-chain-list" data-model-chain-list="${scope.key}">${chain.length ? chain.map((ref, index) => {
@@ -1357,12 +1389,11 @@
               if (isGroupRef(ref)) return renderModelGroupChainTile(scope.key, groupKeyFromRef(ref), index);
               const item = llmState().bindingMap[trim(ref)] || modelRefItem(ref);
               const key = trim(item?.key || ref);
-              const badges = [index === 0
-                ? '<span class="policy-chip risk-low">首选</span>'
-                : '<span class="policy-chip neutral">候选</span>'];
+              const badges = [];
               if (item && item.enabled === false) badges.push('<span class="policy-chip neutral">已禁用</span>');
               if (!item) badges.push('<span class="policy-chip neutral">未托管</span>');
-              return `<article class="model-chain-slide is-editing" draggable="true" data-model-chain-ref="${escv(key)}" data-scope="${scope.key}"><button type="button" class="model-chain-main" data-model-open="${escv(key)}"><span class="resource-list-title">${escv(bindingTitle(item) || key)}</span><span class="resource-list-subtitle">${escv(item?.api_base || "")}</span><span class="model-inline-meta">${badges.join("")}</span></button><button type="button" class="model-chain-remove" data-model-chain-action="remove" data-scope="${scope.key}" data-index="${index}" title="移除" aria-label="移除模型"><i data-lucide="x"></i></button></article>`;
+              const subtitle = trim(item?.provider_model || item?.default_model || "") || key;
+              return `<article class="model-chain-slide is-editing" draggable="true" data-model-chain-ref="${escv(key)}" data-scope="${scope.key}"><span class="model-chain-index" aria-label="链序 ${index + 1}">${index + 1}</span><button type="button" class="model-chain-main" data-model-open="${escv(key)}"><span class="resource-list-title">${escv(bindingTitle(item) || key)}</span><span class="resource-list-subtitle">${escv(subtitle)}</span>${badges.length ? `<span class="model-inline-meta">${badges.join("")}</span>` : ""}</button><button type="button" class="model-chain-remove" data-model-chain-action="remove" data-scope="${scope.key}" data-index="${index}" title="移除" aria-label="移除模型"><i data-lucide="x"></i></button></article>`;
             }).join("") : `<div class="empty-state compact">把左侧模型拖到这里，编排当前角色链。</div>`}</div>
           </div>
         </section>`;
@@ -1370,7 +1401,7 @@
     icons();
   }
 
-  function renderAll() {
+  function renderModelCatalog() {
     const state = llmState();
     refs();
     projectRoutes();
@@ -1383,24 +1414,11 @@
       U.modelRolesSave.hidden = !dirty;
       U.modelRolesSave.disabled = state.loading || state.saving;
     }
-    const iterationsOpen = !!S.modelCatalog.roleIterationsOpen;
-    if (U.modelIterationsToggle) {
-      U.modelIterationsToggle.hidden = false;
-      U.modelIterationsToggle.disabled = state.loading || state.saving;
-      U.modelIterationsToggle.setAttribute("aria-expanded", iterationsOpen ? "true" : "false");
-    }
-    if (U.modelIterationsInput) {
-      U.modelIterationsInput.hidden = !iterationsOpen;
-      if (iterationsOpen && document.activeElement !== U.modelIterationsInput) {
-        U.modelIterationsInput.value = String(modelScopeIterations("ceo") ?? -1);
-      }
-    }
     renderHint();
-    renderBindings();
+    renderModelList();
     if (typeof renderModelGroupColumn === "function") renderModelGroupColumn();
-    renderRoutes();
-    if (typeof renderRoleLimitsBar === "function") renderRoleLimitsBar();
-    renderEditor();
+    renderModelRoleEditors();
+    renderModelDetail();
     icons();
   }
 
@@ -1408,7 +1426,7 @@
     const state = llmState();
     state.loading = true;
     state.error = "";
-    renderAll();
+    renderModelCatalog();
     try {
       const [templates, bindingPayload] = await Promise.all([ApiClient.getLlmTemplates(), ApiClient.listLlmBindings()]);
       state.templates = Array.isArray(templates) ? templates : [];
@@ -1423,7 +1441,7 @@
       state.error = error.message || "加载失败";
     } finally {
       state.loading = false;
-      renderAll();
+      renderModelCatalog();
     }
   }
 
@@ -1457,7 +1475,7 @@
       : String(DEFAULT_MAX_OUTPUT_TOKENS);
     state.editor.validation = null;
     state.editor.probe = null;
-    renderAll();
+    renderModelCatalog();
   }
 
   async function handleTest() {
@@ -1475,7 +1493,7 @@
       persistent: true,
     });
     state.editor.busy = true;
-    renderAll();
+    renderModelCatalog();
     try {
       await probeDraft(draft);
       if (state.editor.probe?.success) {
@@ -1498,7 +1516,7 @@
       });
     } finally {
       state.editor.busy = false;
-      renderAll();
+      renderModelCatalog();
     }
   }
 
@@ -1594,7 +1612,7 @@
     const result = await ApiClient.probeLlmDraftMaxConcurrency(draft);
     const suggestedLimits = Array.isArray(result?.suggested_limits) ? result.suggested_limits : [];
     state.editor.singleApiKeyMaxConcurrency = formatSingleApiKeyMaxConcurrencyValue(suggestedLimits);
-    renderAll();
+    renderModelCatalog();
     showToast({
       title: result?.success ? "最大并发数测试完成" : "最大并发数部分完成",
       text: result?.message || "已根据测试结果回填每个 API key 的最大并发数。",
@@ -1664,20 +1682,20 @@
     const configName = trim(document.getElementById("llm-create-name-input")?.value || "");
     state.editor.createName = configName;
     if (!configName) {
-      renderAll();
+      renderModelCatalog();
       throw new Error("请输入配置名称");
     }
     const duplicated = state.bindings.find((item) => trim(item.name || "") && trim(item.name).toLowerCase() === configName.toLowerCase());
     if (duplicated) {
       state.error = `配置名称已存在：${configName}`;
-      renderAll();
+      renderModelCatalog();
       throw new Error(state.error);
     }
     const bindingDraft = bindingDraftPayload();
     if (apiKeyCountFromValue(String(bindingDraft.draft?.api_key || "").trim()) > 1) {
       const message = "每个配置只允许一个 API Key（单 key 模式）；需要多个模型或容灾回退时，请添加多个配置并组成模型链。";
       state.error = message;
-      renderAll();
+      renderModelCatalog();
       throw new Error(message);
     }
     const providerId = trim(document.getElementById("llm-provider-select")?.value || state.editor.providerId);
@@ -1686,7 +1704,7 @@
     state.editor.jsonText = jsonText;
     const draft = bindingDraft.draft;
     state.saving = true;
-    renderAll();
+    renderModelCatalog();
     try {
       showToast({
         title: "正在保存",
@@ -1712,7 +1730,7 @@
       await loadAll();
     } finally {
       state.saving = false;
-      renderAll();
+      renderModelCatalog();
     }
   }
 
@@ -1729,7 +1747,7 @@
     if (configChanged && apiKeyCountFromValue(String(draft.api_key || "").trim()) > 1) {
       const message = "每个配置只允许一个 API Key（单 key 模式）；需要多个模型或容灾回退时，请添加多个配置并组成模型链。";
       state.error = message;
-      renderAll();
+      renderModelCatalog();
       throw new Error(message);
     }
     const bindingPatch = {};
@@ -1756,7 +1774,7 @@
       }
     }
     state.saving = true;
-    renderAll();
+    renderModelCatalog();
     try {
       let runtimeRefresh = null;
       if (configChanged) {
@@ -1782,7 +1800,7 @@
       await loadAll();
     } finally {
       state.saving = false;
-      renderAll();
+      renderModelCatalog();
     }
   }
 
@@ -1797,7 +1815,7 @@
     });
     if (!confirmed) return;
     llmState().saving = true;
-    renderAll();
+    renderModelCatalog();
     try {
       const deleteResult = await ApiClient.deleteLlmBinding(binding.key);
       await waitForRuntimeRefreshAndUpdateToast(deleteResult?.runtimeRefresh);
@@ -1805,7 +1823,7 @@
       await loadAll();
     } finally {
       llmState().saving = false;
-      renderAll();
+      renderModelCatalog();
     }
   }
 
@@ -1859,28 +1877,6 @@
     refs();
     bindList();
     U.llmConfigCreate?.addEventListener("click", () => void openCreateModal());
-    U.modelIterationsToggle?.addEventListener("click", () => {
-      S.modelCatalog.roleIterationsOpen = !S.modelCatalog.roleIterationsOpen;
-      renderAll();
-      if (S.modelCatalog.roleIterationsOpen) U.modelIterationsInput?.focus();
-    });
-    U.modelIterationsInput?.addEventListener("input", () => {
-      const raw = String(U.modelIterationsInput.value || "").trim();
-      const parsed = raw === "" ? -1 : Number.parseInt(raw, 10);
-      if (!Number.isInteger(parsed) || parsed < -1) {
-        U.modelIterationsInput.classList.add("is-invalid");
-        return;
-      }
-      U.modelIterationsInput.classList.remove("is-invalid");
-      const next = parsed < 0 ? null : parsed;
-      ["ceo", "execution", "inspection"].forEach((scope) => {
-        S.modelCatalog.roleIterationDrafts[scope] = next;
-      });
-      syncModelRoleDraftState();
-      if (U.modelRolesSave) U.modelRolesSave.hidden = !S.modelCatalog.rolesDirty;
-      if (U.modelRolesCancel) U.modelRolesCancel.hidden = !S.modelCatalog.rolesDirty;
-      renderHint();
-    });
     U.llmEditorBackdrop?.addEventListener("click", closeEditor);
     U.llmEditorShell?.addEventListener("change", (event) => {
       if (event.target?.id === "llm-provider-select") void handleProviderChange();
@@ -1963,13 +1959,13 @@
         if (row) row.hidden = !row.hidden;
         return;
       }
-      if (action === "test-create" || action === "test-detail") { void handleTest().catch((error) => { llmState().error = error.message || "测试失败"; showToast({ title: "测试失败", text: llmState().error, kind: "error" }); renderAll(); }); return; }
-      if (action === "test-max-concurrency") { void handleTestMaxConcurrency().catch((error) => { llmState().error = error.message || "测试最大并发数失败"; showToast({ title: "测试最大并发数失败", text: llmState().error, kind: "error" }); renderAll(); }); return; }
+      if (action === "test-create" || action === "test-detail") { void handleTest().catch((error) => { llmState().error = error.message || "测试失败"; showToast({ title: "测试失败", text: llmState().error, kind: "error" }); renderModelCatalog(); }); return; }
+      if (action === "test-max-concurrency") { void handleTestMaxConcurrency().catch((error) => { llmState().error = error.message || "测试最大并发数失败"; showToast({ title: "测试最大并发数失败", text: llmState().error, kind: "error" }); renderModelCatalog(); }); return; }
       if (action === "fetch-model-list") { void handleFetchModelList().catch((error) => { showToast({ title: "获取模型列表失败", text: error?.message || "获取模型列表失败", kind: "error" }); }); return; }
       if (action === "model-list-close") { const editor = llmState().editor; if (editor) editor.modelList = null; renderModelListPanel(); return; }
-      if (action === "save-create") { void handleCreateSave().catch((error) => { llmState().error = error.message || "保存失败"; showToast({ title: "保存失败", text: llmState().error, kind: "error" }); renderAll(); }); return; }
-      if (action === "save-detail") { void handleDetailSave().catch((error) => { llmState().error = error.message || "保存失败"; showToast({ title: "保存失败", text: llmState().error, kind: "error" }); renderAll(); }); return; }
-      if (action === "delete-detail") { void handleDelete().catch((error) => { llmState().error = error.message || "删除失败"; showToast({ title: "删除失败", text: llmState().error, kind: "error" }); renderAll(); }); }
+      if (action === "save-create") { void handleCreateSave().catch((error) => { llmState().error = error.message || "保存失败"; showToast({ title: "保存失败", text: llmState().error, kind: "error" }); renderModelCatalog(); }); return; }
+      if (action === "save-detail") { void handleDetailSave().catch((error) => { llmState().error = error.message || "保存失败"; showToast({ title: "保存失败", text: llmState().error, kind: "error" }); renderModelCatalog(); }); return; }
+      if (action === "delete-detail") { void handleDelete().catch((error) => { llmState().error = error.message || "删除失败"; showToast({ title: "删除失败", text: llmState().error, kind: "error" }); renderModelCatalog(); }); }
     });
     document.addEventListener("click", (event) => {
       if (event.target.closest(".llm-note-wrap") || event.target.closest("[data-llm-note-popover]")) return;
@@ -2000,7 +1996,7 @@
     state.editor.nameEditing = true;
     state.editor.editName = currentDisplay;
     state.editor.editNameOriginal = currentDisplay;
-    renderAll();
+    renderModelCatalog();
     const input = document.getElementById("llm-edit-name-input");
     if (input) {
       input.focus();
@@ -2013,13 +2009,15 @@
     state.editor.nameEditing = false;
     state.editor.editName = "";
     state.editor.editNameOriginal = "";
-    renderAll();
+    renderModelCatalog();
   }
 
-  window.renderModelList = renderBindings;
-  window.renderModelRoleEditors = renderRoutes;
-  window.renderModelDetail = renderEditor;
-  window.renderModelCatalog = renderAll;
+  // 模型页唯一的视图入口：一类实体只有一份渲染实现，不再存在旧视图层与之同名覆盖。
+  window.renderModelList = renderModelList;
+  window.renderModelRoleEditors = renderModelRoleEditors;
+  window.renderModelDetail = renderModelDetail;
+  window.renderModelCatalog = renderModelCatalog;
+  window.renderModelHint = renderHint;
   window.openModel = function openModel(key) { void openDetailModal(key); };
   window.startCreateModel = function startCreateModel() { void openCreateModal(); };
   window.clearModelSelection = closeEditor;
@@ -2046,7 +2044,7 @@
       if (!Number.isInteger(parsed) || parsed < -1) {
         llmState().error = "最大轮数必须是不小于 -1 的整数，-1 代表不限制";
         showToast({ title: "保存失败", text: llmState().error, kind: "error" });
-        renderAll();
+        renderModelCatalog();
         return;
       }
     }
@@ -2055,18 +2053,18 @@
     } catch (error) {
       llmState().error = error.message || "保存失败";
       showToast({ title: "保存失败", text: llmState().error, kind: "error" });
-      renderAll();
+      renderModelCatalog();
       return;
     }
     const validationMessage = requiredModelRoleValidationMessage();
     if (validationMessage) {
       llmState().error = validationMessage;
       showToast({ title: "保存失败", text: llmState().error, kind: "error" });
-      renderAll();
+      renderModelCatalog();
       return;
     }
     llmState().saving = true;
-    renderAll();
+    renderModelCatalog();
     try {
       showToast({
         title: "正在保存模型链",
@@ -2092,7 +2090,7 @@
       showToast({ title: "保存失败", text: llmState().error, kind: "error" });
     } finally {
       llmState().saving = false;
-      renderAll();
+      renderModelCatalog();
     }
   };
 

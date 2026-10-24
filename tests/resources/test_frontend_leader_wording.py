@@ -11,7 +11,8 @@ def test_frontend_model_and_session_wording_matches_latest_copy() -> None:
         (REPO_ROOT / name).read_text(encoding="utf-8")
         for name in (
             "g3ku/web/frontend/org_graph_app.js",
-            "g3ku/web/frontend/models/role-view.js",
+            "g3ku/web/frontend/models/group-view.js",
+            "g3ku/web/frontend/models/dialog-view.js",
         )
     )
     llm_js = (REPO_ROOT / "g3ku/web/frontend/org_graph_llm.js").read_text(encoding="utf-8")
@@ -35,9 +36,6 @@ def test_frontend_model_and_session_wording_matches_latest_copy() -> None:
     assert "暂停当前 CEO 会话" not in app_js
     assert "当前没有可暂停的 CEO 回合。" not in app_js
     assert "不能在 CEO 面板直接发送。" not in app_js
-    assert '<span class="llm-segmented-label model-role-limit-fixed-pill">固定为1</span>' in app_js
-    assert '<span class="policy-chip neutral">固定 1</span>' not in app_js
-    assert '<span class="policy-chip neutral">只读</span>' not in app_js
 
     assert 'const SCOPE_LABELS = { ceo: "主Agent", execution: "执行Agent", inspection: "检验Agent", memory: "记忆Agent" };' in llm_js
     assert 'const SCOPE_LABELS = { ceo: "CEO", execution: "Execution", inspection: "Inspection" };' not in llm_js

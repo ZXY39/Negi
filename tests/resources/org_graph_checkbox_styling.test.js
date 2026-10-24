@@ -44,8 +44,8 @@ const LEDGER = [
     { token: "data-memory-row-select", tier: "ui" },
     { token: "class=\"skill-role\"", tier: "hidden" },
     { token: "tool-role tool-role-input", tier: "hidden" },
-    { token: "name=\"enabled\"", tier: "hidden" },
     { token: "id=\"context-refresh-enabled\"", tier: "ui" },
+    { token: "td-expand-all-input", tier: "ui" },
 ];
 
 function collectSites() {

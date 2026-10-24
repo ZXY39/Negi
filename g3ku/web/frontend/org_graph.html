@@ -371,13 +371,6 @@
                                     <select id="task-depth-select" class="task-depth-select resource-select"
                                         aria-label="全局任务树深度"></select>
                                 </label>
-                                <div id="task-depth-custom-wrap" class="task-depth-custom" hidden>
-                                    <input id="task-depth-custom-input"
-                                        class="task-depth-custom-input spinless-number-input" type="number" min="0"
-                                        step="1" inputmode="numeric" aria-label="自定义全局任务树深度" placeholder="非负整数">
-                                    <button id="task-depth-custom-save" class="toolbar-btn ghost small"
-                                        type="button">应用</button>
-                                </div>
                             </div>
                             <span id="task-depth-hint" class="task-depth-hint" hidden></span>
                         </div>
@@ -601,54 +594,53 @@
                 <header class="content-header resource-header model-page-header model-actions-only-header">
                     <div class="resource-header-title">
                         <h1>模型配置</h1>
-                        <p class="subtitle">给每个 Agent 排模型链；模型库与负载均衡组在下方统一管理。</p>
+                        <p class="subtitle">左侧是模型库与负载均衡组，右侧给每个 Agent 排模型链。</p>
                     </div>
                     <div class="resource-header-actions model-page-actions">
                         <button id="model-refresh-btn" class="toolbar-btn ghost" type="button">刷新</button>
                         <button id="llm-config-create-btn" class="toolbar-btn ghost" type="button">添加配置</button>
-                        <button id="model-iterations-toggle-btn" class="toolbar-btn ghost" type="button" hidden aria-expanded="false">最大轮数</button>
-                        <input id="model-iterations-value-input" class="spinless-number-input model-iterations-toolbar-input" type="number" min="-1" step="1" inputmode="numeric" value="-1" title="-1 代表不限制" aria-label="最大轮数" hidden>
                         <button id="model-roles-save-btn" class="toolbar-btn success" type="button" hidden>保存</button>
                         <button id="model-roles-cancel-btn" class="toolbar-btn ghost" type="button" hidden>取消修改</button>
                         <button id="model-context-refresh-btn" class="toolbar-btn ghost" type="button"
                             aria-haspopup="dialog" aria-controls="context-refresh-dialog">上下文信息更新时间</button>
                     </div>
-                    <div id="model-role-limits-bar" class="model-role-limits-bar" hidden></div>
                 </header>
                 <p id="sidebar-model-hint" class="ceo-model-panel-hint" hidden aria-live="polite">正在加载模型配置...</p>
 
                 <div class="llm-page-layout">
-                    <aside class="resource-detail-panel llm-groups-panel" aria-label="负载均衡组">
-                        <div class="panel-header model-shared-header">
-                            <div>
-                                <h3>负载均衡组</h3>
-                                <p class="subtitle">勾选模型组成一组，拖入右侧角色链。</p>
+                    <aside class="llm-library-panel" aria-label="模型资源库">
+                        <section class="resource-detail-panel llm-bindings-panel">
+                            <div class="panel-header model-shared-header">
+                                <div>
+                                    <h3>模型列表</h3>
+                                    <p class="subtitle">点击模型查看对应 JSON 配置，或新建一个模型。</p>
+                                </div>
+                                <div class="model-shared-actions">
+                                    <input id="model-search-input" class="resource-search" type="search"
+                                        placeholder="搜索模型ID / Provider / 模型">
+                                </div>
                             </div>
-                            <div class="model-shared-actions">
-                                <button id="model-group-create-btn" class="toolbar-btn ghost small" type="button">新建组</button>
+                            <div id="llm-bindings-list" class="model-shared-list" data-model-available-list="bindings">
                             </div>
-                        </div>
-                        <div id="model-group-list" class="model-group-list"></div>
+                        </section>
+
+                        <section class="resource-detail-panel llm-groups-panel" aria-label="负载均衡组">
+                            <div class="panel-header model-shared-header">
+                                <div>
+                                    <h3>负载均衡组</h3>
+                                    <p class="subtitle">勾选模型组成一组，拖入右侧角色链。</p>
+                                </div>
+                                <div class="model-shared-actions">
+                                    <button id="model-group-create-btn" class="toolbar-btn ghost small" type="button">新建组</button>
+                                </div>
+                            </div>
+                            <div id="model-group-list" class="model-group-list"></div>
+                        </section>
                     </aside>
 
-                    <section class="resource-detail-panel llm-bindings-panel">
-                        <div class="panel-header model-shared-header">
-                            <div>
-                                <h3>模型列表</h3>
-                                <p class="subtitle">点击模型查看对应 JSON 配置，或新建一个模型。</p>
-                            </div>
-                            <div class="model-shared-actions">
-                                <input id="model-search-input" class="resource-search" type="search"
-                                    placeholder="搜索模型ID / Provider / 模型">
-                            </div>
-                        </div>
-                        <div id="llm-bindings-list" class="model-shared-list" data-model-available-list="bindings">
-                        </div>
-                    </section>
-
-                    <aside class="llm-routes-panel" aria-label="模型角色链">
+                    <section class="llm-routes-panel" aria-label="模型角色链">
                         <div id="model-role-editors" class="model-routing-grid"></div>
-                    </aside>
+                    </section>
                 </div>
 
                 <div id="llm-editor-backdrop" class="detail-backdrop" aria-hidden="true"></div>
@@ -731,7 +723,6 @@
                                 <span id="external-api-enabled-label" class="tool-governance-switch-label">已停用</span>
                             </button>
                         </div>
-                        <p class="external-security-hint">token 密文保存在加密覆盖层，配置文件不落明文；明文仅在签发 / 重新生成时显示一次。</p>
                     </section>
                     <section class="resource-detail-panel qq-bot-panel">
                         <div class="panel-header">
@@ -739,16 +730,18 @@
                                 <h3>官方 QQ 机器人</h3>
                                 <p class="subtitle external-panel-subtitle">填 AppID + AppSecret（QQ 开放平台）即连；主动提醒受官方消息配额限制。</p>
                             </div>
-                            <button id="qq-bot-enabled-toggle" class="tool-governance-switch" type="button"
-                                aria-pressed="false" aria-label="启用官方 QQ 机器人">
-                                <span class="tool-governance-switch-track" aria-hidden="true"><span class="tool-governance-switch-thumb"></span></span>
-                                <span id="qq-bot-enabled-label" class="tool-governance-switch-label">已停用</span>
-                            </button>
+                            <div class="qq-bot-panel-head">
+                                <span id="qq-bot-status-text" class="qq-bot-status"></span>
+                                <button id="qq-bot-enabled-toggle" class="tool-governance-switch" type="button"
+                                    aria-pressed="false" aria-label="启用官方 QQ 机器人">
+                                    <span class="tool-governance-switch-track" aria-hidden="true"><span class="tool-governance-switch-thumb"></span></span>
+                                    <span id="qq-bot-enabled-label" class="tool-governance-switch-label">已停用</span>
+                                </button>
+                            </div>
                         </div>
                         <form id="qq-bot-settings-form" class="external-token-form" novalidate>
                             <div id="qq-bot-accounts" class="qq-bot-account-list"></div>
                             <div class="external-token-form-actions">
-                                <span id="qq-bot-status-text" class="qq-bot-status"></span>
                                 <button id="qq-bot-account-add-btn" class="toolbar-btn ghost small" type="button">添加账号</button>
                                 <button id="qq-bot-save-btn" class="toolbar-btn success" type="submit">保存并连接</button>
                             </div>
@@ -765,6 +758,7 @@
                                     aria-expanded="false">签发桥接 token</button>
                             </div>
                         </div>
+                        <p class="external-security-hint">token 密文保存在加密覆盖层，配置文件不落明文；明文仅在签发 / 重新生成时显示一次。</p>
                         <form id="external-token-form" class="external-token-form" hidden novalidate>
                             <div class="llm-form-grid">
                                 <label class="resource-field">
@@ -847,6 +841,11 @@
                         <span class="task-detail-pill-label">活跃节点</span>
                         <span id="td-active-count" class="task-detail-pill-value">0</span>
                     </div>
+                    <label id="td-expand-all" class="task-detail-pill task-detail-toggle" title="展开全部节点（含已结束）">
+                        <input id="td-expand-all-input" type="checkbox" class="ui-checkbox-input" />
+                        <span class="ui-checkbox-box" aria-hidden="true"></span>
+                        <span class="task-detail-pill-label">展开全部</span>
+                    </label>
                     <div class="header-actions">
                         <button id="task-error-log-btn" class="task-detail-pill task-detail-error-log-btn" type="button" title="查看错误日志">
                             <i data-lucide="triangle-alert"></i>
@@ -1330,7 +1329,8 @@
     <script src="memory/actions.js"></script>
     <script src="memory/view.js"></script>
     <script src="models/role-store.js"></script>
-    <script src="models/role-view.js"></script>
+    <script src="models/group-view.js"></script>
+    <script src="models/dialog-view.js"></script>
     <script src="models/actions.js"></script>
     <script src="resources/store.js"></script>
     <script src="org_graph_app.js"></script>
