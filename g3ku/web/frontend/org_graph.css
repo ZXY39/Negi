@@ -3717,6 +3717,11 @@ textarea {
     transition: transform 0.18s ease;
 }
 
+.task-flow-chevron {
+    width: 8px;
+    font-size: 0.9rem;
+}
+
 .task-flow-box[open] > .task-flow-summary .task-flow-chevron,
 .interaction-flow[open] .interaction-flow-chevron {
     transform: rotate(90deg);
@@ -17246,10 +17251,10 @@ textarea {
 .task-flow-summary {
     display: flex;
     align-items: center;
-    gap: 12px;
-    /* 26px = 宿主 12px + 列表 6px + 条目 8px：箭头与内部中途文本的「>」同轴，
-       统计文字与内部正文左对齐。 */
-    padding: var(--space-3) var(--space-3) var(--space-3) 26px;
+    gap: 0;
+    /* 外箭头与初始提示词正文左对齐（18px = 卡片正文内缩）；统计文字
+       紧跟其后，正好落到内部中途文本「>」的竖轴（18 + 8）。 */
+    padding: var(--space-3) var(--space-3) var(--space-3) 18px;
     cursor: pointer;
     list-style: none;
     color: var(--text-secondary);
@@ -17281,10 +17286,10 @@ textarea {
 }
 
 .interaction-flow-summary {
-    /* 箭头在秒数左侧，且与内部中途文本的「>」同一条竖轴。 */
+    /* 外箭头与最终回答正文左对齐；秒数仍落在内部中途文本正文的竖轴上。 */
     justify-content: flex-start;
-    gap: 12px;
-    padding-left: 14px;
+    gap: 26px;
+    padding-left: 0;
 }
 
 .interaction-flow-usage {
@@ -17356,7 +17361,7 @@ textarea {
     top: 24px;
     bottom: var(--space-3);
     width: 1px;
-    background: color-mix(in srgb, var(--text-tertiary) 42%, transparent);
+    background: color-mix(in srgb, var(--text-secondary) 55%, transparent);
     transform: scaleY(0);
     transform-origin: top;
     transition: transform 0.22s ease;
@@ -17365,11 +17370,11 @@ textarea {
 
 /* 竖线从各自箭头的中心往下降。 */
 .task-flow-guide {
-    left: 34px;
+    left: 22px;
 }
 
 .interaction-flow-guide {
-    left: 22px;
+    left: 8px;
 }
 
 .task-flow-box[open] .task-flow-guide,
