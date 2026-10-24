@@ -122,6 +122,8 @@ from main.runtime.node_message_kind import (
     KIND_CHILD_ABNORMAL_PAUSE,
     KIND_CHILD_FINAL,
     PRIORITY_HIGH,
+    RELATION_CHILD,
+    RELATION_PARENT,
     derive_message_kind,
     derive_priority,
 )
@@ -4621,7 +4623,8 @@ class MainRuntimeService:
                         target_node_id=parent_id,
                         message=content,
                         origin='node',
-                        relation='parent',
+                        # 收件人是我的父 ⇒ 我在这一对里是 child ⇒ child_progress（子→父）。
+                        relation=RELATION_CHILD,
                         source_node_id=sender_node_id,
                         intent_kind=intent_kind,
                         ref=ref,
@@ -4659,7 +4662,8 @@ class MainRuntimeService:
                     target_node_id=target,
                     message=content,
                     origin='node',
-                    relation='child',
+                    # 收件人是我的直接子节点 ⇒ 我是 parent ⇒ parent_notice（父→子）。
+                    relation=RELATION_PARENT,
                     source_node_id=sender_node_id,
                     intent_kind=intent_kind,
                     ref=ref,
@@ -4708,7 +4712,8 @@ class MainRuntimeService:
             target_node_id=parent_node_id,
             message=body,
             origin='node',
-            relation='parent',
+            # 子节点的终局消息：发送方是 child（relation 只是语义对齐，kind 由 system_kind 决定）。
+            relation=RELATION_CHILD,
             system_kind=KIND_CHILD_FINAL,
             source_node_id=str(node.node_id or '').strip(),
             intent_kind=INTENT_PROGRESS,
@@ -4751,7 +4756,8 @@ class MainRuntimeService:
             target_node_id=parent_node_id,
             message=body,
             origin='node',
-            relation='parent',
+            # 发送方是 child（relation 只做语义对齐，kind 由 system_kind 决定）。
+            relation=RELATION_CHILD,
             system_kind=KIND_CHILD_ABNORMAL_PAUSE,
             source_node_id=str(node.node_id or '').strip(),
             intent_kind=INTENT_PROGRESS,
@@ -4893,7 +4899,8 @@ class MainRuntimeService:
                     target_node_id=node_id,
                     message=note or '上级节点恢复了你，请继续当前任务。',
                     origin='node',
-                    relation='parent',
+                    # 我是发送方、也是收件人的父 ⇒ relation='parent' ⇒ parent_notice。
+                    relation=RELATION_PARENT,
                     source_node_id=str(sender.node_id or '').strip(),
                     intent_kind=INTENT_INSTRUCTION,
                 )

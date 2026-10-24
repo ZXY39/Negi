@@ -81,6 +81,16 @@ def derive_message_kind(
     one of :data:`SYSTEM_KINDS`. Everything else is decided by the origin and
     the endpoint relationship, so a model-sent message can never claim to be a
     terminal result or a verdict.
+
+    ``relation`` 是**发送方相对收件人的角色**，既不是消息的流动方向，也不是
+    "收件人相对发送人的角色"：
+
+    * 我发给自己的父节点 ⇒ 我是 ``child`` ⇒ ``child_progress``（子 → 父）；
+    * 我发给自己的子节点 ⇒ 我是 ``parent`` ⇒ ``parent_notice``（父 → 子）。
+
+    传参前问"我是收件人的谁"。问成"收件人是我的谁"就会把上行标成下行、
+    把下行标成上行——方向与取证都反了，而优先级只看 ``intent_kind``，不会
+    因此报错（实盘 bug，2026-10-24）。
     """
     normalized_origin = str(origin or '').strip().lower()
     normalized_system = str(system_kind or '').strip()
