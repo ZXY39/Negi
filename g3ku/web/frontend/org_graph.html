@@ -371,13 +371,6 @@
                                     <select id="task-depth-select" class="task-depth-select resource-select"
                                         aria-label="全局任务树深度"></select>
                                 </label>
-                                <div id="task-depth-custom-wrap" class="task-depth-custom" hidden>
-                                    <input id="task-depth-custom-input"
-                                        class="task-depth-custom-input spinless-number-input" type="number" min="0"
-                                        step="1" inputmode="numeric" aria-label="自定义全局任务树深度" placeholder="非负整数">
-                                    <button id="task-depth-custom-save" class="toolbar-btn ghost small"
-                                        type="button">应用</button>
-                                </div>
                             </div>
                             <span id="task-depth-hint" class="task-depth-hint" hidden></span>
                         </div>
@@ -847,6 +840,11 @@
                         <span class="task-detail-pill-label">活跃节点</span>
                         <span id="td-active-count" class="task-detail-pill-value">0</span>
                     </div>
+                    <label id="td-expand-all" class="task-detail-pill task-detail-toggle" title="展开全部节点（含已结束）">
+                        <input id="td-expand-all-input" type="checkbox" class="ui-checkbox-input" />
+                        <span class="ui-checkbox-box" aria-hidden="true"></span>
+                        <span class="task-detail-pill-label">展开全部</span>
+                    </label>
                     <div class="header-actions">
                         <button id="task-error-log-btn" class="task-detail-pill task-detail-error-log-btn" type="button" title="查看错误日志">
                             <i data-lucide="triangle-alert"></i>
