@@ -1995,7 +1995,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         tool_schemas: list[dict[str, Any]],
         compression_source: str = "token_compression",
     ) -> FrontdoorTokenPreflightResult:
-        body_messages, contract_messages = self._split_request_body_and_tool_contract_messages(request_messages)
+        body_messages, _contract_messages = self._split_request_body_and_tool_contract_messages(request_messages)
         normalized_body = [dict(item) for item in body_messages if isinstance(item, dict)]
         system_prefix: list[dict[str, Any]] = []
         if normalized_body and str(normalized_body[0].get("role") or "").strip().lower() == "system":
@@ -2034,6 +2034,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         older_history_messages, preserved_silent_groups = self._lift_silent_trace_groups(
             older_history_messages
         )
+        # 任务已终态的 silent 决策不再跨压缩累积：退休整组，不回插。
+        preserved_silent_groups = self._retire_terminal_silent_messages(preserved_silent_groups)
         # 防御：可压缩历史末尾若残留「assistant 声明工具调用但结果缺失」的悬空组
         # （正常对齐后不应出现，续跑种子/异常状态可能带入），从压缩请求里丢弃，
         # 避免 provider 拒绝请求；计数仅入诊断。
@@ -2237,7 +2239,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 *deferred_messages,
                 *preserved_silent_groups,
                 *recent_tail,
-                *contract_messages,
             ]
             rewritten_tokens = self._estimate_frontdoor_send_total_tokens(
                 provider_request_body=self._build_frontdoor_provider_request_body_preview(
@@ -2334,6 +2335,106 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         remaining = [item for index, item in enumerate(records) if index not in preserved_indexes]
         preserved = [item for index, item in enumerate(records) if index in preserved_indexes]
         return remaining, preserved
+
+    @staticmethod
+    def _silent_group_task_subjects(group: list[dict[str, Any]]) -> list[str]:
+        """从 silent 决策组里取 `subject` 中以 `task:` 开头的任务 id。"""
+        subjects: list[str] = []
+        for item in list(group or []):
+            if str(item.get("role") or "").strip().lower() != "assistant":
+                continue
+            for call in list(item.get("tool_calls") or []):
+                function = call.get("function") if isinstance(call, dict) else None
+                name = (
+                    str((function or {}).get("name") or call.get("name") or "").strip()
+                    if isinstance(call, dict)
+                    else ""
+                )
+                if name != SILENT_TOOL_NAME:
+                    continue
+                raw_arguments = (
+                    (function or {}).get("arguments")
+                    if isinstance(function, dict)
+                    else call.get("arguments")
+                )
+                arguments: Any = raw_arguments
+                if isinstance(raw_arguments, str):
+                    text = raw_arguments.strip()
+                    if not text.startswith("{"):
+                        continue
+                    try:
+                        arguments = json.loads(text)
+                    except Exception:
+                        continue
+                if not isinstance(arguments, dict):
+                    continue
+                subject = str(arguments.get("subject") or "").strip()
+                if subject.startswith("task:") and subject not in subjects:
+                    subjects.append(subject)
+        return subjects
+
+    def _silent_subject_task_status(self, task_id: str) -> str:
+        """读 `task:<id>` 的当前状态；读不到返回空串（按“未终态”保守处理）。"""
+        service = getattr(self._loop, "main_task_service", None)
+        get_task = getattr(service, "get_task", None)
+        if not callable(get_task):
+            get_task = getattr(getattr(service, "store", None), "get_task", None)
+        if not callable(get_task):
+            return ""
+        try:
+            task = get_task(str(task_id or "").strip())
+        except Exception:
+            return ""
+        return str(getattr(task, "status", "") or "").strip().lower()
+
+    @staticmethod
+    def _silent_call_ids(item: dict[str, Any]) -> set[str]:
+        call_ids: set[str] = set()
+        for call in list(item.get("tool_calls") or []):
+            if not isinstance(call, dict):
+                continue
+            function = call.get("function") if isinstance(call.get("function"), dict) else {}
+            name = str(function.get("name") or call.get("name") or "").strip()
+            if name != SILENT_TOOL_NAME:
+                continue
+            call_id = str(call.get("id") or "").strip()
+            if call_id:
+                call_ids.add(call_id)
+        return call_ids
+
+    def _retire_terminal_silent_messages(
+        self,
+        messages: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        """任务已终态的 silent 决策组在压缩时退休；其余原样保留。
+
+        入参是 `_lift_silent_trace_groups` 返回的扁平列表（assistant 行 + 它声明的
+        tool 结果行）。判据：同一 assistant 行里所有 `subject=task:<id>` 的当前状态都在
+        `{success, failed}` 时，退休该 assistant 行和它声明的 tool 结果；没有 task
+        subject、任一任务非终态、或有任何一次读取失败，都保留（保守优先）。
+        """
+        records = [dict(item) for item in list(messages or []) if isinstance(item, dict)]
+        retire_indexes: set[int] = set()
+        terminal = frozenset({"success", "failed"})
+        for index, item in enumerate(records):
+            if str(item.get("role") or "").strip().lower() != "assistant":
+                continue
+            call_ids = self._silent_call_ids(item)
+            if not call_ids:
+                continue
+            task_subjects = self._silent_group_task_subjects([item])
+            if not task_subjects:
+                continue
+            statuses = [self._silent_subject_task_status(subject) for subject in task_subjects]
+            if not statuses or not all(status in terminal for status in statuses):
+                continue
+            retire_indexes.add(index)
+            for other_index, other in enumerate(records):
+                if str(other.get("role") or "").strip().lower() != "tool":
+                    continue
+                if str(other.get("tool_call_id") or "").strip() in call_ids:
+                    retire_indexes.add(other_index)
+        return [item for index, item in enumerate(records) if index not in retire_indexes]
 
     @classmethod
     def _drop_dangling_trailing_tool_call_groups(
@@ -7351,13 +7452,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         persisted_messages = list(stable_messages)
         persisted_dynamic_appendix_messages = list(dynamic_appendix_messages)
         if prompt_scope == "ceo_frontdoor":
-            request_body_messages, tool_contract_messages = self._split_request_body_and_tool_contract_messages(messages)
+            request_body_messages, _tool_contract_messages = self._split_request_body_and_tool_contract_messages(messages)
             if request_body_messages:
                 persisted_messages = self._durable_frontdoor_request_body_messages(request_body_messages)
-            if tool_contract_messages:
-                persisted_dynamic_appendix_messages = list(tool_contract_messages)
-            else:
-                persisted_dynamic_appendix_messages = []
+            # 旧合同尾块已退役：不再写回 dynamic appendix，只在装配/压缩时剥离。
+            persisted_dynamic_appendix_messages = []
         shrink_reason = str(
             frontdoor_history_shrink_reason_from_prepare
             or state.get("frontdoor_history_shrink_reason")

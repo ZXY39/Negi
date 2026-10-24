@@ -4442,9 +4442,9 @@ def test_node_token_compaction_keeps_append_notice_tail_before_compact_block() -
                     '{"kind":"raw_notice_window","notice_count":1,"notices":[{"message":"keep me visible"}]}'
                 ),
             },
+            contract_message,
             {"role": "assistant", "content": "older history detail"},
             {"role": "assistant", "content": "recent tail detail"},
-            contract_message,
         ],
         recent_tail_count=1,
     )
@@ -4457,10 +4457,11 @@ def test_node_token_compaction_keeps_append_notice_tail_before_compact_block() -
     assert rewritten[1]["role"] == "user"
     assert notice_index < compact_index
     assert compact_index < len(rewritten) - 1
-    assert extract_node_dynamic_contract_payload([rewritten[-1]]) is not None
+    # 旧合同尾块已退役：压缩后不再保留，也不再进元数据。
+    assert extract_node_dynamic_contract_payload(rewritten) is None
     assert payload["node_id"] == "node-token-compact"
     assert payload["append_notice_tail_count"] == 1
-    assert payload["contract_message_count"] == 1
+    assert "contract_message_count" not in payload
 
 
 def test_node_token_compaction_hoists_deep_raw_notice_windows_out_of_compressible_history() -> None:

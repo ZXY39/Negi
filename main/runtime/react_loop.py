@@ -164,7 +164,6 @@ from main.runtime.node_prompt_contract import (
     extract_node_dynamic_contract_payload,
     inject_node_dynamic_contract_message,
     is_node_dynamic_contract_echo_text,
-    is_node_dynamic_contract_message,
     strip_node_dynamic_contract_messages,
     upsert_node_dynamic_contract_message,
 )
@@ -6063,14 +6062,10 @@ class ReActToolLoop:
             for item in list(request_messages or [])
             if isinstance(item, dict)
         ]
-        contract_tail: list[dict[str, Any]] = []
-        # 请求尾部顺序为「契约 + 当轮 turn-only note」；先暂存末尾 note，
-        # 收取契约尾后再把它放回契约之后，保持原顺序重建。
+        # 请求尾部的 turn-only note 先暂存，压缩后按原顺序放回。
         trailing_note: list[dict[str, Any]] = []
         if normalized and is_turn_only_system_note_message(normalized[-1]):
             trailing_note.append(normalized.pop())
-        while normalized and is_node_dynamic_contract_message(normalized[-1]):
-            contract_tail.insert(0, normalized.pop())
 
         system_prefix: list[dict[str, Any]] = []
         while normalized and str(normalized[0].get("role") or "").strip().lower() == "system":
@@ -6113,7 +6108,6 @@ class ReActToolLoop:
             "append_notice_tail": append_notice_tail,
             "compressible_history": compressible_history,
             "recent_tail": recent_tail,
-            "contract_tail": contract_tail,
             "trailing_note": trailing_note,
         }
 
@@ -6198,7 +6192,6 @@ class ReActToolLoop:
             "history_message_count": len(list(parts.get("compressible_history") or [])),
             "compacted_message_count": len(list(parts.get("compressible_history") or [])),
             "retained_recent_tail_count": len(list(parts.get("recent_tail") or [])),
-            "contract_message_count": len(list(parts.get("contract_tail") or [])),
             "append_notice_tail_count": len(list(parts.get("append_notice_tail") or [])),
         }
         if raw_leftover:
@@ -6222,7 +6215,6 @@ class ReActToolLoop:
             compacted_block,
             *raw_leftover,
             *cls._bound_node_compaction_tail_messages(parts.get("recent_tail")),
-            *list(parts.get("contract_tail") or []),
             *list(parts.get("trailing_note") or []),
         ]
         return rewritten, compacted_payload
