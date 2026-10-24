@@ -801,6 +801,9 @@ class MainRuntimeService:
         self.node_runner.child_final_sink = self._deliver_child_final_message
         # 异常暂停 → 父节点信箱 `child_abnormal_pause`（high 优先级，必唤醒）。
         self.node_runner.abnormal_pause_sink = self._deliver_child_abnormal_pause
+        # 验收车道（交接单 + 三档裁决）的结构性消息与 `send_message` 共用同一条投递
+        # 实现，确保它们也带机械推导的 kind/priority（直写通知表会留下无类型行）。
+        self.node_runner.mailbox_delivery_sink = self._deliver_structural_node_message
         self.node_runner._tool_default_timeout_seconds = self._tool_default_timeout_seconds(app_config)
         self.node_runner._max_task_nodes = self._max_task_nodes
         self.node_runner._node_tool_timeout_ceiling_seconds = self._node_tool_timeout_ceiling_seconds
@@ -4454,10 +4457,15 @@ class MainRuntimeService:
         in_reply_to: str = '',
         submission_id: str = '',
         epoch_id: str = '',
+        wake: bool = True,
     ) -> dict[str, Any]:
         """一条定向投递：判定矩阵 → 机械推导 → 指纹去重 → 落箱 → 唤醒。
 
         `origin`/`relation`/`system_kind` 决定 kind；`system_kind` 只有运行时能传。
+
+        `wake=False` 用于「必须留痕、但不得叫醒收件人」的系统消息：pass 裁决的
+        收件人即将终局，reject_no_progress 裁决的收件人刚被判暂停（唤醒会立刻清掉
+        暂停位）。消息照常落箱并带 kind/priority，只是不触发 R2 唤醒。
         """
         normalized_task_id = self.normalize_task_id(task_id)
         normalized_node_id = self.normalize_node_id(str(target_node_id or '').strip())
@@ -4485,7 +4493,7 @@ class MainRuntimeService:
                 and str(item.fingerprint or '').strip() == fingerprint
             ):
                 wake_outcome = ''
-                if self._delivery_wakes_target(
+                if wake and self._delivery_wakes_target(
                     task_id=normalized_task_id,
                     node_id=normalized_node_id,
                     node=node,
@@ -4534,7 +4542,7 @@ class MainRuntimeService:
         self.log_service.refresh_task_view(normalized_task_id, mark_unread=True)
 
         wake_outcome = ''
-        if self._delivery_wakes_target(
+        if wake and self._delivery_wakes_target(
             task_id=normalized_task_id,
             node_id=normalized_node_id,
             node=node,
@@ -4567,6 +4575,15 @@ class MainRuntimeService:
             'wake': wake_outcome,
             'reason': '',
         }
+
+    async def _deliver_structural_node_message(self, **payload: Any) -> dict[str, Any]:
+        """NodeRunner 的结构性消息投递口（交接单 / 验收裁决）。
+
+        只是 `deliver_node_message` 的一跳间接：绑定的是这个方法而不是 bound
+        method 本身，保证运行期替换/包装 `deliver_node_message` 时投递口跟着走，
+        也让"验收消息确实走了同一条投递"在测试里可观测。
+        """
+        return await self.deliver_node_message(**payload)
 
     async def _deliver_node_message_from_node(
         self,

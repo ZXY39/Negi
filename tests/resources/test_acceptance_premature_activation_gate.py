@@ -11,6 +11,7 @@ final 提交 **且** 它的帧里没有未闭合的非提交工具轮。
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 from main.models import NodeFinalResult, NodeRecord
@@ -199,7 +200,9 @@ def _consume(runner: NodeRunner, result: NodeFinalResult) -> NodeFinalResult:
     runner._finalize_acceptance_pass = lambda **kwargs: passed.append('pass')  # type: ignore[attr-defined]
     runner._record_acceptance_evidence_audit = lambda **kwargs: None  # type: ignore[attr-defined]
     runner._consumed_passes = passed  # type: ignore[attr-defined]
-    return runner._handle_acceptance_node_result(task=_task(), acceptance=_acceptance(), result=result)
+    return asyncio.run(
+        runner._handle_acceptance_node_result(task=_task(), acceptance=_acceptance(), result=result)
+    )
 
 
 def test_frozen_partial_passes_through_the_verdict_consumer_untouched() -> None:

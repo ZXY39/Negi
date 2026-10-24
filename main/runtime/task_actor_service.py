@@ -735,7 +735,9 @@ class TaskActorService:
         if not self._is_root_final_acceptance_node(task=task, node=node):
             return
         acceptance = node
-        handled = self._node_runner._handle_acceptance_node_result(task=task, acceptance=acceptance, result=result)
+        handled = await self._node_runner._handle_acceptance_node_result(
+            task=task, acceptance=acceptance, result=result
+        )
         if str(handled.delivery_status or '').strip() != 'partial':
             return
 
@@ -1002,7 +1004,7 @@ class TaskActorService:
                 if handshake_state not in pending_states:
                     continue
                 result = persisted_verdict
-                handled = self._node_runner._handle_acceptance_node_result(
+                handled = await self._node_runner._handle_acceptance_node_result(
                     task=task,
                     acceptance=node,
                     result=result,
@@ -1049,7 +1051,7 @@ class TaskActorService:
                     progressed = True
                 continue
             result = self._node_runner._result_from_record(node)
-            handled = self._node_runner._handle_acceptance_node_result(
+            handled = await self._node_runner._handle_acceptance_node_result(
                 task=task,
                 acceptance=node,
                 result=result,
@@ -1906,7 +1908,7 @@ class TaskActorService:
         )
         acceptance_result = await self._execute_node(task_id, acceptance.node_id)
         acceptance = self._store.get_node(acceptance.node_id) or acceptance
-        acceptance_result = self._node_runner._handle_acceptance_node_result(
+        acceptance_result = await self._node_runner._handle_acceptance_node_result(
             task=task,
             acceptance=acceptance,
             result=acceptance_result,

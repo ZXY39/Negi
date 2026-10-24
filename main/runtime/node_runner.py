@@ -70,7 +70,13 @@ from main.runtime.internal_tools import (
     SpawnChildNodesTool,
     SubmitFinalResultTool,
 )
-from main.runtime.node_message_kind import INTENT_PROGRESS
+from main.runtime.node_message_kind import (
+    INTENT_INSTRUCTION,
+    INTENT_PROGRESS,
+    KIND_ACCEPTANCE_VERDICT,
+    RELATION_CHILD,
+    RELATION_PARENT,
+)
 from main.runtime.node_prompt_contract import extract_node_dynamic_contract_payload
 from main.runtime.node_wake import (
     WAKE_ON_ALL_CHILDREN,
@@ -293,6 +299,10 @@ class NodeRunner:
         self.child_final_sink = None
         # 异常暂停 → 父节点 `child_abnormal_pause` 的投递口（由 runtime_service 绑定）。
         self.abnormal_pause_sink = None
+        # 验收车道的结构性消息（交接单 / 三档裁决）→ 信箱的统一投递口，绑定到
+        # `MainRuntimeService.deliver_node_message`。走同一个分类/去重/落箱实现，
+        # 保证验收消息与模型消息一样带机械推导的 kind/priority。
+        self.mailbox_delivery_sink = None
         self._pending_terminal_messages: set[asyncio.Task[None]] = set()
         # 子节点创建后的立即派发口（由 task_actor_service 绑定）。拆掉阻塞承诺后
         # 父节点不再等待子管线，创建完就必须把节点交给调度器；没有这个口时（单测、
@@ -773,7 +783,7 @@ class NodeRunner:
                 return self._mark_failed(task_id, node.node_id, reason=terminal_reason)
             if (self._store.get_task(task_id) or task).cancel_requested:
                 return self._mark_failed(task_id, node.node_id, reason='canceled')
-            result = self._maybe_start_acceptance_handshake(task=task, node=node, result=result) or result
+            result = await self._maybe_start_acceptance_handshake(task=task, node=node, result=result) or result
             if str(result.delivery_status or '').strip() == 'partial':
                 self._log_service.refresh_task_view(task_id, mark_unread=True)
                 return result
@@ -1677,13 +1687,6 @@ class NodeRunner:
         )
         self._reactivate_node_for_retry(task_id=task.task_id, node_id=acceptance.node_id)
         self._reactivate_node_for_retry(task_id=task.task_id, node_id=execution.node_id)
-        self._persist_node_notification_direct(
-            task_id=task.task_id,
-            epoch_id='',
-            source_node_id=acceptance.node_id,
-            target_node_id=execution.node_id,
-            message=node_message_body(feedback_text, ref=feedback_ref),
-        )
         if self._acceptance_updates_task_final_acceptance(task=task, execution=execution, acceptance=acceptance):
             self._set_task_final_acceptance_state(
                 task_id=task.task_id,
@@ -1891,7 +1894,7 @@ class NodeRunner:
             )
         self._log_service.refresh_task_view(task_id, mark_unread=True)
 
-    def _handle_acceptance_node_result(
+    async def _handle_acceptance_node_result(
         self,
         *,
         task,
@@ -1909,6 +1912,20 @@ class NodeRunner:
         except Exception as exc:  # 审计是旁路：记账失败绝不影响验收控制流
             logger.debug(f'acceptance evidence audit skipped: {acceptance.node_id}: {describe_exception(exc)}')
         if str(result.status or '').strip() == STATUS_SUCCESS:
+            # 三档裁决都发消息（设计 §3.2）：pass 也要留一条带 submission_id 的
+            # 绑定记录，否则"这一份提交被通过"只存在于握手字段里，取证时对不上。
+            # `wake=False`：被验节点紧接着就被收尾成成功，叫醒它只会多跑一回合。
+            await self._deliver_acceptance_verdict(
+                task=task,
+                acceptance=acceptance,
+                execution=execution,
+                result=result,
+                verdict='pass',
+                message=node_message_body(
+                    str(result.summary or result.answer or '').strip() or '验收通过',
+                ),
+                wake=False,
+            )
             self._finalize_acceptance_pass(task=task, execution=execution, acceptance=acceptance, result=result)
             return NodeFinalResult(
                 status=STATUS_SUCCESS,
@@ -1933,6 +1950,21 @@ class NodeRunner:
                 result=result,
                 rejection_count=next_rejection_count,
             )
+            # 先落暂停再投裁决：`wake=False` 是必须的——唤醒路径会清掉暂停位，
+            # 而这一档的语义正是"停下来等人处理"。priority=high 由分类器按 verdict
+            # 推导（不是靠这里的字面量）。
+            await self._deliver_acceptance_verdict(
+                task=task,
+                acceptance=acceptance,
+                execution=execution,
+                result=result,
+                verdict='reject_no_progress',
+                message=node_message_body(
+                    self._acceptance_feedback_text(result) or '验收判定为无进展。',
+                )
+                + '\n\n裁决：驳回·无进展。被验节点已转入异常暂停，等待上级或人工处理。',
+                wake=False,
+            )
             return NodeFinalResult(
                 status=STATUS_FAILED,
                 delivery_status='final',
@@ -1948,12 +1980,24 @@ class NodeRunner:
         # 投给执行节点、复活验收与执行双方，交给下一轮「执行→验收」继续，
         # 绝不因拒收次数把节点对或任务判成终态。
         feedback_text = self._acceptance_feedback_text(result)
+        feedback_ref = self._externalized_result_payload_ref(task_id=task.task_id, node=acceptance)
         self._persist_rejection_feedback_and_keep_acceptance_live(
             task=task,
             execution=execution,
             acceptance=acceptance,
             feedback_text=feedback_text,
             rejection_count=next_rejection_count,
+        )
+        # 打回意见就是 reject 档的裁决消息。被验节点已被复活，投递即唤醒——
+        # 这正是设计 §11.2 的"acceptance_verdict 唤醒被验节点，同一回合继续干"。
+        await self._deliver_acceptance_verdict(
+            task=task,
+            acceptance=acceptance,
+            execution=execution,
+            result=result,
+            verdict='reject',
+            message=node_message_body(feedback_text, ref=feedback_ref),
+            wake=True,
         )
         return NodeFinalResult(
             status=STATUS_SUCCESS,
@@ -2001,7 +2045,58 @@ class NodeRunner:
                 final_execution_output='',
             )
 
-    def _maybe_start_acceptance_handshake(
+    async def _deliver_acceptance_verdict(
+        self,
+        *,
+        task,
+        acceptance: NodeRecord,
+        execution: NodeRecord | None,
+        result: NodeFinalResult,
+        verdict: str,
+        message: str,
+        wake: bool,
+    ) -> dict[str, Any]:
+        """验收裁决 → 被验节点信箱（`acceptance_verdict`，三档都发）。
+
+        `submission_id` 把裁决绑定到"这一份提交"（迟到裁决规则的唯一判据）。
+        载荷里没带时退回握手上登记的提交 id——旧库里的裁决载荷没有这个字段，
+        丢绑定会让迟到裁决作用到新提交上。
+
+        `wake` 由档位决定：reject 要唤醒被验节点继续干（T6）；pass 的收件人即将
+        终局、reject_no_progress 的收件人刚被暂停，都不该叫醒。
+        """
+        if execution is None:
+            return {'status': 'skipped', 'reason': 'no_execution_node'}
+        submission_id = str(result.submission_id or '').strip()
+        if not submission_id:
+            handshake = normalize_acceptance_handshake(
+                (execution.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY)
+            )
+            submission_id = str(handshake.get('latest_execution_submission_id') or '').strip()
+        delivered = await self._mailbox_deliver(
+            task_id=task.task_id,
+            target_node_id=execution.node_id,
+            message=message,
+            origin='node',
+            # 发送方是验收节点（被验节点的直接子节点）。kind 由 system_kind 机械
+            # 决定；relation 只保证信封上的方向语义与之一致（我是 child）。
+            relation=RELATION_CHILD,
+            system_kind=KIND_ACCEPTANCE_VERDICT,
+            source_node_id=str(acceptance.node_id or '').strip(),
+            intent_kind=INTENT_PROGRESS,
+            verdict=verdict,
+            submission_id=submission_id,
+            wake=wake,
+        )
+        if str(delivered.get('status') or '') not in {'delivered', 'deduplicated'}:
+            logger.warning(
+                f'acceptance verdict not delivered: task={task.task_id} '
+                f'acceptance={acceptance.node_id} execution={execution.node_id} '
+                f'verdict={verdict} result={delivered!r}'
+            )
+        return delivered
+
+    async def _maybe_start_acceptance_handshake(
         self,
         *,
         task,
@@ -2036,17 +2131,29 @@ class NodeRunner:
             node_id=str(acceptance.node_id or ''),
             source_node_id=str(node.node_id or ''),
         )
-        self._persist_node_notification_direct(
+        # 交接单走信箱投递（而不是直写通知表），这样它与模型消息共用同一套机械
+        # 推导：执行节点是验收节点的父，所以是下行 `parent_notice`。
+        # `wake=False`：验收节点由"提交"这个事件唤醒（派发扫描看握手状态），
+        # 设计 §5.2 明确它不由普通消息唤醒；在这里唤醒会在本回合未收尾时就起验收回合。
+        delivered = await self._mailbox_deliver(
             task_id=task.task_id,
-            epoch_id='',
-            source_node_id=node.node_id,
             target_node_id=acceptance.node_id,
             message=self._acceptance_handoff_message(
                 node=node,
                 result=result,
                 result_ref=result_ref,
             ),
+            origin='node',
+            relation=RELATION_PARENT,
+            source_node_id=str(node.node_id or '').strip(),
+            intent_kind=INTENT_INSTRUCTION,
+            wake=False,
         )
+        if str(delivered.get('status') or '') not in {'delivered', 'deduplicated'}:
+            logger.warning(
+                f'acceptance handoff not delivered: task={task.task_id} '
+                f'acceptance={acceptance.node_id} result={delivered!r}'
+            )
         self._log_service.refresh_task_view(task.task_id, mark_unread=True)
         return NodeFinalResult(
             status=STATUS_SUCCESS,
@@ -2333,61 +2440,6 @@ class NodeRunner:
                 'active_round_tool_call_ids': [],
             },
             publish_snapshot=False,
-        )
-
-    def stamp_distribution_target_pending_notice_state(
-        self,
-        *,
-        task_id: str,
-        node_id: str,
-        epoch_id: str,
-        updated_at: str | None = None,
-    ) -> None:
-        target = self._store.get_node(node_id)
-        if target is None or str(target.task_id or '').strip() != str(task_id or '').strip():
-            return
-        resume_mode, holding_round_id = self._pending_notice_resume_target(node=target)
-        self._update_pending_notice_state(
-            node_id=node_id,
-            resume_mode=resume_mode,
-            epoch_id=str(epoch_id or '').strip(),
-            holding_round_id=holding_round_id,
-            updated_at=str(updated_at or now_iso()).strip(),
-        )
-
-    def _persist_node_notification_direct(
-        self,
-        *,
-        task_id: str,
-        epoch_id: str,
-        source_node_id: str,
-        target_node_id: str,
-        message: str,
-        origin: str = '',
-    ) -> None:
-        # origin 非空时写入 payload（供消息列表展示层按来源过滤，如 system_relay 转述族），
-        # 默认空串保持与历史行为一致。
-        notification_payload: dict[str, Any] = {'origin': origin} if str(origin or '').strip() else {}
-        self._store.upsert_task_node_notification(
-            {
-                'notification_id': new_command_id().replace('command:', 'notif:', 1),
-                'task_id': task_id,
-                'node_id': target_node_id,
-                'epoch_id': epoch_id,
-                'source_node_id': source_node_id,
-                'message': str(message or '').strip(),
-                'status': 'delivered',
-                'created_at': _now(),
-                'delivered_at': _now(),
-                'consumed_at': '',
-                'payload': notification_payload,
-            }
-        )
-        self.stamp_distribution_target_pending_notice_state(
-            task_id=task_id,
-            node_id=target_node_id,
-            epoch_id=epoch_id,
-            updated_at=_now(),
         )
 
     def _flush_latest_valid_result_if_paused(self, *, task_id: str, node_id: str) -> NodeFinalResult | None:
@@ -2693,6 +2745,19 @@ class NodeRunner:
             ref=ref,
             in_reply_to=in_reply_to,
         )
+
+    async def _mailbox_deliver(self, **payload: Any) -> dict[str, Any]:
+        """结构性/系统消息的投递口：与 `send_message` 共用 `deliver_node_message`。
+
+        验收交接单与三档裁决不是模型的 `send_message`，但必须走同一条投递实现，
+        否则它们会落成没有 kind/priority 的裸通知（实盘 `task:eb3f3a7753f7`）。
+        NodeRunner 没有 service 引用，通道由 runtime_service 绑定；缺通道时返回
+        可读错误而不是静默成功——"消息没落箱"必须被看见。
+        """
+        sink = getattr(self, 'mailbox_delivery_sink', None)
+        if not callable(sink):
+            return {'status': 'rejected', 'reason': 'node_mailbox_delivery_unavailable'}
+        return await sink(**payload)
 
     async def _manage_child_nodes(
         self,
@@ -6418,17 +6483,6 @@ class NodeRunner:
                 continue
             return str(round_id or '').strip(), copy.deepcopy(payload)
         return None
-
-    def _pending_notice_resume_target(self, *, node: NodeRecord) -> tuple[str, str]:
-        if str(getattr(node, 'node_kind', '') or '').strip().lower() != KIND_EXECUTION:
-            return RESUME_MODE_ORDINARY, ''
-        latest_round = self._latest_incomplete_spawn_round(parent=node)
-        if latest_round is None:
-            return RESUME_MODE_ORDINARY, ''
-        round_id, _payload = latest_round
-        if not round_id:
-            return RESUME_MODE_ORDINARY, ''
-        return RESUME_MODE_WAIT_FOR_CHILDREN, round_id
 
     def live_distribution_child_node_ids(self, *, task_id: str, parent_node_id: str) -> list[str]:
         task = self._store.get_task(task_id)

@@ -388,7 +388,7 @@ async def test_rejection_after_resume_clears_resumable_candidate(tmp_path: Path)
             remaining_work=[],
             blocking_reason="缺少验收项",
         )
-        handled = service.node_runner._handle_acceptance_node_result(
+        handled = await service.node_runner._handle_acceptance_node_result(
             task=service.store.get_task(task_id),
             acceptance=acceptance,
             result=rejection,

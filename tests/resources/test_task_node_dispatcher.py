@@ -925,12 +925,15 @@ async def test_task_actor_service_rejection_loop_completes_across_run_task_round
             result_ref="artifact:root-v2",
             result_summary="draft v2",
         )
-        service.node_runner._persist_node_notification_direct(
+        await service.deliver_node_message(
             task_id=task_id,
-            epoch_id="",
-            source_node_id=root.node_id,
             target_node_id=acceptance.node_id,
             message="新的被检验节点输出如下，请继续在当前验收上下文中核验：draft v2",
+            origin="node",
+            relation="parent",
+            source_node_id=root.node_id,
+            intent_kind="指令",
+            wake=False,
         )
         _set_pending([acceptance.node_id])
         return NodeFinalResult(

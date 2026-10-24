@@ -175,10 +175,16 @@ class TestVerdictDrain:
         assert child.status == 'success'
         handshake = dict((child.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY) or {})
         assert handshake['state'] == ACCEPTANCE_STATE_ACCEPTED
-        assert deliveries, 'child_final must be delivered to the parent'
-        assert deliveries[0]['target_node_id'] == ROOT
-        assert deliveries[0]['system_kind'] == 'child_final'
-        assert deliveries[0]['source_node_id'] == CHILD
+        finals = [item for item in deliveries if item.get('system_kind') == 'child_final']
+        assert finals, 'child_final must be delivered to the parent'
+        assert finals[0]['target_node_id'] == ROOT
+        assert finals[0]['source_node_id'] == CHILD
+        # pass 也留一条带绑定信息的裁决消息（发回被验节点，不唤醒）。
+        verdicts = [item for item in deliveries if item.get('system_kind') == 'acceptance_verdict']
+        assert verdicts and verdicts[0]['target_node_id'] == CHILD
+        assert verdicts[0]['verdict'] == 'pass'
+        assert 'submission_id' in verdicts[0]
+        assert verdicts[0]['wake'] is False
         assert wakes == [ROOT]
 
     @pytest.mark.asyncio
@@ -255,6 +261,9 @@ class TestVerdictDrain:
         assert handshake['rejection_count'] == 1
         feedback = service.store.list_task_node_notifications(TASK, CHILD)
         assert feedback and '第 2 节缺少实测数据' in feedback[0].message
+        assert feedback[0].kind == 'acceptance_verdict'
+        assert feedback[0].verdict == 'reject'
+        assert feedback[0].priority == 'normal'
         # 打回不是终局：父节点不应收到 child_final。
         assert service.store.list_task_node_notifications(TASK, ROOT) == []
 
@@ -304,6 +313,17 @@ class TestVerdictDrain:
             '子节点' in str(item.message or '') and '暂停' in str(item.message or '')
             for item in parent_notices
         )
+        # 裁决本身也要落到被验节点信箱：kind/priority 由分类器推导，
+        # reject_no_progress 必须是 high（P6：父节点必须动作）。
+        verdicts = [
+            item
+            for item in service.store.list_task_node_notifications(TASK, CHILD)
+            if item.kind == 'acceptance_verdict'
+        ]
+        assert verdicts, 'reject_no_progress must leave a typed verdict message'
+        assert verdicts[-1].priority == 'high'
+        assert verdicts[-1].verdict == 'reject_no_progress'
+        assert verdicts[-1].submission_id == 'submission:test'
 
 
     @pytest.mark.asyncio
@@ -394,7 +414,7 @@ class TestNonRootAcceptanceHandshake:
             blocking_reason='',
         )
 
-        handled = service.node_runner._maybe_start_acceptance_handshake(
+        handled = await service.node_runner._maybe_start_acceptance_handshake(
             task=task, node=child, result=result
         )
         await _settle(service)

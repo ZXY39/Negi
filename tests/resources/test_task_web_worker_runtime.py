@@ -5091,10 +5091,13 @@ async def test_spawn_children_surfaces_acceptance_failure_info_while_preserving_
             )
 
         monkeypatch.setattr(service.node_runner, "run_node", _fake_run_node)
+        async def _passthrough_acceptance(*, task, acceptance, result):
+            return result
+
         monkeypatch.setattr(
             service.node_runner,
             "_handle_acceptance_node_result",
-            lambda *, task, acceptance, result: result,
+            _passthrough_acceptance,
         )
 
         results = await service.node_runner._spawn_children(
@@ -7353,18 +7356,20 @@ def test_final_acceptance_rejection_kicks_back_even_past_former_budget(tmp_path:
         result_summary="root deliverable",
         rejection_count=42,
     )
-    result = service.node_runner._handle_acceptance_node_result(
-        task=task,
-        acceptance=acceptance,
-        result=NodeFinalResult(
-            status="failed",
-            delivery_status="final",
-            summary="final acceptance failed",
-            answer="final acceptance failed",
-            evidence=[],
-            remaining_work=[],
-            blocking_reason="final acceptance failed",
-        ),
+    result = asyncio.run(
+        service.node_runner._handle_acceptance_node_result(
+            task=task,
+            acceptance=acceptance,
+            result=NodeFinalResult(
+                status="failed",
+                delivery_status="final",
+                summary="final acceptance failed",
+                answer="final acceptance failed",
+                evidence=[],
+                remaining_work=[],
+                blocking_reason="final acceptance failed",
+            ),
+        )
     )
 
     latest_task = service.get_task(record.task_id)
@@ -7551,7 +7556,7 @@ async def test_first_acceptance_rejection_keeps_acceptance_live_and_feeds_back_e
             blocking_reason="missing board format",
         )
 
-        partial = service.node_runner._handle_acceptance_node_result(task=task, acceptance=acceptance, result=rejection)
+        partial = await service.node_runner._handle_acceptance_node_result(task=task, acceptance=acceptance, result=rejection)
         latest_acceptance = service.store.get_node(acceptance.node_id)
         latest_root = service.store.get_node(root.node_id)
         notifications = service.store.list_task_node_notifications(task.task_id, root.node_id)
@@ -7591,7 +7596,7 @@ async def test_acceptance_blocked_result_is_terminal_without_retry(tmp_path: Pat
             result_ref="artifact:result",
             result_summary="execution crashed without a repair path",
         )
-        terminal = service.node_runner._handle_acceptance_node_result(
+        terminal = await service.node_runner._handle_acceptance_node_result(
             task=task,
             acceptance=acceptance,
             result=NodeFinalResult(
@@ -7654,7 +7659,7 @@ async def test_reactivated_acceptance_syncs_task_node_projection_after_rejection
             failure_reason="missing board format",
         )
 
-        service.node_runner._handle_acceptance_node_result(
+        await service.node_runner._handle_acceptance_node_result(
             task=task,
             acceptance=acceptance,
             result=NodeFinalResult(
@@ -7717,7 +7722,7 @@ async def test_second_acceptance_rejection_still_requests_execution_retry(tmp_pa
             blocking_reason="still missing board format",
         )
 
-        partial = service.node_runner._handle_acceptance_node_result(task=task, acceptance=acceptance, result=rejection)
+        partial = await service.node_runner._handle_acceptance_node_result(task=task, acceptance=acceptance, result=rejection)
         latest_task = service.get_task(record.task_id)
         latest_root = service.store.get_node(root.node_id)
         latest_acceptance = service.store.get_node(acceptance.node_id)
@@ -7774,7 +7779,7 @@ async def test_high_rejection_count_still_requests_execution_retry(tmp_path: Pat
             blocking_reason="still missing board format",
         )
 
-        partial = service.node_runner._handle_acceptance_node_result(task=task, acceptance=acceptance, result=rejection)
+        partial = await service.node_runner._handle_acceptance_node_result(task=task, acceptance=acceptance, result=rejection)
         latest_task = service.get_task(record.task_id)
         latest_root = service.store.get_node(root.node_id)
         latest_acceptance = service.store.get_node(acceptance.node_id)
@@ -7820,7 +7825,7 @@ async def test_execution_retry_failure_cancels_waiting_acceptance_pair(tmp_path:
             result_ref="artifact:result",
             result_summary="draft answer",
         )
-        partial = service.node_runner._handle_acceptance_node_result(
+        partial = await service.node_runner._handle_acceptance_node_result(
             task=task,
             acceptance=acceptance,
             result=NodeFinalResult(
@@ -7893,7 +7898,7 @@ async def test_execution_retry_failure_does_not_overwrite_successful_acceptance(
             result_ref="artifact:result",
             result_summary="draft answer",
         )
-        partial = service.node_runner._handle_acceptance_node_result(
+        partial = await service.node_runner._handle_acceptance_node_result(
             task=task,
             acceptance=acceptance,
             result=NodeFinalResult(
@@ -7975,7 +7980,7 @@ async def test_run_final_acceptance_avoids_duplicate_task_state_rewrites_after_s
                 blocking_reason="still missing board format",
             )
 
-        def _shared_handler(*, task, acceptance, result: NodeFinalResult) -> NodeFinalResult:
+        async def _shared_handler(*, task, acceptance, result: NodeFinalResult) -> NodeFinalResult:
             assert result.status == "failed"
             service.log_service.update_task_metadata(
                 task.task_id,
@@ -8045,7 +8050,7 @@ async def test_root_final_acceptance_bootstrap_is_frozen_and_tail_names_current_
             status="success",
             final_output="root deliverable ready",
         )
-        handoff = service.node_runner._maybe_start_acceptance_handshake(
+        handoff = await service.node_runner._maybe_start_acceptance_handshake(
             task=task,
             node=root,
             result=NodeFinalResult(
@@ -8071,7 +8076,7 @@ async def test_root_final_acceptance_bootstrap_is_frozen_and_tail_names_current_
 
         # 重提交只换待验指针：bootstrap 不受交付正文影响，指纹跟着载荷 ref 走。
         first_fingerprint = str((after_first_round.metadata or {}).get("recovery_fingerprint") or "")
-        resubmission = service.node_runner._maybe_start_acceptance_handshake(
+        resubmission = await service.node_runner._maybe_start_acceptance_handshake(
             task=task,
             node=service.store.get_node(root.node_id),
             result=NodeFinalResult(
