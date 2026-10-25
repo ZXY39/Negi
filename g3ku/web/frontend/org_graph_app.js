@@ -3663,7 +3663,7 @@ function sendImmediateCeoMessage({ text = "", uploads = [], scrollMode = "bottom
         sessionId: activeSessionId(),
         timestamp: sentAt,
     });
-    const turn = createPendingCeoTurn("user", { scrollMode });
+    const turn = createPendingCeoTurn("user", { scrollMode, requestedAt: sentAt });
     if (turn) S.ceoPendingTurns.push(turn);
     S.ceoTurnActive = true;
     S.ceoPauseBusy = false;
@@ -3723,7 +3723,7 @@ function sendImmediateCeoMessageBatch(entries = [], { scrollMode = "bottom" } = 
             timestamp: batchSentAt,
         });
     });
-    const turn = createPendingCeoTurn("user", { scrollMode });
+    const turn = createPendingCeoTurn("user", { scrollMode, requestedAt: batchSentAt });
     if (turn) S.ceoPendingTurns.push(turn);
     const lastEntry = normalizedEntries[normalizedEntries.length - 1];
     S.ceoTurnActive = true;
@@ -4975,34 +4975,82 @@ function sliceCeoRailTurns(turns, turn) {
     });
 }
 
-function ceoTraceElapsedSeconds(turns = []) {
-    let elapsedTotal = 0;
-    let hasElapsed = false;
-    let startMs = null;
-    let endMs = null;
-    (Array.isArray(turns) ? turns : []).forEach((turnItem) => {
-        (Array.isArray(turnItem?.tools) ? turnItem.tools : []).forEach((tool) => {
-            const seconds = Number(tool?.elapsed_seconds);
-            if (Number.isFinite(seconds) && seconds > 0) {
-                elapsedTotal += seconds;
-                hasElapsed = true;
-            }
-            const started = Date.parse(String(tool?.started_at || ""));
-            const finished = Date.parse(String(tool?.finished_at || ""));
-            if (Number.isFinite(started)) startMs = startMs === null ? started : Math.min(startMs, started);
-            if (Number.isFinite(finished)) endMs = endMs === null ? finished : Math.max(endMs, finished);
+function ceoTurnsEarliestToolStartMs(turns = []) {
+    let earliest = null;
+    (Array.isArray(turns) ? turns : []).forEach((group) => {
+        (Array.isArray(group?.tools) ? group.tools : []).forEach((tool) => {
+            const ms = Date.parse(String(tool?.started_at || ""));
+            if (Number.isFinite(ms)) earliest = earliest === null ? ms : Math.min(earliest, ms);
         });
     });
-    if (hasElapsed) return elapsedTotal;
-    if (startMs !== null) return Math.max(0, ((endMs !== null ? endMs : Date.now()) - startMs) / 1000);
-    return 0;
+    return earliest;
+}
+
+function ceoTurnEarliestToolStartMs(turn) {
+    // 整轮优先（turn.turns），切片后的轨道只在它缺失时兜底：压缩切出的两段是同一轮，
+    // 各按自己那半的工具算会得出两个不同的读数。
+    let earliest = ceoTurnsEarliestToolStartMs(turn?.turns);
+    const merge = (ms) => {
+        if (Number.isFinite(ms)) earliest = earliest === null ? ms : Math.min(earliest, ms);
+    };
+    if (earliest === null) merge(ceoTurnsEarliestToolStartMs(turn?.lastExecutionTraceSummary?.turns));
+    const host = turn?.liveToolStepsEl;
+    if (host && typeof host.querySelectorAll === "function") {
+        Array.from(host.querySelectorAll(".interaction-step") || []).forEach((item) => {
+            merge(Date.parse(String(item?.dataset?.startedAt || "")));
+        });
+    }
+    return earliest;
+}
+
+// 头部秒数是本轮总时长：从第一条请求（提问行 / 在飞快照里的 user_message 时间戳）到最终文本输出。
+// 起点缺失时退回本轮最早的工具开始时间，让没有可见提问行的内部轮也有可读的读数。
+function ceoTurnElapsedSeconds(turn, { nowMs = Date.now() } = {}) {
+    const requestedMs = Date.parse(String(turn?.requestedAt || ""));
+    const startMs = Number.isFinite(requestedMs) ? requestedMs : ceoTurnEarliestToolStartMs(turn);
+    if (startMs === null) return null;
+    const completedMs = Date.parse(String(turn?.completedAt || ""));
+    let endMs = Number.isFinite(completedMs) ? completedMs : null;
+    if (endMs === null) {
+        // 历史行没有完成时间就没有读数；在飞段（含压缩切出的头段/续跑段）算到当前时刻，
+        // 于是一轮里的各段读数是同一个数，并一起往上走。
+        if (String(turn?.source || "").trim().toLowerCase() === "history") return null;
+        endMs = nowMs;
+    }
+    return Math.max(0, (endMs - startMs) / 1000);
 }
 
 function formatCeoExecutionSeconds(seconds) {
     const value = Number(seconds);
     if (!Number.isFinite(value) || value <= 0) return "";
-    // 头部读数固定用秒：跨分钟也只写 172s，换算成 m/h 会让同一读数在长回合里改变单位。
-    return `${value >= 10 ? Math.round(value) : value.toFixed(1)}s`;
+    // 整秒读数：跨分钟也只写 172s，换算成 m/h 会让同一读数在长回合里改变单位。
+    return `${Math.floor(value)}s`;
+}
+
+// 本轮总时长的起点：在飞快照里那批提问行中最早的一条时间戳（一次批量发送算同一个请求）。
+function ceoSnapshotRequestedAt(snapshot = null) {
+    const items = normalizeCeoSnapshotUserMessages(snapshot?.user_messages, snapshot?.user_message);
+    let earliestMs = null;
+    items.forEach((item) => {
+        const ms = Date.parse(String(item?.timestamp || ""));
+        if (Number.isFinite(ms)) earliestMs = earliestMs === null ? ms : Math.min(earliestMs, ms);
+    });
+    return earliestMs === null ? "" : new Date(earliestMs).toISOString();
+}
+
+// 转录里提问行与它的回复行共用 turn_id：按 turn_id 收最早一条提问行的时间戳，
+// 刷新后重建的历史回合也能算出本轮总时长。
+function buildCeoRequestedAtByTurn(messages = []) {
+    const map = new Map();
+    (Array.isArray(messages) ? messages : []).forEach((item) => {
+        if (String(item?.role || "").trim().toLowerCase() !== "user") return;
+        const turnId = String(item?.turn_id || "").trim();
+        const ms = Date.parse(String(item?.timestamp || ""));
+        if (!turnId || !Number.isFinite(ms)) return;
+        const currentMs = map.get(turnId);
+        if (currentMs === undefined || ms < currentMs) map.set(turnId, ms);
+    });
+    return map;
 }
 
 function renderCeoTurnsIntoTurn(turn, turns = [], { interruptedMarker = false } = {}) {
@@ -5039,10 +5087,7 @@ function renderCeoTurnsIntoTurn(turn, turns = [], { interruptedMarker = false } 
     turn.lastExecutionTraceSummary = { turns: descriptors };
     turn.flowEl.hidden = false;
     // 框默认折叠；用户此前展开过的话由 applyCeoTurnTraceViewState 按 flowOpen 还原。
-    if (turn.flowUsageEl) {
-        const elapsedSeconds = ceoTraceElapsedSeconds(visibleTurns);
-        turn.flowUsageEl.textContent = formatCeoExecutionSeconds(elapsedSeconds) || "--";
-    }
+    refreshCeoFlowUsage(turn);
     applyCeoTurnTraceViewState(turn, turnViewState);
     // 整帧重建换掉了 listEl，实时行先躲在容器里；这一帧账本已经画上的调用让它退场，
     // 还在跑的挂回新的组体内——同一件事不再因为换帧而改变位置。
@@ -5104,9 +5149,14 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "i
         // token 用量/完成时间泄漏到新轮次的元信息里。
         turn.usage = null;
         turn.completedAt = "";
+        turn.requestedAt = "";
         // 上一轮没收尾的实时行不能跟着回合对象带到新轮次里
         clearCeoLiveToolSteps(turn);
     }
+    // 本轮第一条请求的时刻优先取服务端快照里的提问行时间戳：刷新重连后头部秒数
+    // 才能从真正的请求时刻起算，而不是从第一个工具开始的时间起算。
+    const requestedAt = ceoSnapshotRequestedAt(snapshot);
+    if (requestedAt && !turn.requestedAt) turn.requestedAt = requestedAt;
     if (turnId) {
         turn.turnId = turnId;
         // 视图状态保持依赖回合元素的稳定 key(reconnect/快照重渲染时锚定与展开态还原)。
@@ -5339,7 +5389,7 @@ function renderPersistedCeoAssistantTurn(item = {}, options = {}) {
         tagMessage(el);
         return rules.length > 0;
     }
-    const turn = createPendingCeoTurn("history", { scrollMode: "preserve" });
+    const turn = createPendingCeoTurn("history", { scrollMode: "preserve", requestedAt: options.requestedAt || "" });
     if (!turn) {
         if (!silentReply) {
             const el = addMsg(content, "system", { markdown: true, scrollMode: "preserve", timestamp: historyTimestamp, usage: historyUsage, turnId: forkTurnId, canForkReply });
@@ -5351,6 +5401,12 @@ function renderPersistedCeoAssistantTurn(item = {}, options = {}) {
     const historyTurnId = normalizeCeoTurnId(item?.turn_id || "");
     if (historyTurnId && turn.el && typeof turn.el.setAttribute === "function") {
         turn.el.setAttribute("data-ceo-key", `turn:${historyTurnId}`);
+    }
+    // 起点缺失（提问行被压缩掉、或这类回合本来就没有提问行）时把本轮最早的工具开始时间
+    // 存成起点：切出的两段与基础气泡于是共用一个锚点，读数一致。
+    if (!turn.requestedAt) {
+        const fallbackStartMs = ceoTurnsEarliestToolStartMs(turns);
+        if (Number.isFinite(fallbackStartMs)) turn.requestedAt = new Date(fallbackStartMs).toISOString();
     }
     S.ceoPendingTurns.push(turn);
     // 重建道：区分线按转录里的边界键放回这一回合的轨道中间（或气泡之前/之后），
@@ -5394,6 +5450,9 @@ function renderPersistedCeoAssistantTurn(item = {}, options = {}) {
             });
             headEntries.forEach(({ head, split }) => {
                 head.turns = turns;
+                // 半切头段与基础气泡是同一轮：总时长的两端跟着走，否则头段退回落不成整轮的读数。
+                if (turn.requestedAt) head.requestedAt = turn.requestedAt;
+                if (turn.completedAt) head.completedAt = turn.completedAt;
                 renderCeoTurnsIntoTurn(head, turns);
                 settleCeoCompressionHeadText(head);
                 parent.insertBefore(head.el, turn.el);
@@ -5501,6 +5560,7 @@ function renderCeoSnapshotMessageRange(messages, keys, fromIndex, toIndex, targe
     // 分页补渲染共用。key 由 buildCeoMessageKeyList 全局算好传入，occ 计数
     // 与整列一致，窗口起点无关。
     const compressionPlan = buildCeoCompressionPlan(messages);
+    const requestedAtByTurn = buildCeoRequestedAtByTurn(messages);
     for (let index = fromIndex; index < toIndex; index += 1) {
         const item = messages[index];
         const role = String(item?.role || "").trim().toLowerCase();
@@ -5533,9 +5593,11 @@ function renderCeoSnapshotMessageRange(messages, keys, fromIndex, toIndex, targe
             const turnId = String(item?.turn_id || "").trim();
             const isLastRowForTurn = !!turnId && compressionPlan.lastAssistantRowByTurn.get(turnId) === index;
             const rules = isLastRowForTurn ? (compressionPlan.rulesByTurn.get(turnId) || []) : [];
+            const requestedMs = turnId ? requestedAtByTurn.get(turnId) : undefined;
             renderPersistedCeoAssistantTurn(item, {
                 compressionRules: rules,
                 key: String(keys[index] || ""),
+                requestedAt: Number.isFinite(requestedMs) ? new Date(requestedMs).toISOString() : "",
             });
             // assistant 行的 key 由 renderPersistedCeoAssistantTurn 打在基础气泡上；
             // 这里不能再 tagRendered：线可能在气泡之后，lastElementChild 会是线而不是气泡。
@@ -5649,7 +5711,7 @@ function renderCeoSnapshot(messages = [], inflightTurn = null, { sessionId = "",
     applyCeoFeedViewState(viewState);
 }
 
-function createPendingCeoTurn(source = "user", { scrollMode = "preserve" } = {}) {
+function createPendingCeoTurn(source = "user", { scrollMode = "preserve", requestedAt = "" } = {}) {
     return mutateCeoFeed(() => {
         if (!U.ceoFeed) return null;
         const el = document.createElement("div");
@@ -5700,6 +5762,8 @@ function createPendingCeoTurn(source = "user", { scrollMode = "preserve" } = {})
             // 元数据(sticky):token 用量与完成时间,由 setCeoTurnUsage 维护。
             usage: null,
             completedAt: "",
+            // 本轮第一条请求的时刻;头部秒数(本轮总时长)的起点,缺失时按最早工具开始时间兜底。
+            requestedAt: String(requestedAt || "").trim(),
             contextLoadNoticeKeys: new Set(),
             turnId: "",
             source: String(source || "").trim().toLowerCase() || "user",
@@ -5965,6 +6029,8 @@ function setCeoTurnUsage(turn, usage = null, { completedAt = "" } = {}) {
     if (normalized) turn.usage = normalized;
     const nextCompletedAt = String(completedAt || "").trim();
     if (nextCompletedAt) turn.completedAt = nextCompletedAt;
+    // 完成时间落地就是头部读数的终点：这里重算一次，收尾后不再依赖每秒 ticker。
+    if (nextCompletedAt) refreshCeoFlowUsage(turn);
     if (!turn.usageEl) return;
     const parts = [];
     parts.push(...buildTokenUsageParts(turn.usage));
@@ -6758,26 +6824,12 @@ function updateRuntimeBadge(element, runtimeEl, { runningPrefix = "已运行 ", 
     runtimeEl.textContent = `${status === "running" ? runningPrefix : donePrefix}${formatElapsedDuration(seconds)}`;
 }
 
-function ceoTurnLiveToolSeconds(turn) {
-    const host = turn?.liveToolStepsEl;
-    if (!host || typeof host.querySelectorAll !== "function") return 0;
-    let total = 0;
-    Array.from(host.querySelectorAll(".interaction-step") || []).forEach((item) => {
-        const seconds = resolveRuntimeSeconds(item);
-        if (Number.isFinite(seconds) && seconds > 0) total += seconds;
-    });
-    return total;
-}
-
-// 头部秒数只在整帧重建时算过一次，一条长工具跑着的时候读数会停在上一帧；
-// 每秒把账本里的工具耗时与在飞行的耗时相加，读数才会持续往上加。
+// 头部秒数按本轮起点与终点现算：整帧重建只算一次，长回合跑着的时候读数会停在上一帧；
+// 每秒重算一次才会持续往上加，收尾帧落下 completedAt 后定稿。
 function refreshCeoFlowUsage(turn) {
     if (!turn?.flowUsageEl || !turn?.flowEl || turn.flowEl.hidden) return;
-    const turns = Array.isArray(turn.lastExecutionTraceSummary?.turns)
-        ? turn.lastExecutionTraceSummary.turns
-        : [];
-    const seconds = ceoTraceElapsedSeconds(turns) + ceoTurnLiveToolSeconds(turn);
-    const text = formatCeoExecutionSeconds(seconds) || "--";
+    const seconds = ceoTurnElapsedSeconds(turn);
+    const text = seconds === null ? "--" : (formatCeoExecutionSeconds(seconds) || "--");
     if (turn.flowUsageEl.textContent !== text) turn.flowUsageEl.textContent = text;
 }
 
@@ -7057,6 +7109,15 @@ function finalizeCeoTurn(text, meta = {}) {
     // 渲染层再决定走增量更新还是全量快照重建。完成时间:历史回合用消息自带
     // timestamp,live 回合用收尾时刻的本地时间。
     const completedAt = String(meta?.timestamp || "").trim() || new Date().toISOString();
+    // 同一轮被压缩切出的头段收不到 final 帧：终点在这里补给它们，读数才会跟着本段定稿。
+    if (normalizedTurnId) {
+        (Array.isArray(S.ceoPendingTurns) ? S.ceoPendingTurns : []).forEach((segment) => {
+            if (!segment || segment === turn || segment.completedAt) return;
+            if (normalizeCeoTurnId(segment.turnId) !== normalizedTurnId) return;
+            segment.completedAt = completedAt;
+            refreshCeoFlowUsage(segment);
+        });
+    }
     const finalPayload = buildFinalizedCeoTurnPayload(sessionId, {
         normalizedSource,
         normalizedTurnId,

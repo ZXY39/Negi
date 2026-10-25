@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 const { readFrontendSources } = require("./support/frontend_sources.js");
 
-// 前门执行流程头部：裸秒数、每秒自增、圆点与引导线同轴、在飞行不画轨道点。
+// 前门执行流程头部：本轮总时长（首个请求 → 最终文本输出），整秒自增；圆点与引导线同轴；在飞行不画轨道点。
 
 const APP_CODE = readFrontendSources(["app"]).join("\n");
 const CSS = fs.readFileSync("g3ku/web/frontend/org_graph.css", "utf8").replace(/\r\n/g, "\n");
@@ -59,54 +59,110 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${APP_CODE}\nthis.__testExports = { formatCeoExecutionSeconds, refreshCeoFlowUsage, refreshLiveDurationBadges, S, HTMLElement };`,
+        `${APP_CODE}\nthis.__testExports = { formatCeoExecutionSeconds, ceoTurnElapsedSeconds, refreshCeoFlowUsage, refreshLiveDurationBadges, buildCeoRequestedAtByTurn, setCeoTurnUsage, S, HTMLElement };`,
         context
     );
     return context.__testExports;
 }
 
-function ledgerTurn() {
-    return {
-        tools: [{
-            started_at: "2026-10-24T12:00:00+08:00",
-            finished_at: "2026-10-24T12:01:00+08:00",
-        }],
-    };
-}
+const ISO = (ms) => new Date(ms).toISOString();
 
-function makeTurn(HTMLElementCtor, { liveRows = [] } = {}) {
+function makeTurn({ requestedAt = "", completedAt = "", finalized = false, source = "user", tools = [] } = {}) {
     return {
+        source,
+        finalized,
         flowEl: { hidden: false },
         flowUsageEl: { textContent: "" },
-        liveToolStepsEl: { querySelectorAll: () => liveRows },
-        lastExecutionTraceSummary: { turns: [ledgerTurn()] },
+        requestedAt,
+        completedAt,
+        liveToolStepsEl: null,
+        lastExecutionTraceSummary: tools.length ? { turns: [{ tools }] } : null,
     };
 }
 
-test("flow header duration stays in seconds across minutes and hours", () => {
+test("flow header duration stays whole seconds across minutes and hours", () => {
     const { formatCeoExecutionSeconds } = loadApp();
 
-    assert.equal(formatCeoExecutionSeconds(9.42), "9.4s");
-    assert.equal(formatCeoExecutionSeconds(59.6), "60s");
-    assert.equal(formatCeoExecutionSeconds(172), "172s");
+    assert.equal(formatCeoExecutionSeconds(0.4), "0s");
+    assert.equal(formatCeoExecutionSeconds(59.9), "59s");
+    assert.equal(formatCeoExecutionSeconds(172.4), "172s");
     assert.equal(formatCeoExecutionSeconds(3661), "3661s");
     assert.equal(formatCeoExecutionSeconds(0), "");
 });
 
-test("flow header adds the in-flight tool's seconds without a full re-render", () => {
+test("turn duration runs from the first request to the final output", () => {
+    const { ceoTurnElapsedSeconds } = loadApp();
+    const nowMs = Date.parse("2026-10-25T10:00:00+08:00");
+
+    // 在飞：从请求时刻算到"现在"。
+    const live = makeTurn({ requestedAt: ISO(nowMs - 65000) });
+    assert.equal(ceoTurnElapsedSeconds(live, { nowMs }), 65);
+
+    // 收尾：终点落在 completedAt，不再跟着时钟走。
+    const done = makeTurn({
+        requestedAt: ISO(nowMs - 65000),
+        completedAt: ISO(nowMs - 23000),
+        finalized: true,
+    });
+    assert.equal(ceoTurnElapsedSeconds(done, { nowMs }), 42);
+
+    // 历史行没有完成时间：不给"到现在"的假读数。
+    const stale = makeTurn({ requestedAt: ISO(nowMs - 65000), finalized: true, source: "history" });
+    assert.equal(ceoTurnElapsedSeconds(stale, { nowMs }), null);
+
+    // 在飞回合切出的头段：收不到 final 帧，按"到现在"继续走，与本轮续跑段同读数。
+    const head = makeTurn({ requestedAt: ISO(nowMs - 65000), finalized: true });
+    assert.equal(ceoTurnElapsedSeconds(head, { nowMs }), 65);
+});
+
+test("turn duration falls back to the earliest tool start when there is no request row", () => {
+    const { ceoTurnElapsedSeconds } = loadApp();
+    const nowMs = Date.parse("2026-10-25T10:00:00+08:00");
+    const turn = makeTurn({
+        tools: [
+            { started_at: ISO(nowMs - 30000), finished_at: ISO(nowMs - 20000) },
+            { started_at: ISO(nowMs - 50000), finished_at: ISO(nowMs - 45000) },
+        ],
+    });
+
+    assert.equal(ceoTurnElapsedSeconds(turn, { nowMs }), 50);
+});
+
+test("flow header renders the turn duration and the live ticker refreshes it", () => {
     const api = loadApp();
-    const startedAt = new Date(Date.now() - 5000).toISOString();
-    const liveRow = new api.HTMLElement();
-    liveRow.dataset = { stepState: "running", startedAt, elapsedSeconds: "5" };
-    const turn = makeTurn(api.HTMLElement, { liveRows: [liveRow] });
-    const { flowUsageEl } = turn;
+    const turn = makeTurn({ requestedAt: ISO(Date.now() - 65000) });
 
     api.refreshCeoFlowUsage(turn);
-    assert.equal(flowUsageEl.textContent, "65s");
+    assert.equal(turn.flowUsageEl.textContent, "65s");
 
+    turn.flowUsageEl.textContent = "";
     api.S.ceoPendingTurns = [turn];
     api.refreshLiveDurationBadges();
-    assert.equal(flowUsageEl.textContent, "65s");
+    assert.equal(turn.flowUsageEl.textContent, "65s");
+});
+
+test("completion time freezes the header at the final duration", () => {
+    const api = loadApp();
+    const turn = makeTurn({ requestedAt: ISO(Date.now() - 65000) });
+
+    api.refreshCeoFlowUsage(turn);
+    assert.equal(turn.flowUsageEl.textContent, "65s");
+
+    api.setCeoTurnUsage(turn, null, { completedAt: ISO(Date.now() - 23000) });
+    assert.equal(turn.flowUsageEl.textContent, "42s");
+});
+
+test("history pairing takes the earliest request row of a turn", () => {
+    const { buildCeoRequestedAtByTurn } = loadApp();
+    const map = buildCeoRequestedAtByTurn([
+        { role: "user", turn_id: "t1", timestamp: "2026-10-25T10:00:09+08:00" },
+        { role: "user", turn_id: "t1", timestamp: "2026-10-25T10:00:03+08:00" },
+        { role: "assistant", turn_id: "t1", timestamp: "2026-10-25T10:01:00+08:00", turns: [] },
+        { role: "user", turn_id: "t2", timestamp: "2026-10-25T11:00:00+08:00" },
+    ]);
+
+    assert.equal(map.get("t1"), Date.parse("2026-10-25T10:00:03+08:00"));
+    assert.equal(map.get("t2"), Date.parse("2026-10-25T11:00:00+08:00"));
 });
 
 test("live tool rows carry no rail status dot", () => {
