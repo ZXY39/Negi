@@ -17860,6 +17860,14 @@ textarea {
     gap: var(--ui-space-2);
 }
 
+/* 空态按整行占位：留在 86px 网格里会一个字一行，把弹窗撑成一根竖条。 */
+.persona-photo-grid > .persona-photo-empty {
+    grid-column: 1 / -1;
+    min-height: 96px;
+    padding: 16px;
+    text-align: center;
+}
+
 .persona-photo-tile {
     display: flex;
     flex-direction: column;

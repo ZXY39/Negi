@@ -87,7 +87,7 @@
         container.innerHTML = "";
         if (!rows.length) {
             const empty = document.createElement("div");
-            empty.className = "empty-state compact";
+            empty.className = "empty-state compact persona-photo-empty";
             empty.textContent = emptyText;
             container.appendChild(empty);
             return;

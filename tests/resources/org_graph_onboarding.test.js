@@ -11,6 +11,9 @@ const SOURCE = readFrontendSources(["onboarding"]).join("\n").replace(/\r\n/g, "
 const HTML = fs
     .readFileSync(path.join(__dirname, "..", "..", "g3ku", "web", "frontend", "org_graph.html"), "utf8")
     .replace(/\r\n/g, "\n");
+const CSS = fs
+    .readFileSync(path.join(__dirname, "..", "..", "g3ku", "web", "frontend", "org_graph.css"), "utf8")
+    .replace(/\r\n/g, "\n");
 
 const PERSONA_CHAIN_TOAST = "为了使人设生效，主agent和记忆agent模型链不能为空，点击保存后生效";
 
@@ -386,6 +389,10 @@ test("empty persona shows red dots and can be initialized from the dialog", asyn
         harness.elements["persona-dialog-photo-grid"].children[0].textContent,
         "图片为空，如果需要增加，请在会话中发送",
     );
+    assert.match(
+        harness.elements["persona-dialog-photo-grid"].children[0].className,
+        /persona-photo-empty/,
+    );
 
     harness.elements["persona-dialog-description-empty"].click();
     assert.equal(harness.elements["persona-dialog-description-input"].hidden, false);
@@ -498,4 +505,11 @@ test("frontend scripts keep the page order", () => {
     const onboarding = HTML.indexOf('src="org_graph_onboarding.js"');
     assert.ok(personaApi > 0 && personaApi < apiClient);
     assert.ok(llm > 0 && onboarding > llm);
+});
+
+test("empty persona photos span the whole grid instead of one narrow column", () => {
+    assert.match(
+        CSS,
+        /\.persona-photo-grid > \.persona-photo-empty \{[^}]*grid-column:\s*1\s*\/\s*-1;/,
+    );
 });
