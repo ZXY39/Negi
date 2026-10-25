@@ -17423,13 +17423,11 @@ textarea {
     padding-left: 0;
 }
 
-/* 前门头部的圆点是秒数的前缀，挂在秒数盒子左侧的固定像素上：
-   圆心在 8.5px（与 1px 引导线同轴），直径 9px 时左缘是整像素、圆心落在半像素上，
-   所以圆点既不会被半像素拉扁，也不需要任何 transform。
-   纵向按秒数自己的墨迹中线对齐：--ceo-flow-dot-lift 由脚本用实际字体量出，
-   缺省 0.5px 是 Fira Sans 的墨迹中心比行框中心高出的量。 */
+/* 前门头部的圆点与向下引导线共用一组坐标（--ceo-flow-dot-x / -y），两者都相对
+   同一个 .interaction-flow 定位盒：圆心 = 线中心、线从圆心向下长，任何缩放下都不会各走各的。
+   纵向的 y 由脚本按秒数实际盒子和字体墨迹中线量出（见 org_graph_app.js）；缺省值按
+   Fira Sans、默认字号给出。 */
 .interaction-flow-usage {
-    position: relative;
     flex: none;
     /* 42px = 原 16px 点位 + 26px 间隔：秒数仍落在内部中途文本正文的竖轴上。 */
     padding-left: 42px;
@@ -17437,18 +17435,6 @@ textarea {
     font-weight: 600;
     color: var(--text-primary);
     font-variant-numeric: tabular-nums;
-}
-
-.interaction-flow-usage::before {
-    content: "";
-    position: absolute;
-    left: 4px;
-    top: calc(50% - 4.5px - var(--ceo-flow-dot-lift, 0.5px));
-    width: 9px;
-    height: 9px;
-    border-radius: var(--radius-full);
-    background: #39c5bb;
-    pointer-events: none;
 }
 
 /* 外层框是唯一卡片：内部条目只留内容，不再各画一层卡。 */
@@ -17505,11 +17491,25 @@ textarea {
     position: relative;
 }
 
+/* 圆点与引导线同源：圆心 (x, y)，1px 线占 x-0.5..x+0.5、从 y 往下长。
+   两者都相对 flow 的定位盒，不存在两个原点对不上的问题。 */
+.interaction-flow::before {
+    content: "";
+    position: absolute;
+    left: calc(var(--ceo-flow-dot-x, 8.5px) - 4.5px);
+    top: calc(var(--ceo-flow-dot-y, 23.5px) - 4.5px);
+    width: 9px;
+    height: 9px;
+    border-radius: var(--radius-full);
+    background: #39c5bb;
+    pointer-events: none;
+}
+
 .interaction-flow-guide {
     position: absolute;
-    left: 8px;
-    /* 起点跟着圆点走：圆点按 --ceo-flow-dot-lift 抬升后，线从同一高度往下长。 */
-    top: calc(23.5px - var(--ceo-flow-dot-lift, 0.5px));
+    left: calc(var(--ceo-flow-dot-x, 8.5px) - 0.5px);
+    /* 起点就是圆心：与圆点同一个 --ceo-flow-dot-y，线心也从这里往下长。 */
+    top: var(--ceo-flow-dot-y, 23.5px);
     bottom: var(--space-3);
     width: 1px;
     background: #39c5bb;

@@ -5082,14 +5082,27 @@ function ceoFlowDotLiftPx(element) {
     return lift;
 }
 
-// 秒数换字体/字号后墨迹中线会跟着变：把抬升量写到根节点，所有已渲染的头部一起更新。
-function syncCeoFlowDotLift() {
-    const usage = document.querySelector?.(".interaction-flow-usage");
+// 圆点与引导线共用 --ceo-flow-dot-y：这里按秒数盒子的实际位置 + 字体墨迹修正算出圆心。
+// 两者都相对 flow 的定位盒，圆点圆心和线中心因此是同一个数，不存在两套原点。
+function syncCeoFlowDotGeometry() {
     const root = document.documentElement;
-    if (!usage || !root?.style?.setProperty) return;
-    const lift = ceoFlowDotLiftPx(usage);
-    if (lift === null) root.style.removeProperty("--ceo-flow-dot-lift");
-    else root.style.setProperty("--ceo-flow-dot-lift", `${lift}px`);
+    if (!root?.style?.setProperty) return;
+    const usages = Array.from(document.querySelectorAll?.(".interaction-flow-usage") || []);
+    const visible = usages.map((item) => {
+        const flow = item.closest?.(".interaction-flow") || null;
+        return flow && flow.offsetParent !== null ? { usage: item, flow } : null;
+    }).find(Boolean);
+    if (!visible) return;
+    const lift = ceoFlowDotLiftPx(visible.usage);
+    if (lift === null) {
+        root.style.removeProperty("--ceo-flow-dot-y");
+        return;
+    }
+    const usageRect = visible.usage.getBoundingClientRect();
+    const flowRect = visible.flow.getBoundingClientRect();
+    if (!(usageRect.height > 0) || !(flowRect.height > 0)) return;
+    const y = usageRect.top - flowRect.top + usageRect.height / 2 - lift;
+    root.style.setProperty("--ceo-flow-dot-y", `${Math.round(y * 100) / 100}px`);
 }
 
 function renderCeoTurnsIntoTurn(turn, turns = [], { interruptedMarker = false } = {}) {
@@ -5127,7 +5140,7 @@ function renderCeoTurnsIntoTurn(turn, turns = [], { interruptedMarker = false } 
     turn.flowEl.hidden = false;
     // 框默认折叠；用户此前展开过的话由 applyCeoTurnTraceViewState 按 flowOpen 还原。
     refreshCeoFlowUsage(turn);
-    syncCeoFlowDotLift();
+    syncCeoFlowDotGeometry();
     applyCeoTurnTraceViewState(turn, turnViewState);
     // 整帧重建换掉了 listEl，实时行先躲在容器里；这一帧账本已经画上的调用让它退场，
     // 还在跑的挂回新的组体内——同一件事不再因为换帧而改变位置。
@@ -9947,7 +9960,7 @@ function applyReadingScale(raw) {
     }
     if (U.readingScale) U.readingScale.value = String(scale);
     // 字号档位改了，秒数的墨迹中线跟着变，圆点的抬升量要重量。
-    if (typeof syncCeoFlowDotLift === "function") syncCeoFlowDotLift();
+    if (typeof syncCeoFlowDotGeometry === "function") syncCeoFlowDotGeometry();
     return scale;
 }
 
@@ -10811,7 +10824,7 @@ function init() {
     startLiveDurationTicker();
     // 字体晚于首帧可用时墨迹会换一次：加载完成后把圆点的抬升量重量一遍。
     document.fonts?.ready?.then?.(() => {
-        syncCeoFlowDotLift();
+        syncCeoFlowDotGeometry();
     })?.catch?.(() => {});
     bindAuditBadge();
     void refreshAuditBadge();

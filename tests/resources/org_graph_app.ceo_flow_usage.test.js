@@ -84,10 +84,10 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${APP_CODE}\nthis.__testExports = { formatCeoExecutionSeconds, ceoTurnElapsedSeconds, refreshCeoFlowUsage, refreshLiveDurationBadges, buildCeoRequestedAtByTurn, ceoFlowDotLiftPx, setCeoTurnUsage, S, HTMLElement };`,
+        `${APP_CODE}\nthis.__testExports = { formatCeoExecutionSeconds, ceoTurnElapsedSeconds, refreshCeoFlowUsage, refreshLiveDurationBadges, buildCeoRequestedAtByTurn, ceoFlowDotLiftPx, syncCeoFlowDotGeometry, setCeoTurnUsage, S, HTMLElement };`,
         context
     );
-    return { ...context.__testExports, __probe: probe };
+    return { ...context.__testExports, __probe: probe, __document: context.document };
 }
 
 const ISO = (ms) => new Date(ms).toISOString();
@@ -209,22 +209,44 @@ test("live tool rows carry no rail status dot", () => {
     assert.match(match[1], /display:\s*none/);
 });
 
-test("flow dot hangs off the seconds box and follows the measured lift", () => {
+test("flow dot and guide share one coordinate pair", () => {
     const usage = /\.interaction-flow-usage\s*\{([\s\S]*?)\n\}/.exec(CSS);
     assert.ok(usage, "usage rule not found");
     assert.match(usage[1], /padding-left:\s*42px/);
+    assert.doesNotMatch(CSS, /\.interaction-flow-usage::before/);
 
-    const dot = /\.interaction-flow-usage::before\s*\{([\s\S]*?)\n\}/.exec(CSS);
-    assert.ok(dot, "usage dot rule not found");
-    assert.match(dot[1], /left:\s*4px/);
+    const dot = /\.interaction-flow::before\s*\{([\s\S]*?)\n\}/.exec(CSS);
+    assert.ok(dot, "flow dot rule not found");
+    assert.match(dot[1], /left:\s*calc\(var\(--ceo-flow-dot-x, 8\.5px\) - 4\.5px\)/);
+    assert.match(dot[1], /top:\s*calc\(var\(--ceo-flow-dot-y, 23\.5px\) - 4\.5px\)/);
     assert.match(dot[1], /width:\s*9px/);
-    assert.match(dot[1], /top:\s*calc\(50% - 4\.5px - var\(--ceo-flow-dot-lift, 0\.5px\)\)/);
     assert.doesNotMatch(dot[1], /transform:/);
 
     const guide = /\.interaction-flow-guide\s*\{([\s\S]*?)\n\}/.exec(CSS);
     assert.ok(guide, "guide rule not found");
-    assert.match(guide[1], /left:\s*8px/);
-    assert.match(guide[1], /top:\s*calc\(23\.5px - var\(--ceo-flow-dot-lift, 0\.5px\)\)/);
+    assert.match(guide[1], /left:\s*calc\(var\(--ceo-flow-dot-x, 8\.5px\) - 0\.5px\)/);
+    assert.match(guide[1], /top:\s*var\(--ceo-flow-dot-y, 23\.5px\)/);
     assert.match(guide[1], /width:\s*1px/);
     assert.doesNotMatch(CSS, /\.interaction-flow-chevron/);
+});
+
+test("dot geometry derives its center from the seconds box and the measured lift", () => {
+    const api = loadApp();
+    const props = {};
+    api.__document.documentElement = {
+        style: {
+            setProperty: (name, value) => { props[name] = value; },
+            removeProperty: (name) => { delete props[name]; },
+        },
+    };
+    const flow = { offsetParent: {}, getBoundingClientRect: () => ({ top: 60, height: 47 }) };
+    const usage = new api.HTMLElement();
+    usage.closest = () => flow;
+    usage.getBoundingClientRect = () => ({ top: 100, height: 23 });
+    api.__document.querySelectorAll = () => [usage];
+
+    api.syncCeoFlowDotGeometry();
+
+    // 圆心 = 秒数盒中心 (100-60) + 23/2 = 51.5，再减 Fira Sans 的 0.5px 抬升。
+    assert.equal(props["--ceo-flow-dot-y"], "51px");
 });
