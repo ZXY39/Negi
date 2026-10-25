@@ -7237,6 +7237,31 @@ class NodeRunner:
                 describe_exception_chain(exc),
             )
 
+    def mark_task_paused_node(self, task_id: str, node_id: str) -> None:
+        """任务级暂停落在节点上：标 `pause_reason='task'`，不进 error 道。
+
+        不标这一位的代价：任务暂停只终止在飞协程，节点行仍是 `in_progress`、没有
+        暂停标记、帧还停在在飞相位——下一次 `run_task` 拾取的孤儿收尸会把它判成
+        `spawn_orphan_candidate` 并 park 成 `pause_reason='error'`（实盘
+        task:11267bed647f：一次暂停把 9 个子节点全部判成孤儿）。
+
+        三条限定：终态节点不写；已有暂停位（manual/agent/error）不覆盖，
+        否则人工暂停会被任务恢复顺手清掉；`'task'` 是唯一允许 resume_task 自动清除的值。
+        """
+        node = self._store.get_node(node_id)
+        if node is None:
+            return
+        if str(getattr(node, 'status', '') or '').strip().lower() in {STATUS_SUCCESS, STATUS_FAILED}:
+            return
+        if bool(getattr(node, 'pause_requested', False)) or bool(getattr(node, 'is_paused', False)):
+            return
+        self._mark_node_paused(
+            task_id,
+            node_id,
+            reason='task',
+            remark='任务级暂停：恢复任务时自动继续',
+        )
+
     def _mark_node_paused(self, task_id: str, node_id: str, *, reason: str = '', remark: str = '') -> NodeRecord | None:
         node = self._store.get_node(node_id)
         normalized_reason = str(reason or getattr(node, 'pause_reason', '') if node is not None else '').strip().lower() or 'manual'

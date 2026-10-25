@@ -543,6 +543,27 @@ class TaskNodeDispatcher:
             if root is not None and str(root.root_node_id or '').strip() == entry.node_id and not entry.future.done():
                 entry.future.set_exception(exc)
             return
+        except TaskPausedError as exc:
+            # 任务级暂停：在飞协程在这里终止。节点必须留下 `pause_reason='task'`，
+            # 否则它就是"没有执行器、没有暂停标记、帧停在在飞相位"的非终态行，
+            # 会被下一次拾取的孤儿收尸判成 spawn_orphan_candidate。
+            try:
+                self._node_runner.mark_task_paused_node(self._task_id, entry.node_id)
+            except Exception:
+                logger.exception(
+                    'task pause marker failed: task={} node={}', self._task_id, entry.node_id
+                )
+            try:
+                logger.info(
+                    'node entry suspended by task pause: task={} node={}',
+                    self._task_id,
+                    entry.node_id,
+                )
+            except Exception:
+                pass
+            if not entry.future.done():
+                entry.future.set_exception(exc)
+            return
         except asyncio.CancelledError:
             interrupt_result = entry.interrupt_result
             if interrupt_result is not None:
@@ -878,6 +899,7 @@ class TaskActorService:
             else:
                 # C：孤儿收尸/重派发——每次 worker 拾取都决断"DB 非终态但无执行器
                 # 也无重放路径"的节点，杜绝幽灵 in_progress（2026-09-15 事故 L3）。
+                await self._resume_task_paused_nodes(task_id)
                 await self._reconcile_orphan_in_progress_nodes(task_id, dispatcher)
                 resumed_offroot_nodes = await self._resume_pending_notice_nodes(task_id)
                 if not resumed_offroot_nodes:
@@ -1624,6 +1646,71 @@ class TaskActorService:
         except Exception:
             logger.exception('stranded root park failed: task={}', task_id)
 
+    async def _resume_task_paused_nodes(self, task_id: str) -> list[str]:
+        """恢复任务时重新挂起因任务暂停而停的节点。
+
+        `resume_task` 只清任务标志。子节点带 `pause_reason='task'` 时如果没人清位、
+        也没人重派，它们会永远停在 `in_progress + paused`：`_dispatch_runnable_nodes`
+        跳过暂停节点，而有帧的非根节点本来就不在派发扫描范围内。
+
+        只碰 `'task'`：`manual` / `agent` / `error` 是人工与故障暂停，恢复任务不得代清。
+        停靠相位（`waiting_explicit` / `waiting_acceptance`）只清位不点火——恢复本身
+        不是唤醒源；它们等下一次投递。
+        """
+        task = self._store.get_task(task_id)
+        if task is None:
+            return []
+        if bool(getattr(task, 'is_paused', False)) or bool(getattr(task, 'pause_requested', False)):
+            return []
+        resumed: list[str] = []
+        for node in list(self._store.list_nodes(task_id) or []):
+            node_id = str(getattr(node, 'node_id', '') or '').strip()
+            if not node_id:
+                continue
+            if str(getattr(node, 'status', '') or '').strip().lower() in {'success', 'failed'}:
+                continue
+            if str(getattr(node, 'pause_reason', '') or '').strip().lower() != 'task':
+                continue
+            if not (bool(getattr(node, 'is_paused', False)) or bool(getattr(node, 'pause_requested', False))):
+                continue
+            try:
+                self._log_service.set_node_pause_state(
+                    task_id,
+                    node_id,
+                    pause_requested=False,
+                    is_paused=False,
+                    pause_reason='',
+                    remark='',
+                )
+            except Exception:
+                logger.exception(
+                    'task-paused node resume failed to clear flags: task={} node={}', task_id, node_id
+                )
+                continue
+            if self._frame_phase(task_id, node_id) in PARKED_PHASES:
+                try:
+                    logger.info('task-paused node unparked (parked phase): task={} node={}', task_id, node_id)
+                except Exception:
+                    pass
+                continue
+            try:
+                outcome = await self.resume_node_entry(task_id, node_id, arm_verification=False)
+            except Exception:
+                logger.exception('task-paused node resume failed: task={} node={}', task_id, node_id)
+                continue
+            if outcome in {'resumed', 'deferred'}:
+                resumed.append(node_id)
+            try:
+                logger.info(
+                    'task-paused node resumed: task={} node={} outcome={}',
+                    task_id,
+                    node_id,
+                    outcome,
+                )
+            except Exception:
+                pass
+        return resumed
+
     async def _reconcile_orphan_in_progress_nodes(self, task_id: str, dispatcher: 'TaskNodeDispatcher') -> None:
         """C：孤儿收尸/重派发（每次 run_task 拾取时执行，幂等）。
 
@@ -1638,6 +1725,10 @@ class TaskActorService:
         """
         task = self._store.get_task(task_id)
         if task is None:
+            return
+        if bool(getattr(task, 'is_paused', False)) or bool(getattr(task, 'pause_requested', False)):
+            # 任务暂停期不判孤儿：暂停终止在飞协程后，节点行会短暂处于"非终态 +
+            # 没有执行器"，那正是暂停造成的形态，不是孤儿。恢复后再判。
             return
         root_node_id = str(getattr(task, 'root_node_id', '') or '').strip()
         try:
