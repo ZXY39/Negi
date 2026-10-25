@@ -11,6 +11,7 @@
         status: null,
         photos: [],
         uploadedNames: [],
+        personaDescription: "",
         personaToastShown: false,
         busy: false,
     };
@@ -32,10 +33,18 @@
         U.personaBackdrop = document.getElementById("persona-dialog-backdrop");
         U.personaDialog = document.getElementById("persona-dialog");
         U.personaDescription = document.getElementById("persona-dialog-description");
+        U.personaDescriptionEmpty = document.getElementById("persona-dialog-description-empty");
+        U.personaDescriptionInput = document.getElementById("persona-dialog-description-input");
+        U.personaDescriptionActions = document.getElementById("persona-dialog-description-actions");
+        U.personaDescriptionSave = document.getElementById("persona-dialog-description-save");
+        U.personaDescriptionCancel = document.getElementById("persona-dialog-description-cancel");
         U.personaPhotoGrid = document.getElementById("persona-dialog-photo-grid");
         U.personaClose = document.getElementById("persona-dialog-close-btn");
         U.personaCloseFooter = document.getElementById("persona-dialog-close");
+        U.settingsNavButton = document.getElementById("project-settings-btn");
         U.settingsPersonaButton = document.getElementById("project-settings-open-persona-btn");
+        U.personaNavDot = document.getElementById("persona-nav-dot");
+        U.personaButtonDot = document.getElementById("persona-button-dot");
     }
 
     function hasPersonaInput() {
@@ -70,14 +79,14 @@
         backdrop.classList.remove("is-open");
     }
 
-    function renderPhotoGrid(container, photos) {
+    function renderPhotoGrid(container, photos, emptyText = "还没有照片") {
         if (!container) return;
         const rows = Array.isArray(photos) ? photos : [];
         container.innerHTML = "";
         if (!rows.length) {
             const empty = document.createElement("div");
             empty.className = "empty-state compact";
-            empty.textContent = "还没有照片";
+            empty.textContent = emptyText;
             container.appendChild(empty);
             return;
         }
@@ -109,6 +118,77 @@
             url,
             title: String(tile.dataset.personaPhotoTitle || "照片"),
         });
+    }
+
+    function setPersonaEmpty(empty) {
+        [U.personaNavDot, U.personaButtonDot].forEach((dot) => {
+            if (dot) dot.hidden = !empty;
+        });
+    }
+
+    async function refreshPersonaIndicator() {
+        try {
+            const data = await ApiClient.getPersona();
+            state.personaDescription = String(data?.description || "").trim();
+            setPersonaEmpty(!state.personaDescription);
+        } catch (error) {
+            void error;
+        }
+    }
+
+    function renderPersonaDescription(description) {
+        const text = String(description || "").trim();
+        state.personaDescription = text;
+        const empty = !text;
+        if (U.personaDescription) {
+            U.personaDescription.hidden = empty;
+            U.personaDescription.textContent = text;
+        }
+        if (U.personaDescriptionEmpty) U.personaDescriptionEmpty.hidden = !empty;
+        if (U.personaDescriptionInput) {
+            U.personaDescriptionInput.hidden = true;
+            U.personaDescriptionInput.value = "";
+        }
+        if (U.personaDescriptionActions) U.personaDescriptionActions.hidden = true;
+        setPersonaEmpty(empty);
+    }
+
+    function startPersonaDescriptionEdit() {
+        if (state.personaDescription) return;
+        if (U.personaDescription) U.personaDescription.hidden = true;
+        if (U.personaDescriptionEmpty) U.personaDescriptionEmpty.hidden = true;
+        if (U.personaDescriptionInput) {
+            U.personaDescriptionInput.hidden = false;
+            U.personaDescriptionInput.value = "";
+            U.personaDescriptionInput.focus();
+        }
+        if (U.personaDescriptionActions) U.personaDescriptionActions.hidden = false;
+    }
+
+    function cancelPersonaDescriptionEdit() {
+        renderPersonaDescription(state.personaDescription);
+    }
+
+    async function savePersonaDescription() {
+        const text = String(U.personaDescriptionInput?.value || "").trim();
+        if (!text) {
+            showToast({ title: "人设描述不能为空", text: "请先输入内容再保存", kind: "error" });
+            return;
+        }
+        if (U.personaDescriptionSave) U.personaDescriptionSave.disabled = true;
+        try {
+            const result = await ApiClient.savePersona(text);
+            renderPersonaDescription(result?.description || text);
+            showToast({ title: "人设已保存", text: "下一次会话会按新的人设说话", kind: "success" });
+        } catch (error) {
+            showToast({
+                title: "人设保存失败",
+                text: error?.message || "请稍后重试",
+                kind: "error",
+            });
+        } finally {
+            if (U.personaDescriptionSave) U.personaDescriptionSave.disabled = false;
+        }
     }
 
     function showPersonaChainToast() {
@@ -323,10 +403,12 @@
         refs();
         try {
             const data = await ApiClient.getPersona();
-            if (U.personaDescription) {
-                U.personaDescription.textContent = String(data?.description || "").trim() || "还没有人设描述。";
-            }
-            renderPhotoGrid(U.personaPhotoGrid, data?.photos || []);
+            renderPersonaDescription(data?.description);
+            renderPhotoGrid(
+                U.personaPhotoGrid,
+                data?.photos || [],
+                "图片为空，如果需要增加，请在会话中发送",
+            );
             openBackdrop(U.personaBackdrop, U.personaDialog);
         } catch (error) {
             showToast({
@@ -351,6 +433,7 @@
         try {
             const status = await ApiClient.getOnboardingStatus();
             state.status = status;
+            void refreshPersonaIndicator();
             if (!status?.should_run) return;
             state.active = true;
             state.photos = Array.isArray(status.photo_album) ? status.photo_album : [];
@@ -379,6 +462,10 @@
         U.onboardingPhotoGrid?.addEventListener("click", (event) => openPhotoViewer(U.onboardingPhotoGrid, event));
 
         U.settingsPersonaButton?.addEventListener("click", () => void openPersonaDialog());
+        U.settingsNavButton?.addEventListener("click", () => void refreshPersonaIndicator());
+        U.personaDescriptionEmpty?.addEventListener("click", startPersonaDescriptionEdit);
+        U.personaDescriptionSave?.addEventListener("click", () => void savePersonaDescription());
+        U.personaDescriptionCancel?.addEventListener("click", cancelPersonaDescriptionEdit);
         U.personaClose?.addEventListener("click", closePersonaDialog);
         U.personaCloseFooter?.addEventListener("click", closePersonaDialog);
         U.personaBackdrop?.addEventListener("click", (event) => {

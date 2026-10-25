@@ -18,7 +18,7 @@ from typing import Any
 
 from loguru import logger
 
-from g3ku.agent.persona import PERSONA_PHOTO_DIR_NAME
+from g3ku.agent.persona import PERSONA_NOTE_REF, PERSONA_PHOTO_DIR_NAME
 from g3ku.deployment.data_root import data_root
 from g3ku.utils.helpers import safe_filename
 
@@ -127,6 +127,34 @@ class OnboardingStore:
 
 def persona_photos_dir(workspace: Path) -> Path:
     return Path(workspace).resolve() / PERSONA_PHOTO_DIR_NAME
+
+
+def write_persona_file(workspace: Path, text: str) -> Path:
+    """Direct note write used only when the memory runtime is not available yet.
+
+    A fresh project has no CEO model, so the settings dialog can still initialize the
+    persona body before the memory manager exists. The default notes directory is the
+    landing point; the memory runtime reads the same file once it boots.
+    """
+    body = str(text or "").strip()
+    if not body:
+        raise ValueError("persona text must not be empty")
+    path = Path(workspace).resolve() / "memory" / "notes" / f"{PERSONA_NOTE_REF}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex[:12]}.tmp")
+    try:
+        with open(temp_path, "w", encoding="utf-8") as handle:
+            handle.write(body + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    except BaseException:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    return path
 
 
 def _persona_thumb_path(source: Path) -> Path:

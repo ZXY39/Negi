@@ -27,6 +27,7 @@ from g3ku.runtime.persona_onboarding import (
     persona_photos_dir,
     record_photo_session_error,
     store_persona_photo,
+    write_persona_file,
 )
 from g3ku.runtime.web_ceo_sessions import (
     ensure_ceo_session_metadata,
@@ -259,6 +260,58 @@ async def get_persona():
         "description": _persona_text(),
         "photos": list_persona_photos(workspace_path()),
     }
+
+
+@router.post("/persona")
+async def save_persona(payload: dict | None = Body(default=None)):
+    """Initialize the persona from the settings dialog when it is still empty.
+
+    A non-empty persona stays read-only in settings; later changes go through the
+    memory agent. This endpoint is the one operator write that can happen before the
+    memory runtime exists (fresh project without models).
+    """
+    body = dict(payload or {})
+    description = str(body.get("description") or "").strip()
+    if not description:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "persona_empty", "message": "persona description must not be empty"},
+        )
+    if len(description) > PERSONA_DESCRIPTION_MAX_CHARS:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "persona_too_long",
+                "message": f"persona description exceeds {PERSONA_DESCRIPTION_MAX_CHARS} characters",
+            },
+        )
+    try:
+        manager = _memory_manager()
+    except HTTPException as exc:
+        if exc.status_code != 503:
+            raise
+        path = write_persona_file(workspace_path(), description)
+        return {"ok": True, "description": description, "enqueued": False, "path": str(path)}
+
+    manager.set_persona(description)
+    enqueued = False
+    if _role_chain("memory"):
+        try:
+            result = await manager.enqueue_operator_request(
+                op="write",
+                decision_source="user",
+                trigger_source="persona_settings",
+                payload_text=(
+                    "用户刚在设置页写下了人设描述，并已写入人设 note。"
+                    "请核对这份描述：需要整理就直接改人设 note；不要新增普通记忆，也不要重复追加已有内容。\n"
+                    "---\n"
+                    f"{description}"
+                ),
+            )
+            enqueued = bool(str((result or {}).get("request_id") or "").strip())
+        except Exception as exc:
+            logger.warning("persona settings enqueue failed: {}", exc)
+    return {"ok": True, "description": description, "enqueued": enqueued}
 
 
 @router.post("/persona/photos")

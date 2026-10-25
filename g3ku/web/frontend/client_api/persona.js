@@ -28,6 +28,10 @@
             return this.get("/api/persona");
         },
 
+        async savePersona(description) {
+            return this.post("/api/persona", { description: String(description || "") });
+        },
+
         async uploadPersonaPhotos(files = []) {
             const formData = new FormData();
             [...files].forEach((file) => formData.append("files", file));

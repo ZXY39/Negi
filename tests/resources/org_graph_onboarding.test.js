@@ -64,7 +64,11 @@ function makeElement(id, { backdrop = false } = {}) {
     return element;
 }
 
-function buildHarness({ status, completeResult = { ok: true, jobs: ["persona_enqueued"] } } = {}) {
+function buildHarness({
+    status,
+    completeResult = { ok: true, jobs: ["persona_enqueued"] },
+    persona = { description: "", photos: [] },
+} = {}) {
     const ids = [
         "persona-onboarding-backdrop",
         "persona-onboarding-dialog",
@@ -80,9 +84,17 @@ function buildHarness({ status, completeResult = { ok: true, jobs: ["persona_enq
         "persona-dialog-backdrop",
         "persona-dialog",
         "persona-dialog-description",
+        "persona-dialog-description-empty",
+        "persona-dialog-description-input",
+        "persona-dialog-description-actions",
+        "persona-dialog-description-save",
+        "persona-dialog-description-cancel",
         "persona-dialog-photo-grid",
         "persona-dialog-close-btn",
         "persona-dialog-close",
+        "persona-button-dot",
+        "persona-nav-dot",
+        "project-settings-btn",
         "project-settings-open-persona-btn",
     ];
     const elements = Object.fromEntries(
@@ -94,6 +106,7 @@ function buildHarness({ status, completeResult = { ok: true, jobs: ["persona_enq
         toasts: [],
         skipped: 0,
         savedDescription: [],
+        savedPersona: [],
         completed: 0,
         views: [],
         editing: 0,
@@ -144,7 +157,12 @@ function buildHarness({ status, completeResult = { ok: true, jobs: ["persona_enq
             return completeResult;
         },
         async getPersona() {
-            return { ok: true, description: "人设正文", photos: [] };
+            return { ok: true, description: persona.description, photos: persona.photos };
+        },
+        async savePersona(description) {
+            calls.savedPersona.push(description);
+            persona.description = description;
+            return { ok: true, description };
         },
         async uploadPersonaPhotos() {
             return [];
@@ -319,18 +337,66 @@ test("a persona with an empty saved memory chain still enters chain editing", as
     assert.equal(harness.calls.completed, 1);
 });
 
-test("persona settings dialog is read-only and the settings entry exists", () => {
+test("empty persona shows red dots and can be initialized from the dialog", async () => {
+    const harness = buildHarness({
+        status: {
+            should_run: false,
+            completed: true,
+            persona_step_done: true,
+            has_models: true,
+            has_persona: false,
+            has_persona_input: false,
+            description: "",
+            photos: [],
+            photo_album: [],
+        },
+    });
+    harness.documentListeners.DOMContentLoaded();
+    await flush();
+    assert.equal(harness.elements["persona-nav-dot"].hidden, false);
+    assert.equal(harness.elements["persona-button-dot"].hidden, false);
+
+    await harness.context.G3kuOnboarding.openPersonaDialog();
+    assert.equal(harness.elements["persona-dialog-backdrop"].hidden, false);
+    assert.equal(harness.elements["persona-dialog-backdrop"].classList.contains("is-open"), true);
+    assert.equal(harness.elements["persona-dialog-description-empty"].hidden, false);
+    assert.equal(harness.elements["persona-dialog-description"].hidden, true);
+    assert.equal(
+        harness.elements["persona-dialog-photo-grid"].children[0].textContent,
+        "图片为空，如果需要增加，请在会话中发送",
+    );
+
+    harness.elements["persona-dialog-description-empty"].click();
+    assert.equal(harness.elements["persona-dialog-description-input"].hidden, false);
+    harness.elements["persona-dialog-description-input"].value = "你是测试助手，回答先给结论。";
+    harness.elements["persona-dialog-description-save"].click();
+    await flush();
+    await flush();
+
+    assert.deepEqual(harness.calls.savedPersona, ["你是测试助手，回答先给结论。"]);
+    assert.equal(harness.elements["persona-nav-dot"].hidden, true);
+    assert.equal(harness.elements["persona-button-dot"].hidden, true);
+    assert.equal(harness.elements["persona-dialog-description"].textContent, "你是测试助手，回答先给结论。");
+    assert.equal(harness.elements["persona-dialog-description"].hidden, false);
+    assert.equal(harness.elements["persona-dialog-description-empty"].hidden, true);
+});
+
+test("persona settings dialog initializes an empty description and keeps photos chat-only", () => {
     assert.ok(HTML.includes('id="project-settings-open-persona-btn"'));
+    assert.ok(HTML.includes('id="persona-nav-dot"'));
+    assert.ok(HTML.includes('id="persona-button-dot"'));
     assert.ok(HTML.includes('id="persona-onboarding-backdrop"'));
     const start = HTML.indexOf('id="persona-dialog-backdrop"');
     const end = HTML.indexOf('id="password-change-backdrop"');
     assert.ok(start > 0 && end > start);
     const personaDialog = HTML.slice(start, end);
     assert.ok(!/<input\b/i.test(personaDialog), "persona dialog must not contain inputs");
-    assert.ok(!/<textarea\b/i.test(personaDialog), "persona dialog must not contain a textarea");
     assert.ok(!personaDialog.includes("type=\"file\""));
     assert.ok(!personaDialog.includes("上传"));
     assert.ok(!personaDialog.includes("删除"));
+    assert.ok(personaDialog.includes("persona-dialog-description-empty"));
+    assert.ok(personaDialog.includes("persona-dialog-description-input"));
+    assert.ok(personaDialog.includes("persona-dialog-description-save"));
     assert.ok(personaDialog.includes("persona-dialog-description"));
     assert.ok(personaDialog.includes("persona-dialog-photo-grid"));
 });

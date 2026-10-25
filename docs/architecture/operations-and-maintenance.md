@@ -213,7 +213,7 @@
   记忆目录；排障入口详见本文档「Memory Queue Workflow」章节。
 
 - `memory/notes/note_persona.md`（安装根，位于 `memory/notes/`）
-  人设正文的保留 note。它不是 memories 行，不进常驻字数、压缩、退场与行号；孤儿回收、`reconcile-notes` 与 `doctor_report` 都跳过它。改人设走会话里的记忆 agent（`note_edits` / `note_upserts`），也可以在记忆页的 note 编辑面直接改；没有删除入口。
+  人设正文的保留 note。它不是 memories 行，不进常驻字数、压缩、退场与行号；孤儿回收、`reconcile-notes` 与 `doctor_report` 都跳过它。描述为空时可以在设置页直接初始化（runtime 未就绪时直接写这份文件）；非空后设置页只读，后续改动走会话里的记忆 agent（`note_edits` / `note_upserts`），也可以在记忆页的 note 编辑面直接改；没有删除入口。
 
 - `my_image/`（工作区根，默认安装根）
   人设照片目录。引导页上传直接写入；聊天里用户发来的「你的照片」由 CEO 用 `filesystem_copy` 复制进来；设置页只读画廊读这里。它不被任何记忆回收清理，删照片就是删文件。载体与通知规则见 `runtime-overview.md`「人设块、人设 note 与身份」。

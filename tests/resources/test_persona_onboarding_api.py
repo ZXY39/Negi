@@ -199,6 +199,86 @@ def test_onboarding_status_reads_persona_file_before_the_agent_exists(
     assert persona["description"] == "你是玲音。"
 
 
+def test_save_persona_from_settings_writes_and_enqueues(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, object] = {}
+
+    class _MemoryManager:
+        def set_persona(self, text: str) -> dict:
+            calls["persona"] = text
+            return {"ref": "note_persona"}
+
+        async def enqueue_operator_request(self, **kwargs):
+            calls["enqueue"] = kwargs
+            return {"ok": True, "request_id": "req-settings"}
+
+    monkeypatch.setattr(api, "_memory_manager", lambda: _MemoryManager())
+    monkeypatch.setattr(api, "_role_chain", lambda scope: ["memory-model"] if scope == "memory" else [])
+    import asyncio
+
+    result = asyncio.run(api.save_persona({"description": "你是玲音。"}))
+    assert result["ok"] is True
+    assert result["enqueued"] is True
+    assert calls["persona"] == "你是玲音。"
+    enqueue = calls["enqueue"]
+    assert enqueue["trigger_source"] == "persona_settings"
+    assert enqueue["op"] == "write"
+    assert "你是玲音。" in enqueue["payload_text"]
+
+
+def test_save_persona_skips_enqueue_without_a_memory_chain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, object] = {}
+
+    class _MemoryManager:
+        def set_persona(self, text: str) -> dict:
+            calls["persona"] = text
+            return {"ref": "note_persona"}
+
+        async def enqueue_operator_request(self, **kwargs):
+            calls["enqueue"] = kwargs
+            return {"ok": True, "request_id": "unexpected"}
+
+    monkeypatch.setattr(api, "_memory_manager", lambda: _MemoryManager())
+    monkeypatch.setattr(api, "_role_chain", lambda scope: [])
+    import asyncio
+
+    result = asyncio.run(api.save_persona({"description": "你是玲音。"}))
+    assert result["enqueued"] is False
+    assert calls["persona"] == "你是玲音。"
+    assert "enqueue" not in calls
+
+
+def test_save_persona_without_runtime_writes_the_reserved_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(api, "workspace_path", lambda: tmp_path)
+
+    def _no_runtime():
+        raise api.HTTPException(status_code=503, detail={"code": "memory_manager_unavailable"})
+
+    monkeypatch.setattr(api, "_memory_manager", _no_runtime)
+    import asyncio
+
+    result = asyncio.run(api.save_persona({"description": "你是玲音。"}))
+    assert result["ok"] is True
+    assert result["enqueued"] is False
+    note = tmp_path / "memory" / "notes" / "note_persona.md"
+    assert note.read_text(encoding="utf-8").strip() == "你是玲音。"
+
+
+def test_save_persona_rejects_empty_and_over_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    with pytest.raises(api.HTTPException) as empty:
+        asyncio.run(api.save_persona({"description": "   "}))
+    assert empty.value.status_code == 422
+    assert empty.value.detail["code"] == "persona_empty"
+
+    with pytest.raises(api.HTTPException) as too_long:
+        asyncio.run(api.save_persona({"description": "x" * (PERSONA_DESCRIPTION_MAX_CHARS + 1)}))
+    assert too_long.value.status_code == 422
+    assert too_long.value.detail["code"] == "persona_too_long"
+
+
 def test_onboarding_persona_rejects_over_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     store = _store(tmp_path)
     monkeypatch.setattr(api, "_store", lambda: store)

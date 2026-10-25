@@ -17787,7 +17787,8 @@ textarea {
     font-size: 12px;
 }
 
-.persona-onboarding-field textarea {
+.persona-onboarding-field textarea,
+.persona-dialog-description-input {
     width: 100%;
     min-height: 120px;
     resize: vertical;
@@ -17798,6 +17799,46 @@ textarea {
     color: var(--ui-text);
     font: inherit;
     line-height: 1.6;
+}
+
+.persona-dialog-description-empty {
+    width: 100%;
+    min-height: 72px;
+    padding: 12px;
+    border: 1px dashed var(--ui-border-strong);
+    border-radius: var(--ui-radius-control);
+    background: var(--ui-bg-input);
+    color: var(--ui-text-secondary);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.persona-dialog-description-empty:hover {
+    border-color: var(--ui-border-strong);
+    color: var(--ui-text);
+}
+
+.persona-dialog-description-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--ui-space-2);
+}
+
+/* 设置入口的两颗红点：更新在左上，人设未设置在右上，互不遮挡。 */
+:root #persona-nav-dot {
+    left: auto;
+    right: -3px;
+}
+
+:root #project-settings-open-persona-btn {
+    position: relative;
+}
+
+:root #persona-button-dot {
+    left: auto;
+    right: 6px;
+    top: 6px;
 }
 
 .persona-photo-grid {

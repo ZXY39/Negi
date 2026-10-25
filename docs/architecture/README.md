@@ -149,6 +149,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 用户说「记住/忘掉」但模型照旧，或某轮命中前缀在第二条消息就分叉 → `runtime-overview.md`「Memory Runtime State」（头部基座的压缩边界更新与修订增量）+ `context-and-cache-troubleshooting.md`「长期记忆的头部基座与增量」
 - 人设没生效、头部没有「我的人设」、改了人设旧会话没变、或同一条人设通知重复出现 → `runtime-overview.md`「人设块、人设 note 与身份」+ `context-and-cache-troubleshooting.md`「长期记忆的头部基座与增量」
 - 初次引导不弹、卡在半途、照片没进 `my_image`、设置页画廊空、保存模型链后人设没入队 → `web-and-admin.md`「First-Run Onboarding And Persona Contract」+ `operations-and-maintenance.md`「人设与初次引导」
+- 设置入口或人设按钮的红点不亮/一直亮、空人设点不进去、照片空态文案不对 → `web-and-admin.md`「First-Run Onboarding And Persona Contract」
 - 隐藏的 `internal:persona_photo` 会话出现在网页会话列表或记忆复核里 → `web-and-admin.md`「First-Run Onboarding And Persona Contract」
 - 某条记忆从长期记忆块里消失了、`memory/index/` 出现新文件、归并区的一整节摘不掉，或医生检查报 `broken_category_links` → `runtime-overview.md`「Memory Runtime State」（退场写 `consolidated_into`、归并区派生、摘整节按句柄寻址、机器压缩只降级不删除）
 - 记忆批次停在停车区而错误文本是 `memory_apply_confirm is required`、`line N is outside the memory block`、`line N is outside the candidate list`、`names no category with retired memories` → `runtime-overview.md`「Memory Runtime State」（两次提交那道门与行号的解释时刻）

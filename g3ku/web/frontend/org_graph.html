@@ -120,6 +120,7 @@
                     <i data-lucide="settings" aria-hidden="true"></i>
                     <span class="settings-label">设置</span>
                     <span id="update-nav-dot" class="update-dot" title="有新版本" hidden></span>
+                    <span id="persona-nav-dot" class="update-dot" title="人设未设置" hidden></span>
                 </button>
             </div>
         </nav>
@@ -1119,7 +1120,9 @@
                             <button id="project-settings-open-bundle-btn" class="toolbar-btn ghost"
                                 type="button">配置</button>
                             <button id="project-settings-open-persona-btn" class="toolbar-btn ghost"
-                                type="button">人设</button>
+                                type="button">人设
+                                <span id="persona-button-dot" class="update-dot" title="人设未设置" hidden></span>
+                            </button>
                         </div>
                         <div class="project-settings-actions">
                             <label class="project-settings-font-row" for="project-settings-reading-scale">
@@ -1200,6 +1203,16 @@
                         <section class="persona-dialog-section">
                             <h3>我是谁</h3>
                             <pre id="persona-dialog-description" class="persona-dialog-description"></pre>
+                            <button id="persona-dialog-description-empty" class="persona-dialog-description-empty"
+                                type="button" hidden>点击输入人设描述</button>
+                            <textarea id="persona-dialog-description-input" class="persona-dialog-description-input"
+                                maxlength="39000" rows="6" placeholder="名字、身份、说话方式、称呼习惯……" hidden></textarea>
+                            <div id="persona-dialog-description-actions" class="persona-dialog-description-actions" hidden>
+                                <button id="persona-dialog-description-save" class="toolbar-btn success"
+                                    type="button">保存</button>
+                                <button id="persona-dialog-description-cancel" class="toolbar-btn ghost"
+                                    type="button">取消</button>
+                            </div>
                         </section>
                         <section class="persona-dialog-section">
                             <h3>照片</h3>
