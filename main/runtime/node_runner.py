@@ -39,6 +39,7 @@ from main.models import (
 )
 from main.prompts import load_prompt
 from main.protocol import now_iso
+from main.runtime import model_size_span
 from main.runtime.acceptance_handshake import (
     ACCEPTANCE_HANDSHAKE_KEY,
     ACCEPTANCE_STATE_ACCEPTED,
@@ -876,6 +877,17 @@ class NodeRunner:
                 node_id=node.node_id,
                 text=text,
                 node_goal=str(getattr(node, 'goal', '') or ''),
+            )
+            # 这条异常道也必须有异常暂停通知：`failure_disposition='pause'` 那条道会通知父节点，
+            # 而 provider 整条链耗尽是从这里落地的（实盘 2026-10-26 SPAN-PROBE task:578bebcdf701
+            # node:20bb6c2ea7d1：子节点 400 耗尽后 pause_reason='error'，父节点信箱一条都没收到，
+            # 根节点停在 enter_wait 等一封永远不会来的信）。心跳只报根节点，非根节点少了这一跳
+            # 就是静默悬空。
+            span_report = str(getattr(exc, model_size_span.EXCEPTION_REPORT_ATTR, '') or '').strip()
+            self.notify_parent_abnormal_pause(
+                task_id=task_id,
+                node_id=node.node_id,
+                reason=f'{text}\n{span_report}' if span_report else text,
             )
             raise NodePausedError(task_id, node.node_id) from exc
         finally:

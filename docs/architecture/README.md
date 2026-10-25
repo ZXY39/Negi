@@ -52,7 +52,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - （历史，已删除）追加通知后任务停在 paused / 红色「消息分发失败」横幅 / epoch state=failed：distribution epoch 已整体删除，按 `main-task-runtime.md`「附录 A：已删除的 distribution epoch（历史说明，勿据此实现）」理解旧库数据，不要按它排障。
 - 想知道"每条节点消息走到哪一步"（待处理 / 已消费 / 旧库里的 received·frozen 投影）→ `web-and-admin.md`「Task Message Distribution UI Contract（已删除）」的信箱三态三条 + `main-task-runtime.md`「节点信箱与唤醒（现行）」；节点详情已显示重试中而 toast 不出现 → `web-and-admin.md`「Model Retry Visibility UI Contract」
 - 任务非终态、一批验收节点长期 `in_progress` 而派发计数为 0 → 先按 `operations-and-maintenance.md`「节点投递与冻结/复活排查」的签名分诊（`final acceptance round re-dispatched after interruption` = 验收轮按持久状态重派；`orphan node parked as candidate` = 无人驱动又无重放路径，已可见地暂停），合同见 `main-task-runtime.md`「验收三档裁决（P4）」与「Node-Level Pause and Recovery」；派发计数始终为 0 时再核 `main-task-runtime.md`「验收节点：提前创建、激活与握手重派发」的两个催命点（提交后重排一趟、扫描先于通知复派）
-- 节点突然显示 `暂停·异常`（pause_reason=error）而模型没有报错 → 先看 `metadata.watchdog_history`：三条结构判据（重复相同调用 / 工具连续错误 / 超时无事件）见 `main-task-runtime.md`「看门狗」；验收方裁 `reject_no_progress` 也会走同一暂停形态，理由在验收节点 `failure_reason` 与父节点 `child_abnormal_pause` 里。
+- 节点突然显示 `暂停·异常`（pause_reason=error）而模型没有报错 → 先看 `metadata.watchdog_history`：三条结构判据（重复相同调用 / 工具连续错误 / 超时无事件）见 `main-task-runtime.md`「看门狗」；验收方裁 `reject_no_progress`、回合兜底异常道（provider 整条链耗尽）也落同一暂停形态，理由分别在被验节点 `failure_reason`、该节点错误行与父节点 `child_abnormal_pause` 里。
 - 验收节点选了 `reject_no_progress` 却被工具拒绝 → 首轮无 `metadata.rejection_history` 时该档按设计禁用（`main-task-runtime.md`「验收三档裁决」）。
 - 同一工具反复返回同一条 `Error executing <tool>`、节点长期 `in_progress` 且从不进错误暂停 → `main-task-runtime.md`「Node-Level Pause and Recovery」（`runtime_fault:` 断路器）
 - 操作员点了暂停、节点 `pause_requested=True` 而 `is_paused` 长期不变 → `main-task-runtime.md`「Node-Level Pause and Recovery」（脱离派发面后的暂停直落）

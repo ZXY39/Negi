@@ -29,6 +29,7 @@ from g3ku.providers.fallback import (
     MODEL_RETRY_LIVE_STATES,
     PUBLIC_PROVIDER_FAILURE_MESSAGE,
     ModelProviderExhaustedError,
+    is_request_shape_error,
 )
 from g3ku.resources.retired_schemas import placeholder_tool_schema
 from g3ku.resources.retired_schemas import schema_name as _provider_schema_name
@@ -1177,6 +1178,26 @@ class ReActToolLoop:
                             started_at=now_iso(),
                         )
                     except Exception as exc:
+                        # 被 provider 拒掉的那一发也必须进区间账：这一发没有回包，逐跳台账根本
+                        # 不写行，只记成功跳的话"接受臂"永远孤零零——成员真实墙算不出来（实盘
+                        # 2026-10-26 SPAN-PROBE：288,991 被接受，下一发整条链 400 耗尽，账本里
+                        # 一个拒绝样本都没有，model_size_span 一条没落）。
+                        # 只有请求体形状错误（结构化 400/422）才是体积证据；429、超时、连接失败
+                        # 都按"这一发太大"记账会把墙算低。
+                        if self._is_size_rejection_sample(exc):
+                            span_report = self._note_model_size_span(
+                                response=None,
+                                diagnostics=token_preflight_diagnostics,
+                                task_id=task.task_id,
+                                node_id=node.node_id,
+                                node_title=str(node.goal or ''),
+                                rejected=True,
+                                model_key_override=str(
+                                    getattr(node_turn_lease, 'selected_model_ref', '') or ''
+                                ),
+                            )
+                            if span_report:
+                                setattr(exc, model_size_span.EXCEPTION_REPORT_ATTR, span_report)
                         if not self._is_provider_chain_exhausted_error(exc):
                             raise
                         # 闭包安全：except 作用域结束后 exc 会被删除，而 update_frame 的
@@ -7000,24 +7021,32 @@ class ReActToolLoop:
         task_id: str,
         node_id: str,
         node_title: str,
-    ) -> None:
+        rejected: bool = False,
+        model_key_override: str = '',
+    ) -> str:
         """把"这颗成员实际收得下多大"算出来并报出去——不改路由，也不改配置。
 
         两臂都取发送前自算那把尺子：被拒的那一发拿不到 provider 回执，用 usage 去和估算比会
         得出反向区间（实盘 2026-10-25 一场 400 风暴里，按 usage 的最大接受是 261,853，按估算的
         最小拒绝却是 251,793）。只在区间第一次成立、或它变窄的那一拍落一行错误日志：逐跳都写会
         把这条自己淹成噪声。
+
+        `rejected=True` 供"请求根本没拿到回包"的那一发用：那时没有 response，接单成员只能从
+        租约拿（`model_key_override`），而 `finish_reason` 判据会把空回包误判成"接受"。
+        返回值是这一拍的报告原文（没成交集就是空串），调用方把它挂到异常上带上游。
         """
         payload = dict(diagnostics or {})
         tokens = int(payload.get('final_request_tokens') or 0)
         if tokens <= 0:
-            return
+            return ''
         model_key = (
-            self._served_attempt_model_key(response) or str(payload.get('model_key') or '').strip()
+            str(model_key_override or '').strip()
+            or self._served_attempt_model_key(response)
+            or str(payload.get('model_key') or '').strip()
         )
         if not model_key:
-            return
-        accepted = str(getattr(response, 'finish_reason', '') or '').strip().lower() != 'error'
+            return ''
+        accepted = not rejected and str(getattr(response, 'finish_reason', '') or '').strip().lower() != 'error'
         state = model_size_span.note_send_size(
             model_key,
             tokens=tokens,
@@ -7026,11 +7055,11 @@ class ReActToolLoop:
             compression_trigger_tokens=int(payload.get('effective_trigger_tokens') or 0),
         )
         if not state.get('known') or not state.get('changed'):
-            return
+            return ''
         state['model_key'] = model_key
         text = model_size_span.describe_span(state)
         if not text:
-            return
+            return ''
         logger.warning(text)
         try:
             self._log_service.append_task_error_log(
@@ -7041,6 +7070,7 @@ class ReActToolLoop:
             )
         except Exception:
             pass
+        return text
 
     @staticmethod
     def _node_send_compaction_diagnostics(diagnostics: dict[str, Any] | None) -> dict[str, Any]:
@@ -8702,6 +8732,15 @@ class ReActToolLoop:
             'A submission that has an acceptance reviewer enters acceptance; rejection feedback comes back '
             'as a later notice and you must continue from it.'
         )
+
+    @staticmethod
+    def _is_size_rejection_sample(error: Exception | str) -> bool:
+        """这一发的拒绝能不能当"体积"证据：只认结构化 HTTP 400/422。
+
+        文本关键字不算判据——同一批网关把 429 限流也标成 `invalid_request_error`，按文本判会把
+        可重试错误记成"这颗成员装不下"，区间随之被算低。
+        """
+        return is_request_shape_error(error)
 
     @staticmethod
     def _is_provider_chain_exhausted_error(error: Exception | str) -> bool:

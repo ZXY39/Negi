@@ -222,3 +222,103 @@ class TestFeedWritesOneReportPerNewSpan:
         )
         # 写失败也不能上抛，且状态已经记下（下一次仍然会尝试报）
         assert model_size_span.span_for('seva-lite')['rejected_min'] == 287_020
+
+
+class TestRejectionWithoutAnyReply:
+    """A rejected hop that never got a response still has to reach the interval.
+
+    Live 2026-10-26 (task:578bebcdf701 node:20bb6c2ea7d1): the provider answered 288,991
+    and then 400'd the next send with no reply at all, so the per-hop ledger never wrote a
+    row and the rejected arm stayed empty forever.
+    """
+
+    def test_rejected_flag_needs_no_response_object(self):
+        loop = _loop()
+        loop._note_model_size_span(
+            response=self._accepted('seva-lite', 285_391),
+            diagnostics=dict(_DIAG), task_id='task:x', node_id='node:a', node_title='甲',
+        )
+        text = loop._note_model_size_span(
+            response=None,
+            diagnostics={**_DIAG, 'final_request_tokens': 325_000},
+            task_id='task:x', node_id='node:a', node_title='甲',
+            rejected=True,
+            model_key_override='seva-lite',
+        )
+        assert 'model_size_span: seva-lite' in text
+        assert '325,000' in text
+        assert text in loop._log_service.rows[0]
+
+    def test_absent_response_without_the_flag_would_be_miscounted_as_accepted(self):
+        """Why `rejected=True` exists: `finish_reason` on no response reads as success."""
+        loop = _loop()
+        loop._note_model_size_span(
+            response=self._accepted('seva-lite', 285_391),
+            diagnostics=dict(_DIAG), task_id='task:x', node_id='node:a', node_title='甲',
+        )
+        text = loop._note_model_size_span(
+            response=None,
+            diagnostics={**_DIAG, 'final_request_tokens': 325_000},
+            task_id='task:x', node_id='node:a', node_title='甲',
+            model_key_override='seva-lite',
+        )
+        assert text == ''
+        assert loop._log_service.rows == []
+
+    def test_no_report_until_the_interval_closes(self):
+        loop = _loop()
+        text = loop._note_model_size_span(
+            response=None,
+            diagnostics={**_DIAG, 'final_request_tokens': 325_000},
+            task_id='task:x', node_id='node:a', node_title='甲',
+            rejected=True,
+            model_key_override='lonely-member',
+        )
+        assert text == ''
+
+    def test_member_comes_from_the_lease_when_nothing_was_served(self):
+        loop = _loop()
+        loop._note_model_size_span(
+            response=self._accepted('sensenova-6.8-flash-lite', 285_391),
+            diagnostics=dict(_DIAG), task_id='task:x', node_id='node:a', node_title='甲',
+        )
+        # 接单成员由租约点名，诊断里的 model_key 不能把这一笔挪到别人头上——
+        # 否则墙会算到一颗根本没被这一发问过的成员上。
+        loop._note_model_size_span(
+            response=None,
+            diagnostics={**_DIAG, 'final_request_tokens': 325_000, 'model_key': 'glm-5.2-2'},
+            task_id='task:x', node_id='node:a', node_title='甲',
+            rejected=True,
+            model_key_override='sensenova-6.8-flash-lite',
+        )
+        assert model_size_span.span_for('sensenova-6.8-flash-lite')['rejected_min'] == 325_000
+        assert model_size_span.span_for('glm-5.2-2') == {}
+
+    @staticmethod
+    def _accepted(model_key: str, tokens: int) -> Any:
+        return type('R', (), {
+            'finish_reason': 'stop',
+            'attempts': [{'model_key': model_key}],
+            'usage': {'input_tokens': tokens},
+        })()
+
+
+class TestSizeRejectionGate:
+    def test_structured_400_is_size_evidence(self):
+        exc = RuntimeError('inference request is invalid')
+        exc.status_code = 400  # type: ignore[attr-defined]
+        assert ReActToolLoop._is_size_rejection_sample(exc) is True
+
+    def test_throttling_is_not_size_evidence(self):
+        exc = RuntimeError('rate limited')
+        exc.status_code = 429  # type: ignore[attr-defined]
+        assert ReActToolLoop._is_size_rejection_sample(exc) is False
+
+    def test_words_about_invalid_request_are_not_size_evidence(self):
+        # 同一批网关把 429 也标成 invalid_request_error，按文本判会把墙算低。
+        assert ReActToolLoop._is_size_rejection_sample(
+            RuntimeError("{'message': 'inference request is invalid', 'type': 'invalid_request_error'}")
+        ) is False
+
+    def test_timeout_is_not_size_evidence(self):
+        assert ReActToolLoop._is_size_rejection_sample(RuntimeError('read timeout')) is False

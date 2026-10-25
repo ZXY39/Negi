@@ -27,6 +27,11 @@ from typing import Any, Final
 # operator to distrust it.
 _MIN_ACCEPTED_TOKENS: Final = 1024
 
+# Where the hop layer parks the span sentence when a request was rejected without any
+# reply: the exception object that reaches the node fault lane carries it, so the numbers
+# travel with the failure instead of being re-derived from rendered log text downstream.
+EXCEPTION_REPORT_ATTR: Final = 'model_size_span_report'
+
 _STATE_LOCK = threading.Lock()
 _STATE: dict[str, dict[str, Any]] = {}
 
