@@ -47,4 +47,4 @@ exposure:
   agent: true
   main_runtime: false
 toolskill:
-  enabled: false
+  enabled: true
