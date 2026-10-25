@@ -265,6 +265,24 @@ def test_save_persona_without_runtime_writes_the_reserved_note(
     assert note.read_text(encoding="utf-8").strip() == "你是玲音。"
 
 
+def test_save_persona_falls_back_when_no_ceo_model_is_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(api, "workspace_path", lambda: tmp_path)
+
+    def _no_model():
+        raise ValueError("No model configured for role 'ceo'.")
+
+    monkeypatch.setattr(api, "_memory_manager", _no_model)
+    import asyncio
+
+    result = asyncio.run(api.save_persona({"description": "你是玲音。"}))
+    assert result["ok"] is True
+    assert result["enqueued"] is False
+    note = tmp_path / "memory" / "notes" / "note_persona.md"
+    assert note.read_text(encoding="utf-8").strip() == "你是玲音。"
+
+
 def test_save_persona_rejects_empty_and_over_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import asyncio
 

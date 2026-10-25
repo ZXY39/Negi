@@ -292,6 +292,11 @@ async def save_persona(payload: dict | None = Body(default=None)):
             raise
         path = write_persona_file(workspace_path(), description)
         return {"ok": True, "description": description, "enqueued": False, "path": str(path)}
+    except Exception:
+        # A fresh project has no CEO model, so get_agent() raises before the memory
+        # manager exists. The settings dialog can still initialize the reserved note.
+        path = write_persona_file(workspace_path(), description)
+        return {"ok": True, "description": description, "enqueued": False, "path": str(path)}
 
     manager.set_persona(description)
     enqueued = False
