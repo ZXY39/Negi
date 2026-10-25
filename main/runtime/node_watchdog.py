@@ -12,7 +12,13 @@ The criteria are behavioural, not content-based:
   the arguments nor switched tools.
 * ``no_new_events`` — nothing happened for longer than the stall window. Parked
   phases (``waiting_explicit`` / ``waiting_acceptance``) and paused nodes are
-  explicitly excluded: they are idle by design, not stalled.
+  explicitly excluded: they are idle by design, not stalled. An in-flight model
+  turn (``await_marker`` = ``model.chat.*`` / ``node_turn.*``) is work, not
+  silence: the request may be queueing for a route, backing off a retry, or
+  streaming, and the request layer owns its deadline. The one exception is
+  ``model_retry_status.state == 'waiting_upstream'`` whose ``waiting_seconds``
+  already spans the stall window: a single request that produced no payload for
+  that long is the case this criterion still pauses.
 """
 
 from __future__ import annotations
@@ -23,7 +29,10 @@ from typing import Any
 
 from loguru import logger
 
+from g3ku.providers.fallback import MODEL_RETRY_STATE_WAITING_UPSTREAM
+
 PARKED_PHASES = frozenset({'waiting_explicit', 'waiting_children', 'waiting_acceptance'})
+MODEL_TURN_AWAIT_MARKER_PREFIXES = ('model.chat.', 'node_turn.')
 REPEAT_THRESHOLD = 3
 ERROR_STREAK_THRESHOLD = 3
 _TERMINAL_TOOL_STATUSES = {'success', 'error', 'timeout', 'cancelled'}
@@ -72,6 +81,34 @@ def _frame_has_running_tool(frame: dict[str, Any] | None) -> bool:
     return False
 
 
+def _model_turn_work_state(
+    frame: dict[str, Any] | None,
+    *,
+    stall_seconds: float,
+) -> str:
+    """Return ``model_in_flight`` / ``model_no_payload`` / ``''``.
+
+    The frame's await marker is the only signal that exists while a node turn is
+    inside the model call: the node row and the tool table do not move whether the
+    turn is queueing for a route, sleeping between retries, or streaming. The
+    request layer owns that deadline (first/idle chunk timeouts plus the per-model
+    round budget), so this criterion only re-enters when the request layer itself
+    reports a whole stall window without a payload chunk.
+    """
+    marker = str((frame or {}).get('await_marker') or '').strip()
+    if not marker.startswith(MODEL_TURN_AWAIT_MARKER_PREFIXES):
+        return ''
+    status = (frame or {}).get('model_retry_status')
+    if isinstance(status, dict) and str(status.get('state') or '').strip() == MODEL_RETRY_STATE_WAITING_UPSTREAM:
+        try:
+            waiting_seconds = float(status.get('waiting_seconds') or 0.0)
+        except (TypeError, ValueError):
+            waiting_seconds = 0.0
+        if waiting_seconds >= max(1.0, float(stall_seconds or 600.0)):
+            return 'model_no_payload'
+    return 'model_in_flight'
+
+
 def watchdog_pause_reason(
     *,
     frame: dict[str, Any] | None,
@@ -98,6 +135,12 @@ def watchdog_pause_reason(
                 return 'tool_error_streak'
             if len(statuses) == 1:
                 return 'repeated_identical_tool_call'
+
+    model_state = _model_turn_work_state(frame, stall_seconds=stall_seconds)
+    if model_state == 'model_in_flight':
+        return ''
+    if model_state == 'model_no_payload':
+        return 'no_new_events'
 
     current = now if now is not None else datetime.now(timezone.utc)
     last_event: datetime | None = _parse_iso(last_event_at)

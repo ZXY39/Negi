@@ -70,6 +70,9 @@ class StreamingDiagnostics:
     # 本次静默是否已经上报过、以及上一次上报时刻（刷新节拍用）。
     silence_reported_at: float | None = None
     silence_last_report_at: float | None = None
+    # 上报过等待之后载荷恢复：由下一个载荷分片置位，notice_payload_silence 发一次
+    # cleared。否则帧上的 waiting_upstream 会带着过期读数活到这次请求收尾。
+    silence_cleared_pending: bool = False
     # 是否收到过携带 finish_reason 的 choice 分片。上游在思考/生成中途关闭 SSE 时
     # 该标记保持 False，而 finish_reason 仍会落到默认值，日志里看起来像正常完成。
     finish_reason_seen: bool = False
@@ -93,6 +96,8 @@ class StreamingDiagnostics:
         if self.first_chunk_received_at is None:
             self.first_chunk_received_at = now
         if is_payload_chunk_kind(normalized_kind):
+            if self.silence_reported_at is not None:
+                self.silence_cleared_pending = True
             self.last_payload_received_at = now
             self.silence_reported_at = None
             self.silence_last_report_at = None
@@ -160,6 +165,21 @@ async def notice_payload_silence(diagnostics: StreamingDiagnostics, on_upstream_
     任何载荷分片到达都会清零这两个标记，所以正常的长思考不会被报成等待。
     """
     if not callable(on_upstream_wait):
+        return
+    if diagnostics.silence_cleared_pending:
+        diagnostics.silence_cleared_pending = False
+        result = on_upstream_wait(
+            {
+                "cleared": True,
+                "waiting_seconds": 0,
+                "chunk_count": int(diagnostics.chunk_count),
+                "chunk_kinds": diagnostics.render_chunk_kind_histogram(),
+                "last_chunk_kind": diagnostics.last_chunk_kind,
+                "provider": diagnostics.provider_label,
+            }
+        )
+        if inspect.isawaitable(result):
+            await result
         return
     now = time.perf_counter()
     if diagnostics.silence_reported_at is not None:

@@ -108,6 +108,84 @@ def test_no_new_events_pauses() -> None:
     assert reason == 'no_new_events'
 
 
+def test_model_turn_in_flight_is_not_paused() -> None:
+    reason = watchdog_pause_reason(
+        frame={
+            'phase': 'before_model',
+            'tool_calls': [],
+            'await_marker': 'model.chat.await_response',
+        },
+        tool_results=[],
+        now=NOW,
+        stall_seconds=600,
+        last_event_at=OLD,
+    )
+    assert reason == ''
+
+
+def test_route_lease_wait_is_not_paused() -> None:
+    reason = watchdog_pause_reason(
+        frame={
+            'phase': 'before_model',
+            'tool_calls': [],
+            'await_marker': 'node_turn.acquire',
+        },
+        tool_results=[],
+        now=NOW,
+        stall_seconds=600,
+        last_event_at=OLD,
+    )
+    assert reason == ''
+
+
+def test_model_retry_is_not_paused() -> None:
+    reason = watchdog_pause_reason(
+        frame={
+            'phase': 'before_model',
+            'tool_calls': [],
+            'await_marker': 'model.chat.await_response',
+            'model_retry_status': {'state': 'retrying', 'retry_count': 3},
+        },
+        tool_results=[],
+        now=NOW,
+        stall_seconds=600,
+        last_event_at=OLD,
+    )
+    assert reason == ''
+
+
+def test_waiting_upstream_within_stall_window_is_not_paused() -> None:
+    reason = watchdog_pause_reason(
+        frame={
+            'phase': 'before_model',
+            'tool_calls': [],
+            'await_marker': 'model.chat.await_response',
+            'model_retry_status': {'state': 'waiting_upstream', 'waiting_seconds': 120},
+        },
+        tool_results=[],
+        now=NOW,
+        stall_seconds=600,
+        last_event_at=OLD,
+    )
+    assert reason == ''
+
+
+def test_waiting_upstream_past_stall_window_pauses() -> None:
+    reason = watchdog_pause_reason(
+        frame={
+            'phase': 'before_model',
+            'tool_calls': [],
+            'await_marker': 'model.chat.await_response',
+            'model_retry_status': {'state': 'waiting_upstream', 'waiting_seconds': 600},
+        },
+        tool_results=[],
+        now=NOW,
+        stall_seconds=600,
+        last_event_at=RECENT,
+    )
+    assert reason == 'no_new_events'
+
+
 def _service(tmp_path: Path) -> MainRuntimeService:
     return MainRuntimeService(
         chat_backend=SimpleNamespace(),
@@ -165,6 +243,59 @@ def test_stall_pauses_node_and_records_history(tmp_path: Path) -> None:
         assert node.pause_reason == 'error'
         history = list((node.metadata or {}).get('watchdog_history') or [])
         assert history and history[-1]['reason'] == 'no_new_events'
+    finally:
+        import asyncio
+
+        asyncio.run(service.close())
+
+
+def test_scan_skips_in_flight_model_turn(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    try:
+        old = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
+        service.store.upsert_task(
+            TaskRecord(
+                task_id=TASK,
+                title='t',
+                user_request='u',
+                root_node_id=ROOT,
+                status='in_progress',
+                created_at=old,
+                updated_at=old,
+            )
+        )
+        service.store.upsert_node(
+            NodeRecord(
+                node_id=ROOT,
+                task_id=TASK,
+                parent_node_id='',
+                root_node_id=ROOT,
+                depth=0,
+                node_kind='execution',
+                goal='root',
+                prompt='p',
+                status='in_progress',
+                created_at=old,
+                updated_at=old,
+            )
+        )
+        service.log_service.update_frame(
+            TASK,
+            ROOT,
+            lambda frame: {
+                **dict(frame or {}),
+                'phase': 'before_model',
+                'await_marker': 'model.chat.await_response',
+                'model_retry_status': {'state': 'retrying', 'retry_count': 3},
+            },
+        )
+
+        paused = service.node_watchdog.scan_task(TASK)
+
+        assert paused == []
+        node = service.store.get_node(ROOT)
+        assert node.is_paused is False
+        assert not list((node.metadata or {}).get('watchdog_history') or [])
     finally:
         import asyncio
 

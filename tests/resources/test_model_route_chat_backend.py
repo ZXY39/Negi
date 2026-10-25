@@ -619,6 +619,55 @@ async def test_upstream_wait_notice_reaches_retry_status_channel(monkeypatch) ->
     assert "error_message" not in waiting
 
 
+class _UpstreamWaitClearProvider(_UpstreamWaitProvider):
+    """载荷恢复：provider 在等待上报之后补一条 cleared。"""
+
+    async def chat(self, **kwargs):
+        self.calls.append(self.model_key)
+        callback = kwargs.get("on_upstream_wait")
+        if not callable(callback):
+            return LLMResponse(content="no-callback", finish_reason="stop")
+        await callback(dict(self.info))
+        await callback(
+            {
+                "cleared": True,
+                "waiting_seconds": 0,
+                "chunk_count": 1285,
+                "chunk_kinds": "text_delta:1",
+                "provider": "responses",
+            }
+        )
+        return LLMResponse(content="ok", finish_reason="stop")
+
+
+@pytest.mark.asyncio
+async def test_upstream_wait_clear_reaches_retry_status_channel(monkeypatch) -> None:
+    """载荷恢复必须把帧上的 waiting_upstream 清掉，否则看门狗会读到过期的等待读数。"""
+    statuses: list[dict[str, object]] = []
+
+    async def _capture(status: dict[str, object]) -> None:
+        statuses.append(dict(status))
+
+    calls: list[str] = []
+    provider = _UpstreamWaitClearProvider(
+        "m_a",
+        calls,
+        {"waiting_seconds": 61, "chunk_count": 1284, "chunk_kinds": "line:1284", "provider": "responses"},
+    )
+    _patch(monkeypatch, {"m_a": _target("m_a", provider)})
+
+    response = await _backend().chat(
+        messages=[{"role": "user", "content": "demo"}],
+        tools=None,
+        model_refs=["m_a"],
+        on_model_retry_status=_capture,
+    )
+
+    assert response.content == "ok"
+    assert [item["state"] for item in statuses[:2]] == ["waiting_upstream", "cleared"]
+    assert statuses[-1]["state"] == "cleared"
+
+
 @pytest.mark.asyncio
 async def test_providers_without_notice_capability_are_not_sent_the_callback(monkeypatch) -> None:
     calls: list[str] = []

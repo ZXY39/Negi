@@ -101,9 +101,9 @@
 
 - **重复调用**：同工具 + 字节相同的参数连续 3 次终态调用。
 - **工具连续错误**：同上但三次都失败（既未改参也未换工具）。
-- **失速**：超过 `node_watchdog_stall_seconds`（默认 600s）没有任何新事件。
+- **失速**：超过 `node_watchdog_stall_seconds`（默认 600s）没有任何新事件。在飞模型回合算工作：帧里的 `await_marker`（`model.chat.*` / `node_turn.*`）让这一拍不判——等闸、退避重试（`model_retry_status=retrying`）与流式返回都发生在这个标记期间，节点行与工具表都不变化，请求层用首包/空闲分片超时与每模型轮数预算负责单次请求的止损。唯一的例外是请求层自己报告 `waiting_upstream` 且 `waiting_seconds` 已满一个失速窗口：单次请求在同样长的时间里没有任何载荷产出，才仍落 `no_new_events`。
 
-排除项是合同的一部分：`phase ∈ {waiting_explicit, waiting_acceptance}`（以及旧的 `waiting_children`）是正常停靠，**不得判停**；工具仍在 `running` 时也不判——看门狗是协作式的，等这次同步调用结束或超时后的下一拍才生效。判停留 `metadata.watchdog_history`（`read_child_progress` 会回传），并复用异常暂停的升级链路：节点转 `pause_reason='error'`，父节点收 high 级 `child_abnormal_pause`。任务级 `TaskStallNotifier` 仍然只发会话回调，两者并存、互不替代。
+排除项是合同的一部分：`phase ∈ {waiting_explicit, waiting_acceptance}`（以及旧的 `waiting_children`）是正常停靠，**不得判停**；工具仍在 `running` 时也不判——看门狗是协作式的，等这次同步调用结束或超时后的下一拍才生效；模型回合在飞（`await_marker` 为 `model.chat.*` / `node_turn.*`）同样不判。载荷恢复时 provider 补发 `cleared`，帧上的 `waiting_upstream` 随即消失，看门狗不会读到过期读数。判停留 `metadata.watchdog_history`（`read_child_progress` 会回传），并复用异常暂停的升级链路：节点转 `pause_reason='error'`，父节点收 high 级 `child_abnormal_pause`。任务级 `TaskStallNotifier` 仍然只发会话回调，两者并存、互不替代。
 
 **心跳只报根节点**：`list_new_error_pauses` 的选取谓词带 `node_id = task.root_node_id`。非根节点的异常暂停不直接惊动会话 agent，只经父节点信箱升级；父节点不处理时，前端「暂停·异常」是唯一可见面。
 

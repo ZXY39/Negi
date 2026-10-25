@@ -62,11 +62,17 @@ async def test_silence_notice_fires_once_then_refreshes_on_a_beat() -> None:
     await notice_payload_silence(diagnostics, _callback)
     assert len(seen) == 2
 
-    # 载荷分片一到就复位：正常的长思考不能被报成等待上游。
+    # 载荷分片一到就复位并清掉已上报的等待状态：正常的长思考不能被报成等待上游。
     diagnostics.note_chunk("data:response.reasoning_summary_text.delta")
     await notice_payload_silence(diagnostics, _callback)
-    assert len(seen) == 2
+    assert len(seen) == 3
+    assert seen[-1]["cleared"] is True
     assert diagnostics.payload_silence_seconds() < 1.0
+
+    # 清一次就够：后续载荷分片不再重复发。
+    diagnostics.note_chunk("data:response.reasoning_summary_text.delta")
+    await notice_payload_silence(diagnostics, _callback)
+    assert len(seen) == 3
 
 
 @pytest.mark.asyncio

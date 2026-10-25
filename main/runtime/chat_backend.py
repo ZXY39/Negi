@@ -24,6 +24,7 @@ from g3ku.providers.fallback import (
     DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS,
     DEFAULT_RETRYABLE_MODEL_ROUNDS,
     MODEL_RETRY_LIVE_STATES,
+    MODEL_RETRY_STATE_CLEARED,
     MODEL_RETRY_STATE_RETRYING,
     MODEL_RETRY_STATE_WAITING_UPSTREAM,
     current_runtime_config_revision,
@@ -1294,6 +1295,9 @@ class ConfigChatBackend:
             }
 
         async def _notice_upstream_wait(info: dict[str, Any]) -> None:
+            if bool(info.get("cleared")):
+                await _emit_model_retry_status({"state": MODEL_RETRY_STATE_CLEARED})
+                return
             await _emit_model_retry_status(_waiting_upstream_status(info))
 
         try:
