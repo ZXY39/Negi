@@ -11,10 +11,12 @@ the real reason.
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 from g3ku.agent.tools.base import Tool
 from g3ku.json_schema_utils import coerce_arguments_to_schema, schema_type_names
+from g3ku.runtime.tool_impulse import ARGUMENT_COERCION_FIELD
 from main.runtime.internal_tools import SendMessageTool
 from main.runtime.tool_call_repair import _coerce_xml_parameter_value
 
@@ -225,6 +227,93 @@ class TestCoercionIsCountable:
         facing = tool_facing_runtime_context({'tool_argument_coercions': {'c': ['to']}, 'task_id': 't'})
         assert 'tool_argument_coercions' not in facing
         assert facing['task_id'] == 't'
+
+
+class TestCoercionRowPersistence:
+    """`arguments_coerced` 是这一刀唯一的计数器，它必须真落到工具行上。"""
+
+    def _service(self, captured: list):
+        from unittest.mock import MagicMock
+
+        from main.models import NodeRecord, TaskRecord
+        from main.monitoring.log_service import TaskLogService
+
+        stamp = '2026-10-25T20:00:00+08:00'
+        task = TaskRecord(
+            task_id='task:coerce',
+            title='coercion row',
+            user_request='coercion row',
+            root_node_id='node:a',
+            created_at=stamp,
+            updated_at=stamp,
+        )
+        node = NodeRecord(
+            node_id='node:a',
+            task_id='task:coerce',
+            root_node_id='node:a',
+            goal='coerce',
+            prompt='coerce',
+            created_at=stamp,
+            updated_at=stamp,
+        )
+        store = MagicMock()
+        store.get_task.return_value = task
+        store.get_node.return_value = node
+        store.list_task_node_tool_results.return_value = []
+        store.upsert_task_node_tool_result.side_effect = lambda record: captured.append(record)
+        return TaskLogService(store=store, file_store=MagicMock())
+
+    def _batch(self, live_state: dict[str, Any]):
+        from types import SimpleNamespace
+
+        call = SimpleNamespace(
+            id='call_1',
+            name='send_message',
+            # 模型那条原文：数组的 JSON 文本。行上的 `arguments_text` 记的就是它，不被剥壳覆盖。
+            arguments={'to': '["node:1f3dd7db87e5"]', 'content': '早上好'},
+        )
+        results = [{
+            'tool_message': {
+                'role': 'tool',
+                'tool_call_id': 'call_1',
+                'name': 'send_message',
+                'content': '{"ok": true}',
+            },
+            'live_state': live_state,
+        }]
+        return call, results
+
+    def test_arguments_coerced_lands_in_the_row_payload(self):
+        captured: list[Any] = []
+        service = self._service(captured)
+        call, results = self._batch({
+            'tool_call_id': 'call_1',
+            'tool_name': 'send_message',
+            'status': 'success',
+            ARGUMENT_COERCION_FIELD: ['to'],
+        })
+        service.record_tool_result_batch(
+            task_id='task:coerce', node_id='node:a', response_tool_calls=[call], results=results
+        )
+        payload = captured[0].payload
+        assert payload[ARGUMENT_COERCION_FIELD] == ['to']
+        assert payload['execution_path'] == 'normal'
+        # 原文照旧记在 arguments_text 里：形状被修过与模型发了什么是两件事，台账各记一件。
+        recorded = json.loads(captured[0].arguments_text)
+        assert isinstance(recorded['to'], str) and recorded['to'].startswith('[')
+
+    def test_unrepaired_call_writes_no_key(self):
+        captured: list[Any] = []
+        service = self._service(captured)
+        call, results = self._batch({
+            'tool_call_id': 'call_1',
+            'tool_name': 'send_message',
+            'status': 'success',
+        })
+        service.record_tool_result_batch(
+            task_id='task:coerce', node_id='node:a', response_tool_calls=[call], results=results
+        )
+        assert ARGUMENT_COERCION_FIELD not in captured[0].payload
 
 
 class TestLiveFailureShapeRepaired:
