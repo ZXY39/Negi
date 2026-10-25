@@ -14,6 +14,25 @@ class StubHTMLElement extends StubElement {
     constructor() {
         super();
         this.dataset = {};
+        this.style = { cssText: "" };
+        this.attributes = {};
+    }
+
+    setAttribute(name, value) {
+        this.attributes[name] = String(value);
+    }
+
+    appendChild(child) {
+        this.appended = child;
+        return child;
+    }
+
+    remove() {
+        this.removed = true;
+    }
+
+    getBoundingClientRect() {
+        return { top: 0, bottom: 0, height: 0, left: 0, right: 0, width: 0 };
     }
 }
 
@@ -21,6 +40,7 @@ function loadApp() {
     const probe = {
         fontSize: "13.6px",
         metrics: { fontAsc: 13, fontDesc: 4, inkAsc: 10, inkDesc: 0 },
+        baseline: 116,
     };
     const context = {
         console,
@@ -58,7 +78,10 @@ function loadApp() {
                         }),
                     };
                 }
-                return new StubHTMLElement();
+                const el = new StubHTMLElement();
+                // 零尺寸基线探针：布局会把它摆在基线上，底边就是基线读数。
+                el.getBoundingClientRect = () => ({ top: probe.baseline, bottom: probe.baseline, height: 0, left: 0, right: 0, width: 0 });
+                return el;
             },
         },
         Element: StubElement,
@@ -190,17 +213,18 @@ test("history pairing takes the earliest request row of a turn", () => {
     assert.equal(map.get("t2"), Date.parse("2026-10-25T11:00:00+08:00"));
 });
 
-test("dot lift follows the measured font metrics", () => {
+test("dot lift follows the measured baseline and ink metrics", () => {
     const api = loadApp();
     const usage = new api.HTMLElement();
-
-    // Fira Sans：墨迹中心比行框中心高半像素。
+    // 盒子 100..123（中心 111.5），基线 116，数字墨高 10/墨底 0 → 墨迹中心 111 → 抬 0.5。
+    usage.getBoundingClientRect = () => ({ top: 100, bottom: 123, height: 23, left: 0, right: 20, width: 20 });
     assert.equal(api.ceoFlowDotLiftPx(usage), 0.5);
 
-    // 换一个下伸部更深的字体：同样的数字墨高需要抬 1.5px。
+    // 换字号/字体：基线 120、墨高 12/墨底 1 → 墨迹中心 114.5 → 抬 -3（圆点要往下）。
     api.__probe.fontSize = "20px";
+    api.__probe.baseline = 120;
     api.__probe.metrics = { fontAsc: 16, fontDesc: 8, inkAsc: 12, inkDesc: 1 };
-    assert.equal(api.ceoFlowDotLiftPx(usage), 1.5);
+    assert.equal(api.ceoFlowDotLiftPx(usage), -3);
 });
 
 test("live tool rows carry no rail status dot", () => {

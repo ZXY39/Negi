@@ -5053,32 +5053,41 @@ function buildCeoRequestedAtByTurn(messages = []) {
     return map;
 }
 
-const CEO_FLOW_DOT_LIFT_CACHE = { fontSpec: "", lift: null, ctx: null };
+const CEO_FLOW_DOT_LIFT_CACHE = { key: "", lift: null, ctx: null };
 const CEO_FLOW_DOT_GEOMETRY_LAST = { y: "" };
 
-// 圆点要抬多少像素才落在秒数墨迹的中线上：墨迹中心与行框中心的差值由字体的
-// ascent/descent 与数字墨高决定，CSS 拿不到这些量，只能按实际字体量一次。
+// 圆点要抬多少像素才落在秒数墨迹的中线上。
+// 基线不靠字体的 ascent/descent 推算（canvas 与布局可能给出不同的一套），而是塞一个
+// 零尺寸 inline-block 让浏览器把它摆在基线上、读它的底边——布局自己算的基线最准。
+// 墨高/墨底取 canvas 的 actualBoundingBox*（数字串固定，秒数只变长短）。
 function ceoFlowDotLiftPx(element) {
     if (!(element instanceof HTMLElement) || typeof getComputedStyle !== "function") return null;
     const cs = getComputedStyle(element);
     const fontSpec = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
-    if (CEO_FLOW_DOT_LIFT_CACHE.fontSpec === fontSpec) return CEO_FLOW_DOT_LIFT_CACHE.lift;
+    const box = element.getBoundingClientRect();
+    if (!(box.height > 0)) return null;
+    const cacheKey = `${fontSpec}|${Math.round(box.height * 100)}`;
+    if (CEO_FLOW_DOT_LIFT_CACHE.key === cacheKey) return CEO_FLOW_DOT_LIFT_CACHE.lift;
     if (!CEO_FLOW_DOT_LIFT_CACHE.ctx) {
         CEO_FLOW_DOT_LIFT_CACHE.ctx = document.createElement("canvas").getContext?.("2d") || null;
     }
     const ctx = CEO_FLOW_DOT_LIFT_CACHE.ctx;
     if (!ctx) return null;
     ctx.font = fontSpec;
-    // 固定用数字串取样：秒数只会变长短，不会改变墨高/墨底。
     const metrics = ctx.measureText("0123456789");
-    const fontAsc = Number(metrics.fontBoundingBoxAscent);
-    const fontDesc = Number(metrics.fontBoundingBoxDescent);
     const inkAsc = Number(metrics.actualBoundingBoxAscent);
     const inkDesc = Number(metrics.actualBoundingBoxDescent);
-    if (![fontAsc, fontDesc, inkAsc, inkDesc].every((value) => Number.isFinite(value))) return null;
-    // inkCenter − boxCenter = ((asc − desc) − (inkAsc − inkDesc)) / 2；抬升量取相反数。
-    const lift = Math.round((((inkAsc - inkDesc) - (fontAsc - fontDesc)) / 2) * 100) / 100;
-    CEO_FLOW_DOT_LIFT_CACHE.fontSpec = fontSpec;
+    if (!Number.isFinite(inkAsc) || !Number.isFinite(inkDesc) || inkAsc <= 0) return null;
+    const probe = document.createElement("span");
+    probe.setAttribute("aria-hidden", "true");
+    probe.style.cssText = "display:inline-block;width:0;height:0;margin:0;padding:0;border:0;vertical-align:baseline;pointer-events:none;";
+    element.appendChild(probe);
+    const baseline = probe.getBoundingClientRect().bottom;
+    probe.remove?.();
+    if (!Number.isFinite(baseline)) return null;
+    // 圆心对准墨迹中心：盒中心 − (基线 − 墨迹半高)。
+    const lift = Math.round(((box.top + box.height / 2) - (baseline - (inkAsc - inkDesc) / 2)) * 100) / 100;
+    CEO_FLOW_DOT_LIFT_CACHE.key = cacheKey;
     CEO_FLOW_DOT_LIFT_CACHE.lift = lift;
     return lift;
 }
