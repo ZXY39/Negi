@@ -562,7 +562,7 @@ main/ 侧所有持久化写在磁盘满（ENOSPC / SQLITE_FULL）条件下的行
 
 ## 人设块、人设 note 与身份
 
-- 正文：`memory/notes/note_persona.md`，保留名 `note_persona`。`MemoryManager.persona_text()` 只读普通树里的这份文件，不走裸名「普通区先、分类区兜后」的解析；`set_persona()` 是引导页保存与设置页空人设初始化那条直接写入口，走同一把 `_io_lock` 与原子写；设置页在 runtime 未就绪时直接写这份保留 note。
+- 正文：`memory/notes/note_persona.md`，保留名 `note_persona`。`MemoryManager.persona_text()` 只读普通树里的这份文件，不走裸名「普通区先、分类区兜后」的解析；`set_persona()` 是引导页保存与设置页空人设初始化那条直接写入口，走同一把 `_io_lock` 与原子写；引导页提交描述时立即写入（runtime 未就绪就直接写这份保留 note），模型链保存后的 complete 再负责入队复核。
 - 前门块：`## 我的人设` 是一条稳定 `assistant` 消息，内容是照片目录与「我是谁」。它排在长期记忆块之后：有长期记忆时 index 2，没有时 index 1。会话首请求采纳一次，token 压缩与手动压缩两处重印；两次重印之间字节冻结。
 - 中途变化：`[RUNTIME_NOTICE]` 的 `### Persona updates` 一节带最新正文，按 `persona_cursor` 的 digest 消费，只投一次；压缩后头部重印，游标对齐，同一条更新只出现一次。头部块仍显示旧值时，以这条通知为准。
 - 记忆 agent 面：只多一行指针，正文按需读；`main/prompts/memory_agent.md` 规定改人设走 `note_edits` / `note_upserts`，不新增普通记忆。

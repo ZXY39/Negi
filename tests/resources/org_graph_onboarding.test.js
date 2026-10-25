@@ -101,6 +101,7 @@ function buildHarness({
     );
     const documentListeners = {};
     const windowListeners = {};
+    const intervals = [];
     const calls = {
         toasts: [],
         skipped: 0,
@@ -111,6 +112,7 @@ function buildHarness({
         editing: 0,
         loadModels: 0,
         startCreateModel: 0,
+        toastClosed: 0,
     };
 
     const document = {
@@ -134,6 +136,17 @@ function buildHarness({
             return timer;
         },
         clearTimeout,
+        setInterval: (handler, ms) => {
+            const timer = setInterval(handler, ms);
+            timer.unref?.();
+            intervals.push({ handler, timer });
+            return timer;
+        },
+        clearInterval: (timer) => {
+            clearInterval(timer);
+            const index = intervals.findIndex((entry) => entry.timer === timer);
+            if (index >= 0) intervals.splice(index, 1);
+        },
         Promise,
         FormData: class FormData {},
     };
@@ -145,6 +158,7 @@ function buildHarness({
         },
         async saveOnboardingPersona(description) {
             calls.savedDescription.push(description);
+            if (description) persona.description = description;
             return { ok: true };
         },
         async skipOnboardingPersona() {
@@ -168,6 +182,9 @@ function buildHarness({
         },
     };
     context.showToast = (payload) => calls.toasts.push(payload);
+    context.closeToast = () => {
+        calls.toastClosed += 1;
+    };
     context.switchView = (view) => calls.views.push(view);
     context.startModelRoleEditing = () => {
         calls.editing += 1;
@@ -186,7 +203,7 @@ function buildHarness({
 
     vm.createContext(context);
     vm.runInContext(SOURCE, context, { filename: "org_graph_onboarding.js" });
-    return { context, elements, calls, documentListeners, windowListeners };
+    return { context, elements, calls, documentListeners, windowListeners, intervals };
 }
 
 function flush() {
@@ -383,6 +400,68 @@ test("empty persona shows red dots and can be initialized from the dialog", asyn
     assert.equal(harness.elements["persona-dialog-description"].textContent, "你是测试助手，回答先给结论。");
     assert.equal(harness.elements["persona-dialog-description"].hidden, false);
     assert.equal(harness.elements["persona-dialog-description-empty"].hidden, true);
+});
+
+test("submitting the onboarding description writes it and clears the red dots immediately", async () => {
+    const harness = buildHarness({
+        status: {
+            should_run: true,
+            completed: false,
+            persona_step_done: false,
+            has_models: false,
+            has_persona: false,
+            has_persona_input: false,
+            description: "",
+            photos: [],
+            photo_album: [],
+        },
+    });
+    harness.documentListeners.DOMContentLoaded();
+    await flush();
+    assert.equal(harness.elements["persona-nav-dot"].hidden, false);
+    assert.equal(harness.elements["persona-button-dot"].hidden, false);
+
+    harness.elements["persona-onboarding-description"].value = "你是测试助手。";
+    harness.elements["persona-onboarding-next-btn"].click();
+    await flush();
+    await flush();
+
+    assert.deepEqual(harness.calls.savedDescription, ["你是测试助手。"]);
+    assert.equal(harness.elements["persona-nav-dot"].hidden, true);
+    assert.equal(harness.elements["persona-button-dot"].hidden, true);
+    await harness.context.G3kuOnboarding.openPersonaDialog();
+    assert.equal(harness.elements["persona-dialog-description"].hidden, false);
+    assert.equal(harness.elements["persona-dialog-description"].textContent, "你是测试助手。");
+});
+
+test("the onboarding drag hint stays until both main and memory chains have roles", async () => {
+    const harness = buildHarness({
+        status: {
+            should_run: true,
+            completed: false,
+            persona_step_done: true,
+            has_models: true,
+            has_persona: false,
+            has_persona_input: true,
+            description: "",
+            photos: ["me.png"],
+            photo_album: [{ name: "me.png", url: "u", thumb_url: "t" }],
+        },
+    });
+    harness.documentListeners.DOMContentLoaded();
+    await flush();
+    await flush();
+
+    const dragToast = harness.calls.toasts.find((item) => item.title === "可拖动至 Agent");
+    assert.ok(dragToast, JSON.stringify(harness.calls.toasts));
+    assert.equal(dragToast.persistent, true);
+    assert.equal(dragToast.closable, false);
+    assert.ok(harness.intervals.length >= 1);
+
+    harness.context.S.modelCatalog.roleEditing = true;
+    harness.context.S.modelCatalog.roleDrafts = { ceo: ["m1"], memory: ["m2"] };
+    harness.intervals[0].handler();
+    assert.equal(harness.calls.toastClosed, 1);
 });
 
 test("persona settings dialog initializes an empty description and keeps photos chat-only", () => {

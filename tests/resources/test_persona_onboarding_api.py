@@ -297,6 +297,48 @@ def test_save_persona_rejects_empty_and_over_limit(tmp_path: Path, monkeypatch: 
     assert too_long.value.detail["code"] == "persona_too_long"
 
 
+def test_onboarding_persona_writes_the_note_immediately(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _store(tmp_path)
+    calls: dict[str, object] = {}
+
+    class _MemoryManager:
+        def set_persona(self, text: str) -> dict:
+            calls["persona"] = text
+            return {"ref": "note_persona"}
+
+    monkeypatch.setattr(api, "_store", lambda: store)
+    monkeypatch.setattr(api, "_memory_manager", lambda: _MemoryManager())
+    import asyncio
+
+    result = asyncio.run(api.save_onboarding_persona({"description": "你是玲音。"}))
+    assert result["written"] is True
+    assert calls["persona"] == "你是玲音。"
+    state = store.load()
+    assert state["description"] == "你是玲音。"
+    assert state["persona_step_done"] is True
+
+
+def test_onboarding_persona_falls_back_to_the_note_file_without_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _store(tmp_path)
+    monkeypatch.setattr(api, "_store", lambda: store)
+    monkeypatch.setattr(api, "workspace_path", lambda: tmp_path)
+
+    def _no_model():
+        raise ValueError("No model configured for role 'ceo'.")
+
+    monkeypatch.setattr(api, "_memory_manager", _no_model)
+    import asyncio
+
+    result = asyncio.run(api.save_onboarding_persona({"description": "你是玲音。"}))
+    assert result["written"] is True
+    note = tmp_path / "memory" / "notes" / "note_persona.md"
+    assert note.read_text(encoding="utf-8").strip() == "你是玲音。"
+
+
 def test_onboarding_persona_rejects_over_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     store = _store(tmp_path)
     monkeypatch.setattr(api, "_store", lambda: store)

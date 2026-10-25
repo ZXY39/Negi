@@ -181,8 +181,22 @@ async def save_onboarding_persona(payload: dict | None = Body(default=None)):
                 "message": f"persona description exceeds {PERSONA_DESCRIPTION_MAX_CHARS} characters",
             },
         )
+    if description:
+        # The settings surface reads the reserved note, not the onboarding stage. Write
+        # the body as soon as the step is submitted; the complete call still owns the
+        # memory-agent review enqueue once the model chains exist.
+        try:
+            manager = _memory_manager()
+            manager.set_persona(description)
+        except Exception:
+            write_persona_file(workspace_path(), description)
     state = _store().update(description=description, persona_step_done=True)
-    return {"ok": True, "description": state["description"], "persona_step_done": True}
+    return {
+        "ok": True,
+        "description": state["description"],
+        "persona_step_done": True,
+        "written": bool(description),
+    }
 
 
 @router.post("/onboarding/skip-persona")

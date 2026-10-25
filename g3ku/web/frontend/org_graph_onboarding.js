@@ -4,6 +4,7 @@
     const PERSONA_CHAIN_TOAST = "为了使人设生效，主agent和记忆agent模型链不能为空，点击保存后生效";
     const DRAG_TOAST_TITLE = "可拖动至 Agent";
     const DRAG_TOAST_TEXT = "把模型或负载均衡组拖到右侧任一 Agent 模型链即可加入。";
+    const ONBOARDING_DRAG_TOAST_TEXT = "把模型或负载均衡组拖到右侧任一 Agent 模型链即可加入；主Agent和记忆Agent都需要至少一个角色。";
 
     const state = {
         started: false,
@@ -13,6 +14,8 @@
         uploadedNames: [],
         personaDescription: "",
         personaToastShown: false,
+        dragToastActive: false,
+        dragToastTimer: null,
         busy: false,
     };
 
@@ -209,8 +212,47 @@
         });
     }
 
+    function chainsReadyForDragToast() {
+        if (typeof S === "undefined" || !S.modelCatalog) return false;
+        const source = S.modelCatalog.roleEditing ? S.modelCatalog.roleDrafts : S.modelCatalog.roles;
+        const ceoChain = Array.isArray(source?.ceo) ? source.ceo.filter(Boolean) : [];
+        const memoryChain = Array.isArray(source?.memory) ? source.memory.filter(Boolean) : [];
+        return ceoChain.length > 0 && memoryChain.length > 0;
+    }
+
+    function closeDragToast() {
+        state.dragToastActive = false;
+        if (state.dragToastTimer) {
+            window.clearInterval(state.dragToastTimer);
+            state.dragToastTimer = null;
+        }
+        if (typeof closeToast === "function") closeToast();
+    }
+
+    function syncDragToast() {
+        if (!state.dragToastActive) return;
+        if (chainsReadyForDragToast()) closeDragToast();
+    }
+
+    function showPersistentDragToast() {
+        if (state.dragToastActive) return;
+        state.dragToastActive = true;
+        showToast({
+            title: DRAG_TOAST_TITLE,
+            text: ONBOARDING_DRAG_TOAST_TEXT,
+            kind: "info",
+            persistent: true,
+            closable: false,
+        });
+        state.dragToastTimer = window.setInterval(syncDragToast, 500);
+    }
+
     function enterChainEdit({ delayDragToastMs = 0 } = {}) {
         if (typeof startModelRoleEditing === "function") startModelRoleEditing();
+        if (state.active) {
+            showPersistentDragToast();
+            return;
+        }
         if (delayDragToastMs > 0) {
             window.setTimeout(showDragToast, delayDragToastMs);
         } else {
@@ -280,6 +322,7 @@
             } else {
                 await ApiClient.saveOnboardingPersona("");
             }
+            await refreshPersonaIndicator();
             markPersonaInput();
             closePersonaStep();
             if (hasPersonaInput()) showPersonaChainToast();
@@ -331,6 +374,7 @@
         try {
             const result = await ApiClient.completeOnboarding();
             state.active = false;
+            closeDragToast();
             if (hadPersonaInput && Array.isArray(result?.jobs) && result.jobs.length) {
                 showToast({
                     title: "人设已提交",
@@ -345,6 +389,11 @@
                 kind: "error",
                 durationMs: 6000,
             });
+            window.setTimeout(() => {
+                if (!state.active || chainsReadyForDragToast()) return;
+                state.dragToastActive = false;
+                showPersistentDragToast();
+            }, 6500);
         }
     }
 
