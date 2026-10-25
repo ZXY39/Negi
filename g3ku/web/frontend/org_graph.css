@@ -14573,8 +14573,9 @@ textarea {
     box-shadow: none;
 }
 
-/* 有新版本时亮在设置按钮左上角；折叠态按钮变窄，同一个偏移仍然贴角。 */
-:root #update-nav-dot {
+/* 有新版本时亮在按钮左上角；顶栏设置键与设置弹窗里的「检查更新」共用这一颗
+   （折叠态按钮变窄，同一个偏移仍然贴角）。 */
+:root .update-dot {
     position: absolute;
     top: -3px;
     left: -3px;
@@ -14586,7 +14587,7 @@ textarea {
     pointer-events: none;
 }
 
-:root #update-nav-dot[hidden] {
+:root .update-dot[hidden] {
     display: none;
 }
 
@@ -16567,10 +16568,13 @@ textarea {
 
 /* ---- 设置弹窗与 QQ 沙箱（V2 合并后的最终值） ------------------------------- */
 
-/* 设置弹窗沿用 confirm 皮肤，只补分节、右上角叉号与底部左右按钮位。 */
+/* 设置弹窗沿用 confirm 皮肤，只补分节、右上角叉号与底部左右按钮位。
+   宽度按底部那一行的最坏情况定：☑记住密码自动解锁 + 检查更新 + 重启并更新 + 锁定 + 退出
+   实测 130+78+91+52+52 加四段 12px 间距 = 451px，460 宽的弹窗只剩 410px 可用，
+   「退出」会被折成孤零零第二行；这一族弹窗（设置 / 修改密码 / 配置包）同档，堆叠时宽窄一致。 */
 .project-settings-dialog {
     position: relative;
-    width: min(460px, calc(100vw - 48px));
+    width: min(520px, calc(100vw - 48px));
 }
 
 .project-settings-dialog .confirm-header {
@@ -16602,9 +16606,8 @@ textarea {
     overflow-y: auto;
 }
 
-/* 设置弹窗的三行按「标签在左、控件在右」排：行高一致，右侧控件（勾选框 / 输入框 /
-   状态文字）对齐同一条右边界。其余弹窗也用 .project-settings-body，所以这里只锚在
-   设置弹窗上。 */
+/* 设置弹窗正文的两行按「内容在左、控件在右」排：行高一致，右侧控件对齐同一条右边界。
+   其余弹窗也用 .project-settings-body，所以这里只锚在设置弹窗上。 */
 #project-settings-dialog .project-settings-body {
     gap: 0;
 }
@@ -16621,12 +16624,17 @@ textarea {
     padding: var(--ui-space-2) 0;
 }
 
-#project-settings-dialog .project-settings-actions > .ui-checkbox-row {
-    margin-left: auto;
+/* 正文那行的动作按钮平分整行宽：这一族弹窗的右边界由数字格与底部按钮行守住，
+   两颗靠左的小按钮会在右边留出一大段空白。 */
+#project-settings-dialog .project-settings-actions > .toolbar-btn {
+    flex: 1 1 0;
+    min-width: 0;
 }
 
 /* 字号档位：拖动条写 --reading-font-scale，只乘阅读面（见 :root 里的变量注释）。
-   轨道 4px，已拖过的一段用品牌色填——填充位置由 JS 按当前档位写成 --font-range-pos。 */
+   指针不是圆点而是一颗印着「字号」的按钮，所以这一行没有单独的标签列；原生指针只当
+   命中区（透明），看得见的按钮是壳里那层跟着指针走的 .project-settings-font-knob。
+   --font-range-frac 由 JS 写成 0..1，轨道填充与按钮共用同一个落点。 */
 #project-settings-dialog .project-settings-font-row {
     flex: 1 1 auto;
     display: flex;
@@ -16637,12 +16645,23 @@ textarea {
     color: var(--ui-text);
 }
 
+#project-settings-dialog .project-settings-font-range-shell {
+    --font-knob-w: 44px;
+    --font-knob-h: 24px;
+    --font-knob-x: calc((100% - var(--font-knob-w)) * var(--font-range-frac, 0.5) + var(--font-knob-w) / 2);
+    position: relative;
+    flex: 1 1 auto;
+    min-width: 150px;
+    height: 36px;
+    display: inline-flex;
+    align-items: center;
+}
+
 #project-settings-dialog .project-settings-font-range {
     appearance: none;
     -webkit-appearance: none;
     -moz-appearance: none;
-    flex: 1 1 auto;
-    min-width: 120px;
+    width: 100%;
     height: 36px;
     margin: 0;
     padding: 0;
@@ -16656,21 +16675,20 @@ textarea {
     height: 4px;
     border-radius: var(--ui-radius-pill);
     background: linear-gradient(to right,
-        var(--ui-brand) 0 var(--font-range-pos, 50%),
-        var(--ui-bg-subtle) var(--font-range-pos, 50%) 100%);
+        var(--ui-brand) 0 var(--font-knob-x),
+        var(--ui-bg-subtle) var(--font-knob-x) 100%);
 }
 
+/* 原生指针透明但与按钮同宽：它的宽度决定指针行程，按钮那层才能算出同一个中心。 */
 #project-settings-dialog .project-settings-font-range::-webkit-slider-thumb {
     appearance: none;
     -webkit-appearance: none;
-    width: 16px;
-    height: 16px;
-    margin-top: -6px;
-    border: 1px solid var(--ui-brand);
-    border-radius: 50%;
-    background: var(--ui-bg-surface);
-    box-shadow: var(--ui-shadow-sm);
-    transition: border-color 160ms var(--ui-motion-ease), box-shadow 160ms var(--ui-motion-ease);
+    width: var(--font-knob-w);
+    height: var(--font-knob-h);
+    margin-top: calc((4px - var(--font-knob-h)) / 2);
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
 }
 
 #project-settings-dialog .project-settings-font-range::-moz-range-track {
@@ -16686,21 +16704,36 @@ textarea {
 }
 
 #project-settings-dialog .project-settings-font-range::-moz-range-thumb {
-    width: 14px;
-    height: 14px;
+    width: var(--font-knob-w);
+    height: var(--font-knob-h);
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+}
+
+#project-settings-dialog .project-settings-font-knob {
+    position: absolute;
+    top: 50%;
+    left: calc(var(--font-knob-x) - var(--font-knob-w) / 2);
+    width: var(--font-knob-w);
+    height: var(--font-knob-h);
+    transform: translateY(-50%);
+    display: grid;
+    place-items: center;
     border: 1px solid var(--ui-brand);
-    border-radius: 50%;
+    border-radius: 8px;
     background: var(--ui-bg-surface);
     box-shadow: var(--ui-shadow-sm);
+    color: var(--ui-text);
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1;
+    pointer-events: none;
+    user-select: none;
+    transition: box-shadow 160ms var(--ui-motion-ease);
 }
 
-#project-settings-dialog .project-settings-font-range:focus-visible::-webkit-slider-thumb {
-    border-color: var(--ui-brand);
-    box-shadow: 0 0 0 3px var(--ui-brand-soft);
-}
-
-#project-settings-dialog .project-settings-font-range:focus-visible::-moz-range-thumb {
-    border-color: var(--ui-brand);
+#project-settings-dialog .project-settings-font-range:focus-visible + .project-settings-font-knob {
     box-shadow: 0 0 0 3px var(--ui-brand-soft);
 }
 
@@ -16748,21 +16781,17 @@ textarea {
     box-shadow: 0 0 0 3px var(--ui-brand-soft);
 }
 
-/* 版本信息与「检查更新 / 重启并更新」同一行，靠右；窗口很窄时省略号收尾，
-   完整内容在 title 里。 */
-.project-settings-update-line {
-    margin: 0 0 0 auto;
-    min-width: 0;
-    color: var(--ui-text-secondary);
-    font-size: 13px;
-    text-align: right;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
+/* 底部那一行现在装四颗按钮加自动解锁勾选：出现「重启并更新」时整行会折成两行，
+   所以留出行间距，别把两行按钮挤在一起。 */
 .project-settings-footer {
     justify-content: flex-end;
+    flex-wrap: wrap;
+    row-gap: var(--ui-space-2);
+}
+
+/* 检查更新按钮带红点，得自己当定位父。 */
+#project-settings-check-update-btn {
+    position: relative;
 }
 
 /* 隐藏的 file input 由「选择配置包」按钮代挑，回显只当状态行用。 */

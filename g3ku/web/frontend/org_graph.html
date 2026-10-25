@@ -1118,17 +1118,14 @@
                                 type="button">修改密码</button>
                             <button id="project-settings-open-bundle-btn" class="toolbar-btn ghost"
                                 type="button">配置</button>
-                            <label class="ui-checkbox-row" for="project-settings-auto-unlock">
-                                <input id="project-settings-auto-unlock" class="ui-checkbox-input" type="checkbox">
-                                <span class="ui-checkbox-box" aria-hidden="true"></span>
-                                <span>记住密码自动解锁</span>
-                            </label>
                         </div>
                         <div class="project-settings-actions">
                             <label class="project-settings-font-row" for="project-settings-reading-scale">
-                                <span>字号</span>
-                                <input id="project-settings-reading-scale" class="project-settings-font-range"
-                                    type="range" min="0" max="100" step="0.1" value="50">
+                                <span class="project-settings-font-range-shell" id="project-settings-reading-scale-shell">
+                                    <input id="project-settings-reading-scale" class="project-settings-font-range"
+                                        type="range" min="0" max="100" step="0.1" value="50" aria-label="字号">
+                                    <span class="project-settings-font-knob" aria-hidden="true">字号</span>
+                                </span>
                                 <span class="project-settings-font-value-shell">
                                     <input id="project-settings-reading-scale-value"
                                         class="project-settings-font-value spinless-number-input" type="number"
@@ -1137,15 +1134,18 @@
                                 </span>
                             </label>
                         </div>
-                        <div class="project-settings-actions">
-                            <button id="project-settings-check-update-btn" class="toolbar-btn ghost"
-                                type="button">检查更新</button>
-                            <button id="project-settings-apply-update-btn" class="toolbar-btn" type="button"
-                                hidden>重启并更新</button>
-                            <p id="project-settings-update-text" class="project-settings-update-line">版本信息未读取</p>
-                        </div>
                     </div>
                     <div class="confirm-actions project-settings-footer">
+                        <button id="project-settings-check-update-btn" class="toolbar-btn ghost" type="button">检查更新
+                            <span id="project-settings-check-dot" class="update-dot" title="有新版本" hidden></span>
+                        </button>
+                        <button id="project-settings-apply-update-btn" class="toolbar-btn" type="button"
+                            hidden>重启并更新</button>
+                        <label class="ui-checkbox-row" for="project-settings-auto-unlock">
+                            <input id="project-settings-auto-unlock" class="ui-checkbox-input" type="checkbox">
+                            <span class="ui-checkbox-box" aria-hidden="true"></span>
+                            <span>记住密码自动解锁</span>
+                        </label>
                         <button id="project-settings-lock-btn" class="toolbar-btn ghost" type="button">锁定</button>
                         <button id="project-settings-exit-btn" class="toolbar-btn danger" type="button">退出</button>
                     </div>

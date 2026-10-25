@@ -739,9 +739,10 @@ const U = {
     projectSettingsOpenPassword: document.getElementById("project-settings-open-password-btn"),
     projectSettingsOpenBundle: document.getElementById("project-settings-open-bundle-btn"),
     readingScale: document.getElementById("project-settings-reading-scale"),
+    readingScaleShell: document.getElementById("project-settings-reading-scale-shell"),
     readingScaleValue: document.getElementById("project-settings-reading-scale-value"),
     updateNavDot: document.getElementById("update-nav-dot"),
-    projectSettingsUpdateText: document.getElementById("project-settings-update-text"),
+    projectSettingsCheckDot: document.getElementById("project-settings-check-dot"),
     projectSettingsCheckUpdate: document.getElementById("project-settings-check-update-btn"),
     projectSettingsApplyUpdate: document.getElementById("project-settings-apply-update-btn"),
     configBundleBackdrop: document.getElementById("config-bundle-backdrop"),
@@ -9606,36 +9607,33 @@ function updateApplyOutcomeText(item) {
     return UPDATE_APPLY_OUTCOME_TEXT[outcome] || `升级未完成：${outcome}`;
 }
 
-function updateSettingsLineText(item) {
-    // 一行只放版本对：整行可用宽 412px，两个控件占 78+91+12，带上检查时间就要
-    // 443px 必然换行。时间、错误码这些细节走 title。
-    const outcomeText = updateApplyOutcomeText(item);
-    if (outcomeText) return outcomeText;
-    if (!item?.has_ledger) return "尚未检查过版本";
-    if (item.error) return "上次检查失败";
-    if (item.newer) return `当前 v${item.current_version} · 最新 ${item.latest_tag}`;
-    return `当前 v${item.current_version} · 已是最新`;
-}
-
-function updateSettingsLineTitle(item) {
-    if (!item?.has_ledger) return "还没查过远端标签；点「检查更新」立即查一次。";
-    const checked = `检查于 ${formatUpdateCheckedAt(item.checked_at)}`;
+function updateSettingsButtonTitle(item) {
+    // 版本对不再占一行：可见的只有「检查更新」左上角那颗红点，读数（版本、检查时间、
+    // 错误码、上次升级结果）全部收进按钮的 title。
+    const parts = [];
+    const outcome = updateApplyOutcomeText(item);
+    if (outcome) parts.push(outcome);
+    if (!item?.has_ledger) {
+        parts.push("还没查过远端标签；点「检查更新」立即查一次。");
+    } else if (item.error) {
+        parts.push(`上次检查失败：${item.error}`);
+    } else if (item.newer) {
+        parts.push(`发现新版本 ${item.latest_tag}（当前 v${item.current_version}）`);
+    } else {
+        parts.push(`已是最新 v${item.current_version}`);
+    }
+    if (item?.has_ledger) parts.push(`检查于 ${formatUpdateCheckedAt(item.checked_at)}`);
     const apply = item?.last_apply;
     const applyNote = apply && apply.outcome && apply.outcome !== "ok"
         ? ` · 上次升级 ${apply.outcome} ${formatUpdateCheckedAt(apply.at)}${apply.detail ? `：${apply.detail}` : ""}`
         : "";
-    if (item.error) return `${item.error} · ${checked}${applyNote}`;
-    return `${item.latest_tag || "无标签"} · ${checked}${applyNote}`;
+    return parts.join(" · ") + applyNote;
 }
 
 function renderProjectSettingsUpdate(item) {
-    if (U.projectSettingsUpdateText) {
-        U.projectSettingsUpdateText.textContent = updateSettingsLineText(item);
-        U.projectSettingsUpdateText.title = updateSettingsLineTitle(item);
-    }
-    if (U.projectSettingsApplyUpdate) {
-        U.projectSettingsApplyUpdate.hidden = !Boolean(item?.newer);
-    }
+    if (U.projectSettingsCheckUpdate) U.projectSettingsCheckUpdate.title = updateSettingsButtonTitle(item);
+    if (U.projectSettingsCheckDot) U.projectSettingsCheckDot.hidden = !Boolean(item?.newer);
+    if (U.projectSettingsApplyUpdate) U.projectSettingsApplyUpdate.hidden = !Boolean(item?.newer);
 }
 
 async function refreshUpdateStatus() {
@@ -10051,8 +10049,10 @@ function paintReadingScale(scale, pos) {
         document.documentElement.style.setProperty("--reading-font-scale", String(scale));
     }
     if (U.readingScaleValue) U.readingScaleValue.value = String(Math.round(scale * 100));
-    // 已拖过的那段轨道靠 --font-range-pos 上色：CSS 里画不出"到指针为止"的填充。
-    if (U.readingScale) U.readingScale.style?.setProperty?.("--font-range-pos", `${pos}%`);
+    // 轨道填充与印着「字号」的指针都得知道指针停在几成：CSS 画不出"到指针为止"的填充，
+    // 也画不出跟着指针走的文字，所以把这个比例写成变量挂在壳上（两者都是壳的子节点）。
+    const frac = Math.round((pos / 100) * 10000) / 10000;
+    U.readingScaleShell?.style?.setProperty?.("--font-range-frac", String(frac));
 }
 
 function renderReadingScale(scale) {
@@ -10072,20 +10072,29 @@ function applyReadingScale(raw) {
     return scale;
 }
 
+// 从滑条读数：指针停在哪儿就按哪儿算，只把倍率取整，不动指针。
+function commitSliderScale() {
+    const pos = Number(U.readingScale.value);
+    const scale = normalizeReadingScale(positionToReadingScale(pos));
+    paintReadingScale(scale, Number.isFinite(pos) ? pos : readingScaleToPosition(scale));
+    return scale;
+}
+
 function initializeReadingScale() {
     const stored = readStoredUiPreference(READING_SCALE_KEY);
     applyReadingScale(stored ? stored : READING_SCALE_DEFAULT);
 }
 
 function bindReadingScale() {
-    // 拖动途中只重画数值与填充，不把指针位置回填：档位按 1% 取整，回填会和指针互相拉扯，
-    // 键盘按一格就被弹回原地。松手（change）才 snap 到取整后的格子并落盘。
+    // 滑条自己是指针的权威：input 与 change 都只按 1% 取整读值，绝不把取整后的位置写回
+    // 滑条——写回会让指针退回上一格，键盘每按一次都被弹回原地（实测 Home 后连按 6 次不动）。
     U.readingScale?.addEventListener("input", () => {
-        const pos = Number(U.readingScale.value);
-        paintReadingScale(normalizeReadingScale(positionToReadingScale(pos)), pos);
+        commitSliderScale();
     });
     U.readingScale?.addEventListener("change", () => {
-        const scale = applyReadingScale(positionToReadingScale(U.readingScale.value));
+        const scale = commitSliderScale();
+        // 字号档位改了，秒数的墨迹中线跟着变；只在松手时重量，别挂在每一帧上。
+        if (typeof syncCeoFlowDotGeometry === "function") syncCeoFlowDotGeometry();
         writeStoredUiPreference(READING_SCALE_KEY, String(scale));
     });
     U.readingScaleValue?.addEventListener("change", () => {

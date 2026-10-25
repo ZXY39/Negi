@@ -12,16 +12,19 @@ function loadApp({ stored = null } = {}) {
     const document = new StubDocument();
     // 拖动条与数字框是同一个值的两个入口，两个都要活过 applyReadingScale 的回写。
     const range = new StubHTMLElement("INPUT");
-    const rangeCss = {};
-    range.style = {
+    document._byId["project-settings-reading-scale"] = range;
+    // 指针落点写成壳上的变量：轨道填充与印着「字号」的按钮都是它的子节点。
+    const shell = new StubHTMLElement("SPAN");
+    const shellCss = {};
+    shell.style = {
         setProperty(name, value) {
-            rangeCss[name] = String(value);
+            shellCss[name] = String(value);
         },
         removeProperty(name) {
-            delete rangeCss[name];
+            delete shellCss[name];
         },
     };
-    document._byId["project-settings-reading-scale"] = range;
+    document._byId["project-settings-reading-scale-shell"] = shell;
     const number = new StubHTMLElement("INPUT");
     document._byId["project-settings-reading-scale-value"] = number;
     const cssVars = {};
@@ -76,8 +79,9 @@ function loadApp({ stored = null } = {}) {
         ...vm.runInContext("this.__testExports", context),
         store,
         cssVars,
-        rangeCss,
+        shellCss,
         range,
+        shell,
         number,
     };
 }
@@ -112,13 +116,13 @@ test("拖动条两端是 10% 与 300%，100% 落在轨道正中", () => {
     assert.equal(readingScaleToPosition(positionToReadingScale(75)), 75);
 });
 
-test("应用档位时写 CSS 变量，并把滑条、轨道填充与数字框同步到同一个值", () => {
-    const { applyReadingScale, cssVars, rangeCss, range, number } = loadApp();
+test("应用档位时写 CSS 变量，并把滑条、指针落点与数字框同步到同一个值", () => {
+    const { applyReadingScale, cssVars, shellCss, range, number } = loadApp();
 
     assert.equal(applyReadingScale("1.25"), 1.25);
     assert.equal(cssVars["--reading-font-scale"], "1.25");
     assert.equal(range.value, "56.25");
-    assert.equal(rangeCss["--font-range-pos"], "56.25%");
+    assert.equal(shellCss["--font-range-frac"], "0.5625");
     assert.equal(number.value, "125");
 });
 
@@ -132,8 +136,8 @@ test("没有存过值时按 110%（比基线大两号）起步", () => {
     assert.equal(range.value, "52.5");
 });
 
-test("拖动途中只重画数值与填充，松手才落盘并把指针收到取整后的格子", () => {
-    const { initializeReadingScale, bindReadingScale, cssVars, range, rangeCss, number, store } = loadApp();
+test("滑条的两条路都不回填指针：一格键盘步进不会把自己弹回上一格", () => {
+    const { initializeReadingScale, bindReadingScale, cssVars, range, shellCss, number, store } = loadApp();
 
     initializeReadingScale();
     bindReadingScale();
@@ -142,15 +146,19 @@ test("拖动途中只重画数值与填充，松手才落盘并把指针收到�
     range.value = "0.1";
     range.dispatchEvent({ type: "input", target: range });
     assert.equal(range.value, "0.1");
-    assert.equal(rangeCss["--font-range-pos"], "0.1%");
+    assert.equal(shellCss["--font-range-frac"], "0.001");
     assert.equal(cssVars["--reading-font-scale"], "0.1");
     assert.equal(number.value, "10");
     assert.equal(store.get("g3ku.ui.reading-scale.v1"), undefined);
 
+    // 键盘步进是 input + change 一起发的：松手那步同样不许动指针。
+    range.dispatchEvent({ type: "change", target: range });
+    assert.equal(range.value, "0.1");
+    assert.equal(store.get("g3ku.ui.reading-scale.v1"), "0.1");
+
     range.value = "70";
     range.dispatchEvent({ type: "input", target: range });
     assert.equal(cssVars["--reading-font-scale"], "1.8");
-    assert.equal(store.get("g3ku.ui.reading-scale.v1"), undefined);
 
     range.dispatchEvent({ type: "change", target: range });
     assert.equal(store.get("g3ku.ui.reading-scale.v1"), "1.8");

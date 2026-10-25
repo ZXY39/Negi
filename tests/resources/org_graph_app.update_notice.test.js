@@ -86,9 +86,8 @@ function loadApp() {
         `${APP_CODE}\nthis.__testExports = {
             U,
             renderUpdateNavDot,
-            updateSettingsLineText,
+            updateSettingsButtonTitle,
             updateApplyOutcomeText,
-            updateSettingsLineTitle,
             renderProjectSettingsUpdate,
         };`,
         context
@@ -99,7 +98,8 @@ function loadApp() {
 function stubbedUpdateApi() {
     const api = loadApp();
     api.U.updateNavDot = new StubHTMLElement();
-    api.U.projectSettingsUpdateText = new StubHTMLElement();
+    api.U.projectSettingsCheckUpdate = new StubHTMLElement();
+    api.U.projectSettingsCheckDot = new StubHTMLElement();
     api.U.projectSettingsApplyUpdate = new StubHTMLElement();
     return api;
 }
@@ -120,11 +120,12 @@ test("nav dot lights only on a newer ledger entry", () => {
     assert.equal(api.U.updateNavDot.hidden, true, "检查失败不得亮");
 });
 
-test("settings line keeps unknown, failed and current apart", () => {
+test("弹窗里只有红点认新版，版本对与失败读数收进按钮 title", () => {
     const api = stubbedUpdateApi();
 
     api.renderProjectSettingsUpdate({ has_ledger: false });
-    assert.match(api.U.projectSettingsUpdateText.textContent, /尚未检查/);
+    assert.match(api.U.projectSettingsCheckUpdate.title, /还没查过远端标签/);
+    assert.equal(api.U.projectSettingsCheckDot.hidden, true, "没查过不得亮");
     assert.equal(api.U.projectSettingsApplyUpdate.hidden, true);
 
     api.renderProjectSettingsUpdate({
@@ -134,12 +135,10 @@ test("settings line keeps unknown, failed and current apart", () => {
         latest_tag: "v1.0.2",
         checked_at: "2026-09-25T17:45:04+08:00",
     });
-    const text = api.U.projectSettingsUpdateText.textContent;
-    assert.match(text, /当前 v1\.0\.1/);
-    assert.match(text, /最新 v1\.0\.2/);
-    // 行内不放检查时间：整行可用宽 412px，加上时间就要 443px 会挤到第二行。
-    assert.doesNotMatch(text, /检查于/);
-    assert.match(api.U.projectSettingsUpdateText.title, /检查于 \d{2}-\d{2} \d{2}:\d{2}/);
+    assert.equal(api.U.projectSettingsCheckDot.hidden, false, "有新版必须亮");
+    const newerTitle = api.U.projectSettingsCheckUpdate.title;
+    assert.match(newerTitle, /发现新版本 v1\.0\.2（当前 v1\.0\.1）/);
+    assert.match(newerTitle, /检查于 \d{2}-\d{2} \d{2}:\d{2}/);
     assert.equal(api.U.projectSettingsApplyUpdate.hidden, false);
 
     api.renderProjectSettingsUpdate({
@@ -148,16 +147,19 @@ test("settings line keeps unknown, failed and current apart", () => {
         error: "remote_unreachable",
         checked_at: "2026-09-25T17:45:04+08:00",
     });
-    assert.match(api.U.projectSettingsUpdateText.textContent, /上次检查失败/);
-    assert.doesNotMatch(api.U.projectSettingsUpdateText.textContent, /已是最新/);
-    assert.match(api.U.projectSettingsUpdateText.title, /remote_unreachable/);
+    assert.equal(api.U.projectSettingsCheckDot.hidden, true, "检查失败不得亮");
+    const failedTitle = api.U.projectSettingsCheckUpdate.title;
+    assert.match(failedTitle, /上次检查失败：remote_unreachable/);
+    assert.doesNotMatch(failedTitle, /已是最新/);
 });
 
 test("up to date never borrows the newer wording", () => {
     const api = stubbedUpdateApi();
     api.renderProjectSettingsUpdate({ has_ledger: true, newer: false, latest_tag: "v1.0.1", current_version: "1.0.1" });
-    assert.match(api.U.projectSettingsUpdateText.textContent, /已是最新/);
-    assert.doesNotMatch(api.U.projectSettingsUpdateText.textContent, /最新 v/);
+    const title = api.U.projectSettingsCheckUpdate.title;
+    assert.match(title, /已是最新 v1\.0\.1/);
+    assert.doesNotMatch(title, /发现新版本/);
+    assert.equal(api.U.projectSettingsCheckDot.hidden, true);
 });
 
 test("确认框层级压过叫它起来的弹窗，但仍在 toast 之下", () => {
@@ -191,16 +193,16 @@ test("升级终态不回落成\"正在重启\"：失败占行、成功让回版�
     const api = loadApp();
     const base = { has_ledger: true, newer: true, current_version: "1.0.11", latest_tag: "v1.0.12", checked_at: "2026-09-28T13:15:20+08:00" };
 
-    // 没有记录 / ok：这一行仍归版本对
+    // 没有记录 / ok：title 仍归版本对
     assert.equal(api.updateApplyOutcomeText(base), "");
     assert.equal(api.updateApplyOutcomeText({ ...base, last_apply: { outcome: "ok", at: "2026-09-28T13:30:00+08:00" } }), "");
-    assert.match(api.updateSettingsLineText(base), /当前 v1\.0\.11 · 最新 v1\.0\.12/);
+    assert.match(api.updateSettingsButtonTitle(base), /发现新版本 v1\.0\.12（当前 v1\.0\.11）/);
 
-    // 脏树被守卫拒掉的那次：端口没退干净 ⇒ 代码未动
+    // 脏树被守卫拒掉的那次：端口没退干净 ⇒ 代码未动。终态顶到 title 最前面，不藏在版本对后面。
     const busy = { ...base, last_apply: { outcome: "port_busy", at: "2026-09-28T13:19:05+08:00", detail: "exit_accepted_200; port 18790 still busy" } };
     assert.equal(api.updateApplyOutcomeText(busy), "升级未完成：服务没退干净");
-    assert.equal(api.updateSettingsLineText(busy), "升级未完成：服务没退干净");
-    assert.match(api.updateSettingsLineTitle(busy), /上次升级 port_busy .*：exit_accepted_200/);
+    assert.match(api.updateSettingsButtonTitle(busy), /^升级未完成：服务没退干净 · /);
+    assert.match(api.updateSettingsButtonTitle(busy), /上次升级 port_busy .*：exit_accepted_200/);
 
     // 执行体刚起来：只说执行中，不谎报完成
     assert.equal(api.updateApplyOutcomeText({ ...base, last_apply: { outcome: "started", detail: "port=18790" } }), "升级执行中");
