@@ -319,6 +319,7 @@ const S = {
         loadBalanceGroups: {},
         loadBalanceGroupDrafts: {},
         // 组配置弹窗的表单态：open=false 时不显示；editingKey="" 表示新建。
+        // `baseline` 是打开那一刻的值，确认键的重点色按它判；`saving` 只在落盘请求在飞时为真。
         groupDialog: {
             open: false,
             editingKey: "",
@@ -326,6 +327,8 @@ const S = {
             modelKeys: [],
             maxRetryRounds: 1,
             error: "",
+            saving: false,
+            baseline: { name: "", rounds: "", modelKeys: [] },
         },
         // 空闲刷新设置：`saved` 是服务端读数，草稿不等它——只有「应用」才写回。
         contextRefresh: {
@@ -10479,7 +10482,7 @@ function bindModelPage() {
         // 「删除」在卡片内部，必须先判它，否则点删除会顺手把配置弹窗弹出来。
         const del = e.target.closest("[data-group-delete]");
         if (del) {
-            deleteLoadBalanceGroupDraft(String(del.dataset.groupDelete || ""));
+            void deleteLoadBalanceGroupDraft(String(del.dataset.groupDelete || ""));
             return;
         }
         const edit = e.target.closest("[data-group-edit]");
@@ -10501,7 +10504,7 @@ function bindModelPage() {
         const roundsField = e.target.closest("[data-group-dialog-rounds]");
         if (roundsField instanceof HTMLInputElement) setLoadBalanceGroupDialogField("rounds", roundsField.value);
     });
-    U.modelGroupConfirm?.addEventListener("click", () => confirmLoadBalanceGroupDialog());
+    U.modelGroupConfirm?.addEventListener("click", () => void confirmLoadBalanceGroupDialog());
     U.modelGroupCancel?.addEventListener("click", () => closeLoadBalanceGroupDialog());
     U.modelGroupClose?.addEventListener("click", () => closeLoadBalanceGroupDialog());
     U.modelGroupBackdrop?.addEventListener("click", (e) => {

@@ -184,6 +184,41 @@ function modelRoleConcurrencyEqual(left, right) {
     return MODEL_SCOPES.every(({ key }) => leftNormalized[key] === rightNormalized[key]);
 }
 
+// 组弹窗的「窗口内容变了没」：与打开弹窗时那份基线比，而不是与服务端比——
+// 编辑已有组时基线就是那组当前值，新建时基线是刚给的默认名与默认轮数。
+function loadBalanceGroupDialogDirty() {
+    const dialog = S.modelCatalog.groupDialog;
+    if (!dialog || !dialog.open) return false;
+    const baseline = dialog.baseline || { name: "", rounds: "", modelKeys: [] };
+    if (String(dialog.name || "").trim() !== String(baseline.name || "").trim()) return true;
+    if (String(dialog.maxRetryRounds ?? "").trim() !== String(baseline.rounds ?? "").trim()) return true;
+    const current = [...new Set((dialog.modelKeys || []).map((item) => String(item || "").trim()).filter(Boolean))].sort();
+    const stored = [...new Set((baseline.modelKeys || []).map((item) => String(item || "").trim()).filter(Boolean))].sort();
+    return JSON.stringify(current) !== JSON.stringify(stored);
+}
+
+// 组改名/删组要同时改写链上的 `group:` 记号：提交的链里留着已经不存在的组，
+// 运行时的 route plan 会静默少一跳（`build_model_route_plan` 对查不到的组直接 continue）。
+function rewriteGroupTokensInChain(chain, rewrites) {
+    const entries = Array.isArray(chain) ? chain : [];
+    const map = rewrites && typeof rewrites === "object" ? rewrites : {};
+    const next = [];
+    entries.forEach((ref) => {
+        if (!isGroupRef(ref)) {
+            next.push(ref);
+            return;
+        }
+        const groupKey = groupKeyFromRef(ref);
+        if (!(groupKey in map)) {
+            next.push(ref);
+            return;
+        }
+        const target = String(map[groupKey] || "").trim();
+        if (target) next.push(groupRefToken(target));
+    });
+    return [...new Set(next.filter(Boolean))];
+}
+
 function syncModelRoleDraftState() {
     const rolesChanged = !modelRolesEqual(S.modelCatalog.roleDrafts, S.modelCatalog.roles)
         || !loadBalanceGroupsEqual(S.modelCatalog.loadBalanceGroupDrafts, S.modelCatalog.loadBalanceGroups);

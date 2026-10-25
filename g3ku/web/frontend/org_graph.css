@@ -61,6 +61,11 @@
     --ceo-session-unread-ring: var(--bg-panel);
     /* 上下文压缩的识别色：长按进度环与会话流里的压缩区分线共用。 */
     --ceo-context-compress-color: #39c5bb;
+    /* 配置窗口的确认键：窗口内的内容与已存值不一致时填这个点名色。
+       两主题同值（与 unread 角标同一颗 #39c5bb）；底上的文字用深青 #052e2b，
+       白字在这颗底上只有约 2.13:1，深青约 6.9:1 达 WCAG AA。 */
+    --dialog-dirty-accent: #39c5bb;
+    --dialog-dirty-accent-text: #052e2b;
     --tree-node-bg: rgba(255, 255, 255, 0.8);
     --tree-node-border: rgba(24, 24, 27, 0.1);
     --tree-node-shadow: 0 4px 6px -1px rgba(24, 24, 27, 0.05), 0 2px 4px -2px rgba(24, 24, 27, 0.02);
@@ -16909,6 +16914,23 @@ textarea {
     border-color: var(--ui-brand);
     background: color-mix(in srgb, var(--ui-brand) 88%, var(--ui-on-brand));
     color: var(--ui-on-brand);
+}
+/* 配置窗口的确认键：窗口内的内容一变就填重点色——「点了它就落盘」这件事要在按之前就说出来。
+   判据由 JS 挂 `.is-dirty`（组弹窗、上下文信息更新时间、模型配置编辑面板三处同源）。
+   带 `:not(:disabled)` 是为了「保存中…」那档退回禁用形，不把进行中的键画得还能再点一次。 */
+#model-group-dialog .toolbar-btn.is-dirty:not(:disabled),
+#context-refresh-dialog .toolbar-btn.is-dirty:not(:disabled),
+#llm-editor-shell .toolbar-btn.is-dirty:not(:disabled) {
+    border-color: var(--dialog-dirty-accent);
+    background: var(--dialog-dirty-accent);
+    color: var(--dialog-dirty-accent-text);
+}
+#model-group-dialog .toolbar-btn.is-dirty:not(:disabled):hover,
+#context-refresh-dialog .toolbar-btn.is-dirty:not(:disabled):hover,
+#llm-editor-shell .toolbar-btn.is-dirty:not(:disabled):hover {
+    border-color: color-mix(in srgb, var(--dialog-dirty-accent) 88%, var(--dialog-dirty-accent-text));
+    background: color-mix(in srgb, var(--dialog-dirty-accent) 88%, var(--dialog-dirty-accent-text));
+    color: var(--dialog-dirty-accent-text);
 }
 /* 卡片内三级文字：标题 13/600、副标题 12 灰、元信息 chip 12。 */
 #view-models .model-group-name,

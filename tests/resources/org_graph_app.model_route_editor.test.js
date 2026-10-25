@@ -79,9 +79,11 @@ function loadApp(elements = {}, globals = {}) {
             deleteLoadBalanceGroupDraft,
             groupRefToken,
             isGroupRef,
+            loadBalanceGroupDialogDirty,
             modelScopeChain,
             normalizeModelRoleChain,
             openLoadBalanceGroupDialog,
+            rewriteGroupTokensInChain,
             renderModelGroupChainTile,
             renderModelGroupColumn,
             renderModelGroupDialog,
@@ -222,6 +224,7 @@ test("链上的组卡说明「平级 + 按负载 + 粘滞」，并暴露空成�
 });
 
 function stubElement(extra = {}) {
+    const classes = new Set();
     return {
         innerHTML: "",
         textContent: "",
@@ -231,7 +234,18 @@ function stubElement(extra = {}) {
         attributes: {},
         style: {},
         listeners: {},
-        classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+        // 颜色这类显示判据要靠类名读数，空实现的 classList 会把「加了没有」读成永远没加。
+        classList: {
+            add: (name) => classes.add(name),
+            remove: (name) => classes.delete(name),
+            toggle: (name, force) => {
+                const on = force === undefined ? !classes.has(name) : Boolean(force);
+                if (on) classes.add(name); else classes.delete(name);
+                return on;
+            },
+            contains: (name) => classes.has(name),
+        },
+        classes,
         setAttribute(name, value) { this.attributes[name] = value; },
         getAttribute(name) { return this.attributes[name]; },
         querySelector: () => null,
@@ -290,11 +304,41 @@ function modelPageElements() {
     };
 }
 
-function loadModelPage(payload = catalogPayload()) {
+function loadModelPage(payload = catalogPayload(), options = {}) {
     const elements = modelPageElements();
-    const app = loadApp(elements, { renderTaskSessionScope: () => {} });
+    const calls = [];
+    const failure = options.failWith ? String(options.failWith) : "";
+    const app = loadApp(elements, {
+        renderTaskSessionScope: () => {},
+        ApiClient: {
+            // mini 服务端：记下提交体，再按提交体回读一份配置（链与整份组集合都被替换）。
+            updateModelRoleChains: async (updates) => {
+                calls.push(JSON.parse(JSON.stringify(updates)));
+                if (failure) throw new Error(failure);
+                return committedPayloadAfterSave(payload, updates);
+            },
+        },
+    });
     app.applyModelCatalog(payload, { preserveRoleDrafts: false });
-    return { app, elements };
+    return { app, elements, calls };
+}
+
+function committedPayloadAfterSave(payload, updates) {
+    const next = JSON.parse(JSON.stringify(payload));
+    next.route_entries = { ...(next.route_entries || {}) };
+    Object.entries(updates).forEach(([scope, item]) => {
+        const entries = (item.routeEntries || [])
+            .length
+            ? item.routeEntries
+            : (item.modelKeys || []).map((key) => ({ type: "model", model_key: key }));
+        next.route_entries[scope] = entries;
+        if (item.maxIterations !== undefined) next.roleIterations[scope] = item.maxIterations;
+    });
+    const carried = Object.values(updates)
+        .map((item) => item.loadBalanceGroups)
+        .find((groups) => groups && Object.keys(groups).length);
+    if (carried) next.load_balance_groups = JSON.parse(JSON.stringify(carried));
+    return next;
 }
 
 test("组列列出所有组并标出未加入链的那份", () => {
@@ -320,8 +364,8 @@ test("组列列出所有组并标出未加入链的那份", () => {
     assert.match(sharedRow, /data-group-delete="g_shared"/);
 });
 
-test("新建组先弹窗，点确定才落草稿并自动进入链编辑会话", () => {
-    const { app, elements } = loadModelPage(plainChainPayload());
+test("新建组先弹窗，点确定才落草稿并自动进入链编辑会话", async () => {
+    const { app, elements, calls } = loadModelPage(plainChainPayload());
 
     app.openLoadBalanceGroupDialog();
     const body = elements["model-group-dialog-body"].innerHTML;
@@ -344,98 +388,205 @@ test("新建组先弹窗，点确定才落草稿并自动进入链编辑会话",
     assert.equal(app.toggleLoadBalanceGroupDialogMember("m_a", true), true);
     assert.equal(app.toggleLoadBalanceGroupDialogMember("m_b", true), true);
     assert.equal(app.setLoadBalanceGroupDialogField("rounds", "2"), true);
-    assert.equal(app.confirmLoadBalanceGroupDialog(), true);
+    assert.equal(await app.confirmLoadBalanceGroupDialog(), true);
 
     assert.equal(app.S.modelCatalog.roleEditing, true);
     sameJson(app.S.modelCatalog.loadBalanceGroupDrafts.g_stage.model_keys, ["m_a", "m_b"]);
     assert.equal(app.S.modelCatalog.loadBalanceGroupDrafts.g_stage.max_retry_rounds, 2);
     assert.equal(app.S.modelCatalog.groupDialog.open, false);
 
-    // 没有任何链用到组时，整份组集合挂在第一个能承载组的 scope（execution）上提交。
-    const updates = app.buildModelRoleChainUpdates(["execution", "inspection"], { useDrafts: true });
-    sameJson(Object.keys(updates.execution.loadBalanceGroups), ["g_shared", "g_unused", "g_stage"]);
-    sameJson(updates.execution.modelKeys, ["m_a", "m_b"]);
-    assert.equal(updates.execution.routeEntries, undefined);
-    assert.equal(updates.inspection.loadBalanceGroups, undefined);
+    // 点确定就是落盘点：不再需要页面右上角那一次「保存」。
+    assert.equal(calls.length, 1, "组弹窗的确定必须自己提交");
+    sameJson(calls[0].execution.modelKeys, ["m_a", "m_b"]);
+    sameJson(Object.keys(calls[0].execution.loadBalanceGroups).sort(), ["g_shared", "g_stage", "g_unused"]);
+    assert.equal(calls[0].inspection.loadBalanceGroups, undefined);
+    // 落盘后草稿与已存值一致：脏位清空，头部那颗「保存」不该还亮着。
+    assert.equal(app.S.modelCatalog.rolesDirty, false);
+    sameJson(Object.keys(app.S.modelCatalog.loadBalanceGroups).sort(), ["g_shared", "g_stage", "g_unused"]);
 });
 
-test("弹窗里空成员与空组名都被挡下，不落草稿", () => {
+test("组确认交的是服务端现有链：页面上没保存的拖动草稿不许被顺手提交", async () => {
+    const { app, calls } = loadModelPage();
+
+    // 链草稿被拖成「只剩 m_b」，而服务端 execution 链仍是 group:g_shared + m_emergency。
+    app.startModelRoleEditing();
+    app.S.modelCatalog.roleDrafts.execution = ["m_b"];
+
+    app.openLoadBalanceGroupDialog("g_shared");
+    app.setLoadBalanceGroupDialogField("rounds", "5");
+    assert.equal(await app.confirmLoadBalanceGroupDialog(), true);
+
+    // 提交体按服务端的链回写：组那一跳还在，草稿的 m_b 没被带上去。
+    sameJson(calls[0].execution.routeEntries, [
+        { type: "load_balance", group_key: "g_shared" },
+        { type: "model", model_key: "m_emergency" },
+    ]);
+    assert.equal(calls[0].execution.modelKeys, undefined);
+    assert.equal(calls[0].execution.loadBalanceGroups.g_shared.max_retry_rounds, 5);
+    // 草稿仍是用户拖的那份，脏位还在，右上角「保存」仍可点。
+    sameJson(app.S.modelCatalog.roleDrafts.execution, ["m_b"]);
+    assert.equal(app.S.modelCatalog.rolesDirty, true);
+});
+
+test("组弹窗确定键的重点色：开了不亮，改过才亮", () => {
+    const { app, elements } = loadModelPage();
+    const confirm = elements["model-group-confirm-btn"];
+
+    app.openLoadBalanceGroupDialog("g_shared");
+    assert.equal(confirm.classes.has("is-dirty"), false, "刚打开时内容与已存值一致，不该提示有改动");
+    assert.equal(app.loadBalanceGroupDialogDirty(), false);
+
+    app.setLoadBalanceGroupDialogField("rounds", "3");
+    assert.equal(confirm.classes.has("is-dirty"), true, "改了重试次数就要亮");
+
+    app.setLoadBalanceGroupDialogField("rounds", "2");
+    assert.equal(confirm.classes.has("is-dirty"), false, "改回原值等于没改");
+
+    app.toggleLoadBalanceGroupDialogMember("m_emergency", true);
+    assert.equal(confirm.classes.has("is-dirty"), true, "勾了成员要亮");
+});
+
+test("新建组的重点色按打开那一刻的默认值判，不是按空值判", () => {
     const { app, elements } = loadModelPage(plainChainPayload());
+    const confirm = elements["model-group-confirm-btn"];
 
     app.openLoadBalanceGroupDialog();
-    assert.equal(app.confirmLoadBalanceGroupDialog(), false);
+    assert.equal(confirm.classes.has("is-dirty"), false);
+    app.toggleLoadBalanceGroupDialogMember("m_a", true);
+    assert.equal(confirm.classes.has("is-dirty"), true);
+});
+
+test("弹窗里空成员与空组名都被挡下，不落草稿", async () => {
+    const { app, elements, calls } = loadModelPage(plainChainPayload());
+
+    app.openLoadBalanceGroupDialog();
+    assert.equal(await app.confirmLoadBalanceGroupDialog(), false);
     assert.match(app.S.modelCatalog.groupDialog.error, /至少勾选 1 个模型/);
 
     app.toggleLoadBalanceGroupDialogMember("m_a", true);
     app.setLoadBalanceGroupDialogField("name", "   ");
-    assert.equal(app.confirmLoadBalanceGroupDialog(), false);
+    assert.equal(await app.confirmLoadBalanceGroupDialog(), false);
     assert.match(app.S.modelCatalog.groupDialog.error, /组名不能为空/);
 
     assert.equal(app.S.modelCatalog.roleEditing, false);
     // 草稿仍是已保存那两份组，没有多出被拒的空白组。
     sameJson(Object.keys(app.S.modelCatalog.loadBalanceGroupDrafts).sort(), ["g_shared", "g_unused"]);
     assert.match(elements["model-group-dialog-body"].innerHTML, /组名不能为空/);
+    // 被拒的改动一次都不该发出去。
+    sameJson(calls, []);
 });
 
-test("重试次数只挡负数，大数按用户意图保留", () => {
-    const { app } = loadModelPage(plainChainPayload());
+test("重试次数只挡负数，大数按用户意图保留", async () => {
+    const { app, calls } = loadModelPage(plainChainPayload());
 
     app.openLoadBalanceGroupDialog();
     app.setLoadBalanceGroupDialogField("name", "g_rounds");
     app.toggleLoadBalanceGroupDialogMember("m_a", true);
     app.setLoadBalanceGroupDialogField("rounds", "-1");
-    assert.equal(app.confirmLoadBalanceGroupDialog(), false);
+    assert.equal(await app.confirmLoadBalanceGroupDialog(), false);
     assert.match(app.S.modelCatalog.groupDialog.error, /不小于 0 的整数/);
+    sameJson(calls, []);
 
     app.setLoadBalanceGroupDialogField("rounds", "9999");
-    assert.equal(app.confirmLoadBalanceGroupDialog(), true);
+    assert.equal(await app.confirmLoadBalanceGroupDialog(), true);
     assert.equal(app.S.modelCatalog.loadBalanceGroupDrafts.g_rounds.max_retry_rounds, 9999);
+    assert.equal(calls[0].execution.loadBalanceGroups.g_rounds.max_retry_rounds, 9999);
+    // 服务端读数跟着落：不必再点右上角的「保存」。
+    assert.equal(app.S.modelCatalog.loadBalanceGroups.g_rounds.max_retry_rounds, 9999);
 });
 
-test("弹窗改组名会把链上的 group 记号一起改掉", () => {
-    const { app } = loadModelPage();
+test("弹窗改组名会把链上的 group 记号一起改掉", async () => {
+    const { app, calls } = loadModelPage();
     app.S.modelCatalog.roleEditing = true;
     app.S.modelCatalog.roleDrafts = { ceo: ["m_emergency"], execution: ["group:g_shared", "m_emergency"], inspection: ["m_b"], memory: [] };
     app.S.modelCatalog.loadBalanceGroupDrafts = app.cloneLoadBalanceGroups(app.S.modelCatalog.loadBalanceGroups);
 
     app.openLoadBalanceGroupDialog("g_shared");
     app.setLoadBalanceGroupDialogField("name", "g_fast");
-    assert.equal(app.confirmLoadBalanceGroupDialog(), true);
+    assert.equal(await app.confirmLoadBalanceGroupDialog(), true);
 
     sameJson(app.S.modelCatalog.roleDrafts.execution, ["group:g_fast", "m_emergency"]);
     assert.equal(app.S.modelCatalog.loadBalanceGroupDrafts.g_shared, undefined);
     sameJson(app.S.modelCatalog.loadBalanceGroupDrafts.g_fast.model_keys, ["m_a", "m_b"]);
     // 轮预算跟着组走，不因为改名被重置。
     assert.equal(app.S.modelCatalog.loadBalanceGroupDrafts.g_fast.max_retry_rounds, 2);
+
+    // 改名要连提交体里的链一起换：留着旧记号等于让链指向一个已经不存在的组，
+    // 运行时 route plan 对查不到的组是静默 continue，那一跳就没了。
+    sameJson(calls[0].execution.routeEntries, [
+        { type: "load_balance", group_key: "g_fast" },
+        { type: "model", model_key: "m_emergency" },
+    ]);
+    sameJson(Object.keys(app.S.modelCatalog.loadBalanceGroups).sort(), ["g_fast", "g_unused"]);
 });
 
-test("弹窗改组名撞名或撞模型 key 时拒绝，链保持原样", () => {
-    const { app } = loadModelPage();
+test("弹窗改组名撞名或撞模型 key 时拒绝，链保持原样", async () => {
+    const { app, calls } = loadModelPage();
     app.S.modelCatalog.roleEditing = true;
     app.S.modelCatalog.roleDrafts = { ceo: [], execution: ["group:g_shared"], inspection: [], memory: [] };
     app.S.modelCatalog.loadBalanceGroupDrafts = app.cloneLoadBalanceGroups(app.S.modelCatalog.loadBalanceGroups);
 
     app.openLoadBalanceGroupDialog("g_shared");
     app.setLoadBalanceGroupDialogField("name", "g_unused");
-    assert.equal(app.confirmLoadBalanceGroupDialog(), false);
+    assert.equal(await app.confirmLoadBalanceGroupDialog(), false);
     assert.match(app.S.modelCatalog.groupDialog.error, /组名已存在：g_unused/);
 
     app.setLoadBalanceGroupDialogField("name", "m_a");
-    assert.equal(app.confirmLoadBalanceGroupDialog(), false);
+    assert.equal(await app.confirmLoadBalanceGroupDialog(), false);
     assert.match(app.S.modelCatalog.groupDialog.error, /不能与模型配置同名/);
 
     sameJson(app.S.modelCatalog.roleDrafts.execution, ["group:g_shared"]);
     assert.equal(app.S.modelCatalog.loadBalanceGroupDrafts.g_shared.max_retry_rounds, 2);
     assert.equal(app.S.modelCatalog.groupDialog.open, true);
+    sameJson(calls, []);
 });
 
-test("删除组会把引用它的链位一起摘掉", () => {
-    const { app } = loadModelPage();
+test("保存失败停在弹窗里点名原因，改动留在草稿可重试", async () => {
+    const { app, elements } = loadModelPage(plainChainPayload(), { failWith: "组名不能与模型配置同名：x2" });
+
+    app.openLoadBalanceGroupDialog("g_unused");
+    app.setLoadBalanceGroupDialogField("rounds", "4");
+    assert.equal(await app.confirmLoadBalanceGroupDialog(), true);
+
+    // 弹窗不许自己关掉：改动还在草稿里，原地改完可以再点一次。
+    assert.equal(app.S.modelCatalog.groupDialog.open, true);
+    assert.match(app.S.modelCatalog.groupDialog.error, /保存失败：组名不能与模型配置同名/);
+    assert.match(elements["model-group-dialog-body"].innerHTML, /保存失败：/);
+    // 已存读数没变（服务端拒了），草稿带着新值，脏位仍在——右上角「保存」作为兜底还能点。
+    assert.equal(app.S.modelCatalog.loadBalanceGroups.g_unused.max_retry_rounds, 9);
+    assert.equal(app.S.modelCatalog.loadBalanceGroupDrafts.g_unused.max_retry_rounds, 4);
+    assert.equal(app.S.modelCatalog.rolesDirty, true);
+    assert.equal(elements["model-group-confirm-btn"].disabled, false);
+    assert.equal(elements["model-group-confirm-btn"].textContent, "确定");
+});
+
+test("组确定不许被「链中混着不收图成员」那道确认挡住：交回的是没变过的链", async () => {
+    // 服务端的 execution 链本来就混着收图与不收图的成员——那是上一次链保存时接受过的形状。
+    const payload = catalogPayload();
+    // 三颗成员都要写出显式的识图勾选：没写过这格的记录读成 null，混勾判据会把它们整个跳过。
+    payload.catalog = payload.catalog.map((item) => ({
+        ...item,
+        image_multimodal_enabled: item.key === "m_a",
+    }));
+    const { app, calls } = loadModelPage(payload);
+
+    app.openLoadBalanceGroupDialog("g_shared");
+    app.setLoadBalanceGroupDialogField("rounds", "6");
+    assert.equal(await app.confirmLoadBalanceGroupDialog(), true);
+
+    // 若这道确认仍被调用，提交会停在弹窗后面（桩里没有点下去的人），calls 就是空的。
+    assert.equal(calls.length, 1, "组的确定必须直接落盘，不追加与链无关的确认");
+    assert.equal(app.S.modelCatalog.loadBalanceGroups.g_shared.max_retry_rounds, 6);
+    assert.equal(app.S.modelCatalog.groupDialog.open, false);
+});
+
+test("删除组会把引用它的链位一起摘掉，并当场落盘", async () => {
+    const { app, calls } = loadModelPage();
     app.S.modelCatalog.roleEditing = true;
     app.S.modelCatalog.roleDrafts = { ceo: [], execution: ["group:g_shared", "m_emergency"], inspection: ["m_b"], memory: [] };
     app.S.modelCatalog.loadBalanceGroupDrafts = app.cloneLoadBalanceGroups(app.S.modelCatalog.loadBalanceGroups);
 
-    assert.equal(app.deleteLoadBalanceGroupDraft("g_shared"), true);
+    assert.equal(await app.deleteLoadBalanceGroupDraft("g_shared"), true);
 
     sameJson(app.S.modelCatalog.roleDrafts.execution, ["m_emergency"]);
     assert.equal(app.S.modelCatalog.loadBalanceGroupDrafts.g_shared, undefined);
@@ -443,6 +594,10 @@ test("删除组会把引用它的链位一起摘掉", () => {
     const updates = app.buildModelRoleChainUpdates(["execution"], { useDrafts: true });
     assert.equal(updates.execution.routeEntries, undefined);
     sameJson(updates.execution.modelKeys, ["m_emergency"]);
+    // 提交体按服务端的链把那一跳摘掉（不是留着指向已删的组），组字典整份替换。
+    sameJson(calls[0].execution.modelKeys, ["m_emergency"]);
+    sameJson(Object.keys(calls[0].execution.loadBalanceGroups).sort(), ["g_unused"]);
+    sameJson(Object.keys(app.S.modelCatalog.loadBalanceGroups).sort(), ["g_unused"]);
 });
 
 const LLM_CODE = fs.readFileSync(path.join(ROOT, "g3ku/web/frontend/org_graph_llm.js"), "utf8");
@@ -459,13 +614,16 @@ function llmBindingsPayload() {
     };
 }
 
-function loadModelPageWithLlm() {
+function loadModelPageWithLlm(extraElements = {}, api = {}) {
     const elements = modelPageElements();
     elements["llm-bindings-list"] = stubElement();
+    elements["llm-editor-shell"] = stubElement();
+    Object.assign(elements, extraElements);
     const context = baseContext(elements);
     context.window = context;
     vm.createContext(context);
     vm.runInContext(APP_CODE, context);
+    context.ApiClient = api;
     vm.runInContext(LLM_CODE, context);
     const payload = llmBindingsPayload();
     context.__llmPayload = payload;
@@ -477,6 +635,63 @@ function loadModelPageWithLlm() {
     `, context);
     return { context, elements };
 }
+
+test("旧配置（记录里没写过 retry_on）打开详情时不许一上来就报有改动", async () => {
+    const saveButton = stubElement({ dataset: { llmAction: "save-detail" } });
+    const shell = stubElement({ querySelectorAll: () => [saveButton] });
+    const { context } = loadModelPageWithLlm(
+        { "llm-editor-shell": shell },
+        {
+            getLlmConfig: async () => ({
+                provider_id: "openai",
+                base_url: "https://api.example.com/v1",
+                api_key: "sk-1",
+                default_model: "openai:model-a",
+                parameters: { context_window_tokens: 200000 },
+            }),
+        },
+    );
+    const hooks = context.__llmTestHooks;
+    // bindingMap 正常由加载流程建；这里直接铺一份，让 openModel 走得通。
+    vm.runInContext("const s = __llmTestHooks.llmState(); s.bindingMap = { m_a: s.bindings.find((i) => i.key === 'm_a') };", context);
+
+    context.window.openModel("m_a");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const editor = hooks.llmState().editor;
+    assert.equal(editor.mode, "detail");
+    // 面板把缺席的 retry_on 填成默认关键词：颜色必须按「打开那一刻」判，而不是按服务端字段有无判。
+    sameJson(editor.retryOn, ["network", "429"]);
+    assert.equal(hooks.llmEditorDirty(), false, "刚打开就是基线，没有任何改动可言");
+    assert.equal(saveButton.classes.has("is-dirty"), false);
+
+    hooks.llmState().editor.retryOn = ["network", "429", "502"];
+    hooks.syncLlmEditorDirtyAffordance();
+    assert.equal(hooks.llmEditorDirty(), true, "改了重试关键词要亮");
+    assert.equal(saveButton.classes.has("is-dirty"), true);
+});
+
+test("模型配置面板的确认键：内容改了才填重点色，关闭键不许一起亮", async () => {
+    const saveButton = stubElement({ dataset: { llmAction: "save-create" } });
+    const closeButton = stubElement({ dataset: { llmAction: "close" } });
+    const shell = stubElement({ querySelectorAll: () => [saveButton, closeButton] });
+    const { context } = loadModelPageWithLlm({ "llm-editor-shell": shell });
+    const hooks = context.__llmTestHooks;
+
+    await hooks.openCreateModal();
+    assert.equal(hooks.llmEditorDirty(), false, "刚打开时与打开那一刻一致，不该报有改动");
+    assert.equal(saveButton.classes.has("is-dirty"), false);
+
+    hooks.llmState().editor.createName = "demo";
+    assert.equal(hooks.llmEditorDirty(), true);
+    hooks.syncLlmEditorDirtyAffordance();
+    assert.equal(saveButton.classes.has("is-dirty"), true, "改了内容确认键要当场变重心");
+    assert.equal(closeButton.classes.has("is-dirty"), false, "只有确认键参与这套颜色");
+
+    hooks.llmState().editor.createName = "";
+    hooks.syncLlmEditorDirtyAffordance();
+    assert.equal(saveButton.classes.has("is-dirty"), false, "改回原值等于没改");
+});
 
 test("llmRouteChains 用 route_entries 覆盖候选展开视图", () => {
     const { context } = loadModelPageWithLlm();

@@ -43,13 +43,21 @@ function removeLoadBalanceGroupToken(groupKey) {
 function openLoadBalanceGroupDialog(groupKey = "") {
     const key = String(groupKey || "").trim();
     const group = key ? (activeLoadBalanceGroups()[key] || null) : null;
+    const rounds = group ? Number(group.max_retry_rounds || 1) : GROUP_DEFAULT_MAX_RETRY_ROUNDS;
+    const members = group ? [...(group.model_keys || [])] : [];
     S.modelCatalog.groupDialog = {
         open: true,
         editingKey: key,
         name: key || nextStandaloneGroupKey(),
-        modelKeys: group ? [...(group.model_keys || [])] : [],
-        maxRetryRounds: group ? Number(group.max_retry_rounds || 1) : GROUP_DEFAULT_MAX_RETRY_ROUNDS,
+        modelKeys: members,
+        maxRetryRounds: rounds,
         error: "",
+        saving: false,
+        baseline: {
+            name: key || nextStandaloneGroupKey(),
+            rounds: String(rounds),
+            modelKeys: [...members],
+        },
     };
     renderModelGroupDialog();
     // 正文容器是常驻节点，换组只换它的 innerHTML：不清滚动位置的话，上一组滚到列表
@@ -60,7 +68,10 @@ function openLoadBalanceGroupDialog(groupKey = "") {
 
 function closeLoadBalanceGroupDialog() {
     if (!S.modelCatalog.groupDialog.open) return false;
-    S.modelCatalog.groupDialog = { open: false, editingKey: "", name: "", modelKeys: [], maxRetryRounds: 1, error: "" };
+    S.modelCatalog.groupDialog = {
+        open: false, editingKey: "", name: "", modelKeys: [], maxRetryRounds: 1,
+        error: "", saving: false, baseline: { name: "", rounds: "", modelKeys: [] },
+    };
     renderModelGroupDialog();
     return true;
 }
@@ -95,9 +106,9 @@ function toggleLoadBalanceGroupDialogMember(modelRef, checked) {
     return true;
 }
 
-function confirmLoadBalanceGroupDialog() {
+async function confirmLoadBalanceGroupDialog() {
     const dialog = S.modelCatalog.groupDialog;
-    if (!dialog.open) return false;
+    if (!dialog.open || dialog.saving) return false;
     const name = String(dialog.name || "").trim();
     if (!name) return rejectLoadBalanceGroupDialog("组名不能为空");
     if (!dialog.modelKeys.length) return rejectLoadBalanceGroupDialog("至少勾选 1 个模型");
@@ -115,21 +126,44 @@ function confirmLoadBalanceGroupDialog() {
     ensureModelRoleDraftSession();
     const drafts = S.modelCatalog.loadBalanceGroupDrafts;
     const payload = { enabled: true, max_retry_rounds: rounds, model_keys: [...dialog.modelKeys] };
+    const rewrites = {};
     if (dialog.editingKey && dialog.editingKey !== name) {
         drafts[name] = { ...(drafts[dialog.editingKey] || {}), ...payload };
         delete drafts[dialog.editingKey];
         // 改名必须把链上的 group 记号一起带走，否则链会指向一个已经不存在的组。
         rewriteLoadBalanceGroupToken(dialog.editingKey, name);
+        rewrites[dialog.editingKey] = name;
     } else {
         drafts[name] = payload;
     }
+    // 弹窗的确定就是这一处配置的落盘点：不再要求去页面右上角再点一次「保存」。
+    // 提交的是**服务端现有的链**（页面上没保存的拖动草稿继续留在草稿里，失败时还救得回来），
+    // 组集合交整份草稿，改名时链上的旧记号在提交体里一起换掉。
     syncModelRoleDraftState();
-    closeLoadBalanceGroupDialog();
-    renderModelCatalog();
+    dialog.saving = true;
+    renderModelGroupDialog();
+    try {
+        await persistModelRoleChains(MODEL_SCOPES.map((item) => item.key), `负载均衡组「${name}」已保存。`, {
+            useDrafts: false,
+            groups: drafts,
+            chainGroupRewrites: rewrites,
+            preserveRoleDrafts: true,
+            confirmImageMix: false,
+        });
+        dialog.saving = false;
+        closeLoadBalanceGroupDialog();
+        renderModelCatalog();
+    } catch (error) {
+        // 停在弹窗里：改动已经落进草稿，改完可以再点一次，不必重开窗口从头填。
+        dialog.saving = false;
+        dialog.error = `保存失败：${String(error?.message || "请重试")}`;
+        renderModelGroupDialog();
+        renderModelCatalog();
+    }
     return true;
 }
 
-function deleteLoadBalanceGroupDraft(groupKey) {
+async function deleteLoadBalanceGroupDraft(groupKey) {
     ensureModelRoleDraftSession();
     const drafts = S.modelCatalog.loadBalanceGroupDrafts;
     if (!drafts[groupKey]) return false;
@@ -137,6 +171,21 @@ function deleteLoadBalanceGroupDraft(groupKey) {
     removeLoadBalanceGroupToken(groupKey);
     syncModelRoleDraftState();
     renderModelCatalog();
+    try {
+        await persistModelRoleChains(MODEL_SCOPES.map((item) => item.key), `负载均衡组「${groupKey}」已删除。`, {
+            useDrafts: false,
+            groups: drafts,
+            chainGroupRewrites: { [groupKey]: "" },
+            preserveRoleDrafts: true,
+            confirmImageMix: false,
+        });
+    } catch (error) {
+        showToast({
+            title: "组删除失败",
+            text: String(error?.message || "保存失败，请稍后重试"),
+            kind: "error",
+        });
+    }
     return true;
 }
 
@@ -605,18 +654,31 @@ function cancelModelRoleEditing() {
     hint("已放弃未保存的模型链修改。", false);
 }
 
-async function persistModelRoleChains(scopes = MODEL_SCOPES.map((item) => item.key), successText = "模型链已保存。", { useDrafts = false } = {}) {
-    const updates = buildModelRoleChainUpdates(scopes, { useDrafts });
+async function persistModelRoleChains(
+    scopes = MODEL_SCOPES.map((item) => item.key),
+    successText = "模型链已保存。",
+    { useDrafts = false, groups = null, chainGroupRewrites = null, preserveRoleDrafts = false, confirmImageMix = true } = {},
+) {
+    const updates = buildModelRoleChainUpdates(scopes, { useDrafts, groups, chainGroupRewrites });
     if (!Object.keys(updates).length) return;
-    const submittingChains = Object.entries(updates)
-        .filter(([scope]) => IMAGE_JUDGED_MODEL_SCOPES.includes(scope))
-        .map(([, payload]) => roleChainUpdateToChain(payload));
-    if (!(await confirmChainsImageCapabilityMix(submittingChains))) return;
+    // 「链里混着不收图的成员」那道确认只在链本身在变时才有意义：它讲的是这一跳会不会看见像素。
+    // 组的那两条车道交回的是服务端现有的链（成员一个没动），再问一遍就是把人挡在自己的改动前面。
+    if (confirmImageMix) {
+        const submittingChains = Object.entries(updates)
+            .filter(([scope]) => IMAGE_JUDGED_MODEL_SCOPES.includes(scope))
+            .map(([, payload]) => roleChainUpdateToChain(payload));
+        if (!(await confirmChainsImageCapabilityMix(submittingChains))) return;
+    }
     S.modelCatalog.saving = true;
     renderModelCatalog();
     try {
         const payload = await ApiClient.updateModelRoleChains(updates);
-        if (payload) applyModelCatalog(payload);
+        if (payload) {
+            applyModelCatalog(payload, { preserveRoleDrafts });
+            // 模型页现由 org_graph_llm.js 渲染，它自己那份 routes/组/轮数 会在下一次
+            // renderAll 时覆盖 S.modelCatalog——保存结果必须一起交给它，否则刚落盘的组被冲回旧值。
+            if (typeof window.adoptLlmModelCatalog === "function") window.adoptLlmModelCatalog(payload);
+        }
         hint(successText);
     } catch (e) {
         S.modelCatalog.error = e.message || "save failed";
@@ -628,20 +690,29 @@ async function persistModelRoleChains(scopes = MODEL_SCOPES.map((item) => item.k
     }
 }
 
-function buildModelRoleChainUpdates(scopes = MODEL_SCOPES.map((item) => item.key), { useDrafts = false } = {}) {
+function buildModelRoleChainUpdates(
+    scopes = MODEL_SCOPES.map((item) => item.key),
+    { useDrafts = false, groups = null, chainGroupRewrites = null } = {},
+) {
     const targets = [...new Set(scopes.map((item) => String(item || "").trim()).filter(Boolean))];
     if (!targets.length) return {};
     const roleSource = useDrafts ? S.modelCatalog.roleDrafts : S.modelCatalog.roles;
     const iterationSource = useDrafts ? S.modelCatalog.roleIterationDrafts : S.modelCatalog.roleIterations;
     const draftConcurrencySource = S.modelCatalog.roleConcurrencyDrafts || DEFAULT_ROLE_CONCURRENCY();
     const concurrencySource = useDrafts ? draftConcurrencySource : S.modelCatalog.roleConcurrency;
-    const touchedGroups = collectTouchedLoadBalanceGroups();
+    // 弹窗那几条车道交的是「整份组草稿 + 服务端现有链」：组这次就落盘，链上没保存的
+    // 拖动草稿不许被顺手提交掉。改名与删组的记号改写只作用在提交体上。
+    const touchedGroups = groups !== null && typeof groups === "object" ? groups : collectTouchedLoadBalanceGroups();
+    const scopeChain = (scope) => rewriteGroupTokensInChain(
+        normalizeModelRoleChain(roleSource[scope] || []),
+        chainGroupRewrites,
+    );
     // 组是全局资源，但只有 execution / inspection 能引用它。没有任何链用到组时，把整份
     // 集合挂在第一个可承载的 scope 上，「刚建好还没拖进链」的组才不会丢。
     const groupCarrier = targets.find((scope) => LOAD_BALANCE_ROUTE_SCOPES.includes(scope));
-    const anyChainUsesGroup = targets.some((scope) => chainUsesGroup(normalizeModelRoleChain(roleSource[scope] || [])));
+    const anyChainUsesGroup = targets.some((scope) => chainUsesGroup(scopeChain(scope)));
     return Object.fromEntries(targets.map((scope) => {
-        const chain = normalizeModelRoleChain(roleSource[scope] || []);
+        const chain = scopeChain(scope);
         const base = {
             maxIterations: iterationSource[scope],
             maxConcurrency: concurrencySource[scope],

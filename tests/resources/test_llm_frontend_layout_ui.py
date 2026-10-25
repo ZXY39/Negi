@@ -62,7 +62,7 @@ def test_llm_detail_editor_renders_image_multimodal_before_concurrency_button_in
         global.window.addEventListener = () => {};
         const elements = {
           "llm-bindings-list": { innerHTML: "", addEventListener: () => {} },
-          "llm-editor-shell": { innerHTML: "", addEventListener: () => {} },
+          "llm-editor-shell": { innerHTML: "", addEventListener: () => {}, querySelectorAll: () => [] },
           "llm-editor-backdrop": { addEventListener: () => {} },
           "llm-editor-panel": { addEventListener: () => {} },
           "llm-memory-settings-btn": { addEventListener: () => {} },

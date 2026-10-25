@@ -104,6 +104,17 @@ function loadBalanceGroupCatalogOptions() {
         .sort((left, right) => String(left.key).localeCompare(String(right.key)));
 }
 
+// 组弹窗的确定键：窗口里的内容一变就填重点色；落盘在飞时改文案并禁用，别让人再点一次。
+// 每次字段变化都过这里，不等整块重绘——勾选与输入路径只重画局部，靠重绘会把颜色留在旧状态。
+function syncLoadBalanceGroupConfirmAffordance() {
+    const confirm = U.modelGroupConfirm;
+    if (!confirm) return;
+    const dialog = S.modelCatalog.groupDialog;
+    confirm.classList.toggle("is-dirty", Boolean(dialog.open) && !dialog.saving && loadBalanceGroupDialogDirty());
+    confirm.disabled = Boolean(dialog.saving);
+    confirm.textContent = dialog.saving ? "保存中…" : "确定";
+}
+
 function renderModelGroupDialog() {
     const backdrop = U.modelGroupBackdrop;
     const body = U.modelGroupDialogBody;
@@ -114,6 +125,7 @@ function renderModelGroupDialog() {
         backdrop.classList.remove("is-open");
         U.modelGroupDialog?.setAttribute("aria-hidden", "true");
         body.innerHTML = "";
+        syncLoadBalanceGroupConfirmAffordance();
         return;
     }
     if (U.modelGroupTitle) U.modelGroupTitle.textContent = dialog.editingKey ? "编辑负载均衡组" : "新建负载均衡组";
@@ -145,6 +157,7 @@ function renderModelGroupDialog() {
     backdrop.hidden = false;
     backdrop.classList.add("is-open");
     U.modelGroupDialog?.setAttribute("aria-hidden", "false");
+    syncLoadBalanceGroupConfirmAffordance();
 }
 
 function syncLoadBalanceGroupDialogSummary() {
@@ -158,6 +171,7 @@ function syncLoadBalanceGroupDialogSummary() {
     const windows = body.querySelector("[data-group-dialog-windows]");
     if (windows) windows.innerHTML = renderLoadBalanceGroupWindowAlignment(dialog.modelKeys);
     if (!dialog.error) body.querySelector("[data-group-dialog-error]")?.remove();
+    syncLoadBalanceGroupConfirmAffordance();
 }
 
 function renderModelGroupColumn() {
@@ -415,6 +429,7 @@ function renderContextRefreshDialog() {
     }
     if (U.contextRefreshApply) {
         U.contextRefreshApply.disabled = state.loading || state.saving || !contextRefreshDraftDirty();
+        U.contextRefreshApply.classList.toggle("is-dirty", contextRefreshDraftDirty());
         U.contextRefreshApply.textContent = state.saving ? "应用中…" : "应用";
     }
     const lockClose = Boolean(state.saving);

@@ -30,8 +30,11 @@
       jsonText: "",
       initialJsonText: "",
       retryOn: [...DEFAULT_RETRY_ON],
+      initialRetryOn: [...DEFAULT_RETRY_ON],
       retryCount: 0,
+      initialRetryCount: 0,
       singleApiKeyMaxConcurrency: "",
+      initialSingleApiKeyMaxConcurrency: "",
       contextWindowTokens: "",
       initialContextWindowTokens: "",
       imageMultimodalEnabled: false,
@@ -440,6 +443,7 @@
       requestTimeoutSeconds: trim(draft?.parameters?.request_timeout_seconds),
       initialRequestTimeoutSeconds: trim(draft?.parameters?.request_timeout_seconds),
     };
+    captureEditorBaseline();
     renderAll();
   }
 
@@ -488,6 +492,7 @@
       requestTimeoutSeconds: trim(binding.request_timeout_seconds ?? draft?.parameters?.request_timeout_seconds),
       initialRequestTimeoutSeconds: trim(binding.request_timeout_seconds ?? draft?.parameters?.request_timeout_seconds),
     };
+    captureEditorBaseline();
     renderAll();
   }
 
@@ -1320,12 +1325,14 @@
     }
 
     U.llmEditorShell.innerHTML = normalizeBindingNameText(U.llmEditorShell.innerHTML);
+    syncLlmEditorDirtyAffordance();
     if (state.editor.mode === "create") {
       const createNameInput = document.getElementById("llm-create-name-input");
       if (createNameInput) {
         createNameInput.value = state.editor.createName || "";
         createNameInput.addEventListener("input", (event) => {
           state.editor.createName = trim(event.target.value || "");
+          syncLlmEditorDirtyAffordance();
         });
       }
     } else {
@@ -1333,6 +1340,7 @@
       if (editNameInput) {
         editNameInput.addEventListener("input", (event) => {
           state.editor.editName = String(event.target.value || "");
+          syncLlmEditorDirtyAffordance();
         });
         editNameInput.addEventListener("keydown", (event) => {
           if (event.key === "Escape") {
@@ -1759,6 +1767,54 @@
     }
   }
 
+  // 「打开那一刻」的基线：重试关键词/次数与并发上限这三格在两个构造点都跟着各自的初值记一份。
+  // 判据不许直接比服务端字段——旧记录里 retry_on 缺席时 editor 会被填成默认关键词，
+  // 拿默认去比服务端的空值会让面板一打开就报「有改动」，那颗颜色就再也没说过真话。
+  function captureEditorBaseline() {
+    const editor = llmState().editor;
+    if (!editor) return;
+    editor.initialRetryOn = [...(editor.retryOn || [])];
+    editor.initialRetryCount = editor.retryCount;
+    editor.initialSingleApiKeyMaxConcurrency = editor.singleApiKeyMaxConcurrency;
+  }
+
+  // 面板里的内容与「打开那一刻」不一致：确认键填重点色的判据。纯读 state——渲染路径也要调它，
+  // 渲染里不许反向改动用户正在写的格子。格子的值是在「字段被编辑」时由 syncBindingInputs 搬进
+  // state 的（重试关键词/次数、并发上限、识图勾选只有那条车道会搬，颜色不能等它）。
+  // 不调用 bindingDraftPayload：它会把认下来的数回填进输入格。
+  function llmEditorDirty() {
+    const editor = llmState().editor;
+    if (!editor) return false;
+    if (trim(String(editor.jsonText || "")) !== trim(String(editor.initialJsonText || ""))) return true;
+    if (String(editor.contextWindowTokens || "") !== String(editor.initialContextWindowTokens || "")) return true;
+    if (Boolean(editor.imageMultimodalEnabled) !== Boolean(editor.initialImageMultimodalEnabled)) return true;
+    if (String(editor.reasoningEffort || "") !== String(editor.initialReasoningEffort || "")) return true;
+    if (String(editor.maxOutputTokens || "") !== String(editor.initialMaxOutputTokens || "")) return true;
+    if (String(editor.requestTimeoutSeconds || "") !== String(editor.initialRequestTimeoutSeconds || "")) return true;
+    if (editor.mode === "create") return Boolean(trim(String(editor.createName || "")));
+    const normalizedRetryOn = (list) => JSON.stringify((Array.isArray(list) ? list : []).map((item) => trim(item)).filter(Boolean));
+    if (normalizedRetryOn(editor.retryOn) !== normalizedRetryOn(editor.initialRetryOn)) return true;
+    if (Number.parseInt(String(editor.retryCount ?? 0), 10) !== Number.parseInt(String(editor.initialRetryCount ?? 0), 10)) return true;
+    if (!singleApiKeyMaxConcurrencyEquals(
+      editor.singleApiKeyMaxConcurrency,
+      editor.initialSingleApiKeyMaxConcurrency ?? "",
+    )) return true;
+    const nameInput = document.getElementById("llm-edit-name-input");
+    if (nameInput && trim(nameInput.value || "") !== trim(nameInput.dataset.originalValue || "")) return true;
+    return false;
+  }
+
+  function syncLlmEditorDirtyAffordance() {
+    const shell = U.llmEditorShell;
+    if (!shell) return;
+    const dirty = llmEditorDirty();
+    shell.querySelectorAll("[data-llm-action]").forEach((node) => {
+      const action = node.dataset.llmAction;
+      if (action !== "save-detail" && action !== "save-create") return;
+      node.classList.toggle("is-dirty", dirty);
+    });
+  }
+
   async function handleDetailSave() {
     const state = llmState();
     const binding = currentBinding();
@@ -1925,6 +1981,15 @@
       renderHint();
     });
     U.llmEditorBackdrop?.addEventListener("click", closeEditor);
+    // 确认键的重点色：任何一格改动都当场重判，不等面板重绘（重绘会把光标从格子里踢出去）。
+    // 用微任务而不是靠注册顺序：各字段的 input 处理器要先把格子里的值搬进 state，
+    // 早于它们读会拿到旧值——实盘上「把窗口值改回原数、颜色却不熄」就是这么来的。
+    const noteEditorFieldEdited = () => queueMicrotask(() => {
+      syncBindingInputs();
+      syncLlmEditorDirtyAffordance();
+    });
+    U.llmEditorShell?.addEventListener("input", noteEditorFieldEdited);
+    U.llmEditorShell?.addEventListener("change", noteEditorFieldEdited);
     U.llmEditorShell?.addEventListener("change", (event) => {
       if (event.target?.id === "llm-provider-select") void handleProviderChange();
       if (event.target?.id === "llm-binding-reasoning-effort") handleBindingReasoningInput();
@@ -2067,6 +2132,20 @@
   window.startCreateModel = function startCreateModel() { void openCreateModal(); };
   window.clearModelSelection = closeEditor;
   window.loadModels = async function loadModels() { await loadAll(); };
+  // app 侧的保存车道（组弹窗的确定）拿到的是整份 catalog 载荷。这里把它并进 llm 自己那份
+  // 视图：projectRoutes 会用 state.loadBalanceGroups 覆盖 S.modelCatalog，不 adopt 的话
+  // 下一次 renderAll 就把刚落盘的组冲回旧值。
+  window.adoptLlmModelCatalog = function adoptLlmModelCatalog(payload) {
+    const state = llmState();
+    state.routes = normalizeAllModelRoles(llmRouteChains({
+      routes: payload?.roles || payload?.routes || {},
+      route_entries: payload?.route_entries || payload?.routeEntries || {},
+    }));
+    state.loadBalanceGroups = copyGroupMap(payload?.loadBalanceGroups || payload?.load_balance_groups || {});
+    state.roleIterations = normalizeRoleIterations(payload?.roleIterations || payload?.role_iterations || DEFAULT_ROLE_ITERATIONS());
+    state.roleConcurrency = normalizeRoleConcurrency(payload?.roleConcurrency || payload?.role_concurrency || DEFAULT_ROLE_CONCURRENCY());
+    projectRoutes();
+  };
   window.__llmTestHooks = {
     llmRouteChains,
     llmState,
@@ -2085,6 +2164,8 @@
     normalizeBindingNameText,
     withThinkingOutputParameterDefaults,
     handleBindingJsonEditorInput,
+    llmEditorDirty,
+    syncLlmEditorDirtyAffordance,
   };
   window.handleModelRoleEditorAction = async function handleModelRoleEditorAction() {
     if (!S.modelCatalog.rolesDirty) return;
