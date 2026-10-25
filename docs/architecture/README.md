@@ -92,7 +92,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 某条 `send_message` 大面积拒收、或某个数组参数在某颗上游上总是"对不到节点" → 先分档位（`target_not_in_task` 改地址 / `target_list_unparsed` 改形状），再看工具行的 `arguments_coerced` 数这跳有没有被读侧归一剥过；机制见 `tool-hydration-and-callable-chain.md`「参数错误与状态分类」与 `main-task-runtime.md`「信箱投递、重激活与上行传播」
 - 第三方桥接应用接入（/api/v1 鉴权、外部会话、事件流、主动推送不到达）→ `external-agent-api.md`「常见排障入口」
 - 外部 agent 看不见全部会话、或要把某个 token 的可见范围收回去 → `external-agent-api.md`「启用与鉴权」的跨桥作用域一档
-- 会话转录/Web UI 有回复但渠道端（QQ 等）收不到、回合跑坏了渠道端静默、渠道「能收不能发」、重启后旧提醒补投或重复 → `external-agent-api.md`「回合契约」终态不变量 +「出站路由（主动推送）」+「持久 outbox」+「内置官方 QQ 适配器」
+- 会话转录/Web UI 有回复但渠道端（QQ 等）收不到、群里 @ 了没回复而单聊正常、回合跑坏了渠道端静默、渠道「能收不能发」、重启后旧提醒补投或重复 → `external-agent-api.md`「回合契约」终态不变量 +「出站路由（主动推送）」+「持久 outbox」+「内置官方 QQ 适配器」+「回复形状与主动消息权限」
 - 渠道端只收到文件签名链接、模型回复里引用的图片/文件没有作为媒体消息送达 → `external-agent-api.md`「事件流」出站附件契约 +「内置官方 QQ 适配器」
 - 桥接端 `reply.final` 的 `usage` 缺失或数值不像本轮 → `external-agent-api.md`「事件流」（usage 随 `message_end` 由发出侧带出，relay 只透传）+ `web-and-admin.md`「Per-Turn Token Usage Contract」
 - 渠道会话在网页目录里删了还在、删过的卡片对方再发消息也不回来、清过历史的行仍显示可发消息、或注销身份被拒（`outbox_pending` / `scheduled_target`）→ `web-and-admin.md`「Channel Session Clear Contract」+ `external-agent-api.md`「会话注册表与 key 命名空间」

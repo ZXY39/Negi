@@ -1394,7 +1394,11 @@ async def test_pump_falls_back_to_url_upload_when_file_data_rejected(
 
 @pytest.mark.asyncio
 async def test_pump_maps_attachment_mime_to_platform_file_type(monkeypatch: pytest.MonkeyPatch) -> None:
-    """mime → file_type 映射：图片 1、mp4 2、语音 3、其余（文档）4；群聊走群接口。"""
+    """mime → file_type 映射：图片 1、mp4 2、语音 3、其余（文档）4；群聊走群接口。
+
+    群聊这一轮的三发都带被动回复参数，seq 按实际发出顺序递增（两枚附件各占一发，
+    正文排在其后）——同一个 msg_id 上重复 msg_seq 会被平台拒。
+    """
     records: list[httpx.Request] = []
     group_files_url = "https://api.sgroup.qq.com/v2/groups/g1/files"
     media = _media_transport(
@@ -1431,13 +1435,138 @@ async def test_pump_maps_attachment_mime_to_platform_file_type(monkeypatch: pyte
         assert client.api.calls == [
             (
                 "post_group_message",
-                {"group_openid": "g1", "msg_type": 7, "media": {"file_info": "file-info-fd"}},
+                {
+                    "group_openid": "g1",
+                    "msg_type": 7,
+                    "media": {"file_info": "file-info-fd"},
+                    "msg_id": "m9",
+                    "msg_seq": 1,
+                },
             ),
             (
                 "post_group_message",
-                {"group_openid": "g1", "msg_type": 7, "media": {"file_info": "file-info-fd"}},
+                {
+                    "group_openid": "g1",
+                    "msg_type": 7,
+                    "media": {"file_info": "file-info-fd"},
+                    "msg_id": "m9",
+                    "msg_seq": 2,
+                },
             ),
-            ("post_group_message", {"group_openid": "g1", "content": "好了", "msg_type": 0}),
+            (
+                "post_group_message",
+                {
+                    "group_openid": "g1",
+                    "content": "好了",
+                    "msg_type": 0,
+                    "msg_id": "m9",
+                    "msg_seq": 3,
+                },
+            ),
+        ]
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+def _group_message(content: str = "在吗", message_id: str = "gm1") -> SimpleNamespace:
+    return SimpleNamespace(group_openid="g1", content=content, id=message_id, attachments=[])
+
+
+@pytest.mark.asyncio
+async def test_group_reply_replies_to_the_inbound_message_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """群里 @机器人后的回复带 msg_id/msg_seq 走被动回复道。不带它按平台规则算**主动
+    消息**，而群目标没有这项权限：实盘每一次 POST 被判 400 / code 40034105「主动消息
+    失败, 无权限」，5 次投递预算打穿后按 undeliverable 销账，形态就是"网页有完整回复、
+    群里什么都没有"。"""
+    task, client = await _start_bridge(monkeypatch, _media_transport({}))
+    try:
+        await client.on_group_at_message_create(_group_message(message_id="gm1"))
+        ext = FakeExternalApiClient.instances[-1]
+        await _wait_until(lambda: ext.sent)
+        await ext.events.put({"type": "reply.final", "seq": 1, "text": "在。"})
+        await _wait_until(lambda: client.api.calls)
+        assert client.api.calls == [
+            (
+                "post_group_message",
+                {
+                    "group_openid": "g1",
+                    "content": "在。",
+                    "msg_type": 0,
+                    "msg_id": "gm1",
+                    "msg_seq": 1,
+                },
+            )
+        ]
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_group_reply_falls_back_to_active_shape_outside_the_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """被动窗口过了就不再带 msg_id：落回主动形状（那是唯一还能试的形状），而不是拿一
+    个必然被拒的窗口参数占住投递预算。"""
+    monkeypatch.setattr(bridge_module, "_PASSIVE_REPLY_WINDOW_SECONDS", 0.0)
+    task, client = await _start_bridge(monkeypatch, _media_transport({}))
+    try:
+        await client.on_group_at_message_create(_group_message(message_id="gm2"))
+        ext = FakeExternalApiClient.instances[-1]
+        await _wait_until(lambda: ext.sent)
+        await ext.events.put({"type": "reply.final", "seq": 1, "text": "迟到的回答"})
+        await _wait_until(lambda: client.api.calls)
+        kwargs = client.api.calls[0][1]
+        assert kwargs == {"group_openid": "g1", "content": "迟到的回答", "msg_type": 0}
+        assert "msg_id" not in kwargs
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_group_reply_stops_using_passive_params_after_five_sends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """同一个 msg_id 最多回 5 次，且相同 msg_id+msg_seq 重复发送会失败——所以每一发换
+    新 seq，回满 5 次后不再用被动参数。"""
+    task, client = await _start_bridge(monkeypatch, _media_transport({}))
+    try:
+        await client.on_group_at_message_create(_group_message(message_id="gm3"))
+        ext = FakeExternalApiClient.instances[-1]
+        await _wait_until(lambda: ext.sent)
+        for index in range(1, 7):
+            await ext.events.put({"type": "reply.final", "seq": index, "text": f"r{index}"})
+        await _wait_until(lambda: len(client.api.calls) >= 6)
+
+        assert [call[1]["msg_seq"] for call in client.api.calls[:5]] == [1, 2, 3, 4, 5]
+        assert all(call[1]["msg_id"] == "gm3" for call in client.api.calls[:5])
+        assert "msg_id" not in client.api.calls[5][1]
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_c2c_reply_keeps_the_active_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    """单聊不换道是决定，不是遗漏：同一主动形状实测 66/66 发得出去，所以被动参数只给群
+    聊这条本来就不通的车道，不给一条能用的车道换风险。"""
+    task, client = await _start_bridge(monkeypatch, _media_transport({}))
+    try:
+        await client.on_c2c_message_create(_c2c_message("在吗", [], message_id="cm1"))
+        ext = FakeExternalApiClient.instances[-1]
+        await _wait_until(lambda: ext.sent)
+        await ext.events.put({"type": "reply.final", "seq": 1, "text": "在。"})
+        await _wait_until(lambda: client.api.calls)
+        assert client.api.calls == [
+            ("post_c2c_message", {"openid": "u9", "content": "在。", "msg_type": 0})
         ]
     finally:
         task.cancel()

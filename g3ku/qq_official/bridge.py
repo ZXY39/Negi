@@ -169,6 +169,18 @@ _PUMP_RECONNECT_MAX_BACKOFF_SECONDS = 60.0
 # 同一条上，达到上限记 error 后放弃并继续消费后续事件。
 _PUMP_DELIVER_MAX_ATTEMPTS = 5
 
+# 群聊回复走平台的被动回复车道：入站 @消息的消息 id 在窗口内可以回它几发。不带
+# ``msg_id`` 的形状按平台规则算**主动消息**，需要单独具备的「主动消息」权限——实盘群
+# 目标没有它：每一次 POST 都被判 400 / code 40034105「主动消息失败, 无权限」，5 次投递
+# 预算打穿后按 ``undeliverable`` 销账，形态是"网页有完整回复、群里什么都没有"（同形状
+# 在单聊实测 66/66 发得出去，所以被动参数只给群聊这一条已经不通的车道）。两档上限都
+# 抄平台口径：窗口 5 分钟、同一 msg_id 最多回 5 次，且相同 msg_id+msg_seq 重复发送会
+# 失败——所以每一发换新 seq，超窗或回满就落回主动形状，而不是拿必然被拒的参数占住预算。
+_PASSIVE_REPLY_WINDOW_SECONDS = 5 * 60.0
+_PASSIVE_REPLY_MAX_PER_MESSAGE = 5
+# 被动引用按目标数增长（一个群一条），LRU 兜住长期不再回复的键。
+_PASSIVE_REF_TARGETS_MAX = 256
+
 # 桥侧周期 pending 对账：GET /outbox/pending 不再是启动一次性动作。服务端重启
 # 落在 cron 触发与产出之间时，启动预热会扑空（账本尚空），滞留推送稍后才入账
 # ——2026-09-14 23:00 定时日报正是这样丢掉的。周期对账为「有 pending 记录且无
@@ -224,6 +236,8 @@ class _BridgeDeliveryState:
     acked_outbox_ids: OrderedDict[str, None] = field(default_factory=OrderedDict)
     outbox_attempts: OrderedDict[str, int] = field(default_factory=OrderedDict)
     unconfirmed_outbox_ids: OrderedDict[str, None] = field(default_factory=OrderedDict)
+    # external_key -> [入站消息 id, 下一个 msg_seq, 被动窗口截止（monotonic 秒）]
+    passive_refs: OrderedDict[str, list] = field(default_factory=OrderedDict)
 
 
 _DELIVERY_STATES: dict[str, _BridgeDeliveryState] = {}
@@ -243,6 +257,43 @@ def reset_bridge_delivery_state() -> None:
     """Test hook: 丢掉所有号的账本（进程级状态需要这条隔离缝，同
     ``external_events.reset_session_event_hubs``）。"""
     _DELIVERY_STATES.clear()
+
+
+def _note_passive_ref(state: _BridgeDeliveryState, external_key: str, event_id: Any) -> None:
+    """记下入站消息 id——它是这一轮所有回复的被动窗口凭据。
+
+    消息 id 此前只用来拼幂等键，用完就丢，于是每一发回复都只能以主动消息形状发出。
+    """
+    msg_id = str(event_id or "").strip()
+    if not msg_id:
+        return
+    _lru_remember(
+        state.passive_refs,
+        external_key,
+        [msg_id, 1, time.monotonic() + _PASSIVE_REPLY_WINDOW_SECONDS],
+        limit=_PASSIVE_REF_TARGETS_MAX,
+    )
+
+
+def _passive_reply_kwargs(
+    state: _BridgeDeliveryState, kind: str, external_key: str
+) -> dict[str, Any]:
+    """取这一发的被动回复参数；不给就是主动形状（平台按主动消息判，要权限）。
+
+    每发换新 ``msg_seq``：相同的 msg_id+msg_seq 重复发送会被平台拒掉，而投递失败后
+    pump 的重放正是"同一 msg_id 的下一发"。窗口外或回满上限时把这条引用摘掉。
+    """
+    if kind != "group":
+        return {}
+    ref = state.passive_refs.get(external_key)
+    if not isinstance(ref, list):
+        return {}
+    msg_id, next_seq, deadline = ref
+    if time.monotonic() >= float(deadline) or int(next_seq) > _PASSIVE_REPLY_MAX_PER_MESSAGE:
+        state.passive_refs.pop(external_key, None)
+        return {}
+    ref[1] = int(next_seq) + 1
+    return {"msg_id": str(msg_id), "msg_seq": int(next_seq)}
 
 
 def _is_botpy_task(task: asyncio.Task) -> bool:
@@ -518,6 +569,9 @@ async def run_qq_official_bridge(
         if session_id is None:
             session_id = await client.ensure_session(external_key)
             sessions[external_key] = session_id
+        # 先记下这条入站消息的 id，回复它的那几发才拿得到被动窗口参数。回合回复通常
+        # 在入站后几秒落地（实盘 9 秒），远在窗口之内；不记就只能走主动消息形状。
+        _note_passive_ref(state, external_key, event_id)
         # 每次入站都幂等校验 pump 存活：pump 意外终结（如 shutdown 竞态取消）时
         # 靠下一条用户消息自愈，而不是让该会话的出站永久无人消费。
         _spawn_pump(session_id, external_key)
@@ -663,7 +717,7 @@ async def run_qq_official_bridge(
         return str(media.get("file_info") or "").strip() if isinstance(media, dict) else ""
 
     async def _deliver_attachment(
-        kind: str, target: dict[str, str], attachment: dict[str, Any]
+        kind: str, target: dict[str, str], external_key: str, attachment: dict[str, Any]
     ) -> bool:
         """Send one attachment as a real QQ file/media message; False means the
         caller must degrade it to a signed-URL text line.
@@ -700,6 +754,7 @@ async def run_qq_official_bridge(
                         group_openid=target["group_openid"],
                         msg_type=7,
                         media={"file_info": file_info},
+                        **_passive_reply_kwargs(state, kind, external_key),
                     )
                 else:
                     result = await bridge_api.post_c2c_message(
@@ -756,15 +811,22 @@ async def run_qq_official_bridge(
         for attachment in list(attachments or []):
             if not isinstance(attachment, dict):
                 continue
-            if await _deliver_attachment(kind, target, attachment):
+            if await _deliver_attachment(kind, target, external_key, attachment):
                 continue
             name = str(attachment.get("name") or "attachment")
             fallback_lines.append(f"📎 {name}: {_absolute_media_url(str(attachment.get('url') or ''))}")
         body = "\n".join(part for part in [str(text or "").strip(), *fallback_lines] if part).strip()
         if not body:
             return
+        passive: dict[str, Any] = {}
         if kind == "group":
-            result = await bridge_api.post_group_message(group_openid=target["group_openid"], content=body, msg_type=0)
+            passive = _passive_reply_kwargs(state, kind, external_key)
+            result = await bridge_api.post_group_message(
+                group_openid=target["group_openid"],
+                content=body,
+                msg_type=0,
+                **passive,
+            )
         elif kind == "c2c":
             result = await bridge_api.post_c2c_message(openid=target["user_openid"], content=body, msg_type=0)
         elif kind == "guild":
@@ -783,12 +845,15 @@ async def run_qq_official_bridge(
         if isinstance(result, dict):
             message_id = str(result.get("id") or result.get("message_id") or "").strip()
         # 送达回执：排查"发没发出去"时以这行为准（published to hub 不代表送达）。
+        # passive 这一栏分形状：`<消息id>#<seq>` 是被动回复，`-` 是主动消息形状——
+        # 群目标被平台按主动消息拒投（40034105）时，只有这行能说明那一发是出了窗口。
         logger.info(
-            "qq-official delivered {} message to {} (id={}, attachments={})",
+            "qq-official delivered {} message to {} (id={}, attachments={}, passive={})",
             kind,
             external_key,
             message_id or "-",
             len([item for item in list(attachments or []) if isinstance(item, dict)]),
+            f"{passive['msg_id']}#{passive['msg_seq']}" if passive else "-",
         )
 
     async def _pump(session_id: str, external_key: str) -> None:
