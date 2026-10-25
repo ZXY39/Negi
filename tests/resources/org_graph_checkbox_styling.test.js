@@ -11,6 +11,8 @@ const fs = require("node:fs");
 // 都换成了通用组件，样式面只剩一套自绘盒子可讲。
 
 // 勾选框可能出现在任何前端脚本里；按目录遍历，新增模块不需要再登记一次。
+// 布局对比稿（model-layout-*）不在装载清单里、永远不会被渲染，跳过它们，
+// 否则每份草稿都逼台账登记一颗界面上不存在的勾选框。
 const FRONTEND_DIR = "g3ku/web/frontend";
 function collectFrontendFiles(dir) {
     return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
@@ -18,7 +20,8 @@ function collectFrontendFiles(dir) {
         if (entry.isDirectory()) {
             return entry.name === "vendor" ? [] : collectFrontendFiles(path);
         }
-        return /\.(js|html)$/.test(entry.name) ? [path] : [];
+        if (!/\.(js|html)$/.test(entry.name)) return [];
+        return /^model-layout-/.test(entry.name) ? [] : [path];
     });
 }
 const FILES = collectFrontendFiles(FRONTEND_DIR);
@@ -45,7 +48,6 @@ const LEDGER = [
     { token: "class=\"skill-role\"", tier: "hidden" },
     { token: "tool-role tool-role-input", tier: "hidden" },
     { token: "name=\"enabled\"", tier: "hidden" },
-    { token: "id=\"context-refresh-enabled\"", tier: "ui" },
     { token: "td-expand-all-input", tier: "ui" },
     { token: "ceo-risk-tool-input", tier: "ui" },
 ];

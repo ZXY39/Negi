@@ -615,8 +615,6 @@
                         <input id="model-iterations-value-input" class="spinless-number-input model-iterations-toolbar-input" type="number" min="-1" step="1" inputmode="numeric" value="-1" title="-1 代表不限制" aria-label="最大轮数" hidden>
                         <button id="model-roles-save-btn" class="toolbar-btn success" type="button" hidden>保存</button>
                         <button id="model-roles-cancel-btn" class="toolbar-btn ghost" type="button" hidden>取消修改</button>
-                        <button id="model-context-refresh-btn" class="toolbar-btn ghost" type="button"
-                            aria-haspopup="dialog" aria-controls="context-refresh-dialog">上下文信息更新时间</button>
                     </div>
                     <div id="model-role-limits-bar" class="model-role-limits-bar" hidden></div>
                 </header>
@@ -676,37 +674,6 @@
                         <div class="confirm-actions">
                             <button id="model-group-cancel-btn" class="toolbar-btn ghost" type="button">取消</button>
                             <button id="model-group-confirm-btn" class="toolbar-btn success" type="button">确定</button>
-                        </div>
-                    </section>
-                </div>
-
-                <div id="context-refresh-backdrop" class="confirm-backdrop" hidden>
-                    <section id="context-refresh-dialog" class="confirm-dialog context-refresh-dialog" role="dialog"
-                        aria-modal="true" aria-labelledby="context-refresh-title" tabindex="-1">
-                        <div class="confirm-header">
-                            <h2 id="context-refresh-title">长时间未活跃后刷新上下文信息</h2>
-                            <button id="context-refresh-close-btn" class="icon-btn dialog-close-btn" type="button"
-                                aria-label="关闭上下文刷新设置">
-                                <i data-lucide="x" aria-hidden="true"></i>
-                            </button>
-                        </div>
-                        <div class="project-settings-body context-refresh-body">
-                            <p class="subtitle">距上次请求超过设定时间后，下一次请求前先把工具声明与长期记忆刷到最新。</p>
-                            <label class="ui-checkbox-row" for="context-refresh-enabled">
-                                <input id="context-refresh-enabled" type="checkbox" class="ui-checkbox-input" />
-                                <span class="ui-checkbox-box" aria-hidden="true"></span>
-                                <span>启用</span>
-                            </label>
-                            <label class="memory-browser-edit-field" for="context-refresh-minutes">
-                                <span>刷新时间（分钟）</span>
-                                <input id="context-refresh-minutes" class="spinless-number-input" type="number"
-                                    min="1" step="1" inputmode="numeric" value="120" />
-                            </label>
-                            <p id="context-refresh-error" class="model-group-dialog-error" role="alert" hidden></p>
-                        </div>
-                        <div class="confirm-actions">
-                            <button id="context-refresh-cancel-btn" class="toolbar-btn ghost" type="button">取消</button>
-                            <button id="context-refresh-apply-btn" class="toolbar-btn success" type="button">应用</button>
                         </div>
                     </section>
                 </div>

@@ -91,14 +91,6 @@
 
 `stt` 的写侧两个判断（在豁免前缀里、且每个字段都必须进白名单，否则 `negi stt prepare --enable` 落不了盘）见「写侧：`save_config` 整写与字段白名单」。引擎形态、就绪判定与默认值的实测依据详见 `speech-to-text.md`。
 
-### `context_refresh`
-
-`context_refresh` 是**遗留配置段**（`enabled` 默认 `true`、`idleMinutes` 默认 `120`、`ge=1`），只为存量配置文件与管理接口兼容而保留。运行时把空闲时长排除在重印边界之外：钉住的头部只在压缩/手动压缩时重印，两次重印之间的变化由一次性 `[RUNTIME_NOTICE]` 消息投递（见 `runtime-overview.md`「Runtime Contract Lane」）。
-
-读法只有一个入口：`get_runtime_config()` 按 `config.json` 的 mtime 重载，前门与节点都在各自的发送点现读，所以改完不需要重启、也不需要给 worker 单独发信令。判据读不到配置时**按不刷新处理**（回落到钉住行为），因为刷新是收紧缓存代价的动作，读失败把它打开会让每一跳都变成重印。
-
-`contextRefresh` 的写侧判断（在豁免前缀里、且必须进白名单，否则网页上改了分钟数也永不生效）见「写侧：`save_config` 整写与字段白名单」。
-
 ## 3. 配置加载时做了什么
 
 `load_config()` 不是简单读 JSON，它会做很多迁移和约束检查：
@@ -123,7 +115,7 @@
 
 `agents.nodeParallelism` 里的机器压力读数分档是 `safe < warn < critical`，三条轴（cpu、memory、disk busy）同形，`tool_pressure_monitor` 按这个顺序把样本分成 `normal / warn / critical`，并要求连续 `safe` 采样才算机器侧恢复。写反的档位不会报错，只会静默失效：`machine_safe` 判的是 `读数 <= safe`，一旦 `safe` 高于 `warn`/`critical`，warn 与 critical 区间照样读成"已恢复"，机器侧那半条降档闸门就永远不落地。默认值由 `tests/resources/test_task_web_worker_runtime.py` 的分档用例钉住，改这三组数字要一起过它。
 
-「运行时字段显式性校验」要求白名单里每个叶子都在 `config.json` 出现，缺一个就拒绝加载。豁免前缀（`providers`、`mainRuntime`、`externalApi`、`qqBot`、`cron`、`stt`、`contextRefresh`、`agents.nodeParallelism`、`agents.toolDefaultTimeoutSeconds`、`updateCheck`、`models.loadBalanceGroups`）承担两类情况：存量文件本来没有这些节，以及取值可能来自 `G3KU_*` 环境变量而不是配置文件——被豁免的节没写就是不用，回落到 schema 默认。新增字段时两个判断都要重做：进不进白名单（决定它会不会被保存抹掉），要不要进豁免前缀（决定老文件还能不能加载）。
+「运行时字段显式性校验」要求白名单里每个叶子都在 `config.json` 出现，缺一个就拒绝加载。豁免前缀（`providers`、`mainRuntime`、`externalApi`、`qqBot`、`cron`、`stt`、`agents.nodeParallelism`、`agents.toolDefaultTimeoutSeconds`、`updateCheck`、`models.loadBalanceGroups`）承担两类情况：存量文件本来没有这些节，以及取值可能来自 `G3KU_*` 环境变量而不是配置文件——被豁免的节没写就是不用，回落到 schema 默认。新增字段时两个判断都要重做：进不进白名单（决定它会不会被保存抹掉），要不要进豁免前缀（决定老文件还能不能加载）。摘掉一个配置段时同样有两步：从 schema 与白名单里删掉它，并在 `_migrate_config()` 里 pop 掉它的磁盘拼写——根配置是 `extra="forbid"`，存量 config.json 里残留的那一节会让 `load_config()` 当场拒绝加载。
 
 ## 4. 配置热刷新
 

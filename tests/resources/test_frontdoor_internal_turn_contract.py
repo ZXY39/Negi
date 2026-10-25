@@ -2,8 +2,8 @@
 
 复核结论落成断言：
 
-1. **车道切换不重印**：`_frontdoor_bundle_recommit_boundary` 只看压缩 / 手动压缩标记 /
-   空闲边界，内部轮（`heartbeat_internal` / `cron_internal`）不是重印理由——外部轮钉住的
+1. **车道切换不重印**：`_frontdoor_bundle_recommit_boundary` 只看压缩 / 手动压缩标记，
+   内部轮（`heartbeat_internal` / `cron_internal`）不是重印理由——外部轮钉住的
    `tools[]` 与 skill 全量名单跨车道共享，一次车道切换不得顶掉身后前缀。
 2. **收窄落在执行侧**：内部轮 state 里的 `provider_tool_names` 保持冻结声明面不动，而
    `_frontdoor_dispatch_tool_names`（派发/准入的名字源）按当轮治理可见集收窄——
@@ -24,11 +24,9 @@ from g3ku.runtime.frontdoor.tool_contract import (
     skill_roster_epoch_for,
 )
 from g3ku.runtime.session_agent import (
-    FRONTDOOR_LAST_SEND_AT_ATTR,
     PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR,
 )
 from g3ku.runtime.skill_roster_notice import clear_skill_roster_notice_stores
-from main.protocol import now_iso
 from main.service.runtime_service import MainRuntimeService
 
 
@@ -49,7 +47,6 @@ def test_lane_switch_is_not_a_recommit_boundary() -> None:
     """心跳/定时内部轮不是重印理由：epoch 不动，冻结的头部与 tools[] 继续复用。"""
     ops = _ops()
     session = SimpleNamespace()
-    setattr(session, FRONTDOOR_LAST_SEND_AT_ATTR, now_iso())
     session_key = "web:shared"
     epoch_before = skill_roster_epoch_for(session, session_key=session_key)
 
@@ -123,7 +120,6 @@ def test_stale_compression_reason_is_not_a_recommit_boundary() -> None:
     ops = _ops()
     session = SimpleNamespace()
     session_key = "web:shared"
-    setattr(session, FRONTDOOR_LAST_SEND_AT_ATTR, now_iso())
     setattr(session, "_frontdoor_history_shrink_reason", "token_compression")
     epoch_before = skill_roster_epoch_for(session, session_key=session_key)
     state = {"session_key": session_key}
@@ -156,7 +152,6 @@ def test_inline_compression_raises_the_one_shot_recommit_marker() -> None:
     ops = _ops()
     session = SimpleNamespace()
     session_key = "web:shared"
-    setattr(session, FRONTDOOR_LAST_SEND_AT_ATTR, now_iso())
     state = {"session_key": session_key}
     setattr(session, PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR, True)
 

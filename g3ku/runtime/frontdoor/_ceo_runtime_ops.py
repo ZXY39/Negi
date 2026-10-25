@@ -78,7 +78,6 @@ from g3ku.runtime.frontdoor.turns import (
 from g3ku.runtime.message_token_estimation import estimate_message_tokens
 from g3ku.runtime.project_environment import current_project_environment
 from g3ku.runtime.session_agent import (
-    FRONTDOOR_LAST_SEND_AT_ATTR,
     PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR,
 )
 from g3ku.runtime.session_keys import is_channel_session_key
@@ -5054,13 +5053,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if not session_key:
             return {}
         target_session = getattr(getattr(runtime, "context", None), "session", None)
-        # durable 基线唯一前进点也是"活跃"的唯一读数点：空闲刷新边界按它判"多久没发过"。
-        if target_session is not None:
-            setattr(
-                target_session,
-                FRONTDOOR_LAST_SEND_AT_ATTR,
-                str(provider_request_started_at or "").strip() or now_iso(),
-            )
         # 这里是 durable 基线唯一的前进点。
         turn_id = ""
         turn_id_getter = getattr(target_session, "_current_turn_id", None) if target_session is not None else None

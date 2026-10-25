@@ -17021,17 +17021,15 @@ textarea {
     color: var(--ui-on-brand);
 }
 /* 配置窗口的确认键：窗口内的内容一变就填重点色——「点了它就落盘」这件事要在按之前就说出来。
-   判据由 JS 挂 `.is-dirty`（组弹窗、上下文信息更新时间、模型配置编辑面板三处同源）。
+   判据由 JS 挂 `.is-dirty`（组弹窗与模型配置编辑面板两处同源）。
    带 `:not(:disabled)` 是为了「保存中…」那档退回禁用形，不把进行中的键画得还能再点一次。 */
 #model-group-dialog .toolbar-btn.is-dirty:not(:disabled),
-#context-refresh-dialog .toolbar-btn.is-dirty:not(:disabled),
 #llm-editor-shell .toolbar-btn.is-dirty:not(:disabled) {
     border-color: var(--dialog-dirty-accent);
     background: var(--dialog-dirty-accent);
     color: var(--dialog-dirty-accent-text);
 }
 #model-group-dialog .toolbar-btn.is-dirty:not(:disabled):hover,
-#context-refresh-dialog .toolbar-btn.is-dirty:not(:disabled):hover,
 #llm-editor-shell .toolbar-btn.is-dirty:not(:disabled):hover {
     border-color: color-mix(in srgb, var(--dialog-dirty-accent) 88%, var(--dialog-dirty-accent-text));
     background: color-mix(in srgb, var(--dialog-dirty-accent) 88%, var(--dialog-dirty-accent-text));

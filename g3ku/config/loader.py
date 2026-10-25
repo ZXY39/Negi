@@ -661,10 +661,6 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
             "binaryDownloadBaseUrl": cfg.stt.binary_download_base_url,
             "modelDownloadBaseUrl": cfg.stt.model_download_base_url,
         },
-        "contextRefresh": {
-            "enabled": cfg.context_refresh.enabled,
-            "idleMinutes": cfg.context_refresh.idle_minutes,
-        },
     }
 
     # 可选段按"调过才落盘"写入：save_config 是整写而非合并，白名单外的旋钮会在
@@ -706,8 +702,6 @@ def _ensure_runtime_fields_explicit(raw_data: dict[str, Any], cfg: Config) -> No
         ("cron",),
         # 可选能力段：没配就是不用，取值回落到 schema 默认。
         ("stt",),
-        # 空闲刷新边界：存量 config.json 没有这一节也必须能加载，默认值由 schema 承担。
-        ("contextRefresh",),
         # 调过才落盘的可选旋钮：来源可能是 G3KU_* 环境变量而非配置文件，
         # 因此不能反过来要求 config.json 显式带这些键。
         ("agents", "nodeParallelism"),
@@ -1034,4 +1028,9 @@ def _migrate_config(data: dict[str, Any]) -> dict[str, Any]:
     # during apply (they are pruned permanently on the next unlocked save).
     data.pop("chinaBridge", None)
     data.pop("china_bridge", None)
+
+    # 空闲刷新段整体退役：运行层没有任何判据读它，存量文件里的这一节直接丢弃。
+    # 顶层 `extra="forbid"`，不剥这一节会让旧 config.json 当场加载失败。
+    data.pop("contextRefresh", None)
+    data.pop("context_refresh", None)
     return data

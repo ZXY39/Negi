@@ -12,14 +12,6 @@
         return this.put("/api/external-api/settings", payload || {});
     },
 
-    async getContextRefreshSettings() {
-        return this.get("/api/context-refresh/settings");
-    },
-
-    async updateContextRefreshSettings(payload) {
-        return this.put("/api/context-refresh/settings", payload || {});
-    },
-
     async createExternalApiToken(payload) {
         return this.post("/api/external-api/tokens", payload || {});
     },

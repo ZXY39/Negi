@@ -330,16 +330,6 @@ const S = {
             saving: false,
             baseline: { name: "", rounds: "", modelKeys: [] },
         },
-        // 空闲刷新设置：`saved` 是服务端读数，草稿不等它——只有「应用」才写回。
-        contextRefresh: {
-            open: false,
-            enabled: true,
-            idleMinutes: 120,
-            saved: { enabled: true, idleMinutes: 120 },
-            loading: false,
-            saving: false,
-            error: "",
-        },
         defaults: DEFAULT_MODEL_DEFAULTS(),
         loading: false,
         saving: false,
@@ -579,15 +569,6 @@ const U = {
     modelCreate: document.getElementById("model-create-btn"),
     modelRolesCancel: document.getElementById("model-roles-cancel-btn"),
     modelRolesSave: document.getElementById("model-roles-save-btn"),
-    modelContextRefresh: document.getElementById("model-context-refresh-btn"),
-    contextRefreshBackdrop: document.getElementById("context-refresh-backdrop"),
-    contextRefreshDialog: document.getElementById("context-refresh-dialog"),
-    contextRefreshEnabled: document.getElementById("context-refresh-enabled"),
-    contextRefreshMinutes: document.getElementById("context-refresh-minutes"),
-    contextRefreshApply: document.getElementById("context-refresh-apply-btn"),
-    contextRefreshError: document.getElementById("context-refresh-error"),
-    contextRefreshCancel: document.getElementById("context-refresh-cancel-btn"),
-    contextRefreshClose: document.getElementById("context-refresh-close-btn"),
     modelRoleEditors: document.getElementById("model-role-editors"),
     modelRoleLimitsBar: document.getElementById("model-role-limits-bar"),
     modelSearch: document.getElementById("model-search-input"),
@@ -10509,7 +10490,6 @@ function bindModelPage() {
     U.modelCreate?.addEventListener("click", startCreateModel);
     U.modelRolesCancel?.addEventListener("click", cancelModelRoleEditing);
     U.modelRolesSave?.addEventListener("click", () => void handleModelRoleEditorAction());
-    bindContextRefreshDialog();
     U.modelSearch?.addEventListener("input", (e) => {
         S.modelCatalog.search = String(e.target.value || "");
         renderModelList();

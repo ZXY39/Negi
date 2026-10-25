@@ -1191,18 +1191,6 @@ class UpdateCheckConfig(Base):
     interval_hours: float = Field(default=5.0, ge=0.1, le=24.0)
 
 
-class ContextRefreshConfig(Base):
-    """Legacy idle-refresh settings (kept for config compatibility).
-
-    Idle time is no longer a reprint boundary: pinned heads reprint only at compaction,
-    and changes between reprints are delivered as one-time `[RUNTIME_NOTICE]` messages.
-    The section remains so existing config files and the admin API keep loading.
-    """
-
-    enabled: bool = True
-    idle_minutes: int = Field(default=120, ge=1)
-
-
 class Config(BaseSettings):
     """Root configuration for g3ku."""
 
@@ -1218,7 +1206,6 @@ class Config(BaseSettings):
     cron: CronConfig = Field(default_factory=CronConfig)
     stt: SttConfig = Field(default_factory=SttConfig)
     update_check: UpdateCheckConfig = Field(default_factory=UpdateCheckConfig)
-    context_refresh: ContextRefreshConfig = Field(default_factory=ContextRefreshConfig)
 
     @model_validator(mode="after")
     def _validate_model_runtime_contract(self) -> "Config":
