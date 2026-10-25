@@ -13684,6 +13684,7 @@ textarea {
 
 .external-token-form-actions {
     display: flex;
+    align-items: center;
     justify-content: flex-end;
     gap: var(--space-2);
 }
@@ -14680,7 +14681,7 @@ textarea {
     height: 32px;
     min-height: 32px;
     padding: 0 10px;
-    font-size: 12px;
+    font-size: 13px;
 }
 
 :root .toolbar-btn.danger {
