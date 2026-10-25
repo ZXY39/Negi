@@ -178,7 +178,7 @@ def test_llm_detail_editor_renders_image_multimodal_before_concurrency_button_in
           kebabIndex: html.indexOf("toggle-concurrency-test"),
           modelIdIndex: html.indexOf("llm-binding-default-model"),
           fetchIndex: html.indexOf("获取模型列表"),
-          contextIndex: html.indexOf("最大上下文TOKEN"),
+          contextIndex: html.indexOf("上下文窗口Token"),
           detailGridIndex: html.indexOf("llm-form-grid llm-form-grid--binding-detail-policy"),
         }));
         """

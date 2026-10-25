@@ -185,7 +185,7 @@
       return parts.map((item) => {
         const parsed = Number.parseInt(item, 10);
         if (!Number.isInteger(parsed) || parsed < 0) {
-          throw new Error("单 API key 最大并发数列表必须是大于等于 0 的整数");
+          throw new Error("最大并发数列表必须是大于等于 0 的整数");
         }
         return parsed;
       });
@@ -202,10 +202,10 @@
     if (!Array.isArray(parsed)) return parsed;
     const apiKeyCount = apiKeyCountFromValue(apiKeyValue);
     if (parsed.length !== apiKeyCount) {
-      throw new Error(`单 API key 最大并发数数量必须与 API key 数量一致，当前共有 ${apiKeyCount} 个 key`);
+      throw new Error(`最大并发数数量必须与 API key 数量一致，当前共有 ${apiKeyCount} 个 key`);
     }
     if (apiKeyCount > 0 && parsed.every((item) => item === 0)) {
-      throw new Error("单 API key 最大并发数至少保留一个大于 0 的值");
+      throw new Error("最大并发数至少保留一个大于 0 的值");
     }
     return parsed;
   }
@@ -910,7 +910,7 @@
       throw new Error("重试次数必须是不小于 0 的整数");
     }
     if (!Number.isInteger(contextWindowTokens) || contextWindowTokens <= 25000) {
-      throw new Error("最大上下文TOKEN必须是大于 25000 的整数");
+      throw new Error("上下文窗口Token必须是大于 25000 的整数");
     }
     if (
       singleApiKeyMaxConcurrency !== null &&
@@ -1011,7 +1011,6 @@
           </label>
           ${renderConcurrencyField(editor)}
         </div>
-        ${renderContextWindowField(editor)}
         ${renderThinkingOutputFields(editor)}`;
     }
     return `
@@ -1050,7 +1049,7 @@
   function renderContextWindowField(editor) {
     return `
         <label class="resource-field">
-          <span class="resource-field-label">最大上下文TOKEN *</span>
+          <span class="resource-field-label">上下文窗口Token *</span>
           <input id="llm-binding-context-window-tokens" class="resource-search" type="number" min="25001" step="1" inputmode="numeric" value="${escv(String(editor.contextWindowTokens || ""))}" placeholder="必须大于 25000">
         </label>`;
   }
@@ -1112,7 +1111,7 @@
           <span class="resource-field-label">Apikey *</span>
           <input id="llm-binding-api-key" class="resource-search" type="text" value="${escv(state.editor.apiKey)}" placeholder="支持用逗号分隔填写多个 key">
         </label>
-        ${isCreate ? renderFetchModelListField() : ""}
+        ${isCreate ? renderContextWindowField(state.editor) : ""}
       </div>
       ${isCreate ? "" : `
       <div class="llm-form-grid llm-form-grid--binding-header">
@@ -1126,7 +1125,7 @@
   function renderConcurrencyField(editor) {
     return `
           <label class="resource-field">
-            <span class="resource-field-label">单 API key 最大并发数</span>
+            <span class="resource-field-label">最大并发数</span>
             <div class="llm-concurrency-input-row">
               <input id="llm-binding-single-api-key-max-concurrency" class="resource-search" type="text" value="${escv(String(editor.singleApiKeyMaxConcurrency ?? ""))}" placeholder="留空表示不限制；多 key 可写 3,5,7">
               <button type="button" class="icon-btn llm-kebab-btn" data-llm-action="toggle-concurrency-test" title="并发测试" aria-label="显示并发测试"><i data-lucide="more-horizontal"></i></button>
@@ -1225,6 +1224,7 @@
               <div class="llm-form-grid llm-form-grid--binding-header">
                 ${renderProviderField()}
                 ${renderImageMultimodalField({ layout: "header" })}
+                ${renderFetchModelListField()}
               </div>
               ${renderConnectionFields()}
               ${renderBindingPolicyFields()}

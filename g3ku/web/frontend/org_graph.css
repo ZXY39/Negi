@@ -7599,6 +7599,11 @@ textarea {
     justify-content: flex-end;
 }
 
+/* 这一格不印标题；文字留着占一行高，让按钮与同行控件对齐（同 协议 / 多模态 的隐藏标签）。 */
+.llm-model-list-field .resource-field-label {
+    visibility: hidden;
+}
+
 .llm-fetch-btn {
     width: 100%;
     min-height: 46px;

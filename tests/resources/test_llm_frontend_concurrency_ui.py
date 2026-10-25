@@ -650,6 +650,24 @@ def test_llm_create_editor_renders_new_connection_and_policy_fields() -> None:
     assert "添加配置" in create_html
     assert "测试连接" in create_html
 
+    # 添加配置档的三列顺序：模型列表按钮填进首行右侧空缺，上下文窗口Token 接在
+    # 请求地址/Apikey 之后成第三列，重试那一行不再被独占整行的字段打断。
+    create_order = [create_html.index(marker) for marker in (
+        "llm-provider-select",
+        "llm-binding-image-multimodal-enabled",
+        "llm-fetch-btn",
+        "llm-binding-base-url",
+        "llm-binding-api-key",
+        "llm-binding-context-window-tokens",
+        "llm-binding-retry-on",
+        "llm-binding-single-api-key-max-concurrency",
+    )]
+    assert create_order == sorted(create_order)
+    assert "最大上下文TOKEN" not in create_html
+    assert "<span class=\"resource-field-label\">上下文窗口Token *</span>" in create_html
+    assert "<span class=\"resource-field-label\">最大并发数</span>" in create_html
+    assert "单 API key 最大并发数" not in create_html
+
     detail_html = str(result["detailHtml"])
     assert "协议" in detail_html
     assert 'id="llm-provider-select"' in detail_html
