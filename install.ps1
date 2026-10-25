@@ -94,13 +94,47 @@ function Get-ProjectPin {
     return $null
 }
 
+function Get-DistributionExcludes {
+    param([string]$Source, [switch]$FromGit)
+    # The exclusion list travels inside the payload (packaging/distribution-excludes.txt),
+    # so the installer never carries a second copy that could drift. -FromGit reads it out
+    # of the fetched commit while the worktree is still empty.
+    $names = @()
+    if ($FromGit) {
+        $saved = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $lines = @(& git -C $Source show 'HEAD:packaging/distribution-excludes.txt' 2>$null)
+            $ok = ($LASTEXITCODE -eq 0)
+        }
+        finally { $ErrorActionPreference = $saved }
+        if (-not $ok) { return @() }
+    }
+    else {
+        $file = Join-Path $Source 'packaging\distribution-excludes.txt'
+        if (-not (Test-Path -LiteralPath $file)) { return @() }
+        $lines = @(Get-Content -LiteralPath $file)
+    }
+    foreach ($line in $lines) {
+        $name = ('' + $line).Trim()
+        if (-not $name -or $name.StartsWith('#')) { continue }
+        if ($name -match '[/\\]' -or $name -match '\.\.') {
+            Write-Error "[install] distribution exclusion '$name' is not a single top-level name"
+        }
+        $names += $name
+    }
+    return $names
+}
+
 function Copy-CheckoutInto {
     param([string]$Source, [string]$Root, [switch]$KeepProtected)
     # Top-level merge: environment and operator data are never touched on an
     # upgrade. Files the new release deleted stay behind until a reinstall.
+    $excludes = Get-DistributionExcludes -Source $Source
     Get-ChildItem -LiteralPath $Source -Force | ForEach-Object {
         if ($KeepProtected -and $ProtectedEntries -contains $_.Name) { return }
         if ($_.Name -eq '.git' -and (Test-Path (Join-Path $Root '.git'))) { return }
+        if ($excludes -contains $_.Name) { return }
         Copy-Item -LiteralPath $_.FullName -Destination $Root -Recurse -Force
     }
 }
@@ -110,7 +144,19 @@ function Get-CheckoutStage {
     if (-not $Archive -and (Get-Command git -ErrorAction SilentlyContinue)) {
         $target = Join-Path $StageRoot 'checkout'
         Write-Step "git clone --depth 1 --branch $Ref (staged)"
-        Invoke-Checked @('git', 'clone', '--depth', '1', '--branch', $Ref, $RepoGit, $target) -Where $target
+        Invoke-Checked @('git', 'clone', '--depth', '1', '--branch', $Ref, '--no-checkout', $RepoGit, $target) -Where $target
+        # Sparse rules, never a delete: skipping the files after checkout would leave
+        # every one of them reported as removed, and -Upgrade's first guard is "no
+        # tracked changes", so a delete would lock the device out of upgrading forever.
+        # The rules live in .git and travel with it, so later checkouts stay trimmed too.
+        $excludes = Get-DistributionExcludes -Source $target -FromGit
+        if (@($excludes).Count -gt 0) {
+            $patterns = @('/*')
+            foreach ($name in $excludes) { $patterns += "!/$name/" }
+            Write-Step "sparse checkout: excluding $($excludes -join ', ')"
+            Invoke-Checked (@('git', '-C', $target, 'sparse-checkout', 'set', '--no-cone') + $patterns) -Where $target
+        }
+        Invoke-Checked @('git', '-C', $target, 'checkout') -Where $target
         return $target
     }
     Write-Step "downloading $RepoZip"

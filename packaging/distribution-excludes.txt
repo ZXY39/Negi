@@ -1,0 +1,25 @@
+# Top-level entries this repository keeps for development but does not put on an
+# installed device. Both one-line installers read this file from the payload they
+# just fetched, so there is no second copy of the list to keep in sync:
+#
+#   git lane     -> applied as sparse-checkout rules inside the staged clone. Rules
+#                   plus the skip-worktree bits travel in .git, so `git status` on
+#                   the device stays clean (a plain delete would report every
+#                   excluded file as removed and permanently block -Upgrade, whose
+#                   first guard is "no tracked changes") and later checkouts do not
+#                   re-materialize them.
+#   archive lane -> skipped while merging top-levels into the install directory
+#                   (there is no index there to keep honest).
+#
+# An entry is a single top-level name; blank lines and #-comments are ignored.
+# Put a directory here only when nothing on a device reads it and no shipped text
+# points at it. Measured at tag v2.7.0: this list removes 539 of 1229 files,
+# 8.78 MB of the 23.39 MB tree and 1.78 MB (24%) of the 7.3 MB source payload.
+# Kept on purpose:
+#   docs/    skills/negi-architecture-maintenance works on docs/architecture
+#   scripts/ AGENTS.md names scripts/lint.sh and scripts/lint.ps1
+#   assets/  README embeds banner.png and cover.png, and install.sh builds the
+#            desktop icon out of assets/icon.png
+tests
+work
+.github

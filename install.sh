@@ -120,6 +120,31 @@ ensure_uv() {
   log "using uv: $UV"
 }
 
+exclude_names_from_stream() {
+  # packaging/distribution-excludes.txt（标准输入）-> 一行一个顶层名。
+  # 清单只存在于负载里这一份，两个安装脚本都不再抄一遍，抄了就会各说各话。
+  # 注释与空行去掉；名字里带分隔符的直接报错，不猜他想要哪个子集。
+  sed -e 's/\r$//' | awk '
+    /^[[:space:]]*#/ { next }
+    {
+      gsub(/[[:space:]]/, "")
+      if (length($0) == 0) next
+      if ($0 ~ /\// || $0 ~ /\\/ || $0 ~ /\.\./) {
+        print "not a single top-level name: " $0 > "/dev/stderr"
+        exit 3
+      }
+      print
+    }'
+}
+
+is_excluded_top_level() {
+  local n="$1" e
+  for e in ${EXCLUDED_TOP_LEVELS:-}; do
+    [ "$e" = "$n" ] && return 0
+  done
+  return 1
+}
+
 stage_code() {
   # $1 = archive 时强制走源码包：无 git 的历史安装升级要保持原取码形态。
   # 代码一律先落到临时目录再逐顶层合并 —— `git clone` 对着一个非空目录（保留数据
@@ -128,8 +153,22 @@ stage_code() {
   STAGE_DIR="$(mktemp -d)"
   if [ "$mode" != "archive" ] && command -v git >/dev/null 2>&1; then
     log "git clone --depth 1 --branch $REF (staged)"
-    git clone --depth 1 --branch "$REF" "$REPO_GIT" "$STAGE_DIR/checkout" || fail 'git clone failed'
+    git clone --depth 1 --branch "$REF" --no-checkout "$REPO_GIT" "$STAGE_DIR/checkout" || fail 'git clone failed'
     CHECKOUT_DIR="$STAGE_DIR/checkout"
+    # 排除靠 sparse 规则，不是删文件：checkout 之后再删，每个被删的文件都会被判成
+    # "跟踪文件已修改"，而 -Upgrade 第一道门就是"跟踪文件没动过"，删一次就把这台
+    # 设备永久锁在升级门外。规则写在 .git 里，跟着拷贝走，以后的 checkout 也照规则出树。
+    local names='' patterns='/*' name
+    if git -C "$CHECKOUT_DIR" cat-file -e 'HEAD:packaging/distribution-excludes.txt' 2>/dev/null; then
+      names="$(git -C "$CHECKOUT_DIR" show 'HEAD:packaging/distribution-excludes.txt' | exclude_names_from_stream)" \
+        || fail 'packaging/distribution-excludes.txt is malformed'
+    fi
+    for name in $names; do patterns="$patterns !/$name/"; done
+    if [ -n "$names" ]; then
+      log "sparse checkout: excluding $(printf '%s' "$names" | tr '\n' ' ')"
+      git -C "$CHECKOUT_DIR" sparse-checkout set --no-cone $patterns || fail 'sparse-checkout failed'
+    fi
+    git -C "$CHECKOUT_DIR" checkout || fail 'checkout failed'
     return
   fi
   log "downloading $REPO_ZIP"
@@ -151,6 +190,13 @@ copy_checkout_into_root() {
   local keep_protected="${1:-0}" entry name
   # Top-level merge: environment and operator data are never touched on an
   # upgrade. Files the new release deleted stay behind until a reinstall.
+  # 源码包车道没有 index 可讲道理，只能在合并这一步跳过同样的清单；git 车道到这里
+  # 时那些顶层本来就不在树上，跳过一次是无害的重复。
+  EXCLUDED_TOP_LEVELS=''
+  if [ -f "$CHECKOUT_DIR/packaging/distribution-excludes.txt" ]; then
+    EXCLUDED_TOP_LEVELS="$(exclude_names_from_stream < "$CHECKOUT_DIR/packaging/distribution-excludes.txt")" \
+      || fail 'packaging/distribution-excludes.txt is malformed'
+  fi
   for entry in "$CHECKOUT_DIR"/.* "$CHECKOUT_DIR"/*; do
     name="$(basename "$entry")"
     case "$name" in
@@ -162,6 +208,9 @@ copy_checkout_into_root() {
       esac
     fi
     if [ "$name" = ".git" ] && [ -d "$DIR/.git" ]; then
+      continue
+    fi
+    if is_excluded_top_level "$name"; then
       continue
     fi
     [ -e "$entry" ] || continue
