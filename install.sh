@@ -129,7 +129,7 @@ exclude_names_from_stream() {
     {
       gsub(/[[:space:]]/, "")
       if (length($0) == 0) next
-      if ($0 ~ /\// || $0 ~ /\\/ || $0 ~ /\.\./) {
+      if ($0 ~ /[^A-Za-z0-9._-]/ || index($0, "..")) {
         print "not a single top-level name: " $0 > "/dev/stderr"
         exit 3
       }

@@ -22,14 +22,17 @@ LIST_FILE = REPO_ROOT / "packaging" / "distribution-excludes.txt"
 INSTALLERS = (REPO_ROOT / "install.ps1", REPO_ROOT / "install.sh")
 
 # Read the list the same way the installers do: blank lines and #-comments gone,
-# every remaining line a single top-level name.
+# every remaining line a single top-level name (the shipped validators refuse
+# anything else, so this file refuses it too).
 def _read_list(path: Path) -> list[str]:
     names: list[str] = []
     for raw in path.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        assert not re.search(r"[/\\]|\.\.", line), f"{line!r} is not a top-level name"
+        assert re.fullmatch(r"[A-Za-z0-9._-]+", line) and ".." not in line, (
+            f"{line!r} is not a single top-level name"
+        )
         names.append(line)
     return names
 
@@ -191,6 +194,94 @@ def test_exclusion_leaves_the_device_repository_clean(tmp_path: Path) -> None:
     assert not (stage / "tests").exists(), "the upgrade re-materialized an excluded path"
     assert (stage / "work" / "operator-script.py").is_file(), "the device lost a local file"
     assert run("status", "--porcelain", "--untracked-files=no", cwd=stage).stdout.strip() == ""
+
+
+def _bash_function(name: str) -> str:
+    """Return the shipped body of a shell function, brace-depth independent.
+
+    Feeding the lane through the real function text is the point: a rewritten copy of
+    the skip logic in this file would prove nothing about what the installer does.
+    install.sh closes every function with `}` in column 0, which is where the slice ends.
+    """
+    lines = (REPO_ROOT / "install.sh").read_text(encoding="utf-8").splitlines()
+    start = next((i for i, line in enumerate(lines) if line.startswith(f"{name}()")), None)
+    assert start is not None, f"{name}() is gone from install.sh"
+    body = [lines[start]]
+    for line in lines[start + 1 :]:
+        if line == "}":
+            body.append(line)
+            return "\n".join(body) + "\n"
+        body.append(line)
+    raise AssertionError(f"unterminated {name}() in install.sh")
+
+
+def test_archive_lane_skips_the_listed_top_levels(tmp_path: Path) -> None:
+    """The source-archive lane has no index to keep honest, so it skips at merge time."""
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("bash is only present where the shell installer can run")
+
+    source = tmp_path / "checkout"
+    target = tmp_path / "install"
+    target.mkdir()
+    for rel in (
+        "g3ku/app.py",
+        "docs/read.md",
+        "tests/test_a.py",
+        "work/scratch.py",
+        ".github/workflows/ci.yml",
+    ):
+        leaf = source / rel
+        leaf.parent.mkdir(parents=True, exist_ok=True)
+        leaf.write_text("payload\n", encoding="utf-8")
+    # The lane reads the shipped list itself, so the fixture carries the real one.
+    list_copy = source / "packaging" / "distribution-excludes.txt"
+    list_copy.parent.mkdir(parents=True, exist_ok=True)
+    list_copy.write_text(LIST_FILE.read_text(encoding="utf-8"), encoding="utf-8")
+
+    script = (
+        "set -euo pipefail\n"
+        # The two helpers the real installer calls around this function.
+        + "fail() { printf 'FAIL: %s\\n' \"$1\" >&2; exit 1; }\n"
+        + "log() { :; }\n"
+        + _bash_function("exclude_names_from_stream")
+        + _bash_function("is_excluded_top_level")
+        + _bash_function("copy_checkout_into_root")
+        + f"CHECKOUT_DIR='{source.as_posix()}'\n"
+        + f"DIR='{target.as_posix()}'\n"
+        + "PROTECTED_ENTRIES='.venv .g3ku .git'\n"
+        + "copy_checkout_into_root 0\n"
+        + f"find '{target.as_posix()}' -mindepth 1 -maxdepth 1 -printf '%f\\n' | sort\n"
+    )
+    listing = subprocess.run(
+        [bash, "-c", script],
+        capture_output=True,
+        text=True,
+    )
+    assert listing.returncode == 0, listing.stderr
+    landed = {line for line in listing.stdout.splitlines() if line}
+    assert landed == {"g3ku", "packaging", "docs"}, landed
+    for name in _read_list(LIST_FILE):
+        assert not (target / name).exists(), f"{name} reached the device through the archive lane"
+
+
+def test_the_shipped_validator_refuses_a_nested_name(tmp_path: Path) -> None:
+    """A name with a separator would become a sparse pattern for a subpath.
+
+    The installers are asked to stop rather than guess which subset was meant.
+    """
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("bash is only present where the shell installer can run")
+    script = (
+        "set -euo pipefail\n"
+        + _bash_function("exclude_names_from_stream")
+        + "printf '# comment\\ntests\\nsources/api\\n' | exclude_names_from_stream\n"
+    )
+    result = subprocess.run([bash, "-c", script], capture_output=True, text=True)
+    assert result.returncode != 0, result.stdout
+    assert "not a single top-level name" in result.stderr, result.stderr
+    assert "tests" in result.stdout  # the good name is accepted before the bad one stops it
 
 
 def test_a_tag_older_than_the_list_installs_the_full_tree(tmp_path: Path) -> None:

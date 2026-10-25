@@ -118,7 +118,7 @@ function Get-DistributionExcludes {
     foreach ($line in $lines) {
         $name = ('' + $line).Trim()
         if (-not $name -or $name.StartsWith('#')) { continue }
-        if ($name -match '[/\\]' -or $name -match '\.\.') {
+        if ($name -notmatch '^[A-Za-z0-9._-]+$' -or $name.Contains('..')) {
             Write-Error "[install] distribution exclusion '$name' is not a single top-level name"
         }
         $names += $name
