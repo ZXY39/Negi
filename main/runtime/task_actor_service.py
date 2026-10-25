@@ -381,6 +381,16 @@ class TaskNodeDispatcher:
                 continue
             if not entry.future.done():
                 entry.future.set_result(result)
+        if owned:
+            try:
+                logger.warning(
+                    'cancel_nodes settled owned entries: task={} nodes={} reason={}',
+                    self._task_id,
+                    sorted(owned),
+                    landing_reason,
+                )
+            except Exception:
+                pass
         return owned
 
     async def resume_node(self, node_id: str) -> None:
@@ -446,11 +456,28 @@ class TaskNodeDispatcher:
             entry.future.set_result(result)
         return result
 
+    def _entry_frame_phase(self, node_id: str) -> str:
+        try:
+            frame = self._log_service.read_runtime_frame(self._task_id, node_id)
+        except Exception:
+            return ''
+        return str((frame or {}).get('phase') or '') if isinstance(frame, dict) else ''
+
     async def close(self) -> None:
         if self._closed:
             return
         self._closed = True
-        tasks = [entry.task for entry in self._entries.values() if entry.task is not None and not entry.task.done()]
+        live_entries = [entry for entry in self._entries.values() if entry.task is not None and not entry.task.done()]
+        tasks = [entry.task for entry in live_entries]
+        if live_entries:
+            try:
+                logger.warning(
+                    'dispatcher closing with live node entries: task={} nodes={}',
+                    self._task_id,
+                    [entry.node_id for entry in live_entries],
+                )
+            except Exception:
+                pass
         for task in tasks:
             task.cancel()
         if tasks:
@@ -526,6 +553,19 @@ class TaskNodeDispatcher:
                 return
             if not entry.future.done():
                 entry.future.cancel()
+                try:
+                    current = asyncio.current_task()
+                    logger.warning(
+                        'node entry cancelled before settling: task={} node={} cancelling={} phase={}',
+                        self._task_id,
+                        entry.node_id,
+                        int(current.cancelling())
+                        if current is not None and hasattr(current, 'cancelling')
+                        else -1,
+                        self._entry_frame_phase(entry.node_id),
+                    )
+                except Exception:
+                    pass
             raise
         except Exception as exc:
             # A2：搁浅异常必须留痕——future 可能无人消费（父链路已死时连
