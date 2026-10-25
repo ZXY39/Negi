@@ -34,6 +34,12 @@ _DEFAULT_NODE_DISPATCH_LIMITS = {
 # A3：释放后校验清扫的两段延迟（秒）。第一段后仍卡死则再 resume 一次，
 # 第二段后仍卡死则落 ERROR（冻结→释放的终点必须可见）。
 _RELEASE_VERIFICATION_DELAY_SECONDS = 5.0
+# 根的"在飞相位"：这一回合的执行器本该活着。停在这些相位却没有执行器、
+# 信箱也没有未读，说明唤醒源已断——那是引擎级中断留下的现场，不是停靠。
+_ROOT_INFLIGHT_PHASES = frozenset({'before_model', 'waiting_tool_results', 'after_model'})
+# 同一个 run_task 内最多就地重派根几次；用完仍回到同一形态就 park 给人看，
+# 避免"启动→消失→再启动"每次烧一轮模型的热循环。
+_ROOT_STRANDED_REVIVAL_ATTEMPTS = 2
 _CURRENT_DISPATCH_LEASE: ContextVar['_DispatchLease | None'] = ContextVar(
     'task_node_dispatch_lease',
     default=None,
@@ -1406,6 +1412,7 @@ class TaskActorService:
         4. 有活执行器就等一次现场变化；全都静止再看根节点与任务状态。
         """
         task_snapshot = None
+        root_revivals = 0
         while True:
             await self._node_runner.wait_pending_terminal_messages()
             # 非阻塞派生的轮次完成度从节点行派生：没有父协程的 gather 来宣布它。
@@ -1459,7 +1466,123 @@ class TaskActorService:
                 return self._result_from_node(root), False
             if self._consume_root_entry_pause(dispatcher, root_node_id):
                 return current_result, True
+            if self._root_stranded_without_executor(task_id, dispatcher, root_node_id):
+                if root_revivals < _ROOT_STRANDED_REVIVAL_ATTEMPTS:
+                    root_revivals += 1
+                    phase = self._frame_phase(task_id, root_node_id)
+                    try:
+                        outcome = await self.resume_node_entry(
+                            task_id, root_node_id, arm_verification=False
+                        )
+                    except Exception as exc:  # noqa: BLE001 - 复活失败也必须落到 park，不能穿透
+                        outcome = f'error:{exc!r}'
+                    try:
+                        logger.warning(
+                            'stranded root revival: task={} node={} phase={} attempt={} outcome={}',
+                            task_id,
+                            root_node_id,
+                            phase,
+                            root_revivals,
+                            outcome,
+                        )
+                    except Exception:
+                        pass
+                    if outcome in {'resumed', 'deferred'}:
+                        continue
+                self._park_stranded_root(task_id, root_node_id)
             return current_result, True
+
+    def _root_stranded_without_executor(
+        self,
+        task_id: str,
+        dispatcher: 'TaskNodeDispatcher',
+        root_node_id: str,
+    ) -> bool:
+        """根停在在飞相位却没有执行器 ⇒ 唤醒源已断，不是停靠。
+
+        停靠（`waiting_explicit` / `waiting_acceptance`）的静止由下一次投递负责复活，
+        所以 `run_task` 返回 control_only 是设计语义。停在 `before_model` /
+        `waiting_tool_results` / `after_model` 却没有执行器、也没有未读，则相反：
+        这一回合的执行体已经消失（引擎级中断、取消），dispatcher 里没有活 entry，
+        根也不在派发扫描的范围内（`_dispatch_runnable_nodes` 对根只处理"有未读"）。
+        `run_task` 若照旧返回 control_only 并关闭 dispatcher，任务会静默悬空到
+        下一次 worker 启动（实盘 task:d82fca788a41：工具行 running 悬空 12 分钟）。
+        """
+        if dispatcher.has_live_entries():
+            return False
+        root = self._store.get_node(str(root_node_id or '').strip())
+        if root is None:
+            return False
+        if str(getattr(root, 'status', '') or '').strip().lower() in {'success', 'failed'}:
+            return False
+        if self._node_operator_paused(root):
+            return False
+        if self._node_has_unread(task_id, root_node_id):
+            return False
+        try:
+            frame = self._log_service.read_runtime_frame(task_id, root_node_id)
+        except Exception:
+            return False
+        if not isinstance(frame, dict):
+            return False
+        if str(frame.get('phase') or '').strip() not in _ROOT_INFLIGHT_PHASES:
+            return False
+        return self._frame_has_inflight_tools(frame)
+
+    @staticmethod
+    def _frame_has_inflight_tools(frame: dict[str, Any]) -> bool:
+        """帧里还挂着没有结果的工具调用——这一跳的送达判据（不是结果表有没有行）。
+
+        只看相位不够：回合正常结束但节点未落终态（partial / 停靠）也会留下一个
+        非终态行，那种形态由帧相位与投递负责，重派它只会白跑一回合。真正需要
+        救的是"工具已经发出、结果没回来、执行器也没了"。
+        """
+        if list(frame.get('active_round_tool_call_ids') or []):
+            return True
+        for item in list(frame.get('tool_calls') or []):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get('status') or '').strip().lower() in {'running', 'queued'}:
+                return True
+        return False
+
+    def _park_stranded_root(self, task_id: str, root_node_id: str) -> None:
+        """重派也点不着火：可见地 park，交给有裁定权的一方。
+
+        错误行带 `pause_reason='error'`，正好是 `task_node_error` 心跳车道的选择条件，
+        所以这里不需要新通报机制。pause 是可逆的（`resume_node` 能救回来），
+        比留一个静默 `in_progress` 幽灵诚实——后者只能等 worker 重启。
+        """
+        phase = self._frame_phase(task_id, root_node_id)
+        reason = (
+            f'stranded_root: 根节点停在 {phase or "无帧"} 相位、没有执行器、信箱也没有未读；'
+            '就地重派没能得到可运行的执行器。'
+            '任务不会自己前进，需要确认是 resume 继续还是终止。这不是"节点失败了"。'
+        )
+        try:
+            logger.warning(
+                'stranded root parked: task={} node={} phase={}',
+                task_id,
+                root_node_id,
+                phase,
+            )
+        except Exception:
+            pass
+        root = self._store.get_node(root_node_id)
+        try:
+            self._log_service.append_task_error_log(
+                task_id=task_id,
+                node_id=root_node_id,
+                node_title=str(getattr(root, 'title', '') or getattr(root, 'goal', '') or ''),
+                error_text=reason,
+            )
+        except Exception:
+            logger.exception('stranded root error log failed: task={}', task_id)
+            return
+        try:
+            self._node_runner._mark_node_paused(task_id, root_node_id, reason='error', remark=reason)
+        except Exception:
+            logger.exception('stranded root park failed: task={}', task_id)
 
     async def _reconcile_orphan_in_progress_nodes(self, task_id: str, dispatcher: 'TaskNodeDispatcher') -> None:
         """C：孤儿收尸/重派发（每次 run_task 拾取时执行，幂等）。
