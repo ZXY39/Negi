@@ -829,9 +829,10 @@ function bindCeoRiskUi() {
             else if (target.closest("#ceo-risk-mode-conditional")) void saveToolGovernanceMode({ enabled: true });
             else if (target.closest("#ceo-risk-whitelist-btn")) void openCeoReviewWhitelistDialog();
             else if (target.closest("#ceo-risk-exec-settings-btn")) {
-                // 命令行那一档拦截规则住在 exec 工具详情里（执行模式 + 命令白名单入口），
-                // 风险面板只负责把那张抽屉打开。
+                // 抽屉住在 Tool 页那个 section 里，光调 openTool 会把开在 display:none 的容器上，
+                // 点了像没反应；先换视图再开。
                 closeCeoRiskPanel();
+                if (typeof switchView === "function") switchView("tools");
                 if (typeof openTool === "function") void openTool("exec");
             }
         });

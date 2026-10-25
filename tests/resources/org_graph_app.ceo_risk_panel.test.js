@@ -139,7 +139,7 @@ function loadGovernance({ governanceItem, tools = [], extraIds = [] } = {}) {
         },
         showToast: (options) => { calls.push({ api: "toast", options }); },
         openTool: (toolId) => { calls.push({ api: "openTool", toolId }); return Promise.resolve(); },
-        switchView: () => {},
+        switchView: (view) => { calls.push({ api: "switchView", view }); },
         canMutateCeoSessions: () => true,
         canCreateCeoSessions: () => true,
         canActivateCeoSessions: () => true,
@@ -218,7 +218,11 @@ test("命令行风险拦截设置那颗入口打开 exec 工具详情并收起�
     assert.equal(ctx.elements.get("ceo-risk-panel").hidden, false);
 
     ctx.elements.get("ceo-risk-panel").dispatch("click", { target: ctx.elements.get("ceo-risk-exec-settings-btn") });
-    assert.deepEqual(plain(ctx.calls.filter((call) => call.api === "openTool")), [{ api: "openTool", toolId: "exec" }]);
+    // 抽屉在 Tool 页那个 section 里：不先切视图就等于把窗开在 display:none 的容器上。
+    assert.deepEqual(plain(ctx.calls.filter((call) => call.api === "switchView" || call.api === "openTool")), [
+        { api: "switchView", view: "tools" },
+        { api: "openTool", toolId: "exec" },
+    ]);
     assert.equal(ctx.elements.get("ceo-risk-panel").hidden, true);
 });
 
