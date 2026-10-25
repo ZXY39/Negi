@@ -3605,10 +3605,14 @@ textarea {
 .markdown-content a {
     color: color-mix(in srgb, var(--brand-primary) 86%, #0ea5e9 14%);
     text-decoration: none;
+}
+
+/* 虚线只标真文字链接：图片包装 <a> 与文件 chip 自带边框，叠上这条会在图片下沿画一条线、把 chip 的底边换成异色。 */
+.markdown-content a:not(.msg-inline-image-link):not(.msg-file-chip) {
     border-bottom: 1px dashed color-mix(in srgb, var(--brand-primary) 44%, transparent);
 }
 
-.markdown-content a:hover {
+.markdown-content a:not(.msg-inline-image-link):not(.msg-file-chip):hover {
     border-bottom-style: solid;
 }
 
@@ -6482,11 +6486,6 @@ textarea {
     display: block;
     width: fit-content;
     cursor: zoom-in;
-}
-
-/* 包装 <a> 会吃到 .markdown-content a 的虚线下划线，画在图片下沿；.markdown-content a 权重更高，需复合选择器覆盖。 */
-.markdown-content a.msg-inline-image-link {
-    border-bottom: 0;
 }
 
 .msg-file-chip {
