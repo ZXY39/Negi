@@ -83,6 +83,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 回合进行中看不到新工具调用/新工具组，最终答复落地才一口气出现 → `web-and-admin.md`「CEO Websocket Lane Failure Contract」（单写者与丢帧计数）+「Streamed Reply Delta Contract」（轨道补丁的合并窗口）
 - Multimodal image not reaching model or fabricated image content → `runtime-overview.md` + `web-and-admin.md` (web upload/reopen) or `external-agent-api.md` (bridge inbound attachments)
 - A config refresh disrupts an in-flight turn → `config-and-models.md`「配置热刷新」
+- 改了负载均衡组的每成员重试次数或往组里加成员，正在重试的那一发照旧跑旧预算/判组耗尽 → `config-and-models.md`「模型链变更何时作用于在途回合」
 - Same task result pushed to the channel multiple times → `heartbeat-system.md`「Task Terminal Repair Contract」
 - Channel/bridge reply emits `## Runtime Tool Contract` or other internal context text -> `runtime-overview.md`「frontdoor 与任务运行时的关系」(回显守卫) + `external-agent-api.md` (outbound sanitize contract)
 - 工具上一轮还直接执行、这一轮调用它只交回契约不产出结果，名字却仍留在 `tools[]` 上（既不在 `denied_tools`、也不在 `undeclared_candidates`）→ 它的 toolskill 契约块被 `token_compression` 移出了上下文，按"契约不在 ⇒ 那一跳先交回契约"处理，下一跳起照旧可调；判据与唯一载体见 `tool-hydration-and-callable-chain.md`「契约在场与 callable」，读数是 `tool_contract_presence`

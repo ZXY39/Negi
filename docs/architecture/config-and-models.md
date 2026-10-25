@@ -164,12 +164,19 @@
 - 因此 `model_config set_scope_chain` 之后，同一轮的下一次模型调用即用新链；在同一步把切链与被门控的工具调用作为并行工具调用发出时，闸门仍按切换前的链判定。
 - Main runtime 节点的模型链在任务运行时 chat 后端的每个链轮边界活解析（纯 direct 链由 `model_refs_resolver` 读取当前角色链；链上含组时该活解析只以 route plan 为真源，候选展开不参与链替换，一槽一位的约束见 `runtime-overview.md`「Chat provider 超时与重试边界」），路由/绑定变更在下一个链轮即生效，不必等下一个回合；可重试失败退避等待结束后同样先重新解析链再继续重试。**链在重试途中被改写不会中止回合**：退避边界发现 runtime revision 变化且能解析出与在用链不同的新链时，重试循环丢弃旧链的已试集合、刷新 revision 基线并从新链链首重新评估，成功即正常返回；链未真正变化时只刷新基线，继续原有重试账本，不在同一 revision 上空转。按链首重启意味着新链里被跳过的模型重新获得机会。`DEFAULT_MAX_CHAIN_CHANGE_RESTARTS`（`g3ku/providers/fallback.py`）跨重启累计，只兜底"链反复变化且始终不成功"的病态抖动，达到上限后落既有链耗尽终态。CEO/frontdoor 与二者之上还有各自的回合级守卫：`react_loop` 在链耗尽错误处按 `provider_retry_invalidation` 重建回合，frontdoor 在 provider 失败/空响应边界重新解析角色链，二者都只在 `ensure_runtime_config_current` 报告配置确有前进时触发。memory queue 内部 agent 看的不是 CEO/node 的 provider retry，而是 memory 自己的同批次 validation/repair 重试点，普通 review window 不经过单独的 `assess -> apply` 交接。
 
+一次模型调用（一个 `chat` 调用）内部还有比"链轮"更细的一格，它承接组定义那半张配置面：
+
+- **每一轮重试之前**都对比 runtime revision，并把活配置重建出的槽位表无条件采纳为在用槽位表——组的每成员重试轮预算（`maxRetryRounds`）、成员名册、成员的声明窗口都跟着改值。因此把预算从 999 调成 2 时，正在重试的那颗成员就在下一轮让位；调大时同一条成员当场获得多出来的轮数；重试途中加进组的成员会出现在这一发的换人名册里，而不是等下一发调用才发现它。
+- 采纳槽位与"重启整条链"是两件事，判据不同：换槽位表不动已试集合，也不回到链首；只有链的**成员列表**真的变了才清已试集合并从链首重新评估。把两者捆在一起会让纯数值改动（成员列表不变）被整份丢弃。
+- revision 对比必须排在预算比较**之前**。嵌在"本轮失败且还没跑满预算"里面时，旧预算=1 的那扇门根本进不去，调大追不上；旧预算=999 时会按旧值一路烧完才让位——这两个方向都是操作员报"改了不生效"的实际形态。
+- 残留的边界是一次 attempt 之内：provider 目标、该模型的 key 轮序、attempt 超时在这些值于槽位入口取一次之后不重读，单次已发出的 HTTP 请求永不热切。操作员可见的最长滞后因此是"当前这一轮"，不是"这一发调用"，更不是"这个回合"。
+
 节点侧的路由结构有两个落地点：worker **启动构造**与管理面的**配置刷新**。两处都重建 `execution` / `inspection` 的 route plan，并且都在同一步把同一份组定义连同 revision 交给负载均衡器（`_apply_model_route_plans`；契约见 `runtime-overview.md`「节点模型路由与准入绑定」）。这个"同一步"是硬约束：准入层对链上每个 `load_balance` entry 都要能在 balancer 里查到那个组，查不到就按 `unknown_group` 跳过整条链，节点永远拿不到授予、队列冻在 waiting。新起的 worker 不会自己跑配置刷新——只有管理面保存下发的 `refresh_runtime_config` 命令才会触发它——所以注册组必须落在启动路径上，链上带组的配置才能在每次重启后继续工作。revision 只作观测，不参与重绑判定：刷新只解绑「绑定成员已被移出组」的那些节点，其余绑定与最近的请求速率、429 惩罚一律保留——那两项描述的是上游，与本地配置有没有被改过无关。因此一次与路由无关的保存（改 prompt、改渠道设置）不会打断任何节点的缓存粘性。
 
 维护上把这理解成“迭代/重试边界上的重建”，而不是“请求中途热切模型”。如果用户反馈“改完模型链后旧模型还在用”，重点检查：
 
 1. 对应进程是否真的执行到了 runtime refresh（日志 `Loop runtime config refreshed`）
-2. 问题是否发生在单次 still-in-flight 的 provider request 内（该请求不可热切），还是跨过后续迭代边界后仍未换链
+2. 问题是否发生在单次 still-in-flight 的 provider request 内（该请求不可热切），还是跨过链轮/轮次边界后仍未换链；组的每成员预算与成员名册按上一段在每一轮边界重读，`Retryable model failure … round x/N` 的 N 跟着新值走才算落地
 3. 当前运行路径是 CEO/frontdoor、main runtime worker/node，还是 memory queue 内部 worker
 4. 节点全停在模型侧队列（`node_queue_waiting_count>0` 而 `node_queue_running_count=0`）且心跳里 `model_route_groups` 为空时，问题在本地落地而不是上游：启动路径没把组注册进 balancer，`Model route selected` 一条都不会出现。闸收紧期间的等待不看这条数——`node_queue_waiting` 量的是过闸之后等模型 permit，闸口排队的读数是 `entry_gate_queued_total`（契约见 `runtime-overview.md`「节点回合闸（执行器存在的成本也要闸）」）
 
@@ -459,7 +466,7 @@ If a provider reply looks truncated (for example a response ending at exactly th
 - 请求体形状错误只按结构化 HTTP 状态判定（400/422），无文本关键字兜底；status 不可得的错误一律走正常轮换/降级判定。
 - 换 key（轮换）只在错误**未命中 `retry_on`、且非请求体形状错误、且非内部运行时错误**时才发生，且为单趟：每个 key 各试一次即前进到链上下一个模型。**配置脚枪**：把 `401`/`403`/`invalid api key` 之类配进 `retry_on`，会让坏 key 被当成"可重试"从而只重试不换 key——坏 key 应靠"未命中 → 换 key"自愈，不要配进 `retry_on`。
 - `retry_count`（配置页「重试次数」）是该模型可重试错误的最大退避重试轮数：0/未设置用内置默认 `DEFAULT_RETRYABLE_MODEL_ROUNDS=10`；非可重试错误的轮换恒为单趟、不受该值影响。同一个 key 配置在多个模型上互不影响——轮预算按（模型, key）槽位独立计。**Σ(每模型轮预算 × 该模型 key 数) 只是"每一次失败都被判可重试"时的上界**，不是保证：任何一处判定把失败读成不可重试，那一把键就按单趟让位，实际尝试次数会低于这个上界。
-- 负载均衡组内的成员**不继承** `retry_count`：组用 `models.loadBalanceGroups.<key>.maxRetryRounds`（配置里不填按 1；允许任意非负整数，0 与 1 等价——一轮都不重复就让位；只有负数报错）。原因是一个配了 `9999` 或 `9999999` 的成员会在组内永远不让位，组内平级 fallback 随之失效。`retry_count=0` 在这两条车道上含义不同，所以组预算必须写显式值，不能靠「省略字段」落到 10 轮默认。
+- 负载均衡组内的成员**不继承** `retry_count`：组用 `models.loadBalanceGroups.<key>.maxRetryRounds`（配置里不填按 1；允许任意非负整数，0 与 1 等价——一轮都不重复就让位；只有负数报错）。原因是一个配了 `9999` 或 `9999999` 的成员会在组内永远不让位，组内平级 fallback 随之失效。`retry_count=0` 在这两条车道上含义不同，所以组预算必须写显式值，不能靠「省略字段」落到 10 轮默认。这一格数值对在飞重试的生效时机见本文「模型链变更何时作用于在途回合」。
 - 管理面按**单 key 约束**引导配置：`org_graph_llm.js` 创建配置与保存连接信息时拒绝多 key 输入（逗号/换行分隔即报错），提示以「多配置组模型链」实现容量与容灾回退。运行时多 key 轮换代码路径保留以兼容历史存量配置；新配置从配置面即被限定为单 key。
 
 ## Frontdoor Context Window Contract

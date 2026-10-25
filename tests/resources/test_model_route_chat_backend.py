@@ -633,3 +633,119 @@ async def test_providers_without_notice_capability_are_not_sent_the_callback(mon
 
     assert calls == ["recorded"]
     assert "on_upstream_wait" not in seen[0]
+
+
+@pytest.mark.asyncio
+async def test_group_round_budget_raise_applies_within_the_same_call(monkeypatch) -> None:
+    """操作员在重试途中把「每成员重试次数」调大：下一轮就按新预算走。
+
+    旧的判据把槽位表只在进入该槽位时取一次，并把活刷新嵌在 `rounds_used < budget_rounds`
+    里面——旧预算=1 时那扇门根本进不去，调大追不上。
+    """
+    old_group = _group("m_a", "m_b", max_rounds=1)
+    old_plan = ModelRoutePlan(routes=[_group_route(0, old_group)], config_revision=1)
+    new_group = _group("m_a", "m_b", max_rounds=3)
+    new_plan = ModelRoutePlan(routes=[_group_route(0, new_group)], config_revision=2)
+    turn_controller, controller, balancer, lease = _wiring(old_group, plan=old_plan)
+    balancer.configure(groups={new_group.group_key: new_group}, config_revision=2)
+
+    calls: list[str] = []
+    _patch(
+        monkeypatch,
+        {
+            "m_a": _target("m_a", _RateLimitedProvider("m_a", calls)),
+            "m_b": _target("m_b", _OkProvider("m_b", calls)),
+        },
+    )
+    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
+    monkeypatch.setattr(chat_backend_module, "current_runtime_config_revision", lambda: 2)
+
+    response = await _backend().chat(
+        messages=[{"role": "user", "content": "demo"}],
+        tools=None,
+        model_refs=list(old_plan.candidate_model_keys),
+        model_routes=old_plan,
+        model_routes_supplier=lambda: new_plan,
+        node_turn_lease=lease,
+        node_turn_controller=turn_controller,
+        model_concurrency_controller=controller,
+    )
+
+    assert response.content == "ok"
+    assert calls == ["m_a", "m_a", "m_a", "m_b"]
+
+
+@pytest.mark.asyncio
+async def test_group_round_budget_cut_stops_the_current_member_early(monkeypatch) -> None:
+    """把 999 调成 2：正在烧的那颗成员按新预算让位，不再把旧预算整份烧完。"""
+    old_group = _group("m_a", "m_b", max_rounds=999)
+    old_plan = ModelRoutePlan(routes=[_group_route(0, old_group)], config_revision=1)
+    new_group = _group("m_a", "m_b", max_rounds=2)
+    new_plan = ModelRoutePlan(routes=[_group_route(0, new_group)], config_revision=2)
+    turn_controller, controller, balancer, lease = _wiring(old_group, plan=old_plan)
+    balancer.configure(groups={new_group.group_key: new_group}, config_revision=2)
+
+    calls: list[str] = []
+    _patch(
+        monkeypatch,
+        {
+            "m_a": _target("m_a", _RateLimitedProvider("m_a", calls)),
+            "m_b": _target("m_b", _OkProvider("m_b", calls)),
+        },
+    )
+    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
+    monkeypatch.setattr(chat_backend_module, "current_runtime_config_revision", lambda: 2)
+
+    response = await _backend().chat(
+        messages=[{"role": "user", "content": "demo"}],
+        tools=None,
+        model_refs=list(old_plan.candidate_model_keys),
+        model_routes=old_plan,
+        model_routes_supplier=lambda: new_plan,
+        node_turn_lease=lease,
+        node_turn_controller=turn_controller,
+        model_concurrency_controller=controller,
+    )
+
+    assert response.content == "ok"
+    assert calls == ["m_a", "m_a", "m_b"]
+
+
+@pytest.mark.asyncio
+async def test_group_member_added_midcall_is_rotated_to_within_the_same_call(monkeypatch) -> None:
+    """重试途中往组里加一颗成员：这一发的换人名册就要带上它。
+
+    旧判据只在链的成员列表真的变了才采纳新槽位表，加成员不改链首占位，于是名册留在旧的
+    那一颗上，整发被判成「组耗尽」。
+    """
+    old_group = _group("m_a", max_rounds=1)
+    old_plan = ModelRoutePlan(routes=[_group_route(0, old_group)], config_revision=1)
+    new_group = _group("m_a", "m_b", max_rounds=1)
+    new_plan = ModelRoutePlan(routes=[_group_route(0, new_group)], config_revision=2)
+    turn_controller, controller, balancer, lease = _wiring(old_group, plan=old_plan)
+    balancer.configure(groups={new_group.group_key: new_group}, config_revision=2)
+
+    calls: list[str] = []
+    _patch(
+        monkeypatch,
+        {
+            "m_a": _target("m_a", _RateLimitedProvider("m_a", calls)),
+            "m_b": _target("m_b", _OkProvider("m_b", calls)),
+        },
+    )
+    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
+    monkeypatch.setattr(chat_backend_module, "current_runtime_config_revision", lambda: 2)
+
+    response = await _backend().chat(
+        messages=[{"role": "user", "content": "demo"}],
+        tools=None,
+        model_refs=["m_a"],
+        model_routes=old_plan,
+        model_routes_supplier=lambda: new_plan,
+        node_turn_lease=lease,
+        node_turn_controller=turn_controller,
+        model_concurrency_controller=controller,
+    )
+
+    assert response.content == "ok"
+    assert calls == ["m_a", "m_b"]

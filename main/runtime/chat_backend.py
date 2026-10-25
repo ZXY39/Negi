@@ -927,6 +927,17 @@ def _slot_max_retry_rounds(slot: dict[str, Any] | None) -> int | None:
     return max(1, rounds)
 
 
+def _model_round_budget(route_slot: dict[str, Any] | None, base_target: Any) -> int:
+    """本模型轮循环的预算：组槽位用组的 `maxRetryRounds`，direct 用绑定的 `retry_count`。
+
+    入口与每一轮边界都走这一份，槽位表被活刷新换掉之后预算才会跟着换。
+    """
+    group_budget = _slot_max_retry_rounds(route_slot)
+    if group_budget is not None:
+        return int(group_budget)
+    return normalized_retry_count(getattr(base_target, "retry_count", 0)) or DEFAULT_RETRYABLE_MODEL_ROUNDS
+
+
 class ConfigChatBackend:
     def __init__(self, config: Config):
         self._config = config
@@ -1177,12 +1188,16 @@ class ConfigChatBackend:
                 return None
 
         def _refreshed_route_chain() -> tuple[list[str], list[dict[str, Any]], Any, bool]:
-            """按活配置重建链，返回 (链, 槽位表, plan, 是否变化)；不写回状态，由调用方决定落地点。
+            """按活配置重建链，返回 (链, 槽位表, plan, 成员列表是否变了)；不写回状态。
 
             含组的链只认 route plan，并且 refs 与槽位表一起重建：两者必须同长同序
             （一槽一位）。拿候选展开的扁平列表替换 refs 会让 refs 长于槽位，下标 >=
             槽位数的组成员从此查不到槽位，退化成按配置顺序取用的 direct 模型——组内
             least_load 选人、`maxRetryRounds` 预算与换人退避节拍一并失效。
+
+            最后一个判据只回答「成员列表变了没」：槽位表（组预算、成员名册、窗口）是
+            无条件交回去的，操作员在重试途中改组定义时，下一轮就该按新值走；只有链的
+            成员列表真的变了才需要清已试集合、从链首重新评估。
             """
             if route_slots:
                 plan = _live_route_plan()
@@ -1192,6 +1207,8 @@ class ConfigChatBackend:
                 new_slots = _build_route_slots(plan, node_turn_refs=new_refs)
                 if not new_slots:
                     new_refs = _direct_refs_from_routes(plan)
+                    if not new_refs:
+                        return refs, route_slots, model_routes, False
                 else:
                     # 换人后的成员不能被抹回槽位占位成员，否则已试过的成员会重新占住槽位。
                     for index, slot in enumerate(new_slots):
@@ -1200,8 +1217,7 @@ class ConfigChatBackend:
                         current_ref = str(refs[index] or "")
                         if current_ref and current_ref in list(slot.get("members") or []):
                             new_refs[index] = current_ref
-                changed = bool(new_refs) and new_refs != refs
-                return (new_refs, new_slots, plan, changed) if changed else (refs, route_slots, model_routes, False)
+                return new_refs, new_slots, plan, new_refs != refs
             fresh_refs = _resolved_model_refs()
             if fresh_refs and fresh_refs != refs:
                 return fresh_refs, route_slots, model_routes, True
@@ -1213,7 +1229,8 @@ class ConfigChatBackend:
             new_plan: Any,
         ) -> None:
             """把刷新结果落成在用链：refs、槽位表、plan 与重试 toast 的链视图一起换。"""
-            nonlocal route_slots, model_routes, route_entries_payload
+            nonlocal refs, route_slots, model_routes, route_entries_payload
+            refs = list(new_refs)
             route_slots = new_slots
             model_routes = new_plan
             route_entries_payload = _route_entries_status_payload(new_slots, new_refs)
@@ -1283,9 +1300,8 @@ class ConfigChatBackend:
             # 发送前先做一次活解析（与旧首轮行为一致）：拿到调用前刚发生的链变更。
             previous_refs = list(refs)
             fresh_refs, fresh_slots, fresh_plan, chain_changed = _refreshed_route_chain()
+            _adopt_route_chain(fresh_refs, fresh_slots, fresh_plan)
             if chain_changed:
-                refs = fresh_refs
-                _adopt_route_chain(refs, fresh_slots, fresh_plan)
                 logger.info(
                     "Model chain refreshed before first model: {} -> {}",
                     ", ".join(previous_refs),
@@ -1386,11 +1402,8 @@ class ConfigChatBackend:
                 # 本模型的可重试轮数预算：direct 链沿用绑定 retry_count（0/未设置用默认
                 # DEFAULT_RETRYABLE_MODEL_ROUNDS）。负载均衡组不继承成员 catalog 的值，
                 # 否则 9999999 这类配置会让该成员永远不让位、组内平级 fallback 失效。
-                group_budget = _slot_max_retry_rounds(route_slot)
-                if group_budget is not None:
-                    budget_rounds = int(group_budget)
-                else:
-                    budget_rounds = normalized_retry_count(getattr(base_target, "retry_count", 0)) or DEFAULT_RETRYABLE_MODEL_ROUNDS
+                # 同一份判据在每轮边界重读一次，组预算被改值时这一发才追得上。
+                budget_rounds = _model_round_budget(route_slot, base_target)
                 model_retry_on = list(getattr(base_target, "retry_on", []) or [])
                 preview_payload = build_send_provider_request_preview(
                     config=self._config,
@@ -1650,32 +1663,34 @@ class ConfigChatBackend:
                     if advance_to_next_model:
                         break
                     rounds_used += 1
+                    # 每一轮之前先看活配置：槽位表（组预算、成员名册、声明窗口）无条件采纳，
+                    # 只有链的成员列表真的变了才重启整条链。判据刻意放在预算比较之前——旧的
+                    # 预算小时那扇门根本进不去（调大追不上），旧预算大时会按旧值一路烧完。
+                    if current_runtime_config_revision() != start_revision:
+                        previous_refs = list(refs)
+                        refreshed_refs, refreshed_slots, refreshed_plan, chain_refreshed = _refreshed_route_chain()
+                        _adopt_route_chain(refreshed_refs, refreshed_slots, refreshed_plan)
+                        start_revision = current_runtime_config_revision()
+                        # 在用槽位跟着新槽位表走，预算才会当场改值。
+                        route_slot = _route_slot_at(route_slots, model_index)
+                        if route_slot is not None and route_slot["kind"] == "load_balance":
+                            budget_rounds = _model_round_budget(route_slot, base_target)
+                        if chain_refreshed and chain_restart_count < _MAX_CHAIN_CHANGE_RESTARTS:
+                            # 链在重试途中被改写：按新链重启重试，而不是抛错中止回合。
+                            chain_restart_count += 1
+                            logger.warning(
+                                "Model chain changed during retry; restarting chain {} -> {} (restart {}/{})",
+                                ", ".join(previous_refs),
+                                ", ".join(refreshed_refs),
+                                chain_restart_count,
+                                _MAX_CHAIN_CHANGE_RESTARTS,
+                            )
+                            # 新链等价于新的一轮预算账本：清掉已试集合，让新链里
+                            # 之前被跳过的模型重新获得机会。
+                            tried_model_refs.clear()
+                            restart_with_refreshed_chain = True
+                            break
                     if round_retryable_failed and rounds_used < budget_rounds:
-                        if current_runtime_config_revision() != start_revision:
-                            # 链在重试途中被改写：重新解析当前角色链并按新链重启重试，
-                            # 而不是抛错中止回合。只有真的解析出不同链（且未超过病态
-                            # 抖动上限）才重启；否则只刷新 revision 基线并继续既有
-                            # 重试账本，避免在同一 revision 上空转。
-                            previous_refs = list(refs)
-                            refreshed_refs, refreshed_slots, refreshed_plan, chain_refreshed = _refreshed_route_chain()
-                            if chain_refreshed and chain_restart_count < _MAX_CHAIN_CHANGE_RESTARTS:
-                                chain_restart_count += 1
-                                logger.warning(
-                                    "Model chain changed during retry; restarting chain {} -> {} (restart {}/{})",
-                                    ", ".join(previous_refs),
-                                    ", ".join(refreshed_refs),
-                                    chain_restart_count,
-                                    _MAX_CHAIN_CHANGE_RESTARTS,
-                                )
-                                refs = list(refreshed_refs)
-                                _adopt_route_chain(refs, refreshed_slots, refreshed_plan)
-                                start_revision = current_runtime_config_revision()
-                                # 新链等价于新的一轮预算账本：清掉已试集合，让新链里
-                                # 之前被跳过的模型重新获得机会。
-                                tried_model_refs.clear()
-                                restart_with_refreshed_chain = True
-                                break
-                            start_revision = current_runtime_config_revision()
                         delay_seconds = model_retry_backoff_seconds(rounds_used)
                         logger.warning(
                             "Retryable model failure for {} (round {}/{}); retrying in {:.1f}s: {}",
@@ -1745,18 +1760,18 @@ class ConfigChatBackend:
                             error=str(model_last_failure_reason or "") or (str(model_last_error) if model_last_error is not None else ""),
                         )
                 # 本模型耗尽：在模型前进边界活刷新链（运行中新增的 fallback 模型
-                # 在此可见），跳过已试模型后决定前进还是落终态。
+                # 在此可见），跳过已试模型后决定前进还是落终态。槽位表无条件采纳，
+                # 成员列表真的变了才回到链首重新评估。
                 model_index += 1
                 previous_refs = list(refs)
                 fresh_refs, fresh_slots, fresh_plan, chain_refreshed = _refreshed_route_chain()
+                _adopt_route_chain(fresh_refs, fresh_slots, fresh_plan)
                 if chain_refreshed:
                     logger.info(
                         "Model chain refreshed at model boundary: {} -> {}",
                         ", ".join(previous_refs),
-                        ", ".join(fresh_refs),
+                        ", ".join(refs),
                     )
-                    refs = fresh_refs
-                    _adopt_route_chain(refs, fresh_slots, fresh_plan)
                     model_index = 0
                 while model_index < len(refs) and refs[model_index] in tried_model_refs:
                     model_index += 1
