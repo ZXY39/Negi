@@ -588,6 +588,8 @@ Heartbeat 与 cron 内部轮次共享同一内部轮次合同，完整契约详�
 
 运行时块的表示规则只有一条：块是"当前轮临时合同"的 summary，以 user 角色落地；它不参与 durable history，也不承担任何历史结构裁剪（历史收缩只由 `token_compression` 与 `user_edit_truncation` 造成）。块的字段集合、尾部只带最新快照与基线剥离规则详见 `tool-and-skill-system.md`「四个概念必须分清」与 `context-and-cache-troubleshooting.md`「append-only 规则」。
 
+投递是消费式台账，只有真正要发出的请求装配可以读它：`_frontdoor_send_preflight_snapshot` 是唯一投递点，估算车道（composer 的 token 读数、手动压缩的起点）按 `deliver_runtime_notices=False` 渲同一份请求体但不投递。估算车道走投递会把 `persona_cursor`、`memory_cursor` 与合同摘要一起推走，真正发送的那一跳永远拿空——这两条车道的"只读"指不推进任何会话状态，包括通知游标。
+
 另有两条运行时边界：
 
 - prompt token trace 只有两个字段：`pre_request_prompt_tokens` 是内联 `token_compression` 之前的发送前估算；`effective_prompt_tokens` 是 prompt 组装完成后最终真实发送请求的估算。

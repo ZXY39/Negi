@@ -1691,16 +1691,27 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         state: CeoGraphState,
         runtime: CeoRuntime,
         tool_schemas: list[Any],
+        deliver_runtime_notices: bool = True,
     ) -> dict[str, Any]:
         state_for_request = dict(state or {})
         # 新增可读 skill 的一次性提示：检测与投递只在这一处（每跳的发送准备）发生，
         # 并且和落账同一步——追加进本轮历史，请求体与 durable 基线都从它派生。
         # 其它装配点（state 刷新、回合起点装配）一律不读台账，否则先跑的把差集领走、
         # 落请求体那处永远拿空（旧机制就是这么失效的）。
-        request_messages = self._apply_frontdoor_skill_roster_notice(
-            list(state_for_request.get("messages") or []),
-            session_key=str(state_for_request.get("session_key") or "").strip(),
-            state=state_for_request,
+        #
+        # 估算车道（composer 的 token 读数、手动压缩的起点）必须关掉投递：它们只渲一份
+        # 不会发出去的请求体，却和真实发送共用这本消费式台账，投一次就把游标推走，
+        # 真正要发的那一跳反而永远拿空。
+        runtime_session = getattr(getattr(runtime, "context", None), "session", None)
+        request_messages = (
+            self._apply_frontdoor_skill_roster_notice(
+                list(state_for_request.get("messages") or []),
+                session_key=str(state_for_request.get("session_key") or "").strip(),
+                state=state_for_request,
+                persona_adopted_digest=str(getattr(runtime_session, PERSONA_DIGEST_ATTR, "") or ""),
+            )
+            if deliver_runtime_notices
+            else list(state_for_request.get("messages") or [])
         )
         delivered_message = (
             request_messages[-1]
@@ -3632,6 +3643,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         *,
         session_key: Any,
         state: dict[str, Any] | None = None,
+        persona_adopted_digest: str = "",
     ) -> list[dict[str, Any]]:
         """检测 + 一次性投递，只在这一处发生（真正落请求体的装配路径上）。
 
@@ -3661,7 +3673,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             # 拿前缀键去查会取回空名单，把全部技能当成新增。
             covered_skill_ids=pinned_skill_ids_for(None, session_key=normalized_session_key),
             memory_provider=self._frontdoor_memory_notice_provider,
-            persona_provider=self._frontdoor_persona_notice_provider,
+            persona_provider=lambda **kwargs: self._frontdoor_persona_notice_provider(
+                **kwargs,
+                adopted_digest=persona_adopted_digest,
+            ),
             contract_sections=self._frontdoor_contract_notice_sections(
                 dict(state or {}),
                 session_key=normalized_session_key,
@@ -3801,6 +3816,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         *,
         cursor_digest: str = "",
         initialized: bool = False,
+        adopted_digest: str = "",
     ) -> dict[str, Any] | None:
         """Persona delta for the same `[RUNTIME_NOTICE]` message.
 
@@ -3808,6 +3824,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         current file: a change made between adoption and the first notice still has to be
         announced. After compression the cursor is reset and the adopted digest is already
         the new value, so the next delivery aligns silently.
+
+        `adopted_digest` comes from the session that rendered the head block; reading it off
+        the runtime-ops object would always compare against an empty baseline.
         """
         manager = getattr(self._loop, "memory_manager", None)
         if manager is None or not callable(getattr(manager, "persona_text", None)):
@@ -3817,9 +3836,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         except Exception:
             return None
         digest = persona_digest(current)
-        adopted_digest = str(getattr(self, PERSONA_DIGEST_ATTR, "") or "")
+        adopted = str(adopted_digest or "")
         if not initialized:
-            if digest == adopted_digest:
+            if digest == adopted:
                 return {"digest": digest, "text": "", "align": True}
             return {"digest": digest, "text": render_persona_notice(current), "rebase": False}
         if digest == str(cursor_digest or "").strip():

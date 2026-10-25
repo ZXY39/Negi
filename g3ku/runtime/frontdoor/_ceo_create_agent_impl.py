@@ -521,6 +521,9 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             state=state,
             runtime=runtime,
             tool_schemas=self._frontdoor_tool_schemas_for_state(state=state, runtime=runtime),
+            # 这条车道渲的是不会发出去的请求体（composer 读数 / 手动压缩起点），
+            # 投递会推进消费式游标，让真正发送那一跳拿空提示。
+            deliver_runtime_notices=False,
         )
         return state, runtime, snapshot
 

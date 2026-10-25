@@ -7,7 +7,6 @@ import pytest
 from g3ku.agent.persona import persona_digest
 from g3ku.runtime.frontdoor._ceo_runtime_ops import CeoFrontDoorRuntimeOps
 from g3ku.runtime.frontdoor.message_builder import (
-    PERSONA_DIGEST_ATTR,
     CeoMessageBuilder,
     adopt_persona,
 )
@@ -141,13 +140,18 @@ async def test_persona_notice_aligns_then_delivers_once_and_rebases_after_compre
     manager = _PersonaManager(persona="v1")
     ops = object.__new__(CeoFrontDoorRuntimeOps)
     ops._loop = SimpleNamespace(memory_manager=manager)
-    setattr(ops, PERSONA_DIGEST_ATTR, persona_digest("v1"))
+
+    def provider(*, adopted: str):
+        return lambda **kwargs: ops._frontdoor_persona_notice_provider(
+            **kwargs,
+            adopted_digest=persona_digest(adopted),
+        )
 
     first, _ = deliver_for_scope(
         scope,
         [],
         now="2026-10-26T00:00:00+08:00",
-        persona_provider=ops._frontdoor_persona_notice_provider,
+        persona_provider=provider(adopted="v1"),
     )
     assert first is None
     assert notice_context_for(scope)["persona_cursor"] == {
@@ -160,7 +164,7 @@ async def test_persona_notice_aligns_then_delivers_once_and_rebases_after_compre
         scope,
         [],
         now="2026-10-26T00:01:00+08:00",
-        persona_provider=ops._frontdoor_persona_notice_provider,
+        persona_provider=provider(adopted="v1"),
     )
     content = str(second.get("content") or "")
     assert "### Persona updates" in content
@@ -171,18 +175,17 @@ async def test_persona_notice_aligns_then_delivers_once_and_rebases_after_compre
         scope,
         [],
         now="2026-10-26T00:02:00+08:00",
-        persona_provider=ops._frontdoor_persona_notice_provider,
+        persona_provider=provider(adopted="v1"),
     )
     assert third is None
 
     # Compression reparints the head and aligns the cursor to the newly adopted digest.
-    setattr(ops, PERSONA_DIGEST_ATTR, persona_digest("v2"))
     reset_persona_cursor(scope)
     fourth, _ = deliver_for_scope(
         scope,
         [],
         now="2026-10-26T00:03:00+08:00",
-        persona_provider=ops._frontdoor_persona_notice_provider,
+        persona_provider=provider(adopted="v2"),
     )
     assert fourth is None
 
@@ -193,17 +196,49 @@ def test_persona_change_between_explicit_adoption_and_first_notice_is_delivered(
     manager = _PersonaManager(persona="adopted value")
     ops = object.__new__(CeoFrontDoorRuntimeOps)
     ops._loop = SimpleNamespace(memory_manager=manager)
-    setattr(ops, PERSONA_DIGEST_ATTR, persona_digest("adopted value"))
 
     manager.persona = "changed before first notice"
     message, _ = deliver_for_scope(
         scope,
         [],
         now="2026-10-26T00:00:00+08:00",
-        persona_provider=ops._frontdoor_persona_notice_provider,
+        persona_provider=lambda **kwargs: ops._frontdoor_persona_notice_provider(
+            **kwargs,
+            adopted_digest=persona_digest("adopted value"),
+        ),
     )
     assert message is not None
     assert "changed before first notice" in str(message.get("content") or "")
+
+
+def test_notice_provider_compares_against_the_session_adopted_digest() -> None:
+    clear_skill_roster_notice_stores()
+    manager = _PersonaManager(persona="v1")
+    ops = object.__new__(CeoFrontDoorRuntimeOps)
+    ops._loop = SimpleNamespace(memory_manager=manager)
+    ops._frontdoor_contract_notice_sections = lambda *_args, **_kwargs: {}
+    messages = [{"role": "user", "content": "hello"}]
+
+    unchanged = ops._apply_frontdoor_skill_roster_notice(
+        messages,
+        session_key="web:wiring",
+        state={"session_key": "web:wiring"},
+        persona_adopted_digest=persona_digest("v1"),
+    )
+    assert unchanged == messages
+
+    manager.persona = "v2"
+    changed = ops._apply_frontdoor_skill_roster_notice(
+        messages,
+        session_key="web:wiring",
+        state={"session_key": "web:wiring"},
+        persona_adopted_digest=persona_digest("v1"),
+    )
+    notices = [
+        item for item in changed if str(item.get("content") or "").startswith("[RUNTIME_NOTICE]")
+    ]
+    assert len(notices) == 1
+    assert "v2" in str(notices[0]["content"])
 
 
 def test_frontdoor_prompt_requires_identity_and_persona_photo_handling() -> None:
