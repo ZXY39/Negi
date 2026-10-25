@@ -18,6 +18,10 @@ class StubHTMLElement extends StubElement {
 }
 
 function loadApp() {
+    const probe = {
+        fontSize: "13.6px",
+        metrics: { fontAsc: 13, fontDesc: 4, inkAsc: 10, inkDesc: 0 },
+    };
     const context = {
         console,
         setTimeout,
@@ -29,12 +33,33 @@ function loadApp() {
         location: { protocol: "http:", host: "localhost", pathname: "/org_graph.html" },
         localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
         sessionStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+        getComputedStyle: () => ({
+            fontStyle: "normal",
+            fontWeight: "600",
+            fontSize: probe.fontSize,
+            fontFamily: "Fira Sans",
+        }),
         document: {
             getElementById: () => null,
             querySelector: () => null,
             querySelectorAll: () => [],
             addEventListener: () => {},
-            createElement: () => new StubHTMLElement(),
+            createElement: (tag) => {
+                if (String(tag).toLowerCase() === "canvas") {
+                    return {
+                        getContext: () => ({
+                            font: "",
+                            measureText: () => ({
+                                fontBoundingBoxAscent: probe.metrics.fontAsc,
+                                fontBoundingBoxDescent: probe.metrics.fontDesc,
+                                actualBoundingBoxAscent: probe.metrics.inkAsc,
+                                actualBoundingBoxDescent: probe.metrics.inkDesc,
+                            }),
+                        }),
+                    };
+                }
+                return new StubHTMLElement();
+            },
         },
         Element: StubElement,
         HTMLElement: StubHTMLElement,
@@ -59,10 +84,10 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${APP_CODE}\nthis.__testExports = { formatCeoExecutionSeconds, ceoTurnElapsedSeconds, refreshCeoFlowUsage, refreshLiveDurationBadges, buildCeoRequestedAtByTurn, setCeoTurnUsage, S, HTMLElement };`,
+        `${APP_CODE}\nthis.__testExports = { formatCeoExecutionSeconds, ceoTurnElapsedSeconds, refreshCeoFlowUsage, refreshLiveDurationBadges, buildCeoRequestedAtByTurn, ceoFlowDotLiftPx, setCeoTurnUsage, S, HTMLElement };`,
         context
     );
-    return context.__testExports;
+    return { ...context.__testExports, __probe: probe };
 }
 
 const ISO = (ms) => new Date(ms).toISOString();
@@ -165,21 +190,41 @@ test("history pairing takes the earliest request row of a turn", () => {
     assert.equal(map.get("t2"), Date.parse("2026-10-25T11:00:00+08:00"));
 });
 
+test("dot lift follows the measured font metrics", () => {
+    const api = loadApp();
+    const usage = new api.HTMLElement();
+
+    // Fira Sans：墨迹中心比行框中心高半像素。
+    assert.equal(api.ceoFlowDotLiftPx(usage), 0.5);
+
+    // 换一个下伸部更深的字体：同样的数字墨高需要抬 1.5px。
+    api.__probe.fontSize = "20px";
+    api.__probe.metrics = { fontAsc: 16, fontDesc: 8, inkAsc: 12, inkDesc: 1 };
+    assert.equal(api.ceoFlowDotLiftPx(usage), 1.5);
+});
+
 test("live tool rows carry no rail status dot", () => {
     const match = /\.task-trace-live-steps\s+\.interaction-step::before\s*\{([\s\S]*?)\n\}/.exec(CSS);
     assert.ok(match, "live-step dot rule not found");
     assert.match(match[1], /display:\s*none/);
 });
 
-test("flow chevron dot shares the guide line's center in both axes", () => {
-    const dot = /\.interaction-flow-chevron::before\s*\{([\s\S]*?)\n\}/.exec(CSS);
-    assert.ok(dot, "chevron dot rule not found");
-    // 横向与引导线同轴、纵向与秒数墨迹中心同高，各移半像素。
-    assert.match(dot[1], /transform:\s*translate\(0\.5px,\s*-0\.5px\)/);
+test("flow dot hangs off the seconds box and follows the measured lift", () => {
+    const usage = /\.interaction-flow-usage\s*\{([\s\S]*?)\n\}/.exec(CSS);
+    assert.ok(usage, "usage rule not found");
+    assert.match(usage[1], /padding-left:\s*42px/);
+
+    const dot = /\.interaction-flow-usage::before\s*\{([\s\S]*?)\n\}/.exec(CSS);
+    assert.ok(dot, "usage dot rule not found");
+    assert.match(dot[1], /left:\s*4px/);
+    assert.match(dot[1], /width:\s*9px/);
+    assert.match(dot[1], /top:\s*calc\(50% - 4\.5px - var\(--ceo-flow-dot-lift, 0\.5px\)\)/);
+    assert.doesNotMatch(dot[1], /transform:/);
 
     const guide = /\.interaction-flow-guide\s*\{([\s\S]*?)\n\}/.exec(CSS);
     assert.ok(guide, "guide rule not found");
     assert.match(guide[1], /left:\s*8px/);
-    assert.match(guide[1], /top:\s*23\.5px/);
+    assert.match(guide[1], /top:\s*calc\(23\.5px - var\(--ceo-flow-dot-lift, 0\.5px\)\)/);
     assert.match(guide[1], /width:\s*1px/);
+    assert.doesNotMatch(CSS, /\.interaction-flow-chevron/);
 });

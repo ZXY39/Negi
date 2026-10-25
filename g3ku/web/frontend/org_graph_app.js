@@ -5053,6 +5053,45 @@ function buildCeoRequestedAtByTurn(messages = []) {
     return map;
 }
 
+const CEO_FLOW_DOT_LIFT_CACHE = { fontSpec: "", lift: null, ctx: null };
+
+// 圆点要抬多少像素才落在秒数墨迹的中线上：墨迹中心与行框中心的差值由字体的
+// ascent/descent 与数字墨高决定，CSS 拿不到这些量，只能按实际字体量一次。
+function ceoFlowDotLiftPx(element) {
+    if (!(element instanceof HTMLElement) || typeof getComputedStyle !== "function") return null;
+    const cs = getComputedStyle(element);
+    const fontSpec = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+    if (CEO_FLOW_DOT_LIFT_CACHE.fontSpec === fontSpec) return CEO_FLOW_DOT_LIFT_CACHE.lift;
+    if (!CEO_FLOW_DOT_LIFT_CACHE.ctx) {
+        CEO_FLOW_DOT_LIFT_CACHE.ctx = document.createElement("canvas").getContext?.("2d") || null;
+    }
+    const ctx = CEO_FLOW_DOT_LIFT_CACHE.ctx;
+    if (!ctx) return null;
+    ctx.font = fontSpec;
+    // 固定用数字串取样：秒数只会变长短，不会改变墨高/墨底。
+    const metrics = ctx.measureText("0123456789");
+    const fontAsc = Number(metrics.fontBoundingBoxAscent);
+    const fontDesc = Number(metrics.fontBoundingBoxDescent);
+    const inkAsc = Number(metrics.actualBoundingBoxAscent);
+    const inkDesc = Number(metrics.actualBoundingBoxDescent);
+    if (![fontAsc, fontDesc, inkAsc, inkDesc].every((value) => Number.isFinite(value))) return null;
+    // inkCenter − boxCenter = ((asc − desc) − (inkAsc − inkDesc)) / 2；抬升量取相反数。
+    const lift = Math.round((((inkAsc - inkDesc) - (fontAsc - fontDesc)) / 2) * 100) / 100;
+    CEO_FLOW_DOT_LIFT_CACHE.fontSpec = fontSpec;
+    CEO_FLOW_DOT_LIFT_CACHE.lift = lift;
+    return lift;
+}
+
+// 秒数换字体/字号后墨迹中线会跟着变：把抬升量写到根节点，所有已渲染的头部一起更新。
+function syncCeoFlowDotLift() {
+    const usage = document.querySelector?.(".interaction-flow-usage");
+    const root = document.documentElement;
+    if (!usage || !root?.style?.setProperty) return;
+    const lift = ceoFlowDotLiftPx(usage);
+    if (lift === null) root.style.removeProperty("--ceo-flow-dot-lift");
+    else root.style.setProperty("--ceo-flow-dot-lift", `${lift}px`);
+}
+
 function renderCeoTurnsIntoTurn(turn, turns = [], { interruptedMarker = false } = {}) {
     if (!turn?.listEl || !turn?.flowEl) return 0;
     if (typeof buildTurnGroupDescriptors !== "function" || typeof renderTraceStep !== "function") return 0;
@@ -5088,6 +5127,7 @@ function renderCeoTurnsIntoTurn(turn, turns = [], { interruptedMarker = false } 
     turn.flowEl.hidden = false;
     // 框默认折叠；用户此前展开过的话由 applyCeoTurnTraceViewState 按 flowOpen 还原。
     refreshCeoFlowUsage(turn);
+    syncCeoFlowDotLift();
     applyCeoTurnTraceViewState(turn, turnViewState);
     // 整帧重建换掉了 listEl，实时行先躲在容器里；这一帧账本已经画上的调用让它退场，
     // 还在跑的挂回新的组体内——同一件事不再因为换帧而改变位置。
@@ -5725,7 +5765,6 @@ function createPendingCeoTurn(source = "user", { scrollMode = "preserve", reques
                 </div>
                 <details class="interaction-flow" hidden>
                     <summary class="interaction-flow-summary">
-                        <span class="interaction-flow-chevron" aria-hidden="true"></span>
                         <span class="interaction-flow-usage" data-flow-usage></span>
                         <span class="interaction-flow-meta" hidden>等待工具开始...</span>
                         <span class="interaction-flow-guide" aria-hidden="true"></span>
@@ -9907,6 +9946,8 @@ function applyReadingScale(raw) {
         document.documentElement.style.setProperty("--reading-font-scale", String(scale));
     }
     if (U.readingScale) U.readingScale.value = String(scale);
+    // 字号档位改了，秒数的墨迹中线跟着变，圆点的抬升量要重量。
+    if (typeof syncCeoFlowDotLift === "function") syncCeoFlowDotLift();
     return scale;
 }
 
@@ -10768,6 +10809,10 @@ function init() {
     hydrateCeoSessionSnapshotCache();
     restoreCeoComposerDraftForSession(activeSessionId());
     startLiveDurationTicker();
+    // 字体晚于首帧可用时墨迹会换一次：加载完成后把圆点的抬升量重量一遍。
+    document.fonts?.ready?.then?.(() => {
+        syncCeoFlowDotLift();
+    })?.catch?.(() => {});
     bindAuditBadge();
     void refreshAuditBadge();
     bindUpdateNotice();

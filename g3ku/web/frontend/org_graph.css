@@ -3703,30 +3703,6 @@ textarea {
 .interaction-flow-summary::-webkit-details-marker {
     display: none;
 }
-/* 前门展开钮是一个 8px 圆点（#39c5bb），16px 盒子用来对齐点击区。 */
-.interaction-flow-chevron {
-    position: relative;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    flex: none;
-    width: 16px;
-    height: 16px;
-    font-size: 0;
-    line-height: 1;
-}
-
-.interaction-flow-chevron::before {
-    content: "";
-    width: 8px;
-    height: 8px;
-    border-radius: var(--radius-full);
-    background: #39c5bb;
-    /* 半步微调，两个方向都是为了让点在像素网格上真正居中：
-       横：点居中的中心落在左起 8px 的分界上，1px 引导线占 8~9px、中心 8.5px，右移半分才同轴；
-       纵：秒数是纯数字、没有下伸部，墨迹中心比行框中心高半分，上移半分才和秒数在同一条中线上。 */
-    transform: translate(0.5px, -0.5px);
-}
 
 .interaction-flow-meta {
     flex: 1;
@@ -17447,12 +17423,32 @@ textarea {
     padding-left: 0;
 }
 
+/* 前门头部的圆点是秒数的前缀，挂在秒数盒子左侧的固定像素上：
+   圆心在 8.5px（与 1px 引导线同轴），直径 9px 时左缘是整像素、圆心落在半像素上，
+   所以圆点既不会被半像素拉扁，也不需要任何 transform。
+   纵向按秒数自己的墨迹中线对齐：--ceo-flow-dot-lift 由脚本用实际字体量出，
+   缺省 0.5px 是 Fira Sans 的墨迹中心比行框中心高出的量。 */
 .interaction-flow-usage {
+    position: relative;
     flex: none;
+    /* 42px = 原 16px 点位 + 26px 间隔：秒数仍落在内部中途文本正文的竖轴上。 */
+    padding-left: 42px;
     font-size: 0.85rem;
     font-weight: 600;
     color: var(--text-primary);
     font-variant-numeric: tabular-nums;
+}
+
+.interaction-flow-usage::before {
+    content: "";
+    position: absolute;
+    left: 4px;
+    top: calc(50% - 4.5px - var(--ceo-flow-dot-lift, 0.5px));
+    width: 9px;
+    height: 9px;
+    border-radius: var(--radius-full);
+    background: #39c5bb;
+    pointer-events: none;
 }
 
 /* 外层框是唯一卡片：内部条目只留内容，不再各画一层卡。 */
@@ -17512,8 +17508,8 @@ textarea {
 .interaction-flow-guide {
     position: absolute;
     left: 8px;
-    /* 起点跟着圆点走：圆点上移半像素后，线也从 23.5px 起，仍从圆点中心往下长。 */
-    top: 23.5px;
+    /* 起点跟着圆点走：圆点按 --ceo-flow-dot-lift 抬升后，线从同一高度往下长。 */
+    top: calc(23.5px - var(--ceo-flow-dot-lift, 0.5px));
     bottom: var(--space-3);
     width: 1px;
     background: #39c5bb;
