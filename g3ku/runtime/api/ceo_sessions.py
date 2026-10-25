@@ -19,6 +19,7 @@ from g3ku.runtime.external_sessions import get_external_session_registry
 from g3ku.runtime.frontdoor.message_builder import (
     MEMORY_SNAPSHOT_ADOPTION_MANUAL_COMPRESSION,
     adopt_memory_snapshot,
+    adopt_persona,
 )
 from g3ku.runtime.frontdoor.turns import find_frontdoor_turn_tool
 from g3ku.runtime.session_agent import (
@@ -1290,11 +1291,17 @@ async def _execute_manual_context_compression(agent, runtime_session, *, pause_f
             memory_manager=memory_manager,
             reason=MEMORY_SNAPSHOT_ADOPTION_MANUAL_COMPRESSION,
         )
+        adopt_persona(
+            runtime_session,
+            memory_manager=memory_manager,
+            reason=MEMORY_SNAPSHOT_ADOPTION_MANUAL_COMPRESSION,
+        )
         notice_scope = _skill_roster_notice.session_scope_key(
             getattr(getattr(runtime_session, "state", None), "session_key", "")
         )
         if notice_scope:
             _skill_roster_notice.reset_memory_cursor(notice_scope)
+            _skill_roster_notice.reset_persona_cursor(notice_scope)
 
 
 @router.post("/ceo/sessions/{session_id}/compress-context")

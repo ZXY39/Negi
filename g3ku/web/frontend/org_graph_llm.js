@@ -1761,6 +1761,7 @@
       closeEditor();
       await waitForRuntimeRefreshAndUpdateToast(saveResult?.runtimeRefresh);
       await loadAll();
+      void window.G3kuOnboarding?.onProviderSaved?.(saveResult);
     } finally {
       state.saving = false;
       renderAll();
@@ -2194,6 +2195,13 @@
       renderAll();
       return;
     }
+    const onboardingMessage = window.G3kuOnboarding?.validateChainsBeforeSave?.();
+    if (onboardingMessage) {
+      llmState().error = onboardingMessage;
+      showToast({ title: "保存失败", text: onboardingMessage, kind: "error" });
+      renderAll();
+      return;
+    }
     llmState().saving = true;
     renderAll();
     try {
@@ -2216,6 +2224,7 @@
       S.modelCatalog.roleEditing = false;
       S.modelCatalog.rolesDirty = false;
       showToast({ title: "保存成功", text: "模型链已更新", kind: "success" });
+      void window.G3kuOnboarding?.onChainsSaved?.();
     } catch (error) {
       llmState().error = error?.message || "保存失败";
       showToast({ title: "保存失败", text: llmState().error, kind: "error" });

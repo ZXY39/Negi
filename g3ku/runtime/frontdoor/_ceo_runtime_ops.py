@@ -18,6 +18,7 @@ from typing import Any
 
 from loguru import logger
 
+from g3ku.agent.persona import persona_digest, render_persona_notice
 from g3ku.agent.tools.base import Tool
 from g3ku.config.live_runtime import get_runtime_config, peek_runtime_revision
 from g3ku.core.messages import UserInputMessage
@@ -62,7 +63,9 @@ from g3ku.runtime.context.image_metrics import bmp_dimensions, webp_dimensions
 from g3ku.runtime.context.summarizer import estimate_tokens
 from g3ku.runtime.frontdoor import pinned_tool_bundle
 from g3ku.runtime.frontdoor.message_builder import (
+    PERSONA_DIGEST_ATTR,
     memory_snapshot_provenance,
+    persona_provenance,
 )
 from g3ku.runtime.frontdoor.token_preflight_compaction import (
     FrontdoorTokenPreflightResult,
@@ -3659,6 +3662,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             # 拿前缀键去查会取回空名单，把全部技能当成新增。
             covered_skill_ids=pinned_skill_ids_for(None, session_key=normalized_session_key),
             memory_provider=self._frontdoor_memory_notice_provider,
+            persona_provider=self._frontdoor_persona_notice_provider,
             contract_sections=self._frontdoor_contract_notice_sections(
                 dict(state or {}),
                 session_key=normalized_session_key,
@@ -3792,6 +3796,36 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             return manager.memory_notice_delta(since_rev=int(since_rev))
         except Exception:
             return None
+
+    def _frontdoor_persona_notice_provider(
+        self,
+        *,
+        cursor_digest: str = "",
+        initialized: bool = False,
+    ) -> dict[str, Any] | None:
+        """Persona delta for the same `[RUNTIME_NOTICE]` message.
+
+        The head block is frozen. A first delivery aligns to the *adopted* digest, not the
+        current file: a change made between adoption and the first notice still has to be
+        announced. After compression the cursor is reset and the adopted digest is already
+        the new value, so the next delivery aligns silently.
+        """
+        manager = getattr(self._loop, "memory_manager", None)
+        if manager is None or not callable(getattr(manager, "persona_text", None)):
+            return None
+        try:
+            current = str(manager.persona_text() or "").strip()
+        except Exception:
+            return None
+        digest = persona_digest(current)
+        adopted_digest = str(getattr(self, PERSONA_DIGEST_ATTR, "") or "")
+        if not initialized:
+            if digest == adopted_digest:
+                return {"digest": digest, "text": "", "align": True}
+            return {"digest": digest, "text": render_persona_notice(current), "rebase": False}
+        if digest == str(cursor_digest or "").strip():
+            return {"digest": digest, "text": "", "rebase": False}
+        return {"digest": digest, "text": render_persona_notice(current), "rebase": False}
 
     def _emit_frontdoor_skill_roster_notice_event(self, *, session_key: str, records: list[dict[str, Any]]) -> None:
         """会话流里画一条内部行（与心跳 ack 同一族 system 行），不是用户气泡。
@@ -5053,6 +5087,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             request_lane=request_lane,
             provider_request_started_at=provider_request_started_at,
             memory_snapshot=memory_snapshot_provenance(target_session),
+            persona=persona_provenance(target_session),
         )
         if target_session is not None:
             restore_source = str(getattr(target_session, "_frontdoor_restore_source", "none") or "none").strip() or "none"
@@ -5271,6 +5306,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         parent_request_id: str = "",
         provider_request_started_at: str = "",
         memory_snapshot: dict[str, Any] | None = None,
+        persona: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         diagnostics = dict(prompt_cache_diagnostics or {})
         requested_provider_model = str((list(state.get("model_refs") or []) or [""])[0] or "").strip()
@@ -5323,6 +5359,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             # 长期记忆快照是会话级冻结值（采纳点=首请求/压缩轮末/手动压缩后），而本地 prompt
             # cache key 与 preflight 投影都不含这个块，只有这组字段能证明冻结生效。
             "memory_snapshot": dict(memory_snapshot or {}),
+            # 人设块同样冻结在头部；人设中途变化走尾部通知，这组字段证明这一跳带的是哪一版。
+            "persona": dict(persona or {}),
             "parallel_tool_calls": parallel_tool_calls,
             "prompt_cache_key": str(prompt_cache_key or "").strip(),
             "prompt_cache_key_hash": str(diagnostics.get("prompt_cache_key_hash") or "").strip(),
@@ -5422,6 +5460,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 request_lane=request_lane,
                 parent_request_id=parent_request_id,
                 memory_snapshot=memory_snapshot_provenance(target_session),
+                persona=persona_provenance(target_session),
             ),
         )
 

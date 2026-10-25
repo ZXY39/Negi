@@ -1118,6 +1118,8 @@
                                 type="button">修改密码</button>
                             <button id="project-settings-open-bundle-btn" class="toolbar-btn ghost"
                                 type="button">配置</button>
+                            <button id="project-settings-open-persona-btn" class="toolbar-btn ghost"
+                                type="button">人设</button>
                         </div>
                         <div class="project-settings-actions">
                             <label class="project-settings-font-row" for="project-settings-reading-scale">
@@ -1148,6 +1150,64 @@
                         </label>
                         <button id="project-settings-lock-btn" class="toolbar-btn ghost" type="button">锁定</button>
                         <button id="project-settings-exit-btn" class="toolbar-btn danger" type="button">退出</button>
+                    </div>
+                </section>
+            </div>
+
+            <div id="persona-onboarding-backdrop" class="confirm-backdrop" hidden>
+                <section id="persona-onboarding-dialog" class="confirm-dialog persona-onboarding-dialog"
+                    role="dialog" aria-modal="true" aria-labelledby="persona-onboarding-title" tabindex="-1">
+                    <div class="confirm-header">
+                        <h2 id="persona-onboarding-title">让我认识你</h2>
+                        <button id="persona-onboarding-close-btn" class="icon-btn dialog-close-btn" type="button"
+                            aria-label="跳过">
+                            <i data-lucide="x" aria-hidden="true"></i>
+                        </button>
+                    </div>
+                    <div class="persona-onboarding-body">
+                        <div class="persona-onboarding-upload">
+                            <input id="persona-onboarding-photo-input" type="file"
+                                accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" multiple hidden>
+                            <button id="persona-onboarding-photo-pick" class="toolbar-btn ghost" type="button">选择照片</button>
+                            <span id="persona-onboarding-photo-status" class="persona-onboarding-status"></span>
+                        </div>
+                        <div id="persona-onboarding-photo-grid" class="persona-photo-grid"></div>
+                        <label class="persona-onboarding-field" for="persona-onboarding-description">
+                            <span>我是谁</span>
+                            <textarea id="persona-onboarding-description" maxlength="39000" rows="6"
+                                placeholder="名字、身份、说话方式、称呼习惯……"></textarea>
+                        </label>
+                        <p id="persona-onboarding-error" class="persona-onboarding-error" role="alert" hidden></p>
+                    </div>
+                    <div class="confirm-actions">
+                        <button id="persona-onboarding-skip-btn" class="toolbar-btn ghost" type="button">跳过</button>
+                        <button id="persona-onboarding-next-btn" class="toolbar-btn success" type="button">下一步</button>
+                    </div>
+                </section>
+            </div>
+
+            <div id="persona-dialog-backdrop" class="confirm-backdrop" hidden>
+                <section id="persona-dialog" class="confirm-dialog project-settings-dialog persona-dialog"
+                    role="dialog" aria-modal="true" aria-labelledby="persona-dialog-title" tabindex="-1">
+                    <div class="confirm-header">
+                        <h2 id="persona-dialog-title">人设</h2>
+                        <button id="persona-dialog-close-btn" class="icon-btn dialog-close-btn" type="button"
+                            aria-label="关闭人设">
+                            <i data-lucide="x" aria-hidden="true"></i>
+                        </button>
+                    </div>
+                    <div class="persona-dialog-body">
+                        <section class="persona-dialog-section">
+                            <h3>我是谁</h3>
+                            <pre id="persona-dialog-description" class="persona-dialog-description"></pre>
+                        </section>
+                        <section class="persona-dialog-section">
+                            <h3>照片</h3>
+                            <div id="persona-dialog-photo-grid" class="persona-photo-grid"></div>
+                        </section>
+                    </div>
+                    <div class="confirm-actions">
+                        <button id="persona-dialog-close" class="toolbar-btn ghost" type="button">关闭</button>
                     </div>
                 </section>
             </div>
@@ -1349,6 +1409,7 @@
     <script src="client_api/tasks.js"></script>
     <script src="client_api/models.js"></script>
     <script src="client_api/memory.js"></script>
+    <script src="client_api/persona.js"></script>
     <script src="client_api/audit.js"></script>
     <script src="client_api/resources.js"></script>
     <script src="client_api/external.js"></script>
@@ -1387,6 +1448,7 @@
     <script src="org_graph_ceo_governance.js"></script>
     <script src="org_graph_llm.js"></script>
     <script src="org_graph_external.js"></script>
+    <script src="org_graph_onboarding.js"></script>
     <script>
         if (window.lucide && typeof window.lucide.createIcons === "function") {
             window.lucide.createIcons();

@@ -39,6 +39,7 @@ from g3ku.agent.markdown_memory import (
     split_consolidation_block,
     validate_memory_document,
 )
+from g3ku.agent.persona import PERSONA_NOTE_REF, persona_digest, persona_note_handle
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.providers.base import normalize_usage_payload
 from g3ku.providers.chatmodels import build_chat_model
@@ -622,6 +623,11 @@ class _MemoryToolSession:
         if normalized in self.staged_notes:
             return self.staged_notes[normalized]
         note_file_name(normalized)
+        if normalized in {PERSONA_NOTE_REF, persona_note_handle()}:
+            persona_path = self.notes_dir / note_file_name(PERSONA_NOTE_REF)
+            if persona_path.exists():
+                return persona_path.read_text(encoding="utf-8")
+            raise FileNotFoundError(f"memory note not found: {normalized} (persona note is unset)")
         ordinary_names = {path.stem for path in self.notes_dir.glob("*.md")} | set(self.staged_notes)
         category_names = {path.stem for path in self.index_dir.glob("*.md")} if self.index_dir is not None else set()
         normalized = resolve_note_token(normalized, ordinary_names, category_names)
@@ -718,6 +724,11 @@ class _MemoryToolSession:
                     )
                 if decision_source not in {"user", "self"}:
                     errors[f"adds[{index}].decision_source"] = "decision_source must be user or self"
+                if note_ref and note_ref in {PERSONA_NOTE_REF, persona_note_handle()}:
+                    errors[f"adds[{index}].note_ref"] = (
+                        "the persona note is reserved for persona updates; "
+                        "ordinary memories cannot attach it"
+                    )
                 if content and minimal_memory and decision_source in {"user", "self"}:
                     normalized_adds.append(
                         {
@@ -749,6 +760,11 @@ class _MemoryToolSession:
                 if minimal_memory and ("\n" in minimal_memory or "\r" in minimal_memory):
                     errors[f"rewrites[{index}].minimal_memory"] = (
                         "minimal_memory must be a single line; put the detail in note_upserts"
+                    )
+                if note_ref and note_ref in {PERSONA_NOTE_REF, persona_note_handle()}:
+                    errors[f"rewrites[{index}].note_ref"] = (
+                        "the persona note is reserved for persona updates; "
+                        "ordinary memories cannot attach it"
                     )
                 if line and content and minimal_memory:
                     normalized_rewrites.append(
@@ -970,6 +986,11 @@ class _ConsolidationToolSession:
                     continue
                 if not ref.startswith("note_"):
                     errors[f"note_writes[{index}]"] = "category note ref must start with note_"
+                    continue
+                if ref == PERSONA_NOTE_REF:
+                    errors[f"note_writes[{index}]"] = (
+                        "note_persona is reserved for the persona note; pick another category note name"
+                    )
                     continue
                 # A *new* category note may not take the name of an ordinary note: readers
                 # look in `memory/notes/` first, so the 归并区 line would open the wrong
@@ -2554,6 +2575,62 @@ class MemoryManager:
             "updated_at": self._now_iso(),
         }
 
+    def _persona_note_path(self) -> Path:
+        return self.notes_dir / note_file_name(PERSONA_NOTE_REF)
+
+    def persona_text(self) -> str:
+        """The persona body, or empty when unset.
+
+        Read the ordinary file directly, never through `_note_path`: the bare-name
+        resolver prefers `memory/notes/` and then falls back to `memory/index/`, so a
+        category note that happens to share the reserved name must not become the
+        persona body.
+        """
+        try:
+            return self._persona_note_path().read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            return ""
+        except OSError:
+            return ""
+
+    def set_persona(self, text: str) -> dict[str, Any]:
+        """Write the persona note directly (onboarding save lane).
+
+        This is the operator-triggered write, not a memory commit: it creates or
+        overwrites the one reserved note under `notes_dir`, never a memory row. The
+        memory agent may still refine the same file through `note_edits` /
+        `note_upserts` afterwards.
+        """
+        body = str(text or "").strip()
+        if not body:
+            raise ValueError("persona text must not be empty")
+        with self._io_lock:
+            path = self._persona_note_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._atomic_write_text(path, self._normalize_note_text(body))
+        return {
+            "ref": PERSONA_NOTE_REF,
+            "body": body,
+            "digest": persona_digest(body),
+            "updated_at": self._now_iso(),
+        }
+
+    def _is_persona_note_ref(self, ref: str) -> bool:
+        normalized = str(ref or "").strip()
+        if not normalized:
+            return False
+        if normalized in {PERSONA_NOTE_REF, persona_note_handle()}:
+            return True
+        try:
+            resolved = resolve_note_token(
+                normalized,
+                self._ordinary_note_names(),
+                self._category_note_names(),
+            )
+        except Exception:
+            return False
+        return resolved == PERSONA_NOTE_REF
+
     def doctor_report(
         self,
         *,
@@ -2579,7 +2656,9 @@ class MemoryManager:
         note_refs = self._owned_note_refs()
         note_files = self._note_file_refs()
         missing_note_refs = sorted(ref for ref in note_refs if ref not in note_files)
-        orphan_notes = sorted(ref for ref in note_files if ref not in note_refs)
+        orphan_notes = sorted(
+            ref for ref in note_files if ref not in note_refs and ref != PERSONA_NOTE_REF
+        )
         category_rows, broken_categories = self._consolidation_categories()
         name_collisions = self._note_name_collisions()
         queue_rows, queue_parse_errors = self._read_queue_requests_with_diagnostics()
@@ -2659,6 +2738,8 @@ class MemoryManager:
             "memory_note_refs": note_refs,
             "missing_note_refs": missing_note_refs,
             "orphan_notes": orphan_notes,
+            "persona_note_present": self._persona_note_path().exists(),
+            "persona_note_chars": len(self.persona_text()),
             "consolidated_categories": len(category_rows),
             "broken_category_links": broken_categories,
             "note_name_collisions": name_collisions,
@@ -2677,7 +2758,9 @@ class MemoryManager:
         note_refs = self._memory_repo.owned_note_refs()
         note_files = self._note_file_refs()
         missing_note_refs = sorted(ref for ref in note_refs if ref not in note_files)
-        orphan_notes = sorted(ref for ref in note_files if ref not in note_refs)
+        orphan_notes = sorted(
+            ref for ref in note_files if ref not in note_refs and ref != PERSONA_NOTE_REF
+        )
         _category_rows, broken_categories = self._consolidation_categories()
         category_names = self._category_note_names()
         created_notes: list[str] = []
@@ -2908,6 +2991,14 @@ class MemoryManager:
         ordinary_names = self._ordinary_note_names()
         category_names = self._category_note_names()
         file_name = note_file_name(resolve_note_token(normalized, ordinary_names, category_names))
+        if file_name == note_file_name(PERSONA_NOTE_REF):
+            persona_path = self.notes_dir / file_name
+            if persona_path.exists():
+                return persona_path
+            raise FileNotFoundError(
+                f"memory note not found: {normalized} - the persona note is reserved to "
+                "memory/notes/ and has no category fallback"
+            )
         prefer_index = (
             normalized[0] == CATEGORY_HANDLE_PREFIX and normalized not in (ordinary_names | category_names)
         )
@@ -4585,6 +4676,8 @@ class MemoryManager:
         else is an ordinary note. The ordinary lane may fix a stale category description,
         but it cannot invent a category - that is the consolidator's job.
         """
+        if self._is_persona_note_ref(ref):
+            return self.notes_dir / note_file_name(PERSONA_NOTE_REF)
         name = note_file_name(ref)
         indexed = self.index_dir / name
         if indexed.exists():
@@ -4593,6 +4686,8 @@ class MemoryManager:
 
     def _note_edit_target(self, ref: str) -> Path:
         """Edits land on whichever directory actually holds the note."""
+        if self._is_persona_note_ref(ref):
+            return self.notes_dir / note_file_name(PERSONA_NOTE_REF)
         name = note_file_name(ref)
         for candidate in (self.notes_dir / name, self.index_dir / name):
             if candidate.exists():
@@ -4669,6 +4764,9 @@ class MemoryManager:
         unrecoverable file deletion that leaves no trace cannot be triaged later.
         """
         active_refs = set(self._referenced_note_refs())
+        # The persona note is owned by the reserved name, not by a memory row; without
+        # this it would be reaped on the first commit after it is written.
+        active_refs.add(PERSONA_NOTE_REF)
         removed: list[str] = []
         for path in self.notes_dir.glob("*.md"):
             if path.stem in active_refs:
@@ -5834,6 +5932,7 @@ class MemoryManager:
         return (
             f"当前记忆正文（每行开头 `N|` 是这一行的行号）：\n"
             f"{self._render_numbered_memory_body(snapshot_text)}\n\n"
+            f"人设描述:note {persona_note_handle()}（不是普通记忆行，没有行号；正文按需读）\n\n"
             f"现有 note refs：{json.dumps(note_index, ensure_ascii=False)}\n"
             f"当前批次类型：{batch.op}\n"
             f"待处理请求：\n{json.dumps(requests, ensure_ascii=False, indent=2)}\n"

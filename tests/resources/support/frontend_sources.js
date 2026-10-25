@@ -17,6 +17,7 @@ const FRONTEND_BUNDLES = Object.freeze({
         "client_api/tasks.js",
         "client_api/models.js",
         "client_api/memory.js",
+        "client_api/persona.js",
         "client_api/audit.js",
         "client_api/resources.js",
         "client_api/external.js",
@@ -50,6 +51,7 @@ const FRONTEND_BUNDLES = Object.freeze({
     resources: ["org_graph_resources.js"],
     governance: ["org_graph_ceo_governance.js"],
     llm: ["org_graph_llm.js"],
+    onboarding: ["org_graph_onboarding.js"],
     external: ["org_graph_external.js"],
 });
 

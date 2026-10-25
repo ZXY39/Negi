@@ -2252,18 +2252,19 @@ async def test_message_builder_directly_continues_request_body_seed_without_stag
 
     assert stable_contents[0] == "BASE PROMPT"
     assert "previous final answer" in rendered
-    assert result.stable_messages[3]["role"] == "assistant"
-    assert result.stable_messages[3]["content"] == ""
-    assert result.stable_messages[3]["tool_calls"] == [
+    tool_call_message = next(item for item in result.stable_messages if item.get("tool_calls"))
+    assert tool_call_message["role"] == "assistant"
+    assert tool_call_message["content"] == ""
+    assert tool_call_message["tool_calls"] == [
         {
             "id": "call-exec-1",
             "type": "function",
             "function": {"name": "exec", "arguments": "{}"},
         }
     ]
-    assert result.stable_messages[4]["role"] == "tool"
-    assert result.stable_messages[4]["tool_call_id"] == "call-exec-1"
-    assert result.stable_messages[4]["name"] == "exec"
+    tool_message = next(item for item in result.stable_messages if item.get("role") == "tool")
+    assert tool_message["tool_call_id"] == "call-exec-1"
+    assert tool_message["name"] == "exec"
     assert stable_contents[-1] == '{"status":"success"}'
     # 续跑轮的这一句仍然原样在场，只是末位 user 会盖上送达时间锚点。
     from g3ku.core.timefmt import MESSAGE_ARRIVAL_TIME_MARKER

@@ -11,6 +11,7 @@ Object.assign(
     window.ApiDomains.tasks,
     window.ApiDomains.models,
     window.ApiDomains.memory,
+    window.ApiDomains.persona,
     window.ApiDomains.audit,
     window.ApiDomains.resources,
     window.ApiDomains.external,

@@ -91,6 +91,7 @@ def deliver_for_scope(
     now: str,
     covered_skill_ids: list[Any] | None = None,
     memory_provider: Any = None,
+    persona_provider: Any = None,
     contract_sections: dict[str, Any] | None = None,
     covered_contract_sections: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, list[dict[str, str]]]:
@@ -138,18 +139,36 @@ def deliver_for_scope(
                 next_cursor['base_rev'] = next_rev
             cursor = next_cursor
     context['memory_cursor'] = cursor
+    persona_text = ''
+    persona_cursor = dict(context.get('persona_cursor') or {})
+    if callable(persona_provider):
+        try:
+            persona_delta = persona_provider(
+                cursor_digest=str(persona_cursor.get('digest') or ''),
+                initialized=bool(persona_cursor.get('initialized')),
+            )
+        except Exception:
+            persona_delta = None
+        if isinstance(persona_delta, dict):
+            next_digest = str(persona_delta.get('digest') or '').strip()
+            next_text = str(persona_delta.get('text') or '').strip()
+            if next_text:
+                persona_text = next_text
+            persona_cursor = {'digest': next_digest, 'initialized': True}
+    context['persona_cursor'] = persona_cursor
     context, changed_contract = record_contract_sections(
         context,
         contract_sections or {},
         now=now,
         covered_sections=covered_contract_sections,
     )
-    if not pending and not memory_text and not changed_contract:
+    if not pending and not memory_text and not persona_text and not changed_contract:
         set_notice_context(scope_key, context)
         return None, []
     message = build_notice_message(
         pending,
         memory_text=memory_text,
+        persona_text=persona_text,
         contract_sections=changed_contract,
     )
     if message is not None:
@@ -184,6 +203,13 @@ def reset_memory_cursor(scope_key: str) -> None:
     """
     context = notice_context_for(scope_key)
     context['memory_cursor'] = {'rev': 0, 'base_rev': 0, 'initialized': False}
+    set_notice_context(scope_key, context)
+
+
+def reset_persona_cursor(scope_key: str) -> None:
+    """压缩跳：头部人设块已重印，下一跳以采纳值对齐，不重播同一条通知。"""
+    context = notice_context_for(scope_key)
+    context['persona_cursor'] = {'digest': '', 'initialized': False}
     set_notice_context(scope_key, context)
 
 
@@ -275,6 +301,7 @@ def normalize_skill_roster_notice_context(payload: Any) -> dict[str, Any]:
         if str(item or '').strip()
     ]
     cursor_source = source.get('memory_cursor') if isinstance(source.get('memory_cursor'), dict) else {}
+    persona_source = source.get('persona_cursor') if isinstance(source.get('persona_cursor'), dict) else {}
 
     def _cursor_value(name: str) -> int:
         try:
@@ -289,6 +316,10 @@ def normalize_skill_roster_notice_context(payload: Any) -> dict[str, Any]:
             'rev': _cursor_value('rev'),
             'base_rev': _cursor_value('base_rev'),
             'initialized': bool(cursor_source.get('initialized')),
+        },
+        'persona_cursor': {
+            'digest': str(persona_source.get('digest') or '')[:64],
+            'initialized': bool(persona_source.get('initialized')),
         },
         'contract_sections': normalize_contract_sections(source.get('contract_sections')),
     }
@@ -510,6 +541,7 @@ def reset_contract_sections_for_compaction(scope_key: str, *, now: str = '') -> 
     context = notice_context_for(scope_key)
     context['contract_sections'] = {}
     context['memory_cursor'] = {'rev': 0, 'base_rev': 0, 'initialized': False}
+    context['persona_cursor'] = {'digest': '', 'initialized': False}
     _ = now
     set_notice_context(scope_key, context)
     return context
@@ -568,12 +600,13 @@ def build_notice_message(
     records: list[Any],
     *,
     memory_text: str = '',
+    persona_text: str = '',
     contract_sections: list[tuple[str, str]] | None = None,
 ) -> dict[str, Any] | None:
     """一次性投递那条消息：role=user，落在本轮历史末尾。
 
-    各节共用一条消息：skill 名单在前，记忆增量居中，运行时合同变化在最后（最近处，
-    便于模型把"以最新通知为准"落在下一次判断上）；空节省略。
+    各节共用一条消息：skill 名单在前，记忆增量居中，人设更新在其后，运行时合同变化在最后
+    （最近处，便于模型把"以最新通知为准"落在下一次判断上）；空节省略。
     """
     sections: list[str] = []
     skill_text = render_notice_text(records) if records else ''
@@ -582,6 +615,9 @@ def build_notice_message(
     memory_section = str(memory_text or '').strip()
     if memory_section:
         sections.append('\n'.join([MEMORY_NOTICE_HEADING, memory_section]))
+    persona_section = str(persona_text or '').strip()
+    if persona_section:
+        sections.append(persona_section)
     contract_lines = render_contract_update_lines(contract_sections)
     if contract_lines:
         sections.append('\n'.join(contract_lines))
@@ -726,6 +762,7 @@ __all__ = [
     'render_notice_text',
     'reset_contract_sections_for_compaction',
     'reset_memory_cursor',
+    'reset_persona_cursor',
     'seed_contract_sections',
     'session_scope_key',
     'set_notice_context',

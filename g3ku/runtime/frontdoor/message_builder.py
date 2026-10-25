@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from g3ku.agent.markdown_memory import split_consolidation_block
+from g3ku.agent.persona import persona_digest, render_persona_block
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.core.timefmt import (
     MESSAGE_ARRIVAL_TIME_MARKER,
@@ -42,6 +43,7 @@ from g3ku.runtime.web_ceo_sessions import (
     prompt_history_messages,
     trailing_turn_record,
     transcript_messages,
+    workspace_path,
 )
 from main.runtime.tool_names import SILENT_TOOL_NAME
 
@@ -59,6 +61,14 @@ MEMORY_SNAPSHOT_ADOPTION_FIRST_REQUEST = "session_first_request"
 # 压缩边界：上下文被整段重写，头部基座在这一跳更新到最新文档。
 MEMORY_SNAPSHOT_ADOPTION_TOKEN_COMPRESSION = "token_compression"
 MEMORY_SNAPSHOT_ADOPTION_MANUAL_COMPRESSION = "manual_compression"
+
+# 人设块紧跟长期记忆块；两者都在 system 之后、整段历史之前。人设块同样冻结，
+# 中途变化走 `[RUNTIME_NOTICE]`，只在压缩边界重印。
+PERSONA_TEXT_ATTR = "_frontdoor_persona_text"
+PERSONA_DIGEST_ATTR = "_frontdoor_persona_digest"
+PERSONA_ADOPTED_AT_ATTR = "_frontdoor_persona_adopted_at"
+PERSONA_ADOPTION_REASON_ATTR = "_frontdoor_persona_adoption_reason"
+PERSONA_ADOPTION_FIRST_REQUEST = "session_first_request"
 
 
 def _read_memory_snapshot_text(session: Any, memory_manager: Any) -> str | None:
@@ -118,6 +128,50 @@ def memory_snapshot_provenance(session: Any) -> dict[str, Any]:
         "hash": hashlib.sha256(text.encode("utf-8")).hexdigest()[:12],
         "adopted_at": str(getattr(session, MEMORY_SNAPSHOT_ADOPTED_AT_ATTR, "") or ""),
         "adoption_reason": str(getattr(session, MEMORY_SNAPSHOT_ADOPTION_REASON_ATTR, "") or ""),
+    }
+
+
+def _read_persona_text(memory_manager: Any) -> str | None:
+    reader = getattr(memory_manager, "persona_text", None)
+    if not callable(reader):
+        return None
+    try:
+        return str(reader() or "").strip()
+    except Exception:
+        return None
+
+
+def adopt_persona(session: Any, *, memory_manager: Any, reason: str) -> str:
+    """Persona adoption point: re-read the reserved note and freeze its bytes.
+
+    A transient read failure keeps the previous frozen value instead of pinning the
+    session to "no persona": the memory worker may be rewriting the note at this moment.
+    """
+    text = _read_persona_text(memory_manager)
+    if text is None:
+        return str(getattr(session, PERSONA_TEXT_ATTR, "") or "")
+    setattr(session, PERSONA_TEXT_ATTR, text)
+    setattr(session, PERSONA_DIGEST_ATTR, persona_digest(text))
+    setattr(session, PERSONA_ADOPTED_AT_ATTR, datetime.now().astimezone().isoformat())
+    setattr(session, PERSONA_ADOPTION_REASON_ATTR, str(reason or "").strip())
+    return text
+
+
+def adopted_persona_text(session: Any, *, memory_manager: Any) -> str:
+    frozen = getattr(session, PERSONA_TEXT_ATTR, None)
+    if isinstance(frozen, str):
+        return frozen
+    return adopt_persona(session, memory_manager=memory_manager, reason=PERSONA_ADOPTION_FIRST_REQUEST)
+
+
+def persona_provenance(session: Any) -> dict[str, Any]:
+    text = getattr(session, PERSONA_TEXT_ATTR, None)
+    if not isinstance(text, str):
+        return {}
+    return {
+        "digest": str(getattr(session, PERSONA_DIGEST_ATTR, "") or ""),
+        "adopted_at": str(getattr(session, PERSONA_ADOPTED_AT_ATTR, "") or ""),
+        "adoption_reason": str(getattr(session, PERSONA_ADOPTION_REASON_ATTR, "") or ""),
     }
 
 
@@ -348,6 +402,21 @@ class CeoMessageBuilder:
         if str(record.get("role") or "").strip().lower() != "assistant":
             return False
         return str(record.get("content") or "").strip().startswith("## 长期记忆\n")
+
+    @staticmethod
+    def _persona_stable_message(persona_text: str, *, workspace_root: str) -> dict[str, Any]:
+        return {
+            "role": "assistant",
+            "content": render_persona_block(persona_text, workspace_root=workspace_root),
+        }
+
+    @staticmethod
+    def _is_persona_message(record: dict[str, Any] | None) -> bool:
+        if not isinstance(record, dict):
+            return False
+        if str(record.get("role") or "").strip().lower() != "assistant":
+            return False
+        return str(record.get("content") or "").strip().startswith("## 我的人设\n")
 
     @staticmethod
     def _retrieved_memory_resolution_hint_block() -> str:
@@ -1131,6 +1200,11 @@ class CeoMessageBuilder:
             if memory_manager is not None
             else ""
         )
+        persona_text = (
+            adopted_persona_text(session, memory_manager=memory_manager)
+            if memory_manager is not None
+            else ""
+        )
         if memory_write_terms and memory_write_visible:
             turn_overlay_parts.append(self._memory_write_hint_block(memory_write_terms))
 
@@ -1288,6 +1362,7 @@ class CeoMessageBuilder:
             'memory_write_terms': memory_write_terms,
             'memory_write_visible': memory_write_visible,
             'memory_snapshot_text': memory_snapshot_text,
+            'persona_text': persona_text,
             'selected_skills': selected_skills,
             'skill_trace': skill_trace,
             'external_trace': external_trace,
@@ -1421,6 +1496,7 @@ class CeoMessageBuilder:
         split_prompt_builder: bool,
         turn_overlay_parts: list[str],
         memory_snapshot_text: str,
+        persona_text: str,
         current_user_in_history: bool,
         pinned_contract_text: str = '',
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], str]:
@@ -1430,6 +1506,12 @@ class CeoMessageBuilder:
         memory_snapshot_message = self._memory_snapshot_stable_message(memory_snapshot_text)
         if memory_snapshot_message is not None:
             stable_messages.append(memory_snapshot_message)
+        stable_messages.append(
+            self._persona_stable_message(
+                persona_text,
+                workspace_root=str(workspace_path()),
+            )
+        )
         stable_messages.extend(history_messages)
         has_user_content = bool(self._content_text(user_content).strip())
         if not current_user_in_history and has_user_content:
@@ -1463,6 +1545,7 @@ class CeoMessageBuilder:
         user_content: Any,
         turn_overlay_parts: list[str],
         memory_snapshot_text: str,
+        persona_text: str,
         query_text: str,
         user_metadata: dict[str, Any] | None,
         pinned_contract_text: str = "",
@@ -1471,16 +1554,25 @@ class CeoMessageBuilder:
         stable_messages = [
             dict(item)
             for item in self._request_body_seed_records(request_body_seed_messages)
-            if not self._is_memory_snapshot_message(item)
+            if not self._is_memory_snapshot_message(item) and not self._is_persona_message(item)
         ]
         memory_snapshot_message = self._memory_snapshot_stable_message(memory_snapshot_text)
-        if memory_snapshot_message is not None:
-            insert_at = 1 if stable_messages and str(stable_messages[0].get("role") or "").strip().lower() == "system" else 0
-            stable_messages = [
-                *list(stable_messages[:insert_at]),
-                memory_snapshot_message,
-                *list(stable_messages[insert_at:]),
-            ]
+        persona_message = self._persona_stable_message(
+            persona_text,
+            workspace_root=str(workspace_path()),
+        )
+        has_system = bool(
+            stable_messages
+            and str(stable_messages[0].get("role") or "").strip().lower() == "system"
+        )
+        head = stable_messages[:1] if has_system else []
+        tail = stable_messages[1:] if has_system else stable_messages
+        stable_messages = [
+            *head,
+            *([memory_snapshot_message] if memory_snapshot_message is not None else []),
+            persona_message,
+            *tail,
+        ]
         # 钉住的静态声明并进 system 文本尾部：它不是消息项，因此尾部重铺那条剥契约的路
         # 碰不到它；字节只在刷新键变化时改一次。这条路的头部来自上一跳的请求体种子，已经带着
         # 上一跳那份块，必须先摘再拼——直接 concat 会让续跑回合每轮多叠一份（实盘 06:15 抓到）。
@@ -1552,6 +1644,7 @@ class CeoMessageBuilder:
             user_content=context_sources['user_content'],
             turn_overlay_parts=turn_overlay_parts,
             memory_snapshot_text=str(context_sources.get('memory_snapshot_text') or ''),
+            persona_text=str(context_sources.get('persona_text') or ''),
             query_text=query_text,
             user_metadata=user_metadata,
             pinned_contract_text=pinned_contract_text,
@@ -1802,14 +1895,8 @@ class CeoMessageBuilder:
             ),
             *internal_seed_records,
         ]
-        pre_request_messages = [
-            {"role": "system", "content": str(context_sources["system_prompt"] or "")},
-            *raw_history_messages,
-            *internal_seed_records,
-        ]
-        if not current_user_in_history:
-            pre_request_messages.append({"role": "user", "content": str(context_sources["user_content"] or "")})
-        pre_request_prompt_tokens = estimate_message_tokens(pre_request_messages)
+        pre_request_messages: list[dict[str, Any]] = []
+        pre_request_prompt_tokens = 0
         history_zone_tokens = estimate_message_tokens(history_zone_source)
         compression_state_payload = {
             "status": "",
@@ -1838,9 +1925,15 @@ class CeoMessageBuilder:
             split_prompt_builder=bool(context_sources['split_prompt_builder']),
             turn_overlay_parts=turn_overlay_parts,
             memory_snapshot_text=str(context_sources.get('memory_snapshot_text') or ''),
+            persona_text=str(context_sources.get('persona_text') or ''),
             current_user_in_history=bool(history_state['current_user_in_history']),
             pinned_contract_text=pinned_contract_text,
         )
+        # 锚点量的是"这一跳真要发出去的那一份"：system、长期记忆、人设块、历史与当前
+        # 用户都在稳定前缀里；尾部契约块与 ephemeral 尾不算。装配完成后再量，避免
+        # 新增头部块时这里漏算。
+        pre_request_messages = list(stable_messages)
+        pre_request_prompt_tokens = estimate_message_tokens(pre_request_messages)
         frontdoor_tool_contract = build_frontdoor_tool_contract(
             pinned_contract_text=pinned_contract_text,
             pinned_skill_ids=pinned_skill_ids,

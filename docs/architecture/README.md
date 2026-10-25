@@ -20,11 +20,11 @@ Start here when you are new to the repository or when a change crosses subsystem
 ## Topic Guide
 
 - `runtime-overview.md`
-  Use for session lifecycle, frontdoor/runtime flow, tool execution flow, cross-module runtime behavior, frontdoor context compression, and node model route resolution.
+  Use for session lifecycle, frontdoor/runtime flow, tool execution flow, cross-module runtime behavior, frontdoor context compression, the persona head block and persona note, and node model route resolution.
 - `main-task-runtime.md`
   Use for the task side of the runtime: node mailbox and wake semantics, acceptance three-tier verdicts, node-level pause/resume/cancel and the structural watchdog, and graceful shutdown pause with startup auto-resume.
 - `operations-and-maintenance.md`
-  Use for startup workflows (including the `negi` command stub, icons and the uninstall entry that install writes), troubleshooting order, high-risk change types, memory queue/reset workflows, and Docker deployment.
+  Use for startup workflows (including the `negi` command stub, icons and the uninstall entry that install writes), troubleshooting order, high-risk change types, memory queue/reset workflows, the persona photo folder and onboarding state, and Docker deployment.
 - `context-and-cache-troubleshooting.md`
   Use for prompt cache misses, context shrink/continuity regressions, actual-request artifact forensics, and before changing node or CEO context strategies.
 - `tool-and-skill-system.md`
@@ -32,7 +32,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - `tool-hydration-and-callable-chain.md`
   Use for what makes a tool callable this hop (contract presence), the delivery hop that returns the contract and stages arguments, the `reuse_args` batch lane, re-read and fingerprints, parameter-error lane, the strict plain-text rejection, externalized result envelope, universal tool timeout, tool rerun-safe declaration for the recovery lane, stage gating, and the context→callable chain.
 - `web-and-admin.md`
-  Use for websocket contracts, frontend/backend responsibility boundaries, and operator-visible UI behavior.
+  Use for websocket contracts, frontend/backend responsibility boundaries, the first-run onboarding flow, the read-only persona dialog, and operator-visible UI behavior.
 - `heartbeat-system.md`
   Use for heartbeat turns, task-terminal/stall/distribution-error wakeups, cron at-most-once delivery, and shutdown-resume session wakes.
 - `config-and-models.md`
@@ -147,6 +147,9 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 限流/上游故障期间某轮记忆没写进去、`memory/failed.jsonl` 有停车记录、或医生检查报 `failed_parked` → `runtime-overview.md`「队列状态机与失败停车语义」+ `operations-and-maintenance.md`「Memory Queue Workflow」
 - 记忆页点重试/放弃提示失败、或弹条正文是 `Request timeout` → `web-and-admin.md`「Memory Management Page And Admin Contract」（四条失败正文各自的指向与 30s 客户端超时）
 - 用户说「记住/忘掉」但模型照旧，或某轮命中前缀在第二条消息就分叉 → `runtime-overview.md`「Memory Runtime State」（头部基座的压缩边界更新与修订增量）+ `context-and-cache-troubleshooting.md`「长期记忆的头部基座与增量」
+- 人设没生效、头部没有「我的人设」、改了人设旧会话没变、或同一条人设通知重复出现 → `runtime-overview.md`「人设块、人设 note 与身份」+ `context-and-cache-troubleshooting.md`「长期记忆的头部基座与增量」
+- 初次引导不弹、卡在半途、照片没进 `my_image`、设置页画廊空、保存模型链后人设没入队 → `web-and-admin.md`「First-Run Onboarding And Persona Contract」+ `operations-and-maintenance.md`「人设与初次引导」
+- 隐藏的 `internal:persona_photo` 会话出现在网页会话列表或记忆复核里 → `web-and-admin.md`「First-Run Onboarding And Persona Contract」
 - 某条记忆从长期记忆块里消失了、`memory/index/` 出现新文件、归并区的一整节摘不掉，或医生检查报 `broken_category_links` → `runtime-overview.md`「Memory Runtime State」（退场写 `consolidated_into`、归并区派生、摘整节按句柄寻址、机器压缩只降级不删除）
 - 记忆批次停在停车区而错误文本是 `memory_apply_confirm is required`、`line N is outside the memory block`、`line N is outside the candidate list`、`names no category with retired memories` → `runtime-overview.md`「Memory Runtime State」（两次提交那道门与行号的解释时刻）
 - 日志审计侧栏角标不更新、原始日志为空或翻页停在空白页、时间显示与事件时间戳不一致、`/api/audit` 503 → `web-and-admin.md`「Log Audit Page And Event Contract」
@@ -243,6 +246,7 @@ These rules prevent the docs from re-accumulating redundancy. Every edit to this
 | Append-notice distribution contract: sub-tree control transaction and drain ledger, epoch state machine and barriers, single-flight epoch driver with wave-retry/degraded skip, mailbox delivery and uplink propagation, epoch-completed vs deferred consumption, acceptance node lifecycle and handshake re-dispatch, spawn review, task tree depth ceiling, force-delete precedence, node-level pause/resume/cancel and circuit breakers, graceful shutdown pause and startup auto-resume | `main-task-runtime.md` |
 | Frontdoor context compression contract (`token_compression`, 压缩边界 `boundary_turn_seq`), 思考内容的上下文回放（reasoning 写入闸门与随压缩退出）, provider/model binding flag `reasoningContextEnabled` | `runtime-overview.md` |
 | Memory queue state/file semantics (`runtime-overview`); queue/reset operator workflows (`operations-and-maintenance`) | both, split as shown |
+| Persona carrier (reserved note, frontdoor head block, tail notice) and first-run onboarding (state file, API, `my_image` photos, hidden `internal:` photo turn) | `runtime-overview.md` (carrier and notice), `web-and-admin.md` (first-run flow and settings surface), `operations-and-maintenance.md` (files and operator reset) |
 | Heartbeat continuation contract, cron at-most-once delivery, task terminal repair (including terminal-outbox delivery durability and the `abandoned` state), node-error, distribution-error, and task-stall detection/delivery | `heartbeat-system.md` |
 | Tool/skill four concepts, fixed builtin tool contracts, candidate tools and candidate skills, frontdoor head-pinned static declarations (`candidate_skills` / `exec_runtime_policy` / `session_temp_dir`) and their three reprint boundaries, Tool Admin RBAC semantics, CEO 审批档位（全部放行/条件放行）与免审工具名单的判据与 REST 载荷, provider-facing `tools[]` surface contract (frontdoor live RBAC superset vs node pinned bundle and its single reprint point), duplicate-call guard, resource-directory generation checks and semantic catalog freshness, always-callable resident internal control tools (`silent`, and why fixed-builtin membership does not inject a tool), skill policy role contract (write-side normalization with 400, read-side per-row degradation, and the empty-set fallback that differs from tools) | `tool-and-skill-system.md` |
 | Contract presence as the callability authority, contract delivery and the staged-argument `reuse_args` batch lane, re-read and fingerprints, parameter-error guidance lane, externalized tool result envelope, universal tool timeout contract, tool rerun-safe declaration for the recovery lane, strict plain-text rejection and the fixed builtin set, context→callable chain | `tool-hydration-and-callable-chain.md` |

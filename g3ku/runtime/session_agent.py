@@ -26,6 +26,7 @@ from g3ku.runtime.cancellation import ToolCancellationToken
 from g3ku.runtime.frontdoor.message_builder import (
     MEMORY_SNAPSHOT_ADOPTION_TOKEN_COMPRESSION,
     adopt_memory_snapshot,
+    adopt_persona,
 )
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted
 from g3ku.runtime.frontdoor.turns import frontdoor_turns_for_turn, normalize_frontdoor_turns
@@ -2421,11 +2422,17 @@ class RuntimeAgentSession:
             memory_manager=memory_manager,
             reason=MEMORY_SNAPSHOT_ADOPTION_TOKEN_COMPRESSION,
         )
+        adopt_persona(
+            self,
+            memory_manager=memory_manager,
+            reason=MEMORY_SNAPSHOT_ADOPTION_TOKEN_COMPRESSION,
+        )
         scope = _skill_roster_notice.session_scope_key(
             getattr(self._state, "session_key", "")
         )
         if scope:
             _skill_roster_notice.reset_memory_cursor(scope)
+            _skill_roster_notice.reset_persona_cursor(scope)
 
     def append_context_compression_marker(
         self,
@@ -4117,7 +4124,11 @@ class RuntimeAgentSession:
                     retire_lingering_transcript_rows=True,
                 )
                 tail_profiler.mark("persist_transcript")
-                if not silent_reply and getattr(self._loop, "memory_manager", None) is not None:
+                if (
+                    not silent_reply
+                    and getattr(self._loop, "memory_manager", None) is not None
+                    and not str(getattr(self._state, "session_key", "") or "").startswith("internal:")
+                ):
                     # Memory review mirrors the user-visible surface: internal
                     # heartbeat/cron turns only expose the assistant reply and the
                     # visible stage rail, never the hidden event-bundle prompt.

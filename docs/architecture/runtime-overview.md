@@ -504,6 +504,7 @@ main/ 侧所有持久化写在磁盘满（ENOSPC / SQLITE_FULL）条件下的行
 - `memory/ops.jsonl` 是滚动终态历史，不是进行中重试日志，也不是 append-forever 归档：applied 批次、`precheck_failed`（载荷本身不可恢复）与 `operator_discarded`（操作员显式放弃停车记录）等 durable 终态结果连同最终 snapshot / compression 元数据一起落在这里；`memory_chars_after` 数的是**常驻条目**，不含归并区；归并批次的行另带 `category_count` 与 `changes[type=consolidate]`（退场记忆的完整正文在 `original_content` 里，这是退场后唯一留有原文的地方）；无变更的 applied 行用 `noop_reason`（write 批次）或 `already_satisfied`（delete 批次）携带原因；处理尝试失败先进失败停车区而非终态历史；超过 7 天的行在正常运行时读写中自动清理。容量动作在同一行里可数：`capacity_action` ∈ `compressed` / `consolidation_queued` / `consolidation_noop` / `parked` 说这一批停在梯子哪一级，`capacity_chars_after` 给动作后的常驻字数，每一行被降级的记忆另在 `changes[]` 里落一条 `compress_for_capacity`（带 `freed_chars`；`0` 表示"标了但没省字"，即那行本来就是 `minimal == body`，标记只为给它开归并的门）。终态行不记录入队侧 `trigger_source`；区分普通窗口批次与压缩冲刷批次要对照会话转录时间线。每行同时带两本模型账：`model_chain` 是当时按 `memory` 角色解析出的整条候选链（批内自修复重排时按新 revision 重读），`attempted_model_chain` 是这一批真实走过的 ref（多轮按序去重，末位=最后一次答话的那颗，长度 > 1 即降级过）；前者是配置读数、后者是执行读数，判据来源见「Chat provider 超时与重试边界」。
 - `memory/review_state.json` 是普通复核窗口的按会话缓冲元数据：缓冲轮次载荷与已上报工具记录 keys；不是已提交的用户记忆。
 - `.g3ku/memory-requests/` 存暴露请求元数据的 memory 请求 artifact；processed 行可以指向这些路径供后续取证。
+- `memory/notes/note_persona.md` 是人设正文的唯一载体。它由保留名归属，不是 memories 行，因此不进常驻字数、压缩候选、退场判据与行号定义域；孤儿回收、`reconcile-notes` 与 `doctor_report` 都不把它当孤儿，普通记忆的 `note_ref` 不能指向它，归并环节也不能用同名分类 note 占它。记忆 agent 只看到一行 `人设描述:note <句柄>`，正文按需 `memory_read_note`。
 
 维护边界：
 
@@ -558,6 +559,14 @@ main/ 侧所有持久化写在磁盘满（ENOSPC / SQLITE_FULL）条件下的行
 瞬时执行状态明确在长期记忆边界之外：pause/resume 控制数据、进行中任务状态、临时修复标记与 runtime-only 协调笔记属于 transcript、session、task 或 turns 运行时状态，不进入 `MEMORY.md`。
 
 队列卡住、重复写入、调试顺序、CLI 与 reset 等 operator 工作流详见 `operations-and-maintenance.md`「Memory Queue Workflow」。
+
+## 人设块、人设 note 与身份
+
+- 正文：`memory/notes/note_persona.md`，保留名 `note_persona`。`MemoryManager.persona_text()` 只读普通树里的这份文件，不走裸名「普通区先、分类区兜后」的解析；`set_persona()` 是引导页保存那条直接写入口，走同一把 `_io_lock` 与原子写。
+- 前门块：`## 我的人设` 是一条稳定 `assistant` 消息，内容是照片目录与「我是谁」。它排在长期记忆块之后：有长期记忆时 index 2，没有时 index 1。会话首请求采纳一次，token 压缩与手动压缩两处重印；两次重印之间字节冻结。
+- 中途变化：`[RUNTIME_NOTICE]` 的 `### Persona updates` 一节带最新正文，按 `persona_cursor` 的 digest 消费，只投一次；压缩后头部重印，游标对齐，同一条更新只出现一次。头部块仍显示旧值时，以这条通知为准。
+- 记忆 agent 面：只多一行指针，正文按需读；`main/prompts/memory_agent.md` 规定改人设走 `note_edits` / `note_upserts`，不新增普通记忆。
+- 照片：工作区根 `my_image/`。引导页上传直接写在这里；聊天里用户发来的「你的照片」由前门提示词驱动 CEO 用 `filesystem_copy` 复制进来；设置页只读画廊读同一目录。引导流程、状态文件与隐藏 `internal:` 读图会话见 `web-and-admin.md`「First-Run Onboarding And Persona Contract」。
 
 ## Internal Turn Prompts
 

@@ -182,6 +182,9 @@
 - `.g3ku/config.json`（安装根）
   项目配置
 
+- `.g3ku/onboarding.json`（安装根）
+  初次引导状态：`completed` / `persona_step_done` / 暂存描述 / 照片名 / `persona_request_id` / `photo_session_started_at` / `photo_session_error`。半途引导靠它续跑；`POST /api/onboarding/reset` 写回一份未完成状态，不删 `my_image/` 与人设 note。判据与前端流程见 `web-and-admin.md`「First-Run Onboarding And Persona Contract」。
+
 - `.g3ku/llm-config/`（安装根）
   模型配置仓库（provider/binding record）
 
@@ -209,6 +212,12 @@
 - `memory/`（安装根）
   记忆目录；排障入口详见本文档「Memory Queue Workflow」章节。
 
+- `memory/notes/note_persona.md`（安装根，位于 `memory/notes/`）
+  人设正文的保留 note。它不是 memories 行，不进常驻字数、压缩、退场与行号；孤儿回收、`reconcile-notes` 与 `doctor_report` 都跳过它。改人设走会话里的记忆 agent（`note_edits` / `note_upserts`），也可以在记忆页的 note 编辑面直接改；没有删除入口。
+
+- `my_image/`（工作区根，默认安装根）
+  人设照片目录。引导页上传直接写入；聊天里用户发来的「你的照片」由 CEO 用 `filesystem_copy` 复制进来；设置页只读画廊读这里。它不被任何记忆回收清理，删照片就是删文件。载体与通知规则见 `runtime-overview.md`「人设块、人设 note 与身份」。
+
 - `sessions/`（安装根）
   会话持久化数据
 
@@ -216,6 +225,9 @@
   任务临时目录，每个任务一个 `task_<id>` 子目录；根目录解析与隔离规则见 `runtime-overview.md`「任务侧」。任务进入终态（success/failed）后该目录**默认原样保留**；仅当开启 `main_runtime.disk_guard.terminal_temp_dir_cleanup_enabled`（环境变量 `G3KU_TERMINAL_TEMP_DIR_CLEANUP_ENABLED=1`）时才随终态清理硬删（保留清单与行为契约见 `runtime-overview.md`「磁盘写保护与治理」）。孤儿目录（`runtime.sqlite3` 的 tasks 表中已无对应任务却残留的 `task_*` 目录，含从未走到终态的卡死任务遗留）用 `scripts/cleanup_orphan_task_temp_dirs.py` 清理：默认 dry-run 只报数；`--apply` 删除空孤儿；非空孤儿要么 `--apply --move-non-empty` 移入 `temp/tasks_orphan_backup/`（可逆），要么 `--apply --purge-non-empty` 直接删除（不可逆）。清理脚本以 runtime 库的 `tasks` 表为唯一判据，因此判据缺失即停：库文件不存在、`tasks` 表读不出、或 `--apply` 时 `--tasks-root` 不在 `--runtime-db` 所属安装根之下，脚本一律拒绝执行，不按空任务集继续——空集不等于「没有任务」，按空集判定会把在库任务目录当成孤儿。`--purge-non-empty` 没有交互确认步骤，它的护栏是 `--apply` 与该开关都必须显式给出、缺省 dry-run，以及上面那条拒绝判据。由于终态后目录保留，`temp/tasks/` 会随任务累积增长，磁盘紧张时优先按该脚本处置而非手删。
 
 - `temp/ceo/`（数据根）  CEO/frontdoor 会话级临时目录，每个会话一个 `<safe_session_key>` 子目录（如 `web_ceo-xxxx`）。作为 CEO 会话工具 runtime 的 `task_temp_dir`：`exec` 缺省 cwd 与临时文件规范落点，避免临时产物散落到工作区根目录。它与 `temp/tasks/` 同根，因此设了自定义数据目录的安装里两条 temp 车道一起离开安装根；`temp` 也不在启动建目录的名单里，安装根不会再长出一个空 `temp/`。解析与惰性创建规则见 `runtime-overview.md`「任务侧」。该目录没有任何清理车道：删除会话带走的是连续性快照、请求取证、回合边界与上传目录，不含这里，所以它会随会话数累积增长，处置靠手动清目录。正式交付物禁止以此为最终落点，落点合同见 `tool-and-skill-system.md`「Model Path Anchoring Contract」。
+
+- `temp/persona-thumbs/`（数据根）
+  设置页与引导页照片集的缩略图缓存，文件名按源文件路径、大小与 mtime 派生。可随时删除，下次打开画廊重建；原图在 `my_image/`。
 
 - `output/`（数据根）  正式交付物的默认落点，一个交付物一个子目录或文件，由写入方创建（不在启动建目录的名单里）。用户或任务指定了别的位置时按指定的绝对路径写。这条判据的来源是 `tool-and-skill-system.md`「Model Path Anchoring Contract」，模型侧只在 `path_anchor_rule` 一处看到它。
 
@@ -470,6 +482,14 @@ worker 静默不等于 worker 死亡：空闲 worker 除心跳线程每 1–2s �
 - 401、403、密钥被禁这类失败**不留任何运行态记忆**，状态接口里也查不到：它们当场由模型链 fallback 处理，要去 `.g3ku/logs/console.log` grep `MODEL CHAIN: FALLBACK` 或 worker 日志的 `Model load-balance member … exhausted`。只有上游限流（429）会跨请求留一份衰减惩罚。
 - 「配额分布未知」看 `unresolved_bucket_count`：非 0 表示这个 worker 解析不到密钥材料（未解锁），此时桶合并与 RPM 归因都不可信，先解锁再判断。
 - 要退回旧行为：`mainRuntime.modelRouteLoadBalanceEnabled = false` 把含组的链按配置顺序摊平成 direct 候选（有序链语义），不需要改模型绑定 key，也不影响 token 台账。
+
+### 人设与初次引导
+
+- 人设写入后前门没反应：先看 `memory/notes/note_persona.md` 是否存在，再区分"头部块还没到压缩边界"与"尾部通知没投递"。判读口径见 `context-and-cache-troubleshooting.md`「长期记忆的头部基座与增量」；人设正文不占记忆字数，`negi memory doctor` 的 `persona_note_present` 只是读数，不报 issues。
+- 引导弹窗不出现：读 `/api/onboarding/status` 的 `should_run` / `completed`。老实例没有状态文件且已有 chat 绑定会被直接标记 completed；要在已有模型上重跑，用 `POST /api/onboarding/reset`（保留 `my_image/` 与人设 note）。
+- 保存模型链后没有入队、也没有读图会话：先看 `.g3ku/onboarding.json` 的 `persona_request_id` / `photo_session_started_at` 是否已写，再查 `memory/queue.jsonl` 是否有一条 `trigger_source=persona_onboarding`，以及 `sessions/` 里是否有 `internal_persona_photo` 的转录。`photo_session_error` 非空表示读图会话失败，常见原因是 CEO 链里没有收图成员。
+- 隐藏读图会话不出现在网页会话列表是预期：`internal:` 前缀不进 `web:` 目录、不当活动会话兜底，也不参与记忆复核。它出现在列表或复核批次里属于缺陷。
+- 照片集为空但 `my_image/` 有文件：画廊只列 raster 图片（png/jpg/jpeg/webp/gif/bmp）；缩略图失败会回退原图 URL，不影响陈列。
 
 ### 外部渠道桥接异常
 
