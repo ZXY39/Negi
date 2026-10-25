@@ -1,6 +1,8 @@
 (() => {
   const DEFAULT_RETRY_ON = ["network", "429"];
   const DEFAULT_MAX_OUTPUT_TOKENS = 65536;
+  // 新档上下文窗口的默认写法：200K 就是 200000，落盘走换算后的整数。
+  const DEFAULT_CONTEXT_WINDOW_TOKENS_TEXT = "200K";
   const DEFAULT_REASONING_EFFORT = "medium";
   const REASONING_EFFORT_LEVELS = ["none", "low", "medium", "high", "xhigh", "max"];
   const REASONING_EFFORT_LABELS = {
@@ -405,6 +407,11 @@
       extra_options: {},
     };
     const draft = withThinkingOutputParameterDefaults(rawDraft);
+    // 新档的上下文窗口一律从 200K 这一档起，模板建议值不顶它；JSON 草稿与那一格同步落这个数，
+    // 否则打开抽屉会看到「格子 200K / JSON 32000」两份读数。
+    const contextWindowDefault = DEFAULT_CONTEXT_WINDOW_TOKENS_TEXT;
+    draft.parameters = draft.parameters && typeof draft.parameters === "object" && !Array.isArray(draft.parameters) ? draft.parameters : {};
+    draft.parameters.context_window_tokens = parseTokenScaleValue(contextWindowDefault);
     state.editor = {
       ...emptyEditorState(),
       open: true,
@@ -418,8 +425,8 @@
       initialJsonText: JSON.stringify(draft, null, 2),
       retryOn: [...DEFAULT_RETRY_ON],
       retryCount: 0,
-      contextWindowTokens: "",
-      initialContextWindowTokens: "",
+      contextWindowTokens: contextWindowDefault,
+      initialContextWindowTokens: contextWindowDefault,
       imageMultimodalEnabled: false,
       initialImageMultimodalEnabled: false,
       reasoningEffort: validReasoningEffortValue(draft?.parameters?.reasoning_effort) || DEFAULT_REASONING_EFFORT,
@@ -547,14 +554,36 @@
     return editor;
   }
 
-  function parseContextWindowTokensValue(raw) {
-    const parsed = Number.parseInt(String(raw ?? "").trim(), 10);
-    return Number.isInteger(parsed) ? parsed : null;
+  function parseTokenScaleValue(raw) {
+    const text = String(raw ?? "").trim().replace(/\s+/g, "").toUpperCase();
+    if (!text) return null;
+    const match = /^(\d+(?:\.\d+)?)([KM]?)$/.exec(text);
+    if (!match) return null;
+    const amount = Number(match[1]);
+    if (!Number.isFinite(amount)) return null;
+    const scaled = amount * (match[2] === "K" ? 1000 : match[2] === "M" ? 1000000 : 1);
+    return Number.isInteger(scaled) ? scaled : null;
+  }
+
+  // 保存后回显：数值没变就保留操作员写的那一档（字母统一大写），只有换成别的数才退回纯数字。
+  function tokenScaleDisplayText(raw, value) {
+    const text = String(raw ?? "").trim();
+    if (!text || parseTokenScaleValue(text) !== value) return String(value);
+    return text.toUpperCase();
   }
 
   function validContextWindowTokensValue(raw) {
-    const parsed = parseContextWindowTokensValue(raw);
+    const parsed = parseTokenScaleValue(raw);
     return Number.isInteger(parsed) && parsed > 25000 ? parsed : null;
+  }
+
+  // 认不出形状与认得出但太小是两回事，报错要分开说，否则"200KB 不行"会被读成"要填更大的数"。
+  function contextWindowTokensErrorMessage(raw) {
+    const text = String(raw ?? "").trim();
+    if (!text || parseTokenScaleValue(text) === null) {
+      return "上下文窗口Token无法识别：请填整数，或带 K / M 的写法（如 200K、1M）";
+    }
+    return "上下文窗口Token必须是大于 25000 的整数";
   }
 
   function contextWindowTokensFromDraftText(raw, providerId) {
@@ -572,11 +601,16 @@
   }
 
   function validMaxOutputTokensValue(raw) {
-    if (raw === null || raw === undefined) return null;
-    const text = String(raw).trim();
-    if (!text) return null;
-    const parsed = Number.parseInt(text, 10);
+    const parsed = parseTokenScaleValue(raw);
     return Number.isInteger(parsed) && parsed >= 1 ? parsed : null;
+  }
+
+  function maxOutputTokensErrorMessage(raw) {
+    const text = String(raw ?? "").trim();
+    if (!text || parseTokenScaleValue(text) === null) {
+      return "最大输出TOKEN无法识别：请填整数，或带 K / M 的写法（如 64K、1M）";
+    }
+    return "最大输出TOKEN必须是不小于 1 的整数";
   }
 
   function validRequestTimeoutSecondsValue(raw) {
@@ -665,7 +699,9 @@
     const editor = llmState().editor;
     if (!editor) return false;
     const parsed = validMaxOutputTokensValue(value);
-    const normalized = Number.isInteger(parsed) ? String(parsed) : String(DEFAULT_MAX_OUTPUT_TOKENS);
+    const normalized = Number.isInteger(parsed)
+      ? tokenScaleDisplayText(editor.maxOutputTokens, parsed)
+      : String(DEFAULT_MAX_OUTPUT_TOKENS);
     editor.maxOutputTokens = normalized;
     const input = document.getElementById("llm-binding-max-output-tokens");
     if (input && String(input.value || "") !== normalized) input.value = normalized;
@@ -716,7 +752,10 @@
   function syncContextWindowTokensInputValue(tokens) {
     const editor = llmState().editor;
     if (!editor) return false;
-    const normalized = Number.isInteger(validContextWindowTokensValue(tokens)) ? String(validContextWindowTokensValue(tokens)) : "";
+    const resolved = validContextWindowTokensValue(tokens);
+    const normalized = Number.isInteger(resolved)
+      ? tokenScaleDisplayText(editor.contextWindowTokens, resolved)
+      : "";
     editor.contextWindowTokens = normalized;
     const input = document.getElementById("llm-binding-context-window-tokens");
     if (input && String(input.value || "") !== normalized) input.value = normalized;
@@ -868,6 +907,8 @@
     const providerId = trim(editor.providerId || "");
     const jsonText = String(editor.jsonText || "");
     const inputTokens = validContextWindowTokensValue(editor.contextWindowTokens);
+    // 这一格只要写了字，就不许拿 JSON 的旧读数把它救回来：认不出形状或越界都要停在保存之前。
+    const inputBlocksRescue = String(editor.contextWindowTokens ?? "").trim() !== "" && !Number.isInteger(inputTokens);
     const jsonTokens = contextWindowTokensFromDraftText(jsonText, providerId);
     const initialJsonTokens = contextWindowTokensFromDraftText(editor.initialJsonText || "", providerId);
     const initialInputTokens = validContextWindowTokensValue(
@@ -878,7 +919,7 @@
     let resolved = null;
     if (jsonTokens !== null && inputTokens !== null && jsonTokens === inputTokens) {
       resolved = jsonTokens;
-    } else if (jsonTokens !== null && inputTokens === null) {
+    } else if (jsonTokens !== null && inputTokens === null && !inputBlocksRescue) {
       resolved = jsonTokens;
     } else if (jsonTokens === null && inputTokens !== null) {
       resolved = inputTokens;
@@ -889,7 +930,7 @@
       else if (inputChanged && !jsonChanged) resolved = inputTokens;
       else resolved = inputTokens;
     }
-    if (Number.isInteger(resolved)) {
+    if (Number.isInteger(resolved) && !inputBlocksRescue) {
       syncContextWindowTokensInputValue(resolved);
       syncContextWindowTokensIntoJsonEditor(resolved);
     }
@@ -905,12 +946,12 @@
       String(editor?.singleApiKeyMaxConcurrency ?? ""),
       draft.api_key || ""
     );
-    const contextWindowTokens = Number.parseInt(String(editor?.contextWindowTokens ?? "").trim(), 10);
+    const contextWindowTokens = validContextWindowTokensValue(editor?.contextWindowTokens);
     if (!Number.isInteger(retryCount) || retryCount < 0) {
       throw new Error("重试次数必须是不小于 0 的整数");
     }
-    if (!Number.isInteger(contextWindowTokens) || contextWindowTokens <= 25000) {
-      throw new Error("上下文窗口Token必须是大于 25000 的整数");
+    if (!Number.isInteger(contextWindowTokens)) {
+      throw new Error(contextWindowTokensErrorMessage(editor?.contextWindowTokens));
     }
     if (
       singleApiKeyMaxConcurrency !== null &&
@@ -930,11 +971,13 @@
     const maxOutputRaw = trim(editor?.maxOutputTokens);
     let maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS;
     if (maxOutputRaw) {
-      const parsedMax = Number.parseInt(maxOutputRaw, 10);
-      if (!Number.isInteger(parsedMax) || parsedMax < 1) {
-        throw new Error("最大输出TOKEN必须是不小于 1 的整数");
+      const parsedMax = validMaxOutputTokensValue(maxOutputRaw);
+      if (!Number.isInteger(parsedMax)) {
+        throw new Error(maxOutputTokensErrorMessage(maxOutputRaw));
       }
       maxOutputTokens = parsedMax;
+      // 与上下文窗口同一档处理：认下来的数原样回填那一格，只把字母统一成大写。
+      syncMaxOutputTokensInputValue(maxOutputTokens);
     }
     const requestTimeoutRaw = trim(editor?.requestTimeoutSeconds);
     let requestTimeoutSeconds = null;
@@ -1050,7 +1093,7 @@
     return `
         <label class="resource-field">
           <span class="resource-field-label">上下文窗口Token *</span>
-          <input id="llm-binding-context-window-tokens" class="resource-search" type="number" min="25001" step="1" inputmode="numeric" value="${escv(String(editor.contextWindowTokens || ""))}" placeholder="必须大于 25000">
+          <input id="llm-binding-context-window-tokens" class="resource-search" type="text" inputmode="numeric" autocomplete="off" value="${escv(String(editor.contextWindowTokens || ""))}" placeholder="如 200K / 1M，必须大于 25000" title="支持 K / M 后缀，K = 1000、M = 1000000，不区分大小写（200K = 200000，1M = 1000000）。保存时字母统一成大写，落盘的是换算后的整数。">
         </label>`;
   }
 
@@ -1070,7 +1113,7 @@
     return `
         <label class="resource-field">
           <span class="resource-field-label">最大输出TOKEN *</span>
-          <input id="llm-binding-max-output-tokens" class="resource-search" type="number" min="1" step="1" inputmode="numeric" value="${escv(value)}" placeholder="${DEFAULT_MAX_OUTPUT_TOKENS}">
+          <input id="llm-binding-max-output-tokens" class="resource-search" type="text" inputmode="numeric" autocomplete="off" value="${escv(value)}" placeholder="默认 ${DEFAULT_MAX_OUTPUT_TOKENS}，支持 64K" title="支持 K / M 后缀，K = 1000、M = 1000000，不区分大小写（64K = 64000，1M = 1000000）。保存时字母统一成大写，落盘的是换算后的整数。">
         </label>`;
   }
 
@@ -2031,6 +2074,11 @@
     parseSingleApiKeyMaxConcurrencyInput,
     validateSingleApiKeyMaxConcurrencyInput,
     parseBindingRetryOn,
+    openCreateModal,
+    parseTokenScaleValue,
+    tokenScaleDisplayText,
+    validContextWindowTokensValue,
+    validMaxOutputTokensValue,
     bindingNotesTitle,
     bindingNameLabel,
     bindingNameRequiredMessage,
