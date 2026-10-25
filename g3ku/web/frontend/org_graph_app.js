@@ -5054,6 +5054,7 @@ function buildCeoRequestedAtByTurn(messages = []) {
 }
 
 const CEO_FLOW_DOT_LIFT_CACHE = { fontSpec: "", lift: null, ctx: null };
+const CEO_FLOW_DOT_GEOMETRY_LAST = { y: "" };
 
 // 圆点要抬多少像素才落在秒数墨迹的中线上：墨迹中心与行框中心的差值由字体的
 // ascent/descent 与数字墨高决定，CSS 拿不到这些量，只能按实际字体量一次。
@@ -5102,7 +5103,10 @@ function syncCeoFlowDotGeometry() {
     const flowRect = visible.flow.getBoundingClientRect();
     if (!(usageRect.height > 0) || !(flowRect.height > 0)) return;
     const y = usageRect.top - flowRect.top + usageRect.height / 2 - lift;
-    root.style.setProperty("--ceo-flow-dot-y", `${Math.round(y * 100) / 100}px`);
+    const value = `${Math.round(y * 100) / 100}px`;
+    if (CEO_FLOW_DOT_GEOMETRY_LAST.y === value) return;
+    CEO_FLOW_DOT_GEOMETRY_LAST.y = value;
+    root.style.setProperty("--ceo-flow-dot-y", value);
 }
 
 function renderCeoTurnsIntoTurn(turn, turns = [], { interruptedMarker = false } = {}) {
@@ -6902,6 +6906,8 @@ function refreshLiveDurationBadges() {
     (Array.isArray(S.ceoPendingTurns) ? S.ceoPendingTurns : []).forEach((turn) => {
         refreshCeoFlowUsage(turn);
     });
+    // 每秒顺手校一次圆心：字体晚换、布局晚定都会让首帧量到的 y 过期，这里自愈（值没变就不写）。
+    syncCeoFlowDotGeometry();
     if (typeof refreshTaskWorkerState === "function") {
         refreshTaskWorkerState({ render: S.view === "tasks" });
     }
@@ -10843,7 +10849,11 @@ function init() {
         flushCeoSessionSnapshotCachePersist();
         flushTaskDetailSessionPersist();
     });
-    window.addEventListener("resize", refreshTaskDetailScrollRegions);
+    window.addEventListener("resize", () => {
+        refreshTaskDetailScrollRegions();
+        // 尺寸变化可能改变秒数盒子的位置，圆心的量法要跟着重算。
+        syncCeoFlowDotGeometry();
+    });
     bindTreePan();
     if (typeof bindTaskTreeSearch === "function") bindTaskTreeSearch();
     icons();

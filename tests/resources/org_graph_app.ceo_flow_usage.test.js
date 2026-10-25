@@ -209,24 +209,29 @@ test("live tool rows carry no rail status dot", () => {
     assert.match(match[1], /display:\s*none/);
 });
 
-test("flow dot and guide share one coordinate pair", () => {
+test("flow dot and guide line are painted from one box", () => {
     const usage = /\.interaction-flow-usage\s*\{([\s\S]*?)\n\}/.exec(CSS);
     assert.ok(usage, "usage rule not found");
     assert.match(usage[1], /padding-left:\s*42px/);
-    assert.doesNotMatch(CSS, /\.interaction-flow-usage::before/);
-
-    const dot = /\.interaction-flow::before\s*\{([\s\S]*?)\n\}/.exec(CSS);
-    assert.ok(dot, "flow dot rule not found");
-    assert.match(dot[1], /left:\s*calc\(var\(--ceo-flow-dot-x, 8\.5px\) - 4\.5px\)/);
-    assert.match(dot[1], /top:\s*calc\(var\(--ceo-flow-dot-y, 23\.5px\) - 4\.5px\)/);
-    assert.match(dot[1], /width:\s*9px/);
-    assert.doesNotMatch(dot[1], /transform:/);
 
     const guide = /\.interaction-flow-guide\s*\{([\s\S]*?)\n\}/.exec(CSS);
     assert.ok(guide, "guide rule not found");
-    assert.match(guide[1], /left:\s*calc\(var\(--ceo-flow-dot-x, 8\.5px\) - 0\.5px\)/);
-    assert.match(guide[1], /top:\s*var\(--ceo-flow-dot-y, 23\.5px\)/);
-    assert.match(guide[1], /width:\s*1px/);
+    assert.match(guide[1], /left:\s*calc\(var\(--ceo-flow-dot-x, 8\.5px\) - 4\.5px\)/);
+    assert.match(guide[1], /top:\s*calc\(var\(--ceo-flow-dot-y, 23\.5px\) - 4\.5px\)/);
+    assert.match(guide[1], /width:\s*9px/);
+
+    const dot = /\.interaction-flow-guide::before\s*\{([\s\S]*?)\n\}/.exec(CSS);
+    assert.ok(dot, "dot rule not found");
+    assert.match(dot[1], /width:\s*9px/);
+    assert.match(dot[1], /height:\s*9px/);
+
+    const line = /\.interaction-flow-guide::after\s*\{([\s\S]*?)\n\}/.exec(CSS);
+    assert.ok(line, "line rule not found");
+    assert.match(line[1], /left:\s*4px/);
+    assert.match(line[1], /width:\s*1px/);
+    assert.match(line[1], /transform:\s*scaleY\(0\)/);
+    assert.match(CSS, /\.interaction-flow\[open\] \.interaction-flow-guide::after\s*\{[\s\S]*?scaleY\(1\)/);
+    assert.doesNotMatch(CSS, /\.interaction-flow::before\s*\{/);
     assert.doesNotMatch(CSS, /\.interaction-flow-chevron/);
 });
 

@@ -17493,33 +17493,44 @@ textarea {
 
 /* 圆点与引导线同源：圆心 (x, y)，1px 线占 x-0.5..x+0.5、从 y 往下长。
    两者都相对 flow 的定位盒，不存在两个原点对不上的问题。 */
-.interaction-flow::before {
-    content: "";
+/* 圆点与向下引导线画在同一个元素里（guide 的 ::before / ::after）：
+   两者共用同一个定位盒，圆心就是线中心，任何渲染器下都不可能各偏一边。
+   9px 圆点左缘 0、圆心 4.5px；1px 线占 4~5px、中心也是 4.5px。
+   位置由 --ceo-flow-dot-x / -y 给出（x 缺省 8.5px；y 由脚本按秒数盒子与字体墨迹量出）。 */
+.interaction-flow-guide {
     position: absolute;
     left: calc(var(--ceo-flow-dot-x, 8.5px) - 4.5px);
     top: calc(var(--ceo-flow-dot-y, 23.5px) - 4.5px);
+    bottom: var(--space-3);
+    width: 9px;
+    pointer-events: none;
+}
+
+.interaction-flow-guide::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 0;
     width: 9px;
     height: 9px;
     border-radius: var(--radius-full);
     background: #39c5bb;
-    pointer-events: none;
 }
 
-.interaction-flow-guide {
+.interaction-flow-guide::after {
+    content: "";
     position: absolute;
-    left: calc(var(--ceo-flow-dot-x, 8.5px) - 0.5px);
-    /* 起点就是圆心：与圆点同一个 --ceo-flow-dot-y，线心也从这里往下长。 */
-    top: var(--ceo-flow-dot-y, 23.5px);
-    bottom: var(--space-3);
+    left: 4px;
+    top: 4.5px;
+    bottom: 0;
     width: 1px;
     background: #39c5bb;
     transform: scaleY(0);
     transform-origin: top;
     transition: transform 0.22s ease;
-    pointer-events: none;
 }
 
-.interaction-flow[open] .interaction-flow-guide {
+.interaction-flow[open] .interaction-flow-guide::after {
     transform: scaleY(1);
 }
 
