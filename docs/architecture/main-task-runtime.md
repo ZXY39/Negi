@@ -19,7 +19,7 @@
 - **信箱三态**：`delivered`（待处理）→ `consumed`（回合看过，`consumed_at` 落账，`merged_at` 为空）→ 内容真正并入上下文时补 `merged_at`。节点详情的「已消费」读的就是这一列。
 - **停靠的唯一持久判据**是帧相位 `waiting_explicit`。任何新的相位写入点都必须先看 `park_requested`：把它覆盖成 `waiting_tool_results` 会让唤醒把停靠节点当 in-flight 吞掉（零 ERROR、零告警）。
 - **终局上报**：执行节点转终局时 `NodeRunner.schedule_terminal_child_message` 向父节点发 `child_final`（`notify_parent=False` 的清扫路径抑制）。验收节点**不发** `child_final`（T15）。
-- **异常暂停升级**：`reject_no_progress` 与看门狗判停都把被验/被监视节点转 `pause_reason='error'`，并经 `abnormal_pause_sink` 向父节点发 high 优先级的 `child_abnormal_pause`；根节点没有父节点，改走心跳（心跳只选根节点，见下）。
+- **异常暂停升级**：`reject_no_progress` 与看门狗判停都把被验/被监视节点转 `pause_reason='error'`，并经 `abnormal_pause_sink` 向父节点发 high 优先级的 `child_abnormal_pause`；根节点没有父节点，改走心跳（心跳只选根节点，见下）。这条消息的正文末尾固定带一句**上报出路**（`node_mailbox.error_escalation_hint`，按收件人分两档）：收件人是根节点时给 `send_message(to="frontdoor", …)`，否则给 `send_message(to="parent", …)` 并说明只有根节点能到前门——给非根节点印前门地址等于把它指向一次 `frontdoor_root_only` 拒收。两档都明写模型链、provider 密钥与运行时配置**不由节点改动**：节点带不了这个能力，所以一条它修不了的错误只剩"交上去"这一条有效出路。同一原则管住节点可读的其它故障文案（如 `window_integrity_fault` 的 `blocking_reason`）：可以带观测数字，出路只能写成上报。前门自己撞同类错误时不套这句话——它的失败本来就直接落进会话（transcript 与渠道通知各一份）。
 
 ## 1.1 验收三档裁决（P4）
 
@@ -78,7 +78,9 @@
 
 ## 2. Node-Level Pause and Recovery
 
-> **驱动模型（P3/P4 后）**：`_run_child_pipeline` 已删除。spawn 只做创建并立即返回回执，子节点交调度器；父节点用 `enter_wait` 停靠等人；子节点提交后进入 `waiting_acceptance`，验收节点由 `_dispatch_runnable_nodes` 拾取，裁决由 `_drain_acceptance_verdicts` 落账（R13）。因此下文凡是提到“父管线等待子节点结果”的地方，现行实现是信箱停靠 + 调度扫描，而不是同一协程里的同步循环。
+> **驱动模型**：`_run_child_pipeline` 已删除。spawn 只做创建并立即返回回执，子节点交调度器；父节点用 `enter_wait` 停靠等人；子节点提交后进入 `waiting_acceptance`，验收节点由 `_dispatch_runnable_nodes` 拾取，裁决由 `_drain_acceptance_verdicts` 落账（R13）。因此下文凡是提到“父管线等待子节点结果”的地方，现行实现是信箱停靠 + 调度扫描，而不是同一协程里的同步循环。
+>
+> 这条扫描有**两个催命点**，缺一个就会让验收长时间不启动。其一，交接单投递是 `wake=False`（验收节点不由消息唤醒），所以提交侧在交接落箱后立即把任务重新入队跑一趟（`NodeRunner._request_acceptance_dispatch` → 调度器入队，重复触发由调度器去重）；没有它，提交之后要等下一次任意事件才有人来扫。其二，扫描在每趟 `run_task` 里**先于**通知复派执行：`_resume_pending_notice_nodes` 是逐节点串行 `await` 回合的，排在它后面时一个长回合就能把待验节点饿住（实盘 task:4555863a6a49：五个验收节点在同一趟复派结束后才被一次性拉起，滞后 10～41 分钟）。派发幂等——entry 按节点单一，复派随后 `_execute_node` 等的是同一份 future。
 
 `main/runtime/` treats node pause as a node-local control state layered on `NodeRecord.status`. The pause reasons are `manual`, `agent`, and `error`; a paused node remains `status=in_progress` until it resumes or is explicitly failed.
 

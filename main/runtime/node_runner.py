@@ -341,6 +341,10 @@ class NodeRunner:
         # 父节点不再等待子管线，创建完就必须把节点交给调度器；没有这个口时（单测、
         # 或任务没有活跃 dispatcher）由任务演员的可派发扫描兜底。
         self.dispatch_node_callback = None
+        # 验收交接单落箱后的重排口（由 task_actor_service 绑定）。验收节点**不由消息唤醒**
+        # （交接信 `wake=False` 是设计），它唯一的派发入口是任务演员的可派发扫描；提交以后
+        # 不在这里把任务重新入队，就没有任何东西会起那一趟，验收只能等下一次任意事件。
+        self.acceptance_handoff_requeue_callback = None
         # 磁盘治理（P0）：磁盘满时未能落盘的节点错误文本，仅内存诊断用（有界）。
         self._unpersisted_error_logs: deque[tuple[str, str, str]] = deque(maxlen=64)
 
@@ -2161,6 +2165,24 @@ class NodeRunner:
             blocking_reason='',
         )
 
+    def _request_acceptance_dispatch(self, task_id: str) -> None:
+        """提交完成后把任务重新入队，让演员的可派发扫描来起验收回合。
+
+        只有这一条路：验收节点的交接信按设计 `wake=False`，消息不会叫醒它。入队本身在
+        调度器里去重，重复提交不会叠跑；回调缺失（单测、没有演员）时静默跳过，由下一次
+        pass 的扫描兜住。
+        """
+        callback = self.acceptance_handoff_requeue_callback
+        if not callable(callback):
+            return
+        try:
+            callback(task_id)
+        except Exception:
+            try:
+                logger.debug('acceptance dispatch requeue skipped: task={}', task_id)
+            except Exception:
+                pass
+
     def _set_execution_waiting_acceptance_state(
         self,
         *,
@@ -2322,6 +2344,11 @@ class NodeRunner:
                 f'acceptance handoff not delivered: task={task.task_id} '
                 f'acceptance={acceptance.node_id} result={delivered!r}'
             )
+        # 交接单已落箱，紧接着把任务重新入队跑一趟：验收派发只发生在任务演员的可派发
+        # 扫描里，而交接信不叫醒验收节点。没有这一句，提交之后要等下一次任意事件才有
+        # 人来派验收（实盘 task:4555863a6a49：5 台验收在提交后 38～41 分钟才被同一趟
+        # 扫描一次性拉起）。
+        self._request_acceptance_dispatch(task.task_id)
         self._log_service.refresh_task_view(task.task_id, mark_unread=True)
         return NodeFinalResult(
             status=STATUS_SUCCESS,

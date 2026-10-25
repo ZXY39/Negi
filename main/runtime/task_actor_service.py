@@ -712,6 +712,9 @@ class TaskActorService:
         # 子节点创建后的立即派发：拆掉阻塞承诺后，父节点不再等子管线，
         # 创建完成就必须交给调度器起跑。
         self._node_runner.dispatch_node_callback = self.schedule_node_nowait
+        # 验收交接单落箱后的重排口：验收节点的唯一派发入口是本演员的可派发扫描，
+        # 而交接信按设计 `wake=False`。提交后不重排一趟，就没有任何东西会起验收。
+        self._node_runner.acceptance_handoff_requeue_callback = self._requeue_interrupted_task_best_effort
 
     async def _resume_pending_notice_nodes(self, task_id: str) -> bool:
         # 通知账本以节点级状态为准（epoch 下线后任务级 meta 不再维护该索引）：
@@ -901,6 +904,12 @@ class TaskActorService:
                 # 也无重放路径"的节点，杜绝幽灵 in_progress（2026-09-15 事故 L3）。
                 await self._resume_task_paused_nodes(task_id)
                 await self._reconcile_orphan_in_progress_nodes(task_id, dispatcher)
+                # 先扫一次可派发集合，再做通知复派。复派是逐节点串行 `await` 回合的，
+                # 一个长回合就能把待验节点饿在它后面（实盘 task:4555863a6a49：22:08 那趟
+                # pass 复派三个角色，验收节点到 22:19 才被扫到，白等 11 分钟）。派发本身
+                # 幂等——entry 按节点单一，复派随后 `_execute_node` 等的是同一份 future，
+                # 不会重复驱动。
+                await self._dispatch_runnable_nodes(task_id, dispatcher)
                 resumed_offroot_nodes = await self._resume_pending_notice_nodes(task_id)
                 if not resumed_offroot_nodes:
                     # 通知账本里没人可派发时，再看握手：半路断掉的验收回合已经从
