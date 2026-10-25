@@ -78,6 +78,7 @@ from g3ku.runtime.session_agent import (
     FRONTDOOR_LAST_SEND_AT_ATTR,
     PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR,
 )
+from g3ku.runtime.session_keys import is_channel_session_key
 from g3ku.runtime.token_compact_markers import TOKEN_COMPACT_V2_PREFIX
 from g3ku.runtime.tool_context_presence import (
     contract_index_from_revisions,
@@ -222,6 +223,13 @@ _TOOL_CONTRACT_ECHO_REPAIR_MESSAGE = (
     'The previous response repeated the internal Runtime Tool Contract. '
     'Do not output, summarize, or quote that contract. Return only the '
     'user-facing answer, or use the structured tool-calling interface when a tool is required.'
+)
+# 渠道会话（官方 QQ、第三方桥）没有审批界面：条件放行档下需要审批的那几条调用在这一跳就打回。
+# 回执只教模型怎么把这件事讲给用户，不指使它自己去改设置。
+_CHANNEL_REVIEW_REJECTION_TEXT = (
+    'Error: tool call intercepted by risk review. Channel sessions have no approval surface, '
+    'so this call was not executed. Explain the situation to the user and ask them to allow this '
+    'tool in the risk review settings before retrying it.'
 )
 @dataclass(slots=True)
 class FrontdoorExecutionBundle:
@@ -5652,6 +5660,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "batch_id": f"batch:{uuid.uuid4().hex[:12]}",
             "mode": "regulatory_review",
             "submission_mode": "batch_submit_only",
+            # 渠道会话（qq / 第三方桥）没有审批界面，这一批在 review 节点直接打回，不落中断。
+            "channel_session": is_channel_session_key(session_key),
             "tool_calls": tool_calls,
             "review_items": review_items,
             "pass_through_tool_call_ids": pass_through_tool_call_ids,
@@ -5756,23 +5766,30 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         tool_call_id: str,
         tool_name: str,
         note: str = "",
+        result_text: str = "",
     ) -> dict[str, Any]:
         normalized_tool_call_id = str(tool_call_id or "").strip()
         normalized_tool_name = str(tool_name or "tool").strip() or "tool"
-        result_text = "Error: 用户不允许运行此工具。"
         normalized_note = str(note or "").strip()
-        if normalized_note:
-            result_text = f"{result_text}\n补充说明：{normalized_note}"
+        if str(result_text or "").strip():
+            # 渠道会话那条回执是英文的：它面向模型，不写给界面上的人看。
+            final_text = str(result_text).strip()
+            if normalized_note:
+                final_text = f"{final_text}\n{normalized_note}"
+        else:
+            final_text = "Error: 用户不允许运行此工具。"
+            if normalized_note:
+                final_text = f"{final_text}\n补充说明：{normalized_note}"
         return {
             "tool_call_id": normalized_tool_call_id,
             "tool_name": normalized_tool_name,
             "status": "error",
             "raw_result": None,
-            "result_text": result_text,
+            "result_text": final_text,
             "tool_message": self._tool_result_message(
                 tool_call_id=normalized_tool_call_id,
                 tool_name=normalized_tool_name,
-                content=result_text,
+                content=final_text,
                 started_at="",
                 finished_at="",
                 elapsed_seconds=None,
@@ -8383,6 +8400,51 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "next_step": "finalize",
         }
 
+    def _auto_reject_channel_review(
+        self,
+        *,
+        state: CeoGraphState,
+        approval_request: dict[str, Any],
+    ) -> dict[str, Any]:
+        """渠道会话的审批批次：免审的那几条照常执行，需要审批的那几条当跳打回。
+
+        与人工批审同一个形状——`tool_call_payloads` 保持整批原序，`_graph_execute_tools`
+        再把合成结果与真实结果按原顺序合回去；只留可执行的那半会让模型看到缺号的工具回执。
+        """
+        original_payloads = [
+            dict(item)
+            for item in list(state.get("tool_call_payloads") or [])
+            if isinstance(item, dict)
+        ]
+        blocked_ids = {
+            str(item.get("tool_call_id") or "").strip()
+            for item in list(approval_request.get("review_items") or [])
+            if isinstance(item, dict) and str(item.get("tool_call_id") or "").strip()
+        }
+        executable_payloads: list[dict[str, Any]] = []
+        synthetic_results: list[dict[str, Any]] = []
+        for payload in original_payloads:
+            tool_call_id = str(payload.get("id") or "").strip()
+            if tool_call_id not in blocked_ids:
+                executable_payloads.append(dict(payload))
+                continue
+            synthetic_results.append(
+                self._build_synthetic_rejection_result(
+                    tool_call_id=tool_call_id,
+                    tool_name=str(payload.get("name") or ""),
+                    result_text=_CHANNEL_REVIEW_REJECTION_TEXT,
+                )
+            )
+        return {
+            "approval_request": None,
+            "approval_status": "channel_auto_rejected",
+            "tool_call_payloads": original_payloads,
+            "executable_tool_call_payloads": executable_payloads,
+            "synthetic_tool_results": synthetic_results,
+            "approval_batch_id": str(approval_request.get("batch_id") or ""),
+            "next_step": "execute_tools",
+        }
+
     def _graph_review_tool_calls(
         self,
         state: CeoGraphState,
@@ -8393,6 +8455,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         approval_request = dict(state.get("approval_request") or {})
         if not approval_request:
             return {"next_step": "execute_tools"}
+        if bool(approval_request.get("channel_session")):
+            return self._auto_reject_channel_review(state=state, approval_request=approval_request)
 
         preview_state = dict(state or {})
         (

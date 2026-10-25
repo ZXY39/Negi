@@ -64,10 +64,11 @@
         return data.item || null;
     },
 
-    async updateToolGovernanceMode(enabled) {
-        const data = await this.put("/api/resources/tools/governance-mode", {
-            enabled: !!enabled,
-        }, { session_id: this.getActiveSessionId() });
+    async updateToolGovernanceMode(payload = {}) {
+        const body = {};
+        if (payload.enabled !== undefined) body.enabled = !!payload.enabled;
+        if (Array.isArray(payload.whitelistTools)) body.whitelist_tools = payload.whitelistTools;
+        const data = await this.put("/api/resources/tools/governance-mode", body, { session_id: this.getActiveSessionId() });
         return data.item || null;
     },
 

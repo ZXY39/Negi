@@ -103,20 +103,24 @@ def test_resource_headers_and_ceo_bulk_actions_follow_latest_layout() -> None:
     assert skill_section is not None
     skill_html = skill_section.group(0)
     assert 'id="skill-save-btn"' not in skill_html
-    assert 'id="tool-governance-banner"' not in skill_html
     assert skill_html.index('id="skill-risk-filter"') < skill_html.index('id="skill-status-filter"')
     assert skill_html.index('id="skill-status-filter"') < skill_html.index('id="skill-search-input"')
     # 两个筛选并列后 value=all 的占位项按筛选名标注，不再共用「全部」
     assert skill_html.count('<option value="all">风险</option>') == 1
     assert skill_html.count('<option value="all">状态</option>') == 1
 
+    # 审批档位开关不在任何页面头部：入口是会话页输入行上的风险面板。
+    assert 'id="tool-governance-banner"' not in html
+    assert 'id="tool-governance-switch"' not in html
+    # 命令白名单入口从 Tool 页头部搬进 exec 工具的「执行模式」区块，那颗按钮由
+    # org_graph_resources.js 在详情抽屉里生成，静态 HTML 里不该再有它。
+    assert 'id="exec-whitelist-btn"' not in html
+
     tool_section = re.search(r'<section id="view-tools".*?</section>', html, flags=re.DOTALL)
     assert tool_section is not None
     tool_html = tool_section.group(0)
     assert 'id="tool-save-btn"' not in tool_html
-    assert 'id="tool-governance-banner"' in tool_html
-    assert tool_html.index('id="tool-refresh-btn"') < tool_html.index('id="tool-governance-banner"')
-    assert tool_html.index('id="tool-governance-banner"') < tool_html.index('id="tool-risk-filter"')
+    assert tool_html.index('id="tool-refresh-btn"') < tool_html.index('id="tool-risk-filter"')
     assert tool_html.index('id="tool-risk-filter"') < tool_html.index('id="tool-status-filter"')
     assert tool_html.index('id="tool-status-filter"') < tool_html.index('id="tool-search-input"')
     assert tool_html.count('<option value="all">风险</option>') == 1

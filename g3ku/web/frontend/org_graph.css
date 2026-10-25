@@ -4689,10 +4689,11 @@ textarea {
     gap: var(--ui-space-2);
 }
 
-/* 输入区左下三颗控件走 40px 控件档；v2 用 id 压过基础类，这里保留 id 选择器。 */
+/* 输入区左下四颗控件走 40px 控件档；v2 用 id 压过基础类，这里保留 id 选择器。 */
 #ceo-context-usage-brain,
 #ceo-attach-btn,
-#ceo-voice-btn {
+#ceo-voice-btn,
+#ceo-risk-btn {
     width: 40px;
     height: 40px;
     min-height: 40px;
@@ -4705,7 +4706,8 @@ textarea {
 
 #ceo-context-usage-brain:hover,
 #ceo-attach-btn:hover,
-#ceo-voice-btn:hover {
+#ceo-voice-btn:hover,
+#ceo-risk-btn:hover {
     background: var(--ui-neutral-soft);
     border-color: var(--ui-border-strong);
 }
@@ -4725,7 +4727,8 @@ textarea {
 }
 
 #ceo-attach-btn svg,
-#ceo-voice-btn svg {
+#ceo-voice-btn svg,
+#ceo-risk-btn svg {
     width: 18px;
     height: 18px;
 }
@@ -5283,13 +5286,177 @@ textarea {
     display: none !important;
 }
 
+.ceo-risk-panel {
+    position: absolute;
+    left: 0;
+    bottom: calc(100% + 12px);
+    z-index: 6;
+    width: 312px;
+    max-width: min(312px, 76vw);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px;
+    border: 1px solid var(--border-strong);
+    border-radius: 18px;
+    background: var(--bg-panel);
+    box-shadow: var(--shadow-lg);
+}
+
+.ceo-risk-panel[hidden] {
+    display: none !important;
+}
+
+.ceo-risk-headline {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+
+.ceo-risk-title {
+    font-size: 0.78rem;
+    font-weight: 700;
+    color: var(--text-secondary);
+}
+
+.ceo-risk-mode-options {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+    padding: 4px;
+    border-radius: 12px;
+    background: var(--bg-surface-inner);
+}
+
+.ceo-risk-mode-option {
+    padding: 7px 8px;
+    border: 1px solid transparent;
+    border-radius: 9px;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+    line-height: 1.2;
+    transition: background-color 0.16s ease, color 0.16s ease, border-color 0.16s ease;
+}
+
+.ceo-risk-mode-option:hover {
+    color: var(--text-primary);
+}
+
+.ceo-risk-mode-option[aria-checked="true"] {
+    border-color: color-mix(in srgb, var(--brand-primary) 34%, transparent);
+    background: var(--bg-panel);
+    color: color-mix(in srgb, var(--brand-primary) 74%, var(--text-primary));
+    box-shadow: var(--shadow-sm);
+}
+
+.ceo-risk-mode-option:focus-visible {
+    outline: 0;
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand-primary) 18%, transparent);
+}
+
+.ceo-risk-entry {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    padding: 8px 10px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+    border-radius: 11px;
+    background: color-mix(in srgb, var(--bg-app) 80%, transparent);
+    color: var(--text-primary);
+    text-align: left;
+    transition: border-color 0.16s ease, background-color 0.16s ease;
+}
+
+.ceo-risk-entry:hover {
+    border-color: color-mix(in srgb, var(--brand-primary) 40%, var(--border-color));
+    background: var(--bg-panel);
+}
+
+.ceo-risk-entry[hidden] {
+    display: none !important;
+}
+
+.ceo-risk-entry-title {
+    font-size: 0.78rem;
+    font-weight: 700;
+    line-height: 1.3;
+}
+
+.ceo-risk-entry-hint {
+    font-size: 0.7rem;
+    line-height: 1.3;
+    color: var(--text-muted);
+}
+
+.ceo-risk-mode-note {
+    padding: 8px 10px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 76%, transparent);
+    border-radius: 11px;
+    background: color-mix(in srgb, var(--bg-app) 70%, transparent);
+    color: var(--text-secondary);
+    font-size: 0.72rem;
+    line-height: 1.4;
+}
+
+.ceo-risk-mode-note[hidden] {
+    display: none !important;
+}
+
+.ceo-risk-whitelist-dialog {
+    width: min(560px, calc(100vw - 48px));
+    max-height: min(720px, calc(100vh - 48px));
+    gap: 14px;
+}
+
+.ceo-risk-whitelist-hint {
+    margin: 0;
+    font-size: 0.74rem;
+    line-height: 1.45;
+    color: var(--text-muted);
+}
+
+/* 名单是长内容：盒子按视口封顶、内部滚动，弹窗外壳不当滚动口。 */
+.ceo-risk-whitelist-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-height: 120px;
+    max-height: min(46vh, 420px);
+    overflow: auto;
+    scrollbar-gutter: stable;
+    padding-right: 2px;
+}
+
+.ceo-risk-whitelist-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
+    border-radius: 11px;
+    background: color-mix(in srgb, var(--bg-app) 74%, transparent);
+}
+
+.ceo-risk-tool-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 0.8rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .ceo-input-row > textarea {
     width: 100%;
     display: block;
 }
 
 .ceo-attach-btn,
-.ceo-voice-btn {
+.ceo-voice-btn,
+.ceo-risk-btn {
     width: var(--ceo-input-leading-size);
     height: var(--ceo-input-leading-size);
     border-radius: 20px;
@@ -5303,6 +5470,14 @@ textarea {
     transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease, background-color 0.18s ease;
 }
 
+/* 黄色指的是"这一档不拦任何工具调用"，所以亮在全部放行上。
+   选择器必须带 id：上面那条 #ceo-risk-btn 的底色规则权重比纯 class 高。 */
+#ceo-risk-btn.is-all-pass {
+    color: color-mix(in srgb, #f59e0b 82%, var(--text-primary));
+    border-color: color-mix(in srgb, #f59e0b 46%, var(--ui-border-strong));
+    background: color-mix(in srgb, #f59e0b 12%, var(--ui-bg-surface));
+}
+
 .ceo-attach-btn:hover:not(:disabled) {
     transform: translateY(-1px);
     border-color: color-mix(in srgb, var(--brand-primary) 40%, var(--border-color));
@@ -5310,6 +5485,7 @@ textarea {
 }
 
 .ceo-voice-btn:focus-visible,
+.ceo-risk-btn:focus-visible,
 .ceo-attach-btn:focus-visible,
 .ceo-upload-remove:focus-visible {
     outline: 0;
@@ -12056,7 +12232,7 @@ textarea {
 
 .task-token-topline {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
     gap: var(--space-3);
 }
 
@@ -12617,6 +12793,11 @@ textarea {
 [data-theme="dark"] .meta-tag.status-disabled { color: #fca5a1; }
 [data-theme="dark"] .meta-tag.status-unavailable { color: #fbbf24; }
 [data-theme="dark"] .meta-tag.status-repair-required { color: #fdba74; }
+/* 上面那条 blanket 与 .meta-tag.risk-* 同权重且更靠后，风险色会被它压成中性；
+   status 档当年逐条补了深色对应值，risk 档漏了，这里补齐同一套写法。 */
+[data-theme="dark"] .meta-tag.risk-low { color: #34d399; }
+[data-theme="dark"] .meta-tag.risk-medium { color: #fbbf24; }
+[data-theme="dark"] .meta-tag.risk-high { color: #f87171; }
 
 .meta-tag.status-running,
 .meta-tag.status-success {
@@ -12787,25 +12968,6 @@ textarea {
   display: grid;
   gap: 14px;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-}
-
-.tool-governance-banner {
-    display: inline-flex;
-    align-items: center;
-    gap: 10px;
-    min-height: 42px;
-    padding: 0;
-    border: none;
-    border-radius: 0;
-    background: transparent;
-    flex: 0 0 auto;
-}
-
-.tool-governance-banner-title {
-    font-size: 0.84rem;
-    font-weight: 700;
-    color: var(--text-secondary);
-    white-space: nowrap;
 }
 
 .tool-governance-switch {
@@ -13137,18 +13299,7 @@ textarea {
     scrollbar-gutter: stable;
 }
 
-@media (max-width: 960px) {
-    .tool-governance-banner {
-        max-width: 100%;
-    }
-}
-
 @media (max-width: 720px) {
-    .tool-governance-banner {
-        justify-content: space-between;
-        width: 100%;
-    }
-
     .tool-governance-switch {
         justify-content: space-between;
     }

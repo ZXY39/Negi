@@ -686,6 +686,11 @@ function renderToolDetail() {
                             </label>
                         </div>
                         <div class="resource-copy-block">${esc(execToolModeSummary(execMode))}</div>
+                        <button id="exec-whitelist-btn" class="toolbar-btn ghost" type="button"
+                            title="管理 exec 命令白名单与待审批请求">
+                            <span class="exec-whitelist-btn-label">命令白名单</span>
+                            <span id="exec-whitelist-badge" class="exec-whitelist-badge" hidden>0</span>
+                        </button>
                     </div>
                 </div>
                 ` : ""}
@@ -751,6 +756,9 @@ function renderToolDetail() {
         setToolDirty(true);
         renderToolDetail();
     }));
+    U.toolDetail.querySelector("#exec-whitelist-btn")?.addEventListener("click", () => {
+        if (typeof openExecWhitelistDialog === "function") openExecWhitelistDialog();
+    });
     U.toolDetail.querySelectorAll(".tool-role").forEach((checkbox) => checkbox.addEventListener("change", (e) => {
         const set = new Set(ResourcesState.selectedTool.allowed_roles || []);
         if (e.target.checked) set.add(e.target.dataset.role);

@@ -25,15 +25,16 @@ function ensureCeoGovernanceState() {
             saving: false,
             loaded: false,
             updatedAt: "",
+            panelOpen: false,
+            whitelistTools: [],
+            whitelistCustomized: false,
+            whitelistDraft: [],
+            whitelistToolsCatalog: [],
         };
     }
     if (!S.ceoApprovalFlow || typeof S.ceoApprovalFlow !== "object") {
         S.ceoApprovalFlow = createEmptyCeoApprovalFlow();
     }
-    if (!U.toolGovernanceBanner) U.toolGovernanceBanner = document.getElementById("tool-governance-banner");
-    if (!U.toolGovernanceSwitch) U.toolGovernanceSwitch = document.getElementById("tool-governance-switch");
-    if (!U.toolGovernanceSwitchTrack) U.toolGovernanceSwitchTrack = document.getElementById("tool-governance-switch-track");
-    if (!U.toolGovernanceSwitchLabel) U.toolGovernanceSwitchLabel = document.getElementById("tool-governance-switch-label");
     if (!U.ceoApprovalViewport) U.ceoApprovalViewport = document.getElementById("ceo-approval-viewport");
     if (!U.ceoApprovalArgsBackdrop) U.ceoApprovalArgsBackdrop = document.getElementById("ceo-approval-args-backdrop");
     if (!U.ceoApprovalArgsDrawer) U.ceoApprovalArgsDrawer = document.getElementById("ceo-approval-args-drawer");
@@ -41,8 +42,19 @@ function ensureCeoGovernanceState() {
     if (!U.ceoApprovalArgsSubtitle) U.ceoApprovalArgsSubtitle = document.getElementById("ceo-approval-args-subtitle");
     if (!U.ceoApprovalArgsBody) U.ceoApprovalArgsBody = document.getElementById("ceo-approval-args-body");
     if (!U.ceoApprovalArgsClose) U.ceoApprovalArgsClose = document.getElementById("ceo-approval-args-close");
-    if (!U.execWhitelistButton) U.execWhitelistButton = document.getElementById("exec-whitelist-btn");
-    if (!U.execWhitelistBadge) U.execWhitelistBadge = document.getElementById("exec-whitelist-badge");
+    if (!U.ceoRiskButton) U.ceoRiskButton = document.getElementById("ceo-risk-btn");
+    if (!U.ceoRiskPanel) U.ceoRiskPanel = document.getElementById("ceo-risk-panel");
+    if (!U.ceoRiskModeAll) U.ceoRiskModeAll = document.getElementById("ceo-risk-mode-all");
+    if (!U.ceoRiskModeConditional) U.ceoRiskModeConditional = document.getElementById("ceo-risk-mode-conditional");
+    if (!U.ceoRiskWhitelistButton) U.ceoRiskWhitelistButton = document.getElementById("ceo-risk-whitelist-btn");
+    if (!U.ceoRiskWhitelistHint) U.ceoRiskWhitelistHint = document.getElementById("ceo-risk-whitelist-hint");
+    if (!U.ceoRiskExecSettingsBtn) U.ceoRiskExecSettingsBtn = document.getElementById("ceo-risk-exec-settings-btn");
+    if (!U.ceoRiskModeNote) U.ceoRiskModeNote = document.getElementById("ceo-risk-mode-note");
+    if (!U.ceoRiskWhitelistBackdrop) U.ceoRiskWhitelistBackdrop = document.getElementById("ceo-risk-whitelist-backdrop");
+    if (!U.ceoRiskWhitelistDialog) U.ceoRiskWhitelistDialog = document.getElementById("ceo-risk-whitelist-dialog");
+    if (!U.ceoRiskWhitelistList) U.ceoRiskWhitelistList = document.getElementById("ceo-risk-whitelist-list");
+    if (!U.ceoRiskWhitelistSaveBtn) U.ceoRiskWhitelistSaveBtn = document.getElementById("ceo-risk-whitelist-save-btn");
+    if (!U.ceoRiskWhitelistCloseBtn) U.ceoRiskWhitelistCloseBtn = document.getElementById("ceo-risk-whitelist-close-btn");
     if (!U.execWhitelistBackdrop) U.execWhitelistBackdrop = document.getElementById("exec-whitelist-backdrop");
     if (!U.execWhitelistDialog) U.execWhitelistDialog = document.getElementById("exec-whitelist-dialog");
     if (!U.execApprovalList) U.execApprovalList = document.getElementById("exec-approval-list");
@@ -365,27 +377,28 @@ function rebindActiveApprovalTurnToUserLane() {
     turn.source = "user";
 }
 
-function renderToolGovernanceModeLegacy() {
-    ensureCeoGovernanceState();
-    const state = governanceModeState();
-    const banner = U.toolGovernanceBanner;
-    const toggle = U.toolGovernanceSwitch;
-    const label = U.toolGovernanceSwitchLabel;
-    const text = U.toolGovernanceBannerText;
-    if (!banner || !toggle || !label || !text) return;
-    const enabled = !!state.enabled;
-    toggle.setAttribute("aria-pressed", enabled ? "true" : "false");
-    toggle.disabled = !!state.loading || !!state.saving;
-    label.textContent = state.saving
-        ? "保存中..."
-        : state.loading
-            ? "加载中..."
-            : enabled
-                ? "已开启"
-                : "已关闭";
-    text.textContent = enabled
-        ? "开启后，主 Agent 调用中/高风险 Tool 会进入逐个审批，并在最后统一提交。"
-        : "关闭后，主 Agent 将按现有运行方式直接处理 Tool 调用，不再进入监管审批。";
+const CEO_RISK_MODE_NOTE_ALL_PASS = "全部放行：主 Agent 的 Tool 调用直接执行，不进审批。";
+const CEO_RISK_MODE_NOTE_CONDITIONAL = "条件放行：白名单外的 Tool 调用逐条送审。渠道会话没有审批界面，这类调用会在当跳打回给模型。";
+
+function normalizeGovernanceToolIds(values) {
+    const seen = new Set();
+    const ids = [];
+    (Array.isArray(values) ? values : []).forEach((value) => {
+        const toolId = String(value || "").trim();
+        if (!toolId || seen.has(toolId)) return;
+        seen.add(toolId);
+        ids.push(toolId);
+    });
+    return ids;
+}
+
+function applyGovernanceModeItem(state, item) {
+    const source = item && typeof item === "object" ? item : {};
+    state.enabled = !!source.enabled;
+    state.whitelistTools = normalizeGovernanceToolIds(source.whitelist_tools);
+    state.whitelistCustomized = !!source.whitelist_customized;
+    state.updatedAt = String(source.updated_at || "").trim();
+    state.loaded = true;
 }
 
 async function loadToolGovernanceMode({ quiet = true } = {}) {
@@ -393,18 +406,15 @@ async function loadToolGovernanceMode({ quiet = true } = {}) {
     const state = governanceModeState();
     if (state.loading) return state;
     state.loading = true;
-    renderToolGovernanceMode();
+    renderCeoRiskPanel();
     try {
-        const item = await ApiClient.getToolGovernanceMode();
-        state.enabled = !!item?.enabled;
-        state.updatedAt = String(item?.updated_at || "").trim();
-        state.loaded = true;
+        applyGovernanceModeItem(state, await ApiClient.getToolGovernanceMode());
         return state;
     } catch (error) {
         if (!quiet) {
             showToast({
-                title: "监管模式加载失败",
-                text: error?.message || "无法读取监管模式状态。",
+                title: "审批档位加载失败",
+                text: error?.message || "无法读取工具审批设置。",
                 kind: "error",
                 durationMs: 2600,
             });
@@ -412,60 +422,177 @@ async function loadToolGovernanceMode({ quiet = true } = {}) {
         return state;
     } finally {
         state.loading = false;
-        renderToolGovernanceMode();
+        renderCeoRiskPanel();
     }
 }
 
 window.loadToolGovernanceMode = loadToolGovernanceMode;
 
-function renderToolGovernanceMode() {
+async function saveToolGovernanceMode({ enabled = null, whitelistTools = null } = {}) {
     ensureCeoGovernanceState();
     const state = governanceModeState();
-    const banner = U.toolGovernanceBanner;
-    const toggle = U.toolGovernanceSwitch;
-    const label = U.toolGovernanceSwitchLabel;
-    if (!banner || !toggle || !label) return;
-    const enabled = !!state.enabled;
-    const description = enabled
-        ? "开启后，主 Agent 调用中/高风险 Tool 会进入逐个审批，并在最后统一提交。"
-        : "关闭后，后续 Tool 调用将按非监管模式直接继续执行。";
-    toggle.setAttribute("aria-pressed", enabled ? "true" : "false");
-    toggle.setAttribute("aria-label", enabled ? "关闭监管模式" : "开启监管模式");
-    toggle.title = description;
-    toggle.disabled = !!state.loading || !!state.saving;
-    banner.dataset.enabled = enabled ? "true" : "false";
-    banner.title = description;
-    label.textContent = state.saving
-        ? "保存中"
-        : state.loading
-            ? "加载中"
-            : enabled
-                ? "开启"
-                : "关闭";
-}
-
-async function toggleToolGovernanceMode() {
-    ensureCeoGovernanceState();
-    const state = governanceModeState();
-    if (state.loading || state.saving) return;
+    if (state.saving) return false;
+    const payload = {};
+    if (enabled !== null) payload.enabled = !!enabled;
+    if (whitelistTools !== null) payload.whitelistTools = normalizeGovernanceToolIds(whitelistTools);
     state.saving = true;
-    renderToolGovernanceMode();
+    renderCeoRiskPanel();
     try {
-        const item = await ApiClient.updateToolGovernanceMode(!state.enabled);
-        state.enabled = !!item?.enabled;
-        state.updatedAt = String(item?.updated_at || "").trim();
-        state.loaded = true;
+        applyGovernanceModeItem(state, await ApiClient.updateToolGovernanceMode(payload));
+        return true;
     } catch (error) {
         showToast({
-            title: "监管模式更新失败",
-            text: error?.message || "保存监管模式失败。",
+            title: "审批设置保存失败",
+            text: error?.message || "无法保存工具审批设置。",
             kind: "error",
             durationMs: 2800,
         });
+        return false;
     } finally {
         state.saving = false;
-        renderToolGovernanceMode();
+        renderCeoRiskPanel();
     }
+}
+
+function openCeoRiskPanel() {
+    ensureCeoGovernanceState();
+    const state = governanceModeState();
+    if (state.panelOpen) return;
+    // 两栏都锚在同一处输入行左侧，同时开着会叠在一起。
+    if (typeof closeCeoModelModePanel === "function") closeCeoModelModePanel();
+    state.panelOpen = true;
+    renderCeoRiskPanel();
+    if (!state.loaded && !state.loading) void loadToolGovernanceMode({ quiet: false });
+}
+
+function closeCeoRiskPanel() {
+    ensureCeoGovernanceState();
+    const state = governanceModeState();
+    if (!state.panelOpen) return;
+    state.panelOpen = false;
+    renderCeoRiskPanel();
+}
+
+function toggleCeoRiskPanel() {
+    ensureCeoGovernanceState();
+    if (governanceModeState().panelOpen) closeCeoRiskPanel();
+    else openCeoRiskPanel();
+}
+
+function renderCeoRiskPanel() {
+    ensureCeoGovernanceState();
+    const state = governanceModeState();
+    const panel = U.ceoRiskPanel;
+    if (!panel) return;
+    panel.hidden = !state.panelOpen;
+    const button = U.ceoRiskButton;
+    button?.setAttribute?.("aria-expanded", state.panelOpen ? "true" : "false");
+    button?.classList?.toggle("is-panel-open", !!state.panelOpen);
+    const conditional = !!state.enabled;
+    const busy = !!state.loading || !!state.saving;
+    // 黄色指的是"这一档不拦任何工具调用"，所以亮在全部放行上。
+    button?.classList?.toggle("is-all-pass", !conditional);
+    U.ceoRiskModeAll?.setAttribute?.("aria-checked", conditional ? "false" : "true");
+    U.ceoRiskModeConditional?.setAttribute?.("aria-checked", conditional ? "true" : "false");
+    if (U.ceoRiskModeAll) U.ceoRiskModeAll.disabled = busy;
+    if (U.ceoRiskModeConditional) U.ceoRiskModeConditional.disabled = busy;
+    if (U.ceoRiskWhitelistButton) U.ceoRiskWhitelistButton.hidden = !conditional;
+    if (U.ceoRiskWhitelistHint) {
+        U.ceoRiskWhitelistHint.textContent = conditional
+            ? `${state.whitelistTools.length} 项免审${state.whitelistCustomized ? "" : "（默认低风险）"}`
+            : "";
+    }
+    if (U.ceoRiskModeNote) {
+        U.ceoRiskModeNote.textContent = conditional ? CEO_RISK_MODE_NOTE_CONDITIONAL : CEO_RISK_MODE_NOTE_ALL_PASS;
+        U.ceoRiskModeNote.hidden = !state.panelOpen;
+    }
+}
+
+function execWhitelistToolRows(tools, selectedIds) {
+    const list = Array.isArray(tools) ? tools : [];
+    const selected = new Set(normalizeGovernanceToolIds(selectedIds));
+    return list.map((tool) => {
+        const toolId = String(tool?.tool_id || "").trim();
+        if (!toolId) return "";
+        const risk = String(tool?.risk_level || "medium").trim().toLowerCase();
+        return `
+            <label class="ceo-risk-whitelist-item">
+                <input type="checkbox" class="ui-checkbox-input ceo-risk-tool-input" data-tool-id="${esc(toolId)}"
+                    ${selected.has(toolId) ? "checked" : ""}>
+                <span class="ui-checkbox-box" aria-hidden="true"></span>
+                <span class="ceo-risk-tool-name">${esc(tool?.display_name || toolId)}</span>
+                <span class="meta-tag risk-${esc(risk)}">${esc(displayRiskLabel(risk))}</span>
+            </label>
+        `;
+    }).join("");
+}
+
+async function openCeoReviewWhitelistDialog() {
+    ensureCeoGovernanceState();
+    const state = governanceModeState();
+    const dialog = U.ceoRiskWhitelistDialog;
+    const backdrop = U.ceoRiskWhitelistBackdrop;
+    if (!dialog || !backdrop) return;
+    closeCeoRiskPanel();
+    if (!state.loaded) await loadToolGovernanceMode({ quiet: false });
+    state.whitelistDraft = normalizeGovernanceToolIds(state.whitelistTools);
+    backdrop.hidden = false;
+    backdrop.classList.add("is-open");
+    if (U.ceoRiskWhitelistList) {
+        U.ceoRiskWhitelistList.innerHTML = '<div class="empty-state">加载 Tool 列表…</div>';
+    }
+    try {
+        const tools = await ApiClient.getTools(0, 300);
+        state.whitelistToolsCatalog = Array.isArray(tools) ? tools : [];
+        renderCeoReviewWhitelistList();
+    } catch (error) {
+        if (U.ceoRiskWhitelistList) {
+            U.ceoRiskWhitelistList.innerHTML =
+                `<div class="empty-state error">加载失败：${esc(error?.message || "未知错误")}</div>`;
+        }
+    }
+    window.requestAnimationFrame(() => U.ceoRiskWhitelistCloseBtn?.focus?.());
+}
+
+function renderCeoReviewWhitelistList() {
+    ensureCeoGovernanceState();
+    const state = governanceModeState();
+    const host = U.ceoRiskWhitelistList;
+    if (!host) return;
+    const catalog = Array.isArray(state.whitelistToolsCatalog) ? state.whitelistToolsCatalog : [];
+    if (!catalog.length) {
+        host.innerHTML = '<div class="empty-state">没有可选的 Tool。</div>';
+        return;
+    }
+    host.innerHTML = execWhitelistToolRows(catalog, state.whitelistDraft);
+}
+
+function closeCeoReviewWhitelistDialog() {
+    const backdrop = U.ceoRiskWhitelistBackdrop;
+    if (!backdrop) return;
+    backdrop.hidden = true;
+    backdrop.classList.remove("is-open");
+}
+
+function readCheckedWhitelistToolIds() {
+    const host = U.ceoRiskWhitelistList;
+    if (!host?.querySelectorAll) return [];
+    const inputs = Array.from(host.querySelectorAll(".ceo-risk-tool-input"));
+    return normalizeGovernanceToolIds(
+        inputs.filter((input) => input.checked).map((input) => input.getAttribute?.("data-tool-id") || ""),
+    );
+}
+
+async function saveCeoReviewWhitelist() {
+    const saved = await saveToolGovernanceMode({ whitelistTools: readCheckedWhitelistToolIds() });
+    if (!saved) return;
+    closeCeoReviewWhitelistDialog();
+    showToast({
+        title: "白名单已保存",
+        text: `条件放行下 ${governanceModeState().whitelistTools.length} 项 Tool 免审。`,
+        kind: "success",
+        durationMs: 2400,
+    });
 }
 
 function setApprovalDecision(toolCallId, decision) {
@@ -682,11 +809,51 @@ async function submitCeoApprovalFlow() {
     }
 }
 
-function bindToolGovernanceUi() {
+function bindCeoRiskUi() {
     ensureCeoGovernanceState();
-    if (U.toolGovernanceSwitch && !U.toolGovernanceSwitch.dataset.bound) {
-        U.toolGovernanceSwitch.dataset.bound = "true";
-        U.toolGovernanceSwitch.addEventListener("click", () => void toggleToolGovernanceMode());
+    if (U.ceoRiskButton && !U.ceoRiskButton.dataset.bound) {
+        U.ceoRiskButton.dataset.bound = "true";
+        U.ceoRiskButton.addEventListener("click", (event) => {
+            event.stopPropagation?.();
+            toggleCeoRiskPanel();
+        });
+    }
+    if (U.ceoRiskPanel && !U.ceoRiskPanel.dataset.bound) {
+        U.ceoRiskPanel.dataset.bound = "true";
+        U.ceoRiskPanel.addEventListener("click", (event) => {
+            // 面板内的点击不该被"点外面就关"那条收掉。
+            event.stopPropagation?.();
+            const target = event.target instanceof Element ? event.target : null;
+            if (!target) return;
+            if (target.closest("#ceo-risk-mode-all")) void saveToolGovernanceMode({ enabled: false });
+            else if (target.closest("#ceo-risk-mode-conditional")) void saveToolGovernanceMode({ enabled: true });
+            else if (target.closest("#ceo-risk-whitelist-btn")) void openCeoReviewWhitelistDialog();
+            else if (target.closest("#ceo-risk-exec-settings-btn")) {
+                // 命令行那一档拦截规则住在 exec 工具详情里（执行模式 + 命令白名单入口），
+                // 风险面板只负责把那张抽屉打开。
+                closeCeoRiskPanel();
+                if (typeof openTool === "function") void openTool("exec");
+            }
+        });
+    }
+    if (U.ceoRiskWhitelistDialog && !U.ceoRiskWhitelistDialog.dataset.bound) {
+        U.ceoRiskWhitelistDialog.dataset.bound = "true";
+        U.ceoRiskWhitelistDialog.addEventListener("click", (event) => {
+            const target = event.target instanceof Element ? event.target : null;
+            if (!target) return;
+            if (target.closest("[data-modal-close]")) closeCeoReviewWhitelistDialog();
+            else if (target.closest("#ceo-risk-whitelist-save-btn")) void saveCeoReviewWhitelist();
+        });
+    }
+    if (U.ceoRiskWhitelistBackdrop && !U.ceoRiskWhitelistBackdrop.dataset.bound) {
+        U.ceoRiskWhitelistBackdrop.dataset.bound = "true";
+        U.ceoRiskWhitelistBackdrop.addEventListener("click", (event) => {
+            if (event.target === U.ceoRiskWhitelistBackdrop) closeCeoReviewWhitelistDialog();
+        });
+    }
+    if (!U.ceoRiskOutsideBound) {
+        U.ceoRiskOutsideBound = true;
+        document.addEventListener("click", () => closeCeoRiskPanel());
     }
 }
 
@@ -772,6 +939,7 @@ function ensureExecWhitelistState() {
             deciding: false,
             opened: false,
             approvalWaitSeconds: 120,
+            pendingCount: 0,
             pollIntervalId: null,
             refreshIntervalId: null,
         };
@@ -785,9 +953,12 @@ function execWhitelistScopeLabel(scope = "") {
 }
 
 function renderExecWhitelistBadge(count = 0) {
-    const badge = U.execWhitelistBadge;
-    if (!badge) return;
+    ensureExecWhitelistState();
     const pending = Math.max(0, Number(count) || 0);
+    S.execWhitelist.pendingCount = pending;
+    // 入口在 exec 详情抽屉里，每次重绘都会换成一个新节点，按 id 现取而不是缓存。
+    const badge = document.getElementById("exec-whitelist-badge");
+    if (!badge) return;
     badge.textContent = pending > 99 ? "99+" : String(pending);
     badge.hidden = pending <= 0;
 }
@@ -1146,10 +1317,6 @@ function closeExecWhitelistDialog() {
 
 function bindExecWhitelistUi() {
     ensureCeoGovernanceState();
-    if (U.execWhitelistButton && !U.execWhitelistButton.dataset.bound) {
-        U.execWhitelistButton.dataset.bound = "true";
-        U.execWhitelistButton.addEventListener("click", () => openExecWhitelistDialog());
-    }
     if (U.execWhitelistBackdrop && !U.execWhitelistBackdrop.dataset.bound) {
         U.execWhitelistBackdrop.dataset.bound = "true";
         U.execWhitelistBackdrop.addEventListener("click", (event) => {
@@ -1195,10 +1362,10 @@ function bindExecWhitelistUi() {
     }
 }
 
-bindToolGovernanceUi();
+bindCeoRiskUi();
 bindExecWhitelistUi();
 bindCeoApprovalUi();
-renderToolGovernanceMode();
+renderCeoRiskPanel();
 renderCeoApprovalFlow();
 // 水合之前不能去问审批状态：activeSessionId() 在会话清单落地前回退到 ApiClient 的兜底 id
 // "web:shared"，拿它查到的挂起批次会被画成阻塞浮层，等清单落地换成真会话才消失——
@@ -1214,9 +1381,20 @@ if (S.ceoSessionHydrated) {
         void refreshCeoApprovalFromServer(activeSessionId(), { quiet: true });
     }
 }
-if (S.view === "tools") {
-    void loadToolGovernanceMode({ quiet: true });
-    startExecPendingPolling();
+// 档位是全局的一份设置（所有会话共享，新会话继承最新一次修改），所以按钮指示位
+// 在启动时就按服务端读数点亮，而不是等面板第一次被打开。
+void loadToolGovernanceMode({ quiet: true });
+if (S.view === "tools") startExecPendingPolling();
+
+// exec 详情抽屉每次重绘都会重建那颗命令白名单入口，待审批数字要跟着回灌一次，
+// 否则按钮要等到下一轮 10 秒轮询才带上计数。
+if (typeof renderToolDetail === "function") {
+    const __baseRenderToolDetail = renderToolDetail;
+    renderToolDetail = function renderToolDetailWithExecBadge(...args) {
+        const result = __baseRenderToolDetail.apply(this, args);
+        renderExecWhitelistBadge(ensureExecWhitelistState().pendingCount);
+        return result;
+    };
 }
 
 const __baseCanMutateCeoSessions = canMutateCeoSessions;

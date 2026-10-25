@@ -84,6 +84,13 @@ from main.governance.exec_tool_policy import (
     merge_exec_execution_mode_metadata,
     resolve_exec_runtime_policy_payload,
 )
+from main.governance.review_policy import (
+    GOVERNANCE_MODE_META_KEY,
+    GOVERNANCE_MODE_UPDATED_AT_META_KEY,
+    resolve_review_free_tool_ids,
+    review_mode_from_enabled,
+    write_review_free_tool_ids,
+)
 from main.governance.roles import normalize_public_allowed_roles
 from main.governance.tool_context import (
     build_tool_context_fingerprint,
@@ -223,8 +230,6 @@ from main.storage.fs_utils import remove_tree
 from main.storage.sqlite_store import SQLiteTaskStore
 
 _UNSET = object()
-GOVERNANCE_MODE_META_KEY = 'ceo_frontdoor_regulatory_mode_enabled'
-GOVERNANCE_MODE_UPDATED_AT_META_KEY = 'ceo_frontdoor_regulatory_mode_enabled:updated_at'
 _WORKER_STATUS_STALE_AFTER_SECONDS = 15.0
 _WORKER_STATUS_ACTIVE_TASK_STALE_AFTER_SECONDS = 60.0
 _WORKER_STATUS_STARTING_GRACE_SECONDS = 10.0
@@ -10360,20 +10365,36 @@ class MainRuntimeService:
     def get_tool(self, tool_id: str):
         return self._decorate_tool(self._raw_tool(tool_id))
 
+    def _ceo_review_candidate_tools(self) -> list[Any]:
+        """默认免审档的派生样本：CEO 角色在默认会话下可见的那批工具记录。"""
+        return list(self.list_visible_tools(actor_role='ceo', session_id='web:shared') or [])
+
     def get_governance_mode(self) -> dict[str, Any]:
+        enabled = self.governance_store.get_bool_meta(GOVERNANCE_MODE_META_KEY, default=False)
+        review_free, customized = resolve_review_free_tool_ids(
+            self.governance_store,
+            self._ceo_review_candidate_tools(),
+        )
         return {
-            'enabled': self.governance_store.get_bool_meta(GOVERNANCE_MODE_META_KEY, default=False),
+            'enabled': bool(enabled),
+            'mode': review_mode_from_enabled(enabled),
+            'whitelist_tools': review_free,
+            'whitelist_customized': bool(customized),
             'updated_at': str(self.governance_store.get_meta(GOVERNANCE_MODE_UPDATED_AT_META_KEY) or ''),
         }
 
-    def update_governance_mode(self, *, enabled: bool) -> dict[str, Any]:
-        self.governance_store.set_bool_meta(GOVERNANCE_MODE_META_KEY, bool(enabled))
-        updated_at = now_iso()
-        self.governance_store.set_meta(GOVERNANCE_MODE_UPDATED_AT_META_KEY, updated_at)
-        return {
-            'enabled': bool(enabled),
-            'updated_at': updated_at,
-        }
+    def update_governance_mode(
+        self,
+        *,
+        enabled: bool | None = None,
+        whitelist_tools: list[Any] | None = None,
+    ) -> dict[str, Any]:
+        if enabled is not None:
+            self.governance_store.set_bool_meta(GOVERNANCE_MODE_META_KEY, bool(enabled))
+        if whitelist_tools is not None:
+            write_review_free_tool_ids(self.governance_store, whitelist_tools)
+        self.governance_store.set_meta(GOVERNANCE_MODE_UPDATED_AT_META_KEY, now_iso())
+        return self.get_governance_mode()
 
     @staticmethod
     def _normalize_permission_risk_level(value: Any, *, default: str = 'medium') -> str:
@@ -10384,7 +10405,11 @@ class MainRuntimeService:
         return fallback if fallback in {'low', 'medium', 'high'} else 'medium'
 
     def frontdoor_reviewable_tool_risk_map(self, *, actor_role: str, session_id: str) -> dict[str, str]:
-        if not bool(self.get_governance_mode().get('enabled')):
+        """条件放行档下需要人工审批的工具 → 风险度。
+
+        免审集合由名单决定：操作员存过名单就照名单，没存过则默认放行低风险工具。
+        """
+        if not bool(self.governance_store.get_bool_meta(GOVERNANCE_MODE_META_KEY, default=False)):
             return {}
         normalized_actor_role = str(actor_role or 'ceo').strip().lower() or 'ceo'
         normalized_session_id = self._normalize_session_key(session_id)
@@ -10396,17 +10421,22 @@ class MainRuntimeService:
         )
         if not visible_names:
             return {}
-        reviewable: dict[str, str] = {}
+        candidates = []
         for record in list(
             self.list_visible_tools(actor_role=normalized_actor_role, session_id=normalized_session_id) or []
         ):
             tool_id = str(getattr(record, 'tool_id', '') or '').strip()
             if not tool_id or tool_id not in visible_names:
                 continue
-            risk_level = self._normalize_permission_risk_level(getattr(record, 'risk_level', 'medium'))
-            if risk_level not in {'medium', 'high'}:
+            candidates.append(record)
+        review_free, _ = resolve_review_free_tool_ids(self.governance_store, candidates)
+        review_free_ids = set(review_free)
+        reviewable: dict[str, str] = {}
+        for record in candidates:
+            tool_id = str(getattr(record, 'tool_id', '') or '').strip()
+            if tool_id in review_free_ids:
                 continue
-            reviewable[tool_id] = risk_level
+            reviewable[tool_id] = self._normalize_permission_risk_level(getattr(record, 'risk_level', 'medium'))
         return reviewable
 
     def get_tool_toolskill(self, tool_id: str) -> dict[str, Any] | None:

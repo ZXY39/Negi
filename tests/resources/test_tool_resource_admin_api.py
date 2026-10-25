@@ -5267,12 +5267,21 @@ async def test_main_runtime_service_governance_mode_round_trip(tmp_path: Path):
     try:
         assert service.get_governance_mode() == {
             'enabled': False,
+            'mode': 'all_pass',
+            'whitelist_tools': [],
+            'whitelist_customized': False,
             'updated_at': '',
         }
         updated = service.update_governance_mode(enabled=True)
         assert updated['enabled'] is True
+        assert updated['mode'] == 'conditional'
         assert str(updated['updated_at']).strip()
         assert service.get_governance_mode() == updated
+
+        whitelisted = service.update_governance_mode(whitelist_tools=['exec', 'exec', ' ', 'memory_update'])
+        assert whitelisted['enabled'] is True
+        assert whitelisted['whitelist_tools'] == ['exec', 'memory_update']
+        assert whitelisted['whitelist_customized'] is True
     finally:
         await service.close()
 
@@ -5287,7 +5296,9 @@ async def test_main_runtime_service_governance_mode_round_trip(tmp_path: Path):
     try:
         reloaded = restarted.get_governance_mode()
         assert reloaded['enabled'] is True
-        assert reloaded['updated_at'] == updated['updated_at']
+        assert reloaded['whitelist_tools'] == ['exec', 'memory_update']
+        assert reloaded['whitelist_customized'] is True
+        assert reloaded['updated_at'] == whitelisted['updated_at']
     finally:
         await restarted.close()
 
@@ -5340,6 +5351,43 @@ async def test_main_runtime_service_frontdoor_reviewable_tool_risk_map_uses_gove
         assert reviewable['exec'] == 'high'
         assert reviewable['memory_update'] == 'medium'
         assert 'content_search' not in reviewable
+
+        # 档位与名单各只有一份全局设置，不按会话存：换一个会话键（含渠道会话）读到
+        # 同一份判据，所以改一次所有在跑与新建的会话都跟着走。
+        assert service.frontdoor_reviewable_tool_risk_map(
+            actor_role='ceo',
+            session_id='ext:qq-official:abc',
+        ) == reviewable
+
+        # 从没存过名单时按风险度派生默认档；存了名单之后名单就是唯一判据，
+        # 被摘出名单的低风险工具一样要审。
+        service.update_tool_policy(
+            'content_search',
+            session_id='web:shared',
+            allowed_roles=['ceo'],
+        )
+        service.update_governance_mode(whitelist_tools=['memory_update'])
+        reviewable = service.frontdoor_reviewable_tool_risk_map(
+            actor_role='ceo',
+            session_id='web:shared',
+        )
+        assert reviewable['exec'] == 'high'
+        assert 'memory_update' not in reviewable
+        assert reviewable['content_search'] == 'low'
+
+        service.update_governance_mode(whitelist_tools=[])
+        reviewable = service.frontdoor_reviewable_tool_risk_map(
+            actor_role='ceo',
+            session_id='web:shared',
+        )
+        assert reviewable['exec'] == 'high'
+        assert reviewable['memory_update'] == 'medium'
+
+        service.update_governance_mode(enabled=False)
+        assert service.frontdoor_reviewable_tool_risk_map(
+            actor_role='ceo',
+            session_id='web:shared',
+        ) == {}
     finally:
         await service.close()
         manager.close()
@@ -5353,11 +5401,25 @@ def test_governance_mode_endpoints_round_trip():
             return None
 
         def get_governance_mode(self):
-            return {'enabled': False, 'updated_at': ''}
+            return {
+                'enabled': False,
+                'mode': 'all_pass',
+                'whitelist_tools': [],
+                'whitelist_customized': False,
+                'updated_at': '',
+            }
 
-        def update_governance_mode(self, *, enabled: bool):
+        def update_governance_mode(self, *, enabled=None, whitelist_tools=None):
+            captured.clear()
             captured['enabled'] = enabled
-            return {'enabled': bool(enabled), 'updated_at': '2026-04-21T12:34:56Z'}
+            captured['whitelist_tools'] = whitelist_tools
+            return {
+                'enabled': bool(enabled),
+                'mode': 'conditional' if enabled else 'all_pass',
+                'whitelist_tools': list(whitelist_tools or []),
+                'whitelist_customized': whitelist_tools is not None,
+                'updated_at': '2026-04-21T12:34:56Z',
+            }
 
     client = TestClient(_build_app(_StubService()))
 
@@ -5367,6 +5429,9 @@ def test_governance_mode_endpoints_round_trip():
         'ok': True,
         'item': {
             'enabled': False,
+            'mode': 'all_pass',
+            'whitelist_tools': [],
+            'whitelist_customized': False,
             'updated_at': '',
         },
     }
@@ -5376,14 +5441,33 @@ def test_governance_mode_endpoints_round_trip():
         json={'enabled': True},
     )
     assert put_response.status_code == 200
-    assert captured == {'enabled': True}
+    assert captured == {'enabled': True, 'whitelist_tools': None}
     assert put_response.json() == {
         'ok': True,
         'item': {
             'enabled': True,
+            'mode': 'conditional',
+            'whitelist_tools': [],
+            'whitelist_customized': False,
             'updated_at': '2026-04-21T12:34:56Z',
         },
     }
+
+    # 白名单弹窗只存名单，不顺手改档位。
+    whitelist_response = client.put(
+        '/api/resources/tools/governance-mode',
+        json={'whitelist_tools': ['exec', 'content_search']},
+    )
+    assert whitelist_response.status_code == 200
+    assert captured == {'enabled': None, 'whitelist_tools': ['exec', 'content_search']}
+    assert whitelist_response.json()['item']['whitelist_customized'] is True
+
+    bad_response = client.put(
+        '/api/resources/tools/governance-mode',
+        json={'whitelist_tools': 'exec'},
+    )
+    assert bad_response.status_code == 400
+    assert bad_response.json()['detail'] == 'whitelist_tools_must_be_a_list'
 
 
 @pytest.mark.asyncio

@@ -35,6 +35,13 @@ from main.governance.exec_tool_policy import (
     exec_tool_supports_execution_mode,
     merge_exec_execution_mode_metadata,
 )
+from main.governance.review_policy import (
+    GOVERNANCE_MODE_META_KEY,
+    GOVERNANCE_MODE_UPDATED_AT_META_KEY,
+    resolve_review_free_tool_ids,
+    review_mode_from_enabled,
+    write_review_free_tool_ids,
+)
 from main.governance.roles import normalize_public_allowed_roles
 from main.governance.tool_context import build_tool_toolskill_payload
 from main.protocol import now_iso
@@ -47,8 +54,6 @@ MEMORY_NOTE_REF_RE = re.compile(r"^note_[a-z0-9_]+$")
 # accepts both. Writing a note still requires the real name: a handle is not a target an
 # operator chose, it is a token a reader was handed.
 MEMORY_NOTE_HANDLE_RE = re.compile(r"^[nc][0-9a-f]{5}$")
-GOVERNANCE_MODE_META_KEY = 'ceo_frontdoor_regulatory_mode_enabled'
-GOVERNANCE_MODE_UPDATED_AT_META_KEY = 'ceo_frontdoor_regulatory_mode_enabled:updated_at'
 
 
 
@@ -218,19 +223,31 @@ class _StandaloneResourceService:
         return self._decorate_tool(self._raw_tool(tool_id))
 
     def get_governance_mode(self) -> dict[str, Any]:
+        enabled = self._governance_store.get_bool_meta(GOVERNANCE_MODE_META_KEY, default=False)
+        review_free, customized = resolve_review_free_tool_ids(
+            self._governance_store,
+            list(self.list_visible_tools(actor_role='ceo', session_id='web:shared') or []),
+        )
         return {
-            'enabled': self._governance_store.get_bool_meta(GOVERNANCE_MODE_META_KEY, default=False),
+            'enabled': bool(enabled),
+            'mode': review_mode_from_enabled(enabled),
+            'whitelist_tools': review_free,
+            'whitelist_customized': bool(customized),
             'updated_at': str(self._governance_store.get_meta(GOVERNANCE_MODE_UPDATED_AT_META_KEY) or ''),
         }
 
-    def update_governance_mode(self, *, enabled: bool) -> dict[str, Any]:
-        self._governance_store.set_bool_meta(GOVERNANCE_MODE_META_KEY, bool(enabled))
-        updated_at = now_iso()
-        self._governance_store.set_meta(GOVERNANCE_MODE_UPDATED_AT_META_KEY, updated_at)
-        return {
-            'enabled': bool(enabled),
-            'updated_at': updated_at,
-        }
+    def update_governance_mode(
+        self,
+        *,
+        enabled: bool | None = None,
+        whitelist_tools: list[Any] | None = None,
+    ) -> dict[str, Any]:
+        if enabled is not None:
+            self._governance_store.set_bool_meta(GOVERNANCE_MODE_META_KEY, bool(enabled))
+        if whitelist_tools is not None:
+            write_review_free_tool_ids(self._governance_store, whitelist_tools)
+        self._governance_store.set_meta(GOVERNANCE_MODE_UPDATED_AT_META_KEY, now_iso())
+        return self.get_governance_mode()
 
     def get_tool_toolskill(self, tool_id: str) -> dict[str, Any] | None:
         return build_tool_toolskill_payload(
@@ -1856,8 +1873,19 @@ async def get_governance_mode():
 
 @router.put('/resources/tools/governance-mode')
 async def update_governance_mode(payload: dict = Body(...)):
+    raw_enabled = payload.get('enabled') if 'enabled' in payload else None
+    raw_whitelist = payload.get('whitelist_tools')
+    whitelist_tools: list[str] | None = None
+    if raw_whitelist is not None:
+        if not isinstance(raw_whitelist, list):
+            raise HTTPException(status_code=400, detail='whitelist_tools_must_be_a_list')
+        whitelist_tools = [str(item or '') for item in raw_whitelist]
     with _resource_service() as service:
-        return {'ok': True, 'item': dict(service.update_governance_mode(enabled=bool(payload.get('enabled'))) or {})}
+        item = service.update_governance_mode(
+            enabled=None if raw_enabled is None else bool(raw_enabled),
+            whitelist_tools=whitelist_tools,
+        )
+        return {'ok': True, 'item': dict(item or {})}
 
 
 def _exec_approvals_or_503():

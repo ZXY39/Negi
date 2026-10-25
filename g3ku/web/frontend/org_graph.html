@@ -230,6 +230,11 @@
                                             aria-label="语音输入" aria-pressed="false">
                                             <i data-lucide="mic"></i>
                                         </button>
+                                        <button id="ceo-risk-btn" class="ceo-risk-btn" type="button"
+                                            aria-haspopup="dialog" aria-expanded="false"
+                                            aria-controls="ceo-risk-panel" aria-label="中高风险工具审批">
+                                            <i data-lucide="shield-alert"></i>
+                                        </button>
                                         <div id="ceo-model-mode-panel" class="ceo-model-mode-panel" role="dialog"
                                             aria-label="模型与上下文" hidden>
                                             <div class="ceo-model-mode-headline">
@@ -298,6 +303,28 @@
                                             </div>
                                             <div id="ceo-model-mode-note" class="ceo-model-mode-note" role="status"
                                                 hidden></div>
+                                        </div>
+                                        <div id="ceo-risk-panel" class="ceo-risk-panel" role="dialog"
+                                            aria-label="中高风险工具审批" hidden>
+                                            <div class="ceo-risk-headline">
+                                                <span class="ceo-risk-title">中高风险工具审批</span>
+                                            </div>
+                                            <button id="ceo-risk-exec-settings-btn" class="ceo-risk-entry" type="button">
+                                                <span class="ceo-risk-entry-title">命令行风险拦截设置</span>
+                                                <span class="ceo-risk-entry-hint">exec 执行模式与命令白名单</span>
+                                            </button>
+                                            <div class="ceo-risk-mode-options" role="radiogroup" aria-label="工具审批模式">
+                                                <button id="ceo-risk-mode-all" class="ceo-risk-mode-option" type="button"
+                                                    role="radio" aria-checked="true">全部放行</button>
+                                                <button id="ceo-risk-mode-conditional" class="ceo-risk-mode-option"
+                                                    type="button" role="radio" aria-checked="false">条件放行</button>
+                                            </div>
+                                            <button id="ceo-risk-whitelist-btn" class="ceo-risk-entry" type="button"
+                                                hidden>
+                                                <span class="ceo-risk-entry-title">白名单</span>
+                                                <span id="ceo-risk-whitelist-hint" class="ceo-risk-entry-hint"></span>
+                                            </button>
+                                            <p id="ceo-risk-mode-note" class="ceo-risk-mode-note" role="status" hidden></p>
                                         </div>
                                     </div>
                                     <textarea id="ceo-input" rows="1"
@@ -465,22 +492,6 @@
                     </div>
                     <div class="resource-header-actions compact-resource-header-actions">
                         <button id="tool-refresh-btn" class="toolbar-btn ghost" type="button">刷新</button>
-                        <div id="tool-governance-banner" class="tool-governance-banner" role="group" aria-label="监管模式">
-                            <span class="tool-governance-banner-title">监管模式</span>
-                            <button id="tool-governance-switch" class="tool-governance-switch" type="button"
-                                aria-pressed="false" aria-label="切换监管模式">
-                                <span id="tool-governance-switch-track" class="tool-governance-switch-track"
-                                    aria-hidden="true">
-                                    <span class="tool-governance-switch-thumb"></span>
-                                </span>
-                                <span id="tool-governance-switch-label" class="tool-governance-switch-label">关闭</span>
-                            </button>
-                        </div>
-                        <button id="exec-whitelist-btn" class="toolbar-btn ghost" type="button"
-                            title="管理 exec 命令白名单与待审批请求">
-                            <span class="exec-whitelist-btn-label">命令白名单</span>
-                            <span id="exec-whitelist-badge" class="exec-whitelist-badge" hidden>0</span>
-                        </button>
                         <select id="tool-risk-filter" class="resource-select" aria-label="风险筛选">
                             <option value="all">风险</option>
                             <option value="low">低风险</option>
@@ -1249,6 +1260,22 @@
                         </label>
                         <button id="config-bundle-import-btn" class="toolbar-btn danger" type="button">导入配置包</button>
                         <p class="confirm-text">导入按勾选范围整体替换，不做合并：勾配置会换掉配置与密钥覆盖层，勾记忆会换掉这台机器整库记忆与笔记。设备已有解锁口令时导入后仍用它解锁。重启后 worker 才用新包内容。</p>
+                    </div>
+                </section>
+            </div>
+
+            <div id="ceo-risk-whitelist-backdrop" class="confirm-backdrop" hidden>
+                <section id="ceo-risk-whitelist-dialog" class="confirm-dialog ceo-risk-whitelist-dialog" role="dialog"
+                    aria-modal="true" aria-labelledby="ceo-risk-whitelist-dialog-title" tabindex="-1">
+                    <div class="confirm-header">
+                        <h2 id="ceo-risk-whitelist-dialog-title">免审工具白名单</h2>
+                    </div>
+                    <p class="ceo-risk-whitelist-hint">勾选的 Tool 在条件放行下直接执行，未勾选的需要人工审批。</p>
+                    <div id="ceo-risk-whitelist-list" class="ceo-risk-whitelist-list" aria-live="polite"></div>
+                    <div class="confirm-actions">
+                        <button id="ceo-risk-whitelist-save-btn" class="toolbar-btn success" type="button">保存</button>
+                        <button id="ceo-risk-whitelist-close-btn" class="toolbar-btn ghost" type="button"
+                            data-modal-close>关闭</button>
                     </div>
                 </section>
             </div>

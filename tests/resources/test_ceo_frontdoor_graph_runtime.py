@@ -798,6 +798,51 @@ def test_batch_review_all_approve_keeps_every_call_executable(monkeypatch) -> No
     assert [item["id"] for item in reviewed["executable_tool_call_payloads"]] == ["call-1", "call-2", "call-3"]
 
 
+def test_approval_request_flags_channel_sessions_only_for_the_channel_lane() -> None:
+    """批次上的渠道标记按会话键判：web 会话照常进审批，ext 会话被标成无人可批。"""
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+    runner._reviewable_tool_risk_map = lambda *, session_key: {"exec": "high"}
+    payloads = [{"id": "call-2", "name": "exec", "arguments": {"command": "echo hi"}}]
+
+    channel = runner._approval_request_for_tool_calls(payloads, session_key="ext:qq-official:abc")
+    web = runner._approval_request_for_tool_calls(payloads, session_key="web:shared")
+
+    assert bool(channel.get("channel_session")) is True
+    assert bool(web.get("channel_session")) is False
+
+
+def test_channel_session_batch_review_bounces_without_interrupt(monkeypatch) -> None:
+    """渠道会话没有审批界面：要审的那几条当跳就打回，免审的那条照常执行，且不落中断。"""
+
+    def _fail_interrupt(*, state, payload):
+        _ = state, payload
+        raise AssertionError("channel session must not raise an approval interrupt")
+
+    monkeypatch.setattr(ceo_runtime_ops, "raise_frontdoor_approval_interrupt", _fail_interrupt)
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+    request = _batch_approval_request()
+    request["channel_session"] = True
+
+    reviewed = runner._graph_review_tool_calls(
+        {
+            "approval_request": request,
+            "tool_call_payloads": [dict(item) for item in _BATCH_PAYLOADS],
+        },
+        runtime=SimpleNamespace(context=SimpleNamespace(session=None)),
+    )
+
+    assert reviewed["next_step"] == "execute_tools"
+    assert reviewed["approval_status"] == "channel_auto_rejected"
+    # 整批仍按原序留三份，合并回消息时不会出现缺号的工具回执。
+    assert [item["id"] for item in reviewed["tool_call_payloads"]] == ["call-1", "call-2", "call-3"]
+    assert [item["id"] for item in reviewed["executable_tool_call_payloads"]] == ["call-3"]
+    bounced = reviewed["synthetic_tool_results"]
+    assert [item["tool_call_id"] for item in bounced] == ["call-1", "call-2"]
+    assert "intercepted by risk review" in str(bounced[0]["result_text"] or "")
+    # 这条回执面向模型，不写给界面上的人看。
+    assert not any("\u4e00" <= char <= "\u9fff" for char in str(bounced[0]["result_text"] or ""))
+
+
 @pytest.mark.asyncio
 async def test_rejected_batch_item_never_reaches_the_tool_executor(monkeypatch) -> None:
     """从车道进口喂到执行：拒掉的 call-2 不进执行器，其余两条真跑，工具行按原顺序齐三份。"""

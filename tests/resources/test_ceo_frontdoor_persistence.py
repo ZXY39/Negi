@@ -664,6 +664,8 @@ def test_ceo_frontdoor_approval_request_respects_enabled_flag() -> None:
         "batch_id": result["batch_id"],
         "mode": "regulatory_review",
         "submission_mode": "batch_submit_only",
+        # 会话键决定这一批有没有人可批；web 会话有审批界面。
+        "channel_session": False,
         "tool_calls": [
             {"id": "call-low-1", "name": "content_open", "arguments": {"path": "/tmp/a"}},
             {"id": "call-risk-1", "name": "create_async_task", "arguments": {"task": "demo"}},
@@ -719,6 +721,7 @@ def test_ceo_frontdoor_approval_request_uses_dynamic_governance_risk_map() -> No
         "batch_id": result["batch_id"],
         "mode": "regulatory_review",
         "submission_mode": "batch_submit_only",
+        "channel_session": False,
         "tool_calls": [
             {"id": "call-low-1", "name": "content_open", "arguments": {"path": "/tmp/a"}},
             {"id": "call-risk-1", "name": "exec", "arguments": {"command": "echo hi"}},

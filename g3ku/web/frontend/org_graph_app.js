@@ -644,7 +644,6 @@ const U = {
     taskTokenButton: null,
     taskTokenBackdrop: null,
     taskTokenDrawer: null,
-    taskTokenSummaryText: null,
     taskTokenContent: null,
     taskTokenClose: null,
     artifactList: document.getElementById("artifact-list"),
@@ -9009,7 +9008,6 @@ function ensureTaskTokenUi() {
         view.querySelector(".project-dashboard")?.appendChild(drawer);
         U.taskTokenBackdrop = backdrop;
         U.taskTokenDrawer = drawer;
-        U.taskTokenSummaryText = drawer.querySelector("#task-token-summary-text");
         U.taskTokenContent = drawer.querySelector("#task-token-content");
         U.taskTokenClose = drawer.querySelector("#task-token-close-btn");
     }
@@ -9695,10 +9693,7 @@ function switchView(view) {
     if (view === "memory") startMemoryViewAutoRefresh();
     else stopMemoryViewAutoRefresh();
     if (view === "skills") void loadSkills();
-    if (view === "tools") {
-        void loadTools();
-        if (typeof loadToolGovernanceMode === "function") void loadToolGovernanceMode();
-    }
+    if (view === "tools") void loadTools();
     if (view === "memory") {
         if (!S.memoryLoadedOnce) void loadMemoryView();
         else void loadMemoryView({ quiet: true });

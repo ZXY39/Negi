@@ -323,11 +323,16 @@ Current RBAC rules for surfaced tools:
 
 ### CEO Regulatory Governance Mode
 
-- Tool Admin also owns one global persisted switch for CEO/frontdoor: `ceo_frontdoor_regulatory_mode_enabled`. It is governance metadata used by CEO/frontdoor approval policy, not stored on a specific surfaced tool family.
-- Its scope is narrower than generic Tool Admin RBAC: RBAC decides whether a surfaced tool is visible or callable at all; regulatory mode only decides whether already-visible medium/high-risk CEO tool calls must pause for batch human review.
-- With the switch enabled: risky CEO tool calls are grouped into one `frontdoor_tool_approval_batch` interrupt; `review_items` enumerate only the risky calls that require operator review; the resume side must submit one complete `submit_batch_review` payload covering every `review_item` exactly once. Pass-through low-risk tool calls in the same original tool batch remain part of the runtime-owned original tool-call ordering — “review items” are not “all tool calls in the round”.
+- CEO/frontdoor 的审批档位是**一份全局持久化设置**，不挂在任何一颗 surfaced 工具上，也不按会话存：`ceo_frontdoor_regulatory_mode_enabled`（`conditional` / `all_pass` 两档，开关形状）加一份免审名单 `ceo_frontdoor_tool_review_whitelist`。两者都落 governance sqlite 的 meta 表，读写判据集中在 `main/governance/review_policy.py`——管理台有两个服务实现都读这份 meta（`MainRuntimeService` 与 admin REST 的独立服务），派生默认档的规则各写一份就会让"没存过名单"时的免审集合在两条车道上不同形。
+- 入口是会话页输入行上的那颗风险按钮（面板标题「中高风险工具审批」），Tool 管理页头部没有档位开关。档位对**所有会话**生效：改一次，在跑的与之后新建的会话都按最新一份走，前门每一跳重读判据，因此不存在"某个会话还停在旧档位"的状态。
+- Its scope is narrower than generic Tool Admin RBAC: RBAC decides whether a surfaced tool is visible or callable at all; the governance mode only decides whether an already-visible CEO tool call must pause for batch human review.
+- **免审集合由名单决定，不由风险度决定。** `frontdoor_reviewable_tool_risk_map` 拿当轮 CEO 可见工具集与名单求差：名单里的直接执行，名单外的进 `review_items`（条目仍带各自 `risk_level`，那只是审批卡片上的标注）。操作员从没存过名单时按风险度派生默认档——可见工具里 `low` 免审，其余都要审；存过一次（包括存成空清单）之后名单就是唯一判据，被摘出名单的低风险工具一样要审。`GET /api/resources/tools/governance-mode` 因此同时回 `whitelist_tools`（生效集合）与 `whitelist_customized`（来自名单还是来自派生），界面不许自己再派生一遍。
+- `PUT /api/resources/tools/governance-mode` 是两个字段各自可选的部分更新：两颗模式按钮只发 `enabled`，白名单弹窗只发 `whitelist_tools`。响应体一律回整份读模型，界面按服务端读数重画。
+- With the mode on: risky CEO tool calls are grouped into one `frontdoor_tool_approval_batch` interrupt; `review_items` enumerate only the calls that require operator review; the resume side must submit one complete `submit_batch_review` payload covering every `review_item` exactly once. Pass-through tool calls in the same original tool batch remain part of the runtime-owned original tool-call ordering — "review items" are not "all tool calls in the round".
+- **渠道会话（`ext:` 与 `china:*` 键）那一档没有审批界面**：需要审批的那几条在 `review_tool_calls` 当跳就打回，不落中断、不等人工，免审的那几条照常执行。批次上的 `channel_session` 标记由会话键判出，打回结果与人工拒收共用同一条合成-合并车道，形状见 `runtime-overview.md`「会话侧」。回执正文是给模型看的英文：它教模型把情况讲给用户、请用户在设置里放行这颗工具，而不是自己去改档位。
 - Rejected risky calls do not disappear: CEO/frontdoor constructs synthetic rejection tool results and merges them back with approved real tool results in original tool-call order before the next model round.
-- Changing the switch affects future approval boundaries immediately, even for already-running CEO sessions, but must not silently rewrite an approval batch that is already paused and waiting for review.
+- Changing the mode or the list affects future approval boundaries immediately, even for already-running CEO sessions, but must not silently rewrite an approval batch that is already paused and waiting for review.
+- 同一颗 `exec` 工具另有自己的执行模式与命令白名单（见「Exec Runtime Mode Contract」与 `web-and-admin.md`「Exec Approval And Allowlist Admin Contract」），那条轴管的是单条 shell 命令的形态守卫；本节的档位管的是"这颗工具要不要人放行"。风险面板里那颗「命令行风险拦截设置」只是把 exec 工具详情抽屉打开，不在这条车道上再写一份判据。
 
 ### Removal Of `message` / `messaging`
 

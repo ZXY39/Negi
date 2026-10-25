@@ -313,6 +313,7 @@ worker 进程（任务执行侧）把任务态变化推给 web 进程（浏览�
 
 审批中断的恢复通过持久化的 `graph_state` 重建：中断时 `_pause_for_frontdoor_interrupt` 把**预览前**的完整图状态以 `{"version": 2, "state": ...}` 存入 paused execution context 的 `graph_state` 字段；恢复时 `resume_turn` 读回该快照、校验版本后从 `review_tool_calls` 节点以 resume 决定重入（等价于在中断点重放）。存「预览前」而非「预览后」状态：恢复从 `review_tool_calls` 重入，等价于在中断点重放这一步，预览由恢复后的同一节点重新产出。无标记 / 缺失 / 损坏的快照显式报错 `frontdoor_interrupt_resume_snapshot_unavailable` 且不清除 paused 快照，不回退成新 turn；跨进程重启后的恢复依赖该落盘快照。`resume_frontdoor_interrupt` 的回复与正常收尾走同一条转录写行车道（`_persist_turn_transcript`，`retire_lingering_transcript_rows=True`）：批准续跑的这一轮就是这条请求的回答者，由它按 `turn_id` 给用户行授终态、并就地替换同 turn 的归档行；只发 `message_end` 而不落行的话，这条请求在转录里没有 durable 回复，刷新即消失，而那条 pending 用户行也停在"既没回答也没被接走"的状态里。
 批审的裁决粒度是**一条工具调用**，不是整批：`submit_batch_review` 必须覆盖每个 `review_item` 恰好一次，随后 `reject` 的条目从执行名单里摘掉并就地生成一条合成拒绝结果（正文 `Error: 用户不允许运行此工具。`，带操作者补充说明时一并附上），`approve` 的条目与免审条目照常执行。`tool_call_payloads` 始终是整批原名单，真正执行的是 `executable_tool_call_payloads`，两者之差由 `_merge_ordered_tool_results` 按原顺序合并回消息，所以每一条 tool_call 都有一个 tool 结果收尾——不允许出现挂空的调用。执行侧只认这两个键，把整批读成「批准即全跑」会让被拒的调用照样落地。
+渠道会话（会话键落在 `ext:` / `china:` 前缀）走的是**同一条合成-合并车道，只是没人裁决**：批次在装配时就带 `channel_session=true`，`review_tool_calls` 看到它就不 raise 中断，直接把 `review_items` 那几条合成打回结果（正文是给模型看的英文，指向"请用户去设置里放行"）、把免审条目放进执行名单，`approval_status` 记 `channel_auto_rejected`。整批 `tool_call_payloads` 照旧原序留全，否则合并那一步会为缺号的调用抛 `missing merged tool result`。档位与免审名单的判据归 `tool-and-skill-system.md`「CEO Regulatory Governance Mode」。
 
 ### 任务侧
 

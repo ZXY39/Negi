@@ -47,6 +47,7 @@ const LEDGER = [
     { token: "name=\"enabled\"", tier: "hidden" },
     { token: "id=\"context-refresh-enabled\"", tier: "ui" },
     { token: "td-expand-all-input", tier: "ui" },
+    { token: "ceo-risk-tool-input", tier: "ui" },
 ];
 
 function collectSites() {
