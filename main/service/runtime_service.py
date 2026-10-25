@@ -1001,10 +1001,14 @@ class MainRuntimeService:
             'callback_delivery_error_count': 0.0,
             'task_event_dropped_coalesced_count': 0.0,
             'task_event_dropped_other_count': 0.0,
+            'task_event_delivery_dropped_count': 0.0,
         }
         # 排空时学到的每类平均字节数与丢弃归属：字节水位靠估，不在入队路径序列化。
         self._task_event_avg_item_bytes: dict[str, int] = {}
         self._task_event_dropped_by_type: dict[str, int] = {}
+        # 投递侧的丢弃归属：所有回调目标都失败过一次才算真丢，队列溢出丢的是另一本账。
+        self._task_event_delivery_dropped_by_type: dict[str, int] = {}
+        self._task_event_delivery_logged_mono = 0.0
         self._task_event_heavy_types: set[str] = set()
         self._task_event_drop_logged_mono = 0.0
         self._loopback_census_logged_mono = 0.0
@@ -3720,6 +3724,30 @@ class MainRuntimeService:
             dict(sorted(self._task_event_dropped_by_type.items(), key=lambda item: -item[1])[:6]),
         )
 
+    def _note_task_event_delivery_drop(self, payload: dict[str, Any]) -> None:
+        """所有回调目标都没送到 = 这一帧真丢了，所以必须可数、能点名是哪一类。
+
+        原来这里只有 `logger.debug('task event callback delivery skipped')`：判"丢了几帧"只能
+        从 `callback_delivery_error_count` 反推，而那个数的是投递异常次数——一次批量失败回落
+        逐条、逐条再失败，同一帧在里面算两笔。带上池读数是故意的：实盘 ConnectTimeout 全部与
+        事件循环停顿同拍（09:47:28 lag=4113ms 时池里 1 条且 leased=1），一眼分得开"循环卡了"
+        和"池满了"。
+        """
+        key = str(payload.get('event_type') or '').strip() or '(unnamed)'
+        dropped = self._task_event_delivery_dropped_by_type
+        dropped[key] = int(dropped.get(key) or 0) + 1
+        self._task_event_stats['task_event_delivery_dropped_count'] += 1.0
+        now_mono = time.monotonic()
+        if now_mono - self._task_event_delivery_logged_mono < _CALLBACK_ERROR_WARN_INTERVAL_SECONDS:
+            return
+        self._task_event_delivery_logged_mono = now_mono
+        logger.warning(
+            'task event callback delivery dropped (rate-limited): latest={} by_type={} pool={}',
+            key,
+            dict(sorted(dropped.items(), key=lambda item: -item[1])[:6]),
+            self._callback_pool_snapshot(),
+        )
+
     @staticmethod
     def _find_task_event_coalesce_slot(
         pending: list[dict[str, Any]],
@@ -3827,7 +3855,7 @@ class MainRuntimeService:
                     continue
                 continue
             break
-        logger.debug('task event callback delivery skipped: {}', payload.get('event_type'))
+        self._note_task_event_delivery_drop(payload)
 
     def publish_worker_status_event(
         self,

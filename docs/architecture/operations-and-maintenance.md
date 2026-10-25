@@ -323,7 +323,7 @@ Provider retry troubleshooting note:
 - `spawn_recovery_mode`：`wait_existing_pipeline`（有存活子/验收节点，应等待现有管线）、`rematerialize_round`、`replay_completed_result`、`no_active_round`；
 - `spawn_recovery_round_id` / `spawn_recovery_round_ids` / `spawn_recovery_active_entry_indexes` / `spawn_recovery_active_node_ids`：定位仍活跃的 round、entry 与绑定节点。
 
-再在 worker 日志里搜 `[g3ku spawn diagnostic]` 开头的警告：
+再在 worker 日志里搜 `[g3ku spawn diagnostic]` 开头的警告（列在这里的标题都是故障形状；`title=spawn_round_created_without_waiting` 是 info，它只标记"批次已创建、按设计不阻塞"，每个派发批次固定一行）：
 
 - `title=spawn_blocked_review_over_materialized_round`：已物化轮被重新评审且判为 blocked，但运行时拒绝让其终结仍存活的子/验收节点（只写 `review_decision=blocked`，不把管线状态写成 `success`）；
 - `title=spawn_entry_terminal_with_live_node`：entry 状态已是 terminal/blocked，但绑定节点仍非终态，属无效状态组合信号。

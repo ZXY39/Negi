@@ -141,6 +141,67 @@ async def test_frame_write_with_messages_still_rotates_messages_ref(
 
 
 @pytest.mark.asyncio
+async def test_bodyless_partial_write_warns_once_per_node_ref(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """同一份指针的空正文写只报第一次，但每次都保指针。
+
+    实盘账（2026-10-25 task:e877422583cd 的 2.5 小时）：`update_frame` 的轻读改写是这条
+    车道的既定形状，逐次提警刷出 23,089 行、其中不同的 (task, node, ref) 键只有 18 个，
+    70.9% 还是同秒同计数的整次 no-op——同一段里真正的故障行因此被埋掉。
+    """
+    service = _build_service(tmp_path)
+    record = await service.create_task("warn once", session_id="web:ceo-demo")
+    root_id = record.root_node_id
+    other_id = 'node:bodyless-other'
+
+    _write_frame(service, record.task_id, root_id, 0, _messages(3, "once"))
+    _write_frame(service, record.task_id, other_id, 1, _messages(3, "once"))
+    refs = {
+        root_id: str(_frame_payload(service, record.task_id, root_id)["messages_ref"]),
+        other_id: str(_frame_payload(service, record.task_id, other_id)["messages_ref"]),
+    }
+    assert refs[root_id] and refs[other_id]
+    monkeypatch.setattr(service.log_service, "_resolve_content_ref", lambda ref: "")
+
+    fake_logger = MagicMock()
+    monkeypatch.setattr(log_service_module, "logger", fake_logger)
+
+    def _partial_write(node_id: str, phase: str) -> None:
+        service.log_service.update_frame(
+            record.task_id,
+            node_id,
+            lambda frame: {**dict(frame or {}), "phase": phase},
+            publish_snapshot=False,
+        )
+
+    def _warn_count() -> int:
+        return sum(
+            1
+            for call in fake_logger.warning.call_args_list
+            if "keeping existing messages_ref" in str(call)
+        )
+
+    for phase in ("after_model", "before_model", "after_model"):
+        _partial_write(root_id, phase)
+    assert _warn_count() == 1
+
+    # 换节点=新键，仍要报；这是"某个节点开始不带正文写帧"的锚点，不是逐次计数。
+    _partial_write(other_id, "after_model")
+    assert _warn_count() == 2
+
+    # 被抑制的那些写法照旧必须保住各自节点的指针。
+    monkeypatch.undo()
+    for node_id in (root_id, other_id):
+        after = _frame_payload(service, record.task_id, node_id)
+        assert str(after["messages_ref"]) == refs[node_id]
+        assert int(after["messages_count"]) == 3
+        hydrated = service.log_service.read_runtime_frame(record.task_id, node_id) or {}
+        assert len(hydrated.get("messages") or []) == 3
+
+
+@pytest.mark.asyncio
 async def test_update_frame_mutator_loop_does_not_drop_messages_ref(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

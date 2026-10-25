@@ -65,12 +65,23 @@ class _Stub:
     _post_internal_callback = MainRuntimeService._post_internal_callback
     _note_callback_delivery_error = MainRuntimeService._note_callback_delivery_error
     _callback_pool_snapshot = MainRuntimeService._callback_pool_snapshot
+    _deliver_task_event_callback = MainRuntimeService._deliver_task_event_callback
+    _note_task_event_delivery_drop = MainRuntimeService._note_task_event_delivery_drop
 
     def __init__(self, client: _RaisingClient) -> None:
         self._callback_client = client
         self._callback_delivery_errors: dict[str, int] = {}
         self._callback_error_logged_mono = 0.0
-        self._task_event_stats = {'callback_delivery_error_count': 0.0}
+        self._task_event_stats = {
+            'callback_delivery_error_count': 0.0,
+            'task_event_delivery_dropped_count': 0.0,
+        }
+        self._task_event_delivery_dropped_by_type: dict[str, int] = {}
+        self._task_event_delivery_logged_mono = 0.0
+        self._internal_callback_targets = lambda **_kwargs: [
+            ('http://127.0.0.1:18790/api/internal/task-event', 'token')
+        ]
+        self._callback_headers = lambda **_kwargs: {}
 
     def _get_callback_client(self) -> _RaisingClient:
         return self._callback_client
@@ -146,6 +157,42 @@ def test_connect_gets_no_special_budget() -> None:
         asyncio.run(_post(service))
 
     assert client.timeouts[0] == 1.5
+
+
+def test_a_dropped_event_delivery_is_counted_by_type_and_rate_limited(monkeypatch) -> None:
+    """投递真丢的帧原来只落 `logger.debug('task event callback delivery skipped')`。
+
+    `entry_callback_error_total` 数的是投递异常次数：一次批量失败回落逐条、逐条再失败，
+    同一帧在里面算两笔，所以"丢了哪一类几帧"必须有自己的账。限流沿用同一条车道的 60 s。
+    """
+    import main.service.runtime_service as module
+
+    logged: list[str] = []
+
+    class _Recorder:
+        def warning(self, message: str, *args) -> None:
+            logged.append(str(message).format(*args) if args else str(message))
+
+    monkeypatch.setattr(module, 'logger', _Recorder())
+    client = _RaisingClient(httpx.ConnectTimeout('loop stalled'))
+    service = _Stub(client)
+
+    asyncio.run(service._deliver_task_event_callback({'event_type': 'task.node.patch'}))
+    asyncio.run(service._deliver_task_event_callback({'event_type': 'task.node.patch'}))
+    asyncio.run(service._deliver_task_event_callback({'event_type': 'task.model.call'}))
+
+    assert service._task_event_delivery_dropped_by_type == {'task.node.patch': 2, 'task.model.call': 1}
+    assert service._task_event_stats['task_event_delivery_dropped_count'] == 3.0
+    # 每一帧都得真的发过一遍才算"投递失败"，否则这条用例只是在测壳子里少了个方法。
+    assert client.posts == 3
+    assert service._callback_delivery_errors == {'ConnectTimeout': 3}
+    drop_lines = [text for text in logged if 'delivery dropped' in text]
+    assert len(drop_lines) == 1
+    # 限流那一行印的是"当时"的归属，后续丢弃照旧进账（上面的 by_type=3 笔）——
+    # 与 `_note_callback_delivery_error` 同一语义：计数不限流，日志限流。
+    assert 'latest=task.node.patch' in drop_lines[0]
+    assert "by_type={'task.node.patch': 1}" in drop_lines[0]
+    assert 'pool=' in drop_lines[0]
 
 
 def test_referrer_labels_name_the_pending_proactor_operation() -> None:

@@ -220,7 +220,7 @@ Heartbeat / cron 不在主 CEO/frontdoor 路径上使用单独的短 `ceo_heartb
 
 - 坑：帧正文外置在 `messages_ref` 指向的 artifact 里。hydrate → sanitize → record 的读-改-写回路（启动恢复的 `replace_runtime_frames`、`update_frame`）在 ref 解析失败时只给出空 messages，若无条件换指针就等于用一份空正文覆盖旧历史——不报错、不留痕。
 - 不变量：写帧规则本体见 `runtime-overview.md`「任务侧」（只有携带 messages 正文的写才允许换 `messages_ref`）。本文只登记它的**取证读法**：一次恢复不得缩减任何节点的 durable 历史，缩了必然在 `request_seed_source` 上留痕。
-- 症状：恢复后某节点 `model_message_count` 突然掉到个位数、`request_seed_source=fallback_seed_*`，或 `task_runtime_frames` 行 `messages_ref=''` 而节点 `latest_runtime_messages_ref` 仍在；WARN `keeping existing messages_ref` / `resolved to no messages` 是保留规则被触发的直接证据。
+- 症状：恢复后某节点 `model_message_count` 突然掉到个位数、`request_seed_source=fallback_seed_*`，或 `task_runtime_frames` 行 `messages_ref=''` 而节点 `latest_runtime_messages_ref` 仍在；WARN `keeping existing messages_ref` / `resolved to no messages` 是保留规则被触发的直接证据。**这两行的行数不是一个量**：前者按 `(task, node, messages_ref)` 只报第一次（不带正文的轻读改写是常态，逐次提警会把真正的故障行埋掉），累计次数读它行内的 `bodyless_writes_total=`；后者每次解析失败都打。
 
 ### 3.16 验收 bootstrap 定稿与回合尾块
 

@@ -4132,6 +4132,7 @@ class NodeRunner:
             index=None,
             entry=None,
             detail=f'created={len(receipts)} dispatched={len(dispatched_ids)}',
+            level='info',
         )
         return receipts
 
@@ -5077,10 +5078,14 @@ class NodeRunner:
         index: int | None,
         entry: dict[str, Any] | None,
         detail: str,
+        level: str = 'warning',
     ) -> None:
         child_node_id = str((entry or {}).get('child_node_id') or '').strip()
         acceptance_node_id = str((entry or {}).get('acceptance_node_id') or '').strip()
-        logger.warning(
+        # 除 `spawn_round_created_without_waiting` 这一条按设计成立的路标外，其余标题都指向
+        # 真故障，保持 WARNING。那条每个派发批次固定一行（非阻塞派发的标记），不是异常。
+        emit = logger.warning if str(level or '').strip().lower() != 'info' else logger.info
+        emit(
             '[g3ku spawn diagnostic] '
             f'title={title} task_id={str(task_id or "").strip()} '
             f'parent_node_id={str(parent_node_id or "").strip()} round_id={str(cache_key or "").strip()} '

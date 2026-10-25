@@ -117,6 +117,13 @@ def _default_governance_state(*, node_count_baseline: int = 1) -> dict[str, Any]
 # 事件写失败告警限流间隔（秒）：失败计数不受限，WARNING 至多每 300s 一条。
 _EVENT_WRITE_FAILURE_WARN_INTERVAL_SECONDS = 300.0
 
+# 空正文写帧「保留原指针」这条告警的去重键上限。一条键 = 一个节点的一份 `messages_ref`。
+# 实盘账（2026-10-25，task:e877422583cd 的 2.5 小时）：这句 WARNING 打了 23,089 行，
+# 而不同的键只有 18 个（一节点一份 ref），其中 70.9% 还是同秒同计数的整次 no-op 重写。
+# "这条车道的写不带正文"是按节点成立的事实，同一份指针被重写多少次都不改变它，
+# 所以每个键只报第一次；ref 轮换（新键）或新节点才会再报。
+_FRAME_BODYLESS_WRITE_KEYS_MAX = 4096
+
 
 def _emit_audit_task_node_error(*, task_id: str, node_id: str, node_title: str, error_text: str) -> None:
     """尽力而为：任务节点错误写一条日志审计事件（失败绝不阻塞宿主流程）。"""
@@ -200,6 +207,9 @@ class TaskLogService:
         # 告警每 _EVENT_WRITE_FAILURE_WARN_INTERVAL_SECONDS 至多一条，防磁盘满刷屏）。
         self._event_write_failures = 0
         self._last_event_failure_warn_mono: float | None = None
+        # 不带正文的写帧（读-改-写轻读）累计次数，以及已报过的 (task|node|ref) 键。
+        self._frame_bodyless_partial_writes = 0
+        self._frame_bodyless_write_keys: dict[str, None] = {}
 
     def add_live_snapshot_publisher(self, publisher: Callable[[TaskRecord, dict[str, Any], bool], None]) -> None:
         if callable(publisher):
@@ -4081,6 +4091,36 @@ class TaskLogService:
             )
         return latest_round_id, results
 
+    def _note_frame_bodyless_write(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        messages_ref: str,
+        messages_count: int,
+    ) -> None:
+        """不带正文的写帧：行为按设计（保留原指针），读数按 (task, node, ref) 只报第一次。
+
+        轻读改写是 `update_frame` 的既定形状（正文在 ref 指向的 artifact 里），逐次提警会把
+        一次正常回合刷成上万行，反而把同一段里真正的故障行埋掉。
+        """
+        self._frame_bodyless_partial_writes += 1
+        key = f'{task_id}|{node_id}|{messages_ref}'
+        if key in self._frame_bodyless_write_keys:
+            return
+        if len(self._frame_bodyless_write_keys) >= _FRAME_BODYLESS_WRITE_KEYS_MAX:
+            self._frame_bodyless_write_keys.pop(next(iter(self._frame_bodyless_write_keys)), None)
+        self._frame_bodyless_write_keys[key] = None
+        logger.warning(
+            'runtime frame write carries no messages; keeping existing messages_ref: '
+            'task={} node={} ref={} messages_count={} bodyless_writes_total={}',
+            task_id,
+            node_id,
+            messages_ref,
+            messages_count,
+            self._frame_bodyless_partial_writes,
+        )
+
     def _runtime_frame_record(self, *, task: TaskRecord, frame: dict[str, Any]) -> TaskProjectionRuntimeFrameRecord:
         payload = dict(frame or {})
         node_id = str(payload.get('node_id') or '').strip()
@@ -4111,13 +4151,11 @@ class TaskLogService:
         # 无条件重写会把指针换成一份空正文、旧历史永久丢失且不留任何痕迹。
         # 只有真正携带正文的写才允许换指针：空写入保留原 ref。
         if not messages and carried_messages_ref:
-            logger.warning(
-                'runtime frame write carries no messages; keeping existing messages_ref: '
-                'task={} node={} ref={} messages_count={}',
-                task.task_id,
-                node_id,
-                carried_messages_ref,
-                int(payload.get('messages_count') or 0),
+            self._note_frame_bodyless_write(
+                task_id=task.task_id,
+                node_id=node_id,
+                messages_ref=carried_messages_ref,
+                messages_count=int(payload.get('messages_count') or 0),
             )
         elif messages or callable_tool_snapshots or contract_visible_skill_ids or has_skill_visibility_diagnostics:
             serialized = json.dumps(

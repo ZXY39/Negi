@@ -280,6 +280,7 @@ class WorkerPressureMonitor:
             'entry_event_coalesced_total': 0,
             'entry_event_dropped_coalesced_total': 0,
             'entry_event_dropped_other_total': 0,
+            'entry_event_delivery_dropped_total': 0,
             'entry_event_queue_bytes_estimated': 0,
             'entry_callback_error_total': 0,
             'worker_memory_bytes': -1,
@@ -1010,6 +1011,7 @@ class WorkerPressureMonitor:
                 ('callback_delivery_error_count', 'entry_callback_error_total'),
                 ('task_event_dropped_coalesced_count', 'entry_event_dropped_coalesced_total'),
                 ('task_event_dropped_other_count', 'entry_event_dropped_other_total'),
+                ('task_event_delivery_dropped_count', 'entry_event_delivery_dropped_total'),
                 ('task_event_queue_bytes_estimated', 'entry_event_queue_bytes_estimated'),
             ):
                 if _stat_key in (loop_stats or {}):
