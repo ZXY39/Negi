@@ -16597,32 +16597,79 @@ textarea {
     overflow-y: auto;
 }
 
+/* 设置弹窗的三行按「标签在左、控件在右」排成一条列表：行高一致，行间一条发丝线，
+   右侧控件（勾选框 / 下拉框 / 状态文字）对齐同一条右边界。其余弹窗也用
+   .project-settings-body，所以这里只锚在设置弹窗上。 */
+#project-settings-dialog .project-settings-body {
+    gap: 0;
+}
+
 .project-settings-actions {
     display: flex;
     align-items: center;
-    gap: var(--ui-space-3);
+    flex-wrap: wrap;
+    gap: var(--ui-space-2) var(--ui-space-3);
 }
 
-/* 字号档位：选项写进 --reading-font-scale，只乘阅读面（见 :root 里的变量注释）。 */
-.project-settings-font-row {
+#project-settings-dialog .project-settings-actions {
+    min-height: 52px;
+    padding: var(--ui-space-2) 0;
+}
+
+#project-settings-dialog .project-settings-actions + .project-settings-actions {
+    border-top: 1px solid var(--ui-border);
+}
+
+#project-settings-dialog .project-settings-actions > .ui-checkbox-row {
+    margin-left: auto;
+}
+
+/* 字号档位：选项写进 --reading-font-scale，只乘阅读面（见 :root 里的变量注释）。
+   下拉框与同一行的按钮同高同圆角，箭头换成 SVG，不再用各系统长得不一样的原生箭头。 */
+#project-settings-dialog .project-settings-font-row {
     flex: 1 1 auto;
     display: flex;
     align-items: center;
     gap: var(--ui-space-3);
-    font-size: 0.84rem;
-    color: var(--ui-text-muted);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--ui-text);
 }
 
-.project-settings-font-select {
+#project-settings-dialog .project-settings-font-select {
+    appearance: none;
+    -webkit-appearance: none;
+    -moz-appearance: none;
     margin-left: auto;
-    min-width: 92px;
-    padding: 6px 10px;
+    width: 92px;
+    height: 36px;
+    min-height: 36px;
+    padding: 0 30px 0 var(--ui-space-3);
     border: 1px solid var(--ui-border);
     border-radius: var(--ui-radius-control);
-    background: var(--ui-bg-surface);
+    background-color: var(--ui-bg-input);
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='M4 6L8 10L12 6' stroke='%2394A3B8' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-position: right 10px center;
+    background-repeat: no-repeat;
+    background-size: 16px 16px;
     color: var(--ui-text);
-    font: inherit;
+    color-scheme: var(--ui-color-scheme);
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
     cursor: pointer;
+    transition: border-color 160ms var(--ui-motion-ease), box-shadow 160ms var(--ui-motion-ease);
+}
+
+#project-settings-dialog .project-settings-font-select:hover {
+    border-color: var(--ui-border-strong);
+}
+
+#project-settings-dialog .project-settings-font-select:focus-visible {
+    outline: none;
+    border-color: var(--ui-brand);
+    box-shadow: 0 0 0 3px var(--ui-brand-soft);
 }
 
 /* 版本信息与「检查更新 / 重启并更新」同一行，靠右；窗口很窄时省略号收尾，
