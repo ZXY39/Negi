@@ -5776,7 +5776,10 @@ class ReActToolLoop:
             f'本节点实测最大(输入+输出)={observed_span} 同类跳次={max(1, same_class)}；'
             '这一跳被裁到比声明的发送上限更小的值，拦住它的是窗口剩余，不是最大输出配置，'
             '降思考档位治不了这一类。运行时不改配置：请按上面的观测值核对那颗模型记录，'
-            '或把这几个数报给用户裁决。'
+            '或把这几个数报给用户裁决。 Nodes do not manage model chains or runtime '
+            'configuration: if you cannot act on these numbers, report them up — '
+            '`send_message(to="frontdoor", ...)` when you are the root node, otherwise '
+            '`send_message(to="parent", ...)` and let the root escalate.'
         )
         return self._invalid_final_submission_failure(reason=reason, count=max(1, same_class))
 

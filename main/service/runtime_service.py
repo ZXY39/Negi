@@ -131,6 +131,7 @@ from main.runtime.model_route import build_model_route_plan
 from main.runtime.node_mailbox import (
     REJECT_TARGET_LIST_UNPARSED,
     TARGET_LIST_UNPARSED_HINT,
+    error_escalation_hint,
     message_fingerprint,
     normalize_targets,
     notification_is_held,
@@ -5260,10 +5261,15 @@ class MainRuntimeService:
             return {'status': 'skipped', 'reason': 'no_parent'}
         goal = str(getattr(node, 'goal', '') or '').strip() or str(node.node_id or '')
         reason_text = str(reason or '').strip() or '节点被判定为无进展并暂停'
+        parent = self.store.get_node(parent_node_id)
+        receiver_is_root = bool(parent is not None) and not str(
+            getattr(parent, 'parent_node_id', '') or ''
+        ).strip()
         body = (
             f'子节点「{goal}」已被暂停（异常暂停）。\n'
             f'原因：{reason_text[:1200]}\n'
-            f'节点 id：{node.node_id}。请决定是继续推进、改写要求还是终止这条分支。'
+            f'节点 id：{node.node_id}。请决定是继续推进、改写要求还是终止这条分支。\n'
+            f'{error_escalation_hint(receiver_is_root=receiver_is_root)}'
         )
         return await self.deliver_node_message(
             task_id=normalized_task_id,

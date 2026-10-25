@@ -125,3 +125,22 @@ def unresolved_target_reason(raw: object) -> str:
     if text[:1] in ('[', '{'):
         return REJECT_TARGET_LIST_UNPARSED
     return REJECT_TARGET_NOT_IN_TASK
+
+
+# 节点不带"改模型链 / 管环境"的能力，所以一条错误消息能给的唯一有效出路是把它交上去。
+# 这句话按收件人能不能直达前门分两档：只有根节点的 `send_message` 接受 `frontdoor`，
+# 对非根节点印那句就是在指一条会被 `frontdoor_root_only` 拒掉的死路。
+def error_escalation_hint(*, receiver_is_root: bool) -> str:
+    """The one line appended to error-class mailbox messages telling the receiver where to escalate."""
+    if receiver_is_root:
+        return (
+            'If you cannot resolve this, report it to the front door: '
+            '`send_message(to="frontdoor", content=...)`. Model chains, provider keys and '
+            'runtime configuration are not yours to change — say what you observed and let the '
+            'front door decide.'
+        )
+    return (
+        'If you cannot resolve this, pass it up: `send_message(to="parent", content=...)` — only '
+        'the root node can reach the front door, so name the failing node id and what you tried. '
+        'Model chains, provider keys and runtime configuration are not yours to change.'
+    )
