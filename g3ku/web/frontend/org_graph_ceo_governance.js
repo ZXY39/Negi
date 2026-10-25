@@ -479,6 +479,23 @@ function toggleCeoRiskPanel() {
     else openCeoRiskPanel();
 }
 
+function hoistToolDetailLayer() {
+    // 工具详情抽屉本来就是 position:fixed 的居中层，只是坐在 #view-tools 里，而会话页时那个
+    // section 是 display:none。把它连同遮罩搬到 body 上就能就地弹出，不必把操作员带去 Tool 页；
+    // 抽屉内部的节点跟着走，U.toolDrawer / U.toolDetail 这些句柄按节点取，不受搬动影响。
+    const backdrop = document.getElementById("tool-detail-backdrop");
+    const drawer = document.querySelector(".tool-detail-panel");
+    [backdrop, drawer].forEach((node) => {
+        if (node && node.parentElement !== document.body) document.body.appendChild(node);
+    });
+}
+
+function openExecToolSettings() {
+    if (typeof openTool !== "function") return;
+    hoistToolDetailLayer();
+    void openTool("exec");
+}
+
 function renderCeoRiskPanel() {
     ensureCeoGovernanceState();
     const state = governanceModeState();
@@ -829,11 +846,8 @@ function bindCeoRiskUi() {
             else if (target.closest("#ceo-risk-mode-conditional")) void saveToolGovernanceMode({ enabled: true });
             else if (target.closest("#ceo-risk-whitelist-btn")) void openCeoReviewWhitelistDialog();
             else if (target.closest("#ceo-risk-exec-settings-btn")) {
-                // 抽屉住在 Tool 页那个 section 里，光调 openTool 会把开在 display:none 的容器上，
-                // 点了像没反应；先换视图再开。
                 closeCeoRiskPanel();
-                if (typeof switchView === "function") switchView("tools");
-                if (typeof openTool === "function") void openTool("exec");
+                openExecToolSettings();
             }
         });
     }

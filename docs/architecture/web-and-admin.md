@@ -918,7 +918,7 @@ The context-usage brain is also the composer's model-and-context entry: clicking
 - **档位是一份全局设置，不是会话设置。** 面板打开时读一次服务端读数，页面启动时也读一次，所以按钮的着色反映的是当前生效值，与"这是哪个会话"无关。改动立刻对所有在跑与新建的会话生效，界面因此不需要按会话缓存副本，也不许在切换会话时把读数换回本地缓存。
 - **按钮着色只有一档：全部放行时发黄。** 黄色在这套界面里已经是"需要人来处理"那一族（模型链重试提示、侧栏待审批环），这里指的是"这一档不拦任何工具调用"，即风险敞口打开着。条件放行下按钮不着色。选择态本身由面板里那两颗 radio 的 `aria-checked` 表达，不靠按钮颜色重复一遍。
 - **同尺寸与同锚点**：这颗按钮与脑图标、附件、语音共用输入区那档 40px 控件（`#ceo-risk-btn` 必须与那三颗一起列在同一条 id 规则里——基础类给的是 58px 档，只有 id 选择器压得住它），面板与模型面板同锚点向上弹出，因此打开一个会显式关掉另一个；点面板外收面板，点面板内不收（面板自己的 click handler 需要 stopPropagation，全局"点外面"判据读的是 document 上的 click）。
-- **`命令行风险拦截设置`不复制一份 exec 设置**：它打开的是 exec 工具详情抽屉（执行模式 + 命令白名单入口都在那儿），走的是与 Tool 页列表同一颗 `openTool("exec")`。跨页跳转要先 `switchView("tools")` 再开抽屉——抽屉坐在 `#view-tools` 那个 section 里，只调 `openTool` 等于把窗开在 `display:none` 的容器上，症状是"点了没反应"。风险面板这边不保存、不渲染任何 exec 字段。
+- **`命令行风险拦截设置`在会话页就地弹出 exec 工具详情**，走的是与 Tool 页列表同一颗 `openTool("exec")`，**不换视图**。抽屉本来是坐在 `#view-tools` 里的 `position:fixed` 居中层，而会话页时那个 section 是 `display:none`——直接调 `openTool` 等于把窗开在隐藏容器上（症状：点了没反应），先 `switchView("tools")` 又能弹出但会把操作员从会话里带走。现行做法与模型配置里那份 popover 同源：开之前把遮罩与抽屉两个节点搬到 `document.body`（`hoistToolDetailLayer`），节点句柄按元素取所以不受搬动影响，Tool 页自己用它时形状完全一样。风险面板这边不保存、不渲染任何 exec 字段。
 - **白名单弹窗**列出 `GET /api/resources/tools` 的那份工具记录，勾选态按 `governance-mode` 回的 `whitelist_tools` 画，界面不自己按风险度派生默认档（派生只在服务端做，`whitelist_customized` 告诉界面这份名单是存过的还是默认的）。行是长内容：列表盒子按视口封顶并自滚，弹窗外壳不当滚动口。保存只提交勾上的那几项，走同一个 `PUT governance-mode` 的 `whitelist_tools` 字段，不带 `enabled`——两颗档位按钮与名单是两个动作，一次点击只改一件事。
 - 与审批卡片（见「2.2. Regulatory Approval Flow」）是两条面：那张是"这一批要不要放行"的运行时阻塞态，这颗按钮是"以后要不要拦"的设置态，两者互不读写对方的状态。
 

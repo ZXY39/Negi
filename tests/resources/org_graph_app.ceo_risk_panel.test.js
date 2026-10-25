@@ -36,6 +36,7 @@ class StubElement {
         this.textContent = "";
         this.innerHTML = "";
         this.value = "";
+        this.parentElement = null;
         this.style = { setProperty() {} };
         this._children = [];
     }
@@ -62,11 +63,23 @@ class StubElement {
     querySelectorAll() { return []; }
 }
 
+class StubBody {
+    constructor() {
+        this.children = [];
+    }
+
+    appendChild(node) {
+        this.children.push(node);
+        node.parentElement = this;
+    }
+}
+
 class StubDocument {
     constructor(ids) {
         this.byId = new Map(ids.map((id) => [id, new StubElement(id)]));
         this.listeners = {};
         this.created = [];
+        this.body = new StubBody();
     }
 
     getElementById(id) { return this.byId.get(id) || null; }
@@ -97,6 +110,11 @@ function loadGovernance({ governanceItem, tools = [], extraIds = [] } = {}) {
         "ceo-approval-viewport",
     ];
     const document = new StubDocument([...panelIds, ...extraIds]);
+    // 工具详情抽屉那两个节点：就地弹出这条车道要把它们搬到 body 上。
+    const toolBackdrop = new StubElement("tool-detail-backdrop");
+    const toolDrawer = new StubElement("tool-detail-panel");
+    document.byId.set("tool-detail-backdrop", toolBackdrop);
+    document.querySelector = (selector) => (selector === ".tool-detail-panel" ? toolDrawer : null);
     const calls = [];
     const context = {
         console,
@@ -162,6 +180,8 @@ function loadGovernance({ governanceItem, tools = [], extraIds = [] } = {}) {
     vm.runInContext(GOVERNANCE_CODE, context);
     context.elements = document.byId;
     context.calls = calls;
+    context.toolBackdrop = toolBackdrop;
+    context.toolDrawer = toolDrawer;
     return context;
 }
 
@@ -210,7 +230,7 @@ test("风险面板按服务端档位渲染，条件放行才出现白名单入�
     assert.equal(ctx.elements.get("ceo-risk-btn").classList.contains("is-all-pass"), true);
 });
 
-test("命令行风险拦截设置那颗入口打开 exec 工具详情并收起面板", () => {
+test("命令行风险拦截设置在会话页就地弹出 exec 工具详情", () => {
     const ctx = loadGovernance({
         governanceItem: { enabled: false, mode: "all_pass", whitelist_tools: [], whitelist_customized: false },
     });
@@ -218,11 +238,11 @@ test("命令行风险拦截设置那颗入口打开 exec 工具详情并收起�
     assert.equal(ctx.elements.get("ceo-risk-panel").hidden, false);
 
     ctx.elements.get("ceo-risk-panel").dispatch("click", { target: ctx.elements.get("ceo-risk-exec-settings-btn") });
-    // 抽屉在 Tool 页那个 section 里：不先切视图就等于把窗开在 display:none 的容器上。
-    assert.deepEqual(plain(ctx.calls.filter((call) => call.api === "switchView" || call.api === "openTool")), [
-        { api: "switchView", view: "tools" },
-        { api: "openTool", toolId: "exec" },
-    ]);
+    assert.deepEqual(plain(ctx.calls.filter((call) => call.api === "openTool")), [{ api: "openTool", toolId: "exec" }]);
+    // 不许再把操作员带到 Tool 页：抽屉自己搬到 body 上。
+    assert.equal(ctx.calls.some((call) => call.api === "switchView"), false, "点了设置不该切视图");
+    assert.equal(ctx.toolBackdrop.parentElement, ctx.document.body);
+    assert.equal(ctx.toolDrawer.parentElement, ctx.document.body);
     assert.equal(ctx.elements.get("ceo-risk-panel").hidden, true);
 });
 
