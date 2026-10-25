@@ -2,7 +2,7 @@
 kind: tool
 display_name: "创建异步任务"
 name: create_async_task
-description: Create a background task in the main runtime. Optional `seed_tools` names tools whose contracts the root node gets in its first request, so its first call runs directly instead of spending a hop fetching the contract; the result reports every declared name the runtime did not seed.
+description: Create a background task in the main runtime.
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''
@@ -55,14 +55,6 @@ parameters:
     final_acceptance_prompt:
       type: string
       description: Required when `requires_final_acceptance=true`.
-    seed_tools:
-      type: array
-      description: >-
-        Optional. Tool names whose contracts should be delivered in the root execution node's first
-        request so the first call can execute directly. Runtime filters by the node's role and reports
-        every dropped name in the result. Omit when unsure.
-      items:
-        type: string
   required: [task, core_requirement, execution_policy]
 governance:
   display_name: Create Async Task

@@ -1806,15 +1806,6 @@ class MainRuntimeService:
             metadata=metadata,
         )
         record, root = self.log_service.initialize_task(record, root)
-        # 根节点的预置判据在派发这一刻算：`create_async_task` 的结果文本要带上回执，
-        # 而回执必须来自与首跳同一个判据实现，不能让派发方读到一份推不出来的答案。
-        seed_metadata = self.build_node_seed_metadata(
-            task=record,
-            node_kind='execution',
-            declared=list((record.metadata or {}).get('seed_tools') or []),
-        )
-        if seed_metadata:
-            root = self.log_service.update_node_metadata(root.node_id, lambda current: {**current, **seed_metadata}) or root
         final_acceptance = normalize_final_acceptance_metadata((record.metadata or {}).get('final_acceptance'))
         if final_acceptance.required and not str(final_acceptance.node_id or '').strip():
             acceptance = self.node_runner.create_acceptance_node(

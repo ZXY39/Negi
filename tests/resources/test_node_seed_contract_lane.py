@@ -365,7 +365,7 @@ async def test_resolver_returns_everything_empty_without_declaration(tmp_path: P
 # --- bootstrap 落位 -----------------------------------------------------------
 
 
-async def _make_task(service: MainRuntimeService, *, seed_tools: list[str] | None = None):
+async def _make_task(service: MainRuntimeService):
     service.store.upsert_worker_status(
         worker_id='worker:test',
         role='task_worker',
@@ -373,25 +373,45 @@ async def _make_task(service: MainRuntimeService, *, seed_tools: list[str] | Non
         updated_at=now_iso(),
         payload={'execution_mode': 'worker', 'active_task_count': 0},
     )
-    metadata: dict[str, Any] = {'core_requirement': 'seed lane'}
-    if seed_tools is not None:
-        metadata['seed_tools'] = seed_tools
-    record = await service.create_task('seed lane task', session_id='web:shared', metadata=metadata)
+    record = await service.create_task(
+        'seed lane task',
+        session_id='web:shared',
+        metadata={'core_requirement': 'seed lane'},
+    )
     return record, service.get_node(record.root_node_id)
+
+
+async def _make_seeded_node(service: MainRuntimeService, *, seed_tools: list[str] | None):
+    """车道进口：预置名单只能由派发子节点的父节点声明（前门那半已撤）。"""
+    record, root = await _make_task(service)
+    child = service.node_runner._create_execution_child(
+        task=service.get_task(record.task_id),
+        parent=service.get_node(root.node_id),
+        spec=SpawnChildSpec(
+            goal='seeded child',
+            prompt='seeded child prompt',
+            execution_policy={'mode': 'focus'},
+            seed_tools=list(seed_tools or []),
+        ),
+    )
+    return record, child
 
 
 @pytest.mark.asyncio
 async def test_bootstrap_inserts_seed_messages_after_payload(tmp_path: Path) -> None:
     service, manager = _build_service(tmp_path)
     try:
-        record, root = await _make_task(service, seed_tools=['seed_a', 'seed_b'])
-        messages = await service.node_runner._build_messages(task=service.get_task(record.task_id), node=root)
+        record, node = await _make_seeded_node(service, seed_tools=['seed_a', 'seed_b'])
+        messages = await service.node_runner._build_messages(task=service.get_task(record.task_id), node=node)
         assert messages[0]['role'] == 'system'
         assert str(messages[1]['content']).lstrip().startswith('{'), 'bootstrap payload 仍是第二条'
         assert str(messages[2]['content']).lstrip().startswith(MARKER_PREFIX)
         assert str(messages[3]['content']).lstrip().startswith(MARKER_PREFIX)
-        # 每跳重写的尾块仍在最末，预置没把它挤出末位（那会顶掉缓存前缀）。
-        assert str(messages[-1]['content']).startswith(NODE_DYNAMIC_CONTRACT_HEADING)
+        # 预置插在稳定前缀里，不越到末尾去，也不替节点重新引一份活状态尾块（尾块已退役）。
+        assert len(messages) == 4
+        assert not any(
+            str(item.get('content') or '').startswith(NODE_DYNAMIC_CONTRACT_HEADING) for item in messages
+        ), '预置不该把退役的尾块带回来'
     finally:
         await _shutdown(service, manager)
 
@@ -401,7 +421,7 @@ async def test_bootstrap_is_byte_identical_across_rebuilds(tmp_path: Path) -> No
     """钉住一次定稿：同一节点两次构造逐字节相同（toolskill 源在这两次之间没动）。"""
     service, manager = _build_service(tmp_path)
     try:
-        record, root = await _make_task(service, seed_tools=['seed_a'])
+        record, root = await _make_seeded_node(service, seed_tools=['seed_a'])
         task = service.get_task(record.task_id)
         node = service.get_node(root.node_id)
         first = await service.node_runner._build_messages(task=task, node=node)
@@ -418,10 +438,10 @@ async def test_bootstrap_message_count_unchanged_without_declaration(tmp_path: P
     """没声明 ⇒ 一条消息都不多插，节点行为与改造前一致（回归钉住）。"""
     service, manager = _build_service(tmp_path)
     try:
-        record, root = await _make_task(service, seed_tools=None)
-        messages = await service.node_runner._build_messages(task=service.get_task(record.task_id), node=root)
+        record, node = await _make_seeded_node(service, seed_tools=None)
+        messages = await service.node_runner._build_messages(task=service.get_task(record.task_id), node=node)
         assert not any(str(item.get('content') or '').lstrip().startswith(MARKER_PREFIX) for item in messages)
-        assert len(messages) == 3, 'system + payload + 契约尾块'
+        assert len(messages) == 2, 'system + payload'
     finally:
         await _shutdown(service, manager)
 
@@ -430,7 +450,7 @@ async def test_bootstrap_message_count_unchanged_without_declaration(tmp_path: P
 async def test_seed_observations_land_in_node_metadata_and_frame(tmp_path: Path) -> None:
     service, manager = _build_service(tmp_path)
     try:
-        record, root = await _make_task(service, seed_tools=['seed_a', 'seed_ceo_only'])
+        record, root = await _make_seeded_node(service, seed_tools=['seed_a', 'seed_ceo_only'])
         task = service.get_task(record.task_id)
         await service.node_runner._build_messages(task=task, node=service.get_node(root.node_id))
         metadata = dict(service.get_node(root.node_id).metadata or {})
@@ -455,7 +475,7 @@ async def test_first_hop_executes_a_seeded_tool_without_the_impulse_lane(tmp_pat
 
     service, manager = _build_service(tmp_path)
     try:
-        record, root = await _make_task(service, seed_tools=['seed_a'])
+        record, root = await _make_seeded_node(service, seed_tools=['seed_a'])
         task = service.get_task(record.task_id)
         node = service.get_node(root.node_id)
         messages = await service.node_runner._build_messages(task=task, node=node)
@@ -501,12 +521,13 @@ async def test_first_hop_executes_a_seeded_tool_without_the_impulse_lane(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_create_async_task_receipt_does_not_fabricate_task_ids(tmp_path: Path) -> None:
-    """回执与"从工具结果里抠本回合派了哪些任务"的解析器共用同一条字符串。
+async def test_create_async_task_result_has_no_seed_receipt(tmp_path: Path) -> None:
+    """前门这一跳的结果文本只剩任务号：预置判据不由前门声明，也不由前门回执。
 
-    那道解析用 `task:` 正则在**整段结果文本**上 findall，所以追加进去的 JSON 里
-    任何长得像 id 的值都会被当成又派了一个任务。这条用例走真 handler 的 `execute`，
-    逐字节读结果文本，而不是读渲染器。
+    走真 handler 逐字节读结果文本，并钉两件事：一条结果里只解析出一个任务号（"从结果文本
+    抠本回合派了哪些任务"的解析器在整段文本上 findall，任何长得像 id 的追加值都会被当成又
+    派了一个任务）；旧前门带着 `seed_tools` 重发时（长会话钉住的 `tools[]` 还认得这个字段）
+    任务照常创建，根节点一个预置键都不落。
     """
     import re
 
@@ -519,7 +540,7 @@ async def test_create_async_task_receipt_does_not_fabricate_task_ids(tmp_path: P
             manager.workspace / 'tools' / 'create_async_task_cn',
             ignore=shutil.ignore_patterns('__pycache__'),
         )
-        manager.reload_now(trigger='seed-receipt-test')
+        manager.reload_now(trigger='create-async-task-no-seed-test')
         tool = manager.get_tool('create_async_task')
         assert tool is not None
         # web 模式下 `create_task` 要求 worker 在线，这里是走真 handler 而不是直调 service。
@@ -538,16 +559,16 @@ async def test_create_async_task_receipt_does_not_fabricate_task_ids(tmp_path: P
             seed_tools=['seed_a', 'seed_repair', 'seed_typo'],
         )
         assert str(text).startswith('创建任务成功')
+        assert 'seed_tools' not in str(text), '前门结果文本不再带预置回执'
         ids = _TASK_ID_PATTERN.findall(str(text))
-        assert len(ids) == 1, f'回执文本造出了额外任务号: {ids}'
+        assert len(ids) == 1, f'结果文本造出了额外任务号: {ids}'
         assert re.fullmatch(r'task:[0-9a-f]{12}', ids[0]), ids[0]
-        receipt_line = next(line for line in str(text).splitlines() if line.startswith('seed_tools: '))
-        payload = json.loads(receipt_line.split('seed_tools: ', 1)[1])
-        assert [item['tool'] for item in payload['accepted']] == ['seed_a']
-        assert [item['reason'] for item in payload['dropped']] == ['repair_required', 'unknown_tool']
 
-        bare = await tool.execute(task='no seed declared', core_requirement='n', execution_policy={'mode': 'focus'})
-        assert not any(line.startswith('seed_tools:') for line in str(bare).splitlines()), '未声明时不该回一份空回执'
+        root = service.get_node(service.get_task(ids[0]).root_node_id)
+        metadata = dict(root.metadata or {})
+        assert not ({'seed_tools', 'seed_receipt', 'seeded_contracts', 'seeded_dropped', 'seed_error'} & set(metadata)), (
+            f'根节点落了预置键: {sorted(metadata)}'
+        )
     finally:
         await _shutdown(service, manager)
 
@@ -561,7 +582,7 @@ async def test_frame_readings_survive_every_frame_field_list(tmp_path: Path) -> 
     """
     service, manager = _build_service(tmp_path)
     try:
-        record, root = await _make_task(service, seed_tools=['seed_a'])
+        record, root = await _make_seeded_node(service, seed_tools=['seed_a'])
         task = service.get_task(record.task_id)
         await service.node_runner._build_messages(task=task, node=service.get_node(root.node_id))
 
@@ -586,7 +607,7 @@ async def test_later_frame_write_without_the_readings_does_not_blanc_them(tmp_pa
     """
     service, manager = _build_service(tmp_path)
     try:
-        record, root = await _make_task(service, seed_tools=['seed_a'])
+        record, root = await _make_seeded_node(service, seed_tools=['seed_a'])
         task = service.get_task(record.task_id)
         await service.node_runner._build_messages(task=task, node=service.get_node(root.node_id))
         before = service.log_service.read_runtime_frame_payload(record.task_id, root.node_id) or {}
@@ -616,7 +637,7 @@ async def test_first_hop_sees_the_seeded_contract_in_the_request_view(tmp_path: 
     """预置的落点必须是**当次请求视图**：在场判据只读那里，读别处都是白插。"""
     service, manager = _build_service(tmp_path)
     try:
-        record, root = await _make_task(service, seed_tools=['seed_a'])
+        record, root = await _make_seeded_node(service, seed_tools=['seed_a'])
         task = service.get_task(record.task_id)
         node = service.get_node(root.node_id)
         messages = await service.node_runner._build_messages(task=task, node=node)
@@ -636,11 +657,12 @@ async def test_first_hop_sees_the_seeded_contract_in_the_request_view(tmp_path: 
 async def test_dispatched_receipt_is_persisted_on_the_child_node(tmp_path: Path) -> None:
     service, manager = _build_service(tmp_path)
     try:
-        record, root = await _make_task(service, seed_tools=['seed_a', 'seed_repair'])
+        record, root = await _make_task(service)
         task = service.get_task(record.task_id)
-        receipt = dict((root.metadata or {})['seed_receipt'])
-        assert [item['tool'] for item in receipt['accepted']] == ['seed_a']
-        assert receipt['dropped'] == [{'tool': 'seed_repair', 'reason': 'repair_required'}]
+        root_metadata = dict(service.get_node(root.node_id).metadata or {})
+        assert not {'seed_tools', 'seed_receipt', 'seeded_contracts', 'seeded_dropped'} & set(root_metadata), (
+            '前门派发的根节点不再带任何预置判据'
+        )
 
         child = service.node_runner._create_execution_child(
             task=task,
@@ -678,18 +700,24 @@ def test_seed_tools_guidance_lives_where_the_provider_does_not_strip_it() -> Non
     assert 'Optional. Tool names whose contracts' not in serialized_parameters, '字段说明不该以为能过闸'
 
 
-def test_create_async_task_seed_hint_is_the_tool_level_description() -> None:
-    """`create_async_task` 是资源工具，模型面文字来自 `resource.yaml` 顶层 `description`。
+def test_create_async_task_advertises_no_seed_tools() -> None:
+    """前门模型面（`resource.yaml` 顶层 description + parameters）不认得预置字段。
 
-    `governance.description` 是同一段文字的治理侧副本，不参与模型面渲染，所以说明要落在前者。
+    长会话的 `tools[]` 会钉住到压缩才刷新，所以撤字段要连工具级说明一起撤：留着名字，
+    旧前门照旧会去声明，而声明出来的判据现在无处落。
     """
     import yaml
 
     manifest = yaml.safe_load(
         (REPO_ROOT / 'tools' / 'create_async_task_cn' / 'resource.yaml').read_text(encoding='utf-8-sig')
     )
-    assert 'seed_tools' in str(manifest.get('description') or '')
+    assert 'seed_tools' not in str(manifest.get('description') or '')
+    assert 'seed_tools' not in json.dumps(manifest.get('parameters') or {}, ensure_ascii=False)
     assert 'seed_tools' not in str((manifest.get('governance') or {}).get('description') or '')
+
+    from main.service.create_async_task_contract import build_create_async_task_parameters
+
+    assert 'seed_tools' not in json.dumps(build_create_async_task_parameters(), ensure_ascii=False)
 
 
 @pytest.mark.asyncio
@@ -702,7 +730,7 @@ async def test_spawn_round_delivery_attaches_the_child_receipt(tmp_path: Path) -
     """
     service, manager = _build_service(tmp_path)
     try:
-        record, root = await _make_task(service, seed_tools=['seed_a'])
+        record, root = await _make_seeded_node(service, seed_tools=['seed_a'])
         task = service.get_task(record.task_id)
         parent = service.get_node(root.node_id)
         seeded = service.node_runner._create_execution_child(
@@ -771,7 +799,7 @@ async def test_seed_parse_failure_does_not_block_dispatch(tmp_path: Path) -> Non
 
     try:
         service.resolve_node_seed_contracts = _boom  # type: ignore[method-assign]
-        record, root = await _make_task(service, seed_tools=['seed_a'])
+        record, root = await _make_seeded_node(service, seed_tools=['seed_a'])
         metadata = dict((service.get_node(root.node_id) or root).metadata or {})
         assert record.task_id
         assert metadata.get('seed_tools') == ['seed_a'], '名单照原样留下，首跳还会再解一次'

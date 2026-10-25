@@ -33,8 +33,32 @@ def test_skill_carries_the_persistent_discussion_contract() -> None:
     assert '不替讨论者拟定每轮质询目标' in body
     assert '找**执行同级**' in body
     assert '不读、不向同级索取证据' in body
-    assert '`coverage`' in body
-    assert '不要用 `wait_all_children` 的 child_final 当轮次 barrier' in body
+    assert '不要用“等整批子节点都终局”当轮次 barrier' in body
+
+
+def test_skill_names_no_node_side_tool() -> None:
+    """The skill is a topology contract, not a tool manifest.
+
+    A hard-coded node-side tool name reads as a capability verdict when that
+    name is absent from the target node's turn, and the discussion then degrades
+    into file polling or a rejected seed declaration.
+    """
+    body = (SKILL_ROOT / 'SKILL.md').read_text(encoding='utf-8')
+
+    for tool_name in (
+        'send_message',
+        'view_message_history',
+        'enter_wait',
+        'view_node_tree',
+        'spawn_child_nodes',
+        'manage_child_nodes',
+        'list_child_nodes',
+        'read_child_progress',
+        'submit_final_result',
+        'child_final',
+        'wait_all_children',
+    ):
+        assert tool_name not in body, f'the skill must describe the capability, not `{tool_name}`'
 
 
 def test_standing_prompts_point_to_the_skill_and_keep_the_append_rule() -> None:

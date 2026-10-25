@@ -151,7 +151,6 @@ from main.runtime.tool_call_repair import (
 from main.runtime.tool_names import SILENT_TOOL_NAME
 from main.service.create_async_task_contract import (
     normalize_create_async_task_file_targets,
-    normalize_create_async_task_seed_tools,
 )
 
 from . import skill_roster as _skill_roster
@@ -690,8 +689,6 @@ def _normalize_frontdoor_tool_arguments(tool_name: str, arguments: dict[str, Any
             normalized["file_targets"] = parsed_targets
         else:
             normalized["file_targets"] = normalize_create_async_task_file_targets(stripped_targets)
-    if "seed_tools" in normalized:
-        normalized["seed_tools"] = normalize_create_async_task_seed_tools(normalized.get("seed_tools"))
     return normalized
 
 
