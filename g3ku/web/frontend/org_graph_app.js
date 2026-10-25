@@ -5053,13 +5053,56 @@ function buildCeoRequestedAtByTurn(messages = []) {
     return map;
 }
 
-const CEO_FLOW_DOT_LIFT_CACHE = { key: "", lift: null, ctx: null };
+const CEO_FLOW_DOT_LIFT_CACHE = { key: "", lift: null };
+const CEO_FLOW_INK_CACHE = { key: "", half: null };
 const CEO_FLOW_DOT_GEOMETRY_LAST = { y: "" };
+
+// 数字墨迹半高（基线到墨迹中心的距离）。用 SVG <text> 的 getBBox() 量：
+// bbox 紧贴字形墨迹，且和页面正文走同一套字体解析（canvas 的 font 串可能解析成别的字体）。
+function ceoFlowInkHalfPx(element) {
+    if (typeof getComputedStyle !== "function") return null;
+    const cs = getComputedStyle(element);
+    const fontKey = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+    if (CEO_FLOW_INK_CACHE.key === fontKey) return CEO_FLOW_INK_CACHE.half;
+    if (typeof document.createElementNS !== "function" || !document.body) return null;
+    const ns = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(ns, "svg");
+    const text = document.createElementNS(ns, "text");
+    if (!svg || !text) return null;
+    svg.setAttribute("width", "0");
+    svg.setAttribute("height", "0");
+    svg.style.cssText = "position:absolute;left:-9999px;top:0;overflow:visible;visibility:hidden;";
+    text.setAttribute("x", "0");
+    text.setAttribute("y", "40");
+    text.style.fontStyle = cs.fontStyle;
+    text.style.fontWeight = cs.fontWeight;
+    text.style.fontSize = cs.fontSize;
+    text.style.fontFamily = cs.fontFamily;
+    text.textContent = "0123456789";
+    svg.appendChild(text);
+    document.body.appendChild(svg);
+    let half = null;
+    try {
+        const box = text.getBBox?.();
+        if (box && Number.isFinite(box.y) && box.height > 0) {
+            const inkAbove = 40 - box.y;
+            const inkBelow = box.y + box.height - 40;
+            half = Math.round(((inkAbove - inkBelow) / 2) * 100) / 100;
+        }
+    } catch (error) {
+        void error;
+    }
+    svg.remove?.();
+    if (half === null) return null;
+    CEO_FLOW_INK_CACHE.key = fontKey;
+    CEO_FLOW_INK_CACHE.half = half;
+    return half;
+}
 
 // 圆点要抬多少像素才落在秒数墨迹的中线上。
 // 基线不靠字体的 ascent/descent 推算（canvas 与布局可能给出不同的一套），而是塞一个
 // 零尺寸 inline-block 让浏览器把它摆在基线上、读它的底边——布局自己算的基线最准。
-// 墨高/墨底取 canvas 的 actualBoundingBox*（数字串固定，秒数只变长短）。
+// 墨迹半高由 SVG getBBox() 量出的紧框给出（数字串固定，秒数只变长短）。
 function ceoFlowDotLiftPx(element) {
     if (!(element instanceof HTMLElement) || typeof getComputedStyle !== "function") return null;
     const cs = getComputedStyle(element);
@@ -5068,16 +5111,8 @@ function ceoFlowDotLiftPx(element) {
     if (!(box.height > 0)) return null;
     const cacheKey = `${fontSpec}|${Math.round(box.height * 100)}`;
     if (CEO_FLOW_DOT_LIFT_CACHE.key === cacheKey) return CEO_FLOW_DOT_LIFT_CACHE.lift;
-    if (!CEO_FLOW_DOT_LIFT_CACHE.ctx) {
-        CEO_FLOW_DOT_LIFT_CACHE.ctx = document.createElement("canvas").getContext?.("2d") || null;
-    }
-    const ctx = CEO_FLOW_DOT_LIFT_CACHE.ctx;
-    if (!ctx) return null;
-    ctx.font = fontSpec;
-    const metrics = ctx.measureText("0123456789");
-    const inkAsc = Number(metrics.actualBoundingBoxAscent);
-    const inkDesc = Number(metrics.actualBoundingBoxDescent);
-    if (!Number.isFinite(inkAsc) || !Number.isFinite(inkDesc) || inkAsc <= 0) return null;
+    const inkHalf = ceoFlowInkHalfPx(element);
+    if (inkHalf === null) return null;
     const probe = document.createElement("span");
     probe.setAttribute("aria-hidden", "true");
     probe.style.cssText = "display:inline-block;width:0;height:0;margin:0;padding:0;border:0;vertical-align:baseline;pointer-events:none;";
@@ -5086,7 +5121,7 @@ function ceoFlowDotLiftPx(element) {
     probe.remove?.();
     if (!Number.isFinite(baseline)) return null;
     // 圆心对准墨迹中心：盒中心 − (基线 − 墨迹半高)。
-    const lift = Math.round(((box.top + box.height / 2) - (baseline - (inkAsc - inkDesc) / 2)) * 100) / 100;
+    const lift = Math.round(((box.top + box.height / 2) - (baseline - inkHalf)) * 100) / 100;
     CEO_FLOW_DOT_LIFT_CACHE.key = cacheKey;
     CEO_FLOW_DOT_LIFT_CACHE.lift = lift;
     return lift;

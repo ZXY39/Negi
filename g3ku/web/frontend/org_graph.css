@@ -17492,29 +17492,19 @@ textarea {
 }
 
 /* 圆点与引导线同源：圆心 (x, y)，1px 线占 x-0.5..x+0.5、从 y 往下长。
-   两者都相对 flow 的定位盒，不存在两个原点对不上的问题。 */
-/* 圆点与向下引导线画在同一个元素里（guide 的 ::before / ::after）：
-   两者共用同一个定位盒，圆心就是线中心，任何渲染器下都不可能各偏一边。
-   9px 圆点左缘 0、圆心 4.5px；1px 线占 4~5px、中心也是 4.5px。
-   位置由 --ceo-flow-dot-x / -y 给出（x 缺省 8.5px；y 由脚本按秒数盒子与字体墨迹量出）。 */
+   圆点用固定 9×9 的 SVG 背景画而不是靠盒子 + border-radius：背景尺寸写死，
+   不随盒子高度/行框变化，任何缩放下都是正圆；线是同一个盒子的 ::after。 */
 .interaction-flow-guide {
     position: absolute;
     left: calc(var(--ceo-flow-dot-x, 8.5px) - 4.5px);
     top: calc(var(--ceo-flow-dot-y, 23.5px) - 4.5px);
     bottom: var(--space-3);
     width: 9px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 9 9'%3E%3Ccircle cx='4.5' cy='4.5' r='4.5' fill='%2339c5bb'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: 0 0;
+    background-size: 9px 9px;
     pointer-events: none;
-}
-
-.interaction-flow-guide::before {
-    content: "";
-    position: absolute;
-    left: 0;
-    top: 0;
-    width: 9px;
-    height: 9px;
-    border-radius: var(--radius-full);
-    background: #39c5bb;
 }
 
 .interaction-flow-guide::after {

@@ -39,8 +39,9 @@ class StubHTMLElement extends StubElement {
 function loadApp() {
     const probe = {
         fontSize: "13.6px",
-        metrics: { fontAsc: 13, fontDesc: 4, inkAsc: 10, inkDesc: 0 },
         baseline: 116,
+        inkAbove: 10,
+        inkBelow: 0,
     };
     const context = {
         console,
@@ -60,24 +61,38 @@ function loadApp() {
             fontFamily: "Fira Sans",
         }),
         document: {
+            body: { appendChild() {} },
             getElementById: () => null,
             querySelector: () => null,
             querySelectorAll: () => [],
             addEventListener: () => {},
-            createElement: (tag) => {
-                if (String(tag).toLowerCase() === "canvas") {
-                    return {
-                        getContext: () => ({
-                            font: "",
-                            measureText: () => ({
-                                fontBoundingBoxAscent: probe.metrics.fontAsc,
-                                fontBoundingBoxDescent: probe.metrics.fontDesc,
-                                actualBoundingBoxAscent: probe.metrics.inkAsc,
-                                actualBoundingBoxDescent: probe.metrics.inkDesc,
-                            }),
-                        }),
-                    };
+            createElementNS: (ns, tag) => {
+                const el = {
+                    style: { cssText: "" },
+                    attributes: {},
+                    setAttribute(name, value) {
+                        this.attributes[name] = String(value);
+                    },
+                    appendChild(child) {
+                        this.child = child;
+                        return child;
+                    },
+                    remove() {
+                        this.removed = true;
+                    },
+                };
+                if (String(tag).toLowerCase() === "text") {
+                    // SVG 紧框：y=基线-墨高，高度=墨高+墨底。
+                    el.getBBox = () => ({
+                        x: 0,
+                        y: 40 - probe.inkAbove,
+                        width: 60,
+                        height: probe.inkAbove + probe.inkBelow,
+                    });
                 }
+                return el;
+            },
+            createElement: () => {
                 const el = new StubHTMLElement();
                 // 零尺寸基线探针：布局会把它摆在基线上，底边就是基线读数。
                 el.getBoundingClientRect = () => ({ top: probe.baseline, bottom: probe.baseline, height: 0, left: 0, right: 0, width: 0 });
@@ -216,14 +231,15 @@ test("history pairing takes the earliest request row of a turn", () => {
 test("dot lift follows the measured baseline and ink metrics", () => {
     const api = loadApp();
     const usage = new api.HTMLElement();
-    // 盒子 100..123（中心 111.5），基线 116，数字墨高 10/墨底 0 → 墨迹中心 111 → 抬 0.5。
+    // 盒子 100..123（中心 111.5），基线 116，墨高 10/墨底 0 → 墨迹半高 5、墨迹中心 111 → 抬 0.5。
     usage.getBoundingClientRect = () => ({ top: 100, bottom: 123, height: 23, left: 0, right: 20, width: 20 });
     assert.equal(api.ceoFlowDotLiftPx(usage), 0.5);
 
-    // 换字号/字体：基线 120、墨高 12/墨底 1 → 墨迹中心 114.5 → 抬 -3（圆点要往下）。
+    // 换字号/字体：基线 120、墨高 12/墨底 1 → 墨迹半高 5.5、墨迹中心 114.5 → 抬 -3（圆点要往下）。
     api.__probe.fontSize = "20px";
     api.__probe.baseline = 120;
-    api.__probe.metrics = { fontAsc: 16, fontDesc: 8, inkAsc: 12, inkDesc: 1 };
+    api.__probe.inkAbove = 12;
+    api.__probe.inkBelow = 1;
     assert.equal(api.ceoFlowDotLiftPx(usage), -3);
 });
 
@@ -243,11 +259,10 @@ test("flow dot and guide line are painted from one box", () => {
     assert.match(guide[1], /left:\s*calc\(var\(--ceo-flow-dot-x, 8\.5px\) - 4\.5px\)/);
     assert.match(guide[1], /top:\s*calc\(var\(--ceo-flow-dot-y, 23\.5px\) - 4\.5px\)/);
     assert.match(guide[1], /width:\s*9px/);
-
-    const dot = /\.interaction-flow-guide::before\s*\{([\s\S]*?)\n\}/.exec(CSS);
-    assert.ok(dot, "dot rule not found");
-    assert.match(dot[1], /width:\s*9px/);
-    assert.match(dot[1], /height:\s*9px/);
+    // 圆点是写死 9×9 的 SVG 背景：不随盒子高度变形成椭圆。
+    assert.match(guide[1], /background-image:\s*url\("data:image\/svg\+xml/);
+    assert.match(guide[1], /background-size:\s*9px 9px/);
+    assert.doesNotMatch(CSS, /\.interaction-flow-guide::before\s*\{/);
 
     const line = /\.interaction-flow-guide::after\s*\{([\s\S]*?)\n\}/.exec(CSS);
     assert.ok(line, "line rule not found");
