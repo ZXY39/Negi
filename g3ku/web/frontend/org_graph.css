@@ -10760,6 +10760,14 @@ textarea {
     flex: 0 0 132px;
 }
 
+/* 页脚一行三颗控件同档：每页下拉与上一页 / 下一页一起吃 32px。下拉的 40px 属于页头档，
+   原生替身的 38px 属于输入档，两者都不进列表页脚。 */
+.resource-pagination .resource-select-trigger,
+.resource-pagination .resource-pagination-group select {
+    height: 32px;
+    min-height: 32px;
+}
+
 .resource-pagination .resource-select-menu {
     top: auto;
     bottom: calc(100% + 10px);
@@ -13803,11 +13811,17 @@ textarea {
 
 /* 「可会话范围」不是原生下拉：org_graph_external.js 渲染完调 enhanceResourceSelects()，
    由 buildResourceSelect 把 <select> 包成应用自有的 .resource-select-shell（触发器 +
-   自定义菜单），尺寸直接吃 40px 控件档。这里只定宽——shell 默认 width:100%，
-   在行内 flex 里会随文案浮动。 */
+   自定义菜单）。这一行是卡内动作行，同排的重新生成 / 删除走 32px 档，所以触发器和它的
+   原生替身一起收进同一档。这里只定宽——shell 默认 width:100%，在行内 flex 里会随文案浮动。 */
 .external-token-actions .resource-select-shell {
     width: 118px;
     flex: 0 0 auto;
+}
+
+.external-token-actions .resource-select-shell select,
+.external-token-actions .resource-select-trigger {
+    height: 32px;
+    min-height: 32px;
 }
 
 .external-token-tools {
@@ -14629,8 +14643,8 @@ textarea {
 
 /* 9. 按钮 */
 :root .toolbar-btn {
-    height: 36px;
-    min-height: 36px;
+    height: 32px;
+    min-height: 32px;
     padding: 0 var(--ui-space-3);
     gap: var(--ui-space-2);
     white-space: nowrap;
@@ -15103,8 +15117,8 @@ textarea {
 .content-header .toolbar-btn,
 .content-header .resource-search,
 .content-header .task-depth-setting-main,
-#view-skills .resource-select-trigger,
-#view-tools .resource-select-trigger {
+#view-skills .content-header .resource-select-trigger,
+#view-tools .content-header .resource-select-trigger {
     height: 40px;
     min-height: 40px;
     padding: 0 var(--ui-space-3);
