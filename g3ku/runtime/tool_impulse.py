@@ -39,6 +39,7 @@ LOOP_INTERNAL_RUNTIME_KEYS = frozenset(
         "tool_arg_stash_carrier",
         "tool_arg_stash_swept",
         "tool_execution_paths",
+        "tool_argument_coercions",
         "reuse_batch_in_progress",
         "impulse_delivered_tools",
         "impulse_staged_call_ids",
@@ -174,6 +175,10 @@ STAGED_REPLAY_NEW_ARGS = "new_args"
 # 它和"根本没打标记"在 `corrected` 里是同一个词，可修法的方向完全相反：一个是形状
 # 不允许（schema 里业务参数照旧必填），一个是主动选了重发。没有这一格就只能猜。
 REUSE_FLAG_IGNORED_FIELD = "reuse_flag_ignored"
+# 第四格：入参到达时是它自己那段 JSON 文本（数组/对象被包成字符串），执行前按 schema 剥回了
+# 容器。剥壳本身对模型不可见，所以必须自己留可数落点——换一颗 provider 之后，"数组档位坏没坏"
+# 只能从这一格读，回执文本里没有任何痕迹。
+ARGUMENT_COERCION_FIELD = "arguments_coerced"
 
 
 def staged_replay_kind(
@@ -288,6 +293,7 @@ def aggregate_reuse_results(*, tool_name: str, items: list[dict[str, Any]]) -> P
 
 
 __all__ = [
+    "ARGUMENT_COERCION_FIELD",
     "CONTRACT_DELIVERY_FIELD",
     "IMPULSE_INVALID",
     "IMPULSE_REJECT",

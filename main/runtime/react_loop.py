@@ -92,6 +92,7 @@ from g3ku.runtime.tool_history import (
     truncate_group_head_tail,
 )
 from g3ku.runtime.tool_impulse import (
+    ARGUMENT_COERCION_FIELD,
     CONTRACT_DELIVERY_FIELD,
     EXECUTION_PATH_CORRECTED,
     EXECUTION_PATH_ILLEGAL_REUSE,
@@ -545,6 +546,8 @@ class ReActToolLoop:
             runtime_context['impulse_staged_call_ids'] = set()
             # 每次调用实际走的道（D15 审计），按 call id 索引，随工具行一起落盘。
             runtime_context['tool_execution_paths'] = {}
+            # 入参到达时是它自己那段 JSON 文本、执行前被剥回容器的那些参数名。
+            runtime_context['tool_argument_coercions'] = {}
             # 只交契约、没执行的那批调用：Web 面据此把行画成"加载 tool"卡片而不是普通调用。
             runtime_context['tool_contract_deliveries'] = {}
             callable_visible_tools = dict(current_tools)
@@ -4413,6 +4416,12 @@ class ReActToolLoop:
                 contract_delivery = str(
                     dict(runtime_context.get('tool_contract_deliveries') or {}).get(str(call.id or '')) or ''
                 ).strip()
+                coerced_arguments = [
+                    str(item)
+                    for item in list(
+                        dict(runtime_context.get('tool_argument_coercions') or {}).get(str(call.id or '')) or []
+                    )
+                ]
                 return {
                     'index': index,
                     'raw_result': raw_result,
@@ -4446,6 +4455,9 @@ class ReActToolLoop:
                             else {}
                         ),
                         **({CONTRACT_DELIVERY_FIELD: contract_delivery} if contract_delivery else {}),
+                        # 入参到达时是它自己那段 JSON 文本、执行前被剥回容器的那些参数名。
+                        # 剥壳本身静默，这一格就是它的计数器。
+                        **({ARGUMENT_COERCION_FIELD: coerced_arguments} if coerced_arguments else {}),
                         # 只交契约、没执行（冲动投递）：Web 面把该行画成"加载 tool"卡片。
                     },
                     'tool_message': {
@@ -4852,6 +4864,21 @@ class ReActToolLoop:
                 runtime_context['tool_reuse_flag_ignored'] = ignored
             ignored[call_id] = True
 
+    def _record_tool_argument_coercion(self, runtime_context: dict[str, Any], paths: list[str]) -> None:
+        """按 call id 记下哪些入参被从"自己那段 JSON 文本"剥回了容器。
+
+        剥壳对模型不可见，所以落点必须自己带：换一颗 provider 之后"数组档位到底坏没坏"
+        只能从工具行的 `arguments_coerced` 数出来，回执文本里一点痕迹都没有。
+        """
+        call_id = str(runtime_context.get('current_tool_call_id') or '').strip()
+        if not call_id or not paths:
+            return
+        rows = runtime_context.get('tool_argument_coercions')
+        if not isinstance(rows, dict):
+            rows = {}
+            runtime_context['tool_argument_coercions'] = rows
+        rows[call_id] = [str(item) for item in paths]
+
     def _node_staged_entries(self, *, container: Any, runtime_context: dict[str, Any], tool_name: str) -> list[dict[str, Any]]:
         """这一跳可消费的暂存条目（严格一跳 + 同修订）。"""
         carrier = runtime_context.get('tool_arg_stash_carrier') or {}
@@ -5078,6 +5105,10 @@ class ReActToolLoop:
         }
         if search_signature and search_signature in prior_overflow_signatures:
             return 'Error: previous search overflowed; refine query before retrying'
+        # 上游把数组/对象参数发成它自己那段 JSON 文本时，先按工具的权威 schema 剥回容器。
+        # 校验与执行必须用剥完的同一份，否则"验的形状"和"跑的形状"又分家。
+        arguments, coerced_paths = tool.coerce_arguments(arguments)
+        self._record_tool_argument_coercion(runtime_context, coerced_paths)
         try:
             errors = tool.validate_params(arguments)
         except Exception as exc:

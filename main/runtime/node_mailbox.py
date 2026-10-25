@@ -25,6 +25,15 @@ PARK_RUNNING: Final = 'running'
 REJECT_TARGET_TERMINAL: Final = 'target_terminal'
 REJECT_TARGET_PAUSED_NEEDS_RESUME: Final = 'target_paused_requires_resume'
 REJECT_UNKNOWN_TARGET_STATE: Final = 'unknown_target_state'
+# 寻址层的两个拒收档，必须分开：`target_not_in_task` 要模型改地址，
+# `target_list_unparsed` 要它改**形状**（它想发的是列表，只是文本没解析成列表）。
+# 合成一个值就只能两样都猜一遍。
+REJECT_TARGET_NOT_IN_TASK: Final = 'target_not_in_task'
+REJECT_TARGET_LIST_UNPARSED: Final = 'target_list_unparsed'
+# 形状档附给模型的那一句。措辞只说本条 `to` 接受什么，不指任何全局设置。
+TARGET_LIST_UNPARSED_HINT: Final = (
+    'Pass `to` as one node id, or as a real JSON list of node ids.'
+)
 
 # 用户自由文本对暂停态拒收；机器发送方照常投递并激活（设计 §2.4 注）。
 _USER_ORIGINS = frozenset({'user'})
@@ -103,3 +112,16 @@ def normalize_targets(raw: object) -> list[str]:
         seen.add(value)
         ordered.append(value)
     return ordered
+
+
+def unresolved_target_reason(raw: object) -> str:
+    """Name why one requested target was not accepted, past any shape repair.
+
+    A value that still opens like a container means the model asked for a list and the
+    text did not parse; anything else is a token that simply names no node of this task.
+    Those need different fixes, so they must not share one rejection value.
+    """
+    text = str(raw or '').strip()
+    if text[:1] in ('[', '{'):
+        return REJECT_TARGET_LIST_UNPARSED
+    return REJECT_TARGET_NOT_IN_TASK

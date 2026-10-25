@@ -9,12 +9,15 @@ from main.runtime.node_mailbox import (
     PARK_RUNNING,
     PARK_TERMINAL,
     PARK_WAITING,
+    REJECT_TARGET_LIST_UNPARSED,
+    REJECT_TARGET_NOT_IN_TASK,
     REJECT_TARGET_PAUSED_NEEDS_RESUME,
     REJECT_TARGET_TERMINAL,
     REJECT_UNKNOWN_TARGET_STATE,
     message_fingerprint,
     normalize_targets,
     plan_delivery,
+    unresolved_target_reason,
 )
 
 
@@ -87,3 +90,19 @@ class TestNormalizeTargets:
 
     def test_accepts_set(self):
         assert sorted(normalize_targets({'a', 'b'})) == ['a', 'b']
+
+
+class TestUnresolvedTargetReason:
+    """地址档与形状档必须分开：模型要改的东西不同。"""
+
+    def test_container_shaped_text_is_the_shape_arm(self):
+        assert unresolved_target_reason('["node:a"') == REJECT_TARGET_LIST_UNPARSED
+        assert unresolved_target_reason('{"a": 1}') == REJECT_TARGET_LIST_UNPARSED
+
+    def test_plain_token_naming_no_node_is_the_address_arm(self):
+        assert unresolved_target_reason('node:does-not-exist') == REJECT_TARGET_NOT_IN_TASK
+        assert unresolved_target_reason('千反田爱瑠') == REJECT_TARGET_NOT_IN_TASK
+
+    def test_empty_and_none_do_not_become_the_shape_arm(self):
+        assert unresolved_target_reason('') == REJECT_TARGET_NOT_IN_TASK
+        assert unresolved_target_reason(None) == REJECT_TARGET_NOT_IN_TASK

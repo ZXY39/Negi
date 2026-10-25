@@ -713,6 +713,15 @@ class CeoFrontDoorSupport:
     ) -> tuple[Any, str, str, str, str, float | None]:
         normalized_arguments = normalize_runtime_tool_arguments_dict(arguments)
         normalized_tool_call_id = str(tool_call_id or "").strip()
+        # 上游把数组/对象参数发成它自己那段 JSON 文本时，按工具的权威 schema 剥回容器；
+        # 校验与执行用同一份，剥掉的参数名按 call id 交给回合记录去数。
+        normalized_arguments, coerced_paths = tool.coerce_arguments(normalized_arguments)
+        if coerced_paths and normalized_tool_call_id:
+            coercions = runtime_context.get("tool_argument_coercions")
+            if not isinstance(coercions, dict):
+                coercions = {}
+                runtime_context["tool_argument_coercions"] = coercions
+            coercions[normalized_tool_call_id] = list(coerced_paths)
         try:
             errors = tool.validate_params(normalized_arguments)
         except Exception as exc:

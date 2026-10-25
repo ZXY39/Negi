@@ -129,10 +129,13 @@ from main.runtime.model_key_concurrency import ModelKeyConcurrencyController
 from main.runtime.model_load_balancer import ModelLoadBalancer, quota_bucket_key
 from main.runtime.model_route import build_model_route_plan
 from main.runtime.node_mailbox import (
+    REJECT_TARGET_LIST_UNPARSED,
+    TARGET_LIST_UNPARSED_HINT,
     message_fingerprint,
     normalize_targets,
     notification_is_held,
     plan_delivery,
+    unresolved_target_reason,
 )
 from main.runtime.node_message_kind import (
     KIND_ACCEPTANCE_VERDICT,
@@ -4844,9 +4847,17 @@ class MainRuntimeService:
 
             target = node_map.get(str(target_id or '').strip())
             if target is None:
-                results.append(
-                    {'target': requested_target, 'status': 'rejected', 'reason': 'target_missing'}
-                )
+                reason = unresolved_target_reason(requested_target)
+                rejection: dict[str, Any] = {
+                    'target': requested_target,
+                    'status': 'rejected',
+                    'reason': reason,
+                }
+                # 形状档只在这一档给：地址档已经有 `legal_targets` 说清谁能收，再叠一句
+                # 就是两条互相盖过的路径。
+                if reason == REJECT_TARGET_LIST_UNPARSED:
+                    rejection['hint'] = TARGET_LIST_UNPARSED_HINT
+                results.append(rejection)
                 continue
             relation, reject_reason = self._node_message_relation(
                 sender=sender,
@@ -8760,6 +8771,9 @@ class MainRuntimeService:
             )
         )
 
+        # 暂存这一道也要先剥壳：契约投递时校验的、和下一跳 `reuse_args` 真执行的，必须是
+        # 同一份形状，否则"校验放行的是文本、跑的是容器"这种分家又回来了。
+        arguments, _coerced_paths = instance.coerce_arguments(arguments)
         try:
             validation_errors = instance.validate_params(arguments)
         except Exception as exc:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from collections.abc import Mapping
 from typing import Any
 
@@ -246,6 +247,67 @@ def normalize_runtime_tool_arguments_dict(arguments: dict[str, Any] | None) -> d
     if isinstance(normalized, dict):
         return normalized
     return {}
+
+
+def schema_type_names(schema: Any) -> list[str]:
+    """Declared JSON Schema types of one parameter; union spellings are expanded."""
+
+    if not isinstance(schema, dict):
+        return []
+    declared = schema.get("type")
+    values = declared if isinstance(declared, list) else [declared]
+    names: list[str] = []
+    for item in values:
+        text = str(item or "").strip().lower()
+        if text and text not in names:
+            names.append(text)
+    return names
+
+
+def coerce_arguments_to_schema(
+    schema: Any,
+    arguments: Any,
+) -> tuple[dict[str, Any], list[str]]:
+    """Hand back container arguments that arrived as their own JSON **text**.
+
+    Some providers deliver an ``array``/``object`` parameter as the serialized text of
+    that value inside a string, so ``["node:a"]`` reaches the tool as one opaque token
+    and the tool's own contract rejects it — the model intended a list both times, only
+    the wire shape differed. Repair is bounded by the authoritative schema: only a
+    parameter declared ``array``/``object`` (or a union containing one) is considered,
+    only a strict ``json.loads`` whose result kind matches the declaration replaces it,
+    and only top-level parameters are visited. ``json_repair`` is deliberately not used
+    here: it can complete a truncated value into a well-formed container, which would
+    turn a transport fault into a silently wrong argument. Everything else passes
+    through untouched so the rejection lane can still name the real reason.
+    """
+
+    if not isinstance(arguments, dict):
+        return {}, []
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    repaired = dict(arguments)
+    if not isinstance(properties, dict):
+        return repaired, []
+    coerced: list[str] = []
+    for name, value in repaired.items():
+        spec = properties.get(str(name or "").strip())
+        if not isinstance(value, str) or not isinstance(spec, dict):
+            continue
+        types = schema_type_names(spec)
+        if "array" not in types and "object" not in types:
+            continue
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            continue
+        matched = ("array" in types and isinstance(parsed, list)) or (
+            "object" in types and isinstance(parsed, dict)
+        )
+        if not matched:
+            continue
+        repaired[name] = parsed
+        coerced.append(str(name))
+    return repaired, coerced
 
 
 def normalize_openai_tool_definition(tool: dict[str, Any]) -> dict[str, Any]:

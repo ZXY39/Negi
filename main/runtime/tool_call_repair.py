@@ -10,6 +10,7 @@ from typing import Any
 
 import json_repair
 
+from g3ku.json_schema_utils import schema_type_names
 from g3ku.providers.base import ToolCallRequest
 
 XML_REPAIR_ATTEMPT_LIMIT = 3
@@ -301,35 +302,40 @@ def _extract_invoke_arguments(invoke_body: str, *, tool: Any) -> tuple[dict[str,
 def _coerce_xml_parameter_value(raw_value: str, *, schema: dict[str, Any] | None) -> tuple[Any, str]:
     if not isinstance(schema, dict):
         return raw_value, ''
-    schema_type = str(schema.get('type') or '').strip().lower()
-    if schema_type == 'string' or not schema_type:
+    types = schema_type_names(schema)
+    # 联合声明只取"恰好一种类型"的那种写法进标量档。以前这里读的是 `str(schema['type'])`，
+    # 于是 `['string','array']` 变成 "['string', 'array']"，哪个分支都不匹配，原值被原样
+    # 交给工具——数组参数的文本形态正是这样穿过去的。
+    declared = types[0] if len(types) == 1 else ''
+    if not types or declared == 'string':
         return raw_value, ''
     stripped = str(raw_value or '').strip()
-    if schema_type == 'integer':
+    if 'array' in types or 'object' in types:
+        parsed, ok = _load_json_value(stripped)
+        matched = ('array' in types and isinstance(parsed, list)) or (
+            'object' in types and isinstance(parsed, dict)
+        )
+        if ok and matched:
+            return parsed, ''
+        if 'string' in types:
+            return raw_value, ''
+        expected = 'JSON array' if 'array' in types else 'JSON object'
+        return None, f'must be a valid {expected}'
+    if declared == 'integer':
         if not stripped or not _INTEGER_PATTERN.fullmatch(stripped):
             return None, 'must be an integer'
         return int(stripped), ''
-    if schema_type == 'number':
+    if declared == 'number':
         if not stripped or not _NUMBER_PATTERN.fullmatch(stripped):
             return None, 'must be a number'
         return (int(stripped) if _INTEGER_PATTERN.fullmatch(stripped) else float(stripped)), ''
-    if schema_type == 'boolean':
+    if declared == 'boolean':
         lowered = stripped.lower()
         if lowered == 'true':
             return True, ''
         if lowered == 'false':
             return False, ''
         return None, 'must be true or false'
-    if schema_type in {'array', 'object'}:
-        parsed, ok = _load_json_value(stripped)
-        if not ok:
-            expected = 'JSON array' if schema_type == 'array' else 'JSON object'
-            return None, f'must be a valid {expected}'
-        if schema_type == 'array' and not isinstance(parsed, list):
-            return None, 'must be a JSON array'
-        if schema_type == 'object' and not isinstance(parsed, dict):
-            return None, 'must be a JSON object'
-        return parsed, ''
     return raw_value, ''
 
 

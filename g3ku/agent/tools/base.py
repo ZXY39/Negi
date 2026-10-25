@@ -3,6 +3,7 @@
 from abc import ABC, abstractmethod
 from typing import Any
 
+from g3ku.json_schema_utils import coerce_arguments_to_schema
 from g3ku.runtime.tool_visibility import NON_HYDRATABLE_TOOL_NAMES
 
 # 模型可见面上的入参复用字段。它只是入参传输优化，不构成授权：执行前照旧重跑 RBAC /
@@ -152,6 +153,16 @@ class Tool(ABC):
             Tool result to send back into the agent loop.
         """
         pass
+
+    def coerce_arguments(self, params: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+        """Repair arguments against the authoritative schema before validation.
+
+        Returns the arguments to execute with plus the parameter names that were
+        rewritten, so the repair is countable instead of silent. The caller must use
+        the returned dict for validation *and* execution — validating one shape and
+        running another is how a repaired argument hides in the ledger.
+        """
+        return coerce_arguments_to_schema(self.parameters, params)
 
     def validate_params(self, params: dict[str, Any]) -> list[str]:
         """Validate tool parameters against JSON schema. Returns error list (empty if valid)."""

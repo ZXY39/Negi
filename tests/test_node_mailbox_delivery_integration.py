@@ -202,3 +202,59 @@ class TestDelivery:
         assert result['status'] == 'delivered'
         assert str(result['wake']).startswith('wake_error:')
         assert len(service.store.list_task_node_notifications(TASK, CHILD)) == 1
+
+
+class TestAddressingRejectionArms:
+    """寻址层必须把"改地址"和"改形状"分开报——实盘那 24 条全靠这一格指认原因。"""
+
+    @pytest.mark.asyncio
+    async def test_token_naming_no_node_is_the_address_arm(self, tmp_path, monkeypatch):
+        service = _service(tmp_path)
+        _seed(service)
+        _stub_wake(monkeypatch, service)
+
+        result = await service._deliver_node_message_from_node(
+            task_id=TASK,
+            sender_node_id=CHILD,
+            sender_is_root=False,
+            to='node:nobody-here',
+            content='hi',
+        )
+        rejection = result['results'][0]
+        assert rejection['status'] == 'rejected'
+        assert rejection['reason'] == 'target_not_in_task'
+        assert 'hint' not in rejection
+        assert ROOT in result['legal_targets']
+
+    @pytest.mark.asyncio
+    async def test_container_text_that_did_not_parse_is_the_shape_arm(self, tmp_path, monkeypatch):
+        service = _service(tmp_path)
+        _seed(service)
+        _stub_wake(monkeypatch, service)
+
+        result = await service._deliver_node_message_from_node(
+            task_id=TASK,
+            sender_node_id=CHILD,
+            sender_is_root=False,
+            to='["node:root"',
+            content='hi',
+        )
+        rejection = result['results'][0]
+        assert rejection['reason'] == 'target_list_unparsed'
+        assert 'JSON list of node ids' in rejection['hint']
+
+    @pytest.mark.asyncio
+    async def test_repaired_list_shape_delivers_to_every_target(self, tmp_path, monkeypatch):
+        service = _service(tmp_path)
+        _seed(service)
+        _stub_wake(monkeypatch, service)
+
+        result = await service._deliver_node_message_from_node(
+            task_id=TASK,
+            sender_node_id=ROOT,
+            sender_is_root=True,
+            to=[CHILD],
+            content='hi',
+        )
+        assert result['ok'] is True
+        assert result['results'][0]['status'] == 'delivered'

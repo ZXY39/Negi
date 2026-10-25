@@ -25,6 +25,7 @@ from g3ku.providers.base import provider_body_output_cap, provider_body_reasonin
 from g3ku.providers.fallback import MODEL_RETRY_LIVE_STATES, MODEL_RETRY_STATE_WAITING_UPSTREAM
 from g3ku.runtime.context.summarizer import estimate_tokens
 from g3ku.runtime.tool_impulse import (
+    ARGUMENT_COERCION_FIELD,
     CONTRACT_DELIVERY_FIELD,
     REUSE_FLAG_IGNORED_FIELD,
     STAGED_REPLAY_FIELD,
@@ -887,6 +888,12 @@ class TaskLogService:
 
                 arguments = self._normalize_tool_call_arguments(getattr(call, 'arguments', {}))
                 arguments_text = json.dumps(arguments, ensure_ascii=False, indent=2) if arguments else ''
+                # 剥回容器的只是参数名；`arguments_text` 保留模型那条原文，两者不互相覆盖。
+                coerced_names = [
+                    str(item)
+                    for item in list(live_state.get(ARGUMENT_COERCION_FIELD) or [])
+                    if str(item or '').strip()
+                ]
                 content = tool_message.get('content')
                 preview_text, output_ref = self._tool_result_summary_and_ref(content)
                 record = TaskProjectionToolResultRecord(
@@ -934,6 +941,9 @@ class TaskLogService:
                             if str(live_state.get(CONTRACT_DELIVERY_FIELD) or '').strip()
                             else {}
                         ),
+                        # 入参被剥回容器的那些参数名（上游把数组/对象发成了它自己的 JSON 文本）。
+                        # 没剥过就不写这个键，和上面几格同一口径：空串不是一档状态。
+                        **({ARGUMENT_COERCION_FIELD: coerced_names} if coerced_names else {}),
                     },
                 )
                 self._store.upsert_task_node_tool_result(record)

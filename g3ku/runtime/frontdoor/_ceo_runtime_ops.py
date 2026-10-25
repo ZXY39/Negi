@@ -94,6 +94,7 @@ from g3ku.runtime.tool_history import (
     truncate_group_head_tail,
 )
 from g3ku.runtime.tool_impulse import (
+    ARGUMENT_COERCION_FIELD,
     CONTRACT_DELIVERY_FIELD,
     EXECUTION_PATH_CORRECTED,
     EXECUTION_PATH_ILLEGAL_REUSE,
@@ -8611,6 +8612,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     fields[STAGED_REPLAY_FIELD] = replay
                 if (runtime_context.get("tool_reuse_flag_ignored") or {}).get(call_key):
                     fields[REUSE_FLAG_IGNORED_FIELD] = True
+                coerced = [
+                    str(item)
+                    for item in list((runtime_context.get("tool_argument_coercions") or {}).get(call_key) or [])
+                    if str(item or "").strip()
+                ]
+                if coerced:
+                    fields[ARGUMENT_COERCION_FIELD] = coerced
                 return fields
             duplicate_load_error = await self._frontdoor_load_tool_context_duplicate_error(
                 payload=payload,

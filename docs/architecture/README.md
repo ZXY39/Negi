@@ -88,6 +88,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - Channel/bridge reply emits `## Runtime Tool Contract` or other internal context text -> `runtime-overview.md`「frontdoor 与任务运行时的关系」(回显守卫) + `external-agent-api.md` (outbound sanitize contract)
 - 工具上一轮还直接执行、这一轮调用它只交回契约不产出结果，名字却仍留在 `tools[]` 上（既不在 `denied_tools`、也不在 `undeclared_candidates`）→ 它的 toolskill 契约块被 `token_compression` 移出了上下文，按"契约不在 ⇒ 那一跳先交回契约"处理，下一跳起照旧可调；判据与唯一载体见 `tool-hydration-and-callable-chain.md`「契约在场与 callable」，读数是 `tool_contract_presence`
 - 一批里 `reuse_args=true` 只跑出比暂存份数少的结果、或整批报"没有可复用的入参" → 先确认这是**上一跳**落的条目（严格一跳），再比该工具当轮在场指纹与条目里的指纹是否同修订；份数与执行数都记在工具行的 `execution_path`/`items` 上，机制见 `tool-hydration-and-callable-chain.md`「入参暂存与 `reuse_args` 批量执行」
+- 某条 `send_message` 大面积拒收、或某个数组参数在某颗上游上总是"对不到节点" → 先分档位（`target_not_in_task` 改地址 / `target_list_unparsed` 改形状），再看工具行的 `arguments_coerced` 数这跳有没有被读侧归一剥过；机制见 `tool-hydration-and-callable-chain.md`「参数错误与状态分类」与 `main-task-runtime.md`「信箱投递、重激活与上行传播」
 - 第三方桥接应用接入（/api/v1 鉴权、外部会话、事件流、主动推送不到达）→ `external-agent-api.md`「常见排障入口」
 - 外部 agent 看不见全部会话、或要把某个 token 的可见范围收回去 → `external-agent-api.md`「启用与鉴权」的跨桥作用域一档
 - 会话转录/Web UI 有回复但渠道端（QQ 等）收不到、回合跑坏了渠道端静默、渠道「能收不能发」、重启后旧提醒补投或重复 → `external-agent-api.md`「回合契约」终态不变量 +「出站路由（主动推送）」+「持久 outbox」+「内置官方 QQ 适配器」

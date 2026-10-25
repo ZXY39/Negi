@@ -85,6 +85,9 @@ class ToolRegistry:
             normalized = normalize_runtime_tool_arguments_dict(
                 {k: v for k, v in params.items() if v is not None}
             )
+            # 同一条读侧归一：数组/对象参数到达成它自己的 JSON 文本时按 schema 剥回容器，
+            # 校验与执行都用剥完的这份。
+            normalized, _coerced_paths = tool.coerce_arguments(normalized)
             try:
                 errors = tool.validate_params(normalized)
             except Exception as exc:
