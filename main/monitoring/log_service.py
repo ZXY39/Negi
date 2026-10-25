@@ -2155,6 +2155,11 @@ class TaskLogService:
             # "这一跳按哪把尺子压缩"的取证面。
             'ruler_source': str(payload.get('ruler_source') or '').strip(),
             'comparable_to_previous_request': bool(payload.get('comparable_to_previous_request')),
+            # 发送前自算体积 + 尺子刻度：白名单是串联的第二道，这里漏了上面就只剩空值。
+            'final_request_tokens': int(payload.get('final_request_tokens') or 0),
+            'effective_trigger_tokens': int(payload.get('effective_trigger_tokens') or 0),
+            'context_window_tokens': int(payload.get('context_window_tokens') or 0),
+            'would_trigger_token_compression': bool(payload.get('would_trigger_token_compression')),
             'notice_preservation': dict(notice_preservation) if isinstance(notice_preservation, dict) else {},
         }
 

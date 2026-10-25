@@ -209,6 +209,7 @@ Heartbeat / cron 不在主 CEO/frontdoor 路径上使用单独的短 `ceo_heartb
 - 判别：节点请求 artifact（`.g3ku/main-runtime/artifacts/task_<id>/artifact_*.json`）带 `actual_request_hash`。取失败那次与同节点之后成功那次对比——**若 hash 完全相同（payload 逐字节一致）却一次 400、一次成功，则是 provider 侧瞬时错误，不是 payload bug**，不要去改消息构造。实测某节点 call15/call16（400）与 call17（成功）`actual_request_hash` 同为 `5d70e9a396337067`，且两次 400 正落在 429 配额风暴时段内。
 - 推论：瞬时 400 被当成终态节点错误（`pause_reason=error`）会喂给心跳重投循环。让瞬时 provider 错误（含网关降级期的伪 400）走重试而非终态，属于错误分类/熔断范畴，不在取证层解决。
 - 注意：`provider_request_body` 在这些 artifact 里为空 `{}`，落盘的是内部 `request_messages`（非 wire payload）；内部消息带 `_node_runtime_tool_contract_payload`、tool 消息带 `started_at/finished_at/elapsed_seconds/ephemeral` 等非标准字段，`_sanitize_empty_content` 原样透传给 provider——同 hash 既失败又成功证明 provider 平时容忍它们，不要据此臆断是这些字段致错。
+- 同一类的第三种形状是**这颗成员实际塞不下**：网关对超窗请求返回通用 400（如 `inference request is invalid`），body 里不带任何 token 数，而记录声明的窗口比它真实可收的上限大，于是发送压缩与准入都不收小这一发。`main/runtime/model_size_span.py` 按成员记两臂同尺的读数——它真正答过的最大发送前自算体积、以及它被拒时的最小自算体积——只有"先收过更小的一发、随后被更大的一发拒"才成立区间，并按 `model_size_span:` 锚点落一行节点错误日志与一条 worker WARN，文案同时带上声明窗口与当轮触发线，口径是「运行时不改配置」：只把数字交给操作员，不改路由、不否决准入、不写记录。判据用「同成员更小的一发收过」当前置条件是有意的：400 同样覆盖真实畸形，缺这条证据就报区间会把这条锚点训成噪声。区间里两臂都取发送前自算那一格（`final_request_tokens`），不与 provider 回执混用。
 
 ### 3.14 用户消息时间装饰破坏前缀稳定或相等性去重
 
@@ -423,6 +424,7 @@ execution / acceptance 节点在真正发 provider 请求前也走最后一层 n
 | `actual_request_message_count` | 消息数是否骤降 |
 | `request_seed_source` / `request_seed_message_count` | 第一跳是否采用 scaffold、回退原因（`fallback_*`）或同轮链状态 |
 | `compaction_applied` / `compaction_mode` / `projection_kind` | 这一跳是否被压缩重写、发出的是不是投影（`token_compacted`）|
+| `final_request_tokens` / `effective_trigger_tokens` / `context_window_tokens` / `would_trigger_token_compression` | 这一发的**发送前自算**体积、当轮触发线、当轮尺子读数，以及它是否越过触发线。逐跳行原本只留 provider 回执那份，于是"被拒的一臂"没有可比数字：provider 回执与自算估算对同一正文差几个百分点，拿回执的最大接受去和估算的最小拒绝相减会得出**反向**区间（实测按回执的最大接受低于按估算的最小拒绝）。两臂同尺才谈得上比较，这四格就是为此在场；它们不挂在 `applied` 门后，没压的跳也要能回答"这一发当时多大" |
 | `helper_usage` | 摘要 helper 那次调用的用量（不计入节点与任务累计，账外成本只在这里可见）|
 | `token_preflight_diagnostics.ruler_source` | 这把尺子从哪儿来：`group:<key>`＝按准入预测的那一跳目标组取最小成员窗口，`chain_head:<key>`＝没有组预测（direct 链位、前门、记忆车道）时按这一发落到的那颗（链首）自己的窗口 |
 | `token_preflight_diagnostics.error` | 预检为什么拒发这一跳（压缩助手空包 / 无可压缩历史且预估超过本轮发送窗口）|

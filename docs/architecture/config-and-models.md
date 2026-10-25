@@ -496,7 +496,7 @@ If an operator reports frontdoor send failures after a model or chain change, ch
 2. The saved `llm-config` record under `.g3ku/llm-config/records/*.json` kept the field during migration.
 3. The role chain only references models that have a valid window configured.
 4. The actual provider request estimate crossed the model's window.
-5. 声明值大于真实上限时**没有任何错误信号**：网关超窗不报错，只把 completion 预算裁成 `真实窗口 − 输入`，所以回包表现为 `finish_reason=length` 且 `output_tokens < sent_max_tokens`。核对时用节点自己的观测下界：`max_observed_request_span_tokens(task_id, node_id)` 取该节点台账里 `有效输入 + 输出` 的最大实测和（走 `task_model_calls` 的 task_id 索引，不全扫）。它是"至少装下过多少"的下界而不是真值上界；同一份声明值在发送侧（`resolve_send_model_context_window_info` 读记录 `parameters.context_window_tokens`）与派单过滤（`model_route` / 负载均衡成员）同源，改配置前先确认改的是记录那份——`models.catalog[].contextWindowTokens` 只是配置面副本。窗口虚高还会把两道闸门一起顶到墙外：发送压缩触发线（`0.80 × 窗口 × 0.95`）与节点分块压缩的进入条件都比的是这个数。
+5. 声明值大于真实上限时**没有任何错误信号**：网关超窗不报错，只把 completion 预算裁成 `真实窗口 − 输入`，所以回包表现为 `finish_reason=length` 且 `output_tokens < sent_max_tokens`。核对时用节点自己的观测下界：`max_observed_request_span_tokens(task_id, node_id)` 取该节点台账里 `有效输入 + 输出` 的最大实测和（走 `task_model_calls` 的 task_id 索引，不全扫）。它是"至少装下过多少"的下界而不是真值上界；同一份声明值在发送侧（`resolve_send_model_context_window_info` 读记录 `parameters.context_window_tokens`）与派单过滤（`model_route` / 负载均衡成员）同源，改配置前先确认改的是记录那份——`models.catalog[].contextWindowTokens` 只是配置面副本。窗口虚高还会把两道闸门一起顶到墙外：发送压缩触发线（`0.80 × 窗口 × 0.95`）与节点分块压缩的进入条件都比的是这个数。除这条节点下界外，运行时还按**成员**收集同一把发送前尺子上的两臂读数（该成员答过的最大 vs 它被拒时的最小），成立时把区间连同声明窗口与当轮触发线一起落成一行可数报告；它只报数，不改路由、不否决准入、不写这份记录，合同与判据在 `context-and-cache-troubleshooting.md`「节点 400 不一定是 payload 畸形」那条坑里。
 
 Behavior once the estimate crosses the window: 详见 `runtime-overview.md`「Frontdoor Context Compression」.
 

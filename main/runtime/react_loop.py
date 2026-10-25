@@ -139,6 +139,7 @@ from main.models import (
 from main.protocol import now_iso
 from main.runtime import chat_backend as runtime_chat_backend
 from main.runtime import mid_insert as _mid_insert
+from main.runtime import model_size_span
 from main.runtime import send_token_preflight as runtime_send_token_preflight
 from main.runtime.append_notice_context import (
     APPEND_NOTICE_CONTEXT_KEY,
@@ -1392,6 +1393,13 @@ class ReActToolLoop:
                 provider_request_body=getattr(response, 'provider_request_body', None),
                 stream_incomplete=bool(getattr(response, 'stream_incomplete', False)),
                 send_diagnostics=self._node_send_compaction_diagnostics(token_preflight_diagnostics),
+            )
+            self._note_model_size_span(
+                response=response,
+                diagnostics=token_preflight_diagnostics,
+                task_id=task.task_id,
+                node_id=node.node_id,
+                node_title=str(node.goal or ''),
             )
             if response_tool_calls:
                 if xml_repair_attempt_count > 0:
@@ -6967,6 +6975,71 @@ class ReActToolLoop:
         return records or None
 
     @staticmethod
+    def _served_attempt_model_key(response: Any) -> str:
+        """这一发实际落到哪一颗成员——取最后一次尝试的 model_key。
+
+        区间是按成员算的：拿准入侧那颗会在组内换人时报到错的成员上。
+        """
+        for attempt in reversed(list(getattr(response, 'attempts', None) or [])):
+            if isinstance(attempt, dict):
+                key = str(attempt.get('model_key') or '').strip()
+            else:
+                key = str(getattr(attempt, 'model_key', '') or '').strip()
+            if key:
+                return key
+        return ''
+
+    def _note_model_size_span(
+        self,
+        *,
+        response: Any,
+        diagnostics: dict[str, Any] | None,
+        task_id: str,
+        node_id: str,
+        node_title: str,
+    ) -> None:
+        """把"这颗成员实际收得下多大"算出来并报出去——不改路由，也不改配置。
+
+        两臂都取发送前自算那把尺子：被拒的那一发拿不到 provider 回执，用 usage 去和估算比会
+        得出反向区间（实盘 2026-10-25 一场 400 风暴里，按 usage 的最大接受是 261,853，按估算的
+        最小拒绝却是 251,793）。只在区间第一次成立、或它变窄的那一拍落一行错误日志：逐跳都写会
+        把这条自己淹成噪声。
+        """
+        payload = dict(diagnostics or {})
+        tokens = int(payload.get('final_request_tokens') or 0)
+        if tokens <= 0:
+            return
+        model_key = (
+            self._served_attempt_model_key(response) or str(payload.get('model_key') or '').strip()
+        )
+        if not model_key:
+            return
+        accepted = str(getattr(response, 'finish_reason', '') or '').strip().lower() != 'error'
+        state = model_size_span.note_send_size(
+            model_key,
+            tokens=tokens,
+            accepted=accepted,
+            declared_window_tokens=int(payload.get('context_window_tokens') or 0),
+            compression_trigger_tokens=int(payload.get('effective_trigger_tokens') or 0),
+        )
+        if not state.get('known') or not state.get('changed'):
+            return
+        state['model_key'] = model_key
+        text = model_size_span.describe_span(state)
+        if not text:
+            return
+        logger.warning(text)
+        try:
+            self._log_service.append_task_error_log(
+                task_id,
+                node_id,
+                error_text=text,
+                node_title=node_title,
+            )
+        except Exception:
+            pass
+
+    @staticmethod
     def _node_send_compaction_diagnostics(diagnostics: dict[str, Any] | None) -> dict[str, Any]:
         """把压缩跳的事实从帧诊断里挑出来随发送面留档。
 
@@ -6999,6 +7072,14 @@ class ReActToolLoop:
             # 逐跳明细里就只剩空串。
             'ruler_source': str(payload.get('ruler_source') or '').strip(),
             'comparable_to_previous_request': bool(payload.get('comparable_to_previous_request')),
+            # 发送前自算的体积与那把尺子的两个刻度。逐跳行原来只留 provider 回执那一份，
+            # 于是"收下的那一臂"读 usage、"被拒的那一臂"只剩估算——两把尺子相减会得出反向的
+            # 区间（实盘 2026-10-25：按 usage 的最大接受 261,853 对按估算的最小拒绝 251,793）。
+            # 这两格在场才谈得上"同一把尺子量两臂"。
+            'final_request_tokens': int(payload.get('final_request_tokens') or 0),
+            'effective_trigger_tokens': int(payload.get('effective_trigger_tokens') or 0),
+            'context_window_tokens': int(payload.get('context_window_tokens') or 0),
+            'would_trigger_token_compression': bool(payload.get('would_trigger_token_compression')),
             'notice_preservation': dict(payload.get('notice_preservation') or {}),
         }
 
