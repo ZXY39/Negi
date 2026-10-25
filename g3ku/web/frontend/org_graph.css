@@ -16602,9 +16602,9 @@ textarea {
     overflow-y: auto;
 }
 
-/* 设置弹窗的三行按「标签在左、控件在右」排成一条列表：行高一致，行间一条发丝线，
-   右侧控件（勾选框 / 下拉框 / 状态文字）对齐同一条右边界。其余弹窗也用
-   .project-settings-body，所以这里只锚在设置弹窗上。 */
+/* 设置弹窗的三行按「标签在左、控件在右」排：行高一致，右侧控件（勾选框 / 输入框 /
+   状态文字）对齐同一条右边界。其余弹窗也用 .project-settings-body，所以这里只锚在
+   设置弹窗上。 */
 #project-settings-dialog .project-settings-body {
     gap: 0;
 }
@@ -16621,16 +16621,12 @@ textarea {
     padding: var(--ui-space-2) 0;
 }
 
-#project-settings-dialog .project-settings-actions + .project-settings-actions {
-    border-top: 1px solid var(--ui-border);
-}
-
 #project-settings-dialog .project-settings-actions > .ui-checkbox-row {
     margin-left: auto;
 }
 
-/* 字号档位：选项写进 --reading-font-scale，只乘阅读面（见 :root 里的变量注释）。
-   下拉框与同一行的按钮同高同圆角，箭头换成 SVG，不再用各系统长得不一样的原生箭头。 */
+/* 字号档位：拖动条写 --reading-font-scale，只乘阅读面（见 :root 里的变量注释）。
+   轨道 4px，已拖过的一段用品牌色填——填充位置由 JS 按当前档位写成 --font-range-pos。 */
 #project-settings-dialog .project-settings-font-row {
     flex: 1 1 auto;
     display: flex;
@@ -16641,37 +16637,112 @@ textarea {
     color: var(--ui-text);
 }
 
-#project-settings-dialog .project-settings-font-select {
+#project-settings-dialog .project-settings-font-range {
     appearance: none;
     -webkit-appearance: none;
     -moz-appearance: none;
-    margin-left: auto;
-    width: 92px;
+    flex: 1 1 auto;
+    min-width: 120px;
+    height: 36px;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+    cursor: pointer;
+}
+
+#project-settings-dialog .project-settings-font-range::-webkit-slider-runnable-track {
+    height: 4px;
+    border-radius: var(--ui-radius-pill);
+    background: linear-gradient(to right,
+        var(--ui-brand) 0 var(--font-range-pos, 50%),
+        var(--ui-bg-subtle) var(--font-range-pos, 50%) 100%);
+}
+
+#project-settings-dialog .project-settings-font-range::-webkit-slider-thumb {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 16px;
+    height: 16px;
+    margin-top: -6px;
+    border: 1px solid var(--ui-brand);
+    border-radius: 50%;
+    background: var(--ui-bg-surface);
+    box-shadow: var(--ui-shadow-sm);
+    transition: border-color 160ms var(--ui-motion-ease), box-shadow 160ms var(--ui-motion-ease);
+}
+
+#project-settings-dialog .project-settings-font-range::-moz-range-track {
+    height: 4px;
+    border-radius: var(--ui-radius-pill);
+    background: var(--ui-bg-subtle);
+}
+
+#project-settings-dialog .project-settings-font-range::-moz-range-progress {
+    height: 4px;
+    border-radius: var(--ui-radius-pill);
+    background: var(--ui-brand);
+}
+
+#project-settings-dialog .project-settings-font-range::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    border: 1px solid var(--ui-brand);
+    border-radius: 50%;
+    background: var(--ui-bg-surface);
+    box-shadow: var(--ui-shadow-sm);
+}
+
+#project-settings-dialog .project-settings-font-range:focus-visible::-webkit-slider-thumb {
+    border-color: var(--ui-brand);
+    box-shadow: 0 0 0 3px var(--ui-brand-soft);
+}
+
+#project-settings-dialog .project-settings-font-range:focus-visible::-moz-range-thumb {
+    border-color: var(--ui-brand);
+    box-shadow: 0 0 0 3px var(--ui-brand-soft);
+}
+
+/* 档位数字与拖动条是同一个值的两个入口：数字框吃满右侧那格，百分号画在框内右端。 */
+#project-settings-dialog .project-settings-font-value-shell {
+    position: relative;
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+}
+
+#project-settings-dialog .project-settings-font-value {
+    width: 78px;
     height: 36px;
     min-height: 36px;
-    padding: 0 30px 0 var(--ui-space-3);
+    padding: 0 22px 0 var(--ui-space-3);
     border: 1px solid var(--ui-border);
     border-radius: var(--ui-radius-control);
-    background-color: var(--ui-bg-input);
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='M4 6L8 10L12 6' stroke='%2394A3B8' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-    background-position: right 10px center;
-    background-repeat: no-repeat;
-    background-size: 16px 16px;
+    background: var(--ui-bg-input);
     color: var(--ui-text);
-    color-scheme: var(--ui-color-scheme);
     font-family: inherit;
     font-size: 13px;
     font-weight: 600;
     font-variant-numeric: tabular-nums;
-    cursor: pointer;
+    text-align: right;
     transition: border-color 160ms var(--ui-motion-ease), box-shadow 160ms var(--ui-motion-ease);
 }
 
-#project-settings-dialog .project-settings-font-select:hover {
+#project-settings-dialog .project-settings-font-value-unit {
+    position: absolute;
+    right: 11px;
+    color: var(--ui-text-muted);
+    font-size: 12px;
+    font-weight: 600;
+    pointer-events: none;
+}
+
+#project-settings-dialog .project-settings-font-value:hover {
     border-color: var(--ui-border-strong);
 }
 
-#project-settings-dialog .project-settings-font-select:focus-visible {
+#project-settings-dialog .project-settings-font-value:focus-visible {
     outline: none;
     border-color: var(--ui-brand);
     box-shadow: 0 0 0 3px var(--ui-brand-soft);

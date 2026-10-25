@@ -739,6 +739,7 @@ const U = {
     projectSettingsOpenPassword: document.getElementById("project-settings-open-password-btn"),
     projectSettingsOpenBundle: document.getElementById("project-settings-open-bundle-btn"),
     readingScale: document.getElementById("project-settings-reading-scale"),
+    readingScaleValue: document.getElementById("project-settings-reading-scale-value"),
     updateNavDot: document.getElementById("update-nav-dot"),
     projectSettingsUpdateText: document.getElementById("project-settings-update-text"),
     projectSettingsCheckUpdate: document.getElementById("project-settings-check-update-btn"),
@@ -9998,29 +9999,74 @@ function initializeTheme() {
 
 const READING_SCALE_KEY = "g3ku.ui.reading-scale.v1";
 const READING_SCALE_DEFAULT = 1.1;
-const READING_SCALE_MIN = 0.9;
-const READING_SCALE_MAX = 1.3;
-const READING_SCALE_STEP = 0.05;
+// 拖动条两端 10% / 300%，100% 落在轨道正中：左半 10→100、右半 100→300 各自线性，
+// 位置与倍数因此是分段线性关系，同一段斜率。输入框不受这两端限制，任意正数都收。
+const READING_SCALE_LOW_END = 0.1;
+const READING_SCALE_HIGH_END = 3;
+const READING_SCALE_NEUTRAL = 1;
+const READING_SCALE_POS_CENTER = 50;
 
-// 字号档位只写 --reading-font-scale：CSS 里乘在正文/回复/代码块/笔记正文的字号上，
+// 字号倍数只写 --reading-font-scale：CSS 里乘在正文/回复/代码块/笔记正文的字号上，
 // 控件字号与间距不跟，所以它不同于窗口缩放（桌面壳的 ZoomFactor）。
 function normalizeReadingScale(raw) {
     const text = String(raw ?? "").trim();
-    // 空串要当"没设过"：下拉框没有匹配项时读出来就是空串，而 Number("") 是 0。
+    // 空串要当"没设过"：清空的输入框读出来就是空串，而 Number("") 是 0。
     if (!text) return READING_SCALE_DEFAULT;
     const value = Number(text);
-    if (!Number.isFinite(value)) return READING_SCALE_DEFAULT;
-    const clamped = Math.min(READING_SCALE_MAX, Math.max(READING_SCALE_MIN, value));
-    const snapped = Math.round(clamped / READING_SCALE_STEP) * READING_SCALE_STEP;
-    return Math.round(snapped * 100) / 100;
+    if (!Number.isFinite(value) || value <= 0) return READING_SCALE_DEFAULT;
+    return Math.round(value * 100) / 100;
+}
+
+// 输入框里那格是百分数（110 = 1.1 倍）；非正数或空一律算没填，交回调用方保留原值。
+function parseReadingScalePercent(raw) {
+    const text = String(raw ?? "").trim();
+    if (!text) return null;
+    const percent = Number(text);
+    if (!Number.isFinite(percent) || percent <= 0) return null;
+    return percent / 100;
+}
+
+function readingScaleToPosition(raw) {
+    const value = Math.min(READING_SCALE_HIGH_END, Math.max(READING_SCALE_LOW_END, Number(raw)));
+    return value <= READING_SCALE_NEUTRAL
+        ? ((value - READING_SCALE_LOW_END) / (READING_SCALE_NEUTRAL - READING_SCALE_LOW_END)) * READING_SCALE_POS_CENTER
+        : READING_SCALE_POS_CENTER
+            + ((value - READING_SCALE_NEUTRAL) / (READING_SCALE_HIGH_END - READING_SCALE_NEUTRAL)) * READING_SCALE_POS_CENTER;
+}
+
+function positionToReadingScale(raw) {
+    const pos = Number(raw);
+    if (!Number.isFinite(pos)) return READING_SCALE_DEFAULT;
+    return pos <= READING_SCALE_POS_CENTER
+        ? READING_SCALE_LOW_END + (pos / READING_SCALE_POS_CENTER) * (READING_SCALE_NEUTRAL - READING_SCALE_LOW_END)
+        : READING_SCALE_NEUTRAL
+            + ((pos - READING_SCALE_POS_CENTER) / READING_SCALE_POS_CENTER) * (READING_SCALE_HIGH_END - READING_SCALE_NEUTRAL);
+}
+
+let currentReadingScale = READING_SCALE_DEFAULT;
+
+function paintReadingScale(scale, pos) {
+    currentReadingScale = scale;
+    if (document.documentElement?.style?.setProperty) {
+        document.documentElement.style.setProperty("--reading-font-scale", String(scale));
+    }
+    if (U.readingScaleValue) U.readingScaleValue.value = String(Math.round(scale * 100));
+    // 已拖过的那段轨道靠 --font-range-pos 上色：CSS 里画不出"到指针为止"的填充。
+    if (U.readingScale) U.readingScale.style?.setProperty?.("--font-range-pos", `${pos}%`);
+}
+
+function renderReadingScale(scale) {
+    const pos = Math.round(readingScaleToPosition(scale) * 100) / 100;
+    if (U.readingScale) U.readingScale.value = String(pos);
+    // 填充跟着指针实际落到的那一格走：滑条按 step 会把值收进自己的网格，
+    // 读回来的才是指针真正停下的位置，按它上色才不会差出半格。
+    const shown = U.readingScale ? Number(U.readingScale.value) : pos;
+    paintReadingScale(scale, Number.isFinite(shown) ? shown : pos);
 }
 
 function applyReadingScale(raw) {
     const scale = normalizeReadingScale(raw);
-    if (document.documentElement?.style?.setProperty) {
-        document.documentElement.style.setProperty("--reading-font-scale", String(scale));
-    }
-    if (U.readingScale) U.readingScale.value = String(scale);
+    renderReadingScale(scale);
     // 字号档位改了，秒数的墨迹中线跟着变，圆点的抬升量要重量。
     if (typeof syncCeoFlowDotGeometry === "function") syncCeoFlowDotGeometry();
     return scale;
@@ -10032,8 +10078,24 @@ function initializeReadingScale() {
 }
 
 function bindReadingScale() {
+    // 拖动途中只重画数值与填充，不把指针位置回填：档位按 1% 取整，回填会和指针互相拉扯，
+    // 键盘按一格就被弹回原地。松手（change）才 snap 到取整后的格子并落盘。
+    U.readingScale?.addEventListener("input", () => {
+        const pos = Number(U.readingScale.value);
+        paintReadingScale(normalizeReadingScale(positionToReadingScale(pos)), pos);
+    });
     U.readingScale?.addEventListener("change", () => {
-        const scale = applyReadingScale(U.readingScale.value);
+        const scale = applyReadingScale(positionToReadingScale(U.readingScale.value));
+        writeStoredUiPreference(READING_SCALE_KEY, String(scale));
+    });
+    U.readingScaleValue?.addEventListener("change", () => {
+        const typed = parseReadingScalePercent(U.readingScaleValue.value);
+        if (typed === null) {
+            // 非正数与空串不改档位，也不落盘：把那格刷回当前值，别留下一个与实际不符的数字。
+            renderReadingScale(currentReadingScale);
+            return;
+        }
+        const scale = applyReadingScale(typed);
         writeStoredUiPreference(READING_SCALE_KEY, String(scale));
     });
 }
