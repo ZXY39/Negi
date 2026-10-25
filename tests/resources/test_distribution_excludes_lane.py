@@ -322,9 +322,10 @@ def test_git_lane_stages_the_trimmed_tree(tmp_path: Path) -> None:
         pytest.skip("this lane needs both bash and git on PATH")
     if sys.platform == "win32":
         pytest.skip(
-            "install.sh targets Linux and macOS; Git-for-Windows bash rewrites both the "
-            "leading-slash sparse patterns and the staging paths, so running it here "
-            "measures the emulator, not the script. The ubuntu CI runner executes it."
+            "install.sh targets Linux and macOS, and Git-for-Windows bash rewrites both "
+            "the leading-slash sparse patterns and the staging paths, so running it here "
+            "measures the emulator rather than the script. No job executes it today: "
+            "ci.yml runs pytest on windows-latest only, and its ubuntu job is lint."
         )
 
     origin = tmp_path / "origin"
