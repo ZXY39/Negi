@@ -171,13 +171,15 @@ test("live tool rows carry no rail status dot", () => {
     assert.match(match[1], /display:\s*none/);
 });
 
-test("flow chevron dot shares the guide line's center", () => {
+test("flow chevron dot shares the guide line's center in both axes", () => {
     const dot = /\.interaction-flow-chevron::before\s*\{([\s\S]*?)\n\}/.exec(CSS);
     assert.ok(dot, "chevron dot rule not found");
-    assert.match(dot[1], /transform:\s*translateX\(0\.5px\)/);
+    // 横向与引导线同轴、纵向与秒数墨迹中心同高，各移半像素。
+    assert.match(dot[1], /transform:\s*translate\(0\.5px,\s*-0\.5px\)/);
 
     const guide = /\.interaction-flow-guide\s*\{([\s\S]*?)\n\}/.exec(CSS);
     assert.ok(guide, "guide rule not found");
     assert.match(guide[1], /left:\s*8px/);
+    assert.match(guide[1], /top:\s*23\.5px/);
     assert.match(guide[1], /width:\s*1px/);
 });

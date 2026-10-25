@@ -3722,9 +3722,10 @@ textarea {
     height: 8px;
     border-radius: var(--radius-full);
     background: #39c5bb;
-    /* 点在盒中居中，中心落在左起 8px 的像素分界上；1px 引导线占 8~9px、中心是 8.5px。
-       把点右移半像素，两者才严格同轴；圆点旋转对称，这半步只影响边缘抗锯齿。 */
-    transform: translateX(0.5px);
+    /* 半步微调，两个方向都是为了让点在像素网格上真正居中：
+       横：点居中的中心落在左起 8px 的分界上，1px 引导线占 8~9px、中心 8.5px，右移半分才同轴；
+       纵：秒数是纯数字、没有下伸部，墨迹中心比行框中心高半分，上移半分才和秒数在同一条中线上。 */
+    transform: translate(0.5px, -0.5px);
 }
 
 .interaction-flow-meta {
@@ -17511,7 +17512,8 @@ textarea {
 .interaction-flow-guide {
     position: absolute;
     left: 8px;
-    top: 24px;
+    /* 起点跟着圆点走：圆点上移半像素后，线也从 23.5px 起，仍从圆点中心往下长。 */
+    top: 23.5px;
     bottom: var(--space-3);
     width: 1px;
     background: #39c5bb;
