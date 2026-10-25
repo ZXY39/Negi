@@ -35,6 +35,14 @@ _TRACE = {
             "text_ref": "",
             "created_at": "2026-04-04T19:37:42+08:00",
             "status": "running",
+            # 思考读数只有那四个标量；行上多带的键（这里模拟写侧塞进正文）不许跟着走。
+            "thinking": {
+                "seconds": 12.3,
+                "chars": 880,
+                "est_tokens": 220,
+                "tokens": 259,
+                "reasoning_content": "整段思考正文不该出现在节点详情里",
+            },
             "tools": [dict(_TOOL_RUNNING)],
         },
         {
@@ -69,7 +77,11 @@ def test_execution_trace_summary_preserves_turn_and_tool_runtime_fields() -> Non
     assert turn["tools"][0]["started_at"] == "2026-04-04T19:37:42+08:00"
     assert turn["tools"][0]["finished_at"] == ""
     # 轮次的形状就是这一组键；多出来的键都来自已被移除的台账形状。
-    assert set(turn) == {"seq", "text", "text_ref", "created_at", "status", "tools"}
+    assert set(turn) == {"seq", "text", "text_ref", "created_at", "status", "thinking", "tools"}
+    # 思考读数按名字摘出来，行上多带的正文跟着走不到界面。
+    assert turn["thinking"] == {"seconds": 12.3, "chars": 880, "est_tokens": 220, "tokens": 259}
+    # 这一轮没上报思考读数：留空字典，不补 0（前端据此整行不画）。
+    assert summary["turns"][1]["thinking"] == {}
 
 
 def test_execution_trace_summary_keeps_multiple_turn_boundaries() -> None:

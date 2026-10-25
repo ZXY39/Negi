@@ -8195,3 +8195,131 @@ def test_tool_result_delivery_metadata_tolerates_non_object_arguments() -> None:
 
     assert payload["invocation_text"] == "spawn_child_nodes"
 
+
+class _ReasoningChunkChatBackend:
+    """按真发流的样子调用节点道的两个思维回调：开段 → 吐若干思维分片 → 再写一会儿工具参数。
+
+    后段那截是这条用例的否决力所在：终点必须停在最后一个思维块，工具参数写多久都不该
+    进读数（前门那行读数就栽在把那段算成思考上）。
+    """
+
+    def __init__(self, *, thought_chunks: int = 2) -> None:
+        self.calls: list[dict[str, object]] = []
+        self._thought_chunks = int(thought_chunks)
+
+    async def chat(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        begin_segment = kwargs.get('on_reasoning_segment')
+        note_chunk = kwargs.get('on_reasoning_delta')
+        assert callable(begin_segment), '节点道没把思维段起点接到发送层'
+        assert callable(note_chunk), '节点道没把思维分片接到发送层'
+        begin_segment()
+        for _ in range(self._thought_chunks):
+            await asyncio.sleep(0.02)
+            note_chunk('思' * 30)
+        await asyncio.sleep(0.05)
+        return LLMResponse(
+            content='',
+            tool_calls=[
+                ToolCallRequest(
+                    id='call:final',
+                    name='submit_final_result',
+                    arguments={
+                        'status': 'success',
+                        'delivery_status': 'final',
+                        'summary': 'done',
+                        'answer': 'done',
+                        'evidence': [],
+                        'remaining_work': [],
+                        'blocking_reason': '',
+                    },
+                )
+            ],
+            finish_reason='tool_calls',
+            usage={'input_tokens': 8, 'output_tokens': 3},
+        )
+
+
+class _AppendingNodeTurnHarness:
+    """把一整个节点轮跑到落账那一步，返回 append_node_output 收到的 kwargs。"""
+
+    def __init__(self, tmp_path: Path) -> None:
+        self.tmp_path = tmp_path
+
+    async def run_round(self, backend: _ReasoningChunkChatBackend) -> dict[str, object]:
+        log_service = _FakeLogService()
+        appended: list[dict[str, object]] = []
+
+        def _append_node_output(*args, **kwargs) -> None:
+            appended.append(dict(kwargs))
+
+        log_service.append_node_output = _append_node_output  # type: ignore[method-assign]
+        service = MainRuntimeService(
+            chat_backend=backend,
+            workspace_root=self.tmp_path,
+            store_path=self.tmp_path / 'runtime.sqlite3',
+            files_base_dir=self.tmp_path / 'tasks',
+            artifact_dir=self.tmp_path / 'artifacts',
+            governance_store_path=self.tmp_path / 'governance.sqlite3',
+            execution_model_refs=['fake'],
+            acceptance_model_refs=['fake'],
+        )
+        service._react_loop._log_service = log_service
+        service.store = SimpleNamespace(
+            get_task=lambda task_id: SimpleNamespace(
+                task_id=task_id,
+                session_id='web:shared',
+                metadata={},
+            ),
+            get_node=lambda node_id: SimpleNamespace(
+                node_id=node_id,
+                prompt='demo goal',
+                goal='demo goal',
+                node_kind='execution',
+            ),
+        )
+        await service._react_loop.run(
+            task=SimpleNamespace(task_id='task-thinking-reading'),
+            node=SimpleNamespace(node_id='node-thinking-reading', depth=0, node_kind='execution'),
+            messages=[
+                {'role': 'system', 'content': 'system'},
+                {'role': 'user', 'content': '{"task_id":"task-thinking-reading","goal":"demo"}'},
+            ],
+            tools={
+                'stop_tool_execution': _StageProtocolNoopTool('stop_tool_execution'),
+                'submit_final_result': _submit_final_result_tool(),
+                'spawn_child_nodes': _StageProtocolNoopTool('spawn_child_nodes'),
+            },
+            model_refs=['fake'],
+            runtime_context={
+                'task_id': 'task-thinking-reading',
+                'node_id': 'node-thinking-reading',
+                'session_key': 'web:shared',
+                'actor_role': 'execution',
+            },
+            max_iterations=2,
+        )
+        assert appended, '这一轮没走到落账，读数用例白写'
+        return appended[0]
+
+
+@pytest.mark.asyncio
+async def test_node_round_stops_thinking_clock_at_the_last_reasoning_chunk(tmp_path: Path) -> None:
+    """节点这一轮的思考秒数随轮次落账，且不含思维之后写工具参数的那段。"""
+    backend = _ReasoningChunkChatBackend(thought_chunks=2)
+    appended = await _AppendingNodeTurnHarness(tmp_path).run_round(backend)
+
+    seconds = float(appended.get('reasoning_seconds') or 0.0)
+    assert seconds >= 0.03, seconds
+    # 想完之后还有 0.05s 的参数流：读数不能把它一起吃进来。
+    assert seconds < 0.09, seconds
+
+
+@pytest.mark.asyncio
+async def test_node_round_without_thought_chunks_reports_no_seconds(tmp_path: Path) -> None:
+    """一个思维块都没到的轮次贡献 0：界面据此不画那一行，而不是报一个窗口时长。"""
+    backend = _ReasoningChunkChatBackend(thought_chunks=0)
+    appended = await _AppendingNodeTurnHarness(tmp_path).run_round(backend)
+
+    assert float(appended.get('reasoning_seconds') or 0.0) == 0.0
+

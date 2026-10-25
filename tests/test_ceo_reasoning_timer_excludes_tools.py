@@ -19,6 +19,7 @@ import pytest
 from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
 from g3ku.runtime.frontdoor.state_models import CeoRuntimeContext
+from g3ku.runtime.reasoning_clock import ReasoningSecondsClock
 from g3ku.runtime.session_agent import RuntimeAgentSession
 
 _LANE_METHODS = (
@@ -52,11 +53,9 @@ _REASONING_LANE_ATTRS = {
     "_reasoning_pending": "",
     "_reasoning_seq": 0,
     "_reasoning_attempt": 0,
-    "_reasoning_started_monotonic": 0.0,
     "_reasoning_last_emit_monotonic": 0.0,
     "_reasoning_flush_task": None,
     "_reasoning_turn_key": "",
-    "_reasoning_turn_seconds": 0.0,
     "_reasoning_chars_total": 0,
     "_reasoning_est_tokens_total": 0,
 }
@@ -71,6 +70,8 @@ class _ReasoningTimerStub:
         self._state = SimpleNamespace(latest_message="")
         for name, value in {**_TEXT_LANE_ATTRS, **_REASONING_LANE_ATTRS}.items():
             setattr(self, name, value)
+        # 秒表按实例建：模块级共享会把上一只桩的读数带进下一只。
+        self._reasoning_clock = ReasoningSecondsClock()
 
     async def _emit(self, kind: str, **payload: object) -> None:
         self.frames.append({"kind": kind, **payload})
@@ -100,7 +101,7 @@ async def _open_hop(stub: _ReasoningTimerStub, *, thought_for_seconds: float) ->
 
     stub._begin_assistant_text_segment()
     stub._begin_assistant_reasoning_segment()
-    stub._reasoning_started_monotonic = (
+    stub._reasoning_clock.segment_started = (
         asyncio.get_running_loop().time() - thought_for_seconds
     )
     await stub._handle_assistant_reasoning_delta("思" * 40)
@@ -120,7 +121,7 @@ def test_visible_text_stops_the_reasoning_stopwatch() -> None:
         await stub._handle_assistant_text_delta("正文第一帧")
 
         # 停表而不是清零：已经想过的 42 秒留在回合累计里，往后不再增长。
-        assert stub._reasoning_started_monotonic == 0.0
+        assert stub._reasoning_clock.segment_started == 0.0
         assert _thinking_line_seconds(stub) == pytest.approx(42.0, abs=0.6)
 
     asyncio.run(run())
@@ -134,13 +135,13 @@ def test_tool_execution_window_does_not_add_to_thinking_seconds() -> None:
         frozen = _thinking_line_seconds(stub)
 
         # 工具跑了 30 秒：这段时间里没有任何思考分片，只有状态快照在重画那一行。
-        stub._reasoning_started_monotonic -= 30.0
+        stub._reasoning_clock.segment_started -= 30.0
         assert _thinking_line_seconds(stub) == pytest.approx(frozen, abs=0.6)
 
         # 下一跳真的又想了一会儿：新的一段接上，回合累计继续涨。思考的终点是
         # "最后一个思维块到达"，所以要喂一块才会重新走表。
         stub._begin_assistant_reasoning_segment()
-        stub._reasoning_started_monotonic = asyncio.get_running_loop().time() - 5.0
+        stub._reasoning_clock.segment_started = asyncio.get_running_loop().time() - 5.0
         await stub._handle_assistant_reasoning_delta("再想一会儿")
         assert _thinking_line_seconds(stub) == pytest.approx(frozen + 5.0, abs=0.6)
 
@@ -152,7 +153,7 @@ def test_turn_summary_keeps_only_thinking_time_across_hops() -> None:
         stub = _ReasoningTimerStub()
         await _open_hop(stub, thought_for_seconds=8.0)
         await stub._handle_assistant_text_delta("第一段正文")
-        stub._reasoning_started_monotonic -= 30.0  # 工具窗口
+        stub._reasoning_clock.segment_started -= 30.0  # 工具窗口
         await _open_hop(stub, thought_for_seconds=4.0)
         await stub._handle_assistant_text_delta("第二段正文")
 

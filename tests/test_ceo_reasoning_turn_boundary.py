@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 
+from g3ku.runtime.reasoning_clock import ReasoningSecondsClock
 from g3ku.runtime.session_agent import RuntimeAgentSession
 
 _LANE_METHODS = (
@@ -44,11 +45,10 @@ class _ReasoningLaneStub:
         self._reasoning_pending = ""
         self._reasoning_seq = 0
         self._reasoning_attempt = 0
-        self._reasoning_started_monotonic = 0.0
+        self._reasoning_clock = ReasoningSecondsClock()
         self._reasoning_last_emit_monotonic = 0.0
         self._reasoning_flush_task = None
         self._reasoning_turn_key = ""
-        self._reasoning_turn_seconds = 0.0
         self._reasoning_chars_total = 0
         self._reasoning_est_tokens_total = 0
 

@@ -196,6 +196,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 模型报告"上一轮我想到哪了"却读不到任何思路、或开了思考回放的 binding 一上线就整条链报 400 → `runtime-overview.md`「思考内容（reasoning）的上下文回放」（写入闸门按整条链取交集，咽喉点只透传）
 - 一个回合只剩转圈、长时间没有任何输出，而 usage 里 `completion_tokens` 已经跑了几千 → 先分清"慢"和"不可见"：解码几乎全花在思考上时界面本来看不到任何东西，`web-and-admin.md`「Live Reasoning Row Contract」（实时思考行；Responses 车道没有增量分片，只有耗时与估算 token）+ `runtime-overview.md`「思考内容（reasoning）的上下文回放」
 - 会话里「思考 N秒」比真实思考长（工具调用参数写了一大段、或该跳根本没思考也报了秒数）、或回合还在跑而那一行的秒数不再涨 → 计时窗口与两个收口点见 `web-and-admin.md`「Live Reasoning Row Contract」
+- 节点详情展开后某个轮次块没有那一行思考读数，或正在跑的那一轮迟迟不出数 → 同一合同（按轮落账才有数，缺口径就不画）见 `web-and-admin.md`「Live Reasoning Row Contract」
 - 切回仍在处理的会话看不到期间产生的工具组/工具调用（刷新网页才出现）→ `web-and-admin.md`「CEO Feed View State And Scroll Preservation Contract」
 - 用户气泡的「编辑」或模型回复元信息行里的「Fork」要刷新网页才出现、会话被暂停/审批/压缩挡住输入时找不到 Fork 入口、点了按钮提示「当前不可编辑」、或点击消息后用量/复制仍不显形 → `web-and-admin.md`「Message Edit-Resend And Session Fork Contract」+「Per-Turn Token Usage Contract」
 - 回合进行中发的补充没被回答、待发送条目上的「插话 / 编辑 / 删除」行为疑问、撤下后条目又被画回来，或条目挂着不动、点删除只回 `follow_up_not_queued` → `web-and-admin.md`「Queued Follow-Ups」

@@ -29,6 +29,7 @@ from g3ku.runtime.frontdoor.message_builder import (
 )
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted
 from g3ku.runtime.frontdoor.turns import frontdoor_turns_for_turn, normalize_frontdoor_turns
+from g3ku.runtime.reasoning_clock import ReasoningSecondsClock
 
 _CONTROL_TOOL_NAMES = {"stop_tool_execution"}
 _LEGACY_CONTROL_TOOL_NAMES = {"wait_tool_execution", "stop_tool_execution"}
@@ -263,14 +264,13 @@ class RuntimeAgentSession:
         self._reasoning_pending: str = ""
         self._reasoning_seq: int = 0
         self._reasoning_attempt: int = 0
-        self._reasoning_started_monotonic: float = 0.0
-        self._reasoning_last_delta_monotonic: float = 0.0
+        # 秒表在共用模块里（节点轮次那条车道用的是同一份口径），这里只挂实例。
+        self._reasoning_clock: ReasoningSecondsClock = ReasoningSecondsClock()
         self._reasoning_last_emit_monotonic: float = 0.0
         self._reasoning_flush_task: asyncio.Task[Any] | None = None
         # 回合级累计（多跳回合那一行要报整回合，不只是最后一跳）；按 turn_id 划界，
         # 不依赖各处 reset 的调用顺序。
         self._reasoning_turn_key: str = ""
-        self._reasoning_turn_seconds: float = 0.0
         self._reasoning_chars_total: int = 0
         self._reasoning_est_tokens_total: int = 0
         self._turn_lock = asyncio.Lock()
@@ -2719,8 +2719,7 @@ class RuntimeAgentSession:
         self._reasoning_pending = ""
         self._reasoning_seq = 0
         self._reasoning_attempt = 0
-        self._reasoning_started_monotonic = 0.0
-        self._reasoning_last_delta_monotonic = 0.0
+        self._reasoning_clock.reset_segment()
         self._reasoning_last_emit_monotonic = 0.0
 
     def _reasoning_touch_turn(self) -> str:
@@ -2728,7 +2727,7 @@ class RuntimeAgentSession:
         turn_id = str(self._current_turn_id() or "")
         if str(self._reasoning_turn_key or "") != turn_id:
             self._reasoning_turn_key = turn_id
-            self._reasoning_turn_seconds = 0.0
+            self._reasoning_clock.reset_totals()
             self._reasoning_chars_total = 0
             self._reasoning_est_tokens_total = 0
         return turn_id
@@ -2737,24 +2736,23 @@ class RuntimeAgentSession:
         """把当前这一段思考的耗时并进本回合累计，然后停表。
 
         一个回合常有好几跳（心跳、工具回合），每跳都重新想一遍；界面上那一行要报
-        整回合累计，不是只有最后一跳。
+        整回合累计，不是只有最后一跳。秒表本身见 `reasoning_clock`，节点轮次那条车道
+        读的是同一份口径。
         """
-        if self._reasoning_started_monotonic <= 0.0:
+        if not self._reasoning_clock.close_segment():
             return
-        self._reasoning_turn_seconds = float(self._reasoning_turn_seconds or 0.0) + self._reasoning_seconds()
         chars, est_tokens = self._reasoning_estimate()
         self._reasoning_chars_total = int(self._reasoning_chars_total or 0) + chars
         self._reasoning_est_tokens_total = int(self._reasoning_est_tokens_total or 0) + est_tokens
-        self._reasoning_started_monotonic = 0.0
 
     def _reasoning_total_seconds(self) -> float:
         self._reasoning_touch_turn()
-        return float(self._reasoning_turn_seconds or 0.0) + self._reasoning_seconds()
+        return self._reasoning_clock.total_seconds()
 
     def _assistant_reasoning_turn_summary(self) -> dict[str, Any]:
         """回合终态落进转录行的那份读数（只有标量，思考全文永不落盘）。"""
         self._reasoning_close_segment()
-        seconds = round(float(self._reasoning_turn_seconds or 0.0), 1)
+        seconds = round(float(self._reasoning_clock.total_seconds() or 0.0), 1)
         chars = int(self._reasoning_chars_total or 0)
         if not seconds and not chars:
             return {}
@@ -2773,22 +2771,12 @@ class RuntimeAgentSession:
         self._reasoning_attempt += 1
         self._reasoning_text = ""
         self._reasoning_pending = ""
-        try:
-            self._reasoning_started_monotonic = asyncio.get_running_loop().time()
-        except RuntimeError:
-            self._reasoning_started_monotonic = 0.0
-        self._reasoning_last_delta_monotonic = 0.0
+        self._reasoning_clock.begin_segment()
         self._reasoning_last_emit_monotonic = 0.0
 
     def _reasoning_seconds(self) -> float:
-        """这一段走了多久＝该跳请求起点 → 最后一个思维块到达。
-
-        终点不跟着 `now` 走：思维吐完之后模型还在写工具调用参数（写文件时那是一整个文件
-        正文），操作员眼里那是"工具那段事"，不是思考。一个思维块都没到的跳贡献 0。
-        """
-        if self._reasoning_started_monotonic <= 0.0 or self._reasoning_last_delta_monotonic <= 0.0:
-            return 0.0
-        return max(0.0, self._reasoning_last_delta_monotonic - self._reasoning_started_monotonic)
+        """这一段走了多久＝该跳请求起点 → 最后一个思维块到达（口径在 `reasoning_clock`）。"""
+        return self._reasoning_clock.segment_seconds()
 
     def _reasoning_running_totals(self) -> tuple[float, int, int]:
         """(累计秒, 累计字符, 累计估算 token)＝已收口的各段 + 正在发的这一段。"""
@@ -2864,9 +2852,8 @@ class RuntimeAgentSession:
             now = asyncio.get_running_loop().time()
         except RuntimeError:
             now = 0.0
-        if now > 0.0:
-            # 思维表的终点：每到一个思维块往前推一格，之后模型写工具参数或正文都不再推。
-            self._reasoning_last_delta_monotonic = now
+        # 思维表的终点：每到一个思维块往前推一格，之后模型写工具参数或正文都不再推。
+        self._reasoning_clock.note_chunk(now)
         if (
             self._reasoning_seq <= 0
             or self._reasoning_last_emit_monotonic <= 0.0

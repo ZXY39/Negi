@@ -498,6 +498,7 @@ function buildTurnGroupDescriptors(turns) {
         target.rounds.push({
             seq: turn.seq,
             created_at: String(turn?.created_at || ""),
+            thinking: turn?.thinking || null,
             tools,
         });
     });
@@ -546,15 +547,30 @@ function buildTurnGroupDescriptors(turns) {
     return steps;
 }
 
+// 这一轮的思考读数：文案口径与前门气泡那一行同出一处（`thinkingReadingParts`），这里只喂数。
+// 三个口径都没上报时返回空串，整行不画——空白读作"没上报"，不是"想了 0 秒"。
+function taskRoundThinkingText(thinking) {
+    if (!thinking || typeof thinking !== "object") return "";
+    if (typeof thinkingReadingParts !== "function") return "";
+    return thinkingReadingParts({
+        seconds: thinking.seconds,
+        chars: thinking.chars,
+        estTokens: thinking.est_tokens,
+        reportedTokens: thinking.tokens,
+    }).join(" · ");
+}
+
 // 账本一行就是一轮：正文、时间与工具条都属于这一轮。多轮叠在组体内纵向排列，
 // 不并成一条横向长条，否则"哪一轮调了什么"会被抹平成一行。
 function renderTurnRoundBlock(round) {
     const time = round?.created_at ? formatCompactTime(round.created_at) : "";
     const roundKey = `turn:${String(round?.seq ?? "").trim()}`;
+    const thinkingText = taskRoundThinkingText(round?.thinking);
     return `
         <section class="task-trace-round-group" data-round-key="${esc(roundKey)}">
             ${time ? `<div class="task-trace-round-meta">${esc(time)}</div>` : ""}
             ${renderExecutionRoundToolStrip({ round_id: roundKey, created_at: round?.created_at || "" }, round?.tools)}
+            ${thinkingText ? `<div class="task-trace-round-thinking">${esc(thinkingText)}</div>` : ""}
         </section>
     `;
 }

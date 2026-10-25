@@ -71,6 +71,24 @@ function normalizeSummaryTraceToolCall(step, index = 0) {
     };
 }
 
+function normalizeTurnThinking(thinking) {
+    // 轮次上只有那四个标量读数：思考全文从不外发，行上多带的键也不许跟着进渲染。
+    if (!thinking || typeof thinking !== "object") return null;
+    const toNumber = (value) => {
+        const num = Number(value);
+        return Number.isFinite(num) && num >= 0 ? num : 0;
+    };
+    const reading = {
+        seconds: toNumber(thinking.seconds),
+        chars: toNumber(thinking.chars),
+        est_tokens: toNumber(thinking.est_tokens),
+        // 缺键＝这一族口径这次没上报，与真实的 0 分开，界面才敢标估算还是真值。
+        tokens: thinking.tokens === null || thinking.tokens === undefined ? null : toNumber(thinking.tokens),
+    };
+    if (!reading.seconds && !reading.chars && !reading.est_tokens && !reading.tokens) return null;
+    return reading;
+}
+
 function normalizeTraceTurns(turns) {
     return (Array.isArray(turns) ? turns : [])
         .map((turn, turnIndex) => ({
@@ -79,6 +97,7 @@ function normalizeTraceTurns(turns) {
             text_ref: String(turn?.text_ref || ""),
             created_at: String(turn?.created_at || ""),
             status: String(turn?.status || ""),
+            thinking: normalizeTurnThinking(turn?.thinking),
             tools: (Array.isArray(turn?.tools) ? turn.tools : []).map((step, stepIndex) => (
                 normalizeSummaryTraceToolCall(step, stepIndex)
             )),

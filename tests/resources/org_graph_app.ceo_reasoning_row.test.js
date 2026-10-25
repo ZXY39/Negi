@@ -15,6 +15,7 @@ const APP_CODE = readFrontendSources(["app"]).join("\n").replace(/\r\n/g, "\n");
 const CSS_CODE = fs.readFileSync(CSS_PATH, "utf8").replace(/\r\n/g, "\n");
 
 const NAMES = [
+    "thinkingReadingParts",
     "normalizeCeoSnapshotReasoning",
     "ensureCeoThinkingLineEl",
     "renderCeoThinkingLineIntoTurn",
@@ -305,4 +306,16 @@ test("历史行只给读数：不带可点形状", () => {
     assert.equal(head.listeners.click, undefined);
     assert.equal(line.children[1].hidden, true);
     assert.match(head.children[0].textContent, /~1\.3k tok/);
+});
+
+test("思考文案只有一个产出者：真值优先，都没上报就空", () => {
+    // 节点详情每轮那一行读的是同一具函数（见 org_graph_task_view.turns.test.js），
+    // 所以这段措辞口径钉在这里，两面不许各抄一份。
+    const { sandbox } = buildHarness();
+    const joined = (expression) => String(vm.runInContext(`${expression}.join(" · ")`, sandbox));
+    assert.equal(joined("thinkingReadingParts({seconds:75,chars:5200,estTokens:1300})"), "思考 1分15秒 · ~1.3k tok");
+    // 报过真值就不带 `~`，且不需要估算值在场才印得出。
+    assert.equal(joined("thinkingReadingParts({estTokens:1300,reportedTokens:1780})"), "1.8k tok");
+    assert.equal(joined("thinkingReadingParts({})"), "");
+    assert.equal(joined("thinkingReadingParts({seconds:0,chars:0})"), "");
 });

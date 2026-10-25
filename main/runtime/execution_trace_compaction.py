@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from g3ku.runtime.tool_impulse import CONTRACT_DELIVERY_FIELD
+from main.monitoring.execution_trace import thinking_reading_for_display
 
 _PREVIEW_CHAR_LIMIT = 160
 _RAW_OUTPUT_FALLBACK_PREVIEW_LIMIT = 24
@@ -151,6 +152,7 @@ def build_execution_trace_summary(execution_trace: dict[str, Any] | None) -> dic
                 "text_ref": str(turn.get("text_ref") or ""),
                 "created_at": str(turn.get("created_at") or ""),
                 "status": str(turn.get("status") or ""),
+                "thinking": thinking_reading_for_display(turn.get("thinking")),
                 "tools": compact_tools,
             }
         )

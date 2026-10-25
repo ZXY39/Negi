@@ -4127,6 +4127,18 @@ textarea {
     margin-bottom: calc(var(--space-3) / -2);
 }
 
+/* 每轮末尾的思考读数（思考 12秒 · ~1.3k tok）：只有一行读数，没有可展开的正文——
+   思考全文从不外发到节点详情。字号与配色跟会话气泡那一行同档，两面读的是同一份口径。 */
+.task-trace-round-thinking {
+    font-family: inherit;
+    font-size: 0.74rem;
+    line-height: 1.4;
+    color: var(--text-muted);
+    letter-spacing: 0.01em;
+    /* 同上：与上方工具条的间距从这一格自己扣。 */
+    margin-top: calc(var(--space-3) / -2);
+}
+
 .task-trace-round-strip {
     display: flex;
     gap: var(--space-3);

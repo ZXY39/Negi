@@ -68,6 +68,7 @@ from g3ku.runtime.frontdoor.tool_contract import (
 from g3ku.runtime.frontdoor.tool_contract import (
     skill_roster_epoch_for as _skill_roster_epoch_for,
 )
+from g3ku.runtime.reasoning_clock import ReasoningSecondsClock
 from g3ku.runtime.token_compact_markers import (
     TOKEN_COMPACT_V2_PREFIX as _SHARED_TOKEN_COMPACT_V2_PREFIX,
 )
@@ -1100,6 +1101,10 @@ class ReActToolLoop:
             empty_response_retry_count = 0
             restart_with_refreshed_runtime = False
             inflight_notice_callback_triggered = False
+            # 本轮的思考秒表，口径与前门气泡那行同出一处（`g3ku/runtime/reasoning_clock.py`）：
+            # 表在该次请求起点走、最后一个思维块停，模型写工具参数与正文的那段不算思考。
+            # 一轮里可能重发好几次（同轮重试），每次一段，落账时按整轮累计。
+            round_reasoning_clock = ReasoningSecondsClock()
             turn_outcome = LEASE_OUTCOME_CANCELLED
             try:
                 while True:
@@ -1138,6 +1143,10 @@ class ReActToolLoop:
                                 task_id=task.task_id,
                                 node_id=node.node_id,
                             ),
+                            # 思维分片只用来走表：节点道不往界面转发思考流，
+                            # 每轮落账时取这一份标量读数。
+                            on_reasoning_segment=round_reasoning_clock.begin_segment,
+                            on_reasoning_delta=lambda _chunk: round_reasoning_clock.note_chunk(),
                         )
                         # The chat backend now enforces the per-single-request
                         # response limit itself and retries retryable chain
@@ -1150,6 +1159,9 @@ class ReActToolLoop:
                             awaitable=chat_coro,
                         )
                         turn_outcome = LEASE_OUTCOME_SUCCESS
+                        # 这一轮的模型流到此为止，后面是工具执行：当场收口，否则表要一直
+                        # 走到下一轮起点或轮次落账，工具跑多久读数就多涨多久。
+                        round_reasoning_clock.close_segment()
                         consume_inflight_notice_callback = runtime_context.get('consume_inflight_notice_callback')
                         if callable(consume_inflight_notice_callback) and not inflight_notice_callback_triggered:
                             consume_inflight_notice_callback()
@@ -1333,6 +1345,7 @@ class ReActToolLoop:
                 tool_calls=tool_calls,
                 reasoning_content=str(ledger_reasoning_field.get('reasoning_content') or ''),
                 reasoning_items=list(ledger_reasoning_field.get('reasoning_items') or []),
+                reasoning_seconds=round_reasoning_clock.total_seconds(),
                 usage_attempts=list(response.attempts or []),
                 model_messages=model_messages,
                 request_messages=request_messages,

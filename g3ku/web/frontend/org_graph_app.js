@@ -4624,6 +4624,22 @@ function ensureCeoThinkingLineEl(turn) {
     return line;
 }
 
+// 思考读数的唯一文案口径：前门气泡那一行与节点详情每轮那一行都从这里取，改措辞两面一起变。
+// token 是估算：provider 的 usage 只在流尾给，不少网关连 reasoning_tokens 都不报，所以估算值
+// 一律带 `~`；只有上报过的真值才不带。两个口径都没上报时这一段不印，不补 0。
+function thinkingReadingParts({ seconds = 0, chars = 0, estTokens = 0, reportedTokens = 0 } = {}) {
+    const parts = [];
+    if (Number(seconds) > 0) parts.push(`思考 ${formatElapsedDuration(seconds)}`);
+    const reported = Number(reportedTokens) || 0;
+    if (reported > 0) {
+        parts.push(`${formatTokenCount(reported)} tok`);
+        return parts;
+    }
+    const tokens = Number(estTokens) || Math.round(Number(chars) / 4);
+    if (tokens > 0) parts.push(`~${formatTokenCount(tokens)} tok`);
+    return parts;
+}
+
 function renderCeoThinkingLineIntoTurn(turn) {
     if (!turn?.el) return;
     const text = String(turn.reasoningText || "");
@@ -4637,19 +4653,12 @@ function renderCeoThinkingLineIntoTurn(turn) {
     const line = ensureCeoThinkingLineEl(turn);
     if (!line) return;
     line.hidden = false;
-    const parts = [];
-    if (seconds > 0) parts.push(`思考 ${formatElapsedDuration(seconds)}`);
-    // token 是估算：provider 的 usage 只在流尾给，不少网关连 reasoning_tokens 都不报，
-    // 所以一律带 `~`；真值只有回合结束落进转录行那一刻才可能不带。
-    const tokens = estTokens || Math.round(chars / 4);
-    if (tokens > 0) {
-        // provider 真报了思考 token 才去掉 `~`；否则一律标明是估算。
-        const reported = Number(turn.reasoningTokensReported || 0);
-        parts.push(reported > 0
-            ? `${formatTokenCount(reported)} tok`
-            : `~${formatTokenCount(tokens)} tok`);
-    }
-    turn.thinkingMetaEl.textContent = parts.join(" · ");
+    turn.thinkingMetaEl.textContent = thinkingReadingParts({
+        seconds,
+        chars,
+        estTokens,
+        reportedTokens: Number(turn.reasoningTokensReported || 0),
+    }).join(" · ");
     const lines = text.replace(/\s+$/, "").split("\n");
     turn.thinkingTailEl.textContent = lines[lines.length - 1] || "";
     turn.thinkingTailEl.title = lines[lines.length - 1] || "";

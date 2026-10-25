@@ -123,3 +123,36 @@ def test_token_usage_marks_partial_only_when_the_call_had_no_usage() -> None:
     assert summary.calls_with_usage == 0
     assert summary.calls_without_usage == 1
     assert summary.is_partial is True
+
+
+def test_node_thinking_summary_carries_the_three_gauges_that_reported() -> None:
+    summary = TaskLogService._node_output_thinking_summary(
+        reasoning_content='思' * 200,
+        reasoning_seconds=12.34,
+        usage_attempts=[_attempt(usage={'thinking_tokens': 40}), _attempt(usage={'thinking_tokens': 60})],
+    )
+
+    assert summary['seconds'] == 12.3
+    assert summary['chars'] == 200
+    assert summary['tokens'] == 100
+    # 估算口径与上下文压缩那一份同源，界面上才敢带 `~`。
+    assert summary['est_tokens'] > 0
+
+
+def test_node_thinking_summary_leaves_unreported_gauges_out_entirely() -> None:
+    """没上报的口径不建键：0 与「这个 provider 根本没报」在界面上是两种显示。"""
+    summary = TaskLogService._node_output_thinking_summary(
+        reasoning_content='',
+        reasoning_seconds=0.0,
+        usage_attempts=[_attempt()],
+    )
+
+    assert summary == {}
+    # provider 明确报过 0 的时候键要在，但秒表没走过就不写 seconds。
+    reported_zero = TaskLogService._node_output_thinking_summary(
+        reasoning_content='',
+        reasoning_seconds=None,
+        usage_attempts=[_attempt(usage={'thinking_tokens': 0})],
+    )
+
+    assert reported_zero == {'tokens': 0}

@@ -111,3 +111,27 @@ def test_execution_trace_summary_and_projection_keep_text_only_turns() -> None:
         assert [turn["seq"] for turn in turns] == [1, 2, 3, 4]
         assert turns[3]["text"] == "plain text turn"
         assert turns[3]["tools"] == []
+
+
+def test_turn_thinking_reading_survives_both_summary_builders() -> None:
+    """行上的思考读数要活过两条读路（现算轨迹、存量摘要），断在哪一条界面就少一半轮次。"""
+    node = _node()
+    node.output[0].thinking = {
+        "seconds": 12.3,
+        "chars": 880,
+        "est_tokens": 220,
+        "tokens": 259,
+        "reasoning_content": "思考全文不许跟着读数走到节点详情",
+    }
+
+    trace = build_execution_trace(node, tool_results=[], live_tool_calls=[])
+    reading = {"seconds": 12.3, "chars": 880, "est_tokens": 220, "tokens": 259}
+    assert trace["turns"][0]["thinking"] == reading
+    # 没上报的那一轮留空字典，前端据此整行不画。
+    assert trace["turns"][1]["thinking"] == {}
+
+    for payload in (
+        build_execution_trace_summary(trace),
+        TaskQueryService._sanitize_execution_trace_summary(build_execution_trace_summary(trace)),
+    ):
+        assert payload["turns"][0]["thinking"] == reading

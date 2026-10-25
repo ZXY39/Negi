@@ -15,7 +15,7 @@ from main.models import (
     normalize_final_acceptance_metadata,
     normalize_tool_file_changes,
 )
-from main.monitoring.execution_trace import build_execution_trace
+from main.monitoring.execution_trace import build_execution_trace, thinking_reading_for_display
 from main.monitoring.frame_liveness import STALE_FRAME_MINUTES, frame_is_stale
 from main.monitoring.models import (
     LatestTaskNodeOutput,
@@ -1248,6 +1248,7 @@ class TaskQueryService:
                     'text_ref': str(turn.get('text_ref') or ''),
                     'created_at': str(turn.get('created_at') or ''),
                     'status': str(turn.get('status') or ''),
+                    'thinking': thinking_reading_for_display(turn.get('thinking')),
                     'tools': compact_tools,
                 }
             )

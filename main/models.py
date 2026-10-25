@@ -20,6 +20,10 @@ class NodeOutputEntry(Model):
     # assistant 行时只能从这里取回（写侧闸门判定见 react_loop._node_assistant_reasoning_field）。
     reasoning_content: str = ''
     reasoning_items: list[dict[str, Any]] = Field(default_factory=list)
+    # 这一轮的思考读数（只有标量：seconds/chars/est_tokens/tokens），供节点详情按轮显示。
+    # 缺键＝这一族口径这次没上报（provider 没报思考 token、模型走不吐思维分片的协议），
+    # 与真实的 0 分开，前端据此显示估算或 '--'，不伪造。
+    thinking: dict[str, Any] = Field(default_factory=dict)
     created_at: str
 
 

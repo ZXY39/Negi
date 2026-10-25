@@ -12,6 +12,28 @@ from main.monitoring.models import TaskProjectionToolResultRecord
 
 _CONTROL_TOOL_NAMES = {'wait_tool_execution', 'stop_tool_execution'}
 
+# 轮次行往外带的思考读数只有这四个标量。
+THINKING_READING_FIELDS = ('seconds', 'chars', 'est_tokens', 'tokens')
+
+
+def thinking_reading_for_display(value: Any) -> dict[str, Any]:
+    """把轮次上的思考读数摘成可外发的那一份。
+
+    思考全文住在 `reasoning_content` 上，从不进节点详情的载荷：这里按字段名逐个摘，
+    写侧多出来的键不会跟着走到界面。缺键就是这一族口径这次没上报，不补 0。
+    """
+    if not isinstance(value, dict):
+        return {}
+    reading: dict[str, Any] = {}
+    for field in THINKING_READING_FIELDS:
+        if field not in value:
+            continue
+        number = value.get(field)
+        if isinstance(number, bool) or not isinstance(number, (int, float)):
+            continue
+        reading[field] = number
+    return reading
+
 
 def build_execution_trace(
     node: NodeRecord,
@@ -214,6 +236,7 @@ def _build_execution_turns(
                 'text': str(getattr(entry, 'content', '') or ''),
                 'text_ref': str(getattr(entry, 'content_ref', '') or ''),
                 'created_at': str(getattr(entry, 'created_at', '') or ''),
+                'thinking': thinking_reading_for_display(getattr(entry, 'thinking', None)),
                 'status': (
                     'running'
                     if any(

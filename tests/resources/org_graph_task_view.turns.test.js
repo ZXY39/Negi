@@ -9,6 +9,20 @@ const vm = require("node:vm");
 const FRONTEND = path.join(__dirname, "..", "..", "g3ku", "web", "frontend", "tasks");
 const STORE_CODE = fs.readFileSync(path.join(FRONTEND, "node-detail-store.js"), "utf8");
 const DETAIL_CODE = fs.readFileSync(path.join(FRONTEND, "node-detail.js"), "utf8");
+// 思考文案的唯一产出者住在前门那一支 bundle 里；这里按真页面的加载顺序把它读进同一个
+// 沙箱，用例才是在证"节点页没有自己抄一份文案"。
+const APP_CODE = fs.readFileSync(
+    path.join(__dirname, "..", "..", "g3ku", "web", "frontend", "org_graph_app.js"),
+    "utf8",
+).replace(/\r\n/g, "\n");
+
+function sliceAppFunction(name) {
+    const start = APP_CODE.indexOf(`function ${name}(`);
+    assert.ok(start >= 0, `找不到 app bundle 里的 ${name}`);
+    const end = APP_CODE.indexOf("\n}\n", start);
+    assert.ok(end > start, `${name} 的结尾无法定位`);
+    return APP_CODE.slice(start, end + 2);
+}
 
 function load() {
     const context = {
@@ -32,7 +46,14 @@ function load() {
     };
     vm.createContext(context);
     vm.runInContext(
-        `${STORE_CODE}\n${DETAIL_CODE}\nthis.__turns = { buildExecutionTraceSteps, buildNodeExecutionTrace, buildTraceRenderSignature, renderTraceStep };`,
+        [
+            sliceAppFunction("formatElapsedDuration"),
+            sliceAppFunction("formatTokenCount"),
+            sliceAppFunction("thinkingReadingParts"),
+            STORE_CODE,
+            DETAIL_CODE,
+            "this.__turns = { buildExecutionTraceSteps, buildNodeExecutionTrace, buildTraceRenderSignature, renderTraceStep, taskRoundThinkingText };",
+        ].join("\n"),
         context
     );
     return context.__turns;
@@ -180,4 +201,31 @@ test("render signature changes when progress text changes", () => {
     const first = buildTraceRenderSignature([{ traceKey: "turn:1", title: "a", textOnly: true, text: "a" }]);
     const second = buildTraceRenderSignature([{ traceKey: "turn:1", title: "a", textOnly: true, text: "b" }]);
     assert.notEqual(first, second);
+});
+
+test("每轮块底部带这一轮的思考读数，文案取自前门那一份口径", () => {
+    const { buildNodeExecutionTrace, buildExecutionTraceSteps, taskRoundThinkingText } = load();
+    const turns = [
+        { ...turn(1, "", ["tool-a"]), thinking: { seconds: 75, chars: 5200, est_tokens: 1300 } },
+        { ...turn(2, "", ["tool-b"]), thinking: { chars: 40, tokens: 30 } },
+        // 只有非读数键（写侧多塞的正文）：整行不画，正文也不许出现在详情里。
+        { ...turn(3, "", ["tool-c"]), thinking: { reasoning_content: "思考全文不该出现在这里" } },
+        { ...turn(4, "", ["tool-d"]) },
+    ];
+    const trace = buildNodeExecutionTrace(
+        { node_id: "node:thinking" },
+        { execution_trace: { initial_prompt: "p", turns, tool_steps: [] } }
+    );
+    const body = buildExecutionTraceSteps(trace, { node_id: "node:thinking" })
+        .map((step) => step.bodyHtml || "")
+        .join("");
+
+    assert.match(body, /task-trace-round-thinking">思考 1分15秒 · ~1,300 tok</);
+    // provider 报过真值就不带 `~`，且这一轮没思考时长时不印"思考 0秒"。
+    assert.match(body, /task-trace-round-thinking">30 tok</);
+    assert.equal((body.match(/task-trace-round-thinking/g) || []).length, 2);
+    assert.ok(!body.includes("思考全文不该出现在这里"));
+    // 没上报的那一轮连空 div 都不留，两条读路都在同一处判空。
+    assert.equal(taskRoundThinkingText(null), "");
+    assert.equal(taskRoundThinkingText({}), "");
 });

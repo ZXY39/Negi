@@ -23,6 +23,7 @@ from g3ku.content.navigation import INLINE_CHAR_LIMIT
 from g3ku.deployment.data_root import data_work_path
 from g3ku.providers.base import provider_body_output_cap, provider_body_reasoning_effort
 from g3ku.providers.fallback import MODEL_RETRY_LIVE_STATES, MODEL_RETRY_STATE_WAITING_UPSTREAM
+from g3ku.runtime.context.summarizer import estimate_tokens
 from g3ku.runtime.tool_impulse import (
     CONTRACT_DELIVERY_FIELD,
     REUSE_FLAG_IGNORED_FIELD,
@@ -1088,6 +1089,7 @@ class TaskLogService:
         tool_calls: list[dict[str, Any]] | None = None,
         reasoning_content: str = '',
         reasoning_items: list[dict[str, Any]] | None = None,
+        reasoning_seconds: float | None = None,
         usage_attempts: list[Any] | None = None,
         model_messages: list[dict[str, Any]] | None = None,
         request_messages: list[dict[str, Any]] | None = None,
@@ -1238,6 +1240,11 @@ class TaskLogService:
                             for item in list(reasoning_items or [])
                             if isinstance(item, dict)
                         ],
+                        thinking=self._node_output_thinking_summary(
+                            reasoning_content=reasoning_content,
+                            reasoning_seconds=reasoning_seconds,
+                            usage_attempts=usage_attempts,
+                        ),
                         created_at=changed_at,
                     )
                 )
@@ -2445,6 +2452,35 @@ class TaskLogService:
                     content_index.pop(key, None)
         except Exception:
             pass
+
+    @staticmethod
+    def _node_output_thinking_summary(
+        *,
+        reasoning_content: str,
+        reasoning_seconds: float | None,
+        usage_attempts: list[Any] | None,
+    ) -> dict[str, Any]:
+        '''节点这一轮的思考读数，形状与前门转录行的 `thinking` 相同（节点详情按轮显示它）。
+
+        只留标量：思考全文本来就在 `reasoning_content` 上，读数不是它的副本。三口径各自
+        缺了就缺，不伪造 —— `seconds` 只在秒表真走过该段时写（思维分片不吐的协议恒为 0），
+        `tokens` 沿用明细表那一份聚合，provider 没上报就不建键（缺键与 0 在前端是两种显示）。
+        '''
+        summary: dict[str, Any] = {}
+        text = str(reasoning_content or '')
+        if text:
+            summary['chars'] = len(text)
+            summary['est_tokens'] = int(estimate_tokens(text) or 0)
+        if (
+            isinstance(reasoning_seconds, (int, float))
+            and not isinstance(reasoning_seconds, bool)
+            and float(reasoning_seconds) > 0.0
+        ):
+            summary['seconds'] = round(float(reasoning_seconds), 1)
+        reported_tokens = TaskLogService._model_call_attempt_metrics(usage_attempts)['thinking_tokens']
+        if reported_tokens is not None:
+            summary['tokens'] = int(reported_tokens)
+        return summary
 
     @staticmethod
     def _model_call_attempt_metrics(usage_attempts: list[Any] | None) -> dict[str, Any]:
