@@ -110,6 +110,30 @@ function markCeoSessionRead(sessionId, { messageCount = null } = {}) {
     }
 }
 
+// 新消息提醒只跟 unread 正增量走：active 会话与切换豁免都不弹。
+// 同一批里多个会话同时涨数时只提示 updated_at 最新的那个，角标仍逐个记账。
+function ceoSessionUnreadTitle(item, sessionId) {
+    const title = String(item?.title || "").trim() || String(sessionId || "").trim();
+    return Array.from(title).slice(0, 5).join("");
+}
+
+function notifyCeoSessionUnread(arrivals = []) {
+    if (!arrivals.length) return;
+    const latest = arrivals.reduce((best, entry) => {
+        const bestTime = String(best?.item?.updated_at || "");
+        const entryTime = String(entry?.item?.updated_at || "");
+        return entryTime > bestTime ? entry : best;
+    }, arrivals[0]);
+    const label = ceoSessionUnreadTitle(latest?.item, latest?.sessionId);
+    if (!label) return;
+    showToast({
+        title: "有新消息",
+        text: `来自会话${label}，共未读${latest.unread}条`,
+        kind: "info",
+        durationMs: 3000,
+    });
+}
+
 function armCeoSessionUnreadExemption(previousActiveId) {
     // 仅当页面已水合(存在真实的前序会话基线)才武装:冷启动时 activeSessionId() 会回退到
     // ApiClient 的兜底 id "web:shared",不加此守卫的话每次加载都会为「用户从未看过的会话」误武装。
@@ -143,6 +167,7 @@ function syncCeoSessionUnreadState(sessions = [], activeId = activeSessionId()) 
         : {};
     const nextCounts = {};
     const nextUnread = {};
+    const arrivals = [];
     const hydrated = !!S.ceoSessionHydrated;
 
     if (S.ceoSessionUnreadExempt && Object.keys(S.ceoSessionUnreadExempt).some((key) => S.ceoSessionUnreadExempt[key] <= Date.now())) {
@@ -178,6 +203,7 @@ function syncCeoSessionUnreadState(sessions = [], activeId = activeSessionId()) 
                 return;
             }
             nextUnread[sessionId] = existingUnread + (messageCount - previousCount);
+            arrivals.push({ sessionId, item, unread: nextUnread[sessionId] });
             return;
         }
 
@@ -192,6 +218,7 @@ function syncCeoSessionUnreadState(sessions = [], activeId = activeSessionId()) 
     S.ceoSessionMessageCounts = nextCounts;
     S.ceoSessionUnread = nextUnread;
     S.ceoSessionHydrated = true;
+    notifyCeoSessionUnread(arrivals);
 }
 
 function canMutateCeoSessions() {

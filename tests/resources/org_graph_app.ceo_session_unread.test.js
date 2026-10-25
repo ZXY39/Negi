@@ -124,7 +124,7 @@ function loadApp() {
             return clock.now;
         }
     };
-    return { api: context.__testExports, clock };
+    return { api: context.__testExports, clock, context };
 }
 
 // 加载应用并覆盖切换流程的所有 DOM/副作用函数,保留真实的 applyOptimisticCeoSessionSwitch / arm / sync。
@@ -340,4 +340,100 @@ test("接线:applyOptimisticCeoSessionSwitch 会为被离开的会话武装豁�
     syncCeoSessionUnreadState([mk("web:A", 8), mk("web:B", 2)], "web:B");
     assert.equal(S.ceoSessionUnread["web:A"], 0);
     assert.equal(exemptHas(S, "web:A"), false);
+});
+
+// ---- 新消息提醒 toast ------------------------------------------------------
+
+function captureToasts(loaded) {
+    const toasts = [];
+    // 页面级 showToast 是全局函数:在同一个 realm 里换成探针,后续 sync 调用命中桩。
+    loaded.context.showToast = (payload) => toasts.push(payload);
+    return toasts;
+}
+
+test("新消息提醒:非 active 会话出现未读增量时弹 3 秒 info toast,标题只取前 5 个字符", () => {
+    const loaded = setup();
+    const toasts = captureToasts(loaded);
+
+    loaded.api.syncCeoSessionUnreadState([
+        { session_id: "A", message_count: 5, title: "当前会话" },
+        { session_id: "B", message_count: 3, title: "一二三四五六" },
+    ], "A");
+
+    assert.equal(toasts.length, 1);
+    assert.equal(toasts[0].title, "有新消息");
+    assert.equal(toasts[0].text, "来自会话一二三四五，共未读1条");
+    assert.equal(toasts[0].kind, "info");
+    assert.equal(toasts[0].durationMs, 3000);
+});
+
+test("新消息提醒:同一会话连续来消息时,提示里的未读数是累计值", () => {
+    const loaded = setup();
+    const toasts = captureToasts(loaded);
+
+    loaded.api.syncCeoSessionUnreadState([
+        { session_id: "A", message_count: 5, title: "当前会话" },
+        { session_id: "B", message_count: 3, title: "乙会话" },
+    ], "A");
+    loaded.api.syncCeoSessionUnreadState([
+        { session_id: "A", message_count: 5, title: "当前会话" },
+        { session_id: "B", message_count: 5, title: "乙会话" },
+    ], "A");
+
+    assert.deepEqual(toasts.map((toast) => toast.text), [
+        "来自会话乙会话，共未读1条",
+        "来自会话乙会话，共未读3条",
+    ]);
+});
+
+test("新消息提醒:active 会话与切换豁免的正增量都不弹提醒", () => {
+    const loaded = setup();
+    const toasts = captureToasts(loaded);
+    const { api } = loaded;
+
+    api.syncCeoSessionUnreadState([
+        { session_id: "A", message_count: 8, title: "当前会话" },
+        { session_id: "B", message_count: 2, title: "乙会话" },
+    ], "A");
+    assert.equal(toasts.length, 0, "active 会话的增量是用户眼前的内容");
+
+    api.armCeoSessionUnreadExemption("B");
+    api.syncCeoSessionUnreadState([
+        { session_id: "A", message_count: 8, title: "当前会话" },
+        { session_id: "B", message_count: 5, title: "乙会话" },
+    ], "A");
+    assert.equal(toasts.length, 0, "豁免吸收的迟到补算不是新消息");
+});
+
+test("新消息提醒:首次水合与没有基线的首次出现都不弹提醒", () => {
+    const loaded = loadApp();
+    const toasts = captureToasts(loaded);
+
+    loaded.api.syncCeoSessionUnreadState([{ session_id: "A", message_count: 5, title: "甲会话" }], "A");
+    loaded.api.syncCeoSessionUnreadState([
+        { session_id: "A", message_count: 5, title: "甲会话" },
+        { session_id: "B", message_count: 9, title: "乙会话" },
+    ], "A");
+
+    assert.equal(toasts.length, 0);
+});
+
+test("新消息提醒:同一批多个会话涨数时只提示最近更新的那个", () => {
+    const loaded = loadApp();
+    const toasts = captureToasts(loaded);
+    const { api } = loaded;
+
+    api.syncCeoSessionUnreadState([
+        { session_id: "A", message_count: 1, title: "甲会话" },
+        { session_id: "B", message_count: 1, title: "乙会话标题", updated_at: "2026-10-25T10:00:00" },
+        { session_id: "C", message_count: 1, title: "丙会话标题", updated_at: "2026-10-25T10:00:00" },
+    ], "A");
+    api.syncCeoSessionUnreadState([
+        { session_id: "A", message_count: 1, title: "甲会话" },
+        { session_id: "B", message_count: 3, title: "乙会话标题", updated_at: "2026-10-25T10:00:03" },
+        { session_id: "C", message_count: 2, title: "丙会话标题", updated_at: "2026-10-25T10:00:01" },
+    ], "A");
+
+    assert.equal(toasts.length, 1);
+    assert.equal(toasts[0].text, "来自会话乙会话标题，共未读2条");
 });
