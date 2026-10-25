@@ -60,12 +60,14 @@
     function openBackdrop(backdrop, dialog) {
         if (!backdrop) return;
         backdrop.hidden = false;
+        backdrop.classList.add("is-open");
         if (dialog && typeof dialog.focus === "function") dialog.focus();
     }
 
     function closeBackdrop(backdrop) {
         if (!backdrop) return;
         backdrop.hidden = true;
+        backdrop.classList.remove("is-open");
     }
 
     function renderPhotoGrid(container, photos) {

@@ -16,6 +16,7 @@ const PERSONA_CHAIN_TOAST = "为了使人设生效，主agent和记忆agent模�
 
 function makeElement(id, { backdrop = false } = {}) {
     const listeners = {};
+    const classes = new Set();
     const element = {
         id,
         hidden: backdrop,
@@ -27,11 +28,20 @@ function makeElement(id, { backdrop = false } = {}) {
         dataset: {},
         children: [],
         classList: {
-            toggle() {},
-            add() {},
-            remove() {},
-            contains() {
-                return false;
+            toggle(token, force) {
+                const shouldAdd = typeof force === "boolean" ? force : !classes.has(token);
+                if (shouldAdd) classes.add(token);
+                else classes.delete(token);
+                return shouldAdd;
+            },
+            add(...tokens) {
+                tokens.forEach((token) => classes.add(token));
+            },
+            remove(...tokens) {
+                tokens.forEach((token) => classes.delete(token));
+            },
+            contains(token) {
+                return classes.has(token);
             },
         },
         addEventListener(type, handler) {
@@ -184,12 +194,18 @@ test("persona onboarding opens on first run, skip moves to the model step", asyn
     await flush();
 
     assert.equal(harness.elements["persona-onboarding-backdrop"].hidden, false);
+    assert.equal(
+        harness.elements["persona-onboarding-backdrop"].classList.contains("is-open"),
+        true,
+        "the backdrop must be visible and interactive, not only unhidden",
+    );
     assert.equal(harness.elements["persona-onboarding-description"].value, "旧描述");
 
     harness.elements["persona-onboarding-skip-btn"].click();
     await flush();
     assert.equal(harness.calls.skipped, 1);
     assert.equal(harness.elements["persona-onboarding-backdrop"].hidden, true);
+    assert.equal(harness.elements["persona-onboarding-backdrop"].classList.contains("is-open"), false);
     assert.equal(harness.calls.loadModels, 1);
     assert.equal(harness.calls.startCreateModel, 1);
     assert.equal(harness.elements["persona-onboarding-description"].value, "");
