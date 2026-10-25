@@ -172,16 +172,14 @@ function renderTasks() {
 
 function renderTaskTokenStats(options = {}) {
     const force = !!(options && options.force);
-    if (!U.taskTokenContent || !U.taskTokenSummaryText) return;
+    if (!U.taskTokenContent) return;
     // 窗口打开期间冻结自动刷新：实时事件不重建表格，避免打断滚动位置、
     // 清空搜索框内容与筛选结果；手动更新走「刷新」按钮（force）。
     if (!force && S.taskTokenStatsOpen) return;
     const summary = taskTokenDisplayUsage(S.currentTask, null);
     // taskTokenSummaryLine 自己会换算成显示口径，这里必须喂未换算的用量：传 summary
-    // 会把缓存命中再加一次（实盘同一任务顶部 46,834、副标题 84,082）。
-    const summaryLine = taskTokenSummaryLine(taskTokenUsage(S.currentTask, null));
-    U.taskTokenSummaryText.textContent = summaryLine;
-    if (U.taskTokenButton) U.taskTokenButton.title = summaryLine;
+    // 会把缓存命中再加一次。窗口内的数字只由下面那五格印一次，标题副文字是固定说明。
+    if (U.taskTokenButton) U.taskTokenButton.title = taskTokenSummaryLine(taskTokenUsage(S.currentTask, null));
     if (!summary.tracked) {
         U.taskTokenContent.innerHTML = `
             <div class="task-token-topline">
@@ -205,16 +203,20 @@ function renderTaskTokenStats(options = {}) {
     const partialNote = summary.is_partial
         ? '<span class="task-token-badge warn">部分模型未返回 usage</span>'
         : '<span class="task-token-badge success">统计完整</span>';
+    // 与逐次调用明细表的 modelCallHitRate 同口径：缓存命中 / 整份 prompt（新增输入 + 缓存命中）。
+    const cacheHitRate = summary.effective_input_tokens
+        ? (summary.cache_hit_tokens / summary.effective_input_tokens) * 100
+        : 0;
     const topline = `
         <div class="task-token-topline">
             <div class="task-token-stat"><strong>${esc(formatTokenCount(summary.input_tokens))}</strong><span>总输入</span></div>
             <div class="task-token-stat"><strong>${esc(formatTokenCount(summary.output_tokens))}</strong><span>总输出</span></div>
             <div class="task-token-stat"><strong>${esc(formatTokenCount(summary.cache_hit_tokens))}</strong><span>缓存命中</span></div>
+            <div class="task-token-stat"><strong>${cacheHitRate.toFixed(1)}%</strong><span>缓存命中率</span></div>
             <div class="task-token-stat"><strong>${esc(formatTokenCount(summary.call_count))}</strong><span>模型调用</span></div>
         </div>
         <div class="task-token-meta">
             ${partialNote}
-            <span class="task-token-subtle">有 usage ${esc(formatTokenCount(summary.calls_with_usage))} · 缺失 ${esc(formatTokenCount(summary.calls_without_usage))}</span>
         </div>
     `;
     if (!summary.call_count) {

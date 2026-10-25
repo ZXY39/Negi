@@ -12288,10 +12288,6 @@ textarea {
     color: var(--warning);
 }
 
-.task-token-subtle {
-    color: var(--text-secondary);
-}
-
 .task-token-model-list {
     display: flex;
     flex-direction: column;

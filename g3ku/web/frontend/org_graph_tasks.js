@@ -1322,7 +1322,6 @@ function resetTaskView() {
     syncTaskTreeHeaderState(null);
     refreshTaskDetailScrollRegions();
     if (U.taskTokenButton) U.taskTokenButton.disabled = true;
-    if (U.taskTokenSummaryText) U.taskTokenSummaryText.textContent = "任务级 token 消耗统计；窗口打开期间不自动刷新，可点「刷新」手动更新。";
     if (U.taskTokenContent) U.taskTokenContent.innerHTML = '<div class="empty-state">请选择一个任务后查看 token 统计。</div>';
     setTaskTokenStatsOpen(false);
     setTaskSelectionEmptyVisible(false);

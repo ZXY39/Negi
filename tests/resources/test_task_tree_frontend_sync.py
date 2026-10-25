@@ -1627,8 +1627,9 @@ def test_task_token_ledger_refresh_refetches_and_keys_rows_by_node_and_index() -
             buttonLabel: refreshButton.textContent,
             buttonDisabled: refreshButton.disabled,
             successToast: toasts.some((item) => item.kind === "success"),
-            summaryText: U.taskTokenSummaryText.textContent,
             toplineInput: (U.taskTokenContent.innerHTML.match(/<strong>([\\d,]+)<\\/strong><span>总输入/)||[])[1],
+            // 标题下的副文字是固定说明，数字只由顶部五格印一次。
+            subtitleText: String((U.taskTokenSummaryText || {}).textContent ?? ""),
             stillFlagged: S.taskTokenLedgerRefreshing,
           };
 
@@ -1677,8 +1678,9 @@ def test_task_token_ledger_refresh_refetches_and_keys_rows_by_node_and_index() -
     # node:a#5 被服务端版本替换，node:b#5 没被同序号顶掉，node:c#5 新增。
     assert result["afterSuccess"]["rowKeys"] == ["node:b#5", "node:a#5", "node:c#5"]
     assert result["afterSuccess"]["totalsInput"] == 999
-    # 副标题按 effective 口径 = 输入 999 + 缓存命中 5；不得把缓存命中再加第二次。
-    assert result["afterSuccess"]["summaryText"] == "总输入 1,004 · 总输出 20 · 缓存命中 5"
+    # 顶部五格按 effective 口径 = 输入 999 + 缓存命中 5；不得把缓存命中再加第二次。
+    assert result["afterSuccess"]["toplineInput"] == "1,004"
+    assert result["afterSuccess"]["subtitleText"] == ""
     assert result["afterSuccess"]["buttonLabel"] == "刷新"
     assert result["afterSuccess"]["buttonDisabled"] is False
     assert result["afterSuccess"]["successToast"] is True
@@ -1925,12 +1927,23 @@ def test_render_task_token_stats_uses_effective_input_tokens_for_hit_rate() -> N
         vm.runInThisContext(tasksCode.slice(tokenStatsStart, tokenStatsEnd));
 
         renderTaskTokenStats();
+        const tiles = Array.from(U.taskTokenContent.innerHTML.matchAll(/<strong>([^<]*)<\\/strong><span>([^<]+)<\\/span>/g))
+          .map((match) => `${match[2]}=${match[1]}`);
         console.log(JSON.stringify({
+          tiles,
           html: U.taskTokenContent.innerHTML,
         }));
         """
     )
 
+    # 顶部五格并列，缓存命中率排在总调用之前；口径 = 缓存命中 / (新增输入 + 缓存命中) = 40/140。
+    assert result["tiles"] == [
+        "总输入=140",
+        "总输出=12",
+        "缓存命中=40",
+        "缓存命中率=28.6%",
+        "模型调用=1",
+    ]
     assert "28.6%" in result["html"]
 
 
