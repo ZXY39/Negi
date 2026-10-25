@@ -131,6 +131,7 @@ from main.runtime.model_route import build_model_route_plan
 from main.runtime.node_mailbox import (
     REJECT_TARGET_LIST_UNPARSED,
     TARGET_LIST_UNPARSED_HINT,
+    delivery_defers_wake,
     error_escalation_hint,
     message_fingerprint,
     normalize_targets,
@@ -4532,13 +4533,19 @@ class MainRuntimeService:
         node: Any,
         priority: str,
         park_state: str = '',
+        sender_origin: str = '',
     ) -> bool:
-        """停靠策略只有一个：任何可注入未读都会唤醒。
+        """停靠策略：任何可注入未读都会唤醒，只有一档例外。
 
-        `priority` / `park_state` 保留在签名里是因为调用方与测试仍按投递判定
-        传值；批次等待是落箱时的 held 状态，不在这里判。
+        例外由 `main/runtime/node_mailbox.delivery_defers_wake` 判：人发给暂停
+        节点的消息只落箱，唤醒会把操作员按下的暂停位顺手清掉。
+
+        `priority` 保留在签名里是因为调用方与测试仍按投递判定传值；批次等待是
+        落箱时的 held 状态，不在这里判。
         """
-        _ = task_id, node_id, node, priority, park_state
+        _ = task_id, node_id, node, priority
+        if delivery_defers_wake(target_park_state=park_state, sender_origin=sender_origin):
+            return False
         return True
 
     async def deliver_node_message(
@@ -4566,6 +4573,8 @@ class MainRuntimeService:
         `wake=False` 用于「必须留痕、但不得叫醒收件人」的系统消息：pass 裁决的
         收件人即将终局，reject_no_progress 裁决的收件人刚被判暂停（唤醒会立刻清掉
         暂停位）。消息照常落箱并带 kind/priority，只是不触发 R2 唤醒。
+        同一档后果还有一条不走这个参数：人发给暂停节点的消息由
+        `_delivery_wakes_target` 内部按 `delivery_defers_wake` 免唤醒，落箱待操作员恢复。
         `held=True` 用于 wait_all_children 批次：行照常落箱，但在批次释放前既不
         计入待注入也不唤醒。
         """
@@ -4626,6 +4635,7 @@ class MainRuntimeService:
                         node=node,
                         priority=priority,
                         park_state=park_state,
+                        sender_origin=origin,
                     )
                 ):
                     try:
@@ -4677,6 +4687,7 @@ class MainRuntimeService:
             node=node,
             priority=priority,
             park_state=park_state,
+            sender_origin=origin,
         ):
             try:
                 wake_outcome = await self.wake_node_on_message(

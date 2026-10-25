@@ -48,6 +48,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 
 - Node cache misses, restart-seed continuity, token preflight/compression questions → `context-and-cache-troubleshooting.md` (+ `runtime-overview.md`)
 - 节点信箱投递（`send_message` / 验收驳回 / `child_abnormal_pause`）、`waiting_children` 重放、停在等待档的节点被唤醒 → `main-task-runtime.md`「节点信箱与唤醒（现行）」+ `operations-and-maintenance.md`「节点投递与冻结/复活排查」
+- 网页给暂停节点发了消息、节点照旧不动且没有报错 → 设计内：该档落箱不唤醒，恢复按钮在操作员手上，合同见 `main-task-runtime.md`「节点信箱与唤醒（现行）」+ `web-and-admin.md`「Task Message Distribution UI Contract（已删除）」的节点消息输入框一条
 - （历史，已删除）追加通知后任务停在 paused / 红色「消息分发失败」横幅 / epoch state=failed：distribution epoch 已整体删除，按 `main-task-runtime.md`「附录 A：已删除的 distribution epoch（历史说明，勿据此实现）」理解旧库数据，不要按它排障。
 - 想知道"每条节点消息走到哪一步"（待处理 / 已消费 / 旧库里的 received·frozen 投影）→ `web-and-admin.md`「Task Message Distribution UI Contract（已删除）」的信箱三态三条 + `main-task-runtime.md`「节点信箱与唤醒（现行）」；节点详情已显示重试中而 toast 不出现 → `web-and-admin.md`「Model Retry Visibility UI Contract」
 - 任务非终态、一批验收节点长期 `in_progress` 而派发计数为 0 → 先按 `operations-and-maintenance.md`「节点投递与冻结/复活排查」的签名分诊（`final acceptance round re-dispatched after interruption` = 验收轮按持久状态重派；`orphan node parked as candidate` = 无人驱动又无重放路径，已可见地暂停），合同见 `main-task-runtime.md`「验收三档裁决（P4）」与「Node-Level Pause and Recovery」；派发计数始终为 0 时再核 `main-task-runtime.md`「验收节点：提前创建、激活与握手重派发」的两个催命点（提交后重排一趟、扫描先于通知复派）

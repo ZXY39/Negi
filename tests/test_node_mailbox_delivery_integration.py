@@ -153,10 +153,10 @@ class TestDelivery:
         assert service.store.list_task_node_notifications(TASK, CHILD) == []
 
     @pytest.mark.asyncio
-    async def test_paused_target_refuses_human_text(self, tmp_path, monkeypatch):
+    async def test_paused_target_keeps_human_text_as_unconsumed_mail(self, tmp_path, monkeypatch):
         service = _service(tmp_path)
         _seed(service, phase='before_model')
-        _stub_wake(monkeypatch, service)
+        calls = _stub_wake(monkeypatch, service)
         service.store.update_node(
             CHILD, lambda record: record.model_copy(update={'is_paused': True})
         )
@@ -164,8 +164,33 @@ class TestDelivery:
         result = await service.deliver_node_message(
             task_id=TASK, target_node_id=CHILD, message='are you ok', origin='user'
         )
-        assert result['status'] == 'rejected'
-        assert result['reason'] == 'target_paused_requires_resume'
+
+        assert result['status'] == 'delivered'
+        assert result['wake'] == ''
+        assert calls == []
+        stored = service.store.list_task_node_notifications(TASK, CHILD)
+        assert len(stored) == 1
+        assert stored[0].status == 'delivered'
+        assert stored[0].kind == 'user_direct'
+        # 免唤醒存在的理由就是这一位：叫醒路径会顺手清掉操作员按下的暂停。
+        assert service.store.get_node(CHILD).is_paused is True
+
+    @pytest.mark.asyncio
+    async def test_resending_to_a_paused_target_stays_unwoken(self, tmp_path, monkeypatch):
+        service = _service(tmp_path)
+        _seed(service, phase='before_model')
+        calls = _stub_wake(monkeypatch, service)
+        service.store.update_node(
+            CHILD, lambda record: record.model_copy(update={'is_paused': True})
+        )
+        kwargs = dict(task_id=TASK, target_node_id=CHILD, message='are you ok', origin='user')
+
+        first = await service.deliver_node_message(**kwargs)
+        second = await service.deliver_node_message(**kwargs)
+
+        assert first['status'] == 'delivered'
+        assert second['status'] == 'deduplicated'
+        assert calls == []
 
     @pytest.mark.asyncio
     async def test_paused_target_accepts_a_machine_message(self, tmp_path, monkeypatch):

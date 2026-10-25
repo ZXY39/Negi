@@ -1,14 +1,17 @@
 """Delivery rules for the node mailbox.
 
-Two things live here and nowhere else:
+Three things live here and nowhere else:
 
 1. **the delivery matrix** — which target states accept which sender. Terminal
-   targets accept nothing (terminal is absorbing) and a paused target refuses a
-   human's free text while still accepting a machine's message, because the
-   machine has no "resume" button: for it the message *is* the handling path.
-2. **the fingerprint** — dedupe key for retries of the same message.
+   targets accept nothing (terminal is absorbing); everything else lands in the
+   mailbox, including a human's free text to a paused node.
+2. **the wake consequence** — a paused node is not woken by that human message,
+   only by the operator's resume button. A machine's message *does* wake it,
+   because the machine has no resume button: for it the message is the handling
+   path.
+3. **the fingerprint** — dedupe key for retries of the same message.
 
-Both are pure so the matrix can be read in one place instead of being
+All three are pure so the matrix can be read in one place instead of being
 reconstructed from scattered guards.
 """
 
@@ -23,7 +26,6 @@ PARK_WAITING: Final = 'waiting'
 PARK_RUNNING: Final = 'running'
 
 REJECT_TARGET_TERMINAL: Final = 'target_terminal'
-REJECT_TARGET_PAUSED_NEEDS_RESUME: Final = 'target_paused_requires_resume'
 REJECT_UNKNOWN_TARGET_STATE: Final = 'unknown_target_state'
 # 寻址层的两个拒收档，必须分开：`target_not_in_task` 要模型改地址，
 # `target_list_unparsed` 要它改**形状**（它想发的是列表，只是文本没解析成列表）。
@@ -35,7 +37,7 @@ TARGET_LIST_UNPARSED_HINT: Final = (
     'Pass `to` as one node id, or as a real JSON list of node ids.'
 )
 
-# 用户自由文本对暂停态拒收；机器发送方照常投递并激活（设计 §2.4 注）。
+# 用户自由文本是唯一「落箱但不叫醒」的发送方，其余发送方照常被唤醒。
 _USER_ORIGINS = frozenset({'user'})
 
 
@@ -44,17 +46,30 @@ def plan_delivery(*, target_park_state: str, sender_origin: str) -> tuple[bool, 
 
     ``target_park_state`` comes from :func:`main.runtime.node_wake.node_park_state`
     so the matrix and the wake decision agree on what "paused" and "terminal" mean.
+    Only a terminal target refuses anything, and no sender can talk its way past
+    that: ``sender_origin`` deliberately plays no part in acceptance — it decides
+    only the wake consequence, in :func:`delivery_defers_wake`.
     """
     state = str(target_park_state or '').strip().lower()
-    origin = str(sender_origin or '').strip().lower()
     if state in {PARK_TERMINAL}:
         # P3: 终态吸收。回执由调用方负责，这里只给判定。
         return False, REJECT_TARGET_TERMINAL
-    if state == PARK_PAUSED and origin in _USER_ORIGINS:
-        return False, REJECT_TARGET_PAUSED_NEEDS_RESUME
     if state in {PARK_PAUSED, PARK_WAITING, PARK_RUNNING}:
         return True, ''
     return False, REJECT_UNKNOWN_TARGET_STATE
+
+
+def delivery_defers_wake(*, target_park_state: str, sender_origin: str) -> bool:
+    """True when the message lands as unconsumed mail instead of reviving the node.
+
+    A human addressing a paused node is answering the pause, not lifting it: waking
+    would clear the pause flag through ``wake_parked_node``, so sending a message
+    would silently resume what the operator stopped. The row stays unread until the
+    resume button, and the node's next turn folds it in like any other mail.
+    """
+    state = str(target_park_state or '').strip().lower()
+    origin = str(sender_origin or '').strip().lower()
+    return state == PARK_PAUSED and origin in _USER_ORIGINS
 
 
 def message_fingerprint(

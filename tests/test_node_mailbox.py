@@ -11,9 +11,9 @@ from main.runtime.node_mailbox import (
     PARK_WAITING,
     REJECT_TARGET_LIST_UNPARSED,
     REJECT_TARGET_NOT_IN_TASK,
-    REJECT_TARGET_PAUSED_NEEDS_RESUME,
     REJECT_TARGET_TERMINAL,
     REJECT_UNKNOWN_TARGET_STATE,
+    delivery_defers_wake,
     message_fingerprint,
     normalize_targets,
     plan_delivery,
@@ -29,15 +29,9 @@ class TestDeliveryMatrix:
             REJECT_TARGET_TERMINAL,
         )
 
-    def test_paused_rejects_human_free_text(self):
-        assert plan_delivery(target_park_state=PARK_PAUSED, sender_origin='user') == (
-            False,
-            REJECT_TARGET_PAUSED_NEEDS_RESUME,
-        )
-
-    @pytest.mark.parametrize('origin', ['parent', 'node', 'frontdoor', 'system'])
-    def test_paused_accepts_machine_senders(self, origin):
-        # 机器发送方没有恢复按钮，消息本身就是处理手段。
+    @pytest.mark.parametrize('origin', ['user', 'parent', 'node', 'frontdoor', 'system'])
+    def test_paused_accepts_every_sender(self, origin):
+        # 收件人是谁都由发送方决定不了；暂停只改变叫醒与否（见 delivery_defers_wake）。
         assert plan_delivery(target_park_state=PARK_PAUSED, sender_origin=origin) == (True, '')
 
     @pytest.mark.parametrize('origin', ['user', 'frontdoor', 'node', 'parent'])
@@ -50,6 +44,20 @@ class TestDeliveryMatrix:
             False,
             REJECT_UNKNOWN_TARGET_STATE,
         )
+
+
+class TestDeferredWake:
+    def test_human_mail_to_a_paused_node_waits_for_the_resume_button(self):
+        assert delivery_defers_wake(target_park_state=PARK_PAUSED, sender_origin='user')
+
+    @pytest.mark.parametrize('origin', ['frontdoor', 'node', 'parent', 'system'])
+    def test_machine_senders_still_wake_a_paused_node(self, origin):
+        # 机器没有恢复按钮，唤醒就是它的处理手段；摘掉唤醒等于消息永远读不到。
+        assert not delivery_defers_wake(target_park_state=PARK_PAUSED, sender_origin=origin)
+
+    @pytest.mark.parametrize('state', [PARK_RUNNING, PARK_WAITING, PARK_TERMINAL])
+    def test_only_the_paused_target_defers(self, state):
+        assert not delivery_defers_wake(target_park_state=state, sender_origin='user')
 
 
 class TestFingerprint:
