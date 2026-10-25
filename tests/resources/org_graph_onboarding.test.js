@@ -55,10 +55,10 @@ function makeElement(id, { backdrop = false } = {}) {
         },
         focus() {},
         click() {
-            listeners.click?.({ target: this, preventDefault() {} });
+            listeners.click?.({ target: this, preventDefault() {}, stopPropagation() {} });
         },
         fire(type, event = {}) {
-            listeners[type]?.({ target: this, preventDefault() {}, ...event });
+            listeners[type]?.({ target: this, preventDefault() {}, stopPropagation() {}, ...event });
         },
     };
     return element;
@@ -80,7 +80,6 @@ function buildHarness({
         "persona-onboarding-error",
         "persona-onboarding-skip-btn",
         "persona-onboarding-next-btn",
-        "persona-onboarding-close-btn",
         "persona-dialog-backdrop",
         "persona-dialog",
         "persona-dialog-description",
@@ -218,6 +217,11 @@ test("persona onboarding opens on first run, skip moves to the model step", asyn
         "the backdrop must be visible and interactive, not only unhidden",
     );
     assert.equal(harness.elements["persona-onboarding-description"].value, "旧描述");
+
+    // A backdrop click must not discard the first-run step; only 跳过 (or 下一步) does.
+    harness.elements["persona-onboarding-backdrop"].click();
+    assert.equal(harness.elements["persona-onboarding-backdrop"].hidden, false);
+    assert.equal(harness.elements["persona-onboarding-backdrop"].classList.contains("is-open"), true);
 
     harness.elements["persona-onboarding-skip-btn"].click();
     await flush();
@@ -386,6 +390,13 @@ test("persona settings dialog initializes an empty description and keeps photos 
     assert.ok(HTML.includes('id="persona-nav-dot"'));
     assert.ok(HTML.includes('id="persona-button-dot"'));
     assert.ok(HTML.includes('id="persona-onboarding-backdrop"'));
+    const onboardingStart = HTML.indexOf('id="persona-onboarding-backdrop"');
+    const onboardingEnd = HTML.indexOf('id="persona-dialog-backdrop"');
+    assert.ok(onboardingStart > 0 && onboardingEnd > onboardingStart);
+    const onboardingDialog = HTML.slice(onboardingStart, onboardingEnd);
+    assert.ok(!onboardingDialog.includes("persona-onboarding-close-btn"));
+    assert.ok(onboardingDialog.includes("persona-onboarding-skip-btn"));
+    assert.ok(onboardingDialog.includes("persona-onboarding-next-btn"));
     const start = HTML.indexOf('id="persona-dialog-backdrop"');
     const end = HTML.indexOf('id="password-change-backdrop"');
     assert.ok(start > 0 && end > start);

@@ -29,7 +29,6 @@
         U.onboardingError = document.getElementById("persona-onboarding-error");
         U.onboardingSkip = document.getElementById("persona-onboarding-skip-btn");
         U.onboardingNext = document.getElementById("persona-onboarding-next-btn");
-        U.onboardingClose = document.getElementById("persona-onboarding-close-btn");
         U.personaBackdrop = document.getElementById("persona-dialog-backdrop");
         U.personaDialog = document.getElementById("persona-dialog");
         U.personaDescription = document.getElementById("persona-dialog-description");
@@ -458,7 +457,11 @@
         });
         U.onboardingNext?.addEventListener("click", () => void submitPersonaStep());
         U.onboardingSkip?.addEventListener("click", () => void skipPersonaStep());
-        U.onboardingClose?.addEventListener("click", () => void skipPersonaStep());
+        // The onboarding modal is dismissed only by the explicit 跳过 / 下一步 actions;
+        // a backdrop click must not discard the first-run step.
+        U.onboardingBackdrop?.addEventListener("click", (event) => {
+            if (event.target === U.onboardingBackdrop) event.stopPropagation();
+        });
         U.onboardingPhotoGrid?.addEventListener("click", (event) => openPhotoViewer(U.onboardingPhotoGrid, event));
 
         U.settingsPersonaButton?.addEventListener("click", () => void openPersonaDialog());
@@ -477,9 +480,16 @@
             if (event.key !== "Escape") return;
             if (U.personaBackdrop && !U.personaBackdrop.hidden) {
                 event.preventDefault();
+                event.stopPropagation();
                 closePersonaDialog();
+                return;
             }
-        });
+            if (U.onboardingBackdrop && !U.onboardingBackdrop.hidden) {
+                // Escape must not dismiss the first-run modal; only its buttons do.
+                event.preventDefault();
+                event.stopPropagation();
+            }
+        }, true);
     }
 
     window.G3kuOnboarding = {
