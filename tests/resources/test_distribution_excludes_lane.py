@@ -10,7 +10,9 @@ rather than deleted files (a delete would show up as tracked changes and
 
 from __future__ import annotations
 
+import os
 import re
+import sys
 import shutil
 import subprocess
 from pathlib import Path
@@ -64,6 +66,8 @@ def test_every_listed_name_is_a_tracked_top_level() -> None:
             ["git", "-C", str(REPO_ROOT), "ls-files"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=True,
         ).stdout.splitlines()
         if line
@@ -141,6 +145,8 @@ def test_exclusion_leaves_the_device_repository_clean(tmp_path: Path) -> None:
             [git, "-C", str(cwd), *args],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=True,
         )
 
@@ -159,6 +165,8 @@ def test_exclusion_leaves_the_device_repository_clean(tmp_path: Path) -> None:
         [git, "clone", "--depth", "1", "--branch", "v9.9.9", "--no-checkout", str(origin), str(stage)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=True,
     )
     patterns = ["/*"] + [f"!/{name}/" for name in _read_list(LIST_FILE)]
@@ -257,12 +265,28 @@ def test_archive_lane_skips_the_listed_top_levels(tmp_path: Path) -> None:
         [bash, "-c", script],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     assert listing.returncode == 0, listing.stderr
     landed = {line for line in listing.stdout.splitlines() if line}
     assert landed == {"g3ku", "packaging", "docs"}, landed
     for name in _read_list(LIST_FILE):
         assert not (target / name).exists(), f"{name} reached the device through the archive lane"
+
+
+def test_sparse_patterns_reach_git_as_one_quoted_array() -> None:
+    """`/*` unquoted is a glob, and bash expands it against the current directory.
+
+    On a Linux device that turns the rule set into `/bin /etc /usr ...`, so the
+    checkout materializes nothing but `.git`. The array form is the only shape that
+    survives, so the guard is textual.
+    """
+    text = (REPO_ROOT / "install.sh").read_text(encoding="utf-8")
+    lane = text[text.index("stage_code() {") : text.index("copy_checkout_into_root() {")]
+    assert 'local -a patterns' in lane, "patterns must be an array"
+    assert '"${patterns[@]}"' in lane, "the array must expand quoted, not bare"
+    assert "sparse-checkout set --no-cone $patterns" not in lane
 
 
 def test_the_shipped_validator_refuses_a_nested_name(tmp_path: Path) -> None:
@@ -278,13 +302,71 @@ def test_the_shipped_validator_refuses_a_nested_name(tmp_path: Path) -> None:
         + _bash_function("exclude_names_from_stream")
         + "printf '# comment\\ntests\\nsources/api\\n' | exclude_names_from_stream\n"
     )
-    result = subprocess.run([bash, "-c", script], capture_output=True, text=True)
+    result = subprocess.run([bash, "-c", script], capture_output=True, text=True, encoding="utf-8", errors="replace")
     assert result.returncode != 0, result.stdout
     assert "not a single top-level name" in result.stderr, result.stderr
     assert "tests" in result.stdout  # the good name is accepted before the bad one stops it
 
 
-def test_a_tag_older_than_the_list_installs_the_full_tree(tmp_path: Path) -> None:
+def test_git_lane_stages_the_trimmed_tree(tmp_path: Path) -> None:
+    """Execute install.sh's own `stage_code` against a local origin.
+
+    This is the shell installer's git lane: `--no-checkout`, the shipped list read out
+    of the fetched commit, sparse rules, then `checkout`. Running the real function
+    text (rather than a restatement) is the point - the awk validator bug was only
+    visible this way.
+    """
+    bash = shutil.which("bash")
+    git = shutil.which("git")
+    if not bash or not git:
+        pytest.skip("this lane needs both bash and git on PATH")
+    if sys.platform == "win32":
+        pytest.skip(
+            "install.sh targets Linux and macOS; Git-for-Windows bash rewrites both the "
+            "leading-slash sparse patterns and the staging paths, so running it here "
+            "measures the emulator, not the script. The ubuntu CI runner executes it."
+        )
+
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    for rel in ("g3ku/app.py", "README.md", "tests/test_a.py", "work/scratch.py", ".github/ci.yml"):
+        leaf = origin / rel
+        leaf.parent.mkdir(parents=True, exist_ok=True)
+        leaf.write_text("payload\n", encoding="utf-8")
+    shipped_list = origin / "packaging" / "distribution-excludes.txt"
+    shipped_list.parent.mkdir(parents=True, exist_ok=True)
+    shipped_list.write_text(LIST_FILE.read_text(encoding="utf-8"), encoding="utf-8")
+    for args in (
+        ["init", "-q", "--initial-branch=main", "."],
+        ["config", "user.name", "lane test"],
+        ["config", "user.email", "lane@test.local"],
+        ["add", "-A"],
+        ["commit", "-q", "-m", "seed"],
+        ["tag", "-a", "v1.0.0", "-m", "seed"],
+    ):
+        subprocess.run([git, "-C", str(origin), *args], capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
+
+    script = (
+        "set -euo pipefail\n"
+        + "fail() { printf 'FAIL: %s\\n' \"$1\" >&2; exit 1; }\n"
+        + "log() { :; }\n"
+        + _bash_function("exclude_names_from_stream")
+        + _bash_function("stage_code")
+        + f"REPO_GIT='{origin.as_posix()}'\n"
+        + "REF='v1.0.0'\n"
+        + "stage_code\n"
+        + 'printf "CHECKOUT=%s\\n" "$CHECKOUT_DIR"\n'
+        + 'find "$CHECKOUT_DIR" -mindepth 1 -maxdepth 1 -not -name .git -printf "%f\\n" | sort\n'
+    )
+    # Git-for-Windows bash rewrites any argv word that starts with `/` into a Windows
+    # path, so `!/tests/` would reach git as `!C:/Program Files/Git/tests/`. install.sh
+    # runs on Linux and macOS, where no such conversion happens; disabling it here is
+    # what makes the harness speak the shipped script's real argv instead of this box's.
+    env = {**os.environ, "MSYS2_ARG_CONV_EXCL": "*", "MSYS_NO_PATHCONV": "1"}
+    result = subprocess.run([bash, "-c", script], capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
+    assert result.returncode == 0, result.stderr
+    staged = {line for line in result.stdout.splitlines() if line and not line.startswith("CHECKOUT=")}
+    assert staged == {"g3ku", "README.md", "packaging"}, staged
     """Back-compat: `-Ref v2.6.0` on a new installer must not fail or half-install.
 
     The list travels inside the payload, so a release predating it simply has no
@@ -305,13 +387,15 @@ def test_a_tag_older_than_the_list_installs_the_full_tree(tmp_path: Path) -> Non
         ["commit", "-q", "-m", "before the list"],
         ["tag", "-a", "v0.0.1", "-m", "before the list"],
     ):
-        subprocess.run([git, "-C", str(origin), *args], capture_output=True, text=True, check=True)
+        subprocess.run([git, "-C", str(origin), *args], capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
 
     stage = tmp_path / "stage"
     subprocess.run(
         [git, "clone", "--depth", "1", "--branch", "v0.0.1", "--no-checkout", str(origin), str(stage)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=True,
     )
     # This is what Get-CheckoutStage / stage_code do when the list file is absent:
@@ -322,11 +406,11 @@ def test_a_tag_older_than_the_list_installs_the_full_tree(tmp_path: Path) -> Non
         text=True,
     )
     assert absent.returncode != 0
-    subprocess.run([git, "-C", str(stage), "checkout"], capture_output=True, text=True, check=True)
+    subprocess.run([git, "-C", str(stage), "checkout"], capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
     assert (stage / "tests" / "test_a.py").is_file()
     assert (
         subprocess.run(
-            [git, "-C", str(stage), "status", "--porcelain"], capture_output=True, text=True, check=True
+            [git, "-C", str(stage), "status", "--porcelain"], capture_output=True, text=True, encoding="utf-8", errors="replace", check=True
         ).stdout.strip()
         == ""
     )

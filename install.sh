@@ -158,15 +158,18 @@ stage_code() {
     # 排除靠 sparse 规则，不是删文件：checkout 之后再删，每个被删的文件都会被判成
     # "跟踪文件已修改"，而 -Upgrade 第一道门就是"跟踪文件没动过"，删一次就把这台
     # 设备永久锁在升级门外。规则写在 .git 里，跟着拷贝走，以后的 checkout 也照规则出树。
-    local names='' patterns='/*' name
+    # 模式必须走数组：`/*` 未加引号时会被 bash 当 glob 按当前目录展开（在 / 下就是
+    # /bin /etc /usr…），那样 sparse 规则全是绝对路径，检出来的树只剩 .git。
+    local names='' name
+    local -a patterns=('/*')
     if git -C "$CHECKOUT_DIR" cat-file -e 'HEAD:packaging/distribution-excludes.txt' 2>/dev/null; then
       names="$(git -C "$CHECKOUT_DIR" show 'HEAD:packaging/distribution-excludes.txt' | exclude_names_from_stream)" \
         || fail 'packaging/distribution-excludes.txt is malformed'
     fi
-    for name in $names; do patterns="$patterns !/$name/"; done
+    for name in $names; do patterns+=("!/$name/"); done
     if [ -n "$names" ]; then
       log "sparse checkout: excluding $(printf '%s' "$names" | tr '\n' ' ')"
-      git -C "$CHECKOUT_DIR" sparse-checkout set --no-cone $patterns || fail 'sparse-checkout failed'
+      git -C "$CHECKOUT_DIR" sparse-checkout set --no-cone "${patterns[@]}" || fail 'sparse-checkout failed'
     fi
     git -C "$CHECKOUT_DIR" checkout || fail 'checkout failed'
     return
