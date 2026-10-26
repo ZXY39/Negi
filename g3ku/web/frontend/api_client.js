@@ -15,6 +15,7 @@ Object.assign(
     window.ApiDomains.audit,
     window.ApiDomains.resources,
     window.ApiDomains.external,
+    window.ApiDomains.stickers,
 );
 
 window.ApiClient = ApiClient;

@@ -90,6 +90,10 @@
                 <i data-lucide="wrench"></i>
                 <span>Tool</span>
             </button>
+            <button class="nav-item" data-view="stickers" type="button">
+                <i data-lucide="sticker"></i>
+                <span>表情包</span>
+            </button>
             <button class="nav-item" data-view="memory" type="button">
                 <i data-lucide="brain"></i>
                 <span>记忆</span>
@@ -538,6 +542,53 @@
                         <div id="tool-detail-content" class="resource-detail-shell"></div>
                     </section>
                 </div>
+            </section>
+
+            <section id="view-stickers" class="view-section" style="display: none;">
+                <header class="content-header resource-header compact-resource-header">
+                    <div class="resource-header-title">
+                        <h1>表情包管理</h1>
+                    </div>
+                    <div class="resource-header-actions compact-resource-header-actions">
+                        <button id="sticker-refresh-btn" class="toolbar-btn ghost" type="button">刷新</button>
+                        <input id="sticker-search-input" class="resource-search resource-header-search" type="search"
+                            placeholder="搜索包、主题或分类">
+                        <span id="sticker-busy-label" class="sticker-busy-label" aria-live="polite" hidden></span>
+                    </div>
+                </header>
+
+                <div class="resource-layout sticker-layout">
+                    <aside class="resource-list-panel sticker-pack-panel">
+                        <div id="sticker-pack-list" class="sticker-pack-list"></div>
+                        <div class="sticker-settings">
+                            <div class="sticker-settings-title">发送策略</div>
+                            <label class="sticker-settings-row">
+                                <span>每轮最多</span>
+                                <select id="sticker-max-per-reply" class="resource-select" aria-label="每轮最多发送几张">
+                                    <option value="0">不发</option>
+                                    <option value="1">1 张</option>
+                                    <option value="2">2 张</option>
+                                    <option value="3">3 张</option>
+                                    <option value="4">4 张</option>
+                                </select>
+                            </label>
+                            <label class="sticker-settings-row" for="sticker-semantic-toggle">
+                                <span>精确取图</span>
+                                <input id="sticker-semantic-toggle" class="ui-checkbox-input" type="checkbox">
+                                <span class="ui-checkbox-box" aria-hidden="true"></span>
+                            </label>
+                            <p class="sticker-settings-hint">精确取图要先给表情包生成 caption，否则检索不出东西。</p>
+                        </div>
+                        <div class="resource-pagination">
+                            <div id="sticker-pack-info" class="resource-page-indicator" aria-live="polite">共 0 个包</div>
+                        </div>
+                    </aside>
+
+                    <section class="resource-detail-panel">
+                        <div id="sticker-detail" class="sticker-detail"></div>
+                    </section>
+                </div>
+                <input id="sticker-upload-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
             </section>
 
             <section id="view-memory" class="view-section" style="display: none;">
@@ -1393,6 +1444,7 @@
     <script src="client_api/audit.js"></script>
     <script src="client_api/resources.js"></script>
     <script src="client_api/external.js"></script>
+    <script src="client_api/stickers.js"></script>
     <script src="api_client.js"></script>
     <script src="org_graph_bootstrap.js"></script>
     <script src="tasks/tree-store.js"></script>
@@ -1419,12 +1471,14 @@
     <script src="models/role-view.js"></script>
     <script src="models/actions.js"></script>
     <script src="resources/store.js"></script>
+    <script src="stickers/store.js"></script>
     <script src="org_graph_app.js"></script>
     <script src="tasks/hall-store.js"></script>
     <script src="tasks/hall-view.js"></script>
     <script src="tasks/ws-router.js"></script>
     <script src="org_graph_tasks.js"></script>
     <script src="org_graph_resources.js"></script>
+    <script src="org_graph_stickers.js"></script>
     <script src="org_graph_ceo_governance.js"></script>
     <script src="org_graph_llm.js"></script>
     <script src="org_graph_external.js"></script>

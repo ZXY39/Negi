@@ -523,11 +523,21 @@ const U = {
     viewTasks: document.getElementById("view-tasks-list"),
     viewSkills: document.getElementById("view-skills"),
     viewTools: document.getElementById("view-tools"),
+    viewStickers: document.getElementById("view-stickers"),
     viewMemory: document.getElementById("view-memory"),
     viewModels: document.getElementById("view-models"),
     viewExternal: document.getElementById("view-external"),
     viewTaskDetails: document.getElementById("view-task-details"),
     viewAudit: document.getElementById("view-audit"),
+    stickerRefresh: document.getElementById("sticker-refresh-btn"),
+    stickerSearch: document.getElementById("sticker-search-input"),
+    stickerPackList: document.getElementById("sticker-pack-list"),
+    stickerPackInfo: document.getElementById("sticker-pack-info"),
+    stickerDetail: document.getElementById("sticker-detail"),
+    stickerBusyLabel: document.getElementById("sticker-busy-label"),
+    stickerUploadInput: document.getElementById("sticker-upload-input"),
+    stickerMaxPerReply: document.getElementById("sticker-max-per-reply"),
+    stickerSemanticToggle: document.getElementById("sticker-semantic-toggle"),
     auditNavBadge: document.getElementById("audit-nav-badge"),
     auditEventList: document.getElementById("audit-event-list"),
     auditEventInfo: document.getElementById("audit-event-info"),
@@ -9903,7 +9913,7 @@ function bindMemoryCardToggles() {
 const MEMORY_QUEUE_BODY_CHARS = 220;
 
 function switchView(view) {
-    const map = { ceo: U.viewCeo, tasks: U.viewTasks, skills: U.viewSkills, tools: U.viewTools, memory: U.viewMemory, models: U.viewModels, external: U.viewExternal, audit: U.viewAudit, "task-details": U.viewTaskDetails };
+    const map = { ceo: U.viewCeo, tasks: U.viewTasks, skills: U.viewSkills, tools: U.viewTools, stickers: U.viewStickers, memory: U.viewMemory, models: U.viewModels, external: U.viewExternal, audit: U.viewAudit, "task-details": U.viewTaskDetails };
     const navView = view === "task-details" ? "tasks" : view;
     const leavingTaskDetails = view !== "task-details" && !!U.viewTaskDetails?.classList.contains("active");
     S.view = navView;
@@ -9966,6 +9976,7 @@ function switchView(view) {
     else stopMemoryViewAutoRefresh();
     if (view === "skills") void loadSkills();
     if (view === "tools") void loadTools();
+    if (view === "stickers") void loadStickerView();
     if (view === "memory") {
         if (!S.memoryLoadedOnce) void loadMemoryView();
         else void loadMemoryView({ quiet: true });
@@ -10226,6 +10237,7 @@ function bind() {
     bindModelPage();
     bindTaskHall();
     bindResourcePages();
+    bindStickerPage();
     bindMediaViewer();
     bindGlobalOverlays();
     renderPendingCeoUploads();
