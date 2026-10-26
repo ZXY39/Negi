@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from g3ku.agent.persona import persona_digest
+from g3ku.agent.persona import persona_digest, render_persona_notice
 from g3ku.runtime.frontdoor._ceo_runtime_ops import CeoFrontDoorRuntimeOps
 from g3ku.runtime.frontdoor.message_builder import (
     CeoMessageBuilder,
@@ -92,7 +92,7 @@ async def test_persona_block_follows_memory_and_stays_frozen_until_adopted() -> 
 
 
 @pytest.mark.asyncio
-async def test_persona_block_renders_the_default_identity_and_photo_folder() -> None:
+async def test_persona_block_renders_the_unknown_identity_and_photo_folder() -> None:
     manager = _PersonaManager(document="", persona="")
     result = await _build(_builder(manager), _session())
     persona_rows = [
@@ -104,7 +104,14 @@ async def test_persona_block_renders_the_default_identity_and_photo_folder() -> 
     content = str(persona_rows[0]["content"] or "")
     assert "## 我的人设" in content
     assert "my_image" in content
-    assert "未设置（默认是 Negi）" in content
+    assert "我是谁：未知（在 Negi中运行）" in content
+    assert "未设置（默认是 Negi）" not in content
+
+
+def test_persona_notice_for_missing_persona_asks_the_user() -> None:
+    notice = render_persona_notice("")
+    assert "目前人设不存在，需要向用户询问自己的人设" in notice
+    assert "Respond as Negi" not in notice
 
 
 def test_continuation_strips_and_reinserts_exactly_one_persona_block() -> None:
@@ -249,6 +256,9 @@ def test_frontdoor_prompt_requires_identity_and_persona_photo_handling() -> None
     )
     assert "不要刻意 OOC" in prompt
     assert "头部「我的人设」" in prompt
+    assert "身份未知（只在 Negi 这套 harness 里运行）" in prompt
+    assert "询问用户希望你是谁" in prompt
+    assert "没有给出时，你就是 Negi" not in prompt
     assert "大体相同的，直接合并成一段描述" in prompt
     assert "先问用户保留哪一个" in prompt
     assert "用户发来的是你（主 Agent）的照片或形象时" in prompt

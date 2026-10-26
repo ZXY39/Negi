@@ -35,7 +35,7 @@ def render_persona_block(persona_text: str, *, workspace_root: str | Path) -> st
     body = str(persona_text or "").strip()
     root = Path(workspace_root).resolve()
     photo_dir = root / PERSONA_PHOTO_DIR_NAME
-    who = body if body else "未设置（默认是 Negi）"
+    who = body if body else "未知（在 Negi中运行）"
     return "\n".join(
         [
             "## 我的人设",
@@ -52,7 +52,7 @@ def render_persona_notice(persona_text: str) -> str:
         return "\n".join(
             [
                 heading,
-                "The persona was cleared. Respond as Negi; do not claim another identity.",
+                "目前人设不存在，需要向用户询问自己的人设",
             ]
         )
     return "\n".join(

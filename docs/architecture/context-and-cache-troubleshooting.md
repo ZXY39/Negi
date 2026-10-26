@@ -233,7 +233,7 @@ Heartbeat / cron 不在主 CEO/frontdoor 路径上使用单独的短 `ceo_heartb
 
 - 坑：这个块只在**压缩边界**更新（内联 `token_compression` 轮末、手动压缩），不是每跳现取。块字节一变，可复用前缀就只剩 `system` 与 `tools[]`：实测中位请求要重铺 84% 的正文，其中块本身只占 8%，其余全是被它顶掉的历史——所以更新点被限制在"前缀反正已经断了"的压缩跳；非压缩跳不更新，变化由一次性通知纠正。
 - 不变量：取数是**会话级基座**，首次请求采纳一次，之后只在压缩边界换版本（规则本体见 `runtime-overview.md`「Memory Runtime State」）。两处更新都必须先冲刷复核窗口并落盘记忆批次，再读盘，反序会采纳到旧文档。压缩之间新增/改写/删除的行由修订流增量进上下文（`### Long-term memory updates`，退场行在 `Deleted memories:` 一节）；增量不重投整篇。跨轮可比性投影与 durable 基线两侧都剥这个块，`build_stable_prompt_cache_key` 同样不含它——本地 cache key 对这个块是盲的，判读看 artifact 的 `memory_snapshot` 字段与通知消息。
-- 人设块：`## 我的人设` 是独立稳定消息，排在长期记忆块之后；它同样在首次请求与两处压缩边界采纳，重印之间字节冻结。中途改人设不碰头部字节，由同一条 `[RUNTIME_NOTICE]` 的 `### Persona updates` 投最新正文，`persona_cursor` 按 digest 去重；压缩后头部重印、游标对齐。判读顺序：先确认头部块是不是压缩后的版本，再看通知里有没有 Persona updates；两者都在而模型仍按旧人设说话，才是投递链问题。合同见 `runtime-overview.md`「人设块、人设 note 与身份」。
+- 人设块：`## 我的人设` 是独立稳定消息，排在长期记忆块之后；它同样在首次请求与两处压缩边界采纳，重印之间字节冻结。中途改人设不碰头部字节，由同一条 `[RUNTIME_NOTICE]` 的 `### Persona updates` 投最新正文（人设为空时投询问指令），`persona_cursor` 按 digest 去重；压缩后头部重印、游标对齐。通知消息在压缩跳被丢弃，人设正文由重印后的头部承担，空人设的询问指令不重投。判读顺序：先确认头部块是不是压缩后的版本，再看通知里有没有 Persona updates；两者都在而模型仍按旧人设说话，才是投递链问题。合同见 `runtime-overview.md`「人设块、人设 note 与身份」。
 - 症状：`adoption_reason` 读成 `idle_refresh` → 这条来自历史 artifact；运行时只产 `session_first_request` / `token_compression` / `manual_compression` 三档。某轮命中前缀在第二条消息就分叉、`memory_snapshot.hash` 同时变了、而该跳不是压缩跳 → 基座被非边界路径改写，属缺陷。「用户说记住/忘掉，模型照旧」→ 先看该会话 `memory_cursor` 是否落后于最新修订，再看下一跳有没有 `### Long-term memory updates`；两者都在却没进上下文，才是投递链问题。
 
 ### 3.18 静态声明钉在请求体头部
