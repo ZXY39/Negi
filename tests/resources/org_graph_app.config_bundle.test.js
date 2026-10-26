@@ -206,6 +206,8 @@ function mountDialogs(app) {
     U.configBundleExportConfig.checked = true;
     U.configBundleExportMemory = new StubHTMLElement();
     U.configBundleExportMemory.checked = false;
+    U.configBundleExportPersona = new StubHTMLElement();
+    U.configBundleExportPersona.checked = false;
     U.configBundleExportPasswordField = new StubHTMLElement();
     U.configBundleExportPasswordField.hidden = true;
     U.configBundleExportConfirmField = new StubHTMLElement();
@@ -231,6 +233,8 @@ function mountDialogs(app) {
     U.configBundleImportConfig.checked = true;
     U.configBundleImportMemory = new StubHTMLElement();
     U.configBundleImportMemory.checked = false;
+    U.configBundleImportPersona = new StubHTMLElement();
+    U.configBundleImportPersona.checked = false;
     U.configBundleImportPassword = new StubHTMLElement();
     U.configBundleImport = new StubHTMLElement();
 }
@@ -305,7 +309,7 @@ test("勾选态下不填任何口令就能导出，提交空口令", async () =>
     await app.submitConfigBundleExport();
 
     assert.deepEqual(plain(app.calls), [
-        ["export", { password: "", useProjectPassword: true, includeConfig: true, includeMemory: false }],
+        ["export", { password: "", useProjectPassword: true, includeConfig: true, includeMemory: false, includePersona: false }],
     ]);
     assert.equal(app.anchors.length, 1);
     assert.equal(app.toasts.at(-1).title, "配置包已生成");
@@ -333,7 +337,7 @@ test("自定义口令导出成功后按服务端返回的文件名触发下载�
     await app.submitConfigBundleExport();
 
     assert.deepEqual(plain(app.calls), [
-        ["export", { password: "secret-pass-123", useProjectPassword: false, includeConfig: true, includeMemory: false }],
+        ["export", { password: "secret-pass-123", useProjectPassword: false, includeConfig: true, includeMemory: false, includePersona: false }],
     ]);
     assert.equal(app.anchors.length, 1);
     assert.deepEqual(app.anchors[0].clicks, [
@@ -404,6 +408,7 @@ test("无在跑工作时确认后按原样导入并刷新页面", async () => {
             currentPassword: "local-pass-1",
             includeConfig: true,
             includeMemory: false,
+            includePersona: false,
         }],
         ["reload"],
     ]);
@@ -476,7 +481,7 @@ test("有在跑工作时必须勾选暂停才提交", async () => {
         "import",
         "bundle.g3kucb",
         "secret-pass-123",
-        { confirmRunningWork: true, currentPassword: "local-pass-1", includeConfig: true, includeMemory: false },
+        { confirmRunningWork: true, currentPassword: "local-pass-1", includeConfig: true, includeMemory: false, includePersona: false },
     ]);
 });
 
@@ -502,11 +507,12 @@ test("勾上记忆才提交 includeMemory，提示按面报数", async () => {
         useProjectPassword: true,
         includeConfig: true,
         includeMemory: true,
+        includePersona: false,
     }]);
-    assert.equal(app.toasts.at(-1).text, "共 9 个文件（配置 4、记忆 5）。下载已发起，取消保存则不会落盘；导入时输项目解锁密码。");
+    assert.equal(app.toasts.at(-1).text, "共 9 个文件（配置 4、记忆 5、人设 0）。下载已发起，取消保存则不会落盘；导入时输项目解锁密码。");
 });
 
-test("范围两颗都不勾时导出与导入都不提交", async () => {
+test("范围三颗都不勾时导出与导入都不提交", async () => {
     const app = loadApp();
     app.U.configBundleExportConfig.checked = false;
     await app.submitConfigBundleExport();
@@ -538,22 +544,75 @@ test("只勾记忆时确认文案与载荷都按记忆面走", async () => {
         "import",
         "bundle.g3kucb",
         "secret-pass-123",
-        { confirmRunningWork: false, currentPassword: "local-pass-1", includeConfig: false, includeMemory: true },
+        { confirmRunningWork: false, currentPassword: "local-pass-1", includeConfig: false, includeMemory: true, includePersona: false },
     ]);
 });
 
-test("关窗把两颗范围复位成配置开、记忆关", () => {
+test("勾上人设才提交 includePersona，提示按三面报数", async () => {
+    const sent = [];
+    const app = loadApp({
+        exportConfigBundle: async (options) => {
+            sent.push(plain(options));
+            return {
+                filename: "g3ku-config-bundle-20260924-010203.g3kucb",
+                entry_count: 8,
+                config_entry_count: 4,
+                memory_entry_count: 0,
+                persona_entry_count: 4,
+            };
+        },
+    });
+    app.U.configBundleExportPersona.checked = true;
+
+    await app.submitConfigBundleExport();
+
+    assert.deepEqual(sent, [{
+        password: "",
+        useProjectPassword: true,
+        includeConfig: true,
+        includeMemory: false,
+        includePersona: true,
+    }]);
+    assert.equal(app.toasts.at(-1).text, "共 8 个文件（配置 4、记忆 0、人设 4）。下载已发起，取消保存则不会落盘；导入时输项目解锁密码。");
+});
+
+test("只勾人设时确认文案与载荷都按人设面走", async () => {
+    const app = loadApp();
+    app.U.configBundleImportFile.files = [{ name: "bundle.g3kucb" }];
+    app.U.configBundleImportPassword.value = "secret-pass-123";
+    app.U.configBundleImportConfig.checked = false;
+    app.U.configBundleImportPersona.checked = true;
+
+    await app.submitConfigBundleImport();
+    const confirm = app.confirmCalls.at(-1);
+    assert.match(confirm.text, /整体替换当前人设/);
+
+    await confirm.onConfirm({ checked: false, value: "local-pass-1" });
+    await flush();
+    assert.deepEqual(plain(app.calls.find((call) => call[0] === "import")), [
+        "import",
+        "bundle.g3kucb",
+        "secret-pass-123",
+        { confirmRunningWork: false, currentPassword: "local-pass-1", includeConfig: false, includeMemory: false, includePersona: true },
+    ]);
+});
+
+test("关窗把三颗范围复位成配置开、记忆与人设关", () => {
     const app = loadApp();
     app.U.configBundleExportConfig.checked = false;
     app.U.configBundleExportMemory.checked = true;
+    app.U.configBundleExportPersona.checked = true;
     app.U.configBundleImportMemory.checked = true;
+    app.U.configBundleImportPersona.checked = true;
 
     app.closeConfigBundleDialog();
 
     assert.equal(app.U.configBundleExportConfig.checked, true);
     assert.equal(app.U.configBundleExportMemory.checked, false);
+    assert.equal(app.U.configBundleExportPersona.checked, false);
     assert.equal(app.U.configBundleImportConfig.checked, true);
     assert.equal(app.U.configBundleImportMemory.checked, false);
+    assert.equal(app.U.configBundleImportPersona.checked, false);
 });
 
 test("配置包对话框的风险文案不被 max-height 裁剪", () => {

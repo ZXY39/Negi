@@ -18,7 +18,11 @@ from typing import Any
 
 from loguru import logger
 
-from g3ku.agent.persona import PERSONA_NOTE_REF, PERSONA_PHOTO_DIR_NAME
+from g3ku.agent.persona import (
+    PERSONA_NOTE_REF,
+    PERSONA_PHOTO_DIR_NAME,
+    PERSONA_PHOTO_SUFFIXES,
+)
 from g3ku.deployment.data_root import data_root
 from g3ku.utils.helpers import safe_filename
 
@@ -27,7 +31,6 @@ ONBOARDING_STATE_FILE = "onboarding.json"
 PERSONA_DESCRIPTION_MAX_CHARS = 39000
 PERSONA_PHOTO_MAX_BYTES = 5 * 1024 * 1024
 PERSONA_PHOTO_MAX_FILES = 20
-PERSONA_PHOTO_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"})
 
 
 def _now_iso() -> str:

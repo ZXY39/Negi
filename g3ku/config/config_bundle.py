@@ -1,8 +1,9 @@
-"""口令加密的配置包：把一台部署的配置面与记忆面导出成单文件，在另一台上还原。
+"""口令加密的配置包：把一台部署的配置面、记忆面与人设面导出成单文件，在另一台上还原。
 
-配置面（结构配置、provider 记录、密钥覆盖层、资源开关、治理库）和记忆面（记忆库、
-笔记正文、常驻镜像）是两颗独立勾选：没勾的一面既不进包也不落盘，勾上的面整体替换、
-不做合并。不含任务、会话与取证数据。导出要求进程已解锁，因为带配置面时包里必须有主密钥本身。
+配置面（结构配置、provider 记录、密钥覆盖层、资源开关、治理库）、记忆面（记忆库、
+笔记正文、常驻镜像）和人设面（人设 note 与 `my_image/` 照片）是三颗独立勾选：没勾的
+一面既不进包也不落盘，勾上的面整体替换、不做合并。记忆面不夹带人设 note，人设只随
+人设面走。不含任务、会话与取证数据。导出要求进程已解锁，因为带配置面时包里必须有主密钥本身。
 """
 
 from __future__ import annotations
@@ -22,6 +23,12 @@ from typing import Any
 from cryptography.fernet import InvalidToken
 
 from g3ku import __version__
+from g3ku.agent.markdown_memory import note_file_name
+from g3ku.agent.persona import (
+    PERSONA_NOTE_REF,
+    PERSONA_PHOTO_DIR_NAME,
+    PERSONA_PHOTO_SUFFIXES,
+)
 from g3ku.resources.tool_settings import MemoryRuntimeSettings, load_tool_settings_from_manifest
 from g3ku.security import (
     PASSWORD_KDF,
@@ -32,10 +39,11 @@ from g3ku.security import (
 )
 
 BUNDLE_KIND = "g3ku-config-bundle"
-BUNDLE_VERSION = 3
-# v2 包只装配置面，继续认它：已经躺在操作员手上的文件不能因为我们多加了一面就失效。
-LEGACY_BUNDLE_VERSION = 2
-SUPPORTED_BUNDLE_VERSIONS = (LEGACY_BUNDLE_VERSION, BUNDLE_VERSION)
+BUNDLE_VERSION = 4
+# v2 只有配置面，v3 增加记忆面；旧文件都继续认，不能因为我们多加了面就失效。
+CONFIG_ONLY_BUNDLE_VERSION = 2
+MEMORY_BUNDLE_VERSION = 3
+SUPPORTED_BUNDLE_VERSIONS = (CONFIG_ONLY_BUNDLE_VERSION, MEMORY_BUNDLE_VERSION, BUNDLE_VERSION)
 BUNDLE_EXTENSION = ".g3kucb"
 BUNDLE_OUTPUT_DIR = ".g3ku/config-bundles"
 IMPORT_BACKUP_DIR = ".g3ku/config-bundle-imports"
@@ -44,7 +52,9 @@ KEY_SOURCE_BUNDLE_PASSWORD = "bundle_password"
 
 SCOPE_CONFIG = "config"
 SCOPE_MEMORY = "memory"
-BUNDLE_SCOPES = (SCOPE_CONFIG, SCOPE_MEMORY)
+SCOPE_PERSONA = "persona"
+BUNDLE_SCOPES = (SCOPE_CONFIG, SCOPE_MEMORY, SCOPE_PERSONA)
+V3_BUNDLE_SCOPES = (SCOPE_CONFIG, SCOPE_MEMORY)
 
 CONFIG_FILENAME = ".g3ku/config.json"
 RESOURCES_STATE_PATH = ".g3ku/resources.state.json"
@@ -62,6 +72,11 @@ MEMORY_INDEX_KEY = "memory/index"
 MEMORY_TOOL_NAME = "memory_runtime"
 MEMORY_NOTE_SUFFIXES = {".md"}
 
+# 人设面用独立逻辑根：人设 note 与记忆正文同目录，靠前缀把它从记忆面里摘出来。
+PERSONA_DIR_ROOT = "persona"
+PERSONA_NOTE_KEY = f"{PERSONA_DIR_ROOT}/{note_file_name(PERSONA_NOTE_REF)}"
+PERSONA_PHOTOS_KEY = f"{PERSONA_DIR_ROOT}/{PERSONA_PHOTO_DIR_NAME}"
+
 # 信封锁的是源部署的登录口令，auto-unlock.key 是 bearer credential：两者都不进包，
 # 主密钥改由包内 payload 携带，导入时按包口令重新包裹。
 EXCLUDED_NAMES = {"master.key", "auto-unlock.key"}
@@ -69,7 +84,7 @@ SQLITE_SUFFIXES = {".sqlite3", ".db"}
 COMPANION_SUFFIXES = {".wal", ".shm"}
 
 CONFIG_BUNDLE_ROOT = ".g3ku"
-BUNDLE_ROOTS = (CONFIG_BUNDLE_ROOT, MEMORY_DIR_ROOT)
+BUNDLE_ROOTS = (CONFIG_BUNDLE_ROOT, MEMORY_DIR_ROOT, PERSONA_DIR_ROOT)
 
 
 def _now_iso() -> str:
@@ -167,30 +182,52 @@ def _memory_landing_paths(root: Path) -> dict[str, Path]:
     }
 
 
+def _persona_landing_paths(
+    root: Path, memory_land: dict[str, Path] | None = None
+) -> dict[str, Path]:
+    """人设面在这台机器上的两个落点：保留 note 跟随记忆清单，照片固定在 workspace 根。"""
+    land = memory_land if memory_land is not None else _memory_landing_paths(root)
+    return {
+        PERSONA_NOTE_KEY: land[MEMORY_NOTES_KEY] / note_file_name(PERSONA_NOTE_REF),
+        PERSONA_PHOTOS_KEY: _workspace_anchor(root) / PERSONA_PHOTO_DIR_NAME,
+    }
+
+
 def _entry_scope(rel: str) -> str:
     text = str(rel or "").strip().replace("\\", "/")
     if text.startswith(f"{CONFIG_BUNDLE_ROOT}/"):
         return SCOPE_CONFIG
     if text.startswith(f"{MEMORY_DIR_ROOT}/"):
         return SCOPE_MEMORY
+    if text.startswith(f"{PERSONA_DIR_ROOT}/"):
+        return SCOPE_PERSONA
     return ""
 
 
-def _validate_scopes(scopes: Sequence[str] | None) -> tuple[str, ...]:
+def _validate_scopes(
+    scopes: Sequence[str] | None, *, allowed: Sequence[str] = BUNDLE_SCOPES
+) -> tuple[str, ...]:
     cleaned = {str(scope or "").strip().lower() for scope in (scopes or ())}
     cleaned.discard("")
-    unknown = sorted(cleaned - set(BUNDLE_SCOPES))
+    unknown = sorted(cleaned - set(allowed))
     if unknown:
         raise ValueError(f"unknown bundle scope: {unknown[0]}")
     if not cleaned:
         raise ValueError("bundle_scope_empty")
-    return tuple(scope for scope in BUNDLE_SCOPES if scope in cleaned)
+    return tuple(scope for scope in allowed if scope in cleaned)
 
 
 def _envelope_scopes(envelope: dict[str, Any]) -> tuple[str, ...]:
-    if int(envelope.get("version") or 0) < BUNDLE_VERSION:
+    version = int(envelope.get("version") or 0)
+    if version < MEMORY_BUNDLE_VERSION:
         return (SCOPE_CONFIG,)
-    return _validate_scopes(envelope.get("scopes"))
+    allowed = BUNDLE_SCOPES if version >= BUNDLE_VERSION else V3_BUNDLE_SCOPES
+    return _validate_scopes(envelope.get("scopes"), allowed=allowed)
+
+
+def _bundle_version_for_scopes(scopes: Sequence[str]) -> int:
+    # 只带配置/记忆的包保持 v3，旧程序还能读；人设面才需要 v4 这个版本闸门。
+    return BUNDLE_VERSION if SCOPE_PERSONA in scopes else MEMORY_BUNDLE_VERSION
 
 
 def _count_by_scope(rels: Sequence[str], scope: str) -> int:
@@ -206,6 +243,7 @@ def _collect_config_entries(workspace: Path) -> dict[str, str]:
 
 def _collect_memory_entries(root: Path) -> dict[str, str]:
     land = _memory_landing_paths(root)
+    persona_note_name = note_file_name(PERSONA_NOTE_REF)
     entries: dict[str, str] = {}
     for key in (MEMORY_MIRROR_KEY, MEMORY_STATE_DB_KEY):
         path = land[key]
@@ -219,9 +257,29 @@ def _collect_memory_entries(root: Path) -> dict[str, str]:
         if not directory.is_dir():
             continue
         for child in sorted(directory.iterdir()):
-            # 只带正文本体：`.bak.<stamp>` 是漂移取证，不是记忆。
+            # 人设 note 只随人设面走；`.bak.<stamp>` 是漂移取证，不是记忆。
+            if child.name == persona_note_name:
+                continue
             if child.is_file() and child.suffix in MEMORY_NOTE_SUFFIXES:
                 entries[f"{key}/{child.name}"] = _encode_file(child)
+    return entries
+
+
+def _collect_persona_entries(root: Path) -> dict[str, str]:
+    land = _persona_landing_paths(root)
+    entries: dict[str, str] = {}
+    note = land[PERSONA_NOTE_KEY]
+    if note.is_file():
+        entries[PERSONA_NOTE_KEY] = _encode_file(note)
+    photos = land[PERSONA_PHOTOS_KEY]
+    if photos.is_dir():
+        for child in sorted(photos.iterdir()):
+            if child.is_file() and child.suffix.lower() in PERSONA_PHOTO_SUFFIXES:
+                entries[f"{PERSONA_PHOTOS_KEY}/{child.name}"] = _encode_file(child)
+    if not entries:
+        # 勾了人设却没有任何内容：导出会得到一个"看起来带了人设"的空面，导入方
+        # 还会按整包替换清掉目标机的人设，宁可在这里拒绝。
+        raise ValueError("bundle_persona_empty")
     return entries
 
 
@@ -231,6 +289,8 @@ def _collect_entries(workspace: Path, scopes: tuple[str, ...]) -> dict[str, str]
         entries.update(_collect_config_entries(workspace))
     if SCOPE_MEMORY in scopes:
         entries.update(_collect_memory_entries(workspace))
+    if SCOPE_PERSONA in scopes:
+        entries.update(_collect_persona_entries(workspace))
     return entries
 
 
@@ -297,7 +357,8 @@ def export_bundle(
     """Pack the selected面 into one encrypted file.
 
     `scopes` decides what travels: 配置面 carries the wiring plus the master key,
-    记忆面 carries the memory store, its notes and the resident mirror. With
+    记忆面 carries the memory store, its notes and the resident mirror, and
+    人设面 carries the reserved persona note plus `my_image/`. With
     `use_project_password` the bundle key is the live master key and the
     password envelope travels inside the bundle, so the operator types nothing
     here and unlocks the import with their normal project password. The
@@ -333,14 +394,14 @@ def export_bundle(
         "entries": entries,
     }
     if SCOPE_CONFIG in clean_scopes:
-        # 只带记忆的包不必再拷一份主密钥：那面根本不动密钥，少一份副本就少一个泄漏面。
+        # 只带记忆或人设的包不必再拷一份主密钥：那面根本不动密钥，少一份副本就少一个泄漏面。
         payload["master_key"] = master_key
     token = fernet_from_key(bundle_key).encrypt(
         json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     )
     envelope = {
         "kind": BUNDLE_KIND,
-        "version": BUNDLE_VERSION,
+        "version": _bundle_version_for_scopes(clean_scopes),
         # 格式版本决定能不能读，程序版本只用于对照：跨设备排障时"两端构建不一致"
         # 是最常见的原因，光靠 version 字段查不出来。
         "app_version": __version__,
@@ -373,6 +434,7 @@ def export_bundle(
         "entry_count": len(entries),
         "config_entry_count": _count_by_scope(entries, SCOPE_CONFIG),
         "memory_entry_count": _count_by_scope(entries, SCOPE_MEMORY),
+        "persona_entry_count": _count_by_scope(entries, SCOPE_PERSONA),
         "bytes": path.stat().st_size,
     }
 
@@ -439,16 +501,35 @@ def _memory_entry_target(land: dict[str, Path], rel: str) -> Path:
     raise ValueError(f"unsupported memory bundle path: {rel}")
 
 
+def _persona_entry_target(land: dict[str, Path], rel: str) -> Path:
+    """人设面的逻辑名 → 本机落点；note 走记忆清单，照片固定回 workspace 根。"""
+    if rel == PERSONA_NOTE_KEY:
+        return land[PERSONA_NOTE_KEY]
+    prefix = f"{PERSONA_PHOTOS_KEY}/"
+    if rel.startswith(prefix):
+        name = rel[len(prefix):]
+        if "/" in name or "\\" in name or ":" in name or name in {"", ".", ".."}:
+            raise ValueError(f"unsafe persona bundle path rejected: {rel}")
+        if PurePosixPath(name).suffix.lower() not in PERSONA_PHOTO_SUFFIXES:
+            raise ValueError(f"unsupported persona bundle path: {rel}")
+        return land[PERSONA_PHOTOS_KEY] / name
+    raise ValueError(f"unsupported persona bundle path: {rel}")
+
+
 def _entry_targets(root: Path, rels: list[str]) -> dict[str, Path]:
-    land = _memory_landing_paths(root)
+    memory_land = _memory_landing_paths(root)
+    persona_land = _persona_landing_paths(root, memory_land)
     targets: dict[str, Path] = {}
     for rel in rels:
         pure = _safe_relative_path(rel)
-        targets[str(pure)] = (
-            _memory_entry_target(land, str(pure))
-            if _entry_scope(str(pure)) == SCOPE_MEMORY
-            else root.joinpath(*pure.parts)
-        )
+        scope = _entry_scope(str(pure))
+        if scope == SCOPE_MEMORY:
+            target = _memory_entry_target(memory_land, str(pure))
+        elif scope == SCOPE_PERSONA:
+            target = _persona_entry_target(persona_land, str(pure))
+        else:
+            target = root.joinpath(*pure.parts)
+        targets[str(pure)] = target
     return targets
 
 
@@ -464,7 +545,7 @@ def _preflight(payload: dict[str, Any], scopes: tuple[str, ...]) -> tuple[str, l
     rels = sorted(str(pure) for pure in targets.values())
     master_key = str(payload.get("master_key") or "").strip()
     if SCOPE_CONFIG not in scopes:
-        # 只导入记忆时一个密钥都不动，包里有没有主密钥因此与落盘无关。
+        # 只导入记忆或人设时一个密钥都不动，包里有没有主密钥因此与落盘无关。
         return master_key, rels
     if not master_key:
         raise ValueError("bundle carries no master key")
@@ -499,7 +580,10 @@ def _restore_backup(backup_root: Path, targets: dict[str, Path], backed_up: list
         target = targets[rel]
         target.parent.mkdir(parents=True, exist_ok=True)
         if source.is_dir():
-            shutil.copytree(source, target, dirs_exist_ok=True)
+            # 目录只用于人设照片面：回滚要连导入新建的照片一起清掉，不能只覆盖旧文件。
+            if target.exists():
+                shutil.rmtree(target)
+            shutil.copytree(source, target)
         else:
             shutil.copy2(source, target)
 
@@ -513,6 +597,43 @@ def _write_entries(entries: dict[str, str], targets: dict[str, Path]) -> None:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(blob)
             os.chmod(target, 0o600)
+
+
+def _persona_backup_sources(root: Path) -> dict[str, Path]:
+    """人设面替换前要整份留底：note 可能被删，照片目录会删掉包外文件。"""
+    land = _persona_landing_paths(root)
+    sources: dict[str, Path] = {}
+    note = land[PERSONA_NOTE_KEY]
+    if note.is_file():
+        sources[PERSONA_NOTE_KEY] = note
+    photos = land[PERSONA_PHOTOS_KEY]
+    if photos.is_dir():
+        sources[PERSONA_PHOTOS_KEY] = photos
+    return sources
+
+
+def _clean_persona_face(land: dict[str, Path], entries: dict[str, str]) -> None:
+    """人设面按包内集合整体替换：描述与照片都不保留包外旧值。"""
+    note = land[PERSONA_NOTE_KEY]
+    if PERSONA_NOTE_KEY not in entries:
+        note.unlink(missing_ok=True)
+    photos = land[PERSONA_PHOTOS_KEY]
+    if not photos.is_dir():
+        return
+    # Windows 上写入 `me.png` 会覆盖已有的 `ME.PNG`，目录项仍保留原大小写；
+    # 按本机路径语义比较，否则刚写进去的照片会被当成"包外旧图"删掉。
+    keep = {
+        os.path.normcase(rel[len(PERSONA_PHOTOS_KEY) + 1:])
+        for rel in entries
+        if rel.startswith(f"{PERSONA_PHOTOS_KEY}/")
+    }
+    for child in photos.iterdir():
+        if not child.is_file():
+            continue
+        if child.suffix.lower() not in PERSONA_PHOTO_SUFFIXES:
+            continue
+        if os.path.normcase(child.name) not in keep:
+            child.unlink(missing_ok=True)
 
 
 def import_bundle(
@@ -529,7 +650,7 @@ def import_bundle(
     # 本机已经有解锁口令时，导入先用它证身份，再用它重裹包里的新主密钥：
     # 「导入不改项目口令」是合同，而不是操作员要自己记住的副作用。
     # 没有口令（新装设备）才沿用包口令——那时包口令就是这台机器的第一个口令。
-    # 只带记忆同样过这道证明：往这台机写知识必须由知道本机口令的人发起。
+    # 只带记忆或人设同样过这道证明：往这台机写知识/人设必须由知道本机口令的人发起。
     kept_password = ""
     if security.has_installed_envelope():
         clean_current = str(current_password or "")
@@ -549,21 +670,30 @@ def import_bundle(
     all_entries = payload["entries"]
     applied_rels = [rel for rel in declared_rels if _entry_scope(rel) in clean_scopes]
     entries = {rel: all_entries[rel] for rel in applied_rels}
+    persona_land = _persona_landing_paths(root)
     targets = _entry_targets(root, applied_rels)
 
     backup_root = root / IMPORT_BACKUP_DIR / _stamp()
     backup_root.mkdir(parents=True, exist_ok=True)
-    backed_up = _backup_targets(targets, backup_root)
+    # 人设面按集合替换，旧 note 与整个 my_image 目录先留底；其余面仍只备份会被覆盖的文件。
+    backup_sources = {
+        rel: source for rel, source in targets.items() if _entry_scope(rel) != SCOPE_PERSONA
+    }
+    if SCOPE_PERSONA in clean_scopes:
+        backup_sources.update(_persona_backup_sources(root))
+    backed_up = _backup_targets(backup_sources, backup_root)
     status: dict[str, Any] | None = None
     try:
         _write_entries(entries, targets)
+        if SCOPE_PERSONA in clean_scopes:
+            _clean_persona_face(persona_land, entries)
         if SCOPE_CONFIG in clean_scopes:
             status = security.install_master_key(
                 master_key=master_key,
                 password=kept_password or str(password),
             )
     except Exception:
-        _restore_backup(backup_root, targets, backed_up)
+        _restore_backup(backup_root, backup_sources, backed_up)
         raise
     return {
         "entries": sorted(targets),
@@ -571,6 +701,7 @@ def import_bundle(
         "scopes": list(clean_scopes),
         "config_entry_count": _count_by_scope(targets, SCOPE_CONFIG),
         "memory_entry_count": _count_by_scope(targets, SCOPE_MEMORY),
+        "persona_entry_count": _count_by_scope(targets, SCOPE_PERSONA),
         "backup_dir": str(backup_root),
         "created_at": str(payload.get("created_at") or ""),
         "workspace_label": str(payload.get("workspace_label") or ""),
@@ -592,6 +723,7 @@ __all__ = [
     "KEY_SOURCE_PROJECT_PASSWORD",
     "SCOPE_CONFIG",
     "SCOPE_MEMORY",
+    "SCOPE_PERSONA",
     "bundle_paths",
     "export_bundle",
     "import_bundle",

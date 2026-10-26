@@ -1240,6 +1240,11 @@
                                 <span class="ui-checkbox-box" aria-hidden="true"></span>
                                 <span>记忆</span>
                             </label>
+                            <label class="ui-checkbox-row" for="config-bundle-export-persona">
+                                <input id="config-bundle-export-persona" class="ui-checkbox-input" type="checkbox">
+                                <span class="ui-checkbox-box" aria-hidden="true"></span>
+                                <span>人设</span>
+                            </label>
                         </div>
                         <label class="ui-checkbox-row" for="config-bundle-use-project-password">
                             <input id="config-bundle-use-project-password" class="ui-checkbox-input" type="checkbox"
@@ -1258,7 +1263,7 @@
                                 autocomplete="new-password">
                         </label>
                         <button id="config-bundle-export-btn" class="toolbar-btn success" type="button">导出配置包</button>
-                        <p class="confirm-text">配置＝项目配置、模型与 provider 凭据、密钥覆盖层、工具与技能开关、治理审批；记忆＝长期记忆库、笔记正文与常驻镜像。都不含任务、会话与日志。口令是包的唯一防线，拿到文件即可离线反复试。</p>
+                        <p class="confirm-text">配置＝项目配置、模型与 provider 凭据、密钥覆盖层、工具与技能开关、治理审批；记忆＝长期记忆库、笔记正文与常驻镜像；人设＝人设描述与人设图。都不含任务、会话与日志。口令是包的唯一防线，拿到文件即可离线反复试。</p>
                         <div class="resource-field">
                             <span class="resource-field-label">配置包文件</span>
                             <input id="config-bundle-import-file" class="resource-search" type="file"
@@ -1280,6 +1285,11 @@
                                 <span class="ui-checkbox-box" aria-hidden="true"></span>
                                 <span>记忆</span>
                             </label>
+                            <label class="ui-checkbox-row" for="config-bundle-import-persona">
+                                <input id="config-bundle-import-persona" class="ui-checkbox-input" type="checkbox">
+                                <span class="ui-checkbox-box" aria-hidden="true"></span>
+                                <span>人设</span>
+                            </label>
                         </div>
                         <label class="resource-field">
                             <span class="resource-field-label">包口令</span>
@@ -1287,7 +1297,7 @@
                                 autocomplete="off">
                         </label>
                         <button id="config-bundle-import-btn" class="toolbar-btn danger" type="button">导入配置包</button>
-                        <p class="confirm-text">导入按勾选范围整体替换，不做合并：勾配置会换掉配置与密钥覆盖层，勾记忆会换掉这台机器整库记忆与笔记。设备已有解锁口令时导入后仍用它解锁。重启后 worker 才用新包内容。</p>
+                        <p class="confirm-text">导入按勾选范围整体替换，不做合并：勾配置会换掉配置与密钥覆盖层，勾记忆会换掉这台机器整库记忆与笔记，勾人设会换掉这台机器的人设描述与 my_image 照片。设备已有解锁口令时导入后仍用它解锁。重启后 worker 才用新包内容。</p>
                     </div>
                 </section>
             </div>

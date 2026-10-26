@@ -733,6 +733,7 @@ const U = {
     configBundleUseProjectPassword: document.getElementById("config-bundle-use-project-password"),
     configBundleExportConfig: document.getElementById("config-bundle-export-config"),
     configBundleExportMemory: document.getElementById("config-bundle-export-memory"),
+    configBundleExportPersona: document.getElementById("config-bundle-export-persona"),
     configBundleExportPasswordField: document.getElementById("config-bundle-export-password-field"),
     configBundleExportConfirmField: document.getElementById("config-bundle-export-confirm-field"),
     configBundleExportPassword: document.getElementById("config-bundle-export-password"),
@@ -743,6 +744,7 @@ const U = {
     configBundleImportName: document.getElementById("config-bundle-import-name"),
     configBundleImportConfig: document.getElementById("config-bundle-import-config"),
     configBundleImportMemory: document.getElementById("config-bundle-import-memory"),
+    configBundleImportPersona: document.getElementById("config-bundle-import-persona"),
     configBundleImportPassword: document.getElementById("config-bundle-import-password"),
     configBundleImport: document.getElementById("config-bundle-import-btn"),
     passwordChangeBackdrop: document.getElementById("password-change-backdrop"),
@@ -8111,36 +8113,50 @@ function usesProjectBundlePassword() {
     return U.configBundleUseProjectPassword ? U.configBundleUseProjectPassword.checked !== false : true;
 }
 
-// 缺元素（未渲染/被裁掉）一律回默认值：配置在、记忆不在，与 HTML 的 checked 初始态一致。
-function bundleScopeState(configElement, memoryElement) {
+// 缺元素（未渲染/被裁掉）一律回默认值：配置在、记忆与人设不在，与 HTML 的 checked 初始态一致。
+function bundleScopeState(configElement, memoryElement, personaElement) {
     const includeConfig = configElement ? configElement.checked !== false : true;
     const includeMemory = memoryElement ? memoryElement.checked === true : false;
-    return { includeConfig, includeMemory };
+    const includePersona = personaElement ? personaElement.checked === true : false;
+    return { includeConfig, includeMemory, includePersona };
 }
 
 function configBundleExportScopes() {
-    return bundleScopeState(U.configBundleExportConfig, U.configBundleExportMemory);
+    return bundleScopeState(
+        U.configBundleExportConfig,
+        U.configBundleExportMemory,
+        U.configBundleExportPersona,
+    );
 }
 
 function configBundleImportScopes() {
-    return bundleScopeState(U.configBundleImportConfig, U.configBundleImportMemory);
+    return bundleScopeState(
+        U.configBundleImportConfig,
+        U.configBundleImportMemory,
+        U.configBundleImportPersona,
+    );
 }
 
 function bundleScopeLabels(scopes) {
-    return [scopes.includeConfig ? "配置" : "", scopes.includeMemory ? "记忆" : ""].filter(Boolean).join("、");
+    return [
+        scopes.includeConfig ? "配置" : "",
+        scopes.includeMemory ? "记忆" : "",
+        scopes.includePersona ? "人设" : "",
+    ].filter(Boolean).join("、");
 }
 
 function bundleScopeSummary(item) {
     const memory = Number(item?.memory_entry_count || 0);
-    if (!memory) return "";
-    return `（配置 ${Number(item?.config_entry_count || 0)}、记忆 ${memory}）`;
+    const persona = Number(item?.persona_entry_count || 0);
+    if (!memory && !persona) return "";
+    return `（配置 ${Number(item?.config_entry_count || 0)}、记忆 ${memory}、人设 ${persona}）`;
 }
 
 function resetBundleScopeCheckboxes() {
     [U.configBundleExportConfig, U.configBundleImportConfig].forEach((element) => {
         if (element) element.checked = true;
     });
-    [U.configBundleExportMemory, U.configBundleImportMemory].forEach((element) => {
+    [U.configBundleExportMemory, U.configBundleImportMemory, U.configBundleExportPersona, U.configBundleImportPersona].forEach((element) => {
         if (element) element.checked = false;
     });
 }
@@ -8209,6 +8225,7 @@ async function submitConfigBundleExport() {
             useProjectPassword: useProject,
             includeConfig: scopes.includeConfig,
             includeMemory: scopes.includeMemory,
+            includePersona: scopes.includePersona,
         });
         downloadConfigBundleFile(item?.filename);
         clearConfigBundleInputs();
@@ -8299,6 +8316,7 @@ async function submitConfigBundleImport() {
                 currentPassword,
                 includeConfig: scopes.includeConfig,
                 includeMemory: scopes.includeMemory,
+                includePersona: scopes.includePersona,
             });
             applyConfigBundleImportResult(item);
         },

@@ -577,6 +577,7 @@ def test_bundle_envelope_shape_and_tamper_rejection(tmp_path: Path) -> None:
         "unlock_envelope",
         "payload_b64",
     }
+    assert envelope["version"] == 3
     assert envelope["scopes"] == ["config"]
     assert envelope["app_version"] == config_bundle.__version__
     # 手工按同一 KDF 复算一次，确认自定义口令就是这条车道的唯一凭据。
@@ -629,6 +630,29 @@ def _seed_memory(workspace: Path, *, marker: str, rows: int = 3) -> Path:
         (mem / "notes" / f"{name}.md").write_text(f"{marker} body of {name}\n", encoding="utf-8")
     (mem / "index" / "note_category.md").write_text(f"{marker} category body\n", encoding="utf-8")
     return mem
+
+
+PERSONA_KEYS = {
+    "persona/note_persona.md",
+    "persona/my_image/me.png",
+    "persona/my_image/you.jpg",
+}
+
+
+def _seed_persona(
+    workspace: Path,
+    *,
+    text: str | None = "SRC persona",
+    photos: tuple[str, ...] = ("me.png", "you.jpg"),
+) -> None:
+    notes = workspace / "memory" / "notes"
+    notes.mkdir(parents=True, exist_ok=True)
+    if text is not None:
+        (notes / "note_persona.md").write_text(text, encoding="utf-8")
+    photo_dir = workspace / "my_image"
+    photo_dir.mkdir(parents=True, exist_ok=True)
+    for name in photos:
+        (photo_dir / name).write_bytes(b"png-bytes")
 
 
 def _seed_memory_noise(mem_dir: Path, *, marker: str = "src") -> None:
@@ -723,6 +747,261 @@ def test_both_scopes_count_each_face_separately(tmp_path: Path) -> None:
     assert summary["scopes"] == ["config", "memory"]
     assert summary["config_entry_count"] == len(summary["entries"]) - summary["memory_entry_count"]
     assert summary["memory_entry_count"] == len(MEMORY_KEYS)
+    assert summary["persona_entry_count"] == 0
+    # 没有人设面时保持 v3，旧程序仍能读这份包。
+    assert json.loads(Path(summary["path"]).read_text(encoding="utf-8"))["version"] == 3
+
+
+def test_memory_scope_excludes_the_persona_note(tmp_path: Path) -> None:
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+    _seed_memory(source, marker="SRC")
+    _seed_persona(source)
+
+    archive = _export_scopes(source, (config_bundle.SCOPE_MEMORY,))
+
+    assert set(_payload_of(archive)["entries"]) == MEMORY_KEYS
+    assert "memory/notes/note_persona.md" not in _payload_of(archive)["entries"]
+
+
+def test_persona_scope_carries_description_and_photos_only(tmp_path: Path) -> None:
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+    _seed_persona(source, text="SRC 的人设描述")
+
+    summary = config_bundle.export_bundle(
+        source,
+        password=BUNDLE_PASSWORD,
+        use_project_password=False,
+        scopes=(config_bundle.SCOPE_PERSONA,),
+    )
+    archive = Path(summary["path"])
+    envelope = json.loads(archive.read_text(encoding="utf-8"))
+    payload = _payload_of(archive)
+
+    assert envelope["version"] == 4
+    assert envelope["scopes"] == ["persona"]
+    assert set(payload["entries"]) == PERSONA_KEYS
+    assert "master_key" not in payload
+    assert summary["persona_entry_count"] == len(PERSONA_KEYS)
+    assert summary["config_entry_count"] == summary["memory_entry_count"] == 0
+
+
+def test_persona_scope_without_any_content_is_refused(tmp_path: Path) -> None:
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+
+    with pytest.raises(ValueError, match="bundle_persona_empty"):
+        _export_scopes(source, (config_bundle.SCOPE_PERSONA,))
+
+    assert not (source / config_bundle.BUNDLE_OUTPUT_DIR).exists()
+
+
+def test_all_three_scopes_count_each_face_separately(tmp_path: Path) -> None:
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+    _seed_memory(source, marker="SRC")
+    _seed_persona(source)
+
+    summary = config_bundle.export_bundle(
+        source,
+        password=BUNDLE_PASSWORD,
+        use_project_password=False,
+        scopes=(config_bundle.SCOPE_CONFIG, config_bundle.SCOPE_MEMORY, config_bundle.SCOPE_PERSONA),
+    )
+
+    assert summary["scopes"] == ["config", "memory", "persona"]
+    assert summary["memory_entry_count"] == len(MEMORY_KEYS)
+    assert summary["persona_entry_count"] == len(PERSONA_KEYS)
+    assert summary["config_entry_count"] == (
+        len(summary["entries"]) - summary["memory_entry_count"] - summary["persona_entry_count"]
+    )
+    assert json.loads(Path(summary["path"]).read_text(encoding="utf-8"))["version"] == 4
+
+
+def test_persona_only_import_replaces_the_face_and_leaves_other_faces(tmp_path: Path) -> None:
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+    _seed_persona(source, text="SRC 的人设描述")
+    archive = _export_scopes(source, (config_bundle.SCOPE_PERSONA,))
+
+    target = _write_workspace(tmp_path / "target")
+    _seed_memory(target, marker="TGT")
+    _seed_persona(target, text="TGT 的旧人设", photos=("old.png", "keep.png"))
+    config_before = (target / ".g3ku" / "config.json").read_text(encoding="utf-8")
+    bodies_before = _memory_bodies(target)
+
+    item = config_bundle.import_bundle(
+        target,
+        archive_path=archive,
+        password=BUNDLE_PASSWORD,
+        scopes=(config_bundle.SCOPE_PERSONA,),
+    )
+
+    assert item["scopes"] == ["persona"]
+    assert item["persona_entry_count"] == len(PERSONA_KEYS)
+    assert item["config_entry_count"] == item["memory_entry_count"] == 0
+    assert item["password_kept"] is True
+    assert (target / "memory" / "notes" / "note_persona.md").read_text(encoding="utf-8") == "SRC 的人设描述"
+    assert sorted(path.name for path in (target / "my_image").iterdir()) == ["me.png", "you.jpg"]
+    assert (target / ".g3ku" / "config.json").read_text(encoding="utf-8") == config_before
+    assert _memory_bodies(target) == bodies_before
+    backup = Path(item["backup_dir"])
+    assert (backup / "persona" / "note_persona.md").read_text(encoding="utf-8") == "TGT 的旧人设"
+    assert sorted(path.name for path in (backup / "persona" / "my_image").iterdir()) == [
+        "keep.png",
+        "old.png",
+    ]
+
+
+def test_persona_entries_follow_the_targets_own_workspace_and_notes_dir(tmp_path: Path) -> None:
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+    _seed_persona(source, text="SRC 的人设描述")
+    archive = _export_scopes(source, (config_bundle.SCOPE_PERSONA,))
+
+    target = _write_workspace(tmp_path / "target")
+    (target / ".g3ku" / "config.json").write_text(
+        json.dumps(
+            {
+                "agents": {"defaults": {"workspace": "custom-root"}},
+                "resources": {"statePath": ".g3ku/resources.state.json"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest = target / "custom-root" / "tools" / "memory_runtime"
+    manifest.mkdir(parents=True)
+    (manifest / "resource.yaml").write_text(
+        "schema_version: 1\nkind: tool\nname: memory_runtime\nsettings:\n"
+        "  document:\n    memory_file: memory/MEMORY.md\n    notes_dir: memory/private-notes\n",
+        encoding="utf-8",
+    )
+
+    config_bundle.import_bundle(
+        target,
+        archive_path=archive,
+        password=BUNDLE_PASSWORD,
+        scopes=(config_bundle.SCOPE_PERSONA,),
+    )
+
+    assert (target / "custom-root" / "memory" / "private-notes" / "note_persona.md").read_text(
+        encoding="utf-8"
+    ) == "SRC 的人设描述"
+    assert sorted(path.name for path in (target / "custom-root" / "my_image").iterdir()) == [
+        "me.png",
+        "you.jpg",
+    ]
+    assert not (target / "my_image").exists()
+
+
+def test_persona_import_keeps_a_case_variant_photo_it_just_overwrote(tmp_path: Path) -> None:
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+    _seed_persona(source, text=None, photos=("me.png",))
+    archive = _export_scopes(source, (config_bundle.SCOPE_PERSONA,))
+
+    target = _write_workspace(tmp_path / "target")
+    _seed_persona(target, text=None, photos=("ME.PNG",))
+
+    config_bundle.import_bundle(
+        target,
+        archive_path=archive,
+        password=BUNDLE_PASSWORD,
+        scopes=(config_bundle.SCOPE_PERSONA,),
+    )
+
+    assert [path.name.lower() for path in (target / "my_image").iterdir()] == ["me.png"]
+
+
+def test_persona_import_clears_a_target_note_the_package_does_not_carry(tmp_path: Path) -> None:
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+    _seed_persona(source, text=None, photos=("only.png",))
+    archive = _export_scopes(source, (config_bundle.SCOPE_PERSONA,))
+
+    target = _write_workspace(tmp_path / "target")
+    _seed_persona(target, text="TGT 的旧人设", photos=("old.png",))
+
+    config_bundle.import_bundle(
+        target,
+        archive_path=archive,
+        password=BUNDLE_PASSWORD,
+        scopes=(config_bundle.SCOPE_PERSONA,),
+    )
+
+    assert not (target / "memory" / "notes" / "note_persona.md").exists()
+    assert sorted(path.name for path in (target / "my_image").iterdir()) == ["only.png"]
+
+
+def test_unchecked_persona_scope_leaves_the_target_persona_untouched(tmp_path: Path) -> None:
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+    _seed_memory(source, marker="SRC")
+    _seed_persona(source, text="SRC 的人设描述")
+    archive = _export_scopes(
+        source,
+        (config_bundle.SCOPE_CONFIG, config_bundle.SCOPE_MEMORY, config_bundle.SCOPE_PERSONA),
+    )
+
+    target = _write_workspace(tmp_path / "target")
+    _seed_memory(target, marker="TGT")
+    _seed_persona(target, text="TGT 的人设描述", photos=("tgt.png",))
+    note_before = (target / "memory" / "notes" / "note_persona.md").read_text(encoding="utf-8")
+    photos_before = sorted(path.name for path in (target / "my_image").iterdir())
+
+    config_bundle.import_bundle(
+        target,
+        archive_path=archive,
+        password=BUNDLE_PASSWORD,
+        scopes=(config_bundle.SCOPE_CONFIG, config_bundle.SCOPE_MEMORY),
+    )
+
+    assert (target / "memory" / "notes" / "note_persona.md").read_text(encoding="utf-8") == note_before
+    assert sorted(path.name for path in (target / "my_image").iterdir()) == photos_before
+    assert _memory_bodies(target) == _memory_bodies(source)
+
+
+def test_v3_bundle_with_memory_scope_still_imports(tmp_path: Path) -> None:
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+    _seed_memory(source, marker="SRC")
+    archive = _rescoped(
+        _export_scopes(source, (config_bundle.SCOPE_MEMORY,)),
+        version=3,
+        scopes=["memory"],
+    )
+
+    target = _write_workspace(tmp_path / "target")
+    item = config_bundle.import_bundle(
+        target,
+        archive_path=archive,
+        password=BUNDLE_PASSWORD,
+        scopes=(config_bundle.SCOPE_MEMORY,),
+    )
+
+    assert item["scopes"] == ["memory"]
+    assert _memory_bodies(target) == _memory_bodies(source)
+
+
+def test_v3_bundle_cannot_claim_the_persona_scope(tmp_path: Path) -> None:
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+    _seed_persona(source)
+    archive = _rescoped(
+        _export_scopes(source, (config_bundle.SCOPE_PERSONA,)),
+        version=3,
+        scopes=["persona"],
+    )
+
+    target = _write_workspace(tmp_path / "target")
+    with pytest.raises(ValueError, match="unknown bundle scope: persona"):
+        config_bundle.import_bundle(
+            target,
+            archive_path=archive,
+            password=BUNDLE_PASSWORD,
+            scopes=(config_bundle.SCOPE_PERSONA,),
+        )
 
 
 def test_memory_only_import_replaces_memory_and_leaves_config_and_key(tmp_path: Path) -> None:
@@ -884,6 +1163,7 @@ def test_export_route_reports_scope_counts(tmp_path: Path, monkeypatch: pytest.M
     workspace = _write_workspace(tmp_path / "source")
     _unlock(workspace)
     _seed_memory(workspace, marker="SRC")
+    _seed_persona(workspace)
     monkeypatch.chdir(workspace)
     client = _client()
 
@@ -900,12 +1180,27 @@ def test_export_route_reports_scope_counts(tmp_path: Path, monkeypatch: pytest.M
             "include_memory": True,
         },
     )
+    with_persona = client.post(
+        "/api/bootstrap/config-bundle/export",
+        json={
+            "password": BUNDLE_PASSWORD,
+            "use_project_password": False,
+            "include_config": False,
+            "include_memory": False,
+            "include_persona": True,
+        },
+    )
 
     assert config_only.json()["item"]["scopes"] == ["config"]
     assert config_only.json()["item"]["memory_entry_count"] == 0
+    assert config_only.json()["item"]["persona_entry_count"] == 0
     assert with_memory.json()["item"]["scopes"] == ["memory"]
     assert with_memory.json()["item"]["memory_entry_count"] == len(MEMORY_KEYS)
     assert with_memory.json()["item"]["config_entry_count"] == 0
+    assert with_persona.json()["item"]["scopes"] == ["persona"]
+    assert with_persona.json()["item"]["persona_entry_count"] == len(PERSONA_KEYS)
+    assert with_persona.json()["item"]["config_entry_count"] == 0
+    assert with_persona.json()["item"]["memory_entry_count"] == 0
 
 
 def test_export_route_rejects_a_bundle_with_nothing_checked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -963,4 +1258,34 @@ def test_import_route_applies_only_the_checked_scope(tmp_path: Path, monkeypatch
         )
     assert refused.status_code == 400
     assert refused.json()["detail"] == "bundle_scope_empty"
+
+
+def test_import_route_applies_the_persona_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+    _seed_persona(source, text="SRC 的人设描述")
+    archive = _export_scopes(source, (config_bundle.SCOPE_PERSONA,))
+
+    target = _write_workspace(tmp_path / "target")
+    _seed_persona(target, text="TGT 的旧人设", photos=("old.png",))
+    monkeypatch.chdir(target)
+
+    with archive.open("rb") as handle:
+        applied = _client().post(
+            "/api/bootstrap/config-bundle/import",
+            data={
+                "password": BUNDLE_PASSWORD,
+                "include_config": "false",
+                "include_memory": "false",
+                "include_persona": "true",
+            },
+            files={"file": ("bundle.g3kucb", handle, "application/octet-stream")},
+        )
+
+    assert applied.status_code == 200, applied.text
+    item = applied.json()["item"]
+    assert item["scopes"] == ["persona"]
+    assert item["persona_entry_count"] == len(PERSONA_KEYS)
+    assert (target / "memory" / "notes" / "note_persona.md").read_text(encoding="utf-8") == "SRC 的人设描述"
+    assert sorted(path.name for path in (target / "my_image").iterdir()) == ["me.png", "you.jpg"]
 

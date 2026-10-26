@@ -20,6 +20,7 @@ from g3ku.agent.markdown_memory import note_handle
 
 PERSONA_NOTE_REF = "note_persona"
 PERSONA_PHOTO_DIR_NAME = "my_image"
+PERSONA_PHOTO_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"})
 
 
 def persona_note_handle() -> str:
