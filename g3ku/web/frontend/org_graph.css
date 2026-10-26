@@ -11359,6 +11359,13 @@ textarea {
     overflow: hidden;
 }
 
+/* 「共 N 条」在这层是页脚，不是分页占位：`.resource-page-indicator` 自带
+   flex: 1 1 220px，放进这个纵向 flex 里会跟表格抢空间（实测吃掉 161px，
+   表格只剩 376px），条目一少看起来就像列表被压缩了。 */
+.memory-browser-drawer .resource-page-indicator {
+    flex: 0 0 auto;
+}
+
 .memory-browser-head {
     display: grid;
     gap: 6px;
@@ -13899,6 +13906,9 @@ textarea {
 .qq-bot-account-row {
     height: auto;
     display: flex;
+    /* `.resource-list-item` 自带 column + align-items:center；只覆盖 display 不管用，
+       卡片还是会竖着排并居中。这里必须把方向改回 row。 */
+    flex-direction: row;
     flex-wrap: wrap;
     align-items: center;
     gap: var(--ui-space-2) var(--ui-space-3);
