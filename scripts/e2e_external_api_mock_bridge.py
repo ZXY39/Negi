@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 import uuid
 
@@ -59,7 +60,7 @@ async def _consume_until_terminal(
     return events
 
 
-async def run(base_url: str, token: str, message: str) -> int:
+async def run(base_url: str, token: str, message: str, *, dump_final: bool = False) -> int:
     external_key = f"e2e:mock:{uuid.uuid4().hex[:8]}"
     idem = f"e2e-{uuid.uuid4().hex}"
     async with httpx.AsyncClient(
@@ -96,6 +97,14 @@ async def run(base_url: str, token: str, message: str) -> int:
         if body.get("status") != "started" or not body.get("turn_id"):
             _fail(f"expected started+turn_id, got {body}")
         events = await _consume_until_terminal(client, session_id)
+        if dump_final:
+            for event in events:
+                if event.get("type") == "reply.final":
+                    print("  reply.final:", json.dumps(event, ensure_ascii=False))
+        # 流式增量的正文与最终正文一样会到达真实桥：任何一条带出表情包标记都算泄漏。
+        leaked = [e.get("type") for e in events if "[[" in str(e.get("text") or "")]
+        if leaked:
+            _fail(f"sticker marker leaked into {leaked}")
         types = [e["type"] for e in events]
         terminal = [t for t in types if t in {"turn.completed", "turn.failed"}]
         if len(terminal) != 1:
@@ -147,9 +156,14 @@ def main() -> None:
     parser.add_argument("--base-url", default="http://127.0.0.1:18790")
     parser.add_argument("--token", required=True)
     parser.add_argument("--message", default="请只回复「E2E 测试成功」六个字，不要调用任何工具。")
+    parser.add_argument(
+        "--dump-final",
+        action="store_true",
+        help="打印 reply.final 的完整载荷（验证附件形状用）。",
+    )
     args = parser.parse_args()
     try:
-        sys.exit(asyncio.run(run(args.base_url, args.token, args.message)))
+        sys.exit(asyncio.run(run(args.base_url, args.token, args.message, dump_final=args.dump_final)))
     except SystemExit:
         raise
     except Exception as exc:

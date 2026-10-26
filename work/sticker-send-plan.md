@@ -447,7 +447,8 @@ sticker_packs (emit `[[sticker:<pack>/<category>]]` as the last line; `pack | th
 - 网页三面（实时 final / in-flight 快照 / 历史行）都不含标记；会话列表预览只留纯文本。
 - 动图走 `anim_*` 原样副本；PNG 走 `thumb_*`。
 - 增量通知（`demo2` 只可能从 `[RUNTIME_NOTICE]` 得知）、skill 装载、头部缓存命中。
-- 流式：`_reply_delta_frame` 是纯函数，单测覆盖完整标记/半截标记/纯标记帧。
+- 流式：`_reply_delta_frame` 是纯函数，单测覆盖完整标记/半截标记/纯标记帧；**线上 SSE 也已验**——`scripts/e2e_external_api_mock_bridge.py` 跑一轮带表情包的回合，所有 `reply.delta`/`reply.final` 都不含 `[[`（脚本已内置这条断言）。
+- 渠道侧线上形状：同一次 E2E 打印的 `reply.final.attachments[0]` = `{name, mime_type, kind: "image", size, url, after_text: true}`，与文档契约一致。
 
 **只能真连 QQ 验证的**（假 botpy 把这些全 mock 了）：平台是否接受 `file_type=1` 的 gif/webp、群聊富媒体是否吃主动消息额度、被动回复窗口（`msg_passive`）里媒体消息的实际表现、以及"文字在前、图在后"在真实客户端的观感。
 
@@ -485,7 +486,7 @@ sticker_packs (emit `[[sticker:<pack>/<category>]]` as the last line; `pack | th
 - P2 已实现但**默认关**（`stickers.semanticSearch`）：没有 caption 的库检索不出东西，且加工具会让 `tools[]` 前缀作废一次。打开前先跑 `caption_pack.py`。
 - `stickers.max_per_reply` 已接配置（`3c9dfb26`）。
 - **平台（web）车道已实测通过**（见上表）。**QQ 桥的代码路径也已覆盖**（假 botpy 驱动真桥，`b41b3f02`）；**只剩平台接受度需要真账号**，见「验证边界」。
-- 流式：网页侧已抽成 `_reply_delta_frame` 纯函数并有单测（完整标记/半截标记/纯标记帧）。浏览器中间帧仍没抓到，但那已经只是"同一函数有没有被调用"的问题，不再是"标记会不会漏"。
+- 流式：网页侧 `_reply_delta_frame` 有单测；**渠道侧已线上验证**（mock 桥 E2E 的 SSE 流里没有任何 `[[`）。浏览器中间帧仍没抓到，但那已经只是"同一函数有没有被调用"，不再是"标记会不会漏"。
 - 旧会话（本次实测前创建的 `web:ceo-96681f6af630`）转录里仍有 3 处历史标记——那是修复前的落盘数据，新会话已干净。需要的话在界面里删掉那个会话即可。
 
 **与本次无关的既有失败**（在干净 HEAD 上同样失败，已用 detached worktree 复核）：`test_frontdoor_pinned_contract::test_continuation_seed_head_is_not_stacked_with_a_second_pinned_block`（缺 `persona_text` 参数）、`test_ceo_create_agent_runner::test_parse_create_async_task_result_recognizes_task_append_notice_guidance`（`duplicate` vs `append_notice`）。
