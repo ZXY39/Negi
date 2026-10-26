@@ -28,17 +28,17 @@ function _externalFormEl() {
 function _setExternalSwitch(button, pressed, label) {
     if (!button) return;
     button.setAttribute("aria-pressed", pressed ? "true" : "false");
-    if (label) {
-        const text = button.querySelector(".tool-governance-switch-label");
-        if (text) text.textContent = label;
-    }
+    if (!label) return;
+    // 主开关已换成「已启用/已禁用 + 呼吸点」按钮，其余仍是带滑块的开关，两套都认。
+    const text = button.querySelector(".tool-governance-switch-label")
+        || button.querySelector(".external-api-state-label");
+    if (text) text.textContent = label;
 }
 
 function _externalBusy(next) {
     EXTERNAL_API_VIEW_STATE.busy = !!next;
     const busy = EXTERNAL_API_VIEW_STATE.busy;
     for (const id of [
-        "external-refresh-btn",
         "external-token-create-btn",
         "external-token-form-submit",
         "external-token-form-cancel",
@@ -122,7 +122,7 @@ async function loadExternalApiView({ quiet = false } = {}) {
     try {
         const payload = await ApiClient.getExternalApiSettings();
         _applyExternalPayload(payload);
-        _setExternalSwitch(_externalMasterSwitch(), EXTERNAL_API_VIEW_STATE.enabled, EXTERNAL_API_VIEW_STATE.enabled ? "已启用" : "已停用");
+        _setExternalSwitch(_externalMasterSwitch(), EXTERNAL_API_VIEW_STATE.enabled, EXTERNAL_API_VIEW_STATE.enabled ? "已启用" : "已禁用");
         renderExternalTokenList();
     } catch (error) {
         if (!quiet) showToast({ title: "加载外部接入配置失败", text: ApiClient.friendlyErrorMessage(error), kind: "error" });
@@ -266,12 +266,12 @@ async function toggleExternalApiEnabled(enabled) {
     try {
         const payload = await ApiClient.updateExternalApiSettings({ enabled });
         _applyExternalPayload(payload);
-        _setExternalSwitch(_externalMasterSwitch(), EXTERNAL_API_VIEW_STATE.enabled, EXTERNAL_API_VIEW_STATE.enabled ? "已启用" : "已停用");
+        _setExternalSwitch(_externalMasterSwitch(), EXTERNAL_API_VIEW_STATE.enabled, EXTERNAL_API_VIEW_STATE.enabled ? "已启用" : "已禁用");
         _renderExternalScopeSwitch();
         renderExternalTokenList();
         showToast({
-            title: enabled ? "External Agent API 已启用" : "External Agent API 已停用",
-            text: enabled ? "外部桥接现在可以凭 token 访问 /api/v1。" : "所有外部桥接访问将被拒绝（403）。",
+            title: enabled ? "External Agent API 已启用" : "External Agent API 已禁用",
+            text: enabled ? "外部桥接现在可以凭 token 访问 /api/v1。" : "外部桥接的请求会被拒绝。",
             kind: "info",
         });
     } catch (error) {
@@ -298,9 +298,6 @@ async function updateExternalTokenScope(bridgeId, choice) {
 }
 
 function initExternalApiView() {
-    const refreshBtn = document.getElementById("external-refresh-btn");
-    if (refreshBtn) refreshBtn.addEventListener("click", () => void loadExternalApiView());
-
     const master = _externalMasterSwitch();
     if (master) {
         master.addEventListener("click", () => {
@@ -360,7 +357,7 @@ function initExternalApiView() {
 }
 
 // ---- 官方 QQ 机器人面板：一个 AppID 一行账号 ----
-const QQ_BOT_STATE = { loaded: false, busy: false, enabled: false, rows: [] };
+const QQ_BOT_STATE = { loaded: false, busy: false, enabled: false, rows: [], editingIndex: -1 };
 
 function _qqBotListEl() {
     return document.getElementById("qq-bot-accounts");
@@ -408,54 +405,70 @@ function renderQqBotAccounts() {
         const status = _qqBotRowStatus(row);
         const el = document.createElement("div");
         const appId = String(row.app_id || "");
-        // 未落库的行整份铺表单，已保存的行收成卡片。class 一次写全，别分两步加。
+        // 未落库的行铺输入框，已保存的行收成单行卡片。class 一次写全，别分两步加。
         el.className = `resource-list-item qq-bot-account-row${appId ? "" : " is-new"}`;
         el.dataset.index = String(index);
         if (!appId) {
-            // 还没落库的行：整份表单给出来（AppID 是它的身份，收不起来）。
+            // 临时卡片：三个输入框一行排开，右边一个小叉号撤掉它（不留「删除」按钮，
+            // 因为这张卡还没有对象可删）。
             el.innerHTML = `
-                <div class="llm-form-grid qq-bot-account-fields">
-                    <label class="resource-field"><span class="resource-field-label">AppID</span>
-                        <input class="resource-search qq-bot-appid" type="text" value="" autocomplete="off"></label>
-                    <label class="resource-field"><span class="resource-field-label">AppSecret</span>
-                        <input class="resource-search qq-bot-secret" type="password" autocomplete="new-password"
-                            placeholder="仅保存，不回显"></label>
-                    <label class="resource-field"><span class="resource-field-label">备注</span>
-                        <input class="resource-search qq-bot-label" type="text" value="${esc(row.label || "")}" autocomplete="off"></label>
-                </div>
-                <div class="qq-bot-account-meta">
-                    <button class="toolbar-btn ghost danger small" data-action="remove" type="button">删除</button>
-                </div>`;
+                <input class="resource-search qq-bot-appid" type="text" value="" autocomplete="off" placeholder="AppID">
+                <input class="resource-search qq-bot-secret" type="password" autocomplete="new-password" placeholder="AppSecret">
+                <input class="resource-search qq-bot-label" type="text" value="${esc(row.label || "")}" autocomplete="off" placeholder="备注（可选）">
+                <button class="qq-bot-account-remove-x" data-action="remove" type="button"
+                    aria-label="移除这个临时账号" title="移除">&times;</button>`;
             listEl.appendChild(el);
             return;
         }
-        // 已保存的行：备注就是标题（点它改），开关与删除跟在同一行右侧，
-        // 下面只留 AppID 与状态。AppSecret 收进「改密钥」，不在卡片上铺开。
+        const editing = QQ_BOT_STATE.editingIndex === index;
+        // 编辑态就地换成一个输入框：改备注不该为一行字开一整个弹窗。
+        const titleParts = editing
+            ? `<input class="resource-search qq-bot-label qq-bot-label-inline" type="text"
+                    value="${esc(row.label || "")}" data-inline-label="${index}"
+                    placeholder="备注，留空显示 AppID" autocomplete="off">`
+            : `<button class="qq-bot-account-title" type="button" data-action="edit-label"
+                    title="点击修改备注">${esc(row.label || appId)}</button>
+                <button class="qq-bot-account-edit" type="button" data-action="edit-label"
+                    aria-label="修改备注" title="修改备注"><i data-lucide="pencil" aria-hidden="true"></i></button>`;
         el.innerHTML = `
             <input class="qq-bot-appid" type="hidden" value="${esc(appId)}">
             <input class="qq-bot-secret" type="hidden" value="">
-            <input class="qq-bot-label" type="hidden" value="${esc(row.label || "")}">
-            <div class="qq-bot-account-head">
-                <button class="qq-bot-account-title" type="button" data-action="edit-label"
-                    title="点击修改备注">${esc(row.label || appId)}</button>
-                <div class="qq-bot-account-head-actions">
-                    <span class="status-badge qq-bot-account-status" data-status="${esc(status.badge)}"
-                        title="${esc(status.text)}">${esc(status.text)}</span>
-                    <button class="tool-governance-switch qq-bot-row-switch" type="button"
-                        aria-pressed="${row.enabled ? "true" : "false"}" aria-label="切换该号启用状态">
-                        <span class="tool-governance-switch-track" aria-hidden="true"><span class="tool-governance-switch-thumb"></span></span>
-                        <span class="tool-governance-switch-label">${row.enabled ? "已启用" : "已停用"}</span>
-                    </button>
-                    <button class="toolbar-btn ghost danger small" data-action="remove" type="button">删除</button>
-                </div>
-            </div>
-            <div class="qq-bot-account-meta">
-                <span class="qq-bot-account-appid-text">AppID ${esc(appId)}</span>
-                <button class="toolbar-btn ghost small" data-action="edit-secret" type="button">改密钥</button>
-            </div>`;
+            ${editing ? "" : `<input class="qq-bot-label" type="hidden" value="${esc(row.label || "")}">`}
+            ${titleParts}
+            <span class="qq-bot-account-appid-text">AppID ${esc(appId)}</span>
+            <span class="status-badge qq-bot-account-status" data-status="${esc(status.badge)}"
+                title="${esc(status.text)}">${esc(status.text)}</span>
+            <button class="tool-governance-switch qq-bot-row-switch" type="button"
+                aria-pressed="${row.enabled ? "true" : "false"}" aria-label="切换该号启用状态">
+                <span class="tool-governance-switch-track" aria-hidden="true"><span class="tool-governance-switch-thumb"></span></span>
+                <span class="tool-governance-switch-label">${row.enabled ? "已启用" : "已停用"}</span>
+            </button>
+            <button class="toolbar-btn ghost small" data-action="edit-secret" type="button">改密钥</button>
+            <button class="toolbar-btn ghost danger small" data-action="remove" type="button">删除</button>`;
         listEl.appendChild(el);
     });
     _renderQqBotStatus();
+    _syncQqBotSaveHighlight();
+    if (typeof icons === "function") icons(true);
+}
+
+/** 保存按钮只有在「有还没落库、且 AppID 与 AppSecret 都填了」的行时才点亮。 */
+function _syncQqBotSaveHighlight() {
+    const btn = document.getElementById("qq-bot-save-btn");
+    if (!btn) return;
+    const listEl = _qqBotListEl();
+    let ready = false;
+    if (listEl) {
+        for (const el of listEl.querySelectorAll(".qq-bot-account-row.is-new")) {
+            const appId = String(el.querySelector(".qq-bot-appid")?.value || "").trim();
+            const secret = String(el.querySelector(".qq-bot-secret")?.value || "").trim();
+            if (appId && secret) {
+                ready = true;
+                break;
+            }
+        }
+    }
+    btn.classList.toggle("is-ready", ready);
 }
 
 function _renderQqBotStatus() {
@@ -592,6 +605,7 @@ async function toggleQqBotEnabled(enabled) {
 function _addQqBotAccountRow() {
     const rows = _collectQqBotRows();
     if (rows) QQ_BOT_STATE.rows = rows;
+    QQ_BOT_STATE.editingIndex = -1;
     QQ_BOT_STATE.rows.push({ app_id: "", app_secret: "", label: "", sandbox: false, enabled: true, has_secret: false, service: null });
     renderQqBotAccounts();
     const listEl = _qqBotListEl();
@@ -607,22 +621,40 @@ function _qqBotRowFor(index) {
     return QQ_BOT_STATE.rows[index] || null;
 }
 
-function _editQqBotLabel(index) {
+function _beginQqBotLabelEdit(index) {
     const target = _qqBotRowFor(index);
     if (!target) return;
-    const appId = String(target.app_id || "").trim();
-    openConfirm({
-        title: "修改备注",
-        text: appId ? `备注会成为账号卡片标题，也用于渠道分类显示（${appId}）。` : "备注会成为账号卡片标题。",
-        confirmLabel: "保存",
-        confirmKind: "",
-        input: { label: "备注", value: String(target.label || ""), placeholder: "留空则显示 AppID" },
-        onConfirm: async ({ value }) => {
-            target.label = String(value || "").trim();
-            renderQqBotAccounts();
-            await _persistQqBotSettings({ silentEmpty: true });
-        },
-    });
+    QQ_BOT_STATE.editingIndex = index;
+    renderQqBotAccounts();
+    const input = _qqBotListEl()?.querySelector(`[data-inline-label="${index}"]`);
+    if (input) {
+        input.focus();
+        input.select?.();
+    }
+}
+
+function _cancelQqBotLabelEdit() {
+    if (QQ_BOT_STATE.editingIndex < 0) return;
+    QQ_BOT_STATE.editingIndex = -1;
+    renderQqBotAccounts();
+}
+
+async function _commitQqBotLabel(index, value) {
+    if (QQ_BOT_STATE.editingIndex !== index) return;
+    QQ_BOT_STATE.editingIndex = -1;
+    const target = QQ_BOT_STATE.rows[index];
+    if (!target) {
+        renderQqBotAccounts();
+        return;
+    }
+    const next = String(value || "").trim();
+    if (next === String(target.label || "").trim()) {
+        renderQqBotAccounts();
+        return;
+    }
+    target.label = next;
+    renderQqBotAccounts();
+    await _persistQqBotSettings({ silentEmpty: true });
 }
 
 function _editQqBotSecret(index) {
@@ -657,6 +689,7 @@ function _removeQqBotAccountRow(index) {
         text: `删除后 ${name} 不再接收消息，重新加回需要再填一次 AppSecret。确定删除？`,
         confirmLabel: "删除",
         onConfirm: async () => {
+            QQ_BOT_STATE.editingIndex = -1;
             QQ_BOT_STATE.rows.splice(index, 1);
             renderQqBotAccounts();
             // 已有 AppID 的行要真的从表里消失，否则刷新后又回来。
@@ -771,11 +804,18 @@ function initQqBotView() {
             if (!rowEl) return;
             const index = Number(rowEl.dataset.index);
             if (event.target.closest("[data-action='remove']")) {
+                if (rowEl.classList.contains("is-new")) {
+                    // 临时卡还没落进任何账本，也没有可删的对象：小叉号一点就撤，不弹确认。
+                    QQ_BOT_STATE.editingIndex = -1;
+                    QQ_BOT_STATE.rows.splice(index, 1);
+                    renderQqBotAccounts();
+                    return;
+                }
                 void _removeQqBotAccountRow(index);
                 return;
             }
             if (event.target.closest("[data-action='edit-label']")) {
-                _editQqBotLabel(index);
+                _beginQqBotLabelEdit(index);
                 return;
             }
             if (event.target.closest("[data-action='edit-secret']")) {
@@ -784,5 +824,24 @@ function initQqBotView() {
             }
             if (event.target.closest(".qq-bot-row-switch")) void _toggleQqBotRowEnabled(index);
         });
+        // 临时卡填齐 AppID + AppSecret 时把「保存并连接」点亮。
+        listEl.addEventListener("input", () => _syncQqBotSaveHighlight());
+        listEl.addEventListener("keydown", (event) => {
+            const input = event.target instanceof Element ? event.target.closest(".qq-bot-label-inline") : null;
+            if (!input) return;
+            if (event.key === "Enter") {
+                event.preventDefault();
+                void _commitQqBotLabel(Number(input.dataset.inlineLabel), input.value);
+            } else if (event.key === "Escape") {
+                event.preventDefault();
+                _cancelQqBotLabelEdit();
+            }
+        });
+        // blur 不冒泡，用捕获接。重渲染会先摘掉输入框，所以提交口子只认仍在编辑态的那一个。
+        listEl.addEventListener("blur", (event) => {
+            const input = event.target instanceof Element ? event.target.closest(".qq-bot-label-inline") : null;
+            if (!input) return;
+            void _commitQqBotLabel(Number(input.dataset.inlineLabel), input.value);
+        }, true);
     }
 }

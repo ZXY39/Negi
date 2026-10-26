@@ -162,7 +162,7 @@ test("QQ 账号面板：状态摘要按号计数，行状态区分未配置", ()
     assert.match(status.text, /错误（intents 未开通）/);
 });
 
-test("QQ 账号面板：徽标坐在卡片右上角，取色跟服务态走", () => {
+test("QQ 账号面板：徽标在单行卡片里紧挨着 AppID，取色跟服务态走", () => {
     const listEl = makeListEl();
     const { t } = loadModule({ listEl, statusEl: { textContent: "", className: "" } });
     t.QQ_BOT_STATE.loaded = true;
@@ -177,29 +177,32 @@ test("QQ 账号面板：徽标坐在卡片右上角，取色跟服务态走", ()
     t.renderQqBotAccounts();
 
     const html0 = listEl.children[0].innerHTML;
-    // 标题行里依次是备注标题、状态徽标、开关与删除，AppID 掉到下面那一行。
-    assert.match(html0, /qq-bot-account-head[\s\S]*qq-bot-account-head-actions[\s\S]*data-status="completed"[\s\S]*qq-bot-account-meta/);
+    // 单行卡：AppID 后面紧跟徽标，徽标后面是开关与操作按钮，不再分层。
+    assert.match(html0, /qq-bot-account-appid-text[\s\S]*data-status="completed"[\s\S]*qq-bot-row-switch[\s\S]*data-action="edit-secret"[\s\S]*data-action="remove"/);
+    assert.doesNotMatch(html0, /qq-bot-account-head|qq-bot-account-meta/);
     assert.doesNotMatch(html0, /external-token-actions[\s\S]*qq-bot-account-status/);
     assert.match(listEl.children[1].innerHTML, /data-status="failed"/);
     assert.match(listEl.children[2].innerHTML, /data-status="running"/);
     assert.equal(t._qqBotRowStatus(t.QQ_BOT_STATE.rows[3]).badge, "pending");
 });
 
-test("QQ 账号面板：新行表单只留 AppID → AppSecret → 备注，沙箱已撤掉", () => {
+test("QQ 账号面板：新行是三个输入框，沙箱已撤掉，临时卡用叉号而不是删除按钮", () => {
     const listEl = makeListEl();
     const { t } = loadModule({ listEl, statusEl: { textContent: "", className: "" } });
     t.QQ_BOT_STATE.loaded = true;
-    // 没有 AppID 的行才是可填表单；已落库的行是卡片，不铺字段。
+    // 没有 AppID 的行才是可填表单；已落库的行是单行卡片，不铺输入框。
     t.QQ_BOT_STATE.rows = [row({ app_id: "" })];
 
     t.renderQqBotAccounts();
 
     const html = listEl.children[0].innerHTML;
-    const fields = html.slice(html.indexOf("qq-bot-account-fields"));
-    const order = ["AppID", "AppSecret", "备注"].map((label) => fields.indexOf(label));
+    const order = ["qq-bot-appid", "qq-bot-secret", "qq-bot-label", "qq-bot-account-remove-x"]
+        .map((name) => html.indexOf(name));
     assert.deepEqual(order, [...order].sort((a, b) => a - b));
     assert.equal(order.every((i) => i >= 0), true);
     assert.doesNotMatch(html, /qq-bot-sandbox/);
+    // 临时卡还没有可删的对象，所以不出「删除」按钮。
+    assert.doesNotMatch(html, /data-action="remove"[^>]*>删除</);
 });
 
 test("QQ 账号面板：已保存的行是卡片，备注即标题且可点改，AppID 掉到下方", () => {
@@ -213,11 +216,34 @@ test("QQ 账号面板：已保存的行是卡片，备注即标题且可点改�
     const html = listEl.children[0].innerHTML;
     assert.match(html, /<button class="qq-bot-account-title"[^>]*data-action="edit-label"/);
     assert.match(html, /qq-bot-account-title[^>]*>客服小助手</);
+    // 标题右侧是无边框编辑键，点它就地改名（不再开弹窗）。
+    assert.match(html, /<button class="qq-bot-account-edit"[^>]*data-action="edit-label"/);
     assert.match(html, /qq-bot-account-appid-text">AppID 111</);
-    assert.match(html, /data-action="edit-secret"/);
-    // 卡片态不铺字段网格，也不再有沙箱勾选。
-    assert.doesNotMatch(html, /qq-bot-account-fields/);
+    // AppID 在开关左边，改密钥在删除左边。
+    const order = ["qq-bot-account-appid-text", "qq-bot-row-switch", "edit-secret", 'data-action="remove"']
+        .map((token) => html.indexOf(token));
+    assert.deepEqual(order, [...order].sort((a, b) => a - b));
+    assert.equal(order.every((i) => i >= 0), true);
+    // 卡片态不铺输入框，也不再有沙箱勾选。
+    assert.doesNotMatch(html, /qq-bot-label-inline/);
     assert.doesNotMatch(html, /qq-bot-sandbox/);
+});
+
+test("QQ 账号面板：编辑态把备注就地换成输入框，且不再留隐藏的 label 副本", () => {
+    const listEl = makeListEl();
+    const { t } = loadModule({ listEl, statusEl: { textContent: "", className: "" } });
+    t.QQ_BOT_STATE.loaded = true;
+    t.QQ_BOT_STATE.rows = [row({ app_id: "111", label: "旧备注" })];
+    t.QQ_BOT_STATE.editingIndex = 0;
+
+    t.renderQqBotAccounts();
+
+    const html = listEl.children[0].innerHTML;
+    assert.match(html, /qq-bot-label-inline[^>]*data-inline-label="0"/);
+    assert.match(html, /value="旧备注"/);
+    // 同一行只能有一份 label 值来源，否则采集会读到隐藏的那份旧值。
+    assert.doesNotMatch(html, /type="hidden" value="旧备注"/);
+    assert.doesNotMatch(html, /qq-bot-account-title/);
 });
 
 test("QQ 账号面板：备注为空时卡片标题退回 AppID", () => {

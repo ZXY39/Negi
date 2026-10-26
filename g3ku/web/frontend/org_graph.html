@@ -685,26 +685,14 @@
                         <p class="subtitle">External Agent API、官方 QQ 机器人与桥接 token 的开关与签发。</p>
                     </div>
                     <div class="resource-header-actions compact-resource-header-actions">
-                        <button id="external-refresh-btn" class="toolbar-btn ghost" type="button">刷新</button>
+                        <button id="external-api-enabled-toggle" class="external-api-state-btn" type="button"
+                            aria-pressed="false" aria-label="启用 External Agent API">
+                            <span id="external-api-enabled-label" class="external-api-state-label">已禁用</span>
+                            <span class="external-api-state-dot" aria-hidden="true"></span>
+                        </button>
                     </div>
                 </header>
                 <div class="external-api-shell">
-                    <section class="resource-detail-panel external-master-panel">
-                        <div class="panel-header">
-                            <div>
-                                <h3>External Agent API（/api/v1）</h3>
-                                <p class="subtitle external-panel-subtitle">外部渠道由独立桥接进程接入，关闭时所有外部访问将被拒绝（403）。</p>
-                            </div>
-                            <button id="external-api-enabled-toggle" class="tool-governance-switch" type="button"
-                                aria-pressed="false" aria-label="启用 External Agent API">
-                                <span class="tool-governance-switch-track" aria-hidden="true">
-                                    <span class="tool-governance-switch-thumb"></span>
-                                </span>
-                                <span id="external-api-enabled-label" class="tool-governance-switch-label">已停用</span>
-                            </button>
-                        </div>
-                        <p class="external-security-hint">token 密文保存在加密覆盖层，配置文件不落明文；明文仅在签发 / 重新生成时显示一次。</p>
-                    </section>
                     <section class="resource-detail-panel qq-bot-panel">
                         <div class="panel-header">
                             <div>
@@ -778,6 +766,7 @@
                         </div>
                         <div id="external-token-list" class="external-token-list"></div>
                     </section>
+                    <p class="external-security-hint">token 密文保存在加密覆盖层，配置文件不落明文；明文仅在签发 / 重新生成时显示一次。</p>
                 </div>
             </section>
             <section id="view-audit" class="view-section" style="display: none;">

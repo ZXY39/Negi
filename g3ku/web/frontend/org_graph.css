@@ -6991,6 +6991,21 @@ textarea {
     box-shadow: 0 0 0 4px color-mix(in srgb, var(--brand-primary) 24%, transparent), 0 20px 36px -24px color-mix(in srgb, var(--brand-primary-hover) 78%, transparent);
 }
 
+/* 临时卡把 AppID + AppSecret 都填齐时才点亮：#39c5bb 是「这一下真的能提交」的信号，
+   不是又一个常态主按钮。 */
+.toolbar-btn.success.is-ready {
+    background: #39c5bb;
+    border-color: #39c5bb;
+    color: #06262a;
+    box-shadow: 0 16px 30px -24px rgba(57, 197, 187, 0.7);
+}
+
+.toolbar-btn.success.is-ready:hover:not(:disabled) {
+    background: #2fb3a9;
+    border-color: #2fb3a9;
+    box-shadow: 0 20px 36px -24px rgba(57, 197, 187, 0.85);
+}
+
 #model-roles-save-btn {
     background: color-mix(in srgb, var(--brand-primary) 90%, #0ea5e9 10%);
     border-color: color-mix(in srgb, var(--brand-primary) 52%, transparent);
@@ -11331,10 +11346,17 @@ textarea {
     right: auto;
     bottom: auto;
     width: min(1440px, calc(100vw - 32px));
-    max-height: min(88vh, calc(100dvh - 32px));
+    /* 固定高度而不是 max-height：条目少的时候面板不该跟着内容缩，
+       否则同一个弹窗在 3 条和 30 条记忆下是两种尺寸，点开先跳一下。 */
+    height: min(88vh, calc(100dvh - 32px));
     transform: translate(-50%, calc(-50% + 8px));
     background: var(--bg-panel);
     z-index: 100;
+}
+
+/* 让表格区吃掉剩余高度（表格自己滚），搜索栏与「共 N 条」保持原位。 */
+.memory-browser-drawer .detail-modal-body {
+    overflow: hidden;
 }
 
 .memory-browser-head {
@@ -11355,6 +11377,8 @@ textarea {
 }
 
 .memory-browser-table-wrap {
+    flex: 1 1 auto;
+    min-height: 0;
     overflow: auto;
     border-radius: 16px;
     border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
@@ -13868,23 +13892,22 @@ textarea {
     line-height: 1.5;
 }
 
-/* 官方 QQ 机器人：一个账号一张卡，卡内两列——AppID/AppSecret 一行，备注/环境一行。
+/* 官方 QQ 机器人：一个账号一张单行卡——备注、AppID、状态、开关、改密钥、删除同排。
+   还没落库的临时卡换成三个输入框 + 贴右的小叉号（它没有可删的对象，不给「删除」）。
    .resource-list-item 的 height:100% 会把每张卡拉到整表高度、第二张卡被面板裁掉，
-   align-items:flex-start 会把卡内网格压成内容宽；两处都改回按内容排高、横向铺满。 */
+   这里改回按内容排高。 */
 .qq-bot-account-row {
     height: auto;
-    align-items: stretch;
-}
-
-.qq-bot-account-head {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    justify-content: space-between;
-    gap: var(--ui-space-2);
+    gap: var(--ui-space-2) var(--ui-space-3);
 }
 
-/* 备注即标题：看着像标题，点下去能改。卡片默认态必须只读，所以不做成常驻输入框。 */
+/* 备注即标题：看着像标题，点下去就地改名。卡片默认态只读，所以不做成常驻输入框。 */
 .qq-bot-account-title {
+    flex: 0 1 auto;
+    max-width: 34%;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -13905,38 +13928,144 @@ textarea {
     text-underline-offset: 3px;
 }
 
-.qq-bot-account-head-actions {
-    display: flex;
-    align-items: center;
-    gap: var(--ui-space-2);
+/* 标题右侧的无边框编辑键。 */
+.qq-bot-account-edit {
     flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: 0;
+    border-radius: 6px;
+    background: none;
+    color: var(--ui-text-muted);
+    cursor: pointer;
 }
 
-.qq-bot-account-meta {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--ui-space-2);
-    font-size: 0.78rem;
-    color: var(--ui-text-muted);
+.qq-bot-account-edit:hover {
+    color: var(--brand-primary);
+    background: var(--ui-neutral-soft);
+}
+
+.qq-bot-account-edit svg {
+    width: 14px;
+    height: 14px;
 }
 
 .qq-bot-account-appid-text {
+    flex: 0 1 auto;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    font-size: 0.78rem;
+    color: var(--ui-text-muted);
     font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 
-.qq-bot-account-fields {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+/* 就地改名时输入框接管标题那一格。 */
+.qq-bot-account-row .qq-bot-label-inline {
+    flex: 1 1 180px;
+    min-width: 140px;
+}
+
+/* 临时卡：三个输入框等宽排开，叉号靠右。 */
+.qq-bot-account-row.is-new .qq-bot-appid {
+    flex: 1 1 140px;
+    min-width: 120px;
+}
+
+.qq-bot-account-row.is-new .qq-bot-secret {
+    flex: 1 1 160px;
+    min-width: 140px;
+}
+
+.qq-bot-account-row.is-new .qq-bot-label {
+    flex: 1 1 140px;
+    min-width: 120px;
+}
+
+.qq-bot-account-remove-x {
+    flex: 0 0 auto;
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    border: 0;
+    border-radius: 8px;
+    background: none;
+    color: var(--ui-text-muted);
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.qq-bot-account-remove-x:hover {
+    color: var(--danger-color, #ef4444);
+    background: color-mix(in srgb, var(--danger-color, #ef4444) 12%, transparent);
 }
 
 .qq-bot-account-status {
     max-width: 100%;
     overflow: hidden;
     text-overflow: ellipsis;
+}
+
+/* 外部接入主标题右侧的总开关：一个「已启用/已禁用」按钮加一颗状态点。
+   颜色本身就是判据（绿=启用、红=禁用），呼吸只用来区分「活着」和「只是画了个绿点」。 */
+.external-api-state-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ui-space-2);
+    min-height: 34px;
+    padding: 0 var(--ui-space-3);
+    border: 1px solid var(--ui-border);
+    border-radius: 999px;
+    background: var(--ui-bg-surface);
+    color: var(--ui-text-secondary);
+    font: inherit;
+    cursor: pointer;
+    transition: border-color 0.2s ease, color 0.2s ease;
+}
+
+.external-api-state-btn:hover {
+    border-color: var(--ui-border-strong);
+    color: var(--ui-text-primary);
+}
+
+.external-api-state-btn[aria-pressed="true"] {
+    color: var(--ui-text-primary);
+}
+
+.external-api-state-dot {
+    flex: 0 0 auto;
+    width: 8px;
+    height: 8px;
+    border-radius: 999px;
+    background: var(--danger-color, #ef4444);
+}
+
+.external-api-state-btn[aria-pressed="true"] .external-api-state-dot {
+    background: #22c55e;
+    animation: external-api-breathe 1.8s ease-in-out infinite;
+}
+
+@keyframes external-api-breathe {
+    0%, 100% { opacity: 0.35; transform: scale(0.8); }
+    50% { opacity: 1; transform: scale(1.1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .external-api-state-btn[aria-pressed="true"] .external-api-state-dot {
+        animation: none;
+        opacity: 1;
+        transform: none;
+    }
 }
 
 /* 沙箱勾选项：原生方框在淡底上几乎看不见，勾上后与不勾只差 1px 描边，
@@ -17208,19 +17337,11 @@ textarea {
     gap: 6px;
     padding: var(--ui-space-3);
 }
-/* QQ 账号卡：徽标一行 + 字段按 200px 自动排布 + 操作一行；卡内不再留空腔，操作行不再画分隔线。 */
+/* QQ 账号卡：单行排布，卡内不留空腔，操作行不再画分隔线。 */
 #view-external .resource-list-item.qq-bot-account-row {
     height: auto;
     gap: 10px;
     padding: var(--ui-space-3);
-}
-#view-external .qq-bot-account-head {
-    min-height: 0;
-}
-#view-external .qq-bot-account-fields {
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    align-content: start;
-    gap: 10px var(--ui-space-4);
 }
 #view-external .qq-bot-account-row .external-token-actions {
     padding-top: 0;
