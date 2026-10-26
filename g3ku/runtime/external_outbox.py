@@ -30,8 +30,11 @@ was written out), ``superseded`` (a newer ``reply.final`` for the same session
 replaced this pull-only reply; the text itself stays in the transcript),
 ``undeliverable`` (bridge gave up after its attempt budget), ``unconfirmed``
 (the request reached the channel API but no receipt came back, so the bridge
-refuses to send a second copy of the same text) and ``unreachable`` (no enabled
-bridge token can ever see it again — see ``g3ku.shells.web``).
+refuses to send a second copy of the same text), ``unreachable`` (no enabled
+bridge token can ever see it again — see ``g3ku.shells.web``) and ``discarded``
+(a one-off operator sweep of the never-collected backlog, written through this
+module only: bridges may not ack that status, and no runtime loop ever picks
+records by age).
 
 Storage is a single append-only jsonl (``.g3ku/external-outbox/outbox.jsonl``)
 of ``{"kind":"msg",...}`` records plus ``{"kind":"ack","id":...}`` tombstones.
