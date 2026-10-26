@@ -35,22 +35,28 @@ MAX_STICKERS_PER_REPLY = 1
 
 _SEGMENT = r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}"
 MARKER_RE = re.compile(rf"^\[\[sticker:({_SEGMENT})/({_SEGMENT})\]\]$")
+# 精确取图：`[[sticker:<pack>/@<id>]]`。`@` 不在合法键字符集里，所以与分类键
+# 不可能混淆；id 是内容哈希前缀，由 `search_stickers` 的候选表给出。
+ID_MARKER_RE = re.compile(rf"^\[\[sticker:({_SEGMENT})/@([0-9a-f]{{12,64}})\]\]$")
 SHORT_MARKER_RE = re.compile(rf"^\[\[sticker:({_SEGMENT})\]\]$")
 _MARKER_PREFIX = "[[sticker:"
 
 
-def _parse_marker_line(line: str, packs: tuple[Pack, ...]) -> tuple[str, str] | str | None:
-    """Return ``(pack, category)``, ``"ambiguous"``, or ``None`` (not a marker)."""
+def _parse_marker_line(line: str, packs: tuple[Pack, ...]) -> tuple[str, str, str] | str | None:
+    """Return ``(kind, pack, value)``, ``"ambiguous"``, or ``None`` (not a marker)."""
     stripped = line.strip()
+    by_id = ID_MARKER_RE.match(stripped)
+    if by_id is not None:
+        return "id", by_id.group(1), by_id.group(2)
     full = MARKER_RE.match(stripped)
     if full is not None:
-        return full.group(1), full.group(2)
+        return "category", full.group(1), full.group(2)
     short = SHORT_MARKER_RE.match(stripped)
     if short is not None:
         category = short.group(1)
         owners = category_owners(packs, category)
         if len(owners) == 1:
-            return owners[0].key, category
+            return "category", owners[0].key, category
         # Zero owners and cross-pack duplicates both fail closed: guessing here
         # is how a reply ends up with an image from the wrong pack.
         logger.warning(
@@ -64,7 +70,9 @@ def _parse_marker_line(line: str, packs: tuple[Pack, ...]) -> tuple[str, str] | 
 
 def _is_complete_marker_syntax(line: str) -> bool:
     stripped = line.strip()
-    return bool(MARKER_RE.match(stripped) or SHORT_MARKER_RE.match(stripped))
+    return bool(
+        MARKER_RE.match(stripped) or ID_MARKER_RE.match(stripped) or SHORT_MARKER_RE.match(stripped)
+    )
 
 
 def _pick_path(
@@ -90,6 +98,23 @@ def _pick_path(
         )
         return None
     return picker.choice(images)
+
+
+def _pick_by_id(packs: tuple[Pack, ...], pack_key: str, id_prefix: str) -> Path | None:
+    """Resolve a ``[[sticker:pack/@id]]`` marker against the pack's metadata."""
+    pack = find_pack(packs, pack_key)
+    if pack is None:
+        logger.warning("sticker pack {!r} is not in the catalog; nothing sent", pack_key)
+        return None
+    from g3ku.stickers import semantic
+
+    entry = semantic.resolve_entry(pack, id_prefix)
+    if entry is None:
+        logger.warning(
+            "sticker id {!r} did not resolve in pack {!r}; nothing sent", id_prefix, pack_key
+        )
+        return None
+    return (pack.path / entry.relpath).resolve()
 
 
 def resolve_markers(
@@ -133,7 +158,11 @@ def resolve_markers(
                 "sticker marker dropped: per-reply cap {} already reached", limit
             )
             continue
-        path = _pick_path(packs, parsed[0], parsed[1], picker)
+        kind, pack_key, value = parsed
+        if kind == "id":
+            path = _pick_by_id(packs, pack_key, value)
+        else:
+            path = _pick_path(packs, pack_key, value, picker)
         if path is not None:
             chosen.append(path)
     if not dropped:

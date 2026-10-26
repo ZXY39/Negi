@@ -86,6 +86,18 @@ python skills/meme/scripts/import_pack.py <源> --theme "一句话主题" [--pac
 
 AstrBot 包协议与逐字段映射见 `references/pack-format.md`；描述与 caption 的写法规则见 `references/caption-policy.md`。
 
+## 精确取图（可选，需先打开语义检索）
+
+分类键只能到"大致情景"。包里有逐图 caption/tags 之后，可以打开 `stickers.semanticSearch`，模型就多一颗 `search_stickers` 工具：按想表达的态度检索候选，再用 `[[sticker:<包>/@<id>]]` 精确发送那一张。
+
+1. 看还缺哪些描述：`python skills/meme/scripts/caption_pack.py --list <pack>`
+2. 看图写 caption/tags（写法见 `references/caption-policy.md`），存成 JSON：
+   `{"happy/h1.png": {"caption": "…", "tags": ["…"], "visible_text": ""}}`
+3. 落盘：`python skills/meme/scripts/caption_pack.py <pack> --map captions.json`
+4. 在配置里打开 `stickers.semanticSearch`（默认关：多一颗工具会让 `tools[]` 前缀作废一次，且没有 caption 的库检索不出东西）。
+
+`entry_id` 与 `sha256` 由脚本按磁盘字节现算：换图或改分类之后旧 id 自动失效，模型拿着旧 id 发送只会"不发图"，不会发错图。
+
 ## 边界
 
 - 契约头里的清单是**钉住时点的快照**：两次重印之间增删，你会在下一轮收到一条 `[RUNTIME_NOTICE]` 的 `sticker_pack:<包>` 分节，以那条为准；头部要到下一次上下文压缩才刷新。

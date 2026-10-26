@@ -676,6 +676,9 @@ class StickersConfig(Base):
     """
 
     max_per_reply: int = 1
+    # 精确取图（`search_stickers` + `[[sticker:<pack>/@<id>]]`）。默认关：它要求
+    # `<pack>/semantic/metadata.json` 已生成，且加一颗工具会作废一次 tools[] 前缀。
+    semantic_search: bool = False
 
     @field_validator("max_per_reply", mode="before")
     @classmethod
