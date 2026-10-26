@@ -98,8 +98,8 @@ _ATTACHMENT_DOWNLOAD_RETRY_DELAY_SECONDS = 1.5
 # 超过即降级为签名链接文本，不向平台发起必然失败的巨型上传。
 _MAX_OUTBOUND_ATTACHMENT_BYTES = 20 * 1024 * 1024
 
-# 媒体上传的预算不能借 SDK 那枚全局超时：``botpy.Client(timeout=5)`` 套在桥的每一个
-# API 请求上（文本消息也是它），且 ``http.request`` 对超时只打一条 WARNING 就返回
+# 媒体上传的预算不能借 SDK 那枚全局超时：``botpy.Client`` 的 timeout 默认 5 秒，套在桥
+# 的每一个 API 请求上（文本消息也是它），且 ``http.request`` 对超时只打一条 WARNING 就返回
 # ``None``。上传预算按请求体字节数推导——固定开销（握手与网关收下整段 base64 后落
 # 媒体存储）加上按可接受的最低上行吞吐折算的传输时间；低于该吞吐就该判失败，而不是
 # 无限等。固定开销这一档目前只有握手的实测（本机到 api.sgroup.qq.com 的 DNS+TLS
@@ -108,6 +108,14 @@ _MAX_OUTBOUND_ATTACHMENT_BYTES = 20 * 1024 * 1024
 # 且只发生在带附件的那一发上。
 _MEDIA_UPLOAD_FIXED_BUDGET_SECONDS = 15.0
 _MEDIA_UPLOAD_MIN_THROUGHPUT_BYTES_PER_SECOND = 512 * 1024
+
+# SDK 那枚默认 5 秒的超时对**文本消息**太紧：实测群聊一发被动回复的 POST 会跑过 5 秒，
+# SDK 于是吞掉超时返回 None，桥只能记一次「无回执」——平台其实收了（用户在群里看得到），
+# 而出站幂等闸门为了不发第二份就把它按 `unconfirmed` 销账。日志窗口里这类无回执 2/74 发，
+# 每次都让一份已经生成的回复变成"送达与否无从判断"。文本道不需要上传量级的预算，
+# 但需要比握手（0.56s）宽出余量：取 15 秒，是 SDK 默认的 3 倍，也是上传固定开销那一档。
+# 真卡住的 POST 最多占住这条会话的 pump 15 秒（pump 单会话串行），毒消息预算仍是 5 次。
+_BRIDGE_HTTP_TIMEOUT_SECONDS = 15
 
 
 def _media_upload_timeout(body_bytes: int) -> float:
@@ -732,7 +740,8 @@ async def run_qq_official_bridge(
         botpy 的 ``post_group_file`` / ``post_c2c_file`` 只暴露 ``url`` 参数——那
         条路径由 QQ 服务器回源下载，要求本服务端公网可达；``file_data`` 不回源，
         服务端只监听回环地址时同样成立。这一发不走 botpy 的 ``http.request``：SDK
-        把 ``Client(timeout=...)``（默认 5 秒）那一枚套在桥的每一个 API 请求上，
+        把 ``Client(timeout=...)``（默认 5 秒，桥构造时抬到 ``_BRIDGE_HTTP_TIMEOUT_SECONDS``）
+        那一枚套在桥的每一个 API 请求上，
         而媒体上传的预算和一条文本消息的预算不是同一回事；它超时也只打一条 SDK
         自己的 WARNING 就返回 ``None``，桥侧连失败原因都拿不到。这里沿用 SDK 的
         Route（域名与路径参数）和它的鉴权头续期，把 POST 发到桥自己的媒体 client
@@ -1302,7 +1311,12 @@ async def run_qq_official_bridge(
     reconcile_task: asyncio.Task | None = None
 
     try:
-        bridge_client = QqOfficialClient(intents=intents, is_sandbox=sandbox, ext_handlers=False)
+        bridge_client = QqOfficialClient(
+            intents=intents,
+            timeout=_BRIDGE_HTTP_TIMEOUT_SECONDS,
+            is_sandbox=sandbox,
+            ext_handlers=False,
+        )
         bridge_api = getattr(bridge_client, "api", None)
         await _reconcile_pending_pumps()  # 启动首跑（原预热），失败不阻断启动
         # 常驻对账在进入 botpy 网关前拉起：登录期间也在轮询，「服务端晚于桥

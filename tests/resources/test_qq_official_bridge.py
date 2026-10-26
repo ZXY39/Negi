@@ -257,6 +257,39 @@ async def test_bridge_uses_async_entry_and_wires_messages(monkeypatch: pytest.Mo
 
 
 @pytest.mark.asyncio
+async def test_bridge_raises_the_shared_http_timeout_above_the_sdk_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """botpy 那枚 timeout 是全桥共用的一把，默认 5 秒，且超时只打一条 SDK WARNING 就
+    返回 None。实测群聊一发被动回复的 POST 会跑过 5 秒：平台收了、用户看得见，桥却只能
+    记一次"无回执"，而出站幂等闸门为了不发第二份会把它按 unconfirmed 销账——一份已经生成
+    好的回复就此变成"送达与否无从判断"。所以构造桥必须显式抬高这把，不能用 SDK 默认。"""
+    _install_fake_botpy(monkeypatch)
+    monkeypatch.setattr(bridge_module, "ExternalApiClient", FakeExternalApiClient)
+
+    task = asyncio.create_task(
+        bridge_module.run_qq_official_bridge(
+            app_id="100",
+            app_secret="sekrit",
+            sandbox=False,
+            token="t",
+            base_url="http://127.0.0.1:1/api/v1",
+            on_state=lambda state, detail: None,
+        ),
+        name="test-qq-bridge-timeout",
+    )
+    try:
+        await _wait_until(lambda: FakeClient.instances and FakeClient.instances[-1].started)
+        client = FakeClient.instances[-1]
+        assert client.init_kwargs.get("timeout") == bridge_module._BRIDGE_HTTP_TIMEOUT_SECONDS
+        assert bridge_module._BRIDGE_HTTP_TIMEOUT_SECONDS > 5
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
 async def test_bridge_cancels_botpy_leftover_tasks_on_stop(monkeypatch: pytest.MonkeyPatch) -> None:
     _install_fake_botpy(monkeypatch)
     monkeypatch.setattr(bridge_module, "ExternalApiClient", FakeExternalApiClient)
@@ -1485,11 +1518,17 @@ async def test_pump_delivers_event_attachment_via_file_data(monkeypatch: pytest.
         timeout = upload.extensions["timeout"]
         assert timeout["connect"] == 5.0
         assert timeout["read"] == pytest.approx(15.0, abs=0.01)
-        # 这一发不经 botpy 的 http.request（那条道带的是文本消息用的 5 秒旋钮）。
+        # 这一发不经 botpy 的 http.request（那条道带的是文本消息用的共用旋钮）。
         assert client.api.http_calls == []
-        # 全局旋钮保持 SDK 默认：把 timeout 抬到上传量级会连带把每条文本消息的判死
-        # 从 5 秒变成几十秒，一个卡住的 POST 就能顶住这条会话的 pump。
-        assert "timeout" not in client.init_kwargs
+        # 全局旋钮是 15 秒（SDK 默认 5 秒对文本太紧，见 test_bridge_raises_the_shared_http_
+        # timeout_above_the_sdk_default），但它服务不了上传：20MiB 那一档按字节推导需要
+        # 68 秒，把共用一把抬到那个量级就等于让一个卡住的文本 POST 顶住这条会话的 pump。
+        assert client.init_kwargs.get("timeout") == bridge_module._BRIDGE_HTTP_TIMEOUT_SECONDS
+        big_upload_body = len(base64.b64encode(bytes(20 * 1024 * 1024)))
+        assert (
+            bridge_module._media_upload_timeout(big_upload_body)
+            > bridge_module._BRIDGE_HTTP_TIMEOUT_SECONDS
+        )
         assert client.api.check_session_calls == 1
         assert client.api.calls == [
             (
