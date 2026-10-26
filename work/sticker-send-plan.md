@@ -436,6 +436,22 @@ sticker_packs (emit `[[sticker:<pack>/<category>]]` as the last line; `pack | th
 | 修正 | `51d58fbc` | 三个用户可见渲染面统一走 `_render_assistant_media`；会话列表预览去掉 markdown |
 | 配置 | `3c9dfb26` | `stickers.maxPerReply`（调过才落盘 + 豁免前缀，老 config 照常加载） |
 | P2 | `36f67f42` | 逐图元数据 + `search_stickers` + `[[sticker:<包>/@<id>]]` + `semanticSearch` 开关 |
+| 覆盖 | `b41b3f02` | QQ 出站顺序/纯表情（假 botpy 驱动真桥）+ 网页流式帧抽成可测函数 |
+
+### 验证边界：哪些必须真连 QQ
+
+本机已可验证（不需要账号）：
+
+- 出站事件形状：`attachments[].kind` / `after_text`（`test_external_api_events` / `test_ceo_media_middle_layer`）。
+- **QQ 桥的真实代码路径**：用仓库自带的假 botpy + httpx MockTransport 驱动 `run_qq_official_bridge`，断言正文 `msg_type=0` 先发、附件经媒体 client 上传后以 `msg_type=7` 发、纯表情回合不发空文本（`b41b3f02`）。
+- 网页三面（实时 final / in-flight 快照 / 历史行）都不含标记；会话列表预览只留纯文本。
+- 动图走 `anim_*` 原样副本；PNG 走 `thumb_*`。
+- 增量通知（`demo2` 只可能从 `[RUNTIME_NOTICE]` 得知）、skill 装载、头部缓存命中。
+- 流式：`_reply_delta_frame` 是纯函数，单测覆盖完整标记/半截标记/纯标记帧。
+
+**只能真连 QQ 验证的**（假 botpy 把这些全 mock 了）：平台是否接受 `file_type=1` 的 gif/webp、群聊富媒体是否吃主动消息额度、被动回复窗口（`msg_passive`）里媒体消息的实际表现、以及"文字在前、图在后"在真实客户端的观感。
+
+工作树里现在有两套可直接灌给真 QQ 的测试数据：`stickers/demo`（PNG×2 + GIF×1）、`stickers/demo2`（PNG，用于验证通知）。接上 QQ 后只需在该渠道会话里发一句"夸我一句，最后附一张开心类表情包"，然后看桥日志的 `qq-official delivered c2c message (attachments=1)` 与客户端顺序。
 
 ### 平台会话实测（2026-10-26 23:08，web 车道，非 QQ）
 
@@ -468,8 +484,8 @@ sticker_packs (emit `[[sticker:<pack>/<category>]]` as the last line; `pack | th
 
 - P2 已实现但**默认关**（`stickers.semanticSearch`）：没有 caption 的库检索不出东西，且加工具会让 `tools[]` 前缀作废一次。打开前先跑 `caption_pack.py`。
 - `stickers.max_per_reply` 已接配置（`3c9dfb26`）。
-- **平台（web）车道已实测通过**（见上表）；**QQ 车道待实测**：需要真实群/私聊确认 `msg_type=7` 落地、动图正常、顺序为"文字在前"。
-- 流式期间"看不到标记"目前只有代码级保证（`strip_markers_for_stream` + 单测）；平台实测里回合太快没抓到中间帧，之后用长回复再看一次。
+- **平台（web）车道已实测通过**（见上表）。**QQ 桥的代码路径也已覆盖**（假 botpy 驱动真桥，`b41b3f02`）；**只剩平台接受度需要真账号**，见「验证边界」。
+- 流式：网页侧已抽成 `_reply_delta_frame` 纯函数并有单测（完整标记/半截标记/纯标记帧）。浏览器中间帧仍没抓到，但那已经只是"同一函数有没有被调用"的问题，不再是"标记会不会漏"。
 - 旧会话（本次实测前创建的 `web:ceo-96681f6af630`）转录里仍有 3 处历史标记——那是修复前的落盘数据，新会话已干净。需要的话在界面里删掉那个会话即可。
 
 **与本次无关的既有失败**（在干净 HEAD 上同样失败，已用 detached worktree 复核）：`test_frontdoor_pinned_contract::test_continuation_seed_head_is_not_stacked_with_a_second_pinned_block`（缺 `persona_text` 参数）、`test_ceo_create_agent_runner::test_parse_create_async_task_result_recognizes_task_append_notice_guidance`（`duplicate` vs `append_notice`）。
