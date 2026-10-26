@@ -11383,12 +11383,13 @@ textarea {
     box-sizing: border-box;
 }
 
+/* 表格只留一条线（表头下沿）：外框、逐行分隔线都去掉，靠留白与悬停区分行。
+   这一层是只读浏览，密排的横线比内容本身还抢眼。 */
 .memory-browser-table-wrap {
     flex: 1 1 auto;
     min-height: 0;
     overflow: auto;
     border-radius: 16px;
-    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
     background: color-mix(in srgb, var(--bg-panel) 84%, var(--bg-app) 16%);
 }
 
@@ -11405,7 +11406,7 @@ textarea {
     text-align: left;
     padding: 10px 12px;
     background: var(--bg-panel);
-    border-bottom: 1px solid var(--border-color);
+    border-bottom: 1px solid color-mix(in srgb, var(--border-color) 55%, transparent);
     color: var(--text-muted);
     font-weight: 700;
     white-space: nowrap;
@@ -11422,9 +11423,14 @@ textarea {
 }
 
 .memory-browser-table tbody td {
-    padding: 10px 12px;
-    border-bottom: 1px solid color-mix(in srgb, var(--border-color) 60%, transparent);
+    padding: 12px;
+    border-bottom: 0;
     vertical-align: top;
+}
+
+/* 没有任何分隔线之后，靠这一档悬停把"正在看哪一行"补回来。 */
+.memory-browser-table tbody tr:hover > td {
+    background: color-mix(in srgb, var(--text-primary) 4%, transparent);
 }
 
 .memory-browser-cell-nowrap {
@@ -13726,14 +13732,6 @@ textarea {
     margin: 4px 0 0;
     color: var(--text-secondary);
     font-size: 0.84rem;
-    line-height: 1.6;
-}
-
-.external-security-hint {
-    margin: 0;
-    padding: 10px var(--space-5) var(--space-4);
-    color: var(--text-muted);
-    font-size: 0.8rem;
     line-height: 1.6;
 }
 
@@ -17328,12 +17326,6 @@ textarea {
     font-size: 0.8rem;
     line-height: 1.5;
     color: var(--ui-text-muted);
-}
-#view-external .external-security-hint {
-    margin: 0;
-    padding: 0;
-    font-size: 0.8rem;
-    line-height: 1.5;
 }
 #view-external .external-token-form {
     padding: 0;
