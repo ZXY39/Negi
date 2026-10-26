@@ -2164,3 +2164,95 @@ async def test_bridge_relogin_resumes_from_last_delivered_seq(monkeypatch: pytes
         second_task.cancel()
         with suppress(asyncio.CancelledError):
             await second_task
+
+
+@pytest.mark.asyncio
+async def test_outbound_after_text_attachment_goes_after_the_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """表情包附件（after_text）：正文先发、附件后发。"""
+    order: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url).endswith("/files"):
+            order.append("upload")
+            return httpx.Response(200, json={"file_info": "fi-1", "file_uuid": "u1", "ttl": 0})
+        order.append("download")
+        return httpx.Response(200, content=b"gif-bytes")
+
+    task, client = await _start_bridge(monkeypatch, httpx.MockTransport(handler))
+    try:
+        await client.on_c2c_message_create(_c2c_message("hi", [], message_id="ao-1"))
+        ext = FakeExternalApiClient.instances[-1]
+        await ext.events.put(
+            {
+                "type": "reply.final",
+                "seq": 1,
+                "text": "好耶",
+                "attachments": [
+                    {
+                        "kind": "image",
+                        "name": "happy.gif",
+                        "mime_type": "image/gif",
+                        "url": "/api/ceo/media/original?token=t9",
+                        "after_text": True,
+                    }
+                ],
+            }
+        )
+        await _wait_until(lambda: any(call[1].get("msg_type") == 7 for call in client.api.calls))
+
+        assert order == ["download", "upload"]
+        calls = list(client.api.calls)
+        assert calls[0] == (
+            "post_c2c_message",
+            {"openid": "u9", "content": "好耶", "msg_type": 0},
+        )
+        assert calls[1][0] == "post_c2c_message"
+        assert calls[1][1]["msg_type"] == 7
+        assert calls[1][1]["media"] == {"file_info": "fi-1"}
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_outbound_sticker_only_reply_sends_the_media_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """纯表情回合：正文为空时不补发空文本消息，只发那一条富媒体。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url).endswith("/files"):
+            return httpx.Response(200, json={"file_info": "fi-2", "file_uuid": "u2", "ttl": 0})
+        return httpx.Response(200, content=b"png-bytes")
+
+    task, client = await _start_bridge(monkeypatch, httpx.MockTransport(handler))
+    try:
+        await client.on_c2c_message_create(_c2c_message("hi", [], message_id="ao-2"))
+        ext = FakeExternalApiClient.instances[-1]
+        await ext.events.put(
+            {
+                "type": "reply.final",
+                "seq": 1,
+                "text": "",
+                "attachments": [
+                    {
+                        "kind": "image",
+                        "name": "smug.png",
+                        "mime_type": "image/png",
+                        "url": "/api/ceo/media/original?token=t10",
+                        "after_text": True,
+                    }
+                ],
+            }
+        )
+        await _wait_until(lambda: any(call[1].get("msg_type") == 7 for call in client.api.calls))
+        await asyncio.sleep(0.2)
+
+        assert [call[1].get("msg_type") for call in client.api.calls] == [7]
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task

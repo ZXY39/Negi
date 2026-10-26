@@ -119,6 +119,25 @@ def _render_assistant_media(session_id: str, text: Any) -> Any:
     if paths:
         cleaned = cleaned + "".join(f"\n\n![]({path})" for path in paths)
     return rewrite_assistant_media_content(session_id, cleaned)
+
+
+def _reply_delta_frame(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    """``ceo.reply.delta`` frame with sticker markers (complete or partial) removed.
+
+    Split out of the socket handler so the streaming decision is testable
+    without a live connection: the frame is what the platform UI renders while
+    the reply is still being generated.
+    """
+    source = dict(payload or {})
+    stream_text = _strip_sticker_markers_for_stream(str(source.get('text') or ''))
+    if not stream_text:
+        return None
+    return {
+        'turn_id': str(source.get('turn_id') or '').strip(),
+        'source': str(source.get('source') or 'user').strip().lower() or 'user',
+        'text': stream_text,
+        'seq': int(source.get('seq') or 0),
+    }
 # 静默回合的历史占位文案：存量转录里仍带这一行，快照层按静默归一化后不显示到会话框。
 _LEGACY_SILENT_REPLY_TEXT = "信息已静默"
 _APPROVAL_INTERRUPT_KINDS = {
@@ -1781,18 +1800,10 @@ async def ceo_websocket(websocket: WebSocket):
         if event.type == 'assistant_stream_delta':
             payload = dict(event.payload or {})
             # 累计全文：标记（含写了一半的）在到达前端前就扣住。
-            stream_text = _strip_sticker_markers_for_stream(str(payload.get('text') or ''))
-            if not stream_text:
+            frame = _reply_delta_frame(payload)
+            if frame is None:
                 return
-            await _push_stream_event(
-                'ceo.reply.delta',
-                {
-                    'turn_id': str(payload.get('turn_id') or '').strip(),
-                    'source': str(payload.get('source') or 'user').strip().lower() or 'user',
-                    'text': stream_text,
-                    'seq': int(payload.get('seq') or 0),
-                },
-            )
+            await _push_stream_event('ceo.reply.delta', frame)
             return
         if event.type == 'assistant_reasoning_delta':
             # 思维链帧与正文帧同一条 writer、同一条 stream_queue，不另开 sender；

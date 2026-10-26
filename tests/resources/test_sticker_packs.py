@@ -283,3 +283,17 @@ def test_strip_markers_for_stream_is_idempotent():
     once = strip_markers_for_stream("正文\n[[sticker:atri/happy]]\n尾巴\n[[sticker:at")
     twice = strip_markers_for_stream(once)
     assert once == twice == "正文\n尾巴\n"
+
+
+def test_web_reply_delta_frame_never_carries_a_marker():
+    """网页流式帧：完整标记剔除、半截标记扣住、纯标记帧整帧丢弃。"""
+    from g3ku.runtime.api.websocket_ceo import _reply_delta_frame
+
+    partial = _reply_delta_frame({"text": "好耶\n[[sticker:atri/ha", "turn_id": "t1", "seq": 3})
+    assert partial == {"turn_id": "t1", "source": "user", "text": "好耶\n", "seq": 3}
+
+    complete = _reply_delta_frame({"text": "好耶\n[[sticker:atri/happy]]\n", "seq": 4})
+    assert complete is not None and "[[" not in complete["text"]
+
+    # 整帧只有半截标记：这一帧没有可显示内容，别推空文本
+    assert _reply_delta_frame({"text": "[[sticker:atri/ha"}) is None
