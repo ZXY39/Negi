@@ -1,0 +1,28 @@
+schema_version: 1
+kind: skill
+name: meme
+description: 管理表情包图库：导入外部表情包项目、增删图片与分类、校准主题与分类描述。发送表情包不需要读本文（可用清单已钉在契约头）。
+trigger:
+  keywords:
+    - 表情包
+    - 贴纸
+    - meme
+    - sticker
+    - 导入表情包
+    - 加表情
+    - 删表情
+    - 整理图库
+    - astrbot 表情包
+requires:
+  tools:
+    - filesystem_copy
+    - filesystem_delete
+    - filesystem_stat
+    - exec
+  bins: []
+  env: []
+content:
+  main: SKILL.md
+exposure:
+  agent: true
+  main_runtime: true

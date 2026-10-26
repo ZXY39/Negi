@@ -257,7 +257,7 @@ Negi 不需要新造"标记 → 图片 → 消息链"的发送实现：**正文�
 
 - 落点是 skill 自带脚本 `skills/meme/scripts/import_pack.py`（惯例已有：`skills/contributor-codebase-analyzer/scripts/checkpoint.sh`，SKILL.md 里以 `./scripts/xxx` 调用）。agent 一条 `exec` 跑完 500–1000 张，秒级。
 - 反面：走 `filesystem_copy` 逐张搬 = 每张一次模型往返，ATRI 那种 551 张的包等于 551 跳，不可行。这是"agent 自由管理"的唯一例外——**单张增删走文件工具，批量导入走脚本**。
-- 命令形态：`python skills/meme/scripts/import_pack.py <src> [--pack NAME] [--dry-run] [--force]`；`--dry-run` 先出报告再落盘，避免导错 500 张再删。
+- 命令形态：`python skills/meme/scripts/import_pack.py <src> [--pack NAME] [--theme "一句话"] [--force] [--dry-run] [--classify-map FILE]`；`--dry-run` 先出报告再落盘，避免导错 500 张再删。
 - **报告必须短**：按分类聚合的计数 + 异常清单，不打印逐个文件名。工具结果超 6000 字符会被外置成 artifact、模型只看到 6 行预览（`g3ku/content/navigation.py:505-520`），输出体积得由脚本自己控制。
 - 脚本经 `exec` 运行，**绕过 `_enforce_workspace_path_policy`**，所以脚本必须自限：只写 `<workspace>/stickers/`，解压与 clone 只落 `temp/`（`data_work_path('temp')`，也正好是 managed-artifact 规则唯一放行的落点）。
 
@@ -286,16 +286,16 @@ AstrBot 是最高价值输入：分类人工分好（社区包实测 10–21 类
 | `manifest.json:categories[].description` | `categories.<键>.description` | 原样搬（1–2000 字）；头部块里截 20 字渲染，全文留在 manifest 供 P2 用 |
 | `memes/<分类>/<图片>` | `<pack>/<分类>/<图片>` | 目录名即键，字符集与我们相同（`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`），**不需要 slugify**；`/` 是我们新引入的分隔符，不在该字符集内，所以不冲突 |
 | `previews/` | 丢弃 | 包预览图不是可用表情，混进去会污染随机取图 |
-| `semantic_metadata.json` | `<pack>/semantic/metadata.json` | caption/tags 白送 → **P1.5 那几百次视觉调用直接省掉**，甚至可跳过 P1 直上 P2 |
+| `semantic_metadata.json` | `<pack>/semantic/metadata.source.json` | **原样复制**，不重算。没有 P2 时这些 ID 没有消费者；开启 P2 前必须重算（见下） |
 | （无对应字段） | `theme` | **AstrBot manifest 没有包级主题字段**，必须补，见下 |
 
 `entry_id` 必须重算：它的定义是 `sha256(图片字节 + 分类 + 相对路径)`。我们改了相对路径（`memes/<cat>/x.png` → `<cat>/x.png`），原 `entry_id` 全部失效；不重算的话导入当时看不出问题，上 P2 时哈希校验整批失败。重算规则照抄不变量：**内容或分类变了，身份必须跟着变**。
 
 **包级主题怎么补**（模型要区分包，靠的就是这一句）：
 
-1. 默认：导入时从该包**分层抽样 8 张**（每个分类最多 1 张，保证覆盖不同情景）跑一次视觉模型，产出一句 ≤60 字的主题描述，写进 `manifest.json` 的 `theme`，`theme_source: "vision"`。成本 = 每包 1 次调用。
-2. 有来源仓库时，README 首段可作为提示一并喂给视觉模型，但**不单独依赖 README**——zip 包没有 README，通用性要求走图片。
-3. 人工可覆盖：改 `theme` 并把 `theme_source` 改成 `"human"`；导入器与运行时都不得覆盖 `theme_source == "human"` 的条目。
+1. **默认（已落地）**：`import_pack.py --dry-run` 从该包**分层抽样 8 张**（每个分类最多 1 张，保证覆盖不同情景）复制到 `stickers/.import/<pack>-theme-<n>.<ext>`，并在报告里列出路径。agent 用 `content_open` 看完，把一句 ≤60 字的主题写进 `--theme`，脚本落盘时标 `theme_source: "human"`。成本 = agent 侧 1 次（可复用的）多模态读取。
+2. 有来源仓库时 README 首段可以一起看，但**不单独依赖 README**——zip 包没有 README，通用性要求走图片。
+3. 人工可覆盖：改 `theme` 并把 `theme_source` 改成 `"human"`；导入器与运行时都不得覆盖 `theme_source == "human"` 的条目（脚本合并时只在显式 `--theme` 时改写）。
 4. 主题句按"数据不是指令"渲染（同 caption 规则），因为它可能来自 README 或图内文字。
 
 **继承的两条协议不变量**（AstrBot 包协议本身就要求，判据照抄，不自己发明）：路径不得绝对、不得含 `..` 或反斜杠、不得经符号链接逃逸包根。
@@ -372,8 +372,8 @@ sticker_packs (emit `[[sticker:<pack>/<category>]]` as the last line; `pack | th
 - 硬约束：**不许发明新键**。否则导 3 个杂包就长出 3 套私有分类，键数爆炸且新键没有描述、模型选不准。加新类必须是显式决定（建目录 + 写一行描述），由 agent 或人做，不由导入器做。
 - 低置信 / 无合适键 → `_review/`，不猜。
 - 批量 30 张一次（Hermes 的做法），500 张 ≈ 17 次调用，一次性成本。
-- **实现路径已核实**：本地 OpenAI 兼容端点 `POST /chat/completions`（`g3ku/runtime/api/openai_compat.py:464`）接受 data URL 图片（`:154-183`），脚本直接打 localhost，不需要新基础设施。
-- 副作用要处理：该端点会把 base64 图片落进会话 upload 目录（`_store_base64_attachment`），500 张就是 500 份副本。脚本用一个专用一次性 session key，跑完删掉该目录。
+- **实现路径已定（与初版有偏离）**：脚本**不自己调模型**。本地 OpenAI 兼容端点要 `require_external_api` 的外部令牌（`openai_compat.py:464` → `Depends(require_external_api)`），CLI 里配令牌不划算。改为把判断交回 agent：脚本 `--dry-run` 报告里给出 `theme_samples`（分层 8 张路径已复制到 `stickers/.import/`），agent 用 `content_open` 看图后带 `--theme` 定稿。agent 本身就是这条链路里的多模态模型，不需要第二套调用。
+- 分类同理：`--classify-map` 接收 `{相对路径: 分类键}`，平铺图堆的归属由 agent 看图后给出；未映射的进 `_review/`。没有实现"脚本内跑视觉分类"，原因同上。
 
 ### 语义冲突：命名空间视图下大部分冲突自动消失
 
@@ -413,3 +413,30 @@ sticker_packs (emit `[[sticker:<pack>/<category>]]` as the last line; `pack | th
 - 标 † 的读数动 P2/流式前复核。
 - 已拍板：渠道严/网页宽的路径白名单；agent 用普通文件工具自由增删；命名空间视图（模型要能区分包）；QQ 收 gif/webp 故不做格式转换；**清单常驻头部钉住块 + `[RUNTIME_NOTICE]` 增量，meme skill 只管管理**（替换早先的"发送时按需 load skill"方案，理由见 P1-3 成本对比）。
 - 第一步只做 P0（三项：`kind`、路径白名单、网页动图例外），各自可独立验收，不引入新模块。P1 里最省力也最值钱的顺序是：先接头部渲染（复用 `render_pinned_contract_text`，不新增 epoch），再接解析器与两个接线点，最后接通知块。
+
+## 落地记录（2026-10-26）
+
+| 批次 | 提交 | 内容 |
+|---|---|---|
+| 计划 | `53fbf30f`（随用户 checkpoint 提交） | `work/sticker-send-plan.md` |
+| P0 | `71f084e6` | `kind` / 渠道路径白名单 / 网页动图例外 |
+| P1 核心 | `5cf1dd53` | `g3ku/stickers/{catalog,marker}.py` |
+| P1 接线 | `ba6626aa` | 两条出站车道 + 流式扣留 + 桥侧 `after_text` |
+| P1 头部 | `b3496194` | 钉住块 + `sticker_pack:*` 通知分节 + 渲染器 v3 |
+| P1c | 本批 | `skills/meme/` + `import_pack.py` + 测试 |
+
+验收现状：`test_sticker_packs`（15）、`test_sticker_import_script`（6）、`test_external_api_events`（含 3 条表情包链路用例）、`test_runtime_contract_notice`（含头部冻结/只投一次）、`test_frontdoor_pinned_contract`（含 round-trip）全绿；OneBot 桥 38 条全绿。
+
+**与初版的偏离（三条，都是"脚本不自己调模型"的连带）**：
+
+1. `--classify` 改成 `--classify-map`：本地 OpenAI 兼容端点要外部 API 令牌（`Depends(require_external_api)`），CLI 配令牌不划算；分类判断交回 agent（它本来就是多模态），未映射的进 `_review/`。
+2. 包主题不再由脚本跑视觉模型生成，改为脚本给出 8 张分层抽样、agent 看完带 `--theme` 定稿（`theme_source: "human"`）。
+3. `semantic_metadata.json` 原样复制为 `semantic/metadata.source.json`，**不重算 `entry_id`**（缺 schema 证据，不臆造结构）。P2 开工前必须重算，否则候选表校验会整批失败。
+
+**未实现 / 待办**：
+
+- P2（`search_stickers` 工具 + 向量检索 + 六项校验）未实现，按计划保持默认关。
+- `stickers.max_per_reply` 目前是模块常量 `MAX_STICKERS_PER_REPLY = 1`，未接配置项。
+- **运行时验收未做**：需要真实 QQ 会话发一张表情包，确认 `msg_type=7` 落地、动画正常、顺序为"文字在前"，并在网页端确认流式期间看不到标记。单测只覆盖到出站事件与桥参数。
+
+**与本次无关的既有失败**（在干净 HEAD 上同样失败，已用 detached worktree 复核）：`test_frontdoor_pinned_contract::test_continuation_seed_head_is_not_stacked_with_a_second_pinned_block`（缺 `persona_text` 参数）、`test_ceo_create_agent_runner::test_parse_create_async_task_result_recognizes_task_append_notice_guidance`（`duplicate` vs `append_notice`）。
