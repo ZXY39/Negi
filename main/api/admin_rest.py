@@ -10,7 +10,8 @@ from inspect import isawaitable
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Body, HTTPException, Query, Request
+from fastapi import APIRouter, Body, File, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse
 
 from g3ku import audit_events
 from g3ku.config.loader import load_config, save_config
@@ -22,6 +23,7 @@ from g3ku.resources.models import ResourceKind
 from g3ku.resources.retired_schemas import record_tool_schema
 from g3ku.runtime.core_tools import configured_core_tools, resolve_core_tool_targets
 from g3ku.shells.web import get_agent, is_no_ceo_model_configured_error, refresh_web_agent_runtime
+from g3ku.stickers import admin as sticker_admin
 from g3ku.utils.retry_keywords import split_retry_keywords
 from main.governance import (
     GovernanceStore,
@@ -2010,6 +2012,325 @@ async def reload_resources(payload: dict[str, Any] | None = Body(default=None), 
         effective_session_id = str((payload or {}).get('session_id') or session_id or 'web:shared')
         result = await service.reload_resources_async(session_id=effective_session_id)
         return {'ok': True, **result}
+
+
+# ---------------------------------------------------------------------------
+# 表情包管理页
+#
+# 目录即清单：这一组路由不维护任何注册表，读是扫 <workspace>/stickers，写是改
+# 目录名与 manifest.json。名字解析全部下沉到 g3ku.stickers.admin（那里 fail-closed：
+# 非法名、`..`、绝对路径、指向根外的符号链接一律拒绝），路由层只把
+# StickerAdminError 翻成 HTTP 状态码。
+#
+# 每个写操作返回刷新后的整个包，界面因此不需要"写成功再 GET 一次"，也不会出现
+# 写后读到 TTL 内旧值的窗口。
+# ---------------------------------------------------------------------------
+
+
+def _sticker_http_error(exc: 'sticker_admin.StickerAdminError') -> HTTPException:
+    return HTTPException(status_code=exc.status_code, detail=exc.payload())
+
+
+def _sticker_flag(payload: dict[str, Any] | None) -> bool:
+    value = (payload or {}).get('enabled')
+    if isinstance(value, bool):
+        return value
+    raise HTTPException(
+        status_code=400,
+        detail={'code': 'invalid_enabled', 'message': 'enabled 必须是布尔值'},
+    )
+
+
+def _stickers_settings_payload(cfg: Config) -> dict[str, Any]:
+    return {
+        'max_per_reply': int(getattr(cfg.stickers, 'max_per_reply', 1)),
+        'semantic_search': bool(getattr(cfg.stickers, 'semantic_search', False)),
+        'max_per_reply_limit': 4,
+        'theme_max_chars': sticker_admin.THEME_MAX_CHARS,
+        'description_max_chars': sticker_admin.CATEGORY_DESCRIPTION_MAX_CHARS,
+        'max_upload_files': sticker_admin.MAX_UPLOAD_FILES,
+        'max_image_bytes': sticker_admin.MAX_IMAGE_BYTES,
+    }
+
+
+def _sticker_image_payload(
+    pack_dir_name: str,
+    category_dir_name: str,
+    image: 'sticker_admin.AdminImage',
+) -> dict[str, Any]:
+    return {
+        'name': image.name,
+        'size': image.size,
+        'mtime': image.mtime,
+        'url': sticker_admin.sticker_image_url(pack_dir_name, category_dir_name, image.name),
+    }
+
+
+def _sticker_pack_payload(pack: 'sticker_admin.AdminPack') -> dict[str, Any]:
+    return {
+        'dir_name': pack.dir_name,
+        'key': pack.key,
+        'theme': pack.theme,
+        'theme_source': pack.theme_source,
+        'source': dict(pack.source),
+        'enabled': pack.enabled,
+        'total': pack.total,
+        'categories': [
+            {
+                'dir_name': item.dir_name,
+                'key': item.key,
+                'description': item.description,
+                'enabled': item.enabled,
+                'count': item.count,
+                'images': [
+                    _sticker_image_payload(pack.dir_name, item.dir_name, image)
+                    for image in item.images
+                ],
+            }
+            for item in pack.categories
+        ],
+    }
+
+
+def _sticker_pack_after(pack_dir_name: str, *, per_category: int = 12) -> dict[str, Any]:
+    try:
+        pack = sticker_admin.read_admin_pack(pack_dir_name, per_category=per_category)
+    except sticker_admin.StickerAdminError as exc:
+        raise _sticker_http_error(exc) from exc
+    return _sticker_pack_payload(pack)
+
+
+def _audit_sticker_delete(event_type: str, summary: str, **detail: Any) -> None:
+    """不可逆删除留一条审计；改名/上传/改描述不留——它们可逆或在 manifest 里可见。"""
+    audit_events.emit_audit_event(
+        'stickers',
+        'warning',
+        event_type,
+        summary,
+        detail={key: value for key, value in detail.items() if value not in (None, '')},
+    )
+
+
+@router.get('/resources/stickers/packs')
+async def list_sticker_packs():
+    packs = sticker_admin.scan_admin_packs(per_category=0)
+    return {'ok': True, 'items': [_sticker_pack_payload(pack) for pack in packs]}
+
+
+@router.get('/resources/stickers/settings')
+async def get_sticker_settings():
+    return {'ok': True, **_stickers_settings_payload(load_config())}
+
+
+@router.put('/resources/stickers/settings')
+async def update_sticker_settings(payload: dict | None = Body(default=None)):
+    body = payload if isinstance(payload, dict) else {}
+    cfg = load_config()
+    changed = False
+    if 'max_per_reply' in body or 'maxPerReply' in body:
+        raw = body.get('max_per_reply', body.get('maxPerReply'))
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail={'code': 'invalid_max_per_reply'}) from None
+        if not 0 <= value <= 4:
+            raise HTTPException(
+                status_code=400,
+                detail={'code': 'invalid_max_per_reply', 'message': '每轮张数取值 0..4'},
+            )
+        if value != int(getattr(cfg.stickers, 'max_per_reply', 1)):
+            cfg.stickers.max_per_reply = value
+            changed = True
+    if 'semantic_search' in body or 'semanticSearch' in body:
+        value = body.get('semantic_search', body.get('semanticSearch'))
+        if not isinstance(value, bool):
+            raise HTTPException(status_code=400, detail={'code': 'invalid_semantic_search'})
+        if value != bool(getattr(cfg.stickers, 'semantic_search', False)):
+            cfg.stickers.semantic_search = value
+            changed = True
+    if changed:
+        save_config(cfg)
+        await _refresh_runtime_after_save('admin_stickers_settings_update')
+    return {'ok': True, **_stickers_settings_payload(cfg)}
+
+
+@router.get('/resources/stickers/image')
+async def get_sticker_image(
+    pack: str = Query(...),
+    category: str = Query(...),
+    name: str = Query(...),
+):
+    from g3ku.runtime.api.ceo_media import guess_media_mime
+
+    try:
+        path = sticker_admin.image_path(pack, category, name)
+    except sticker_admin.StickerAdminError as exc:
+        raise _sticker_http_error(exc) from exc
+    return FileResponse(
+        str(path),
+        media_type=guess_media_mime(path.name),
+        filename=path.name,
+        content_disposition_type='inline',
+        headers={'Cache-Control': 'no-cache'},
+    )
+
+
+@router.get('/resources/stickers/packs/{pack}')
+async def get_sticker_pack(pack: str, per_category: int = Query(12, ge=0, le=200)):
+    try:
+        item = sticker_admin.read_admin_pack(pack, per_category=per_category)
+    except sticker_admin.StickerAdminError as exc:
+        raise _sticker_http_error(exc) from exc
+    return {'ok': True, 'item': _sticker_pack_payload(item)}
+
+
+@router.put('/resources/stickers/packs/{pack}/theme')
+async def update_sticker_theme(pack: str, payload: dict = Body(...)):
+    try:
+        sticker_admin.set_theme(pack, payload.get('theme'))
+    except sticker_admin.StickerAdminError as exc:
+        raise _sticker_http_error(exc) from exc
+    return {'ok': True, 'item': _sticker_pack_after(pack)}
+
+
+@router.post('/resources/stickers/packs/{pack}/enabled')
+async def set_sticker_pack_enabled(pack: str, payload: dict | None = Body(default=None)):
+    enabled = _sticker_flag(payload)
+    try:
+        new_name = sticker_admin.set_enabled(pack, enabled)
+    except sticker_admin.StickerAdminError as exc:
+        raise _sticker_http_error(exc) from exc
+    return {'ok': True, 'dir_name': new_name, 'item': _sticker_pack_after(new_name)}
+
+
+@router.post('/resources/stickers/packs/{pack}/categories')
+async def create_sticker_category(pack: str, payload: dict = Body(...)):
+    try:
+        dir_name = sticker_admin.create_category(
+            pack,
+            payload.get('key') or payload.get('name'),
+            payload.get('description'),
+        )
+    except sticker_admin.StickerAdminError as exc:
+        raise _sticker_http_error(exc) from exc
+    return {'ok': True, 'dir_name': dir_name, 'item': _sticker_pack_after(pack)}
+
+
+@router.get('/resources/stickers/packs/{pack}/categories/{category}/images')
+async def list_sticker_category_images(
+    pack: str,
+    category: str,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(120, ge=1, le=500),
+):
+    try:
+        images, total = sticker_admin.list_category_images(
+            pack, category, offset=offset, limit=limit
+        )
+    except sticker_admin.StickerAdminError as exc:
+        raise _sticker_http_error(exc) from exc
+    return {
+        'ok': True,
+        'total': total,
+        'items': [_sticker_image_payload(pack, category, image) for image in images],
+    }
+
+
+@router.put('/resources/stickers/packs/{pack}/categories/{category}/description')
+async def update_sticker_category_description(
+    pack: str, category: str, payload: dict = Body(...)
+):
+    try:
+        sticker_admin.set_category_description(pack, category, payload.get('description'))
+    except sticker_admin.StickerAdminError as exc:
+        raise _sticker_http_error(exc) from exc
+    return {'ok': True, 'item': _sticker_pack_after(pack)}
+
+
+@router.post('/resources/stickers/packs/{pack}/categories/{category}/enabled')
+async def set_sticker_category_enabled(
+    pack: str, category: str, payload: dict | None = Body(default=None)
+):
+    enabled = _sticker_flag(payload)
+    try:
+        sticker_admin.set_category_enabled(pack, category, enabled)
+    except sticker_admin.StickerAdminError as exc:
+        raise _sticker_http_error(exc) from exc
+    return {'ok': True, 'item': _sticker_pack_after(pack)}
+
+
+@router.post('/resources/stickers/upload')
+async def upload_sticker_images(
+    pack: str = Query(...),
+    category: str = Query(...),
+    files: list[UploadFile] = File(...),
+):
+    uploads: list[tuple[str, bytes]] = []
+    try:
+        if len(files) > sticker_admin.MAX_UPLOAD_FILES:
+            raise sticker_admin.StickerAdminError(
+                'too_many_files',
+                f'一次最多上传 {sticker_admin.MAX_UPLOAD_FILES} 张',
+                detail={'limit': sticker_admin.MAX_UPLOAD_FILES},
+            )
+        for upload in files:
+            try:
+                # 多读一字节即判超限：整包读进内存再比大小，超限请求会先把内存吃掉。
+                payload = await upload.read(sticker_admin.MAX_IMAGE_BYTES + 1)
+                uploads.append((str(upload.filename or ''), payload))
+            finally:
+                await upload.close()
+        items = sticker_admin.store_uploads(pack, category, uploads)
+    except sticker_admin.StickerAdminError as exc:
+        raise _sticker_http_error(exc) from exc
+    return {'ok': True, 'items': items, 'item': _sticker_pack_after(pack)}
+
+
+@router.delete('/resources/stickers/packs/{pack}/categories/{category}/images')
+async def delete_sticker_image(pack: str, category: str, name: str = Query(...)):
+    try:
+        sticker_admin.delete_image(pack, category, name)
+    except sticker_admin.StickerAdminError as exc:
+        raise _sticker_http_error(exc) from exc
+    _audit_sticker_delete(
+        'sticker_image_deleted',
+        f'删除表情包图片：{pack}/{category}/{name}',
+        pack=pack,
+        category=category,
+        name=name,
+    )
+    return {'ok': True, 'item': _sticker_pack_after(pack)}
+
+
+@router.delete('/resources/stickers/packs/{pack}/categories/{category}')
+async def delete_sticker_category(pack: str, category: str):
+    try:
+        deleted = sticker_admin.delete_category(pack, category)
+    except sticker_admin.StickerAdminError as exc:
+        raise _sticker_http_error(exc) from exc
+    _audit_sticker_delete(
+        'sticker_category_deleted',
+        f"删除表情包分类：{pack}/{category}（{deleted['images']} 张图）",
+        pack=pack,
+        category=category,
+        **deleted,
+    )
+    return {'ok': True, 'deleted': deleted, 'item': _sticker_pack_after(pack)}
+
+
+@router.delete('/resources/stickers/packs/{pack}')
+async def delete_sticker_pack(pack: str):
+    try:
+        deleted = sticker_admin.delete_pack(pack)
+    except sticker_admin.StickerAdminError as exc:
+        raise _sticker_http_error(exc) from exc
+    _audit_sticker_delete(
+        'sticker_pack_deleted',
+        f"删除表情包：{pack}（{deleted['images']} 张图）",
+        pack=pack,
+        **deleted,
+    )
+    return {'ok': True, 'deleted': deleted}
 
 
 def _runtime_memory_manager():
