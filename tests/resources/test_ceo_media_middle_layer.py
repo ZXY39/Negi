@@ -205,21 +205,20 @@ def test_channel_attachment_roots_are_workspace_only():
     assert roots == (ceo_media.workspace_path(),)
 
 
-def test_animated_media_skips_thumbnail(monkeypatch, tmp_path):
-    """gif/webp 走签名原图：缩略图会把动图压成静态首帧。"""
+def test_animated_media_keeps_bytes_and_uses_a_local_src(monkeypatch, tmp_path):
+    """gif/webp 不被压成静态 JPEG；src 必须是本地副本（前端只渲染本地 src）。"""
     monkeypatch.chdir(tmp_path)
+    payload = b"GIF89a-fake-animated"
     gif = tmp_path / "wave.gif"
-    gif.write_bytes(b"GIF89a-fake")
-    webp = tmp_path / "wave.webp"
-    webp.write_bytes(b"RIFF-fake")
+    gif.write_bytes(payload)
 
-    rewritten = ceo_media.rewrite_assistant_media_content(
-        "sess_anim", f"![a]({gif}) ![b]({webp})"
-    )
+    rewritten = ceo_media.rewrite_assistant_media_content("sess_anim", f"![a]({gif})")
 
-    assert "inline_media" not in rewritten
-    sources = re.findall(r"!\[[^\]]*\]\(([^)\s]+)", rewritten)
-    assert len(sources) == 2
-    for src in sources:
-        assert src.startswith(ceo_media.VIEWER_ROUTE + "?token=")
+    match = re.search(r'!\[a\]\(([^)"]+)\s+"([^"]+)"\)', rewritten)
+    assert match, rewritten
+    staged, viewer = Path(match.group(1)), match.group(2)
+    assert staged.exists() and staged.suffix == ".gif"
+    # 原样副本：没有被 _build_thumbnail 转成首帧 JPEG
+    assert staged.read_bytes() == payload
+    assert viewer.startswith(ceo_media.VIEWER_ROUTE + "?token=")
 

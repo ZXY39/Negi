@@ -3218,6 +3218,11 @@ class RuntimeAgentSession:
         retire_lingering_transcript_rows: bool = False,
         promote_user_transcript_rows: bool = True,
     ) -> Any | None:
+        # 转录里不能留原始标记：历史回放与导出读的是这段文本，而标记是模型/运行时
+        # 之间的传输细节。这里换成图片 markdown，与实时帧用同一次确定性选图。
+        from g3ku.stickers import render_marker_images
+
+        assistant_text = render_marker_images(assistant_text)
         persisted_session = None
         try:
             persisted_session = self._loop.sessions.get_or_create(self._state.session_key)

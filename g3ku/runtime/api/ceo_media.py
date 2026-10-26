@@ -18,6 +18,7 @@ import json
 import mimetypes
 import re
 import secrets
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -222,6 +223,35 @@ def _stage_thumbnail(session_id: str, source: Path) -> Path | None:
     return thumb if thumb.exists() else None
 
 
+def _stage_animated_original(session_id: str, source: Path) -> Path | None:
+    """Copy an animated image byte-for-byte into the session upload dir.
+
+    The frontend only renders an inline ``<img>`` when the markdown src is a
+    local file it can serve itself; pointing src at the signed viewer route
+    degrades the image to a clickable "image" label. So animation is preserved
+    by staging the original bytes (no re-encode) and keeping the signed URL in
+    the title slot, which is the same shape the thumbnail path uses.
+    """
+    suffix = source.suffix.lower()
+    try:
+        stat = source.stat()
+    except OSError:
+        return None
+    digest = hashlib.sha1(
+        f"{source}|{stat.st_size}|{stat.st_mtime_ns}".encode("utf-8")
+    ).hexdigest()[:12]
+    name = safe_filename(source.stem) or "image"
+    dest = upload_dir_for_session(session_id) / "inline_media" / f"anim_{digest}_{name}{suffix}"
+    if dest.exists():
+        return dest
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, dest)
+    except Exception:
+        return None
+    return dest if dest.exists() else None
+
+
 def rewrite_assistant_media_content(session_id: str, content: Any) -> Any:
     if not isinstance(content, str) or not content.strip():
         return content
@@ -240,7 +270,10 @@ def rewrite_assistant_media_content(session_id: str, content: Any) -> Any:
         if is_raster_image(source.name):
             url = original_view_url(source)
             if source.suffix.lower() in _ANIMATED_RASTER_SUFFIXES:
-                return stash(f'![{alt}]({url} "{url}")')
+                staged = _stage_animated_original(session_id, source)
+                if staged is None:
+                    return match.group(0)
+                return stash(f'![{alt}]({staged} "{url}")')
             thumb = _stage_thumbnail(session_id, source)
             if thumb is None:
                 return match.group(0)

@@ -9,6 +9,7 @@ from pathlib import Path
 from g3ku.stickers import (
     STICKER_HEADER,
     render_catalog_lines,
+    render_marker_images,
     resolve_markers,
     scan_packs,
     sticker_pack_sections,
@@ -216,6 +217,32 @@ def test_resolve_markers_ignores_inline_mentions(tmp_path):
 
     assert text == content
     assert images == ()
+
+
+def test_short_form_picks_are_deterministic_for_the_same_reply(tmp_path):
+    """同一段回复两次解析必须取同一张图：实时帧与转录各解析一次。"""
+    _write_pack(tmp_path, "atri", {"happy": 5}, theme="t")
+    invalidate_scan_cache()
+    content = "好耶\n[[sticker:atri/happy]]\n"
+
+    first = resolve_markers(content, root=tmp_path)
+    second = resolve_markers(content, root=tmp_path)
+
+    assert first[1] == second[1]
+    assert len(first[1]) == 1
+
+
+def test_render_marker_images_rewrites_for_the_transcript(tmp_path):
+    _write_pack(tmp_path, "atri", {"happy": 2}, theme="t")
+    invalidate_scan_cache()
+    content = "好耶\n[[sticker:atri/happy]]\n"
+
+    rendered = render_marker_images(content, root=tmp_path)
+
+    assert "[[sticker:" not in rendered
+    assert rendered.startswith("好耶\n\n![](")
+    _, paths = resolve_markers(content, root=tmp_path)
+    assert f"![]({paths[0]})" in rendered
 
 
 def test_strip_markers_for_stream_removes_complete_and_holds_partial():

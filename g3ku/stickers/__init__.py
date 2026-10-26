@@ -27,6 +27,7 @@ from g3ku.stickers.catalog import (
 )
 from g3ku.stickers.marker import (
     MAX_STICKERS_PER_REPLY,
+    render_marker_images,
     resolve_markers,
     strip_markers_for_stream,
 )
@@ -39,6 +40,7 @@ __all__ = [
     "Pack",
     "StickerCategory",
     "render_catalog_lines",
+    "render_marker_images",
     "resolve_markers",
     "safe_scan_packs",
     "scan_packs",

@@ -16,6 +16,7 @@ and this module turns it into local image paths. Two properties matter:
 
 from __future__ import annotations
 
+import hashlib
 import random
 import re
 from pathlib import Path
@@ -102,11 +103,15 @@ def resolve_markers(
 
     ``max_per_reply <= 0`` is a kill switch: markers are still removed, but no
     image is produced.
+
+    The pick is deterministic in the reply text unless ``rng`` is given: the
+    persisted transcript and the live frame resolve the same reply separately,
+    and they must land on the same image.
     """
     if not isinstance(text, str) or _MARKER_PREFIX not in text:
         return text, ()
     packs = scan_packs(root)
-    picker = rng if rng is not None else random
+    picker = rng if rng is not None else random.Random(hashlib.sha256(text.encode("utf-8")).hexdigest())
     limit = max(0, int(max_per_reply))
     kept: list[str] = []
     chosen: list[Path] = []
@@ -158,10 +163,27 @@ def strip_markers_for_stream(text: str) -> str:
     return _hold_partial_marker("".join(kept))
 
 
+def render_marker_images(text: str, *, root: Path | None = None) -> str:
+    """Rewrite marker lines into image markdown, for persisted transcripts.
+
+    Live egress turns the paths into attachments (channel) or thumbnails (web);
+    a transcript has to carry something self-describing, and image markdown is
+    already rendered by the history views. The pick is the same one the live
+    frame used because resolution is deterministic in the reply text.
+    """
+    if not isinstance(text, str) or _MARKER_PREFIX not in text:
+        return text
+    cleaned, paths = resolve_markers(text, root=root)
+    if not paths:
+        return cleaned
+    return cleaned + "".join(f"\n\n![]({path})" for path in paths)
+
+
 __all__ = [
     "MARKER_RE",
     "MAX_STICKERS_PER_REPLY",
     "SHORT_MARKER_RE",
+    "render_marker_images",
     "resolve_markers",
     "strip_markers_for_stream",
 ]
