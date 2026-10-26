@@ -3927,7 +3927,14 @@ textarea {
 }
 
 .task-trace-step--turn-text[open] > .task-trace-summary .task-trace-turn-toggle {
-    margin-top: 0.25em;
+    /* 首行行高 21.8、箭头 16：抬 (21.8-16)/2 ≈ 3px 才和首行文字同中线。 */
+    margin-top: 3px;
+}
+
+/* 前门里箭头与正文之间只留半个原间距（12 → 6），与下方工具列同一条基线；
+   节点详情的正文列仍是 28（16 + 12），间隔不动。 */
+.interaction-flow-list .task-trace-step--turn-text > .task-trace-summary {
+    gap: 6px;
 }
 
 .task-trace-step--turn-text .interaction-step-title {
@@ -3935,6 +3942,9 @@ textarea {
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
+    /* 中途正文是过程记录，不是结论：常态字重 + 次要文字色，别和最终回答抢层级。 */
+    font-weight: 400;
+    color: var(--text-secondary);
 }
 
 .task-trace-step--turn-text[open] .interaction-step-title {
@@ -4160,7 +4170,7 @@ textarea {
 /* 在飞工具行的容器：挂在阶段卡体内，与正式轮次同一处出现（org_graph_app.js ceoLiveToolStepHost）。 */
 .task-trace-live-steps {
     display: grid;
-    gap: var(--space-2);
+    gap: 6px;
 }
 
 /* 在飞工具行不再套卡片外壳：它跟上方已完成的工具卡同一量级，但只占内容宽，
@@ -4204,18 +4214,13 @@ textarea {
 
 .task-trace-round-group {
     display: grid;
-    gap: var(--space-3);
+    /* 一轮一组：组间只靠这点行距分层，工具行本身不再有外框，放宽就成了散落的文字。 */
+    gap: 0.375rem;
 }
 
-.task-trace-round-meta {
-    font-family: inherit;
-    font-size: 0.85rem;
-    font-weight: 500;
-    line-height: 1.4;
-    color: var(--text-tertiary);
-    letter-spacing: normal;
-    /* 轮次行是 grid 且行距统一,单独收窄它到下方工具条的距离只能从这一格自己扣。 */
-    margin-bottom: calc(var(--space-3) / -2);
+/* 无标题的工具段没有 body 来撑行距，轮与轮之间在这一层补一条。 */
+.task-trace-step--bare > .task-trace-round-group + .task-trace-round-group {
+    margin-top: 6px;
 }
 
 /* 每轮末尾的思考读数（思考 12秒 · ~1.3k tok）：只有一行读数，没有可展开的正文——
@@ -4226,26 +4231,28 @@ textarea {
     line-height: 1.4;
     color: var(--text-muted);
     letter-spacing: 0.01em;
-    /* 同上：与上方工具条的间距从这一格自己扣。 */
-    margin-top: calc(var(--space-3) / -2);
+    margin-top: -2px;
 }
 
 .task-trace-round-strip {
     display: flex;
-    gap: var(--space-3);
+    gap: 6px;
     flex-wrap: nowrap;
     overflow-x: auto;
     overflow-y: hidden;
-    padding-bottom: 2px;
+    /* 工具行去掉左右内边距后整条左移，让图标跟上方文字同列对齐。 */
+    margin-left: -8px;
+    padding-bottom: 0;
     scrollbar-gutter: stable;
     align-items: stretch;
 }
 
+/* 工具行就是一行「图标 + 名字」，无框无底：静态和悬停都不画描边，点开才在名字上落一层淡底。 */
 .task-trace-round-chip {
     appearance: none;
-    border: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
-    background: color-mix(in srgb, var(--bg-app) 72%, transparent);
-    border-radius: 18px;
+    border: 0;
+    background: none;
+    border-radius: 10px;
     color: var(--text-primary);
     cursor: pointer;
     display: flex;
@@ -4255,24 +4262,22 @@ textarea {
     flex: 0 0 auto;
     width: auto;
     max-width: 100%;
-    padding: var(--space-3) calc(var(--space-3) + 2px);
+    padding: 3px 8px;
     text-align: left;
-    transition: border-color 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
+    transition: background 0.18s ease, color 0.18s ease;
 }
 
 .task-trace-round-chip:hover {
-    border-color: color-mix(in srgb, var(--brand-primary) 42%, var(--border-color));
+    background: color-mix(in srgb, var(--text-primary) 5%, transparent);
 }
 
 .task-trace-round-chip:focus-visible {
     outline: 2px solid color-mix(in srgb, var(--brand-primary) 68%, transparent);
-    outline-offset: 3px;
+    outline-offset: 2px;
 }
 
 .task-trace-round-chip.is-active {
-    border-color: color-mix(in srgb, var(--brand-primary) 56%, transparent);
-    box-shadow: var(--shadow-sm);
-    background: color-mix(in srgb, var(--bg-panel) 82%, var(--bg-app));
+    background: color-mix(in srgb, var(--brand-primary) 10%, transparent);
 }
 
 .task-trace-round-chip-label {
@@ -4357,6 +4362,11 @@ textarea {
 .task-trace-round-panels {
     display: grid;
     gap: var(--space-3);
+}
+
+/* 面板全收起时这一层不占位：grid 里留一个空子项等于多一条行距。 */
+.task-trace-round-panels:not(:has(> .task-trace-round-panel:not([hidden]))) {
+    display: none;
 }
 
 .task-trace-round-panel {
@@ -17932,7 +17942,8 @@ textarea {
     padding: var(--space-2) var(--space-2);
 }
 
-/* 每条中途文本最左侧的「>」：只折叠这一条正文，展开成 16.5 行视窗。 */
+/* 每条中途文本最左侧的展开箭头：只折叠这一条正文，展开成 16.5 行视窗。
+   箭头用两条边画成等边折角，墨迹中心就是盒子中心，不会像「>」那样压到下行。 */
 .task-trace-turn-toggle {
     display: inline-flex;
     align-items: center;
@@ -17941,9 +17952,17 @@ textarea {
     width: 16px;
     height: 16px;
     color: var(--text-tertiary);
-    font-size: 0.95rem;
     line-height: 1;
     transition: transform 0.15s ease;
+}
+
+.task-trace-turn-toggle::before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    border-top: 1.5px solid currentColor;
+    border-right: 1.5px solid currentColor;
+    transform: rotate(45deg);
 }
 
 .task-trace-step--turn-text[open] > .task-trace-summary .task-trace-turn-toggle {
@@ -18024,11 +18043,20 @@ textarea {
     animation: taskFlowBodyIn 0.18s ease-out;
 }
 
-/* 流程内每条的时间行与工具条统一让到正文列（16px 箭头 + 12px 间距），
-   中途文本、纯工具前言都落在同一条左基线上。 */
-.task-flow-box .task-trace-step > .task-trace-body,
-.interaction-flow-list .task-trace-step > .task-trace-body {
+/* 流程内每条的时间行与工具条统一让到正文列（16px 箭头 + 间距），
+   中途文本、纯工具前言都落在同一条左基线上。节点详情保持 12px 间距。 */
+.task-flow-box .task-trace-step > .task-trace-body {
     padding-left: calc(16px + var(--space-3));
+}
+
+/* 前门内容列收紧：箭头列 16 + 间距 6 就是正文列，工具行跟着落在这条线上。
+   条目左内边距同时减半（8 → 4），整列朝引导线靠拢。 */
+.interaction-flow-list .task-trace-step {
+    padding-left: 4px;
+}
+
+.interaction-flow-list .task-trace-step > .task-trace-body {
+    padding-left: calc(16px + 6px);
 }
 
 /* 第一段叙述之前的纯工具块没有标题行，时间/工具仍对齐正文列。 */
@@ -18040,6 +18068,11 @@ textarea {
 .task-flow-box .task-trace-step--bare,
 .interaction-flow-list .task-trace-step--bare {
     padding-left: calc(var(--space-2) + 16px + var(--space-3));
+}
+
+/* 前门的纯工具段与有标题的段共用同一条正文列（4 + 22）。 */
+.interaction-flow-list .task-trace-step--bare {
+    padding-left: calc(4px + 16px + 6px);
 }
 
 /* 初次引导：人设与照片。正文是唯一滚动口，弹窗本身不随内容长高。 */

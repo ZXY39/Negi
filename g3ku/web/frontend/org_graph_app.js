@@ -5190,6 +5190,28 @@ function syncCeoFlowDotGeometry() {
     root.style.setProperty("--ceo-flow-dot-y", value);
 }
 
+// 引导线只画到最后一个可见条目：列表下方还有内边距、Fork 行和框底留白，
+// 线跟着整框走就会拖出一截空线。收起时交回 CSS 的 bottom，让线只够到汇总行。
+function syncCeoFlowGuideLength(turn) {
+    const flow = turn?.flowEl;
+    const guide = flow?.querySelector?.(".interaction-flow-guide");
+    const list = turn?.listEl;
+    if (!(guide instanceof HTMLElement) || !(list instanceof HTMLElement)) return;
+    if (typeof guide.style?.removeProperty !== "function") return;
+    guide.style.removeProperty("height");
+    if (!flow.open || flow.hidden) return;
+    const steps = Array.from(list.children).filter((el) => el instanceof HTMLElement && el.getBoundingClientRect().height > 0);
+    const last = steps[steps.length - 1];
+    if (!last) return;
+    const guideTop = guide.getBoundingClientRect().top;
+    const listRect = list.getBoundingClientRect();
+    const listPadBottom = parseFloat(getComputedStyle(list).paddingBottom) || 0;
+    // 列表可滚动时以可见区底为界，线不追到滚动内容下面去。
+    const contentBottom = Math.min(last.getBoundingClientRect().bottom, listRect.bottom - listPadBottom);
+    const height = Math.round(contentBottom - guideTop);
+    if (height > 0) guide.style.height = `${height}px`;
+}
+
 function renderCeoTurnsIntoTurn(turn, turns = [], { interruptedMarker = false } = {}) {
     if (!turn?.listEl || !turn?.flowEl) return 0;
     if (typeof buildTurnGroupDescriptors !== "function" || typeof renderTraceStep !== "function") return 0;
@@ -5239,6 +5261,7 @@ function renderCeoTurnsIntoTurn(turn, turns = [], { interruptedMarker = false } 
         });
     }
     renderCeoLiveStreamTextIntoTurn(turn);
+    syncCeoFlowGuideLength(turn);
     return turn.steps;
 }
 
@@ -5911,6 +5934,13 @@ function createPendingCeoTurn(source = "user", { scrollMode = "preserve", reques
             event.preventDefault();
             event.stopPropagation();
             toggleCeoToolHistory(turn);
+        });
+        // 展开/收起会换掉列表高度：线在同一帧里跟着重算，收起时交回 CSS。
+        // toggle 不冒泡，用捕获接住内部每条中途正文的开合。
+        turn.flowEl?.addEventListener?.("toggle", () => syncCeoFlowGuideLength(turn), true);
+        // 工具卡点开后插入参数/输出面板，末条也会被顶下去。
+        turn.listEl?.addEventListener?.("click", () => {
+            window.requestAnimationFrame?.(() => syncCeoFlowGuideLength(turn));
         });
         icons();
         return turn;
@@ -6967,10 +6997,11 @@ function refreshCeoFlowUsage(turn) {
     if (!turn?.flowUsageEl || !turn?.flowEl || turn.flowEl.hidden) return;
     const seconds = ceoTurnElapsedSeconds(turn);
     const base = seconds === null ? "--" : (formatCeoExecutionSeconds(seconds) || "--");
-    // 秒数旁边带上模型轮数（39s 16轮）：光看时间分不清"一个工具跑了 39 秒"还是
-    // "来回十几轮才 39 秒"，这两个数一起才读得出这一跳的节奏。
+    // 秒数旁边带上模型轮数（39s   16轮）：光看时间分不清"一个工具跑了 39 秒"还是
+    // "来回十几轮才 39 秒"，这两个数一起才读得出这一跳的节奏。两个读数之间留三个空格，
+    // 免得数字挤在一起读成同一个量。
     const rounds = Number(turn?.usage?.call_count) || 0;
-    const text = rounds > 0 ? `${base} ${rounds}轮` : base;
+    const text = rounds > 0 ? `${base}\u00a0\u00a0\u00a0${rounds}轮` : base;
     if (turn.flowUsageEl.textContent !== text) turn.flowUsageEl.textContent = text;
 }
 
@@ -6990,6 +7021,8 @@ function refreshLiveDurationBadges() {
     });
     (Array.isArray(S.ceoPendingTurns) ? S.ceoPendingTurns : []).forEach((turn) => {
         refreshCeoFlowUsage(turn);
+        // 正文还在流式长高：线每秒跟一次末条的位置，别停在上一帧。
+        syncCeoFlowGuideLength(turn);
     });
     // 每秒顺手校一次圆心：字体晚换、布局晚定都会让首帧量到的 y 过期，这里自愈（值没变就不写）。
     syncCeoFlowDotGeometry();

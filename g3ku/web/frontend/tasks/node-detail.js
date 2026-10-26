@@ -59,9 +59,10 @@ function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = 
         const label = String(statusLabel || "").trim() || traceStatusLabel(status);
         sideParts.push(`<span class="interaction-step-status">${esc(label)}</span>`);
     }
-    // 中途正文行最左侧的展开钮：折叠时是「>」，展开后转 90°。
+    // 中途正文行最左侧的展开钮：折叠时朝右，展开后转 90° 朝下。箭头用 CSS 画，
+    // 不用「>」字形——字形的墨迹比盒子低，视觉上会贴着下一行。
     const turnToggle = assistantText
-        ? '<span class="task-trace-turn-toggle" aria-hidden="true">&gt;</span>'
+        ? '<span class="task-trace-turn-toggle" aria-hidden="true"></span>'
         : "";
     return `
         <details class="${classes.join(" ")}" data-trace-key="${esc(traceKey)}" data-default-open="${open ? "true" : "false"}"${open ? " open" : ""}>
@@ -594,15 +595,14 @@ function taskRoundThinkingText(thinking) {
     }).join(" · ");
 }
 
-// 账本一行就是一轮：正文、时间与工具条都属于这一轮。多轮叠在组体内纵向排列，
+// 账本一行就是一轮：工具条与思考读数都属于这一轮。多轮叠在组体内纵向排列，
 // 不并成一条横向长条，否则"哪一轮调了什么"会被抹平成一行。
+// 时间不进外层：起止时刻在工具展开后的参数 / 输出两栏里，外层只留工具本身。
 function renderTurnRoundBlock(round) {
-    const time = round?.created_at ? formatCompactTime(round.created_at) : "";
     const roundKey = `turn:${String(round?.seq ?? "").trim()}`;
     const thinkingText = taskRoundThinkingText(round?.thinking);
     return `
         <section class="task-trace-round-group" data-round-key="${esc(roundKey)}">
-            ${time ? `<div class="task-trace-round-meta">${esc(time)}</div>` : ""}
             ${renderExecutionRoundToolStrip({ round_id: roundKey, created_at: round?.created_at || "" }, round?.tools)}
             ${thinkingText ? `<div class="task-trace-round-thinking">${esc(thinkingText)}</div>` : ""}
         </section>
