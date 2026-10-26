@@ -39,6 +39,15 @@ def _manager(tmp_path: Path):
     return module.MemoryManager(tmp_path, _memory_cfg())
 
 
+def _write_session(manager):
+    return _module()._MemoryToolSession(
+        snapshot_text=manager.snapshot_text(),
+        notes_dir=manager.notes_dir,
+        index_dir=manager.index_dir,
+        batch_op="write",
+    )
+
+
 def _seed_row(manager, *, body: str = "Prefer concise answers") -> dict:
     row = manager._memory_repo.create_memory(
         memory_body=body,
@@ -200,8 +209,72 @@ def test_memory_agent_sees_the_persona_pointer_not_the_body(tmp_path: Path) -> N
             snapshot_text=manager.snapshot_text(),
             repair_reason="",
         )
-        assert f"人设描述:note {persona_note_handle()}" in prompt
+        assert f"人设描述：ref={PERSONA_NOTE_REF}" in prompt
+        assert f"key 都写 {PERSONA_NOTE_REF}" in prompt
+        assert persona_note_handle() not in prompt
         assert body not in prompt
+    finally:
+        manager.close()
+
+
+def test_persona_handle_written_as_a_note_name_is_refused(tmp_path: Path) -> None:
+    """The field model saw `(note: n1a2b3)` and wrote `note_n1a2b3`; validation accepted
+    it as a new note, the orphan sweep reaped it, and the settings persona stayed empty."""
+    manager = _manager(tmp_path)
+    try:
+        mangled = f"note_{persona_note_handle()}"
+        result = _write_session(manager).apply_batch(note_upserts={mangled: "你是玲音。"})
+
+        assert result["ok"] is False
+        assert f"note_upserts.{mangled}" in result["errors"]
+        assert PERSONA_NOTE_REF in result["errors"][f"note_upserts.{mangled}"]
+        assert not (manager.notes_dir / f"{mangled}.md").exists()
+    finally:
+        manager.close()
+
+
+def test_persona_read_handle_is_normalized_to_the_reserved_ref(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    try:
+        session = _write_session(manager)
+        result = session.apply_batch(note_upserts={persona_note_handle(): "你是玲音。"})
+
+        assert result["ok"] is True, result
+        assert session.applied_batch["note_upserts"] == {PERSONA_NOTE_REF: "你是玲音。"}
+    finally:
+        manager.close()
+
+
+def test_persona_note_upsert_lands_and_survives_the_orphan_sweep(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    try:
+        module = _module()
+        batch = module.MemoryBatch(
+            op="write",
+            items=[
+                module.MemoryQueueRequest(
+                    op="write",
+                    decision_source="user",
+                    payload_text="这是人设更新，请修改人设描述，不要新增普通记忆。",
+                    created_at="2026-10-26T00:00:00+08:00",
+                )
+            ],
+        )
+        session = _write_session(manager)
+        result = session.apply_batch(note_upserts={PERSONA_NOTE_REF: "你是玲音。"})
+        assert result["ok"] is True, result
+        session.confirm_batch()
+        validated = manager._build_validated_write_from_apply_batch(
+            before_text=manager.snapshot_text(),
+            session=session,
+            batch=batch,
+        )
+
+        manager._commit_validated_write(validated)
+
+        assert manager.persona_text() == "你是玲音。"
+        assert (tmp_path / "memory" / "notes" / f"{PERSONA_NOTE_REF}.md").exists()
+        assert validated.reaped_notes == []
     finally:
         manager.close()
 

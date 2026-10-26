@@ -55,6 +55,13 @@ from main.runtime.send_token_preflight import estimate_runtime_provider_request_
 # 只服务**入站文本**的两处：legacy import 的候选校验与存量迁移的剥离。新写路径的关系落在
 # `note_ref` 列，渲染出来的是从名字派生的句柄，任何判据都不再扫正文里的 `ref:` / `见noteid:`。
 _NOTE_REF_RE = re.compile(r"(?:\bref:|见noteid:)(?P<ref>[a-z0-9_]+)\b")
+# `note_` + a reader handle. The memory block prints notes as `(note: n1a2b3)`, and models
+# have read that literal `note` as part of the name, then written `note_n1a2b3` - which
+# validation treats as a brand-new note. For the persona that landed, got reaped as
+# unreferenced, and left the settings persona empty with no error anywhere else.
+_HANDLE_SHAPED_NOTE_REF_RE = re.compile(
+    rf"^note_[{re.escape(ORDINARY_HANDLE_PREFIX)}{re.escape(CATEGORY_HANDLE_PREFIX)}][0-9a-f]{{5}}$"
+)
 
 # 模型看到的是带行号的正文（`18| 261018:...`），它抄 content 时会把这两段一起带回来。日期和
 # 行号都由系统维护，正文里出现就是重影：`261018:261018:...`。剥掉比打回好——打回要模型再读一遍
@@ -641,6 +648,46 @@ class _MemoryToolSession:
                 return path.read_text(encoding="utf-8")
         raise FileNotFoundError(f"memory note not found: {normalized}")
 
+    def _note_ref_hint(self, ref: str) -> str:
+        """Field error for names a model derived from a read handle instead of the ref.
+
+        `note_<handle>` names a new file, and the persona ref with an extra `note_` prefix
+        names nothing meaningful. The persona note has no memory row and may not exist yet,
+        so a first persona write that lands under a mangled name has nothing to keep it
+        alive: the post-commit orphan sweep reaps it and the persona silently stays empty.
+        Refusing the ref keeps the batch from being staged, so the model retries with the
+        real name in the same run instead of learning about the loss from a later empty
+        settings dialog.
+        """
+        candidate = str(ref or "").strip()
+        if candidate == f"note_{PERSONA_NOTE_REF}":
+            return (
+                f"{candidate} is not a note name: the persona note ref is {PERSONA_NOTE_REF}. "
+                f"Use {PERSONA_NOTE_REF}."
+            )
+        if not _HANDLE_SHAPED_NOTE_REF_RE.fullmatch(candidate):
+            return ""
+        handle = candidate[len("note_"):]
+        if handle == persona_note_handle():
+            return (
+                f"{candidate} is not a note name: {handle} is only the read handle of the persona note. "
+                f"Use the ref {PERSONA_NOTE_REF}."
+            )
+        ordinary_names = {path.stem for path in self.notes_dir.glob("*.md")} | set(self.staged_notes)
+        category_names = (
+            {path.stem for path in self.index_dir.glob("*.md")} if self.index_dir is not None else set()
+        )
+        resolved = resolve_note_token(handle, ordinary_names, category_names)
+        if resolved != handle:
+            return (
+                f"{candidate} is not a note name: {handle} is the read handle of {resolved}. "
+                f"Use the ref {resolved}."
+            )
+        return (
+            f"{candidate} is not a note name: {handle} is a note handle, not a ref. "
+            "For an existing note use its ref; for a new note pick a descriptive name instead of a handle."
+        )
+
     def write_document(self, content: str) -> str:
         self.staged_document = str(content or "")
         return "document staged"
@@ -729,6 +776,10 @@ class _MemoryToolSession:
                         "the persona note is reserved for persona updates; "
                         "ordinary memories cannot attach it"
                     )
+                elif note_ref:
+                    hint = self._note_ref_hint(note_ref)
+                    if hint:
+                        errors[f"adds[{index}].note_ref"] = hint
                 if content and minimal_memory and decision_source in {"user", "self"}:
                     normalized_adds.append(
                         {
@@ -766,6 +817,10 @@ class _MemoryToolSession:
                         "the persona note is reserved for persona updates; "
                         "ordinary memories cannot attach it"
                     )
+                elif note_ref:
+                    hint = self._note_ref_hint(note_ref)
+                    if hint:
+                        errors[f"rewrites[{index}].note_ref"] = hint
                 if line and content and minimal_memory:
                     normalized_rewrites.append(
                         {
@@ -794,6 +849,12 @@ class _MemoryToolSession:
             for raw_ref, raw_body in raw_note_upserts.items():
                 ref = str(raw_ref or "").strip()
                 body = str(raw_body or "")
+                hint = self._note_ref_hint(ref)
+                if hint:
+                    errors[f"note_upserts.{ref}"] = hint
+                    continue
+                if ref == persona_note_handle():
+                    ref = PERSONA_NOTE_REF
                 try:
                     note_file_name(ref)
                 except Exception as exc:
@@ -830,6 +891,12 @@ class _MemoryToolSession:
         else:
             for raw_ref, raw_ops in raw_note_edits.items():
                 ref = str(raw_ref or "").strip()
+                hint = self._note_ref_hint(ref)
+                if hint:
+                    errors[f"note_edits.{ref}"] = hint
+                    continue
+                if ref == persona_note_handle():
+                    ref = PERSONA_NOTE_REF
                 try:
                     note_file_name(ref)
                 except Exception as exc:
@@ -5932,7 +5999,9 @@ class MemoryManager:
         return (
             f"当前记忆正文（每行开头 `N|` 是这一行的行号）：\n"
             f"{self._render_numbered_memory_body(snapshot_text)}\n\n"
-            f"人设描述:note {persona_note_handle()}（不是普通记忆行，没有行号；正文按需读）\n\n"
+            f"人设描述：ref={PERSONA_NOTE_REF}（不是普通记忆行，没有行号，正文按需读）。"
+            f"改人设只改这份 note：首次用 note_upserts 新建，已有内容用 note_edits，"
+            f"两种写法的 key 都写 {PERSONA_NOTE_REF}，不要把句柄拼成名字。\n\n"
             f"现有 note refs：{json.dumps(note_index, ensure_ascii=False)}\n"
             f"当前批次类型：{batch.op}\n"
             f"待处理请求：\n{json.dumps(requests, ensure_ascii=False, indent=2)}\n"
