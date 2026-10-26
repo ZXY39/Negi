@@ -576,6 +576,9 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
                 entry = {
                     "outbox_id": outbox_id,
                     "ts": str(item.get("ts") or ""),
+                    # 来路必须跟着正文上来：主动推送与回合答案在拉取式读口里同形，
+                    # 调用方要能分辨这条是"回合的答案"还是"给用户的推送"。
+                    "event": str(item.get("event") or ""),
                     **spill_reply(session_id, outbox_id, str(item.get("text") or "")),
                 }
                 woken.append(entry)
