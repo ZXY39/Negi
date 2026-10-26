@@ -726,6 +726,9 @@ class TaskActorService:
         ]
         if not pending_node_ids:
             return False
+        task = self._store.get_task(task_id)
+        if task is None:
+            return False
         resumed_any = False
         skipped_premature_acceptance = False
         for node_id in pending_node_ids:
@@ -735,6 +738,15 @@ class TaskActorService:
                 # 判出「交付物缺失」，绕过打回循环把任务提前终态
                 # （事故复盘：task:eb6dda95055b 重启后验收抢跑，零打回终结）。
                 skipped_premature_acceptance = True
+                continue
+            node = self._store.get_node(node_id)
+            if (
+                node is not None
+                and str(getattr(node, 'node_kind', '') or '').strip().lower() == KIND_ACCEPTANCE
+                and self._node_runner.acceptance_dispatch_block_reason(task=task, node=node)
+            ):
+                # 验收节点只由绑定执行节点的待裁定提交开回合；其余未读/待注入
+                # 通知留在原处，等下一次合法验收回合并入。
                 continue
             result = await self._execute_node(task_id, node_id)
             resumed_any = True
@@ -1246,8 +1258,9 @@ class TaskActorService:
         * 执行节点：信箱有未读，或**还没有任何运行帧**（刚创建、第一次起跑）。
           有帧且无未读 = 停靠中（等待消息/等验收），再派发只会让它空转一回合。
           停靠中的节点只要有可注入未读就复派；批次 held 行不计入未读。
-        * 验收节点：握手处于待裁决且登记了可解析的提交引用；或有未读消息。
-          被验节点已终态时不派发（没有可检验的对象；T15 的联动由 P4 收口）。
+        * 验收节点：只认绑定执行节点的待裁定提交（与回合入口同一冻结判据）；
+          未读消息、定时唤醒等只落箱，不参与派发。被验节点已终态时不派发
+          （没有可检验的对象；T15 的联动由 P4 收口）。
 
         根节点不在本道：它的第一回合由 `run_task` 显式驱动，之后的复活走唤醒路径。
         """
@@ -1299,14 +1312,7 @@ class TaskActorService:
                     # 它正在改写中的旧提交。等它停靠（waiting_acceptance）或再次提交
                     # （握手 ref 变化）后再派。
                     continue
-                handshake = normalize_acceptance_handshake(
-                    (execution.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY)
-                )
-                pending = (
-                    str(handshake.get('state') or '').strip() == ACCEPTANCE_STATE_WAITING_ACCEPTANCE
-                    and bool(str(handshake.get('latest_execution_result_ref') or '').strip())
-                )
-                if not pending and not unread:
+                if self._node_runner.acceptance_dispatch_block_reason(task=task, node=node):
                     continue
                 dispatcher.schedule_node(node_id)
                 dispatched = True

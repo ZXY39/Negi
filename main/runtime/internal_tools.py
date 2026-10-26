@@ -349,14 +349,20 @@ class SendMessageTool(Tool):
             'Send a message to your parent node, to execution nodes below you, to a sibling, to a '
             'descendant acceptance node, or (root node only) to the front-door agent. Each target is '
             'judged on its own: a terminal target rejects and says so, a paused target still accepts '
-            'a machine message (that is how it gets unstuck), and an out-of-scope target is rejected '
+            'a machine message (that is how it gets unstuck), a target awaiting acceptance queues a '
+            'parent message without waking it (it is consumed only if the submission is rejected and '
+            'the node is reactivated; the receipt says so), and an out-of-scope target is rejected '
             'with the addresses you may use. Sending does not make you wait; call `enter_wait` when '
             'you need a reply. Large bodies belong in `ref`; the message itself should stay a summary.'
         )
 
     @property
     def model_description(self) -> str:
-        return 'Message your parent, execution descendants, a sibling, a descendant verifier, or the front door (root only).'
+        return (
+            'Message your parent, execution descendants, a sibling, a descendant verifier, or the '
+            'front door (root only). A target awaiting acceptance queues parent messages without '
+            'waking it.'
+        )
 
     @property
     def parameters(self) -> dict[str, Any]:

@@ -79,6 +79,7 @@ from main.runtime.internal_tools import (
 )
 from main.runtime.node_mailbox import notification_is_held
 from main.runtime.node_message_kind import (
+    ACCEPTANCE_MIRROR_KINDS,
     KIND_ACCEPTANCE_VERDICT,
     KIND_USER_DIRECT,
     RELATION_CHILD,
@@ -1580,6 +1581,14 @@ class NodeRunner:
                 f'{ACCEPTANCE_FREEZE_PREFIX}被检验执行节点没有待裁定的闭合提交，'
                 '需待其提交 final 结果并登记交接后再继续核验。'
             )
+        # `accepted_node_id` 只证明对方是这颗执行节点；握手点名才证明这份提交是给
+        # 这颗验收节点的。空值保留给旧数据：有绑定就必须与当前节点一致。
+        bound_acceptance_node_id = str(handshake.get('acceptance_node_id') or '').strip()
+        if bound_acceptance_node_id and bound_acceptance_node_id != str(getattr(node, 'node_id', '') or '').strip():
+            return (
+                f'{ACCEPTANCE_FREEZE_PREFIX}待裁定的提交绑定的是另一份验收节点，'
+                '需待对应执行节点重新提交。'
+            )
         if execution_node_id != str(getattr(task, 'root_node_id', '') or '').strip():
             return ''
         pending_node_ids = set(self.nodes_with_pending_distribution_notices(task_id=task.task_id))
@@ -1589,6 +1598,15 @@ class NodeRunner:
             f'{FINAL_ACCEPTANCE_FREEZE_PREFIX}被检验执行节点仍有未消费通知，'
             '需待其消费通知并重新提交后再继续核验。'
         )
+
+    def acceptance_dispatch_block_reason(self, *, task, node: NodeRecord) -> str:
+        """派发层与回合入口共用的唯一验收激活判据。
+
+        派发扫描与通知复派在把验收节点交给执行器之前先问这一句；不能开回合的
+        派发不排进调度器，避免“排一次、到入口再冻结”的空转。验收节点的未读邮件
+        不参与判据——消息只落箱，等绑定执行节点的待裁定提交把回合开起来后并入。
+        """
+        return self._final_acceptance_freeze_reason(task=task, node=node)
 
     def resumable_final_acceptance_node_id(self, task_id: str) -> str:
         """握手仍等它的根最终验收节点 id；不构成承诺时返回空串。
@@ -6885,8 +6903,10 @@ class NodeRunner:
         return node_ids
 
     def _acceptance_notice_block(self, *, accepted_node: NodeRecord) -> str:
-        # 汇总针对被检验执行节点（根节点）的追加通知：已消费归档 + 尚未消费的 pending。
-        # 同一逻辑通知会以不同 id（notif:xxx 与 root-notice:...）双写落盘，故按 message 文本去重。
+        # 汇总被检验执行节点已消费的用户/前门通知 + 尚未消费的 root pending 记录。
+        # 节点之间的消息是执行上下文，不进验收回合；旧记录没有 kind 时保留兼容。
+        # 同一逻辑通知会以不同 id（notif:xxx 与 root-notice:...）双写落盘，故按
+        # message 文本去重；已 superseded 的记录不再作为当前要求。
         metadata = dict(accepted_node.metadata or {}) if isinstance(getattr(accepted_node, 'metadata', None), dict) else {}
         consumed = normalize_append_notice_context(metadata.get(APPEND_NOTICE_CONTEXT_KEY)).get('notice_records') or []
         pending = normalize_pending_append_notice_records(metadata.get(PENDING_APPEND_NOTICE_RECORDS_KEY))
@@ -6894,6 +6914,11 @@ class NodeRunner:
         seen_texts: set[str] = set()
         for item in [*list(consumed), *list(pending)]:
             if not isinstance(item, dict):
+                continue
+            if str(item.get('superseded_at') or '').strip():
+                continue
+            kind = str(item.get('kind') or '').strip()
+            if kind and kind not in ACCEPTANCE_MIRROR_KINDS:
                 continue
             text = str(item.get('message') or '').strip()
             if not text or text in seen_texts:

@@ -146,6 +146,9 @@ from main.runtime.node_message_kind import (
     KIND_CHILD_ABNORMAL_PAUSE,
     KIND_CHILD_FINAL,
     KIND_WAKE_TIMER,
+    ORIGIN_FRONTDOOR,
+    ORIGIN_NODE,
+    ORIGIN_USER,
     PRIORITY_HIGH,
     RELATION_CHILD,
     RELATION_PARENT,
@@ -334,6 +337,14 @@ _LOOP_CENSUS_INTERVAL_SECONDS = 20.0
 # `schedule_wake` 的扫描节拍。5 秒是"唤醒到点后最多晚 5 秒"与"每分钟扫 12 次窄表"之间的取值；
 # 表是按 wake_at_ms 索引的点查，空表时这条查询不碰任何胖行（见 main/storage/sqlite_store 的 timer 段）。
 _NODE_WAKE_TIMER_POLL_SECONDS = 5.0
+# 用户/父节点/前门给“已提交、正等验收”的执行节点发消息：消息落箱但不唤醒，
+# 工具回执必须说清消费时机，否则发送方会以为节点下一回合一定会读到。
+_WAITING_ACCEPTANCE_DELIVERY_NOTICE = (
+    'The target execution node has submitted its output and is awaiting acceptance. '
+    'The message was delivered to its mailbox but will not be consumed while the acceptance '
+    'is in progress. If the acceptance passes, the node terminates without consuming it; if '
+    'the submission is rejected and the node is reactivated, the node consumes it in its next round.'
+)
 _LOOP_CENSUS_SAMPLE_TASKS = 6
 _LOOP_CENSUS_TOP_SITES = 10
 # gc 全量扫一次要持 GIL 一两秒，所以池榜每 5 拍（约 100 秒）才点一次，其余拍报空列表。
@@ -4686,6 +4697,21 @@ class MainRuntimeService:
             return False
         return True
 
+    @staticmethod
+    def _delivery_to_waiting_acceptance_allowed(*, origin: str, relation: str) -> bool:
+        """用户/前门/父级节点给正在等验收的执行节点发消息时允许落箱。
+
+        验收本身仍在进行，所以这条消息不唤醒目标；它只是排队，等驳回把执行节点
+        带回执行态后才被消费。peer/child 的消息仍是执行期上下文，维持拒收。
+        """
+        normalized_origin = str(origin or '').strip().lower()
+        if normalized_origin in {ORIGIN_USER, ORIGIN_FRONTDOOR}:
+            return True
+        return (
+            normalized_origin == ORIGIN_NODE
+            and str(relation or '').strip().lower() == RELATION_PARENT
+        )
+
     async def deliver_node_message(
         self,
         *,
@@ -4730,16 +4756,27 @@ class MainRuntimeService:
             target_kind == 'execution'
             and str(handshake.get('state') or '').strip() == ACCEPTANCE_STATE_WAITING_ACCEPTANCE
         )
+        under_acceptance_notice = ''
         if target_under_acceptance and not str(system_kind or '').strip():
-            return {
-                'target': normalized_node_id,
-                'status': 'rejected',
-                'reason': 'target_under_acceptance',
-            }
-        # 验收节点是运行时的裁决车道：模型消息照常落箱，但不唤醒它起新回合。
-        # 被检验节点只放行裁决；在途系统消息排队，等裁决把它带回执行态。
+            if not self._delivery_to_waiting_acceptance_allowed(origin=origin, relation=relation):
+                return {
+                    'target': normalized_node_id,
+                    'status': 'rejected',
+                    'reason': 'target_under_acceptance',
+                    'target_state': 'waiting_acceptance',
+                }
+            under_acceptance_notice = _WAITING_ACCEPTANCE_DELIVERY_NOTICE
+        under_acceptance_fields = (
+            {'target_state': 'waiting_acceptance', 'notice': under_acceptance_notice}
+            if under_acceptance_notice
+            else {}
+        )
+        # 验收节点不参与信箱唤醒：唯一的激活源是绑定执行节点的待裁定提交
+        # （派发扫描读握手）。其余消息——含 `wake_timer` 与模型消息——照常落箱，
+        # 等下一次合法验收回合并入。被检验执行节点在唤醒上只放行裁决；用户/父级/
+        # 前门的消息落箱不唤醒，其余系统消息排队。
         suppress_wake = (
-            (target_kind == 'acceptance' and not str(system_kind or '').strip())
+            target_kind == 'acceptance'
             or (target_under_acceptance and str(system_kind or '').strip() != KIND_ACCEPTANCE_VERDICT)
         )
 
@@ -4790,6 +4827,7 @@ class MainRuntimeService:
                     'priority': priority,
                     'wake': wake_outcome,
                     'reason': '',
+                    **under_acceptance_fields,
                 }
 
         notification = self.store.upsert_task_node_notification(
@@ -4852,6 +4890,7 @@ class MainRuntimeService:
             'priority': priority,
             'wake': wake_outcome,
             'reason': '',
+            **under_acceptance_fields,
         }
 
     async def deliver_control_node_message(self, **payload: Any) -> dict[str, Any]:

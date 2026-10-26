@@ -61,6 +61,10 @@ ALWAYS_WAKING_KINDS: Final = frozenset(
     {KIND_USER_DIRECT, KIND_FRONTDOOR_NOTICE, KIND_CHILD_ABNORMAL_PAUSE}
 )
 
+# 验收节点只判“用户/前门对结果的要求”。节点之间的消息是执行上下文，不镜像进
+# 验收回合；无 kind 的旧记录与 root 追加通知由消费侧单独保留。
+ACCEPTANCE_MIRROR_KINDS: Final = frozenset({KIND_USER_DIRECT, KIND_FRONTDOOR_NOTICE})
+
 
 class MessageClassificationError(ValueError):
     """Sender-described fields cannot produce a valid message."""

@@ -57,6 +57,7 @@ def normalize_append_notice_context(payload: Any) -> dict[str, Any]:
                 'notification_id': notification_id,
                 'epoch_id': str(item.get('epoch_id') or '').strip(),
                 'source_node_id': str(item.get('source_node_id') or '').strip(),
+                'kind': str(item.get('kind') or '').strip(),
                 'message': str(item.get('message') or '').strip(),
                 'received_at': str(item.get('received_at') or '').strip(),
                 'consumed_at': str(item.get('consumed_at') or '').strip(),
@@ -205,6 +206,7 @@ def record_consumed_notifications(
                 'notification_id': notification_id,
                 'epoch_id': str(item.get('epoch_id') or '').strip(),
                 'source_node_id': str(item.get('source_node_id') or '').strip(),
+                'kind': str(item.get('kind') or '').strip(),
                 'message': str(item.get('message') or '').strip(),
                 'received_at': str(
                     item.get('received_at')

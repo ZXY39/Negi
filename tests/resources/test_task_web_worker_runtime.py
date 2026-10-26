@@ -13592,6 +13592,7 @@ async def test_spawn_review_request_includes_consumed_distribution_notices(tmp_p
                 "notification_id": "notif:1",
                 "epoch_id": "epoch:1",
                 "source_node_id": root.node_id,
+                "kind": "",
                 "message": "requirement changed to male characters top 20",
                 "received_at": "2026-04-24T20:54:00+08:00",
                 "consumed_at": "2026-04-24T20:54:32+08:00",

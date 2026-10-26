@@ -124,7 +124,7 @@ async def test_frontdoor_can_message_execution_node_only(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_frontdoor_rejects_wrong_session_and_under_acceptance(tmp_path):
+async def test_frontdoor_delivers_under_acceptance_but_rejects_wrong_session(tmp_path):
     service = _service(tmp_path, execution_mode='worker')
     _seed(service)
     wrong = await service.deliver_frontdoor_node_message(
@@ -146,7 +146,12 @@ async def test_frontdoor_rejects_wrong_session_and_under_acceptance(tmp_path):
     result = await service.deliver_frontdoor_node_message(
         session_id=SESSION, to=CHILD, content='x'
     )
-    assert result['results'][0]['reason'] == 'target_under_acceptance'
+    receipt = result['results'][0]
+    assert receipt['status'] == 'delivered'
+    assert receipt['target_state'] == 'waiting_acceptance'
+    assert 'awaiting acceptance' in receipt['notice']
+    rows = service.store.list_task_node_notifications(TASK, CHILD)
+    assert rows[-1].message == 'x'
 
 
 @pytest.mark.asyncio

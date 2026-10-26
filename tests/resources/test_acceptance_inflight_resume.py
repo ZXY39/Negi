@@ -310,6 +310,12 @@ async def test_run_task_redispatches_inflight_acceptance_round_without_notice(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """账本为空、只靠握手承诺时，恢复选择器把半截验收回合重派起来。
+
+    本用例专门隔离「通知账本之外的握手承诺」这条路：派发扫描先被短路，证明
+    `_resume_inflight_final_acceptance` 自己就能把回合拉起来（扫描路径由
+    `test_node_acceptance_scheduler.py` 覆盖）。
+    """
     backend = _QueuedChatBackend(
         [_submit_final_response(call_id="call:accept-pass", status="success", delivery_status="final", text="验收通过")]
     )
@@ -317,11 +323,14 @@ async def test_run_task_redispatches_inflight_acceptance_round_without_notice(
     fake_logger = MagicMock()
     monkeypatch.setattr("main.runtime.task_actor_service.logger", fake_logger)
 
+    async def _noop_dispatch(*args, **kwargs) -> bool:
+        return False
+
     async def _noop_drive_scheduler_loop(*, task_id: str, dispatcher, root_node_id: str, current_result):
-        # 用例的主体是 run_task 的重派发决策；验收回合跑完后的调度循环不在断言范围内，
-        # 也不再给它一个会永远等空闲判定的真实循环。
+        # 用例的主体是 run_task 的重派发决策；验收回合跑完后的调度循环不在断言范围内。
         return current_result, False
 
+    monkeypatch.setattr(service.task_actor_service, "_dispatch_runnable_nodes", _noop_dispatch)
     monkeypatch.setattr(
         service.task_actor_service,
         "_drive_scheduler_loop",

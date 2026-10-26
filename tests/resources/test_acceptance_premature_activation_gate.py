@@ -125,6 +125,17 @@ def test_registered_state_without_a_resolvable_pointer_still_freezes() -> None:
     assert '没有待裁定的闭合提交' in reason
 
 
+def test_submission_bound_to_a_different_acceptance_node_freezes() -> None:
+    """握手点名的是另一份验收节点：同一份提交不能开两颗验收回合。"""
+    reason = _freeze(_runner(_execution(metadata=_handshake(acceptance_node_id='node:other'))))
+    assert '绑定的是另一份验收节点' in reason
+
+
+def test_blank_binding_is_treated_as_legacy() -> None:
+    """旧握手没有点名验收节点时保留兼容；有点名就必须与当前节点一致。"""
+    assert _freeze(_runner(_execution(metadata=_handshake(acceptance_node_id='')))) == ''
+
+
 def test_rework_state_with_a_previous_pointer_freezes() -> None:
     """打回续跑时握手仍留着上一轮 ref：对方正在重做，不许拿旧指针再裁一次。
 

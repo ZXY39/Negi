@@ -12,5 +12,5 @@ Frontdoor-to-node messaging inside tasks owned by this session.
 ## Other rules
 
 - Messaging does not control the task: pause / resume / terminate use `manage_task_nodes`.
-- Terminal and under-acceptance nodes reject delivery; the result reports the reason per target.
+- Terminal nodes reject delivery. An under-acceptance execution node queues the message without waking it; it is consumed only if that submission is rejected and the node is reactivated, and the receipt says so. The result reports the outcome per target.
 - Put long material in `ref` and keep `content` a summary.
