@@ -181,6 +181,17 @@ _PASSIVE_REPLY_MAX_PER_MESSAGE = 5
 # 被动引用按目标数增长（一个群一条），LRU 兜住长期不再回复的键。
 _PASSIVE_REF_TARGETS_MAX = 256
 
+# 主动消息的额度：平台口径是单关系 20/qpm、每日 1000 条/目标。额度只对**主动形状**
+# 计费——被动回复不占主动额度，所以下面这套节流只在没有窗口参数的那一发上生效。
+# 每分钟留出余量（15 而不是 20）：平台同时还有 Bot 维度 60/qpm 与其它会话在共用。
+_ACTIVE_SEND_PER_MINUTE = 15
+_ACTIVE_SEND_PER_DAY = 1000
+_ACTIVE_SEND_WINDOW_SECONDS = 60.0
+
+# 不值得再花的投递预算：这三类失败重放多少次结果都一样，一次就够。
+# 其余（网络、无回执、429、5xx、文案认不出的 4xx）照旧吃满 5 次预算。
+_NON_RETRYABLE_SEND_KINDS = frozenset({"passive_expired", "active_denied", "quota_exhausted"})
+
 # 桥侧周期 pending 对账：GET /outbox/pending 不再是启动一次性动作。服务端重启
 # 落在 cron 触发与产出之间时，启动预热会扑空（账本尚空），滞留推送稍后才入账
 # ——2026-09-14 23:00 定时日报正是这样丢掉的。周期对账为「有 pending 记录且无
@@ -203,12 +214,83 @@ class DeliveryUnconfirmedError(RuntimeError):
     """
 
 
+class ChannelSendError(RuntimeError):
+    """渠道发送失败的归类，决定 pump 还要不要为这一发继续花投递预算。
+
+    botpy 的 http 层把 HTTP 400 也抛成 ``ServerError``——只带平台文案、不带数字码，
+    所以这里只能按文案认两类确定性失败（``passive_expired`` 窗口过期、
+    ``active_denied`` 目标没有主动消息权限）。文案认不出的一律按 ``transient`` 处理：
+    宁可多试几次，也不要把一次网络抖动判成永久失败。``rate_limited`` 是本地节流器
+    自己抛的（还没发出去），同样可重试。
+    """
+
+    def __init__(self, kind: str, detail: str) -> None:
+        super().__init__(detail)
+        self.kind = kind
+
+
+# 平台文案里的确定性失败标记：认不出就不当确定性失败（见 ``ChannelSendError``）。
+_ACTIVE_DENIED_MARKERS = ("无权限",)
+_PASSIVE_EXPIRED_MARKERS = ("msg_id", "过期")
+
+
+def _classify_send_failure(exc: Exception) -> str:
+    text = str(exc)
+    if any(marker in text for marker in _ACTIVE_DENIED_MARKERS):
+        return "active_denied"
+    lowered = text.lower()
+    if all(marker in lowered for marker in _PASSIVE_EXPIRED_MARKERS):
+        return "passive_expired"
+    return "transient"
+
+
 def _lru_remember(mapping: "OrderedDict[str, Any]", key: str, value: Any = None, *, limit: int = _PUMP_OUTBOX_HISTORY_MAX_IDS) -> None:
     """Bounded LRU write: remember ``key`` and evict the oldest beyond limit."""
     mapping[key] = value
     mapping.move_to_end(key)
     while len(mapping) > max(1, int(limit)):
         mapping.popitem(last=False)
+
+
+@dataclass(slots=True)
+class _SendPacer:
+    """按目标给**主动**消息计数并节流。
+
+    被动回复不占主动额度，所以只有拿不到窗口参数的那一发才过这里。撞到分钟档就抛
+    ``rate_limited``（pump 按重连退避重试，天然不会齐发）；撞到日档是 ``quota_exhausted``
+    ——那条今天没机会了，不该继续烧预算。
+    """
+
+    windows: dict[str, list[float]] = field(default_factory=dict)
+    daily: dict[str, list] = field(default_factory=dict)
+
+    def _prune(self, target: str, now: float) -> list[float]:
+        recent = [stamp for stamp in self.windows.get(target, []) if now - stamp < _ACTIVE_SEND_WINDOW_SECONDS]
+        self.windows[target] = recent
+        return recent
+
+    def _today(self, target: str) -> list:
+        day = time.strftime("%Y-%m-%d")
+        entry = self.daily.get(target)
+        if not isinstance(entry, list) or entry[0] != day:
+            entry = [day, 0]
+            self.daily[target] = entry
+        return entry
+
+    def check(self, target: str) -> str:
+        """返回 "" 表示可以发；否则返回该拒绝的 kind。"""
+        now = time.monotonic()
+        if len(self._prune(target, now)) >= _ACTIVE_SEND_PER_MINUTE:
+            return "rate_limited"
+        if int(self._today(target)[1]) >= _ACTIVE_SEND_PER_DAY:
+            return "quota_exhausted"
+        return ""
+
+    def record(self, target: str) -> None:
+        now = time.monotonic()
+        self._prune(target, now).append(now)
+        entry = self._today(target)
+        entry[1] = int(entry[1]) + 1
 
 
 @dataclass(slots=True)
@@ -238,6 +320,8 @@ class _BridgeDeliveryState:
     unconfirmed_outbox_ids: OrderedDict[str, None] = field(default_factory=OrderedDict)
     # external_key -> [入站消息 id, 下一个 msg_seq, 被动窗口截止（monotonic 秒）]
     passive_refs: OrderedDict[str, list] = field(default_factory=OrderedDict)
+    # 主动消息的分钟档与日档计数（被动回复不过这里）
+    pacer: _SendPacer = field(default_factory=_SendPacer)
 
 
 _DELIVERY_STATES: dict[str, _BridgeDeliveryState] = {}
@@ -294,6 +378,17 @@ def _passive_reply_kwargs(
         return {}
     ref[1] = int(next_seq) + 1
     return {"msg_id": str(msg_id), "msg_seq": int(next_seq)}
+
+
+def _gate_active_send(
+    state: _BridgeDeliveryState, kind: str, external_key: str, passive: dict[str, Any]
+) -> None:
+    """主动形状的那一发先过额度闸；被动回复不占主动额度，直接放行。"""
+    if passive or kind not in ("group", "c2c"):
+        return
+    blocked = state.pacer.check(external_key)
+    if blocked:
+        raise ChannelSendError(blocked, f"active send {blocked} for {external_key}")
 
 
 def _is_botpy_task(task: asyncio.Task) -> bool:
@@ -750,12 +845,24 @@ async def run_qq_official_bridge(
                 if not file_info:
                     raise RuntimeError("media upload failed on both file_data and url paths")
                 if kind == "group":
-                    result = await bridge_api.post_group_message(
-                        group_openid=target["group_openid"],
-                        msg_type=7,
-                        media={"file_info": file_info},
-                        **_passive_reply_kwargs(state, kind, external_key),
-                    )
+                    media_passive = _passive_reply_kwargs(state, kind, external_key)
+                    _gate_active_send(state, kind, external_key, media_passive)
+                    try:
+                        result = await bridge_api.post_group_message(
+                            group_openid=target["group_openid"],
+                            msg_type=7,
+                            media={"file_info": file_info},
+                            **media_passive,
+                        )
+                    except (asyncio.CancelledError, DeliveryUnconfirmedError):
+                        raise
+                    except Exception as exc:
+                        failure = _classify_send_failure(exc)
+                        raise ChannelSendError(
+                            failure, f"group media send failed ({failure}): {exc}"
+                        ) from exc
+                    if not media_passive:
+                        state.pacer.record(external_key)
                 else:
                     result = await bridge_api.post_c2c_message(
                         openid=target["user_openid"],
@@ -790,6 +897,10 @@ async def run_qq_official_bridge(
                 name,
             )
             return False
+        except (asyncio.CancelledError, ChannelSendError):
+            # 额度/确定性失败必须让整条事件走 pump 的重试与判毒，不能降级成链接文本
+            # ——降级会把它当成"发出去了"，额度闸就此被绕过。
+            raise
         except Exception as exc:  # noqa: BLE001 - degrade to signed-URL text line
             logger.warning(
                 "qq-official attachment delivery failed for {} ({}); degrading to text link",
@@ -821,18 +932,35 @@ async def run_qq_official_bridge(
         passive: dict[str, Any] = {}
         if kind == "group":
             passive = _passive_reply_kwargs(state, kind, external_key)
-            result = await bridge_api.post_group_message(
-                group_openid=target["group_openid"],
-                content=body,
-                msg_type=0,
-                **passive,
+        _gate_active_send(state, kind, external_key, passive)
+        try:
+            if kind == "group":
+                result = await bridge_api.post_group_message(
+                    group_openid=target["group_openid"],
+                    content=body,
+                    msg_type=0,
+                    **passive,
+                )
+            elif kind == "c2c":
+                result = await bridge_api.post_c2c_message(openid=target["user_openid"], content=body, msg_type=0)
+            elif kind == "guild":
+                result = await bridge_api.post_message(channel_id=target["channel_id"], content=body)
+            else:
+                result = await bridge_api.post_dms(guild_id=target["guild_id"], content=body)
+        except (asyncio.CancelledError, DeliveryUnconfirmedError):
+            raise
+        except Exception as exc:
+            failure = _classify_send_failure(exc)
+            logger.warning(
+                "qq-official send failed kind={} shape={} target={} ({})",
+                failure,
+                "passive" if passive else "active",
+                external_key,
+                str(exc)[:200],
             )
-        elif kind == "c2c":
-            result = await bridge_api.post_c2c_message(openid=target["user_openid"], content=body, msg_type=0)
-        elif kind == "guild":
-            result = await bridge_api.post_message(channel_id=target["channel_id"], content=body)
-        else:
-            result = await bridge_api.post_dms(guild_id=target["guild_id"], content=body)
+            raise ChannelSendError(failure, f"{kind} send failed ({failure}): {exc}") from exc
+        if not passive and kind in ("group", "c2c"):
+            state.pacer.record(external_key)
         # botpy 的 http 层对请求超时只打一条 WARNING 就返回 None（吞掉
         # asyncio.TimeoutError）：无回执必须视为投递失败抛出，不能记一次假成功。
         # 抛的是 ``DeliveryUnconfirmedError``——pump 据此把这条 outbox 标记成
@@ -947,6 +1075,8 @@ async def run_qq_official_bridge(
                     except asyncio.CancelledError:
                         raise
                     except Exception as exc:  # noqa: BLE001 - retry via reconnect replay
+                        failure_kind = str(getattr(exc, "kind", "") or "transient")
+                        deterministic = failure_kind in _NON_RETRYABLE_SEND_KINDS
                         if outbox_id:
                             _lru_remember(
                                 outbox_attempts,
@@ -955,44 +1085,59 @@ async def run_qq_official_bridge(
                             )
                             if isinstance(exc, DeliveryUnconfirmedError):
                                 _lru_remember(unconfirmed_outbox_ids, outbox_id)
-                        failed_attempts = failed_attempts + 1 if seq == failed_seq else 1
+                        failed_attempts = (
+                            1
+                            if deterministic
+                            else (failed_attempts + 1 if seq == failed_seq else 1)
+                        )
                         failed_seq = seq
                         logger.exception(
-                            "qq-official deliver failed for session {} seq {} (attempt {}/{})",
+                            "qq-official deliver failed for session {} seq {} (attempt {}/{}, kind={})",
                             session_id,
                             seq,
                             failed_attempts,
                             _PUMP_DELIVER_MAX_ATTEMPTS,
+                            failure_kind,
                         )
-                        if failed_attempts >= _PUMP_DELIVER_MAX_ATTEMPTS:
+                        if not deterministic and failed_attempts < _PUMP_DELIVER_MAX_ATTEMPTS:
+                            # 重连后由服务端按 last_seq 重放本条；外层循环负责记一条
+                            # `event pump error ... reconnecting` 与退避。
+                            raise
+                        if deterministic:
+                            logger.error(
+                                "qq-official dropping undeliverable event seq {} for session {} (kind={}, no retry)",
+                                seq,
+                                session_id,
+                                failure_kind,
+                            )
+                        else:
                             logger.error(
                                 "qq-official dropping undeliverable event seq {} for session {} after {} attempts",
                                 seq,
                                 session_id,
                                 failed_attempts,
                             )
-                            if outbox_id:
-                                # 账本不再有年龄上限，投递预算就是它唯一的上界：判毒后
-                                # 按终态销账。不销的话，一次进程重启（per-id 计数随进程
-                                # 消失，实测网关每小时那次重登已不再清它）就让一个平台
-                                # 永久拒绝的目标重新拿到 5 次预算。
-                                try:
-                                    await client.ack_outbox(
-                                        session_id, outbox_id, status="undeliverable"
-                                    )
-                                except Exception as exc:  # noqa: BLE001 - 销账失败只多几份副本
-                                    logger.warning(
-                                        "qq-official undeliverable ack failed for {}: {}",
-                                        outbox_id,
-                                        exc,
-                                    )
-                                else:
-                                    _lru_remember(acked_outbox_ids, outbox_id)
-                            seqs[session_id] = seq
-                            failed_seq, failed_attempts = 0, 0
-                            backoff = _PUMP_RECONNECT_INITIAL_BACKOFF_SECONDS
-                            continue
-                        raise
+                        if outbox_id:
+                            # 账本不再有年龄上限，投递预算就是它唯一的上界：判毒后
+                            # 按终态销账。不销的话，一次进程重启（per-id 计数随进程
+                            # 消失，实测网关每小时那次重登已不再清它）就让一个平台
+                            # 永久拒绝的目标重新拿到 5 次预算。
+                            try:
+                                await client.ack_outbox(
+                                    session_id, outbox_id, status="undeliverable"
+                                )
+                            except Exception as exc:  # noqa: BLE001 - 销账失败只多几份副本
+                                logger.warning(
+                                    "qq-official undeliverable ack failed for {}: {}",
+                                    outbox_id,
+                                    exc,
+                                )
+                            else:
+                                _lru_remember(acked_outbox_ids, outbox_id)
+                        seqs[session_id] = seq
+                        failed_seq, failed_attempts = 0, 0
+                        backoff = _PUMP_RECONNECT_INITIAL_BACKOFF_SECONDS
+                        continue
                     seqs[session_id] = seq
                     failed_seq, failed_attempts = 0, 0
                     backoff = _PUMP_RECONNECT_INITIAL_BACKOFF_SECONDS

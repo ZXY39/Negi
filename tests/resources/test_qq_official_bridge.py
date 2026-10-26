@@ -773,6 +773,170 @@ async def test_pump_retries_failed_delivery_then_drops_poison(monkeypatch: pytes
             await task
 
 
+def _single_failing_api(monkeypatch, *, method: str, error: Exception, max_attempts: int | None = None):
+    """装一个只有某个发送方法会失败、且失败次数可数的桥（返回 attempts 计数器）。"""
+    monkeypatch.setattr(bridge_module, "_PUMP_RECONNECT_INITIAL_BACKOFF_SECONDS", 0.01)
+    if max_attempts is not None:
+        monkeypatch.setattr(bridge_module, "_PUMP_DELIVER_MAX_ATTEMPTS", max_attempts)
+    attempts = {"n": 0}
+
+    async def _fail(**kwargs):
+        attempts["n"] += 1
+        raise error
+
+    api = FakeBotApi()
+    setattr(api, method, _fail)
+
+    class _ApiClient(FakeClient):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.api = api
+
+    fake_botpy = types.ModuleType("botpy")
+    fake_botpy.Client = _ApiClient
+    fake_botpy.Intents = FakeIntents
+    monkeypatch.setitem(sys.modules, "botpy", fake_botpy)
+    monkeypatch.setattr(bridge_module, "ExternalApiClient", _ReplayStreamClient)
+    monkeypatch.setattr(
+        bridge_module,
+        "_create_media_client",
+        lambda: httpx.AsyncClient(transport=_media_transport({})),
+    )
+    return attempts
+
+
+@pytest.mark.asyncio
+async def test_passive_expiry_failure_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    """被动窗口过期是确定性失败：平台对同一条重放多少次都一样，一发就够。
+    botpy 把 HTTP 400 只抛成带文案的 ServerError（没有数字码），所以判据是文案。"""
+    attempts = _single_failing_api(
+        monkeypatch, method="post_group_message", error=RuntimeError("回复消息msg_id已过期")
+    )
+    task = asyncio.create_task(
+        bridge_module.run_qq_official_bridge(
+            app_id="100",
+            app_secret="sekrit",
+            sandbox=False,
+            token="t",
+            base_url="http://127.0.0.1:1/api/v1",
+            on_state=lambda state, detail: None,
+        ),
+        name="test-qq-bridge-expired",
+    )
+    try:
+        await _wait_until(lambda: FakeClient.instances and FakeClient.instances[-1].started)
+        client = FakeClient.instances[-1]
+        await client.on_group_at_message_create(_group_message(message_id="gm-exp"))
+        ext = FakeExternalApiClient.instances[-1]
+        await _wait_until(lambda: ext.sent)
+        ext.feed.append(
+            {"type": "reply.final", "seq": 1, "text": "跑了很久的答案", "outbox_id": "obx-exp-1"}
+        )
+        await _wait_until(lambda: ext.ack_status_by_id.get("obx-exp-1") == "undeliverable")
+        assert attempts["n"] == 1
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_active_permission_failure_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    """群目标没有主动消息权限也是确定性失败：一次判死，不烧满 5 次预算。"""
+    attempts = _single_failing_api(
+        monkeypatch, method="post_c2c_message", error=RuntimeError("主动消息失败, 无权限")
+    )
+    task = asyncio.create_task(
+        bridge_module.run_qq_official_bridge(
+            app_id="100",
+            app_secret="sekrit",
+            sandbox=False,
+            token="t",
+            base_url="http://127.0.0.1:1/api/v1",
+            on_state=lambda state, detail: None,
+        ),
+        name="test-qq-bridge-denied",
+    )
+    try:
+        await _wait_until(lambda: FakeClient.instances and FakeClient.instances[-1].started)
+        client = FakeClient.instances[-1]
+        await client.on_c2c_message_create(_c2c_message("hi", [], message_id="cm-denied"))
+        ext = FakeExternalApiClient.instances[-1]
+        await _wait_until(lambda: ext.sent)
+        ext.feed.append(
+            {
+                "type": "outbound.created",
+                "seq": 1,
+                "text": "提醒",
+                "external_key": "qq:c2c:u9",
+                "outbox_id": "obx-denied-1",
+            }
+        )
+        await _wait_until(lambda: ext.ack_status_by_id.get("obx-denied-1") == "undeliverable")
+        assert attempts["n"] == 1
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_active_send_over_rate_budget_is_deferred_not_sent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """主动消息按目标限速：撞到分钟档那一发根本不发出去（省一次必然被拒的请求），
+    交给 pump 重连重试；它不是确定性失败，不该被判毒销账。"""
+    monkeypatch.setattr(bridge_module, "_ACTIVE_SEND_PER_MINUTE", 1)
+    monkeypatch.setattr(bridge_module, "_PUMP_DELIVER_MAX_ATTEMPTS", 99)
+    monkeypatch.setattr(bridge_module, "_PUMP_RECONNECT_INITIAL_BACKOFF_SECONDS", 0.01)
+    task, client = await _start_bridge(monkeypatch, _media_transport({}))
+    try:
+        await client.on_c2c_message_create(_c2c_message("hi", [], message_id="cm-rate"))
+        ext = FakeExternalApiClient.instances[-1]
+        await _wait_until(lambda: ext.sent)
+        await ext.events.put(
+            {"type": "outbound.created", "seq": 1, "text": "第一条", "external_key": "qq:c2c:u9"}
+        )
+        await _wait_until(lambda: len(client.api.calls) >= 1)
+        await ext.events.put(
+            {
+                "type": "outbound.created",
+                "seq": 2,
+                "text": "第二条",
+                "external_key": "qq:c2c:u9",
+                "outbox_id": "obx-rate-2",
+            }
+        )
+        await asyncio.sleep(0.2)
+        assert [call[1]["content"] for call in client.api.calls] == ["第一条"]
+        assert ext.ack_status_by_id.get("obx-rate-2") != "undeliverable"
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_passive_replies_do_not_consume_the_active_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """被动回复不占主动额度：分钟档只剩 1 个名额，两发被动也必须都发得出去。"""
+    monkeypatch.setattr(bridge_module, "_ACTIVE_SEND_PER_MINUTE", 1)
+    task, client = await _start_bridge(monkeypatch, _media_transport({}))
+    try:
+        await client.on_group_at_message_create(_group_message(message_id="gm-budget"))
+        ext = FakeExternalApiClient.instances[-1]
+        await _wait_until(lambda: ext.sent)
+        await ext.events.put({"type": "reply.final", "seq": 1, "text": "第一发"})
+        await ext.events.put({"type": "reply.final", "seq": 2, "text": "第二发"})
+        await _wait_until(lambda: len(client.api.calls) >= 2)
+        assert [call[1]["msg_seq"] for call in client.api.calls] == [1, 2]
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
 @pytest.mark.asyncio
 async def test_deliver_treats_empty_api_response_as_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     """botpy http 层对请求超时静默返回 None：deliver 必须把无回执视为失败抛出、
