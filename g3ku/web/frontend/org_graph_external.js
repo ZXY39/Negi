@@ -28,6 +28,9 @@ function _externalFormEl() {
 function _setExternalSwitch(button, pressed, label) {
     if (!button) return;
     button.setAttribute("aria-pressed", pressed ? "true" : "false");
+    // 请求在飞时文案固定在「处理中」：中途回来的状态只更新 aria-pressed，
+    // 标签留到 finally 收尾再落，否则会闪一下「已启用」再跳回去。
+    if (button.classList.contains("is-busy")) return;
     if (!label) return;
     // 主开关已换成「已启用/已禁用 + 呼吸点」按钮，其余仍是带滑块的开关，两套都认。
     const text = button.querySelector(".tool-governance-switch-label")
@@ -284,12 +287,17 @@ async function toggleExternalApiEnabled(enabled) {
     }
 }
 
-/** 请求期间把状态点换成加载环：这个开关一次往返几十毫秒，没有反馈就像没点上。 */
+/** 请求期间状态点换成加载环、文案换成「处理中」：这个开关一次往返好几秒，没有反馈就像没点上。 */
 function _setExternalApiSwitchBusy(busy) {
     const button = _externalMasterSwitch();
     if (!button) return;
     button.classList.toggle("is-busy", !!busy);
     button.setAttribute("aria-busy", busy ? "true" : "false");
+    const text = button.querySelector(".external-api-state-label");
+    if (!text) return;
+    text.textContent = busy
+        ? "处理中"
+        : (EXTERNAL_API_VIEW_STATE.enabled ? "已启用" : "已禁用");
 }
 
 async function updateExternalTokenScope(bridgeId, choice) {
