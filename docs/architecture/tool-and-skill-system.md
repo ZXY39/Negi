@@ -349,6 +349,18 @@ Current RBAC rules for surfaced tools:
 
 The surfaced `message` executor is absent from the resource/tool contract entirely: resource discovery finds no `tools/message/resource.yaml`, Tool Admin lists no such tool, and CEO/frontdoor fixed builtin exposure and the default `frontdoor_interrupt_tool_names` include no `message`; if it still appears in Tool Admin or in provider-facing web tool schemas, treat that as a contract regression rather than a disabled-by-default state. Browser/web replies travel through the websocket session path (`ceo.reply.final`, inflight snapshots, and related runtime events) and external-channel replies through the External Agent API event stream (`outbound.created`, see `external-agent-api.md`), so channel reply delivery is owned by those paths and independent of this tool-family contract.
 
+### 会话档位与工具面
+
+工具面按会话档位收窄，判据在 `sandbox-execution-plane.md`「只读档（`readonly`）」：
+
+- **受限档的第三方会话用白名单**：未登记的工具名在曝光层不进候选，在执行层被合成拒绝；
+  新增资源工具要进这一档必须显式登记并声明它读什么根。
+- **owner 的受限档用黑名单**：只摘写类 / 进程控制 / 任务族 / 会写盘的联网工具，其余照旧。
+- **受限档一律不给任务族**（`create_async_task` / `task_*` / `send_message` / `schedule_wake`），owner 也一样。
+- 收窄发生在**常驻内置并进来之后**——先减后并等于没减；`_frontdoor_callable_tool_names_for_state`
+  与 `CeoExposureResolver.resolve_for_actor` 共用同一份名单，让尾块 callable 与执行准入同源。
+- 档位不是审批档：信任策略高于全局审批档，`all_pass` 不能把它放开。
+
 ### Provider Tool Surface
 
 发给 provider 的 `tools[]` 声明清单（`provider_tool_names`）与"本轮真能调用"的 `tool_names` 是两份集合，两条车道都用这份区分做排查：`tool_names` 是当前轮权威 callable 合同；`provider_tool_names` 只决定 `tools[]` 里出现哪些名字与参数表。契约在场判定的变化只改运行时合同尾块，不该每轮都重铺 `tools[]`。运行时合同是插在最新 user 消息之前的 system-role 摘要，不是 provider schema，也不是 durable history；模型若回显它，前门归一化只做一次私有修复，重复回显永不升级为最终输出。

@@ -50,6 +50,23 @@
 - 控制端点复用桥语义：`POST /turns/{turn_id}/pause`（running guard，空闲返回未暂停）、`POST /sessions/{id}/cancel`。取消面覆盖**两半**：在跑的回合，以及按 `tasks.session_id` 属于本会话、还没落终态的任务（逐个走 `main_task_service.cancel_task`，"暂停未恢复"的任务也在这半里）。回包 `cancelled_turns`/`cancelled_tasks`/`task_ids`/`skipped:[{target,reason,how_to_clear}]`/`tasks_still_running`；`cancelled` 是对接手册里的已发布字段，等于前两者之和。**取消是请求式的**——分离部署下节点在下一个检查点才落终态，所以紧随的几次读数里 `tasks_still_running` 可能仍为正，不是失败；真被拒的目标把原因原样带在 `skipped` 里。
 - `DELETE /sessions/{id}` 默认是清除语义（对齐 web-and-admin.md「Channel Session Clear Contract」）：转录清空、内存失效、side artifacts 全清，注册表条目保留；`?purge=true` 才是连条目一起忘掉（`agent-gateway.md`「MCP stdio 网关契约」的 `negi_delete_conversation` 走这条）。摘除身份时的闸门与后果一律归 web-and-admin.md 那一节：网页侧按该桥的 token 条目分流隐藏/注销，`/api/v1` 这条只认 `_own_entry` 的归属限定，不重复一遍闸门。
 
+### 入站身份契约（`sender` / `chat_type`）
+
+`POST /sessions/{id}/messages` 的请求体可带两样身份信息，服务端据此派生会话信任级（契约在
+`sandbox-execution-plane.md`「信任分级」）：
+
+- `sender: {id, name}` —— 发送者身份，`id` 上限 128 字符（超限 400 `sender_id_too_long`），`name` 截断到 128。
+- `chat_type` —— 白名单 `group` / `dm` / `guild` / `guild_dm`，非法值一律 400 `chat_type_invalid`；
+  `POST /sessions` 也接受它并记在注册表条目上。缺省时按 `external_key` 前缀回退（`qq:group:` / `qq:guild:`
+  是多人会话，`qq:c2c:` / `qq:guilddm:` 是私聊）。
+
+服务端把派生结果写回消息 metadata：`external_trust`（`owner` / `third_party_dm` / `third_party_group`）与
+`chat_type`。**桥不能自报信任级**：请求体里的同名字段会被覆盖，白名单来自服务端配置
+（`externalApi.tokens.<id>.trustedSenders`，官方 QQ 适配器读 `qqBot.accounts.<appId>.ownerOpenids`）。
+
+三条判定不因桥的声明而放宽：群聊整会话按第三方（发送者在白名单里也不升级）；信任只降不升
+（注册表记最受限的那一档）；缺 sender 永不等于操作员。
+
 ### 会话状态读数（`GET /sessions/{id}/state`）
 
 四档读数都由既有状态投影出来，不新增状态。它们的共同由来：调用方（MCP 网关、外部桥）手里只有一个 SSE 事件游标时，分不清"在跑一个长活"与"已经卡死"。

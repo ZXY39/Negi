@@ -2,7 +2,8 @@
 
 日期：2026-10-26
 最后更新：2026-10-27（第四轮拍板：**安装态驱动的档位模型**，见 D17–D20）
-状态：**待确认，未动代码**
+状态：**P0 已实现并提交**（分支 `feat/sandbox-trust`，commit `f23cba39`）；
+P1a / P1b / P3 未开工。架构文档已随 P0 更新。
 取证基线：`main` @ `53fbf30f`。标 † 的是子代理读数，尚未逐行复核，动对应阶段前先复核。
 
 > 工作树警告：本计划落笔时工作树**不干净**，已有他人/前序会话的未提交改动
@@ -1063,6 +1064,25 @@ detecting → awaiting_confirm → downloading → installing → (needs_reboot)
     但比 jail 弱，所以界面与文档都不能把它叫沙箱。
 
 ## 交接
+
+### 进度（截至 2026-10-27）
+
+- **P0 全部落地**，分支 `feat/sandbox-trust`，commit `f23cba39`：
+  - 新增 `g3ku/runtime/session_trust.py`、`g3ku/runtime/sender_stamp.py`、
+    `g3ku/sandbox/{__init__,policy}.py`、`g3ku/utils/path_roots.py`；
+  - 改动 `external_sessions` / `external_v1` / `external_auth` / `qq_official/{bridge,client}` /
+    `config/{schema,loader}` / `message_builder` / `_ceo_runtime_ops` / `_ceo_support` /
+    `exposure_resolver` / `bootstrap_bridge` / `memory_agent_runtime` / `memory_update` /
+    `shell` / `content/{navigation,tool}` / `filesystem*` / `react_loop`；
+  - 测试 `tests/test_sandbox_trust_p0.py`（29 条）；两条既有 approval 用例按新载荷形状更新。
+- **实机验证（隔离 worktree，端口 18791，独立 data root，未触碰真实项目）**：
+  启动无回归；`chat_type` 非法值 400；群会话 + 白名单发送者仍判 `third_party_group`；
+  owner 私聊判 `owner`；同一私聊见过陌生人后降为 `third_party_dm` 且后续 owner 消息不回升；
+  群会话谎报 `dm` 时 `chat_type` 保持 `group`；`_memory_review_eligibility` 对三种第三方会话
+  返回 False、对 `web:` 返回 True，档位分别为 `readonly` / `host_full`，`exec` 只在
+  `host_full` 可用。
+- **未做**：真实模型回合下的工具拒绝与记忆门实测（需要项目解锁口令与可用的模型 key，
+  本轮环境无法解密 secret overlay）；P1a/P1b/P3。
 
 - **已逐行复核**（本计划引用的行号都亲自读过）：
   `g3ku/runtime/session_agent.py:1099-1116,1562-1596,4070-4179,4470-4529`、

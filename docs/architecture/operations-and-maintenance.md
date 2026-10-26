@@ -498,6 +498,22 @@ IM 渠道有两条：内置官方 QQ 适配器（`g3ku/qq_official/`，进程内
 - `docs/architecture/external-agent-api.md`「常见排障入口」
 - 桥接应用自身的日志与配置（如 `bridges/qq-onebot/README.md`）
 
+### 群聊里工具用不了 / 读不到文件 / 记不住东西
+
+这三件事都属于会话档位的正常表现，先分清是哪一层，再改配置或判断是不是 bug：
+
+- **工具看不到**（候选与 `tools[]` 里都没有）→ 曝光层按名单收窄，属设计内。要放行必须登记到只读档白名单，
+  不能靠临时放宽设置；契约见 `sandbox-execution-plane.md`「只读档（`readonly`）」。
+- **工具看得到但被拒**（回执是 `blocked by the session trust policy`）→ 执行层打回，同样属设计内；
+  回执里的 `channel_auto_rejected` / `policy_auto_rejected` 区分渠道无审批面与纯策略打回。
+- **读文件被拒**（`outside the allowed roots`）→ 读根只有该会话的上传目录与 temp 目录；宿主工作区、
+  `.g3ku`、`memory/` 不在其中。要给它文件就走渠道上传，不要改 `restrict_to_workspace`（运行时根优先于它）。
+- **它想记住但被忽略**（`memory_update` 返回 `ok:false`）→ 记忆门按信任级判定；第三方会话的复核缓冲在启动时
+  会被清扫，`memory/ops.jsonl` 里的 `discarded` + `untrusted_session` 就是这条路径。
+- **会话信任级与该群不符**（本该是第三方却被当成操作员，或反之）→ 看 `.g3ku/external-sessions/registry.json`
+  该条目的 `chat_type` 与 `trust`；`trust` 只降不升，改配置里的白名单不会把既有条目抬回去，需要操作员显式重建会话。
+- 判据与工具面总表见 `sandbox-execution-plane.md`「Debugging Entry Points」。
+
 ### 磁盘满（Errno 28 / SQLITE_FULL）
 
 症状族：worker 日志或 `.g3ku/errors/` 出现 `OSError [Errno 28] No space left on device` / `OperationalError: database or disk is full`；`.g3ku/errors/` 里的错误日志是 0 字节空文件；多个节点连锁 error-pause；渠道告警发不出去。

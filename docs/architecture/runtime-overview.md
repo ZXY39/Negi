@@ -154,6 +154,16 @@ Negi 并不是所有问题都在 CEO 单次对话内完成。frontdoor 的职责
 - `g3ku/runtime/prompts/ceo_frontdoor.md` 承载 CEO frontdoor 的稳定协议（角色规则、任务/工具通用约束、轮次作用域判据）；稳定 system prompt 只保留最小的 capability exposure revision 锚点，不把可见 tool/skill 名单写进稳定前缀。
 - `g3ku/runtime/frontdoor/prompt_builder.py` 负责把稳定协议与少量环境提示装成 base prompt；`g3ku/runtime/frontdoor/message_builder.py` 按本轮会话状态动态注入 retrieved context、memory hint 与当前轮运行时工具合同所需的数据。
 
+### 会话档位与工具运行时上下文
+
+每轮装配按会话键解析一次档位（信任级 + `mode` + 安装态 → `host_full` / `readonly` / `jailed`），
+把结果写进 `runtime_context`：`trust_level` / `sandbox_mode` / `sandbox_tier` /
+`exec_force_governed` / `fs_read_roots` / `fs_write_roots`。工具层只读这几个键，不自己判来源；
+`fs_read_roots` 由执行闸门用 `ContextVar` 在调用期 pin（工具实例在资源层共享，会话根不能写到实例上）。
+
+档位只在回合边界生效；同一次解析的结果同时供曝光层收窄、执行层打回与读根限定使用。
+判据与工具面契约详见 `sandbox-execution-plane.md`「档位模型（意图 × 安装态）」。
+
 ### 用户消息时间锚点
 
 - 转录持久化始终保持用户原文（RAG ingest、web UI 等消费方依赖 raw content），`message_builder._history_message` 在投影历史时把记录自带的 `timestamp` 渲染为 `[消息送达时间] <本地时间 +08:00 星期>` 行追加到用户消息投影副本末尾（渲染 helper 在 `g3ku/core/timefmt.py`；heartbeat/cron 内部消息不装饰，各自携带时间锚点，见 `heartbeat-system.md`「Internal-turn time anchors」）。装饰值派生自记录固定字段而非 now()，跨回合字节稳定，不打断 provider 前缀缓存；仅"当前用户不在历史、直接追加进请求"的兜底路径用 now() 盖章，下一回合投影自动切换回记录时间。硬性规则：所有基于内容相等性的比较（当前用户匹配 `_cron_prompt_equal`、暂停回合种子对账 `_reconcile_paused_user_turns_into_seed`）必须先 `strip_arrival_time_stamp` 剥离装饰再比较，否则已装饰投影与原文不相等，会被误判为新消息造成重复注入；新增任何"按用户消息文本去重/匹配"的逻辑都适用同一规则。
@@ -561,6 +571,16 @@ main/ 侧所有持久化写在磁盘满（ENOSPC / SQLITE_FULL）条件下的行
 瞬时执行状态明确在长期记忆边界之外：pause/resume 控制数据、进行中任务状态、临时修复标记与 runtime-only 协调笔记属于 transcript、session、task 或 turns 运行时状态，不进入 `MEMORY.md`。
 
 队列卡住、重复写入、调试顺序、CLI 与 reset 等 operator 工作流详见 `operations-and-maintenance.md`「Memory Queue Workflow」。
+
+### 复核资格与注入范围（会话信任）
+
+长期记忆是**工作区级全局**的，注入在每个会话的 message index 1，所以"谁能写"与"谁能读"都按会话信任级判定，
+契约在 `sandbox-execution-plane.md`「记忆门」：
+
+- 写侧四个入口（`record_turn_for_review` / `flush_review_window` / 队列消费 / `memory_update` 工具）
+  共用 `MemoryManager.review_eligibility`，判据抛错按不可信处理；管理器启动时清扫不合格会话的既有缓冲。
+- 读侧对第三方会话返回空快照（稳定空值，不是读失败），记忆增量与人设增量都不投递。
+- 判据本身（`is_owner_session`）由 `g3ku/runtime/bootstrap_bridge.py` 注入；CLI 与检查实例不注入，等价于全允许（inspection 的只读视图不受影响）。
 
 ## 人设块、人设 note 与身份
 

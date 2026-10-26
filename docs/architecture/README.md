@@ -16,6 +16,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 10. `external-agent-api.md` when the change touches the external bridge API (`/api/v1`), external sessions, outbound routing to bridges, or the built-in official QQ adapter
 11. `agent-gateway.md` when the change touches the OpenAI-compatible endpoint (`/api/v1/chat/completions`) or the MCP stdio gateway (`negi mcp serve`)
 12. `speech-to-text.md` when the change touches local voice transcription: the composer mic button, inbound channel voice, the `stt` config section, or the vendored whisper.cpp binary
+13. `sandbox-execution-plane.md` when the change touches session trust, third-party channel gating, the read-only tier, tool allowlists by tier, or the read-root boundary
 
 ## Topic Guide
 
@@ -43,6 +44,8 @@ Start here when you are new to the repository or when a change crosses subsystem
   Use for the out-of-the-box agent integration surfaces built on the External Agent API: the OpenAI-compatible chat endpoint (session mapping, wait/timeout and streaming semantics) and the MCP stdio gateway (`negi mcp serve`, tool surface, stdout purity).
 - `speech-to-text.md`
   Use for local voice-to-text: the whisper.cpp subprocess engine and why it is not kept resident, audio normalization and silence gating, binary/model provisioning, and what the model tier choice trades in latency and accuracy.
+- `sandbox-execution-plane.md`
+  Use for the trust tier of a session (owner vs third party), the install-state-driven tier model (`restricted` / `unrestricted` resolving to `readonly` / `jailed` / `host_full`), the read-only tool allowlist and default-deny rule, the read-root boundary and its `ContextVar` pinning, control-plane rejection on the synthetic lane, the memory gate's four intake points, and the third-party sender stamp in the model-visible projection.
 
 ## Debugging Entry Points
 
@@ -57,6 +60,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 同一工具反复返回同一条 `Error executing <tool>`、节点长期 `in_progress` 且从不进错误暂停 → `main-task-runtime.md`「Node-Level Pause and Recovery」（`runtime_fault:` 断路器）
 - 操作员点了暂停、节点 `pause_requested=True` 而 `is_paused` 长期不变 → `main-task-runtime.md`「Node-Level Pause and Recovery」（脱离派发面后的暂停直落）
 - 渠道会话（`ext:`）任务长期静默却收不到失速提醒 → `heartbeat-system.md`「Task Stall Detection」（受众谓词与它要过的两道闸门）
+- 群聊里让它记住某事、跑命令、发文件、读宿主配置 → `sandbox-execution-plane.md` 的「Debugging Entry Points」：先分是信任级判错（注册表 `trust`）、档位名单漏登记，还是读根没下发
 - 父节点在验收节点仍非终态时提前进入 `before_model`、或出现意外 `superseded by newer spawn round`（含节点被 resume 后白跑一段再落该原因）、或 `resume` 返回 `entry_settled`、或工具行是 `Error executing spawn_child_nodes` 而它绑定的子节点还在跑、或同一个执行节点在任务树上挂出两颗检验节点（其中一颗的 FAILED 只是清扫疤、从没下过判词）、或一批子节点在存储抖动时刻整批被记成 `Error: CancelledError`（其中有的其实早已成功）、或节点 `failure_reason` 写着 `orphan reaped at task resume` → `operations-and-maintenance.md`「spawn 轮次过早完成或子节点被意外 supersede」+ `main-task-runtime.md`「Node-Level Pause and Recovery」「验收节点：提前创建、激活与握手重派发」+ `tool-hydration-and-callable-chain.md`「统一工具 Timeout 合同」「验收节点：提前创建、激活与握手重派发」
 - 派生评审把整批候选全拦下来、把带 `requires_acceptance` 的候选判成"验收内嵌/自产自销"、或想知道评审请求本身有多大/重发过几次 → `main-task-runtime.md`「任务树深度上限」（送审候选的解析结构、派生审查的 fail-closed 默认结果与 `review_attempts` / `review_request_chars`）
 - 任务已终态但仍有节点显示处理中（`in_progress`）→ `operations-and-maintenance.md`「残留节点自愈」+ `main-task-runtime.md`「Node-Level Pause and Recovery」
@@ -262,4 +266,5 @@ These rules prevent the docs from re-accumulating redundancy. Every edit to this
 | External Agent API contract: `externalApi` config and token overlay, ext session registry/keys, turn terminal invariant, SSE event mapping, ext outbound routing, built-in official QQ adapter (`qqBot` config, in-process botpy bridge) | `external-agent-api.md` |
 | Agent gateway contract: OpenAI-compatible endpoint (`/api/v1/chat/completions`, session mapping, wait/200-honest-text policy, streaming diff) and MCP stdio gateway (`negi mcp serve`, tool surface, stdout purity) | `agent-gateway.md` |
 | Local speech-to-text contract: whisper.cpp subprocess engine and slot serialization, audio normalization and silence/language gating, traditional→simplified post-pass, binary/model provisioning (`stt` defaults' measured basis), voice-clip storage and the model-visibility exclusion, known latency and accuracy envelope | `speech-to-text.md` |
+| Sandbox execution plane: session trust tiers and their derivation (`owner` / `third_party_dm` / `third_party_group`, sticky downgrade, fail-closed on unknown), install-state-driven tier model (`restricted` / `unrestricted` → `readonly` / `jailed` / `host_full`), read-only tool allowlist and default-deny rule, owner read-only denylist and `governed` exec clamp, read-root boundary and its call-scoped pinning, control-plane rejection on the synthetic lane, memory gate intake points and read-side suppression, third-party sender stamp | `sandbox-execution-plane.md` |
 | Startup/deploy/troubleshooting order, the post-install entry surface (`negi` command stub, install-root pointer, desktop/Start Menu shortcuts, uninstall entry and its keep/purge guards), install root vs data root storage layout (which paths hang on which root, where to read the effective data root) and data-root resolution order, memory CLI, Docker compose | `operations-and-maintenance.md` |
