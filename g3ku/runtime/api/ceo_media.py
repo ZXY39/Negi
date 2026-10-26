@@ -154,6 +154,31 @@ def original_view_url(path: Path) -> str:
     return f"{VIEWER_ROUTE}?token={mint_original_token(path)}"
 
 
+def build_attachment_descriptor(source: Path, *, after_text: bool = False) -> dict[str, Any]:
+    """Channel attachment descriptor for one local file.
+
+    ``kind`` is what the OneBot bridge keys on to send ``[CQ:image]`` instead of
+    a file upload. ``after_text`` keeps the bridge from sending the attachment
+    before the reply body at all (stickers read as punctuation, not as a
+    lead-in).
+    """
+    try:
+        size = source.stat().st_size
+    except OSError:
+        size = 0
+    mime = guess_media_mime(source.name)
+    descriptor: dict[str, Any] = {
+        "name": source.name,
+        "mime_type": mime,
+        "kind": "image" if mime.startswith("image/") else "file",
+        "size": int(size),
+        "url": original_view_url(source),
+    }
+    if after_text:
+        descriptor["after_text"] = True
+    return descriptor
+
+
 def _thumbnail_path_for(session_id: str, source: Path) -> Path:
     stat = source.stat()
     digest = hashlib.sha1(
@@ -304,23 +329,7 @@ def extract_local_media_attachments(
         if key in seen or len(attachments) >= MAX_CHANNEL_ATTACHMENTS:
             return None
         seen.add(key)
-        try:
-            size = source.stat().st_size
-        except OSError:
-            size = 0
-        mime = guess_media_mime(source.name)
-        attachments.append(
-            {
-                "name": source.name,
-                "mime_type": mime,
-                # 渠道桥按这个字段决定发图片还是发文件（OneBot 的
-                # `[CQ:image]` 分支只认 kind == "image"）。缺了它，所有图片
-                # 都会退化成"下载一个文件"。
-                "kind": "image" if mime.startswith("image/") else "file",
-                "size": int(size),
-                "url": original_view_url(source),
-            }
-        )
+        attachments.append(build_attachment_descriptor(source))
         return label.strip() or source.name
 
     def replace_image(match: re.Match[str]) -> str:

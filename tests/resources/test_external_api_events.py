@@ -416,3 +416,81 @@ async def test_outbox_registration_failure_still_publishes_and_says_so(clean_hub
     assert [event["type"] for event in events] == ["reply.final"]
     assert "outbox_id" not in events[0]
     assert any("external outbox registration failed" in line for line in records)
+
+
+async def test_relay_message_end_resolves_sticker_marker_into_trailing_attachment(
+    tmp_path, monkeypatch
+):
+    """表情包标记：正文不留标记，图片以 after_text 附件在正文之后发。"""
+    category = tmp_path / "stickers" / "atri" / "happy"
+    category.mkdir(parents=True)
+    (category / "happy_01.gif").write_bytes(b"GIF89a-fake")
+    monkeypatch.setattr("g3ku.stickers.catalog.stickers_root", lambda: tmp_path / "stickers")
+    monkeypatch.setattr("g3ku.runtime.api.ceo_media.workspace_path", lambda: tmp_path)
+
+    session_key = "ext:test-bridge:sticker"
+    relay = make_session_event_relay(session_key, turn_id="t-sticker", external_key="qq:dm:1")
+
+    await relay(
+        AgentEvent(
+            type="message_end",
+            payload={
+                "turn_id": "t-sticker",
+                "text": "好耶\n[[sticker:atri/happy]]\n",
+                "source": "user",
+            },
+        )
+    )
+
+    final = get_session_event_hub(session_key).replay(0)[0]
+    assert final["type"] == "reply.final"
+    assert final["text"] == "好耶"
+    assert "sticker" not in final["text"]
+    attachment = final["attachments"][0]
+    assert attachment["name"] == "happy_01.gif"
+    assert attachment["kind"] == "image"
+    assert attachment["after_text"] is True
+
+
+async def test_relay_message_end_sticker_only_reply_still_delivers(tmp_path, monkeypatch):
+    """纯表情回合：正文被标记清空，事件仍要发出去并进账本。"""
+    category = tmp_path / "stickers" / "panda" / "smug"
+    category.mkdir(parents=True)
+    (category / "smug_01.png").write_bytes(b"\x89PNG-fake")
+    monkeypatch.setattr("g3ku.stickers.catalog.stickers_root", lambda: tmp_path / "stickers")
+    monkeypatch.setattr("g3ku.runtime.api.ceo_media.workspace_path", lambda: tmp_path)
+
+    session_key = "ext:test-bridge:sticker-only"
+    relay = make_session_event_relay(session_key, turn_id="t-only", external_key="qq:dm:1")
+
+    await relay(
+        AgentEvent(
+            type="message_end",
+            payload={"turn_id": "t-only", "text": "[[sticker:panda/smug]]", "source": "user"},
+        )
+    )
+
+    final = get_session_event_hub(session_key).replay(0)[0]
+    assert final["text"] == ""
+    assert final.get("outbox_id")
+    assert len(final["attachments"]) == 1
+
+
+async def test_relay_stream_delta_hides_partial_sticker_marker():
+    """流式推的是累计全文：半截标记不落前端。"""
+    session_key = "ext:test-bridge:sticker-stream"
+    relay = make_session_event_relay(session_key, turn_id="t-stream")
+
+    await relay(
+        AgentEvent(type="assistant_stream_delta", payload={"text": "好耶\n[[sticker:atri/ha"})
+    )
+    await relay(
+        AgentEvent(type="assistant_stream_delta", payload={"text": "好耶\n[[sticker:atri/happy]]\n"})
+    )
+
+    deltas = [
+        event["text"]
+        for event in get_session_event_hub(session_key).replay(0)
+        if event["type"] == "reply.delta"
+    ]
+    assert deltas == ["好耶\n", "好耶\n"]

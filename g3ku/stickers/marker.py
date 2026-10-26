@@ -110,12 +110,14 @@ def resolve_markers(
     limit = max(0, int(max_per_reply))
     kept: list[str] = []
     chosen: list[Path] = []
+    dropped = False
     for raw_line in text.splitlines(keepends=True):
         line = raw_line.rstrip("\r\n")
         parsed = _parse_marker_line(line, packs)
         if parsed is None:
             kept.append(raw_line)
             continue
+        dropped = True
         # From here on the line is always dropped: a marker must never surface.
         if parsed == "ambiguous":
             continue
@@ -127,7 +129,10 @@ def resolve_markers(
         path = _pick_path(packs, parsed[0], parsed[1], picker)
         if path is not None:
             chosen.append(path)
-    return "".join(kept), tuple(chosen)
+    if not dropped:
+        return text, ()
+    # 删掉末尾的标记行会留下一个悬空换行；渠道正文本来就被 sanitize 收过边。
+    return "".join(kept).rstrip(), tuple(chosen)
 
 
 def _hold_partial_marker(text: str) -> str:

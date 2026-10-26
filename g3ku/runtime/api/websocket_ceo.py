@@ -84,6 +84,25 @@ _SENDER_CONSECUTIVE_FAILURE_LIMIT = 3
 # 补丁里的 delta 始终相对最后落库的 assistant 行，丢掉中间帧不丢阶段；回合结束帧
 # （final / 静默回执 / 错误）前强制冲一帧，快回合也不会丢轨道。
 _CEO_TURN_PATCH_MIN_INTERVAL_S = 0.25
+
+
+def _resolve_sticker_markers(text: str) -> tuple[str, tuple[Path, ...]]:
+    """Drop sticker markers and return the chosen images for the web lane.
+
+    The web snapshot renders images as markdown, so the caller re-appends them
+    as ``![](path)`` and lets ``rewrite_assistant_media_content`` stage them.
+    """
+    from g3ku.stickers import resolve_markers
+
+    cleaned, paths = resolve_markers(text)
+    return (cleaned if isinstance(cleaned, str) else text), tuple(paths or ())
+
+
+def _strip_sticker_markers_for_stream(text: str) -> str:
+    from g3ku.stickers import strip_markers_for_stream
+
+    cleaned = strip_markers_for_stream(text)
+    return cleaned if isinstance(cleaned, str) else text
 # 静默回合的历史占位文案：存量转录里仍带这一行，快照层按静默归一化后不显示到会话框。
 _LEGACY_SILENT_REPLY_TEXT = "信息已静默"
 _APPROVAL_INTERRUPT_KINDS = {
@@ -1745,12 +1764,16 @@ async def ceo_websocket(websocket: WebSocket):
             return
         if event.type == 'assistant_stream_delta':
             payload = dict(event.payload or {})
+            # 累计全文：标记（含写了一半的）在到达前端前就扣住。
+            stream_text = _strip_sticker_markers_for_stream(str(payload.get('text') or ''))
+            if not stream_text:
+                return
             await _push_stream_event(
                 'ceo.reply.delta',
                 {
                     'turn_id': str(payload.get('turn_id') or '').strip(),
                     'source': str(payload.get('source') or 'user').strip().lower() or 'user',
-                    'text': str(payload.get('text') or ''),
+                    'text': stream_text,
                     'seq': int(payload.get('seq') or 0),
                 },
             )
@@ -1830,6 +1853,11 @@ async def ceo_websocket(websocket: WebSocket):
             # 内容。不外发由 silent_reply flag 决定（外部渠道与 cron 各自据它闸门），
             # 不再靠把文本清空。
             text = str(payload.get('text') or '').strip()
+            text, sticker_paths = _resolve_sticker_markers(text)
+            if sticker_paths:
+                # 网页车道用 markdown 呈现图片，追加在正文之后交给媒体层换缩略图
+                # （动图在 P0-3 之后直接走签名原图）。
+                text = text + "".join(f"\n\n![]({path})" for path in sticker_paths)
             silent_reason = str(payload.get('silent_reason') or '').strip()
             source = str(payload.get('source') or 'user').strip().lower() or 'user'
             turn_id = str(payload.get('turn_id') or '').strip()

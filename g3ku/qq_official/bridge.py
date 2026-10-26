@@ -918,6 +918,23 @@ async def run_qq_official_bridge(
             )
             return False
 
+    async def _deliver_trailing(
+        kind: str, target: dict[str, str], external_key: str, attachments: list[dict[str, Any]]
+    ) -> None:
+        """Send ``after_text`` attachments once the reply body is out.
+
+        Failures stay silent on purpose: a signed download link where a sticker
+        should have been is worse than no sticker at all.
+        """
+        for attachment in attachments:
+            if await _deliver_attachment(kind, target, external_key, attachment):
+                continue
+            logger.warning(
+                "qq-official dropped trailing attachment {} for {}",
+                str(attachment.get("name") or "attachment"),
+                external_key,
+            )
+
     async def deliver(
         external_key: str, text: str, attachments: list[dict[str, Any]] | None = None
     ) -> None:
@@ -925,18 +942,23 @@ async def run_qq_official_bridge(
         if kind not in ("group", "c2c", "guild", "guilddm"):
             logger.warning("qq-official cannot deliver to target external_key={}", external_key)
             return
+        incoming = [item for item in list(attachments or []) if isinstance(item, dict)]
+        # 附件默认先于正文投递；`after_text` 的（表情包）反过来，等正文发完再发，
+        # 否则用户先收到一张图、再收到那句话。
+        leading = [item for item in incoming if not item.get("after_text")]
+        trailing = [item for item in incoming if item.get("after_text")]
         # 附件先于正文投递；失败的附件降级为签名下载链接行并入正文，用户至少
         # 拿得到可下载的链接。全部附件成功且正文为空时不再补发空文本消息。
         fallback_lines: list[str] = []
-        for attachment in list(attachments or []):
-            if not isinstance(attachment, dict):
-                continue
+        for attachment in leading:
             if await _deliver_attachment(kind, target, external_key, attachment):
                 continue
             name = str(attachment.get("name") or "attachment")
             fallback_lines.append(f"📎 {name}: {_absolute_media_url(str(attachment.get('url') or ''))}")
         body = "\n".join(part for part in [str(text or "").strip(), *fallback_lines] if part).strip()
         if not body:
+            # 纯表情回合：正文为空，但 after_text 附件仍要发。
+            await _deliver_trailing(kind, target, external_key, trailing)
             return
         passive: dict[str, Any] = {}
         if kind == "group":
@@ -992,6 +1014,7 @@ async def run_qq_official_bridge(
             len([item for item in list(attachments or []) if isinstance(item, dict)]),
             f"{passive['msg_id']}#{passive['msg_seq']}" if passive else "-",
         )
+        await _deliver_trailing(kind, target, external_key, trailing)
 
     async def _pump(session_id: str, external_key: str) -> None:
         """Per-session SSE consumer with a real reconnect loop.

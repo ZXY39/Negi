@@ -126,7 +126,7 @@ def test_resolve_markers_picks_an_image_and_drops_the_line(tmp_path):
         "今天心情不错。\n[[sticker:atri/happy]]\n", root=tmp_path, rng=random.Random(1)
     )
 
-    assert text == "今天心情不错。\n"
+    assert text == "今天心情不错。"
     assert len(images) == 1
     assert images[0].is_file()
     assert images[0].parent.name == "happy"
@@ -140,7 +140,7 @@ def test_resolve_markers_accepts_unique_short_form(tmp_path):
 
     text, images = resolve_markers("好耶\n[[sticker:happy]]\n", root=tmp_path)
 
-    assert text == "好耶\n"
+    assert text == "好耶"
     assert [path.parent.name for path in images] == ["happy"]
 
 
@@ -151,7 +151,7 @@ def test_resolve_markers_rejects_ambiguous_short_form(tmp_path):
 
     text, images = resolve_markers("好耶\n[[sticker:happy]]\n", root=tmp_path)
 
-    assert text == "好耶\n"
+    assert text == "好耶"
     assert images == ()
 
 
@@ -163,7 +163,7 @@ def test_resolve_markers_drops_unknown_keys_without_leaking(tmp_path):
         "a\n[[sticker:atri/happpy]]\nb\n[[sticker:nope/happy]]\nc\n", root=tmp_path
     )
 
-    assert text == "a\nb\nc\n"
+    assert text == "a\nb\nc"
     assert images == ()
     assert "sticker" not in text
 
@@ -175,11 +175,11 @@ def test_resolve_markers_caps_per_reply(tmp_path):
 
     content = "x\n[[sticker:atri/happy]]\n[[sticker:panda/smug]]\n"
     text, images = resolve_markers(content, root=tmp_path, max_per_reply=1)
-    assert text == "x\n"
+    assert text == "x"
     assert len(images) == 1
 
     text, images = resolve_markers(content, root=tmp_path, max_per_reply=0)
-    assert text == "x\n"
+    assert text == "x"
     assert images == ()
 
 

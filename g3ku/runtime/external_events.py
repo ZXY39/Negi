@@ -191,6 +191,51 @@ def _extract_media_attachments(text: str) -> tuple[str, list[dict[str, Any]]]:
     return (cleaned if isinstance(cleaned, str) else text), list(attachments or [])
 
 
+def _resolve_sticker_markers(text: str) -> tuple[str, tuple[Any, ...]]:
+    """Drop sticker markers from channel text and return the chosen images.
+
+    Lazy import for the same reason as the media helpers: the sticker catalog
+    resolves the workspace through the runtime config.
+    """
+    from g3ku.stickers import resolve_markers
+
+    cleaned, paths = resolve_markers(text)
+    return (cleaned if isinstance(cleaned, str) else text), tuple(paths or ())
+
+
+def _strip_sticker_markers_for_stream(text: str) -> str:
+    from g3ku.stickers import strip_markers_for_stream
+
+    cleaned = strip_markers_for_stream(text)
+    return cleaned if isinstance(cleaned, str) else text
+
+
+def _with_sticker_attachments(
+    attachments: list[dict[str, Any]], sticker_paths: tuple[Any, ...]
+) -> list[dict[str, Any]]:
+    """Append sticker descriptors under the same per-message attachment budget.
+
+    Stickers are marked ``after_text`` so the bridges send them after the reply
+    body instead of before it.
+    """
+    if not sticker_paths:
+        return attachments
+    from g3ku.runtime.api.ceo_media import (
+        MAX_CHANNEL_ATTACHMENTS,
+        build_attachment_descriptor,
+    )
+
+    budget = max(0, MAX_CHANNEL_ATTACHMENTS - len(attachments))
+    for path in sticker_paths[:budget]:
+        attachments.append(build_attachment_descriptor(path, after_text=True))
+    if len(sticker_paths) > budget:
+        logger.warning(
+            "sticker attachments trimmed: {} over the channel attachment budget",
+            len(sticker_paths) - budget,
+        )
+    return attachments
+
+
 def make_session_event_relay(
     session_key: str,
     *,
@@ -223,6 +268,10 @@ def make_session_event_relay(
                 text = str(payload.get("text") or "")
                 if not text:
                     return
+                # 流式推的是累计全文：标记在到达前先扣住，用户看不到半截标记。
+                text = _strip_sticker_markers_for_stream(text)
+                if not text:
+                    return
                 # 对外事件一律携带 record turn_id（与 turn.started/completed 及
                 # 等待方的 want_turn_id 同一命名空间）；会话内部事件携带的
                 # transcript turn id 是另一套命名空间，直接透出会让等待方按
@@ -240,7 +289,12 @@ def make_session_event_relay(
                 text = sanitize_channel_outbound_text(str(payload.get("text") or ""))
                 if not text:
                     return
+                text, sticker_paths = _resolve_sticker_markers(text)
+                # 纯表情回合：正文被标记清空、但仍有图要发，不能在这里早退。
+                if not text and not sticker_paths:
+                    return
                 text, attachments = _extract_media_attachments(text)
+                attachments = _with_sticker_attachments(attachments, sticker_paths)
                 text = _rewrite_media_signed(text)
                 final_payload: dict[str, Any] = {
                     "text": text,

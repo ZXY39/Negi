@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import mimetypes
 import re
 from dataclasses import dataclass, field
@@ -21,6 +22,8 @@ from typing import Any
 from .config import BehaviorConfig
 from .g3ku_client import G3kuClient
 from .onebot import OnebotClient
+
+logger = logging.getLogger("qq_onebot_bridge.dispatcher")
 
 PAUSE_COMMANDS = {"/pause", "pause", "暂停", "暫停"}
 STOP_COMMANDS = {"/stop", "停止"}
@@ -281,11 +284,17 @@ class Dispatcher:
     ) -> None:
         """Attachments first, then the text body; failed attachments degrade
         into signed-URL lines appended to the text (better a clickable link
-        than a silently missing file)."""
+        than a silently missing file).
+
+        ``after_text`` attachments (stickers) invert that order and go out once
+        the body is sent; their failures stay silent because a download link
+        where a sticker should have been is worse than no sticker.
+        """
+        incoming = [item for item in list(attachments or []) if isinstance(item, dict)]
+        leading = [item for item in incoming if not item.get("after_text")]
+        trailing = [item for item in incoming if item.get("after_text")]
         fallback_lines: list[str] = []
-        for attachment in list(attachments or []):
-            if not isinstance(attachment, dict):
-                continue
+        for attachment in leading:
             if await self._deliver_attachment(str(external_key or ""), attachment):
                 continue
             name = str(attachment.get("name") or "attachment")
@@ -298,6 +307,14 @@ class Dispatcher:
         ).strip()
         if body:
             await self._send_to(external_key, body)
+        for attachment in trailing:
+            if await self._deliver_attachment(str(external_key or ""), attachment):
+                continue
+            logger.warning(
+                "qq-onebot dropped trailing attachment %s for %s",
+                str(attachment.get("name") or "attachment"),
+                external_key,
+            )
 
     async def _flush_progress(self, session_id: str) -> None:
         buffer = self._progress.get(session_id)

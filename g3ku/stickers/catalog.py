@@ -186,13 +186,25 @@ def category_owners(packs: Iterable[Pack], category_key: str) -> tuple[Pack, ...
 
 
 def pack_images(pack: Pack, category_key: str) -> tuple[Path, ...]:
-    """Existing image files for one category, sorted for deterministic picks."""
+    """Existing image files for one category, sorted for deterministic picks.
+
+    Paths are resolved and required to stay inside the pack directory: a symlink
+    planted in a category folder must not be able to hand out a file from
+    elsewhere (the channel egress only trusts the sticker root to sit in the
+    workspace).
+    """
     target = pack.path / category_key
-    return tuple(
-        path
-        for path in sorted(_image_paths(target), key=lambda item: item.name)
-        if path.is_file() and path.stat().st_size > 0
-    )
+    root = pack.path.resolve()
+    images: list[Path] = []
+    for path in sorted(_image_paths(target), key=lambda item: item.name):
+        try:
+            resolved = path.resolve()
+            size = resolved.stat().st_size
+        except OSError:
+            continue
+        if resolved.is_relative_to(root) and resolved.is_file() and size > 0:
+            images.append(resolved)
+    return tuple(images)
 
 
 def _clip(text: str, limit: int) -> str:

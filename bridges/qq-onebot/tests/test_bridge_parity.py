@@ -663,6 +663,67 @@ async def test_outbound_attachment_failure_degrades_to_signed_link():
     ]
 
 
+@pytest.mark.asyncio
+async def test_outbound_after_text_attachment_goes_after_the_body():
+    """after_text 附件（表情包）：正文先发、图后发；失败不降级成链接。"""
+    dispatcher, g3ku, onebot = _dispatcher()
+    await dispatcher.handle_onebot_event(
+        {"post_type": "message", "message_type": "group", "group_id": 42,
+         "message": [{"type": "at", "data": {"qq": "999"}}, {"type": "text", "data": {"text": "hi"}}]}
+    )
+    session_id = g3ku.sessions["qq:group:42"]
+    await dispatcher._handle_g3ku_event(
+        session_id,
+        {
+            "type": "outbound.created",
+            "text": "好耶",
+            "external_key": "qq:group:42",
+            "attachments": [
+                {
+                    "kind": "image",
+                    "name": "happy.gif",
+                    "mime_type": "image/gif",
+                    "size": 8,
+                    "url": "/api/ceo/media/original?token=t4",
+                    "after_text": True,
+                }
+            ],
+        },
+    )
+    assert onebot.group[0] == ("42", "好耶")
+    assert onebot.group[1][1].startswith("[CQ:image,file=base64://")
+    assert len(onebot.group) == 2
+
+
+@pytest.mark.asyncio
+async def test_outbound_sticker_only_reply_sends_the_image_alone():
+    """纯表情回合：正文为空时不补发空文本消息。"""
+    dispatcher, g3ku, onebot = _dispatcher()
+    await dispatcher.handle_onebot_event(
+        {"post_type": "message", "message_type": "private", "user_id": 7, "message": "hi"}
+    )
+    session_id = g3ku.sessions["qq:dm:7"]
+    await dispatcher._handle_g3ku_event(
+        session_id,
+        {
+            "type": "reply.final",
+            "text": "",
+            "attachments": [
+                {
+                    "kind": "image",
+                    "name": "smug.png",
+                    "mime_type": "image/png",
+                    "size": 8,
+                    "url": "/api/ceo/media/original?token=t5",
+                    "after_text": True,
+                }
+            ],
+        },
+    )
+    assert len(onebot.private) == 1
+    assert onebot.private[0][1].startswith("[CQ:image,file=base64://")
+
+
 def test_media_source_policy_blocks_never_a_donor_address_families():
     from qq_onebot_bridge.onebot import MediaSourcePolicy
 
