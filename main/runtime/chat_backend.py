@@ -43,11 +43,13 @@ from g3ku.providers.fallback import (
 )
 from g3ku.providers.provider_factory import build_provider_from_model_key
 from g3ku.utils.api_keys import iter_api_key_retry_slots
+from main.errors import NodePausedError, TaskPausedError
 from main.runtime.model_key_concurrency import ModelKeyConcurrencyController, ModelKeyPermitLease
 from main.runtime.model_route import (
     LEASE_OUTCOME_GROUP_EXHAUSTED,
     MODEL_ROUTE_KIND_LOAD_BALANCE,
     MODEL_ROUTE_KIND_MODEL,
+    RouteCandidateFilters,
 )
 from main.runtime.node_turn_controller import NodeTurnLease
 from main.runtime.send_token_preflight import estimate_runtime_provider_request_preview_tokens
@@ -90,6 +92,9 @@ class ChatBackend(Protocol):
         model_refs_resolver: Any = None,
         single_request_timeout_seconds: float | None = None,
         on_model_retry_status: Any = None,
+        required_context_window_tokens: int = 0,
+        window_shortfall_compressor: Any = None,
+        on_window_shortfall_compressed: Any = None,
     ) -> LLMResponse: ...
 
 
@@ -833,6 +838,15 @@ def _build_route_slots(model_routes: Any, *, node_turn_refs: list[str]) -> list[
         candidates = [str(item or "").strip() for item in tuple(getattr(route, "candidates", ()) or ()) if str(item or "").strip()]
         if is_group:
             first_member = candidates[0] if candidates else ""
+            member_windows: dict[str, int] = {}
+            for member in list(getattr(group, "members", None) or []):
+                member_key = str(getattr(member, "model_key", "") or "").strip()
+                if not member_key or not bool(getattr(member, "enabled", True)):
+                    continue
+                try:
+                    member_windows[member_key] = max(0, int(getattr(member, "context_window_tokens", 0) or 0))
+                except (TypeError, ValueError):
+                    member_windows[member_key] = 0
             slots.append(
                 {
                     "kind": "load_balance",
@@ -840,6 +854,9 @@ def _build_route_slots(model_routes: Any, *, node_turn_refs: list[str]) -> list[
                     "group_key": str(getattr(route, "group_key", "") or ""),
                     "max_retry_rounds": int(getattr(group, "max_retry_rounds", 1) or 1) if group is not None else 1,
                     "members": candidates,
+                    # 声明窗口跟着槽位走：链前进到更窄的组时要按**这个组**的窗口压缩，
+                    # 而不是回头再按链首那颗的窗口重算。
+                    "member_windows": member_windows,
                     # 占位成员：真正用哪个由准入绑定或组内重绑决定。
                     "placeholder": first_member,
                 }
@@ -916,6 +933,38 @@ def _route_slot_at(slots: list[dict[str, Any]], index: int) -> dict[str, Any] | 
     if 0 <= index < len(slots):
         return slots[index]
     return None
+
+
+def _slot_widest_available_window(slot: dict[str, Any], excluded: set[str] | frozenset[str]) -> int:
+    """组里还没试过的成员中最宽的声明窗口；读不到窗口返回 0（判不出来就不压）。"""
+    windows = dict(slot.get("member_windows") or {})
+    available = [
+        max(0, int(window or 0))
+        for model_key, window in windows.items()
+        if str(model_key or "").strip() and str(model_key) not in excluded
+    ]
+    return max(available) if available else 0
+
+
+def _slot_available_members(
+    slot: dict[str, Any],
+    excluded: set[str] | frozenset[str],
+    *,
+    min_window: int = 0,
+) -> tuple[str, ...]:
+    """组里还没试过、声明窗口不小于 `min_window` 的成员：交给压缩 helper 当候选链。
+
+    只取至少能装下目标窗口的成员——把更窄的成员放进 helper 链，会让分块请求在链尾
+    再撞一次窗口，白白多烧一轮。
+    """
+    windows = dict(slot.get("member_windows") or {})
+    return tuple(
+        str(model_key)
+        for model_key, window in windows.items()
+        if str(model_key or "").strip()
+        and str(model_key) not in excluded
+        and int(window or 0) >= int(min_window or 0) > 0
+    )
 
 
 def _slot_max_retry_rounds(slot: dict[str, Any] | None) -> int | None:
@@ -1043,12 +1092,14 @@ class ConfigChatBackend:
         slot: dict[str, Any],
         model_index: int,
         tried_model_refs: set[str],
+        filters: RouteCandidateFilters | None = None,
     ) -> str | None:
         """该组槽位本次用哪个成员；返回 None 表示这个组给不出可用候选。
 
         准入阶段已经绑好的成员优先直接复用（它的 permit 就在 lease 上），否则向 balancer
         重绑一次。没有任何准入可依赖时（embedded/web 无 controller）退回槽位占位成员，
-        保持旧配置与旧进程形态可读。
+        保持旧配置与旧进程形态可读。`filters` 只给"压缩后放宽窗口判据"这一条路径用；
+        默认沿用 lease 上准入时的那份要求。
         """
         if controller is None or lease is None:
             member = str(slot.get("placeholder") or "")
@@ -1065,6 +1116,7 @@ class ConfigChatBackend:
         selected = controller.rebind_turn(
             lease,
             route_index=int(model_index),
+            filters=filters,
             excluded_model_keys=frozenset(tried_model_refs),
             rebind_reason="route_entry",
         )
@@ -1137,13 +1189,15 @@ class ConfigChatBackend:
         model_routes: Any = None,
         node_turn_controller: Any = None,
         required_context_window_tokens: int = 0,
+        window_shortfall_compressor: Any = None,
+        on_window_shortfall_compressed: Any = None,
     ) -> LLMResponse:
         refs = [str(item or '').strip() for item in list(model_refs or []) if str(item or '').strip()]
         if not refs:
             raise ValueError('model_refs must not be empty')
-        # 本轮请求体需要的窗口下限（压缩/预检之后的真实体量）。>0 时链上"声明窗口塞不下
-        # 这一位"的候选被留到最后再试：把它们当首发等于把请求交给一个必然静默裁输出的成员。
-        # 默认 0 = 不判，helper/评审等没有体量读数的车道保持原行为。
+        # 本轮请求体需要的窗口下限（压缩/预检之后的真实体量）。>0 时声明窗口塞不下的
+        # 候选不会首发；有压缩器时先按候选窗口补压再发，没有时留到最后兜底。默认 0 =
+        # 不判，helper/评审等没有体量读数的车道保持原行为。
         required_window = max(0, int(required_context_window_tokens or 0))
         # route plan 里出现负载均衡组时，模型序列由 balancer 的绑定驱动；纯 direct 链
         # 沿用现有 refs 走位，行为与改造前一致。
@@ -1263,6 +1317,104 @@ class ConfigChatBackend:
         # 全部试过之后才回头用它们（最后一轮兜底），保证不会因为判据而一条都发不出去。
         window_skipped: list[tuple[int, str, int]] = []
         window_fallback_used = False
+        # 按候选窗口压缩过的请求体：键是目标窗口。同一跳里多个成员共用一档窗口时只压一次；
+        # 压缩失败的档也记 None，避免对同一档反复烧压缩 helper。
+        window_shortfall_cache: dict[int, dict[str, Any] | None] = {}
+
+        async def _fit_body_to_window(
+            *,
+            target_window_tokens: int,
+            model_ref: str,
+            candidate_refs: tuple[str, ...] = (),
+        ) -> bool:
+            """把请求体压到 `target_window_tokens` 以内；成功返回 True 并就地替换 `messages`。
+
+            窗口不再是"拒收候选"的理由：链前进到更窄的档时，用那一档的窗口重做一次分片
+            压缩再发。压缩器由调用方（节点车道）注入；没有压缩器（前门/辅助车道）或压完
+            仍塞不下时返回 False，调用方保留原来的跳过/兜底语义。
+            """
+            nonlocal messages, required_window
+            if not callable(window_shortfall_compressor):
+                return False
+            target = max(0, int(target_window_tokens or 0))
+            if target <= 0 or required_window <= 0 or target >= required_window:
+                return False
+            required_before = int(required_window)
+            if target not in window_shortfall_cache:
+                try:
+                    compressed = window_shortfall_compressor(
+                        [dict(item) for item in list(messages or []) if isinstance(item, dict)],
+                        target,
+                        str(model_ref or ""),
+                        tuple(candidate_refs),
+                    )
+                    if inspect.isawaitable(compressed):
+                        compressed = await compressed
+                except asyncio.CancelledError:
+                    raise
+                except (TaskPausedError, NodePausedError):
+                    # 压缩 helper 跑在回合里：暂停/取消是控制流，不能被"压缩失败"吞成
+                    # 一次普通 fallback。
+                    raise
+                except Exception as exc:
+                    logger.warning(
+                        "Model window shortfall compression failed: model={} target_window={} "
+                        "error={}",
+                        str(model_ref or ""),
+                        target,
+                        str(exc or exc.__class__.__name__),
+                    )
+                    compressed = None
+                window_shortfall_cache[target] = compressed if isinstance(compressed, dict) else None
+            compressed = window_shortfall_cache.get(target)
+            if not isinstance(compressed, dict):
+                return False
+            compressed_messages = compressed.get("messages")
+            if not isinstance(compressed_messages, list) or not compressed_messages:
+                return False
+            try:
+                compressed_tokens = max(0, int(compressed.get("estimated_tokens") or 0))
+            except (TypeError, ValueError):
+                return False
+            if compressed_tokens <= 0 or compressed_tokens > target:
+                return False
+            messages = [dict(item) for item in compressed_messages if isinstance(item, dict)]
+            required_window = compressed_tokens
+            logger.warning(
+                "Model window shortfall compressed to candidate window: model={} target_window={} "
+                "required_before={} required_after={} compression_mode={} chunks={}",
+                str(model_ref or ""),
+                target,
+                required_before,
+                compressed_tokens,
+                str(compressed.get("compression_mode") or ""),
+                int(compressed.get("chunk_count") or 0),
+            )
+            if callable(on_window_shortfall_compressed):
+                try:
+                    notified = on_window_shortfall_compressed(
+                        {
+                            "messages": [dict(item) for item in messages],
+                            "estimated_tokens": compressed_tokens,
+                            "required_before": required_before,
+                            "target_window_tokens": target,
+                            "model_ref": str(model_ref or ""),
+                            "compression_mode": str(compressed.get("compression_mode") or ""),
+                            "chunk_count": int(compressed.get("chunk_count") or 0),
+                            "chunk_failed_count": int(compressed.get("chunk_failed_count") or 0),
+                        }
+                    )
+                    if inspect.isawaitable(notified):
+                        await notified
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.warning(
+                        "Model window shortfall notification failed: model={} target_window={}",
+                        str(model_ref or ""),
+                        target,
+                    )
+            return True
 
         async def _emit_model_retry_status(status: dict[str, Any]) -> None:
             nonlocal retry_status_emitted
@@ -1349,6 +1501,30 @@ class ConfigChatBackend:
                         tried_model_refs=tried_model_refs,
                     )
                     if chosen is None:
+                        # 组给不出成员时先分清原因：若只是声明窗口塞不下，就按这一组最宽的
+                        # 可用成员窗口压一次请求体，再用压完的体量重绑；容量/成员耗尽的组
+                        # 不会进压缩（最宽窗口仍 >= 本轮体量）。
+                        fit_window = _slot_widest_available_window(route_slot, tried_model_refs)
+                        if fit_window and await _fit_body_to_window(
+                            target_window_tokens=fit_window,
+                            model_ref=ref,
+                            candidate_refs=_slot_available_members(
+                                route_slot,
+                                tried_model_refs,
+                                min_window=fit_window,
+                            ),
+                        ):
+                            chosen = self._resolve_group_slot_ref(
+                                controller=node_turn_controller,
+                                lease=node_turn_lease,
+                                slot=route_slot,
+                                model_index=model_index,
+                                tried_model_refs=tried_model_refs,
+                                filters=RouteCandidateFilters(
+                                    required_context_window_tokens=int(required_window),
+                                ),
+                            )
+                    if chosen is None:
                         # 这个组给不出任何成员（全容量满 / 全被过滤 / 全已试过）：按链前进。
                         tried_model_refs.add(ref)
                         model_index += 1
@@ -1379,9 +1555,16 @@ class ConfigChatBackend:
                     raise
                 declared_window = self._target_context_window_tokens(base_target)
                 if required_window > 0 and 0 < declared_window < required_window:
-                    # 这一位塞不下本轮请求体：发给它等于让网关把 completion 预算静默裁成
-                    # `真实窗口 − 输入`（没有任何错误信号，只会表现成一跳被裁的输出）。
-                    # 先把它留在链上，等塞得下的成员都试完再回头用它。
+                    # 这一位塞不下本轮请求体：先按这颗自己的窗口压一次再发；压不下去时
+                    # 才退回旧语义（留到塞得下的成员试完再兜底），不让尺寸判据把整跳
+                    # 打成"链耗尽"。
+                    if await _fit_body_to_window(
+                        target_window_tokens=declared_window,
+                        model_ref=ref,
+                        candidate_refs=(str(ref),),
+                    ):
+                        tried_model_refs.discard(ref)
+                        continue
                     if not any(item[1] == ref for item in window_skipped):
                         window_skipped.append((int(model_index), str(ref), int(declared_window)))
                     model_index += 1
@@ -1751,6 +1934,32 @@ class ConfigChatBackend:
                         group_member_rotations += 1
                         continue
                     if node_turn_controller is not None:
+                        # 组内还剩成员、但全都比这一份体量窄：按最宽的剩余成员窗口补压
+                        # 一次，再在同一个组上重绑。异构组的宽成员 429 之后，窄成员
+                        # 不该因为"上一发太大"被整组判死。
+                        fit_window = _slot_widest_available_window(route_slot, tried_model_refs)
+                        if fit_window and await _fit_body_to_window(
+                            target_window_tokens=fit_window,
+                            model_ref=ref,
+                            candidate_refs=_slot_available_members(
+                                route_slot,
+                                tried_model_refs,
+                                min_window=fit_window,
+                            ),
+                        ):
+                            selected = node_turn_controller.rebind_turn(
+                                node_turn_lease,
+                                route_index=int(model_index),
+                                filters=RouteCandidateFilters(
+                                    required_context_window_tokens=int(required_window),
+                                ),
+                                excluded_model_keys=frozenset(tried_model_refs),
+                                rebind_reason="window_shortfall",
+                            )
+                            if selected is not None:
+                                refs[model_index] = str(getattr(selected, "model_key", "") or "")
+                                group_member_rotations += 1
+                                continue
                         # 组整体耗尽：归还组侧 permit 与 reserved，再按链向后前进，
                         # 不允许一边占着组成员 permit 一边跑 direct 模型。
                         logger.warning(

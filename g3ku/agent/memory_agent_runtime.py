@@ -57,11 +57,12 @@ from main.runtime.send_token_preflight import estimate_runtime_provider_request_
 _NOTE_REF_RE = re.compile(r"(?:\bref:|见noteid:)(?P<ref>[a-z0-9_]+)\b")
 # `note_` + a reader handle. The memory block prints notes as `(note: n1a2b3)`, and models
 # have read that literal `note` as part of the name, then written `note_n1a2b3` - which
-# validation treats as a brand-new note. For the persona that landed, got reaped as
-# unreferenced, and left the settings persona empty with no error anywhere else.
-_HANDLE_SHAPED_NOTE_REF_RE = re.compile(
-    rf"^note_[{re.escape(ORDINARY_HANDLE_PREFIX)}{re.escape(CATEGORY_HANDLE_PREFIX)}][0-9a-f]{{5}}$"
+# validation otherwise treats as a brand-new note. The write lanes resolve it back to the
+# one note the handle names; only a handle that matches nothing is refused.
+_HANDLE_TOKEN_RE = re.compile(
+    rf"^[{re.escape(ORDINARY_HANDLE_PREFIX)}{re.escape(CATEGORY_HANDLE_PREFIX)}][0-9a-f]{{5}}$"
 )
+_HANDLE_SHAPED_NOTE_REF_RE = re.compile(rf"^note_({_HANDLE_TOKEN_RE.pattern[1:-1]})$")
 
 # 模型看到的是带行号的正文（`18| 261018:...`），它抄 content 时会把这两段一起带回来。日期和
 # 行号都由系统维护，正文里出现就是重影：`261018:261018:...`。剥掉比打回好——打回要模型再读一遍
@@ -611,6 +612,9 @@ class _MemoryToolSession:
     # True only between a preview the model was handed and the next submission. It is what
     # tells the tool whether the new preview replaced one the model has already read.
     previewed: bool = False
+    # Refs this submission auto-corrected. Returned with the staged batch so the model
+    # learns the caller's name was wrong without spending a whole repair round on it.
+    corrections: list[dict[str, str]] = field(default_factory=list)
 
     def note_directories(self) -> list[Path]:
         return [self.index_dir, self.notes_dir] if self.index_dir is not None else [self.notes_dir]
@@ -648,45 +652,73 @@ class _MemoryToolSession:
                 return path.read_text(encoding="utf-8")
         raise FileNotFoundError(f"memory note not found: {normalized}")
 
-    def _note_ref_hint(self, ref: str) -> str:
-        """Field error for names a model derived from a read handle instead of the ref.
-
-        `note_<handle>` names a new file, and the persona ref with an extra `note_` prefix
-        names nothing meaningful. The persona note has no memory row and may not exist yet,
-        so a first persona write that lands under a mangled name has nothing to keep it
-        alive: the post-commit orphan sweep reaps it and the persona silently stays empty.
-        Refusing the ref keeps the batch from being staged, so the model retries with the
-        real name in the same run instead of learning about the loss from a later empty
-        settings dialog.
-        """
-        candidate = str(ref or "").strip()
-        if candidate == f"note_{PERSONA_NOTE_REF}":
-            return (
-                f"{candidate} is not a note name: the persona note ref is {PERSONA_NOTE_REF}. "
-                f"Use {PERSONA_NOTE_REF}."
-            )
-        if not _HANDLE_SHAPED_NOTE_REF_RE.fullmatch(candidate):
-            return ""
-        handle = candidate[len("note_"):]
-        if handle == persona_note_handle():
-            return (
-                f"{candidate} is not a note name: {handle} is only the read handle of the persona note. "
-                f"Use the ref {PERSONA_NOTE_REF}."
-            )
+    def _note_handle_resolution(self, handle: str) -> str:
+        """The single note whose reader handle is `handle`, or empty when none/many match."""
         ordinary_names = {path.stem for path in self.notes_dir.glob("*.md")} | set(self.staged_notes)
         category_names = (
             {path.stem for path in self.index_dir.glob("*.md")} if self.index_dir is not None else set()
         )
-        resolved = resolve_note_token(handle, ordinary_names, category_names)
-        if resolved != handle:
-            return (
-                f"{candidate} is not a note name: {handle} is the read handle of {resolved}. "
-                f"Use the ref {resolved}."
-            )
+        matches = [
+            name for name in sorted(ordinary_names) if note_handle(name) == handle
+        ] + [
+            name for name in sorted(category_names) if note_handle(name, category=True) == handle
+        ]
+        return matches[0] if len(matches) == 1 else ""
+
+    def _normalize_note_ref(self, ref: str, *, field: str) -> str:
+        """Resolve a read handle used as a note ref and record the correction.
+
+        The memory block prints notes as `(note: n1a2b3)`. A model that copies the literal
+        `note` into the name writes `note_n1a2b3`; the bare handle is the same mistake
+        without the prefix. Both are corrected here instead of costing a repair round.
+        The persona is the fixed case: its handle always means the reserved note. An
+        unresolvable handle-shaped ref is left for `_unresolved_note_ref_hint` to refuse -
+        accepting it would create a note nothing references.
+        """
+        candidate = str(ref or "").strip()
+        match = _HANDLE_SHAPED_NOTE_REF_RE.fullmatch(candidate)
+        handle = match.group(1) if match else candidate
+        if (
+            candidate in {PERSONA_NOTE_REF, persona_note_handle(), f"note_{PERSONA_NOTE_REF}"}
+            or handle == persona_note_handle()
+        ):
+            corrected = PERSONA_NOTE_REF
+        elif match and self._note_exists(candidate):
+            # The note itself is really named like a handle; a real ref wins over guessing.
+            corrected = candidate
+        elif _HANDLE_TOKEN_RE.fullmatch(handle):
+            corrected = self._note_handle_resolution(handle)
+            if not corrected and match:
+                # A legacy note may itself be named exactly like the handle; a real file
+                # name is still a valid ref even without the `note_` prefix.
+                for directory in (self.notes_dir, self.index_dir):
+                    if directory is not None and (directory / note_file_name(handle)).exists():
+                        corrected = handle
+                        break
+        else:
+            corrected = candidate
+        if not corrected:
+            return candidate
+        if corrected != candidate:
+            self.corrections.append({"field": field, "from": candidate, "to": corrected})
+        return corrected
+
+    def _unresolved_note_ref_hint(self, ref: str) -> str:
+        """Field error for a `note_<handle>` ref whose handle matches no existing note."""
+        candidate = str(ref or "").strip()
+        if not _HANDLE_SHAPED_NOTE_REF_RE.fullmatch(candidate):
+            return ""
         return (
-            f"{candidate} is not a note name: {handle} is a note handle, not a ref. "
-            "For an existing note use its ref; for a new note pick a descriptive name instead of a handle."
+            f"{candidate} is not a note name and its handle matches no existing note. "
+            "Use the note ref shown in the existing note list."
         )
+
+    def _correction_warnings(self) -> list[str]:
+        return [
+            f"{item['field']} used {item['from']!r}, which is not a note name; "
+            f"auto-corrected to {item['to']!r}. The batch uses {item['to']!r}."
+            for item in self.corrections
+        ]
 
     def write_document(self, content: str) -> str:
         self.staged_document = str(content or "")
@@ -748,6 +780,7 @@ class _MemoryToolSession:
         normalized_category_deletes: list[str] = []
         normalized_noop_reason = str(noop_reason or "").strip()
         normalized_already_satisfied = str(already_satisfied or "").strip()
+        self.corrections.clear()
 
         raw_adds = list(adds or [])
         if not isinstance(raw_adds, list):
@@ -760,7 +793,10 @@ class _MemoryToolSession:
                 content = str(item.get("content") or "").strip()
                 minimal_memory = str(item.get("minimal_memory") or "").strip()
                 decision_source = str(item.get("decision_source") or "").strip().lower()
-                note_ref = str(item.get("note_ref") or "").strip()
+                note_ref = self._normalize_note_ref(
+                    str(item.get("note_ref") or "").strip(),
+                    field=f"adds[{index}].note_ref",
+                )
                 if not content:
                     errors[f"adds[{index}].content"] = "content must not be empty"
                 if content and not minimal_memory:
@@ -771,13 +807,13 @@ class _MemoryToolSession:
                     )
                 if decision_source not in {"user", "self"}:
                     errors[f"adds[{index}].decision_source"] = "decision_source must be user or self"
-                if note_ref and note_ref in {PERSONA_NOTE_REF, persona_note_handle()}:
+                if note_ref == PERSONA_NOTE_REF:
                     errors[f"adds[{index}].note_ref"] = (
                         "the persona note is reserved for persona updates; "
                         "ordinary memories cannot attach it"
                     )
                 elif note_ref:
-                    hint = self._note_ref_hint(note_ref)
+                    hint = self._unresolved_note_ref_hint(note_ref)
                     if hint:
                         errors[f"adds[{index}].note_ref"] = hint
                 if content and minimal_memory and decision_source in {"user", "self"}:
@@ -801,7 +837,10 @@ class _MemoryToolSession:
                 line, line_error = coerce_memory_line(item.get("line"))
                 content = str(item.get("content") or "").strip()
                 minimal_memory = str(item.get("minimal_memory") or "").strip()
-                note_ref = str(item.get("note_ref") or "").strip()
+                note_ref = self._normalize_note_ref(
+                    str(item.get("note_ref") or "").strip(),
+                    field=f"rewrites[{index}].note_ref",
+                )
                 if line_error:
                     errors[f"rewrites[{index}].line"] = line_error
                 if not content:
@@ -812,13 +851,13 @@ class _MemoryToolSession:
                     errors[f"rewrites[{index}].minimal_memory"] = (
                         "minimal_memory must be a single line; put the detail in note_upserts"
                     )
-                if note_ref and note_ref in {PERSONA_NOTE_REF, persona_note_handle()}:
+                if note_ref == PERSONA_NOTE_REF:
                     errors[f"rewrites[{index}].note_ref"] = (
                         "the persona note is reserved for persona updates; "
                         "ordinary memories cannot attach it"
                     )
                 elif note_ref:
-                    hint = self._note_ref_hint(note_ref)
+                    hint = self._unresolved_note_ref_hint(note_ref)
                     if hint:
                         errors[f"rewrites[{index}].note_ref"] = hint
                 if line and content and minimal_memory:
@@ -847,14 +886,15 @@ class _MemoryToolSession:
             errors["note_upserts"] = "note_upserts must be an object"
         else:
             for raw_ref, raw_body in raw_note_upserts.items():
-                ref = str(raw_ref or "").strip()
+                ref = self._normalize_note_ref(
+                    str(raw_ref or "").strip(),
+                    field="note_upserts key",
+                )
                 body = str(raw_body or "")
-                hint = self._note_ref_hint(ref)
+                hint = self._unresolved_note_ref_hint(ref)
                 if hint:
                     errors[f"note_upserts.{ref}"] = hint
                     continue
-                if ref == persona_note_handle():
-                    ref = PERSONA_NOTE_REF
                 try:
                     note_file_name(ref)
                 except Exception as exc:
@@ -890,13 +930,14 @@ class _MemoryToolSession:
             errors["note_edits"] = "note_edits must be an object"
         else:
             for raw_ref, raw_ops in raw_note_edits.items():
-                ref = str(raw_ref or "").strip()
-                hint = self._note_ref_hint(ref)
+                ref = self._normalize_note_ref(
+                    str(raw_ref or "").strip(),
+                    field="note_edits key",
+                )
+                hint = self._unresolved_note_ref_hint(ref)
                 if hint:
                     errors[f"note_edits.{ref}"] = hint
                     continue
-                if ref == persona_note_handle():
-                    ref = PERSONA_NOTE_REF
                 try:
                     note_file_name(ref)
                 except Exception as exc:
@@ -974,7 +1015,10 @@ class _MemoryToolSession:
             )
 
         if errors:
-            return {"ok": False, "errors": errors}
+            result: dict[str, Any] = {"ok": False, "errors": errors}
+            if self.corrections:
+                result["warnings"] = self._correction_warnings()
+            return result
 
         self.apply_batch_count += 1
         # A resubmission replaces the staged payload, so the confirmation attached to the
@@ -993,7 +1037,10 @@ class _MemoryToolSession:
             "noop_reason": normalized_noop_reason,
             "already_satisfied": normalized_already_satisfied,
         }
-        return {"ok": True, "status": "batch_staged"}
+        result = {"ok": True, "status": "batch_staged"}
+        if self.corrections:
+            result["warnings"] = self._correction_warnings()
+        return result
 
 
 @dataclass(slots=True)
@@ -5916,12 +5963,15 @@ class MemoryManager:
                     # staged would let a confirm (or the commit gate) retry a payload that
                     # already failed, which is exactly the loop this replaces.
                     session.applied_batch = None
-                    return {
+                    failure: dict[str, Any] = {
                         "ok": False,
                         "errors": {"batch": str(preview.get("error") or "batch did not build")},
                         "preview": preview,
                         "next_step": "fix this batch and call memory_apply_batch again; nothing was staged",
                     }
+                    if staged.get("warnings"):
+                        failure["warnings"] = staged["warnings"]
+                    return failure
                 staged["status"] = "batch_previewed"
                 staged["preview"] = preview
                 session.previewed = True

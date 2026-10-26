@@ -217,18 +217,72 @@ def test_memory_agent_sees_the_persona_pointer_not_the_body(tmp_path: Path) -> N
         manager.close()
 
 
-def test_persona_handle_written_as_a_note_name_is_refused(tmp_path: Path) -> None:
-    """The field model saw `(note: n1a2b3)` and wrote `note_n1a2b3`; validation accepted
-    it as a new note, the orphan sweep reaped it, and the settings persona stayed empty."""
+def test_persona_handle_written_as_a_note_name_is_auto_corrected(tmp_path: Path) -> None:
+    """The field model saw `(note: n1a2b3)` and wrote `note_n1a2b3`; the write lane maps it
+    back to the persona ref and tells the model what it changed, instead of spending a
+    repair round on a batch that can only mean one note."""
     manager = _manager(tmp_path)
     try:
         mangled = f"note_{persona_note_handle()}"
-        result = _write_session(manager).apply_batch(note_upserts={mangled: "你是玲音。"})
+        session = _write_session(manager)
+        result = session.apply_batch(note_upserts={mangled: "你是玲音。"})
+
+        assert result["ok"] is True, result
+        assert session.applied_batch["note_upserts"] == {PERSONA_NOTE_REF: "你是玲音。"}
+        assert result["warnings"] == [
+            f"note_upserts key used {mangled!r}, which is not a note name; "
+            f"auto-corrected to {PERSONA_NOTE_REF!r}. The batch uses {PERSONA_NOTE_REF!r}."
+        ]
+        assert not (manager.notes_dir / f"{mangled}.md").exists()
+    finally:
+        manager.close()
+
+
+def test_memory_apply_batch_reports_the_ref_correction_to_the_model(tmp_path: Path) -> None:
+    """The correction has to be in the tool result the model reads, not just in the
+    staged payload - otherwise the agent never learns which name it should have used."""
+    manager = _manager(tmp_path)
+    try:
+        session = _write_session(manager)
+        tool = {item.name: item for item in manager._memory_agent_tools(session)}["memory_apply_batch"]
+        mangled = f"note_{persona_note_handle()}"
+
+        result = tool.invoke({"note_upserts": {mangled: "你是玲音。"}})
+
+        assert result["ok"] is True, result
+        assert any("auto-corrected" in warning and PERSONA_NOTE_REF in warning for warning in result["warnings"])
+    finally:
+        manager.close()
+
+
+def test_existing_note_handle_used_as_a_ref_is_auto_corrected(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    try:
+        note = tmp_path / "memory" / "notes" / "note_ports.md"
+        note.parent.mkdir(parents=True, exist_ok=True)
+        note.write_text("旧端口\n", encoding="utf-8")
+        mangled = f"note_{_module().note_handle('note_ports')}"
+        session = _write_session(manager)
+        result = session.apply_batch(
+            note_edits={mangled: [{"old_text": "旧端口", "new_text": "新端口"}]}
+        )
+
+        assert result["ok"] is True, result
+        assert session.applied_batch["note_edits"] == {
+            "note_ports": [{"old_text": "旧端口", "new_text": "新端口"}]
+        }
+        assert "auto-corrected to 'note_ports'" in result["warnings"][0]
+    finally:
+        manager.close()
+
+
+def test_a_handle_shaped_ref_that_matches_no_note_is_still_refused(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    try:
+        result = _write_session(manager).apply_batch(note_upserts={"note_n0a1b2": "x"})
 
         assert result["ok"] is False
-        assert f"note_upserts.{mangled}" in result["errors"]
-        assert PERSONA_NOTE_REF in result["errors"][f"note_upserts.{mangled}"]
-        assert not (manager.notes_dir / f"{mangled}.md").exists()
+        assert "matches no existing note" in result["errors"]["note_upserts.note_n0a1b2"]
     finally:
         manager.close()
 
@@ -241,6 +295,7 @@ def test_persona_read_handle_is_normalized_to_the_reserved_ref(tmp_path: Path) -
 
         assert result["ok"] is True, result
         assert session.applied_batch["note_upserts"] == {PERSONA_NOTE_REF: "你是玲音。"}
+        assert "auto-corrected" in result["warnings"][0]
     finally:
         manager.close()
 
@@ -261,8 +316,9 @@ def test_persona_note_upsert_lands_and_survives_the_orphan_sweep(tmp_path: Path)
             ],
         )
         session = _write_session(manager)
-        result = session.apply_batch(note_upserts={PERSONA_NOTE_REF: "你是玲音。"})
+        result = session.apply_batch(note_upserts={f"note_{persona_note_handle()}": "你是玲音。"})
         assert result["ok"] is True, result
+        assert "auto-corrected" in result["warnings"][0]
         session.confirm_batch()
         validated = manager._build_validated_write_from_apply_batch(
             before_text=manager.snapshot_text(),

@@ -263,7 +263,7 @@
 ### 9. 人设
 
 - 用户明确要求更改人设或增加人设描述时，先读 `note_persona`，在原有内容上改；首次没有正文就用 `note_upserts` 以 `note_persona` 为 key 新建这份 note。
-- `note_upserts` / `note_edits` 的 key 一律写 `note_persona`。不要把句柄拼成名字（例如 `note_n1a2b3`）——那是另一份无人引用的新 note，提交后会被孤儿清理回收，人设仍然是空的。
+- `note_upserts` / `note_edits` 的 key 一律写 `note_persona`。如果把句柄拼成名字（例如 `note_n1a2b3`），运行时会自动改写到唯一对应的 note，并在工具结果的 `warnings` 里说明改成了什么；兼容层只兜底，读到 warning 后要用正确 ref 重写后续批次。
 - 不要把人设写进 `adds` / `rewrites`，不要新增普通记忆行，也不要删这份 note。
 - 人设 note 永不退场、不压缩、不占记忆字数。
 

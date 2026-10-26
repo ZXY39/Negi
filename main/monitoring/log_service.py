@@ -2161,6 +2161,12 @@ class TaskLogService:
             'context_window_tokens': int(payload.get('context_window_tokens') or 0),
             'would_trigger_token_compression': bool(payload.get('would_trigger_token_compression')),
             'notice_preservation': dict(notice_preservation) if isinstance(notice_preservation, dict) else {},
+            # 预检之后的链尾补压：单独一格，不和 `compaction_applied` 混成一次压缩。
+            'window_shortfall_compaction': (
+                dict(payload.get('window_shortfall_compaction') or {})
+                if isinstance(payload.get('window_shortfall_compaction'), dict)
+                else {}
+            ),
         }
 
     @classmethod

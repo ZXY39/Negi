@@ -568,7 +568,7 @@ main/ 侧所有持久化写在磁盘满（ENOSPC / SQLITE_FULL）条件下的行
 - 前门块：`## 我的人设` 是一条稳定 `assistant` 消息，内容是照片目录与「我是谁」。它排在长期记忆块之后：有长期记忆时 index 2，没有时 index 1。会话首请求采纳一次，token 压缩与手动压缩两处重印；两次重印之间字节冻结。
 - 中途变化：`[RUNTIME_NOTICE]` 的 `### Persona updates` 一节带最新正文，按 `persona_cursor` 的 digest 消费，只投一次；压缩后头部重印，游标对齐，同一条更新只出现一次。头部块仍显示旧值时，以这条通知为准。
 - 合并规则：新的人设信息或照片与当前最新人设大体相同 ⇒ 直接合成一段连续描述，不保留多份参考稿；无法同时成立、无法自行判断的冲突 ⇒ 先问用户保留哪一个，得到答复前不提交人设更新。这条判据住在前门提示词的定位段，正文由前门通过 `memory_update` 交给记忆 agent 写入。
-- 记忆 agent 面：只多一行指针，指针给的是写入用的真实 ref `note_persona`，不是只读句柄，正文按需读；`main/prompts/memory_agent.md` 规定改人设走 `note_edits` / `note_upserts`，key 必须是 `note_persona`，不新增普通记忆。参数门口拒绝 `note_<句柄>` 形状的 ref：它会被当成一份新 note 落盘，随后按无引用文件回收，人设正文与设置页红点都不会变——这正是"记忆 agent 写了人设、设置页仍为空"那类故障的来源。
+- 记忆 agent 面：只多一行指针，指针给的是写入用的真实 ref `note_persona`，不是只读句柄，正文按需读；`main/prompts/memory_agent.md` 规定改人设走 `note_edits` / `note_upserts`，key 必须是 `note_persona`，不新增普通记忆。写入前先把 `note_<句柄>` / 裸句柄解析回唯一对应的 note（人设句柄固定归一到 `note_persona`），并在工具结果的 `warnings` 里回报"用了 X、已改成 Y"，不占一次修复轮；只有解析不到的句柄形状才打回，避免静默生成一份无人引用的新 note。
 - 照片：工作区根 `my_image/`。引导页上传直接写在这里；聊天里用户发来的「你的照片」由前门提示词驱动 CEO 用 `filesystem_copy` 复制进来；设置页只读画廊读同一目录。引导流程、状态文件与隐藏 `internal:` 读图会话见 `web-and-admin.md`「First-Run Onboarding And Persona Contract」。
 - 配置包：人设 note 与 `my_image/` 只随人设面走，记忆面不夹带它们；勾选与替换语义见 `config-and-models.md`「Config Bundle Export And Import」。
 

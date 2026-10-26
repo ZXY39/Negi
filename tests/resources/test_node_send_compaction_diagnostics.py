@@ -25,7 +25,12 @@ _EXPECTED_SEND_DIAGNOSTIC_KEYS = {
     'estimate_source',
     'ruler_source',
     'comparable_to_previous_request',
+    'final_request_tokens',
+    'effective_trigger_tokens',
+    'context_window_tokens',
+    'would_trigger_token_compression',
     'notice_preservation',
+    'window_shortfall_compaction',
 }
 
 _LIVE_DIAGNOSTICS = {
@@ -95,7 +100,12 @@ def test_send_diagnostics_fields_are_whitelisted_and_typed() -> None:
         'estimate_source': '',
         'ruler_source': '',
         'comparable_to_previous_request': False,
+        'final_request_tokens': 0,
+        'effective_trigger_tokens': 0,
+        'context_window_tokens': 0,
+        'would_trigger_token_compression': False,
         'notice_preservation': {},
+        'window_shortfall_compaction': {},
     }
     junk = TaskLogService._send_diagnostics_fields(
         {

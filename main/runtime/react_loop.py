@@ -1130,6 +1130,59 @@ class ReActToolLoop:
                             marker='model.chat.dispatch',
                             started_at=now_iso(),
                         )
+
+                        def _on_window_shortfall_compressed(payload: dict[str, Any]) -> None:
+                            # 发送层在链尾按候选窗口压完请求体后回调这里：台账/取证面必须
+                            # 跟着换成真正发出去的那份正文，否则逐跳行会继续报压缩前的
+                            # 体量，"这一跳为什么没超窗"就永远对不上账。
+                            nonlocal request_messages, actual_request_diagnostics
+                            nonlocal previous_actual_request_messages
+                            compressed_messages = [
+                                dict(item)
+                                for item in list(payload.get('messages') or [])
+                                if isinstance(item, dict)
+                            ]
+                            if not compressed_messages:
+                                return
+                            request_messages = compressed_messages
+                            # 与预检压缩同一个收口：把这一份压缩后的正文记为下一跳的
+                            # append-only 基线，并把 durable 历史里的旧通知剥掉。不采纳的话
+                            # 下一跳又从全量账本重装配，链尾仍塞不下 ⇒ 每跳重摘要一次。
+                            message_history[:] = _mid_insert.strip_after_compaction(
+                                message_history,
+                                lane=_mid_insert.LANE_NODE,
+                            )
+                            previous_actual_request_messages = self._reset_node_runtime_notice_after_compaction(
+                                compressed_messages,
+                                node=node,
+                            )
+                            actual_request_diagnostics = build_actual_request_diagnostics(
+                                request_messages=request_messages,
+                                tool_schemas=tool_schemas,
+                            )
+                            compressed_tokens = int(payload.get('estimated_tokens') or 0)
+                            token_preflight_diagnostics.update(
+                                {
+                                    'estimated_total_tokens': compressed_tokens,
+                                    'final_estimate_tokens': compressed_tokens,
+                                    'final_request_tokens': compressed_tokens,
+                                    'window_shortfall_compaction': {
+                                        'applied': True,
+                                        'model_ref': str(payload.get('model_ref') or ''),
+                                        'target_window_tokens': int(
+                                            payload.get('target_window_tokens') or 0
+                                        ),
+                                        'required_before': int(payload.get('required_before') or 0),
+                                        'required_after': compressed_tokens,
+                                        'compression_mode': str(payload.get('compression_mode') or ''),
+                                        'chunk_count': int(payload.get('chunk_count') or 0),
+                                        'chunk_failed_count': int(
+                                            payload.get('chunk_failed_count') or 0
+                                        ),
+                                    },
+                                }
+                            )
+
                         chat_coro = self._chat_with_optional_extensions(
                             messages=request_messages,
                             tools=tool_schemas or None,
@@ -1147,6 +1200,14 @@ class ReActToolLoop:
                             required_context_window_tokens=int(
                                 (token_preflight_diagnostics or {}).get('estimated_total_tokens') or 0
                             ),
+                            # 链前进到预检没预测到的更窄一档时，别把候选按窗口筛掉：
+                            # 用它的窗口现压一次请求体（分片管线复用同一套）。
+                            window_shortfall_compressor=self._node_window_shortfall_compressor(
+                                task_id=task.task_id,
+                                node_id=node.node_id,
+                                tool_schemas=tool_schemas,
+                            ),
+                            on_window_shortfall_compressed=_on_window_shortfall_compressed,
                             # 含组的链只能按 route plan 活刷新：扁平候选列表不是 fallback 顺序。
                             model_routes_supplier=(model_routes_supplier if callable(model_routes_supplier) else None),
                             single_request_timeout_seconds=self._resolved_model_response_timeout_seconds(
@@ -6494,6 +6555,116 @@ class ReActToolLoop:
                 break
         return records
 
+    def _node_window_shortfall_compressor(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        tool_schemas: list[dict[str, Any]],
+    ) -> Any:
+        """给发送层一个"按候选窗口分片压缩"的入口。
+
+        预检那把尺子取的是**这一跳预测落到的组**；链在 429 之后前进到更窄的一档时，
+        预检已经过去，体量不会再自己变小。这里让发送层在真正跳过候选之前回调一次：
+        用候选窗口当容量重跑同一条分片压缩管线，压完再交回发送层重绑。
+        没有可压历史、压缩 helper 失败或压完仍超窗时返回 None，发送层保留原有兜底。
+        """
+
+        async def _compress(
+            messages: list[dict[str, Any]],
+            target_window_tokens: int,
+            model_ref: str,
+            candidate_refs: tuple[str, ...] = (),
+        ) -> dict[str, Any] | None:
+            target_window = max(0, int(target_window_tokens or 0))
+            if target_window <= 0:
+                return None
+            helper_refs = [
+                str(item or "").strip()
+                for item in list(candidate_refs or ())
+                if str(item or "").strip()
+            ] or ([str(model_ref or "").strip()] if str(model_ref or "").strip() else [])
+            if not helper_refs:
+                return None
+            try:
+                compressed_text, helper_call = await self._request_node_token_compression_summary(
+                    task_id=task_id,
+                    node_id=node_id,
+                    model_refs=helper_refs,
+                    provider_model="",
+                    request_messages=messages,
+                    context_window_tokens=target_window,
+                )
+            except asyncio.CancelledError:
+                raise
+            except (TaskPausedError, NodePausedError):
+                raise
+            except Exception as exc:
+                logger.warning(
+                    'node window shortfall compression helper failed: task={} node={} '
+                    'target_window={} error={}',
+                    task_id,
+                    node_id,
+                    target_window,
+                    str(exc or exc.__class__.__name__),
+                )
+                return None
+            if not str(compressed_text or '').strip():
+                logger.warning(
+                    'node window shortfall compression produced no summary: task={} node={} '
+                    'target_window={} mode={} chunks={} failed_chunks={} reason={}',
+                    task_id,
+                    node_id,
+                    target_window,
+                    str(helper_call.get('compression_mode') or ''),
+                    int(helper_call.get('chunk_count') or 0),
+                    int(helper_call.get('chunk_failed_count') or 0),
+                    str(helper_call.get('chunk_refused_reason') or helper_call.get('chunk_error_text') or ''),
+                )
+                return None
+            rewritten, compact_payload = self._rewrite_request_messages_for_token_compaction(
+                node_id=node_id,
+                request_messages=messages,
+                compressed_text=compressed_text,
+                preserved_raw_messages=list(helper_call.get('deferred_raw_messages') or []),
+            )
+            if not rewritten:
+                return None
+            estimated_tokens = int(
+                runtime_send_token_preflight.estimate_runtime_provider_request_preview_tokens(
+                    provider_request_body=None,
+                    request_messages=rewritten,
+                    tool_schemas=list(tool_schemas or []),
+                )
+                or 0
+            )
+            if estimated_tokens <= 0:
+                return None
+            logger.warning(
+                'node window shortfall compression finished: task={} node={} target_window={} '
+                'estimated_tokens={} fits={} mode={} chunks={} failed_chunks={} helper_refs={}',
+                task_id,
+                node_id,
+                target_window,
+                estimated_tokens,
+                estimated_tokens <= target_window,
+                str(helper_call.get('compression_mode') or 'llm'),
+                int(helper_call.get('chunk_count') or 1),
+                int(helper_call.get('chunk_failed_count') or 0),
+                ','.join(helper_refs),
+            )
+            return {
+                'messages': rewritten,
+                'estimated_tokens': int(estimated_tokens),
+                'target_window_tokens': int(target_window),
+                'compression_mode': str(helper_call.get('compression_mode') or 'llm'),
+                'chunk_count': int(helper_call.get('chunk_count') or 1),
+                'chunk_failed_count': int(helper_call.get('chunk_failed_count') or 0),
+                'compaction_payload': dict(compact_payload or {}),
+            }
+
+        return _compress
+
     async def _request_node_token_compression_summary(
         self,
         *,
@@ -7127,6 +7298,9 @@ class ReActToolLoop:
             'context_window_tokens': int(payload.get('context_window_tokens') or 0),
             'would_trigger_token_compression': bool(payload.get('would_trigger_token_compression')),
             'notice_preservation': dict(payload.get('notice_preservation') or {}),
+            # 预检之后的链尾补压：`compaction_applied` 只描述预检那一压，这里单列一条，
+            # 逐跳行才能区分"预检压过"与"前进到更窄一档后才补压"。
+            'window_shortfall_compaction': dict(payload.get('window_shortfall_compaction') or {}),
         }
 
     def _append_only_delta_estimate_tokens(
