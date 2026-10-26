@@ -128,7 +128,9 @@ def test_extract_attachments_replaces_local_links_with_labels(monkeypatch, tmp_p
     chart.write_bytes(b"\x89PNG fake")
 
     content = f"已完成：[日报]({doc}) 和 ![]({chart}) 另见 [外部](https://example.com/a.png)"
-    text, attachments = ceo_media.extract_local_media_attachments(content)
+    text, attachments = ceo_media.extract_local_media_attachments(
+        content, allowed_roots=(tmp_path,)
+    )
 
     assert "日报" in text and "chart.png" in text
     assert f"({doc})" not in text and f"({chart})" not in text
@@ -137,6 +139,9 @@ def test_extract_attachments_replaces_local_links_with_labels(monkeypatch, tmp_p
     assert set(by_name) == {"report.docx", "chart.png"}
     assert by_name["report.docx"]["mime_type"].endswith("wordprocessingml.document")
     assert by_name["report.docx"]["size"] == len(b"doc-bytes")
+    # kind 是渠道桥决定"发图片还是发文件"的唯一依据
+    assert by_name["report.docx"]["kind"] == "file"
+    assert by_name["chart.png"]["kind"] == "image"
     for item in attachments:
         assert item["url"].startswith(ceo_media.VIEWER_ROUTE + "?token=")
 
@@ -147,7 +152,9 @@ def test_extract_attachments_skips_missing_and_dedupes(monkeypatch, tmp_path):
     doc.write_text("x", encoding="utf-8")
 
     content = f"[一]({doc}) [二]({doc}) [缺]({tmp_path / 'nope.txt'})"
-    text, attachments = ceo_media.extract_local_media_attachments(content)
+    text, attachments = ceo_media.extract_local_media_attachments(
+        content, allowed_roots=(tmp_path,)
+    )
 
     assert len(attachments) == 1
     # 重复引用与不存在的文件保留原样（由签名改写兜底）
@@ -162,7 +169,57 @@ def test_extract_attachments_caps_count(monkeypatch, tmp_path):
         file.write_text(str(index), encoding="utf-8")
         parts.append(f"[f{index}]({file})")
 
-    text, attachments = ceo_media.extract_local_media_attachments(" ".join(parts))
+    text, attachments = ceo_media.extract_local_media_attachments(
+        " ".join(parts), allowed_roots=(tmp_path,)
+    )
 
     assert len(attachments) == ceo_media.MAX_CHANNEL_ATTACHMENTS
     assert f"[f{ceo_media.MAX_CHANNEL_ATTACHMENTS}](" in text
+
+
+def test_extract_attachments_rejects_paths_outside_allowed_roots(monkeypatch, tmp_path):
+    """渠道白名单：越界路径既不转附件，也不能在签名改写里变成可下载链接。"""
+    monkeypatch.chdir(tmp_path)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    allowed = workspace / "ok.png"
+    allowed.write_bytes(b"\x89PNG fake")
+    outside = tmp_path / "secret.txt"
+    outside.write_text("token", encoding="utf-8")
+
+    content = f"![]({allowed}) [泄露]({outside})"
+    text, attachments = ceo_media.extract_local_media_attachments(
+        content, allowed_roots=(workspace,)
+    )
+
+    assert [item["name"] for item in attachments] == ["ok.png"]
+    assert f"[泄露]({outside})" in text
+
+    signed = ceo_media.rewrite_media_links_signed(text, allowed_roots=(workspace,))
+    assert ceo_media.VIEWER_ROUTE not in signed
+    assert str(outside) in signed
+
+
+def test_channel_attachment_roots_are_workspace_only():
+    roots = ceo_media.channel_attachment_roots()
+    assert roots == (ceo_media.workspace_path(),)
+
+
+def test_animated_media_skips_thumbnail(monkeypatch, tmp_path):
+    """gif/webp 走签名原图：缩略图会把动图压成静态首帧。"""
+    monkeypatch.chdir(tmp_path)
+    gif = tmp_path / "wave.gif"
+    gif.write_bytes(b"GIF89a-fake")
+    webp = tmp_path / "wave.webp"
+    webp.write_bytes(b"RIFF-fake")
+
+    rewritten = ceo_media.rewrite_assistant_media_content(
+        "sess_anim", f"![a]({gif}) ![b]({webp})"
+    )
+
+    assert "inline_media" not in rewritten
+    sources = re.findall(r"!\[[^\]]*\]\(([^)\s]+)", rewritten)
+    assert len(sources) == 2
+    for src in sources:
+        assert src.startswith(ceo_media.VIEWER_ROUTE + "?token=")
+

@@ -371,9 +371,14 @@ def _extract_outbound_media_attachments(text: str) -> tuple[str, list[dict[str, 
     """Lazy wrapper over ceo_media extraction (same circular-import constraint
     as ``g3ku.runtime.external_events``: ``g3ku.runtime.api`` imports this
     shell, so it must not be imported at module load here)."""
-    from g3ku.runtime.api.ceo_media import extract_local_media_attachments
+    from g3ku.runtime.api.ceo_media import (
+        channel_attachment_roots,
+        extract_local_media_attachments,
+    )
 
-    cleaned, attachments = extract_local_media_attachments(text)
+    cleaned, attachments = extract_local_media_attachments(
+        text, allowed_roots=channel_attachment_roots()
+    )
     return (cleaned if isinstance(cleaned, str) else text), list(attachments or [])
 
 

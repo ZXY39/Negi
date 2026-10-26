@@ -80,9 +80,15 @@ async def test_heartbeat_ext_reply_ignores_empty_text(env):
 
 
 @pytest.mark.asyncio
-async def test_outbound_reply_extracts_file_attachments_into_event_and_outbox(env, tmp_path):
+async def test_outbound_reply_extracts_file_attachments_into_event_and_outbox(env, tmp_path, monkeypatch):
     """主动推送正文里的 markdown 本地文件链接在统一出口（drain）被提取：
-    事件携带结构化附件，正文留标签，账本持久化附件供重启重放。"""
+    事件携带结构化附件，正文留标签，账本持久化附件供重启重放。
+
+    渠道白名单只放行 workspace，所以这里把 workspace 一并指到 tmp_path。
+    """
+    monkeypatch.setattr(
+        "g3ku.runtime.api.ceo_media.workspace_path", lambda: tmp_path
+    )
     registry, bus = env
     entry, _ = registry.resolve_or_create(bridge_id="qq", external_key="qq:group:file")
     doc = tmp_path / "日报.docx"

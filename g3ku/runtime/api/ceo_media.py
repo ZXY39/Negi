@@ -38,6 +38,9 @@ MAX_CHANNEL_ATTACHMENTS = 4
 
 _TOKEN_SECRET = secrets.token_bytes(32)
 _RASTER_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+# 动图不走缩略图：`_build_thumbnail` 只取首帧并把透明通道铺白，GIF/WebP 会被压成
+# 一张静态 JPEG，网页端表情包就不动了。这两类直接引用签名原图。
+_ANIMATED_RASTER_SUFFIXES = {".gif", ".webp"}
 # `/ceo/media/original` 的 inline 判定原本只看 `text/*`，可 `.json` / `.yaml` / 代码这些
 # Python 认成 application/* 的其实也是纯文本，进 iframe 只会变成一次下载。这一组在**这条
 # 路由上**按 text/plain 供；`guess_media_mime` 本身不动——渠道文件消息的 MIME 另有用途。
@@ -81,7 +84,21 @@ def is_raster_image(name: str) -> bool:
     return Path(str(name or "")).suffix.lower() in _RASTER_SUFFIXES
 
 
-def _resolve_local_source(raw_src: str) -> Path | None:
+def channel_attachment_roots() -> tuple[Path, ...]:
+    """Roots a channel-bound reply is allowed to reference.
+
+    Channel replies leave the machine (QQ / OneBot), so a model-injected
+    ``![](C:\\...)`` must not be able to hand out arbitrary local files. The
+    workspace covers both agent output and ``<workspace>/.g3ku/external-uploads``
+    (where inbound channel attachments land).
+
+    Web snapshots pass ``None`` instead: the operator is looking at their own
+    machine, so restricting there would only break legitimate previews.
+    """
+    return (workspace_path(),)
+
+
+def _resolve_local_source(raw_src: str, allowed_roots: tuple[Path, ...] | None = None) -> Path | None:
     src = str(raw_src or "").strip()
     if not src or src.startswith(("#", "data:")):
         return None
@@ -93,9 +110,14 @@ def _resolve_local_source(raw_src: str) -> Path | None:
     if not candidate.is_absolute():
         candidate = workspace_path() / candidate
     try:
-        return candidate.resolve()
+        resolved = candidate.resolve()
     except OSError:
         return None
+    if allowed_roots is not None:
+        roots = tuple(Path(root).expanduser().resolve() for root in allowed_roots)
+        if not any(resolved.is_relative_to(root) for root in roots):
+            return None
+    return resolved
 
 
 def mint_original_token(path: Path) -> str:
@@ -187,14 +209,17 @@ def rewrite_assistant_media_content(session_id: str, content: Any) -> Any:
     def replace_image(match: re.Match[str]) -> str:
         alt, target = match.group(1), match.group(2)
         raw_src = _TITLE_RE.sub("", target).strip()
-        source = _resolve_local_source(raw_src)
+        source = _resolve_local_source(raw_src, None)
         if source is None or not source.is_file():
             return match.group(0)
         if is_raster_image(source.name):
+            url = original_view_url(source)
+            if source.suffix.lower() in _ANIMATED_RASTER_SUFFIXES:
+                return stash(f'![{alt}]({url} "{url}")')
             thumb = _stage_thumbnail(session_id, source)
             if thumb is None:
                 return match.group(0)
-            return stash(f'![{alt}]({thumb} "{original_view_url(source)}")')
+            return stash(f'![{alt}]({thumb} "{url}")')
         # 非图片保留 `![]` 形状：前端靠 src 位的文件名判类型（预览 or 保存），
         # 改成普通链接会把扩展名一起丢掉，点开就只能下载。
         return stash(f'![{alt or source.name}]({source.name} "{original_view_url(source)}")')
@@ -202,7 +227,7 @@ def rewrite_assistant_media_content(session_id: str, content: Any) -> Any:
     def replace_link(match: re.Match[str]) -> str:
         label, target = match.group(1), match.group(2)
         raw_src = _TITLE_RE.sub("", target).strip()
-        source = _resolve_local_source(raw_src)
+        source = _resolve_local_source(raw_src, None)
         if source is None or not source.is_file():
             return match.group(0)
         return f"[{label}]({original_view_url(source)})"
@@ -212,13 +237,20 @@ def rewrite_assistant_media_content(session_id: str, content: Any) -> Any:
     return _PLACEHOLDER_RE.sub(lambda m: placeholders[int(m.group(1))], text)
 
 
-def rewrite_media_links_signed(content: Any) -> Any:
+def rewrite_media_links_signed(
+    content: Any, *, allowed_roots: tuple[Path, ...] | None
+) -> Any:
     """Rewrite local file references into signed viewer URLs only.
 
     External-facing variant of ``rewrite_assistant_media_content``: no
     thumbnail staging, no local paths left behind — every resolvable local
     image/link href becomes the HMAC-signed original viewer URL, which the
     caller can fetch without extra authentication.
+
+    ``allowed_roots`` is required on purpose (pass ``channel_attachment_roots()``
+    for channel-bound text): a signed URL is still a working download link, so
+    leaving this unrestricted would re-open the same leak the attachment
+    whitelist closes.
     """
     if not isinstance(content, str) or not content.strip():
         return content
@@ -226,7 +258,7 @@ def rewrite_media_links_signed(content: Any) -> Any:
     def replace_image(match: re.Match[str]) -> str:
         alt, target = match.group(1), match.group(2)
         raw_src = _TITLE_RE.sub("", target).strip()
-        source = _resolve_local_source(raw_src)
+        source = _resolve_local_source(raw_src, allowed_roots)
         if source is None or not source.is_file():
             return match.group(0)
         return f"![{alt}]({original_view_url(source)})"
@@ -234,7 +266,7 @@ def rewrite_media_links_signed(content: Any) -> Any:
     def replace_link(match: re.Match[str]) -> str:
         label, target = match.group(1), match.group(2)
         raw_src = _TITLE_RE.sub("", target).strip()
-        source = _resolve_local_source(raw_src)
+        source = _resolve_local_source(raw_src, allowed_roots)
         if source is None or not source.is_file():
             return match.group(0)
         return f"[{label}]({original_view_url(source)})"
@@ -243,7 +275,9 @@ def rewrite_media_links_signed(content: Any) -> Any:
     return _MD_LINK_RE.sub(replace_link, text)
 
 
-def extract_local_media_attachments(content: Any) -> tuple[str, list[dict[str, Any]]]:
+def extract_local_media_attachments(
+    content: Any, *, allowed_roots: tuple[Path, ...] | None
+) -> tuple[str, list[dict[str, Any]]]:
     """Turn markdown references to existing local files into channel attachments.
 
     Channel-facing variant of the signed rewrite: every markdown image/link
@@ -254,6 +288,10 @@ def extract_local_media_attachments(content: Any) -> tuple[str, list[dict[str, A
     sent as file messages. Tokens beyond ``MAX_CHANNEL_ATTACHMENTS`` (and
     duplicate paths) are left untouched so the caller's signed-URL rewrite can
     still turn them into clickable fallback links.
+
+    ``allowed_roots`` is required on purpose (pass ``channel_attachment_roots()``
+    for channel-bound text): it is the only thing standing between a
+    model-echoed path and a file the recipient should never receive.
     """
     if not isinstance(content, str) or not content.strip():
         return (content if isinstance(content, str) else ""), []
@@ -270,10 +308,15 @@ def extract_local_media_attachments(content: Any) -> tuple[str, list[dict[str, A
             size = source.stat().st_size
         except OSError:
             size = 0
+        mime = guess_media_mime(source.name)
         attachments.append(
             {
                 "name": source.name,
-                "mime_type": guess_media_mime(source.name),
+                "mime_type": mime,
+                # 渠道桥按这个字段决定发图片还是发文件（OneBot 的
+                # `[CQ:image]` 分支只认 kind == "image"）。缺了它，所有图片
+                # 都会退化成"下载一个文件"。
+                "kind": "image" if mime.startswith("image/") else "file",
                 "size": int(size),
                 "url": original_view_url(source),
             }
@@ -282,7 +325,7 @@ def extract_local_media_attachments(content: Any) -> tuple[str, list[dict[str, A
 
     def replace_image(match: re.Match[str]) -> str:
         alt, target = match.group(1), match.group(2)
-        source = _resolve_local_source(_TITLE_RE.sub("", target).strip())
+        source = _resolve_local_source(_TITLE_RE.sub("", target).strip(), allowed_roots)
         if source is None or not source.is_file():
             return match.group(0)
         replacement = stash(source, alt)
@@ -290,7 +333,7 @@ def extract_local_media_attachments(content: Any) -> tuple[str, list[dict[str, A
 
     def replace_link(match: re.Match[str]) -> str:
         label, target = match.group(1), match.group(2)
-        source = _resolve_local_source(_TITLE_RE.sub("", target).strip())
+        source = _resolve_local_source(_TITLE_RE.sub("", target).strip(), allowed_roots)
         if source is None or not source.is_file():
             return match.group(0)
         replacement = stash(source, label)

@@ -166,9 +166,9 @@ def reset_session_event_hubs() -> None:
 def _rewrite_media_signed(text: str) -> str:
     # Lazy import: ceo_media lives in g3ku.runtime.api, which must not be
     # imported at module load time here (see module docstring).
-    from g3ku.runtime.api.ceo_media import rewrite_media_links_signed
+    from g3ku.runtime.api.ceo_media import channel_attachment_roots, rewrite_media_links_signed
 
-    rewritten = rewrite_media_links_signed(text)
+    rewritten = rewrite_media_links_signed(text, allowed_roots=channel_attachment_roots())
     return rewritten if isinstance(rewritten, str) else text
 
 
@@ -180,9 +180,14 @@ def _extract_media_attachments(text: str) -> tuple[str, list[dict[str, Any]]]:
     (bridges send them as real file messages); leftovers keep going through
     the signed-URL rewrite as clickable fallback links.
     """
-    from g3ku.runtime.api.ceo_media import extract_local_media_attachments
+    from g3ku.runtime.api.ceo_media import (
+        channel_attachment_roots,
+        extract_local_media_attachments,
+    )
 
-    cleaned, attachments = extract_local_media_attachments(text)
+    cleaned, attachments = extract_local_media_attachments(
+        text, allowed_roots=channel_attachment_roots()
+    )
     return (cleaned if isinstance(cleaned, str) else text), list(attachments or [])
 
 

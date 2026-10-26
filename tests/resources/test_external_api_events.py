@@ -160,9 +160,15 @@ def test_relay_skips_internal_ack_message_end():
     assert get_session_event_hub(session_key).replay(0) == []
 
 
-def test_relay_message_end_extracts_local_file_attachments(tmp_path):
+def test_relay_message_end_extracts_local_file_attachments(tmp_path, monkeypatch):
     """回复正文里的 markdown 本地文件链接被提取为结构化附件：正文留下标签，
-    事件携带签名 URL，桥据此发真实文件消息。"""
+    事件携带签名 URL，桥据此发真实文件消息。
+
+    渠道白名单只放行 workspace，所以这里把 workspace 一并指到 tmp_path。
+    """
+    monkeypatch.setattr(
+        "g3ku.runtime.api.ceo_media.workspace_path", lambda: tmp_path
+    )
     session_key = "ext:test-bridge:files"
     relay = make_session_event_relay(session_key, turn_id="t2")
     doc = tmp_path / "日报.docx"
