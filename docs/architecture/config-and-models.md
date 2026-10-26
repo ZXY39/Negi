@@ -91,6 +91,10 @@
 
 `stt` 的写侧两个判断（在豁免前缀里、且每个字段都必须进白名单，否则 `negi stt prepare --enable` 落不了盘）见「写侧：`save_config` 整写与字段白名单」。引擎形态、就绪判定与默认值的实测依据详见 `speech-to-text.md`。
 
+### `stickers`
+
+表情包发送预算：`maxPerReply`（默认 1；0 = 关闭发送但标记仍会被剥掉、不会漏进正文；上限 4，与单条渠道消息的附件预算 `MAX_CHANNEL_ATTACHMENTS` 对齐）。属于「调过才落盘」的可选旋钮，同时在豁免前缀里——存量 `config.json` 没有这一节必须还能加载。清单本身不在这里配置：它由 `<workspace>/stickers/` 目录扫描得到。
+
 ## 3. 配置加载时做了什么
 
 `load_config()` 不是简单读 JSON，它会做很多迁移和约束检查：
@@ -115,7 +119,7 @@
 
 `agents.nodeParallelism` 里的机器压力读数分档是 `safe < warn < critical`，三条轴（cpu、memory、disk busy）同形，`tool_pressure_monitor` 按这个顺序把样本分成 `normal / warn / critical`，并要求连续 `safe` 采样才算机器侧恢复。写反的档位不会报错，只会静默失效：`machine_safe` 判的是 `读数 <= safe`，一旦 `safe` 高于 `warn`/`critical`，warn 与 critical 区间照样读成"已恢复"，机器侧那半条降档闸门就永远不落地。默认值由 `tests/resources/test_task_web_worker_runtime.py` 的分档用例钉住，改这三组数字要一起过它。
 
-「运行时字段显式性校验」要求白名单里每个叶子都在 `config.json` 出现，缺一个就拒绝加载。豁免前缀（`providers`、`mainRuntime`、`externalApi`、`qqBot`、`cron`、`stt`、`agents.nodeParallelism`、`agents.toolDefaultTimeoutSeconds`、`updateCheck`、`models.loadBalanceGroups`）承担两类情况：存量文件本来没有这些节，以及取值可能来自 `G3KU_*` 环境变量而不是配置文件——被豁免的节没写就是不用，回落到 schema 默认。新增字段时两个判断都要重做：进不进白名单（决定它会不会被保存抹掉），要不要进豁免前缀（决定老文件还能不能加载）。摘掉一个配置段时同样有两步：从 schema 与白名单里删掉它，并在 `_migrate_config()` 里 pop 掉它的磁盘拼写——根配置是 `extra="forbid"`，存量 config.json 里残留的那一节会让 `load_config()` 当场拒绝加载。
+「运行时字段显式性校验」要求白名单里每个叶子都在 `config.json` 出现，缺一个就拒绝加载。豁免前缀（`providers`、`mainRuntime`、`externalApi`、`qqBot`、`cron`、`stt`、`stickers`、`agents.nodeParallelism`、`agents.toolDefaultTimeoutSeconds`、`updateCheck`、`models.loadBalanceGroups`）承担两类情况：存量文件本来没有这些节，以及取值可能来自 `G3KU_*` 环境变量而不是配置文件——被豁免的节没写就是不用，回落到 schema 默认。新增字段时两个判断都要重做：进不进白名单（决定它会不会被保存抹掉），要不要进豁免前缀（决定老文件还能不能加载）。摘掉一个配置段时同样有两步：从 schema 与白名单里删掉它，并在 `_migrate_config()` 里 pop 掉它的磁盘拼写——根配置是 `extra="forbid"`，存量 config.json 里残留的那一节会让 `load_config()` 当场拒绝加载。
 
 ## 4. 配置热刷新
 

@@ -96,13 +96,13 @@ def resolve_markers(
     text: str,
     *,
     root: Path | None = None,
-    max_per_reply: int = MAX_STICKERS_PER_REPLY,
+    max_per_reply: int | None = None,
     rng: random.Random | None = None,
 ) -> tuple[str, tuple[Path, ...]]:
     """Drop every sticker marker line and return the images they asked for.
 
-    ``max_per_reply <= 0`` is a kill switch: markers are still removed, but no
-    image is produced.
+    ``max_per_reply`` defaults to the configured ``stickers.max_per_reply``
+    (0 is a kill switch: markers are still removed, but no image is produced).
 
     The pick is deterministic in the reply text unless ``rng`` is given: the
     persisted transcript and the live frame resolve the same reply separately,
@@ -110,9 +110,11 @@ def resolve_markers(
     """
     if not isinstance(text, str) or _MARKER_PREFIX not in text:
         return text, ()
+    from g3ku.stickers import config as sticker_config
+
     packs = scan_packs(root)
     picker = rng if rng is not None else random.Random(hashlib.sha256(text.encode("utf-8")).hexdigest())
-    limit = max(0, int(max_per_reply))
+    limit = max(0, int(max_per_reply if max_per_reply is not None else sticker_config.max_per_reply()))
     kept: list[str] = []
     chosen: list[Path] = []
     dropped = False

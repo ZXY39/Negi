@@ -682,6 +682,10 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
     update_check = _tuned_block(cfg.update_check)
     if update_check:
         payload["updateCheck"] = update_check
+    # 表情包发送预算是可选旋钮：默认 1 时不落盘，调过才写。
+    stickers = _tuned_block(cfg.stickers)
+    if stickers:
+        payload["stickers"] = stickers
     return payload
 
 
@@ -702,6 +706,8 @@ def _ensure_runtime_fields_explicit(raw_data: dict[str, Any], cfg: Config) -> No
         ("cron",),
         # 可选能力段：没配就是不用，取值回落到 schema 默认。
         ("stt",),
+        # 表情包预算是可选旋钮：存量 config.json 没有该节也必须能加载。
+        ("stickers",),
         # 调过才落盘的可选旋钮：来源可能是 G3KU_* 环境变量而非配置文件，
         # 因此不能反过来要求 config.json 显式带这些键。
         ("agents", "nodeParallelism"),

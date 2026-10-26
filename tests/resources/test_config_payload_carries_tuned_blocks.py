@@ -29,6 +29,7 @@ def _tuned_config() -> Config:
     cfg.agents.node_parallelism.max_parallel_tool_calls_per_node = 4
     cfg.update_check.enabled = False
     cfg.update_check.interval_hours = 9.0
+    cfg.stickers.max_per_reply = 3
     return cfg
 
 
@@ -43,6 +44,7 @@ def test_tuned_optional_knobs_are_written_by_the_payload() -> None:
     assert main_runtime["duplicatePrecheck"] == {"llmReviewEnabled": False}
     assert main_runtime["eventHistory"] == {"archiveEncoding": "plain"}
     assert payload["updateCheck"] == {"enabled": False, "intervalHours": 9.0}
+    assert payload["stickers"] == {"maxPerReply": 3}
     assert payload["agents"]["toolDefaultTimeoutSeconds"] == 60.0
     assert payload["agents"]["nodeParallelism"] == {"enabled": False, "maxParallelToolCallsPerNode": 4}
 
@@ -51,6 +53,7 @@ def test_untuned_optional_knobs_stay_out_of_the_file() -> None:
     payload = _runtime_config_payload(Config())
 
     assert "updateCheck" not in payload
+    assert "stickers" not in payload
     assert "nodeParallelism" not in payload["agents"]
     assert "toolDefaultTimeoutSeconds" not in payload["agents"]
     for block in ("diskGuard", "duplicatePrecheck", "eventHistory"):
@@ -74,3 +77,4 @@ def test_tuned_knobs_survive_a_saved_config_round_trip(tmp_path: Path, monkeypat
     assert reloaded.agents.node_parallelism.max_parallel_tool_calls_per_node == 4
     assert reloaded.update_check.enabled is False
     assert reloaded.update_check.interval_hours == 9.0
+    assert reloaded.stickers.max_per_reply == 3

@@ -245,6 +245,27 @@ def test_render_marker_images_rewrites_for_the_transcript(tmp_path):
     assert f"![]({paths[0]})" in rendered
 
 
+def test_max_per_reply_comes_from_config_when_not_passed(tmp_path, monkeypatch):
+    """两条出站车道不传预算，统一读 stickers.max_per_reply。"""
+    _write_pack(tmp_path, "atri", {"happy": 1}, theme="t")
+    invalidate_scan_cache()
+    monkeypatch.setattr("g3ku.stickers.config.max_per_reply", lambda: 0)
+
+    text, images = resolve_markers("x\n[[sticker:atri/happy]]\n", root=tmp_path)
+
+    assert text == "x"
+    assert images == ()
+
+
+def test_stickers_config_clamps_max_per_reply():
+    from g3ku.config.schema import StickersConfig
+
+    assert StickersConfig().max_per_reply == 1
+    assert StickersConfig(max_per_reply=9).max_per_reply == 4
+    assert StickersConfig(max_per_reply=-3).max_per_reply == 0
+    assert StickersConfig(max_per_reply="junk").max_per_reply == 1
+
+
 def test_strip_markers_for_stream_removes_complete_and_holds_partial():
     assert (
         strip_markers_for_stream("说完了\n[[sticker:atri/happy]]\n")

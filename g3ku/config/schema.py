@@ -668,9 +668,27 @@ class AgentsConfig(Base):
         return max(0.05, float(value or 600.0))
 
 
+class StickersConfig(Base):
+    """表情包发送策略。
+
+    `max_per_reply` 是每轮最多发几张：0 = 关掉发送（标记仍会被剥掉，不会漏到正文）；
+    上限 4 与渠道单条消息的附件预算（`MAX_CHANNEL_ATTACHMENTS`）对齐。
+    """
+
+    max_per_reply: int = 1
+
+    @field_validator("max_per_reply", mode="before")
+    @classmethod
+    def _clamp_max_per_reply(cls, value: Any) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return 1
+        return max(0, min(4, parsed))
+
+
 class ProviderConfig(Base):
     """LLM provider configuration."""
-
     api_key: str = ""
     api_base: str | None = None
     extra_headers: dict[str, str] | None = None  # Custom headers (e.g. APP-Code for AiHubMix)
@@ -1206,6 +1224,7 @@ class Config(BaseSettings):
     cron: CronConfig = Field(default_factory=CronConfig)
     stt: SttConfig = Field(default_factory=SttConfig)
     update_check: UpdateCheckConfig = Field(default_factory=UpdateCheckConfig)
+    stickers: StickersConfig = Field(default_factory=StickersConfig)
 
     @model_validator(mode="after")
     def _validate_model_runtime_contract(self) -> "Config":
