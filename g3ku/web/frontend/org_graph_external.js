@@ -263,11 +263,12 @@ async function deleteExternalToken(bridgeId) {
 
 async function toggleExternalApiEnabled(enabled) {
     _externalBusy(true);
+    _setExternalApiSwitchBusy(true);
     try {
         const payload = await ApiClient.updateExternalApiSettings({ enabled });
         _applyExternalPayload(payload);
         _setExternalSwitch(_externalMasterSwitch(), EXTERNAL_API_VIEW_STATE.enabled, EXTERNAL_API_VIEW_STATE.enabled ? "已启用" : "已禁用");
-        _renderExternalScopeSwitch();
+        // 会话范围下拉由 token 列表一起重绘，这里不再单独调（旧调用指向的函数已不存在）。
         renderExternalTokenList();
         showToast({
             title: enabled ? "External Agent API 已启用" : "External Agent API 已禁用",
@@ -278,8 +279,17 @@ async function toggleExternalApiEnabled(enabled) {
         showToast({ title: "更新失败", text: ApiClient.friendlyErrorMessage(error), kind: "error" });
         await loadExternalApiView({ quiet: true });
     } finally {
+        _setExternalApiSwitchBusy(false);
         _externalBusy(false);
     }
+}
+
+/** 请求期间把状态点换成加载环：这个开关一次往返几十毫秒，没有反馈就像没点上。 */
+function _setExternalApiSwitchBusy(busy) {
+    const button = _externalMasterSwitch();
+    if (!button) return;
+    button.classList.toggle("is-busy", !!busy);
+    button.setAttribute("aria-busy", busy ? "true" : "false");
 }
 
 async function updateExternalTokenScope(bridgeId, choice) {

@@ -14068,6 +14068,21 @@ textarea {
     50% { opacity: 1; transform: scale(1.1); }
 }
 
+/* 切换在飞时状态点变加载环：这一下要等一次往返，没有反馈就像没点上。
+   放在 aria-pressed 规则之后同优先级覆盖，所以顺序别挪。 */
+.external-api-state-btn.is-busy .external-api-state-dot {
+    width: 12px;
+    height: 12px;
+    background: transparent;
+    border: 2px solid color-mix(in srgb, var(--ui-border-strong) 70%, transparent);
+    border-top-color: var(--ui-text-secondary);
+    animation: external-api-spin 0.7s linear infinite;
+}
+
+@keyframes external-api-spin {
+    to { transform: rotate(360deg); }
+}
+
 @media (prefers-reduced-motion: reduce) {
     .external-api-state-btn[aria-pressed="true"] .external-api-state-dot {
         animation: none;
