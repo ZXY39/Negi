@@ -59,10 +59,12 @@ function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = 
         const label = String(statusLabel || "").trim() || traceStatusLabel(status);
         sideParts.push(`<span class="interaction-step-status">${esc(label)}</span>`);
     }
-    // 中途正文行最左侧的展开钮：折叠时朝右，展开后转 90° 朝下。箭头用 CSS 画，
-    // 不用「>」字形——字形的墨迹比盒子低，视觉上会贴着下一行。
+    // 中途正文行最左侧的展开钮：折叠时朝右，展开后转 90° 朝下。箭头用对称的 SVG 折线，
+    // 墨迹中心与盒子中心重合——展开旋转绕的是圆心，不会像「>」或 CSS 折角那样转出偏心。
     const turnToggle = assistantText
-        ? '<span class="task-trace-turn-toggle" aria-hidden="true"></span>'
+        ? `<span class="task-trace-turn-toggle" aria-hidden="true">
+                <svg viewBox="0 0 16 16" width="16" height="16" focusable="false"><path d="M6 4 L10 8 L6 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </span>`
         : "";
     return `
         <details class="${classes.join(" ")}" data-trace-key="${esc(traceKey)}" data-default-open="${open ? "true" : "false"}"${open ? " open" : ""}>
@@ -450,7 +452,10 @@ function setTraceRoundActiveTool(roundHost, nextToolKey = "") {
         const isActive = normalizedToolKey && String(panel.dataset.toolKey || "").trim() === normalizedToolKey;
         panel.hidden = !isActive;
         panel.classList.toggle("is-active", !!isActive);
-        if (isActive) hydrateTraceOutputBlocks(panel);
+        if (isActive) {
+            hydrateTraceOutputBlocks(panel);
+            playTraceUnfoldWave(Array.from(panel.children || []));
+        }
     });
 }
 
@@ -469,6 +474,34 @@ function bindTraceRoundToolStrips(traceList) {
     });
 }
 
+// 展开时让内容从上往下逐层浮入：每个条目错开 32ms；中途正文是整块文本，
+// 用自上而下的抹开代替逐行拆分。动画类只挂到这一小段结束，流式重绘不会反复触发。
+const TRACE_UNFOLD_TIMERS = new WeakMap();
+
+function playTraceUnfoldWave(items, { textMode = false } = {}) {
+    const list = Array.from(items || []).filter((el) => el instanceof HTMLElement);
+    if (!list.length || typeof window === "undefined") return;
+    const className = textMode ? "unfold-wave-text" : "unfold-wave-row";
+    const otherClass = textMode ? "unfold-wave-row" : "unfold-wave-text";
+    list.forEach((el, index) => {
+        el.classList?.remove?.(otherClass);
+        el.style?.setProperty?.("--unfold-index", String(Math.min(index, 12)));
+        // 摘掉再加回去，同一元素连续展开两次也能重新播。
+        el.classList?.remove?.(className);
+        void el.offsetWidth;
+        el.classList?.add?.(className);
+    });
+    const timerKey = list[0];
+    window.clearTimeout(TRACE_UNFOLD_TIMERS.get(timerKey));
+    TRACE_UNFOLD_TIMERS.set(timerKey, window.setTimeout(() => {
+        list.forEach((el) => {
+            el.classList?.remove?.(className);
+            el.style?.removeProperty?.("--unfold-index");
+        });
+        TRACE_UNFOLD_TIMERS.delete(timerKey);
+    }, textMode ? 620 : 860));
+}
+
 function bindTraceOutputAutoLoad(traceList) {
     if (!(traceList instanceof HTMLElement) || traceList.dataset.traceOutputBindings === "true") return;
     traceList.dataset.traceOutputBindings = "true";
@@ -476,6 +509,14 @@ function bindTraceOutputAutoLoad(traceList) {
         const traceStep = event.target instanceof Element ? event.target.closest(".task-trace-step") : null;
         if (!(traceStep instanceof HTMLElement) || !traceList.contains(traceStep) || !traceStep.open) return;
         hydrateTraceOutputBlocks(traceStep);
+        // 中途正文：整块文本自上而下抹开；其它条目：正文里的每一层依次浮入。
+        const turnTitle = traceStep.querySelector?.(".task-trace-summary .interaction-step-title");
+        if (traceStep.classList?.contains?.("task-trace-step--turn-text") && turnTitle instanceof HTMLElement) {
+            playTraceUnfoldWave([turnTitle], { textMode: true });
+            return;
+        }
+        const body = Array.from(traceStep.children || []).find((el) => el.classList?.contains?.("task-trace-body"));
+        if (body) playTraceUnfoldWave(Array.from(body.children || []));
     }, true);
 }
 

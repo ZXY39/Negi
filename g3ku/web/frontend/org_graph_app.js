@@ -5935,9 +5935,22 @@ function createPendingCeoTurn(source = "user", { scrollMode = "preserve", reques
             event.stopPropagation();
             toggleCeoToolHistory(turn);
         });
-        // 展开/收起会换掉列表高度：线在同一帧里跟着重算，收起时交回 CSS。
+        // 展开/收起会换掉列表高度：线先在无动画的布局上量好，再让条目逐层浮入。
         // toggle 不冒泡，用捕获接住内部每条中途正文的开合。
-        turn.flowEl?.addEventListener?.("toggle", () => syncCeoFlowGuideLength(turn), true);
+        turn.flowEl?.addEventListener?.("toggle", (event) => {
+            syncCeoFlowGuideLength(turn);
+            if (event.target === turn.flowEl && turn.flowEl.open && typeof playTraceUnfoldWave === "function") {
+                // 纯工具段没有标题行：波浪铺到段里的每一轮，否则整段只会作为一个大块滑一次。
+                const rows = [];
+                Array.from(turn.listEl?.children || []).forEach((step) => {
+                    const groups = step.classList?.contains?.("task-trace-step--bare")
+                        ? Array.from(step.children || []).filter((el) => el.classList?.contains?.("task-trace-round-group"))
+                        : [];
+                    rows.push(...(groups.length ? groups : [step]));
+                });
+                playTraceUnfoldWave(rows);
+            }
+        }, true);
         // 工具卡点开后插入参数/输出面板，末条也会被顶下去。
         turn.listEl?.addEventListener?.("click", () => {
             window.requestAnimationFrame?.(() => syncCeoFlowGuideLength(turn));

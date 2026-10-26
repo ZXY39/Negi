@@ -252,7 +252,8 @@ test("live tool rows carry no rail status dot", () => {
 test("flow dot and guide line are painted from one box", () => {
     const usage = /\.interaction-flow-usage\s*\{([\s\S]*?)\n\}/.exec(CSS);
     assert.ok(usage, "usage rule not found");
-    assert.match(usage[1], /padding-left:\s*42px/);
+    // 秒数行与下方正文/工具同轴：列表 6 + 条目 4 + 正文列 22。
+    assert.match(usage[1], /padding-left:\s*32px/);
 
     const guide = /\.interaction-flow-guide\s*\{([\s\S]*?)\n\}/.exec(CSS);
     assert.ok(guide, "guide rule not found");

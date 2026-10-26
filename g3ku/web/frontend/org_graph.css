@@ -17924,8 +17924,8 @@ textarea {
    Fira Sans、默认字号给出。 */
 .interaction-flow-usage {
     flex: none;
-    /* 42px = 原 16px 点位 + 26px 间隔：秒数仍落在内部中途文本正文的竖轴上。 */
-    padding-left: 42px;
+    /* 32px = 列表 6 + 条目 4 + 正文列 22：秒数行与下方的中途正文、工具图标同一条竖轴。 */
+    padding-left: 32px;
     font-size: 0.85rem;
     font-weight: 600;
     color: var(--text-primary);
@@ -17943,7 +17943,7 @@ textarea {
 }
 
 /* 每条中途文本最左侧的展开箭头：只折叠这一条正文，展开成 16.5 行视窗。
-   箭头用两条边画成等边折角，墨迹中心就是盒子中心，不会像「>」那样压到下行。 */
+   箭头是对称的 SVG 折线，墨迹中心就是盒子中心：展开旋转绕圆心，不会转出偏心。 */
 .task-trace-turn-toggle {
     display: inline-flex;
     align-items: center;
@@ -17953,16 +17953,14 @@ textarea {
     height: 16px;
     color: var(--text-tertiary);
     line-height: 1;
+    transform-origin: 50% 50%;
     transition: transform 0.15s ease;
 }
 
-.task-trace-turn-toggle::before {
-    content: "";
-    width: 6px;
-    height: 6px;
-    border-top: 1.5px solid currentColor;
-    border-right: 1.5px solid currentColor;
-    transform: rotate(45deg);
+.task-trace-turn-toggle svg {
+    display: block;
+    width: 16px;
+    height: 16px;
 }
 
 .task-trace-step--turn-text[open] > .task-trace-summary .task-trace-turn-toggle {
@@ -18028,10 +18026,17 @@ textarea {
     transform: scaleY(1);
 }
 
-@keyframes taskFlowBodyIn {
+/* 展开动效：条目从上一行的高度往下逐层浮入，每层错开 32ms。类只在打开后的一小段
+   挂着（由 playTraceUnfoldWave 收回），流式重绘不会反复触发。 */
+.unfold-wave-row {
+    animation: traceUnfoldRowIn 0.32s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+    animation-delay: calc(var(--unfold-index, 0) * 32ms);
+}
+
+@keyframes traceUnfoldRowIn {
     from {
         opacity: 0;
-        transform: translateY(-4px);
+        transform: translateY(-6px);
     }
     to {
         opacity: 1;
@@ -18039,8 +18044,27 @@ textarea {
     }
 }
 
-.interaction-flow[open] .interaction-flow-list {
-    animation: taskFlowBodyIn 0.18s ease-out;
+/* 中途正文是整块文本：用自上而下的抹开代替逐行拆分，读起来就是一层层展开。 */
+.unfold-wave-text {
+    animation: traceUnfoldTextIn 0.44s ease both;
+}
+
+@keyframes traceUnfoldTextIn {
+    from {
+        opacity: 0.25;
+        clip-path: inset(0 0 92% 0);
+    }
+    to {
+        opacity: 1;
+        clip-path: inset(0 0 0 0);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .unfold-wave-row,
+    .unfold-wave-text {
+        animation: none;
+    }
 }
 
 /* 流程内每条的时间行与工具条统一让到正文列（16px 箭头 + 间距），
