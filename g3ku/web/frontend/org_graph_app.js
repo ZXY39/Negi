@@ -4635,8 +4635,13 @@ function ensureCeoThinkingLineEl(turn) {
     head.appendChild(tail);
     line.appendChild(head);
     line.appendChild(pane);
-    const anchor = turn.textEl?.nextElementSibling || null;
-    const host = turn.textEl?.parentElement || turn.el;
+    // 思考行排在工具条之后：这一跳是"先调工具、再读结果"的，实时行压在工具上面
+    // 会让工具看着像后发生的。收起态最终落到的每轮读数（task-trace-round-thinking）
+    // 本来也在工具条下方，两处顺序由此一致。没有工具条时退回正文之后。
+    const host = turn.flowEl?.parentElement || turn.textEl?.parentElement || turn.el;
+    const anchor = turn.flowEl
+        ? (turn.flowEl.nextElementSibling || null)
+        : (turn.textEl?.nextElementSibling || null);
     host.insertBefore(line, anchor);
     turn.thinkingLineEl = line;
     turn.thinkingHeadEl = head;

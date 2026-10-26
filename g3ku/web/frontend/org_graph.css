@@ -3195,6 +3195,9 @@ textarea {
     display: flex;
     align-items: center;
     min-height: 28px;
+    /* 加载弧要对准上方那条轨道竖线：气泡在加载态多了 12px 内边距，线在内容左缘 +8px，
+       16px 的弧自身中心再 +8——不抵消这 12px，整条弧就是右移一格。 */
+    margin-left: calc(-1 * var(--ui-space-3));
 }
 
 /* 静默回合（模型调用 silent 工具）：整条响应折成一行「静默消息 HH:MM:SS」+ 下箭头。
@@ -3481,6 +3484,16 @@ textarea {
     /* 图标按线盒居中时，墨迹底边比文字（无下伸部）低 1px，读起来就是图标往下掉。
        实测「Fork」9.25px / git-fork 10.75px、铅笔 11.75px / 「编辑」11px，抬 1px 后底边齐。 */
     transform: translateY(-1px);
+}
+
+/* Fork 药丸里那颗图标不抬：它的字没有下伸部，抬 1px 反而把图标顶到文字中线上方，
+   看起来就是「Fork」没在图标里居中。整颗按钮靠 flex 居中即可。 */
+.msg-action-fork svg {
+    transform: none;
+}
+
+.msg-action-fork {
+    line-height: 1;
 }
 
 /* 静止档没有描边，胶囊的横向内边距就成了死空格：按钮落在行首/行尾时用它抵掉，
@@ -4134,6 +4147,21 @@ textarea {
     gap: var(--space-3);
 }
 
+/* 在飞工具也画成小卡片，与轮次卡（.task-trace-round-chip）同一副壳：
+   加载图标就落在名字前面那一格，看着和「加载 tool」是同一族控件。 */
+.task-trace-live-steps .interaction-step-header {
+    margin-bottom: 0;
+    border: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
+    background: color-mix(in srgb, var(--bg-app) 72%, transparent);
+    border-radius: 18px;
+    padding: var(--space-3) calc(var(--space-3) + 2px);
+}
+
+/* 卡里不再印文字状态：状态由前置图标（转圈 / √ / ！）表达。 */
+.task-trace-live-steps .interaction-step-status {
+    display: none;
+}
+
 /* 在飞工具行不画左上角的轨道状态点：卡内正式轮次已经不画，实时行再留一颗跳动的蓝点只会多一层状态。 */
 .task-trace-live-steps .interaction-step::before {
     display: none;
@@ -4267,39 +4295,38 @@ textarea {
     color: #ef4444;
 }
 
-.task-trace-round-chip-status {
+/* 工具卡左侧的状态图标：成功 √、失败 ！、在跑转圈。占的就是「加载 tool」放类型图标的
+   那一格，所以右侧那条状态药丸撤掉了——同一件事不画两遍。 */
+.tool-status-icon {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    min-height: 22px;
-    padding: 0 10px;
-    border-radius: var(--radius-full);
-    background: var(--status-pending-bg);
-    color: var(--status-pending-text);
-    font-size: 0.72rem;
-    white-space: nowrap;
-    flex-shrink: 0;
+    flex: 0 0 auto;
+    width: 1rem;
+    height: 1rem;
+    color: var(--text-secondary);
 }
 
-.task-trace-round-chip.running .task-trace-round-chip-status {
-    background: var(--status-running-bg);
-    color: var(--status-running-text);
+.tool-status-icon svg {
+    width: 1rem;
+    height: 1rem;
 }
 
-.task-trace-round-chip.success .task-trace-round-chip-status {
-    background: var(--status-success-bg);
-    color: var(--status-success-text);
+.tool-status-icon.is-success {
+    color: var(--status-success-text, #22c55e);
 }
 
-.task-trace-round-chip.error .task-trace-round-chip-status {
-    background: var(--status-failed-bg);
-    color: var(--status-failed-text);
+.tool-status-icon.is-error {
+    color: var(--status-failed-text, #ef4444);
 }
 
-.task-trace-round-chip.warning .task-trace-round-chip-status,
-.task-trace-round-chip.interrupted .task-trace-round-chip-status {
-    background: var(--status-pending-bg);
-    color: var(--status-pending-text);
+.tool-status-icon.is-running {
+    color: var(--status-running-text, var(--brand-primary));
+    animation: tool-status-spin 0.9s linear infinite;
+}
+
+@keyframes tool-status-spin {
+    to { transform: rotate(360deg); }
 }
 
 .task-trace-round-panels {

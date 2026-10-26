@@ -317,12 +317,36 @@ function renderContextLoadBodyField(contextLoad, step) {
     );
 }
 
+// 工具卡左侧那颗图标：成功 √、失败 ！、在跑转圈。位置就是「加载 tool / 加载 skill」
+// 放类型图标的那一格，右侧那条状态药丸因此不再需要。
+function traceToolStatusIconName(status) {
+    const normalized = String(status || "").trim().toLowerCase();
+    if (normalized === "success") return "check";
+    if (normalized === "error") return "alert-circle";
+    if (normalized === "running" || normalized === "queued") return "loader";
+    return "";
+}
+
+function renderTraceToolStatusIcon(status) {
+    const name = traceToolStatusIconName(status);
+    if (!name) return "";
+    const tone = name === "check" ? "is-success" : name === "alert-circle" ? "is-error" : "is-running";
+    return `<span class="tool-status-icon ${tone}" aria-hidden="true"><i data-lucide="${name}"></i></span>`;
+}
+
 function renderExecutionRoundToolChip(round, step, toolIndex) {
     const toolKey = buildExecutionRoundToolKey(round, step, toolIndex);
     const status = String(step?.status || "info").trim() || "info";
     const contextLoad = contextLoadDisplayFor(step);
     const titleText = contextLoad ? contextLoad.title : (String(step?.tool_name || "tool").trim() || "tool");
-    const iconHtml = renderContextLoadIcon(contextLoad);
+    // 加载器卡保留类型图标（风险度配色在那颗图标上），只有跑挂了才让位给 ！；
+    // 普通工具卡没有类型图标，整格就是状态位。
+    const contextLoadIconHtml = renderContextLoadIcon(contextLoad);
+    const iconHtml = contextLoad
+        ? (String(status).trim().toLowerCase() === "success"
+            ? contextLoadIconHtml
+            : (renderTraceToolStatusIcon(status) || contextLoadIconHtml))
+        : renderTraceToolStatusIcon(status);
     const titleAttr = contextLoad?.targetId ? ` title="${esc(contextLoad.targetId)}"` : "";
     return `
         <button
@@ -335,7 +359,6 @@ function renderExecutionRoundToolChip(round, step, toolIndex) {
                 ${iconHtml}
                 <span class="task-trace-round-chip-title">${esc(titleText)}</span>
             </span>
-            <span class="task-trace-round-chip-status">${esc(traceStatusLabel(status))}</span>
         </button>
     `;
 }
