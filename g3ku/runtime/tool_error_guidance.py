@@ -49,6 +49,12 @@ _NOT_HYDRATED_NOTE = (
 )
 _NO_LOAD_NEEDED_NOTE = '「{name}」是常驻内置工具，无需加载说明即可直接调用；它没有可加载的 toolskill。'
 
+# 合成实例的常驻工具（`silent` / `time` / `schedule_wake`）：没有 resource.yaml，所以既不在
+# registry 也不在两份 `*_FIXED_BUILTIN_TOOL_NAMES` 里。名字正本在
+# `main/runtime/tool_names.SYNTHETIC_RESIDENT_TOOL_NAMES`；本模块是两条车道共用的叶子，不
+# import 它，等价性由 tests 钉住。
+_SYNTHETIC_RESIDENT_TOOL_NAMES = ("silent", "time", "schedule_wake")
+
 
 def tool_supports_context_load(tool: Any) -> bool:
     """工具是否具备 load_tool_context 可加载的资源契约。
@@ -143,6 +149,13 @@ def no_load_needed_hint(*, requested: str, actor_role: str = "") -> str:
         builtin_names = fixed_builtin_tool_name_set_for_actor_role(str(actor_role or "").strip())
     except Exception:
         return ""
+    # 合成实例的常驻工具（时钟、自设唤醒）既不在 registry 也不在两份 fixed builtin 名单里，
+    # 照名字取实例永远取不到，所以"不用加载"这句必须也覆盖它们——否则模型收到的是
+    # "运行时未暴露该工具"，只能换个名字再撞一次。名字正本在
+    # `main/runtime/tool_names.SYNTHETIC_RESIDENT_TOOL_NAMES`；这里不 import（本模块是两条
+    # 车道共用的叶子），等价性由 `tests/resources/test_reuse_args_surface.py` 钉住。
+    if name in _SYNTHETIC_RESIDENT_TOOL_NAMES:
+        builtin_names = set(builtin_names) | set(_SYNTHETIC_RESIDENT_TOOL_NAMES)
     return _NO_LOAD_NEEDED_NOTE.format(name=name) if name in builtin_names else ""
 
 

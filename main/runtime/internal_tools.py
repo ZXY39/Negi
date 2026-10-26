@@ -5,6 +5,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from g3ku.agent.tools.base import Tool
+from g3ku.runtime.wake_clock import clock_payload, resolve_wake_moment
 from main.models import (
     NodeEvidenceItem,
     SpawnChildResult,
@@ -14,8 +15,10 @@ from main.models import (
 from main.runtime.tool_names import (
     ENTER_WAIT_TOOL_NAME,
     FINAL_RESULT_TOOL_NAME,
+    SCHEDULE_WAKE_TOOL_NAME,
     SEND_MESSAGE_TOOL_NAME,
     SILENT_TOOL_NAME,
+    TIME_TOOL_NAME,
     VIEW_MESSAGE_HISTORY_TOOL_NAME,
 )
 
@@ -179,6 +182,148 @@ class EnterWaitTool(Tool):
         _ = kwargs
         result = await self._park(note=str(note or '').strip())
         return json.dumps(result, ensure_ascii=False, sort_keys=True)
+
+
+class TimeTool(Tool):
+    """当前时刻的权威读数。
+
+    两条车道共用同一个实例，无任何依赖注入：节点与前门都只是"问一次表"。它存在的理由是
+    上下文里没有时钟——消息不带时刻时，模型只能按消息顺序和记忆里的工作流猜"现在几点"，
+    实盘就出现过角色把场景时间写成真实时刻、以及心算 epoch 毫秒算错归属日期。
+    """
+
+    hide_universal_timeout_parameter = True
+    # 纯读，重放不产生任何副作用。
+    rerun_safe = True
+
+    @property
+    def name(self) -> str:
+        return TIME_TOOL_NAME
+
+    @property
+    def description(self) -> str:
+        return (
+            'Read the wall clock. Returns `now` (local time with its UTC offset), `utc`, `epoch_ms`, '
+            'and `weekday`. Nothing in your context tells you what time it is: message order is not a '
+            'clock, and converting an epoch value in your head is unreliable. Ask before you reason '
+            'about real time — judging a deadline, stamping a record, or setting a wake-up. One read '
+            'per decision is enough; the clock does not move inside a turn.'
+        )
+
+    @property
+    def model_description(self) -> str:
+        return (
+            'Read the wall clock: `now` (local time with UTC offset), `utc`, `epoch_ms`, `weekday`. '
+            'Your context carries no clock — ask it instead of converting timestamps by hand.'
+        )
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {'type': 'object', 'properties': {}, 'required': []}
+
+    async def execute(self, **kwargs: Any) -> str:
+        _ = kwargs
+        return json.dumps(clock_payload(), ensure_ascii=False, sort_keys=True)
+
+
+class ScheduleWakeTool(Tool):
+    """给自己设一次唤醒：到点后收到一条带着 `note` 的消息。
+
+    它存在的理由是 `enter_wait` 只能被消息叫醒，而场上唯一"按真实时钟推进"的角色（报时节点
+    那一类）此前只能用 `exec Start-Sleep` 当时钟：那既占一个执行槽，又会被任何重启打断，而
+    恢复后模型重新发一次**完整时长**的睡眠，下一次到点就被一路往后推。唤醒时刻必须落在耐久
+    载体上（节点落 timer 表、会话落一次性任务），而不是活在某个协程里。
+
+    `rerun_safe`：两条车道的写点都是"每个调用方至多一份待触发唤醒"的 upsert/replace，重放
+    只会换掉同一份，不会排进第二次。
+    """
+
+    hide_universal_timeout_parameter = True
+    rerun_safe = True
+    NOTE_LIMIT = 500
+
+    def __init__(self, arm: Callable[..., Awaitable[dict[str, Any]]]) -> None:
+        self._arm = arm
+
+    @property
+    def name(self) -> str:
+        return SCHEDULE_WAKE_TOOL_NAME
+
+    @property
+    def description(self) -> str:
+        return (
+            'Arm one wake-up for yourself: `note` (what to do when it fires) plus exactly one of '
+            '`after_seconds` or `at`. Take `at` from the time tool instead of computing it, and it '
+            'must still be in the future. You keep at most one pending wake-up — arming again '
+            'replaces it, and nothing repeats unless you arm it again. Arming does not end this turn '
+            'and does not make you wait: stop working when you have nothing left to do until it '
+            'fires. The deadline is durable, so it still fires when this process restarts first — '
+            'that is what it replaces sleeping inside a long-running command, whose deadline is lost.'
+        )
+
+    @property
+    def model_description(self) -> str:
+        return (
+            'Arm one wake-up for yourself: `note` plus exactly one of `after_seconds` or a future `at` '
+            '(copy it from the time tool). Arming replaces your previous pending wake-up and does not '
+            'end this turn; when it fires you get a message carrying your note and the current time. '
+            'Use it instead of sleeping inside a long-running command — this deadline survives a '
+            'restart, that one does not.'
+        )
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            'type': 'object',
+            'properties': {
+                'note': {
+                    'type': 'string',
+                    'minLength': 1,
+                    'maxLength': self.NOTE_LIMIT,
+                    'description': 'What to do when it fires. Delivered to you verbatim.',
+                },
+                'after_seconds': {
+                    'type': 'integer',
+                    'minimum': 1,
+                    'description': 'Delay from now, in seconds.',
+                },
+                'at': {
+                    'type': 'string',
+                    'description': 'Absolute future time, written the way the time tool prints it.',
+                },
+            },
+            'required': ['note'],
+        }
+
+    async def execute(
+        self,
+        note: str = '',
+        at: Any = None,
+        after_seconds: Any = None,
+        **kwargs: Any,
+    ) -> str:
+        _ = kwargs
+        body = str(note or '').strip()
+        truncated = len(body) > self.NOTE_LIMIT
+        if truncated:
+            body = body[: self.NOTE_LIMIT].rstrip()
+        if not body:
+            return json.dumps(
+                {
+                    'armed': False,
+                    'error': 'note is required — it is the only thing you will have when the wake-up fires.',
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        wake_at_ms, refusal = resolve_wake_moment(at=at, after_seconds=after_seconds)
+        if refusal:
+            return json.dumps({'armed': False, 'error': refusal}, ensure_ascii=False, sort_keys=True)
+        payload = dict(await self._arm(wake_at_ms=int(wake_at_ms), note=body) or {})
+        payload.setdefault('armed', str(payload.get('error') or '').strip() == '')
+        if truncated:
+            payload['note_truncated'] = True
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
 class SendMessageTool(Tool):

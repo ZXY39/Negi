@@ -30,6 +30,9 @@ KIND_CHILD_FINAL: Final = 'child_final'
 KIND_CHILD_ABNORMAL_PAUSE: Final = 'child_abnormal_pause'
 KIND_ACCEPTANCE_VERDICT: Final = 'acceptance_verdict'
 KIND_PEER_NOTICE: Final = 'peer_notice'
+# `schedule_wake` 到点时由运行时投给自己的唤醒。它只能是运行时报的：模型若能用
+# `send_message` 造出这一档，就等于能给自己发一条"看起来是定时器响了"的假消息。
+KIND_WAKE_TIMER: Final = 'wake_timer'
 
 ORIGIN_USER: Final = 'user'
 ORIGIN_FRONTDOOR: Final = 'frontdoor'
@@ -48,9 +51,9 @@ VERDICT_REJECT: Final = 'reject'
 VERDICT_REJECT_NO_PROGRESS: Final = 'reject_no_progress'
 VERDICTS: Final = frozenset({VERDICT_PASS, VERDICT_REJECT, VERDICT_REJECT_NO_PROGRESS})
 
-# 只能由运行时产出、模型无法通过 send_message 伪造的三类。
+# 只能由运行时产出、模型无法通过 send_message 伪造的四类。
 SYSTEM_KINDS: Final = frozenset(
-    {KIND_CHILD_FINAL, KIND_CHILD_ABNORMAL_PAUSE, KIND_ACCEPTANCE_VERDICT}
+    {KIND_CHILD_FINAL, KIND_CHILD_ABNORMAL_PAUSE, KIND_ACCEPTANCE_VERDICT, KIND_WAKE_TIMER}
 )
 
 # 无条件唤醒的 kind：收件人必须动作，否则系统或发送方无法推进（P6）。

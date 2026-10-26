@@ -23,6 +23,7 @@ from main.runtime.node_message_kind import (
     KIND_PARENT_NOTICE,
     KIND_PEER_NOTICE,
     KIND_USER_DIRECT,
+    KIND_WAKE_TIMER,
 )
 
 _LABEL_BY_KIND = {
@@ -34,6 +35,11 @@ _LABEL_BY_KIND = {
     KIND_ACCEPTANCE_VERDICT: '来自验收节点',
     KIND_FRONTDOOR_NOTICE: '来自会话',
     KIND_USER_DIRECT: '来自用户',
+    # 唤醒通知走「来自系统」这一档，不是漏填：`_PREFIX_RE` 只认这个家族里的标签，
+    # 而 notice tail 的去重与被验节点的正文比对都靠 `strip_node_message_prefix` 剥这一行。
+    # 给新 kind 起一个新前缀（例如「来自定时器」）会让剥前缀那条路认不出这行，
+    # 于是同一份唤醒在尾块里既算"原文"又算"未消费通知"。
+    KIND_WAKE_TIMER: '来自系统',
 }
 
 _PREFIX_RE = re.compile(

@@ -20,9 +20,11 @@ import pytest
 
 from g3ku.json_schema_utils import normalize_openai_tool_definition
 from main.runtime.internal_tools import (
+    ScheduleWakeTool,
     SilentTool,
     SpawnChildNodesTool,
     SubmitFinalResultTool,
+    TimeTool,
 )
 
 
@@ -68,6 +70,8 @@ def _description_keys(node: Any, path: str = '') -> list[str]:
 
 CONTROL_TOOLS: list[tuple[str, Callable[[], Any]]] = [
     ('silent', lambda: SilentTool()),
+    ('time', lambda: TimeTool()),
+    ('schedule_wake', lambda: ScheduleWakeTool(_callback)),
     ('spawn_child_nodes', lambda: SpawnChildNodesTool(_callback)),
     ('submit_final_result(execution)', lambda: SubmitFinalResultTool(_callback, node_kind='execution')),
     ('submit_final_result(acceptance)', lambda: SubmitFinalResultTool(_callback, node_kind='acceptance')),

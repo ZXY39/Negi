@@ -22,6 +22,7 @@ from loguru import logger
 from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
 from g3ku.utils.helpers import tools_bundle_single_source_enabled
 from main.runtime import react_loop as rl
+from main.runtime.tool_names import SYNTHETIC_RESIDENT_TOOL_NAMES
 
 
 def _schema(name: str, description: str) -> dict:
@@ -165,17 +166,21 @@ def test_frontdoor_renderer_counts_schema_sources_with_denominator() -> None:
         state=state, runtime=SimpleNamespace(context=SimpleNamespace(session=session))
     )
 
-    # 名单 4 名 + 渲染器尾部追加的合成控制工具；控制工具本例既不在 declared 也不在注册表，
-    # 因此落占位档——这正是 N5 说的"前门集合口径与节点不同"。
+    # 名单 4 名 + 渲染器尾部追加的整族合成控制工具；这些控制工具本例既不在 declared 也不在
+    # 注册表，因此全部落占位档——这正是 N5 说的"前门集合口径与节点不同"。
+    # 占位 = vanished_tool + silent + time + schedule_wake。
     assert state["frontdoor_tool_schema_hits"] == {
         "declared": 1,
         "registry": 1,
         "retired": 0,
         "bundle": 1,
-        "placeholder": 2,
+        "placeholder": 4,
     }
-    assert state["frontdoor_tool_schema_fallback_opportunities"] == 3
-    assert [(item.get("function") or {}).get("name") for item in rendered][-1:] == ["silent"]
+    # 回退机会 = 走整表的那 1 名 + 落占位的 4 名。
+    assert state["frontdoor_tool_schema_fallback_opportunities"] == 5
+    assert [(item.get("function") or {}).get("name") for item in rendered][-1:] == [
+        SYNTHETIC_RESIDENT_TOOL_NAMES[-1]
+    ]
 
 
 def test_node_readings_land_in_trace_and_warn_on_byte_drift_without_membership_change() -> None:

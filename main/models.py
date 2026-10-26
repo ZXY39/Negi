@@ -300,6 +300,25 @@ class TaskNodePauseRecord(Model):
     error_text: str = ''
 
 
+class TaskNodeTimerRecord(Model):
+    """节点自己设的一次性唤醒（`schedule_wake`）。
+
+    每个节点至多一份待触发唤醒：`(task_id, node_id)` 是主键，重新设就是覆盖。唤醒时刻存
+    epoch 毫秒而不是 ISO 串——它只用来和时钟比大小，而 `time` 工具把同一个数以两种写法还给
+    模型。`claimed_by` / `claimed_at_ms` 是多 worker 下的一次性领取凭证：领取后投递成功即删行；
+    进程在中间死掉时，过期（`_WAKE_CLAIM_STALE_MS`）的领取被下一个扫描重新领走——这张表存在
+    的意义就是"重启也认"，所以丢掉一条领了一半的凭证等于回到 `exec Start-Sleep` 的老故障。
+    """
+
+    task_id: str
+    node_id: str
+    wake_at_ms: int = 0
+    note: str = ''
+    armed_at: str = ''
+    claimed_by: str = ''
+    claimed_at_ms: int = 0
+
+
 class TaskErrorLogRecord(Model):
     seq: int = 0
     task_id: str

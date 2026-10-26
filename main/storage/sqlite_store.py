@@ -26,6 +26,7 @@ from main.models import (
     TaskMessageDistributionEpoch,
     TaskNodeNotification,
     TaskNodePauseRecord,
+    TaskNodeTimerRecord,
     TaskRecord,
 )
 from main.monitoring.models import (
@@ -219,6 +220,18 @@ class SQLiteTaskStore:
                 delivered INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
+            )
+            ''',
+            '''
+            CREATE TABLE IF NOT EXISTS task_node_timers (
+                task_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                wake_at_ms INTEGER NOT NULL,
+                note TEXT NOT NULL DEFAULT '',
+                armed_at TEXT NOT NULL,
+                claimed_by TEXT NOT NULL DEFAULT '',
+                claimed_at_ms INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (task_id, node_id)
             )
             ''',
             '''
@@ -520,6 +533,7 @@ class SQLiteTaskStore:
             'CREATE INDEX IF NOT EXISTS idx_nodes_parent_node_id ON nodes(parent_node_id)',
             'CREATE INDEX IF NOT EXISTS idx_task_node_pauses_task_id ON task_node_pauses(task_id)',
             'CREATE INDEX IF NOT EXISTS idx_task_node_pauses_error_pending ON task_node_pauses(pause_reason, delivered)',
+            'CREATE INDEX IF NOT EXISTS idx_task_node_timers_wake_at ON task_node_timers(wake_at_ms)',
             'CREATE INDEX IF NOT EXISTS idx_task_error_logs_task_id_seq ON task_error_logs(task_id, seq)',
             'CREATE INDEX IF NOT EXISTS idx_artifacts_task_id ON artifacts(task_id)',
             'CREATE INDEX IF NOT EXISTS idx_artifacts_node_id ON artifacts(node_id)',
@@ -1648,6 +1662,7 @@ class SQLiteTaskStore:
             conn.execute('DELETE FROM task_model_calls WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM task_runtime_meta WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM task_node_pauses WHERE task_id = ?', (task_id,))
+            conn.execute('DELETE FROM task_node_timers WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM task_error_logs WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM task_commands WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM task_terminal_outbox WHERE task_id = ?', (task_id,))
@@ -1728,6 +1743,121 @@ class SQLiteTaskStore:
 
     def mark_pause_delivered(self, pause_id: int) -> None:
         self.mark_task_node_pause_delivered(pause_id)
+
+    # --- 节点自设的一次性唤醒（`schedule_wake`）-------------------------------------
+    # 领取凭证的有效期：投递一条唤醒要读节点行、写通知行、可能再拉一次 task actor，正常都在
+    # 秒级完成。留 2 分钟是因为真正的窗口是"领了之后进程死了"——那时这条唤醒必须还能被下一个
+    # 扫描领走，否则重启就把它吞了，而"重启也认"正是这张表存在的理由。
+    _WAKE_CLAIM_STALE_MS = 120_000
+
+    def upsert_task_node_timer(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        wake_at_ms: int,
+        note: str,
+        armed_at: str,
+    ) -> TaskNodeTimerRecord:
+        """设一次唤醒：每个节点只留最新一份，重新设连领取凭证一起清掉。"""
+        def operation(conn: sqlite3.Connection) -> TaskNodeTimerRecord:
+            conn.execute(
+                'INSERT INTO task_node_timers (task_id, node_id, wake_at_ms, note, armed_at, claimed_by, claimed_at_ms) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?) '
+                'ON CONFLICT(task_id, node_id) DO UPDATE SET wake_at_ms=excluded.wake_at_ms, '
+                'note=excluded.note, armed_at=excluded.armed_at, claimed_by=excluded.claimed_by, '
+                'claimed_at_ms=excluded.claimed_at_ms',
+                (
+                    str(task_id or '').strip(),
+                    str(node_id or '').strip(),
+                    int(wake_at_ms or 0),
+                    str(note or ''),
+                    str(armed_at or ''),
+                    '',
+                    0,
+                ),
+            )
+            row = conn.execute(
+                'SELECT task_id, node_id, wake_at_ms, note, armed_at, claimed_by, claimed_at_ms '
+                'FROM task_node_timers WHERE task_id = ? AND node_id = ?',
+                (str(task_id or '').strip(), str(node_id or '').strip()),
+            ).fetchone()
+            return self._parse_task_node_timer(row)
+        return self._run_write(operation)
+
+    def get_task_node_timer(self, task_id: str, node_id: str) -> TaskNodeTimerRecord | None:
+        row = self._fetchone(
+            'SELECT task_id, node_id, wake_at_ms, note, armed_at, claimed_by, claimed_at_ms '
+            'FROM task_node_timers WHERE task_id = ? AND node_id = ?',
+            (str(task_id or '').strip(), str(node_id or '').strip()),
+        )
+        return self._parse_task_node_timer(row) if row is not None else None
+
+    def list_task_node_timers(self, task_id: str) -> list[TaskNodeTimerRecord]:
+        rows = self._fetchall(
+            'SELECT task_id, node_id, wake_at_ms, note, armed_at, claimed_by, claimed_at_ms '
+            'FROM task_node_timers WHERE task_id = ? ORDER BY wake_at_ms ASC',
+            (str(task_id or '').strip(),),
+        )
+        return [self._parse_task_node_timer(row) for row in rows]
+
+    def claim_due_task_node_timers(
+        self,
+        *,
+        now_ms: int,
+        claimed_by: str,
+        limit: int = 50,
+    ) -> list[TaskNodeTimerRecord]:
+        """领走到期的唤醒，只返回**这一条语句**翻成已领取的行。
+
+        用 `RETURNING` 而不是"UPDATE 之后再 SELECT 我的凭证"：后者按
+        `(claimed_by, claimed_at_ms)` 认行，同一毫秒内的两次扫描会把上一拍已经处理过的
+        行再领一次——一条唤醒被投两次比丢一条更难查。过期凭证（`claimed_at_ms <= stale`）
+        与未领取的行一起可领，覆盖"领了但进程死了"。
+        """
+        token = str(claimed_by or '').strip()
+        if not token:
+            return []
+        current = int(now_ms or 0)
+        stale_floor = current - self._WAKE_CLAIM_STALE_MS
+        bound = max(1, int(limit or 50))
+        claimable = '(claimed_by = ? OR claimed_at_ms <= ?)'
+
+        def operation(conn: sqlite3.Connection) -> list[TaskNodeTimerRecord]:
+            rows = conn.execute(
+                'UPDATE task_node_timers SET claimed_by = ?, claimed_at_ms = ? '
+                'WHERE rowid IN ('
+                '  SELECT rowid FROM task_node_timers'
+                f'   WHERE wake_at_ms <= ? AND {claimable}'
+                '   ORDER BY wake_at_ms ASC LIMIT ?'
+                f') AND {claimable} '
+                'RETURNING task_id, node_id, wake_at_ms, note, armed_at, claimed_by, claimed_at_ms',
+                (
+                    token, current,
+                    current, '', stale_floor, bound,
+                    '', stale_floor,
+                ),
+            ).fetchall()
+            return [self._parse_task_node_timer(row) for row in rows]
+        return self._run_write(operation)
+
+    def delete_task_node_timer(self, *, task_id: str, node_id: str) -> None:
+        self._execute_write(
+            'DELETE FROM task_node_timers WHERE task_id = ? AND node_id = ?',
+            (str(task_id or '').strip(), str(node_id or '').strip()),
+        )
+
+    @staticmethod
+    def _parse_task_node_timer(row: Any) -> TaskNodeTimerRecord:
+        return TaskNodeTimerRecord(
+            task_id=str(row['task_id'] or ''),
+            node_id=str(row['node_id'] or ''),
+            wake_at_ms=int(row['wake_at_ms'] or 0),
+            note=str(row['note'] or ''),
+            armed_at=str(row['armed_at'] or ''),
+            claimed_by=str(row['claimed_by'] or ''),
+            claimed_at_ms=int(row['claimed_at_ms'] or 0),
+        )
 
     def list_new_error_pauses(self) -> list[dict[str, Any]]:
         rows = self._fetchall(

@@ -6,15 +6,16 @@
 
 ## 1. 节点信箱与唤醒（现行）
 
-- **三种消息来源**：用户（`origin=user`）、前门/会话 agent（`origin=frontdoor`）、节点（`origin=node`）。节点可发给父节点、执行同级、执行后代、后代验收节点；自己的/父节点的验收节点与自身不可发。根节点还可发给 `frontdoor`，消息落入前门持久 inbox（`frontdoor_node_messages`），由心跳扫描器（`frontdoor_message_scanner.py`）唤醒会话；前门用同名 `send_message` 只回投执行节点。运行时另有三类系统消息，模型无法伪造：`child_final`、`child_abnormal_pause`、`acceptance_verdict`（`main/runtime/node_message_kind.py` 是 kind/priority 的单一作者）。
+- **三种消息来源**：用户（`origin=user`）、前门/会话 agent（`origin=frontdoor`）、节点（`origin=node`）。节点可发给父节点、执行同级、执行后代、后代验收节点；自己的/父节点的验收节点与自身不可发。根节点还可发给 `frontdoor`，消息落入前门持久 inbox（`frontdoor_node_messages`），由心跳扫描器（`frontdoor_message_scanner.py`）唤醒会话；前门用同名 `send_message` 只回投执行节点。运行时另有四类系统消息，模型无法伪造：`child_final`、`child_abnormal_pause`、`acceptance_verdict`、`wake_timer`（节点自己设的闹钟到点那一条）（`main/runtime/node_message_kind.py` 是 kind/priority 的单一作者）。
 - **投递入口**：`MainRuntimeService.deliver_node_message(...)`。它先过停靠判定矩阵（`plan_delivery`），再做指纹去重、落箱、唤醒。同一指纹只在“还没被处理”时去重；消费过的重复是一条新意图。
 - **矩阵只按目标状态放行**：终态吸收（`target_terminal`），暂停 / waiting / running 一律受理，**发送方决定不了受理与否**——`sender_origin` 在矩阵里不参与判据，机器无法靠自称绕过终态吸收。发送方唯一能分档的是**暂停目标上的唤醒后果**（`delivery_defers_wake`，两者同在 `main/runtime/node_mailbox.py`，所以矩阵与它的后果一处可读）：
   - 人类自由文本（`origin='user'`，即网页节点消息框那一条）落箱后**不叫醒**收件人，暂停位保持不变。理由是要报暂停的那只手就是操作员的这只手：唤醒路径 `wake_parked_node` 在派发前会 `clear_pause`，一条消息等于替操作员按了「恢复节点」。该行以未读留在信箱，操作员点恢复后由节点下一回合按普通待并入读取（注入判据只看 `delivered` / `consumed-未merged`，与暂停位无关）。去重臂同受这条判据约束：对暂停目标重发同一正文返回 `deduplicated` 且仍不唤醒。
-  - 机器发送方（`node` / `frontdoor` / 三类系统消息）照旧落箱并唤醒，对它来说唤醒就是处置路径——机器没有恢复按钮可按。
+  - 机器发送方（`node` / `frontdoor` / 四类系统消息）照旧落箱并唤醒，对它来说唤醒就是处置路径——机器没有恢复按钮可按。唯一的例外是自设闹钟到点：那条投递自己带 `wake=False`（见下条），因为它要送的正是"操作员按了暂停"这一位。
   判据挂在 `_delivery_wakes_target` 上，两处唤醒点（去重臂与落箱后臂）都走它，漏一处就会让「重发」变成恢复。
 - **模型寻址层**：`MainRuntimeService._deliver_node_message_from_node(...)` 把 `to` 解析成逐目标投递（`parent` / `frontdoor`（仅根）/ 节点 id / 它们的列表），投递判定本身仍走上面那条入口。越址不抛异常：回执逐目标给 `reason`，并附本轮合法目标集合 `legal_targets`——只说"不允许"要模型再猜一轮，给出"能发给谁"只要一次往返。两个**档位必须分开命名**，因为模型要改的东西不同：`target_not_in_task` 是这个令牌在本任务里对不到节点（要改地址），`target_list_unparsed` 是它想发列表、而那串文本连读侧归一都没剥开（要改形状，回执带一句形状说明，判据 `main/runtime/node_mailbox.unresolved_target_reason`）。形状归一本体见 `tool-hydration-and-callable-chain.md`「参数错误与状态分类」。运行时内部投递口（结构性消息、跨进程命令、前门回投）拿到的是自己生成的节点 id，那里的"对不到节点"仍是 `target_missing`，与模型面这两个档位互不判读。
 - **跨进程投递**：前门与操作员在 web 角色发起的节点消息走 `deliver_control_node_message(...)`，web 侧只入 `task_commands` 的 `send_node_message` 命令，由 worker 执行同一次 `deliver_node_message` 并把回执带回。worker 在线时 web 角色不启动 task actor（`run_task` 拒绝）：两个进程各自建 dispatcher 会并发驱动同一棵树，web 侧看不到 worker 在跑的子节点，孤儿收尸器会把健康子节点暂停。
 - **投递即唤醒（R2）**：收件人处于停靠（`waiting_explicit`）时，投递路径直接复活它的执行器；在跑时消息留在信箱，由下一个安全边界并入。`wake_ready(unread_count)` 是唯一的**可注入判据**：任何可注入未读都会唤醒，`priority=high` 无条件放行；它之上还有一道发送方闸门，见上条暂停档。`enter_wait` 只有 `note`。
+- **节点自设闹钟（`wake_timer`）**：`schedule_wake` 在 `task_node_timers` 里为 `(task_id, node_id)` 落**一行**待触发时刻（主键就是这一对，所以"重设"天然是替换而不是累积——一个每 40 分钟看一眼进度的节点不会攒出一串唤醒）。触发靠 worker 侧一条 5 秒拍的清扫（`MainRuntimeService.sweep_due_node_wakes`），它把到点的行**领取**下来（`claimed_by` + `claimed_at_ms`，超过 `_WAKE_CLAIM_STALE_MS`=2 分钟的领取视为陈旧）再投递，所以两个 worker 不会同投一条，进程被硬杀也不会让行永久卡在已领状态。到点之后只有三种结局，每种都改得了状态且不重投：节点或任务已终态 ⇒ **删行**（否则终态任务的表一直涨）；节点或任务被暂停 ⇒ 落箱但 `wake=False`，暂停位保持不变（叫醒会顺手 `clear_pause`，等于闹钟替操作员按了「恢复节点」；这与上条人发往暂停节点的消息同一档，只是握手机关不同——那条挂在 `delivery_defers_wake` 的发送方判据上，这条由清扫方显式传参）；投递抛异常 ⇒ **不**退回领取位，下一次重试要先过陈旧窗口，这就是失败道唯一的退避（磁盘满一类故障下 5 秒一拍会热循环）。正文由 `_node_wake_notice_text` 渲染，全英文，自带"这是你自己设的"、原定时刻与现在时刻，晚了 ≥60 秒时明写"先重新对钟再按原计划推日期"（停机/重启期间到点的那些正是这一档）。排查"闹钟没响"按这条链读：表里有没有行 → 清扫节拍有没有跑（worker 日志 `node wake timer sweep`）→ 是不是被暂停落成未读 → 领取是不是还在陈旧窗口内。前门会话的同一颗工具走的是 cron 一次性 `at` 任务，不是这张表，见 `heartbeat-system.md`「Cron Reminder Contract」。
 - **批次持有**：`spawn_child_nodes.wait_all_children=true` 时，该轮每个 `child_final` 先以 `held_at` 落箱；在批次全部创建执行子节点终局前既不注入也不唤醒，终局后统一补 `released_at` 并唤醒/注入。`child_abnormal_pause` 不受批次影响，始终 high 即时。重启由 `_reconcile_wait_all_batches` 按节点终态重算释放；历史工具对被 held 的行只给状态、不给正文。
 - **提交闸门**：执行节点有未终态执行后代，或仍有未读/未合并（含 held）的 `child_final` / `child_abnormal_pause` 时，`submit_final_result` 被打回；这是非 strike 修复，不计 `invalid_final_submission_count`。根节点排除自己的最终验收子节点。
 - **验收节点目标权限**：所有验收节点可见；自己的验收节点与父节点的验收节点不可发消息、不可 `manage_child_nodes` 操作。后代验收节点可收消息，但投递 `wake=False`，由验收节点在下一回合自行读取。被检验节点（握手 `waiting_acceptance`）只放行 `acceptance_verdict`；模型消息拒收，其他系统消息排队不唤醒。
@@ -106,7 +107,7 @@
 
 `main/runtime/node_watchdog.py` 每任务一条扫描循环（`main_runtime.node_watchdog_interval_seconds`，默认 30s），对 `in_progress` 的执行节点按三条**结构判据**决定是否 `暂停·异常`：
 
-- **重复调用**：同工具 + 字节相同的参数连续 3 次终态调用。
+- **重复调用**：同工具 + 字节相同的参数连续 3 次终态调用。终态清单先按 `PROGRESS_NEUTRAL_TOOL_NAMES` 过滤（当前只有 `time`）：读钟既不该判停，也**不算新事件**——节点只看时钟不动别的时，失速判据必须照样能触发。判据与同一集合在两车道上的用法见 `tool-and-skill-system.md`「Duplicate Tool Call Guard」。
 - **工具连续错误**：同上但三次都失败（既未改参也未换工具）。
 - **失速**：超过 `node_watchdog_stall_seconds`（默认 600s）没有任何新事件。在飞模型回合算工作：帧里的 `await_marker`（`model.chat.*` / `node_turn.*`）让这一拍不判——等闸、退避重试（`model_retry_status=retrying`）与流式返回都发生在这个标记期间，节点行与工具表都不变化，请求层用首包/空闲分片超时与每模型轮数预算负责单次请求的止损。唯一的例外是请求层自己报告 `waiting_upstream` 且 `waiting_seconds` 已满一个失速窗口：单次请求在同样长的时间里没有任何载荷产出，才仍落 `no_new_events`。
 

@@ -30,7 +30,8 @@ NODE_CONTROL_SIGNAL_TOOL_NAMES: tuple[str, ...] = (
     "submit_notice_inspection_decision",
 )
 
-# 两条车道共用的无契约信号：静默/异步控制 + 加载器（加载器自己就是送契约的那一跳）。
+# 两条车道共用的无契约信号：静默/异步控制 + 加载器（加载器自己就是送契约的那一跳）
+# + 常驻的时钟与定时唤醒（它们没有 toolskill，契约块永远不会出现在请求视图里）。
 #
 # 这几个名字的正本在 `main/runtime/tool_names.py`。这里不 import 它：
 # `base → tool_visibility → main.runtime…` 会经 `main/__init__.py` 绕回 `base`，是个真循环。
@@ -39,6 +40,8 @@ NODE_CONTROL_SIGNAL_TOOL_NAMES: tuple[str, ...] = (
 _NO_CONTRACT_SIGNAL_TOOL_NAMES: frozenset[str] = frozenset(
     {
         "silent",
+        "time",
+        "schedule_wake",
         "wait_tool_execution",
         "stop_tool_execution",
         "load_tool_context",

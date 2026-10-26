@@ -17,6 +17,8 @@ from g3ku.agent.tools.base import Tool
 from g3ku.deployment.data_root import data_work_path
 from g3ku.runtime.memory_scope import normalize_memory_scope
 from g3ku.runtime.project_environment import current_project_environment
+from g3ku.runtime.wake_clock import describe_delay, iso_from_ms
+from g3ku.runtime.wake_clock import now_ms as wake_now_ms
 from g3ku.utils.helpers import PATH_ANCHOR_RULE_TEXT, path_anchor_policy
 from main.errors import (
     NodePausedError,
@@ -68,9 +70,11 @@ from main.runtime.child_tools import (
 )
 from main.runtime.internal_tools import (
     EnterWaitTool,
+    ScheduleWakeTool,
     SendMessageTool,
     SpawnChildNodesTool,
     SubmitFinalResultTool,
+    TimeTool,
     ViewMessageHistoryTool,
 )
 from main.runtime.node_mailbox import notification_is_held
@@ -106,7 +110,9 @@ from main.runtime.tool_names import (
     LIST_CHILD_NODES_TOOL_NAME,
     MANAGE_CHILD_NODES_TOOL_NAME,
     READ_CHILD_PROGRESS_TOOL_NAME,
+    SCHEDULE_WAKE_TOOL_NAME,
     SEND_MESSAGE_TOOL_NAME,
+    TIME_TOOL_NAME,
     VIEW_MESSAGE_HISTORY_TOOL_NAME,
     VIEW_NODE_TREE_TOOL_NAME,
 )
@@ -2950,6 +2956,45 @@ class NodeRunner:
             'unread_injected': 0,
         }
 
+    async def _arm_node_wake(
+        self,
+        *,
+        task,
+        node: NodeRecord,
+        wake_at_ms: int = 0,
+        note: str = '',
+    ) -> dict[str, Any]:
+        """`schedule_wake` 的节点侧写点：把唤醒时刻落进 timer 表，每个节点只留最新一份。
+
+        这里**不**停靠，也**不**开协程等：停靠是 `enter_wait` 的事，而"等"由 worker 的扫描按
+        表里的时刻投一条 `wake_timer` 通知。活在协程里的期限会被任何重启吞掉（实盘那条
+        `exec Start-Sleep 5400` 就是这个形状：08:30 设的 10:00 被 09:02 的重启推成 10:33）。
+        """
+        normalized_task_id = str(getattr(task, 'task_id', '') or '').strip()
+        latest = self._store.get_node(node.node_id)
+        if latest is None:
+            return {'error': 'node_missing'}
+        if str(latest.status or '').strip().lower() in {'success', 'failed'}:
+            return {'error': 'node_terminal'}
+        if str(getattr(task, 'status', '') or '').strip().lower() in {'success', 'failed', 'canceled'}:
+            return {'error': 'task_terminal'}
+        moment = int(wake_at_ms or 0)
+        if moment <= 0:
+            return {'error': 'wake_at_ms_required'}
+        record = self._store.upsert_task_node_timer(
+            task_id=normalized_task_id,
+            node_id=str(node.node_id or '').strip(),
+            wake_at_ms=moment,
+            note=str(note or '').strip(),
+            armed_at=now_iso(),
+        )
+        return {
+            'scope': 'node',
+            'wake_at': iso_from_ms(record.wake_at_ms),
+            'epoch_ms': int(record.wake_at_ms),
+            'from_now': describe_delay(wake_at_ms=record.wake_at_ms, current_ms=wake_now_ms()),
+        }
+
     async def _deliver_node_message(
         self,
         *,
@@ -3062,6 +3107,12 @@ class NodeRunner:
 
     def _build_tools(self, *, task, node: NodeRecord) -> dict[str, Tool]:
         tools = dict(self._tool_provider(node) or {})
+        # 时钟与自设唤醒对执行节点和验收节点都常驻：验收节点同样要知道真实时刻，而它等被验
+        # 节点重交时也不能靠空等——`enter_wait` 只能被消息叫醒，没有期限这一档。
+        tools[TIME_TOOL_NAME] = TimeTool()
+        tools[SCHEDULE_WAKE_TOOL_NAME] = ScheduleWakeTool(
+            lambda **payload: self._arm_node_wake(task=task, node=node, **payload)
+        )
         if node.node_kind in {KIND_EXECUTION, KIND_ACCEPTANCE}:
             tools['submit_final_result'] = SubmitFinalResultTool(
                 lambda payload: self._submit_final_result(task=task, node=node, payload=payload),

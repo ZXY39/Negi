@@ -25,7 +25,7 @@ from g3ku.runtime.frontdoor.tool_contract import (
 )
 from g3ku.runtime.tool_contract_block import render_tool_contract_block
 from g3ku.session.manager import Session
-from main.runtime.tool_names import SILENT_TOOL_NAME
+from main.runtime.tool_names import SYNTHETIC_RESIDENT_TOOL_NAMES
 
 CONTRACT_FINGERPRINT = "tcf:" + "a" * 16
 
@@ -355,7 +355,7 @@ async def test_message_builder_exposes_all_visible_skills_and_tools_without_any_
         "secondary-skill",
     ]
     # `silent` 是常驻内置控制工具：上下文选择一条都没选中时它照样可调用。
-    assert result.tool_names == [SILENT_TOOL_NAME]
+    assert result.tool_names == [*SYNTHETIC_RESIDENT_TOOL_NAMES]
     assert result.candidate_tool_names == ["filesystem", "agent_browser", "web_fetch"]
     assert result.trace["retrieval_scope"]["mode"] == "disabled"
     assert result.trace["retrieval_scope"]["allowed_skill_record_ids"] == []
@@ -721,7 +721,7 @@ async def test_message_builder_keeps_callable_and_candidate_tools_separate() -> 
         persisted_session=None,
     )
 
-    assert result.tool_names == ["load_tool_context", SILENT_TOOL_NAME]
+    assert result.tool_names == ["load_tool_context", *SYNTHETIC_RESIDENT_TOOL_NAMES]
     assert result.candidate_tool_names == ["agent_browser", "web_fetch"]
 
 
@@ -822,7 +822,7 @@ async def test_message_builder_prefers_specific_filesystem_candidates_for_write_
         persisted_session=None,
     )
 
-    assert result.tool_names == ["load_tool_context", "exec", SILENT_TOOL_NAME]
+    assert result.tool_names == ["load_tool_context", "exec", *SYNTHETIC_RESIDENT_TOOL_NAMES]
     assert expected_tool_id in result.candidate_tool_names
 
 
@@ -927,7 +927,7 @@ async def test_message_builder_adds_contract_present_tools_to_callable_list() ->
         contract_present_tool_names=["filesystem_write"],
     )
 
-    assert result.tool_names == ["load_tool_context", "filesystem_write", SILENT_TOOL_NAME]
+    assert result.tool_names == ["load_tool_context", "filesystem_write", *SYNTHETIC_RESIDENT_TOOL_NAMES]
     assert "content_open" in result.candidate_tool_names
     assert "content_search" in result.candidate_tool_names
     assert "agent_browser" in result.candidate_tool_names
@@ -958,7 +958,7 @@ async def test_message_builder_adds_contract_present_content_tool_to_callable_li
         contract_present_tool_names=["content_open"],
     )
 
-    assert result.tool_names == ["load_tool_context", "content_open", SILENT_TOOL_NAME]
+    assert result.tool_names == ["load_tool_context", "content_open", *SYNTHETIC_RESIDENT_TOOL_NAMES]
     assert result.candidate_tool_names == ["content_search"]
 
 

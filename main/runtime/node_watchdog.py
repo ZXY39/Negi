@@ -30,6 +30,7 @@ from typing import Any
 from loguru import logger
 
 from g3ku.providers.fallback import MODEL_RETRY_STATE_WAITING_UPSTREAM
+from main.runtime.tool_names import PROGRESS_NEUTRAL_TOOL_NAMES
 
 PARKED_PHASES = frozenset({'waiting_explicit', 'waiting_children', 'waiting_acceptance'})
 MODEL_TURN_AWAIT_MARKER_PREFIXES = ('model.chat.', 'node_turn.')
@@ -125,7 +126,16 @@ def watchdog_pause_reason(
     if _frame_has_running_tool(frame):
         return ''
 
-    terminal = [item for item in list(tool_results or []) if _status(item) in _TERMINAL_TOOL_STATUSES]
+    terminal = [
+        item
+        for item in list(tool_results or [])
+        if _status(item) in _TERMINAL_TOOL_STATUSES
+        # 时钟读数不进这条窗口：`time` 逐字相同是它的本性，不是"没有新信息"的证据。
+        # 不摘掉的话，一个每轮校时的节点（报时节点正是这一类）会被判成重复调用循环并异常暂停。
+        # 摘掉它也不会放松看门狗：`no_new_events` 取的是这份列表最后一项的 `finished_at`，
+        # 所以"只在校时、没有真事件"照样按失速窗口判停——校时不算进展，这正是它应有的读法。
+        and _signature(item)[0] not in PROGRESS_NEUTRAL_TOOL_NAMES
+    ]
     recent = terminal[-max(REPEAT_THRESHOLD, ERROR_STREAK_THRESHOLD):]
     if len(recent) >= REPEAT_THRESHOLD:
         signatures = {_signature(item) for item in recent}

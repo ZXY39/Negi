@@ -191,7 +191,10 @@ from main.runtime.tool_call_repair import (
 from main.runtime.tool_names import (
     ENTER_WAIT_TOOL_NAME,
     FINAL_RESULT_TOOL_NAME,
+    PROGRESS_NEUTRAL_TOOL_NAMES,
+    SCHEDULE_WAKE_TOOL_NAME,
     SILENT_TOOL_NAME,
+    TIME_TOOL_NAME,
 )
 from main.runtime.turn_overlay import (
     build_turn_only_system_note_message,
@@ -345,6 +348,11 @@ class ReActToolLoop:
         FINAL_RESULT_TOOL_NAME,
         _SPAWN_CHILDREN_TOOL_NAME,
         SILENT_TOOL_NAME,
+        # 时钟与自设唤醒和 `enter_wait` 同族：一次调用就是几十微秒，让它们排在磁盘紧急态
+        # 的闸位后面（`_should_bypass_tool_slot_controller`）只会把"想知道现在几点"变成
+        # 一次排队，而模型想知道时刻的时候通常正在判断该不该继续等。
+        TIME_TOOL_NAME,
+        SCHEDULE_WAKE_TOOL_NAME,
         *_CONTROL_TOOL_NAMES,
         'load_tool_context',
         'load_tool_context_v2',
@@ -1722,6 +1730,11 @@ class ReActToolLoop:
                     arguments = self._normalize_tool_call_arguments(getattr(call, 'arguments', {}))
                     signature = f"{tool_name}:{json.dumps(arguments, ensure_ascii=False, sort_keys=True)}"
                     if tool_name in self._CONTROL_TOOL_NAMES or tool_name == FINAL_RESULT_TOOL_NAME:
+                        continue
+                    # 时钟读数不进这条熔断窗口：连续三轮 `time` 的参数逐字相同是它的本性，
+                    # 而"每轮先校时"正是 `schedule_wake` 想换来的行为。与看门狗同一档豁免，
+                    # 名字同源取 `PROGRESS_NEUTRAL_TOOL_NAMES`。
+                    if tool_name in PROGRESS_NEUTRAL_TOOL_NAMES:
                         continue
                     # 未水合工具的调用这一跳不执行（只交契约+暂存），不该进重复调用熔断：
                     # 撞两次同样的"先给契约"被软拒，等于把机制自己的代价算成模型的错（D3）。

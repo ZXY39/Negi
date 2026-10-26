@@ -98,6 +98,7 @@ Negi 的工具/技能体系分成几层，而不是一次性把所有东西注�
 - `load_skill_context`
 - `load_tool_context`
 - 节点树与信箱工具：`list_child_nodes`、`read_child_progress`、`view_node_tree`（`scope=subtree|family`，带 `messageable`/`controllable`/`acceptance`）、`view_message_history`、`enter_wait`（仅 `note`）、`send_message`（`to/content/ref`）、`manage_child_nodes`（仅执行节点；验收节点只保留 `submit_final_result` + RBAC `inspection` 类工具）。
+- 时钟与自设闹钟：`time`、`schedule_wake`。两颗都没有 `tools/<name>/resource.yaml`，因此**不在**上面那份常量里（`NODE_FIXED_BUILTIN_TOOL_NAMES` / `CEO_FIXED_BUILTIN_TOOL_NAMES` 同时是 RBAC 与可见性口径，把合成工具写进去等于给它编一条治理记录），而是由 `main/runtime/tool_names.py::SYNTHETIC_RESIDENT_TOOL_NAMES` 与 `silent` 一起恒定注入。注入点少一处的症状见「3.1.1 为什么"常驻"需要独立机制」。
 
 CEO/frontdoor 另有任务生命周期与分发控制类固定工具。治理记录、RBAC、启停、删除、核心保护都以**工具**为单位：一个 `tools/<name>/` 目录就是一条记录，没有中间的分组层。各工具的当前契约与守卫如下：
 
@@ -115,16 +116,24 @@ CEO/frontdoor 另有任务生命周期与分发控制类固定工具。治理记
 | `filesystem_*` | 每个变更工具各是一条独立的治理记录，也只以这些名字被调用与授权：`filesystem_write`（整文件“创建或替换”）、`filesystem_edit`（单文件文本区域替换，契约见下一行）、`filesystem_copy` / `filesystem_move`（`operations=[{source, destination}, ...]`）、`filesystem_delete`（`paths=[...]`）、`filesystem_propose_patch`。`copy` / `move` / `delete` 是路径级批量操作，变更单位本来就是整个文件系统对象路径，不采用文本区域定位契约。每条记录的资源 uri 是 `negi://resource/tool/<tool_id>`（写侧只出这个方案名，已沉淀在转录与工具结果里的 `g3ku://…` 继续按同一规则识别）。 | 授权按被调用的那一条工具判（`filesystem_write` 的 `allowed_roles` 只管写）。所有路径必须绝对路径，并先经过现有 workspace policy（拦截系统临时目录与 legacy `tmp/`、`.g3ku/tmp`；`tools/` 只放行 resource.yaml/main/toolskills 注册内容；`tmp_*` / `temp_*` 前缀命名——含点前缀 `.tmp_*` / `.temp_*`——以及日志、压缩包、下载产物等临时工件必须落在 temp_root（runtime 注入的 `task_temp_dir`，缺省 `<数据根>/temp`）或 `externaltools/` 下）。目录 `copy` / `move` 只允许目标路径不存在；目录 `delete` 必须显式 `recursive=true`。不存在可调用的 legacy 兼容入口（如 `filesystem(action=...)`、`filesystem.search`、`filesystem.open`）。 `filesystem_stat` 是目录清单与度量的归属工具（`paths` 收到目录时返回 `entries` 与整树聚合），它只列与量、不搜文件正文；content path 模式拒绝目录时给出的两条出路里，列目录归它，跨文件正文检索归 `exec`。 |
 | `filesystem_edit` | 模型可见契约是**平面必填字段对**：`path + old_text + new_text`，不含任何 object 字段。`old_text` 须逐字节匹配且唯一，用相邻行扩到唯一为止；`new_text: ""` 即删除该区域。定位方式只有这一条车道，因此没有 `by` / `mode` 判别器、也没有“车道互斥”的散文约束。成功文本回显被替换的行区间（`resolved lines N-M`），调用方不必重读文件即可确认改在了哪一段。 | 校验面 `parameters` 有意宽于模型面：`target.by` ∈ `exact_text` / `anchor_pair` / `line_range` 与 `mode + old_text/new_text`、`mode + start_line/end_line/replacement` 仍是可执行车道，历史转录与 adapter 形状继续可跑（`anchor_pair` 车道因此仍然存在，只是不向模型曝光——模型面没有 object，就不存在“把替换文本塞进定位器对象”这个错法）；判定 legacy 类别前先剥离对侧车道的占位值（`start_line=0` / `replacement=""` 等）吸收自动填充噪声，但 `target + legacy 字段` 不是受支持组合。模型面不出现 object 字段的原因：provider schema 管线无法表达互斥与条件必填（组合关键字会被压平），所以定位变体只能拆字段车道或拆工具，不能靠散文约束。重复提交同一编辑安全：`old_text` 已不在文件而 `new_text` 唯一在盘（锚点车道为区域已等于 `new_text`）时返回 `Already applied:` 且不写文件，属成功车道；`main/runtime/recovery_check.py` 判定“结果丢失但磁盘已生效”用同一条判据。`load_tool_context` / `get_tool_toolskill` 的参数摘要与示例只渲染模型面。 |
 
-| `silent` | CEO/frontdoor 专属的常驻内置控制工具：调用它 = 本轮不向用户投递任何回复，同时把正文留在上下文里（参数 `reason` 必填，`subject` / `superseded_by` 可选，三者都进转录行元数据供审计与后续轮次判读）。它是回合终态：同批其余工具照常执行完，随后直接收尾，不回模型。节点侧不暴露。合同与理由见 `runtime-overview.md`「3.3 静默回复（`silent` 工具）」。 | 常驻靠一条独立机制，不靠 `RESERVED_INTERNAL_TOOLS`，也不靠 `CEO_FIXED_BUILTIN_TOOL_NAMES`——那两个集合都只保证"已可见时排在本轮 callable 最前面"，**不具备注入能力**（`stop_tool_execution` 就是反例：它没有 `tools/<name>/resource.yaml`，也不在默认治理表里，因此根本进不了 exposure 名单）。真正让它恒定可用的是**四处**：① 执行侧的工具对象字典——`_frontdoor_execution_bundle` 的 `all_tools` 里就地构造，不依赖注册表；② `ALWAYS_CALLABLE_INTERNAL_TOOLS`（不要求已可见）；③④ exposure 与 runtime 可见集两处的恒定点名。顺序上一律追加在真实能力之后，两条路径同一位置口径。它恒可调用，不受任何前置动作约束；这条豁免同时写在提示词里（`ceo_frontdoor.md` 的静默条目与契约的 `silent_help` 都点名"静默不需要前置动作"），否则模型会为静默一轮白跑一次工具轮。纯内置工具不在 `tools/` 目录下，因此不计入资源管理器的工具计数、也不被 RBAC 的 `supported` 集合返回——这四处恒定注入正是为了绕过这一点，**漏掉任何一处都会出现"模型看得见名字却调不动"**：实盘的失败形状就是②③④齐全而①缺失——模型确实发出了 `silent` 调用、被 `_run_single` 的 `visible_tools.get()` 判成 `Error: tool not available: silent`。名字可见 ≠ 对象可解析。名字出现在 callable 名单时，契约另渲染一行 `silent_help:` 告诉模型何时用它，并说明"静默没有文本写法"——措辞里刻意不重提被禁的字面串：在纠正里拼写它等于把它送回模型上下文（`runtime-overview.md`「3.3 静默回复（`silent` 工具）」）。 |
+| `silent` | CEO/frontdoor 专属的常驻内置控制工具：调用它 = 本轮不向用户投递任何回复，同时把正文留在上下文里（参数 `reason` 必填，`subject` / `superseded_by` 可选，三者都进转录行元数据供审计与后续轮次判读）。它是回合终态：同批其余工具照常执行完，随后直接收尾，不回模型。节点侧不暴露。合同与理由见 `runtime-overview.md`「3.3 静默回复（`silent` 工具）」。 | 常驻靠一条独立机制，不靠 `RESERVED_INTERNAL_TOOLS`，也不靠 `CEO_FIXED_BUILTIN_TOOL_NAMES`——那两个集合都只保证"已可见时排在本轮 callable 最前面"，**不具备注入能力**（`stop_tool_execution` 就是反例：它没有 `tools/<name>/resource.yaml`，也不在默认治理表里，因此根本进不了 exposure 名单）。它吃的是「3.1.1 为什么"常驻"需要独立机制」里那五处，当年"名单齐全而执行束缺实例"的实盘失败形状也记在那里。顺序上一律追加在真实能力之后，两条路径同一位置口径。它恒可调用，不受任何前置动作约束；这条豁免同时写在提示词里（`ceo_frontdoor.md` 的静默条目与契约的 `silent_help` 都点名"静默不需要前置动作"），否则模型会为静默一轮白跑一次工具轮。名字出现在 callable 名单时，契约另渲染一行 `silent_help:` 告诉模型何时用它，并说明"静默没有文本写法"——措辞里刻意不重提被禁的字面串：在纠正里拼写它等于把它送回模型上下文（`runtime-overview.md`「3.3 静默回复（`silent` 工具）」）。 |
+
+| `time` | 读当前时刻，**零参数**。返回 `now`（本地墙钟）、`utc`、`epoch_ms`、`weekday`、`utc_offset`，正文全英文。两条车道共用同一份实现（`g3ku/runtime/wake_clock.py`，只依赖标准库——它被 web 与 worker 两侧读，不能 import `main.runtime`）。它是模型唯一的"现在几点"来源：绝对时刻从这一发读数取，不靠对别的字段做心算。 | 同参重复调用是正当动作（核对时钟、跑完一次长工具后再看时间），所以它是 `PROGRESS_NEUTRAL_TOOL_NAMES` 的唯一成员：`main/runtime/react_loop.py` 的跨回合熔断与 `main/runtime/node_watchdog.py` 的 `repeated_identical_tool_call` 都跳过它，并且它**不算进度**——只看时钟的节点照样该被判失速。判据见本文「8. Duplicate Tool Call Guard」。`rerun_safe=True`（纯读，恢复车道可自动重放）、带 `hide_universal_timeout_parameter`、进 `_NO_CONTRACT_SIGNAL_TOOL_NAMES`。 |
+| `schedule_wake` | 给自己设**一次**唤醒：`note` 必填，时刻二选一——`after_seconds` 或未来的 `at`（`at` 抄 `time` 的读数；读侧容忍 ISO、`YYYY-MM-DD HH:MM`、epoch 秒/毫秒，裸日期按本地时区）。设闹钟**不停回合**（停靠另有出口 `enter_wait`），到点收到一条带着自己 `note` 与当前时刻的通知。重设只替换自己那条待触发的闹钟，一条车道上最多一份。 | 后端按车道分叉、模型契约同一份：节点落 `task_node_timers`（一节点一行，worker 侧每 5 秒扫一次，到期经 `deliver_node_message` 投一条 `wake_timer` 系统消息，所以暂停/终态/去重语义全部复用信箱那条道，见 `main-task-runtime.md`「节点信箱与唤醒」）；前门落会话自己的 cron 一次性 `at` 任务（见 `heartbeat-system.md`「Cron Reminder Contract」）。时钟到点而节点停靠⇒通知照常入箱并唤醒；节点被操作员暂停⇒只入箱不叫醒，暂停位仍归操作员。 overdue 到点的正文自带"晚了多久、先重新对钟再按原计划推日期"。`at`/`after_seconds` 的互斥形状住在函数级 `description`（provider 边界剥掉参数级描述，只有函数级送达模型）。它带 `rerun_safe`，理由是可证明的那一种而不是"看起来无害"：两条车道的写点都是"每个调用方至多一份待触发唤醒"的 upsert / 按名替换，重放只会换掉同一份，不会排进第二次（判据归 `tool-hydration-and-callable-chain.md`「工具可重放声明」）。同 `time` 一起进 `_NO_CONTRACT_SIGNAL_TOOL_NAMES`：两颗都没有 toolskill，请求视图里永远不会出现它们的契约块，因此不能当"契约在场"的读数用。 |
 
 ### 3.1.1 为什么"常驻"需要独立机制
 
 `fixed builtin`（不参与候选挑选）与"恒定 callable/visible"（一定进 provider `tools[]`）是两件事，容易混为一谈：
 
 - `CEO_FIXED_BUILTIN_TOOL_NAMES` 与 `RESERVED_INTERNAL_TOOLS` 的作用点都在**已经可见**的名单内部：`_callable_tool_names` 把其中可见的名字排在**本轮 callable 最前面**（先 RESERVED 再 FIXED，然后才是契约在场的名字），所以它们不进取予候选行；同一对集合又把它们从在场读数里剔掉（`CEO_NEVER_CONTRACT_TOOL_NAMES` / `NODE_NEVER_CONTRACT_TOOL_NAMES`），免得常驻名被当成"本轮靠契约块进来的"。两者都会跳过不在 exposure 名单里的名字。
-- 让一个不在 `tools/` 注册表里的工具恒定出现，需要：① 在工具注册表注册实例（否则 provider 侧解析不到 schema，会静默丢条目）；② 一条不看 exposure 的追加名单（`ALWAYS_CALLABLE_INTERNAL_TOOLS`）；③ 前门 callable 与 runtime-visible 两条状态路径各自恒定点名。
+- 让一个不在 `tools/` 注册表里的工具恒定出现，名单只有一份——`main/runtime/tool_names.py::SYNTHETIC_RESIDENT_TOOL_NAMES`（当前是 `silent` / `time` / `schedule_wake`），而**读它的落点有五处**，加一颗新常驻工具就是把名加进元组后逐处核对：
+  ① 两条车道各自的**工具对象字典**：前门在 `_frontdoor_execution_bundle` 里就地构造合成实例（同时进 `all_tools` 与 `declared_tools`），节点在 `NodeRunner._build_tools` 里注册实例。两处都不查注册表，所以注册缺失不会悄悄把条目丢掉。
+  ② `ALWAYS_CALLABLE_INTERNAL_TOOLS`（`g3ku/runtime/frontdoor/message_builder.py`）——唯一不看 exposure 的 callable 追加名单。
+  ③④ 前门 callable 名单与 runtime-visible 名单各自的恒定点名。
+  ⑤ provider `tools[]` 的钉住名字与按名取参数表的声明面。
+  反方向还有一处**减法**：按名从 registry 取实例的那份名单要把它们剔掉（对象在束里，不在注册表），否则排障视图里全是空转取实例。另有两个集合因为 import 方向拿不到那份正本（`base → tool_visibility → main.runtime…` 会绕回 `base` 成真循环），各自保留字面量副本——`g3ku/runtime/tool_visibility.py::_NO_CONTRACT_SIGNAL_TOOL_NAMES` 与 `g3ku/runtime/tool_error_guidance.py` 的"无需加载"文案名单——漂移由 `tests/resources/test_reuse_args_surface.py` 逐名钉红，不靠人记。
 
-新增内置控制工具时按这三步核对，少一步的症状是"模型从不使用它"或"调了就报错"，都不会指向注册环节。
+少一处的症状分成两类，都不会指向注册环节：名字没进任何名单 ⇒ "模型从不使用它"；名字进了 callable/visible 却没进对象字典或 `tools[]` ⇒ "调了就报错"。实盘两种形态都出现过——`silent` 曾在名单齐全而执行束缺实例时被回成 `Error: tool not available: silent`（名字可见 ≠ 对象可解析），时钟那条则是完全没有曝光面时模型只能心算时刻或用 `exec` 问系统时间。契约测试：`tests/resources/test_frontdoor_silent_tool_exposure.py` 与 `tests/resources/test_frontdoor_time_wake_resident_tools.py` 逐处钉前门五处，节点侧由 `tests/test_node_time_and_wake_tools.py` 钉注册与持久化。
 
 ### 3.2 candidate tools
 
@@ -194,6 +203,7 @@ exec 与 memory 工具：
 - 定时任务触发的回合（`cron_internal`）里，`cron` 工具照常可用 `add` / `list`（新任务仍只绑定创建它的当前会话），只有 `remove` 被限制为只能删除当前正在触发的任务自身——改传其它 `job_id`、或运行上下文缺失 `cron_job_id` 时一律拒绝，防止提醒回合误拆其它任务。
 - 使用规范（提醒写成内部指令、调度三选一、投递目标由运行时从当前会话上下文自动推导、模型不传 `delivery.*` / `sessionTarget` / `payload.*`）放在 cron 工具的 toolskill 里，按需 `load_tool_context("cron")` 加载；模型对 cron 用法理解过时时，改 toolskill 而不是改注入逻辑。
 - 排查“为什么没有自动停止”先看 cron store 的 `payload.max_runs` / `state.delivered_runs`（到达上限由 scheduler 删除，提醒回合内手工 `remove` 只是辅助出口）；排查“cron 到点了但没创建/查询任务、只重复谈 cron 自己”，先检查 frontdoor tool exposure 是否被错误缩成 `cron`，而不是先怀疑 scheduler 没触发。
+- 前门的 `schedule_wake` 是 cron 的另一个生产者，走同一条一次性 `at` 车道（`max_runs=1` + `delete_after_run`），所以它的耐久存储、到点自愈重臂、at-most-once 投递与重启后的过期抑制都不是新机制；投递正文与到点判读归 `heartbeat-system.md`「Cron Reminder Contract」。它与操作员自己建的提醒之间有一条必须成立的边界：**替换只替换自己那一族**——`name` 以 `self-wake: ` 开头 **且** `schedule.kind == 'at'`，两侧都带会话键且不同才保留（CLI 共享会话没有更可分的键，那一族整批让位）。不这样做的话，一个每 40 分钟推进一次的报时回合会攒出一串闹钟，而"重设一次自己的闹钟"也会撞上同会话同毫秒的重复注册闸门。调度器不在（CLI 起的会话、cron 被关闭）时工具返回 `wake_scheduler_unavailable`，而不是 `armed: true` 却永远不会响。
 
 ### `manage_task_nodes` 节点控制工具
 
@@ -278,6 +288,7 @@ Tool visibility and callable status do not guarantee that the runtime will keep 
 - After execution, `_dedupe_tool_messages` dedupes identical tool-result contents at the message-history level (later copies become `reused` with `same_as` the earlier `tool_call_id`); that is a context-bloat guard, independent of the two layers above.
   - 豁免只有 `submit_final_result` 的 error 回执（`_is_no_dedupe_receipt_message`）。理由是可回读性而不是体积：折叠信封的 `ref` 是空串，这份契约文本除了历史里那一拍之外没有第二处可取，而节点逐字重交同一份被拒载荷时，读的就是最新那一行回执——折成 `summary` 残段后，必填项尾段（`answer`/`evidence`/`remaining_work`/`blocking_reason`）正好落在省略号之后。同轮重复调用未执行的那份 reused 合同不受影响，它保护的是副作用不是指引。
 - This duplicate-call guard is distinct from the read-only retrieval guard: repeated read-only calls such as `content_describe` / `content_open` / `content_search`, and `task_progress` use their own repair-guidance path with its own repair messaging and escalation semantics.
+- **进度中性那一档**（`main/runtime/tool_names.py::PROGRESS_NEUTRAL_TOOL_NAMES`，当前只有 `time`）比"控制/终态豁免"更窄也更必要：核对时钟是同参调用**唯一正当用途**（跑完一次长命令后确认还剩多少预算），按签名拦它等于拦掉模型唯一的取时刻手段。它与普通只读工具的差别在方向上：判据两边都用同一个集合，所以一次读钟既不会被熔断打回，也不会被看门狗算成"这一拍有进展"——只看时钟的节点照样会被 `no_new_events` 判失速。豁免点必须在 `breaker.register(signature)` **之前**判，否则记录本身就把它算成了进展。`schedule_wake` 不在这一档：重设闹钟是副作用，同参连打三次该被打回。
 - The filesystem tools do not participate in the read-only retrieval branch: the execution runtime only hydrates the mutation executors themselves; repeated filesystem mutations follow the ordinary duplicate-call soft-reject path, while retrieval-style guards remain reserved for read-only tools such as `content_*`, `task_progress`, and `task_node_detail`.
 - If a node loops on one tool, inspect the transcript/tool messages first: a tool message with `status=reused` and `reason=duplicate_tool_call_in_same_turn` means that call was never executed, and its `same_as` points at the call whose result is authoritative; the absence of a fresh tool result may likewise mean the runtime intentionally rejected a duplicate call rather than that the tool executor failed.
 
@@ -288,9 +299,9 @@ Tool visibility and callable status do not guarantee that the runtime will keep 
 There is an explicit maintenance boundary between:
 
 - surfaced tools that appear in Tool Admin (`/api/resources/tools`, Tool management UI), and
-- internal fixed tools that never appear there, such as `silent`.
+- internal fixed tools that never appear there, such as `silent`, `time`, `schedule_wake`（即 `SYNTHETIC_RESIDENT_TOOL_NAMES` 那一族：没有 `tools/<name>/` 目录就不进资源管理器计数，也不被 RBAC 的 `supported` 集合返回——「3.1.1」的恒定注入正是为了绕过这一点）。
 
-For surfaced tools, RBAC is the highest-priority access contract. Internal fixed tools remain outside this contract: they keep their runtime-only visibility rules, their access is not modeled through Tool Admin `allowed_roles`, and behavior questions about runtime control tools such as `silent` are debugged through the runtime path rather than Tool Admin RBAC.
+For surfaced tools, RBAC is the highest-priority access contract. Internal fixed tools remain outside this contract: they keep their runtime-only visibility rules, their access is not modeled through Tool Admin `allowed_roles`, and behavior questions about runtime control tools such as `silent` / `time` / `schedule_wake` are debugged through the runtime path rather than Tool Admin RBAC.
 
 Current RBAC rules for surfaced tools:
 

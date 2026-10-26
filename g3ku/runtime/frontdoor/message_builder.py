@@ -45,7 +45,11 @@ from g3ku.runtime.web_ceo_sessions import (
     transcript_messages,
     workspace_path,
 )
-from main.runtime.tool_names import SILENT_TOOL_NAME
+from main.runtime.tool_names import (
+    SCHEDULE_WAKE_TOOL_NAME,
+    SILENT_TOOL_NAME,
+    TIME_TOOL_NAME,
+)
 
 # 动态 overlay 块头（跨轮可比性投影按这些常量识别并剥离，禁止散文匹配）。
 MEMORY_WRITE_HINT_HEADER = "## 长期记忆写入提示"
@@ -242,8 +246,13 @@ class CeoMessageBuilder:
     # 与 RESERVED_INTERNAL_TOOLS 的区别只在一点：这些名字**不要求已经可见**，因此
     # 不依赖任何 tools/*/resource.yaml 声明族。RESERVED_INTERNAL_TOOLS 只保证
     # 「已可见时排在本轮 callable 最前面」，不具备注入能力 —— 照它加是加不进 schema 的。
-    # 目前唯一的成员是静默收尾信号：它是前门的合同的一部分，不是可被选中的能力。
-    ALWAYS_CALLABLE_INTERNAL_TOOLS: tuple[str, ...] = (SILENT_TOOL_NAME,)
+    # 目前成员是静默收尾信号 + 两条车道共用的时钟与自设唤醒：它们都是合同的一部分，
+    # 不是可被选中的能力，所以实例在 `_frontdoor_execution_bundle` 里就地构造。
+    ALWAYS_CALLABLE_INTERNAL_TOOLS: tuple[str, ...] = (
+        SILENT_TOOL_NAME,
+        TIME_TOOL_NAME,
+        SCHEDULE_WAKE_TOOL_NAME,
+    )
     FIXED_BUILTIN_TOOL_NAMES: tuple[str, ...] = CEO_FIXED_BUILTIN_TOOL_NAMES
     ATTACHMENT_REOPEN_TARGET_LIMIT = 8
 

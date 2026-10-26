@@ -44,11 +44,13 @@ def _session(key: str) -> SimpleNamespace:
 
 def _runner(tools: dict[str, _Tool], *, declared: dict[str, _Tool] | None = None) -> CreateAgentCeoFrontDoorRunner:
     runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(tools=dict(tools)))
-    # 生产里 `declared_tools` 一定含两颗合成控制工具（`_frontdoor_execution_bundle` 现场加），
+    # 生产里 `declared_tools` 一定含整族合成控制工具（`_frontdoor_execution_bundle` 现场加），
     # 替身不给就会让它们掉进占位档——那正是 N5 警告过的形状，别用它当常态。
     control = {
         'filesystem_stat': _Tool('filesystem_stat', 'start the next stage'),
         'silent': _Tool('silent', 'reply with nothing'),
+        'time': _Tool('time', 'read the wall clock'),
+        'schedule_wake': _Tool('schedule_wake', 'arm one self wake-up'),
     }
     runner._frontdoor_execution_bundle = lambda **kwargs: SimpleNamespace(
         declared_tools={**tools, **(declared or control)}

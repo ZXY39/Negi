@@ -63,6 +63,8 @@ from g3ku.runtime.tool_visibility import (
     NODE_NEVER_CONTRACT_TOOL_NAMES,
     fixed_builtin_tool_name_set_for_actor_role,
 )
+from g3ku.runtime.wake_clock import iso_from_ms
+from g3ku.runtime.wake_clock import now_ms as wall_now_ms
 from g3ku.security import get_bootstrap_security_service
 from g3ku.update_apply import WEB_LOG_FILE
 from g3ku.utils.api_keys import parse_api_keys, resolve_api_key_concurrency_layout
@@ -143,6 +145,7 @@ from main.runtime.node_message_kind import (
     KIND_ACCEPTANCE_VERDICT,
     KIND_CHILD_ABNORMAL_PAUSE,
     KIND_CHILD_FINAL,
+    KIND_WAKE_TIMER,
     PRIORITY_HIGH,
     RELATION_CHILD,
     RELATION_PARENT,
@@ -328,6 +331,9 @@ _LOOPBACK_CENSUS_INTERVAL_SECONDS = 60.0
 # 事件循环死了还是某条车道任务不在了，而这条车道本身也顺便回答这个问题。
 _LOOP_CENSUS_MARKER_NAME = 'loop-census.on'
 _LOOP_CENSUS_INTERVAL_SECONDS = 20.0
+# `schedule_wake` 的扫描节拍。5 秒是"唤醒到点后最多晚 5 秒"与"每分钟扫 12 次窄表"之间的取值；
+# 表是按 wake_at_ms 索引的点查，空表时这条查询不碰任何胖行（见 main/storage/sqlite_store 的 timer 段）。
+_NODE_WAKE_TIMER_POLL_SECONDS = 5.0
 _LOOP_CENSUS_SAMPLE_TASKS = 6
 _LOOP_CENSUS_TOP_SITES = 10
 # gc 全量扫一次要持 GIL 一两秒，所以池榜每 5 拍（约 100 秒）才点一次，其余拍报空列表。
@@ -984,6 +990,8 @@ class MainRuntimeService:
         self._watchdog_snapshot_flights: dict[str, asyncio.Task] = {}
         self._mem_probe = None
         self._loop_census_task = None
+        # 节点自设唤醒的扫描节拍（worker 车道）。
+        self._node_wake_timer_task: asyncio.Task[Any] | None = None
         self._worker_lease_takeover = False
         self._worker_lease_acquired = False
         self._command_poller_task: asyncio.Task[Any] | None = None
@@ -1146,6 +1154,136 @@ class MainRuntimeService:
             self._worker_heartbeat_task = asyncio.create_task(self._worker_heartbeat_loop(), name=f'main-runtime-worker-heartbeat:{self.worker_id or "worker"}')
         if self._loop_census_task is None or self._loop_census_task.done():
             self._loop_census_task = asyncio.create_task(self._loop_census_loop(), name=f'main-runtime-loop-census:{self.worker_id or "worker"}')
+        if self._node_wake_timer_task is None or self._node_wake_timer_task.done():
+            self._node_wake_timer_task = asyncio.create_task(
+                self._node_wake_timer_loop(),
+                name=f'main-runtime-node-wake-timer:{self.worker_id or "worker"}',
+            )
+
+    async def _node_wake_timer_loop(self) -> None:
+        """`schedule_wake` 的节拍：到点的唤醒投一条 `wake_timer` 通知，不在协程里等。
+
+        期限存在 `task_node_timers` 里而不是存在 `asyncio.sleep` 里，就是为了重启也认：实盘那条
+        `exec Start-Sleep 5400`（task:4555863a6a49 的报时节点）08:30 设的 10:00 被 09:02 的重启
+        打断后，恢复的模型重新发了一次完整 5400 秒，下一次到点被推成 10:33。这里没有"剩余
+        时长"可丢——扫表时 `wake_at_ms <= now` 就是一条待投递。
+        """
+        while True:
+            try:
+                await asyncio.sleep(_NODE_WAKE_TIMER_POLL_SECONDS)
+                fired = await self.sweep_due_node_wakes()
+                if fired:
+                    logger.info(f'node wake timer sweep: fired={fired}')
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - 节拍死掉等于所有已设唤醒静默失效
+                logger.warning(f'node wake timer sweep failed: {exc!r}')
+                await asyncio.sleep(_NODE_WAKE_TIMER_POLL_SECONDS * 4)
+
+    async def sweep_due_node_wakes(self) -> int:
+        """投出所有到点的节点唤醒，返回处理条数。
+
+        一条唤醒的三种结局都改得了状态且不重投：
+
+        - 节点/任务已终态或节点行没了 ⇒ 删行（否则终态任务的表会一直涨）。
+        - 节点或任务被暂停 ⇒ 落箱但不叫醒（`wake=False`）。叫醒会顺手清掉操作员按下的暂停位，
+          这条判据与 `node_mailbox.delivery_defers_wake` 给人发往暂停节点的消息同一档。
+        - 投递本身抛异常 ⇒ **不**退回领取位。留着凭证意味着下一次重试要等过
+          `_WAKE_CLAIM_STALE_MS`（2 分钟），这就是失败道唯一的退避——磁盘满一类的故障下，
+          5 秒一拍会把清扫变成热循环。
+        """
+        claim_token = str(self.worker_id or 'worker').strip() or 'worker'
+        due = self.store.claim_due_task_node_timers(
+            now_ms=wall_now_ms(),
+            claimed_by=claim_token,
+        )
+        fired = 0
+        for timer in list(due or []):
+            fired += 1
+            task_id = str(timer.task_id or '').strip()
+            node_id = str(timer.node_id or '').strip()
+            task = self.store.get_task(task_id)
+            node = self.store.get_node(node_id)
+            if task is None or node is None or str(node.status or '').strip().lower() in {'success', 'failed'}:
+                self.store.delete_task_node_timer(task_id=task_id, node_id=node_id)
+                continue
+            if str(task.status or '').strip().lower() in {'success', 'failed', 'canceled'}:
+                self.store.delete_task_node_timer(task_id=task_id, node_id=node_id)
+                continue
+            paused = (
+                bool(getattr(task, 'is_paused', False))
+                or bool(getattr(task, 'pause_requested', False))
+                or bool(getattr(node, 'is_paused', False))
+                or bool(getattr(node, 'pause_requested', False))
+            )
+            current_ms = wall_now_ms()
+            late_ms = max(0, current_ms - int(timer.wake_at_ms or 0))
+            try:
+                receipt = await self.deliver_node_message(
+                    task_id=task_id,
+                    target_node_id=node_id,
+                    message=self._node_wake_notice_text(
+                        note=str(timer.note or ''),
+                        due_ms=int(timer.wake_at_ms or 0),
+                        now_ms=current_ms,
+                        late_ms=late_ms,
+                        paused=paused,
+                    ),
+                    origin='node',
+                    system_kind=KIND_WAKE_TIMER,
+                    source_node_id=node_id,
+                    wake=not paused,
+                )
+            except Exception as exc:  # noqa: BLE001 - 凭证留着，下一拍过 stale 窗口后重试
+                logger.warning(
+                    'node wake timer delivery failed: task={} node={} wake_at_ms={} error={!r}',
+                    task_id,
+                    node_id,
+                    timer.wake_at_ms,
+                    exc,
+                )
+                continue
+            self.store.delete_task_node_timer(task_id=task_id, node_id=node_id)
+            logger.info(
+                'node wake timer fired: task={} node={} due={} late_ms={} wake={} status={}',
+                task_id,
+                node_id,
+                iso_from_ms(int(timer.wake_at_ms or 0)),
+                late_ms,
+                (not paused),
+                str(receipt.get('status') or '') if isinstance(receipt, dict) else '',
+            )
+        return fired
+
+    @staticmethod
+    def _node_wake_notice_text(
+        *,
+        note: str,
+        due_ms: int,
+        now_ms: int,
+        late_ms: int,
+        paused: bool,
+    ) -> str:
+        """唤醒通知的模型可见正文：英文，并说清"这是你自己设的"。"""
+        lines = [
+            f'Scheduled wake-up for: {note or "(no note was given)"}',
+            f'You armed it for {iso_from_ms(due_ms)}. It is now {iso_from_ms(now_ms)}.',
+        ]
+        if late_ms >= 60_000:
+            lines.append(
+                f'It fired {late_ms // 1000}s after its due time — the runtime was paused, '
+                'busy, or restarted in between. Re-check the clock before you act on any '
+                'deadline math built on the original schedule.'
+            )
+        if paused:
+            lines.append(
+                'This node is paused, so the notice is only filed here: nothing woke up. '
+                'It reaches the model when the operator resumes this node.'
+            )
+        lines.append(
+            'To keep a schedule running, arm the next wake-up now; this one is spent.'
+        )
+        return '\n'.join(lines)
 
     async def _requeue_interrupted_task(self, task_id: str) -> None:
         """引擎级中断任务的尽力即时重排（进程仍活着时）。
@@ -12382,6 +12520,7 @@ class MainRuntimeService:
         loop_tasks = [
             self._command_poller_task,
             self._worker_heartbeat_task,
+            self._node_wake_timer_task,
             self._task_disk_reconcile_task,
             self._terminal_outbox_reconcile_task,
         ]

@@ -157,6 +157,7 @@ Negi 并不是所有问题都在 CEO 单次对话内完成。frontdoor 的职责
 ### 用户消息时间锚点
 
 - 转录持久化始终保持用户原文（RAG ingest、web UI 等消费方依赖 raw content），`message_builder._history_message` 在投影历史时把记录自带的 `timestamp` 渲染为 `[消息送达时间] <本地时间 +08:00 星期>` 行追加到用户消息投影副本末尾（渲染 helper 在 `g3ku/core/timefmt.py`；heartbeat/cron 内部消息不装饰，各自携带时间锚点，见 `heartbeat-system.md`「Internal-turn time anchors」）。装饰值派生自记录固定字段而非 now()，跨回合字节稳定，不打断 provider 前缀缓存；仅"当前用户不在历史、直接追加进请求"的兜底路径用 now() 盖章，下一回合投影自动切换回记录时间。硬性规则：所有基于内容相等性的比较（当前用户匹配 `_cron_prompt_equal`、暂停回合种子对账 `_reconcile_paused_user_turns_into_seed`）必须先 `strip_arrival_time_stamp` 剥离装饰再比较，否则已装饰投影与原文不相等，会被误判为新消息造成重复注入；新增任何"按用户消息文本去重/匹配"的逻辑都适用同一规则。
+- 投影装饰只回答"这条消息当时什么时候到"，它不给模型提供"现在是几点"。需要当前时刻时的唯一出口是常驻的 `time` 工具（两条车道都无需 load，形状与判据见 `tool-and-skill-system.md`「fixed builtin tools」）；把 now() 印进头部或历史正文会逐请求顶掉可复用前缀，所以那种做法不在候选里，坑的形状见 `context-and-cache-troubleshooting.md`「用户消息时间装饰破坏前缀稳定或相等性去重」。
 
 ### `prompt_batch` 批次回合内容合并
 
@@ -322,6 +323,7 @@ worker 进程（任务执行侧）把任务态变化推给 web 进程（浏览�
 - artifacts
 - 事件历史
 - 治理状态
+- 节点自设唤醒时刻 `task_node_timers`（每个 `(task_id, node_id)` 至多一份待触发唤醒，由 worker 侧清扫投递；触发、暂停与陈旧领取的判据归 `main-task-runtime.md`「节点信箱与唤醒」）
 - 任务临时目录 `temp/tasks/task_<id>`（每个任务的 scratch 空间，路径在任务创建时写入任务 runtime meta；终态后默认保留，清理契约见「磁盘写保护与治理」）
 
 任务临时目录的根由 `MainRuntimeService._temp_root()` 解析：构造参数 `workspace_root` > 数据根（`g3ku/deployment/data_root.py`，默认等于进程 cwd，见 `operations-and-maintenance.md`「关键状态文件与目录」）。它与 `_workspace_root()` 是两条线：后者仍按 `resource_manager.workspace` 解释 skills/tools 等资源根，数据根换到别的盘不带动资源解析。该临时根既决定 `temp/tasks/` 的位置，也影响 `exec`/`filesystem` 类工具默认的 `task_temp_dir` 工作目录。需要掌握的两条维护约束：

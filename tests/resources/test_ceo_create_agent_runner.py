@@ -1274,7 +1274,13 @@ async def test_create_agent_graph_execute_tools_makes_loaded_contract_callable()
 
     assert result["next_step"] == "call_model"
     assert "hydrated_tool_names" not in result
-    assert result["tool_names"] == ["load_tool_context", "filesystem_write", "silent"]
+    assert result["tool_names"] == [
+        "load_tool_context",
+        "filesystem_write",
+        "silent",
+        "time",
+        "schedule_wake",
+    ]
     assert result["candidate_tool_names"] == ["agent_browser"]
     assert result["candidate_tool_items"] == [
         {
@@ -1403,7 +1409,7 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_contract_present_too
             "visible_skill_ids": [],
         },
         "selected_skills": [],
-        "callable_tool_names": ["load_tool_context", "filesystem_write", "silent"],
+        "callable_tool_names": ["load_tool_context", "filesystem_write", "silent", "time", "schedule_wake"],
         "candidate_tool_names": [],
         "contract_present_tool_names": ["filesystem_write"],
         # D15 的两档读数：在场那份带自己的修订与本跳暂存份数；清扫计数缺省空。
@@ -1756,6 +1762,8 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_normal_ceo_tools_for
         "task_list",
         "cron",
         "silent",
+        "time",
+        "schedule_wake",
     ]
 
 

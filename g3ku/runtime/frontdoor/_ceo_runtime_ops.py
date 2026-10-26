@@ -23,6 +23,7 @@ from g3ku.agent.tools.base import Tool
 from g3ku.config.live_runtime import get_runtime_config, peek_runtime_revision
 from g3ku.core.messages import UserInputMessage
 from g3ku.core.timefmt import render_arrival_stamp, strip_arrival_time_stamp
+from g3ku.cron.types import CronSchedule
 from g3ku.json_schema_utils import (
     normalize_runtime_tool_arguments_dict,
     sanitize_provider_parameters_schema,
@@ -117,6 +118,15 @@ from g3ku.runtime.tool_impulse import (
     staged_replay_kind,
 )
 from g3ku.runtime.tool_visibility import CEO_FIXED_BUILTIN_TOOL_NAMES, CEO_NEVER_CONTRACT_TOOL_NAMES
+from g3ku.runtime.wake_clock import (
+    WAKE_JOB_NAME_PREFIX,
+    WAKE_MESSAGE_HEAD,
+    describe_delay,
+    iso_from_ms,
+)
+from g3ku.runtime.wake_clock import (
+    now_ms as wall_now_ms,
+)
 from g3ku.runtime.web_ceo_sessions import (
     WEB_CEO_IMAGE_UPLOAD_MAX_BYTES,
     actual_request_dir_for_session,
@@ -137,7 +147,7 @@ from main.runtime.chat_backend import (
     build_prompt_cache_diagnostics,
     resolve_send_model_context_window_info,
 )
-from main.runtime.internal_tools import SilentTool
+from main.runtime.internal_tools import ScheduleWakeTool, SilentTool, TimeTool
 from main.runtime.send_token_preflight import (
     build_runtime_estimated_input_truth,
     build_runtime_hybrid_send_token_estimate,
@@ -151,7 +161,12 @@ from main.runtime.tool_call_repair import (
     extract_tool_calls_from_xml_pseudo_content,
     recover_tool_calls_from_json_payload,
 )
-from main.runtime.tool_names import SILENT_TOOL_NAME
+from main.runtime.tool_names import (
+    SCHEDULE_WAKE_TOOL_NAME,
+    SILENT_TOOL_NAME,
+    SYNTHETIC_RESIDENT_TOOL_NAMES,
+    TIME_TOOL_NAME,
+)
 from main.service.create_async_task_contract import (
     normalize_create_async_task_file_targets,
 )
@@ -3461,9 +3476,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         callable_names = [
             name
             for name in self._frontdoor_callable_tool_names_for_state(state)
-            # 控制工具是执行束里另装的合成实例（`_frontdoor_execution_bundle`），不在
+            # 常驻控制工具是执行束里另装的合成实例（`_frontdoor_execution_bundle`），不在
             # registry 里，留在这份名单只会让按名取实例空转、污染排障视图。
-            if name not in {SILENT_TOOL_NAME}
+            if name not in set(SYNTHETIC_RESIDENT_TOOL_NAMES)
         ]
         if not callable_names and "tool_names" not in state:
             return self._frontdoor_dispatch_tool_names(state)
@@ -4085,10 +4100,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 continue
             if name in present_set and name not in repair_required_set:
                 normalized.append(name)
-        # 静默收尾信号恒可调用：它是回合收尾合同的一部分，不随曝光层而消失。
-        # 缺了它模型只剩「把正文写短一点」这一种伪静默手段。
-        if SILENT_TOOL_NAME not in normalized:
-            normalized = [*normalized, SILENT_TOOL_NAME]
+        # 合成实例的常驻工具恒可调用：静默收尾、时钟与自设唤醒都是回合合同的一部分，
+        # 不随曝光层而消失。缺了静默那条模型只剩「把正文写短一点」这一种伪静默手段；
+        # 缺了时钟那条模型只能心算时刻，或白跑一次 exec 去问系统时间。
+        for forced in SYNTHETIC_RESIDENT_TOOL_NAMES:
+            if forced not in normalized:
+                normalized = [*normalized, forced]
         return normalized
 
     def _frontdoor_runtime_visible_tool_names_for_state(
@@ -4101,8 +4118,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if raw_names is None and isinstance(state, dict):
             raw_names = list(state.get("provider_tool_names") or state.get("tool_names") or [])
         normalized = self._normalized_tool_name_state_list(raw_names)
-        if SILENT_TOOL_NAME not in normalized:
-            normalized = [*normalized, SILENT_TOOL_NAME]
+        for forced in SYNTHETIC_RESIDENT_TOOL_NAMES:
+            if forced not in normalized:
+                normalized = [*normalized, forced]
         return normalized
 
     def _selected_tool_schemas(self, tool_names: list[str] | None) -> list[dict[str, Any]]:
@@ -5989,7 +6007,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         keep = self._normalized_tool_name_state_list(
             list(state.get("provider_tool_names") or [])
         ) or self._frontdoor_dispatch_tool_names(state)
-        for forced in (SILENT_TOOL_NAME,):
+        for forced in SYNTHETIC_RESIDENT_TOOL_NAMES:
             if forced not in keep:
                 keep.append(forced)
         keep_names = [str(name or "").strip() for name in keep if str(name or "").strip()]
@@ -6563,7 +6581,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         registered_tools = self._registered_tools_for_state(state)
         all_tools = {
             **registered_tools,
-            SILENT_TOOL_NAME: SilentTool(),
+            **self._frontdoor_resident_tools(state=state, runtime=runtime),
         }
         # 声明面与准入面分源：schema 用的实例按钉住的派发名单单独解析（同一道
         # `_frontdoor_provider_visible_tool_names` 契约投影校验），控制工具复用同一份
@@ -6574,7 +6592,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     self._frontdoor_dispatch_tool_names(state)
                 )
             ),
-            SILENT_TOOL_NAME: all_tools[SILENT_TOOL_NAME],
+            **self._frontdoor_resident_tools(state=state, runtime=runtime),
         }
         runtime_context = self._build_tool_runtime_context(state=state, runtime=runtime)
         return FrontdoorExecutionBundle(
@@ -6583,6 +6601,110 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             runtime_context=runtime_context,
             on_progress=runtime_context.get("on_progress"),
         )
+
+    def _frontdoor_resident_tools(
+        self,
+        *,
+        state: CeoGraphState,
+        runtime: CeoRuntime,
+    ) -> dict[str, Any]:
+        """合成实例的常驻工具：不在 registry、不在治理表，所以只能在这里就地装进来。
+
+        同一个名字必须同时出现在 `visible_tools`（执行侧解析实例）与 `declared_tools`
+        （`tools[]` 渲参数表），并且被 `_frontdoor_*` 那几条恒定点名走到 callable/visible
+        名单——四处少任何一处，症状都是"模型看得见名字却调不动"或"从不使用它"。
+        """
+        return {
+            SILENT_TOOL_NAME: SilentTool(),
+            TIME_TOOL_NAME: TimeTool(),
+            SCHEDULE_WAKE_TOOL_NAME: ScheduleWakeTool(
+                lambda **payload: self._frontdoor_schedule_wake(state=state, runtime=runtime, **payload)
+            ),
+        }
+
+    async def _frontdoor_schedule_wake(
+        self,
+        *,
+        state: CeoGraphState,
+        runtime: CeoRuntime,
+        wake_at_ms: int = 0,
+        note: str = '',
+    ) -> dict[str, Any]:
+        """前门车道的 `schedule_wake`：一条绑在本会话上的一次性 cron 任务。
+
+        不自己排协程等，是因为 cron 那条道已经有耐久存储、到点自愈重臂、至多一次投递与
+        重启后的过期补投（见 `docs/architecture/heartbeat-system.md`「Cron Reminder
+        Contract」）；再写一份会话侧计时器只是多一个会吞掉唤醒的地方。节点车道不能用它：
+        `CronService` 只在 web 进程里跑，而节点活在 worker。
+
+        "重新设就是覆盖"靠 `WAKE_JOB_NAME_PREFIX` 先摘掉本会话仍待触发的那一份 —— 不然
+        一个每 40 分钟推进一次的报时回合会攒出一串闹钟。
+        """
+        moment = int(wake_at_ms or 0)
+        if moment <= 0:
+            return {'error': 'wake_at_ms_required'}
+        cron_service = getattr(self._loop, "cron_service", None)
+        add_job = getattr(cron_service, "add_job", None)
+        if not callable(add_job):
+            # 调度器不在（CLI 起的会话、或 cron 被关掉）时给一句可读的失败，而不是
+            # "armed": true 却永远不会响——那是最难查的一种形状。
+            return {'error': 'wake_scheduler_unavailable'}
+        session = runtime.context.session
+        session_key = str(getattr(getattr(session, "state", None), "session_key", "") or "").strip()
+        channel = str(getattr(session, "_channel", "cli") or "cli")
+        chat_id = str(getattr(session, "_chat_id", session_key) or session_key)
+        self._retire_frontdoor_wake_jobs(
+            cron_service,
+            session_key=session_key,
+        )
+        body = f'{WAKE_MESSAGE_HEAD} {str(note or "").strip()}'.strip()
+        try:
+            job = add_job(
+                name=f'{WAKE_JOB_NAME_PREFIX}{str(note or "").strip()[:24]}',
+                schedule=CronSchedule(kind="at", at_ms=moment),
+                message=body,
+                deliver=True,
+                channel=channel,
+                to=chat_id,
+                session_key=session_key or None,
+                max_runs=1,
+                delete_after_run=True,
+            )
+        except ValueError as exc:
+            return {'error': str(exc)}
+        return {
+            'scope': 'session',
+            'wake_at': iso_from_ms(moment),
+            'epoch_ms': moment,
+            'from_now': describe_delay(wake_at_ms=moment, current_ms=wall_now_ms()),
+            'wake_id': str(getattr(job, "id", "") or "").strip(),
+        }
+
+    def _retire_frontdoor_wake_jobs(self, cron_service: Any, *, session_key: str) -> int:
+        """摘掉本会话仍待触发的自设闹钟，返回摘掉的条数。
+
+        只认 `WAKE_JOB_NAME_PREFIX` 这一族且 `kind == 'at'`：给用户的定时提醒、别的工作
+        建的周期任务都不在射程里。
+        """
+        list_jobs = getattr(cron_service, "list_jobs", None)
+        remove_job = getattr(cron_service, "remove_job", None)
+        if not callable(list_jobs) or not callable(remove_job):
+            return 0
+        removed = 0
+        for job in list(list_jobs(include_disabled=False) or []):
+            name = str(getattr(job, "name", "") or "")
+            if not name.startswith(WAKE_JOB_NAME_PREFIX):
+                continue
+            if str(getattr(getattr(job, "schedule", None), "kind", "") or "") != "at":
+                continue
+            payload = getattr(job, "payload", None)
+            job_session = str(getattr(payload, "session_key", "") or "").strip()
+            if session_key and job_session and job_session != session_key:
+                continue
+            job_id = str(getattr(job, "id", "") or "").strip()
+            if job_id and remove_job(job_id):
+                removed += 1
+        return removed
 
     @staticmethod
     def _model_response_view(message: dict[str, Any]) -> Any:

@@ -6134,6 +6134,8 @@ async def test_ceo_frontdoor_prepare_turn_heartbeat_inherits_previous_tool_state
         "task_list",
         "filesystem_write",
         "silent",
+        "time",
+        "schedule_wake",
     ]
     assert state_update["frontdoor_selection_debug"]["candidate_tool_names"] == ["web_fetch"]
     assert state_update["frontdoor_selection_debug"]["contract_present_tool_names"] == ["filesystem_write"]
@@ -6169,7 +6171,7 @@ async def test_ceo_frontdoor_prepare_turn_heartbeat_inherits_previous_tool_state
     contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
     assert (
         list(state_update["frontdoor_selection_debug"]["callable_tool_names"])
-        == ["create_async_task", "task_list", "filesystem_write", "silent"]
+        == ["create_async_task", "task_list", "filesystem_write", "silent", "time", "schedule_wake"]
     )
     # D11：callable 不再渲成模型可见的一行，上一跳继承来的那份只在上面的读数里可见。
     assert "callable_tools:" not in contract_text
@@ -6359,6 +6361,8 @@ async def test_ceo_frontdoor_prepare_turn_cron_inherits_previous_tool_state_with
         "task_list",
         "filesystem_write",
         "silent",
+        "time",
+        "schedule_wake",
     ]
     assert state_update["frontdoor_selection_debug"]["candidate_tool_names"] == ["web_fetch"]
     assert state_update["frontdoor_selection_debug"]["contract_present_tool_names"] == ["filesystem_write"]
@@ -6427,7 +6431,7 @@ async def test_ceo_frontdoor_prepare_turn_cron_inherits_previous_tool_state_with
     contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
     assert (
         list(state_update["frontdoor_selection_debug"]["callable_tool_names"])
-        == ["create_async_task", "task_list", "filesystem_write", "silent"]
+        == ["create_async_task", "task_list", "filesystem_write", "silent", "time", "schedule_wake"]
     )
     # D11：callable 不再渲成模型可见的一行，上一跳继承来的那份只在上面的读数里可见。
     assert "callable_tools:" not in contract_text
@@ -7270,7 +7274,14 @@ def test_context_assembly_always_keeps_tool_execution_control_tools_visible() ->
     assert "wait_tool_execution" not in selected
     assert "create_async_task" in selected
     # RESERVED 排在最前，FIXED 其次，在场名随后：常驻名不靠被选中，也不要求契约块在场。
-    assert selected == ["stop_tool_execution", "create_async_task", "skill-installer", "silent"]
+    assert selected == [
+        "stop_tool_execution",
+        "create_async_task",
+        "skill-installer",
+        "silent",
+        "time",
+        "schedule_wake",
+    ]
 
 
 def _prepare_turn_batch_harness(monkeypatch, tmp_path: Path, *, capture_builder: dict | None = None):
