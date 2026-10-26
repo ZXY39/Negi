@@ -103,6 +103,22 @@ def _strip_sticker_markers_for_stream(text: str) -> str:
 
     cleaned = strip_markers_for_stream(text)
     return cleaned if isinstance(cleaned, str) else text
+
+
+def _render_assistant_media(session_id: str, text: Any) -> Any:
+    """Resolve sticker markers and stage local media for any user-visible render.
+
+    The live final frame, the in-flight snapshot and a replayed transcript row
+    all need the same result: markers gone, images inlined through the media
+    layer. Selection is deterministic in the reply text, so resolving twice (for
+    the plain-text preview and again here) cannot pick two different images.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return text
+    cleaned, paths = _resolve_sticker_markers(text)
+    if paths:
+        cleaned = cleaned + "".join(f"\n\n![]({path})" for path in paths)
+    return rewrite_assistant_media_content(session_id, cleaned)
 # 静默回合的历史占位文案：存量转录里仍带这一行，快照层按静默归一化后不显示到会话框。
 _LEGACY_SILENT_REPLY_TEXT = "信息已静默"
 _APPROVAL_INTERRUPT_KINDS = {
@@ -923,7 +939,7 @@ def _rewrite_turn_snapshot_media(
         snapshot = dict(snapshot)
         text = snapshot.get('assistant_text')
         if isinstance(text, str):
-            snapshot['assistant_text'] = rewrite_assistant_media_content(session_id, text)
+            snapshot['assistant_text'] = _render_assistant_media(session_id, text)
     return snapshot
 
 
@@ -1117,7 +1133,7 @@ def _build_ceo_snapshot(
             if isinstance(raw_text, str) and isinstance(metadata.get('web_ceo_uploads'), list):
                 content = raw_text
         if role == 'assistant' and session_id:
-            content = rewrite_assistant_media_content(session_id, content)
+            content = _render_assistant_media(session_id, content)
         attachments = _normalize_snapshot_attachments(raw, session_id) if role == 'user' else []
         compression = (
             dict(raw.get('compression'))
@@ -1852,12 +1868,9 @@ async def ceo_websocket(websocket: WebSocket):
             # 静默回合不再抹正文：那正文就是给模型的痕迹，也是前端折叠行「展开」要显示的
             # 内容。不外发由 silent_reply flag 决定（外部渠道与 cron 各自据它闸门），
             # 不再靠把文本清空。
-            text = str(payload.get('text') or '').strip()
-            text, sticker_paths = _resolve_sticker_markers(text)
-            if sticker_paths:
-                # 网页车道用 markdown 呈现图片，追加在正文之后交给媒体层换缩略图
-                # （动图在 P0-3 之后直接走签名原图）。
-                text = text + "".join(f"\n\n![]({path})" for path in sticker_paths)
+            raw_text = str(payload.get('text') or '').strip()
+            # 预览与用量按"不含标记的纯文本"算；图片由 _render_assistant_media 在渲染处补。
+            text, _sticker_paths = _resolve_sticker_markers(raw_text)
             silent_reason = str(payload.get('silent_reason') or '').strip()
             source = str(payload.get('source') or 'user').strip().lower() or 'user'
             turn_id = str(payload.get('turn_id') or '').strip()
@@ -1883,7 +1896,7 @@ async def ceo_websocket(websocket: WebSocket):
             await _push_stream_event(
                 'ceo.reply.final',
                 {
-                    'text': rewrite_assistant_media_content(session_id, text),
+                    'text': _render_assistant_media(session_id, raw_text),
                     'source': source,
                     'turn_id': turn_id,
                     **({'silent_reply': True} if silent_reply else {}),

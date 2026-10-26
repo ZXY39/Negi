@@ -672,8 +672,14 @@ def summarize_session_title(text: str, *, max_chars: int = 24) -> str:
     return f"{compact[: max_chars - 1].rstrip()}…"
 
 
+_PREVIEW_MEDIA_RE = re.compile(r"!?\[[^\]]*\]\([^)]*\)")
+
+
 def summarize_preview_text(text: str, *, max_chars: int = 96) -> str:
-    compact = " ".join(str(text or "").split()).strip()
+    # 预览是一行纯文本：图片/链接的 markdown 目标在这里没有意义，只会把
+    # `![](D:\...)` 这种本地路径摊到会话列表上。
+    stripped = _PREVIEW_MEDIA_RE.sub(" ", str(text or ""))
+    compact = " ".join(stripped.split()).strip()
     if not compact:
         return ""
     if len(compact) <= max_chars:
