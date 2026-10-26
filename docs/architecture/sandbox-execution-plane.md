@@ -35,8 +35,33 @@
 - 空会话键（无会话上下文的装配、CLI、检查实例）按 `host_full` 处理：外部渠道的每一轮
   都带 `ext:` 键，走不到这一支；按第三方处理会让所有无会话的装配路径失去工具。
 
-本层当前只解析出 `readonly` 与 `host_full`；jail 后端作为后续阶段接入，
-届时 `resolve_tier` 的 `jailed` 分支生效，工具面与读根判据不变。
+本层解析出 `readonly` 与 `host_full`；`jailed` 的分支在 `resolve_tier` 里已经写好，
+但要等 jail 后端（manager + router）接进执行道、`JAIL_BACKENDS_AVAILABLE` 打开之后才会发放。
+在那之前工具面与读根判据已经就位，接后端只改这一处开关。
+
+## 档位存储与 API
+
+- **意图存储**：`<数据根>/sandbox/session-modes.json`，进程内缓存、变更时整份原子落盘。
+  换工作区不丢开关；每回合解析只读内存。`operator_unlocks` 同文件记"谁在什么时候用口令
+  把会话放到 `unrestricted`"。
+- **安装态**：`g3ku/sandbox/probe.py` 探测（Windows 查 WSL 发行版、Linux 查 bwrap 与
+  非特权 userns、macOS 查 `sandbox-exec`、任意平台回退容器运行时），结论按逐维度强制力
+  上报并缓存在进程内；`POST /api/sandbox/refresh` 才重探。
+- **`JAIL_BACKENDS_AVAILABLE` 是 fail-closed 闸门**：jail 后端接进执行道之前恒为 False，
+  `resolve_tier` 即便读到 `ready` 也只发 `readonly`——安装态好看但没人看守的数据面不发。
+
+端点（`/api` 前缀，与其它 CEO 会话端点同层）：
+
+| 端点 | 契约 |
+|---|---|
+| `GET /api/ceo/sessions/{id}/sandbox` | 返回 `{trust, mode, stored_mode, default_mode, resolved_tier, tier_label, install_state, backend, enforcement, ui_labels, unlock_required, operator_unlock, tasks_allowed}` |
+| `PATCH /api/ceo/sessions/{id}/sandbox` | 只改意图：`{mode, unlock_password?}`；第三方会话切 `unrestricted` 必须带项目解锁口令，服务端用 `unwrap_with_password` **只读**校验（不顺便解锁项目），通过后记 `operator_unlock` + 审计；返回体带 `effective_from: "next_turn"` |
+| `GET /api/sandbox/status` | 全局安装态、后端、逐维度强制力、`ui_labels`；`?refresh=1` 重探 |
+| `POST /api/sandbox/refresh` | 重探并返回新读数 |
+
+`ui_labels` 由服务端按安装态给出（未安装「只读 / 全权限」、已安装「开启沙箱 / 关闭沙箱」），
+前端不自己判安装态。文件管理一族端点只在安装态 `ready` / `partial` 时有意义，当前
+`install_available` 恒为 false（安装器属于后续阶段）。
 
 ## 信任分级
 

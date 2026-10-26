@@ -1,0 +1,206 @@
+"""沙箱档位 API：会话级开关 + 安装态读数。
+
+契约 owner：``docs/architecture/sandbox-execution-plane.md``「档位模型（意图 × 安装态）」。
+
+- `GET  /api/ceo/sessions/{id}/sandbox` —— 当前意图、解析出的档位、安装态、逐维度强制力，
+  以及**服务端给出的 UI 标签**（前端不自己判安装态，避免两处口径漂移）。
+- `PATCH /api/ceo/sessions/{id}/sandbox` —— 只改意图；第三方会话切 `unrestricted`
+  必须带项目解锁口令（服务端只读校验，不顺便解锁项目）。
+- `GET  /api/sandbox/status` —— 全局安装态与后端读数（进程内缓存，`?refresh=1` 重探）。
+- `POST /api/sandbox/refresh` —— 重探安装态。
+
+沙箱页面里的文件/包/磁盘一族端点属于 jail 后端落地之后的事，本模块不提供——
+没有后端时"管理沙箱内容"没有对象可管。
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import APIRouter, Body, HTTPException, Query
+from loguru import logger
+
+from g3ku.audit_events import emit_audit_event
+from g3ku.runtime.external_sessions import get_external_session_registry
+from g3ku.runtime.session_trust import TRUST_OWNER, session_trust
+from g3ku.sandbox.policy import (
+    MODE_RESTRICTED,
+    MODE_UNRESTRICTED,
+    TIER_HOST_FULL,
+    TIER_JAILED,
+    TIER_READONLY,
+    default_mode_for_trust,
+    session_policy,
+)
+from g3ku.sandbox.state import (
+    get_session_mode,
+    install_state,
+    install_state_name,
+    note_operator_unlock,
+    operator_unlock_note,
+    refresh_install_state,
+    set_session_mode,
+)
+
+router = APIRouter()
+
+_LABELS_NOT_INSTALLED = {"restricted": "只读", "unrestricted": "全权限"}
+_LABELS_INSTALLED = {"restricted": "开启沙箱", "unrestricted": "关闭沙箱"}
+_TIER_LABELS = {
+    TIER_READONLY: "只读",
+    TIER_JAILED: "沙箱",
+    TIER_HOST_FULL: "宿主全权限",
+}
+
+
+def _normalized_mode(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if raw not in {MODE_RESTRICTED, MODE_UNRESTRICTED}:
+        raise HTTPException(status_code=400, detail="sandbox_mode_invalid")
+    return raw
+
+
+def _ui_labels(reading: dict[str, Any]) -> dict[str, str]:
+    state = str(reading.get("state") or "")
+    if state in {"ready", "partial"}:
+        return dict(_LABELS_INSTALLED)
+    return dict(_LABELS_NOT_INSTALLED)
+
+
+def _session_exists(session_key: str) -> bool:
+    if not session_key:
+        return False
+    try:
+        if get_external_session_registry().get_by_session_key(session_key) is not None:
+            return True
+    except Exception:  # noqa: BLE001 - 注册表不可读时退回转录判定
+        pass
+    if session_key.startswith("web:"):
+        # 本地会话键由前端自由生成，没有"注册"这一步；存在性由目录接口负责。
+        return True
+    try:
+        from g3ku.runtime.api.external_v1 import _session_manager
+
+        return _session_manager().has_transcript(session_key)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _session_item(session_key: str) -> dict[str, Any]:
+    reading = install_state()
+    policy = session_policy(session_key)
+    stored_mode = get_session_mode(session_key)
+    unlock_note = operator_unlock_note(session_key)
+    return {
+        "session_id": session_key,
+        "trust": policy.trust,
+        "mode": policy.mode,
+        "stored_mode": stored_mode,
+        "default_mode": default_mode_for_trust(policy.trust),
+        "resolved_tier": policy.tier,
+        "tier_label": _TIER_LABELS.get(policy.tier, policy.tier),
+        "install_state": str(reading.get("state") or ""),
+        "backend": str(reading.get("backend") or ""),
+        "enforcement": dict(reading.get("enforcement") or {}),
+        "install_detail": dict(reading.get("detail") or {}),
+        "ui_labels": _ui_labels(reading),
+        # 第三方会话切 unrestricted 必须带口令；owner 不需要。
+        "unlock_required": session_trust(session_key) != TRUST_OWNER,
+        "operator_unlock": unlock_note,
+        # 受限档不派任务：UI 用它来决定任务按钮的可用性提示。
+        "tasks_allowed": policy.tier == TIER_HOST_FULL,
+    }
+
+
+def _verify_unlock_password(password: str) -> bool:
+    """只读校验：解得开本机信封即通过，不激活、不落盘。"""
+    clean = str(password or "")
+    if not clean:
+        return False
+    try:
+        from g3ku.security.bootstrap import get_bootstrap_security_service
+
+        service = get_bootstrap_security_service()
+        return bool(service.unwrap_with_password(clean))
+    except Exception as exc:  # noqa: BLE001 - 校验器故障按失败处理
+        logger.warning("sandbox unlock password check failed: {}", exc)
+        return False
+
+
+@router.get("/ceo/sessions/{session_id}/sandbox")
+async def get_session_sandbox(session_id: str):
+    key = str(session_id or "").strip()
+    if not _session_exists(key):
+        raise HTTPException(status_code=404, detail="session_not_found")
+    return {"ok": True, "item": _session_item(key)}
+
+
+@router.patch("/ceo/sessions/{session_id}/sandbox")
+async def patch_session_sandbox(session_id: str, payload: dict = Body(...)):
+    key = str(session_id or "").strip()
+    if not _session_exists(key):
+        raise HTTPException(status_code=404, detail="session_not_found")
+    mode = _normalized_mode(payload.get("mode"))
+    trust = session_trust(key)
+    if mode == MODE_UNRESTRICTED and trust != TRUST_OWNER:
+        password = str(payload.get("unlock_password") or payload.get("unlockPassword") or "")
+        if not password:
+            raise HTTPException(status_code=403, detail="unlock_password_required")
+        if not _verify_unlock_password(password):
+            raise HTTPException(status_code=403, detail="unlock_password_invalid")
+        from datetime import datetime
+
+        note_operator_unlock(key, at=datetime.now().astimezone().isoformat(), by="operator")
+    set_session_mode(key, mode)
+    # 档位只在回合边界生效：这里只落意图，正在跑的回合不受影响。
+    item = _session_item(key)
+    item["effective_from"] = "next_turn"
+    try:
+        emit_audit_event(
+            "sandbox",
+            "info",
+            "mode_changed",
+            "session sandbox mode changed",
+            detail={
+                "session_id": key,
+                "mode": mode,
+                "tier": item.get("resolved_tier"),
+                "trust": item.get("trust"),
+                "unlocked": bool(item.get("operator_unlock")),
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 - 审计失败不阻塞开关
+        logger.warning("sandbox mode audit emit failed: {}", exc)
+    return {"ok": True, "item": item}
+
+
+@router.get("/sandbox/status")
+async def get_sandbox_status(refresh: int = Query(0)):
+    reading = refresh_install_state() if int(refresh or 0) else install_state()
+    return {
+        "ok": True,
+        "item": {
+            "install_state": str(reading.get("state") or ""),
+            "backend": str(reading.get("backend") or ""),
+            "reason": str(reading.get("reason") or ""),
+            "enforcement": dict(reading.get("enforcement") or {}),
+            "detail": dict(reading.get("detail") or {}),
+            "ui_labels": _ui_labels(reading),
+            # 安装/卸载入口属于安装器（P1b）；没有后端时这里如实说没有对象可管。
+            "install_available": False,
+            "file_management_available": str(reading.get("state") or "") in {"ready", "partial"},
+        },
+    }
+
+
+@router.post("/sandbox/refresh")
+async def post_sandbox_refresh():
+    reading = refresh_install_state()
+    return {
+        "ok": True,
+        "item": {
+            "install_state": install_state_name(),
+            "backend": str(reading.get("backend") or ""),
+            "enforcement": dict(reading.get("enforcement") or {}),
+        },
+    }

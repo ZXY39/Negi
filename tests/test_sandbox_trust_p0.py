@@ -155,7 +155,12 @@ def test_unknown_external_session_fails_closed(registry) -> None:
     ],
 )
 def test_tier_matrix(trust: str, mode: str, install: str, expected: str) -> None:
-    assert resolve_tier(trust=trust, mode=mode, install_state=install) == expected
+    # `jail_available=True` 模拟 P1a 后端接进执行道之后的状态；默认（未接后端时）
+    # 永不发放 jailed，见 test_jailed_is_never_granted_without_backends。
+    assert (
+        resolve_tier(trust=trust, mode=mode, install_state=install, jail_available=True)
+        == expected
+    )
 
 
 def test_default_mode_follows_trust() -> None:

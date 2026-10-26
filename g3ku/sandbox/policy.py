@@ -49,6 +49,11 @@ INSTALL_READY = "ready"
 
 ALL_TIERS: tuple[str, ...] = (TIER_HOST_FULL, TIER_READONLY, TIER_JAILED)
 
+# jail 后端（bwrap / seatbelt / wsl_bwrap / container 的 manager + router）接进执行道
+# 之前，`jailed` 一律不发放：安装态可以是 `ready`，但没有后端就意味着没有隔离，
+# 这时把会话放进 jailed 等于给它开数据面而没有人看守。P1a 落地时改这一处。
+JAIL_BACKENDS_AVAILABLE = False
+
 # third_party 只读档的白名单。**加工具要连"它读什么根"一起声明**：
 # 名单里的读类工具都受 `fs_read_roots` 约束（见 `g3ku/utils/path_roots.py`）。
 READONLY_THIRD_PARTY_TOOL_NAMES: frozenset[str] = frozenset(
@@ -114,11 +119,22 @@ def default_mode_for_trust(trust: Any) -> str:
     return MODE_UNRESTRICTED if normalize_trust(trust) == TRUST_OWNER else MODE_RESTRICTED
 
 
-def resolve_tier(*, trust: Any, mode: Any, install_state: Any) -> str:
+def resolve_tier(
+    *,
+    trust: Any,
+    mode: Any,
+    install_state: Any,
+    jail_available: bool | None = None,
+) -> str:
     """意图 × 安装态 → 实际执行面。"""
     normalized_mode = str(mode or "").strip().lower()
     if normalized_mode != MODE_RESTRICTED:
         return TIER_HOST_FULL
+    if jail_available is None:
+        jail_available = JAIL_BACKENDS_AVAILABLE
+    if not jail_available:
+        # 后端没接进执行道：安装态再好看也只给只读档，绝不发放无人看守的数据面。
+        return TIER_READONLY
     install = str(install_state or "").strip().lower() or INSTALL_NOT_INSTALLED
     if install == INSTALL_READY:
         return TIER_JAILED
@@ -183,9 +199,9 @@ def session_policy(
     session_key: Any,
     *,
     mode: Any = None,
-    install_state: Any = INSTALL_NOT_INSTALLED,
+    install_state: Any = None,
 ) -> SessionPolicy:
-    """按会话键解析策略。注册表是进程内内存表，这里没有磁盘 I/O。
+    """按会话键解析策略。模式与安装态都走进程内缓存，这里没有磁盘 I/O。
 
     空会话键 = 没有会话上下文（测试装配、CLI、内部检查），按不受限处理。这是安全的：
     外部渠道的每一轮都必然带 ``ext:`` 键，走不到这一支；而把它按第三方处理会让
@@ -203,8 +219,8 @@ def session_policy(
     trust = session_trust(raw_key)
     normalized_mode = str(mode or "").strip().lower()
     if normalized_mode not in {MODE_RESTRICTED, MODE_UNRESTRICTED}:
-        normalized_mode = default_mode_for_trust(trust)
-    install = str(install_state or "").strip().lower() or INSTALL_NOT_INSTALLED
+        normalized_mode = _stored_mode(raw_key) or default_mode_for_trust(trust)
+    install = str(install_state or "").strip().lower() or _probed_install_state()
     return SessionPolicy(
         session_key=raw_key,
         trust=trust,
@@ -212,6 +228,29 @@ def session_policy(
         install_state=install,
         tier=resolve_tier(trust=trust, mode=normalized_mode, install_state=install),
     )
+
+
+def _stored_mode(session_key: str) -> str:
+    # 惰性导入：`state` 依赖本模块的常量，模块级导入会成环。
+    try:
+        from g3ku.sandbox.state import get_session_mode
+    except Exception:  # noqa: BLE001
+        return ""
+    try:
+        return get_session_mode(session_key)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _probed_install_state() -> str:
+    try:
+        from g3ku.sandbox.state import install_state_name
+    except Exception:  # noqa: BLE001
+        return INSTALL_NOT_INSTALLED
+    try:
+        return install_state_name()
+    except Exception:  # noqa: BLE001
+        return INSTALL_NOT_INSTALLED
 
 
 __all__ = [
