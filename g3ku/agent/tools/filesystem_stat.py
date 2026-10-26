@@ -16,6 +16,7 @@ from typing import Any
 
 from g3ku.agent.tools.base import Tool
 from g3ku.utils.helpers import model_data_root, resolve_model_path
+from g3ku.utils.path_roots import enforce_roots, runtime_read_roots
 
 # 目录聚合的上限：防御病态目录树，同时保证正常交付目录（数百文件）一次调用即可测全。
 _MAX_SCAN_FILES = 200_000
@@ -93,8 +94,14 @@ class FilesystemStatTool(Tool):
         runtime = __g3ku_runtime if isinstance(__g3ku_runtime, dict) else None
         entry_cap = max(1, min(int(max_entries or _DEFAULT_MAX_ENTRIES), _MAX_ENTRIES_LIMIT))
         temp_root = self._runtime_temp_root(runtime)
+        roots = runtime_read_roots(runtime)
         items = [
-            self._measure_one(str(raw or "").strip(), entry_cap=entry_cap, temp_root=temp_root)
+            self._measure_one(
+                str(raw or "").strip(),
+                entry_cap=entry_cap,
+                temp_root=temp_root,
+                roots=roots,
+            )
             for raw in list(paths or [])
         ]
         items = [item for item in items if item]
@@ -115,11 +122,18 @@ class FilesystemStatTool(Tool):
             "measured_at": datetime.now().isoformat(timespec="seconds"),
         }
 
-    def _measure_one(self, raw_path: str, *, entry_cap: int, temp_root: Path | None = None) -> dict[str, Any] | None:
+    def _measure_one(
+        self,
+        raw_path: str,
+        *,
+        entry_cap: int,
+        temp_root: Path | None = None,
+        roots: tuple[Path, ...] = (),
+    ) -> dict[str, Any] | None:
         if not raw_path:
             return None
         try:
-            target = self._resolve_path(raw_path, temp_root=temp_root)
+            target = self._resolve_path(raw_path, temp_root=temp_root, roots=roots)
         except PermissionError as exc:
             return {"path": raw_path, "exists": False, "error": str(exc)}
         item: dict[str, Any] = {"path": str(target)}
@@ -224,7 +238,12 @@ class FilesystemStatTool(Tool):
         except Exception:
             return None
 
-    def _resolve_path(self, raw_path: str, temp_root: Path | None = None) -> Path:
+    def _resolve_path(
+        self,
+        raw_path: str,
+        temp_root: Path | None = None,
+        roots: tuple[Path, ...] = (),
+    ) -> Path:
         candidate = resolve_model_path(
             raw_path,
             workspace=self._workspace,
@@ -232,6 +251,8 @@ class FilesystemStatTool(Tool):
             data_root=model_data_root(),
         )
         resolved = candidate.resolve()
+        if roots:
+            return enforce_roots(resolved, roots, label="path")
         if self._allowed_dir is not None:
             try:
                 resolved.relative_to(self._allowed_dir.resolve())

@@ -9,6 +9,16 @@ from typing import Any
 from g3ku.core.results import ContentEnvelope, ContentHandle
 from g3ku.runtime.tool_contract_block import contract_text_length
 from g3ku.utils.helpers import model_data_root, resolve_model_path
+from g3ku.utils.path_roots import (
+    current_read_roots,
+    enforce_roots,
+    normalize_roots,
+    runtime_read_roots,
+)
+
+
+def _normalized_roots(value: Any) -> tuple[Path, ...]:
+    return normalize_roots(value)
 
 INLINE_CHAR_LIMIT = 6000
 DEFAULT_OPEN_LINES = 80
@@ -632,13 +642,33 @@ class ContentNavigationService:
         *,
         workspace: Path,
         allowed_dir: Path | None = None,
+        allowed_roots: Any = None,
         artifact_store: Any = None,
         artifact_lookup: Any = None,
     ) -> None:
         self._workspace = Path(workspace).resolve()
         self._allowed_dir = Path(allowed_dir).resolve() if allowed_dir is not None else None
+        # 档位根清单（只读档）：非空时优先于 `allowed_dir`，且是**多根**。
+        self._allowed_roots = _normalized_roots(allowed_roots)
         self._artifact_store = artifact_store
         self._artifact_lookup = artifact_lookup
+
+    @property
+    def allowed_roots(self) -> tuple[Path, ...]:
+        return self._allowed_roots
+
+    def with_runtime_roots(self, runtime: dict[str, Any] | None) -> "ContentNavigationService":
+        """按当次调用的档位根派生一个新实例（工具实例是共享的，不能就地改）。"""
+        roots = runtime_read_roots(runtime)
+        if not roots or roots == self._allowed_roots:
+            return self
+        return ContentNavigationService(
+            workspace=self._workspace,
+            allowed_dir=None,
+            allowed_roots=roots,
+            artifact_store=self._artifact_store,
+            artifact_lookup=self._artifact_lookup,
+        )
 
     def maybe_externalize_text(
         self,
@@ -1698,6 +1728,9 @@ class ContentNavigationService:
             data_root=model_data_root(),
         )
         resolved = candidate.resolve()
+        roots = self._allowed_roots or current_read_roots()
+        if roots:
+            return enforce_roots(resolved, roots, label="path")
         if self._allowed_dir is not None:
             try:
                 resolved.relative_to(self._allowed_dir)
@@ -1713,6 +1746,9 @@ class ContentNavigationService:
             raise ValueError(f"content ref must be passed via ref, not path: {path}")
         candidate = Path(raw).expanduser()
         resolved = (self._workspace / candidate).resolve() if not candidate.is_absolute() else candidate.resolve()
+        roots = self._allowed_roots or current_read_roots()
+        if roots:
+            return enforce_roots(resolved, roots, label="path")
         if self._allowed_dir is not None:
             try:
                 resolved.relative_to(self._allowed_dir)

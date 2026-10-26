@@ -14,6 +14,7 @@ from g3ku.deployment.data_root import data_g3ku_path, data_work_path
 from g3ku.resources.tool_settings import FilesystemToolSettings, runtime_tool_settings
 from g3ku.runtime.project_environment import apply_project_environment
 from g3ku.utils.helpers import model_data_root, resolve_model_path
+from g3ku.utils.path_roots import current_read_roots, enforce_roots
 from g3ku.utils.process_tree import kill_process_tree
 from g3ku.utils.subprocess_text import decode_subprocess_output, enrich_subprocess_env_for_text
 
@@ -92,6 +93,9 @@ def _resolve_path(
         data_root=model_data_root(),
     )
     resolved = candidate.resolve()
+    roots = current_read_roots()
+    if roots:
+        return enforce_roots(resolved, roots)
     if allowed_dir is not None:
         try:
             resolved.relative_to(allowed_dir.resolve())

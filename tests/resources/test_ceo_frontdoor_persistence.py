@@ -666,6 +666,9 @@ def test_ceo_frontdoor_approval_request_respects_enabled_flag() -> None:
         "submission_mode": "batch_submit_only",
         # 会话键决定这一批有没有人可批；web 会话有审批界面。
         "channel_session": False,
+        # 空会话键 = 无会话上下文，按不受限处理（见 sandbox.policy.session_policy）。
+        "auto_reject": False,
+        "policy_tier": "host_full",
         "tool_calls": [
             {"id": "call-low-1", "name": "content_open", "arguments": {"path": "/tmp/a"}},
             {"id": "call-risk-1", "name": "create_async_task", "arguments": {"task": "demo"}},
@@ -676,12 +679,14 @@ def test_ceo_frontdoor_approval_request_respects_enabled_flag() -> None:
                 "tool_call_id": "call-risk-1",
                 "name": "create_async_task",
                 "risk_level": "high",
+                "reason": "approval",
                 "arguments": {"task": "demo"},
             },
             {
                 "tool_call_id": "call-risk-2",
                 "name": "exec",
                 "risk_level": "high",
+                "reason": "approval",
                 "arguments": {"command": "echo hi"},
             },
         ],
@@ -722,6 +727,8 @@ def test_ceo_frontdoor_approval_request_uses_dynamic_governance_risk_map() -> No
         "mode": "regulatory_review",
         "submission_mode": "batch_submit_only",
         "channel_session": False,
+        "auto_reject": False,
+        "policy_tier": "host_full",
         "tool_calls": [
             {"id": "call-low-1", "name": "content_open", "arguments": {"path": "/tmp/a"}},
             {"id": "call-risk-1", "name": "exec", "arguments": {"command": "echo hi"}},
@@ -732,12 +739,14 @@ def test_ceo_frontdoor_approval_request_uses_dynamic_governance_risk_map() -> No
                 "tool_call_id": "call-risk-1",
                 "name": "exec",
                 "risk_level": "high",
+                "reason": "approval",
                 "arguments": {"command": "echo hi"},
             },
             {
                 "tool_call_id": "call-risk-2",
                 "name": "memory_update",
                 "risk_level": "medium",
+                "reason": "approval",
                 "arguments": {"content": "remember this"},
             },
         ],

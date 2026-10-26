@@ -36,10 +36,19 @@ class ExternalApiClient:
             headers.update(extra)
         return headers
 
-    async def ensure_session(self, external_key: str, *, title: str | None = None) -> str:
+    async def ensure_session(
+        self,
+        external_key: str,
+        *,
+        title: str | None = None,
+        chat_type: str | None = None,
+    ) -> str:
+        payload: dict[str, Any] = {"external_key": external_key, "title": title}
+        if chat_type:
+            payload["chat_type"] = str(chat_type)
         response = await self._client.post(
             "/sessions",
-            json={"external_key": external_key, "title": title},
+            json=payload,
             headers=self._headers(),
         )
         response.raise_for_status()
@@ -52,10 +61,16 @@ class ExternalApiClient:
         *,
         idempotency_key: str | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        sender: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {"text": text}
         if attachments:
             payload["attachments"] = list(attachments)
+        if sender:
+            payload["sender"] = dict(sender)
+        if metadata:
+            payload["metadata"] = dict(metadata)
         resolved_key = str(idempotency_key or "").strip()
         extra_headers = {"Idempotency-Key": resolved_key} if resolved_key else None
         response = await self._client.post(

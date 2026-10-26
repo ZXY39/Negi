@@ -26,6 +26,9 @@ class ExternalApiPrincipal:
     label: str
     # 是否可以寻址别名下的/全量会话。只按号裁决，默认放开。
     cross_session: bool = False
+    # 该桥自报的发送者 id 白名单（``externalApi.tokens.<id>.trustedSenders``）：
+    # 命中即按操作员处理。空 = 该桥的每条消息都是第三方。
+    trusted_senders: tuple[str, ...] = ()
 
 
 def _extract_bearer_token(authorization: str | None) -> str | None:
@@ -59,5 +62,10 @@ def require_external_api(
                 bridge_id=str(bridge_id),
                 label=str(getattr(entry, "label", "") or ""),
                 cross_session=bool(getattr(entry, "cross_session", True)),
+                trusted_senders=tuple(
+                    str(item or "").strip()
+                    for item in list(getattr(entry, "trusted_senders", None) or [])
+                    if str(item or "").strip()
+                ),
             )
     raise HTTPException(status_code=401, detail="invalid_api_token")

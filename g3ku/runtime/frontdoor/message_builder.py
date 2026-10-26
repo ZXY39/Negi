@@ -32,6 +32,8 @@ from g3ku.runtime.frontdoor.tool_contract import (
     upsert_frontdoor_tool_contract_message,
 )
 from g3ku.runtime.message_token_estimation import estimate_message_tokens
+from g3ku.runtime.sender_stamp import MESSAGE_SENDER_MARKER, render_sender_stamp, strip_sender_stamp
+from g3ku.runtime.session_trust import is_third_party_session
 from g3ku.runtime.tool_visibility import (
     CEO_FIXED_BUILTIN_TOOL_NAMES,
 )
@@ -81,6 +83,10 @@ def _read_memory_snapshot_text(session: Any, memory_manager: Any) -> str | None:
     if not callable(reader):
         return None
     session_key = str(getattr(getattr(session, "state", None), "session_key", "") or "")
+    if session_key and is_third_party_session(session_key):
+        # 第三方会话不注入长期记忆：记忆是工作区级全局的，群聊读到它等于把操作员的
+        # 私人偏好播给群里。返回 ""（不是 None）——"文档为空"是稳定事实，不是读失败。
+        return ""
     try:
         return str(
             reader(
@@ -150,7 +156,17 @@ def adopt_persona(session: Any, *, memory_manager: Any, reason: str) -> str:
 
     A transient read failure keeps the previous frozen value instead of pinning the
     session to "no persona": the memory worker may be rewriting the note at this moment.
+
+    第三方会话默认不带人设（D7）：人设是操作员写给自己助手的语气设定，群聊里注入
+    等于替群友"认领"一个身份。配置入口在沙箱页面，未安装沙箱时也可用（D20）。
     """
+    session_key = str(getattr(getattr(session, "state", None), "session_key", "") or "")
+    if session_key and is_third_party_session(session_key):
+        setattr(session, PERSONA_TEXT_ATTR, "")
+        setattr(session, PERSONA_DIGEST_ATTR, persona_digest(""))
+        setattr(session, PERSONA_ADOPTED_AT_ATTR, datetime.now().astimezone().isoformat())
+        setattr(session, PERSONA_ADOPTION_REASON_ATTR, "third_party_default_empty")
+        return ""
     text = _read_persona_text(memory_manager)
     if text is None:
         return str(getattr(session, PERSONA_TEXT_ATTR, "") or "")
@@ -579,17 +595,28 @@ class CeoMessageBuilder:
             value = getattr(message, key, None)
             if value not in (None, '', [], {}):
                 entry[key] = value
-        return CeoMessageBuilder._decorate_user_arrival_time(message, entry)
+        return CeoMessageBuilder._decorate_user_projection(message, entry)
 
     @staticmethod
-    def _decorate_user_arrival_time(message: Any, entry: dict[str, Any]) -> dict[str, Any]:
-        """投影时给普通用户消息追加送达时间戳（持久化内容保持原文不动）。
+    def _sender_stamped_content(content: str, metadata: dict[str, Any] | None) -> str:
+        """第三方消息加一行来源标注（幂等：已带标记的内容原样返回）。"""
+        if content.startswith(MESSAGE_SENDER_MARKER):
+            return content
+        stamp = render_sender_stamp(metadata)
+        return f"{stamp}{content}" if stamp else content
+
+    @staticmethod
+    def _decorate_user_projection(message: Any, entry: dict[str, Any]) -> dict[str, Any]:
+        """投影时给用户消息追加来源标注与送达时间戳（持久化内容保持原文不动）。
 
         模型上下文原本没有任何"现在几点"的信息：system prompt 不含时间，转录的
         timestamp 字段也不进请求体，实测发生过模型凭上下文残片编造当前时间的事故
         （会话记录 21:41 却声称"现在 19:43"）。这里把每条用户消息**记录里已有的**
         timestamp 渲染成带时区偏移的可读时间追加到投影副本末尾——用记录固定值而非
         now()，保证跨回合字节稳定，不打断 provider 前缀缓存。
+
+        第三方渠道消息另在正文**之前**加一行来源标注（发送者 + 群聊/私聊）：正文在
+        转录里和操作员本人说的话完全相同，模型只能靠这一行分清"谁在要求它做事"。
 
         heartbeat/cron 内部注入消息各自携带时间锚点（事件束头部唤醒时刻、cron
         送达时间字段），不重复装饰；已含标记的内容（如上一轮请求体基线回放的
@@ -600,14 +627,16 @@ class CeoMessageBuilder:
         content = entry.get('content')
         if not isinstance(content, str) or not content.strip():
             return entry
-        if MESSAGE_ARRIVAL_TIME_MARKER in content:
+        stamped = CeoMessageBuilder._sender_stamped_content(content, message_metadata(message))
+        if MESSAGE_ARRIVAL_TIME_MARKER in stamped:
+            entry['content'] = stamped
             return entry
         if is_internal_ceo_user_message(message):
+            entry['content'] = stamped
             return entry
         timestamp = message.get('timestamp') if isinstance(message, dict) else getattr(message, 'timestamp', None)
-        stamp = render_arrival_stamp(timestamp)
-        if stamp:
-            entry['content'] = content + stamp
+        tail = render_arrival_stamp(timestamp)
+        entry['content'] = f"{stamped}{tail}" if tail else stamped
         return entry
 
     def _transcript_history(self, persisted_session: Any | None) -> list[dict[str, Any]]:
@@ -688,14 +717,18 @@ class CeoMessageBuilder:
         return self._cron_prompt_equal(last.get('content'), query_text)
 
     def _cron_prompt_equal(self, content: Any, query_text: str) -> bool:
-        """比较当前用户内容时忽略 cron 隐藏契约与投影追加的送达时间戳。
+        """比较当前用户内容时忽略 cron 隐藏契约与投影追加的来源/送达装饰。
 
         历史/转录里旧消息可能带宿主追加的隐藏契约，而新消息已剥除；直接
         全等比较会判失败，导致 frontdoor 没把当前用户置于末位（答非所问）。
-        投影层给用户消息追加的 [消息送达时间] 装饰同理必须剥离后再比。
+        投影层给用户消息追加的 [消息来源] 与 [消息送达时间] 装饰同理必须剥离后再比。
         """
-        left = strip_arrival_time_stamp(strip_cron_hidden_prompt(self._content_text(content)).strip())
-        right = strip_arrival_time_stamp(strip_cron_hidden_prompt(str(query_text or '')).strip())
+        left = strip_arrival_time_stamp(
+            strip_cron_hidden_prompt(strip_sender_stamp(self._content_text(content))).strip()
+        )
+        right = strip_arrival_time_stamp(
+            strip_cron_hidden_prompt(strip_sender_stamp(str(query_text or ''))).strip()
+        )
         return left == right
 
     def _render_retrieved_context(self, bundle: RetrievedContextBundle) -> str:
@@ -1446,18 +1479,25 @@ class CeoMessageBuilder:
         }
 
     @staticmethod
-    def _current_user_content_with_arrival_time(user_content: Any) -> Any:
+    def _current_user_content_with_arrival_time(
+        user_content: Any,
+        metadata: dict[str, Any] | None = None,
+    ) -> Any:
         """当前回合用户消息不在历史里、直接追加进请求时，用 now() 盖送达时间戳。
 
         常规路径下用户消息先持久化再投影（装饰来自记录 timestamp，跨回合字节稳定）；
         这里只覆盖"记录尚不存在"的兜底路径，下一回合起装饰会自动切换为记录时间。
+        来源标注与历史道同源（按 metadata 派生），否则群聊首轮会漏掉"这是第三方"这一行。
         非字符串内容（多模态块）原样返回。
         """
         if not isinstance(user_content, str):
             return user_content
-        if not user_content.strip() or MESSAGE_ARRIVAL_TIME_MARKER in user_content:
+        if not user_content.strip():
             return user_content
-        return f"{user_content}\n\n{MESSAGE_ARRIVAL_TIME_MARKER} {render_local_time()}"
+        body = CeoMessageBuilder._sender_stamped_content(user_content, metadata)
+        if MESSAGE_ARRIVAL_TIME_MARKER in body:
+            return body
+        return f"{body}\n\n{MESSAGE_ARRIVAL_TIME_MARKER} {render_local_time()}"
 
     def _frontdoor_exec_runtime_policy(self) -> dict[str, Any] | None:
         main_service = getattr(self._loop, 'main_task_service', None)
@@ -1516,6 +1556,7 @@ class CeoMessageBuilder:
         persona_text: str,
         current_user_in_history: bool,
         pinned_contract_text: str = '',
+        user_metadata: dict[str, Any] | None = None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], str]:
         turn_overlay_text = self._join_turn_overlay_sections(turn_overlay_parts)
         system_prompt = merge_pinned_contract_into_system_text(system_prompt, pinned_contract_text)
@@ -1535,7 +1576,9 @@ class CeoMessageBuilder:
             stable_messages.append(
                 {
                     "role": "user",
-                    "content": self._current_user_content_with_arrival_time(user_content),
+                    "content": self._current_user_content_with_arrival_time(
+                        user_content, user_metadata
+                    ),
                 }
             )
         dynamic_appendix_messages = [
@@ -1620,7 +1663,9 @@ class CeoMessageBuilder:
             model_messages.append(
                 {
                     "role": "user",
-                    "content": self._current_user_content_with_arrival_time(user_content),
+                    "content": self._current_user_content_with_arrival_time(
+                        user_content, user_metadata
+                    ),
                 }
             )
         return model_messages, stable_messages, dynamic_appendix_messages, turn_overlay_text, current_user_in_history
@@ -1726,7 +1771,9 @@ class CeoMessageBuilder:
         if not current_user_in_history and has_user_content:
             current_user_message = {
                 "role": "user",
-                "content": self._current_user_content_with_arrival_time(context_sources['user_content']),
+                "content": self._current_user_content_with_arrival_time(
+                    context_sources['user_content'], user_metadata
+                ),
             }
             model_messages.append(current_user_message)
 
@@ -1945,6 +1992,7 @@ class CeoMessageBuilder:
             persona_text=str(context_sources.get('persona_text') or ''),
             current_user_in_history=bool(history_state['current_user_in_history']),
             pinned_contract_text=pinned_contract_text,
+            user_metadata=user_metadata,
         )
         # 锚点量的是"这一跳真要发出去的那一份"：system、长期记忆、人设块、历史与当前
         # 用户都在稳定前缀里；尾部契约块与 ephemeral 尾不算。装配完成后再量，避免

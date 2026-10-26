@@ -652,6 +652,8 @@ async def run_qq_official_bridge(
         attachments: list[dict[str, str]] | None = None,
         voice_lines: list[str] | None = None,
         attachment_names: list[str] | None = None,
+        sender: dict[str, str] | None = None,
+        chat_type: str = "",
     ) -> None:
         attachment_payloads = list(attachments or [])
         if voice_lines:
@@ -670,7 +672,7 @@ async def run_qq_official_bridge(
                 return
         session_id = sessions.get(external_key)
         if session_id is None:
-            session_id = await client.ensure_session(external_key)
+            session_id = await client.ensure_session(external_key, chat_type=chat_type or None)
             sessions[external_key] = session_id
         # 先记下这条入站消息的 id，回复它的那几发才拿得到被动窗口参数。回合回复通常
         # 在入站后几秒落地（实盘 9 秒），远在窗口之内；不记就只能走主动消息形状。
@@ -687,6 +689,8 @@ async def run_qq_official_bridge(
             text,
             idempotency_key=idem or None,
             attachments=attachment_payloads or None,
+            sender=sender,
+            metadata={"chat_type": chat_type} if chat_type else None,
         )
         payload = response if isinstance(response, dict) else {}
         if str(payload.get("status") or "").strip() == "queued":
@@ -1283,7 +1287,7 @@ async def run_qq_official_bridge(
         async def on_ready(self):
             on_state("connected", "")
 
-        async def _dispatch(self, external_key: str, message):
+        async def _dispatch(self, external_key: str, message, *, chat_type: str):
             attachments, voice_lines = await _collect_attachments(media_client, message)
             await on_incoming(
                 external_key,
@@ -1295,15 +1299,21 @@ async def run_qq_official_bridge(
                     str(getattr(item, "filename", "") or "").strip()
                     for item in (getattr(message, "attachments", None) or [])
                 ],
+                _sender_of(message, chat_type),
+                chat_type,
             )
 
         async def on_group_at_message_create(self, message):
             await self._dispatch(
-                external_key_for_group(getattr(message, "group_openid", "")), message
+                external_key_for_group(getattr(message, "group_openid", "")),
+                message,
+                chat_type="group",
             )
 
         async def on_c2c_message_create(self, message):
-            await self._dispatch(external_key_for_c2c(_openid_of(message)), message)
+            await self._dispatch(
+                external_key_for_c2c(_openid_of(message)), message, chat_type="dm"
+            )
 
         async def on_at_message_create(self, message):
             await self._dispatch(
@@ -1311,6 +1321,7 @@ async def run_qq_official_bridge(
                     getattr(message, "guild_id", ""), getattr(message, "channel_id", "")
                 ),
                 message,
+                chat_type="guild",
             )
 
         async def on_direct_message_create(self, message):
@@ -1320,11 +1331,34 @@ async def run_qq_official_bridge(
                     getattr(getattr(message, "author", None), "id", ""),
                 ),
                 message,
+                chat_type="guild_dm",
             )
 
     def _content_of(message: Any) -> str:
         content = getattr(message, "content", "")
         return str(content or "").strip()
+
+    def _sender_of(message: Any, chat_type: str) -> dict[str, str]:
+        """发送者身份；群消息只有 ``member_openid``（botpy 不给昵称），频道才有用户名。
+
+        群里的 ``member_openid`` 与 c2c 的 ``user_openid`` 属于两套 id 空间，不可互相
+        匹配——所以"群里谁是操作员"在协议层不可判定，群聊整会话按第三方处理。
+        """
+        author = getattr(message, "author", None) or {}
+        if chat_type == "group":
+            return {"id": str(getattr(author, "member_openid", "") or "").strip(), "name": ""}
+        if chat_type == "dm":
+            return {
+                "id": str(
+                    getattr(author, "user_openid", "") or getattr(author, "id", "") or ""
+                ).strip(),
+                "name": "",
+            }
+        member = getattr(message, "member", None)
+        name = str(getattr(author, "username", "") or "").strip() or str(
+            getattr(member, "nick", "") or ""
+        ).strip()
+        return {"id": str(getattr(author, "id", "") or "").strip(), "name": name}
 
     def _openid_of(message: Any) -> str:
         author = getattr(message, "author", None) or {}

@@ -624,6 +624,7 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
                     "label": entry.label,
                     "enabled": entry.enabled,
                     "crossSession": entry.cross_session,
+                    "trustedSenders": list(entry.trusted_senders or []),
                 }
                 for token_id, entry in (cfg.external_api.tokens or {}).items()
             },
@@ -636,6 +637,7 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
                     "sandbox": entry.sandbox,
                     "enabled": entry.enabled,
                     "label": entry.label,
+                    "ownerOpenids": list(entry.owner_openids or []),
                 }
                 for app_id, entry in (cfg.qq_bot.accounts or {}).items()
                 if str(app_id or "").strip()

@@ -21,6 +21,7 @@ from g3ku.utils.subprocess_text import decode_subprocess_output, enrich_subproce
 from main.governance.exec_tool_policy import (
     EXEC_TOOL_ID,
     EXECUTION_MODE_FULL_ACCESS,
+    EXECUTION_MODE_GOVERNED,
     normalize_exec_execution_mode,
     resolve_exec_execution_mode,
 )
@@ -240,6 +241,13 @@ class ExecTool(Tool):
                 error=message,
             )
         execution_mode = self._resolve_execution_mode()
+        if (
+            execution_mode == EXECUTION_MODE_FULL_ACCESS
+            and bool(runtime.get("exec_force_governed"))
+        ):
+            # owner 的只读档：工具档位（可能是 full_access）被策略压回 governed，
+            # 于是路径策略、工作区监禁与只读形态守卫三层全部生效。
+            execution_mode = EXECUTION_MODE_GOVERNED
 
         # Full-access exec may skip ordinary exec guardrails, but it can never
         # terminate the runtime host that owns this tool call.

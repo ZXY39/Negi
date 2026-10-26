@@ -33,6 +33,7 @@ from g3ku.runtime.web_ceo_sessions import (
     ceo_session_pinned_model_key,
     ceo_session_task_defaults_scope,
 )
+from g3ku.utils.path_roots import pinned_read_roots
 from main.protocol import now_iso
 from main.runtime.chat_backend import ConfigChatBackend, sanitize_provider_messages
 from main.runtime.tool_call_repair import format_xml_repair_failure_reason
@@ -788,10 +789,13 @@ class CeoFrontDoorSupport:
 
         async def _invoke() -> Any:
             resource_manager = getattr(self._loop, "resource_manager", None)
-            if resource_manager is not None and resource_manager.get_tool_descriptor(tool_name) is not None:
-                with resource_manager.acquire_tool(tool_name):
-                    return await tool.execute(**execute_kwargs)
-            return await tool.execute(**execute_kwargs)
+            # 档位读根随调用生效：工具实例是共享缓存对象，不能把会话根写进实例；
+            # ContextVar 按 asyncio 任务隔离，并发会话不会互相串根。
+            with pinned_read_roots(per_call_runtime.get("fs_read_roots") or ()):
+                if resource_manager is not None and resource_manager.get_tool_descriptor(tool_name) is not None:
+                    with resource_manager.acquire_tool(tool_name):
+                        return await tool.execute(**execute_kwargs)
+                return await tool.execute(**execute_kwargs)
 
         token = self._loop.tools.push_runtime_context(per_call_runtime)
         try:

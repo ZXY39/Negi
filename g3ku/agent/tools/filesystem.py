@@ -5,16 +5,27 @@ from pathlib import Path
 from typing import Any
 
 from g3ku.agent.tools.base import Tool
+from g3ku.utils.path_roots import current_read_roots, enforce_roots, normalize_roots
 
 
 def _resolve_path(
-    path: str, workspace: Path | None = None, allowed_dir: Path | None = None
+    path: str,
+    workspace: Path | None = None,
+    allowed_dir: Path | None = None,
+    allowed_roots: Any = None,
 ) -> Path:
-    """Resolve path against workspace (if relative) and enforce directory restriction."""
+    """Resolve path against workspace (if relative) and enforce directory restriction.
+
+    ``allowed_roots``（档位根清单）优先于单值 ``allowed_dir``：只读档给的是多根，
+    而且必须能覆盖工具设置推出来的宽松根。
+    """
     p = Path(path).expanduser()
     if not p.is_absolute() and workspace:
         p = workspace / p
     resolved = p.resolve()
+    roots = normalize_roots(allowed_roots) or current_read_roots()
+    if roots:
+        return enforce_roots(resolved, roots)
     if allowed_dir:
         try:
             resolved.relative_to(allowed_dir.resolve())

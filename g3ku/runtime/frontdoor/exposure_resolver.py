@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from g3ku.sandbox.policy import session_policy
+
 from .capability_snapshot import build_capability_snapshot
 
 
@@ -37,6 +39,16 @@ class CeoExposureResolver:
         }
         registered = set(getattr(self._loop.tools, 'tool_names', []) or [])
         tool_names = sorted(registered & allowed_tool_names)
+        # 受限档（只读/沙箱）再收一道：名单外的名字不进曝光层，候选列表与执行准入同源。
+        # 这是"模型看不到 → 不会去调"的那一层；真正的拒绝在执行侧的 approval 闸门。
+        policy = session_policy(session_id)
+        if policy.restricted:
+            tool_names = [name for name in tool_names if policy.tool_allowed(name)]
+            visible_tools = [
+                record
+                for record in list(visible_tools or [])
+                if policy.tool_allowed(getattr(record, 'tool_id', ''))
+            ]
         capability_snapshot = build_capability_snapshot(
             visible_skills=list(visible_skills or []),
             visible_tools=list(visible_tools or []),

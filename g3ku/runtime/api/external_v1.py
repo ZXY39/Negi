@@ -35,6 +35,7 @@ from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Requ
 from fastapi.responses import StreamingResponse
 from loguru import logger
 
+from g3ku.config.live_runtime import get_runtime_config
 from g3ku.core.messages import UserInputMessage
 from g3ku.runtime.api.ceo_sessions import _publish_ceo_sessions_snapshot
 from g3ku.runtime.api.external_auth import ExternalApiPrincipal, require_external_api
@@ -55,6 +56,12 @@ from g3ku.runtime.external_sessions import (
     get_external_session_registry,
 )
 from g3ku.runtime.session_keys import sanitize_channel_outbound_text
+from g3ku.runtime.session_trust import (
+    chat_type_from_external_key,
+    is_multi_party_chat,
+    normalize_chat_type,
+    note_inbound_session_shape,
+)
 from g3ku.runtime.web_ceo_sessions import (
     EXTERNAL_UPLOAD_ROOT,
     WEB_CEO_IMAGE_UPLOAD_MAX_BYTES,
@@ -79,6 +86,75 @@ VOICE_CLIP_TRANSCODE_MAX_BYTES = 8 * 1024 * 1024
 
 def _registry():
     return get_external_session_registry()
+
+
+_QQ_BRIDGE_PREFIX = "qq-official-"
+
+
+def _owner_openids_for_bridge(bridge_id: str) -> tuple[str, ...]:
+    """该桥的操作员 openid 白名单。
+
+    QQ 号的桥身份由 AppID 派生（``qq-official-<appId>``），白名单是**服务端配置**
+    （``qqBot.accounts.<appId>.ownerOpenids``），不接受桥在请求体里自报——否则被攻破
+    的桥一句 ``trust: owner`` 就把自己提成操作员。
+    """
+    bridge = str(bridge_id or "").strip()
+    if not bridge.startswith(_QQ_BRIDGE_PREFIX):
+        return ()
+    try:
+        config = get_runtime_config(force=False)[0]
+    except Exception:  # noqa: BLE001 - 读不到配置就按没有白名单处理（fail-closed）
+        return ()
+    accounts = dict(getattr(getattr(config, "qq_bot", None), "accounts", None) or {})
+    for app_id, account in accounts.items():
+        if f"{_QQ_BRIDGE_PREFIX}{app_id}" != bridge:
+            continue
+        return tuple(
+            str(item or "").strip()
+            for item in list(getattr(account, "owner_openids", None) or [])
+            if str(item or "").strip()
+        )
+    return ()
+
+
+def _validated_chat_type(value: Any) -> str:
+    """白名单校验：空 = 未声明（走回退），非法值一律 400 而不是静默按 dm 处理。"""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    normalized = normalize_chat_type(raw)
+    if not normalized:
+        raise HTTPException(status_code=400, detail="chat_type_invalid")
+    return normalized
+
+
+def _effective_chat_type(*, claimed: str, entry: ExternalSessionEntry) -> str:
+    """请求自报的形状与既有会话形状合并：**取更严的一档**。
+
+    ``external_key`` 前缀（``qq:group:`` / ``qq:guild:``）是既有契约里的形状声明，
+    与请求体不一致时按多人会话处理并留 WARNING——一条谎报 dm 的消息不能把群会话
+    洗成私聊。
+    """
+    known = normalize_chat_type(getattr(entry, "chat_type", "")) or chat_type_from_external_key(
+        getattr(entry, "external_key", "")
+    )
+    if claimed and known and claimed != known:
+        merged = (
+            claimed
+            if is_multi_party_chat(chat_type=claimed)
+            else known
+        )
+        if is_multi_party_chat(chat_type=merged):
+            logger.warning(
+                "external chat_type mismatch for {}: claimed={} key={} — 按更严的一档处理",
+                getattr(entry, "session_key", ""),
+                claimed,
+                known,
+            )
+        return merged
+    if is_multi_party_chat(chat_type=known) or is_multi_party_chat(chat_type=claimed):
+        return normalize_chat_type(claimed) if is_multi_party_chat(chat_type=claimed) else known
+    return claimed or known
 
 
 def _own_entry(session_id: str, principal: ExternalApiPrincipal) -> ExternalSessionEntry:
@@ -163,6 +239,7 @@ async def create_external_session(
     if not external_key:
         raise HTTPException(status_code=400, detail="external_key_required")
     title = str(payload.get("title") or "").strip() or None
+    chat_type = _validated_chat_type(payload.get("chat_type"))
     registry = _registry()
     # 隐身的行只有"再有人来注册"或"再有人发消息"才会回来。命中既有映射时 resolve_or_create
     # 顺手清掉 hidden，所以这里也得把目录推出去，否则网页要刷新页面才看得见。
@@ -171,7 +248,10 @@ async def create_external_session(
     )
     was_hidden = bool(previous and previous.hidden)
     entry, created = registry.resolve_or_create(
-        bridge_id=principal.bridge_id, external_key=external_key, title=title
+        bridge_id=principal.bridge_id,
+        external_key=external_key,
+        title=title,
+        chat_type=chat_type or None,
     )
     if created or was_hidden:
         _publish_ceo_catalog_best_effort()
@@ -180,6 +260,7 @@ async def create_external_session(
         "session_id": entry.session_key,
         "external_key": entry.external_key,
         "title": entry.title,
+        "chat_type": entry.chat_type,
         "created_at": entry.created_at,
         "created": created,
     }
@@ -938,17 +1019,40 @@ async def post_external_message(
     sender = payload.get("sender") if isinstance(payload.get("sender"), dict) else None
     sender_payload = None
     if sender:
+        sender_id = str(sender.get("id") or "").strip()
+        if len(sender_id) > 128:
+            raise HTTPException(status_code=400, detail="sender_id_too_long")
         sender_payload = {
-            "id": str(sender.get("id") or "").strip(),
-            "name": str(sender.get("name") or "").strip(),
+            "id": sender_id,
+            "name": str(sender.get("name") or "").strip()[:128],
         }
     extra_metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else None
+
+    claimed_chat_type = _validated_chat_type(
+        payload.get("chat_type") or (extra_metadata or {}).get("chat_type")
+    )
+    effective_chat_type = _effective_chat_type(claimed=claimed_chat_type, entry=entry)
+    # 信任级在这里定型并落到注册表（粘性、只降不升）：记忆门、控制面拒绝与投影标注
+    # 全部读同一个值，不各自再判一次来源。
+    turn_trust = note_inbound_session_shape(
+        entry.session_key,
+        chat_type=effective_chat_type,
+        external_key=entry.external_key,
+        sender_id=(sender_payload or {}).get("id", ""),
+        owner_openids=_owner_openids_for_bridge(principal.bridge_id),
+        trusted_senders=principal.trusted_senders,
+    )
+    channel_metadata = dict(extra_metadata or {})
+    if effective_chat_type:
+        channel_metadata["chat_type"] = effective_chat_type
+    # 服务端派生值，桥不能自报（请求体里的同名字段一律被覆盖）。
+    channel_metadata["external_trust"] = turn_trust
 
     user_message = _build_external_user_message(
         text=text,
         attachments=descriptors,
         sender=sender_payload,
-        metadata=extra_metadata,
+        metadata=channel_metadata,
     )
 
     try:

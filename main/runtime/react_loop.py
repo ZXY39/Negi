@@ -123,6 +123,7 @@ from g3ku.runtime.tool_watchdog import (
     run_tool_with_hard_timeout,
     run_tool_with_watchdog,
 )
+from g3ku.utils.path_roots import pinned_read_roots
 from main.errors import (
     NodePausedError,
     TaskPausedError,
@@ -5251,18 +5252,25 @@ class ReActToolLoop:
             execute_kwargs['timeout_seconds'] = effective_timeout
         else:
             execute_kwargs.pop('timeout_seconds', None)
+
+        async def _invoke_tool() -> Any:
+            # 档位读根随调用生效（与前端 `_ceo_support` 同一机制）：工具实例在资源层
+            # 共享，会话根只能走调用期的 ContextVar，不能写到实例上。
+            with pinned_read_roots(runtime_context.get('fs_read_roots') or ()):
+                return await tool.execute(**execute_kwargs)
+
         try:
             if not actor_role_allows_watchdog(runtime_context):
                 if self_enforced or timeout_exempt:
-                    return await tool.execute(**execute_kwargs)
+                    return await _invoke_tool()
                 return await run_tool_with_hard_timeout(
-                    tool.execute(**execute_kwargs),
+                    _invoke_tool(),
                     tool_name=tool_name,
                     timeout_seconds=effective_timeout,
                     cancel_token=runtime_context.get('cancel_token'),
                 )
             outcome = await run_tool_with_watchdog(
-                tool.execute(**execute_kwargs),
+                _invoke_tool(),
                 tool_name=tool_name,
                 runtime_context=runtime_context,
                 snapshot_supplier=self._snapshot_supplier(runtime_context),

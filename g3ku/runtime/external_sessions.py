@@ -39,6 +39,12 @@ class ExternalSessionEntry:
     created_at: str
     title: str = ""
     hidden: bool = False
+    # 入站消息自报的聊天形状（``group`` / ``dm`` / ``guild`` / ``guild_dm``）。
+    # 存量条目不迁移：空值由 ``external_key`` 前缀回退解析。
+    chat_type: str = ""
+    # 该会话历史上见过的最受限信任级（见 ``g3ku.runtime.session_trust``）。
+    # 空值 = 还没见过入站消息，读取侧按第三方兜底。
+    trust: str = ""
 
 
 def _registry_workspace() -> Path:
@@ -89,6 +95,8 @@ class ExternalSessionRegistry:
                 created_at=str(item.get("created_at") or ""),
                 title=str(item.get("title") or ""),
                 hidden=bool(item.get("hidden")),
+                chat_type=str(item.get("chat_type") or ""),
+                trust=str(item.get("trust") or ""),
             )
             self._entries[entry.session_key] = entry
             self._index[(entry.bridge_id, entry.external_key)] = entry.session_key
@@ -103,6 +111,8 @@ class ExternalSessionRegistry:
                     "created_at": entry.created_at,
                     "title": entry.title,
                     "hidden": bool(entry.hidden),
+                    "chat_type": entry.chat_type,
+                    "trust": entry.trust,
                 }
                 for session_key, entry in self._entries.items()
             },
@@ -115,13 +125,17 @@ class ExternalSessionRegistry:
         bridge_id: str,
         external_key: str,
         title: str | None = None,
+        chat_type: str | None = None,
     ) -> tuple[ExternalSessionEntry, bool]:
         """Idempotent get-or-create. Returns ``(entry, created)``."""
+        from g3ku.runtime.session_trust import is_multi_party_chat, normalize_chat_type
+
         bridge = normalize_bridge_id(bridge_id)
         key = str(external_key or "").strip()
         if not key:
             raise ValueError("external_key is required")
         title_text = str(title or "").strip()
+        shape = normalize_chat_type(chat_type)
         with self._lock:
             existing_key = self._index.get((bridge, key))
             if existing_key is not None:
@@ -130,6 +144,11 @@ class ExternalSessionRegistry:
                 if title_text and entry.title != title_text:
                     entry.title = title_text
                     changed = True
+                if shape and entry.chat_type != shape:
+                    # 形状冲突按更严的一档记：先报 dm 再报 group 的桥不能让会话留在 dm。
+                    if not entry.chat_type or is_multi_party_chat(chat_type=shape):
+                        entry.chat_type = shape
+                        changed = True
                 if entry.hidden:
                     # 入站即"这个渠道还在跟我说话"：被操作员从网页隐身的会话要当场回来。
                     entry.hidden = False
@@ -159,6 +178,7 @@ class ExternalSessionRegistry:
                 session_key=session_key,
                 created_at=datetime.now().isoformat(),
                 title=title_text,
+                chat_type=shape,
             )
             self._entries[session_key] = entry
             self._index[(bridge, key)] = session_key
@@ -206,6 +226,43 @@ class ExternalSessionRegistry:
             return None
         with self._lock:
             return self._entries.get(raw)
+
+    def note_inbound(
+        self,
+        session_key: str,
+        *,
+        chat_type: str = "",
+        trust: str = "",
+    ) -> ExternalSessionEntry | None:
+        """记下一条入站消息的形状与信任级（粘性，只降不升）。
+
+        只在真的变化时落盘：稳态下每条入站消息就是一次 dict 查找。信任级由
+        `g3ku.runtime.session_trust` 判定，这里只负责持久化"见过的最受限那一档"——
+        一条声称是操作员的后继消息不能把先前的第三方判定抬回去。
+        """
+        from g3ku.runtime.session_trust import more_restrictive, normalize_chat_type
+
+        raw = str(session_key or "").strip()
+        shape = normalize_chat_type(chat_type)
+        incoming = str(trust or "").strip()
+        if not raw:
+            return None
+        with self._lock:
+            entry = self._entries.get(raw)
+            if entry is None:
+                return None
+            changed = False
+            if shape and entry.chat_type != shape:
+                entry.chat_type = shape
+                changed = True
+            if incoming:
+                merged = more_restrictive(entry.trust, incoming)
+                if entry.trust != merged:
+                    entry.trust = merged
+                    changed = True
+            if changed:
+                self._save()
+            return entry
 
     def session_count(self) -> int:
         """当前加载进来的会话条目数。

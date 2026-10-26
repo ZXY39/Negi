@@ -66,6 +66,25 @@ class MemoryUpdateTool(Tool):
         runtime_raw = kwargs.pop("__g3ku_runtime", None)
         runtime = runtime_raw if isinstance(runtime_raw, dict) else {}
         session_key = str(runtime.get("session_key") or "")
+        eligibility = getattr(self._manager, "review_eligibility", None)
+        if callable(eligibility):
+            allowed, reason = eligibility(session_key)
+            if not allowed:
+                # 控制面拒绝的第一道：群聊/第三方会话连入队都不许。工具面本身已经在
+                # 受限档把它摘掉了，这里是"万一装配漏改"的硬校验。
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "status": "rejected",
+                        "reason": reason,
+                        "message": (
+                            "Long-term memory is only writable from the operator's own session. "
+                            "This session is third-party, so nothing was queued. "
+                            "Do not retry; explain to the user that memory changes need the operator."
+                        ),
+                    },
+                    ensure_ascii=False,
+                )
         result = await self._manager.enqueue_write_request(
             session_key=session_key,
             decision_source="user",

@@ -20,6 +20,28 @@ from main.runtime.internal_tools import SilentTool
 from main.service.runtime_service import MainRuntimeService
 
 
+def _memory_review_eligibility(session_key: str) -> bool:
+    """长期记忆复核的信任判据：只有操作员自己的会话能进全局记忆。
+
+    第三方（群聊 / 未列名私聊 / 未知渠道）一律不写——记忆是工作区级全局的，注入在
+    每个会话的 index 1，群里一句话会污染操作员的每一次对话。
+    """
+    from g3ku.runtime.session_trust import is_owner_session
+
+    return is_owner_session(session_key)
+
+
+def _accepts_keyword(target, keyword: str) -> bool:
+    """目标可调用对象是否接受该关键字（测试替身只吃位置参数）。"""
+    try:
+        parameters = inspect.signature(target).parameters
+    except (TypeError, ValueError):
+        return False
+    if keyword in parameters:
+        return True
+    return any(param.kind is inspect.Parameter.VAR_KEYWORD for param in parameters.values())
+
+
 class RuntimeBootstrapBridge:
     """Bootstrap and runtime initialization bridge for AgentLoop."""
 
@@ -264,7 +286,11 @@ class RuntimeBootstrapBridge:
             manager_cls = getattr(self._loop, '_memory_manager_cls', None)
             if manager_cls is None:
                 raise RuntimeError('memory manager class is not configured')
-            self._loop.memory_manager = manager_cls(self._loop.workspace, cfg)
+            kwargs: dict[str, object] = {}
+            if _accepts_keyword(manager_cls, 'review_eligibility'):
+                # 复审资格的单一判据：只有操作员自己的会话能进全局长期记忆。
+                kwargs['review_eligibility'] = _memory_review_eligibility
+            self._loop.memory_manager = manager_cls(self._loop.workspace, cfg, **kwargs)
             start = getattr(self._loop.memory_manager, 'start', None)
             if callable(start):
                 start()

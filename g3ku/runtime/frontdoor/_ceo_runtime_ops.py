@@ -78,10 +78,12 @@ from g3ku.runtime.frontdoor.turns import (
 )
 from g3ku.runtime.message_token_estimation import estimate_message_tokens
 from g3ku.runtime.project_environment import current_project_environment
+from g3ku.runtime.sender_stamp import render_sender_stamp, strip_sender_stamp
 from g3ku.runtime.session_agent import (
     PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR,
 )
 from g3ku.runtime.session_keys import is_channel_session_key
+from g3ku.runtime.session_trust import TRUST_OWNER, is_third_party_session
 from g3ku.runtime.token_compact_markers import TOKEN_COMPACT_V2_PREFIX
 from g3ku.runtime.tool_context_presence import (
     contract_index_from_revisions,
@@ -128,6 +130,7 @@ from g3ku.runtime.wake_clock import (
     now_ms as wall_now_ms,
 )
 from g3ku.runtime.web_ceo_sessions import (
+    EXTERNAL_UPLOAD_ROOT,
     WEB_CEO_IMAGE_UPLOAD_MAX_BYTES,
     actual_request_dir_for_session,
     fold_internal_prompt_history,
@@ -135,9 +138,12 @@ from g3ku.runtime.web_ceo_sessions import (
     persist_frontdoor_actual_request,
     strip_multimodal_blocks_from_message_records,
     trailing_turn_record,
+    upload_dir_for_session,
+    workspace_path,
 )
+from g3ku.sandbox.policy import TIER_READONLY, session_policy
 from g3ku.stickers import safe_scan_packs, sticker_contract_sections
-from g3ku.utils.helpers import tools_bundle_single_source_enabled
+from g3ku.utils.helpers import safe_filename, tools_bundle_single_source_enabled
 from main.governance.exec_tool_policy import render_exec_runtime_policy_body
 from main.governance.tool_context import apply_runtime_tool_context_projection
 from main.models import normalize_execution_policy_metadata
@@ -248,6 +254,14 @@ _CHANNEL_REVIEW_REJECTION_TEXT = (
     'Error: tool call intercepted by risk review. Channel sessions have no approval surface, '
     'so this call was not executed. Explain the situation to the user and ask them to allow this '
     'tool in the risk review settings before retrying it.'
+)
+# 信任策略拒绝（受限档）：面向模型，必须说清"这是第三方会话 / 该换什么路子 / 别重试"。
+_TRUST_POLICY_REJECTION_TEXT = (
+    'Error: tool call blocked by the session trust policy. This session is third-party '
+    '(a group chat or an unrecognized direct channel), so this tool is not available here. '
+    'The call was not executed and nothing on the host was touched. '
+    'Do not retry the same tool. If the user really needs this action, tell them it has to be '
+    'initiated by the operator from the operator\'s own session.'
 )
 @dataclass(slots=True)
 class FrontdoorExecutionBundle:
@@ -891,16 +905,20 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         )
         if not records or not transcript:
             return records
-        # 种子里的用户消息可能带投影追加的送达时间戳装饰，转录原文没有；
+        # 种子里的用户消息可能带投影追加的来源标注/送达时间戳装饰，转录原文没有；
         # 去重比较前统一剥离，补发时用记录 timestamp 重新装饰，保持
         # "请求体里的用户消息都带时间锚点"的不变量。
         known_user_texts = {
-            strip_arrival_time_stamp(cls._content_text(record.get("content")).strip())
+            strip_arrival_time_stamp(
+                strip_sender_stamp(cls._content_text(record.get("content")).strip())
+            )
             for record in records
             if str(record.get("role") or "").strip().lower() == "user"
         }
         known_user_texts.discard("")
-        current_text = strip_arrival_time_stamp(cls._content_text(current_turn_user_content).strip())
+        current_text = strip_arrival_time_stamp(
+            strip_sender_stamp(cls._content_text(current_turn_user_content).strip())
+        )
         if current_text:
             known_user_texts.add(current_text)
         for message in transcript:
@@ -913,12 +931,15 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 continue
             if not is_prompt_visible_message(message):
                 continue
-            text = strip_arrival_time_stamp(cls._content_text(message.get("content")).strip())
+            text = strip_arrival_time_stamp(
+                strip_sender_stamp(cls._content_text(message.get("content")).strip())
+            )
             if not text or text in known_user_texts:
                 continue
             known_user_texts.add(text)
             stamp = render_arrival_stamp(message.get("timestamp"))
-            records.append({"role": "user", "content": f"{text}{stamp}" if stamp else text})
+            body = f"{render_sender_stamp(metadata)}{text}"
+            records.append({"role": "user", "content": f"{body}{stamp}" if stamp else body})
         return records
 
     def _quarantine_frontdoor_shrink(
@@ -3361,6 +3382,38 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             return {}
         return {"default_timeout_seconds": value} if value >= 1 else {}
 
+    def _sandbox_read_roots(self, session_key: str, policy: Any) -> tuple[str, ...]:
+        """只读档的可读根：会话自己的上传目录 + temp；owner 另加工作区。
+
+        third_party 的读根**不含**工作区、`.g3ku`、`memory/`、`sessions/`、其他会话
+        目录——没有 jail 时这是唯一的读边界。owner 的只读档是防手滑，工作区必须可读，
+        否则"只读"会变成"什么都干不了"。
+        """
+        if str(getattr(policy, "tier", "")) != TIER_READONLY:
+            return ()
+        roots: list[str] = []
+        if str(getattr(policy, "trust", "")) == TRUST_OWNER:
+            workspace = str(getattr(self._loop, "workspace", "") or "").strip()
+            if workspace:
+                roots.append(workspace)
+        try:
+            temp_dir = str(self._ceo_session_temp_dir(session_key) or "").strip()
+        except Exception:
+            temp_dir = ""
+        if temp_dir:
+            roots.append(temp_dir)
+        try:
+            roots.append(str(upload_dir_for_session(session_key, create=False)))
+        except Exception:
+            pass
+        try:
+            roots.append(
+                str(workspace_path() / EXTERNAL_UPLOAD_ROOT / safe_filename(session_key))
+            )
+        except Exception:
+            pass
+        return tuple(dict.fromkeys(item for item in roots if item))
+
     def _build_tool_runtime_context(
         self,
         *,
@@ -3387,12 +3440,20 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         # 在场索引随 runtime context 交给执行道：参数错误指针与冲动投递都读这一份，
         # 每条消费路各自重扫历史就会在同一跳里长出两个答案。
         contract_presence = self._frontdoor_contract_presence_index(state)
+        policy = session_policy(session.state.session_key)
         return {
             "on_progress": runtime.context.on_progress,
             "emit_lifecycle": True,
             "actor_role": "ceo",
             "tool_watchdog": self._ceo_tool_watchdog_runtime_config(),
             "session_key": session.state.session_key,
+            # 档位：信任级 + 意图 + 解析出的执行面。工具层只读这几个键，不自己判来源。
+            "trust_level": policy.trust,
+            "sandbox_mode": policy.mode,
+            "sandbox_tier": policy.tier,
+            "exec_force_governed": policy.exec_requires_governed,
+            "fs_read_roots": list(self._sandbox_read_roots(session.state.session_key, policy)),
+            "fs_write_roots": [],
             "turn_id": turn_id,
             "model_refs": turn_model_refs,
             "image_multimodal_enabled": image_enabled,
@@ -3689,10 +3750,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             # 钉住表按裸 session_key 分桶（`session:` 前缀只是台账的作用域写法），
             # 拿前缀键去查会取回空名单，把全部技能当成新增。
             covered_skill_ids=pinned_skill_ids_for(None, session_key=normalized_session_key),
-            memory_provider=self._frontdoor_memory_notice_provider,
+            memory_provider=lambda **kwargs: self._frontdoor_memory_notice_provider(
+                **kwargs,
+                session_key=normalized_session_key,
+            ),
             persona_provider=lambda **kwargs: self._frontdoor_persona_notice_provider(
                 **kwargs,
                 adopted_digest=persona_adopted_digest,
+                session_key=normalized_session_key,
             ),
             contract_sections=self._frontdoor_contract_notice_sections(
                 dict(state or {}),
@@ -3808,14 +3873,24 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         return "; ".join(rows)
 
     def _frontdoor_memory_notice_provider(
-        self, *, since_rev: int, base_rev: int, initialized: bool = False
+        self,
+        *,
+        since_rev: int,
+        base_rev: int,
+        initialized: bool = False,
+        session_key: str = "",
     ) -> dict[str, Any] | None:
         """长期记忆增量：与 skill 名单同一条通知消息、同一个游标。
 
         首次投递（`initialized=False`）只对齐到当前修订——会话 index 1 的冻结快照就是
         这份文档，再投一遍整篇会把同一份内容放两次。对齐也把 `initialized` 记为真，
         所以"首跳时还没有任何修订"的会话不会因此漏掉第一条真实修订。
+
+        第三方会话直接 `None`：头部快照已经空了，增量还照投就等于从侧门把记忆
+        送进群聊上下文。
         """
+        if session_key and is_third_party_session(session_key):
+            return None
         manager = getattr(self._loop, "memory_manager", None)
         if manager is None or not callable(getattr(manager, "memory_notice_delta", None)):
             return None
@@ -3838,6 +3913,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         cursor_digest: str = "",
         initialized: bool = False,
         adopted_digest: str = "",
+        session_key: str = "",
     ) -> dict[str, Any] | None:
         """Persona delta for the same `[RUNTIME_NOTICE]` message.
 
@@ -3848,7 +3924,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
         `adopted_digest` comes from the session that rendered the head block; reading it off
         the runtime-ops object would always compare against an empty baseline.
+
+        第三方会话不投人设增量：头部已经是空的，增量照投等于从侧门把人设送进群聊。
         """
+        if session_key and is_third_party_session(session_key):
+            return None
         manager = getattr(self._loop, "memory_manager", None)
         if manager is None or not callable(getattr(manager, "persona_text", None)):
             return None
@@ -4112,6 +4192,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         for forced in SYNTHETIC_RESIDENT_TOOL_NAMES:
             if forced not in normalized:
                 normalized = [*normalized, forced]
+        # 受限档最后再减一次（**必须在常驻内置并进来之后**：先减后并等于没减）。
+        policy = session_policy(str(normalized_state.get("session_key") or ""))
+        if policy.restricted:
+            normalized = [name for name in normalized if policy.tool_allowed(name)]
         return normalized
 
     def _frontdoor_runtime_visible_tool_names_for_state(
@@ -5703,12 +5787,28 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if not tool_calls:
             return None
         reviewable_risk_map = self._reviewable_tool_risk_map(session_key=session_key)
+        # 信任策略**高于**全局审批档：受限档名单外的调用无条件进打回批，不看
+        # governance 开没开、也不看风险度。`all_pass` 不能把它放开。
+        policy = session_policy(session_key)
         review_items: list[dict[str, Any]] = []
         pass_through_tool_call_ids: list[str] = []
+        policy_blocked = False
         for item in tool_calls:
             tool_call_id = str(item.get("id") or "").strip()
             tool_name = str(item.get("name") or "").strip()
             arguments = dict(item.get("arguments") or {})
+            if not policy.tool_allowed(tool_name):
+                policy_blocked = True
+                review_items.append(
+                    {
+                        "tool_call_id": tool_call_id,
+                        "name": tool_name,
+                        "risk_level": "high",
+                        "reason": "trust_policy",
+                        "arguments": arguments,
+                    }
+                )
+                continue
             risk_level = self._normalize_review_risk_level(
                 reviewable_risk_map.get(tool_name, ""),
                 default="",
@@ -5719,6 +5819,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         "tool_call_id": tool_call_id,
                         "name": tool_name,
                         "risk_level": risk_level,
+                        "reason": "approval",
                         "arguments": arguments,
                     }
                 )
@@ -5727,13 +5828,17 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 pass_through_tool_call_ids.append(tool_call_id)
         if not review_items:
             return None
+        channel_session = is_channel_session_key(session_key)
         return {
             "kind": "frontdoor_tool_approval_batch",
             "batch_id": f"batch:{uuid.uuid4().hex[:12]}",
             "mode": "regulatory_review",
             "submission_mode": "batch_submit_only",
             # 渠道会话（qq / 第三方桥）没有审批界面，这一批在 review 节点直接打回，不落中断。
-            "channel_session": is_channel_session_key(session_key),
+            "channel_session": channel_session,
+            # 策略打回不落中断：owner 的只读档也没有"问你一下"这个选项，只能是拒绝。
+            "auto_reject": channel_session or policy_blocked,
+            "policy_tier": policy.tier,
             "tool_calls": tool_calls,
             "review_items": review_items,
             "pass_through_tool_call_ids": pass_through_tool_call_ids,
@@ -8592,10 +8697,26 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             for item in list(state.get("tool_call_payloads") or [])
             if isinstance(item, dict)
         ]
+        review_items = [
+            dict(item)
+            for item in list(approval_request.get("review_items") or [])
+            if isinstance(item, dict)
+        ]
         blocked_ids = {
             str(item.get("tool_call_id") or "").strip()
-            for item in list(approval_request.get("review_items") or [])
-            if isinstance(item, dict) and str(item.get("tool_call_id") or "").strip()
+            for item in review_items
+            if str(item.get("tool_call_id") or "").strip()
+        }
+        # 同一批里可能混着两类打回：信任策略（受限档名单外）与审批档（渠道无审批面）。
+        # 回执文案按条目给——模型需要知道"这段是权限不够"还是"这段要操作员批"。
+        reject_text_by_id = {
+            str(item.get("tool_call_id") or "").strip(): (
+                _TRUST_POLICY_REJECTION_TEXT
+                if str(item.get("reason") or "").strip() == "trust_policy"
+                else _CHANNEL_REVIEW_REJECTION_TEXT
+            )
+            for item in review_items
+            if str(item.get("tool_call_id") or "").strip()
         }
         executable_payloads: list[dict[str, Any]] = []
         synthetic_results: list[dict[str, Any]] = []
@@ -8608,12 +8729,16 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 self._build_synthetic_rejection_result(
                     tool_call_id=tool_call_id,
                     tool_name=str(payload.get("name") or ""),
-                    result_text=_CHANNEL_REVIEW_REJECTION_TEXT,
+                    result_text=reject_text_by_id.get(tool_call_id, _CHANNEL_REVIEW_REJECTION_TEXT),
                 )
             )
         return {
             "approval_request": None,
-            "approval_status": "channel_auto_rejected",
+            "approval_status": (
+                "channel_auto_rejected"
+                if bool(approval_request.get("channel_session"))
+                else "policy_auto_rejected"
+            ),
             "tool_call_payloads": original_payloads,
             "executable_tool_call_payloads": executable_payloads,
             "synthetic_tool_results": synthetic_results,
@@ -8631,7 +8756,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         approval_request = dict(state.get("approval_request") or {})
         if not approval_request:
             return {"next_step": "execute_tools"}
-        if bool(approval_request.get("channel_session")):
+        if bool(approval_request.get("auto_reject")) or bool(
+            approval_request.get("channel_session")
+        ):
             return self._auto_reject_channel_review(state=state, approval_request=approval_request)
 
         preview_state = dict(state or {})

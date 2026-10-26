@@ -1011,6 +1011,9 @@ class ExternalApiTokenConfig(Base):
     # 作用域按号裁决，默认放开：能拿到 token 与能读本机会话之间没有新的信任边界
     # （/api/v1 本来就要 operator 亲手签发 Bearer，服务只绑回环）。收回它就设 False。
     cross_session: bool = True
+    # 第三方桥自己报的发送者 id 白名单：命中即视为操作员本人（可写长期记忆、可用
+    # 控制面工具）。空 = 该桥的每一条消息都是第三方。群聊形状不看这个白名单。
+    trusted_senders: list[str] = Field(default_factory=list)
 
 
 def _normalize_external_token_id(value: Any) -> str:
@@ -1079,6 +1082,10 @@ class QqBotAccountConfig(Base):
     sandbox: bool = False
     enabled: bool = True
     label: str = ""
+    # 操作员自己的 openid 白名单（c2c 的 user_openid / 频道私信的 user id）：
+    # 命中即 owner。群聊里的 member_openid 不可跨会话匹配，所以群聊整会话按第三方处理，
+    # 这条白名单对 group/guild 消息不生效。
+    owner_openids: list[str] = Field(default_factory=list)
 
 
 def _normalize_qq_app_id(value: Any) -> str:
