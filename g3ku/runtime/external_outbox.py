@@ -64,6 +64,21 @@ OUTBOX_FILENAME = "outbox.jsonl"
 PROACTIVE_EVENT = "outbound.created"
 REPLY_EVENT = "reply.final"
 
+# What a pull consumer (MCP gateway, any client that polls the ledger instead of holding a
+# channel socket) is allowed to treat as "text the user has not seen yet". A heartbeat-origin
+# front door turn never emits `reply.final` — its body leaves through the proactive push lane —
+# so restricting the pull reads to replies makes that text structurally unreadable while it
+# sits pending in this very ledger.
+PULL_CONSUMABLE_EVENTS = (REPLY_EVENT, PROACTIVE_EVENT)
+
+
+def is_pull_consumable(record: dict[str, Any]) -> bool:
+    """One predicate for every pull-side read, so the reads cannot drift apart."""
+    event = str((record or {}).get("event") or "")
+    if event not in PULL_CONSUMABLE_EVENTS:
+        return False
+    return bool(str((record or {}).get("text") or "").strip())
+
 _LOCK = threading.RLock()
 _ROOT_OVERRIDE: Path | None = None
 

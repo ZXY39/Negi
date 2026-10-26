@@ -43,6 +43,7 @@
 
 - **无竞态次序**：调用方先取 `after_seq = hub.last_seq`，再 submit；等待器先 subscribe、先消费 `replay(after_seq)` 再进 live 队列，seen-seq 集合去重（publish 在锁外扇出，到达顺序不保证——匹配按类型/turn_id，选择按 max-seq，从不按到达序）。
 - **started**：等 `seq > after_seq` 且 turn_id 匹配的第一个 `reply.final`。
+- **没点名回合的续取**（`negi_get_reply` 不带 `turn_id`）：除 `reply.final` 外还接 `outbound.created` 作为正文，回包带 `source: proactive` 标出来路，并顺手 `ack_reply` 销掉这条账本记录（服务端对这一类**不**自动销账，判据与理由见 `external-agent-api.md`「持久 outbox」）。点名等某一回合时不接这一类——一条无关的主动推送不能顶掉本轮的答案。必要性：心跳来源的回合从不产 `reply.final`，它的正文只以主动推送记录进账。
 - **queued**（消息并入在跑回合链）：链上**前一条消息**的 final 会先到，drain 批次在同一 turn_id 下追加新 final、且发生在唯一终态 `turn.completed` 之前——规则是收集 finals 直到终态、取 max-seq 的那条。**"等下一个 final"对 queued 是错的。**
 - **duplicate**：原 final 可能已在缓冲（seq ≤ after_seq），先反扫 `replay(0)` 找匹配 turn_id 的 final，找不到再以 `after_seq=0` 活等。
 - `turn.failed` → failed（error 为用户可读全文）；`turn.completed(cancelled)` 且无 final → cancelled；完成但无 final → no_reply。

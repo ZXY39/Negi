@@ -275,6 +275,21 @@ class G3kuMcpClient:
                     pass
             event_type = str(event.get("type") or "")
             event_turn_id = str(event.get("turn_id") or "")
+            if event_type == "outbound.created" and turn_id is None and not queued:
+                # 心跳来源的回合从不发 reply.final，它给用户的正文只以主动推送记录进账并
+                # 发布这一帧；不认它就把"账本里有存货"报成"这轮没写回复"。只在没有点名
+                # 某一回合时取它：等特定回合答案的读口不该被一条无关推送顶掉。
+                proactive_text = str(event.get("text") or "").strip()
+                if not proactive_text:
+                    continue
+                await _settle(event)
+                return {
+                    "kind": "reply",
+                    "text": proactive_text,
+                    "turn_id": event_turn_id or None,
+                    "seq": int(event.get("seq") or 0),
+                    "source": "proactive",
+                }
             if event_type == "reply.final":
                 if queued:
                     finals.append(dict(event))

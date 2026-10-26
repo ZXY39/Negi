@@ -44,7 +44,12 @@ from g3ku.runtime.external_events import (
     SSE_HEARTBEAT_INTERVAL_SECONDS,
     get_session_event_hub,
 )
-from g3ku.runtime.external_outbox import REPLY_EVENT, ack_outbound_message, load_pending_outbound
+from g3ku.runtime.external_outbox import (
+    REPLY_EVENT,
+    ack_outbound_message,
+    is_pull_consumable,
+    load_pending_outbound,
+)
 from g3ku.runtime.external_sessions import (
     ExternalSessionEntry,
     get_external_session_registry,
@@ -529,8 +534,7 @@ async def get_external_session_state(
     unconsumed = sum(
         1
         for record in load_pending_outbound()
-        if str(record.get("session_key") or "") == entry.session_key
-        and str(record.get("event") or "") == REPLY_EVENT
+        if str(record.get("session_key") or "") == entry.session_key and is_pull_consumable(record)
     )
     task_activity = _session_task_activity(peek_global_agent(), entry.session_key)
     task_hop_ceiling = _task_hop_ceiling(task_activity) if task_activity is not None else ""
@@ -593,8 +597,10 @@ def summarize_external_session_wake(
     """把两份既有 durable 事实合成一条唤醒读数：终态任务行 + 未销账的回复记录。
 
     只算不读，是为了让"哪条算终态、哪条算未消费、截断怎么写"这一套判据可测——
-    真读口在 `tasks` 表与 outbox 账本里。回复只认 `event == reply.final`：账本里
-    还有主动推送那一种记录，它是发给渠道用户的消息，不是回合的答案。
+    真读口在 `tasks` 表与 outbox 账本里。可取集合由 `external_outbox.is_pull_consumable`
+    单点决定：`reply.final`（回合的答案）和 `outbound.created`（发给用户的正文）都算，因为
+    心跳来源的回合从不产 `reply.final`，它的正文只以主动推送记录进账——只认前一类会让这段
+    正文躺在账本里对拉取式消费方永远不可读。每条回复自带 `event` 字段标出来路。
 
     水位线只认一种形状：本机墙钟到秒。两本时间源的串不一样——账本 `ts` 是
     `datetime.now().isoformat()`（naive、带微秒），`tasks.updated_at` 带 `+08:00` 且只到秒
@@ -611,17 +617,14 @@ def summarize_external_session_wake(
         for item in list(task_rows or [])[:tasks_limit]
         if str(item.get("task_id") or "")
     ]
-    owned = [
-        record
-        for record in list(pending_records or [])
-        if str(record.get("event") or "") == REPLY_EVENT and str(record.get("text") or "")
-    ]
+    owned = [record for record in list(pending_records or []) if is_pull_consumable(record)]
     if cursor:
         owned = [record for record in owned if _wake_wall_second(str(record.get("ts") or "")) >= cursor]
     replies = [
         {
             "outbox_id": str(record.get("id") or ""),
             "ts": str(record.get("ts") or ""),
+            "event": str(record.get("event") or ""),
             "text": str(record.get("text") or ""),
         }
         for record in owned[:replies_limit]
@@ -1155,12 +1158,20 @@ def _sse_chunk(event: dict[str, Any]) -> str:
 
 
 def _ack_streamed_outbox_event(event: dict[str, Any], session_key: str) -> None:
-    """外部 SSE 把这一帧写出去了 = 拉取式客户端已经拿到正文，就地销账。
+    """外部 SSE 把 `reply.final` 写出去了 = 拉取式客户端已经拿到正文，就地销账。
 
     与桥在渠道 API 确认后发起的 ack 同义；重复 ack 是幂等墓碑。跨进程的
     MCP 网关（negi_get_reply 走这条 SSE）过去没有任何 ack 点，未取走的回复
     只能靠对账循环无限重投。
+
+    只销 `reply.final`：主动推送那一类（`outbound.created`）在这一条流上有现成的
+    消费者（渠道桥），也有根本没有消费者的（纯拉取式会话），服务端看不出客户端会不会
+    把这一帧丢掉。按帧类型一律销账会让"问一下有没有回复"这一次连接把账本里唯一的存货
+    标成已交付——正文仍在转录里，但待投递这个事实没了。主动推送由真正取走它的一方
+    ack：桥发送成功后调 `/outbox/{id}/ack`，拉取式客户端返回它时同样调这一颗。
     """
+    if str((event or {}).get("type") or "") != REPLY_EVENT:
+        return
     outbox_id = str((event or {}).get("outbox_id") or "").strip()
     if not outbox_id:
         return
