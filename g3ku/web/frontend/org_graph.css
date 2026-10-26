@@ -3195,9 +3195,6 @@ textarea {
     display: flex;
     align-items: center;
     min-height: 28px;
-    /* 加载弧要对准上方那条轨道竖线：气泡在加载态多了 12px 内边距，线在内容左缘 +8px，
-       16px 的弧自身中心再 +8——不抵消这 12px，整条弧就是右移一格。 */
-    margin-left: calc(-1 * var(--ui-space-3));
 }
 
 /* 静默回合（模型调用 silent 工具）：整条响应折成一行「静默消息 HH:MM:SS」+ 下箭头。
@@ -3587,6 +3584,14 @@ textarea {
     height: 16px;
 }
 
+/* 外框也钉成 16px：它默认会被撑到 26px，圆心因此偏右 5px，弧就不再落在轨道线上了。 */
+.assistant-loading-indicator.interaction-step-icon {
+    flex: 0 0 auto;
+    width: 16px;
+    height: 16px;
+    padding: 0;
+}
+
 .markdown-content {
     display: flex;
     flex-direction: column;
@@ -3915,6 +3920,16 @@ textarea {
     overflow: hidden;
 }
 
+/* 展开后正文变成多行的滚动块：整行居中对齐会把箭头拽到中间的某一行，
+   读起来像指向第二段。展开态钉在顶部，箭头就留在第一行。 */
+.task-trace-step--turn-text[open] > .task-trace-summary {
+    align-items: flex-start;
+}
+
+.task-trace-step--turn-text[open] > .task-trace-summary .task-trace-turn-toggle {
+    margin-top: 0.25em;
+}
+
 .task-trace-step--turn-text .interaction-step-title {
     flex: 1 1 auto;
     overflow: hidden;
@@ -4137,29 +4152,39 @@ textarea {
 
 .task-trace-body {
     display: grid;
-    gap: var(--space-3);
-    margin-top: var(--space-3);
+    /* 工具陈列更紧密：卡内就是一行行工具，行距再宽就散成两栏了。 */
+    gap: var(--space-2);
+    margin-top: var(--space-2);
 }
 
 /* 在飞工具行的容器：挂在阶段卡体内，与正式轮次同一处出现（org_graph_app.js ceoLiveToolStepHost）。 */
 .task-trace-live-steps {
     display: grid;
-    gap: var(--space-3);
+    gap: var(--space-2);
 }
 
-/* 在飞工具也画成小卡片，与轮次卡（.task-trace-round-chip）同一副壳：
-   加载图标就落在名字前面那一格，看着和「加载 tool」是同一族控件。 */
+/* 在飞工具行不再套卡片外壳：它跟上方已完成的工具卡同一量级，但只占内容宽，
+   不拉满整行。秒数跟在名字后面，右侧只留展开钮。 */
 .task-trace-live-steps .interaction-step-header {
     margin-bottom: 0;
-    border: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
-    background: color-mix(in srgb, var(--bg-app) 72%, transparent);
-    border-radius: 18px;
-    padding: var(--space-3) calc(var(--space-3) + 2px);
+    display: inline-flex;
+    width: fit-content;
+    max-width: 100%;
+    gap: 10px;
+    padding: 0;
+    border: 0;
+    background: none;
 }
 
 /* 卡里不再印文字状态：状态由前置图标（转圈 / √ / ！）表达。 */
 .task-trace-live-steps .interaction-step-status {
     display: none;
+}
+
+.task-trace-live-steps .interaction-step-runtime {
+    color: var(--text-muted);
+    font-size: 0.76rem;
+    white-space: nowrap;
 }
 
 /* 在飞工具行不画左上角的轨道状态点：卡内正式轮次已经不画，实时行再留一颗跳动的蓝点只会多一层状态。 */
@@ -4174,7 +4199,7 @@ textarea {
 
 .task-trace-round-tools {
     display: grid;
-    gap: var(--space-3);
+    gap: var(--space-2);
 }
 
 .task-trace-round-group {

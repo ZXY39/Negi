@@ -6966,7 +6966,11 @@ function updateRuntimeBadge(element, runtimeEl, { runningPrefix = "已运行 ", 
 function refreshCeoFlowUsage(turn) {
     if (!turn?.flowUsageEl || !turn?.flowEl || turn.flowEl.hidden) return;
     const seconds = ceoTurnElapsedSeconds(turn);
-    const text = seconds === null ? "--" : (formatCeoExecutionSeconds(seconds) || "--");
+    const base = seconds === null ? "--" : (formatCeoExecutionSeconds(seconds) || "--");
+    // 秒数旁边带上模型轮数（39s 16轮）：光看时间分不清"一个工具跑了 39 秒"还是
+    // "来回十几轮才 39 秒"，这两个数一起才读得出这一跳的节奏。
+    const rounds = Number(turn?.usage?.call_count) || 0;
+    const text = rounds > 0 ? `${base} ${rounds}轮` : base;
     if (turn.flowUsageEl.textContent !== text) turn.flowUsageEl.textContent = text;
 }
 
@@ -7139,11 +7143,10 @@ function applyCeoToolEventToTurn(turn, event = {}) {
                 <span class="interaction-step-lead">
                     <span class="interaction-step-icon" data-icon-name="loader"><i data-lucide="loader"></i></span>
                     <span class="interaction-step-title"></span>
+                    <span class="interaction-step-runtime" hidden></span>
                     <button type="button" class="interaction-step-copy" hidden aria-label="复制工具结果" title="复制工具结果"><i data-lucide="copy"></i></button>
                 </span>
                 <span class="interaction-step-side">
-                    <time class="interaction-step-started" hidden></time>
-                    <span class="interaction-step-runtime" hidden></span>
                     <span class="interaction-step-status"></span>
                     <button type="button" class="interaction-step-disclosure" hidden aria-expanded="false" aria-label="Expand tool output"></button>
                 </span>

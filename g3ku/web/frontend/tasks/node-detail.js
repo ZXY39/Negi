@@ -377,6 +377,17 @@ function renderExecutionRoundToolPanel(round, step, toolIndex) {
         .map((item) => [String(item?.kind || "").trim(), String(item?.path || item?.ref || "").trim(), String(item?.note || "").trim()].filter(Boolean).join(" | "))
         .filter(Boolean)
         .join("\n");
+    // 起止时刻跟着字段走：外层不再印 Started / 已运行，时间只有点开这一层才看得到，
+    // 看参数时能对上"什么时候开始"，看输出时能对上"什么时候结束"。
+    const compact = (value) => {
+        const text = String(value || "").trim();
+        if (!text) return "";
+        return typeof formatCompactTime === "function" ? formatCompactTime(text) : text;
+    };
+    const startedText = compact(step?.started_at);
+    const finishedText = compact(step?.finished_at);
+    const argumentsLabel = startedText ? `参数 · 开始 ${startedText}` : "参数";
+    const outputLabel = finishedText ? `工具输出 · 结束 ${finishedText}` : "工具输出";
     // 入参被投影清空时，面板先印提示、再按 tool_call_id 回取全量。
     const argumentsLookupId = !String(step?.arguments_full || "").trim() && step?.arguments_truncated
         ? String(step?.tool_call_id || "").trim()
@@ -391,9 +402,9 @@ function renderExecutionRoundToolPanel(round, step, toolIndex) {
     return `
         <section class="task-trace-round-panel" data-tool-key="${esc(toolKey)}" hidden>
             ${[
-                renderTraceField("参数", step?.arguments_full || step?.arguments_text, "无参数", { copyable: true, argumentsLookupId }),
+                renderTraceField(argumentsLabel, step?.arguments_full || step?.arguments_text, "无参数", { copyable: true, argumentsLookupId }),
                 renderTraceOutputField(
-                    "工具输出",
+                    outputLabel,
                     step?.output_text,
                     step?.output_ref,
                     String(step?.status || "") === "running" ? "等待工具输出..." : "暂无工具输出",
