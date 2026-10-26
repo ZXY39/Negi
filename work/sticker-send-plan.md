@@ -81,9 +81,9 @@ Negi 不需要新造"标记 → 图片 → 消息链"的发送实现：**正文�
 
 - 现状：网页车道走 `rewrite_assistant_media_content` → `_build_thumbnail`（`ceo_media.py:144-164`）：PIL `img.load()` 只取首帧、RGBA 铺白底、存 JPEG。`.gif`/`.webp` 都在 `_RASTER_SUFFIXES`（`:40`）里 → **动图在网页端只显示静态首帧，透明背景变白**。
 - 渠道车道不受影响（发原图字节，见 P1c 校验 3）。
-- 改法：`ceo_media.py:193-197` 给 `.gif`/`.webp` 开例外，跳过缩略图、直接用签名原图 URL。表情包以动图为主，不做这条网页端体验明显打折。
-- 代价：网页首屏会拉原图而不是 ≤100KB 的缩略图（`THUMBNAIL_MAX_BYTES`，`:33`）。表情包通常几十到几百 KB，可接受；超大图仍走缩略图。
-- 验收：网页会话里发一张动图，前端 `<img>` 的 src 是签名原图 URL 而非 `inline_media/thumb_*.jpg`，且动画在播。
+- 改法（初版改错过一次，实测修正）：**把原图字节原样复制**到会话 upload 目录的 `inline_media/anim_<digest>_<name>.<ext>`，markdown 用副本路径做 src、签名原图 URL 放 title 槽。**不能**直接把 src 换成签名 viewer URL——前端只内联"能自己服"的本地 src，viewer URL 会让图片退化成一个写有 `image` 的可点文本（平台实测踩到）。
+- 代价：动图多一份副本（表情包通常几十到几百 KB）。超大图仍走缩略图。
+- 验收：网页会话里发一张动图，`<img>` 的 src 命中 `inline_media/anim_*.gif`，动画在播；PNG 仍走 `thumb_*.jpg`。
 
 ## 模型侧契约：只写 `包/分类` 键，不写路径、不读图
 
@@ -423,9 +423,30 @@ sticker_packs (emit `[[sticker:<pack>/<category>]]` as the last line; `pack | th
 | P1 核心 | `5cf1dd53` | `g3ku/stickers/{catalog,marker}.py` |
 | P1 接线 | `ba6626aa` | 两条出站车道 + 流式扣留 + 桥侧 `after_text` |
 | P1 头部 | `b3496194` | 钉住块 + `sticker_pack:*` 通知分节 + 渲染器 v3 |
-| P1c | 本批 | `skills/meme/` + `import_pack.py` + 测试 |
+| P1c | `bc5cff48` | `skills/meme/` + `import_pack.py` + 测试 |
+| 修正 | `28e7cf83` | `stickers_root` 不再经 `web_ceo_sessions`（绕开基线既有循环导入）；`.gitignore` 根锚定 `/stickers/` |
+| 修正 | `16f15c99` | 转录落盘前把标记换成图片 markdown（确定性选图）；动图改暂存原样副本 |
 
-验收现状：`test_sticker_packs`（15）、`test_sticker_import_script`（6）、`test_external_api_events`（含 3 条表情包链路用例）、`test_runtime_contract_notice`（含头部冻结/只投一次）、`test_frontdoor_pinned_contract`（含 round-trip）全绿；OneBot 桥 38 条全绿。
+### 平台会话实测（2026-10-26 23:08，web 车道，非 QQ）
+
+前置：`stickers/demo/`（`happy` 两张 PNG + `awkward` 一张 GIF，manifest 带主题与分类描述）；`negi bootstrap` 优雅退出后重启。
+
+| 检查项 | 结果 |
+|---|---|
+| 头部携带清单 | 用户只说"开心类"，模型自己写出 `[[sticker:demo/happy]]`——没提包名，说明清单确实在头部且被读到 |
+| 标记不出站 | 实时帧与刷新后 DOM 里都没有 `[[sticker:` |
+| PNG 渲染 | `<img>` src = `inline_media/thumb_*.jpg`（走缩略图，符合预期） |
+| GIF 渲染 | `<img>` src = `inline_media/anim_*_a1.gif`（原样副本，动画保留） |
+| 历史回放 | 刷新后两条回复都渲染成"文字 + 图片"，无标记 |
+| 转录文件 | 新会话 `sessions/web_ceo-*.jsonl` 里 `[[sticker:` 计数为 0，assistant 行是 `![](...)` |
+| 头部缓存 | 第二轮 `缓存命中 13.7k / 99.0%`，头部未破前缀 |
+
+实测中发现并已修的两处缺陷（都不在初版计划里）：
+
+1. **viewer URL 做 src 会让图片退化成可点文本**（P0-3 初版改法错误）→ 改为暂存原样副本。
+2. **历史回放露出原始标记**（转录存的是模型原文）→ 在 `_persist_turn_transcript` 落盘前换成图片 markdown，并把选图改成"按回复文本确定性"，否则实时帧与转录各取一张、刷新后换图。
+
+验收现状：`test_sticker_packs`（17）、`test_sticker_import_script`（6）、`test_ceo_media_middle_layer`（10，含动图副本）、`test_external_api_events`（含 3 条表情包链路用例）、`test_runtime_contract_notice`（头部冻结/只投一次）、`test_frontdoor_pinned_contract`（round-trip/冻结）全绿；OneBot 桥 38 条全绿。
 
 **与初版的偏离（三条，都是"脚本不自己调模型"的连带）**：
 
@@ -437,6 +458,8 @@ sticker_packs (emit `[[sticker:<pack>/<category>]]` as the last line; `pack | th
 
 - P2（`search_stickers` 工具 + 向量检索 + 六项校验）未实现，按计划保持默认关。
 - `stickers.max_per_reply` 目前是模块常量 `MAX_STICKERS_PER_REPLY = 1`，未接配置项。
-- **运行时验收未做**：需要真实 QQ 会话发一张表情包，确认 `msg_type=7` 落地、动画正常、顺序为"文字在前"，并在网页端确认流式期间看不到标记。单测只覆盖到出站事件与桥参数。
+- **平台（web）车道已实测通过**（见上表）；**QQ 车道待实测**：需要真实群/私聊确认 `msg_type=7` 落地、动图正常、顺序为"文字在前"。
+- 流式期间"看不到标记"目前只有代码级保证（`strip_markers_for_stream` + 单测）；平台实测里回合太快没抓到中间帧，之后用长回复再看一次。
+- 旧会话（本次实测前创建的 `web:ceo-96681f6af630`）转录里仍有 3 处历史标记——那是修复前的落盘数据，新会话已干净。需要的话在界面里删掉那个会话即可。
 
 **与本次无关的既有失败**（在干净 HEAD 上同样失败，已用 detached worktree 复核）：`test_frontdoor_pinned_contract::test_continuation_seed_head_is_not_stacked_with_a_second_pinned_block`（缺 `persona_text` 参数）、`test_ceo_create_agent_runner::test_parse_create_async_task_result_recognizes_task_append_notice_guidance`（`duplicate` vs `append_notice`）。
