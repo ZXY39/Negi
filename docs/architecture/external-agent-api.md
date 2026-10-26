@@ -140,7 +140,7 @@ bus/hub 全是内存态：桥 pump 断连或进程重启窗口里滞留的消息
 
 一条出站消息有两种平台形状，选哪一种决定这一发要不要权限。
 
-- **被动回复**：请求带 `msg_id`+`msg_seq`，回复的是那条入站消息。桥在 `on_incoming` 里按 external_key 把入站消息 id 记进投递账本（`bridge.py::_note_passive_ref`，与 `sessions`/`seqs` 同生共死、活过到期重登），`deliver` 每一发向 `_passive_reply_kwargs` 取参数并递增 seq。两档上限照平台口径钉成常量：窗口 `_PASSIVE_REPLY_WINDOW_SECONDS`（5 分钟）、同一 `msg_id` 最多回 `_PASSIVE_REPLY_MAX_PER_MESSAGE`（5）次；平台还会拒**相同 `msg_id`+`msg_seq` 的重复发送**，所以 pump 失败重放的那一发必然换新 seq，而不是重试同一发。正文与附件共用同一个 msg_id 的 seq 计数，每发递增。
+- **被动窗口参数只认入站消息**。两档上限照平台口径钉成常量：窗口 `_PASSIVE_REPLY_WINDOW_SECONDS`（5 分钟）、同一 `msg_id` 最多回 `_PASSIVE_REPLY_MAX_PER_MESSAGE`（5）次；平台还会拒**相同 `msg_id`+`msg_seq` 的重复发送**，所以 pump 失败重放的那一发必然换新 seq，而不是重试同一发。正文与附件共用同一个 msg_id 的 seq 计数，每发递增。实盘对照（同一条入站、相隔数秒的两发）：入站 id 上 `seq=2` 仍返回 200，说明一条入站在窗内可换多发；把 id 换成**机器人自己刚发出的那条消息**（远未过 5 分钟）则返回 `400 / code 40034005「回复消息msg_id已过期」`，说明平台不把自家输出当可回复对象——**"用上一条回复续窗"这条路不成立**，看到别家框架缓存发出消息的 id 当票据也不要照抄。
 - **主动消息**：不带 `msg_id`，平台按主动推送判定并要求该目标具备主动消息权限。
 
 分工按实测结果定：**群聊只在被动窗口内可达**。群目标实测没有这项权限——每一次 POST 被判 `400 / code 40034105「主动消息失败, 无权限」`，5 次投递预算打穿后按 `undeliverable` 销账，实盘读数里 `qq-official delivered` 只有 `kind=c2c`、群 0 条。单聊与频道用同一主动形状实测发得出去，因此保持原形状：不给一条能用的车道换风险。
