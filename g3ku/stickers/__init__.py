@@ -12,11 +12,17 @@ from __future__ import annotations
 
 from g3ku.stickers.catalog import (
     MANIFEST_NAME,
+    STICKER_HEADER,
     STICKERS_DIRNAME,
     Pack,
     StickerCategory,
     render_catalog_lines,
+    safe_scan_packs,
     scan_packs,
+    sticker_contract_sections,
+    sticker_contract_sections_from_text,
+    sticker_pack_sections,
+    sticker_sections_from_pinned_text,
     stickers_root,
 )
 from g3ku.stickers.marker import (
@@ -29,11 +35,17 @@ __all__ = [
     "MANIFEST_NAME",
     "MAX_STICKERS_PER_REPLY",
     "STICKERS_DIRNAME",
+    "STICKER_HEADER",
     "Pack",
     "StickerCategory",
     "render_catalog_lines",
     "resolve_markers",
+    "safe_scan_packs",
     "scan_packs",
+    "sticker_contract_sections",
+    "sticker_contract_sections_from_text",
+    "sticker_pack_sections",
+    "sticker_sections_from_pinned_text",
     "stickers_root",
     "strip_markers_for_stream",
 ]

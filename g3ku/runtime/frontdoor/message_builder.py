@@ -1491,10 +1491,18 @@ class CeoMessageBuilder:
             session_temp_dir=ceo_session_temp_dir(session_key),
             skill_roster_epoch=skill_roster_epoch_for(persisted_session, session_key=session_key),
             session_key=session_key,
+            sticker_items=self._frontdoor_sticker_catalog(),
         )
         if not pinned_text:
             return '', []
         return pinned_text, pinned_skill_ids_for(persisted_session, session_key=session_key)
+
+    @staticmethod
+    def _frontdoor_sticker_catalog() -> list[Any]:
+        """钉住时点的表情包清单；目录读不出来就当没有表情包（见 `safe_scan_packs`）。"""
+        from g3ku.stickers import safe_scan_packs
+
+        return list(safe_scan_packs())
 
     def _inject_turn_context(
         self,

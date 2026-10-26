@@ -247,3 +247,57 @@ def test_frontdoor_compaction_strips_old_notice_and_replays_one_snapshot() -> No
     assert "candidate_tools" not in texts[0]
     assert "repair_required" not in texts[0]
     assert "attachment_targets" not in texts[0]
+
+
+def test_frontdoor_sticker_pack_change_is_one_notice_and_head_stays_frozen(monkeypatch) -> None:
+    """表情包增删：头部冻结不动，只投一条 `sticker_pack:` 分节，同值不重复。"""
+    from pathlib import Path
+
+    from g3ku.stickers import Pack, StickerCategory
+
+    _reset_stores()
+    holder = {"policy": dict(GOVERNED)}
+    runner = _frontdoor_runner(holder)
+
+    atri = Pack(
+        key="atri",
+        theme="动漫少女",
+        categories=(StickerCategory(key="happy", description="开心大笑", count=1),),
+        path=Path("C:/ws/stickers/atri"),
+    )
+    panda = Pack(
+        key="panda",
+        theme="熊猫头",
+        categories=(StickerCategory(key="smug", description="得意", count=1),),
+        path=Path("C:/ws/stickers/panda"),
+    )
+    live = {"packs": (atri,)}
+    monkeypatch.setattr(
+        "g3ku.runtime.frontdoor._ceo_runtime_ops.safe_scan_packs", lambda: live["packs"]
+    )
+
+    head = frontdoor_pinned_contract_text(
+        None,
+        skill_items=[],
+        exec_runtime_policy=holder["policy"],
+        session_temp_dir="C:/temp/ceo",
+        skill_roster_epoch=skill_roster_epoch_for(None, session_key=SESSION_KEY),
+        session_key=SESSION_KEY,
+        sticker_items=list(live["packs"]),
+    )
+    base = [{"role": "system", "content": head}, {"role": "user", "content": "hi"}]
+    first = runner._apply_frontdoor_skill_roster_notice(
+        base, session_key=SESSION_KEY, state=_frontdoor_state()
+    )
+    assert "sticker_pack:atri" not in "\n".join(_notice_texts(first))
+
+    live["packs"] = (atri, panda)
+    changed = runner._apply_frontdoor_skill_roster_notice(
+        first, session_key=SESSION_KEY, state=_frontdoor_state()
+    )
+    assert "sticker_pack:panda: 熊猫头 | smug(得意)" in "\n".join(_notice_texts(changed))
+
+    third = runner._apply_frontdoor_skill_roster_notice(
+        changed, session_key=SESSION_KEY, state=_frontdoor_state()
+    )
+    assert len(_notice_texts(third)) == len(_notice_texts(changed))

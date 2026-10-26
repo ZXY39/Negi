@@ -26,12 +26,18 @@ from g3ku.runtime.frontdoor.tool_contract import (
     merge_pinned_contract_into_system_text,
     pinned_contract_is_carried_by_head,
     pinned_contract_revision_key,
+    pinned_contract_section_values,
     pinned_skill_ids_for,
     render_pinned_contract_text,
     skill_roster_epoch_for,
     split_pinned_contract_from_system_text,
 )
 from g3ku.runtime.skill_roster_notice import clear_skill_roster_notice_stores
+from g3ku.stickers import (
+    STICKER_HEADER,
+    sticker_pack_sections,
+    sticker_sections_from_pinned_text,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -54,7 +60,7 @@ def _items(*ids: str) -> list[dict[str, str]]:
     ]
 
 
-def _pinned(*, session=None, skill_items=None, session_key="web:pinned", epoch=None, policy=None, temp_dir="C:/temp/ceo/pinned", include_extras=True):
+def _pinned(*, session=None, skill_items=None, session_key="web:pinned", epoch=None, policy=None, temp_dir="C:/temp/ceo/pinned", include_extras=True, sticker_items=None):
     if epoch is None:
         epoch = skill_roster_epoch_for(session, session_key=session_key)
     return frontdoor_pinned_contract_text(
@@ -65,6 +71,7 @@ def _pinned(*, session=None, skill_items=None, session_key="web:pinned", epoch=N
         skill_roster_epoch=epoch,
         session_key=session_key,
         include_extras=include_extras,
+        sticker_items=sticker_items,
     )
 
 
@@ -333,3 +340,61 @@ def test_graph_contract_pins_full_roster_into_head_and_keeps_it_frozen() -> None
     # 重印之后下一跳按新名单继续冻结。
     stable_after = _contract(runner, _canonical_state(candidate_skill_ids=list(DRIFTED_ROSTER)))
     assert stable_after.stable_messages[0]["content"] == repinned.stable_messages[0]["content"]
+
+
+def _sticker_pack(key: str, theme: str, categories: list[tuple[str, str]]):
+    from pathlib import Path
+
+    from g3ku.stickers import Pack, StickerCategory
+
+    return Pack(
+        key=key,
+        theme=theme,
+        categories=tuple(
+            StickerCategory(key=name, description=description, count=1)
+            for name, description in categories
+        ),
+        path=Path("C:/ws/stickers") / key,
+    )
+
+
+def test_pinned_head_carries_sticker_catalog_and_round_trips_into_sections() -> None:
+    """头部渲染与通知分节是同一份渲染：解析回来必须逐字相等。"""
+    packs = [
+        _sticker_pack("atri", "动漫少女", [("happy", "开心大笑"), ("awkward", "尴尬")]),
+        _sticker_pack("panda", "熊猫头", [("smug", "得意")]),
+    ]
+    text = render_pinned_contract_text(
+        skill_items=[],
+        exec_runtime_policy=None,
+        session_temp_dir="C:/temp/ceo",
+        sticker_items=packs,
+    )
+
+    assert STICKER_HEADER in text
+    assert "- `atri` | 动漫少女 | awkward(尴尬), happy(开心大笑)" in text
+    assert "- `panda` | 熊猫头 | smug(得意)" in text
+    assert sticker_sections_from_pinned_text(text) == sticker_pack_sections(packs)
+    values = pinned_contract_section_values(text)
+    assert values["sticker_pack:atri"] == sticker_pack_sections(packs)["atri"]
+
+
+def test_pinned_sticker_lines_stay_frozen_between_repaints() -> None:
+    """两次重印之间增删表情包：头部逐字节不动，变化只走通知分节。"""
+    packs = [_sticker_pack("atri", "动漫少女", [("happy", "开心大笑")])]
+    kwargs = dict(
+        skill_items=[],
+        policy=None,
+        temp_dir="C:/temp/ceo",
+        session_key="web:pinned",
+    )
+    first = _pinned(sticker_items=packs, **kwargs)
+    grown = [*packs, _sticker_pack("panda", "熊猫头", [("smug", "得意")])]
+    again = _pinned(sticker_items=grown, **kwargs)
+    assert again == first
+    assert "sticker_pack:panda" not in again
+
+    bump_skill_roster_epoch(None, session_key="web:pinned")
+    repinned = _pinned(sticker_items=grown, **kwargs)
+    assert repinned != first
+    assert "- `panda` | 熊猫头 | smug(得意)" in repinned

@@ -7,9 +7,12 @@ import random
 from pathlib import Path
 
 from g3ku.stickers import (
+    STICKER_HEADER,
     render_catalog_lines,
     resolve_markers,
     scan_packs,
+    sticker_pack_sections,
+    sticker_sections_from_pinned_text,
     strip_markers_for_stream,
 )
 from g3ku.stickers.catalog import invalidate_scan_cache
@@ -99,7 +102,7 @@ def test_scan_packs_cache_and_invalidate(tmp_path):
     assert [pack.key for pack in scan_packs(tmp_path)] == ["atri", "panda"]
 
 
-def test_render_catalog_lines_groups_and_truncates(tmp_path):
+def test_render_catalog_lines_is_one_parseable_line_per_pack(tmp_path):
     long_description = "尴尬、被说中、当场社死的复合语气与典型触发语境补充说明"
     _write_pack(
         tmp_path,
@@ -110,12 +113,32 @@ def test_render_catalog_lines_groups_and_truncates(tmp_path):
     )
     invalidate_scan_cache()
 
-    lines = render_catalog_lines(scan_packs(tmp_path))
+    packs = scan_packs(tmp_path)
+    lines = render_catalog_lines(packs)
 
-    assert lines[0] == "- `atri` | 动漫少女 ATRI"
-    assert lines[1] == "  - `awkward` | " + long_description[:19].rstrip() + "…"
-    assert lines[2] == "  - `happy` | 开心大笑"
-    assert not any("张" in line or "2" in line for line in lines)
+    assert lines[0] == STICKER_HEADER
+    assert lines[1] == (
+        f"- `atri` | 动漫少女 ATRI | awkward({long_description[:19].rstrip()}…), happy(开心大笑)"
+    )
+    # 头部 ≡ 通知分节：解析回来必须逐字相等
+    assert sticker_sections_from_pinned_text("\n".join(lines)) == sticker_pack_sections(packs)
+    assert not any("张" in line for line in lines)
+
+
+def test_catalog_sections_drop_descriptions_over_budget(tmp_path):
+    _write_pack(
+        tmp_path,
+        "atri",
+        {f"cat{index:03d}": 1 for index in range(100)},
+        theme="长主题",
+        descriptions={f"cat{index:03d}": "很长的分类描述还要再长一些才能撑爆预算" for index in range(100)},
+    )
+    invalidate_scan_cache()
+
+    sections = sticker_pack_sections(scan_packs(tmp_path))
+
+    assert "(" not in sections["atri"]
+    assert "cat099" in sections["atri"]
 
 
 def test_resolve_markers_picks_an_image_and_drops_the_line(tmp_path):

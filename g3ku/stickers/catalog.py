@@ -23,6 +23,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+from loguru import logger
+
 STICKERS_DIRNAME = "stickers"
 MANIFEST_NAME = "manifest.json"
 # AstrBot's pack protocol uses the same character set for category keys, and it
@@ -180,6 +182,19 @@ def find_pack(packs: Iterable[Pack], key: str) -> Pack | None:
     return None
 
 
+def safe_scan_packs() -> tuple[Pack, ...]:
+    """``scan_packs()`` that never raises.
+
+    The pinned contract head must assemble even when the sticker directory is
+    unreadable: an exception here would take out the whole stable prefix.
+    """
+    try:
+        return scan_packs()
+    except Exception:
+        logger.warning("sticker catalog scan failed; treating the catalog as empty")
+        return ()
+
+
 def category_owners(packs: Iterable[Pack], category_key: str) -> tuple[Pack, ...]:
     """Packs that expose ``category_key`` -- used for the short-marker rule."""
     return tuple(pack for pack in packs if pack.category(category_key) is not None)
@@ -214,22 +229,104 @@ def _clip(text: str, limit: int) -> str:
     return compact
 
 
-def render_catalog_lines(packs: Iterable[Pack], *, description_chars: int = 20) -> tuple[str, ...]:
-    """The pinned-contract rendering: pack line, then indented category lines.
+def _flatten(text: str, limit: int) -> str:
+    """Single-line, pipe-free: the head line doubles as a parseable section."""
+    return _clip(str(text or "").replace("|", "/"), limit)
+
+
+STICKER_HEADER = (
+    "sticker_packs (emit `[[sticker:<pack>/<category>]]` as the last line; "
+    "`pack | theme | category(description), ...`):"
+)
+# 头部与增量通知共用这一份预算判据：两边都按同一个形状渲染，摘要才对得上。
+STICKER_SECTION_BUDGET = 2000
+
+
+def _build_sections(packs: Iterable[Pack], *, include_descriptions: bool) -> dict[str, str]:
+    sections: dict[str, str] = {}
+    for pack in packs:
+        theme = _flatten(pack.theme, 40) or _THEME_PLACEHOLDER
+        parts: list[str] = []
+        # 分类按 key 排序：头部字节稳定性不能依赖调用方给元组的顺序。
+        for category in sorted(pack.categories, key=lambda item: item.key):
+            description = _flatten(category.description, 20) if include_descriptions else ""
+            parts.append(f"{category.key}({description})" if description else category.key)
+        sections[pack.key] = f"{theme} | {', '.join(parts)}"
+    return sections
+
+
+def sticker_pack_sections(packs: Iterable[Pack]) -> dict[str, str]:
+    """``{pack_key: "theme | category(description), ..."}`` — the single rendering.
+
+    The pinned head line and the runtime-notice section come from this same
+    function, so "the head already says X" and "the current value is X" are byte
+    identical without a second renderer. Over budget, descriptions are dropped
+    for every pack at once so both sides keep agreeing.
+    """
+    ordered = tuple(packs)
+    sections = _build_sections(ordered, include_descriptions=True)
+    if sum(len(key) + len(value) + 8 for key, value in sections.items()) <= STICKER_SECTION_BUDGET:
+        return sections
+    return _build_sections(ordered, include_descriptions=False)
+
+
+def render_catalog_lines(packs: Iterable[Pack]) -> tuple[str, ...]:
+    """Pinned-contract rendering: one parseable line per pack.
 
     Counts stay out on purpose: a count changes on every single-file add, which
     would break the byte-stability the pinned block depends on.
     """
-    lines: list[str] = []
-    for pack in packs:
-        lines.append(f"- `{pack.key}` | {pack.theme}")
-        for category in pack.categories:
-            description = _clip(category.description, description_chars)
-            if description:
-                lines.append(f"  - `{category.key}` | {description}")
-            else:
-                lines.append(f"  - `{category.key}`")
-    return tuple(lines)
+    sections = sticker_pack_sections(packs)
+    if not sections:
+        return ()
+    return (STICKER_HEADER, *(f"- `{key}` | {value}" for key, value in sections.items()))
+
+
+def sticker_sections_from_pinned_text(pinned_text: Any) -> dict[str, str]:
+    """Read the pinned head back into ``{pack_key: section_text}``.
+
+    Used to seed the notice ledger with "the head already covers this", so the
+    first turn after a reprint does not announce the whole catalog again.
+    """
+    lines = str(pinned_text or "").splitlines()
+    start = -1
+    for index, line in enumerate(lines):
+        if line.strip().startswith("sticker_packs ("):
+            start = index
+            break
+    if start < 0:
+        return {}
+    sections: dict[str, str] = {}
+    for line in lines[start + 1 :]:
+        stripped = line.strip()
+        if not stripped.startswith("- `"):
+            break
+        key_part, separator, value = stripped[2:].partition("` | ")
+        if not separator:
+            continue
+        key = key_part.strip().strip("`").strip()
+        if key and PACK_KEY_RE.match(key):
+            sections[key] = value.strip()
+    return sections
+
+
+# 运行时合同通知的分节键前缀：一包一节，`record_contract_sections` 按摘要 diff，
+# 只有真变化的包会进下一次通知。
+STICKER_SECTION_PREFIX = "sticker_pack:"
+
+
+def sticker_contract_sections(packs: Iterable[Pack]) -> dict[str, str]:
+    return {
+        f"{STICKER_SECTION_PREFIX}{key}": value
+        for key, value in sticker_pack_sections(packs).items()
+    }
+
+
+def sticker_contract_sections_from_text(pinned_text: Any) -> dict[str, str]:
+    return {
+        f"{STICKER_SECTION_PREFIX}{key}": value
+        for key, value in sticker_sections_from_pinned_text(pinned_text).items()
+    }
 
 
 __all__ = [
@@ -238,6 +335,9 @@ __all__ = [
     "MANIFEST_NAME",
     "PACK_KEY_RE",
     "STICKERS_DIRNAME",
+    "STICKER_HEADER",
+    "STICKER_SECTION_BUDGET",
+    "STICKER_SECTION_PREFIX",
     "Pack",
     "StickerCategory",
     "category_owners",
@@ -245,6 +345,11 @@ __all__ = [
     "invalidate_scan_cache",
     "pack_images",
     "render_catalog_lines",
+    "safe_scan_packs",
     "scan_packs",
+    "sticker_contract_sections",
+    "sticker_contract_sections_from_text",
+    "sticker_pack_sections",
+    "sticker_sections_from_pinned_text",
     "stickers_root",
 ]

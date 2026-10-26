@@ -136,6 +136,7 @@ from g3ku.runtime.web_ceo_sessions import (
     strip_multimodal_blocks_from_message_records,
     trailing_turn_record,
 )
+from g3ku.stickers import safe_scan_packs, sticker_contract_sections
 from g3ku.utils.helpers import tools_bundle_single_source_enabled
 from main.governance.exec_tool_policy import render_exec_runtime_policy_body
 from main.governance.tool_context import apply_runtime_tool_context_projection
@@ -3343,6 +3344,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             session_temp_dir=self._ceo_session_temp_dir(normalized_session_key),
             skill_roster_epoch=skill_roster_epoch_for(session, session_key=normalized_session_key),
             session_key=normalized_session_key,
+            sticker_items=list(safe_scan_packs()),
         )
         if not pinned_text:
             return "", []
@@ -3747,7 +3749,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             for item in list(state.get("attachment_reopen_targets") or [])
             if isinstance(item, dict)
         ]
-        return {
+        sections = {
             "exec_runtime_policy": render_exec_runtime_policy_body(
                 self._frontdoor_exec_runtime_policy()
             ),
@@ -3759,6 +3761,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "repair_required": self._render_repair_notice(repair_items, repair_skill_ids),
             "attachment_targets": self._render_attachment_notice(attachment_targets),
         }
+        # 每个表情包一节（`sticker_pack:<pack>`）：两次重印之间增删包或分类只改对应那一节，
+        # 台账按摘要 diff，只有真变化的包进下一次 `[RUNTIME_NOTICE]`。
+        sections.update(sticker_contract_sections(safe_scan_packs()))
+        return sections
 
     @staticmethod
     def _render_notice_names(names: Any) -> str:

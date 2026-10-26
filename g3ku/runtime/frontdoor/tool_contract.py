@@ -35,7 +35,8 @@ RUNTIME_APPENDIX_HEADINGS = (FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING,)
 # `load_skill_context` 的三态回执告知原因。
 FRONTDOOR_PINNED_CONTRACT_HEADING = '## Runtime Contract (pinned)'
 FRONTDOOR_PINNED_CONTRACT_KIND = 'frontdoor_runtime_pinned_contract'
-PINNED_CONTRACT_RENDERER_VERSION = 'pinned-contract-v2'
+# v3: 头部新增 sticker_packs 段。版本进重印判据，存量钉住块上线后重印一次。
+PINNED_CONTRACT_RENDERER_VERSION = 'pinned-contract-v3'
 PINNED_CONTRACT_SNAPSHOT_NOTE = (
     'snapshot_note: this block refreshes only at compaction; later runtime notices '
     'supersede changed values.'
@@ -256,7 +257,14 @@ def render_pinned_contract_text(
     exec_runtime_policy: dict[str, Any] | None,
     session_temp_dir: str | None,
     include_extras: bool = True,
+    sticker_items: list[Any] | None = None,
 ) -> str:
+    """渲染头部钉住块。
+
+    `sticker_items` 是 `g3ku.stickers.catalog.scan_packs()` 的结果；它在钉住时点被
+    冻结进原文，两次重印之间怎么增删表情包都不改这块（增删由 `[RUNTIME_NOTICE]`
+    的 `sticker_pack:<pack>` 分节纠正）。
+    """
     """渲染钉住块；`include_extras=True` 时即使名单为空也渲静态声明。
 
     头部是**快照**：只在重印边界（压缩/手动压缩）用当刻值重渲，两次重印之间逐字节不动。
@@ -287,6 +295,9 @@ def render_pinned_contract_text(
             f'- `{item["skill_id"]}` | {item["display_name"]} | {item["description"]}'
             for item in normalized_items
         )
+    from g3ku.stickers import render_catalog_lines
+
+    lines.extend(render_catalog_lines(sticker_items or ()))
     if not include_extras:
         return '\n'.join(lines).strip()
     lines.append(_render_exec_runtime_policy(exec_runtime_policy))
@@ -384,9 +395,12 @@ def pinned_contract_state(session: Any, *, session_key: str | None = None) -> tu
 def pinned_contract_section_values(pinned_text: Any) -> dict[str, str]:
     """从头部原文里取"快照已覆盖"的合同分节，作为一次性通知台账的初值。
 
-    只认头部真正渲染过的两行：exec 策略与临时目录。头部没有这两行（旧数据或
-    `include_extras=False`）时返回空表，通知层会把当刻值当首次快照投出去。
+    认头部真正渲染过的行：exec 策略、临时目录，以及每个表情包一行
+    （`sticker_pack:<pack>`）。头部没有这些行（旧数据或 `include_extras=False`）时
+    返回空表，通知层会把当刻值当首次快照投出去。
     """
+    from g3ku.stickers import sticker_contract_sections_from_text
+
     values: dict[str, str] = {}
     for line in str(pinned_text or '').splitlines():
         stripped = line.strip()
@@ -395,6 +409,7 @@ def pinned_contract_section_values(pinned_text: Any) -> dict[str, str]:
             values['exec_runtime_policy'] = '' if body in {'', 'none'} else body
         elif stripped.startswith('session_temp_dir:'):
             values['session_temp_dir'] = stripped.split(':', 1)[1].strip()
+    values.update(sticker_contract_sections_from_text(pinned_text))
     return values
 
 
@@ -407,6 +422,7 @@ def frontdoor_pinned_contract_text(
     skill_roster_epoch: int,
     session_key: str | None = None,
     include_extras: bool = True,
+    sticker_items: list[Any] | None = None,
 ) -> str:
     """注入侧唯一取数口：命中已钉住的内容就复用原文，否则重钉一次并记下判据键。
 
@@ -438,6 +454,7 @@ def frontdoor_pinned_contract_text(
         exec_runtime_policy=exec_runtime_policy,
         session_temp_dir=session_temp_dir,
         include_extras=include_extras,
+        sticker_items=sticker_items,
     )
     if not fresh:
         return ''
