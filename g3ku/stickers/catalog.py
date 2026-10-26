@@ -34,7 +34,7 @@ IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp"})
 DISABLED_PREFIX = "_"
 # Sidecar directories that live beside the category folders and must never be
 # mistaken for one.
-_RESERVED_PACK_DIRS = frozenset({"semantic"})
+RESERVED_PACK_DIRS = frozenset({"semantic"})
 SCAN_TTL_SECONDS = 60.0
 _THEME_PLACEHOLDER = "（未设置主题）"
 
@@ -105,7 +105,7 @@ def _image_paths(directory: Path) -> list[Path]:
     ]
 
 
-def _read_manifest(pack_dir: Path) -> dict[str, Any]:
+def read_manifest(pack_dir: Path) -> dict[str, Any]:
     manifest_path = pack_dir / MANIFEST_NAME
     try:
         raw = manifest_path.read_text(encoding="utf-8")
@@ -118,7 +118,7 @@ def _read_manifest(pack_dir: Path) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _category_description(manifest: dict[str, Any], key: str) -> str:
+def category_description(manifest: dict[str, Any], key: str) -> str:
     categories = manifest.get("categories")
     if not isinstance(categories, dict):
         return ""
@@ -131,7 +131,7 @@ def _category_description(manifest: dict[str, Any], key: str) -> str:
 
 
 def _scan_pack(pack_dir: Path) -> Pack | None:
-    manifest = _read_manifest(pack_dir)
+    manifest = read_manifest(pack_dir)
     categories: list[StickerCategory] = []
     try:
         entries = sorted(pack_dir.iterdir(), key=lambda item: item.name)
@@ -140,7 +140,7 @@ def _scan_pack(pack_dir: Path) -> Pack | None:
     for entry in entries:
         if not entry.is_dir() or not _is_catalog_name(entry.name):
             continue
-        if entry.name in _RESERVED_PACK_DIRS:
+        if entry.name in RESERVED_PACK_DIRS:
             continue
         images = _image_paths(entry)
         if not images:
@@ -148,7 +148,7 @@ def _scan_pack(pack_dir: Path) -> Pack | None:
         categories.append(
             StickerCategory(
                 key=entry.name,
-                description=_category_description(manifest, entry.name),
+                description=category_description(manifest, entry.name),
                 count=len(images),
             )
         )
@@ -345,16 +345,19 @@ __all__ = [
     "IMAGE_SUFFIXES",
     "MANIFEST_NAME",
     "PACK_KEY_RE",
+    "RESERVED_PACK_DIRS",
     "STICKERS_DIRNAME",
     "STICKER_HEADER",
     "STICKER_SECTION_BUDGET",
     "STICKER_SECTION_PREFIX",
     "Pack",
     "StickerCategory",
+    "category_description",
     "category_owners",
     "find_pack",
     "invalidate_scan_cache",
     "pack_images",
+    "read_manifest",
     "render_catalog_lines",
     "safe_scan_packs",
     "scan_packs",
