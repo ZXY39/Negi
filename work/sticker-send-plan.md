@@ -380,13 +380,20 @@ sticker_packs (emit `[[sticker:<pack>/<category>]]` as the last line; `pack | th
 - **跨包同名不再是冲突**：`atri/happy`（大笑）与 `panda/happy`（得意）各有各的描述，互不污染。这正是选命名空间视图而不是合并视图的主要收益——合并视图下这两个语义会被压成一行糊掉的描述。
 - 剩下的冲突只在**同一个包内**：自动分类把语义不同的图塞进了同一个键。导入器只**报告**（"`panda/happy` 里混进了 12 张自嘲图，考虑拆出 `selfmock`"），**不自动拆键**。拆键是分类学决定，自动做会让键空间随每次导入漂移，模型选择准确率无法稳定。
 
-## P2 精确取图（语义检索，默认关）
+## P2 精确取图（已实现，默认关）
 
-- 前提：图库有 `<pack>/semantic/metadata.json`（caption/tags/entry_id）。AstrBot 包自带 `semantic_metadata.json` 的话这一步的元数据白送（见 P1c），只需重算 `entry_id`。
-- 新增 `search_stickers` 工具（`tools/search_stickers/resource.yaml` + `build()`，参照 `g3ku/resources/loader.py:144-162`†）；候选表只在本轮有效；标记形如 `[[sticker:<包>/<12hex>]]` —— 与 P1 保持同一形状 `<seg>/<seg>`，解析器只有一套正则。
-- 落图前六项校验（照抄 AstrBot §4.2）：形态合法 → 命中本轮候选表 → 来源包仍未被 `_` 前缀禁用 → 前缀唯一 → 非复核分类 → 文件存在且 sha256 与元数据一致。任一不过 → 不发。
-- 代价先算：`tools[]` 加一颗工具会让 provider 端全量前缀作废一次，且水合首调多一跳（`docs/architecture/tool-and-skill-system.md:368`† 记整表约 16KB）。必须和其它 `tools[]` 变更合并上线。
-- P2 与命名空间视图的关系：语义检索是**跨包**的（候选可来自多个包），所以 P2 下模型不必先选包；但标记里仍带包名，以便校验"来源包未被禁用"。
+实现形状与初版有三处偏离，都是为了少建基础设施：
+
+- **检索是词法而非向量**：几百张图的量级、查询由模型现写，对 `caption + tags + visible_text + category` 做词项/中文二元组重叠就够。接口仍是 `query -> candidates`，以后换向量后端不改调用方。
+- **标记是 `[[sticker:<包>/@<id>]]`**：`@` 不在合法键字符集里，与分类键不可能混淆（初版裸写 12hex 会和"恰好长成十六进制"的分类名撞车）。
+- **没有本轮候选表**：id 是内容哈希前缀（`sha256(bytes + category + relpath)[:16]`），伪造或过期的 id 要么唯一匹配失败、要么哈希对不上，两种都不发图。候选表能多拦的只有"前几轮见过的 id"，属口味问题不是安全问题；省掉它是为了不引入 per-turn 台账。
+
+落图前校验链（任一不过即不发）：形态合法 → 包存在且未被 `_` 禁用 → id 前缀在该包元数据里唯一 → 分类非 `_review`/`_` 前缀 → 文件存在且落在包内 → 当前字节 sha256 与元数据一致。
+
+- **工具**：`tools/search_stickers/`，`build()` 在 `stickers.semanticSearch` 关闭时返回 `None`（不注册），所以默认安装的 `tools[]` 与今天逐字节相同；打开它才付一次前缀作废 + 水合首跳。
+- **元数据**：`<pack>/semantic/metadata.json`，由 `skills/meme/scripts/caption_pack.py` 从 agent 填的 `{relpath: {caption, tags}}` 生成；`entry_id` 与 `sha256` 由磁盘字节现算，脚本不接受调用方给的身份。
+- **AstrBot 自带 `semantic_metadata.json`**：导入时仍原样复制为 `metadata.source.json`（结构未核实，不臆造）；要让 P2 用上，按上面的 `--map` 走一遍 `caption_pack.py` 重新计算。
+- **验收**：`test_sticker_semantic.py` 覆盖身份随内容变化、搜索排序、id 唯一前缀、换图后拒绝、未知 id 整行剥掉。
 
 ## 不做
 
@@ -426,6 +433,9 @@ sticker_packs (emit `[[sticker:<pack>/<category>]]` as the last line; `pack | th
 | P1c | `bc5cff48` | `skills/meme/` + `import_pack.py` + 测试 |
 | 修正 | `28e7cf83` | `stickers_root` 不再经 `web_ceo_sessions`（绕开基线既有循环导入）；`.gitignore` 根锚定 `/stickers/` |
 | 修正 | `16f15c99` | 转录落盘前把标记换成图片 markdown（确定性选图）；动图改暂存原样副本 |
+| 修正 | `51d58fbc` | 三个用户可见渲染面统一走 `_render_assistant_media`；会话列表预览去掉 markdown |
+| 配置 | `3c9dfb26` | `stickers.maxPerReply`（调过才落盘 + 豁免前缀，老 config 照常加载） |
+| P2 | `36f67f42` | 逐图元数据 + `search_stickers` + `[[sticker:<包>/@<id>]]` + `semanticSearch` 开关 |
 
 ### 平台会话实测（2026-10-26 23:08，web 车道，非 QQ）
 
@@ -456,8 +466,8 @@ sticker_packs (emit `[[sticker:<pack>/<category>]]` as the last line; `pack | th
 
 **未实现 / 待办**：
 
-- P2（`search_stickers` 工具 + 向量检索 + 六项校验）未实现，按计划保持默认关。
-- `stickers.max_per_reply` 目前是模块常量 `MAX_STICKERS_PER_REPLY = 1`，未接配置项。
+- P2 已实现但**默认关**（`stickers.semanticSearch`）：没有 caption 的库检索不出东西，且加工具会让 `tools[]` 前缀作废一次。打开前先跑 `caption_pack.py`。
+- `stickers.max_per_reply` 已接配置（`3c9dfb26`）。
 - **平台（web）车道已实测通过**（见上表）；**QQ 车道待实测**：需要真实群/私聊确认 `msg_type=7` 落地、动图正常、顺序为"文字在前"。
 - 流式期间"看不到标记"目前只有代码级保证（`strip_markers_for_stream` + 单测）；平台实测里回合太快没抓到中间帧，之后用长回复再看一次。
 - 旧会话（本次实测前创建的 `web:ceo-96681f6af630`）转录里仍有 3 处历史标记——那是修复前的落盘数据，新会话已干净。需要的话在界面里删掉那个会话即可。
