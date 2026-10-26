@@ -14433,7 +14433,8 @@ textarea {
 
 .content-header #skill-refresh-btn,
 .content-header #tool-refresh-btn,
-.content-header #memory-refresh-btn {
+.content-header #memory-refresh-btn,
+.content-header #sticker-refresh-btn {
     position: absolute;
     left: var(--ui-space-6);
     top: 50%;
@@ -15460,6 +15461,7 @@ textarea {
 .content-header #memory-refresh-btn,
 .content-header #model-refresh-btn,
 .content-header #external-refresh-btn,
+.content-header #sticker-refresh-btn,
 .content-header #audit-refresh-btn {
     height: 40px;
     min-height: 40px;
@@ -15468,6 +15470,7 @@ textarea {
 .content-header #skill-search-input,
 .content-header #tool-search-input,
 .content-header #memory-search-input,
+.content-header #sticker-search-input,
 .content-header #model-search-input {
     height: 40px;
     min-height: 40px;
@@ -18370,7 +18373,14 @@ textarea {
     font-size: 13px;
 }
 
+.sticker-settings-row > span {
+    white-space: nowrap;
+}
+
 .sticker-settings-row .resource-select {
+    flex: 0 0 auto;
+    width: auto;
+    max-width: 132px;
     height: 32px;
 }
 
@@ -18495,7 +18505,9 @@ textarea {
 
 .sticker-thumb-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(88px, 1fr));
+    /* 定宽列而不是 1fr：分类里只有一张图时，1fr 会把那一格拉成整行宽。 */
+    grid-template-columns: repeat(auto-fill, 96px);
+    justify-content: start;
     gap: var(--ui-space-2);
 }
 

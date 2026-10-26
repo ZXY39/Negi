@@ -230,7 +230,12 @@ function stickerThumbHtml(pack, category, image) {
 function renderStickerSettings() {
     const settings = StickersState.settings;
     if (!settings) return;
-    if (U.stickerMaxPerReply) U.stickerMaxPerReply.value = String(Number(settings.max_per_reply) || 0);
+    if (U.stickerMaxPerReply) {
+        U.stickerMaxPerReply.value = String(Number(settings.max_per_reply) || 0);
+        // .resource-select 会被 enhanceResourceSelects() 换成自定义壳，壳上的标签是
+        // 快照：只改原生 select.value 不会让界面跟着变。
+        if (typeof syncResourceSelectUI === "function") syncResourceSelectUI(U.stickerMaxPerReply);
+    }
     if (U.stickerSemanticToggle) U.stickerSemanticToggle.checked = !!settings.semantic_search;
 }
 
