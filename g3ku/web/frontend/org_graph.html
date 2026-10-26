@@ -711,11 +711,14 @@
                                 <h3>官方 QQ 机器人</h3>
                                 <p class="subtitle external-panel-subtitle">填 AppID + AppSecret（QQ 开放平台）即连；主动提醒受官方消息配额限制。</p>
                             </div>
-                            <button id="qq-bot-enabled-toggle" class="tool-governance-switch" type="button"
-                                aria-pressed="false" aria-label="启用官方 QQ 机器人">
-                                <span class="tool-governance-switch-track" aria-hidden="true"><span class="tool-governance-switch-thumb"></span></span>
-                                <span id="qq-bot-enabled-label" class="tool-governance-switch-label">已停用</span>
-                            </button>
+                            <div class="panel-header-actions">
+                                <button id="qq-bot-apply-entry-btn" class="toolbar-btn ghost small" type="button">申请入口</button>
+                                <button id="qq-bot-enabled-toggle" class="tool-governance-switch" type="button"
+                                    aria-pressed="false" aria-label="启用官方 QQ 机器人">
+                                    <span class="tool-governance-switch-track" aria-hidden="true"><span class="tool-governance-switch-thumb"></span></span>
+                                    <span id="qq-bot-enabled-label" class="tool-governance-switch-label">已停用</span>
+                                </button>
+                            </div>
                         </div>
                         <form id="qq-bot-settings-form" class="external-token-form" novalidate>
                             <div id="qq-bot-accounts" class="qq-bot-account-list"></div>
@@ -1108,9 +1111,12 @@
                         </div>
                     </div>
                     <div class="confirm-actions project-settings-footer">
-                        <button id="project-settings-check-update-btn" class="toolbar-btn ghost" type="button">检查更新
-                            <span id="project-settings-check-dot" class="update-dot" title="有新版本" hidden></span>
-                        </button>
+                        <div class="project-settings-footer-left">
+                            <button id="project-settings-check-update-btn" class="toolbar-btn ghost" type="button">检查更新
+                                <span id="project-settings-check-dot" class="update-dot" title="有新版本" hidden></span>
+                            </button>
+                            <span id="project-settings-version" class="project-settings-version"></span>
+                        </div>
                         <button id="project-settings-apply-update-btn" class="toolbar-btn" type="button"
                             hidden>重启并更新</button>
                         <label class="ui-checkbox-row" for="project-settings-auto-unlock">

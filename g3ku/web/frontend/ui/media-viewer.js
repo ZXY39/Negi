@@ -7,8 +7,16 @@
 
 const MEDIA_VIEWER_IMAGE_SUFFIXES = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"]);
 // 只收服务端确实按 inline 供的类型：/api/ceo/media/original 的 inline 判定是 image（svg 除外）/
-// application/pdf/text/*。收进 iframe 的 attachment 类型不会显示，只会变成一次下载。
-const MEDIA_VIEWER_EMBED_SUFFIXES = new Set(["pdf", "txt", "md", "markdown", "csv", "tsv"]);
+// application/pdf/text/*，另加 `_INLINE_TEXT_SUFFIXES`（json/yaml/代码等被显式按 text/plain 供）。
+// 收进 iframe 的 attachment 类型不会显示，只会变成一次下载。
+// 刻意不收 html / css / js / svg：它们被同源 iframe 加载时会在应用 origin 里执行脚本。
+const MEDIA_VIEWER_EMBED_SUFFIXES = new Set([
+    "pdf",
+    "txt", "log", "md", "markdown", "rst", "csv", "tsv", "srt", "vtt",
+    "json", "jsonl", "yaml", "yml", "toml", "ini", "cfg", "conf", "xml",
+    "py", "sh", "bash", "bat", "ps1", "sql", "java", "c", "h", "cpp", "hpp",
+    "rs", "go", "rb", "php", "lua", "r", "kt", "swift",
+]);
 
 const mediaViewerState = {
     backdrop: null,
@@ -16,6 +24,9 @@ const mediaViewerState = {
     title: null,
     subtitle: null,
     body: null,
+    saveBtn: null,
+    url: "",
+    name: "",
     open: false,
 };
 
@@ -54,7 +65,10 @@ function ensureMediaViewerSurface() {
                 <h2 id="media-viewer-title">内容预览</h2>
                 <p id="media-viewer-subtitle" class="subtitle" hidden></p>
             </div>
-            <button id="media-viewer-close-btn" class="toolbar-btn ghost" type="button" data-modal-close>关闭</button>
+            <div class="detail-modal-actions">
+                <button id="media-viewer-save-btn" class="toolbar-btn ghost" type="button" hidden>保存到本地</button>
+                <button id="media-viewer-close-btn" class="toolbar-btn ghost" type="button" data-modal-close>关闭</button>
+            </div>
         </div>
         <div class="detail-modal-body">
             <div id="media-viewer-body" class="media-viewer-body"></div>
@@ -68,8 +82,12 @@ function ensureMediaViewerSurface() {
     mediaViewerState.title = drawer.querySelector("#media-viewer-title");
     mediaViewerState.subtitle = drawer.querySelector("#media-viewer-subtitle");
     mediaViewerState.body = drawer.querySelector("#media-viewer-body");
+    mediaViewerState.saveBtn = drawer.querySelector("#media-viewer-save-btn");
 
     drawer.querySelector("#media-viewer-close-btn")?.addEventListener("click", () => closeMediaViewer());
+    mediaViewerState.saveBtn?.addEventListener("click", () => {
+        triggerMediaDownload(mediaViewerState.url, mediaViewerState.name);
+    });
     backdrop.addEventListener("click", (event) => {
         if (event.target === backdrop) closeMediaViewer();
     });
@@ -126,12 +144,16 @@ function renderMediaViewerContent(outputRef, title) {
     return block;
 }
 
-function openMediaViewer({ mode = "image", url = "", title = "内容预览", subtitle = "", outputRef = "" } = {}) {
+function openMediaViewer({ mode = "image", url = "", title = "内容预览", subtitle = "", outputRef = "", downloadName = "" } = {}) {
     ensureMediaViewerSurface();
     mediaViewerState.title.textContent = title;
     mediaViewerState.subtitle.textContent = subtitle;
     if (mediaViewerState.subtitle) mediaViewerState.subtitle.hidden = !subtitle;
     mediaViewerState.body.innerHTML = "";
+    // content 模式（轨迹续读）没有文件 URL，此时不该出现「保存到本地」。
+    mediaViewerState.url = mode === "content" ? "" : String(url || "");
+    mediaViewerState.name = String(downloadName || title || "").trim();
+    if (mediaViewerState.saveBtn) mediaViewerState.saveBtn.hidden = !mediaViewerState.url;
     if (mode === "image") renderMediaViewerImage(url, title);
     else if (mode === "embed") renderMediaViewerEmbed(url, title);
     else if (mode === "content") renderMediaViewerContent(outputRef, title);
@@ -145,6 +167,8 @@ function closeMediaViewer() {
     if (!mediaViewerState.open) return false;
     setDrawerOpen(mediaViewerState.backdrop, mediaViewerState.drawer, false);
     mediaViewerState.open = false;
+    mediaViewerState.url = "";
+    mediaViewerState.name = "";
     // 收掉本层内容：iframe 里的 pdf/正文还在解码，留着就是下一层的卡顿。
     if (mediaViewerState.body) mediaViewerState.body.innerHTML = "";
     return true;
@@ -165,11 +189,12 @@ function triggerMediaDownload(url, name = "") {
     return true;
 }
 
-function openMediaAnchor({ url = "", name = "", kind = "" } = {}) {
+function openMediaAnchor({ url = "", name = "", kind = "", title = "" } = {}) {
     if (!url || url === "#") return false;
     const mode = resolveMediaViewerMode({ kind, name });
     if (mode === "download") return triggerMediaDownload(url, name || "attachment");
-    return openMediaViewer({ mode, url, title: name || "内容预览" });
+    // name 决定模式与下载文件名（要带扩展名），title 只是给人看的标题（可以是不带扩展名的描述）。
+    return openMediaViewer({ mode, url, title: title || name || "内容预览", downloadName: name });
 }
 
 function bindMediaViewer() {
@@ -184,6 +209,7 @@ function bindMediaViewer() {
             url: String(anchor.getAttribute("href") || "").trim(),
             name: String(anchor.dataset?.mediaName || ""),
             kind: String(anchor.dataset?.mediaOpen || ""),
+            title: String(anchor.dataset?.mediaTitle || ""),
         });
     });
 }

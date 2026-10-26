@@ -16,7 +16,9 @@ function openConfirm({ title, text, confirmLabel = "确认", confirmKind = "dang
         const inputEnabled = !!(input && typeof input === "object");
         U.confirmInputRow.hidden = !inputEnabled;
         U.confirmInput.disabled = false;
-        U.confirmInput.value = "";
+        // 带初值时用它（改备注这类"在原值上编辑"的场景），否则清空。
+        U.confirmInput.value = inputEnabled ? String(input.value || "") : "";
+        U.confirmInput.type = inputEnabled && input.type === "password" ? "password" : "text";
         if (inputEnabled && U.confirmInputLabel) {
             U.confirmInputLabel.textContent = input.label || "";
         }
@@ -95,6 +97,7 @@ function closeConfirm({ restoreFocus = true } = {}) {
     if (U.confirmInputRow) U.confirmInputRow.hidden = true;
     if (U.confirmInput) {
         U.confirmInput.value = "";
+        U.confirmInput.type = "text";
         U.confirmInput.disabled = false;
     }
     if (U.confirmCheckbox) {

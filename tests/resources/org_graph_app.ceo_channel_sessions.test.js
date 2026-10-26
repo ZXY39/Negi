@@ -163,7 +163,10 @@ test("deriveCeoChannelId prefers explicit channel_id and derives from session ke
 test("displayChannelGroupLabel renders external bridges and legacy channels distinctly", () => {
     const { displayChannelGroupLabel } = loadApp();
 
-    assert.equal(displayChannelGroupLabel("ext:qq-official"), "外部桥接 · qq-official");
+    // 备注由后端写进 group.label；这里的兜底只区分渠道名，不再拼「外部桥接 · <桥接 id>」。
+    assert.equal(displayChannelGroupLabel("ext:qq-official"), "QQ");
+    assert.equal(displayChannelGroupLabel("ext:qq-official-123456"), "QQ");
+    assert.equal(displayChannelGroupLabel("ext:wecom"), "外部桥接");
     assert.equal(displayChannelGroupLabel("qqbot"), "QQ Bot");
     assert.equal(displayChannelGroupLabel("wecom"), "企业微信");
 });
@@ -186,7 +189,7 @@ test("applyCeoSessionPatch routes channel items into channel groups, never the l
     assert.deepEqual(S.ceoLocalSessions.map((item) => item.session_id), ["web:local-1"]);
     assert.equal(S.ceoChannelGroups.length, 1);
     assert.equal(S.ceoChannelGroups[0].channel_id, "ext:qq-official");
-    assert.equal(S.ceoChannelGroups[0].label, "外部桥接 · qq-official");
+    assert.equal(S.ceoChannelGroups[0].label, "QQ");
     assert.equal(S.ceoChannelGroups[0].items.length, 1);
     assert.equal(S.ceoChannelGroups[0].items[0].session_id, "ext:qq-official:f8a8001865631301");
 

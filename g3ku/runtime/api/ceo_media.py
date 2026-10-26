@@ -38,6 +38,15 @@ MAX_CHANNEL_ATTACHMENTS = 4
 
 _TOKEN_SECRET = secrets.token_bytes(32)
 _RASTER_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+# `/ceo/media/original` 的 inline 判定原本只看 `text/*`，可 `.json` / `.yaml` / 代码这些
+# Python 认成 application/* 的其实也是纯文本，进 iframe 只会变成一次下载。这一组在**这条
+# 路由上**按 text/plain 供；`guess_media_mime` 本身不动——渠道文件消息的 MIME 另有用途。
+_INLINE_TEXT_SUFFIXES = {
+    ".json", ".jsonl", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".log",
+    ".xml", ".rst", ".srt", ".vtt",
+    ".py", ".sh", ".bash", ".bat", ".ps1", ".sql",
+    ".c", ".h", ".cpp", ".hpp", ".rs", ".go", ".rb", ".php", ".lua", ".kt", ".swift",
+}
 _THUMB_LADDER = ((1280, 85), (1280, 70), (960, 70), (720, 60), (512, 50), (384, 45), (256, 40))
 # 部分 Python 环境的 mimetypes 不含常见办公文档映射（如 .docx），渠道文件消息
 # 的 mime 会影响平台侧展示，这里保底。
@@ -186,7 +195,9 @@ def rewrite_assistant_media_content(session_id: str, content: Any) -> Any:
             if thumb is None:
                 return match.group(0)
             return stash(f'![{alt}]({thumb} "{original_view_url(source)}")')
-        return stash(f"[{alt or source.name}]({original_view_url(source)})")
+        # 非图片保留 `![]` 形状：前端靠 src 位的文件名判类型（预览 or 保存），
+        # 改成普通链接会把扩展名一起丢掉，点开就只能下载。
+        return stash(f'![{alt or source.name}]({source.name} "{original_view_url(source)}")')
 
     def replace_link(match: re.Match[str]) -> str:
         label, target = match.group(1), match.group(2)
@@ -298,6 +309,9 @@ async def get_ceo_media_original(token: str = Query(...)):
     if not path.is_file():
         raise HTTPException(status_code=404, detail="media_file_not_found")
     mime = guess_media_mime(path.name)
+    suffix = path.suffix.lower()
+    if suffix in _INLINE_TEXT_SUFFIXES and not mime.startswith("text/"):
+        mime = "text/plain; charset=utf-8"
     inline = (
         (mime.startswith("image/") and mime != "image/svg+xml")
         or mime == "application/pdf"

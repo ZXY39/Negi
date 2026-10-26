@@ -725,6 +725,7 @@ const U = {
     updateNavDot: document.getElementById("update-nav-dot"),
     projectSettingsCheckDot: document.getElementById("project-settings-check-dot"),
     projectSettingsCheckUpdate: document.getElementById("project-settings-check-update-btn"),
+    projectSettingsVersion: document.getElementById("project-settings-version"),
     projectSettingsApplyUpdate: document.getElementById("project-settings-apply-update-btn"),
     configBundleBackdrop: document.getElementById("config-bundle-backdrop"),
     configBundleDialog: document.getElementById("config-bundle-dialog"),
@@ -822,8 +823,10 @@ function deriveCeoChannelId(item = {}) {
 function displayChannelGroupLabel(channelId) {
     const raw = String(channelId || "").trim();
     if (raw.startsWith("ext:")) {
-        const bridgeId = raw.slice(4).trim();
-        return `外部桥接 · ${bridgeId || "bridge"}`;
+        // 备注由后端写进 group.label；这里只是实时补丁新建未知分组时的兜底，
+        // 拿不到备注就退化成渠道名，不再拼「外部桥接 · <桥接 id>」。
+        const bridgeId = raw.slice(4).trim().toLowerCase();
+        return bridgeId === "qq-official" || bridgeId.startsWith("qq-official-") ? "QQ" : "外部桥接";
     }
     return displayChinaChannelLabel(raw);
 }
@@ -2768,6 +2771,22 @@ function createMarkdownToken(tokens, html) {
     return token;
 }
 
+// `![](路径)` 现在承载所有文件类型，不止图片：后缀决定渲染成图片还是文件卡片。
+const CEO_MARKDOWN_IMAGE_SUFFIXES = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"]);
+
+function ceoMarkdownFileName(value) {
+    // 查询串与 hash 不算文件名的一部分：签名链接的后缀来自 path 参数之外的那段原文，
+    // 而这里只需要"末段 + 扩展名"做类型判断。
+    const text = String(value || "").trim().split(/[?#]/)[0];
+    return String(text.split(/[\\/]/).pop() || "").trim();
+}
+
+function ceoMarkdownFileSuffix(name) {
+    const base = ceoMarkdownFileName(name);
+    const dot = base.lastIndexOf(".");
+    return dot > 0 ? base.slice(dot + 1).toLowerCase() : "";
+}
+
 function renderInlineMarkdown(value, { allowLinks = true } = {}) {
     let text = String(value ?? "");
     if (!text) return "";
@@ -2781,15 +2800,31 @@ function renderInlineMarkdown(value, { allowLinks = true } = {}) {
             const safeSrc = ceoMarkdownImageSrc(rawSrc);
             if (!safeSrc) return _match;
             const label = esc(String(alt || "image").trim() || "image");
-            const imgTag = `<img class="msg-inline-image" src="${safeSrc}" alt="${label}" title="${label}" loading="lazy">`;
+            // 后缀取自路径而不是 alt：alt 常是「三季度报告」这类描述，不带扩展名。
+            const fileName = ceoMarkdownFileName(rawSrc);
             const clickHref =
                 titleMatch && /^\/api\/ceo\/media\/original\?/.test(String(titleMatch[1] || "").trim())
                     ? esc(String(titleMatch[1]).trim())
                     : "";
-            if (!clickHref) return createMarkdownToken(tokens, imgTag);
+            const openHref = clickHref || safeSrc;
+            const openName = esc(fileName || String(alt || "file").trim() || "file");
+            if (!CEO_MARKDOWN_IMAGE_SUFFIXES.has(ceoMarkdownFileSuffix(fileName))) {
+                // 非图片不进 <img>：浏览器只会画一个破图标，而且点开也没内容。
+                // 渲染成文件卡片，点开由 media-viewer 按后缀决定预览还是保存。
+                return createMarkdownToken(
+                    tokens,
+                    `<a class="msg-file-chip" href="${openHref}" data-media-open="auto" data-media-name="${openName}" data-media-title="${label}">` +
+                        `<svg class="msg-file-chip-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">` +
+                        `<path d="M4.5 1.5h5l2.5 2.5v10.5h-7.5z" fill="none" stroke="currentColor" stroke-width="1.1"/>` +
+                        `<path d="M9.5 1.5V4h2.5" fill="none" stroke="currentColor" stroke-width="1.1"/></svg>` +
+                        `<span>${label}</span></a>`
+                );
+            }
+            const imgTag = `<img class="msg-inline-image" src="${safeSrc}" alt="${label}" title="${label}" loading="lazy">`;
+            // 没有签名标题时过去只留一个不可点的 <img>；现在一律可点，href 退回内联取文件那条路。
             return createMarkdownToken(
                 tokens,
-                `<a class="msg-inline-image-link" href="${clickHref}" data-media-open="image" data-media-name="${label}">${imgTag}</a>`
+                `<a class="msg-inline-image-link" href="${openHref}" data-media-open="auto" data-media-name="${openName}" data-media-title="${label}">${imgTag}</a>`
             );
         });
         text = text.replace(/\[([^\]]+)\]\(([^)\s]+(?:\s+"[^"]*")?)\)/g, (_match, label, target) => {
@@ -9589,8 +9624,7 @@ function updateApplyOutcomeText(item) {
 }
 
 function updateSettingsButtonTitle(item) {
-    // 版本对不再占一行：可见的只有「检查更新」左上角那颗红点，读数（版本、检查时间、
-    // 错误码、上次升级结果）全部收进按钮的 title。
+    // 版本对常显在按钮右侧，title 只留那一行放不下的读数：检查时间、错误码、上次升级结果。
     const parts = [];
     const outcome = updateApplyOutcomeText(item);
     if (outcome) parts.push(outcome);
@@ -9611,8 +9645,19 @@ function updateSettingsButtonTitle(item) {
     return parts.join(" · ") + applyNote;
 }
 
+function projectSettingsVersionText(item) {
+    const current = String(item?.current_version || "").trim();
+    if (!current) return "";
+    const latest = item?.newer ? String(item?.latest_tag || "").trim() : "";
+    return latest ? `v${current} → ${latest}` : `v${current}`;
+}
+
 function renderProjectSettingsUpdate(item) {
     if (U.projectSettingsCheckUpdate) U.projectSettingsCheckUpdate.title = updateSettingsButtonTitle(item);
+    if (U.projectSettingsVersion) {
+        U.projectSettingsVersion.textContent = projectSettingsVersionText(item);
+        U.projectSettingsVersion.classList.toggle("is-newer", Boolean(item?.newer));
+    }
     if (U.projectSettingsCheckDot) U.projectSettingsCheckDot.hidden = !Boolean(item?.newer);
     if (U.projectSettingsApplyUpdate) U.projectSettingsApplyUpdate.hidden = !Boolean(item?.newer);
 }

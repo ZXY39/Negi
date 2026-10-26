@@ -407,32 +407,51 @@ function renderQqBotAccounts() {
     QQ_BOT_STATE.rows.forEach((row, index) => {
         const status = _qqBotRowStatus(row);
         const el = document.createElement("div");
-        el.className = "resource-list-item qq-bot-account-row";
+        const appId = String(row.app_id || "");
+        // 未落库的行整份铺表单，已保存的行收成卡片。class 一次写全，别分两步加。
+        el.className = `resource-list-item qq-bot-account-row${appId ? "" : " is-new"}`;
         el.dataset.index = String(index);
+        if (!appId) {
+            // 还没落库的行：整份表单给出来（AppID 是它的身份，收不起来）。
+            el.innerHTML = `
+                <div class="llm-form-grid qq-bot-account-fields">
+                    <label class="resource-field"><span class="resource-field-label">AppID</span>
+                        <input class="resource-search qq-bot-appid" type="text" value="" autocomplete="off"></label>
+                    <label class="resource-field"><span class="resource-field-label">AppSecret</span>
+                        <input class="resource-search qq-bot-secret" type="password" autocomplete="new-password"
+                            placeholder="仅保存，不回显"></label>
+                    <label class="resource-field"><span class="resource-field-label">备注</span>
+                        <input class="resource-search qq-bot-label" type="text" value="${esc(row.label || "")}" autocomplete="off"></label>
+                </div>
+                <div class="qq-bot-account-meta">
+                    <button class="toolbar-btn ghost danger small" data-action="remove" type="button">删除</button>
+                </div>`;
+            listEl.appendChild(el);
+            return;
+        }
+        // 已保存的行：备注就是标题（点它改），开关与删除跟在同一行右侧，
+        // 下面只留 AppID 与状态。AppSecret 收进「改密钥」，不在卡片上铺开。
         el.innerHTML = `
+            <input class="qq-bot-appid" type="hidden" value="${esc(appId)}">
+            <input class="qq-bot-secret" type="hidden" value="">
+            <input class="qq-bot-label" type="hidden" value="${esc(row.label || "")}">
             <div class="qq-bot-account-head">
-                <span class="status-badge qq-bot-account-status" data-status="${esc(status.badge)}"
-                    title="${esc(status.text)}">${esc(status.text)}</span>
+                <button class="qq-bot-account-title" type="button" data-action="edit-label"
+                    title="点击修改备注">${esc(row.label || appId)}</button>
+                <div class="qq-bot-account-head-actions">
+                    <span class="status-badge qq-bot-account-status" data-status="${esc(status.badge)}"
+                        title="${esc(status.text)}">${esc(status.text)}</span>
+                    <button class="tool-governance-switch qq-bot-row-switch" type="button"
+                        aria-pressed="${row.enabled ? "true" : "false"}" aria-label="切换该号启用状态">
+                        <span class="tool-governance-switch-track" aria-hidden="true"><span class="tool-governance-switch-thumb"></span></span>
+                        <span class="tool-governance-switch-label">${row.enabled ? "已启用" : "已停用"}</span>
+                    </button>
+                    <button class="toolbar-btn ghost danger small" data-action="remove" type="button">删除</button>
+                </div>
             </div>
-            <div class="llm-form-grid qq-bot-account-fields">
-                <label class="resource-field"><span class="resource-field-label">AppID</span>
-                    <input class="resource-search qq-bot-appid" type="text" value="${esc(row.app_id || "")}" autocomplete="off"></label>
-                <label class="resource-field"><span class="resource-field-label">AppSecret</span>
-                    <input class="resource-search qq-bot-secret" type="password" autocomplete="new-password"
-                        placeholder="${row.has_secret ? "已保存，留空不改" : "仅保存，不回显"}"></label>
-                <label class="resource-field"><span class="resource-field-label">备注</span>
-                    <input class="resource-search qq-bot-label" type="text" value="${esc(row.label || "")}" autocomplete="off"></label>
-                <div class="resource-field qq-bot-sandbox-field"><span class="resource-field-label">环境</span>
-                    <label class="qq-bot-sandbox"><input class="qq-bot-sandbox-input" type="checkbox"
-                        ${row.sandbox ? "checked" : ""}>沙箱</label></div>
-            </div>
-            <div class="external-token-actions">
-                <button class="tool-governance-switch qq-bot-row-switch" type="button"
-                    aria-pressed="${row.enabled ? "true" : "false"}" aria-label="切换该号启用状态">
-                    <span class="tool-governance-switch-track" aria-hidden="true"><span class="tool-governance-switch-thumb"></span></span>
-                    <span class="tool-governance-switch-label">${row.enabled ? "已启用" : "已停用"}</span>
-                </button>
-                <button class="toolbar-btn ghost danger small" data-action="remove" type="button">删除</button>
+            <div class="qq-bot-account-meta">
+                <span class="qq-bot-account-appid-text">AppID ${esc(appId)}</span>
+                <button class="toolbar-btn ghost small" data-action="edit-secret" type="button">改密钥</button>
             </div>`;
         listEl.appendChild(el);
     });
@@ -469,14 +488,14 @@ function _collectQqBotRows() {
         const appIdInput = el.querySelector(".qq-bot-appid");
         const secretInput = el.querySelector(".qq-bot-secret");
         const labelInput = el.querySelector(".qq-bot-label");
-        const sandboxInput = el.querySelector(".qq-bot-sandbox-input");
         const appId = String(appIdInput ? appIdInput.value : "").trim();
         if (!appId) continue;
         rows.push({
             app_id: appId,
             app_secret: String(secretInput ? secretInput.value : "").trim(),
             label: String(labelInput ? labelInput.value : "").trim(),
-            sandbox: !!(sandboxInput && sandboxInput.checked),
+            // 沙箱不再暴露给界面，写死 false：存量勾过沙箱的号会在下次保存时归位。
+            sandbox: false,
             enabled: previous.enabled !== false,
             has_secret: !!previous.has_secret,
             service: previous.service || null,
@@ -496,7 +515,8 @@ function _qqBotRowsBody() {
             app_id: appId,
             app_secret: String(row.app_secret || "").trim(),
             label: String(row.label || "").trim(),
-            sandbox: !!row.sandbox,
+            // 与 `_collectQqBotRows` 同一口径：界面没有沙箱开关，恒为关闭。
+            sandbox: false,
             enabled: row.enabled !== false,
         });
     }
@@ -580,14 +600,69 @@ function _addQqBotAccountRow() {
     if (last) last.focus();
 }
 
-async function _removeQqBotAccountRow(index) {
+function _qqBotRowFor(index) {
+    // 先把界面上的未保存改动收进 state，再取目标行——否则改备注/密钥会丢上一次输入。
+    const rows = _collectQqBotRows();
+    if (rows) QQ_BOT_STATE.rows = rows;
+    return QQ_BOT_STATE.rows[index] || null;
+}
+
+function _editQqBotLabel(index) {
+    const target = _qqBotRowFor(index);
+    if (!target) return;
+    const appId = String(target.app_id || "").trim();
+    openConfirm({
+        title: "修改备注",
+        text: appId ? `备注会成为账号卡片标题，也用于渠道分类显示（${appId}）。` : "备注会成为账号卡片标题。",
+        confirmLabel: "保存",
+        confirmKind: "",
+        input: { label: "备注", value: String(target.label || ""), placeholder: "留空则显示 AppID" },
+        onConfirm: async ({ value }) => {
+            target.label = String(value || "").trim();
+            renderQqBotAccounts();
+            await _persistQqBotSettings({ silentEmpty: true });
+        },
+    });
+}
+
+function _editQqBotSecret(index) {
+    const target = _qqBotRowFor(index);
+    if (!target) return;
+    openConfirm({
+        title: "更新 AppSecret",
+        text: "留空表示不修改。改完该号会按新凭证重连。",
+        confirmLabel: "保存",
+        confirmKind: "",
+        input: { label: "新的 AppSecret", type: "password", placeholder: "留空不改" },
+        onConfirm: async ({ value }) => {
+            const secret = String(value || "").trim();
+            if (!secret) return;
+            target.app_secret = secret;
+            await _persistQqBotSettings({ silentEmpty: true });
+        },
+    });
+}
+
+function _removeQqBotAccountRow(index) {
     const rows = _collectQqBotRows();
     if (rows) QQ_BOT_STATE.rows = rows;
     const target = QQ_BOT_STATE.rows[index];
-    QQ_BOT_STATE.rows.splice(index, 1);
-    renderQqBotAccounts();
-    // 已有 AppID 的行要真的从表里消失，否则刷新后又回来。
-    if (target && String(target.app_id || "").trim()) await _persistQqBotSettings({ silentEmpty: true });
+    if (!target) return;
+    const appId = String(target.app_id || "").trim();
+    const label = String(target.label || "").trim();
+    const name = label ? `${label}（${appId || "未填 AppID"}）` : (appId || "这个账号");
+    // 删除是整表覆盖式写入，误点一次就没了凭证；二次确认是这里唯一的一道门。
+    openConfirm({
+        title: "删除 QQ 账号",
+        text: `删除后 ${name} 不再接收消息，重新加回需要再填一次 AppSecret。确定删除？`,
+        confirmLabel: "删除",
+        onConfirm: async () => {
+            QQ_BOT_STATE.rows.splice(index, 1);
+            renderQqBotAccounts();
+            // 已有 AppID 的行要真的从表里消失，否则刷新后又回来。
+            if (appId) await _persistQqBotSettings({ silentEmpty: true });
+        },
+    });
 }
 
 async function _toggleQqBotRowEnabled(index) {
@@ -600,6 +675,80 @@ async function _toggleQqBotRowEnabled(index) {
     await _persistQqBotSettings({ silentEmpty: true });
 }
 
+// ---- QQ 机器人申请入口：应用内嵌第三方页面 ----
+const QQ_BOT_APPLY_URL = "https://q.qq.com/qqbot/openclaw/login.html";
+
+const qqBotApplyState = { backdrop: null, drawer: null, frame: null, open: false };
+
+function ensureQqBotApplySurface() {
+    if (qqBotApplyState.backdrop && qqBotApplyState.drawer) return;
+    const backdrop = document.createElement("div");
+    backdrop.id = "qq-bot-apply-backdrop";
+    backdrop.className = "detail-backdrop";
+    backdrop.setAttribute("aria-hidden", "true");
+
+    const drawer = document.createElement("section");
+    drawer.id = "qq-bot-apply-drawer";
+    drawer.className = "panel detail-drawer qq-bot-apply-drawer";
+    drawer.setAttribute("role", "dialog");
+    drawer.setAttribute("aria-modal", "true");
+    drawer.setAttribute("aria-hidden", "true");
+    drawer.setAttribute("aria-labelledby", "qq-bot-apply-title");
+    drawer.tabIndex = -1;
+    drawer.innerHTML = `
+        <div class="detail-modal-header">
+            <div>
+                <h2 id="qq-bot-apply-title">申请 QQ 机器人</h2>
+                <p class="subtitle">在 QQ 开放平台创建机器人，拿到 AppID 与 AppSecret 后填到账号里。登录被拦时点右上角用浏览器打开。</p>
+            </div>
+            <div class="detail-modal-actions">
+                <a id="qq-bot-apply-external" class="toolbar-btn ghost" href="${QQ_BOT_APPLY_URL}"
+                    target="_blank" rel="noreferrer noopener">浏览器打开</a>
+                <button id="qq-bot-apply-close" class="toolbar-btn ghost" type="button" data-modal-close>关闭</button>
+            </div>
+        </div>
+        <div class="detail-modal-body qq-bot-apply-body">
+            <iframe id="qq-bot-apply-frame" class="qq-bot-apply-frame" title="QQ 开放平台 · 创建机器人"></iframe>
+        </div>`;
+
+    document.body.appendChild(backdrop);
+    document.body.appendChild(drawer);
+    qqBotApplyState.backdrop = backdrop;
+    qqBotApplyState.drawer = drawer;
+    qqBotApplyState.frame = drawer.querySelector("#qq-bot-apply-frame");
+
+    drawer.querySelector("#qq-bot-apply-close")?.addEventListener("click", () => closeQqBotApply());
+    backdrop.addEventListener("click", (event) => {
+        if (event.target === backdrop) closeQqBotApply();
+    });
+    document.addEventListener("keydown", (event) => {
+        if (event.key !== "Escape" || !qqBotApplyState.open) return;
+        event.preventDefault();
+        closeQqBotApply();
+    });
+}
+
+function openQqBotApply() {
+    ensureQqBotApplySurface();
+    // src 只在打开时写：页面一加载就挂上去会白跑一次第三方请求。
+    if (qqBotApplyState.frame && qqBotApplyState.frame.src !== QQ_BOT_APPLY_URL) {
+        qqBotApplyState.frame.src = QQ_BOT_APPLY_URL;
+    }
+    setDrawerOpen(qqBotApplyState.backdrop, qqBotApplyState.drawer, true);
+    qqBotApplyState.open = true;
+    if (typeof icons === "function") icons(true);
+    return true;
+}
+
+function closeQqBotApply() {
+    if (!qqBotApplyState.open) return false;
+    setDrawerOpen(qqBotApplyState.backdrop, qqBotApplyState.drawer, false);
+    qqBotApplyState.open = false;
+    // 摘掉 src：别把一个已登录的第三方页面留在后台继续跑。
+    if (qqBotApplyState.frame) qqBotApplyState.frame.src = "about:blank";
+    return true;
+}
+
 function initQqBotView() {
     const toggle = document.getElementById("qq-bot-enabled-toggle");
     if (toggle) toggle.addEventListener("click", () => void toggleQqBotEnabled(toggle.getAttribute("aria-pressed") !== "true"));
@@ -610,6 +759,11 @@ function initQqBotView() {
         event.preventDefault();
         _addQqBotAccountRow();
     });
+    const applyBtn = document.getElementById("qq-bot-apply-entry-btn");
+    if (applyBtn) applyBtn.addEventListener("click", (event) => {
+        event.preventDefault();
+        openQqBotApply();
+    });
     const listEl = _qqBotListEl();
     if (listEl) {
         listEl.addEventListener("click", (event) => {
@@ -618,6 +772,14 @@ function initQqBotView() {
             const index = Number(rowEl.dataset.index);
             if (event.target.closest("[data-action='remove']")) {
                 void _removeQqBotAccountRow(index);
+                return;
+            }
+            if (event.target.closest("[data-action='edit-label']")) {
+                _editQqBotLabel(index);
+                return;
+            }
+            if (event.target.closest("[data-action='edit-secret']")) {
+                _editQqBotSecret(index);
                 return;
             }
             if (event.target.closest(".qq-bot-row-switch")) void _toggleQqBotRowEnabled(index);

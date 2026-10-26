@@ -348,7 +348,8 @@ function renderCeoSessionCard(item, { allowActions = false, index = -1 } = {}) {
     const unreadText = unreadCount > 99 ? "99+" : String(unreadCount);
     const createdText = formatSessionTime(item?.created_at);
     const type = String(item?.chat_type || "").trim();
-    const typeLabel = type === "dm" ? "DM merged" : type === "group" ? "Group" : type === "thread" ? "Thread" : "";
+    // DM 是渠道会话的默认形态，标出来只是噪音；群/线程才是能帮人区分的那两档。
+    const typeLabel = type === "group" ? "群" : type === "thread" ? "Thread" : "";
     const badges = [
         typeLabel ? `<span class="ceo-session-pill">${esc(typeLabel)}</span>` : "",
         item?.is_readonly && !item?.can_message ? '<span class="ceo-session-pill readonly">只读</span>' : "",

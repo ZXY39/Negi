@@ -94,15 +94,37 @@ function findCreated(document, predicate) {
 test("内联图片与文件 chip 不再要求开新窗口", () => {
     const { renderInlineMarkdown } = loadApp();
 
+    // 后缀决定行为，所以 data-media-open 一律交给 auto：图片仍按图片开，
+    // 非图片由 media-viewer 按扩展名决定预览还是保存。
     const imageMarkup = renderInlineMarkdown('![截图](/x.png "/api/ceo/media/original?token=abc")');
-    assert.match(imageMarkup, /data-media-open="image"/);
-    assert.match(imageMarkup, /data-media-name="截图"/);
+    assert.match(imageMarkup, /data-media-open="auto"/);
+    assert.match(imageMarkup, /data-media-name="x\.png"/);
+    assert.match(imageMarkup, /data-media-title="截图"/);
+    assert.match(imageMarkup, /href="\/api\/ceo\/media\/original\?token=abc"/);
     assert.doesNotMatch(imageMarkup, /target="_blank"/);
 
     const chipMarkup = renderInlineMarkdown("[报告.pdf](/api/ceo/media/original?token=abc)");
     assert.match(chipMarkup, /data-media-open="auto"/);
     assert.match(chipMarkup, /data-media-name="报告\.pdf"/);
     assert.doesNotMatch(chipMarkup, /target="_blank"/);
+});
+
+test("`![]()` 包住非图片文件时渲染成文件卡片而不是破图", () => {
+    const { renderInlineMarkdown } = loadApp();
+
+    // 服务端会保留 `![]` 形状交给前端判类型；这里盯的是渲染器别把它当 <img>。
+    const card = renderInlineMarkdown('![季度报告](report.md "/api/ceo/media/original?token=abc")');
+    assert.match(card, /msg-file-chip/);
+    assert.doesNotMatch(card, /<img/);
+    assert.match(card, /data-media-name="report\.md"/);
+    assert.match(card, /data-media-title="季度报告"/);
+    assert.match(card, /href="\/api\/ceo\/media\/original\?token=abc"/);
+
+    // 没有签名标题的图片也要可点：过去这条只留一个不可点的 <img>。
+    const bare = renderInlineMarkdown("![图](/tmp/a.png)");
+    assert.match(bare, /<a class="msg-inline-image-link"/);
+    assert.match(bare, /data-media-open="auto"/);
+    assert.match(bare, /<img class="msg-inline-image"/);
 });
 
 test("会话附件卡按类型标记，图片显式声明 image", () => {

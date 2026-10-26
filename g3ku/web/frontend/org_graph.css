@@ -1689,8 +1689,10 @@ textarea {
     }
 }
 
-/* 程序内媒体查看器：显示面按视口封顶，长内容在本层滚动，盒子不跟内容一起长。 */
-.media-viewer-drawer {
+/* 程序内媒体查看器：显示面按视口封顶，长内容在本层滚动，盒子不跟内容一起长。
+   宽度与 z-index 必须压过 9285 行那条 `.detail-drawer`：它在文件里更靠后，只写类名会
+   被它的 `z-index: 96` 与 `width: 980px` 顶掉——遮罩是 111，于是加暗跑到窗口前面。 */
+#media-viewer-drawer.media-viewer-drawer {
     width: min(1180px, calc(100vw - 32px));
     height: min(86vh, calc(100dvh - 48px));
     z-index: 112;
@@ -1726,8 +1728,35 @@ textarea {
     background: var(--bg-app);
 }
 
+/* QQ 机器人申请入口：应用内嵌第三方页面。z-index 同样要压过 9285 行那条
+   `.detail-drawer`（文件里更靠后），否则遮罩会盖在窗口上面。 */
+#qq-bot-apply-backdrop.detail-backdrop {
+    z-index: 111;
+}
+
+#qq-bot-apply-drawer.qq-bot-apply-drawer {
+    width: min(1200px, calc(100vw - 32px));
+    height: min(88vh, calc(100dvh - 48px));
+    z-index: 112;
+}
+
+.qq-bot-apply-body {
+    padding: 0;
+    gap: 0;
+    overflow: hidden;
+}
+
+.qq-bot-apply-frame {
+    flex: 1;
+    width: 100%;
+    min-height: 0;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    background: var(--bg-app);
+}
+
 @media (max-width: 960px) {
-    .media-viewer-drawer {
+    #media-viewer-drawer.media-viewer-drawer {
         width: calc(100vw - 20px);
         height: min(88vh, calc(100dvh - 24px));
     }
@@ -13849,7 +13878,55 @@ textarea {
 
 .qq-bot-account-head {
     display: flex;
-    justify-content: flex-end;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--ui-space-2);
+}
+
+/* 备注即标题：看着像标题，点下去能改。卡片默认态必须只读，所以不做成常驻输入框。 */
+.qq-bot-account-title {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    padding: 0;
+    border: 0;
+    background: none;
+    font: inherit;
+    font-weight: 600;
+    color: var(--text-primary);
+    text-align: left;
+    cursor: pointer;
+}
+
+.qq-bot-account-title:hover {
+    color: var(--brand-primary);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+}
+
+.qq-bot-account-head-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--ui-space-2);
+    flex: 0 0 auto;
+}
+
+.qq-bot-account-meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--ui-space-2);
+    font-size: 0.78rem;
+    color: var(--ui-text-muted);
+}
+
+.qq-bot-account-appid-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 
 .qq-bot-account-fields {
@@ -16806,6 +16883,26 @@ textarea {
     justify-content: flex-end;
     flex-wrap: wrap;
     row-gap: var(--ui-space-2);
+}
+
+/* 「检查更新 + 当前版本」自成一组靠左，其余按钮留在右侧：靠 margin-right:auto 把剩余
+   空间全吃掉，加按钮时不必再动这一行的对齐。 */
+.project-settings-footer-left {
+    display: flex;
+    align-items: center;
+    gap: var(--ui-space-2);
+    margin-right: auto;
+}
+
+.project-settings-version {
+    color: var(--ui-text-muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+/* 有新版本时版本对（v2.7.0 → v2.8.0）跟着红点一起换色，两处同一条判据。 */
+.project-settings-version.is-newer {
+    color: var(--danger-color, #ef4444);
 }
 
 /* 检查更新按钮带红点，得自己当定位父。 */

@@ -1806,10 +1806,69 @@ def _external_api_tokens() -> dict[str, Any] | None:
     return dict(getattr(getattr(config, "external_api", None), "tokens", None) or {})
 
 
-def _external_bridge_label(bridge_id: str) -> str:
+QQ_OFFICIAL_BRIDGE_ID = "qq-official"
+_QQ_AUTO_LABEL_PREFIX = "官方 QQ 机器人"
+
+
+def _is_qq_official_bridge(bridge_id: str) -> bool:
+    """多号并跑时桥接 id 是 `qq-official-<AppID>`（`bridge_id_for_app_id`），单号是裸名。"""
+    normalized = str(bridge_id or "").strip().lower()
+    return normalized == QQ_OFFICIAL_BRIDGE_ID or normalized.startswith(f"{QQ_OFFICIAL_BRIDGE_ID}-")
+
+
+def _qq_bot_accounts() -> list[Any]:
+    try:
+        config, _revision, _changed = get_runtime_config()
+    except Exception:
+        return []
+    accounts = getattr(getattr(config, "qq_bot", None), "accounts", None)
+    if not isinstance(accounts, dict):
+        return []
+    return [accounts[key] for key in sorted(accounts)]
+
+
+def _qq_account_remark() -> str:
+    """QQ 账号卡片上的备注；多号取第一个非空的（按 AppID 排序，读数稳定不抖）。"""
+    for account in _qq_bot_accounts():
+        label = str(getattr(account, "label", "") or "").strip()
+        if label:
+            return label
+    return ""
+
+
+def _external_bridge_remark(bridge_id: str) -> str:
+    """桥接 token 的备注，空串表示"操作员没填过"。
+
+    QQ 桥接那条 token 是建号时自动写的「官方 QQ 机器人 <AppID>」，不算备注——否则
+    操作员什么都没填，分类标题也会跟着显示那串自动文案。
+    """
     tokens = _external_api_tokens()
     label = "" if tokens is None else str(getattr(tokens.get(str(bridge_id or "").strip()), "label", "") or "").strip()
-    return label or str(bridge_id or "bridge").strip() or "bridge"
+    if label.startswith(_QQ_AUTO_LABEL_PREFIX):
+        return ""
+    return label
+
+
+def _external_chat_type(external_key: str) -> str:
+    """`ext:` 行的会话形态只能从外部键前缀读——注册表不落 chat_type。"""
+    key = str(external_key or "").strip()
+    if key.startswith("qq:group:"):
+        return "group"
+    if key.startswith("qq:guild:"):
+        return "thread"
+    return "dm"
+
+
+def _first_user_text(session: Any) -> str:
+    """首条用户消息，截断口径与普通会话标题同一个函数（24 字），两边读起来一样长。"""
+    for item in transcript_messages(session):
+        if message_role(item) != "user":
+            continue
+        raw = str(item.get("content") or "")
+        if not raw.strip():
+            continue
+        return summarize_session_title(raw)
+    return ""
 
 
 def external_bridge_token_present(bridge_id: str) -> bool:
@@ -1837,9 +1896,16 @@ def channel_session_hides_on_delete(entry: ExternalSessionEntry | None) -> bool:
 
 
 def _channel_label(channel_id: str) -> str:
+    """分类标题：有备注就只显示备注，没有才退化成渠道名。
+
+    「外部桥接 · <桥接 id>」对操作员没有信息量——他认得的是自己填的那条备注。
+    """
     raw = str(channel_id or "").strip()
     if raw.startswith("ext:"):
-        return f"外部桥接 · {_external_bridge_label(raw[len('ext:'):])}"
+        bridge_id = raw[len("ext:"):].strip()
+        if _is_qq_official_bridge(bridge_id):
+            return _qq_account_remark() or _external_bridge_remark(bridge_id) or "QQ"
+        return _external_bridge_remark(bridge_id) or "外部桥接"
     return CHINA_CHANNEL_LABELS.get(raw, raw or "渠道")
 
 
@@ -1915,11 +1981,16 @@ def _channel_session_summary_from_entry(
     updated_at: str,
     last_llm_output_at: str,
     is_virtual: bool,
+    first_user_text: str = "",
 ) -> dict[str, Any]:
     kind = _channel_session_kind(parsed)
+    # 非 QQ 渠道的标题口径与普通会话一致：第一条用户消息。QQ 保留「渠道 · 号 · 群/DM」，
+    # 那里会话身份（哪个群、哪个号）比首句内容更能区分。
+    channel_name = str(getattr(parsed, "channel", "") or "").strip().lower()
+    title = first_user_text if (channel_name != "qqbot" and first_user_text) else _channel_title(parsed)
     return {
         "session_id": session_id,
-        "title": _channel_title(parsed),
+        "title": title,
         "preview_text": preview_text,
         "message_count": message_count,
         "created_at": created_at,
@@ -2031,6 +2102,7 @@ def list_channel_ceo_sessions(
             updated_at=_session_updated_at(session),
             last_llm_output_at=_session_last_assistant_at(session),
             is_virtual=False,
+            first_user_text=_first_user_text(session),
         )
         existing = summaries.get(canonical_id)
         if existing is None:
@@ -2090,13 +2162,8 @@ def _external_channel_row(
         return None
     external_key = str(getattr(entry, "external_key", "") or "").strip()
     entry_title = str(getattr(entry, "title", "") or "").strip()
-    label = _external_bridge_label(bridge_id)
-    if entry_title:
-        title = f"{label} · {entry_title}"
-    elif external_key:
-        title = f"{label} · {external_key}"
-    else:
-        title = f"{label} · {parts[2].strip()[:8]}"
+    label = _channel_label(f"ext:{bridge_id}")
+    is_qq_official = _is_qq_official_bridge(bridge_id)
     # 转录在不在是两个轴：桥一注册就有 registry 条目，第一回合才落文件。
     # 早先这里无条件 `get_or_create`，文件缺失时会当场造一个 `created_at=now` 的空会话
     # （Session.created_at 默认 datetime.now）并被 manager 缓存住——列表读数于是会
@@ -2105,6 +2172,16 @@ def _external_channel_row(
     has_transcript = bool(checker(key)) if callable(checker) else True
     session = session_manager.get_or_create(key) if has_transcript else None
     visible_messages = transcript_messages(session) if session is not None else []
+    first_user_text = _first_user_text(session) if session is not None else ""
+    if not is_qq_official and first_user_text:
+        # 非 QQ 渠道按普通会话的口径：第一条用户消息就是标题（与 `web:` 会话同源同形）。
+        title = first_user_text
+    elif entry_title:
+        title = f"{label} · {entry_title}"
+    elif external_key:
+        title = f"{label} · {external_key}"
+    else:
+        title = f"{label} · {parts[2].strip()[:8]}"
     registry_created_at = str(getattr(entry, "created_at", "") or "").strip()
     return {
         "session_id": key,
@@ -2129,7 +2206,7 @@ def _external_channel_row(
         "hides_on_delete": channel_session_hides_on_delete(entry),
         "channel_id": f"ext:{bridge_id}",
         "account_id": bridge_id,
-        "chat_type": "dm",
+        "chat_type": _external_chat_type(external_key),
         "peer_id": external_key or None,
         "thread_id": None,
         "is_virtual": False,
