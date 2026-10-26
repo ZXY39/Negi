@@ -64,10 +64,21 @@ _SCAN_CACHE: dict[str, tuple[float, tuple[Pack, ...]]] = {}
 
 
 def stickers_root() -> Path:
-    """``<workspace>/stickers``; resolved lazily to avoid an import cycle."""
-    from g3ku.runtime.web_ceo_sessions import workspace_path
+    """``<workspace>/stickers``.
 
-    return workspace_path() / STICKERS_DIRNAME
+    Resolved through the live config rather than ``web_ceo_sessions``: importing
+    that module pulls the external-session stack, which re-enters
+    ``frontdoor.tool_contract`` through ``main.runtime`` and dead-ends in a
+    partially initialised module when this is the first import in a process.
+    """
+    try:
+        from g3ku.config.live_runtime import get_runtime_config
+
+        config, _revision, _changed = get_runtime_config()
+        return Path(config.workspace_path) / STICKERS_DIRNAME
+    except Exception:
+        logger.warning("workspace path unavailable; resolving stickers against the cwd")
+        return Path.cwd() / STICKERS_DIRNAME
 
 
 def invalidate_scan_cache() -> None:

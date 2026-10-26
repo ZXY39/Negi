@@ -82,6 +82,8 @@ worktrees/
 output/
 assets/persona/
 hotdata/
+# 表情包图库：用户数据，随安装留存但不入库（根锚定，别误伤 g3ku/stickers 包）
+/stickers/
 cli_help.txt
 image_help.txt
 
