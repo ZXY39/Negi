@@ -2,8 +2,8 @@
 
 日期：2026-10-26
 最后更新：2026-10-27（第四轮拍板：**安装态驱动的档位模型**，见 D17–D20）
-状态：**P0 已实现并提交**（分支 `feat/sandbox-trust`，commit `f23cba39`）；
-P1a / P1b / P3 未开工。架构文档已随 P0 更新。
+状态：**P0 完成**；**P1 的第一步（档位开关 + 安装态探测）完成**；
+jail 本体（P1a 剩余）、安装器（P1b）、前端面板仍未开工。分支 `feat/sandbox-trust`。
 取证基线：`main` @ `53fbf30f`。标 † 的是子代理读数，尚未逐行复核，动对应阶段前先复核。
 
 > 工作树警告：本计划落笔时工作树**不干净**，已有他人/前序会话的未提交改动
@@ -1083,6 +1083,21 @@ detecting → awaiting_confirm → downloading → installing → (needs_reboot)
   `host_full` 可用。
 - **未做**：真实模型回合下的工具拒绝与记忆门实测（需要项目解锁口令与可用的模型 key，
   本轮环境无法解密 secret overlay）；P1a/P1b/P3。
+
+- **P1 的第一块已落地**（commit `c999dc36`）：档位意图存储（`<数据根>/sandbox/session-modes.json`
+  + 进程内缓存）、`probe.py` 按平台探测与逐维度强制力、`JAIL_BACKENDS_AVAILABLE` fail-closed 闸门、
+  `GET/PATCH /api/ceo/sessions/{id}/sandbox` 与安装态端点、第三方切档的口令闸门（只读校验）。
+  **实机验证（隔离 worktree / 18791）**：`/api/sandbox/status` 如实报 `runtime_missing`
+  （`wsl_distro_missing`，本机 WSL2 无发行版）与 `ui_labels`；owner PATCH 到 `restricted` 得
+  `readonly`；第三方 PATCH 到 `unrestricted` 无口令 403、错口令 403、对口令 200 并落
+  `operator_unlocks`；`session-modes.json` 内容与预期一致。
+- **P1a 剩余（jail 本体）**：`backend_base` / `profiles` / `backend_bwrap` / `backend_seatbelt` /
+  `backend_wsl` / `backend_container` / `fsop` / `manager` / `router` / `bridge_files`，
+  以及把数据面工具换成代理实例的装配改动；落地后把 `policy.JAIL_BACKENDS_AVAILABLE` 置真。
+  **本机无法验收**（无 WSL 发行版、无 Docker/Podman），必须在一台装好后端的机器上跑
+  P1 验收那一套断言，再打开闸门。
+- **P1b**：安装器（`POST /api/sandbox/install` 当前恒为 `install_available: false`）。
+- **前端**：权限面板里的档位开关与沙箱页面尚未接这批端点（`ui_labels` 已由服务端给出）。
 
 - **已逐行复核**（本计划引用的行号都亲自读过）：
   `g3ku/runtime/session_agent.py:1099-1116,1562-1596,4070-4179,4470-4529`、
