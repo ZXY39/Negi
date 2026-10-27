@@ -23,6 +23,12 @@ from loguru import logger
 from g3ku.audit_events import emit_audit_event
 from g3ku.runtime.external_sessions import get_external_session_registry
 from g3ku.runtime.session_trust import TRUST_OWNER, session_trust
+from g3ku.sandbox.installer import (
+    build_install_plan,
+    install_status,
+    start_install,
+    start_uninstall,
+)
 from g3ku.sandbox.policy import (
     MODE_RESTRICTED,
     MODE_UNRESTRICTED,
@@ -177,6 +183,7 @@ async def patch_session_sandbox(session_id: str, payload: dict = Body(...)):
 @router.get("/sandbox/status")
 async def get_sandbox_status(refresh: int = Query(0)):
     reading = refresh_install_state() if int(refresh or 0) else install_state()
+    plan = build_install_plan(reading)
     return {
         "ok": True,
         "item": {
@@ -186,11 +193,61 @@ async def get_sandbox_status(refresh: int = Query(0)):
             "enforcement": dict(reading.get("enforcement") or {}),
             "detail": dict(reading.get("detail") or {}),
             "ui_labels": _ui_labels(reading),
-            # 安装/卸载入口属于安装器（P1b）；没有后端时这里如实说没有对象可管。
-            "install_available": False,
+            "install_available": bool(plan.installable),
+            "install_plan_reason": plan.reason,
             "file_management_available": str(reading.get("state") or "") in {"ready", "partial"},
         },
     }
+
+
+@router.get("/sandbox/install/plan")
+async def get_install_plan():
+    plan = build_install_plan()
+    return {"ok": True, "item": plan.to_dict(), "status": install_status()}
+
+
+@router.post("/sandbox/install")
+async def post_sandbox_install(payload: dict = Body(...)):
+    result = start_install(confirm=bool(payload.get("confirm")))
+    if not result.get("ok"):
+        raise HTTPException(status_code=409, detail=str(result.get("detail") or "install_rejected"))
+    try:
+        emit_audit_event(
+            "sandbox",
+            "info",
+            "install_started",
+            "sandbox runtime install started",
+            detail={"steps": [step["id"] for step in result["plan"]["steps"]]},
+        )
+    except Exception as exc:  # noqa: BLE001 - 审计失败不阻塞安装
+        logger.warning("sandbox install audit emit failed: {}", exc)
+    return result
+
+
+@router.get("/sandbox/install/status")
+async def get_install_status():
+    return {"ok": True, "item": install_status()}
+
+
+@router.post("/sandbox/uninstall")
+async def post_sandbox_uninstall(payload: dict = Body(...)):
+    result = start_uninstall(confirm=bool(payload.get("confirm")))
+    if result.get("ok"):
+        try:
+            emit_audit_event(
+                "sandbox",
+                "info",
+                "uninstall_finished",
+                "sandbox runtime uninstall finished",
+                detail={"results": result.get("results") or []},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("sandbox uninstall audit emit failed: {}", exc)
+        return result
+    detail = str(result.get("detail") or "uninstall_rejected")
+    if detail == "nothing_we_installed":
+        return {"ok": False, **result}
+    raise HTTPException(status_code=409, detail=detail)
 
 
 @router.post("/sandbox/refresh")

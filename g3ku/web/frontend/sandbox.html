@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>沙箱环境 · Negi</title>
+  <link rel="icon" href="/favicon.ico" />
+  <link rel="stylesheet" href="/sandbox.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">沙箱环境</div>
+    <div class="topbar-actions">
+      <span id="status-badge" class="badge" data-state="loading">检测中…</span>
+      <button id="refresh-btn" class="btn ghost" type="button">重新检测</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="card" id="runtime-card">
+      <h2>运行时</h2>
+      <dl class="kv">
+        <dt>安装态</dt><dd id="install-state">—</dd>
+        <dt>后端</dt><dd id="backend">—</dd>
+        <dt>说明</dt><dd id="reason">—</dd>
+      </dl>
+      <div class="dimensions" id="dimensions"></div>
+      <div class="card-actions">
+        <button id="install-btn" class="btn primary" type="button" hidden>安装沙箱</button>
+        <button id="uninstall-btn" class="btn danger" type="button" hidden>卸载沙箱</button>
+        <button id="plan-btn" class="btn ghost" type="button">查看安装内容</button>
+      </div>
+      <p class="hint" id="runtime-hint"></p>
+    </section>
+
+    <section class="card" id="session-card">
+      <h2>会话档位</h2>
+      <p class="hint" id="tier-hint">选择会话后可切换受限档。第三方会话切到全权限需要项目解锁口令。</p>
+      <label class="field">
+        <span>会话</span>
+        <select id="session-select"><option value="">加载中…</option></select>
+      </label>
+      <div id="session-panel" class="session-panel" hidden>
+        <div class="session-meta">
+          <span id="session-trust" class="badge" data-state="neutral">—</span>
+          <span id="session-tier" class="badge" data-state="neutral">—</span>
+        </div>
+        <div class="mode-switch" id="mode-switch"></div>
+        <div class="field" id="unlock-field" hidden>
+          <span>项目解锁口令</span>
+          <input id="unlock-password" type="password" autocomplete="current-password" placeholder="仅本次切换使用" />
+        </div>
+        <div class="card-actions">
+          <button id="save-mode-btn" class="btn primary" type="button">保存</button>
+          <span id="save-result" class="save-result"></span>
+        </div>
+        <p class="hint" id="tasks-hint"></p>
+      </div>
+    </section>
+
+    <section class="card wide" id="plan-card" hidden>
+      <h2>安装内容</h2>
+      <p class="hint">安装前请确认下面的步骤与提权要求。任何一步失败都会中止，不会留下半装状态以外的改动。</p>
+      <ol id="plan-steps" class="steps"></ol>
+      <ul id="plan-notes" class="notes"></ul>
+      <label class="check"><input id="confirm-check" type="checkbox" /> 我确认在上面这台机器上执行这些步骤</label>
+      <div class="card-actions">
+        <button id="confirm-install-btn" class="btn primary" type="button" disabled>确认安装</button>
+        <button id="cancel-plan-btn" class="btn ghost" type="button">取消</button>
+      </div>
+    </section>
+
+    <section class="card wide" id="progress-card" hidden>
+      <h2>安装进度</h2>
+      <ol id="progress-steps" class="steps"></ol>
+      <pre id="progress-output" class="output" hidden></pre>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" hidden></div>
+  <script src="/sandbox.js"></script>
+</body>
+</html>
