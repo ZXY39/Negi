@@ -304,7 +304,7 @@ const S = {
         task_hall_max_patch_queue_age_ms: 0,
     },
     confirmState: null,
-    toastState: { timeoutId: null, intervalId: null, remaining: 0 },
+    toastState: { timeoutId: null, intervalId: null, remaining: 0, action: null },
     openResourceSelectId: "",
     modelCatalog: {
         items: [],
@@ -708,6 +708,7 @@ const U = {
     toastText: document.getElementById("app-toast-text"),
     toastClose: document.getElementById("app-toast-close"),
     toastIcon: document.getElementById("app-toast-icon"),
+    toastAction: document.getElementById("app-toast-action"),
     taskLoadNotice: document.getElementById("task-load-notice"),
     taskLoadNoticeText: document.getElementById("task-load-notice-text"),
     confirmBackdrop: document.getElementById("confirm-backdrop"),
@@ -10985,6 +10986,12 @@ function bindResourcePages() {
 
 function bindGlobalOverlays() {
     U.toastClose?.addEventListener("click", closeToast);
+    // 行首箭头：先收起 toast，再跑这一次的动作（动作里可能切视图 / 换会话）。
+    U.toastAction?.addEventListener("click", () => {
+        const runAction = typeof S.toastState.action === "function" ? S.toastState.action : null;
+        closeToast();
+        if (runAction) runAction();
+    });
     U.confirmBackdrop?.addEventListener("click", (e) => {
         if (e.target === U.confirmBackdrop) closeConfirm();
     });

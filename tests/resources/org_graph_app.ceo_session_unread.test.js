@@ -351,7 +351,7 @@ function captureToasts(loaded) {
     return toasts;
 }
 
-test("新消息提醒:非 active 会话出现未读增量时弹 3 秒 info toast,标题只取前 5 个字符", () => {
+test("新消息提醒:非 active 会话出现未读增量时弹 5 秒 info toast,标题只取前 5 个字符", () => {
     const loaded = setup();
     const toasts = captureToasts(loaded);
 
@@ -364,7 +364,29 @@ test("新消息提醒:非 active 会话出现未读增量时弹 3 秒 info toast
     assert.equal(toasts[0].title, "有新消息");
     assert.equal(toasts[0].text, "来自会话一二三四五，共未读1条");
     assert.equal(toasts[0].kind, "info");
-    assert.equal(toasts[0].durationMs, 3000);
+    assert.equal(toasts[0].durationMs, 5000);
+    // 行首箭头：点它切到 CEO 视图并激活这条最新未读会话。
+    assert.equal(toasts[0].action.label, "跳转到最新未读会话");
+    assert.equal(typeof toasts[0].action.onClick, "function");
+});
+
+test("新消息提醒的行首箭头切到最新未读会话", () => {
+    const loaded = setup();
+    const toasts = captureToasts(loaded);
+    const calls = [];
+    loaded.context.switchView = (view) => calls.push(`view:${view}`);
+    loaded.context.activateCeoSession = (sessionId) => {
+        calls.push(`session:${sessionId}`);
+        return Promise.resolve();
+    };
+
+    loaded.api.syncCeoSessionUnreadState([
+        { session_id: "A", message_count: 5, title: "当前会话" },
+        { session_id: "B", message_count: 3, title: "乙会话" },
+    ], "A");
+
+    toasts[0].action.onClick();
+    assert.deepEqual(calls, ["view:ceo", "session:B"]);
 });
 
 test("新消息提醒:同一会话连续来消息时,提示里的未读数是累计值", () => {

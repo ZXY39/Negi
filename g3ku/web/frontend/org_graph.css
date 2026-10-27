@@ -8308,6 +8308,37 @@ textarea {
     animation: interaction-step-icon-spin 0.9s linear infinite;
 }
 
+/* 行首跳转箭头：只有带动作的 toast 才出现。淡底圆钮与右侧关闭键同档，
+   点它就是去那条会话，不额外占一整行。 */
+.app-toast-action {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    margin-inline-start: -4px;
+    border-radius: 999px;
+    color: var(--brand-primary);
+    background: color-mix(in srgb, var(--brand-primary) 12%, transparent);
+    transition: background 140ms ease, color 140ms ease;
+}
+
+.app-toast-action[hidden] {
+    display: none;
+}
+
+.app-toast-action:hover,
+.app-toast-action:focus-visible {
+    color: var(--text-primary);
+    background: color-mix(in srgb, var(--brand-primary) 22%, transparent);
+}
+
+.app-toast-action svg {
+    width: 14px;
+    height: 14px;
+}
+
 .app-toast-copy {
     display: flex;
     flex-direction: row;

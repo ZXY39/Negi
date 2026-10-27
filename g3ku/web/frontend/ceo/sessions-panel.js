@@ -126,11 +126,19 @@ function notifyCeoSessionUnread(arrivals = []) {
     }, arrivals[0]);
     const label = ceoSessionUnreadTitle(latest?.item, latest?.sessionId);
     if (!label) return;
+    // 5 秒：够读完「哪个会话、几条未读」再决定点不点；行首箭头直接切到这条会话。
     showToast({
         title: "有新消息",
         text: `来自会话${label}，共未读${latest.unread}条`,
         kind: "info",
-        durationMs: 3000,
+        durationMs: 5000,
+        action: {
+            label: "跳转到最新未读会话",
+            onClick: () => {
+                if (typeof switchView === "function") switchView("ceo");
+                if (typeof activateCeoSession === "function") void activateCeoSession(latest?.sessionId);
+            },
+        },
     });
 }
 

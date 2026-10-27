@@ -14,9 +14,12 @@ function closeToast() {
     U.toast.hidden = true;
     U.toast.className = "app-toast";
     if (U.toastClose) U.toastClose.hidden = false;
+    // 跳转动作只活在这一条 toast 里：关掉就撤，下一条不会继承上一颗箭头。
+    if (U.toastAction) U.toastAction.hidden = true;
+    S.toastState.action = null;
 }
 
-function showToast({ title = "操作成功", text = "修改已生效", kind = "success", durationMs = 3000, persistent = false, spin = false, closable = true } = {}) {
+function showToast({ title = "操作成功", text = "修改已生效", kind = "success", durationMs = 3000, persistent = false, spin = false, closable = true, action = null } = {}) {
     if (!U.toast || !U.toastTitle || !U.toastText || !U.toastClose) return;
     clearToastTimers();
     const sticky = persistent || durationMs <= 0;
@@ -28,6 +31,17 @@ function showToast({ title = "操作成功", text = "修改已生效", kind = "s
     // 引导期的拖动提示也要求常驻到链路配齐，调用方用 closable=false 表达。
     U.toastClose.hidden = !!spin || closable === false;
     if (U.toastIcon) U.toastIcon.hidden = !spin;
+    // 行首箭头是可选的跳转入口：只在调用方给了 onClick 时出现。
+    if (U.toastAction) {
+        const runAction = typeof action?.onClick === "function" ? action.onClick : null;
+        const label = String(action?.label || "").trim() || "跳转";
+        U.toastAction.hidden = !runAction;
+        if (runAction) {
+            U.toastAction.setAttribute("aria-label", label);
+            U.toastAction.title = label;
+        }
+        S.toastState.action = runAction;
+    }
     if (!sticky) {
         S.toastState.timeoutId = window.setTimeout(closeToast, durationMs);
     }

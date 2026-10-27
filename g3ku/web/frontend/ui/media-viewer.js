@@ -44,6 +44,45 @@ function resolveMediaViewerMode({ kind = "", name = "" } = {}) {
     return "download";
 }
 
+function resetMediaViewerSize() {
+    const drawer = mediaViewerState.drawer;
+    if (typeof drawer?.style?.removeProperty !== "function") return;
+    drawer.style.removeProperty("width");
+    drawer.style.removeProperty("height");
+}
+
+// 图片窗口跟着图片走：按自然尺寸和视口上限算出实际显示尺寸，再把抽屉收到
+// 「图片 + 头部 + 内边距」，小图不再被塞进一个固定 1180×86vh 的空框里。
+function syncMediaViewerImageSize() {
+    const drawer = mediaViewerState.drawer;
+    const img = mediaViewerState.body?.querySelector?.(".media-viewer-image");
+    if (!drawer?.style || !mediaViewerState.open || !img) {
+        resetMediaViewerSize();
+        return;
+    }
+    const naturalWidth = Number(img.naturalWidth) || 0;
+    const naturalHeight = Number(img.naturalHeight) || 0;
+    // 还没解码完：等 load 事件再量，先保持 CSS 默认尺寸。
+    if (!(naturalWidth > 0) || !(naturalHeight > 0)) return;
+    const headerEl = drawer.querySelector(".detail-modal-header");
+    const bodyEl = drawer.querySelector(".detail-modal-body");
+    const bodyStyle = bodyEl ? getComputedStyle(bodyEl) : null;
+    const padX = bodyStyle ? (parseFloat(bodyStyle.paddingLeft) || 0) + (parseFloat(bodyStyle.paddingRight) || 0) : 0;
+    const padY = bodyStyle ? (parseFloat(bodyStyle.paddingTop) || 0) + (parseFloat(bodyStyle.paddingBottom) || 0) : 0;
+    const headerHeight = headerEl ? headerEl.getBoundingClientRect().height : 0;
+    const maxWidth = Math.min(1180, window.innerWidth - 32);
+    const maxHeight = Math.min(window.innerHeight * 0.86, window.innerHeight - 48);
+    // 右侧留 12px 给滚动条槽位，尺寸算到整像素后不再多出一条横向滚动。
+    const availWidth = Math.max(160, maxWidth - padX - 12);
+    const availHeight = Math.max(120, maxHeight - headerHeight - padY - 2);
+    const scale = Math.min(1, availWidth / naturalWidth, availHeight / naturalHeight);
+    const width = Math.round(naturalWidth * scale) + padX + 12;
+    const height = Math.round(naturalHeight * scale) + headerHeight + padY + 2;
+    // 头部标题与两颗按钮需要最小宽度；视口更窄时仍以视口为准。
+    drawer.style.width = `${Math.round(Math.min(maxWidth, Math.max(360, width)))}px`;
+    drawer.style.height = `${Math.round(Math.min(maxHeight, Math.max(220, height)))}px`;
+}
+
 function ensureMediaViewerSurface() {
     if (mediaViewerState.backdrop && mediaViewerState.drawer) return;
     const backdrop = document.createElement("div");
@@ -91,6 +130,10 @@ function ensureMediaViewerSurface() {
     backdrop.addEventListener("click", (event) => {
         if (event.target === backdrop) closeMediaViewer();
     });
+    // 视口变化后重新量：图片窗口跟着剩余空间收缩，不留下超出屏幕的旧尺寸。
+    window.addEventListener("resize", () => {
+        if (mediaViewerState.open) syncMediaViewerImageSize();
+    });
     // 续读沿用轨迹字段那条车道：正文按服务端一屏取，不整份搬进页面。
     drawer.addEventListener("click", (event) => {
         const more = event.target instanceof Element ? event.target.closest(".task-trace-more") : null;
@@ -105,6 +148,7 @@ function renderMediaViewerImage(url, title) {
     img.className = "media-viewer-image";
     img.src = url;
     img.alt = title;
+    img.addEventListener("load", () => syncMediaViewerImageSize());
     img.addEventListener("error", () => {
         mediaViewerState.body.innerHTML = '<div class="empty-state">这个文件已经读不到了。</div>';
     });
@@ -159,6 +203,13 @@ function openMediaViewer({ mode = "image", url = "", title = "内容预览", sub
     else if (mode === "content") renderMediaViewerContent(outputRef, title);
     setDrawerOpen(mediaViewerState.backdrop, mediaViewerState.drawer, true);
     mediaViewerState.open = true;
+    // 图片模式按图片实际尺寸收窗口；嵌入/正文模式回到固定的视口档。
+    if (mode === "image") {
+        const img = mediaViewerState.body?.querySelector?.(".media-viewer-image");
+        if (img && img.complete && img.naturalWidth) syncMediaViewerImageSize();
+    } else {
+        resetMediaViewerSize();
+    }
     if (typeof icons === "function") icons(true);
     return true;
 }
@@ -169,6 +220,7 @@ function closeMediaViewer() {
     mediaViewerState.open = false;
     mediaViewerState.url = "";
     mediaViewerState.name = "";
+    resetMediaViewerSize();
     // 收掉本层内容：iframe 里的 pdf/正文还在解码，留着就是下一层的卡顿。
     if (mediaViewerState.body) mediaViewerState.body.innerHTML = "";
     return true;
