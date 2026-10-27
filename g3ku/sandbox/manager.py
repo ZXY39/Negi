@@ -250,6 +250,9 @@ class SandboxManager:
                 workspace = Path(wsl_paths["workspace"])
                 inbox = Path(wsl_paths["inbox"])
                 outbox = Path(wsl_paths["outbox"])
+                # 助手文件在发行版里，但 fsop 是在 jail 内被 python3 执行的：
+                # 不绑进来就是 `can't open file '/home/…/fsop.py'`。
+                helper_binds = ((Path(self._wsl.helper_path), FSOP_JAIL_PATH),)
             else:
                 if self._local is None:
                     raise SandboxUnavailableError("local sandbox layout is not configured")
@@ -465,8 +468,6 @@ class SandboxManager:
 
     def _fsop_helper_for(self, handle: SandboxHandle) -> str:
         """助手文件的可见路径：有 mount namespace 的用 jail 路径，Seatbelt 用宿主路径。"""
-        if handle.backend.name == "wsl_bwrap" and self._wsl is not None:
-            return self._wsl.helper_path
         if bool(getattr(handle.backend, "maps_paths", True)):
             return FSOP_JAIL_PATH
         return str(Path(__file__).with_name(FSOP_HELPER_NAME))
