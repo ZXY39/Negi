@@ -2,6 +2,9 @@
     "use strict";
 
     const PERSONA_CHAIN_TOAST = "为了使人设生效，主agent和记忆agent模型链不能为空，点击保存后生效";
+    // The memory agent writes the persona in the background; the dot has no server push, so
+    // poll while the page is visible. 15s matches the memory view's refresh cadence.
+    const PERSONA_INDICATOR_POLL_MS = 15000;
     const DRAG_TOAST_TITLE = "可拖动至 Agent";
     const DRAG_TOAST_TEXT = "把模型或负载均衡组拖到右侧任一 Agent 模型链即可加入。";
     const ONBOARDING_DRAG_TOAST_TEXT = "把模型或负载均衡组拖到右侧任一 Agent 模型链即可加入；主Agent和记忆Agent都需要至少一个角色。";
@@ -14,6 +17,7 @@
         uploadedNames: [],
         personaDescription: "",
         personaToastShown: false,
+        personaPollTimer: null,
         dragToastActive: false,
         dragToastTimer: null,
         busy: false,
@@ -128,14 +132,43 @@
         });
     }
 
+    function isPersonaDialogOpen() {
+        return Boolean(U.personaBackdrop && !U.personaBackdrop.hidden);
+    }
+
+    function isPersonaDescriptionEditing() {
+        return Boolean(U.personaDescriptionInput && !U.personaDescriptionInput.hidden);
+    }
+
     async function refreshPersonaIndicator() {
         try {
             const data = await ApiClient.getPersona();
-            state.personaDescription = String(data?.description || "").trim();
-            setPersonaEmpty(!state.personaDescription);
+            const text = String(data?.description || "").trim();
+            const changed = text !== state.personaDescription;
+            state.personaDescription = text;
+            setPersonaEmpty(!text);
+            // An open dialog should follow a background write too, but never overwrite a
+            // draft the operator is typing: the dots and the saved state update, the editor
+            // keeps its bytes.
+            if (changed && isPersonaDialogOpen() && !isPersonaDescriptionEditing()) {
+                renderPersonaDescription(text);
+                renderPhotoGrid(
+                    U.personaPhotoGrid,
+                    data?.photos || [],
+                    "图片为空，如果需要增加，请在会话中发送",
+                );
+            }
         } catch (error) {
             void error;
         }
+    }
+
+    function startPersonaIndicatorPolling() {
+        if (state.personaPollTimer) return;
+        state.personaPollTimer = window.setInterval(() => {
+            if (document.hidden) return;
+            void refreshPersonaIndicator();
+        }, PERSONA_INDICATOR_POLL_MS);
     }
 
     function renderPersonaDescription(description) {
