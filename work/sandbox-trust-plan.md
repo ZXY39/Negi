@@ -1141,8 +1141,12 @@ detecting → awaiting_confirm → downloading → installing → (needs_reboot)
     **实机验收（替身状态置 ready）**：卡片出现、文件行带下载链接、目录行不带、
     下载 URL 正确编码会话 ID 与区名。顺带修了 WSL 卷布局的真 bug：带 `~` 的路径放进
     单引号传给 shell 不展开，文件桥会找不到路径（改成先问一次 `$HOME` 再用绝对路径）。
-  - **仍未做**：主应用里的入口（导航/权限面板）——`org_graph.*` 正被并行会话改，暂不碰；
-    `additional_writable_roots`（D14）的页面编辑入口。
+  - **主应用入口**（本批续）：侧栏加「沙箱」视图，首次点开才给 iframe 挂 `/sandbox.html`
+    （主界面打开时不额外轮询）；CEO 权限面板加「会话档位」一行，显示当前档位，点开跳到
+    `/sandbox.html?session=<id>` 并预选该会话。页面主题跟随外壳（同源 iframe 读 `data-theme`
+    + 切主题时 postMessage）。**实机验收**：侧栏入口与图标正常、iframe 懒加载、
+    切主题后 iframe 背景同步变暗、面板行显示「宿主全权限」且点击后视图切换并预选会话。
+  - **仍未做**：`additional_writable_roots`（D14）的页面编辑入口。
 
 - **已逐行复核**（本计划引用的行号都亲自读过）：
   `g3ku/runtime/session_agent.py:1099-1116,1562-1596,4070-4179,4470-4529`、

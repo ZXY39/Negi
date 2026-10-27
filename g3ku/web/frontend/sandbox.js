@@ -417,7 +417,7 @@ function renderSession(item) {
 }
 
 function currentSessionId() {
-  return $('session-select').value || $('manual-session').value.trim();
+  return $('manual-session').value.trim() || $('session-select').value;
 }
 
 async function loadSessionDetail() {
@@ -557,6 +557,12 @@ async function main() {
     await loadPlan(false);
   } catch (error) {
     toast(`初始化失败：${error.message}`);
+  }
+  // 从权限面板跳进来时带着会话 ID：手动输入框是权威来源，列表加载完也不覆盖它。
+  const preset = (new URLSearchParams(window.location.search).get('session') || '').trim();
+  if (preset) {
+    $('manual-session').value = preset;
+    $('manual-session-field').hidden = false;
   }
   await loadSessions();
   if (currentSessionId()) {

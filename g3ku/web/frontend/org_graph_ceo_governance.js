@@ -44,6 +44,8 @@ function ensureCeoGovernanceState() {
     if (!U.ceoApprovalArgsClose) U.ceoApprovalArgsClose = document.getElementById("ceo-approval-args-close");
     if (!U.ceoRiskButton) U.ceoRiskButton = document.getElementById("ceo-risk-btn");
     if (!U.ceoRiskPanel) U.ceoRiskPanel = document.getElementById("ceo-risk-panel");
+    if (!U.ceoRiskSandboxButton) U.ceoRiskSandboxButton = document.getElementById("ceo-risk-sandbox-btn");
+    if (!U.ceoRiskSandboxHint) U.ceoRiskSandboxHint = document.getElementById("ceo-risk-sandbox-hint");
     if (!U.ceoRiskModeAll) U.ceoRiskModeAll = document.getElementById("ceo-risk-mode-all");
     if (!U.ceoRiskModeConditional) U.ceoRiskModeConditional = document.getElementById("ceo-risk-mode-conditional");
     if (!U.ceoRiskWhitelistButton) U.ceoRiskWhitelistButton = document.getElementById("ceo-risk-whitelist-btn");
@@ -523,6 +525,41 @@ function renderCeoRiskPanel() {
         U.ceoRiskModeNote.textContent = conditional ? CEO_RISK_MODE_NOTE_CONDITIONAL : CEO_RISK_MODE_NOTE_ALL_PASS;
         U.ceoRiskModeNote.hidden = !state.panelOpen;
     }
+    if (state.panelOpen) void refreshCeoRiskSandboxHint();
+}
+
+let ceoSandboxTierCache = { sessionId: "", text: "", at: 0 };
+
+async function refreshCeoRiskSandboxHint() {
+    const hint = U.ceoRiskSandboxHint;
+    if (!hint) return;
+    const sessionId = String(typeof activeSessionId === "function" ? activeSessionId() : "").trim();
+    if (!sessionId) {
+        hint.textContent = "";
+        return;
+    }
+    const now = Date.now();
+    if (ceoSandboxTierCache.sessionId === sessionId && now - ceoSandboxTierCache.at < 15000) {
+        hint.textContent = ceoSandboxTierCache.text;
+        return;
+    }
+    try {
+        const response = await fetch(`/api/ceo/sessions/${encodeURIComponent(sessionId)}/sandbox`, {
+            credentials: "same-origin",
+        });
+        if (!response.ok) {
+            hint.textContent = "档位不可用";
+            return;
+        }
+        const payload = await response.json();
+        const item = payload.item || {};
+        const tier = String(item.tier_label || item.resolved_tier || "");
+        const text = [tier, item.tasks_allowed === false ? "不可派任务" : ""].filter(Boolean).join(" · ");
+        hint.textContent = text;
+        ceoSandboxTierCache = { sessionId, text, at: now };
+    } catch (error) {
+        hint.textContent = "档位不可用";
+    }
 }
 
 function execWhitelistToolRows(tools, selectedIds) {
@@ -845,6 +882,12 @@ function bindCeoRiskUi() {
             if (target.closest("#ceo-risk-mode-all")) void saveToolGovernanceMode({ enabled: false });
             else if (target.closest("#ceo-risk-mode-conditional")) void saveToolGovernanceMode({ enabled: true });
             else if (target.closest("#ceo-risk-whitelist-btn")) void openCeoReviewWhitelistDialog();
+            else if (target.closest("#ceo-risk-sandbox-btn")) {
+                closeCeoRiskPanel();
+                if (typeof openSandboxViewForSession === "function") {
+                    openSandboxViewForSession(String(activeSessionId() || "").trim());
+                }
+            }
             else if (target.closest("#ceo-risk-exec-settings-btn")) {
                 closeCeoRiskPanel();
                 openExecToolSettings();

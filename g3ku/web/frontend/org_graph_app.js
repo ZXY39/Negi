@@ -10004,6 +10004,15 @@ function switchView(view) {
     }
 }
 
+function openSandboxViewForSession(sessionId) {
+    const frame = U.sandboxFrame;
+    if (frame) {
+        const query = sessionId ? `?session=${encodeURIComponent(sessionId)}` : "";
+        frame.setAttribute("src", `/sandbox.html${query}`);
+    }
+    switchView("sandbox");
+}
+
 function toggleTheme() {
     const html = document.documentElement;
     const theme = html.getAttribute("data-theme") === "light" ? "dark" : "light";
