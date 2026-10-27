@@ -722,6 +722,69 @@ async def test_graph_execute_tools_executes_only_approved_calls_and_merges_synth
     assert "用户不允许运行此工具" in str(tool_messages[1]["content"] or "")
 
 
+@pytest.mark.asyncio
+async def test_graph_execute_tools_executes_nothing_when_every_call_is_rejected(
+    monkeypatch,
+) -> None:
+    """整批都被策略拒绝时执行名单是空列表，不能被当成“没设置”回退成执行整批。"""
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    executed: list[str] = []
+
+    monkeypatch.setattr(runner, "_registered_tools_for_state", lambda state: {"echo_tool": _EchoTool()})
+    monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": None})
+
+    async def _fake_execute_tool_call_with_raw_result(
+        *, tool, tool_name, arguments, runtime_context, on_progress, tool_call_id
+    ):
+        _ = tool, arguments, runtime_context, on_progress, tool_call_id
+        executed.append(tool_name)
+        return ("{}", "{}", "success", "", "", 1.0)
+
+    monkeypatch.setattr(
+        runner, "_execute_tool_call_with_raw_result", _fake_execute_tool_call_with_raw_result
+    )
+    synthetic = runner._build_synthetic_rejection_result(
+        tool_call_id="call-1",
+        tool_name="echo_tool",
+        note="先别动这台机器",
+    )
+
+    result = await runner._graph_execute_tools(
+        {
+            "messages": [],
+            "tool_names": ["echo_tool"],
+            "candidate_tool_names": [],
+            "visible_skill_ids": [],
+            "candidate_skill_ids": [],
+            "rbac_visible_tool_names": ["echo_tool"],
+            "rbac_visible_skill_ids": [],
+            "tool_call_payloads": [
+                {"id": "call-1", "name": "echo_tool", "arguments": {"value": "alpha"}},
+            ],
+            "executable_tool_call_payloads": [],
+            "synthetic_tool_results": [synthetic],
+            "used_tools": [],
+            "route_kind": "direct_reply",
+            "parallel_enabled": False,
+            "max_parallel_tool_calls": 1,
+            "synthetic_tool_calls_used": False,
+            "response_payload": {"content": "", "tool_calls": []},
+            "session_key": "web:shared",
+        },
+        runtime=SimpleNamespace(context=SimpleNamespace()),
+    )
+
+    tool_messages = [
+        dict(message)
+        for message in list(result["messages"])
+        if str(message.get("role") or "").strip().lower() == "tool"
+    ]
+    assert executed == []
+    assert [item["tool_call_id"] for item in tool_messages] == ["call-1"]
+    assert tool_messages[0]["name"] == "echo_tool"
+    assert "用户不允许运行此工具" in str(tool_messages[0]["content"] or "")
+
+
 _BATCH_PAYLOADS = [
     {"id": "call-1", "name": "content_open", "arguments": {"path": "/tmp/a"}},
     {"id": "call-2", "name": "exec", "arguments": {"command": "echo hi"}},
@@ -842,6 +905,42 @@ def test_channel_session_batch_review_bounces_without_interrupt(monkeypatch) -> 
     assert "intercepted by risk review" in str(bounced[0]["result_text"] or "")
     # 这条回执面向模型，不写给界面上的人看。
     assert not any("\u4e00" <= char <= "\u9fff" for char in str(bounced[0]["result_text"] or ""))
+
+
+def test_batch_review_all_reviewed_items_rejected_keeps_executable_list_empty(monkeypatch) -> None:
+    """人工批审把待审条目全部拒掉时，执行名单必须为空，不能回退成整批执行。"""
+    request = _batch_approval_request()
+    request["tool_calls"] = [
+        item for item in request["tool_calls"] if item["id"] in {"call-1", "call-2"}
+    ]
+    request["pass_through_tool_call_ids"] = []
+    monkeypatch.setattr(
+        ceo_runtime_ops,
+        "raise_frontdoor_approval_interrupt",
+        _submit_batch(
+            [
+                {"tool_call_id": "call-1", "decision": "reject"},
+                {"tool_call_id": "call-2", "decision": "reject"},
+            ]
+        ),
+    )
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(main_task_service=None)
+    )
+    reviewed = runner._graph_review_tool_calls(
+        {
+            "approval_request": request,
+            "tool_call_payloads": [dict(item) for item in request["tool_calls"]],
+        },
+        runtime=SimpleNamespace(context=SimpleNamespace(session=None)),
+    )
+
+    assert reviewed["next_step"] == "execute_tools"
+    assert reviewed["executable_tool_call_payloads"] == []
+    assert [item["tool_call_id"] for item in reviewed["synthetic_tool_results"]] == [
+        "call-1",
+        "call-2",
+    ]
 
 
 @pytest.mark.asyncio

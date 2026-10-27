@@ -8861,8 +8861,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "tool_call_payloads": list(normalized["tool_call_payloads"]),
             # 批审把条目分成了两半：这一半真的执行，另一半在 `_graph_execute_tools` 里
             # 与真实结果按原顺序合并。非批审的裁决没有这两个键，回落成"全部照原样执行"。
+            # 空列表是“待审条目全部被拒”的合法结果；只有键缺失（非批审裁决）才回退整批。
             "executable_tool_call_payloads": list(
-                normalized.get("executable_tool_call_payloads") or normalized["tool_call_payloads"]
+                normalized["tool_call_payloads"]
+                if normalized.get("executable_tool_call_payloads") is None
+                else normalized["executable_tool_call_payloads"]
             ),
             "synthetic_tool_results": list(normalized.get("synthetic_tool_results") or []),
             "approval_batch_id": str(normalized.get("batch_id") or ""),
@@ -8876,8 +8879,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         runtime: CeoRuntime,
     ) -> dict[str, Any]:
         original_tool_call_payloads = list(state.get("tool_call_payloads") or [])
+        # 空列表 = 整批都被拒，不能当成“没设置”回退整批——那会执行刚被策略拒掉的调用。
+        raw_executable_payloads = state.get("executable_tool_call_payloads")
         executable_tool_call_payloads = list(
-            state.get("executable_tool_call_payloads") or original_tool_call_payloads
+            original_tool_call_payloads
+            if raw_executable_payloads is None
+            else raw_executable_payloads
         )
         synthetic_tool_results = [
             dict(item)
