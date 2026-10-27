@@ -3352,9 +3352,8 @@ textarea {
     pointer-events: none;
 }
 
-/* 普通消息气泡(用户/无轨道助手兜底)的元信息行:发送/完成时间 + token 用量 + 复制按钮,
-   回复的 Fork 按钮排在最左。行的显隐由上面那组点击门管,行本身一直占位。
-   助手靠右(时间吃左),用户靠左(时间吃右)。 */
+/* 普通消息气泡(用户/无轨道助手兜底)的元信息行:发送/完成时间 + token 用量 + 复制按钮。
+   行的显隐由上面那组点击门管,行本身一直占位。助手靠右(时间吃左),用户靠左(时间吃右)。 */
 .msg-meta {
     display: flex;
     align-items: center;
@@ -3372,8 +3371,22 @@ textarea {
     margin-inline-end: auto;
 }
 
+/* 复制按钮跟着另一颗动作按钮走：用户气泡排在「编辑」右边；
+   回复气泡有 Fork 时排在 Fork 左边（没有 Fork 的只读会话仍留在行尾）。 */
 .message.user .msg-meta > .msg-copy-btn {
+    order: 1;
+}
+
+.message.system .msg-meta:has(> .msg-action-fork) > .msg-copy-btn,
+.ceo-turn-meta:has(> .msg-action-fork) > .msg-copy-btn {
     order: -1;
+}
+
+/* 复制排到 Fork 左边后，行首已经有一颗按钮：Fork 不再吃「首个动作抵边」的负边距，
+   否则它那 -11px 会压到复制图标上。 */
+.message.system .msg-meta:has(> .msg-copy-btn) > .msg-action-fork:first-child,
+.ceo-turn-meta:has(> .msg-copy-btn) > .msg-action-fork:first-child {
+    margin-inline-start: 0;
 }
 
 .message.user .msg-meta > .msg-meta-text {
