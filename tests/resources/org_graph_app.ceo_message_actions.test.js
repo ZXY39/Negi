@@ -424,7 +424,7 @@ test("R7 接线静态契约:委托/时序/横幅/HTML 元素", () => {
     // 按整行隐藏会把同一行里的 Fork 一起吃掉（暂停/运行中正是唯一还能 Fork 的时刻）。
     assert.ok(!css.includes(".ceo-turn-active .msg-meta"), "CSS 仍按整行隐藏元信息里的按钮");
     assert.ok(!css.includes(".message:hover .msg-action"), "动作按钮仍靠悬停显形");
-    // 按钮文字常驻，只有外面那圈胶囊描边按悬停显形：基档必须全透明，悬停档画回来。
+    // 按钮文字常驻；悬停反馈与复制按钮一致——只换文字色，不铺底也不描边。
     const actionRules = [...css.replace(/\r\n/g, "\n").matchAll(/([^{}]+)\{([^}]*)\}/g)]
         .map(([, selector, body]) => ({ selector: selector.trim(), body }))
         .filter((rule) => rule.selector.includes(".msg-action-btn"));
@@ -437,9 +437,11 @@ test("R7 接线静态契约:委托/时序/横幅/HTML 元素", () => {
     );
     const actionHover = actionRules.find((rule) => rule.selector.includes(".msg-action-btn:hover"));
     assert.ok(
-        actionHover && actionHover.body.includes("border-color:") && actionHover.body.includes("background:"),
-        "悬停档没有把描边画回来"
+        actionHover && actionHover.body.includes("color: var(--text-primary)"),
+        "悬停档没有换文字色"
     );
+    assert.ok(actionHover && !actionHover.body.includes("background:"), "悬停档仍铺底色");
+    assert.ok(actionHover && !actionHover.body.includes("border-color:"), "悬停档仍画描边");
     // 对齐档：横向内边距只有一个来源变量，行首/行尾那颗用它把自己的内缩抵掉，
     // 图标才和上方气泡同一条边线；图标抬 1px 让墨迹底边贴住文字底边。
     assert.ok(
