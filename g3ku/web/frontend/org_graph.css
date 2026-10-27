@@ -8539,6 +8539,21 @@ textarea {
     width: 100%;
 }
 
+/* 纯文本确认（沙箱开/关的安全影响说明）：正文不限高、不出滚动条；
+   口令行去掉外层框，只留输入框本身。两者都由 openConfirm 的选项挂类。 */
+.confirm-dialog.is-text-full .confirm-text {
+    max-height: none;
+    overflow: visible;
+    padding-right: 0;
+}
+
+.confirm-dialog.is-input-plain .confirm-input-row {
+    padding: 0;
+    margin-top: 2px;
+    border: 0;
+    background: transparent;
+}
+
 .confirm-checkbox-row {
     display: flex;
     align-items: flex-start;

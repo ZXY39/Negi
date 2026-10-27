@@ -210,7 +210,7 @@ def test_third_party_patch_rejects_writable_roots(isolated_state: Path, registry
             asyncio.run(
                 sandbox_api.patch_session_sandbox(
                     entry.session_key,
-                    {"mode": "restricted", "writable_roots": ["/tmp/x"]},
+                    {"writable_roots": ["/tmp/x"]},
                 )
             )
         assert getattr(excinfo.value, "status_code", None) == 403
@@ -263,13 +263,28 @@ async def test_sandbox_api_owner_and_third_party_gate(
     )
     monkeypatch.setattr(sandbox_api, "_session_exists", lambda key: True)
 
-    # owner 切档不需要口令
+    # owner 开沙箱同样要口令（安全边界改变，不分信任级）
+    with pytest.raises(Exception) as owner_missing:
+        await sandbox_api.patch_session_sandbox(
+            "web:ceo-1", {"mode": MODE_RESTRICTED}
+        )
+    assert getattr(owner_missing.value, "status_code", None) == 403
+    assert sandbox_state.get_session_mode("web:ceo-1") == ""
+
+    monkeypatch.setattr(sandbox_api, "_verify_unlock_password", lambda pw: pw == "right")
     result = await sandbox_api.patch_session_sandbox(
-        "web:ceo-1", {"mode": MODE_RESTRICTED}
+        "web:ceo-1", {"mode": MODE_RESTRICTED, "unlock_password": "right"}
     )
     assert result["item"]["resolved_tier"] == TIER_READONLY
-    assert result["item"]["unlock_required"] is False
+    assert result["item"]["unlock_required"] is True
     assert result["item"]["effective_from"] == "next_turn"
+    assert result["item"]["operator_unlock"]["at"]
+
+    # 意图没变（只重存同一档）不走口令闸
+    same = await sandbox_api.patch_session_sandbox(
+        "web:ceo-1", {"mode": MODE_RESTRICTED}
+    )
+    assert same["item"]["resolved_tier"] == TIER_READONLY
 
     # 第三方切 unrestricted：没口令 403
     with pytest.raises(Exception) as missing:
@@ -296,7 +311,7 @@ async def test_sandbox_api_owner_and_third_party_gate(
     assert ok["item"]["operator_unlock"]["at"]
     assert sandbox_state.get_session_mode(entry.session_key) == MODE_UNRESTRICTED
 
-    # 非法 mode → 400
+    # 非法 mode → 400（归一化先于口令校验）
     with pytest.raises(Exception) as bad:
         await sandbox_api.patch_session_sandbox("web:ceo-1", {"mode": "root"})
     assert getattr(bad.value, "status_code", None) == 400

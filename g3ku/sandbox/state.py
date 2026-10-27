@@ -199,7 +199,7 @@ def _write_locked(modes: dict[str, str]) -> None:
 
 
 def note_operator_unlock(session_key: Any, *, at: str, by: str = "operator") -> None:
-    """记一条"操作员用口令把该会话放到 unrestricted"的审计痕迹。"""
+    """记一条"操作员用口令确认过一次改档（开或关）"的审计痕迹。"""
     key = str(session_key or "").strip()
     if not key:
         return

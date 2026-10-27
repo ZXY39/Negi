@@ -129,7 +129,7 @@
 | 端点 | 契约 |
 |---|---|
 | `GET /api/ceo/sessions/{id}/sandbox` | 返回 `{trust, mode, stored_mode, default_mode, resolved_tier, tier_label, install_state, backend, enforcement, ui_labels, unlock_required, operator_unlock, tasks_allowed, writable_roots}` |
-| `PATCH /api/ceo/sessions/{id}/sandbox` | 改意图：`{mode, unlock_password?, writable_roots?}`；第三方会话切 `unrestricted` 必须带项目解锁口令（`unwrap_with_password` 只读校验），通过后记 `operator_unlock` + 审计；`writable_roots` 只对 owner 开放（D14：交付目录常在工作区外），third_party 传了直接 403；返回体带 `effective_from: "next_turn"` |
+| `PATCH /api/ceo/sessions/{id}/sandbox` | 改意图：`{mode?, unlock_password?, writable_roots?}`；**任何信任级的开/关沙箱**（`mode` 与当前意图不同）都必须带项目解锁口令（`unwrap_with_password` 只读校验），通过后记 `operator_unlock` + 审计；`mode` 与原意图相同或只传 `writable_roots` 时不走口令闸。`writable_roots` 只对 owner 开放（D14：交付目录常在工作区外），third_party 传了直接 403；返回体带 `effective_from: "next_turn"` |
 | `GET/PUT /api/sandbox/persona` | 第三方会话用的人设正文；空 = 群聊不带人设。与操作员自己的人设 note 分开存放 |
 | `GET /api/sandbox/status` | 全局安装态、后端、逐维度强制力、`ui_labels`；`?refresh=1` 重探 |
 | `POST /api/sandbox/refresh` | 重探并返回新读数 |
@@ -143,12 +143,21 @@
 页面视觉复制外壳的 UI kit token（`--ui-*`：canvas / surface / border / brand / 控件档），
 不加载 `org_graph.css`，所以改外壳 token 时要同步 `sandbox.css` 顶部那张表；版式是
 左主列（会话 + 文件）与右副列（运行时 + 群聊人设 + 安装），卡片按内容排高。
-入口有两处：侧栏「沙箱」、CEO 权限面板里的「沙箱模式」一行。后者是**就地开关**：
-整行可点、右侧画开关，标题「沙箱模式」下按当前意图显示「无限制」或「只读模式（沙箱模式）」；
-第三方会话从受限切 `unrestricted` 时弹项目解锁口令框（`openConfirm` 的 password 输入），
-开关成功后停在本面板并通知沙箱 iframe 重读（`negi-sandbox-refresh`）。页面嵌在同源 iframe
-里，主题跟随外壳（`data-theme` 由父页经 postMessage 同步）；会话列表拿不到时退化成手填
-会话 ID，不让页面卡在"加载中"。
+入口有两处：侧栏「沙箱」、CEO 权限面板里的**就地开关**——排在「命令行风险拦截设置」上面，
+整行可点、右侧画开关，行标题直接写当前状态：`unrestricted` → 「无限制」；`restricted` 且
+后端装好 → 「沙箱模式」；`restricted` 但没装成 → 「只读模式」；行内只有这一行标题。
+**开和关都弹二次确认**（`openConfirm` 的 password 输入，`textFull` + `inputPlain`：影响说明
+整段展示不出滚动条、口令行不带外层框），确认里逐条写工具面 / 缓存 / 安全的变化；未装后端时
+标题用「进入只读模式 / 退出只读模式」，装好后才是「开启沙箱模式 / 关闭沙箱模式」。成功后停在
+本面板并通知沙箱 iframe 重读（`negi-sandbox-refresh`）。页面嵌在同源 iframe 里，主题跟随外壳
+（`data-theme` 由父页经 postMessage 同步）；会话列表拿不到时退化成手填会话 ID，不让页面卡在
+"加载中"。
+
+沙箱页自身：会话下拉是自绘菜单（原生 `<select>` 的弹层不可控）；额外可写目录收进
+`<details>` 折叠区、owner 才出现且已有值时默认展开；右上角状态只留「未安装沙箱 /
+已安装沙箱 / 需要修复」三档（`partial` 才是需要修复），「重新检测」先 toast「正在检测…」，
+完成后 toast 结果。安装计划点「查看安装内容」走弹窗；安装进度留在页内卡片。
+改档保存同样走页内二次确认弹窗（影响说明 + 项目解锁口令），只存可写目录时不弹口令框。
 
 `ui_labels` 由服务端按安装态给出（未安装「只读 / 全权限」、已安装「开启沙箱 / 关闭沙箱」），
 前端不自己判安装态。文件管理一族端点只在安装态 `ready` / `partial` 时有意义；

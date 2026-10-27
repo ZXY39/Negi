@@ -45,7 +45,7 @@ function ensureCeoGovernanceState() {
     if (!U.ceoRiskButton) U.ceoRiskButton = document.getElementById("ceo-risk-btn");
     if (!U.ceoRiskPanel) U.ceoRiskPanel = document.getElementById("ceo-risk-panel");
     if (!U.ceoRiskSandboxButton) U.ceoRiskSandboxButton = document.getElementById("ceo-risk-sandbox-btn");
-    if (!U.ceoRiskSandboxHint) U.ceoRiskSandboxHint = document.getElementById("ceo-risk-sandbox-hint");
+    if (!U.ceoRiskSandboxTitle) U.ceoRiskSandboxTitle = document.getElementById("ceo-risk-sandbox-title");
     if (!U.ceoRiskModeAll) U.ceoRiskModeAll = document.getElementById("ceo-risk-mode-all");
     if (!U.ceoRiskModeConditional) U.ceoRiskModeConditional = document.getElementById("ceo-risk-mode-conditional");
     if (!U.ceoRiskWhitelistButton) U.ceoRiskWhitelistButton = document.getElementById("ceo-risk-whitelist-btn");
@@ -528,30 +528,33 @@ function renderCeoRiskPanel() {
     if (state.panelOpen) void refreshCeoRiskSandboxHint();
 }
 
-const CEO_SANDBOX_MODE_TEXTS = {
-    restricted: "只读模式（沙箱模式）",
-    unrestricted: "无限制",
+let ceoSandboxTierCache = {
+    sessionId: "",
+    restricted: null,
+    trust: "",
+    installState: "",
+    at: 0,
 };
 
-let ceoSandboxTierCache = { sessionId: "", restricted: null, unlockRequired: false, at: 0 };
+// 行标题直接写当前状态：没装后端时是「只读模式」，装好之后才是「沙箱模式」。
+function ceoSandboxRowTitle() {
+    if (ceoSandboxTierCache.restricted === null) return "沙箱模式";
+    if (!ceoSandboxTierCache.restricted) return "无限制";
+    return ceoSandboxInstalled() ? "沙箱模式" : "只读模式";
+}
 
 function renderCeoRiskSandboxState() {
-    if (U.ceoRiskSandboxHint) {
-        U.ceoRiskSandboxHint.textContent = ceoSandboxTierCache.restricted === null
-            ? ""
-            : CEO_SANDBOX_MODE_TEXTS[ceoSandboxTierCache.restricted ? "restricted" : "unrestricted"];
-    }
+    if (U.ceoRiskSandboxTitle) U.ceoRiskSandboxTitle.textContent = ceoSandboxRowTitle();
     U.ceoRiskSandboxButton?.setAttribute?.("aria-pressed", ceoSandboxTierCache.restricted ? "true" : "false");
 }
 
 async function refreshCeoRiskSandboxHint() {
-    const hint = U.ceoRiskSandboxHint;
     const button = U.ceoRiskSandboxButton;
-    if (!hint) return;
+    if (!button && !U.ceoRiskSandboxTitle) return;
     const sessionId = String(typeof activeSessionId === "function" ? activeSessionId() : "").trim();
     if (!sessionId) {
-        ceoSandboxTierCache = { sessionId: "", restricted: null, unlockRequired: false, at: 0 };
-        hint.textContent = "先选择一个会话";
+        ceoSandboxTierCache = { sessionId: "", restricted: null, trust: "", installState: "", at: 0 };
+        if (U.ceoRiskSandboxTitle) U.ceoRiskSandboxTitle.textContent = "沙箱模式";
         button?.setAttribute?.("aria-pressed", "false");
         if (button) button.disabled = true;
         return;
@@ -571,7 +574,7 @@ async function refreshCeoRiskSandboxHint() {
             credentials: "same-origin",
         });
         if (!response.ok) {
-            hint.textContent = "档位不可用";
+            if (U.ceoRiskSandboxTitle) U.ceoRiskSandboxTitle.textContent = "档位不可用";
             return;
         }
         const payload = await response.json();
@@ -579,12 +582,13 @@ async function refreshCeoRiskSandboxHint() {
         ceoSandboxTierCache = {
             sessionId,
             restricted: item.mode === "restricted",
-            unlockRequired: !!item.unlock_required,
+            trust: String(item.trust || ""),
+            installState: String(item.install_state || ""),
             at: now,
         };
         renderCeoRiskSandboxState();
     } catch (error) {
-        hint.textContent = "档位不可用";
+        if (U.ceoRiskSandboxTitle) U.ceoRiskSandboxTitle.textContent = "档位不可用";
     }
 }
 
@@ -626,12 +630,58 @@ function applyCeoSandboxMode(item, sessionId) {
     ceoSandboxTierCache = {
         sessionId,
         restricted: item?.mode === "restricted",
-        unlockRequired: !!item?.unlock_required,
+        trust: String(item?.trust || ""),
+        installState: String(item?.install_state || ""),
         at: Date.now(),
     };
     if (U.ceoRiskSandboxButton) U.ceoRiskSandboxButton.disabled = false;
     renderCeoRiskSandboxState();
     if (typeof notifySandboxSessionModeChanged === "function") notifySandboxSessionModeChanged(sessionId);
+}
+
+function ceoSandboxInstalled() {
+    return ceoSandboxTierCache.installState === "ready" || ceoSandboxTierCache.installState === "partial";
+}
+
+// 没装成后端时没有"沙箱"可开：同一颗开关表达的是"只读 / 无限制"，文案跟着安装态走。
+function ceoSandboxConfirmLabels(turningOn) {
+    if (ceoSandboxInstalled()) {
+        return {
+            title: turningOn ? "开启沙箱模式？" : "关闭沙箱模式？",
+            confirm: turningOn ? "开启沙箱模式" : "关闭沙箱模式",
+            done: turningOn ? "已开启沙箱模式" : "已关闭沙箱模式",
+        };
+    }
+    return {
+        title: turningOn ? "进入只读模式？" : "退出只读模式？",
+        confirm: turningOn ? "进入只读模式" : "退出只读模式",
+        done: turningOn ? "已进入只读模式" : "已退出只读模式",
+    };
+}
+
+// 开或关都改执行边界，也都会换掉暴露给模型的工具清单：二次确认要把这三件事说清。
+function ceoSandboxImpactText(targetRestricted) {
+    const thirdParty = ceoSandboxTierCache.trust !== "owner";
+    const installed = ceoSandboxInstalled();
+    const cacheText = "缓存：切档在下一回合生效；暴露给模型的工具清单会变，下一次请求的缓存前缀失效，首回合要重新预热。";
+    if (targetRestricted) {
+        return [
+            installed
+                ? "工具面：收窄到只读白名单；写文件、执行命令、联网等动作会被拒绝，已装沙箱时数据面工具在 jail 内执行。"
+                : "工具面：收窄到只读白名单；只能读本会话的上传与临时目录，不能写文件、执行命令、联网，也不能派异步任务。",
+            cacheText,
+            thirdParty
+                ? "安全：白名单外的工具调用会被拒绝；这是第三方会话，记忆门继续生效。"
+                : "安全：白名单外的工具调用会被拒绝；这是操作员自己的会话，随时可以再关掉。",
+        ].join("\n\n");
+    }
+    return [
+        "工具面：数据面工具回到宿主执行；写文件、执行命令、联网恢复可用。",
+        cacheText,
+        thirdParty
+            ? "安全：控制面拒绝与记忆门仍然生效，但宿主文件与命令只剩 exec 自身的形态守卫；这个群的发送者因此能触达本机能力。"
+            : "安全：工具按你当前系统账号的权限执行；误操作没有第二道边界。",
+    ].join("\n\n");
 }
 
 async function toggleCeoRiskSandboxMode() {
@@ -640,7 +690,6 @@ async function toggleCeoRiskSandboxMode() {
         showToast({ title: "先选择会话", text: "沙箱模式按会话生效。", kind: "warn", durationMs: 2400 });
         return;
     }
-    const button = U.ceoRiskSandboxButton;
     if (ceoSandboxTierCache.sessionId !== sessionId || ceoSandboxTierCache.restricted === null) {
         await refreshCeoRiskSandboxHint();
     }
@@ -654,43 +703,36 @@ async function toggleCeoRiskSandboxMode() {
         return;
     }
     const targetRestricted = !ceoSandboxTierCache.restricted;
-    const run = async (password) => {
-        if (button) button.disabled = true;
-        try {
-            const item = await patchCeoSandboxMode(sessionId, targetRestricted, password);
-            applyCeoSandboxMode(item, sessionId);
-            showToast({
-                title: targetRestricted ? "已开启沙箱模式" : "已关闭沙箱模式",
-                text: "下一回合生效。",
-                kind: "success",
-                durationMs: 2200,
-            });
-        } catch (error) {
-            throw new Error(ceoSandboxModeErrorText(error.detail || error.message));
-        } finally {
-            if (button) button.disabled = false;
-        }
-    };
-    if (!targetRestricted && ceoSandboxTierCache.unlockRequired) {
-        closeCeoRiskPanel();
-        openConfirm({
-            title: "关闭沙箱模式？",
-            text: "这是第三方会话。切到无限制要验一次项目解锁口令；控制面拒绝和记忆门仍然生效。",
-            confirmLabel: "关闭沙箱模式",
-            input: { label: "项目解锁口令", type: "password", placeholder: "仅本次切换使用", required: true },
-            onConfirm: async ({ value }) => {
-                const password = String(value || "").trim();
-                if (!password) throw new Error("请输入项目解锁口令。");
-                await run(password);
-            },
-        });
-        return;
-    }
-    try {
-        await run("");
-    } catch (error) {
-        showToast({ title: "切换失败", text: error.message, kind: "error", durationMs: 2800 });
-    }
+    const turningOn = targetRestricted;
+    const labels = ceoSandboxConfirmLabels(turningOn);
+    openConfirm({
+        title: labels.title,
+        text: ceoSandboxImpactText(targetRestricted),
+        confirmLabel: labels.confirm,
+        input: { label: "项目解锁口令", type: "password", placeholder: "仅本次切换使用", required: true },
+        textFull: true,
+        inputPlain: true,
+        onConfirm: async ({ value }) => {
+            const password = String(value || "").trim();
+            if (!password) throw new Error("请输入项目解锁口令。");
+            const button = U.ceoRiskSandboxButton;
+            if (button) button.disabled = true;
+            try {
+                const item = await patchCeoSandboxMode(sessionId, targetRestricted, password);
+                applyCeoSandboxMode(item, sessionId);
+                showToast({
+                    title: labels.done,
+                    text: "下一回合生效。",
+                    kind: "success",
+                    durationMs: 2200,
+                });
+            } catch (error) {
+                throw new Error(ceoSandboxModeErrorText(error.detail || error.message));
+            } finally {
+                if (button) button.disabled = false;
+            }
+        },
+    });
 }
 
 function execWhitelistToolRows(tools, selectedIds) {

@@ -44,13 +44,23 @@
           <div class="panel-head">
             <div class="panel-heading">
               <h2>会话档位</h2>
-              <p>选择会话后切换档位；第三方会话切到全权限需要项目解锁口令。</p>
+              <p>选择会话后可切换沙箱；开或关都要输入项目解锁口令二次确认。</p>
             </div>
           </div>
           <div class="panel-body">
             <div class="field">
-              <label class="field-label" for="session-select">会话</label>
-              <select id="session-select"><option value="">加载中…</option></select>
+              <span class="field-label">会话</span>
+              <div class="select" id="session-select">
+                <button id="session-select-trigger" class="select-trigger" type="button"
+                  aria-haspopup="listbox" aria-expanded="false">
+                  <span id="session-select-label" class="select-label">加载中…</span>
+                  <svg class="select-chevron" viewBox="0 0 20 20" aria-hidden="true">
+                    <path d="M5 7.5 10 12.5 15 7.5" fill="none" stroke="currentColor" stroke-width="1.6"
+                      stroke-linecap="round" stroke-linejoin="round" />
+                  </svg>
+                </button>
+                <div id="session-select-menu" class="select-menu" role="listbox" aria-label="会话" hidden></div>
+              </div>
             </div>
             <div class="field" id="manual-session-field" hidden>
               <label class="field-label" for="manual-session">会话 ID（列表不可用时手动输入）</label>
@@ -65,20 +75,17 @@
                 <span id="session-tier" class="status-pill" data-state="neutral">—</span>
               </div>
               <div class="mode-switch" id="mode-switch"></div>
-              <div class="field" id="unlock-field" hidden>
-                <label class="field-label" for="unlock-password">项目解锁口令</label>
-                <input id="unlock-password" type="password" autocomplete="current-password" placeholder="仅本次切换使用" />
-              </div>
-              <div class="field" id="roots-field" hidden>
-                <label class="field-label" for="roots-input">额外可写目录（每行一个绝对路径，仅 owner 会话）</label>
-                <textarea id="roots-input" rows="3" placeholder="C:\Users\me\Desktop&#10;/home/me/output"></textarea>
-                <p class="hint">交付物常落在桌面或输出目录时用；第三方会话不支持。</p>
-              </div>
+              <details class="advanced" id="roots-field" hidden>
+                <summary>额外可写目录（可选）</summary>
+                <div class="advanced-body">
+                  <p class="hint">每行一个绝对路径，仅 owner 会话；交付物常落在桌面或输出目录时用。</p>
+                  <textarea id="roots-input" rows="3" placeholder="C:\Users\me\Desktop&#10;/home/me/output"></textarea>
+                </div>
+              </details>
               <div class="panel-actions">
                 <button id="save-mode-btn" class="toolbar-btn primary" type="button">保存</button>
                 <span id="save-result" class="save-result"></span>
               </div>
-              <p class="hint" id="tasks-hint"></p>
             </div>
           </div>
         </section>
@@ -108,7 +115,6 @@
             <p class="hint" id="files-empty" hidden>这个区还没有文件。</p>
           </div>
         </section>
-
       </div>
 
       <div class="page-column page-column-side">
@@ -154,28 +160,6 @@
           </div>
         </section>
 
-        <section class="panel" id="plan-card" hidden>
-          <div class="panel-head">
-            <div class="panel-heading">
-              <h2>安装内容</h2>
-              <p>安装前请确认下面的步骤与提权要求。任何一步失败都会中止，不会留下半装状态以外的改动。</p>
-            </div>
-          </div>
-          <div class="panel-body">
-            <ol id="plan-steps" class="steps"></ol>
-            <ul id="plan-notes" class="notes"></ul>
-            <label class="check" id="confirm-row">
-              <input id="confirm-check" class="ui-checkbox-input" type="checkbox" />
-              <span class="ui-checkbox-box" aria-hidden="true"></span>
-              <span>我确认在上面这台机器上执行这些步骤</span>
-            </label>
-            <div class="panel-actions">
-              <button id="confirm-install-btn" class="toolbar-btn primary" type="button" disabled>确认安装</button>
-              <button id="cancel-plan-btn" class="toolbar-btn" type="button">取消</button>
-            </div>
-          </div>
-        </section>
-
         <section class="panel" id="progress-card" hidden>
           <div class="panel-head">
             <div class="panel-heading">
@@ -191,6 +175,49 @@
       </div>
     </div>
   </main>
+
+  <div id="mode-confirm-backdrop" class="modal-backdrop" hidden>
+    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="mode-confirm-title">
+      <div class="modal-head">
+        <h2 id="mode-confirm-title">切换沙箱模式？</h2>
+      </div>
+      <div class="modal-body">
+        <ul id="mode-confirm-impact" class="impact-list"></ul>
+        <label class="field" for="mode-confirm-password">
+          <span class="field-label">项目解锁口令</span>
+          <input id="mode-confirm-password" type="password" autocomplete="current-password"
+            placeholder="仅本次切换使用" />
+        </label>
+        <p class="modal-error" id="mode-confirm-error" hidden></p>
+      </div>
+      <div class="modal-actions">
+        <button id="mode-confirm-cancel" class="toolbar-btn" type="button">取消</button>
+        <button id="mode-confirm-accept" class="toolbar-btn primary" type="button">确认切换</button>
+      </div>
+    </section>
+  </div>
+
+  <div id="plan-backdrop" class="modal-backdrop" hidden>
+    <section class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="plan-title">
+      <div class="modal-head">
+        <h2 id="plan-title">安装内容</h2>
+      </div>
+      <div class="modal-body">
+        <p class="hint">安装前请确认下面的步骤与提权要求。任何一步失败都会中止，不会留下半装状态以外的改动。</p>
+        <ol id="plan-steps" class="steps"></ol>
+        <ul id="plan-notes" class="notes"></ul>
+        <label class="check" id="confirm-row">
+          <input id="confirm-check" class="ui-checkbox-input" type="checkbox" />
+          <span class="ui-checkbox-box" aria-hidden="true"></span>
+          <span>我确认在上面这台机器上执行这些步骤</span>
+        </label>
+      </div>
+      <div class="modal-actions">
+        <button id="cancel-plan-btn" class="toolbar-btn" type="button">关闭</button>
+        <button id="confirm-install-btn" class="toolbar-btn primary" type="button" disabled>确认安装</button>
+      </div>
+    </section>
+  </div>
 
   <div id="toast" class="toast" hidden></div>
   <script src="/sandbox.js"></script>

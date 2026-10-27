@@ -4,8 +4,9 @@
 
 - `GET  /api/ceo/sessions/{id}/sandbox` —— 当前意图、解析出的档位、安装态、逐维度强制力，
   以及**服务端给出的 UI 标签**（前端不自己判安装态，避免两处口径漂移）。
-- `PATCH /api/ceo/sessions/{id}/sandbox` —— 只改意图；第三方会话切 `unrestricted`
-  必须带项目解锁口令（服务端只读校验，不顺便解锁项目）。
+- `PATCH /api/ceo/sessions/{id}/sandbox` —— 只改意图；**任何信任级的开/关沙箱**
+  （mode 与当前意图不同）都必须带项目解锁口令（服务端只读校验，不顺便解锁项目）。
+  只改 `writable_roots`、或 mode 与原意图相同，则不需要口令。
 - `GET  /api/sandbox/status` —— 全局安装态与后端读数（进程内缓存，`?refresh=1` 重探）。
 - `POST /api/sandbox/refresh` —— 重探安装态。
 
@@ -121,8 +122,8 @@ def _session_item(session_key: str) -> dict[str, Any]:
         "enforcement": dict(reading.get("enforcement") or {}),
         "install_detail": dict(reading.get("detail") or {}),
         "ui_labels": _ui_labels(reading),
-        # 第三方会话切 unrestricted 必须带口令；owner 不需要。
-        "unlock_required": session_trust(session_key) != TRUST_OWNER,
+        # 开/关沙箱都是安全边界改变，任何信任级都要口令（后端在 PATCH 里只读校验）。
+        "unlock_required": True,
         "operator_unlock": unlock_note,
         # 受限档不派任务：UI 用它来决定任务按钮的可用性提示。
         "tasks_allowed": policy.tier == TIER_HOST_FULL,
@@ -159,9 +160,13 @@ async def patch_session_sandbox(session_id: str, payload: dict = Body(...)):
     key = str(session_id or "").strip()
     if not _session_exists(key):
         raise HTTPException(status_code=404, detail="session_not_found")
-    mode = _normalized_mode(payload.get("mode"))
     trust = session_trust(key)
-    if mode == MODE_UNRESTRICTED and trust != TRUST_OWNER:
+    current = session_policy(key)
+    mode = _normalized_mode(payload.get("mode")) if "mode" in payload else None
+    # 开/关沙箱都是安全边界的改变：任何信任级都要用项目解锁口令二次确认，
+    # 不只是第三方会话切 unrestricted。只改可写根（mode 缺省或与原意图相同）不走这道闸。
+    mode_changed = mode is not None and mode != current.mode
+    if mode_changed:
         password = str(payload.get("unlock_password") or payload.get("unlockPassword") or "")
         if not password:
             raise HTTPException(status_code=403, detail="unlock_password_required")
@@ -170,7 +175,8 @@ async def patch_session_sandbox(session_id: str, payload: dict = Body(...)):
         from datetime import datetime
 
         note_operator_unlock(key, at=datetime.now().astimezone().isoformat(), by="operator")
-    set_session_mode(key, mode)
+    if mode is not None:
+        set_session_mode(key, mode)
     if "writable_roots" in payload:
         if trust != TRUST_OWNER:
             raise HTTPException(status_code=403, detail="writable_roots_owner_only")
@@ -181,22 +187,25 @@ async def patch_session_sandbox(session_id: str, payload: dict = Body(...)):
     # 档位只在回合边界生效：这里只落意图，正在跑的回合不受影响。
     item = _session_item(key)
     item["effective_from"] = "next_turn"
-    try:
-        emit_audit_event(
-            "sandbox",
-            "info",
-            "mode_changed",
-            "session sandbox mode changed",
-            detail={
-                "session_id": key,
-                "mode": mode,
-                "tier": item.get("resolved_tier"),
-                "trust": item.get("trust"),
-                "unlocked": bool(item.get("operator_unlock")),
-            },
-        )
-    except Exception as exc:  # noqa: BLE001 - 审计失败不阻塞开关
-        logger.warning("sandbox mode audit emit failed: {}", exc)
+    if mode is not None:
+        try:
+            emit_audit_event(
+                "sandbox",
+                "info",
+                "mode_changed",
+                "session sandbox mode changed",
+                detail={
+                    "session_id": key,
+                    "mode": mode,
+                    "previous_mode": current.mode,
+                    "changed": mode_changed,
+                    "tier": item.get("resolved_tier"),
+                    "trust": item.get("trust"),
+                    "unlocked": mode_changed,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - 审计失败不阻塞开关
+            logger.warning("sandbox mode audit emit failed: {}", exc)
     return {"ok": True, "item": item}
 
 

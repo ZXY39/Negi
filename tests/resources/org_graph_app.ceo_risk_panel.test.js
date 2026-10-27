@@ -335,75 +335,97 @@ test("点面板外面收起风险面板，点面板内部不收起", async () =>
     assert.equal(ctx.elements.get("ceo-risk-panel").hidden, true);
 });
 
-function stubSandboxFetch(ctx, { mode, unlockRequired }) {
+function stubSandboxFetch(ctx, { mode, thirdParty, installState = "not_installed" }) {
     const state = { mode };
     const patched = [];
+    const item = () => ({
+        session_id: "web:shared",
+        trust: thirdParty ? "third_party_dm" : "owner",
+        mode: state.mode,
+        resolved_tier: state.mode === "restricted"
+            ? (installState === "ready" ? "jailed" : "readonly")
+            : "host_full",
+        install_state: installState,
+        unlock_required: true,
+    });
     ctx.fetch = async (_url, options = {}) => {
         if (!options.method || options.method === "GET") {
-            return {
-                ok: true,
-                json: async () => ({
-                    ok: true,
-                    item: {
-                        session_id: "web:shared",
-                        trust: unlockRequired ? "third_party_dm" : "owner",
-                        mode: state.mode,
-                        resolved_tier: state.mode === "restricted" ? "readonly" : "host_full",
-                        unlock_required: unlockRequired,
-                    },
-                }),
-            };
+            return { ok: true, json: async () => ({ ok: true, item: item() }) };
         }
         const body = JSON.parse(options.body);
         patched.push(body);
+        if (body.unlock_password !== "live-test-pass") {
+            return { ok: false, status: 403, json: async () => ({ detail: "unlock_password_invalid" }) };
+        }
         state.mode = body.mode || state.mode;
-        return {
-            ok: true,
-            json: async () => ({
-                ok: true,
-                item: {
-                    session_id: "web:shared",
-                    trust: unlockRequired ? "third_party_dm" : "owner",
-                    mode: state.mode,
-                    resolved_tier: state.mode === "restricted" ? "readonly" : "host_full",
-                    unlock_required: unlockRequired,
-                },
-            }),
-        };
+        return { ok: true, json: async () => ({ ok: true, item: item() }) };
     };
     return patched;
 }
 
-test("沙箱模式一行：按意图画开关，整行一点就地切档并通知沙箱页", async () => {
+test("沙箱模式一行：行标题直接写状态，开关方向先弹二次确认", async () => {
     const ctx = loadGovernance({
         governanceItem: { enabled: false, mode: "all_pass", whitelist_tools: [], whitelist_customized: false },
-        extraIds: ["ceo-risk-sandbox-btn", "ceo-risk-sandbox-hint"],
+        extraIds: ["ceo-risk-sandbox-btn", "ceo-risk-sandbox-title"],
     });
-    const patched = stubSandboxFetch(ctx, { mode: "restricted", unlockRequired: false });
+    const patched = stubSandboxFetch(ctx, { mode: "unrestricted", thirdParty: false });
     const notified = [];
+    let dialog = null;
     ctx.notifySandboxSessionModeChanged = (sessionId) => notified.push(sessionId);
+    ctx.openConfirm = (options) => { dialog = options; };
 
     ctx.elements.get("ceo-risk-btn").dispatch("click");
     await settle();
     const row = ctx.elements.get("ceo-risk-sandbox-btn");
-    const hint = ctx.elements.get("ceo-risk-sandbox-hint");
-    assert.equal(row.attrs["aria-pressed"], "true");
-    assert.equal(hint.textContent, "只读模式（沙箱模式）");
+    const title = ctx.elements.get("ceo-risk-sandbox-title");
+    assert.equal(row.attrs["aria-pressed"], "false");
+    assert.equal(title.textContent, "无限制");
 
     ctx.elements.get("ceo-risk-panel").dispatch("click", { target: row });
     await settle();
-    assert.deepEqual(plain(patched), [{ mode: "unrestricted" }], "owner 切无限制不带口令");
-    assert.equal(row.attrs["aria-pressed"], "false");
-    assert.equal(hint.textContent, "无限制");
+    assert.equal(dialog?.title, "进入只读模式？", "没装沙箱时开关表达的是只读");
+    assert.equal(dialog?.confirmLabel, "进入只读模式");
+    assert.equal(dialog?.input?.type, "password");
+    assert.equal(dialog?.textFull, true, "影响说明要整段展示");
+    assert.equal(dialog?.inputPlain, true, "口令行去掉外层框");
+    assert.match(dialog?.text || "", /工具面/);
+    assert.match(dialog?.text || "", /缓存/);
+    assert.match(dialog?.text || "", /安全/);
+    assert.deepEqual(plain(patched), [], "确认之前不发 PATCH");
+
+    await dialog.onConfirm({ value: "live-test-pass" });
+    assert.deepEqual(plain(patched), [{ mode: "restricted", unlock_password: "live-test-pass" }]);
+    assert.equal(row.attrs["aria-pressed"], "true");
+    assert.equal(title.textContent, "只读模式", "没装后端时不冒充沙箱");
     assert.deepEqual(notified, ["web:shared"], "切完要通知沙箱 iframe 重读");
 });
 
-test("第三方会话关闭沙箱：先弹口令框，口令随 PATCH 一起提交", async () => {
+test("装好沙箱后，同一开关的二次确认改叫开启/关闭沙箱模式", async () => {
     const ctx = loadGovernance({
         governanceItem: { enabled: false, mode: "all_pass", whitelist_tools: [], whitelist_customized: false },
-        extraIds: ["ceo-risk-sandbox-btn", "ceo-risk-sandbox-hint"],
+        extraIds: ["ceo-risk-sandbox-btn", "ceo-risk-sandbox-title"],
     });
-    const patched = stubSandboxFetch(ctx, { mode: "restricted", unlockRequired: true });
+    stubSandboxFetch(ctx, { mode: "unrestricted", thirdParty: false, installState: "ready" });
+    let dialog = null;
+    ctx.openConfirm = (options) => { dialog = options; };
+
+    ctx.elements.get("ceo-risk-btn").dispatch("click");
+    await settle();
+    ctx.elements.get("ceo-risk-panel").dispatch("click", {
+        target: ctx.elements.get("ceo-risk-sandbox-btn"),
+    });
+    await settle();
+    assert.equal(dialog?.title, "开启沙箱模式？");
+    assert.equal(dialog?.confirmLabel, "开启沙箱模式");
+    assert.match(dialog?.text || "", /jail 内执行/);
+});
+
+test("第三方会话关闭沙箱：口令错留在二次确认里，口令对才切", async () => {
+    const ctx = loadGovernance({
+        governanceItem: { enabled: false, mode: "all_pass", whitelist_tools: [], whitelist_customized: false },
+        extraIds: ["ceo-risk-sandbox-btn", "ceo-risk-sandbox-title"],
+    });
+    const patched = stubSandboxFetch(ctx, { mode: "restricted", thirdParty: true });
     let dialog = null;
     ctx.openConfirm = (options) => { dialog = options; };
 
@@ -414,11 +436,13 @@ test("第三方会话关闭沙箱：先弹口令框，口令随 PATCH 一起提�
 
     ctx.elements.get("ceo-risk-panel").dispatch("click", { target: row });
     await settle();
-    assert.equal(dialog?.title, "关闭沙箱模式？");
-    assert.equal(dialog?.input?.type, "password");
-    assert.deepEqual(plain(patched), [], "没验口令之前不发 PATCH");
+    assert.equal(dialog?.title, "退出只读模式？");
+    assert.match(dialog?.text || "", /exec 自身的形态守卫/);
+
+    await assert.rejects(() => dialog.onConfirm({ value: "wrong" }), /口令不正确/);
+    assert.deepEqual(plain(patched), [{ mode: "unrestricted", unlock_password: "wrong" }]);
+    assert.equal(row.attrs["aria-pressed"], "true", "口令不对不改开关");
 
     await dialog.onConfirm({ value: "live-test-pass" });
-    assert.deepEqual(plain(patched), [{ mode: "unrestricted", unlock_password: "live-test-pass" }]);
     assert.equal(row.attrs["aria-pressed"], "false");
 });

@@ -8,18 +8,26 @@ const DIMENSION_LABELS = {
   resource: '资源',
 };
 
-const STATE_LABELS = {
-  ready: '已就绪',
-  partial: '部分可用',
-  runtime_missing: '需要修复',
-  not_installed: '未安装',
+// 右上角只留三档：未装 / 已装 / 装了但有问题。装好之前缺后端是常态，不报红。
+const STATUS_LABELS = {
+  ready: '已安装沙箱',
+  partial: '需要修复',
+  runtime_missing: '未安装沙箱',
+  not_installed: '未安装沙箱',
 };
 
-const STATE_TONE = {
+const STATUS_TONE = {
   ready: 'ok',
   partial: 'warn',
-  runtime_missing: 'warn',
-  not_installed: 'bad',
+  runtime_missing: 'neutral',
+  not_installed: 'neutral',
+};
+
+const INSTALL_LABELS = {
+  ready: '已安装',
+  partial: '需要修复',
+  runtime_missing: '未安装',
+  not_installed: '未安装',
 };
 
 const REASON_TEXT = {
@@ -32,12 +40,23 @@ const REASON_TEXT = {
   unsupported_platform: '当前平台没有可用的沙箱后端。',
 };
 
+const MODE_ERROR_TEXT = {
+  unlock_password_required: '这次切换需要项目解锁口令',
+  unlock_password_invalid: '口令不正确',
+  sandbox_mode_invalid: '档位取值不合法',
+  session_not_found: '会话不存在',
+  writable_roots_owner_only: '只有 owner 会话能配额外可写目录',
+};
+
 const state = {
   status: null,
   plan: null,
   current: null,
+  sessions: [],
+  sessionId: '',
   pollTimer: null,
   pendingMode: '',
+  confirmMode: '',
   area: 'workspace',
 };
 
@@ -80,11 +99,16 @@ function badge(node, text, tone) {
   node.dataset.state = tone || 'neutral';
 }
 
+function isInstalled(reading) {
+  const value = String((reading || {}).install_state || '');
+  return value === 'ready' || value === 'partial';
+}
+
 function renderStatus(item) {
   state.status = item;
   const installState = item.install_state || 'not_installed';
-  badge($('status-badge'), STATE_LABELS[installState] || installState, STATE_TONE[installState] || 'neutral');
-  $('install-state').textContent = STATE_LABELS[installState] || installState;
+  badge($('status-badge'), STATUS_LABELS[installState] || installState, STATUS_TONE[installState] || 'neutral');
+  $('install-state').textContent = INSTALL_LABELS[installState] || installState;
   $('backend').textContent = item.backend || '（未选择）';
   $('reason').textContent = REASON_TEXT[item.reason] || item.reason || '—';
 
@@ -107,7 +131,7 @@ function renderStatus(item) {
 
   const installBtn = $('install-btn');
   installBtn.hidden = !item.install_available;
-  installBtn.textContent = installState === 'not_installed' ? '安装沙箱' : '修复沙箱';
+  installBtn.textContent = installState === 'ready' ? '修复沙箱' : '安装沙箱';
 
   const uninstallBtn = $('uninstall-btn');
   const dedicated = Boolean((item.detail || {}).dedicated);
@@ -116,7 +140,7 @@ function renderStatus(item) {
   const hint = $('runtime-hint');
   if (installState === 'ready') {
     hint.textContent = item.file_management_available
-      ? '沙箱已就绪。数据面工具在会话切到受限档后进 jail 执行。'
+      ? '沙箱已就绪。会话切到受限档后，数据面工具在 jail 内执行。'
       : '沙箱已就绪。';
   } else if (item.install_available) {
     hint.textContent = '点击「查看安装内容」确认要执行的步骤与提权要求。';
@@ -165,12 +189,10 @@ function renderPlan(plan) {
     notes.appendChild(item);
   });
 
-  const confirm = $('confirm-check');
-  confirm.checked = false;
+  $('confirm-check').checked = false;
   $('confirm-install-btn').disabled = true;
   $('confirm-install-btn').hidden = !plan.installable;
   $('confirm-row').hidden = !plan.installable;
-  $('plan-card').hidden = false;
 }
 
 function renderProgress(status) {
@@ -287,15 +309,26 @@ function renderFileSection() {
   loadFiles();
 }
 
-async function loadPlan(reveal) {
+async function loadPlan() {
   const payload = await api('/api/sandbox/install/plan');
   renderPlan(payload.item || {});
-  if (!reveal) {
-    $('plan-card').hidden = true;
-  }
   if (payload.status && payload.status.running) {
     watchInstall();
   }
+}
+
+async function openPlanModal() {
+  try {
+    await loadPlan();
+    $('plan-backdrop').hidden = false;
+    window.requestAnimationFrame(() => $('cancel-plan-btn').focus());
+  } catch (error) {
+    toast(`读取安装内容失败：${error.message}`);
+  }
+}
+
+function closePlanModal() {
+  $('plan-backdrop').hidden = true;
 }
 
 async function startInstall() {
@@ -304,7 +337,7 @@ async function startInstall() {
       method: 'POST',
       body: JSON.stringify({ confirm: true }),
     });
-    $('plan-card').hidden = true;
+    closePlanModal();
     renderProgress({ steps: [] });
     watchInstall();
     toast(payload.started ? '安装已开始' : '安装已提交');
@@ -329,7 +362,7 @@ function watchInstall() {
           toast('安装流程结束，正在重新探测');
         }
         await loadStatus(true);
-        await loadPlan(!$('plan-card').hidden);
+        await loadPlan();
       }
     } catch (error) {
       window.clearInterval(state.pollTimer);
@@ -339,49 +372,128 @@ function watchInstall() {
   }, 1200);
 }
 
+/* ---------------- 会话选择（自绘下拉） ---------------- */
+
+function syncSelectLabel() {
+  const label = $('session-select-label');
+  const item = state.sessions.find((entry) => entry.id === state.sessionId);
+  if (item) {
+    label.textContent = `${item.title || '(未命名)'} · ${item.id}`;
+  } else {
+    label.textContent = state.sessionId || '没有可用会话';
+  }
+  label.title = label.textContent;
+}
+
+function renderSessionOptions() {
+  const menu = $('session-select-menu');
+  menu.textContent = '';
+  if (!state.sessions.length) {
+    const empty = document.createElement('div');
+    empty.className = 'select-empty';
+    empty.textContent = '没有可用会话';
+    menu.appendChild(empty);
+    syncSelectLabel();
+    return;
+  }
+  state.sessions.forEach((item) => {
+    const option = document.createElement('button');
+    option.type = 'button';
+    option.className = 'select-option';
+    option.setAttribute('role', 'option');
+    option.setAttribute('aria-selected', item.id === state.sessionId ? 'true' : 'false');
+    option.dataset.sessionId = item.id;
+    const label = document.createElement('span');
+    label.className = 'select-option-label';
+    label.textContent = `${item.title || '(未命名)'} · ${item.id}`;
+    option.title = label.textContent;
+    option.appendChild(label);
+    option.addEventListener('click', () => selectSession(item.id));
+    menu.appendChild(option);
+  });
+  syncSelectLabel();
+}
+
+function openSelectMenu() {
+  if (!state.sessions.length) return;
+  $('session-select').classList.add('open');
+  $('session-select-trigger').setAttribute('aria-expanded', 'true');
+  const menu = $('session-select-menu');
+  menu.hidden = false;
+  const selected = menu.querySelector('[aria-selected="true"]');
+  window.requestAnimationFrame(() => (selected || menu.querySelector('.select-option'))?.focus());
+}
+
+function closeSelectMenu() {
+  $('session-select').classList.remove('open');
+  $('session-select-trigger').setAttribute('aria-expanded', 'false');
+  $('session-select-menu').hidden = true;
+}
+
+function toggleSelectMenu() {
+  if ($('session-select-menu').hidden) openSelectMenu();
+  else closeSelectMenu();
+}
+
+function selectSession(sessionId) {
+  state.sessionId = sessionId;
+  closeSelectMenu();
+  renderSessionOptions();
+  void loadSessionDetail();
+}
+
 async function loadSessions() {
-  const select = $('session-select');
+  const preset = String(state.preset || '').trim();
   try {
     const payload = await api('/api/ceo/sessions');
     const items = payload.items || [];
-    select.textContent = '';
-    if (!items.length) {
-      const option = document.createElement('option');
-      option.value = '';
-      option.textContent = '没有可用会话';
-      select.appendChild(option);
-      return;
+    state.sessions = items
+      .map((item) => ({
+        id: item.session_id || item.id || item.session_key || '',
+        title: item.title || '',
+      }))
+      .filter((item) => item.id);
+    if (preset && state.sessions.some((item) => item.id === preset)) {
+      state.sessionId = preset;
+      $('manual-session-field').hidden = true;
+    } else if (preset) {
+      $('manual-session').value = preset;
+      $('manual-session-field').hidden = false;
+    } else {
+      $('manual-session-field').hidden = true;
+      if (state.sessions.length && !state.sessionId) {
+        state.sessionId = state.sessions[0].id;
+      }
     }
-    items.forEach((item) => {
-      const id = item.session_id || item.id || item.session_key || '';
-      if (!id) return;
-      const option = document.createElement('option');
-      option.value = id;
-      option.textContent = `${item.title || '(未命名)'} · ${id}`;
-      select.appendChild(option);
-    });
-    $('manual-session-field').hidden = true;
+    renderSessionOptions();
   } catch (error) {
     // 目录接口要运行时就绪才给数据；拿不到时让操作员直接贴会话 ID，页面仍然可用。
-    select.textContent = '';
-    const option = document.createElement('option');
-    option.value = '';
-    option.textContent = '会话列表不可用';
-    select.appendChild(option);
+    state.sessions = [];
+    renderSessionOptions();
+    if (preset) $('manual-session').value = preset;
     $('manual-session-field').hidden = false;
     toast(`会话列表不可用：${error.message}。可以直接粘贴会话 ID。`);
   }
 }
 
+function currentSessionId() {
+  return $('manual-session').value.trim() || state.sessionId;
+}
+
+/* ---------------- 档位 ---------------- */
+
 function renderSession(item) {
   state.current = item;
+  state.pendingMode = item.mode;
   $('session-panel').hidden = false;
   badge($('session-trust'), `信任：${item.trust}`, item.trust === 'owner' ? 'ok' : 'warn');
-  badge($('session-tier'), `当前：${item.tier_label || item.resolved_tier}`, item.resolved_tier === 'host_full' ? 'neutral' : 'ok');
+  badge(
+    $('session-tier'),
+    `当前：${item.tier_label || item.resolved_tier}`,
+    item.resolved_tier === 'host_full' ? 'neutral' : 'ok',
+  );
 
   const labels = item.ui_labels || { restricted: '只读', unrestricted: '全权限' };
-  const restrictedText = labels.restricted;
-  const unrestrictedText = labels.unrestricted;
   const describeRestricted = item.resolved_tier === 'jailed'
     ? '数据面工具在 jail 内执行；控制面仍然拒绝。'
     : '可读本会话的上传与临时目录，不能写文件、不能执行命令。';
@@ -391,8 +503,8 @@ function renderSession(item) {
 
   const switchNode = $('mode-switch');
   switchNode.textContent = '';
-  [['restricted', restrictedText, describeRestricted], ['unrestricted', unrestrictedText, describeUnrestricted]].forEach(
-    ([value, label, description]) => {
+  [['restricted', labels.restricted, describeRestricted], ['unrestricted', labels.unrestricted, describeUnrestricted]]
+    .forEach(([value, label, description]) => {
       const wrapper = document.createElement('label');
       wrapper.className = 'mode-option';
       if (item.mode === value) wrapper.classList.add('active');
@@ -405,7 +517,6 @@ function renderSession(item) {
         state.pendingMode = value;
         document.querySelectorAll('.mode-option').forEach((node) => node.classList.remove('active'));
         wrapper.classList.add('active');
-        $('unlock-field').hidden = !(value === 'unrestricted' && item.unlock_required);
       });
       const text = document.createElement('div');
       const strong = document.createElement('strong');
@@ -415,24 +526,176 @@ function renderSession(item) {
       text.append(strong, small);
       wrapper.append(input, text);
       switchNode.appendChild(wrapper);
-    },
-  );
-  state.pendingMode = item.mode;
-  $('unlock-field').hidden = true;
-  $('unlock-password').value = '';
+    });
+
   $('save-result').textContent = '';
-  // D14：只有 owner 会话能配额外可写根；third_party 恒空，连输入框都不出现。
   const rootsField = $('roots-field');
   rootsField.hidden = item.trust !== 'owner';
-  $('roots-input').value = (item.writable_roots || []).join('\n');
-  $('tasks-hint').textContent = item.tasks_allowed
-    ? '此档可以派异步任务。'
-    : '受限档不能派异步任务：任务节点跑在 worker 里，受限意图传不进那条执行面。';
+  const roots = item.writable_roots || [];
+  $('roots-input').value = roots.join('\n');
+  rootsField.open = roots.length > 0;
   renderFileSection();
 }
 
-function currentSessionId() {
-  return $('manual-session').value.trim() || $('session-select').value;
+function collectRoots() {
+  const field = $('roots-field');
+  if (!state.current || state.current.trust !== 'owner' || field.hidden) return null;
+  return $('roots-input')
+    .value.split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function impactItems(targetMode) {
+  const current = state.current || {};
+  const thirdParty = current.trust !== 'owner';
+  const installed = isInstalled(state.status);
+  const cacheText = '切档在下一回合生效；暴露给模型的工具清单会变，下一次请求的缓存前缀失效，首回合要重新预热。';
+  if (targetMode === 'restricted') {
+    return [
+      {
+        title: '工具面',
+        text: installed
+          ? '收窄到只读白名单；写文件、执行命令、联网等动作被拒绝。已装沙箱时数据面工具在 jail 内执行。'
+          : '收窄到只读：只能读本会话的上传与临时目录；不能写文件、执行命令、联网，也不能派异步任务。',
+      },
+      { title: '缓存', text: cacheText },
+      {
+        title: '安全',
+        text: thirdParty
+          ? '白名单外的工具调用会被拒绝；这是第三方会话，记忆门继续生效。'
+          : '白名单外的工具调用会被拒绝；这是操作员自己的会话，随时可以再关掉。',
+      },
+    ];
+  }
+  return [
+    {
+      title: '工具面',
+      text: '数据面工具回到宿主执行；写文件、执行命令、联网恢复可用。',
+    },
+    { title: '缓存', text: cacheText },
+    {
+      title: '安全',
+      text: thirdParty
+        ? '控制面拒绝与记忆门仍然生效，但宿主文件与命令只剩 exec 自身的形态守卫；这个群的发送者因此能触达本机能力。'
+        : '工具按你当前系统账号的权限执行；误操作没有第二道边界。',
+    },
+  ];
+}
+
+// 没装成后端时没有"沙箱"可开：开关表达的是只读 / 无限制，确认文案跟着安装态走。
+function modeLabels(turningOn) {
+  if (isInstalled(state.status)) {
+    return {
+      title: turningOn ? '开启沙箱模式？' : '关闭沙箱模式？',
+      confirm: turningOn ? '开启沙箱模式' : '关闭沙箱模式',
+      done: turningOn ? '已开启沙箱模式' : '已关闭沙箱模式',
+    };
+  }
+  return {
+    title: turningOn ? '进入只读模式？' : '退出只读模式？',
+    confirm: turningOn ? '进入只读模式' : '退出只读模式',
+    done: turningOn ? '已进入只读模式' : '已退出只读模式',
+  };
+}
+
+function openModeConfirm(targetMode) {
+  state.confirmMode = targetMode;
+  const turningOn = targetMode === 'restricted';
+  const labels = modeLabels(turningOn);
+  $('mode-confirm-title').textContent = labels.title;
+  const list = $('mode-confirm-impact');
+  list.textContent = '';
+  impactItems(targetMode).forEach(({ title, text }) => {
+    const row = document.createElement('li');
+    const heading = document.createElement('strong');
+    heading.textContent = title;
+    const body = document.createElement('span');
+    body.textContent = text;
+    row.append(heading, body);
+    list.appendChild(row);
+  });
+  $('mode-confirm-password').value = '';
+  $('mode-confirm-error').hidden = true;
+  $('mode-confirm-accept').textContent = labels.confirm;
+  $('mode-confirm-backdrop').hidden = false;
+  window.requestAnimationFrame(() => $('mode-confirm-password').focus());
+}
+
+function closeModeConfirm() {
+  $('mode-confirm-backdrop').hidden = true;
+  state.confirmMode = '';
+}
+
+function modeErrorText(error) {
+  return MODE_ERROR_TEXT[error.message] || `切换失败：${error.message}`;
+}
+
+async function applyModeChange() {
+  const sessionId = currentSessionId();
+  const targetMode = state.confirmMode;
+  if (!sessionId || !targetMode) return;
+  const password = $('mode-confirm-password').value.trim();
+  const errorNode = $('mode-confirm-error');
+  if (!password) {
+    errorNode.textContent = '请输入项目解锁口令。';
+    errorNode.hidden = false;
+    return;
+  }
+  const body = { mode: targetMode, unlock_password: password };
+  const roots = collectRoots();
+  if (roots) body.writable_roots = roots;
+  const accept = $('mode-confirm-accept');
+  accept.disabled = true;
+  try {
+    const payload = await api(`/api/ceo/sessions/${encodeURIComponent(sessionId)}/sandbox`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    });
+    closeModeConfirm();
+    renderSession(payload.item || {});
+    toast(`${modeLabels(targetMode === 'restricted').done}，下一回合生效`);
+  } catch (error) {
+    errorNode.textContent = modeErrorText(error);
+    errorNode.hidden = false;
+  } finally {
+    accept.disabled = false;
+  }
+}
+
+async function saveRootsOnly() {
+  const sessionId = currentSessionId();
+  const roots = collectRoots();
+  if (!sessionId || !roots) return;
+  const button = $('save-mode-btn');
+  button.disabled = true;
+  try {
+    const payload = await api(`/api/ceo/sessions/${encodeURIComponent(sessionId)}/sandbox`, {
+      method: 'PATCH',
+      body: JSON.stringify({ writable_roots: roots }),
+    });
+    renderSession(payload.item || {});
+    toast('可写目录已保存');
+  } catch (error) {
+    $('save-result').textContent = modeErrorText(error);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function onSave() {
+  const sessionId = currentSessionId();
+  if (!sessionId || !state.current) return;
+  $('save-result').textContent = '';
+  if (state.pendingMode && state.pendingMode !== state.current.mode) {
+    openModeConfirm(state.pendingMode);
+    return;
+  }
+  if (collectRoots() === null) {
+    toast('档位没有变化');
+    return;
+  }
+  await saveRootsOnly();
 }
 
 async function loadSessionDetail() {
@@ -449,78 +712,24 @@ async function loadSessionDetail() {
   }
 }
 
-async function saveMode() {
-  const sessionId = currentSessionId();
-  if (!sessionId || !state.pendingMode) return;
-  const body = { mode: state.pendingMode };
-  const unlockField = $('unlock-field');
-  if (!unlockField.hidden) {
-    const password = $('unlock-password').value;
-    if (!password) {
-      $('save-result').textContent = '需要项目解锁口令';
-      return;
-    }
-    body.unlock_password = password;
-  }
-  const rootsField = $('roots-field');
-  if (!rootsField.hidden) {
-    body.writable_roots = $('roots-input')
-      .value.split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean);
-  }
-  $('save-mode-btn').disabled = true;
-  try {
-    const payload = await api(`/api/ceo/sessions/${encodeURIComponent(sessionId)}/sandbox`, {
-      method: 'PATCH',
-      body: JSON.stringify(body),
-    });
-    renderSession(payload.item || {});
-    $('save-result').textContent = '已保存，下一回合生效';
-    toast('档位已更新，下一回合生效');
-  } catch (error) {
-    const map = {
-      unlock_password_required: '这次切换需要项目解锁口令',
-      unlock_password_invalid: '口令不正确',
-      sandbox_mode_invalid: '档位取值不合法',
-      session_not_found: '会话不存在',
-    };
-    $('save-result').textContent = map[error.message] || `保存失败：${error.message}`;
-  } finally {
-    $('save-mode-btn').disabled = false;
-  }
-}
+/* ---------------- 事件 ---------------- */
 
 function bindEvents() {
   $('refresh-btn').addEventListener('click', async () => {
+    toast('正在检测沙箱环境状态…');
     try {
       await loadStatus(true);
-      await loadPlan(!$('plan-card').hidden);
-      toast('已重新探测');
+      await loadPlan();
+      const reading = state.status || {};
+      const tone = reading.install_state || 'not_installed';
+      toast(`沙箱环境：${STATUS_LABELS[tone] || tone}`);
     } catch (error) {
-      toast(`探测失败：${error.message}`);
+      toast(`检测失败：${error.message}`);
     }
   });
-  $('plan-btn').addEventListener('click', async () => {
-    try {
-      await loadPlan(true);
-    } catch (error) {
-      toast(`读取安装内容失败：${error.message}`);
-    }
-  });
-  $('install-btn').addEventListener('click', async () => {
-    try {
-      await loadPlan(true);
-      if (state.plan && !state.plan.installable) {
-        toast(REASON_TEXT[state.plan.reason] || '当前没有可自动安装的内容');
-      }
-    } catch (error) {
-      toast(`读取安装内容失败：${error.message}`);
-    }
-  });
-  $('cancel-plan-btn').addEventListener('click', () => {
-    $('plan-card').hidden = true;
-  });
+  $('plan-btn').addEventListener('click', openPlanModal);
+  $('install-btn').addEventListener('click', openPlanModal);
+  $('cancel-plan-btn').addEventListener('click', closePlanModal);
   $('confirm-check').addEventListener('change', (event) => {
     $('confirm-install-btn').disabled = !event.target.checked;
   });
@@ -539,9 +748,47 @@ function bindEvents() {
       toast(`卸载失败：${error.message}`);
     }
   });
-  $('session-select').addEventListener('change', loadSessionDetail);
+
+  $('session-select-trigger').addEventListener('click', (event) => {
+    event.stopPropagation();
+    toggleSelectMenu();
+  });
+  $('session-select-trigger').addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      closeSelectMenu();
+      return;
+    }
+    if (event.key === 'ArrowDown' || event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      if ($('session-select-menu').hidden) openSelectMenu();
+    }
+  });
+  document.addEventListener('click', (event) => {
+    if (!event.target.closest('#session-select')) closeSelectMenu();
+  });
   $('manual-session-btn').addEventListener('click', loadSessionDetail);
-  $('save-mode-btn').addEventListener('click', saveMode);
+  $('manual-session').addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') loadSessionDetail();
+  });
+
+  $('save-mode-btn').addEventListener('click', onSave);
+  $('mode-confirm-cancel').addEventListener('click', closeModeConfirm);
+  $('mode-confirm-accept').addEventListener('click', applyModeChange);
+  $('mode-confirm-password').addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') applyModeChange();
+  });
+  $('mode-confirm-backdrop').addEventListener('click', (event) => {
+    if (event.target === $('mode-confirm-backdrop')) closeModeConfirm();
+  });
+  $('plan-backdrop').addEventListener('click', (event) => {
+    if (event.target === $('plan-backdrop')) closePlanModal();
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') return;
+    if (!$('plan-backdrop').hidden) closePlanModal();
+    else if (!$('mode-confirm-backdrop').hidden) closeModeConfirm();
+  });
+
   $('persona-save-btn').addEventListener('click', savePersona);
   document.querySelectorAll('#area-tabs .tab').forEach((node) => {
     node.addEventListener('click', () => {
@@ -602,16 +849,12 @@ async function main() {
   bindEvents();
   try {
     await loadStatus(false);
-    await loadPlan(false);
+    await loadPlan();
   } catch (error) {
     toast(`初始化失败：${error.message}`);
   }
-  // 从权限面板跳进来时带着会话 ID：手动输入框是权威来源，列表加载完也不覆盖它。
-  const preset = (new URLSearchParams(window.location.search).get('session') || '').trim();
-  if (preset) {
-    $('manual-session').value = preset;
-    $('manual-session-field').hidden = false;
-  }
+  // 从权限面板/别处跳进来时带着会话 ID：列表里有就选中，没有才退回手填。
+  state.preset = (new URLSearchParams(window.location.search).get('session') || '').trim();
   await loadPersona();
   await loadSessions();
   if (currentSessionId()) {

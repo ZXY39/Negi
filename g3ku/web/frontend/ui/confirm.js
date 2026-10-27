@@ -1,7 +1,25 @@
 "use strict";
 
 // 共享确认框：保留全局入口与 S.confirmState 结构，页面在 app.js 之前加载本文件。
-function openConfirm({ title, text, confirmLabel = "确认", confirmKind = "danger", onConfirm, onClose = null, returnFocus = null, checkbox = null, input = null }) {
+function openConfirm({
+    title,
+    text,
+    confirmLabel = "确认",
+    confirmKind = "danger",
+    onConfirm,
+    onClose = null,
+    returnFocus = null,
+    checkbox = null,
+    input = null,
+    textFull = false,
+    inputPlain = false,
+}) {
+    const dialog = document.getElementById("confirm-dialog");
+    if (dialog) {
+        // 长的安全影响说明要整段展示，不能塞进 180px 的滚动口；口令行也可以去掉外层框。
+        dialog.classList.toggle("is-text-full", !!textFull);
+        dialog.classList.toggle("is-input-plain", !!inputPlain);
+    }
     S.confirmState = {
         onConfirm,
         onClose,
@@ -107,6 +125,8 @@ function closeConfirm({ restoreFocus = true } = {}) {
     if (U.confirmCheckboxHint) U.confirmCheckboxHint.textContent = "";
     U.confirmBackdrop.hidden = true;
     U.confirmBackdrop.classList.remove("is-open");
+    const dialog = document.getElementById("confirm-dialog");
+    if (dialog) dialog.classList.remove("is-text-full", "is-input-plain");
     if (!accepted && typeof onClose === "function") {
         try {
             onClose();
