@@ -116,3 +116,46 @@
 - 共享工作树纪律：只 `git add` 本计划涉及文件；不碰 `work/sandbox-trust-plan.md`；提交用 `git -c user.name="ZXY39" -c user.email="1045273950@qq.com"`。
 - 文件写入一律 Edit/Write，禁 shell heredoc（中文 GBK 事故既往）。
 - 本计划确认后才动代码；每批完成即 commit。
+
+---
+
+## 10. 落地记录（2026-10-27）
+
+分支：`main`（`feat/sandbox-trust` 已合入并删除，另合并了远端 `6b56ea47`）。
+
+| 阶段 | 提交 | 内容 |
+|---|---|---|
+| P0 | `52fe45c7` | 拆语义层（semantic/sticker_search/caption 全删，−578 行）；删 `semantic_search` 配置与 UI 开关；删 2000 全有全无；描述渲染不截断；写入 120 单一清洗函数；16000 口提醒 |
+| P1 | `80ba1938` | `registry.py`（可见性真相、铸号 append-only、36 上限、幂等 bootstrap、符号链接越界防护）；索引标记 + fail-closed 解析；随机车道只抽已注册；建包/注册路由；启停不排序 |
+| P2 | `90fa135e` | `sheet.py` 渲染器（tile200/crop+fit/letterbox/徽标/≤36/1256²/内容哈希缓存）+ `show_sticker_category`；沙箱白名单 |
+| P3 | `f1fc6d4b` | 导入两阶段（`--detect` / `--commit --map`，只收分类形状）；`register_stickers` 工具；SKILL/pack-format 重写 |
+| P4 | `367e44bc` | 建包、注册待处理、未注册缩略图、16000 banner；删已停用徽标与提示段 |
+| 文档 | `15f5c810` | 四份 architecture 同步 |
+| 修复 | `5c3a79e6` | 工具 build(runtime) 收到 SimpleNamespace 被 dict() 打死 → repair 态；改兼容两种形状 |
+
+### 与计划的偏差
+
+1. **迁移期发现并修掉一个铸号 bug**：`_INDEX_RE` 原写 `\d{3,}`，把社区包常见的 13 位时间戳文件名当成"已编号"保留，索引超出标记语法 1–3 位而不可发送。改为恰好三位；真实库重跑后 138 张全部注册（86 可见 + 52 隐身）、编号三位。
+2. `write_registry` 对 Windows `WinError 5` 短暂重试（AV/索引器持有句柄，实测必现一次）。
+3. 删除了已无消费者的 `catalog.pack_images()`，把它的符号链接越界判据搬进 `registry._inside()`。
+4. 分类启用 >36 的拒绝规则没有单独实现：注册上限 36 已使其结构上不可能。
+5. 描述上限落地为 **120**（用户定案，不提升 300）。
+
+### 验收状态
+
+| 项 | 结果 |
+|---|---|
+| Python 贴纸测试（packs/admin/api/registry/sheet/import） | 117 passed, 2 skipped |
+| 前端 JS 测试 | 773/775；2 项失败经 detached worktree 复核为**基线既有**（`bindStickerPage is not defined`，模型路由测试） |
+| ruff | 通过 |
+| 服务重启 + 资源加载 | 35 tools；`show_sticker_category` / `register_stickers` 均 available+callable |
+| API 契约 | settings 返回 `description_max_chars=120 / injected_chars=819 / limit=16000 / over=false`，无 `semantic_search`；packs 返回 `pending/registered/over_limit` |
+| 界面（浏览器） | 3 包无"已停用"徽标；隐身分类按 key 原位穿插不重排；每分类「N / N 张已注册」；描述全量（含 37 字长描述）；新建包表单在；发送策略只剩「每轮最多」；精确取图开关消失 |
+| 真实库渲染 | happy 9 格、sad 8 格、work 3 格、_laugh 12 格均正确（横幅 1–9，小 emoji 裁剪后撑满） |
+| **会话端到端（拼图→序号发送）** | **阻塞**：图片工具在"工具契约 → reuse_args 执行"两段式下，`_merge_ordered_tool_results` 抛 `missing merged tool result`，整轮失败。**`content_open` 打开图片同样复现**，故为运行时既有缺陷，与本次改造无关；会话 overlay E2E 待该缺陷修复后补 |
+
+### 交接
+
+- 阻塞点落点：`g3ku/runtime/frontdoor/_ceo_runtime_ops.py` 的 `_graph_execute_tools`（8881–9160）与 `_frontdoor_reuse_args_execution`（6488+）：复用车道把 `execute_one` 的返回压成 `(text, status)`，图片 payload 的 `raw_result` 不进入结果行；同时被暂存的调用在合并阶段缺一条结果。修它属于运行时范围，不在本计划内。
+- 探针产物 `temp/sheet-probe/` 仍在（gitignore），确认后可删。
+- 仓库自身记忆 `memory/MEMORY.md` 里仍留着 `search_stickers`/`caption_pack` 的旧教训条目，是否清理由用户决定（属 agent 记忆，不擅自改）。
