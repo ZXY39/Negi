@@ -5945,21 +5945,27 @@ function createPendingCeoTurn(source = "user", { scrollMode = "preserve", reques
             event.stopPropagation();
             toggleCeoToolHistory(turn);
         });
-        // 展开/收起会换掉列表高度：线先在无动画的布局上量好，再让条目逐层浮入。
+        // 展开/收起会换掉列表高度：线跟着重算，收起时交回 CSS。
         // toggle 不冒泡，用捕获接住内部每条中途正文的开合。
-        turn.flowEl?.addEventListener?.("toggle", (event) => {
-            syncCeoFlowGuideLength(turn);
-            if (event.target === turn.flowEl && turn.flowEl.open && typeof playTraceUnfoldWave === "function") {
-                // 纯工具段没有标题行：波浪铺到段里的每一轮，否则整段只会作为一个大块滑一次。
-                const rows = [];
-                Array.from(turn.listEl?.children || []).forEach((step) => {
-                    const groups = step.classList?.contains?.("task-trace-step--bare")
-                        ? Array.from(step.children || []).filter((el) => el.classList?.contains?.("task-trace-round-group"))
-                        : [];
-                    rows.push(...(groups.length ? groups : [step]));
-                });
-                playTraceUnfoldWave(rows);
-            }
+        turn.flowEl?.addEventListener?.("toggle", () => syncCeoFlowGuideLength(turn), true);
+        // 波浪必须在 details 打开之前挂好：toggle 事件是异步的，等它到了再挂会先闪一帧全亮。
+        // 线的行程按波浪总时长走完，不再自己 0.22s 先跑完。
+        turn.flowEl?.addEventListener?.("click", (event) => {
+            const summary = event.target instanceof Element ? event.target.closest(".interaction-flow-summary") : null;
+            if (!summary || summary.parentElement !== turn.flowEl || turn.flowEl.open) return;
+            if (typeof playTraceUnfoldWave !== "function") return;
+            // 纯工具段没有标题行：波浪铺到段里的每一轮，否则整段只会作为一个大块滑一次。
+            const rows = [];
+            Array.from(turn.listEl?.children || []).forEach((step) => {
+                const groups = step.classList?.contains?.("task-trace-step--bare")
+                    ? Array.from(step.children || []).filter((el) => el.classList?.contains?.("task-trace-round-group"))
+                    : [];
+                rows.push(...(groups.length ? groups : [step]));
+            });
+            // 线的行程 = 最后一层开始淡入的时刻 + 一次淡入的时长，和波浪同时落定。
+            const waveMs = 320 + Math.min(15, Math.max(0, rows.length - 1)) * 32;
+            turn.flowEl.style?.setProperty?.("--ceo-flow-guide-duration", `${waveMs}ms`);
+            playTraceUnfoldWave(rows);
         }, true);
         // 工具卡点开后插入参数/输出面板，末条也会被顶下去。
         turn.listEl?.addEventListener?.("click", () => {

@@ -18022,7 +18022,8 @@ textarea {
     background: #39c5bb;
     transform: scaleY(0);
     transform-origin: top;
-    transition: transform 0.22s ease;
+    /* 与波浪同一个总时长（展开前由脚本按行数写入），线的末端和最后一行同时落定。 */
+    transition: transform var(--ceo-flow-guide-duration, 0.22s) linear;
 }
 
 .interaction-flow[open] .interaction-flow-guide::after {

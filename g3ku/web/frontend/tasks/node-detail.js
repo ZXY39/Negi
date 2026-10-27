@@ -483,15 +483,19 @@ function playTraceUnfoldWave(items, { textMode = false } = {}) {
     if (!list.length || typeof window === "undefined") return;
     const className = textMode ? "unfold-wave-text" : "unfold-wave-row";
     const otherClass = textMode ? "unfold-wave-row" : "unfold-wave-text";
+    // 阶梯最多排到第 16 层：更靠后的条目在滚动视窗外，没必要再往下数。
+    const maxIndex = Math.min(list.length - 1, 15);
     list.forEach((el, index) => {
         el.classList?.remove?.(otherClass);
-        el.style?.setProperty?.("--unfold-index", String(Math.min(index, 12)));
+        el.style?.setProperty?.("--unfold-index", String(Math.min(index, maxIndex)));
         // 摘掉再加回去，同一元素连续展开两次也能重新播。
         el.classList?.remove?.(className);
         void el.offsetWidth;
         el.classList?.add?.(className);
     });
     const timerKey = list[0];
+    // 类挂到最后一层的淡入结束再多一点，提前摘会看到动画被截断。
+    const totalMs = (textMode ? 440 : 320) + maxIndex * 32 + 80;
     window.clearTimeout(TRACE_UNFOLD_TIMERS.get(timerKey));
     TRACE_UNFOLD_TIMERS.set(timerKey, window.setTimeout(() => {
         list.forEach((el) => {
@@ -499,24 +503,37 @@ function playTraceUnfoldWave(items, { textMode = false } = {}) {
             el.style?.removeProperty?.("--unfold-index");
         });
         TRACE_UNFOLD_TIMERS.delete(timerKey);
-    }, textMode ? 620 : 860));
+    }, totalMs));
+}
+
+function playTraceStepUnfold(traceStep) {
+    if (!(traceStep instanceof HTMLElement)) return;
+    // 中途正文：整块文本自上而下抹开；其它条目：正文里的每一层依次浮入。
+    const turnTitle = traceStep.querySelector?.(".task-trace-summary .interaction-step-title");
+    if (traceStep.classList?.contains?.("task-trace-step--turn-text") && turnTitle instanceof HTMLElement) {
+        playTraceUnfoldWave([turnTitle], { textMode: true });
+        return;
+    }
+    const body = Array.from(traceStep.children || []).find((el) => el.classList?.contains?.("task-trace-body"));
+    if (body) playTraceUnfoldWave(Array.from(body.children || []));
 }
 
 function bindTraceOutputAutoLoad(traceList) {
     if (!(traceList instanceof HTMLElement) || traceList.dataset.traceOutputBindings === "true") return;
     traceList.dataset.traceOutputBindings = "true";
+    // 波浪在点击时就挂上：details 的 toggle 是异步事件，等它到了再挂会先闪一帧全亮。
+    traceList.addEventListener("click", (event) => {
+        const summary = event.target instanceof Element ? event.target.closest(".task-trace-summary") : null;
+        if (!(summary instanceof HTMLElement)) return;
+        const traceStep = summary.parentElement;
+        if (!(traceStep instanceof HTMLElement) || !traceList.contains(traceStep)) return;
+        if (!traceStep.classList?.contains?.("task-trace-step") || traceStep.open) return;
+        playTraceStepUnfold(traceStep);
+    }, true);
     traceList.addEventListener("toggle", (event) => {
         const traceStep = event.target instanceof Element ? event.target.closest(".task-trace-step") : null;
         if (!(traceStep instanceof HTMLElement) || !traceList.contains(traceStep) || !traceStep.open) return;
         hydrateTraceOutputBlocks(traceStep);
-        // 中途正文：整块文本自上而下抹开；其它条目：正文里的每一层依次浮入。
-        const turnTitle = traceStep.querySelector?.(".task-trace-summary .interaction-step-title");
-        if (traceStep.classList?.contains?.("task-trace-step--turn-text") && turnTitle instanceof HTMLElement) {
-            playTraceUnfoldWave([turnTitle], { textMode: true });
-            return;
-        }
-        const body = Array.from(traceStep.children || []).find((el) => el.classList?.contains?.("task-trace-body"));
-        if (body) playTraceUnfoldWave(Array.from(body.children || []));
     }, true);
 }
 
