@@ -19,6 +19,7 @@ requires:
     - filesystem_delete
     - filesystem_stat
     - exec
+    - register_stickers
   bins: []
   env: []
 content:

@@ -137,6 +137,28 @@ def test_random_lane_only_picks_registered_files(tmp_path: Path):
     assert picked == {"001.png"}
 
 
+def test_register_tool_registers_pending_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import asyncio
+    import json
+
+    from g3ku.agent.tools import sticker_register as tool_module
+    from g3ku.stickers.catalog import scan_packs
+
+    target = _category(tmp_path, "demo", "happy", 1)
+    _bare_pack(tmp_path)
+    registry.ensure_bootstrap(tmp_path / "demo")
+    (target / "late.png").write_bytes(PNG + b"late")
+    monkeypatch.setattr(tool_module, "safe_scan_packs", lambda: scan_packs(tmp_path))
+
+    payload = json.loads(
+        asyncio.run(tool_module.StickerRegisterTool().execute(pack="demo"))
+    )
+
+    assert payload["ok"] is True
+    assert [row["name"] for row in payload["registered"]] == ["002.png"]
+    assert payload["pending"] == 0
+
+
 def test_unregistered_file_is_invisible_until_registered(tmp_path: Path):
     target = _category(tmp_path, "demo", "happy", 1)
     _bare_pack(tmp_path)

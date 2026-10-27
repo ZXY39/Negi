@@ -1,0 +1,45 @@
+schema_version: 1
+kind: tool
+name: register_stickers
+display_name: Register Stickers
+description: Register images that were copied into a sticker pack folder. Unregistered files are invisible to the model; registration renames them to the next free index (001, 002, …) and a category is capped at 36.
+tool_result_delivery_contract: runtime_managed
+protocol: mcp
+mcp:
+  transport: embedded
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem:
+    - workspace
+parameters:
+  type: object
+  properties:
+    pack:
+      type: string
+      description: Pack key from the sticker catalog in the pinned contract head.
+    category:
+      type: string
+      description: Optional category key; omit to register every pending file in the pack.
+  required:
+    - pack
+governance:
+  display_name: Register Stickers
+  description: Register hand-dropped sticker files (renames to NNN.ext, capped at 36 per category).
+  risk_level: low
+  destructive: false
+  allowed_roles:
+    - ceo
+    - execution
+    - inspection
+recovery_policy:
+  rerun_safe: true
+
+exposure:
+  agent: true
+  main_runtime: true
+toolskill:
+  enabled: true

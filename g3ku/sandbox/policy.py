@@ -86,6 +86,8 @@ READONLY_THIRD_PARTY_TOOL_NAMES: frozenset[str] = frozenset(
         "view_message_history",
         # 拼图/索引选图：只读渲染并返回图片路径，不碰文件与网络
         "show_sticker_category",
+        # 注册手放进去的图：只改 registry.json 与改名，不读文件内容意外面
+        "register_stickers",
     }
 )
 
