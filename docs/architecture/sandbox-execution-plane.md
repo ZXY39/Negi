@@ -39,6 +39,25 @@
 但要等 jail 后端（manager + router）接进执行道、`JAIL_BACKENDS_AVAILABLE` 打开之后才会发放。
 在那之前工具面与读根判据已经就位，接后端只改这一处开关。
 
+## 头部沙箱声明
+
+模型必须知道自己站在哪一面。不告诉它，它就拿宿主路径、宿主挂载和联网命令去试，每撞一次
+赔一个回合——验收第 4 条里模型先 `cat /mnt/e/...` 再 `content_open E:\...`，两次都是猜的。
+
+稳定前缀里因此有两段声明，按解析出的档位选一，由 `CeoPromptBuilder.build_base_prompt`
+渲染：
+
+| 档位 | 头部段 |
+|---|---|
+| `jailed` | `## Sandbox Environment`：一次性 bwrap、只有 `/workspace` 与 `/shared` 落盘、宿主路径不存在、`network=none` |
+| `readonly` | `## Read-only Session`：写类工具与 `exec` 的准入边界、读根限定 |
+| `host_full` | 不带声明 |
+
+**档位不进 cache stamp**：重印时钟仍是（记忆块采纳时刻 × 工具面暴露修订）。切档不重印
+稳定前缀，新声明等到下一次重印（记忆采纳、工具面修订、压缩、编辑重发或 fork 后的基线
+重建）随新前缀一起落地。这条折中是刻意的：把档位塞进 stamp 会在操作者切档的瞬间重印整段
+前缀，正好打掉这个契约要保住的缓存。
+
 ## jail 基础设施（后端 / 布局 / 助手 / 文件桥）
 
 这一层已经就位，但**还没有接到执行道**：`JAIL_BACKENDS_AVAILABLE` 仍为 false，

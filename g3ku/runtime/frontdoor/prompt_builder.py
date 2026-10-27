@@ -56,13 +56,18 @@ class CeoPromptBuilder:
             return rendered
         return f'{rendered}\n\n{visible_skills_block}'.strip()
 
-    def build_base_prompt(self, *, cache_stamp: str = '') -> str:
+    def build_base_prompt(self, *, cache_stamp: str = '', sandbox_tier: str = '') -> str:
         """Render the stable system prompt, re-reading the file only when the stamp moves.
 
         The stamp is (memory-block adoption time, tool-face exposure revision): the two clocks
         that already decide when the stable prefix changes. Re-reading mid-session would rewrite
         the system bytes while nothing behind them has to move, so a file edit waits for the next
         adoption or exposure change - the same moment the memory block and `tools[]` refresh.
+
+        `sandbox_tier` is deliberately **not** part of the stamp: the declaration below is a
+        header, and a header changes only at a reprint boundary. Folding the tier into the stamp
+        would reprint the whole prefix the moment an operator flips a session to `jailed`, which
+        is exactly the cache miss this contract exists to avoid.
         """
 
         stamp = str(cache_stamp or '').strip()
@@ -78,9 +83,46 @@ class CeoPromptBuilder:
         runtime_environment_block = self._runtime_environment_block(project_environment)
         if runtime_environment_block:
             rendered = f'{rendered}\n\n{runtime_environment_block}'.strip()
+        sandbox_block = self._sandbox_declaration_block(sandbox_tier)
+        if sandbox_block:
+            rendered = f'{rendered}\n\n{sandbox_block}'.strip()
         self._base_prompt_cache = rendered if stamp else ''
         self._base_prompt_cache_stamp = stamp
         return rendered
+
+    @staticmethod
+    def _sandbox_declaration_block(tier: str) -> str:
+        """What the model is told about the surface it is standing on.
+
+        Without this the jailed model reads host paths, host mounts and `curl` as ordinary
+        options and spends a turn per attempt learning otherwise (acceptance item 4 did exactly
+        that: `cat /mnt/e/...` then `content_open E:\\...`).
+        """
+        normalized = str(tier or '').strip()
+        if normalized == 'jailed':
+            return '\n'.join(
+                [
+                    '## Sandbox Environment',
+                    '- 每条命令都在一次性 bwrap jail 里执行：只有 `/workspace` 与 `/shared` 会落盘，'
+                    '进程结束即消失，没有后台进程可留。',
+                    '- 宿主路径在 jail 里不存在：`E:\\…`、`/mnt/…`、`/root`、数据根都读不到也写不到，'
+                    '`ls /` 只有系统根与上面两个卷。',
+                    '- 网络被关闭（`network=none`）：`curl` / `wget` / `getent` 一律失败，'
+                    '外部内容只能通过已有上下文或工具回补。',
+                    '- 需要产出文件就写 `/workspace`；写完可以用 `filesystem_stat` / `content_open` 自检。',
+                ]
+            )
+        if normalized == 'readonly':
+            return '\n'.join(
+                [
+                    '## Read-only Session',
+                    '- 本会话是只读档：写类工具（filesystem_* / edit / propose_patch）被拒，'
+                    '`exec` 对第三方会话整条拒绝，owner 会话降为 governed。',
+                    '- 可读范围限定在会话上传目录与临时目录（owner 另含工作区），'
+                    '读取按真实路径判，软链指到范围外同样被拒。',
+                ]
+            )
+        return ''
 
     def build_visible_skills_block(self, *, skills: list) -> str:
         return self._visible_skills_block(skills)

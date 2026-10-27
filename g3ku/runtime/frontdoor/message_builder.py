@@ -47,6 +47,7 @@ from g3ku.runtime.web_ceo_sessions import (
     transcript_messages,
     workspace_path,
 )
+from g3ku.sandbox.policy import session_policy as sandbox_session_policy
 from main.runtime.tool_names import (
     SCHEDULE_WAKE_TOOL_NAME,
     SILENT_TOOL_NAME,
@@ -1228,7 +1229,18 @@ class CeoMessageBuilder:
                 f"{str(getattr(session, MEMORY_SNAPSHOT_ADOPTED_AT_ATTR, '') or '').strip()}"
                 f"|{str(getattr(capability_snapshot, 'exposure_revision', '') or '').strip()}"
             )
-            system_prompt = self._prompt_builder.build_base_prompt(cache_stamp=prompt_refresh_stamp)
+            # 档位只影响头部里那句声明，不进 stamp：切档不重印前缀。
+            sandbox_session_key = str(
+                getattr(getattr(session, 'state', None), 'session_key', '') or ''
+            ).strip()
+            sandbox_tier = (
+                str(sandbox_session_policy(sandbox_session_key).tier or '')
+                if sandbox_session_key
+                else ''
+            )
+            system_prompt = self._prompt_builder.build_base_prompt(
+                cache_stamp=prompt_refresh_stamp, sandbox_tier=sandbox_tier
+            )
         else:
             system_prompt = self._prompt_builder.build(skills=[])
         if capability_snapshot.stable_catalog_message:
