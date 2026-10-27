@@ -44,6 +44,7 @@ from g3ku.sandbox.policy import (
     default_mode_for_trust,
     session_policy,
 )
+from g3ku.sandbox.probe import BACKEND_WSL_BWRAP
 from g3ku.sandbox.state import (
     get_session_mode,
     get_writable_roots,
@@ -131,6 +132,19 @@ def _session_item(session_key: str) -> dict[str, Any]:
     }
 
 
+def _roots_unreachable_in_jail(session_key: str) -> bool:
+    """这一档会不会落到 WSL jail——那里的宿主路径永远挂不上。
+
+    `/mnt` 在禁绑前缀里，`E:\\…` 又不是发行版路径，profile 只会静默跳过这类根。存下
+    一个做不到的承诺比拒绝更坏：操作者以为交付目录已挂上，模型每轮都撞
+    `host path is not reachable inside the sandbox`。
+    """
+    reading = install_state()
+    if str(reading.get("backend") or "") != BACKEND_WSL_BWRAP:
+        return False
+    return str(session_policy(session_key).tier or "") == TIER_JAILED
+
+
 def _verify_unlock_password(password: str) -> bool:
     """只读校验：解得开本机信封即通过，不激活、不落盘。"""
     clean = str(password or "")
@@ -177,6 +191,8 @@ async def patch_session_sandbox(session_id: str, payload: dict = Body(...)):
         raw_roots = payload.get("writable_roots")
         if not isinstance(raw_roots, list):
             raise HTTPException(status_code=400, detail="writable_roots_must_be_list")
+        if raw_roots and _roots_unreachable_in_jail(key):
+            raise HTTPException(status_code=400, detail="writable_roots_unreachable_in_backend")
         set_writable_roots(key, raw_roots)
     # 档位只在回合边界生效：这里只落意图，正在跑的回合不受影响。
     item = _session_item(key)

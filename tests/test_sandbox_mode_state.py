@@ -315,3 +315,44 @@ async def test_sandbox_status_reports_no_file_management_without_backend(
         assert item["file_management_available"] is False
         assert item["ui_labels"]["restricted"] == "只读"
     assert item["install_available"] is False
+
+
+def test_wsl_jail_rejects_writable_roots_it_cannot_mount(
+    isolated_state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WSL jail 挂不上宿主路径：这条承诺要在落盘前拒绝，而不是存下来静默失败。
+
+    实机读数：PATCH 返回 200 并保存了 `E:/…`，jail 内每次写都回
+    `host path is not reachable inside the sandbox`，交付目录始终是空的。
+    """
+    import asyncio
+    from types import SimpleNamespace
+
+    from g3ku.runtime.api import sandbox as sandbox_api
+
+    monkeypatch.setattr(sandbox_api, "_session_exists", lambda key: True)
+    monkeypatch.setattr(
+        sandbox_api, "session_policy",
+        lambda key: SimpleNamespace(trust="owner", mode="restricted", tier="jailed"),
+    )
+    monkeypatch.setattr(
+        sandbox_api, "install_state", lambda: {"state": "ready", "backend": "wsl_bwrap"}
+    )
+
+    with pytest.raises(Exception) as excinfo:
+        asyncio.run(
+            sandbox_api.patch_session_sandbox(
+                "web:ceo-wsl", {"mode": "restricted", "writable_roots": ["E:/delivery"]}
+            )
+        )
+    assert getattr(excinfo.value, "status_code", None) == 400
+    assert getattr(excinfo.value, "detail", "") == "writable_roots_unreachable_in_backend"
+    assert sandbox_state.get_writable_roots("web:ceo-wsl") == []
+
+    # 本地 bwrap 后端同一条根是可用的，不能被这条闸门一起拒掉。
+    monkeypatch.setattr(sandbox_api, "install_state", lambda: {"state": "ready", "backend": "bwrap"})
+    result = asyncio.run(
+        sandbox_api.patch_session_sandbox("web:ceo-local", {"mode": "restricted", "writable_roots": ["/srv/delivery"]})
+    )
+    assert result["ok"] is True
+    assert sandbox_state.get_writable_roots("web:ceo-local")
