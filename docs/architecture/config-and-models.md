@@ -93,7 +93,7 @@
 
 ### `stickers`
 
-表情包发送预算：`maxPerReply`（默认 1；0 = 关闭发送但标记仍会被剥掉、不会漏进正文；上限 4，与单条渠道消息的附件预算 `MAX_CHANNEL_ATTACHMENTS` 对齐）。属于「调过才落盘」的可选旋钮，同时在豁免前缀里——存量 `config.json` 没有这一节必须还能加载。清单本身不在这里配置：它由 `<workspace>/stickers/` 目录扫描得到。这两个值都能在网页的 表情包 页直接改（`PUT /api/resources/stickers/settings`，落盘后走同一条 runtime refresh）；页面契约见 `web-and-admin.md`「Sticker Pack Page And Admin Contract」。
+表情包发送预算：`maxPerReply`（默认 1；0 = 关闭发送但标记仍会被剥掉、不会漏进正文；上限 4，与单条渠道消息的附件预算 `MAX_CHANNEL_ATTACHMENTS` 对齐）。属于「调过才落盘」的可选旋钮，同时在豁免前缀里——存量 `config.json` 没有这一节必须还能加载。清单本身不在这里配置：它由 `<workspace>/stickers/` 的目录 + 各包 `registry.json` 得到（描述写入上限与注入量提醒口径都在代码常数里，见 `web-and-admin.md`「Sticker Pack Page And Admin Contract」）。这个值能在网页的 表情包 页直接改（`PUT /api/resources/stickers/settings`，落盘后走同一条 runtime refresh）。
 
 ## 3. 配置加载时做了什么
 
