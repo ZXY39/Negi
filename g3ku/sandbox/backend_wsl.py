@@ -145,7 +145,11 @@ class WslBwrapBackend(BwrapBackend):
             path_is_file=self._paths.is_file,
         )
         assert_profile_safe(inner)
-        return [self._wsl, "-d", self._distro, "--", *inner]
+        # `-e`, not `--`: `--` hands the joined argv to the distro's default shell, so
+        # `$( … )` and `$HOME` inside the model's own command are expanded *outside* the
+        # jail — `ls /` then reports the distro root and `ls /mnt` lists the host drives.
+        # bwrap's own `--` (separating profile from jail command) is unaffected.
+        return [self._wsl, "-d", self._distro, "-e", *inner]
 
     def probe(self) -> dict[str, Any]:
         return {
