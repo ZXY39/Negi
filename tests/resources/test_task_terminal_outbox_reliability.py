@@ -141,17 +141,12 @@ class _StopTick(BaseException):
 
 
 @pytest.mark.asyncio
-async def test_distribution_reconcile_tick_also_redrives_terminal_outbox(tmp_path, monkeypatch):
-    """60s 节拍接入点：不能只在 startup 补投，也不必新起一条循环。"""
+async def test_terminal_outbox_reconcile_tick_redrives_stranded_rows(tmp_path, monkeypatch):
+    """60s 节拍接入点：不能只在 startup 补投。epoch 子系统下线后这条循环只剩这一半。"""
     service = _make_worker_service(tmp_path)
     dedupe_key = _put_terminal_row(service, task_id='task:tick', finished_at=_iso(7200))
     scheduled: list[str] = []
     service._schedule_task_terminal_delivery = lambda key: scheduled.append(str(key))
-
-    async def _noop_reconcile():
-        return None
-
-    service.task_actor_service.reconcile_distribution_drivers = _noop_reconcile
 
     ticks = 0
 
@@ -165,7 +160,7 @@ async def test_distribution_reconcile_tick_also_redrives_terminal_outbox(tmp_pat
     monkeypatch.setattr('main.service.runtime_service.asyncio.sleep', _stop_after_one_full_tick)
 
     with pytest.raises(_StopTick):
-        await service._distribution_reconcile_loop()
+        await service._terminal_outbox_reconcile_loop()
 
     assert ticks == 2
     assert scheduled == [dedupe_key]
