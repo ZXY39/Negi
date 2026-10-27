@@ -239,6 +239,9 @@ def build_sbpl_profile(spec: SandboxSpec) -> str:
         if _forbidden(host):
             continue
         write_rules.append(f"(subpath \"{_q(host)}\")")
+    # Seatbelt 没有 mount namespace：助手文件（fsop）按宿主路径执行，必须显式放行只读。
+    for source, _dest in spec.helper_binds:
+        read_rules.append(f"(literal \"{_q(source)}\")")
     lines = [
         "(version 1)",
         "(deny default)",

@@ -18,6 +18,8 @@ from g3ku.sandbox.profiles import JAIL_INBOX, JAIL_OUTBOX, JAIL_WORKSPACE
 
 class ContainerBackend:
     name = "container"
+    # 卷挂在容器的 /workspace，与 bwrap 同形。
+    maps_paths = True
     # 容器自带环境，宿主环境不参与。
     keeps_host_env = False
 

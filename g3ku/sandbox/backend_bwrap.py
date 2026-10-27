@@ -19,6 +19,8 @@ from g3ku.sandbox.profiles import (
 
 class BwrapBackend:
     name = "bwrap"
+    # bwrap 建自己的 mount namespace：卷挂在 /workspace，模型看到的就是它。
+    maps_paths = True
     # bwrap 的 --clearenv 会清空环境，宿主环境不参与；但 wsl.exe 需要宿主的
     # SystemRoot 等变量才能启动，所以这个标志只对真·本地后端生效。
     keeps_host_env = False

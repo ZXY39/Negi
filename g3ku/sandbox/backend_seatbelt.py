@@ -16,6 +16,9 @@ from g3ku.sandbox.profiles import JAIL_WORKSPACE, build_sbpl_profile
 
 class SeatbeltBackend:
     name = "seatbelt"
+    # Seatbelt 没有 mount namespace：profile 放行的是**宿主路径**，所以模型可见的
+    # /workspace 要由 manager 映射回宿主卷路径。
+    maps_paths = False
     keeps_host_env = False
 
     def __init__(self, *, sandbox_exec_path: str = "sandbox-exec", enforcement: Enforcement | None = None):

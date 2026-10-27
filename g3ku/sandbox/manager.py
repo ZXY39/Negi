@@ -312,6 +312,69 @@ class SandboxManager:
                     reaped.append(key)
         return reaped
 
+    # -- 路径映射 -----------------------------------------------------------
+
+    def jail_roots(self, handle: SandboxHandle) -> tuple[str, ...]:
+        """助手要校验的根。有 mount namespace 的后端用 jail 内路径，Seatbelt 用宿主路径。"""
+        if bool(getattr(handle.backend, "maps_paths", True)):
+            return (JAIL_WORKSPACE, "/shared/inbox", "/shared/outbox")
+        return (
+            str(handle.spec.workspace_root),
+            str(handle.spec.shared_inbox),
+            str(handle.spec.shared_outbox),
+        )
+
+    def default_cwd(self, handle: SandboxHandle) -> str:
+        if bool(getattr(handle.backend, "maps_paths", True)):
+            return JAIL_WORKSPACE
+        return str(handle.spec.workspace_root)
+
+    def display_path(self, model_path: str) -> str:
+        """模型可见路径：锚点展开成 ``/workspace`` 形式，不映射到宿主。"""
+        raw = str(model_path or "").strip()
+        if not raw:
+            raise SandboxDeniedError("path is required")
+        if raw in {"{workspace}", "{workspace}/"}:
+            return JAIL_WORKSPACE
+        if raw.startswith("{workspace}/"):
+            return JAIL_WORKSPACE + raw[len("{workspace}") :]
+        if raw == "{temp}":
+            return f"{JAIL_WORKSPACE}/tmp"
+        if raw.startswith("{temp}/"):
+            return f"{JAIL_WORKSPACE}/tmp" + raw[len("{temp}") :]
+        if raw.startswith("{data_root}"):
+            raise SandboxDeniedError("the data root is not reachable inside the sandbox")
+        if raw.startswith("/"):
+            if not (raw.startswith("/workspace") or raw.startswith("/shared") or raw.startswith("/tmp")):
+                raise SandboxDeniedError(
+                    f"host path is not reachable inside the sandbox: {raw}; use /workspace paths"
+                )
+            return raw
+        if len(raw) > 1 and raw[1] == ":":
+            raise SandboxDeniedError(
+                f"host path is not reachable inside the sandbox: {raw}; use /workspace paths"
+            )
+        return f"{JAIL_WORKSPACE}/{raw.lstrip('./')}"
+
+    def map_path(self, handle: SandboxHandle, model_path: str) -> str:
+        """把模型给的路径翻成该后端内的真实路径；宿主路径一律拒。
+
+        模型只该看见 ``/workspace`` 与 ``/shared``。旧上下文里的宿主绝对路径（``C:\\…``、
+        ``/home/…``）在这一层被挡下并给可读原因——它们在里面本来就不存在，放过去只会变成
+        一堆"文件不存在"。
+        """
+        jail_path = self.display_path(model_path)
+        if bool(getattr(handle.backend, "maps_paths", True)):
+            return jail_path
+        if jail_path == JAIL_WORKSPACE or jail_path.startswith(JAIL_WORKSPACE + "/"):
+            suffix = jail_path[len(JAIL_WORKSPACE) :]
+            return str(handle.spec.workspace_root) + suffix
+        if jail_path.startswith("/shared/inbox"):
+            return str(handle.spec.shared_inbox) + jail_path[len("/shared/inbox") :]
+        if jail_path.startswith("/shared/outbox"):
+            return str(handle.spec.shared_outbox) + jail_path[len("/shared/outbox") :]
+        return jail_path
+
     # -- 执行 ---------------------------------------------------------------
 
     def run(
@@ -362,22 +425,11 @@ class SandboxManager:
     ) -> dict[str, Any]:
         import json
 
-        helper = (
-            self._wsl.helper_path
-            if handle.backend.name == "wsl_bwrap" and self._wsl is not None
-            else FSOP_JAIL_PATH
-        )
+        helper = self._fsop_helper_for(handle)
         payload = json.dumps(request, ensure_ascii=False)
-        argv = [
-            "python3",
-            helper,
-            "--root",
-            str(handle.spec.workspace_root),
-            "--root",
-            str(handle.spec.shared_inbox),
-            "--root",
-            str(handle.spec.shared_outbox),
-        ]
+        argv = ["python3", helper]
+        for root in self.jail_roots(handle):
+            argv.extend(["--root", root])
         result = self._run_with_stdin(handle, argv, payload, timeout=timeout)
         if result.kind == KIND_DENIED or result.exit_code == 2:
             try:
@@ -391,6 +443,14 @@ class SandboxManager:
             return json.loads(result.stdout.strip().splitlines()[-1])
         except (IndexError, ValueError) as exc:
             raise SandboxUnavailableError(f"fsop returned unparsable output: {exc}") from exc
+
+    def _fsop_helper_for(self, handle: SandboxHandle) -> str:
+        """助手文件的可见路径：有 mount namespace 的用 jail 路径，Seatbelt 用宿主路径。"""
+        if handle.backend.name == "wsl_bwrap" and self._wsl is not None:
+            return self._wsl.helper_path
+        if bool(getattr(handle.backend, "maps_paths", True)):
+            return FSOP_JAIL_PATH
+        return str(Path(__file__).with_name(FSOP_HELPER_NAME))
 
     def _run_with_stdin(
         self,

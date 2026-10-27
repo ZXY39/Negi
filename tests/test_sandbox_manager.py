@@ -21,6 +21,9 @@ class FakeBackend:
     """把 jail 内的 ``python3`` / 助手路径映射到本机，其余原样交给 subprocess。"""
 
     keeps_host_env = True
+    # 假后端直接在宿主上跑，路径不重映射（与 Seatbelt 同形）——这样 fsop 的根就是
+    # 真实的会话卷目录。
+    maps_paths = False
 
     def __init__(self, name: str = "fake", enforcement: Enforcement | None = None):
         self.name = name

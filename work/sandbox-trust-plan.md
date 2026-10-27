@@ -1109,9 +1109,18 @@ detecting → awaiting_confirm → downloading → installing → (needs_reboot)
   环境剥离、文件桥穿越）。
   **本机无法跑真 jail**：没有 WSL 发行版、没有 Docker/Podman，所以 `JAIL_BACKENDS_AVAILABLE`
   保持 false——基础设施就位不等于可以放开数据面。
-- **P1a 剩下的最后一步**：把数据面工具换成走 `manager` 的代理实例（`router.py`），
-  在装好后端的机器上跑完 P1 验收（读不到 `master.key`、`curl` 失败、`env` 无 key、
-  `netstat` 无监听、`/mnt` 与 `/init` 不可见），再把闸门置真。
+- **P1a 路由已落地**（本批）：`g3ku/sandbox/router.py` —— `exec` / `filesystem_*` /
+  `content_*` 换成走 `manager` 的代理实例，路径先 `display_path`（宿主绝对路径直接拒），
+  `filesystem_edit` 的 exact_text / anchor_pair / line_range 三种模式都翻到 fsop，
+  `background` 与 `propose_patch` / `process_kill` 在 jail 里明确拒绝。
+  测试 `tests/test_sandbox_router.py`（8 条，用 `maps_paths=False` 的假后端 + 真 fsop，
+  文件语义是真的，只有内核隔离被跳过）。
+- **P1a 剩下的最后一步**：把代理接进 `_frontdoor_execution_bundle`（`tier==jailed` 时替换
+  `visible_tools`/`declared_tools` 里的数据面实例），加 `runtime_context["sandbox_id"]` 与
+  `_execute_tool_call_with_raw_result` 的硬校验（数据面工具拿到宿主实例而 `sandbox_id`
+  非空 → 拒）；再建 manager 工厂（按探测读数构造后端）与 `configure_wsl`。
+  之后在装好后端的机器上跑完 P1 验收（读不到 `master.key`、`curl` 失败、`env` 无 key、
+  `netstat` 无监听、`/mnt` 与 `/init` 不可见），再把 `JAIL_BACKENDS_AVAILABLE` 置真。
 - **P1b**：安装器（`POST /api/sandbox/install` 当前恒为 `install_available: false`）。
 - **前端**：权限面板里的档位开关与沙箱页面尚未接这批端点（`ui_labels` 已由服务端给出）。
 

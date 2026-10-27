@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -209,10 +210,149 @@ def _search(request: dict[str, Any], roots: tuple[Path, ...]) -> dict[str, Any]:
     return {"path": str(path), "matches": matches, "truncated": len(matches) >= limit}
 
 
+def _edit(request: dict[str, Any], roots: tuple[Path, ...]) -> dict[str, Any]:
+    path = _resolve(request.get("path"), roots)
+    if not path.is_file():
+        raise FsOpError(KIND_INVALID, f"not a file: {request.get('path')}")
+    text = path.read_text(encoding="utf-8")
+    mode = str(request.get("mode") or "exact_text").strip().lower()
+    new_text = request.get("new_text")
+    if not isinstance(new_text, str):
+        raise FsOpError(KIND_INVALID, "new_text must be a string")
+
+    if mode == "exact_text":
+        old_text = request.get("old_text")
+        if not isinstance(old_text, str) or not old_text:
+            raise FsOpError(KIND_INVALID, "old_text must be a non-empty string")
+        occurrences = text.count(old_text)
+        if occurrences == 0:
+            raise FsOpError(KIND_INVALID, "old_text not found")
+        replace_all = bool(request.get("replace_all", False))
+        if occurrences > 1 and not replace_all:
+            raise FsOpError(
+                KIND_INVALID,
+                f"old_text matches {occurrences} times; pass replace_all or a longer unique snippet",
+            )
+        updated = text.replace(old_text, new_text) if replace_all else text.replace(old_text, new_text, 1)
+        path.write_text(updated, encoding="utf-8")
+        return {"path": str(path), "occurrences": occurrences, "replacements": occurrences if replace_all else 1}
+
+    if mode == "anchor_pair":
+        start_anchor = str(request.get("start_anchor") or "")
+        end_anchor = str(request.get("end_anchor") or "")
+        if not start_anchor or not end_anchor:
+            raise FsOpError(KIND_INVALID, "start_anchor and end_anchor are required")
+        start = text.find(start_anchor)
+        if start < 0:
+            raise FsOpError(KIND_INVALID, "start_anchor not found")
+        end = text.find(end_anchor, start + len(start_anchor))
+        if end < 0:
+            raise FsOpError(KIND_INVALID, "end_anchor not found after start_anchor")
+        end += len(end_anchor)
+        updated = text[:start] + new_text + text[end:]
+        path.write_text(updated, encoding="utf-8")
+        return {"path": str(path), "replaced_chars": end - start}
+
+    if mode == "line_range":
+        start_line = int(request.get("start_line") or 0)
+        end_line = int(request.get("end_line") or 0)
+        if start_line < 1 or end_line < start_line:
+            raise FsOpError(KIND_INVALID, "start_line/end_line must satisfy 1 <= start <= end")
+        lines = text.splitlines(keepends=True)
+        if start_line > len(lines):
+            raise FsOpError(KIND_INVALID, f"start_line exceeds the file ({len(lines)} lines)")
+        end_line = min(end_line, len(lines))
+        prefix = "".join(lines[: start_line - 1])
+        suffix = "".join(lines[end_line:])
+        updated = prefix + new_text + suffix
+        path.write_text(updated, encoding="utf-8")
+        return {"path": str(path), "start_line": start_line, "end_line": end_line}
+
+    raise FsOpError(KIND_INVALID, f"unsupported edit mode: {mode}")
+
+
+def _remove(request: dict[str, Any], roots: tuple[Path, ...]) -> dict[str, Any]:
+    raw_paths = request.get("paths")
+    if not isinstance(raw_paths, list) or not raw_paths:
+        raise FsOpError(KIND_INVALID, "paths must be a non-empty list")
+    recursive = bool(request.get("recursive", False))
+    allow_missing = bool(request.get("allow_missing", False))
+    continue_on_error = bool(request.get("continue_on_error", False))
+    removed: list[str] = []
+    errors: list[dict[str, str]] = []
+    for raw in raw_paths:
+        try:
+            path = _resolve(raw, roots)
+            if not path.exists():
+                if allow_missing:
+                    continue
+                raise FsOpError(KIND_INVALID, f"no such path: {raw}")
+            if path.is_dir():
+                if not recursive:
+                    raise FsOpError(KIND_INVALID, f"is a directory (pass recursive): {raw}")
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+            removed.append(str(path))
+        except FsOpError as exc:
+            if not continue_on_error:
+                raise
+            errors.append({"path": str(raw), "error": str(exc)})
+    return {"removed": removed, "errors": errors}
+
+
+def _transfer(request: dict[str, Any], roots: tuple[Path, ...], *, move: bool) -> dict[str, Any]:
+    raw_operations = request.get("operations")
+    if not isinstance(raw_operations, list) or not raw_operations:
+        raise FsOpError(KIND_INVALID, "operations must be a non-empty list")
+    overwrite = bool(request.get("overwrite", False))
+    create_parents = bool(request.get("create_parents", False))
+    continue_on_error = bool(request.get("continue_on_error", False))
+    completed: list[dict[str, str]] = []
+    errors: list[dict[str, str]] = []
+    for raw in raw_operations:
+        operation = raw if isinstance(raw, dict) else {}
+        try:
+            source = _resolve(operation.get("source"), roots)
+            destination = _resolve(operation.get("destination"), roots)
+            if not source.exists():
+                raise FsOpError(KIND_INVALID, f"no such source: {operation.get('source')}")
+            if destination.exists() and not overwrite:
+                raise FsOpError(KIND_INVALID, f"destination exists (pass overwrite): {operation.get('destination')}")
+            if create_parents:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+            if source.is_dir() and not move:
+                if destination.exists() and not destination.is_dir():
+                    raise FsOpError(KIND_INVALID, "destination is not a directory")
+                shutil.copytree(source, destination, dirs_exist_ok=True)
+            elif move:
+                shutil.move(str(source), str(destination))
+            else:
+                shutil.copyfile(source, destination)
+            completed.append({"source": str(source), "destination": str(destination)})
+        except FsOpError as exc:
+            if not continue_on_error:
+                raise
+            errors.append({"source": str(operation.get("source")), "error": str(exc)})
+    return {"operations": completed, "errors": errors}
+
+
+def _copy(request: dict[str, Any], roots: tuple[Path, ...]) -> dict[str, Any]:
+    return _transfer(request, roots, move=False)
+
+
+def _move(request: dict[str, Any], roots: tuple[Path, ...]) -> dict[str, Any]:
+    return _transfer(request, roots, move=True)
+
+
 _OPS = {
     "read": _read,
     "write": _write,
     "replace": _replace,
+    "edit": _edit,
+    "remove": _remove,
+    "copy": _copy,
+    "move": _move,
     "list": _list,
     "stat": _stat,
     "search": _search,

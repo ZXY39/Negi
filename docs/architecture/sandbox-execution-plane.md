@@ -56,7 +56,13 @@
 | `g3ku/sandbox/fsop.py` | jail 内一次性文件助手（read/write/replace/list/stat/search），只依赖标准库、走字节流 JSON |
 | `g3ku/sandbox/manager.py` | 每会话一个卷、lease 计数、idle 回收、执行与 fsop 委派；本地卷在数据根，WSL 卷在发行版内 |
 | `g3ku/sandbox/bridge_files.py` | `/shared/{inbox,outbox}` 导入导出：只收普通文件、拒 symlink、文件名单段化、64 MB 上限 |
+| `g3ku/sandbox/router.py` | 数据面工具 → jail 代理：`exec` 走 `manager.run`，`filesystem_*` / `content_*` 翻成 `fsop`；只覆写 `execute`，契约成员全部转发（`tools[]` 字节不变） |
 | `g3ku/sandbox/errors.py` | `denied` / `unavailable` / `runner_failure` 三分类（按后端 stderr 签名，不猜模型文本） |
+
+代理的三条行为约束：路径先过 `display_path`（模型只该看见 `/workspace` 与 `/shared`，
+宿主绝对路径直接拒）；`exec` 的 `background` 在 jail 里拒绝（一次性进程，后台活不过这次调用）；
+所有阻塞调用走 `asyncio.to_thread`，不占事件循环。`filesystem_propose_patch` 与
+`process_kill` 不进 jail 代理——前者依赖宿主工件库，后者在一次性进程模型下没有对象可杀。
 
 两条实现约束值得记住：
 
