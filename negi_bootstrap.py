@@ -171,7 +171,13 @@ def _ensure_project_installed() -> None:
     # 环境必然失败——必须优先探测 uv。
     uv = _uv_executable()
     if uv is not None and (PROJECT_ROOT / "uv.lock").exists():
-        _run([uv, "sync", "--frozen"], cwd=PROJECT_ROOT)
+        sync_argv = [uv, "sync", "--frozen"]
+        # 开发机的 venv 里装着 dev extras（AGENTS.md 要求改码前后跑 ruff/pytest），
+        # 而不带 --extra dev 的 sync 会把它们当非锁定包裁掉——下一次 `negi` 起完，
+        # 同一棵树里就 `No module named pytest` 了。装了才跟着保留。
+        if _python_has_module(VENV_PYTHON, "pytest"):
+            sync_argv += ["--extra", "dev"]
+        _run(sync_argv, cwd=PROJECT_ROOT)
     elif _python_has_module(VENV_PYTHON, "pip"):
         _run([str(VENV_PYTHON), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"], cwd=PROJECT_ROOT)
         _run([str(VENV_PYTHON), "-m", "pip", "install", "-e", "."], cwd=PROJECT_ROOT)
