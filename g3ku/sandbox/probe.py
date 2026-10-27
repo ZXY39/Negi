@@ -188,7 +188,11 @@ def _wsl_list_distros(wsl: str) -> tuple[bool, list[str], dict[str, Any]]:
 
 
 def _wsl_distro_capabilities(wsl: str, distro: str) -> dict[str, Any]:
-    code, out = _run([wsl, "-d", distro, "--", "sh", "-lc", _WSL_CAPABILITY_SCRIPT])
+    # `-e`, not `--`: with `--` wsl.exe joins argv and re-evaluates it through the
+    # distro's default shell, so the `-lc` script loses its quoting and every `$b`
+    # in it expands to empty in the outer shell — the probe then reads a qualified
+    # distro as having no bwrap and no python3.
+    code, out = _run([wsl, "-d", distro, "-e", "sh", "-lc", _WSL_CAPABILITY_SCRIPT])
     line = out.strip().splitlines()[-1] if out.strip() else ""
     parts = line.split("|")
     bwrap = parts[0].strip() if len(parts) > 0 else ""
