@@ -226,14 +226,17 @@ test("委托点击接管媒体锚点，带修饰键的点击留给浏览器", ()
     assert.equal(prevented, 1, "修饰键点击不该被接管");
 });
 
-test("关闭预览层收掉本层内容并回报是否真的关过", () => {
+test("关闭预览层等淡出走完再收掉本层内容并回报是否真的关过", async () => {
     const { openMediaViewer, closeMediaViewer, mediaViewerState } = loadApp();
 
     assert.equal(closeMediaViewer(), false, "没开过就不该报告关闭");
     openMediaViewer({ mode: "image", url: "http://localhost/a.png", title: "a.png" });
     assert.equal(closeMediaViewer(), true);
     assert.equal(mediaViewerState.open, false);
-    assert.equal(mediaViewerState.body.children.length, 0, "关闭后 iframe/图片该被摘掉");
+    // 收起动画期间内容还在：立刻清空会在淡出途中露出一张空白窗。
+    assert.equal(mediaViewerState.body.children.length, 1);
+    await new Promise((resolve) => setTimeout(resolve, 240));
+    assert.equal(mediaViewerState.body.children.length, 0, "淡出结束后 iframe/图片该被摘掉");
 });
 
 test("导出配置包共用同一条下载车道", () => {

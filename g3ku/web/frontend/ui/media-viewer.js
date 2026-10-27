@@ -28,6 +28,7 @@ const mediaViewerState = {
     url: "",
     name: "",
     open: false,
+    closeTimer: 0,
 };
 
 function mediaViewerSuffix(name = "") {
@@ -197,6 +198,11 @@ function renderMediaViewerContent(outputRef, title) {
 
 function openMediaViewer({ mode = "image", url = "", title = "内容预览", subtitle = "", outputRef = "", downloadName = "" } = {}) {
     ensureMediaViewerSurface();
+    // 上一条关闭动画还没走完就重新打开：先撤掉延迟拆除，别把新内容一起清掉。
+    if (mediaViewerState.closeTimer) {
+        window.clearTimeout(mediaViewerState.closeTimer);
+        mediaViewerState.closeTimer = 0;
+    }
     mediaViewerState.title.textContent = title;
     mediaViewerState.subtitle.textContent = subtitle;
     if (mediaViewerState.subtitle) mediaViewerState.subtitle.hidden = !subtitle;
@@ -227,9 +233,14 @@ function closeMediaViewer() {
     mediaViewerState.open = false;
     mediaViewerState.url = "";
     mediaViewerState.name = "";
-    resetMediaViewerSize();
-    // 收掉本层内容：iframe 里的 pdf/正文还在解码，留着就是下一层的卡顿。
-    if (mediaViewerState.body) mediaViewerState.body.innerHTML = "";
+    // 收起动画（160ms）走完再拆内容和尺寸：立刻清空会在淡出途中露出一张空白窗。
+    if (mediaViewerState.closeTimer) window.clearTimeout(mediaViewerState.closeTimer);
+    mediaViewerState.closeTimer = window.setTimeout(() => {
+        mediaViewerState.closeTimer = 0;
+        if (mediaViewerState.open) return;
+        resetMediaViewerSize();
+        if (mediaViewerState.body) mediaViewerState.body.innerHTML = "";
+    }, 200);
     return true;
 }
 
