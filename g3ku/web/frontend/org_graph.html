@@ -333,9 +333,15 @@
                                                 <span class="ceo-risk-entry-title">白名单</span>
                                                 <span id="ceo-risk-whitelist-hint" class="ceo-risk-entry-hint"></span>
                                             </button>
-                                            <button id="ceo-risk-sandbox-btn" class="ceo-risk-entry" type="button">
-                                                <span class="ceo-risk-entry-title">会话档位</span>
-                                                <span id="ceo-risk-sandbox-hint" class="ceo-risk-entry-hint"></span>
+                                            <button id="ceo-risk-sandbox-btn" class="ceo-risk-entry ceo-risk-entry-sandbox"
+                                                type="button" aria-pressed="false">
+                                                <span class="ceo-risk-entry-text">
+                                                    <span class="ceo-risk-entry-title">沙箱模式</span>
+                                                    <span id="ceo-risk-sandbox-hint" class="ceo-risk-entry-hint">正在读取…</span>
+                                                </span>
+                                                <span class="ceo-risk-switch" aria-hidden="true">
+                                                    <span class="ceo-risk-switch-thumb"></span>
+                                                </span>
                                             </button>
                                             <p id="ceo-risk-mode-note" class="ceo-risk-mode-note" role="status" hidden></p>
                                         </div>
@@ -850,7 +856,7 @@
             </section>
             <section id="view-sandbox" class="view-section" style="display: none; padding: 0;">
                 <iframe id="sandbox-frame" title="沙箱环境" src="about:blank"
-                    style="display: block; width: 100%; height: calc(100vh - 1px); border: 0; background: transparent;"></iframe>
+                    style="display: block; flex: 1 1 auto; width: 100%; height: 100%; min-height: 0; border: 0; background: transparent;"></iframe>
             </section>
 
             <section id="view-task-details" class="view-section" style="display: none;">

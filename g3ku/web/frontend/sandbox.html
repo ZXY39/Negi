@@ -17,125 +17,179 @@
         theme = null;
       }
       if (theme !== 'light' && theme !== 'dark') {
-        theme = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+        theme = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
       }
       document.documentElement.setAttribute('data-theme', theme);
     })();
   </script>
+  <link rel="stylesheet" href="vendor/fonts/google-fonts.css" />
   <link rel="stylesheet" href="/sandbox.css" />
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand">沙箱环境</div>
-    <div class="topbar-actions">
-      <span id="status-badge" class="badge" data-state="loading">检测中…</span>
-      <button id="refresh-btn" class="btn ghost" type="button">重新检测</button>
+  <header class="page-header">
+    <div class="page-heading">
+      <h1>沙箱环境</h1>
+      <p class="page-subtitle">运行时探测、会话档位与沙箱文件。</p>
+    </div>
+    <div class="page-actions">
+      <span id="status-badge" class="status-pill" data-state="loading">检测中…</span>
+      <button id="refresh-btn" class="toolbar-btn" type="button">重新检测</button>
     </div>
   </header>
 
-  <main class="layout">
-    <section class="card" id="runtime-card">
-      <h2>运行时</h2>
-      <dl class="kv">
-        <dt>安装态</dt><dd id="install-state">—</dd>
-        <dt>后端</dt><dd id="backend">—</dd>
-        <dt>说明</dt><dd id="reason">—</dd>
-      </dl>
-      <div class="dimensions" id="dimensions"></div>
-      <div class="card-actions">
-        <button id="install-btn" class="btn primary" type="button" hidden>安装沙箱</button>
-        <button id="uninstall-btn" class="btn danger" type="button" hidden>卸载沙箱</button>
-        <button id="plan-btn" class="btn ghost" type="button">查看安装内容</button>
-      </div>
-      <p class="hint" id="runtime-hint"></p>
-    </section>
+  <main class="page-body">
+    <div class="page-grid">
+      <div class="page-column page-column-main">
+        <section class="panel" id="session-card">
+          <div class="panel-head">
+            <div class="panel-heading">
+              <h2>会话档位</h2>
+              <p>选择会话后切换档位；第三方会话切到全权限需要项目解锁口令。</p>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div class="field">
+              <label class="field-label" for="session-select">会话</label>
+              <select id="session-select"><option value="">加载中…</option></select>
+            </div>
+            <div class="field" id="manual-session-field" hidden>
+              <label class="field-label" for="manual-session">会话 ID（列表不可用时手动输入）</label>
+              <div class="inline">
+                <input id="manual-session" type="text" placeholder="web:ceo-… 或 ext:…" />
+                <button id="manual-session-btn" class="toolbar-btn" type="button">查看</button>
+              </div>
+            </div>
+            <div id="session-panel" class="session-panel" hidden>
+              <div class="session-meta">
+                <span id="session-trust" class="status-pill" data-state="neutral">—</span>
+                <span id="session-tier" class="status-pill" data-state="neutral">—</span>
+              </div>
+              <div class="mode-switch" id="mode-switch"></div>
+              <div class="field" id="unlock-field" hidden>
+                <label class="field-label" for="unlock-password">项目解锁口令</label>
+                <input id="unlock-password" type="password" autocomplete="current-password" placeholder="仅本次切换使用" />
+              </div>
+              <div class="field" id="roots-field" hidden>
+                <label class="field-label" for="roots-input">额外可写目录（每行一个绝对路径，仅 owner 会话）</label>
+                <textarea id="roots-input" rows="3" placeholder="C:\Users\me\Desktop&#10;/home/me/output"></textarea>
+                <p class="hint">交付物常落在桌面或输出目录时用；第三方会话不支持。</p>
+              </div>
+              <div class="panel-actions">
+                <button id="save-mode-btn" class="toolbar-btn primary" type="button">保存</button>
+                <span id="save-result" class="save-result"></span>
+              </div>
+              <p class="hint" id="tasks-hint"></p>
+            </div>
+          </div>
+        </section>
 
-    <section class="card" id="session-card">
-      <h2>会话档位</h2>
-      <p class="hint" id="tier-hint">选择会话后可切换受限档。第三方会话切到全权限需要项目解锁口令。</p>
-      <label class="field">
-        <span>会话</span>
-        <select id="session-select"><option value="">加载中…</option></select>
-      </label>
-      <div class="field" id="manual-session-field" hidden>
-        <span>会话 ID（列表不可用时手动输入）</span>
-        <div class="inline">
-          <input id="manual-session" type="text" placeholder="web:ceo-… 或 ext:…" />
-          <button id="manual-session-btn" class="btn ghost" type="button">查看</button>
-        </div>
-      </div>
-      <div id="session-panel" class="session-panel" hidden>
-        <div class="session-meta">
-          <span id="session-trust" class="badge" data-state="neutral">—</span>
-          <span id="session-tier" class="badge" data-state="neutral">—</span>
-        </div>
-        <div class="mode-switch" id="mode-switch"></div>
-        <div class="field" id="unlock-field" hidden>
-          <span>项目解锁口令</span>
-          <input id="unlock-password" type="password" autocomplete="current-password" placeholder="仅本次切换使用" />
-        </div>
-        <div class="field" id="roots-field" hidden>
-          <span>额外可写目录（每行一个绝对路径，仅 owner 会话；交付物常落在桌面/输出目录时用）</span>
-          <textarea id="roots-input" rows="3" placeholder="C:\Users\me\Desktop&#10;/home/me/output"></textarea>
-        </div>
-        <div class="card-actions">
-          <button id="save-mode-btn" class="btn primary" type="button">保存</button>
-          <span id="save-result" class="save-result"></span>
-        </div>
-        <p class="hint" id="tasks-hint"></p>
-      </div>
-    </section>
+        <section class="panel" id="files-card" hidden>
+          <div class="panel-head">
+            <div class="panel-heading">
+              <h2>沙箱文件</h2>
+              <p id="files-hint">会话卷里的文件；导入只进 inbox，模型写出的文件在 outbox。</p>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div class="segmented" id="area-tabs" role="tablist" aria-label="文件区域">
+              <button class="tab" type="button" role="tab" data-area="workspace">workspace</button>
+              <button class="tab" type="button" role="tab" data-area="inbox">inbox</button>
+              <button class="tab" type="button" role="tab" data-area="outbox">outbox</button>
+            </div>
+            <div class="panel-actions">
+              <label class="toolbar-btn file-input">
+                导入到 inbox
+                <input id="upload-input" type="file" hidden />
+              </label>
+              <button id="files-refresh-btn" class="toolbar-btn" type="button">刷新列表</button>
+              <button id="reset-volume-btn" class="toolbar-btn danger" type="button">重置会话卷</button>
+            </div>
+            <ul id="file-list" class="file-list"></ul>
+            <p class="hint" id="files-empty" hidden>这个区还没有文件。</p>
+          </div>
+        </section>
 
-    <section class="card wide" id="files-card" hidden>
-      <h2>沙箱文件</h2>
-      <p class="hint" id="files-hint">会话卷里的文件；导入只进 inbox，模型写出的文件在 outbox。</p>
-      <div class="tabs" id="area-tabs">
-        <button class="tab" type="button" data-area="workspace">workspace</button>
-        <button class="tab" type="button" data-area="inbox">inbox</button>
-        <button class="tab" type="button" data-area="outbox">outbox</button>
       </div>
-      <div class="card-actions">
-        <label class="btn ghost file-input">
-          导入到 inbox
-          <input id="upload-input" type="file" hidden />
-        </label>
-        <button id="files-refresh-btn" class="btn ghost" type="button">刷新列表</button>
-        <button id="reset-volume-btn" class="btn danger" type="button">重置会话卷</button>
-      </div>
-      <ul id="file-list" class="file-list"></ul>
-      <p class="hint" id="files-empty" hidden>这个区还没有文件。</p>
-    </section>
 
-    <section class="card wide" id="persona-card">
-      <h2>群聊人设</h2>
-      <p class="hint">只作用于第三方会话（群聊 / 未列名私聊）。留空 = 群聊不带人设；不读取操作员自己的人设 note。</p>
-      <div class="field">
-        <span>人设正文</span>
-        <textarea id="persona-input" rows="5" placeholder="例如：你是这个群的助手，回答简洁、不透露任何本机信息。"></textarea>
-      </div>
-      <div class="card-actions">
-        <button id="persona-save-btn" class="btn primary" type="button">保存人设</button>
-        <span id="persona-result" class="save-result"></span>
-      </div>
-    </section>
+      <div class="page-column page-column-side">
+        <section class="panel" id="runtime-card">
+          <div class="panel-head">
+            <div class="panel-heading">
+              <h2>运行时</h2>
+              <p>本机沙箱后端与逐维度强制力。</p>
+            </div>
+          </div>
+          <div class="panel-body">
+            <dl class="kv">
+              <dt>安装态</dt><dd id="install-state">—</dd>
+              <dt>后端</dt><dd id="backend">—</dd>
+              <dt>说明</dt><dd id="reason">—</dd>
+            </dl>
+            <div class="dimensions" id="dimensions"></div>
+            <div class="panel-actions">
+              <button id="install-btn" class="toolbar-btn primary" type="button" hidden>安装沙箱</button>
+              <button id="uninstall-btn" class="toolbar-btn danger" type="button" hidden>卸载沙箱</button>
+              <button id="plan-btn" class="toolbar-btn" type="button">查看安装内容</button>
+            </div>
+            <p class="hint" id="runtime-hint"></p>
+          </div>
+        </section>
 
-    <section class="card wide" id="plan-card" hidden>
-      <h2>安装内容</h2>
-      <p class="hint">安装前请确认下面的步骤与提权要求。任何一步失败都会中止，不会留下半装状态以外的改动。</p>
-      <ol id="plan-steps" class="steps"></ol>
-      <ul id="plan-notes" class="notes"></ul>
-      <label class="check" id="confirm-row"><input id="confirm-check" type="checkbox" /> 我确认在上面这台机器上执行这些步骤</label>
-      <div class="card-actions">
-        <button id="confirm-install-btn" class="btn primary" type="button" disabled>确认安装</button>
-        <button id="cancel-plan-btn" class="btn ghost" type="button">取消</button>
-      </div>
-    </section>
+        <section class="panel" id="persona-card">
+          <div class="panel-head">
+            <div class="panel-heading">
+              <h2>群聊人设</h2>
+              <p>只作用于第三方会话（群聊 / 未列名私聊）。留空 = 群聊不带人设；不读取操作员自己的人设 note。</p>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div class="field">
+              <label class="field-label" for="persona-input">人设正文</label>
+              <textarea id="persona-input" rows="4" placeholder="例如：你是这个群的助手，回答简洁、不透露任何本机信息。"></textarea>
+            </div>
+            <div class="panel-actions">
+              <button id="persona-save-btn" class="toolbar-btn primary" type="button">保存人设</button>
+              <span id="persona-result" class="save-result"></span>
+            </div>
+          </div>
+        </section>
 
-    <section class="card wide" id="progress-card" hidden>
-      <h2>安装进度</h2>
-      <ol id="progress-steps" class="steps"></ol>
-      <pre id="progress-output" class="output" hidden></pre>
-    </section>
+        <section class="panel" id="plan-card" hidden>
+          <div class="panel-head">
+            <div class="panel-heading">
+              <h2>安装内容</h2>
+              <p>安装前请确认下面的步骤与提权要求。任何一步失败都会中止，不会留下半装状态以外的改动。</p>
+            </div>
+          </div>
+          <div class="panel-body">
+            <ol id="plan-steps" class="steps"></ol>
+            <ul id="plan-notes" class="notes"></ul>
+            <label class="check" id="confirm-row">
+              <input id="confirm-check" class="ui-checkbox-input" type="checkbox" />
+              <span class="ui-checkbox-box" aria-hidden="true"></span>
+              <span>我确认在上面这台机器上执行这些步骤</span>
+            </label>
+            <div class="panel-actions">
+              <button id="confirm-install-btn" class="toolbar-btn primary" type="button" disabled>确认安装</button>
+              <button id="cancel-plan-btn" class="toolbar-btn" type="button">取消</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel" id="progress-card" hidden>
+          <div class="panel-head">
+            <div class="panel-heading">
+              <h2>安装进度</h2>
+              <p>后台执行；关掉页面不会中断安装。</p>
+            </div>
+          </div>
+          <div class="panel-body">
+            <ol id="progress-steps" class="steps"></ol>
+            <pre id="progress-output" class="output" hidden></pre>
+          </div>
+        </section>
+      </div>
+    </div>
   </main>
 
   <div id="toast" class="toast" hidden></div>

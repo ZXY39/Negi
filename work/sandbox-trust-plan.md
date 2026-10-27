@@ -1157,6 +1157,15 @@ detecting → awaiting_confirm → downloading → installing → (needs_reboot)
     计划，必须 `--yes` 或交互确认）；`negi status` 增加沙箱体检（安装态、缺失的必需维度、
     第三方会话处全权限的清单）。注：早前各轮写的 `negi doctor` 指的就是这条体检，
     实现落在 `negi status`（仓库里没有顶层 `doctor` 命令）。
+  - **UI 对齐与就地开关**（本批）：沙箱页改为复制外壳 UI kit token 的独立样式表
+    （canvas/surface/border/brand、24px 页头 + 40px 控件、13px 输入、白卡 12px 圆角），
+    左主列（会话 + 文件）与右副列（运行时 + 人设 + 安装）按内容排高；`[hidden]` 兜底与
+    iframe 高度（`height:100%`，不再 `100vh-1px` 多出 56px）一并修掉。CEO 权限面板的
+    「会话档位」一行改成「沙箱模式」就地开关：整行可点、右侧开关、按意图显示「无限制 /
+    只读模式（沙箱模式）」；第三方切无限制弹 `openConfirm` 口令框，成功后停在本面板并
+    postMessage 让沙箱 iframe 重读。**实机验收（隔离实例 + Playwright）**：owner 点行
+    无口令往返两态、开关与文案同步；第三方（拦截替身）弹口令框、错口令留在框内、对口令
+    切成功；iframe 高度 944px 无内嵌滚动条；1600/1280/820 三档版式不溢出。
   - **仍未做**：无（P2/P3/P4 按计划不在本次范围）。
 
 - **已逐行复核**（本计划引用的行号都亲自读过）：

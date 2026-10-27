@@ -5516,6 +5516,62 @@ textarea {
     color: var(--text-muted);
 }
 
+/* 沙箱模式一行：标题 + 状态在左，开关在右，整行可点。开关只画状态，
+   语义由外层按钮的 aria-pressed 表达（读屏不会多出一个无名的开关）。 */
+.ceo-risk-entry-sandbox {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.ceo-risk-entry-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.ceo-risk-switch {
+    position: relative;
+    flex: 0 0 auto;
+    width: 38px;
+    height: 22px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--text-muted) 34%, transparent);
+    transition: background-color 0.18s ease;
+}
+
+.ceo-risk-switch-thumb {
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 16px;
+    height: 16px;
+    border-radius: 999px;
+    background: #fff;
+    box-shadow: 0 6px 14px -10px rgba(15, 23, 42, 0.5);
+    transition: transform 0.2s ease;
+}
+
+.ceo-risk-entry-sandbox[aria-pressed="true"] .ceo-risk-switch {
+    background: color-mix(in srgb, var(--brand-primary) 74%, transparent);
+}
+
+.ceo-risk-entry-sandbox[aria-pressed="true"] .ceo-risk-switch-thumb {
+    transform: translateX(16px);
+}
+
+.ceo-risk-entry-sandbox:disabled {
+    opacity: 0.6;
+    cursor: default;
+}
+
+.ceo-risk-entry-sandbox:disabled:hover {
+    border-color: color-mix(in srgb, var(--border-color) 82%, transparent);
+    background: color-mix(in srgb, var(--bg-app) 80%, transparent);
+}
+
 .ceo-risk-mode-note {
     padding: 8px 10px;
     border: 1px solid color-mix(in srgb, var(--border-color) 76%, transparent);

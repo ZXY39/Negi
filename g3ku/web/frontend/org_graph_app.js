@@ -10013,6 +10013,18 @@ function openSandboxViewForSession(sessionId) {
     switchView("sandbox");
 }
 
+function notifySandboxSessionModeChanged(sessionId) {
+    try {
+        // 沙箱页是同源 iframe；档位在输入区面板里改掉时，让它重读一次而不是停在旧状态。
+        U.sandboxFrame?.contentWindow?.postMessage(
+            { type: "negi-sandbox-refresh", sessionId: String(sessionId || "") },
+            window.location.origin,
+        );
+    } catch (error) {
+        void error;
+    }
+}
+
 function toggleTheme() {
     const html = document.documentElement;
     const theme = html.getAttribute("data-theme") === "light" ? "dark" : "light";

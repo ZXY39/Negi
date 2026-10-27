@@ -528,19 +528,42 @@ function renderCeoRiskPanel() {
     if (state.panelOpen) void refreshCeoRiskSandboxHint();
 }
 
-let ceoSandboxTierCache = { sessionId: "", text: "", at: 0 };
+const CEO_SANDBOX_MODE_TEXTS = {
+    restricted: "只读模式（沙箱模式）",
+    unrestricted: "无限制",
+};
+
+let ceoSandboxTierCache = { sessionId: "", restricted: null, unlockRequired: false, at: 0 };
+
+function renderCeoRiskSandboxState() {
+    if (U.ceoRiskSandboxHint) {
+        U.ceoRiskSandboxHint.textContent = ceoSandboxTierCache.restricted === null
+            ? ""
+            : CEO_SANDBOX_MODE_TEXTS[ceoSandboxTierCache.restricted ? "restricted" : "unrestricted"];
+    }
+    U.ceoRiskSandboxButton?.setAttribute?.("aria-pressed", ceoSandboxTierCache.restricted ? "true" : "false");
+}
 
 async function refreshCeoRiskSandboxHint() {
     const hint = U.ceoRiskSandboxHint;
+    const button = U.ceoRiskSandboxButton;
     if (!hint) return;
     const sessionId = String(typeof activeSessionId === "function" ? activeSessionId() : "").trim();
     if (!sessionId) {
-        hint.textContent = "";
+        ceoSandboxTierCache = { sessionId: "", restricted: null, unlockRequired: false, at: 0 };
+        hint.textContent = "先选择一个会话";
+        button?.setAttribute?.("aria-pressed", "false");
+        if (button) button.disabled = true;
         return;
     }
+    if (button) button.disabled = false;
     const now = Date.now();
-    if (ceoSandboxTierCache.sessionId === sessionId && now - ceoSandboxTierCache.at < 15000) {
-        hint.textContent = ceoSandboxTierCache.text;
+    if (
+        ceoSandboxTierCache.sessionId === sessionId
+        && ceoSandboxTierCache.restricted !== null
+        && now - ceoSandboxTierCache.at < 15000
+    ) {
+        renderCeoRiskSandboxState();
         return;
     }
     try {
@@ -553,12 +576,120 @@ async function refreshCeoRiskSandboxHint() {
         }
         const payload = await response.json();
         const item = payload.item || {};
-        const tier = String(item.tier_label || item.resolved_tier || "");
-        const text = [tier, item.tasks_allowed === false ? "不可派任务" : ""].filter(Boolean).join(" · ");
-        hint.textContent = text;
-        ceoSandboxTierCache = { sessionId, text, at: now };
+        ceoSandboxTierCache = {
+            sessionId,
+            restricted: item.mode === "restricted",
+            unlockRequired: !!item.unlock_required,
+            at: now,
+        };
+        renderCeoRiskSandboxState();
     } catch (error) {
         hint.textContent = "档位不可用";
+    }
+}
+
+function ceoSandboxModeErrorText(detail) {
+    const map = {
+        unlock_password_required: "这次切换需要项目解锁口令",
+        unlock_password_invalid: "口令不正确",
+        sandbox_mode_invalid: "档位取值不合法",
+        session_not_found: "会话不存在",
+    };
+    return map[detail] || `切换失败：${detail || "未知错误"}`;
+}
+
+async function patchCeoSandboxMode(sessionId, restricted, password) {
+    const body = { mode: restricted ? "restricted" : "unrestricted" };
+    if (password) body.unlock_password = password;
+    const response = await fetch(`/api/ceo/sessions/${encodeURIComponent(sessionId)}/sandbox`, {
+        method: "PATCH",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+    });
+    let payload = null;
+    try {
+        payload = await response.json();
+    } catch (error) {
+        payload = null;
+    }
+    if (!response.ok) {
+        const detail = String(payload?.detail || response.status);
+        const failure = new Error(detail);
+        failure.detail = detail;
+        throw failure;
+    }
+    return payload?.item || null;
+}
+
+function applyCeoSandboxMode(item, sessionId) {
+    ceoSandboxTierCache = {
+        sessionId,
+        restricted: item?.mode === "restricted",
+        unlockRequired: !!item?.unlock_required,
+        at: Date.now(),
+    };
+    if (U.ceoRiskSandboxButton) U.ceoRiskSandboxButton.disabled = false;
+    renderCeoRiskSandboxState();
+    if (typeof notifySandboxSessionModeChanged === "function") notifySandboxSessionModeChanged(sessionId);
+}
+
+async function toggleCeoRiskSandboxMode() {
+    const sessionId = String(typeof activeSessionId === "function" ? activeSessionId() : "").trim();
+    if (!sessionId) {
+        showToast({ title: "先选择会话", text: "沙箱模式按会话生效。", kind: "warn", durationMs: 2400 });
+        return;
+    }
+    const button = U.ceoRiskSandboxButton;
+    if (ceoSandboxTierCache.sessionId !== sessionId || ceoSandboxTierCache.restricted === null) {
+        await refreshCeoRiskSandboxHint();
+    }
+    if (ceoSandboxTierCache.sessionId !== sessionId || ceoSandboxTierCache.restricted === null) {
+        showToast({
+            title: "档位不可用",
+            text: "读不到这个会话的沙箱档位，稍后再试。",
+            kind: "error",
+            durationMs: 2800,
+        });
+        return;
+    }
+    const targetRestricted = !ceoSandboxTierCache.restricted;
+    const run = async (password) => {
+        if (button) button.disabled = true;
+        try {
+            const item = await patchCeoSandboxMode(sessionId, targetRestricted, password);
+            applyCeoSandboxMode(item, sessionId);
+            showToast({
+                title: targetRestricted ? "已开启沙箱模式" : "已关闭沙箱模式",
+                text: "下一回合生效。",
+                kind: "success",
+                durationMs: 2200,
+            });
+        } catch (error) {
+            throw new Error(ceoSandboxModeErrorText(error.detail || error.message));
+        } finally {
+            if (button) button.disabled = false;
+        }
+    };
+    if (!targetRestricted && ceoSandboxTierCache.unlockRequired) {
+        closeCeoRiskPanel();
+        openConfirm({
+            title: "关闭沙箱模式？",
+            text: "这是第三方会话。切到无限制要验一次项目解锁口令；控制面拒绝和记忆门仍然生效。",
+            confirmLabel: "关闭沙箱模式",
+            input: { label: "项目解锁口令", type: "password", placeholder: "仅本次切换使用", required: true },
+            onConfirm: async ({ value }) => {
+                const password = String(value || "").trim();
+                if (!password) throw new Error("请输入项目解锁口令。");
+                await run(password);
+            },
+        });
+        return;
+    }
+    try {
+        await run("");
+    } catch (error) {
+        showToast({ title: "切换失败", text: error.message, kind: "error", durationMs: 2800 });
     }
 }
 
@@ -882,12 +1013,7 @@ function bindCeoRiskUi() {
             if (target.closest("#ceo-risk-mode-all")) void saveToolGovernanceMode({ enabled: false });
             else if (target.closest("#ceo-risk-mode-conditional")) void saveToolGovernanceMode({ enabled: true });
             else if (target.closest("#ceo-risk-whitelist-btn")) void openCeoReviewWhitelistDialog();
-            else if (target.closest("#ceo-risk-sandbox-btn")) {
-                closeCeoRiskPanel();
-                if (typeof openSandboxViewForSession === "function") {
-                    openSandboxViewForSession(String(activeSessionId() || "").trim());
-                }
-            }
+            else if (target.closest("#ceo-risk-sandbox-btn")) void toggleCeoRiskSandboxMode();
             else if (target.closest("#ceo-risk-exec-settings-btn")) {
                 closeCeoRiskPanel();
                 openExecToolSettings();

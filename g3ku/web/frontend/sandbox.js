@@ -93,9 +93,15 @@ function renderStatus(item) {
   Object.entries(DIMENSION_LABELS).forEach(([key, label]) => {
     const value = (item.enforcement || {})[key] || 'missing';
     const chip = document.createElement('span');
-    chip.className = 'badge';
+    chip.className = 'dimension';
     chip.dataset.state = value === 'full' ? 'ok' : value === 'partial' ? 'warn' : 'missing';
-    chip.textContent = `${label} ${value === 'full' ? '完整' : value === 'partial' ? '部分' : '缺失'}`;
+    const name = document.createElement('span');
+    name.className = 'dimension-label';
+    name.textContent = label;
+    const reading = document.createElement('span');
+    reading.className = 'dimension-value';
+    reading.textContent = value === 'full' ? '完整' : value === 'partial' ? '部分' : '缺失';
+    chip.append(name, reading);
     dimensions.appendChild(chip);
   });
 
@@ -143,7 +149,7 @@ function renderPlan(plan) {
     }
     if (step.elevated) {
       const flag = document.createElement('span');
-      flag.className = 'badge';
+      flag.className = 'status-pill small';
       flag.dataset.state = 'warn';
       flag.textContent = '需要授权';
       row.appendChild(flag);
@@ -199,16 +205,19 @@ function renderFiles(entries) {
   $('files-empty').hidden = items.length > 0;
   items.forEach((entry) => {
     const row = document.createElement('li');
+    const kind = document.createElement('span');
+    kind.className = 'kind';
+    kind.textContent = entry.kind === 'dir' ? '目录' : '文件';
     const name = document.createElement('span');
     name.className = 'name';
-    name.textContent = `${entry.kind === 'dir' ? '📁' : '📄'} ${entry.name}`;
+    name.textContent = entry.name;
     const meta = document.createElement('span');
     meta.className = 'meta';
-    meta.textContent = entry.kind === 'dir' ? '目录' : `${entry.size || 0} B`;
-    row.append(name, meta);
+    meta.textContent = entry.kind === 'dir' ? '—' : `${entry.size || 0} B`;
+    row.append(kind, name, meta);
     if (entry.kind !== 'dir') {
       const link = document.createElement('a');
-      link.className = 'btn ghost';
+      link.className = 'toolbar-btn small';
       link.textContent = '下载';
       link.href = `/api/ceo/sessions/${encodeURIComponent(currentSessionId())}/sandbox/export?area=${encodeURIComponent(
         state.area,
@@ -264,7 +273,9 @@ async function uploadFile(file) {
 
 function syncAreaTabs() {
   document.querySelectorAll('#area-tabs .tab').forEach((node) => {
-    node.classList.toggle('active', node.dataset.area === state.area);
+    const active = node.dataset.area === state.area;
+    node.classList.toggle('active', active);
+    node.setAttribute('aria-selected', active ? 'true' : 'false');
   });
 }
 
@@ -614,5 +625,13 @@ window.addEventListener('message', (event) => {
   const data = event.data || {};
   if (data.type === 'negi-theme' && (data.theme === 'light' || data.theme === 'dark')) {
     document.documentElement.setAttribute('data-theme', data.theme);
+    return;
+  }
+  if (data.type === 'negi-sandbox-refresh') {
+    // 外壳里改了档位就通知本页重读；不是当前会话的改动不动选择。
+    const changed = String(data.sessionId || '').trim();
+    if (changed && changed !== currentSessionId()) return;
+    void loadStatus(true).catch(() => {});
+    void loadSessionDetail();
   }
 });

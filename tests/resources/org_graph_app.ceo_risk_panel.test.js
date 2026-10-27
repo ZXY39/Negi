@@ -334,3 +334,91 @@ test("点面板外面收起风险面板，点面板内部不收起", async () =>
     ctx.document.dispatch("click", { target: new StubElement("ceo-feed") });
     assert.equal(ctx.elements.get("ceo-risk-panel").hidden, true);
 });
+
+function stubSandboxFetch(ctx, { mode, unlockRequired }) {
+    const state = { mode };
+    const patched = [];
+    ctx.fetch = async (_url, options = {}) => {
+        if (!options.method || options.method === "GET") {
+            return {
+                ok: true,
+                json: async () => ({
+                    ok: true,
+                    item: {
+                        session_id: "web:shared",
+                        trust: unlockRequired ? "third_party_dm" : "owner",
+                        mode: state.mode,
+                        resolved_tier: state.mode === "restricted" ? "readonly" : "host_full",
+                        unlock_required: unlockRequired,
+                    },
+                }),
+            };
+        }
+        const body = JSON.parse(options.body);
+        patched.push(body);
+        state.mode = body.mode || state.mode;
+        return {
+            ok: true,
+            json: async () => ({
+                ok: true,
+                item: {
+                    session_id: "web:shared",
+                    trust: unlockRequired ? "third_party_dm" : "owner",
+                    mode: state.mode,
+                    resolved_tier: state.mode === "restricted" ? "readonly" : "host_full",
+                    unlock_required: unlockRequired,
+                },
+            }),
+        };
+    };
+    return patched;
+}
+
+test("沙箱模式一行：按意图画开关，整行一点就地切档并通知沙箱页", async () => {
+    const ctx = loadGovernance({
+        governanceItem: { enabled: false, mode: "all_pass", whitelist_tools: [], whitelist_customized: false },
+        extraIds: ["ceo-risk-sandbox-btn", "ceo-risk-sandbox-hint"],
+    });
+    const patched = stubSandboxFetch(ctx, { mode: "restricted", unlockRequired: false });
+    const notified = [];
+    ctx.notifySandboxSessionModeChanged = (sessionId) => notified.push(sessionId);
+
+    ctx.elements.get("ceo-risk-btn").dispatch("click");
+    await settle();
+    const row = ctx.elements.get("ceo-risk-sandbox-btn");
+    const hint = ctx.elements.get("ceo-risk-sandbox-hint");
+    assert.equal(row.attrs["aria-pressed"], "true");
+    assert.equal(hint.textContent, "只读模式（沙箱模式）");
+
+    ctx.elements.get("ceo-risk-panel").dispatch("click", { target: row });
+    await settle();
+    assert.deepEqual(plain(patched), [{ mode: "unrestricted" }], "owner 切无限制不带口令");
+    assert.equal(row.attrs["aria-pressed"], "false");
+    assert.equal(hint.textContent, "无限制");
+    assert.deepEqual(notified, ["web:shared"], "切完要通知沙箱 iframe 重读");
+});
+
+test("第三方会话关闭沙箱：先弹口令框，口令随 PATCH 一起提交", async () => {
+    const ctx = loadGovernance({
+        governanceItem: { enabled: false, mode: "all_pass", whitelist_tools: [], whitelist_customized: false },
+        extraIds: ["ceo-risk-sandbox-btn", "ceo-risk-sandbox-hint"],
+    });
+    const patched = stubSandboxFetch(ctx, { mode: "restricted", unlockRequired: true });
+    let dialog = null;
+    ctx.openConfirm = (options) => { dialog = options; };
+
+    ctx.elements.get("ceo-risk-btn").dispatch("click");
+    await settle();
+    const row = ctx.elements.get("ceo-risk-sandbox-btn");
+    assert.equal(row.attrs["aria-pressed"], "true");
+
+    ctx.elements.get("ceo-risk-panel").dispatch("click", { target: row });
+    await settle();
+    assert.equal(dialog?.title, "关闭沙箱模式？");
+    assert.equal(dialog?.input?.type, "password");
+    assert.deepEqual(plain(patched), [], "没验口令之前不发 PATCH");
+
+    await dialog.onConfirm({ value: "live-test-pass" });
+    assert.deepEqual(plain(patched), [{ mode: "unrestricted", unlock_password: "live-test-pass" }]);
+    assert.equal(row.attrs["aria-pressed"], "false");
+});

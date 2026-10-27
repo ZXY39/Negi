@@ -140,13 +140,20 @@
 
 独立页面：`/sandbox.html`（`g3ku/web/frontend/sandbox.{html,css,js}`），提供运行时状态与逐维度
 强制力、安装计划的确认与进度、会话档位切换（含第三方口令闸门）、会话卷文件管理。
-入口有两处：侧栏「沙箱」、CEO 权限面板里的「会话档位」一行（显示当前档位，点开跳到
-`/sandbox.html?session=<id>`）。页面嵌在同源 iframe 里，主题跟随外壳（`data-theme` 由父页
-经 postMessage 同步）；会话列表拿不到时退化成手填会话 ID，不让页面卡在"加载中"。
+页面视觉复制外壳的 UI kit token（`--ui-*`：canvas / surface / border / brand / 控件档），
+不加载 `org_graph.css`，所以改外壳 token 时要同步 `sandbox.css` 顶部那张表；版式是
+左主列（会话 + 文件）与右副列（运行时 + 群聊人设 + 安装），卡片按内容排高。
+入口有两处：侧栏「沙箱」、CEO 权限面板里的「沙箱模式」一行。后者是**就地开关**：
+整行可点、右侧画开关，标题「沙箱模式」下按当前意图显示「无限制」或「只读模式（沙箱模式）」；
+第三方会话从受限切 `unrestricted` 时弹项目解锁口令框（`openConfirm` 的 password 输入），
+开关成功后停在本面板并通知沙箱 iframe 重读（`negi-sandbox-refresh`）。页面嵌在同源 iframe
+里，主题跟随外壳（`data-theme` 由父页经 postMessage 同步）；会话列表拿不到时退化成手填
+会话 ID，不让页面卡在"加载中"。
 
 `ui_labels` 由服务端按安装态给出（未安装「只读 / 全权限」、已安装「开启沙箱 / 关闭沙箱」），
-前端不自己判安装态。文件管理一族端点只在安装态 `ready` / `partial` 时有意义，当前
-`install_available` 恒为 false（安装器属于后续阶段）。
+前端不自己判安装态。文件管理一族端点只在安装态 `ready` / `partial` 时有意义；
+`install_available` / 安装计划由 `g3ku/sandbox/installer.py` 按平台计算，`partial` 与
+`runtime_missing` 允许走「修复」路径。
 
 ## 信任分级
 
