@@ -244,6 +244,7 @@ def test_continuation_seed_head_is_not_stacked_with_a_second_pinned_block() -> N
             user_content="这一轮的问题",
             turn_overlay_parts=[],
             memory_snapshot_text="",
+            persona_text="",
             query_text="这一轮的问题",
             user_metadata=None,
             pinned_contract_text=pinned,
