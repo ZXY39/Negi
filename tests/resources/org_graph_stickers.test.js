@@ -152,7 +152,7 @@ function pack(overrides = {}) {
     };
 }
 
-test("包列表渲染停用态与计数，空库给导入提示", () => {
+test("包列表只报计数与待注册数，启停不加徽标", () => {
     const view = loadView();
 
     view.renderStickerPacks();
@@ -161,7 +161,7 @@ test("包列表渲染停用态与计数，空库给导入提示", () => {
 
     view.StickersState.packs = [
         pack(),
-        pack({ dir_name: "_parked", key: "parked", theme: "", enabled: false, total: 3, categories: [] }),
+        pack({ dir_name: "_parked", key: "parked", theme: "", enabled: false, total: 3, pending: 2, categories: [] }),
     ];
     view.StickersState.selected = "demo";
     view.renderStickerPacks();
@@ -169,7 +169,8 @@ test("包列表渲染停用态与计数，空库给导入提示", () => {
     const html = view.U.stickerPackList.innerHTML;
     assert.match(html, /sticker-pack-item selected" data-sticker-pack="demo"/);
     assert.match(html, /动漫少女/);
-    assert.match(html, /已停用/);
+    assert.match(html, /待注册 2/);
+    assert.doesNotMatch(html, /已停用/);
     assert.match(html, /（未设置主题）/);
     assert.equal(view.U.stickerPackInfo.textContent, "共 2 个包");
 });
@@ -205,7 +206,7 @@ test("详情渲染缩略图、描述与停用提示", () => {
     assert.doesNotMatch(html, /停用的包不进模型的清单/);
 });
 
-test("详情在图片被截断时给查看全部，停用包给停用提示", () => {
+test("详情：截断给查看全部，待注册给注册按钮，停用只降饱和不加提示", () => {
     const view = loadView();
     const disabled = pack({
         enabled: false,
@@ -218,9 +219,11 @@ test("详情在图片被截断时给查看全部，停用包给停用提示", ()
                 description: "",
                 enabled: false,
                 count: 9,
+                registered: 2,
+                pending: 1,
                 images: [
-                    { name: "a.png", size: 1, mtime: 1, url: "/u1" },
-                    { name: "b.png", size: 1, mtime: 1, url: "/u2" },
+                    { name: "001.png", size: 1, mtime: 1, url: "/u1", registered: true },
+                    { name: "a.png", size: 1, mtime: 1, url: "/u2", registered: false },
                 ],
             },
         ],
@@ -230,8 +233,11 @@ test("详情在图片被截断时给查看全部，停用包给停用提示", ()
 
     const html = view.U.stickerDetail.innerHTML;
     assert.match(html, /查看全部 9 张/);
-    assert.match(html, /停用的包不进模型的清单/);
+    assert.doesNotMatch(html, /停用的包不进模型的清单/);
     assert.match(html, /sticker-category-card is-disabled/);
+    assert.match(html, /2 \/ 9 张已注册（1 张待注册）/);
+    assert.match(html, /data-sticker-action="register-category"/);
+    assert.match(html, /sticker-thumb is-unregistered/);
 });
 
 test("写操作返回的整包快照替换骨架，改名后选中跟着走", () => {

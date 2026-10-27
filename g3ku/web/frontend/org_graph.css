@@ -18666,6 +18666,23 @@ textarea {
     margin: 0;
 }
 
+/* 待注册：模型看不到，压暗并描虚线边——状态用外观表达，不加徽标。 */
+.sticker-thumb.is-unregistered .sticker-thumb-open {
+    opacity: 0.45;
+    border-style: dashed;
+}
+
+.sticker-new-pack {
+    display: flex;
+    gap: 8px;
+    padding: 8px 0;
+}
+
+.sticker-new-pack .resource-search {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
 .sticker-thumb-open {
     display: block;
     width: 100%;

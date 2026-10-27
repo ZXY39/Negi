@@ -111,12 +111,12 @@ function renderStickerPacks() {
         U.stickerPackList.innerHTML = packs
             .map((pack) => {
                 const active = pack.dir_name === StickersState.selected ? " selected" : "";
-                const badge = pack.enabled ? "" : '<span class="meta-tag status-disabled">已停用</span>';
+                const pending = Number(pack.pending || 0);
                 const theme = pack.theme || "（未设置主题）";
                 return `<button type="button" class="sticker-pack-item${active}" data-sticker-pack="${esc(pack.dir_name)}">
-                    <span class="sticker-pack-item-head"><strong>${esc(pack.key)}</strong>${badge}</span>
+                    <span class="sticker-pack-item-head"><strong>${esc(pack.key)}</strong></span>
                     <span class="sticker-pack-item-theme">${esc(theme)}</span>
-                    <span class="sticker-pack-item-meta">${Number(pack.total || 0)} 张 · ${(pack.categories || []).length} 个分类</span>
+                    <span class="sticker-pack-item-meta">${Number(pack.total || 0)} 张 · ${(pack.categories || []).length} 个分类${pending ? ` · 待注册 ${pending}` : ""}</span>
                 </button>`;
             })
             .join("");
@@ -140,18 +140,15 @@ function renderStickerDetail() {
         return;
     }
     const limits = stickerLimits();
-    const badge = pack.enabled ? "" : '<span class="meta-tag status-disabled">已停用</span>';
-    const disabledHint = pack.enabled
-        ? ""
-        : '<p class="sticker-hint">停用的包不进模型的清单，标记也解析不到；启用后下一轮对话生效。</p>';
+    const pending = Number(pack.pending || 0);
     const theme = pack.theme || "";
     const sections = [];
     sections.push(`<div class="sticker-pack-head">
         <div class="sticker-pack-title">
             <h2>${esc(pack.key)}</h2>
-            ${badge}
             <span class="sticker-pack-total">${Number(pack.total || 0)} 张 · ${(pack.categories || []).length} 个分类</span>
             <span class="sticker-pack-actions">
+                ${pending ? '<button type="button" class="toolbar-btn ghost small" data-sticker-action="register-pack">注册待处理</button>' : ""}
                 <button type="button" class="toolbar-btn ghost small" data-sticker-action="toggle-pack">${pack.enabled ? "停用" : "启用"}</button>
                 <button type="button" class="toolbar-btn ghost small" data-sticker-action="delete-pack">删除</button>
             </span>
@@ -162,7 +159,6 @@ function renderStickerDetail() {
                 value="${esc(theme)}" placeholder="一句话说明这套图是什么、什么调性（模型靠它选包）">
             <button type="button" class="toolbar-btn success small" data-sticker-action="save-theme" hidden>保存</button>
         </label>
-        ${disabledHint}
     </div>`);
     if (!(pack.categories || []).length) {
         sections.push('<div class="empty-state">这个包还没有分类。新建一个分类，再往里面上传图片。</div>');
@@ -182,7 +178,8 @@ function renderStickerDetail() {
 function stickerCategoryHtml(pack, category, limits) {
     const expanded = StickersState.expanded[stickerKey(pack.dir_name, category.dir_name)];
     const images = expanded || category.images || [];
-    const badge = category.enabled ? "" : '<span class="meta-tag status-disabled">已停用</span>';
+    const registered = Number(category.registered || 0);
+    const pending = Number(category.pending || 0);
     const hidden = Number(category.count || 0) - images.length;
     const thumbs = images.length
         ? `<div class="sticker-thumb-grid">${images.map((image) => stickerThumbHtml(pack, category, image)).join("")}</div>`
@@ -190,15 +187,16 @@ function stickerCategoryHtml(pack, category, limits) {
     const more = hidden > 0
         ? `<button type="button" class="toolbar-btn ghost small" data-sticker-action="expand-category">查看全部 ${Number(category.count)} 张</button>`
         : "";
+    const meta = `${registered} / ${Number(category.count || 0)} 张已注册${pending ? `（${pending} 张待注册）` : ""}`;
     return `<section class="sticker-category-card${category.enabled ? "" : " is-disabled"}" data-sticker-category="${esc(category.dir_name)}">
         <header class="sticker-category-head">
             <div class="sticker-category-title">
                 <strong>${esc(category.key)}</strong>
-                ${badge}
-                <span class="sticker-pack-item-meta">${Number(category.count || 0)} 张</span>
+                <span class="sticker-pack-item-meta">${meta}</span>
             </div>
             <div class="sticker-category-actions">
                 <button type="button" class="toolbar-btn ghost small" data-sticker-action="upload">上传</button>
+                ${pending ? '<button type="button" class="toolbar-btn ghost small" data-sticker-action="register-category">注册</button>' : ""}
                 <button type="button" class="toolbar-btn ghost small" data-sticker-action="toggle-category">${category.enabled ? "停用" : "启用"}</button>
                 <button type="button" class="toolbar-btn ghost small" data-sticker-action="delete-category">删除</button>
             </div>
@@ -216,10 +214,13 @@ function stickerCategoryHtml(pack, category, limits) {
 
 function stickerThumbHtml(pack, category, image) {
     const title = `${pack.key} / ${category.key}`;
-    return `<figure class="sticker-thumb">
+    const pending = image.registered === false;
+    const extra = pending ? " is-unregistered" : "";
+    const hint = pending ? "（待注册，模型看不到）" : "";
+    return `<figure class="sticker-thumb${extra}">
         <button type="button" class="sticker-thumb-open" data-sticker-action="preview"
             data-url="${esc(image.url)}" data-name="${esc(image.name)}" data-title="${esc(title)}"
-            aria-label="查看 ${esc(image.name)}">
+            aria-label="查看 ${esc(image.name)}${hint}">
             <img src="${esc(image.url)}" alt="${esc(image.name)}" loading="lazy" decoding="async">
         </button>
         <button type="button" class="sticker-thumb-remove" data-sticker-action="delete-image"
@@ -389,6 +390,22 @@ function onStickerDetailClick(event) {
                 onSuccess: (data) => applyStickerPack(data.item, pack.dir_name),
             });
             return;
+        case "register-pack": {
+            const targets = (pack.categories || []).filter((item) => Number(item.pending || 0) > 0);
+            if (!targets.length) return;
+            void runStickerMutation({
+                label: "正在注册…",
+                request: async () => {
+                    let last = null;
+                    for (const item of targets) {
+                        last = await ApiClient.registerStickerCategory(pack.dir_name, item.dir_name);
+                    }
+                    return last;
+                },
+                onSuccess: (data) => applyStickerPack(data.item, pack.dir_name),
+            });
+            return;
+        }
         case "delete-pack":
             stickerConfirmDelete({
                 title: `删除表情包 ${pack.key}`,
@@ -431,6 +448,13 @@ function onStickerDetailClick(event) {
             void runStickerMutation({
                 label: category.enabled ? "正在停用…" : "正在启用…",
                 request: () => ApiClient.setStickerCategoryEnabled(pack.dir_name, category.dir_name, !category.enabled),
+                onSuccess: (data) => applyStickerPack(data.item, pack.dir_name),
+            });
+            return;
+        case "register-category":
+            void runStickerMutation({
+                label: "正在注册…",
+                request: () => ApiClient.registerStickerCategory(pack.dir_name, category.dir_name),
                 onSuccess: (data) => applyStickerPack(data.item, pack.dir_name),
             });
             return;
@@ -514,6 +538,23 @@ async function createStickerCategory(pack, key, description) {
     });
 }
 
+async function createStickerPack() {
+    const input = U.stickerNewPackKey;
+    const key = String(input ? input.value : "").trim();
+    if (!key) {
+        stickerFail("新建包", new Error("先填包名，如 atri"));
+        return;
+    }
+    await runStickerMutation({
+        label: "正在新建包…",
+        request: () => ApiClient.createStickerPack(key),
+        onSuccess: (data) => {
+            if (input) input.value = "";
+            if (data.item) applyStickerPack(data.item);
+        },
+    });
+}
+
 function pickStickerUploads(packDirName, categoryDirName) {
     if (!U.stickerUploadInput) return;
     StickersState.uploadTarget = { pack: packDirName, category: categoryDirName };
@@ -576,4 +617,14 @@ function bindStickerPage() {
     }
     if (U.stickerUploadInput) U.stickerUploadInput.addEventListener("change", onStickerUploadPicked);
     if (U.stickerMaxPerReply) U.stickerMaxPerReply.addEventListener("change", onStickerMaxPerReplyChanged);
+    if (U.stickerCreatePackBtn) {
+        U.stickerCreatePackBtn.addEventListener("click", () => void createStickerPack());
+    }
+    if (U.stickerNewPackKey) {
+        U.stickerNewPackKey.addEventListener("keydown", (event) => {
+            if (event.key !== "Enter") return;
+            event.preventDefault();
+            void createStickerPack();
+        });
+    }
 }

@@ -540,6 +540,8 @@ const U = {
     stickerUploadInput: document.getElementById("sticker-upload-input"),
     stickerMaxPerReply: document.getElementById("sticker-max-per-reply"),
     stickerInjectedBanner: document.getElementById("sticker-injected-banner"),
+    stickerNewPackKey: document.getElementById("sticker-new-pack-key"),
+    stickerCreatePackBtn: document.getElementById("sticker-create-pack-btn"),
     auditNavBadge: document.getElementById("audit-nav-badge"),
     auditEventList: document.getElementById("audit-event-list"),
     auditEventInfo: document.getElementById("audit-event-info"),

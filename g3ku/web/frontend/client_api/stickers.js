@@ -53,6 +53,14 @@
             return this.post(`${packPath(pack)}/categories`, { key, description });
         },
 
+        async createStickerPack(dirName, theme = "") {
+            return this.post("/api/resources/stickers/packs", { dir_name: dirName, theme });
+        },
+
+        async registerStickerCategory(pack, category) {
+            return this.post(`${categoryPath(pack, category)}/register`);
+        },
+
         async uploadStickerImages(pack, category, files) {
             const form = new FormData();
             for (const file of files || []) form.append("files", file);
