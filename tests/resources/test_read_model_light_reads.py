@@ -48,7 +48,7 @@ def _service(tmp_path: Path) -> tuple[TaskLogService, _ContentStore]:
     service.upsert_frame(TASK_ID, {
         'node_id': NODE_ID, 'depth': 0, 'node_kind': 'execution', 'phase': 'running',
         'active': False, 'runnable': True, 'waiting': False,
-        'stage_goal': 'demo goal', 'stage_status': '进行中',
+        'await_marker': 'demo goal',
         'messages_ref': 'content:messages/node-a', 'messages_count': 2,
         'tool_calls': [{'tool_call_id': 'call-1', 'name': 'filesystem_read', 'status': 'running'}],
     })
@@ -59,12 +59,12 @@ def test_update_frame_does_not_resolve_the_message_blob(tmp_path) -> None:
     """读-改-写一帧不该把会话历史读回来：指针在，正文就还在原地。"""
     service, content_store = _service(tmp_path)
 
-    service.update_frame(TASK_ID, NODE_ID, lambda frame: {**frame, 'stage_goal': 'changed'})
+    service.update_frame(TASK_ID, NODE_ID, lambda frame: {**frame, 'await_marker': 'changed'})
 
     assert content_store.hits == 0
     record = service._store.get_task_runtime_frame(TASK_ID, NODE_ID)
     payload = dict(record.payload or {})
-    assert payload['stage_goal'] == 'changed'
+    assert payload['await_marker'] == 'changed'
     # 指针与计数必须原样留着——写回时 mutator 没带 messages，护栏靠这两个字段续命
     assert payload['messages_ref'] == 'content:messages/node-a'
     assert int(payload['messages_count'] or 0) == 2
@@ -73,7 +73,7 @@ def test_update_frame_does_not_resolve_the_message_blob(tmp_path) -> None:
 def test_history_is_still_readable_after_a_light_update(tmp_path) -> None:
     service, content_store = _service(tmp_path)
 
-    service.update_frame(TASK_ID, NODE_ID, lambda frame: {**frame, 'stage_goal': 'changed'})
+    service.update_frame(TASK_ID, NODE_ID, lambda frame: {**frame, 'await_marker': 'changed'})
     frame = service.read_runtime_frame(TASK_ID, NODE_ID) or {}
 
     assert [item['content'] for item in frame['messages']] == ['first', 'second']
