@@ -152,10 +152,10 @@
 | API 契约 | settings 返回 `description_max_chars=120 / injected_chars=819 / limit=16000 / over=false`，无 `semantic_search`；packs 返回 `pending/registered/over_limit` |
 | 界面（浏览器） | 3 包无"已停用"徽标；隐身分类按 key 原位穿插不重排；每分类「N / N 张已注册」；描述全量（含 37 字长描述）；新建包表单在；发送策略只剩「每轮最多」；精确取图开关消失 |
 | 真实库渲染 | happy 9 格、sad 8 格、work 3 格、_laugh 12 格均正确（横幅 1–9，小 emoji 裁剪后撑满） |
-| **会话端到端（拼图→序号发送）** | **阻塞**：图片工具在"工具契约 → reuse_args 执行"两段式下，`_merge_ordered_tool_results` 抛 `missing merged tool result`，整轮失败。**`content_open` 打开图片同样复现**，故为运行时既有缺陷，与本次改造无关；会话 overlay E2E 待该缺陷修复后补 |
+| **会话端到端（拼图→序号发送）** | **通过**。远端 `8589d399`（合并为 `ac313c36`）修掉了"批次可执行清单跨跳"导致的 `missing merged tool result`。实测：模型调用 `show_sticker_category` 后**逐格描述了整张拼图**（1 拿羽毛掸子的鲸鱼娘 / 2 游泳圈 / 3 粉色小人 / 8 女仆趴在黑发角色上 / 9 张嘴大笑的黄色生物，与真实拼图一致），选 5 号写出 `[[sticker:deepseek-girl-pack/happy/5]]`；出站解析为 `happy/005.gif` 附件，转录中标记被替换为图片，记忆复核载荷尾部带 `[已发表情包：deepseek-girl-pack/happy/5]`，无新增 `sticker_send_failed` |
 
 ### 交接
 
-- 阻塞点落点：`g3ku/runtime/frontdoor/_ceo_runtime_ops.py` 的 `_graph_execute_tools`（8881–9160）与 `_frontdoor_reuse_args_execution`（6488+）：复用车道把 `execute_one` 的返回压成 `(text, status)`，图片 payload 的 `raw_result` 不进入结果行；同时被暂存的调用在合并阶段缺一条结果。修它属于运行时范围，不在本计划内。
+- 曾阻塞的会话 E2E 已由远端 `8589d399`（`fix(frontdoor): scope tool-batch executable list to one hop`）修复并合并；验收已通过，无需再动运行时。
 - 探针产物 `temp/sheet-probe/` 仍在（gitignore），确认后可删。
 - 仓库自身记忆 `memory/MEMORY.md` 里仍留着 `search_stickers`/`caption_pack` 的旧教训条目，是否清理由用户决定（属 agent 记忆，不擅自改）。
