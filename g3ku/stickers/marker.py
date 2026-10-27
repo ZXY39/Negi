@@ -24,11 +24,11 @@ from pathlib import Path
 
 from loguru import logger
 
+from g3ku.stickers import registry
 from g3ku.stickers.catalog import (
     Pack,
     category_owners,
     find_pack,
-    pack_images,
     scan_packs,
 )
 
@@ -36,22 +36,30 @@ MAX_STICKERS_PER_REPLY = 1
 
 _SEGMENT = r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}"
 MARKER_RE = re.compile(rf"^\[\[sticker:({_SEGMENT})/({_SEGMENT})\]\]$")
+# 索引取图：`[[sticker:<pack>/<category>/<N>]]`。N 是该分类注册表里的编号，
+# 也就是文件名（001.png）；三段数字与两段分类键不可能混淆。
+INDEX_MARKER_RE = re.compile(rf"^\[\[sticker:({_SEGMENT})/({_SEGMENT})/(\d{{1,3}})\]\]$")
 SHORT_MARKER_RE = re.compile(rf"^\[\[sticker:({_SEGMENT})\]\]$")
 _MARKER_PREFIX = "[[sticker:"
 
 
-def _parse_marker_line(line: str, packs: tuple[Pack, ...]) -> tuple[str, str] | str | None:
-    """Return ``(pack, category)``, ``"ambiguous"``, or ``None`` (not a marker)."""
+def _parse_marker_line(
+    line: str, packs: tuple[Pack, ...]
+) -> tuple[str, str, int | None] | str | None:
+    """Return ``(pack, category, index_or_None)``, ``"ambiguous"``, or ``None``."""
     stripped = line.strip()
+    by_index = INDEX_MARKER_RE.match(stripped)
+    if by_index is not None:
+        return by_index.group(1), by_index.group(2), int(by_index.group(3))
     full = MARKER_RE.match(stripped)
     if full is not None:
-        return full.group(1), full.group(2)
+        return full.group(1), full.group(2), None
     short = SHORT_MARKER_RE.match(stripped)
     if short is not None:
         category = short.group(1)
         owners = category_owners(packs, category)
         if len(owners) == 1:
-            return owners[0].key, category
+            return owners[0].key, category, None
         # Zero owners and cross-pack duplicates both fail closed: guessing here
         # is how a reply ends up with an image from the wrong pack.
         logger.warning(
@@ -89,15 +97,34 @@ def _pick_path(
             pack_key,
         )
         return None
-    images = pack_images(pack, category_key)
+    registry.ensure_bootstrap(pack.path)
+    images = registry.registered_files(pack.path, category_key)
     if not images:
         logger.warning(
-            "sticker category {!r} in pack {!r} has no readable image; nothing sent",
+            "sticker category {!r} in pack {!r} has no registered image; nothing sent",
             category_key,
             pack_key,
         )
         return None
     return picker.choice(images)
+
+
+def _pick_by_index(packs: tuple[Pack, ...], pack_key: str, category_key: str, index: int) -> Path | None:
+    """Resolve ``[[sticker:pack/cat/N]]`` against the pack registry."""
+    pack = find_pack(packs, pack_key)
+    if pack is None:
+        logger.warning("sticker pack {!r} is not in the catalog; nothing sent", pack_key)
+        return None
+    registry.ensure_bootstrap(pack.path)
+    path = registry.resolve_index(pack.path, category_key, index)
+    if path is None:
+        logger.warning(
+            "sticker index {}/{} did not resolve in pack {!r}; nothing sent",
+            category_key,
+            index,
+            pack_key,
+        )
+    return path
 
 
 def _marker_label(line: str) -> str:
@@ -183,9 +210,12 @@ def resolve_reply_stickers(
                 "sticker marker dropped: per-reply cap {} already reached", limit
             )
             continue
-        pack_key, value = parsed
-        label = f"{pack_key}/{value}"
-        path = _pick_path(packs, pack_key, value, picker)
+        pack_key, value, index = parsed
+        label = f"{pack_key}/{value}/{index}" if index is not None else f"{pack_key}/{value}"
+        if index is not None:
+            path = _pick_by_index(packs, pack_key, value, index)
+        else:
+            path = _pick_path(packs, pack_key, value, picker)
         if path is not None:
             chosen.append(path)
             delivered.append(label)

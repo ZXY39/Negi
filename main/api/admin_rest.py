@@ -25,6 +25,7 @@ from g3ku.runtime.core_tools import configured_core_tools, resolve_core_tool_tar
 from g3ku.shells.web import get_agent, is_no_ceo_model_configured_error, refresh_web_agent_runtime
 from g3ku.stickers import admin as sticker_admin
 from g3ku.stickers import catalog as sticker_catalog
+from g3ku.stickers import registry as sticker_registry
 from g3ku.utils.retry_keywords import split_retry_keywords
 from main.governance import (
     GovernanceStore,
@@ -2067,6 +2068,7 @@ def _sticker_image_payload(
         'name': image.name,
         'size': image.size,
         'mtime': image.mtime,
+        'registered': image.registered,
         'url': sticker_admin.sticker_image_url(pack_dir_name, category_dir_name, image.name),
     }
 
@@ -2080,6 +2082,7 @@ def _sticker_pack_payload(pack: 'sticker_admin.AdminPack') -> dict[str, Any]:
         'source': dict(pack.source),
         'enabled': pack.enabled,
         'total': pack.total,
+        'pending': sum(item.pending for item in pack.categories),
         'categories': [
             {
                 'dir_name': item.dir_name,
@@ -2087,6 +2090,9 @@ def _sticker_pack_payload(pack: 'sticker_admin.AdminPack') -> dict[str, Any]:
                 'description': item.description,
                 'enabled': item.enabled,
                 'count': item.count,
+                'registered': item.registered,
+                'pending': item.pending,
+                'over_limit': item.over_limit,
                 'images': [
                     _sticker_image_payload(pack.dir_name, item.dir_name, image)
                     for image in item.images
@@ -2120,6 +2126,19 @@ def _audit_sticker_delete(event_type: str, summary: str, **detail: Any) -> None:
 async def list_sticker_packs():
     packs = sticker_admin.scan_admin_packs(per_category=0)
     return {'ok': True, 'items': [_sticker_pack_payload(pack) for pack in packs]}
+
+
+@router.post('/resources/stickers/packs')
+async def create_sticker_pack(payload: dict | None = Body(default=None)):
+    body = dict(payload or {})
+    try:
+        created = sticker_admin.create_pack(
+            str(body.get('dir_name') or body.get('key') or '').strip(),
+            theme=body.get('theme') or '',
+        )
+    except sticker_admin.StickerAdminError as exc:
+        raise _sticker_http_error(exc) from exc
+    return {'ok': True, **created, 'item': _sticker_pack_after(created['dir_name'])}
 
 
 @router.get('/resources/stickers/settings')
@@ -2161,6 +2180,8 @@ async def get_sticker_image(
     from g3ku.runtime.api.ceo_media import guess_media_mime
 
     try:
+        # 首次接触任何入口都先接管存量文件：序号=文件名，越早稳定越好。
+        sticker_registry.ensure_bootstrap(sticker_admin.pack_dir(pack))
         path = sticker_admin.image_path(pack, category, name)
     except sticker_admin.StickerAdminError as exc:
         raise _sticker_http_error(exc) from exc
@@ -2212,6 +2233,19 @@ async def create_sticker_category(pack: str, payload: dict = Body(...)):
     except sticker_admin.StickerAdminError as exc:
         raise _sticker_http_error(exc) from exc
     return {'ok': True, 'dir_name': dir_name, 'item': _sticker_pack_after(pack)}
+
+
+@router.post('/resources/stickers/packs/{pack}/categories/{category}/register')
+async def register_sticker_category(pack: str, category: str):
+    try:
+        registered = sticker_admin.register_pending(pack, category)
+    except sticker_admin.StickerAdminError as exc:
+        raise _sticker_http_error(exc) from exc
+    return {
+        'ok': True,
+        'registered': registered,
+        'item': _sticker_pack_after(pack),
+    }
 
 
 @router.get('/resources/stickers/packs/{pack}/categories/{category}/images')

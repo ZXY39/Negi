@@ -85,16 +85,19 @@ def test_scan_admin_packs_caps_images_but_keeps_true_count(tmp_path: Path):
 def test_read_admin_pack_and_list_category_images(tmp_path: Path):
     _pack(tmp_path, "demo")
     pack = sticker_admin.read_admin_pack("demo", root=tmp_path, per_category=12)
-    assert pack.categories[0].images[0].name == "happy-a.png"
+    # bootstrap 把存量文件按序号接管：序号就是文件名
+    assert pack.categories[0].images[0].name == "001.png"
+    assert pack.categories[0].images[0].registered is True
     assert pack.categories[0].images[0].size > 0
+    assert (pack.categories[0].registered, pack.categories[0].pending) == (1, 0)
 
     images, total = sticker_admin.list_category_images("demo", "happy", root=tmp_path)
-    assert total == 1 and images[0].name == "happy-a.png"
+    assert total == 1 and images[0].name == "001.png"
     window, total = sticker_admin.list_category_images("demo", "happy", root=tmp_path, offset=1, limit=5)
     assert (window, total) == ([], 1)
 
 
-def test_enabled_categories_sort_before_disabled(tmp_path: Path):
+def test_enabled_categories_do_not_reorder(tmp_path: Path):
     pack = tmp_path / "demo"
     for name in ("_hidden", "zebra", "alpha"):
         _write(pack / name / "a.png")
@@ -102,8 +105,8 @@ def test_enabled_categories_sort_before_disabled(tmp_path: Path):
 
     categories = sticker_admin.read_admin_pack("demo", root=tmp_path).categories
 
-    # `_` 在 ASCII 里比字母小：不显式排序的话，停用分类会霸占第一屏。
-    assert [category.dir_name for category in categories] == ["alpha", "zebra", "_hidden"]
+    # 启停只是原地状态：顺序恒按 key，停用的分类不会因为排在后面而换位。
+    assert [category.dir_name for category in categories] == ["alpha", "_hidden", "zebra"]
 
 
 def test_read_admin_pack_missing_is_404(tmp_path: Path):
@@ -339,8 +342,10 @@ def test_store_uploads_writes_and_dedupes(tmp_path: Path):
         [("new.png", b"\x89PNG-new"), ("new.png", b"\x89PNG-second")],
         root=tmp_path,
     )
-    assert [item["name"] for item in items] == ["new.png", "new_2.png"]
-    assert (tmp_path / "demo" / "happy" / "new_2.png").read_bytes() == b"\x89PNG-second"
+    # 存量文件在首次写入时被 bootstrap 接管成 001，新图从 002 起铸号
+    assert [item["name"] for item in items] == ["002.png", "003.png"]
+    assert (tmp_path / "demo" / "happy" / "003.png").read_bytes() == b"\x89PNG-second"
+    assert (tmp_path / "demo" / "happy" / "001.png").is_file()
 
 
 def test_store_uploads_validates_the_whole_batch_before_writing(tmp_path: Path):
@@ -386,7 +391,7 @@ def test_uploaded_category_is_resolvable_by_marker(tmp_path: Path):
     text, paths = resolve_markers("祝你好运\n[[sticker:demo/celebrate]]", root=tmp_path)
 
     assert text == "祝你好运"
-    assert [path.name for path in paths] == ["party.png"]
+    assert [path.name for path in paths] == ["001.png"]
 
 
 # --------------------------------------------------------------- delete
@@ -394,8 +399,8 @@ def test_uploaded_category_is_resolvable_by_marker(tmp_path: Path):
 
 def test_delete_image(tmp_path: Path):
     _pack(tmp_path, "demo")
-    sticker_admin.delete_image("demo", "happy", "happy-a.png", root=tmp_path)
-    assert not (tmp_path / "demo" / "happy" / "happy-a.png").exists()
+    sticker_admin.delete_image("demo", "happy", "001.png", root=tmp_path)
+    assert not (tmp_path / "demo" / "happy" / "001.png").exists()
     assert sticker_admin.read_admin_pack("demo", root=tmp_path).categories[0].count == 0
 
 

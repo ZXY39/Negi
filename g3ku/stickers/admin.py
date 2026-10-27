@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urlencode
 
+from g3ku.stickers import registry
 from g3ku.stickers.catalog import (
     CATEGORY_DESCRIPTION_MAX_CHARS,
     DISABLED_PREFIX,
@@ -80,6 +81,7 @@ class AdminImage:
     name: str
     size: int
     mtime: float
+    registered: bool = False
 
 
 @dataclass(frozen=True)
@@ -90,6 +92,10 @@ class AdminCategory:
     enabled: bool
     count: int
     images: tuple[AdminImage, ...] = ()
+    # 目录里有多少张已注册（模型可见）与多少张待注册；count 是磁盘总数。
+    registered: int = 0
+    pending: int = 0
+    over_limit: bool = False
 
 
 @dataclass(frozen=True)
@@ -207,9 +213,14 @@ def _all_file_count(directory: Path) -> int:
 
 
 def _image_entries(
-    directory: Path, names: list[str], *, per_category: int | None
+    directory: Path,
+    names: list[str],
+    *,
+    per_category: int | None,
+    registered: set[str] | None = None,
 ) -> tuple[AdminImage, ...]:
     take = names if per_category is None else names[: max(0, int(per_category))]
+    known = registered or set()
     entries: list[AdminImage] = []
     for name in take:
         try:
@@ -217,7 +228,12 @@ def _image_entries(
         except OSError:
             continue
         entries.append(
-            AdminImage(name=name, size=int(stat.st_size), mtime=float(stat.st_mtime))
+            AdminImage(
+                name=name,
+                size=int(stat.st_size),
+                mtime=float(stat.st_mtime),
+                registered=name in known,
+            )
         )
     return tuple(entries)
 
@@ -231,6 +247,7 @@ def _scan_pack_entry(
         return None
     if not resolved.is_relative_to(base):
         return None
+    registry.ensure_bootstrap(resolved)
     manifest = read_manifest(resolved)
     categories: list[AdminCategory] = []
     try:
@@ -247,6 +264,7 @@ def _scan_pack_entry(
             continue
         key = display_key(child.name)
         names = _image_names(child)
+        rows = registry.category_rows(resolved, child.name)
         categories.append(
             AdminCategory(
                 dir_name=child.name,
@@ -254,7 +272,12 @@ def _scan_pack_entry(
                 description=category_description(manifest, key),
                 enabled=not child.name.startswith(DISABLED_PREFIX),
                 count=len(names),
-                images=_image_entries(child, names, per_category=per_category),
+                images=_image_entries(
+                    child, names, per_category=per_category, registered=set(rows)
+                ),
+                registered=len(rows),
+                pending=len(registry.unregistered_files(resolved, child.name)),
+                over_limit=len(rows) >= registry.MAX_IMAGES_PER_CATEGORY,
             )
         )
     source = manifest.get('source')
@@ -265,9 +288,8 @@ def _scan_pack_entry(
         theme_source=str(manifest.get('theme_source') or '').strip(),
         source=dict(source) if isinstance(source, dict) else {},
         enabled=not entry.name.startswith(DISABLED_PREFIX),
-        # 启用的分类排在停用的前面：ASCII 里 `_` 比字母小，不排的话一个带 8 个
-        # 隐藏分类的包，第一屏全是被停用的。
-        categories=tuple(sorted(categories, key=lambda item: (not item.enabled, item.key))),
+        # 只按 key 排：启停是原地状态，不允许把卡片在列表里搬来搬去。
+        categories=tuple(sorted(categories, key=lambda item: item.key)),
         path=resolved,
     )
 
@@ -463,21 +485,6 @@ def create_category(
     return raw
 
 
-def _target_name(
-    directory: Path, name: str, suffix: str, *, reserved: set[str] | None = None
-) -> str:
-    stem = name[: -len(suffix)] if suffix else name
-    taken = reserved or set()
-    candidate = f'{stem}{suffix}'
-    index = 2
-    while (directory / candidate).exists() or candidate in taken:
-        candidate = f'{stem}_{index}{suffix}'
-        index += 1
-        if index > 999:
-            raise StickerAdminError('sticker_name_conflict', f'{name} 重名太多')
-    return candidate
-
-
 def store_uploads(
     pack_dir_name: str,
     category_dir_name: str,
@@ -485,11 +492,14 @@ def store_uploads(
     *,
     root: Path | None = None,
 ) -> list[dict[str, Any]]:
-    """Validate the whole batch before writing any byte.
+    """Validate the whole batch before writing any byte, then register each file.
 
     A rejected 3rd file must not leave the first two on disk: the operator sees
-    one failure toast and would have no idea half the batch landed.
+    one failure toast and would have no idea half the batch landed. Names are
+    minted by the registry (``NNN.<ext>``), so uploads never collide and the
+    per-category cap is enforced here, at the write boundary.
     """
+    pack = pack_dir(pack_dir_name, root=root)
     category = category_dir(pack_dir_name, category_dir_name, root=root)
     items = list(uploads)
     if not items:
@@ -501,7 +511,6 @@ def store_uploads(
             detail={'limit': MAX_UPLOAD_FILES},
         )
     planned: list[tuple[str, bytes]] = []
-    taken: set[str] = set()
     for raw_name, payload in items:
         base_name = safe_filename(Path(str(raw_name or '')).name) or 'image'
         suffix = Path(base_name).suffix.lower()
@@ -520,20 +529,92 @@ def store_uploads(
             )
         if not payload:
             raise StickerAdminError('empty_file', f'{base_name} 是空文件')
-        name = _target_name(category, base_name, suffix, reserved=taken)
-        taken.add(name)
-        planned.append((name, payload))
-    for name, payload in planned:
-        (category / name).write_bytes(payload)
+        planned.append((base_name, payload))
+    # 迁移放在整批校验之后：校验失败时连改名都不该发生。
+    registry.ensure_bootstrap(pack)
+    current = len(registry.category_rows(pack, category.name))
+    if current + len(planned) > registry.MAX_IMAGES_PER_CATEGORY:
+        raise StickerAdminError(
+            'category_full',
+            f'分类最多 {registry.MAX_IMAGES_PER_CATEGORY} 张，当前 {current} 张，'
+            f'本次要加 {len(planned)} 张',
+            detail={
+                'limit': registry.MAX_IMAGES_PER_CATEGORY,
+                'current': current,
+                'incoming': len(planned),
+            },
+        )
+    results: list[dict[str, Any]] = []
+    for base_name, payload in planned:
+        try:
+            row = registry.register_payload(pack, category.name, base_name, payload)
+        except registry.RegistryError as exc:
+            raise StickerAdminError(exc.code, exc.message, detail=exc.detail) from exc
+        results.append(
+            {
+                'name': row['name'],
+                'index': row['index'],
+                'size': row['size'],
+                'url': sticker_image_url(pack_dir_name, category_dir_name, row['name']),
+            }
+        )
     invalidate_scan_cache()
-    return [
-        {
-            'name': name,
-            'size': len(payload),
-            'url': sticker_image_url(pack_dir_name, category_dir_name, name),
-        }
-        for name, payload in planned
-    ]
+    return results
+
+
+def register_pending(
+    pack_dir_name: str, category_dir_name: str, *, root: Path | None = None
+) -> list[dict[str, Any]]:
+    """Register files that were dropped into a category outside the app."""
+    pack = pack_dir(pack_dir_name, root=root)
+    category = category_dir(pack_dir_name, category_dir_name, root=root)
+    results: list[dict[str, Any]] = []
+    for path in registry.unregistered_files(pack, category.name):
+        try:
+            row = registry.register_existing(pack, category.name, path)
+        except registry.RegistryError as exc:
+            raise StickerAdminError(exc.code, exc.message, detail=exc.detail) from exc
+        results.append(
+            {
+                'name': row['name'],
+                'index': row['index'],
+                'url': sticker_image_url(pack_dir_name, category_dir_name, row['name']),
+            }
+        )
+    invalidate_scan_cache()
+    return results
+
+
+def create_pack(
+    pack_dir_name: str, *, theme: str = '', root: Path | None = None
+) -> dict[str, Any]:
+    """Create an empty pack; the UI can then add categories and uploads."""
+    base = _root_path(root)
+    base.mkdir(parents=True, exist_ok=True)
+    if not admin_segment_ok(pack_dir_name):
+        raise StickerAdminError(
+            'invalid_pack_name',
+            '包名只能用字母数字与 . _ -，且不能以下划线开头',
+        )
+    if pack_dir_name in RESERVED_PACK_DIRS or pack_dir_name in FORBIDDEN_NAMES:
+        raise StickerAdminError('invalid_pack_name', f'{pack_dir_name} 是保留名')
+    raw = str(pack_dir_name or '')
+    if raw.startswith(FORBIDDEN_PREFIXES):
+        raise StickerAdminError('invalid_pack_name', f'{pack_dir_name} 是保留前缀')
+    target = base / pack_dir_name
+    if target.exists():
+        raise StickerAdminError(
+            'sticker_name_conflict', f'{pack_dir_name} 已存在', status_code=409
+        )
+    target.mkdir(parents=True)
+    text = _clean_text(theme)[:THEME_MAX_CHARS]
+    manifest = {'theme': text} if text else {}
+    _write_manifest(target, manifest)
+    registry.write_registry(
+        target, {'schema_version': registry.REGISTRY_SCHEMA_VERSION, 'categories': {}}
+    )
+    invalidate_scan_cache()
+    return {'dir_name': pack_dir_name, 'theme': text}
 
 
 def _prune_manifest_category(pack: Path, key: str) -> None:
@@ -552,7 +633,10 @@ def _prune_manifest_category(pack: Path, key: str) -> None:
 def delete_image(
     pack_dir_name: str, category_dir_name: str, name: str, *, root: Path | None = None
 ) -> None:
+    pack = pack_dir(pack_dir_name, root=root)
+    registry.ensure_bootstrap(pack)
     image_path(pack_dir_name, category_dir_name, name, root=root).unlink()
+    registry.unregister_image(pack, category_dir_name, name)
     invalidate_scan_cache()
 
 
@@ -565,6 +649,7 @@ def delete_category(
     images = len(_image_names(category))
     files = _all_file_count(category)
     shutil.rmtree(category)
+    registry.drop_category(pack, category.name)
     _prune_manifest_category(pack, key)
     invalidate_scan_cache()
     return {'images': images, 'files': files}
@@ -599,6 +684,7 @@ __all__ = [
     "admin_segment_ok",
     "category_dir",
     "create_category",
+    "create_pack",
     "delete_category",
     "delete_image",
     "delete_pack",
@@ -607,6 +693,7 @@ __all__ = [
     "list_category_images",
     "pack_dir",
     "read_admin_pack",
+    "register_pending",
     "scan_admin_packs",
     "set_category_description",
     "set_category_enabled",

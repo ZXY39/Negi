@@ -58,14 +58,16 @@ def test_pack_detail_carries_capped_image_urls(client: TestClient):
 
     happy = next(item for item in payload["item"]["categories"] if item["key"] == "happy")
     assert happy["count"] == 1
-    assert happy["images"][0]["name"] == "happy-a.png"
+    assert happy["images"][0]["name"] == "001.png"
+    assert happy["images"][0]["registered"] is True
+    assert (happy["registered"], happy["pending"], happy["over_limit"]) == (1, 0, False)
     assert happy["images"][0]["url"].startswith("/api/resources/stickers/image?pack=demo&category=happy&name=")
 
 
 def test_image_route_serves_bytes_inline(client: TestClient):
     response = client.get(
         "/api/resources/stickers/image",
-        params={"pack": "demo", "category": "happy", "name": "happy-a.png"},
+        params={"pack": "demo", "category": "happy", "name": "001.png"},
     )
 
     assert response.status_code == 200
@@ -125,7 +127,8 @@ def test_upload_adds_images_to_the_category(client: TestClient):
 
     assert response.status_code == 200
     body = response.json()
-    assert [item["name"] for item in body["items"]] == ["party.png", "party_2.png"]
+    # 存量 happy-a.png 被 bootstrap 接管成 001，新传的两张从 002 起
+    assert [item["name"] for item in body["items"]] == ["002.png", "003.png"]
     happy = next(item for item in body["item"]["categories"] if item["key"] == "happy")
     assert happy["count"] == 3
 
@@ -143,7 +146,7 @@ def test_upload_rejects_non_image(client: TestClient):
 def test_delete_image_then_category_then_pack(client: TestClient):
     first = client.delete(
         "/api/resources/stickers/packs/demo/categories/happy/images",
-        params={"name": "happy-a.png"},
+        params={"name": "001.png"},
     )
     assert first.status_code == 200
     assert first.json()["item"]["total"] == 1
