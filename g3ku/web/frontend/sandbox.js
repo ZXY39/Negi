@@ -410,6 +410,10 @@ function renderSession(item) {
   $('unlock-field').hidden = true;
   $('unlock-password').value = '';
   $('save-result').textContent = '';
+  // D14：只有 owner 会话能配额外可写根；third_party 恒空，连输入框都不出现。
+  const rootsField = $('roots-field');
+  rootsField.hidden = item.trust !== 'owner';
+  $('roots-input').value = (item.writable_roots || []).join('\n');
   $('tasks-hint').textContent = item.tasks_allowed
     ? '此档可以派异步任务。'
     : '受限档不能派异步任务：任务节点跑在 worker 里，受限意图传不进那条执行面。';
@@ -446,6 +450,13 @@ async function saveMode() {
       return;
     }
     body.unlock_password = password;
+  }
+  const rootsField = $('roots-field');
+  if (!rootsField.hidden) {
+    body.writable_roots = $('roots-input')
+      .value.split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
   }
   $('save-mode-btn').disabled = true;
   try {
@@ -520,6 +531,7 @@ function bindEvents() {
   $('session-select').addEventListener('change', loadSessionDetail);
   $('manual-session-btn').addEventListener('click', loadSessionDetail);
   $('save-mode-btn').addEventListener('click', saveMode);
+  $('persona-save-btn').addEventListener('click', savePersona);
   document.querySelectorAll('#area-tabs .tab').forEach((node) => {
     node.addEventListener('click', () => {
       state.area = node.dataset.area || 'workspace';
@@ -550,6 +562,31 @@ function bindEvents() {
   });
 }
 
+async function loadPersona() {
+  try {
+    const payload = await api('/api/sandbox/persona');
+    $('persona-input').value = (payload.item || {}).persona || '';
+  } catch (error) {
+    $('persona-result').textContent = `读取失败：${error.message}`;
+  }
+}
+
+async function savePersona() {
+  $('persona-save-btn').disabled = true;
+  try {
+    const payload = await api('/api/sandbox/persona', {
+      method: 'PUT',
+      body: JSON.stringify({ persona: $('persona-input').value }),
+    });
+    $('persona-result').textContent = (payload.item || {}).persona ? '已保存' : '已清空（群聊不带人设）';
+    toast('群聊人设已更新');
+  } catch (error) {
+    $('persona-result').textContent = `保存失败：${error.message}`;
+  } finally {
+    $('persona-save-btn').disabled = false;
+  }
+}
+
 async function main() {
   bindEvents();
   try {
@@ -564,6 +601,7 @@ async function main() {
     $('manual-session').value = preset;
     $('manual-session-field').hidden = false;
   }
+  await loadPersona();
   await loadSessions();
   if (currentSessionId()) {
     await loadSessionDetail();

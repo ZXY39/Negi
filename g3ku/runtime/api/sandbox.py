@@ -46,12 +46,16 @@ from g3ku.sandbox.policy import (
 )
 from g3ku.sandbox.state import (
     get_session_mode,
+    get_writable_roots,
     install_state,
     install_state_name,
     note_operator_unlock,
     operator_unlock_note,
     refresh_install_state,
+    sandbox_persona_text,
+    set_sandbox_persona_text,
     set_session_mode,
+    set_writable_roots,
 )
 from g3ku.utils.helpers import safe_filename
 
@@ -122,6 +126,8 @@ def _session_item(session_key: str) -> dict[str, Any]:
         "operator_unlock": unlock_note,
         # 受限档不派任务：UI 用它来决定任务按钮的可用性提示。
         "tasks_allowed": policy.tier == TIER_HOST_FULL,
+        # D14：owner 的额外可写根；third_party 恒空（列表只读，写入走 PATCH 的 owner 闸门）。
+        "writable_roots": get_writable_roots(session_key),
     }
 
 
@@ -165,6 +171,13 @@ async def patch_session_sandbox(session_id: str, payload: dict = Body(...)):
 
         note_operator_unlock(key, at=datetime.now().astimezone().isoformat(), by="operator")
     set_session_mode(key, mode)
+    if "writable_roots" in payload:
+        if trust != TRUST_OWNER:
+            raise HTTPException(status_code=403, detail="writable_roots_owner_only")
+        raw_roots = payload.get("writable_roots")
+        if not isinstance(raw_roots, list):
+            raise HTTPException(status_code=400, detail="writable_roots_must_be_list")
+        set_writable_roots(key, raw_roots)
     # 档位只在回合边界生效：这里只落意图，正在跑的回合不受影响。
     item = _session_item(key)
     item["effective_from"] = "next_turn"
@@ -376,6 +389,27 @@ async def post_sandbox_uninstall(payload: dict = Body(...)):
     if detail == "nothing_we_installed":
         return {"ok": False, **result}
     raise HTTPException(status_code=409, detail=detail)
+
+
+@router.get("/sandbox/persona")
+async def get_sandbox_persona():
+    return {"ok": True, "item": {"persona": sandbox_persona_text()}}
+
+
+@router.put("/sandbox/persona")
+async def put_sandbox_persona(payload: dict = Body(...)):
+    text = set_sandbox_persona_text(payload.get("persona"))
+    try:
+        emit_audit_event(
+            "sandbox",
+            "info",
+            "persona_updated",
+            "third-party persona updated",
+            detail={"chars": len(text)},
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    return {"ok": True, "item": {"persona": text}}
 
 
 @router.post("/sandbox/refresh")

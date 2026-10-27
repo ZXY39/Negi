@@ -162,11 +162,18 @@ def adopt_persona(session: Any, *, memory_manager: Any, reason: str) -> str:
     """
     session_key = str(getattr(getattr(session, "state", None), "session_key", "") or "")
     if session_key and is_third_party_session(session_key):
-        setattr(session, PERSONA_TEXT_ATTR, "")
-        setattr(session, PERSONA_DIGEST_ATTR, persona_digest(""))
+        # 第三方会话不继承操作员的人设 note；只认沙箱页里单独配置的那份（空 = 不带人设）。
+        try:
+            from g3ku.sandbox.state import sandbox_persona_text
+
+            text = sandbox_persona_text()
+        except Exception:  # noqa: BLE001 - 读不到按空处理
+            text = ""
+        setattr(session, PERSONA_TEXT_ATTR, text)
+        setattr(session, PERSONA_DIGEST_ATTR, persona_digest(text))
         setattr(session, PERSONA_ADOPTED_AT_ATTR, datetime.now().astimezone().isoformat())
-        setattr(session, PERSONA_ADOPTION_REASON_ATTR, "third_party_default_empty")
-        return ""
+        setattr(session, PERSONA_ADOPTION_REASON_ATTR, "third_party_sandbox_persona")
+        return text
     text = _read_persona_text(memory_manager)
     if text is None:
         return str(getattr(session, PERSONA_TEXT_ATTR, "") or "")

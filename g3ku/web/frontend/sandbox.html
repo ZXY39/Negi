@@ -74,6 +74,10 @@
           <span>项目解锁口令</span>
           <input id="unlock-password" type="password" autocomplete="current-password" placeholder="仅本次切换使用" />
         </div>
+        <div class="field" id="roots-field" hidden>
+          <span>额外可写目录（每行一个绝对路径，仅 owner 会话；交付物常落在桌面/输出目录时用）</span>
+          <textarea id="roots-input" rows="3" placeholder="C:\Users\me\Desktop&#10;/home/me/output"></textarea>
+        </div>
         <div class="card-actions">
           <button id="save-mode-btn" class="btn primary" type="button">保存</button>
           <span id="save-result" class="save-result"></span>
@@ -100,6 +104,19 @@
       </div>
       <ul id="file-list" class="file-list"></ul>
       <p class="hint" id="files-empty" hidden>这个区还没有文件。</p>
+    </section>
+
+    <section class="card wide" id="persona-card">
+      <h2>群聊人设</h2>
+      <p class="hint">只作用于第三方会话（群聊 / 未列名私聊）。留空 = 群聊不带人设；不读取操作员自己的人设 note。</p>
+      <div class="field">
+        <span>人设正文</span>
+        <textarea id="persona-input" rows="5" placeholder="例如：你是这个群的助手，回答简洁、不透露任何本机信息。"></textarea>
+      </div>
+      <div class="card-actions">
+        <button id="persona-save-btn" class="btn primary" type="button">保存人设</button>
+        <span id="persona-result" class="save-result"></span>
+      </div>
     </section>
 
     <section class="card wide" id="plan-card" hidden>

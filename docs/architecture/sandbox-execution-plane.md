@@ -124,8 +124,9 @@
 
 | 端点 | 契约 |
 |---|---|
-| `GET /api/ceo/sessions/{id}/sandbox` | 返回 `{trust, mode, stored_mode, default_mode, resolved_tier, tier_label, install_state, backend, enforcement, ui_labels, unlock_required, operator_unlock, tasks_allowed}` |
-| `PATCH /api/ceo/sessions/{id}/sandbox` | 只改意图：`{mode, unlock_password?}`；第三方会话切 `unrestricted` 必须带项目解锁口令，服务端用 `unwrap_with_password` **只读**校验（不顺便解锁项目），通过后记 `operator_unlock` + 审计；返回体带 `effective_from: "next_turn"` |
+| `GET /api/ceo/sessions/{id}/sandbox` | 返回 `{trust, mode, stored_mode, default_mode, resolved_tier, tier_label, install_state, backend, enforcement, ui_labels, unlock_required, operator_unlock, tasks_allowed, writable_roots}` |
+| `PATCH /api/ceo/sessions/{id}/sandbox` | 改意图：`{mode, unlock_password?, writable_roots?}`；第三方会话切 `unrestricted` 必须带项目解锁口令（`unwrap_with_password` 只读校验），通过后记 `operator_unlock` + 审计；`writable_roots` 只对 owner 开放（D14：交付目录常在工作区外），third_party 传了直接 403；返回体带 `effective_from: "next_turn"` |
+| `GET/PUT /api/sandbox/persona` | 第三方会话用的人设正文；空 = 群聊不带人设。与操作员自己的人设 note 分开存放 |
 | `GET /api/sandbox/status` | 全局安装态、后端、逐维度强制力、`ui_labels`；`?refresh=1` 重探 |
 | `POST /api/sandbox/refresh` | 重探并返回新读数 |
 | `GET /api/sandbox/install/plan` | 安装计划（要执行的步骤、是否提权、是否可能重启、卸载命令） |
@@ -270,7 +271,9 @@
 - **成功信号自动重排**排除整批不可信的停车记录；混合批次照常重排，消费侧再拆。
 
 读侧同样按同一判据：第三方会话的长期记忆快照返回空串（不是"读失败"，所以冻结值是稳定的
-空），记忆修订增量与人设增量都不投。人设默认空，配置入口在沙箱页面（不依赖安装态）。
+空），记忆修订增量与人设增量都不投。第三方会话的人设**只认沙箱页单独配置的那一份**
+（`<数据根>/sandbox/persona.md`，`GET/PUT /api/sandbox/persona`），空即不带人设；操作员自己
+的人设 note 不注入群聊。该配置不依赖安装态（D20）。
 
 ## 来源标注
 

@@ -1146,7 +1146,14 @@ detecting → awaiting_confirm → downloading → installing → (needs_reboot)
     `/sandbox.html?session=<id>` 并预选该会话。页面主题跟随外壳（同源 iframe 读 `data-theme`
     + 切主题时 postMessage）。**实机验收**：侧栏入口与图标正常、iframe 懒加载、
     切主题后 iframe 背景同步变暗、面板行显示「宿主全权限」且点击后视图切换并预选会话。
-  - **仍未做**：`additional_writable_roots`（D14）的页面编辑入口。
+  - **D14 与群聊人设**（本批续）：owner 会话可在页面配「额外可写目录」（每行一个绝对路径，
+    限 16 条；third_party 传了直接 403），保存进 `session-modes.json` 的 `writable_roots`，
+    `_sandbox_jail_overrides` 在 jailed 档把它交给 `manager.ensure(write_roots=…)`。
+    群聊人设独立成 `<数据根>/sandbox/persona.md`（`GET/PUT /api/sandbox/persona`），
+    `adopt_persona` 对第三方会话只读这一份、空即不带人设；不依赖安装态（D20）。
+    **实机验收**：人设卡常显、保存后 GET 读回；owner 会话显示可写根输入框，
+    `/tmp/out` + `relative/path` 只落前者；第三方会话的 PATCH 带 roots 返回 403（单测覆盖）。
+  - **仍未做**：无（P2/P3/P4 按计划不在本次范围）。
 
 - **已逐行复核**（本计划引用的行号都亲自读过）：
   `g3ku/runtime/session_agent.py:1099-1116,1562-1596,4070-4179,4470-4529`、

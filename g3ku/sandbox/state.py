@@ -31,7 +31,10 @@ _LOCK = threading.RLock()
 _MODES: dict[str, str] | None = None
 _MODES_PATH: Path | None = None
 _UNLOCKS: dict[str, dict[str, str]] = {}
+_ROOTS: dict[str, list[str]] = {}
 _INSTALL: dict[str, Any] | None = None
+_PERSONA: str | None = None
+_MAX_WRITABLE_ROOTS = 16
 
 
 def _normalized_mode(value: Any) -> str:
@@ -74,8 +77,71 @@ def _load_locked() -> dict[str, str]:
                     "at": str(value.get("at") or ""),
                     "by": str(value.get("by") or ""),
                 }
+    roots = payload.get("writable_roots") if isinstance(payload, dict) else None
+    if isinstance(roots, dict):
+        _ROOTS.clear()
+        for key, value in roots.items():
+            normalized_key = str(key or "").strip()
+            if normalized_key and isinstance(value, list):
+                cleaned = _normalized_roots(value)
+                if cleaned:
+                    _ROOTS[normalized_key] = cleaned
     _MODES = modes
     return modes
+
+
+def _normalized_roots(values: Any) -> list[str]:
+    """额外可写根：只收绝对路径，去重、限数量。
+
+    POSIX 绝对路径（``/home/me/out``）在 Windows 上也收：owner 的 jail 跑在 WSL 发行版里，
+    操作员填的就是发行版内路径。相对路径没有锚点，直接丢。
+    """
+    from pathlib import Path
+
+    roots: list[str] = []
+    for item in list(values or []):
+        text = str(item or "").strip()
+        if not text:
+            continue
+        posix_absolute = text.startswith("/")
+        try:
+            resolved = Path(text).expanduser()
+        except (OSError, RuntimeError, ValueError):
+            continue
+        host_absolute = resolved.is_absolute()
+        if not host_absolute and not posix_absolute:
+            continue
+        normalized = str(resolved) if host_absolute else text.rstrip("/")
+        if normalized and normalized not in roots:
+            roots.append(normalized)
+        if len(roots) >= _MAX_WRITABLE_ROOTS:
+            break
+    return roots
+
+
+def get_writable_roots(session_key: Any) -> list[str]:
+    """owner 档的额外可写根（D14：交付物常落在桌面/输出目录）。third_party 恒为空。"""
+    key = str(session_key or "").strip()
+    if not key:
+        return []
+    with _LOCK:
+        _load_locked()
+        return list(_ROOTS.get(key) or [])
+
+
+def set_writable_roots(session_key: Any, values: Any) -> list[str]:
+    key = str(session_key or "").strip()
+    if not key:
+        raise ValueError("session_key_required")
+    cleaned = _normalized_roots(values)
+    with _LOCK:
+        _load_locked()
+        if cleaned:
+            _ROOTS[key] = cleaned
+        else:
+            _ROOTS.pop(key, None)
+        _write_locked(dict(_MODES or {}))
+    return cleaned
 
 
 def get_session_mode(session_key: Any) -> str:
@@ -121,7 +187,12 @@ def _write_locked(modes: dict[str, str]) -> None:
     path = _MODES_PATH or _states_path()
     _MODES_PATH = path
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"version": 1, "sessions": dict(sorted(modes.items())), "operator_unlocks": _UNLOCKS}
+    payload = {
+        "version": 1,
+        "sessions": dict(sorted(modes.items())),
+        "operator_unlocks": _UNLOCKS,
+        "writable_roots": {key: list(value) for key, value in sorted(_ROOTS.items())},
+    }
     temp = path.with_suffix(path.suffix + ".tmp")
     temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     temp.replace(path)
@@ -147,6 +218,47 @@ def operator_unlock_note(session_key: Any) -> dict[str, Any]:
         return dict(_UNLOCKS.get(key) or {})
 
 
+def sandbox_persona_text() -> str:
+    """群聊（第三方会话）用的人设。空 = 群聊不带人设（D7 默认）。
+
+    与长期记忆里的人设 note 分开存放：那份是操作员自己助手的人设，注入进来等于替群聊
+    认领一个身份；这份只给第三方会话用，操作员在沙箱页按需填。
+    """
+    global _PERSONA
+    with _LOCK:
+        if _PERSONA is not None:
+            return _PERSONA
+        path = _persona_path()
+        try:
+            _PERSONA = path.read_text(encoding="utf-8").strip() if path.exists() else ""
+        except Exception as exc:  # noqa: BLE001 - 读不到按空处理
+            logger.warning("sandbox persona unreadable: {}", exc)
+            _PERSONA = ""
+        return _PERSONA
+
+
+def set_sandbox_persona_text(text: Any) -> str:
+    global _PERSONA
+    value = str(text or "").strip()
+    with _LOCK:
+        path = _persona_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if value:
+            temp = path.with_suffix(path.suffix + ".tmp")
+            temp.write_text(value + "\n", encoding="utf-8")
+            temp.replace(path)
+        else:
+            path.unlink(missing_ok=True)
+        _PERSONA = value
+        return value
+
+
+def _persona_path() -> Path:
+    from g3ku.deployment.data_root import data_work_path
+
+    return data_work_path("sandbox") / "persona.md"
+
+
 def install_state(*, refresh: bool = False) -> dict[str, Any]:
     """当前机器的安装态读数（进程内缓存）。"""
     global _INSTALL
@@ -166,22 +278,28 @@ def refresh_install_state() -> dict[str, Any]:
 
 def reset_sandbox_state_for_tests() -> None:
     """测试钩子：丢掉进程内缓存（不动磁盘）。"""
-    global _MODES, _MODES_PATH, _INSTALL
+    global _MODES, _MODES_PATH, _INSTALL, _PERSONA
     with _LOCK:
         _MODES = None
         _MODES_PATH = None
         _INSTALL = None
         _UNLOCKS.clear()
+        _ROOTS.clear()
+        _PERSONA = None
 
 
 __all__ = [
     "clear_session_mode",
     "get_session_mode",
+    "get_writable_roots",
     "install_state",
     "install_state_name",
     "note_operator_unlock",
     "operator_unlock_note",
     "refresh_install_state",
     "reset_sandbox_state_for_tests",
+    "sandbox_persona_text",
+    "set_sandbox_persona_text",
     "set_session_mode",
+    "set_writable_roots",
 ]

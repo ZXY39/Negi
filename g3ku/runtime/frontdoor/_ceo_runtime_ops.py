@@ -6747,7 +6747,17 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             if manager is None:
                 reason = "sandbox backend is not installed"
             else:
-                handle = manager.ensure(session_key, trust=policy.trust)
+                write_roots: tuple[str, ...] = ()
+                if policy.trust == TRUST_OWNER:
+                    # D14：owner 的交付物常落在桌面/输出目录，进 jail 前要显式放行。
+                    from g3ku.sandbox.state import get_writable_roots
+
+                    write_roots = tuple(get_writable_roots(session_key))
+                handle = manager.ensure(
+                    session_key,
+                    trust=policy.trust,
+                    write_roots=write_roots,
+                )
                 runtime_context["sandbox_id"] = handle.sandbox_id
                 runtime_context["sandbox_backend"] = handle.backend.name
                 runtime_context["sandbox_workspace"] = "/workspace"

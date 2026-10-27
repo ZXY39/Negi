@@ -720,6 +720,38 @@ def status():
             has_key = bool(p.api_key)
             console.print(f"{spec.label}: {'[green]OK[/green]' if has_key else '[dim]not set[/dim]'}")
 
+        # 沙箱体检：安装态、必需维度，以及"第三方会话被放到全权限"的残留风险清单。
+        try:
+            from g3ku.sandbox.probe import REQUIRED_DIMENSIONS
+            from g3ku.sandbox.state import get_session_mode
+            from g3ku.sandbox.state import install_state as sandbox_install_state
+
+            reading = sandbox_install_state()
+            enforcement = dict(reading.get("enforcement") or {})
+            console.print(
+                f"Sandbox: {reading.get('state') or 'not_installed'} "
+                f"backend={reading.get('backend') or '-'}"
+            )
+            missing = [dim for dim in REQUIRED_DIMENSIONS if enforcement.get(dim) != "full"]
+            if missing:
+                console.print(f"Sandbox missing required dimensions: {', '.join(missing)}")
+            from g3ku.runtime.external_sessions import get_external_session_registry
+
+            risky = [
+                entry.session_key
+                for entry in get_external_session_registry().list_entries()
+                if str(entry.trust or "") not in {"", "owner"}
+                and get_session_mode(entry.session_key) == "unrestricted"
+            ]
+            if risky:
+                console.print(
+                    f"[yellow]Third-party sessions running with full host access: {len(risky)}[/yellow]"
+                )
+                for key in risky[:5]:
+                    console.print(f"  {key}")
+        except Exception as exc:  # noqa: BLE001 - 体检失败不阻塞 doctor
+            console.print(f"Sandbox: [dim]check skipped ({exc})[/dim]")
+
 
 # Each sub-CLI import sits beside the block that builds and registers its app,
 # so they stay below the module header on purpose.
@@ -727,6 +759,11 @@ from g3ku.shells.memory_cli import build_memory_app  # noqa: E402
 
 memory_app = build_memory_app(console)
 app.add_typer(memory_app, name="memory")
+
+from g3ku.shells.sandbox_cli import build_sandbox_app  # noqa: E402
+
+sandbox_app = build_sandbox_app(console)
+app.add_typer(sandbox_app, name="sandbox")
 
 from g3ku.shells.security_cli import build_security_app  # noqa: E402
 

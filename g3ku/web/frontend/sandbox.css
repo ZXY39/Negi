@@ -141,7 +141,7 @@ body {
 
 .field { display: grid; gap: 6px; margin: 12px 0; }
 .field > span { color: var(--muted); font-size: 12.5px; }
-select, input[type="password"], input[type="text"] {
+select, input[type="password"], input[type="text"], textarea {
   width: 100%;
   padding: 8px 10px;
   border-radius: 8px;
@@ -149,6 +149,7 @@ select, input[type="password"], input[type="text"] {
   background: var(--bg);
   color: var(--text);
   font: inherit;
+  resize: vertical;
 }
 
 .inline { display: flex; gap: 8px; }

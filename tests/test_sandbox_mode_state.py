@@ -30,7 +30,9 @@ from g3ku.sandbox.probe import REQUIRED_DIMENSIONS, probe_install_state
 @pytest.fixture()
 def isolated_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     store = tmp_path / "sandbox" / "session-modes.json"
+    persona = tmp_path / "sandbox" / "persona.md"
     monkeypatch.setattr(sandbox_state, "_states_path", lambda: store)
+    monkeypatch.setattr(sandbox_state, "_persona_path", lambda: persona)
     sandbox_state.reset_sandbox_state_for_tests()
     try:
         yield store
@@ -172,6 +174,73 @@ def test_factory_configures_wsl_layout(monkeypatch: pytest.MonkeyPatch) -> None:
     assert manager is not None
     assert manager._wsl is not None
     assert manager._wsl.distro == "Ubuntu"
+
+
+def test_writable_roots_are_normalized_and_owner_only(isolated_state: Path, registry) -> None:
+    roots = sandbox_state.set_writable_roots(
+        "web:ceo-1",
+        ["/tmp/out", "/tmp/out", "relative/path", "  ", "/tmp/deliverables"],
+    )
+    assert roots == ["/tmp/out", "/tmp/deliverables"]
+    assert sandbox_state.get_writable_roots("web:ceo-1") == roots
+
+    # 清空即删除条目
+    assert sandbox_state.set_writable_roots("web:ceo-1", []) == []
+    assert sandbox_state.get_writable_roots("web:ceo-1") == []
+
+
+def test_writable_roots_are_capped(isolated_state: Path) -> None:
+    many = [f"/tmp/root-{index}" for index in range(40)]
+    roots = sandbox_state.set_writable_roots("web:ceo-1", many)
+    assert len(roots) == sandbox_state._MAX_WRITABLE_ROOTS
+
+
+def test_third_party_patch_rejects_writable_roots(isolated_state: Path, registry) -> None:
+    import asyncio
+
+    from g3ku.runtime.api import sandbox as sandbox_api
+
+    entry, _ = registry.resolve_or_create(
+        bridge_id="qq-official-1", external_key="qq:group:g1", chat_type="group"
+    )
+    original = sandbox_api._session_exists
+    sandbox_api._session_exists = lambda key: True
+    try:
+        with pytest.raises(Exception) as excinfo:
+            asyncio.run(
+                sandbox_api.patch_session_sandbox(
+                    entry.session_key,
+                    {"mode": "restricted", "writable_roots": ["/tmp/x"]},
+                )
+            )
+        assert getattr(excinfo.value, "status_code", None) == 403
+    finally:
+        sandbox_api._session_exists = original
+    assert sandbox_state.get_writable_roots(entry.session_key) == []
+
+
+def test_sandbox_persona_roundtrip(isolated_state: Path) -> None:
+    assert sandbox_state.sandbox_persona_text() == ""
+    text = "你是这个群的助手，不透露本机信息。"
+    assert sandbox_state.set_sandbox_persona_text(text) == text
+    sandbox_state.reset_sandbox_state_for_tests()  # 清缓存，从磁盘重读
+    assert sandbox_state.sandbox_persona_text() == text
+    assert sandbox_state.set_sandbox_persona_text("") == ""
+    assert sandbox_state.sandbox_persona_text() == ""
+
+
+def test_third_party_persona_uses_sandbox_block(isolated_state: Path) -> None:
+    from types import SimpleNamespace
+
+    from g3ku.runtime.frontdoor.message_builder import adopt_persona
+
+    session = SimpleNamespace(state=SimpleNamespace(session_key="ext:unknown-bridge:abc"))
+    assert adopt_persona(session, memory_manager=None, reason="test") == ""
+
+    sandbox_state.set_sandbox_persona_text("群聊人设")
+    session2 = SimpleNamespace(state=SimpleNamespace(session_key="ext:unknown-bridge:abc"))
+    assert adopt_persona(session2, memory_manager=None, reason="test") == "群聊人设"
+    assert session2._frontdoor_persona_text == "群聊人设"
 
 
 def test_probe_shape() -> None:
