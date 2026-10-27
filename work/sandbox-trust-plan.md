@@ -1134,6 +1134,15 @@ detecting → awaiting_confirm → downloading → installing → (needs_reboot)
     本机无发行版时计划只给指引、确认控件隐藏；手填会话 ID → 切「只读」→ 保存 → 后端
     `mode=restricted` / `resolved_tier=readonly` 且提示"受限档不能派异步任务"。
     **修掉一个真 UI bug**：组件类里的 `display` 会压过 `[hidden]`，口令框在 owner 会话上误显示。
+  - **文件管理**（本批续）：`GET …/sandbox/files`、`POST …/sandbox/import`（multipart）、
+    `GET …/sandbox/export`、`POST …/sandbox/reset`（二次确认）；四个口先过安装态闸门，
+    没装返回 409 而不是空列表。页面加「沙箱文件」卡（workspace / inbox / outbox、导入到
+    inbox、按区下载、刷新、重置卷），未安装或未选会话时整卡不出现。
+    **实机验收（替身状态置 ready）**：卡片出现、文件行带下载链接、目录行不带、
+    下载 URL 正确编码会话 ID 与区名。顺带修了 WSL 卷布局的真 bug：带 `~` 的路径放进
+    单引号传给 shell 不展开，文件桥会找不到路径（改成先问一次 `$HOME` 再用绝对路径）。
+  - **仍未做**：主应用里的入口（导航/权限面板）——`org_graph.*` 正被并行会话改，暂不碰；
+    `additional_writable_roots`（D14）的页面编辑入口。
 
 - **已逐行复核**（本计划引用的行号都亲自读过）：
   `g3ku/runtime/session_agent.py:1099-1116,1562-1596,4070-4179,4470-4529`、
