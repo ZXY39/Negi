@@ -28,7 +28,9 @@ from g3ku.stickers.catalog import IMAGE_SUFFIXES
 REGISTRY_NAME = "registry.json"
 REGISTRY_SCHEMA_VERSION = 1
 MAX_IMAGES_PER_CATEGORY = 36
-_INDEX_RE = re.compile(r"^(\d{3,})\.")
+# 只认恰好三位：真实社区包里大量 13 位时间戳文件名（1790955203428.gif），
+# 用 \d{3,} 会把它们误当成"已编号"而保留，索引就永远超出标记语法的 1–3 位。
+_INDEX_RE = re.compile(r"^(\d{3})\.")
 _RESERVED_DIRS = frozenset({"semantic"})
 
 
@@ -67,7 +69,12 @@ def read_registry(pack_dir: Path) -> dict[str, Any]:
 
 
 def write_registry(pack_dir: Path, payload: dict[str, Any]) -> None:
-    """Atomic write: a crash mid-write must not leave a half registry."""
+    """Atomic write: a crash mid-write must not leave a half registry.
+
+    ``os.replace`` on Windows intermittently fails with WinError 5 while an
+    antivirus or indexer holds the destination open; retry briefly before
+    surfacing it.
+    """
     path = registry_path(pack_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
@@ -75,7 +82,21 @@ def write_registry(pack_dir: Path, payload: dict[str, Any]) -> None:
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    os.replace(tmp, path)
+    last: OSError | None = None
+    for attempt in range(4):
+        try:
+            os.replace(tmp, path)
+            return
+        except OSError as exc:
+            last = exc
+            if attempt == 3:
+                break
+            time.sleep(0.05 * (attempt + 1))
+    try:
+        tmp.unlink()
+    except OSError:
+        pass
+    raise last if last is not None else RuntimeError("registry write failed")
 
 
 def index_of(filename: str) -> int | None:
@@ -103,12 +124,8 @@ def _inside(pack_dir: Path, path: Path) -> Path | None:
     return resolved
 
 
-def registered_files(pack_dir: Path, category: str) -> tuple[Path, ...]:
-    """Registered images that still exist, ordered by index.
-
-    Size is checked here (cheap); the full sha256 check happens only when an
-    index is resolved for sending, where a silent swap would be a wrong send.
-    """
+def registered_entries(pack_dir: Path, category: str) -> tuple[tuple[int, Path], ...]:
+    """``(index, path)`` pairs ordered by index; same checks as registered_files."""
     category_dir = Path(pack_dir) / str(category)
     rows = category_rows(pack_dir, category)
     found: list[tuple[int, Path]] = []
@@ -129,7 +146,12 @@ def registered_files(pack_dir: Path, category: str) -> tuple[Path, ...]:
         if resolved is not None and size > 0:
             found.append((index, resolved))
     found.sort(key=lambda item: item[0])
-    return tuple(path for _index, path in found)
+    return tuple(found)
+
+
+def registered_files(pack_dir: Path, category: str) -> tuple[Path, ...]:
+    """Registered images that still exist, ordered by index."""
+    return tuple(path for _index, path in registered_entries(pack_dir, category))
 
 
 def unregistered_files(pack_dir: Path, category: str) -> tuple[Path, ...]:
@@ -354,6 +376,7 @@ __all__ = [
     "read_registry",
     "register_existing",
     "register_payload",
+    "registered_entries",
     "registered_files",
     "registry_path",
     "resolve_index",

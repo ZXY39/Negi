@@ -84,6 +84,8 @@ READONLY_THIRD_PARTY_TOOL_NAMES: frozenset[str] = frozenset(
         "content_describe",
         "filesystem_stat",
         "view_message_history",
+        # 拼图/索引选图：只读渲染并返回图片路径，不碰文件与网络
+        "show_sticker_category",
     }
 )
 

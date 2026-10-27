@@ -45,6 +45,22 @@ def test_bootstrap_numbers_existing_files_and_is_idempotent(tmp_path: Path):
     assert registry.category_rows(tmp_path / "demo", "happy") == first
 
 
+def test_timestamp_like_names_are_minted_not_trusted(tmp_path: Path):
+    """社区包大量用 13 位时间戳当文件名，不能当成"已编号"保留。"""
+    target = tmp_path / "demo" / "happy"
+    target.mkdir(parents=True)
+    (target / "1790955203428.gif").write_bytes(PNG + b"a")
+    (target / "007.png").write_bytes(PNG + b"b")
+
+    registry.ensure_bootstrap(tmp_path / "demo")
+
+    rows = registry.category_rows(tmp_path / "demo", "happy")
+    # 按文件名顺序处理：007 先入表，时间戳那张从 8 起铸号
+    assert sorted(rows) == ["007.png", "008.gif"]
+    assert (target / "008.gif").is_file()
+    assert registry.index_of("1790955203428.gif") is None
+
+
 def test_numbering_is_append_only_and_leaves_tombstones(tmp_path: Path):
     _category(tmp_path, "demo", "happy", 2)
     _bare_pack(tmp_path)

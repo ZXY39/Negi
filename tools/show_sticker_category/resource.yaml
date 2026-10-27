@@ -1,0 +1,46 @@
+schema_version: 1
+kind: tool
+name: show_sticker_category
+display_name: Sticker Category Sheet
+description: Show one sticker category as a single image with every tile badged by its index, so the model can pick an exact sticker. The image is attached to this turn's next request only; to send tile N write `[[sticker:<pack>/<category>/<N>]]` as the last line. Non-multimodal models get a reminder to fall back to the category marker.
+tool_result_delivery_contract: runtime_managed
+protocol: mcp
+mcp:
+  transport: embedded
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem:
+    - workspace
+parameters:
+  type: object
+  properties:
+    pack:
+      type: string
+      description: Pack key from the sticker catalog in the pinned contract head.
+    category:
+      type: string
+      description: Category key inside that pack. `_`-prefixed categories are hidden and rejected.
+  required:
+    - pack
+    - category
+governance:
+  display_name: Sticker Category Sheet
+  description: Render one sticker category as a numbered contact sheet for this turn only.
+  risk_level: low
+  destructive: false
+  allowed_roles:
+    - ceo
+    - execution
+    - inspection
+recovery_policy:
+  rerun_safe: true
+
+exposure:
+  agent: true
+  main_runtime: true
+toolskill:
+  enabled: true
