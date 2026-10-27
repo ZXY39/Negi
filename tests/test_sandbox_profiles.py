@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -154,3 +155,63 @@ def test_inbox_and_outbox_are_the_only_shared_roots(tmp_path: Path) -> None:
     assert JAIL_INBOX in binds
     assert JAIL_OUTBOX in binds
     assert "/shared" not in binds
+
+
+def _ro_targets(argv: list[str]) -> set[str]:
+    return {
+        argv[index + 2]
+        for index, token in enumerate(argv[:-2])
+        if token in {"--bind", "--ro-bind"}
+    }
+
+
+def test_system_roots_follow_the_backend_resolver(tmp_path: Path) -> None:
+    """存在性判据属于 jail 那一侧，不是宿主。
+
+    WSL 后端的宿主是 Windows：默认的宿主 stat 让 `Path("/usr")` 恒为 False，profile
+    于是产出一个只绑了会话卷的空根，bwrap 连 `sh` 都 exec 不到。绑定必须跟着后端给的
+    resolver 走。
+    """
+    distro = {"/usr", "/etc/localtime"}
+    argv = build_bwrap_argv(
+        _spec(tmp_path),
+        ["sh", "-lc", "pwd"],
+        path_exists=lambda path: path in distro,
+        path_is_file=lambda path: path in distro,
+    )
+    assert "/usr" in _ro_targets(argv)
+    assert "/etc/ssl" not in _ro_targets(argv)
+
+
+def test_merged_usr_symlinks_are_decided_by_the_backend(tmp_path: Path) -> None:
+    distro = {"/usr", "/usr/bin", "/usr/lib", "/usr/lib64"}
+    argv = build_bwrap_argv(
+        _spec(tmp_path),
+        ["sh", "-lc", "pwd"],
+        path_exists=lambda path: path in distro,
+        path_is_file=lambda path: False,
+    )
+    symlinks = {tuple(argv[index + 1 : index + 3]) for index, token in enumerate(argv[:-2]) if token == "--symlink"}
+    assert ("usr/bin", "/bin") in symlinks
+    assert ("usr/lib", "/lib") in symlinks
+
+
+def test_helper_bind_uses_the_backend_is_file(tmp_path: Path) -> None:
+    spec = replace(
+        _spec(tmp_path),
+        helper_binds=((Path("/home/negi/.negi-sandbox/fsop.py"), "/opt/negi/fsop.py"),),
+    )
+    bound = build_bwrap_argv(
+        spec,
+        ["true"],
+        path_exists=lambda path: path == "/usr",
+        path_is_file=lambda path: path.endswith("fsop.py"),
+    )
+    assert "/opt/negi/fsop.py" in _ro_targets(bound)
+    missing = build_bwrap_argv(
+        spec,
+        ["true"],
+        path_exists=lambda path: path == "/usr",
+        path_is_file=lambda path: False,
+    )
+    assert "/opt/negi/fsop.py" not in _ro_targets(missing)

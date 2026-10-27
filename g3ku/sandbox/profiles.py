@@ -64,15 +64,22 @@ def _forbidden(path: str) -> bool:
     )
 
 
-def _existing_ro_roots() -> list[str]:
-    roots: list[str] = []
-    for candidate in RO_SYSTEM_ROOTS:
-        try:
-            if Path(candidate).exists():
-                roots.append(candidate)
-        except OSError:
-            continue
-    return roots
+def _host_exists(path: str) -> bool:
+    try:
+        return Path(path).exists()
+    except OSError:
+        return False
+
+
+def _host_is_file(path: str) -> bool:
+    try:
+        return Path(path).is_file()
+    except OSError:
+        return False
+
+
+def _existing_ro_roots(exists) -> list[str]:
+    return [candidate for candidate in RO_SYSTEM_ROOTS if exists(candidate)]
 
 
 class _MountPlan:
@@ -112,12 +119,20 @@ def build_bwrap_argv(
     cwd: str = JAIL_WORKSPACE,
     env: dict[str, str] | None = None,
     bwrap_path: str = "bwrap",
+    path_exists=None,
+    path_is_file=None,
 ) -> list[str]:
     """把一次调用包成 bwrap argv。
 
     ``env`` 是**追加**的环境变量；基础三元组（PATH/HOME/TMPDIR/LANG/SANDBOX_ID）由这里给，
     宿主环境整体不继承（``--clearenv``），所以任何 ``G3KU_*`` 密钥都进不去。
+
+    ``path_exists`` / ``path_is_file`` 回答的是"**jail 要绑的那一侧**有没有这条路径"。
+    默认按当前文件系统判，对 Linux 后端就是对的；WSL 后端必须换成发行版内的判据，
+    否则 Windows 上的 ``Path("/usr").exists()`` 全是 False，jail 里一个系统根都绑不上。
     """
+    exists = path_exists or _host_exists
+    is_file = path_is_file or _host_is_file
     if not list(argv or ()):
         raise ValueError("sandbox argv is empty")
     for candidate in (spec.workspace_root, spec.shared_inbox, spec.shared_outbox):
@@ -151,16 +166,16 @@ def build_bwrap_argv(
         out.append("--share-net")
 
     plan = _MountPlan()
-    for root in _existing_ro_roots():
+    for root in _existing_ro_roots(exists):
         plan.bind(root, root, writable=False)
-    # 常见发行版把 /bin、/lib 做成 /usr 下的软链；宿主上不存在时显式补一条。
+    # 常见发行版把 /bin、/lib 做成 /usr 下的软链；jail 侧不存在时显式补一条。
     for link_target, link_name in (("usr/bin", "/bin"), ("usr/lib", "/lib"), ("usr/lib64", "/lib64")):
-        if not Path(link_name).exists() and Path("/" + link_target).exists():
+        if not exists(link_name) and exists("/" + link_target):
             plan.dir(link_name.rsplit("/", 1)[0] or "/")
             plan.args.extend(["--symlink", link_target, link_name])
 
     plan.args.extend(["--proc", "/proc", "--dev", "/dev", "--tmpfs", JAIL_TMP])
-    if spec.network and Path("/etc/resolv.conf").exists():
+    if spec.network and exists("/etc/resolv.conf"):
         plan.bind("/etc/resolv.conf", "/etc/resolv.conf", writable=False)
 
     # 会话卷：唯一可写的主根。
@@ -174,7 +189,7 @@ def build_bwrap_argv(
         host = _as_posix(path)
         if _forbidden(host) or host in (_as_posix(spec.workspace_root),):
             continue
-        if not Path(host).exists():
+        if not exists(host):
             continue
         plan.bind(host, host, writable=False)
     # 额外写根（owner 档的 additional_writable_roots）。
@@ -182,14 +197,15 @@ def build_bwrap_argv(
         host = _as_posix(path)
         if _forbidden(host) or host in (_as_posix(spec.workspace_root),):
             continue
-        if not Path(host).exists():
+        if not exists(host):
             continue
         plan.bind(host, host, writable=True)
     # 助手文件（fsop）：单文件只读绑进 jail，jail 里不需要装包。
     for source, dest in spec.helper_binds:
-        if not Path(source).is_file():
+        helper_source = _as_posix(source)
+        if not is_file(helper_source):
             continue
-        plan.bind(_as_posix(source), dest, writable=False)
+        plan.bind(helper_source, dest, writable=False)
     out.extend(plan.args)
 
     for key, value in dict(env or {}).items():
