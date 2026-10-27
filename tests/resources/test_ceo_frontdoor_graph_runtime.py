@@ -8,6 +8,7 @@ import pytest
 from g3ku.agent.tools.base import Tool
 from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
 from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
+from g3ku.runtime.frontdoor.state_models import initial_persistent_state
 from g3ku.runtime.tool_contract_block import attach_tool_contract_block, render_tool_contract_block
 from main.governance.tool_context import build_tool_context_fingerprint
 from main.runtime.tool_names import SYNTHETIC_RESIDENT_TOOL_NAMES
@@ -1006,6 +1007,124 @@ async def test_rejected_batch_item_never_reaches_the_tool_executor(monkeypatch) 
     ]
     assert [item["tool_call_id"] for item in tool_messages] == ["call-1", "call-2", "call-3"]
     assert "用户不允许运行此工具" in str(tool_messages[1]["content"] or "")
+
+
+def _step_loop_harness(monkeypatch, hops: list[dict]) -> tuple[object, list[str]]:
+    """把整轮从步循环进口喂进来：跳与跳之间只靠 `current_state.update(update)` 传状态。
+
+    直接调 `_graph_execute_tools` 的用例看不见这条道——它读到的名单是自己递给自己的，
+    而实盘上下一跳读到的是上一跳跳末留下的那份。
+    """
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+    executed: list[str] = []
+    echo_tool = _EchoTool()
+    cursor = {"hop": 0}
+    monkeypatch.setattr(runner, "_registered_tools_for_state", lambda state: {"echo_tool": echo_tool})
+    monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": None})
+    monkeypatch.setattr(runner, "_sync_runtime_session_frontdoor_state", lambda **kwargs: None)
+
+    async def _fake_execute(*, tool, tool_name, arguments, runtime_context, on_progress, tool_call_id):
+        _ = tool, tool_name, arguments, runtime_context, on_progress
+        executed.append(str(tool_call_id or ""))
+        return ({}, "{}", "success", "", "", 1.0)
+
+    async def _no_turns_event(*, runtime):
+        _ = runtime
+        return None
+
+    async def _fake_call_model(state, runtime):
+        _ = runtime
+        index = cursor["hop"]
+        cursor["hop"] += 1
+        return {
+            "iteration": index + 1,
+            "response_payload": dict(hops[index]),
+            "messages": list(state.get("messages") or []),
+        }
+
+    async def _fake_finalize(state, runtime):
+        _ = state, runtime
+        return {"final_output": "done", "next_step": "finalize"}
+
+    monkeypatch.setattr(runner, "_execute_tool_call_with_raw_result", _fake_execute)
+    monkeypatch.setattr(runner, "_emit_frontdoor_turns_sync_event", _no_turns_event)
+    monkeypatch.setattr(runner, "_node_call_model", _fake_call_model)
+    monkeypatch.setattr(runner, "_node_finalize_turn", _fake_finalize)
+    return runner, executed
+
+
+def _step_loop_state(*, session_key: str = "web:shared") -> dict:
+    state = initial_persistent_state(user_input={"content": "hi", "metadata": {}})
+    state["session_key"] = session_key
+    state["tool_names"] = ["echo_tool"]
+    state["rbac_visible_tool_names"] = ["echo_tool"]
+    state["provider_tool_names"] = ["echo_tool"]
+    state["parallel_enabled"] = False
+    state["max_parallel_tool_calls"] = 1
+    return state
+
+
+def _two_tool_hops() -> list[dict]:
+    return [
+        {"content": "", "tool_calls": [{"id": "call-1", "name": "echo_tool", "arguments": {"value": "a"}}]},
+        {"content": "", "tool_calls": [{"id": "call-2", "name": "echo_tool", "arguments": {"value": "b"}}]},
+        {"content": "done", "tool_calls": []},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_step_loop_executes_the_second_tool_hop_after_a_cleared_batch(monkeypatch) -> None:
+    """执行节点在跳末把名单清成空列表；下一跳没有审批名单时必须退回未设置态。
+
+    空列表的读侧含义是"整批已被拒"（`83c9192c6` 定的），陈旧值照读就会让第二个工具跳
+    一件都不执行，合并回执时抛 missing merged tool result 把整轮打死。
+    """
+    runner, executed = _step_loop_harness(monkeypatch, _two_tool_hops())
+
+    await runner._run_step_loop(
+        state=_step_loop_state(),
+        runtime=SimpleNamespace(context=SimpleNamespace(session=None)),
+        entry="call_model",
+    )
+
+    assert executed == ["call-1", "call-2"]
+
+
+@pytest.mark.asyncio
+async def test_step_loop_policy_rejected_hop_does_not_reject_the_next_hop(monkeypatch) -> None:
+    """信任策略打回只作用于它那一跳：本跳一条都不许执行，下一跳无名单时照常执行。"""
+    runner, executed = _step_loop_harness(monkeypatch, _two_tool_hops())
+
+    def _reject_only_the_first_hop(tool_call_payloads, *, session_key=""):
+        _ = session_key
+        if str(tool_call_payloads[0].get("id") or "") != "call-1":
+            return None
+        return {
+            "kind": "frontdoor_tool_approval_batch",
+            "batch_id": "batch:policy",
+            "channel_session": True,
+            "tool_calls": [dict(item) for item in tool_call_payloads],
+            "review_items": [
+                {
+                    "tool_call_id": "call-1",
+                    "name": "echo_tool",
+                    "risk_level": "high",
+                    "reason": "trust_policy",
+                    "arguments": {"value": "a"},
+                }
+            ],
+            "pass_through_tool_call_ids": [],
+        }
+
+    monkeypatch.setattr(runner, "_approval_request_for_tool_calls", _reject_only_the_first_hop)
+
+    await runner._run_step_loop(
+        state=_step_loop_state(session_key="ext:qq-official-probe:session"),
+        runtime=SimpleNamespace(context=SimpleNamespace(session=None)),
+        entry="call_model",
+    )
+
+    assert executed == ["call-2"]
 
 
 @pytest.mark.asyncio

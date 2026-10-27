@@ -122,7 +122,9 @@ class CeoPersistentState(TypedDict, total=False):
 
     # 本轮真正要执行的条目与已经定稿的合成结果（批审里被拒的那几条）。两者只在
     # `review_tool_calls → execute_tools` 这一跳内存在，合并回原顺序后清空。
-    executable_tool_call_payloads: list[dict[str, Any]]
+    # `None`＝本跳没有审批名单（回落实整批），空列表＝整批都被拒（一条都不许执行），
+    # 所以 review 在无名单那一条出口也得显式写 `None`，否则读到的就是上一跳的残值。
+    executable_tool_call_payloads: list[dict[str, Any]] | None
     synthetic_tool_results: list[dict[str, Any]]
 
     pending_content_open_image_payloads: list[dict[str, Any]]
