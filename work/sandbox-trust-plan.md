@@ -1153,6 +1153,10 @@ detecting → awaiting_confirm → downloading → installing → (needs_reboot)
     `adopt_persona` 对第三方会话只读这一份、空即不带人设；不依赖安装态（D20）。
     **实机验收**：人设卡常显、保存后 GET 读回；owner 会话显示可写根输入框，
     `/tmp/out` + `relative/path` 只落前者；第三方会话的 PATCH 带 roots 返回 403（单测覆盖）。
+  - **CLI 与体检**（本批续）：`negi sandbox status|install|uninstall|persona`（安装/卸载先打印
+    计划，必须 `--yes` 或交互确认）；`negi status` 增加沙箱体检（安装态、缺失的必需维度、
+    第三方会话处全权限的清单）。注：早前各轮写的 `negi doctor` 指的就是这条体检，
+    实现落在 `negi status`（仓库里没有顶层 `doctor` 命令）。
   - **仍未做**：无（P2/P3/P4 按计划不在本次范围）。
 
 - **已逐行复核**（本计划引用的行号都亲自读过）：

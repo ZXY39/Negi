@@ -76,6 +76,10 @@
 - **闸门是环境变量 `G3KU_SANDBOX_ENABLE_JAIL`**（默认关）。代码写完不等于可以打开：
   先按下一节的清单在装好后端的机器上验收，再设它。
 
+运维入口：`negi sandbox status|install|uninstall|persona`（`install`/`uninstall` 先打印计划，
+必须 `--yes` 或交互确认）；`negi status` 的环境体检包含沙箱安装态、缺失的必需维度，以及
+"第三方会话被放到全权限"的清单。
+
 ## 上机验收清单（打开闸门之前）
 
 在装好后端的机器上（Linux `bubblewrap` / Windows 有合格发行版 / macOS 自带 `sandbox-exec`），
