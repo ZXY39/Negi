@@ -8815,7 +8815,16 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
     ) -> dict[str, Any]:
         approval_request = dict(state.get("approval_request") or {})
         if not approval_request:
-            return {"next_step": "execute_tools"}
+            # 本跳没有审批名单，就得把名单显式退回未设置态：执行节点在跳末把它清成空列表，
+            # 而空列表的读侧含义是"整批已被拒"。不退回的话，上一跳留下的空列表会被这一跳
+            # 照读成"全拒"，一个工具都不执行，合并回执时抛 missing merged tool result。
+            # review 是 execute 的唯一前驱（生产里 next_step=execute_tools 只有本节点写），
+            # 所以重置放在这里就不依赖"谁记得在装新批次时清一遍"。
+            return {
+                "next_step": "execute_tools",
+                "executable_tool_call_payloads": None,
+                "synthetic_tool_results": [],
+            }
         if bool(approval_request.get("auto_reject")) or bool(
             approval_request.get("channel_session")
         ):
