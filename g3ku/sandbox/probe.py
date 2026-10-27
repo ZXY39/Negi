@@ -32,8 +32,20 @@ REQUIRED_DIMENSIONS: tuple[str, ...] = ("fs_read", "fs_write", "network")
 _DIMENSIONS: tuple[str, ...] = ("fs_read", "fs_write", "network", "process", "resource")
 
 _PROBE_TIMEOUT_SECONDS = 8.0
-# 我们自己的 WSL 发行版名字；装箱脚本与探测共用同一个常量。
-WSL_DISTRO_NAME = "negi-sandbox"
+# 我们自己的 WSL 发行版名字：不是"必须"，而是"优先 + 保证项"。装箱脚本与探测共用。
+WSL_DEDICATED_DISTRO = "negi-sandbox"
+# 逐发行版探测要起一次 `wsl` 互操作调用；机器上装了七八个发行版时不能全扫。
+_WSL_MAX_DISTRO_CHECKS = 4
+
+# 一个发行版能否承载 jail 的三条硬条件里的两条（第三条"不依赖发行版 dotfile"
+# 由 profile 保证：jail 只绑最小根，不读发行版的家目录与 shell 配置）。
+# bwrap 缺失时给可读的安装提示；python 缺失时 fsop 跑不起来，判不合格。
+_WSL_CAPABILITY_SCRIPT = (
+    'b="$(command -v bwrap || true)"; '
+    'p="$(command -v python3 || command -v python || true)"; '
+    'i=""; if [ -e /proc/sys/fs/binfmt_misc/WSLInterop ]; then i=1; fi; '
+    'printf "%s|%s|%s" "$b" "$p" "$i"'
+)
 
 
 def _empty_enforcement() -> dict[str, str]:
@@ -164,41 +176,116 @@ def _probe_darwin() -> dict[str, Any]:
     return _result(state="not_installed", reason="seatbelt_missing")
 
 
+def _wsl_list_distros(wsl: str) -> tuple[bool, list[str], dict[str, Any]]:
+    """列出已安装发行版。`wsl -l -q` 的输出是 UTF-16LE（带 BOM）。"""
+    code, out = _run([wsl, "-l", "-q"], encoding="utf-16-le")
+    distros: list[str] = []
+    for line in out.replace("\x00", "").splitlines():
+        name = line.strip().lstrip("\ufeff").strip()
+        if name and name not in distros:
+            distros.append(name)
+    return code == 0, distros, {"rc": code}
+
+
+def _wsl_distro_capabilities(wsl: str, distro: str) -> dict[str, Any]:
+    code, out = _run([wsl, "-d", distro, "--", "sh", "-lc", _WSL_CAPABILITY_SCRIPT])
+    line = out.strip().splitlines()[-1] if out.strip() else ""
+    parts = line.split("|")
+    bwrap = parts[0].strip() if len(parts) > 0 else ""
+    python = parts[1].strip() if len(parts) > 1 else ""
+    interop = (parts[2].strip() if len(parts) > 2 else "") == "1"
+    return {
+        "name": distro,
+        "probe_rc": code,
+        "bwrap": bwrap,
+        "python": python,
+        "interop": interop,
+        # 三条硬条件里的两条；第三条（不读发行版 dotfile）由 profile 保证。
+        "qualified": bool(bwrap) and bool(python),
+    }
+
+
+def _wsl_candidate_order(distros: list[str]) -> list[str]:
+    """专用发行版优先，其余保持 `wsl -l` 的顺序；最多探前 N 个。"""
+    ordered = [name for name in distros if name == WSL_DEDICATED_DISTRO]
+    ordered += [name for name in distros if name != WSL_DEDICATED_DISTRO]
+    return ordered[:_WSL_MAX_DISTRO_CHECKS]
+
+
+def _wsl_ready_result(distro: str, capabilities: dict[str, Any], detail: dict[str, Any]) -> dict[str, Any]:
+    return _result(
+        state="ready",
+        backend=BACKEND_WSL_BWRAP,
+        detail={
+            **detail,
+            "selected_distro": distro,
+            "dedicated": distro == WSL_DEDICATED_DISTRO,
+            "bwrap": str(capabilities.get("bwrap") or ""),
+            "python": str(capabilities.get("python") or ""),
+            # interop 注册存在不是不合格项：profile 用 --unshare-pid + 全新 /proc
+            # 把它挡在 jail 外。这里只把它作为 doctor 的读数列出来。
+            "wsl_interop": bool(capabilities.get("interop")),
+        },
+        enforcement={
+            "fs_read": FULL,
+            "fs_write": FULL,
+            "network": FULL,
+            "process": FULL,
+            # WSL2 的 cgroup 支持随发行版与 systemd 配置浮动，没有实测就不报 full。
+            "resource": PARTIAL,
+        },
+    )
+
+
 def _probe_windows() -> dict[str, Any]:
     wsl = shutil.which("wsl") or shutil.which("wsl.exe")
-    detail: dict[str, Any] = {"wsl": wsl or "", "distro": WSL_DISTRO_NAME}
+    detail: dict[str, Any] = {"wsl": wsl or "", "dedicated_distro": WSL_DEDICATED_DISTRO}
+    distro_failure: dict[str, Any] | None = None
     if wsl:
-        # wsl.exe 的输出是 UTF-16LE；列发行版的 rc 在"没有已安装发行版"时为非零。
-        code, out = _run([wsl, "-l", "-q"], encoding="utf-16-le")
-        detail["distros_rc"] = code
-        distros = [
-            line.strip()
-            for line in out.replace("\x00", "").splitlines()
-            if line.strip() and not line.strip().startswith("\ufeff")
-        ]
+        listed, distros, listing = _wsl_list_distros(wsl)
+        detail["distros_rc"] = listing.get("rc")
         detail["distros"] = distros
-        if code == 0 and WSL_DISTRO_NAME in distros:
-            code_inner, inner = _run(
-                [wsl, "-d", WSL_DISTRO_NAME, "--", "bwrap", "--version"],
-                encoding="utf-8",
-            )
-            if code_inner == 0:
-                return _result(
-                    state="ready",
-                    backend=BACKEND_WSL_BWRAP,
-                    detail={**detail, "bwrap": inner.strip()},
-                    enforcement={
-                        "fs_read": FULL,
-                        "fs_write": FULL,
-                        "network": FULL,
-                        "process": FULL,
-                        "resource": PARTIAL,
-                    },
+        if listed and distros:
+            checked: list[dict[str, Any]] = []
+            best_missing_bwrap: dict[str, Any] | None = None
+            for distro in _wsl_candidate_order(distros):
+                capabilities = _wsl_distro_capabilities(wsl, distro)
+                checked.append(
+                    {
+                        "name": distro,
+                        "bwrap": bool(capabilities.get("bwrap")),
+                        "python": bool(capabilities.get("python")),
+                        "qualified": bool(capabilities.get("qualified")),
+                    }
                 )
-            detail["bwrap_probe_rc"] = code_inner
+                if capabilities["qualified"]:
+                    detail["checked"] = checked
+                    return _wsl_ready_result(distro, capabilities, detail)
+                if capabilities.get("python") and best_missing_bwrap is None:
+                    best_missing_bwrap = capabilities
+            detail["checked"] = checked
+            if best_missing_bwrap is not None:
+                # 有 Python（fsop 能跑）但缺 bwrap：给出发行版内的安装命令，不静默降级。
+                detail["install_hint"] = (
+                    f"wsl -d {best_missing_bwrap['name']} -- sudo apt-get install -y bubblewrap"
+                )
+                distro_failure = _result(
+                    state="runtime_missing",
+                    reason="bwrap_missing_in_distro",
+                    detail=detail,
+                )
+            else:
+                distro_failure = _result(
+                    state="runtime_missing",
+                    reason="no_qualified_distro",
+                    detail=detail,
+                )
+    # 发行版不合格时仍然看容器：一台装着 Docker 的机器不该因为 WSL 里缺 bwrap 被判不可用。
     container = _container_backend()
     if container is not None:
         return container
+    if distro_failure is not None:
+        return distro_failure
     state = "runtime_missing" if wsl else "not_installed"
     return _result(
         state=state,
@@ -234,7 +321,7 @@ __all__ = [
     "MISSING",
     "PARTIAL",
     "REQUIRED_DIMENSIONS",
-    "WSL_DISTRO_NAME",
+    "WSL_DEDICATED_DISTRO",
     "probe_install_state",
     "third_party_usable",
 ]

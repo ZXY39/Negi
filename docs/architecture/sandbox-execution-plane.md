@@ -44,9 +44,21 @@
 - **意图存储**：`<数据根>/sandbox/session-modes.json`，进程内缓存、变更时整份原子落盘。
   换工作区不丢开关；每回合解析只读内存。`operator_unlocks` 同文件记"谁在什么时候用口令
   把会话放到 `unrestricted`"。
-- **安装态**：`g3ku/sandbox/probe.py` 探测（Windows 查 WSL 发行版、Linux 查 bwrap 与
+- **安装态**：`g3ku/sandbox/probe.py` 探测（Windows 扫已安装的 WSL 发行版、Linux 查 bwrap 与
   非特权 userns、macOS 查 `sandbox-exec`、任意平台回退容器运行时），结论按逐维度强制力
   上报并缓存在进程内；`POST /api/sandbox/refresh` 才重探。
+
+  **Windows 不要求专有发行版**：`wsl -l -q` 列出的发行版逐个探能力，一个发行版要能承载
+  jail 需同时有 `bubblewrap` 与 `python3`（后者跑 `fsop`）。专用发行版 `negi-sandbox`
+  排在最前、命中即停，用户自己的发行版次之；最多探 4 个，避免多个发行版时启动被拖慢。
+  有 Python 缺 bwrap 时给发行版内的安装命令（`runtime_missing` / `bwrap_missing_in_distro`），
+  都不合格则 `no_qualified_distro`，一个都没有则 `wsl_distro_missing`。
+  发行版开着 automount 不影响隔离——jail 的 mount namespace 里只有 profile 绑进去的路径，
+  `/mnt` 与 `/init` 从不 bind；WSL interop 的 binfmt 用 `--unshare-pid` + 全新 `/proc` 挡在
+  jail 外，探测把 `wsl_interop` 作为读数留给 doctor，不作为不合格项。
+
+  **安装态是全局读数、不进会话元数据**；`jailed` 的发放另有一道
+  `JAIL_BACKENDS_AVAILABLE` 闸门（见下）。
 - **`JAIL_BACKENDS_AVAILABLE` 是 fail-closed 闸门**：jail 后端接进执行道之前恒为 False，
   `resolve_tier` 即便读到 `ready` 也只发 `readonly`——安装态好看但没人看守的数据面不发。
 

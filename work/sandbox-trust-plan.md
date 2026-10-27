@@ -1,7 +1,7 @@
 # 沙箱执行面 + 第三方信任分级 实现计划
 
 日期：2026-10-26
-最后更新：2026-10-27（第四轮拍板：**安装态驱动的档位模型**，见 D17–D20）
+最后更新：2026-10-27（第四轮拍板：**安装态驱动的档位模型**，见 D17–D21）
 状态：**P0 完成**；**P1 的第一步（档位开关 + 安装态探测）完成**；
 jail 本体（P1a 剩余）、安装器（P1b）、前端面板仍未开工。分支 `feat/sandbox-trust`。
 取证基线：`main` @ `53fbf30f`。标 † 的是子代理读数，尚未逐行复核，动对应阶段前先复核。
@@ -235,6 +235,16 @@ UI 标签跟着安装态换字（只读↔全权限 / 开启沙箱↔关闭沙�
 - **D20 群聊人设配置不依赖安装态**：D7 说"群聊人设默认不导入，用户在沙箱页面配置"，但人设注入发生在**宿主前门**
   （`g3ku/runtime/frontdoor/message_builder.py` 的 `adopted_persona_text`），与 jail 无关。
   所以沙箱页面里的**人设配置区块在未安装时也可用**；只有依赖 jail 的区块（文件、包、磁盘、重置卷）才锁在安装态后面。
+
+- **D21 Windows 发行版来源：现有发行版优先，专用 rootfs 回退**（第五轮增补，取代 D12 里
+  "必须专用发行版"的隐含前提）。探测扫 `wsl -l -q` 的已安装发行版，**同时具备 `bubblewrap`
+  与 `python3`** 即合格（后者跑 `fsop`）；专用发行版 `negi-sandbox` 排最前、命中即停，
+  用户自己的发行版次之，最多探 4 个。隔离强度不因此下降：jail 的 mount namespace 里只有
+  profile 绑进去的路径，发行版开着 automount 也看不见 `/mnt`；`/init` 与 WSL interop 的
+  binfmt 用 `--unshare-pid` + 全新 `/proc` 挡在 jail 外（`wsl_interop` 作为读数留给 doctor，
+  不是不合格项）。代价：发行版的版本与包集不可 pin，用户可能随手卸载或升级；专用 rootfs
+  仍是"保证 `fsop` 一定在、包集最小"的唯一路子，所以保留为回退项，安装页三选一
+  （现有发行版 / 专用 rootfs / 容器运行时）。
 
 ### 沙箱档位状态机（P0/P1 的唯一判据来源）
 
@@ -666,7 +676,7 @@ P0 是这次改造里**性价比最高的一段**：不引入任何新运行时�
   |---|---|---|
   | Linux | `bubblewrap` 包（+ 可选 cgroup v2 委托） | 约 100 KB 级 |
   | macOS | 无需安装（Seatbelt 系统自带），只做探测 | 0 |
-  | Windows | WSL2 + 专用发行版 rootfs tar（`wsl --import`，关 automount） | rootfs 数百 MB |
+  | Windows | WSL2 + **一个合格发行版**（现有发行版需有 `bwrap` + `python3`；否则导入专用 rootfs tar，`wsl --import`，关 automount） | rootfs 数百 MB（复用现有发行版时 0） |
   | 可选（任意平台） | Podman / Docker + 沙箱镜像（pin digest） | 镜像数百 MB～GB |
 
 - **安装确认页必须列出**：平台检测结果、要装什么、来源 URL 与校验和、体积、安装落点、预计磁盘占用、
