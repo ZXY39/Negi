@@ -88,23 +88,17 @@ class _LocalLayout:
 
 
 class _WslLayout:
-    """卷在发行版内部：`/mnt/*` 既慢又属于禁绑前缀，工作区必须落在 ext4 上。"""
+    """卷在发行版内部：`/mnt/*` 既慢又属于禁绑前缀，工作区必须落在 ext4 上。
+
+    路径一律用**绝对**形式：宿主侧的文件桥把路径放进单引号里传给 shell，带 `~` 的路径
+    在引号内不会被展开。home 在首次使用时问一次发行版，之后复用。
+    """
 
     def __init__(self, *, wsl_path: str, distro: str):
         self.wsl_path = wsl_path
         self.distro = distro
         self._helper_ready = False
-
-    def _base(self) -> str:
-        return "~/.negi-sandbox/sandboxes"
-
-    def paths_for(self, sandbox_id: str) -> dict[str, str]:
-        root = f"{self._base()}/{sandbox_id}"
-        return {
-            "workspace": f"{root}/workspace",
-            "inbox": f"{root}/shared/inbox",
-            "outbox": f"{root}/shared/outbox",
-        }
+        self._home = ""
 
     def _run(self, script: str, *, timeout: float = 60.0) -> tuple[int, str]:
         completed = subprocess.run(  # noqa: S603 - 固定 argv
@@ -115,9 +109,29 @@ class _WslLayout:
         )
         return completed.returncode, (completed.stdout or b"").decode("utf-8", errors="replace")
 
+    def home(self) -> str:
+        if not self._home:
+            code, out = self._run('printf %s "$HOME"')
+            home = out.strip()
+            if code != 0 or not home.startswith("/"):
+                raise SandboxUnavailableError(f"wsl home resolution failed in {self.distro}")
+            self._home = home.rstrip("/") or "/root"
+        return self._home
+
+    def _base(self) -> str:
+        return f"{self.home()}/.negi-sandbox"
+
+    def paths_for(self, sandbox_id: str) -> dict[str, str]:
+        root = f"{self._base()}/sandboxes/{sandbox_id}"
+        return {
+            "workspace": f"{root}/workspace",
+            "inbox": f"{root}/shared/inbox",
+            "outbox": f"{root}/shared/outbox",
+        }
+
     def ensure(self, sandbox_id: str) -> dict[str, str]:
         paths = self.paths_for(sandbox_id)
-        script = "; ".join(f"mkdir -p ~/{path.lstrip('~').lstrip('/')}" for path in paths.values())
+        script = "; ".join(f"mkdir -p '{path}'" for path in paths.values())
         code, _ = self._run(script)
         if code != 0:
             raise SandboxUnavailableError(f"wsl mkdir failed in {self.distro}")
@@ -130,7 +144,7 @@ class _WslLayout:
         source = Path(__file__).with_name(FSOP_HELPER_NAME)
         if not source.is_file():
             raise SandboxUnavailableError("fsop helper missing")
-        script = f"mkdir -p ~/.negi-sandbox && cat > ~/.negi-sandbox/{FSOP_HELPER_NAME}"
+        script = f"mkdir -p '{self._base()}' && cat > '{self.helper_path}'"
         completed = subprocess.run(  # noqa: S603
             [self.wsl_path, "-d", self.distro, "--", "sh", "-lc", script],
             input=source.read_bytes(),
@@ -144,10 +158,10 @@ class _WslLayout:
 
     @property
     def helper_path(self) -> str:
-        return f"~/.negi-sandbox/{FSOP_HELPER_NAME}"
+        return f"{self._base()}/{FSOP_HELPER_NAME}"
 
     def destroy(self, sandbox_id: str) -> None:
-        self._run(f"rm -rf ~/.negi-sandbox/sandboxes/{sandbox_id}", timeout=120)
+        self._run(f"rm -rf '{self._base()}/sandboxes/{sandbox_id}'", timeout=120)
 
 
 class SandboxManager:

@@ -22,7 +22,7 @@ from g3ku.sandbox.manager import SandboxHandle
 from g3ku.utils.helpers import safe_filename
 
 MAX_BRIDGE_FILE_BYTES = 64 * 1024 * 1024
-AREAS = ("inbox", "outbox")
+AREAS = ("workspace", "inbox", "outbox")
 
 
 def _safe_name(value: Any, *, fallback: str) -> str:

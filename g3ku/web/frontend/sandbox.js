@@ -38,6 +38,7 @@ const state = {
   current: null,
   pollTimer: null,
   pendingMode: '',
+  area: 'workspace',
 };
 
 const $ = (id) => document.getElementById(id);
@@ -116,6 +117,7 @@ function renderStatus(item) {
   } else {
     hint.textContent = REASON_TEXT[item.reason] || item.install_plan_reason || '当前没有可自动安装的内容。';
   }
+  renderFileSection();
 }
 
 function renderPlan(plan) {
@@ -188,6 +190,90 @@ async function loadStatus(refresh) {
   const suffix = refresh ? '?refresh=1' : '';
   const payload = await api(`/api/sandbox/status${suffix}`);
   renderStatus(payload.item || {});
+}
+
+function renderFiles(entries) {
+  const list = $('file-list');
+  list.textContent = '';
+  const items = entries || [];
+  $('files-empty').hidden = items.length > 0;
+  items.forEach((entry) => {
+    const row = document.createElement('li');
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = `${entry.kind === 'dir' ? '📁' : '📄'} ${entry.name}`;
+    const meta = document.createElement('span');
+    meta.className = 'meta';
+    meta.textContent = entry.kind === 'dir' ? '目录' : `${entry.size || 0} B`;
+    row.append(name, meta);
+    if (entry.kind !== 'dir') {
+      const link = document.createElement('a');
+      link.className = 'btn ghost';
+      link.textContent = '下载';
+      link.href = `/api/ceo/sessions/${encodeURIComponent(currentSessionId())}/sandbox/export?area=${encodeURIComponent(
+        state.area,
+      )}&name=${encodeURIComponent(entry.name)}`;
+      row.appendChild(link);
+    }
+    list.appendChild(row);
+  });
+}
+
+async function loadFiles() {
+  const sessionId = currentSessionId();
+  if (!sessionId || !state.status || !state.status.file_management_available) return;
+  try {
+    const payload = await api(
+      `/api/ceo/sessions/${encodeURIComponent(sessionId)}/sandbox/files?area=${encodeURIComponent(state.area)}`,
+    );
+    renderFiles((payload.item || {}).entries || []);
+  } catch (error) {
+    renderFiles([]);
+    $('files-hint').textContent = error.status === 409 ? '沙箱尚未安装，文件管理不可用。' : `读取失败：${error.message}`;
+  }
+}
+
+async function uploadFile(file) {
+  const sessionId = currentSessionId();
+  if (!sessionId || !file) return;
+  const form = new FormData();
+  form.append('file', file);
+  try {
+    const response = await fetch(`/api/ceo/sessions/${encodeURIComponent(sessionId)}/sandbox/import`, {
+      method: 'POST',
+      body: form,
+      credentials: 'same-origin',
+    });
+    if (!response.ok) {
+      let detail = response.status;
+      try {
+        detail = (await response.json()).detail || detail;
+      } catch (error) {
+        detail = response.status;
+      }
+      throw new Error(String(detail));
+    }
+    toast(`已导入 ${file.name}`);
+    state.area = 'inbox';
+    syncAreaTabs();
+    await loadFiles();
+  } catch (error) {
+    toast(`导入失败：${error.message}`);
+  }
+}
+
+function syncAreaTabs() {
+  document.querySelectorAll('#area-tabs .tab').forEach((node) => {
+    node.classList.toggle('active', node.dataset.area === state.area);
+  });
+}
+
+function renderFileSection() {
+  const available = Boolean(state.status && state.status.file_management_available && state.current);
+  $('files-card').hidden = !available;
+  if (!available) return;
+  syncAreaTabs();
+  loadFiles();
 }
 
 async function loadPlan(reveal) {
@@ -327,6 +413,7 @@ function renderSession(item) {
   $('tasks-hint').textContent = item.tasks_allowed
     ? '此档可以派异步任务。'
     : '受限档不能派异步任务：任务节点跑在 worker 里，受限意图传不进那条执行面。';
+  renderFileSection();
 }
 
 function currentSessionId() {
@@ -433,6 +520,34 @@ function bindEvents() {
   $('session-select').addEventListener('change', loadSessionDetail);
   $('manual-session-btn').addEventListener('click', loadSessionDetail);
   $('save-mode-btn').addEventListener('click', saveMode);
+  document.querySelectorAll('#area-tabs .tab').forEach((node) => {
+    node.addEventListener('click', () => {
+      state.area = node.dataset.area || 'workspace';
+      syncAreaTabs();
+      loadFiles();
+    });
+  });
+  $('files-refresh-btn').addEventListener('click', loadFiles);
+  $('upload-input').addEventListener('change', async (event) => {
+    const file = event.target.files && event.target.files[0];
+    event.target.value = '';
+    if (file) await uploadFile(file);
+  });
+  $('reset-volume-btn').addEventListener('click', async () => {
+    const sessionId = currentSessionId();
+    if (!sessionId) return;
+    if (!window.confirm('重置会清空该会话的沙箱卷（workspace 与 shared 都删）。确定继续？')) return;
+    try {
+      await api(`/api/ceo/sessions/${encodeURIComponent(sessionId)}/sandbox/reset`, {
+        method: 'POST',
+        body: JSON.stringify({ confirm: true }),
+      });
+      toast('会话卷已重置');
+      await loadFiles();
+    } catch (error) {
+      toast(`重置失败：${error.message}`);
+    }
+  });
 }
 
 async function main() {

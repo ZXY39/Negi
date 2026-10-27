@@ -15,14 +15,20 @@
 
 from __future__ import annotations
 
+import asyncio
+import shutil
+from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
-from fastapi import APIRouter, Body, HTTPException, Query
+from fastapi import APIRouter, Body, File, HTTPException, Query, UploadFile
+from fastapi.responses import Response
 from loguru import logger
 
 from g3ku.audit_events import emit_audit_event
 from g3ku.runtime.external_sessions import get_external_session_registry
 from g3ku.runtime.session_trust import TRUST_OWNER, session_trust
+from g3ku.sandbox.errors import SandboxDeniedError, SandboxUnavailableError
 from g3ku.sandbox.installer import (
     build_install_plan,
     install_status,
@@ -47,6 +53,7 @@ from g3ku.sandbox.state import (
     refresh_install_state,
     set_session_mode,
 )
+from g3ku.utils.helpers import safe_filename
 
 router = APIRouter()
 
@@ -178,6 +185,127 @@ async def patch_session_sandbox(session_id: str, payload: dict = Body(...)):
     except Exception as exc:  # noqa: BLE001 - 审计失败不阻塞开关
         logger.warning("sandbox mode audit emit failed: {}", exc)
     return {"ok": True, "item": item}
+
+
+@router.get("/ceo/sessions/{session_id}/sandbox/files")
+async def get_session_sandbox_files(
+    session_id: str,
+    area: str = "workspace",
+    limit: int = 200,
+):
+    handle, manager = _installed_handle(session_id)
+    from g3ku.sandbox.bridge_files import list_area
+
+    normalized_area = str(area or "workspace").strip().lower()
+    entries = await asyncio.to_thread(list_area, handle, area=normalized_area, max_entries=max(1, min(int(limit or 200), 1000)))
+    return {"ok": True, "item": {"area": normalized_area, "entries": entries}}
+
+
+@router.post("/ceo/sessions/{session_id}/sandbox/import")
+async def post_session_sandbox_import(session_id: str, file: UploadFile = File(...)):
+    handle, _manager = _installed_handle(session_id)
+    from g3ku.sandbox.bridge_files import import_file
+
+    staging_dir = await asyncio.to_thread(lambda: _staging_dir())
+    staged = staging_dir / f"{uuid4().hex}-{safe_filename(file.filename or 'upload.bin') or 'upload.bin'}"
+    try:
+        with staged.open("wb") as output:
+            await asyncio.to_thread(shutil.copyfileobj, file.file, output)
+        result = await asyncio.to_thread(import_file, handle, staged)
+    except SandboxDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except SandboxUnavailableError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    finally:
+        staged.unlink(missing_ok=True)
+    try:
+        emit_audit_event(
+            "sandbox",
+            "info",
+            "files_imported",
+            "file imported into the sandbox inbox",
+            detail={"session_id": session_id, "name": result.get("name"), "bytes": result.get("bytes")},
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    return {"ok": True, "item": result}
+
+
+@router.get("/ceo/sessions/{session_id}/sandbox/export")
+async def get_session_sandbox_export(
+    session_id: str,
+    name: str,
+    area: str = "outbox",
+):
+    handle, _manager = _installed_handle(session_id)
+    from g3ku.sandbox.bridge_files import export_file
+
+    try:
+        resolved_name, payload = await asyncio.to_thread(export_file, handle, name, area=str(area or "outbox").lower())
+    except SandboxDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except SandboxUnavailableError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return Response(
+        content=payload,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{resolved_name}"'},
+    )
+
+
+@router.post("/ceo/sessions/{session_id}/sandbox/reset")
+async def post_session_sandbox_reset(session_id: str, payload: dict = Body(...)):
+    if not bool(payload.get("confirm")):
+        raise HTTPException(status_code=400, detail="reset_confirmation_required")
+    handle, manager = _installed_handle(session_id)
+    key = str(session_id or "").strip()
+    trust = session_trust(key)
+    await asyncio.to_thread(manager.forget, key)
+    new_handle = await asyncio.to_thread(manager.ensure, key, trust=trust)
+    try:
+        emit_audit_event(
+            "sandbox",
+            "warning",
+            "volume_reset",
+            "sandbox volume reset",
+            detail={"session_id": key, "sandbox_id": new_handle.sandbox_id},
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    return {"ok": True, "item": _session_item(key), "paths": dict(new_handle.paths)}
+
+
+def _staging_dir() -> Path:
+    from g3ku.deployment.data_root import data_work_path
+
+    directory = data_work_path("sandbox") / "incoming"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def _sandbox_manager():
+    from g3ku.sandbox.factory import get_sandbox_manager
+
+    return get_sandbox_manager()
+
+
+def _installed_handle(session_id: str):
+    """文件管理只在装好之后才有对象可管；没装就是 409，不是空列表。"""
+    key = str(session_id or "").strip()
+    if not _session_exists(key):
+        raise HTTPException(status_code=404, detail="session_not_found")
+    reading = install_state()
+    if str(reading.get("state") or "") not in {"ready", "partial"}:
+        raise HTTPException(status_code=409, detail="sandbox_not_installed")
+
+    manager = _sandbox_manager()
+    if manager is None:
+        raise HTTPException(status_code=409, detail="sandbox_backend_unavailable")
+    try:
+        handle = manager.ensure(key, trust=session_trust(key))
+    except SandboxUnavailableError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return handle, manager
 
 
 @router.get("/sandbox/status")

@@ -65,6 +65,26 @@
       </div>
     </section>
 
+    <section class="card wide" id="files-card" hidden>
+      <h2>沙箱文件</h2>
+      <p class="hint" id="files-hint">会话卷里的文件；导入只进 inbox，模型写出的文件在 outbox。</p>
+      <div class="tabs" id="area-tabs">
+        <button class="tab" type="button" data-area="workspace">workspace</button>
+        <button class="tab" type="button" data-area="inbox">inbox</button>
+        <button class="tab" type="button" data-area="outbox">outbox</button>
+      </div>
+      <div class="card-actions">
+        <label class="btn ghost file-input">
+          导入到 inbox
+          <input id="upload-input" type="file" hidden />
+        </label>
+        <button id="files-refresh-btn" class="btn ghost" type="button">刷新列表</button>
+        <button id="reset-volume-btn" class="btn danger" type="button">重置会话卷</button>
+      </div>
+      <ul id="file-list" class="file-list"></ul>
+      <p class="hint" id="files-empty" hidden>这个区还没有文件。</p>
+    </section>
+
     <section class="card wide" id="plan-card" hidden>
       <h2>安装内容</h2>
       <p class="hint">安装前请确认下面的步骤与提权要求。任何一步失败都会中止，不会留下半装状态以外的改动。</p>
