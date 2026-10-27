@@ -1101,11 +1101,17 @@ detecting → awaiting_confirm → downloading → installing → (needs_reboot)
   （`wsl_distro_missing`，本机 WSL2 无发行版）与 `ui_labels`；owner PATCH 到 `restricted` 得
   `readonly`；第三方 PATCH 到 `unrestricted` 无口令 403、错口令 403、对口令 200 并落
   `operator_unlocks`；`session-modes.json` 内容与预期一致。
-- **P1a 剩余（jail 本体）**：`backend_base` / `profiles` / `backend_bwrap` / `backend_seatbelt` /
-  `backend_wsl` / `backend_container` / `fsop` / `manager` / `router` / `bridge_files`，
-  以及把数据面工具换成代理实例的装配改动；落地后把 `policy.JAIL_BACKENDS_AVAILABLE` 置真。
-  **本机无法验收**（无 WSL 发行版、无 Docker/Podman），必须在一台装好后端的机器上跑
-  P1 验收那一套断言，再打开闸门。
+- **P1a 基础设施已落地**（本批）：`errors` / `backend_base` / `profiles`（bwrap argv 与
+  SBPL 的唯一产地，含禁绑断言）/ `fsop`（jail 内一次性文件助手，字节流 JSON）/
+  `manager`（每会话卷、lease、idle 回收、本地与 WSL 两种布局）/ `bridge_files`（导入导出
+  的守卫）/ 四个后端（bwrap / wsl_bwrap / seatbelt / container）。
+  测试 `tests/test_sandbox_{profiles,fsop,manager}.py`（37 条，含禁绑路径、symlink 逃逸、
+  环境剥离、文件桥穿越）。
+  **本机无法跑真 jail**：没有 WSL 发行版、没有 Docker/Podman，所以 `JAIL_BACKENDS_AVAILABLE`
+  保持 false——基础设施就位不等于可以放开数据面。
+- **P1a 剩下的最后一步**：把数据面工具换成走 `manager` 的代理实例（`router.py`），
+  在装好后端的机器上跑完 P1 验收（读不到 `master.key`、`curl` 失败、`env` 无 key、
+  `netstat` 无监听、`/mnt` 与 `/init` 不可见），再把闸门置真。
 - **P1b**：安装器（`POST /api/sandbox/install` 当前恒为 `install_available: false`）。
 - **前端**：权限面板里的档位开关与沙箱页面尚未接这批端点（`ui_labels` 已由服务端给出）。
 

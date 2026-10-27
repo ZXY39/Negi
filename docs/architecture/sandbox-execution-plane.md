@@ -39,6 +39,32 @@
 但要等 jail 后端（manager + router）接进执行道、`JAIL_BACKENDS_AVAILABLE` 打开之后才会发放。
 在那之前工具面与读根判据已经就位，接后端只改这一处开关。
 
+## jail 基础设施（后端 / 布局 / 助手 / 文件桥）
+
+这一层已经就位，但**还没有接到执行道**：`JAIL_BACKENDS_AVAILABLE` 仍为 false，
+所以没有会话会进 `jailed`。接线的最后一步（把数据面工具换成代理实例）与真机验收
+是同一件事，验收没跑完就不打开闸门。
+
+| 模块 | 职责 |
+|---|---|
+| `g3ku/sandbox/backend_base.py` | 后端契约：`SandboxSpec`（卷、可写根、网络、助手绑定）、`Enforcement`（逐维度）、`ExecResult` |
+| `g3ku/sandbox/profiles.py` | **bwrap argv 与 Seatbelt profile 的唯一产地**：`--unshare-all`、`--clearenv`、最小只读系统根、会话卷唯一可写、`/mnt` 与 `/init` 永不 bind；`assert_profile_safe` 在执行前再扫一遍 bind |
+| `g3ku/sandbox/backend_bwrap.py` | Linux：拼 argv + 执行前断言 |
+| `g3ku/sandbox/backend_wsl.py` | Windows：`wsl -d <distro> -- bwrap …`；宿主环境原样传给 `wsl.exe`，jail 内环境由 bwrap 决定 |
+| `g3ku/sandbox/backend_seatbelt.py` | macOS：`sandbox-exec -p <SBPL>`，默认全拒 |
+| `g3ku/sandbox/backend_container.py` | 可选：`cap-drop=ALL`、`no-new-privileges`、pids/内存上限、inbox 只读挂载 |
+| `g3ku/sandbox/fsop.py` | jail 内一次性文件助手（read/write/replace/list/stat/search），只依赖标准库、走字节流 JSON |
+| `g3ku/sandbox/manager.py` | 每会话一个卷、lease 计数、idle 回收、执行与 fsop 委派；本地卷在数据根，WSL 卷在发行版内 |
+| `g3ku/sandbox/bridge_files.py` | `/shared/{inbox,outbox}` 导入导出：只收普通文件、拒 symlink、文件名单段化、64 MB 上限 |
+| `g3ku/sandbox/errors.py` | `denied` / `unavailable` / `runner_failure` 三分类（按后端 stderr 签名，不猜模型文本） |
+
+两条实现约束值得记住：
+
+- **`fsop` 靠单文件绑进 jail**（`/opt/negi/fsop.py`，只读）：jail 里没有仓库、不装包，
+  标准库足够；WSL 布局改成把这份文件拷进发行版一次。
+- **jail 内不继承宿主环境**：本地后端由 `--clearenv` 与子进程净化环境双重保证，
+  `G3KU_*` 一个都进不去；`wsl.exe` 自己需要宿主环境启动，这一层不过 jail 边界。
+
 ## 档位存储与 API
 
 - **意图存储**：`<数据根>/sandbox/session-modes.json`，进程内缓存、变更时整份原子落盘。
