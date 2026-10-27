@@ -5,6 +5,23 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>沙箱环境 · Negi</title>
   <link rel="icon" href="/favicon.ico" />
+  <script>
+    // 主题跟随外壳（同源 iframe 读父页的 data-theme）；独立打开时退回系统偏好。
+    (function () {
+      var theme = null;
+      try {
+        if (window.parent && window.parent !== window) {
+          theme = window.parent.document.documentElement.getAttribute('data-theme');
+        }
+      } catch (error) {
+        theme = null;
+      }
+      if (theme !== 'light' && theme !== 'dark') {
+        theme = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+      }
+      document.documentElement.setAttribute('data-theme', theme);
+    })();
+  </script>
   <link rel="stylesheet" href="/sandbox.css" />
 </head>
 <body>

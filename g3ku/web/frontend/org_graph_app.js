@@ -527,6 +527,8 @@ const U = {
     viewMemory: document.getElementById("view-memory"),
     viewModels: document.getElementById("view-models"),
     viewExternal: document.getElementById("view-external"),
+    viewSandbox: document.getElementById("view-sandbox"),
+    sandboxFrame: document.getElementById("sandbox-frame"),
     viewTaskDetails: document.getElementById("view-task-details"),
     viewAudit: document.getElementById("view-audit"),
     stickerRefresh: document.getElementById("sticker-refresh-btn"),
@@ -9920,10 +9922,14 @@ function bindMemoryCardToggles() {
 const MEMORY_QUEUE_BODY_CHARS = 220;
 
 function switchView(view) {
-    const map = { ceo: U.viewCeo, tasks: U.viewTasks, skills: U.viewSkills, tools: U.viewTools, stickers: U.viewStickers, memory: U.viewMemory, models: U.viewModels, external: U.viewExternal, audit: U.viewAudit, "task-details": U.viewTaskDetails };
+    const map = { ceo: U.viewCeo, tasks: U.viewTasks, skills: U.viewSkills, tools: U.viewTools, stickers: U.viewStickers, memory: U.viewMemory, models: U.viewModels, external: U.viewExternal, sandbox: U.viewSandbox, audit: U.viewAudit, "task-details": U.viewTaskDetails };
     const navView = view === "task-details" ? "tasks" : view;
     const leavingTaskDetails = view !== "task-details" && !!U.viewTaskDetails?.classList.contains("active");
     S.view = navView;
+    // 沙箱页按需加载：首次进入才挂 iframe，避免主界面一打开就多一份轮询。
+    if (view === "sandbox" && U.sandboxFrame && U.sandboxFrame.getAttribute("src") === "about:blank") {
+        U.sandboxFrame.setAttribute("src", "/sandbox.html");
+    }
     U.nav.forEach((btn) => btn.classList.toggle("active", btn.dataset.view === navView));
     Object.entries(map).forEach(([key, el]) => {
         if (!el) return;
@@ -10002,6 +10008,12 @@ function toggleTheme() {
     const html = document.documentElement;
     const theme = html.getAttribute("data-theme") === "light" ? "dark" : "light";
     html.setAttribute("data-theme", theme);
+    try {
+        // 沙箱页是同源 iframe，主题不会跟着继承，切主题时主动通知一声。
+        U.sandboxFrame?.contentWindow?.postMessage({ type: "negi-theme", theme }, window.location.origin);
+    } catch (error) {
+        // 跨源或还没挂载都无所谓：iframe 自己会按父页属性初始化。
+    }
     syncThemeToggleIcons();
     updateThemeToggleA11y();
     writeStoredUiPreference(THEME_KEY, theme);

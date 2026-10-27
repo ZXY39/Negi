@@ -565,3 +565,10 @@ async function main() {
 }
 
 document.addEventListener('DOMContentLoaded', main);
+
+window.addEventListener('message', (event) => {
+  const data = event.data || {};
+  if (data.type === 'negi-theme' && (data.theme === 'light' || data.theme === 'dark')) {
+    document.documentElement.setAttribute('data-theme', data.theme);
+  }
+});

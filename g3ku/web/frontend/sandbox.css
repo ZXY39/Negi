@@ -1,5 +1,5 @@
 :root {
-  color-scheme: light dark;
+  color-scheme: dark;
   --bg: #0f1115;
   --card: #171a21;
   --line: #262b36;
@@ -11,14 +11,13 @@
   --warn: #d9a227;
 }
 
-@media (prefers-color-scheme: light) {
-  :root {
-    --bg: #f5f7fb;
-    --card: #ffffff;
-    --line: #dfe5ee;
-    --text: #1b2230;
-    --muted: #5d6b80;
-  }
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f5f7fb;
+  --card: #ffffff;
+  --line: #dfe5ee;
+  --text: #1b2230;
+  --muted: #5d6b80;
 }
 
 * { box-sizing: border-box; }

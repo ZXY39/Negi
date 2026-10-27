@@ -106,6 +106,10 @@
                 <i data-lucide="plug"></i>
                 <span>外部</span>
             </button>
+            <button class="nav-item" data-view="sandbox" type="button">
+                <i data-lucide="shield"></i>
+                <span>沙箱</span>
+            </button>
             <button class="nav-item" data-view="audit" type="button">
                 <i data-lucide="scroll-text"></i>
                 <span>日志</span>
@@ -840,6 +844,11 @@
                     </div>
                 </section>
             </section>
+            <section id="view-sandbox" class="view-section" style="display: none; padding: 0;">
+                <iframe id="sandbox-frame" title="沙箱环境" src="about:blank"
+                    style="display: block; width: 100%; height: calc(100vh - 1px); border: 0; background: transparent;"></iframe>
+            </section>
+
             <section id="view-task-details" class="view-section" style="display: none;">
                 <header class="content-header project-header task-detail-header">
                     <button class="icon-btn back-btn task-detail-back-btn" id="back-to-tasks" type="button"
