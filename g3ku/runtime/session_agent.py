@@ -4143,11 +4143,30 @@ class RuntimeAgentSession:
                         user_messages = []
                     try:
                         review_turn_id = self._current_turn_id(user_input)
+                        # 记忆窗口收"用户实际看到的那版"：标记换成发送痕迹，没发出去的
+                        # 那行也如实记成未发出，而不是让摘要模型去读一段标记语法。
+                        from g3ku.audit_events import emit_audit_event
+                        from g3ku.stickers import resolve_reply_stickers
+
+                        review_reply = resolve_reply_stickers(output)
+                        if review_reply.undelivered:
+                            emit_audit_event(
+                                "stickers",
+                                "warning",
+                                "sticker_send_failed",
+                                "表情包未发出："
+                                + "、".join(review_reply.undelivered)[:160],
+                                detail={
+                                    "session_key": self._state.session_key,
+                                    "turn_id": review_turn_id,
+                                    "targets": list(review_reply.undelivered),
+                                },
+                            )
                         await self._loop.memory_manager.record_turn_for_review(
                             session_key=self._state.session_key,
                             turn_id=review_turn_id,
                             user_messages=user_messages,
-                            assistant_text=output,
+                            assistant_text=review_reply.memory_text,
                             turns=frontdoor_turns_for_turn(
                                 getattr(self, "_frontdoor_turns", None),
                                 review_turn_id,

@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import random
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from loguru import logger
@@ -122,6 +123,111 @@ def _pick_by_id(packs: tuple[Pack, ...], pack_key: str, id_prefix: str) -> Path 
     return (pack.path / entry.relpath).resolve()
 
 
+def _marker_label(line: str) -> str:
+    """Breadcrumb text for a marker line that did not resolve to a key."""
+    text = str(line or "").strip()
+    if text.startswith(_MARKER_PREFIX) and text.endswith("]]"):
+        inner = text[len(_MARKER_PREFIX):-2].strip()
+        if inner:
+            return inner[:80]
+    return text[:80]
+
+
+@dataclass(frozen=True)
+class StickerReply:
+    """One reply's sticker intent, and what egress actually produced."""
+
+    text: str
+    images: tuple[Path, ...] = ()
+    delivered: tuple[str, ...] = ()
+    undelivered: tuple[str, ...] = ()
+
+    @property
+    def memory_text(self) -> str:
+        """The reply as the operator saw it, plus whether the sticker landed.
+
+        The memory review window gets this instead of the model's raw output:
+        ``[[sticker:pack/category]]`` is meaningless to a text summariser, and a
+        marker that never resolved (hidden category, deleted pack, unknown key)
+        must not be recorded as "the assistant sent a sticker".
+        """
+        notes = [f"[已发表情包：{label}]" for label in self.delivered]
+        notes.extend(f"[表情包未发出：{label}]" for label in self.undelivered)
+        if not notes:
+            return self.text
+        if not self.text:
+            return "\n".join(notes)
+        return f"{self.text}\n\n" + "\n".join(notes)
+
+
+def resolve_reply_stickers(
+    text: str,
+    *,
+    root: Path | None = None,
+    max_per_reply: int | None = None,
+    rng: random.Random | None = None,
+) -> StickerReply:
+    """Resolve one reply: strip marker lines, pick images, label what happened."""
+    if not isinstance(text, str):
+        return StickerReply(text="")
+    if _MARKER_PREFIX not in text:
+        return StickerReply(text=text)
+    from g3ku.stickers import config as sticker_config
+
+    packs = scan_packs(root)
+    picker = rng if rng is not None else random.Random(hashlib.sha256(text.encode("utf-8")).hexdigest())
+    limit = max(0, int(max_per_reply if max_per_reply is not None else sticker_config.max_per_reply()))
+    kept: list[str] = []
+    chosen: list[Path] = []
+    delivered: list[str] = []
+    undelivered: list[str] = []
+    dropped = False
+    for raw_line in text.splitlines(keepends=True):
+        line = raw_line.rstrip("\r\n")
+        parsed = _parse_marker_line(line, packs)
+        if parsed is None:
+            if _looks_like_marker(line):
+                dropped = True
+                undelivered.append(_marker_label(line))
+                logger.warning(
+                    "sticker marker syntax not recognised; dropped: {!r}", line.strip()[:80]
+                )
+                continue
+            kept.append(raw_line)
+            continue
+        dropped = True
+        # From here on the line is always dropped: a marker must never surface.
+        if parsed == "ambiguous":
+            undelivered.append(_marker_label(line))
+            continue
+        if len(chosen) >= limit:
+            # 配额是策略不是失败：已经在上面记过一次 warning，不再进未发出清单。
+            logger.warning(
+                "sticker marker dropped: per-reply cap {} already reached", limit
+            )
+            continue
+        kind, pack_key, value = parsed
+        label = f"{pack_key}/@{value}" if kind == "id" else f"{pack_key}/{value}"
+        if kind == "id":
+            path = _pick_by_id(packs, pack_key, value)
+        else:
+            path = _pick_path(packs, pack_key, value, picker)
+        if path is not None:
+            chosen.append(path)
+            delivered.append(label)
+        else:
+            undelivered.append(label)
+    if not dropped:
+        return StickerReply(text=text)
+    # 删掉末尾的标记行会留下一个悬空换行；渠道正文本来就被 sanitize 收过边。
+    return StickerReply(
+        text="".join(kept).rstrip(),
+        images=tuple(chosen),
+        delivered=tuple(delivered),
+        undelivered=tuple(undelivered),
+    )
+
+
 def resolve_markers(
     text: str,
     *,
@@ -138,48 +244,10 @@ def resolve_markers(
     persisted transcript and the live frame resolve the same reply separately,
     and they must land on the same image.
     """
-    if not isinstance(text, str) or _MARKER_PREFIX not in text:
-        return text, ()
-    from g3ku.stickers import config as sticker_config
-
-    packs = scan_packs(root)
-    picker = rng if rng is not None else random.Random(hashlib.sha256(text.encode("utf-8")).hexdigest())
-    limit = max(0, int(max_per_reply if max_per_reply is not None else sticker_config.max_per_reply()))
-    kept: list[str] = []
-    chosen: list[Path] = []
-    dropped = False
-    for raw_line in text.splitlines(keepends=True):
-        line = raw_line.rstrip("\r\n")
-        parsed = _parse_marker_line(line, packs)
-        if parsed is None:
-            if _looks_like_marker(line):
-                dropped = True
-                logger.warning(
-                    "sticker marker syntax not recognised; dropped: {!r}", line.strip()[:80]
-                )
-                continue
-            kept.append(raw_line)
-            continue
-        dropped = True
-        # From here on the line is always dropped: a marker must never surface.
-        if parsed == "ambiguous":
-            continue
-        if len(chosen) >= limit:
-            logger.warning(
-                "sticker marker dropped: per-reply cap {} already reached", limit
-            )
-            continue
-        kind, pack_key, value = parsed
-        if kind == "id":
-            path = _pick_by_id(packs, pack_key, value)
-        else:
-            path = _pick_path(packs, pack_key, value, picker)
-        if path is not None:
-            chosen.append(path)
-    if not dropped:
-        return text, ()
-    # 删掉末尾的标记行会留下一个悬空换行；渠道正文本来就被 sanitize 收过边。
-    return "".join(kept).rstrip(), tuple(chosen)
+    reply = resolve_reply_stickers(
+        text, root=root, max_per_reply=max_per_reply, rng=rng
+    )
+    return reply.text, reply.images
 
 
 def _hold_partial_marker(text: str) -> str:
@@ -225,7 +293,9 @@ __all__ = [
     "MARKER_RE",
     "MAX_STICKERS_PER_REPLY",
     "SHORT_MARKER_RE",
+    "StickerReply",
     "render_marker_images",
     "resolve_markers",
+    "resolve_reply_stickers",
     "strip_markers_for_stream",
 ]

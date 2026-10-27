@@ -11,6 +11,7 @@ from g3ku.stickers import (
     render_catalog_lines,
     render_marker_images,
     resolve_markers,
+    resolve_reply_stickers,
     scan_packs,
     sticker_pack_sections,
     sticker_sections_from_pinned_text,
@@ -231,6 +232,45 @@ def test_stream_drops_malformed_marker_lines(tmp_path):
     invalidate_scan_cache()
 
     assert strip_markers_for_stream("a\n[[sticker:atri/_secret]]\nb") == "a\nb"
+
+
+def test_sticker_reply_memory_text_replaces_markers_with_breadcrumbs(tmp_path):
+    """记忆窗口收的是出站投影：标记语法对摘要模型没有意义。"""
+    _write_pack(tmp_path, "atri", {"happy": 1}, theme="t")
+    invalidate_scan_cache()
+
+    reply = resolve_reply_stickers("好耶\n[[sticker:atri/happy]]", root=tmp_path)
+
+    assert reply.text == "好耶"
+    assert reply.delivered == ("atri/happy",)
+    assert reply.undelivered == ()
+    assert reply.memory_text == "好耶\n\n[已发表情包：atri/happy]"
+
+
+def test_sticker_reply_marks_failed_sends_instead_of_recording_them(tmp_path):
+    """没发出去的图不能在记忆里变成"发过"；未知键与隐身分类都算未发出。"""
+    _write_pack(tmp_path, "atri", {"happy": 1, "_secret": 1}, theme="t")
+    invalidate_scan_cache()
+
+    reply = resolve_reply_stickers(
+        "嗯\n[[sticker:atri/nope]]\n[[sticker:atri/_secret]]", root=tmp_path
+    )
+
+    assert reply.delivered == ()
+    assert reply.undelivered == ("atri/nope", "atri/_secret")
+    assert reply.memory_text == (
+        "嗯\n\n[表情包未发出：atri/nope]\n[表情包未发出：atri/_secret]"
+    )
+
+
+def test_sticker_reply_without_markers_is_left_alone(tmp_path):
+    _write_pack(tmp_path, "atri", {"happy": 1}, theme="t")
+    invalidate_scan_cache()
+
+    reply = resolve_reply_stickers("就是一句普通回复", root=tmp_path)
+
+    assert reply.memory_text == "就是一句普通回复"
+    assert reply.delivered == () and reply.undelivered == ()
 
 
 def test_resolve_markers_caps_per_reply(tmp_path):
