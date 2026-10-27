@@ -1705,6 +1705,26 @@ textarea {
     background: var(--modal-backdrop);
 }
 
+/* 预览层头部只留标题：动作按钮统一挪到底部，窄窗时不会再被标题挤掉。
+   内边距同步收紧，图片上方不再空出一段。 */
+#media-viewer-drawer.media-viewer-drawer .detail-modal-header {
+    padding: 16px 20px;
+}
+
+#media-viewer-drawer.media-viewer-drawer .detail-modal-body {
+    padding: 12px 16px;
+    /* 图片窗口按像素算准，不会溢出；不要让常驻滚动条槽位再吃掉右侧一条白边。 */
+    scrollbar-gutter: auto;
+}
+
+.media-viewer-footer {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    padding: 0 16px 16px;
+}
+
 .media-viewer-body {
     display: flex;
     flex-direction: column;

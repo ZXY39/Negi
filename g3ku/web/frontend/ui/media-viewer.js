@@ -65,21 +65,28 @@ function syncMediaViewerImageSize() {
     // 还没解码完：等 load 事件再量，先保持 CSS 默认尺寸。
     if (!(naturalWidth > 0) || !(naturalHeight > 0)) return;
     const headerEl = drawer.querySelector(".detail-modal-header");
+    const footerEl = drawer.querySelector(".media-viewer-footer");
     const bodyEl = drawer.querySelector(".detail-modal-body");
-    const bodyStyle = bodyEl ? getComputedStyle(bodyEl) : null;
+    const bodyStyle = bodyEl && typeof getComputedStyle === "function" ? getComputedStyle(bodyEl) : null;
     const padX = bodyStyle ? (parseFloat(bodyStyle.paddingLeft) || 0) + (parseFloat(bodyStyle.paddingRight) || 0) : 0;
     const padY = bodyStyle ? (parseFloat(bodyStyle.paddingTop) || 0) + (parseFloat(bodyStyle.paddingBottom) || 0) : 0;
     const headerHeight = headerEl ? headerEl.getBoundingClientRect().height : 0;
+    const footerHeight = footerEl ? footerEl.getBoundingClientRect().height : 0;
     const maxWidth = Math.min(1180, window.innerWidth - 32);
     const maxHeight = Math.min(window.innerHeight * 0.86, window.innerHeight - 48);
-    // 右侧留 12px 给滚动条槽位，尺寸算到整像素后不再多出一条横向滚动。
-    const availWidth = Math.max(160, maxWidth - padX - 12);
-    const availHeight = Math.max(120, maxHeight - headerHeight - padY - 2);
+    const availWidth = Math.max(160, maxWidth - padX);
+    // 头部 + 底部按钮条都要算进去，图片不会把按钮挤出窗框。
+    const availHeight = Math.max(120, maxHeight - headerHeight - footerHeight - padY - 2);
     const scale = Math.min(1, availWidth / naturalWidth, availHeight / naturalHeight);
-    const width = Math.round(naturalWidth * scale) + padX + 12;
-    const height = Math.round(naturalHeight * scale) + headerHeight + padY + 2;
-    // 头部标题与两颗按钮需要最小宽度；视口更窄时仍以视口为准。
-    drawer.style.width = `${Math.round(Math.min(maxWidth, Math.max(360, width)))}px`;
+    const displayWidth = Math.round(naturalWidth * scale);
+    const displayHeight = Math.round(naturalHeight * scale);
+    // 图片自己也按算出的尺寸封顶：只收窗框的话，图片会撑满内容宽再把底部按钮顶出去。
+    img.style.maxWidth = `${displayWidth}px`;
+    img.style.maxHeight = `${displayHeight}px`;
+    const width = displayWidth + padX + 2;
+    const height = displayHeight + headerHeight + footerHeight + padY + 2;
+    // 底部按钮条需要放下两颗按钮；视口更窄时仍以视口为准。
+    drawer.style.width = `${Math.round(Math.min(maxWidth, Math.max(300, width)))}px`;
     drawer.style.height = `${Math.round(Math.min(maxHeight, Math.max(220, height)))}px`;
 }
 
@@ -104,13 +111,13 @@ function ensureMediaViewerSurface() {
                 <h2 id="media-viewer-title">内容预览</h2>
                 <p id="media-viewer-subtitle" class="subtitle" hidden></p>
             </div>
-            <div class="detail-modal-actions">
-                <button id="media-viewer-save-btn" class="toolbar-btn ghost" type="button" hidden>保存到本地</button>
-                <button id="media-viewer-close-btn" class="toolbar-btn ghost" type="button" data-modal-close>关闭</button>
-            </div>
         </div>
         <div class="detail-modal-body">
             <div id="media-viewer-body" class="media-viewer-body"></div>
+        </div>
+        <div class="media-viewer-footer">
+            <button id="media-viewer-save-btn" class="toolbar-btn ghost" type="button" hidden>保存到本地</button>
+            <button id="media-viewer-close-btn" class="toolbar-btn ghost" type="button" data-modal-close>关闭</button>
         </div>
     `;
 
