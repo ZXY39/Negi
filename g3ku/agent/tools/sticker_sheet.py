@@ -17,8 +17,15 @@ class StickerSheetTool(Tool):
 
     hide_universal_timeout_parameter = True
 
-    def __init__(self, runtime: dict[str, Any] | None = None):
-        self._runtime = dict(runtime or {})
+    def __init__(self, runtime: Any = None):
+        # 资源加载器传的是 SimpleNamespace，执行期注入的 __g3ku_runtime 是 dict。
+        self._runtime = runtime
+
+    @staticmethod
+    def _runtime_value(runtime: Any, key: str, default: Any = None) -> Any:
+        if isinstance(runtime, dict):
+            return runtime.get(key, default)
+        return getattr(runtime, key, default)
 
     @property
     def name(self) -> str:
@@ -77,10 +84,10 @@ class StickerSheetTool(Tool):
 
     async def execute(self, pack: str, category: str, **kwargs: Any) -> str:
         runtime = kwargs.get("__g3ku_runtime")
-        if not isinstance(runtime, dict):
+        if runtime is None:
             runtime = self._runtime
-        display_name = str(runtime.get("image_model_display_name") or "").strip()
-        if not bool(runtime.get("image_multimodal_enabled")):
+        display_name = str(self._runtime_value(runtime, "image_model_display_name") or "").strip()
+        if not bool(self._runtime_value(runtime, "image_multimodal_enabled")):
             return self._not_multimodal(display_name)
 
         pack_key = str(pack or "").strip()
