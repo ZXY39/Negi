@@ -23,6 +23,9 @@
 
 * { box-sizing: border-box; }
 
+/* 组件类里的 display 会压过 UA 的 [hidden]{display:none}，显式兜一层。 */
+[hidden] { display: none !important; }
+
 body {
   margin: 0;
   background: var(--bg);
@@ -113,7 +116,7 @@ body {
 
 .field { display: grid; gap: 6px; margin: 12px 0; }
 .field > span { color: var(--muted); font-size: 12.5px; }
-select, input[type="password"] {
+select, input[type="password"], input[type="text"] {
   width: 100%;
   padding: 8px 10px;
   border-radius: 8px;
@@ -122,6 +125,10 @@ select, input[type="password"] {
   color: var(--text);
   font: inherit;
 }
+
+.inline { display: flex; gap: 8px; }
+.inline input { flex: 1 1 auto; }
+.inline .btn { flex: 0 0 auto; }
 
 .session-panel { margin-top: 8px; }
 .session-meta { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }

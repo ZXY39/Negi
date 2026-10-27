@@ -128,6 +128,14 @@
 | `PATCH /api/ceo/sessions/{id}/sandbox` | 只改意图：`{mode, unlock_password?}`；第三方会话切 `unrestricted` 必须带项目解锁口令，服务端用 `unwrap_with_password` **只读**校验（不顺便解锁项目），通过后记 `operator_unlock` + 审计；返回体带 `effective_from: "next_turn"` |
 | `GET /api/sandbox/status` | 全局安装态、后端、逐维度强制力、`ui_labels`；`?refresh=1` 重探 |
 | `POST /api/sandbox/refresh` | 重探并返回新读数 |
+| `GET /api/sandbox/install/plan` | 安装计划（要执行的步骤、是否提权、是否可能重启、卸载命令） |
+| `POST /api/sandbox/install` | `{confirm:true}` 才执行；后台线程跑步骤，失败即停 |
+| `GET /api/sandbox/install/status` | 安装进度（步骤状态与输出尾部） |
+| `POST /api/sandbox/uninstall` | 只注销本项目导入的专有发行版；系统包与用户发行版不动 |
+
+独立页面：`/sandbox.html`（`g3ku/web/frontend/sandbox.{html,css,js}`），提供运行时状态与逐维度
+强制力、安装计划的确认与进度、会话档位切换（含第三方口令闸门）。页面自身不碰 session 目录接口
+以外的数据面；会话列表拿不到时退化成手填会话 ID，不让页面卡在"加载中"。
 
 `ui_labels` 由服务端按安装态给出（未安装「只读 / 全权限」、已安装「开启沙箱 / 关闭沙箱」），
 前端不自己判安装态。文件管理一族端点只在安装态 `ready` / `partial` 时有意义，当前

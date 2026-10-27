@@ -40,6 +40,13 @@
         <span>会话</span>
         <select id="session-select"><option value="">加载中…</option></select>
       </label>
+      <div class="field" id="manual-session-field" hidden>
+        <span>会话 ID（列表不可用时手动输入）</span>
+        <div class="inline">
+          <input id="manual-session" type="text" placeholder="web:ceo-… 或 ext:…" />
+          <button id="manual-session-btn" class="btn ghost" type="button">查看</button>
+        </div>
+      </div>
       <div id="session-panel" class="session-panel" hidden>
         <div class="session-meta">
           <span id="session-trust" class="badge" data-state="neutral">—</span>
@@ -63,7 +70,7 @@
       <p class="hint">安装前请确认下面的步骤与提权要求。任何一步失败都会中止，不会留下半装状态以外的改动。</p>
       <ol id="plan-steps" class="steps"></ol>
       <ul id="plan-notes" class="notes"></ul>
-      <label class="check"><input id="confirm-check" type="checkbox" /> 我确认在上面这台机器上执行这些步骤</label>
+      <label class="check" id="confirm-row"><input id="confirm-check" type="checkbox" /> 我确认在上面这台机器上执行这些步骤</label>
       <div class="card-actions">
         <button id="confirm-install-btn" class="btn primary" type="button" disabled>确认安装</button>
         <button id="cancel-plan-btn" class="btn ghost" type="button">取消</button>

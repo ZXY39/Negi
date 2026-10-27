@@ -1123,8 +1123,17 @@ detecting → awaiting_confirm → downloading → installing → (needs_reboot)
   （12 条：安装态、开闸、根、读隔离、写隔离、网络、控制面不可达、凭据、无常驻、
   WSL 的 `/mnt` 与 interop、降级、`tools[]` 字节稳定）。全部通过后保留 env；
   任何一条失败就别设它，此时群聊仍落只读档、数据面工具回策略拒绝。
-- **P1b**：安装器（`POST /api/sandbox/install` 当前恒为 `install_available: false`）。
-- **前端**：权限面板里的档位开关与沙箱页面尚未接这批端点（`ui_labels` 已由服务端给出）。
+- **P1b 与前端已落地**（本批）：
+  - 安装器 `g3ku/sandbox/installer.py`：按平台生成计划（Linux 包管理器 + `pkexec`/`sudo -n`；
+    Windows 在已装发行版里 `wsl -u root` 装 bubblewrap；没有发行版时给 `wsl --install` 指引；
+    专有 rootfs 只做离线导入提示），**先确认再执行**、失败即停、后台线程 + 进度轮询；
+    卸载只注销 `negi-sandbox`，系统包与用户发行版永不自动卸载，会话卷保留。
+  - 端点：`install/plan`、`install`、`install/status`、`uninstall`；`install_available` 按计划计算。
+  - 独立页面 `/sandbox.html`：运行时状态与逐维度强制力、安装计划确认与进度、会话档位切换
+    （第三方口令闸门）。**实机验收（隔离实例 + Chrome）**：页面渲染正常；计划卡默认收起；
+    本机无发行版时计划只给指引、确认控件隐藏；手填会话 ID → 切「只读」→ 保存 → 后端
+    `mode=restricted` / `resolved_tier=readonly` 且提示"受限档不能派异步任务"。
+    **修掉一个真 UI bug**：组件类里的 `display` 会压过 `[hidden]`，口令框在 owner 会话上误显示。
 
 - **已逐行复核**（本计划引用的行号都亲自读过）：
   `g3ku/runtime/session_agent.py:1099-1116,1562-1596,4070-4179,4470-4529`、

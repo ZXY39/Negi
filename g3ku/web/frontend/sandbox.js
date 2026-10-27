@@ -161,6 +161,7 @@ function renderPlan(plan) {
   confirm.checked = false;
   $('confirm-install-btn').disabled = true;
   $('confirm-install-btn').hidden = !plan.installable;
+  $('confirm-row').hidden = !plan.installable;
   $('plan-card').hidden = false;
 }
 
@@ -189,9 +190,12 @@ async function loadStatus(refresh) {
   renderStatus(payload.item || {});
 }
 
-async function loadPlan() {
+async function loadPlan(reveal) {
   const payload = await api('/api/sandbox/install/plan');
   renderPlan(payload.item || {});
+  if (!reveal) {
+    $('plan-card').hidden = true;
+  }
   if (payload.status && payload.status.running) {
     watchInstall();
   }
@@ -228,7 +232,7 @@ function watchInstall() {
           toast('安装流程结束，正在重新探测');
         }
         await loadStatus(true);
-        await loadPlan();
+        await loadPlan(!$('plan-card').hidden);
       }
     } catch (error) {
       window.clearInterval(state.pollTimer);
@@ -239,25 +243,37 @@ function watchInstall() {
 }
 
 async function loadSessions() {
-  const payload = await api('/api/ceo/sessions');
-  const items = payload.items || [];
   const select = $('session-select');
-  select.textContent = '';
-  if (!items.length) {
+  try {
+    const payload = await api('/api/ceo/sessions');
+    const items = payload.items || [];
+    select.textContent = '';
+    if (!items.length) {
+      const option = document.createElement('option');
+      option.value = '';
+      option.textContent = '没有可用会话';
+      select.appendChild(option);
+      return;
+    }
+    items.forEach((item) => {
+      const id = item.session_id || item.id || item.session_key || '';
+      if (!id) return;
+      const option = document.createElement('option');
+      option.value = id;
+      option.textContent = `${item.title || '(未命名)'} · ${id}`;
+      select.appendChild(option);
+    });
+    $('manual-session-field').hidden = true;
+  } catch (error) {
+    // 目录接口要运行时就绪才给数据；拿不到时让操作员直接贴会话 ID，页面仍然可用。
+    select.textContent = '';
     const option = document.createElement('option');
     option.value = '';
-    option.textContent = '没有可用会话';
+    option.textContent = '会话列表不可用';
     select.appendChild(option);
-    return;
+    $('manual-session-field').hidden = false;
+    toast(`会话列表不可用：${error.message}。可以直接粘贴会话 ID。`);
   }
-  items.forEach((item) => {
-    const id = item.session_id || item.id || item.session_key || '';
-    if (!id) return;
-    const option = document.createElement('option');
-    option.value = id;
-    option.textContent = `${item.title || '(未命名)'} · ${id}`;
-    select.appendChild(option);
-  });
 }
 
 function renderSession(item) {
@@ -313,8 +329,12 @@ function renderSession(item) {
     : '受限档不能派异步任务：任务节点跑在 worker 里，受限意图传不进那条执行面。';
 }
 
+function currentSessionId() {
+  return $('session-select').value || $('manual-session').value.trim();
+}
+
 async function loadSessionDetail() {
-  const sessionId = $('session-select').value;
+  const sessionId = currentSessionId();
   if (!sessionId) {
     $('session-panel').hidden = true;
     return;
@@ -328,7 +348,7 @@ async function loadSessionDetail() {
 }
 
 async function saveMode() {
-  const sessionId = $('session-select').value;
+  const sessionId = currentSessionId();
   if (!sessionId || !state.pendingMode) return;
   const body = { mode: state.pendingMode };
   const unlockField = $('unlock-field');
@@ -366,7 +386,7 @@ function bindEvents() {
   $('refresh-btn').addEventListener('click', async () => {
     try {
       await loadStatus(true);
-      await loadPlan();
+      await loadPlan(!$('plan-card').hidden);
       toast('已重新探测');
     } catch (error) {
       toast(`探测失败：${error.message}`);
@@ -374,14 +394,14 @@ function bindEvents() {
   });
   $('plan-btn').addEventListener('click', async () => {
     try {
-      await loadPlan();
+      await loadPlan(true);
     } catch (error) {
       toast(`读取安装内容失败：${error.message}`);
     }
   });
   $('install-btn').addEventListener('click', async () => {
     try {
-      await loadPlan();
+      await loadPlan(true);
       if (state.plan && !state.plan.installable) {
         toast(REASON_TEXT[state.plan.reason] || '当前没有可自动安装的内容');
       }
@@ -411,6 +431,7 @@ function bindEvents() {
     }
   });
   $('session-select').addEventListener('change', loadSessionDetail);
+  $('manual-session-btn').addEventListener('click', loadSessionDetail);
   $('save-mode-btn').addEventListener('click', saveMode);
 }
 
@@ -418,17 +439,13 @@ async function main() {
   bindEvents();
   try {
     await loadStatus(false);
-    await loadPlan();
+    await loadPlan(false);
   } catch (error) {
     toast(`初始化失败：${error.message}`);
   }
-  try {
-    await loadSessions();
-    if ($('session-select').value) {
-      await loadSessionDetail();
-    }
-  } catch (error) {
-    toast(`会话列表加载失败：${error.message}`);
+  await loadSessions();
+  if (currentSessionId()) {
+    await loadSessionDetail();
   }
 }
 
