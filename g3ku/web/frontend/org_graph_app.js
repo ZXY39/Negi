@@ -6262,9 +6262,9 @@ function setCeoTurnUsageCollapsed(turn, collapsed = true) {
     turn.el.classList.toggle("usage-collapsed", !!collapsed);
 }
 
-// 元信息行（完成时间 / 输入·缓存命中·输出 / 复制）改为"点击这条消息才显示"。
-// 悬停门在长会话里会把相邻两条同时点亮，而且鼠标扫过就闪；Fork 按钮不吃这道门
-// （它常驻，见 .msg-action-fork 的样式）。
+// 元信息行（完成时间 / 输入·缓存命中·输出 / 复制 / Fork / 编辑）改为"点击这条消息才显示"。
+// 悬停门在长会话里会把相邻两条同时点亮，而且鼠标扫过就闪；动作按钮也只占位，
+// 点开气泡才跟着读数一起浮出来，行高不变、点按钮不会把气泡顶动。
 function toggleCeoMessageMetaReveal(target = null) {
     if (!target || typeof target.closest !== "function") return;
     if (target.closest("button, a, summary, input, textarea, select, label")) return;

@@ -62,6 +62,8 @@ function loadApp({ onHydrate = null } = {}) {
         clearTimeout,
         document,
         window: {},
+        innerWidth: 1440,
+        innerHeight: 900,
         Element: StubElement,
         HTMLElement: TestElement,
         URLSearchParams,
@@ -164,12 +166,16 @@ test("图片锚点在程序内开预览层显示", () => {
     const opened = openMediaAnchor({ url: "http://localhost/api/ceo/media/original?token=abc", name: "截图.png", kind: "image" });
 
     assert.equal(opened, true);
-    assert.equal(mediaViewerState.open, true);
     assert.ok(findCreated(document, (el) => el.id === "media-viewer-drawer"), "预览抽屉未挂上");
     const image = mediaViewerState.body.children.find((child) => child.tagName === "IMG");
     assert.ok(image, "图片未进本层显示");
     assert.equal(image.src, "http://localhost/api/ceo/media/original?token=abc");
     assert.equal(mediaViewerState.title.textContent, "截图.png");
+    // 图片模式要等解码完再开窗，避免首帧先亮一个空白窗。
+    image.naturalWidth = 800;
+    image.naturalHeight = 600;
+    image.dispatchEvent({ type: "load" });
+    assert.equal(mediaViewerState.open, true);
 });
 
 test("文档类锚点走下载车道而不是开预览层", () => {
@@ -218,6 +224,11 @@ test("委托点击接管媒体锚点，带修饰键的点击留给浏览器", ()
     };
     document.dispatchEvent({ type: "click", button: 0, target: img, preventDefault });
     assert.equal(prevented, 1);
+    // 图片模式等解码完、量好窗框再开：桩里手动补一次 load。
+    const opener = mediaViewerState.body.children[0];
+    opener.naturalWidth = 640;
+    opener.naturalHeight = 480;
+    opener.dispatchEvent({ type: "load" });
     assert.equal(mediaViewerState.open, true);
 
     const plain = new TestElement("A");
@@ -231,6 +242,10 @@ test("关闭预览层等淡出走完再收掉本层内容并回报是否真的�
 
     assert.equal(closeMediaViewer(), false, "没开过就不该报告关闭");
     openMediaViewer({ mode: "image", url: "http://localhost/a.png", title: "a.png" });
+    const opener = mediaViewerState.body.children[0];
+    opener.naturalWidth = 400;
+    opener.naturalHeight = 300;
+    opener.dispatchEvent({ type: "load" });
     assert.equal(closeMediaViewer(), true);
     assert.equal(mediaViewerState.open, false);
     // 收起动画期间内容还在：立刻清空会在淡出途中露出一张空白窗。

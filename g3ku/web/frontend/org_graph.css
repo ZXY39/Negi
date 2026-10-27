@@ -3366,7 +3366,8 @@ textarea {
 
 .ceo-turn-message.usage-collapsed:not(.meta-open) .ceo-turn-usage,
 .message:not(.meta-open) .msg-meta-text,
-.message:not(.meta-open) .msg-copy-btn {
+.message:not(.meta-open) .msg-copy-btn,
+.message:not(.meta-open) .msg-action-btn {
     opacity: 0;
     transform: translateY(2px);
     pointer-events: none;
@@ -3434,6 +3435,8 @@ textarea {
 .msg-copy-btn svg {
     width: 13px;
     height: 13px;
+    /* 两颗动作按钮的图标已按文字基线抬 1px；复制图标没有邻字，跟着抬同一格才不会显得往下掉。 */
+    transform: translateY(-1px);
 }
 
 .msg-copy-btn:hover,
@@ -3471,10 +3474,9 @@ textarea {
     display: none;
 }
 
-/* 两颗动作按钮常驻在元信息行里，各吃一份服务端门槛：can_edit_fork 画用户行的
-   「编辑」（排在发送时间右边），can_fork_reply 画回复行的「Fork」（排在用量左边）。
-   同一行那些读数（时间 / token 用量 / 复制）才走上面的 .meta-open 点击门。
-   按钮本身一直在，只有外面那圈胶囊描边按悬停显形。 */
+/* 两颗动作按钮各吃一份服务端门槛：can_edit_fork 画用户行的「编辑」（排在发送时间右边），
+   can_fork_reply 画回复行的「Fork」（排在用量左边）。显隐与同行读数一样走 .meta-open
+   点击门：点开气泡才浮出来，平时只占位不出声。 */
 
 /* 回合进行中(含心跳内部轮)只隐藏编辑:它要改源会话转录。
    Fork 是只读前缀复制、源会话零变更，运行/暂停/等审批中都留着可点。
@@ -3505,7 +3507,8 @@ textarea {
     font-size: 0.76rem;
     line-height: 1.2;
     cursor: pointer;
-    transition: color 140ms ease, border-color 140ms ease, background 140ms ease;
+    transition: color 140ms ease, border-color 140ms ease, background 140ms ease,
+        opacity 160ms ease, transform 160ms ease;
 }
 
 .msg-action-btn svg {

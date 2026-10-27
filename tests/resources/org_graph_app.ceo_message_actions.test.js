@@ -9,7 +9,7 @@ const { readFrontendSources } = require("./support/frontend_sources.js");
 // - buildCeoAssistantForkMarkup/addMsg/renderCeoAssistantForkAction:Fork 挂在回复行的元信息
 //   行、排在用量左边,服务端只有这一个切点(R10/R11);
 // - 两颗按钮都排在元信息行里:编辑在发送时间右边,不再自成 .msg-actions 一行(R2);
-// - 元信息(时间/token/复制)由点击消息显形(.meta-open),按钮不吃这道门(R7 的 CSS 契约);
+// - 元信息(时间/token/复制)与两颗动作按钮都由点击消息显形(.meta-open)(R7 的 CSS 契约);
 // - 提问轴的 can_fork / at=question 已从这条车道整体摘掉:flag 不进缓存、不进签名(R3/R4);
 // - normalizeCeoSnapshotMessage 保留 can_edit_fork/can_fork_reply/task_dispatched(R3/R12);
 // - syncCeoFeedTurnActiveClass:回合进行中给 feed 挂 .ceo-turn-active(R5);
@@ -463,7 +463,7 @@ test("R7 接线静态契约:委托/时序/横幅/HTML 元素", () => {
         actionIcon && actionIcon.body.includes("transform: translateY(-1px)"),
         "动作按钮的图标没有做光学抬高"
     );
-    // 元信息（时间/用量/复制）改成点击这条消息才显形，两车道各一条门；两颗按钮不吃这道门。
+    // 元信息（时间/用量/复制）与两颗动作按钮（Fork/编辑）都只在点击这条消息后显形。
     assert.ok(
         css.includes(".ceo-turn-message.usage-collapsed:not(.meta-open) .ceo-turn-usage"),
         "CSS 缺轨道回合用量的点击门"
@@ -473,8 +473,7 @@ test("R7 接线静态契约:委托/时序/横幅/HTML 元素", () => {
             css.includes(".message:not(.meta-open) .msg-copy-btn"),
         "CSS 缺普通气泡元信息的点击门"
     );
-    assert.ok(!css.includes(".message:not(.meta-open) .msg-action-fork"), "Fork 按钮被点击门管住了");
-    assert.ok(!css.includes(".message:not(.meta-open) .msg-action-edit"), "编辑按钮被点击门管住了");
+    assert.ok(css.includes(".message:not(.meta-open) .msg-action-btn"), "Fork/编辑按钮没有跟随点击门");
     assert.ok(!css.includes(".message:hover .msg-copy-btn"), "复制按钮仍靠悬停显形");
     assert.ok(!css.includes(".message:hover .msg-meta"), "元信息行仍靠悬停显形");
     // 点击门的行为面：委托挂在 feed 的 click 上，且控件与选字都让路。

@@ -53,17 +53,16 @@ function resetMediaViewerSize() {
 }
 
 // 图片窗口跟着图片走：按自然尺寸和视口上限算出实际显示尺寸，再把抽屉收到
-// 「图片 + 头部 + 内边距」，小图不再被塞进一个固定 1180×86vh 的空框里。
+// 「图片 + 头部 + 底部按钮条 + 内边距」。开窗前就要量好——打开后再改尺寸会先亮出默认大窗。
 function syncMediaViewerImageSize() {
     const drawer = mediaViewerState.drawer;
     const img = mediaViewerState.body?.querySelector?.(".media-viewer-image");
-    if (!drawer?.style || !mediaViewerState.open || !img) {
+    if (!drawer?.style || !img) {
         resetMediaViewerSize();
         return;
     }
     const naturalWidth = Number(img.naturalWidth) || 0;
     const naturalHeight = Number(img.naturalHeight) || 0;
-    // 还没解码完：等 load 事件再量，先保持 CSS 默认尺寸。
     if (!(naturalWidth > 0) || !(naturalHeight > 0)) return;
     const headerEl = drawer.querySelector(".detail-modal-header");
     const footerEl = drawer.querySelector(".media-viewer-footer");
@@ -71,24 +70,34 @@ function syncMediaViewerImageSize() {
     const bodyStyle = bodyEl && typeof getComputedStyle === "function" ? getComputedStyle(bodyEl) : null;
     const padX = bodyStyle ? (parseFloat(bodyStyle.paddingLeft) || 0) + (parseFloat(bodyStyle.paddingRight) || 0) : 0;
     const padY = bodyStyle ? (parseFloat(bodyStyle.paddingTop) || 0) + (parseFloat(bodyStyle.paddingBottom) || 0) : 0;
-    const headerHeight = headerEl ? headerEl.getBoundingClientRect().height : 0;
-    const footerHeight = footerEl ? footerEl.getBoundingClientRect().height : 0;
     const maxWidth = Math.min(1180, window.innerWidth - 32);
     const maxHeight = Math.min(window.innerHeight * 0.86, window.innerHeight - 48);
     const availWidth = Math.max(160, maxWidth - padX);
-    // 头部 + 底部按钮条都要算进去，图片不会把按钮挤出窗框。
-    const availHeight = Math.max(120, maxHeight - headerHeight - footerHeight - padY - 2);
-    const scale = Math.min(1, availWidth / naturalWidth, availHeight / naturalHeight);
-    const displayWidth = Math.round(naturalWidth * scale);
-    const displayHeight = Math.round(naturalHeight * scale);
+    // 头部标题会随窗宽折行：先在临时窗宽上量一次头部/底部，再按算出的最终窗宽复量。
+    const measure = (width) => {
+        drawer.style.width = `${Math.round(width)}px`;
+        const headerHeight = headerEl ? headerEl.getBoundingClientRect().height : 0;
+        const footerHeight = footerEl ? footerEl.getBoundingClientRect().height : 0;
+        const availHeight = Math.max(120, maxHeight - headerHeight - footerHeight - padY - 2);
+        const scale = Math.min(1, availWidth / naturalWidth, availHeight / naturalHeight);
+        return { headerHeight, footerHeight, scale };
+    };
+    const provisionalWidth = Math.min(maxWidth, Math.max(300, naturalWidth + padX + 2));
+    let pass = measure(provisionalWidth);
+    let displayWidth = Math.round(naturalWidth * pass.scale);
+    let displayHeight = Math.round(naturalHeight * pass.scale);
+    let width = Math.min(maxWidth, Math.max(300, displayWidth + padX + 2));
+    if (Math.abs(width - provisionalWidth) > 1) {
+        pass = measure(width);
+        displayWidth = Math.round(naturalWidth * pass.scale);
+        displayHeight = Math.round(naturalHeight * pass.scale);
+        width = Math.min(maxWidth, Math.max(300, displayWidth + padX + 2));
+    }
     // 图片自己也按算出的尺寸封顶：只收窗框的话，图片会撑满内容宽再把底部按钮顶出去。
     img.style.maxWidth = `${displayWidth}px`;
     img.style.maxHeight = `${displayHeight}px`;
-    const width = displayWidth + padX + 2;
-    const height = displayHeight + headerHeight + footerHeight + padY + 2;
-    // 底部按钮条需要放下两颗按钮；视口更窄时仍以视口为准。
-    drawer.style.width = `${Math.round(Math.min(maxWidth, Math.max(300, width)))}px`;
-    drawer.style.height = `${Math.round(Math.min(maxHeight, Math.max(220, height)))}px`;
+    drawer.style.width = `${Math.round(width)}px`;
+    drawer.style.height = `${Math.round(Math.min(maxHeight, Math.max(220, displayHeight + pass.headerHeight + pass.footerHeight + padY + 2)))}px`;
 }
 
 function ensureMediaViewerSurface() {
@@ -151,16 +160,20 @@ function ensureMediaViewerSurface() {
     });
 }
 
-function renderMediaViewerImage(url, title) {
+function renderMediaViewerImage(url, title, { onReady = null } = {}) {
     const img = document.createElement("img");
     img.className = "media-viewer-image";
     img.src = url;
     img.alt = title;
-    img.addEventListener("load", () => syncMediaViewerImageSize());
+    img.addEventListener("load", () => {
+        if (typeof onReady === "function") onReady();
+    });
     img.addEventListener("error", () => {
         mediaViewerState.body.innerHTML = '<div class="empty-state">这个文件已经读不到了。</div>';
+        if (typeof onReady === "function") onReady();
     });
     mediaViewerState.body.appendChild(img);
+    return img;
 }
 
 function renderMediaViewerEmbed(url, title) {
@@ -203,6 +216,8 @@ function openMediaViewer({ mode = "image", url = "", title = "内容预览", sub
         window.clearTimeout(mediaViewerState.closeTimer);
         mediaViewerState.closeTimer = 0;
     }
+    const openToken = (mediaViewerState.openToken || 0) + 1;
+    mediaViewerState.openToken = openToken;
     mediaViewerState.title.textContent = title;
     mediaViewerState.subtitle.textContent = subtitle;
     if (mediaViewerState.subtitle) mediaViewerState.subtitle.hidden = !subtitle;
@@ -211,19 +226,28 @@ function openMediaViewer({ mode = "image", url = "", title = "内容预览", sub
     mediaViewerState.url = mode === "content" ? "" : String(url || "");
     mediaViewerState.name = String(downloadName || title || "").trim();
     if (mediaViewerState.saveBtn) mediaViewerState.saveBtn.hidden = !mediaViewerState.url;
-    if (mode === "image") renderMediaViewerImage(url, title);
-    else if (mode === "embed") renderMediaViewerEmbed(url, title);
-    else if (mode === "content") renderMediaViewerContent(outputRef, title);
-    setDrawerOpen(mediaViewerState.backdrop, mediaViewerState.drawer, true);
-    mediaViewerState.open = true;
-    // 图片模式按图片实际尺寸收窗口；嵌入/正文模式回到固定的视口档。
+    let revealed = false;
+    const reveal = () => {
+        if (revealed) return;
+        revealed = true;
+        // 期间又开了别的图/正文：这一枪作废，别把旧内容顶上来。
+        if (mediaViewerState.openToken !== openToken) return;
+        syncMediaViewerImageSize();
+        setDrawerOpen(mediaViewerState.backdrop, mediaViewerState.drawer, true);
+        mediaViewerState.open = true;
+        if (typeof icons === "function") icons(true);
+    };
     if (mode === "image") {
-        const img = mediaViewerState.body?.querySelector?.(".media-viewer-image");
-        if (img && img.complete && img.naturalWidth) syncMediaViewerImageSize();
-    } else {
-        resetMediaViewerSize();
+        // 先等图片解码、把窗框量到最终尺寸再开：否则首帧会先亮出一个默认大小的空白窗
+        // （图片走缓存时该帧几乎看不到，所以只有刷新后的第一张图会闪）。
+        const img = renderMediaViewerImage(url, title, { onReady: reveal });
+        if (img.complete && img.naturalWidth) reveal();
+        return true;
     }
-    if (typeof icons === "function") icons(true);
+    if (mode === "embed") renderMediaViewerEmbed(url, title);
+    else if (mode === "content") renderMediaViewerContent(outputRef, title);
+    resetMediaViewerSize();
+    reveal();
     return true;
 }
 
