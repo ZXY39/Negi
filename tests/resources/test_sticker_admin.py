@@ -94,6 +94,18 @@ def test_read_admin_pack_and_list_category_images(tmp_path: Path):
     assert (window, total) == ([], 1)
 
 
+def test_enabled_categories_sort_before_disabled(tmp_path: Path):
+    pack = tmp_path / "demo"
+    for name in ("_hidden", "zebra", "alpha"):
+        _write(pack / name / "a.png")
+    _write(pack / "manifest.json", b"{}")
+
+    categories = sticker_admin.read_admin_pack("demo", root=tmp_path).categories
+
+    # `_` 在 ASCII 里比字母小：不显式排序的话，停用分类会霸占第一屏。
+    assert [category.dir_name for category in categories] == ["alpha", "zebra", "_hidden"]
+
+
 def test_read_admin_pack_missing_is_404(tmp_path: Path):
     with pytest.raises(sticker_admin.StickerAdminError) as excinfo:
         sticker_admin.read_admin_pack("nope", root=tmp_path)

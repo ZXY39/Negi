@@ -28,11 +28,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -40,6 +43,10 @@ from pathlib import Path
 
 KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 SLUG_RE = re.compile(r"[^a-z0-9._-]+")
+# 零宽 / 方向控制字符：手工编辑过的 manifest 常混进去（实测一个 AstrBot 包的三个
+# 分类键前面带 ZWNJ），留在键里会让描述按目录名查不到，目录名肉眼也看不出差别。
+INVISIBLE_CHARS_RE = re.compile("[\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]")
+DISABLED_PREFIX = "_"
 IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp"})
 # 与 filesystem 工具的 managed-artifact 启发式同名：这些目录名做包/分类会被工具层拦。
 FORBIDDEN_NAMES = frozenset(
@@ -83,16 +90,21 @@ def slug_key(raw: str, *, salt: str = "") -> str:
     """ASCII key for a directory name; unrepresentable names get a stable hash.
 
     Names that are already legal keys are returned untouched: AstrBot category
-    keys must not be silently lowercased or rewritten.
+    keys must not be silently lowercased or rewritten. A leading ``_`` survives,
+    because AstrBot uses it for "special scene" categories and Negi uses the same
+    prefix for the hidden lane -- slugging it away would quietly publish images
+    the pack author kept out of the normal rotation.
     """
-    original = str(raw or "").strip()
+    original = INVISIBLE_CHARS_RE.sub("", str(raw or "")).strip()
+    hidden = original.startswith(DISABLED_PREFIX)
+    body = original[len(DISABLED_PREFIX):] if hidden else original
     if (
-        KEY_RE.match(original)
-        and original not in FORBIDDEN_NAMES
-        and not original.startswith(FORBIDDEN_PREFIXES)
+        KEY_RE.match(body)
+        and body not in FORBIDDEN_NAMES
+        and not body.startswith(FORBIDDEN_PREFIXES)
     ):
-        return original
-    candidate = SLUG_RE.sub("-", original.lower()).strip("-._")
+        return f"{DISABLED_PREFIX}{body}" if hidden else body
+    candidate = SLUG_RE.sub("-", body.lower()).strip("-._")
     if candidate and not candidate[0].isalnum():
         candidate = candidate.lstrip("-._")
     if not candidate or not KEY_RE.match(candidate):
@@ -100,7 +112,15 @@ def slug_key(raw: str, *, salt: str = "") -> str:
         candidate = f"cat-{digest}"
     if candidate in FORBIDDEN_NAMES or candidate.startswith(FORBIDDEN_PREFIXES):
         candidate = f"x-{candidate}"
-    return candidate[:63]
+    candidate = candidate[:63]
+    return f"{DISABLED_PREFIX}{candidate}" if hidden else candidate
+
+
+def display_key(key: str) -> str:
+    """Manifest keys are the display keys: the catalog and the admin page look a
+    category's description up by its Stripped name, so ``_kg/`` is described
+    under ``kg``."""
+    return key[len(DISABLED_PREFIX):] if key.startswith(DISABLED_PREFIX) else key
 
 
 def _sha256(path: Path) -> str:
@@ -202,13 +222,30 @@ def detect(source_root: Path) -> Source:
     memes_dir = source_root / "memes"
     if manifest_path.is_file() and memes_dir.is_dir():
         try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            # utf-8-sig：手工编辑过的 manifest 常带 BOM，严格 utf-8 会直接解析失败。
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
         except (OSError, json.JSONDecodeError):
             raise SystemExit("import_pack: manifest.json 读不出来，拒绝猜测包结构")
-        if str(manifest.get("schema_version")) != "1":
+        schema_version = manifest.get("schema_version")
+        # 早期 / 非官方 AstrBot 包不带这个字段（实测一个 138 张的社区包就没有）：
+        # 按 1 处理；写了别的版本号才是真的不认识，继续拒绝。
+        if schema_version is not None and str(schema_version) != "1":
             raise SystemExit(
-                f"import_pack: 不认识的 schema_version={manifest.get('schema_version')!r}（只认 1）"
+                f"import_pack: 不认识的 schema_version={schema_version!r}（只认 1）"
             )
+        raw_descriptions = manifest.get("categories")
+        # 源 manifest 的分类键可能带零宽字符或 `_` 前缀，和目录名对不上；
+        # 一律按 slug_key 归一化后再查，免得描述成片空掉。
+        normalized_descriptions: dict[str, str] = {}
+        if isinstance(raw_descriptions, dict):
+            for raw_key, entry in raw_descriptions.items():
+                if isinstance(entry, dict):
+                    text = str(entry.get("description") or "").strip()
+                else:
+                    text = str(entry or "").strip()
+                key = slug_key(str(raw_key))
+                if text and key not in normalized_descriptions:
+                    normalized_descriptions[key] = text
         categories: dict[str, list[Path]] = {}
         descriptions: dict[str, str] = {}
         for category_dir in sorted(memes_dir.iterdir(), key=lambda item: item.name):
@@ -219,10 +256,7 @@ def detect(source_root: Path) -> Source:
                 continue
             key = slug_key(category_dir.name)
             categories[key] = images
-            descriptions[key] = str(
-                (manifest.get("categories") or {}).get(category_dir.name, {}).get("description")
-                or DEFAULT_DESCRIPTION
-            ).strip()
+            descriptions[key] = normalized_descriptions.get(key, DEFAULT_DESCRIPTION)
         previews = 0
         preview_dir = source_root / "previews"
         if preview_dir.is_dir():
@@ -266,8 +300,15 @@ def detect(source_root: Path) -> Source:
     raise SystemExit("import_pack: 源里没有可用的图片（.png/.jpg/.jpeg/.gif/.webp）")
 
 
-def _existing_index(pack_dir: Path) -> tuple[dict[str, str], dict[str, Path]]:
-    hashes: dict[str, str] = {}
+def _existing_index(pack_dir: Path) -> tuple[dict[str, set[str]], dict[str, Path]]:
+    """Per-category sha256 sets already on disk.
+
+    Dedupe is scoped to a category on purpose: meme packs legitimately reuse the
+    same image under several categories (a "laugh" reaction also lives under
+    "happy"), and a pack-wide set silently drops those memberships -- one real
+    AstrBot pack lost 33 images and three whole categories that way.
+    """
+    hashes: dict[str, set[str]] = {}
     by_category: dict[str, Path] = {}
     if not pack_dir.is_dir():
         return hashes, by_category
@@ -276,7 +317,7 @@ def _existing_index(pack_dir: Path) -> tuple[dict[str, str], dict[str, Path]]:
             continue
         for image in _images_in(category_dir):
             try:
-                hashes[_sha256(image)] = str(image)
+                hashes.setdefault(category_dir.name, set()).add(_sha256(image))
             except OSError:
                 continue
             by_category.setdefault(category_dir.name, category_dir)
@@ -290,7 +331,7 @@ def build_plan(
     classify_map: dict[str, str],
 ) -> Plan:
     plan = Plan()
-    seen = dict(_existing_index(pack_dir)[0])
+    seen = {key: set(value) for key, value in _existing_index(pack_dir)[0].items()}
     known_categories = {path.name for path in pack_dir.iterdir() if path.is_dir()} if pack_dir.is_dir() else set()
     for category, images in source.categories.items():
         for image in images:
@@ -308,11 +349,6 @@ def build_plan(
             if size <= 0 or size > MAX_IMAGE_BYTES:
                 plan.skipped_size += 1
                 continue
-            digest = _sha256(image)
-            if digest in seen:
-                plan.duplicates += 1
-                continue
-            seen[digest] = str(image)
             target_category = category
             if source.kind == "flat":
                 mapped = classify_map.get(image.name) or classify_map.get(
@@ -322,6 +358,12 @@ def build_plan(
                     target_category = slug_key(mapped)
                 else:
                     target_category = REVIEW_CATEGORY
+            digest = _sha256(image)
+            bucket = seen.setdefault(target_category, set())
+            if digest in bucket:
+                plan.duplicates += 1
+                continue
+            bucket.add(digest)
             if target_category == REVIEW_CATEGORY:
                 plan.review += 1
             if target_category not in known_categories and target_category != REVIEW_CATEGORY:
@@ -357,7 +399,7 @@ def write_pack(
     existing: dict[str, object] = {}
     if manifest_path.is_file():
         try:
-            loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+            loaded = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
             existing = loaded if isinstance(loaded, dict) else {}
         except (OSError, json.JSONDecodeError):
             existing = {}
@@ -372,7 +414,7 @@ def write_pack(
         per_category[category] = per_category.get(category, 0) + 1
     for category in per_category:
         existing_categories.setdefault(
-            category,
+            display_key(category),
             {"description": source.descriptions.get(category, DEFAULT_DESCRIPTION)},
         )
     if theme:
@@ -466,6 +508,16 @@ def format_report(
         origin += f" v{source.version}"
     lines.append(origin)
     lines.append(f"categories: {len(source.categories)}")
+    counts: dict[str, int] = {}
+    for _src, category, _name in plan.actions:
+        counts[category] = counts.get(category, 0) + 1
+    hidden = {key: value for key, value in counts.items() if key.startswith(DISABLED_PREFIX)}
+    if hidden:
+        lines.append(
+            "hidden: {} 个分类以 `_` 开头，共 {} 张（按约定隐身，可在表情包页启用）".format(
+                len(hidden), sum(hidden.values())
+            )
+        )
     lines.append(
         "images: copied={} skipped_suffix={} skipped_size={} skipped_unsafe={} duplicate={}".format(
             len(plan.actions),
@@ -488,12 +540,50 @@ def format_report(
         lines.append("theme: 未设置（包里没有可抽样的图？）")
     if semantic_copied:
         lines.append("semantic: copied verbatim -> semantic/metadata.source.json (entry_id stale)")
-    if plan.actions:
-        counts: dict[str, int] = {}
-        for _src, category, _name in plan.actions:
-            counts[category] = counts.get(category, 0) + 1
+    if counts:
         lines.append(f"top: {_short_summary(counts)}")
     return "\n".join(lines)
+
+
+def _rmtree(path: Path) -> bool:
+    """Remove a checkout, clearing read-only bits first.
+
+    ``git clone`` writes its pack files read-only, so a plain ``rmtree`` dies on
+    ``WinError 5`` and leaves the whole 78 MB checkout behind.
+    """
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                os.chmod(os.path.join(root, name), stat.S_IWRITE)
+            except OSError:
+                continue
+    shutil.rmtree(path, ignore_errors=True)
+    return not path.exists()
+
+
+def _cleanup_temp(path: Path) -> None:
+    """Best effort, but never silent: an interrupted clone leaves the whole
+    checkout behind and ``rmtree(ignore_errors=True)`` would report nothing."""
+    if not _rmtree(path):
+        print(
+            f"import_pack: 临时目录没删干净（git 克隆进程或杀软可能还占着）：{path}",
+            file=sys.stderr,
+        )
+
+
+def sweep_stale_temp_dirs(workspace: Path, *, max_age_seconds: float = 6 * 3600) -> None:
+    """Clean checkouts left by interrupted runs; a real import never takes 6h,
+    so anything that old belongs to nobody."""
+    base = workspace / "temp"
+    if not base.is_dir():
+        return
+    cutoff = time.time() - max_age_seconds
+    for item in base.glob("sticker-import-*"):
+        try:
+            if item.is_dir() and item.stat().st_mtime < cutoff:
+                _rmtree(item)
+        except OSError:
+            continue
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -522,6 +612,7 @@ def main(argv: list[str] | None = None) -> int:
             classify_map = {str(key): str(value) for key, value in payload.items()}
 
     (workspace / "temp").mkdir(parents=True, exist_ok=True)
+    sweep_stale_temp_dirs(workspace)
     source_root, _origin_kind, source_url, commit, temp_dir = materialize(args.src, workspace)
     try:
         source = detect(source_root)
@@ -580,7 +671,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     finally:
         if temp_dir is not None:
-            shutil.rmtree(temp_dir, ignore_errors=True)
+            _cleanup_temp(temp_dir)
 
 
 if __name__ == "__main__":

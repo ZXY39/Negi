@@ -68,11 +68,16 @@ def _parse_marker_line(line: str, packs: tuple[Pack, ...]) -> tuple[str, str, st
     return None
 
 
-def _is_complete_marker_syntax(line: str) -> bool:
-    stripped = line.strip()
-    return bool(
-        MARKER_RE.match(stripped) or ID_MARKER_RE.match(stripped) or SHORT_MARKER_RE.match(stripped)
-    )
+def _looks_like_marker(line: str) -> bool:
+    """True for any whole line that opens with our marker prefix.
+
+    Deliberately looser than the grammar: a well-formed marker that does not
+    parse (an unknown shape, or a ``_``-prefixed category the segment pattern
+    rejects) must still be dropped. Leaking the raw syntax to the user is worse
+    than sending nothing -- and now that imports can produce hidden ``_``
+    categories, that shape is reachable.
+    """
+    return str(line or "").strip().startswith(_MARKER_PREFIX)
 
 
 def _pick_path(
@@ -147,6 +152,12 @@ def resolve_markers(
         line = raw_line.rstrip("\r\n")
         parsed = _parse_marker_line(line, packs)
         if parsed is None:
+            if _looks_like_marker(line):
+                dropped = True
+                logger.warning(
+                    "sticker marker syntax not recognised; dropped: {!r}", line.strip()[:80]
+                )
+                continue
             kept.append(raw_line)
             continue
         dropped = True
@@ -189,7 +200,7 @@ def strip_markers_for_stream(text: str) -> str:
     kept = [
         raw_line
         for raw_line in text.splitlines(keepends=True)
-        if not _is_complete_marker_syntax(raw_line.rstrip("\r\n"))
+        if not _looks_like_marker(raw_line.rstrip("\r\n"))
     ]
     return _hold_partial_marker("".join(kept))
 

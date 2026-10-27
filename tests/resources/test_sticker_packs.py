@@ -48,6 +48,21 @@ def _write_pack(
     return pack_dir
 
 
+def test_manifest_with_bom_still_yields_theme_and_descriptions(tmp_path):
+    """manifest 是人手改的，Windows 编辑器会给它加 BOM；读不出来的话整包主题和
+    分类描述会静默消失，模型只能看到「（未设置主题）」。"""
+    pack_dir = _write_pack(tmp_path, "atri", {"happy": 1}, theme="动漫少女", descriptions={"happy": "开心"})
+    manifest_path = pack_dir / "manifest.json"
+    raw = manifest_path.read_text(encoding="utf-8")
+    manifest_path.write_text("\ufeff" + raw, encoding="utf-8")
+    invalidate_scan_cache()
+
+    pack = scan_packs(tmp_path)[0]
+
+    assert pack.theme == "动漫少女"
+    assert pack.category("happy").description == "开心"
+
+
 def test_scan_packs_reads_directories_and_skips_soft_deleted(tmp_path):
     _write_pack(tmp_path, "atri", {"happy": 2, "awkward": 1}, theme="动漫少女")
     _write_pack(tmp_path, "panda", {"happy": 1}, theme="熊猫头")
@@ -190,6 +205,32 @@ def test_resolve_markers_drops_unknown_keys_without_leaking(tmp_path):
     assert text == "a\nb\nc"
     assert images == ()
     assert "sticker" not in text
+
+
+def test_malformed_marker_lines_are_dropped_not_leaked(tmp_path):
+    """语法不成立也算我们的标记：漏到用户面前比不发更糟。
+
+    `_` 开头的分类是隐身的（AstrBot 导入会保留这个前缀），模型照着写出来的
+    `[[sticker:atri/_secret]]` 不被段落模式接受；若按"不认识就原样保留"处理，
+    正文里就会露出一坨标记。多一段的 `happy/extra` 同理。
+    """
+    _write_pack(tmp_path, "atri", {"happy": 1, "_secret": 1}, theme="t")
+    invalidate_scan_cache()
+
+    text, images = resolve_markers(
+        "a\n[[sticker:atri/_secret]]\n[[sticker:atri/happy/extra]]\nb\n", root=tmp_path
+    )
+
+    assert text == "a\nb"
+    assert images == ()
+    assert "[[" not in text
+
+
+def test_stream_drops_malformed_marker_lines(tmp_path):
+    _write_pack(tmp_path, "atri", {"happy": 1, "_secret": 1}, theme="t")
+    invalidate_scan_cache()
+
+    assert strip_markers_for_stream("a\n[[sticker:atri/_secret]]\nb") == "a\nb"
 
 
 def test_resolve_markers_caps_per_reply(tmp_path):

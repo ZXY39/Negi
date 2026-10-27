@@ -264,7 +264,9 @@ def _scan_pack_entry(
         theme_source=str(manifest.get('theme_source') or '').strip(),
         source=dict(source) if isinstance(source, dict) else {},
         enabled=not entry.name.startswith(DISABLED_PREFIX),
-        categories=tuple(categories),
+        # 启用的分类排在停用的前面：ASCII 里 `_` 比字母小，不排的话一个带 8 个
+        # 隐藏分类的包，第一屏全是被停用的。
+        categories=tuple(sorted(categories, key=lambda item: (not item.enabled, item.key))),
         path=resolved,
     )
 

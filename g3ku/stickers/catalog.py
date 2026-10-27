@@ -108,7 +108,9 @@ def _image_paths(directory: Path) -> list[Path]:
 def read_manifest(pack_dir: Path) -> dict[str, Any]:
     manifest_path = pack_dir / MANIFEST_NAME
     try:
-        raw = manifest_path.read_text(encoding="utf-8")
+        # utf-8-sig：manifest 是给人手改的，Windows 编辑器常给它加 BOM；严格 utf-8
+        # 会解析失败，主题与分类描述就整包消失了。
+        raw = manifest_path.read_text(encoding="utf-8-sig")
     except (OSError, UnicodeDecodeError):
         return {}
     try:
