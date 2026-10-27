@@ -247,22 +247,45 @@ def _flatten(text: str, limit: int) -> str:
     return _clip(str(text or "").replace("|", "/"), limit)
 
 
+# 分类描述在渲染侧不截断：描述是模型选分类的唯一路由信号，兄弟分类的区分词
+# （"不好/很好"）常落在句子后半，按字数砍等于每轮静默丢掉路由信息。
+# 长度约束只放在写入侧（见 normalize_description），由写入方一次性可见地处理。
+CATEGORY_DESCRIPTION_MAX_CHARS = 120
+
+# 注入总量只提醒不删除：超过这个字符数时表情包页出 banner，引导运维停用。
+# 钉住头的体积会随库增长线性变大，这条是运营护栏，不是硬闸。
+STICKER_INJECTED_CHAR_WARN = 16000
+
+
+def normalize_description(text: str, *, truncate: bool = True) -> tuple[str, bool]:
+    """Compact a category description; ``(value, was_too_long)``.
+
+    所有写路径（导入 commit、管理 API/界面、注册工具）都过这一处，
+    ``truncate=False`` 时保留原文并让调用方报错（界面/API），
+    ``truncate=True`` 时截到上限并让调用方在报告里列出（批量导入）。
+    """
+    compact = " ".join(str(text or "").replace("|", "/").split())
+    if len(compact) <= CATEGORY_DESCRIPTION_MAX_CHARS:
+        return compact, False
+    if not truncate:
+        return compact, True
+    return compact[:CATEGORY_DESCRIPTION_MAX_CHARS], True
+
+
 STICKER_HEADER = (
     "sticker_packs (emit `[[sticker:<pack>/<category>]]` as the last line; "
     "`pack | theme | category(description), ...`):"
 )
-# 头部与增量通知共用这一份预算判据：两边都按同一个形状渲染，摘要才对得上。
-STICKER_SECTION_BUDGET = 2000
 
 
-def _build_sections(packs: Iterable[Pack], *, include_descriptions: bool) -> dict[str, str]:
+def _build_sections(packs: Iterable[Pack]) -> dict[str, str]:
     sections: dict[str, str] = {}
     for pack in packs:
         theme = _flatten(pack.theme, 40) or _THEME_PLACEHOLDER
         parts: list[str] = []
         # 分类按 key 排序：头部字节稳定性不能依赖调用方给元组的顺序。
         for category in sorted(pack.categories, key=lambda item: item.key):
-            description = _flatten(category.description, 20) if include_descriptions else ""
+            description = _flatten(category.description, 0)
             parts.append(f"{category.key}({description})" if description else category.key)
         sections[pack.key] = f"{theme} | {', '.join(parts)}"
     return sections
@@ -273,14 +296,17 @@ def sticker_pack_sections(packs: Iterable[Pack]) -> dict[str, str]:
 
     The pinned head line and the runtime-notice section come from this same
     function, so "the head already says X" and "the current value is X" are byte
-    identical without a second renderer. Over budget, descriptions are dropped
-    for every pack at once so both sides keep agreeing.
+    identical without a second renderer. Descriptions are never dropped here:
+    the size guardrail is a UI hint at ``STICKER_INJECTED_CHAR_WARN``.
     """
-    ordered = tuple(packs)
-    sections = _build_sections(ordered, include_descriptions=True)
-    if sum(len(key) + len(value) + 8 for key, value in sections.items()) <= STICKER_SECTION_BUDGET:
-        return sections
-    return _build_sections(ordered, include_descriptions=False)
+    return _build_sections(tuple(packs))
+
+
+def injected_chars(packs: Iterable[Pack] | None = None) -> int:
+    """Rendered injected size of the catalog, in characters (the 16000 guardrail)."""
+    resolved = tuple(packs) if packs is not None else scan_packs()
+    sections = sticker_pack_sections(resolved)
+    return sum(len(key) + len(value) + 8 for key, value in sections.items())
 
 
 def render_catalog_lines(packs: Iterable[Pack]) -> tuple[str, ...]:
@@ -343,6 +369,7 @@ def sticker_contract_sections_from_text(pinned_text: Any) -> dict[str, str]:
 
 
 __all__ = [
+    "CATEGORY_DESCRIPTION_MAX_CHARS",
     "DISABLED_PREFIX",
     "IMAGE_SUFFIXES",
     "MANIFEST_NAME",
@@ -350,14 +377,16 @@ __all__ = [
     "RESERVED_PACK_DIRS",
     "STICKERS_DIRNAME",
     "STICKER_HEADER",
-    "STICKER_SECTION_BUDGET",
+    "STICKER_INJECTED_CHAR_WARN",
     "STICKER_SECTION_PREFIX",
     "Pack",
     "StickerCategory",
     "category_description",
     "category_owners",
     "find_pack",
+    "injected_chars",
     "invalidate_scan_cache",
+    "normalize_description",
     "pack_images",
     "read_manifest",
     "render_catalog_lines",

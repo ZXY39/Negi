@@ -17,7 +17,12 @@ from g3ku.stickers import (
     sticker_sections_from_pinned_text,
     strip_markers_for_stream,
 )
-from g3ku.stickers.catalog import invalidate_scan_cache
+from g3ku.stickers.catalog import (
+    CATEGORY_DESCRIPTION_MAX_CHARS,
+    injected_chars,
+    invalidate_scan_cache,
+    normalize_description,
+)
 
 
 def _write_pack(
@@ -135,14 +140,14 @@ def test_render_catalog_lines_is_one_parseable_line_per_pack(tmp_path):
 
     assert lines[0] == STICKER_HEADER
     assert lines[1] == (
-        f"- `atri` | 动漫少女 ATRI | awkward({long_description[:19].rstrip()}…), happy(开心大笑)"
+        f"- `atri` | 动漫少女 ATRI | awkward({long_description}), happy(开心大笑)"
     )
     # 头部 ≡ 通知分节：解析回来必须逐字相等
     assert sticker_sections_from_pinned_text("\n".join(lines)) == sticker_pack_sections(packs)
     assert not any("张" in line for line in lines)
 
 
-def test_catalog_sections_drop_descriptions_over_budget(tmp_path):
+def test_catalog_sections_keep_descriptions_and_flag_over_limit(tmp_path):
     _write_pack(
         tmp_path,
         "atri",
@@ -152,10 +157,29 @@ def test_catalog_sections_drop_descriptions_over_budget(tmp_path):
     )
     invalidate_scan_cache()
 
-    sections = sticker_pack_sections(scan_packs(tmp_path))
+    packs = scan_packs(tmp_path)
+    sections = sticker_pack_sections(packs)
 
-    assert "(" not in sections["atri"]
-    assert "cat099" in sections["atri"]
+    # 描述永不降级：超量只体现在提醒口径上，不删内容。
+    assert sections["atri"].count("(") == 100
+    assert injected_chars(packs) == sum(
+        len(key) + len(value) + 8 for key, value in sections.items()
+    )
+
+
+def test_normalize_description_truncates_only_when_asked():
+    long_text = "字" * (CATEGORY_DESCRIPTION_MAX_CHARS + 5)
+
+    kept, over = normalize_description(long_text)
+    assert over is True
+    assert len(kept) == CATEGORY_DESCRIPTION_MAX_CHARS
+
+    raw, over_raw = normalize_description(long_text, truncate=False)
+    assert over_raw is True
+    assert len(raw) == len(long_text)
+
+    compact, over_short = normalize_description("  开心 | 大笑  ")
+    assert (compact, over_short) == ("开心 / 大笑", False)
 
 
 def test_resolve_markers_picks_an_image_and_drops_the_line(tmp_path):

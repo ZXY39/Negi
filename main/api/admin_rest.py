@@ -24,6 +24,7 @@ from g3ku.resources.retired_schemas import record_tool_schema
 from g3ku.runtime.core_tools import configured_core_tools, resolve_core_tool_targets
 from g3ku.shells.web import get_agent, is_no_ceo_model_configured_error, refresh_web_agent_runtime
 from g3ku.stickers import admin as sticker_admin
+from g3ku.stickers import catalog as sticker_catalog
 from g3ku.utils.retry_keywords import split_retry_keywords
 from main.governance import (
     GovernanceStore,
@@ -2042,14 +2043,18 @@ def _sticker_flag(payload: dict[str, Any] | None) -> bool:
 
 
 def _stickers_settings_payload(cfg: Config) -> dict[str, Any]:
+    injected = int(sticker_catalog.injected_chars())
+    limit = int(sticker_catalog.STICKER_INJECTED_CHAR_WARN)
     return {
         'max_per_reply': int(getattr(cfg.stickers, 'max_per_reply', 1)),
-        'semantic_search': bool(getattr(cfg.stickers, 'semantic_search', False)),
         'max_per_reply_limit': 4,
         'theme_max_chars': sticker_admin.THEME_MAX_CHARS,
         'description_max_chars': sticker_admin.CATEGORY_DESCRIPTION_MAX_CHARS,
         'max_upload_files': sticker_admin.MAX_UPLOAD_FILES,
         'max_image_bytes': sticker_admin.MAX_IMAGE_BYTES,
+        'injected_chars': injected,
+        'injected_limit': limit,
+        'over_injected_limit': injected > limit,
     }
 
 
@@ -2140,13 +2145,6 @@ async def update_sticker_settings(payload: dict | None = Body(default=None)):
             )
         if value != int(getattr(cfg.stickers, 'max_per_reply', 1)):
             cfg.stickers.max_per_reply = value
-            changed = True
-    if 'semantic_search' in body or 'semanticSearch' in body:
-        value = body.get('semantic_search', body.get('semanticSearch'))
-        if not isinstance(value, bool):
-            raise HTTPException(status_code=400, detail={'code': 'invalid_semantic_search'})
-        if value != bool(getattr(cfg.stickers, 'semantic_search', False)):
-            cfg.stickers.semantic_search = value
             changed = True
     if changed:
         save_config(cfg)

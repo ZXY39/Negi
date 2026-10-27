@@ -23,15 +23,4 @@ def max_per_reply() -> int:
     return max(0, min(4, value))
 
 
-def semantic_search_enabled() -> bool:
-    """Whether the precise-pick tool is registered (`stickers.semantic_search`)."""
-    try:
-        from g3ku.config.live_runtime import get_runtime_config
-
-        config, _revision, _changed = get_runtime_config()
-        return bool(getattr(getattr(config, "stickers", None), "semantic_search", False))
-    except Exception:
-        return False
-
-
-__all__ = ["max_per_reply", "semantic_search_enabled"]
+__all__ = ["max_per_reply"]

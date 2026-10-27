@@ -185,7 +185,6 @@ def test_third_party_readonly_is_a_whitelist(registry) -> None:
         "content_describe",
         "filesystem_stat",
         "view_message_history",
-        "search_stickers",
     ):
         assert policy.tool_allowed(allowed), allowed
     for denied in (

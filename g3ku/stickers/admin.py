@@ -27,6 +27,7 @@ from typing import Any, Iterable
 from urllib.parse import urlencode
 
 from g3ku.stickers.catalog import (
+    CATEGORY_DESCRIPTION_MAX_CHARS,
     DISABLED_PREFIX,
     IMAGE_SUFFIXES,
     MANIFEST_NAME,
@@ -34,6 +35,7 @@ from g3ku.stickers.catalog import (
     RESERVED_PACK_DIRS,
     category_description,
     invalidate_scan_cache,
+    normalize_description,
     read_manifest,
     stickers_root,
 )
@@ -50,9 +52,8 @@ FORBIDDEN_PREFIXES = ("tmp_", "temp_", ".tmp_")
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_UPLOAD_FILES = 20
 THEME_MAX_CHARS = 60
-# 契约头按 20 字裁分类描述（catalog._flatten(..., 20)）；界面按同一个上限收，
-# 免得"写进去的"和"模型读到的"不是同一句话。
-CATEGORY_DESCRIPTION_MAX_CHARS = 20
+# 描述上限与清洗口径的唯一归属地是 catalog（导入/界面/注册三条写路径共用）；
+# 这里只是转出给 API 回包与测试用。
 
 
 class StickerAdminError(ValueError):
@@ -368,8 +369,8 @@ def set_category_description(
     pack = pack_dir(pack_dir_name, root=root)
     category = category_dir(pack_dir_name, category_dir_name, root=root)
     key = display_key(category.name)
-    text = _clean_text(description)
-    if len(text) > CATEGORY_DESCRIPTION_MAX_CHARS:
+    text, too_long = normalize_description(_clean_text(description), truncate=False)
+    if too_long:
         raise StickerAdminError(
             'description_too_long',
             f'分类描述最多 {CATEGORY_DESCRIPTION_MAX_CHARS} 字',

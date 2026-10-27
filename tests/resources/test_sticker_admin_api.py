@@ -193,14 +193,16 @@ def test_settings_round_trip(client: TestClient, monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(admin_rest, "_refresh_runtime_after_save", _refresh)
 
     initial = client.get("/api/resources/stickers/settings").json()
-    assert (initial["max_per_reply"], initial["semantic_search"]) == (1, False)
+    assert initial["max_per_reply"] == 1
     assert initial["max_per_reply_limit"] == 4
+    assert isinstance(initial["injected_chars"], int)
+    assert initial["injected_limit"] > 0
+    assert initial["over_injected_limit"] is False
+    assert "semantic_search" not in initial
 
-    response = client.put(
-        "/api/resources/stickers/settings", json={"max_per_reply": 3, "semantic_search": True}
-    )
+    response = client.put("/api/resources/stickers/settings", json={"max_per_reply": 3})
     assert response.status_code == 200
-    assert (config.stickers.max_per_reply, config.stickers.semantic_search) == (3, True)
+    assert config.stickers.max_per_reply == 3
     assert len(saved) == 1
     assert refreshed == ["admin_stickers_settings_update"]
 
@@ -218,3 +220,13 @@ def test_settings_rejects_out_of_range(client: TestClient, monkeypatch: pytest.M
     response = client.put("/api/resources/stickers/settings", json={"max_per_reply": value})
     assert response.status_code == 400
     assert response.json()["detail"]["code"] == "invalid_max_per_reply"
+
+
+def test_settings_flags_over_injected_limit(monkeypatch: pytest.MonkeyPatch):
+    config = Config()
+    monkeypatch.setattr(admin_rest.sticker_catalog, "STICKER_INJECTED_CHAR_WARN", 1)
+
+    payload = admin_rest._stickers_settings_payload(config)
+
+    assert payload["injected_limit"] == 1
+    assert payload["over_injected_limit"] is (payload["injected_chars"] > 1)

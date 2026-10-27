@@ -51,7 +51,6 @@ const LEDGER = [
     { token: "name=\"enabled\"", tier: "hidden" },
     { token: "td-expand-all-input", tier: "ui" },
     { token: "ceo-risk-tool-input", tier: "ui" },
-    { token: "id=\"sticker-semantic-toggle\"", tier: "ui" },
     { token: "id=\"confirm-check\"", tier: "ui" },
 ];
 

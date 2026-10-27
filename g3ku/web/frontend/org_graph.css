@@ -18530,6 +18530,17 @@ textarea {
     color: var(--ui-text-muted);
 }
 
+.sticker-injected-banner {
+    margin: 0 0 12px;
+    padding: 8px 12px;
+    border: 1px solid var(--ui-warning);
+    border-radius: 8px;
+    background: var(--ui-warning-soft);
+    color: var(--ui-text-primary);
+    font-size: 12px;
+    line-height: 1.5;
+}
+
 .sticker-detail {
     flex: 1 1 auto;
     min-height: 0;

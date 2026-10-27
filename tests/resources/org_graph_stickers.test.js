@@ -58,7 +58,7 @@ function stubU(document) {
         "sticker-busy-label",
         "sticker-upload-input",
         "sticker-max-per-reply",
-        "sticker-semantic-toggle",
+        "sticker-injected-banner",
     ];
     return {
         stickerRefresh: document.getElementById("sticker-refresh-btn"),
@@ -69,7 +69,7 @@ function stubU(document) {
         stickerBusyLabel: document.getElementById("sticker-busy-label"),
         stickerUploadInput: document.getElementById("sticker-upload-input"),
         stickerMaxPerReply: document.getElementById("sticker-max-per-reply"),
-        stickerSemanticToggle: document.getElementById("sticker-semantic-toggle"),
+        stickerInjectedBanner: document.getElementById("sticker-injected-banner"),
         _ids: ids,
     };
 }
@@ -294,7 +294,6 @@ test("发送策略按服务端下发的上限渲染", () => {
     const view = loadView();
     view.StickersState.settings = {
         max_per_reply: 2,
-        semantic_search: true,
         theme_max_chars: 40,
         description_max_chars: 12,
         max_upload_files: 5,
@@ -302,9 +301,16 @@ test("发送策略按服务端下发的上限渲染", () => {
     view.renderStickerSettings();
 
     assert.equal(view.U.stickerMaxPerReply.value, "2");
-    assert.equal(view.U.stickerSemanticToggle.checked, true);
+    assert.equal(view.U.stickerInjectedBanner.hidden, true);
     assert.equal(view.stickerLimits().theme, 40);
     assert.equal(view.stickerLimits().description, 12);
+});
+
+test("注入总量超限时露出停用提醒", () => {
+    const view = loadView();
+    view.StickersState.settings = { max_per_reply: 1, over_injected_limit: true };
+    view.renderStickerSettings();
+    assert.equal(view.U.stickerInjectedBanner.hidden, false);
 });
 
 test("http 错误优先显示服务端中文 message", () => {

@@ -236,7 +236,7 @@ function renderStickerSettings() {
         // 快照：只改原生 select.value 不会让界面跟着变。
         if (typeof syncResourceSelectUI === "function") syncResourceSelectUI(U.stickerMaxPerReply);
     }
-    if (U.stickerSemanticToggle) U.stickerSemanticToggle.checked = !!settings.semantic_search;
+    if (U.stickerInjectedBanner) U.stickerInjectedBanner.hidden = !settings.over_injected_limit;
 }
 
 // ---------------------------------------------------------------- load
@@ -541,16 +541,10 @@ async function onStickerMaxPerReplyChanged() {
     await saveStickerSettings({ max_per_reply: value }, "每轮张数保存失败");
 }
 
-async function onStickerSemanticChanged() {
-    const enabled = !!U.stickerSemanticToggle?.checked;
-    await saveStickerSettings({ semantic_search: enabled }, "精确取图开关保存失败");
-}
-
 async function saveStickerSettings(patch, failureTitle) {
     const previous = StickersState.settings;
     const pending = { ...(previous || {}), ...patch };
     if (patch.max_per_reply !== undefined) pending.max_per_reply = patch.max_per_reply;
-    if (patch.semantic_search !== undefined) pending.semantic_search = patch.semantic_search;
     StickersState.settings = pending;
     renderStickerSettings();
     try {
@@ -582,5 +576,4 @@ function bindStickerPage() {
     }
     if (U.stickerUploadInput) U.stickerUploadInput.addEventListener("change", onStickerUploadPicked);
     if (U.stickerMaxPerReply) U.stickerMaxPerReply.addEventListener("change", onStickerMaxPerReplyChanged);
-    if (U.stickerSemanticToggle) U.stickerSemanticToggle.addEventListener("change", onStickerSemanticChanged);
 }

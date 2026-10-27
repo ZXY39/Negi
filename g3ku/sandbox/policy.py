@@ -84,8 +84,6 @@ READONLY_THIRD_PARTY_TOOL_NAMES: frozenset[str] = frozenset(
         "content_describe",
         "filesystem_stat",
         "view_message_history",
-        # 贴纸目录只读扫描：群聊里可用的表达工具，不碰文件与网络
-        "search_stickers",
     }
 )
 

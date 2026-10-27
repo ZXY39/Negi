@@ -539,7 +539,7 @@ const U = {
     stickerBusyLabel: document.getElementById("sticker-busy-label"),
     stickerUploadInput: document.getElementById("sticker-upload-input"),
     stickerMaxPerReply: document.getElementById("sticker-max-per-reply"),
-    stickerSemanticToggle: document.getElementById("sticker-semantic-toggle"),
+    stickerInjectedBanner: document.getElementById("sticker-injected-banner"),
     auditNavBadge: document.getElementById("audit-nav-badge"),
     auditEventList: document.getElementById("audit-event-list"),
     auditEventInfo: document.getElementById("audit-event-info"),
