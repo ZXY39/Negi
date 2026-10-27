@@ -1115,12 +1115,14 @@ detecting → awaiting_confirm → downloading → installing → (needs_reboot)
   `background` 与 `propose_patch` / `process_kill` 在 jail 里明确拒绝。
   测试 `tests/test_sandbox_router.py`（8 条，用 `maps_paths=False` 的假后端 + 真 fsop，
   文件语义是真的，只有内核隔离被跳过）。
-- **P1a 剩下的最后一步**：把代理接进 `_frontdoor_execution_bundle`（`tier==jailed` 时替换
-  `visible_tools`/`declared_tools` 里的数据面实例），加 `runtime_context["sandbox_id"]` 与
-  `_execute_tool_call_with_raw_result` 的硬校验（数据面工具拿到宿主实例而 `sandbox_id`
-  非空 → 拒）；再建 manager 工厂（按探测读数构造后端）与 `configure_wsl`。
-  之后在装好后端的机器上跑完 P1 验收（读不到 `master.key`、`curl` 失败、`env` 无 key、
-  `netstat` 无监听、`/mnt` 与 `/init` 不可见），再把 `JAIL_BACKENDS_AVAILABLE` 置真。
+- **P1a 代码全部写完**（本批收尾）：工厂（按探测读数构造后端、`configure_wsl`）、
+  执行束接线（`tier==jailed` 时替换数据面实例，换不上就换"永不执行"替身并记
+  `sandbox_unavailable`）、执行闸门硬校验（jail 档里数据面工具解析到宿主实例直接拒）。
+  闸门改成环境变量 `G3KU_SANDBOX_ENABLE_JAIL`（默认关），所以**代码写完不影响线上**。
+- **统一上机验收**：清单见 `docs/architecture/sandbox-execution-plane.md`「上机验收清单」
+  （12 条：安装态、开闸、根、读隔离、写隔离、网络、控制面不可达、凭据、无常驻、
+  WSL 的 `/mnt` 与 interop、降级、`tools[]` 字节稳定）。全部通过后保留 env；
+  任何一条失败就别设它，此时群聊仍落只读档、数据面工具回策略拒绝。
 - **P1b**：安装器（`POST /api/sandbox/install` 当前恒为 `install_available: false`）。
 - **前端**：权限面板里的档位开关与沙箱页面尚未接这批端点（`ui_labels` 已由服务端给出）。
 

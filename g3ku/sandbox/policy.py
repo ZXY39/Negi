@@ -26,6 +26,7 @@ jail，安装态恒为 ``not_installed``，所以只可能解析出 ``readonly``
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -51,8 +52,20 @@ ALL_TIERS: tuple[str, ...] = (TIER_HOST_FULL, TIER_READONLY, TIER_JAILED)
 
 # jail 后端（bwrap / seatbelt / wsl_bwrap / container 的 manager + router）接进执行道
 # 之前，`jailed` 一律不发放：安装态可以是 `ready`，但没有后端就意味着没有隔离，
-# 这时把会话放进 jailed 等于给它开数据面而没有人看守。P1a 落地时改这一处。
+# 这时把会话放进 jailed 等于给它开数据面而没有人看守。
+#
+# P1a 的代码已经写完，是否发放改由 `G3KU_SANDBOX_ENABLE_JAIL` 控制：默认关，
+# 只有在装好后端的机器上跑完验收清单（docs/architecture/sandbox-execution-plane.md
+# 的「上机验收清单」）之后才允许打开。
 JAIL_BACKENDS_AVAILABLE = False
+JAIL_ENABLE_ENV = "G3KU_SANDBOX_ENABLE_JAIL"
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def jail_backends_available() -> bool:
+    if JAIL_BACKENDS_AVAILABLE:
+        return True
+    return str(os.getenv(JAIL_ENABLE_ENV, "")).strip().lower() in _TRUTHY
 
 # third_party 只读档的白名单。**加工具要连"它读什么根"一起声明**：
 # 名单里的读类工具都受 `fs_read_roots` 约束（见 `g3ku/utils/path_roots.py`）。
@@ -131,7 +144,7 @@ def resolve_tier(
     if normalized_mode != MODE_RESTRICTED:
         return TIER_HOST_FULL
     if jail_available is None:
-        jail_available = JAIL_BACKENDS_AVAILABLE
+        jail_available = jail_backends_available()
     if not jail_available:
         # 后端没接进执行道：安装态再好看也只给只读档，绝不发放无人看守的数据面。
         return TIER_READONLY
@@ -273,6 +286,7 @@ __all__ = [
     "WRITE_TOOL_NAMES",
     "default_mode_for_trust",
     "is_task_tool_name",
+    "jail_backends_available",
     "resolve_tier",
     "session_policy",
 ]

@@ -70,6 +70,32 @@
   标准库足够；WSL 布局改成把这份文件拷进发行版一次。
 - **jail 内不继承宿主环境**：本地后端由 `--clearenv` 与子进程净化环境双重保证，
   `G3KU_*` 一个都进不去；`wsl.exe` 自己需要宿主环境启动，这一层不过 jail 边界。
+- **装配接线**：`tier == jailed` 时执行束把数据面实例换成代理；换不上（后端挂了、卷建不起来）
+  就换成"永不执行"的替身并记 `runtime_context["sandbox_unavailable"]`，绝不掉回宿主实例。
+  执行闸门另有一道硬校验：jail 档里数据面工具若解析到宿主实例，直接拒绝。
+- **闸门是环境变量 `G3KU_SANDBOX_ENABLE_JAIL`**（默认关）。代码写完不等于可以打开：
+  先按下一节的清单在装好后端的机器上验收，再设它。
+
+## 上机验收清单（打开闸门之前）
+
+在装好后端的机器上（Linux `bubblewrap` / Windows 有合格发行版 / macOS 自带 `sandbox-exec`），
+按顺序跑；任何一条失败就把 `G3KU_SANDBOX_ENABLE_JAIL` 留在未设置状态：
+
+1. **安装态**：`GET /api/sandbox/status?refresh=1` → `install_state=ready`，
+   `enforcement` 的 `fs_read` / `fs_write` / `network` 三项都是 `full`。
+2. **开闸**：设 `G3KU_SANDBOX_ENABLE_JAIL=1` 重启 web；`GET /api/ceo/sessions/{id}/sandbox`
+   的 `resolved_tier` 变成 `jailed`。
+3. **根**：让模型 `exec pwd` → `/workspace`；`ls /` 里没有任何宿主目录树。
+4. **读隔离**：`content_open` / `exec cat` 打 `.g3ku/master.key`、`config.json`、
+   `memory/MEMORY.md` → 全部失败（不是"读到只读副本"）。
+5. **写隔离**：写 `/workspace/x` 成功；写 `/etc/x`、`/home/x` 失败。
+6. **网络**：`exec curl -sS https://example.com` 失败（`network=none`）。
+7. **控制面不可达**：jail 内访问宿主 web 端口、容器运行时 socket、ssh-agent 全部失败。
+8. **凭据**：`exec env` 里没有任何 `G3KU_*`、模型 key、master key、QQ AppSecret。
+9. **无常驻**：jail 内 `ps` 没有 Negi 进程；宿主 `netstat` 没有为沙箱新增监听端口。
+10. **WSL 额外**：`ls /mnt` 为空、`/init` 不存在、`exec notepad.exe` 失败。
+11. **降级**：去掉 env 重启 → 群会话回 `readonly`，`exec` 回执是策略拒绝而不是宿主执行。
+12. **缓存**：同一会话切档前后 `tools[]` 字节不变，头部沙箱声明只在重印边界变。
 
 ## 档位存储与 API
 

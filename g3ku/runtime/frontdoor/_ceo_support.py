@@ -748,6 +748,24 @@ class CeoFrontDoorSupport:
 
         started_at = now_iso()
         started_monotonic = time.monotonic()
+        # 装配路漏改的硬校验：会话在 jail 档，数据面工具却拿到了宿主实例 → 直接拒。
+        # 只在 runtime_context 带 sandbox_id 时生效，宿主档不受影响。
+        sandbox_id = str((runtime_context or {}).get("sandbox_id") or "").strip()
+        if sandbox_id:
+            from g3ku.sandbox.router import (
+                JAILED_TOOL_NAMES,
+                JailToolProxy,
+                SandboxUnavailableProxy,
+            )
+
+            if tool_name in JAILED_TOOL_NAMES and not isinstance(
+                tool, (JailToolProxy, SandboxUnavailableProxy)
+            ):
+                error_text = (
+                    f"Error: refused to run {tool_name}: this session is jailed, but the tool "
+                    "resolved to a host instance. Nothing was executed."
+                )
+                return error_text, error_text, "error", "", "", None
         await self._emit_progress(
             on_progress,
             self._tool_invocation_hint(tool_name, normalized_arguments),

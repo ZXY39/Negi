@@ -51,13 +51,11 @@ def _json(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
-class JailToolProxy(Tool):
-    """同一个工具契约、换一个执行面。"""
+class _ForwardingToolProxy(Tool):
+    """只拥有 execute，其余契约成员全部转发底对象。"""
 
-    def __init__(self, *, base_tool: Tool, manager: SandboxManager, handle: SandboxHandle):
+    def __init__(self, base_tool: Tool):
         self._base_tool = base_tool
-        self._manager = manager
-        self._handle = handle
 
     # 抽象成员与带默认实现的契约成员都要显式转发：默认实现会**遮蔽** __getattr__，
     # 漏掉任何一条都会让 tools[] 与宿主档产生字节差。
@@ -98,11 +96,39 @@ class JailToolProxy(Tool):
         return bool(getattr(self._base_tool, "rerun_safe", False))
 
     def __getattr__(self, item: str) -> Any:
-        # 其余成员（前缀、能力声明、未来的新标志）一律转发，代理只拥有 execute。
+        # 其余成员（前缀、能力声明、未来的新标志）一律转发。
         base = self.__dict__.get("_base_tool")
         if base is None:
             raise AttributeError(item)
         return getattr(base, item)
+
+
+class SandboxUnavailableProxy(_ForwardingToolProxy):
+    """档位是 jailed 但后端拿不到时的替身：**永远不执行**，只回不可用。
+
+    这是 fail-closed 的落点：拿不到 jail 时绝不能掉回宿主实例，否则"沙箱不可用"
+    会变成"数据面在宿主上全权运行"。
+    """
+
+    def __init__(self, *, base_tool: Tool, reason: str):
+        super().__init__(base_tool)
+        self._reason = str(reason or "sandbox unavailable")
+
+    async def execute(self, **kwargs: Any) -> Any:
+        _ = kwargs
+        return _error_text(
+            f"sandbox unavailable: {self._reason}. Nothing was executed; "
+            "tell the operator the sandbox backend needs attention."
+        )
+
+
+class JailToolProxy(_ForwardingToolProxy):
+    """同一个工具契约、换一个执行面。"""
+
+    def __init__(self, *, base_tool: Tool, manager: SandboxManager, handle: SandboxHandle):
+        super().__init__(base_tool)
+        self._manager = manager
+        self._handle = handle
 
     async def execute(self, **kwargs: Any) -> Any:
         kwargs.pop("__g3ku_runtime", None)
@@ -442,4 +468,30 @@ def build_jailed_tools(
     return proxies
 
 
-__all__ = ["JAILED_TOOL_NAMES", "JailToolProxy", "build_jailed_tools"]
+def build_jail_overrides(
+    base_tools: Iterable[Tool],
+    *,
+    manager: SandboxManager | None,
+    handle: SandboxHandle | None,
+    reason: str = "",
+) -> dict[str, Tool]:
+    """装配侧入口：拿到 handle 就换真代理，拿不到就换"永不执行"的替身。"""
+    if manager is not None and handle is not None:
+        return build_jailed_tools(base_tools, manager=manager, handle=handle)
+    unavailable: dict[str, Tool] = {}
+    for tool in list(base_tools or []):
+        name = str(getattr(tool, "name", "") or "")
+        if name in JAILED_TOOL_NAMES:
+            unavailable[name] = SandboxUnavailableProxy(
+                base_tool=tool, reason=reason or "sandbox backend unavailable"
+            )
+    return unavailable
+
+
+__all__ = [
+    "JAILED_TOOL_NAMES",
+    "JailToolProxy",
+    "SandboxUnavailableProxy",
+    "build_jail_overrides",
+    "build_jailed_tools",
+]

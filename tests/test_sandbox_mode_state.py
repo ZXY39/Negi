@@ -94,9 +94,10 @@ def test_session_policy_honors_stored_mode(isolated_state: Path, registry) -> No
     assert unlocked.trust == TRUST_THIRD_PARTY_GROUP
 
 
-def test_jailed_is_never_granted_without_backends() -> None:
+def test_jailed_is_never_granted_without_backends(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("G3KU_SANDBOX_ENABLE_JAIL", raising=False)
     assert JAIL_BACKENDS_AVAILABLE is False
-    # 安装态说 ready，但后端没接进执行道 → 仍然只读
+    # 安装态说 ready，但闸门没开 → 仍然只读
     assert (
         resolve_tier(
             trust=TRUST_THIRD_PARTY_GROUP,
@@ -105,7 +106,7 @@ def test_jailed_is_never_granted_without_backends() -> None:
         )
         == TIER_READONLY
     )
-    # 后端可用时才发放 jailed（P1a 打开这个开关）
+    # 显式传 jail_available=True 才发放（装配侧测试用这个口子）
     assert (
         resolve_tier(
             trust=TRUST_THIRD_PARTY_GROUP,
@@ -115,6 +116,62 @@ def test_jailed_is_never_granted_without_backends() -> None:
         )
         == TIER_JAILED
     )
+
+
+def test_jail_gate_env_switch(monkeypatch: pytest.MonkeyPatch) -> None:
+    from g3ku.sandbox.policy import jail_backends_available
+
+    monkeypatch.delenv("G3KU_SANDBOX_ENABLE_JAIL", raising=False)
+    assert jail_backends_available() is False
+    monkeypatch.setenv("G3KU_SANDBOX_ENABLE_JAIL", "1")
+    assert jail_backends_available() is True
+    assert (
+        resolve_tier(trust=TRUST_THIRD_PARTY_GROUP, mode=MODE_RESTRICTED, install_state="ready")
+        == TIER_JAILED
+    )
+
+
+def test_factory_only_builds_when_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from g3ku.sandbox import factory
+
+    assert factory.build_sandbox_manager({"state": "not_installed"}) is None
+    manager = factory.build_sandbox_manager(
+        {
+            "state": "ready",
+            "backend": "bwrap",
+            "enforcement": {
+                "fs_read": "full",
+                "fs_write": "full",
+                "network": "full",
+                "process": "full",
+                "resource": "partial",
+            },
+        }
+    )
+    assert manager is not None
+    assert manager.select(trust="third_party_group").backend is not None
+
+
+def test_factory_configures_wsl_layout(monkeypatch: pytest.MonkeyPatch) -> None:
+    from g3ku.sandbox import factory
+
+    manager = factory.build_sandbox_manager(
+        {
+            "state": "ready",
+            "backend": "wsl_bwrap",
+            "enforcement": {
+                "fs_read": "full",
+                "fs_write": "full",
+                "network": "full",
+                "process": "full",
+                "resource": "partial",
+            },
+            "detail": {"wsl": "C:/Windows/System32/wsl.exe", "selected_distro": "Ubuntu"},
+        }
+    )
+    assert manager is not None
+    assert manager._wsl is not None
+    assert manager._wsl.distro == "Ubuntu"
 
 
 def test_probe_shape() -> None:

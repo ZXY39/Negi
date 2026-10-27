@@ -167,6 +167,11 @@ class SandboxManager:
         self._local = _LocalLayout(Path(base_dir)) if base_dir is not None else None
         self._wsl: _WslLayout | None = None
 
+    def configure_wsl(self, *, wsl_path: str, distro: str) -> None:
+        """WSL 后端的卷在发行版里，布局要在选后端之后才定。"""
+        with self._lock:
+            self._wsl = _WslLayout(wsl_path=str(wsl_path), distro=str(distro))
+
     # -- 选择 ---------------------------------------------------------------
 
     def select(self, *, trust: str) -> BackendSelection:

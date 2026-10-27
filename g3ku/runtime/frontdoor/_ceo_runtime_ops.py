@@ -141,7 +141,7 @@ from g3ku.runtime.web_ceo_sessions import (
     upload_dir_for_session,
     workspace_path,
 )
-from g3ku.sandbox.policy import TIER_READONLY, session_policy
+from g3ku.sandbox.policy import TIER_JAILED, TIER_READONLY, session_policy
 from g3ku.stickers import safe_scan_packs, sticker_contract_sections
 from g3ku.utils.helpers import safe_filename, tools_bundle_single_source_enabled
 from main.governance.exec_tool_policy import render_exec_runtime_policy_body
@@ -6706,11 +6706,61 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             **self._frontdoor_resident_tools(state=state, runtime=runtime),
         }
         runtime_context = self._build_tool_runtime_context(state=state, runtime=runtime)
+        # jailed 档才换数据面实例；换不上（后端挂/卷建不起来）就换"永不执行"的替身，
+        # 绝不掉回宿主实例——那是"沙箱不可用 → 数据面在宿主全权"的经典失手。
+        policy = session_policy(state.get("session_key"))
+        if policy.tier == TIER_JAILED:
+            overrides = self._sandbox_jail_overrides(
+                state=state,
+                runtime_context=runtime_context,
+                policy=policy,
+                tools=all_tools,
+            )
+            if overrides:
+                all_tools.update(overrides)
+                declared_tools.update(overrides)
         return FrontdoorExecutionBundle(
             visible_tools=all_tools,
             declared_tools=declared_tools,
             runtime_context=runtime_context,
             on_progress=runtime_context.get("on_progress"),
+        )
+
+    def _sandbox_jail_overrides(
+        self,
+        *,
+        state: CeoGraphState,
+        runtime_context: dict[str, Any],
+        policy: Any,
+        tools: dict[str, Any],
+    ) -> dict[str, Any]:
+        from g3ku.sandbox.router import build_jail_overrides
+
+        session_key = str(state.get("session_key") or "")
+        manager = None
+        handle = None
+        reason = "sandbox backend unavailable"
+        try:
+            from g3ku.sandbox.factory import get_sandbox_manager
+
+            manager = get_sandbox_manager()
+            if manager is None:
+                reason = "sandbox backend is not installed"
+            else:
+                handle = manager.ensure(session_key, trust=policy.trust)
+                runtime_context["sandbox_id"] = handle.sandbox_id
+                runtime_context["sandbox_backend"] = handle.backend.name
+                runtime_context["sandbox_workspace"] = "/workspace"
+        except Exception as exc:  # noqa: BLE001 - 后端异常一律降级成"不可用"
+            reason = str(exc) or "sandbox backend unavailable"
+            handle = None
+        if handle is None:
+            runtime_context["sandbox_unavailable"] = reason
+        return build_jail_overrides(
+            list(tools.values()),
+            manager=manager,
+            handle=handle,
+            reason=reason,
         )
 
     def _frontdoor_resident_tools(

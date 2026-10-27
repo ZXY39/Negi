@@ -208,6 +208,20 @@ def test_exec_payload_and_background_refusal(sandbox, monkeypatch: pytest.Monkey
     assert "background processes are not supported" in refused
 
 
+def test_unavailable_overrides_never_execute(tmp_path: Path) -> None:
+    from g3ku.sandbox.router import SandboxUnavailableProxy, build_jail_overrides
+
+    base = [_NamedTool("exec"), _NamedTool("memory_update")]
+    proxies = build_jail_overrides(base, manager=None, handle=None, reason="backend is down")
+    assert set(proxies) == {"exec"}
+    proxy = proxies["exec"]
+    assert isinstance(proxy, SandboxUnavailableProxy)
+    result = asyncio.run(proxy.execute(command="echo hi"))
+    assert "sandbox unavailable" in result
+    # 契约照旧转发，模型看到的 schema 不变
+    assert proxy.parameters == base[0].parameters
+
+
 def test_stat_reports_directory_entries(sandbox) -> None:
     manager, handle, workspace = sandbox
     (workspace / "a.txt").write_text("abc", encoding="utf-8")
