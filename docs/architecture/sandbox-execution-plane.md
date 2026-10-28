@@ -242,7 +242,7 @@
 |---|---|---|---|
 | 读类数据面 | `content_open` / `content_search` / `content_describe` / `filesystem_stat` / `view_message_history` | 放行（受读根限定） | 放行（受读根限定） |
 | 常驻信号 | `silent` / `time` / `load_tool_context` / `load_skill_context` | 放行 | 放行 |
-| 贴纸目录 | `search_stickers` | 放行 | 放行 |
+| 贴纸目录 | `show_sticker_category`（渲染缓存供选图；会改写 `registry.json` 的 `register_stickers` 不在本档，按默认拒） | 放行 | 放行 |
 | 写类数据面 | `filesystem_write` / `edit` / `copy` / `move` / `delete` / `propose_patch` | 拒 | 拒 |
 | 进程 / 网络 | `exec` / `process_kill` / `web_fetch` / `skill-installer` | 拒（见下） | `exec` 强制 `governed`，`web_fetch` 放行，其余拒 |
 | 控制面 | 记忆、任务族、`send_message`、`cron`、`schedule_wake`、模型配置 | 拒 | 记忆照 RBAC，任务族拒 |
