@@ -6,6 +6,7 @@ from datetime import datetime
 from types import SimpleNamespace
 
 from fastapi import APIRouter, BackgroundTasks, Body, HTTPException
+from loguru import logger
 
 from g3ku.runtime import skill_roster_notice as _skill_roster_notice
 from g3ku.runtime.ceo_catalog_offload import (
@@ -23,6 +24,7 @@ from g3ku.runtime.frontdoor.message_builder import (
 )
 from g3ku.runtime.frontdoor.turns import find_frontdoor_turn_tool
 from g3ku.runtime.session_agent import (
+    MANUAL_COMPRESSION_FAILED,
     MANUAL_COMPRESSION_RUNNING,
     MANUAL_COMPRESSION_STATE_ATTR,
     PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR,
@@ -1144,6 +1146,16 @@ def _set_manual_compression_state(runtime_session, **changes) -> dict:
     return current
 
 
+def _manual_compression_failure_text(exc: BaseException) -> str:
+    """失败线上要给的那句话：原始正文优先，拿不到才退异常类型名。
+
+    压缩失败的成因是外部报的那件事（上游拒绝、请求形状、超时），不是"操作员按了暂停"。
+    这一串原样交给区分线与状态读数，运行时不替它换成任何与本因无关的判词。
+    """
+    text = " ".join(str(exc or "").split()).strip()
+    return text or (type(exc).__name__ or "compression_failed")
+
+
 async def _emit_runtime_state_snapshot(runtime_session) -> None:
     emit = getattr(runtime_session, "_emit_state_snapshot", None)
     if not callable(emit):
@@ -1212,7 +1224,7 @@ async def _execute_manual_context_compression(agent, runtime_session, *, pause_f
         if not callable(pause):
             await _finish_manual_compression(
                 runtime_session,
-                status="failed",
+                status=MANUAL_COMPRESSION_FAILED,
                 marker_state="",
                 stats={},
                 reason="session_pause_unavailable",
@@ -1232,10 +1244,10 @@ async def _execute_manual_context_compression(agent, runtime_session, *, pause_f
         except Exception as exc:
             await _finish_manual_compression(
                 runtime_session,
-                status="failed",
+                status=MANUAL_COMPRESSION_FAILED,
                 marker_state="",
                 stats={},
-                reason=f"pause_failed:{type(exc).__name__}",
+                reason=_manual_compression_failure_text(exc),
             )
             return
     try:
@@ -1250,12 +1262,20 @@ async def _execute_manual_context_compression(agent, runtime_session, *, pause_f
         )
         raise
     except Exception as exc:
+        # 压缩自己失败 ≠ 操作员按了暂停。落 failed，并把外部报的那句话原样交给终局文案；
+        # 区分线只由 completed / paused 落，失败不在转录里留一条没人按过暂停的线。
+        failure_text = _manual_compression_failure_text(exc)
+        logger.warning(
+            f"Manual context compression failed "
+            f"(session_key={str(getattr(getattr(runtime_session, 'state', None), 'session_key', '') or '')}): "
+            f"{type(exc).__name__}: {failure_text}"
+        )
         await _finish_manual_compression(
             runtime_session,
-            status="paused",
-            marker_state="paused",
+            status=MANUAL_COMPRESSION_FAILED,
+            marker_state="",
             stats={},
-            reason=f"failed:{type(exc).__name__}",
+            reason=failure_text,
         )
         return
     if not result.get("applied"):

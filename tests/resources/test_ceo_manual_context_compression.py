@@ -11,9 +11,13 @@ from fastapi.testclient import TestClient
 from g3ku.core.state import AgentState
 from g3ku.runtime.api import ceo_sessions, websocket_ceo
 from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
-from g3ku.runtime.frontdoor._ceo_runtime_ops import FrontdoorTokenPreflightResult
+from g3ku.runtime.frontdoor._ceo_runtime_ops import (
+    FrontdoorCompressionRuntimeError,
+    FrontdoorTokenPreflightResult,
+)
 from g3ku.runtime.session_agent import (
     CONTEXT_COMPRESSION_MARKER_KIND,
+    MANUAL_COMPRESSION_STATE_ATTR,
     RuntimeAgentSession,
 )
 from g3ku.session.manager import SessionManager
@@ -599,3 +603,64 @@ async def test_manual_compression_marker_carries_the_turn_boundary() -> None:
     )
 
     assert captured[0]["stats"]["boundary_turn_seq"] == 2
+
+
+def test_compress_context_endpoint_failure_lands_failed_with_verbatim(tmp_path: Path, monkeypatch) -> None:
+    """手动压缩自己失败：落 failed 并把外部原话交给终局文案，转录里不落任何区分线。
+
+    实盘 2026-10-28 会话 ext:qq-official-1903529517:f8a8001865631301：某一被供应商拒绝的块
+    被旧分支写成 status="paused"，操作员在一条自己从没按过暂停的会话上看到「压缩已暂停」。
+    """
+    rejection = "Inappropriate input/output rejected for security reasons"
+
+    class _RejectingRunner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def compress_session_context(self, *, session):
+            self.calls += 1
+            raise FrontdoorCompressionRuntimeError(
+                code="frontdoor_compression_provider_rejected",
+                message=rejection,
+                recoverable=True,
+            )
+
+    runner = _RejectingRunner()
+    runtime_session = _idle_runtime_session()
+    markers: list[dict] = []
+    runtime_session.append_context_compression_marker = lambda **kwargs: markers.append(kwargs) or True
+    _install_endpoint_runtime(monkeypatch, tmp_path, runner=runner, runtime_session=runtime_session)
+
+    client = TestClient(_build_app())
+    response = client.post("/api/ceo/sessions/web:shared/compress-context")
+
+    assert response.status_code == 200
+    assert runner.calls == 1
+    state = getattr(runtime_session, MANUAL_COMPRESSION_STATE_ATTR, None) or {}
+    assert state.get("status") == "failed", state
+    assert state.get("reason") == rejection, state
+    assert markers == [], f"压缩失败不该在转录里留下一条暂停线：{markers}"
+    # 进度复位，否则实时线一直挂在「上下文压缩中」。
+    assert runtime_session._compression_state["status"] == ""
+
+
+def test_manual_compression_cancel_still_lands_paused_marker(tmp_path: Path) -> None:
+    """真取消才用 paused 这个词：操作员按下的那一次取消，落一条「压缩已暂停」的线。"""
+
+    class _CancellingRunner:
+        async def compress_session_context(self, *, session):
+            raise asyncio.CancelledError()
+
+    runtime_session = _idle_runtime_session()
+    markers: list[dict] = []
+    runtime_session.append_context_compression_marker = lambda **kwargs: markers.append(kwargs) or True
+    agent = SimpleNamespace(multi_agent_runner=_CancellingRunner())
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            ceo_sessions._execute_manual_context_compression(agent, runtime_session, pause_first=False)
+        )
+
+    state = getattr(runtime_session, MANUAL_COMPRESSION_STATE_ATTR, None) or {}
+    assert state.get("status") == "paused", state
+    assert markers and markers[-1]["state"] == "paused", markers
