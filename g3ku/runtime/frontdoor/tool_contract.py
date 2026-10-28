@@ -11,8 +11,6 @@ from g3ku.utils.helpers import (
     path_anchor_tokens,
     render_candidate_tool_line,
 )
-from main.governance.exec_tool_policy import render_exec_runtime_policy_body
-
 FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND = 'frontdoor_runtime_tool_contract'
 FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING = '## Runtime Tool Contract'
 FRONTDOOR_DYNAMIC_TOOL_CONTRACT_PAYLOAD_KEY = '_frontdoor_tool_contract_payload'
@@ -711,6 +709,9 @@ def _render_exec_runtime_policy(exec_runtime_policy: dict[str, Any] | None) -> s
     payload = dict(exec_runtime_policy or {})
     if not payload:
         return 'exec_runtime_policy: none'
+    # 延迟导入：tool_contract 会被 main.runtime 反向导入，模块级 import 会成环。
+    from main.governance.exec_tool_policy import render_exec_runtime_policy_body
+
     body = render_exec_runtime_policy_body(payload)
     return 'exec_runtime_policy: ' + (body or 'none')
 
