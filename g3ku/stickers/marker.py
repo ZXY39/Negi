@@ -84,7 +84,11 @@ def _looks_like_marker(line: str) -> bool:
 
 
 def _pick_path(
-    packs: tuple[Pack, ...], pack_key: str, category_key: str, picker: random.Random
+    packs: tuple[Pack, ...],
+    pack_key: str,
+    category_key: str,
+    picker: random.Random,
+    avoid: set[Path],
 ) -> Path | None:
     pack = find_pack(packs, pack_key)
     if pack is None:
@@ -106,7 +110,10 @@ def _pick_path(
             pack_key,
         )
         return None
-    return picker.choice(images)
+    # 同一回复里的随机标记自动去重：先从本轮还没发过的图里挑。分类总数小于要发送
+    # 的张数时没有可选余地，退回全集——这是唯一允许重复的情形。
+    fresh = [path for path in images if path not in avoid]
+    return picker.choice(fresh or images)
 
 
 def _pick_by_index(packs: tuple[Pack, ...], pack_key: str, category_key: str, index: int) -> Path | None:
@@ -175,7 +182,13 @@ def resolve_reply_stickers(
     max_per_reply: int | None = None,
     rng: random.Random | None = None,
 ) -> StickerReply:
-    """Resolve one reply: strip marker lines, pick images, label what happened."""
+    """Resolve one reply: strip marker lines, pick images, label what happened.
+
+    Random markers (``pack/category`` and short form) are de-duplicated within
+    the reply: each one picks an image not already chosen by an earlier marker.
+    A category smaller than the requested count falls back to repeats -- with
+    nothing left to choose, sending the same picture twice is the only outcome.
+    """
     if not isinstance(text, str):
         return StickerReply(text="")
     if _MARKER_PREFIX not in text:
@@ -222,7 +235,7 @@ def resolve_reply_stickers(
         if index is not None:
             path = _pick_by_index(packs, pack_key, value, index)
         else:
-            path = _pick_path(packs, pack_key, value, picker)
+            path = _pick_path(packs, pack_key, value, picker, set(chosen))
         if path is None:
             label = f"{pack_key}/{value}/{index}" if index is not None else f"{pack_key}/{value}"
             undelivered.append(label)

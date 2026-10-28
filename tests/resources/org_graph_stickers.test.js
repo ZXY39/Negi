@@ -59,6 +59,7 @@ function stubU(document) {
         "sticker-upload-input",
         "sticker-max-per-reply",
         "sticker-injected-banner",
+        "sticker-create-pack-btn",
     ];
     return {
         stickerRefresh: document.getElementById("sticker-refresh-btn"),
@@ -70,6 +71,7 @@ function stubU(document) {
         stickerUploadInput: document.getElementById("sticker-upload-input"),
         stickerMaxPerReply: document.getElementById("sticker-max-per-reply"),
         stickerInjectedBanner: document.getElementById("sticker-injected-banner"),
+        stickerCreatePackBtn: document.getElementById("sticker-create-pack-btn"),
         _ids: ids,
     };
 }
@@ -117,13 +119,16 @@ function loadView({ calls = {} } = {}) {
             applyStickerPack,
             dropStickerPack,
             onStickerDetailClick,
+            onStickerListClick,
             renderStickerSettings,
             stickerLimits,
             stickerErrorText,
+            startStickerPackCreate,
+            createStickerPack,
         };`,
         context,
     );
-    return { ...context.__test, U: context.U, calls };
+    return { ...context.__test, U: context.U, calls, ApiClient: context.ApiClient };
 }
 
 function pack(overrides = {}) {
@@ -239,6 +244,56 @@ test("详情：截断给查看全部，待注册给注册按钮，停用只降�
     assert.match(html, /2 \/ 9 张已注册（1 张待注册）/);
     assert.match(html, /data-sticker-action="register-category"/);
     assert.match(html, /sticker-thumb is-unregistered/);
+});
+
+test("新建包：卡片只在点创建后出现，保存后收起并选中新包", async () => {
+    const view = loadView();
+    view.U.stickerDetail.clientWidth = 500;
+    view.StickersState.detail = pack();
+    view.StickersState.selected = "demo";
+    view.renderStickerDetail();
+    assert.doesNotMatch(view.U.stickerDetail.innerHTML, /sticker-new-pack-key/);
+
+    view.startStickerPackCreate();
+    const html = view.U.stickerDetail.innerHTML;
+    assert.match(html, /id="sticker-new-pack-key"/);
+    assert.match(html, /data-sticker-action="save-new-pack"/);
+    assert.match(html, /data-sticker-action="cancel-new-pack"/);
+    // 卡片铺在右栏顶部，已选中的包详情还在下面。
+    assert.ok(html.indexOf("sticker-new-pack-card") < html.indexOf("sticker-pack-head"));
+
+    view.U.stickerDetail.querySelector = (selector) =>
+        selector === "#sticker-new-pack-key" ? { value: "atri" } : null;
+    const posted = [];
+    view.ApiClient.createStickerPack = async (key) => {
+        posted.push(key);
+        return { item: pack({ dir_name: key, key, total: 0, categories: [] }) };
+    };
+    await view.createStickerPack();
+
+    assert.deepEqual(posted, ["atri"]);
+    assert.equal(view.StickersState.creatingPack, false);
+    assert.equal(view.StickersState.selected, "atri");
+    assert.doesNotMatch(view.U.stickerDetail.innerHTML, /sticker-new-pack-key/);
+});
+
+test("取消新建包只收起卡片，不动已选中的包", () => {
+    const view = loadView();
+    view.StickersState.detail = pack();
+    view.StickersState.selected = "demo";
+    view.startStickerPackCreate();
+    const target = {
+        dataset: { stickerAction: "cancel-new-pack" },
+        closest(selector) {
+            return selector === "[data-sticker-action]" ? target : null;
+        },
+    };
+
+    view.onStickerDetailClick({ target });
+
+    assert.equal(view.StickersState.creatingPack, false);
+    assert.equal(view.StickersState.selected, "demo");
+    assert.doesNotMatch(view.U.stickerDetail.innerHTML, /sticker-new-pack-key/);
 });
 
 function categoryWithImages(count) {

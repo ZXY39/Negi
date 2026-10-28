@@ -4072,7 +4072,10 @@ class ReActToolLoop:
             for name in list((runtime_context or {}).get('declared_denied_tool_names') or [])
             if str(name or '').strip()
         ]
+        from g3ku.stickers.config import max_per_reply as sticker_max_per_reply
+
         return {
+            'sticker_max_per_reply': str(sticker_max_per_reply()),
             'exec_runtime_policy': render_exec_runtime_policy_body(exec_runtime_policy),
             'session_temp_dir': str(task_temp_dir or '').strip(),
             'denied_tools': ', '.join(f'`{name}`' for name in denied_names),

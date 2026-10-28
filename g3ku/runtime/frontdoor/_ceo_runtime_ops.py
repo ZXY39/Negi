@@ -142,6 +142,7 @@ from g3ku.runtime.web_ceo_sessions import (
     workspace_path,
 )
 from g3ku.sandbox.policy import TIER_JAILED, TIER_READONLY, session_policy
+from g3ku.stickers import config as sticker_config
 from g3ku.stickers import safe_scan_packs, sticker_contract_sections
 from g3ku.utils.helpers import safe_filename, tools_bundle_single_source_enabled
 from main.governance.exec_tool_policy import render_exec_runtime_policy_body
@@ -3818,6 +3819,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             if isinstance(item, dict)
         ]
         sections = {
+            # 与头部同一取值：头部 `sticker_max_per_reply` 行覆盖这一节时以头部原文为初值，
+            # 之后改设置只投这一条变化（不重印头部）。
+            "sticker_max_per_reply": str(sticker_config.max_per_reply()),
             "exec_runtime_policy": render_exec_runtime_policy_body(
                 self._frontdoor_exec_runtime_policy()
             ),

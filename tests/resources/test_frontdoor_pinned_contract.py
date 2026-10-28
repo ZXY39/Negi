@@ -359,8 +359,9 @@ def _sticker_pack(key: str, theme: str, categories: list[tuple[str, str]]):
     )
 
 
-def test_pinned_head_carries_sticker_catalog_and_round_trips_into_sections() -> None:
+def test_pinned_head_carries_sticker_catalog_and_round_trips_into_sections(monkeypatch) -> None:
     """头部渲染与通知分节是同一份渲染：解析回来必须逐字相等。"""
+    monkeypatch.setattr("g3ku.stickers.config.max_per_reply", lambda: 2)
     packs = [
         _sticker_pack("atri", "动漫少女", [("happy", "开心大笑"), ("awkward", "尴尬")]),
         _sticker_pack("panda", "熊猫头", [("smug", "得意")]),
@@ -373,11 +374,14 @@ def test_pinned_head_carries_sticker_catalog_and_round_trips_into_sections() -> 
     )
 
     assert STICKER_HEADER in text
+    assert "sticker_max_per_reply: 2" in text
     assert "- `atri` | 动漫少女 | awkward(尴尬), happy(开心大笑)" in text
     assert "- `panda` | 熊猫头 | smug(得意)" in text
     assert sticker_sections_from_pinned_text(text) == sticker_pack_sections(packs)
     values = pinned_contract_section_values(text)
     assert values["sticker_pack:atri"] == sticker_pack_sections(packs)["atri"]
+    # 头部这一行就是通知分节的初值：两边必须逐字一致，否则会被当成"值变了"再投一条。
+    assert values["sticker_max_per_reply"] == "2"
 
 
 def test_pinned_sticker_lines_stay_frozen_between_repaints() -> None:

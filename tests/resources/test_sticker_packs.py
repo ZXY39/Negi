@@ -340,6 +340,44 @@ def test_short_form_picks_are_deterministic_for_the_same_reply(tmp_path):
     assert len(first[1]) == 1
 
 
+def test_random_markers_dedupe_within_one_reply(tmp_path):
+    """同一轮两个随机标记必须挑两张不同的图；转录与实时帧各解析一次也一样。"""
+    _write_pack(tmp_path, "atri", {"happy": 2}, theme="t")
+    invalidate_scan_cache()
+    content = "好耶\n[[sticker:atri/happy]]\n[[sticker:atri/happy]]\n"
+
+    first = resolve_markers(content, root=tmp_path, max_per_reply=2)
+    second = resolve_markers(content, root=tmp_path, max_per_reply=2)
+
+    assert first[1] == second[1]
+    assert len(first[1]) == 2
+    assert first[1][0] != first[1][1]
+
+
+def test_random_markers_repeat_only_when_category_is_too_small(tmp_path):
+    """分类里只有一张图时要两张只能重复；这是唯一允许重复的情形。"""
+    _write_pack(tmp_path, "atri", {"happy": 1}, theme="t")
+    invalidate_scan_cache()
+    content = "好耶\n[[sticker:atri/happy]]\n[[sticker:atri/happy]]\n"
+
+    _, images = resolve_markers(content, root=tmp_path, max_per_reply=2)
+
+    assert len(images) == 2
+    assert images[0] == images[1]
+
+
+def test_random_markers_avoid_images_already_chosen_by_index(tmp_path):
+    """同一轮先精确点名再走随机：随机那一张不会撞上已点名的图。"""
+    _write_pack(tmp_path, "atri", {"happy": 2}, theme="t")
+    invalidate_scan_cache()
+    content = "好耶\n[[sticker:atri/happy/1]]\n[[sticker:atri/happy]]\n"
+
+    reply = resolve_reply_stickers(content, root=tmp_path, max_per_reply=2)
+
+    assert len(reply.images) == 2
+    assert reply.images[0] != reply.images[1]
+
+
 def test_render_marker_images_rewrites_for_the_transcript(tmp_path):
     _write_pack(tmp_path, "atri", {"happy": 2}, theme="t")
     invalidate_scan_cache()

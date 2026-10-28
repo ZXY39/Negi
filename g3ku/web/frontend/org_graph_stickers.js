@@ -170,17 +170,39 @@ function renderStickerEmptyDetail(text) {
     if (U.stickerDetail) U.stickerDetail.innerHTML = `<div class="empty-state">${text}</div>`;
 }
 
+// 新建包卡片只在点「创建新包」后出现：包名输入与保存按钮都属于这张卡，
+// 左栏不再常驻一个会被误当成"改名"的输入框。
+function stickerNewPackCardHtml() {
+    return `<section class="sticker-new-pack-card">
+        <div class="sticker-pack-title">
+            <h2>新建表情包</h2>
+            <span class="sticker-pack-total">建好后再往分类里上传图片</span>
+        </div>
+        <div class="sticker-field-row">
+            <span class="sticker-field-label">包名</span>
+            <input class="resource-search sticker-field-input" id="sticker-new-pack-key" maxlength="64"
+                aria-label="包名" placeholder="如 atri（字母/数字/点/下划线/连字符）">
+            <button type="button" class="toolbar-btn success small" data-sticker-action="save-new-pack">保存</button>
+            <button type="button" class="toolbar-btn ghost small" data-sticker-action="cancel-new-pack">取消</button>
+        </div>
+    </section>`;
+}
+
 function renderStickerDetail() {
     if (!U.stickerDetail) return;
     const pack = StickersState.detail;
+    const sections = StickersState.creatingPack ? [stickerNewPackCardHtml()] : [];
     if (!pack) {
-        renderStickerEmptyDetail("选择左边的表情包查看图片。");
+        if (!sections.length) {
+            renderStickerEmptyDetail("选择左边的表情包查看图片。");
+            return;
+        }
+        U.stickerDetail.innerHTML = sections.join("");
         return;
     }
     const limits = stickerLimits();
     const pending = Number(pack.pending || 0);
     const theme = pack.theme || "";
-    const sections = [];
     sections.push(`<div class="sticker-pack-head">
         <div class="sticker-pack-title">
             <h2>${esc(pack.key)}</h2>
@@ -430,7 +452,13 @@ function onStickerListClick(event) {
     const trigger = event.target.closest("[data-sticker-pack]");
     if (!trigger) return;
     const dirName = trigger.dataset.stickerPack;
-    if (!dirName || dirName === StickersState.selected) return;
+    if (!dirName) return;
+    const wasCreating = StickersState.creatingPack;
+    StickersState.creatingPack = false;
+    if (dirName === StickersState.selected) {
+        if (wasCreating) renderStickerDetail();
+        return;
+    }
     StickersState.selected = dirName;
     renderStickerPacks();
     void loadStickerDetail(dirName);
@@ -438,7 +466,7 @@ function onStickerListClick(event) {
 
 function onStickerDetailKeydown(event) {
     if (event.key !== "Enter") return;
-    const field = event.target.closest("#sticker-theme-input, [data-sticker-description]");
+    const field = event.target.closest("#sticker-theme-input, #sticker-new-pack-key, [data-sticker-description]");
     if (!field) return;
     event.preventDefault();
     const saveTrigger = field.parentElement?.querySelector("[data-sticker-action^='save-']");
@@ -467,6 +495,15 @@ function onStickerDetailClick(event) {
     const trigger = event.target.closest("[data-sticker-action]");
     if (!trigger) return;
     const action = trigger.dataset.stickerAction;
+    if (action === "save-new-pack") {
+        void createStickerPack();
+        return;
+    }
+    if (action === "cancel-new-pack") {
+        StickersState.creatingPack = false;
+        renderStickerDetail();
+        return;
+    }
     const pack = stickerSelectedPack();
     if (!pack) return;
     switch (action) {
@@ -643,8 +680,16 @@ async function createStickerCategory(pack, key, description) {
     });
 }
 
+function startStickerPackCreate() {
+    if (StickersState.busy) return;
+    StickersState.creatingPack = true;
+    renderStickerDetail();
+    const input = U.stickerDetail ? U.stickerDetail.querySelector("#sticker-new-pack-key") : null;
+    if (input && typeof input.focus === "function") input.focus();
+}
+
 async function createStickerPack() {
-    const input = U.stickerNewPackKey;
+    const input = U.stickerDetail ? U.stickerDetail.querySelector("#sticker-new-pack-key") : null;
     const key = String(input ? input.value : "").trim();
     if (!key) {
         stickerFail("新建包", new Error("先填包名，如 atri"));
@@ -654,8 +699,9 @@ async function createStickerPack() {
         label: "正在新建包…",
         request: () => ApiClient.createStickerPack(key),
         onSuccess: (data) => {
-            if (input) input.value = "";
+            StickersState.creatingPack = false;
             if (data.item) applyStickerPack(data.item);
+            else renderStickerDetail();
         },
     });
 }
@@ -726,13 +772,6 @@ function bindStickerPage() {
         window.addEventListener("resize", onStickerViewportResize);
     }
     if (U.stickerCreatePackBtn) {
-        U.stickerCreatePackBtn.addEventListener("click", () => void createStickerPack());
-    }
-    if (U.stickerNewPackKey) {
-        U.stickerNewPackKey.addEventListener("keydown", (event) => {
-            if (event.key !== "Enter") return;
-            event.preventDefault();
-            void createStickerPack();
-        });
+        U.stickerCreatePackBtn.addEventListener("click", startStickerPackCreate);
     }
 }

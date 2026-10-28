@@ -18560,24 +18560,20 @@ textarea {
     color: var(--ui-text-muted);
 }
 
+/* 发送策略与「创建新包」共用底栏一行：左栏不再常驻包名输入框，
+   新建入口在点了之后才把卡片铺到右栏顶部。 */
 .sticker-settings {
     display: flex;
-    flex-direction: column;
-    gap: 6px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
     padding: var(--ui-space-3) 0;
     border-top: 1px solid var(--ui-border);
-}
-
-.sticker-settings-title {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--ui-text-secondary);
 }
 
 .sticker-settings-row {
     display: flex;
     align-items: center;
-    justify-content: space-between;
     gap: 8px;
     font-size: 13px;
 }
@@ -18744,15 +18740,15 @@ textarea {
     border-style: dashed;
 }
 
-.sticker-new-pack {
+/* 新建包卡片：虚线描边表示这是一张待填写的临时卡片，不是已存在的包。 */
+.sticker-new-pack-card {
     display: flex;
+    flex-direction: column;
     gap: 8px;
-    padding: 8px 0;
-}
-
-.sticker-new-pack .resource-search {
-    flex: 1 1 auto;
-    min-width: 0;
+    padding: var(--ui-space-3);
+    border: 1px dashed var(--ui-brand);
+    border-radius: var(--ui-radius-card);
+    background: var(--ui-brand-soft);
 }
 
 .sticker-thumb-open {

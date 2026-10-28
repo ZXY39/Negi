@@ -15,6 +15,8 @@ const StickersState = {
     settingsLoadedOnce: false,
     busy: false,
     search: "",
+    // 新建包不是一个常驻表单：点「创建新包」才在右栏顶部铺一张卡片。
+    creatingPack: false,
     // 上传按钮属于某个分类，但 <input type="file"> 只有一颗，所以选择时记在这里。
     uploadTarget: null,
 };

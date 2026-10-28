@@ -39,6 +39,7 @@ MEMORY_NOTICE_HEADING = '### Long-term memory updates'
 RUNTIME_CONTRACT_UPDATE_HEADING = '### Runtime contract updates (supersede the pinned snapshot)'
 # 渲染顺序固定：同一组变化每次投出来的字节稳定，便于模型与测试比对。
 CONTRACT_SECTION_ORDER = (
+    'sticker_max_per_reply',
     'exec_runtime_policy',
     'session_temp_dir',
     'denied_tools',

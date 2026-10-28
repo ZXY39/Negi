@@ -34,8 +34,9 @@ RUNTIME_APPENDIX_HEADINGS = (FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING,)
 # `load_skill_context` 的三态回执告知原因。
 FRONTDOOR_PINNED_CONTRACT_HEADING = '## Runtime Contract (pinned)'
 FRONTDOOR_PINNED_CONTRACT_KIND = 'frontdoor_runtime_pinned_contract'
-# v3: 头部新增 sticker_packs 段。版本进重印判据，存量钉住块上线后重印一次。
-PINNED_CONTRACT_RENDERER_VERSION = 'pinned-contract-v3'
+# v4: 头部新增 sticker_max_per_reply 行（每轮发送预算）。版本进重印判据，
+# 存量钉住块上线后重印一次；之后改设置由 `[RUNTIME_NOTICE]` 的合同分节纠正。
+PINNED_CONTRACT_RENDERER_VERSION = 'pinned-contract-v4'
 PINNED_CONTRACT_SNAPSHOT_NOTE = (
     'snapshot_note: this block refreshes only at compaction; later runtime notices '
     'supersede changed values.'
@@ -262,7 +263,8 @@ def render_pinned_contract_text(
 
     `sticker_items` 是 `g3ku.stickers.catalog.scan_packs()` 的结果；它在钉住时点被
     冻结进原文，两次重印之间怎么增删表情包都不改这块（增删由 `[RUNTIME_NOTICE]`
-    的 `sticker_pack:<pack>` 分节纠正）。
+    的 `sticker_pack:<pack>` 分节纠正）。`sticker_max_per_reply` 与它同属一节：
+    钉住时冻结，改设置由同一条通知的 `sticker_max_per_reply` 分节纠正。
     """
     """渲染钉住块；`include_extras=True` 时即使名单为空也渲静态声明。
 
@@ -295,7 +297,11 @@ def render_pinned_contract_text(
             for item in normalized_items
         )
     from g3ku.stickers import render_catalog_lines
+    from g3ku.stickers.config import max_per_reply
 
+    # 发送预算与包清单同属表情包一节的静态声明：钉住时点冻结，改设置不重印头部，
+    # 由 `[RUNTIME_NOTICE]` 的 `sticker_max_per_reply` 分节纠正。
+    lines.append(f'sticker_max_per_reply: {max_per_reply()}')
     lines.extend(render_catalog_lines(sticker_items or ()))
     if not include_extras:
         return '\n'.join(lines).strip()
@@ -408,6 +414,8 @@ def pinned_contract_section_values(pinned_text: Any) -> dict[str, str]:
             values['exec_runtime_policy'] = '' if body in {'', 'none'} else body
         elif stripped.startswith('session_temp_dir:'):
             values['session_temp_dir'] = stripped.split(':', 1)[1].strip()
+        elif stripped.startswith('sticker_max_per_reply:'):
+            values['sticker_max_per_reply'] = stripped.split(':', 1)[1].strip()
     values.update(sticker_contract_sections_from_text(pinned_text))
     return values
 

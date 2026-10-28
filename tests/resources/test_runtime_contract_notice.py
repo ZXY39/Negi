@@ -137,6 +137,37 @@ def test_frontdoor_policy_change_is_one_notice_and_head_stays_frozen() -> None:
     assert covered["exec_runtime_policy"].startswith("mode=governed")
 
 
+def test_sticker_budget_change_is_one_notice_and_head_stays_frozen(monkeypatch) -> None:
+    """改每轮张数：头部不重印，过一次 `[RUNTIME_NOTICE]`，同值不重复投。"""
+    _reset_stores()
+    monkeypatch.setattr("g3ku.stickers.config.max_per_reply", lambda: 1)
+    holder = {"policy": dict(GOVERNED)}
+    runner = _frontdoor_runner(holder)
+    head = _pin_frontdoor_head(holder["policy"])
+    assert "sticker_max_per_reply: 1" in head
+    base = [{"role": "system", "content": head}, {"role": "user", "content": "hi"}]
+
+    first = runner._apply_frontdoor_skill_roster_notice(
+        base, session_key=SESSION_KEY, state=_frontdoor_state()
+    )
+    assert not any("sticker_max_per_reply" in text for text in _notice_texts(first))
+
+    monkeypatch.setattr("g3ku.stickers.config.max_per_reply", lambda: 3)
+    changed = runner._apply_frontdoor_skill_roster_notice(
+        base, session_key=SESSION_KEY, state=_frontdoor_state()
+    )
+    texts = _notice_texts(changed)
+    assert len(texts) == 1
+    assert "- sticker_max_per_reply: 3" in texts[0]
+    # 值变化不重印头部：重新取数仍是钉住的那一份原文。
+    assert _pin_frontdoor_head(holder["policy"]) == head
+
+    again = runner._apply_frontdoor_skill_roster_notice(
+        changed, session_key=SESSION_KEY, state=_frontdoor_state()
+    )
+    assert len(_notice_texts(again)) == len(texts)
+
+
 def _node_loop() -> ReActToolLoop:
     class _LogService:
         def read_runtime_frame(self, task_id: str, node_id: str):
@@ -177,6 +208,7 @@ def test_node_notice_carries_only_non_head_sections() -> None:
 
     sections = {
         # 与头部同一渲染口：值必须逐字一致，否则会被当成"策略变了"再投一条。
+        "sticker_max_per_reply": covered.get("sticker_max_per_reply", ""),
         "exec_runtime_policy": covered.get("exec_runtime_policy", ""),
         "session_temp_dir": covered.get("session_temp_dir", ""),
         "denied_tools": "`exec`",
