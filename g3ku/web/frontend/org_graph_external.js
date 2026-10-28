@@ -445,9 +445,7 @@ function renderQqBotAccounts() {
                     value="${esc(row.label || "")}" data-inline-label="${index}"
                     placeholder="备注，留空显示 AppID" autocomplete="off">`
             : `<button class="qq-bot-account-title" type="button" data-action="edit-label"
-                    title="点击修改备注">${esc(row.label || appId)}</button>
-                <button class="qq-bot-account-edit" type="button" data-action="edit-label"
-                    aria-label="修改备注" title="修改备注"><i data-lucide="pencil" aria-hidden="true"></i></button>`;
+                    title="点击修改备注">${esc(row.label || appId)}</button>`;
         el.innerHTML = `
             <input class="qq-bot-appid" type="hidden" value="${esc(appId)}">
             <input class="qq-bot-secret" type="hidden" value="">

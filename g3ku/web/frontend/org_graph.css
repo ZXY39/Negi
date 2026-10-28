@@ -14110,7 +14110,8 @@ textarea {
     line-height: 1.5;
 }
 
-/* 官方 QQ 机器人：一个账号一张单行卡——备注、AppID、状态、开关、改密钥、删除同排。
+/* 官方 QQ 机器人：一个账号一张单行卡——备注靠左，AppID、状态、开关、改密钥、删除
+   作为一组靠右（分隔由 `.qq-bot-account-appid-text` 的 `margin-left: auto` 撑开）。
    还没落库的临时卡换成三个输入框 + 贴右的小叉号（它没有可删的对象，不给「删除」）。
    .resource-list-item 的 height:100% 会把每张卡拉到整表高度、第二张卡被面板裁掉，
    这里改回按内容排高。 */
@@ -14149,35 +14150,12 @@ textarea {
     text-underline-offset: 3px;
 }
 
-/* 标题右侧的无边框编辑键。 */
-.qq-bot-account-edit {
-    flex: 0 0 auto;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 22px;
-    height: 22px;
-    padding: 0;
-    border: 0;
-    border-radius: 6px;
-    background: none;
-    color: var(--ui-text-muted);
-    cursor: pointer;
-}
-
-.qq-bot-account-edit:hover {
-    color: var(--brand-primary);
-    background: var(--ui-neutral-soft);
-}
-
-.qq-bot-account-edit svg {
-    width: 14px;
-    height: 14px;
-}
-
 .qq-bot-account-appid-text {
     flex: 0 1 auto;
     min-width: 0;
+    /* 备注收成内容宽度靠左，AppID 起整组顶到卡片右缘：两者之间留白，
+       而不是备注后面紧跟一长串信息。 */
+    margin-left: auto;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

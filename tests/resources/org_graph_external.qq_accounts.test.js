@@ -216,8 +216,8 @@ test("QQ 账号面板：已保存的行是卡片，备注即标题且可点改�
     const html = listEl.children[0].innerHTML;
     assert.match(html, /<button class="qq-bot-account-title"[^>]*data-action="edit-label"/);
     assert.match(html, /qq-bot-account-title[^>]*>客服小助手</);
-    // 标题右侧是无边框编辑键，点它就地改名（不再开弹窗）。
-    assert.match(html, /<button class="qq-bot-account-edit"[^>]*data-action="edit-label"/);
+    // 备注本身就是唯一的改备注入口，标题右侧不再另放一颗编辑键。
+    assert.doesNotMatch(html, /qq-bot-account-edit|data-lucide="pencil"/);
     assert.match(html, /qq-bot-account-appid-text">AppID 111</);
     // AppID 在开关左边，改密钥在删除左边。
     const order = ["qq-bot-account-appid-text", "qq-bot-row-switch", "edit-secret", 'data-action="remove"']
