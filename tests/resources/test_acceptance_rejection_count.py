@@ -47,6 +47,7 @@ def _make_runner(execution) -> tuple[NodeRunner, list[dict]]:
         recorded.append(kwargs)
 
     runner._store = _StoreStub(execution)  # type: ignore[attr-defined]
+    runner._log_service = SimpleNamespace(update_frame=lambda *args, **kwargs: None)  # type: ignore[attr-defined]
     runner._update_execution_acceptance_handshake = _record_update  # type: ignore[attr-defined]
     runner._acceptance_updates_task_final_acceptance = lambda **kwargs: False  # type: ignore[attr-defined]
     return runner, recorded
