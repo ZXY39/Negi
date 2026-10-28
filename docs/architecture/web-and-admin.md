@@ -37,6 +37,12 @@ The channel-agnostic headless surface for third-party bridges is mounted alongsi
 - Channel rows additionally carry the delete-lane reading the session rail renders: `can_delete=true` enables the per-card「删除」, and `hides_on_delete` says whether that button only hides the card or also retires the external identity. Both come from one predicate (`web_ceo_sessions.channel_session_hides_on_delete`), which is also what the delete handler consults, so the confirm text cannot promise an outcome the backend does not perform. See「Channel Session Clear Contract」.
 - The web UI「外部接入」page (nav `data-view="external"`, `g3ku/web/frontend/org_graph_external.js`) manages `externalApi.enabled` and bridge tokens through `admin_rest` `/api/external-api/*` endpoints; token plaintext is revealed exactly once at issue/regenerate time.
 
+### External Access Page Contract
+
+Each token card carries two switches (启用 / 当操作员), the 可会话范围 select, and the 重新生成 · 删除 buttons, all at the small control tier: `toolbar-btn small` / 32px. A new control joins that tier rather than introducing a third height (see「Frontend Theme And Layout Contract」for the two-tier rule).
+
+「当操作员」 is the only privilege grant on this page, and it writes exactly one thing: `GATEWAY_SENDER_ID` into `externalApi.tokens.<id>.trustedSenders`. Granting requires the project unlock password (`403 unlock_password_required` / `unlock_password_invalid` through the read-only envelope check); revoking never asks for one — the operator must always be able to take a grant back. Both branches touch only that constant, so a hand-written sender id survives either direction. Both land an `external_api` / `operator_grant_changed` audit line with `actor: operator`. The rendered state is the server-computed `operator` field (presence of the constant in the list), never a client-side guess, so the switch cannot claim a grant the config does not carry. What the grant means downstream — tier, memory, persona, task family — is owned by `sandbox-execution-plane.md`「信任分级」.
+
 Full contract (endpoints, turn terminal invariant, event mapping, outbound routing): 详见 `external-agent-api.md`.
 
 ## Local Startup And Launcher Contract

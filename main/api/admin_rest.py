@@ -22,6 +22,7 @@ from g3ku.resources import get_shared_resource_manager
 from g3ku.resources.models import ResourceKind
 from g3ku.resources.retired_schemas import record_tool_schema
 from g3ku.runtime.core_tools import configured_core_tools, resolve_core_tool_targets
+from g3ku.runtime.session_trust import GATEWAY_SENDER_ID
 from g3ku.shells.web import get_agent, is_no_ceo_model_configured_error, refresh_web_agent_runtime
 from g3ku.stickers import admin as sticker_admin
 from g3ku.stickers import catalog as sticker_catalog
@@ -1044,6 +1045,14 @@ def _mask_external_api_token(token: str) -> str:
     return f'{raw[:4]}…{raw[-4:]}'
 
 
+def _entry_trusted_senders(entry: Any) -> list[str]:
+    return [
+        str(item).strip()
+        for item in list(getattr(entry, 'trusted_senders', None) or [])
+        if str(item).strip()
+    ]
+
+
 def _external_api_payload(cfg: Config) -> dict[str, Any]:
     external_api = cfg.external_api
     items: list[dict[str, Any]] = []
@@ -1058,6 +1067,8 @@ def _external_api_payload(cfg: Config) -> dict[str, Any]:
                 'token_masked': _mask_external_api_token(token),
                 # 作用域只按号裁决，没有继承态。
                 'cross_session': bool(getattr(entry, 'cross_session', True)),
+                # 「当操作员」= 该桥的会话被认成操作员（档位/记忆/人设/任务同源）。
+                'operator': GATEWAY_SENDER_ID in _entry_trusted_senders(entry),
             }
         )
     items.sort(key=lambda item: item['bridge_id'])
@@ -1141,12 +1152,47 @@ async def update_external_api_token(bridge_id: str, payload: dict | None = Body(
             # 旧的"交回全局裁决"写法：全局档已删，静默折成 False 会悄悄把这一号关掉。
             raise HTTPException(status_code=400, detail={'code': 'invalid_cross_session'})
         entry.cross_session = bool(raw_cross)
+    operator_changed = False
+    operator_state = GATEWAY_SENDER_ID in _entry_trusted_senders(entry)
+    if 'operator' in body:
+        want = bool(body.get('operator'))
+        if want != operator_state:
+            senders = _entry_trusted_senders(entry)
+            if want:
+                password = str(body.get('unlock_password') or body.get('unlockPassword') or '')
+                if not password:
+                    raise HTTPException(
+                        status_code=403,
+                        detail={'code': 'unlock_password_required', 'message': '开启「当操作员」需要项目解锁口令'},
+                    )
+                from g3ku.security.bootstrap import verify_unlock_password
+
+                if not verify_unlock_password(password):
+                    raise HTTPException(
+                        status_code=403,
+                        detail={'code': 'unlock_password_invalid', 'message': '口令不正确'},
+                    )
+                senders.append(GATEWAY_SENDER_ID)
+            else:
+                # 收回权限不要口令：能关的人不该被关在门外。
+                senders = [item for item in senders if item != GATEWAY_SENDER_ID]
+            entry.trusted_senders = senders
+            operator_changed = True
+        operator_state = want
     revealed = None
     if bool(body.get('regenerate')):
         revealed = secrets.token_urlsafe(32)
         entry.token = revealed
     save_config(cfg)
     await _refresh_runtime_after_save('admin_external_api_token_update')
+    if operator_changed:
+        audit_events.emit_audit_event(
+            'external_api',
+            'warning',
+            'operator_grant_changed',
+            'external bridge operator grant changed',
+            detail={'bridge_id': key, 'operator': operator_state, 'actor': 'operator'},
+        )
     response = {'ok': True, 'bridge_id': key, **_external_api_payload(cfg)}
     if revealed is not None:
         response['token'] = revealed

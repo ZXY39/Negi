@@ -231,3 +231,61 @@ def test_legacy_global_scope_folds_into_each_token() -> None:
         {"enabled": True, "crossSessionEnabled": True, "tokens": {"relay": {"token": "t"}}}
     )
     assert opened.tokens["relay"].cross_session is True
+
+
+def _saved_token_entry() -> dict:
+    payload = json.loads((Path.cwd() / ".g3ku" / "config.json").read_text(encoding="utf-8"))
+    return payload["externalApi"]["tokens"]["mcp"]
+
+
+def test_external_api_token_operator_grant_requires_unlock_password(client: TestClient) -> None:
+    """「当操作员」开启要项目口令，关闭不要（收回权限不该被自己锁在门外）。"""
+    client.post("/api/external-api/tokens", json={"bridge_id": "mcp"})
+    assert client.get("/api/external-api/settings").json()["items"][0]["operator"] is False
+
+    missing = client.patch("/api/external-api/tokens/mcp", json={"operator": True})
+    assert missing.status_code == 403
+    assert missing.json()["detail"]["code"] == "unlock_password_required"
+
+    wrong = client.patch(
+        "/api/external-api/tokens/mcp",
+        json={"operator": True, "unlock_password": "not-the-password"},
+    )
+    assert wrong.status_code == 403
+    assert wrong.json()["detail"]["code"] == "unlock_password_invalid"
+
+    granted = client.patch(
+        "/api/external-api/tokens/mcp",
+        json={"operator": True, "unlock_password": "owner-password"},
+    )
+    assert granted.status_code == 200
+    assert granted.json()["items"][0]["operator"] is True
+    # 「当操作员」就是把网关固定身份写进白名单；开关与常量必须同一个字符串。
+    from g3ku.runtime.session_trust import GATEWAY_SENDER_ID
+
+    assert GATEWAY_SENDER_ID == "negi-mcp"
+    assert _saved_token_entry()["trustedSenders"] == [GATEWAY_SENDER_ID]
+
+    revoked = client.patch("/api/external-api/tokens/mcp", json={"operator": False})
+    assert revoked.status_code == 200
+    assert revoked.json()["items"][0]["operator"] is False
+    assert _saved_token_entry()["trustedSenders"] == []
+
+
+def test_external_api_token_operator_grant_preserves_manual_senders(client: TestClient) -> None:
+    """开关只增删网关身份；手工写进去的发送者 id 不能被顺手清掉。"""
+    client.post("/api/external-api/tokens", json={"bridge_id": "mcp"})
+    path = Path.cwd() / ".g3ku" / "config.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["externalApi"]["tokens"]["mcp"]["trustedSenders"] = ["manual-id"]
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    granted = client.patch(
+        "/api/external-api/tokens/mcp",
+        json={"operator": True, "unlock_password": "owner-password"},
+    )
+    assert granted.status_code == 200
+    assert _saved_token_entry()["trustedSenders"] == ["manual-id", "negi-mcp"]
+
+    client.patch("/api/external-api/tokens/mcp", json={"operator": False})
+    assert _saved_token_entry()["trustedSenders"] == ["manual-id"]

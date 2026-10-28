@@ -107,6 +107,14 @@ function renderExternalTokenList() {
                         <option value="deny"${item.cross_session === false ? " selected" : ""}>仅本桥</option>
                     </select>
                 </span>
+                <button class="tool-governance-switch external-row-switch" type="button"
+                    data-action="operator"
+                    data-bridge="${esc(item.bridge_id)}"
+                    aria-pressed="${item.operator ? "true" : "false"}"
+                    aria-label="切换 ${esc(item.bridge_id)} 当操作员">
+                    <span class="tool-governance-switch-track" aria-hidden="true"><span class="tool-governance-switch-thumb"></span></span>
+                    <span class="tool-governance-switch-label">当操作员：${item.operator ? "已开启" : "已关闭"}</span>
+                </button>
                 <div class="external-token-tools">
                     <button class="toolbar-btn ghost small" data-action="regenerate" data-bridge="${esc(item.bridge_id)}" type="button">重新生成</button>
                     <button class="toolbar-btn ghost danger small" data-action="delete" data-bridge="${esc(item.bridge_id)}" type="button">删除</button>
@@ -315,6 +323,65 @@ async function updateExternalTokenScope(bridgeId, choice) {
     }
 }
 
+async function _submitExternalOperator(bridgeId, next, password = "") {
+    _externalBusy(true);
+    try {
+        const body = { operator: !!next };
+        if (next && password) body.unlock_password = password;
+        const payload = await ApiClient.updateExternalApiToken(bridgeId, body);
+        _applyExternalPayload(payload);
+        renderExternalTokenList();
+        return payload;
+    } finally {
+        _externalBusy(false);
+    }
+}
+
+// 「当操作员」= 该桥的会话被认成操作员（档位 / 记忆 / 人设 / 任务同源）。开启要口令，
+// 收回不要——能关的人不该被关在门外。
+async function toggleExternalOperator(bridgeId, next) {
+    if (!next) {
+        try {
+            await _submitExternalOperator(bridgeId, false);
+            showToast({
+                title: "已收回操作员权限",
+                text: `${bridgeId} 的会话下一条消息起按第三方处理。`,
+                kind: "success",
+            });
+        } catch (error) {
+            showToast({ title: "更新失败", text: ApiClient.friendlyErrorMessage(error), kind: "error" });
+            await loadExternalApiView({ quiet: true });
+        }
+        return;
+    }
+    openConfirm({
+        title: `允许 ${bridgeId} 当操作员`,
+        text:
+            "开启后，这个桥创建的会话会被当成操作员本人：可以写长期记忆、派发任务、读写整个工作区，"
+            + "沙箱档位也随之放开。等于把这个 token 当成你的身份，只在本机自用的 token 上开启。"
+            + "下一条消息起生效；关掉后下一条消息即收回。",
+        confirmLabel: "开启",
+        confirmKind: "danger",
+        textFull: true,
+        inputPlain: true,
+        input: { label: "项目解锁口令", type: "password", placeholder: "仅本次开启使用", required: true },
+        onConfirm: async ({ value }) => {
+            const password = String(value || "").trim();
+            if (!password) throw new Error("请输入项目解锁口令。");
+            try {
+                await _submitExternalOperator(bridgeId, true, password);
+            } catch (error) {
+                throw new Error(ApiClient.friendlyErrorMessage(error));
+            }
+            showToast({
+                title: "已允许当操作员",
+                text: `${bridgeId} 的会话按操作员处理：可写长期记忆、派发任务、读写工作区。下一条消息起生效。`,
+                kind: "warn",
+            });
+        },
+    });
+}
+
 function initExternalApiView() {
     const master = _externalMasterSwitch();
     if (master) {
@@ -352,10 +419,9 @@ function initExternalApiView() {
         listEl.addEventListener("click", (event) => {
             const switchBtn = event.target.closest("button.external-row-switch[data-bridge]");
             if (switchBtn) {
-                void toggleExternalTokenEnabled(
-                    switchBtn.dataset.bridge,
-                    switchBtn.getAttribute("aria-pressed") !== "true"
-                );
+                const next = switchBtn.getAttribute("aria-pressed") !== "true";
+                if (switchBtn.dataset.action === "operator") toggleExternalOperator(switchBtn.dataset.bridge, next);
+                else void toggleExternalTokenEnabled(switchBtn.dataset.bridge, next);
                 return;
             }
             const button = event.target.closest("button[data-action][data-bridge]");

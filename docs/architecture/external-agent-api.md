@@ -67,6 +67,13 @@
 三条判定不因桥的声明而放宽：群聊整会话按第三方（发送者在白名单里也不升级）；信任只降不升
 （注册表记最受限的那一档）；缺 sender 永不等于操作员。
 
+MCP 网关的身份由 `sender.id = "negi-mcp"` 表达（常量 `GATEWAY_SENDER_ID`，`g3ku/runtime/session_trust.py`），
+**每回合都带**而不是只在建会话时带：信任是逐条入站按 min 合并的，所以撤掉授权后下一条消息就把会话降回第三方。
+这个 id 在不在白名单里由「外部接入」页 token 行的「当操作员」开关决定——开启要项目解锁口令、收回不要，
+写入的就是 `externalApi.tokens.<id>.trustedSenders`（控件契约见 `web-and-admin.md`「External Access Page Contract」）。
+命中时该桥的会话按操作员处理：档位默认 `unrestricted`、长期记忆可读可写、人设取操作员那份、任务族可派，
+四扇门读的都是同一个信任级。
+
 ### 会话状态读数（`GET /sessions/{id}/state`）
 
 四档读数都由既有状态投影出来，不新增状态。它们的共同由来：调用方（MCP 网关、外部桥）手里只有一个 SSE 事件游标时，分不清"在跑一个长活"与"已经卡死"。

@@ -879,6 +879,18 @@ def get_bootstrap_security_service(workspace: Path | None = None) -> BootstrapSe
         return service
 
 
+def verify_unlock_password(password: str, workspace: Path | None = None) -> bool:
+    """这个口令是否解得开本机信封（只读校验：不激活、不落盘）。"""
+    clean = str(password or "")
+    if not clean:
+        return False
+    try:
+        return bool(get_bootstrap_security_service(workspace).unwrap_with_password(clean))
+    except Exception as exc:  # noqa: BLE001 - 校验器故障按失败处理
+        logger.warning("unlock password check failed: {}", exc)
+        return False
+
+
 __all__ = [
     "BOOTSTRAP_MASTER_KEY_ENV",
     "BootstrapSecurityService",
@@ -889,4 +901,5 @@ __all__ = [
     "extract_config_secret_entries",
     "get_bootstrap_security_service",
     "strip_config_secret_entries",
+    "verify_unlock_password",
 ]
