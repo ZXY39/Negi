@@ -22,6 +22,7 @@ import shutil
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
@@ -99,8 +100,31 @@ def channel_attachment_roots() -> tuple[Path, ...]:
     return (workspace_path(),)
 
 
+def _file_url_to_path(src: str) -> str:
+    """``file:///C:/x/y.mp3`` → ``C:/x/y.mp3``; anything else comes back unchanged.
+
+    Markdown authors emit ``file://`` for local files (it is what a browser gives
+    you when you copy a local link), and that shape used to die in the scheme
+    guard below, so the channel reply left with raw markdown text in it instead of
+    a file message. Percent-escapes are undone because a path with spaces arrives
+    as ``%20``. The allowed-roots gate still decides what may be sent.
+    """
+    if not src.lower().startswith("file://"):
+        return src
+    rest = src[len("file://"):]
+    if rest.lower().startswith("localhost/"):
+        rest = rest[len("localhost"):]
+    rest = unquote(rest)
+    if re.match(r"^/[A-Za-z]:[\\/]", rest):
+        # Windows 的三斜杠形态：file:///C:/x 去掉前缀后是 /C:/x
+        rest = rest[1:]
+    if re.match(r"^[A-Za-z]:[\\/]", rest) or rest.startswith("/"):
+        return rest
+    return src
+
+
 def _resolve_local_source(raw_src: str, allowed_roots: tuple[Path, ...] | None = None) -> Path | None:
-    src = str(raw_src or "").strip()
+    src = _file_url_to_path(str(raw_src or "").strip())
     if not src or src.startswith(("#", "data:")):
         return None
     if src.startswith("/api/ceo/media/original") or src.startswith("/api/ceo/uploads/file"):
