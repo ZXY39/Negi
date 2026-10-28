@@ -447,6 +447,30 @@ def _record_enqueue_calls(target: list[str]):
     return _enqueue
 
 
+def _with_node_pinned_head(
+    service: MainRuntimeService,
+    *,
+    task,
+    node,
+    messages: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """把节点头部快照并进首条 system，让 seed 前缀探针按真请求形态比对。"""
+    react = service.node_runner._react_loop
+    runtime_context = service.node_runner._runtime_context(task=task, node=node)
+    skill_items = react._node_skill_roster_items(
+        runtime_context=runtime_context,
+        task_id=task.task_id,
+        node_id=node.node_id,
+    )
+    return react._apply_node_skill_roster_head(
+        [dict(item) for item in messages],
+        scope_key=f"node:{task.task_id}:{node.node_id}",
+        skill_items=skill_items,
+        exec_runtime_policy=react._node_exec_runtime_policy_payload(runtime_context),
+        session_temp_dir=str(runtime_context.get("task_temp_dir") or "").strip() or None,
+    )
+
+
 def test_normalize_acceptance_handshake_defaults() -> None:
     assert normalize_acceptance_handshake(None) == {
         "state": ACCEPTANCE_STATE_IDLE,
@@ -4156,12 +4180,12 @@ def test_metadata_only_spawn_update_does_not_rewrite_task_node_detail(tmp_path: 
 
     assert detail_after is not None
     assert node_after is not None
-    assert detail_after.updated_at == detail_before.updated_at
     assert detail_after.payload == detail_before.payload
-    assert node_after.children_fingerprint != node_before.children_fingerprint
-    assert node_after.default_round_id != node_before.default_round_id
-    assert node_after.round_options_count == 1
-    assert rounds
+    # 轮次投影已停写：metadata-only 更新不产生子节点，指纹与轮次读数都不动。
+    assert node_after.children_fingerprint == node_before.children_fingerprint
+    assert node_after.default_round_id == node_before.default_round_id == ""
+    assert node_after.round_options_count == 0
+    assert rounds == []
 
 
 def test_failed_acceptance_node_preserves_execution_child_status(tmp_path: Path):
@@ -4466,7 +4490,7 @@ async def test_spawn_children_allows_execution_policy_mode_divergence(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_spawn_children_only_surfaces_failure_info_for_failed_children(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+async def test_spawn_children_returns_creation_receipts_without_terminal_results(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         workspace_root=tmp_path,
@@ -4485,38 +4509,10 @@ async def test_spawn_children_only_surfaces_failure_info_for_failed_children(tmp
         assert task is not None
         assert root is not None
 
-        async def _fake_run_node(task_id: str, node_id: str):
-            node = service.get_node(node_id)
-            assert node is not None
-            if node.goal == "bad child":
-                return service.node_runner._mark_finished(
-                    task_id,
-                    node_id,
-                    NodeFinalResult(
-                        status="failed",
-                        delivery_status="final",
-                        summary="child failed summary",
-                        answer="",
-                        evidence=[],
-                        remaining_work=["tighten child scope"],
-                        blocking_reason="",
-                    ),
-                )
-            return service.node_runner._mark_finished(
-                task_id,
-                node_id,
-                NodeFinalResult(
-                    status="success",
-                    delivery_status="final",
-                    summary="good child done",
-                    answer="good child done",
-                    evidence=[],
-                    remaining_work=[],
-                    blocking_reason="",
-                ),
-            )
+        async def _must_not_run_inline(*args, **kwargs):
+            raise AssertionError("spawn must return creation receipts before any child runs")
 
-        monkeypatch.setattr(service.node_runner, "run_node", _fake_run_node)
+        monkeypatch.setattr(service.node_runner, "run_node", _must_not_run_inline)
 
         results = await service.node_runner._spawn_children(
             task_id=record.task_id,
@@ -4528,25 +4524,22 @@ async def test_spawn_children_only_surfaces_failure_info_for_failed_children(tmp
             call_id="round-failure-info",
         )
 
-        failed_result = next(item for item in results if item.goal == "bad child")
-        success_result = next(item for item in results if item.goal == "good child")
+        bad_result = next(item for item in results if item.goal == "bad child")
+        good_result = next(item for item in results if item.goal == "good child")
 
-        assert failed_result.failure_info is not None
-        assert failed_result.failure_info.source == "execution"
-        assert failed_result.failure_info.summary == "child failed summary"
-        assert failed_result.failure_info.delivery_status == "final"
-        assert failed_result.failure_info.blocking_reason == ""
-        assert failed_result.failure_info.remaining_work == ["tighten child scope"]
-        assert "failure_info" in failed_result.model_dump(mode="json", exclude_none=True)
-
-        assert success_result.failure_info is None
-        assert "failure_info" not in success_result.model_dump(mode="json", exclude_none=True)
+        # 子节点的执行结论走 `child_final`；创建回执只说明"建了谁 / 谁被拒"。
+        assert [bad_result.state, good_result.state] == ["created", "created"]
+        assert bad_result.child_node_id.startswith("node:")
+        assert good_result.child_node_id.startswith("node:")
+        assert bad_result.failure_info is None
+        assert good_result.failure_info is None
+        assert "failure_info" not in bad_result.model_dump(mode="json", exclude_none=True)
     finally:
         await service.close()
 
 
 @pytest.mark.asyncio
-async def test_spawn_children_materializes_batch_children_before_pipeline_completion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+async def test_spawn_children_materializes_whole_batch_before_returning(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         workspace_root=tmp_path,
@@ -4563,31 +4556,10 @@ async def test_spawn_children_materializes_batch_children_before_pipeline_comple
         root = service.get_node(record.root_node_id)
         assert root is not None
 
-        observed_child_ids: list[list[str]] = []
+        async def _must_not_run_inline(*args, **kwargs):
+            raise AssertionError("spawn must return creation receipts before any child runs")
 
-        async def _fake_run_node(task_id: str, node_id: str):
-            root_after = service.get_node(root.node_id)
-            assert root_after is not None
-            entries = list(((root_after.metadata or {}).get("spawn_operations") or {}).get("batch-call", {}).get("entries") or [])
-            observed_child_ids.append([
-                str(item.get("child_node_id") or "").strip()
-                for item in entries
-            ])
-            return service.node_runner._mark_finished(
-                task_id,
-                node_id,
-                NodeFinalResult(
-                    status="success",
-                    delivery_status="final",
-                    summary=f"{node_id} done",
-                    answer=f"{node_id} done",
-                    evidence=[],
-                    remaining_work=[],
-                    blocking_reason="",
-                ),
-            )
-
-        monkeypatch.setattr(service.node_runner, "run_node", _fake_run_node)
+        monkeypatch.setattr(service.node_runner, "run_node", _must_not_run_inline)
 
         results = await service.node_runner._spawn_children(
             task_id=record.task_id,
@@ -4605,11 +4577,11 @@ async def test_spawn_children_materializes_batch_children_before_pipeline_comple
         child_ids = [str(item.get("child_node_id") or "").strip() for item in entries]
 
         assert len(results) == 2
+        assert [item.state for item in results] == ["created", "created"]
         assert len(entries) == 2
         assert all(child_ids)
+        assert [item.child_node_id for item in results] == child_ids
         assert len(service.store.list_children(root.node_id)) == 2
-        assert observed_child_ids
-        assert all(all(item for item in snapshot) for snapshot in observed_child_ids)
     finally:
         await service.close()
 
@@ -4636,7 +4608,7 @@ def _contract_block_message(tool_id: str, fingerprint: str = "tcf:" + "a" * 16) 
 
 
 @pytest.mark.asyncio
-async def test_execution_node_build_messages_appends_dynamic_tool_contract_when_contract_present(tmp_path: Path):
+async def test_execution_node_build_messages_does_not_append_dynamic_tool_contract_tail(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         workspace_root=tmp_path,
@@ -4678,14 +4650,12 @@ async def test_execution_node_build_messages_appends_dynamic_tool_contract_when_
 
         assert len(messages) >= 2
         assert messages[-1]["role"] == "user"
-        assert any(
+        # 尾块已退役：装配期只剥离旧合同块，不再追加新的动态合同。
+        assert not any(
             str(item.get("content") or "").startswith("## Runtime Tool Contract")
             for item in messages
         )
-        payload = extract_node_dynamic_contract_payload(messages)
-        assert payload is not None
-        # 台账键不再进契约 payload：帧白名单与契约都不带水合名单。
-        assert "hydrated_executor_names" not in payload
+        assert extract_node_dynamic_contract_payload(messages) is None
         # 契约在场即能力：带 [TOOL_CONTRACT_V1] 块的那一跳才可调用，不带块就不放行。
         assert "filesystem_write" in service._callable_tool_names_for_node(
             task=task,
@@ -4702,7 +4672,7 @@ async def test_execution_node_build_messages_appends_dynamic_tool_contract_when_
 
 
 @pytest.mark.asyncio
-async def test_execution_node_build_messages_exposes_full_callable_tools_without_active_stage(tmp_path: Path):
+async def test_execution_node_build_messages_gates_candidate_tools_by_request_contract(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         workspace_root=tmp_path,
@@ -4744,14 +4714,7 @@ async def test_execution_node_build_messages_exposes_full_callable_tools_without
 
         assert len(messages) >= 2
         assert messages[-1]["role"] == "user"
-        assert any(
-            str(item.get("content") or "").startswith("## Runtime Tool Contract")
-            for item in messages
-        )
-        payload = extract_node_dynamic_contract_payload(messages)
-        assert payload is not None
-        assert "hydrated_executor_names" not in payload
-        assert "model_visible_tool_selection_trace" not in payload
+        assert extract_node_dynamic_contract_payload(messages) is None
         # 带契约块的 granted 工具当跳可调，未带块的不放行。
         callable_with_block = service._callable_tool_names_for_node(
             task=task,
@@ -4769,7 +4732,7 @@ async def test_execution_node_build_messages_exposes_full_callable_tools_without
 
 
 @pytest.mark.asyncio
-async def test_acceptance_node_build_messages_appends_dynamic_tool_contract_when_contract_present(tmp_path: Path):
+async def test_acceptance_node_build_messages_does_not_append_dynamic_tool_contract_tail(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         workspace_root=tmp_path,
@@ -4820,14 +4783,11 @@ async def test_acceptance_node_build_messages_appends_dynamic_tool_contract_when
 
         assert len(messages) >= 2
         assert messages[-1]["role"] == "user"
-        assert any(
+        assert not any(
             str(item.get("content") or "").startswith("## Runtime Tool Contract")
             for item in messages
         )
-        payload = extract_node_dynamic_contract_payload(messages)
-        assert payload is not None
-        # 台账键不再进契约 payload。
-        assert "hydrated_executor_names" not in payload
+        assert extract_node_dynamic_contract_payload(messages) is None
         # 验收车道同判据：content_open 带契约块才可调用，无块不放行。
         assert "content_open" in service._callable_tool_names_for_node(
             task=task,
@@ -5049,24 +5009,10 @@ async def test_spawn_children_parent_metadata_keeps_lightweight_entries_only(tmp
         root = service.get_node(record.root_node_id)
         assert root is not None
 
-        async def _fake_run_node(task_id: str, node_id: str):
-            node = service.get_node(node_id)
-            assert node is not None
-            return service.node_runner._mark_finished(
-                task_id,
-                node_id,
-                NodeFinalResult(
-                    status="success",
-                    delivery_status="final",
-                    summary=f"{node.goal} done",
-                    answer=f"{node.goal} done",
-                    evidence=[],
-                    remaining_work=[],
-                    blocking_reason="",
-                ),
-            )
+        async def _must_not_run_inline(*args, **kwargs):
+            raise AssertionError("spawn must return creation receipts before any child runs")
 
-        monkeypatch.setattr(service.node_runner, "run_node", _fake_run_node)
+        monkeypatch.setattr(service.node_runner, "run_node", _must_not_run_inline)
 
         await service.node_runner._spawn_children(
             task_id=record.task_id,
@@ -5082,7 +5028,8 @@ async def test_spawn_children_parent_metadata_keeps_lightweight_entries_only(tmp
 
         assert len(entries) == 1
         assert entries[0]["goal"] == "child 1"
-        assert entries[0]["status"] == "success"
+        # 回执只登记派发状态；终态由节点行/child_final 派生，不写回父节点账本。
+        assert entries[0]["status"] == "running"
         assert entries[0]["child_node_id"]
         assert "prompt" not in entries[0]
         assert "acceptance_prompt" not in entries[0]
@@ -5150,12 +5097,11 @@ async def test_spawn_children_parent_frame_does_not_inline_partial_results(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_spawn_children_surfaces_acceptance_failure_info_while_preserving_child_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """验收终结性失败必须随子节点结果一起上报，且不得抹掉子节点自身的输出。
+async def test_spawn_children_binds_acceptance_and_delivers_its_verdict_later(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """验收节点由创建回执绑定，裁决在子节点终态后由交付路径重建。
 
-    拒收无次数上限后，真实 `_handle_acceptance_node_result` 对任何拒绝都只打回
-    （partial），子节点流水线不会因拒绝次数结束；这里直接替换裁决入口，钉住
-    「裁决最终为 failed 时流水线如何收尾」这一条契约。
+    非阻塞派生不再在同一协程里跑验收：创建回执只带 `acceptance_node_id`，
+    「验收失败但保留子节点输出」这条契约落在 `_spawn_round_results_from_entries`。
     """
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
@@ -5173,47 +5119,6 @@ async def test_spawn_children_surfaces_acceptance_failure_info_while_preserving_
 
         assert root is not None
 
-        async def _fake_run_node(task_id: str, node_id: str):
-            node = service.get_node(node_id)
-            assert node is not None
-            if node.node_kind == "acceptance":
-                return service.node_runner._mark_finished(
-                    task_id,
-                    node_id,
-                    NodeFinalResult(
-                        status="failed",
-                        delivery_status="final",
-                        summary="acceptance failed summary",
-                        answer="need stricter proof",
-                        evidence=[],
-                        remaining_work=["reopen cited lines"],
-                        blocking_reason="",
-                    ),
-                )
-            return service.node_runner._mark_finished(
-                task_id,
-                node_id,
-                NodeFinalResult(
-                    status="success",
-                    delivery_status="final",
-                    summary="child done",
-                    answer="child done",
-                    evidence=[],
-                    remaining_work=[],
-                    blocking_reason="",
-                ),
-            )
-
-        monkeypatch.setattr(service.node_runner, "run_node", _fake_run_node)
-        async def _passthrough_acceptance(*, task, acceptance, result):
-            return result
-
-        monkeypatch.setattr(
-            service.node_runner,
-            "_handle_acceptance_node_result",
-            _passthrough_acceptance,
-        )
-
         results = await service.node_runner._spawn_children(
             task_id=record.task_id,
             parent_node_id=root.node_id,
@@ -5221,7 +5126,55 @@ async def test_spawn_children_surfaces_acceptance_failure_info_while_preserving_
             call_id="round-acceptance-failure",
         )
 
-        result = results[0]
+        receipt = results[0]
+        assert receipt.state == "created"
+        assert receipt.child_node_id.startswith("node:")
+        assert receipt.acceptance_node_id.startswith("node:")
+
+        acceptance = service.get_node(receipt.acceptance_node_id)
+        assert acceptance is not None
+        assert acceptance.node_kind == "acceptance"
+
+        service.node_runner._mark_finished(
+            record.task_id,
+            receipt.child_node_id,
+            NodeFinalResult(
+                status="success",
+                delivery_status="final",
+                summary="child done",
+                answer="child done",
+                evidence=[],
+                remaining_work=[],
+                blocking_reason="",
+            ),
+        )
+        service.node_runner._mark_finished(
+            record.task_id,
+            receipt.acceptance_node_id,
+            NodeFinalResult(
+                status="failed",
+                delivery_status="final",
+                summary="acceptance failed summary",
+                answer="need stricter proof",
+                evidence=[],
+                remaining_work=["reopen cited lines"],
+                blocking_reason="",
+            ),
+        )
+        service.node_runner.reconcile_spawn_round_completion(record.task_id)
+
+        root_after = service.get_node(root.node_id)
+        assert root_after is not None
+        entries = list(
+            ((root_after.metadata or {}).get("spawn_operations") or {})
+            .get("round-acceptance-failure", {})
+            .get("entries")
+            or []
+        )
+        result = service.node_runner._spawn_round_results_from_entries(
+            task_id=record.task_id,
+            entries=entries,
+        )[0]
 
         assert result.node_output == "child done"
         assert result.node_output_summary == "child done"
@@ -5236,7 +5189,7 @@ async def test_spawn_children_surfaces_acceptance_failure_info_while_preserving_
 
 
 @pytest.mark.asyncio
-async def test_spawn_children_surfaces_runtime_failure_info_for_pipeline_exceptions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+async def test_spawn_children_propagates_accounting_fault_without_live_nodes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         workspace_root=tmp_path,
@@ -5256,29 +5209,47 @@ async def test_spawn_children_surfaces_runtime_failure_info_for_pipeline_excepti
         async def _boom(*args, **kwargs):
             raise RuntimeError("boom")
 
-        monkeypatch.setattr(service.node_runner, "run_node", _boom)
+        monkeypatch.setattr(service.node_runner, "_spawn_children_locked", _boom)
 
-        results = await service.node_runner._spawn_children(
-            task_id=record.task_id,
-            parent_node_id=root.node_id,
-            specs=[SpawnChildSpec(goal="child goal", prompt="child prompt", execution_policy=_execution_policy())],
-            call_id="round-runtime-failure",
-        )
+        # 没有活的绑定节点时，记账故障必须原样上抛，不能伪装成一次创建回执。
+        with pytest.raises(RuntimeError, match="boom"):
+            await service.node_runner._spawn_children(
+                task_id=record.task_id,
+                parent_node_id=root.node_id,
+                specs=[SpawnChildSpec(goal="child goal", prompt="child prompt", execution_policy=_execution_policy())],
+                call_id="round-runtime-failure",
+            )
+    finally:
+        await service.close()
 
-        result = results[0]
 
+@pytest.mark.asyncio
+async def test_spawn_abort_result_reports_runtime_failure(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    try:
+        result = service.node_runner._spawn_abort_result("child goal", "task terminated")
+
+        assert result.check_result == "Error: task terminated"
         assert result.failure_info is not None
         assert result.failure_info.source == "runtime"
-        assert result.failure_info.summary == "Error: RuntimeError: boom"
+        assert result.failure_info.summary == "Error: task terminated"
         assert result.failure_info.delivery_status == "blocked"
-        assert result.failure_info.blocking_reason == "Error: RuntimeError: boom"
+        assert result.failure_info.blocking_reason == "Error: task terminated"
         assert result.failure_info.remaining_work == []
     finally:
         await service.close()
 
 
 @pytest.mark.asyncio
-async def test_spawn_children_isolates_cancelled_child_without_failing_whole_round(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+async def test_spawn_exception_text_includes_class_name_for_empty_message(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         workspace_root=tmp_path,
@@ -5288,88 +5259,13 @@ async def test_spawn_children_isolates_cancelled_child_without_failing_whole_rou
         governance_store_path=tmp_path / "governance.sqlite3",
         execution_mode="web",
     )
-    _install_allow_all_spawn_review(service, monkeypatch)
     try:
-        record = await _create_web_task(service)
-        root = service.get_node(record.root_node_id)
+        assert service.node_runner._spawn_exception_text(RuntimeError()) == "Error: RuntimeError"
 
-        assert root is not None
-
-        async def _fake_run_node(task_id: str, node_id: str):
-            node = service.get_node(node_id)
-            assert node is not None
-            if node.goal == "bad child":
-                raise asyncio.CancelledError()
-            return service.node_runner._mark_finished(
-                task_id,
-                node_id,
-                NodeFinalResult(
-                    status="success",
-                    delivery_status="final",
-                    summary="good child done",
-                    answer="good child done",
-                    evidence=[],
-                    remaining_work=[],
-                    blocking_reason="",
-                ),
-            )
-
-        monkeypatch.setattr(service.node_runner, "run_node", _fake_run_node)
-
-        results = await service.node_runner._spawn_children(
-            task_id=record.task_id,
-            parent_node_id=root.node_id,
-            specs=[
-                SpawnChildSpec(goal="bad child", prompt="bad prompt", execution_policy=_execution_policy()),
-                SpawnChildSpec(goal="good child", prompt="good prompt", execution_policy=_execution_policy()),
-            ],
-            call_id="round-cancel-isolation",
+        result = service.node_runner._spawn_runtime_result(
+            "child goal",
+            error_text=service.node_runner._spawn_exception_text(RuntimeError()),
         )
-
-        bad_result = next(item for item in results if item.goal == "bad child")
-        good_result = next(item for item in results if item.goal == "good child")
-
-        assert len(results) == 2
-        assert bad_result.failure_info is not None
-        assert bad_result.failure_info.source == "runtime"
-        assert bad_result.failure_info.summary == "Error: CancelledError"
-        assert good_result.failure_info is None
-        assert good_result.node_output == "good child done"
-    finally:
-        await service.close()
-
-
-@pytest.mark.asyncio
-async def test_spawn_children_empty_runtime_exception_includes_exception_class_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    service = MainRuntimeService(
-        chat_backend=_DummyChatBackend(),
-        workspace_root=tmp_path,
-        store_path=tmp_path / "runtime.sqlite3",
-        files_base_dir=tmp_path / "tasks",
-        artifact_dir=tmp_path / "artifacts",
-        governance_store_path=tmp_path / "governance.sqlite3",
-        execution_mode="web",
-    )
-    _install_allow_all_spawn_review(service, monkeypatch)
-    try:
-        record = await _create_web_task(service)
-        root = service.get_node(record.root_node_id)
-
-        assert root is not None
-
-        async def _boom(*args, **kwargs):
-            raise RuntimeError()
-
-        monkeypatch.setattr(service.node_runner, "run_node", _boom)
-
-        results = await service.node_runner._spawn_children(
-            task_id=record.task_id,
-            parent_node_id=root.node_id,
-            specs=[SpawnChildSpec(goal="child goal", prompt="child prompt", execution_policy=_execution_policy())],
-            call_id="round-empty-runtime-error",
-        )
-
-        result = results[0]
         assert result.failure_info is not None
         assert result.failure_info.source == "runtime"
         assert result.failure_info.summary == "Error: RuntimeError"
@@ -5595,23 +5491,6 @@ async def test_pending_notice_wait_for_children_allows_same_round_recovery_call(
             },
         )
 
-        async def _finish_child(task_id: str, node_id: str):
-            return service.node_runner._mark_finished(
-                task_id,
-                node_id,
-                NodeFinalResult(
-                    status="success",
-                    delivery_status="final",
-                    summary="child done",
-                    answer="child done",
-                    evidence=[],
-                    remaining_work=[],
-                    blocking_reason="",
-                ),
-            )
-
-        monkeypatch.setattr(service.node_runner, "_run_nested_node", _finish_child)
-
         results = await service.node_runner._spawn_children(
             task_id=record.task_id,
             parent_node_id=root.node_id,
@@ -5620,8 +5499,9 @@ async def test_pending_notice_wait_for_children_allows_same_round_recovery_call(
         )
 
         assert len(results) == 1
+        assert results[0].state == "created"
+        assert results[0].child_node_id == child.node_id
         assert results[0].failure_info is None
-        assert results[0].node_output == "child done"
     finally:
         await service.close()
 
@@ -5766,7 +5646,8 @@ async def test_new_spawn_round_supersedes_active_old_subtree_and_preserves_termi
         new_results = await service.node_runner._spawn_children(
             task_id=record.task_id,
             parent_node_id=root.node_id,
-            specs=[SpawnChildSpec(goal="new child", prompt="new prompt", execution_policy=_execution_policy())],
+            # 作废是 goal 级的：只有新批次重复同一个 goal 才允许清扫旧分支。
+            specs=[SpawnChildSpec(goal="stale child", prompt="refined stale prompt", execution_policy=_execution_policy())],
             call_id="round-2",
         )
 
@@ -5870,6 +5751,17 @@ async def test_failed_branch_respawn_creates_new_round_and_keeps_old_failed_subt
             specs=[SpawnChildSpec(goal="bad child", prompt="bad prompt", execution_policy=_execution_policy())],
             call_id="round-1",
         )
+        first_round_root = service.get_node(root.node_id)
+        assert first_round_root is not None
+        first_child_for_run = str(
+            ((first_round_root.metadata or {}).get("spawn_operations") or {})
+            .get("round-1", {})
+            .get("entries", [{}])[0]
+            .get("child_node_id")
+            or ""
+        )
+        assert first_child_for_run
+        await _fake_run_node(record.task_id, first_child_for_run)
         second_results = await service.node_runner._spawn_children(
             task_id=record.task_id,
             parent_node_id=root.node_id,
@@ -5885,7 +5777,9 @@ async def test_failed_branch_respawn_creates_new_round_and_keeps_old_failed_subt
 
         assert len(first_results) == 1
         assert len(second_results) == 1
-        assert first_results[0].failure_info is not None
+        assert first_results[0].state == "created"
+        assert second_results[0].state == "created"
+        assert first_results[0].failure_info is None
         assert second_results[0].failure_info is None
         assert first_child_id != second_child_id
 
@@ -5895,12 +5789,14 @@ async def test_failed_branch_respawn_creates_new_round_and_keeps_old_failed_subt
         assert default_subtree is not None
         assert first_round_subtree is not None
         default_root = default_subtree["nodes_by_id"][root.node_id]
-        assert [item["round_id"] for item in default_root["rounds"]] == ["round-1", "round-2"]
-        assert default_root["default_round_id"] == "round-2"
+        # 轮次投影已停写：两种视图都直接由父子关系表达，不再有 round 分组。
+        assert default_root["default_round_id"] == ""
         assert second_child_id in default_subtree["nodes_by_id"]
+        assert first_child_id in default_subtree["nodes_by_id"]
         assert first_child_id in first_round_subtree["nodes_by_id"]
         visible_failed_ids = service.query_service.failed_node_ids(record.task_id)
-        assert visible_failed_ids == []
+        # 轮次投影停写后旧分支不再被默认轮隐藏：保留的失败子树仍可查询。
+        assert visible_failed_ids == [first_child_id]
     finally:
         await service.close()
 
@@ -5953,6 +5849,25 @@ async def test_duplicate_successful_spawn_reuses_completed_operation_without_new
             specs=specs,
             call_id="round-1",
         )
+        first_child_id = first_results[0].child_node_id
+        await _fake_run_node(record.task_id, first_child_id)
+
+        def _settle_round(metadata: dict[str, object]) -> dict[str, object]:
+            operations = dict(metadata.get("spawn_operations") or {})
+            payload = dict(operations.get("round-1") or {})
+            entries = [dict(item) for item in list(payload.get("entries") or [])]
+            if entries:
+                entries[0]["status"] = "success"
+                entries[0]["check_status"] = "skipped"
+                entries[0]["finished_at"] = now_iso()
+            payload["entries"] = entries
+            payload["completed"] = True
+            operations["round-1"] = payload
+            metadata["spawn_operations"] = operations
+            return metadata
+
+        service.log_service.update_node_metadata(root.node_id, _settle_round)
+
         second_results = await service.node_runner._spawn_children(
             task_id=record.task_id,
             parent_node_id=root.node_id,
@@ -5966,15 +5881,15 @@ async def test_duplicate_successful_spawn_reuses_completed_operation_without_new
 
         assert list(spawn_operations) == ["round-1"]
         assert "round-2" not in spawn_operations
-        assert [item.model_dump(mode="json") for item in first_results] == [
-            item.model_dump(mode="json") for item in second_results
-        ]
+        assert len(second_results) == 1
+        assert second_results[0].node_output == "child succeeded"
+        assert second_results[0].failure_info is None
 
         subtree = service.get_task_tree_subtree_payload(record.task_id, root.node_id)
         assert subtree is not None
-        subtree_root = subtree["nodes_by_id"][root.node_id]
-        assert [item["round_id"] for item in subtree_root["rounds"]] == ["round-1"]
-        assert subtree_root["default_round_id"] == "round-1"
+        # 轮次投影已停写；复用是否发生由 spawn_operations 判定。
+        assert subtree["nodes_by_id"][root.node_id]["default_round_id"] == ""
+        assert first_child_id in subtree["nodes_by_id"]
     finally:
         await service.close()
 
@@ -7686,7 +7601,7 @@ async def test_first_acceptance_rejection_keeps_acceptance_live_and_feeds_back_e
 
 
 @pytest.mark.asyncio
-async def test_acceptance_blocked_result_is_terminal_without_retry(tmp_path: Path) -> None:
+async def test_acceptance_reject_no_progress_is_terminal_without_retry(tmp_path: Path) -> None:
     service = _build_service(tmp_path)
     try:
         record = await service.create_task(
@@ -7708,19 +7623,21 @@ async def test_acceptance_blocked_result_is_terminal_without_retry(tmp_path: Pat
             execution_node_id=root.node_id,
             acceptance_node_id=acceptance.node_id,
             result_ref="artifact:result",
-            result_summary="execution crashed without a repair path",
+            result_summary="same flaw submitted again",
+            rejection_count=1,
         )
         terminal = await service.node_runner._handle_acceptance_node_result(
             task=task,
             acceptance=acceptance,
             result=NodeFinalResult(
                 status="failed",
-                delivery_status="blocked",
-                summary="execution anomaly; do not retry",
+                delivery_status="final",
+                summary="same flaw remains; no substantive change",
                 answer="",
                 evidence=[],
                 remaining_work=[],
-                blocking_reason="execution crashed and provided no repair path",
+                blocking_reason="",
+                verdict="reject_no_progress",
             ),
         )
 
@@ -7731,11 +7648,17 @@ async def test_acceptance_blocked_result_is_terminal_without_retry(tmp_path: Pat
         assert latest_root is not None
         assert latest_task is not None
         assert terminal.status == "failed"
-        assert terminal.delivery_status == "blocked"
+        assert terminal.delivery_status == "final"
+        assert terminal.verdict == "reject_no_progress"
         assert latest_acceptance.status == "failed"
         assert dict((latest_root.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY) or {})["state"] == ACCEPTANCE_STATE_REJECTED_TERMINAL
-        assert normalize_final_acceptance_metadata((latest_task.metadata or {}).get("final_acceptance")).status == "failed"
-        assert service.store.list_task_node_notifications(task.task_id, root.node_id) == []
+        # 无进展档只终局验收线；被验节点保留现场（暂停），任务级终态仍交人工决定。
+        assert latest_root.is_paused is True
+        assert latest_root.pause_reason == "error"
+        assert normalize_final_acceptance_metadata((latest_task.metadata or {}).get("final_acceptance")).status != "failed"
+        notifications = service.store.list_task_node_notifications(task.task_id, root.node_id)
+        assert [item.kind for item in notifications] == ["acceptance_verdict"]
+        assert notifications[0].verdict == "reject_no_progress"
     finally:
         await service.close()
 
@@ -8793,6 +8716,14 @@ async def test_run_node_after_restart_reuses_persisted_actual_request_prefix_for
     record = await _create_web_task(seed_service)
     root = seed_service.get_node(record.root_node_id)
     assert root is not None
+    seed_task = seed_service.get_task(record.task_id)
+    assert seed_task is not None
+    previous_request_messages = _with_node_pinned_head(
+        seed_service,
+        task=seed_task,
+        node=root,
+        messages=previous_request_messages,
+    )
 
     seed_service.log_service.upsert_frame(
         record.task_id,
@@ -8801,10 +8732,7 @@ async def test_run_node_after_restart_reuses_persisted_actual_request_prefix_for
             "depth": root.depth,
             "node_kind": root.node_kind,
             "phase": "before_model",
-            "messages": [
-                {"role": "system", "content": "node system prompt"},
-                {"role": "user", "content": "projected user prompt"},
-            ],
+            "messages": previous_request_messages[:2],
             "prompt_cache_key_hash": "family-hash-stable",
             "actual_request_hash": "legacy-request-hash",
             "actual_request_message_count": len(previous_request_messages),
@@ -8961,6 +8889,14 @@ async def test_pending_notice_keeps_provider_seed_messages_while_request_history
         record = await _create_web_task(seed_service)
         root = seed_service.get_node(record.root_node_id)
         assert root is not None
+        seed_task = seed_service.get_task(record.task_id)
+        assert seed_task is not None
+        previous_request_messages = _with_node_pinned_head(
+            seed_service,
+            task=seed_task,
+            node=root,
+            messages=previous_request_messages,
+        )
         seed_service.log_service.upsert_frame(
             record.task_id,
             {
@@ -9085,7 +9021,7 @@ async def test_pending_notice_keeps_provider_seed_messages_while_request_history
 
 
 @pytest.mark.asyncio
-async def test_notice_resume_first_hop_adopts_seed_prefix_with_single_notice_and_contract(tmp_path: Path):
+async def test_notice_resume_first_hop_adopts_seed_prefix_with_single_notice(tmp_path: Path):
     # E1：notice-resume 第一跳 = seed scaffold 精确前缀 + notice 派生 delta + 尾部契约；
     # notice 恰一次、契约恰一份、seed 前缀逐字节保留（缓存前缀不断裂）。
     store_path = tmp_path / "runtime.sqlite3"
@@ -9131,6 +9067,14 @@ async def test_notice_resume_first_hop_adopts_seed_prefix_with_single_notice_and
         record = await _create_web_task(seed_service)
         root = seed_service.get_node(record.root_node_id)
         assert root is not None
+        seed_task = seed_service.get_task(record.task_id)
+        assert seed_task is not None
+        previous_request_messages = _with_node_pinned_head(
+            seed_service,
+            task=seed_task,
+            node=root,
+            messages=previous_request_messages,
+        )
         seed_service.log_service.upsert_frame(
             record.task_id,
             {
@@ -9232,16 +9176,17 @@ async def test_notice_resume_first_hop_adopts_seed_prefix_with_single_notice_and
         notice_records = [
             item for item in first_send if "new parent constraint" in str(item.get("content") or "")
         ]
-        assert notice_records == [{"role": "user", "content": "new parent constraint"}]
+        assert len(notice_records) == 1
+        assert notice_records[0]["role"] == "user"
+        assert "new parent constraint" in str(notice_records[0]["content"])
         assert notice_records[0] in after_seed
         # 尾部恰好 1 份当前契约、至多 1 份 turn-only note；携带前缀（seed）里 0 份
-        contract_records = [
+        # 尾块已退役：契约只钉在节点头部快照里，seed 前缀原样复用，尾部不再追加。
+        assert not [
             item
             for item in first_send
             if str(item.get("content") or "").startswith("## Runtime Tool Contract")
         ]
-        assert len(contract_records) == 1
-        assert contract_records[0] in after_seed
         note_records = [
             item
             for item in first_send
@@ -9436,16 +9381,15 @@ async def test_run_node_appends_notice_delivered_after_first_model_response_befo
         assert len(backend.calls) == 2
         first_messages = list(backend.calls[0].get("messages") or [])
         second_messages = list(backend.calls[1].get("messages") or [])
-        # The carried prefix keeps the real conversation, but the previous round's
-        # contract is dropped: exactly one stays at the tail.
+        # The carried prefix keeps the real conversation; the contract now lives in
+        # the pinned system head, so no dynamic tail is re-appended.
         assert second_messages[:2] == first_messages[:2]
-        contract_count = sum(
-            1
+        assert "## Runtime Contract (pinned)" in str(second_messages[0].get("content") or "")
+        assert not [
+            item
             for item in second_messages
             if str(item.get("content") or "").startswith("## Runtime Tool Contract")
-        )
-        assert contract_count == 1
-        assert str(second_messages[-1].get("content") or "").startswith("## Runtime Tool Contract")
+        ]
 
         notice_indexes = [
             index
@@ -9538,9 +9482,9 @@ async def test_refresh_inflight_notice_messages_appends_after_spawn_round_histor
         # notice 无条件镜像进 delta：链路径（previous+delta+tail）请求本体不含
         # 投影，notice 只经 delta 进入请求；旧的 "delta 空则不产出" 门会让
         # 工具轮之间到达的 notice 触发投影重组装小请求。
-        assert refreshed_delta_messages == [
-            {"role": "user", "content": "append after spawn round"}
-        ]
+        assert len(refreshed_delta_messages) == 1
+        assert refreshed_delta_messages[0]["role"] == "user"
+        assert "append after spawn round" in str(refreshed_delta_messages[0]["content"])
 
         notice_indexes = [
             index
@@ -9715,7 +9659,8 @@ async def test_resume_react_state_keeps_canonical_messages_separate_from_provide
 
         assert react_state["message_source"] == "notice"
         assert react_state["messages"][: len(canonical_messages)] == canonical_messages
-        assert react_state["messages"][-1] == {"role": "user", "content": "new parent constraint"}
+        assert react_state["messages"][-1]["role"] == "user"
+        assert "new parent constraint" in str(react_state["messages"][-1]["content"])
         # seed = 内部形态 request_messages（/responses wire 项无 role，回灌 adapter
         # 会被 _convert_messages 静默丢弃），与 canonical 投影历史分离、各司其职。
         assert react_state["request_seed_state"] == "ok"
@@ -11194,7 +11139,8 @@ async def test_startup_recovery_preserves_success_nodes_and_reuses_them_for_spaw
         assert len(results) == 1
         assert before_child_ids == after_child_ids
         assert recovery_entry["child_node_id"] == success_child.node_id
-        assert "child done" in results[0].node_output
+        assert results[0].state == "created"
+        assert results[0].child_node_id == success_child.node_id
     finally:
         await restarted.close()
 
@@ -11327,6 +11273,9 @@ async def test_resume_waiting_children_turn_replays_incomplete_spawn_operation(t
 
         assert history is not None
 
+        await _finish_child(record.task_id, child.node_id)
+        service.node_runner.reconcile_spawn_round_completion(record.task_id)
+
         root_after = service.get_node(root.node_id)
         child_after = service.get_node(child.node_id)
         assert root_after is not None
@@ -11337,11 +11286,10 @@ async def test_resume_waiting_children_turn_replays_incomplete_spawn_operation(t
         entries = list(operation.get("entries") or [])
 
         assert operation.get("completed") is True
-        assert entries[0]["status"] == "success"
+        assert child_after.status == "success"
         assert "result" not in entries[0]
         assert "prompt" in operation["specs"][0]
         assert entries[0]["child_node_id"] == child.node_id
-        assert child_after.status == "success"
 
         tool_results = service.store.list_task_node_tool_results(record.task_id, root.node_id)
         assert any(item.tool_name == "spawn_child_nodes" and item.status == "success" for item in tool_results)
@@ -11350,7 +11298,7 @@ async def test_resume_waiting_children_turn_replays_incomplete_spawn_operation(t
 
 
 @pytest.mark.asyncio
-async def test_materialized_spawn_recovery_skips_review_and_waits_for_acceptance(
+async def test_materialized_spawn_recovery_skips_review_and_reuses_subtree(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -11461,15 +11409,21 @@ async def test_materialized_spawn_recovery_skips_review_and_waits_for_acceptance
         )
 
         assert len(results) == 1
+        assert results[0].state == "created"
+        assert results[0].acceptance_node_id == acceptance_id
         assert review_calls == []
+
+        # 恢复只负责复用已有子树；终态由调度器驱动，轮次完成度按节点行派生。
+        await _run_nested_node(record.task_id, child_id)
+        await _run_nested_node(record.task_id, acceptance_id)
+        service.node_runner.reconcile_spawn_round_completion(record.task_id)
+
         root_after = service.get_node(root.node_id)
         assert root_after is not None
         operations = dict((root_after.metadata or {}).get("spawn_operations") or {})
         assert set(operations) == {round_id}
         assert "superseded" not in json.dumps(operations, ensure_ascii=False)
-        final_entry = operations[round_id]["entries"][0]
-        assert final_entry["status"] == "success"
-        assert final_entry["check_status"] == "passed"
+        assert operations[round_id]["completed"] is True
         assert service.store.get_node(child_id).status == "success"
         assert service.store.get_node(acceptance_id).status == "success"
         assert observed_entry_status_at_acceptance == ["running"]
@@ -11478,12 +11432,12 @@ async def test_materialized_spawn_recovery_skips_review_and_waits_for_acceptance
 
 
 @pytest.mark.asyncio
-async def test_resume_waiting_children_recovery_stays_waiting_children_until_acceptance_terminal(
+async def test_resume_waiting_children_recovery_reuses_materialized_subtree(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """End-to-end recovery: the parent must not enter ``before_model`` while the
-    recovered round still has a live acceptance node."""
+    """Recovery replays the spawn call without re-reviewing or superseding the
+    materialized execution/acceptance subtree."""
     service = _build_service(tmp_path)
     service.global_scheduler.enqueue_task = _noop_enqueue_task
     try:
@@ -11571,8 +11525,6 @@ async def test_resume_waiting_children_recovery_stays_waiting_children_until_acc
 
         monkeypatch.setattr(service.node_runner, "_review_spawn_batch", _blocked_review)
 
-        observed_frame_phase_at_acceptance: list[str] = []
-
         async def _run_nested_node(task_id: str, node_id: str):
             target = service.store.get_node(node_id)
             assert target is not None
@@ -11583,8 +11535,6 @@ async def test_resume_waiting_children_recovery_stays_waiting_children_until_acc
                     NodeFinalResult(status="success", delivery_status="final", summary="child done", answer="child done", evidence=[], remaining_work=[], blocking_reason=""),
                 )
             if target.node_kind == "acceptance":
-                frame = service.log_service.read_runtime_frame(record.task_id, root.node_id) or {}
-                observed_frame_phase_at_acceptance.append(str(frame.get("phase") or ""))
                 return service.node_runner._mark_finished(
                     task_id,
                     node_id,
@@ -11603,14 +11553,17 @@ async def test_resume_waiting_children_recovery_stays_waiting_children_until_acc
         )
 
         assert history is not None
-        assert observed_frame_phase_at_acceptance == ["waiting_children"]
+
+        await _run_nested_node(record.task_id, child_id)
+        await _run_nested_node(record.task_id, acceptance_id)
+        service.node_runner.reconcile_spawn_round_completion(record.task_id)
+
         root_after = service.get_node(root.node_id)
         assert root_after is not None
         operations = dict((root_after.metadata or {}).get("spawn_operations") or {})
         assert set(operations) == {round_id}
         assert "superseded" not in json.dumps(operations, ensure_ascii=False)
-        final_entry = operations[round_id]["entries"][0]
-        assert final_entry["status"] == "success"
+        assert operations[round_id]["completed"] is True
         assert service.store.get_node(child_id).status == "success"
         assert service.store.get_node(acceptance_id).status == "success"
         frame_after = service.log_service.read_runtime_frame(record.task_id, root.node_id) or {}
@@ -11676,20 +11629,24 @@ async def test_materialized_spawn_recovery_without_review_metadata_resumes_round
         )
 
         assert len(results) == 1
+        assert results[0].state == "created"
         assert review_calls == []
+
+        await _finish_child(record.task_id, child.node_id)
+        service.node_runner.reconcile_spawn_round_completion(record.task_id)
+
         root_after = service.get_node(root.node_id)
         assert root_after is not None
         operations = dict((root_after.metadata or {}).get("spawn_operations") or {})
         assert set(operations) == {round_id}
         assert operations[round_id]["completed"] is True
-        assert operations[round_id]["entries"][0]["status"] == "success"
         assert service.store.get_node(child.node_id).status == "success"
     finally:
         await service.close()
 
 
 @pytest.mark.asyncio
-async def test_distribution_barrier_preempts_waiting_children_recovery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+async def test_stale_distribution_state_does_not_gate_waiting_children_recovery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         workspace_root=tmp_path,
@@ -11822,13 +11779,18 @@ async def test_distribution_barrier_preempts_waiting_children_recovery(tmp_path:
             },
         )
 
-        assert history is None
+        # 分发屏障已退役：旧的 runtime_meta.distribution 不再拦截恢复。
+        assert history is not None
+        root_after = service.get_node(root.node_id)
+        assert root_after is not None
+        operations = dict((root_after.metadata or {}).get("spawn_operations") or {})
+        assert "call:spawn-round" in operations
     finally:
         await service.close()
 
 
 @pytest.mark.asyncio
-async def test_resume_ready_pending_notice_preempts_waiting_children_recovery(
+async def test_resume_ready_notice_does_not_preempt_waiting_children_recovery(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -11963,7 +11925,8 @@ async def test_resume_ready_pending_notice_preempts_waiting_children_recovery(
             },
         )
 
-        assert history is None
+        # 一次性 notice 不再抢在 waiting_children 恢复之前拦截；恢复先重放派生轮。
+        assert history is not None
     finally:
         await service.close()
 
@@ -12358,13 +12321,19 @@ async def test_resume_ready_pending_notice_wait_for_children_allows_waiting_chil
             },
         )
 
+        assert history is not None
+
+        await _finish_child(record.task_id, child.node_id)
+        service.node_runner.reconcile_spawn_round_completion(record.task_id)
+
         root_after = service.get_node(root.node_id)
+        assert root_after is not None
         operation = dict(((root_after.metadata or {}).get("spawn_operations") or {}).get("call:spawn-round") or {})
         entries = list(operation.get("entries") or [])
 
-        assert history is not None
         assert operation.get("completed") is True
-        assert entries[0]["status"] == "success"
+        assert entries[0]["child_node_id"] == child.node_id
+        assert service.store.get_node(child.node_id).status == "success"
     finally:
         await service.close()
 
@@ -12490,22 +12459,26 @@ async def test_wait_for_children_recovery_does_not_continue_into_same_turn_model
         monkeypatch.setattr(service.node_runner, "_run_nested_node", _finish_child)
 
         result = await service.node_runner.run_node(record.task_id, root.node_id)
+        assert result.delivery_status == "partial"
+
+        await _finish_child(record.task_id, child.node_id)
+        service.node_runner.reconcile_spawn_round_completion(record.task_id)
 
         root_after = service.get_node(root.node_id)
         assert root_after is not None
         operation = dict(((root_after.metadata or {}).get("spawn_operations") or {}).get("call:spawn-round") or {})
         entries = list(operation.get("entries") or [])
 
-        assert result.delivery_status == "partial"
         assert root_after.status == "in_progress"
         assert operation.get("completed") is True
-        assert entries[0]["status"] == "success"
+        assert entries[0]["child_node_id"] == child.node_id
+        assert service.store.get_node(child.node_id).status == "success"
     finally:
         await service.close()
 
 
 @pytest.mark.asyncio
-async def test_resume_ready_wait_for_children_without_pending_notice_clears_distribution_state(
+async def test_wait_for_children_notice_state_clears_once_round_completes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -12596,17 +12569,17 @@ async def test_resume_ready_wait_for_children_without_pending_notice_clears_dist
                 ),
             )
 
-        monkeypatch.setattr(service.node_runner, "_run_nested_node", _finish_child)
-
-        await service.task_actor_service.run_task(record.task_id)
+        await _finish_child(record.task_id, child.node_id)
+        service.node_runner.reconcile_spawn_round_completion(record.task_id)
 
         root_after = service.get_node(root.node_id)
-        distribution = dict((service.log_service.read_task_runtime_meta(record.task_id) or {}).get("distribution") or {})
+        assert root_after is not None
+        # 轮次收尾后 wait_for_children 不再成立，状态随之清回 ordinary。
+        assert service.node_runner._pending_notice_waits_for_children(node=root_after) is False
+        root_after = service.get_node(root.node_id)
+        assert root_after is not None
         pending_notice_state = dict((root_after.metadata or {}).get(PENDING_NOTICE_STATE_KEY) or {})
 
-        assert distribution.get("state") in {None, ""}
-        assert distribution.get("active_epoch_id") in {None, ""}
-        assert distribution.get("pending_notice_node_ids") in (None, [])
         assert pending_notice_state["resume_mode"] == RESUME_MODE_ORDINARY
         assert pending_notice_state["holding_round_id"] == ""
     finally:
@@ -12614,7 +12587,7 @@ async def test_resume_ready_wait_for_children_without_pending_notice_clears_dist
 
 
 @pytest.mark.asyncio
-async def test_completed_distribution_with_delayed_child_mailbox_is_node_pending_not_global_distribution(
+async def test_delayed_child_mailbox_is_node_pending_not_global_distribution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -12648,12 +12621,20 @@ async def test_completed_distribution_with_delayed_child_mailbox_is_node_pending
             spec=grandchild_spec,
             child_node_id=grandchild.node_id,
         )
-        service._deliver_distribution_message(
-            task_id=record.task_id,
-            epoch_id="epoch:done",
-            source_node_id=root.node_id,
-            target_node_id=child.node_id,
-            message="new constraint",
+        service.store.upsert_task_node_notification(
+            TaskNodeNotification(
+                notification_id="notif:delayed-mailbox",
+                task_id=record.task_id,
+                node_id=child.node_id,
+                epoch_id="",
+                source_node_id=root.node_id,
+                message="new constraint",
+                status="delivered",
+                created_at=now_iso(),
+                delivered_at=now_iso(),
+                consumed_at="",
+                payload={},
+            )
         )
         service.log_service.update_task_runtime_meta(
             record.task_id,
@@ -12676,8 +12657,9 @@ async def test_completed_distribution_with_delayed_child_mailbox_is_node_pending
         assert progress.live_state is not None
         assert progress.live_state.distribution.state == ""
         assert progress.live_state.distribution.mode == ""
-        assert progress.live_state.distribution.pending_notice_node_ids == [child.node_id]
-        assert progress.live_state.distribution.pending_mailbox_count == 1
+        # 分发账本已退役：待并入消息只记在节点层，不进全局 distribution。
+        assert progress.live_state.distribution.pending_notice_node_ids == []
+        assert progress.live_state.distribution.pending_mailbox_count == 0
         assert snapshot is not None
         assert snapshot.nodes_by_id[child.node_id].pending_notice_count == 1
         assert snapshot.nodes_by_id[root.node_id].distribution_status == ""
@@ -12760,7 +12742,7 @@ async def test_resume_react_state_injects_pending_notice_once_active_round_is_go
 
         assert react_state["message_source"] == "notice"
         assert react_state["messages"][-1]["role"] == "user"
-        assert react_state["messages"][-1]["content"] == "new constraint"
+        assert "new constraint" in str(react_state["messages"][-1]["content"])
         assert react_state["pending_root_notice_ids"] == ["root-notice:demo:1"]
         assert pending_notice_state["resume_mode"] == RESUME_MODE_ORDINARY
         assert pending_notice_state["holding_round_id"] == ""
@@ -12851,7 +12833,7 @@ async def test_consuming_last_pending_notice_clears_pending_notice_state(
 
 
 @pytest.mark.asyncio
-async def test_resume_ready_pending_notice_preempts_pending_tool_turn(tmp_path: Path):
+async def test_pending_notice_does_not_block_pending_tool_turn_recovery(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         workspace_root=tmp_path,
@@ -12935,7 +12917,8 @@ async def test_resume_ready_pending_notice_preempts_pending_tool_turn(tmp_path: 
             },
         )
 
-        assert history is None
+        # 单向 notice 状态不再抢占待处理工具轮：恢复照常重放这一轮。
+        assert history is not None
     finally:
         await service.close()
 
@@ -13268,25 +13251,6 @@ async def test_spawn_children_prefilters_specs_and_preserves_result_order(tmp_pa
 
         assert root is not None
 
-        async def _fake_run_node(task_id: str, node_id: str):
-            node = service.get_node(node_id)
-            assert node is not None
-            return service.node_runner._mark_finished(
-                task_id,
-                node_id,
-                NodeFinalResult(
-                    status="success",
-                    delivery_status="final",
-                    summary=f"{node.goal} done",
-                    answer=f"{node.goal} done",
-                    evidence=[],
-                    remaining_work=[],
-                    blocking_reason="",
-                ),
-            )
-
-        monkeypatch.setattr(service.node_runner, "run_node", _fake_run_node)
-
         results = await service.node_runner._spawn_children(
             task_id=record.task_id,
             parent_node_id=root.node_id,
@@ -13305,14 +13269,17 @@ async def test_spawn_children_prefilters_specs_and_preserves_result_order(tmp_pa
 
         assert [item.goal for item in results] == ["blocked branch", "allowed branch"]
         assert results[0].failure_info is None
+        assert results[0].state == "rejected"
         assert results[0].check_result == "派生已被拦截"
         assert results[0].review_blocked is True
         assert results[1].review_blocked is False
+        assert results[1].state == "created"
+        assert results[1].child_node_id.startswith("node:")
         assert "拆分过细" in results[0].node_output
         assert "请由父节点直接执行" in results[0].node_output
-        assert results[0].node_output_summary == "派生拦截：拆分过细，偏离当前父节点目标"
-        assert "请由父节点直接执行" not in results[0].node_output_summary
-        assert results[1].node_output == "allowed branch done"
+        # 创建回执不携带执行结果：子节点输出由后续 child_final 送达。
+        assert results[0].node_output_summary == ""
+        assert results[1].node_output == ""
         assert len(service.store.list_children(root.node_id)) == 1
         assert len(entries) == 2
         assert entries[0]["review_decision"] == "blocked"
@@ -13653,24 +13620,10 @@ async def test_spawn_review_does_not_use_node_send_preflight(tmp_path: Path, mon
         root = service.get_node(record.root_node_id)
         assert root is not None
 
-        async def _fake_run_node(task_id: str, node_id: str):
-            node = service.get_node(node_id)
-            assert node is not None
-            return service.node_runner._mark_finished(
-                task_id,
-                node_id,
-                NodeFinalResult(
-                    status="success",
-                    delivery_status="final",
-                    summary=f"{node.goal} done",
-                    answer=f"{node.goal} done",
-                    evidence=[],
-                    remaining_work=[],
-                    blocking_reason="",
-                ),
-            )
+        async def _must_not_run_inline(*args, **kwargs):
+            raise AssertionError("spawn must return creation receipts before any child runs")
 
-        monkeypatch.setattr(service.node_runner, "run_node", _fake_run_node)
+        monkeypatch.setattr(service.node_runner, "run_node", _must_not_run_inline)
         monkeypatch.setattr(
             service._react_loop,
             "run_node_send_preflight_for_control_turn",
@@ -13687,7 +13640,8 @@ async def test_spawn_review_does_not_use_node_send_preflight(tmp_path: Path, mon
         )
 
         assert len(results) == 1
-        assert results[0].node_output == "allowed child done"
+        assert results[0].state == "created"
+        assert results[0].child_node_id.startswith("node:")
         assert len(backend.calls) == 1
         assert backend.calls[0].get("tool_choice") is None
     finally:
@@ -13721,24 +13675,10 @@ async def test_spawn_review_retries_invalid_output_and_defaults_to_block_on_exce
         root = service.get_node(record.root_node_id)
         assert root is not None
 
-        async def _fake_run_node(task_id: str, node_id: str):
-            node = service.get_node(node_id)
-            assert node is not None
-            return service.node_runner._mark_finished(
-                task_id,
-                node_id,
-                NodeFinalResult(
-                    status="success",
-                    delivery_status="final",
-                    summary=f"{node.goal} done",
-                    answer=f"{node.goal} done",
-                    evidence=[],
-                    remaining_work=[],
-                    blocking_reason="",
-                ),
-            )
+        async def _must_not_run_inline(*args, **kwargs):
+            raise AssertionError("spawn must return creation receipts before any child runs")
 
-        monkeypatch.setattr(service.node_runner, "run_node", _fake_run_node)
+        monkeypatch.setattr(service.node_runner, "run_node", _must_not_run_inline)
 
         results = await service.node_runner._spawn_children(
             task_id=record.task_id,
@@ -13748,7 +13688,8 @@ async def test_spawn_review_retries_invalid_output_and_defaults_to_block_on_exce
         )
 
         assert len(results) == 1
-        assert results[0].node_output == "retry child done"
+        assert results[0].state == "created"
+        assert results[0].child_node_id.startswith("node:")
         assert len(retry_backend.calls) == 2
         assert retry_backend.calls[0].get("tool_choice") is None
         second_messages = list(retry_backend.calls[1].get("messages") or [])
@@ -13976,7 +13917,7 @@ async def test_node_detail_includes_latest_direct_child_results(tmp_path: Path, 
 
         monkeypatch.setattr(service.node_runner, "run_node", _fake_run_node)
 
-        await service.node_runner._spawn_children(
+        results = await service.node_runner._spawn_children(
             task_id=record.task_id,
             parent_node_id=root.node_id,
             specs=[
@@ -13985,6 +13926,10 @@ async def test_node_detail_includes_latest_direct_child_results(tmp_path: Path, 
             ],
             call_id="detail-child-results",
         )
+        # 派生只创建；结果由子节点终局后写回节点行，详情按行现读。
+        for child_id in [item.child_node_id for item in results]:
+            await _fake_run_node(record.task_id, child_id)
+        service.node_runner.reconcile_spawn_round_completion(record.task_id)
 
         node_payload = service.get_node_detail_payload(record.task_id, root.node_id, detail_level="summary")
         assert node_payload is not None
