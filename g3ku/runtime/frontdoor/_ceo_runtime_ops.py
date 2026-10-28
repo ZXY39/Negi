@@ -2256,12 +2256,15 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             }
             # 摘出的静默痕迹回插在摘要块之后、recent_tail 之前：它们比尾部更早，
             # 放这个位置保持时间顺序单调，不会在摘要与近况之间造出时序空洞。
+            # 契约尾块从压缩区间里拆出，必须原样回插：repair_required / candidate
+            # 这些机器状态不在摘要里，丢了模型就不知道哪些工具当前不可执行。
             rewritten_messages = [
                 *system_prefix,
                 compacted_block,
                 *deferred_messages,
                 *preserved_silent_groups,
                 *recent_tail,
+                *_contract_messages,
             ]
             rewritten_tokens = self._estimate_frontdoor_send_total_tokens(
                 provider_request_body=self._build_frontdoor_provider_request_body_preview(
