@@ -160,3 +160,60 @@
 
 - 完成后在本文件末尾补：已关闭项、剩余 G3 分类、验证命令与结果、
   文档更新状态、J 的前置条件。
+
+## 执行结果（2026-10-28）
+
+### 已提交
+
+| 批次 | commit |
+|---|---|
+| B 循环导入 | `cdd66148` |
+| A 前端 mock | `31eecf6e` |
+| C2 测试桩 | `d23cabf9` |
+| 计划文件 | `c07cc814` |
+| E 安全 / rerun_safe | `24974e5d` |
+| F2 distribution | `19da46c1` |
+| G2 follow-up 测试 | `b6acfc64` |
+| C1 证据纪律测试 | `593e629e` |
+| C3/C4 两份提示词 | `0a979bfb` |
+| F1 / D3 / G1 | `3785e9fd` / `3dfbec6e` / `b91e9327` |
+| D4 契约 + repair 骨架 | `31fb8350` |
+| G3 节点 goal / sandbox_tier / impulse 替身 | `8cf39505` |
+| G3 剩余测试批次 | `eee6f366` |
+
+### 验证结果
+
+- A：12 个前端文件 `148 passed`。
+- B：18 个文件单进程 `168 passed, 2 skipped`；`import g3ku.runtime.frontdoor.tool_contract` 成功。
+- C：`test_acceptance_evidence_discipline_prompt.py`、`test_acceptance_rejection_count.py`、
+  `test_runtime_environment_guidance.py` 全绿；`test_execution_prompt_filesystem_guidance.py`
+  仅剩 frontdoor 的 `completed_stage_summary` 一条。
+- D4：`test_final_result_shape_faults.py` `37 passed`。
+- F：external contract/messages + frame summary `84 passed`（与 D4 合并运行）。
+- E：manifest + sandbox trust `44 passed, 1 skipped`；贴纸相关 `59 passed`。
+- sandbox 子集：`109 passed, 3 skipped`。
+- G3 已关闭：react regressions 134、context assembly 79、tool_impulse 28、
+  tool resource admin 125、runtime progress 119、reasoning replay / file targets 全绿。
+
+### 剩余（明确阻塞）
+
+1. **C4 frontdoor 一句**：`g3ku/runtime/prompts/ceo_frontdoor.md` 仍被另一会话占用
+   （当前有未提交改动），未写入
+   `completed_stage_summary` 段；`test_prompts_require_stage_summary_to_cover_facts_goals_and_lessons`
+   仍红。等该文件释放后补一句并重跑。
+2. **context_window_overflow 1 条**：`repair_required_tools:` 只渲在动态契约尾块，
+   压缩后尾块被丢弃，钉住头不带它。要修需产品决策：把 repair 条目放进钉住头并纳入
+   revision key（会改变重印边界），或压缩后重贴该段。属真实缺口，不是测试漂移。
+3. **task_web_worker_runtime 40 条**：多根因，非单一退役契约。当前聚类：
+   waiting_children/spawn 恢复、distribution/round 状态、`_deliver_distribution_message`
+   已删除、消息批次形状。需要按新行为逐族定稿，未在本轮硬改。
+4. **J 第 11 条**：本机仍无 WSL 后端、token 为空，证据包不在本机；不可复跑。
+
+### 并发改动警告
+
+工作时另一会话在同一工作树修改了：
+`docs/architecture/*`、`g3ku/runtime/prompts/ceo_frontdoor.md`、
+`g3ku/runtime/frontdoor/tool_contract.py`（repair 段注释）、
+`g3ku/web/frontend/*`、`skills/meme|repair-tool`、以及多个 prompt/前端测试。
+本轮只 stage 自己的文件；上述文件不要整文件提交，避免把他人改动带进 commit。
+如需继续 C4 / G3，建议等另一会话提交后在干净树上续跑。
