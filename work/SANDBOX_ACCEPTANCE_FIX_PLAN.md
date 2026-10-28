@@ -228,6 +228,14 @@
 `docs/architecture/sandbox-execution-plane.md` 只读表已同步（`ceefd5ed`）；
 仓库 ruff 基线恢复（`6b4fbc4c`）。
 
+### 最终验证（2026-10-28 15:40）
+
+- `tests/resources/test_task_web_worker_runtime.py`：221 passed。
+- 关联回归（spawn / wait_all / spawn-round-fault / contract-overlay / acceptance scheduler / append-only）：97 passed。
+- `test_resource_runtime_smoke.py`：106 passed。
+- `pytest tests -k sandbox`：109 passed / 3 skipped。
+- `python -m ruff check .`：全绿。
+
 context_window 已关闭：`1bbcc31c` 在压缩重置后、同一次主请求前重投一次性
 `[RUNTIME_NOTICE]`，repair 段以 `- repair_required:` 合同节到达模型；压缩套件
 `25 passed`。钉住头保持只吃 roster epoch 的缓存契约，未把 repair 项塞进头部。
