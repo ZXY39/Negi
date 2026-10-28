@@ -4199,24 +4199,46 @@ textarea {
     margin-top: var(--space-2);
 }
 
-/* 在飞工具行的容器：挂在阶段卡体内，与正式轮次同一处出现（org_graph_app.js ceoLiveToolStepHost）。 */
+/* 在飞工具行的容器：挂在阶段卡体内（纯工具段挂进裸块），与正式轮次同一处出现
+   （org_graph_app.js ceoLiveToolStepHost）。按工具条带排：多件工具并行时并排。 */
 .task-trace-live-steps {
-    display: grid;
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: flex-start;
     gap: 6px;
+    /* 与 .task-trace-round-strip 同一个左移量：工具卡的内边距由 8px 抵回来。 */
+    margin-left: -8px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-gutter: stable;
 }
 
-/* 在飞工具行不再套卡片外壳：它跟上方已完成的工具卡同一量级，但只占内容宽，
-   不拉满整行。行内只留转圈图标、工具名（原始 tool_id）和展开钮；计时只在流程
-   头部那一处出现，行尾不再挂“已运行 N 秒”。 */
+/* 在飞行不用 .interaction-step 的轨道外壳：那条 2px 灰竖线和 16px 缩进会把图标
+   推离上方工具卡那一列，看起来像另一套样式。 */
+.task-trace-live-steps .interaction-step {
+    flex: 0 0 auto;
+    padding: 0;
+    border-left: 0;
+}
+
+/* 与工具卡同尺寸：3px 8px 内边距、8px 图标到名字的间距、1rem 图标格。运行时
+   左侧转圈，完成换成 √，失败换成 ！，其余排版与卡内工具一致。line-height 取
+   normal，行高才和按钮里的 chip 标题一样（正文继承的 1.75 会把这一行撑高）。 */
 .task-trace-live-steps .interaction-step-header {
     margin-bottom: 0;
-    display: inline-flex;
+    /* block 级 flex：inline-flex 会在外层行盒里再叠一层 strut，行高多出约 3px。 */
+    display: flex;
     width: fit-content;
     max-width: 100%;
-    gap: 10px;
-    padding: 0;
+    gap: 8px;
+    padding: 3px 8px;
     border: 0;
     background: none;
+    line-height: normal;
+}
+
+.task-trace-live-steps .interaction-step-lead {
+    gap: 8px;
 }
 
 /* 卡里不再印文字状态：状态由前置图标（转圈 / √ / ！）表达。 */

@@ -6768,6 +6768,15 @@ function renderCeoToolIcon(iconWrap, iconName = "loader") {
     iconWrap.innerHTML = `<i data-lucide="${esc(nextIcon)}"></i>`;
 }
 
+// 在飞工具与账本里的工具卡共用同一颗前置状态图标：运行中转圈、完成 √、失败 ！。
+// 图标名与配色沿用工具卡那一套（tasks/node-detail.js 的 renderTraceToolStatusIcon）。
+function ceoToolStatusIcon(status = "running") {
+    const normalized = String(status || "").trim().toLowerCase();
+    if (normalized === "success") return { name: "check", tone: "is-success" };
+    if (normalized === "error") return { name: "alert-circle", tone: "is-error" };
+    return { name: "loader", tone: "is-running" };
+}
+
 function normalizeInteractionDetailText(text = "") {
     return readableText(text, { decodeEscapes: true, emptyText: "" }).replace(/\r\n?/g, "\n").trim();
 }
@@ -6946,10 +6955,9 @@ function toggleCeoToolHistory(turn) {
     }, { scrollMode: "preserve" });
 }
 
-function applyCeoToolStepState(item, { status = "running", toolName = "tool", detail = "", toolCallId = "", kind = "", stage = null, allowEmptyOutput = false } = {}) {
+function applyCeoToolStepState(item, { status = "running", toolName = "tool", detail = "", toolCallId = "", kind = "", allowEmptyOutput = false } = {}) {
     if (!(item instanceof HTMLElement)) return;
     const statusLabel = ({ running: "进行中", success: "完成", error: "出错" })[status] || "更新";
-    const resolvedStage = stage || ceoToolStage(toolName, detail, status);
     item.className = `interaction-step ${status}`;
     item.dataset.stepState = status;
     item.dataset.toolName = String(toolName || "tool").trim() || "tool";
@@ -6958,8 +6966,9 @@ function applyCeoToolStepState(item, { status = "running", toolName = "tool", de
     const titleEl = item.querySelector(".interaction-step-title");
     const startedEl = item.querySelector(".interaction-step-started");
     const statusEl = item.querySelector(".interaction-step-status");
-    const iconWrap = item.querySelector(".interaction-step-icon");
-    if (titleEl) titleEl.textContent = ceoFriendlyToolName(toolName);
+    const iconWrap = item.querySelector(".tool-status-icon");
+    // 标题用原始 tool_id：与账本里工具卡（chip 标题）同字，运行中与完成后不换名字。
+    if (titleEl) titleEl.textContent = String(toolName || "tool").trim() || "tool";
     if (startedEl instanceof HTMLElement) {
         const startedLabel = formatCompactTime(item.dataset.startedAt || "");
         startedEl.hidden = !startedLabel;
@@ -6970,8 +6979,9 @@ function applyCeoToolStepState(item, { status = "running", toolName = "tool", de
     if (statusEl) statusEl.textContent = statusLabel;
     setCeoToolStepOutput(item, allowEmptyOutput ? detail : (detail || `${ceoFriendlyToolName(toolName)}${statusLabel}`));
     if (iconWrap) {
-        iconWrap.classList.toggle("is-spinning", !!resolvedStage.spinning);
-        renderCeoToolIcon(iconWrap, resolvedStage.icon);
+        const statusIcon = ceoToolStatusIcon(status);
+        iconWrap.className = `tool-status-icon ${statusIcon.tone}`;
+        renderCeoToolIcon(iconWrap, statusIcon.name);
     }
 }
 
@@ -7116,11 +7126,15 @@ function ceoLiveToolStepHost(turn) {
         turn.liveToolStepsEl = container;
     }
     const host = turn.liveToolStepsEl;
-    const groupEl = ceoLastTraceStepEl(turn);
-    const body = groupEl instanceof HTMLElement && typeof groupEl.querySelector === "function"
-        ? groupEl.querySelector(".task-trace-body")
+    const stepEl = ceoLastTraceStepEl(turn);
+    const body = stepEl instanceof HTMLElement && typeof stepEl.querySelector === "function"
+        ? stepEl.querySelector(".task-trace-body")
         : null;
-    const target = body instanceof HTMLElement ? body : turn.listEl;
+    // 纯工具段（裸块）没有 body：挂进裸块本身，与上面的轮次条落在同一条左缩进上；
+    // 挂到列表层会退到裸块 26px 缩进之外，在飞工具就成了另一套对齐。
+    const target = body instanceof HTMLElement
+        ? body
+        : (stepEl instanceof HTMLElement ? stepEl : turn.listEl);
     if (host.parentElement !== target) target.appendChild(host);
     return host;
 }
@@ -7206,7 +7220,7 @@ function applyCeoToolEventToTurn(turn, event = {}) {
         item.innerHTML = `
             <div class="interaction-step-header">
                 <span class="interaction-step-lead">
-                    <span class="interaction-step-icon" data-icon-name="loader"><i data-lucide="loader"></i></span>
+                    <span class="tool-status-icon is-running" data-icon-name="loader"><i data-lucide="loader"></i></span>
                     <span class="interaction-step-title"></span>
                     <button type="button" class="interaction-step-copy" hidden aria-label="复制工具结果" title="复制工具结果"><i data-lucide="copy"></i></button>
                 </span>
@@ -7252,7 +7266,6 @@ function applyCeoToolEventToTurn(turn, event = {}) {
         detail,
         toolCallId,
         kind: eventKind,
-        stage,
         allowEmptyOutput: status === "running" && eventKind === "tool_start",
     });
     if (outputRef) item.dataset.outputRef = outputRef;

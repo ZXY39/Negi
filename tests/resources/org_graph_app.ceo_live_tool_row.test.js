@@ -14,7 +14,7 @@ const LIVE_ROW_SELECTORS = [
     ".interaction-step-title",
     ".interaction-step-started",
     ".interaction-step-status",
-    ".interaction-step-icon",
+    ".tool-status-icon",
     ".interaction-step-preview",
     ".interaction-step-detail",
     ".interaction-step-disclosure",
@@ -177,10 +177,53 @@ test("live tool row renders icon + raw name only, with no elapsed-time badge", (
     assert.doesNotMatch(item.innerHTML, /interaction-step-runtime/);
     assert.doesNotMatch(item.innerHTML, /已运行/);
     assert.equal(item.querySelector(".interaction-step-runtime"), null);
+    // 与账本里的工具卡同一颗前置状态图标：运行中是转圈。
+    const icon = item.querySelector(".tool-status-icon");
+    assert.equal(icon.className, "tool-status-icon is-running");
+    assert.match(icon.innerHTML, /data-lucide="loader"/);
 });
 
-test("stylesheets carry no live-row elapsed badge rule", () => {
+test("a finished live tool flips the same row to the check icon", () => {
+    const { applyCeoToolEventToTurn } = loadApp();
+    const turn = makeTurn();
+    const base = {
+        tool_name: "exec",
+        tool_call_id: "call_live_1",
+        timestamp: new Date().toISOString(),
+    };
+
+    applyCeoToolEventToTurn(turn, { ...base, status: "running", kind: "tool_start" });
+    const item = applyCeoToolEventToTurn(turn, { ...base, status: "success", kind: "tool_end", output_text: "ok" });
+
+    assert.equal(item.dataset.stepState, "success");
+    assert.equal(item.querySelector(".interaction-step-title").textContent, "exec");
+    const icon = item.querySelector(".tool-status-icon");
+    assert.equal(icon.className, "tool-status-icon is-success");
+    assert.match(icon.innerHTML, /data-lucide="check"/);
+});
+
+test("stylesheets give live rows the tool-card shape, not the rail", () => {
     assert.doesNotMatch(CSS, /\.task-trace-live-steps \.interaction-step-runtime/);
+
+    // 在飞行不画轨道：灰竖线与 16px 缩进都要归零，图标才能和上方工具卡同列。
+    const item = /\.task-trace-live-steps \.interaction-step\s*\{([\s\S]*?)\n\}/.exec(CSS);
+    assert.ok(item, "live item override not found");
+    assert.match(item[1], /padding:\s*0;/);
+    assert.match(item[1], /border-left:\s*0;/);
+
+    // 与 chip 同尺寸：3px 8px 内边距、8px 图标到名字的间距；block 级 flex +
+    // line-height normal 让行高与按钮里的 chip 完全一致。
+    const header = /\.task-trace-live-steps \.interaction-step-header\s*\{([\s\S]*?)\n\}/.exec(CSS);
+    assert.ok(header, "live header rule not found");
+    assert.match(header[1], /display:\s*flex;/);
+    assert.match(header[1], /gap:\s*8px;/);
+    assert.match(header[1], /padding:\s*3px 8px;/);
+    assert.match(header[1], /line-height:\s*normal;/);
+
+    const container = /\.task-trace-live-steps\s*\{([\s\S]*?)\n\}/.exec(CSS);
+    assert.ok(container, "live container rule not found");
+    assert.match(container[1], /display:\s*flex/);
+    assert.match(container[1], /margin-left:\s*-8px;/);
 });
 
 test("the usage row sits beside the placeholder arc while the turn is loading", () => {
