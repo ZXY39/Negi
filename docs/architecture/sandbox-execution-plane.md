@@ -39,6 +39,25 @@
 但要等 jail 后端（manager + router）接进执行道、`JAIL_BACKENDS_AVAILABLE` 打开之后才会发放。
 在那之前工具面与读根判据已经就位，接后端只改这一处开关。
 
+## 头部沙箱声明
+
+模型必须知道自己站在哪一面。不告诉它，它就拿宿主路径、宿主挂载和联网命令去试，每撞一次
+赔一个回合——验收第 4 条里模型先 `cat /mnt/e/...` 再 `content_open E:\...`，两次都是猜的。
+
+稳定前缀里因此有两段声明，按解析出的档位选一，由 `CeoPromptBuilder.build_base_prompt`
+渲染：
+
+| 档位 | 头部段 |
+|---|---|
+| `jailed` | `## Sandbox Environment`：一次性 bwrap、只有 `/workspace` 与 `/shared` 落盘、宿主路径不存在、`network=none` |
+| `readonly` | `## Read-only Session`：写类工具与 `exec` 的准入边界、读根限定 |
+| `host_full` | 不带声明 |
+
+**档位不进 cache stamp**：重印时钟仍是（记忆块采纳时刻 × 工具面暴露修订）。切档不重印
+稳定前缀，新声明等到下一次重印（记忆采纳、工具面修订、压缩、编辑重发或 fork 后的基线
+重建）随新前缀一起落地。这条折中是刻意的：把档位塞进 stamp 会在操作者切档的瞬间重印整段
+前缀，正好打掉这个契约要保住的缓存。
+
 ## jail 基础设施（后端 / 布局 / 助手 / 文件桥）
 
 这一层已经就位，但**还没有接到执行道**：`JAIL_BACKENDS_AVAILABLE` 仍为 false，
@@ -64,10 +83,22 @@
 所有阻塞调用走 `asyncio.to_thread`，不占事件循环。`filesystem_propose_patch` 与
 `process_kill` 不进 jail 代理——前者依赖宿主工件库，后者在一次性进程模型下没有对象可杀。
 
-两条实现约束值得记住：
+几条实现约束值得记住：
 
 - **`fsop` 靠单文件绑进 jail**（`/opt/negi/fsop.py`，只读）：jail 里没有仓库、不装包，
-  标准库足够；WSL 布局改成把这份文件拷进发行版一次。
+  标准库足够。WSL 布局把这份文件拷进发行版一次，但它仍然只是一条 bind 的**源**——
+  `python3` 是在 jail 内执行的，发行版路径在 jail 内不存在，所以两个后端都走同一条
+  `helper_binds` 契约，`_fsop_helper_for` 也一律回 `FSOP_JAIL_PATH`。
+- **jail 里有什么，由后端回答，不由宿主 stat 回答**：`build_bwrap_argv` 的
+  `path_exists` / `path_is_file` 决定绑哪些系统根、补哪些 merged-usr 软链、助手文件在不在。
+  Linux 后端上宿主就是 jail 的那一侧，默认判据即正确；WSL 后端的宿主是 Windows，
+  `Path("/usr").exists()` 恒为 False，于是必须问发行版本人，否则 profile 产出一个只绑了
+  会话卷的空根，`exec` 回执是 `bwrap: execvp sh: No such file or directory`。问不到发行版
+  时后端拒绝拼 argv，而不是交出一份"看着像绑全了"的 profile。
+- **`wsl.exe` 用 `-e` 而不是 `--`**：`--` 把剩余参数拼回一条命令交给发行版的默认 shell，
+  于是模型命令里的 `$( … )` 与 `$HOME` 在 **jail 外**求值——同一次调用里 `pwd` 给出
+  `/workspace`，`ls /` 却报出发行版整根、`ls /mnt` 数出宿主盘符。探测与数据面两条车道都吃
+  这条；bwrap 自己那个隔开 profile 与 jail 命令的 `--` 不受影响。
 - **jail 内不继承宿主环境**：本地后端由 `--clearenv` 与子进程净化环境双重保证，
   `G3KU_*` 一个都进不去；`wsl.exe` 自己需要宿主环境启动，这一层不过 jail 边界。
 - **装配接线**：`tier == jailed` 时执行束把数据面实例换成代理；换不上（后端挂了、卷建不起来）
@@ -92,7 +123,10 @@
 3. **根**：让模型 `exec pwd` → `/workspace`；`ls /` 里没有任何宿主目录树。
 4. **读隔离**：`content_open` / `exec cat` 打 `.g3ku/master.key`、`config.json`、
    `memory/MEMORY.md` → 全部失败（不是"读到只读副本"）。
-5. **写隔离**：写 `/workspace/x` 成功；写 `/etc/x`、`/home/x` 失败。
+5. **写隔离**：写 `/workspace/x` 成功；`/etc`、`/home` 这类 profile 为了放 ro-bind 而
+   合成的脚手架目录即便写成功也不算违规——判据是**宿主侧看不到**：到发行版里 `ls /etc/x`
+   必须是 `No such file or directory`，写进去的东西随 mount namespace 一起消失。
+   真正不许碰的是宿主路径（`/mnt`、`/root`、会话卷之外的一切）。
 6. **网络**：`exec curl -sS https://example.com` 失败（`network=none`）。
 7. **控制面不可达**：jail 内访问宿主 web 端口、容器运行时 socket、ssh-agent 全部失败。
 8. **凭据**：`exec env` 里没有任何 `G3KU_*`、模型 key、master key、QQ AppSecret。

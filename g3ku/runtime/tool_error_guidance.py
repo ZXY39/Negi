@@ -189,7 +189,9 @@ def _typed_name_list(properties: dict[str, Any], names: list[str]) -> str:
     parts: list[str] = []
     for name in names:
         spec = properties.get(name)
-        parts.append(f"{name}={_base_type_label(spec)}" if isinstance(spec, dict) else str(name))
+        # 可选字段也走完整标签：`evidence=array` 会让模型把对象数组当成字符串数组，
+        # 与必填字段那一路渲染出的 `array<object{…}>` 自相矛盾。
+        parts.append(f"{name}={_contract_type_label(spec)}" if isinstance(spec, dict) else str(name))
     return ",".join(parts)
 
 

@@ -401,6 +401,10 @@ async def _export_rounds(*, output_dir: Path) -> dict[str, Any]:
         depth=0,
         node_kind="execution",
         can_spawn_children=False,
+        # 生产节点自带 goal，循环会把它写进 model-size 遥测；缺了这条导出脚本
+        # 会在 `str(node.goal or '')` 处崩掉。
+        goal="Inspect the repo and prepare to write a file.",
+        prompt="Inspect the repo and prepare to write a file.",
         metadata={},
         output=[],
     )

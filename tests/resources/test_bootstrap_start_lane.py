@@ -547,3 +547,28 @@ def test_the_cmd_entry_boots_without_powershell_and_the_ps1_keeps_no_reaper() ->
         assert gone not in ps1, gone
     # 回收只剩解释器一处。
     assert 'reap_existing_runtime_processes' in (REPO_ROOT / 'negi_bootstrap.py').read_text(encoding='utf-8')
+
+
+def test_uv_sync_keeps_dev_extras_when_present(monkeypatch, tmp_path):
+    """不带 --extra dev 的 sync 会把开发机上装好的 pytest/ruff 裁掉。
+
+    实机后果：`uv sync --frozen --extra dev` 装好后跑一次 `negi`，下一轮就
+    `No module named pytest`，而 AGENTS.md 要求改码前后跑 lint 与 pytest。
+    """
+    calls = []
+    monkeypatch.setattr(negi_bootstrap, '_marker_matches_current', lambda: False)
+    monkeypatch.setattr(negi_bootstrap, '_venv_has_runtime_deps', lambda: False)
+    monkeypatch.setattr(negi_bootstrap, '_uv_executable', lambda: 'uv')
+    monkeypatch.setattr(negi_bootstrap, '_pyproject_fingerprint', lambda: 'fp')
+    monkeypatch.setattr(negi_bootstrap, 'BOOTSTRAP_MARKER', tmp_path / 'marker')
+    monkeypatch.setattr(negi_bootstrap, '_run', lambda argv, **kw: calls.append(list(argv)))
+
+    monkeypatch.setattr(negi_bootstrap, '_python_has_module', lambda python, module: module == 'pytest')
+    negi_bootstrap._ensure_project_installed()
+    assert calls == [['uv', 'sync', '--frozen', '--extra', 'dev']]
+
+    # 装机形态（venv 里没有 pytest）保持原样，不多带 extras。
+    calls.clear()
+    monkeypatch.setattr(negi_bootstrap, '_python_has_module', lambda python, module: False)
+    negi_bootstrap._ensure_project_installed()
+    assert calls == [['uv', 'sync', '--frozen']]

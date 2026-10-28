@@ -158,3 +158,42 @@ def test_file_bridge_roundtrip_and_guards(tmp_path: Path) -> None:
         pytest.skip("symlink not available on this platform")
     with pytest.raises(SandboxDeniedError):
         import_file(handle, link)
+
+
+class _WslLayoutStub:
+    """替掉真实 wsl 调用：卷路径就是发行版内的字符串。"""
+
+    def __init__(self) -> None:
+        self.helper_path = "/home/negi/.negi-sandbox/fsop.py"
+
+    def ensure(self, sandbox_id: str) -> dict[str, str]:
+        root = f"/home/negi/.negi-sandbox/sandboxes/{sandbox_id}"
+        return {
+            "workspace": f"{root}/workspace",
+            "inbox": f"{root}/shared/inbox",
+            "outbox": f"{root}/shared/outbox",
+        }
+
+
+class _WslShapedBackend(FakeBackend):
+    """名字与 mount namespace 行为都按 wsl_bwrap 的形状来。"""
+
+    maps_paths = True
+
+    def __init__(self) -> None:
+        super().__init__(name="wsl_bwrap")
+
+
+def test_wsl_volume_binds_the_fsop_helper_into_the_jail(tmp_path: Path) -> None:
+    """助手文件在发行版里，`python3` 却在 jail 内执行。
+
+    不把它绑进 jail，两个方向都落空：spec 里没有 bind，`_fsop_helper_for` 给的
+    发行版路径在 jail 内也不存在——回执就是 `can't open file '/home/…/fsop.py'`。
+    """
+    manager = _manager(tmp_path, backend=_WslShapedBackend())
+    manager._wsl = _WslLayoutStub()
+
+    handle = manager.ensure("web:ceo-1", trust="owner")
+
+    assert handle.spec.helper_binds == ((Path("/home/negi/.negi-sandbox/fsop.py"), FSOP_JAIL_PATH),)
+    assert manager._fsop_helper_for(handle) == FSOP_JAIL_PATH

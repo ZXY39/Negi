@@ -135,7 +135,10 @@ class FakeExternalApiClient:
         self.base_url = base_url
         self.token = token
         self.ensured: list[str] = []
+        self.ensured_chat_types: list[str | None] = []
         self.sent: list[tuple[str, str, str, list]] = []
+        self.sent_sender: list[dict] = []
+        self.sent_metadata: list[dict] = []
         self.events: asyncio.Queue = asyncio.Queue()
         self.acked: list[tuple[str, str]] = []
         self.ack_status_by_id: dict[str, str] = {}
@@ -143,8 +146,16 @@ class FakeExternalApiClient:
         self.closed = False
         FakeExternalApiClient.instances.append(self)
 
-    async def ensure_session(self, external_key: str) -> str:
+    async def ensure_session(
+        self,
+        external_key: str,
+        *,
+        title: str | None = None,
+        chat_type: str | None = None,
+    ) -> str:
+        _ = title
         self.ensured.append(external_key)
+        self.ensured_chat_types.append(chat_type)
         return f"ext:qq-official:{external_key}"
 
     async def send_message(
@@ -152,10 +163,14 @@ class FakeExternalApiClient:
         session_id: str,
         text: str,
         *,
-        idempotency_key: str = "",
+        idempotency_key: str | None = None,
         attachments: list | None = None,
+        sender: dict | None = None,
+        metadata: dict | None = None,
     ) -> dict:
-        self.sent.append((session_id, text, idempotency_key, list(attachments or [])))
+        self.sent.append((session_id, text, idempotency_key or "", list(attachments or [])))
+        self.sent_sender.append(dict(sender or {}))
+        self.sent_metadata.append(dict(metadata or {}))
         return {"ok": True, "turn_id": "t1"}
 
     async def list_pending_outbox(self) -> list[dict]:
@@ -638,10 +653,13 @@ class _QueuedFakeExternalApiClient(FakeExternalApiClient):
         session_id: str,
         text: str,
         *,
-        idempotency_key: str = "",
+        idempotency_key: str | None = None,
         attachments: list | None = None,
+        sender: dict | None = None,
+        metadata: dict | None = None,
     ) -> dict:
-        self.sent.append((session_id, text, idempotency_key, list(attachments or [])))
+        _ = (sender, metadata)
+        self.sent.append((session_id, text, idempotency_key or "", list(attachments or [])))
         if text == "有回执":
             return {"ok": True, "status": "queued", "receipt": "自定义排队回执", "turn_id": None}
         return {"ok": True, "status": "queued", "turn_id": None}

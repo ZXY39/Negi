@@ -659,7 +659,7 @@ async def test_react_loop_no_longer_passes_hardcoded_model_parameter_defaults(
     loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=2)
     result = await loop.run(
         task=SimpleNamespace(task_id="task-1"),
-        node=SimpleNamespace(node_id="node-1", depth=0, node_kind="execution"),
+        node=SimpleNamespace(node_id="node-1", depth=0, node_kind="execution", goal="demo"),
         messages=[
             {"role": "system", "content": "system"},
             {"role": "user", "content": '{"task_id":"task-1","goal":"demo"}'},

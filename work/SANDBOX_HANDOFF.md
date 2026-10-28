@@ -5,6 +5,8 @@
 完整验收记录留在原测试机本地，未入库。
 
 代码基线要求：`main` ≥ `83c9192c6`（含"整批被策略拒时不得回退执行整批"的修复）。
+Windows 路线另需 `7ee1aa3b` 及之后的三个沙箱修复（探测与数据面的 `wsl -e`、jail 路径存在性
+交给后端、fsop 绑进 jail），否则第 1 条就过不去、第 3-10 条全部拿不到 jail 内读数。
 
 ## 0. 先选一条后端路
 
@@ -22,8 +24,11 @@
 sudo apt-get update && sudo apt-get install -y bubblewrap python3 python3-venv git curl
 bwrap --version
 # 冒烟：非特权 user namespace 能不能建起来
+# merged-usr 的发行版（Ubuntu/Debian）必须同时补 /bin 与 /lib64，否则 execvp 报
+# "No such file or directory"：jail 根里根本没有 /bin 这条软链，而 ELF 解释器在 /lib64。
 bwrap --unshare-all --die-with-parent --ro-bind /usr /usr \
-      --symlink usr/lib /lib --proc /proc --dev /dev -- /bin/true && echo BWRAP_OK
+      --symlink usr/lib /lib --symlink usr/bin /bin --symlink usr/lib64 /lib64 \
+      --proc /proc --dev /dev -- /bin/true && echo BWRAP_OK
 ```
 
 > Ubuntu 24.04 起 AppArmor 限制非特权 user namespace，上面这条会失败。
@@ -33,13 +38,29 @@ bwrap --unshare-all --die-with-parent --ro-bind /usr /usr \
 ### Windows（宿主必须已向 guest 暴露 VT-x；普通云主机一般不满足）
 
 ```powershell
-wsl --install -d Ubuntu-24.04
-wsl -d Ubuntu-24.04 -u root -- sh -lc "apt-get update && apt-get install -y bubblewrap python3"
+wsl --install -d Ubuntu-22.04
+wsl -d Ubuntu-22.04 -u root -- sh -lc "apt-get update && apt-get install -y bubblewrap python3 procps iproute2"
 # 默认用户不能是 root，否则会话卷落在 /root 会被禁绑断言打死（见第 6 节坑 2）
-wsl -d Ubuntu-24.04 -u root -- sh -lc "adduser -D negi && mkdir -p /home/negi && chown -R negi:negi /home/negi && printf '[user]\ndefault=negi\n' > /etc/wsl.conf"
-wsl --terminate Ubuntu-24.04
-wsl -d Ubuntu-24.04 -- sh -lc 'id; echo HOME=$HOME; command -v bwrap; command -v python3'
+# adduser 用 Debian 的写法：`adduser -D` 是 BusyBox 语法，Ubuntu 上报 "Option d is ambiguous"。
+wsl -d Ubuntu-22.04 -u root -- sh -lc "adduser --disabled-password --gecos '' negi && mkdir -p /home/negi && chown -R negi:negi /home/negi && printf '[user]\ndefault=negi\n' > /etc/wsl.conf"
+wsl --terminate Ubuntu-22.04
+wsl -d Ubuntu-22.04 -- sh -lc 'id; echo HOME=$HOME; command -v bwrap; command -v python3'
 ```
+
+`wsl --install` 取不到发行版时的两条实测退路（本机商店通道与 `--web-download` 都回
+「已禁止(403)」，后者是因为它先查 `api.github.com`，而该 IP 正被限流）：
+
+```powershell
+# 1) 真 wsl.exe：System32 里那个只是引导桩，--help 里连 --import 都没有
+#    从 GitHub  Releases 取 wsl.<ver>.x64.msi 安装
+# 2) 官方 rootfs 直接导入，绕开商店
+wsl --import negi-sandbox <安装目录> ubuntu-jammy-wsl-amd64-wsl.rootfs.tar.gz --version 2
+```
+
+`negi-sandbox` 是 `probe.py` 排在探测首位的专用发行版名，导入成这个名字最省事。
+导入需要虚拟化已就位：启用 `VirtualMachinePlatform` 后必须**重启整机**（不是重启项目），
+否则报 `Hcs/Service/CreateInstance/E_UNINITIALIZED` 或 `Wsl/Service/RegisterDistro/CreateVm/HCS_E_SERVICE_NOT_AVAILABLE`。
+apt 源在本机直连 `archive.ubuntu.com` 只有 123 KB/s，换 `mirrors.aliyun.com` 是 1.2 MB/s。
 
 ## 2. 起服务并读安装态（清单第 1 条）
 
@@ -100,13 +121,29 @@ Linux / macOS 路这一条记 **N/A**，不要记成通过。
    `build_bwrap_argv` 会抛 `refusing to bind forbidden host path into the jail` ——
    探测报 `ready`、每次数据面调用全失败。先按第 1 节建非 root 默认用户再开闸。
 3. **安装态探测不判 `wsl -l -q` 的返回码**：WSL 未安装时桩程序的提示文本会被当成发行版名，
-   `install_available` 误报 true、安装计划指向一个不存在的发行版。
+   `install_available` 误报 true、安装计划指向一个不存在的发行版。实机复现：安装计划标题
+   变成「在发行版 未安装适用于 Linux 的 Windows 子系统… 里安装 bubblewrap」。
+4. **（已修 `60df987e`）探测用 `wsl --` 而不是 `-e`**：`--` 把剩余参数拼回一条命令交给
+   发行版默认 shell，`-lc` 那段脚本失去引用，`$b`/`$p` 在外层被展开成空——有 bwrap、有
+   python3 的发行版照样判成 `no_qualified_distro`，`install_state` 永远到不了 `ready`。
+5. **（已修 `5fb597a2`）profile 拿宿主 stat 决定 jail 里有什么**：Windows 宿主上
+   `Path("/usr").exists()` 恒为 False，于是一条系统根都不绑，`exec` 回执
+   `bwrap: execvp sh: No such file or directory`；merged-usr 软链与 fsop 助手同理被跳过。
+   表现与坑 2 一样（探测好看、数据面全灭），成因完全不同。
+6. **（已修 `df54a355`）数据面也吃 `--`**：同一次 jail 调用里 `pwd` 给出 `/workspace`，
+   `ls /` 却报出发行版整根、`ls /mnt` 数出宿主盘符——因为 `$( )` 在 jail 外求值。
+   第 3 条与第 10 条会因此**假通过**，判据必须来自 jail 内的读数。
+7. **（已修 `7ee1aa3b`）WSL 分支没把 fsop 绑进 jail**：`filesystem_write` / `content_open`
+   回执 `python3: can't open file '/home/…/fsop.py'`，读隔离与内容通道根本没法验。
 
 ## 7. 需要带回来的证据
 
 - `GET /api/sandbox/status?refresh=1` 与 `GET /api/ceo/sessions/<id>/sandbox` 的**原始 JSON**；
 - 该会话最新的请求原件（`<数据根>/web-ceo-requests/<session>/`，每轮取最后一个文件）里的
-  `actual_tool_schema_hash`、`stable_prefix_hash`、`tools[]` 名字数与名单；
+  `actual_tool_schema_hash`、`stable_prefix_hash`、`tools[]` 名字数与名单。
+  **数据根不等于安装目录**：`<安装根>/.g3ku/data-root.json` 的 `data_dir` 指到哪，请求原件
+  就落在哪（本机指 `E:\NegiData`，仓库自己的 `.g3ku/` 里没有 `web-ceo-requests`，
+  在错的地方找会误判成"证据通道没写"）。
 - web 进程日志里与 `Cron:` / `bwrap:` / `sandbox` 相关的行；
 - 宿主监听对比：开闸前后各一份 `ss -lntp` / `netstat -ano`；
 - 每条探针的**工具回执原文**，失败时把 stderr 一起带上；
@@ -120,11 +157,13 @@ Linux / macOS 路这一条记 **N/A**，不要记成通过。
   回执必须是策略拒绝且**没有任何宿主副作用**（cron / 文件 / 进程都不许变）。
   已在无后端环境实测过这一条：只读档解析、宿主绝对路径被读根拒、记忆三本账 0 命中。
 - **第 12 条（缓存）**：同一会话 `restricted(jailed)` ↔ `unrestricted(host_full)` 各跑一轮，
-  对比两跳的 `actual_tool_schema_hash`。当前实现的**声明面 `tools[]` 会随档位变**
-  （无后端环境实测：第三方只读 11 个 vs owner 全权限 35 个），与清单里"切档前后 `tools[]`
-  字节不变"冲突；同档内字节稳定已实测通过（同一会话 14 跳哈希一致）。
-  另外头部沙箱声明（`## Sandbox Environment` / `## Read-only Session`）**代码里还不存在**，
-  这一句在实现补上之前必然过不了。
+  对比两跳的 `actual_tool_schema_hash`。装好后端之后实测是**通过的**：jailed / host_full /
+  再 jailed 三跳都是 36 个工具、名单与 `actual_tool_schema_hash` 逐字节一致。
+  先前"声明面 `tools[]` 会随档位变"的读数来自**无后端环境**——那里 `restricted` 解析成
+  `readonly`，比的其实是"第三方只读 11 个 vs owner 全权限 35 个"这两档，不是
+  `jailed ↔ host_full`；两者不是一回事，别拿它当本条的结论。
+  头部沙箱声明（`## Sandbox Environment` / `## Read-only Session`）**代码里还不存在**
+  （全仓 grep 无命中），这一句在实现补上之前必然过不了。
 
 ## 9. 判定口径
 

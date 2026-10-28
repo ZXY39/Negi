@@ -62,9 +62,8 @@ def _frame(node_id: str, *, goal: str) -> dict:
         'active': False,
         'runnable': True,
         'waiting': False,
-        'stage_goal': goal,
-        'stage_status': '进行中',
-        'tool_calls': [{'tool_call_id': 'call-1', 'tool_name': 'filesystem_read', 'status': 'running'}],
+        'await_marker': goal,
+                'tool_calls': [{'tool_call_id': 'call-1', 'tool_name': 'filesystem_read', 'status': 'running'}],
         'child_pipelines': [],
     }
 
@@ -107,7 +106,7 @@ def test_second_snapshot_reads_no_frame_payload(tmp_path) -> None:
 
     assert first is not None and second is not None
     assert [item.model_dump() for item in first.frames] == [item.model_dump() for item in second.frames]
-    assert [item.stage_goal for item in second.frames] == ['goal-node:a', 'goal-node:b', 'goal-node:c']
+    assert [item.await_marker for item in second.frames] == ['goal-node:a', 'goal-node:b', 'goal-node:c']
     assert reads == []
     assert set(store.list_task_runtime_frame_heads(TASK_ID)[0].keys()) >= {'payload_digest'}
 
@@ -115,14 +114,14 @@ def test_second_snapshot_reads_no_frame_payload(tmp_path) -> None:
 def test_a_changed_frame_is_read_back_and_the_others_are_not(tmp_path) -> None:
     _store, log_service, query_service = _harness(tmp_path)
     query_service._projection_live_state(TASK_ID)
-    log_service.update_frame(TASK_ID, 'node:b', lambda frame: {**frame, 'stage_goal': 'changed'})
+    log_service.update_frame(TASK_ID, 'node:b', lambda frame: {**frame, 'await_marker': 'changed'})
     # 计数器要在变更之后装：`update_frame` 自己会回读那一帧一次，混进来会把判据糊掉。
     reads = _count_payload_reads(query_service)
     state = query_service._projection_live_state(TASK_ID)
 
     assert state is not None
     assert reads == ['node:b']
-    assert [item.stage_goal for item in state.frames] == ['goal-node:a', 'changed', 'goal-node:c']
+    assert [item.await_marker for item in state.frames] == ['goal-node:a', 'changed', 'goal-node:c']
 
 
 def test_head_only_columns_are_re_stamped_without_a_payload_read(tmp_path) -> None:
@@ -149,7 +148,7 @@ def test_head_only_columns_are_re_stamped_without_a_payload_read(tmp_path) -> No
     assert frame.depth == 7
     assert 'node:a' not in state.active_node_ids
     # 没被改过的两帧仍从缓存取，正文一个字节都不该再读（排序按帧头 depth 走，node:a 被推到末位）
-    assert {item.node_id: item.stage_goal for item in state.frames} == {
+    assert {item.node_id: item.await_marker for item in state.frames} == {
         'node:a': 'goal-node:a',
         'node:b': 'goal-node:b',
         'node:c': 'goal-node:c',
