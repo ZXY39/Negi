@@ -46,13 +46,13 @@ const elements = {
   "llm-binding-image-multimodal-enabled": { checked: false },
   "llm-create-name-input": { value: "demo-config", addEventListener: () => {} },
   "llm-bindings-list": { innerHTML: "", addEventListener: () => {} },
-  "llm-editor-shell": { innerHTML: "", addEventListener: () => {} },
+  "llm-editor-shell": { innerHTML: "", addEventListener: () => {}, querySelectorAll: () => [] },
   "llm-editor-backdrop": { addEventListener: () => {} },
   "model-roles-cancel-btn": {},
 };
 global.document = {
   getElementById: (id) => elements[id] || null,
-  querySelector: () => ({}),
+  querySelector: () => ({ querySelectorAll: () => [] }),
   addEventListener: () => {},
 };
 const bindingRow = {

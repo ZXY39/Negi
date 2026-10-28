@@ -51,7 +51,7 @@ def test_handle_create_save_uses_current_dom_json_and_defers_binding_key() -> No
           "llm-binding-image-multimodal-enabled": { checked: true },
           "llm-create-name-input": { value: "demo-config", addEventListener: () => {} },
           "llm-bindings-list": { innerHTML: "", addEventListener: () => {} },
-          "llm-editor-shell": { innerHTML: "", addEventListener: () => {} },
+          "llm-editor-shell": { innerHTML: "", addEventListener: () => {}, querySelectorAll: () => [] },
           "llm-editor-backdrop": { addEventListener: () => {} },
           "llm-memory-settings-btn": { addEventListener: () => {} },
           "llm-config-create-btn": { addEventListener: () => {} },
@@ -59,7 +59,7 @@ def test_handle_create_save_uses_current_dom_json_and_defers_binding_key() -> No
         };
         global.document = {
           getElementById: (id) => elements[id] || null,
-          querySelector: () => ({}),
+          querySelector: () => ({ querySelectorAll: () => [] }),
           addEventListener: () => {},
         };
         global.S = {
@@ -207,7 +207,7 @@ def test_handle_create_save_closes_editor_before_runtime_refresh_polling() -> No
           "llm-binding-image-multimodal-enabled": { checked: false },
           "llm-create-name-input": { value: "demo-config", addEventListener: () => {} },
           "llm-bindings-list": { innerHTML: "", addEventListener: () => {} },
-          "llm-editor-shell": { innerHTML: "", addEventListener: () => {} },
+          "llm-editor-shell": { innerHTML: "", addEventListener: () => {}, querySelectorAll: () => [] },
           "llm-editor-backdrop": { addEventListener: () => {} },
           "llm-memory-settings-btn": { addEventListener: () => {} },
           "llm-config-create-btn": { addEventListener: () => {} },
@@ -215,7 +215,7 @@ def test_handle_create_save_closes_editor_before_runtime_refresh_polling() -> No
         };
         global.document = {
           getElementById: (id) => elements[id] || null,
-          querySelector: () => ({}),
+          querySelector: () => ({ querySelectorAll: () => [] }),
           addEventListener: () => {},
         };
         global.S = {
@@ -350,7 +350,7 @@ def test_handle_detail_save_uses_current_dom_json_text() -> None:
           "llm-binding-context-window-tokens": { value: "35001" },
           "llm-binding-image-multimodal-enabled": { checked: false },
           "llm-bindings-list": { innerHTML: "", addEventListener: () => {} },
-          "llm-editor-shell": { innerHTML: "", addEventListener: () => {} },
+          "llm-editor-shell": { innerHTML: "", addEventListener: () => {}, querySelectorAll: () => [] },
           "llm-editor-backdrop": { addEventListener: () => {} },
           "llm-memory-settings-btn": { addEventListener: () => {} },
           "llm-config-create-btn": { addEventListener: () => {} },
@@ -358,7 +358,7 @@ def test_handle_detail_save_uses_current_dom_json_text() -> None:
         };
         global.document = {
           getElementById: (id) => elements[id] || null,
-          querySelector: () => ({}),
+          querySelector: () => ({ querySelectorAll: () => [] }),
           addEventListener: () => {},
         };
         global.S = {
@@ -544,7 +544,7 @@ def test_handle_detail_save_closes_editor_before_runtime_refresh_polling() -> No
           "llm-binding-context-window-tokens": { value: "32000" },
           "llm-binding-image-multimodal-enabled": { checked: false },
           "llm-bindings-list": { innerHTML: "", addEventListener: () => {} },
-          "llm-editor-shell": { innerHTML: "", addEventListener: () => {} },
+          "llm-editor-shell": { innerHTML: "", addEventListener: () => {}, querySelectorAll: () => [] },
           "llm-editor-backdrop": { addEventListener: () => {} },
           "llm-memory-settings-btn": { addEventListener: () => {} },
           "llm-config-create-btn": { addEventListener: () => {} },
@@ -552,7 +552,7 @@ def test_handle_detail_save_closes_editor_before_runtime_refresh_polling() -> No
         };
         global.document = {
           getElementById: (id) => elements[id] || null,
-          querySelector: () => ({}),
+          querySelector: () => ({ querySelectorAll: () => [] }),
           addEventListener: () => {},
         };
         global.S = {
@@ -709,7 +709,7 @@ def test_handle_detail_save_updates_binding_image_multimodal_flag_without_pollut
           "llm-binding-context-window-tokens": { value: "32000" },
           "llm-binding-image-multimodal-enabled": { checked: true },
           "llm-bindings-list": { innerHTML: "", addEventListener: () => {} },
-          "llm-editor-shell": { innerHTML: "", addEventListener: () => {} },
+          "llm-editor-shell": { innerHTML: "", addEventListener: () => {}, querySelectorAll: () => [] },
           "llm-editor-backdrop": { addEventListener: () => {} },
           "llm-memory-settings-btn": { addEventListener: () => {} },
           "llm-config-create-btn": { addEventListener: () => {} },
@@ -717,7 +717,7 @@ def test_handle_detail_save_updates_binding_image_multimodal_flag_without_pollut
         };
         global.document = {
           getElementById: (id) => elements[id] || null,
-          querySelector: () => ({}),
+          querySelector: () => ({ querySelectorAll: () => [] }),
           addEventListener: () => {},
         };
         global.S = {
@@ -869,7 +869,7 @@ def test_handle_detail_save_persists_context_window_tokens_when_only_input_chang
           "llm-binding-single-api-key-max-concurrency": { value: "" },
           "llm-binding-context-window-tokens": { value: "36001" },
           "llm-bindings-list": { innerHTML: "", addEventListener: () => {} },
-          "llm-editor-shell": { innerHTML: "", addEventListener: () => {} },
+          "llm-editor-shell": { innerHTML: "", addEventListener: () => {}, querySelectorAll: () => [] },
           "llm-editor-backdrop": { addEventListener: () => {} },
           "llm-memory-settings-btn": { addEventListener: () => {} },
           "llm-config-create-btn": { addEventListener: () => {} },
@@ -877,7 +877,7 @@ def test_handle_detail_save_persists_context_window_tokens_when_only_input_chang
         };
         global.document = {
           getElementById: (id) => elements[id] || null,
-          querySelector: () => ({}),
+          querySelector: () => ({ querySelectorAll: () => [] }),
           addEventListener: () => {},
         };
         global.S = {
@@ -1030,7 +1030,7 @@ def test_handle_detail_save_respects_json_context_window_tokens_when_json_change
           "llm-binding-single-api-key-max-concurrency": { value: "" },
           "llm-binding-context-window-tokens": { value: "32000" },
           "llm-bindings-list": { innerHTML: "", addEventListener: () => {} },
-          "llm-editor-shell": { innerHTML: "", addEventListener: () => {} },
+          "llm-editor-shell": { innerHTML: "", addEventListener: () => {}, querySelectorAll: () => [] },
           "llm-editor-backdrop": { addEventListener: () => {} },
           "llm-memory-settings-btn": { addEventListener: () => {} },
           "llm-config-create-btn": { addEventListener: () => {} },
@@ -1038,7 +1038,7 @@ def test_handle_detail_save_respects_json_context_window_tokens_when_json_change
         };
         global.document = {
           getElementById: (id) => elements[id] || null,
-          querySelector: () => ({}),
+          querySelector: () => ({ querySelectorAll: () => [] }),
           addEventListener: () => {},
         };
         global.S = {
@@ -1184,7 +1184,7 @@ def test_handle_detail_save_multiple_api_keys_sends_concurrency_list() -> None:
           "llm-binding-context-window-tokens": { value: "32000" },
           "llm-binding-image-multimodal-enabled": { checked: false },
           "llm-bindings-list": { innerHTML: "", addEventListener: () => {} },
-          "llm-editor-shell": { innerHTML: "", addEventListener: () => {} },
+          "llm-editor-shell": { innerHTML: "", addEventListener: () => {}, querySelectorAll: () => [] },
           "llm-editor-backdrop": { addEventListener: () => {} },
           "llm-memory-settings-btn": { addEventListener: () => {} },
           "llm-config-create-btn": { addEventListener: () => {} },
@@ -1192,7 +1192,7 @@ def test_handle_detail_save_multiple_api_keys_sends_concurrency_list() -> None:
         };
         global.document = {
           getElementById: (id) => elements[id] || null,
-          querySelector: () => ({}),
+          querySelector: () => ({ querySelectorAll: () => [] }),
           addEventListener: () => {},
         };
         global.S = {
