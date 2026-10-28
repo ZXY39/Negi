@@ -5205,6 +5205,7 @@ class TaskLogService:
             'dispatch_running': self._sanitize_dispatch_counters(state.get('dispatch_running')),
             'dispatch_queued': self._sanitize_dispatch_counters(state.get('dispatch_queued')),
             'governance': self._sanitize_governance_state(state.get('governance')),
+            'distribution': dict(state.get('distribution') or {}),
             'frames': frames,
         }
         # 只有增量档自带过期名单；全量档每帧自己有 stale 字段，别的生产者（read_runtime_state）
