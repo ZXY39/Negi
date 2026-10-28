@@ -145,7 +145,7 @@
         return data.item || null;
     },
 
-    async exportConfigBundle({ password = "", useProjectPassword = true, includeConfig = true, includeMemory = false, includePersona = false } = {}) {
+    async exportConfigBundle({ password = "", useProjectPassword = true, includeConfig = true, includeMemory = false, includePersona = false, includeStickers = false } = {}) {
         const data = await this._request("POST", "/api/bootstrap/config-bundle/export", {
             body: {
                 password,
@@ -153,6 +153,7 @@
                 include_config: !!includeConfig,
                 include_memory: !!includeMemory,
                 include_persona: !!includePersona,
+                include_stickers: !!includeStickers,
             },
             timeoutMs: 60000,
         });
@@ -166,7 +167,7 @@
     async importConfigBundle(
         file,
         password,
-        { confirmRunningWork = false, currentPassword = "", includeConfig = true, includeMemory = false, includePersona = false } = {},
+        { confirmRunningWork = false, currentPassword = "", includeConfig = true, includeMemory = false, includePersona = false, includeStickers = false } = {},
     ) {
         const formData = new FormData();
         formData.append("file", file);
@@ -176,6 +177,7 @@
         formData.append("include_config", includeConfig ? "true" : "false");
         formData.append("include_memory", includeMemory ? "true" : "false");
         formData.append("include_persona", includePersona ? "true" : "false");
+        formData.append("include_stickers", includeStickers ? "true" : "false");
         const data = await this._request("POST", "/api/bootstrap/config-bundle/import", {
             body: formData,
             timeoutMs: 180000,

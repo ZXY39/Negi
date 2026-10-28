@@ -1,9 +1,10 @@
-"""口令加密的配置包：把一台部署的配置面、记忆面与人设面导出成单文件，在另一台上还原。
+"""口令加密的配置包：把一台部署的配置面、记忆面、人设面与表情包面导出成单文件，在另一台上还原。
 
 配置面（结构配置、provider 记录、密钥覆盖层、资源开关、治理库）、记忆面（记忆库、
-笔记正文、常驻镜像）和人设面（人设 note 与 `my_image/` 照片）是三颗独立勾选：没勾的
-一面既不进包也不落盘，勾上的面整体替换、不做合并。记忆面不夹带人设 note，人设只随
-人设面走。不含任务、会话与取证数据。导出要求进程已解锁，因为带配置面时包里必须有主密钥本身。
+笔记正文、常驻镜像）、人设面（人设 note 与 `my_image/` 照片）和表情包面（`stickers/`
+下的包目录、manifest 与注册表）是四颗独立勾选：没勾的一面既不进包也不落盘，勾上的面
+整体替换、不做合并。记忆面不夹带人设 note，人设只随人设面走。不含任务、会话与取证数据。
+导出要求进程已解锁，因为带配置面时包里必须有主密钥本身。
 """
 
 from __future__ import annotations
@@ -37,13 +38,23 @@ from g3ku.security import (
     get_bootstrap_security_service,
     unwrap_master_key,
 )
+from g3ku.stickers.admin import admin_segment_ok
+from g3ku.stickers.catalog import IMAGE_SUFFIXES, MANIFEST_NAME, STICKERS_DIRNAME
+from g3ku.stickers.registry import REGISTRY_NAME
 
 BUNDLE_KIND = "g3ku-config-bundle"
-BUNDLE_VERSION = 4
-# v2 只有配置面，v3 增加记忆面；旧文件都继续认，不能因为我们多加了面就失效。
+BUNDLE_VERSION = 5
+# v2 只有配置面，v3 增加记忆面，v4 增加人设面；旧文件都继续认，不能因为我们多加了面就失效。
 CONFIG_ONLY_BUNDLE_VERSION = 2
 MEMORY_BUNDLE_VERSION = 3
-SUPPORTED_BUNDLE_VERSIONS = (CONFIG_ONLY_BUNDLE_VERSION, MEMORY_BUNDLE_VERSION, BUNDLE_VERSION)
+PERSONA_BUNDLE_VERSION = 4
+STICKERS_BUNDLE_VERSION = 5
+SUPPORTED_BUNDLE_VERSIONS = (
+    CONFIG_ONLY_BUNDLE_VERSION,
+    MEMORY_BUNDLE_VERSION,
+    PERSONA_BUNDLE_VERSION,
+    STICKERS_BUNDLE_VERSION,
+)
 BUNDLE_EXTENSION = ".g3kucb"
 BUNDLE_OUTPUT_DIR = ".g3ku/config-bundles"
 IMPORT_BACKUP_DIR = ".g3ku/config-bundle-imports"
@@ -53,7 +64,9 @@ KEY_SOURCE_BUNDLE_PASSWORD = "bundle_password"
 SCOPE_CONFIG = "config"
 SCOPE_MEMORY = "memory"
 SCOPE_PERSONA = "persona"
-BUNDLE_SCOPES = (SCOPE_CONFIG, SCOPE_MEMORY, SCOPE_PERSONA)
+SCOPE_STICKERS = "stickers"
+BUNDLE_SCOPES = (SCOPE_CONFIG, SCOPE_MEMORY, SCOPE_PERSONA, SCOPE_STICKERS)
+V4_BUNDLE_SCOPES = (SCOPE_CONFIG, SCOPE_MEMORY, SCOPE_PERSONA)
 V3_BUNDLE_SCOPES = (SCOPE_CONFIG, SCOPE_MEMORY)
 
 CONFIG_FILENAME = ".g3ku/config.json"
@@ -83,8 +96,13 @@ EXCLUDED_NAMES = {"master.key", "auto-unlock.key"}
 SQLITE_SUFFIXES = {".sqlite3", ".db"}
 COMPANION_SUFFIXES = {".wal", ".shm"}
 
+# 表情包面锚在 workspace 根，与 catalog.stickers_root() 同一落点；包内逻辑名就是
+# `<pack>/<file>` 这层相对路径，导入时按本机 workspace 重新拼。
+STICKERS_DIR_ROOT = STICKERS_DIRNAME
+STICKER_PACK_FILES = frozenset({MANIFEST_NAME, REGISTRY_NAME})
+
 CONFIG_BUNDLE_ROOT = ".g3ku"
-BUNDLE_ROOTS = (CONFIG_BUNDLE_ROOT, MEMORY_DIR_ROOT, PERSONA_DIR_ROOT)
+BUNDLE_ROOTS = (CONFIG_BUNDLE_ROOT, MEMORY_DIR_ROOT, PERSONA_DIR_ROOT, STICKERS_DIR_ROOT)
 
 
 def _now_iso() -> str:
@@ -193,6 +211,11 @@ def _persona_landing_paths(
     }
 
 
+def _stickers_landing_paths(root: Path) -> dict[str, Path]:
+    """表情包面在这台机器上的落点：`<workspace>/stickers` 整棵树。"""
+    return {STICKERS_DIR_ROOT: _workspace_anchor(root) / STICKERS_DIR_ROOT}
+
+
 def _entry_scope(rel: str) -> str:
     text = str(rel or "").strip().replace("\\", "/")
     if text.startswith(f"{CONFIG_BUNDLE_ROOT}/"):
@@ -201,6 +224,8 @@ def _entry_scope(rel: str) -> str:
         return SCOPE_MEMORY
     if text.startswith(f"{PERSONA_DIR_ROOT}/"):
         return SCOPE_PERSONA
+    if text.startswith(f"{STICKERS_DIR_ROOT}/"):
+        return SCOPE_STICKERS
     return ""
 
 
@@ -221,13 +246,22 @@ def _envelope_scopes(envelope: dict[str, Any]) -> tuple[str, ...]:
     version = int(envelope.get("version") or 0)
     if version < MEMORY_BUNDLE_VERSION:
         return (SCOPE_CONFIG,)
-    allowed = BUNDLE_SCOPES if version >= BUNDLE_VERSION else V3_BUNDLE_SCOPES
+    if version < PERSONA_BUNDLE_VERSION:
+        allowed = V3_BUNDLE_SCOPES
+    elif version < STICKERS_BUNDLE_VERSION:
+        allowed = V4_BUNDLE_SCOPES
+    else:
+        allowed = BUNDLE_SCOPES
     return _validate_scopes(envelope.get("scopes"), allowed=allowed)
 
 
 def _bundle_version_for_scopes(scopes: Sequence[str]) -> int:
-    # 只带配置/记忆的包保持 v3，旧程序还能读；人设面才需要 v4 这个版本闸门。
-    return BUNDLE_VERSION if SCOPE_PERSONA in scopes else MEMORY_BUNDLE_VERSION
+    # 版本闸门逐面抬高：只带配置/记忆的包保持 v3，带人设是 v4，带表情包才需要 v5。
+    if SCOPE_STICKERS in scopes:
+        return STICKERS_BUNDLE_VERSION
+    if SCOPE_PERSONA in scopes:
+        return PERSONA_BUNDLE_VERSION
+    return MEMORY_BUNDLE_VERSION
 
 
 def _count_by_scope(rels: Sequence[str], scope: str) -> int:
@@ -283,6 +317,32 @@ def _collect_persona_entries(root: Path) -> dict[str, str]:
     return entries
 
 
+def _collect_sticker_entries(root: Path) -> dict[str, str]:
+    """表情包面：包目录整棵带走，只认 manifest/registry 与分类图片。
+
+    目录里可能有编辑器残留、缩略图缓存之类不属于表情包树的文件；入口与出口都按
+    同一份白名单收，保证「导出的包一定导得回去」。
+    """
+    base = _stickers_landing_paths(root)[STICKERS_DIR_ROOT]
+    entries: dict[str, str] = {}
+    if base.is_dir():
+        for pack_dir in sorted(base.iterdir(), key=lambda item: item.name):
+            if not pack_dir.is_dir() or pack_dir.is_symlink() or not admin_segment_ok(pack_dir.name):
+                continue
+            for child in sorted(pack_dir.iterdir(), key=lambda item: item.name):
+                if child.is_file() and not child.is_symlink() and child.name in STICKER_PACK_FILES:
+                    entries[f"{STICKERS_DIR_ROOT}/{pack_dir.name}/{child.name}"] = _encode_file(child)
+                elif child.is_dir() and not child.is_symlink() and admin_segment_ok(child.name):
+                    for image in sorted(child.iterdir(), key=lambda item: item.name):
+                        if image.is_file() and not image.is_symlink() and image.suffix.lower() in IMAGE_SUFFIXES:
+                            entries[f"{STICKERS_DIR_ROOT}/{pack_dir.name}/{child.name}/{image.name}"] = _encode_file(image)
+    if not entries:
+        # 勾了表情包却没有任何包：导出会得到一个"看起来带了表情包"的空面，
+        # 导入方还会按整包替换清掉目标机的表情包，宁可在这里拒绝。
+        raise ValueError("bundle_stickers_empty")
+    return entries
+
+
 def _collect_entries(workspace: Path, scopes: tuple[str, ...]) -> dict[str, str]:
     entries: dict[str, str] = {}
     if SCOPE_CONFIG in scopes:
@@ -291,6 +351,8 @@ def _collect_entries(workspace: Path, scopes: tuple[str, ...]) -> dict[str, str]
         entries.update(_collect_memory_entries(workspace))
     if SCOPE_PERSONA in scopes:
         entries.update(_collect_persona_entries(workspace))
+    if SCOPE_STICKERS in scopes:
+        entries.update(_collect_sticker_entries(workspace))
     return entries
 
 
@@ -357,8 +419,9 @@ def export_bundle(
     """Pack the selected面 into one encrypted file.
 
     `scopes` decides what travels: 配置面 carries the wiring plus the master key,
-    记忆面 carries the memory store, its notes and the resident mirror, and
-    人设面 carries the reserved persona note plus `my_image/`. With
+    记忆面 carries the memory store, its notes and the resident mirror, 人设面
+    carries the reserved persona note plus `my_image/`, and 表情包面 carries the
+    pack tree under `<workspace>/stickers`. With
     `use_project_password` the bundle key is the live master key and the
     password envelope travels inside the bundle, so the operator types nothing
     here and unlocks the import with their normal project password. The
@@ -435,6 +498,7 @@ def export_bundle(
         "config_entry_count": _count_by_scope(entries, SCOPE_CONFIG),
         "memory_entry_count": _count_by_scope(entries, SCOPE_MEMORY),
         "persona_entry_count": _count_by_scope(entries, SCOPE_PERSONA),
+        "sticker_entry_count": _count_by_scope(entries, SCOPE_STICKERS),
         "bytes": path.stat().st_size,
     }
 
@@ -516,9 +580,31 @@ def _persona_entry_target(land: dict[str, Path], rel: str) -> Path:
     raise ValueError(f"unsupported persona bundle path: {rel}")
 
 
+def _stickers_entry_target(land: dict[str, Path], rel: str) -> Path:
+    """表情包面的逻辑名 → 本机落点；只认包边车与分类图片两种形状。"""
+    base = land[STICKERS_DIR_ROOT]
+    parts = PurePosixPath(rel).parts
+    if len(parts) < 3 or parts[0] != STICKERS_DIR_ROOT:
+        raise ValueError(f"unsupported sticker bundle path: {rel}")
+    pack = parts[1]
+    rest = parts[2:]
+    if not admin_segment_ok(pack):
+        raise ValueError(f"unsafe sticker bundle path rejected: {rel}")
+    if len(rest) == 1 and rest[0] in STICKER_PACK_FILES:
+        return base / pack / rest[0]
+    if (
+        len(rest) == 2
+        and admin_segment_ok(rest[0])
+        and PurePosixPath(rest[1]).suffix.lower() in IMAGE_SUFFIXES
+    ):
+        return base / pack / rest[0] / rest[1]
+    raise ValueError(f"unsupported sticker bundle path: {rel}")
+
+
 def _entry_targets(root: Path, rels: list[str]) -> dict[str, Path]:
     memory_land = _memory_landing_paths(root)
     persona_land = _persona_landing_paths(root, memory_land)
+    stickers_land = _stickers_landing_paths(root)
     targets: dict[str, Path] = {}
     for rel in rels:
         pure = _safe_relative_path(rel)
@@ -527,6 +613,8 @@ def _entry_targets(root: Path, rels: list[str]) -> dict[str, Path]:
             target = _memory_entry_target(memory_land, str(pure))
         elif scope == SCOPE_PERSONA:
             target = _persona_entry_target(persona_land, str(pure))
+        elif scope == SCOPE_STICKERS:
+            target = _stickers_entry_target(stickers_land, str(pure))
         else:
             target = root.joinpath(*pure.parts)
         targets[str(pure)] = target
@@ -636,6 +724,18 @@ def _clean_persona_face(land: dict[str, Path], entries: dict[str, str]) -> None:
             child.unlink(missing_ok=True)
 
 
+def _stickers_backup_sources(root: Path) -> dict[str, Path]:
+    """表情包面整体替换前整棵树留底：包目录之外的旧包会被清掉。"""
+    base = _stickers_landing_paths(root)[STICKERS_DIR_ROOT]
+    return {STICKERS_DIR_ROOT: base} if base.exists() else {}
+
+
+def _apply_sticker_scope(root: Path) -> None:
+    """整棵树先清掉再写入包内容：表情包面按包内集合整体替换。"""
+    base = _stickers_landing_paths(root)[STICKERS_DIR_ROOT]
+    shutil.rmtree(base, ignore_errors=True)
+
+
 def import_bundle(
     workspace: Path | None = None,
     *,
@@ -675,15 +775,22 @@ def import_bundle(
 
     backup_root = root / IMPORT_BACKUP_DIR / _stamp()
     backup_root.mkdir(parents=True, exist_ok=True)
-    # 人设面按集合替换，旧 note 与整个 my_image 目录先留底；其余面仍只备份会被覆盖的文件。
+    # 人设与表情包按集合替换：旧的 note、`my_image/` 与整棵 stickers 树先留底；
+    # 其余面仍只备份会被覆盖的文件。
     backup_sources = {
-        rel: source for rel, source in targets.items() if _entry_scope(rel) != SCOPE_PERSONA
+        rel: source
+        for rel, source in targets.items()
+        if _entry_scope(rel) not in {SCOPE_PERSONA, SCOPE_STICKERS}
     }
     if SCOPE_PERSONA in clean_scopes:
         backup_sources.update(_persona_backup_sources(root))
+    if SCOPE_STICKERS in clean_scopes:
+        backup_sources.update(_stickers_backup_sources(root))
     backed_up = _backup_targets(backup_sources, backup_root)
     status: dict[str, Any] | None = None
     try:
+        if SCOPE_STICKERS in clean_scopes:
+            _apply_sticker_scope(root)
         _write_entries(entries, targets)
         if SCOPE_PERSONA in clean_scopes:
             _clean_persona_face(persona_land, entries)
@@ -702,6 +809,7 @@ def import_bundle(
         "config_entry_count": _count_by_scope(targets, SCOPE_CONFIG),
         "memory_entry_count": _count_by_scope(targets, SCOPE_MEMORY),
         "persona_entry_count": _count_by_scope(targets, SCOPE_PERSONA),
+        "sticker_entry_count": _count_by_scope(targets, SCOPE_STICKERS),
         "backup_dir": str(backup_root),
         "created_at": str(payload.get("created_at") or ""),
         "workspace_label": str(payload.get("workspace_label") or ""),
@@ -724,6 +832,7 @@ __all__ = [
     "SCOPE_CONFIG",
     "SCOPE_MEMORY",
     "SCOPE_PERSONA",
+    "SCOPE_STICKERS",
     "bundle_paths",
     "export_bundle",
     "import_bundle",

@@ -19,6 +19,7 @@ from g3ku.config.config_bundle import (
     SCOPE_CONFIG,
     SCOPE_MEMORY,
     SCOPE_PERSONA,
+    SCOPE_STICKERS,
     export_bundle,
     import_bundle,
 )
@@ -322,6 +323,7 @@ _BUNDLE_ERROR_CODES: tuple[tuple[str, str, int], ...] = (
     ("bundle_scope_empty", "bundle_scope_empty", 400),
     ("bundle_memory_store_missing", "bundle_memory_store_missing", 400),
     ("bundle_persona_empty", "bundle_persona_empty", 400),
+    ("bundle_stickers_empty", "bundle_stickers_empty", 400),
     ("rejected", "bundle_path_rejected", 400),
     ("unsupported config bundle version", "bundle_version_unsupported", 400),
     ("config bundle", "bundle_file_invalid", 400),
@@ -518,7 +520,10 @@ def _bundle_flag(payload: dict, snake: str, camel: str, *, default: bool) -> boo
 
 
 def _bundle_scopes(
-    include_config: bool, include_memory: bool, include_persona: bool
+    include_config: bool,
+    include_memory: bool,
+    include_persona: bool,
+    include_stickers: bool,
 ) -> tuple[str, ...]:
     scopes = tuple(
         scope
@@ -526,11 +531,12 @@ def _bundle_scopes(
             (SCOPE_CONFIG, include_config),
             (SCOPE_MEMORY, include_memory),
             (SCOPE_PERSONA, include_persona),
+            (SCOPE_STICKERS, include_stickers),
         )
         if selected
     )
     if not scopes:
-        # 三颗都没勾：报错，而不是悄悄导出一份只有配置面的包。
+        # 一颗都没勾：报错，而不是悄悄导出一份只有配置面的包。
         raise HTTPException(status_code=400, detail="bundle_scope_empty")
     return scopes
 
@@ -545,6 +551,7 @@ async def bootstrap_config_bundle_export(payload: dict = Body(...)):
         _bundle_flag(payload, "include_config", "includeConfig", default=True),
         _bundle_flag(payload, "include_memory", "includeMemory", default=False),
         _bundle_flag(payload, "include_persona", "includePersona", default=False),
+        _bundle_flag(payload, "include_stickers", "includeStickers", default=False),
     )
     try:
         item = export_bundle(
@@ -578,8 +585,9 @@ async def bootstrap_config_bundle_import(
     include_config: bool = Form(True),
     include_memory: bool = Form(False),
     include_persona: bool = Form(False),
+    include_stickers: bool = Form(False),
 ):
-    scopes = _bundle_scopes(include_config, include_memory, include_persona)
+    scopes = _bundle_scopes(include_config, include_memory, include_persona, include_stickers)
     try:
         await _pause_running_work_for_bundle_import(confirm_running_work)
     except HTTPException:

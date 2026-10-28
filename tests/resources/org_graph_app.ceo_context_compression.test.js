@@ -741,8 +741,12 @@ test("压缩 toast 让位给会话流区分线，长按进度条与提示进入 
         CSS_CODE,
         /\.ceo-context-usage-brain-ring rect\s*\{[^}]*stroke-dashoffset: calc\(100px - var\(--ceo-brain-hold, 0\) \* 100px\)/
     );
-    // 内嵌圆环的 conic-gradient 画法已经退役，不能再回来。
-    assert.equal(CSS_CODE.includes("conic-gradient"), false);
+    // 内嵌圆环的 conic-gradient 画法已经退役，不能再回来。判据只钉这一枚进度环：
+    // 会话占位加载环（.assistant-loading-ring）用的正是 conic-gradient 整环，
+    // 全表禁写会把那枚无缝环当成回归。
+    const brainRingRules = [...CSS_CODE.matchAll(/[#.]ceo-context-usage-brain[^{]*\{[^}]*\}/g)].map((match) => match[0]);
+    assert.ok(brainRingRules.length, "缺少 .ceo-context-usage-brain-ring 规则");
+    assert.equal(brainRingRules.some((rule) => rule.includes("conic-gradient")), false);
     assert.match(HTML_CODE, /<span id="ceo-context-usage-brain-hint"[^>]*>长按压缩上下文<\/span>/);
     assert.match(CSS_CODE, /\.message\.ceo-compression-divider\s*\{[^}]*\}/);
     assert.match(CSS_CODE, /--ceo-context-compress-color:\s*#39c5bb/);

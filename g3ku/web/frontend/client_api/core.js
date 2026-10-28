@@ -50,13 +50,15 @@ class ApiCore {
             case "bundle_password_required":
                 return "请输入口令。";
             case "bundle_scope_empty":
-                return "请先勾选要导出或导入的范围（配置 / 记忆 / 人设）。";
+                return "请先勾选要导出或导入的范围（配置 / 记忆 / 人设 / 表情包）。";
             case "bundle_scope_not_in_package":
                 return "这个包里没有你勾选的那一面，请改勾选或换一个包。";
             case "bundle_memory_store_missing":
                 return "这台机器还没有记忆库，导不出记忆。";
             case "bundle_persona_empty":
                 return "这台机器还没有人设描述或人设图，导不出人设。";
+            case "bundle_stickers_empty":
+                return "这台机器还没有表情包，导不出表情包。";
             case "bundle_file_invalid":
                 return "这个文件不是可用的配置包，或包内密钥已损坏。";
             case "bundle_version_unsupported":

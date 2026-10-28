@@ -655,6 +655,42 @@ def _seed_persona(
         (photo_dir / name).write_bytes(b"png-bytes")
 
 
+STICKER_KEYS = {
+    "stickers/packA/manifest.json",
+    "stickers/packA/registry.json",
+    "stickers/packA/happy/001.png",
+    "stickers/packA/happy/002.webp",
+    # `_` 前缀是软删除包，仍属于这台机器的表情包面。
+    "stickers/_parked/sad/001.jpg",
+}
+
+
+def _seed_stickers(workspace: Path, *, marker: str = "SRC") -> Path:
+    """表情包面：包目录 + manifest/registry + 分类图片；顺带放几份包外杂项。"""
+    base = workspace / "stickers"
+    (base / "packA" / "happy").mkdir(parents=True, exist_ok=True)
+    (base / "packA" / "manifest.json").write_text(
+        json.dumps(
+            {"theme": f"{marker} theme", "categories": {"happy": {"description": "开心"}}},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (base / "packA" / "registry.json").write_text(
+        json.dumps({"schema_version": 1, "categories": {"happy": {}}}),
+        encoding="utf-8",
+    )
+    (base / "packA" / "happy" / "001.png").write_bytes(b"png-bytes")
+    (base / "packA" / "happy" / "002.webp").write_bytes(b"webp-bytes")
+    (base / "_parked" / "sad").mkdir(parents=True, exist_ok=True)
+    (base / "_parked" / "sad" / "001.jpg").write_bytes(b"jpg-bytes")
+    # 不属于表情包树的文件既不进包，也不参与导入替换。
+    (base / "packA" / "notes.txt").write_text("stray", encoding="utf-8")
+    (base / "packA" / "happy" / "cover.txt").write_text("stray", encoding="utf-8")
+    (base / "loose.png").write_bytes(b"loose")
+    return base
+
+
 def _seed_memory_noise(mem_dir: Path, *, marker: str = "src") -> None:
     """运行历史、在飞状态与取证备份：都不是记忆本身，不该跟包走。"""
     (mem_dir / "ops.jsonl").write_text(f'{{"log": "{marker} round"}}\n', encoding="utf-8")
@@ -813,10 +849,106 @@ def test_all_three_scopes_count_each_face_separately(tmp_path: Path) -> None:
     assert summary["scopes"] == ["config", "memory", "persona"]
     assert summary["memory_entry_count"] == len(MEMORY_KEYS)
     assert summary["persona_entry_count"] == len(PERSONA_KEYS)
+    assert summary["sticker_entry_count"] == 0
     assert summary["config_entry_count"] == (
         len(summary["entries"]) - summary["memory_entry_count"] - summary["persona_entry_count"]
     )
     assert json.loads(Path(summary["path"]).read_text(encoding="utf-8"))["version"] == 4
+
+
+def test_stickers_scope_carries_pack_tree_and_ignores_stray_files(tmp_path: Path) -> None:
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+    _seed_stickers(source)
+
+    summary = config_bundle.export_bundle(
+        source,
+        password=BUNDLE_PASSWORD,
+        use_project_password=False,
+        scopes=(config_bundle.SCOPE_STICKERS,),
+    )
+    archive = Path(summary["path"])
+    envelope = json.loads(archive.read_text(encoding="utf-8"))
+    payload = _payload_of(archive)
+
+    assert envelope["version"] == 5
+    assert envelope["scopes"] == ["stickers"]
+    assert set(payload["entries"]) == STICKER_KEYS
+    assert "master_key" not in payload
+    assert summary["sticker_entry_count"] == len(STICKER_KEYS)
+    assert summary["config_entry_count"] == summary["memory_entry_count"] == 0
+    assert summary["persona_entry_count"] == 0
+
+
+def test_stickers_scope_without_any_pack_is_refused(tmp_path: Path) -> None:
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+
+    with pytest.raises(ValueError, match="bundle_stickers_empty"):
+        _export_scopes(source, (config_bundle.SCOPE_STICKERS,))
+
+    assert not (source / config_bundle.BUNDLE_OUTPUT_DIR).exists()
+
+
+def test_stickers_only_import_replaces_the_face_and_leaves_other_faces(tmp_path: Path) -> None:
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+    _seed_stickers(source, marker="SRC")
+    archive = _export_scopes(source, (config_bundle.SCOPE_STICKERS,))
+
+    target = _write_workspace(tmp_path / "target")
+    _seed_memory(target, marker="TGT")
+    _seed_stickers(target, marker="TGT")
+    extra_pack = target / "stickers" / "packOld" / "joy"
+    extra_pack.mkdir(parents=True)
+    (extra_pack / "001.gif").write_bytes(b"old-gif")
+    config_before = (target / ".g3ku" / "config.json").read_text(encoding="utf-8")
+    bodies_before = _memory_bodies(target)
+
+    item = config_bundle.import_bundle(
+        target,
+        archive_path=archive,
+        password=BUNDLE_PASSWORD,
+        scopes=(config_bundle.SCOPE_STICKERS,),
+    )
+
+    assert item["scopes"] == ["stickers"]
+    assert item["sticker_entry_count"] == len(STICKER_KEYS)
+    assert item["config_entry_count"] == item["memory_entry_count"] == 0
+    assert item["persona_entry_count"] == 0
+    assert item["password_kept"] is True
+    assert json.loads((target / "stickers" / "packA" / "manifest.json").read_text(encoding="utf-8"))[
+        "theme"
+    ] == "SRC theme"
+    assert (target / "stickers" / "packA" / "happy" / "001.png").read_bytes() == b"png-bytes"
+    # 整棵树按包内集合替换：包外的旧包、以及不属于表情包树的杂项都不保留。
+    assert not (target / "stickers" / "packOld").exists()
+    assert not (target / "stickers" / "packA" / "notes.txt").exists()
+    assert not (target / "stickers" / "loose.png").exists()
+    assert (target / ".g3ku" / "config.json").read_text(encoding="utf-8") == config_before
+    assert _memory_bodies(target) == bodies_before
+    backup = Path(item["backup_dir"])
+    assert (backup / "stickers" / "packOld" / "joy" / "001.gif").read_bytes() == b"old-gif"
+    assert json.loads((backup / "stickers" / "packA" / "manifest.json").read_text(encoding="utf-8"))[
+        "theme"
+    ] == "TGT theme"
+
+
+def test_v4_bundle_cannot_claim_the_stickers_scope(tmp_path: Path) -> None:
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+    archive = _export_scopes(source, (config_bundle.SCOPE_CONFIG,))
+    forged = _rescoped(archive, version=4, scopes=["stickers"])
+
+    target = _write_workspace(tmp_path / "target")
+    with pytest.raises(ValueError, match="unknown bundle scope"):
+        config_bundle.import_bundle(
+            target,
+            archive_path=forged,
+            password=BUNDLE_PASSWORD,
+            scopes=(config_bundle.SCOPE_STICKERS,),
+        )
+    assert not (target / "stickers").exists()
 
 
 def test_persona_only_import_replaces_the_face_and_leaves_other_faces(tmp_path: Path) -> None:
@@ -1194,6 +1326,7 @@ def test_export_route_reports_scope_counts(tmp_path: Path, monkeypatch: pytest.M
     assert config_only.json()["item"]["scopes"] == ["config"]
     assert config_only.json()["item"]["memory_entry_count"] == 0
     assert config_only.json()["item"]["persona_entry_count"] == 0
+    assert config_only.json()["item"]["sticker_entry_count"] == 0
     assert with_memory.json()["item"]["scopes"] == ["memory"]
     assert with_memory.json()["item"]["memory_entry_count"] == len(MEMORY_KEYS)
     assert with_memory.json()["item"]["config_entry_count"] == 0
@@ -1201,6 +1334,53 @@ def test_export_route_reports_scope_counts(tmp_path: Path, monkeypatch: pytest.M
     assert with_persona.json()["item"]["persona_entry_count"] == len(PERSONA_KEYS)
     assert with_persona.json()["item"]["config_entry_count"] == 0
     assert with_persona.json()["item"]["memory_entry_count"] == 0
+
+
+def test_stickers_export_and_import_routes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+    _seed_stickers(source)
+    monkeypatch.chdir(source)
+
+    exported = _client().post(
+        "/api/bootstrap/config-bundle/export",
+        json={
+            "password": BUNDLE_PASSWORD,
+            "use_project_password": False,
+            "include_config": False,
+            "include_stickers": True,
+        },
+    )
+    assert exported.status_code == 200
+    item = exported.json()["item"]
+    assert item["scopes"] == ["stickers"]
+    assert item["sticker_entry_count"] == len(STICKER_KEYS)
+
+    target = _write_workspace(tmp_path / "target")
+    _seed_stickers(target, marker="TGT")
+    monkeypatch.chdir(target)
+    archive = source / config_bundle.BUNDLE_OUTPUT_DIR / item["filename"]
+    with archive.open("rb") as handle:
+        imported = _client().post(
+            "/api/bootstrap/config-bundle/import",
+            data={
+                "password": BUNDLE_PASSWORD,
+                "include_config": "false",
+                "include_stickers": "true",
+            },
+            files={"file": ("bundle.g3kucb", handle, "application/octet-stream")},
+        )
+
+    assert imported.status_code == 200
+    imported_item = imported.json()["item"]
+    assert imported_item["scopes"] == ["stickers"]
+    assert imported_item["sticker_entry_count"] == len(STICKER_KEYS)
+    assert imported_item["restart_required"] is True
+    assert json.loads(
+        (target / "stickers" / "packA" / "manifest.json").read_text(encoding="utf-8")
+    )["theme"] == "SRC theme"
 
 
 def test_export_route_rejects_a_bundle_with_nothing_checked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -196,7 +196,7 @@ test("createPendingCeoTurn renders a loading icon instead of fixed processing co
 
     assert.equal(U.ceoFeed.appended.length, 1);
     assert.equal(!!turn, true);
-    assert.match(turn.el.innerHTML, /data-lucide="loader-circle"/);
+    assert.match(turn.el.innerHTML, /class="assistant-loading-ring"/);
     assert.doesNotMatch(turn.el.innerHTML, new RegExp(PROCESSING_LABEL));
     assert.equal(turn.el.classList.contains("ceo-turn-loading-only"), true);
 });
@@ -210,7 +210,7 @@ test("renderCeoAssistantTextIntoTurn converts CEO model-call loading copy into a
 
     renderCeoAssistantTextIntoTurn(turn, MODEL_CALL_LABEL, { status: "running" });
 
-    assert.match(textEl.innerHTML, /data-lucide="loader-circle"/);
+    assert.match(textEl.innerHTML, /class="assistant-loading-ring"/);
     assert.doesNotMatch(textEl.innerHTML, new RegExp(MODEL_CALL_LABEL));
     assert.equal(textEl.textContent, "");
     assert.equal(textEl.classList.contains("assistant-text-loading"), true);

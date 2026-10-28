@@ -143,6 +143,7 @@ function loadApp(apiClientOverrides = {}) {
             U,
             openConfigBundleDialog,
             closeConfigBundleDialog,
+            setConfigBundleView,
             isConfigBundleOpen,
             submitConfigBundleExport,
             submitConfigBundleImport,
@@ -200,6 +201,14 @@ function mountDialogs(app) {
     U.configBundleBackdrop.hidden = true;
     U.configBundleDialog = new StubHTMLElement();
     U.configBundleClose = new StubHTMLElement();
+    U.configBundleBack = new StubHTMLElement();
+    U.configBundleMenu = new StubHTMLElement();
+    U.configBundleMenuImport = new StubHTMLElement();
+    U.configBundleMenuExport = new StubHTMLElement();
+    U.configBundleExportPanel = new StubHTMLElement();
+    U.configBundleImportPanel = new StubHTMLElement();
+    U.configBundleImportRest = new StubHTMLElement();
+    U.configBundleImportRest.hidden = true;
     U.configBundleUseProjectPassword = new StubHTMLElement();
     U.configBundleUseProjectPassword.checked = true;
     U.configBundleExportConfig = new StubHTMLElement();
@@ -208,6 +217,8 @@ function mountDialogs(app) {
     U.configBundleExportMemory.checked = false;
     U.configBundleExportPersona = new StubHTMLElement();
     U.configBundleExportPersona.checked = false;
+    U.configBundleExportStickers = new StubHTMLElement();
+    U.configBundleExportStickers.checked = false;
     U.configBundleExportPasswordField = new StubHTMLElement();
     U.configBundleExportPasswordField.hidden = true;
     U.configBundleExportConfirmField = new StubHTMLElement();
@@ -235,6 +246,8 @@ function mountDialogs(app) {
     U.configBundleImportMemory.checked = false;
     U.configBundleImportPersona = new StubHTMLElement();
     U.configBundleImportPersona.checked = false;
+    U.configBundleImportStickers = new StubHTMLElement();
+    U.configBundleImportStickers.checked = false;
     U.configBundleImportPassword = new StubHTMLElement();
     U.configBundleImport = new StubHTMLElement();
 }
@@ -309,7 +322,7 @@ test("勾选态下不填任何口令就能导出，提交空口令", async () =>
     await app.submitConfigBundleExport();
 
     assert.deepEqual(plain(app.calls), [
-        ["export", { password: "", useProjectPassword: true, includeConfig: true, includeMemory: false, includePersona: false }],
+        ["export", { password: "", useProjectPassword: true, includeConfig: true, includeMemory: false, includePersona: false, includeStickers: false }],
     ]);
     assert.equal(app.anchors.length, 1);
     assert.equal(app.toasts.at(-1).title, "配置包已生成");
@@ -337,7 +350,7 @@ test("自定义口令导出成功后按服务端返回的文件名触发下载�
     await app.submitConfigBundleExport();
 
     assert.deepEqual(plain(app.calls), [
-        ["export", { password: "secret-pass-123", useProjectPassword: false, includeConfig: true, includeMemory: false, includePersona: false }],
+        ["export", { password: "secret-pass-123", useProjectPassword: false, includeConfig: true, includeMemory: false, includePersona: false, includeStickers: false }],
     ]);
     assert.equal(app.anchors.length, 1);
     assert.deepEqual(app.anchors[0].clicks, [
@@ -409,6 +422,7 @@ test("无在跑工作时确认后按原样导入并刷新页面", async () => {
             includeConfig: true,
             includeMemory: false,
             includePersona: false,
+            includeStickers: false,
         }],
         ["reload"],
     ]);
@@ -481,7 +495,7 @@ test("有在跑工作时必须勾选暂停才提交", async () => {
         "import",
         "bundle.g3kucb",
         "secret-pass-123",
-        { confirmRunningWork: true, currentPassword: "local-pass-1", includeConfig: true, includeMemory: false, includePersona: false },
+        { confirmRunningWork: true, currentPassword: "local-pass-1", includeConfig: true, includeMemory: false, includePersona: false, includeStickers: false },
     ]);
 });
 
@@ -508,11 +522,12 @@ test("勾上记忆才提交 includeMemory，提示按面报数", async () => {
         includeConfig: true,
         includeMemory: true,
         includePersona: false,
+        includeStickers: false,
     }]);
-    assert.equal(app.toasts.at(-1).text, "共 9 个文件（配置 4、记忆 5、人设 0）。下载已发起，取消保存则不会落盘；导入时输项目解锁密码。");
+    assert.equal(app.toasts.at(-1).text, "共 9 个文件（配置 4、记忆 5、人设 0、表情包 0）。下载已发起，取消保存则不会落盘；导入时输项目解锁密码。");
 });
 
-test("范围三颗都不勾时导出与导入都不提交", async () => {
+test("范围四颗都不勾时导出与导入都不提交", async () => {
     const app = loadApp();
     app.U.configBundleExportConfig.checked = false;
     await app.submitConfigBundleExport();
@@ -544,11 +559,11 @@ test("只勾记忆时确认文案与载荷都按记忆面走", async () => {
         "import",
         "bundle.g3kucb",
         "secret-pass-123",
-        { confirmRunningWork: false, currentPassword: "local-pass-1", includeConfig: false, includeMemory: true, includePersona: false },
+        { confirmRunningWork: false, currentPassword: "local-pass-1", includeConfig: false, includeMemory: true, includePersona: false, includeStickers: false },
     ]);
 });
 
-test("勾上人设才提交 includePersona，提示按三面报数", async () => {
+test("勾上人设才提交 includePersona，提示按四面报数", async () => {
     const sent = [];
     const app = loadApp({
         exportConfigBundle: async (options) => {
@@ -572,8 +587,9 @@ test("勾上人设才提交 includePersona，提示按三面报数", async () =>
         includeConfig: true,
         includeMemory: false,
         includePersona: true,
+        includeStickers: false,
     }]);
-    assert.equal(app.toasts.at(-1).text, "共 8 个文件（配置 4、记忆 0、人设 4）。下载已发起，取消保存则不会落盘；导入时输项目解锁密码。");
+    assert.equal(app.toasts.at(-1).text, "共 8 个文件（配置 4、记忆 0、人设 4、表情包 0）。下载已发起，取消保存则不会落盘；导入时输项目解锁密码。");
 });
 
 test("只勾人设时确认文案与载荷都按人设面走", async () => {
@@ -593,26 +609,30 @@ test("只勾人设时确认文案与载荷都按人设面走", async () => {
         "import",
         "bundle.g3kucb",
         "secret-pass-123",
-        { confirmRunningWork: false, currentPassword: "local-pass-1", includeConfig: false, includeMemory: false, includePersona: true },
+        { confirmRunningWork: false, currentPassword: "local-pass-1", includeConfig: false, includeMemory: false, includePersona: true, includeStickers: false },
     ]);
 });
 
-test("关窗把三颗范围复位成配置开、记忆与人设关", () => {
+test("关窗把四颗范围复位成配置开、记忆/人设/表情包关", () => {
     const app = loadApp();
     app.U.configBundleExportConfig.checked = false;
     app.U.configBundleExportMemory.checked = true;
     app.U.configBundleExportPersona.checked = true;
+    app.U.configBundleExportStickers.checked = true;
     app.U.configBundleImportMemory.checked = true;
     app.U.configBundleImportPersona.checked = true;
+    app.U.configBundleImportStickers.checked = true;
 
     app.closeConfigBundleDialog();
 
     assert.equal(app.U.configBundleExportConfig.checked, true);
     assert.equal(app.U.configBundleExportMemory.checked, false);
     assert.equal(app.U.configBundleExportPersona.checked, false);
+    assert.equal(app.U.configBundleExportStickers.checked, false);
     assert.equal(app.U.configBundleImportConfig.checked, true);
     assert.equal(app.U.configBundleImportMemory.checked, false);
     assert.equal(app.U.configBundleImportPersona.checked, false);
+    assert.equal(app.U.configBundleImportStickers.checked, false);
 });
 
 test("配置包对话框的风险文案不被 max-height 裁剪", () => {
@@ -648,4 +668,108 @@ test("锁定态读不到在跑工作时按无在跑工作处理", async () => {
     await app.submitConfigBundleImport();
 
     assert.equal(app.confirmCalls.at(-1).checkbox, null);
+});
+
+test("配置弹窗先只给导入/导出两个入口", () => {
+    const app = loadApp();
+    app.openConfigBundleDialog();
+
+    assert.equal(app.U.configBundleMenu.hidden, false);
+    assert.equal(app.U.configBundleExportPanel.hidden, true);
+    assert.equal(app.U.configBundleImportPanel.hidden, true);
+    assert.equal(app.U.configBundleBack.hidden, true);
+});
+
+test("进入导出面板后返回键出现，返回菜单收起面板", () => {
+    const app = loadApp();
+    app.openConfigBundleDialog();
+
+    app.setConfigBundleView("export");
+    assert.equal(app.U.configBundleMenu.hidden, true);
+    assert.equal(app.U.configBundleExportPanel.hidden, false);
+    assert.equal(app.U.configBundleImportPanel.hidden, true);
+    assert.equal(app.U.configBundleBack.hidden, false);
+
+    app.setConfigBundleView("menu");
+    assert.equal(app.U.configBundleMenu.hidden, false);
+    assert.equal(app.U.configBundleExportPanel.hidden, true);
+    assert.equal(app.U.configBundleBack.hidden, true);
+});
+
+test("导入面板选包之前不显示范围、口令与导入按钮", () => {
+    const app = loadApp();
+    app.openConfigBundleDialog();
+    app.setConfigBundleView("import");
+
+    assert.equal(app.U.configBundleImportPanel.hidden, false);
+    assert.equal(app.U.configBundleImportRest.hidden, true);
+
+    app.U.configBundleImportFile.files = [{ name: "bundle.g3kucb" }];
+    app.syncConfigBundleFileName();
+    assert.equal(app.U.configBundleImportRest.hidden, false);
+
+    app.closeConfigBundleDialog();
+    assert.equal(app.U.configBundleImportRest.hidden, true);
+});
+
+test("勾上表情包才提交 includeStickers，提示按四面报数", async () => {
+    const sent = [];
+    const app = loadApp({
+        exportConfigBundle: async (options) => {
+            sent.push(plain(options));
+            return {
+                filename: "g3ku-config-bundle-20260924-010203.g3kucb",
+                entry_count: 12,
+                config_entry_count: 4,
+                memory_entry_count: 0,
+                persona_entry_count: 0,
+                sticker_entry_count: 8,
+            };
+        },
+    });
+    app.U.configBundleExportStickers.checked = true;
+
+    await app.submitConfigBundleExport();
+
+    assert.deepEqual(sent, [{
+        password: "",
+        useProjectPassword: true,
+        includeConfig: true,
+        includeMemory: false,
+        includePersona: false,
+        includeStickers: true,
+    }]);
+    assert.equal(app.toasts.at(-1).text, "共 12 个文件（配置 4、记忆 0、人设 0、表情包 8）。下载已发起，取消保存则不会落盘；导入时输项目解锁密码。");
+});
+
+test("只勾表情包时确认文案与载荷都按表情包面走", async () => {
+    const app = loadApp();
+    app.U.configBundleImportFile.files = [{ name: "bundle.g3kucb" }];
+    app.U.configBundleImportPassword.value = "secret-pass-123";
+    app.U.configBundleImportConfig.checked = false;
+    app.U.configBundleImportStickers.checked = true;
+
+    await app.submitConfigBundleImport();
+    const confirm = app.confirmCalls.at(-1);
+    assert.match(confirm.text, /整体替换当前表情包/);
+
+    await confirm.onConfirm({ checked: false, value: "local-pass-1" });
+    await flush();
+    assert.deepEqual(plain(app.calls.find((call) => call[0] === "import")), [
+        "import",
+        "bundle.g3kucb",
+        "secret-pass-123",
+        { confirmRunningWork: false, currentPassword: "local-pass-1", includeConfig: false, includeMemory: false, includePersona: false, includeStickers: true },
+    ]);
+});
+
+test("关窗回到入口菜单", () => {
+    const app = loadApp();
+    app.openConfigBundleDialog();
+    app.setConfigBundleView("export");
+    app.closeConfigBundleDialog();
+
+    assert.equal(app.U.configBundleMenu.hidden, false);
+    assert.equal(app.U.configBundleExportPanel.hidden, true);
+    assert.equal(app.U.configBundleBack.hidden, true);
 });

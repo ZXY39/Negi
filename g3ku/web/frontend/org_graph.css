@@ -3611,19 +3611,31 @@ textarea {
     background: color-mix(in srgb, var(--border-color) 64%, transparent);
 }
 
-/* 气泡里的加载占位弧比轨道步骤图标大一档。选择器要带上 .interaction-step-icon
-   才压得住同特异性的 `.interaction-step-icon svg`，单写类名会静默输掉。 */
-.assistant-loading-indicator.interaction-step-icon svg {
-    width: 16px;
-    height: 16px;
-}
-
-/* 外框也钉成 16px：它默认会被撑到 26px，圆心因此偏右 5px，弧就不再落在轨道线上了。 */
+/* 外框钉成 16px：它默认会被撑到 26px，圆心因此偏右 5px，环就不再落在轨道线上了。 */
 .assistant-loading-indicator.interaction-step-icon {
     flex: 0 0 auto;
     width: 16px;
     height: 16px;
     padding: 0;
+}
+
+/* 无缝加载环：整圈常亮、只有亮度绕圈，旋转到任何角度都不会露出缺口。
+   开口弧（loader-circle）转到轨道线或读数行旁边时会空出一段，读起来像环断了。 */
+.assistant-loading-indicator .assistant-loading-ring {
+    display: block;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: conic-gradient(
+        from 0deg,
+        color-mix(in srgb, currentColor 18%, transparent),
+        currentColor 38%,
+        currentColor 60%,
+        color-mix(in srgb, currentColor 18%, transparent)
+    );
+    -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 1.5px), #000 calc(100% - 1.5px));
+    mask: radial-gradient(farthest-side, transparent calc(100% - 1.5px), #000 calc(100% - 1.5px));
+    animation: interaction-step-icon-spin 0.9s linear infinite;
 }
 
 .markdown-content {
@@ -6412,6 +6424,7 @@ textarea {
 @media (prefers-reduced-motion: reduce) {
     .ceo-compression-divider-spinner::before,
     .interaction-step-icon.is-spinning svg,
+    .assistant-loading-indicator .assistant-loading-ring,
     .app-toast-icon {
         animation: interaction-step-icon-spin 0.9s linear infinite !important;
     }
@@ -17284,6 +17297,65 @@ textarea {
     color: var(--ui-text-secondary);
     font-size: 13px;
     word-break: break-all;
+}
+
+/* 配置弹窗先给方向再给面板：左上角返回箭头只在本层面板里出现。 */
+.config-bundle-header {
+    display: flex;
+    align-items: center;
+    gap: var(--ui-space-2);
+}
+
+.config-bundle-back-btn {
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border-radius: var(--ui-radius-control);
+    color: var(--ui-text-secondary);
+}
+
+.config-bundle-back-btn svg {
+    width: 16px;
+    height: 16px;
+}
+
+/* 入口菜单两键平分一行；面板内的控件各自成列。 */
+.config-bundle-menu {
+    display: flex;
+    gap: var(--ui-space-3);
+}
+
+.config-bundle-menu > .toolbar-btn {
+    flex: 1 1 0;
+    min-width: 0;
+}
+
+.config-bundle-panel,
+.config-bundle-import-rest {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ui-space-4);
+}
+
+/* 范围四颗横排：一行读完全部面，纵向陈列会把弹窗无谓拉高。 */
+.config-bundle-scope-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--ui-space-2) var(--ui-space-5);
+}
+
+/* 导出面板底部：解锁口令勾选靠左、导出按钮靠右；导入面板只把按钮推到右边。 */
+.config-bundle-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: var(--ui-space-3);
+}
+
+.config-bundle-footer-end {
+    justify-content: flex-end;
 }
 
 /* 配置包对话框的两段风险文案必须整段读完：正文和段落各自都带 max-height +

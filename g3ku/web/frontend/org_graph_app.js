@@ -745,10 +745,18 @@ const U = {
     configBundleBackdrop: document.getElementById("config-bundle-backdrop"),
     configBundleDialog: document.getElementById("config-bundle-dialog"),
     configBundleClose: document.getElementById("config-bundle-close-btn"),
+    configBundleBack: document.getElementById("config-bundle-back-btn"),
+    configBundleMenu: document.getElementById("config-bundle-menu"),
+    configBundleMenuImport: document.getElementById("config-bundle-menu-import-btn"),
+    configBundleMenuExport: document.getElementById("config-bundle-menu-export-btn"),
+    configBundleExportPanel: document.getElementById("config-bundle-export-panel"),
+    configBundleImportPanel: document.getElementById("config-bundle-import-panel"),
+    configBundleImportRest: document.getElementById("config-bundle-import-rest"),
     configBundleUseProjectPassword: document.getElementById("config-bundle-use-project-password"),
     configBundleExportConfig: document.getElementById("config-bundle-export-config"),
     configBundleExportMemory: document.getElementById("config-bundle-export-memory"),
     configBundleExportPersona: document.getElementById("config-bundle-export-persona"),
+    configBundleExportStickers: document.getElementById("config-bundle-export-stickers"),
     configBundleExportPasswordField: document.getElementById("config-bundle-export-password-field"),
     configBundleExportConfirmField: document.getElementById("config-bundle-export-confirm-field"),
     configBundleExportPassword: document.getElementById("config-bundle-export-password"),
@@ -760,6 +768,7 @@ const U = {
     configBundleImportConfig: document.getElementById("config-bundle-import-config"),
     configBundleImportMemory: document.getElementById("config-bundle-import-memory"),
     configBundleImportPersona: document.getElementById("config-bundle-import-persona"),
+    configBundleImportStickers: document.getElementById("config-bundle-import-stickers"),
     configBundleImportPassword: document.getElementById("config-bundle-import-password"),
     configBundleImport: document.getElementById("config-bundle-import-btn"),
     passwordChangeBackdrop: document.getElementById("password-change-backdrop"),
@@ -4465,7 +4474,7 @@ function syncCeoTurnLoadingOnlyState(turn, isLoadingOnly = false) {
 }
 
 function renderCeoAssistantLoadingMarkup() {
-    return `<span class="assistant-loading-indicator interaction-step-icon is-spinning" aria-hidden="true"><i data-lucide="loader-circle"></i></span>`;
+    return `<span class="assistant-loading-indicator interaction-step-icon is-spinning" aria-hidden="true"><span class="assistant-loading-ring"></span></span>`;
 }
 
 function renderCeoAssistantLoadingState(turn, label = CEO_ASSISTANT_LOADING_LABEL) {
@@ -8178,6 +8187,17 @@ function isConfigBundleOpen() {
     return !!U.configBundleBackdrop && !U.configBundleBackdrop.hidden;
 }
 
+// 弹窗先只给「导入 / 导出」两个入口，选定方向后再展开那一面自己的控件：
+// 同一屏里同时摆两套范围与口令，会把"我现在是在打包还是往本机落盘"读糊。
+function setConfigBundleView(view) {
+    const next = view === "export" || view === "import" ? view : "menu";
+    if (U.configBundleMenu) U.configBundleMenu.hidden = next !== "menu";
+    if (U.configBundleExportPanel) U.configBundleExportPanel.hidden = next !== "export";
+    if (U.configBundleImportPanel) U.configBundleImportPanel.hidden = next !== "import";
+    if (U.configBundleBack) U.configBundleBack.hidden = next === "menu";
+    syncConfigBundleImportRest();
+}
+
 function setConfigBundleBusy(busy) {
     const disabled = Boolean(busy);
     [U.configBundleExport, U.configBundleImport]
@@ -8186,22 +8206,31 @@ function setConfigBundleBusy(busy) {
         });
 }
 
+// 导入面板在选包之前只露文件选择：范围与口令都等文件落定后再出现。
+function syncConfigBundleImportRest() {
+    if (!U.configBundleImportRest) return;
+    U.configBundleImportRest.hidden = !U.configBundleImportFile?.files?.[0];
+}
+
 function syncConfigBundleFileName() {
-    if (!U.configBundleImportName) return;
-    const file = U.configBundleImportFile?.files?.[0];
-    U.configBundleImportName.textContent = file ? String(file.name || "已选择") : "未选择文件";
+    if (U.configBundleImportName) {
+        const file = U.configBundleImportFile?.files?.[0];
+        U.configBundleImportName.textContent = file ? String(file.name || "已选择") : "未选择文件";
+    }
+    syncConfigBundleImportRest();
 }
 
 function usesProjectBundlePassword() {
     return U.configBundleUseProjectPassword ? U.configBundleUseProjectPassword.checked !== false : true;
 }
 
-// 缺元素（未渲染/被裁掉）一律回默认值：配置在、记忆与人设不在，与 HTML 的 checked 初始态一致。
-function bundleScopeState(configElement, memoryElement, personaElement) {
+// 缺元素（未渲染/被裁掉）一律回默认值：配置在、记忆/人设/表情包不在，与 HTML 的 checked 初始态一致。
+function bundleScopeState(configElement, memoryElement, personaElement, stickersElement) {
     const includeConfig = configElement ? configElement.checked !== false : true;
     const includeMemory = memoryElement ? memoryElement.checked === true : false;
     const includePersona = personaElement ? personaElement.checked === true : false;
-    return { includeConfig, includeMemory, includePersona };
+    const includeStickers = stickersElement ? stickersElement.checked === true : false;
+    return { includeConfig, includeMemory, includePersona, includeStickers };
 }
 
 function configBundleExportScopes() {
@@ -8209,6 +8238,7 @@ function configBundleExportScopes() {
         U.configBundleExportConfig,
         U.configBundleExportMemory,
         U.configBundleExportPersona,
+        U.configBundleExportStickers,
     );
 }
 
@@ -8217,6 +8247,7 @@ function configBundleImportScopes() {
         U.configBundleImportConfig,
         U.configBundleImportMemory,
         U.configBundleImportPersona,
+        U.configBundleImportStickers,
     );
 }
 
@@ -8225,21 +8256,30 @@ function bundleScopeLabels(scopes) {
         scopes.includeConfig ? "配置" : "",
         scopes.includeMemory ? "记忆" : "",
         scopes.includePersona ? "人设" : "",
+        scopes.includeStickers ? "表情包" : "",
     ].filter(Boolean).join("、");
 }
 
 function bundleScopeSummary(item) {
     const memory = Number(item?.memory_entry_count || 0);
     const persona = Number(item?.persona_entry_count || 0);
-    if (!memory && !persona) return "";
-    return `（配置 ${Number(item?.config_entry_count || 0)}、记忆 ${memory}、人设 ${persona}）`;
+    const stickers = Number(item?.sticker_entry_count || 0);
+    if (!memory && !persona && !stickers) return "";
+    return `（配置 ${Number(item?.config_entry_count || 0)}、记忆 ${memory}、人设 ${persona}、表情包 ${stickers}）`;
 }
 
 function resetBundleScopeCheckboxes() {
     [U.configBundleExportConfig, U.configBundleImportConfig].forEach((element) => {
         if (element) element.checked = true;
     });
-    [U.configBundleExportMemory, U.configBundleImportMemory, U.configBundleExportPersona, U.configBundleImportPersona].forEach((element) => {
+    [
+        U.configBundleExportMemory,
+        U.configBundleImportMemory,
+        U.configBundleExportPersona,
+        U.configBundleImportPersona,
+        U.configBundleExportStickers,
+        U.configBundleImportStickers,
+    ].forEach((element) => {
         if (element) element.checked = false;
     });
 }
@@ -8266,6 +8306,7 @@ function openConfigBundleDialog() {
     if (!U.configBundleBackdrop) return;
     U.configBundleBackdrop.hidden = false;
     U.configBundleBackdrop.classList.add("is-open");
+    setConfigBundleView("menu");
     syncConfigBundlePasswordField();
     window.requestAnimationFrame(() => U.configBundleDialog?.focus?.());
 }
@@ -8275,6 +8316,7 @@ function closeConfigBundleDialog() {
     U.configBundleBackdrop.hidden = true;
     U.configBundleBackdrop.classList.remove("is-open");
     clearConfigBundleInputs();
+    setConfigBundleView("menu");
 }
 
 function downloadConfigBundleFile(filename) {
@@ -8309,6 +8351,7 @@ async function submitConfigBundleExport() {
             includeConfig: scopes.includeConfig,
             includeMemory: scopes.includeMemory,
             includePersona: scopes.includePersona,
+            includeStickers: scopes.includeStickers,
         });
         downloadConfigBundleFile(item?.filename);
         clearConfigBundleInputs();
@@ -8400,6 +8443,7 @@ async function submitConfigBundleImport() {
                 includeConfig: scopes.includeConfig,
                 includeMemory: scopes.includeMemory,
                 includePersona: scopes.includePersona,
+                includeStickers: scopes.includeStickers,
             });
             applyConfigBundleImportResult(item);
         },
@@ -10311,6 +10355,9 @@ function bindProjectSettings() {
     U.projectSettingsOpenPassword?.addEventListener("click", () => openPasswordChangeDialog());
     U.projectSettingsOpenBundle?.addEventListener("click", () => openConfigBundleDialog());
     U.configBundleClose?.addEventListener("click", () => closeConfigBundleDialog());
+    U.configBundleBack?.addEventListener("click", () => setConfigBundleView("menu"));
+    U.configBundleMenuExport?.addEventListener("click", () => setConfigBundleView("export"));
+    U.configBundleMenuImport?.addEventListener("click", () => setConfigBundleView("import"));
     U.configBundleBackdrop?.addEventListener("click", (e) => {
         if (e.target === U.configBundleBackdrop) closeConfigBundleDialog();
     });
