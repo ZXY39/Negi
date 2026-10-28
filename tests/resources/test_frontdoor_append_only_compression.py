@@ -8,7 +8,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from g3ku.providers.fallback import DEFAULT_RETRYABLE_MODEL_ROUNDS
 from g3ku.runtime.chunk_compression_plan import output_headroom_tokens
 from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
 from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
@@ -42,9 +41,9 @@ def _build_runner(monkeypatch: pytest.MonkeyPatch, *, context_window_tokens: int
     monkeypatch.setattr(runner, "_refresh_runtime_config_for_retry_invalidation", lambda: False, raising=False)
     monkeypatch.setattr(runner, "_resolve_ceo_model_refs_for_session", lambda *_a, **_k: [], raising=False)
     monkeypatch.setattr(runner, "_model_response_usage", lambda _message: {}, raising=False)
-    # 重试判据取自模型绑定（`retry_on` 决定要不要重烧、`retry_count` 决定几轮）。测试里
-    # 没有真配置：固定成"默认关键词表 + 2 轮"，既验判据走的是这条道，又不让默认 10 轮的
-    # 退避把用例拖成几十秒。判据本身的解析另有单独用例。
+    # 重试判据取自模型绑定（`retry_on` 决定要不要重烧、`retry_count` 决定几轮；读不到绑定
+    # 就是 0 轮＝一发都不重烧）。测试里没有真配置：固定成"默认关键词表 + 2 轮"，好让重烧
+    # 这条通道真的被走到，同时不把用例拖长。判据本身的解析另有单独用例。
     monkeypatch.setattr(
         runner,
         "_frontdoor_compression_retry_policy",
@@ -693,7 +692,8 @@ def test_frontdoor_compression_retry_policy_reads_the_binding(monkeypatch: pytes
     )
 
     assert runner._frontdoor_compression_retry_policy(["ceo_primary"]) == (["429"], 5)
-    # 显式空列表＝操作员说了"永不重试"，判据要原样交回 []，不是悄悄换成默认关键词表。
-    assert runner._frontdoor_compression_retry_policy(["ceo_never"]) == ([], DEFAULT_RETRYABLE_MODEL_ROUNDS)
-    # 查不到绑定才退默认关键词表；三条道都不退"硬拦 3 次"。
-    assert runner._frontdoor_compression_retry_policy(["ceo_missing"]) == (None, DEFAULT_RETRYABLE_MODEL_ROUNDS)
+    # 显式空列表＝操作员说了"永不重试"，判据要原样交回 []，不是悄悄换成默认关键词表；
+    # retry_count=0 同样按字面值交回 0（一次都不重烧）。
+    assert runner._frontdoor_compression_retry_policy(["ceo_never"]) == ([], 0)
+    # 查不到绑定才退默认关键词表、轮数退 0；三条道都不退"硬拦 3 次"，也不退内置轮数默认。
+    assert runner._frontdoor_compression_retry_policy(["ceo_missing"]) == (None, 0)

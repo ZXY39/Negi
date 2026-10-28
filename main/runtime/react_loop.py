@@ -26,7 +26,6 @@ from g3ku.providers.base import (
 )
 from g3ku.providers.fallback import (
     DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS,
-    DEFAULT_RETRYABLE_MODEL_ROUNDS,
     MODEL_RETRY_LIVE_STATES,
     PUBLIC_PROVIDER_FAILURE_MESSAGE,
     ModelProviderExhaustedError,
@@ -6853,9 +6852,9 @@ class ReActToolLoop:
     def _node_compression_retry_policy(self, model_refs: list[str] | None) -> tuple[list[str] | None, int]:
         """压缩 helper 的重试判据：这条绑定自己的 `retry_on` 与「重试次数」。
 
-        次数沿用节点普通发送同一口径（绑定 `retry_count`，0/未设置＝默认轮数预算）。
-        取不到绑定时退默认关键词表，而不是退"硬拦 3 次"：那道硬闸把操作员设的 0 和
-        9999 都读成同一个 3。
+        次数沿用节点普通发送同一口径（绑定 `retry_count`，按字面值取，0＝不重烧）。
+        取不到绑定时退默认关键词表、轮数退 0，而不是退"硬拦 3 次"：那道硬闸把操作员设的 0
+        和 9999 都读成同一个 3。
         """
         model_key = str((list(model_refs or []) or [''])[0] or '').strip()
         config = None
@@ -6864,16 +6863,16 @@ class ReActToolLoop:
         except Exception:
             config = None
         if not model_key or config is None:
-            return None, DEFAULT_RETRYABLE_MODEL_ROUNDS
+            return None, 0
         try:
             managed = config.get_managed_model(model_key)
         except Exception:
             managed = None
         if managed is None:
-            return None, DEFAULT_RETRYABLE_MODEL_ROUNDS
+            return None, 0
         raw_retry_on = getattr(managed, 'retry_on', None)
         retry_on = None if raw_retry_on is None else list(raw_retry_on or [])
-        rounds = normalized_retry_count(getattr(managed, 'retry_count', 0)) or DEFAULT_RETRYABLE_MODEL_ROUNDS
+        rounds = normalized_retry_count(getattr(managed, 'retry_count', 0))
         return retry_on, rounds
 
     async def _node_compression_helper_call(
@@ -6885,7 +6884,7 @@ class ReActToolLoop:
     ) -> Any:
         """压缩 helper 单发调用 + 由模型绑定决定要不要重烧。
 
-        失败正文只有命中该绑定的 `retry_on` 才按 `retry_count`（0/未设置＝默认轮数预算）
+        失败正文只有命中该绑定的 `retry_on` 才按 `retry_count`（按字面值取，0＝一次都不重烧）
         退避重试；没命中的失败（内容审核拒、请求形状错、无声断流）一次都不重烧，直接交回
         这次响应——调用方把它的 `error_text` 原话当拒因报出去。这条道每一发都是几十 k
         token，而同一批字节重发只会再撞同一道拒绝。模型链内部的回退/换 key 由 chat backend

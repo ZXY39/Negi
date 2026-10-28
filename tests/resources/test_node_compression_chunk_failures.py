@@ -23,7 +23,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from g3ku.providers.fallback import DEFAULT_RETRYABLE_MODEL_ROUNDS
 from g3ku.runtime.chunk_compression_plan import output_headroom_tokens
 from main.runtime.react_loop import ReActToolLoop
 
@@ -70,8 +69,8 @@ def _make_loop(fake_chat):
     loop._node_token_compression_task_goal = lambda **_: '探针任务目标：汇总大文件'
     loop._node_compression_must_preserve_records = lambda **_: []
     # 压缩 helper 的重试判据取自模型绑定（`retry_on` 决定要不要重烧、`retry_count` 决定
-    # 几轮）。测试里没有真配置：固定成"默认关键词表 + 2 轮"，既验这条判据通道，又不让
-    # 默认 10 轮的退避把用例拖成几分钟。绑定解析本身另有单独用例。
+    # 几轮；读不到绑定就是 0 轮＝一发都不重烧）。测试里没有真配置：固定成"默认关键词表 +
+    # 2 轮"，好让重烧这条通道真的被走到，同时不把用例拖长。绑定解析本身另有单独用例。
     loop._node_compression_retry_policy = lambda _refs: (['network', '429'], 2)
     return loop
 
@@ -327,7 +326,8 @@ def test_node_compression_retry_policy_reads_the_binding(monkeypatch: pytest.Mon
     )
 
     assert loop._node_compression_retry_policy(['ceo_primary']) == (['429'], 5)
-    # 显式空列表＝操作员说了"永不重试"，原样交回 []，不悄悄换成默认关键词表。
-    assert loop._node_compression_retry_policy(['ceo_never']) == ([], DEFAULT_RETRYABLE_MODEL_ROUNDS)
-    # 查不到绑定才退默认关键词表；三条道都不退"硬拦 3 次"。
-    assert loop._node_compression_retry_policy(['ceo_missing']) == (None, DEFAULT_RETRYABLE_MODEL_ROUNDS)
+    # 显式空列表＝操作员说了"永不重试"，原样交回 []，不悄悄换成默认关键词表；
+    # retry_count=0 同样按字面值交回 0（一次都不重烧）。
+    assert loop._node_compression_retry_policy(['ceo_never']) == ([], 0)
+    # 查不到绑定才退默认关键词表、轮数退 0；不退"硬拦 3 次"，也不退内置轮数默认。
+    assert loop._node_compression_retry_policy(['ceo_missing']) == (None, 0)

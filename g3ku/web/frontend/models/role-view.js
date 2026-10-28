@@ -385,10 +385,10 @@ function renderModelDetail() {
                             </label>
                             <label class="resource-field">
                                 <span class="resource-field-label">重试次数</span>
-                                <input class="resource-search spinless-number-input" type="number" min="0" step="1" name="retryCount" value="${esc(String(current?.retry_count ?? 0))}" placeholder="0" title="命中自动重试关键词时的最大重试轮数（一轮 = 完整轮过该模型所有 Key），轮间按指数退避加抖动；填 0 使用默认 10 轮。未命中关键词的错误每个 Key 只试一次即切换下一模型。">
+                                <input class="resource-search spinless-number-input" type="number" min="0" step="1" name="retryCount" value="${esc(String(current?.retry_count ?? 0))}" placeholder="0" title="命中自动重试关键词时该模型的重试轮数预算（一轮 = 完整轮过该模型所有 Key），轮间按指数退避加抖动；填 0 就是不重试（只发首那一趟）。未命中关键词的错误每个 Key 只试一次即切换下一模型。">
                             </label>
                         </div>
-                        <p class="subtitle">重试次数 = 命中自动重试关键词时该模型的最大重试轮数（一轮完整轮过所有 Key，轮间动态退避）；0 表示默认 10 轮，预算耗尽后切换下一模型，全链耗尽报错停止。</p>
+                        <p class="subtitle">重试次数 = 命中自动重试关键词时该模型的重试轮数预算（一轮完整轮过所有 Key，轮间动态退避）；填 0 就是不重试（只发首那一趟），预算耗尽后切换下一模型，全链耗尽报错停止。</p>
                     </section>
                     <section class="resource-section">
                         <h3>额外请求头</h3>

@@ -11,7 +11,8 @@ MULTI_API_KEY_HELP_TEXT = (
     "`key1,key2`. Multiple keys are used in order. retry_count is the "
     "retryable-error round budget for the model: one round is a full pass "
     "across all configured keys, with exponential backoff between rounds; "
-    "0 uses the built-in default of 10 rounds. Non-retryable errors try "
+    "0 means no retry round (the first pass is the only one). Negative values "
+    "are rejected. Non-retryable errors try "
     "each key once, then move to the next model."
 )
 MULTI_API_KEY_PLACEHOLDER = "sk-... or sk-1,sk-2"

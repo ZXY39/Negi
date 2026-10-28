@@ -45,12 +45,11 @@ MODEL_RETRY_STATE_RETRYING = "retrying"
 MODEL_RETRY_STATE_WAITING_UPSTREAM = "waiting_upstream"
 MODEL_RETRY_STATE_CLEARED = "cleared"
 MODEL_RETRY_LIVE_STATES = frozenset({MODEL_RETRY_STATE_RETRYING, MODEL_RETRY_STATE_WAITING_UPSTREAM})
-# 可重试错误（retry_on 命中）的每模型退避重试轮数预算：模型绑定 retry_count 为
-# 0/未设置时使用该默认值。一轮 = 完整轮过该模型所有 key；轮间走封顶指数退避加
-# 抖动。模型预算耗尽才前进到链上下一个模型，全链模型预算耗尽即报错停止——次数
-# 预算是唯一权威上限（请求耗时另由 DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS
-# 单次约束），不存在无限重试循环。
-DEFAULT_RETRYABLE_MODEL_ROUNDS = 10
+# 可重试错误（retry_on 命中）的每模型退避重试轮数预算就是模型绑定的 retry_count
+# （配置页「重试次数」），没有内置默认：0/未设置＝一轮都不重烧，非 0＝该值的总轮数
+# （一轮 = 完整轮过该模型所有 key），轮间走封顶指数退避加抖动。模型预算耗尽才前进到
+# 链上下一个模型，全链模型预算耗尽即报错停止——次数预算是唯一权威上限（请求耗时另由
+# DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS 单次约束），不存在无限重试循环。
 # 运行途中改写模型链（`model_config` 工具 / 管理面保存）会让 runtime config
 # revision 前进。链重试循环在退避边界检测到 revision 变化时，按新链重启重试而
 # 不是报错中止；此上限只兜底"链反复变化 + 一直不可重试成功"的病态抖动，正常一次
@@ -633,9 +632,9 @@ class FallbackProvider(LLMProvider):
             if str(effective_reasoning or "").strip().lower() == "none":
                 effective_reasoning = None
 
-            # 本模型的可重试轮数预算：绑定 retry_count 即配置页「重试次数」，
-            # 0/未设置用默认 DEFAULT_RETRYABLE_MODEL_ROUNDS。一轮 = 完整轮过该模型所有 key。
-            budget_rounds = normalized_retry_count(getattr(base_target, "retry_count", 0)) or DEFAULT_RETRYABLE_MODEL_ROUNDS
+            # 本模型的可重试轮数预算：绑定 retry_count 即配置页「重试次数」，按字面值取，
+            # 0＝不重烧（首发那一趟仍然发）。一轮 = 完整轮过该模型所有 key。
+            budget_rounds = normalized_retry_count(getattr(base_target, "retry_count", 0))
             model_retry_on = list(getattr(base_target, "retry_on", []) or [])
             rounds_used = 0
             model_last_error: Exception | None = None

@@ -218,7 +218,7 @@
   function bindingNotesTitle() {
     return [
       "每个配置只使用一个 API Key（单 key 模式）；需要额外容量或容灾回退时，请添加多个配置并组成模型链，链上的配置会按顺序自动回退。",
-      "“重试次数”是命中自动重试关键词时的最大重试轮数：一轮 = 完整轮过该配置，轮间按指数退避加抖动；填 0 使用默认 10 轮。预算耗尽后切换链上下一个配置，全链耗尽报错停止。",
+      "“重试次数”是命中自动重试关键词时该配置的重试轮数预算：一轮 = 完整轮过该配置，轮间按指数退避加抖动；填 0 就是不重试（只发首那一趟），填 N 最多跑 N 轮。预算耗尽后切换链上下一个配置，全链耗尽报错停止。",
       "未命中关键词的错误（如坏 Key、503）每个配置只试一次即切换链上下一个配置；请求体形状错误（400/422）不重试不换配置。",
       "配置名称用于界面展示与区分，需唯一；名称会同步到 Token 统计与会话页面的配置显示。",
     ];
@@ -546,7 +546,8 @@
     if (retryOnInput) editor.retryOn = parseBindingRetryOn(retryOnInput.value || "");
     if (retryCountInput) {
       const parsed = Number.parseInt(String(retryCountInput.value || "").trim(), 10);
-      editor.retryCount = Number.isInteger(parsed) && parsed >= 0 ? parsed : 0;
+      // 负数保留原值交给保存校验报错，不在这里夹成 0——0 现在是「不重试」，静默夹取等于替操作员关掉重试。
+      editor.retryCount = Number.isInteger(parsed) ? parsed : 0;
     }
     if (singleApiKeyMaxConcurrencyInput) {
       editor.singleApiKeyMaxConcurrency = trim(singleApiKeyMaxConcurrencyInput.value || "");
@@ -1055,7 +1056,7 @@
           </label>
           <label class="resource-field">
             <span class="resource-field-label">重试次数</span>
-            <input id="llm-binding-retry-count" class="resource-search" type="number" min="0" step="1" inputmode="numeric" value="${escv(String(editor.retryCount ?? 0))}" placeholder="0" title="命中自动重试关键词时的最大重试轮数（一轮 = 完整轮过该模型所有 Key），轮间按指数退避加抖动；填 0 使用默认 10 轮。未命中关键词的错误每个 Key 只试一次即切换下一模型。">
+            <input id="llm-binding-retry-count" class="resource-search" type="number" min="0" step="1" inputmode="numeric" value="${escv(String(editor.retryCount ?? 0))}" placeholder="0" title="命中自动重试关键词时的最大重试轮数（一轮 = 完整轮过该模型所有 Key），轮间按指数退避加抖动；填 0 就是不重试（只发首那一趟）。未命中关键词的错误每个 Key 只试一次即切换下一模型。">
           </label>
           ${renderConcurrencyField(editor)}
         </div>
@@ -1069,7 +1070,7 @@
         </label>
         <label class="resource-field">
           <span class="resource-field-label">重试次数</span>
-          <input id="llm-binding-retry-count" class="resource-search" type="number" min="0" step="1" inputmode="numeric" value="${escv(String(editor.retryCount ?? 0))}" placeholder="0" title="命中自动重试关键词时的最大重试轮数（一轮 = 完整轮过该模型所有 Key），轮间按指数退避加抖动；填 0 使用默认 10 轮。未命中关键词的错误每个 Key 只试一次即切换下一模型。">
+          <input id="llm-binding-retry-count" class="resource-search" type="number" min="0" step="1" inputmode="numeric" value="${escv(String(editor.retryCount ?? 0))}" placeholder="0" title="命中自动重试关键词时的最大重试轮数（一轮 = 完整轮过该模型所有 Key），轮间按指数退避加抖动；填 0 就是不重试（只发首那一趟）。未命中关键词的错误每个 Key 只试一次即切换下一模型。">
         </label>
         ${renderConcurrencyField(editor)}
       </div>`;
@@ -2178,6 +2179,7 @@
     handleBindingJsonEditorInput,
     llmEditorDirty,
     syncLlmEditorDirtyAffordance,
+    syncBindingInputs,
   };
   window.handleModelRoleEditorAction = async function handleModelRoleEditorAction() {
     if (!S.modelCatalog.rolesDirty) return;
