@@ -196,4 +196,5 @@ def test_silence_rules_state_which_turn_they_govern() -> None:
     # 写进去会把后面的规则整段切掉（实盘踩过一次）。
     assert '[SESSION EVENTS]' not in rules
     assert 'govern this event turn only' in preamble
-    assert '用户一旦开口就不再适用' in frontdoor
+    assert '用户在提问时必须正常回答' in frontdoor
+    assert '不要用它省略本应给出的答复' in frontdoor

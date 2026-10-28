@@ -7,14 +7,12 @@
 """
 from __future__ import annotations
 
-from pathlib import Path
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-PROMPT_PATH = REPO_ROOT / "main/prompts/acceptance_execution.md"
+from main.prompts import load_prompt
 
 
 def _prompt() -> str:
-    return PROMPT_PATH.read_text(encoding="utf-8")
+    # 证据纪律条款住在 shared_evidence_discipline.md，断言必须读渲染结果。
+    return load_prompt("acceptance_execution.md")
 
 
 def test_acceptance_prompt_has_evidence_discipline_section() -> None:

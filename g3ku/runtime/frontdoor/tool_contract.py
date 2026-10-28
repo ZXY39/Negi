@@ -664,8 +664,8 @@ def _render_candidate_tool_section(items: list[dict[str, str]] | None, declared_
 
 
 def _render_repair_required_tool_section(items: list[dict[str, str]] | None) -> list[str]:
-    """只列条目。四句固定处置指令是回合内常量，改由稳定提示词承载
-    （`ceo_frontdoor.md`「工具待修复处置顺序」／节点道 `shared_repair_required.md`）。
+    """只列条目。处置指令是回合内常量：前门稳定提示词只留信号识别、重试禁令与缺口申报，
+    排查流程住 skill `repair-tool`；节点道住 `shared_repair_required.md`。
     """
     normalized_items = _normalized_repair_required_tool_items(items)
     if not normalized_items:

@@ -65,7 +65,8 @@ def test_standing_prompts_point_to_the_skill_and_keep_the_append_rule() -> None:
     frontdoor = FRONTDOOR_PROMPT.read_text(encoding='utf-8')
     node = NODE_PROMPT.read_text(encoding='utf-8')
 
-    assert 'load_skill_context(skill_id="multi-node-discussion")' in frontdoor
+    # The frontdoor only names the capability; the node lane keeps the explicit load form.
+    assert 'multi-node-discussion' in frontdoor
     assert 'load_skill_context(skill_id="multi-node-discussion")' in node
     # The frontdoor may append new requirements/constraints to the current task.
     assert '新增需求/约束' in frontdoor

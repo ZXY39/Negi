@@ -36,6 +36,4 @@
 }
 ```
 
-- `pass` 表示交付通过；`feedback` 写简短结论。
-- `reject` 表示可修复驳回；`feedback` 必须写清不通过原因与逐条修复要求。
-- `reject_no_progress` 表示本轮提交与上一轮驳回相比没有实质变化；`feedback` 必须点名「上一轮要求了什么、本轮仍未做到什么」。首次裁定禁止使用这一档。
+- 三档裁决的判据见验收车道「验收判定规则」（`pass` / `reject` / `reject_no_progress`）。

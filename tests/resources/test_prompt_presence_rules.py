@@ -99,10 +99,12 @@ def test_presence_wording_replaces_the_callable_line() -> None:
     for text in (
         load_prompt("node_execution.md"),
         load_prompt("acceptance_execution.md"),
-        CeoPromptBuilder(loop=SimpleNamespace(workspace=None))._read_prompt("ceo_frontdoor.md"),
     ):
         assert "TOOL_CONTRACT" in text
         assert "不执行" in text
+    frontdoor = CeoPromptBuilder(loop=SimpleNamespace(workspace=None))._read_prompt("ceo_frontdoor.md")
+    assert "契约随结果交回" in frontdoor
+    assert "暂存可复用" in frontdoor
 
 
 def _receipt(*, staged_count: int, batch_total: int = 1, batch_position: int = 1) -> str:

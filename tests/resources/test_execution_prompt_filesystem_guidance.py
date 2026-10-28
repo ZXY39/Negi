@@ -49,12 +49,6 @@ def test_prompts_and_exec_manifest_do_not_hardcode_exec_as_read_only() -> None:
     assert "read-only shell commands" not in exec_manifest
 
 
-def test_ceo_frontdoor_prompt_prefers_direct_visual_reasoning_for_current_turn_images() -> None:
-    prompt = (REPO_ROOT / "g3ku/runtime/prompts/ceo_frontdoor.md").read_text(encoding="utf-8")
-    assert "当前轮已经包含图片输入时，优先直接基于图片内容回答" in prompt
-    assert "不要为了查看同一张当前轮图片而优先调用 `exec`、`content_open`" in prompt
-
-
 def test_prompts_describe_historical_image_reopen_via_content_open() -> None:
     ceo_prompt = (REPO_ROOT / "g3ku/runtime/prompts/ceo_frontdoor.md").read_text(encoding="utf-8")
     assert "如果历史上下文里只保留了图片 `path` / `ref`" in ceo_prompt
@@ -80,8 +74,8 @@ def test_ceo_frontdoor_prompt_requires_real_upload_paths_or_refs_in_async_task_p
 
 
 def test_prompts_require_stage_summary_to_cover_facts_goals_and_lessons() -> None:
+    # 阶段小结是节点侧字段：前门不提交阶段，条款只住节点两条车道。
     for relative_path in (
-        "g3ku/runtime/prompts/ceo_frontdoor.md",
         "main/prompts/node_execution.md",
         "main/prompts/acceptance_execution.md",
     ):

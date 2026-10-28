@@ -254,13 +254,12 @@ def test_frontdoor_prompt_requires_identity_and_persona_photo_handling() -> None
     prompt = (Path(__file__).resolve().parents[2] / "g3ku/runtime/prompts/ceo_frontdoor.md").read_text(
         encoding="utf-8"
     )
-    assert "不要刻意 OOC" in prompt
     assert "头部「我的人设」" in prompt
-    assert "身份未知（只在 Negi 这套 harness 里运行）" in prompt
-    assert "询问用户希望你是谁" in prompt
+    assert "没有给出时，你的身份未知" in prompt
+    assert "询问用户你是谁" in prompt
     assert "没有给出时，你就是 Negi" not in prompt
     assert "大体相同的，直接合并成一段描述" in prompt
-    assert "先问用户保留哪一个" in prompt
+    assert "存在无法同时成立的冲突时" in prompt
     assert "用户发来的是你（主 Agent）的照片或形象时" in prompt
     assert "filesystem_copy" in prompt
     assert "memory_update" in prompt

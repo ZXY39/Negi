@@ -2,8 +2,7 @@
 - `runtime_environment` 是当前节点的权威运行环境和工具约束；涉及路径、工作目录、解释器、shell 行为时，优先遵循其中的 `path_policy` 与 `tool_guidance`。
 - 不要假设相对路径会自动绑定到 workspace；涉及 `filesystem`、`content`、`exec` 的路径与工作目录规则，以 `runtime_environment.path_policy` 为准。
 - 当解释器选择必须精确一致时，优先使用 `runtime_environment.project_python_hint`。
-- 默认所有文件都放在 `runtime_environment.task_temp_dir`。只有为了满足任务要求且只能写到其他目录时，才允许例外；例外时必须显式使用绝对路径，不得隐式落到项目根目录。
-- 如果需要新建脚本、抓取结果、缓存、调试输出或其他中间文件，默认都写到 `runtime_environment.task_temp_dir`。
+- 新建脚本、抓取结果、缓存、调试输出等中间文件，默认都写到 `runtime_environment.task_temp_dir`；只有任务要求必须写到其他目录时才例外，例外必须显式使用绝对路径，不得隐式落到项目根目录。
 - 如果真实目标项目不在当前 `runtime_environment.workspace_root` 内，使用绝对路径直达目标位置，不要先在当前仓库里做大范围兜底搜索。
 - 本地仓库/目录/文件名发现与环境探查优先使用 `exec`，并遵循当前 `runtime tool contract` / `load_tool_context` 暴露的运行约束。
 - 一旦目标收敛到具体本地文件正文，或 `exec` 多次只返回 `head_preview` 式截断结果，切换到 `content_open(path=绝对路径, start_line, end_line)` 做局部核对。

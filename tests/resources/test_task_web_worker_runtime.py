@@ -13609,8 +13609,8 @@ def test_spawn_review_prompt_prioritizes_consumed_distribution_notices() -> None
     prompt = load_prompt("spawn_child_review.md")
 
     assert "consumed_distribution_notices" in prompt
-    assert "Priority rule:" in prompt
-    assert "use the latest consumed distribution notice as the effective current requirement" in prompt
+    assert "优先级规则：" in prompt
+    assert "以父节点的最新分发消息为准" in prompt
 
 
 def test_spawn_review_prompt_states_parsed_structure_and_merge_template() -> None:

@@ -2,6 +2,27 @@
 
 当某个工具已经注册，但当前不可用、缺少本地安装、未出现在 callable function tool list，或用户明确要求“修好工具再继续”时，使用本技能。
 
+## 待修复信号
+
+以下任一出现，表示工具已注册且你有调用权限，但当前不能执行真实能力：
+
+- 函数工具描述以 `【待修复】` 开头；
+- 调用返回 `repair_required=true` 或 `tool_state="repair_required"`；
+- 运行时合同的 `repair_required_tools:` 列出了该 `tool_id`。
+
+它不是目标能力，而是修复入口：把它当正常能力继续排程，或直接重试原始调用，都会把“待修复”报成“已执行”。处置顺序固定为：
+
+1. `load_tool_context(tool_id="<tool_id>")` 读取安装、排障、更新与使用说明。
+2. 用 `filesystem_write` / `filesystem_edit` / `filesystem_copy` / `filesystem_move` / `filesystem_propose_patch` / `exec` 补齐缺失依赖、路径、环境变量或注册信息。
+3. 刷新并重查该工具的可用性。
+4. 只有恢复可用后，才重试原始调用或继续依赖它完成验证。
+
+分型排查见下文「故障分类」，复核口径见「刷新与复核」。
+
+合同 `repair_required_skills:` 列出的是 skill 而不是工具：那类资源按 `main/prompts/shared_repair_required.md`「技能待修复规则」与 skill `writing-skills` 处置，不在本技能范围内。
+
+只有权限、环境和可用工具都已穷尽，才把剩余缺口（具体缺哪个 bin/env/tool、影响哪个资源、已做过哪些修复动作）如实写进交付说明；禁止笼统写“待复核”，也不许把未修复状态报成已完成。
+
 ## 目标
 
 - 不要停在“诊断出问题”。
