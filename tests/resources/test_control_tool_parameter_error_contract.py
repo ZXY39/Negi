@@ -68,10 +68,12 @@ def test_contract_guidance_names_every_required_key_with_type_and_enum() -> None
     # The render must not silently drop a single required key.
     for name in required:
         assert f'{name}=' in guidance
-    assert 'status=string(success|failed)' in guidance
-    assert 'delivery_status=string(final|blocked)' in guidance
     assert 'summary=string(非空)' in guidance
     assert 'remaining_work=array<string>' in guidance
+    # 执行节点没有 status / delivery_status：提交即表示这一轮做完了
+    # （main/prompts/node_execution.md「执行节点没有 status / delivery_status 可选」）。
+    assert 'status=' not in guidance
+    assert 'delivery_status=' not in guidance
 
 
 def test_contract_guidance_shows_evidence_is_an_object_array_not_a_string() -> None:
