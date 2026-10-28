@@ -202,6 +202,7 @@
 | C4 frontdoor `completed_stage_summary` | `f64e5e85` |
 | 压缩后重贴契约尾块 | `72694462` |
 | 验收握手 submission_id 默认字段 | `ee35a6d1` |
+| 压缩后重投一次性合同 notice | `1bbcc31c` |
 
 - C4 已关闭：`test_execution_prompt_filesystem_guidance.py` 6 passed。
 - 压缩契约尾块已修：`repair_required/candidate` 段不再随摘要丢失；
@@ -210,14 +211,7 @@
 
 ### 剩余（明确阻塞/独立批次）
 
-1. **context_window_overflow 的修复验收（1 条）**：压缩函数已把拆出的
-   `_contract_messages` 回插（`72694462`），但该用例的 repair 段不在压缩输入里。
-   注意**不要**把 `repair_required_tool_items` 塞进钉住头：`pinned_contract_revision_key`
-   刻意只吃 roster epoch，执行策略/临时目录/可见集都不进键（缓存优先）；把 repair 项
-   放进头部会让 repair 状态每变一次就重印整段前缀。正确修法是走一次性
-   `[RUNTIME_NOTICE]` / 动态契约尾块，让 repair 段在压缩后重贴；需要作者确认这条测试
-   的状态构造是否仍有效。
-2. **task_web_worker_runtime 39 条**：独立的行为漂移批次，非单一退役契约。
+1. **task_web_worker_runtime 39 条**：独立的行为漂移批次，非单一退役契约。
    聚类：
    - spawn children 结果/failure_info（约 10）
    - waiting_children / round 恢复（约 10）
@@ -227,7 +221,11 @@
    - acceptance blocked 终态语义（1）
    - node detail 形状（1）
    需要按新 task runtime 行为逐族定稿，不能靠改字符串一次收完。
-3. **J 第 11 条**：本机仍无 WSL 后端、token 为空，证据包不在本机；不可复跑。
+2. **J 第 11 条**：本机仍无 WSL 后端、token 为空，证据包不在本机；不可复跑。
+
+context_window 已关闭：`1bbcc31c` 在压缩重置后、同一次主请求前重投一次性
+`[RUNTIME_NOTICE]`，repair 段以 `- repair_required:` 合同节到达模型；压缩套件
+`25 passed`。钉住头保持只吃 roster epoch 的缓存契约，未把 repair 项塞进头部。
 
 ### 并发改动警告
 
