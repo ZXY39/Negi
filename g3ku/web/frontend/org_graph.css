@@ -4210,7 +4210,8 @@ textarea {
 }
 
 /* 在飞工具行不再套卡片外壳：它跟上方已完成的工具卡同一量级，但只占内容宽，
-   不拉满整行。秒数跟在名字后面，右侧只留展开钮。 */
+   不拉满整行。行内只留转圈图标、工具名（原始 tool_id）和展开钮；计时只在流程
+   头部那一处出现，行尾不再挂“已运行 N 秒”。 */
 .task-trace-live-steps .interaction-step-header {
     margin-bottom: 0;
     display: inline-flex;
@@ -4225,12 +4226,6 @@ textarea {
 /* 卡里不再印文字状态：状态由前置图标（转圈 / √ / ！）表达。 */
 .task-trace-live-steps .interaction-step-status {
     display: none;
-}
-
-.task-trace-live-steps .interaction-step-runtime {
-    color: var(--text-muted);
-    font-size: 0.76rem;
-    white-space: nowrap;
 }
 
 /* 在飞工具行不画左上角的轨道状态点：卡内正式轮次已经不画，实时行再留一颗跳动的蓝点只会多一层状态。 */
@@ -13615,6 +13610,30 @@ textarea {
 
 .ceo-timeline .interaction-flow {
     order: -1;
+}
+
+/* 在飞占位弧（缺弧圆环）与读数行并排：弧列 1、`.ceo-turn-meta` 列 2，同一行。
+   分成上下两行时弧像悬空、读数像第二条状态，读起来是两个块。流程框与思考行
+   仍通栏，行序照旧（timeline 下流程框靠 order:-1 排在第一行）。 */
+.ceo-turn-content:has(> .assistant-text.assistant-text-loading) {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    align-items: center;
+    column-gap: var(--space-3);
+    row-gap: var(--space-3);
+}
+
+.ceo-turn-content:has(> .assistant-text.assistant-text-loading) > .assistant-text-loading {
+    grid-column: 1;
+}
+
+.ceo-turn-content:has(> .assistant-text.assistant-text-loading) > .ceo-turn-meta {
+    grid-column: 2;
+    min-width: 0;
+}
+
+.ceo-turn-content:has(> .assistant-text.assistant-text-loading) > :not(.assistant-text-loading):not(.ceo-turn-meta) {
+    grid-column: 1 / -1;
 }
 
 /* 跟进消息打断标记:归档半截回合里被补充消息拦腰打断的那个阶段标题用警示色提示 */

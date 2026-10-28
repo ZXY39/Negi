@@ -6308,7 +6308,6 @@ function ceoFriendlyToolName(toolName = "") {
     const map = {
         "skill-installer": "技能安装",
         "filesystem": "文件处理",
-        "exec": "命令执行",
         "load_tool_context": "工具说明",
         "load_skill_context": "技能说明",
     };
@@ -7040,11 +7039,10 @@ function refreshCeoFlowUsage(turn) {
 }
 
 function refreshLiveDurationBadges() {
-    document.querySelectorAll(".interaction-step").forEach((item) => {
+    // 在飞行不再挂本行计时（总时长只看流程头部），但后台转运行的那句读数
+    // 里的“已等待 N 秒”仍要每秒跟着走。
+    document.querySelectorAll(".task-trace-live-steps .interaction-step").forEach((item) => {
         if (!(item instanceof HTMLElement)) return;
-        const runtimeEl = item.querySelector(".interaction-step-runtime");
-        if (!(runtimeEl instanceof HTMLElement)) return;
-        updateRuntimeBadge(item, runtimeEl);
         updateCeoBackgroundDetail(item);
     });
     document.querySelectorAll(".task-trace-step").forEach((item) => {
@@ -7210,7 +7208,6 @@ function applyCeoToolEventToTurn(turn, event = {}) {
                 <span class="interaction-step-lead">
                     <span class="interaction-step-icon" data-icon-name="loader"><i data-lucide="loader"></i></span>
                     <span class="interaction-step-title"></span>
-                    <span class="interaction-step-runtime" hidden></span>
                     <button type="button" class="interaction-step-copy" hidden aria-label="复制工具结果" title="复制工具结果"><i data-lucide="copy"></i></button>
                 </span>
                 <span class="interaction-step-side">
@@ -7268,8 +7265,6 @@ function applyCeoToolEventToTurn(turn, event = {}) {
     trimCeoToolSteps(turn);
     // 有轨道时保住那行一直在动的计数，只在没有轨道（纯工具回合）才用状态句子
     updateCeoTurnMeta(turn, ceoRailMetaLabel(turn) || stage.meta);
-    const runtimeEl = item.querySelector(".interaction-step-runtime");
-    if (runtimeEl instanceof HTMLElement) updateRuntimeBadge(item, runtimeEl);
     updateCeoBackgroundDetail(item);
     icons();
     return item;
