@@ -28,11 +28,21 @@ from g3ku.runtime.frontdoor._ceo_support import CeoFrontDoorSupport
 from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
 from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted, CeoPendingInterrupt
-from g3ku.runtime.frontdoor.tool_contract import split_pinned_contract_from_system_text
+from g3ku.runtime.frontdoor.tool_contract import (
+    clear_pinned_contract_stores,
+    split_pinned_contract_from_system_text,
+)
 from g3ku.runtime.session_agent import MANUAL_COMPRESSION_STATE_ATTR, RuntimeAgentSession
 from g3ku.runtime.tool_contract_block import render_tool_contract_block
 from g3ku.session.manager import SessionManager
 from main.storage.artifact_store import TaskArtifactStore
+
+
+@pytest.fixture(autouse=True)
+def _isolate_pinned_contract_stores():
+    clear_pinned_contract_stores()
+    yield
+    clear_pinned_contract_stores()
 from main.storage.sqlite_store import SQLiteTaskStore
 
 
@@ -5931,7 +5941,7 @@ async def test_ceo_frontdoor_prepare_turn_continues_full_context_and_appends_hid
     }
     assert captured["builder_kwargs"]["user_content"] == heartbeat_event_bundle
     assert captured["contract_kwargs"]["scope"] == "ceo_frontdoor"
-    assert captured["contract_kwargs"]["stable_messages"] == [
+    assert _body_without_pinned_head(captured["contract_kwargs"]["stable_messages"]) == [
         *builder_seed,
         {
             "role": "user",
@@ -5976,7 +5986,6 @@ async def test_ceo_frontdoor_prepare_turn_heartbeat_inherits_previous_tool_state
     from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
     from g3ku.runtime.frontdoor.prompt_cache_contract import FrontdoorPromptContract
     from g3ku.runtime.frontdoor.state_models import CeoRuntimeContext
-    from g3ku.runtime.frontdoor.tool_contract import is_frontdoor_tool_contract_message
 
     async def _noop_ready() -> None:
         return None
@@ -6162,37 +6171,20 @@ async def test_ceo_frontdoor_prepare_turn_heartbeat_inherits_previous_tool_state
             },
         },
     ]
-    contract_messages = [
-        dict(item)
-        for item in list(state_update["dynamic_appendix_messages"] or [])
-        if is_frontdoor_tool_contract_message(dict(item))
-    ]
-    assert len(contract_messages) == 1  # 运行时工具合同只有一份
-    contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
     assert (
         list(state_update["frontdoor_selection_debug"]["callable_tool_names"])
         == ["create_async_task", "task_list", "filesystem_write", "silent", "time", "schedule_wake"]
     )
-    # D11：callable 不再渲成模型可见的一行，上一跳继承来的那份只在上面的读数里可见。
-    assert "callable_tools:" not in contract_text
-    assert "hydrated_tools:" not in contract_text
-    # 名单钉在请求体头部的 system 里（每跳逐字节复用），尾块不得再抄第二份。
+    # 名单钉在请求体头部的 system 里（每跳逐字节复用），尾块不再抄第二份。
     inherited_head_text = str(
         (list(state_update["frontdoor_request_body_messages"] or [{}])[0] or {}).get("content") or ""
     )
     assert "candidate_skills (loadable with `load_skill_context`; `id | name | description`):" in inherited_head_text
-    assert "candidate_skills" not in contract_text
+    # D11：callable 不再渲成模型可见的一行，上一跳继承来的那份只在上面的读数里可见。
+    assert "callable_tools:" not in inherited_head_text
+    assert "hydrated_tools:" not in inherited_head_text
     # skill 加载规则只在基础提示词里说一次，契约不再抄第二份
-    assert 'Call `load_skill_context(skill_id="<skill_id>")`' not in contract_text
-    # 钉住的 tools[] 不吸收候选，`web_fetch` 这一跳能 load 却没有参数表：
-    # 它既不把整份候选表重列，也不靠说明文本承载，只在尾块那条滞后差集里点名一次。
-    assert "candidate_tools:" not in contract_text
-    lag_line = next(
-        line for line in contract_text.splitlines() if line.startswith("undeclared_candidates")
-    )
-    assert "`web_fetch`" in lag_line
-    # 候选的说明文本不抄进正文：这个名字的参数表由 `load_tool_context` 的返回承载
-    assert "`web_fetch`: fetch web pages" not in contract_text
+    assert 'Call `load_skill_context(skill_id="<skill_id>")`' not in inherited_head_text
 
 
 @pytest.mark.asyncio
@@ -6203,7 +6195,6 @@ async def test_ceo_frontdoor_prepare_turn_cron_inherits_previous_tool_state_with
     from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
     from g3ku.runtime.frontdoor.prompt_cache_contract import FrontdoorPromptContract
     from g3ku.runtime.frontdoor.state_models import CeoRuntimeContext
-    from g3ku.runtime.frontdoor.tool_contract import is_frontdoor_tool_contract_message
 
     async def _noop_ready() -> None:
         return None
@@ -6422,37 +6413,20 @@ async def test_ceo_frontdoor_prepare_turn_cron_inherits_previous_tool_state_with
             },
         },
     ]
-    contract_messages = [
-        dict(item)
-        for item in list(state_update["dynamic_appendix_messages"] or [])
-        if is_frontdoor_tool_contract_message(dict(item))
-    ]
-    assert len(contract_messages) == 1  # 运行时工具合同只有一份
-    contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
     assert (
         list(state_update["frontdoor_selection_debug"]["callable_tool_names"])
         == ["create_async_task", "task_list", "filesystem_write", "silent", "time", "schedule_wake"]
     )
-    # D11：callable 不再渲成模型可见的一行，上一跳继承来的那份只在上面的读数里可见。
-    assert "callable_tools:" not in contract_text
-    assert "hydrated_tools:" not in contract_text
-    # 名单钉在请求体头部的 system 里（每跳逐字节复用），尾块不得再抄第二份。
+    # 名单钉在请求体头部的 system 里（每跳逐字节复用），尾块不再抄第二份。
     inherited_head_text = str(
         (list(state_update["frontdoor_request_body_messages"] or [{}])[0] or {}).get("content") or ""
     )
     assert "candidate_skills (loadable with `load_skill_context`; `id | name | description`):" in inherited_head_text
-    assert "candidate_skills" not in contract_text
+    # D11：callable 不再渲成模型可见的一行，上一跳继承来的那份只在上面的读数里可见。
+    assert "callable_tools:" not in inherited_head_text
+    assert "hydrated_tools:" not in inherited_head_text
     # skill 加载规则只在基础提示词里说一次，契约不再抄第二份
-    assert 'Call `load_skill_context(skill_id="<skill_id>")`' not in contract_text
-    # 钉住的 tools[] 不吸收候选，`web_fetch` 这一跳能 load 却没有参数表：
-    # 它既不把整份候选表重列，也不靠说明文本承载，只在尾块那条滞后差集里点名一次。
-    assert "candidate_tools:" not in contract_text
-    lag_line = next(
-        line for line in contract_text.splitlines() if line.startswith("undeclared_candidates")
-    )
-    assert "`web_fetch`" in lag_line
-    # 候选的说明文本不抄进正文：这个名字的参数表由 `load_tool_context` 的返回承载
-    assert "`web_fetch`: fetch web pages" not in contract_text
+    assert 'Call `load_skill_context(skill_id="<skill_id>")`' not in inherited_head_text
 
 
 @pytest.mark.asyncio

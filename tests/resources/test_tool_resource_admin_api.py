@@ -1252,7 +1252,7 @@ async def test_create_async_task_tool_returns_duplicate_rejection_text():
     assert '任务未创建' in result
     assert 'task:existing-1' in result
     assert '完全相同' in result
-    assert 'task_append_notice' in result
+    assert '先暂停或结束旧任务' in result
     assert '暂停旧任务或等待其进入终态（如失败）后，即可重新创建' in result
     assert captured['precheck']['session_id'] == 'web:ceo-demo'
 
@@ -1325,7 +1325,7 @@ async def test_create_async_task_tool_rechecks_exact_duplicate_before_create():
 
 
 @pytest.mark.asyncio
-async def test_create_async_task_tool_returns_append_notice_guidance():
+async def test_create_async_task_tool_returns_manage_task_nodes_guidance():
     class _StubService:
         async def precheck_async_task_creation(self, **kwargs):
             _ = kwargs
@@ -1351,8 +1351,8 @@ async def test_create_async_task_tool_returns_append_notice_guidance():
 
     assert '任务未创建' in result
     assert 'task:existing-2' in result
-    assert '追加通知' in result
-    assert 'task_append_notice' in result
+    assert 'manage_task_nodes' in result
+    assert 'resume' in result
 
 
 @pytest.mark.asyncio
@@ -5486,7 +5486,6 @@ async def test_tool_resources_mark_core_tools_and_keep_skill_context_tools_indep
         'load_skill_context',
         'load_tool_context',
         'create_async_task_cn',
-        'task_append_notice_cn',
         'task_fetch_cn',
         'task_delete_cn',
         'task_failed_nodes_cn',
@@ -5520,14 +5519,14 @@ async def test_tool_resources_mark_core_tools_and_keep_skill_context_tools_indep
         assert 'messaging' not in items
         assert items['load_skill_context'].is_core is True
         assert items['create_async_task'].is_core is True
-        assert items['task_append_notice'].is_core is True
+        assert items['task_summary'].is_core is True
 
         # 旧模型里 skill_access 是一个 action 共享两条执行器；新模型是两条独立记录，
         # 默认角色相同但各自持有 allowed_roles。
         assert items['load_skill_context'].allowed_roles == ['ceo', 'execution', 'inspection']
         assert items['load_tool_context'].allowed_roles == ['ceo', 'execution', 'inspection']
 
-        assert 'ceo' in set(items['task_append_notice'].allowed_roles)
+        assert 'ceo' in set(items['task_summary'].allowed_roles)
 
         assert {key for key in items if key.startswith('memory_')} == {
             'memory_update',
@@ -5736,7 +5735,6 @@ async def test_ensure_runtime_config_current_keeps_dynamic_task_tools_visible(tm
         'load_skill_context',
         'load_tool_context',
         'create_async_task_cn',
-        'task_append_notice_cn',
         'task_fetch_cn',
         'task_delete_cn',
         'task_failed_nodes_cn',
@@ -5781,11 +5779,10 @@ async def test_ensure_runtime_config_current_keeps_dynamic_task_tools_visible(tm
         assert 'create_async_task' in manager.tool_instances()
         after = service.list_effective_tool_names(actor_role='ceo', session_id='web:shared')
         assert 'create_async_task' in after
-        assert 'task_append_notice' in after
+        assert 'task_summary' in after
         assert 'memory_update' in after
         assert {
             'task_list',
-            'task_append_notice',
             'task_delete',
             'task_failed_nodes',
             'task_node_detail',
@@ -5812,7 +5809,6 @@ async def test_core_tool_admin_endpoints_allow_disable_block_delete_and_allow_ro
         'load_skill_context',
         'load_tool_context',
         'create_async_task_cn',
-        'task_append_notice_cn',
         'task_fetch_cn',
         'task_delete_cn',
         'task_failed_nodes_cn',
@@ -5841,12 +5837,12 @@ async def test_core_tool_admin_endpoints_allow_disable_block_delete_and_allow_ro
 
         # 新合同：核心工具可以停用（关掉一条只影响这一条），但仍然不能删除。
         disable_response = client.post(
-            '/api/resources/tools/task_append_notice/disable',
+            '/api/resources/tools/task_summary/disable',
             params={'session_id': 'web:shared'},
         )
         assert disable_response.status_code == 200
         assert disable_response.json()['item']['enabled'] is False
-        assert service.get_tool('task_append_notice').enabled is False
+        assert service.get_tool('task_summary').enabled is False
         assert service.get_tool('task_list').enabled is True
 
         delete_response = client.delete('/api/resources/tools/load_tool_context', params={'session_id': 'web:shared'})

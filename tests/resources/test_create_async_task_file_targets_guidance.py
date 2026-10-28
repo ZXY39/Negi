@@ -41,8 +41,7 @@ def test_frontdoor_contract_guides_models_to_copy_reopen_targets_into_file_targe
         ],
     )
 
-    updated = upsert_frontdoor_tool_contract_message([], contract)
-    contract_text = str(updated[0]["content"] or "")
+    contract_text = str(contract.to_message()["content"] or "")
 
     assert "attachment_reopen_targets:" in contract_text
     assert "D:/Uploads/resume.docx" in contract_text

@@ -416,7 +416,7 @@ def test_node_ledger_call_site_wires_the_thinking_fields() -> None:
     而漏掉这两个 kwarg 的表现是"恢复的行没有思路"，行为测试覆盖不到它。
     """
     source = Path(__file__).resolve().parents[2].joinpath("main/runtime/react_loop.py").read_text(encoding="utf-8")
-    writer = source.split("updated_node = self._log_service.append_node_output(", 1)[1][:1500]
+    writer = source.split("self._log_service.append_node_output(", 1)[1][:1500]
 
     assert "reasoning_content=str(ledger_reasoning_field.get('reasoning_content') or '')," in writer
     assert "reasoning_items=list(ledger_reasoning_field.get('reasoning_items') or [])," in writer
