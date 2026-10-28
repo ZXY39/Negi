@@ -548,7 +548,7 @@ async def test_session_status_carries_the_node_cells_through_the_gateway_project
 
 
 @pytest.mark.asyncio
-async def test_wake_projection_counts_only_reply_final_and_shows_truncation():
+async def test_wake_projection_includes_reply_final_and_outbound_created():
     from g3ku.runtime.api.external_v1 import summarize_external_session_wake
 
     rows = [
@@ -565,8 +565,9 @@ async def test_wake_projection_counts_only_reply_final_and_shows_truncation():
     )
     assert [item["task_id"] for item in first["tasks"]] == ["task:1", "task:2"]
     assert first["tasks_truncated"] is True
-    assert [item["outbox_id"] for item in first["replies"]] == ["obx-1", "obx-3"]
-    assert first["replies_pending"] == 2
+    assert [item["outbox_id"] for item in first["replies"]] == ["obx-1", "obx-2", "obx-3"]
+    assert [item["event"] for item in first["replies"]] == ["reply.final", "outbound.created", "reply.final"]
+    assert first["replies_pending"] == 3
     assert first["next_since"] == "2026-10-11T02:00:00"
 
     again = summarize_external_session_wake(cursor="2026-10-11T01:40:00", task_rows=[], pending_records=records)
