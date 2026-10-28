@@ -111,6 +111,7 @@
 - 创建异步任务后，需要判断最终结果是否需要最终验收。
 - 设置 `requires_final_acceptance=true`时，需要同时提供明确的 `final_acceptance_prompt`。
 - `final_acceptance_prompt` 应该明确说明真正的验收标准，验收方式，验收结果。
+- `completed_stage_summary` 必须是对刚结束那条阶段的简要概括：写清本阶段已确认的事实、剩下的目标、以及从犯过的错误中总结出的经验教训。
 
 ### 2.5 与执行节点通信
 
