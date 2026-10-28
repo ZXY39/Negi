@@ -36,7 +36,7 @@ governance:
     - execution
     - inspection
 recovery_policy:
-  rerun_safe: true
+  rerun_safe: false
 
 exposure:
   agent: true

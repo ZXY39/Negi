@@ -84,12 +84,12 @@ READONLY_THIRD_PARTY_TOOL_NAMES: frozenset[str] = frozenset(
         "content_describe",
         "filesystem_stat",
         "view_message_history",
-        # 拼图/索引选图：只读渲染并返回图片路径，不碰文件与网络
+        # 拼图/索引选图：渲染贴纸缓存图并返回路径，不碰用户文件与网络
         "show_sticker_category",
-        # 注册手放进去的图：只改 registry.json 与改名，不读文件内容意外面
-        "register_stickers",
     }
 )
+
+# register_stickers 会改名并写 registry.json，属于工作区写入，不进第三方只读档。
 
 WRITE_TOOL_NAMES: frozenset[str] = frozenset(
     {
