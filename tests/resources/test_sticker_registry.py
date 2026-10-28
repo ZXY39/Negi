@@ -113,10 +113,17 @@ def test_index_marker_resolves_and_fails_closed(tmp_path: Path):
     assert text == "送你了"
     assert [path.name for path in images] == ["002.png"]
 
+    explicit = resolve_reply_stickers(
+        "送你了\n[[sticker:demo/happy/2]]", root=tmp_path, rng=random.Random(1)
+    )
+    assert explicit.context_text == "送你了\n[[sticker:demo/happy/2]]"
+    assert explicit.delivered == ("demo/happy/2",)
+
     reply = resolve_reply_stickers(
         "送你了\n[[sticker:demo/happy/9]]", root=tmp_path, rng=random.Random(1)
     )
     assert reply.text == "送你了"
+    assert reply.context_text == "送你了"
     assert reply.images == ()
     assert reply.undelivered == ("demo/happy/9",)
 

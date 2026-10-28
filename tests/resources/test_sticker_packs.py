@@ -266,9 +266,10 @@ def test_sticker_reply_memory_text_replaces_markers_with_breadcrumbs(tmp_path):
     reply = resolve_reply_stickers("好耶\n[[sticker:atri/happy]]", root=tmp_path)
 
     assert reply.text == "好耶"
-    assert reply.delivered == ("atri/happy",)
+    assert reply.context_text == "好耶\n[[sticker:atri/happy/1]]"
+    assert reply.delivered == ("atri/happy/1",)
     assert reply.undelivered == ()
-    assert reply.memory_text == "好耶\n\n[已发表情包：atri/happy]"
+    assert reply.memory_text == "好耶\n\n[已发表情包：atri/happy/1]"
 
 
 def test_sticker_reply_marks_failed_sends_instead_of_recording_them(tmp_path):
@@ -282,6 +283,7 @@ def test_sticker_reply_marks_failed_sends_instead_of_recording_them(tmp_path):
 
     assert reply.delivered == ()
     assert reply.undelivered == ("atri/nope", "atri/_secret")
+    assert reply.context_text == "嗯"
     assert reply.memory_text == (
         "嗯\n\n[表情包未发出：atri/nope]\n[表情包未发出：atri/_secret]"
     )
@@ -293,6 +295,7 @@ def test_sticker_reply_without_markers_is_left_alone(tmp_path):
 
     reply = resolve_reply_stickers("就是一句普通回复", root=tmp_path)
 
+    assert reply.context_text == "就是一句普通回复"
     assert reply.memory_text == "就是一句普通回复"
     assert reply.delivered == () and reply.undelivered == ()
 

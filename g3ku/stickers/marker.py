@@ -142,6 +142,10 @@ class StickerReply:
     """One reply's sticker intent, and what egress actually produced."""
 
     text: str
+    # 进模型上下文的版本：随机/短标记被替换为实际发送的序号
+    # （``[[sticker:pack/category/N]]``），未发出的标记行不进入上下文。
+    # 只在 assistant 行第一次写入 baseline 时生成，之后不得再改写。
+    context_text: str = ""
     images: tuple[Path, ...] = ()
     delivered: tuple[str, ...] = ()
     undelivered: tuple[str, ...] = ()
@@ -175,13 +179,14 @@ def resolve_reply_stickers(
     if not isinstance(text, str):
         return StickerReply(text="")
     if _MARKER_PREFIX not in text:
-        return StickerReply(text=text)
+        return StickerReply(text=text, context_text=text)
     from g3ku.stickers import config as sticker_config
 
     packs = scan_packs(root)
     picker = rng if rng is not None else random.Random(hashlib.sha256(text.encode("utf-8")).hexdigest())
     limit = max(0, int(max_per_reply if max_per_reply is not None else sticker_config.max_per_reply()))
     kept: list[str] = []
+    context_kept: list[str] = []
     chosen: list[Path] = []
     delivered: list[str] = []
     undelivered: list[str] = []
@@ -198,9 +203,12 @@ def resolve_reply_stickers(
                 )
                 continue
             kept.append(raw_line)
+            context_kept.append(raw_line)
             continue
         dropped = True
-        # From here on the line is always dropped: a marker must never surface.
+        # From here on the line is always dropped from user-visible text: a marker
+        # must never surface. A resolved one re-enters only as the sent index in
+        # context_text, never as the user's original two-segment marker.
         if parsed == "ambiguous":
             undelivered.append(_marker_label(line))
             continue
@@ -211,21 +219,28 @@ def resolve_reply_stickers(
             )
             continue
         pack_key, value, index = parsed
-        label = f"{pack_key}/{value}/{index}" if index is not None else f"{pack_key}/{value}"
         if index is not None:
             path = _pick_by_index(packs, pack_key, value, index)
         else:
             path = _pick_path(packs, pack_key, value, picker)
-        if path is not None:
-            chosen.append(path)
-            delivered.append(label)
-        else:
+        if path is None:
+            label = f"{pack_key}/{value}/{index}" if index is not None else f"{pack_key}/{value}"
             undelivered.append(label)
+            continue
+        chosen.append(path)
+        sent_index = registry.index_of(path.name)
+        if sent_index is None:
+            sent_index = index
+        label = f"{pack_key}/{value}/{sent_index}" if sent_index is not None else f"{pack_key}/{value}"
+        delivered.append(label)
+        ending = raw_line[len(line):]
+        context_kept.append(f"[[sticker:{label}]]{ending}")
     if not dropped:
-        return StickerReply(text=text)
+        return StickerReply(text=text, context_text=text)
     # 删掉末尾的标记行会留下一个悬空换行；渠道正文本来就被 sanitize 收过边。
     return StickerReply(
         text="".join(kept).rstrip(),
+        context_text="".join(context_kept).rstrip(),
         images=tuple(chosen),
         delivered=tuple(delivered),
         undelivered=tuple(undelivered),

@@ -9424,18 +9424,27 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         is_silent_internal_ack = is_internal_turn and not str(output or "").strip()
         should_append_visible_output = bool(visible_output) and not is_silent_internal_ack
         if should_append_visible_output:
-            final_response_payload = dict(state.get("response_payload") or {})
-            visible_row = {"role": "assistant", "content": visible_output}
-            # 轮末行只在该跳正文与可见正文逐字相同时带思考：多跳攒出来的正文不与任何单一跳
-            # 对齐，配错比不配更坏。
-            hop_text = self._content_text(final_response_payload.get("content", "")).strip()
-            if hop_text and hop_text == str(visible_output or "").strip():
-                visible_row.update(self._frontdoor_assistant_reasoning_field(final_response_payload))
-            messages.append(dict(visible_row))
-            authoritative_request_body_messages = [
-                *list(authoritative_request_body_messages),
-                dict(visible_row),
-            ]
+            # 表情包随机标记在第一次进入 baseline 前定稿成实际发送的序号；这一行是
+            # finalize 新追加的，产生它的请求里没有它，所以不会改写已发出的前缀。
+            # 写入后任何一轮都不得重新解析或改写它，否则从该行起断缓存且与转录分叉。
+            context_output = visible_output
+            if "[[sticker:" in visible_output:
+                from g3ku.stickers import resolve_reply_stickers
+
+                context_output = resolve_reply_stickers(visible_output).context_text
+            if context_output.strip():
+                final_response_payload = dict(state.get("response_payload") or {})
+                visible_row = {"role": "assistant", "content": context_output}
+                # 轮末行只在该跳正文与可见正文逐字相同时带思考：多跳攒出来的正文不与任何单一跳
+                # 对齐，配错比不配更坏。
+                hop_text = self._content_text(final_response_payload.get("content", "")).strip()
+                if hop_text and hop_text == str(visible_output or "").strip():
+                    visible_row.update(self._frontdoor_assistant_reasoning_field(final_response_payload))
+                messages.append(dict(visible_row))
+                authoritative_request_body_messages = [
+                    *list(authoritative_request_body_messages),
+                    dict(visible_row),
+                ]
         if visible_output and route_kind == "direct_reply":
             result["messages"] = list(messages)
             result["frontdoor_request_body_messages"] = list(authoritative_request_body_messages)

@@ -2392,6 +2392,40 @@ async def test_graph_finalize_turn_appends_direct_reply_after_runtime_context_as
 
 
 @pytest.mark.asyncio
+async def test_graph_finalize_turn_records_the_sent_sticker_index(tmp_path: Path, monkeypatch) -> None:
+    from g3ku.stickers import catalog as sticker_catalog
+    from g3ku.stickers import registry as sticker_registry
+
+    pack = tmp_path / "atri"
+    category = pack / "happy"
+    category.mkdir(parents=True)
+    (category / "001.png").write_bytes(b"\x89PNG-fake")
+    sticker_registry.ensure_bootstrap(pack)
+    sticker_catalog.invalidate_scan_cache()
+    monkeypatch.setattr(sticker_catalog, "stickers_root", lambda: tmp_path)
+
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+    result = await runner._graph_finalize_turn(
+        {
+            "messages": [
+                {"role": "system", "content": "SYSTEM"},
+                {"role": "user", "content": "hello"},
+            ],
+            "final_output": "好耶\n[[sticker:atri/happy]]",
+            "route_kind": "direct_reply",
+            "heartbeat_internal": False,
+            "query_text": "hello",
+        }
+    )
+
+    expected = {"role": "assistant", "content": "好耶\n[[sticker:atri/happy/1]]"}
+    assert result["messages"][-1] == expected
+    assert result["frontdoor_request_body_messages"][-1] == expected
+    # 出站/UI 仍拿原始输出，由 egress 解析成图片。
+    assert result["final_output"] == "好耶\n[[sticker:atri/happy]]"
+
+
+@pytest.mark.asyncio
 async def test_graph_finalize_turn_strips_all_frontdoor_tool_contract_snapshots_from_durable_messages() -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
     contract_text = json.dumps(
