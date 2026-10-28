@@ -195,19 +195,39 @@
 - G3 已关闭：react regressions 134、context assembly 79、tool_impulse 28、
   tool resource admin 125、runtime progress 119、reasoning replay / file targets 全绿。
 
-### 剩余（明确阻塞）
+### 后续续跑（2026-10-28 下午）
 
-1. **C4 frontdoor 一句**：`g3ku/runtime/prompts/ceo_frontdoor.md` 仍被另一会话占用
-   （当前有未提交改动），未写入
-   `completed_stage_summary` 段；`test_prompts_require_stage_summary_to_cover_facts_goals_and_lessons`
-   仍红。等该文件释放后补一句并重跑。
-2. **context_window_overflow 1 条**：`repair_required_tools:` 只渲在动态契约尾块，
-   压缩后尾块被丢弃，钉住头不带它。要修需产品决策：把 repair 条目放进钉住头并纳入
-   revision key（会改变重印边界），或压缩后重贴该段。属真实缺口，不是测试漂移。
-3. **task_web_worker_runtime 40 条**：多根因，非单一退役契约。当前聚类：
-   waiting_children/spawn 恢复、distribution/round 状态、`_deliver_distribution_message`
-   已删除、消息批次形状。需要按新行为逐族定稿，未在本轮硬改。
-4. **J 第 11 条**：本机仍无 WSL 后端、token 为空，证据包不在本机；不可复跑。
+| 批次 | commit |
+|---|---|
+| C4 frontdoor `completed_stage_summary` | `f64e5e85` |
+| 压缩后重贴契约尾块 | `72694462` |
+| 验收握手 submission_id 默认字段 | `ee35a6d1` |
+
+- C4 已关闭：`test_execution_prompt_filesystem_guidance.py` 6 passed。
+- 压缩契约尾块已修：`repair_required/candidate` 段不再随摘要丢失；
+  `test_frontdoor_append_only_compression.py` + context overflow 24 passed。
+- task_web_worker 握手默认字段已修，40 → 39。
+
+### 剩余（明确阻塞/独立批次）
+
+1. **context_window_overflow 的修复验收（1 条）**：压缩函数已把拆出的
+   `_contract_messages` 回插（`72694462`），但该用例的 repair 段不在压缩输入里。
+   注意**不要**把 `repair_required_tool_items` 塞进钉住头：`pinned_contract_revision_key`
+   刻意只吃 roster epoch，执行策略/临时目录/可见集都不进键（缓存优先）；把 repair 项
+   放进头部会让 repair 状态每变一次就重印整段前缀。正确修法是走一次性
+   `[RUNTIME_NOTICE]` / 动态契约尾块，让 repair 段在压缩后重贴；需要作者确认这条测试
+   的状态构造是否仍有效。
+2. **task_web_worker_runtime 39 条**：独立的行为漂移批次，非单一退役契约。
+   聚类：
+   - spawn children 结果/failure_info（约 10）
+   - waiting_children / round 恢复（约 10）
+   - notice / seed / prefix（约 6）
+   - execution/acceptance `_build_messages` 契约渲染（3）
+   - distribution / barrier（约 4）
+   - acceptance blocked 终态语义（1）
+   - node detail 形状（1）
+   需要按新 task runtime 行为逐族定稿，不能靠改字符串一次收完。
+3. **J 第 11 条**：本机仍无 WSL 后端、token 为空，证据包不在本机；不可复跑。
 
 ### 并发改动警告
 
