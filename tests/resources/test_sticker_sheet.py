@@ -119,3 +119,14 @@ def test_tool_rejects_hidden_category_and_single_image(workspace: Path):
     single_payload = _run(tool.execute(pack="demo", category="one"))
     assert single_payload["ok"] is False
     assert "只有 1 张" in single_payload["reason"]
+
+
+def test_sticker_sheet_is_callable_without_loading_on_the_frontdoor() -> None:
+    # 选图必须当跳执行：契约投递那一跳不渲染拼图，每次精确选图都会白跑一轮模型请求。
+    from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
+
+    assert "show_sticker_category" in CeoMessageBuilder.FIXED_BUILTIN_TOOL_NAMES
+    assert "show_sticker_category" in CeoMessageBuilder._callable_tool_names(
+        visible_tool_names=["show_sticker_category"],
+        contract_present_tool_names=[],
+    )

@@ -12,6 +12,9 @@ CEO_FIXED_BUILTIN_TOOL_NAMES: tuple[str, ...] = (
     "exec",
     "memory_update",
     "memory_note",
+    # 选图是每轮都要现取的回合内动作：走候选车道时第一次调用只交回契约、不渲染拼图，
+    # 等于每次精确选图都白跑一轮模型请求。
+    "show_sticker_category",
 )
 
 NODE_FIXED_BUILTIN_TOOL_NAMES: tuple[str, ...] = (
