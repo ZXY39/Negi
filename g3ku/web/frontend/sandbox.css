@@ -144,7 +144,7 @@ body {
 .page-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr);
-  align-items: start;
+  align-items: stretch;
   gap: var(--ui-space-4);
   width: 100%;
   max-width: 1440px;
@@ -159,9 +159,12 @@ body {
   min-width: 0;
 }
 
+/* 右列默认折叠；底边与左列对齐，差值由卡片间距吸收，不把卡片拉出空白。 */
+.page-column-side { align-content: space-between; }
+
 @media (max-width: 1080px) {
   .page-grid { grid-template-columns: minmax(0, 1fr); }
-  .page-column-side { order: 2; }
+  .page-column-side { order: 2; align-content: start; }
 }
 
 @media (max-width: 640px) {
@@ -186,6 +189,36 @@ body {
   padding: var(--ui-space-4) 18px var(--ui-space-3);
   border-bottom: 1px solid var(--ui-border);
 }
+
+/* 折叠卡：summary 就是卡头；折叠时去掉分段线，避免与卡片底边叠成双线。 */
+.collapsible > .panel-head {
+  list-style: none;
+  cursor: pointer;
+}
+
+.collapsible > .panel-head::-webkit-details-marker { display: none; }
+
+.collapsible:not([open]) > .panel-head { border-bottom: 0; }
+
+.collapsible > .panel-head:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--ui-brand-soft);
+}
+
+.panel-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  margin-top: 2px;
+  color: var(--ui-text-muted);
+  transition: transform 160ms var(--ui-motion-ease);
+}
+
+.panel-chevron svg { width: 16px; height: 16px; }
+.collapsible[open] .panel-chevron { transform: rotate(180deg); }
 
 .panel-heading { min-width: 0; }
 .panel-heading h2 {
@@ -290,8 +323,8 @@ a.toolbar-btn { text-decoration: none; }
 }
 
 .page-header .toolbar-btn {
-  height: 40px;
-  min-height: 40px;
+  height: 32px;
+  min-height: 32px;
   padding: 0 14px;
 }
 
@@ -710,7 +743,30 @@ textarea:focus {
   word-break: break-all;
 }
 
+.steps .command-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--ui-space-2);
+  margin-top: 6px;
+}
+
+.steps .command-row code {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-top: 0;
+}
+
+.steps .command-row .toolbar-btn { flex: 0 0 auto; }
+
+.steps .step-flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
 .steps .status-pill { margin-top: 6px; }
+.steps .step-flags .status-pill { margin-top: 0; }
 
 .notes {
   display: grid;

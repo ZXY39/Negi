@@ -69,6 +69,9 @@ def test_windows_without_distro_asks_for_one(monkeypatch: pytest.MonkeyPatch) ->
     assert plan.installable is False
     assert plan.reason == "wsl_distro_missing"
     assert any("wsl --install" in note for note in plan.notes)
+    step = plan.steps[0]
+    assert step.manual is True
+    assert step.command == ["wsl.exe", "--install", "-d", "Ubuntu"]
 
 
 def test_windows_with_distro_installs_bwrap_inside_it(monkeypatch: pytest.MonkeyPatch) -> None:

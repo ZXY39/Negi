@@ -200,9 +200,18 @@ def build_install_plan(reading: dict[str, Any] | None = None) -> InstallPlan:
             )
         return replace(
             base,
+            steps=[
+                InstallStep(
+                    id="install-wsl-distro",
+                    title="安装一个 WSL 发行版",
+                    command=[str(detail.get("wsl") or "wsl"), "--install", "-d", "Ubuntu"],
+                    manual=True,
+                    detail="在管理员终端执行；首次安装可能需要重启。装完后回到本页重新检测。",
+                )
+            ],
             reason="wsl_distro_missing",
             notes=[
-                "这台机器还没有任何 WSL 发行版。先装一个（例如 `wsl --install -d Ubuntu`），"
+                "这台机器还没有任何 WSL 发行版。先装一个（例如 wsl --install -d Ubuntu），"
                 "再回来点安装；本项目会复用它，不强制专有发行版。",
             ],
             installable=False,

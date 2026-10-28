@@ -33,7 +33,7 @@
     </div>
     <div class="page-actions">
       <span id="status-badge" class="status-pill" data-state="loading">检测中…</span>
-      <button id="refresh-btn" class="toolbar-btn" type="button">重新检测</button>
+      <button id="install-cta" class="toolbar-btn primary" type="button" hidden>一键安装</button>
     </div>
   </header>
 
@@ -44,7 +44,6 @@
           <div class="panel-head">
             <div class="panel-heading">
               <h2>会话档位</h2>
-              <p>选择会话后可切换沙箱；开或关都要输入项目解锁口令二次确认。</p>
             </div>
           </div>
           <div class="panel-body">
@@ -83,7 +82,7 @@
                 </div>
               </details>
               <div class="panel-actions">
-                <button id="save-mode-btn" class="toolbar-btn primary" type="button">保存</button>
+                <button id="save-mode-btn" class="toolbar-btn primary" type="button" hidden>保存</button>
                 <span id="save-result" class="save-result"></span>
               </div>
             </div>
@@ -118,13 +117,18 @@
       </div>
 
       <div class="page-column page-column-side">
-        <section class="panel" id="runtime-card">
-          <div class="panel-head">
+        <details class="panel collapsible" id="runtime-card" open>
+          <summary class="panel-head">
             <div class="panel-heading">
               <h2>运行时</h2>
-              <p>本机沙箱后端与逐维度强制力。</p>
             </div>
-          </div>
+            <span class="panel-chevron" aria-hidden="true">
+              <svg viewBox="0 0 20 20">
+                <path d="M5 7.5 10 12.5 15 7.5" fill="none" stroke="currentColor" stroke-width="1.6"
+                  stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+            </span>
+          </summary>
           <div class="panel-body">
             <dl class="kv">
               <dt>安装态</dt><dd id="install-state">—</dd>
@@ -133,22 +137,27 @@
             </dl>
             <div class="dimensions" id="dimensions"></div>
             <div class="panel-actions">
-              <button id="install-btn" class="toolbar-btn primary" type="button" hidden>安装沙箱</button>
               <button id="uninstall-btn" class="toolbar-btn danger" type="button" hidden>卸载沙箱</button>
-              <button id="plan-btn" class="toolbar-btn" type="button">查看安装内容</button>
             </div>
             <p class="hint" id="runtime-hint"></p>
           </div>
-        </section>
+        </details>
 
-        <section class="panel" id="persona-card">
-          <div class="panel-head">
+        <details class="panel collapsible" id="persona-card">
+          <summary class="panel-head">
             <div class="panel-heading">
               <h2>群聊人设</h2>
-              <p>只作用于第三方会话（群聊 / 未列名私聊）。留空 = 群聊不带人设；不读取操作员自己的人设 note。</p>
+              <p>只作用于第三方会话。</p>
             </div>
-          </div>
+            <span class="panel-chevron" aria-hidden="true">
+              <svg viewBox="0 0 20 20">
+                <path d="M5 7.5 10 12.5 15 7.5" fill="none" stroke="currentColor" stroke-width="1.6"
+                  stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+            </span>
+          </summary>
           <div class="panel-body">
+            <p class="hint">群聊 / 未列名私聊使用；留空 = 群聊不带人设，不读取操作员自己的人设 note。</p>
             <div class="field">
               <label class="field-label" for="persona-input">人设正文</label>
               <textarea id="persona-input" rows="4" placeholder="例如：你是这个群的助手，回答简洁、不透露任何本机信息。"></textarea>
@@ -158,7 +167,7 @@
               <span id="persona-result" class="save-result"></span>
             </div>
           </div>
-        </section>
+        </details>
 
         <section class="panel" id="progress-card" hidden>
           <div class="panel-head">
@@ -203,7 +212,7 @@
         <h2 id="plan-title">安装内容</h2>
       </div>
       <div class="modal-body">
-        <p class="hint">安装前请确认下面的步骤与提权要求。任何一步失败都会中止，不会留下半装状态以外的改动。</p>
+        <p class="hint" id="plan-intro">安装前请确认下面的步骤与提权要求。任何一步失败都会中止，不会留下半装状态以外的改动。</p>
         <ol id="plan-steps" class="steps"></ol>
         <ul id="plan-notes" class="notes"></ul>
         <label class="check" id="confirm-row">
@@ -213,6 +222,7 @@
         </label>
       </div>
       <div class="modal-actions">
+        <button id="plan-refresh-btn" class="toolbar-btn" type="button" hidden>重新检测</button>
         <button id="cancel-plan-btn" class="toolbar-btn" type="button">关闭</button>
         <button id="confirm-install-btn" class="toolbar-btn primary" type="button" disabled>确认安装</button>
       </div>

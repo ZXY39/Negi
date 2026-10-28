@@ -99,9 +99,46 @@ function badge(node, text, tone) {
   node.dataset.state = tone || 'neutral';
 }
 
+async function copyText(text) {
+  const value = String(text || '').trim();
+  if (!value) return;
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(value);
+    } else {
+      const area = document.createElement('textarea');
+      area.value = value;
+      area.setAttribute('readonly', '');
+      area.style.position = 'fixed';
+      area.style.opacity = '0';
+      document.body.appendChild(area);
+      area.select();
+      document.execCommand('copy');
+      area.remove();
+    }
+    toast('命令已复制');
+  } catch (error) {
+    toast('复制失败，请手动选择命令');
+  }
+}
+
 function isInstalled(reading) {
   const value = String((reading || {}).install_state || '');
   return value === 'ready' || value === 'partial';
+}
+
+function renderInstallCta(item) {
+  const button = $('install-cta');
+  const installState = String(item.install_state || 'not_installed');
+  if (installState === 'ready') {
+    button.hidden = true;
+    return;
+  }
+  const installable = Boolean(item.install_available);
+  const partial = installState === 'partial';
+  button.hidden = false;
+  button.textContent = installable ? (partial ? '修复沙箱' : '一键安装') : partial ? '修复说明' : '安装说明';
+  button.classList.toggle('primary', installable);
 }
 
 function renderStatus(item) {
@@ -129,29 +166,46 @@ function renderStatus(item) {
     dimensions.appendChild(chip);
   });
 
-  const installBtn = $('install-btn');
-  installBtn.hidden = !item.install_available;
-  installBtn.textContent = installState === 'ready' ? '修复沙箱' : '安装沙箱';
+  renderInstallCta(item);
 
   const uninstallBtn = $('uninstall-btn');
   const dedicated = Boolean((item.detail || {}).dedicated);
   uninstallBtn.hidden = !dedicated;
+  const runtimeActions = uninstallBtn.closest('.panel-actions');
+  if (runtimeActions) runtimeActions.hidden = uninstallBtn.hidden;
 
   const hint = $('runtime-hint');
   if (installState === 'ready') {
     hint.textContent = item.file_management_available
       ? '沙箱已就绪。会话切到受限档后，数据面工具在 jail 内执行。'
       : '沙箱已就绪。';
-  } else if (item.install_available) {
-    hint.textContent = '点击「查看安装内容」确认要执行的步骤与提权要求。';
   } else {
-    hint.textContent = REASON_TEXT[item.reason] || item.install_plan_reason || '当前没有可自动安装的内容。';
+    // 未就绪时原因已经写在「说明」行，操作入口在页头；卡内不再重复一遍。
+    hint.textContent = '';
   }
+  // 空提示仍占一个网格项和一道 gap，会把右列无谓撑高。
+  hint.hidden = !hint.textContent;
   renderFileSection();
 }
 
 function renderPlan(plan) {
   state.plan = plan;
+  const installable = Boolean(plan.installable);
+  const ready = String(plan.install_state || '') === 'ready';
+  const partial = String(plan.install_state || '') === 'partial';
+  $('plan-title').textContent = ready
+    ? '安装内容'
+    : installable
+      ? partial
+        ? '修复沙箱'
+        : '一键安装沙箱'
+      : '安装说明';
+  $('plan-intro').textContent = ready
+    ? '沙箱运行时已就绪，无需安装。'
+    : installable
+      ? '确认下面的步骤后开始；安装后台执行，关掉页面不会中断。需要授权的步骤会弹出系统授权窗口。'
+      : '这些步骤需要你手动完成；完成后点「重新检测」。';
+
   const list = $('plan-steps');
   list.textContent = '';
   (plan.steps || []).forEach((step) => {
@@ -161,9 +215,17 @@ function renderPlan(plan) {
     title.textContent = step.title;
     row.appendChild(title);
     if (step.command && step.command.length) {
+      const commandRow = document.createElement('div');
+      commandRow.className = 'command-row';
       const code = document.createElement('code');
       code.textContent = step.command.join(' ');
-      row.appendChild(code);
+      const copy = document.createElement('button');
+      copy.type = 'button';
+      copy.className = 'toolbar-btn small';
+      copy.textContent = '复制';
+      copy.addEventListener('click', () => copyText(step.command.join(' ')));
+      commandRow.append(code, copy);
+      row.appendChild(commandRow);
     }
     if (step.detail) {
       const detail = document.createElement('div');
@@ -171,13 +233,23 @@ function renderPlan(plan) {
       detail.textContent = step.detail;
       row.appendChild(detail);
     }
+    const flags = document.createElement('div');
+    flags.className = 'step-flags';
+    if (step.manual) {
+      const manual = document.createElement('span');
+      manual.className = 'status-pill small';
+      manual.dataset.state = 'warn';
+      manual.textContent = '手动执行';
+      flags.appendChild(manual);
+    }
     if (step.elevated) {
       const flag = document.createElement('span');
       flag.className = 'status-pill small';
       flag.dataset.state = 'warn';
       flag.textContent = '需要授权';
-      row.appendChild(flag);
+      flags.appendChild(flag);
     }
+    if (flags.childNodes.length) row.appendChild(flags);
     list.appendChild(row);
   });
 
@@ -191,8 +263,9 @@ function renderPlan(plan) {
 
   $('confirm-check').checked = false;
   $('confirm-install-btn').disabled = true;
-  $('confirm-install-btn').hidden = !plan.installable;
-  $('confirm-row').hidden = !plan.installable;
+  $('confirm-install-btn').hidden = !installable;
+  $('confirm-row').hidden = !installable;
+  $('plan-refresh-btn').hidden = installable || ready;
 }
 
 function renderProgress(status) {
@@ -517,6 +590,7 @@ function renderSession(item) {
         state.pendingMode = value;
         document.querySelectorAll('.mode-option').forEach((node) => node.classList.remove('active'));
         wrapper.classList.add('active');
+        syncSaveVisibility();
       });
       const text = document.createElement('div');
       const strong = document.createElement('strong');
@@ -534,6 +608,7 @@ function renderSession(item) {
   const roots = item.writable_roots || [];
   $('roots-input').value = roots.join('\n');
   rootsField.open = roots.length > 0;
+  syncSaveVisibility();
   renderFileSection();
 }
 
@@ -544,6 +619,27 @@ function collectRoots() {
     .value.split('\n')
     .map((line) => line.trim())
     .filter(Boolean);
+}
+
+function rootsDirty() {
+  const current = state.current;
+  if (!current || current.trust !== 'owner') return false;
+  const roots = collectRoots() || [];
+  const saved = (current.writable_roots || []).map((item) => String(item));
+  return roots.join('\n') !== saved.join('\n');
+}
+
+function formDirty() {
+  const current = state.current;
+  if (!current) return false;
+  if (state.pendingMode && state.pendingMode !== current.mode) return true;
+  return rootsDirty();
+}
+
+function syncSaveVisibility() {
+  const dirty = formDirty();
+  $('save-mode-btn').hidden = !dirty;
+  if (dirty) $('save-result').textContent = '';
 }
 
 function impactItems(targetMode) {
@@ -686,13 +782,10 @@ async function saveRootsOnly() {
 async function onSave() {
   const sessionId = currentSessionId();
   if (!sessionId || !state.current) return;
+  if (!formDirty()) return;
   $('save-result').textContent = '';
   if (state.pendingMode && state.pendingMode !== state.current.mode) {
     openModeConfirm(state.pendingMode);
-    return;
-  }
-  if (collectRoots() === null) {
-    toast('档位没有变化');
     return;
   }
   await saveRootsOnly();
@@ -715,7 +808,10 @@ async function loadSessionDetail() {
 /* ---------------- 事件 ---------------- */
 
 function bindEvents() {
-  $('refresh-btn').addEventListener('click', async () => {
+  $('install-cta').addEventListener('click', openPlanModal);
+  $('plan-refresh-btn').addEventListener('click', async () => {
+    const button = $('plan-refresh-btn');
+    button.disabled = true;
     toast('正在检测沙箱环境状态…');
     try {
       await loadStatus(true);
@@ -725,10 +821,10 @@ function bindEvents() {
       toast(`沙箱环境：${STATUS_LABELS[tone] || tone}`);
     } catch (error) {
       toast(`检测失败：${error.message}`);
+    } finally {
+      button.disabled = false;
     }
   });
-  $('plan-btn').addEventListener('click', openPlanModal);
-  $('install-btn').addEventListener('click', openPlanModal);
   $('cancel-plan-btn').addEventListener('click', closePlanModal);
   $('confirm-check').addEventListener('change', (event) => {
     $('confirm-install-btn').disabled = !event.target.checked;
@@ -772,6 +868,7 @@ function bindEvents() {
   });
 
   $('save-mode-btn').addEventListener('click', onSave);
+  $('roots-input').addEventListener('input', syncSaveVisibility);
   $('mode-confirm-cancel').addEventListener('click', closeModeConfirm);
   $('mode-confirm-accept').addEventListener('click', applyModeChange);
   $('mode-confirm-password').addEventListener('keydown', (event) => {
@@ -848,7 +945,7 @@ async function savePersona() {
 async function main() {
   bindEvents();
   try {
-    await loadStatus(false);
+    await loadStatus(true);
     await loadPlan();
   } catch (error) {
     toast(`初始化失败：${error.message}`);
