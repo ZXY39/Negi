@@ -905,7 +905,7 @@ async def test_execution_first_turn_does_not_emit_all_visible_tool_schemas(tmp_p
 
     result = await service._react_loop.run(
         task=SimpleNamespace(task_id='task-first-turn-schemas'),
-        node=SimpleNamespace(node_id='node-first-turn-schemas', depth=0, node_kind='execution'),
+        node=SimpleNamespace(node_id='node-first-turn-schemas', depth=0, node_kind='execution', goal='demo'),
         messages=[
             {'role': 'system', 'content': 'system'},
             {'role': 'user', 'content': '{"task_id":"task-first-turn-schemas","goal":"demo"}'},
@@ -1079,7 +1079,7 @@ async def test_execution_root_replay_semantic_selection_includes_split_tools_wit
 
     result = await service._react_loop.run(
         task=SimpleNamespace(task_id='task-root-replay-budget'),
-        node=SimpleNamespace(node_id='node-root-replay-budget', depth=0, node_kind='execution'),
+        node=SimpleNamespace(node_id='node-root-replay-budget', depth=0, node_kind='execution', goal='demo'),
         messages=[
             {'role': 'system', 'content': 'system'},
             {'role': 'user', 'content': '{"task_id":"task-root-replay-budget","goal":"demo"}'},
@@ -3183,7 +3183,7 @@ async def test_react_loop_writes_before_model_frame_before_chat_dispatch() -> No
 
     result = await loop.run(
         task=SimpleNamespace(task_id="task-before-model"),
-        node=SimpleNamespace(node_id="node-before-model", depth=0, node_kind="execution"),
+        node=SimpleNamespace(node_id="node-before-model", depth=0, node_kind="execution", goal="demo"),
         messages=[
             {"role": "system", "content": "system"},
             {"role": "user", "content": '{"task_id":"task-before-model","goal":"demo"}'},
@@ -3317,7 +3317,7 @@ async def test_react_loop_writes_candidate_skill_items_into_before_model_frame()
 
     result = await loop.run(
         task=SimpleNamespace(task_id="task-before-model-visible-skills"),
-        node=SimpleNamespace(task_id="task-before-model-visible-skills", node_id=node_id, depth=0, node_kind="execution"),
+        node=SimpleNamespace(task_id="task-before-model-visible-skills", node_id=node_id, depth=0, node_kind="execution", goal="demo"),
         messages=[
             {"role": "system", "content": "system"},
             {"role": "user", "content": '{"task_id":"task-before-model-visible-skills","goal":"demo"}'},
@@ -3337,7 +3337,7 @@ def test_build_node_dynamic_contract_does_not_resurrect_stale_candidate_tools_wh
     log_service = _FakeLogService()
     loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=log_service, max_iterations=2)
     task_id = "task-no-stale-candidates"
-    node = SimpleNamespace(task_id=task_id, node_id="node-no-stale-candidates", depth=0, node_kind="execution")
+    node = SimpleNamespace(task_id=task_id, node_id="node-no-stale-candidates", depth=0, node_kind="execution", goal="demo")
 
     stale_contract = NodeRuntimeToolContract(
         node_id=node.node_id,
@@ -3398,7 +3398,7 @@ def test_build_node_dynamic_contract_does_not_resurrect_stale_candidate_skills_w
     log_service = _FakeLogService()
     loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=log_service, max_iterations=2)
     task_id = "task-no-stale-skill-candidates"
-    node = SimpleNamespace(task_id=task_id, node_id="node-no-stale-skill-candidates", depth=0, node_kind="execution")
+    node = SimpleNamespace(task_id=task_id, node_id="node-no-stale-skill-candidates", depth=0, node_kind="execution", goal="demo")
 
     stale_contract = NodeRuntimeToolContract(
         node_id=node.node_id,
@@ -3459,7 +3459,7 @@ def test_build_node_dynamic_contract_uses_fresh_message_skill_contract_when_boot
     log_service = _FakeLogService()
     loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=log_service, max_iterations=2)
     task_id = "task-bootstrap-empty-skill-frame"
-    node = SimpleNamespace(task_id=task_id, node_id="node-bootstrap-empty-skill-frame", depth=0, node_kind="execution")
+    node = SimpleNamespace(task_id=task_id, node_id="node-bootstrap-empty-skill-frame", depth=0, node_kind="execution", goal="demo")
 
     fresh_contract = NodeRuntimeToolContract(
         node_id=node.node_id,
@@ -3564,7 +3564,7 @@ def test_build_node_dynamic_contract_prefers_fresh_runtime_seeded_skill_contract
     log_service = _FakeLogService()
     loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=log_service, max_iterations=2)
     task_id = "task-runtime-seeded-skill-contract"
-    node = SimpleNamespace(task_id=task_id, node_id="node-runtime-seeded-skill-contract", depth=0, node_kind="execution")
+    node = SimpleNamespace(task_id=task_id, node_id="node-runtime-seeded-skill-contract", depth=0, node_kind="execution", goal="demo")
 
     prepared_history = [
         {"role": "system", "content": "system"},
@@ -3707,6 +3707,7 @@ async def test_react_loop_before_model_frame_keeps_candidate_tool_items_aligned_
             node_id=node_id,
             depth=0,
             node_kind="execution",
+            goal="demo",
         ),
         messages=[
             {"role": "system", "content": "system"},
@@ -3808,6 +3809,7 @@ async def test_react_loop_before_model_frame_keeps_candidate_skill_items_aligned
             node_id=node_id,
             depth=0,
             node_kind="execution",
+            goal="demo",
         ),
         messages=[
             {"role": "system", "content": "system"},
@@ -3992,7 +3994,7 @@ async def test_execute_tool_calls_injects_rbac_visible_tool_names_into_runtime_c
 
     results = await loop._execute_tool_calls(
         task=SimpleNamespace(task_id="task-runtime-rbac"),
-        node=SimpleNamespace(node_id="node-runtime-rbac", depth=0, node_kind="execution"),
+        node=SimpleNamespace(node_id="node-runtime-rbac", depth=0, node_kind="execution", goal="demo"),
         response_tool_calls=[SimpleNamespace(id="call-runtime-rbac", name="capture_runtime", arguments={"value": "demo"})],
         tools={"capture_runtime": _RuntimeCaptureTool()},
         runtime_context={
@@ -4072,7 +4074,7 @@ async def test_execute_tool_calls_injects_image_multimodal_enabled_from_runtime_
 
     results = await loop._execute_tool_calls(
         task=SimpleNamespace(task_id="task-runtime-mm"),
-        node=SimpleNamespace(node_id="node-runtime-mm", depth=0, node_kind="execution"),
+        node=SimpleNamespace(node_id="node-runtime-mm", depth=0, node_kind="execution", goal="demo"),
         response_tool_calls=[SimpleNamespace(id="call-runtime-mm", name="capture_runtime", arguments={"value": "demo"})],
         tools={"capture_runtime": _RuntimeCaptureTool()},
         runtime_context={
@@ -4149,7 +4151,7 @@ async def test_load_tool_context_direct_read_guard_blocks_duplicate_inline_tools
     violations = await loop._load_tool_context_direct_read_violations(
         response_tool_calls=[SimpleNamespace(id="call-1", name="load_tool_context", arguments={"tool_id": "exec"})],
         task=SimpleNamespace(task_id=f"task-{node_kind}-duplicate"),
-        node=SimpleNamespace(node_id=f"node-{node_kind}-duplicate", node_kind=node_kind),
+        node=SimpleNamespace(node_id=f"node-{node_kind}-duplicate", node_kind=node_kind, goal='demo'),
         message_history=[
             {
                 "role": "tool",
@@ -4236,7 +4238,7 @@ async def test_load_tool_context_direct_read_guard_allows_refresh_when_fingerpri
     violations = await loop._load_tool_context_direct_read_violations(
         response_tool_calls=[SimpleNamespace(id="call-1", name="load_tool_context", arguments={"tool_id": "exec"})],
         task=SimpleNamespace(task_id="task-execution-refresh"),
-        node=SimpleNamespace(node_id="node-execution-refresh", node_kind="execution"),
+        node=SimpleNamespace(node_id="node-execution-refresh", node_kind="execution", goal="demo"),
         message_history=[
             {
                 "role": "tool",
@@ -4263,7 +4265,7 @@ def test_node_dynamic_contract_state_restores_skill_candidates_from_frame_after_
     log_service = _FakeLogService()
     loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=log_service, max_iterations=2)
     task_id = "task-stage-skill-restore"
-    node = SimpleNamespace(task_id=task_id, node_id="node-stage-skill-restore", depth=0, node_kind="execution")
+    node = SimpleNamespace(task_id=task_id, node_id="node-stage-skill-restore", depth=0, node_kind="execution", goal="demo")
     log_service._store._node = SimpleNamespace(
         metadata={
             "execution_stages": {
@@ -4922,7 +4924,7 @@ async def test_react_loop_uses_latest_model_refs_from_supplier_between_turns() -
 
     result = await loop.run(
         task=SimpleNamespace(task_id='task-1'),
-        node=SimpleNamespace(node_id='node-1', depth=0, node_kind='execution'),
+        node=SimpleNamespace(node_id='node-1', depth=0, node_kind='execution', goal='demo'),
         messages=[
             {"role": "system", "content": "system"},
             {"role": "user", "content": '{"task_id":"task-1","goal":"demo"}'},
@@ -5547,7 +5549,7 @@ async def test_react_loop_directly_executes_xml_reply_without_repair() -> None:
     loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=3)
     result = await loop.run(
         task=SimpleNamespace(task_id='task-xml-json'),
-        node=SimpleNamespace(node_id='node-xml-json', depth=0, node_kind='execution'),
+        node=SimpleNamespace(node_id='node-xml-json', depth=0, node_kind='execution', goal='demo'),
         messages=[
             {'role': 'system', 'content': 'system'},
             {'role': 'user', 'content': '{"task_id":"task-xml-json","goal":"demo"}'},
@@ -5628,7 +5630,7 @@ async def test_react_loop_repairs_xml_reply_with_json_array_payload() -> None:
     loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=4)
     result = await loop.run(
         task=SimpleNamespace(task_id='task-xml-array'),
-        node=SimpleNamespace(node_id='node-xml-array', depth=0, node_kind='execution'),
+        node=SimpleNamespace(node_id='node-xml-array', depth=0, node_kind='execution', goal='demo'),
         messages=[
             {'role': 'system', 'content': 'system'},
             {'role': 'user', 'content': '{"task_id":"task-xml-array","goal":"demo"}'},
@@ -5668,7 +5670,7 @@ async def test_react_loop_directly_executes_xml_submit_final_result() -> None:
     loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=2)
     result = await loop.run(
         task=SimpleNamespace(task_id='task-xml-final'),
-        node=SimpleNamespace(node_id='node-xml-final', depth=0, node_kind='execution'),
+        node=SimpleNamespace(node_id='node-xml-final', depth=0, node_kind='execution', goal='demo'),
         messages=[
             {'role': 'system', 'content': 'system'},
             {'role': 'user', 'content': '{"task_id":"task-xml-final","goal":"demo"}'},
@@ -5733,7 +5735,7 @@ async def test_react_loop_repairs_xml_reply_with_json_object_tool_payload_after_
     loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=4)
     result = await loop.run(
         task=SimpleNamespace(task_id='task-xml-json'),
-        node=SimpleNamespace(node_id='node-xml-json', depth=0, node_kind='execution'),
+        node=SimpleNamespace(node_id='node-xml-json', depth=0, node_kind='execution', goal='demo'),
         messages=[
             {'role': 'system', 'content': 'system'},
             {'role': 'user', 'content': '{"task_id":"task-xml-json","goal":"demo"}'},
@@ -5781,7 +5783,7 @@ async def test_react_loop_fails_after_three_xml_repair_attempts() -> None:
     loop = ReActToolLoop(chat_backend=backend, log_service=_FakeLogService(), max_iterations=5)
     result = await loop.run(
         task=SimpleNamespace(task_id='task-xml-fail'),
-        node=SimpleNamespace(node_id='node-xml-fail', depth=0, node_kind='execution'),
+        node=SimpleNamespace(node_id='node-xml-fail', depth=0, node_kind='execution', goal='demo'),
         messages=[
             {'role': 'system', 'content': 'system'},
             {'role': 'user', 'content': '{"task_id":"task-xml-fail","goal":"demo"}'},
@@ -5897,7 +5899,7 @@ async def test_react_loop_failed_final_payload_is_accepted_immediately_without_r
     loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=3)
     result = await loop.run(
         task=SimpleNamespace(task_id='task-1'),
-        node=SimpleNamespace(node_id='node-1', depth=0, node_kind='execution'),
+        node=SimpleNamespace(node_id='node-1', depth=0, node_kind='execution', goal='demo'),
         messages=[
             {'role': 'system', 'content': 'system'},
             {'role': 'user', 'content': '{"task_id":"task-1","goal":"demo"}'},
@@ -5963,7 +5965,7 @@ async def test_react_loop_retries_empty_response_until_valid_result(monkeypatch:
     loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=2)
     result = await loop.run(
         task=SimpleNamespace(task_id='task-empty-retry'),
-        node=SimpleNamespace(node_id='node-empty-retry', depth=0, node_kind='execution'),
+        node=SimpleNamespace(node_id='node-empty-retry', depth=0, node_kind='execution', goal='demo'),
         messages=[
             {'role': 'system', 'content': 'system'},
             {'role': 'user', 'content': '{"task_id":"task-empty-retry","goal":"demo"}'},
@@ -6022,7 +6024,7 @@ async def test_react_loop_bounces_plain_text_then_accepts_final_submission() -> 
     loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=3)
     result = await loop.run(
         task=SimpleNamespace(task_id='task-plain-final'),
-        node=SimpleNamespace(node_id='node-plain-final', depth=0, node_kind='execution'),
+        node=SimpleNamespace(node_id='node-plain-final', depth=0, node_kind='execution', goal='demo'),
         messages=[
             {'role': 'system', 'content': 'system'},
             {'role': 'user', 'content': '{"task_id":"task-plain-final","goal":"demo"}'},
@@ -6095,7 +6097,7 @@ async def test_react_loop_bounces_plain_text_after_tool_usage() -> None:
     loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=4)
     result = await loop.run(
         task=SimpleNamespace(task_id='task-plain-final-with-tools'),
-        node=SimpleNamespace(node_id='node-plain-final-with-tools', depth=0, node_kind='execution'),
+        node=SimpleNamespace(node_id='node-plain-final-with-tools', depth=0, node_kind='execution', goal='demo'),
         messages=[
             {'role': 'system', 'content': 'system'},
             {'role': 'user', 'content': '{"task_id":"task-plain-final-with-tools","goal":"demo"}'},
@@ -6163,7 +6165,7 @@ async def test_react_loop_allows_progress_text_with_tool_calls() -> None:
     loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=3)
     result = await loop.run(
         task=SimpleNamespace(task_id='task-progress-text'),
-        node=SimpleNamespace(node_id='node-progress-text', depth=0, node_kind='execution'),
+        node=SimpleNamespace(node_id='node-progress-text', depth=0, node_kind='execution', goal='demo'),
         messages=[
             {'role': 'system', 'content': 'system'},
             {'role': 'user', 'content': '{"task_id":"task-progress-text","goal":"demo"}'},
@@ -6201,7 +6203,7 @@ async def test_react_loop_pauses_after_three_plain_text_replies_without_a_stage(
     loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=4)
     result = await loop.run(
         task=SimpleNamespace(task_id='task-plain-text-strike-no-stage'),
-        node=SimpleNamespace(node_id='node-plain-text-strike-no-stage', depth=0, node_kind='execution'),
+        node=SimpleNamespace(node_id='node-plain-text-strike-no-stage', depth=0, node_kind='execution', goal='demo'),
         messages=[
             {'role': 'system', 'content': 'system'},
             {'role': 'user', 'content': '{"task_id":"task-plain-text-strike-no-stage","goal":"demo"}'},
@@ -6287,7 +6289,7 @@ async def test_react_loop_bounces_midstage_plain_text_instead_of_auto_wrapping()
     loop = ReActToolLoop(chat_backend=_Backend(), log_service=log_service, max_iterations=5)
     result = await loop.run(
         task=SimpleNamespace(task_id='task-midstage-plain-text'),
-        node=SimpleNamespace(node_id='node-midstage-plain-text', depth=0, node_kind='execution'),
+        node=SimpleNamespace(node_id='node-midstage-plain-text', depth=0, node_kind='execution', goal='demo'),
         messages=[
             {'role': 'system', 'content': 'system'},
             {'role': 'user', 'content': '{"task_id":"task-midstage-plain-text","goal":"demo"}'},
@@ -6327,7 +6329,7 @@ async def test_react_loop_pauses_after_three_consecutive_plain_text_replies() ->
     loop = ReActToolLoop(chat_backend=_Backend(), log_service=log_service, max_iterations=6)
     result = await loop.run(
         task=SimpleNamespace(task_id='task-plain-text-strike'),
-        node=SimpleNamespace(node_id='node-plain-text-strike', depth=0, node_kind='execution'),
+        node=SimpleNamespace(node_id='node-plain-text-strike', depth=0, node_kind='execution', goal='demo'),
         messages=[
             {'role': 'system', 'content': 'system'},
             {'role': 'user', 'content': '{"task_id":"task-plain-text-strike","goal":"demo"}'},
@@ -6391,7 +6393,7 @@ async def test_react_loop_normalizes_sparse_success_final_result_payload_after_t
     loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=3)
     result = await loop.run(
         task=SimpleNamespace(task_id='task-sparse-final'),
-        node=SimpleNamespace(node_id='node-sparse-final', depth=0, node_kind='execution'),
+        node=SimpleNamespace(node_id='node-sparse-final', depth=0, node_kind='execution', goal='demo'),
         messages=[
             {'role': 'system', 'content': 'system'},
             {'role': 'user', 'content': '{"task_id":"task-sparse-final","goal":"demo"}'},
@@ -6447,7 +6449,7 @@ async def test_react_loop_infers_evidence_kind_for_submit_final_result_payload()
     loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=2)
     result = await loop.run(
         task=SimpleNamespace(task_id='task-evidence-kind-final'),
-        node=SimpleNamespace(node_id='node-evidence-kind-final', depth=0, node_kind='execution'),
+        node=SimpleNamespace(node_id='node-evidence-kind-final', depth=0, node_kind='execution', goal='demo'),
         messages=[
             {'role': 'system', 'content': 'system'},
             {'role': 'user', 'content': '{"task_id":"task-evidence-kind-final","goal":"demo"}'},
@@ -6560,7 +6562,7 @@ async def test_react_loop_ignores_persisted_invalid_final_submission_count_and_a
     loop = ReActToolLoop(chat_backend=backend, log_service=log_service, max_iterations=3)
     result = await loop.run(
         task=SimpleNamespace(task_id='task-persisted-invalid-final'),
-        node=SimpleNamespace(node_id='node-persisted-invalid-final', depth=0, node_kind='execution'),
+        node=SimpleNamespace(node_id='node-persisted-invalid-final', depth=0, node_kind='execution', goal='demo'),
         messages=[
             {'role': 'system', 'content': 'system'},
             {'role': 'user', 'content': '{"task_id":"task-persisted-invalid-final","goal":"demo"}'},
@@ -6621,7 +6623,7 @@ async def test_react_loop_retries_provider_chain_exhaustion_until_success(monkey
     loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=3)
     result = await loop.run(
         task=SimpleNamespace(task_id='task-provider-retry'),
-        node=SimpleNamespace(node_id='node-provider-retry', depth=0, node_kind='execution'),
+        node=SimpleNamespace(node_id='node-provider-retry', depth=0, node_kind='execution', goal='demo'),
         messages=[
             {'role': 'system', 'content': 'system'},
             {'role': 'user', 'content': '{"task_id":"task-provider-retry","goal":"demo"}'},
@@ -6661,7 +6663,7 @@ async def test_react_loop_stops_retrying_provider_chain_exhaustion_after_limit(
     result = await asyncio.wait_for(
         loop.run(
             task=SimpleNamespace(task_id='task-provider-retry-limit'),
-            node=SimpleNamespace(node_id='node-provider-retry-limit', depth=0, node_kind='execution'),
+            node=SimpleNamespace(node_id='node-provider-retry-limit', depth=0, node_kind='execution', goal='demo'),
             messages=[
                 {'role': 'system', 'content': 'system'},
                 {'role': 'user', 'content': '{"task_id":"task-provider-retry-limit","goal":"demo"}'},
@@ -6731,7 +6733,7 @@ async def test_react_loop_restarts_provider_retry_with_refreshed_model_refs_afte
     )
     result = await loop.run(
         task=SimpleNamespace(task_id='task-provider-refresh'),
-        node=SimpleNamespace(node_id='node-provider-refresh', depth=0, node_kind='execution'),
+        node=SimpleNamespace(node_id='node-provider-refresh', depth=0, node_kind='execution', goal='demo'),
         messages=[
             {'role': 'system', 'content': 'system'},
             {'role': 'user', 'content': '{"task_id":"task-provider-refresh","goal":"demo"}'},
@@ -6824,7 +6826,7 @@ async def test_node_send_preflight_does_not_compress_below_threshold(
     loop = ReActToolLoop(chat_backend=_FramingBackend(), log_service=log_service, max_iterations=2)
     result = await loop.run(
         task=SimpleNamespace(task_id="task-preflight-no-compress"),
-        node=SimpleNamespace(node_id="node-preflight-no-compress", depth=0, node_kind="execution"),
+        node=SimpleNamespace(node_id="node-preflight-no-compress", depth=0, node_kind="execution", goal="demo"),
         messages=[
             {"role": "system", "content": "system"},
             {"role": "user", "content": '{"task_id":"task-preflight-no-compress","goal":"demo"}'},
@@ -6960,7 +6962,7 @@ async def test_node_send_preflight_triggers_compression_at_effective_threshold(
     loop = ReActToolLoop(chat_backend=_FramingBackend(), log_service=log_service, max_iterations=2)
     result = await loop.run(
         task=SimpleNamespace(task_id="task-preflight-compress"),
-        node=SimpleNamespace(node_id="node-preflight-compress", depth=0, node_kind="execution"),
+        node=SimpleNamespace(node_id="node-preflight-compress", depth=0, node_kind="execution", goal="demo"),
         messages=[
             {"role": "system", "content": "system"},
             {"role": "user", "content": '{"task_id":"task-preflight-compress","goal":"demo"}'},
@@ -7123,7 +7125,7 @@ async def test_node_send_preflight_token_compression_recommits_pinned_provider_b
 
     result = await loop.run(
         task=SimpleNamespace(task_id="task-preflight-provider-sync"),
-        node=SimpleNamespace(node_id="node-preflight-provider-sync", depth=0, node_kind="execution"),
+        node=SimpleNamespace(node_id="node-preflight-provider-sync", depth=0, node_kind="execution", goal="demo"),
         messages=[
             {"role": "system", "content": "system"},
             {"role": "user", "content": '{"task_id":"task-preflight-provider-sync","goal":"demo"}'},
@@ -7207,7 +7209,7 @@ async def test_node_send_preflight_fails_when_post_compression_overflows(
     loop = ReActToolLoop(chat_backend=_Backend(), log_service=log_service, max_iterations=2)
     result = await loop.run(
         task=SimpleNamespace(task_id="task-preflight-overflow"),
-        node=SimpleNamespace(node_id="node-preflight-overflow", depth=0, node_kind="execution"),
+        node=SimpleNamespace(node_id="node-preflight-overflow", depth=0, node_kind="execution", goal="demo"),
         messages=[
             {"role": "system", "content": "system"},
             {"role": "user", "content": '{"task_id":"task-preflight-overflow","goal":"demo"}'},
@@ -7364,7 +7366,7 @@ async def test_node_preflight_uses_previous_effective_input_tokens_when_preview_
     loop = ReActToolLoop(chat_backend=_FramingBackend(), log_service=log_service, max_iterations=2)
     result = await loop.run(
         task=SimpleNamespace(task_id="task-preflight-usage-plus-delta"),
-        node=SimpleNamespace(node_id="node-preflight-usage-plus-delta", depth=0, node_kind="execution"),
+        node=SimpleNamespace(node_id="node-preflight-usage-plus-delta", depth=0, node_kind="execution", goal="demo"),
         messages=[
             {"role": "system", "content": "system"},
             {"role": "user", "content": '{"task_id":"task-preflight-usage-plus-delta","goal":"demo"}'},
@@ -7461,7 +7463,7 @@ async def test_node_preflight_attempts_compression_before_failing_when_pre_compa
     loop = ReActToolLoop(chat_backend=_Backend(), log_service=log_service, max_iterations=2)
     result = await loop.run(
         task=SimpleNamespace(task_id="task-preflight-compress-before-fail"),
-        node=SimpleNamespace(node_id="node-preflight-compress-before-fail", depth=0, node_kind="execution"),
+        node=SimpleNamespace(node_id="node-preflight-compress-before-fail", depth=0, node_kind="execution", goal="demo"),
         messages=[
             {"role": "system", "content": "system"},
             {"role": "user", "content": '{"task_id":"task-preflight-compress-before-fail","goal":"demo"}'},
@@ -7599,7 +7601,7 @@ async def test_node_preflight_falls_back_to_preview_when_request_is_not_append_o
     loop = ReActToolLoop(chat_backend=_FramingBackend(), log_service=log_service, max_iterations=2)
     result = await loop.run(
         task=SimpleNamespace(task_id="task-preflight-preview-fallback"),
-        node=SimpleNamespace(node_id="node-preflight-preview-fallback", depth=0, node_kind="execution"),
+        node=SimpleNamespace(node_id="node-preflight-preview-fallback", depth=0, node_kind="execution", goal="demo"),
         messages=[
             {"role": "system", "content": "system"},
             {"role": "user", "content": '{"task_id":"task-preflight-preview-fallback","goal":"demo"}'},
@@ -7748,7 +7750,7 @@ async def test_node_second_tool_round_request_carries_no_stale_contract_or_note(
     loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=3)
     result = await loop.run(
         task=SimpleNamespace(task_id="task-overlay-single"),
-        node=SimpleNamespace(node_id="node-overlay-single", depth=0, node_kind="execution"),
+        node=SimpleNamespace(node_id="node-overlay-single", depth=0, node_kind="execution", goal="demo"),
         messages=[
             {"role": "system", "content": "system"},
             {"role": "user", "content": '{"task_id":"task-overlay-single","goal":"demo"}'},
@@ -7941,7 +7943,7 @@ async def test_empty_model_responses_stop_at_retry_limit(tmp_path, monkeypatch) 
     result = await asyncio.wait_for(
         service._react_loop.run(
             task=SimpleNamespace(task_id='task-empty-cap'),
-            node=SimpleNamespace(node_id='node-empty-cap', depth=0, node_kind='execution'),
+            node=SimpleNamespace(node_id='node-empty-cap', depth=0, node_kind='execution', goal='demo'),
             messages=[
                 {'role': 'system', 'content': 'system'},
                 {'role': 'user', 'content': '{"task_id":"task-empty-cap","goal":"demo"}'},
@@ -8149,7 +8151,7 @@ async def test_node_loop_keeps_revoked_tool_declared_but_still_refuses_it() -> N
 
     result = await loop.run(
         task=SimpleNamespace(task_id="task-declared-denied"),
-        node=SimpleNamespace(node_id="node-declared-denied", depth=0, node_kind="execution"),
+        node=SimpleNamespace(node_id="node-declared-denied", depth=0, node_kind="execution", goal="demo"),
         messages=[
             {"role": "system", "content": "system"},
             {"role": "user", "content": '{"task_id":"task-declared-denied","goal":"demo"}'},
@@ -8280,7 +8282,7 @@ class _AppendingNodeTurnHarness:
         )
         await service._react_loop.run(
             task=SimpleNamespace(task_id='task-thinking-reading'),
-            node=SimpleNamespace(node_id='node-thinking-reading', depth=0, node_kind='execution'),
+            node=SimpleNamespace(node_id='node-thinking-reading', depth=0, node_kind='execution', goal='demo'),
             messages=[
                 {'role': 'system', 'content': 'system'},
                 {'role': 'user', 'content': '{"task_id":"task-thinking-reading","goal":"demo"}'},

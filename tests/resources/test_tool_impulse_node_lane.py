@@ -92,11 +92,15 @@ def _service(tmp_path: Path, *, validation_errors: list[str] | None = None) -> M
     )
 
     class _Instance:
+        def coerce_arguments(self, arguments):
+            return dict(arguments or {}), []
+
         def validate_params(self, params):
             return list(validation_errors or [])
 
-    service._resource_manager = SimpleNamespace(get_tool=lambda name: _Instance())
-    service._visible_tool_map = lambda **kwargs: {TOOL_ID: object()}
+    instance = _Instance()
+    service._resource_manager = SimpleNamespace(get_tool=lambda name: instance)
+    service._visible_tool_map = lambda **kwargs: {TOOL_ID: instance}
     service.get_tool_toolskill = lambda tool_id: dict(CONTRACT_PAYLOAD)
     # 冲动路径把暂存写回 `node.metadata`，所以这条节点行必须真的在库里——没有它，
     # 用例会退化成"只测内存算术"，pause/resume 存活那条承诺就没人钉。
@@ -201,8 +205,18 @@ async def test_fixed_builtin_is_never_treated_as_impulsive(tmp_path: Path) -> No
     context = _context()
     context['current_tool_call_id'] = 'call-silent'
 
+    class _BuiltinStub:
+        def coerce_arguments(self, arguments):
+            return dict(arguments or {}), []
+
+        def validate_params(self, params):
+            return []
+
+        async def execute(self, **kwargs):
+            return "ok"
+
     content = await loop._execute_tool_raw(
-        tools={'filesystem_stat': object()},
+        tools={'filesystem_stat': _BuiltinStub()},
         tool_name='filesystem_stat',
         arguments={},
         runtime_context=context,

@@ -48,6 +48,9 @@ class _ValidatingTool:
         self._errors = errors or []
         self._raise = raise_exc
 
+    def coerce_arguments(self, arguments):
+        return dict(arguments or {}), []
+
     def validate_params(self, params):
         if self._raise:
             raise TypeError("schema exploded")
@@ -65,7 +68,7 @@ def _service(tool, tmp_path: Path, *, visible: bool = True, payload: dict | None
         execution_mode="web",
     )
     service._resource_manager = SimpleNamespace(get_tool=lambda name: tool)
-    service._visible_tool_map = lambda **kwargs: ({TOOL_ID: object()} if visible else {})
+    service._visible_tool_map = lambda **kwargs: ({TOOL_ID: tool} if visible else {})
     service.get_tool_toolskill = lambda tool_id: dict(payload) if payload else None
     return service
 
@@ -160,6 +163,9 @@ def test_a_failed_last_call_still_reports_the_batch_count(tmp_path: Path) -> Non
     """末条校验失败：它不入 stash，但整批的最终份数仍要在这一条里报出来。"""
 
     class _SecondCallInvalid:
+        def coerce_arguments(self, arguments):
+            return dict(arguments or {}), []
+
         def validate_params(self, params):
             return [] if params.get("new_text") == "ok" else ["missing new_text"]
 

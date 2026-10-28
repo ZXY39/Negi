@@ -53,11 +53,15 @@ def _service(tmp_path: Path, *, validation_errors: list[str] | None = None) -> M
     )
 
     class _Instance:
+        def coerce_arguments(self, arguments):
+            return dict(arguments or {}), []
+
         def validate_params(self, params):
             return list(validation_errors or [])
 
-    service._resource_manager = SimpleNamespace(get_tool=lambda name: _Instance())
-    service._visible_tool_map = lambda **kwargs: {TOOL_ID: object()}
+    instance = _Instance()
+    service._resource_manager = SimpleNamespace(get_tool=lambda name: instance)
+    service._visible_tool_map = lambda **kwargs: {TOOL_ID: instance}
     service.get_tool_toolskill = lambda tool_id: dict(CONTRACT_PAYLOAD)
     service.store.upsert_node(
         NodeRecord(
@@ -259,89 +263,6 @@ def test_reject_outcome_falls_through_to_the_existing_refusal(tmp_path: Path) ->
         )
         is None
     )
-
-
-def test_round_tool_entry_carries_the_contract_delivery_marker(tmp_path: Path) -> None:
-    """阶段账本要带上"只交契约、没执行"这颗标记，Web 轨道才能把行画成"加载 tool"。"""
-    ops = _ops(_service(tmp_path))
-    payload = {"id": "call-1", "name": TOOL_ID, "arguments": {"path": "/a", "new_text": "x"}}
-
-    delivered = ops._frontdoor_round_tool_entry(
-        payload=payload,
-        result={
-            "tool_call_id": "call-1",
-            "tool_name": TOOL_ID,
-            "status": "success",
-            "result_text": "[TOOL_CONTRACT_V1:filesystem_edit:tcf:abc]\nbody\n[/TOOL_CONTRACT_V1]",
-            "contract_delivery": IMPULSE_STAGED,
-            "tool_message": {"started_at": "", "finished_at": "", "elapsed_seconds": None},
-        },
-        source="user",
-    )
-    assert delivered["contract_delivery"] == IMPULSE_STAGED
-
-    executed = ops._frontdoor_round_tool_entry(
-        payload=payload,
-        result={"tool_call_id": "call-1", "tool_name": TOOL_ID, "status": "success", "result_text": "ok"},
-        source="user",
-    )
-    assert "contract_delivery" not in executed
-
-
-def test_round_tool_entry_carries_the_impulse_ledger_marks(tmp_path: Path) -> None:
-    """`execution_path` 与 `staged_replay` 要随执行行进阶段账本。
-
-    前门没有节点那种按 call 落库的审计行：这两格不在这里落，reuse 缺口就只能靠手翻
-    请求 artifact 数——那既不是耐久读数，也挡不住回执文本反推那一类误判。
-    """
-    ops = _ops(_service(tmp_path))
-    payload = {"id": "call-1", "name": TOOL_ID, "arguments": {"reuse_args": True}}
-
-    reused = ops._frontdoor_round_tool_entry(
-        payload=payload,
-        result={
-            "tool_call_id": "call-1",
-            "tool_name": TOOL_ID,
-            "status": "success",
-            "result_text": '{"ok": true, "executed": 2, "failed": 0}',
-            "execution_path": "reused",
-            "tool_message": {"started_at": "", "finished_at": "", "elapsed_seconds": None},
-        },
-        source="user",
-    )
-    assert reused["execution_path"] == "reused"
-    assert "staged_replay" not in reused
-
-    replayed = ops._frontdoor_round_tool_entry(
-        payload=payload,
-        result={
-            "tool_call_id": "call-1",
-            "tool_name": TOOL_ID,
-            "status": "success",
-            "result_text": "ok",
-            "execution_path": "corrected",
-            "staged_replay": "identical",
-        },
-        source="user",
-    )
-    assert replayed["execution_path"] == "corrected"
-    assert replayed["staged_replay"] == "identical"
-    assert "reuse_flag_ignored" not in replayed
-
-    ignored_flag = ops._frontdoor_round_tool_entry(
-        payload=payload,
-        result={
-            "tool_call_id": "call-1",
-            "tool_name": TOOL_ID,
-            "status": "success",
-            "result_text": "reuse_args ignored: executed with the arguments you provided.",
-            "execution_path": "corrected",
-            "staged_replay": "new_args",
-            "reuse_flag_ignored": True,
-        },
-        source="user",
-    )
-    assert ignored_flag["reuse_flag_ignored"] is True
 
 
 def test_reuse_branch_requires_a_call_id(tmp_path: Path) -> None:

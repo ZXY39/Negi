@@ -71,7 +71,7 @@ class _SplitPromptBuilder:
     def build(self, *, skills: list) -> str:
         raise AssertionError("message builder should use split prompt builder methods")
 
-    def build_base_prompt(self, *, cache_stamp: str = '') -> str:
+    def build_base_prompt(self, *, cache_stamp: str = '', sandbox_tier: str = '') -> str:
         self.base_calls += 1
         return "BASE PROMPT"
 
