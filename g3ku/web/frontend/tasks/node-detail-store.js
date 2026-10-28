@@ -72,7 +72,7 @@ function normalizeSummaryTraceToolCall(step, index = 0) {
 }
 
 function normalizeTurnThinking(thinking) {
-    // 轮次上只有那四个标量读数：思考全文从不外发，行上多带的键也不许跟着进渲染。
+    // 轮次上只有四个标量读数与外发来的思考正文（只挂最近一轮）；行上多带的键不许跟着进渲染。
     if (!thinking || typeof thinking !== "object") return null;
     const toNumber = (value) => {
         const num = Number(value);
@@ -84,8 +84,10 @@ function normalizeTurnThinking(thinking) {
         est_tokens: toNumber(thinking.est_tokens),
         // 缺键＝这一族口径这次没上报，与真实的 0 分开，界面才敢标估算还是真值。
         tokens: thinking.tokens === null || thinking.tokens === undefined ? null : toNumber(thinking.tokens),
+        text: String(thinking.text || ""),
+        text_truncated: thinking.text_truncated === true,
     };
-    if (!reading.seconds && !reading.chars && !reading.est_tokens && !reading.tokens) return null;
+    if (!reading.seconds && !reading.chars && !reading.est_tokens && !reading.tokens && !reading.text.trim()) return null;
     return reading;
 }
 

@@ -4295,6 +4295,12 @@ textarea {
     margin-top: -2px;
 }
 
+/* 执行流程最底部的最新思考行：结构与会话气泡那一行完全同款（复用 `.ceo-thinking-line`
+   的排版与开关），这里只补它与上方工具行之间的行距。 */
+.task-trace-latest-thinking {
+    margin-top: 8px;
+}
+
 .task-trace-round-strip {
     display: flex;
     gap: 6px;

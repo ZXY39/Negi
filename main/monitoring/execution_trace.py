@@ -15,6 +15,10 @@ _CONTROL_TOOL_NAMES = {'wait_tool_execution', 'stop_tool_execution'}
 # 轮次行往外带的思考读数只有这四个标量。
 THINKING_READING_FIELDS = ('seconds', 'chars', 'est_tokens', 'tokens')
 
+# 最新一轮思考正文的发稿上限：实盘 7769 条思考中位数 462 字、p99 13.4k、最长 76.8k，
+# 与前端轨迹面板的显示上限同档（16000），超过这份只发前段。
+THINKING_TEXT_DISPLAY_LIMIT = 16000
+
 
 def thinking_reading_for_display(value: Any) -> dict[str, Any]:
     """把轮次上的思考读数摘成可外发的那一份。
@@ -33,6 +37,35 @@ def thinking_reading_for_display(value: Any) -> dict[str, Any]:
             continue
         reading[field] = number
     return reading
+
+
+def attach_latest_thinking_text(trace: dict[str, Any] | None, node: Any) -> dict[str, Any]:
+    """读侧专用：把最近一次有思考的那一轮正文挂到 `turns[].thinking.text`。
+
+    节点账本每一轮都存着思考全文（`reasoning_content`），轨迹只发那四个读数；
+    节点详情底部那一行要显示最新一轮的思考过程，所以在这里单独挂一份。只挂最近一轮、
+    只挂在读侧——轨迹外置件与摘要都由写侧构造，不经过这里，磁盘上不会多出第二份全文。
+    """
+    payload = trace if isinstance(trace, dict) else {}
+    turns = [turn for turn in list(payload.get('turns') or []) if isinstance(turn, dict)]
+    if not turns or node is None:
+        return payload
+    entries = {
+        int(getattr(entry, 'seq', 0) or 0): entry
+        for entry in list(getattr(node, 'output', None) or [])
+    }
+    for turn in reversed(turns):
+        entry = entries.get(int(turn.get('seq') or 0))
+        text = str(getattr(entry, 'reasoning_content', '') or '') if entry is not None else ''
+        if not text.strip():
+            continue
+        thinking = dict(turn.get('thinking') or {})
+        thinking['text'] = text[:THINKING_TEXT_DISPLAY_LIMIT]
+        if len(text) > THINKING_TEXT_DISPLAY_LIMIT:
+            thinking['text_truncated'] = True
+        turn['thinking'] = thinking
+        break
+    return payload
 
 
 def build_execution_trace(
