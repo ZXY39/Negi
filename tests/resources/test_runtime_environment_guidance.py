@@ -154,8 +154,8 @@ def test_execution_and_acceptance_prompts_forbid_self_task_progress_polling(monk
     execution_prompt = runner._build_system_prompt(node=SimpleNamespace(node_kind='execution'))
     acceptance_prompt = runner._build_system_prompt(node=SimpleNamespace(node_kind='acceptance'))
 
-    assert '当前正在执行的 `task_id`' in execution_prompt
-    assert '不得对当前正在执行的 `task_id` 调用' in execution_prompt
+    assert '不要用 `task_progress` 等待子节点或轮询当前任务' in execution_prompt
+    assert '它是会话侧工具，节点侧调不到' in execution_prompt
     assert '`task_progress`' in execution_prompt
     assert 'spawn_child_nodes' in execution_prompt
     assert 'content_search' in execution_prompt
