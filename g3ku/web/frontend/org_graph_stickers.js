@@ -6,7 +6,45 @@
 // 每个写操作都由服务端返回刷新后的整包快照，applyStickerPack() 直接替换本地状态，
 // 不补发 GET：既省一次往返，也不会读到扫描缓存 TTL 内的旧值。
 
-const STICKER_DEFAULT_PER_CATEGORY = 12;
+// 网格几何与 org_graph.css 的 .sticker-thumb-grid / .sticker-category-card /
+// .sticker-detail 保持一致：定宽 96px 列、8px 间距，卡片 12px 内边距 + 1px 边框，
+// 详情面板左右各 4px。首屏只铺两行，最后一格放「查看全部」。
+const STICKER_THUMB_SIZE = 96;
+const STICKER_THUMB_GAP = 8;
+const STICKER_GRID_CHROME = 34;
+const STICKER_COLUMNS_FALLBACK = 6;
+const STICKER_PREVIEW_SLACK = 4;
+const STICKER_PREVIEW_MAX = 200;
+
+function stickerGridColumnsFromWidth(width) {
+    const inner = Number(width || 0) - STICKER_GRID_CHROME;
+    if (!(inner > 0)) return 0;
+    return Math.max(1, Math.floor((inner + STICKER_THUMB_GAP) / (STICKER_THUMB_SIZE + STICKER_THUMB_GAP)));
+}
+
+// 已渲染的网格给出真实列数（含滚动条占位），比按面板宽估算更准。
+function stickerGridColumns(grid) {
+    if (!grid || typeof getComputedStyle !== "function") return 0;
+    const tracks = String(getComputedStyle(grid).gridTemplateColumns || "").trim();
+    if (!tracks || tracks === "none") return 0;
+    return tracks.split(/\s+/).filter(Boolean).length;
+}
+
+function stickerPreviewCount() {
+    const pane = U.stickerDetail;
+    const grid = pane && typeof pane.querySelector === "function"
+        ? pane.querySelector(".sticker-thumb-grid")
+        : null;
+    const columns = stickerGridColumns(grid)
+        || stickerGridColumnsFromWidth(pane ? pane.clientWidth : 0)
+        || STICKER_COLUMNS_FALLBACK;
+    return Math.max(1, columns * 2 - 1);
+}
+
+// 多取几格：首屏还没渲染出网格时只能估宽，滚动条出现后列数可能变少，留余量避免立刻再请求。
+function stickerPreviewFetchCount() {
+    return Math.min(STICKER_PREVIEW_MAX, stickerPreviewCount() + STICKER_PREVIEW_SLACK);
+}
 
 function stickerLimits() {
     const settings = StickersState.settings || {};
@@ -173,20 +211,82 @@ function renderStickerDetail() {
         <button type="button" class="toolbar-btn ghost small" data-sticker-action="create-category">新建分类</button>
     </div>`);
     U.stickerDetail.innerHTML = sections.join("");
+    scheduleStickerPreviewCheck();
+}
+
+// 首屏没有网格可量，只能按面板宽估列数；滚动条一出现宽度会缩，列数可能少一格。
+// 渲染后量一次真实列数，不一致就按实测值重画（必要时补请求）。
+let stickerPreviewCheckQueued = false;
+
+function scheduleStickerPreviewCheck() {
+    if (stickerPreviewCheckQueued) return;
+    if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") return;
+    stickerPreviewCheckQueued = true;
+    window.requestAnimationFrame(() => {
+        stickerPreviewCheckQueued = false;
+        const pane = U.stickerDetail;
+        if (!pane || typeof pane.querySelectorAll !== "function") return;
+        const grids = Array.from(pane.querySelectorAll(".sticker-thumb-grid[data-sticker-preview]"));
+        for (const grid of grids) {
+            const declared = Number(grid.dataset ? grid.dataset.stickerPreview : 0);
+            if (!declared) continue;
+            const expected = stickerGridColumns(grid) * 2 - 1;
+            if (expected <= 0 || expected === declared) continue;
+            const needsMore = expected > declared
+                && expected + STICKER_PREVIEW_SLACK > Number(StickersState.previewLimit || 0)
+                && ((StickersState.detail?.categories) || []).some(
+                    (category) => Number(category.count || 0) > (category.images || []).length,
+                );
+            if (needsMore) void loadStickerDetail(StickersState.selected, { quiet: true });
+            else renderStickerDetail();
+            return;
+        }
+    });
+}
+
+let stickerResizeTimer = 0;
+
+function onStickerViewportResize() {
+    if (!StickersState.detail || !U.viewStickers || U.viewStickers.style.display === "none") return;
+    window.clearTimeout(stickerResizeTimer);
+    stickerResizeTimer = window.setTimeout(() => {
+        const needed = stickerPreviewFetchCount();
+        const hasUnloaded = ((StickersState.detail?.categories) || []).some(
+            (category) => Number(category.count || 0) > (category.images || []).length,
+        );
+        if (needed > Number(StickersState.previewLimit || 0) && hasUnloaded) {
+            void loadStickerDetail(StickersState.selected, { quiet: true });
+            return;
+        }
+        renderStickerDetail();
+    }, 150);
 }
 
 function stickerCategoryHtml(pack, category, limits) {
-    const expanded = StickersState.expanded[stickerKey(pack.dir_name, category.dir_name)];
-    const images = expanded || category.images || [];
+    const key = stickerKey(pack.dir_name, category.dir_name);
+    const expanded = StickersState.expanded[key];
+    const loaded = category.images || [];
+    const total = Math.max(Number(category.count || 0), loaded.length);
+    const preview = stickerPreviewCount();
+    const images = expanded || loaded.slice(0, preview);
+    const hidden = Math.max(0, total - images.length);
+    const tiles = images.map((image) => stickerThumbHtml(pack, category, image)).join("");
+    const more = !expanded && hidden > 0
+        ? `<button type="button" class="sticker-thumb-more" data-sticker-action="expand-category" aria-label="查看全部 ${total} 张">
+                <span class="sticker-thumb-more-label">查看全部</span>
+                <span class="sticker-thumb-more-meta">${total} 张</span>
+            </button>`
+        : "";
+    const collapse = expanded
+        ? `<button type="button" class="sticker-thumb-more" data-sticker-action="collapse-category" aria-label="收起">
+                <span class="sticker-thumb-more-label">收起</span>
+            </button>`
+        : "";
+    const thumbs = tiles || more || collapse
+        ? `<div class="sticker-thumb-grid"${expanded ? "" : ` data-sticker-preview="${preview}"`}>${tiles}${more}${collapse}</div>`
+        : '<p class="sticker-hint">这个分类还没有图片。</p>';
     const registered = Number(category.registered || 0);
     const pending = Number(category.pending || 0);
-    const hidden = Number(category.count || 0) - images.length;
-    const thumbs = images.length
-        ? `<div class="sticker-thumb-grid">${images.map((image) => stickerThumbHtml(pack, category, image)).join("")}</div>`
-        : '<p class="sticker-hint">这个分类还没有图片。</p>';
-    const more = hidden > 0
-        ? `<button type="button" class="toolbar-btn ghost small" data-sticker-action="expand-category">查看全部 ${Number(category.count)} 张</button>`
-        : "";
     const meta = `${registered} / ${Number(category.count || 0)} 张已注册${pending ? `（${pending} 张待注册）` : ""}`;
     return `<section class="sticker-category-card${category.enabled ? "" : " is-disabled"}" data-sticker-category="${esc(category.dir_name)}">
         <header class="sticker-category-head">
@@ -208,7 +308,6 @@ function stickerCategoryHtml(pack, category, limits) {
             <button type="button" class="toolbar-btn success small" data-sticker-action="save-description" hidden>保存</button>
         </label>
         ${thumbs}
-        ${more}
     </section>`;
 }
 
@@ -295,10 +394,12 @@ async function loadStickerDetail(dirName, { quiet = false } = {}) {
         renderStickerEmptyDetail("正在读取图片…");
     }
     try {
-        const pack = await ApiClient.getStickerPack(dirName, STICKER_DEFAULT_PER_CATEGORY);
+        const limit = stickerPreviewFetchCount();
+        const pack = await ApiClient.getStickerPack(dirName, limit);
         if (!pack) return;
         StickersState.detail = pack;
         StickersState.selected = pack.dir_name;
+        StickersState.previewLimit = limit;
         renderStickerPacks();
         renderStickerDetail();
     } catch (error) {
@@ -491,6 +592,10 @@ function onStickerDetailClick(event) {
         case "expand-category":
             void expandStickerCategory(pack, category);
             return;
+        case "collapse-category":
+            delete StickersState.expanded[stickerKey(pack.dir_name, category.dir_name)];
+            renderStickerDetail();
+            return;
         default:
             break;
     }
@@ -617,6 +722,9 @@ function bindStickerPage() {
     }
     if (U.stickerUploadInput) U.stickerUploadInput.addEventListener("change", onStickerUploadPicked);
     if (U.stickerMaxPerReply) U.stickerMaxPerReply.addEventListener("change", onStickerMaxPerReplyChanged);
+    if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+        window.addEventListener("resize", onStickerViewportResize);
+    }
     if (U.stickerCreatePackBtn) {
         U.stickerCreatePackBtn.addEventListener("click", () => void createStickerPack());
     }

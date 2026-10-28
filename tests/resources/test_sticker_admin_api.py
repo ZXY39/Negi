@@ -64,6 +64,14 @@ def test_pack_detail_carries_capped_image_urls(client: TestClient):
     assert happy["images"][0]["url"].startswith("/api/resources/stickers/image?pack=demo&category=happy&name=")
 
 
+def test_category_images_route_marks_registered_images(client: TestClient):
+    payload = client.get("/api/resources/stickers/packs/demo/categories/happy/images").json()
+
+    assert payload["total"] == 1
+    assert payload["items"][0]["name"] == "001.png"
+    assert payload["items"][0]["registered"] is True
+
+
 def test_image_route_serves_bytes_inline(client: TestClient):
     response = client.get(
         "/api/resources/stickers/image",

@@ -2103,7 +2103,10 @@ def _sticker_pack_payload(pack: 'sticker_admin.AdminPack') -> dict[str, Any]:
     }
 
 
-def _sticker_pack_after(pack_dir_name: str, *, per_category: int = 12) -> dict[str, Any]:
+def _sticker_pack_after(pack_dir_name: str, *, per_category: int | None = None) -> dict[str, Any]:
+    # 写操作返回的整包快照必须够页面直接重画：首屏容量按视口列数算（两行减一格），
+    # 固定 12 张在宽窗口下不够，而页面合同是不在写后补发 GET。分类上限 36 张，
+    # 全量下发仍有界。
     try:
         pack = sticker_admin.read_admin_pack(pack_dir_name, per_category=per_category)
     except sticker_admin.StickerAdminError as exc:

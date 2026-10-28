@@ -338,10 +338,14 @@ def list_category_images(
     root: Path | None = None,
 ) -> tuple[list[AdminImage], int]:
     category = category_dir(pack_dir_name, category_dir_name, root=root)
+    registry.ensure_bootstrap(category.parent)
     names = _image_names(category)
     start = max(0, int(offset))
     window = names[start : start + max(0, int(limit))]
-    return list(_image_entries(category, window, per_category=None)), len(names)
+    rows = registry.category_rows(category.parent, category_dir_name)
+    return list(
+        _image_entries(category, window, per_category=None, registered=set(rows))
+    ), len(names)
 
 
 def _write_manifest(pack: Path, manifest: dict[str, Any]) -> None:

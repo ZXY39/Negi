@@ -232,12 +232,86 @@ test("详情：截断给查看全部，待注册给注册按钮，停用只降�
     view.renderStickerDetail();
 
     const html = view.U.stickerDetail.innerHTML;
-    assert.match(html, /查看全部 9 张/);
+    assert.match(html, /查看全部/);
+    assert.match(html, /9 张/);
     assert.doesNotMatch(html, /停用的包不进模型的清单/);
     assert.match(html, /sticker-category-card is-disabled/);
     assert.match(html, /2 \/ 9 张已注册（1 张待注册）/);
     assert.match(html, /data-sticker-action="register-category"/);
     assert.match(html, /sticker-thumb is-unregistered/);
+});
+
+function categoryWithImages(count) {
+    return {
+        dir_name: "happy",
+        key: "happy",
+        description: "开心大笑",
+        enabled: true,
+        count,
+        registered: count,
+        pending: 0,
+        images: Array.from({ length: count }, (_, index) => ({
+            name: `${String(index + 1).padStart(3, "0")}.png`,
+            size: 1,
+            mtime: 1,
+            url: `/u${index}`,
+            registered: true,
+        })),
+    };
+}
+
+test("首屏按当前列数只铺两行减一格，末位是查看全部瓦片", () => {
+    const view = loadView();
+    // 面板 500px 扣掉内边距与卡片边距后正好 4 列：4 × 2 - 1 = 7 张。
+    view.U.stickerDetail.clientWidth = 500;
+    view.StickersState.detail = pack({ categories: [categoryWithImages(9)] });
+    view.renderStickerDetail();
+
+    const html = view.U.stickerDetail.innerHTML;
+    assert.equal((html.match(/class="sticker-thumb-open"/g) || []).length, 7);
+    assert.match(html, /data-sticker-action="expand-category"/);
+    assert.match(html, /查看全部/);
+    assert.doesNotMatch(html, /data-sticker-action="collapse-category"/);
+});
+
+test("展开后全部图片保持原色，末尾出现同尺寸收起瓦片", () => {
+    const view = loadView();
+    view.U.stickerDetail.clientWidth = 500;
+    const category = categoryWithImages(9);
+    category.images = [];
+    view.StickersState.detail = pack({ categories: [category] });
+    view.StickersState.expanded["demo/happy"] = categoryWithImages(9).images;
+    view.renderStickerDetail();
+
+    const html = view.U.stickerDetail.innerHTML;
+    assert.equal((html.match(/class="sticker-thumb-open"/g) || []).length, 9);
+    assert.match(html, /class="sticker-thumb-more" data-sticker-action="collapse-category"/);
+    assert.match(html, /收起/);
+    assert.doesNotMatch(html, /data-sticker-action="expand-category"/);
+    // 已注册的图片不带 is-unregistered：展开接口曾经漏传注册表，整页会变灰。
+    assert.doesNotMatch(html, /sticker-thumb is-unregistered/);
+});
+
+test("收起清掉展开缓存并回到预览", () => {
+    const view = loadView();
+    view.U.stickerDetail.clientWidth = 500;
+    view.StickersState.detail = pack({ categories: [categoryWithImages(9)] });
+    view.StickersState.selected = "demo";
+    view.StickersState.expanded["demo/happy"] = categoryWithImages(9).images;
+    const card = { dataset: { stickerCategory: "happy" } };
+    const target = {
+        dataset: { stickerAction: "collapse-category" },
+        closest(selector) {
+            if (selector === "[data-sticker-action]") return target;
+            if (selector === ".sticker-category-card") return card;
+            return null;
+        },
+    };
+
+    view.onStickerDetailClick({ target });
+
+    assert.equal(view.StickersState.expanded["demo/happy"], undefined);
+    assert.match(view.U.stickerDetail.innerHTML, /data-sticker-action="expand-category"/);
 });
 
 test("写操作返回的整包快照替换骨架，改名后选中跟着走", () => {

@@ -93,6 +93,7 @@ def test_read_admin_pack_and_list_category_images(tmp_path: Path):
 
     images, total = sticker_admin.list_category_images("demo", "happy", root=tmp_path)
     assert total == 1 and images[0].name == "001.png"
+    assert images[0].registered is True
     window, total = sticker_admin.list_category_images("demo", "happy", root=tmp_path, offset=1, limit=5)
     assert (window, total) == ([], 1)
 

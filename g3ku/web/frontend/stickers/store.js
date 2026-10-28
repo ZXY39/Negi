@@ -9,6 +9,8 @@ const StickersState = {
     detail: null,
     // "pack/category" -> 已取回的完整图片列表（展开"查看全部"时才填）。
     expanded: {},
+    // 详情快照里每个分类取回的图片上限；视口变宽后可据此判断要不要补请求。
+    previewLimit: 0,
     settings: null,
     settingsLoadedOnce: false,
     busy: false,
