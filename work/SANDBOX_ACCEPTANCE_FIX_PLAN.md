@@ -211,17 +211,22 @@
 
 ### 剩余（明确阻塞/独立批次）
 
-1. **task_web_worker_runtime 39 条**：独立的行为漂移批次，非单一退役契约。
-   聚类：
-   - spawn children 结果/failure_info（约 10）
-   - waiting_children / round 恢复（约 10）
-   - notice / seed / prefix（约 6）
-   - execution/acceptance `_build_messages` 契约渲染（3）
-   - distribution / barrier（约 4）
-   - acceptance blocked 终态语义（1）
-   - node detail 形状（1）
-   需要按新 task runtime 行为逐族定稿，不能靠改字符串一次收完。
+1. **task_web_worker_runtime（已关闭）**：`f11fd682` 把 39 条全部对齐到
+   非阻塞派生、钉住契约头与节点信箱契约，整文件 `221 passed`。分族处置：
+   - spawn children 结果/failure_info：改为创建回执断言；失败/取消/异常用例改测
+     `_spawn_abort_result`、`_runtime_spawn_failure_info` 与记账故障原样上抛。
+   - waiting_children / round 恢复：恢复只重放派生轮，测试显式驱动子节点后
+     用 `reconcile_spawn_round_completion` 断言轮次完成度。
+   - 契约尾块与 seed/prefix：动态尾块退役，改为断言钉住头 + 一次性 notice；
+     seed 夹具补上节点头部快照，`provider`/内部前缀断言恢复为精确前缀。
+   - distribution / barrier：分发屏障与 `_deliver_distribution_message` 已删，
+     改测“旧 distribution 状态不再拦恢复”“待并入消息只记节点层”。
+   - acceptance blocked：改为 `reject_no_progress` 三档裁决契约。
+   - node detail / metadata-only：轮次投影停写，详情读节点行、指纹只看子节点集。
 2. **J 第 11 条**：本机仍无 WSL 后端、token 为空，证据包不在本机；不可复跑。
+
+`docs/architecture/sandbox-execution-plane.md` 只读表已同步（`ceefd5ed`）；
+仓库 ruff 基线恢复（`6b4fbc4c`）。
 
 context_window 已关闭：`1bbcc31c` 在压缩重置后、同一次主请求前重投一次性
 `[RUNTIME_NOTICE]`，repair 段以 `- repair_required:` 合同节到达模型；压缩套件
