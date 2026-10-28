@@ -113,7 +113,8 @@ def impulse_receipt(
         blocks.append(
             f'Tool contract for "{tool_name}" loaded - the tool is now callable.\n'
             "This call's arguments passed validation and were staged.\n"
-            "This call did not run the tool - call it again to execute it."
+            "This call did not run the tool - call it again to execute it.\n"
+            "Targets and other runtime references are resolved only when the call runs."
         )
     if is_last_of_batch and (outcome != IMPULSE_INVALID or batch_total > 1):
         # 份数只在最后一条报：投递逐条发生，前面的条只看得见半批。末条恰好失败时也要报，
