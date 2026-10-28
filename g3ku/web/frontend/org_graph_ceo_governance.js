@@ -537,10 +537,11 @@ let ceoSandboxTierCache = {
 };
 
 // 行标题直接写当前状态：没装后端时是「只读模式」，装好之后才是「沙箱模式」。
+// 开/关都写进标题（已开启 / 已关闭），光写"无限制"读不出开关方向。
 function ceoSandboxRowTitle() {
     if (ceoSandboxTierCache.restricted === null) return "沙箱模式";
-    if (!ceoSandboxTierCache.restricted) return "无限制";
-    return ceoSandboxInstalled() ? "沙箱模式" : "只读模式";
+    const label = ceoSandboxInstalled() ? "沙箱模式" : "只读模式";
+    return ceoSandboxTierCache.restricted ? `${label}已开启` : `${label}已关闭`;
 }
 
 function renderCeoRiskSandboxState() {

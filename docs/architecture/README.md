@@ -222,6 +222,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 节点详情页的「加载 skill / 加载 tool」chip 风险色全部同一档、展开看不到正文，或契约不在场时直接调用工具的那一行仍画成普通工具行（会话轨道/节点卡片） → `web-and-admin.md`「Context Loader Notices」
 - 工具面板的「参数」只有 48 字调用提示、超长入参点开也不回补 → `web-and-admin.md`「CEO Turn Timeline Rendering Contract」（`arguments_truncated` 标记与 `tool-arguments` 按需回取车道）
 - 翻看工具输出时新输出把输出框滚动条顶回顶部 → `web-and-admin.md`「CEO Feed View State And Scroll Preservation Contract」
+- 调用工具列表 / 任务详情消息列表没多到出现滚动条时，滚轮在它上面推不动会话流或详情页（同一族还有工具输出框、中途正文视窗、初始提示词视窗、思考面板） → `web-and-admin.md`「CEO Feed View State And Scroll Preservation Contract」（封顶内层滚动框不写 `overscroll-behavior`，有没有滚动条按实际溢出判；主滚动区仍保留 `contain`）
 - 模型正在输出最终内容时整页被定住无法滚动（上翻每一帧都被拽回底部）、或回合进行中的流式文本要等收尾才从工具组里搬到外面 → `web-and-admin.md`「Streamed Reply Delta Contract」+「CEO Feed View State And Scroll Preservation Contract」
 - 「回到最新」按钮该不该呼吸（回合早已收尾还在闪、或正在进行却不闪）、呼吸光晕盖到周围消息上 → `web-and-admin.md`「CEO Feed View State And Scroll Preservation Contract」
 - 日志板块反复出现「接口返回 500：/api/content/read」、节点详情输出框报「加载完整输出失败」或显示「完整输出已被清理」、点开工具行只有开头一段或整页卡死 → `web-and-admin.md`「Node Output Content Read Contract」

@@ -21,7 +21,9 @@ def test_expanded_prompt_text_is_a_fixed_height_scroll_viewport() -> None:
     assert "height: 120px;" in body
     assert "max-height" not in body
     assert "overflow-y: auto;" in body
-    assert "overscroll-behavior: contain;" in body
+    # 封顶内层滚动框不写 overscroll-behavior: contain：没有溢出、没滚动条时
+    # Chromium 也会把它当到达边界，滚轮被截住、详情页滚不动。
+    assert "overscroll-behavior" not in body
     # 展开后必须换行，否则固定高度只会把超出部分裁掉。
     assert "white-space: normal;" in body
     # 折叠态仍是单行省略号，不受固定高度影响。

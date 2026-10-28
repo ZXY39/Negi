@@ -1395,6 +1395,12 @@
 
   function renderRoutes() {
     if (!U.modelRoleEditors) return;
+    // 打开/关闭某个模型配置只换右侧抽屉：角色链重绘时按角色把各链的滚动位置带过去，
+    // 否则整块 innerHTML 重建会把每个 .model-chain-list 的滚动条清零（看起来是自动回到最上面）。
+    const chainScrollTops = new Map();
+    U.modelRoleEditors.querySelectorAll("[data-model-chain-list]").forEach((list) => {
+      chainScrollTops.set(String(list.dataset.modelChainList || ""), Number(list.scrollTop || 0));
+    });
     U.modelRoleEditors.innerHTML = MODEL_SCOPES.map((scope) => {
       const chain = modelScopeChain(scope.key);
       return `
@@ -1419,6 +1425,11 @@
         </section>`;
     }).join("");
     icons();
+    if (!chainScrollTops.size) return;
+    U.modelRoleEditors.querySelectorAll("[data-model-chain-list]").forEach((list) => {
+      const top = chainScrollTops.get(String(list.dataset.modelChainList || ""));
+      if (top > 0) list.scrollTop = top;
+    });
   }
 
   function renderAll() {

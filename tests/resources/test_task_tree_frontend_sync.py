@@ -4907,6 +4907,35 @@ def test_detail_boxes_are_line_capped_and_outputs_have_copy_buttons() -> None:
     assert "max-height: calc(10.5 * 48px + 10 * var(--space-3))" in css
     # 中途输出列表（节点详情与 CEO 回合轨）：16.5 条封顶。
     assert "max-height: calc(16.5 * 48px + 16 * var(--space-3))" in css
+    # 条目不足、没有滚动条时不能吞滚轮：封顶内层滚动框一律不写 overscroll-behavior: contain，
+    # Chromium 把无溢出的框也按"到达边界"处理，滚轮被截在框内、外层滚不动。
+    # 溢出归属留给浏览器按实际高度判，滚到边界再交回外层。
+    css_rules = [
+        (match.group("sel"), match.group("body"))
+        for match in re.finditer(r"(?P<sel>[^{}]+)\{(?P<body>[^{}]*)\}", css)
+    ]
+    nested_scroll_boxes = (
+        "#ad-messages .task-trace-list",
+        "#ad-spawn-reviews .task-trace-list",
+        "#ad-input .task-trace-list",
+        ".interaction-flow-list.task-trace-list",
+        ".task-trace-step--turn-text[open] .interaction-step-title",
+        ".interaction-step-detail",
+        ".task-trace-code",
+        ".task-trace-message-body",
+        ".spawn-node-text",
+        ".task-output-shell > .code-block",
+        ".task-prompt-disclosure[open] .task-prompt-text",
+        ".ceo-thinking-line-pane",
+        ".toolskill-disclosure .resource-disclosure-body",
+    )
+    for selector in nested_scroll_boxes:
+        bodies = [body for sel, body in css_rules if selector in sel]
+        assert bodies, selector
+        assert all("overscroll-behavior" not in body for body in bodies), selector
+    # 视图自己的主滚动区仍保留 contain，作为该视图的滚动边界。
+    feed_bodies = [body for sel, body in css_rules if ".chat-feed" in sel]
+    assert any("overscroll-behavior: contain" in body for body in feed_bodies)
     # 提交输出 / 验收结果：15 行封顶。
     assert "max-height: calc(15 * 1.65em)" in css
     html = (REPO_ROOT / "g3ku/web/frontend/org_graph.html").read_text(encoding="utf-8")

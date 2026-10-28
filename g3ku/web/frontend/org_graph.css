@@ -828,7 +828,6 @@ textarea {
     min-height: 0;
     overflow-x: hidden;
     overflow-y: auto;
-    overscroll-behavior: contain;
     padding-right: 8px;
 }
 
@@ -3333,7 +3332,6 @@ textarea {
 .ceo-thinking-line-pane {
     max-height: 8.5rem;
     overflow-y: auto;
-    overscroll-behavior: contain;
     padding-left: 8px;
     border-left: 1px solid var(--border-color, rgba(255, 255, 255, 0.12));
     color: var(--text-secondary);
@@ -3992,7 +3990,6 @@ textarea {
     /* 16.5 行视窗：max-height 而不是 height，短正文不预占空白。 */
     max-height: calc(16.5 * 1.6em);
     overflow-y: auto;
-    overscroll-behavior: contain;
     background: transparent;
     border: 0;
     line-height: 1.6;
@@ -4077,7 +4074,6 @@ textarea {
     /* 会话流工具输出展开后同样封顶,避免长输出把聊天流刷满。 */
     max-height: 260px;
     overflow: auto;
-    overscroll-behavior: contain;
 }
 
 .interaction-step-disclosure {
@@ -4507,7 +4503,6 @@ textarea {
        超过固定高度后在内部滚动,由全局细滚动条承载。 */
     max-height: 260px;
     overflow: auto;
-    overscroll-behavior: contain;
     font-size: calc(0.85rem * var(--reading-font-scale));
     background: color-mix(in srgb, var(--bg-panel) 62%, var(--bg-app));
 }
@@ -9029,7 +9024,6 @@ textarea {
 .toolskill-disclosure .resource-disclosure-body {
     max-height: min(46vh, 560px);
     overflow: auto;
-    overscroll-behavior: contain;
     scrollbar-gutter: stable;
 }
 
@@ -17770,7 +17764,6 @@ textarea {
     line-height: 1.65;
     max-height: 320px;
     overflow-y: auto;
-    overscroll-behavior: contain;
 }
 
 .spawn-node-list {
@@ -17860,7 +17853,6 @@ textarea {
     word-break: break-word;
     max-height: 220px;
     overflow-y: auto;
-    overscroll-behavior: contain;
     font-size: 0.84rem;
     line-height: 1.6;
     color: var(--text-primary);
@@ -17979,8 +17971,13 @@ textarea {
 #ad-spawn-reviews .task-trace-list {
     max-height: calc(10.5 * 48px + 10 * var(--space-3));
     overflow-y: auto;
-    overscroll-behavior: contain;
 }
+
+/* 封顶内层滚动框统一不写 overscroll-behavior: contain：它按"滚动容器到达边界"生效，
+   条目不足、没有滚动条时 Chromium 同样把框当边界，滚轮会被截在框内、外层滚不动。
+   让浏览器按实际溢出判定归属：框内还能滚就滚框，滚到头再交回外层。
+   视图自己的主滚动区（.chat-feed / .audit-event-list / .tree-container）保留 contain
+   作为该视图的滚动边界。 */
 
 /* 中途输出列表：节点详情与 CEO 回合轨各在 16.5 条处封顶，
    条目再多只在框内滚动，不再把整页刷长。 */
@@ -17988,7 +17985,6 @@ textarea {
 .interaction-flow-list.task-trace-list {
     max-height: calc(16.5 * 48px + 16 * var(--space-3));
     overflow-y: auto;
-    overscroll-behavior: contain;
 }
 
 /* 提交输出 / 验收结果：15 行视窗，右上角常驻复制按钮（滚动时浮在框上）。 */
@@ -17999,7 +17995,6 @@ textarea {
 .task-output-shell > .code-block {
     max-height: calc(15 * 1.65em);
     overflow-y: auto;
-    overscroll-behavior: contain;
     padding-right: 46px;
 }
 
@@ -18187,8 +18182,9 @@ textarea {
     transform: scaleY(1);
 }
 
-/* 展开动效：条目从上一行的高度往下逐层浮入，每层错开 32ms。类只在打开后的一小段
-   挂着（由 playTraceUnfoldWave 收回），流式重绘不会反复触发。 */
+/* 展开动效：条目从上一行的高度往下逐层浮入，每层错开 32ms。只挂在"展开执行记录"
+   这一处；单条中途正文 / 单轮工具展开不播。类只在打开后的一小段挂着
+   （由 playTraceUnfoldWave 收回），流式重绘不会反复触发。 */
 .unfold-wave-row {
     animation: traceUnfoldRowIn 0.32s cubic-bezier(0.22, 0.61, 0.36, 1) both;
     animation-delay: calc(var(--unfold-index, 0) * 32ms);
@@ -18205,25 +18201,8 @@ textarea {
     }
 }
 
-/* 中途正文是整块文本：用自上而下的抹开代替逐行拆分，读起来就是一层层展开。 */
-.unfold-wave-text {
-    animation: traceUnfoldTextIn 0.44s ease both;
-}
-
-@keyframes traceUnfoldTextIn {
-    from {
-        opacity: 0.25;
-        clip-path: inset(0 0 92% 0);
-    }
-    to {
-        opacity: 1;
-        clip-path: inset(0 0 0 0);
-    }
-}
-
 @media (prefers-reduced-motion: reduce) {
-    .unfold-wave-row,
-    .unfold-wave-text {
+    .unfold-wave-row {
         animation: none;
     }
 }

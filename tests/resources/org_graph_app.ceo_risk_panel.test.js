@@ -379,7 +379,7 @@ test("沙箱模式一行：行标题直接写状态，开关方向先弹二次�
     const row = ctx.elements.get("ceo-risk-sandbox-btn");
     const title = ctx.elements.get("ceo-risk-sandbox-title");
     assert.equal(row.attrs["aria-pressed"], "false");
-    assert.equal(title.textContent, "无限制");
+    assert.equal(title.textContent, "只读模式已关闭");
 
     ctx.elements.get("ceo-risk-panel").dispatch("click", { target: row });
     await settle();
@@ -396,7 +396,7 @@ test("沙箱模式一行：行标题直接写状态，开关方向先弹二次�
     await dialog.onConfirm({ value: "live-test-pass" });
     assert.deepEqual(plain(patched), [{ mode: "restricted", unlock_password: "live-test-pass" }]);
     assert.equal(row.attrs["aria-pressed"], "true");
-    assert.equal(title.textContent, "只读模式", "没装后端时不冒充沙箱");
+    assert.equal(title.textContent, "只读模式已开启", "没装后端时不冒充沙箱");
     assert.deepEqual(notified, ["web:shared"], "切完要通知沙箱 iframe 重读");
 });
 
@@ -411,6 +411,11 @@ test("装好沙箱后，同一开关的二次确认改叫开启/关闭沙箱模�
 
     ctx.elements.get("ceo-risk-btn").dispatch("click");
     await settle();
+    assert.equal(
+        ctx.elements.get("ceo-risk-sandbox-title").textContent,
+        "沙箱模式已关闭",
+        "装好后同一行也按开/关写状态",
+    );
     ctx.elements.get("ceo-risk-panel").dispatch("click", {
         target: ctx.elements.get("ceo-risk-sandbox-btn"),
     });
@@ -433,6 +438,7 @@ test("第三方会话关闭沙箱：口令错留在二次确认里，口令对�
     await settle();
     const row = ctx.elements.get("ceo-risk-sandbox-btn");
     assert.equal(row.attrs["aria-pressed"], "true");
+    assert.equal(ctx.elements.get("ceo-risk-sandbox-title").textContent, "只读模式已开启");
 
     ctx.elements.get("ceo-risk-panel").dispatch("click", { target: row });
     await settle();
@@ -445,4 +451,5 @@ test("第三方会话关闭沙箱：口令错留在二次确认里，口令对�
 
     await dialog.onConfirm({ value: "live-test-pass" });
     assert.equal(row.attrs["aria-pressed"], "false");
+    assert.equal(ctx.elements.get("ceo-risk-sandbox-title").textContent, "只读模式已关闭");
 });
