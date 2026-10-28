@@ -655,7 +655,13 @@ async def test_graph_call_model_injects_running_turn_follow_up_messages_before_p
     )
 
     request_messages = list(captured.get("messages") or [])
-    assert [str(item.get("content") or "") for item in request_messages[-2:]] == [
+    # 运行时通知固定追加在尾部，不参与 follow-up 位置的断言。
+    visible_messages = [
+        item
+        for item in request_messages
+        if not str(item.get("content") or "").startswith("[RUNTIME_NOTICE]")
+    ]
+    assert [str(item.get("content") or "") for item in visible_messages[-2:]] == [
         "working on it",
         "Please also include the risk matrix.",
     ]
