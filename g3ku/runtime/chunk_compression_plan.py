@@ -66,7 +66,7 @@ class ChunkPlanRefusal:
     max_group_tokens: int
 
 
-def _output_headroom_tokens(context_window_tokens: int) -> int:
+def output_headroom_tokens(context_window_tokens: int) -> int:
     return min(
         CHUNK_OUTPUT_HEADROOM_TOKENS,
         max(CHUNK_OUTPUT_HEADROOM_MIN_TOKENS, int(int(context_window_tokens or 0) * CHUNK_OUTPUT_HEADROOM_RATIO)),
@@ -82,7 +82,7 @@ def resolve_chunk_capacity(
     """单块容量与其来源；容量非正时返回 0（调用方据此拒发）。"""
 
     window = int(context_window_tokens or 0)
-    capacity = window - int(envelope_tokens or 0) - _output_headroom_tokens(window)
+    capacity = window - int(envelope_tokens or 0) - output_headroom_tokens(window)
     source = CAPACITY_SOURCE_WINDOW
     observed = int(observed_span_tokens or 0)
     if observed > 0:
@@ -190,7 +190,7 @@ def plan_compression_pass(
 
     window = int(context_window_tokens or 0)
     single_request = int(single_shot_tokens or 0)
-    if counts and window > 0 and single_request > 0 and single_request + _output_headroom_tokens(window) <= window:
+    if counts and window > 0 and single_request > 0 and single_request + output_headroom_tokens(window) <= window:
         return _pass(
             mode=COMPRESSION_MODE_SINGLE,
             spans=[(0, len(counts))],
@@ -276,7 +276,7 @@ def plan_chunk_groups(
     limit = max(1, int(max_chunks or 1))
     window = int(context_window_tokens or 0)
     context = (
-        f"窗口={window} 信封={int(envelope_tokens or 0)} 输出余量={_output_headroom_tokens(window)} "
+        f"窗口={window} 信封={int(envelope_tokens or 0)} 输出余量={output_headroom_tokens(window)} "
         f"观测跨度={int(observed_span_tokens or 0)} 可压历史={history_tokens}"
     )
 

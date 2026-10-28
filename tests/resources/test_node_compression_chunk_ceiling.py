@@ -285,7 +285,7 @@ def _frontdoor_runner(record: list[int]):
             request_messages=list(messages or []),
             tool_schemas=[],
         ) or 0))
-        return '【摘要】保留结论与路径。', {'role': 'assistant', 'content': '摘要'}
+        return '【摘要】保留结论与路径。', {'role': 'assistant', 'content': '摘要'}, ''
 
     async def no_emit(**kwargs):
         return None
@@ -343,7 +343,7 @@ def _frontdoor_run(runner, history, window, state=None, observed_span_tokens=0):
 def test_frontdoor_chunks_stay_inside_window() -> None:
     sizes: list[int] = []
     runner = _frontdoor_runner(sizes)
-    combined, chunk_count, _merge, _failed, _rounds, deferred, committed = _frontdoor_run(
+    combined, chunk_count, _merge, _failed, _rounds, deferred, committed, _provider_error = _frontdoor_run(
         runner, _frontdoor_history(219, 4800), 390000
     )
     assert combined
@@ -369,7 +369,7 @@ def test_frontdoor_scale_overflow_defers_inside_the_hop_instead_of_raising() -> 
     runner = _frontdoor_runner(sizes)
     # 会话实测跨度 12 万 ⇒ 容量被夹到 10.8 万，390 万历史要几十块，越过 12 上限。
     # 旧处置是抛 `frontdoor_context_window_exceeded`；现在两轮压满，剩下的原样交回。
-    combined, chunk_count, _merge, failed, rounds, deferred, committed = _frontdoor_run(
+    combined, chunk_count, _merge, failed, rounds, deferred, committed, _provider_error = _frontdoor_run(
         runner, _frontdoor_history(420, 10000), 390000, observed_span_tokens=120000
     )
     assert sizes, '溢出块应在本跳第二轮继续压'

@@ -8,6 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from g3ku.providers.fallback import DEFAULT_RETRYABLE_MODEL_ROUNDS
+from g3ku.runtime.chunk_compression_plan import output_headroom_tokens
 from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
 from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
 from g3ku.runtime.frontdoor.state_models import CeoRuntimeContext
@@ -40,6 +42,20 @@ def _build_runner(monkeypatch: pytest.MonkeyPatch, *, context_window_tokens: int
     monkeypatch.setattr(runner, "_refresh_runtime_config_for_retry_invalidation", lambda: False, raising=False)
     monkeypatch.setattr(runner, "_resolve_ceo_model_refs_for_session", lambda *_a, **_k: [], raising=False)
     monkeypatch.setattr(runner, "_model_response_usage", lambda _message: {}, raising=False)
+    # 重试判据取自模型绑定（`retry_on` 决定要不要重烧、`retry_count` 决定几轮）。测试里
+    # 没有真配置：固定成"默认关键词表 + 2 轮"，既验判据走的是这条道，又不让默认 10 轮的
+    # 退避把用例拖成几十秒。判据本身的解析另有单独用例。
+    monkeypatch.setattr(
+        runner,
+        "_frontdoor_compression_retry_policy",
+        lambda _refs: (["network", "429"], 2),
+        raising=False,
+    )
+
+    async def _fast_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(ceo_runtime_ops.asyncio, "sleep", _fast_sleep)
     return runner
 
 
@@ -482,11 +498,17 @@ def test_iter_compaction_atomic_groups_keeps_tool_call_runs_indivisible() -> Non
 async def test_frontdoor_compression_aborts_and_keeps_body_when_helper_yields_no_summary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """helper 没拿到摘要就放弃这一 pass：原请求体照发，绝不拿空产物去替换历史。"""
+    """helper 没拿到摘要就放弃这一 pass：原请求体照发，绝不拿空产物去替换历史。
+
+    这里喂的是**没有任何失败签名**的空包：`retry_on` 无从命中，所以它按绑定的重试次数
+    （测试里固定 2 轮）重烧后放弃，而不是把一次空包升级成一条拒因。
+    """
     runner = _build_runner(monkeypatch)
+    calls: list[int] = []
 
     async def _empty(*_args, **_kwargs):
-        return {"content": "", "error_text": "upstream returned empty"}
+        calls.append(len(calls))
+        return {"content": ""}
 
     monkeypatch.setattr(runner, "_call_model_with_tools", _empty)
     monkeypatch.setattr(
@@ -509,6 +531,7 @@ async def test_frontdoor_compression_aborts_and_keeps_body_when_helper_yields_no
     assert [dict(item) for item in result.request_messages] == original
     assert result.history_shrink_reason == ""
     assert "no summary" in str(result.diagnostics.get("compression_pass_failed") or "")
+    assert len(calls) == 2, f"重烧轮数取自绑定的重试次数：{len(calls)}"
 
 
 def test_over_window_messages_state_facts_and_never_order_a_chain_edit() -> None:
@@ -536,3 +559,141 @@ def test_over_window_messages_state_facts_and_never_order_a_chain_edit() -> None
     assert "原因: context_window_missing" in missing.message
     assert "按这颗模型的窗口压缩后仍装不下" in exceeded.message
     assert "capacity_non_positive" in exceeded.message
+
+
+@pytest.mark.asyncio
+async def test_frontdoor_compression_request_declares_planner_output_headroom(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """压缩请求的输出预算＝规划器划容量时预留的那颗余量，不再沿用绑定的 max_tokens。
+
+    实盘 2026-10-28：一颗声明 100000 窗口的模型，容量按"窗口−信封−一成余量"装箱，
+    发出去的压缩请求却带 `max_tokens=65536`——请求体从来没有被它自己算出的余量约束过。
+    """
+    runner = _build_runner(monkeypatch, context_window_tokens=100_000)
+    captured: list[dict[str, object]] = []
+
+    async def _call_model_with_tools(**kwargs):
+        captured.append(dict(kwargs))
+        return {"content": "压缩后的摘要"}
+
+    monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
+    monkeypatch.setattr(runner, "_estimate_frontdoor_send_total_tokens", lambda **kwargs: 10_000, raising=False)
+
+    await runner._run_frontdoor_llm_token_compression(
+        state={"session_key": "web:shared", "prompt_cache_key": ""},
+        runtime=_build_runtime(),
+        request_messages=_request_messages(),
+        model_refs=["ceo_primary"],
+        tool_schemas=[],
+    )
+
+    assert len(captured) == 1
+    assert int(captured[0].get("max_tokens") or 0) == output_headroom_tokens(100_000) == 10_000
+
+
+@pytest.mark.asyncio
+async def test_frontdoor_chunk_and_merge_requests_share_the_same_output_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """分块与归并是同一条压缩车道的两种形状，输出预算必须与单发同一颗数。"""
+    runner = _build_runner(monkeypatch, context_window_tokens=2_000)
+    captured: list[dict[str, object]] = []
+
+    async def _call_model_with_tools(**kwargs):
+        messages = list(kwargs.get("messages") or [])
+        captured.append(dict(kwargs))
+        rendered = json.dumps(messages, ensure_ascii=False, default=str)
+        if "frontdoor_token_compression_chunk" in rendered:
+            return {"content": "块摘要"}
+        return {"content": "归并后的总摘要"}
+
+    monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
+    monkeypatch.setattr(runner, "_estimate_frontdoor_send_total_tokens", lambda **kwargs: 1_000, raising=False)
+
+    def _module_estimate(provider_request_body=None, request_messages=None, tool_schemas=None):
+        messages = list(request_messages or [])
+        rendered = json.dumps(messages, ensure_ascii=False, default=str)
+        if "【上下文压缩指令】" in rendered:
+            loaded = sum(1 for item in messages if str(item.get("content") or "").startswith("h"))
+            return 900 + 2100 * loaded
+        if "frontdoor_token_compression_merge" in rendered:
+            return 100
+        if len(messages) == 1 and str((messages[0] or {}).get("content") or "").startswith("[分块摘要"):
+            return 300
+        return 2100
+
+    monkeypatch.setattr(ceo_runtime_ops, "_estimate_frontdoor_provider_request_tokens", _module_estimate)
+
+    await runner._run_frontdoor_llm_token_compression(
+        state={"session_key": "web:shared", "prompt_cache_key": ""},
+        runtime=_build_runtime(),
+        request_messages=_history_body(8),
+        model_refs=["ceo_primary"],
+        tool_schemas=[],
+    )
+
+    assert len(captured) >= 2, captured
+    expected = output_headroom_tokens(2_000)
+    assert all(int(dict(item).get("max_tokens") or 0) == expected for item in captured), [
+        item.get("max_tokens") for item in captured
+    ]
+
+
+@pytest.mark.asyncio
+async def test_frontdoor_compression_surfaces_unclassified_provider_rejection_verbatim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """没命中 `retry_on` 的失败：第一跳就把 provider 原话抛出去，不重烧、不改写成"装不下"。
+
+    实盘 2026-10-28 会话 ext:qq-official-1903529517:f8a8001865631301：第二块被上游内容审核
+    拒（非流式回 `code 18`，流式表现为无声关流）。旧行为是按硬闸重烧同一批 82k 字节三次，
+    再把整次压缩收口成"按这颗模型的窗口压缩后仍装不下"——那是与成因无关的判词。
+    """
+    runner = _build_runner(monkeypatch)
+    calls: list[int] = []
+    rejection = "Inappropriate input/output rejected for security reasons"
+
+    async def _reject(*_args, **_kwargs):
+        calls.append(len(calls))
+        return {"content": "", "error_text": rejection, "finish_reason": "error", "error_status": 400}
+
+    monkeypatch.setattr(runner, "_call_model_with_tools", _reject)
+    monkeypatch.setattr(runner, "_estimate_frontdoor_send_total_tokens", lambda **kwargs: 10_000, raising=False)
+
+    with pytest.raises(ceo_runtime_ops.FrontdoorCompressionRuntimeError) as raised:
+        await runner._run_frontdoor_llm_token_compression(
+            state={"session_key": "web:shared", "prompt_cache_key": ""},
+            runtime=_build_runtime(),
+            request_messages=_request_messages(),
+            model_refs=["ceo_primary"],
+            tool_schemas=[],
+        )
+
+    assert raised.value.message == rejection, raised.value.message
+    assert raised.value.code == "frontdoor_compression_provider_rejected"
+    assert "装不下" not in raised.value.message
+    assert len(calls) == 1, f"没命中 retry_on 的失败不许重烧：{len(calls)} 次"
+
+
+def test_frontdoor_compression_retry_policy_reads_the_binding(monkeypatch: pytest.MonkeyPatch) -> None:
+    """重试判据取操作员设的那颗：`retry_on` 决定要不要重烧，`retry_count` 决定几轮。"""
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    record = SimpleNamespace(retry_on=["429"], retry_count=5)
+    never = SimpleNamespace(retry_on=[], retry_count=0)
+
+    def _fake_config(ref: str) -> SimpleNamespace:
+        return record if ref == "ceo_primary" else (never if ref == "ceo_never" else None)
+
+    monkeypatch.setattr(
+        runner,
+        "_frontdoor_runtime_config",
+        lambda: SimpleNamespace(get_managed_model=_fake_config),
+        raising=False,
+    )
+
+    assert runner._frontdoor_compression_retry_policy(["ceo_primary"]) == (["429"], 5)
+    # 显式空列表＝操作员说了"永不重试"，判据要原样交回 []，不是悄悄换成默认关键词表。
+    assert runner._frontdoor_compression_retry_policy(["ceo_never"]) == ([], DEFAULT_RETRYABLE_MODEL_ROUNDS)
+    # 查不到绑定才退默认关键词表；三条道都不退"硬拦 3 次"。
+    assert runner._frontdoor_compression_retry_policy(["ceo_missing"]) == (None, DEFAULT_RETRYABLE_MODEL_ROUNDS)

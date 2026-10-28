@@ -23,6 +23,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from g3ku.providers.fallback import DEFAULT_RETRYABLE_MODEL_ROUNDS
+from g3ku.runtime.chunk_compression_plan import output_headroom_tokens
 from main.runtime.react_loop import ReActToolLoop
 
 
@@ -67,6 +69,10 @@ def _make_loop(fake_chat):
     loop._node_stage_archive_plan = lambda **_: {}
     loop._node_token_compression_task_goal = lambda **_: '探针任务目标：汇总大文件'
     loop._node_compression_must_preserve_records = lambda **_: []
+    # 压缩 helper 的重试判据取自模型绑定（`retry_on` 决定要不要重烧、`retry_count` 决定
+    # 几轮）。测试里没有真配置：固定成"默认关键词表 + 2 轮"，既验这条判据通道，又不让
+    # 默认 10 轮的退避把用例拖成几分钟。绑定解析本身另有单独用例。
+    loop._node_compression_retry_policy = lambda _refs: (['network', '429'], 2)
     return loop
 
 
@@ -253,3 +259,75 @@ def test_single_shot_failure_quotes_provider_error() -> None:
 )
 def test_compression_failure_reason_branches(payload: dict, expected: str) -> None:
     assert expected in ReActToolLoop._compression_failure_reason(payload)
+
+
+def test_node_compression_request_declares_planner_output_headroom() -> None:
+    """节点道的压缩请求把输出预算钉在规划器预留的那颗余量上，不再沿用绑定的 max_tokens。
+
+    与前门道同一条规则：容量按"窗口−信封−输出余量"装箱，发出去的那一发就必须用同一个
+    余量数字，否则请求体从来没被自己算出的余量约束过（实盘 2026-10-28 那颗带 65536）。
+    """
+    sent: list[dict] = []
+
+    async def fake_chat(*args, messages=None, **kwargs):
+        sent.append(dict(kwargs))
+        return _Resp(content='【摘要】保留结论与路径。')
+
+    loop = _make_loop(fake_chat)
+    text, _payload = _compress(loop, _history(20, 600), window=300_000)
+
+    assert text
+    assert sent, '压缩请求没发出去'
+    expected = output_headroom_tokens(300_000)
+    assert all(int(item.get('max_tokens') or 0) == expected for item in sent), [
+        item.get('max_tokens') for item in sent
+    ]
+
+
+def test_node_compression_stops_at_first_unclassified_rejection() -> None:
+    """没命中 `retry_on` 的失败一次都不重烧，provider 原话直接进拒因。
+
+    实盘 2026-10-28 会话 ext:qq-official-1903529517:f8a8001865631301：第二块被上游内容审核
+    拒（流式表现为无声关流），旧行为按硬闸把同一批 82k 字节重烧三遍，再把整次压缩收口成
+    与成因无关的判词。
+    """
+    sent: list[int] = []
+
+    async def fake_chat(*args, messages=None, **kwargs):
+        sent.append(1)
+        return _Resp(content='', error_text='Inappropriate input/output rejected for security reasons')
+
+    loop = _make_loop(fake_chat)
+    text, payload = _compress(loop, _history(20, 600), window=300_000)
+
+    assert text == ''
+    assert len(sent) == 1, f'没命中 retry_on 的失败不许重烧：{len(sent)} 次'
+    assert payload.get('helper_error_text') == 'Inappropriate input/output rejected for security reasons'
+    reason = ReActToolLoop._compression_failure_reason(payload)
+    assert 'Inappropriate input/output rejected for security reasons' in reason, reason
+
+
+def test_node_compression_retry_policy_reads_the_binding(monkeypatch: pytest.MonkeyPatch) -> None:
+    """重试判据取操作员设的那颗：`retry_on` 决定要不要重烧，`retry_count` 决定几轮。"""
+    from main.runtime import react_loop as react_loop_module
+
+    loop = _make_loop(lambda *a, **k: _Resp(content=''))
+    # 这条用例验的就是判据本身，得绕开 `_make_loop` 里那只固定 2 轮的桩。
+    del loop._node_compression_retry_policy
+    record = SimpleNamespace(retry_on=['429'], retry_count=5)
+    never = SimpleNamespace(retry_on=[], retry_count=0)
+
+    def _fake_config(ref: str) -> SimpleNamespace:
+        return record if ref == 'ceo_primary' else (never if ref == 'ceo_never' else None)
+
+    monkeypatch.setattr(
+        react_loop_module,
+        'get_runtime_config',
+        lambda **_: (SimpleNamespace(get_managed_model=_fake_config), 1, False),
+    )
+
+    assert loop._node_compression_retry_policy(['ceo_primary']) == (['429'], 5)
+    # 显式空列表＝操作员说了"永不重试"，原样交回 []，不悄悄换成默认关键词表。
+    assert loop._node_compression_retry_policy(['ceo_never']) == ([], DEFAULT_RETRYABLE_MODEL_ROUNDS)
+    # 查不到绑定才退默认关键词表；三条道都不退"硬拦 3 次"。
+    assert loop._node_compression_retry_policy(['ceo_missing']) == (None, DEFAULT_RETRYABLE_MODEL_ROUNDS)

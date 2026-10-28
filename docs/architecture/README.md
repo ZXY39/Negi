@@ -207,6 +207,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 拆分前端模块后页面白屏并报 `ApiCore` / `ApiClient is not defined`、新模块请求 404、或页面脚本顺序与测试装载对不上 → `web-and-admin.md`「Frontend Script Layout And Test Loading」
 - 长按脑图标不发起压缩、区分线停在「压缩已暂停」、压缩中区分线凭空消失刷新后才出现、一条「上下文压缩中」长期钉住收不掉、中断线旁边像按钮却点不动、心跳唤醒的回合里压缩全程没有线、「会话已压缩」要刷新才出现、区分线跑到回合气泡之前或压缩之后那段内容的下方、刷新后区分线重复两条、往回翻页时区分线在窗口边界重复、渠道会话脑图标没有读数 → `web-and-admin.md`「CEO Compression UI Contract」+「Manual Context Compression」+ `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」
 - 压缩报成功、`post_tokens` 也降了，但下一回合请求体又回到原大小；或压缩途中发的消息没被回答 → `runtime-overview.md`「压缩窗口：入站闸门与基线写入仲裁」+ `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」
+- 分块压缩每次都恰好有一块拿不到摘要、或报错写着"按这颗模型的窗口压缩后仍装不下"而那一跳的块尺寸并不超容量 → `runtime-overview.md`「Frontdoor Context Compression」+ `context-and-cache-troubleshooting.md`「frontdoor token preflight 之后要看哪份诊断」
 - 节点反复收到"缺必填参数"式拒绝、错误首行逐字相同而 arguments 后缀不同，眼看要被无效提交上限判死 → `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」（provider 参数块未转义 + 宽容解析吞参数，按协议故障单独计数）
 - 节点连续多轮重交同一份被拒载荷、越到后面收到的参数契约越短（只剩 `summary` 残段、`ref` 为空） → `tool-and-skill-system.md`「Duplicate Tool Call Guard」（控制工具 error 回执不参与消息级折叠）
 - 模型报告"上一轮我想到哪了"却读不到任何思路、或开了思考回放的 binding 一上线就整条链报 400 → `runtime-overview.md`「思考内容（reasoning）的上下文回放」（写入闸门按整条链取交集，咽喉点只透传）

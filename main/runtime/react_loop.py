@@ -26,10 +26,13 @@ from g3ku.providers.base import (
 )
 from g3ku.providers.fallback import (
     DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS,
+    DEFAULT_RETRYABLE_MODEL_ROUNDS,
     MODEL_RETRY_LIVE_STATES,
     PUBLIC_PROVIDER_FAILURE_MESSAGE,
     ModelProviderExhaustedError,
     is_request_shape_error,
+    is_retryable_model_error,
+    normalized_retry_count,
 )
 from g3ku.resources.retired_schemas import placeholder_tool_schema
 from g3ku.resources.retired_schemas import schema_name as _provider_schema_name
@@ -40,6 +43,7 @@ from g3ku.runtime.chunk_compression_plan import (
     COMPRESSION_MAX_PASS_ROUNDS,
     COMPRESSION_MODE_CHUNKED,
     CompressionPass,
+    output_headroom_tokens,
     plan_compression_pass,
 )
 from g3ku.runtime.frontdoor.tool_contract import (
@@ -6100,8 +6104,8 @@ class ReActToolLoop:
                 f"{quoted_error}"
             )
         return (
-            "token compression helper returned an empty summary after retries "
-            f"(limit {_PROVIDER_RETRY_LIMIT}){quoted_error}"
+            "token compression helper returned an empty summary"
+            f"{quoted_error}"
         )
 
     @staticmethod
@@ -6742,6 +6746,10 @@ class ReActToolLoop:
         ]
         single_shot_tokens = self._estimate_node_compression_message_tokens(single_shot_messages)
         window = int(context_window_tokens or 0)
+        # 压缩请求的输出预算与规划器划容量时预留的那颗余量同源（与前门车道同一条规则）：
+        # 一边按"窗口−信封−一成余量"装箱、另一边按绑定的 max_tokens 发出去，请求体就从来
+        # 没被它自己算出的余量约束过。读不到窗口时不压输出——那时容量判据本身走拒发档。
+        compression_output_tokens = output_headroom_tokens(window) if window > 0 else None
         grouped_history = [
             (list(group), self._estimate_node_compression_message_tokens(group))
             for group in iter_compaction_atomic_groups(older_history_messages)
@@ -6778,6 +6786,7 @@ class ReActToolLoop:
                 grouped_history=grouped_history,
                 compression_pass=compression_pass,
                 model_refs=list(model_refs or []),
+                max_tokens=compression_output_tokens,
             )
             helper_payload["chunk_count"] = int(chunk_count or 1)
             helper_payload["chunk_committed_count"] = int(committed_chunks or 0)
@@ -6799,6 +6808,7 @@ class ReActToolLoop:
         response = await self._node_compression_helper_call(
             messages=single_shot_messages,
             model_refs=list(model_refs or []),
+            max_tokens=compression_output_tokens,
         )
         compressed_text = str(getattr(response, 'content', '') or '').strip()
         helper_error_text = str(getattr(response, 'error_text', None) or '').strip()
@@ -6840,20 +6850,49 @@ class ReActToolLoop:
         except Exception:
             return 0
 
+    def _node_compression_retry_policy(self, model_refs: list[str] | None) -> tuple[list[str] | None, int]:
+        """压缩 helper 的重试判据：这条绑定自己的 `retry_on` 与「重试次数」。
+
+        次数沿用节点普通发送同一口径（绑定 `retry_count`，0/未设置＝默认轮数预算）。
+        取不到绑定时退默认关键词表，而不是退"硬拦 3 次"：那道硬闸把操作员设的 0 和
+        9999 都读成同一个 3。
+        """
+        model_key = str((list(model_refs or []) or [''])[0] or '').strip()
+        config = None
+        try:
+            config, _revision, _changed = get_runtime_config(force=False)
+        except Exception:
+            config = None
+        if not model_key or config is None:
+            return None, DEFAULT_RETRYABLE_MODEL_ROUNDS
+        try:
+            managed = config.get_managed_model(model_key)
+        except Exception:
+            managed = None
+        if managed is None:
+            return None, DEFAULT_RETRYABLE_MODEL_ROUNDS
+        raw_retry_on = getattr(managed, 'retry_on', None)
+        retry_on = None if raw_retry_on is None else list(raw_retry_on or [])
+        rounds = normalized_retry_count(getattr(managed, 'retry_count', 0)) or DEFAULT_RETRYABLE_MODEL_ROUNDS
+        return retry_on, rounds
+
     async def _node_compression_helper_call(
         self,
         *,
         messages: list[dict[str, Any]],
         model_refs: list[str],
+        max_tokens: int | None = None,
     ) -> Any:
-        """压缩 helper 单发调用 + 空响应对齐节点普通路径的重试语义。
+        """压缩 helper 单发调用 + 由模型绑定决定要不要重烧。
 
-        空响应按 `_empty_response_retry_delay_seconds` 退避重试，上限
-        `_PROVIDER_RETRY_LIMIT`（与节点普通发送一致）；耗尽后返回最后一次响应
-        （调用方按空摘要走既有失败分支，报错如实含重试次数）。模型链内部的
-        回退/换 key 由 chat backend 承担。暂停/取消异常直接穿透，不重试。"""
+        失败正文只有命中该绑定的 `retry_on` 才按 `retry_count`（0/未设置＝默认轮数预算）
+        退避重试；没命中的失败（内容审核拒、请求形状错、无声断流）一次都不重烧，直接交回
+        这次响应——调用方把它的 `error_text` 原话当拒因报出去。这条道每一发都是几十 k
+        token，而同一批字节重发只会再撞同一道拒绝。模型链内部的回退/换 key 由 chat backend
+        承担。暂停/取消异常直接穿透，不重试。"""
         empty_response_retry_count = 0
         response = None
+        retry_on, retry_rounds = self._node_compression_retry_policy(model_refs)
         while True:
             response = await self._chat_with_optional_extensions(
                 messages=list(messages),
@@ -6862,17 +6901,20 @@ class ReActToolLoop:
                 tool_choice=None,
                 parallel_tool_calls=None,
                 prompt_cache_key="",
+                max_tokens=max_tokens,
                 single_request_timeout_seconds=self._resolved_model_response_timeout_seconds(
                     model_refs=list(model_refs),
                 ),
             )
-            if not self._is_empty_model_response(response) and not str(
-                getattr(response, 'error_text', None) or ''
-            ).strip():
+            error_text = str(getattr(response, 'error_text', None) or '').strip()
+            if not self._is_empty_model_response(response) and not error_text:
                 return response
-            # 空摘要或 provider 错误文本：退避重试（错误文本绝不能被当成压缩产物）。
+            if error_text and not is_retryable_model_error(response, retry_on=retry_on):
+                # 错误正文绝不能被当成压缩产物，但它也不是"等一等就好"的失败。
+                return response
+            # 空摘要 / 命中 retry_on 的 provider 错误：退避重试。
             empty_response_retry_count += 1
-            if empty_response_retry_count >= _PROVIDER_RETRY_LIMIT:
+            if empty_response_retry_count >= retry_rounds:
                 return response
             await asyncio.sleep(self._empty_response_retry_delay_seconds(empty_response_retry_count))
 
@@ -6885,6 +6927,7 @@ class ReActToolLoop:
         grouped_history: list[tuple[list[dict[str, Any]], int]],
         compression_pass: CompressionPass,
         model_refs: list[str],
+        max_tokens: int | None = None,
     ) -> tuple[str, int, bool, list[int], str, int, list[dict[str, Any]], int]:
         """执行规划器给出的块，提交最长成功前缀，其余原始历史留在本跳请求里。
 
@@ -6937,6 +6980,7 @@ class ReActToolLoop:
                 response = await self._node_compression_helper_call(
                     messages=chunk_messages,
                     model_refs=list(model_refs or []),
+                    max_tokens=max_tokens,
                 )
                 chunk_error_text = str(getattr(response, 'error_text', None) or '').strip()
                 chunk_text = "" if chunk_error_text else str(getattr(response, 'content', '') or '').strip()
@@ -6983,6 +7027,7 @@ class ReActToolLoop:
             merge_response = await self._node_compression_helper_call(
                 messages=merge_messages,
                 model_refs=list(model_refs or []),
+                max_tokens=max_tokens,
             )
             merge_error_text = str(getattr(merge_response, 'error_text', None) or '').strip()
             merged_text = "" if merge_error_text else str(getattr(merge_response, 'content', '') or '').strip()
