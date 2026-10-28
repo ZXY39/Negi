@@ -15,7 +15,26 @@ const CEO_COMPRESSION_TEXT = {
     running: "上下文压缩中",
     completed: "会话已压缩",
     paused: "压缩已暂停",
+    failed: "压缩失败",
 };
+
+// 失败线上的正文来自 provider / 运行时（外部字符串），这条束里没有现成的 HTML 转义器，
+// 直接拼进 innerHTML 等于让外部文本决定结构。
+function escapeCeoCompressionText(value) {
+    return String(value || "").replace(/[&<>"']/g, (ch) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;",
+    })[ch]);
+}
+
+function ceoCompressionDividerText(state, detail) {
+    const label = String(CEO_COMPRESSION_TEXT[state] || "");
+    const text = String(detail || "").trim();
+    return text ? `${label}：${escapeCeoCompressionText(text)}` : label;
+}
 
 let ceoCompressionSyncQueued = false;
 
@@ -37,10 +56,13 @@ function normalizeCeoSnapshotCompression(compression = null) {
 function normalizeCeoSnapshotCompressionMarker(marker = null) {
     if (!marker || typeof marker !== "object") return null;
     const state = String(marker?.state || "").trim().toLowerCase();
-    if (state !== "completed" && state !== "paused") return null;
+    if (state !== "completed" && state !== "paused" && state !== "failed") return null;
     const next = { state };
     const source = String(marker?.source || "").trim().toLowerCase();
     if (source) next.source = source;
+    // 失败线上给的是外部原话（转录行是唯一事实源，页面上那句 toast 会消失）。
+    const errorText = String(marker?.stats?.error_text || "").trim();
+    if (errorText) next.error_text = errorText;
     // turn_id 只用来认出这条线属于哪一回合：重建按转录顺序画，画完把 id 标在元素上，
     // 这样随后才到的实时帧不会在同一回合后面再画一条。
     const turnId = String(marker?.stats?.turn_id || "").trim();
@@ -120,8 +142,8 @@ function buildCeoCompressionRetryControl() {
            title="${CEO_COMPRESSION_RETRY_TITLE}">${CEO_COMPRESSION_RETRY_LABEL}</button>`;
 }
 
-function ceoCompressionDividerInner(state, { interactive = false, retry = false } = {}) {
-    return `<div class="ceo-compression-divider-inner"><span>${CEO_COMPRESSION_TEXT[state]}</span>${
+function ceoCompressionDividerInner(state, { interactive = false, retry = false, detail = "" } = {}) {
+    return `<div class="ceo-compression-divider-inner"><span>${ceoCompressionDividerText(state, detail)}</span>${
         retry ? buildCeoCompressionRetryControl() : buildCeoCompressionDividerControl(state, interactive)
     }</div>`;
 }
@@ -132,25 +154,33 @@ function syncCeoCompressionRetryAffordances() {
     const last = rows.length ? rows[rows.length - 1] : null;
     rows.forEach((row) => {
         const state = String(row.dataset.ceoCompressionState || "");
-        const eligible = row === last && state === "paused";
+        // 被取消的和失败的那一条，操作员手上的下一个动作都是"再来一次"，所以两条都挂按钮。
+        const eligible = row === last && (state === "paused" || state === "failed");
         const current = row.dataset.ceoCompressionRetry === "1";
         if (eligible === current) return;
         row.dataset.ceoCompressionRetry = eligible ? "1" : "";
-        row.innerHTML = ceoCompressionDividerInner(state, { retry: eligible });
+        row.innerHTML = ceoCompressionDividerInner(state, {
+            retry: eligible,
+            detail: String(row.dataset.ceoCompressionDetail || ""),
+        });
     });
 }
 
-function buildCeoCompressionDividerElement(state, { interactive = true, turnId = "", boundary = "", origin = "" } = {}) {
+function buildCeoCompressionDividerElement(
+    state,
+    { interactive = true, turnId = "", boundary = "", origin = "", detail = "" } = {},
+) {
     if (!CEO_COMPRESSION_TEXT[state]) return null;
     const el = document.createElement("div");
     el.className = `message system ${CEO_COMPRESSION_DIVIDER_CLASS} is-${state}`;
     el.dataset.ceoCompressionState = state;
+    if (detail) el.dataset.ceoCompressionDetail = String(detail);
     if (turnId) el.dataset.ceoCompressionTurn = turnId;
     if (boundary !== "" && boundary !== null) el.dataset.ceoCompressionBoundary = String(boundary);
     if (origin) el.dataset.ceoCompressionOrigin = String(origin);
     el.setAttribute("role", "status");
     el.setAttribute("aria-live", state === "running" ? "polite" : "off");
-    el.innerHTML = ceoCompressionDividerInner(state, { interactive });
+    el.innerHTML = ceoCompressionDividerInner(state, { interactive, detail });
     return el;
 }
 
@@ -396,13 +426,14 @@ function applyCeoCompressionMarker(sessionId = "", marker = null) {
     // 终态那条线的本体是刚落盘的转录行；这一帧只负责让它在实时车道当场出现，
     // 不等整页重建。事件在写盘成功之后才广播，所以"画了线"不会先于"有这条行"。
     const state = String((marker || {}).state || "").trim().toLowerCase();
-    if (state !== "completed" && state !== "paused") return false;
+    if (state !== "completed" && state !== "paused" && state !== "failed") return false;
     const key = String(sessionId || "").trim();
     if (!key || key !== String(activeSessionId() || "").trim()) return false;
     if (!U.ceoFeed) return false;
     removeCeoCompressionLiveDivider();
     const stats = (marker || {}).stats || {};
     const turnId = String((marker || {}).turn_id || stats.turn_id || "").trim();
+    const errorText = String((marker || {}).error_text || stats.error_text || "").trim();
     const boundary = Number(stats.boundary_turn_seq);
     // boundary 0 也是有效落点（本次压缩折的是更早的历史，整条回合都在线下方）：
     // 把它当成"没有边界"就会退回追 feed 尾部，压缩之后跑出来的内容全在线上方。
@@ -418,6 +449,7 @@ function applyCeoCompressionMarker(sessionId = "", marker = null) {
         anchorEl,
         turnId,
         boundary: dividerBoundary,
+        detail: errorText,
     });
     // 钉底只在"线就是最后一条"时成立：插进历史里的那条不该把正在往上翻的人拽回底部。
     if (!anchorEl && S.ceoFeedFollowLatest !== false) scrollCeoFeedToBottom();
@@ -455,17 +487,14 @@ function stopCeoContextCompressionPolling() {
     }
 }
 
-function ceoContextCompressionTerminalText(status, reason) {
+function ceoContextCompressionTerminalText(reason) {
     const normalizedReason = String(reason || "").trim().toLowerCase();
     if (normalizedReason === "baseline_advanced") {
         // 摘要算完了，但基线在这期间被另一个回合改写过：不落盘也不落区分线，
         // 说成「没有可压缩的历史」会把人引向错误的下一步。
         return "压缩期间这条会话的上下文基线被另一个回合改写了。为避免丢掉那条回合的内容，本次摘要没有落盘；请等这条回复结束后再压缩一次。";
     }
-    if (status === "not_needed") {
-        return "没有可压缩的历史，或所选模型没有可用的上下文窗口（需大于 25000 token）。";
-    }
-    return `压缩任务未能开始或中途中止：${String(reason || "unknown")}`;
+    return "没有可压缩的历史，或所选模型没有可用的上下文窗口（需大于 25000 token）。";
 }
 
 function applyCeoContextCompressionStatus(payload = {}) {
@@ -486,8 +515,11 @@ function applyCeoContextCompressionStatus(payload = {}) {
     } else {
         if (previous === "running") {
             // 先就地改成终态，避免“先删线、再等重连”的空白窗口。
-            if (status === "completed" || status === "paused") {
-                convertCeoRunningDividerToTerminal(status);
+            if (status === "completed" || status === "paused" || status === "failed") {
+                convertCeoRunningDividerToTerminal(
+                    status,
+                    status === "failed" ? String(payload?.reason || "") : "",
+                );
             } else {
                 removeCeoCompressionLiveDivider();
             }
@@ -496,11 +528,12 @@ function applyCeoContextCompressionStatus(payload = {}) {
         if (sessionId) setCeoSessionSnapshotCache(sessionId, { compression: null });
     }
     if (previous === "running" && status !== "running") {
-        if (status === "not_needed" || status === "failed") {
-            // 这两种终局都不会落区分线，不解释一句的话用户看到的就是「线莫名其妙没了」。
+        if (status === "not_needed") {
+            // 这一种终局不落区分线，不解释一句的话用户看到的就是「线莫名其妙没了」。
+            // `failed` 现在自己落一条写着外部原话的线，不再叠第二份说明。
             showToast({
                 title: "上下文未压缩",
-                text: ceoContextCompressionTerminalText(status, payload?.reason),
+                text: ceoContextCompressionTerminalText(payload?.reason),
                 kind: "warn",
             });
         }

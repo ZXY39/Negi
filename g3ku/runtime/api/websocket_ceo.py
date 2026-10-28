@@ -1073,7 +1073,7 @@ def _snapshot_compression_marker(metadata: Any) -> dict[str, Any]:
     if str(metadata.get("kind") or "").strip().lower() != "context_compression":
         return {}
     state = str(metadata.get("compression_state") or "").strip().lower()
-    if state not in {"completed", "paused"}:
+    if state not in {"completed", "paused", "failed"}:
         return {}
     marker: dict[str, Any] = {
         "state": state,

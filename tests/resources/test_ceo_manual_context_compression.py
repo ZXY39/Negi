@@ -93,6 +93,25 @@ def test_paused_marker_uses_paused_label(tmp_path: Path) -> None:
     assert transcript.messages[-1]["content"] == "压缩已暂停"
 
 
+def test_failed_marker_uses_failed_label(tmp_path: Path) -> None:
+    """失败档自己一个词，不借 paused：那一档说的是"操作员取消了"，没人取消过压缩。"""
+    session_manager = SessionManager(tmp_path)
+    transcript = session_manager.get_or_create("web:shared")
+    host = _MarkerHost(loop=SimpleNamespace(sessions=session_manager), state=_agent_state())
+
+    assert host.append_context_compression_marker(
+        state="failed",
+        source="manual",
+        stats={"error_text": "Inappropriate input/output rejected for security reasons"},
+    ) is True
+    row = transcript.messages[-1]
+    assert row["content"] == "压缩失败"
+    assert row["metadata"]["compression_state"] == "failed"
+    assert row["metadata"]["prompt_visible"] is False
+    # 原话只走 UI 载荷，不进模型侧正文：这条行对模型永远不可见。
+    assert row["metadata"]["stats"]["error_text"].startswith("Inappropriate")
+
+
 # ---- 快照下发 ---------------------------------------------------------------
 
 
@@ -606,7 +625,7 @@ async def test_manual_compression_marker_carries_the_turn_boundary() -> None:
 
 
 def test_compress_context_endpoint_failure_lands_failed_with_verbatim(tmp_path: Path, monkeypatch) -> None:
-    """手动压缩自己失败：落 failed 并把外部原话交给终局文案，转录里不落任何区分线。
+    """手动压缩自己失败：落 failed 档的区分线，正文就是外部原话。
 
     实盘 2026-10-28 会话 ext:qq-official-1903529517:f8a8001865631301：某一被供应商拒绝的块
     被旧分支写成 status="paused"，操作员在一条自己从没按过暂停的会话上看到「压缩已暂停」。
@@ -639,7 +658,10 @@ def test_compress_context_endpoint_failure_lands_failed_with_verbatim(tmp_path: 
     state = getattr(runtime_session, MANUAL_COMPRESSION_STATE_ATTR, None) or {}
     assert state.get("status") == "failed", state
     assert state.get("reason") == rejection, state
-    assert markers == [], f"压缩失败不该在转录里留下一条暂停线：{markers}"
+    # 失败是一次真的发生过的事件，所以它必须有持久落点：线自己带着原话。
+    assert markers and markers[-1]["state"] == "failed", markers
+    assert markers[-1]["stats"]["error_text"] == rejection, markers
+    assert "paused" not in {str(item.get("state")) for item in markers}, markers
     # 进度复位，否则实时线一直挂在「上下文压缩中」。
     assert runtime_session._compression_state["status"] == ""
 

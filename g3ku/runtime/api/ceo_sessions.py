@@ -1225,8 +1225,8 @@ async def _execute_manual_context_compression(agent, runtime_session, *, pause_f
             await _finish_manual_compression(
                 runtime_session,
                 status=MANUAL_COMPRESSION_FAILED,
-                marker_state="",
-                stats={},
+                marker_state="failed",
+                stats={"error_text": "会话暂停入口不可用，压缩没有开始"},
                 reason="session_pause_unavailable",
             )
             return
@@ -1242,12 +1242,13 @@ async def _execute_manual_context_compression(agent, runtime_session, *, pause_f
             )
             raise
         except Exception as exc:
+            pause_failure_text = _manual_compression_failure_text(exc)
             await _finish_manual_compression(
                 runtime_session,
                 status=MANUAL_COMPRESSION_FAILED,
-                marker_state="",
-                stats={},
-                reason=_manual_compression_failure_text(exc),
+                marker_state="failed",
+                stats={"error_text": pause_failure_text},
+                reason=pause_failure_text,
             )
             return
     try:
@@ -1262,8 +1263,8 @@ async def _execute_manual_context_compression(agent, runtime_session, *, pause_f
         )
         raise
     except Exception as exc:
-        # 压缩自己失败 ≠ 操作员按了暂停。落 failed，并把外部报的那句话原样交给终局文案；
-        # 区分线只由 completed / paused 落，失败不在转录里留一条没人按过暂停的线。
+        # 压缩自己失败 ≠ 操作员按了暂停。落 failed 档的区分线，正文就是外部报的那句话；
+        # 页面上那句 toast 会自己消失，转录里必须留下这次真的失败过。
         failure_text = _manual_compression_failure_text(exc)
         logger.warning(
             f"Manual context compression failed "
@@ -1273,8 +1274,8 @@ async def _execute_manual_context_compression(agent, runtime_session, *, pause_f
         await _finish_manual_compression(
             runtime_session,
             status=MANUAL_COMPRESSION_FAILED,
-            marker_state="",
-            stats={},
+            marker_state="failed",
+            stats={"error_text": failure_text},
             reason=failure_text,
         )
         return

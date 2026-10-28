@@ -1881,9 +1881,9 @@ function activeCeoRuntimeUsageEstimate(sessionId = activeSessionId()) {
 // running 状态随快照缓存落 sessionStorage：刷新后能先挂线，不必等整份 snapshot.ceo。
 // seen_at 每次确认 running 都刷新；终局写 null 清键。
 // 终局不再先删线等重连：把当前 running 线就地改成终态，重连快照到达后由整页重建替换。
-function convertCeoRunningDividerToTerminal(state) {
+function convertCeoRunningDividerToTerminal(state, detail = "") {
     if (!U.ceoFeed) return false;
-    if (state !== "completed" && state !== "paused") return false;
+    if (state !== "completed" && state !== "paused" && state !== "failed") return false;
     const selector = `.${CEO_COMPRESSION_DIVIDER_CLASS}.is-running`;
     const first = typeof U.ceoFeed.querySelector === "function" ? U.ceoFeed.querySelector(selector) : null;
     const all = typeof U.ceoFeed.querySelectorAll === "function"
@@ -1895,9 +1895,16 @@ function convertCeoRunningDividerToTerminal(state) {
     classes.delete("is-running");
     classes.add(`is-${state}`);
     el.className = [...classes].join(" ");
-    if (el.dataset) el.dataset.ceoCompressionState = state;
+    if (el.dataset) {
+        el.dataset.ceoCompressionState = state;
+        // 就地转终态时先落原话，等转录行重建时它带的是同一句话，不会出现两种写法。
+        if (detail) el.dataset.ceoCompressionDetail = String(detail);
+    }
     el.setAttribute?.("aria-live", "off");
-    el.innerHTML = ceoCompressionDividerInner(state, { interactive: false });
+    el.innerHTML = ceoCompressionDividerInner(state, {
+        interactive: false,
+        detail: String(el.dataset?.ceoCompressionDetail || ""),
+    });
     syncCeoCompressionRetryAffordances();
     return true;
 }
@@ -5800,6 +5807,7 @@ function renderCeoSnapshotMessageRange(messages, keys, fromIndex, toIndex, targe
                     turnId: String(marker.turn_id || ""),
                     boundary: Number.isFinite(rawBoundary) && rawBoundary > 0 ? rawBoundary : "",
                     origin: "row",
+                    detail: String(marker.error_text || ""),
                 });
                 tagRendered();
             } else {

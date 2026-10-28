@@ -91,6 +91,7 @@ CONTEXT_COMPRESSION_MARKER_KIND = "context_compression"
 CONTEXT_COMPRESSION_MARKER_LABELS = {
     "completed": "会话已压缩",
     "paused": "压缩已暂停",
+    "failed": "压缩失败",
 }
 
 
