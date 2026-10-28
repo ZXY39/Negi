@@ -326,6 +326,10 @@
 | 队列消费（`run_due_batch_once`） | 按 `session_key` 拆批：不合格条目终态化 `discarded`，可信条目照常处理 |
 | `memory_update` 工具 | 直接返回可读拒绝（`ok=false`），不入队 |
 
+入队请求的 `session_key` 就是判据输入，空值按第三方处理（fail-closed）。操作员本地面入队时带
+`internal:` 前缀的 owner 键：记忆管理页的编辑/删除用 `internal:memory_admin`，人设引导页与
+设置页的整理请求用 `internal:persona_memory`；渠道会话的自主复核带真实 `ext:` 键。
+
 另外两条配套：
 
 - **启动清扫**：管理器启动时把 `review_state.json` 里不合格会话的缓冲摘掉——闸门只管新写入，

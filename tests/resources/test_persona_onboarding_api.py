@@ -15,6 +15,7 @@ from g3ku.runtime.persona_onboarding import (
     persona_photos_dir,
     store_persona_photo,
 )
+from g3ku.runtime.session_trust import is_owner_session
 
 
 def _store(tmp_path: Path) -> OnboardingStore:
@@ -142,6 +143,8 @@ def test_complete_onboarding_writes_enqueues_and_starts_the_photo_session(
     assert enqueue["trigger_source"] == "persona_onboarding"
     assert enqueue["op"] == "write"
     assert enqueue["decision_source"] == "user"
+    assert enqueue["session_key"] == api.PERSONA_MEMORY_SESSION_KEY
+    assert is_owner_session(str(enqueue["session_key"]))
     assert "你是玲音。" in enqueue["payload_text"]
     assert calls["photos"] == ["me.png"]
     state = store.load()
@@ -222,6 +225,8 @@ def test_save_persona_from_settings_writes_and_enqueues(tmp_path: Path, monkeypa
     enqueue = calls["enqueue"]
     assert enqueue["trigger_source"] == "persona_settings"
     assert enqueue["op"] == "write"
+    assert enqueue["session_key"] == api.PERSONA_MEMORY_SESSION_KEY
+    assert is_owner_session(str(enqueue["session_key"]))
     assert "你是玲音。" in enqueue["payload_text"]
 
 

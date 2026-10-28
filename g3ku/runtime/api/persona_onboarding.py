@@ -37,6 +37,8 @@ from g3ku.runtime.web_ceo_sessions import (
 router = APIRouter()
 
 PERSONA_PHOTO_SESSION_KEY = "internal:persona_photo"
+# 引导页与设置页都是操作员本地面：人设整理请求必须带 owner 会话键，否则被记忆门丢弃。
+PERSONA_MEMORY_SESSION_KEY = "internal:persona_memory"
 _PHOTO_SESSION_TASKS: set[asyncio.Task] = set()
 
 
@@ -239,6 +241,7 @@ async def complete_onboarding():
                 op="write",
                 decision_source="user",
                 trigger_source="persona_onboarding",
+                session_key=PERSONA_MEMORY_SESSION_KEY,
                 payload_text=(
                     "用户刚在引导页写下了人设描述，并已写入人设 note。"
                     "请核对这份描述：需要整理就直接改人设 note；不要新增普通记忆，也不要重复追加已有内容。\n"
@@ -320,6 +323,7 @@ async def save_persona(payload: dict | None = Body(default=None)):
                 op="write",
                 decision_source="user",
                 trigger_source="persona_settings",
+                session_key=PERSONA_MEMORY_SESSION_KEY,
                 payload_text=(
                     "用户刚在设置页写下了人设描述，并已写入人设 note。"
                     "请核对这份描述：需要整理就直接改人设 note；不要新增普通记忆，也不要重复追加已有内容。\n"

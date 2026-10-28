@@ -2390,6 +2390,10 @@ def _memory_admin_mutation_disabled() -> HTTPException:
     )
 
 
+# 管理面是操作员本地面：入队必须带 owner 会话键，否则记忆门按第三方会话丢弃。
+MEMORY_ADMIN_SESSION_KEY = "internal:memory_admin"
+
+
 def _memory_admin_audit_path(manager: Any) -> Path:
     workspace = Path(getattr(manager, 'workspace', Path.cwd()))
     return workspace / 'memory' / 'admin_audit.jsonl'
@@ -2727,6 +2731,7 @@ async def update_current_memory(request: Request, payload: dict | None = Body(de
             decision_source='user',
             payload_text='\n'.join(request_lines),
             trigger_source='admin_ui_edit',
+            session_key=MEMORY_ADMIN_SESSION_KEY,
         )
     except ValueError as exc:
         raise HTTPException(
@@ -2862,6 +2867,7 @@ async def delete_current_memories(request: Request, payload: dict | None = Body(
             decision_source='user',
             payload_text='\n'.join(request_lines),
             trigger_source='admin_ui_delete',
+            session_key=MEMORY_ADMIN_SESSION_KEY,
         )
     except ValueError as exc:
         raise HTTPException(

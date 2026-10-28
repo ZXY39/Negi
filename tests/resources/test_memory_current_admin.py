@@ -11,6 +11,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from g3ku.runtime.session_trust import is_owner_session
 from main.api import admin_rest
 
 
@@ -44,6 +45,7 @@ class _StubMemoryManager:
     def __init__(self, workspace: Path):
         self.workspace = workspace
         self.calls: list[tuple[str, object]] = []
+        self.enqueue_kwargs: list[dict[str, object]] = []
 
     async def list_failed_page(self, *, limit: int = 20, offset: int = 0):
         self.calls.append(("list_failed_page", {"limit": limit, "offset": offset}))
@@ -127,6 +129,15 @@ class _StubMemoryManager:
         session_key: str = "",
     ):
         self.calls.append((op, decision_source, payload_text, trigger_source))
+        self.enqueue_kwargs.append(
+            {
+                "op": op,
+                "decision_source": decision_source,
+                "payload_text": payload_text,
+                "trigger_source": trigger_source,
+                "session_key": session_key,
+            }
+        )
         if not str(payload_text or "").strip():
             raise ValueError("payload_text is required")
         return {"ok": True, "status": "queued", "request_id": f"{op}_1"}
@@ -365,6 +376,9 @@ def test_current_memory_update_enqueues_a_request_and_maps_errors(stub_env, monk
     assert op == "write" and decision_source == "user" and trigger_source == "admin_ui_edit"
     assert "id:Ab12Z9" in payload_text and "新内容" in payload_text and "新的->正文" in payload_text
     assert "只改这一条记忆" in payload_text, "the request bounds its own scope"
+    enqueued = manager.enqueue_kwargs[0]
+    assert enqueued["session_key"] == admin_rest.MEMORY_ADMIN_SESSION_KEY
+    assert is_owner_session(str(enqueued["session_key"]))
 
     empty = client.post("/api/memory/current/update", json={"memory_id": "Ab12Z9", "memory_body": "  "})
     assert empty.status_code == 400
@@ -431,6 +445,9 @@ def test_current_memory_delete_enqueues_one_request_per_action(stub_env, monkeyp
     op, _source, payload_text, trigger_source = manager.calls[0]
     assert op == "delete" and trigger_source == "admin_ui_delete"
     assert "id:Ab12Z9" in payload_text and "id:missing" in payload_text and "cleanup" in payload_text
+    enqueued = manager.enqueue_kwargs[0]
+    assert enqueued["session_key"] == admin_rest.MEMORY_ADMIN_SESSION_KEY
+    assert is_owner_session(str(enqueued["session_key"]))
     # 笔记不进请求体：界面没有这个动作，回收只认所有权列。多余的 note_refs 字段照旧被忽略。
     assert "note_keep" not in payload_text
     audit = _audit_lines(workspace)
@@ -442,6 +459,42 @@ def test_current_memory_delete_enqueues_one_request_per_action(stub_env, monkeyp
     empty = client.post("/api/memory/current/delete", json={"memory_ids": []})
     assert empty.status_code == 400
     assert empty.json()["detail"]["code"] == "memory_current_invalid_id"
+
+
+def test_admin_ui_queue_requests_survive_the_memory_trust_gate(tmp_path: Path):
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(
+        tmp_path,
+        _memory_cfg(),
+        review_eligibility=is_owner_session,
+    )
+    try:
+        admin = module.MemoryQueueRequest(
+            op="delete",
+            decision_source="user",
+            payload_text="操作员在管理页要求删除长期记忆：第 8 行。",
+            created_at="2026-10-28T14:34:34+08:00",
+            request_id="delete_admin",
+            trigger_source="admin_ui_delete",
+            session_key=admin_rest.MEMORY_ADMIN_SESSION_KEY,
+        )
+        # 回归样本：修复前管理页入队不带 session_key，空键被记忆门按第三方丢弃。
+        anonymous = module.MemoryQueueRequest(
+            op="delete",
+            decision_source="user",
+            payload_text="操作员在管理页要求删除长期记忆：第 9 行。",
+            created_at="2026-10-28T14:34:35+08:00",
+            request_id="delete_anonymous",
+            trigger_source="admin_ui_delete",
+            session_key="",
+        )
+        batch, dropped = manager._partition_queue_batch_by_eligibility(
+            module.MemoryBatch(op="delete", items=[admin, anonymous])
+        )
+        assert [item.request_id for item in batch.items] == ["delete_admin"]
+        assert [item.request_id for item in dropped] == ["delete_anonymous"]
+    finally:
+        manager.close()
 
 
 def test_current_memory_uncompress_route_warms_one_row(stub_env, monkeypatch):
