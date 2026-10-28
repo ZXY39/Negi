@@ -8837,14 +8837,25 @@ class ReActToolLoop:
     )
 
     @staticmethod
-    def _identical_payload_clause(*, identical_streak: int) -> str:
+    def _identical_payload_clause(*, identical_streak: int, node_kind: str) -> str:
         # 骨架里裁定值一律留空：告诉它该判 success 还是 failed 就是替它下结论。
+        normalized_kind = str(node_kind or '').strip().lower()
+        if normalized_kind == 'acceptance':
+            skeleton = (
+                '{"verdict":"<pass|reject|reject_no_progress>",'
+                '"feedback":"<一句话裁定，允许与 evidence 重叠>"}'
+            )
+            fields = 'verdict and feedback fields'
+        else:
+            skeleton = (
+                '{"summary":"<一句话裁定，允许与 evidence 重叠>","answer":"<完整裁定>",'
+                '"evidence":[...原样保留...],"remaining_work":[...]}'
+            )
+            fields = 'two prose fields'
         return (
             f'This payload was rejected {int(identical_streak)} times in a row unchanged, so sending the same '
-            'shape again will be rejected again. Fill only the two prose fields and keep everything else as is: '
-            '{"status":"<success|failed>","delivery_status":"<final|blocked>",'
-            '"summary":"<一句话裁定，允许与 evidence 重叠>","answer":"<完整裁定>",'
-            '"evidence":[...原样保留...],"remaining_work":[...],"blocking_reason":"..."}.'
+            f'shape again will be rejected again. Fill only the {fields} and keep everything else as is: '
+            f'{skeleton}.'
         )
 
     @classmethod
@@ -8855,17 +8866,22 @@ class ReActToolLoop:
         node_kind: str,
         identical_streak: int,
     ) -> str:
+        normalized_kind = str(node_kind or '').strip().lower()
         base = (
             cls._result_contract_violation_message(reason_parts, node_kind=node_kind)
             if reason_parts
             else cls._result_protocol_message(node_kind=node_kind)
         )
         if int(identical_streak or 0) >= 2:
-            return (
-                f'{base} {cls._PROSE_FIELD_ROLE_CLAUSE} '
-                f'{cls._identical_payload_clause(identical_streak=int(identical_streak))}'
+            role_clause = (
+                f'{cls._PROSE_FIELD_ROLE_CLAUSE} '
+                if normalized_kind != 'acceptance'
+                else ''
             )
-        if any(
+            return (
+                f'{base} {role_clause}{cls._identical_payload_clause(identical_streak=int(identical_streak), node_kind=node_kind)}'
+            )
+        if normalized_kind != 'acceptance' and any(
             token in str(item or '')
             for item in reason_parts
             for token in ('summary', 'answer')

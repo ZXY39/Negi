@@ -290,8 +290,7 @@ async def test_react_loop_derives_final_delivery_status_for_success_acceptance_v
     assert logs.error_logs == []
 
 
-@pytest.mark.asyncio
-async def test_react_loop_does_not_invent_delivery_status_for_failed_acceptance_verdict() -> None:
+def test_legacy_failed_acceptance_payload_maps_to_reject_verdict() -> None:
     payload = {
         "status": "failed",
         "summary": "rejected",
@@ -300,26 +299,14 @@ async def test_react_loop_does_not_invent_delivery_status_for_failed_acceptance_
         "remaining_work": ["修 X"],
         "blocking_reason": "",
     }
-    result, _requests, logs = await _run_final_result_loop(
-        responses=[
-            LLMResponse(
-                content="",
-                tool_calls=[_final_call("call:acceptance-no-delivery", payload)],
-                finish_reason="tool_calls",
-                usage={"input_tokens": 8, "output_tokens": 4},
-            )
-        ],
-        node_kind="acceptance",
-        task_id="task-acceptance-no-delivery",
-        node_id="node-acceptance-no-delivery",
-        max_iterations=1,
+    normalized = ReActToolLoop._normalize_final_result_payload(
+        raw_payload=payload, message_history=[], response_content="", node_kind="acceptance"
     )
 
-    # 验收节点 failed 时 final(打回) 与 blocked(终止循环) 语义相反：这一击仍算模型的违约。
-    assert result.status == "failed"
-    assert "missing required delivery_status" in result.blocking_reason
-    assert "1 consecutive times" in result.blocking_reason
-    assert len(logs.error_logs) == 1
+    assert normalized["verdict"] == "reject"
+    assert normalized["feedback"] == "rejected"
+    assert normalized["status"] == "failed"
+    assert normalized["delivery_status"] == "final"
 
 
 @pytest.mark.asyncio
@@ -399,8 +386,8 @@ async def test_react_loop_still_strikes_model_violation_after_a_shape_fault() ->
     # 形态计数不许"热"着免罚后续真实违约：判据只看当次回包是否被输出上限切断。
     truncated = _good_final_arguments()
     truncated.pop("summary")
-    bad_verdict = _good_final_arguments()
-    bad_verdict["status"] = "partial"
+    violation = _good_final_arguments()
+    violation["summary"] = ""
     result, requests, logs = await _run_final_result_loop(
         responses=[
             LLMResponse(
@@ -411,7 +398,7 @@ async def test_react_loop_still_strikes_model_violation_after_a_shape_fault() ->
             ),
             LLMResponse(
                 content="",
-                tool_calls=[_final_call("call:out-of-enum", bad_verdict)],
+                tool_calls=[_final_call("call:empty-summary", violation)],
                 finish_reason="tool_calls",
                 usage={"input_tokens": 8, "output_tokens": 4},
             ),
@@ -425,7 +412,7 @@ async def test_react_loop_still_strikes_model_violation_after_a_shape_fault() ->
     assert len(requests) == 2
     assert len(logs.error_logs) == 2
     assert "provider output limit truncated" in logs.error_logs[0]["error_text"]
-    assert "status must be one of" in logs.error_logs[1]["error_text"]
+    assert "summary must be at least 1 chars" in logs.error_logs[1]["error_text"]
     frame = logs.read_runtime_frame("task-shape-then-violation", "node-shape-then-violation")
     assert int(frame.get("invalid_final_submission_count") or 0) == 1
     assert result.status == "failed"
@@ -438,7 +425,7 @@ async def test_react_loop_accepts_explicit_null_line_numbers_on_url_evidence() -
     # 所以删键等价；区间串 '12-15' 仍必须拒收（见上一条测试）。
     payload = _good_final_arguments()
     payload["evidence"] = [
-        {"ref": "artifact:artifact:demo-ref", "start_line": 10, "end_line": 20},
+        {"kind": "artifact", "ref": "artifact:artifact:demo-ref", "start_line": 10, "end_line": 20},
         {"kind": "url", "path": "", "ref": "https://example.com/a", "start_line": None, "end_line": None},
         {"kind": "url", "path": "", "ref": "https://example.com/b", "start_line": None, "end_line": None},
     ]
@@ -451,7 +438,7 @@ async def test_react_loop_accepts_explicit_null_line_numbers_on_url_evidence() -
                 usage={"input_tokens": 8, "output_tokens": 4},
             )
         ],
-        node_kind="acceptance",
+        node_kind="execution",
         task_id="task-null-lines",
         node_id="node-null-lines",
         max_iterations=1,
@@ -484,7 +471,7 @@ def test_final_result_repair_tags_cover_only_equivalence_repairs() -> None:
         "line_to_int",
     ]
 
-    # 策略性改写（success 清空 remaining_work/blocking_reason）不算补齐
+    # 策略性改写（blocking_reason 清空、remaining_work 保留）不算补齐
     policy_raw = {
         "status": "success",
         "delivery_status": "final",
@@ -497,7 +484,7 @@ def test_final_result_repair_tags_cover_only_equivalence_repairs() -> None:
     policy_norm = ReActToolLoop._normalize_final_result_payload(
         raw_payload=policy_raw, message_history=[], response_content="", node_kind="execution"
     )
-    assert policy_norm["remaining_work"] == [] and policy_norm["blocking_reason"] == ""
+    assert policy_norm["remaining_work"] == ["还有一件事"] and policy_norm["blocking_reason"] == ""
     assert ReActToolLoop._final_result_repair_tags(raw_payload=policy_raw, normalized_payload=policy_norm) == []
 
 
@@ -649,7 +636,7 @@ async def test_second_identical_rejection_escalates_the_repair_overlay() -> None
             LLMResponse(content='', tool_calls=[_final_call('call:dup-3', _good_final_arguments())],
                          finish_reason='tool_calls', usage={'input_tokens': 8, 'output_tokens': 4}),
         ],
-        node_kind='acceptance',
+        node_kind='execution',
         task_id='task-dup-overlay',
         node_id='node-dup-overlay',
         max_iterations=4,
@@ -677,7 +664,7 @@ async def test_identical_rejection_early_stops_on_the_third_strike() -> None:
     ]
     result, requests, logs = await _run_final_result_loop(
         responses=responses,
-        node_kind='acceptance',
+        node_kind='execution',
         task_id='task-dup-early-stop',
         node_id='node-dup-early-stop',
         max_iterations=8,
@@ -718,7 +705,7 @@ async def test_repeated_identical_submission_is_folded_in_history() -> None:
             _resp('call:fold-2', bad),
             _resp('call:fold-3', _good_final_arguments()),
         ],
-        node_kind='acceptance',
+        node_kind='execution',
         task_id='task-fold',
         node_id='node-fold',
         max_iterations=4,
@@ -748,7 +735,7 @@ async def test_different_violation_on_repeat_is_not_folded() -> None:
             _resp('call:nd-2', other),
             _resp('call:nd-3', _good_final_arguments()),
         ],
-        node_kind='acceptance',
+        node_kind='execution',
         task_id='task-no-fold',
         node_id='node-no-fold',
         max_iterations=4,
@@ -1318,7 +1305,7 @@ async def test_marker_fault_row_carries_the_untouched_upstream_bytes() -> None:
     shape_row = logs.error_logs[0]["error_text"]
     violation_row = logs.error_logs[1]["error_text"]
     assert shape_row.startswith("Upstream payload shape fault detected (第1次)")
-    assert "missing required summary" in violation_row
+    assert "summary must be at least 1 chars" in violation_row
     assert violation_row.startswith("Invalid final result submission detected (第1次)")
     # 原件只在 provider 边界存在：封顶尾部足以判"网关到底有没有把后面的参数发过来"。
     assert "upstream_raw_bytes=%d" % len(raw) in shape_row
