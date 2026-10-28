@@ -2,10 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from g3ku.runtime.frontdoor.tool_contract import (
-    build_frontdoor_tool_contract,
-    upsert_frontdoor_tool_contract_message,
-)
+from g3ku.runtime.frontdoor.tool_contract import build_frontdoor_tool_contract
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
