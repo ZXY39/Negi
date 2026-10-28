@@ -454,6 +454,7 @@ def test_normalize_acceptance_handshake_defaults() -> None:
         "rejection_count": 0,
         "latest_execution_result_ref": "",
         "latest_execution_result_summary": "",
+        "latest_execution_submission_id": "",
         "latest_rejection_feedback_ref": "",
         "latest_rejection_feedback_summary": "",
         "updated_at": "",
