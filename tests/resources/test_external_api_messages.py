@@ -192,7 +192,7 @@ async def test_idle_message_produces_exactly_one_terminal(harness, registry):
     assert events[-1]["type"] == "turn.completed"
     assert events[-1]["turn_id"] == turn_id
     assert len(bridge.prompts) == 1
-    assert bridge.prompts[0] == "你好"
+    assert bridge.prompts[0].content == "你好"
 
 
 @pytest.mark.asyncio

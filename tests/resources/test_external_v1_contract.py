@@ -265,7 +265,7 @@ def test_post_sessions_repeat_returns_stable_full_shape(harness):
     first = harness.post("/api/v1/sessions", json={"external_key": "qq:group:1", "title": "群A"})
     assert first.status_code == 200
     first_body = first.json()
-    assert set(first_body) == {"ok", "session_id", "external_key", "title", "created_at", "created"}
+    assert set(first_body) == {"ok", "session_id", "external_key", "title", "chat_type", "created_at", "created"}
     assert first_body["ok"] is True
     assert first_body["created"] is True
     assert first_body["title"] == "群A"
@@ -465,7 +465,7 @@ async def test_messages_long_text_passes_through_unchanged(monkeypatch, workspac
     assert response.json()["status"] == "started"
     await _wait_terminal(created["session_id"])
     service = external_turns.get_external_turn_service()
-    assert service._runtime_bridge.prompts == [long_text]
+    assert [prompt.content for prompt in service._runtime_bridge.prompts] == [long_text]
 
 
 @pytest.mark.asyncio
@@ -484,7 +484,7 @@ async def test_messages_inbound_text_truncated_at_internal_marker(monkeypatch, w
         await _wait_terminal(created["session_id"])
 
     service = external_turns.get_external_turn_service()
-    assert service._runtime_bridge.prompts == ["你好"]
+    assert [prompt.content for prompt in service._runtime_bridge.prompts] == ["你好"]
 
 
 @pytest.mark.asyncio
