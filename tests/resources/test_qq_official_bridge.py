@@ -1696,6 +1696,68 @@ def _group_message(content: str = "在吗", message_id: str = "gm1") -> SimpleNa
 
 
 @pytest.mark.asyncio
+async def test_pump_delivers_audio_attachment_as_voice_media(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`audio/*` 落平台语音那一档（file_type=3），仍以 msg_type=7 富媒体发出。
+
+    上一条映射用例的 docstring 写了"语音 3"，断言里却只有 [1, 4]——音频这一档从未被
+    喂过，而它是渠道语音回复的唯一出口。这里按群目标打，因为群里那一发还要带被动参数。
+    """
+    records: list[httpx.Request] = []
+    group_files_url = "https://api.sgroup.qq.com/v2/groups/g1/files"
+    media = _media_transport(
+        {_absolute_media("v1"): (200, b"mp3-bytes"), group_files_url: (200, _upload_reply())},
+        records,
+    )
+    task, client = await _start_bridge(monkeypatch, media)
+    try:
+        await client.on_group_at_message_create(_group_message("念一下", message_id="mv1"))
+        ext = FakeExternalApiClient.instances[-1]
+        await ext.events.put(
+            {
+                "type": "reply.final",
+                "seq": 1,
+                "text": "给你：早间问候.mp3",
+                "attachments": [_outbound_attachment("早间问候.mp3", "audio/mpeg", "v1")],
+            }
+        )
+        await _wait_until(lambda: len(client.api.calls) >= 2)
+
+        uploads = _api_uploads(records)
+        assert [str(request.url) for request in uploads] == [group_files_url]
+        body = json.loads(uploads[0].content)
+        assert body["file_type"] == 3  # 平台口径的"语音"档
+        assert base64.b64decode(body["file_data"]) == b"mp3-bytes"
+        assert client.api.calls == [
+            (
+                "post_group_message",
+                {
+                    "group_openid": "g1",
+                    "msg_type": 7,
+                    "media": {"file_info": "file-info-fd"},
+                    "msg_id": "mv1",
+                    "msg_seq": 1,
+                },
+            ),
+            (
+                "post_group_message",
+                {
+                    "group_openid": "g1",
+                    "content": "给你：早间问候.mp3",
+                    "msg_type": 0,
+                    "msg_id": "mv1",
+                    "msg_seq": 2,
+                },
+            ),
+        ]
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
 async def test_group_reply_replies_to_the_inbound_message_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -1,0 +1,29 @@
+schema_version: 1
+kind: skill
+name: edge-tts
+display_name: Edge TTS
+description: 默认语音合成车道：用 Microsoft Edge 的在线语音合成（edge-tts）把文字生成 MP3 语音文件，供回复、配音、朗读等交付发出。用户说"发语音/说一段/配音/朗读/TTS/文字转语音"、或没有指定其他合成方式时用。
+trigger:
+  keywords:
+    - 发语音
+    - 语音回复
+    - 说一段
+    - 朗读
+    - 配音
+    - 文字转语音
+    - 语音合成
+    - tts
+    - edge-tts
+    - edge tts
+  always: false
+requires:
+  tools:
+    - exec
+    - filesystem_write
+  bins: []
+  env: []
+content:
+  main: SKILL.md
+exposure:
+  agent: true
+  main_runtime: true
