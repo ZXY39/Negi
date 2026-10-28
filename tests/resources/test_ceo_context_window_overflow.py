@@ -759,7 +759,12 @@ async def test_graph_call_model_token_compression_keeps_repair_required_contract
 
     assert len(captured_calls) == 2
     assert "[TOKEN_COMPACT_V2]" in "\n".join(str(item.get("content") or "") for item in captured_calls[1])
-    assert any("repair_required_tools:" in str(item.get("content") or "") for item in captured_calls[1])
+    # repair 清单走一次性 [RUNTIME_NOTICE] 的合同节（key 是 repair_required），
+    # 不再依赖动态契约尾块的 repair_required_tools: 标签。
+    notice_text = "\n".join(str(item.get("content") or "") for item in captured_calls[1])
+    assert "- repair_required:" in notice_text
+    assert "`agent_browser`" in notice_text
+    assert "missing required paths" in notice_text
     # skill 的 repair 行已删：payload 仍带条目（机器状态），渲染交给 load 回执
     assert not any("repair_required_skills:" in str(item.get("content") or "") for item in captured_calls[1])
     assert result["frontdoor_history_shrink_reason"] == "token_compression"

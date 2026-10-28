@@ -8171,6 +8171,16 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         else ""
                     ),
                 )
+                # 台账刚清空：同一次主请求前重投一次非头部合同节（repair/denied/candidate/
+                # 附件）。否则压缩后的第一发看不到 repair 清单，下一轮才补，等于漏一拍。
+                request_messages = self._apply_frontdoor_skill_roster_notice(
+                    request_messages,
+                    session_key=str(state_for_request.get("session_key") or "").strip(),
+                    state=state_for_request,
+                    persona_adopted_digest=str(
+                        getattr(runtime_session, PERSONA_DIGEST_ATTR, "") or ""
+                    ),
+                )
                 durable_request_messages = strip_multimodal_blocks_from_message_records(request_messages)
                 if runtime_session is not None and dict(preflight.diagnostics or {}).get("applied"):
                     # 按 turn 记账，回合收尾时据此落「会话已压缩」区分线。用 turn_id 而不是
