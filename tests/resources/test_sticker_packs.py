@@ -8,6 +8,7 @@ from pathlib import Path
 
 from g3ku.stickers import (
     STICKER_HEADER,
+    registry,
     render_catalog_lines,
     render_marker_images,
     resolve_markers,
@@ -266,9 +267,28 @@ def test_sticker_reply_memory_text_replaces_markers_with_breadcrumbs(tmp_path):
     reply = resolve_reply_stickers("好耶\n[[sticker:atri/happy]]", root=tmp_path)
 
     assert reply.text == "好耶"
-    assert reply.delivered == ("atri/happy",)
+    assert reply.delivered == ("atri/happy/1",)
     assert reply.undelivered == ()
-    assert reply.memory_text == "好耶\n\n[已发表情包：atri/happy]"
+    assert reply.memory_text == "好耶\n\n[已发表情包：atri/happy/1]"
+
+
+def test_random_sticker_pick_records_the_number_that_was_sent(tmp_path):
+    """随机取图的编号只有运行时知道，记忆载荷必须带上：用户是对屏幕上那一张表态的，
+    只记到分类的话"喜欢这张"在长期记忆里解不出是哪张图。"""
+    _write_pack(tmp_path, "atri", {"happy": 6}, theme="t")
+    invalidate_scan_cache()
+
+    reply = resolve_reply_stickers("哈哈\n[[sticker:atri/happy]]", root=tmp_path)
+
+    sent_index = registry.index_of(reply.images[0].name)
+    assert sent_index is not None
+    assert reply.delivered == (f"atri/happy/{sent_index}",)
+    assert reply.memory_text == f"哈哈\n\n[已发表情包：atri/happy/{sent_index}]"
+
+    # 编号要能反查回这一张：记忆里的键后续被模型点名发送时必须是同一文件。
+    pack_dir = tmp_path / "atri"
+    resolved = registry.resolve_index(pack_dir, "happy", sent_index)
+    assert resolved is not None and resolved.name == reply.images[0].name
 
 
 def test_sticker_reply_marks_failed_sends_instead_of_recording_them(tmp_path):

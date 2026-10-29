@@ -211,15 +211,18 @@ def resolve_reply_stickers(
             )
             continue
         pack_key, value, index = parsed
-        label = f"{pack_key}/{value}/{index}" if index is not None else f"{pack_key}/{value}"
         if index is not None:
             path = _pick_by_index(packs, pack_key, value, index)
         else:
             path = _pick_path(packs, pack_key, value, picker)
         if path is not None:
             chosen.append(path)
-            delivered.append(label)
+            # 发出去的这一张必须带编号：随机取图时只有运行时知道选了哪张，而用户是对
+            # 屏幕上那张图表态的。编号即文件名、注册后永不复用，所以这个键长期可解引用。
+            sent_index = index if index is not None else registry.index_of(path.name)
+            delivered.append(f"{pack_key}/{value}/{sent_index}")
         else:
+            label = f"{pack_key}/{value}/{index}" if index is not None else f"{pack_key}/{value}"
             undelivered.append(label)
     if not dropped:
         return StickerReply(text=text)
