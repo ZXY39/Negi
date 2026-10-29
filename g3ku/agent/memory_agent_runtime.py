@@ -2054,6 +2054,16 @@ class _MemorySqliteRepository:
         return retired
 
 
+def _lane_names(values: list[Any]) -> list[str]:
+    """停车/重投日志里的车道读数：去重保序，空值画成 ``-`` 而不是漏项。"""
+    names: list[str] = []
+    for value in values:
+        name = str(value or "").strip() or "-"
+        if name not in names:
+            names.append(name)
+    return names
+
+
 def _emit_audit_memory_parked(record: dict[str, Any], *, trigger: str = "initial") -> None:
     """尽力而为：记忆批次停车写一条日志审计事件（失败绝不阻塞宿主流程）。
 
@@ -6909,7 +6919,7 @@ class MemoryManager:
             except Exception as exc:
                 # 运行时异常（含 provider 抛出的链路耗尽错误）按瞬时失败停车：
                 # 离开主队列、保留完整载荷与错误，等成功信号或人工重试，不再队头无限自旋。
-                logger.warning("memory batch failed, parking for retry: {}", exc)
+                # 停车读数由 `_park_failed_batch` 统一打一条，这里不再重复一行只带异常文本的告警。
                 failed_record = self._park_failed_batch(
                     batch,
                     category="provider_error",
@@ -7348,6 +7358,26 @@ class MemoryManager:
         self._write_failed_records(rows)
         self._drop_request_ids(id_set)
         _emit_audit_memory_parked(record, trigger=str(trigger or "initial").strip())
+        # 停车是"队列看起来空了、这批却再也不会自己回来"的唯一时刻，所以这一行要自己把
+        # 等谁讲清楚：provider_error 只在下一批成功应用时重投一条，其余档只吃人工重试。
+        logger.warning(
+            "memory batch parked: failed_id={} op={} category={} trigger_sources={} session_keys={} "
+            "request_ids={} park_count={} auto_requeue_count={} {} error={}",
+            str(record.get("failed_id") or "").strip(),
+            str(batch.op or "").strip(),
+            str(record.get("category") or "").strip(),
+            _lane_names([item.trigger_source for item in batch.items]),
+            _lane_names([item.session_key for item in batch.items]),
+            request_ids,
+            int(record.get("park_count", 0) or 0),
+            int(record.get("auto_requeue_count", 0) or 0),
+            (
+                "auto_retry=next_applied_batch"
+                if str(record.get("category") or "").strip() == "provider_error"
+                else "auto_retry=none_manual_only"
+            ),
+            str(record.get("last_error_text") or "").strip()[:160],
+        )
         return record
 
     def _parked_batch_report(
@@ -7440,6 +7470,19 @@ class MemoryManager:
         else:
             record["auto_requeue_count"] = int(record.get("auto_requeue_count", 0) or 0) + 1
         self._write_failed_records(rows)
+        logger.info(
+            "memory parked batch requeued: failed_id={} trigger={} op={} category={} trigger_sources={} "
+            "session_keys={} request_ids={} queue_rows={} park_count={}",
+            str(record.get("failed_id") or "").strip(),
+            str(trigger or "auto").strip(),
+            str(record.get("op") or "").strip(),
+            str(record.get("category") or "").strip(),
+            _lane_names([str(item.get("trigger_source") or "") for item in list(record.get("items") or []) if isinstance(item, dict)]),
+            _lane_names([str(item.get("session_key") or "") for item in list(record.get("items") or []) if isinstance(item, dict)]),
+            requeued_ids,
+            len(queue_rows),
+            int(record.get("park_count", 0) or 0),
+        )
         return {
             "failed_id": str(record.get("failed_id") or "").strip(),
             "request_ids": requeued_ids,

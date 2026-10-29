@@ -351,6 +351,126 @@ async def test_success_signal_requeues_provider_error_and_purges_after_apply(
 
 
 @pytest.mark.asyncio
+async def test_parked_boundary_batch_and_requeue_each_leave_one_log_line(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """实盘撞过的形状：一批 session_boundary 载荷被 429 停下，主队列看着是空的、日志一个字
+    没有，只有 `failed.jsonl` 里有行。停车与重投各留一行，并把"要等下一次成功批次才自动重投"
+    写进读数，判"这批还回不回得来"不必再去翻文件。
+    """
+    from loguru import logger
+
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    records: list[str] = []
+    sink_id = logger.add(lambda message: records.append(str(message)), level="INFO")
+    try:
+        await manager._append_queue_request(
+            module.MemoryQueueRequest(
+                op="write",
+                decision_source="self",
+                payload_text="[session_key] web:ceo-park-demo\n## 窗口回合 1",
+                created_at="2026-04-18T10:00:00+08:00",
+                request_id="write_boundary",
+                trigger_source="session_boundary",
+                session_key="web:ceo-park-demo",
+            )
+        )
+        fake_model = _FakeToolCallingModel([_provider_error_response("RateLimitError: 429 rpm exhausted")])
+        _wire_runtime(module, manager, tmp_path, monkeypatch, fake_model)
+
+        parked = await manager.run_due_batch_once(now_iso="2026-04-18T10:00:05+08:00")
+        assert parked["status"] == "parked"
+        park_lines = [line for line in records if "memory batch parked:" in line]
+        assert len(park_lines) == 1
+        assert f"failed_id={parked['failed_id']}" in park_lines[0]
+        assert "category=provider_error" in park_lines[0]
+        assert "trigger_sources=['session_boundary']" in park_lines[0]
+        assert "session_keys=['web:ceo-park-demo']" in park_lines[0]
+        assert "request_ids=['write_boundary']" in park_lines[0]
+        assert "auto_retry=next_applied_batch" in park_lines[0]
+        assert "429 rpm exhausted" in park_lines[0]
+        # 只此一行：异常车道上那条只带异常文本的旧告警不再重复印一遍
+        assert not [line for line in records if "memory batch failed, parking for retry" in line]
+
+        await manager._append_queue_request(
+            module.MemoryQueueRequest(
+                op="write",
+                decision_source="user",
+                payload_text="Success signal memory",
+                created_at="2026-04-18T10:01:00+08:00",
+                request_id="write_success",
+                trigger_source="memory_update_tool",
+                session_key="web:ceo-park-demo",
+            )
+        )
+        fake_model._responses = [
+            _apply_batch_response("Success signal memory", "success->signal"),
+            _fake_response(content="done", usage={"input_tokens": 1, "output_tokens": 1, "cache_read_tokens": 0}),
+        ]
+        applied = await manager.run_due_batch_once(now_iso="2026-04-18T10:01:05+08:00")
+        assert applied["status"] == "applied"
+
+        requeue_lines = [line for line in records if "memory parked batch requeued:" in line]
+        assert len(requeue_lines) == 1
+        assert f"failed_id={parked['failed_id']}" in requeue_lines[0]
+        assert "trigger=auto" in requeue_lines[0]
+        assert "trigger_sources=['session_boundary']" in requeue_lines[0]
+        assert "request_ids=['write_boundary']" in requeue_lines[0]
+    finally:
+        logger.remove(sink_id)
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_parked_protocol_batch_says_manual_only_in_the_log(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """protocol / window_refusal 档不会被成功信号重排，日志要写出这个差别，
+    否则操作员看到 parked 就以为等着就行。"""
+    from loguru import logger
+
+    module = _load_memory_agent_runtime_module()
+    cfg = _memory_cfg()
+    cfg.agent.repair_attempt_limit = 0  # 单次尝试即停车，减少 fake 响应数量
+    manager = module.MemoryManager(tmp_path, cfg)
+    records: list[str] = []
+    sink_id = logger.add(lambda message: records.append(str(message)), level="INFO")
+    try:
+        await manager._append_queue_request(
+            module.MemoryQueueRequest(
+                op="write",
+                decision_source="user",
+                payload_text="Remember the protocol breach case",
+                created_at="2026-04-18T10:00:00+08:00",
+                request_id="write_protocol",
+                trigger_source="memory_update_tool",
+                session_key="web:ceo-protocol",
+            )
+        )
+        fake_model = _FakeToolCallingModel(
+            [_fake_response(content="no tool call at all", usage={"input_tokens": 2, "output_tokens": 1, "cache_read_tokens": 0})]
+        )
+        _wire_runtime(module, manager, tmp_path, monkeypatch, fake_model)
+
+        parked = await manager.run_due_batch_once(now_iso="2026-04-18T10:00:05+08:00")
+        assert parked["status"] == "parked"
+        assert parked["category"] == "protocol"
+        park_lines = [line for line in records if "memory batch parked:" in line]
+        assert len(park_lines) == 1
+        assert "category=protocol" in park_lines[0]
+        assert "auto_retry=none_manual_only" in park_lines[0]
+        assert "trigger_sources=['memory_update_tool']" in park_lines[0]
+        assert "session_keys=['web:ceo-protocol']" in park_lines[0]
+        assert "request_ids=['write_protocol']" in park_lines[0]
+    finally:
+        logger.remove(sink_id)
+        manager.close()
+
+
+@pytest.mark.asyncio
 async def test_protocol_failure_is_not_requeued_by_success_signal(tmp_path: Path, monkeypatch) -> None:
     module = _load_memory_agent_runtime_module()
     cfg = _memory_cfg()
