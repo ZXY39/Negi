@@ -733,9 +733,10 @@ const U = {
     projectSettingsClose: document.getElementById("project-settings-close-btn"),
     projectSettingsOpenPassword: document.getElementById("project-settings-open-password-btn"),
     projectSettingsOpenBundle: document.getElementById("project-settings-open-bundle-btn"),
-    readingScale: document.getElementById("project-settings-reading-scale"),
-    readingScaleShell: document.getElementById("project-settings-reading-scale-shell"),
-    readingScaleValue: document.getElementById("project-settings-reading-scale-value"),
+    zoom: document.getElementById("project-settings-zoom"),
+    zoomBlock: document.getElementById("project-settings-zoom-block"),
+    zoomShell: document.getElementById("project-settings-zoom-shell"),
+    zoomValue: document.getElementById("project-settings-zoom-value"),
     updateNavDot: document.getElementById("update-nav-dot"),
     projectSettingsCheckDot: document.getElementById("project-settings-check-dot"),
     projectSettingsCheckUpdate: document.getElementById("project-settings-check-update-btn"),
@@ -10205,28 +10206,41 @@ function initializeTheme() {
     updateThemeToggleA11y();
 }
 
-const READING_SCALE_KEY = "g3ku.ui.reading-scale.v1";
-const READING_SCALE_DEFAULT = 1.1;
+const ZOOM_KEY = "g3ku.ui.zoom.v1";
+// 缩放是桌面窗口的档位：写 WebView2 的宿主 ZoomFactor（原生缩放，视口跟着变，页面按新
+// 视口重排），起点与 g3ku/shells/desktop.py 的 DEFAULT_ZOOM_FACTOR 同一档。
+// 浏览器没有可写的宿主缩放，CSS zoom 又不会带动 100vh/100vw 那层布局（放大溢出、缩小留白），
+// 所以这一行整块只在壳里出现，浏览器里用 Ctrl + / Ctrl −。
+const ZOOM_DEFAULT = 0.9;
 // 拖动条两端 10% / 300%，100% 落在轨道正中：左半 10→100、右半 100→300 各自线性，
 // 位置与倍数因此是分段线性关系，同一段斜率。输入框不受这两端限制，任意正数都收。
-const READING_SCALE_LOW_END = 0.1;
-const READING_SCALE_HIGH_END = 3;
-const READING_SCALE_NEUTRAL = 1;
-const READING_SCALE_POS_CENTER = 50;
+const ZOOM_LOW_END = 0.1;
+const ZOOM_HIGH_END = 3;
+const ZOOM_NEUTRAL = 1;
+const ZOOM_POS_CENTER = 50;
 
-// 字号倍数只写 --reading-font-scale：CSS 里乘在正文/回复/代码块/笔记正文的字号上，
-// 控件字号与间距不跟，所以它不同于窗口缩放（桌面壳的 ZoomFactor）。
-function normalizeReadingScale(raw) {
+// WebView2 在页面脚本之前就注入 chrome.webview；pywebview 自己的 window.pywebview 要等
+// 导航完成才注入，所以「是不是桌面壳」只能看前者，不能等后者。
+function desktopShellReady() {
+    return Boolean(window.chrome && window.chrome.webview);
+}
+
+function desktopShellZoomApi() {
+    const api = window.pywebview && window.pywebview.api;
+    return api && typeof api.set_window_zoom === "function" ? api : null;
+}
+
+function normalizeZoom(raw) {
     const text = String(raw ?? "").trim();
     // 空串要当"没设过"：清空的输入框读出来就是空串，而 Number("") 是 0。
-    if (!text) return READING_SCALE_DEFAULT;
+    if (!text) return ZOOM_DEFAULT;
     const value = Number(text);
-    if (!Number.isFinite(value) || value <= 0) return READING_SCALE_DEFAULT;
+    if (!Number.isFinite(value) || value <= 0) return ZOOM_DEFAULT;
     return Math.round(value * 100) / 100;
 }
 
 // 输入框里那格是百分数（110 = 1.1 倍）；非正数或空一律算没填，交回调用方保留原值。
-function parseReadingScalePercent(raw) {
+function parseZoomPercent(raw) {
     const text = String(raw ?? "").trim();
     if (!text) return null;
     const percent = Number(text);
@@ -10234,88 +10248,117 @@ function parseReadingScalePercent(raw) {
     return percent / 100;
 }
 
-function readingScaleToPosition(raw) {
-    const value = Math.min(READING_SCALE_HIGH_END, Math.max(READING_SCALE_LOW_END, Number(raw)));
-    return value <= READING_SCALE_NEUTRAL
-        ? ((value - READING_SCALE_LOW_END) / (READING_SCALE_NEUTRAL - READING_SCALE_LOW_END)) * READING_SCALE_POS_CENTER
-        : READING_SCALE_POS_CENTER
-            + ((value - READING_SCALE_NEUTRAL) / (READING_SCALE_HIGH_END - READING_SCALE_NEUTRAL)) * READING_SCALE_POS_CENTER;
+function zoomToPosition(raw) {
+    const value = Math.min(ZOOM_HIGH_END, Math.max(ZOOM_LOW_END, Number(raw)));
+    return value <= ZOOM_NEUTRAL
+        ? ((value - ZOOM_LOW_END) / (ZOOM_NEUTRAL - ZOOM_LOW_END)) * ZOOM_POS_CENTER
+        : ZOOM_POS_CENTER
+            + ((value - ZOOM_NEUTRAL) / (ZOOM_HIGH_END - ZOOM_NEUTRAL)) * ZOOM_POS_CENTER;
 }
 
-function positionToReadingScale(raw) {
+function positionToZoom(raw) {
     const pos = Number(raw);
-    if (!Number.isFinite(pos)) return READING_SCALE_DEFAULT;
-    return pos <= READING_SCALE_POS_CENTER
-        ? READING_SCALE_LOW_END + (pos / READING_SCALE_POS_CENTER) * (READING_SCALE_NEUTRAL - READING_SCALE_LOW_END)
-        : READING_SCALE_NEUTRAL
-            + ((pos - READING_SCALE_POS_CENTER) / READING_SCALE_POS_CENTER) * (READING_SCALE_HIGH_END - READING_SCALE_NEUTRAL);
+    if (!Number.isFinite(pos)) return ZOOM_DEFAULT;
+    return pos <= ZOOM_POS_CENTER
+        ? ZOOM_LOW_END + (pos / ZOOM_POS_CENTER) * (ZOOM_NEUTRAL - ZOOM_LOW_END)
+        : ZOOM_NEUTRAL
+            + ((pos - ZOOM_POS_CENTER) / ZOOM_POS_CENTER) * (ZOOM_HIGH_END - ZOOM_NEUTRAL);
 }
 
-let currentReadingScale = READING_SCALE_DEFAULT;
+let currentZoom = ZOOM_DEFAULT;
+let pendingDesktopZoom = null;
+let desktopZoomFrame = false;
 
-function paintReadingScale(scale, pos) {
-    currentReadingScale = scale;
-    if (document.documentElement?.style?.setProperty) {
-        document.documentElement.style.setProperty("--reading-font-scale", String(scale));
-    }
-    if (U.readingScaleValue) U.readingScaleValue.value = String(Math.round(scale * 100));
-    // 轨道填充与印着「字号」的指针都得知道指针停在几成：CSS 画不出"到指针为止"的填充，
+function writeDesktopZoom(scale) {
+    pendingDesktopZoom = scale;
+    if (desktopZoomFrame) return;
+    desktopZoomFrame = true;
+    const flush = () => {
+        desktopZoomFrame = false;
+        const next = pendingDesktopZoom;
+        pendingDesktopZoom = null;
+        const api = desktopShellZoomApi();
+        if (api === null || next === null) return;
+        try {
+            const result = api.set_window_zoom(next);
+            if (result && typeof result.catch === "function") result.catch(() => {});
+        } catch (_) {
+            // 桥没接上时窗口仍按壳的默认比例显示；下次改档会再试。
+        }
+    };
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(flush);
+    else flush();
+}
+
+function paintZoom(scale, pos) {
+    currentZoom = scale;
+    if (U.zoomValue) U.zoomValue.value = String(Math.round(scale * 100));
+    // 轨道填充与印着「缩放」的指针都得知道指针停在几成：CSS 画不出"到指针为止"的填充，
     // 也画不出跟着指针走的文字，所以把这个比例写成变量挂在壳上（两者都是壳的子节点）。
     const frac = Math.round((pos / 100) * 10000) / 10000;
-    U.readingScaleShell?.style?.setProperty?.("--font-range-frac", String(frac));
+    U.zoomShell?.style?.setProperty?.("--zoom-range-frac", String(frac));
+    writeDesktopZoom(scale);
 }
 
-function renderReadingScale(scale) {
-    const pos = Math.round(readingScaleToPosition(scale) * 100) / 100;
-    if (U.readingScale) U.readingScale.value = String(pos);
+function renderZoom(scale) {
+    const pos = Math.round(zoomToPosition(scale) * 100) / 100;
+    if (U.zoom) U.zoom.value = String(pos);
     // 填充跟着指针实际落到的那一格走：滑条按 step 会把值收进自己的网格，
     // 读回来的才是指针真正停下的位置，按它上色才不会差出半格。
-    const shown = U.readingScale ? Number(U.readingScale.value) : pos;
-    paintReadingScale(scale, Number.isFinite(shown) ? shown : pos);
+    const shown = U.zoom ? Number(U.zoom.value) : pos;
+    paintZoom(scale, Number.isFinite(shown) ? shown : pos);
 }
 
-function applyReadingScale(raw) {
-    const scale = normalizeReadingScale(raw);
-    renderReadingScale(scale);
-    // 字号档位改了，秒数的墨迹中线跟着变，圆点的抬升量要重量。
+function applyZoom(raw) {
+    const scale = normalizeZoom(raw);
+    renderZoom(scale);
+    // 缩放档位改了，秒数的墨迹中线跟着变，圆点的抬升量要重量。
     if (typeof syncCeoFlowDotGeometry === "function") syncCeoFlowDotGeometry();
     return scale;
 }
 
 // 从滑条读数：指针停在哪儿就按哪儿算，只把倍率取整，不动指针。
-function commitSliderScale() {
-    const pos = Number(U.readingScale.value);
-    const scale = normalizeReadingScale(positionToReadingScale(pos));
-    paintReadingScale(scale, Number.isFinite(pos) ? pos : readingScaleToPosition(scale));
+function commitSliderZoom() {
+    const pos = Number(U.zoom.value);
+    if (!Number.isFinite(pos) || U.zoom.value === "") return currentZoom;
+    const scale = normalizeZoom(positionToZoom(pos));
+    paintZoom(scale, pos);
     return scale;
 }
 
-function initializeReadingScale() {
-    const stored = readStoredUiPreference(READING_SCALE_KEY);
-    applyReadingScale(stored ? stored : READING_SCALE_DEFAULT);
+function initializeZoom() {
+    if (!desktopShellReady()) return;
+    U.zoomBlock?.removeAttribute?.("hidden");
+    const stored = readStoredUiPreference(ZOOM_KEY);
+    applyZoom(stored ? stored : ZOOM_DEFAULT);
+    // 壳里的桥在页面脚本之后才建好；就绪事件到了再按当前档位调一次，
+    // 否则启动时那次调用会落在还没有 api 的 window.pywebview 上。api 已就绪时不必重放。
+    if (desktopShellZoomApi() === null && typeof window.addEventListener === "function") {
+        window.addEventListener("pywebviewready", () => writeDesktopZoom(currentZoom));
+    }
 }
 
-function bindReadingScale() {
+function bindZoom() {
     // 滑条自己是指针的权威：input 与 change 都只按 1% 取整读值，绝不把取整后的位置写回
     // 滑条——写回会让指针退回上一格，键盘每按一次都被弹回原地（实测 Home 后连按 6 次不动）。
-    U.readingScale?.addEventListener("input", () => {
-        commitSliderScale();
+    U.zoom?.addEventListener("input", () => {
+        commitSliderZoom();
     });
-    U.readingScale?.addEventListener("change", () => {
-        const scale = commitSliderScale();
-        // 字号档位改了，秒数的墨迹中线跟着变；只在松手时重量，别挂在每一帧上。
+    U.zoom?.addEventListener("change", () => {
+        const scale = commitSliderZoom();
+        // 宿主缩放会自己触发 resize；圆点几何按实测位置摆，只在松手时重量。
         if (typeof syncCeoFlowDotGeometry === "function") syncCeoFlowDotGeometry();
-        writeStoredUiPreference(READING_SCALE_KEY, String(scale));
+        writeStoredUiPreference(ZOOM_KEY, String(scale));
     });
-    U.readingScaleValue?.addEventListener("change", () => {
-        const typed = parseReadingScalePercent(U.readingScaleValue.value);
+    U.zoomValue?.addEventListener("change", () => {
+        const typed = parseZoomPercent(U.zoomValue.value);
         if (typed === null) {
             // 非正数与空串不改档位，也不落盘：把那格刷回当前值，别留下一个与实际不符的数字。
-            renderReadingScale(currentReadingScale);
+            renderZoom(currentZoom);
             return;
         }
-        const scale = applyReadingScale(typed);
-        writeStoredUiPreference(READING_SCALE_KEY, String(scale));
+        const scale = applyZoom(typed);
+        writeStoredUiPreference(ZOOM_KEY, String(scale));
     });
 }
 
@@ -10323,7 +10366,7 @@ function initializeUiPreferences() {
     // 本模块会被 tests/resources 的 vm 桩环境直接求值，那里没有 documentElement。
     if (!document.documentElement) return;
     initializeTheme();
-    initializeReadingScale();
+    initializeZoom();
     S.ceoSessionOrder = readStoredCeoSessionOrder();
     S.ceoChannelCollapsed = readStoredCeoChannelCollapse();
 }
@@ -10353,7 +10396,7 @@ function bind() {
 function bindProjectSettings() {
     U.theme?.addEventListener("click", toggleTheme);
     bindModelRetryToastExpansion();
-    bindReadingScale();
+    bindZoom();
     U.projectSettings?.addEventListener("click", () => openProjectSettingsDialog());
     U.projectSettingsClose?.addEventListener("click", () => closeProjectSettingsDialog());
     U.projectSettingsBackdrop?.addEventListener("click", (e) => {

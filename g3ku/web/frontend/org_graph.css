@@ -81,8 +81,9 @@
     --radius-full: 9999px;
 
     --font-sans: 'Fira Sans', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-    /* 阅读面字号倍数：只乘正文/回复/代码块/笔记正文的字号，控件与布局不跟。
-       设置里的档位写这个变量，默认 1.1（比基线大两号，每号 5%）。 */
+    /* 阅读面字号基准：只乘正文/回复/代码块/笔记正文的字号，控件与布局不跟。
+       界面缩放由设置里的「缩放」档位统一负责（桌面壳的宿主 ZoomFactor），所以这里的 1.1
+       是排版基准，不是用户档位。 */
     --reading-font-scale: 1.1;
     --transition-fast: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
     --scrollbar-track: transparent;
@@ -17061,11 +17062,12 @@ textarea {
     min-width: 0;
 }
 
-/* 字号档位：拖动条写 --reading-font-scale，只乘阅读面（见 :root 里的变量注释）。
-   指针不是圆点而是一颗印着「字号」的按钮，所以这一行没有单独的标签列；原生指针只当
-   命中区（透明），看得见的按钮是壳里那层跟着指针走的 .project-settings-font-knob。
-   --font-range-frac 由 JS 写成 0..1，轨道填充与按钮共用同一个落点。 */
-#project-settings-dialog .project-settings-font-row {
+/* 缩放档位：设置里的这一行改的是桌面窗口的宿主缩放（WebView2 的 ZoomFactor），所以它
+   只在壳里出现，浏览器轨由 JS 把整块留在 hidden 上。
+   指针不是圆点而是一颗印着「缩放」的按钮，所以这一行没有单独的标签列；原生指针只当
+   命中区（透明），看得见的按钮是壳里那层跟着指针走的 .project-settings-zoom-knob。
+   --zoom-range-frac 由 JS 写成 0..1，轨道填充与按钮共用同一个落点。 */
+#project-settings-dialog .project-settings-zoom-row {
     flex: 1 1 auto;
     display: flex;
     align-items: center;
@@ -17075,10 +17077,10 @@ textarea {
     color: var(--ui-text);
 }
 
-#project-settings-dialog .project-settings-font-range-shell {
-    --font-knob-w: 44px;
-    --font-knob-h: 24px;
-    --font-knob-x: calc((100% - var(--font-knob-w)) * var(--font-range-frac, 0.5) + var(--font-knob-w) / 2);
+#project-settings-dialog .project-settings-zoom-range-shell {
+    --zoom-knob-w: 44px;
+    --zoom-knob-h: 24px;
+    --zoom-knob-x: calc((100% - var(--zoom-knob-w)) * var(--zoom-range-frac, 0.5) + var(--zoom-knob-w) / 2);
     position: relative;
     flex: 1 1 auto;
     min-width: 150px;
@@ -17087,7 +17089,7 @@ textarea {
     align-items: center;
 }
 
-#project-settings-dialog .project-settings-font-range {
+#project-settings-dialog .project-settings-zoom-range {
     appearance: none;
     -webkit-appearance: none;
     -moz-appearance: none;
@@ -17101,52 +17103,52 @@ textarea {
     cursor: pointer;
 }
 
-#project-settings-dialog .project-settings-font-range::-webkit-slider-runnable-track {
+#project-settings-dialog .project-settings-zoom-range::-webkit-slider-runnable-track {
     height: 4px;
     border-radius: var(--ui-radius-pill);
     background: linear-gradient(to right,
-        var(--ui-brand) 0 var(--font-knob-x),
-        var(--ui-bg-subtle) var(--font-knob-x) 100%);
+        var(--ui-brand) 0 var(--zoom-knob-x),
+        var(--ui-bg-subtle) var(--zoom-knob-x) 100%);
 }
 
 /* 原生指针透明但与按钮同宽：它的宽度决定指针行程，按钮那层才能算出同一个中心。 */
-#project-settings-dialog .project-settings-font-range::-webkit-slider-thumb {
+#project-settings-dialog .project-settings-zoom-range::-webkit-slider-thumb {
     appearance: none;
     -webkit-appearance: none;
-    width: var(--font-knob-w);
-    height: var(--font-knob-h);
-    margin-top: calc((4px - var(--font-knob-h)) / 2);
+    width: var(--zoom-knob-w);
+    height: var(--zoom-knob-h);
+    margin-top: calc((4px - var(--zoom-knob-h)) / 2);
     border: 0;
     border-radius: 8px;
     background: transparent;
 }
 
-#project-settings-dialog .project-settings-font-range::-moz-range-track {
+#project-settings-dialog .project-settings-zoom-range::-moz-range-track {
     height: 4px;
     border-radius: var(--ui-radius-pill);
     background: var(--ui-bg-subtle);
 }
 
-#project-settings-dialog .project-settings-font-range::-moz-range-progress {
+#project-settings-dialog .project-settings-zoom-range::-moz-range-progress {
     height: 4px;
     border-radius: var(--ui-radius-pill);
     background: var(--ui-brand);
 }
 
-#project-settings-dialog .project-settings-font-range::-moz-range-thumb {
-    width: var(--font-knob-w);
-    height: var(--font-knob-h);
+#project-settings-dialog .project-settings-zoom-range::-moz-range-thumb {
+    width: var(--zoom-knob-w);
+    height: var(--zoom-knob-h);
     border: 0;
     border-radius: 8px;
     background: transparent;
 }
 
-#project-settings-dialog .project-settings-font-knob {
+#project-settings-dialog .project-settings-zoom-knob {
     position: absolute;
     top: 50%;
-    left: calc(var(--font-knob-x) - var(--font-knob-w) / 2);
-    width: var(--font-knob-w);
-    height: var(--font-knob-h);
+    left: calc(var(--zoom-knob-x) - var(--zoom-knob-w) / 2);
+    width: var(--zoom-knob-w);
+    height: var(--zoom-knob-h);
     transform: translateY(-50%);
     display: grid;
     place-items: center;
@@ -17163,19 +17165,19 @@ textarea {
     transition: box-shadow 160ms var(--ui-motion-ease);
 }
 
-#project-settings-dialog .project-settings-font-range:focus-visible + .project-settings-font-knob {
+#project-settings-dialog .project-settings-zoom-range:focus-visible + .project-settings-zoom-knob {
     box-shadow: 0 0 0 3px var(--ui-brand-soft);
 }
 
 /* 档位数字与拖动条是同一个值的两个入口：数字框吃满右侧那格，百分号画在框内右端。 */
-#project-settings-dialog .project-settings-font-value-shell {
+#project-settings-dialog .project-settings-zoom-value-shell {
     position: relative;
     flex: 0 0 auto;
     display: inline-flex;
     align-items: center;
 }
 
-#project-settings-dialog .project-settings-font-value {
+#project-settings-dialog .project-settings-zoom-value {
     width: 78px;
     height: 36px;
     min-height: 36px;
@@ -17192,7 +17194,7 @@ textarea {
     transition: border-color 160ms var(--ui-motion-ease), box-shadow 160ms var(--ui-motion-ease);
 }
 
-#project-settings-dialog .project-settings-font-value-unit {
+#project-settings-dialog .project-settings-zoom-value-unit {
     position: absolute;
     right: 11px;
     color: var(--ui-text-muted);
@@ -17201,11 +17203,11 @@ textarea {
     pointer-events: none;
 }
 
-#project-settings-dialog .project-settings-font-value:hover {
+#project-settings-dialog .project-settings-zoom-value:hover {
     border-color: var(--ui-border-strong);
 }
 
-#project-settings-dialog .project-settings-font-value:focus-visible {
+#project-settings-dialog .project-settings-zoom-value:focus-visible {
     outline: none;
     border-color: var(--ui-brand);
     box-shadow: 0 0 0 3px var(--ui-brand-soft);
