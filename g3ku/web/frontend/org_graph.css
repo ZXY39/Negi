@@ -17121,6 +17121,8 @@ textarea {
 .project-settings-qr-btn svg {
     width: 15px;
     height: 15px;
+    /* 字形底边比 12px 中文基线低约 1px，上移一像素让二维码与群号文字坐在同一行。 */
+    transform: translateY(-1px);
 }
 
 .project-settings-qr-popover {
