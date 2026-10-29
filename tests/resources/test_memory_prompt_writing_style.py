@@ -64,3 +64,18 @@ def test_built_user_prompt_carries_the_style_rule(tmp_path: Path) -> None:
         assert "方法论写成读取时机+触发条件" in prompt
     finally:
         manager.close()
+
+
+def test_memory_agent_prompt_names_the_sticker_breadcrumb_shape() -> None:
+    """`[已发表情包：…]` 的标签是三段键，提示词按同一形状教它抄。
+
+    编号是投递道给的，要不要留在记忆正文里由提示词的写法规范决定；标签哪天改成两段，
+    这一段就成了一句假指引，用户的逐张表态会静默退回按分类归纳。
+    """
+    text = _repo_file("main/prompts/memory_agent.md").read_text(encoding="utf-8")
+    assert "已发表情包" in text
+    assert "<包>/<分类>/<序号>" in text
+    assert "不要收成分类名" in text
+
+    marker = _repo_file("g3ku/stickers/marker.py").read_text(encoding="utf-8")
+    assert 'delivered.append(f"{pack_key}/{value}/{sent_index}")' in marker
