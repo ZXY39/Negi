@@ -8,8 +8,10 @@ import pytest
 
 from main.runtime.node_relationships import resolve_wait_targets
 from main.runtime.wait_graph import (
+    NODE_WAIT_EXTERNAL_KEY,
     NODE_WAIT_TARGETS_KEY,
     build_wait_nodes,
+    find_all_parked_waits,
     find_wait_cycles,
 )
 from main.service.runtime_service import MainRuntimeService
@@ -217,6 +219,76 @@ def test_paused_message_reads_as_paused():
     )
     assert '已暂停' in body
     assert '看门狗判停' in body
+
+
+# --- all-parked invariant ---------------------------------------------------
+
+
+def _parked(node: SimpleNamespace, *, external: bool = False) -> SimpleNamespace:
+    if external:
+        node.metadata[NODE_WAIT_EXTERNAL_KEY] = True
+    return node
+
+
+def test_all_parked_without_an_external_waker_is_a_deadlock():
+    a = _parked(_node('node:a', parent='root'))
+    b = _parked(_node('node:b', parent='root'))
+    nodes = build_wait_nodes(records=[a, b], frames=_frames('node:a', 'node:b'))
+    assert find_all_parked_waits(nodes) == ['node:a', 'node:b']
+
+
+def test_an_external_declaration_legitimises_the_all_parked_state():
+    a = _parked(_node('node:a', parent='root'), external=True)
+    b = _parked(_node('node:b', parent='root'))
+    nodes = build_wait_nodes(records=[a, b], frames=_frames('node:a', 'node:b'))
+    assert find_all_parked_waits(nodes) is None
+
+
+def test_a_running_execution_node_is_a_reachable_waker():
+    a = _parked(_node('node:a', parent='root'))
+    b = _node('node:b', parent='root')
+    frames = {'node:a': {'phase': 'waiting_explicit'}, 'node:b': {'phase': 'before_model'}}
+    nodes = build_wait_nodes(records=[a, b], frames=frames)
+    assert find_all_parked_waits(nodes) is None
+
+
+def test_waiting_children_counts_as_idle():
+    # 等子节点的父节点不持有回合，也不是唤醒候选（它在等结果，叫醒它没用）；
+    # 真正该叫醒的是停在信箱上的那个节点。
+    a = _parked(_node('node:a', parent='root'))
+    b = _node('node:b', parent='root')
+    frames = {'node:a': {'phase': 'waiting_explicit'}, 'node:b': {'phase': 'waiting_children'}}
+    nodes = build_wait_nodes(records=[a, b], frames=frames)
+    assert find_all_parked_waits(nodes) == ['node:a']
+
+
+def test_terminal_nodes_are_ignored():
+    a = _parked(_node('node:a', parent='root'))
+    done = _node('node:b', parent='root', status='success')
+    nodes = build_wait_nodes(records=[a, done], frames=_frames('node:a', 'node:b'))
+    assert find_all_parked_waits(nodes) == ['node:a']
+
+
+def test_an_idle_acceptance_node_does_not_mask_the_deadlock():
+    a = _parked(_node('node:a', parent='root'))
+    verifier = _node('node:v', parent='node:a', kind='acceptance')
+    nodes = build_wait_nodes(records=[a, verifier], frames=_frames('node:a'))
+    assert find_all_parked_waits(nodes) == ['node:a']
+
+
+def test_no_explicit_park_means_nothing_to_break():
+    a = _node('node:a', parent='root')
+    nodes = build_wait_nodes(records=[a], frames={'node:a': {'phase': 'before_model'}})
+    assert find_all_parked_waits(nodes) is None
+
+
+def test_shallowest_parked_node_is_listed_first():
+    deep = _parked(_node('node:deep', parent='node:mid'))
+    deep.depth = 5
+    shallow = _parked(_node('node:shallow', parent='root'))
+    shallow.depth = 1
+    nodes = build_wait_nodes(records=[deep, shallow], frames=_frames('node:deep', 'node:shallow'))
+    assert find_all_parked_waits(nodes) == ['node:shallow', 'node:deep']
 
 
 # --- targeted wake ----------------------------------------------------------

@@ -118,7 +118,7 @@ from main.runtime.tool_names import (
     VIEW_MESSAGE_HISTORY_TOOL_NAME,
     VIEW_NODE_TREE_TOOL_NAME,
 )
-from main.runtime.wait_graph import NODE_WAIT_TARGETS_KEY
+from main.runtime.wait_graph import NODE_WAIT_EXTERNAL_KEY, NODE_WAIT_TARGETS_KEY
 from main.service.create_async_task_contract import normalize_create_async_task_file_targets
 from main.storage.disk_guard import is_disk_full_error
 from main.types import KIND_ACCEPTANCE, KIND_EXECUTION, STATUS_FAILED, STATUS_SUCCESS
@@ -1023,6 +1023,7 @@ class NodeRunner:
             next_metadata.pop(self.NODE_WAIT_NOTE_KEY, None)
             # 这一回合已经不在等任何人：留着声明只会让后续的定向唤醒继续找它。
             next_metadata.pop(NODE_WAIT_TARGETS_KEY, None)
+            next_metadata.pop(NODE_WAIT_EXTERNAL_KEY, None)
             return next_metadata
 
         self._log_service.update_node_metadata(node_id, _mutate)
@@ -2996,6 +2997,7 @@ class NodeRunner:
                         **dict(record.metadata or {}),
                         self.NODE_WAIT_NOTE_KEY: str(note or '').strip(),
                         NODE_WAIT_TARGETS_KEY: list(targets),
+                        NODE_WAIT_EXTERNAL_KEY: bool(external),
                     }
                 }
             ),

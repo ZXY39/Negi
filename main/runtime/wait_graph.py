@@ -28,8 +28,14 @@ from typing import Any
 # this node" — is one `list_nodes` pass with no per-node frame reads. Edges are only
 # built for parked nodes, so a stale value on a node that already woke is inert.
 NODE_WAIT_TARGETS_KEY = 'node_wait_targets'
+# Companion flag: the declaration named `frontdoor`, i.e. a human is expected to
+# wake this node. An all-parked task is legitimate only if someone set this.
+NODE_WAIT_EXTERNAL_KEY = 'node_wait_external'
 
 PARKED_PHASES = frozenset({'waiting_explicit', 'waiting_acceptance'})
+# Every phase in which an execution node owns no turn and will not produce a
+# message by itself. The watchdog uses the same set for the same reason.
+IDLE_PHASES = frozenset({'waiting_explicit', 'waiting_children', 'waiting_acceptance'})
 TERMINAL_STATUSES = frozenset({'success', 'failed'})
 
 
@@ -45,6 +51,7 @@ class WaitNode:
     subject_node_id: str = ''
     handshake_state: str = ''
     wait_targets: tuple[str, ...] = ()
+    wait_external: bool = False
 
 
 def build_wait_nodes(
@@ -81,6 +88,7 @@ def build_wait_nodes(
                 subject_node_id=str(metadata.get('accepted_node_id') or getattr(record, 'parent_node_id', '') or '').strip(),
                 handshake_state=str(handshake.get('state') or '').strip(),
                 wait_targets=wait_targets,
+                wait_external=bool(metadata.get(NODE_WAIT_EXTERNAL_KEY)),
             )
         )
     return nodes
@@ -128,6 +136,37 @@ def _wait_edges(nodes_by_id: dict[str, WaitNode]) -> dict[str, list[str]]:
         if out:
             edges[node.node_id] = list(dict.fromkeys(out))
     return edges
+
+
+def find_all_parked_waits(nodes: list[WaitNode]) -> list[str] | None:
+    """Return the ids to force-wake when a task has no reachable waker.
+
+    A task is provably stuck when every non-terminal execution node sits in an
+    idle phase and none of the explicitly parked ones declared an external
+    (``frontdoor``) waker. Any execution node outside those phases is either
+    running or queued, so it can still produce a message and the task is not
+    stuck. Acceptance nodes are excluded: they are driven by the handshake and
+    never wake anyone by sending.
+
+    Returns the explicitly parked ids ordered shallowest-first, or ``None``.
+    """
+    explicit: list[WaitNode] = []
+    external = False
+    for node in list(nodes or []):
+        if node.node_kind != 'execution' or _is_terminal(node):
+            continue
+        if node.phase == 'waiting_explicit':
+            explicit.append(node)
+            if node.wait_external:
+                external = True
+            continue
+        if node.phase in IDLE_PHASES:
+            continue
+        return None
+    if not explicit or external:
+        return None
+    explicit.sort(key=lambda item: (item.depth, item.node_id))
+    return [item.node_id for item in explicit]
 
 
 def find_wait_cycles(nodes: list[WaitNode]) -> list[list[str]]:

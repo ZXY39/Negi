@@ -24,7 +24,7 @@ from main.runtime.acceptance_handshake import (
 from main.runtime.node_mailbox import notification_is_held
 from main.runtime.node_runner import SKIPPED_CHECK_RESULT
 from main.runtime.node_wake import PARKED_PHASES
-from main.runtime.wait_graph import build_wait_nodes, find_wait_cycles
+from main.runtime.wait_graph import build_wait_nodes, find_all_parked_waits, find_wait_cycles
 from main.types import KIND_ACCEPTANCE
 
 _DEFAULT_NODE_DISPATCH_LIMITS = {
@@ -1441,33 +1441,66 @@ class TaskActorService:
         )
         cycles = find_wait_cycles(nodes)
         if not cycles:
-            return False
+            # 没有可证明的环，仍可能全员停靠：每个执行节点都不持有回合，而没有任何
+            # 一个声明在等外部输入。那种状态没有唤醒源，只能等失速告警——把它当成
+            # 一个环来打破，让"静默全员停靠"在结构上不可达。
+            all_parked = find_all_parked_waits(nodes)
+            if not all_parked:
+                return False
+            return await self._force_wake_parked(
+                task_id=task_id,
+                node_ids=all_parked,
+                label='all-parked deadlock',
+                reason=(
+                    '【运行时等待图检测】任务里所有执行节点都已停靠，且没有任何节点声明在等外部输入：'
+                    + '、'.join(all_parked)
+                    + '。没有谁会来唤醒它们，已强制唤醒本节点；请根据当前事实决定继续推进、调整要求还是终止这条分支。'
+                ),
+            )
         broke = False
         for cycle in cycles:
-            node_id = str(cycle[0] or '').strip()
-            if not node_id:
-                continue
-            reason = (
-                '【运行时等待图检测】检测到等待成环：'
-                + ' → '.join(cycle)
-                + '。已强制唤醒本节点以打破死锁；请根据当前事实决定继续推进、调整要求还是终止这条分支。'
-            )
-            try:
-                await self.resume_node_entry(task_id, node_id)
-            except Exception:
-                logger.exception('wait-cycle resume failed: task={} node={}', task_id, node_id)
-            notifier = self.wait_cycle_notifier
-            if callable(notifier):
-                try:
-                    notifier(task_id=task_id, node_id=node_id, reason=reason)
-                except Exception:
-                    logger.exception('wait-cycle notice failed: task={} node={}', task_id, node_id)
-            try:
-                logger.warning('wait-for cycle broken: task={} cycle={}', task_id, cycle)
-            except Exception:
-                pass
-            broke = True
+            broke = await self._force_wake_parked(
+                task_id=task_id,
+                node_ids=cycle,
+                label='wait-for cycle',
+                reason=(
+                    '【运行时等待图检测】检测到等待成环：'
+                    + ' → '.join(cycle)
+                    + '。已强制唤醒本节点以打破死锁；请根据当前事实决定继续推进、调整要求还是终止这条分支。'
+                ),
+            ) or broke
         return broke
+
+    async def _force_wake_parked(
+        self,
+        *,
+        task_id: str,
+        node_ids: list[str],
+        label: str,
+        reason: str,
+    ) -> bool:
+        """唤醒 `node_ids` 里最浅的那个停靠节点，并投一条说明原因的通知。
+
+        通知走 `create_task` 异步投递，调用方不能假设它已经落箱。
+        """
+        node_id = str((node_ids or [''])[0] or '').strip()
+        if not node_id:
+            return False
+        try:
+            await self.resume_node_entry(task_id, node_id)
+        except Exception:
+            logger.exception('parked-wake resume failed: task={} node={}', task_id, node_id)
+        notifier = self.wait_cycle_notifier
+        if callable(notifier):
+            try:
+                notifier(task_id=task_id, node_id=node_id, reason=reason)
+            except Exception:
+                logger.exception('parked-wake notice failed: task={} node={}', task_id, node_id)
+        try:
+            logger.warning('{} broken: task={} nodes={}', label, task_id, node_ids)
+        except Exception:
+            pass
+        return True
 
     async def _drive_scheduler_loop(
         self,
