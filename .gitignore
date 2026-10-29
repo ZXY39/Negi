@@ -83,7 +83,9 @@ output/
 assets/persona/
 hotdata/
 # 表情包图库：用户数据，随安装留存但不入库（根锚定，别误伤 g3ku/stickers 包）
-/stickers/
+/stickers/*
+# 随项目分发的默认表情包（内容资产，入库；其余包与自建包仍属操作员数据）
+!/stickers/deepseek-fanart/
 cli_help.txt
 image_help.txt
 
