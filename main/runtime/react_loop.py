@@ -4849,17 +4849,38 @@ class ReActToolLoop:
         position = int(delivered.get(name, 0) or 0) + 1
         totals = runtime_context.get('impulse_batch_totals')
         batch_total = int(totals.get(name, position) or position) if isinstance(totals, dict) else position
+        # 同批每条调用拿的都是同一份批前快照（`_call_runtime_context` 是浅拷贝）：从这里
+        # 读载体，兄弟调用刚暂存的条目一定看不见。按 node_id 现读一次，暂存/落盘都交给
+        # 存储层的原子合并（`stage_node_stash_entry`），快照回写不再存在。
+        carrier = runtime_context.get('tool_arg_stash_carrier') or {}
+        reader = getattr(service, 'node_stash_carrier', None)
+        if callable(reader):
+            try:
+                fresh_carrier = reader(node_id)
+            except Exception:
+                fresh_carrier = None
+            if isinstance(fresh_carrier, dict) and fresh_carrier:
+                carrier = fresh_carrier
+        scope_key = _stash_node_scope_key(task_id, node_id, name)
+        stage = getattr(service, 'stage_node_stash_entry', None)
+        stage_entry = None
+        if callable(stage):
+            stage_hop = tool_arg_stash.read_hop(carrier)
+
+            def stage_entry(entry: dict[str, Any], _hop: int = stage_hop) -> tuple[dict[str, Any], int]:
+                return stage(node_id, scope_key=scope_key, entry=entry, hop=_hop)
         try:
             result = deliver(
                 actor_role=str(runtime_context.get('actor_role') or 'execution').strip() or 'execution',
                 session_id=str(runtime_context.get('session_key') or runtime_context.get('session_id') or 'web:shared').strip(),
                 tool_id=name,
                 arguments=dict(arguments or {}),
-                scope_key=_stash_node_scope_key(task_id, node_id, name),
-                carrier=runtime_context.get('tool_arg_stash_carrier') or {},
+                scope_key=scope_key,
+                carrier=carrier,
                 batch_position=position,
                 batch_total=max(position, batch_total),
                 runtime_context=runtime_context,
+                stage_entry=stage_entry,
             )
         except Exception as exc:
             return f'Error: could not deliver the contract for {name}: {describe_exception(exc)}'
@@ -4867,12 +4888,15 @@ class ReActToolLoop:
             return None
         if str(result.get('outcome') or '').strip() == IMPULSE_REJECT:
             return None
-        persist = getattr(service, 'persist_node_stash_carrier', None)
-        if callable(persist):
-            try:
-                runtime_context['tool_arg_stash_carrier'] = persist(node_id, result.get('carrier')) or {}
-            except Exception:
-                pass
+        if result.get('stash_persisted'):
+            runtime_context['tool_arg_stash_carrier'] = result.get('carrier') or {}
+        else:
+            persist = getattr(service, 'persist_node_stash_carrier', None)
+            if callable(persist):
+                try:
+                    runtime_context['tool_arg_stash_carrier'] = persist(node_id, result.get('carrier')) or {}
+                except Exception:
+                    pass
         delivered[name] = position
         call_id = str(runtime_context.get('current_tool_call_id') or '').strip()
         outcome = str(result.get('outcome') or '').strip()
@@ -4904,6 +4928,70 @@ class ReActToolLoop:
             runtime_context['tool_arg_stash_carrier'] = persist(node_id, carrier) or {}
         except Exception:
             pass
+
+    def _consume_node_stash_entries(
+        self,
+        *,
+        node_id: str,
+        scope_key: str,
+        digests: list[str],
+        container: dict[str, Any],
+        hop: int,
+        fingerprint: str,
+        runtime_context: dict[str, Any],
+    ) -> None:
+        """按 digest 原子销账：只删这一批真跑过的份数。
+
+        复用批逐份执行有 await 窗口，同批另一条调用可能在这段时间又暂存了新入参；
+        整份写回会连它们一起删掉。服务不支持原子消费时退回老行为，至少本批消费仍落盘。
+        """
+        service = getattr(self, '_tool_impulse_service', None)
+        consume = getattr(service, 'consume_node_stash_entries', None) if service is not None else None
+        if callable(consume):
+            try:
+                carrier, _removed = consume(node_id, scope_key=scope_key, digests=digests)
+                runtime_context['tool_arg_stash_carrier'] = carrier
+                return
+            except Exception:
+                pass
+        next_container, _dropped = tool_arg_stash.consume_entries(
+            container,
+            scope_key=scope_key,
+            current_hop=hop,
+            fingerprint=fingerprint,
+        )
+        self._persist_node_stash_carrier(
+            node_id=node_id,
+            carrier=tool_arg_stash.build_carrier(next_container, hop=hop),
+            runtime_context=runtime_context,
+        )
+
+    def _drop_node_stash_scope(
+        self,
+        *,
+        node_id: str,
+        scope_key: str,
+        container: dict[str, Any],
+        hop: int,
+        runtime_context: dict[str, Any],
+    ) -> None:
+        """原子摘掉一个 scope：不能把批前快照整份写回。"""
+        service = getattr(self, '_tool_impulse_service', None)
+        drop = getattr(service, 'drop_node_stash_scope', None) if service is not None else None
+        if callable(drop):
+            try:
+                runtime_context['tool_arg_stash_carrier'] = drop(node_id, scope_key=scope_key)
+                return
+            except Exception:
+                pass
+        self._persist_node_stash_carrier(
+            node_id=node_id,
+            carrier=tool_arg_stash.build_carrier(
+                tool_arg_stash.drop_scope(container, scope_key=scope_key),
+                hop=hop,
+            ),
+            runtime_context=runtime_context,
+        )
 
     def _node_contract_presence_reading(
         self,
@@ -5101,15 +5189,13 @@ class ReActToolLoop:
                 arguments=dict(plan.get('arguments') or {}),
                 runtime_context=runtime_context,
             )
-            next_container, _dropped = tool_arg_stash.consume_entries(
-                container,
-                scope_key=scope_key,
-                current_hop=hop,
-                fingerprint=fingerprint,
-            )
-            self._persist_node_stash_carrier(
+            self._consume_node_stash_entries(
                 node_id=node_id,
-                carrier=tool_arg_stash.build_carrier(next_container, hop=hop),
+                scope_key=scope_key,
+                digests=[str(entry.get(tool_arg_stash.DIGEST_FIELD) or '') for entry in staged_entries],
+                container=container,
+                hop=hop,
+                fingerprint=fingerprint,
                 runtime_context=runtime_context,
             )
             refusal_text = f"{reuse_refusal_text(kind, name)}\n\n{executed}"
@@ -5121,12 +5207,11 @@ class ReActToolLoop:
             if isinstance(staged_ids, set) and call_id:
                 staged_ids.add(call_id)
             if kind == REUSE_PLAN_CONTRACT_ABSENT and container.get(scope_key):
-                self._persist_node_stash_carrier(
+                self._drop_node_stash_scope(
                     node_id=node_id,
-                    carrier=tool_arg_stash.build_carrier(
-                        tool_arg_stash.drop_scope(container, scope_key=scope_key),
-                        hop=hop,
-                    ),
+                    scope_key=scope_key,
+                    container=container,
+                    hop=hop,
                     runtime_context=runtime_context,
                 )
             refusal_text = reuse_refusal_text(kind, name)
@@ -5163,15 +5248,16 @@ class ReActToolLoop:
                 items.append(item)
         finally:
             runtime_context.pop('reuse_batch_in_progress', None)
-        next_container, _consumed = tool_arg_stash.consume_entries(
-            container,
-            scope_key=scope_key,
-            current_hop=hop,
-            fingerprint=fingerprint,
-        )
-        self._persist_node_stash_carrier(
+        self._consume_node_stash_entries(
             node_id=node_id,
-            carrier=tool_arg_stash.build_carrier(next_container, hop=hop),
+            scope_key=scope_key,
+            digests=[
+                str(entry.get(tool_arg_stash.DIGEST_FIELD) or tool_arg_stash.args_digest(entry.get(tool_arg_stash.ARGS_FIELD) or {}))
+                for entry in entries
+            ],
+            container=container,
+            hop=hop,
+            fingerprint=fingerprint,
             runtime_context=runtime_context,
         )
         return aggregate_reuse_results(tool_name=name, items=items)

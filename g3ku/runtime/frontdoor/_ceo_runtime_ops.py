@@ -6660,26 +6660,22 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 reuse_flag_ignored=True,
             )
             executed_text, _executed_status = await execute_one(dict(plan.get('arguments') or {}))
-            self._persist_frontdoor_stash_container(
-                container=tool_arg_stash.consume_entries(
-                    container,
-                    scope_key=scope_key,
-                    current_hop=hop,
-                    fingerprint=fingerprint,
-                )[0],
-                hop=hop,
+            self._consume_frontdoor_stash_entries(
                 session=session,
                 runtime_context=runtime_context,
+                scope_key=scope_key,
+                digests=[str(entry.get(tool_arg_stash.DIGEST_FIELD) or '') for entry in staged_entries],
+                hop=hop,
             )
             return f"{reuse_refusal_text(kind, name)}\n\n{executed_text}"
         if kind in {REUSE_PLAN_NO_STASH, REUSE_PLAN_CONTRACT_ABSENT}:
             self._record_frontdoor_execution_path(runtime_context, call_id, EXECUTION_PATH_ILLEGAL_REUSE)
             if kind == REUSE_PLAN_CONTRACT_ABSENT and container.get(scope_key):
-                self._persist_frontdoor_stash_container(
-                    container=tool_arg_stash.drop_scope(container, scope_key=scope_key),
-                    hop=hop,
+                self._drop_frontdoor_stash_scope(
                     session=session,
                     runtime_context=runtime_context,
+                    scope_key=scope_key,
+                    hop=hop,
                 )
             return reuse_refusal_text(kind, name)
         if kind != REUSE_PLAN_EXECUTE:
@@ -6698,16 +6694,15 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             }
             item['error' if item['ok'] is False else 'result'] = text
             items.append(item)
-        self._persist_frontdoor_stash_container(
-            container=tool_arg_stash.consume_entries(
-                container,
-                scope_key=scope_key,
-                current_hop=hop,
-                fingerprint=fingerprint,
-            )[0],
-            hop=hop,
+        self._consume_frontdoor_stash_entries(
             session=session,
             runtime_context=runtime_context,
+            scope_key=scope_key,
+            digests=[
+                str(entry.get(tool_arg_stash.DIGEST_FIELD) or tool_arg_stash.args_digest(entry.get(tool_arg_stash.ARGS_FIELD) or {}))
+                for entry in entries
+            ],
+            hop=hop,
         )
         return aggregate_reuse_results(tool_name=name, items=items)
 
@@ -6762,6 +6757,57 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if session is not None:
             setattr(session, '_frontdoor_tool_arg_stash', next_carrier)
         runtime_context['tool_arg_stash_carrier'] = next_carrier
+
+    def _frontdoor_stash_carrier(self, session: Any, runtime_context: dict[str, Any]) -> dict[str, Any]:
+        """销账前现读会话当前载体：复用批逐份执行有 await 窗口，批前快照已经过期。"""
+        if session is not None:
+            carrier = getattr(session, '_frontdoor_tool_arg_stash', None)
+            if isinstance(carrier, dict) and carrier:
+                return carrier
+        return (runtime_context or {}).get('tool_arg_stash_carrier') or {}
+
+    def _consume_frontdoor_stash_entries(
+        self,
+        *,
+        session: Any,
+        runtime_context: dict[str, Any],
+        scope_key: str,
+        digests: Any,
+        hop: int,
+    ) -> None:
+        """按 digest 精确销账：只删这一批真跑过的份数，不整份写回快照。"""
+        carrier = self._frontdoor_stash_carrier(session, runtime_context)
+        next_container, _removed = tool_arg_stash.remove_digests(
+            tool_arg_stash.carrier_container(carrier),
+            scope_key=scope_key,
+            digests=digests,
+        )
+        self._persist_frontdoor_stash_container(
+            container=next_container,
+            hop=tool_arg_stash.read_hop(carrier) or hop,
+            session=session,
+            runtime_context=runtime_context,
+        )
+
+    def _drop_frontdoor_stash_scope(
+        self,
+        *,
+        session: Any,
+        runtime_context: dict[str, Any],
+        scope_key: str,
+        hop: int,
+    ) -> None:
+        """契约离场时原子摘掉该 scope，别把并发新增的条目一起写没。"""
+        carrier = self._frontdoor_stash_carrier(session, runtime_context)
+        self._persist_frontdoor_stash_container(
+            container=tool_arg_stash.drop_scope(
+                tool_arg_stash.carrier_container(carrier),
+                scope_key=scope_key,
+            ),
+            hop=tool_arg_stash.read_hop(carrier) or hop,
+            session=session,
+            runtime_context=runtime_context,
+        )
 
     def _frontdoor_execution_bundle(
         self,

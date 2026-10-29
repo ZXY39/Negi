@@ -9012,6 +9012,132 @@ class MainRuntimeService:
             hop=tool_arg_stash.read_hop(metadata if isinstance(metadata, dict) else {}),
         )
 
+    def stage_node_stash_entry(
+        self,
+        node_id: str,
+        *,
+        scope_key: str,
+        entry: Any,
+        hop: int = 0,
+    ) -> tuple[dict[str, Any], int]:
+        """把一条已校验入参原子并入节点载体，返回 (落盘载体, 下一跳可消费份数)。
+
+        合并必须在存储层做：同批多个冲动调用拿到的是同一份批前快照，谁把自己那份
+        快照整份写回，就会覆盖兄弟调用刚暂存的条目。`update_node` 的读行与 mutator
+        在同一个 writer-queue 操作里，后到的一定看得见先到的（sqlite_store.update_node）。
+        """
+        staged = dict(entry or {}) if isinstance(entry, dict) else {}
+        digest = str(staged.get(tool_arg_stash.DIGEST_FIELD) or "").strip() or tool_arg_stash.args_digest(
+            staged.get(tool_arg_stash.ARGS_FIELD)
+        )
+        fingerprint = str(staged.get(tool_arg_stash.FINGERPRINT_FIELD) or "").strip()
+        outcome: dict[str, Any] = {}
+
+        def _mutate(record: Any) -> Any:
+            metadata = dict(getattr(record, 'metadata', None) or {})
+            container = tool_arg_stash.carrier_container(metadata)
+            current_hop = tool_arg_stash.read_hop(metadata)
+            if not current_hop:
+                current_hop = int(hop or 0)
+            staged[tool_arg_stash.DIGEST_FIELD] = digest
+            # 跳序以库内为准：调用方那份快照可能落后于本进程已推进过的时钟。
+            staged[tool_arg_stash.STAGED_HOP_FIELD] = current_hop
+            entries = list(container.get(scope_key) or [])
+            duplicate = any(
+                str(existing.get(tool_arg_stash.DIGEST_FIELD) or "").strip() == digest
+                and int(existing.get(tool_arg_stash.STAGED_HOP_FIELD) or 0) == current_hop
+                and (
+                    not fingerprint
+                    or str(existing.get(tool_arg_stash.FINGERPRINT_FIELD) or "").strip() == fingerprint
+                )
+                for existing in entries
+            )
+            if not duplicate:
+                entries.append(dict(staged))
+            container[scope_key] = entries
+            carrier = tool_arg_stash.build_carrier(container, hop=current_hop)
+            metadata.pop(tool_arg_stash.STASH_CONTAINER_KEY, None)
+            metadata.pop(tool_arg_stash.STASH_HOP_KEY, None)
+            metadata.update(carrier)
+            record.metadata = metadata
+            outcome['carrier'] = carrier
+            return record
+
+        updated = self.store.update_node(str(node_id or '').strip(), _mutate)
+        if updated is None:
+            raise RuntimeError(f'node_not_found:{node_id}')
+        carrier = outcome.get('carrier') or {}
+        current_hop = tool_arg_stash.read_hop(carrier) or int(hop or 0)
+        count = len(
+            tool_arg_stash.peek_entries(
+                tool_arg_stash.carrier_container(carrier),
+                scope_key=scope_key,
+                current_hop=current_hop + 1,
+                fingerprint=fingerprint,
+            )
+        )
+        return carrier, count
+
+    def consume_node_stash_entries(
+        self,
+        node_id: str,
+        *,
+        scope_key: str,
+        digests: Any,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """按 digest 原子销账，返回 (落盘载体, 被移除条目)。
+
+        只删调用方真正跑过的那几份：整份写回会让执行期间同批暂存的新入参一起消失。
+        """
+        outcome: dict[str, Any] = {}
+
+        def _mutate(record: Any) -> Any:
+            metadata = dict(getattr(record, 'metadata', None) or {})
+            container = tool_arg_stash.carrier_container(metadata)
+            current_hop = tool_arg_stash.read_hop(metadata)
+            next_container, removed = tool_arg_stash.remove_digests(
+                container,
+                scope_key=scope_key,
+                digests=digests,
+            )
+            carrier = tool_arg_stash.build_carrier(next_container, hop=current_hop)
+            metadata.pop(tool_arg_stash.STASH_CONTAINER_KEY, None)
+            metadata.pop(tool_arg_stash.STASH_HOP_KEY, None)
+            metadata.update(carrier)
+            record.metadata = metadata
+            outcome['carrier'] = carrier
+            outcome['removed'] = removed
+            return record
+
+        updated = self.store.update_node(str(node_id or '').strip(), _mutate)
+        if updated is None:
+            return {}, []
+        return outcome.get('carrier') or {}, list(outcome.get('removed') or [])
+
+    def drop_node_stash_scope(self, node_id: str, *, scope_key: str) -> dict[str, Any]:
+        """原子摘掉一个 scope（契约离场时用），不影响别的工具/并发新增。"""
+        outcome: dict[str, Any] = {}
+
+        def _mutate(record: Any) -> Any:
+            metadata = dict(getattr(record, 'metadata', None) or {})
+            container = tool_arg_stash.carrier_container(metadata)
+            current_hop = tool_arg_stash.read_hop(metadata)
+            carrier = tool_arg_stash.build_carrier(
+                tool_arg_stash.drop_scope(container, scope_key=scope_key),
+                hop=current_hop,
+            )
+            metadata.pop(tool_arg_stash.STASH_CONTAINER_KEY, None)
+            metadata.pop(tool_arg_stash.STASH_HOP_KEY, None)
+            metadata.update(carrier)
+            record.metadata = metadata
+            outcome['carrier'] = carrier
+            return record
+
+        updated = self.store.update_node(str(node_id or '').strip(), _mutate)
+        if updated is None:
+            return {}
+        return outcome.get('carrier') or {}
+
     def deliver_impulse_contract(
         self,
         *,
@@ -9024,6 +9150,7 @@ class MainRuntimeService:
         batch_position: int = 1,
         batch_total: int = 1,
         runtime_context: dict[str, Any] | None = None,
+        stage_entry: Callable[[dict[str, Any]], tuple[dict[str, Any], int]] | None = None,
     ) -> dict[str, Any]:
         """未水合工具被直接调用时的那一跳：交契约、暂存入参、**不执行**（D3）。
 
@@ -9132,19 +9259,11 @@ class MainRuntimeService:
             }
 
         pending_container = tool_arg_stash.carrier_container(carrier)
-        existing_digests = {
-            str(entry.get(tool_arg_stash.DIGEST_FIELD) or '').strip()
-            for entry in tool_arg_stash.peek_entries(
-                pending_container,
-                scope_key=scope_key,
-                current_hop=hop + 1,
-                fingerprint=fingerprint,
-            )
-        }
-        # 同一跳里签名完全相同的重复调用只入一条（D5）：否则 `reuse_args=true` 会把同一份
-        # 入参执行两遍，而模型看到的两份回执是分开的两条消息，它没有理由知道要合并。
-        if tool_arg_stash.args_digest(arguments) not in existing_digests:
-            pending_container, _entry, _staged_total = tool_arg_stash.stage_args(
+        persisted_carrier: dict[str, Any] | None = None
+        if callable(stage_entry):
+            # 节点道：合并与落盘在存储层一次完成，兄弟调用互相看不见对方快照也不会互删；
+            # 份数必须取落盘后的容器，否则回执报的仍是本调用自己那一份。
+            _plan_container, staged_entry, _staged_total = tool_arg_stash.stage_args(
                 pending_container,
                 scope_key=scope_key,
                 args=arguments,
@@ -9152,16 +9271,42 @@ class MainRuntimeService:
                 staged_at=now_iso(),
                 staged_hop=hop,
             )
-        # 份数只数**下一跳真会被执行**的条目：容器里可能还留着上一跳过期或别的修订的条目，
-        # 按 list 长度报会把永远不会跑的那些算进去（`staged_count` 就是长度，别用它报数）。
-        staged_count = len(
-            tool_arg_stash.peek_entries(
-                pending_container,
-                scope_key=scope_key,
-                current_hop=hop + 1,
-                fingerprint=fingerprint,
+            try:
+                persisted_carrier, staged_count = stage_entry(dict(staged_entry))
+            except Exception:
+                persisted_carrier = None
+        if persisted_carrier is None:
+            existing_digests = {
+                str(entry.get(tool_arg_stash.DIGEST_FIELD) or '').strip()
+                for entry in tool_arg_stash.peek_entries(
+                    pending_container,
+                    scope_key=scope_key,
+                    current_hop=hop + 1,
+                    fingerprint=fingerprint,
+                )
+            }
+            # 同一跳里签名完全相同的重复调用只入一条（D5）：否则 `reuse_args=true` 会把同一份
+            # 入参执行两遍，而模型看到的两份回执是分开的两条消息，它没有理由知道要合并。
+            if tool_arg_stash.args_digest(arguments) not in existing_digests:
+                pending_container, _entry, _staged_total = tool_arg_stash.stage_args(
+                    pending_container,
+                    scope_key=scope_key,
+                    args=arguments,
+                    fingerprint=fingerprint,
+                    staged_at=now_iso(),
+                    staged_hop=hop,
+                )
+            # 份数只数**下一跳真会被执行**的条目：容器里可能还留着上一跳过期或别的修订的条目，
+            # 按 list 长度报会把永远不会跑的那些算进去（`staged_count` 就是长度，别用它报数）。
+            staged_count = len(
+                tool_arg_stash.peek_entries(
+                    pending_container,
+                    scope_key=scope_key,
+                    current_hop=hop + 1,
+                    fingerprint=fingerprint,
+                )
             )
-        )
+            persisted_carrier = tool_arg_stash.build_carrier(pending_container, hop=hop)
         receipt = impulse_receipt(
             tool_name=normalized_tool,
             contract_block=block,
@@ -9173,10 +9318,11 @@ class MainRuntimeService:
         return {
             'outcome': IMPULSE_STAGED,
             'content': receipt['content'],
-            'carrier': tool_arg_stash.build_carrier(pending_container, hop=hop),
+            'carrier': persisted_carrier,
             'staged_count': staged_count,
             'fingerprint': fingerprint,
             'executed': False,
+            **({'stash_persisted': True} if callable(stage_entry) and persisted_carrier is not None else {}),
         }
 
     def list_skill_resources(self) -> list[Any]:

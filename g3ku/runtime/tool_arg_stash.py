@@ -273,6 +273,35 @@ def consume_entries(
     return next_container, usable
 
 
+def remove_digests(
+    container: dict[str, list[dict[str, Any]]],
+    *,
+    scope_key: str,
+    digests: Any,
+) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
+    """按 digest 精确销账：只移除调用方真正执行/作废的那几份。
+
+    与 `consume_entries` 的差别是它不按"当前可消费"重新取全集——复用批执行期间同批
+    另一条调用可能又暂存了新条目，按全集消费会把那些没跑过的入参一并删掉。
+    """
+    wanted = {str(item or "").strip() for item in list(digests or []) if str(item or "").strip()}
+    next_container = {scope: list(entries) for scope, entries in (container or {}).items()}
+    removed: list[dict[str, Any]] = []
+    if not wanted:
+        return next_container, removed
+    kept: list[dict[str, Any]] = []
+    for entry in next_container.get(scope_key, []):
+        if str(entry.get(DIGEST_FIELD) or "").strip() in wanted:
+            removed.append(dict(entry))
+        else:
+            kept.append(entry)
+    if kept:
+        next_container[scope_key] = kept
+    else:
+        next_container.pop(scope_key, None)
+    return next_container, removed
+
+
 def drop_scope(
     container: dict[str, list[dict[str, Any]]],
     *,
@@ -391,6 +420,7 @@ __all__ = [
     "peek_entries",
     "read_container",
     "read_hop",
+    "remove_digests",
     "session_scope_key",
     "scope_key_has_shape",
     "scope_tool_id",
