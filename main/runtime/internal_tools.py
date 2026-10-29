@@ -141,6 +141,10 @@ class EnterWaitTool(Tool):
     否则本回合结束、节点进入 `waiting_explicit`，任意一条后续消息都会唤醒它。
     子节点的 `child_final` 是否攒齐由 `spawn_child_nodes.wait_all_children`
     决定，停靠本身不再选策略。
+
+    `waiting_for` 是给运行时的**活性声明**，不改变唤醒判据（任何消息仍能叫醒）：
+    声明了内部节点，停靠就成了等待图的一条边，两个节点互等会被环检测直接打破；
+    被等的节点终态或判停时，等待方立刻收到一条带原因的通知，而不是等到失速告警。
     """
 
     hide_universal_timeout_parameter = True
@@ -158,12 +162,20 @@ class EnterWaitTool(Tool):
             'Stop this turn and wait until a message wakes you. If qualifying mail is already '
             'waiting, this does not park you — it injects that mail and the turn continues. '
             '`note` is echoed back to you once on wake so you remember what you were waiting for. '
+            '`waiting_for` names who can wake you: a node id or list of ids (parent, execution '
+            'descendants, or siblings), `parent`, or `frontdoor` when you are waiting on a human. '
+            'Declaring it lets the runtime break a mutual wait and lets you hear immediately when '
+            'the node you wait for ends or gets paused instead of waiting for nothing; leaving it '
+            'out keeps the old "any message wakes me" behaviour with no liveness guarantee. '
             'Do not call this while you still have work you can do now.'
         )
 
     @property
     def model_description(self) -> str:
-        return 'Park until a message wakes you. `note` is echoed once on wake.'
+        return (
+            'Park until a message wakes you. `note` is echoed once on wake. `waiting_for` names '
+            'who can wake you (node ids, `parent`, or `frontdoor` for a human).'
+        )
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -174,13 +186,21 @@ class EnterWaitTool(Tool):
                     'type': 'string',
                     'description': 'What you are waiting for. Echoed back once when you wake.',
                 },
+                'waiting_for': {
+                    'type': ['string', 'array'],
+                    'items': {'type': 'string'},
+                    'description': (
+                        'Who can wake you: node ids you may receive from, `parent`, or `frontdoor` '
+                        '(a human). Omit when you genuinely wait for any message.'
+                    ),
+                },
             },
             'required': [],
         }
 
-    async def execute(self, note: str = '', **kwargs: Any) -> str:
+    async def execute(self, note: str = '', waiting_for: Any = None, **kwargs: Any) -> str:
         _ = kwargs
-        result = await self._park(note=str(note or '').strip())
+        result = await self._park(note=str(note or '').strip(), waiting_for=waiting_for)
         return json.dumps(result, ensure_ascii=False, sort_keys=True)
 
 

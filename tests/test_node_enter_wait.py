@@ -43,7 +43,7 @@ class TestTool:
         assert tool.name == ENTER_WAIT_TOOL_NAME
         schema = tool.parameters
         assert schema['required'] == []
-        assert set(schema['properties']) == {'note'}
+        assert set(schema['properties']) == {'note', 'waiting_for'}
 
     def test_timeout_parameter_hidden(self):
         assert _tool(_Capture()).hide_universal_timeout_parameter is True
@@ -52,14 +52,20 @@ class TestTool:
     async def test_defaults_to_empty_note(self):
         record = _Capture()
         raw = await _tool(record).execute()
-        assert record.calls == [{'note': ''}]
+        assert record.calls == [{'note': '', 'waiting_for': None}]
         assert json.loads(raw)['status'] == 'parked'
 
     @pytest.mark.asyncio
     async def test_forwards_note(self):
         record = _Capture()
         await _tool(record).execute(note='等三个子节点')
-        assert record.calls == [{'note': '等三个子节点'}]
+        assert record.calls == [{'note': '等三个子节点', 'waiting_for': None}]
+
+    @pytest.mark.asyncio
+    async def test_forwards_waiting_for(self):
+        record = _Capture()
+        await _tool(record).execute(note='等兄弟', waiting_for='node:2')
+        assert record.calls == [{'note': '等兄弟', 'waiting_for': 'node:2'}]
 
 
 def test_take_wait_note_is_one_shot():

@@ -117,6 +117,67 @@ def messageable_target_ids(
     return ordered[:limit], truncated
 
 
+def resolve_wait_targets(
+    *,
+    waiter: Any,
+    waiting_for: Any,
+    node_map: dict[str, Any],
+) -> tuple[list[str], bool, list[dict[str, str]]]:
+    """Resolve one ``enter_wait.waiting_for`` declaration.
+
+    Returns ``(targets, external, problems)``:
+
+    * ``targets`` — in-task node ids the waiter is waiting for. These are what the
+      wait-for graph turns into edges, so they must be nodes that can actually
+      address the waiter; a target that cannot is a guaranteed dead wait and is
+      reported as a problem instead.
+    * ``external`` — the declaration named ``frontdoor`` (or ``parent`` on a root
+      node). Waiting on a human is a legitimate unbounded wait and never becomes
+      an edge.
+    * ``problems`` — one entry per rejected value. Non-empty means the caller must
+      refuse the park and hand the reasons back to the model.
+
+    Terminal targets are rejected here rather than turned into an instant wake:
+    the answer is ready now, so parking would be a wasted round.
+    """
+    raw_items = waiting_for if isinstance(waiting_for, (list, tuple, set)) else [waiting_for]
+    waiter_parent_id = node_parent_id(waiter)
+    targets: list[str] = []
+    seen: set[str] = set()
+    external = False
+    problems: list[dict[str, str]] = []
+    for raw in raw_items:
+        value = str(raw or '').strip()
+        if not value:
+            continue
+        if value == 'frontdoor':
+            external = True
+            continue
+        if value == 'parent':
+            if waiter_parent_id:
+                value = waiter_parent_id
+            else:
+                # 根节点没有父节点可等，它对上的唯一地址就是前门。
+                external = True
+                continue
+        if value in seen:
+            continue
+        seen.add(value)
+        target = node_map.get(value)
+        if target is None:
+            problems.append({'target': value, 'reason': 'wait_target_not_in_task'})
+            continue
+        if str(getattr(target, 'status', '') or '').strip().lower() in {'success', 'failed'}:
+            problems.append({'target': value, 'reason': 'wait_target_terminal'})
+            continue
+        _, reject_reason = message_relation(sender=target, target=waiter, node_map=node_map)
+        if reject_reason:
+            problems.append({'target': value, 'reason': f'wait_target_not_messageable:{reject_reason}'})
+            continue
+        targets.append(value)
+    return targets, external, problems
+
+
 def execution_has_acceptance(node: Any, node_map: dict[str, Any], *, task_final_node_id: str = '') -> bool:
     """Whether an execution node has a dedicated acceptance node watching it."""
     target_id = node_id(node)
@@ -142,4 +203,5 @@ __all__ = [
     'node_kind',
     'node_metadata',
     'node_parent_id',
+    'resolve_wait_targets',
 ]

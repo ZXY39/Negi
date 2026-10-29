@@ -91,6 +91,7 @@ from main.runtime.node_relationships import (
     accepted_node_id,
     execution_has_acceptance,
     message_relation,
+    resolve_wait_targets,
 )
 from main.runtime.node_relationships import (
     node_kind as relationship_node_kind,
@@ -117,6 +118,7 @@ from main.runtime.tool_names import (
     VIEW_MESSAGE_HISTORY_TOOL_NAME,
     VIEW_NODE_TREE_TOOL_NAME,
 )
+from main.runtime.wait_graph import NODE_WAIT_TARGETS_KEY
 from main.service.create_async_task_contract import normalize_create_async_task_file_targets
 from main.storage.disk_guard import is_disk_full_error
 from main.types import KIND_ACCEPTANCE, KIND_EXECUTION, STATUS_FAILED, STATUS_SUCCESS
@@ -1012,15 +1014,20 @@ class NodeRunner:
         node = self._store.get_node(str(node_id or '').strip())
         metadata = dict(getattr(node, 'metadata', None) or {}) if node is not None else {}
         note = str(metadata.get(self.NODE_WAIT_NOTE_KEY) or '').strip()
-        if not note:
+        has_targets = bool(metadata.get(NODE_WAIT_TARGETS_KEY))
+        if not note and not has_targets:
             return None
 
         def _mutate(current: dict[str, Any]) -> dict[str, Any]:
             next_metadata = dict(current or {})
             next_metadata.pop(self.NODE_WAIT_NOTE_KEY, None)
+            # 这一回合已经不在等任何人：留着声明只会让后续的定向唤醒继续找它。
+            next_metadata.pop(NODE_WAIT_TARGETS_KEY, None)
             return next_metadata
 
         self._log_service.update_node_metadata(node_id, _mutate)
+        if not note:
+            return None
         return {
             'role': 'user',
             'content': f'[WAIT_NOTE] 你上次停靠时在等：{note[:500]}',
@@ -2936,13 +2943,42 @@ class NodeRunner:
         task_id: str,
         node: NodeRecord,
         note: str = '',
+        waiting_for: Any = None,
     ) -> dict[str, Any]:
         """记下停靠意图；真正的停靠由回合结束表达（见 react_loop 的 _park_requested）。
 
         防丢唤醒（R3）：入睡前先看有没有待注入的未读。有就**不睡**——未读立即
         进入上下文、回合继续，因此不存在"最后一条消息在入睡前到达"的竞态。
         批次等待由 spawn 的 `wait_all_children` 控制，停靠本身不再选策略。
+
+        `waiting_for` 是活性声明，不进唤醒判据（任何消息仍能叫醒）：声明了内部
+        节点，停靠就成等待图上的一条边；被等节点终态或判停时，等待方由定向唤醒
+        立刻收到原因。声明里的目标此刻已终态、不在本任务或根本发不了消息给本节点
+        时拒绝停靠——那种等待永远不会被满足，早一轮说清比挂到失速告警便宜。
         """
+        targets: list[str] = []
+        external = False
+        if waiting_for:
+            node_map = {
+                str(item.node_id or '').strip(): item
+                for item in list(self._store.list_nodes(task_id) or [])
+            }
+            targets, external, problems = resolve_wait_targets(
+                waiter=node,
+                waiting_for=waiting_for,
+                node_map=node_map,
+            )
+            if problems:
+                return {
+                    'status': 'not_parked_invalid_targets',
+                    'problems': problems,
+                    'hint': (
+                        'These targets can never wake you: one is missing from this task, already '
+                        'terminal, or is not allowed to message this node. Do the work now, fix the '
+                        'addresses, or omit `waiting_for` if any message should wake you.'
+                    ),
+                }
+
         unread = self._pending_node_notifications(task_id=task_id, node_id=node.node_id)
         may_park, refusal = enter_wait_verdict(unread_count=len(unread))
         if not may_park:
@@ -2959,6 +2995,7 @@ class NodeRunner:
                     'metadata': {
                         **dict(record.metadata or {}),
                         self.NODE_WAIT_NOTE_KEY: str(note or '').strip(),
+                        NODE_WAIT_TARGETS_KEY: list(targets),
                     }
                 }
             ),
@@ -2971,6 +3008,7 @@ class NodeRunner:
         return {
             'status': 'parked',
             'note': str(note or '').strip(),
+            'waiting_for': {'targets': list(targets), 'external': external},
             'unread_injected': 0,
         }
 
@@ -3155,10 +3193,11 @@ class NodeRunner:
                 )
             )
             tools[ENTER_WAIT_TOOL_NAME] = EnterWaitTool(
-                lambda note='': self._enter_wait(
+                lambda note='', waiting_for=None: self._enter_wait(
                     task_id=task.task_id,
                     node=node,
                     note=note,
+                    waiting_for=waiting_for,
                 )
             )
             tools[SEND_MESSAGE_TOOL_NAME] = SendMessageTool(

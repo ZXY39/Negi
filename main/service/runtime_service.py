@@ -181,6 +181,7 @@ from main.runtime.node_watchdog import NodeWatchdog
 from main.runtime.react_loop import ReActToolLoop
 from main.runtime.task_actor_service import TaskActorService
 from main.runtime.tool_pressure_monitor import WorkerPressureMonitor
+from main.runtime.wait_graph import NODE_WAIT_TARGETS_KEY
 from main.service.event_registry import TaskEventRegistry
 from main.service.task_distribution_error_callback import (
     TASK_DISTRIBUTION_ERROR_CALLBACK_PATH,
@@ -5231,9 +5232,6 @@ class MainRuntimeService:
         node = self.store.get_node(str(node_id or '').strip())
         if node is None:
             return {'status': 'rejected', 'reason': 'source_missing'}
-        parent_node_id = str(getattr(node, 'parent_node_id', '') or '').strip()
-        if not parent_node_id:
-            return {'status': 'skipped', 'reason': 'no_parent'}
         status = str(getattr(node, 'status', '') or '').strip().lower()
         if status not in {'success', 'failed'}:
             return {'status': 'skipped', 'reason': 'source_not_terminal'}
@@ -5244,13 +5242,27 @@ class MainRuntimeService:
         summary = summary or str(getattr(node, 'final_output', '') or '').strip()
         summary = summary or str(getattr(node, 'failure_reason', '') or '').strip()
         summary = summary or ('执行完成' if status == 'success' else '执行失败')
+        goal = str(getattr(node, 'goal', '') or '').strip()
+        parent_node_id = str(getattr(node, 'parent_node_id', '') or '').strip()
+        wait_all, batch_id = self._spawn_batch_wait_policy(node=node)
+        # 先叫醒在等它的节点，再走父节点那条道：父节点可能根本不存在（根节点），
+        # 而兄弟之间的等待与父子关系无关。批次持有期间跳过父节点——它的
+        # `child_final` 正被 held，提前唤醒会绕过 wait_all_children 的语义。
+        await self._notify_node_waiters(
+            task_id=normalized_task_id,
+            gone_node_id=str(node.node_id or '').strip(),
+            event='terminal',
+            detail=summary,
+            goal=goal,
+            skip_node_ids={parent_node_id} if wait_all and parent_node_id else None,
+        )
+        if not parent_node_id:
+            return {'status': 'skipped', 'reason': 'no_parent'}
         ref = str(getattr(node, 'final_output_ref', '') or '').strip()
         if not ref and isinstance(getattr(node, 'metadata', None), dict):
             ref = str((node.metadata or {}).get('result_payload_ref') or '').strip()
-        goal = str(getattr(node, 'goal', '') or '').strip()
         verdict_word = '完成' if status == 'success' else '失败'
         body = f'子节点「{goal or node.node_id}」已{verdict_word}：{summary[:1200]}'
-        wait_all, batch_id = self._spawn_batch_wait_policy(node=node)
         delivered = await self.deliver_node_message(
             task_id=normalized_task_id,
             target_node_id=parent_node_id,
@@ -5322,6 +5334,95 @@ class MainRuntimeService:
                 )
         return released
 
+
+    async def _notify_node_waiters(
+        self,
+        *,
+        task_id: str,
+        gone_node_id: str,
+        event: str,
+        detail: str = '',
+        goal: str = '',
+        skip_node_ids: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """被等节点消失（终态 / 判停）→ 定向唤醒声明在等它的节点。
+
+        `waiting_for` 是模型给出的活性声明，所以这里只找"点名等这个节点"的人：
+        等操作员的停靠不声明内部 id，扫描命中不了它，不存在广播式唤醒风暴。
+        投递走 `origin='frontdoor'`，即 `frontdoor_notice` + high 优先级，必唤醒；
+        正文把停靠时的 note 回显与消失原因绑在一起，模型不必自己拼因果。
+        """
+        normalized_task_id = self.normalize_task_id(task_id)
+        gone_id = str(gone_node_id or '').strip()
+        if not gone_id:
+            return []
+        wait_note_key = str(getattr(self.node_runner, 'NODE_WAIT_NOTE_KEY', 'node_wait_note'))
+        try:
+            records = list(self.store.list_nodes(normalized_task_id) or [])
+        except Exception as exc:  # noqa: BLE001 - 反查失败不得打断终态/暂停写入道
+            logger.warning('waiter lookup failed: task={} error={!r}', normalized_task_id, exc)
+            return []
+        results: list[dict[str, Any]] = []
+        skip = {str(item or '').strip() for item in set(skip_node_ids or set())}
+        for record in records:
+            waiter_id = str(getattr(record, 'node_id', '') or '').strip()
+            if not waiter_id or waiter_id == gone_id or waiter_id in skip:
+                continue
+            if str(getattr(record, 'status', '') or '').strip().lower() in {'success', 'failed'}:
+                continue
+            metadata = record.metadata if isinstance(getattr(record, 'metadata', None), dict) else {}
+            targets = [
+                str(item or '').strip()
+                for item in list((metadata or {}).get(NODE_WAIT_TARGETS_KEY) or [])
+            ]
+            if gone_id not in targets:
+                continue
+            note = str((metadata or {}).get(wait_note_key) or '').strip()
+            body = self._waiter_gone_message(
+                note=note,
+                goal=goal or gone_id,
+                gone_node_id=gone_id,
+                event=event,
+                detail=detail,
+            )
+            try:
+                results.append(
+                    await self.deliver_node_message(
+                        task_id=normalized_task_id,
+                        target_node_id=waiter_id,
+                        message=body,
+                        origin=ORIGIN_FRONTDOOR,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 - 唤醒失败不得打断终态/暂停写入道
+                logger.warning(
+                    'waiter notification failed: task={} waiter={} gone={} error={!r}',
+                    normalized_task_id,
+                    waiter_id,
+                    gone_id,
+                    exc,
+                )
+        return results
+
+    @staticmethod
+    def _waiter_gone_message(
+        *,
+        note: str,
+        goal: str,
+        gone_node_id: str,
+        event: str,
+        detail: str,
+    ) -> str:
+        verb = '已暂停' if str(event or '').strip() == 'paused' else '已结束'
+        head = f'你上次停靠时在等：{note}\n' if note else ''
+        reason = str(detail or '').strip()
+        reason_line = f'{verb}原因：{reason[:1200]}\n' if reason else ''
+        return (
+            f'{head}'
+            f'节点「{goal}」（{gone_node_id}）{verb}。\n'
+            f'{reason_line}'
+            '你要等的东西不会再来了。请根据当前事实决定继续推进、换个方式推进还是结束这条分支。'
+        )
 
     async def _notify_wait_cycle(self, *, task_id: str, node_id: str, reason: str) -> dict[str, Any]:
         """等待图环检测的系统通知：以 frontdoor 身份投递（必唤醒，可外部破环）。"""
@@ -5445,10 +5546,20 @@ class MainRuntimeService:
         if node is None:
             return {'status': 'rejected', 'reason': 'source_missing'}
         parent_node_id = str(getattr(node, 'parent_node_id', '') or '').strip()
-        if not parent_node_id:
-            return {'status': 'skipped', 'reason': 'no_parent'}
         goal = str(getattr(node, 'goal', '') or '').strip() or str(node.node_id or '')
         reason_text = str(reason or '').strip() or '节点被判定为无进展并暂停'
+        # 被等节点的判停同样要叫醒等待方：父节点那条道只覆盖「谁管我」，
+        # 而「谁在等我」与父子关系无关。
+        await self._notify_node_waiters(
+            task_id=normalized_task_id,
+            gone_node_id=str(node.node_id or '').strip(),
+            event='paused',
+            detail=reason_text,
+            goal=goal,
+        )
+        parent_node_id = str(getattr(node, 'parent_node_id', '') or '').strip()
+        if not parent_node_id:
+            return {'status': 'skipped', 'reason': 'no_parent'}
         parent = self.store.get_node(parent_node_id)
         receiver_is_root = bool(parent is not None) and not str(
             getattr(parent, 'parent_node_id', '') or ''

@@ -1,23 +1,33 @@
 """Wait-for graph: structural cycle detection for parked nodes (P6 fallback).
 
-A parked node can normally be woken by a mailbox message. The only structural
-deadlock the runtime can prove without guessing about future user input is a
-closed waiting cycle:
+A parked node can normally be woken by a mailbox message. The runtime can prove
+two kinds of structural deadlock without guessing about future user input:
 
 * an execution node waiting for an acceptance verdict while the acceptance node
   is itself parked waiting for the next submission (a verdict nobody will
-  produce).
+  produce);
+* a closed cycle of ``enter_wait`` declarations — ``waiting_for`` names who may
+  wake the node, so A waiting for B while B waits for A is a real cycle rather
+  than a guess.
 
 Every parked node is externally wakeable by any mailbox message, so spawn-batch
-waits are a tree-shaped chain rather than a cycle. Terminal nodes settle and
-therefore also break the chain. The detector is deliberately conservative: a
-false positive would wake a legitimately parked node.
+waits are a tree-shaped chain rather than a cycle. Declarations that name
+``frontdoor`` produce no edge at all: waiting on a human is a legitimate
+unbounded wait. Terminal nodes settle and therefore also break the chain. The
+detector is deliberately conservative: a false positive would wake a
+legitimately parked node.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
+
+# Node metadata key carrying the resolved `enter_wait.waiting_for` ids. It lives on
+# the node row (not the frame) so the reverse lookup — "who declared they wait for
+# this node" — is one `list_nodes` pass with no per-node frame reads. Edges are only
+# built for parked nodes, so a stale value on a node that already woke is inert.
+NODE_WAIT_TARGETS_KEY = 'node_wait_targets'
 
 PARKED_PHASES = frozenset({'waiting_explicit', 'waiting_acceptance'})
 TERMINAL_STATUSES = frozenset({'success', 'failed'})
@@ -34,6 +44,7 @@ class WaitNode:
     acceptance_node_id: str = ''
     subject_node_id: str = ''
     handshake_state: str = ''
+    wait_targets: tuple[str, ...] = ()
 
 
 def build_wait_nodes(
@@ -54,6 +65,10 @@ def build_wait_nodes(
         handshake = {}
         if node_kind == 'execution' and callable(handshake_lookup):
             handshake = dict(handshake_lookup(record) or {})
+        raw_targets = metadata.get(NODE_WAIT_TARGETS_KEY)
+        wait_targets = tuple(
+            str(item or '').strip() for item in list(raw_targets or []) if str(item or '').strip()
+        )
         nodes.append(
             WaitNode(
                 node_id=node_id,
@@ -65,6 +80,7 @@ def build_wait_nodes(
                 acceptance_node_id=str(handshake.get('acceptance_node_id') or '').strip(),
                 subject_node_id=str(metadata.get('accepted_node_id') or getattr(record, 'parent_node_id', '') or '').strip(),
                 handshake_state=str(handshake.get('state') or '').strip(),
+                wait_targets=wait_targets,
             )
         )
     return nodes
@@ -101,6 +117,14 @@ def _wait_edges(nodes_by_id: dict[str, WaitNode]) -> dict[str, list[str]]:
                 and _is_parked(subject)
             ):
                 out.append(subject.node_id)
+        if node.phase == 'waiting_explicit' and node.wait_targets:
+            # 声明式等待：只连"还停靠着"的目标。运行中的目标在推进，成不了环；
+            # 终态的目标由定向唤醒负责，不在这里补一条假边。
+            for target_id in node.wait_targets:
+                target = nodes_by_id.get(target_id)
+                if target is None or _is_terminal(target) or not _is_parked(target):
+                    continue
+                out.append(target_id)
         if out:
             edges[node.node_id] = list(dict.fromkeys(out))
     return edges
