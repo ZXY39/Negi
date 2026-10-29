@@ -1369,6 +1369,12 @@ class WebSessionHeartbeatService:
     ) -> bool:
         if not self._session_exists(session_id):
             return False
+        # 心跳回复是模型原文：标记在转录、历史回放与刷新后的 web 渲染里都是不可读
+        # 语法。与普通回合（`_persist_turn_transcript`）同一次确定性选图换成图片
+        # markdown；没有标记时这一步什么都不做。
+        from g3ku.stickers import render_marker_images
+
+        text = render_marker_images(str(text or ""))
         session = self._session_manager.get_or_create(session_id)
         normalized_task_ids: list[str] = []
         for task_id in list(task_ids or []) + _extract_task_ids_from_text(text):
@@ -1792,8 +1798,32 @@ class WebSessionHeartbeatService:
         turn_id: str,
     ) -> dict[str, Any]:
         final_payload: dict[str, Any] = {
-            "text": str(text or "").strip(),
+            "text": self._render_reply_for_web(key, text),
             "source": "heartbeat",
             "turn_id": str(turn_id or "").strip(),
         }
         return final_payload
+
+    @staticmethod
+    def _render_reply_for_web(session_id: str, text: str) -> str:
+        """心跳帧正文的贴纸解析：这条帧不走 socket 的 `message_end` 渲染路。
+
+        渲染失败不能吃掉这一帧（后面还有渠道投递），退化成只剥标记——原始语法
+        出现在用户可见帧里比少一张图更糟。
+        """
+        raw = str(text or "").strip()
+        if "[[sticker:" not in raw:
+            return raw
+        try:
+            from g3ku.runtime.api.ceo_media import render_assistant_reply_media
+
+            return str(render_assistant_reply_media(session_id, raw) or "").strip()
+        except Exception as exc:  # noqa: BLE001 - the frame must still go out
+            logger.warning(
+                "heartbeat reply sticker render failed for {} ({}); markers stripped only",
+                session_id,
+                exc,
+            )
+            from g3ku.stickers import strip_markers_for_stream
+
+            return str(strip_markers_for_stream(raw) or "").strip()

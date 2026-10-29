@@ -447,7 +447,8 @@ async def test_relay_message_end_resolves_sticker_marker_into_trailing_attachmen
     assert final["text"] == "好耶"
     assert "sticker" not in final["text"]
     attachment = final["attachments"][0]
-    assert attachment["name"] == "happy_01.gif"
+    # 注册表引导会把未编号的文件改名成 001.gif（编号是可见性真相）。
+    assert attachment["name"] == "001.gif"
     assert attachment["kind"] == "image"
     assert attachment["after_text"] is True
 

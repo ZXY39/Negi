@@ -20,7 +20,10 @@ from g3ku.runtime import SessionRuntimeBridge, SessionRuntimeManager
 from g3ku.runtime.bootstrap_factory import make_agent_loop as _make_agent_loop
 from g3ku.runtime.bootstrap_factory import make_provider as _make_provider
 from g3ku.runtime.config_refresh import refresh_loop_runtime_config
-from g3ku.runtime.external_events import get_session_event_hub
+from g3ku.runtime.external_events import (
+    get_session_event_hub,
+    resolve_sticker_attachments,
+)
 from g3ku.runtime.external_outbox import (
     ack_outbound_message,
     compact_outbox,
@@ -429,6 +432,10 @@ def _start_outbound_drain(bus: MessageBus) -> asyncio.Task:
             attachments = [item for item in carried if isinstance(item, dict)]
         else:
             sanitized, attachments = _extract_outbound_media_attachments(sanitized)
+        # 贴纸标记：心跳/cron/任务终态/回合失败通知都不经过回合 relay，这里是它们
+        # 唯一能把标记换成图片的出口。正文已剥过的重放消息不做任何事；旧账本里
+        # 带标记的滞留记录也会在这里被修掉。
+        sanitized, attachments = resolve_sticker_attachments(sanitized, attachments)
         # 持久 outbox 登记（先于 hub 发布）：桥 pump 断连或进程重启窗口里滞留的
         # 主动推送靠它在启动重放时找回。重放消息自带 outbox_id，直接复用不重复
         # 登记；登记失败（磁盘满）降级为仅内存投递，不阻断发布。

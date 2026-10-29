@@ -319,6 +319,27 @@ def rewrite_assistant_media_content(session_id: str, content: Any) -> Any:
     return _PLACEHOLDER_RE.sub(lambda m: placeholders[int(m.group(1))], text)
 
 
+def render_assistant_reply_media(session_id: str, content: Any) -> Any:
+    """Resolve sticker markers and stage local media for one user-visible reply.
+
+    Both web render points use this: the socket lane applies it to
+    ``message_end`` text and to replayed transcript rows, and the heartbeat
+    service applies it before publishing ``ceo.reply.final`` (that frame never
+    reaches the socket's ``message_end`` branch). Selection is deterministic in
+    the reply text, so the image staged here is the same one the channel lane
+    sends.
+    """
+    if not isinstance(content, str) or not content.strip():
+        return content
+    from g3ku.stickers import resolve_markers
+
+    cleaned, paths = resolve_markers(content)
+    text = cleaned if isinstance(cleaned, str) else content
+    if paths:
+        text = text + "".join(f"\n\n![]({path})" for path in paths)
+    return rewrite_assistant_media_content(session_id, text)
+
+
 def rewrite_media_links_signed(
     content: Any, *, allowed_roots: tuple[Path, ...] | None
 ) -> Any:

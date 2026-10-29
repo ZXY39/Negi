@@ -427,3 +427,74 @@ async def test_ensure_outbox_reconcile_running_is_idempotent(monkeypatch) -> Non
     web_shell._ensure_outbox_reconcile_running()
     assert web_shell._global_outbox_reconcile_task is first
     await _stop(first)
+
+
+@pytest.mark.asyncio
+async def test_drain_resolves_sticker_marker_into_trailing_attachment(
+    ext_registry, tmp_path, monkeypatch
+) -> None:
+    """心跳/cron/任务终态推送不经过回合 relay：drain 是它们唯一能把标记换成
+    图片的出口。
+
+    实盘（2026-10-29 03:24）：心跳回复尾行的 `[[sticker:...]]` 原样送到了 QQ，
+    因为 drain 只做 markdown 附件提取，从不解析贴纸标记。
+    """
+    # 已编号的文件在 registry 引导时保留编号；未编号的会被改名成下一个空位。
+    category = tmp_path / "stickers" / "atri" / "happy"
+    category.mkdir(parents=True)
+    (category / "001.png").write_bytes(b"\x89PNG-fake")
+    monkeypatch.setattr("g3ku.stickers.catalog.stickers_root", lambda: tmp_path / "stickers")
+
+    entry, _ = ext_registry.resolve_or_create(bridge_id="qq", external_key="qq:dm:1")
+    bus = MessageBus()
+    task = _start_outbound_drain(bus)
+    try:
+        await bus.publish_outbound(
+            OutboundMessage(
+                channel="ext",
+                chat_id=entry.session_key,
+                content="好耶\n[[sticker:atri/happy]]",
+            )
+        )
+        hub = get_session_event_hub(entry.session_key)
+        await _wait_until(lambda: hub.last_seq >= 1)
+        event = hub.replay(0)[0]
+        assert event["type"] == "outbound.created"
+        assert event["text"] == "好耶"
+        attachment = event["attachments"][0]
+        assert attachment["name"] == "001.png"
+        assert attachment["kind"] == "image"
+        assert attachment["after_text"] is True
+        # 账本里存的也得是剥过的正文：重放/对账按它再发一次。
+        pending = external_outbox.load_pending_outbound()
+        assert pending[0]["text"] == "好耶"
+        assert pending[0]["attachments"][0]["name"] == "001.png"
+    finally:
+        await _stop(task)
+
+
+@pytest.mark.asyncio
+async def test_drain_strips_unresolvable_sticker_marker_without_image(
+    ext_registry, tmp_path, monkeypatch
+) -> None:
+    """解析不出来的标记也整行剥掉：把原始语法漏给用户比不发这张图更糟。"""
+    monkeypatch.setattr("g3ku.stickers.catalog.stickers_root", lambda: tmp_path / "no-stickers")
+
+    entry, _ = ext_registry.resolve_or_create(bridge_id="qq", external_key="qq:dm:3")
+    bus = MessageBus()
+    task = _start_outbound_drain(bus)
+    try:
+        await bus.publish_outbound(
+            OutboundMessage(
+                channel="ext",
+                chat_id=entry.session_key,
+                content="好耶\n[[sticker:ghost/happy]]",
+            )
+        )
+        hub = get_session_event_hub(entry.session_key)
+        await _wait_until(lambda: hub.last_seq >= 1)
+        event = hub.replay(0)[0]
+        assert event["text"] == "好耶"
+        assert "attachments" not in event
+    finally:
+        await _stop(task)

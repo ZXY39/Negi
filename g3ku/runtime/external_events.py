@@ -236,6 +236,21 @@ def _with_sticker_attachments(
     return attachments
 
 
+def resolve_sticker_attachments(
+    text: str, attachments: list[dict[str, Any]]
+) -> tuple[str, list[dict[str, Any]]]:
+    """Strip sticker marker lines and append the chosen images as trailing attachments.
+
+    Both channel egress lanes run this: the turn relay resolves markers itself
+    (it needs the tokens before media extraction), and the proactive-push drain
+    calls this directly. Without it on the drain, a heartbeat / cron / task
+    terminal reply that ends in a marker is delivered verbatim and no image is
+    sent.
+    """
+    cleaned, paths = _resolve_sticker_markers(text)
+    return cleaned, _with_sticker_attachments(attachments, paths)
+
+
 def make_session_event_relay(
     session_key: str,
     *,
