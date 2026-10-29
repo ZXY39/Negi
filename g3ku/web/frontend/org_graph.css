@@ -10526,27 +10526,25 @@ textarea {
     align-items: center;
     justify-content: flex-end;
     flex-wrap: wrap;
-    gap: 8px;
+    gap: 18px;
     flex: 1 1 620px;
     min-width: min(100%, 520px);
 }
 
+/* 读数只以文字呈现：不吃胶囊边框/底色/内边距，五项像一行读数往右收拢。 */
 .task-performance-item {
     display: flex;
     align-items: center;
     gap: 8px;
-    min-height: 38px;
-    padding: 0 12px;
-    border-radius: 999px;
-    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
-    background: color-mix(in srgb, var(--bg-panel) 92%, var(--bg-app) 8%);
-    box-shadow: var(--shadow-sm);
     white-space: nowrap;
 }
 
+/* 标签与读数各自的字号不同，行高必须同取 1em：盒子按内容居中后，基线落在
+   各自字号同一比例的位置上，读数才不会比标签低约 1px。 */
 .task-performance-label {
     font-size: 0.73rem;
     font-weight: 700;
+    line-height: 1;
     color: var(--text-muted);
     letter-spacing: 0.02em;
 }
@@ -10559,7 +10557,7 @@ textarea {
 }
 
 /* 监控新鲜度是一根每 1s 走一步的整数秒表：数字与单位之间留一点呼吸，并用等宽
-   数字 + 两位预留（渲染侧 pad 到两位）保证 9→10→99 秒这些跳变不改变胶囊宽度，
+   数字 + 两位预留（渲染侧 pad 到两位）保证 9→10→99 秒这些跳变不改变这一项的宽度，
    否则整条性能条会跟着抖。*/
 .task-performance-age-value {
     font-variant-numeric: tabular-nums;
@@ -10567,10 +10565,6 @@ textarea {
     padding-inline: 0.12em;
     /* 个位数前面是留空而不是零，默认的规则会把前导空格吃掉，宽度预留就白做了。 */
     white-space: pre;
-}
-
-.task-performance-item--freshness {
-    padding: 0 16px;
 }
 
 .task-performance-queue-value {
@@ -10589,34 +10583,6 @@ textarea {
 
 .task-performance-count--waiting {
     color: #d97706;
-}
-
-.task-performance-item--state[data-state="normal"] {
-    border-color: color-mix(in srgb, var(--status-success-text) 24%, var(--border-color));
-    background: color-mix(in srgb, var(--status-success-bg) 18%, var(--bg-panel));
-}
-
-.task-performance-item--state[data-state="easing"] {
-    border-color: color-mix(in srgb, var(--brand-primary) 28%, var(--border-color));
-    background: color-mix(in srgb, var(--brand-primary) 12%, var(--bg-panel));
-}
-
-.task-performance-item--state[data-state="throttled"] {
-    border-color: color-mix(in srgb, #f59e0b 30%, var(--border-color));
-    background: color-mix(in srgb, #f59e0b 12%, var(--bg-panel));
-}
-
-.task-performance-item--state[data-state="critical"] {
-    border-color: color-mix(in srgb, var(--status-failed-text) 24%, var(--border-color));
-    background: color-mix(in srgb, var(--status-failed-bg) 18%, var(--bg-panel));
-}
-
-.task-performance-item--state[data-state="unfresh"],
-.task-performance-item--state[data-state="stale"],
-.task-performance-item--state[data-state="starting"],
-.task-performance-item--state[data-state="offline"] {
-    border-color: color-mix(in srgb, var(--status-failed-text) 18%, var(--border-color));
-    background: color-mix(in srgb, var(--status-failed-bg) 14%, var(--bg-panel));
 }
 
 @media (max-width: 1320px) {
@@ -16217,28 +16183,7 @@ textarea {
     }
 }
 
-/* 状态栏：压力状态与资源读数共用一颗胶囊，压力档位由数值颜色表达。 */
-.task-performance-bar > .task-performance-item:nth-child(1),
-.task-performance-bar > .task-performance-item:nth-child(2) {
-    background: var(--ui-bg-surface);
-    box-shadow: none;
-}
-
-@media (min-width: 768px) {
-    .task-performance-bar > .task-performance-item:nth-child(1) {
-        margin-right: calc(var(--ui-space-2) * -1);
-        border-top-right-radius: 0;
-        border-bottom-right-radius: 0;
-        border-right-color: transparent;
-    }
-
-    .task-performance-bar > .task-performance-item:nth-child(2) {
-        border-top-left-radius: 0;
-        border-bottom-left-radius: 0;
-        border-left-color: transparent;
-    }
-}
-
+/* 状态栏只以文字呈现，压力档位由读数颜色表达。 */
 .task-performance-item--state[data-state="normal"] .task-performance-value {
     color: var(--ui-success);
 }
