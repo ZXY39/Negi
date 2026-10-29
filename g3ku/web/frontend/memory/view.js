@@ -1466,8 +1466,10 @@ function renderMemoryBrowserList() {
             const checked = !!S.memoryBrowser.selected[selectableId];
             const actionBusy = String(S.memoryBrowser.actionBusy || "").trim();
             const rowBusy = !!actionBusy;
+            // input 被藏成 1px 且 pointer-events:none，可点的盒子是兄弟 span；
+            // 没有 label 承接点击时这一行只能靠全选，单条永远点不中。
             const selectCell = editMode
-                ? `<td class="memory-browser-cell-select"><input type="checkbox" class="ui-checkbox-input" data-memory-row-select="${esc(selectableId)}"${checked ? " checked" : ""}${rowBusy ? " disabled" : ""} aria-label="选择记忆 ${esc(memoryId)}" /><span class="ui-checkbox-box" aria-hidden="true"></span></td>`
+                ? `<td class="memory-browser-cell-select"><label class="memory-browser-row-select"><input type="checkbox" class="ui-checkbox-input" data-memory-row-select="${esc(selectableId)}"${checked ? " checked" : ""}${rowBusy ? " disabled" : ""} aria-label="选择记忆 ${esc(memoryId)}" /><span class="ui-checkbox-box" aria-hidden="true"></span></label></td>`
                 : "";
             const actionsCell = editMode
                 ? `

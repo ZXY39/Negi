@@ -11743,6 +11743,16 @@ textarea {
     cursor: pointer;
 }
 
+/* 可见盒子是 input 的兄弟 span，input 本身 1px 且 pointer-events:none；
+   点击必须落在 label 上才会转发给 input，所以命中区按 label 撑满单元格正文区。 */
+.memory-browser-row-select {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 22px;
+    cursor: pointer;
+}
+
 .memory-browser-cell-actions {
     white-space: nowrap;
 }

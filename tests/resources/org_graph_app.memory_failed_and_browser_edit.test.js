@@ -369,6 +369,10 @@ test("browser list adds select and action columns in edit mode", () => {
     const html = api.U.memoryBrowserTbody.innerHTML;
     assert.match(html, /data-memory-row-select="Ab12Z9"[^>]*checked/);
     assert.match(html, /data-memory-row-select="Cd34W8"/);
+    // 行勾选框必须包在 label 里：input 是 1px + pointer-events:none，可见盒子是兄弟
+    // span，没有 label 承接点击时单条勾选只能靠全选。
+    assert.match(html, /<label class="memory-browser-row-select"><input type="checkbox" class="ui-checkbox-input" data-memory-row-select="Ab12Z9"/);
+    assert.equal((html.match(/<label class="memory-browser-row-select">/g) || []).length, 2);
     assert.match(html, /data-memory-row-edit="Ab12Z9"/);
     assert.match(html, /data-memory-row-delete="Cd34W8"/);
     assert.match(html, /memory-browser-row-selected/);
