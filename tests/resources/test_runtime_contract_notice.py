@@ -333,3 +333,77 @@ def test_frontdoor_sticker_pack_change_is_one_notice_and_head_stays_frozen(monke
         changed, session_key=SESSION_KEY, state=_frontdoor_state()
     )
     assert len(_notice_texts(third)) == len(_notice_texts(changed))
+
+
+def test_frontdoor_sticker_pack_disabled_after_notice_announcement_reports_none(monkeypatch) -> None:
+    """头部钉住之后才启用的包只存在于台账；再停用必须补一条 `none`。
+
+    这正是“通知里说有的包，头部里从来没有”的那条路：只按 covered ∪ current 做
+    diff 时，停用包既不在头部也不在当前目录，撤销通知永远发不出去。
+    """
+    from pathlib import Path
+
+    from g3ku.stickers import Pack, StickerCategory
+
+    _reset_stores()
+    holder = {"policy": dict(GOVERNED)}
+    runner = _frontdoor_runner(holder)
+
+    atri = Pack(
+        key="atri",
+        theme="动漫少女",
+        categories=(StickerCategory(key="happy", description="开心大笑", count=1),),
+        path=Path("C:/ws/stickers/atri"),
+    )
+    live = {"packs": ()}
+    monkeypatch.setattr(
+        "g3ku.runtime.frontdoor._ceo_runtime_ops.safe_scan_packs", lambda: live["packs"]
+    )
+    head = _pin_frontdoor_head(holder["policy"])
+    base = [{"role": "system", "content": head}, {"role": "user", "content": "hi"}]
+
+    first = runner._apply_frontdoor_skill_roster_notice(
+        base, session_key=SESSION_KEY, state=_frontdoor_state()
+    )
+    assert "sticker_pack:atri" not in "\n".join(_notice_texts(first))
+
+    live["packs"] = (atri,)
+    announced = runner._apply_frontdoor_skill_roster_notice(
+        first, session_key=SESSION_KEY, state=_frontdoor_state()
+    )
+    assert "sticker_pack:atri: 动漫少女 | happy(开心大笑)" in "\n".join(
+        _notice_texts(announced)
+    )
+
+    live["packs"] = ()
+    revoked = runner._apply_frontdoor_skill_roster_notice(
+        announced, session_key=SESSION_KEY, state=_frontdoor_state()
+    )
+    assert "- sticker_pack:atri: none" in "\n".join(_notice_texts(revoked))
+
+    again = runner._apply_frontdoor_skill_roster_notice(
+        revoked, session_key=SESSION_KEY, state=_frontdoor_state()
+    )
+    assert len(_notice_texts(again)) == len(_notice_texts(revoked))
+
+
+def test_contract_section_removed_when_only_the_ledger_knew_it() -> None:
+    _reset_stores()
+    context: dict = {}
+    context, changed = notice.record_contract_sections(
+        context, {"sticker_pack:atri": "动漫少女 | happy(开心)"}, now="2026-10-29T00:00:00Z"
+    )
+    assert changed == [("sticker_pack:atri", "动漫少女 | happy(开心)")]
+
+    context, changed = notice.record_contract_sections(
+        context, {}, now="2026-10-29T00:00:01Z"
+    )
+    assert changed == [("sticker_pack:atri", "")]
+    assert "- sticker_pack:atri: none" in "\n".join(
+        notice.render_contract_update_lines(changed)
+    )
+
+    context, changed = notice.record_contract_sections(
+        context, {}, now="2026-10-29T00:00:02Z"
+    )
+    assert changed == []

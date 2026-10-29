@@ -444,7 +444,10 @@ def record_contract_sections(
         if str(key or '').strip()
     }
     changed: list[tuple[str, str]] = []
-    for key in _ordered_contract_keys({*covered.keys(), *normalized_current.keys()}):
+    # 台账里独有的键也要遍历：只在通知里宣布过、从未进过头部快照的节（典型是
+    # 头部钉住之后才启用的表情包）退场时，covered 与 current 都没有它；漏掉这一组
+    # 就永远发不出 `none`，模型会一直以为它可用。
+    for key in _ordered_contract_keys({*covered.keys(), *normalized_current.keys(), *table.keys()}):
         current_text = normalized_current.get(key, '')
         entry = table.get(key)
         if entry is None:
