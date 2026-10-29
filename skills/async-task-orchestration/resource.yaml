@@ -1,0 +1,40 @@
+schema_version: 1
+kind: skill
+name: async-task-orchestration
+description: 任务要拆成多个子节点、且子节点之间需要交换消息时使用。给出并行汇总、多轮互评辩论、分票统计、人工确认、分批流水五种结构的选型、停靠声明规则、反模式与子节点提示词模板。单节点任务与单轮并行取证不要用。
+trigger:
+  keywords:
+    - 异步任务编排
+    - 任务编排
+    - 多节点
+    - 多节点讨论
+    - 节点讨论
+    - 相互讨论
+    - 互相讨论
+    - 辩论
+    - 讨论会
+    - 互相质询
+    - 交叉质询
+    - 常驻讨论者
+    - 评审团
+    - 分票
+    - 投票统计
+    - 流水线
+    - 扇出
+    - 多agent
+    - 多智能体
+    - peer discussion
+    - multi-node discussion
+    - multi-agent
+    - debate
+    - orchestration
+  always: false
+requires:
+  tools: []
+  bins: []
+  env: []
+content:
+  main: SKILL.md
+exposure:
+  agent: true
+  main_runtime: true
