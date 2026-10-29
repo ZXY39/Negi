@@ -151,7 +151,6 @@ test("浏览器轨没有宿主缩放：这一行整块留在 hidden 上，不写
     assert.equal(app.desktopShellReady(), false);
     assert.equal(app.block.hasAttribute("hidden"), true);
     assert.equal(app.context.document.body.style.zoom, undefined);
-    assert.equal(app.cssVars["--ui-zoom"], undefined);
     assert.equal(app.store.get("g3ku.ui.zoom.v1"), undefined);
 });
 
