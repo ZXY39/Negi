@@ -289,3 +289,100 @@ async def test_held_batch_parent_is_skipped():
 
     assert [item['target_node_id'] for item in delivered] == ['node:a']
 
+
+# --- the park itself --------------------------------------------------------
+
+
+class _Record:
+    def __init__(self, node_id: str, *, parent: str = '', status: str = 'in_progress') -> None:
+        self.node_id = node_id
+        self.parent_node_id = parent
+        self.status = status
+        self.node_kind = 'execution'
+        self.depth = 1
+        self.metadata: dict = {}
+
+    def model_copy(self, *, update: dict | None = None) -> _Record:
+        clone = _Record(self.node_id, parent=self.parent_node_id, status=self.status)
+        clone.metadata = dict((update or {}).get('metadata') or self.metadata)
+        return clone
+
+
+class _ParkStore:
+    def __init__(self, records: list[_Record]) -> None:
+        self._records = {record.node_id: record for record in records}
+
+    def list_nodes(self, task_id: str) -> list[_Record]:
+        _ = task_id
+        return list(self._records.values())
+
+    def update_node(self, node_id: str, mutate) -> None:
+        self._records[node_id] = mutate(self._records[node_id])
+
+
+class _ParkLog:
+    def __init__(self) -> None:
+        self.frames: dict[str, dict] = {}
+
+    def update_frame(self, task_id: str, node_id: str, mutate) -> None:
+        _ = task_id
+        self.frames[node_id] = mutate(self.frames.get(node_id) or {})
+
+
+def _park_runner(records: list[_Record]):
+    from main.runtime.node_runner import NodeRunner
+
+    runner = object.__new__(NodeRunner)
+    runner._store = _ParkStore(records)
+    runner._log_service = _ParkLog()
+    runner._pending_node_notifications = lambda task_id, node_id: []
+    return runner
+
+
+@pytest.mark.asyncio
+async def test_undeclared_park_keeps_the_old_shape():
+    root = _Record('root')
+    node = _Record('node:a', parent='root')
+    runner = _park_runner([root, node])
+
+    result = await runner._enter_wait(task_id='task:1', node=node, note='等消息')
+
+    assert result['status'] == 'parked'
+    assert result['waiting_for'] == {'targets': [], 'external': False}
+    assert runner._store.list_nodes('task:1')[1].metadata[NODE_WAIT_TARGETS_KEY] == []
+    assert runner._log_service.frames['node:a']['phase'] == 'waiting_explicit'
+
+
+@pytest.mark.asyncio
+async def test_declared_sibling_is_persisted_for_the_reverse_lookup():
+    root = _Record('root')
+    node = _Record('node:a', parent='root')
+    sibling = _Record('node:b', parent='root')
+    runner = _park_runner([root, node, sibling])
+
+    result = await runner._enter_wait(
+        task_id='task:1', node=node, note='等兄弟', waiting_for='node:b'
+    )
+
+    assert result['status'] == 'parked'
+    assert result['waiting_for'] == {'targets': ['node:b'], 'external': False}
+    assert runner._store.list_nodes('task:1')[1].metadata[NODE_WAIT_TARGETS_KEY] == ['node:b']
+
+
+@pytest.mark.asyncio
+async def test_terminal_target_refuses_the_park():
+    root = _Record('root')
+    node = _Record('node:a', parent='root')
+    done = _Record('node:b', parent='root', status='success')
+    runner = _park_runner([root, node, done])
+
+    result = await runner._enter_wait(
+        task_id='task:1', node=node, note='等兄弟', waiting_for='node:b'
+    )
+
+    assert result['status'] == 'not_parked_invalid_targets'
+    assert result['problems'] == [{'target': 'node:b', 'reason': 'wait_target_terminal'}]
+    assert NODE_WAIT_TARGETS_KEY not in runner._store.list_nodes('task:1')[1].metadata
+    assert runner._log_service.frames == {}
+
+
