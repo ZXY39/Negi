@@ -17107,7 +17107,7 @@ textarea {
 #project-settings-dialog .project-settings-scale-range-shell {
     --scale-knob-w: 44px;
     --scale-knob-h: 24px;
-    --scale-knob-x: calc((100% - var(--scale-knob-w)) * var(--zoom-range-frac, 0.5) + var(--scale-knob-w) / 2);
+    --scale-knob-x: calc((100% - var(--scale-knob-w)) * var(--scale-range-frac, 0.5) + var(--scale-knob-w) / 2);
     position: relative;
     flex: 1 1 auto;
     min-width: 150px;

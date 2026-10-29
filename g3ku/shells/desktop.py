@@ -30,9 +30,9 @@ MICROPHONE_PERMISSION = "Microphone"
 PERMISSION_ALLOWED = 1
 DOWNLOADS_SETTING = "ALLOW_DOWNLOADS"
 DEFAULT_ZOOM_FACTOR = 0.9
-# 与设置里那根拖动条的两端一致：10% 与 300%。
-ZOOM_MIN_FACTOR = 0.1
-ZOOM_MAX_FACTOR = 3.0
+# 与设置里那根拖动条的两端一致：50% 与 250%。
+ZOOM_MIN_FACTOR = 0.5
+ZOOM_MAX_FACTOR = 2.5
 
 
 def apply_shell_settings(settings: Any) -> None:

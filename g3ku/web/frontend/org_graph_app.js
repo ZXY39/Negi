@@ -10374,21 +10374,23 @@ function initializeTheme() {
 }
 
 // 设置里的两行档位共用一套控件逻辑：拖动条与数字格是同一个倍数的两个入口，行与行的差别
-// 只在落点（缩放写窗口，字号写阅读面变量）、默认档与存档键。
-// 拖动条两端 10% / 300%，100% 落在轨道正中：左半 10→100、右半 100→300 各自线性，
-// 位置与倍数因此是分段线性关系，同一段斜率。数字格不受这两端限制，任意正数都收。
+// 只在落点（缩放写窗口，字号写阅读面变量）、默认档、存档键与拖动条两端。
+// 两端之内分段线性，100% 落在轨道正中：缩放行 50→100→250，字号行 10→100→300。
+// 两端同时是该行档位的上下限，数字格与拖动条共用，填越界值按端值收。
 const SCALE_LOW_END = 0.1;
 const SCALE_HIGH_END = 3;
+const ZOOM_LOW_END = 0.5;
+const ZOOM_HIGH_END = 2.5;
 const SCALE_NEUTRAL = 1;
 const SCALE_POS_CENTER = 50;
 
-function normalizeScale(raw, fallback) {
+function normalizeScale(raw, fallback, lowEnd = 0, highEnd = Infinity) {
     const text = String(raw ?? "").trim();
     // 空串要当"没设过"：清空的数字格读出来就是空串，而 Number("") 是 0。
     if (!text) return fallback;
     const value = Number(text);
     if (!Number.isFinite(value) || value <= 0) return fallback;
-    return Math.round(value * 100) / 100;
+    return Math.round(Math.min(highEnd, Math.max(lowEnd, value)) * 100) / 100;
 }
 
 // 数字格里那格是百分数（110 = 1.1 倍）；非正数或空一律算没填，交回调用方保留原值。
@@ -10400,24 +10402,34 @@ function parseScalePercent(raw) {
     return percent / 100;
 }
 
-function scaleToPosition(raw) {
-    const value = Math.min(SCALE_HIGH_END, Math.max(SCALE_LOW_END, Number(raw)));
+function scaleToPosition(raw, lowEnd = SCALE_LOW_END, highEnd = SCALE_HIGH_END) {
+    const value = Math.min(highEnd, Math.max(lowEnd, Number(raw)));
     return value <= SCALE_NEUTRAL
-        ? ((value - SCALE_LOW_END) / (SCALE_NEUTRAL - SCALE_LOW_END)) * SCALE_POS_CENTER
+        ? ((value - lowEnd) / (SCALE_NEUTRAL - lowEnd)) * SCALE_POS_CENTER
         : SCALE_POS_CENTER
-            + ((value - SCALE_NEUTRAL) / (SCALE_HIGH_END - SCALE_NEUTRAL)) * SCALE_POS_CENTER;
+            + ((value - SCALE_NEUTRAL) / (highEnd - SCALE_NEUTRAL)) * SCALE_POS_CENTER;
 }
 
-function positionToScale(raw, fallback) {
+function positionToScale(raw, fallback, lowEnd = SCALE_LOW_END, highEnd = SCALE_HIGH_END) {
     const pos = Number(raw);
     if (!Number.isFinite(pos)) return fallback;
     return pos <= SCALE_POS_CENTER
-        ? SCALE_LOW_END + (pos / SCALE_POS_CENTER) * (SCALE_NEUTRAL - SCALE_LOW_END)
+        ? lowEnd + (pos / SCALE_POS_CENTER) * (SCALE_NEUTRAL - lowEnd)
         : SCALE_NEUTRAL
-            + ((pos - SCALE_POS_CENTER) / SCALE_POS_CENTER) * (SCALE_HIGH_END - SCALE_NEUTRAL);
+            + ((pos - SCALE_POS_CENTER) / SCALE_POS_CENTER) * (highEnd - SCALE_NEUTRAL);
 }
 
-function createScaleRow({ range, shell, value, storageKey, fallback, write, onCommit }) {
+function createScaleRow({
+    range,
+    shell,
+    value,
+    storageKey,
+    fallback,
+    lowEnd = SCALE_LOW_END,
+    highEnd = SCALE_HIGH_END,
+    write,
+    onCommit,
+}) {
     let current = fallback;
 
     function notify() {
@@ -10435,7 +10447,7 @@ function createScaleRow({ range, shell, value, storageKey, fallback, write, onCo
     }
 
     function render(scale) {
-        const pos = Math.round(scaleToPosition(scale) * 100) / 100;
+        const pos = Math.round(scaleToPosition(scale, lowEnd, highEnd) * 100) / 100;
         if (range) range.value = String(pos);
         // 填充跟着指针实际落到的那一格走：滑条按 step 会把值收进自己的网格，
         // 读回来的才是指针真正停下的位置，按它上色才不会差出半格。
@@ -10444,7 +10456,7 @@ function createScaleRow({ range, shell, value, storageKey, fallback, write, onCo
     }
 
     function apply(raw) {
-        const scale = normalizeScale(raw, fallback);
+        const scale = normalizeScale(raw, fallback, lowEnd, highEnd);
         render(scale);
         return scale;
     }
@@ -10453,7 +10465,7 @@ function createScaleRow({ range, shell, value, storageKey, fallback, write, onCo
     function commitSlider() {
         const pos = Number(range.value);
         if (range.value === "" || !Number.isFinite(pos)) return current;
-        const scale = normalizeScale(positionToScale(pos, fallback), fallback);
+        const scale = normalizeScale(positionToScale(pos, fallback, lowEnd, highEnd), fallback, lowEnd, highEnd);
         paint(scale, pos);
         return scale;
     }
@@ -10560,6 +10572,8 @@ const zoomRow = createScaleRow({
     value: U.zoomValue,
     storageKey: ZOOM_KEY,
     fallback: desktopShellReady() ? ZOOM_DEFAULT_DESKTOP : ZOOM_DEFAULT_BROWSER,
+    lowEnd: ZOOM_LOW_END,
+    highEnd: ZOOM_HIGH_END,
     write: writeWindowZoom,
     onCommit: syncZoomLayout,
 });

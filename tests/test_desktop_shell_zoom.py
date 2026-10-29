@@ -8,7 +8,13 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from g3ku.shells.desktop import DEFAULT_ZOOM_FACTOR, ShellApi, apply_zoom
+from g3ku.shells.desktop import (
+    DEFAULT_ZOOM_FACTOR,
+    ZOOM_MAX_FACTOR,
+    ZOOM_MIN_FACTOR,
+    ShellApi,
+    apply_zoom,
+)
 
 
 class _Control:
@@ -57,11 +63,26 @@ def test_shell_api_writes_the_zoom_through_the_window_control() -> None:
     assert api.zoom_factor == 1.1
 
 
+def test_slider_ends_are_50_and_250_percent() -> None:
+    assert ZOOM_MIN_FACTOR == 0.5
+    assert ZOOM_MAX_FACTOR == 2.5
+
+
+def test_shell_api_accepts_values_on_the_slider_ends() -> None:
+    control = _Control()
+    api = ShellApi(_window(control))
+
+    for value in (ZOOM_MIN_FACTOR, ZOOM_MAX_FACTOR):
+        result = api.set_window_zoom(value)
+        assert result["ok"] is True
+        assert control.ZoomFactor == value
+
+
 def test_shell_api_rejects_values_outside_the_slider_ends() -> None:
     control = _Control()
     api = ShellApi(_window(control))
 
-    for bad in ("abc", "", 0, 0.05, 4):
+    for bad in ("abc", "", 0, 0.49, 2.51):
         result = api.set_window_zoom(bad)
         assert result["ok"] is False
         assert control.ZoomFactor == 1.0
