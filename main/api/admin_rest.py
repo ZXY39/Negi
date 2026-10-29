@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -2089,6 +2090,23 @@ def _sticker_flag(payload: dict[str, Any] | None) -> bool:
     )
 
 
+# Windows 只有在目录内没有任何打开的文件句柄时才允许改名；点击启停时缩略图往往
+# 还在流出这个目录。退避发生在这里（异步），让那些读取有机会跑完再重试。
+_STICKER_RENAME_RETRY_DELAYS = (0.1, 0.2, 0.35, 0.5, 0.75)
+
+
+async def _sticker_rename_with_retry(operation):
+    attempts = len(_STICKER_RENAME_RETRY_DELAYS) + 1
+    for attempt in range(attempts):
+        try:
+            return operation()
+        except sticker_admin.StickerAdminError as exc:
+            if exc.code != 'sticker_rename_busy' or attempt == attempts - 1:
+                raise
+        await asyncio.sleep(_STICKER_RENAME_RETRY_DELAYS[attempt])
+    raise RuntimeError('unreachable sticker rename retry state')
+
+
 def _stickers_settings_payload(cfg: Config) -> dict[str, Any]:
     injected = int(sticker_catalog.injected_chars())
     limit = int(sticker_catalog.STICKER_INJECTED_CHAR_WARN)
@@ -2265,7 +2283,9 @@ async def update_sticker_theme(pack: str, payload: dict = Body(...)):
 async def set_sticker_pack_enabled(pack: str, payload: dict | None = Body(default=None)):
     enabled = _sticker_flag(payload)
     try:
-        new_name = sticker_admin.set_enabled(pack, enabled)
+        new_name = await _sticker_rename_with_retry(
+            lambda: sticker_admin.set_enabled(pack, enabled)
+        )
     except sticker_admin.StickerAdminError as exc:
         raise _sticker_http_error(exc) from exc
     return {'ok': True, 'dir_name': new_name, 'item': _sticker_pack_after(new_name)}
@@ -2334,7 +2354,9 @@ async def set_sticker_category_enabled(
 ):
     enabled = _sticker_flag(payload)
     try:
-        sticker_admin.set_category_enabled(pack, category, enabled)
+        await _sticker_rename_with_retry(
+            lambda: sticker_admin.set_category_enabled(pack, category, enabled)
+        )
     except sticker_admin.StickerAdminError as exc:
         raise _sticker_http_error(exc) from exc
     return {'ok': True, 'item': _sticker_pack_after(pack)}

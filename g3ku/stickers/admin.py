@@ -427,6 +427,34 @@ def set_category_description(
     return manifest
 
 
+def _rename_directory(path: Path, target: Path) -> None:
+    """Rename one directory, reporting Windows sharing violations as a typed retry.
+
+    Windows refuses to rename a directory while any file inside it is open, and the
+    admin page is usually still streaming thumbnails out of that very tree. The
+    route retries ``sticker_rename_busy`` asynchronously; sleeping here would block
+    the event loop that has to finish those reads and turn the retry into a deadlock.
+    """
+    try:
+        path.rename(target)
+    except PermissionError as exc:
+        raise StickerAdminError(
+            'sticker_rename_busy',
+            '表情包目录正在被读取（图片还在加载），请稍后重试',
+            status_code=409,
+        ) from exc
+    except OSError as exc:
+        if getattr(exc, 'winerror', None) in {5, 32}:
+            raise StickerAdminError(
+                'sticker_rename_busy',
+                '表情包目录正在被读取（图片还在加载），请稍后重试',
+                status_code=409,
+            ) from exc
+        raise StickerAdminError(
+            'sticker_rename_failed', f'重命名失败：{exc}', status_code=409
+        ) from exc
+
+
 def _rename_flag(base: Path, path: Path, enabled: bool) -> str:
     name = path.name
     target_name = display_key(name) if enabled else f'{DISABLED_PREFIX}{display_key(name)}'
@@ -439,15 +467,28 @@ def _rename_flag(base: Path, path: Path, enabled: bool) -> str:
         raise StickerAdminError(
             'sticker_name_conflict', f'{target_name} 已存在，先处理重名', status_code=409
         )
-    path.rename(target)
+    _rename_directory(path, target)
     invalidate_scan_cache()
     return target_name
+
+
+def _resolved_sibling(base: Path, name: str) -> Path:
+    return (base / name).resolve(strict=False)
 
 
 def set_enabled(
     pack_dir_name: str, enabled: bool, *, root: Path | None = None
 ) -> str:
     base = _root_resolved(root)
+    raw = str(pack_dir_name or '').strip()
+    target_name = display_key(raw) if enabled else f'{DISABLED_PREFIX}{display_key(raw)}'
+    # 上一次请求已改名成功但响应丢了时，重试仍带着旧名：请求要的状态已经达成，
+    # 按成功返回而不是 404。
+    if target_name != raw and admin_segment_ok(raw) and admin_segment_ok(target_name):
+        if not _resolved_sibling(base, raw).is_dir() and _resolved_sibling(
+            base, target_name
+        ).is_dir():
+            return target_name
     return _rename_flag(base, pack_dir(pack_dir_name, root=root), bool(enabled))
 
 
@@ -459,6 +500,13 @@ def set_category_enabled(
     root: Path | None = None,
 ) -> str:
     pack = pack_dir(pack_dir_name, root=root)
+    raw = str(category_dir_name or '').strip()
+    target_name = display_key(raw) if enabled else f'{DISABLED_PREFIX}{display_key(raw)}'
+    if target_name != raw and admin_segment_ok(raw) and admin_segment_ok(target_name):
+        if not _resolved_sibling(pack, raw).is_dir() and _resolved_sibling(
+            pack, target_name
+        ).is_dir():
+            return target_name
     category = category_dir(pack_dir_name, category_dir_name, root=root)
     return _rename_flag(pack, category, bool(enabled))
 

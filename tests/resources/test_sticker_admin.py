@@ -275,6 +275,28 @@ def test_disable_conflicts_when_target_exists(tmp_path: Path):
     assert (excinfo.value.code, excinfo.value.status_code) == ("sticker_name_conflict", 409)
 
 
+def test_stale_name_retry_after_the_rename_landed_is_success(tmp_path: Path):
+    _pack(tmp_path, "demo")
+
+    assert sticker_admin.set_enabled("demo", False, root=tmp_path) == "_demo"
+    # 第一次请求已改名、响应丢了；重试仍带旧名时按“已达成”返回，而不是 404。
+    assert sticker_admin.set_enabled("demo", False, root=tmp_path) == "_demo"
+    assert sticker_admin.set_enabled("_demo", True, root=tmp_path) == "demo"
+    assert sticker_admin.set_enabled("_demo", True, root=tmp_path) == "demo"
+
+
+def test_windows_sharing_violation_is_a_typed_busy_error(tmp_path: Path, monkeypatch):
+    _pack(tmp_path, "demo")
+
+    def deny(self, target):
+        raise PermissionError(13, "Access is denied")
+
+    monkeypatch.setattr(Path, "rename", deny)
+    with pytest.raises(sticker_admin.StickerAdminError) as excinfo:
+        sticker_admin.set_enabled("demo", False, root=tmp_path)
+    assert (excinfo.value.code, excinfo.value.status_code) == ("sticker_rename_busy", 409)
+
+
 def test_category_enable_disable_keeps_manifest(tmp_path: Path):
     pack = _pack(tmp_path, "demo")
     sticker_admin.set_category_enabled("demo", "happy", False, root=tmp_path)

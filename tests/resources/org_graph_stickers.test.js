@@ -369,6 +369,126 @@ test("收起清掉展开缓存并回到预览", () => {
     assert.match(view.U.stickerDetail.innerHTML, /data-sticker-action="expand-category"/);
 });
 
+test("删除图片后展开态保留，缩略图按服务端快照刷新", async () => {
+    const view = loadView({ calls: { confirms: [] } });
+    view.U.stickerDetail.clientWidth = 500;
+    view.StickersState.packs = [pack()];
+    view.StickersState.detail = pack();
+    view.StickersState.selected = "demo";
+    view.StickersState.expanded["demo/happy"] = pack().categories[0].images;
+    view.ApiClient.deleteStickerImage = async () => ({
+        item: pack({
+            total: 1,
+            categories: [{
+                ...pack().categories[0],
+                count: 1,
+                registered: 1,
+                pending: 0,
+                images: [{ name: "b.png", size: 10, mtime: 1, url: "/u2", registered: true }],
+            }],
+        }),
+    });
+    const card = { dataset: { stickerCategory: "happy" } };
+    const target = {
+        dataset: { stickerAction: "delete-image", name: "a.png" },
+        closest(selector) {
+            if (selector === "[data-sticker-action]") return target;
+            if (selector === ".sticker-category-card") return card;
+            return null;
+        },
+    };
+
+    view.onStickerDetailClick({ target });
+    assert.equal(view.calls.confirms.length, 1);
+    await view.calls.confirms[0].onConfirm();
+
+    assert.deepEqual(
+        Array.from(view.StickersState.expanded["demo/happy"], (image) => image.name),
+        ["b.png"],
+    );
+    assert.match(view.U.stickerDetail.innerHTML, /data-sticker-action="collapse-category"/);
+    assert.doesNotMatch(view.U.stickerDetail.innerHTML, /data-sticker-action="expand-category"/);
+});
+
+test("整包停用时整个详情区降饱和，恢复后撤掉", () => {
+    const view = loadView();
+    view.StickersState.detail = pack({ enabled: false, dir_name: "_demo" });
+    view.renderStickerDetail();
+
+    assert.equal(view.U.stickerDetail.classList.contains("is-pack-disabled"), true);
+    // 分类自身仍是启用的：灰的是整包这一层，不是把分类卡伪装成单独停用。
+    assert.doesNotMatch(view.U.stickerDetail.innerHTML, /sticker-category-card is-disabled/);
+
+    view.StickersState.detail = pack();
+    view.renderStickerDetail();
+    assert.equal(view.U.stickerDetail.classList.contains("is-pack-disabled"), false);
+});
+
+test("整包改名后展开态跟着迁移到新目录名", () => {
+    const view = loadView();
+    view.StickersState.packs = [pack()];
+    view.StickersState.detail = pack();
+    view.StickersState.expanded["demo/happy"] = pack().categories[0].images;
+
+    view.applyStickerPack(pack({ dir_name: "_demo", enabled: false }), "demo");
+
+    assert.deepEqual(Object.keys(view.StickersState.expanded), ["_demo/happy"]);
+    assert.equal(view.StickersState.expanded["_demo/happy"].length, 2);
+});
+
+test("启停失败只写右上角状态行，不弹失败提示", async () => {
+    const view = loadView({ calls: { notices: [] } });
+    view.StickersState.detail = pack();
+    view.StickersState.selected = "demo";
+    const error = new Error("目录被占用");
+    error.data = { code: "sticker_rename_busy", message: "表情包目录正在被读取（图片还在加载），请稍后重试" };
+    view.ApiClient.setStickerPackEnabled = async () => {
+        throw error;
+    };
+    const target = {
+        dataset: { stickerAction: "toggle-pack" },
+        closest(selector) {
+            return selector === "[data-sticker-action]" ? target : null;
+        },
+    };
+
+    view.onStickerDetailClick({ target });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.equal(view.calls.notices.length, 0);
+    assert.equal(view.U.stickerBusyLabel.hidden, false);
+    assert.match(view.U.stickerBusyLabel.textContent, /停用失败/);
+    assert.match(view.U.stickerBusyLabel.textContent, /正在被读取/);
+});
+
+test("启停请求在飞时重复点击不会发第二次请求", async () => {
+    const view = loadView();
+    view.StickersState.detail = pack();
+    view.StickersState.selected = "demo";
+    let calls = 0;
+    let release = null;
+    view.ApiClient.setStickerPackEnabled = () => {
+        calls += 1;
+        return new Promise((resolve) => {
+            release = resolve;
+        });
+    };
+    const target = {
+        dataset: { stickerAction: "toggle-pack" },
+        closest(selector) {
+            return selector === "[data-sticker-action]" ? target : null;
+        },
+    };
+
+    view.onStickerDetailClick({ target });
+    view.onStickerDetailClick({ target });
+    assert.equal(calls, 1);
+
+    release({ item: pack({ dir_name: "_demo", key: "demo", enabled: false }) });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(view.StickersState.selected, "_demo");
+});
+
 test("写操作返回的整包快照替换骨架，改名后选中跟着走", () => {
     const view = loadView();
     view.StickersState.packs = [{ ...pack(), categories: [{ dir_name: "happy", key: "happy", description: "开心大笑", enabled: true, count: 2 }] }];

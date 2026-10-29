@@ -120,6 +120,41 @@ def test_enabled_flag_must_be_boolean(client: TestClient):
     assert response.json()["detail"]["code"] == "invalid_enabled"
 
 
+def test_enabled_retries_a_transient_sharing_violation(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    real_rename = Path.rename
+    remaining = {"count": 2}
+
+    def flaky(self, target):
+        if self.name == "demo" and remaining["count"]:
+            remaining["count"] -= 1
+            raise PermissionError(13, "Access is denied")
+        return real_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", flaky)
+    response = client.post("/api/resources/stickers/packs/demo/enabled", json={"enabled": False})
+
+    assert response.status_code == 200
+    assert response.json()["dir_name"] == "_demo"
+    assert remaining["count"] == 0
+
+
+def test_enabled_busy_rename_is_409_not_500(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(admin_rest, "_STICKER_RENAME_RETRY_DELAYS", (0.0, 0.0))
+
+    def deny(self, target):
+        raise PermissionError(13, "Access is denied")
+
+    monkeypatch.setattr(Path, "rename", deny)
+    response = client.post("/api/resources/stickers/packs/demo/enabled", json={"enabled": False})
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "sticker_rename_busy"
+
+
 def test_create_category_conflict_is_409(client: TestClient):
     response = client.post("/api/resources/stickers/packs/demo/categories", json={"key": "happy"})
     assert response.status_code == 409

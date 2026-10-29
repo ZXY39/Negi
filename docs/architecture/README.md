@@ -221,6 +221,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 会话页语音按钮右边那颗风险按钮找不到、它的黄色出现在条件放行档上、按钮比附件/语音大一圈、面板与模型链面板叠在一起，或 Tool 页头部还在找监管模式开关 / 命令白名单入口 → `web-and-admin.md`「Composer Risk Panel」+「Exec Approval And Allowlist Admin Contract」（命令白名单入口现在在 exec 工具详情的「执行模式」里）
 - 回合卡在半截、下方一直转圈，刷新网页才同步到最终回复（本地与渠道会话同症状，转录里其实已有完整回复）→ `web-and-admin.md`「CEO Websocket Lane Failure Contract」
 - 节点详情页的「加载 skill / 加载 tool」chip 风险色全部同一档、展开看不到正文，或契约不在场时直接调用工具的那一行仍画成普通工具行（会话轨道/节点卡片） → `web-and-admin.md`「Context Loader Notices」
+- 连点表情包页的启用/停用弹出 `HTTP 500`、停用整包后包内缩略图没有全部变灰，或删掉一张图后展开的分类自己收起 → `web-and-admin.md`「Sticker Pack Page And Admin Contract」（`sticker_rename_busy` 的异步重试与右上角状态行、包级灰度、展开态随快照迁移）
 - 工具面板的「参数」只有 48 字调用提示、超长入参点开也不回补 → `web-and-admin.md`「CEO Turn Timeline Rendering Contract」（`arguments_truncated` 标记与 `tool-arguments` 按需回取车道）
 - 翻看工具输出时新输出把输出框滚动条顶回顶部 → `web-and-admin.md`「CEO Feed View State And Scroll Preservation Contract」
 - 调用工具列表 / 任务详情消息列表没多到出现滚动条时，滚轮在它上面推不动会话流或详情页（同一族还有工具输出框、中途正文视窗、初始提示词视窗、思考面板） → `web-and-admin.md`「CEO Feed View State And Scroll Preservation Contract」（封顶内层滚动框不写 `overscroll-behavior`，有没有滚动条按实际溢出判；主滚动区仍保留 `contain`）

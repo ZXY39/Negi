@@ -86,17 +86,64 @@ function stickerFilteredPacks() {
     });
 }
 
+let stickerStatusTimer = 0;
+
 function stickerSetBusy(on, label = "") {
     StickersState.busy = !!on;
     if (U.stickerDetail) U.stickerDetail.classList.toggle("is-busy", !!on);
     if (U.stickerBusyLabel) {
+        if (on && typeof window.clearTimeout === "function") window.clearTimeout(stickerStatusTimer);
         U.stickerBusyLabel.textContent = on ? label || "处理中…" : "";
         U.stickerBusyLabel.hidden = !on;
     }
 }
 
+// 启停是高频小操作，失败只落在右上角状态行，不弹提示：弹窗会打断连续切换，
+// 而且这条路径的失败大多是缩略图还在读、目录改名被占用，稍后重试即可。
+function stickerShowStatus(text) {
+    if (!U.stickerBusyLabel) return;
+    U.stickerBusyLabel.textContent = text;
+    U.stickerBusyLabel.hidden = false;
+    if (typeof window.setTimeout !== "function") return;
+    window.clearTimeout(stickerStatusTimer);
+    stickerStatusTimer = window.setTimeout(() => {
+        if (StickersState.busy) return;
+        U.stickerBusyLabel.textContent = "";
+        U.stickerBusyLabel.hidden = true;
+    }, 4000);
+}
+
+// 写操作返回的整包快照带着每个分类的完整图列表。展开态属于操作员的视图状态，
+// 不该被一次删图/启停吞掉：按显示键把旧键迁到新目录名，并用快照刷新图列表
+// （删掉的图因此立即消失，而不是留着一条指向 404 的缩略图）。
+function carryStickerExpanded(item, requestedDirName = "") {
+    const packNames = new Set([String(requestedDirName || ""), item.dir_name].filter(Boolean));
+    const categories = item.categories || [];
+    const expanded = {};
+    for (const [key, images] of Object.entries(StickersState.expanded)) {
+        const split = key.indexOf("/");
+        if (split < 0) {
+            expanded[key] = images;
+            continue;
+        }
+        const packDir = key.slice(0, split);
+        const categoryDir = key.slice(split + 1);
+        if (!packNames.has(packDir)) {
+            expanded[key] = images;
+            continue;
+        }
+        const category = categories.find((entry) => entry.dir_name === categoryDir)
+            || categories.find((entry) => entry.key === categoryDir.replace(/^_/, ""));
+        if (!category) continue;
+        const fresh = Array.isArray(category.images) ? category.images : images;
+        expanded[stickerKey(item.dir_name, category.dir_name)] = fresh;
+    }
+    StickersState.expanded = expanded;
+}
+
 function applyStickerPack(item, requestedDirName = "") {
     if (!item || !item.dir_name) return;
+    carryStickerExpanded(item, requestedDirName);
     StickersState.detail = item;
     StickersState.selected = item.dir_name;
     const nextSkeleton = stickerSkeleton(item);
@@ -121,17 +168,22 @@ function dropStickerPack(dirName) {
     else renderStickerDetail();
 }
 
-async function runStickerMutation({ label, request, onSuccess }) {
+async function runStickerMutation({ label, request, onSuccess, quiet = false }) {
     if (StickersState.busy) return;
     stickerSetBusy(true, label);
     try {
         const payload = await request();
         if (typeof onSuccess === "function") await onSuccess(payload || {});
-    } catch (error) {
-        if (isAbortLike(error)) return;
-        stickerFail(label, error);
-    } finally {
         stickerSetBusy(false);
+    } catch (error) {
+        stickerSetBusy(false);
+        if (isAbortLike(error)) return;
+        if (quiet) {
+            const action = label.replace(/^正在/, "").replace(/…$/, "");
+            stickerShowStatus(`${action}失败：${stickerErrorText(error)}`);
+            return;
+        }
+        stickerFail(label, error);
     }
 }
 
@@ -191,6 +243,11 @@ function stickerNewPackCardHtml() {
 function renderStickerDetail() {
     if (!U.stickerDetail) return;
     const pack = StickersState.detail;
+    // 包级停用与分类级停用是同一件事的两层：包停用后整包都不进模型清单，
+    // 所以包内每一格缩略图都要降饱和，而不是只处理被单独停用的分类卡。
+    if (U.stickerDetail.classList) {
+        U.stickerDetail.classList.toggle("is-pack-disabled", !!pack && !pack.enabled);
+    }
     const sections = StickersState.creatingPack ? [stickerNewPackCardHtml()] : [];
     if (!pack) {
         if (!sections.length) {
@@ -526,6 +583,7 @@ function onStickerDetailClick(event) {
                 label: pack.enabled ? "正在停用…" : "正在启用…",
                 request: () => ApiClient.setStickerPackEnabled(pack.dir_name, !pack.enabled),
                 onSuccess: (data) => applyStickerPack(data.item, pack.dir_name),
+                quiet: true,
             });
             return;
         case "register-pack": {
@@ -587,6 +645,7 @@ function onStickerDetailClick(event) {
                 label: category.enabled ? "正在停用…" : "正在启用…",
                 request: () => ApiClient.setStickerCategoryEnabled(pack.dir_name, category.dir_name, !category.enabled),
                 onSuccess: (data) => applyStickerPack(data.item, pack.dir_name),
+                quiet: true,
             });
             return;
         case "register-category":
@@ -618,10 +677,7 @@ function onStickerDetailClick(event) {
                     runStickerMutation({
                         label: "正在删除…",
                         request: () => ApiClient.deleteStickerImage(pack.dir_name, category.dir_name, name),
-                        onSuccess: (data) => {
-                            delete StickersState.expanded[stickerKey(pack.dir_name, category.dir_name)];
-                            applyStickerPack(data.item, pack.dir_name);
-                        },
+                        onSuccess: (data) => applyStickerPack(data.item, pack.dir_name),
                     }),
             });
             return;
@@ -720,10 +776,7 @@ async function onStickerUploadPicked(event) {
     await runStickerMutation({
         label: `正在上传 ${files.length} 张…`,
         request: () => ApiClient.uploadStickerImages(target.pack, target.category, files),
-        onSuccess: (data) => {
-            delete StickersState.expanded[stickerKey(target.pack, target.category)];
-            applyStickerPack(data.item, target.pack);
-        },
+        onSuccess: (data) => applyStickerPack(data.item, target.pack),
     });
 }
 
