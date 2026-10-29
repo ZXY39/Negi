@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from g3ku.config import config_bundle
 from g3ku.security import derive_password_key, get_bootstrap_security_service
+from g3ku.stickers import catalog
 from main.api import bootstrap_rest
 from main.governance.store import GovernanceStore
 
@@ -682,6 +683,12 @@ def _seed_builtin_pack(
     return base
 
 
+@pytest.fixture
+def builtin_pack_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    """仓库不分发预置包；这些用例用合成包键钉住预置包的排除契约。"""
+    monkeypatch.setattr(catalog, "BUILTIN_PACK_KEYS", frozenset({"deepseek-fanart"}))
+
+
 def _rewrite_payload(archive: Path, mutate) -> Path:
     """改写包载荷，模拟旧版本导出（当时预置包还会随包走）。"""
     envelope = json.loads(archive.read_text(encoding="utf-8"))
@@ -974,7 +981,9 @@ def test_stickers_only_import_replaces_the_face_and_leaves_other_faces(tmp_path:
     ] == "TGT theme"
 
 
-def test_stickers_scope_exports_operator_packs_only(tmp_path: Path) -> None:
+def test_stickers_scope_exports_operator_packs_only(
+    tmp_path: Path, builtin_pack_keys: None
+) -> None:
     source = _write_workspace(tmp_path / "source")
     _unlock(source)
     _seed_stickers(source)
@@ -985,7 +994,9 @@ def test_stickers_scope_exports_operator_packs_only(tmp_path: Path) -> None:
     assert set(_payload_of(archive)["entries"]) == STICKER_KEYS
 
 
-def test_stickers_scope_with_only_builtin_pack_is_refused(tmp_path: Path) -> None:
+def test_stickers_scope_with_only_builtin_pack_is_refused(
+    tmp_path: Path, builtin_pack_keys: None
+) -> None:
     source = _write_workspace(tmp_path / "source")
     _unlock(source)
     _seed_builtin_pack(source, name="_deepseek-fanart")
@@ -996,7 +1007,9 @@ def test_stickers_scope_with_only_builtin_pack_is_refused(tmp_path: Path) -> Non
     assert not (source / config_bundle.BUNDLE_OUTPUT_DIR).exists()
 
 
-def test_stickers_import_keeps_the_local_builtin_pack(tmp_path: Path) -> None:
+def test_stickers_import_keeps_the_local_builtin_pack(
+    tmp_path: Path, builtin_pack_keys: None
+) -> None:
     source = _write_workspace(tmp_path / "source")
     _unlock(source)
     _seed_stickers(source, marker="SRC")
@@ -1038,7 +1051,7 @@ def test_stickers_import_keeps_the_local_builtin_pack(tmp_path: Path) -> None:
 
 
 def test_stickers_import_with_only_builtin_entries_leaves_operator_packs(
-    tmp_path: Path,
+    tmp_path: Path, builtin_pack_keys: None
 ) -> None:
     source = _write_workspace(tmp_path / "source")
     _unlock(source)

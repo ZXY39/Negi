@@ -35,7 +35,10 @@ DISABLED_PREFIX = "_"
 # 随仓库分发的预置包：资产入库、由升级维护，不属于操作员数据。配置包导入导出
 # 都按这个名单排除，否则旧设备导出的旧版本会把新装设备的预置包整个覆盖回去。
 # 只看去前缀后的键：`_<key>` 是停用态，仍算同一个预置包。
-BUILTIN_PACK_KEYS = frozenset({"deepseek-fanart"})
+#
+# 名单为空：`stickers/` 整棵树都是操作员数据，仓库不分发任何包。机制保留——只有
+# 拿到明确再分发授权的内容资产才能进这个名单，包键写进来即恢复排除语义。
+BUILTIN_PACK_KEYS: frozenset[str] = frozenset()
 # Sidecar directories that live beside the category folders and must never be
 # mistaken for one.
 RESERVED_PACK_DIRS = frozenset({"semantic"})
