@@ -189,11 +189,12 @@ def test_llm_detail_editor_renders_image_multimodal_before_concurrency_button_in
     assert result["buttonIndex"] >= 0
     assert result["kebabIndex"] >= 0
     assert result["modelIdIndex"] >= 0
-    # 模型列表 / 多模态 / 上下文TOKEN 同一行，且位于并发测试（⋯ 折叠）之前
-    assert result["fetchIndex"] < result["imageIndex"] < result["contextIndex"]
+    # 取列表按钮挂在模型ID框内，与协议、多模态同处第一行；上下文TOKEN在第二行，
+    # 整条连接区都在并发测试（⋯ 折叠）之前。
+    assert result["modelIdIndex"] < result["fetchIndex"] < result["imageIndex"] < result["contextIndex"]
     assert result["contextIndex"] < result["kebabIndex"] < result["buttonIndex"]
     assert 'class="llm-concurrency-test-row" hidden' in result["html"]
-    assert 'class="resource-field llm-image-checkbox-field"' in result["html"]
+    assert 'class="resource-field llm-image-checkbox-field llm-image-checkbox-field--header"' in result["html"]
 
 
 def test_memory_role_fixed_concurrency_reuses_segmented_label_shell_styling() -> None:

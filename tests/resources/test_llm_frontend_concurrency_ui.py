@@ -650,12 +650,13 @@ def test_llm_create_editor_renders_new_connection_and_policy_fields() -> None:
     assert "添加配置" in create_html
     assert "测试连接" in create_html
 
-    # 添加配置档的三列顺序：模型列表按钮填进首行右侧空缺，上下文窗口Token 接在
-    # 请求地址/Apikey 之后成第三列，重试那一行不再被独占整行的字段打断。
+    # 首行是 模型ID（右侧带取列表小按钮）/ 协议 / 多模态；第二行是 请求地址 / Apikey /
+    # 上下文窗口Token；重试那一行不再被独占整行的字段打断。新建档与编辑档同一套布局。
     create_order = [create_html.index(marker) for marker in (
+        "llm-binding-default-model",
+        "llm-fetch-btn",
         "llm-provider-select",
         "llm-binding-image-multimodal-enabled",
-        "llm-fetch-btn",
         "llm-binding-base-url",
         "llm-binding-api-key",
         "llm-binding-context-window-tokens",
@@ -677,6 +678,19 @@ def test_llm_create_editor_renders_new_connection_and_policy_fields() -> None:
     assert "llm-fetch-btn" in detail_html
     assert "toggle-concurrency-test" in detail_html
     assert "测试最大并发数" in detail_html
+
+    # 编辑档与新建档同一套两行连接区。
+    detail_order = [detail_html.index(marker) for marker in (
+        "llm-binding-default-model",
+        "llm-fetch-btn",
+        "llm-provider-select",
+        "llm-binding-image-multimodal-enabled",
+        "llm-binding-base-url",
+        "llm-binding-api-key",
+        "llm-binding-context-window-tokens",
+        "llm-binding-retry-on",
+    )]
+    assert detail_order == sorted(detail_order)
 
 
 def test_handle_provider_change_preserves_entered_values() -> None:

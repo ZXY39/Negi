@@ -1076,20 +1076,22 @@
       </div>`;
   }
 
-  function renderFetchModelListField() {
+  function renderModelIdField(editor) {
     return `
-        <div class="resource-field llm-model-list-field">
-          <span class="resource-field-label" aria-hidden="true">模型列表</span>
-          <button type="button" class="toolbar-btn ghost llm-fetch-btn" data-llm-action="fetch-model-list">获取模型列表</button>
-        </div>`;
+        <label class="resource-field llm-model-id-field">
+          <span class="resource-field-label">模型ID</span>
+          <div class="llm-model-id-input-row">
+            <input id="llm-binding-default-model" class="resource-search" type="text" value="${escv(editor.defaultModel)}" placeholder="模型ID，例如：gpt-4o">
+            <button type="button" class="icon-btn llm-fetch-btn" data-llm-action="fetch-model-list" title="获取模型列表" aria-label="获取模型列表"><i data-lucide="refresh-cw"></i></button>
+          </div>
+        </label>`;
   }
 
-  function renderProviderField(options = {}) {
+  function renderProviderField() {
     const state = llmState();
-    const fieldClass = options.compact ? "resource-field llm-edit-protocol-field" : "resource-field";
     const optionsHtml = state.templates.map((item) => `<option value="${escv(item.provider_id)}"${trim(item.provider_id) === trim(state.editor.providerId) ? " selected" : ""}>${escv(item.display_name || item.provider_id)}</option>`).join("");
     return `
-      <label class="${fieldClass}">
+      <label class="resource-field">
         <span class="resource-field-label llm-provider-label-spacer">协议</span>
         <select id="llm-provider-select" class="resource-search resource-select" data-resource-select-label="LLM provider">${optionsHtml}</select>
       </label>`;
@@ -1143,15 +1145,13 @@
 
   function renderConnectionFields() {
     const state = llmState();
-    const isCreate = state.editor.mode === "create";
-    const modelIdField = isCreate ? "" : `
-        <label class="resource-field">
-          <span class="resource-field-label">模型ID</span>
-          <input id="llm-binding-default-model" class="resource-search" type="text" value="${escv(state.editor.defaultModel)}" placeholder="模型ID，例如：gpt-4o">
-        </label>`;
     return `
       <div class="llm-form-grid llm-form-grid--binding-header">
-        ${modelIdField}
+        ${renderModelIdField(state.editor)}
+        ${renderProviderField()}
+        ${renderImageMultimodalField({ layout: "header" })}
+      </div>
+      <div class="llm-form-grid llm-form-grid--binding-header">
         <label class="resource-field">
           <span class="resource-field-label">请求地址 *</span>
           <input id="llm-binding-base-url" class="resource-search" type="text" value="${escv(state.editor.baseUrl)}" placeholder="例如：https://api.example.com/v1">
@@ -1160,15 +1160,8 @@
           <span class="resource-field-label">Apikey *</span>
           <input id="llm-binding-api-key" class="resource-search" type="text" value="${escv(state.editor.apiKey)}" placeholder="支持用逗号分隔填写多个 key">
         </label>
-        ${isCreate ? renderContextWindowField(state.editor) : ""}
-      </div>
-      ${isCreate ? "" : `
-      <div class="llm-form-grid llm-form-grid--binding-header">
-        ${renderFetchModelListField()}
-        ${renderImageMultimodalField()}
         ${renderContextWindowField(state.editor)}
-      </div>`}
-      <div id="llm-model-list-panel" class="llm-model-list-panel" hidden></div>`;
+      </div>`;
   }
 
   function renderConcurrencyField(editor) {
@@ -1194,18 +1187,66 @@
       </details>`;
   }
 
-  function renderModelListPanel() {
-    const panel = document.getElementById("llm-model-list-panel");
+  // 模型列表是挂在 body 上的悬浮下拉：弹窗正文是滚动容器，内联面板会被裁掉、
+  // 展开时还会把整张表单顶高。位置跟着模型ID输入框走，滚动/缩放时重新贴一次。
+  function modelListPanel() {
+    return document.getElementById("llm-model-list-panel");
+  }
+
+  function ensureModelListPanel() {
+    let panel = modelListPanel();
+    if (panel) return panel;
+    panel = document.createElement("div");
+    panel.id = "llm-model-list-panel";
+    panel.className = "llm-model-list-panel llm-model-list-panel--floating";
+    panel.hidden = true;
+    document.body.appendChild(panel);
+    return panel;
+  }
+
+  function closeModelListPanel() {
+    const panel = modelListPanel();
     if (!panel) return;
-    const modelList = llmState().editor?.modelList;
-    if (!modelList) {
+    panel.hidden = true;
+    panel.innerHTML = "";
+  }
+
+  function positionModelListPanel() {
+    const panel = modelListPanel();
+    if (!panel || panel.hidden) return;
+    const anchor = document.getElementById("llm-binding-default-model");
+    if (!anchor) {
       panel.hidden = true;
-      panel.innerHTML = "";
       return;
     }
+    const rect = anchor.getBoundingClientRect();
+    const viewportWidth = window.innerWidth || 0;
+    const viewportHeight = window.innerHeight || 0;
+    if (!rect.width || !viewportWidth) return;
+    const width = Math.min(Math.max(rect.width, 280), viewportWidth - 16);
+    const height = panel.offsetHeight || 0;
+    const left = Math.min(Math.max(rect.left, 8), viewportWidth - width - 8);
+    let top = rect.bottom + 6;
+    if (height && top + height > viewportHeight - 8) {
+      const above = rect.top - height - 6;
+      top = above >= 8 ? above : Math.max(8, viewportHeight - height - 8);
+    }
+    panel.style.width = `${width}px`;
+    panel.style.left = `${Math.max(left, 8)}px`;
+    panel.style.top = `${top}px`;
+  }
+
+  function renderModelListPanel() {
+    const modelList = llmState().editor?.modelList;
+    if (!modelList) {
+      closeModelListPanel();
+      return;
+    }
+    const panel = ensureModelListPanel();
     panel.hidden = false;
     if (modelList.loading) {
       panel.innerHTML = '<p class="llm-muted">正在获取模型列表...</p>';
+      positionModelListPanel();
       return;
     }
     if (modelList.error) {
@@ -1214,12 +1255,12 @@
           <span class="llm-muted llm-model-list-error">${escv(modelList.error)}</span>
           <button type="button" class="toolbar-btn ghost small" data-llm-action="model-list-close">收起</button>
         </div>`;
+      positionModelListPanel();
       return;
     }
     panel.innerHTML = `
       <div class="llm-model-list-toolbar">
         <input id="llm-model-list-filter" class="resource-search" type="search" placeholder="筛选模型..." value="${escv(modelList.filter || "")}">
-        <span id="llm-model-list-count" class="llm-muted"></span>
         <button type="button" class="toolbar-btn ghost small" data-llm-action="model-list-close">收起</button>
       </div>
       <div class="llm-model-list-items"></div>`;
@@ -1227,7 +1268,7 @@
   }
 
   function renderModelListItems() {
-    const panel = document.getElementById("llm-model-list-panel");
+    const panel = modelListPanel();
     if (!panel) return;
     const modelList = llmState().editor?.modelList;
     if (!modelList || modelList.loading || modelList.error) return;
@@ -1236,11 +1277,10 @@
     const items = Array.isArray(modelList.items) ? modelList.items : [];
     const filterText = trim(modelList.filter || "").toLowerCase();
     const filtered = items.filter((item) => !filterText || String(item).toLowerCase().includes(filterText));
-    const countHost = panel.querySelector("#llm-model-list-count");
-    if (countHost) countHost.textContent = `${filtered.length} / ${items.length} 个配置`;
     itemsHost.innerHTML = filtered.length
       ? filtered.map((item) => `<button type="button" class="llm-model-list-item" data-llm-model-item="${escv(item)}" title="点击将该模型填入配置">${escv(item)}</button>`).join("")
       : '<p class="llm-muted">没有匹配的模型。</p>';
+    positionModelListPanel();
   }
 
   function renderEditor() {
@@ -1249,6 +1289,7 @@
     if (!U.llmEditorShell || !U.llmEditorPanel || !U.llmEditorBackdrop) return;
     if (!state.editor.open) {
       U.llmEditorShell.innerHTML = "";
+      closeModelListPanel();
       setDrawerOpen(U.llmEditorBackdrop, U.llmEditorPanel, false);
       return;
     }
@@ -1270,11 +1311,6 @@
           </div>
           <div class="detail-modal-body model-config-body">
             <div class="llm-section">
-              <div class="llm-form-grid llm-form-grid--binding-header">
-                ${renderProviderField()}
-                ${renderImageMultimodalField({ layout: "header" })}
-                ${renderFetchModelListField()}
-              </div>
               ${renderConnectionFields()}
               ${renderBindingPolicyFields()}
               ${renderJsonDetails()}
@@ -1298,7 +1334,6 @@
             <div class="detail-modal-title">
               <div class="llm-edit-name-row">
                 ${nameControl}
-                ${renderProviderField({ compact: true })}
               </div>
               <p class="subtitle">可同时编辑当前配置的 JSON 配置与降级重试策略。</p>
             </div>
@@ -2035,14 +2070,6 @@
       }
       if (targetId === "llm-binding-default-model") {
         handleBindingDefaultModelInput();
-        return;
-      }
-      if (targetId === "llm-model-list-filter") {
-        const editor = llmState().editor;
-        if (editor?.modelList) {
-          editor.modelList.filter = String(event.target.value || "");
-          renderModelListItems();
-        }
       }
     });
     U.llmEditorShell?.addEventListener("click", (event) => {
@@ -2068,11 +2095,6 @@
         }
         return;
       }
-      const modelItem = event.target.closest("[data-llm-model-item]");
-      if (modelItem) {
-        applyModelListItem(modelItem.dataset.llmModelItem);
-        return;
-      }
       const action = event.target.closest("[data-llm-action]")?.dataset.llmAction;
       if (!action) return;
       if (action === "close") { closeEditor(); return; }
@@ -2087,23 +2109,53 @@
       if (action === "test-create" || action === "test-detail") { void handleTest().catch((error) => { llmState().error = error.message || "测试失败"; showToast({ title: "测试失败", text: llmState().error, kind: "error" }); renderAll(); }); return; }
       if (action === "test-max-concurrency") { void handleTestMaxConcurrency().catch((error) => { llmState().error = error.message || "测试最大并发数失败"; showToast({ title: "测试最大并发数失败", text: llmState().error, kind: "error" }); renderAll(); }); return; }
       if (action === "fetch-model-list") { void handleFetchModelList().catch((error) => { showToast({ title: "获取模型列表失败", text: error?.message || "获取模型列表失败", kind: "error" }); }); return; }
-      if (action === "model-list-close") { const editor = llmState().editor; if (editor) editor.modelList = null; renderModelListPanel(); return; }
       if (action === "save-create") { void handleCreateSave().catch((error) => { llmState().error = error.message || "保存失败"; showToast({ title: "保存失败", text: llmState().error, kind: "error" }); renderAll(); }); return; }
       if (action === "save-detail") { void handleDetailSave().catch((error) => { llmState().error = error.message || "保存失败"; showToast({ title: "保存失败", text: llmState().error, kind: "error" }); renderAll(); }); return; }
       if (action === "delete-detail") { void handleDelete().catch((error) => { llmState().error = error.message || "删除失败"; showToast({ title: "删除失败", text: llmState().error, kind: "error" }); renderAll(); }); }
     });
     document.addEventListener("click", (event) => {
-      if (event.target.closest(".llm-note-wrap") || event.target.closest("[data-llm-note-popover]")) return;
-      closeLlmNotePopovers();
+      if (event.target.closest("#llm-model-list-panel")) {
+        const modelItem = event.target.closest("[data-llm-model-item]");
+        if (modelItem) {
+          applyModelListItem(modelItem.dataset.llmModelItem);
+          return;
+        }
+        if (event.target.closest("[data-llm-action='model-list-close']")) dismissModelList();
+        return;
+      }
+      if (!event.target.closest(".llm-note-wrap") && !event.target.closest("[data-llm-note-popover]")) {
+        closeLlmNotePopovers();
+      }
+      if (
+        event.target.closest("[data-llm-action='fetch-model-list']")
+        || event.target.closest("#llm-binding-default-model")
+      ) return;
+      dismissModelList();
+    });
+    document.addEventListener("input", (event) => {
+      if (event.target?.id !== "llm-model-list-filter") return;
+      const editor = llmState().editor;
+      if (!editor?.modelList) return;
+      editor.modelList.filter = String(event.target.value || "");
+      renderModelListItems();
     });
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape") {
         closeLlmNotePopovers();
+        dismissModelList();
         const nameEdit = document.getElementById("llm-edit-name-input");
         if (nameEdit) cancelModelNameEdit();
       }
     });
+    document.addEventListener("scroll", () => positionModelListPanel(), true);
+    window.addEventListener("resize", () => positionModelListPanel());
     llmState().eventsBound = true;
+  }
+
+  function dismissModelList() {
+    const editor = llmState().editor;
+    if (editor) editor.modelList = null;
+    closeModelListPanel();
   }
 
   function closeLlmNotePopovers() {
@@ -2177,6 +2229,8 @@
     normalizeBindingNameText,
     withThinkingOutputParameterDefaults,
     handleBindingJsonEditorInput,
+    handleFetchModelList,
+    applyModelListItem,
     llmEditorDirty,
     syncLlmEditorDirtyAffordance,
     syncBindingInputs,

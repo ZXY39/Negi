@@ -137,7 +137,7 @@ def _run_node_script(script: str) -> dict[str, object]:
     return json.loads(completed.stdout.strip())
 
 
-def test_detail_editor_header_renders_protocol_select() -> None:
+def test_detail_editor_renders_protocol_select_in_first_form_row() -> None:
     result = _run_node_script(
         """
         window.renderModelDetail();
@@ -146,12 +146,18 @@ def test_detail_editor_header_renders_protocol_select() -> None:
     )
 
     detail_html = str(result["detailHtml"])
-    assert "llm-edit-protocol-field" in detail_html
     # 协议文字只作为占位标签存在，控件本身自描述
     assert '<span class="resource-field-label llm-provider-label-spacer">协议</span>' in detail_html
     assert "llm-provider-select" in detail_html
     assert 'value="openai" selected' in detail_html
     assert "OpenAI Responses" in detail_html
+    # 协议不再单独占弹窗头部一格：它与模型ID、多模态同处第一行。
+    assert "llm-edit-protocol-field" not in detail_html
+    assert (
+        detail_html.index("llm-binding-default-model")
+        < detail_html.index("llm-provider-select")
+        < detail_html.index("llm-binding-image-multimodal-enabled")
+    )
 
 
 def test_detail_provider_switch_rewrites_draft_and_marks_config_changed() -> None:

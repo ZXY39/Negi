@@ -7788,7 +7788,16 @@ textarea {
     padding: var(--space-3);
     border: 1px solid var(--border-color);
     border-radius: var(--radius-md);
-    background: color-mix(in srgb, var(--bg-app) 78%, transparent);
+    background: var(--bg-panel);
+    box-shadow: var(--shadow-md);
+}
+
+/* 悬浮下拉：挂到 body 上按模型ID输入框定位，弹窗正文的滚动与裁剪都碰不到它。 */
+.llm-model-list-panel--floating {
+    position: fixed;
+    z-index: 1000;
+    max-height: min(420px, calc(100dvh - 24px));
+    overflow: auto;
 }
 
 .llm-model-list-panel[hidden] {
@@ -7798,12 +7807,17 @@ textarea {
 .llm-model-list-toolbar {
     display: flex;
     align-items: center;
-    gap: var(--space-3);
-    flex-wrap: wrap;
+    gap: var(--space-2);
+    flex-wrap: nowrap;
 }
 
 .llm-model-list-toolbar .resource-search {
-    flex: 1 1 220px;
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.llm-model-list-toolbar .toolbar-btn {
+    flex: 0 0 auto;
 }
 
 .llm-model-list-items {
@@ -7834,19 +7848,27 @@ textarea {
     color: var(--status-error-text, #dc2626);
 }
 
-.llm-model-list-field {
-    justify-content: flex-end;
+.llm-model-id-input-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
 }
 
-/* 这一格不印标题；文字留着占一行高，让按钮与同行控件对齐（同 协议 / 多模态 的隐藏标签）。 */
-.llm-model-list-field .resource-field-label {
-    visibility: hidden;
+.llm-model-id-input-row .resource-search {
+    flex: 1 1 auto;
+    min-width: 0;
 }
 
+/* 模型ID右侧的取列表小按钮：与输入框同高的一条 38px 方档。 */
 .llm-fetch-btn {
-    width: 100%;
-    min-height: 46px;
+    flex: 0 0 auto;
+    width: 38px;
+    min-width: 38px;
+    min-height: 38px;
+    border: 1px solid var(--border-color);
     border-radius: var(--radius-md);
+    background: color-mix(in srgb, var(--bg-app) 78%, transparent);
+    cursor: pointer;
 }
 
 .llm-concurrency-input-row {
@@ -13861,11 +13883,6 @@ textarea {
 .llm-edit-name-input {
     width: min(320px, 56vw);
     font-size: 0.95rem;
-}
-.llm-edit-protocol-field {
-    flex: 0 0 auto;
-    width: 168px;
-    margin: 0;
 }
 
 .llm-note-wrap {
