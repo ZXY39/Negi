@@ -97,8 +97,10 @@ def test_stale_process_reaper_keeps_both_cmdline_shapes() -> None:
 def test_readme_launches_via_start_script_and_keeps_typed_commands_later() -> None:
     readme = _read("README.md")
 
-    startup_section = readme[readme.index("## 2. 快速开始"):readme.index("## 3. Web 界面")]
-    manual_section = readme[readme.index("## 11. 手动安装与命令行"):]
+    # 日常启动段只给"不需要知道细节"的入口；`negi web` / `negi worker` 是前台与
+    # 拆环节排查用的，留在后面的命令一览里，否则用户会照着前台命令起服务。
+    startup_section = readme[readme.index("### 启动和停止"):readme.index("## 群聊里的它")]
+    manual_section = readme[readme.index("### 命令一览"):]
 
     assert "start-negi" in startup_section
     assert "negi web" not in startup_section
@@ -110,9 +112,10 @@ def test_readme_launches_via_start_script_and_keeps_typed_commands_later() -> No
 def test_readme_documents_daily_start_and_uninstall() -> None:
     readme = _read("README.md")
 
-    assert "### 2.3 日常启动与项目口令" in readme
-    assert "### 2.6 卸载" in readme
-    uninstall_section = readme[readme.index("### 2.6 卸载"):readme.index("## 3. Web 界面")]
+    assert "### 启动和停止" in readme
+    assert "项目口令" in readme
+    assert "### 卸载" in readme
+    uninstall_section = readme[readme.index("### 卸载"):readme.index("### 安装脚本参数")]
     for phrase in ("已安装的应用", "uninstall.ps1", "uninstall.sh", "保留数据", "全部删除"):
         assert phrase in uninstall_section, phrase
 

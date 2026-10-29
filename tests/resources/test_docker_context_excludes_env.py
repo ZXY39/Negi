@@ -1,6 +1,6 @@
 """Docker 构建上下文必须排除操作员自己造的 .env。
 
-README「10.1 启动步骤」第 1 步就是"复制 `.env.docker.example` 为 `.env`"，里面放
+README「Docker 部署」第 1 步就是"复制 `.env.docker.example` 为 `.env`"，里面放
 `G3KU_BOOTSTRAP_PASSWORD` / `G3KU_BOOTSTRAP_MASTER_KEY`；compose 是**运行时**读 `.env`
 做变量插值，镜像里根本不需要它。而 `Dockerfile` 用 `COPY . /app` 一次带走整个上下文，
 所以 `.dockerignore` 少这一行就等于把口令烤进镜像层（跟着 push 走出去，删不掉）。
