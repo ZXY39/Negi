@@ -17050,8 +17050,8 @@ textarea {
     padding-right: 36px;
 }
 
-/* 设置标题右侧挂两行项目外部信息（GitHub 链接 / 交流 QQ 群号 + 二维码入口）。
-   二维码弹层锚在群号行右端并落在弹窗内：.confirm-dialog 是 overflow: clip，
+/* 设置标题右侧挂一行项目外部信息（GitHub 链接 + 交流 QQ 群号与二维码入口）。
+   二维码弹层锚在这一行右端并落在弹窗内：.confirm-dialog 是 overflow: clip，
    超出弹窗的部分会被裁掉。 */
 #project-settings-dialog .confirm-header {
     display: flex;
@@ -17067,15 +17067,17 @@ textarea {
 .project-settings-meta {
     position: relative;
     display: flex;
-    flex-direction: column;
-    gap: 3px;
+    align-items: center;
+    gap: var(--ui-space-3);
     min-width: 0;
     font-size: 12px;
     line-height: 1.4;
+    white-space: nowrap;
     color: var(--ui-text-secondary);
 }
 
 .project-settings-meta-link {
+    flex: 0 0 auto;
     color: var(--ui-text-secondary);
     text-decoration: none;
     white-space: nowrap;
