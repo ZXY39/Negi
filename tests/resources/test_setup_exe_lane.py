@@ -22,13 +22,17 @@ param(
     [string]$Dir,
     [switch]$Upgrade,
     [switch]$NoUninstallEntry,
-    [switch]$NoStart
+    [switch]$NoStart,
+    [string]$SourceArchive,
+    [string]$UvPath
 )
 $payload = [ordered]@{
     dir = $Dir
     upgrade = $Upgrade.IsPresent
     no_uninstall_entry = $NoUninstallEntry.IsPresent
     no_start = $NoStart.IsPresent
+    source_archive = $SourceArchive
+    uv_path = $UvPath
 }
 $payload | ConvertTo-Json | Set-Content -LiteralPath $env:NEGI_STUB_OUT -Encoding ascii
 exit 3
@@ -118,6 +122,32 @@ def test_pointer_without_code_under_it_stays_a_fresh_install(tmp_path: Path) -> 
     bound = _bound(out)
     assert bound["dir"] == str(target)
     assert bound["upgrade"] is False
+
+
+def test_payload_next_to_the_scripts_is_handed_to_install_ps1(tmp_path: Path) -> None:
+    stage, local, script = _stage(tmp_path)
+    source = stage / "negi-source.zip"
+    source.write_bytes(b"PK\x03\x04")
+    uv = stage / "uv.exe"
+    uv.write_bytes(b"MZ")
+    out = tmp_path / "bound.json"
+
+    _run(script, local, out, ["-Dir", str(tmp_path / "fresh"), "-Quiet"])
+
+    bound = _bound(out)
+    assert bound["source_archive"] == str(source)
+    assert bound["uv_path"] == str(uv)
+
+
+def test_setup_keeps_a_log_a_user_can_send_back(tmp_path: Path) -> None:
+    stage, local, script = _stage(tmp_path)
+    out = tmp_path / "bound.json"
+
+    _run(script, local, out, ["-Dir", str(tmp_path / "fresh"), "-Quiet"])
+
+    log = local / "Negi" / "logs" / "setup.log"
+    assert log.exists()
+    assert "setup start" in log.read_text(encoding="utf-8-sig")
 
 
 def test_relative_answer_resolves_against_the_caller_cwd(tmp_path: Path) -> None:

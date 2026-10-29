@@ -60,6 +60,8 @@ QQ 官方机器人和 OneBot 桥都按普通图片消息投递，每轮发几张
 
 **推荐：双击安装包。** 发布页的 `Negi-Setup-<版本>.exe`，向导只问一个安装目录，剩下全自动。已经装过的机器再跑一次它就是升级。
 
+安装包里带着该版本的源码快照和 uv：全新安装不为「取代码」访问 GitHub，也不下载 uv；Python 解释器和依赖仍要联网，直连失败会自动换镜像重试（见下节）。升级要取目标版本的代码，仍从 GitHub 走。
+
 这个 exe 没有签名，首次运行 Windows 可能会拦一下，点「更多信息」→「仍要运行」。
 
 **或者用一行命令：**
@@ -80,21 +82,16 @@ curl -LsSf https://github.com/ZXY39/Negi/releases/latest/download/install.sh | b
 
 ### 网络慢或连不上 GitHub
 
-同一份脚本可以走镜像通道，仓库地址和参数都不变：
+用安装包装的时候，「取代码」和「装 uv」不经过网络：两者都在 exe 里。仍要联网的是 Python 解释器（从 python-build-standalone 下载）和 PyPI 依赖，这两步直连失败会自动换镜像重试一次（清华 PyPI、SJTU 的 python-build-standalone 镜像）。用脚本安装时想一开始就走镜像，把脚本下载下来加 `-Mirror` / `--mirror`（一行命令不能传参）；只想直连用 `-NoMirror` / `--no-mirror`；自己设了 `UV_DEFAULT_INDEX` / `UV_PYTHON_INSTALL_MIRROR` 就按你的来，脚本不覆盖。
+
+一行命令那条通道没有内置载荷：脚本本身和代码都还从 GitHub 取。GitHub 连不上时优先用安装包；只取脚本这一步想走镜像，仓库地址和参数都不变：
 
 ```powershell
 iwr https://cdn.jsdelivr.net/gh/ZXY39/Negi@latest/install.ps1 | iex
 iwr https://ghfast.top/https://github.com/ZXY39/Negi/releases/latest/download/install.ps1 | iex
 ```
 
-走第三方代理等于把「执行什么代码」交给了对方。稳妥的做法是先下载再看一眼：脚本首行应该是 `#requires -Version 5.1` 或 `#!/usr/bin/env bash`，里面的 `$Ref` / `REF` 就是它将要装的版本。jsdelivr 按标签缓存，发新版后 `@latest` 可能滞后，急用就把地址里的 `@latest` 换成 `@vX.Y.Z`。
-
-PyPI 慢的话给 uv 指个镜像就行，脚本没有专门的开关：
-
-```bash
-export UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
-export UV_PYTHON_INSTALL_MIRROR=<可用的 python-build-standalone 镜像>
-```
+注意这两条只加速脚本本身：脚本跑起来后仍然直连 GitHub 拉代码。走第三方代理等于把「执行什么代码」交给了对方。稳妥的做法是先下载再看一眼：脚本首行应该是 `#requires -Version 5.1` 或 `#!/usr/bin/env bash`，里面的 `$Ref` / `REF` 就是它将要装的版本。jsdelivr 按标签缓存，发新版后 `@latest` 可能滞后，急用就把地址里的 `@latest` 换成 `@vX.Y.Z`。
 
 ## 装完之后
 
@@ -234,6 +231,8 @@ Windows 在「设置 → 应用 → 已安装的应用」里找到 Negi 点卸�
 | `-Upgrade` / `--upgrade` | 更新已安装的设备到指定版本 |
 | `-NoPath` / `--no-path` | 写命令桩但不改 PATH |
 | `-NoShortcut` / `--no-shortcut` | 不创建桌面与开始菜单图标 |
+| `-Mirror` / `--mirror` | Python 与依赖直接从内置镜像下载 |
+| `-NoMirror` / `--no-mirror` | 只走直连，失败不自动换镜像 |
 
 ### 启动脚本参数
 

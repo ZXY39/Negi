@@ -10,6 +10,9 @@
 # Environment knobs (passed straight through to uv):
 #   UV_DEFAULT_INDEX          e.g. https://pypi.tuna.tsinghua.edu.cn/simple
 #   UV_PYTHON_INSTALL_MIRROR  e.g. a reachable python-build-standalone mirror
+#
+# When those are unset, a failed direct download is retried once through the
+# mirrors below. --mirror starts on the mirrors, --no-mirror disables the retry.
 set -euo pipefail
 
 REPO_OWNER='ZXY39'
@@ -23,6 +26,10 @@ NO_SHORTCUT=0
 REPO_GIT="https://github.com/${REPO_OWNER}/${REPO_NAME}.git"
 REPO_ZIP="https://github.com/${REPO_OWNER}/${REPO_NAME}/archive/${REF}.zip"
 UV_INSTALLER='https://astral.sh/uv/install.sh'
+PYPI_MIRROR='https://pypi.tuna.tsinghua.edu.cn/simple'
+PYTHON_MIRROR='https://mirror.sjtu.edu.cn/github-release/astral-sh/python-build-standalone/releases/download'
+MIRROR=0
+NO_MIRROR=0
 # Kept across upgrades: the environment and everything the operator created.
 PROTECTED_ENTRIES='.venv .g3ku .git'
 STAGE_DIR=''
@@ -38,7 +45,7 @@ trap cleanup EXIT
 
 usage() {
   cat <<'EOF'
-Usage: install.sh [--dir PATH] [--ref TAG] [--no-start] [--upgrade] [--no-path] [--no-shortcut]
+Usage: install.sh [--dir PATH] [--ref TAG] [--no-start] [--upgrade] [--no-path] [--no-shortcut] [--mirror|--no-mirror]
 
   --dir PATH       install location (default ~/Negi)
   --ref TAG        git ref to install (default the pinned release tag)
@@ -46,6 +53,8 @@ Usage: install.sh [--dir PATH] [--ref TAG] [--no-start] [--upgrade] [--no-path] 
   --upgrade        update the code in an existing install, keep .venv and .g3ku
   --no-path        write the command stub but leave PATH alone
   --no-shortcut    skip the desktop entry
+  --mirror         start Python and package downloads on the built-in mirrors
+  --no-mirror      only use the direct sources; no automatic mirror retry
 EOF
 }
 
@@ -83,6 +92,14 @@ while [ $# -gt 0 ]; do
       NO_SHORTCUT=1
       shift
       ;;
+    --mirror)
+      MIRROR=1
+      shift
+      ;;
+    --no-mirror)
+      NO_MIRROR=1
+      shift
+      ;;
     -h | --help)
       usage
       exit 0
@@ -93,6 +110,15 @@ while [ $# -gt 0 ]; do
       ;;
   esac
 done
+
+if [ "$MIRROR" -eq 1 ] && [ "$NO_MIRROR" -eq 1 ]; then
+  fail '--mirror and --no-mirror cannot be combined'
+fi
+if [ "$MIRROR" -eq 1 ]; then
+  export UV_DEFAULT_INDEX="$PYPI_MIRROR"
+  export UV_PYTHON_INSTALL_MIRROR="$PYTHON_MIRROR"
+  log "mirror mode: index=$PYPI_MIRROR python=$PYTHON_MIRROR"
+fi
 
 find_uv() {
   if command -v uv >/dev/null 2>&1; then
@@ -298,16 +324,43 @@ update_code() {
   copy_checkout_into_root 0
 }
 
+install_python() {
+  local pin="$1"
+  log "uv python install $pin"
+  if "$UV" python install "$pin"; then
+    return 0
+  fi
+  # A mirror already chosen by the operator (or by --mirror above) is not
+  # second-guessed; the retry is only for "direct failed, nothing chosen yet".
+  if [ "$NO_MIRROR" -eq 1 ] || [ -n "${UV_PYTHON_INSTALL_MIRROR:-}" ]; then
+    fail "uv python install $pin failed; set UV_PYTHON_INSTALL_MIRROR to a reachable mirror and rerun"
+  fi
+  log "python download failed; retrying via $PYTHON_MIRROR"
+  export UV_PYTHON_INSTALL_MIRROR="$PYTHON_MIRROR"
+  "$UV" python install "$pin" || fail "uv python install $pin failed direct and via $PYTHON_MIRROR"
+}
+
+sync_environment() {
+  log 'uv sync --frozen'
+  if (cd "$DIR" && "$UV" sync --frozen); then
+    return 0
+  fi
+  if [ "$NO_MIRROR" -eq 1 ] || [ -n "${UV_DEFAULT_INDEX:-}" ]; then
+    fail 'uv sync failed; set UV_DEFAULT_INDEX to a reachable index and rerun'
+  fi
+  log "dependency download failed; retrying via $PYPI_MIRROR"
+  export UV_DEFAULT_INDEX="$PYPI_MIRROR"
+  (cd "$DIR" && "$UV" sync --frozen) || fail "uv sync failed direct and via $PYPI_MIRROR"
+}
+
 install_environment() {
   if [ -f "$DIR/.python-version" ]; then
     pin="$(head -n 1 "$DIR/.python-version" | tr -d '[:space:]')"
     if [ -n "$pin" ]; then
-      log "uv python install $pin"
-      "$UV" python install "$pin" || fail "uv python install $pin failed"
+      install_python "$pin"
     fi
   fi
-  log 'uv sync --frozen'
-  (cd "$DIR" && "$UV" sync --frozen) || fail 'uv sync failed'
+  sync_environment
 }
 
 BIN_DIR="$HOME/.local/bin"

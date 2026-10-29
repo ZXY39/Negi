@@ -15,7 +15,9 @@
 param(
     [string]$Dir,
     [switch]$Quiet,
-    [switch]$NoUninstallEntry
+    [switch]$NoUninstallEntry,
+    [string]$SourceArchive,
+    [string]$UvPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -24,6 +26,18 @@ $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $installer = Join-Path $here 'install.ps1'
 if (-not (Test-Path -LiteralPath $installer)) {
     Write-Error "[setup] install.ps1 is missing next to this script"
+}
+
+# The wizard unpacks these next to the scripts. They are optional: an older exe,
+# or a manual run of this script, simply falls through to install.ps1's network
+# lanes.
+if (-not $SourceArchive) {
+    $candidate = Join-Path $here 'negi-source.zip'
+    if (Test-Path -LiteralPath $candidate) { $SourceArchive = $candidate }
+}
+if (-not $UvPath) {
+    $candidate = Join-Path $here 'uv.exe'
+    if (Test-Path -LiteralPath $candidate) { $UvPath = $candidate }
 }
 
 function Get-InstalledRoot {
@@ -97,7 +111,48 @@ if ($NoUninstallEntry) {
     # its own: two "Negi" entries that uninstall differently is worse than none.
     $parameters['NoUninstallEntry'] = $true
 }
+if ($SourceArchive) { $parameters['SourceArchive'] = $SourceArchive }
+if ($UvPath) { $parameters['UvPath'] = $UvPath }
 
 Write-Host "[setup] 安装到 $Dir" -ForegroundColor Cyan
-& $installer @parameters
-exit $LASTEXITCODE
+$logDir = Join-Path $env:LOCALAPPDATA 'Negi\logs'
+$log = Join-Path $logDir 'setup.log'
+try {
+    New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+    Add-Content -LiteralPath $log -Value ("[{0}] setup start: {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Dir) -Encoding UTF8
+}
+catch {
+    Write-Host "[setup] 无法写入日志：$($_.Exception.Message)" -ForegroundColor Yellow
+}
+
+# The wizard runs this script hidden. Without a log, a failed install leaves
+# nothing to read; this file is the only diagnosis a user can send back. Lines
+# are appended one by one so setup.log stays a single UTF-8 text file instead of
+# mixing Tee-Object's default encoding with the header above.
+$code = 1
+try {
+    & $installer @parameters 2>&1 | ForEach-Object {
+        $text = ($_ | Out-String).TrimEnd()
+        if ($text) {
+            Write-Host $text
+            try {
+                Add-Content -LiteralPath $log -Value $text -Encoding UTF8
+            }
+            catch { }
+        }
+    }
+    $code = $LASTEXITCODE
+}
+catch {
+    $message = $_.Exception.Message
+    try {
+        Add-Content -LiteralPath $log -Value "[setup] failed: $message" -Encoding UTF8
+    }
+    catch { }
+    Write-Host "[setup] 安装失败：$message" -ForegroundColor Red
+    $code = 1
+}
+if ($code -ne 0) {
+    Write-Host "[setup] 完整日志：$log" -ForegroundColor Yellow
+}
+exit $code

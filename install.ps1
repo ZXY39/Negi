@@ -7,6 +7,10 @@
   Provisions uv (and therefore Python) on a machine that has neither, fetches the
   pinned checkout, syncs the locked environment and hands off to negi_bootstrap.py.
   Runtime code is not modified by this script.
+
+  The exe passes -SourceArchive and -UvPath so a fresh install copies the tag's
+  checkout out of negi-source.zip and reuses the bundled uv instead of touching
+  GitHub. Both are optional: without them the network lanes below run as before.
 #>
 param(
     [string]$Dir = (Join-Path $env:USERPROFILE 'Negi'),
@@ -15,17 +19,30 @@ param(
     [switch]$Upgrade,
     [switch]$NoPath,
     [switch]$NoShortcut,
-    [switch]$NoUninstallEntry
+    [switch]$NoUninstallEntry,
+    [string]$SourceArchive = '',
+    [string]$UvPath = '',
+    [switch]$Mirror,
+    [switch]$NoMirror
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+if ($Mirror -and $NoMirror) {
+    Write-Error '[install] -Mirror and -NoMirror cannot be combined'
+}
 
 $RepoOwner = 'ZXY39'
 $RepoName = 'Negi'
 $RepoGit = "https://github.com/$RepoOwner/$RepoName.git"
 $RepoZip = "https://github.com/$RepoOwner/$RepoName/archive/${Ref}.zip"
 $UvInstaller = 'https://astral.sh/uv/install.ps1'
+# Mirrors are only used after the direct source fails, unless -Mirror asks for
+# them up front. UV_DEFAULT_INDEX / UV_PYTHON_INSTALL_MIRROR keep working and
+# suppress the automatic retry (they are an explicit choice already).
+$PyPiMirror = 'https://pypi.tuna.tsinghua.edu.cn/simple'
+$PythonMirror = 'https://mirror.sjtu.edu.cn/github-release/astral-sh/python-build-standalone/releases/download'
 # Kept across upgrades: the environment and everything the operator created.
 $ProtectedEntries = @('.venv', '.g3ku', '.git')
 # Per-user install surface outside the project root: the command stub, the icon
@@ -70,11 +87,38 @@ function Get-UvCommand {
     return $null
 }
 
+function Install-BundledUv {
+    param([string]$Path)
+    # The exe's {tmp} disappears after setup, and later upgrades (including the
+    # web "restart and update" lane) need uv again. The official astral layout
+    # is %USERPROFILE%\.local\bin, which Get-UvCommand already probes.
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $null }
+    $bin = Join-Path $env:USERPROFILE '.local\bin'
+    $target = Join-Path $bin 'uv.exe'
+    try {
+        New-Item -ItemType Directory -Force -Path $bin | Out-Null
+        Copy-Item -LiteralPath $Path -Destination $target -Force
+    }
+    catch {
+        Write-Step "could not persist the bundled uv: $($_.Exception.Message)"
+        return $null
+    }
+    return $target
+}
+
 function Ensure-Uv {
     $uv = Get-UvCommand
     if ($uv) {
         Write-Step "using uv: $uv"
         return $uv
+    }
+    if ($UvPath) {
+        $bundled = Install-BundledUv -Path $UvPath
+        if ($bundled) {
+            Write-Step "using bundled uv: $bundled"
+            return $bundled
+        }
+        Write-Step "bundled uv is missing at $UvPath; falling back to astral.sh"
     }
     Write-Step 'uv not found, installing it from astral.sh'
     Invoke-Checked @('powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', "irm $UvInstaller | iex") -Where 'installer'
@@ -139,8 +183,67 @@ function Copy-CheckoutInto {
     }
 }
 
+function Expand-SourceArchive {
+    param([string]$ArchivePath, [string]$Target)
+    try {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        [System.IO.Compression.ZipFile]::ExtractToDirectory($ArchivePath, $Target)
+        return
+    }
+    catch {
+        # Constrained Language mode blocks Add-Type; Expand-Archive is slower but
+        # ships with Windows PowerShell.
+        Expand-Archive -LiteralPath $ArchivePath -DestinationPath $Target -Force
+    }
+}
+
+function Get-CheckoutVersion {
+    param([string]$Checkout)
+    $initFile = Join-Path $Checkout 'g3ku\__init__.py'
+    if (-not (Test-Path -LiteralPath $initFile)) { return '' }
+    $text = Get-Content -LiteralPath $initFile -Raw
+    if ($text -match '__version__\s*=\s*"([^"]+)"') { return $Matches[1] }
+    return ''
+}
+
 function Get-CheckoutStage {
     param([string]$StageRoot, [switch]$Archive)
+    if ($SourceArchive) {
+        $target = Join-Path $StageRoot 'checkout'
+        if (-not (Test-Path -LiteralPath $SourceArchive)) {
+            Write-Step "bundled source not found at $SourceArchive; using the network checkout"
+        }
+        else {
+            Write-Step "extracting bundled source: $SourceArchive"
+            $ready = $true
+            try {
+                New-Item -ItemType Directory -Force -Path $target | Out-Null
+                Expand-SourceArchive -ArchivePath $SourceArchive -Target $target
+            }
+            catch {
+                Write-Step "bundled source could not be extracted: $($_.Exception.Message)"
+                $ready = $false
+            }
+            if ($ready) {
+                $version = Get-CheckoutVersion -Checkout $target
+                if ($version -ne $Ref.TrimStart('v')) {
+                    Write-Step "bundled source declares '$version' instead of $Ref; using the network checkout"
+                    $ready = $false
+                }
+            }
+            if ($ready -and -not (Get-Command git -ErrorAction SilentlyContinue)) {
+                # Without git the install stays on the archive lane; leaving .git
+                # behind would make every later -Upgrade demand an install of git.
+                Write-Step 'git is unavailable: dropping .git from the bundled source (archive lane)'
+                Remove-Item -LiteralPath (Join-Path $target '.git') -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            if ($ready) {
+                Write-Step "using bundled source at $target"
+                return $target
+            }
+            Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
     if (-not $Archive -and (Get-Command git -ErrorAction SilentlyContinue)) {
         $target = Join-Path $StageRoot 'checkout'
         Write-Step "git clone --depth 1 --branch $Ref (staged)"
@@ -312,17 +415,64 @@ function Update-Code {
     Install-CodeInto -Root $Root
 }
 
+function Invoke-UvCapture {
+    param([string[]]$Command)
+    # uv writes progress to stderr; capture both streams without letting PS 5.1
+    # promote stderr into a terminating error, and keep the exit code for retries.
+    $exe = $Command[0]
+    $rest = @($Command | Select-Object -Skip 1)
+    $saved = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $lines = @(& $exe @rest 2>&1 | ForEach-Object { [string]$_ })
+        $code = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $saved
+    }
+    foreach ($line in $lines) { Write-Host $line }
+    return @{ Code = $code }
+}
+
+function Install-ProjectPython {
+    param([string]$uv, [string]$Pin)
+    Write-Step "uv python install $Pin"
+    $first = Invoke-UvCapture @($uv, 'python', 'install', $Pin)
+    if ($first['Code'] -eq 0) { return }
+    if ($NoMirror -or $env:UV_PYTHON_INSTALL_MIRROR) {
+        Write-Error "[install] uv python install failed (exit $($first['Code'])); set UV_PYTHON_INSTALL_MIRROR to a reachable mirror and rerun"
+    }
+    Write-Step "python download failed; retrying via $PythonMirror"
+    $env:UV_PYTHON_INSTALL_MIRROR = $PythonMirror
+    $second = Invoke-UvCapture @($uv, 'python', 'install', $Pin)
+    if ($second['Code'] -ne 0) {
+        Write-Error "[install] uv python install failed direct and via $PythonMirror; set UV_PYTHON_INSTALL_MIRROR yourself"
+    }
+}
+
+function Sync-ProjectEnvironment {
+    param([string]$uv)
+    Write-Step 'uv sync --frozen'
+    $first = Invoke-UvCapture @($uv, 'sync', '--frozen')
+    if ($first['Code'] -eq 0) { return }
+    if ($NoMirror -or $env:UV_DEFAULT_INDEX) {
+        Write-Error "[install] uv sync failed (exit $($first['Code'])); set UV_DEFAULT_INDEX to a reachable index and rerun"
+    }
+    Write-Step "dependency download failed; retrying via $PyPiMirror"
+    $env:UV_DEFAULT_INDEX = $PyPiMirror
+    $second = Invoke-UvCapture @($uv, 'sync', '--frozen')
+    if ($second['Code'] -ne 0) {
+        Write-Error "[install] uv sync failed with PyPI and $PyPiMirror; set UV_DEFAULT_INDEX yourself"
+    }
+}
+
 function Install-Environment {
     param([string]$uv, [string]$Root)
     $pin = Get-ProjectPin -Root $Root
-    if ($pin) {
-        Write-Step "uv python install $pin"
-        Invoke-Checked @($uv, 'python', 'install', $pin) -Where $Root
-    }
+    if ($pin) { Install-ProjectPython -uv $uv -Pin $pin }
     Push-Location -LiteralPath $Root
     try {
-        Write-Step 'uv sync --frozen'
-        Invoke-Checked @($uv, 'sync', '--frozen') -Where $Root
+        Sync-ProjectEnvironment -uv $uv
     }
     finally {
         Pop-Location
@@ -473,6 +623,20 @@ function Install-DesktopIcons {
     }
 }
 
+function Get-RegistryLocation {
+    param([string]$Path)
+    # A `*_is1` key without InstallLocation is malformed but real; under
+    # StrictMode the missing property is a terminating error, not $null.
+    try {
+        $value = (Get-ItemProperty -LiteralPath $Path -Name InstallLocation -ErrorAction SilentlyContinue).InstallLocation
+    }
+    catch {
+        return ''
+    }
+    if ($value) { return [string]$value }
+    return ''
+}
+
 function Get-SetupExeOwner {
     param([string]$Root)
     # Inno Setup registers its uninstall key as '<AppId>_is1' and stores the chosen
@@ -485,7 +649,7 @@ function Get-SetupExeOwner {
     $wanted = $Root.TrimEnd('\')
     foreach ($entry in (Get-ChildItem -LiteralPath $parent -ErrorAction SilentlyContinue)) {
         if ($entry.PSChildName -notlike '*_is1') { continue }
-        $location = (Get-ItemProperty -LiteralPath $entry.PSPath -Name InstallLocation -ErrorAction SilentlyContinue).InstallLocation
+        $location = Get-RegistryLocation -Path $entry.PSPath
         if ($location -and ($location.TrimEnd('\') -ieq $wanted)) { return $entry.PSChildName }
     }
     return ''
@@ -515,6 +679,11 @@ function Write-UninstallRegistryEntry {
 }
 
 Write-Step "target directory: $Dir"
+if ($Mirror) {
+    $env:UV_DEFAULT_INDEX = $PyPiMirror
+    $env:UV_PYTHON_INSTALL_MIRROR = $PythonMirror
+    Write-Step "mirror mode: index=$PyPiMirror python=$PythonMirror"
+}
 $uv = Ensure-Uv
 Update-Code -Root $Dir
 Install-Environment -uv $uv -Root $Dir
@@ -529,7 +698,7 @@ if ($setupExeOwner) {
     # that also keeps a script-installed copy elsewhere must not lose its entry.
     $legacyLocation = ''
     if (Test-Path -LiteralPath $UninstallKey) {
-        $legacyLocation = (Get-ItemProperty -LiteralPath $UninstallKey -Name InstallLocation -ErrorAction SilentlyContinue).InstallLocation
+        $legacyLocation = Get-RegistryLocation -Path $UninstallKey
     }
     if ($legacyLocation -and ($legacyLocation.TrimEnd('\') -ieq $Dir.TrimEnd('\'))) {
         Remove-Item -LiteralPath $UninstallKey -Recurse -Force
