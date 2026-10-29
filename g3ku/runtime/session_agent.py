@@ -1389,6 +1389,35 @@ class RuntimeAgentSession:
             payload["thinking_tokens"] = int(entry.get("thinking_tokens") or 0)
         return payload
 
+    def _sticker_sheet_turn_text_prefix(self, text: str, turn_id: str) -> str:
+        """只调用了成功 ``show_sticker_category`` 的那几轮，正文垫在出站正文前面。
+
+        那一跳的正文是给用户看的答复（"找到了，这组表情挺全…"），而最终输出只带最后一跳；
+        渠道端按 ``message_end`` 投递，不垫回去用户就只收到收尾那一句和一张图。
+        只改这一处出站正文：转录行与模型上下文仍各自保存模型原文。
+        """
+        raw = str(text or "")
+        turn_key = str(turn_id or "").strip()
+        if not raw or not turn_key:
+            return raw
+        parts: list[str] = []
+        for turn in frontdoor_turns_for_turn(getattr(self, "_frontdoor_turns", None), turn_key):
+            tools = list(turn.get("tools") or [])
+            if not tools:
+                continue
+            if not all(
+                str(tool.get("tool_name") or "").strip() == "show_sticker_category"
+                and str(tool.get("status") or "").strip().lower() != "error"
+                for tool in tools
+            ):
+                continue
+            part = str(turn.get("text") or "").strip()
+            if part and part not in raw and part not in parts:
+                parts.append(part)
+        if not parts:
+            return raw
+        return "\n\n".join([*parts, raw])
+
     @classmethod
     def _find_transcript_user_index(cls, persisted_session: Any, *, turn_id: str) -> int | None:
         normalized_turn_id = str(turn_id or "").strip()
@@ -3954,10 +3983,15 @@ class RuntimeAgentSession:
                         assistant_metadata=assistant_metadata,
                     )
                 final_turn_id = self._current_turn_id(user_input)
+                # 出站正文（web final 帧 + 渠道 reply.final）补齐表情轮那段正文；
+                # 转录行仍写 output 原文。
+                outbound_text = str(output or "") if silent_reply else self._sticker_sheet_turn_text_prefix(
+                    str(output or ""), final_turn_id
+                )
                 await self._emit(
                     "message_end",
                     role="assistant",
-                    text=str(output or ""),
+                    text=outbound_text,
                     silent_reply=silent_reply,
                     silent_reason=str(getattr(self, "_last_silent_reason", "") or ""),
                     heartbeat_internal=heartbeat_internal,
@@ -4192,10 +4226,14 @@ class RuntimeAgentSession:
                         await self._flush_memory_review_after_compression()
                         tail_profiler.mark("memory_review_flush")
             final_turn_id = self._current_turn_id(user_input)
+            # 同正常收尾：出站正文补齐表情轮那段正文，转录仍写 output 原文。
+            outbound_text = str(output or "") if silent_reply else self._sticker_sheet_turn_text_prefix(
+                str(output or ""), final_turn_id
+            )
             await self._emit(
                 "message_end",
                 role="assistant",
-                text=str(output or ""),
+                text=outbound_text,
                 silent_reply=silent_reply,
                 silent_reason=str(getattr(self, "_last_silent_reason", "") or ""),
                 heartbeat_internal=heartbeat_internal,
@@ -4768,10 +4806,15 @@ class RuntimeAgentSession:
                     assistant_metadata=assistant_metadata,
                     retire_lingering_transcript_rows=True,
                 )
+            outbound_text = (
+                str(output or "")
+                if silent_reply
+                else self._sticker_sheet_turn_text_prefix(str(output or ""), final_turn_id)
+            )
             await self._emit(
                 "message_end",
                 role="assistant",
-                text=str(output or ""),
+                text=outbound_text,
                 silent_reply=silent_reply,
                 silent_reason=str(getattr(self, "_last_silent_reason", "") or ""),
                 source="user",

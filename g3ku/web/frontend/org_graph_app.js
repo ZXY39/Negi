@@ -4504,7 +4504,12 @@ function renderCeoLiveStreamTextIntoTurn(turn) {
     // 没有这道闸门，旁白全部进轨之后的空 residual 会把那一份权威正文换成转圈。
     if (!turn.textEl.classList?.contains?.("pending")) return;
     // 流式文本一律走气泡车道（纯文本，ceo.reply.final 才换 markdown），不再挂进末位分组卡体。
-    const text = ceoLiveStreamResidual(turn, turn.lastExecutionTraceSummary);
+    // 表情轮的正文不在轨道里，所以 residual 不会被它吸收；工具帧那一刻抓下来的正文记在回合上，
+    // 下一段流式开始覆盖 latest_message 后垫在残段前面继续显示——中途文本不再闪一下就没。
+    const text = ceoAssistantTextWithStickerSheetTurns(
+        ceoLiveStreamResidual(turn, turn.lastExecutionTraceSummary),
+        turn.stickerSheetStreamTexts
+    );
     if (!text.trim()) {
         // 旁白都已经进轨：回到等待态。只在状态真的变化时重写 markup——
         // 这一句每帧都会跑到，而 loading markup 里带 <i data-lucide>，重写就牵动全文档图标扫描。
@@ -5045,6 +5050,99 @@ function sliceCeoRailTurns(turns, turn) {
     });
 }
 
+// 表情分类总览是"给模型看一眼再挑一张"的载入动作，不是业务工具：会话轨道不画它，
+// 改成与工具/技能载入同一族的提醒气泡（已加载表情 <pack>/<category>）。
+// 只认成功的调用——失败仍按普通工具行画，原因要可诊断。
+function isCeoStickerSheetToolName(toolName = "") {
+    return String(toolName || "").trim().toLowerCase() === "show_sticker_category";
+}
+
+function ceoStickerSheetStepFailed(step = null) {
+    return String(step?.status || "").trim().toLowerCase() === "error";
+}
+
+function ceoStickerSheetTargetFromText(raw = "") {
+    const text = String(raw || "").trim();
+    if (!text) return "";
+    const payload = parseJsonObjectText(text);
+    const pack = String(payload?.pack || "").trim();
+    const category = String(payload?.category || "").trim();
+    if (pack && category) return `${pack}/${category}`;
+    // 实时工具帧的 arguments_text 是调用摘要（`show_sticker_category (pack=…, category=…)`），
+    // 不是参数 JSON，所以还要认一遍键值形状。
+    const packMatch = text.match(/pack\s*[=:]\s*"?([A-Za-z0-9._-]+)/i);
+    const categoryMatch = text.match(/category\s*[=:]\s*"?([A-Za-z0-9._-]+)/i);
+    return packMatch && categoryMatch ? `${packMatch[1]}/${categoryMatch[1]}` : "";
+}
+
+// 只调用了成功 show_sticker_category 的那一轮：它的正文是给用户看的答复，不属于内部工具流程。
+// 从轨道里摘掉（工具行与这行标题都不画），正文改由气泡拼在最终回复前面显示。
+// 同轮还调了别的工具时只摘那一行工具，正文仍留在轨道里。
+function splitCeoStickerSheetTurns(turns = []) {
+    const railTurns = [];
+    const replyTexts = [];
+    (Array.isArray(turns) ? turns : []).forEach((turn) => {
+        if (!turn || typeof turn !== "object") return;
+        const tools = Array.isArray(turn.tools) ? turn.tools : [];
+        const stickerTools = tools.filter((tool) => (
+            isCeoStickerSheetToolName(tool?.tool_name) && !ceoStickerSheetStepFailed(tool)
+        ));
+        if (!stickerTools.length) {
+            railTurns.push(turn);
+            return;
+        }
+        const otherTools = tools.filter((tool) => !stickerTools.includes(tool));
+        if (otherTools.length) {
+            railTurns.push({ ...turn, tools: otherTools });
+            return;
+        }
+        const text = String(turn.text || "").trim();
+        if (text) replyTexts.push(text);
+    });
+    return { railTurns, replyTexts };
+}
+
+// 拼接顺序就是先后：表情轮在最终答复之前发生，所以前置；最终正文里已经含着这段
+// （收尾帧已由服务端拼好、或攒全正文的车道）时不再重复，同一段出现两次也只留一份。
+function ceoAssistantTextWithStickerSheetTurns(text = "", replyTexts = []) {
+    const finalText = String(text || "");
+    const seen = new Set();
+    const prefix = [];
+    (Array.isArray(replyTexts) ? replyTexts : []).forEach((item) => {
+        const normalized = String(item || "").trim();
+        if (!normalized || seen.has(normalized) || finalText.includes(normalized)) return;
+        seen.add(normalized);
+        prefix.push(normalized);
+    });
+    if (!prefix.length) return finalText;
+    return `${prefix.join("\n\n")}\n\n${finalText}`.trim();
+}
+
+// 表情轮的正文在实时回合里要"留在气泡里继续显示"，不能等账本落地才回来：
+// 工具帧到达时这一刻的流式残留就是这一跳的正文，先把它记在回合上，下一段流式开始时
+// 垫在残段前面继续显示。账本落地后再按 seq 补记（覆盖抓帧漏掉的情况）。
+function rememberCeoStickerSheetStreamText(turn, text) {
+    const normalized = String(text || "").trim();
+    if (!turn || !normalized) return "";
+    const list = Array.isArray(turn.stickerSheetStreamTexts) ? turn.stickerSheetStreamTexts : [];
+    if (list.includes(normalized)) return normalized;
+    turn.stickerSheetStreamTexts = [...list, normalized];
+    return normalized;
+}
+
+// 一旦这段正文被轨道吸收（同轮还调了别的工具、或看图失败仍画普通工具行），
+// 就从气泡的垫前段里摘掉——同一段文字不能轨道一份、气泡再一份。
+function pruneCeoStickerSheetStreamTexts(turn, descriptors = []) {
+    const list = Array.isArray(turn?.stickerSheetStreamTexts) ? turn.stickerSheetStreamTexts : [];
+    if (!list.length) return;
+    const railTexts = new Set(
+        (Array.isArray(descriptors) ? descriptors : [])
+            .map((step) => String(step?.turnText || "").trim())
+            .filter(Boolean)
+    );
+    turn.stickerSheetStreamTexts = list.filter((text) => !railTexts.has(String(text || "").trim()));
+}
+
 function ceoTurnsEarliestToolStartMs(turns = []) {
     let earliest = null;
     (Array.isArray(turns) ? turns : []).forEach((group) => {
@@ -5249,9 +5347,21 @@ function renderCeoTurnsIntoTurn(turn, turns = [], { interruptedMarker = false } 
     if (!turn?.listEl || !turn?.flowEl) return 0;
     if (typeof buildTurnGroupDescriptors !== "function" || typeof renderTraceStep !== "function") return 0;
     const visibleTurns = sliceCeoRailTurns(Array.isArray(turns) ? turns : [], turn);
-    if (!visibleTurns.length) return 0;
-    const descriptors = buildTurnGroupDescriptors(visibleTurns);
-    if (!descriptors.length) return 0;
+    // 表情轮的工具行与标题都不进轨道；它的正文提升到气泡里与最终回复拼接。
+    const stickerSplit = splitCeoStickerSheetTurns(visibleTurns);
+    stickerSplit.replyTexts.forEach((text) => rememberCeoStickerSheetStreamText(turn, text));
+    if (!visibleTurns.length) {
+        renderCeoLiveStreamTextIntoTurn(turn);
+        return 0;
+    }
+    const descriptors = buildTurnGroupDescriptors(stickerSplit.railTurns);
+    if (!descriptors.length) {
+        // 整轮只有表情工具时轨道画不出任何组：气泡里的流式正文仍要吐回去（收尾与后续帧同源）。
+        renderCeoLiveStreamTextIntoTurn(turn);
+        return 0;
+    }
+    // 按轨道实际吸收的正文剪一遍，避免同一段在轨道与气泡各显示一次。
+    pruneCeoStickerSheetStreamTexts(turn, descriptors);
     syncCeoTurnLoadingOnlyState(turn, false);
     const turnViewState = captureCeoTurnTraceViewState(turn);
     resetCeoToolFlow(turn);
@@ -5273,8 +5383,8 @@ function renderCeoTurnsIntoTurn(turn, turns = [], { interruptedMarker = false } 
     if (typeof bindTraceFieldCopyActions === "function") bindTraceFieldCopyActions(turn.listEl);
     if (typeof bindTaskTraceListInteractions === "function") bindTaskTraceListInteractions(turn.listEl);
     turn.steps = descriptors.length;
-    turn.railTurns = visibleTurns;
-    turn.railMetaLabel = ceoRailMetaLabel(turn, visibleTurns) || `${descriptors.length} 组`;
+    turn.railTurns = stickerSplit.railTurns;
+    turn.railMetaLabel = ceoRailMetaLabel(turn, stickerSplit.railTurns) || `${descriptors.length} 组`;
     turn.lastExecutionTraceSummary = { turns: descriptors };
     turn.flowEl.hidden = false;
     // 框默认折叠；用户此前展开过的话由 applyCeoTurnTraceViewState 按 flowOpen 还原。
@@ -5338,6 +5448,7 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "i
         turn.lastExecutionTraceSummary = null;
         turn.turns = [];
         turn.liveStreamText = "";
+        turn.stickerSheetStreamTexts = [];
         // 跨 turn 复用同一回合对象时清空 sticky 元数据,避免上一轮的
         // token 用量/完成时间泄漏到新轮次的元信息里。
         turn.usage = null;
@@ -5949,6 +6060,8 @@ function createPendingCeoTurn(source = "user", { scrollMode = "preserve", reques
             finalized: false,
             historyExpanded: false,
             lastExecutionTraceSummary: null,
+            // 表情轮里"先流式显示、后调用看图工具"的那几段正文（脱离内嵌轨道后留在气泡里）。
+            stickerSheetStreamTexts: [],
             // 在飞工具行的容器（见 ceoLiveToolStepHost），卡片开合不由它决定
             liveToolStepsEl: null,
             liveStreamText: "",
@@ -6447,6 +6560,7 @@ function ceoContextLoadNoticeIconName(kind = "") {
     if (normalizedKind === "skill") return "sparkles";
     if (normalizedKind === "note") return "notebook-pen";
     if (normalizedKind === "memory") return "brain";
+    if (normalizedKind === "sticker") return "sticker";
     return "";
 }
 
@@ -6463,7 +6577,7 @@ function showCeoContextLoadNotice(text = "", { durationMs = CEO_CONTEXT_LOAD_NOT
     const item = document.createElement("div");
     item.className = "ceo-context-load-notice-item";
     const normalizedKind = String(kind || "").trim().toLowerCase();
-    if (["tool", "skill", "note", "memory"].includes(normalizedKind)) {
+    if (["tool", "skill", "note", "memory", "sticker"].includes(normalizedKind)) {
         item.classList?.add?.(`is-${normalizedKind}`);
         item.dataset.noticeKind = normalizedKind;
     }
@@ -6625,6 +6739,27 @@ function maybeShowCeoContextLoadNotice(turn, { toolName = "", status = "", detai
         kind: loaderKind,
         riskLevel: memoryNotice ? memoryNotice.riskLevel : resolveCeoContextLoadNoticeRiskLevel(loaderKind, targetId),
     });
+    return true;
+}
+
+// 表情拼图与工具/技能载入同一族呈现：成功那一跳只弹一条「已加载表情 <pack>/<category>」
+// 气泡，不建工具行（图附在下一次请求里，这一跳没有用户可见的工具结果）。
+// 风险度固定 low：渲染的是已注册表情的缓存拼图，不碰用户文件与网络。
+function maybeShowCeoStickerSheetNotice(turn, { toolName = "", status = "", detailTexts = [] } = {}) {
+    if (!isCeoStickerSheetToolName(toolName)) return false;
+    if (String(status || "").trim().toLowerCase() !== "success") return false;
+    if (String(turn?.source || "").trim().toLowerCase() === "history") return false;
+    const keys = ensureCeoContextLoadNoticeKeys(turn);
+    let targetId = "";
+    for (const candidate of Array.isArray(detailTexts) ? detailTexts : []) {
+        targetId = ceoStickerSheetTargetFromText(candidate);
+        if (targetId) break;
+    }
+    const noticeText = targetId ? `已加载表情 ${targetId}` : "已加载表情分类总览";
+    const signature = `sticker:${targetId || noticeText}`;
+    if (keys?.has(signature)) return true;
+    keys?.add(signature);
+    showCeoContextLoadNotice(noticeText, { kind: "sticker", riskLevel: "low" });
     return true;
 }
 
@@ -7219,6 +7354,28 @@ function applyCeoToolEventToTurn(turn, event = {}) {
         });
         return null;
     }
+    // 表情拼图与载入同一族：成功只弹「已加载表情 …」气泡，不建实时工具行；
+    // 失败落回普通工具行，原因要留在轨道上。
+    if (isCeoStickerSheetToolName(toolName) && status !== "error") {
+        // 工具开跑这一刻，气泡里的流式残留就是这一跳的正文；先记在回合上，
+        // 下一段流式开始覆盖它时才有东西可垫（账本落地通常晚于这里的抓帧）。
+        // 成功帧只在没抓到开跑帧时补记，避免把下一段的文本误记成这一跳的正文。
+        const retained = Array.isArray(turn?.stickerSheetStreamTexts) ? turn.stickerSheetStreamTexts : [];
+        if (status === "running" || !retained.length) {
+            rememberCeoStickerSheetStreamText(turn, ceoLiveStreamResidual(turn, turn.lastExecutionTraceSummary));
+        }
+        maybeShowCeoStickerSheetNotice(turn, {
+            toolName,
+            status,
+            detailTexts: [
+                rawText,
+                String(event.output_text || "").trim(),
+                String(event.output_preview_text || "").trim(),
+                String(event.arguments_text || "").trim(),
+            ],
+        });
+        return null;
+    }
     const eventKind = String(event.kind || "").trim().toLowerCase();
     const detail = status === "running" && eventKind === "tool_start"
         ? ""
@@ -7340,6 +7497,15 @@ function finalizeCeoTurn(text, meta = {}) {
     const finalTurns = metaTurns.length
         ? metaTurns
         : ((Array.isArray(turn?.turns) && turn.turns.length) ? turn.turns : []);
+    // 只调用了 show_sticker_category 的那一轮正文已从轨道提升到气泡：收尾帧只带最终一句，
+    // 不再把这段拼回来就等于收尾时把它折进内部。实时抓帧记下的那几段与账本按本段窗口
+    // 收出来的合并去重（压缩切出的两段各管各的）。
+    const collectedStickerTexts = splitCeoStickerSheetTurns(sliceCeoRailTurns(finalTurns, turn)).replyTexts;
+    collectedStickerTexts.forEach((item) => rememberCeoStickerSheetStreamText(turn, item));
+    const stickerReplyTexts = Array.isArray(turn?.stickerSheetStreamTexts)
+        ? turn.stickerSheetStreamTexts
+        : collectedStickerTexts;
+    const displayText = ceoAssistantTextWithStickerSheetTurns(text, stickerReplyTexts);
     // 三个旧分支的缓存写入统一为一次计算:消息列表与 inflight 清空只在处构建,
     // 渲染层再决定走增量更新还是全量快照重建。完成时间:历史回合用消息自带
     // timestamp,live 回合用收尾时刻的本地时间。
@@ -7358,7 +7524,7 @@ function finalizeCeoTurn(text, meta = {}) {
         normalizedTurnId,
         finalUserMessages,
         finalTurns,
-        text,
+        text: displayText,
         meta,
         completedAt,
     });
@@ -7382,7 +7548,7 @@ function finalizeCeoTurn(text, meta = {}) {
                 turn = ensureActiveCeoTurn({ source: normalizedSource, turnId: normalizedTurnId });
             }
             if (!turn?.textEl || !turn?.flowEl) {
-                if (!silentReply) addMsg(text, "system", { markdown: true, scrollMode: "preserve" });
+                if (!silentReply) addMsg(displayText, "system", { markdown: true, scrollMode: "preserve" });
                 discardPendingCeoTurns({
                     force: normalizedSource === "heartbeat",
                     source: normalizedSource,
@@ -7400,7 +7566,7 @@ function finalizeCeoTurn(text, meta = {}) {
                 renderCeoSilentTurn(turn, { text, timestamp: completedAt });
             } else {
                 turn.textEl.hidden = false;
-                turn.textEl.innerHTML = renderMarkdown(String(text || "").trim() || "已完成。");
+                turn.textEl.innerHTML = renderMarkdown(String(displayText || "").trim() || "已完成。");
                 turn.textEl.classList.remove("pending");
                 turn.textEl.classList.add("markdown-content");
                 turn.textEl.classList.remove("assistant-text-loading");
@@ -7479,7 +7645,7 @@ function finalizeCeoTurn(text, meta = {}) {
                 renderCeoSilentTurn(turn, { text, timestamp: completedAt });
             } else {
                 turn.textEl.hidden = false;
-                turn.textEl.innerHTML = renderMarkdown(String(text || "").trim() || "已完成。");
+                turn.textEl.innerHTML = renderMarkdown(String(displayText || "").trim() || "已完成。");
                 turn.textEl.classList.remove("pending");
                 turn.textEl.classList.add("markdown-content");
                 turn.textEl.classList.remove("assistant-text-loading");

@@ -226,6 +226,21 @@ test("stylesheets give live rows the tool-card shape, not the rail", () => {
     assert.match(container[1], /margin-left:\s*-8px;/);
 });
 
+// 在飞行与正式轮次工具卡必须落在同一条竖轴上，否则工具一进账本就换列。
+// 轴位 = 列表 6 + 条目 4 + 正文列 22；缺了组卡的那两层要自己补回来。
+
+test("a live row hung straight on the list keeps the tool column", () => {
+    const orphan = /\.interaction-flow-list > \.task-trace-live-steps\s*\{([\s\S]*?)\n\}/.exec(CSS);
+    assert.ok(orphan, "orphan live-row indent rule not found");
+    assert.match(orphan[1], /padding-left:\s*calc\(4px \+ 16px \+ 6px\);/);
+});
+
+test("the flow list carries its trace-list padding from creation", () => {
+    // 少了这个类，列表自身的左内边距是 16 而不是 6：第一轮在飞时整行偏右 10px，
+    // 账本一落又跳回 6，同一颗图标在回合里换两次列。
+    assert.match(APP_CODE, /class="interaction-flow-list task-trace-list"/);
+});
+
 test("the usage row sits beside the placeholder arc while the turn is loading", () => {
     const rule = /\.ceo-turn-content:has\(> \.assistant-text\.assistant-text-loading\)\s*\{([\s\S]*?)\n\}/.exec(CSS);
     assert.ok(rule, "loading-state grid rule not found");
