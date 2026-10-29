@@ -734,9 +734,11 @@ const U = {
     projectSettingsOpenPassword: document.getElementById("project-settings-open-password-btn"),
     projectSettingsOpenBundle: document.getElementById("project-settings-open-bundle-btn"),
     zoom: document.getElementById("project-settings-zoom"),
-    zoomBlock: document.getElementById("project-settings-zoom-block"),
     zoomShell: document.getElementById("project-settings-zoom-shell"),
     zoomValue: document.getElementById("project-settings-zoom-value"),
+    readingScale: document.getElementById("project-settings-reading-scale"),
+    readingScaleShell: document.getElementById("project-settings-reading-scale-shell"),
+    readingScaleValue: document.getElementById("project-settings-reading-scale-value"),
     updateNavDot: document.getElementById("update-nav-dot"),
     projectSettingsCheckDot: document.getElementById("project-settings-check-dot"),
     projectSettingsCheckUpdate: document.getElementById("project-settings-check-update-btn"),
@@ -5254,7 +5256,6 @@ function renderCeoTurnsIntoTurn(turn, turns = [], { interruptedMarker = false } 
     const turnViewState = captureCeoTurnTraceViewState(turn);
     resetCeoToolFlow(turn);
     turn.el?.classList?.add?.("ceo-timeline");
-    turn.listEl.classList?.add?.("task-trace-list");
     let lastGroupIndex = -1;
     descriptors.forEach((step, index) => {
         if (!step.textOnly) lastGroupIndex = index;
@@ -5922,7 +5923,7 @@ function createPendingCeoTurn(source = "user", { scrollMode = "preserve", reques
                         <span class="interaction-flow-meta" hidden>等待工具开始...</span>
                         <span class="interaction-flow-guide" aria-hidden="true"></span>
                     </summary>
-                    <div class="interaction-flow-list" role="list"></div>
+                    <div class="interaction-flow-list task-trace-list" role="list"></div>
                     <div class="interaction-flow-footer" hidden>
                         <button type="button" class="interaction-flow-toggle">展开全部</button>
                     </div>
@@ -10206,18 +10207,125 @@ function initializeTheme() {
     updateThemeToggleA11y();
 }
 
-const ZOOM_KEY = "g3ku.ui.zoom.v1";
-// 缩放是桌面窗口的档位：写 WebView2 的宿主 ZoomFactor（原生缩放，视口跟着变，页面按新
-// 视口重排），起点与 g3ku/shells/desktop.py 的 DEFAULT_ZOOM_FACTOR 同一档。
-// 浏览器没有可写的宿主缩放，CSS zoom 又不会带动 100vh/100vw 那层布局（放大溢出、缩小留白），
-// 所以这一行整块只在壳里出现，浏览器里用 Ctrl + / Ctrl −。
-const ZOOM_DEFAULT = 0.9;
+// 设置里的两行档位共用一套控件逻辑：拖动条与数字格是同一个倍数的两个入口，行与行的差别
+// 只在落点（缩放写窗口，字号写阅读面变量）、默认档与存档键。
 // 拖动条两端 10% / 300%，100% 落在轨道正中：左半 10→100、右半 100→300 各自线性，
-// 位置与倍数因此是分段线性关系，同一段斜率。输入框不受这两端限制，任意正数都收。
-const ZOOM_LOW_END = 0.1;
-const ZOOM_HIGH_END = 3;
-const ZOOM_NEUTRAL = 1;
-const ZOOM_POS_CENTER = 50;
+// 位置与倍数因此是分段线性关系，同一段斜率。数字格不受这两端限制，任意正数都收。
+const SCALE_LOW_END = 0.1;
+const SCALE_HIGH_END = 3;
+const SCALE_NEUTRAL = 1;
+const SCALE_POS_CENTER = 50;
+
+function normalizeScale(raw, fallback) {
+    const text = String(raw ?? "").trim();
+    // 空串要当"没设过"：清空的数字格读出来就是空串，而 Number("") 是 0。
+    if (!text) return fallback;
+    const value = Number(text);
+    if (!Number.isFinite(value) || value <= 0) return fallback;
+    return Math.round(value * 100) / 100;
+}
+
+// 数字格里那格是百分数（110 = 1.1 倍）；非正数或空一律算没填，交回调用方保留原值。
+function parseScalePercent(raw) {
+    const text = String(raw ?? "").trim();
+    if (!text) return null;
+    const percent = Number(text);
+    if (!Number.isFinite(percent) || percent <= 0) return null;
+    return percent / 100;
+}
+
+function scaleToPosition(raw) {
+    const value = Math.min(SCALE_HIGH_END, Math.max(SCALE_LOW_END, Number(raw)));
+    return value <= SCALE_NEUTRAL
+        ? ((value - SCALE_LOW_END) / (SCALE_NEUTRAL - SCALE_LOW_END)) * SCALE_POS_CENTER
+        : SCALE_POS_CENTER
+            + ((value - SCALE_NEUTRAL) / (SCALE_HIGH_END - SCALE_NEUTRAL)) * SCALE_POS_CENTER;
+}
+
+function positionToScale(raw, fallback) {
+    const pos = Number(raw);
+    if (!Number.isFinite(pos)) return fallback;
+    return pos <= SCALE_POS_CENTER
+        ? SCALE_LOW_END + (pos / SCALE_POS_CENTER) * (SCALE_NEUTRAL - SCALE_LOW_END)
+        : SCALE_NEUTRAL
+            + ((pos - SCALE_POS_CENTER) / SCALE_POS_CENTER) * (SCALE_HIGH_END - SCALE_NEUTRAL);
+}
+
+function createScaleRow({ range, shell, value, storageKey, fallback, write, onCommit }) {
+    let current = fallback;
+
+    function notify() {
+        if (typeof onCommit === "function") onCommit();
+    }
+
+    function paint(scale, pos) {
+        current = scale;
+        if (value) value.value = String(Math.round(scale * 100));
+        // 轨道填充与印着档位名的指针都得知道指针停在几成：CSS 画不出"到指针为止"的填充，
+        // 也画不出跟着指针走的文字，所以把这个比例写成变量挂在壳上（两者都是壳的子节点）。
+        const frac = Math.round((pos / 100) * 10000) / 10000;
+        shell?.style?.setProperty?.("--scale-range-frac", String(frac));
+        write(scale);
+    }
+
+    function render(scale) {
+        const pos = Math.round(scaleToPosition(scale) * 100) / 100;
+        if (range) range.value = String(pos);
+        // 填充跟着指针实际落到的那一格走：滑条按 step 会把值收进自己的网格，
+        // 读回来的才是指针真正停下的位置，按它上色才不会差出半格。
+        const shown = range ? Number(range.value) : pos;
+        paint(scale, Number.isFinite(shown) ? shown : pos);
+    }
+
+    function apply(raw) {
+        const scale = normalizeScale(raw, fallback);
+        render(scale);
+        return scale;
+    }
+
+    // 从滑条读数：指针停在哪儿就按哪儿算，只把倍率取整，不动指针。
+    function commitSlider() {
+        const pos = Number(range.value);
+        if (range.value === "" || !Number.isFinite(pos)) return current;
+        const scale = normalizeScale(positionToScale(pos, fallback), fallback);
+        paint(scale, pos);
+        return scale;
+    }
+
+    function initialize() {
+        const stored = readStoredUiPreference(storageKey);
+        const scale = apply(stored ? stored : fallback);
+        notify();
+        return scale;
+    }
+
+    function bind() {
+        // 滑条自己是指针的权威：input 与 change 都只按 1% 取整读值，绝不把取整后的位置写回
+        // 滑条——写回会让指针退回上一格，键盘每按一次都被弹回原地（实测 Home 后连按 6 次不动）。
+        range?.addEventListener("input", () => {
+            commitSlider();
+        });
+        range?.addEventListener("change", () => {
+            const scale = commitSlider();
+            // 视口测量与圆点几何只在松手/按键落定这一次重量，不挂在每一帧上。
+            notify();
+            writeStoredUiPreference(storageKey, String(scale));
+        });
+        value?.addEventListener("change", () => {
+            const typed = parseScalePercent(value.value);
+            if (typed === null) {
+                // 非正数与空串不改档位，也不落盘：把那格刷回当前值，别留下一个与实际不符的数字。
+                render(current);
+                return;
+            }
+            const scale = apply(typed);
+            notify();
+            writeStoredUiPreference(storageKey, String(scale));
+        });
+    }
+
+    return { apply, bind, commitSlider, initialize, paint, render, current: () => current };
+}
 
 // WebView2 在页面脚本之前就注入 chrome.webview；pywebview 自己的 window.pywebview 要等
 // 导航完成才注入，所以「是不是桌面壳」只能看前者，不能等后者。
@@ -10230,42 +10338,14 @@ function desktopShellZoomApi() {
     return api && typeof api.set_window_zoom === "function" ? api : null;
 }
 
-function normalizeZoom(raw) {
-    const text = String(raw ?? "").trim();
-    // 空串要当"没设过"：清空的输入框读出来就是空串，而 Number("") 是 0。
-    if (!text) return ZOOM_DEFAULT;
-    const value = Number(text);
-    if (!Number.isFinite(value) || value <= 0) return ZOOM_DEFAULT;
-    return Math.round(value * 100) / 100;
-}
+const ZOOM_KEY = "g3ku.ui.zoom.v1";
+// 缩放改的是整个界面的大小，两条轨各有各的落点：桌面壳写 WebView2 的宿主 ZoomFactor
+// （原生缩放，视口跟着变，页面按新视口重排），起点与 g3ku/shells/desktop.py 的
+// DEFAULT_ZOOM_FACTOR 同档；浏览器没有可写的宿主缩放，写 body 的 CSS zoom，并把倍数同步进
+// --ui-zoom 让满视口的锚点反除——CSS zoom 不带动视口，不反除就会放大溢出、缩小留白。
+const ZOOM_DEFAULT_DESKTOP = 0.9;
+const ZOOM_DEFAULT_BROWSER = 1;
 
-// 输入框里那格是百分数（110 = 1.1 倍）；非正数或空一律算没填，交回调用方保留原值。
-function parseZoomPercent(raw) {
-    const text = String(raw ?? "").trim();
-    if (!text) return null;
-    const percent = Number(text);
-    if (!Number.isFinite(percent) || percent <= 0) return null;
-    return percent / 100;
-}
-
-function zoomToPosition(raw) {
-    const value = Math.min(ZOOM_HIGH_END, Math.max(ZOOM_LOW_END, Number(raw)));
-    return value <= ZOOM_NEUTRAL
-        ? ((value - ZOOM_LOW_END) / (ZOOM_NEUTRAL - ZOOM_LOW_END)) * ZOOM_POS_CENTER
-        : ZOOM_POS_CENTER
-            + ((value - ZOOM_NEUTRAL) / (ZOOM_HIGH_END - ZOOM_NEUTRAL)) * ZOOM_POS_CENTER;
-}
-
-function positionToZoom(raw) {
-    const pos = Number(raw);
-    if (!Number.isFinite(pos)) return ZOOM_DEFAULT;
-    return pos <= ZOOM_POS_CENTER
-        ? ZOOM_LOW_END + (pos / ZOOM_POS_CENTER) * (ZOOM_NEUTRAL - ZOOM_LOW_END)
-        : ZOOM_NEUTRAL
-            + ((pos - ZOOM_POS_CENTER) / ZOOM_POS_CENTER) * (ZOOM_HIGH_END - ZOOM_NEUTRAL);
-}
-
-let currentZoom = ZOOM_DEFAULT;
 let pendingDesktopZoom = null;
 let desktopZoomFrame = false;
 
@@ -10290,83 +10370,76 @@ function writeDesktopZoom(scale) {
     else flush();
 }
 
-function paintZoom(scale, pos) {
-    currentZoom = scale;
-    if (U.zoomValue) U.zoomValue.value = String(Math.round(scale * 100));
-    // 轨道填充与印着「缩放」的指针都得知道指针停在几成：CSS 画不出"到指针为止"的填充，
-    // 也画不出跟着指针走的文字，所以把这个比例写成变量挂在壳上（两者都是壳的子节点）。
-    const frac = Math.round((pos / 100) * 10000) / 10000;
-    U.zoomShell?.style?.setProperty?.("--zoom-range-frac", String(frac));
-    writeDesktopZoom(scale);
+function writeWindowZoom(scale) {
+    if (desktopShellReady()) {
+        writeDesktopZoom(scale);
+        return;
+    }
+    if (!document.body?.style) return;
+    document.documentElement?.style?.setProperty?.("--ui-zoom", String(scale));
+    document.body.style.zoom = String(scale);
 }
 
-function renderZoom(scale) {
-    const pos = Math.round(zoomToPosition(scale) * 100) / 100;
-    if (U.zoom) U.zoom.value = String(pos);
-    // 填充跟着指针实际落到的那一格走：滑条按 step 会把值收进自己的网格，
-    // 读回来的才是指针真正停下的位置，按它上色才不会差出半格。
-    const shown = U.zoom ? Number(U.zoom.value) : pos;
-    paintZoom(scale, Number.isFinite(shown) ? shown : pos);
-}
-
-function applyZoom(raw) {
-    const scale = normalizeZoom(raw);
-    renderZoom(scale);
-    // 缩放档位改了，秒数的墨迹中线跟着变，圆点的抬升量要重量。
+function syncZoomLayout() {
+    // 宿主缩放自己会触发 resize；浏览器轨的 CSS zoom 不会，依赖视口测量的视图要自己重算一次。
+    if (!desktopShellReady() && typeof window.dispatchEvent === "function" && typeof Event === "function") {
+        window.dispatchEvent(new Event("resize"));
+    }
     if (typeof syncCeoFlowDotGeometry === "function") syncCeoFlowDotGeometry();
-    return scale;
 }
 
-// 从滑条读数：指针停在哪儿就按哪儿算，只把倍率取整，不动指针。
-function commitSliderZoom() {
-    const pos = Number(U.zoom.value);
-    if (!Number.isFinite(pos) || U.zoom.value === "") return currentZoom;
-    const scale = normalizeZoom(positionToZoom(pos));
-    paintZoom(scale, pos);
-    return scale;
+const zoomRow = createScaleRow({
+    range: U.zoom,
+    shell: U.zoomShell,
+    value: U.zoomValue,
+    storageKey: ZOOM_KEY,
+    fallback: desktopShellReady() ? ZOOM_DEFAULT_DESKTOP : ZOOM_DEFAULT_BROWSER,
+    write: writeWindowZoom,
+    onCommit: syncZoomLayout,
+});
+
+const READING_SCALE_KEY = "g3ku.ui.reading-scale.v1";
+// 字号只乘阅读面（会话气泡与 markdown 正文、执行流程的代码块、记忆正文预览），控件与布局
+// 不跟，所以它是界面缩放之外的第二个旋钮。默认 1.1：比基线大两号，每号 5%。
+const READING_SCALE_DEFAULT = 1.1;
+
+function writeReadingScale(scale) {
+    document.documentElement?.style?.setProperty?.("--reading-font-scale", String(scale));
 }
 
-function initializeZoom() {
-    if (!desktopShellReady()) return;
-    U.zoomBlock?.removeAttribute?.("hidden");
-    const stored = readStoredUiPreference(ZOOM_KEY);
-    applyZoom(stored ? stored : ZOOM_DEFAULT);
+const readingScaleRow = createScaleRow({
+    range: U.readingScale,
+    shell: U.readingScaleShell,
+    value: U.readingScaleValue,
+    storageKey: READING_SCALE_KEY,
+    fallback: READING_SCALE_DEFAULT,
+    write: writeReadingScale,
+    // 字号档位改了，秒数的墨迹中线跟着变，圆点的抬升量要重量。
+    onCommit: () => {
+        if (typeof syncCeoFlowDotGeometry === "function") syncCeoFlowDotGeometry();
+    },
+});
+
+function initializeScaleRows() {
+    zoomRow.initialize();
+    readingScaleRow.initialize();
     // 壳里的桥在页面脚本之后才建好；就绪事件到了再按当前档位调一次，
     // 否则启动时那次调用会落在还没有 api 的 window.pywebview 上。api 已就绪时不必重放。
-    if (desktopShellZoomApi() === null && typeof window.addEventListener === "function") {
-        window.addEventListener("pywebviewready", () => writeDesktopZoom(currentZoom));
+    if (desktopShellReady() && desktopShellZoomApi() === null && typeof window.addEventListener === "function") {
+        window.addEventListener("pywebviewready", () => writeDesktopZoom(zoomRow.current()));
     }
 }
 
-function bindZoom() {
-    // 滑条自己是指针的权威：input 与 change 都只按 1% 取整读值，绝不把取整后的位置写回
-    // 滑条——写回会让指针退回上一格，键盘每按一次都被弹回原地（实测 Home 后连按 6 次不动）。
-    U.zoom?.addEventListener("input", () => {
-        commitSliderZoom();
-    });
-    U.zoom?.addEventListener("change", () => {
-        const scale = commitSliderZoom();
-        // 宿主缩放会自己触发 resize；圆点几何按实测位置摆，只在松手时重量。
-        if (typeof syncCeoFlowDotGeometry === "function") syncCeoFlowDotGeometry();
-        writeStoredUiPreference(ZOOM_KEY, String(scale));
-    });
-    U.zoomValue?.addEventListener("change", () => {
-        const typed = parseZoomPercent(U.zoomValue.value);
-        if (typed === null) {
-            // 非正数与空串不改档位，也不落盘：把那格刷回当前值，别留下一个与实际不符的数字。
-            renderZoom(currentZoom);
-            return;
-        }
-        const scale = applyZoom(typed);
-        writeStoredUiPreference(ZOOM_KEY, String(scale));
-    });
+function bindScaleRows() {
+    zoomRow.bind();
+    readingScaleRow.bind();
 }
 
 function initializeUiPreferences() {
     // 本模块会被 tests/resources 的 vm 桩环境直接求值，那里没有 documentElement。
     if (!document.documentElement) return;
     initializeTheme();
-    initializeZoom();
+    initializeScaleRows();
     S.ceoSessionOrder = readStoredCeoSessionOrder();
     S.ceoChannelCollapsed = readStoredCeoChannelCollapse();
 }
@@ -10396,7 +10469,7 @@ function bind() {
 function bindProjectSettings() {
     U.theme?.addEventListener("click", toggleTheme);
     bindModelRetryToastExpansion();
-    bindZoom();
+    bindScaleRows();
     U.projectSettings?.addEventListener("click", () => openProjectSettingsDialog());
     U.projectSettingsClose?.addEventListener("click", () => closeProjectSettingsDialog());
     U.projectSettingsBackdrop?.addEventListener("click", (e) => {

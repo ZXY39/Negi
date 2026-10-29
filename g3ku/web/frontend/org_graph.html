@@ -1152,18 +1152,34 @@
                                 <span id="persona-button-dot" class="update-dot" title="人设未设置" hidden></span>
                             </button>
                         </div>
-                        <div class="project-settings-actions" id="project-settings-zoom-block" hidden>
-                            <label class="project-settings-zoom-row" for="project-settings-zoom">
-                                <span class="project-settings-zoom-range-shell" id="project-settings-zoom-shell">
-                                    <input id="project-settings-zoom" class="project-settings-zoom-range"
+                        <div class="project-settings-actions">
+                            <label class="project-settings-scale-row" for="project-settings-zoom">
+                                <span class="project-settings-scale-range-shell" id="project-settings-zoom-shell">
+                                    <input id="project-settings-zoom" class="project-settings-scale-range"
                                         type="range" min="0" max="100" step="0.1" value="50" aria-label="缩放">
-                                    <span class="project-settings-zoom-knob" aria-hidden="true">缩放</span>
+                                    <span class="project-settings-scale-knob" aria-hidden="true">缩放</span>
                                 </span>
-                                <span class="project-settings-zoom-value-shell">
+                                <span class="project-settings-scale-value-shell">
                                     <input id="project-settings-zoom-value"
-                                        class="project-settings-zoom-value spinless-number-input" type="number"
+                                        class="project-settings-scale-value spinless-number-input" type="number"
                                         min="1" step="1" aria-label="缩放百分比">
-                                    <span class="project-settings-zoom-value-unit" aria-hidden="true">%</span>
+                                    <span class="project-settings-scale-value-unit" aria-hidden="true">%</span>
+                                </span>
+                            </label>
+                        </div>
+                        <div class="project-settings-actions">
+                            <label class="project-settings-scale-row" for="project-settings-reading-scale">
+                                <span class="project-settings-scale-range-shell"
+                                    id="project-settings-reading-scale-shell">
+                                    <input id="project-settings-reading-scale" class="project-settings-scale-range"
+                                        type="range" min="0" max="100" step="0.1" value="50" aria-label="字号">
+                                    <span class="project-settings-scale-knob" aria-hidden="true">字号</span>
+                                </span>
+                                <span class="project-settings-scale-value-shell">
+                                    <input id="project-settings-reading-scale-value"
+                                        class="project-settings-scale-value spinless-number-input" type="number"
+                                        min="1" step="1" aria-label="字号百分比">
+                                    <span class="project-settings-scale-value-unit" aria-hidden="true">%</span>
                                 </span>
                             </label>
                         </div>

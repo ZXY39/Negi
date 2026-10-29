@@ -81,10 +81,13 @@
     --radius-full: 9999px;
 
     --font-sans: 'Fira Sans', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-    /* 阅读面字号基准：只乘正文/回复/代码块/笔记正文的字号，控件与布局不跟。
-       界面缩放由设置里的「缩放」档位统一负责（桌面壳的宿主 ZoomFactor），所以这里的 1.1
-       是排版基准，不是用户档位。 */
+    /* 阅读面字号倍数：只乘正文/回复/代码块/笔记正文的字号，控件与布局不跟。
+       设置里的「字号」档位写它，默认 1.1（比基线大两号，每号 5%）。 */
     --reading-font-scale: 1.1;
+    /* 界面缩放倍数：桌面壳由宿主 ZoomFactor 承担（这一行保持 1），浏览器轨写 body 的
+       CSS zoom 时同步写它。满视口的锚点（100vh/100vw/100dvh）按它反除，因为 CSS zoom
+       不带动视口——不反除的话放大溢出窗口右下、缩小在右/下留白。 */
+    --ui-zoom: 1;
     --transition-fast: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
     --scrollbar-track: transparent;
     --scrollbar-thumb: rgba(161, 161, 170, 0.4);
@@ -222,8 +225,8 @@ textarea {
 /* 3. Layout Structure */
 .app-layout {
     display: flex;
-    height: 100vh;
-    width: 100vw;
+    height: calc(100vh / var(--ui-zoom, 1));
+    width: calc(100vw / var(--ui-zoom, 1));
 }
 
 /* Sidebar */
@@ -1011,7 +1014,7 @@ textarea {
     flex-direction: column;
     gap: 2px;
     width: max(100%, 340px);
-    max-width: min(480px, calc(100vw - 48px));
+    max-width: min(480px, calc(calc(100vw / var(--ui-zoom, 1)) - 48px));
     max-height: min(320px, 46vh);
     overflow-y: auto;
     padding: 6px;
@@ -1657,9 +1660,9 @@ textarea {
     right: auto;
     bottom: auto;
     width: min(66vw, 1120px);
-    max-width: calc(100vw - 48px);
-    height: min(82vh, calc(100dvh - 48px));
-    max-height: calc(100dvh - 48px);
+    max-width: calc(calc(100vw / var(--ui-zoom, 1)) - 48px);
+    height: min(82vh, calc(calc(100dvh / var(--ui-zoom, 1)) - 48px));
+    max-height: calc(calc(100dvh / var(--ui-zoom, 1)) - 48px);
     transform: translate(-50%, calc(-50% + 8px));
     opacity: 0;
     pointer-events: none;
@@ -1685,7 +1688,7 @@ textarea {
 @media (max-width: 960px) {
     .detail-drawer.project-detail-drawer {
         width: min(92vw, 1120px);
-        height: min(88vh, calc(100dvh - 24px));
+        height: min(88vh, calc(calc(100dvh / var(--ui-zoom, 1)) - 24px));
     }
 }
 
@@ -1693,8 +1696,8 @@ textarea {
    宽度与 z-index 必须压过 9285 行那条 `.detail-drawer`：它在文件里更靠后，只写类名会
    被它的 `z-index: 96` 与 `width: 980px` 顶掉——遮罩是 111，于是加暗跑到窗口前面。 */
 #media-viewer-drawer.media-viewer-drawer {
-    width: min(1180px, calc(100vw - 32px));
-    height: min(86vh, calc(100dvh - 48px));
+    width: min(1180px, calc(calc(100vw / var(--ui-zoom, 1)) - 32px));
+    height: min(86vh, calc(calc(100dvh / var(--ui-zoom, 1)) - 48px));
     z-index: 112;
 }
 
@@ -1735,14 +1738,14 @@ textarea {
 .media-viewer-image {
     align-self: center;
     max-width: 100%;
-    max-height: min(72vh, calc(100dvh - 190px));
+    max-height: min(72vh, calc(calc(100dvh / var(--ui-zoom, 1)) - 190px));
     object-fit: contain;
     border-radius: var(--radius-lg);
 }
 
 .media-viewer-frame {
     width: 100%;
-    height: min(72vh, calc(100dvh - 190px));
+    height: min(72vh, calc(calc(100dvh / var(--ui-zoom, 1)) - 190px));
     border: 1px solid var(--border-color);
     border-radius: var(--radius-lg);
     background: var(--bg-app);
@@ -1755,8 +1758,8 @@ textarea {
 }
 
 #qq-bot-apply-drawer.qq-bot-apply-drawer {
-    width: min(1200px, calc(100vw - 32px));
-    height: min(88vh, calc(100dvh - 48px));
+    width: min(1200px, calc(calc(100vw / var(--ui-zoom, 1)) - 32px));
+    height: min(88vh, calc(calc(100dvh / var(--ui-zoom, 1)) - 48px));
     z-index: 112;
 }
 
@@ -1777,8 +1780,8 @@ textarea {
 
 @media (max-width: 960px) {
     #media-viewer-drawer.media-viewer-drawer {
-        width: calc(100vw - 20px);
-        height: min(88vh, calc(100dvh - 24px));
+        width: calc(calc(100vw / var(--ui-zoom, 1)) - 20px);
+        height: min(88vh, calc(calc(100dvh / var(--ui-zoom, 1)) - 24px));
     }
 }
 
@@ -4226,6 +4229,14 @@ textarea {
     scrollbar-gutter: stable;
 }
 
+/* 第一轮还没落账本时列表里还没有组卡，在飞行只能直接挂在列表下
+   （org_graph_app.js ceoLiveToolStepHost 的兜底分支）。这里补回组卡自带的那段缩进
+   （条目 4 + 正文列 22），图标才落在与 .interaction-flow-usage、正式轮次工具卡
+   同一条竖轴上——工具一进账本不换列。 */
+.interaction-flow-list > .task-trace-live-steps {
+    padding-left: calc(4px + 16px + 6px);
+}
+
 /* 在飞行不用 .interaction-step 的轨道外壳：那条 2px 灰竖线和 16px 缩进会把图标
    推离上方工具卡那一列，看起来像另一套样式。 */
 .task-trace-live-steps .interaction-step {
@@ -5618,8 +5629,8 @@ textarea {
 }
 
 .ceo-risk-whitelist-dialog {
-    width: min(560px, calc(100vw - 48px));
-    max-height: min(720px, calc(100vh - 48px));
+    width: min(560px, calc(calc(100vw / var(--ui-zoom, 1)) - 48px));
+    max-height: min(720px, calc(calc(100vh / var(--ui-zoom, 1)) - 48px));
     gap: 14px;
 }
 
@@ -7226,7 +7237,7 @@ textarea {
     grid-template-columns: minmax(220px, 260px) minmax(240px, 300px) minmax(0, 1fr);
     gap: var(--space-6);
     padding: var(--ui-space-5) var(--ui-space-3) var(--ui-space-6);
-    min-height: calc(100vh - 120px);
+    min-height: calc(calc(100vh / var(--ui-zoom, 1)) - 120px);
     align-items: stretch;
     width: 100%;
     max-width: min(100%, 1760px);
@@ -7353,8 +7364,8 @@ textarea {
     position: fixed;
     top: 50%;
     left: 50%;
-    width: min(1120px, calc(100vw - 48px));
-    max-height: calc(100dvh - 48px);
+    width: min(1120px, calc(calc(100vw / var(--ui-zoom, 1)) - 48px));
+    max-height: calc(calc(100dvh / var(--ui-zoom, 1)) - 48px);
     min-height: 0;
     transform: translate(-50%, calc(-50% + 8px));
     opacity: 0;
@@ -8167,7 +8178,7 @@ textarea {
     .detail-drawer {
         width: 92vw;
         height: 90vh;
-        max-height: calc(100dvh - 24px);
+        max-height: calc(calc(100dvh / var(--ui-zoom, 1)) - 24px);
     }
 
 }
@@ -8207,7 +8218,7 @@ textarea {
     .detail-drawer {
         width: 92vw;
         height: 90vh;
-        max-height: calc(100dvh - 24px);
+        max-height: calc(calc(100dvh / var(--ui-zoom, 1)) - 24px);
     }
 
 }
@@ -8252,7 +8263,7 @@ textarea {
     .app-layout {
         flex-direction: column;
         height: auto;
-        min-height: 100vh;
+        min-height: calc(100vh / var(--ui-zoom, 1));
     }
 
     .sidebar {
@@ -8318,7 +8329,7 @@ textarea {
     display: inline-flex;
     align-items: center;
     margin-top: 20px;
-    max-width: min(420px, calc(100vw - 48px));
+    max-width: min(420px, calc(calc(100vw / var(--ui-zoom, 1)) - 48px));
     min-height: 34px;
     padding: 9px 16px;
     border-radius: 999px;
@@ -8358,7 +8369,7 @@ textarea {
    圆角留在 16px 一档，不随盒子变小而改。 */
 .app-toast {
     width: fit-content;
-    max-width: min(420px, calc(100vw - 48px));
+    max-width: min(420px, calc(calc(100vw / var(--ui-zoom, 1)) - 48px));
     display: flex;
     flex-direction: column;
     gap: 0;
@@ -8512,8 +8523,8 @@ textarea {
 }
 
 .confirm-dialog {
-    width: min(480px, calc(100vw - 48px));
-    max-height: min(720px, calc(100vh - 48px));
+    width: min(480px, calc(calc(100vw / var(--ui-zoom, 1)) - 48px));
+    max-height: min(720px, calc(calc(100vh / var(--ui-zoom, 1)) - 48px));
     display: flex;
     flex-direction: column;
     gap: 16px;
@@ -9136,7 +9147,7 @@ textarea {
 
 .resource-layout.model-simple-layout {
     position: relative;
-    height: calc(100vh - 110px);
+    height: calc(calc(100vh / var(--ui-zoom, 1)) - 110px);
 }
 
 .model-detail-panel {
@@ -9562,8 +9573,8 @@ textarea {
     position: fixed;
     top: 50%;
     left: 50%;
-    width: min(980px, calc(100vw - 48px));
-    max-height: calc(100dvh - 48px);
+    width: min(980px, calc(calc(100vw / var(--ui-zoom, 1)) - 48px));
+    max-height: calc(calc(100dvh / var(--ui-zoom, 1)) - 48px);
     /* Avoid scale/3d transforms here: they blur modal text on Windows/Chromium. */
     transform: translate(-50%, calc(-50% + 8px));
     opacity: 0;
@@ -9615,8 +9626,8 @@ textarea {
 }
 
 .memory-note-preview-drawer {
-    width: min(780px, calc(100vw - 32px));
-    max-height: min(78vh, calc(100dvh - 32px));
+    width: min(780px, calc(calc(100vw / var(--ui-zoom, 1)) - 32px));
+    max-height: min(78vh, calc(calc(100dvh / var(--ui-zoom, 1)) - 32px));
     z-index: 98;
 }
 
@@ -9798,7 +9809,7 @@ textarea {
     .detail-drawer,
     .model-detail-dialog {
         width: min(92vw, 760px);
-        max-height: calc(100dvh - 24px);
+        max-height: calc(calc(100dvh / var(--ui-zoom, 1)) - 24px);
     }
 }
 
@@ -9810,7 +9821,7 @@ textarea {
 
     .detail-drawer,
     .model-detail-dialog {
-        width: calc(100vw - 24px);
+        width: calc(calc(100vw / var(--ui-zoom, 1)) - 24px);
     }
 
     .detail-drawer .detail-modal-header,
@@ -10609,7 +10620,7 @@ textarea {
     display: grid;
     grid-template-columns: minmax(300px, 380px) minmax(0, 1fr);
     gap: var(--space-6);
-    height: calc(100vh - 110px);
+    height: calc(calc(100vh / var(--ui-zoom, 1)) - 110px);
     width: 100%;
     max-width: min(100%, 1760px);
     margin-right: auto;
@@ -11279,8 +11290,8 @@ textarea {
     left: 50%;
     right: auto;
     bottom: auto;
-    width: min(920px, calc(100vw - 32px));
-    max-height: min(84vh, calc(100dvh - 32px));
+    width: min(920px, calc(calc(100vw / var(--ui-zoom, 1)) - 32px));
+    max-height: min(84vh, calc(calc(100dvh / var(--ui-zoom, 1)) - 32px));
     transform: translate(-50%, calc(-50% + 8px));
     background: var(--bg-panel);
     z-index: 97;
@@ -11542,10 +11553,10 @@ textarea {
     left: 50%;
     right: auto;
     bottom: auto;
-    width: min(1440px, calc(100vw - 32px));
+    width: min(1440px, calc(calc(100vw / var(--ui-zoom, 1)) - 32px));
     /* 固定高度而不是 max-height：条目少的时候面板不该跟着内容缩，
        否则同一个弹窗在 3 条和 30 条记忆下是两种尺寸，点开先跳一下。 */
-    height: min(88vh, calc(100dvh - 32px));
+    height: min(88vh, calc(calc(100dvh / var(--ui-zoom, 1)) - 32px));
     transform: translate(-50%, calc(-50% + 8px));
     background: var(--bg-panel);
     z-index: 100;
@@ -11750,8 +11761,8 @@ textarea {
     left: 50%;
     transform: translate(-50%, -50%);
     z-index: 1200;
-    width: min(680px, calc(100vw - 48px));
-    max-height: calc(100vh - 96px);
+    width: min(680px, calc(calc(100vw / var(--ui-zoom, 1)) - 48px));
+    max-height: calc(calc(100vh / var(--ui-zoom, 1)) - 96px);
     display: flex;
     flex-direction: column;
     border: 1px solid var(--border-color);
@@ -12480,7 +12491,7 @@ textarea {
     right: auto;
     bottom: auto;
     /* 模型调用明细表格列较多（时间/节点ID/序号/…/模型），加宽窗口避免横向滚动遮挡列 */
-    width: min(1200px, calc(100vw - 32px));
+    width: min(1200px, calc(calc(100vw / var(--ui-zoom, 1)) - 32px));
     max-height: min(78vh, 820px);
     transform: translate(-50%, calc(-50% + 8px));
     z-index: 98;
@@ -12754,7 +12765,7 @@ textarea {
 
 @media (max-width: 640px) {
     .task-token-modal {
-        width: calc(100vw - 20px);
+        width: calc(calc(100vw / var(--ui-zoom, 1)) - 20px);
         max-height: 84vh;
     }
 
@@ -12800,7 +12811,7 @@ textarea {
 
 .model-shared-list {
     min-height: 0;
-    max-height: calc(100dvh - 320px);
+    max-height: calc(calc(100dvh / var(--ui-zoom, 1)) - 320px);
     overflow-y: auto;
     padding-right: 4px;
 }
@@ -13324,7 +13335,7 @@ textarea {
 }
 
 .ceo-approval-toast {
-    width: min(560px, calc(100vw - 32px));
+    width: min(560px, calc(calc(100vw / var(--ui-zoom, 1)) - 32px));
     display: grid;
     gap: 16px;
     padding: 18px;
@@ -13545,8 +13556,8 @@ textarea {
 }
 
 .ceo-approval-args-drawer {
-    width: min(760px, calc(100vw - 32px));
-    max-height: min(78vh, calc(100dvh - 32px));
+    width: min(760px, calc(calc(100vw / var(--ui-zoom, 1)) - 32px));
+    max-height: min(78vh, calc(calc(100dvh / var(--ui-zoom, 1)) - 32px));
     z-index: 1452;
 }
 
@@ -13702,8 +13713,8 @@ textarea {
 }
 
 .task-error-log-drawer {
-    width: min(780px, calc(100vw - 32px));
-    max-height: min(82vh, calc(100dvh - 32px));
+    width: min(780px, calc(calc(100vw / var(--ui-zoom, 1)) - 32px));
+    max-height: min(82vh, calc(calc(100dvh / var(--ui-zoom, 1)) - 32px));
     z-index: 99;
 }
 
@@ -14373,8 +14384,8 @@ textarea {
 }
 
 .exec-whitelist-dialog {
-    width: min(820px, calc(100vw - 48px));
-    max-height: min(760px, calc(100vh - 48px));
+    width: min(820px, calc(calc(100vw / var(--ui-zoom, 1)) - 48px));
+    max-height: min(760px, calc(calc(100vh / var(--ui-zoom, 1)) - 48px));
     gap: 14px;
 }
 
@@ -14913,8 +14924,8 @@ textarea {
 :root .app-layout {
     display: flex;
     flex-direction: column;
-    height: 100vh;
-    width: 100vw;
+    height: calc(100vh / var(--ui-zoom, 1));
+    width: calc(100vw / var(--ui-zoom, 1));
 }
 
 :root .main-content {
@@ -16789,7 +16800,7 @@ textarea {
         bottom: 0;
         left: 0;
         z-index: 5;
-        width: min(288px, calc(100vw - 24px));
+        width: min(288px, calc(calc(100vw / var(--ui-zoom, 1)) - 24px));
         height: auto;
         box-shadow: var(--ui-shadow-dialog);
     }
@@ -17005,7 +17016,7 @@ textarea {
    「退出」会被折成孤零零第二行；这一族弹窗（设置 / 修改密码 / 配置包）同档，堆叠时宽窄一致。 */
 .project-settings-dialog {
     position: relative;
-    width: min(520px, calc(100vw - 48px));
+    width: min(520px, calc(calc(100vw / var(--ui-zoom, 1)) - 48px));
 }
 
 .project-settings-dialog .confirm-header {
@@ -17032,7 +17043,7 @@ textarea {
     display: flex;
     flex-direction: column;
     gap: var(--ui-space-5);
-    max-height: min(420px, calc(100vh - 240px));
+    max-height: min(420px, calc(calc(100vh / var(--ui-zoom, 1)) - 240px));
     padding: 0;
     overflow-y: auto;
 }
@@ -17062,12 +17073,11 @@ textarea {
     min-width: 0;
 }
 
-/* 缩放档位：设置里的这一行改的是桌面窗口的宿主缩放（WebView2 的 ZoomFactor），所以它
-   只在壳里出现，浏览器轨由 JS 把整块留在 hidden 上。
-   指针不是圆点而是一颗印着「缩放」的按钮，所以这一行没有单独的标签列；原生指针只当
-   命中区（透明），看得见的按钮是壳里那层跟着指针走的 .project-settings-zoom-knob。
-   --zoom-range-frac 由 JS 写成 0..1，轨道填充与按钮共用同一个落点。 */
-#project-settings-dialog .project-settings-zoom-row {
+/* 缩放/字号两行共用这一族样式（按类选，不按行选）：拖动条与数字格是同一个值的两个入口。
+   指针不是圆点而是一颗印着档位名的按钮，所以这两行没有单独的标签列；原生指针只当
+   命中区（透明），看得见的按钮是壳里那层跟着指针走的 .project-settings-scale-knob。
+   --scale-range-frac 由 JS 写成 0..1，轨道填充与按钮共用同一个落点。 */
+#project-settings-dialog .project-settings-scale-row {
     flex: 1 1 auto;
     display: flex;
     align-items: center;
@@ -17077,10 +17087,10 @@ textarea {
     color: var(--ui-text);
 }
 
-#project-settings-dialog .project-settings-zoom-range-shell {
-    --zoom-knob-w: 44px;
-    --zoom-knob-h: 24px;
-    --zoom-knob-x: calc((100% - var(--zoom-knob-w)) * var(--zoom-range-frac, 0.5) + var(--zoom-knob-w) / 2);
+#project-settings-dialog .project-settings-scale-range-shell {
+    --scale-knob-w: 44px;
+    --scale-knob-h: 24px;
+    --scale-knob-x: calc((100% - var(--scale-knob-w)) * var(--zoom-range-frac, 0.5) + var(--scale-knob-w) / 2);
     position: relative;
     flex: 1 1 auto;
     min-width: 150px;
@@ -17089,7 +17099,7 @@ textarea {
     align-items: center;
 }
 
-#project-settings-dialog .project-settings-zoom-range {
+#project-settings-dialog .project-settings-scale-range {
     appearance: none;
     -webkit-appearance: none;
     -moz-appearance: none;
@@ -17103,52 +17113,52 @@ textarea {
     cursor: pointer;
 }
 
-#project-settings-dialog .project-settings-zoom-range::-webkit-slider-runnable-track {
+#project-settings-dialog .project-settings-scale-range::-webkit-slider-runnable-track {
     height: 4px;
     border-radius: var(--ui-radius-pill);
     background: linear-gradient(to right,
-        var(--ui-brand) 0 var(--zoom-knob-x),
-        var(--ui-bg-subtle) var(--zoom-knob-x) 100%);
+        var(--ui-brand) 0 var(--scale-knob-x),
+        var(--ui-bg-subtle) var(--scale-knob-x) 100%);
 }
 
 /* 原生指针透明但与按钮同宽：它的宽度决定指针行程，按钮那层才能算出同一个中心。 */
-#project-settings-dialog .project-settings-zoom-range::-webkit-slider-thumb {
+#project-settings-dialog .project-settings-scale-range::-webkit-slider-thumb {
     appearance: none;
     -webkit-appearance: none;
-    width: var(--zoom-knob-w);
-    height: var(--zoom-knob-h);
-    margin-top: calc((4px - var(--zoom-knob-h)) / 2);
+    width: var(--scale-knob-w);
+    height: var(--scale-knob-h);
+    margin-top: calc((4px - var(--scale-knob-h)) / 2);
     border: 0;
     border-radius: 8px;
     background: transparent;
 }
 
-#project-settings-dialog .project-settings-zoom-range::-moz-range-track {
+#project-settings-dialog .project-settings-scale-range::-moz-range-track {
     height: 4px;
     border-radius: var(--ui-radius-pill);
     background: var(--ui-bg-subtle);
 }
 
-#project-settings-dialog .project-settings-zoom-range::-moz-range-progress {
+#project-settings-dialog .project-settings-scale-range::-moz-range-progress {
     height: 4px;
     border-radius: var(--ui-radius-pill);
     background: var(--ui-brand);
 }
 
-#project-settings-dialog .project-settings-zoom-range::-moz-range-thumb {
-    width: var(--zoom-knob-w);
-    height: var(--zoom-knob-h);
+#project-settings-dialog .project-settings-scale-range::-moz-range-thumb {
+    width: var(--scale-knob-w);
+    height: var(--scale-knob-h);
     border: 0;
     border-radius: 8px;
     background: transparent;
 }
 
-#project-settings-dialog .project-settings-zoom-knob {
+#project-settings-dialog .project-settings-scale-knob {
     position: absolute;
     top: 50%;
-    left: calc(var(--zoom-knob-x) - var(--zoom-knob-w) / 2);
-    width: var(--zoom-knob-w);
-    height: var(--zoom-knob-h);
+    left: calc(var(--scale-knob-x) - var(--scale-knob-w) / 2);
+    width: var(--scale-knob-w);
+    height: var(--scale-knob-h);
     transform: translateY(-50%);
     display: grid;
     place-items: center;
@@ -17165,19 +17175,19 @@ textarea {
     transition: box-shadow 160ms var(--ui-motion-ease);
 }
 
-#project-settings-dialog .project-settings-zoom-range:focus-visible + .project-settings-zoom-knob {
+#project-settings-dialog .project-settings-scale-range:focus-visible + .project-settings-scale-knob {
     box-shadow: 0 0 0 3px var(--ui-brand-soft);
 }
 
 /* 档位数字与拖动条是同一个值的两个入口：数字框吃满右侧那格，百分号画在框内右端。 */
-#project-settings-dialog .project-settings-zoom-value-shell {
+#project-settings-dialog .project-settings-scale-value-shell {
     position: relative;
     flex: 0 0 auto;
     display: inline-flex;
     align-items: center;
 }
 
-#project-settings-dialog .project-settings-zoom-value {
+#project-settings-dialog .project-settings-scale-value {
     width: 78px;
     height: 36px;
     min-height: 36px;
@@ -17194,7 +17204,7 @@ textarea {
     transition: border-color 160ms var(--ui-motion-ease), box-shadow 160ms var(--ui-motion-ease);
 }
 
-#project-settings-dialog .project-settings-zoom-value-unit {
+#project-settings-dialog .project-settings-scale-value-unit {
     position: absolute;
     right: 11px;
     color: var(--ui-text-muted);
@@ -17203,11 +17213,11 @@ textarea {
     pointer-events: none;
 }
 
-#project-settings-dialog .project-settings-zoom-value:hover {
+#project-settings-dialog .project-settings-scale-value:hover {
     border-color: var(--ui-border-strong);
 }
 
-#project-settings-dialog .project-settings-zoom-value:focus-visible {
+#project-settings-dialog .project-settings-scale-value:focus-visible {
     outline: none;
     border-color: var(--ui-brand);
     box-shadow: 0 0 0 3px var(--ui-brand-soft);
@@ -18268,7 +18278,7 @@ textarea {
 
 /* 初次引导：人设与照片。正文是唯一滚动口，弹窗本身不随内容长高。 */
 .persona-onboarding-dialog {
-    width: min(560px, calc(100vw - 32px));
+    width: min(560px, calc(calc(100vw / var(--ui-zoom, 1)) - 32px));
 }
 
 .persona-onboarding-body,

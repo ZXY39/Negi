@@ -34,7 +34,12 @@ def test_ceo_session_bulk_delete_css_contract() -> None:
     assert ".ceo-session-bulk-actions" in css
     assert ".ceo-session-checkbox" in css
     assert re.search(r"\.ceo-session-tab\s*\{[^}]*white-space:\s*nowrap;", css, flags=re.MULTILINE)
-    assert re.search(r"\.confirm-dialog\s*\{[^}]*max-height:\s*min\(720px,\s*calc\(100vh - 48px\)\);", css, flags=re.MULTILINE)
+    # 弹窗高度上限按 --ui-zoom 反除：浏览器轨的 CSS zoom 不带动视口，不反除会溢出窗口。
+    assert re.search(
+        r"\.confirm-dialog\s*\{[^}]*max-height:\s*min\(720px,\s*calc\(calc\(100vh / var\(--ui-zoom, 1\)\) - 48px\)\);",
+        css,
+        flags=re.MULTILINE,
+    )
     assert re.search(r"\.confirm-text\s*\{[^}]*overflow-y:\s*auto;", css, flags=re.MULTILINE)
     assert re.search(r"\.confirm-checkbox-details\s*\{[^}]*overflow:\s*auto;", css, flags=re.MULTILINE)
     assert ".resource-header-search" in css
