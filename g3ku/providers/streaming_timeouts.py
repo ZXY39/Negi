@@ -76,6 +76,10 @@ class StreamingDiagnostics:
     # 是否收到过携带 finish_reason 的 choice 分片。上游在思考/生成中途关闭 SSE 时
     # 该标记保持 False，而 finish_reason 仍会落到默认值，日志里看起来像正常完成。
     finish_reason_seen: bool = False
+    # 上游给的终止原因取值（`stop` / `length` / `tool_calls` …）。只有"见过"不够：
+    # 回复被输出上限掐断时 `finish_reason_seen` 同样是 1，而正文尾行正好断在
+    # `[[sticker:...]]` 这类语法中间——判"是没说完还是被掐"只能读这个值。
+    finish_reason_value: str = ""
 
     @classmethod
     def start(cls, provider_label: str, *, started_at: float | None = None) -> "StreamingDiagnostics":
@@ -116,8 +120,11 @@ class StreamingDiagnostics:
     def render_chunk_kind_histogram(self) -> str:
         return ",".join(f"{kind}:{count}" for kind, count in sorted(self.chunk_kind_counts.items()))
 
-    def note_finish_reason(self) -> None:
+    def note_finish_reason(self, value: str = "") -> None:
         self.finish_reason_seen = True
+        reason = str(value or "").strip()
+        if reason:
+            self.finish_reason_value = reason
 
     def first_token_ms(self) -> float | None:
         """首 token 耗时（毫秒）。以首个到达的分片为准（推理模型的首分片常是
@@ -146,6 +153,7 @@ class StreamingDiagnostics:
             f"chunk_count={self.chunk_count}",
             f"chunk_kinds={self.render_chunk_kind_histogram()}",
             f"finish_reason_seen={int(self.finish_reason_seen)}",
+            f"finish_reason={self.finish_reason_value or '-'}",
         ]
         if outcome == "completed":
             parts.append(f"stream_completed_ms={max(0.0, (now - self.started_at) * 1000.0):.1f}")
@@ -382,7 +390,7 @@ async def consume_openai_like_chat_stream(
         raw_finish_reason = str(_maybe_get(choice, "finish_reason", "") or "").strip()
         if raw_finish_reason:
             finish_reason = raw_finish_reason
-            diagnostics.note_finish_reason()
+            diagnostics.note_finish_reason(raw_finish_reason)
 
     tool_calls: list[ToolCallRequest] = []
     for index in sorted(tool_call_buffers):

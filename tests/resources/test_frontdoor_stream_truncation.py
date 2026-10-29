@@ -65,7 +65,34 @@ async def test_consumer_records_finish_reason_when_stream_terminates() -> None:
     assert finish_reason == "stop"
     assert usage.get("input_tokens") == 7
     assert diagnostics.finish_reason_seen is True
+    assert diagnostics.finish_reason_value == "stop"
     assert "finish_reason_seen=1" in diagnostics.render_summary(outcome="completed")
+    assert "finish_reason=stop" in diagnostics.render_summary(outcome="completed")
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_distinguish_length_stop_from_clean_stop() -> None:
+    """被输出上限掐断的流同样"见过 finish_reason"，只有取值能把它和正常收尾分开。
+
+    实盘（2026-10-29 08:36-08:44）五条回复的尾行断在 `[[sticker:...]]` 语法中间；
+    当时的诊断行只写 `finish_reason_seen=1`，判不出是没说完还是被掐。
+    """
+    diagnostics = StreamingDiagnostics.start("openai_chat")
+    chunks = [
+        {"choices": [{"delta": {"content": "任务完成\n[[sticker:atri/ha"}}]},
+        {"choices": [{"delta": {}, "finish_reason": "length"}]},
+    ]
+
+    _content, _tool_calls, finish_reason, _usage, _reasoning = await consume_openai_like_chat_stream(
+        _aiter(chunks),
+        diagnostics=diagnostics,
+        first_chunk_timeout_seconds=5,
+        idle_chunk_timeout_seconds=5,
+    )
+
+    assert finish_reason == "length"
+    assert diagnostics.finish_reason_seen is True
+    assert "finish_reason=length" in diagnostics.render_summary(outcome="completed")
 
 
 @pytest.mark.asyncio
