@@ -17050,6 +17050,129 @@ textarea {
     padding-right: 36px;
 }
 
+/* 设置标题右侧挂两行项目外部信息（GitHub 链接 / 交流 QQ 群号 + 二维码入口）。
+   二维码弹层锚在群号行右端并落在弹窗内：.confirm-dialog 是 overflow: clip，
+   超出弹窗的部分会被裁掉。 */
+#project-settings-dialog .confirm-header {
+    display: flex;
+    align-items: center;
+    gap: var(--ui-space-4);
+}
+
+#project-settings-dialog .confirm-header h2 {
+    flex: 0 0 auto;
+    margin: 0;
+}
+
+.project-settings-meta {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--ui-text-secondary);
+}
+
+.project-settings-meta-link {
+    color: var(--ui-text-secondary);
+    text-decoration: none;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.project-settings-meta-link:hover,
+.project-settings-meta-link:focus-visible {
+    color: var(--ui-text);
+    text-decoration: underline;
+}
+
+.project-settings-meta-group {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    white-space: nowrap;
+}
+
+.project-settings-qr-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: 0;
+    border-radius: var(--ui-radius-control);
+    background: transparent;
+    color: var(--ui-text-secondary);
+    cursor: pointer;
+}
+
+.project-settings-qr-btn:hover,
+.project-settings-qr-btn:focus-visible {
+    color: var(--ui-text);
+    background: color-mix(in srgb, var(--ui-text) 8%, transparent);
+}
+
+.project-settings-qr-btn svg {
+    width: 15px;
+    height: 15px;
+}
+
+.project-settings-qr-popover {
+    position: absolute;
+    top: calc(100% + 10px);
+    right: 0;
+    z-index: 5;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    width: 224px;
+    padding: 14px;
+    border-radius: 14px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-panel);
+    box-shadow: var(--shadow-lg);
+}
+
+.project-settings-qr-popover[hidden],
+.project-settings-qr-image[hidden],
+.project-settings-qr-placeholder[hidden] {
+    display: none;
+}
+
+.project-settings-qr-image {
+    display: block;
+    width: 196px;
+    height: 196px;
+    border-radius: 8px;
+    object-fit: contain;
+    /* 深色主题下也留白底：多数群二维码是深色码点 + 透明底。 */
+    background: #fff;
+}
+
+.project-settings-qr-placeholder {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    width: 196px;
+    height: 196px;
+    border: 1px dashed var(--border-color);
+    border-radius: 8px;
+    color: var(--ui-text-muted);
+    font-size: 12px;
+}
+
+.project-settings-qr-placeholder svg {
+    width: 28px;
+    height: 28px;
+}
+
 .dialog-close-btn.dialog-close-btn {
     position: absolute;
     top: 20px;

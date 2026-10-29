@@ -731,6 +731,10 @@ const U = {
     projectSettingsBackdrop: document.getElementById("project-settings-backdrop"),
     projectSettingsDialog: document.getElementById("project-settings-dialog"),
     projectSettingsClose: document.getElementById("project-settings-close-btn"),
+    projectSettingsQrBtn: document.getElementById("project-settings-qq-qr-btn"),
+    projectSettingsQrPopover: document.getElementById("project-settings-qq-qr-popover"),
+    projectSettingsQrImage: document.getElementById("project-settings-qq-qr-image"),
+    projectSettingsQrPlaceholder: document.getElementById("project-settings-qq-qr-placeholder"),
     projectSettingsOpenPassword: document.getElementById("project-settings-open-password-btn"),
     projectSettingsOpenBundle: document.getElementById("project-settings-open-bundle-btn"),
     zoom: document.getElementById("project-settings-zoom"),
@@ -8276,12 +8280,52 @@ function openProjectSettingsDialog() {
 
 function closeProjectSettingsDialog() {
     if (!U.projectSettingsBackdrop) return;
+    closeProjectSettingsQrPopover();
     closePasswordChangeDialog();
     closeConfigBundleDialog();
     U.projectSettingsBackdrop.hidden = true;
     U.projectSettingsBackdrop.classList.remove("is-open");
     U.projectSettings?.setAttribute("aria-expanded", "false");
     clearProjectSettingsPasswords();
+}
+
+function isProjectSettingsQrOpen() {
+    return !!U.projectSettingsQrPopover && !U.projectSettingsQrPopover.hidden;
+}
+
+function setProjectSettingsQrOpen(open) {
+    if (!U.projectSettingsQrPopover) return;
+    U.projectSettingsQrPopover.hidden = !open;
+    U.projectSettingsQrBtn?.setAttribute("aria-expanded", open ? "true" : "false");
+}
+
+function closeProjectSettingsQrPopover() {
+    if (!isProjectSettingsQrOpen()) return false;
+    setProjectSettingsQrOpen(false);
+    return true;
+}
+
+// 二维码图片由后续上传的文件提供：文件缺席时弹层显示占位，而不是破图。
+function syncProjectSettingsQrImage() {
+    const image = U.projectSettingsQrImage;
+    if (!image) return;
+    const apply = (loaded) => {
+        image.hidden = !loaded;
+        if (U.projectSettingsQrPlaceholder) U.projectSettingsQrPlaceholder.hidden = loaded;
+    };
+    if (image.complete) {
+        apply(image.naturalWidth > 0);
+        return;
+    }
+    image.addEventListener("load", () => apply(true), { once: true });
+    image.addEventListener("error", () => apply(false), { once: true });
+}
+
+function bindProjectSettingsQr() {
+    syncProjectSettingsQrImage();
+    U.projectSettingsQrBtn?.addEventListener("click", () => {
+        setProjectSettingsQrOpen(!isProjectSettingsQrOpen());
+    });
 }
 
 async function syncProjectSettingsAutoUnlock() {
@@ -10650,6 +10694,7 @@ function bindProjectSettings() {
     U.theme?.addEventListener("click", toggleTheme);
     bindModelRetryToastExpansion();
     bindScaleRows();
+    bindProjectSettingsQr();
     U.projectSettings?.addEventListener("click", () => openProjectSettingsDialog());
     U.projectSettingsClose?.addEventListener("click", () => closeProjectSettingsDialog());
     U.projectSettingsBackdrop?.addEventListener("click", (e) => {
@@ -11398,6 +11443,7 @@ function bindGlobalOverlays() {
         }
         if (!e.target.closest(".ceo-session-actions.toolbar-dropdown")) closeCeoSessionMenus();
         if (!e.target.closest(".toolbar-dropdown")) closeTaskMenus();
+        if (!e.target.closest(".project-settings-meta")) closeProjectSettingsQrPopover();
     });
     document.addEventListener("keydown", (e) => {
         if (e.key !== "Escape") return;
@@ -11409,6 +11455,10 @@ function bindGlobalOverlays() {
         if (closeCeoSessionMenus({ restoreFocus: true })) return;
         if (isPasswordChangeOpen()) {
             closePasswordChangeDialog();
+            return;
+        }
+        if (closeProjectSettingsQrPopover()) {
+            U.projectSettingsQrBtn?.focus?.();
             return;
         }
         if (isProjectSettingsOpen()) {

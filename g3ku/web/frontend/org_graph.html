@@ -1136,6 +1136,30 @@
                     aria-modal="true" aria-labelledby="project-settings-title" tabindex="-1">
                     <div class="confirm-header">
                         <h2 id="project-settings-title">设置</h2>
+                        <div class="project-settings-meta">
+                            <a class="project-settings-meta-link" href="https://github.com/ZXY39/Negi"
+                                target="_blank" rel="noreferrer noopener">https://github.com/ZXY39/Negi</a>
+                            <span class="project-settings-meta-group">
+                                <span>交流QQ群：1130255086</span>
+                                <button id="project-settings-qq-qr-btn" class="project-settings-qr-btn" type="button"
+                                    aria-label="查看交流QQ群二维码" aria-haspopup="dialog" aria-expanded="false"
+                                    aria-controls="project-settings-qq-qr-popover">
+                                    <i data-lucide="qr-code" aria-hidden="true"></i>
+                                </button>
+                            </span>
+                            <!-- 群二维码图片放在 g3ku/web/frontend/assets/qq-group-qrcode.png；文件缺席时显示占位。 -->
+                            <div id="project-settings-qq-qr-popover" class="project-settings-qr-popover"
+                                role="dialog" aria-label="交流QQ群二维码" hidden>
+                                <img id="project-settings-qq-qr-image" class="project-settings-qr-image"
+                                    src="assets/qq-group-qrcode.png" alt="交流QQ群 1130255086 二维码" width="196"
+                                    height="196" hidden>
+                                <div id="project-settings-qq-qr-placeholder" class="project-settings-qr-placeholder"
+                                    hidden>
+                                    <i data-lucide="qr-code" aria-hidden="true"></i>
+                                    <span>群二维码待上传</span>
+                                </div>
+                            </div>
+                        </div>
                         <button id="project-settings-close-btn" class="icon-btn dialog-close-btn" type="button"
                             aria-label="关闭设置">
                             <i data-lucide="x" aria-hidden="true"></i>
