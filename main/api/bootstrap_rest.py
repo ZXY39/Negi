@@ -324,6 +324,7 @@ _BUNDLE_ERROR_CODES: tuple[tuple[str, str, int], ...] = (
     ("bundle_memory_store_missing", "bundle_memory_store_missing", 400),
     ("bundle_persona_empty", "bundle_persona_empty", 400),
     ("bundle_stickers_empty", "bundle_stickers_empty", 400),
+    ("bundle_stickers_only_builtin", "bundle_stickers_only_builtin", 400),
     ("rejected", "bundle_path_rejected", 400),
     ("unsupported config bundle version", "bundle_version_unsupported", 400),
     ("config bundle", "bundle_file_invalid", 400),

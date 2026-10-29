@@ -59,6 +59,8 @@ class ApiCore {
                 return "这台机器还没有人设描述或人设图，导不出人设。";
             case "bundle_stickers_empty":
                 return "这台机器还没有表情包，导不出表情包。";
+            case "bundle_stickers_only_builtin":
+                return "这台机器只有预置表情包，没有可导出的自建包；预置包不参与导入导出。";
             case "bundle_file_invalid":
                 return "这个文件不是可用的配置包，或包内密钥已损坏。";
             case "bundle_version_unsupported":

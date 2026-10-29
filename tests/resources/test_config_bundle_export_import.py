@@ -665,6 +665,46 @@ STICKER_KEYS = {
 }
 
 
+def _seed_builtin_pack(
+    workspace: Path, *, name: str = "deepseek-fanart", marker: str = "BUILTIN"
+) -> Path:
+    """预置包：随仓库分发，配置包导入导出都按包键排除。"""
+    base = workspace / "stickers" / name
+    (base / "happy").mkdir(parents=True, exist_ok=True)
+    (base / "manifest.json").write_text(
+        json.dumps({"theme": f"{marker} theme"}, ensure_ascii=False), encoding="utf-8"
+    )
+    (base / "registry.json").write_text(
+        json.dumps({"schema_version": 1, "categories": {"happy": {}}}),
+        encoding="utf-8",
+    )
+    (base / "happy" / "001.webp").write_bytes(f"{marker}-webp".encode())
+    return base
+
+
+def _rewrite_payload(archive: Path, mutate) -> Path:
+    """改写包载荷，模拟旧版本导出（当时预置包还会随包走）。"""
+    envelope = json.loads(archive.read_text(encoding="utf-8"))
+    key = derive_password_key(
+        BUNDLE_PASSWORD,
+        salt=base64.b64decode(envelope["salt_b64"]),
+        n=int(envelope["kdf"]["n"]),
+        r=int(envelope["kdf"]["r"]),
+        p=int(envelope["kdf"]["p"]),
+    )
+    fernet = Fernet(key.encode())
+    payload = json.loads(
+        fernet.decrypt(base64.b64decode(envelope["payload_b64"])).decode("utf-8")
+    )
+    mutate(payload)
+    envelope["payload_b64"] = base64.b64encode(
+        fernet.encrypt(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+    ).decode("ascii")
+    forged = archive.with_name(f"payload-{archive.stem}.g3kucb")
+    forged.write_text(json.dumps(envelope), encoding="utf-8")
+    return forged
+
+
 def _seed_stickers(workspace: Path, *, marker: str = "SRC") -> Path:
     """表情包面：包目录 + manifest/registry + 分类图片；顺带放几份包外杂项。"""
     base = workspace / "stickers"
@@ -932,6 +972,113 @@ def test_stickers_only_import_replaces_the_face_and_leaves_other_faces(tmp_path:
     assert json.loads((backup / "stickers" / "packA" / "manifest.json").read_text(encoding="utf-8"))[
         "theme"
     ] == "TGT theme"
+
+
+def test_stickers_scope_exports_operator_packs_only(tmp_path: Path) -> None:
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+    _seed_stickers(source)
+    _seed_builtin_pack(source)
+
+    archive = _export_scopes(source, (config_bundle.SCOPE_STICKERS,))
+
+    assert set(_payload_of(archive)["entries"]) == STICKER_KEYS
+
+
+def test_stickers_scope_with_only_builtin_pack_is_refused(tmp_path: Path) -> None:
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+    _seed_builtin_pack(source, name="_deepseek-fanart")
+
+    with pytest.raises(ValueError, match="bundle_stickers_only_builtin"):
+        _export_scopes(source, (config_bundle.SCOPE_STICKERS,))
+
+    assert not (source / config_bundle.BUNDLE_OUTPUT_DIR).exists()
+
+
+def test_stickers_import_keeps_the_local_builtin_pack(tmp_path: Path) -> None:
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+    _seed_stickers(source, marker="SRC")
+    archive = _export_scopes(source, (config_bundle.SCOPE_STICKERS,))
+    forged = _rewrite_payload(
+        archive,
+        lambda payload: payload["entries"].update(
+            {
+                "stickers/deepseek-fanart/manifest.json": base64.b64encode(
+                    b'{"theme": "old builtin"}'
+                ).decode("ascii"),
+                "stickers/deepseek-fanart/happy/001.webp": base64.b64encode(
+                    b"old-builtin-webp"
+                ).decode("ascii"),
+            }
+        ),
+    )
+
+    target = _write_workspace(tmp_path / "target")
+    builtin = _seed_builtin_pack(target)
+
+    item = config_bundle.import_bundle(
+        target,
+        archive_path=forged,
+        password=BUNDLE_PASSWORD,
+        scopes=(config_bundle.SCOPE_STICKERS,),
+    )
+
+    assert item["sticker_scope_applied"] is True
+    assert item["sticker_builtin_skipped"] == ["deepseek-fanart"]
+    assert item["sticker_entry_count"] == len(STICKER_KEYS)
+    assert json.loads((builtin / "manifest.json").read_text(encoding="utf-8"))["theme"] == "BUILTIN theme"
+    assert (builtin / "happy" / "001.webp").read_bytes() == b"BUILTIN-webp"
+    assert json.loads(
+        (target / "stickers" / "packA" / "manifest.json").read_text(encoding="utf-8")
+    )["theme"] == "SRC theme"
+    backup = Path(item["backup_dir"])
+    assert not (backup / "stickers" / "deepseek-fanart").exists()
+
+
+def test_stickers_import_with_only_builtin_entries_leaves_operator_packs(
+    tmp_path: Path,
+) -> None:
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+    _seed_stickers(source)
+    archive = _export_scopes(source, (config_bundle.SCOPE_STICKERS,))
+    builtin_only = _rewrite_payload(
+        archive,
+        lambda payload: payload.__setitem__(
+            "entries",
+            {
+                "stickers/deepseek-fanart/manifest.json": base64.b64encode(
+                    b'{"theme": "old builtin"}'
+                ).decode("ascii"),
+                "stickers/deepseek-fanart/happy/001.webp": base64.b64encode(
+                    b"old-builtin-webp"
+                ).decode("ascii"),
+            },
+        ),
+    )
+
+    target = _write_workspace(tmp_path / "target")
+    _seed_stickers(target, marker="TGT")
+    builtin = _seed_builtin_pack(target, marker="TGT")
+
+    item = config_bundle.import_bundle(
+        target,
+        archive_path=builtin_only,
+        password=BUNDLE_PASSWORD,
+        scopes=(config_bundle.SCOPE_STICKERS,),
+    )
+
+    assert item["sticker_scope_applied"] is False
+    assert item["sticker_builtin_skipped"] == ["deepseek-fanart"]
+    assert item["sticker_entry_count"] == 0
+    # 整面不动：目标机的自建包与预置包都保持原样。
+    assert (target / "stickers" / "packA" / "happy" / "001.png").read_bytes() == b"png-bytes"
+    assert json.loads(
+        (target / "stickers" / "packA" / "manifest.json").read_text(encoding="utf-8")
+    )["theme"] == "TGT theme"
+    assert (builtin / "happy" / "001.webp").read_bytes() == b"TGT-webp"
 
 
 def test_v4_bundle_cannot_claim_the_stickers_scope(tmp_path: Path) -> None:

@@ -39,7 +39,12 @@ from g3ku.security import (
     unwrap_master_key,
 )
 from g3ku.stickers.admin import admin_segment_ok
-from g3ku.stickers.catalog import IMAGE_SUFFIXES, MANIFEST_NAME, STICKERS_DIRNAME
+from g3ku.stickers.catalog import (
+    IMAGE_SUFFIXES,
+    MANIFEST_NAME,
+    STICKERS_DIRNAME,
+    is_builtin_pack,
+)
 from g3ku.stickers.registry import REGISTRY_NAME
 
 BUNDLE_KIND = "g3ku-config-bundle"
@@ -318,16 +323,23 @@ def _collect_persona_entries(root: Path) -> dict[str, str]:
 
 
 def _collect_sticker_entries(root: Path) -> dict[str, str]:
-    """表情包面：包目录整棵带走，只认 manifest/registry 与分类图片。
+    """表情包面：操作员的包目录整棵带走，只认 manifest/registry 与分类图片。
 
     目录里可能有编辑器残留、缩略图缓存之类不属于表情包树的文件；入口与出口都按
     同一份白名单收，保证「导出的包一定导得回去」。
+
+    预置包随仓库分发、由升级维护，不进包：它在目标机上有自己的版本，带上旧版本
+    反而会整包覆盖回新装设备。
     """
     base = _stickers_landing_paths(root)[STICKERS_DIR_ROOT]
     entries: dict[str, str] = {}
+    builtin_skipped = 0
     if base.is_dir():
         for pack_dir in sorted(base.iterdir(), key=lambda item: item.name):
             if not pack_dir.is_dir() or pack_dir.is_symlink() or not admin_segment_ok(pack_dir.name):
+                continue
+            if is_builtin_pack(pack_dir.name):
+                builtin_skipped += 1
                 continue
             for child in sorted(pack_dir.iterdir(), key=lambda item: item.name):
                 if child.is_file() and not child.is_symlink() and child.name in STICKER_PACK_FILES:
@@ -337,8 +349,10 @@ def _collect_sticker_entries(root: Path) -> dict[str, str]:
                         if image.is_file() and not image.is_symlink() and image.suffix.lower() in IMAGE_SUFFIXES:
                             entries[f"{STICKERS_DIR_ROOT}/{pack_dir.name}/{child.name}/{image.name}"] = _encode_file(image)
     if not entries:
-        # 勾了表情包却没有任何包：导出会得到一个"看起来带了表情包"的空面，
-        # 导入方还会按整包替换清掉目标机的表情包，宁可在这里拒绝。
+        # 勾了表情包却没有可导出的包：导出会得到一个"看起来带了表情包"的空面，
+        # 导入方还会按整面替换动到目标机的包，宁可在这里拒绝。
+        if builtin_skipped:
+            raise ValueError("bundle_stickers_only_builtin")
         raise ValueError("bundle_stickers_empty")
     return entries
 
@@ -725,15 +739,36 @@ def _clean_persona_face(land: dict[str, Path], entries: dict[str, str]) -> None:
 
 
 def _stickers_backup_sources(root: Path) -> dict[str, Path]:
-    """表情包面整体替换前整棵树留底：包目录之外的旧包会被清掉。"""
+    """表情包面替换前给操作员数据留底：预置包原地保留，不需要备份。"""
     base = _stickers_landing_paths(root)[STICKERS_DIR_ROOT]
-    return {STICKERS_DIR_ROOT: base} if base.exists() else {}
+    if not base.is_dir():
+        return {}
+    sources: dict[str, Path] = {}
+    for child in base.iterdir():
+        if child.is_dir() and not child.is_symlink() and is_builtin_pack(child.name):
+            continue
+        sources[f"{STICKERS_DIR_ROOT}/{child.name}"] = child
+    return sources
 
 
 def _apply_sticker_scope(root: Path) -> None:
-    """整棵树先清掉再写入包内容：表情包面按包内集合整体替换。"""
+    """清掉操作员包再写入包内容：表情包面按包内集合整体替换。
+
+    预置包随仓库分发，不属于导入范围：原地保留，包内同名条目在导入前已被摘掉。
+    """
     base = _stickers_landing_paths(root)[STICKERS_DIR_ROOT]
-    shutil.rmtree(base, ignore_errors=True)
+    if not base.is_dir():
+        return
+    for child in base.iterdir():
+        if child.is_dir() and not child.is_symlink() and is_builtin_pack(child.name):
+            continue
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child, ignore_errors=True)
+            continue
+        try:
+            child.unlink()
+        except OSError:
+            continue
 
 
 def import_bundle(
@@ -769,13 +804,30 @@ def import_bundle(
     master_key, declared_rels = _preflight(payload, bundle_scopes)
     all_entries = payload["entries"]
     applied_rels = [rel for rel in declared_rels if _entry_scope(rel) in clean_scopes]
+    # 预置包不属于表情包面：旧版本导出的同名条目整段摘掉，落盘阶段保留目标机自己
+    # 的那一份，让升级维护的预置内容不被旧包覆盖。
+    builtin_skipped: list[str] = []
+    if SCOPE_STICKERS in clean_scopes:
+        kept: list[str] = []
+        for rel in applied_rels:
+            parts = PurePosixPath(rel).parts
+            if _entry_scope(rel) == SCOPE_STICKERS and is_builtin_pack(parts[1]):
+                if parts[1] not in builtin_skipped:
+                    builtin_skipped.append(parts[1])
+                continue
+            kept.append(rel)
+        applied_rels = kept
+    # 只剩预置条目的包：整面不动，否则会清掉目标机的自建包却写不进任何东西。
+    sticker_apply = SCOPE_STICKERS in clean_scopes and any(
+        _entry_scope(rel) == SCOPE_STICKERS for rel in applied_rels
+    )
     entries = {rel: all_entries[rel] for rel in applied_rels}
     persona_land = _persona_landing_paths(root)
     targets = _entry_targets(root, applied_rels)
 
     backup_root = root / IMPORT_BACKUP_DIR / _stamp()
     backup_root.mkdir(parents=True, exist_ok=True)
-    # 人设与表情包按集合替换：旧的 note、`my_image/` 与整棵 stickers 树先留底；
+    # 人设与表情包按集合替换：旧的 note、`my_image/` 与操作员表情包包树先留底；
     # 其余面仍只备份会被覆盖的文件。
     backup_sources = {
         rel: source
@@ -784,12 +836,12 @@ def import_bundle(
     }
     if SCOPE_PERSONA in clean_scopes:
         backup_sources.update(_persona_backup_sources(root))
-    if SCOPE_STICKERS in clean_scopes:
+    if sticker_apply:
         backup_sources.update(_stickers_backup_sources(root))
     backed_up = _backup_targets(backup_sources, backup_root)
     status: dict[str, Any] | None = None
     try:
-        if SCOPE_STICKERS in clean_scopes:
+        if sticker_apply:
             _apply_sticker_scope(root)
         _write_entries(entries, targets)
         if SCOPE_PERSONA in clean_scopes:
@@ -810,6 +862,8 @@ def import_bundle(
         "memory_entry_count": _count_by_scope(targets, SCOPE_MEMORY),
         "persona_entry_count": _count_by_scope(targets, SCOPE_PERSONA),
         "sticker_entry_count": _count_by_scope(targets, SCOPE_STICKERS),
+        "sticker_scope_applied": sticker_apply,
+        "sticker_builtin_skipped": sorted(builtin_skipped),
         "backup_dir": str(backup_root),
         "created_at": str(payload.get("created_at") or ""),
         "workspace_label": str(payload.get("workspace_label") or ""),

@@ -32,6 +32,10 @@ MANIFEST_NAME = "manifest.json"
 PACK_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp"})
 DISABLED_PREFIX = "_"
+# 随仓库分发的预置包：资产入库、由升级维护，不属于操作员数据。配置包导入导出
+# 都按这个名单排除，否则旧设备导出的旧版本会把新装设备的预置包整个覆盖回去。
+# 只看去前缀后的键：`_<key>` 是停用态，仍算同一个预置包。
+BUILTIN_PACK_KEYS = frozenset({"deepseek-fanart"})
 # Sidecar directories that live beside the category folders and must never be
 # mistaken for one.
 RESERVED_PACK_DIRS = frozenset({"semantic"})
@@ -91,6 +95,18 @@ def _is_catalog_name(name: str) -> bool:
         and not name.startswith(DISABLED_PREFIX)
         and name not in {".", ".."}
     )
+
+
+def bare_pack_key(name: str) -> str:
+    """去掉软删除前缀后的包键：`_foo` 与 `foo` 是同一个包。"""
+    raw = str(name or "").strip()
+    if raw.startswith(DISABLED_PREFIX):
+        return raw[len(DISABLED_PREFIX):]
+    return raw
+
+
+def is_builtin_pack(name: str) -> bool:
+    return bare_pack_key(name) in BUILTIN_PACK_KEYS
 
 
 def _image_paths(directory: Path) -> list[Path]:
@@ -347,6 +363,7 @@ def sticker_contract_sections_from_text(pinned_text: Any) -> dict[str, str]:
 
 
 __all__ = [
+    "BUILTIN_PACK_KEYS",
     "CATEGORY_DESCRIPTION_MAX_CHARS",
     "DISABLED_PREFIX",
     "IMAGE_SUFFIXES",
@@ -359,11 +376,13 @@ __all__ = [
     "STICKER_SECTION_PREFIX",
     "Pack",
     "StickerCategory",
+    "bare_pack_key",
     "category_description",
     "category_owners",
     "find_pack",
     "injected_chars",
     "invalidate_scan_cache",
+    "is_builtin_pack",
     "normalize_description",
     "read_manifest",
     "render_catalog_lines",
