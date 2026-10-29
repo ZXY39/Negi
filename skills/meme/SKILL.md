@@ -49,6 +49,15 @@ python skills/meme/scripts/import_pack.py <源> --commit --map map.json --theme 
 
 **导入之后**：报告里会给出每类新增数与主题；描述可在「表情包」页核对。模型侧下一轮会收到该包的清单变化通知，不用另行通知。
 
+## 从 AstrBot 生态找包
+
+社区索引：`anka-afk/astrbot-meme-pack-index`，读 `community-index.json`（`web_fetch` 取 raw 即可，包十几条）。每条含 `id` / `name` / `maintainer` / `description` / `tags` / `license` / `verified` / `source{repo,ref,subpath}` / `previews`。
+
+1. 按用户的主题词匹配 `name` + `description` + `tags`（角色名、番剧、风格），给 2~3 个候选，**连带 `license` 和 `verified` 一起说**：条目多为「仅限非商业使用」/CC-BY-NC-SA；`verified: false` 是社区投稿、维护者未审，先只 `--detect` 看分类名，必要时抽查几张再决定落盘。
+2. `source.ref` 多是 tag，而 URL 通道只 `--depth 1` 拉默认分支。要锁版本先手动克隆再交本地目录：`git clone --depth 1 --branch <ref> https://github.com/<repo> temp/<名>`，`subpath` 非 `.` 时指到那个子目录。
+3. 剩下按上一节走：`--detect` → `--map` → `--commit`。
+4. 装成功后**问用户要不要给作者点 Star 表示鼓励**，两个对象分别给链接：索引仓库（维护者）与 `source.repo`（包的作者，同一人时说明只有一个可点）。用户点头也只给链接或让 gh 自己认证执行，**不代点**；拒绝或没回应就不再追问。
+
 ## 删一张图 / 停用一个包
 
 - 单张：`filesystem_delete`。不可逆，删前先 `filesystem_stat`。删掉的序号留空洞，不重排。

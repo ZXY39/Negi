@@ -13,6 +13,9 @@ trigger:
     - 删表情
     - 整理图库
     - astrbot 表情包
+    - 表情包索引
+    - 表情包广场
+    - 找表情包
 requires:
   tools:
     - filesystem_copy
