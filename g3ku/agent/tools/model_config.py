@@ -14,6 +14,17 @@ def _as_int(value: Any, *, field: str) -> int:
         raise ValueError(f"{field} must be an integer, got {value!r}") from None
 
 
+def _as_retry_count(value: Any) -> int:
+    rounds = _as_int(value, field="retry_count")
+    if rounds < 0:
+        raise ValueError(
+            f"retry_count must be 0 or greater, got {value!r} "
+            "(0 = no retry round: each API key is tried once, then the chain advances "
+            "to the next model)"
+        )
+    return rounds
+
+
 def _as_float(value: Any, *, field: str) -> float:
     try:
         return float(str(value).strip())
@@ -132,10 +143,12 @@ class ModelConfigTool(Tool):
                 "retry_count": {
                     "type": "integer",
                     "description": (
-                        "Max retryable-error rounds for this model before falling back to the "
+                        "Retryable-error round budget for this model before falling back to the "
                         "next model (one round = one pass over all of the model's API keys, "
-                        "with exponential backoff + jitter between rounds). 0/omitted uses the "
-                        "built-in default of 10 rounds. Non-retryable errors try each key once "
+                        "with exponential backoff + jitter between rounds). 0 (also when "
+                        "omitted) means no retry round: each key is tried once, then the chain "
+                        "advances to the next model. Negative values are rejected. "
+                        "Non-retryable errors try each key once "
                         "then move to the next model."
                     ),
                 },
@@ -256,7 +269,7 @@ class ModelConfigTool(Tool):
                 temperature=None if kwargs.get("temperature") in (None, "") else _as_float(kwargs.get("temperature"), field="temperature"),
                 reasoning_effort=kwargs.get("reasoning_effort"),
                 retry_on=kwargs.get("retry_on"),
-                retry_count=None if kwargs.get("retry_count") in (None, "") else _as_int(kwargs.get("retry_count"), field="retry_count"),
+                retry_count=None if kwargs.get("retry_count") in (None, "") else _as_retry_count(kwargs.get("retry_count")),
                 description=str(kwargs.get("description") or ""),
                 name=str(kwargs.get("name") or ""),
                 image_multimodal_enabled=_as_bool(kwargs.get("image_multimodal_enabled", False), field="image_multimodal_enabled"),
@@ -389,8 +402,8 @@ class ModelConfigTool(Tool):
             if self._provided(kwargs, field):
                 patch[field] = None if str(kwargs.get(field) or "").strip() == "" else _as_int(kwargs.get(field), field=field)
         if self._provided(kwargs, "retry_count") and str(kwargs.get("retry_count") or "").strip() != "":
-            # retry_count 没有"清空"语义，交 None 会让 manager 的 int(None) 直接抛。
-            patch["retry_count"] = _as_int(kwargs.get("retry_count"), field="retry_count")
+            # retry_count 没有"清空"语义：交空串或 null 都是不动这一格。
+            patch["retry_count"] = _as_retry_count(kwargs.get("retry_count"))
         for field in ("temperature", "request_timeout_seconds"):
             if self._provided(kwargs, field):
                 patch[field] = None if str(kwargs.get(field) or "").strip() == "" else _as_float(kwargs.get(field), field=field)

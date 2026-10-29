@@ -229,6 +229,11 @@
 （第三方桥）。配置项的落点见 `config-and-models.md`「external_api」与
 `external-agent-api.md`「入站身份契约（`sender` / `chat_type`）」。
 
+MCP 网关以固定身份 `negi-mcp` 出现在每条入站消息里，所以「外部接入」页的「当操作员」开关，
+实质是给这颗 token 的白名单增删这个 id：开启要项目解锁口令、收回不需要，两条都写同一个配置项、
+留同一条审计。判据只有一处——`session_trust` 按 sender 与白名单派生信任级，档位、记忆、人设、
+任务四扇门都读它；开关改的是白名单内容，不是判据本身。
+
 `/api/v1` 入站契约：`sender{id,name}` 与 `chat_type`（白名单 `group` / `dm` / `guild` /
 `guild_dm`，非法值 400）；二者与 `external_key` 前缀冲突时**取更严的一档**并留 WARNING。
 服务端把派生结果写进 `metadata["external_trust"]` 与 `metadata["chat_type"]`，桥不能覆盖。

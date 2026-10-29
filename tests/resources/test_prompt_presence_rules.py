@@ -95,7 +95,7 @@ def test_both_lanes_receive_the_rules_byte_for_byte() -> None:
 
 
 def test_presence_wording_replaces_the_callable_line() -> None:
-    """两条车道都要说清"契约不在场不拦路、那一跳交回契约"，否则模型仍会先去 load。"""
+    """两条车道都要说清"契约不在场不拦路、那一跳交回契约且不执行"，否则模型会把投递回执当执行成功。"""
     for text in (
         load_prompt("node_execution.md"),
         load_prompt("acceptance_execution.md"),
@@ -104,7 +104,7 @@ def test_presence_wording_replaces_the_callable_line() -> None:
         assert "不执行" in text
     frontdoor = CeoPromptBuilder(loop=SimpleNamespace(workspace=None))._read_prompt("ceo_frontdoor.md")
     assert "契约随结果交回" in frontdoor
-    assert "暂存可复用" in frontdoor
+    assert "不执行工具" in frontdoor
 
 
 def _receipt(*, staged_count: int, batch_total: int = 1, batch_position: int = 1) -> str:

@@ -241,13 +241,12 @@ def resolve_reply_stickers(
             undelivered.append(label)
             continue
         chosen.append(path)
-        sent_index = registry.index_of(path.name)
-        if sent_index is None:
-            sent_index = index
-        label = f"{pack_key}/{value}/{sent_index}" if sent_index is not None else f"{pack_key}/{value}"
-        delivered.append(label)
+        # 发出去的这一张必须带编号：随机取图时只有运行时知道选了哪张，而用户是对
+        # 屏幕上那张图表态的。编号即文件名、注册后永不复用，所以这个键长期可解引用。
+        sent_index = index if index is not None else registry.index_of(path.name)
+        delivered.append(f"{pack_key}/{value}/{sent_index}")
         ending = raw_line[len(line):]
-        context_kept.append(f"[[sticker:{label}]]{ending}")
+        context_kept.append(f"[[sticker:{pack_key}/{value}/{sent_index}]]{ending}")
     if not dropped:
         return StickerReply(text=text, context_text=text)
     # 删掉末尾的标记行会留下一个悬空换行；渠道正文本来就被 sanitize 收过边。

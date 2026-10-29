@@ -67,6 +67,9 @@ _TRANSCRIPT_ERROR_REPLY_SOURCE = "runtime_error"
 # 常量放在运行层，是为了让四条入站车道问的是同一个字段名（api 层依赖运行层，反向不行）。
 MANUAL_COMPRESSION_STATE_ATTR = "_manual_context_compression"
 MANUAL_COMPRESSION_RUNNING = "running"
+# 手动压缩自己失败（provider 拒、异常）用这一档，不复用 paused：paused 只描述"操作员取消了
+# 在跑的压缩"这件真发生过的事，把失败写成暂停会让操作员去找一个从没按下的按钮。
+MANUAL_COMPRESSION_FAILED = "failed"
 # 待重印的 provider tools[] 标记：手动压缩跑在回合外、够不到 preflight，所以由 api 层挂
 # 一个标记，下一跳的清单定形把它当成重印边界消费掉（内联压缩自带 token_compression 信号）。
 PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR = "_pending_provider_bundle_recommit"
@@ -88,6 +91,7 @@ CONTEXT_COMPRESSION_MARKER_KIND = "context_compression"
 CONTEXT_COMPRESSION_MARKER_LABELS = {
     "completed": "会话已压缩",
     "paused": "压缩已暂停",
+    "failed": "压缩失败",
 }
 
 

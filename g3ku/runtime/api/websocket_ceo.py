@@ -25,7 +25,6 @@ from loguru import logger
 from g3ku.core.events import AgentEvent
 from g3ku.core.messages import UserInputMessage
 from g3ku.deployment.data_root import data_root
-from g3ku.runtime.api.ceo_media import rewrite_assistant_media_content
 from g3ku.runtime.api.external_turns import get_external_turn_service
 from g3ku.runtime.ceo_catalog_offload import (
     build_ceo_session_catalog_async,
@@ -113,12 +112,9 @@ def _render_assistant_media(session_id: str, text: Any) -> Any:
     layer. Selection is deterministic in the reply text, so resolving twice (for
     the plain-text preview and again here) cannot pick two different images.
     """
-    if not isinstance(text, str) or not text.strip():
-        return text
-    cleaned, paths = _resolve_sticker_markers(text)
-    if paths:
-        cleaned = cleaned + "".join(f"\n\n![]({path})" for path in paths)
-    return rewrite_assistant_media_content(session_id, cleaned)
+    from g3ku.runtime.api.ceo_media import render_assistant_reply_media
+
+    return render_assistant_reply_media(session_id, text)
 
 
 def _reply_delta_frame(payload: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -1073,7 +1069,7 @@ def _snapshot_compression_marker(metadata: Any) -> dict[str, Any]:
     if str(metadata.get("kind") or "").strip().lower() != "context_compression":
         return {}
     state = str(metadata.get("compression_state") or "").strip().lower()
-    if state not in {"completed", "paused"}:
+    if state not in {"completed", "paused", "failed"}:
         return {}
     marker: dict[str, Any] = {
         "state": state,

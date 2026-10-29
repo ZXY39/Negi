@@ -15,7 +15,11 @@ from main.models import (
     normalize_final_acceptance_metadata,
     normalize_tool_file_changes,
 )
-from main.monitoring.execution_trace import build_execution_trace, thinking_reading_for_display
+from main.monitoring.execution_trace import (
+    attach_latest_thinking_text,
+    build_execution_trace,
+    thinking_reading_for_display,
+)
 from main.monitoring.frame_liveness import STALE_FRAME_MINUTES, frame_is_stale
 from main.monitoring.models import (
     LatestTaskNodeOutput,
@@ -1010,6 +1014,11 @@ class TaskQueryService:
             detail.check_result = self._summary_inline_text(detail.check_result, detail.check_result_ref)
             detail.final_output = self._summary_inline_text(detail.final_output, detail.final_output_ref)
         if normalized_detail_level == 'full':
+            # 底部「最新思考」那一行要正文：账本里每一轮都有全文，轨迹只带读数，
+            # 读侧在这里补最近一轮。摘要只在轨迹没带回合时兜底（前端优先读轨迹）。
+            attach_latest_thinking_text(execution_trace, runtime_node)
+            if not list(execution_trace.get('turns') or []):
+                attach_latest_thinking_text(execution_trace_summary, runtime_node)
             final_output_full = self._resolve_detail_text(detail.final_output, detail.final_output_ref)
             if final_output_full:
                 detail.final_output = final_output_full

@@ -156,7 +156,7 @@ test("更久的断供按整数分钟计时；一次读数都没有时才是未�
     assert.ok(freshness(bar, { ...baseMetrics }).includes(">未采样<"));
 });
 
-test("9 秒、10 秒与 99 秒渲染出的文本等长：秒表不改变胶囊宽度", () => {
+test("9 秒、10 秒与 99 秒渲染出的文本等长：秒表不改变这一项的宽度", () => {
     const texts = [9_400, 10_400, 99_400].map((elapsedMs) => {
         const bar = createPerfBar(beat(0), BASE_NOW_MS);
         freshness(bar);

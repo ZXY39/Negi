@@ -10,6 +10,7 @@ from g3ku.config.schema import (
     ModelLoadBalanceGroup,
     ModelRouteEntry,
     coerce_route_entry,
+    require_non_negative_retry_count,
 )
 from g3ku.llm_config.enums import AuthMode, Capability
 from g3ku.llm_config.facade import LLMConfigFacade
@@ -245,7 +246,7 @@ class ModelManager:
                 "description": str(description or "").strip(),
                 "name": str(name or "").strip(),
                 "retry_on": list(DEFAULT_RETRY_ON_KEYWORDS) if retry_on is None else split_retry_keywords(retry_on),
-                "retry_count": 0 if retry_count is None else int(retry_count),
+                "retry_count": require_non_negative_retry_count(retry_count, field="models.catalog[].retryCount"),
                 "single_api_key_max_concurrency": normalize_single_api_key_max_concurrency(single_api_key_max_concurrency),
                 "image_multimodal_enabled": bool(image_multimodal_enabled),
             },
@@ -315,8 +316,13 @@ class ModelManager:
         if retry_on is not _UNSET and retry_on is not None:
             # 显式提供（含 [] / ""）即尊重其值；空列表表示关闭关键字重试，不再回填默认。
             item.retry_on = split_retry_keywords(retry_on)
-        if retry_count is not _UNSET:
-            item.retry_count = int(retry_count)
+        if retry_count is not _UNSET and retry_count is not None:
+            # 赋值绕开字段的 ge=0（Base 未开 validate_assignment），所以负数在这里必须当场
+            # 拒掉；`null` 与「没交上来」同义，保持原值。
+            item.retry_count = require_non_negative_retry_count(
+                retry_count,
+                field="models.catalog[].retryCount",
+            )
         if single_api_key_max_concurrency is not _UNSET:
             item.single_api_key_max_concurrency = normalize_single_api_key_max_concurrency(single_api_key_max_concurrency)
         if description is not _UNSET:

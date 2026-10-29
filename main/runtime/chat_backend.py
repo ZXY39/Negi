@@ -22,7 +22,6 @@ from g3ku.prompt_trace import render_model_chain_trace
 from g3ku.providers.base import LLMModelAttempt, LLMResponse, normalize_usage_payload
 from g3ku.providers.fallback import (
     DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS,
-    DEFAULT_RETRYABLE_MODEL_ROUNDS,
     MODEL_RETRY_LIVE_STATES,
     MODEL_RETRY_STATE_CLEARED,
     MODEL_RETRY_STATE_RETRYING,
@@ -980,12 +979,13 @@ def _slot_max_retry_rounds(slot: dict[str, Any] | None) -> int | None:
 def _model_round_budget(route_slot: dict[str, Any] | None, base_target: Any) -> int:
     """本模型轮循环的预算：组槽位用组的 `maxRetryRounds`，direct 用绑定的 `retry_count`。
 
-    入口与每一轮边界都走这一份，槽位表被活刷新换掉之后预算才会跟着换。
+    两条车道都没有内置默认：0＝不重烧（首发那一趟仍然发）。入口与每一轮边界都走这一份，
+    槽位表被活刷新换掉之后预算才会跟着换。
     """
     group_budget = _slot_max_retry_rounds(route_slot)
     if group_budget is not None:
         return int(group_budget)
-    return normalized_retry_count(getattr(base_target, "retry_count", 0)) or DEFAULT_RETRYABLE_MODEL_ROUNDS
+    return normalized_retry_count(getattr(base_target, "retry_count", 0))
 
 
 class ConfigChatBackend:
@@ -1586,10 +1586,10 @@ class ConfigChatBackend:
                     held_key_index = int(node_turn_lease.key_index)
                     if held_key_index in api_key_indexes:
                         api_key_indexes = [held_key_index] + [item for item in api_key_indexes if item != held_key_index]
-                # 本模型的可重试轮数预算：direct 链沿用绑定 retry_count（0/未设置用默认
-                # DEFAULT_RETRYABLE_MODEL_ROUNDS）。负载均衡组不继承成员 catalog 的值，
-                # 否则 9999999 这类配置会让该成员永远不让位、组内平级 fallback 失效。
-                # 同一份判据在每轮边界重读一次，组预算被改值时这一发才追得上。
+                # 本模型的可重试轮数预算：direct 链按字面用绑定 retry_count（0＝不重烧）。
+                # 负载均衡组不继承成员 catalog 的值，否则 9999999 这类配置会让该成员永远
+                # 不让位、组内平级 fallback 失效。同一份判据在每轮边界重读一次，组预算被
+                # 改值时这一发才追得上。
                 budget_rounds = _model_round_budget(route_slot, base_target)
                 model_retry_on = list(getattr(base_target, "retry_on", []) or [])
                 preview_payload = build_send_provider_request_preview(

@@ -1,4 +1,4 @@
-- Authorized tools can be called directly. You are never blocked for not having loaded one: the contract is returned with the result.
+- Authorized tools can be called directly. You are never blocked for not having loaded one: a call made before the contract is in context returns the contract and does not run the tool; its arguments are staged for your next call.
 - To re-run arguments staged by your previous call to a tool, set `reuse_args=true` on it in the next turn.
 - `reuse_args=true` executes ALL argument sets staged for that tool in the current window; partial execution is not supported.
 - To execute only some of them, do not use `reuse_args` - call the tool again with new arguments.

@@ -34,6 +34,8 @@ from g3ku.providers.fallback import (
     PUBLIC_PROVIDER_FAILURE_MESSAGE,
     ModelProviderExhaustedError,
     ModelProviderResponseError,
+    is_retryable_model_error,
+    normalized_retry_count,
 )
 from g3ku.providers.responses_protocol_helpers import (
     _convert_messages as _preview_responses_messages,
@@ -57,6 +59,7 @@ from g3ku.runtime.chunk_compression_plan import (
     COMPRESSION_MAX_PASS_ROUNDS,
     COMPRESSION_MODE_CHUNKED,
     CompressionPass,
+    output_headroom_tokens,
     plan_compression_pass,
 )
 from g3ku.runtime.config_refresh import refresh_loop_runtime_config
@@ -2118,6 +2121,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     diagnostics={"applied": False, "reason": "no_compressible_history"},
                 )
             context_window_tokens = int(model_info.get("context_window_tokens") or 0)
+            # 压缩请求的输出预算＝规划器划容量时预留的那一颗余量，同一个函数同一个数：
+            # 一边按"窗口−信封−一成余量"装箱、另一边却按绑定的 max_tokens（这里可以是
+            # 65536）发出去，请求体就从来没有被它自己算出的余量约束过。
+            # 读不到窗口时不压输出：那时容量判据本身就走拒发档，给个 1000 反而会掐掉摘要。
+            compression_output_tokens = (
+                output_headroom_tokens(context_window_tokens) if context_window_tokens > 0 else None
+            )
             instruction_text = _FRONTDOOR_TOKEN_COMPRESSION_INSTRUCTION
             # append-only 单发压缩请求：原请求体（去尾/去契约）+ 末尾一条 user 指令。
             # 前缀与刚发出的正常请求字节一致，provider 前缀缓存真实命中，压缩请求
@@ -2187,6 +2197,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             chunk_committed_count = 0
             compression_pass_rounds = 1
             deferred_messages: list[dict[str, Any]] = []
+            helper_error_text = ""
             if chunked_mode:
                 (
                     compressed_text,
@@ -2196,6 +2207,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     compression_pass_rounds,
                     deferred_messages,
                     chunk_committed_count,
+                    helper_error_text,
                 ) = await self._chunked_frontdoor_compression_summaries(
                     grouped_history=grouped_history,
                     compression_pass=compression_pass,
@@ -2205,17 +2217,21 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     is_cancelled=_compression_cancelled,
                     model_info=model_info,
                     compression_source=compression_source,
+                    max_tokens=compression_output_tokens,
                 )
             else:
-                compressed_text, _compressed_message = await self._run_frontdoor_compression_helper_request(
-                    messages=single_shot_messages,
-                    model_refs=list(model_refs or []),
-                    state=state,
-                    runtime=runtime,
-                    is_cancelled=_compression_cancelled,
-                    model_info=model_info,
-                    progress_text="上下文压缩中",
-                    compression_source=compression_source,
+                compressed_text, _compressed_message, helper_error_text = (
+                    await self._run_frontdoor_compression_helper_request(
+                        messages=single_shot_messages,
+                        model_refs=list(model_refs or []),
+                        state=state,
+                        runtime=runtime,
+                        is_cancelled=_compression_cancelled,
+                        model_info=model_info,
+                        progress_text="上下文压缩中",
+                        compression_source=compression_source,
+                        max_tokens=compression_output_tokens,
+                    )
                 )
             if _compression_cancelled():
                 raise asyncio.CancelledError()
@@ -2233,7 +2249,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     diagnostics={
                         "applied": False,
                         "mode": "llm_chunked" if chunked_mode else "llm",
-                        "compression_pass_failed": "compression helper returned no summary",
+                        "compression_pass_failed": (
+                            helper_error_text or "compression helper returned no summary"
+                        ),
                         "final_request_tokens": int(single_shot_tokens or 0),
                         "estimated_total_tokens": int(single_shot_tokens or 0),
                         "chunk_count": int(chunk_count or 0),
@@ -2298,6 +2316,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     "chunk_committed_count": int(chunk_committed_count or 0),
                     "compression_pass_rounds": int(compression_pass_rounds or 1),
                     "deferred_message_count": int(len(deferred_messages or [])),
+                    # 某一块被拒时原文留在这里：收口后的请求体超窗与那一块的拒因是
+                    # 同一件事的两面，只报前者会把成因说反。
+                    "compression_provider_error": helper_error_text,
                     "capacity_tokens": int(compression_pass.capacity_tokens or 0),
                     "capacity_source": compression_pass.capacity_source,
                     "truncation_group_count": len(list(compression_pass.truncation_group_indexes or [])),
@@ -2465,6 +2486,28 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             dropped += 1
         return kept, dropped
 
+    def _frontdoor_compression_retry_policy(self, model_refs: list[str] | None) -> tuple[list[str] | None, int]:
+        """压缩 helper 的重试判据：这条绑定自己的 `retry_on` 与「重试次数」。
+
+        次数沿用普通发送道同一口径（绑定 `retry_count`，按字面值取，0＝不重烧）。取不到
+        绑定时退默认关键词表、轮数退 0，而不是退"硬拦 3 次"：那道硬闸会把操作员设的 0 和
+        9999 都读成同一个 3。
+        """
+        model_key = str((list(model_refs or []) or [""])[0] or "").strip()
+        config = self._frontdoor_runtime_config()
+        if not model_key or config is None:
+            return None, 0
+        try:
+            managed = config.get_managed_model(model_key)
+        except Exception:
+            managed = None
+        if managed is None:
+            return None, 0
+        raw_retry_on = getattr(managed, "retry_on", None)
+        retry_on = None if raw_retry_on is None else list(raw_retry_on or [])
+        rounds = normalized_retry_count(getattr(managed, "retry_count", 0))
+        return retry_on, rounds
+
     async def _run_frontdoor_compression_helper_request(
         self,
         *,
@@ -2476,15 +2519,22 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         model_info: dict[str, Any],
         progress_text: str = "上下文压缩中",
         compression_source: str = "token_compression",
-    ) -> tuple[str, Any]:
-        """压缩 helper 的单次请求发送 + 空响应对齐普通路径的重试语义。
+        max_tokens: int | None = None,
+    ) -> tuple[str, Any, str]:
+        """压缩 helper 的单次请求发送 + 由模型绑定决定要不要重烧。
 
-        与 `_graph_call_model` 普通发送一致：空响应（含 error_text）先尝试运行时
-        配置失效重建模型链，否则退避后重试，不设上限（普通路径同样无上限）；
-        每次尝试之间检查取消钩子，压缩中 pause/取消随时生效。返回 (摘要正文, 消息)。
+        重试判据交回操作员设的那颗：失败正文只有命中该绑定的 `retry_on` 才退避重试，
+        次数用该绑定的 `retry_count`（按字面值取，0＝一次都不重烧）。没命中的失败
+        ——内容审核拒、请求形状错、无声断流——一次都不重烧：这条道每一发都是几十 k
+        token，而同一批字节重发只会再撞同一道拒绝。不可重试的失败直接把 provider 原文
+        抛出去，不改写成"按这颗模型的窗口压缩后仍装不下"那种与成因无关的判词。
+        每次尝试之间检查取消钩子，压缩中 pause/取消随时生效。
+        返回 (摘要正文, 消息, 可重试但次数用尽时的 provider 原文)。
         """
         empty_response_retry_count = 0
         current_model_refs = list(model_refs or [])
+        retry_on, retry_rounds = self._frontdoor_compression_retry_policy(current_model_refs)
+        last_error_text = ""
         while True:
             if callable(is_cancelled) and bool(is_cancelled()):
                 raise asyncio.CancelledError()
@@ -2494,6 +2544,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 model_refs=list(current_model_refs),
                 parallel_tool_calls=None,
                 prompt_cache_key="",
+                max_tokens=max_tokens,
             )
             if callable(is_cancelled) and bool(is_cancelled()):
                 raise asyncio.CancelledError()
@@ -2532,14 +2583,24 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 else "",
             )
             compressed_text = self._content_text(response_view.content).strip()
-            has_error_text = bool(str(response_view.error_text or "").strip())
+            error_text = str(response_view.error_text or "").strip()
+            if error_text:
+                last_error_text = error_text
             if callable(is_cancelled) and bool(is_cancelled()):
                 raise asyncio.CancelledError()
-            if compressed_text and not has_error_text:
-                return compressed_text, message
-            # 空摘要 / provider 错误文本：对齐普通路径的空响应语义——先试配置失效
-            # 重建模型链，再退避重试。绝不把空结果或错误文本当成压缩产物，也绝不
-            # 误报为「上下文超限」。
+            if compressed_text and not error_text:
+                return compressed_text, message, ""
+            if error_text and not is_retryable_model_error(response_view, retry_on=retry_on):
+                # 没命中这条绑定的 retry_on：这不是"等一等就好"的失败，重发同一批字节只会
+                # 再撞同一道拒绝。原文抛出去——改写成"按这颗模型的窗口压缩后仍装不下"会把
+                # 成因说反（审核拒、请求形状错与窗口尺寸无关）。
+                raise FrontdoorCompressionRuntimeError(
+                    code="frontdoor_compression_provider_rejected",
+                    message=error_text,
+                    recoverable=True,
+                )
+            # 空摘要（没有失败签名可判）/ 命中 retry_on 的 provider 错误：先试配置失效
+            # 重建模型链，再按绑定的重试次数退避。绝不把空结果或错误文本当成压缩产物。
             if self._refresh_runtime_config_for_retry_invalidation():
                 try:
                     refreshed = self._resolve_ceo_model_refs_for_session(str(state.get("session_key") or "").strip())
@@ -2547,11 +2608,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     refreshed = []
                 if list(refreshed or []):
                     current_model_refs = list(refreshed)
+                    retry_on, retry_rounds = self._frontdoor_compression_retry_policy(current_model_refs)
             empty_response_retry_count += 1
-            if empty_response_retry_count >= _PROVIDER_RETRY_LIMIT:
-                # 与节点道同口径封顶（`_PROVIDER_RETRY_LIMIT`）。交回空串＝"这一 pass 没拿到
-                # 摘要"，由调用方放弃压缩；绝不把空产物当压缩结果，那等于静默丢历史。
-                return "", None
+            if empty_response_retry_count >= retry_rounds:
+                # 命中 retry_on 但操作员给的重试次数用尽（0＝一次都不重烧）。交回空串＋原文
+                # ＝"这一 pass 没拿到摘要"，由调用方放弃压缩；绝不把空产物当压缩结果，那等于
+                # 静默丢历史。
+                return "", None, last_error_text
             await self._emit_frontdoor_runtime_snapshot(
                 runtime=runtime,
                 state={
@@ -2600,14 +2663,16 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         is_cancelled: Any,
         model_info: dict[str, Any],
         compression_source: str = "token_compression",
-    ) -> tuple[str, int, bool, int, int, list[dict[str, Any]], int]:
+        max_tokens: int | None = None,
+    ) -> tuple[str, int, bool, int, int, list[dict[str, Any]], int, str]:
         """执行规划器给出的块，提交最长成功前缀，其余原始历史留在本跳请求里。
 
         块是 system+user 重打包形态（块不构成对话前缀，体量与正常流量同级）。一块
         没拿到摘要就停在这儿：压好的块照常交付，这一块及其之后的原始历史整体保留，
         由下一跳按那时的窗口重算。比"整次作废、下一跳重烧所有块"省，也比"在摘要里
         插一行缺口却声称历史已收口"诚实——那行缺口下面根本没跟内容。
-        返回 (合并摘要, 计划块数, 是否归并, 未取得摘要的块数, 实跑轮数, 留在请求里的原始历史, 收下的块数)。
+        没命中 `retry_on` 的失败由 helper 直接抛原文，不在这个循环里被降级成"没拿到摘要"。
+        返回 (合并摘要, 计划块数, 是否归并, 未取得摘要的块数, 实跑轮数, 留在请求里的原始历史, 收下的块数, provider 错误原文)。
         """
 
         capacity = int(compression_pass.capacity_tokens or 0)
@@ -2619,6 +2684,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         failed_chunks = 0
         committed_group_end = 0
         rounds = 0
+        last_error_text = ""
         while queue:
             rounds += 1
             batch = queue[:CHUNK_MAX_CHUNKS]
@@ -2661,7 +2727,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         ),
                     },
                 ]
-                chunk_text, _chunk_message = await self._run_frontdoor_compression_helper_request(
+                chunk_text, _chunk_message, chunk_error_text = await self._run_frontdoor_compression_helper_request(
                     messages=chunk_messages,
                     model_refs=list(model_refs or []),
                     state=state,
@@ -2669,10 +2735,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     is_cancelled=is_cancelled,
                     model_info=model_info,
                     progress_text=progress,
+                    max_tokens=max_tokens,
                 )
                 if not str(chunk_text or "").strip():
                     # 这一块耗尽重试仍没拿到摘要：停在这里，本块及其后的原始历史原样留在
                     # 请求里，由下一跳重算。压好的前缀照常交付，不整次作废重烧。
+                    if chunk_error_text:
+                        last_error_text = chunk_error_text
                     failed_chunks += 1
                     queue = batch[offset:] + remaining
                     interrupted = True
@@ -2724,7 +2793,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     ),
                 },
             ]
-            merged_text, _merged_message = await self._run_frontdoor_compression_helper_request(
+            merged_text, _merged_message, merge_error_text = await self._run_frontdoor_compression_helper_request(
                 messages=merge_messages,
                 model_refs=list(model_refs or []),
                 state=state,
@@ -2732,7 +2801,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 is_cancelled=is_cancelled,
                 model_info=model_info,
                 progress_text="上下文压缩中（归并分块摘要）",
+                max_tokens=max_tokens,
             )
+            if merge_error_text:
+                last_error_text = merge_error_text
             if str(merged_text or "").strip():
                 # 归并失败时交回的是已经压好的那份多块摘要，不是空串：拿空串覆盖等于
                 # 把整次压缩的成果抵给一次没成功的调用。
@@ -2748,6 +2820,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             rounds,
             deferred_messages,
             len(summaries),
+            last_error_text,
         )
 
     def _refresh_runtime_config_for_retry_invalidation(self) -> bool:
@@ -7248,6 +7321,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         on_reasoning_segment: Any = None,
         on_model_retry_status: Any = None,
         required_context_window_tokens: int = 0,
+        max_tokens: int | None = None,
     ) -> dict[str, Any]:
         response = await self._resolve_chat_backend().chat(
             messages=[dict(item) for item in list(messages or []) if isinstance(item, dict)],
@@ -7260,6 +7334,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             on_reasoning_segment=on_reasoning_segment,
             on_model_retry_status=on_model_retry_status,
             required_context_window_tokens=int(required_context_window_tokens or 0),
+            max_tokens=max_tokens,
         )
         return self._model_response_payload_dict(response)
 
@@ -8369,8 +8444,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 if int(preflight_diagnostics.get("final_request_tokens") or preflight.final_request_tokens or 0) > context_window_tokens:
                     raise self._frontdoor_context_window_exceeded_error(
                         model_info=model_info,
-                        # 区分两种"超窗"：压了还超，与压缩本身没拿到摘要。
-                        detail=str(preflight_diagnostics.get("compression_pass_failed") or "").strip(),
+                        # 区分三种"超窗"：压了还超、压缩没拿到摘要、压缩被 provider 拒。
+                        # 最后一种的拒因与窗口尺寸无关，只报"装不下"会把成因说反。
+                        detail=str(
+                            preflight_diagnostics.get("compression_pass_failed")
+                            or preflight_diagnostics.get("compression_provider_error")
+                            or ""
+                        ).strip(),
                     )
             state_for_request = {
                 **dict(state_for_request or {}),

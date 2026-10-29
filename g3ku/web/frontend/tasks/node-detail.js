@@ -641,6 +641,103 @@ function renderTurnRoundBlock(round) {
     `;
 }
 
+// 最新思考行取的那一轮：从后往前找第一轮带外发正文的（写侧只给最近一轮挂正文）。
+// 读数那一行每轮都有，这一行只回答"它最近一次想了什么"。
+function latestTraceThinking(trace) {
+    const turns = Array.isArray(trace?.turns) ? trace.turns : [];
+    for (let index = turns.length - 1; index >= 0; index -= 1) {
+        const turn = turns[index] || {};
+        const thinking = turn?.thinking && typeof turn.thinking === "object" ? turn.thinking : null;
+        const text = String(thinking?.text || "");
+        if (!text.trim()) continue;
+        // 折叠态右侧沿用会话那一行的取法：去掉尾巴空白后的最后一行。
+        const lines = text.replace(/\s+$/, "").split("\n");
+        return {
+            key: `thinking:${String(turn?.seq ?? "").trim()}`,
+            meta: taskRoundThinkingText(thinking),
+            tail: lines[lines.length - 1] || "",
+            text,
+            truncated: thinking?.text_truncated === true,
+        };
+    }
+    return null;
+}
+
+// 执行流程最底部那一行，与会话气泡里的思考行同款（共用 `.ceo-thinking-line` 的样式与开关）：
+// 左侧读数、右侧最后一行思考，点开在下方展开全文。没有外发正文的节点整行不画——
+// 那一面上每轮的读数已经由轮次块给了。
+function createLatestThinkingLine() {
+    const line = document.createElement("div");
+    line.className = "task-trace-latest-thinking ceo-thinking-line";
+    const head = document.createElement("div");
+    head.className = "ceo-thinking-line-head";
+    head.setAttribute("role", "button");
+    head.setAttribute("tabindex", "0");
+    head.setAttribute("aria-expanded", "false");
+    head.title = "点击展开思考过程";
+    const meta = document.createElement("span");
+    meta.className = "ceo-thinking-line-meta";
+    const tail = document.createElement("span");
+    tail.className = "ceo-thinking-line-tail";
+    const pane = document.createElement("div");
+    pane.className = "ceo-thinking-line-pane";
+    pane.setAttribute("role", "log");
+    pane.hidden = true;
+    const toggle = () => {
+        const expanded = head.getAttribute("aria-expanded") !== "true";
+        head.setAttribute("aria-expanded", expanded ? "true" : "false");
+        head.title = expanded ? "点击收起思考过程" : "点击展开思考过程";
+        pane.hidden = !expanded;
+        line.classList.toggle("is-expanded", expanded);
+        if (expanded) pane.scrollTop = pane.scrollHeight;
+    };
+    head.addEventListener("click", toggle);
+    head.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            toggle();
+        }
+    });
+    head.appendChild(meta);
+    head.appendChild(tail);
+    line.appendChild(head);
+    line.appendChild(pane);
+    return line;
+}
+
+function renderLatestThinkingLine(trace) {
+    const host = U.adFlow;
+    if (!(host instanceof HTMLElement)) return;
+    const latest = latestTraceThinking(trace);
+    const existing = host.querySelector(".task-trace-latest-thinking");
+    if (!latest) {
+        existing?.remove();
+        return;
+    }
+    const line = existing instanceof HTMLElement ? existing : createLatestThinkingLine();
+    // 永远压在流程最下面：切节点后列表可能先被重建，靠这一步把位置找回来。
+    host.appendChild(line);
+    const head = line.querySelector(".ceo-thinking-line-head");
+    const meta = line.querySelector(".ceo-thinking-line-meta");
+    const tail = line.querySelector(".ceo-thinking-line-tail");
+    const pane = line.querySelector(".ceo-thinking-line-pane");
+    if (line.dataset.thinkingKey !== latest.key) {
+        // 换了一轮的思考：折叠重来，不把上一轮展开的姿态带过来。
+        line.dataset.thinkingKey = latest.key;
+        head?.setAttribute("aria-expanded", "false");
+        if (head) head.title = "点击展开思考过程";
+        line.classList.remove("is-expanded");
+        if (pane) pane.hidden = true;
+    }
+    if (meta) meta.textContent = latest.meta;
+    if (tail) {
+        tail.textContent = latest.tail;
+        tail.title = latest.tail;
+    }
+    const paneText = latest.truncated ? `${latest.text}\n\n……（思考过长，仅显示前段）` : latest.text;
+    if (pane && pane.textContent !== paneText) pane.textContent = paneText;
+}
+
 function buildTurnTraceSteps(turns, initialPromptStep) {
     const steps = [initialPromptStep, ...buildTurnGroupDescriptors(turns)];
     const last = steps[steps.length - 1];
@@ -1422,6 +1519,7 @@ function renderExecutionTrace(node, { viewState = null } = {}) {
         traceList.dataset.renderNodeId = renderNodeId;
     }
     renderFlowHeading();
+    renderLatestThinkingLine(trace);
     const traceItems = Array.from(traceList.querySelectorAll(".task-trace-step"));
     traceItems.forEach((item) => {
         if (!(item instanceof HTMLElement)) return;

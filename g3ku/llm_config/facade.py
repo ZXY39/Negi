@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from g3ku.config.schema import normalize_reasoning_effort
+from g3ku.config.schema import normalize_reasoning_effort, require_non_negative_retry_count
 from g3ku.llm_config.export import MASKED_SECRET_VALUE, to_generic_runtime_config
 from g3ku.llm_config.models import (
     GenericRuntimeConfig,
@@ -339,7 +339,11 @@ class LLMConfigFacade:
         if "retry_on" in draft_payload:
             pending["retry_on"] = split_retry_keywords(draft_payload.get("retry_on")) or list(DEFAULT_RETRY_ON_KEYWORDS)
         if "retry_count" in draft_payload:
-            pending["retry_count"] = int(draft_payload.get("retry_count") or 0)
+            # 这里是 setattr 到已有绑定，绕开字段上的 ge=0，所以负数必须在这一步拒掉。
+            pending["retry_count"] = require_non_negative_retry_count(
+                draft_payload.get("retry_count"),
+                field="models.catalog[].retryCount",
+            )
         if "single_api_key_max_concurrency" in draft_payload or "singleApiKeyMaxConcurrency" in draft_payload:
             raw_limit = draft_payload.get("single_api_key_max_concurrency")
             if raw_limit is None and "singleApiKeyMaxConcurrency" in draft_payload:
@@ -652,7 +656,7 @@ class LLMConfigFacade:
             default_temperature=float(model_parameters.get("temperature")) if model_parameters.get("temperature") is not None else None,
             default_reasoning_effort=str(model_parameters.get("reasoning_effort")) if model_parameters.get("reasoning_effort") is not None else None,
             retry_on=list(retry_on),
-            retry_count=max(0, int(retry_count or 0)),
+            retry_count=int(retry_count or 0),
             single_api_key_max_concurrency=single_api_key_max_concurrency,
             extra_options=dict(record.extra_options),
         )

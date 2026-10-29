@@ -103,6 +103,10 @@ def test_valid_arguments_are_staged_and_the_contract_is_delivered(tmp_path: Path
     assert f"{TOOL_ID}:" in content
     # 份数报最终值；**不**枚举入参：模型自己那条 tool_calls 就在同一请求视图里，再抄一遍是重复。
     assert f'Staged sets for "{TOOL_ID}": 1.' in content
+    # 回执必须自己说"这一跳没执行"：只写契约已加载/入参通过校验会被读成执行成功。
+    assert "did not run the tool - call it again to execute it" in content
+    # "passed validation" 只覆盖参数形状：目标/引用要到真执行时才判，回执不能说成已校验。
+    assert "resolved only when the call runs" in content
     assert "/abs/a" not in content
     assert tool_arg_stash.staged_count(tool_arg_stash.carrier_container(result["carrier"]), scope_key=SCOPE) == 1
 

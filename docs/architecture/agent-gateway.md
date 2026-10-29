@@ -54,6 +54,7 @@
 - 进程模型：`negi mcp serve --token <t> [--base-url http://127.0.0.1:18790/api/v1] [--conversation-prefix mcp]`；token 可由 env `NEGI_EXTERNAL_TOKEN` 提供（旧名 `G3KU_EXTERNAL_TOKEN` 继续读作兜底，装好的人不必改 env）。MCP server 名与工具名都是 `negi` / `negi_*`（不认旧名：客户端配置里写死的 `claude mcp add g3ku` 要换成 `negi` 才连得上）。独立轻量进程，连**运行中的** web 运行时；`negi mcp check` 提供接入前连通性自检（回显 bridge_id 与会话数）。
 - **stdout 纯净铁律**：stdio 上 stdout 是 JSON-RPC 协议通道，serve 路径一切提示走 stderr（`typer.echo(..., err=True)`；loguru 与 FastMCP 日志均 stderr-only）。任何 stdout 字节都会毁帧。
 - 会话映射：`conversation` 不带 `:` 时 → `external_key = mcp:{conversation}`（本网关命名空间，不存在即建）；**带 `:` 时按全键寻址**（`web:ceo-…`、`qq:group:…`、`ext:…`），不加前缀、不建会话，能不能寻到别名下的会话由 token 的跨桥作用域裁决（`external-agent-api.md`「启用与鉴权」）。**前缀不是会话名的一部分**：把 `mcp:foo` 当名字传，谁的会话都不匹配，工具回 `{ok:false, error:"http_404"}`（实盘踩过一次，读起来像"会话丢了"）。这条寻址规则写在 FastMCP 的 `instructions` 里一处，供全部工具共用，**不逐工具重复**（描述是每请求都进上下文的，重复打印只多花 token）。每次工具调用内"开 SSE 流 → 发消息 → 有界等待 → 关流"（流先开=零事件间隙；无驻留泵）。
+- 入站身份：每次发消息都带 `sender: {id: "negi-mcp", name: "Negi MCP"}`（常量 `GATEWAY_SENDER_ID`，与 `admin_rest` 引用的是同一个名字），**每回合都带**而不是只在建会话时带一次——会话信任逐条按 min 合并，撤掉操作员授权后下一条消息就把会话降回第三方。是否按操作员处理由服务端 token 配置决定（「外部接入」页的「当操作员」开关），网关没有自报信任级的通道；身份契约见 `external-agent-api.md`「入站身份契约（`sender` / `chat_type`）」。没有对应 CLI 参数：换身份就是改那个常量。
 - 工具面（`g3ku/mcp_gateway/server.py`，全部返回 dict、**永不抛异常**——HTTP/传输错误转 `{ok:false, error, status_code?}` 可读载荷）：
 
 | 工具 | 语义 | 关键返回 |

@@ -207,6 +207,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 拆分前端模块后页面白屏并报 `ApiCore` / `ApiClient is not defined`、新模块请求 404、或页面脚本顺序与测试装载对不上 → `web-and-admin.md`「Frontend Script Layout And Test Loading」
 - 长按脑图标不发起压缩、区分线停在「压缩已暂停」、压缩中区分线凭空消失刷新后才出现、一条「上下文压缩中」长期钉住收不掉、中断线旁边像按钮却点不动、心跳唤醒的回合里压缩全程没有线、「会话已压缩」要刷新才出现、区分线跑到回合气泡之前或压缩之后那段内容的下方、刷新后区分线重复两条、往回翻页时区分线在窗口边界重复、渠道会话脑图标没有读数 → `web-and-admin.md`「CEO Compression UI Contract」+「Manual Context Compression」+ `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」
 - 压缩报成功、`post_tokens` 也降了，但下一回合请求体又回到原大小；或压缩途中发的消息没被回答 → `runtime-overview.md`「压缩窗口：入站闸门与基线写入仲裁」+ `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」
+- 分块压缩每次都恰好有一块拿不到摘要、或报错写着"按这颗模型的窗口压缩后仍装不下"而那一跳的块尺寸并不超容量 → `runtime-overview.md`「Frontdoor Context Compression」+ `context-and-cache-troubleshooting.md`「frontdoor token preflight 之后要看哪份诊断」
 - 节点反复收到"缺必填参数"式拒绝、错误首行逐字相同而 arguments 后缀不同，眼看要被无效提交上限判死 → `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」（provider 参数块未转义 + 宽容解析吞参数，按协议故障单独计数）
 - 节点连续多轮重交同一份被拒载荷、越到后面收到的参数契约越短（只剩 `summary` 残段、`ref` 为空） → `tool-and-skill-system.md`「Duplicate Tool Call Guard」（控制工具 error 回执不参与消息级折叠）
 - 模型报告"上一轮我想到哪了"却读不到任何思路、或开了思考回放的 binding 一上线就整条链报 400 → `runtime-overview.md`「思考内容（reasoning）的上下文回放」（写入闸门按整条链取交集，咽喉点只透传）
@@ -234,6 +235,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 点输入框麦克风提示未就绪／未启用、新设备首点迟迟不出录音、录音结果仍是繁体、或局域网 http 打开时浏览器拒绝麦克风 → `speech-to-text.md`「分发与就绪」「已知边界」
 - QQ 发来的语音变成一行本地路径注记、或只有「用户语音，机器识别失败：…」、或语音条迟迟等不到回复 → `external-agent-api.md`「内置官方 QQ 适配器」+ `speech-to-text.md`「常见排障入口」
 - 语音气泡播放不出来、语音条右端的 `T` 点开是空的、或用户气泡里仍然显示 `用户语音，机器识别结果：` 这行字 → `speech-to-text.md`「语音气泡与音频字段的存放」+ `web-and-admin.md`「Attachment Bubble Rendering Contract」
+- 让模型发语音却没发出语音、渠道端只收到一条链接、或收到的音频不是语音气泡 → `external-agent-api.md`「内置官方 QQ 适配器」（生成侧是 skill `edge-tts`，反方向入口见 `speech-to-text.md`「定位与边界」）
 - 桌面窗口里点图片跳出浏览器、点「导出配置包」在窗口里没反应、或节点详情「查看完整」开成另一扇窗 → `web-and-admin.md`「In-App Media Viewer And Download Lane」+ `operations-and-maintenance.md`「首选一键启动脚本」
 - `/api/tasks`、worker 状态、`perf_samples` 这类"需要 `ORDER BY` 的读"稳定 500 而别的端点正常，日志里 `unable to open database file` 印的又是正确的库绝对路径 → `operations-and-maintenance.md`「读口报 `SQLITE_CANTOPEN`：先分"库打不开"还是"临时目录建不出文件"」
 

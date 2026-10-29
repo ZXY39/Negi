@@ -15,6 +15,8 @@ from typing import Any, AsyncIterator
 
 import httpx
 
+from g3ku.runtime.session_trust import GATEWAY_SENDER_ID
+
 DEFAULT_BASE_URL = "http://127.0.0.1:18790/api/v1"
 
 
@@ -85,7 +87,12 @@ class G3kuMcpClient:
         key = str(idempotency_key or "").strip()
         if key:
             headers["Idempotency-Key"] = key
-        body: dict[str, Any] = {"text": text}
+        # 每轮都带身份，不是只在首轮：会话信任按「见过的最受限一档」逐条合并，
+        # 所以撤掉操作员授权后，下一条消息就会把会话降回第三方。
+        body: dict[str, Any] = {
+            "text": text,
+            "sender": {"id": GATEWAY_SENDER_ID, "name": "Negi MCP"},
+        }
         if attachments:
             body["attachments"] = list(attachments)
         response = await self._client.post(

@@ -148,17 +148,9 @@ def _roots_unreachable_in_jail(session_key: str) -> bool:
 
 def _verify_unlock_password(password: str) -> bool:
     """只读校验：解得开本机信封即通过，不激活、不落盘。"""
-    clean = str(password or "")
-    if not clean:
-        return False
-    try:
-        from g3ku.security.bootstrap import get_bootstrap_security_service
+    from g3ku.security.bootstrap import verify_unlock_password
 
-        service = get_bootstrap_security_service()
-        return bool(service.unwrap_with_password(clean))
-    except Exception as exc:  # noqa: BLE001 - 校验器故障按失败处理
-        logger.warning("sandbox unlock password check failed: {}", exc)
-        return False
+    return verify_unlock_password(password)
 
 
 @router.get("/ceo/sessions/{session_id}/sandbox")

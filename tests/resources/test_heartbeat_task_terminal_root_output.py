@@ -515,3 +515,80 @@ def test_normalize_task_terminal_payload_preserves_worker_supplements() -> None:
     # 无 getter 可用（--no-worker 拓扑：web 读不到 worker 库）：enrich 保留上游预计算值。
     enriched = enrich_task_terminal_payload(normalized, task=None, task_getter=lambda task_id: None)
     assert enriched["user_node_supplements"] == normalized["user_node_supplements"]
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_reply_renders_sticker_marker_for_transcript_and_web_frame(
+    tmp_path, monkeypatch
+) -> None:
+    """心跳回复有两个用户可见面：转录行与 `ceo.reply.final` 帧。
+
+    实盘（2026-10-29 03:24）两处都原样带着 `[[sticker:...]]`：落盘走
+    `_persist_assistant_reply`（没有普通回合的 `render_marker_images`），帧由
+    heartbeat 自己发布、绕过了 socket 的 `message_end` 渲染路。
+    """
+    # 已编号的文件在 registry 引导时保留编号；未编号的会被改名成下一个空位。
+    category = tmp_path / "stickers" / "atri" / "happy"
+    category.mkdir(parents=True)
+    (category / "001.png").write_bytes(b"\x89PNG-fake")
+    monkeypatch.setattr("g3ku.stickers.catalog.stickers_root", lambda: tmp_path / "stickers")
+    # 缩略图 staging 落 tmp：假 PNG 会让 PIL 失败并回落成原 markdown，真实数据根不该被写。
+    monkeypatch.setattr(
+        "g3ku.runtime.api.ceo_media.upload_dir_for_session",
+        lambda session_id: tmp_path / "uploads",
+    )
+
+    session_id = "web:ceo-heartbeat-sticker-reply"
+    session_manager = SessionManager(tmp_path)
+    persisted = session_manager.get_or_create(session_id)
+    session_manager.save(persisted)
+    live_session = _FakeHeartbeatSession(outputs=["任务完成\n[[sticker:atri/happy]]"])
+    task_service = _TaskService()
+    task_id = "task:demo-sticker-reply"
+    task_service.tasks[task_id] = SimpleNamespace(
+        task_id=task_id,
+        root_node_id="node:root",
+        metadata={},
+        final_output="sticker deliverable",
+        final_output_ref="",
+        failure_reason="",
+    )
+    service = WebSessionHeartbeatService(
+        workspace=tmp_path,
+        agent=SimpleNamespace(tool_execution_manager=None),
+        runtime_manager=_RuntimeManager(live_session),
+        main_task_service=task_service,
+        session_manager=session_manager,
+    )
+    accepted = service.enqueue_task_terminal_payload(
+        {
+            "task_id": task_id,
+            "session_id": session_id,
+            "title": "demo sticker reply task",
+            "status": "success",
+            "brief_text": "done",
+            "failure_reason": "",
+            "finished_at": "2026-03-27T01:35:32+08:00",
+            "dedupe_key": "task-terminal:task:demo-sticker-reply:success:2026-03-27T01:35:32+08:00",
+        }
+    )
+    assert accepted is True
+    service._started = True
+
+    next_delay = await service._run_session(session_id)
+
+    assert next_delay is None
+    row = SessionManager(tmp_path).get_or_create(session_id).messages[-1]
+    row_text = str(row.get("content") or "")
+    assert "[[sticker:" not in row_text
+    assert "001.png" in row_text
+
+    frames = [
+        envelope
+        for _, envelope in task_service.registry.published
+        if envelope.get("type") == "ceo.reply.final"
+    ]
+    assert frames
+    frame_text = str(dict(frames[-1].get("data") or {}).get("text") or "")
+    assert "[[sticker:" not in frame_text
+    assert "001.png" in frame_text

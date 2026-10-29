@@ -11,9 +11,13 @@ from fastapi.testclient import TestClient
 from g3ku.core.state import AgentState
 from g3ku.runtime.api import ceo_sessions, websocket_ceo
 from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
-from g3ku.runtime.frontdoor._ceo_runtime_ops import FrontdoorTokenPreflightResult
+from g3ku.runtime.frontdoor._ceo_runtime_ops import (
+    FrontdoorCompressionRuntimeError,
+    FrontdoorTokenPreflightResult,
+)
 from g3ku.runtime.session_agent import (
     CONTEXT_COMPRESSION_MARKER_KIND,
+    MANUAL_COMPRESSION_STATE_ATTR,
     RuntimeAgentSession,
 )
 from g3ku.session.manager import SessionManager
@@ -87,6 +91,25 @@ def test_paused_marker_uses_paused_label(tmp_path: Path) -> None:
 
     assert host.append_context_compression_marker(state="paused", source="auto") is True
     assert transcript.messages[-1]["content"] == "压缩已暂停"
+
+
+def test_failed_marker_uses_failed_label(tmp_path: Path) -> None:
+    """失败档自己一个词，不借 paused：那一档说的是"操作员取消了"，没人取消过压缩。"""
+    session_manager = SessionManager(tmp_path)
+    transcript = session_manager.get_or_create("web:shared")
+    host = _MarkerHost(loop=SimpleNamespace(sessions=session_manager), state=_agent_state())
+
+    assert host.append_context_compression_marker(
+        state="failed",
+        source="manual",
+        stats={"error_text": "Inappropriate input/output rejected for security reasons"},
+    ) is True
+    row = transcript.messages[-1]
+    assert row["content"] == "压缩失败"
+    assert row["metadata"]["compression_state"] == "failed"
+    assert row["metadata"]["prompt_visible"] is False
+    # 原话只走 UI 载荷，不进模型侧正文：这条行对模型永远不可见。
+    assert row["metadata"]["stats"]["error_text"].startswith("Inappropriate")
 
 
 # ---- 快照下发 ---------------------------------------------------------------
@@ -599,3 +622,67 @@ async def test_manual_compression_marker_carries_the_turn_boundary() -> None:
     )
 
     assert captured[0]["stats"]["boundary_turn_seq"] == 2
+
+
+def test_compress_context_endpoint_failure_lands_failed_with_verbatim(tmp_path: Path, monkeypatch) -> None:
+    """手动压缩自己失败：落 failed 档的区分线，正文就是外部原话。
+
+    实盘 2026-10-28 会话 ext:qq-official-1903529517:f8a8001865631301：某一被供应商拒绝的块
+    被旧分支写成 status="paused"，操作员在一条自己从没按过暂停的会话上看到「压缩已暂停」。
+    """
+    rejection = "Inappropriate input/output rejected for security reasons"
+
+    class _RejectingRunner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def compress_session_context(self, *, session):
+            self.calls += 1
+            raise FrontdoorCompressionRuntimeError(
+                code="frontdoor_compression_provider_rejected",
+                message=rejection,
+                recoverable=True,
+            )
+
+    runner = _RejectingRunner()
+    runtime_session = _idle_runtime_session()
+    markers: list[dict] = []
+    runtime_session.append_context_compression_marker = lambda **kwargs: markers.append(kwargs) or True
+    _install_endpoint_runtime(monkeypatch, tmp_path, runner=runner, runtime_session=runtime_session)
+
+    client = TestClient(_build_app())
+    response = client.post("/api/ceo/sessions/web:shared/compress-context")
+
+    assert response.status_code == 200
+    assert runner.calls == 1
+    state = getattr(runtime_session, MANUAL_COMPRESSION_STATE_ATTR, None) or {}
+    assert state.get("status") == "failed", state
+    assert state.get("reason") == rejection, state
+    # 失败是一次真的发生过的事件，所以它必须有持久落点：线自己带着原话。
+    assert markers and markers[-1]["state"] == "failed", markers
+    assert markers[-1]["stats"]["error_text"] == rejection, markers
+    assert "paused" not in {str(item.get("state")) for item in markers}, markers
+    # 进度复位，否则实时线一直挂在「上下文压缩中」。
+    assert runtime_session._compression_state["status"] == ""
+
+
+def test_manual_compression_cancel_still_lands_paused_marker(tmp_path: Path) -> None:
+    """真取消才用 paused 这个词：操作员按下的那一次取消，落一条「压缩已暂停」的线。"""
+
+    class _CancellingRunner:
+        async def compress_session_context(self, *, session):
+            raise asyncio.CancelledError()
+
+    runtime_session = _idle_runtime_session()
+    markers: list[dict] = []
+    runtime_session.append_context_compression_marker = lambda **kwargs: markers.append(kwargs) or True
+    agent = SimpleNamespace(multi_agent_runner=_CancellingRunner())
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            ceo_sessions._execute_manual_context_compression(agent, runtime_session, pause_first=False)
+        )
+
+    state = getattr(runtime_session, MANUAL_COMPRESSION_STATE_ATTR, None) or {}
+    assert state.get("status") == "paused", state
+    assert markers and markers[-1]["state"] == "paused", markers

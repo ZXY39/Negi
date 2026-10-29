@@ -48,6 +48,29 @@ DEFAULT_NODE_DISPATCH_CONCURRENCY = {
 # fallback 就永远不会发生。负数是配置错误，直接报错而不是夹断。
 GROUP_DEFAULT_MAX_RETRY_ROUNDS = 1
 MODEL_ROUTE_ENTRY_TYPES = ("model", "load_balance")
+
+
+def require_non_negative_retry_count(value: Any, *, field: str) -> int:
+    """重试次数的写侧闸门：0 就是「不重烧」，负数是配置错误，报错而不是夹断。
+
+    所有会落到 `retry_count` / `maxRetryRounds` 的写车道共用这一份。pydantic 的 `ge=0`
+    只在构造期生效，而管理面与工具走的是对已有绑定直接赋值（`Base` 没开
+    `validate_assignment`），绕得开字段约束，所以赋值前必须过一次这里。
+    """
+    if value is None:
+        return 0
+    if isinstance(value, str) and not value.strip():
+        return 0
+    try:
+        rounds = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be an integer") from exc
+    if rounds < 0:
+        raise ValueError(
+            f"{field} must be a non-negative integer; 0 means no retry round for this target"
+        )
+    return rounds
+
 # 第一阶段只允许这两条车道使用负载均衡组。
 LOAD_BALANCE_ROUTE_SCOPES = ("execution", "inspection")
 
@@ -194,11 +217,7 @@ class ModelFallbackTarget(Base):
     @field_validator("retry_count", mode="before")
     @classmethod
     def _normalize_retry_count(cls, value: Any) -> int:
-        if value is None:
-            return 0
-        if isinstance(value, str) and not value.strip():
-            return 0
-        return int(value)
+        return require_non_negative_retry_count(value, field="models.fallbackTargets[].retryCount")
 
     @property
     def provider_model(self) -> str:
@@ -284,11 +303,7 @@ class ManagedModelConfig(Base):
     @field_validator("retry_count", mode="before")
     @classmethod
     def _normalize_retry_count(cls, value: Any) -> int:
-        if value is None:
-            return 0
-        if isinstance(value, str) and not value.strip():
-            return 0
-        return int(value)
+        return require_non_negative_retry_count(value, field="models.catalog[].retryCount")
 
     @field_validator("context_window_tokens", mode="before")
     @classmethod

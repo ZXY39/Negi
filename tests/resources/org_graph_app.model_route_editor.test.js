@@ -693,6 +693,26 @@ test("模型配置面板的确认键：内容改了才填重点色，关闭键�
     assert.equal(saveButton.classes.has("is-dirty"), false, "改回原值等于没改");
 });
 
+test("配置面板的重试次数：负数原样交给保存校验，不许静默夹成 0", () => {
+    // 0 现在就是「不重试」，把 -1 夹成 0 等于替操作员关掉重试并让他看不见。
+    const retryInput = stubElement({ value: "-1" });
+    const { context } = loadModelPageWithLlm({ "llm-binding-retry-count": retryInput });
+    const hooks = context.__llmTestHooks;
+    hooks.llmState().editor = { retryCount: 5, initialRetryCount: 5 };
+
+    hooks.syncBindingInputs();
+    assert.equal(hooks.llmState().editor.retryCount, -1, "负数要留在 editor 上，由保存那一步报错");
+    assert.equal(hooks.llmEditorDirty(), true);
+
+    retryInput.value = "0";
+    hooks.syncBindingInputs();
+    assert.equal(hooks.llmState().editor.retryCount, 0, "填 0 就是不重烧，按字面值留");
+
+    retryInput.value = "";
+    hooks.syncBindingInputs();
+    assert.equal(hooks.llmState().editor.retryCount, 0, "留空同样是 0，没有内置默认可退");
+});
+
 test("llmRouteChains 用 route_entries 覆盖候选展开视图", () => {
     const { context } = loadModelPageWithLlm();
 

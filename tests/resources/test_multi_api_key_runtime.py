@@ -424,7 +424,7 @@ async def test_config_chat_backend_retries_retryable_error_without_consuming_fal
             model_id=f"{model_key}-model",
             provider=providers[str(model_key)],
             retry_on=["network", "429", "502"],
-            retry_count=0,
+            retry_count=3,
             api_key_count=1,
         )
 
@@ -461,7 +461,7 @@ async def test_config_chat_backend_publishes_model_retry_status_and_clears_it(mo
             model_id=f"{model_key}-model",
             provider=providers[str(model_key)],
             retry_on=["network", "429", "502"],
-            retry_count=0,
+            retry_count=3,
             api_key_count=1,
         )
 
@@ -507,7 +507,7 @@ async def test_fallback_provider_retries_retryable_error_without_consuming_fallb
             model_id=f"{model_key}-model",
             provider=providers[str(model_key)],
             retry_on=["network", "429", "502"],
-            retry_count=0,
+            retry_count=3,
             api_key_count=1,
         )
 
@@ -603,7 +603,7 @@ async def test_config_chat_backend_restarts_with_refreshed_chain_when_runtime_co
     """链在重试途中被改写：按新链重启重试，而不是抛错中止。
 
     新链把可用模型换到链首：只有真的按新链重启，才会在 primary 的第二个轮预算
-    （共 10 轮）远未用尽时就落到 secondary。守卫在"一轮轮过所有 key"之后判定，
+    （共 3 轮）远未用尽时就落到 secondary。守卫在"一轮轮过所有 key"之后判定，
     因此新链生效前必然还会打出那一轮的首发请求——断言里体现为第二次 primary。
     """
     calls: list[str] = []
@@ -622,7 +622,7 @@ async def test_config_chat_backend_restarts_with_refreshed_chain_when_runtime_co
             model_id=f"{model_key}-model",
             provider=providers[str(model_key)],
             retry_on=["network", "429", "502"],
-            retry_count=0,
+            retry_count=3,
             api_key_count=1,
         )
 
@@ -672,7 +672,7 @@ async def test_fallback_provider_restarts_with_refreshed_chain_when_runtime_conf
             model_id=f"{model_key}-model",
             provider=providers[str(model_key)],
             retry_on=["network", "429", "502"],
-            retry_count=0,
+            retry_count=3,
             api_key_count=1,
         )
 
@@ -713,7 +713,7 @@ async def test_config_chat_backend_retry_backoff_is_cancellable(monkeypatch) -> 
             model_id=f"{model_key}-model",
             provider=_AlwaysRetryableChainProvider(str(model_key), calls),
             retry_on=["network", "429", "502"],
-            retry_count=0,
+            retry_count=3,
             api_key_count=1,
         )
 
@@ -903,7 +903,7 @@ async def test_config_chat_backend_retries_retryable_timeout_without_fallback(mo
             model_id=f"{model_key}-model",
             provider=providers[str(model_key)],
             retry_on=["network", "429"],
-            retry_count=0,
+            retry_count=3,
             api_key_count=1,
         )
 
@@ -961,7 +961,7 @@ async def test_config_chat_backend_retries_gateway_429_with_invalid_request_erro
             model_id=f"{model_key}-model",
             provider=providers[str(model_key)],
             retry_on=["network", "429"],
-            retry_count=0,
+            retry_count=3,
             api_key_count=1,
         )
 
@@ -1020,7 +1020,7 @@ async def test_config_chat_backend_retries_retryable_error_response_at_chain_hea
             model_id=f"{model_key}-model",
             provider=providers[str(model_key)],
             retry_on=["network", "429"],
-            retry_count=0,
+            retry_count=3,
             api_key_count=1,
         )
 
@@ -1075,7 +1075,7 @@ async def test_fallback_provider_retries_retryable_error_response_at_chain_head(
             model_id=f"{model_key}-model",
             provider=providers[str(model_key)],
             retry_on=["network", "429"],
-            retry_count=0,
+            retry_count=3,
             api_key_count=1,
         )
 
@@ -1157,9 +1157,8 @@ async def test_fallback_provider_exhausts_full_key_round_budget_then_raises(monk
 
 
 @pytest.mark.asyncio
-async def test_config_chat_backend_default_retry_budget_when_retry_count_zero(monkeypatch) -> None:
-    # retry_count=0/未设置 → 使用默认轮预算 DEFAULT_RETRYABLE_MODEL_ROUNDS(10)：
-    # 单 key 模型持续可重试失败时恰好 10 次尝试后冒泡 exhausted。
+async def test_config_chat_backend_retry_count_zero_sends_one_pass_per_key(monkeypatch) -> None:
+    # retry_count=0/未设置 = 字面 0 轮重烧：单 key 模型只发首那一趟，零等待冒泡 exhausted。
     calls: list[str] = []
 
     def _builder(config, model_key, *, api_key_index=None):
@@ -1186,4 +1185,4 @@ async def test_config_chat_backend_default_retry_budget_when_retry_count_zero(mo
         )
 
     assert exc_info.value.retryable is True
-    assert calls.count("primary") == fallback_module.DEFAULT_RETRYABLE_MODEL_ROUNDS == 10
+    assert calls.count("primary") == 1

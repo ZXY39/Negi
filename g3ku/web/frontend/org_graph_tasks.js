@@ -604,7 +604,7 @@ function renderTaskPerformanceBar() {
             <span class="task-performance-label">节点队列</span>
             <strong class="task-performance-value task-performance-queue-value"><span class="task-performance-count task-performance-count--running">${esc(gateRunningText)}</span>运行 / <span class="task-performance-count task-performance-count--waiting">${esc(gateWaitingText)}</span>等待 / <span class="task-performance-count">${esc(gateCapacityText)}</span>当前容量</strong>
         </div>
-        <div class="task-performance-item task-performance-item--freshness">
+        <div class="task-performance-item">
             <span class="task-performance-label">监控新鲜度</span>
             <strong class="task-performance-value task-performance-age-value">${esc(formatTaskWorkerSampleFreshness(metrics))}</strong>
         </div>

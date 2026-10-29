@@ -5,8 +5,8 @@
 - 准入层按链首预占 model/key permit，并在整次 `chat()` 期间攥着不放（Phase 3 把首
   次选择移到准入层，这条变成「按 balancer 选中的成员预占」）。
 - 退避只发生在同模型轮之间，跨模型前进零等待（Phase 3 在组内成员之间补节拍）。
-- `retry_count=0/未配置` 落 `DEFAULT_RETRYABLE_MODEL_ROUNDS`，不是 1 轮（Phase 3 的
-  group 预算必须显式写值才拿得到 1）。
+- `retry_count=0/未配置` 就是 0 轮不重烧（首发那一趟仍会发），组预算要拿到「1 个完整
+  key pass」两条车道都是写 0 或 1。
 
 把它们单独放一个文件，是为了让改动时的 diff 可读：删掉的是哪条契约，一目了然。
 """
@@ -17,7 +17,6 @@ from types import SimpleNamespace
 
 import pytest
 
-import g3ku.providers.fallback as fallback_module
 import main.runtime.chat_backend as chat_backend_module
 from g3ku.providers.base import LLMResponse
 from g3ku.providers.provider_factory import ProviderTarget
@@ -307,16 +306,21 @@ async def test_backoff_paces_same_model_rounds_only(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_retry_count_zero_uses_default_round_budget_not_one(monkeypatch) -> None:
-    """现状陷阱：`retry_count=0`（含未配置）落 `DEFAULT_RETRYABLE_MODEL_ROUNDS`，不
-    是 1 轮。group 预算要拿到「1 个完整 key pass」必须写显式值，不能复用该默认。"""
+async def test_retry_count_zero_sends_first_pass_only(monkeypatch) -> None:
+    """`retry_count=0`（含未配置）按字面值走：首发那一趟仍发，之后零轮退避重烧。"""
     monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
 
     calls: list[str] = []
+    delays: list[int] = []
     providers = {
         "a": _target(_AlwaysRetryableProvider("a", calls), model_key="a", retry_count=0),
     }
     _patch_providers(monkeypatch, providers)
+    monkeypatch.setattr(
+        chat_backend_module,
+        "model_retry_backoff_seconds",
+        lambda attempt: delays.append(attempt) or 0.0,
+    )
 
     with pytest.raises(RuntimeError):
         await _backend().chat(
@@ -325,5 +329,5 @@ async def test_retry_count_zero_uses_default_round_budget_not_one(monkeypatch) -
             model_refs=["a"],
         )
 
-    assert len(calls) == fallback_module.DEFAULT_RETRYABLE_MODEL_ROUNDS
-    assert fallback_module.DEFAULT_RETRYABLE_MODEL_ROUNDS == 10
+    assert calls == ["a"]
+    assert delays == []

@@ -200,6 +200,47 @@ def test_extract_attachments_rejects_paths_outside_allowed_roots(monkeypatch, tm
     assert str(outside) in signed
 
 
+def test_extract_attachments_accepts_file_url_form_of_an_audio_target(monkeypatch, tmp_path):
+    """`file:///` 形态的本地引用要能被抽成附件：模型抄一条本地文件链接时给的就是这个形状，
+    以前它死在 scheme 守卫上，于是渠道收到的是原样的 markdown 文本而不是文件消息。
+    带空格的路径以 %20 抵达，也要一起解开。"""
+    monkeypatch.chdir(tmp_path)
+    voice = tmp_path / "voice note.mp3"
+    voice.write_bytes(b"ID3\x04fake-mp3")
+    target = "file:///" + voice.as_posix().replace(" ", "%20")
+
+    text, attachments = ceo_media.extract_local_media_attachments(
+        f"![早间问候]({target})", allowed_roots=(tmp_path,)
+    )
+
+    assert len(attachments) == 1
+    assert attachments[0]["name"] == "voice note.mp3"
+    assert attachments[0]["mime_type"].startswith("audio/")
+    # 标记本身从正文里摘掉，由附件承担投递（正文只留标签）。
+    assert "file:///" not in text and "早间问候" in text
+
+
+def test_extract_attachments_still_rejects_file_url_outside_allowed_roots(monkeypatch, tmp_path):
+    """归一化只换形态，不放宽闸门：`file:///` 指到工作区外仍然既不转附件也不发链接。"""
+    monkeypatch.chdir(tmp_path)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    outside = tmp_path / "secret.mp3"
+    outside.write_bytes(b"ID3\x04fake-mp3")
+
+    text, attachments = ceo_media.extract_local_media_attachments(
+        f"![外](file:///{outside.as_posix()})", allowed_roots=(workspace,)
+    )
+
+    assert attachments == []
+    assert "file:///" in text
+
+    signed = ceo_media.rewrite_media_links_signed(text, allowed_roots=(workspace,))
+    assert ceo_media.VIEWER_ROUTE not in signed
+    # 越界的 file:// 引用原样留着：既不变成附件，也不变成可下载链接。
+    assert "file:///" in signed
+
+
 def test_channel_attachment_roots_are_workspace_only():
     roots = ceo_media.channel_attachment_roots()
     assert roots == (ceo_media.workspace_path(),)

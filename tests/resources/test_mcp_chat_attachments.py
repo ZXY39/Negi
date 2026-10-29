@@ -237,7 +237,7 @@ async def test_the_attachment_echo_survives_a_queued_turn(tmp_path: Path):
     assert result["attachments"] == [f"n.txt ({len(payload)} bytes)"], result
 
 
-def test_the_body_stays_text_only_when_no_attachment_is_given():
+def test_the_body_carries_identity_and_no_empty_attachments():
     bodies: list[dict[str, Any]] = []
 
     def _handler(request: httpx.Request) -> httpx.Response:
@@ -258,11 +258,14 @@ def test_the_body_stays_text_only_when_no_attachment_is_given():
 
     asyncio.run(_run())
 
-    assert bodies[0] == {"text": "只有正文"}, "没附件时请求体形状不许变"
-    assert bodies[1] == {
-        "text": "带一张",
-        "attachments": [{"url": "https://e/x.png"}],
-    }, bodies[1]
+    # 没附件时除了身份不许有别的东西（尤其不许出现空 attachments）；身份每轮都带。
+    assert set(bodies[0]) == {"text", "sender"}, "没附件时请求体只许多出身份"
+    assert bodies[0]["text"] == "只有正文"
+    assert bodies[0]["sender"]["id"] == "negi-mcp"
+    assert set(bodies[1]) == {"text", "attachments", "sender"}, bodies[1]
+    assert bodies[1]["text"] == "带一张"
+    assert bodies[1]["attachments"] == [{"url": "https://e/x.png"}]
+    assert bodies[1]["sender"] == bodies[0]["sender"]
 
 
 def test_gateway_limits_are_the_runtimes_own_numbers():

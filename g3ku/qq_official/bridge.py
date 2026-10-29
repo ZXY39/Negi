@@ -791,10 +791,13 @@ async def run_qq_official_bridge(
                 budget,
             )
             return ""
-        # 逐发实耗是这条车道的读数：预算的固定开销档靠它重定。
+        # 逐发实耗是这条车道的读数：预算的固定开销档靠它重定。`file_type=` 是这一发
+        # 落进平台哪一档媒体（1 图/2 视频/3 语音/4 文件）的唯一落点——音频到底按
+        # 语音还是按文件递出去，事后只有这行能证。
         logger.info(
-            "qq-official file_data uploaded {} bytes in {:.1f}s (budget {:.1f}s)",
+            "qq-official file_data uploaded {} bytes (file_type={}) in {:.1f}s (budget {:.1f}s)",
             len(file_data),
+            file_type,
             time.perf_counter() - started,
             budget,
         )
@@ -884,7 +887,9 @@ async def run_qq_official_bridge(
                     )
                 if result is None:
                     raise RuntimeError("unconfirmed media message (empty API response)")
-                logger.info("qq-official delivered {} attachment {}", kind, name)
+                logger.info(
+                    "qq-official delivered {} attachment {} (file_type={})", kind, name, file_type
+                )
                 return True
             if mime.startswith("image/"):
                 data = await _download_attachment_bytes(

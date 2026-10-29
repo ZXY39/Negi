@@ -42,6 +42,12 @@ _TRUST_RANK: dict[str, int] = {
     TRUST_THIRD_PARTY_GROUP: 2,
 }
 
+# MCP 网关每轮自报的发送者身份。管理面「当操作员」开关写的就是这个 id：把它加进
+# ``externalApi.tokens.<id>.trustedSenders`` 后，该桥的会话按 owner 处理（档位、记忆、
+# 人设、任务四扇门同源）。常量放这里而不是网关包里，是为了让 admin 路由引用它时
+# 不把 httpx 客户端拖进导入图。
+GATEWAY_SENDER_ID = "negi-mcp"
+
 # ``/api/v1`` 接受的 ``chat_type`` 白名单。guild/guild_dm 是 QQ 频道（多人/私信）
 # 的既有说法，与 group/dm 同义分档。
 CHAT_TYPE_GROUP = "group"
@@ -244,6 +250,7 @@ __all__ = [
     "CHAT_TYPE_GROUP",
     "CHAT_TYPE_GUILD",
     "CHAT_TYPE_GUILD_DM",
+    "GATEWAY_SENDER_ID",
     "MULTI_PARTY_CHAT_TYPES",
     "TRUST_OWNER",
     "TRUST_THIRD_PARTY_DM",

@@ -256,3 +256,108 @@ test("QQ 账号面板：备注为空时卡片标题退回 AppID", () => {
 
     assert.match(listEl.children[0].innerHTML, /qq-bot-account-title[^>]*>222</);
 });
+
+// ---- 桥接 token「当操作员」开关 ----
+
+function loadTokenModule({ items = [] } = {}) {
+    const listEl = makeListEl();
+    const calls = { patch: [], confirm: [], toast: [] };
+    const context = {
+        console,
+        setTimeout,
+        clearTimeout,
+        document: {
+            getElementById(id) {
+                return id === "external-token-list" ? listEl : null;
+            },
+            createElement() {
+                return makeRowEl();
+            },
+        },
+        window: {},
+        esc: (value) => String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"),
+        showToast: (toast) => calls.toast.push(toast),
+        ApiClient: {
+            updateExternalApiToken: async (bridgeId, body) => {
+                calls.patch.push({ bridgeId, body });
+                const next = items.map((item) => (
+                    item.bridge_id === bridgeId ? { ...item, operator: !!body.operator } : item
+                ));
+                return { enabled: true, items: next };
+            },
+            friendlyErrorMessage: (error) => String(error?.message || error || ""),
+        },
+        openConfirm: (options) => calls.confirm.push(options),
+    };
+    context.window = context;
+    vm.createContext(context);
+    vm.runInContext(
+        `${CODE}
+        this.__t = { EXTERNAL_API_VIEW_STATE, renderExternalTokenList, toggleExternalOperator, _applyExternalPayload };`,
+        context,
+    );
+    context.__t.EXTERNAL_API_VIEW_STATE.loaded = true;
+    context.__t._applyExternalPayload({ enabled: true, items });
+    return { t: context.__t, listEl, calls };
+}
+
+const tokenItem = (over = {}) => ({
+    bridge_id: "qoder",
+    label: "",
+    token_masked: "abcd…wxyz",
+    enabled: true,
+    cross_session: true,
+    operator: false,
+    ...over,
+});
+
+test("桥接 token：当操作员开关按 operator 渲染，关闭态不带 aria-pressed=true", () => {
+    const { t, listEl } = loadTokenModule({
+        items: [tokenItem(), tokenItem({ bridge_id: "qq", operator: true })],
+    });
+
+    t.renderExternalTokenList();
+
+    assert.equal(listEl.children.length, 2);
+    assert.match(listEl.children[0].innerHTML, /data-action="operator"[\s\S]*?aria-pressed="false"[\s\S]*?当操作员：已关闭/);
+    assert.match(listEl.children[1].innerHTML, /data-action="operator"[\s\S]*?aria-pressed="true"[\s\S]*?当操作员：已开启/);
+});
+
+test("桥接 token：关掉当操作员不弹口令，直接提交 operator=false", async () => {
+    const { t, calls } = loadTokenModule({ items: [tokenItem({ operator: true })] });
+
+    await t.toggleExternalOperator("qoder", false);
+
+    assert.equal(calls.confirm.length, 0);
+    assert.equal(calls.patch.length, 1);
+    // 请求体来自 vm 上下文，原型不同，用 JSON 比形状（strict assert 会因对象原型判不等）。
+    assert.equal(JSON.stringify(calls.patch[0].body), JSON.stringify({ operator: false }));
+    assert.match(calls.toast.at(-1).title, /已收回操作员权限/);
+});
+
+test("桥接 token：开启当操作员走口令确认，空口令挡在请求之前", async () => {
+    const { t, calls } = loadTokenModule({ items: [tokenItem()] });
+
+    await t.toggleExternalOperator("qoder", true);
+
+    assert.equal(calls.confirm.length, 1);
+    const dialog = calls.confirm[0];
+    assert.equal(dialog.input.type, "password");
+    assert.match(dialog.text, /操作员/);
+
+    let blocked = false;
+    try {
+        await dialog.onConfirm({ value: "   " });
+    } catch (error) {
+        blocked = true;
+    }
+    assert.equal(blocked, true);
+    assert.equal(calls.patch.length, 0);
+
+    await dialog.onConfirm({ value: "owner-password" });
+    assert.equal(
+        JSON.stringify(calls.patch[0].body),
+        JSON.stringify({ operator: true, unlock_password: "owner-password" }),
+    );
+    assert.match(calls.toast.at(-1).title, /已允许当操作员/);
+});
