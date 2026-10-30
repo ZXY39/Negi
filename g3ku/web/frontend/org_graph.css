@@ -3419,7 +3419,8 @@ textarea {
 }
 
 /* 普通消息气泡(用户/无轨道助手兜底)的元信息行:发送/完成时间 + token 用量 + 复制按钮。
-   行的显隐由上面那组点击门管,行本身一直占位。助手靠右(时间吃左),用户靠左(时间吃右)。 */
+   行的显隐由上面那组点击门管,行本身一直占位。助手行复制打头、读数随后;用户行读数吃左、
+   复制与编辑收在行尾。 */
 .msg-meta {
     display: flex;
     align-items: center;
@@ -3438,13 +3439,13 @@ textarea {
 }
 
 /* 复制按钮跟着另一颗动作按钮走：用户气泡排在「编辑」右边；
-   回复气泡有 Fork 时排在 Fork 左边（没有 Fork 的只读会话仍留在行尾）。 */
+   回复气泡固定在读数行行首（Fork 紧随其后），不再钉在行尾。 */
 .message.user .msg-meta > .msg-copy-btn {
     order: 1;
 }
 
-.message.system .msg-meta:has(> .msg-action-fork) > .msg-copy-btn,
-.ceo-turn-meta:has(> .msg-action-fork) > .msg-copy-btn {
+.message.system .msg-meta > .msg-copy-btn,
+.ceo-turn-meta > .msg-copy-btn {
     order: -1;
 }
 
@@ -3497,7 +3498,7 @@ textarea {
     color: var(--status-failed-text);
 }
 
-/* 轨道回合的元信息行:token/完成时间靠左,复制钉在气泡右角。
+/* 轨道回合的元信息行:复制钉在行首,Fork 次之,token/完成时间吃满剩余宽度。
    usage 为空时整行退出布局,免得在正文下方留一段空档。 */
 .ceo-turn-meta {
     display: flex;
@@ -3783,11 +3784,14 @@ textarea {
     min-width: max-content;
 }
 
+/* 引用只留一条直角细线。之前的 18px 圆角会把左竖条两端一起弯成括号状的弧，
+   而底色在浅色会话面上几乎不可见，视觉上就只剩那道弧。参考块内部的段落/列表
+   自带留白，这里只给竖条和左侧缩进。 */
 .markdown-content blockquote {
-    padding: 14px 16px;
-    border-left: 3px solid color-mix(in srgb, var(--brand-primary) 54%, transparent);
-    border-radius: 18px;
-    background: color-mix(in srgb, var(--bg-app) 68%, transparent);
+    padding: 2px 0 2px 14px;
+    border-left: 2px solid color-mix(in srgb, var(--brand-primary) 40%, transparent);
+    border-radius: 0;
+    background: none;
     color: var(--text-secondary);
 }
 
@@ -6760,27 +6764,37 @@ textarea {
     cursor: zoom-in;
 }
 
+/* 文件卡片只靠颜色和图标区分，不再套灰色胶囊：底色在正文里像一段被框住的
+   代码，而且同屏多个文件会连成一排灰条。悬停用虚线下划线（和正文链接同族）。 */
 .msg-file-chip {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
-    margin: 4px 0;
-    padding: 4px 10px;
-    border-radius: 10px;
-    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
-    background: color-mix(in srgb, var(--bg-app) 82%, black 18%);
-    color: inherit;
+    gap: 5px;
+    margin: 2px 0;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: none;
+    color: color-mix(in srgb, var(--brand-primary) 86%, #0ea5e9 14%);
     text-decoration: none;
     font-size: 12.5px;
 }
 
 .msg-file-chip:hover {
-    border-color: color-mix(in srgb, var(--border-color) 40%, #7aa2f7 60%);
+    color: var(--brand-primary);
+}
+
+.msg-file-chip:hover > span {
+    text-decoration: underline;
+    text-decoration-thickness: 1px;
+    text-decoration-style: dashed;
+    text-decoration-color: color-mix(in srgb, currentColor 55%, transparent);
+    text-underline-offset: 3px;
 }
 
 .msg-file-chip-icon {
     flex: none;
-    opacity: 0.8;
+    opacity: 0.9;
 }
 
 .chat-attachment-image-meta {
