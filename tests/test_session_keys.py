@@ -534,7 +534,8 @@ def test_build_channel_ceo_session_item_keeps_channel_shape(tmp_path: Path) -> N
         assert ext_item["session_origin"] == "external"
         assert ext_item["channel_id"] == "ext:qq-official"
         assert ext_item["is_readonly"] is True
-        assert ext_item["can_rename"] is False
+        assert ext_item["can_rename"] is True
+        assert ext_item["rename_title"] == ""
         assert ext_item["can_delete"] is True
         # 有注册表条目 ⇒ 可向里发（提交要靠 entry 路由回复）。
         assert ext_item["can_message"] is True
@@ -546,6 +547,7 @@ def test_build_channel_ceo_session_item_keeps_channel_shape(tmp_path: Path) -> N
         assert orphan_item is not None
         assert orphan_item["is_readonly"] is True
         assert orphan_item["can_message"] is False, "注册表里没有条目的孤儿 ext 转录必须保持只读"
+        assert orphan_item["can_rename"] is False, "注册表里没有条目的孤儿 ext 转录没有可写的标题位"
 
         china_item = build_channel_ceo_session_item(store, china_key, active_session_id="web:shared")
         assert china_item is not None
@@ -554,6 +556,7 @@ def test_build_channel_ceo_session_item_keeps_channel_shape(tmp_path: Path) -> N
         assert china_item["channel_id"] == "qqbot"
         assert china_item["is_readonly"] is True
         assert china_item["can_message"] is False
+        assert china_item["can_rename"] is True
         assert china_item["is_active"] is False
 
         assert build_channel_ceo_session_item(store, "web:shared", active_session_id="") is None

@@ -1107,14 +1107,9 @@ function renderCeoApprovalFlow() {
     if (flow.submitting) {
         viewport.innerHTML = `
             <div class="ceo-approval-toast is-submitting">
-                <div class="ceo-approval-copy">
-                    <div class="ceo-approval-kicker">监管模式</div>
-                    <div class="ceo-approval-title">审批结果提交中</div>
-                    <div class="ceo-approval-helper">本批次选择已发送到后端，等待主 Agent 继续处理。</div>
-                </div>
+                <div class="ceo-approval-title">审批结果等待处理中</div>
             </div>
         `;
-        icons();
         return;
     }
     const item = activeApprovalItem(flow);

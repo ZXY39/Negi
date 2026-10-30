@@ -1514,3 +1514,44 @@ def test_memory_edit_send_clear_only_when_the_field_actually_changed() -> None:
     assert "const minimalChanged = minimal.trim() !== originalMinimal;" in source
     assert 'minimalMemory: minimalChanged ? minimal.trim() : null' in source
     assert "最小记忆（minimal_memory，留空即清空）" in app_js
+
+
+def test_memory_scope_selector_is_a_session_labelled_custom_select() -> None:
+    """作用域选择器的可见标签是「会话」，且走自绘外壳而不是原生 select。"""
+    html_source = (REPO_ROOT / "g3ku/web/frontend/org_graph.html").read_text(encoding="utf-8")
+    memory_html = _memory_view_fragment(html_source)
+    store_js = (REPO_ROOT / "g3ku/web/frontend/memory/store.js").read_text(encoding="utf-8")
+    css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
+
+    assert 'id="memory-scope-select" class="resource-select"' in memory_html
+    assert '<span class="task-depth-label">会话</span>' in memory_html
+    assert "作用域" not in memory_html
+    assert "syncResourceSelectUI(select)" in store_js
+    assert ".memory-scope-setting .resource-select-trigger {" in css
+
+
+def test_memory_processed_card_marks_the_selected_scope() -> None:
+    """已处理记录旁要能看出这批记忆落在本地域还是群域。"""
+    result = _run_app_script(
+        """
+        const __ex = context.__testExports;
+        __out.localKind = __ex.memoryScopeKindLabel();
+        __ex.S.memoryScopes = [
+          { scope: "", kind: "local", title: "本地记忆" },
+          { scope: "grp-1", kind: "group", title: "家庭群" },
+        ];
+        __ex.S.memoryScope = "grp-1";
+        __out.groupKind = __ex.memoryScopeKindLabel();
+        __out.groupCard = __ex.renderMemoryProcessedCard({ batch_id: "b1", status: "applied", source_op: "write" });
+        __ex.S.memoryScope = "";
+        __out.localCard = __ex.renderMemoryProcessedCard({ batch_id: "b2", status: "applied", source_op: "write" });
+        """,
+        ["memoryScopeKindLabel", "renderMemoryProcessedCard", "S"],
+    )
+
+    assert result["localKind"] == "本地"
+    assert result["groupKind"] == "群"
+    assert 'data-memory-scope-kind="群"' in str(result["groupCard"])
+    assert ">群</span>" in str(result["groupCard"])
+    assert 'data-memory-scope-kind="本地"' in str(result["localCard"])
+    assert ">本地</span>" in str(result["localCard"])

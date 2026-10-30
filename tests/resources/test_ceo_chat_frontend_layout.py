@@ -44,6 +44,25 @@ def test_approval_viewport_stays_a_positioning_container() -> None:
     assert toast, "重试提示条缺少可见底色"
 
 
+def test_approval_submitting_state_is_one_compact_line() -> None:
+    """提交后只剩一行「审批结果等待处理中」：不再带档位抬头与整段说明。"""
+    js = (REPO_ROOT / "g3ku/web/frontend/org_graph_ceo_governance.js").read_text(encoding="utf-8")
+    css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
+
+    assert "审批结果等待处理中" in js
+    assert "审批结果提交中" not in js
+    submitting = js[js.index("if (flow.submitting) {"):js.index("const item = activeApprovalItem(flow);")]
+    assert "ceo-approval-title" in submitting
+    assert "ceo-approval-kicker" not in submitting
+    assert "ceo-approval-helper" not in submitting
+
+    toast = re.search(r"\.ceo-approval-toast\.is-submitting \{[^}]*\}", css)
+    assert toast, "缺少提交态提示条样式"
+    body = toast.group(0)
+    assert "width: auto;" in body
+    assert "padding: 8px 14px;" in body
+
+
 def test_app_sidebars_use_compact_160px_width_before_mobile_stack() -> None:
     # 只查真正加载的样式表：org_graph.html 只挂 org_graph.css。
     css_files = [

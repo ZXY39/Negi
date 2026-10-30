@@ -1957,6 +1957,14 @@ def _session_last_assistant_at(session: Any) -> str:
     return latest_llm_output_at(session)
 
 
+def channel_session_title_override(session: Any) -> str:
+    """操作员给渠道会话起的名字存在转录 metadata 里；注册表标题另存一份给记忆作用域读。"""
+    metadata = getattr(session, "metadata", None)
+    if not isinstance(metadata, dict):
+        return ""
+    return str(metadata.get("title") or "").strip()
+
+
 def _canonical_china_session_id(parsed) -> str:
     if parsed.chat_type == "group":
         return build_session_key(
@@ -1988,12 +1996,15 @@ def _channel_session_summary_from_entry(
     last_llm_output_at: str,
     is_virtual: bool,
     first_user_text: str = "",
+    title_override: str = "",
 ) -> dict[str, Any]:
     kind = _channel_session_kind(parsed)
     # 非 QQ 渠道的标题口径与普通会话一致：第一条用户消息。QQ 保留「渠道 · 号 · 群/DM」，
-    # 那里会话身份（哪个群、哪个号）比首句内容更能区分。
+    # 那里会话身份（哪个群、哪个号）比首句内容更能区分。操作员命名一律优先。
     channel_name = str(getattr(parsed, "channel", "") or "").strip().lower()
-    title = first_user_text if (channel_name != "qqbot" and first_user_text) else _channel_title(parsed)
+    title = title_override or (
+        first_user_text if (channel_name != "qqbot" and first_user_text) else _channel_title(parsed)
+    )
     return {
         "session_id": session_id,
         "title": title,
@@ -2008,7 +2019,8 @@ def _channel_session_summary_from_entry(
         "session_origin": "china",
         "is_readonly": True,
         "can_message": False,
-        "can_rename": False,
+        "can_rename": True,
+        "rename_title": title_override,
         "can_delete": True,
         # `china:` 归档没有注册表身份，删除只能是彻底删除，没有隐藏这一档。
         "hides_on_delete": False,
@@ -2109,6 +2121,7 @@ def list_channel_ceo_sessions(
             last_llm_output_at=_session_last_assistant_at(session),
             is_virtual=False,
             first_user_text=_first_user_text(session),
+            title_override=channel_session_title_override(session),
         )
         existing = summaries.get(canonical_id)
         if existing is None:
@@ -2121,7 +2134,7 @@ def list_channel_ceo_sessions(
         merged["is_virtual"] = bool(existing.get("is_virtual")) and bool(summary.get("is_virtual"))
         merged["is_running"] = bool(existing.get("is_running")) or bool(summary.get("is_running"))
         if summary_updated_at >= existing_updated_at:
-            for key_name in ("preview_text", "created_at", "updated_at", "last_llm_output_at"):
+            for key_name in ("title", "rename_title", "preview_text", "created_at", "updated_at", "last_llm_output_at"):
                 merged[key_name] = summary.get(key_name) or merged.get(key_name)
         summaries[canonical_id] = merged
 
@@ -2179,7 +2192,10 @@ def _external_channel_row(
     session = session_manager.get_or_create(key) if has_transcript else None
     visible_messages = transcript_messages(session) if session is not None else []
     first_user_text = _first_user_text(session) if session is not None else ""
-    if not is_qq_official and first_user_text:
+    operator_title = channel_session_title_override(session) if session is not None else ""
+    if operator_title:
+        title = operator_title
+    elif not is_qq_official and first_user_text:
         # 非 QQ 渠道按普通会话的口径：第一条用户消息就是标题（与 `web:` 会话同源同形）。
         title = first_user_text
     elif entry_title:
@@ -2205,7 +2221,9 @@ def _external_channel_row(
         # 可输入 = 注册表里有这条会话（`submit` 的必填 entry 就是它）。没有条目的
         # 孤儿 ext 转录（注册表丢失/手工文件）与 `china:` 归档同样落到 False。
         "can_message": entry is not None,
-        "can_rename": False,
+        "can_rename": entry is not None,
+        # 命名的输入框要拿到存下来的原始标题：卡片标题可能是带渠道前缀/首句的派生串。
+        "rename_title": operator_title or entry_title,
         "can_delete": True,
         # 「删除」这颗按钮点下去会不会只把卡片隐掉（该桥 token 还在、身份可回），
         # 还是连外部身份一起注销。与删除车道同一个判据，见 `channel_session_hides_on_delete`。
@@ -2282,6 +2300,7 @@ def build_channel_ceo_session_item(
         updated_at=_session_updated_at(session),
         last_llm_output_at=_session_last_assistant_at(session),
         is_virtual=False,
+        title_override=channel_session_title_override(session),
     )
 
 

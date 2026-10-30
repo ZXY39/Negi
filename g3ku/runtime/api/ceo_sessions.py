@@ -891,23 +891,51 @@ async def get_ceo_session_tool_arguments(session_id: str, tool_call_id: str = ""
     }
 
 
+def _rename_channel_ceo_session(session_manager, session_id: str, title: str) -> str:
+    """渠道会话命名：注册表存一份（记忆作用域下拉读它），转录 metadata 存一份（会话卡片读它）。"""
+    key = str(session_id or "").strip()
+    if not key:
+        raise HTTPException(status_code=404, detail="session_not_found")
+    registry = get_external_session_registry(getattr(session_manager, "workspace", None))
+    entry = registry.get_by_session_key(key) if key.startswith("ext:") else None
+    transcript_exists = False
+    get_path = getattr(session_manager, "get_path", None)
+    if callable(get_path):
+        try:
+            transcript_exists = bool(get_path(key).exists())
+        except Exception:
+            transcript_exists = False
+    if entry is None and not transcript_exists:
+        raise HTTPException(status_code=404, detail="session_not_found")
+    if entry is not None:
+        registry.update_title(key, title)
+    if transcript_exists:
+        session = session_manager.get_or_create(key)
+        session.metadata = dict(session.metadata or {})
+        session.metadata["title"] = title
+        session_manager.save(session)
+    return key
+
+
 @router.patch("/ceo/sessions/{session_id}")
 async def rename_ceo_session(session_id: str, payload: dict = Body(...)):
     agent, session_manager, runtime_manager, state_store = _sessions()
-    if _is_channel_session_id(session_id):
-        _raise_channel_session_readonly()
-    session = _assert_known_session(session_manager, session_id)
     title = str(payload.get("title") or "").strip()
     if not title:
         raise HTTPException(status_code=400, detail="title_required")
-    session.metadata = dict(session.metadata or {})
-    session.metadata["title"] = title
-    session.updated_at = datetime.now()
-    session_manager.save(session)
+    if _is_channel_session_id(session_id):
+        session_key = _rename_channel_ceo_session(session_manager, session_id, title)
+    else:
+        session = _assert_known_session(session_manager, session_id)
+        session.metadata = dict(session.metadata or {})
+        session.metadata["title"] = title
+        session.updated_at = datetime.now()
+        session_manager.save(session)
+        session_key = session.key
     active_session_id = resolve_active_ceo_session_id(session_manager, state_store)
     catalog = _build_catalog(session_manager, runtime_manager, active_session_id=active_session_id)
     store_ceo_catalog_cache(active_session_id, catalog)
-    item = next((entry for entry in list(catalog.get("items") or []) if entry["session_id"] == session.key), None)
+    item = find_ceo_session_catalog_item(catalog, session_key)
     _publish_ceo_sessions_snapshot(
         agent,
         session_manager,

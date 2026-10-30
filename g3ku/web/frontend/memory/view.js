@@ -1978,12 +1978,14 @@ function renderMemoryProcessedCard(item) {
     const statusSlot = opKinds.length
         ? renderMemoryOpChips(opKinds)
         : `<span class="memory-op-chip" data-op="nochange"><i data-lucide="minus" aria-hidden="true"></i>${esc(statusLabel)}</span>`;
+    const scopeKindLabel = memoryScopeKindLabel();
     return `
         <article class="memory-card memory-card-compact" data-memory-card="processed" data-memory-detail-open="processed" data-memory-detail-key="${esc(batchId)}" role="button" tabindex="0" aria-label="打开已处理批次详情">
             <div class="memory-card-summary">
                 <div class="memory-card-minimal-row">
                     <div class="memory-card-minimal-status">
                         ${statusSlot}
+                        <span class="memory-scope-chip" data-memory-scope-kind="${esc(scopeKindLabel)}">${esc(scopeKindLabel)}</span>
                     </div>
                     <div class="memory-card-minimal-trailing">
                         <span class="memory-card-time">${esc(processedAt || "-")}</span>

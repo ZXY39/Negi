@@ -8980,7 +8980,8 @@ async function renameCeoSession(sessionId) {
         showToast({ title: "当前不可重命名", text: "请先等待当前回合完成或暂停后再操作。", kind: "warn" });
         return;
     }
-    U.renameSessionInput.value = current.title || "";
+    // 渠道会话的卡片标题可能是「渠道 · 群号」这类派生串；输入框要用存下来的原始标题。
+    U.renameSessionInput.value = String(current.rename_title ?? current.title ?? "");
     U.renameSessionBackdrop.hidden = false;
     U.renameSessionBackdrop.classList.add("is-open");
     U.renameSessionInput.focus();
@@ -9002,6 +9003,8 @@ async function handleRenameAccept() {
     try {
         const payload = await ApiClient.renameCeoSession(sessionId, { title: nextTitle });
         applyCeoSessionsPayload(payload);
+        // 记忆页的会话下拉读的是同一份标题；下次进入时重取，别停在旧名字。
+        S.memoryScopesLoaded = false;
         showToast({ title: "成功", text: "会话已重命名", kind: "success" });
     } catch (e) {
         showToast({ title: "重命名失败", text: e.message || "Unknown error", kind: "error" });
@@ -10294,6 +10297,8 @@ function switchView(view) {
     if (view === "tools") void loadTools();
     if (view === "stickers") void loadStickerView();
     if (view === "memory") {
+        // 会话名可被重命名；每次进入都重取一次作用域清单，下拉不会停在旧标题。
+        void loadMemoryScopes({ force: true });
         if (!S.memoryLoadedOnce) void loadMemoryView();
         else void loadMemoryView({ quiet: true });
     }

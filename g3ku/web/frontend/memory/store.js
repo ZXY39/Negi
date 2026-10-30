@@ -12,6 +12,17 @@ function memoryScopeQuery() {
     return S.memoryScope;
 }
 
+function memoryScopeKindLabel() {
+    ensureMemoryScopeState();
+    const current = S.memoryScope;
+    const item = (S.memoryScopes || [])
+        .find((entry) => String(entry?.scope || "") === current) || null;
+    const kind = String(item?.kind || "").trim().toLowerCase();
+    if (kind === "local") return "本地";
+    if (kind === "group") return "群";
+    return current ? "群" : "本地";
+}
+
 function renderMemoryScopeOptions() {
     ensureMemoryScopeState();
     const select = document.getElementById("memory-scope-select");
@@ -25,6 +36,9 @@ function renderMemoryScopeOptions() {
         select.append(option);
     }
     select.value = S.memoryScopes.some((item) => String(item?.scope || "") === current) ? current : "";
+    if (!select.value && S.memoryScope) S.memoryScope = "";
+    // 原生 select 被自绘外壳接管后，换选项必须同步一次菜单与触发器，否则展开仍是旧清单。
+    if (typeof syncResourceSelectUI === "function") syncResourceSelectUI(select);
 }
 
 async function loadMemoryScopes({ force = false } = {}) {
