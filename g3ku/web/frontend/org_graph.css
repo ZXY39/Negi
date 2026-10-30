@@ -15899,6 +15899,23 @@ textarea {
     border-color: var(--ui-border-strong);
 }
 
+/* 群名就是外部键：面板停在触发器宽度内换行，不按文字最大宽度撑出去，
+   否则隐式网格列会把面板顶宽，底部长出一条横向滚动条。 */
+.memory-scope-setting .resource-select-menu {
+    grid-template-columns: minmax(0, 1fr);
+    overflow-x: hidden;
+}
+
+.memory-scope-setting .resource-select-option {
+    min-width: 0;
+}
+
+.memory-scope-setting .resource-select-option-label {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    line-height: 1.35;
+}
+
 .memory-card {
     border: 1px solid var(--ui-border);
     border-radius: var(--ui-radius-control);

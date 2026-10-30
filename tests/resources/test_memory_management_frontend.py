@@ -1528,6 +1528,13 @@ def test_memory_scope_selector_is_a_session_labelled_custom_select() -> None:
     assert "作用域" not in memory_html
     assert "syncResourceSelectUI(select)" in store_js
     assert ".memory-scope-setting .resource-select-trigger {" in css
+    # 长群名在面板宽度内换行：不按文字最大宽度撑开面板，也不出横向滚动条
+    menu = _fragment(css, ".memory-scope-setting .resource-select-menu {", ".memory-scope-setting .resource-select-option {")
+    assert "grid-template-columns: minmax(0, 1fr);" in menu
+    assert "overflow-x: hidden;" in menu
+    label_css = _fragment(css, ".memory-scope-setting .resource-select-option-label {", "}")
+    assert "white-space: normal;" in label_css
+    assert "overflow-wrap: anywhere;" in label_css
 
 
 def test_memory_processed_card_marks_the_selected_scope() -> None:
