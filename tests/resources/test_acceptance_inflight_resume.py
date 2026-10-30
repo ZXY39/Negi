@@ -26,6 +26,7 @@ from main.models import NodeFinalResult, TaskNodeNotification, normalize_final_a
 from main.protocol import now_iso
 from main.runtime.acceptance_handshake import (
     ACCEPTANCE_HANDSHAKE_KEY,
+    ACCEPTANCE_STATE_ACCEPTED,
     ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
     ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY,
     normalize_acceptance_handshake,
@@ -167,6 +168,7 @@ def _set_handshake(
     node_id: str,
     state: str,
     acceptance_node_id: str,
+    submission_id: str | None = None,
 ) -> None:
     def _mutate(metadata: dict[str, object]) -> dict[str, object]:
         current = normalize_acceptance_handshake(metadata.get(ACCEPTANCE_HANDSHAKE_KEY))
@@ -180,6 +182,7 @@ def _set_handshake(
             latest_rejection_feedback_ref="",
             latest_rejection_feedback_summary="",
             updated_at=now_iso(),
+            latest_execution_submission_id=submission_id,
         )
         return metadata
 
@@ -408,6 +411,201 @@ async def test_rejection_after_resume_clears_resumable_candidate(tmp_path: Path)
         assert service.store.get_node(acceptance_id).status == "in_progress"
         assert _handshake(service, root_id).get("state") == ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY
         assert service.node_runner.resumable_final_acceptance_node_id(task_id) == ""
+    finally:
+        await service.close()
+
+
+# ---------------------------------------------------------------------------
+# I1：accepted 关闭本轮分派——重放终态根不得再开验收轮
+# ---------------------------------------------------------------------------
+
+
+def _seed_booked_pass(
+    service: MainRuntimeService,
+    *,
+    task_id: str,
+    root_id: str,
+    acceptance_id: str,
+) -> None:
+    """落一个「裁决已记账」的现场：根 success、握手 accepted、验收节点 success。"""
+    service.log_service.update_node_status(
+        task_id,
+        root_id,
+        status="success",
+        final_output="booked answer",
+    )
+    service.node_runner._update_execution_acceptance_handshake(
+        node_id=root_id,
+        state=ACCEPTANCE_STATE_ACCEPTED,
+        acceptance_node_id=acceptance_id,
+        rejection_count=0,
+        latest_execution_result_ref="artifact:booked",
+        latest_execution_result_summary="booked answer",
+        latest_rejection_feedback_ref="",
+        latest_rejection_feedback_summary="",
+        latest_execution_submission_id="submission:booked",
+    )
+    service.log_service.update_node_status(
+        task_id,
+        acceptance_id,
+        status="success",
+        final_output="verdict: pass",
+    )
+
+
+def _acceptance_round_stub(service: MainRuntimeService, runs: list[str], *, submission_id: str = ""):
+    async def _fake_run_node(task_id: str, node_id: str) -> NodeFinalResult:
+        node = service.store.get_node(node_id)
+        assert node is not None
+        if str(node.node_kind or "").strip().lower() != "acceptance":
+            return service.node_runner._result_from_record(node)
+        runs.append(node_id)
+        service.log_service.update_node_status(
+            task_id,
+            node_id,
+            status="success",
+            final_output="verdict: pass again",
+        )
+        return NodeFinalResult(
+            status="success",
+            delivery_status="final",
+            summary="verdict: pass again",
+            answer="verdict: pass again",
+            evidence=[],
+            remaining_work=[],
+            blocking_reason="",
+            submission_id=submission_id,
+        )
+
+    return _fake_run_node
+
+
+@pytest.mark.asyncio
+async def test_replayed_terminal_root_does_not_open_a_second_acceptance_round(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T1：裁决落账后重复驱动 run_task，不得重置验收节点、重开模型回合。"""
+    service = _build_service(tmp_path)
+    terminal_events: list[str] = []
+
+    def _count_terminal(*, task) -> None:
+        terminal_events.append(str(getattr(task, "task_id", "") or ""))
+
+    try:
+        record = await service.create_task(
+            "booked pass replay",
+            session_id="web:shared",
+            metadata={"final_acceptance": {"required": True, "prompt": "verify root output"}},
+        )
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None and root is not None
+        acceptance_id = str(
+            normalize_final_acceptance_metadata((task.metadata or {}).get("final_acceptance")).node_id or ""
+        ).strip()
+        acceptance = service.store.get_node(acceptance_id)
+        assert acceptance is not None
+
+        monkeypatch.setattr(service.log_service, "_publish_task_terminal_locked", _count_terminal)
+
+        _seed_booked_pass(
+            service,
+            task_id=record.task_id,
+            root_id=root.node_id,
+            acceptance_id=acceptance_id,
+        )
+        seeded_task = service.get_task(record.task_id)
+        seeded_acceptance = service.store.get_node(acceptance_id)
+        seeded_root = service.store.get_node(root.node_id)
+        assert seeded_task is not None and seeded_acceptance is not None and seeded_root is not None
+        assert seeded_task.status == "success"
+        assert seeded_acceptance.status == "success"
+        assert seeded_root.check_result
+        assert (
+            normalize_final_acceptance_metadata((seeded_task.metadata or {}).get("final_acceptance")).status
+            == "passed"
+        )
+        assert len(terminal_events) == 1
+
+        runs: list[str] = []
+        monkeypatch.setattr(service.node_runner, "run_node", _acceptance_round_stub(service, runs))
+
+        await service.task_actor_service.run_task(record.task_id)
+
+        latest_task = service.get_task(record.task_id)
+        latest_acceptance = service.store.get_node(acceptance_id)
+        latest_root = service.store.get_node(root.node_id)
+        assert latest_task is not None and latest_acceptance is not None and latest_root is not None
+        # 没有第二轮模型回合；那一份已记账的 pass 没有被塞进 rejection_history。
+        assert runs == []
+        assert list((latest_acceptance.metadata or {}).get("rejection_history") or []) == []
+        assert latest_acceptance.status == "success"
+        assert (
+            normalize_final_acceptance_metadata((latest_task.metadata or {}).get("final_acceptance")).status
+            == "passed"
+        )
+        assert latest_root.check_result
+        assert len(terminal_events) == 1
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_new_submission_after_booked_pass_still_reverifies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T2：正向控制——新提交（新 submission id + waiting_acceptance）仍要作废旧裁决重验。"""
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task(
+            "new submission after pass",
+            session_id="web:shared",
+            metadata={"final_acceptance": {"required": True, "prompt": "verify root output"}},
+        )
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None and root is not None
+        acceptance_id = str(
+            normalize_final_acceptance_metadata((task.metadata or {}).get("final_acceptance")).node_id or ""
+        ).strip()
+
+        _seed_booked_pass(
+            service,
+            task_id=record.task_id,
+            root_id=root.node_id,
+            acceptance_id=acceptance_id,
+        )
+        _set_handshake(
+            service,
+            node_id=root.node_id,
+            state=ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
+            acceptance_node_id=acceptance_id,
+            submission_id="submission:new",
+        )
+
+        runs: list[str] = []
+        monkeypatch.setattr(
+            service.node_runner,
+            "run_node",
+            _acceptance_round_stub(service, runs, submission_id="submission:new"),
+        )
+
+        await service.task_actor_service.run_task(record.task_id)
+
+        latest_task = service.get_task(record.task_id)
+        latest_acceptance = service.store.get_node(acceptance_id)
+        assert latest_task is not None and latest_acceptance is not None
+        assert runs == [acceptance_id]
+        assert list((latest_acceptance.metadata or {}).get("rejection_history") or [])
+        handshake = _handshake(service, root.node_id)
+        assert handshake.get("state") == ACCEPTANCE_STATE_ACCEPTED
+        assert handshake.get("latest_execution_submission_id") == "submission:new"
+        assert (
+            normalize_final_acceptance_metadata((latest_task.metadata or {}).get("final_acceptance")).status
+            == "passed"
+        )
     finally:
         await service.close()
 

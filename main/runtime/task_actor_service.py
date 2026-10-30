@@ -2275,6 +2275,9 @@ class TaskActorService:
         handshake = normalize_acceptance_handshake(
             (getattr(root, 'metadata', None) or {}).get(ACCEPTANCE_HANDSHAKE_KEY)
         )
+        if str(handshake.get('state') or '').strip() == ACCEPTANCE_STATE_ACCEPTED:
+            # 裁决已记账：重放终态根得到的 success+final 不是新提交，不得再开一轮。
+            return self._result_from_node(root)
         root_status = str(getattr(root, 'status', '') or '').strip().lower()
         if root_status != 'success' and str(handshake.get('state') or '').strip() != ACCEPTANCE_STATE_WAITING_ACCEPTANCE:
             logger.info(
