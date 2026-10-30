@@ -43,12 +43,13 @@ CREATE_ASYNC_TASK_FILE_TARGETS_DESCRIPTION = (
 )
 
 CREATE_ASYNC_TASK_REQUIRES_FINAL_ACCEPTANCE_DESCRIPTION = (
-    "Whether the root execution should be followed by final acceptance."
+    "Whether the root execution gets a final acceptance node. Off by default; set true only when a "
+    "wrong final result is costly and you cannot verify it cheaply yourself."
 )
 
 CREATE_ASYNC_TASK_FINAL_ACCEPTANCE_PROMPT_DESCRIPTION = (
-    "Final acceptance instructions. Required only when "
-    "`requires_final_acceptance=true`."
+    "Final acceptance instructions. Required when `requires_final_acceptance=true`; a prompt "
+    "without the flag is rejected."
 )
 
 

@@ -536,11 +536,13 @@ class SpawnChildNodesTool(Tool):
                 'requires_acceptance': {
                     'type': 'boolean',
                     'description': (
-                        'Whether this child gets a follow-up acceptance node. Set true when the child output is reused upstream '
-                        '(aggregation, the parent answer, a required deliverable), writes or rewrites files, carries count/scope '
-                        'thresholds, or spans multiple artifacts or directories. The acceptance node is activated only after this child pipeline '
-                        'is terminal — this is the correct way to gate acceptance for a single child; do not spawn a sibling acceptance node in the '
-                        'same batch for it.'
+                        'Whether this child gets a follow-up acceptance node. Off by default. Set true only when BOTH hold: '
+                        '(1) an error is costly — an irreversible or external action, finance/compliance/production code, or a '
+                        'batch/coverage requirement where a silent omission would go unnoticed; and (2) you cannot certify the '
+                        'output yourself in one cheap pass at wrap-up — it needs a dedicated round of checks. Do not request '
+                        'acceptance merely because the output is a deliverable or will be aggregated into your answer; verify '
+                        'those inline before submitting. The acceptance node is activated only after this child pipeline is '
+                        'terminal — never spawn a sibling acceptance node in the same batch for it.'
                     ),
                 },
                 'acceptance_prompt': {
@@ -633,6 +635,11 @@ class SpawnChildNodesTool(Tool):
             acceptance_prompt = str(item.get('acceptance_prompt') or '').strip()
             if requires_acceptance is True and not acceptance_prompt:
                 errors.append(f'children[{index}].acceptance_prompt is required when requires_acceptance=true')
+            elif acceptance_prompt and requires_acceptance is not True:
+                errors.append(
+                    f'children[{index}].acceptance_prompt is set but requires_acceptance is not true; '
+                    'set requires_acceptance=true or drop the prompt'
+                )
         return errors
 
     async def execute(

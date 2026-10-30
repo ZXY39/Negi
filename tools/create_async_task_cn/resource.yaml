@@ -51,10 +51,10 @@ parameters:
             description: Exact artifact or content ref to reopen.
     requires_final_acceptance:
       type: boolean
-      description: Whether the root execution should be followed by final acceptance.
+      description: Whether the root execution gets a final acceptance node. Off by default; set true only when a wrong final result is costly and you cannot verify it cheaply yourself.
     final_acceptance_prompt:
       type: string
-      description: Required when `requires_final_acceptance=true`.
+      description: Acceptance criteria for the final result. Required when `requires_final_acceptance=true`; rejected when the flag is not true.
   required: [task, core_requirement, execution_policy]
 governance:
   display_name: Create Async Task

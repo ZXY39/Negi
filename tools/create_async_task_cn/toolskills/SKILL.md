@@ -19,8 +19,8 @@ Create a detached background task in the main runtime.
   - Each item should include exact `path` and/or exact `ref`.
   - Use this when the task depends on specific uploaded files, local files, or artifacts.
   - Use `null` or `[]` when the task does not depend on specific files.
-- `requires_final_acceptance=true`
-- `final_acceptance_prompt`: clear acceptance criteria for the final result.
+- `requires_final_acceptance`: set `true` only when a wrong final result is costly and you cannot verify it cheaply yourself.
+- `final_acceptance_prompt`: clear acceptance criteria for the final result; requires `requires_final_acceptance=true`.
 
 ## Task Prompt Requirements
 - Describe the goal, scope, important clues, and expected output.
@@ -32,4 +32,4 @@ Create a detached background task in the main runtime.
 ## Notes
 - `core_requirement` must not be empty.
 - `execution_policy.mode` must be explicit.
-- When `requires_final_acceptance=true`, `final_acceptance_prompt` is required.
+- When `requires_final_acceptance=true`, `final_acceptance_prompt` is required. A prompt without the flag is rejected.

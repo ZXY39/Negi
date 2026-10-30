@@ -94,6 +94,11 @@ class _CreateAsyncTaskHandler(Tool):
         final_acceptance_prompt = str((normalized or {}).get('final_acceptance_prompt') or '').strip()
         if requires_final_acceptance is True and not final_acceptance_prompt:
             errors.append('final_acceptance_prompt is required when requires_final_acceptance=true')
+        elif final_acceptance_prompt and requires_final_acceptance is not True:
+            errors.append(
+                'final_acceptance_prompt is set but requires_final_acceptance is not true; '
+                'set requires_final_acceptance=true or drop the prompt'
+            )
         errors.extend(validate_create_async_task_file_targets((normalized or {}).get('file_targets')))
         return errors
 
@@ -118,10 +123,12 @@ class _CreateAsyncTaskHandler(Tool):
         if file_target_errors:
             raise ValueError('; '.join(file_target_errors))
         final_acceptance_prompt = str(kwargs.get('final_acceptance_prompt') or '').strip()
-        raw_requires_final_acceptance = kwargs.get('requires_final_acceptance')
-        requires_final_acceptance = bool(raw_requires_final_acceptance) or (
-            raw_requires_final_acceptance in (None, '') and bool(final_acceptance_prompt)
-        )
+        requires_final_acceptance = bool(kwargs.get('requires_final_acceptance'))
+        if final_acceptance_prompt and not requires_final_acceptance:
+            raise ValueError(
+                'final_acceptance_prompt is set but requires_final_acceptance is not true; '
+                'set requires_final_acceptance=true or drop the prompt'
+            )
         precheck = await self._service.precheck_async_task_creation(
             session_id=session_id,
             task_text=str(task or '').strip(),
