@@ -7919,6 +7919,25 @@ textarea {
     min-width: 0;
 }
 
+.llm-api-key-input-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+}
+
+.llm-api-key-input-row .resource-search {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+/* 查看/隐藏是字段右侧的动作，跟输入框同高；不要落进 32px 的工具按钮档。 */
+:root .llm-api-key-input-row .llm-api-key-reveal-btn {
+    flex: 0 0 auto;
+    height: 38px;
+    min-height: 38px;
+    padding: 0 14px;
+}
+
 /* 模型ID右侧的取列表小按钮：与输入框同高的一条 38px 方档。 */
 .llm-fetch-btn {
     flex: 0 0 auto;
