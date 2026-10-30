@@ -71,12 +71,14 @@ class MemoryUpdateTool(Tool):
         manager = self._manager
         view = runtime.get("memory_view")
         if view is None and session_key:
-            # 节点道/未携带视图的调用点：按会话键问进程内活动路由，别掉回本地域。
+            # 节点道/未携带视图的调用点：只有渠道会话需要问进程内活动路由（群作用域），
+            # 本地会话直接用自己的 manager，避免测试/重启留下的旧路由改变本地写入目标。
             try:
                 from g3ku.runtime.memory_scope_router import active_memory_scope_router
+                from g3ku.runtime.session_keys import is_channel_session_key
 
                 router = active_memory_scope_router()
-                if router is not None:
+                if router is not None and is_channel_session_key(session_key):
                     view = router.view_for_session(session_key)
             except Exception:
                 view = None

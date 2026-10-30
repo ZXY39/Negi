@@ -51,9 +51,10 @@ class MemoryNoteTool(Tool):
         if view is None and session_key:
             try:
                 from g3ku.runtime.memory_scope_router import active_memory_scope_router
+                from g3ku.runtime.session_keys import is_channel_session_key
 
                 router = active_memory_scope_router()
-                if router is not None:
+                if router is not None and is_channel_session_key(session_key):
                     view = router.view_for_session(session_key)
             except Exception:
                 view = None
