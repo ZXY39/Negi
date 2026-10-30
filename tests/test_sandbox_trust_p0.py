@@ -676,6 +676,26 @@ async def test_group_scope_manager_never_reads_or_writes_the_persona_note(tmp_pa
         assert manager.persona_text() == ""
         with pytest.raises(ValueError):
             manager.set_persona("群里的人设")
+        batch = module.MemoryBatch(
+            op="write",
+            items=[
+                module.MemoryQueueRequest(
+                    op="write",
+                    decision_source="user",
+                    payload_text="群友说以后温度统一用摄氏度",
+                    created_at="2026-10-31T00:00:00+08:00",
+                )
+            ],
+        )
+        prompt = manager._memory_agent_user_prompt(
+            batch=batch,
+            snapshot_text="",
+            repair_reason="",
+        )
+        assert "群聊记忆" in prompt
+        assert "群成员提供的内容按价值准入" in prompt
+        assert "不因发送者不是 Master 而拒绝" in prompt
+        assert "不得写成 Master 的个人偏好" not in prompt
     finally:
         manager.close()
 

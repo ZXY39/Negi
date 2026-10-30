@@ -1324,6 +1324,11 @@ class CeoMessageBuilder:
             if session_key
             else ''
         )
+        memory_view = _memory_view_for_session(self._loop, session_key)
+        group_memory = bool(
+            memory_view is not None
+            and str(getattr(memory_view, 'kind', '') or '').strip() == 'group'
+        )
         split_prompt_builder = callable(getattr(self._prompt_builder, 'build_base_prompt', None))
         prompt_refresh_stamp = ''
         if split_prompt_builder:
@@ -1343,7 +1348,9 @@ class CeoMessageBuilder:
         if channel_session:
             channel_block = getattr(self._prompt_builder, 'channel_identity_block', None)
             channel_text = str(
-                channel_block(sandbox_tier) if callable(channel_block) else ''
+                channel_block(sandbox_tier, group_memory=group_memory)
+                if callable(channel_block)
+                else ''
             ).strip()
             if channel_text:
                 system_prompt = f"{system_prompt}\n\n{channel_text}".strip()
@@ -1358,7 +1365,6 @@ class CeoMessageBuilder:
             if str(name or '').strip()
         }
         turn_overlay_parts: list[str] = []
-        memory_view = _memory_view_for_session(self._loop, session_key)
         memory_snapshot_text = (
             adopted_memory_snapshot_text(session, memory_manager=memory_manager, memory_view=memory_view)
             if memory_manager is not None

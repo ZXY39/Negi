@@ -6078,8 +6078,9 @@ class MemoryManager:
             else (
                 f"本记忆域是群聊记忆{('（' + self.scope_label + '）') if self.scope_label else ''}："
                 "不含操作员人设，不要创建或修改 note_persona。"
-                "只记录本群上下文与群级偏好；第三方发送者的话不是 Master 的话，"
-                "不得写成 Master 的个人偏好。"
+                "记录本群共享的约定、事实、偏好与经验；群成员提供的内容按价值准入，"
+                "不因发送者不是 Master 而拒绝。写入时按群级内容表述，"
+                "不要写成操作员的个人偏好。"
             )
         )
         return (
