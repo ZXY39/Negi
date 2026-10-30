@@ -79,6 +79,10 @@ def guess_media_mime(name: str) -> str:
     suffix = Path(str(name or "")).suffix.lower()
     if suffix in _KNOWN_DOCUMENT_MIME:
         return _KNOWN_DOCUMENT_MIME[suffix]
+    # 部分 Windows 的 mimetypes 没有 `.webp` 映射（实测 guess_type → (None, None)），
+    # 落到 application/octet-stream 会让渠道桥把表情包当文件发出去。栅格后缀以本表为准。
+    if suffix in _RASTER_SUFFIXES:
+        return "image/jpeg" if suffix in {".jpg", ".jpeg"} else f"image/{suffix.lstrip('.')}"
     return str(mimetypes.guess_type(str(name or ""))[0] or "application/octet-stream")
 
 

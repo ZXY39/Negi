@@ -37,7 +37,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import mimetypes
+import re
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -165,6 +167,59 @@ def _declared_mime(content_type: str) -> str:
     descriptor and the file-name extension guess."""
     value = str(content_type or "").strip().lower()
     return value if "/" in value else ""
+
+
+# 小表情/表情包在官方协议里是**正文里的占位符**：实测一条纯表情包消息的 content 就是
+# ``<faceType=6,faceId="0",ext="eyJ0ZXh0IjoiIn0=">``（ext 是 base64 的 ``{"text":""}``），
+# 真正的图在同一条消息的 attachments 里。原样转发会让模型和网页都读到一段协议标记。
+_FACE_MARKUP_RE = re.compile(r'<faceType=\d+,faceId="[^"]*"(?:,ext="[^"]*")?>')
+_FACE_PLACEHOLDER = "[表情]"
+
+
+def _normalize_face_markup(text: str, *, has_image_attachment: bool) -> str:
+    """Drop QQ face placeholders; keep one readable token when no image carries it."""
+    if "<faceType=" not in text:
+        return text
+    replacement = "" if has_image_attachment else _FACE_PLACEHOLDER
+    return _FACE_MARKUP_RE.sub(replacement, text).strip()
+
+
+# 平台的图片档（file_type=1）只保证 png/jpg；gif 实测也能画成图片。其余栅格格式
+# （实测 .webp 表情包）先转码再上传，否则平台按"任意文件"渲染/拒收。
+_PLATFORM_IMAGE_MAGIC = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a")
+
+
+def _platform_image_bytes(data: bytes) -> tuple[bytes, str]:
+    """Transcode a raster image the platform image lane cannot render into png/gif.
+
+    Returns ``(bytes, mime)``; an empty mime means the bytes go up unchanged.
+    """
+    if not data or data.startswith(_PLATFORM_IMAGE_MAGIC):
+        return data, ""
+    try:
+        from PIL import Image
+    except Exception:  # noqa: BLE001 - 没有 Pillow 时保持原字节
+        return data, ""
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            frames = int(getattr(image, "n_frames", 1) or 1)
+            if frames > 1:
+                images = []
+                for index in range(frames):
+                    image.seek(index)
+                    images.append(image.convert("RGBA").convert("P", palette=Image.ADAPTIVE))
+                output = io.BytesIO()
+                images[0].save(
+                    output, format="GIF", save_all=True, append_images=images[1:], loop=0
+                )
+                return output.getvalue(), "image/gif"
+            output = io.BytesIO()
+            image.convert("RGBA").save(output, format="PNG")
+            return output.getvalue(), "image/png"
+    except Exception as exc:  # noqa: BLE001 - 转码失败不该吞掉附件
+        logger.warning("qq-official image transcode failed ({}); sending original bytes", exc)
+        return data, ""
+
 
 # pump 重连退避。SSE 流断开（服务端事件循环阻塞超过读超时、网络抖动、进程重启）
 # 后必须自动重连：pump 一旦终结且不再重建，该会话的所有主动推送（心跳升级、
@@ -855,6 +910,13 @@ async def run_qq_official_bridge(
                     raise RuntimeError(
                         "signed media download failed or exceeds the outbound attachment cap"
                     )
+                if file_type == 1:
+                    converted, converted_mime = _platform_image_bytes(data)
+                    if converted_mime:
+                        logger.info(
+                            "qq-official converted image attachment {} to {}", name, converted_mime
+                        )
+                        data = converted
                 file_info = await _upload_media_data(kind, target, data, file_type)
                 if not file_info:
                     file_info = await _upload_media_url(kind, target, url, file_type)
@@ -897,6 +959,12 @@ async def run_qq_official_bridge(
                 )
                 if not data:
                     raise RuntimeError("image attachment download failed")
+                converted, converted_mime = _platform_image_bytes(data)
+                if converted_mime:
+                    logger.info(
+                        "qq-official converted image attachment {} to {}", name, converted_mime
+                    )
+                    data = converted
                 if kind == "guild":
                     result = await bridge_api.post_message(
                         channel_id=target["channel_id"], file_image=data
@@ -1296,7 +1364,12 @@ async def run_qq_official_bridge(
             attachments, voice_lines = await _collect_attachments(media_client, message)
             await on_incoming(
                 external_key,
-                _content_of(message),
+                _normalize_face_markup(
+                    _content_of(message),
+                    has_image_attachment=any(
+                        str(item.get("kind") or "") == "image" for item in attachments
+                    ),
+                ),
                 getattr(message, "id", ""),
                 attachments,
                 voice_lines,

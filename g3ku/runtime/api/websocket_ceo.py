@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import mimetypes
+import re
 import shutil
 import uuid
 from inspect import isawaitable
@@ -26,6 +27,7 @@ from g3ku.core.events import AgentEvent
 from g3ku.core.messages import UserInputMessage
 from g3ku.deployment.data_root import data_root
 from g3ku.runtime.api.external_turns import get_external_turn_service
+from g3ku.runtime.api.external_v1 import channel_attachment_note
 from g3ku.runtime.ceo_catalog_offload import (
     build_ceo_session_catalog_async,
     build_ceo_session_catalog_cached,
@@ -857,6 +859,52 @@ def _history_text(content: Any) -> str:
     return str(content or '').strip()
 
 
+def _strip_channel_attachment_note(content: str, metadata: dict[str, Any]) -> str:
+    """把模型可见的渠道附件说明从气泡正文里剥掉，只显示用户原文。
+
+    与 web 上传的 ``web_ceo_raw_text`` 同一纪律（说明行属于模型输入，不属于聊天气泡）。
+    说明在这里按同一份描述符重建，所以说明已经写进 content 的历史行也能剥干净，
+    不必改写转录。
+    """
+    attachments = metadata.get('external_attachments') if isinstance(metadata, dict) else None
+    if not isinstance(attachments, list) or not attachments:
+        return content
+    note = channel_attachment_note([item for item in attachments if isinstance(item, dict)])
+    if not note:
+        return content
+    if content == note:
+        return ''
+    suffix = f'\n\n{note}'
+    return content[: -len(suffix)] if content.endswith(suffix) else content
+
+
+# QQ 小表情/表情包在正文里是协议占位符（`<faceType=6,faceId="0",ext="…">`，表情包的真图
+# 在同一条消息的附件里）。入站归一化归桥：`g3ku/qq_official/bridge.py::_normalize_face_markup`。
+# 这里只处理**已经落盘的历史行**——转录不改写，气泡这一层把占位符隐掉。
+_CHANNEL_FACE_PLACEHOLDER_RE = re.compile(r'<faceType=\d+,faceId="[^"]*"(?:,ext="[^"]*")?>')
+
+
+def _strip_channel_bubble_noise(content: str, metadata: dict[str, Any]) -> str:
+    """渠道用户行只显示用户原文：剥掉模型说明行与平台占位符。"""
+    if not isinstance(metadata, dict):
+        return content
+    if not (
+        metadata.get('external_attachments')
+        or metadata.get('chat_type')
+        or metadata.get('external_trust')
+    ):
+        return content
+    content = _strip_channel_attachment_note(content, metadata)
+    if '<faceType=' not in content:
+        return content
+    attachments = metadata.get('external_attachments')
+    has_image = isinstance(attachments, list) and any(
+        isinstance(item, dict) and str(item.get('kind') or '') == 'image'
+        for item in attachments
+    )
+    return _CHANNEL_FACE_PLACEHOLDER_RE.sub('' if has_image else '[表情]', content).strip()
+
+
 def _normalize_snapshot_attachments(message: dict[str, Any], session_id: str = "") -> list[dict[str, Any]]:
     metadata = message.get('metadata') if isinstance(message.get('metadata'), dict) else {}
     uploads = metadata.get('web_ceo_uploads') if isinstance(metadata, dict) else None
@@ -880,29 +928,31 @@ def _normalize_snapshot_attachments(message: dict[str, Any], session_id: str = "
         if isinstance(size, (int, float)):
             item['size'] = int(size)
         items.append(item)
-    # 渠道侧的语音条落在 external_attachments 里（桥经 /api/v1 推上来），
-    # 历史上这个元数据从不到前端，所以只有可播放的音频被提升进气泡车道——
-    # 把所有渠道文件都画成附件卡会顺手改掉现有渠道会话的显示形状。
+    # 渠道附件（桥经 /api/v1 推上来的）与 web 上传同形：图片画缩略图、文件画文件卡、
+    # 音频走语音条。它们不在 web 上传根下，所以每一条都要带 external-upload-file 的
+    # 读文件地址；只按 path 让前端回退到 `uploads/file` 会得到 404 的破图。
     session_id = str(session_id or '').strip()
     for raw in list(metadata.get('external_attachments') or []):
         if not isinstance(raw, dict):
-            continue
-        if str(raw.get('kind') or '').strip().lower() != 'audio':
             continue
         path = str(raw.get('path') or '').strip()
         if not path or not session_id:
             continue
         name = str(raw.get('name') or Path(path).name).strip() or Path(path).name or path
+        mime_type = str(raw.get('mime_type') or '').strip()
+        kind = str(raw.get('kind') or '').strip() or _upload_kind(mime_type=mime_type, name=name)
         params = urlencode({'session_id': session_id, 'path': path})
-        items.append(
-            {
-                'path': path,
-                'name': name,
-                'mime_type': str(raw.get('mime_type') or '').strip() or 'audio/wav',
-                'kind': 'audio',
-                'url': f'/api/ceo/external-upload-file?{params}',
-            }
-        )
+        item = {
+            'path': path,
+            'name': name,
+            'mime_type': mime_type or _guess_upload_mime_type(name),
+            'kind': kind,
+            'url': f'/api/ceo/external-upload-file?{params}',
+        }
+        size = raw.get('size')
+        if isinstance(size, (int, float)):
+            item['size'] = int(size)
+        items.append(item)
     if items:
         return items
     for raw in list(message.get('attachments') or []):
@@ -1144,6 +1194,7 @@ def _build_ceo_snapshot(
             continue
         content = _history_text(raw.get('content'))
         if role == 'user':
+            content = _strip_channel_bubble_noise(content, metadata)
             raw_text = metadata.get('web_ceo_raw_text')
             if isinstance(raw_text, str) and isinstance(metadata.get('web_ceo_uploads'), list):
                 content = raw_text
