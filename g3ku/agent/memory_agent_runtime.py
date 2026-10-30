@@ -2104,14 +2104,14 @@ class MemoryManager:
         config: Any,
         *,
         read_only_init: bool = False,
-        review_eligibility: Callable[[str], bool] | None = None,
+        scope_label: str = "",
+        persona_enabled: bool = True,
     ):
         self.workspace = Path(workspace)
         self.config = config
+        self.scope_label = str(scope_label or "").strip()
+        self.persona_enabled = bool(persona_enabled)
         self._read_only_init = bool(read_only_init)
-        # 复核资格的单一判据（信任分级）。默认 None = 全允许（CLI/测试/检查实例）。
-        # 生产实例由 bootstrap 注入"会话是否可信"的判定，四处复核入口都只问它一次。
-        self._review_eligibility = review_eligibility
         self.runtime_dir = self.workspace / ".g3ku"
         self.request_artifacts_dir = self.runtime_dir / "memory-requests"
         self.mem_dir = self.workspace / "memory"
@@ -2165,10 +2165,6 @@ class MemoryManager:
                 self._reconcile_mirror_with_sqlite_locked(now_iso=self._now_iso(), at_boot=True)
         except Exception as exc:
             logger.error(f"memory mirror reconciliation failed at boot: {exc}")
-        try:
-            self._sweep_ineligible_review_sessions()
-        except Exception as exc:  # noqa: BLE001 - 记忆门不能把启动搞挂
-            logger.warning("memory review sweep at boot failed: {}", exc)
 
     def _ensure_layout(self) -> None:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -2722,8 +2718,10 @@ class MemoryManager:
         Read the ordinary file directly, never through `_note_path`: the bare-name
         resolver prefers `memory/notes/` and then falls back to `memory/index/`, so a
         category note that happens to share the reserved name must not become the
-        persona body.
+        persona body. Group-scope managers have `persona_enabled=False`.
         """
+        if not self.persona_enabled:
+            return ""
         try:
             return self._persona_note_path().read_text(encoding="utf-8").strip()
         except FileNotFoundError:
@@ -2739,6 +2737,8 @@ class MemoryManager:
         memory agent may still refine the same file through `note_edits` /
         `note_upserts` afterwards.
         """
+        if not self.persona_enabled:
+            raise ValueError("persona is not managed by this memory scope")
         body = str(text or "").strip()
         if not body:
             raise ValueError("persona text must not be empty")
@@ -4974,52 +4974,6 @@ class MemoryManager:
     def _review_window_turns(self) -> int:
         return max(int(getattr(self.config.queue, "review_interval_turns", 5) or 5), 1)
 
-    def review_eligibility(self, session_key: str) -> tuple[bool, str]:
-        """该会话的轮次能否进入长期记忆复核：``(allowed, reason)``。
-
-        单一判据，四处入口（记录 / 冲刷 / 队列消费 / 手工写入）都只问这里。没有注入
-        判据 = 全允许（CLI 与检查实例）；**判据自身抛错按不可信处理**——记忆是全局
-        副作用，拿不准的时候宁可不写。
-        """
-        if self._review_eligibility is None:
-            return True, ""
-        normalized = str(session_key or "").strip()
-        try:
-            allowed = bool(self._review_eligibility(normalized))
-        except Exception as exc:  # noqa: BLE001 - 判据故障按不可信处理
-            logger.warning("memory review eligibility check failed for {}: {}", normalized, exc)
-            return False, "eligibility_check_failed"
-        return (True, "") if allowed else (False, "untrusted_session")
-
-    def _sweep_ineligible_review_sessions(self) -> None:
-        """启动时清掉不可信会话已缓冲的复核轮次。
-
-        升级前群聊消息已经躺在 review_state.json 里；闸门只拦新写入的话，这些轮次
-        仍会在下一次按龄冲刷时进全局记忆。只摘缓冲、不动停车区（failed.jsonl 里的
-        历史记录仍需留证），失败只告警——启动不能因为记忆门而挂。
-        """
-        if self._review_eligibility is None:
-            return
-        try:
-            sessions = dict(self._read_review_state().get("sessions") or {})
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("memory review sweep skipped: {}", exc)
-            return
-        dropped = 0
-        for session_key in list(sessions.keys()):
-            allowed, _reason = self.review_eligibility(session_key)
-            if allowed:
-                continue
-            try:
-                self._pop_review_session_state(session_key=session_key)
-                dropped += 1
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("memory review sweep failed for {}: {}", session_key, exc)
-        if dropped:
-            logger.info(
-                "memory review sweep dropped {} untrusted session buffer(s)", dropped
-            )
-
     @staticmethod
     def _review_turn_fingerprint(turn: dict[str, Any]) -> str:
         """缓冲轮次的身份：`turn_id` 可能为空，载荷本身才是稳定的一半。"""
@@ -5386,34 +5340,6 @@ class MemoryManager:
             if str((artifact or {}).get("path") or "").strip()
         ]
 
-    def _partition_queue_batch_by_eligibility(
-        self,
-        batch: MemoryBatch,
-    ) -> tuple[MemoryBatch, list[MemoryQueueRequest]]:
-        """按复核资格拆批次：返回（可信子批, 不合格条目）。资格判据只问一次/条。"""
-        if not isinstance(batch, MemoryBatch) or not list(batch.items or []):
-            return batch, []
-        eligible: list[MemoryQueueRequest] = []
-        ineligible: list[MemoryQueueRequest] = []
-        for item in batch.items:
-            if self.review_eligibility(item.session_key)[0]:
-                eligible.append(item)
-            else:
-                ineligible.append(item)
-        if not ineligible:
-            return batch, []
-        return MemoryBatch(op=batch.op, items=eligible), ineligible
-
-    def _failed_record_all_untrusted(self, record: dict[str, Any]) -> bool:
-        """停车记录是否整批来自不可信会话（成功信号不得把它自动重排回队列）。"""
-        items = [item for item in list(record.get("items") or []) if isinstance(item, dict)]
-        if not items:
-            return False
-        return all(
-            not self.review_eligibility(str(item.get("session_key") or ""))[0]
-            for item in items
-        )
-
     @staticmethod
     def _precheck_batch_for_processing(batch: MemoryBatch) -> str:
         if not isinstance(batch, MemoryBatch) or not list(batch.items or []):
@@ -5774,11 +5700,6 @@ class MemoryManager:
         normalized_session = str(session_key or "").strip()
         if not normalized_session:
             return {"ok": True, "status": "ignored", "reason": "missing_session_key"}
-        allowed, denied_reason = self.review_eligibility(normalized_session)
-        if not allowed:
-            # 不可信会话连缓冲都不进：缓冲只是延迟的写入，先收下再在冲刷时丢，
-            # 等于把"群里说的话"在磁盘上多留一份。
-            return {"ok": True, "status": "ignored", "reason": denied_reason}
         state = self._read_review_state()
         session_state = dict((state.get("sessions") or {}).get(normalized_session) or {})
         reported_tool_keys = [
@@ -5869,12 +5790,6 @@ class MemoryManager:
         normalized_trigger = str(trigger_source or "").strip() or "token_compression"
         if normalized_trigger not in self._allowed_review_flush_sources():
             return {"ok": True, "status": "ignored", "reason": "unsupported_trigger_source"}
-        allowed, denied_reason = self.review_eligibility(normalized_session)
-        if not allowed:
-            # 覆盖全部三条冲刷道（按龄 / token 压缩 / 会话边界）：不合格会话的缓冲
-            # 直接清掉，绝不再走"入队 → 消费侧再过滤"的两段路。
-            self.clear_review_window(session_key=normalized_session)
-            return {"ok": True, "status": "discarded", "reason": denied_reason, "pending_turn_count": 0}
         state = self._read_review_state()
         session_state = dict((state.get("sessions") or {}).get(normalized_session) or {})
         pending_turns = [
@@ -6155,12 +6070,22 @@ class MemoryManager:
             for item in batch.items
         ]
         repair_block = f"\n上一轮输出无效：{repair_reason}\n请修复后重试。\n" if repair_reason else ""
+        persona_block = (
+            f"人设描述：ref={PERSONA_NOTE_REF}（不是普通记忆行，没有行号，正文按需读）。"
+            f"改人设只改这份 note：首次用 note_upserts 新建，已有内容用 note_edits，"
+            f"两种写法的 key 都写 {PERSONA_NOTE_REF}，不要把句柄拼成名字。"
+            if self.persona_enabled
+            else (
+                f"本记忆域是群聊记忆{('（' + self.scope_label + '）') if self.scope_label else ''}："
+                "不含操作员人设，不要创建或修改 note_persona。"
+                "只记录本群上下文与群级偏好；第三方发送者的话不是 Master 的话，"
+                "不得写成 Master 的个人偏好。"
+            )
+        )
         return (
             f"当前记忆正文（每行开头 `N|` 是这一行的行号）：\n"
             f"{self._render_numbered_memory_body(snapshot_text)}\n\n"
-            f"人设描述：ref={PERSONA_NOTE_REF}（不是普通记忆行，没有行号，正文按需读）。"
-            f"改人设只改这份 note：首次用 note_upserts 新建，已有内容用 note_edits，"
-            f"两种写法的 key 都写 {PERSONA_NOTE_REF}，不要把句柄拼成名字。\n\n"
+            f"{persona_block}\n\n"
             f"现有 note refs：{json.dumps(note_index, ensure_ascii=False)}\n"
             f"当前批次类型：{batch.op}\n"
             f"待处理请求：\n{json.dumps(requests, ensure_ascii=False, indent=2)}\n"
@@ -6853,29 +6778,6 @@ class MemoryManager:
                     "processed": 0,
                     "request_ids": list(duplicate_request_ids),
                 }
-            # 消费侧闸门：批次按 op 先进先出，可能同时装着可信与不可信会话的条目。
-            # 不合格条目就地终态化（discarded/untrusted_session），可信的照旧处理。
-            batch, ineligible_items = self._partition_queue_batch_by_eligibility(batch)
-            if ineligible_items:
-                discarded_at = self._now_iso()
-                self._drop_request_ids({item.request_id for item in ineligible_items})
-                self._append_terminal_history(
-                    batch=MemoryBatch(op=batch.op, items=ineligible_items),
-                    status="discarded",
-                    op=batch.op,
-                    processed_at=discarded_at,
-                    discard_reason="untrusted_session",
-                )
-                if not list(batch.items or []):
-                    return {
-                        "ok": True,
-                        "status": "discarded",
-                        "discard_reason": "untrusted_session",
-                        "op": batch.op,
-                        "processed": len(ineligible_items),
-                        "request_ids": [item.request_id for item in ineligible_items],
-                        "processed_at": discarded_at,
-                    }
             precheck_error = self._precheck_batch_for_processing(batch)
             if precheck_error:
                 self._drop_request_ids({item.request_id for item in batch.items})
@@ -7501,7 +7403,6 @@ class MemoryManager:
             for row in rows
             if str(row.get("status") or "").strip() == "parked"
             and str(row.get("category") or "").strip() == "provider_error"
-            and not self._failed_record_all_untrusted(row)
         ]
         if not candidates:
             return None

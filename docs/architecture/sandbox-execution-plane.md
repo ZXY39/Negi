@@ -12,8 +12,8 @@
 | 控制面 | 记忆写入、任务与节点、cron、模型配置、治理 | 恒在宿主，由档位判定准入 |
 
 判据只有一个实现：`g3ku/sandbox/policy.py`（档位与工具面）与
-`g3ku/runtime/session_trust.py`（信任级）。前门执行束、曝光层、节点执行道、
-记忆门、QQ 桥都读这两份，不各自再判一次来源。
+`g3ku/runtime/session_trust.py`（信任级）。前门执行束、曝光层、节点执行道与 QQ 桥都读
+这两份，不各自再判一次来源。
 
 ## 档位模型（意图 × 安装态）
 
@@ -110,7 +110,7 @@ pinned contract 同时带 `session_mode` 与受限档的 `session_workspace_dir:
 - **闸门是环境变量 `G3KU_SANDBOX_ENABLE_JAIL`**（默认关）。代码写完不等于可以打开：
   先按下一节的清单在装好后端的机器上验收，再设它。
 
-运维入口：`negi sandbox status|install|uninstall|persona`（`install`/`uninstall` 先打印计划，
+运维入口：`negi sandbox status|install|uninstall`（`install`/`uninstall` 先打印计划，
 必须 `--yes` 或交互确认）；`negi status` 的环境体检包含沙箱安装态、缺失的必需维度，以及
 "第三方会话被放到全权限"的清单。
 
@@ -168,7 +168,6 @@ pinned contract 同时带 `session_mode` 与受限档的 `session_workspace_dir:
 | `GET /api/ceo/sessions/{id}/sandbox` | 返回 `{trust, mode, stored_mode, default_mode, resolved_tier, tier_label, install_state, backend, enforcement, ui_labels, unlock_required, operator_unlock, tasks_allowed, writable_roots, allowed_tools, allowed_tools_customized, default_allowed_tools, fixed_tools, tool_warnings, exec_allowed, exec_requires_governed}` |
 | `PATCH /api/ceo/sessions/{id}/sandbox` | 改意图：`{mode?, unlock_password?, writable_roots?}`；**任何信任级的开/关沙箱**（`mode` 与当前意图不同）都必须带项目解锁口令（`unwrap_with_password` 只读校验），通过后记 `operator_unlock` + 审计；`mode` 与原意图相同或只传 `writable_roots` 时不走口令闸。`writable_roots` 只对 owner 开放（D14：交付目录常在工作区外），third_party 传了直接 403；返回体带 `effective_from: "next_turn"` |
 | `GET/PATCH /api/ceo/sessions/{id}/sandbox/tools` | 受限模式的按会话工具列表。GET 返回生效集合、默认集合、运行时固定项、逐工具 warning 与 `exec_allowed`；PATCH（`{allowed_tools, unlock_password}`）必须带项目解锁口令，写入 session state 并写 `sandbox_tools_changed` 审计；与默认集合完全一致时清掉 override。返回 `effective_from: "next_turn"` |
-| `GET/PUT /api/sandbox/persona` | 第三方会话用的人设正文；空 = 群聊不带人设。与操作员自己的人设 note 分开存放 |
 | `GET /api/sandbox/status` | 全局安装态、后端、逐维度强制力、`ui_labels`；`?refresh=1` 重探 |
 | `POST /api/sandbox/refresh` | 重探并返回新读数 |
 | `GET /api/sandbox/install/plan` | 安装计划（要执行的步骤、是否提权、是否可能重启、卸载命令） |
@@ -180,8 +179,8 @@ pinned contract 同时带 `session_mode` 与受限档的 `session_workspace_dir:
 强制力、安装计划的确认与进度、会话档位切换（含第三方口令闸门）、会话卷文件管理。
 页面视觉复制外壳的 UI kit token（`--ui-*`：canvas / surface / border / brand / 控件档），
 不加载 `org_graph.css`，所以改外壳 token 时要同步 `sandbox.css` 顶部那张表；版式是
-左主列（会话 + 文件）与右副列（运行时 + 群聊人设 + 安装）。右副列的运行时默认展开、
-群聊人设默认折叠，两卡自上而下排列，右列底边与左列对齐。开页即重探一次安装态。
+左主列（会话 + 文件）与右副列（运行时 + 安装）。右副列的运行时默认展开、
+安装卡默认折叠，两卡自上而下排列，右列底边与左列对齐。开页即重探一次安装态。
 入口有两处：侧栏「沙箱」、CEO 权限面板里的**就地开关**——排在「命令行风险拦截设置」上面，
 整行可点、右侧画开关。行标题把开关方向和当前状态写在一起，名字跟安装态走：后端没装成时
 `unrestricted` → 「受限模式已关闭」、`restricted` → 「受限模式已开启」；后端装好时
@@ -204,7 +203,7 @@ pinned contract 同时带 `session_mode` 与受限档的 `session_workspace_dir:
 不可自动安装时只给步骤与「重新检测」，不调用安装接口；可自动安装时勾选确认后后台执行，进度
 留在页内卡片。会话下拉是自绘菜单（原生 `<select>` 的弹层不可控）；额外可写目录收进
 `<details>` 折叠区、owner 才出现且已有值时默认展开。运行时默认展开、卡头不写副标题，
-群聊人设默认折叠；运行时卡内只显示读数与提示，不设第二个安装入口。两卡自上而下排列，
+安装卡默认折叠；运行时卡内只显示读数与提示，不设第二个安装入口。两卡自上而下排列，
 右列底边与左列对齐（差值由卡间距吸收）；运行时的空按钮行与空提示不占布局，避免把右列撑高。改档保存走页内二次确认
 弹窗（影响说明 + 项目解锁口令），只存可写目录时不弹口令框；「保存」按钮只在档位或可写目录
 与已存值不同时出现。
@@ -240,8 +239,8 @@ openid 按 AppID 隔离，每个号各填一条；任一账号里填过的 openi
 
 MCP 网关以固定身份 `negi-mcp` 出现在每条入站消息里，所以「外部接入」页的「当操作员」开关，
 实质是给这颗 token 的白名单增删这个 id：开启要项目解锁口令、收回不需要，两条都写同一个配置项、
-留同一条审计。判据只有一处——`session_trust` 按 sender 与白名单派生信任级，档位、记忆、人设、
-任务四扇门都读它；开关改的是白名单内容，不是判据本身。
+留同一条审计。判据只有一处——`session_trust` 按 sender 与白名单派生信任级，档位、记忆分域、
+任务三扇门都读它；开关改的是白名单内容，不是判据本身。
 
 `/api/v1` 入站契约：`sender{id,name}` 与 `chat_type`（白名单 `group` / `dm` / `guild` /
 `guild_dm`，非法值 400）；二者与 `external_key` 前缀冲突时**取更严的一档**并留 WARNING。
@@ -277,8 +276,8 @@ MCP 网关以固定身份 `negi-mcp` 出现在每条入站消息里，所以「�
 - **任务派发在受限/沙箱档一律拒**：`create_async_task` / `send_message` / `task_*` 即使用工具列表
   勾选也不生效（`SessionPolicy.tool_allowed` 的派发族硬拒）。调度类 `cron` / `schedule_wake`
   不属于派发族，可正常使用。
-- **渠道会话的显式授权**：渠道没有审批面，受限档里通过 `tool_allowed` 的工具不再走
-  `auto_reject`（否则勾选也调不动）；`exec` 由 governed 接管，其他工具按自身守卫执行。
+- **渠道会话的显式授权**：渠道没有审批面，受限档里通过 `tool_allowed` 的工具不进入
+  `auto_reject` 车道（否则勾选也调不动）；`exec` 由 governed 接管，其他工具按自身守卫执行。
 - **两层同时生效**：曝光层（`CeoExposureResolver` / `_frontdoor_callable_tool_names_for_state`）
   收窄可见工具；执行层 `_approval_request_for_tool_calls` 对名单外调用生成打回项。
   收窄必须发生在常驻内置并进来之后，先减后并等于没减。
@@ -323,36 +322,24 @@ MCP 网关以固定身份 `negi-mcp` 出现在每条入站消息里，所以「�
    不要重试"；审批拒绝说明"渠道会话没有审批面"。
 4. `approval_status`：渠道会话 `channel_auto_rejected`，纯策略打回 `policy_auto_rejected`。
 
-## 记忆门
+## 记忆分域
 
-全局长期记忆是工作区级的，注入在每个会话的 index 1，所以群聊内容一旦写进去，
-操作员之后的每一次对话都会被污染。判定同样只有一处：
-`MemoryManager.review_eligibility(session_key)`，生产实例由 bootstrap 注入
-"`is_owner_session`"，CLI 与检查实例不注入（全允许）。判据自身抛错按**不可信**处理。
+长期记忆按会话作用域路由，写到哪里由 `g3ku/runtime/memory_scope_router.py` 决定，
+信任级只决定会话的默认档位：
 
-四个入口，缺一处就是绕过：
+| 会话 | 读 | 写 |
+|---|---|---|
+| 本地 / 操作员 | 本地记忆 + 人设 | 本地 manager |
+| 群聊 | 本地记忆 + 本群块 + 人设 | 仅本群 manager（`memory/groups/<scope>/`） |
+| 第三方私聊 | 本地记忆 + 人设 | 无：`memory_update` 返回可读拒绝（`ok=false`） |
 
-| 入口 | 不合格时的行为 |
-|---|---|
-| `record_turn_for_review` | 不入缓冲，返回 `ignored` / `untrusted_session` |
-| `flush_review_window`（按龄 / token 压缩 / 会话边界三条冲刷道共用一个口） | 清缓冲、不入队，返回 `discarded` |
-| 队列消费（`run_due_batch_once`） | 按 `session_key` 拆批：不合格条目终态化 `discarded`，可信条目照常处理 |
-| `memory_update` 工具 | 直接返回可读拒绝（`ok=false`），不入队 |
-
-入队请求的 `session_key` 就是判据输入，空值按第三方处理（fail-closed）。操作员本地面入队时带
-`internal:` 前缀的 owner 键：记忆管理页的编辑/删除用 `internal:memory_admin`，人设引导页与
-设置页的整理请求用 `internal:persona_memory`；渠道会话的自主复核带真实 `ext:` 键。
-
-另外两条配套：
-
-- **启动清扫**：管理器启动时把 `review_state.json` 里不合格会话的缓冲摘掉——闸门只管新写入，
-  升级前已缓冲的轮次仍会在下一次按龄冲刷时进全局记忆。
-- **成功信号自动重排**排除整批不可信的停车记录；混合批次照常重排，消费侧再拆。
-
-读侧同样按同一判据：第三方会话的长期记忆快照返回空串（不是"读失败"，所以冻结值是稳定的
-空），记忆修订增量与人设增量都不投。第三方会话的人设**只认沙箱页单独配置的那一份**
-（`<数据根>/sandbox/persona.md`，`GET/PUT /api/sandbox/persona`），空即不带人设；操作员自己
-的人设 note 不注入群聊。该配置不依赖安装态（D20）。
+- `record_turn_for_review` / `flush_review_window` / 队列消费都作用在 `view.review_manager` 上；
+  第三方私聊没有管理器，轮次不进复核窗口。
+- 入队请求的 `session_key` 如实记录来源：记忆管理页的编辑/删除用 `internal:memory_admin`，
+  人设引导页与设置页的整理请求用 `internal:persona_memory`，渠道会话的自主复核带真实 `ext:` 键。
+- 群聊看得到本地记忆是产品决定：第三方索要私人信息的拒绝只能靠提示词与工具闸兜底，
+  所以本地记忆里不应放不可对群暴露的凭据类内容。
+- 群 manager 不读人设 note（`persona_enabled=False`）；人设只有 `note_persona` 这一份。
 
 ## 来源标注
 
@@ -377,7 +364,7 @@ MCP 网关以固定身份 `negi-mcp` 出现在每条入站消息里，所以「�
   不能拿 `session_trust` 代替（它对 `web:` / `internal:` 返回 owner）。
 - 渠道会话的 system prompt 追加「渠道会话来源标注」说明块：`Master` 是谁、`第三方 000N` 是编号，
   并明确第三方索要 Master 的私人信息（身份、联系方式、住址、日程、账号凭据、私聊内容、记忆与人设）
-  时必须拒绝。它是提示词约束，底层仍靠记忆门、只读档与工具闸。
+  时必须拒绝。它是提示词约束，底层仍靠记忆分域、只读档与工具闸。
 - 幂等判据是"正文以本次投影渲染出的那一行开头"，不是"以 `[来源]` 开头"：后者由发送者控制，
   第三方正文自己写一行标记就能把真标注整行免掉。
 - 发送者 `id` / `name` 折成一行（`" ".join(split())`）：名字来自桥的请求体，其中的换行不能伪造出

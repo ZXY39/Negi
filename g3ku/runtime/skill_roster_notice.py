@@ -35,6 +35,7 @@ SKILL_ROSTER_NOTICE_LOAD_HINT = 'Use `load_skill_context(skill_id="...")` to rea
 SKILL_ROSTER_CARRIED_HEADING = '### Skills newly readable in this session (still readable; kept across compaction)'
 # 长期记忆增量与 skill 名单共用一条通知消息；两节之间用空行分隔。
 MEMORY_NOTICE_HEADING = '### Long-term memory updates'
+GROUP_MEMORY_NOTICE_HEADING = '### Group memory updates'
 SESSION_MODE_NOTICE_HEADING = '### Session mode'
 # 头部快照与当刻值的差量：两次重印之间唯一的变化出口。
 RUNTIME_CONTRACT_UPDATE_HEADING = '### Runtime contract updates (supersede the pinned snapshot)'
@@ -95,6 +96,7 @@ def deliver_for_scope(
     now: str,
     covered_skill_ids: list[Any] | None = None,
     memory_provider: Any = None,
+    group_memory_provider: Any = None,
     persona_provider: Any = None,
     mode_provider: Any = None,
     contract_sections: dict[str, Any] | None = None,
@@ -107,6 +109,7 @@ def deliver_for_scope(
 
     `memory_provider(since_rev=..., base_rev=...)` 返回 `{rev, text, rebase}`：记忆增量
     与 skill 名单合成同一条消息，游标随消息一起推进（同一次投递、同一份耐久基线）。
+    `group_memory_provider` 同签名、独立游标：群聊专属记忆块的增量单独成节。
 
     `contract_sections` 是运行时合同的当刻值（key → 单行正文），`covered_contract_sections`
     是头部快照里已经覆盖的那几组（初值用它，避免把头部已有的值再宣布一遍）。两组只在值
@@ -144,6 +147,31 @@ def deliver_for_scope(
                 next_cursor['base_rev'] = next_rev
             cursor = next_cursor
     context['memory_cursor'] = cursor
+    group_memory_text = ''
+    group_cursor = dict(context.get('group_memory_cursor') or {})
+    if callable(group_memory_provider):
+        try:
+            group_delta = group_memory_provider(
+                since_rev=int(group_cursor.get('rev') or 0),
+                base_rev=int(group_cursor.get('base_rev') or 0),
+                initialized=bool(group_cursor.get('initialized')),
+            )
+        except Exception:
+            group_delta = None
+        if isinstance(group_delta, dict):
+            next_rev = max(int(group_delta.get('rev') or 0), 0)
+            text = str(group_delta.get('text') or '').strip()
+            if text:
+                group_memory_text = text
+            next_cursor = {
+                'rev': max(next_rev, int(group_cursor.get('rev') or 0)),
+                'base_rev': int(group_cursor.get('base_rev') or 0),
+                'initialized': True,
+            }
+            if group_delta.get('rebase') or group_delta.get('align'):
+                next_cursor['base_rev'] = next_rev
+            group_cursor = next_cursor
+    context['group_memory_cursor'] = group_cursor
     persona_text = ''
     persona_cursor = dict(context.get('persona_cursor') or {})
     if callable(persona_provider):
@@ -184,12 +212,13 @@ def deliver_for_scope(
         now=now,
         covered_sections=covered_contract_sections,
     )
-    if not pending and not memory_text and not persona_text and not mode_text and not changed_contract:
+    if not pending and not memory_text and not group_memory_text and not persona_text and not mode_text and not changed_contract:
         set_notice_context(scope_key, context)
         return None, []
     message = build_notice_message(
         pending,
         memory_text=memory_text,
+        group_memory_text=group_memory_text,
         persona_text=persona_text,
         mode_text=mode_text,
         contract_sections=changed_contract,
@@ -208,6 +237,7 @@ def deliver_for_scope(
                 now=now,
             )
         context['memory_cursor'] = cursor
+        context['group_memory_cursor'] = group_cursor
     set_notice_context(scope_key, context)
     return message, (pending if message is not None else [])
 
@@ -226,6 +256,7 @@ def reset_memory_cursor(scope_key: str) -> None:
     """
     context = notice_context_for(scope_key)
     context['memory_cursor'] = {'rev': 0, 'base_rev': 0, 'initialized': False}
+    context['group_memory_cursor'] = {'rev': 0, 'base_rev': 0, 'initialized': False}
     set_notice_context(scope_key, context)
 
 
@@ -324,12 +355,16 @@ def normalize_skill_roster_notice_context(payload: Any) -> dict[str, Any]:
         if str(item or '').strip()
     ]
     cursor_source = source.get('memory_cursor') if isinstance(source.get('memory_cursor'), dict) else {}
+    group_cursor_source = (
+        source.get('group_memory_cursor') if isinstance(source.get('group_memory_cursor'), dict) else {}
+    )
     persona_source = source.get('persona_cursor') if isinstance(source.get('persona_cursor'), dict) else {}
     mode_source = source.get('mode_cursor') if isinstance(source.get('mode_cursor'), dict) else {}
 
-    def _cursor_value(name: str) -> int:
+    def _cursor_value(name: str, cursor: dict[str, Any] | None = None) -> int:
+        active = cursor if isinstance(cursor, dict) else cursor_source
         try:
-            return max(int(cursor_source.get(name) or 0), 0)
+            return max(int(active.get(name) or 0), 0)
         except (TypeError, ValueError):
             return 0
 
@@ -340,6 +375,11 @@ def normalize_skill_roster_notice_context(payload: Any) -> dict[str, Any]:
             'rev': _cursor_value('rev'),
             'base_rev': _cursor_value('base_rev'),
             'initialized': bool(cursor_source.get('initialized')),
+        },
+        'group_memory_cursor': {
+            'rev': _cursor_value('rev', group_cursor_source),
+            'base_rev': _cursor_value('base_rev', group_cursor_source),
+            'initialized': bool(group_cursor_source.get('initialized')),
         },
         'persona_cursor': {
             'digest': str(persona_source.get('digest') or '')[:64],
@@ -631,14 +671,15 @@ def build_notice_message(
     records: list[Any],
     *,
     memory_text: str = '',
+    group_memory_text: str = '',
     persona_text: str = '',
     mode_text: str = '',
     contract_sections: list[tuple[str, str]] | None = None,
 ) -> dict[str, Any] | None:
     """一次性投递那条消息：role=user，落在本轮历史末尾。
 
-    各节共用一条消息：skill 名单在前，记忆增量居中，人设更新在其后，运行时合同变化在最后
-    （最近处，便于模型把"以最新通知为准"落在下一次判断上）；空节省略。
+    各节共用一条消息：skill 名单在前，记忆增量居中，群聊专属记忆紧随其后，人设更新在其后，
+    运行时合同变化在最后（最近处，便于模型把"以最新通知为准"落在下一次判断上）；空节省略。
     """
     sections: list[str] = []
     skill_text = render_notice_text(records) if records else ''
@@ -647,6 +688,9 @@ def build_notice_message(
     memory_section = str(memory_text or '').strip()
     if memory_section:
         sections.append('\n'.join([MEMORY_NOTICE_HEADING, memory_section]))
+    group_memory_section = str(group_memory_text or '').strip()
+    if group_memory_section:
+        sections.append('\n'.join([GROUP_MEMORY_NOTICE_HEADING, group_memory_section]))
     persona_section = str(persona_text or '').strip()
     if persona_section:
         sections.append(persona_section)

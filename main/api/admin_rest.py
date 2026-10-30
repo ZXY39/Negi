@@ -2469,8 +2469,30 @@ async def delete_sticker_pack(pack: str):
     return {'ok': True, 'deleted': deleted}
 
 
-def _runtime_memory_manager():
+def _memory_normalize_scope(value: Any) -> str:
+    """管理面作用域：空 / local 指本地；其余按群作用域键解析。"""
+    raw = str(value or '').strip()
+    return '' if raw.lower() in {'', 'local', 'default'} else raw
+
+
+def _memory_scope_from_request(request: Request) -> str:
+    return _memory_normalize_scope((request.query_params or {}).get('scope'))
+
+
+def _runtime_memory_manager(scope: str = ''):
     agent = get_agent()
+    normalized_scope = _memory_normalize_scope(scope)
+    if normalized_scope:
+        router = getattr(agent, 'memory_scope_router', None)
+        if router is None:
+            raise HTTPException(status_code=503, detail='memory_scope_unavailable')
+        manager = router.manager_for_scope(normalized_scope)
+        if manager is None:
+            raise HTTPException(
+                status_code=404,
+                detail={'code': 'memory_scope_not_found', 'message': 'unknown memory scope'},
+            )
+        return manager
     manager = getattr(agent, 'memory_manager', None)
     if manager is None:
         service = getattr(agent, 'main_task_service', None)
@@ -2478,6 +2500,16 @@ def _runtime_memory_manager():
     if manager is None:
         raise HTTPException(status_code=503, detail='memory_manager_unavailable')
     return manager
+
+
+@router.get('/memory/scopes')
+async def get_memory_scopes():
+    """记忆作用域清单：本地 + 外部会话注册表里出现过的群。"""
+    agent = get_agent()
+    router = getattr(agent, 'memory_scope_router', None)
+    if router is None:
+        return {'ok': True, 'items': [{'scope': '', 'kind': 'local', 'title': '本地记忆', 'session_key': ''}]}
+    return {'ok': True, 'items': list(router.list_scopes() or [])}
 
 
 def _memory_admin_mutations_enabled() -> bool:
@@ -2681,8 +2713,9 @@ def _audit_read_error(*, code: str, message: str) -> HTTPException:
 async def get_memory_queue(
     limit: int = Query(20, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    scope: str = Query(''),
 ):
-    manager = _runtime_memory_manager()
+    manager = _runtime_memory_manager(scope)
     reader = getattr(manager, 'list_queue_page', None)
     if not callable(reader):
         raise HTTPException(status_code=503, detail='memory_queue_unavailable')
@@ -2705,8 +2738,9 @@ async def get_memory_queue(
 async def get_memory_processed(
     limit: int = Query(20, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    scope: str = Query(''),
 ):
-    manager = _runtime_memory_manager()
+    manager = _runtime_memory_manager(scope)
     reader = getattr(manager, 'list_processed_page', None)
     if not callable(reader):
         raise HTTPException(status_code=503, detail='memory_processed_unavailable')
@@ -2726,8 +2760,8 @@ async def get_memory_processed(
 
 
 @router.get('/memory/current')
-async def get_current_memories():
-    manager = _runtime_memory_manager()
+async def get_current_memories(scope: str = Query('')):
+    manager = _runtime_memory_manager(scope)
     reader = getattr(manager, 'list_current_memories', None)
     if not callable(reader):
         raise HTTPException(status_code=503, detail='memory_current_unavailable')
@@ -2750,12 +2784,12 @@ async def get_current_memories():
 
 
 @router.get('/memory/index-notes')
-async def get_memory_index_notes():
+async def get_memory_index_notes(scope: str = Query('')):
     """归并区分类 note 的只读列表：每分类一条，带常驻行显示的句柄与被归并的条目数。
 
     断链的分类同样返回（`unusable` 为真），让浏览面把问题显示出来而不是静默少一类。
     """
-    manager = _runtime_memory_manager()
+    manager = _runtime_memory_manager(scope)
     reader = getattr(manager, 'list_consolidation_categories', None)
     if not callable(reader):
         raise HTTPException(status_code=503, detail='memory_index_notes_unavailable')
@@ -2783,7 +2817,7 @@ async def update_current_memory(request: Request, payload: dict | None = Body(de
     两条写道就等于两套闸门——内容扫描、容量梯子、带 before/after 的台账、note 所有权
     两轴原先都只长在队列那一侧。现在只剩一扇门，操作员的原话和 CEO 的请求走同一条道。
     """
-    manager = _runtime_memory_manager()
+    manager = _runtime_memory_manager(_memory_scope_from_request(request))
     body = dict(payload or {})
     memory_id = str(body.get('memory_id') or '').strip()
     memory_body = str(body.get('memory_body') or '').strip()
@@ -2880,7 +2914,7 @@ async def uncompress_current_memory(request: Request, payload: dict | None = Bod
 
     它往常驻块里加回字符，顶到硬顶会被镜像校验整笔拒回并回滚，读数原样带回来。
     """
-    manager = _runtime_memory_manager()
+    manager = _runtime_memory_manager(_memory_scope_from_request(request))
     body = dict(payload or {})
     memory_id = str(body.get('memory_id') or '').strip()
     if not memory_id:
@@ -2937,7 +2971,7 @@ async def delete_current_memories(request: Request, payload: dict | None = Body(
     请求里不带笔记：note 文件的回收只认所有权列（`note_ref` / `consolidated_into`），
     在端点里 unlink 会留下指向空文件的指针。
     """
-    manager = _runtime_memory_manager()
+    manager = _runtime_memory_manager(_memory_scope_from_request(request))
     body = dict(payload or {})
     raw_ids = body.get('memory_ids')
     if not isinstance(raw_ids, list):
@@ -3011,8 +3045,8 @@ async def delete_current_memories(request: Request, payload: dict | None = Body(
 
 
 @router.get('/memory/notes/{ref}')
-async def get_memory_note(ref: str):
-    manager = _runtime_memory_manager()
+async def get_memory_note(ref: str, scope: str = Query('')):
+    manager = _runtime_memory_manager(scope)
     reader = getattr(manager, 'load_note', None)
     if not callable(reader):
         reader = getattr(manager, 'read_note', None)
@@ -3086,7 +3120,7 @@ async def get_memory_note(ref: str):
 
 @router.post('/memory/notes/{ref}/update')
 async def update_memory_note(request: Request, ref: str, payload: dict | None = Body(default=None)):
-    manager = _runtime_memory_manager()
+    manager = _runtime_memory_manager(_memory_scope_from_request(request))
     body = dict(payload or {})
     normalized_ref = str(ref or '').strip()
     if not normalized_ref or not MEMORY_NOTE_REF_RE.fullmatch(normalized_ref):
@@ -3158,7 +3192,7 @@ async def retry_memory_queue_head(request: Request, payload: dict | None = Body(
     if not _memory_admin_mutations_enabled():
         raise _memory_admin_mutation_disabled()
 
-    manager = _runtime_memory_manager()
+    manager = _runtime_memory_manager(_memory_scope_from_request(request))
     reason = str((payload or {}).get('reason') or 'manual').strip() or 'manual'
     request_id = str(request.headers.get('x-request-id') or '').strip()
     item = await _retry_memory_queue_head_with_fallback(
@@ -3173,8 +3207,9 @@ async def retry_memory_queue_head(request: Request, payload: dict | None = Body(
 async def get_memory_failed(
     limit: int = Query(20, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    scope: str = Query(''),
 ):
-    manager = _runtime_memory_manager()
+    manager = _runtime_memory_manager(scope)
     reader = getattr(manager, 'list_failed_page', None)
     if not callable(reader):
         raise HTTPException(status_code=503, detail='memory_failed_unavailable')
@@ -3200,6 +3235,7 @@ async def get_memory_failed_payload(
     failed_id: str,
     request_id: str = Query(''),
     start_char: int = Query(1, ge=1),
+    scope: str = Query(''),
 ):
     """失败记忆正文的按需一屏（三面共用 `_memory_payload_window` 的实现）。"""
     return await _memory_payload_window(
@@ -3207,6 +3243,7 @@ async def get_memory_failed_payload(
         key=failed_id,
         request_id=request_id,
         start_char=start_char,
+        scope=scope,
     )
 
 
@@ -3215,6 +3252,7 @@ async def get_memory_processed_payload(
     batch_id: str,
     request_id: str = Query(''),
     start_char: int = Query(1, ge=1),
+    scope: str = Query(''),
 ):
     """已处理批次正文的按需一屏：`request_id` 留空取该批次第一条。"""
     return await _memory_payload_window(
@@ -3222,6 +3260,7 @@ async def get_memory_processed_payload(
         key=batch_id,
         request_id=request_id,
         start_char=start_char,
+        scope=scope,
     )
 
 
@@ -3229,6 +3268,7 @@ async def get_memory_processed_payload(
 async def get_memory_queue_payload(
     request_id: str,
     start_char: int = Query(1, ge=1),
+    scope: str = Query(''),
 ):
     """队列请求正文的按需一屏。"""
     return await _memory_payload_window(
@@ -3236,6 +3276,7 @@ async def get_memory_queue_payload(
         key=request_id,
         request_id='',
         start_char=start_char,
+        scope=scope,
     )
 
 
@@ -3245,6 +3286,7 @@ async def _memory_payload_window(
     key: str,
     request_id: str,
     start_char: int,
+    scope: str = '',
 ) -> dict:
     """三面共用的取全文口。
 
@@ -3252,7 +3294,7 @@ async def _memory_payload_window(
     字符寻址、响应里的 `start_char`/`end_char` 是本次**实际交付**的区间，前端按它推进，
     不按请求参数推进——单条 MB 级载荷就是这样把详情抽屉冻住的。
     """
-    manager = _runtime_memory_manager()
+    manager = _runtime_memory_manager(scope)
     reader = getattr(manager, 'get_payload_window', None)
     if not callable(reader):
         raise HTTPException(status_code=503, detail='memory_payload_unavailable')
@@ -3355,7 +3397,7 @@ async def _mutate_memory_failed_record(
 
 @router.post('/memory/failed/{failed_id}/retry')
 async def retry_memory_failed_record(request: Request, failed_id: str, payload: dict | None = Body(default=None)):
-    manager = _runtime_memory_manager()
+    manager = _runtime_memory_manager(_memory_scope_from_request(request))
     reason = str((payload or {}).get('reason') or 'manual').strip() or 'manual'
     request_id = str(request.headers.get('x-request-id') or '').strip()
     item = await _mutate_memory_failed_record(
@@ -3370,7 +3412,7 @@ async def retry_memory_failed_record(request: Request, failed_id: str, payload: 
 
 @router.post('/memory/failed/{failed_id}/discard')
 async def discard_memory_failed_record(request: Request, failed_id: str, payload: dict | None = Body(default=None)):
-    manager = _runtime_memory_manager()
+    manager = _runtime_memory_manager(_memory_scope_from_request(request))
     reason = str((payload or {}).get('reason') or 'manual').strip() or 'manual'
     request_id = str(request.headers.get('x-request-id') or '').strip()
     item = await _mutate_memory_failed_record(

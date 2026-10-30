@@ -3274,7 +3274,7 @@ def test_admin_memory_queue_and_processed_endpoints_return_paged_payloads(monkey
                 'has_more': True,
             }
 
-    monkeypatch.setattr(admin_rest, '_runtime_memory_manager', lambda: _StubMemoryManager())
+    monkeypatch.setattr(admin_rest, '_runtime_memory_manager', lambda scope='': _StubMemoryManager())
     app = FastAPI()
     app.include_router(admin_rest.router, prefix='/api')
     client = TestClient(app)
@@ -3324,7 +3324,7 @@ def test_memory_admin_mutations_are_disabled_without_feature_flag(monkeypatch):
         pass
 
     monkeypatch.delenv('G3KU_ENABLE_MEMORY_ADMIN_MUTATIONS', raising=False)
-    monkeypatch.setattr(admin_rest, '_runtime_memory_manager', lambda: _StubMemoryManager())
+    monkeypatch.setattr(admin_rest, '_runtime_memory_manager', lambda scope='': _StubMemoryManager())
 
     app = FastAPI()
     app.include_router(admin_rest.router, prefix='/api')
@@ -3366,7 +3366,7 @@ def test_memory_admin_mutation_retry_head_writes_audit_record(tmp_path: Path, mo
 
     manager = _StubMemoryManager()
     monkeypatch.setenv('G3KU_ENABLE_MEMORY_ADMIN_MUTATIONS', '1')
-    monkeypatch.setattr(admin_rest, '_runtime_memory_manager', lambda: manager)
+    monkeypatch.setattr(admin_rest, '_runtime_memory_manager', lambda scope='': manager)
 
     app = FastAPI()
     app.include_router(admin_rest.router, prefix='/api')
@@ -3425,7 +3425,7 @@ def test_memory_admin_mutation_retry_head_rolls_back_when_audit_write_fails(tmp_
 
     manager = _StubMemoryManager()
     monkeypatch.setenv('G3KU_ENABLE_MEMORY_ADMIN_MUTATIONS', '1')
-    monkeypatch.setattr(admin_rest, '_runtime_memory_manager', lambda: manager)
+    monkeypatch.setattr(admin_rest, '_runtime_memory_manager', lambda scope='': manager)
 
     def _raise_audit_error(*args, **kwargs):
         raise OSError('disk full')

@@ -134,7 +134,7 @@
 当前 `negi status` 的记忆区块应按 queued Markdown runtime 理解：
 
 - 它会显示 `Memory Notebook`、`Memory Notes Dir`、`Memory Queue`、`Memory Ops Log`
-- `negi status` 的 `Memory Notebook` 一行只说明笔记文件在不在，不是长期记忆健康指标；健康判断走 `negi memory`，它的命令面是 `current` / `queue` / `flush` / `uncompress` / `doctor` / `reconcile-notes` / `reformat` / `import-legacy` / `cleanup-legacy`
+- `negi status` 的 `Memory Notebook` 一行只说明笔记文件在不在，不是长期记忆健康指标；健康判断走 `negi memory`，它的命令面是 `current` / `queue` / `flush` / `uncompress` / `doctor` / `reconcile-notes` / `reformat` / `import-legacy` / `cleanup-legacy`。除 `import-legacy` / `cleanup-legacy` 外都接受 `--scope <群作用域键>`：缺省查本地记忆，`doctor` 缺省扫描本地与全部群。
 
 ## 3. 关键状态文件与目录
 
@@ -210,7 +210,7 @@
   外部渠道出站消息（主动推送与回合回复）的持久账本（append-only jsonl，msg 记录 + ack tombstone），没有年龄出口：记录 pending 到被某个消费方 ack 或被判不可达为止。排查「渠道端收不到推送或回复」先看这里有无 pending 滞留、以及它属于哪个 `event`；契约、销账方与重放语义详见 `external-agent-api.md`「持久 outbox」。
 
 - `memory/`（安装根）
-  记忆目录；排障入口详见本文档「Memory Queue Workflow」章节。
+  本地记忆目录；`memory/groups/<scope>/memory/` 是每个群各自的记忆根（同样的 mirror / sqlite / notes / index / queue），由 `MemoryScopeRouter` 按需创建。排障入口详见本文档「Memory Queue Workflow」章节。
 
 - `memory/notes/note_persona.md`（安装根，位于 `memory/notes/`）
   人设正文的保留 note。它不是 memories 行，不进常驻字数、压缩、退场与行号；孤儿回收、`reconcile-notes` 与 `doctor_report` 都跳过它。描述为空时可以在设置页直接初始化（runtime 未就绪时直接写这份文件）；非空后设置页只读，后续改动走会话里的记忆 agent（`note_edits` / `note_upserts`），也可以在记忆页的 note 编辑面直接改；没有删除入口。配置包的人设面同时带上这份 note 与 `my_image/`，合同见 `config-and-models.md`「Config Bundle Export And Import」。
@@ -508,14 +508,15 @@ IM 渠道有两条：内置官方 QQ 适配器（`g3ku/qq_official/`，进程内
 
 这三件事都属于会话档位的正常表现，先分清是哪一层，再改配置或判断是不是 bug：
 
-- **工具看不到**（候选与 `tools[]` 里都没有）→ 曝光层按名单收窄，属设计内。要放行必须登记到只读档白名单，
-  不能靠临时放宽设置；契约见 `sandbox-execution-plane.md`「只读档（`readonly`）」。
+- **工具看不到**（候选与 `tools[]` 里都没有）→ 曝光层按名单收窄，属设计内。要放行必须登记到受限档的工具列表，
+  不能靠临时放宽设置；契约见 `sandbox-execution-plane.md`「受限档（`limited`）」。
 - **工具看得到但被拒**（回执是 `blocked by the session trust policy`）→ 执行层打回，同样属设计内；
   回执里的 `channel_auto_rejected` / `policy_auto_rejected` 区分渠道无审批面与纯策略打回。
 - **读文件被拒**（`outside the allowed roots`）→ 读根只有该会话的上传目录与 temp 目录；宿主工作区、
   `.g3ku`、`memory/` 不在其中。要给它文件就走渠道上传，不要改 `restrict_to_workspace`（运行时根优先于它）。
-- **它想记住但被忽略**（`memory_update` 返回 `ok:false`）→ 记忆门按信任级判定；第三方会话的复核缓冲在启动时
-  会被清扫，`memory/ops.jsonl` 里的 `discarded` + `untrusted_session` 就是这条路径。
+- **它想记住但被拒绝**（`memory_update` 返回 `ok:false`）→ 只有第三方私聊会这样：它没有可写记忆域。
+  群聊写入进 `<workspace>/memory/groups/<scope>/`，不会落到本地记忆；三档路由见
+  `sandbox-execution-plane.md`「记忆分域」。
 - **会话信任级与该群不符**（本该是第三方却被当成操作员，或反之）→ 看 `.g3ku/external-sessions/registry.json`
   该条目的 `chat_type` 与 `trust`；`trust` 只降不升，改配置里的白名单不会把既有条目抬回去，需要操作员显式重建会话。
 - 判据与工具面总表见 `sandbox-execution-plane.md`「Debugging Entry Points」。
@@ -732,7 +733,7 @@ For the queued Markdown memory runtime, the first operator checks should be:
 4. Inspect `memory/failed.jsonl` for parked failed batches: each row carries `category` (`provider_error` / `window_refusal` / `protocol` / `agent_fault` / `capacity` / `capacity_noop`), `status` (`parked` / `requeued`), retry counters and a full `error_history`. A non-empty file means some turns of memory are waiting for a success signal or an operator decision. `capacity` is the ladder's last rung: that batch never fit, its payload is held verbatim, and the queue kept flowing. `capacity_noop` is a consolidation that ran clean and declared these rows have no category - discarding it is what re-arms consolidation for that same candidate set, so leaving it parked is a deliberate "stop asking", not a forgotten failure. `agent_fault` is a deterministic write fault (the batch could not be turned into a document at all): retrying it asks the model again rather than replaying the same answer, and it never rejoins the queue on its own; read `last_error_text` for the reason.
 5. Inspect `memory/ops.jsonl` for the latest terminal batch history (`applied`, `precheck_failed`, `operator_discarded`). Note files removed by the orphan sweep appear as `note_reaped` change entries carrying the reason the store stopped owning them (`memory_deleted` / `ref_dropped` / `unreferenced`) — that is the only evidence trail for a note that is not on disk. A user saying "it did not remember" is diagnosed here, not in the worker log: every request that entered the queue ends as exactly one terminal row, so a missing row means the request never reached the queue.
 6. If a processed row exposes `request_artifact_paths`, inspect the referenced files under `.g3ku/memory-requests/` before blaming prompt assembly or the provider adapter.
-7. Use `negi memory current`, `negi memory queue`, and `negi memory flush` when you need a quick operator view without manually opening files.
+7. Use `negi memory current`, `negi memory queue`, and `negi memory flush` when you need a quick operator view without manually opening files. Group memory uses the same commands with `--scope <群作用域键>` (keys and titles come from `GET /api/memory/scopes`), and `negi memory doctor` scans the local scope plus every group under `memory/groups/` by default.
 8. If the queue head is stuck in `processing`, inspect `.g3ku/config.json -> models.roles.memory` before debugging the frontend.
 
 Operator workflow for parked failed batches:

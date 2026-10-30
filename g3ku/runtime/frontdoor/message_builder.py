@@ -41,7 +41,7 @@ from g3ku.runtime.sender_stamp import (
     strip_sender_stamp,
 )
 from g3ku.runtime.session_keys import is_channel_session_key
-from g3ku.runtime.session_trust import is_third_party_session, qq_owner_openids
+from g3ku.runtime.session_trust import qq_owner_openids
 from g3ku.runtime.tool_visibility import (
     CEO_FIXED_BUILTIN_TOOL_NAMES,
 )
@@ -87,17 +87,34 @@ PERSONA_ADOPTION_REASON_ATTR = "_frontdoor_persona_adoption_reason"
 PERSONA_ADOPTION_FIRST_REQUEST = "session_first_request"
 
 
-def _read_memory_snapshot_text(session: Any, memory_manager: Any) -> str | None:
-    """读当份文档快照；None 表示这次读取失败（与"文档确实为空"的 "" 区分开）。"""
-    reader = getattr(memory_manager, "snapshot_text", None)
-    if not callable(reader):
+def _memory_view_for_session(loop: Any, session_key: str) -> Any | None:
+    """按会话取记忆分域视图；没有路由（旧装配/测试替身）时返回 None。
+
+    视图里的群聊管理器是按需懒建的，这里只解析，不触发任何写盘。
+    """
+    router = getattr(loop, 'memory_scope_router', None)
+    if router is None or not str(session_key or '').strip():
         return None
-    session_key = str(getattr(getattr(session, "state", None), "session_key", "") or "")
-    if session_key and is_third_party_session(session_key):
-        # 第三方会话不注入长期记忆：记忆是工作区级全局的，群聊读到它等于把操作员的
-        # 私人偏好播给群里。返回 ""（不是 None）——"文档为空"是稳定事实，不是读失败。
-        return ""
     try:
+        return router.view_for_session(session_key)
+    except Exception:
+        return None
+
+
+def _read_memory_snapshot_text(
+    session: Any,
+    memory_manager: Any,
+    memory_view: Any | None = None,
+) -> str | None:
+    """读当份文档快照；None 表示这次读取失败（与"文档确实为空"的 "" 区分开）。"""
+    try:
+        if memory_view is not None:
+            # 群聊：本地记忆 + 本群专属块；第三方私聊：只读本地。
+            return str(memory_view.snapshot_text() or '').strip()
+        reader = getattr(memory_manager, "snapshot_text", None)
+        if not callable(reader):
+            return None
+        session_key = str(getattr(getattr(session, "state", None), "session_key", "") or "")
         return str(
             reader(
                 session_key=session_key,
@@ -112,13 +129,19 @@ def _read_memory_snapshot_text(session: Any, memory_manager: Any) -> str | None:
         return None
 
 
-def adopt_memory_snapshot(session: Any, *, memory_manager: Any, reason: str) -> str:
+def adopt_memory_snapshot(
+    session: Any,
+    *,
+    memory_manager: Any,
+    reason: str,
+    memory_view: Any | None = None,
+) -> str:
     """采纳点：重读文档并覆盖会话冻结值。
 
     读取失败时保留上一次的冻结值且不盖时间戳——记忆 worker 与这里是并发的，
     一次瞬时读失败不该把整会话钉成空记忆。
     """
-    text = _read_memory_snapshot_text(session, memory_manager)
+    text = _read_memory_snapshot_text(session, memory_manager, memory_view=memory_view)
     if text is None:
         return str(getattr(session, MEMORY_SNAPSHOT_TEXT_ATTR, "") or "")
     setattr(session, MEMORY_SNAPSHOT_TEXT_ATTR, text)
@@ -127,12 +150,22 @@ def adopt_memory_snapshot(session: Any, *, memory_manager: Any, reason: str) -> 
     return text
 
 
-def adopted_memory_snapshot_text(session: Any, *, memory_manager: Any) -> str:
+def adopted_memory_snapshot_text(
+    session: Any,
+    *,
+    memory_manager: Any,
+    memory_view: Any | None = None,
+) -> str:
     """注入侧唯一取数口：本会话已采纳过就只读冻结值，否则先采纳一次。"""
     frozen = getattr(session, MEMORY_SNAPSHOT_TEXT_ATTR, None)
     if isinstance(frozen, str):
         return frozen
-    return adopt_memory_snapshot(session, memory_manager=memory_manager, reason=MEMORY_SNAPSHOT_ADOPTION_FIRST_REQUEST)
+    return adopt_memory_snapshot(
+        session,
+        memory_manager=memory_manager,
+        reason=MEMORY_SNAPSHOT_ADOPTION_FIRST_REQUEST,
+        memory_view=memory_view,
+    )
 
 
 def memory_snapshot_provenance(session: Any) -> dict[str, Any]:
@@ -161,30 +194,25 @@ def _read_persona_text(memory_manager: Any) -> str | None:
         return None
 
 
-def adopt_persona(session: Any, *, memory_manager: Any, reason: str) -> str:
+def adopt_persona(
+    session: Any,
+    *,
+    memory_manager: Any,
+    reason: str,
+    memory_view: Any | None = None,
+) -> str:
     """Persona adoption point: re-read the reserved note and freeze its bytes.
 
     A transient read failure keeps the previous frozen value instead of pinning the
     session to "no persona": the memory worker may be rewriting the note at this moment.
 
-    第三方会话默认不带人设（D7）：人设是操作员写给自己助手的语气设定，群聊里注入
-    等于替群友"认领"一个身份。配置入口在沙箱页面，未安装沙箱时也可用（D20）。
+    人设是单一主 agent 的设定：所有会话（含群聊/第三方私聊）读同一份 local 人设。
     """
-    session_key = str(getattr(getattr(session, "state", None), "session_key", "") or "")
-    if session_key and is_third_party_session(session_key):
-        # 第三方会话不继承操作员的人设 note；只认沙箱页里单独配置的那份（空 = 不带人设）。
-        try:
-            from g3ku.sandbox.state import sandbox_persona_text
-
-            text = sandbox_persona_text()
-        except Exception:  # noqa: BLE001 - 读不到按空处理
-            text = ""
-        setattr(session, PERSONA_TEXT_ATTR, text)
-        setattr(session, PERSONA_DIGEST_ATTR, persona_digest(text))
-        setattr(session, PERSONA_ADOPTED_AT_ATTR, datetime.now().astimezone().isoformat())
-        setattr(session, PERSONA_ADOPTION_REASON_ATTR, "third_party_sandbox_persona")
-        return text
-    text = _read_persona_text(memory_manager)
+    text = (
+        str(memory_view.persona_text() or '').strip()
+        if memory_view is not None
+        else _read_persona_text(memory_manager)
+    )
     if text is None:
         return str(getattr(session, PERSONA_TEXT_ATTR, "") or "")
     setattr(session, PERSONA_TEXT_ATTR, text)
@@ -194,11 +222,21 @@ def adopt_persona(session: Any, *, memory_manager: Any, reason: str) -> str:
     return text
 
 
-def adopted_persona_text(session: Any, *, memory_manager: Any) -> str:
+def adopted_persona_text(
+    session: Any,
+    *,
+    memory_manager: Any,
+    memory_view: Any | None = None,
+) -> str:
     frozen = getattr(session, PERSONA_TEXT_ATTR, None)
     if isinstance(frozen, str):
         return frozen
-    return adopt_persona(session, memory_manager=memory_manager, reason=PERSONA_ADOPTION_FIRST_REQUEST)
+    return adopt_persona(
+        session,
+        memory_manager=memory_manager,
+        reason=PERSONA_ADOPTION_FIRST_REQUEST,
+        memory_view=memory_view,
+    )
 
 
 def persona_provenance(session: Any) -> dict[str, Any]:
@@ -1319,13 +1357,14 @@ class CeoMessageBuilder:
             if str(name or '').strip()
         }
         turn_overlay_parts: list[str] = []
+        memory_view = _memory_view_for_session(self._loop, session_key)
         memory_snapshot_text = (
-            adopted_memory_snapshot_text(session, memory_manager=memory_manager)
+            adopted_memory_snapshot_text(session, memory_manager=memory_manager, memory_view=memory_view)
             if memory_manager is not None
             else ""
         )
         persona_text = (
-            adopted_persona_text(session, memory_manager=memory_manager)
+            adopted_persona_text(session, memory_manager=memory_manager, memory_view=memory_view)
             if memory_manager is not None
             else ""
         )

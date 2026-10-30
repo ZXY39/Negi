@@ -58,8 +58,6 @@ from g3ku.sandbox.state import (
     note_operator_unlock,
     operator_unlock_note,
     refresh_install_state,
-    sandbox_persona_text,
-    set_sandbox_persona_text,
     set_session_allowed_tools,
     set_session_mode,
     set_writable_roots,
@@ -496,27 +494,6 @@ async def post_sandbox_uninstall(payload: dict = Body(...)):
     if detail == "nothing_we_installed":
         return {"ok": False, **result}
     raise HTTPException(status_code=409, detail=detail)
-
-
-@router.get("/sandbox/persona")
-async def get_sandbox_persona():
-    return {"ok": True, "item": {"persona": sandbox_persona_text()}}
-
-
-@router.put("/sandbox/persona")
-async def put_sandbox_persona(payload: dict = Body(...)):
-    text = set_sandbox_persona_text(payload.get("persona"))
-    try:
-        emit_audit_event(
-            "sandbox",
-            "info",
-            "persona_updated",
-            "third-party persona updated",
-            detail={"chars": len(text)},
-        )
-    except Exception:  # noqa: BLE001
-        pass
-    return {"ok": True, "item": {"persona": text}}
 
 
 @router.post("/sandbox/refresh")

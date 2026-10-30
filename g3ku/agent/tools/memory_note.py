@@ -44,5 +44,20 @@ class MemoryNoteTool(Tool):
         return errors
 
     async def execute(self, ref: str, **kwargs: Any) -> str:
-        _ = kwargs
+        runtime_raw = kwargs.pop("__g3ku_runtime", None)
+        runtime = runtime_raw if isinstance(runtime_raw, dict) else {}
+        view = runtime.get("memory_view")
+        session_key = str(runtime.get("session_key") or "")
+        if view is None and session_key:
+            try:
+                from g3ku.runtime.memory_scope_router import active_memory_scope_router
+
+                router = active_memory_scope_router()
+                if router is not None:
+                    view = router.view_for_session(session_key)
+            except Exception:
+                view = None
+        if view is not None and callable(getattr(view, "read_note", None)):
+            # 群聊：先群块、再本地；本地/第三方私聊：本地。引用跨域也读得到。
+            return view.read_note(str(ref or "").strip())
         return self._manager.load_note(str(ref or "").strip())

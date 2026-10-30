@@ -103,12 +103,12 @@ def test_memory_page_note_preview_edit_is_confirmed_and_has_no_delete() -> None:
     assert "<textarea" in preview_fragment
     save_fragment = _fragment(app_js, "function requestMemoryNoteSave()", "function closeMemoryNotePreview(")
     assert "openConfirm({" in save_fragment
-    assert 'ApiClient.updateMemoryNote(ref, body, "manual-ui")' in app_js
+    assert 'ApiClient.updateMemoryNote(ref, body, "manual-ui", memoryScopeQuery())' in app_js
     assert "updateMemoryNote" in api_client_js
     assert "@router.post('/memory/notes/{ref}/update')" in admin_rest_py
     update_route = _admin_route_fragment(admin_rest_py, "@router.post('/memory/notes/{ref}/update')")
     assert "_append_memory_admin_audit_event(" in update_route
-    assert "ApiClient.getMemoryNote(noteRef)" in app_js
+    assert "ApiClient.getMemoryNote(noteRef, memoryScopeQuery())" in app_js
 
     # note 面不提供任何删除入口
     assert "data-memory-note-delete" not in app_js
@@ -170,7 +170,7 @@ def test_memory_page_note_preview_admin_api_and_client_contract(monkeypatch: pyt
     admin_rest_py = _source("main/api/admin_rest.py")
     route_fragment = _admin_route_fragment(admin_rest_py, "@router.get('/memory/notes/{ref}')")
 
-    assert "async getMemoryNote(ref)" in api_client_js
+    assert 'async getMemoryNote(ref, scope = "")' in api_client_js
     assert "`/api/memory/notes/${encodeURIComponent(ref)}`" in api_client_js
     assert "memory_note_not_found" in api_client_js
     assert "未找到对应的记忆 note" in api_client_js
@@ -198,7 +198,7 @@ def test_memory_page_note_preview_admin_api_and_client_contract(monkeypatch: pyt
             raise AssertionError("get_memory_note should prefer load_note over read_note when available")
 
     stub_manager = _StubMemoryManager()
-    monkeypatch.setattr(admin_rest, "_runtime_memory_manager", lambda: stub_manager)
+    monkeypatch.setattr(admin_rest, "_runtime_memory_manager", lambda scope="": stub_manager)
     app = FastAPI()
     app.include_router(admin_rest.router, prefix="/api")
     client = TestClient(app)
@@ -243,7 +243,7 @@ def test_memory_note_read_endpoint_admits_the_resident_handle(monkeypatch: pytes
             return "# note_ports 端口正文"
 
     stub_manager = _StubMemoryManager()
-    monkeypatch.setattr(admin_rest, "_runtime_memory_manager", lambda: stub_manager)
+    monkeypatch.setattr(admin_rest, "_runtime_memory_manager", lambda scope="": stub_manager)
     app = FastAPI()
     app.include_router(admin_rest.router, prefix="/api")
     client = TestClient(app)
@@ -274,7 +274,7 @@ def test_consolidation_note_browser_wires_the_read_only_lane() -> None:
     assert '<button id="memory-index-notes-btn" class="toolbar-btn ghost" type="button">归并记忆</button>' in html
     assert 'memoryIndexNotes: document.getElementById("memory-index-notes-btn")' in app_js
     assert 'U.memoryIndexNotes?.addEventListener("click", () => void openMemoryNoteBrowser());' in app_js
-    assert '"memory:index-notes"' in api_js
+    assert "`memory:index-notes:${scopeKey(scope)}`" in api_js
     assert '"/api/memory/index-notes"' in api_js
 
     # 列表与正文共用一个窗：index/note 两种形态在同一个 DOM 槽位里换，不叠第二层抽屉

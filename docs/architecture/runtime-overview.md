@@ -517,6 +517,7 @@ main/ 侧所有持久化写在磁盘满（ENOSPC / SQLITE_FULL）条件下的行
 - `memory/review_state.json` 是普通复核窗口的按会话缓冲元数据：缓冲轮次载荷与已上报工具记录 keys；不是已提交的用户记忆。
 - `.g3ku/memory-requests/` 存暴露请求元数据的 memory 请求 artifact；processed 行可以指向这些路径供后续取证。
 - `memory/notes/note_persona.md` 是人设正文的唯一载体。它由保留名归属，不是 memories 行，因此不进常驻字数、压缩候选、退场判据与行号定义域；孤儿回收、`reconcile-notes` 与 `doctor_report` 都不把它当孤儿，普通记忆的 `note_ref` 不能指向它，归并环节也不能用同名分类 note 占它。记忆 agent 只看到一行 `人设描述:note <句柄>`，正文按需 `memory_read_note`。
+- `memory/groups/<scope>/` 是群聊记忆根：每个群一个独立 `MemoryManager`（sqlite、`MEMORY.md`、notes、index、queue/review_state 与 worker），布局与本地一致，并由 `MemoryScopeRouter` 按需创建、LRU 缓存。群 manager 不读人设 note。
 
 维护边界：
 
@@ -525,7 +526,7 @@ main/ 侧所有持久化写在磁盘满（ENOSPC / SQLITE_FULL）条件下的行
 
 运行时合同：
 
-- `## 长期记忆` 快照注入在稳定前缀的固定位置（`system` 之后、全部历史之前，即 message index 1），所以它的字节变化等价于把身后整段历史重铺一遍。取数因此是**会话级冻结**：`adopted_memory_snapshot_text()` 在会话首次 prompt 组装时读一次 `MEMORY.md`，把这份投影**逐字节原样**钉在会话状态上（前门不二次渲染记忆行：块里既没有 id 也没有来源头要剥，任何再派生都会在 index 1 造出镜像本身没有的字节；文档末尾的归并区同样原样带过，否则归并 agent 改一次分类 note 首行就会在会话中途改动 index 1 的字节；内部 memory agent 看的是同一份形状），之后所有 provider 往返——包括同一轮内的多次工具往返——复用同一份字节。冻结值在**压缩边界更新**：内联 `token_compression` 轮末与手动压缩各更新一次（两处都先冲刷复核窗口并落盘记忆批次，再读盘；手动压缩跑在回合外，单独接一次）。非压缩跳不重印也不读快照；空闲不是边界。压缩之后的变化仍由修订流增量投递（下一条）。读盘瞬时失败（记忆 worker 正在重写 `MEMORY.md`）保留上一份冻结值且不盖采纳时间戳，一次失败不得把整会话钉成空记忆。不同会话因此可以呈现文档的不同版本——这是规则本身；会话内的新鲜度由增量车道保证，不靠每跳改写基座。缓存口径与 artifact 判读见 `context-and-cache-troubleshooting.md`「长期记忆的头部基座与增量」。
+- `## 长期记忆` 快照注入在稳定前缀的固定位置（`system` 之后、全部历史之前，即 message index 1），所以它的字节变化等价于把身后整段历史重铺一遍。取数因此是**会话级冻结**：`adopted_memory_snapshot_text()` 在会话首次 prompt 组装时读一次 `MEMORY.md`，把这份投影**逐字节原样**钉在会话状态上（前门不二次渲染记忆行：块里既没有 id 也没有来源头要剥，任何再派生都会在 index 1 造出镜像本身没有的字节；文档末尾的归并区同样原样带过，否则归并 agent 改一次分类 note 首行就会在会话中途改动 index 1 的字节；内部 memory agent 看的是同一份形状），之后所有 provider 往返——包括同一轮内的多次工具往返——复用同一份字节。冻结值在**压缩边界更新**：内联 `token_compression` 轮末与手动压缩各更新一次（两处都先冲刷复核窗口并落盘记忆批次，再读盘；手动压缩跑在回合外，单独接一次）。非压缩跳不重印也不读快照；空闲不是边界。压缩之后的变化仍由修订流增量投递（下一条）。读盘瞬时失败（记忆 worker 正在重写 `MEMORY.md`）保留上一份冻结值且不盖采纳时间戳，一次失败不得把整会话钉成空记忆。不同会话因此可以呈现文档的不同版本——这是规则本身；会话内的新鲜度由增量车道保证，不靠每跳改写基座。群会话冻结的是本地 + 群块的组合投影（`MemoryScopeView.snapshot_text()`），群块变化由 `group_memory_cursor` 增量投递。缓存口径与 artifact 判读见 `context-and-cache-troubleshooting.md`「长期记忆的头部基座与增量」。
 - `memory_update(content=...)` 只向单一记忆队列入队，不内联修改已提交记忆；CEO 侧的记住、修改、忘记都从这一个入口进，载荷是自然语言，不传记忆 id——把它解析成具体 id 是内部 memory agent 负责的事。**一次调用交任意数量的要求**：实盘曾把 38 条记忆要求发成 38 次调用（同一轮并行工具调用），38 条队列行边到边落地，被记忆 worker 的 1 秒节拍切成两批，内部 agent 因此多跑一轮并重复付一次常驻记忆块；这条约束钉在工具的函数级 `description` 上（字段级 description 在 provider 边界会被剥掉，写在那里等于没写），由 `tests/resources/test_memory_update_contract.py` 钉住它能穿过 `_provider_visible_tool_contract`。
 - 记忆提交的**可见变化**另有一条按修订消费的车道：每次改变居民行渲染结果的提交在记忆库里写一条 `memory_revisions`（`added_ids` / `changed_ids` / `retired_ids` 与渲染后的行；退场行渲染成 `Deleted memories:` 一节），noop 与只动计数器的提交不写。会话台账记 `memory_cursor{rev, base_rev, initialized}`，在唯一投递点（`_frontdoor_send_preflight_snapshot` 的 `_apply_frontdoor_skill_roster_notice`）把 `rev` 之后的增量与新增可读 skill 合成同一条 `[RUNTIME_NOTICE]` 尾部消息。首次投递只把游标对齐到当前修订——index 1 的基座就是那份文档；压缩边界更新基座后游标同样对齐到最新。增量不按大小或归并类型改投整篇：删除与归并退场都以 `Deleted memories:` 行走增量，整份文档只在头部基座的初始化与压缩更新时出现。游标随提示一起进入请求体基线；提示行被压缩裁掉后，那些增量不重投（压缩边界见本文「Frontdoor Context Compression」）。
 - `RuntimeAgentSession` 把自主复核窗口缓冲在 `memory/review_state.json`，并在四个时点自动入队直接 `write` 批次：配置的普通轮窗口阈值（默认 5 轮）、缓冲轮次躺够 1 小时的按龄冲刷（`stale_buffer`）、token 压缩冲刷（`token_compression`）、会话结束/删除冲刷（`session_boundary`）。按龄冲刷存在是因为攒不满轮次窗口是常态：一两轮就停的会话（渠道会话尤其如此）永远凑不到 5 轮，缓冲里的用户消息、工具记录与最终回复就一条也不会送达内部 memory agent。扫描器只挂在记忆 worker 的节拍上（每 60 秒看一次、每次最多倒 2 个会话、按最老优先、阈值与节拍都是常数），并且自己抢记忆 worker lease：web 与 worker 两个进程各有一个 1 秒 tick，lease 保证同一个会话不被两个进程各倒一次；它只入队，所以也不会把一次内部 memory agent 往返顶到用户请求那一跳上（这正是旧空闲边界那一档不冲刷复核窗口的原因；该边界现已移除，结论不变）。终态台账用 `trigger_sources` 记这一批是从哪个时点倒出来的，"靠龄倒了几次"数这个字段，不靠日志。token 压缩冲刷只看“当轮内联压缩真实发生”这一事件信号：会话级标志在回合内任一请求压缩 applied 时置位、轮首清零，不读跨轮残留的 `frontdoor_history_shrink_reason`——后者是“baseline 为何比上一轮短”的解释（合同见 `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」），不是当轮压缩事件，用它判冲刷会把上一轮的压缩算到本轮头上。不支持的冲刷来源必须保持缓冲窗口原样，不得制造队列行。复核载荷与用户在界面看到的可见面一致：用户轮记录用户消息与助手回复；心跳/cron 内部轮只记录可见的助手回复与工具记录，隐藏事件束提示词不进载荷；调用 `silent` 的静默轮不入队（见「静默回复（`silent` 工具）」）。`assistant_text` 是**出站投影**而不是模型原文：表情包标记换成 `[已发表情包：<包>/<分类>/<序号>]`，序号一律是**实际发出那一张**的注册编号——模型写索引形式时就是它点名的 N，写类别形式时由运行时从发出文件的文件名补出（`registry.index_of`）。用户对屏幕上那一张图表态，只记到分类的话这条偏好在长期记忆里解不出是哪张图；编号 mint 后永不复用，所以这个键长期可反查。解析不到或整行语法不成立的行记 `[表情包未发出：…]`（键保持模型原写的形状）并发一条 `sticker_send_failed` 审计事件（`g3ku/stickers/marker.py` 的 `StickerReply.memory_text`）。理由与"心跳轮不投隐藏提示词"是同一条：摘要模型不该读到传输细节，更不该把一张没发出去的图记成发过。每轮载荷有四块：`[turn_id]`、`user_messages:`、`tool_records:` 与 `assistant_text:`，其中 `tool_records:` 只在本次仍有未见过的记录时才出现。`tool_records` 是本轮 `turns[].tools[]` 的扁平 JSON 数组，每条带 `key` / `tool_call_id` / `turn_id` / `seq` / `mid_text` / `tool_name` / `status` / `is_error` / `arguments_text` / `output_text`，出参只此一份——`output_preview_text` 是节点账本那条车道的列名，复核记录不复制它：复制等于把同一段正文写两遍，每条原子的尺寸翻倍，更容易落到"拆到原子也装不下"那一档。尺寸不做裁剪：记录时全量捕获、不设每轮条数上限，失败与成功的调用一起带（防错规则要的是"失败前试了什么"），超容量交拆片与发送闸门处置。工具记录按会话已上报的 `reported_tool_keys` 跨轮去重（上限 5000；空 `tool_call_id` 用内容指纹），**去重发生在渲染之前**：`record_turn_for_review` 把过滤后的记录集交给 `_review_turn_payload`，正文与游标因此同源——只推进游标而把整轮原始 `turns` 交给渲染器，等于同一条记录在它出现的每一轮都重送一次，队列里看不出重复，只有内部 memory agent 的批次字节会涨。`review_state.json` 只维护 `pending_turns` 与 `reported_tool_keys`：冲刷只清缓冲轮次、保留 `reported_tool_keys`（普通窗口、token 压缩冲刷与按龄冲刷）；会话结束/删除冲刷在入队后连同该会话复核状态一并清除。摘除轮次按轮次指纹（`turn_id` + 载荷文本）逐条删，写回是"把本会话的状态盖到刚读到的最新副本上"（`_merge_review_session_state` / `_clear_review_turns` / `_pop_review_session_state`，读-改-写在同一把锁内完成）：整份按内存副本覆盖会把另一个会话刚 append 的那一轮抹掉，而那条轮次从此哪儿也不会再去——`_io_lock` 只在进程内互斥，进程之间的互斥靠记忆 worker lease。
@@ -572,15 +573,29 @@ main/ 侧所有持久化写在磁盘满（ENOSPC / SQLITE_FULL）条件下的行
 
 队列卡住、重复写入、调试顺序、CLI 与 reset 等 operator 工作流详见 `operations-and-maintenance.md`「Memory Queue Workflow」。
 
-### 复核资格与注入范围（会话信任）
+### 记忆分域（本地 / 群聊 / 第三方私聊）
 
-长期记忆是**工作区级全局**的，注入在每个会话的 message index 1，所以"谁能写"与"谁能读"都按会话信任级判定，
-契约在 `sandbox-execution-plane.md`「记忆门」：
+长期记忆按**作用域**路由，路由层是 `g3ku/runtime/memory_scope_router.py` 的
+`MemoryScopeRouter` / `MemoryScopeView`，每个会话一个视图：
 
-- 写侧四个入口（`record_turn_for_review` / `flush_review_window` / 队列消费 / `memory_update` 工具）
-  共用 `MemoryManager.review_eligibility`，判据抛错按不可信处理；管理器启动时清扫不合格会话的既有缓冲。
-- 读侧对第三方会话返回空快照（稳定空值，不是读失败），记忆增量与人设增量都不投递。
-- 判据本身（`is_owner_session`）由 `g3ku/runtime/bootstrap_bridge.py` 注入；CLI 与检查实例不注入，等价于全允许（inspection 的只读视图不受影响）。
+- 本地会话（`web:` / `internal:` / CLI）：读写工作区本地 manager。
+- 群聊会话（外部会话注册表 `chat_type` 为 `group` / `guild`）：读本地 + 本群；写只进本群
+  manager，根在 `<workspace>/memory/groups/<safe-scope>-<hash>/`（配置深拷贝，路径相对群根，
+  因此每个群有自己的 sqlite、`MEMORY.md`、notes、index、queue 与 worker）。模型可见块 =
+  本地记忆 + `## 群聊长期记忆` 一节；人设仍取本地那一份。
+- 第三方私聊：读本地记忆与人设，**没有可写管理器**；`memory_update` 返回可读拒绝，
+  复核窗口不接收它的轮次。
+- 群 manager 以 `persona_enabled=False` 创建：`persona_text()` 恒为空、`set_persona()` 拒绝，
+  记忆 agent 提示词改为"本记忆域是群聊记忆，不含人设"，并要求不把第三方发送者的话写成
+  Master 的个人偏好。
+- manager 实例按作用域 LRU 缓存（上限 32，逐出即 `close()`）；管理面 `list_scopes()` 只读
+  注册表，不创建实例。
+- 通知车道有两条游标：`memory_cursor`（本地增量，投给所有能读本地记忆的会话）与
+  `group_memory_cursor`（群增量，只投给该群，渲染为 `### Group memory updates`）；
+  压缩跳两者同时归零。人设增量对所有会话同源投递。
+- 会话复核、冲刷与 `run_due_batch_once` 都走 `view.review_manager`；写侧没有额外的信任门，
+  写到哪里由作用域决定。人设只有 `memory/notes/note_persona.md` 这一份，没有按会话隔离的
+  第三方人设。
 
 ## 人设块、人设 note 与身份
 

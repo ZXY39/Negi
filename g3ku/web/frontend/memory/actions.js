@@ -7,7 +7,7 @@ async function runMemoryNoteSave(ref, body) {
     preview.saving = true;
     renderMemoryNotePreview();
     try {
-        await ApiClient.updateMemoryNote(ref, body, "manual-ui");
+        await ApiClient.updateMemoryNote(ref, body, "manual-ui", memoryScopeQuery());
         preview.editMode = false;
         preview.body = body;
         preview.editBody = "";
@@ -25,7 +25,7 @@ async function runMemoryBrowserUncompress(memoryId) {
     S.memoryBrowser.actionBusy = `uncompress:${id}`;
     renderMemoryBrowserList();
     try {
-        const result = await ApiClient.uncompressCurrentMemory(id);
+        const result = await ApiClient.uncompressCurrentMemory(id, "manual-ui", memoryScopeQuery());
         const item = result?.item || {};
         showToast({
             title: item.changed ? "已回暖" : "这条本来就是全文",
@@ -55,7 +55,7 @@ async function runMemoryBrowserDelete(memoryIds) {
     S.memoryBrowser.actionBusy = `delete:${ids.length}`;
     renderMemoryBrowserList();
     try {
-        const result = await ApiClient.deleteCurrentMemories(ids, "manual-ui");
+        const result = await ApiClient.deleteCurrentMemories(ids, "manual-ui", memoryScopeQuery());
         const status = String(result?.item?.status || "").trim();
         showToast({
             title: status === "queued" ? "已提交删除" : "删除请求未被受理",
@@ -95,6 +95,7 @@ async function runMemoryBrowserEditSave(memoryId, body, minimal) {
             memoryBody: body.trim(),
             minimalMemory: minimalChanged ? minimal.trim() : null,
             reason: "manual-ui",
+            scope: memoryScopeQuery(),
         });
         showToast({ title: "已提交修改", text: "修改请求已交给记忆 agent 处理，落库结果以「已处理批次」的台账为准。", kind: "success" });
         S.memoryBrowser.editDialog = { open: false, memoryId: "", body: "", minimal: "", busy: false };
@@ -124,9 +125,9 @@ async function runMemoryFailedAction(action, failedId) {
     });
     try {
         if (isRetry) {
-            await ApiClient.retryMemoryFailed(target, "manual-ui");
+            await ApiClient.retryMemoryFailed(target, "manual-ui", memoryScopeQuery());
         } else {
-            await ApiClient.discardMemoryFailed(target, "manual-ui");
+            await ApiClient.discardMemoryFailed(target, "manual-ui", memoryScopeQuery());
         }
         closeMemoryDetailPreview();
         if (isRetry) {

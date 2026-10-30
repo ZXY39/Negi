@@ -612,7 +612,7 @@ def test_approval_gate_auto_rejects_third_party_tools(registry) -> None:
     assert result["pass_through_tool_call_ids"] == ["c2"]
 
 
-# -- 记忆门 -----------------------------------------------------------------
+# -- 记忆分域 -----------------------------------------------------------------
 
 
 def _memory_cfg():
@@ -640,107 +640,58 @@ def _memory_module():
 
 
 @pytest.mark.asyncio
-async def test_memory_gate_ignores_untrusted_session(tmp_path: Path) -> None:
+async def test_memory_review_accepts_group_sessions_without_a_trust_gate(tmp_path: Path) -> None:
+    """记忆门已删除：群会话轮次照常进复核窗口，写入由分域路由负责（群写群块）。"""
     module = _memory_module()
-    manager = module.MemoryManager(
-        tmp_path,
-        _memory_cfg(),
-        review_eligibility=lambda key: key.startswith("web:"),
-    )
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
         result = await manager.record_turn_for_review(
             session_key="ext:qq-official-1:abc",
             turn_id="t1",
-            user_messages=["记住我喜欢 X"],
+            user_messages=["记住这个群喜欢简短回答"],
             assistant_text="好的",
         )
-        assert result["status"] == "ignored"
-        assert result["reason"] == "untrusted_session"
+        assert result["status"] == "buffered"
         state = json.loads((tmp_path / "memory" / "review_state.json").read_text(encoding="utf-8"))
-        assert "ext:qq-official-1:abc" not in (state.get("sessions") or {})
-        assert not (tmp_path / "memory" / "queue.jsonl").read_text(encoding="utf-8").strip()
-
-        # 合格会话照常入缓冲
-        ok = await manager.record_turn_for_review(
-            session_key="web:ceo-1",
-            turn_id="t2",
-            user_messages=["记住我喜欢 Y"],
-            assistant_text="好的",
+        assert "ext:qq-official-1:abc" in (state.get("sessions") or {})
+        flushed = await manager.flush_review_window(
+            session_key="ext:qq-official-1:abc", trigger_source="session_boundary"
         )
-        assert ok["status"] == "buffered"
+        assert flushed["status"] == "queued"
+        assert not hasattr(manager, "review_eligibility")
     finally:
         manager.close()
 
 
 @pytest.mark.asyncio
-async def test_memory_gate_flush_discards_and_clears_buffer(tmp_path: Path) -> None:
+async def test_group_scope_manager_never_reads_or_writes_the_persona_note(tmp_path: Path) -> None:
     module = _memory_module()
     manager = module.MemoryManager(
-        tmp_path,
+        tmp_path / "memory" / "groups" / "grp-1",
         _memory_cfg(),
-        review_eligibility=lambda key: True,
+        scope_label="grp-1",
+        persona_enabled=False,
     )
     try:
-        # 先以"合格"身份缓冲一轮，再模拟信任降级后的冲刷
-        await manager.record_turn_for_review(
-            session_key="ext:late-third-party",
-            turn_id="t1",
-            user_messages=["先记住这个"],
-            assistant_text="好的",
-        )
-        manager._review_eligibility = lambda key: False
-        result = await manager.flush_review_window(
-            session_key="ext:late-third-party", trigger_source="session_boundary"
-        )
-        assert result["status"] == "discarded"
-        assert result["reason"] == "untrusted_session"
-        state = json.loads((tmp_path / "memory" / "review_state.json").read_text(encoding="utf-8"))
-        assert "ext:late-third-party" not in (state.get("sessions") or {})
-        assert not (tmp_path / "memory" / "queue.jsonl").read_text(encoding="utf-8").strip()
+        assert manager.persona_text() == ""
+        with pytest.raises(ValueError):
+            manager.set_persona("群里的人设")
     finally:
         manager.close()
 
 
-def test_memory_queue_partition_splits_by_trust(tmp_path: Path) -> None:
+def test_memory_queue_no_longer_partitions_by_trust(tmp_path: Path) -> None:
     module = _memory_module()
-    manager = module.MemoryManager(
-        tmp_path,
-        _memory_cfg(),
-        review_eligibility=lambda key: key.startswith("web:"),
-    )
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
-        good = module.MemoryQueueRequest(
-            op="write",
-            decision_source="self",
-            payload_text="ok",
-            created_at="2026-10-27T00:00:00+08:00",
-            request_id="r1",
-            session_key="web:ceo-1",
-        )
-        bad = module.MemoryQueueRequest(
-            op="write",
-            decision_source="self",
-            payload_text="poison",
-            created_at="2026-10-27T00:00:01+08:00",
-            request_id="r2",
-            session_key="ext:qq-official-1:abc",
-        )
-        batch, dropped = manager._partition_queue_batch_by_eligibility(
-            module.MemoryBatch(op="write", items=[good, bad])
-        )
-        assert [item.request_id for item in batch.items] == ["r1"]
-        assert [item.request_id for item in dropped] == ["r2"]
-        assert manager._failed_record_all_untrusted(
-            {"items": [{"session_key": "ext:qq-official-1:abc"}]}
-        )
-        assert not manager._failed_record_all_untrusted(
-            {"items": [{"session_key": "ext:x:1"}, {"session_key": "web:ceo-1"}]}
-        )
+        assert not hasattr(manager, "_partition_queue_batch_by_eligibility")
+        assert not hasattr(manager, "_failed_record_all_untrusted")
+        assert not hasattr(manager, "_sweep_ineligible_review_sessions")
     finally:
         manager.close()
 
 
-def test_memory_boot_sweep_drops_untrusted_buffer(tmp_path: Path) -> None:
+def test_memory_manager_boots_existing_group_buffer(tmp_path: Path) -> None:
     module = _memory_module()
     first = module.MemoryManager(tmp_path, _memory_cfg())
     try:
@@ -759,13 +710,10 @@ def test_memory_boot_sweep_drops_untrusted_buffer(tmp_path: Path) -> None:
     finally:
         first.close()
 
-    second = module.MemoryManager(
-        tmp_path,
-        _memory_cfg(),
-        review_eligibility=lambda key: not key.startswith("ext:"),
-    )
+    second = module.MemoryManager(tmp_path, _memory_cfg())
     try:
         state = json.loads((tmp_path / "memory" / "review_state.json").read_text(encoding="utf-8"))
-        assert "ext:qq-official-1:abc" not in (state.get("sessions") or {})
+        # 启动不再清扫：升级前已有的群会话缓冲保留在本地 manager 的复核窗口里。
+        assert "ext:qq-official-1:abc" in (state.get("sessions") or {})
     finally:
         second.close()

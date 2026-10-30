@@ -34,7 +34,6 @@ _UNLOCKS: dict[str, dict[str, str]] = {}
 _ROOTS: dict[str, list[str]] = {}
 _TOOLS: dict[str, list[str]] = {}
 _INSTALL: dict[str, Any] | None = None
-_PERSONA: str | None = None
 _MAX_WRITABLE_ROOTS = 16
 _MAX_ALLOWED_TOOLS = 256
 
@@ -285,47 +284,6 @@ def operator_unlock_note(session_key: Any) -> dict[str, Any]:
         return dict(_UNLOCKS.get(key) or {})
 
 
-def sandbox_persona_text() -> str:
-    """群聊（第三方会话）用的人设。空 = 群聊不带人设（D7 默认）。
-
-    与长期记忆里的人设 note 分开存放：那份是操作员自己助手的人设，注入进来等于替群聊
-    认领一个身份；这份只给第三方会话用，操作员在沙箱页按需填。
-    """
-    global _PERSONA
-    with _LOCK:
-        if _PERSONA is not None:
-            return _PERSONA
-        path = _persona_path()
-        try:
-            _PERSONA = path.read_text(encoding="utf-8").strip() if path.exists() else ""
-        except Exception as exc:  # noqa: BLE001 - 读不到按空处理
-            logger.warning("sandbox persona unreadable: {}", exc)
-            _PERSONA = ""
-        return _PERSONA
-
-
-def set_sandbox_persona_text(text: Any) -> str:
-    global _PERSONA
-    value = str(text or "").strip()
-    with _LOCK:
-        path = _persona_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if value:
-            temp = path.with_suffix(path.suffix + ".tmp")
-            temp.write_text(value + "\n", encoding="utf-8")
-            temp.replace(path)
-        else:
-            path.unlink(missing_ok=True)
-        _PERSONA = value
-        return value
-
-
-def _persona_path() -> Path:
-    from g3ku.deployment.data_root import data_work_path
-
-    return data_work_path("sandbox") / "persona.md"
-
-
 def install_state(*, refresh: bool = False) -> dict[str, Any]:
     """当前机器的安装态读数（进程内缓存）。"""
     global _INSTALL
@@ -345,7 +303,7 @@ def refresh_install_state() -> dict[str, Any]:
 
 def reset_sandbox_state_for_tests() -> None:
     """测试钩子：丢掉进程内缓存（不动磁盘）。"""
-    global _MODES, _MODES_PATH, _INSTALL, _PERSONA
+    global _MODES, _MODES_PATH, _INSTALL
     with _LOCK:
         _MODES = None
         _MODES_PATH = None
@@ -353,7 +311,6 @@ def reset_sandbox_state_for_tests() -> None:
         _UNLOCKS.clear()
         _ROOTS.clear()
         _TOOLS.clear()
-        _PERSONA = None
 
 
 __all__ = [
@@ -368,8 +325,6 @@ __all__ = [
     "operator_unlock_note",
     "refresh_install_state",
     "reset_sandbox_state_for_tests",
-    "sandbox_persona_text",
-    "set_sandbox_persona_text",
     "set_session_allowed_tools",
     "set_session_mode",
     "set_writable_roots",

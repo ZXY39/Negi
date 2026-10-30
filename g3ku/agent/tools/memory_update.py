@@ -30,6 +30,8 @@ class MemoryUpdateTool(Tool):
             "State what should change; a memory agent decides whether that becomes a new item, a rewrite of an "
             "existing one, or a deletion.\n"
             "所有关于记忆的处理都通过此工具交给记忆 agent，禁止自己改 `memory/` 下的文件。\n"
+            "Scope: in the operator's own sessions this updates local long-term memory; in a group "
+            "session it updates only that group's memory block, never the operator's local memory.\n"
             "This call only queues the request: nothing has changed yet, so tell the user what you submitted "
             "and never say the memory is already saved, revised, or removed.\n"
             "任意数量的记忆处理需求可通过自然语言描述后，一次调用即可处理，禁止批量调用。\n"
@@ -66,26 +68,37 @@ class MemoryUpdateTool(Tool):
         runtime_raw = kwargs.pop("__g3ku_runtime", None)
         runtime = runtime_raw if isinstance(runtime_raw, dict) else {}
         session_key = str(runtime.get("session_key") or "")
-        eligibility = getattr(self._manager, "review_eligibility", None)
-        if callable(eligibility):
-            allowed, reason = eligibility(session_key)
-            if not allowed:
-                # 控制面拒绝的第一道：群聊/第三方会话连入队都不许。工具面本身已经在
-                # 受限档把它摘掉了，这里是"万一装配漏改"的硬校验。
+        manager = self._manager
+        view = runtime.get("memory_view")
+        if view is None and session_key:
+            # 节点道/未携带视图的调用点：按会话键问进程内活动路由，别掉回本地域。
+            try:
+                from g3ku.runtime.memory_scope_router import active_memory_scope_router
+
+                router = active_memory_scope_router()
+                if router is not None:
+                    view = router.view_for_session(session_key)
+            except Exception:
+                view = None
+        if view is not None:
+            # 分域路由：群聊写本群专属块；本地写本地；第三方私聊没有可写管理器。
+            manager = getattr(view, "writable_manager", None)
+            if manager is None:
                 return json.dumps(
                     {
                         "ok": False,
                         "status": "rejected",
-                        "reason": reason,
+                        "reason": "memory_read_only",
                         "message": (
-                            "Long-term memory is only writable from the operator's own session. "
-                            "This session is third-party, so nothing was queued. "
+                            "Long-term memory is writable only from the operator's own session or "
+                            "from a group session (which writes that group's own block). "
+                            "This session is read-only, so nothing was queued. "
                             "Do not retry; explain to the user that memory changes need the operator."
                         ),
                     },
                     ensure_ascii=False,
                 )
-        result = await self._manager.enqueue_write_request(
+        result = await manager.enqueue_write_request(
             session_key=session_key,
             decision_source="user",
             payload_text=str(content or "").strip(),

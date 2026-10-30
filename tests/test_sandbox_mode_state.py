@@ -30,9 +30,7 @@ from g3ku.sandbox.probe import REQUIRED_DIMENSIONS, probe_install_state
 @pytest.fixture()
 def isolated_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     store = tmp_path / "sandbox" / "session-modes.json"
-    persona = tmp_path / "sandbox" / "persona.md"
     monkeypatch.setattr(sandbox_state, "_states_path", lambda: store)
-    monkeypatch.setattr(sandbox_state, "_persona_path", lambda: persona)
     sandbox_state.reset_sandbox_state_for_tests()
     try:
         yield store
@@ -219,28 +217,23 @@ def test_third_party_patch_rejects_writable_roots(isolated_state: Path, registry
     assert sandbox_state.get_writable_roots(entry.session_key) == []
 
 
-def test_sandbox_persona_roundtrip(isolated_state: Path) -> None:
-    assert sandbox_state.sandbox_persona_text() == ""
-    text = "你是这个群的助手，不透露本机信息。"
-    assert sandbox_state.set_sandbox_persona_text(text) == text
-    sandbox_state.reset_sandbox_state_for_tests()  # 清缓存，从磁盘重读
-    assert sandbox_state.sandbox_persona_text() == text
-    assert sandbox_state.set_sandbox_persona_text("") == ""
-    assert sandbox_state.sandbox_persona_text() == ""
+def test_sandbox_persona_feature_is_gone(isolated_state: Path) -> None:
+    assert not hasattr(sandbox_state, "sandbox_persona_text")
+    assert not hasattr(sandbox_state, "set_sandbox_persona_text")
 
 
-def test_third_party_persona_uses_sandbox_block(isolated_state: Path) -> None:
+def test_third_party_persona_uses_the_single_local_persona(isolated_state: Path) -> None:
+    """人设不再按会话隔离：第三方会话读到的就是 local 记忆域里的那份。"""
     from types import SimpleNamespace
 
     from g3ku.runtime.frontdoor.message_builder import adopt_persona
 
-    session = SimpleNamespace(state=SimpleNamespace(session_key="ext:unknown-bridge:abc"))
-    assert adopt_persona(session, memory_manager=None, reason="test") == ""
+    class _Manager:
+        def persona_text(self):
+            return "统一人设"
 
-    sandbox_state.set_sandbox_persona_text("群聊人设")
-    session2 = SimpleNamespace(state=SimpleNamespace(session_key="ext:unknown-bridge:abc"))
-    assert adopt_persona(session2, memory_manager=None, reason="test") == "群聊人设"
-    assert session2._frontdoor_persona_text == "群聊人设"
+    session = SimpleNamespace(state=SimpleNamespace(session_key="ext:unknown-bridge:abc"))
+    assert adopt_persona(session, memory_manager=_Manager(), reason="test") == "统一人设"
 
 
 @pytest.mark.asyncio

@@ -75,6 +75,7 @@ from g3ku.runtime.external_sessions import (
 from g3ku.runtime.frontdoor import pinned_tool_bundle
 from g3ku.runtime.frontdoor.message_builder import (
     PERSONA_DIGEST_ATTR,
+    _memory_view_for_session,
     memory_snapshot_provenance,
     persona_provenance,
 )
@@ -99,7 +100,7 @@ from g3ku.runtime.session_agent import (
     PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR,
 )
 from g3ku.runtime.session_keys import is_channel_session_key
-from g3ku.runtime.session_trust import TRUST_OWNER, is_third_party_session, qq_owner_openids
+from g3ku.runtime.session_trust import TRUST_OWNER, qq_owner_openids
 from g3ku.runtime.token_compact_markers import TOKEN_COMPACT_V2_PREFIX
 from g3ku.runtime.tool_context_presence import (
     contract_index_from_revisions,
@@ -3634,6 +3635,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "cron_internal": cron_internal,
             "cron_job_id": str(metadata.get("cron_job_id") or "").strip(),
             "cron_stop_condition": str(metadata.get("cron_stop_condition") or "").strip(),
+            # 记忆分域视图：memory_update / memory_note 按它选写入/读取的管理器，
+            # 群聊写群块、第三方私聊只读、本地写本地。视图对象只在进程内传递。
+            "memory_view": _memory_view_for_session(self._loop, session.state.session_key),
         }
 
     def _frontdoor_dispatch_tool_names(self, state: CeoGraphState) -> list[str]:
@@ -3894,6 +3898,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 **kwargs,
                 session_key=normalized_session_key,
             ),
+            group_memory_provider=lambda **kwargs: self._frontdoor_group_memory_notice_provider(
+                **kwargs,
+                session_key=normalized_session_key,
+            ),
             persona_provider=lambda **kwargs: self._frontdoor_persona_notice_provider(
                 **kwargs,
                 adopted_digest=persona_adopted_digest,
@@ -4071,18 +4079,46 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         initialized: bool = False,
         session_key: str = "",
     ) -> dict[str, Any] | None:
-        """长期记忆增量：与 skill 名单同一条通知消息、同一个游标。
+        """本地长期记忆增量：与 skill 名单同一条通知消息、同一个游标。
 
         首次投递（`initialized=False`）只对齐到当前修订——会话 index 1 的冻结快照就是
         这份文档，再投一遍整篇会把同一份内容放两次。对齐也把 `initialized` 记为真，
         所以"首跳时还没有任何修订"的会话不会因此漏掉第一条真实修订。
 
-        第三方会话直接 `None`：头部快照已经空了，增量还照投就等于从侧门把记忆
-        送进群聊上下文。
+        所有会话（含群聊）都读这一份：群聊头部块是本地 + 群块，本地变了同样要通知。
         """
-        if session_key and is_third_party_session(session_key):
-            return None
-        manager = getattr(self._loop, "memory_manager", None)
+        view = _memory_view_for_session(self._loop, session_key)
+        manager = (
+            getattr(view, "local_manager", None)
+            if view is not None
+            else getattr(self._loop, "memory_manager", None)
+        )
+        return self._frontdoor_memory_delta_from(
+            manager, since_rev=since_rev, initialized=initialized
+        )
+
+    def _frontdoor_group_memory_notice_provider(
+        self,
+        *,
+        since_rev: int,
+        base_rev: int,
+        initialized: bool = False,
+        session_key: str = "",
+    ) -> dict[str, Any] | None:
+        """群聊专属记忆块的增量：只有群会话有独立游标，私聊返回 None。"""
+        view = _memory_view_for_session(self._loop, session_key)
+        manager = getattr(view, "group_manager", None) if view is not None else None
+        return self._frontdoor_memory_delta_from(
+            manager, since_rev=since_rev, initialized=initialized
+        )
+
+    @staticmethod
+    def _frontdoor_memory_delta_from(
+        manager: Any,
+        *,
+        since_rev: int,
+        initialized: bool,
+    ) -> dict[str, Any] | None:
         if manager is None or not callable(getattr(manager, "memory_notice_delta", None)):
             return None
         try:
@@ -4116,11 +4152,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         `adopted_digest` comes from the session that rendered the head block; reading it off
         the runtime-ops object would always compare against an empty baseline.
 
-        第三方会话不投人设增量：头部已经是空的，增量照投等于从侧门把人设送进群聊。
+        所有会话共用同一份 local 人设：群聊也投人设增量，不再有独立的人设隔离。
         """
-        if session_key and is_third_party_session(session_key):
-            return None
-        manager = getattr(self._loop, "memory_manager", None)
+        view = _memory_view_for_session(self._loop, session_key)
+        manager = (
+            getattr(view, "local_manager", None)
+            if view is not None
+            else getattr(self._loop, "memory_manager", None)
+        )
         if manager is None or not callable(getattr(manager, "persona_text", None)):
             return None
         try:

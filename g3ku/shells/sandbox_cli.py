@@ -1,13 +1,12 @@
 """沙箱运维 CLI（`negi sandbox ...`）。
 
 只读优先：`status` 打印安装态、后端与逐维度强制力；`install` / `uninstall` 先打印计划，
-必须显式 `--yes` 才执行（与网页的"先确认再动手"同一条纪律）。`persona` 读写群聊人设。
+必须显式 `--yes` 才执行（与网页的"先确认再动手"同一条纪律）。
 """
 
 from __future__ import annotations
 
 import json
-from typing import Optional
 
 import typer
 
@@ -17,16 +16,11 @@ from g3ku.sandbox.installer import (
     start_install,
     start_uninstall,
 )
-from g3ku.sandbox.state import (
-    install_state,
-    refresh_install_state,
-    sandbox_persona_text,
-    set_sandbox_persona_text,
-)
+from g3ku.sandbox.state import install_state, refresh_install_state
 
 
 def build_sandbox_app(console) -> typer.Typer:
-    app = typer.Typer(help="Sandbox runtime (install state, tiers, persona)")
+    app = typer.Typer(help="Sandbox runtime (install state, tiers)")
 
     def _print_reading(reading: dict) -> None:
         state = str(reading.get("state") or "not_installed")
@@ -90,25 +84,6 @@ def build_sandbox_app(console) -> typer.Typer:
         for command in result.get("manual_commands") or []:
             console.print(f"  {command}")
         raise typer.Exit(1)
-
-    @app.command("persona")
-    def persona(
-        show: bool = typer.Option(False, "--show", help="Print the current persona"),
-        clear: bool = typer.Option(False, "--clear", help="Remove the persona (group chats go without one)"),
-        set_text: Optional[str] = typer.Option(None, "--set", help="Set the persona text"),
-    ) -> None:
-        """第三方会话（群聊）用的人设；与操作员自己的人设 note 分开。"""
-        if clear:
-            set_sandbox_persona_text("")
-            console.print("Persona cleared.")
-            return
-        if set_text is not None:
-            set_sandbox_persona_text(set_text)
-            console.print("Persona saved.")
-            return
-        _ = show
-        text = sandbox_persona_text()
-        console.print(text if text else "[dim](empty — group chats run without a persona)[/dim]")
 
     return app
 

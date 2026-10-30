@@ -111,6 +111,7 @@ async function loadMoreMemoryPayloadBlock(button) {
                 key,
                 requestId: String(item.dataset.requestId || "").trim(),
                 startChar,
+                scope: memoryScopeQuery(),
             })
             : null;
         const chunk = payload?.item || {};
@@ -804,7 +805,7 @@ async function loadMemoryIndexNotes() {
     const requestToken = preview.indexToken;
     renderMemoryNotePreview();
     try {
-        const data = await ApiClient.listMemoryIndexNotes();
+        const data = await ApiClient.listMemoryIndexNotes(memoryScopeQuery());
         if (requestToken !== preview.indexToken) return;
         preview.indexItems = Array.isArray(data?.items) ? data.items : [];
         preview.indexError = "";
@@ -876,7 +877,7 @@ async function openMemoryNotePreview(noteRef, options = {}) {
     const requestToken = S.memoryNotePreview.requestToken;
     renderMemoryNotePreview();
     try {
-        const item = await ApiClient.getMemoryNote(noteRef);
+        const item = await ApiClient.getMemoryNote(noteRef, memoryScopeQuery());
         if (requestToken !== S.memoryNotePreview.requestToken) return;
         S.memoryNotePreview.ref = String(item?.ref || normalizedRef).trim() || normalizedRef;
         S.memoryNotePreview.body = String(item?.body || "");
@@ -1715,7 +1716,7 @@ async function toggleDeleteNoteExpand(ref) {
         note.loading = true;
         renderMemoryDeleteDialog();
         try {
-            const item = await ApiClient.getMemoryNote(ref);
+            const item = await ApiClient.getMemoryNote(ref, memoryScopeQuery());
             note.body = String(item?.body || "");
             note.loaded = true;
         } catch (error) {
@@ -1831,7 +1832,7 @@ async function loadMemoryBrowser() {
     const requestToken = S.memoryBrowser.requestToken;
     renderMemoryBrowser();
     try {
-        const payload = await ApiClient.getCurrentMemories();
+        const payload = await ApiClient.getCurrentMemories(memoryScopeQuery());
         if (requestToken !== S.memoryBrowser.requestToken) return;
         S.memoryBrowser.items = Array.isArray(payload?.items) ? payload.items : [];
         S.memoryBrowser.total = normalizeInt(payload?.total, S.memoryBrowser.items.length);

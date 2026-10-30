@@ -19,6 +19,7 @@ from g3ku.runtime.external_outbox import load_pending_outbound
 from g3ku.runtime.external_sessions import get_external_session_registry
 from g3ku.runtime.frontdoor.message_builder import (
     MEMORY_SNAPSHOT_ADOPTION_MANUAL_COMPRESSION,
+    _memory_view_for_session,
     adopt_memory_snapshot,
     adopt_persona,
 )
@@ -1307,15 +1308,21 @@ async def _execute_manual_context_compression(agent, runtime_session, *, pause_f
     # 头部基座在这一跳更新；手动车道跑在回合外，够不到轮末那条，单独接一次。
     memory_manager = getattr(agent, "memory_manager", None)
     if memory_manager is not None:
+        memory_view = _memory_view_for_session(
+            agent,
+            getattr(getattr(runtime_session, "state", None), "session_key", ""),
+        )
         adopt_memory_snapshot(
             runtime_session,
             memory_manager=memory_manager,
             reason=MEMORY_SNAPSHOT_ADOPTION_MANUAL_COMPRESSION,
+            memory_view=memory_view,
         )
         adopt_persona(
             runtime_session,
             memory_manager=memory_manager,
             reason=MEMORY_SNAPSHOT_ADOPTION_MANUAL_COMPRESSION,
+            memory_view=memory_view,
         )
         notice_scope = _skill_roster_notice.session_scope_key(
             getattr(getattr(runtime_session, "state", None), "session_key", "")

@@ -87,6 +87,11 @@ MEMORY_MIRROR_KEY = "memory/MEMORY.md"
 MEMORY_STATE_DB_KEY = "memory/memory_state.sqlite3"
 MEMORY_NOTES_KEY = "memory/notes"
 MEMORY_INDEX_KEY = "memory/index"
+# 群聊记忆：每个群一个独立记忆根，包内逻辑键保持 `memory/groups/<scope>/...`。
+GROUP_MEMORY_ROOT = f"{MEMORY_DIR_ROOT}/groups"
+GROUP_MEMORY_MIRROR_NAME = "MEMORY.md"
+GROUP_MEMORY_STATE_DB_NAME = "memory_state.sqlite3"
+GROUP_MEMORY_NOTE_DIRS = ("notes", "index")
 MEMORY_TOOL_NAME = "memory_runtime"
 MEMORY_NOTE_SUFFIXES = {".md"}
 
@@ -280,6 +285,41 @@ def _collect_config_entries(workspace: Path) -> dict[str, str]:
     return entries
 
 
+def _group_memory_base(root: Path) -> Path:
+    return _workspace_anchor(root) / GROUP_MEMORY_ROOT
+
+
+def _collect_group_memory_entries(root: Path) -> dict[str, str]:
+    """群记忆面：每个群根下的 mirror、sqlite、notes、index。
+
+    队列/ops/review_state、worker lock 与 `.bak` 漂移取证都不进包——它们是运行时状态，
+    不是记忆内容。
+    """
+    base = _group_memory_base(root)
+    if not base.is_dir():
+        return {}
+    entries: dict[str, str] = {}
+    for scope_dir in sorted(base.iterdir(), key=lambda item: item.name):
+        if not scope_dir.is_dir() or scope_dir.is_symlink() or not admin_segment_ok(scope_dir.name):
+            continue
+        memory_dir = scope_dir / MEMORY_DIR_ROOT
+        prefix = f"{GROUP_MEMORY_ROOT}/{scope_dir.name}"
+        mirror = memory_dir / GROUP_MEMORY_MIRROR_NAME
+        if mirror.is_file():
+            entries[f"{prefix}/{GROUP_MEMORY_MIRROR_NAME}"] = _encode_file(mirror)
+        store = memory_dir / GROUP_MEMORY_STATE_DB_NAME
+        if store.is_file():
+            entries[f"{prefix}/{GROUP_MEMORY_STATE_DB_NAME}"] = _encode_file(store)
+        for dirname in GROUP_MEMORY_NOTE_DIRS:
+            directory = memory_dir / dirname
+            if not directory.is_dir():
+                continue
+            for child in sorted(directory.iterdir()):
+                if child.is_file() and child.suffix in MEMORY_NOTE_SUFFIXES:
+                    entries[f"{prefix}/{dirname}/{child.name}"] = _encode_file(child)
+    return entries
+
+
 def _collect_memory_entries(root: Path) -> dict[str, str]:
     land = _memory_landing_paths(root)
     persona_note_name = note_file_name(PERSONA_NOTE_REF)
@@ -301,6 +341,7 @@ def _collect_memory_entries(root: Path) -> dict[str, str]:
                 continue
             if child.is_file() and child.suffix in MEMORY_NOTE_SUFFIXES:
                 entries[f"{key}/{child.name}"] = _encode_file(child)
+    entries.update(_collect_group_memory_entries(root))
     return entries
 
 
@@ -563,8 +604,32 @@ def _safe_relative_path(rel: str) -> PurePosixPath:
     return PurePosixPath(*parts)
 
 
-def _memory_entry_target(land: dict[str, Path], rel: str) -> Path:
+def _group_memory_entry_target(root: Path, rel: str) -> Path:
+    """群记忆逻辑名 → 本机落点；只认固定布局，scope 与文件名都必须安全。"""
+    parts = PurePosixPath(rel).parts
+    if len(parts) < 4 or parts[0] != MEMORY_DIR_ROOT or parts[1] != "groups":
+        raise ValueError(f"unsupported group memory bundle path: {rel}")
+    scope = parts[2]
+    if not admin_segment_ok(scope):
+        raise ValueError(f"unsafe group memory bundle path rejected: {rel}")
+    rest = parts[3:]
+    base = _group_memory_base(root) / scope / MEMORY_DIR_ROOT
+    if len(rest) == 1 and rest[0] in {GROUP_MEMORY_MIRROR_NAME, GROUP_MEMORY_STATE_DB_NAME}:
+        return base / rest[0]
+    if (
+        len(rest) == 2
+        and rest[0] in GROUP_MEMORY_NOTE_DIRS
+        and rest[1] not in {"", ".", ".."}
+        and PurePosixPath(rest[1]).suffix in MEMORY_NOTE_SUFFIXES
+    ):
+        return base / rest[0] / rest[1]
+    raise ValueError(f"unsupported group memory bundle path: {rel}")
+
+
+def _memory_entry_target(land: dict[str, Path], rel: str, *, root: Path) -> Path:
     """包内逻辑名 → 这台机器的落点；路径由本机清单算，所以不跟包里的字节走。"""
+    if rel.startswith(f"{GROUP_MEMORY_ROOT}/"):
+        return _group_memory_entry_target(root, rel)
     for key, base in land.items():
         if rel == key:
             if key in (MEMORY_NOTES_KEY, MEMORY_INDEX_KEY):
@@ -624,7 +689,7 @@ def _entry_targets(root: Path, rels: list[str]) -> dict[str, Path]:
         pure = _safe_relative_path(rel)
         scope = _entry_scope(str(pure))
         if scope == SCOPE_MEMORY:
-            target = _memory_entry_target(memory_land, str(pure))
+            target = _memory_entry_target(memory_land, str(pure), root=root)
         elif scope == SCOPE_PERSONA:
             target = _persona_entry_target(persona_land, str(pure))
         elif scope == SCOPE_STICKERS:

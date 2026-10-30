@@ -170,7 +170,7 @@ def stub_env(tmp_path: Path, monkeypatch):
     workspace = tmp_path / "workspace"
     (workspace / "memory").mkdir(parents=True, exist_ok=True)
     manager = _StubMemoryManager(workspace)
-    monkeypatch.setattr(admin_rest, "_runtime_memory_manager", lambda: manager)
+    monkeypatch.setattr(admin_rest, "_runtime_memory_manager", lambda scope="": manager)
     app = FastAPI()
     app.include_router(admin_rest.router, prefix="/api")
     client = TestClient(app)
@@ -461,38 +461,14 @@ def test_current_memory_delete_enqueues_one_request_per_action(stub_env, monkeyp
     assert empty.json()["detail"]["code"] == "memory_current_invalid_id"
 
 
-def test_admin_ui_queue_requests_survive_the_memory_trust_gate(tmp_path: Path):
+def test_admin_ui_queue_requests_no_longer_depend_on_a_memory_gate(tmp_path: Path):
     module = _load_memory_agent_runtime_module()
-    manager = module.MemoryManager(
-        tmp_path,
-        _memory_cfg(),
-        review_eligibility=is_owner_session,
-    )
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
-        admin = module.MemoryQueueRequest(
-            op="delete",
-            decision_source="user",
-            payload_text="操作员在管理页要求删除长期记忆：第 8 行。",
-            created_at="2026-10-28T14:34:34+08:00",
-            request_id="delete_admin",
-            trigger_source="admin_ui_delete",
-            session_key=admin_rest.MEMORY_ADMIN_SESSION_KEY,
-        )
-        # 回归样本：修复前管理页入队不带 session_key，空键被记忆门按第三方丢弃。
-        anonymous = module.MemoryQueueRequest(
-            op="delete",
-            decision_source="user",
-            payload_text="操作员在管理页要求删除长期记忆：第 9 行。",
-            created_at="2026-10-28T14:34:35+08:00",
-            request_id="delete_anonymous",
-            trigger_source="admin_ui_delete",
-            session_key="",
-        )
-        batch, dropped = manager._partition_queue_batch_by_eligibility(
-            module.MemoryBatch(op="delete", items=[admin, anonymous])
-        )
-        assert [item.request_id for item in batch.items] == ["delete_admin"]
-        assert [item.request_id for item in dropped] == ["delete_anonymous"]
+        # 记忆门已经删除：管理面入队不再按会话信任级拆批或丢弃。
+        assert not hasattr(manager, "_partition_queue_batch_by_eligibility")
+        assert not hasattr(manager, "review_eligibility")
+        assert admin_rest.MEMORY_ADMIN_SESSION_KEY == "internal:memory_admin"
     finally:
         manager.close()
 

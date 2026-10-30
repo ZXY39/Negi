@@ -155,6 +155,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 限流/上游故障期间某轮记忆没写进去、`memory/failed.jsonl` 有停车记录、或医生检查报 `failed_parked` → `runtime-overview.md`「队列状态机与失败停车语义」+ `operations-and-maintenance.md`「Memory Queue Workflow」
 - 记忆页点重试/放弃提示失败、或弹条正文是 `Request timeout` → `web-and-admin.md`「Memory Management Page And Admin Contract」（四条失败正文各自的指向与 30s 客户端超时）
 - 用户说「记住/忘掉」但模型照旧，或某轮命中前缀在第二条消息就分叉 → `runtime-overview.md`「Memory Runtime State」（头部基座的压缩边界更新与修订增量）+ `context-and-cache-troubleshooting.md`「长期记忆的头部基座与增量」
+- 群聊里说「记住」后本地记忆没变、某个群看不到自己的记忆、第三方私聊写记忆被拒、或记忆页切不到某个群 → `sandbox-execution-plane.md`「记忆分域」+ `runtime-overview.md`「记忆分域（本地 / 群聊 / 第三方私聊）」+ `web-and-admin.md`「Memory Management Page And Admin Contract」
 - 人设没生效、头部没有「我的人设」、没有人设时模型仍自称 Negi、改了人设旧会话没变、压缩后还留着旧人设通知、或同一条人设通知重复出现 → `runtime-overview.md`「人设块、人设 note 与身份」+ `context-and-cache-troubleshooting.md`「长期记忆的头部基座与增量」
 - 初次引导不弹、卡在半途、照片没进 `my_image`、设置页画廊空、保存模型链后人设没入队 → `web-and-admin.md`「First-Run Onboarding And Persona Contract」+ `operations-and-maintenance.md`「人设与初次引导」
 - 设置入口或人设按钮的红点不亮/一直亮、空人设点不进去、照片空态文案不对 → `web-and-admin.md`「First-Run Onboarding And Persona Contract」

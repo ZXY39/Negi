@@ -25,6 +25,7 @@ from g3ku.runtime import tool_arg_stash as _tool_arg_stash
 from g3ku.runtime.cancellation import ToolCancellationToken
 from g3ku.runtime.frontdoor.message_builder import (
     MEMORY_SNAPSHOT_ADOPTION_TOKEN_COMPRESSION,
+    _memory_view_for_session,
     adopt_memory_snapshot,
     adopt_persona,
 )
@@ -2422,6 +2423,19 @@ class RuntimeAgentSession:
             return {}
         return snapshot
 
+    def _memory_review_manager(self) -> Any | None:
+        """本会话可写的记忆管理器：本地 → 本地；群聊 → 本群；第三方私聊 → 无。
+
+        无路由（旧装配/测试替身）时退回本地管理器，保持既有行为。
+        """
+        local_manager = getattr(self._loop, "memory_manager", None)
+        if local_manager is None:
+            return None
+        view = _memory_view_for_session(self._loop, self._state.session_key)
+        if view is None:
+            return local_manager
+        return getattr(view, "review_manager", None)
+
     async def _flush_memory_review_after_compression(self) -> None:
         """压缩轮末：先冲刷复核窗口，再把头部基座更新到最新文档。
 
@@ -2432,13 +2446,20 @@ class RuntimeAgentSession:
         memory_manager = getattr(self._loop, "memory_manager", None)
         if memory_manager is None:
             return
+        memory_view = _memory_view_for_session(self._loop, self._state.session_key)
+        review_manager = (
+            getattr(memory_view, "review_manager", None)
+            if memory_view is not None
+            else memory_manager
+        )
         try:
-            flush_result = await memory_manager.flush_review_window(
-                session_key=self._state.session_key,
-                trigger_source="token_compression",
-            )
-            if str(flush_result.get("status") or "").strip() == "queued":
-                await memory_manager.run_due_batch_once()
+            if review_manager is not None:
+                flush_result = await review_manager.flush_review_window(
+                    session_key=self._state.session_key,
+                    trigger_source="token_compression",
+                )
+                if str(flush_result.get("status") or "").strip() == "queued":
+                    await review_manager.run_due_batch_once()
         except Exception:
             await self._emit(
                 "message_delta",
@@ -2450,11 +2471,13 @@ class RuntimeAgentSession:
             self,
             memory_manager=memory_manager,
             reason=MEMORY_SNAPSHOT_ADOPTION_TOKEN_COMPRESSION,
+            memory_view=memory_view,
         )
         adopt_persona(
             self,
             memory_manager=memory_manager,
             reason=MEMORY_SNAPSHOT_ADOPTION_TOKEN_COMPRESSION,
+            memory_view=memory_view,
         )
         scope = _skill_roster_notice.session_scope_key(
             getattr(self._state, "session_key", "")
@@ -4200,16 +4223,18 @@ class RuntimeAgentSession:
                                     "targets": list(review_reply.undelivered),
                                 },
                             )
-                        await self._loop.memory_manager.record_turn_for_review(
-                            session_key=self._state.session_key,
-                            turn_id=review_turn_id,
-                            user_messages=user_messages,
-                            assistant_text=review_reply.memory_text,
-                            turns=frontdoor_turns_for_turn(
-                                getattr(self, "_frontdoor_turns", None),
-                                review_turn_id,
-                            ),
-                        )
+                        review_manager = self._memory_review_manager()
+                        if review_manager is not None:
+                            await review_manager.record_turn_for_review(
+                                session_key=self._state.session_key,
+                                turn_id=review_turn_id,
+                                user_messages=user_messages,
+                                assistant_text=review_reply.memory_text,
+                                turns=frontdoor_turns_for_turn(
+                                    getattr(self, "_frontdoor_turns", None),
+                                    review_turn_id,
+                                ),
+                            )
                     except Exception:
                         await self._emit(
                             "message_delta",

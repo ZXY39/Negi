@@ -20,28 +20,6 @@ from main.runtime.internal_tools import SilentTool
 from main.service.runtime_service import MainRuntimeService
 
 
-def _memory_review_eligibility(session_key: str) -> bool:
-    """长期记忆复核的信任判据：只有操作员自己的会话能进全局记忆。
-
-    第三方（群聊 / 未列名私聊 / 未知渠道）一律不写——记忆是工作区级全局的，注入在
-    每个会话的 index 1，群里一句话会污染操作员的每一次对话。
-    """
-    from g3ku.runtime.session_trust import is_owner_session
-
-    return is_owner_session(session_key)
-
-
-def _accepts_keyword(target, keyword: str) -> bool:
-    """目标可调用对象是否接受该关键字（测试替身只吃位置参数）。"""
-    try:
-        parameters = inspect.signature(target).parameters
-    except (TypeError, ValueError):
-        return False
-    if keyword in parameters:
-        return True
-    return any(param.kind is inspect.Parameter.VAR_KEYWORD for param in parameters.values())
-
-
 class RuntimeBootstrapBridge:
     """Bootstrap and runtime initialization bridge for AgentLoop."""
 
@@ -247,6 +225,14 @@ class RuntimeBootstrapBridge:
             self._close_value(commit_service)
         self._loop.commit_service = None
 
+        router = getattr(self._loop, 'memory_scope_router', None)
+        if router is not None:
+            self._close_value(router)
+        self._loop.memory_scope_router = None
+        from g3ku.runtime.memory_scope_router import set_active_memory_scope_router
+
+        set_active_memory_scope_router(None)
+
         memory_manager = getattr(self._loop, 'memory_manager', None)
         if memory_manager is not None:
             self._close_value(memory_manager)
@@ -286,16 +272,24 @@ class RuntimeBootstrapBridge:
             manager_cls = getattr(self._loop, '_memory_manager_cls', None)
             if manager_cls is None:
                 raise RuntimeError('memory manager class is not configured')
-            kwargs: dict[str, object] = {}
-            if _accepts_keyword(manager_cls, 'review_eligibility'):
-                # 复审资格的单一判据：只有操作员自己的会话能进全局长期记忆。
-                kwargs['review_eligibility'] = _memory_review_eligibility
-            self._loop.memory_manager = manager_cls(self._loop.workspace, cfg, **kwargs)
+            self._loop.memory_manager = manager_cls(self._loop.workspace, cfg)
             start = getattr(self._loop.memory_manager, 'start', None)
             if callable(start):
                 start()
             if getattr(self._loop, 'main_task_service', None) is not None:
                 self._loop.main_task_service.memory_manager = self._loop.memory_manager
+            from g3ku.runtime.memory_scope_router import (
+                MemoryScopeRouter,
+                set_active_memory_scope_router,
+            )
+
+            router = MemoryScopeRouter(
+                workspace=self._loop.workspace,
+                local_manager=self._loop.memory_manager,
+                config=cfg,
+            )
+            self._loop.memory_scope_router = router
+            set_active_memory_scope_router(router)
             logger.info('Memory runtime enabled')
         except Exception as exc:
             logger.warning('Memory runtime init failed: {}', exc)

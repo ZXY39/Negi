@@ -1,5 +1,74 @@
 // 记忆页状态层：三列加载与分页、轮询、失败提示。渲染在 org_graph_app.js。
 
+// 作用域："" = 本地；其余是群作用域键（/api/memory/scopes 返回）。
+function ensureMemoryScopeState() {
+    if (typeof S.memoryScope !== "string") S.memoryScope = "";
+    if (!Array.isArray(S.memoryScopes)) S.memoryScopes = [];
+    if (typeof S.memoryScopesLoaded !== "boolean") S.memoryScopesLoaded = false;
+}
+
+function memoryScopeQuery() {
+    ensureMemoryScopeState();
+    return S.memoryScope;
+}
+
+function renderMemoryScopeOptions() {
+    ensureMemoryScopeState();
+    const select = document.getElementById("memory-scope-select");
+    if (!select) return;
+    const current = S.memoryScope;
+    select.innerHTML = "";
+    for (const item of S.memoryScopes) {
+        const option = document.createElement("option");
+        option.value = String(item?.scope || "");
+        option.textContent = String(item?.title || item?.scope || "本地记忆");
+        select.append(option);
+    }
+    select.value = S.memoryScopes.some((item) => String(item?.scope || "") === current) ? current : "";
+}
+
+async function loadMemoryScopes({ force = false } = {}) {
+    ensureMemoryScopeState();
+    if (S.memoryScopesLoaded && !force) {
+        renderMemoryScopeOptions();
+        return;
+    }
+    try {
+        const payload = await ApiClient.getMemoryScopes();
+        S.memoryScopes = Array.isArray(payload?.items) ? payload.items : [];
+    } catch (error) {
+        void error;
+        S.memoryScopes = [{ scope: "", kind: "local", title: "本地记忆", session_key: "" }];
+    }
+    S.memoryScopesLoaded = true;
+    renderMemoryScopeOptions();
+}
+
+async function switchMemoryScope(scope) {
+    ensureMemoryScopeState();
+    const next = String(scope || "").trim();
+    if (next === S.memoryScope) return;
+    S.memoryScope = next;
+    S.memoryQueueItems = [];
+    S.memoryQueueTotal = 0;
+    S.memoryQueueHasMore = false;
+    S.memoryProcessedItems = [];
+    S.memoryProcessedTotal = 0;
+    S.memoryProcessedHasMore = false;
+    S.memoryFailedItems = [];
+    S.memoryFailedTotal = 0;
+    S.memoryFailedHasMore = false;
+    S.memoryError = "";
+    S.memoryLoadedOnce = false;
+    renderMemoryScopeOptions();
+    await loadMemoryView({ force: true });
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+    const select = document.getElementById("memory-scope-select");
+    if (select) select.addEventListener("change", () => void switchMemoryScope(select.value));
+});
+
 function stopMemoryViewAutoRefresh() {
     if (S.memoryPollIntervalId) {
         window.clearInterval(S.memoryPollIntervalId);
@@ -23,6 +92,7 @@ async function loadMoreMemoryQueue() {
         const payload = await ApiClient.getMemoryQueue({
             limit: S.memoryQueuePageSize,
             offset: S.memoryQueueItems.length,
+            scope: memoryScopeQuery(),
         });
         S.memoryQueueItems = [...S.memoryQueueItems, ...(Array.isArray(payload?.items) ? payload.items : [])];
         S.memoryQueueTotal = normalizeInt(payload?.total, S.memoryQueueTotal);
@@ -43,6 +113,7 @@ async function loadMoreMemoryProcessed() {
         const payload = await ApiClient.getMemoryProcessed({
             limit: S.memoryProcessedPageSize,
             offset: S.memoryProcessedItems.length,
+            scope: memoryScopeQuery(),
         });
         S.memoryProcessedItems = [...S.memoryProcessedItems, ...(Array.isArray(payload?.items) ? payload.items : [])];
         S.memoryProcessedTotal = normalizeInt(payload?.total, S.memoryProcessedTotal);
@@ -85,6 +156,8 @@ function maybeToastMemoryAlerts({ quiet = false } = {}) {
 
 async function loadMemoryView({ force = false, quiet = false } = {}) {
     if (S.memoryBusy) return;
+    ensureMemoryScopeState();
+    if (!S.memoryScopesLoaded) void loadMemoryScopes();
     S.memoryBusy = true;
     if (force) S.memoryError = "";
     renderMemoryView();
@@ -93,9 +166,9 @@ async function loadMemoryView({ force = false, quiet = false } = {}) {
         const processedLimit = Math.max(normalizeInt(S.memoryProcessedItems.length, 0), S.memoryProcessedPageSize);
         const failedLimit = Math.max(normalizeInt(S.memoryFailedItems.length, 0), S.memoryFailedPageSize);
         const [queue, processed, failed] = await Promise.all([
-            ApiClient.getMemoryQueue({ limit: queueLimit, offset: 0 }),
-            ApiClient.getMemoryProcessed({ limit: processedLimit, offset: 0 }),
-            ApiClient.getMemoryFailed({ limit: failedLimit, offset: 0 }),
+            ApiClient.getMemoryQueue({ limit: queueLimit, offset: 0, scope: memoryScopeQuery() }),
+            ApiClient.getMemoryProcessed({ limit: processedLimit, offset: 0, scope: memoryScopeQuery() }),
+            ApiClient.getMemoryFailed({ limit: failedLimit, offset: 0, scope: memoryScopeQuery() }),
         ]);
         S.memoryQueueItems = Array.isArray(queue?.items) ? queue.items : [];
         S.memoryQueueTotal = normalizeInt(queue?.total, 0);
@@ -127,6 +200,7 @@ async function loadMoreMemoryFailed() {
         const payload = await ApiClient.getMemoryFailed({
             limit: S.memoryFailedPageSize,
             offset: S.memoryFailedItems.length,
+            scope: memoryScopeQuery(),
         });
         S.memoryFailedItems = [...S.memoryFailedItems, ...(Array.isArray(payload?.items) ? payload.items : [])];
         S.memoryFailedTotal = normalizeInt(payload?.total, S.memoryFailedTotal);
