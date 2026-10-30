@@ -146,6 +146,35 @@ class MemoryScopeRouter:
         # Third-party DM: local memory is readable but owner-only for writes.
         return MemoryScopeView(session_key=key, kind="readonly_local", local_manager=self.local_manager)
 
+    def review_manager_for_session(self, session_key: Any) -> Any | None:
+        """会话边界的冲刷目标：本地 → 本地；群聊 → 本群；第三方私聊 → 无。
+
+        群聊的复核窗口存在本群 manager 上，冲本地 manager 是空操作。只有本群目录
+        已经存在时才载入 manager，避免删掉一个从未写过记忆的群时凭空建出一个空域。
+        """
+        key = str(session_key or "").strip()
+        if not key:
+            return self.local_manager
+        entry = self._entry_for_session(key)
+        if _is_group_entry(entry):
+            group_key = _group_key_for_entry(entry, fallback=key)
+            with self._lock:
+                existing = self._groups.get(group_key)
+                if existing is not None:
+                    self._groups.move_to_end(group_key)
+                    return existing
+            if not self._disk_scope_exists(group_key):
+                return None
+            return self._group_manager(
+                group_key,
+                label=str(getattr(entry, "title", "") or "").strip()
+                or str(getattr(entry, "external_key", "") or "").strip()
+                or group_key,
+            )
+        if session_trust(key) == TRUST_OWNER:
+            return self.local_manager
+        return None
+
     def list_scopes(self) -> list[dict[str, Any]]:
         """已知记忆作用域：本地 + 外部会话注册表里出现过的群。
 

@@ -19,7 +19,11 @@ import pytest
 
 import g3ku.runtime.external_sessions as external_sessions
 from g3ku.config.schema import MemoryToolsConfig
-from g3ku.runtime.memory_scope_router import GROUP_MEMORY_DIRNAME, MemoryScopeRouter
+from g3ku.runtime.memory_scope_router import (
+    GROUP_MEMORY_DIRNAME,
+    MemoryScopeRouter,
+    _group_key_for_entry,
+)
 from g3ku.runtime.skill_roster_notice import (
     GROUP_MEMORY_NOTICE_HEADING,
     clear_skill_roster_notice_stores,
@@ -94,6 +98,24 @@ def test_router_routes_local_group_and_readonly_dm(tmp_path, monkeypatch) -> Non
         assert dm_view.kind == "readonly_local"
         assert dm_view.review_manager is None
         assert dm_view.writable_manager is None
+    finally:
+        router.close()
+        local.close()
+
+
+def test_review_manager_for_session_routes_scope_without_creating_empty_group(tmp_path, monkeypatch) -> None:
+    entry = _group_entry()
+    router, local = _router(tmp_path, monkeypatch, entries=[entry, _dm_entry()])
+    try:
+        assert router.review_manager_for_session("web:ceo-1") is local
+        assert router.review_manager_for_session("ext:qq-official-1:dm-a") is None
+        # 从未写过记忆的群：删除会话不该凭空建出一个空作用域。
+        assert router.review_manager_for_session(entry.session_key) is None
+        scope = router.group_root / _group_key_for_entry(entry, fallback=entry.session_key)
+        scope.mkdir(parents=True)
+        manager = router.review_manager_for_session(entry.session_key)
+        assert manager is not None and manager is not local
+        assert str(manager.workspace) == str(scope)
     finally:
         router.close()
         local.close()

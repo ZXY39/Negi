@@ -34,7 +34,7 @@ class _FakeRuntimeManager:
         self.removed.append(session_key)
 
 
-def _agent(cron_jobs) -> SimpleNamespace:
+def _agent(cron_jobs, *, memory_manager=None, memory_scope_router=None) -> SimpleNamespace:
     cron_service = None
     if cron_jobs is not None:
         def _list_jobs(include_disabled: bool = False):
@@ -48,7 +48,12 @@ def _agent(cron_jobs) -> SimpleNamespace:
     async def _cancel(session_key: str, *, reason: str = "") -> None:
         return None
 
-    return SimpleNamespace(cron_service=cron_service, memory_manager=None, cancel_session_tasks=_cancel)
+    return SimpleNamespace(
+        cron_service=cron_service,
+        memory_manager=memory_manager,
+        memory_scope_router=memory_scope_router,
+        cancel_session_tasks=_cancel,
+    )
 
 
 @pytest.fixture
@@ -82,11 +87,12 @@ def harness(tmp_path, monkeypatch):
         *,
         session_key_override: str | None = None,
         token_present: bool = True,
+        agent: SimpleNamespace | None = None,
         **kwargs,
     ):
         token_state["present"] = bool(token_present)
         return await ceo_sessions._delete_single_ceo_session(
-            _agent(cron_jobs),
+            agent or _agent(cron_jobs),
             session_manager,
             _FakeRuntimeManager(),
             SimpleNamespace(delete_task_records_for_session=lambda key: 0),
@@ -117,6 +123,50 @@ async def test_delete_keeps_identity_by_default(harness):
     assert result["identity_hidden"] is True
     assert registry.get_by_session_key(session_key).hidden is True
     assert registry.get_session_key(bridge_id="qq", external_key=EXTERNAL_KEY) == session_key
+
+
+class _FlushRecorder:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def enqueue_session_boundary_flush(self, *, session_key: str) -> None:
+        self.calls.append(session_key)
+
+
+async def test_delete_flushes_group_scope_manager_not_local(harness):
+    """群聊的复核窗口在本群 manager 上；冲本地 manager 是空操作，最后几轮会留在缓冲里。"""
+    delete, _registry, session_key = harness
+    local = _FlushRecorder()
+    scoped = _FlushRecorder()
+    agent = _agent(
+        None,
+        memory_manager=local,
+        memory_scope_router=SimpleNamespace(review_manager_for_session=lambda key: scoped),
+    )
+    await delete(agent=agent)
+    assert scoped.calls == [session_key]
+    assert local.calls == []
+
+
+async def test_delete_skips_flush_when_scope_has_no_review_manager(harness):
+    """第三方私聊或从未建域的群没有可写 manager：不回落本地，避免跨域写。"""
+    delete, _registry, session_key = harness
+    local = _FlushRecorder()
+    agent = _agent(
+        None,
+        memory_manager=local,
+        memory_scope_router=SimpleNamespace(review_manager_for_session=lambda key: None),
+    )
+    await delete(agent=agent)
+    assert local.calls == []
+
+
+async def test_delete_flushes_local_manager_without_scope_router(harness):
+    """旧装配没有分域路由时保持原行为：本地会话冲本地 manager。"""
+    delete, _registry, session_key = harness
+    local = _FlushRecorder()
+    await delete(agent=_agent(None, memory_manager=local))
+    assert local.calls == [session_key]
 
 
 async def test_hidden_identity_returns_on_the_next_inbound(harness):

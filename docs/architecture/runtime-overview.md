@@ -597,8 +597,9 @@ main/ 侧所有持久化写在磁盘满（ENOSPC / SQLITE_FULL）条件下的行
   `group_memory_cursor`（群增量，只投给该群，渲染为 `### Group memory updates`）；
   压缩跳两者同时归零。人设增量对所有会话同源投递。
 - 会话复核、冲刷与 `run_due_batch_once` 都走 `view.review_manager`；写侧没有额外的信任门，
-  写到哪里由作用域决定。人设只有 `memory/notes/note_persona.md` 这一份，没有按会话隔离的
-  第三方人设。
+  写到哪里由作用域决定。会话删除时的边界冲刷也按同一路由取 manager（群聊冲本群，
+  第三方私聊没有可写 manager 就跳过）；群目录不随会话删除，管理页按注册表与磁盘目录继续列出它。
+  人设只有 `memory/notes/note_persona.md` 这一份，没有按会话隔离的第三方人设。
 
 ## 人设块、人设 note 与身份
 

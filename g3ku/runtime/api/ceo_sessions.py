@@ -519,9 +519,18 @@ async def _delete_single_ceo_session(
     if delete_task_records:
         deleted_task_count = await service.delete_task_records_for_session(session_key)
     memory_manager = getattr(agent, 'memory_manager', None) if agent is not None else None
+    # 复核窗口记在会话所属的作用域上：群聊缓冲在本群 manager，冲本地是空操作。
+    review_manager = memory_manager
     if memory_manager is not None:
+        router = getattr(agent, 'memory_scope_router', None)
+        if router is not None:
+            try:
+                review_manager = router.review_manager_for_session(session_key)
+            except Exception:
+                review_manager = memory_manager
+    if review_manager is not None:
         try:
-            await memory_manager.enqueue_session_boundary_flush(session_key=session_key)
+            await review_manager.enqueue_session_boundary_flush(session_key=session_key)
         except Exception:
             pass
     delete_web_ceo_session_artifacts(
