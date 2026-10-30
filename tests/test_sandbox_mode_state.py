@@ -254,10 +254,12 @@ async def test_sandbox_tools_api_roundtrip(
     item = got["item"]
     assert item["applicable"] is True
     assert "web_fetch" in item["allowed_tools"]
+    assert "search_session_history" in item["allowed_tools"]
     assert "exec" not in item["allowed_tools"]
     assert item["exec_allowed"] is False
     assert item["allowed_tools_customized"] is False
     default_tools = list(item["default_allowed_tools"])
+    assert "search_session_history" in default_tools
 
     with pytest.raises(Exception) as missing:
         await sandbox_api.patch_session_sandbox_tools(

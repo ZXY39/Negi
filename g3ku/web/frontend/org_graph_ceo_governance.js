@@ -941,7 +941,10 @@ async function openCeoRiskToolsDialog() {
         const tools = await ApiClient.getTools(0, 300);
         state.toolsContext = item;
         state.toolsDraft = Array.isArray(item.allowed_tools) ? item.allowed_tools.slice() : [];
-        state.toolsCatalog = Array.isArray(tools) ? tools : [];
+        // 会话工具列表只列模型可见的工具；memory_runtime 是设置锚点（agent_visible=false），不是可选工具。
+        state.toolsCatalog = (Array.isArray(tools) ? tools : []).filter(
+            (tool) => tool?.agent_visible !== false
+        );
         state.toolsOpen = true;
         if (U.ceoRiskToolsList) U.ceoRiskToolsList.innerHTML = '<div class="empty-state">加载 Tool 列表…</div>';
         if (U.ceoRiskToolsBackdrop) {

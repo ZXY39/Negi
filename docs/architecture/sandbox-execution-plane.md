@@ -266,7 +266,7 @@ MCP 网关以固定身份 `negi-mcp` 出现在每条入站消息里，所以「�
 | 任务派发 | `send_message` / `task_*` | 拒（不管勾选与否） |
 | 其他一切 | MCP 工具、skill 工具、资源工具、将来新增的工具 | 默认拒（可在工具列表显式勾选，前提是 CEO 可见） |
 
-- `search_session_history` 是上面「其他一切」里的一条例外：它是 owner-only 的会话转录检索，即使出现在 CEO 可见集并被按会话工具列表勾选，第三方会话也会在工具内被拒；合同见 `tool-and-skill-system.md`「本会话历史检索（`search_session_history`）」。
+- `search_session_history` 是上面「其他一切」里的一条例外：它是 owner-only 的会话转录检索，受限模式默认勾选；第三方会话即使勾选也会在工具内被拒，合同见 `tool-and-skill-system.md`「本会话历史检索（`search_session_history`）」。
 - **按会话工具列表**：`<数据根>/sandbox/session-modes.json` 的 `allowed_tools` 保存 override；
   未设置 = 默认集合。`GET/PATCH /api/ceo/sessions/{id}/sandbox/tools` 读写这份列表；
   PATCH 必须带项目解锁口令并审计。固定基础工具始终并入，不能取消。

@@ -453,3 +453,52 @@ test("第三方会话关闭沙箱：口令错留在二次确认里，口令对�
     assert.equal(row.attrs["aria-pressed"], "false");
     assert.equal(ctx.elements.get("ceo-risk-sandbox-title").textContent, "受限模式已关闭");
 });
+
+test("工具列表弹窗给长名称和说明留宽度，说明独占第二行", () => {
+    const css = fs.readFileSync("g3ku/web/frontend/org_graph.css", "utf8");
+    const dialog = css.match(/\.ceo-risk-whitelist-dialog \{([^}]*)\}/)?.[1] || "";
+    assert.match(dialog, /width: min\(760px/);
+    const item = css.match(/\.ceo-risk-whitelist-item \{([^}]*)\}/)?.[1] || "";
+    assert.match(item, /display: grid/);
+    const warning = css.match(/\.ceo-risk-tool-warning \{([^}]*)\}/)?.[1] || "";
+    assert.match(warning, /grid-column: 2 \/ 4/);
+});
+
+test("会话工具列表过滤 agent_visible=false 的系统锚点", async () => {
+    const ctx = loadGovernance({
+        governanceItem: { enabled: false, mode: "all_pass", whitelist_tools: [], whitelist_customized: false },
+        tools: [
+            { tool_id: "search_session_history", display_name: "Search Session History", risk_level: "low", agent_visible: true },
+            { tool_id: "memory_runtime", display_name: "Memory Runtime", risk_level: "low", agent_visible: false },
+        ],
+        extraIds: [
+            "ceo-risk-tools-backdrop",
+            "ceo-risk-tools-dialog",
+            "ceo-risk-tools-list",
+            "ceo-risk-tools-password",
+            "ceo-risk-tools-save-btn",
+            "ceo-risk-tools-reset-btn",
+            "ceo-risk-tools-close-btn",
+        ],
+    });
+    ctx.fetch = async () => ({
+        ok: true,
+        json: async () => ({
+            ok: true,
+            item: {
+                applicable: true,
+                allowed_tools: ["search_session_history"],
+                default_allowed_tools: ["search_session_history"],
+                fixed_tools: [],
+                tool_warnings: {},
+            },
+        }),
+    });
+
+    await ctx.openCeoRiskToolsDialog();
+    await settle();
+
+    const html = ctx.elements.get("ceo-risk-tools-list").innerHTML;
+    assert.match(html, /search_session_history/);
+    assert.doesNotMatch(html, /memory_runtime/);
+});

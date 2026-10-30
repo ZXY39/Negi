@@ -94,6 +94,7 @@ LIMITED_DEFAULT_TOOL_NAMES: frozenset[str] = frozenset(
         "content_describe",
         "filesystem_stat",
         "view_message_history",
+        "search_session_history",
         # 写类数据面（受会话工作目录写根限定）
         "filesystem_write",
         "filesystem_edit",
@@ -124,6 +125,7 @@ LIMITED_TOOL_WARNINGS: dict[str, str] = {
     "create_async_task": "任务在独立 worker 执行，不受本会话工作目录约束。",
     "skill-installer": "会安装工具到工作区，不受本会话工作目录约束。",
     "register_stickers": "会写全局表情包注册表，不受本会话工作目录约束。",
+    "search_session_history": "仅操作员会话可检索转录；第三方群聊/私聊调用会被工具内拒绝。",
 }
 
 # register_stickers 会改名并写 registry.json，属于全局写入，默认不进受限集合。

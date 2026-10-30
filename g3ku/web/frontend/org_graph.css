@@ -5716,9 +5716,9 @@ textarea {
     display: none !important;
 }
 
-.ceo-risk-whitelist-dialog {
-    width: min(560px, calc(calc(100vw / var(--ui-zoom, 1)) - 48px));
-    max-height: min(720px, calc(calc(100vh / var(--ui-zoom, 1)) - 48px));
+.confirm-dialog.ceo-risk-whitelist-dialog {
+    width: min(760px, calc(calc(100vw / var(--ui-zoom, 1)) - 48px));
+    max-height: min(860px, calc(calc(100vh / var(--ui-zoom, 1)) - 48px));
     gap: 14px;
 }
 
@@ -5733,31 +5733,53 @@ textarea {
 .ceo-risk-whitelist-list {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 8px;
     min-height: 120px;
-    max-height: min(46vh, 420px);
+    max-height: min(56vh, 560px);
     overflow: auto;
     scrollbar-gutter: stable;
     padding-right: 2px;
 }
 
 .ceo-risk-whitelist-item {
-    display: flex;
+    display: grid;
+    grid-template-columns: 18px minmax(0, 1fr) auto;
     align-items: center;
-    gap: 10px;
-    padding: 8px 10px;
+    column-gap: 10px;
+    row-gap: 5px;
+    padding: 10px 12px;
     border: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
     border-radius: 11px;
     background: color-mix(in srgb, var(--bg-app) 74%, transparent);
 }
 
+.ceo-risk-whitelist-item > .ui-checkbox-box {
+    grid-column: 1;
+    grid-row: 1;
+}
+
+.ceo-risk-whitelist-item > .meta-tag {
+    grid-column: 3;
+    grid-row: 1;
+    justify-self: end;
+}
+
 .ceo-risk-tool-name {
-    flex: 1 1 auto;
+    grid-column: 2;
+    grid-row: 1;
     min-width: 0;
     font-size: 0.8rem;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+}
+
+.ceo-risk-tool-warning {
+    grid-column: 2 / 4;
+    grid-row: 2;
+    font-size: 0.72rem;
+    line-height: 1.5;
+    color: var(--text-muted);
+    overflow-wrap: anywhere;
 }
 
 .ceo-input-row > textarea {
