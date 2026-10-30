@@ -226,6 +226,12 @@
 
 - `temp/ceo/`（数据根）  CEO/frontdoor 会话级临时目录，每个会话一个 `<safe_session_key>` 子目录（如 `web_ceo-xxxx`）。作为 CEO 会话工具 runtime 的 `task_temp_dir`：`exec` 缺省 cwd 与临时文件规范落点，避免临时产物散落到工作区根目录。它与 `temp/tasks/` 同根，因此设了自定义数据目录的安装里两条 temp 车道一起离开安装根；`temp` 也不在启动建目录的名单里，安装根不会再长出一个空 `temp/`。解析与惰性创建规则见 `runtime-overview.md`「任务侧」。该目录没有任何清理车道：删除会话带走的是连续性快照、请求取证、回合边界与上传目录，不含这里，所以它会随会话数累积增长，处置靠手动清目录。正式交付物禁止以此为最终落点，落点合同见 `tool-and-skill-system.md`「Model Path Anchoring Contract」。
 
+- `session-workspaces/`（数据根）
+  受限模式的会话工作目录，每个会话一个 `<safe_session_key>-<digest>` 子目录。文件读写工具在
+  `limited` 档只能写这里；`exec` 若被 operator 显式勾选，默认 cwd 也在这里。没有自动清理车道
+  （与 `temp/ceo/` 同纪律），删除会话不会带走它，需要时手动清；解析见
+  `g3ku/runtime/frontdoor/session_workspace.py`，契约见 `sandbox-execution-plane.md`「受限档」。
+
 - `temp/persona-thumbs/`（数据根）
   设置页与引导页照片集的缩略图缓存，文件名按源文件路径、大小与 mtime 派生。可随时删除，下次打开画廊重建；原图在 `my_image/`。
 

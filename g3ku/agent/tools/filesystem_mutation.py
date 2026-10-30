@@ -14,7 +14,7 @@ from g3ku.deployment.data_root import data_g3ku_path, data_work_path
 from g3ku.resources.tool_settings import FilesystemToolSettings, runtime_tool_settings
 from g3ku.runtime.project_environment import apply_project_environment
 from g3ku.utils.helpers import model_data_root, resolve_model_path
-from g3ku.utils.path_roots import current_read_roots, enforce_roots
+from g3ku.utils.path_roots import current_read_roots, enforce_roots, runtime_write_roots
 from g3ku.utils.process_tree import kill_process_tree
 from g3ku.utils.subprocess_text import decode_subprocess_output, enrich_subprocess_env_for_text
 
@@ -352,12 +352,29 @@ class FilesystemTool:
         return self._temp_root()
 
     def _resolve_model_path(self, path: str, runtime: dict[str, Any] | None) -> Path:
+        workspace = self._workspace
+        temp_root = self._canonical_temp_root(runtime)
+        # 受限模式：相对路径锚到本会话工作目录，而不是项目根；绝对路径仍按写根判定。
+        if isinstance(runtime, dict) and str(runtime.get('sandbox_tier') or '') == 'limited':
+            session_workspace = str(runtime.get('session_workspace_dir') or '').strip()
+            if session_workspace:
+                workspace = Path(session_workspace)
+                temp_root = Path(session_workspace)
         return _resolve_path(
             path,
-            self._workspace,
+            workspace,
             self._allowed_dir,
-            temp_root=self._canonical_temp_root(runtime),
+            temp_root=temp_root,
         )
+
+    @staticmethod
+    def _runtime_validation_enabled(runtime: dict[str, Any] | None, configured: bool) -> bool:
+        if not configured:
+            return False
+        # 受限模式禁止 CLI：内部写后校验命令同样不能跑。
+        if isinstance(runtime, dict) and str(runtime.get('sandbox_tier') or '') == 'limited':
+            return False
+        return True
 
     def _externaltools_root(self) -> Path:
         return self._workspace_root() / 'externaltools'
@@ -473,6 +490,19 @@ class FilesystemTool:
 
     def _enforce_workspace_path_policy(self, *, file_path: Path, action: str, runtime: dict[str, Any] | None = None) -> None:
         resolved = file_path.expanduser().resolve()
+        write_roots = runtime_write_roots(runtime)
+        if write_roots:
+            enforce_roots(resolved, write_roots, label='Path')
+        runtime_payload = runtime if isinstance(runtime, dict) else {}
+        session_workspace = str(runtime_payload.get('session_workspace_dir') or '').strip()
+        if session_workspace:
+            try:
+                if _is_relative_to(resolved, Path(session_workspace).expanduser().resolve()):
+                    # 会话工作目录是受限档的写边界；里面的临时产物/压缩包不套项目根的
+                    # legacy-temp / managed-artifact 规则。
+                    return
+            except (OSError, RuntimeError, ValueError):
+                pass
         workspace_root = self._workspace_root()
         temp_root = self._canonical_temp_root(runtime)
         externaltools_root = self._externaltools_root()
@@ -532,7 +562,9 @@ class FilesystemTool:
             validation_result = await self._validate_file(
                 file_path=file_path,
                 runtime=runtime,
-                enabled=bool(self._settings.write_validation_enabled),
+                enabled=self._runtime_validation_enabled(
+                    runtime, bool(self._settings.write_validation_enabled)
+                ),
                 timeout_seconds=max(1, int(self._settings.write_validation_timeout_seconds or 20)),
                 rollback_on_failure=bool(self._settings.write_validation_rollback_on_failure),
                 default_commands=list(self._settings.write_validation_default_commands or []),
@@ -546,7 +578,9 @@ class FilesystemTool:
             self._record_node_file_change(runtime=runtime, path=file_path, change_type='modified' if existed_before else 'created')
             self._notify_resource_change_paths([file_path], trigger='tool:filesystem.write')
             validated_count = int(self._validation_success_count(
-                enabled=bool(self._settings.write_validation_enabled),
+                enabled=self._runtime_validation_enabled(
+                    runtime, bool(self._settings.write_validation_enabled)
+                ),
                 file_path=file_path,
                 default_commands=list(self._settings.write_validation_default_commands or []),
                 commands_by_ext=dict(self._settings.write_validation_commands_by_ext or {}),
@@ -683,7 +717,9 @@ class FilesystemTool:
             validation_result = await self._validate_file(
                 file_path=file_path,
                 runtime=runtime,
-                enabled=bool(self._settings.edit_validation_enabled),
+                enabled=self._runtime_validation_enabled(
+                    runtime, bool(self._settings.edit_validation_enabled)
+                ),
                 timeout_seconds=max(1, int(self._settings.edit_validation_timeout_seconds or 20)),
                 rollback_on_failure=bool(self._settings.edit_validation_rollback_on_failure),
                 default_commands=list(self._settings.edit_validation_default_commands or []),
@@ -697,7 +733,9 @@ class FilesystemTool:
             self._record_node_file_change(runtime=runtime, path=file_path, change_type='modified')
             self._notify_resource_change_paths([file_path], trigger='tool:filesystem.edit')
             validated_count = int(self._validation_success_count(
-                enabled=bool(self._settings.edit_validation_enabled),
+                enabled=self._runtime_validation_enabled(
+                    runtime, bool(self._settings.edit_validation_enabled)
+                ),
                 file_path=file_path,
                 default_commands=list(self._settings.edit_validation_default_commands or []),
                 commands_by_ext=dict(self._settings.edit_validation_commands_by_ext or {}),

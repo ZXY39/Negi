@@ -139,10 +139,6 @@ class ApiCore {
                 return "审计事件暂时不可读取，请稍后刷新。";
             case "llm_binding_key_exists":
                 return "模型ID已存在，请使用其他模型ID。";
-            case "api_key_password_required":
-                return "查看 Apikey 需要项目解锁口令。";
-            case "api_key_password_invalid":
-                return "项目解锁口令不正确。";
             default:
                 return "";
         }

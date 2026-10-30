@@ -30,6 +30,11 @@ function ensureCeoGovernanceState() {
             whitelistCustomized: false,
             whitelistDraft: [],
             whitelistToolsCatalog: [],
+            toolsOpen: false,
+            toolsSaving: false,
+            toolsDraft: [],
+            toolsCatalog: [],
+            toolsContext: null,
         };
     }
     if (!S.ceoApprovalFlow || typeof S.ceoApprovalFlow !== "object") {
@@ -51,6 +56,15 @@ function ensureCeoGovernanceState() {
     if (!U.ceoRiskWhitelistButton) U.ceoRiskWhitelistButton = document.getElementById("ceo-risk-whitelist-btn");
     if (!U.ceoRiskWhitelistHint) U.ceoRiskWhitelistHint = document.getElementById("ceo-risk-whitelist-hint");
     if (!U.ceoRiskExecSettingsBtn) U.ceoRiskExecSettingsBtn = document.getElementById("ceo-risk-exec-settings-btn");
+    if (!U.ceoRiskToolsButton) U.ceoRiskToolsButton = document.getElementById("ceo-risk-tools-btn");
+    if (!U.ceoRiskToolsHint) U.ceoRiskToolsHint = document.getElementById("ceo-risk-tools-hint");
+    if (!U.ceoRiskToolsBackdrop) U.ceoRiskToolsBackdrop = document.getElementById("ceo-risk-tools-backdrop");
+    if (!U.ceoRiskToolsDialog) U.ceoRiskToolsDialog = document.getElementById("ceo-risk-tools-dialog");
+    if (!U.ceoRiskToolsList) U.ceoRiskToolsList = document.getElementById("ceo-risk-tools-list");
+    if (!U.ceoRiskToolsPassword) U.ceoRiskToolsPassword = document.getElementById("ceo-risk-tools-password");
+    if (!U.ceoRiskToolsSaveBtn) U.ceoRiskToolsSaveBtn = document.getElementById("ceo-risk-tools-save-btn");
+    if (!U.ceoRiskToolsResetBtn) U.ceoRiskToolsResetBtn = document.getElementById("ceo-risk-tools-reset-btn");
+    if (!U.ceoRiskToolsCloseBtn) U.ceoRiskToolsCloseBtn = document.getElementById("ceo-risk-tools-close-btn");
     if (!U.ceoRiskModeNote) U.ceoRiskModeNote = document.getElementById("ceo-risk-mode-note");
     if (!U.ceoRiskWhitelistBackdrop) U.ceoRiskWhitelistBackdrop = document.getElementById("ceo-risk-whitelist-backdrop");
     if (!U.ceoRiskWhitelistDialog) U.ceoRiskWhitelistDialog = document.getElementById("ceo-risk-whitelist-dialog");
@@ -525,7 +539,10 @@ function renderCeoRiskPanel() {
         U.ceoRiskModeNote.textContent = conditional ? CEO_RISK_MODE_NOTE_CONDITIONAL : CEO_RISK_MODE_NOTE_ALL_PASS;
         U.ceoRiskModeNote.hidden = !state.panelOpen;
     }
-    if (state.panelOpen) void refreshCeoRiskSandboxHint();
+    if (state.panelOpen) {
+        renderCeoRiskEntryVisibility();
+        void refreshCeoRiskSandboxHint();
+    }
 }
 
 let ceoSandboxTierCache = {
@@ -533,20 +550,42 @@ let ceoSandboxTierCache = {
     restricted: null,
     trust: "",
     installState: "",
+    execAllowed: false,
+    allowedTools: [],
+    allowedToolsCustomized: false,
     at: 0,
 };
+
+function ceoRiskToolsVisible() {
+    return ceoSandboxTierCache.restricted === true;
+}
+
+function ceoRiskExecSettingsVisible() {
+    return ceoSandboxTierCache.restricted !== true || !!ceoSandboxTierCache.execAllowed;
+}
+
+function renderCeoRiskEntryVisibility() {
+    if (U.ceoRiskToolsButton) U.ceoRiskToolsButton.hidden = !ceoRiskToolsVisible();
+    if (U.ceoRiskToolsHint) {
+        U.ceoRiskToolsHint.textContent = ceoRiskToolsVisible()
+            ? `${ceoSandboxTierCache.allowedTools.length} 项${ceoSandboxTierCache.allowedToolsCustomized ? "（已自定义）" : "（默认）"}`
+            : "";
+    }
+    if (U.ceoRiskExecSettingsBtn) U.ceoRiskExecSettingsBtn.hidden = !ceoRiskExecSettingsVisible();
+}
 
 // 行标题直接写当前状态：没装后端时是「只读模式」，装好之后才是「沙箱模式」。
 // 开/关都写进标题（已开启 / 已关闭），光写"无限制"读不出开关方向。
 function ceoSandboxRowTitle() {
     if (ceoSandboxTierCache.restricted === null) return "沙箱模式";
-    const label = ceoSandboxInstalled() ? "沙箱模式" : "只读模式";
+    const label = ceoSandboxInstalled() ? "沙箱模式" : "受限模式";
     return ceoSandboxTierCache.restricted ? `${label}已开启` : `${label}已关闭`;
 }
 
 function renderCeoRiskSandboxState() {
     if (U.ceoRiskSandboxTitle) U.ceoRiskSandboxTitle.textContent = ceoSandboxRowTitle();
     U.ceoRiskSandboxButton?.setAttribute?.("aria-pressed", ceoSandboxTierCache.restricted ? "true" : "false");
+    renderCeoRiskEntryVisibility();
 }
 
 async function refreshCeoRiskSandboxHint() {
@@ -554,7 +593,16 @@ async function refreshCeoRiskSandboxHint() {
     if (!button && !U.ceoRiskSandboxTitle) return;
     const sessionId = String(typeof activeSessionId === "function" ? activeSessionId() : "").trim();
     if (!sessionId) {
-        ceoSandboxTierCache = { sessionId: "", restricted: null, trust: "", installState: "", at: 0 };
+        ceoSandboxTierCache = {
+            sessionId: "",
+            restricted: null,
+            trust: "",
+            installState: "",
+            execAllowed: false,
+            allowedTools: [],
+            allowedToolsCustomized: false,
+            at: 0,
+        };
         if (U.ceoRiskSandboxTitle) U.ceoRiskSandboxTitle.textContent = "沙箱模式";
         button?.setAttribute?.("aria-pressed", "false");
         if (button) button.disabled = true;
@@ -585,6 +633,9 @@ async function refreshCeoRiskSandboxHint() {
             restricted: item.mode === "restricted",
             trust: String(item.trust || ""),
             installState: String(item.install_state || ""),
+            execAllowed: !!item.exec_allowed,
+            allowedTools: Array.isArray(item.allowed_tools) ? item.allowed_tools.slice() : [],
+            allowedToolsCustomized: !!item.allowed_tools_customized,
             at: now,
         };
         renderCeoRiskSandboxState();
@@ -599,6 +650,8 @@ function ceoSandboxModeErrorText(detail) {
         unlock_password_invalid: "口令不正确",
         sandbox_mode_invalid: "档位取值不合法",
         session_not_found: "会话不存在",
+        allowed_tools_must_be_list: "工具列表格式不对",
+        tool_id_too_long: "工具名过长",
     };
     return map[detail] || `切换失败：${detail || "未知错误"}`;
 }
@@ -633,6 +686,9 @@ function applyCeoSandboxMode(item, sessionId) {
         restricted: item?.mode === "restricted",
         trust: String(item?.trust || ""),
         installState: String(item?.install_state || ""),
+        execAllowed: !!item?.exec_allowed,
+        allowedTools: Array.isArray(item?.allowed_tools) ? item.allowed_tools.slice() : [],
+        allowedToolsCustomized: !!item?.allowed_tools_customized,
         at: Date.now(),
     };
     if (U.ceoRiskSandboxButton) U.ceoRiskSandboxButton.disabled = false;
@@ -654,9 +710,9 @@ function ceoSandboxConfirmLabels(turningOn) {
         };
     }
     return {
-        title: turningOn ? "进入只读模式？" : "退出只读模式？",
-        confirm: turningOn ? "进入只读模式" : "退出只读模式",
-        done: turningOn ? "已进入只读模式" : "已退出只读模式",
+        title: turningOn ? "进入受限模式？" : "退出受限模式？",
+        confirm: turningOn ? "进入受限模式" : "退出受限模式",
+        done: turningOn ? "已进入受限模式" : "已退出受限模式",
     };
 }
 
@@ -668,12 +724,12 @@ function ceoSandboxImpactText(targetRestricted) {
     if (targetRestricted) {
         return [
             installed
-                ? "工具面：收窄到只读白名单；写文件、执行命令、联网等动作会被拒绝，已装沙箱时数据面工具在 jail 内执行。"
-                : "工具面：收窄到只读白名单；只能读本会话的上传与临时目录，不能写文件、执行命令、联网，也不能派异步任务。",
+                ? "工具面：收窄到受限集合；数据面工具在 jail 内执行，具体可用工具以会话的允许列表为准。"
+                : "工具面：收窄到受限集合；文件写入限本会话工作目录，默认不执行命令行、不派异步任务，具体可用工具以会话的允许列表为准。",
             cacheText,
             thirdParty
-                ? "安全：白名单外的工具调用会被拒绝；这是第三方会话，记忆门继续生效。"
-                : "安全：白名单外的工具调用会被拒绝；这是操作员自己的会话，随时可以再关掉。",
+                ? "安全：允许列表外的工具调用会被拒绝；这是第三方会话，控制面拒绝继续生效。"
+                : "安全：允许列表外的工具调用会被拒绝；这是操作员自己的会话，随时可以再关掉。",
         ].join("\n\n");
     }
     return [
@@ -821,6 +877,163 @@ async function saveCeoReviewWhitelist() {
         kind: "success",
         durationMs: 2400,
     });
+}
+
+function ceoRiskToolsState() {
+    return governanceModeState();
+}
+
+function renderCeoRiskToolsList() {
+    const state = ceoRiskToolsState();
+    const host = U.ceoRiskToolsList;
+    if (!host) return;
+    const context = state.toolsContext || {};
+    const catalog = Array.isArray(state.toolsCatalog) ? state.toolsCatalog : [];
+    const fixed = new Set(Array.isArray(context.fixed_tools) ? context.fixed_tools : []);
+    const warnings = context.tool_warnings && typeof context.tool_warnings === "object" ? context.tool_warnings : {};
+    const selected = new Set(Array.isArray(state.toolsDraft) ? state.toolsDraft : []);
+    if (!catalog.length) {
+        host.innerHTML = '<div class="empty-state">没有可选的 Tool。</div>';
+        return;
+    }
+    host.innerHTML = catalog.map((tool) => {
+        const toolId = String(tool?.tool_id || "").trim();
+        if (!toolId) return "";
+        const isFixed = fixed.has(toolId);
+        const risk = String(tool?.risk_level || "medium").trim().toLowerCase();
+        const warning = String(warnings[toolId] || "").trim();
+        const checked = isFixed || selected.has(toolId);
+        return `
+            <label class="ceo-risk-whitelist-item">
+                <input type="checkbox" class="ui-checkbox-input ceo-risk-tool-input" data-tool-id="${esc(toolId)}"
+                    ${checked ? "checked" : ""} ${isFixed ? "disabled" : ""}>
+                <span class="ui-checkbox-box" aria-hidden="true"></span>
+                <span class="ceo-risk-tool-name">${esc(tool?.display_name || toolId)}${isFixed ? "（固定）" : ""}</span>
+                <span class="meta-tag risk-${esc(risk)}">${esc(displayRiskLabel(risk))}</span>
+                ${warning ? `<span class="ceo-risk-tool-warning">${esc(warning)}</span>` : ""}
+            </label>
+        `;
+    }).join("");
+}
+
+async function openCeoRiskToolsDialog() {
+    ensureCeoGovernanceState();
+    const sessionId = String(typeof activeSessionId === "function" ? activeSessionId() : "").trim();
+    if (!sessionId) {
+        showToast({ title: "先选择会话", text: "工具列表按会话生效。", kind: "warn", durationMs: 2400 });
+        return;
+    }
+    closeCeoRiskPanel();
+    const state = ceoRiskToolsState();
+    try {
+        const response = await fetch(`/api/ceo/sessions/${encodeURIComponent(sessionId)}/sandbox/tools`, {
+            credentials: "same-origin",
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            throw new Error(String(payload?.detail || response.status));
+        }
+        const item = payload.item || {};
+        if (!item.applicable) {
+            showToast({ title: "当前不是受限模式", text: "先开启受限模式再调整允许使用的工具。", kind: "warn", durationMs: 2600 });
+            return;
+        }
+        const tools = await ApiClient.getTools(0, 300);
+        state.toolsContext = item;
+        state.toolsDraft = Array.isArray(item.allowed_tools) ? item.allowed_tools.slice() : [];
+        state.toolsCatalog = Array.isArray(tools) ? tools : [];
+        state.toolsOpen = true;
+        if (U.ceoRiskToolsList) U.ceoRiskToolsList.innerHTML = '<div class="empty-state">加载 Tool 列表…</div>';
+        if (U.ceoRiskToolsBackdrop) {
+            U.ceoRiskToolsBackdrop.hidden = false;
+            U.ceoRiskToolsBackdrop.classList.add("is-open");
+        }
+        if (U.ceoRiskToolsPassword) U.ceoRiskToolsPassword.value = "";
+        renderCeoRiskToolsList();
+        window.requestAnimationFrame(() => U.ceoRiskToolsCloseBtn?.focus?.());
+    } catch (error) {
+        showToast({
+            title: "加载工具列表失败",
+            text: error?.message || "无法读取当前会话的工具列表。",
+            kind: "error",
+            durationMs: 2800,
+        });
+    }
+}
+
+function closeCeoRiskToolsDialog() {
+    const backdrop = U.ceoRiskToolsBackdrop;
+    if (!backdrop) return;
+    backdrop.hidden = true;
+    backdrop.classList.remove("is-open");
+    const state = ceoRiskToolsState();
+    state.toolsOpen = false;
+    if (U.ceoRiskToolsPassword) U.ceoRiskToolsPassword.value = "";
+}
+
+function resetCeoRiskToolsDraft() {
+    const state = ceoRiskToolsState();
+    const context = state.toolsContext || {};
+    state.toolsDraft = Array.isArray(context.default_allowed_tools) ? context.default_allowed_tools.slice() : [];
+    renderCeoRiskToolsList();
+}
+
+function readCheckedRiskToolIds() {
+    const host = U.ceoRiskToolsList;
+    if (!host?.querySelectorAll) return [];
+    const inputs = Array.from(host.querySelectorAll(".ceo-risk-tool-input"));
+    return inputs.filter((input) => input.checked).map((input) => input.getAttribute?.("data-tool-id") || "").filter(Boolean);
+}
+
+async function saveCeoRiskTools() {
+    const state = ceoRiskToolsState();
+    if (state.toolsSaving) return;
+    const sessionId = String(typeof activeSessionId === "function" ? activeSessionId() : "").trim();
+    const password = String(U.ceoRiskToolsPassword?.value || "").trim();
+    if (!sessionId) return;
+    if (!password) {
+        showToast({ title: "需要项目解锁口令", text: "保存工具列表前请输入项目解锁口令。", kind: "warn", durationMs: 2400 });
+        return;
+    }
+    state.toolsSaving = true;
+    if (U.ceoRiskToolsSaveBtn) U.ceoRiskToolsSaveBtn.disabled = true;
+    try {
+        const response = await fetch(`/api/ceo/sessions/${encodeURIComponent(sessionId)}/sandbox/tools`, {
+            method: "PATCH",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ allowed_tools: readCheckedRiskToolIds(), unlock_password: password }),
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            const detail = String(payload?.detail || response.status);
+            throw new Error(ceoSandboxModeErrorText(detail));
+        }
+        const item = payload.item || {};
+        ceoSandboxTierCache = {
+            sessionId,
+            restricted: item.mode === "restricted",
+            trust: String(item.trust || ""),
+            installState: String(item.install_state || ""),
+            execAllowed: !!item.exec_allowed,
+            allowedTools: Array.isArray(item.allowed_tools) ? item.allowed_tools.slice() : [],
+            allowedToolsCustomized: !!item.allowed_tools_customized,
+            at: Date.now(),
+        };
+        renderCeoRiskSandboxState();
+        closeCeoRiskToolsDialog();
+        showToast({ title: "工具列表已保存", text: "下一回合生效。", kind: "success", durationMs: 2200 });
+    } catch (error) {
+        showToast({
+            title: "保存失败",
+            text: error?.message || "无法保存工具列表。",
+            kind: "error",
+            durationMs: 2800,
+        });
+    } finally {
+        state.toolsSaving = false;
+        if (U.ceoRiskToolsSaveBtn) U.ceoRiskToolsSaveBtn.disabled = false;
+    }
 }
 
 function setApprovalDecision(toolCallId, decision) {
@@ -1056,6 +1269,7 @@ function bindCeoRiskUi() {
             if (target.closest("#ceo-risk-mode-all")) void saveToolGovernanceMode({ enabled: false });
             else if (target.closest("#ceo-risk-mode-conditional")) void saveToolGovernanceMode({ enabled: true });
             else if (target.closest("#ceo-risk-whitelist-btn")) void openCeoReviewWhitelistDialog();
+            else if (target.closest("#ceo-risk-tools-btn")) void openCeoRiskToolsDialog();
             else if (target.closest("#ceo-risk-sandbox-btn")) void toggleCeoRiskSandboxMode();
             else if (target.closest("#ceo-risk-exec-settings-btn")) {
                 closeCeoRiskPanel();
@@ -1076,6 +1290,22 @@ function bindCeoRiskUi() {
         U.ceoRiskWhitelistBackdrop.dataset.bound = "true";
         U.ceoRiskWhitelistBackdrop.addEventListener("click", (event) => {
             if (event.target === U.ceoRiskWhitelistBackdrop) closeCeoReviewWhitelistDialog();
+        });
+    }
+    if (U.ceoRiskToolsDialog && !U.ceoRiskToolsDialog.dataset.bound) {
+        U.ceoRiskToolsDialog.dataset.bound = "true";
+        U.ceoRiskToolsDialog.addEventListener("click", (event) => {
+            const target = event.target instanceof Element ? event.target : null;
+            if (!target) return;
+            if (target.closest("[data-modal-close]")) closeCeoRiskToolsDialog();
+            else if (target.closest("#ceo-risk-tools-save-btn")) void saveCeoRiskTools();
+            else if (target.closest("#ceo-risk-tools-reset-btn")) resetCeoRiskToolsDraft();
+        });
+    }
+    if (U.ceoRiskToolsBackdrop && !U.ceoRiskToolsBackdrop.dataset.bound) {
+        U.ceoRiskToolsBackdrop.dataset.bound = "true";
+        U.ceoRiskToolsBackdrop.addEventListener("click", (event) => {
+            if (event.target === U.ceoRiskToolsBackdrop) closeCeoRiskToolsDialog();
         });
     }
     if (!U.ceoRiskOutsideBound) {

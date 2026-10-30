@@ -37,10 +37,14 @@ from g3ku.sandbox.installer import (
     start_uninstall,
 )
 from g3ku.sandbox.policy import (
+    LIMITED_DEFAULT_TOOL_NAMES,
+    LIMITED_FIXED_TOOL_NAMES,
+    LIMITED_TOOL_WARNINGS,
     MODE_RESTRICTED,
     MODE_UNRESTRICTED,
     TIER_HOST_FULL,
     TIER_JAILED,
+    TIER_LIMITED,
     TIER_READONLY,
     default_mode_for_trust,
     session_policy,
@@ -56,6 +60,7 @@ from g3ku.sandbox.state import (
     refresh_install_state,
     sandbox_persona_text,
     set_sandbox_persona_text,
+    set_session_allowed_tools,
     set_session_mode,
     set_writable_roots,
 )
@@ -63,9 +68,10 @@ from g3ku.utils.helpers import safe_filename
 
 router = APIRouter()
 
-_LABELS_NOT_INSTALLED = {"restricted": "只读", "unrestricted": "全权限"}
+_LABELS_NOT_INSTALLED = {"restricted": "受限", "unrestricted": "全权限"}
 _LABELS_INSTALLED = {"restricted": "开启沙箱", "unrestricted": "关闭沙箱"}
 _TIER_LABELS = {
+    TIER_LIMITED: "受限",
     TIER_READONLY: "只读",
     TIER_JAILED: "沙箱",
     TIER_HOST_FULL: "宿主全权限",
@@ -118,6 +124,18 @@ def _session_item(session_key: str) -> dict[str, Any]:
         "default_mode": default_mode_for_trust(policy.trust),
         "resolved_tier": policy.tier,
         "tier_label": _TIER_LABELS.get(policy.tier, policy.tier),
+        # 受限模式的按会话工具列表；其他档位不读这份。
+        "allowed_tools": (
+            sorted(getattr(policy, "allowlist", None) or ())
+            if policy.tier == TIER_LIMITED
+            else []
+        ),
+        "allowed_tools_customized": getattr(policy, "explicit_allowed_tool_names", None) is not None,
+        "default_allowed_tools": sorted(LIMITED_DEFAULT_TOOL_NAMES | LIMITED_FIXED_TOOL_NAMES),
+        "fixed_tools": sorted(LIMITED_FIXED_TOOL_NAMES),
+        "tool_warnings": dict(LIMITED_TOOL_WARNINGS),
+        "exec_allowed": bool(getattr(policy, "exec_allowed", False)),
+        "exec_requires_governed": bool(getattr(policy, "exec_requires_governed", False)),
         "install_state": str(reading.get("state") or ""),
         "backend": str(reading.get("backend") or ""),
         "enforcement": dict(reading.get("enforcement") or {}),
@@ -214,6 +232,78 @@ async def patch_session_sandbox(session_id: str, payload: dict = Body(...)):
             )
         except Exception as exc:  # noqa: BLE001 - 审计失败不阻塞开关
             logger.warning("sandbox mode audit emit failed: {}", exc)
+    return {"ok": True, "item": item}
+
+
+def _normalized_allowed_tool_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        raise HTTPException(status_code=400, detail="allowed_tools_must_be_list")
+    cleaned: list[str] = []
+    for item in value:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        if len(text) > 128:
+            raise HTTPException(status_code=400, detail="tool_id_too_long")
+        if text not in cleaned:
+            cleaned.append(text)
+    return cleaned
+
+
+@router.get("/ceo/sessions/{session_id}/sandbox/tools")
+async def get_session_sandbox_tools(session_id: str):
+    key = str(session_id or "").strip()
+    if not _session_exists(key):
+        raise HTTPException(status_code=404, detail="session_not_found")
+    policy = session_policy(key)
+    item = _session_item(key)
+    item["applicable"] = policy.tier == TIER_LIMITED
+    return {"ok": True, "item": item}
+
+
+@router.patch("/ceo/sessions/{session_id}/sandbox/tools")
+async def patch_session_sandbox_tools(session_id: str, payload: dict = Body(...)):
+    key = str(session_id or "").strip()
+    if not _session_exists(key):
+        raise HTTPException(status_code=404, detail="session_not_found")
+    password = str(payload.get("unlock_password") or payload.get("unlockPassword") or "")
+    if not password:
+        raise HTTPException(status_code=403, detail="unlock_password_required")
+    if not _verify_unlock_password(password):
+        raise HTTPException(status_code=403, detail="unlock_password_invalid")
+    selected = _normalized_allowed_tool_list(payload.get("allowed_tools"))
+    fixed = set(LIMITED_FIXED_TOOL_NAMES)
+    effective = set(selected) | fixed
+    default_set = set(LIMITED_DEFAULT_TOOL_NAMES) | fixed
+    previous = session_policy(key)
+    previous_allowed = set(previous.allowlist or ()) if previous.tier == TIER_LIMITED else set()
+    # 与默认集合完全一致时清掉 override，未来默认集合调整能自动跟随。
+    set_session_allowed_tools(key, [] if effective == default_set else sorted(effective))
+    from datetime import datetime
+
+    note_operator_unlock(key, at=datetime.now().astimezone().isoformat(), by="operator")
+    current = session_policy(key)
+    current_allowed = set(current.allowlist or ()) if current.tier == TIER_LIMITED else set()
+    try:
+        emit_audit_event(
+            "sandbox",
+            "info",
+            "sandbox_tools_changed",
+            "session allowed tools changed",
+            detail={
+                "session_id": key,
+                "tier": current.tier,
+                "added": sorted(current_allowed - previous_allowed),
+                "removed": sorted(previous_allowed - current_allowed),
+                "exec_allowed": current.exec_allowed,
+                "customized": current.explicit_allowed_tool_names is not None,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 - 审计失败不阻塞保存
+        logger.warning("sandbox tools audit emit failed: {}", exc)
+    item = _session_item(key)
+    item["applicable"] = current.tier == TIER_LIMITED
+    item["effective_from"] = "next_turn"
     return {"ok": True, "item": item}
 
 

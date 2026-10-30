@@ -2,13 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-import math
 import os
 import re
 import secrets
 import shutil
-import threading
-import time
 from contextlib import contextmanager
 from inspect import isawaitable
 from pathlib import Path
@@ -1601,50 +1598,6 @@ async def list_llm_draft_models(payload: dict = Body(...)):
     return {'ok': True, 'result': result}
 
 
-_LLM_SECRET_REVEAL_TTL_SECONDS = 300.0
-_LLM_API_KEY_PASSWORD_REQUIRED = {
-    'code': 'api_key_password_required',
-    'message': '查看 Apikey 需要项目解锁口令',
-}
-_LLM_API_KEY_PASSWORD_INVALID = {
-    'code': 'api_key_password_invalid',
-    'message': '项目解锁口令不正确',
-}
-
-
-class _SecretRevealGrant:
-    """Apikey 查看授权：一次口令校验换来固定长度的免密读窗口。
-
-    授权只活在 web 进程内存里，不落盘、不过期前不跨进程；它省下的是重复输入口令，
-    不是新的访问边界——管理面本身仍只绑回环（见 config-and-models.md 的 web.host 约定）。
-    """
-
-    def __init__(self, ttl_seconds: float = _LLM_SECRET_REVEAL_TTL_SECONDS) -> None:
-        self.ttl_seconds = float(ttl_seconds)
-        self._expires_at = 0.0
-        self._lock = threading.Lock()
-
-    def active(self) -> bool:
-        with self._lock:
-            return time.monotonic() < self._expires_at
-
-    def grant(self) -> None:
-        with self._lock:
-            self._expires_at = time.monotonic() + self.ttl_seconds
-
-    def remaining_seconds(self) -> int:
-        with self._lock:
-            remaining = self._expires_at - time.monotonic()
-        return max(0, math.ceil(remaining))
-
-    def reset(self) -> None:
-        with self._lock:
-            self._expires_at = 0.0
-
-
-_LLM_SECRET_REVEAL_GRANT = _SecretRevealGrant()
-
-
 @router.get('/llm/configs')
 async def list_llm_configs():
     return {'ok': True, 'items': _llm_facade().list_config_records()}
@@ -1652,42 +1605,11 @@ async def list_llm_configs():
 
 @router.get('/llm/configs/{config_id}')
 async def get_llm_config(config_id: str, include_secrets: bool = Query(False)):
-    if include_secrets and not _LLM_SECRET_REVEAL_GRANT.active():
-        raise HTTPException(status_code=403, detail=dict(_LLM_API_KEY_PASSWORD_REQUIRED))
     try:
         item = _llm_facade().get_config_record(config_id, include_secrets=include_secrets)
     except Exception as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {'ok': True, 'item': item}
-
-
-@router.post('/llm/configs/{config_id}/reveal')
-async def reveal_llm_config_api_key(config_id: str, payload: dict | None = Body(default=None)):
-    body = payload if isinstance(payload, dict) else {}
-    password = str(body.get('password') or body.get('unlock_password') or '')
-    facade = _llm_facade()
-    grant = _LLM_SECRET_REVEAL_GRANT
-    authenticated_now = False
-    if not grant.active():
-        if password:
-            if not facade.verify_reveal_password(password):
-                raise HTTPException(status_code=403, detail=dict(_LLM_API_KEY_PASSWORD_INVALID))
-        elif not facade.passwordless_secret_reveal_allowed():
-            raise HTTPException(status_code=403, detail=dict(_LLM_API_KEY_PASSWORD_REQUIRED))
-        authenticated_now = True
-    try:
-        item = facade.get_config_record(config_id, include_secrets=True)
-    except Exception as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    # 免密窗口是固定的：窗口内的再次查看只复用剩余时间，不滑动续期。
-    if authenticated_now:
-        grant.grant()
-    return {
-        'ok': True,
-        'item': item,
-        'reveal_ttl_seconds': int(grant.ttl_seconds),
-        'reveal_expires_in_seconds': grant.remaining_seconds(),
-    }
 
 
 @router.post('/llm/configs')

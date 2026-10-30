@@ -1,4 +1,4 @@
-# 沙箱执行面（信任分级 / 只读档 / 读根限定）
+# 沙箱执行面（信任分级 / 受限档 / 读根限定）
 
 本层回答一个问题：**这一轮是谁在要求运行时做事，它因此能触到哪些东西？**
 会话本身不带答案——QQ 群里的陌生人和操作员本人在转录里长得一模一样——所以答案由
@@ -8,7 +8,7 @@
 
 | 面 | 内容 | 执行位置 |
 |---|---|---|
-| 数据面 | 命令、文件读写、内容读取、进程控制、网络抓取 | 宿主（`host_full`）/ 宿主进程内受限（`readonly`）/ jail（`jailed`，后续阶段） |
+| 数据面 | 命令、文件读写、内容读取、进程控制、网络抓取 | 宿主（`host_full`）/ 宿主进程内受限（`limited`）/ jail（`jailed`，后续阶段） |
 | 控制面 | 记忆写入、任务与节点、cron、模型配置、治理 | 恒在宿主，由档位判定准入 |
 
 判据只有一个实现：`g3ku/sandbox/policy.py`（档位与工具面）与
@@ -22,20 +22,20 @@
 
 | 安装态 | `restricted` | `unrestricted` |
 |---|---|---|
-| `not_installed` / `runtime_missing` / `partial`（该信任档必需维度不全） | `readonly` | `host_full` |
+| `not_installed` / `runtime_missing` / `partial`（该信任档必需维度不全） | `limited` | `host_full` |
 | `ready` | `jailed` | `host_full` |
 
 - **默认意图按信任派生**：`third_party*` → `restricted`，`owner` → `unrestricted`。
   操作员本地会话因此保持既有行为（宿主执行 + 现有 guards + 记忆注入 + 可派任务）。
 - **装/卸沙箱不改任何会话元数据**：意图不动，档位随安装态变；`restricted` 会话在
-  安装后自动升 `jailed`，卸载后自动回 `readonly`。
+  安装后自动升 `jailed`，卸载后自动回 `limited`。
 - **`partial` 只服务 owner**：`third_party` 的必需维度（`fs_read` / `fs_write` / `network`）
   缺一维就不给它 jail——把"缺一维"当"全缺"或反过来，两种都是假安全。
 - 档位变化**只在回合边界生效**，不打断在飞回合。
 - 空会话键（无会话上下文的装配、CLI、检查实例）按 `host_full` 处理：外部渠道的每一轮
   都带 `ext:` 键，走不到这一支；按第三方处理会让所有无会话的装配路径失去工具。
 
-本层解析出 `readonly` 与 `host_full`；`jailed` 的分支在 `resolve_tier` 里已经写好，
+本层解析出 `limited` 与 `host_full`；`jailed` 的分支在 `resolve_tier` 里已经写好，
 但要等 jail 后端（manager + router）接进执行道、`JAIL_BACKENDS_AVAILABLE` 打开之后才会发放。
 在那之前工具面与读根判据已经就位，接后端只改这一处开关。
 
@@ -50,7 +50,7 @@
 | 档位 | 头部段 |
 |---|---|
 | `jailed` | `## Sandbox Environment`：一次性 bwrap、只有 `/workspace` 与 `/shared` 落盘、宿主路径不存在、`network=none` |
-| `readonly` | `## Read-only Session`：写类工具与 `exec` 的准入边界、读根限定 |
+| `limited` | `## Limited Session`：会话工作目录可写、CLI 默认不可用的边界、读根/写根限定 |
 | `host_full` | 不带声明 |
 
 **档位不进 cache stamp**：重印时钟仍是（记忆块采纳时刻 × 工具面暴露修订）。切档不重印
@@ -132,7 +132,7 @@
 8. **凭据**：`exec env` 里没有任何 `G3KU_*`、模型 key、master key、QQ AppSecret。
 9. **无常驻**：jail 内 `ps` 没有 Negi 进程；宿主 `netstat` 没有为沙箱新增监听端口。
 10. **WSL 额外**：`ls /mnt` 为空、`/init` 不存在、`exec notepad.exe` 失败。
-11. **降级**：去掉 env 重启 → 群会话回 `readonly`，`exec` 回执是策略拒绝而不是宿主执行。
+11. **降级**：去掉 env 重启 → 群会话回 `limited`，`exec` 默认不可用（除非在会话工具列表显式勾选）。
 12. **缓存**：同一会话切档前后 `tools[]` 字节不变，头部沙箱声明只在重印边界变。
 
 ## 档位存储与 API
@@ -156,14 +156,15 @@
   **安装态是全局读数、不进会话元数据**；`jailed` 的发放另有一道
   `JAIL_BACKENDS_AVAILABLE` 闸门（见下）。
 - **`JAIL_BACKENDS_AVAILABLE` 是 fail-closed 闸门**：jail 后端接进执行道之前恒为 False，
-  `resolve_tier` 即便读到 `ready` 也只发 `readonly`——安装态好看但没人看守的数据面不发。
+  `resolve_tier` 即便读到 `ready` 也只发 `limited`——安装态好看但没人看守的数据面不发。
 
 端点（`/api` 前缀，与其它 CEO 会话端点同层）：
 
 | 端点 | 契约 |
 |---|---|
-| `GET /api/ceo/sessions/{id}/sandbox` | 返回 `{trust, mode, stored_mode, default_mode, resolved_tier, tier_label, install_state, backend, enforcement, ui_labels, unlock_required, operator_unlock, tasks_allowed, writable_roots}` |
+| `GET /api/ceo/sessions/{id}/sandbox` | 返回 `{trust, mode, stored_mode, default_mode, resolved_tier, tier_label, install_state, backend, enforcement, ui_labels, unlock_required, operator_unlock, tasks_allowed, writable_roots, allowed_tools, allowed_tools_customized, default_allowed_tools, fixed_tools, tool_warnings, exec_allowed, exec_requires_governed}` |
 | `PATCH /api/ceo/sessions/{id}/sandbox` | 改意图：`{mode?, unlock_password?, writable_roots?}`；**任何信任级的开/关沙箱**（`mode` 与当前意图不同）都必须带项目解锁口令（`unwrap_with_password` 只读校验），通过后记 `operator_unlock` + 审计；`mode` 与原意图相同或只传 `writable_roots` 时不走口令闸。`writable_roots` 只对 owner 开放（D14：交付目录常在工作区外），third_party 传了直接 403；返回体带 `effective_from: "next_turn"` |
+| `GET/PATCH /api/ceo/sessions/{id}/sandbox/tools` | 受限模式的按会话工具列表。GET 返回生效集合、默认集合、运行时固定项、逐工具 warning 与 `exec_allowed`；PATCH（`{allowed_tools, unlock_password}`）必须带项目解锁口令，写入 session state 并写 `sandbox_tools_changed` 审计；与默认集合完全一致时清掉 override。返回 `effective_from: "next_turn"` |
 | `GET/PUT /api/sandbox/persona` | 第三方会话用的人设正文；空 = 群聊不带人设。与操作员自己的人设 note 分开存放 |
 | `GET /api/sandbox/status` | 全局安装态、后端、逐维度强制力、`ui_labels`；`?refresh=1` 重探 |
 | `POST /api/sandbox/refresh` | 重探并返回新读数 |
@@ -180,12 +181,16 @@
 群聊人设默认折叠，两卡自上而下排列，右列底边与左列对齐。开页即重探一次安装态。
 入口有两处：侧栏「沙箱」、CEO 权限面板里的**就地开关**——排在「命令行风险拦截设置」上面，
 整行可点、右侧画开关。行标题把开关方向和当前状态写在一起，名字跟安装态走：后端没装成时
-`unrestricted` → 「只读模式已关闭」、`restricted` → 「只读模式已开启」；后端装好时
+`unrestricted` → 「受限模式已关闭」、`restricted` → 「受限模式已开启」；后端装好时
 `unrestricted` → 「沙箱模式已关闭」、`restricted` → 「沙箱模式已开启」；档位还没读到时只写
 中性标题「沙箱模式」。行内只有这一行标题。
+受限模式下同一面板显示「允许使用的工具列表」；「命令行风险拦截设置」只在 `unrestricted`
+或受限且生效工具包含 `exec` 时显示。工具列表对话框列出 CEO 可见工具，运行时固定项勾选且
+不可改，危险工具（`exec` / `process_kill` / `create_async_task` / `skill-installer` /
+`register_stickers`）默认不勾选但可勾选并附后果说明；保存必须输入项目解锁口令。
 **开和关都弹二次确认**（`openConfirm` 的 password 输入，`textFull` + `inputPlain`：影响说明
 整段展示不出滚动条、口令行不带外层框），确认里逐条写工具面 / 缓存 / 安全的变化；未装后端时
-标题用「进入只读模式 / 退出只读模式」，装好后才是「开启沙箱模式 / 关闭沙箱模式」。成功后停在
+标题用「进入受限模式 / 退出受限模式」，装好后才是「开启沙箱模式 / 关闭沙箱模式」。成功后停在
 本面板并通知沙箱 iframe 重读（`negi-sandbox-refresh`）。页面嵌在同源 iframe 里，主题跟随外壳
 （`data-theme` 由父页经 postMessage 同步）；会话列表拿不到时退化成手填会话 ID，不让页面卡在
 "加载中"。
@@ -201,7 +206,7 @@
 弹窗（影响说明 + 项目解锁口令），只存可写目录时不弹口令框；「保存」按钮只在档位或可写目录
 与已存值不同时出现。
 
-`ui_labels` 由服务端按安装态给出（未安装「只读 / 全权限」、已安装「开启沙箱 / 关闭沙箱」），
+`ui_labels` 由服务端按安装态给出（未安装「受限 / 全权限」、已安装「开启沙箱 / 关闭沙箱」），
 前端不自己判安装态。文件管理一族端点只在安装态 `ready` / `partial` 时有意义；
 `install_available` / 安装计划由 `g3ku/sandbox/installer.py` 按平台计算，`partial` 与
 `runtime_missing` 允许走「修复」路径。
@@ -239,62 +244,60 @@ MCP 网关以固定身份 `negi-mcp` 出现在每条入站消息里，所以「�
 `guild_dm`，非法值 400）；二者与 `external_key` 前缀冲突时**取更严的一档**并留 WARNING。
 服务端把派生结果写进 `metadata["external_trust"]` 与 `metadata["chat_type"]`，桥不能覆盖。
 
-## 只读档（`readonly`）
+## 受限档（`limited`）
 
-没有 jail 时，只读档是第三方会话的地板。它不是"给工具加路径限制"的泛称，
-而是一份**默认拒绝的名单**：未登记的工具名一律不可调用。
+没有 jail 时，受限档是第三方会话的地板，也是 owner 主动收紧时的默认档。它不是"只读"：
+每个会话有一个独立工作目录 `<数据根>/session-workspaces/<safe-key>-<digest>/`，文件读写
+工具只能在这个目录里写；CLI 默认不可用，operator 可以在按会话工具列表里显式勾选 `exec`。
 
-| 面 | 组内工具 | third_party `readonly` | owner `readonly` |
-|---|---|---|---|
-| 读类数据面 | `content_open` / `content_search` / `content_describe` / `filesystem_stat` / `view_message_history` | 放行（受读根限定） | 放行（受读根限定） |
-| 常驻信号 | `silent` / `time` / `load_tool_context` / `load_skill_context` | 放行 | 放行 |
-| 贴纸目录 | `show_sticker_category`（渲染缓存供选图；会改写 `registry.json` 的 `register_stickers` 不在本档，按默认拒） | 放行 | 放行 |
-| 写类数据面 | `filesystem_write` / `edit` / `copy` / `move` / `delete` / `propose_patch` | 拒 | 拒 |
-| 进程 / 网络 | `exec` / `process_kill` / `web_fetch` / `skill-installer` | 拒（见下） | `exec` 强制 `governed`，`web_fetch` 放行，其余拒 |
-| 控制面 | 记忆、任务族、`send_message`、`cron`、`schedule_wake`、模型配置 | 拒 | 记忆照 RBAC，任务族拒 |
-| 其他一切 | MCP 工具、skill 工具、资源工具、将来新增的工具 | **默认拒** | **默认拒** |
+默认集合（`LIMITED_DEFAULT_TOOL_NAMES` + `LIMITED_FIXED_TOOL_NAMES`）：
 
-两档的强度不同，这点不能混：
+| 面 | 工具 | 默认 |
+|---|---|---|
+| 读类数据面 | `content_open` / `content_search` / `content_describe` / `filesystem_stat` / `view_message_history` | 放行（受读根限定） |
+| 写类数据面 | `filesystem_write` / `edit` / `copy` / `move` / `delete` / `propose_patch` | 放行（受会话工作目录写根限定） |
+| 常驻信号 | `silent` / `time` / `load_tool_context(_v2)` / `load_skill_context(_v2)` | 固定可用，不可取消 |
+| 记忆 / 调度 / 渠道 | `memory_update` / `memory_note` / `cron` / `schedule_wake` / `mention_member` | 放行 |
+| 网络 | `web_fetch` | 默认放行；operator 可在工具列表取消 |
+| 贴纸目录 | `show_sticker_category` | 放行；`register_stickers` 默认不勾选 |
+| 危险工具 | `exec` / `process_kill` / `create_async_task` / `skill-installer` | 默认不勾选，可勾选；勾选时给后果说明 |
+| 任务派发 | `send_message` / `task_*` | 拒（不管勾选与否） |
+| 其他一切 | MCP 工具、skill 工具、资源工具、将来新增的工具 | 默认拒（可在工具列表显式勾选，前提是 CEO 可见） |
 
-- **third_party 只读是安全边界**，用白名单。新增资源工具要进这一档，必须显式登记到
-  `READONLY_THIRD_PARTY_TOOL_NAMES` 并声明它读什么根；未声明一律按不可用。
-- **owner 只读是防手滑**，用黑名单（写类 / 进程控制 / 任务族 / 会写盘的联网工具）。
-  其余工具与设置照旧，`exec` 的档位被压回 `governed`（形态守卫 + 路径策略 + 工作区监禁
-  三层同时生效），即便工具记录里的执行模式是 `full_access`。
-- **`exec` 在 third_party 只读档整条拒绝**：它的只读形态守卫是正则黑名单
-  （`g3ku/agent/tools/shell.py` 的 `_enforce_read_only_command`），`os.system('rm …')`
-  这类写法能绕过去。它是防误操作的形态层，不是边界，因此不给第三方会话。
-- 只读档约束的是**数据面**。控制面对 owner 照旧按 RBAC（所以 owner 的只读档仍能写长期记忆），
-  对 third_party 本来就全拒。
+- **按会话工具列表**：`<数据根>/sandbox/session-modes.json` 的 `allowed_tools` 保存 override；
+  未设置 = 默认集合。`GET/PATCH /api/ceo/sessions/{id}/sandbox/tools` 读写这份列表；
+  PATCH 必须带项目解锁口令并审计。固定基础工具始终并入，不能取消。
+- **`web_fetch` 默认允许**：受限档默认拥有一个外发通道；不需要的群由 operator 取消。
+- **`exec` 默认不允许，但可显式打开**：打开后 `exec_requires_governed=True`，命令行形态守卫、
+  路径策略与“命令行风险拦截设置”的全局治理继续生效；只有 operator 保存过口令的会话才可达。
+- **任务派发在受限/沙箱档一律拒**：`create_async_task` / `send_message` / `task_*` 即使用工具列表
+  勾选也不生效（`SessionPolicy.tool_allowed` 的派发族硬拒）。调度类 `cron` / `schedule_wake`
+  不属于派发族，可正常使用。
+- **渠道会话的显式授权**：渠道没有审批面，受限档里通过 `tool_allowed` 的工具不再走
+  `auto_reject`（否则勾选也调不动）；`exec` 由 governed 接管，其他工具按自身守卫执行。
+- **两层同时生效**：曝光层（`CeoExposureResolver` / `_frontdoor_callable_tool_names_for_state`）
+  收窄可见工具；执行层 `_approval_request_for_tool_calls` 对名单外调用生成打回项。
+  收窄必须发生在常驻内置并进来之后，先减后并等于没减。
 
-**受限档一律不能派异步任务**：`create_async_task` / `task_*` / `send_message` / `schedule_wake`
-在 `readonly` 与 `jailed` 下都拒，owner 也一样。任务节点跑在 worker 进程里，受限意图
-传不进那条执行面；与其做一个"名义只读、节点里全权"的假档，不如直接不给派。
+## 受限档的读写根限定
 
-判定在两层同时生效，缺一层就是绕过：
+名单里的文件工具必须同时限定"能读哪、能写哪"。根清单由前门写进
+`runtime_context["fs_read_roots"]` / `["fs_write_roots"]`：
 
-1. **曝光层**：候选与 callable 名单在执行前收窄（`CeoExposureResolver`、
-   `_frontdoor_callable_tool_names_for_state`）。模型看不到，就不会去调。
-2. **执行层**：`_approval_request_for_tool_calls` 对名单外调用无条件生成打回项——
-   不查治理开关、不查风险度，`all_pass` 也放不开。**收窄必须发生在常驻内置并进来之后**，
-   先减后并等于没减。
-
-## 只读档的读根限定
-
-名单里的读类工具必须同时限定"能读哪"。根清单由前门写进
-`runtime_context["fs_read_roots"]`：
-
-| 档位 | 读根 |
-|---|---|
-| `third_party` `readonly` | 该会话的入站上传目录（web 上传目录 + `external-uploads/<会话>`）、会话 temp 目录 |
-| `owner` `readonly` | 上列 + 宿主工作区 |
-| `host_full` / `jailed` | 不下发（不设限 / jail 自己管） |
+| 档位 | 读根 | 写根 |
+|---|---|---|
+| `third_party` `limited` | 该会话工作目录、入站上传目录（web 上传目录 + `external-uploads/<会话>`）、会话 temp 目录 | 会话工作目录 |
+| `owner` `limited` | 上列 + 宿主工作区 | 会话工作目录 |
+| `host_full` / `jailed` | 不下发（不设限 / jail 自己管） | 不下发 |
 
 实现约定：
 
 - 判定在 `Path.resolve()` **之后**做，symlink 指到根外与直接写绝对路径一样被拒。
-- 运行时根**优先于**工具设置推出的根：只读档不能被 `restrict_to_workspace` 之类的宽松
+- 运行时根**优先于**工具设置推出的根：受限档不能被 `restrict_to_workspace` 之类的宽松
   设置反向放宽。
+- 写侧单独校验 `fs_write_roots`（`filesystem_mutation._enforce_workspace_path_policy`）：
+  读根里有工作区不等于能写工作区。受限模式的相对路径锚到会话工作目录，写后校验命令
+  （`write_validation_*` / `edit_validation_*`）关闭。
 - 工具实例在资源层共享，会话根不能写到实例上：执行闸门（前门
   `_execute_tool_call_with_raw_result`、节点 `_execute_tool_raw`）用 `ContextVar`
   在调用期 pin，`with` 退出即还原。ContextVar 按 asyncio 任务隔离，并发会话不串根。
@@ -394,7 +397,8 @@ MCP 网关以固定身份 `negi-mcp` 出现在每条入站消息里，所以「�
 - 群里让它"记住 X"后全局记忆变了 → 先看 `memory/ops.jsonl` 的 `session_key` 与
   `memory/review_state.json`；四处闸门任一漏改都会表现成"只有某一条车道漏了"。
 - 群里让它读 `config.json` / `master.key` → 看该会话的 `external_trust` 是否为第三方、
-  工具是否落在只读白名单里、`fs_read_roots` 是否下发（前门 `_sandbox_read_roots`）。
+  工具是否落在会话允许列表里、`fs_read_roots` / `fs_write_roots` 是否下发
+  （前门 `_sandbox_read_roots` / `_sandbox_write_roots`）。
 - 群聊工具"看不到但不报错" → 曝光层收窄；"看得到但被拒" → 执行层打回，两者文案不同。
 - 群聊本来能用的工具突然没了 → 查注册表条目的 `trust`（粘性，只降不升）。
 - 装了/卸了沙箱但会话档位没变 → 安装态是全局读数、档位在回合边界才生效。

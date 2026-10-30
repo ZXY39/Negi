@@ -150,7 +150,7 @@ from g3ku.runtime.web_ceo_sessions import (
     upload_dir_for_session,
     workspace_path,
 )
-from g3ku.sandbox.policy import TIER_JAILED, TIER_READONLY, session_policy
+from g3ku.sandbox.policy import TIER_JAILED, TIER_LIMITED, TIER_READONLY, session_policy
 from g3ku.stickers import config as sticker_config
 from g3ku.stickers import safe_scan_packs, sticker_contract_sections
 from g3ku.utils.helpers import safe_filename, tools_bundle_single_source_enabled
@@ -193,6 +193,7 @@ from ._ceo_support import CeoFrontDoorSupport
 from .message_builder import CeoMessageBuilder
 from .prompt_cache_contract import DEFAULT_CACHE_FAMILY_REVISION, build_frontdoor_prompt_contract
 from .session_temp_dir import ceo_session_temp_dir
+from .session_workspace import ceo_session_workspace_dir
 from .state_models import (
     CeoFrontdoorInterrupted,
     CeoPendingInterrupt,
@@ -3473,19 +3474,25 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         return {"default_timeout_seconds": value} if value >= 1 else {}
 
     def _sandbox_read_roots(self, session_key: str, policy: Any) -> tuple[str, ...]:
-        """只读档的可读根：会话自己的上传目录 + temp；owner 另加工作区。
+        """受限/只读档的可读根：会话工作目录 + 上传目录 + temp；owner 另加工作区。
 
         third_party 的读根**不含**工作区、`.g3ku`、`memory/`、`sessions/`、其他会话
-        目录——没有 jail 时这是唯一的读边界。owner 的只读档是防手滑，工作区必须可读，
-        否则"只读"会变成"什么都干不了"。
+        目录——没有 jail 时这是唯一的读边界。owner 的受限档是防手滑，工作区必须可读，
+        否则"受限"会变成"什么都干不了"。
         """
-        if str(getattr(policy, "tier", "")) != TIER_READONLY:
+        tier = str(getattr(policy, "tier", ""))
+        if tier not in {TIER_LIMITED, TIER_READONLY}:
             return ()
         roots: list[str] = []
         if str(getattr(policy, "trust", "")) == TRUST_OWNER:
             workspace = str(getattr(self._loop, "workspace", "") or "").strip()
             if workspace:
                 roots.append(workspace)
+        if tier == TIER_LIMITED:
+            try:
+                roots.append(ceo_session_workspace_dir(session_key, create=True))
+            except Exception:
+                pass
         try:
             temp_dir = str(self._ceo_session_temp_dir(session_key) or "").strip()
         except Exception:
@@ -3503,6 +3510,15 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         except Exception:
             pass
         return tuple(dict.fromkeys(item for item in roots if item))
+
+    def _sandbox_write_roots(self, session_key: str, policy: Any) -> tuple[str, ...]:
+        """受限档的可写根：只有会话工作目录；其他档不设写根（由 jail/host 处理）。"""
+        if str(getattr(policy, "tier", "")) != TIER_LIMITED:
+            return ()
+        try:
+            return (ceo_session_workspace_dir(session_key, create=True),)
+        except Exception:
+            return ()
 
     def _build_tool_runtime_context(
         self,
@@ -3543,7 +3559,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "sandbox_tier": policy.tier,
             "exec_force_governed": policy.exec_requires_governed,
             "fs_read_roots": list(self._sandbox_read_roots(session.state.session_key, policy)),
-            "fs_write_roots": [],
+            "fs_write_roots": list(self._sandbox_write_roots(session.state.session_key, policy)),
+            "session_workspace_dir": (
+                str(ceo_session_workspace_dir(session.state.session_key, create=True))
+                if policy.tier == TIER_LIMITED
+                else ""
+            ),
             "turn_id": turn_id,
             "model_refs": turn_model_refs,
             "image_multimodal_enabled": image_enabled,
@@ -5883,6 +5904,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         # 信任策略**高于**全局审批档：受限档名单外的调用无条件进打回批，不看
         # governance 开没开、也不看风险度。`all_pass` 不能把它放开。
         policy = session_policy(session_key)
+        channel_session = is_channel_session_key(session_key)
         review_items: list[dict[str, Any]] = []
         pass_through_tool_call_ids: list[str] = []
         policy_blocked = False
@@ -5901,6 +5923,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         "arguments": arguments,
                     }
                 )
+                continue
+            # 渠道会话没有审批面；受限档的按会话工具列表就是操作员的显式授权。
+            # 勾选即表示接受该工具的风险，不再走全局审批打回（exec 仍受 governed 约束）。
+            if channel_session and policy.tier == TIER_LIMITED:
+                if tool_call_id:
+                    pass_through_tool_call_ids.append(tool_call_id)
                 continue
             risk_level = self._normalize_review_risk_level(
                 reviewable_risk_map.get(tool_name, ""),
@@ -5921,7 +5949,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 pass_through_tool_call_ids.append(tool_call_id)
         if not review_items:
             return None
-        channel_session = is_channel_session_key(session_key)
         return {
             "kind": "frontdoor_tool_approval_batch",
             "batch_id": f"batch:{uuid.uuid4().hex[:12]}",

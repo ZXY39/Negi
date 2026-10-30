@@ -191,18 +191,6 @@
         return data.item || null;
     },
 
-    async revealLlmConfigApiKey(configId, password = "") {
-        const body = password ? { password } : {};
-        const data = await this._request("POST", `/api/llm/configs/${encodeURIComponent(configId)}/reveal`, {
-            body,
-            timeoutMs: 15000,
-        });
-        return {
-            item: data.item || null,
-            expiresInSeconds: Number(data.reveal_expires_in_seconds ?? data.revealExpiresInSeconds ?? 0) || 0,
-        };
-    },
-
     async createLlmConfig(payload) {
         const data = await this._request("POST", "/api/llm/configs", {
             body: payload || {},

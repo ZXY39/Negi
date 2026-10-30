@@ -131,6 +131,16 @@ class CeoPromptBuilder:
                     '- 需要产出文件就写 `/workspace`；写完可以用 `filesystem_stat` / `content_open` 自检。',
                 ]
             )
+        if normalized == 'limited':
+            return '\n'.join(
+                [
+                    '## Limited Session',
+                    '- 本会话处于受限模式：文件读写只允许落在本会话工作目录内；工作目录外的路径不可读写。',
+                    '- 默认不提供命令行执行；`web_fetch` 默认可用。具体可用工具以 `tools[]` 为准。',
+                    '- 若操作员在「允许使用的工具列表」里勾选了 `exec`，命令行执行按命令行风险拦截设置执行。',
+                    '- 任务派发（异步任务 / 任务族）不可用；`cron` / `schedule_wake` 可用。',
+                ]
+            )
         if normalized == 'readonly':
             return '\n'.join(
                 [

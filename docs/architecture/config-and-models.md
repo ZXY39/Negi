@@ -297,7 +297,6 @@ Leader（CEO/frontdoor）解析本轮模型引用时按三档取值，顺序固�
 - 真正 secret 通过 bootstrap security overlay 管理
 - `LLMConfigFacade` 存 record 时会清洗掉明文 secret，再把 secret 写入 overlay
 - 脱敏读面（`GET /api/llm/configs/{id}` 的默认视图、绑定行、runtime config 导出、`_redact_config`）与写回闸门共用 `g3ku/llm_config/export.py` 的 `MASKED_SECRET_VALUE` 一个常量：那个值是"这次没改密钥"的哨兵，不是要落盘的内容。出现第二个掩码字面量时，把脱敏记录读回来再 PUT 回去的调用方会把明文 key 覆盖成掩码字符串本身。
-- 读面默认只回掩码，明文只在一次显式解锁之后出现：`POST /api/llm/configs/{id}/reveal` 用项目解锁口令（只读核对口令信封）换来 5 分钟的进程内授权，窗口内 `include_secrets=true` 与免密 reveal 都可以读到明文。授权不落盘、不滑动续期、只活在 web 进程里；没有口令信封（只用主密钥解锁）的部署在解锁态免密查看。脱敏记录额外带 `api_key_redacted` 与 `api_key_count`，编辑面靠它们区分"这份配置没有 key"与"key 被遮住"，并按真实 key 数校验每 key 并发格。创建/更新响应也只回掩码，所以一次 no-op 写入不能当读密钥的旁路。
 
 所以：
 

@@ -379,12 +379,12 @@ test("沙箱模式一行：行标题直接写状态，开关方向先弹二次�
     const row = ctx.elements.get("ceo-risk-sandbox-btn");
     const title = ctx.elements.get("ceo-risk-sandbox-title");
     assert.equal(row.attrs["aria-pressed"], "false");
-    assert.equal(title.textContent, "只读模式已关闭");
+    assert.equal(title.textContent, "受限模式已关闭");
 
     ctx.elements.get("ceo-risk-panel").dispatch("click", { target: row });
     await settle();
-    assert.equal(dialog?.title, "进入只读模式？", "没装沙箱时开关表达的是只读");
-    assert.equal(dialog?.confirmLabel, "进入只读模式");
+    assert.equal(dialog?.title, "进入受限模式？", "没装沙箱时开关表达的是受限");
+    assert.equal(dialog?.confirmLabel, "进入受限模式");
     assert.equal(dialog?.input?.type, "password");
     assert.equal(dialog?.textFull, true, "影响说明要整段展示");
     assert.equal(dialog?.inputPlain, true, "口令行去掉外层框");
@@ -396,7 +396,7 @@ test("沙箱模式一行：行标题直接写状态，开关方向先弹二次�
     await dialog.onConfirm({ value: "live-test-pass" });
     assert.deepEqual(plain(patched), [{ mode: "restricted", unlock_password: "live-test-pass" }]);
     assert.equal(row.attrs["aria-pressed"], "true");
-    assert.equal(title.textContent, "只读模式已开启", "没装后端时不冒充沙箱");
+    assert.equal(title.textContent, "受限模式已开启", "没装后端时不冒充沙箱");
     assert.deepEqual(notified, ["web:shared"], "切完要通知沙箱 iframe 重读");
 });
 
@@ -438,11 +438,11 @@ test("第三方会话关闭沙箱：口令错留在二次确认里，口令对�
     await settle();
     const row = ctx.elements.get("ceo-risk-sandbox-btn");
     assert.equal(row.attrs["aria-pressed"], "true");
-    assert.equal(ctx.elements.get("ceo-risk-sandbox-title").textContent, "只读模式已开启");
+    assert.equal(ctx.elements.get("ceo-risk-sandbox-title").textContent, "受限模式已开启");
 
     ctx.elements.get("ceo-risk-panel").dispatch("click", { target: row });
     await settle();
-    assert.equal(dialog?.title, "退出只读模式？");
+    assert.equal(dialog?.title, "退出受限模式？");
     assert.match(dialog?.text || "", /exec 自身的形态守卫/);
 
     await assert.rejects(() => dialog.onConfirm({ value: "wrong" }), /口令不正确/);
@@ -451,5 +451,5 @@ test("第三方会话关闭沙箱：口令错留在二次确认里，口令对�
 
     await dialog.onConfirm({ value: "live-test-pass" });
     assert.equal(row.attrs["aria-pressed"], "false");
-    assert.equal(ctx.elements.get("ceo-risk-sandbox-title").textContent, "只读模式已关闭");
+    assert.equal(ctx.elements.get("ceo-risk-sandbox-title").textContent, "受限模式已关闭");
 });

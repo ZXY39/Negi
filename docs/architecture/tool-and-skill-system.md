@@ -114,7 +114,7 @@ CEO/frontdoor 另有任务生命周期、分发控制与贴纸选图类固定工
 | `filesystem_*` | 每个变更工具各是一条独立的治理记录，也只以这些名字被调用与授权：`filesystem_write`（整文件“创建或替换”）、`filesystem_edit`（单文件文本区域替换，契约见下一行）、`filesystem_copy` / `filesystem_move`（`operations=[{source, destination}, ...]`）、`filesystem_delete`（`paths=[...]`）、`filesystem_propose_patch`。`copy` / `move` / `delete` 是路径级批量操作，变更单位本来就是整个文件系统对象路径，不采用文本区域定位契约。每条记录的资源 uri 是 `negi://resource/tool/<tool_id>`（写侧只出这个方案名，已沉淀在转录与工具结果里的 `g3ku://…` 继续按同一规则识别）。 | 授权按被调用的那一条工具判（`filesystem_write` 的 `allowed_roles` 只管写）。所有路径必须绝对路径，并先经过现有 workspace policy（拦截系统临时目录与 legacy `tmp/`、`.g3ku/tmp`；`tools/` 只放行 resource.yaml/main/toolskills 注册内容；`tmp_*` / `temp_*` 前缀命名——含点前缀 `.tmp_*` / `.temp_*`——以及日志、压缩包、下载产物等临时工件必须落在 temp_root（runtime 注入的 `task_temp_dir`，缺省 `<数据根>/temp`）或 `externaltools/` 下）。目录 `copy` / `move` 只允许目标路径不存在；目录 `delete` 必须显式 `recursive=true`。不存在可调用的 legacy 兼容入口（如 `filesystem(action=...)`、`filesystem.search`、`filesystem.open`）。 `filesystem_stat` 是目录清单与度量的归属工具（`paths` 收到目录时返回 `entries` 与整树聚合），它只列与量、不搜文件正文；content path 模式拒绝目录时给出的两条出路里，列目录归它，跨文件正文检索归 `exec`。 |
 | `filesystem_edit` | 模型可见契约是**平面必填字段对**：`path + old_text + new_text`，不含任何 object 字段。`old_text` 须逐字节匹配且唯一，用相邻行扩到唯一为止；`new_text: ""` 即删除该区域。定位方式只有这一条车道，因此没有 `by` / `mode` 判别器、也没有“车道互斥”的散文约束。成功文本回显被替换的行区间（`resolved lines N-M`），调用方不必重读文件即可确认改在了哪一段。 | 校验面 `parameters` 有意宽于模型面：`target.by` ∈ `exact_text` / `anchor_pair` / `line_range` 与 `mode + old_text/new_text`、`mode + start_line/end_line/replacement` 仍是可执行车道，历史转录与 adapter 形状继续可跑（`anchor_pair` 车道因此仍然存在，只是不向模型曝光——模型面没有 object，就不存在“把替换文本塞进定位器对象”这个错法）；判定 legacy 类别前先剥离对侧车道的占位值（`start_line=0` / `replacement=""` 等）吸收自动填充噪声，但 `target + legacy 字段` 不是受支持组合。模型面不出现 object 字段的原因：provider schema 管线无法表达互斥与条件必填（组合关键字会被压平），所以定位变体只能拆字段车道或拆工具，不能靠散文约束。重复提交同一编辑安全：`old_text` 已不在文件而 `new_text` 唯一在盘（锚点车道为区域已等于 `new_text`）时返回 `Already applied:` 且不写文件，属成功车道；`main/runtime/recovery_check.py` 判定“结果丢失但磁盘已生效”用同一条判据。`load_tool_context` / `get_tool_toolskill` 的参数摘要与示例只渲染模型面。 |
 | `silent` | CEO/frontdoor 专属的常驻内置控制工具：调用它 = 本轮不向用户投递任何回复，同时把正文留在上下文里（参数 `reason` 必填，`subject` / `superseded_by` 可选，三者都进转录行元数据供审计与后续轮次判读）。它是回合终态：同批其余工具照常执行完，随后直接收尾，不回模型。节点侧不暴露。合同与理由见 `runtime-overview.md`「3.3 静默回复（`silent` 工具）」。 | 常驻靠一条独立机制，不靠 `RESERVED_INTERNAL_TOOLS`，也不靠 `CEO_FIXED_BUILTIN_TOOL_NAMES`——那两个集合都只保证"已可见时排在本轮 callable 最前面"，**不具备注入能力**（`stop_tool_execution` 就是反例：它没有 `tools/<name>/resource.yaml`，也不在默认治理表里，因此根本进不了 exposure 名单）。它吃的是「3.1.1 为什么"常驻"需要独立机制」里那五处，当年"名单齐全而执行束缺实例"的实盘失败形状也记在那里。顺序上一律追加在真实能力之后，两条路径同一位置口径。它恒可调用，不受任何前置动作约束；这条豁免同时写在提示词里（`ceo_frontdoor.md` 的静默条目与契约的 `silent_help` 都点名"静默不需要前置动作"），否则模型会为静默一轮白跑一次工具轮。名字出现在 callable 名单时，契约另渲染一行 `silent_help:` 告诉模型何时用它，并说明"静默没有文本写法"——措辞里刻意不重提被禁的字面串：在纠正里拼写它等于把它送回模型上下文（`runtime-overview.md`「3.3 静默回复（`silent` 工具）」）。 |
-| `show_sticker_category` | CEO/frontdoor 固定内置的贴纸选图工具（资源 `tools/show_sticker_category`，没有 toolskill）。参数 `pack` / `category`（`_` 前缀的隐身分类拒绝）；把该分类**已注册**图片拼成一张每格带序号徽标的拼图，以与 `content_open` 同形的 image payload 交付，图只附在**本轮下一次请求**。模型看到后在同一条回复最后一行写 `[[sticker:<包>/<分类>/<序号>]]`；当前会话模型未勾多模态时返回点名该模型配置的提醒，并指引改用类别语法 `[[sticker:<包>/<分类>]]`。 | 常驻在 `CEO_FIXED_BUILTIN_TOOL_NAMES`：选图是回合内动作，走候选车道时第一次调用只交回契约、不渲染拼图，等于每次精确选图都白跑一轮模型请求。拼图按已注册列表做内容哈希缓存（`.g3ku/sticker-sheets`，不写 `stickers/` 目录，否则会被扫成表情包），`rerun_safe=true` 的重放只复用缓存。第三方会话的只读档白名单包含它（渲染缓存，不碰用户文件与网络，见 `sandbox-execution-plane.md`「只读档」）。 |
+| `show_sticker_category` | CEO/frontdoor 固定内置的贴纸选图工具（资源 `tools/show_sticker_category`，没有 toolskill）。参数 `pack` / `category`（`_` 前缀的隐身分类拒绝）；把该分类**已注册**图片拼成一张每格带序号徽标的拼图，以与 `content_open` 同形的 image payload 交付，图只附在**本轮下一次请求**。模型看到后在同一条回复最后一行写 `[[sticker:<包>/<分类>/<序号>]]`；当前会话模型未勾多模态时返回点名该模型配置的提醒，并指引改用类别语法 `[[sticker:<包>/<分类>]]`。 | 常驻在 `CEO_FIXED_BUILTIN_TOOL_NAMES`：选图是回合内动作，走候选车道时第一次调用只交回契约、不渲染拼图，等于每次精确选图都白跑一轮模型请求。拼图按已注册列表做内容哈希缓存（`.g3ku/sticker-sheets`，不写 `stickers/` 目录，否则会被扫成表情包），`rerun_safe=true` 的重放只复用缓存。受限档默认集合包含它（渲染缓存，不碰用户文件与网络，见 `sandbox-execution-plane.md`「受限档」）。 |
 | `time` | 读当前时刻，**零参数**。返回 `now`（本地墙钟）、`utc`、`epoch_ms`、`weekday`、`utc_offset`，正文全英文。两条车道共用同一份实现（`g3ku/runtime/wake_clock.py`，只依赖标准库——它被 web 与 worker 两侧读，不能 import `main.runtime`）。它是模型唯一的"现在几点"来源：绝对时刻从这一发读数取，不靠对别的字段做心算。 | 同参重复调用是正当动作（核对时钟、跑完一次长工具后再看时间），所以它是 `PROGRESS_NEUTRAL_TOOL_NAMES` 的唯一成员：`main/runtime/react_loop.py` 的跨回合熔断与 `main/runtime/node_watchdog.py` 的 `repeated_identical_tool_call` 都跳过它，并且它**不算进度**——只看时钟的节点照样该被判失速。判据见本文「8. Duplicate Tool Call Guard」。`rerun_safe=True`（纯读，恢复车道可自动重放）、带 `hide_universal_timeout_parameter`、进 `_NO_CONTRACT_SIGNAL_TOOL_NAMES`。 |
 | `schedule_wake` | 给自己设**一次**唤醒：`note` 必填，时刻二选一——`after_seconds` 或未来的 `at`（`at` 抄 `time` 的读数；读侧容忍 ISO、`YYYY-MM-DD HH:MM`、epoch 秒/毫秒，裸日期按本地时区）。设闹钟**不停回合**（停靠另有出口 `enter_wait`），到点收到一条带着自己 `note` 与当前时刻的通知。重设只替换自己那条待触发的闹钟，一条车道上最多一份。 | 后端按车道分叉、模型契约同一份：节点落 `task_node_timers`（一节点一行，worker 侧每 5 秒扫一次，到期经 `deliver_node_message` 投一条 `wake_timer` 系统消息，所以暂停/终态/去重语义全部复用信箱那条道，见 `main-task-runtime.md`「节点信箱与唤醒」）；前门落会话自己的 cron 一次性 `at` 任务（见 `heartbeat-system.md`「Cron Reminder Contract」）。时钟到点而节点停靠⇒通知照常入箱并唤醒；节点被操作员暂停⇒只入箱不叫醒，暂停位仍归操作员。 overdue 到点的正文自带"晚了多久、先重新对钟再按原计划推日期"。`at`/`after_seconds` 的互斥形状住在函数级 `description`（provider 边界剥掉参数级描述，只有函数级送达模型）。它带 `rerun_safe`，理由是可证明的那一种而不是"看起来无害"：两条车道的写点都是"每个调用方至多一份待触发唤醒"的 upsert / 按名替换，重放只会换掉同一份，不会排进第二次（判据归 `tool-hydration-and-callable-chain.md`「工具可重放声明」）。同 `time` 一起进 `_NO_CONTRACT_SIGNAL_TOOL_NAMES`：两颗都没有 toolskill，请求视图里永远不会出现它们的契约块，因此不能当"契约在场"的读数用。 |
 
@@ -348,15 +348,22 @@ The surfaced `message` executor is absent from the resource/tool contract entire
 
 ### 会话档位与工具面
 
-工具面按会话档位收窄，判据在 `sandbox-execution-plane.md`「只读档（`readonly`）」：
+工具面按会话档位收窄，判据在 `sandbox-execution-plane.md`「受限档（`limited`）」：
 
-- **受限档的第三方会话用白名单**：未登记的工具名在曝光层不进候选，在执行层被合成拒绝；
-  新增资源工具要进这一档必须显式登记并声明它读什么根。
-- **owner 的受限档用黑名单**：只摘写类 / 进程控制 / 任务族 / 会写盘的联网工具，其余照旧。
-- **受限档一律不给任务族**（`create_async_task` / `task_*` / `send_message` / `schedule_wake`），owner 也一样。
+- **受限档的第三方与 owner 用同一份按会话白名单**：默认集合见 `LIMITED_DEFAULT_TOOL_NAMES`，
+  固定基础项见 `LIMITED_FIXED_TOOL_NAMES`；operator 可以在「允许使用的工具列表」里逐会话增删，
+  override 落 `<数据根>/sandbox/session-modes.json` 的 `allowed_tools`。
+- **默认允许写文件（限会话工作目录）、`web_fetch`、记忆、`cron` / `schedule_wake`、`mention_member`；
+  `exec` / `process_kill` / `create_async_task` / `skill-installer` / `register_stickers` 默认不允许，
+  但可显式勾选**。`exec` 勾选后 `exec_requires_governed=True`，命令行风险拦截设置可见并生效。
+- **任务派发在受限/沙箱档一律拒**（`create_async_task` / `send_message` / `task_*`）；
+  调度类 `cron` / `schedule_wake` 不属于派发族，正常放行。
+- **渠道会话的显式授权不走审批打回**：渠道没有审批面，`policy.tool_allowed` 通过的工具
+  直接 pass-through（`exec` 由 governed 接管）；未勾选的工具仍按 `trust_policy` 拒绝。
 - 收窄发生在**常驻内置并进来之后**——先减后并等于没减；`_frontdoor_callable_tool_names_for_state`
   与 `CeoExposureResolver.resolve_for_actor` 共用同一份名单，让尾块 callable 与执行准入同源。
-- 档位不是审批档：信任策略高于全局审批档，`all_pass` 不能把它放开。
+- 档位不是审批档：信任策略高于全局审批档，`all_pass` 不能把它放开；反过来，
+  全局审批档也不能把未授权的受限工具放开。
 
 ### Provider Tool Surface
 

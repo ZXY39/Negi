@@ -327,6 +327,10 @@
                                                     <span class="ceo-risk-switch-thumb"></span>
                                                 </span>
                                             </button>
+                                            <button id="ceo-risk-tools-btn" class="ceo-risk-entry" type="button" hidden>
+                                                <span class="ceo-risk-entry-title">允许使用的工具列表</span>
+                                                <span id="ceo-risk-tools-hint" class="ceo-risk-entry-hint"></span>
+                                            </button>
                                             <button id="ceo-risk-exec-settings-btn" class="ceo-risk-entry" type="button">
                                                 <span class="ceo-risk-entry-title">命令行风险拦截设置</span>
                                                 <span class="ceo-risk-entry-hint">exec 执行模式与命令白名单</span>
@@ -1456,6 +1460,28 @@
                     <div class="confirm-actions">
                         <button id="ceo-risk-whitelist-save-btn" class="toolbar-btn success" type="button">保存</button>
                         <button id="ceo-risk-whitelist-close-btn" class="toolbar-btn ghost" type="button"
+                            data-modal-close>关闭</button>
+                    </div>
+                </section>
+            </div>
+
+            <div id="ceo-risk-tools-backdrop" class="confirm-backdrop" hidden>
+                <section id="ceo-risk-tools-dialog" class="confirm-dialog ceo-risk-whitelist-dialog" role="dialog"
+                    aria-modal="true" aria-labelledby="ceo-risk-tools-dialog-title" tabindex="-1">
+                    <div class="confirm-header">
+                        <h2 id="ceo-risk-tools-dialog-title">允许使用的工具列表</h2>
+                    </div>
+                    <p class="ceo-risk-whitelist-hint">仅对当前会话的受限模式生效。运行时基础项始终可用；保存需要项目解锁口令。</p>
+                    <div id="ceo-risk-tools-list" class="ceo-risk-whitelist-list" aria-live="polite"></div>
+                    <label class="resource-field">
+                        <span class="resource-field-label">项目解锁口令</span>
+                        <input id="ceo-risk-tools-password" class="resource-search" type="password"
+                            autocomplete="current-password" placeholder="保存时校验">
+                    </label>
+                    <div class="confirm-actions">
+                        <button id="ceo-risk-tools-reset-btn" class="toolbar-btn ghost" type="button">恢复默认</button>
+                        <button id="ceo-risk-tools-save-btn" class="toolbar-btn success" type="button">保存</button>
+                        <button id="ceo-risk-tools-close-btn" class="toolbar-btn ghost" type="button"
                             data-modal-close>关闭</button>
                     </div>
                 </section>

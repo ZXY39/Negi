@@ -32,9 +32,11 @@ _MODES: dict[str, str] | None = None
 _MODES_PATH: Path | None = None
 _UNLOCKS: dict[str, dict[str, str]] = {}
 _ROOTS: dict[str, list[str]] = {}
+_TOOLS: dict[str, list[str]] = {}
 _INSTALL: dict[str, Any] | None = None
 _PERSONA: str | None = None
 _MAX_WRITABLE_ROOTS = 16
+_MAX_ALLOWED_TOOLS = 256
 
 
 def _normalized_mode(value: Any) -> str:
@@ -86,6 +88,15 @@ def _load_locked() -> dict[str, str]:
                 cleaned = _normalized_roots(value)
                 if cleaned:
                     _ROOTS[normalized_key] = cleaned
+    tools = payload.get("allowed_tools") if isinstance(payload, dict) else None
+    if isinstance(tools, dict):
+        _TOOLS.clear()
+        for key, value in tools.items():
+            normalized_key = str(key or "").strip()
+            if normalized_key and isinstance(value, list):
+                cleaned = _normalized_tool_names(value)
+                if cleaned:
+                    _TOOLS[normalized_key] = cleaned
     _MODES = modes
     return modes
 
@@ -119,6 +130,21 @@ def _normalized_roots(values: Any) -> list[str]:
     return roots
 
 
+def _normalized_tool_names(values: Any) -> list[str]:
+    """工具名：去空、去重、保留首次出现顺序，限数量。"""
+    tools: list[str] = []
+    seen: set[str] = set()
+    for item in list(values or []):
+        text = str(item or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        tools.append(text)
+        if len(tools) >= _MAX_ALLOWED_TOOLS:
+            break
+    return tools
+
+
 def get_writable_roots(session_key: Any) -> list[str]:
     """owner 档的额外可写根（D14：交付物常落在桌面/输出目录）。third_party 恒为空。"""
     key = str(session_key or "").strip()
@@ -142,6 +168,42 @@ def set_writable_roots(session_key: Any, values: Any) -> list[str]:
             _ROOTS.pop(key, None)
         _write_locked(dict(_MODES or {}))
     return cleaned
+
+
+def get_session_allowed_tools(session_key: Any) -> list[str]:
+    """受限模式的按会话工具 override；空列表 = 未自定义（使用默认集合）。"""
+    key = str(session_key or "").strip()
+    if not key:
+        return []
+    with _LOCK:
+        _load_locked()
+        return list(_TOOLS.get(key) or [])
+
+
+def set_session_allowed_tools(session_key: Any, values: Any) -> list[str]:
+    key = str(session_key or "").strip()
+    if not key:
+        raise ValueError("session_key_required")
+    cleaned = _normalized_tool_names(values)
+    with _LOCK:
+        _load_locked()
+        if cleaned:
+            _TOOLS[key] = cleaned
+        else:
+            _TOOLS.pop(key, None)
+        _write_locked(dict(_MODES or {}))
+    return cleaned
+
+
+def clear_session_allowed_tools(session_key: Any) -> None:
+    key = str(session_key or "").strip()
+    if not key:
+        return
+    with _LOCK:
+        _load_locked()
+        if _TOOLS.pop(key, None) is None:
+            return
+        _write_locked(dict(_MODES or {}))
 
 
 def get_session_mode(session_key: Any) -> str:
@@ -175,7 +237,11 @@ def clear_session_mode(session_key: Any) -> None:
         return
     with _LOCK:
         modes = dict(_load_locked())
-        if modes.pop(key, None) is None:
+        removed = modes.pop(key, None) is not None
+        removed = _TOOLS.pop(key, None) is not None or removed
+        removed = _ROOTS.pop(key, None) is not None or removed
+        removed = _UNLOCKS.pop(key, None) is not None or removed
+        if not removed:
             return
         _write_locked(modes)
         _MODES.clear()
@@ -192,6 +258,7 @@ def _write_locked(modes: dict[str, str]) -> None:
         "sessions": dict(sorted(modes.items())),
         "operator_unlocks": _UNLOCKS,
         "writable_roots": {key: list(value) for key, value in sorted(_ROOTS.items())},
+        "allowed_tools": {key: list(value) for key, value in sorted(_TOOLS.items())},
     }
     temp = path.with_suffix(path.suffix + ".tmp")
     temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -285,11 +352,14 @@ def reset_sandbox_state_for_tests() -> None:
         _INSTALL = None
         _UNLOCKS.clear()
         _ROOTS.clear()
+        _TOOLS.clear()
         _PERSONA = None
 
 
 __all__ = [
+    "clear_session_allowed_tools",
     "clear_session_mode",
+    "get_session_allowed_tools",
     "get_session_mode",
     "get_writable_roots",
     "install_state",
@@ -300,6 +370,7 @@ __all__ = [
     "reset_sandbox_state_for_tests",
     "sandbox_persona_text",
     "set_sandbox_persona_text",
+    "set_session_allowed_tools",
     "set_session_mode",
     "set_writable_roots",
 ]

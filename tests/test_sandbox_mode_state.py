@@ -20,7 +20,7 @@ from g3ku.sandbox.policy import (
     MODE_UNRESTRICTED,
     TIER_HOST_FULL,
     TIER_JAILED,
-    TIER_READONLY,
+    TIER_LIMITED,
     resolve_tier,
     session_policy,
 )
@@ -80,16 +80,16 @@ def test_session_policy_honors_stored_mode(isolated_state: Path, registry) -> No
     assert session_policy("web:ceo-1").tier == TIER_HOST_FULL
     sandbox_state.set_session_mode("web:ceo-1", MODE_RESTRICTED)
     policy = session_policy("web:ceo-1")
-    assert policy.tier == TIER_READONLY
-    assert policy.exec_requires_governed is True
-    assert policy.tool_allowed("exec") is True
-    assert policy.tool_allowed("filesystem_write") is False
+    assert policy.tier == TIER_LIMITED
+    assert policy.exec_requires_governed is False
+    assert policy.tool_allowed("exec") is False
+    assert policy.tool_allowed("filesystem_write") is True
 
     # 第三方默认 restricted；显式放成 unrestricted 后回宿主（口令 gate 在 API 层）
     entry, _ = registry.resolve_or_create(
         bridge_id="qq-official-1", external_key="qq:group:g1", chat_type="group"
     )
-    assert session_policy(entry.session_key).tier == TIER_READONLY
+    assert session_policy(entry.session_key).tier == TIER_LIMITED
     sandbox_state.set_session_mode(entry.session_key, MODE_UNRESTRICTED)
     unlocked = session_policy(entry.session_key)
     assert unlocked.tier == TIER_HOST_FULL
@@ -99,14 +99,14 @@ def test_session_policy_honors_stored_mode(isolated_state: Path, registry) -> No
 def test_jailed_is_never_granted_without_backends(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("G3KU_SANDBOX_ENABLE_JAIL", raising=False)
     assert JAIL_BACKENDS_AVAILABLE is False
-    # 安装态说 ready，但闸门没开 → 仍然只读
+    # 安装态说 ready，但闸门没开 → 仍然受限
     assert (
         resolve_tier(
             trust=TRUST_THIRD_PARTY_GROUP,
             mode=MODE_RESTRICTED,
             install_state="ready",
         )
-        == TIER_READONLY
+        == TIER_LIMITED
     )
     # 显式传 jail_available=True 才发放（装配侧测试用这个口子）
     assert (
@@ -243,6 +243,84 @@ def test_third_party_persona_uses_sandbox_block(isolated_state: Path) -> None:
     assert session2._frontdoor_persona_text == "群聊人设"
 
 
+@pytest.mark.asyncio
+async def test_sandbox_tools_api_roundtrip(
+    isolated_state: Path,
+    registry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from g3ku.runtime.api import sandbox as sandbox_api
+
+    entry, _ = registry.resolve_or_create(
+        bridge_id="qq-official-1", external_key="qq:group:g1", chat_type="group"
+    )
+    monkeypatch.setattr(sandbox_api, "_session_exists", lambda key: True)
+    monkeypatch.setattr(sandbox_api, "_verify_unlock_password", lambda pw: pw == "right")
+
+    got = await sandbox_api.get_session_sandbox_tools(entry.session_key)
+    item = got["item"]
+    assert item["applicable"] is True
+    assert "web_fetch" in item["allowed_tools"]
+    assert "exec" not in item["allowed_tools"]
+    assert item["exec_allowed"] is False
+    assert item["allowed_tools_customized"] is False
+    default_tools = list(item["default_allowed_tools"])
+
+    with pytest.raises(Exception) as missing:
+        await sandbox_api.patch_session_sandbox_tools(
+            entry.session_key, {"allowed_tools": ["exec"]}
+        )
+    assert getattr(missing.value, "status_code", None) == 403
+    monkeypatch.setattr(sandbox_api, "_verify_unlock_password", lambda pw: False)
+    with pytest.raises(Exception) as invalid:
+        await sandbox_api.patch_session_sandbox_tools(
+            entry.session_key, {"allowed_tools": ["exec"], "unlock_password": "nope"}
+        )
+    assert getattr(invalid.value, "status_code", None) == 403
+
+    monkeypatch.setattr(sandbox_api, "_verify_unlock_password", lambda pw: pw == "right")
+    saved = await sandbox_api.patch_session_sandbox_tools(
+        entry.session_key,
+        {"allowed_tools": ["exec", "web_fetch"], "unlock_password": "right"},
+    )
+    saved_item = saved["item"]
+    assert saved_item["exec_allowed"] is True
+    assert "exec" in saved_item["allowed_tools"]
+    assert saved_item["allowed_tools_customized"] is True
+    policy = session_policy(entry.session_key)
+    assert policy.exec_allowed is True
+    assert policy.exec_requires_governed is True
+    stored = sandbox_state.get_session_allowed_tools(entry.session_key)
+    assert "exec" in stored
+    assert "silent" in stored  # 固定项自动补入
+
+    restored = await sandbox_api.patch_session_sandbox_tools(
+        entry.session_key,
+        {"allowed_tools": default_tools, "unlock_password": "right"},
+    )
+    assert restored["item"]["allowed_tools_customized"] is False
+    assert saved["item"]["effective_from"] == "next_turn"
+    assert sandbox_state.get_session_allowed_tools(entry.session_key) == []
+
+    owner = await sandbox_api.get_session_sandbox_tools("web:ceo-1")
+    assert owner["item"]["applicable"] is False
+
+
+def test_session_workspace_is_stable_and_isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from g3ku.runtime.frontdoor import session_workspace
+
+    monkeypatch.setattr(
+        session_workspace, "data_work_path", lambda *parts: tmp_path.joinpath(*parts)
+    )
+    first = session_workspace.ceo_session_workspace_dir("ext:qq-official-1:abc", create=True)
+    second = session_workspace.ceo_session_workspace_dir("ext:qq-official-1:abc", create=True)
+    other = session_workspace.ceo_session_workspace_dir("ext:qq-official-1:def", create=True)
+    assert first == second
+    assert first != other
+    assert Path(first).is_dir()
+    assert Path(other).is_dir()
+
+
 def test_probe_shape() -> None:
     reading = probe_install_state()
     assert reading["state"] in {"ready", "partial", "runtime_missing", "not_installed"}
@@ -275,7 +353,7 @@ async def test_sandbox_api_owner_and_third_party_gate(
     result = await sandbox_api.patch_session_sandbox(
         "web:ceo-1", {"mode": MODE_RESTRICTED, "unlock_password": "right"}
     )
-    assert result["item"]["resolved_tier"] == TIER_READONLY
+    assert result["item"]["resolved_tier"] == TIER_LIMITED
     assert result["item"]["unlock_required"] is True
     assert result["item"]["effective_from"] == "next_turn"
     assert result["item"]["operator_unlock"]["at"]
@@ -284,7 +362,7 @@ async def test_sandbox_api_owner_and_third_party_gate(
     same = await sandbox_api.patch_session_sandbox(
         "web:ceo-1", {"mode": MODE_RESTRICTED}
     )
-    assert same["item"]["resolved_tier"] == TIER_READONLY
+    assert same["item"]["resolved_tier"] == TIER_LIMITED
 
     # 第三方切 unrestricted：没口令 403
     with pytest.raises(Exception) as missing:
@@ -328,7 +406,7 @@ async def test_sandbox_status_reports_no_file_management_without_backend(
     assert item["install_state"] in {"ready", "partial", "runtime_missing", "not_installed"}
     if item["install_state"] not in {"ready", "partial"}:
         assert item["file_management_available"] is False
-        assert item["ui_labels"]["restricted"] == "只读"
+        assert item["ui_labels"]["restricted"] == "受限"
     assert item["install_available"] is False
 
 

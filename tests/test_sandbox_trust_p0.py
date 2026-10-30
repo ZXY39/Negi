@@ -44,7 +44,7 @@ from g3ku.sandbox.policy import (
     MODE_UNRESTRICTED,
     TIER_HOST_FULL,
     TIER_JAILED,
-    TIER_READONLY,
+    TIER_LIMITED,
     default_mode_for_trust,
     resolve_tier,
     session_policy,
@@ -152,9 +152,9 @@ def test_unknown_external_session_fails_closed(registry) -> None:
     ("trust", "mode", "install", "expected"),
     [
         (TRUST_OWNER, MODE_UNRESTRICTED, INSTALL_NOT_INSTALLED, TIER_HOST_FULL),
-        (TRUST_OWNER, MODE_RESTRICTED, INSTALL_NOT_INSTALLED, TIER_READONLY),
+        (TRUST_OWNER, MODE_RESTRICTED, INSTALL_NOT_INSTALLED, TIER_LIMITED),
         (TRUST_OWNER, MODE_RESTRICTED, INSTALL_READY, TIER_JAILED),
-        (TRUST_THIRD_PARTY_GROUP, MODE_RESTRICTED, INSTALL_NOT_INSTALLED, TIER_READONLY),
+        (TRUST_THIRD_PARTY_GROUP, MODE_RESTRICTED, INSTALL_NOT_INSTALLED, TIER_LIMITED),
         (TRUST_THIRD_PARTY_GROUP, MODE_RESTRICTED, INSTALL_READY, TIER_JAILED),
         (TRUST_THIRD_PARTY_GROUP, MODE_UNRESTRICTED, INSTALL_READY, TIER_HOST_FULL),
     ],
@@ -174,12 +174,12 @@ def test_default_mode_follows_trust() -> None:
     assert default_mode_for_trust(TRUST_THIRD_PARTY_DM) == MODE_RESTRICTED
 
 
-def test_third_party_readonly_is_a_whitelist(registry) -> None:
+def test_third_party_limited_is_a_whitelist(registry) -> None:
     entry, _ = registry.resolve_or_create(
         bridge_id="qq-official-1", external_key="qq:group:g1", chat_type="group"
     )
     policy = session_policy(entry.session_key)
-    assert policy.tier == TIER_READONLY
+    assert policy.tier == TIER_LIMITED
     for allowed in (
         "silent",
         "time",
@@ -189,49 +189,57 @@ def test_third_party_readonly_is_a_whitelist(registry) -> None:
         "content_search",
         "content_describe",
         "filesystem_stat",
+        "filesystem_write",
+        "filesystem_delete",
         "view_message_history",
+        "memory_update",
+        "cron",
+        "schedule_wake",
+        "web_fetch",
     ):
         assert policy.tool_allowed(allowed), allowed
     for denied in (
         "exec",
         "process_kill",
-        "filesystem_write",
-        "filesystem_delete",
-        "web_fetch",
         "skill-installer",
-        "memory_update",
         "create_async_task",
         "task_summary",
         "send_message",
-        "cron",
-        "schedule_wake",
         "some_future_tool",
     ):
         assert not policy.tool_allowed(denied), denied
 
 
-def test_owner_readonly_is_a_denylist() -> None:
+def test_owner_limited_uses_the_same_allowlist() -> None:
     policy = session_policy("web:ceo-1", mode=MODE_RESTRICTED)
-    assert policy.tier == TIER_READONLY
-    assert policy.exec_requires_governed is True
-    # 防手滑：干不了写/进程/任务，但读与联网照常
-    assert policy.tool_allowed("exec")
+    assert policy.tier == TIER_LIMITED
+    assert policy.exec_requires_governed is False
     assert policy.tool_allowed("web_fetch")
     assert policy.tool_allowed("content_open")
-    assert policy.tool_allowed("some_skill_tool")
+    assert policy.tool_allowed("filesystem_write")
+    assert not policy.tool_allowed("exec")
     for denied in (
-        "filesystem_write",
-        "filesystem_edit",
-        "filesystem_propose_patch",
         "process_kill",
         "skill-installer",
         "create_async_task",
         "task_summary",
         "send_message",
-        "cron",
-        "schedule_wake",
     ):
         assert not policy.tool_allowed(denied), denied
+
+
+def test_limited_tool_override_can_grant_exec(monkeypatch) -> None:
+    from g3ku.sandbox import state as sandbox_state
+
+    monkeypatch.setattr(sandbox_state, "get_session_allowed_tools", lambda key: ["exec", "web_fetch"])
+    policy = session_policy("web:ceo-1", mode=MODE_RESTRICTED)
+    assert policy.tier == TIER_LIMITED
+    assert policy.tool_allowed("exec")
+    assert policy.exec_allowed is True
+    assert policy.exec_requires_governed is True
+    # 固定项即使没写进 override 也始终可用
+    assert policy.tool_allowed("silent")
+    assert policy.tool_allowed("load_tool_context")
 
 
 def test_owner_unrestricted_keeps_today_behavior() -> None:
@@ -246,6 +254,42 @@ def test_empty_session_key_is_not_restricted() -> None:
     # 无会话上下文的装配（测试/CLI）不该被当成第三方
     policy = session_policy("")
     assert policy.tier == TIER_HOST_FULL
+
+
+def test_limited_filesystem_write_roots_and_anchoring(tmp_path: Path) -> None:
+    from g3ku.agent.tools.filesystem_mutation import FilesystemTool
+
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    session_ws = tmp_path / "session-workspace"
+    session_ws.mkdir()
+    tool = FilesystemTool(workspace=workspace)
+    runtime = {
+        "sandbox_tier": "limited",
+        "session_workspace_dir": str(session_ws),
+        "session_key": "ext:qq-official-1:abc",
+        "fs_write_roots": [str(session_ws)],
+    }
+
+    # 相对路径锚到会话工作目录，而不是项目根
+    assert tool._resolve_model_path("draft.md", runtime) == (session_ws / "draft.md").resolve()
+
+    # 工作目录内可写；项目根和系统路径被写根拒绝
+    tool._enforce_workspace_path_policy(
+        file_path=session_ws / "draft.md", action="write", runtime=runtime
+    )
+    with pytest.raises(PermissionError):
+        tool._enforce_workspace_path_policy(
+            file_path=workspace / "project.py", action="write", runtime=runtime
+        )
+    with pytest.raises(PermissionError):
+        tool._enforce_workspace_path_policy(
+            file_path=tmp_path / "outside.txt", action="delete", runtime=runtime
+        )
+
+    # 受限模式不跑写后校验命令
+    assert tool._runtime_validation_enabled(runtime, True) is False
+    assert tool._runtime_validation_enabled({"sandbox_tier": "host_full"}, True) is True
 
 
 # -- 读根限定 ---------------------------------------------------------------
@@ -562,7 +606,7 @@ def test_approval_gate_auto_rejects_third_party_tools(registry) -> None:
     # 第三方会话没有审批面，策略也不落中断：整批走合成拒绝车道
     assert result["auto_reject"] is True
     assert result["channel_session"] is True
-    assert result["policy_tier"] == TIER_READONLY
+    assert result["policy_tier"] == TIER_LIMITED
     assert [item["tool_call_id"] for item in result["review_items"]] == ["c1", "c3"]
     assert all(item["reason"] == "trust_policy" for item in result["review_items"])
     assert result["pass_through_tool_call_ids"] == ["c2"]

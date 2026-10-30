@@ -958,6 +958,15 @@ class ExecTool(Tool):
 
     def _runtime_task_temp_root(self, runtime: dict[str, Any] | None = None) -> Path | None:
         payload = runtime if isinstance(runtime, dict) else {}
+        # 受限模式：会话工作目录就是 cwd 与临时/下载落点（exec 只有在 operator
+        # 显式勾选后才可达；这里保证它不会把文件散落到项目根）。
+        if str(payload.get("sandbox_tier") or "") == "limited":
+            session_workspace = str(payload.get("session_workspace_dir") or "").strip()
+            if session_workspace:
+                try:
+                    return Path(session_workspace).expanduser().resolve()
+                except (OSError, RuntimeError, ValueError):
+                    pass
         raw = str(payload.get("task_temp_dir") or "").strip()
         if not raw:
             return None

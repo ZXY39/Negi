@@ -16,7 +16,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 10. `external-agent-api.md` when the change touches the external bridge API (`/api/v1`), external sessions, outbound routing to bridges, or the built-in official QQ adapter
 11. `agent-gateway.md` when the change touches the OpenAI-compatible endpoint (`/api/v1/chat/completions`) or the MCP stdio gateway (`negi mcp serve`)
 12. `speech-to-text.md` when the change touches local voice transcription: the composer mic button, inbound channel voice, the `stt` config section, or the vendored whisper.cpp binary
-13. `sandbox-execution-plane.md` when the change touches session trust, third-party channel gating, the read-only tier, tool allowlists by tier, or the read-root boundary
+13. `sandbox-execution-plane.md` when the change touches session trust, third-party channel gating, the limited tier, per-session tool allowlists, or the read/write-root boundary
 
 ## Topic Guide
 
@@ -45,7 +45,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - `speech-to-text.md`
   Use for local voice-to-text: the whisper.cpp subprocess engine and why it is not kept resident, audio normalization and silence gating, binary/model provisioning, and what the model tier choice trades in latency and accuracy.
 - `sandbox-execution-plane.md`
-  Use for the trust tier of a session (owner vs third party), the install-state-driven tier model (`restricted` / `unrestricted` resolving to `readonly` / `jailed` / `host_full`), the read-only tool allowlist and default-deny rule, the read-root boundary and its `ContextVar` pinning, control-plane rejection on the synthetic lane, the memory gate's four intake points, and the third-party sender stamp in the model-visible projection.
+  Use for the trust tier of a session (owner vs third party), the install-state-driven tier model (`restricted` / `unrestricted` resolving to `limited` / `jailed` / `host_full`), the limited-mode per-session tool allowlist (fixed primitives, default set, optional exec/process/task tools), the session workspace and read/write-root boundary, control-plane rejection on the synthetic lane, the memory gate's four intake points, and the third-party sender stamp in the model-visible projection.
 
 ## Debugging Entry Points
 
@@ -272,5 +272,5 @@ These rules prevent the docs from re-accumulating redundancy. Every edit to this
 | External Agent API contract: `externalApi` config and token overlay, ext session registry/keys, turn terminal invariant, SSE event mapping, ext outbound routing, built-in official QQ adapter (`qqBot` config, in-process botpy bridge) | `external-agent-api.md` |
 | Agent gateway contract: OpenAI-compatible endpoint (`/api/v1/chat/completions`, session mapping, wait/200-honest-text policy, streaming diff) and MCP stdio gateway (`negi mcp serve`, tool surface, stdout purity) | `agent-gateway.md` |
 | Local speech-to-text contract: whisper.cpp subprocess engine and slot serialization, audio normalization and silence/language gating, traditional→simplified post-pass, binary/model provisioning (`stt` defaults' measured basis), voice-clip storage and the model-visibility exclusion, known latency and accuracy envelope | `speech-to-text.md` |
-| Sandbox execution plane: session trust tiers and their derivation (`owner` / `third_party_dm` / `third_party_group`, sticky downgrade, fail-closed on unknown), install-state-driven tier model (`restricted` / `unrestricted` → `readonly` / `jailed` / `host_full`), read-only tool allowlist and default-deny rule, owner read-only denylist and `governed` exec clamp, read-root boundary and its call-scoped pinning, control-plane rejection on the synthetic lane, memory gate intake points and read-side suppression, third-party sender stamp | `sandbox-execution-plane.md` |
+| Sandbox execution plane: session trust tiers and their derivation (`owner` / `third_party_dm` / `third_party_group`, sticky downgrade, fail-closed on unknown), install-state-driven tier model (`restricted` / `unrestricted` → `limited` / `jailed` / `host_full`), limited-mode per-session tool allowlist and fixed primitives, session workspace with read/write roots, optional `exec` grant with `governed` clamp, control-plane rejection on the synthetic lane, memory gate intake points and read-side suppression, third-party sender stamp | `sandbox-execution-plane.md` |
 | Startup/deploy/troubleshooting order, the post-install entry surface (`negi` command stub, install-root pointer, desktop/Start Menu shortcuts, uninstall entry and its keep/purge guards), install root vs data root storage layout (which paths hang on which root, where to read the effective data root) and data-root resolution order, memory CLI, Docker compose | `operations-and-maintenance.md` |

@@ -566,10 +566,10 @@ function renderSession(item) {
     item.resolved_tier === 'host_full' ? 'neutral' : 'ok',
   );
 
-  const labels = item.ui_labels || { restricted: '只读', unrestricted: '全权限' };
+  const labels = item.ui_labels || { restricted: '受限', unrestricted: '全权限' };
   const describeRestricted = item.resolved_tier === 'jailed'
     ? '数据面工具在 jail 内执行；控制面仍然拒绝。'
-    : '可读本会话的上传与临时目录，不能写文件、不能执行命令。';
+    : '可读写本会话工作目录内的文件；默认不能执行命令；具体可用工具以会话的允许列表为准。';
   const describeUnrestricted = item.trust === 'owner'
     ? '与今天一致：宿主执行，按现有权限。'
     : '数据面回到宿主执行，控制面拒绝与记忆门仍然生效。';
@@ -652,15 +652,15 @@ function impactItems(targetMode) {
       {
         title: '工具面',
         text: installed
-          ? '收窄到只读白名单；写文件、执行命令、联网等动作被拒绝。已装沙箱时数据面工具在 jail 内执行。'
-          : '收窄到只读：只能读本会话的上传与临时目录；不能写文件、执行命令、联网，也不能派异步任务。',
+          ? '收窄到受限集合；数据面工具在 jail 内执行。具体可用工具以会话的允许列表为准。'
+          : '收窄到受限集合：文件写入限本会话工作目录；默认不执行命令行、不派异步任务；具体可用工具以会话的允许列表为准。',
       },
       { title: '缓存', text: cacheText },
       {
         title: '安全',
         text: thirdParty
-          ? '白名单外的工具调用会被拒绝；这是第三方会话，记忆门继续生效。'
-          : '白名单外的工具调用会被拒绝；这是操作员自己的会话，随时可以再关掉。',
+          ? '允许列表外的工具调用会被拒绝；这是第三方会话，控制面拒绝继续生效。'
+          : '允许列表外的工具调用会被拒绝；这是操作员自己的会话，随时可以再关掉。',
       },
     ];
   }
@@ -679,7 +679,7 @@ function impactItems(targetMode) {
   ];
 }
 
-// 没装成后端时没有"沙箱"可开：开关表达的是只读 / 无限制，确认文案跟着安装态走。
+// 没装成后端时没有"沙箱"可开：开关表达的是受限 / 无限制，确认文案跟着安装态走。
 function modeLabels(turningOn) {
   if (isInstalled(state.status)) {
     return {
@@ -689,9 +689,9 @@ function modeLabels(turningOn) {
     };
   }
   return {
-    title: turningOn ? '进入只读模式？' : '退出只读模式？',
-    confirm: turningOn ? '进入只读模式' : '退出只读模式',
-    done: turningOn ? '已进入只读模式' : '已退出只读模式',
+    title: turningOn ? '进入受限模式？' : '退出受限模式？',
+    confirm: turningOn ? '进入受限模式' : '退出受限模式',
+    done: turningOn ? '已进入受限模式' : '已退出受限模式',
   };
 }
 

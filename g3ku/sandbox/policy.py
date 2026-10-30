@@ -7,7 +7,7 @@
 ===============  ======================  ==========================
 安装态           ``restricted``          ``unrestricted``
 ===============  ======================  ==========================
-未安装 / partial  只读档 ``readonly``       宿主全权限 ``host_full``
+未安装 / partial  受限档 ``limited``        宿主全权限 ``host_full``
 ready           沙箱档 ``jailed``          宿主全权限 ``host_full``
 ===============  ======================  ==========================
 
@@ -16,11 +16,12 @@ jail，安装态恒为 ``not_installed``，所以只可能解析出 ``readonly``
 
 两档只读的强度不同，这点不能混：
 
-* **third_party 只读** 是安全边界，用**白名单**（未登记的名字一律拒）。新工具默认
-  拿不到宿主访问权，只有显式登记 + 声明读什么根才能进。
-* **owner 只读** 是防手滑，用**黑名单**（写类/进程/任务/外网写入工具拒，其余照旧）。
+* **limited 受限档** 用**按会话白名单**：默认集合只放开文件/读类/记忆/调度/网络读取
+  与展示类工具；写类工具受会话工作目录写根约束。operator 可以在「允许使用的工具列表」
+  里逐会话增删，`exec` 等危险工具也可显式打开（打开后 exec 强制 governed）。
+* **owner 旧只读档** 是防手滑，用**黑名单**（写类/进程/任务/外网写入工具拒，其余照旧）。
 
-只读档约束的是**数据面**（文件 / 进程 / 网络）。控制面对 owner 照旧按 RBAC，
+受限档约束的是**数据面**（文件 / 进程 / 网络）。控制面对 owner 照旧按 RBAC，
 对 third_party 本来就全拒。
 """
 
@@ -37,6 +38,8 @@ from g3ku.runtime.session_trust import (
 )
 
 TIER_HOST_FULL = "host_full"
+TIER_LIMITED = "limited"
+# 兼容旧数据/旧调用：上一版的 `readonly` 档已被 `limited` 取代，保留常量只为读旧快照。
 TIER_READONLY = "readonly"
 TIER_JAILED = "jailed"
 
@@ -48,7 +51,7 @@ INSTALL_RUNTIME_MISSING = "runtime_missing"
 INSTALL_PARTIAL = "partial"
 INSTALL_READY = "ready"
 
-ALL_TIERS: tuple[str, ...] = (TIER_HOST_FULL, TIER_READONLY, TIER_JAILED)
+ALL_TIERS: tuple[str, ...] = (TIER_HOST_FULL, TIER_LIMITED, TIER_READONLY, TIER_JAILED)
 
 # jail 后端（bwrap / seatbelt / wsl_bwrap / container 的 manager + router）接进执行道
 # 之前，`jailed` 一律不发放：安装态可以是 `ready`，但没有后端就意味着没有隔离，
@@ -67,29 +70,63 @@ def jail_backends_available() -> bool:
         return True
     return str(os.getenv(JAIL_ENABLE_ENV, "")).strip().lower() in _TRUTHY
 
-# third_party 只读档的白名单。**加工具要连"它读什么根"一起声明**：
-# 名单里的读类工具都受 `fs_read_roots` 约束（见 `g3ku/utils/path_roots.py`）。
-READONLY_THIRD_PARTY_TOOL_NAMES: frozenset[str] = frozenset(
+# 运行时基础工具：agent 循环与工具/技能 hydrated 的必需项。它们不是安全边界，
+# 不允许在会话工具列表里取消；关闭 `silent` 或 loader 会让会话本身失效。
+LIMITED_FIXED_TOOL_NAMES: frozenset[str] = frozenset(
     {
-        # 无副作用的常驻信号
         "silent",
         "time",
         "load_tool_context",
         "load_tool_context_v2",
         "load_skill_context",
         "load_skill_context_v2",
+    }
+)
+
+# 受限模式的默认工具集合。写类工具只允许在会话工作目录内落盘（由 fs 写根约束）；
+# `web_fetch` 默认允许；`exec` / `process_kill` / `create_async_task` / `skill-installer`
+# / `register_stickers` 默认不勾选，但 operator 可以在按会话工具列表里显式打开。
+LIMITED_DEFAULT_TOOL_NAMES: frozenset[str] = frozenset(
+    {
         # 读类数据面（受读根限定）
         "content_open",
         "content_search",
         "content_describe",
         "filesystem_stat",
         "view_message_history",
-        # 拼图/索引选图：渲染贴纸缓存图并返回路径，不碰用户文件与网络
+        # 写类数据面（受会话工作目录写根限定）
+        "filesystem_write",
+        "filesystem_edit",
+        "filesystem_copy",
+        "filesystem_move",
+        "filesystem_delete",
+        "filesystem_propose_patch",
+        # 记忆、调度、渠道提醒
+        "memory_update",
+        "memory_note",
+        "cron",
+        "schedule_wake",
+        "mention_member",
+        # 网络默认允许（operator 可在工具列表取消）
+        "web_fetch",
+        # 拼图/索引选图：渲染贴纸缓存图并返回路径，不碰用户文件
         "show_sticker_category",
     }
 )
 
-# register_stickers 会改名并写 registry.json，属于工作区写入，不进第三方只读档。
+# 旧名兼容：上一版第三方只读白名单的引用点继续可读；语义现在是“受限模式默认集合”。
+READONLY_THIRD_PARTY_TOOL_NAMES = LIMITED_DEFAULT_TOOL_NAMES
+
+# 勾选后确有额外后果、UI 需要给出说明的工具。
+LIMITED_TOOL_WARNINGS: dict[str, str] = {
+    "exec": "命令行执行会触达宿主；本档强制 governed（形态守卫 + 路径策略 + 命令行风险拦截）。",
+    "process_kill": "可终止宿主进程；只应在本会话确实需要时打开。",
+    "create_async_task": "任务在独立 worker 执行，不受本会话工作目录约束。",
+    "skill-installer": "会安装工具到工作区，不受本会话工作目录约束。",
+    "register_stickers": "会写全局表情包注册表，不受本会话工作目录约束。",
+}
+
+# register_stickers 会改名并写 registry.json，属于全局写入，默认不进受限集合。
 
 WRITE_TOOL_NAMES: frozenset[str] = frozenset(
     {
@@ -108,11 +145,13 @@ NETWORK_WRITE_TOOL_NAMES: frozenset[str] = frozenset({"skill-installer"})
 NETWORK_TOOL_NAMES: frozenset[str] = frozenset({"web_fetch"})
 PROCESS_TOOL_NAMES: frozenset[str] = frozenset({"exec", "process_kill"})
 _TASK_TOOL_PREFIX = "task_"
-TASK_TOOL_NAMES: frozenset[str] = frozenset(
-    {"create_async_task", "send_message", "schedule_wake", "cron"}
-)
+# 调度类与派发类分开：`cron` / `schedule_wake` 在受限/沙盒档可用，任务派发仍拒。
+SCHEDULE_TOOL_NAMES: frozenset[str] = frozenset({"cron", "schedule_wake"})
+TASK_DISPATCH_TOOL_NAMES: frozenset[str] = frozenset({"create_async_task", "send_message"})
+# 兼容旧引用：任务族 = 派发 + 调度。
+TASK_TOOL_NAMES: frozenset[str] = TASK_DISPATCH_TOOL_NAMES | SCHEDULE_TOOL_NAMES
 
-# owner 只读档：写类 / 进程控制 / 任务族 / 会写盘的联网工具一律拒。
+# owner 只读档（旧档）：写类 / 进程控制 / 任务族 / 会写盘的联网工具一律拒。
 _OWNER_READONLY_DENIED: frozenset[str] = (
     WRITE_TOOL_NAMES
     | NETWORK_WRITE_TOOL_NAMES
@@ -127,6 +166,14 @@ def is_task_tool_name(tool_name: Any) -> bool:
     if not name:
         return False
     return name in TASK_TOOL_NAMES or name.startswith(_TASK_TOOL_PREFIX)
+
+
+def is_task_dispatch_tool_name(tool_name: Any) -> bool:
+    """派发族：`create_async_task` / `send_message` / `task_*`；不含调度类。"""
+    name = str(tool_name or "").strip()
+    if not name:
+        return False
+    return name in TASK_DISPATCH_TOOL_NAMES or name.startswith(_TASK_TOOL_PREFIX)
 
 
 def default_mode_for_trust(trust: Any) -> str:
@@ -148,8 +195,8 @@ def resolve_tier(
     if jail_available is None:
         jail_available = jail_backends_available()
     if not jail_available:
-        # 后端没接进执行道：安装态再好看也只给只读档，绝不发放无人看守的数据面。
-        return TIER_READONLY
+        # 后端没接进执行道：安装态再好看也只给受限档，绝不发放无人看守的数据面。
+        return TIER_LIMITED
     install = str(install_state or "").strip().lower() or INSTALL_NOT_INSTALLED
     if install == INSTALL_READY:
         return TIER_JAILED
@@ -157,7 +204,7 @@ def resolve_tier(
     # 绝不把它放进 jail——那会把"缺一维"当"全缺"或反过来，两种都是假安全。
     if install == INSTALL_PARTIAL and normalize_trust(trust) == TRUST_OWNER:
         return TIER_JAILED
-    return TIER_READONLY
+    return TIER_LIMITED
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +214,9 @@ class SessionPolicy:
     mode: str
     install_state: str
     tier: str
+    # 受限档生效集合；None = 用默认集合。两项都只在 limited 档有意义。
+    allowed_tool_names: frozenset[str] | None = None
+    explicit_allowed_tool_names: frozenset[str] | None = None
 
     @property
     def restricted(self) -> bool:
@@ -174,7 +224,11 @@ class SessionPolicy:
 
     @property
     def allowlist(self) -> frozenset[str] | None:
-        """None = 不设白名单（宿主全权限 / owner 只读走黑名单）。"""
+        """None = 不设白名单（宿主全权限 / 沙箱档 / owner 旧只读走黑名单）。"""
+        if self.tier == TIER_LIMITED:
+            return self.allowed_tool_names or (
+                LIMITED_DEFAULT_TOOL_NAMES | LIMITED_FIXED_TOOL_NAMES
+            )
         if self.tier == TIER_READONLY and self.trust != TRUST_OWNER:
             return READONLY_THIRD_PARTY_TOOL_NAMES
         return None
@@ -184,23 +238,32 @@ class SessionPolicy:
         if self.tier == TIER_READONLY and self.trust == TRUST_OWNER:
             return _OWNER_READONLY_DENIED
         if self.tier == TIER_JAILED:
-            # 沙箱档数据面放开，但任务仍然不许派：只读意图传不进 worker 执行面。
-            return TASK_TOOL_NAMES
+            # 沙箱档数据面放开，但任务派发仍然不许：调度类（cron/schedule_wake）例外。
+            return TASK_DISPATCH_TOOL_NAMES
         return frozenset()
 
     @property
     def exec_requires_governed(self) -> bool:
-        """owner 只读档的 exec 必须落到 governed（形态守卫 + 路径策略 + 工作区监禁）。"""
+        """受限档的 exec 必须落到 governed（形态守卫 + 路径策略 + 工作区监禁）。"""
+        if self.tier == TIER_LIMITED:
+            return self.exec_allowed
         return self.tier == TIER_READONLY and self.trust == TRUST_OWNER
+
+    @property
+    def exec_allowed(self) -> bool:
+        return self.tool_allowed("exec")
 
     def tool_allowed(self, tool_name: Any) -> bool:
         name = str(tool_name or "").strip()
         if not name:
             return False
-        if is_task_tool_name(name) and self.restricted:
+        # 任务派发族在受限/沙箱档一律拒；调度类不被这一条挡住。
+        if is_task_dispatch_tool_name(name) and self.restricted:
             return False
         if name in self.denied:
             return False
+        if self.tier == TIER_LIMITED:
+            return name in (self.allowlist or frozenset())
         allowlist = self.allowlist
         if allowlist is not None and name not in allowlist:
             return False
@@ -236,12 +299,21 @@ def session_policy(
     if normalized_mode not in {MODE_RESTRICTED, MODE_UNRESTRICTED}:
         normalized_mode = _stored_mode(raw_key) or default_mode_for_trust(trust)
     install = str(install_state or "").strip().lower() or _probed_install_state()
+    tier = resolve_tier(trust=trust, mode=normalized_mode, install_state=install)
+    effective_tools: frozenset[str] | None = None
+    explicit_tools: frozenset[str] | None = None
+    if tier == TIER_LIMITED:
+        stored = _stored_allowed_tools(raw_key)
+        explicit_tools = frozenset(stored) if stored else None
+        effective_tools = (explicit_tools or LIMITED_DEFAULT_TOOL_NAMES) | LIMITED_FIXED_TOOL_NAMES
     return SessionPolicy(
         session_key=raw_key,
         trust=trust,
         mode=normalized_mode,
         install_state=install,
-        tier=resolve_tier(trust=trust, mode=normalized_mode, install_state=install),
+        tier=tier,
+        allowed_tool_names=effective_tools,
+        explicit_allowed_tool_names=explicit_tools,
     )
 
 
@@ -255,6 +327,17 @@ def _stored_mode(session_key: str) -> str:
         return get_session_mode(session_key)
     except Exception:  # noqa: BLE001
         return ""
+
+
+def _stored_allowed_tools(session_key: str) -> list[str]:
+    try:
+        from g3ku.sandbox.state import get_session_allowed_tools
+    except Exception:  # noqa: BLE001
+        return []
+    try:
+        return list(get_session_allowed_tools(session_key) or [])
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def _probed_install_state() -> str:
@@ -274,19 +357,26 @@ __all__ = [
     "INSTALL_PARTIAL",
     "INSTALL_READY",
     "INSTALL_RUNTIME_MISSING",
+    "LIMITED_DEFAULT_TOOL_NAMES",
+    "LIMITED_FIXED_TOOL_NAMES",
+    "LIMITED_TOOL_WARNINGS",
     "MODE_RESTRICTED",
     "MODE_UNRESTRICTED",
     "NETWORK_TOOL_NAMES",
     "NETWORK_WRITE_TOOL_NAMES",
     "PROCESS_TOOL_NAMES",
     "READONLY_THIRD_PARTY_TOOL_NAMES",
+    "SCHEDULE_TOOL_NAMES",
     "SessionPolicy",
+    "TASK_DISPATCH_TOOL_NAMES",
     "TASK_TOOL_NAMES",
     "TIER_HOST_FULL",
     "TIER_JAILED",
+    "TIER_LIMITED",
     "TIER_READONLY",
     "WRITE_TOOL_NAMES",
     "default_mode_for_trust",
+    "is_task_dispatch_tool_name",
     "is_task_tool_name",
     "jail_backends_available",
     "resolve_tier",
