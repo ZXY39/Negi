@@ -6,13 +6,15 @@
 // 真外链不带这些标记，仍然交系统浏览器。
 
 const MEDIA_VIEWER_IMAGE_SUFFIXES = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"]);
+// Markdown 不走 iframe 的 text/plain 原文：同源取回正文后用聊天同款渲染器排版。
+const MEDIA_VIEWER_MARKDOWN_SUFFIXES = new Set(["md", "markdown"]);
 // 只收服务端确实按 inline 供的类型：/api/ceo/media/original 的 inline 判定是 image（svg 除外）/
 // application/pdf/text/*，另加 `_INLINE_TEXT_SUFFIXES`（json/yaml/代码等被显式按 text/plain 供）。
 // 收进 iframe 的 attachment 类型不会显示，只会变成一次下载。
 // 刻意不收 html / css / js / svg：它们被同源 iframe 加载时会在应用 origin 里执行脚本。
 const MEDIA_VIEWER_EMBED_SUFFIXES = new Set([
     "pdf",
-    "txt", "log", "md", "markdown", "rst", "csv", "tsv", "srt", "vtt",
+    "txt", "log", "rst", "csv", "tsv", "srt", "vtt",
     "json", "jsonl", "yaml", "yml", "toml", "ini", "cfg", "conf", "xml",
     "py", "sh", "bash", "bat", "ps1", "sql", "java", "c", "h", "cpp", "hpp",
     "rs", "go", "rb", "php", "lua", "r", "kt", "swift",
@@ -41,6 +43,7 @@ function resolveMediaViewerMode({ kind = "", name = "" } = {}) {
     if (String(kind || "").trim() === "image") return "image";
     const suffix = mediaViewerSuffix(name);
     if (MEDIA_VIEWER_IMAGE_SUFFIXES.has(suffix)) return "image";
+    if (MEDIA_VIEWER_MARKDOWN_SUFFIXES.has(suffix)) return "markdown";
     if (MEDIA_VIEWER_EMBED_SUFFIXES.has(suffix)) return "embed";
     return "download";
 }
@@ -184,6 +187,47 @@ function renderMediaViewerEmbed(url, title) {
     mediaViewerState.body.appendChild(frame);
 }
 
+// .md 附件按 Markdown 排版：iframe 只会把 text/plain 原文贴出来。取数用同源 fetch，
+// 失败（外链、文件被回收）退回 iframe 原文，至少还能读到内容。
+function renderMediaViewerMarkdown(url, title, openToken = 0) {
+    const article = document.createElement("article");
+    article.className = "markdown-content media-viewer-markdown";
+    article.textContent = "正在加载…";
+    mediaViewerState.body.appendChild(article);
+    const isCurrent = () => mediaViewerState.open === true && mediaViewerState.openToken === openToken;
+    const fallbackToRaw = () => {
+        if (!isCurrent()) return;
+        mediaViewerState.body.innerHTML = "";
+        renderMediaViewerEmbed(url, title);
+        resetMediaViewerSize();
+        if (typeof icons === "function") icons(true);
+    };
+    if (typeof fetch !== "function") {
+        // 没有 fetch 的环境没有渲染档可言，直接回到原文内嵌；这一步发生在 reveal 之前，
+        // 不能走 isCurrent 闸门（那时窗还没标记为打开）。
+        mediaViewerState.body.innerHTML = "";
+        renderMediaViewerEmbed(url, title);
+        return article;
+    }
+    fetch(url, { credentials: "same-origin" })
+        .then((response) => {
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            return response.text();
+        })
+        .then((text) => {
+            if (!isCurrent()) return;
+            if (typeof renderMarkdown === "function") {
+                article.innerHTML = renderMarkdown(text);
+            } else {
+                article.textContent = text;
+                article.classList.add("media-viewer-markdown-raw");
+            }
+            if (typeof icons === "function") icons(true);
+        })
+        .catch(() => fallbackToRaw());
+    return article;
+}
+
 function renderMediaViewerContent(outputRef, title) {
     // 与节点详情轨迹字段同形：.task-trace-field + .task-trace-output-value + .task-trace-more，
     // 这样首屏与续读都走既有的取数车道，本层不复刻行窗数学。
@@ -245,6 +289,7 @@ function openMediaViewer({ mode = "image", url = "", title = "内容预览", sub
         return true;
     }
     if (mode === "embed") renderMediaViewerEmbed(url, title);
+    else if (mode === "markdown") renderMediaViewerMarkdown(url, title, openToken);
     else if (mode === "content") renderMediaViewerContent(outputRef, title);
     resetMediaViewerSize();
     reveal();

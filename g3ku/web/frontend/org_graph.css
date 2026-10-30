@@ -1753,6 +1753,23 @@ textarea {
     background: var(--bg-app);
 }
 
+/* Markdown 附件预览：正文沿用聊天那套 .markdown-content，只把栏宽收在一个阅读宽度里。
+   查看器本来就在滚动，这里不再套第二层滚动框。 */
+.media-viewer-markdown {
+    align-self: center;
+    width: min(100%, 920px);
+    padding: 4px 12px 28px;
+    color: var(--text-primary);
+    font-size: 15px;
+    overflow-wrap: anywhere;
+}
+
+.media-viewer-markdown-raw {
+    white-space: pre-wrap;
+    font-family: "Fira Code", "SFMono-Regular", ui-monospace, monospace;
+    font-size: 13px;
+}
+
 /* QQ 机器人申请入口：应用内嵌第三方页面。z-index 同样要压过 9285 行那条
    `.detail-drawer`（文件里更靠后），否则遮罩会盖在窗口上面。 */
 #qq-bot-apply-backdrop.detail-backdrop {
@@ -3516,7 +3533,10 @@ textarea {
     min-width: 0;
 }
 
-.ceo-turn-loading-only .msg-copy-btn {
+/* 复制按钮只在回复定稿后出现：流式期间 token 行常驻，按钮若跟着显形，
+   读到的就是还没写完的正文。usage-collapsed 是既有的「本轮已定稿」判据
+   （运行时为关，final / paused / 历史为开），占位态也落在同一条选择器里。 */
+.ceo-turn-message:not(.usage-collapsed) .msg-copy-btn {
     display: none;
 }
 
@@ -4044,9 +4064,27 @@ textarea {
     color: var(--text-secondary);
 }
 
+/* 展开态换成 Markdown 渲染：折叠时保留单行纯文本（省略号仍靠它），展开后把这一行
+   换成渲染结果。md 块沿用 .markdown-content 的列间距，白空格收回 normal——
+   外层展开框的 pre-wrap 会把块标签之间的空白也照原样印出来。 */
+.task-trace-turn-md {
+    display: none;
+}
+
+.task-trace-step--turn-text[open] .task-trace-turn-plain {
+    display: none;
+}
+
+.task-trace-step--turn-text[open] .task-trace-turn-md {
+    display: flex;
+    flex-direction: column;
+    white-space: normal;
+    font-weight: 400;
+}
+
 .task-trace-step--turn-text[open] .interaction-step-title {
     display: block;
-    white-space: pre-wrap;
+    white-space: normal;
     overflow-wrap: anywhere;
     word-break: break-word;
     text-overflow: clip;

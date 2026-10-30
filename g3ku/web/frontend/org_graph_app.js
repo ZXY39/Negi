@@ -7224,11 +7224,12 @@ function refreshCeoFlowUsage(turn) {
     if (!turn?.flowUsageEl || !turn?.flowEl || turn.flowEl.hidden) return;
     const seconds = ceoTurnElapsedSeconds(turn);
     const base = seconds === null ? "--" : (formatCeoExecutionSeconds(seconds) || "--");
-    // 秒数旁边带上模型轮数（39s   16轮）：光看时间分不清"一个工具跑了 39 秒"还是
-    // "来回十几轮才 39 秒"，这两个数一起才读得出这一跳的节奏。两个读数之间留三个空格，
-    // 免得数字挤在一起读成同一个量。
-    const rounds = Number(turn?.usage?.call_count) || 0;
-    const text = rounds > 0 ? `${base}\u00a0\u00a0\u00a0${rounds}轮` : base;
+    // 秒数旁边报的是轨道里折叠的中途文本条数（39s   4 条）：这个数回答"流程里还压着
+    // 几段过程叙述"，模型调用轮数已经由 token 行的「轮数」表达，两处不重复印同一个量。
+    const textCount = turn.listEl?.querySelectorAll
+        ? turn.listEl.querySelectorAll(".task-trace-step--turn-text").length
+        : 0;
+    const text = textCount > 0 ? `${base}\u00a0\u00a0\u00a0${textCount} 条` : base;
     if (turn.flowUsageEl.textContent !== text) turn.flowUsageEl.textContent = text;
 }
 

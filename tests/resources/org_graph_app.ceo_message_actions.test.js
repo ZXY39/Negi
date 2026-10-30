@@ -476,6 +476,11 @@ test("R7 接线静态契约:委托/时序/横幅/HTML 元素", () => {
         "CSS 缺普通气泡元信息的点击门"
     );
     assert.ok(css.includes(".message:not(.meta-open) .msg-action-btn"), "Fork/编辑按钮没有跟随点击门");
+    // 复制按钮跟着回合定稿走：流式期间整颗按钮不出现，不能把还没写完的正文当成可复制成品。
+    assert.ok(
+        css.includes(".ceo-turn-message:not(.usage-collapsed) .msg-copy-btn"),
+        "流式回合仍会露出复制按钮"
+    );
     assert.ok(!css.includes(".message:hover .msg-copy-btn"), "复制按钮仍靠悬停显形");
     assert.ok(!css.includes(".message:hover .msg-meta"), "元信息行仍靠悬停显形");
     // 点击门的行为面：委托挂在 feed 的 click 上，且控件与选字都让路。

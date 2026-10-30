@@ -9,6 +9,9 @@ const vm = require("node:vm");
 const FRONTEND = path.join(__dirname, "..", "..", "g3ku", "web", "frontend", "tasks");
 const STORE_CODE = fs.readFileSync(path.join(FRONTEND, "node-detail-store.js"), "utf8");
 const DETAIL_CODE = fs.readFileSync(path.join(FRONTEND, "node-detail.js"), "utf8");
+// CONTEXT_LOAD_TITLES / CONTEXT_LOAD_HIDDEN_STATUSES 住在前门那一支 bundle，按真页面
+// 的加载顺序一起读进来，标题断言才是在证生产映射而不是测试自己抄的一份。
+const VIEW_CODE = fs.readFileSync(path.join(FRONTEND, "..", "org_graph_task_view.js"), "utf8");
 // 思考文案的唯一产出者住在前门那一支 bundle 里；这里按真页面的加载顺序把它读进同一个
 // 沙箱，用例才是在证"节点页没有自己抄一份文案"。
 const APP_CODE = fs.readFileSync(
@@ -24,7 +27,7 @@ function sliceAppFunction(name) {
     return APP_CODE.slice(start, end + 2);
 }
 
-function load() {
+function load({ contextLoaderKind = () => "" } = {}) {
     const context = {
         console,
         normalizeInt: (value, fallback = 0) => {
@@ -34,12 +37,13 @@ function load() {
         esc: (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
             "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
         }[char])),
+        renderMarkdown: (value) => String(value ?? "").replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>"),
         formatCompactTime: () => "10:00",
         readableText: (value) => String(value ?? ""),
         repairAcceptanceTitle: (value) => String(value ?? ""),
         isTerminalTreeNodeStatus: () => false,
         taskPauseDisplayActive: () => false,
-        ceoContextLoaderKind: () => "",
+        ceoContextLoaderKind: contextLoaderKind,
         ceoContextLoadNoticeIconName: () => "",
         normalizeUploadList: (items) => (Array.isArray(items) ? items : []),
         document: { querySelector: () => null, querySelectorAll: () => [] },
@@ -52,7 +56,8 @@ function load() {
             sliceAppFunction("thinkingReadingParts"),
             STORE_CODE,
             DETAIL_CODE,
-            "this.__turns = { buildExecutionTraceSteps, buildNodeExecutionTrace, buildTraceRenderSignature, renderTraceStep, taskRoundThinkingText };",
+            VIEW_CODE,
+            "this.__turns = { buildExecutionTraceSteps, buildNodeExecutionTrace, buildTraceRenderSignature, renderTraceStep, taskRoundThinkingText, contextLoadDisplayFor };",
         ].join("\n"),
         context
     );
@@ -160,6 +165,45 @@ test("turn text expands in place without a duplicate block or a status badge", (
         /\.task-trace-step--turn-text\[open\] \.interaction-step-title \{[^}]*max-height:\s*calc\(16\.5 \* 1\.6em\)[^}]*overflow-y:\s*auto[^}]*background:\s*transparent/
     );
     assert.doesNotMatch(css, /\.task-trace-turn-text\s*\{/);
+});
+
+test("expanded turn text renders markdown on the same scroll box", () => {
+    const { buildExecutionTraceSteps, renderTraceStep } = load();
+    const text = "先确认：**饭就是 Token**，再看下一段。";
+    const steps = buildExecutionTraceSteps({
+        initial_prompt: "initial",
+        turns: [turn(2, text, ["tool-b"])],
+        tool_steps: [],
+        stages: [],
+    }, {});
+    const step = steps.find((item) => item.traceKey === "turn:2");
+    const html = renderTraceStep({ ...step, open: true });
+
+    // 折叠行仍是原始文本，展开块才是渲染结果；两份都挂在同一个标题滚动框里。
+    assert.match(html, /task-trace-turn-plain/);
+    assert.match(html, /task-trace-turn-md markdown-content/);
+    assert.match(html, /<strong>饭就是 Token<\/strong>/);
+
+    const css = fs.readFileSync(path.join(FRONTEND, "..", "org_graph.css"), "utf8");
+    assert.match(css, /\.task-trace-step--turn-text\[open\] \.task-trace-turn-plain \{[^}]*display:\s*none/);
+    assert.match(css, /\.task-trace-step--turn-text\[open\] \.task-trace-turn-md \{[^}]*display:\s*flex/);
+});
+
+test("memory tools carry their own loader title instead of 加载内容", () => {
+    const { contextLoadDisplayFor } = load({
+        contextLoaderKind: (name) => {
+            if (name === "memory_update") return "memory";
+            if (name === "memory_note") return "note";
+            return "";
+        },
+    });
+
+    const memory = contextLoadDisplayFor({ tool_name: "memory_update", status: "success", output_text: '{"ok":true}' });
+    assert.equal(memory.title, "更新记忆");
+    assert.equal(memory.kind, "memory");
+
+    const note = contextLoadDisplayFor({ tool_name: "memory_note", status: "success", output_text: '{"ok":true}' });
+    assert.equal(note.title, "加载笔记");
 });
 
 test("textless rounds stay separate sections instead of one merged strip", () => {

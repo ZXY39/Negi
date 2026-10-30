@@ -204,6 +204,29 @@ test("flow header renders the turn duration and the live ticker refreshes it", (
     assert.equal(turn.flowUsageEl.textContent, "65s");
 });
 
+test("flow header counts folded interim texts instead of model rounds", () => {
+    const api = loadApp();
+    const turn = makeTurn({ requestedAt: ISO(Date.now() - 65000) });
+    // call_count 仍住在 token 行；流程头部改报轨道里折叠的中途文本条数。
+    turn.usage = { call_count: 16 };
+    let queried = "";
+    turn.listEl = {
+        querySelectorAll: (selector) => {
+            queried = selector;
+            return [{}, {}, {}];
+        },
+    };
+
+    api.refreshCeoFlowUsage(turn);
+    assert.equal(queried, ".task-trace-step--turn-text");
+    assert.equal(turn.flowUsageEl.textContent, "65s\u00a0\u00a0\u00a03 条");
+
+    // 没有中途文本时只留秒数，不印一个 0。
+    turn.listEl = { querySelectorAll: () => [] };
+    api.refreshCeoFlowUsage(turn);
+    assert.equal(turn.flowUsageEl.textContent, "65s");
+});
+
 test("completion time freezes the header at the final duration", () => {
     const api = loadApp();
     const turn = makeTurn({ requestedAt: ISO(Date.now() - 65000) });

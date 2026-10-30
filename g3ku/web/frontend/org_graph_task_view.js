@@ -767,7 +767,14 @@ function buildLiveSectionStatus(items) {
 
 // CEO 轨道的 arguments_text 是 `_tool_invocation_hint` 的 48 字截断提示（模型-facing
 // 同一份），展开面板要的是原始入参对象，不能拿提示当正文印。
-const CONTEXT_LOAD_TITLES = { skill: "加载 skill", tool: "加载 tool" };
+// 四类上下文动作都要说清自己做了什么：写入记忆是「更新记忆」，读笔记是「加载笔记」，
+// 缺了这两个键会一起落到兜底的「加载内容」——一次写记忆被读成一次加载。
+const CONTEXT_LOAD_TITLES = {
+    skill: "加载 skill",
+    tool: "加载 tool",
+    memory: "更新记忆",
+    note: "加载笔记",
+};
 const CONTEXT_LOAD_HIDDEN_STATUSES = new Set(["error", "warning", "interrupted"]);
 
 function syncNoticeComposerState() {

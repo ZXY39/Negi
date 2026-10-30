@@ -54,7 +54,7 @@ class TestDocument extends StubDocument {
     }
 }
 
-function loadApp({ onHydrate = null } = {}) {
+function loadApp({ onHydrate = null, fetchImpl = null } = {}) {
     const document = new TestDocument();
     const context = {
         console,
@@ -80,6 +80,7 @@ function loadApp({ onHydrate = null } = {}) {
         },
     };
     if (onHydrate) context.hydrateTraceOutputBlocks = onHydrate;
+    if (fetchImpl) context.fetch = fetchImpl;
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
@@ -148,16 +149,54 @@ test("外部链接仍保留新窗口语义", () => {
     assert.match(renderInlineMarkdown("[仓库](https://example.com/a)"), /target="_blank"/);
 });
 
-test("按类型分派：图片预览、pdf/文本内嵌、其余下载", () => {
+test("按类型分派：图片预览、Markdown 渲染、pdf/文本内嵌、其余下载", () => {
     const { resolveMediaViewerMode } = loadApp();
 
     assert.equal(resolveMediaViewerMode({ kind: "image", name: "noext" }), "image");
     assert.equal(resolveMediaViewerMode({ name: "photo.PNG" }), "image");
     assert.equal(resolveMediaViewerMode({ name: "a\\b\\c.jpeg" }), "image");
-    assert.equal(resolveMediaViewerMode({ name: "spec.md" }), "embed");
+    assert.equal(resolveMediaViewerMode({ name: "spec.md" }), "markdown");
+    assert.equal(resolveMediaViewerMode({ name: "README.MARKDOWN" }), "markdown");
     assert.equal(resolveMediaViewerMode({ name: "deck.pdf" }), "embed");
     assert.equal(resolveMediaViewerMode({ name: "book.docx" }), "download");
     assert.equal(resolveMediaViewerMode({ name: "no-suffix" }), "download");
+});
+
+test("Markdown 附件取回正文后按渲染结果打开，而不是 iframe 原文", async () => {
+    const requests = [];
+    const { openMediaAnchor, mediaViewerState, document } = loadApp({
+        fetchImpl: async (url) => {
+            requests.push(url);
+            return { ok: true, text: async () => "# 标题\n\n这是 **重点**。" };
+        },
+    });
+
+    const opened = openMediaAnchor({ url: "/api/ceo/media/original?token=abc", name: "notes.md", kind: "auto", title: "笔记" });
+    assert.equal(opened, true);
+    assert.ok(findCreated(document, (el) => el.id === "media-viewer-drawer"), "预览抽屉未挂上");
+    assert.equal(findCreated(document, (el) => el.tagName === "IFRAME"), null, "Markdown 不该退回 iframe 原文");
+    const article = mediaViewerState.body.children.find((child) => String(child.className).includes("media-viewer-markdown"));
+    assert.ok(article, "Markdown 渲染容器未挂上");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(requests, ["/api/ceo/media/original?token=abc"]);
+    assert.match(article.innerHTML, /<h1>标题<\/h1>/);
+    assert.match(article.innerHTML, /<strong>重点<\/strong>/);
+    assert.equal(mediaViewerState.open, true);
+});
+
+test("Markdown 取数失败时退回 iframe 原文", async () => {
+    const { openMediaAnchor, mediaViewerState, document } = loadApp({
+        fetchImpl: async () => {
+            throw new Error("network down");
+        },
+    });
+
+    openMediaAnchor({ url: "https://example.com/notes.md", name: "notes.md", kind: "auto" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const frame = findCreated(document, (el) => el.tagName === "IFRAME");
+    assert.ok(frame, "取数失败时没有退回原文 iframe");
+    assert.equal(frame.src, "https://example.com/notes.md");
+    assert.equal(mediaViewerState.body.children.includes(frame), true);
 });
 
 test("图片锚点在程序内开预览层显示", () => {

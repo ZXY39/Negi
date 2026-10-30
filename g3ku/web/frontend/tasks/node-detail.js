@@ -48,10 +48,15 @@ function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = 
     const classes = ["interaction-step", "task-trace-step", esc(status)];
     const normalizedExtraClass = String(extraClass || "").trim();
     if (normalizedExtraClass) classes.push(esc(normalizedExtraClass));
-    // 模型中途输出：折叠时摘要行只占一行向右溢出；展开后仍是同一段原文，
-    // 只是换成固定高度可滚动，体内不再重复一遍正文。状态徽标也不挂在正文右侧。
+    // 模型中途输出：折叠时摘要行只占一行向右溢出；展开后在原位换成 Markdown 渲染，
+    // 仍是同一个固定高度滚动框，体内不重复一遍正文。
     const assistantText = String(turnText || "").trim();
     if (assistantText) classes.push("task-trace-step--turn-text");
+    // 渲染器住在 app bundle，节点详情/前门共用；单测沙箱里没有它时退回纯文本。
+    const assistantMarkup = assistantText
+        ? `<span class="task-trace-turn-plain">${esc(title)}</span>` +
+          `<span class="task-trace-turn-md markdown-content">${typeof renderMarkdown === "function" ? renderMarkdown(assistantText) : esc(assistantText)}</span>`
+        : esc(title);
     const bodyContent = bodyHtml;
     const sideParts = [];
     if (showRuntime) sideParts.push('<span class="task-trace-runtime" hidden></span>');
@@ -72,7 +77,7 @@ function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = 
                 ${turnToggle}
                 <span class="interaction-step-lead">
                     ${leadHtml}
-                    <span class="interaction-step-title"${assistantText ? ` title="${esc(assistantText)}"` : ""}>${esc(title)}</span>
+                    <span class="interaction-step-title"${assistantText ? ` title="${esc(assistantText)}"` : ""}>${assistantMarkup}</span>
                 </span>
                 <span class="interaction-step-side">
                     ${sideParts.join("")}
