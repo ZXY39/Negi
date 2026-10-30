@@ -17903,11 +17903,14 @@ textarea {
     outline-offset: 2px;
 }
 
-/* 复制入口并进 ID 胶囊：复制图标常驻，整颗胶囊可点。 */
+/* 复制入口并进 ID 胶囊：复制图标常驻，整颗胶囊可点。
+   胶囊本身会 flex 撑到 220px，而 ID 文本有自己的最大宽度；不留这个 auto 外边距时，
+   多出来的空间全落在图标右边，缩放一变胶囊宽度图标就跟着左移。 */
 .pc-task-id-copy {
     width: 14px;
     height: 14px;
     flex: 0 0 auto;
+    margin-inline-start: auto;
     color: var(--text-muted);
 }
 
