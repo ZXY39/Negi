@@ -88,6 +88,7 @@ function loadApp() {
             toggleCeoChannelCollapse,
             isCeoChannelCollapsed,
             visibleCeoBulkSelectableSessionIds,
+            toggleCeoBulkChannelSelection,
             readStoredCeoChannelCollapse,
             syncCeoPrimaryButton,
             activeSessionItem,
@@ -481,4 +482,56 @@ test("collapsed groups leave the bulk selection set and their checked rows with 
 
     toggleCeoChannelCollapse("ext:qq");
     assert.deepEqual([...S.ceoSelectedSessionIds], ["web:keep"], "展开不复活被摘掉的勾选");
+});
+
+test("bulk mode renders a group checkbox on the channel title that toggles the whole group", () => {
+    // 勾选走列表级事件委托，和逐卡勾选同一条道。
+    assert.ok(APP_CODE.includes('closest("[data-channel-bulk-checkbox]")'));
+
+    const app = railHarness();
+    const { S, U, renderCeoSessions, toggleCeoBulkChannelSelection, __makeSet } = app;
+    S.ceoBulkMode = true;
+    S.ceoSelectedSessionIds = __makeSet(["web:keep"]);
+    S.ceoChannelCollapsed = [];
+
+    renderCeoSessions();
+    let html = U.ceoSessionList.innerHTML;
+    assert.match(html, /class="ceo-session-group-head"/, "组勾要留在标题行里");
+    assert.match(html, /<input type="checkbox" data-channel-bulk-checkbox="ext:qq">/);
+
+    toggleCeoBulkChannelSelection("ext:qq");
+    assert.deepEqual(
+        [...S.ceoSelectedSessionIds].sort(),
+        ["ext:qq:a", "ext:qq:b", "web:keep"],
+        "组勾补齐整组，组外已勾的会话不动"
+    );
+
+    renderCeoSessions();
+    html = U.ceoSessionList.innerHTML;
+    assert.match(html, /<input type="checkbox" data-channel-bulk-checkbox="ext:qq" checked>/);
+
+    toggleCeoBulkChannelSelection("ext:qq");
+    assert.deepEqual([...S.ceoSelectedSessionIds], ["web:keep"], "整组已选时再点 = 整组取消");
+});
+
+test("group checkbox exists only in bulk mode and only on expanded groups", () => {
+    const app = railHarness();
+    const { S, U, renderCeoSessions, __makeSet } = app;
+    S.ceoSelectedSessionIds = __makeSet();
+    S.ceoChannelCollapsed = [];
+
+    renderCeoSessions();
+    assert.doesNotMatch(U.ceoSessionList.innerHTML, /data-channel-bulk-checkbox/, "非多选模式不画组勾");
+
+    S.ceoBulkMode = true;
+    renderCeoSessions();
+    assert.match(U.ceoSessionList.innerHTML, /data-channel-bulk-checkbox="ext:qq"/);
+
+    S.ceoChannelCollapsed = ["ext:qq"];
+    renderCeoSessions();
+    assert.doesNotMatch(
+        U.ceoSessionList.innerHTML,
+        /data-channel-bulk-checkbox/,
+        "折叠组不提供组勾：它的行已被移出批量作用集"
+    );
 });

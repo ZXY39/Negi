@@ -45,6 +45,7 @@ const LEDGER = [
     { token: "id=\"memory-browser-select-all\"", tier: "ui" },
     { token: "project-select-checkbox", tier: "ui" },
     { token: "data-session-bulk-checkbox", tier: "specialist" },
+    { token: "data-channel-bulk-checkbox", tier: "specialist" },
     { token: "llm-binding-image-multimodal-enabled", tier: "specialist" },
     { token: "ceo-voice-autosend", tier: "ui" },
     { token: "data-memory-row-select", tier: "ui" },

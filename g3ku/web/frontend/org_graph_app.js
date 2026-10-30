@@ -948,6 +948,20 @@ function toggleCeoBulkSelectAll() {
     return S.ceoSelectedSessionIds.size;
 }
 
+function toggleCeoBulkChannelSelection(channelId) {
+    // 渠道组级全选：整组已选则整组取消，否则补齐；组外已勾的会话原样保留。
+    const ids = [...ceoChannelGroupSessionIds(channelId)];
+    if (!ids.length) return 0;
+    const next = new Set(S.ceoSelectedSessionIds instanceof Set ? [...S.ceoSelectedSessionIds] : []);
+    const allSelected = ids.every((sessionId) => next.has(sessionId));
+    ids.forEach((sessionId) => {
+        if (allSelected) next.delete(sessionId);
+        else next.add(sessionId);
+    });
+    S.ceoSelectedSessionIds = next;
+    return next.size;
+}
+
 function ceoSessionCreatedTime(session) {
     const item = session && typeof session === "object" ? session : {};
     return String(item.created_at || item.updated_at || "").trim();
@@ -10898,6 +10912,14 @@ function bindCeoSessionsPanel() {
         if (bulkCheckbox) {
             e.stopPropagation();
             toggleCeoBulkSessionSelection(bulkCheckbox.dataset.sessionBulkCheckbox);
+            renderCeoSessions();
+            syncCeoSessionActions();
+            return;
+        }
+        const channelBulkCheckbox = e.target.closest("[data-channel-bulk-checkbox]");
+        if (channelBulkCheckbox) {
+            e.stopPropagation();
+            toggleCeoBulkChannelSelection(channelBulkCheckbox.dataset.channelBulkCheckbox);
             renderCeoSessions();
             syncCeoSessionActions();
             return;

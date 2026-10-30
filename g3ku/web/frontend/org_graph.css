@@ -2360,6 +2360,31 @@ textarea {
     white-space: nowrap;
 }
 
+/* 标题行右侧留给多选模式下的组勾。组勾是按钮的兄弟而不是子节点：input 嵌进 button 会让
+   每次勾选都顺带触发折叠。 */
+.ceo-session-group-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    min-width: 0;
+}
+
+.ceo-session-group-head .ceo-session-group-title {
+    flex: 1 1 auto;
+    width: auto;
+    min-width: 0;
+}
+
+.ceo-session-group-head .ceo-session-group-checkbox {
+    position: relative;
+    top: auto;
+    left: auto;
+    flex: 0 0 auto;
+    width: 22px;
+    height: 22px;
+}
+
 /* 折叠后组内新消息只在这颗计数上说话，尺寸/配色与卡片角标同形。 */
 .ceo-session-group-unread {
     flex: 0 0 auto;
@@ -2727,6 +2752,21 @@ textarea {
     opacity: 1;
     border-right-color: var(--bg-panel);
     border-bottom-color: var(--bg-panel);
+}
+
+/* 组勾半选：部分会话已选时画横杠。原生 input 是透明的，不补这条它看起来就是"一个没选"。 */
+.ceo-session-checkbox input:indeterminate + .ceo-session-checkbox__box {
+    border-color: var(--brand-primary);
+    background: var(--brand-primary);
+}
+
+.ceo-session-checkbox input:indeterminate + .ceo-session-checkbox__box::after {
+    width: 10px;
+    height: 0;
+    border: 0;
+    border-top: 2px solid var(--bg-panel);
+    transform: none;
+    opacity: 1;
 }
 
 .ceo-session-checkbox input:disabled + .ceo-session-checkbox__box {

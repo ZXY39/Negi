@@ -309,6 +309,15 @@ function syncCeoSessionActions() {
     U.ceoSessionList?.querySelectorAll("[data-session-bulk-checkbox]")?.forEach((input) => {
         input.disabled = bulkSelectionDisabled;
     });
+    // 组勾三态：全选 ✓、部分选中横杠、未选空。checked 由渲染时写进标记，这里只补 indeterminate。
+    U.ceoSessionList?.querySelectorAll("[data-channel-bulk-checkbox]")?.forEach((input) => {
+        const groupIds = [...ceoChannelGroupSessionIds(input.dataset.channelBulkCheckbox)];
+        const selectedCount = groupIds.filter((sessionId) => isCeoBulkSessionSelected(sessionId)).length;
+        const allSelected = groupIds.length > 0 && selectedCount === groupIds.length;
+        input.checked = allSelected;
+        input.indeterminate = !allSelected && selectedCount > 0;
+        input.disabled = bulkSelectionDisabled || groupIds.length <= 0;
+    });
     U.ceoSessionList?.querySelectorAll("[data-session-menu-toggle], [data-session-rename], [data-session-delete]")?.forEach((button) => {
         button.disabled = mutationDisabled;
     });
@@ -438,13 +447,24 @@ function renderCeoSessions() {
             const unreadText = unreadTotal > 99 ? "99+" : String(unreadTotal);
             // 窄栏只剩一颗字母块，渠道 tile 用它替掉的那张卡片同一个 glyph，读起来是"这组被折起来了"。
             const channelGlyph = collapsed ? (items.length ? ceoSessionGlyph(items[0]) : "@") : "";
+            // 组勾只跟着看得见的行走：折叠组不画（其会话已被移出批量作用集），与「全选」同一条规矩。
+            const groupSessionIds = items.map((item) => String(item?.session_id || "").trim()).filter(Boolean);
+            const groupAllSelected = groupSessionIds.length > 0 && groupSessionIds.every((id) => isCeoBulkSessionSelected(id));
+            const groupCheckboxLabel = `选择渠道 ${label} 的全部会话`;
             return `
                 <section class="ceo-session-group${collapsed ? " is-collapsed" : ""}" data-channel-group="${esc(channelId)}">
-                    <button type="button" class="ceo-session-group-title" data-channel-collapse="${esc(channelId)}" aria-expanded="${collapsed ? "false" : "true"}" title="${esc(collapsed ? "展开该渠道" : "折叠该渠道")}">
-                        <span class="ceo-session-group-caret" aria-hidden="true"><i data-lucide="chevron-down"></i></span>
-                        <span class="ceo-session-group-label">${esc(label)}</span>
-                        ${unreadTotal > 0 ? `<span class="ceo-session-group-unread" aria-label="${esc(`新消息 ${unreadTotal} 条`)}">${esc(unreadText)}</span>` : ""}
-                    </button>
+                    <div class="ceo-session-group-head">
+                        <button type="button" class="ceo-session-group-title" data-channel-collapse="${esc(channelId)}" aria-expanded="${collapsed ? "false" : "true"}" title="${esc(collapsed ? "展开该渠道" : "折叠该渠道")}">
+                            <span class="ceo-session-group-caret" aria-hidden="true"><i data-lucide="chevron-down"></i></span>
+                            <span class="ceo-session-group-label">${esc(label)}</span>
+                            ${unreadTotal > 0 ? `<span class="ceo-session-group-unread" aria-label="${esc(`新消息 ${unreadTotal} 条`)}">${esc(unreadText)}</span>` : ""}
+                        </button>
+                        ${S.ceoBulkMode && !collapsed ? `
+                        <label class="ceo-session-checkbox ceo-session-group-checkbox" aria-label="${esc(groupCheckboxLabel)}" title="${esc(groupCheckboxLabel)}">
+                            <input type="checkbox" data-channel-bulk-checkbox="${esc(channelId)}"${groupAllSelected ? " checked" : ""}>
+                            <span class="ceo-session-checkbox__box" aria-hidden="true"></span>
+                        </label>` : ""}
+                    </div>
                     ${collapsed ? `
                     <button type="button" class="ceo-session-channel-tile" data-channel-collapse="${esc(channelId)}" aria-expanded="false" aria-label="${esc(`展开渠道 ${label}`)}" title="${esc(label)}">
                         <span class="ceo-session-glyph" aria-hidden="true">${esc(channelGlyph)}</span>
