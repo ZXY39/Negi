@@ -10623,9 +10623,20 @@ const zoomRow = createScaleRow({
 });
 
 const READING_SCALE_KEY = "g3ku.ui.reading-scale.v1";
-// 字号只乘阅读面（会话气泡与 markdown 正文、执行流程的代码块、记忆正文预览），控件与布局
-// 不跟，所以它是界面缩放之外的第二个旋钮。默认 1.1：比基线大两号，每号 5%。
+// 字号乘会话阅读面的全部文字（气泡与 markdown 正文、中途输出、阶段/轮次标题、工具卡
+// 标签与详情、节点详情的消息正文、记忆正文），控件与页面框架不跟，所以它是界面缩放
+// 之外的第二个旋钮。默认 1.1：比基线大两号，每号 5%。
 const READING_SCALE_DEFAULT = 1.1;
+
+// 阅读面文字变高后，已展开流程框的引导线长度与圆点几何都会过期：按当前 DOM 重量一次，
+// 不等下一次重绘。折叠框与没有流程行的会话会被 syncCeoFlowGuideLength 自己跳过。
+function syncReadingTextGeometry() {
+    document.querySelectorAll?.(".interaction-flow[open]")?.forEach?.((flow) => {
+        const list = flow?.querySelector?.(".interaction-flow-list");
+        if (list) syncCeoFlowGuideLength({ flowEl: flow, listEl: list });
+    });
+    if (typeof syncCeoFlowDotGeometry === "function") syncCeoFlowDotGeometry();
+}
 
 function writeReadingScale(scale) {
     document.documentElement?.style?.setProperty?.("--reading-font-scale", String(scale));
@@ -10638,10 +10649,7 @@ const readingScaleRow = createScaleRow({
     storageKey: READING_SCALE_KEY,
     fallback: READING_SCALE_DEFAULT,
     write: writeReadingScale,
-    // 字号档位改了，秒数的墨迹中线跟着变，圆点的抬升量要重量。
-    onCommit: () => {
-        if (typeof syncCeoFlowDotGeometry === "function") syncCeoFlowDotGeometry();
-    },
+    onCommit: syncReadingTextGeometry,
 });
 
 function initializeScaleRows() {

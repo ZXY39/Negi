@@ -145,6 +145,37 @@ test("字号滑条的两条路都不回填指针，落盘只在松手那一次",
     assert.equal(app.store.get("g3ku.ui.reading-scale.v1"), "0.1");
 });
 
+test("字号落定后重算已展开流程框的引导线长度与圆点几何", () => {
+    const app = loadApp();
+    const flow = new StubHTMLElement("DETAILS");
+    flow.open = true;
+    const guide = new StubHTMLElement("SPAN");
+    const removed = [];
+    guide.style = {
+        removeProperty(name) {
+            removed.push(name);
+        },
+    };
+    const list = new StubHTMLElement("DIV");
+    flow.querySelector = (selector) => {
+        if (selector === ".interaction-flow-guide") return guide;
+        if (selector === ".interaction-flow-list") return list;
+        return null;
+    };
+    app.context.document._qsAll[".interaction-flow[open]"] = [flow];
+    let dotSyncs = 0;
+    app.context.syncCeoFlowDotGeometry = () => {
+        dotSyncs += 1;
+    };
+    app.readingScaleRow.bind();
+
+    app.number.value = "150";
+    app.number.dispatchEvent({ type: "change", target: app.number });
+
+    assert.deepEqual(removed, ["height"], "展开流程的引导线高度没有按新字号重量");
+    assert.equal(dotSyncs, 1, "字号落定后圆点几何没有重量");
+});
+
 test("字号数字格填任意正数即落盘，非正数与空保留原档位", () => {
     const app = loadApp({ stored: "1.35" });
     app.readingScaleRow.bind();

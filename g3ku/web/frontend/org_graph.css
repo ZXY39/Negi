@@ -81,8 +81,10 @@
     --radius-full: 9999px;
 
     --font-sans: 'Fira Sans', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-    /* 阅读面字号倍数：只乘正文/回复/代码块/笔记正文的字号，控件与布局不跟。
-       设置里的「字号」档位写它，默认 1.1（比基线大两号，每号 5%）。 */
+    /* 阅读面字号倍数：乘会话阅读面的全部文字——正文/回复、中途输出、阶段与轮次标题、
+       工具卡的标签与详情、节点详情的消息正文、代码块与笔记正文；控件与页面框架不跟。
+       设置里的「字号」档位写它，默认 1.1（比基线大两号，每号 5%）。文本滚动框的
+       max-height 也乘它，封顶保持「约多少行」而不是被大字号挤成几行。 */
     --reading-font-scale: 1.1;
     /* 界面缩放倍数：桌面壳由宿主 ZoomFactor 承担（这一行保持 1），浏览器轨写 body 的
        CSS zoom 时同步写它。满视口的锚点（100vh/100vw/100dvh）按它反除，因为 CSS zoom
@@ -3184,7 +3186,7 @@ textarea {
     background: color-mix(in srgb, var(--bg-elevated) 92%, transparent);
     border-radius: var(--radius-md);
     color: var(--text-secondary);
-    font-size: 0.84rem;
+    font-size: calc(0.84rem * var(--reading-font-scale));
 }
 
 .ceo-internal-ack.is-heartbeat .msg-content {
@@ -3247,7 +3249,7 @@ textarea {
     background: none;
     color: var(--text-muted);
     font-family: inherit;
-    font-size: 0.76rem;
+    font-size: calc(0.76rem * var(--reading-font-scale));
     letter-spacing: 0.01em;
     cursor: pointer;
 }
@@ -3292,7 +3294,7 @@ textarea {
     gap: 2px;
     margin: 2px 0 0;
     color: var(--text-muted);
-    font-size: 0.74rem;
+    font-size: calc(0.74rem * var(--reading-font-scale));
     letter-spacing: 0.01em;
     min-width: 0;
 }
@@ -3334,7 +3336,8 @@ textarea {
 }
 
 .ceo-thinking-line-pane {
-    max-height: 8.5rem;
+    /* 滚动窗按字号同倍放大：窗口是「约多少行」的视窗，不随字号收成两三行。 */
+    max-height: calc(8.5rem * var(--reading-font-scale));
     overflow-y: auto;
     padding-left: 8px;
     border-left: 1px solid var(--border-color, rgba(255, 255, 255, 0.12));
@@ -3348,7 +3351,7 @@ textarea {
 }
 
 .ceo-turn-usage {
-    font-size: 0.76rem;
+    font-size: calc(0.76rem * var(--reading-font-scale));
     line-height: 1.4;
     color: var(--text-muted);
     letter-spacing: 0.01em;
@@ -3383,7 +3386,7 @@ textarea {
     justify-content: flex-end;
     gap: 8px;
     width: 100%;
-    font-size: 0.76rem;
+    font-size: calc(0.76rem * var(--reading-font-scale));
     line-height: 1.4;
     color: var(--text-muted);
     letter-spacing: 0.01em;
@@ -3813,7 +3816,7 @@ textarea {
 .interaction-flow-meta {
     flex: 1;
     text-align: right;
-    font-size: 0.78rem;
+    font-size: calc(0.78rem * var(--reading-font-scale));
     color: var(--text-muted);
 }
 
@@ -3957,7 +3960,7 @@ textarea {
 }
 
 .interaction-step-title {
-    font-size: 0.85rem;
+    font-size: calc(0.85rem * var(--reading-font-scale));
     font-weight: 600;
     color: var(--text-primary);
     min-width: 0;
@@ -4021,7 +4024,7 @@ textarea {
     border-radius: var(--radius-full);
     background: var(--status-pending-bg);
     color: var(--status-pending-text);
-    font-size: 0.72rem;
+    font-size: calc(0.72rem * var(--reading-font-scale));
     white-space: nowrap;
 }
 
@@ -4036,12 +4039,13 @@ textarea {
     background: color-mix(in srgb, var(--bg-app) 78%, transparent);
     color: var(--text-secondary);
     border: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
-    font-size: 0.72rem;
+    font-size: calc(0.72rem * var(--reading-font-scale));
     white-space: nowrap;
 }
 
 .interaction-step-started {
-    max-width: 148px;
+    /* 时间戳的单行宽度跟字号一起放大：封顶不动的话大字号下时间会被截成省略号。 */
+    max-width: calc(148px * var(--reading-font-scale));
     overflow: hidden;
     text-overflow: ellipsis;
 }
@@ -4070,7 +4074,7 @@ textarea {
 .interaction-step-preview,
 .interaction-step-detail {
     color: var(--text-secondary);
-    font-size: 0.8rem;
+    font-size: calc(0.8rem * var(--reading-font-scale));
     line-height: 1.55;
     white-space: pre-wrap;
     word-break: break-word;
@@ -4087,8 +4091,9 @@ textarea {
 
 .interaction-step-detail {
     margin-top: 2px;
-    /* 会话流工具输出展开后同样封顶,避免长输出把聊天流刷满。 */
-    max-height: 260px;
+    /* 会话流工具输出展开后同样封顶,避免长输出把聊天流刷满。
+       封顶跟字号同倍放大，视窗保持「约多少行」而不是被大字号挤成几行。 */
+    max-height: calc(260px * var(--reading-font-scale));
     overflow: auto;
 }
 
@@ -4300,7 +4305,7 @@ textarea {
    思考全文从不外发到节点详情。字号与配色跟会话气泡那一行同档，两面读的是同一份口径。 */
 .task-trace-round-thinking {
     font-family: inherit;
-    font-size: 0.74rem;
+    font-size: calc(0.74rem * var(--reading-font-scale));
     line-height: 1.4;
     color: var(--text-muted);
     letter-spacing: 0.01em;
@@ -4367,7 +4372,7 @@ textarea {
 }
 
 .task-trace-round-chip-title {
-    font-size: 0.85rem;
+    font-size: calc(0.85rem * var(--reading-font-scale));
     font-weight: 600;
     min-width: 0;
     white-space: nowrap;
@@ -4483,7 +4488,7 @@ textarea {
 }
 
 .task-trace-label {
-    font-size: 0.74rem;
+    font-size: calc(0.74rem * var(--reading-font-scale));
     font-weight: 700;
     letter-spacing: 0.05em;
     text-transform: uppercase;
@@ -4552,8 +4557,9 @@ textarea {
 .task-trace-code {
     min-height: 56px;
     /* 工具输入/输出内容很多时不再把详情页刷满:
-       超过固定高度后在内部滚动,由全局细滚动条承载。 */
-    max-height: 260px;
+       超过固定高度后在内部滚动,由全局细滚动条承载。封顶跟字号同倍放大，
+       视窗行数不随字号变大而缩水。 */
+    max-height: calc(260px * var(--reading-font-scale));
     overflow: auto;
     font-size: calc(0.85rem * var(--reading-font-scale));
     background: color-mix(in srgb, var(--bg-panel) 62%, var(--bg-app));
@@ -5844,7 +5850,7 @@ textarea {
 }
 
 .msg-voice-transcript {
-    font-size: 14px;
+    font-size: calc(14px * var(--reading-font-scale));
     line-height: 1.5;
     color: var(--text-secondary);
     white-space: pre-wrap;
@@ -6216,7 +6222,7 @@ textarea {
     border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
     background: color-mix(in srgb, var(--bg-panel) 88%, var(--bg-app) 12%);
     color: var(--text-primary);
-    font-size: 0.8rem;
+    font-size: calc(0.8rem * var(--reading-font-scale));
     font-weight: 500;
     line-height: 1.2;
     overflow-wrap: anywhere;
@@ -6340,7 +6346,7 @@ textarea {
     width: 100%;
     padding-inline: clamp(20px, 7%, 88px);
     color: color-mix(in srgb, var(--ceo-context-compress-color) 78%, var(--text-primary));
-    font-size: 0.78rem;
+    font-size: calc(0.78rem * var(--reading-font-scale));
     line-height: 1.2;
     letter-spacing: 0.02em;
 }
@@ -16940,7 +16946,7 @@ textarea {
 
 .msg-voice-transcript {
     color: var(--ui-text-secondary);
-    font-size: 13px;
+    font-size: calc(13px * var(--reading-font-scale));
 }
 
 /* 分色不能并进上面那条共享规则：属性选择器压过基础类，动作文字会被染成正文灰，
@@ -17951,9 +17957,9 @@ textarea {
     overflow-wrap: anywhere;
     word-break: break-word;
     color: var(--text-primary);
-    font-size: 0.86rem;
+    font-size: calc(0.86rem * var(--reading-font-scale));
     line-height: 1.65;
-    max-height: 320px;
+    max-height: calc(320px * var(--reading-font-scale));
     overflow-y: auto;
 }
 
@@ -18011,7 +18017,7 @@ textarea {
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
-    font-size: 0.84rem;
+    font-size: calc(0.84rem * var(--reading-font-scale));
     color: var(--text-primary);
 }
 
@@ -18034,7 +18040,7 @@ textarea {
 }
 
 .spawn-node-label {
-    font-size: 0.72rem;
+    font-size: calc(0.72rem * var(--reading-font-scale));
     color: var(--text-tertiary);
 }
 
@@ -18042,9 +18048,9 @@ textarea {
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     word-break: break-word;
-    max-height: 220px;
+    max-height: calc(220px * var(--reading-font-scale));
     overflow-y: auto;
-    font-size: 0.84rem;
+    font-size: calc(0.84rem * var(--reading-font-scale));
     line-height: 1.6;
     color: var(--text-primary);
 }
@@ -18230,7 +18236,7 @@ textarea {
     cursor: pointer;
     list-style: none;
     color: var(--text-secondary);
-    font-size: 0.8rem;
+    font-size: calc(0.8rem * var(--reading-font-scale));
     font-variant-numeric: tabular-nums;
 }
 
@@ -18272,7 +18278,7 @@ textarea {
     flex: none;
     /* 32px = 列表 6 + 条目 4 + 正文列 22：秒数行与下方的中途正文、工具图标同一条竖轴。 */
     padding-left: 32px;
-    font-size: 0.85rem;
+    font-size: calc(0.85rem * var(--reading-font-scale));
     font-weight: 600;
     color: var(--text-primary);
     font-variant-numeric: tabular-nums;
@@ -18323,7 +18329,7 @@ textarea {
 
 /* 节点用量行与中途文本同款：0.85rem / 600 / 主文字色。 */
 .task-flow-usage {
-    font-size: 0.85rem;
+    font-size: calc(0.85rem * var(--reading-font-scale));
     font-weight: 600;
     color: var(--text-primary);
 }
