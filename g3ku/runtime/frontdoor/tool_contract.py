@@ -203,8 +203,10 @@ def pinned_contract_revision_key(
     exec_runtime_policy: dict[str, Any] | None,
     session_temp_dir: str | None,
     skill_roster_epoch: int,
+    sandbox_tier: str = "",
+    tool_policy_signature: str = "",
 ) -> str:
-    """头部块的重印判据：只有 roster epoch（随 token 压缩 / 手动压缩递增）。
+    """头部块的重印判据：roster epoch + 档位 + 生效工具集合。
 
     执行策略与临时目录**刻意不进判据**：缓存命中第一。它们变化时不重印头部，改由一次性
     `[RUNTIME_NOTICE]` 消息纠正；下次压缩 epoch 跳变时，头部才用当刻值重印。可见集本身
@@ -212,6 +214,10 @@ def pinned_contract_revision_key(
     持久提示落进历史，被删/被收回的名字留在头部直到下一次重印（`load_skill_context`
     三态回执告知原因）。把可见集或策略算进键会让一次资源/配置变化把整段头部（连同它
     后面的全部前缀）打掉。
+
+    例外是**档位与受限档工具集合**：切档/改工具列表会同时换掉模型可见的 `tools[]` 与
+    头部声明，继续沿用旧前缀会让模型按旧工具面行动。这两项变化一次前缀是操作员显式动作，
+    接受这一次 cache miss。
     """
     _ = (exec_runtime_policy, session_temp_dir)
     digest = hashlib.sha256(
@@ -219,6 +225,8 @@ def pinned_contract_revision_key(
             (
                 PINNED_CONTRACT_RENDERER_VERSION,
                 str(int(skill_roster_epoch or 0)),
+                str(sandbox_tier or "").strip(),
+                str(tool_policy_signature or "").strip(),
             )
         ).encode('utf-8')
     ).hexdigest()[:16]
@@ -251,6 +259,25 @@ def _normalize_skill_roster_items(items: list[Any] | None) -> list[dict[str, str
     return [entries[key] for key in sorted(entries)]
 
 
+_TIER_LABELS = {
+    "limited": "受限模式",
+    "jailed": "沙盒模式",
+    "readonly": "只读模式",
+    "host_full": "全权限模式",
+}
+
+
+def session_mode_text(sandbox_tier: Any) -> str:
+    tier = str(sandbox_tier or "").strip()
+    label = _TIER_LABELS.get(tier, "")
+    return f"已切换到{label}" if label else ""
+
+
+def _session_mode_line(sandbox_tier: Any) -> str:
+    mode_text = session_mode_text(sandbox_tier)
+    return f'session_mode: {mode_text}' if mode_text else ""
+
+
 def render_pinned_contract_text(
     *,
     skill_items: list[Any] | None,
@@ -258,6 +285,8 @@ def render_pinned_contract_text(
     session_temp_dir: str | None,
     include_extras: bool = True,
     sticker_items: list[Any] | None = None,
+    sandbox_tier: str = "",
+    session_workspace_dir: str | None = None,
 ) -> str:
     """渲染头部钉住块。
 
@@ -305,6 +334,12 @@ def render_pinned_contract_text(
     lines.extend(render_catalog_lines(sticker_items or ()))
     if not include_extras:
         return '\n'.join(lines).strip()
+    mode_line = _session_mode_line(sandbox_tier)
+    if mode_line:
+        lines.append(mode_line)
+    workspace_dir = str(session_workspace_dir or "").strip()
+    if workspace_dir:
+        lines.append(f'session_workspace_dir: {workspace_dir}')
     lines.append(_render_exec_runtime_policy(exec_runtime_policy))
     lines.extend(_render_session_temp_dir(session_temp_dir))
     lines.extend(_render_path_anchor())
@@ -414,6 +449,10 @@ def pinned_contract_section_values(pinned_text: Any) -> dict[str, str]:
             values['exec_runtime_policy'] = '' if body in {'', 'none'} else body
         elif stripped.startswith('session_temp_dir:'):
             values['session_temp_dir'] = stripped.split(':', 1)[1].strip()
+        elif stripped.startswith('session_mode:'):
+            values['session_mode'] = stripped.split(':', 1)[1].strip()
+        elif stripped.startswith('session_workspace_dir:'):
+            values['session_workspace_dir'] = stripped.split(':', 1)[1].strip()
         elif stripped.startswith('sticker_max_per_reply:'):
             values['sticker_max_per_reply'] = stripped.split(':', 1)[1].strip()
     values.update(sticker_contract_sections_from_text(pinned_text))
@@ -430,6 +469,9 @@ def frontdoor_pinned_contract_text(
     session_key: str | None = None,
     include_extras: bool = True,
     sticker_items: list[Any] | None = None,
+    sandbox_tier: str = "",
+    session_workspace_dir: str | None = None,
+    tool_policy_signature: str = "",
 ) -> str:
     """注入侧唯一取数口：命中已钉住的内容就复用原文，否则重钉一次并记下判据键。
 
@@ -448,6 +490,8 @@ def frontdoor_pinned_contract_text(
         exec_runtime_policy=exec_runtime_policy,
         session_temp_dir=session_temp_dir,
         skill_roster_epoch=skill_roster_epoch,
+        sandbox_tier=sandbox_tier,
+        tool_policy_signature=tool_policy_signature,
     )
     stored_text, _stored_skill_ids = _read_pinned_contract_entry(
         session,
@@ -462,6 +506,8 @@ def frontdoor_pinned_contract_text(
         session_temp_dir=session_temp_dir,
         include_extras=include_extras,
         sticker_items=sticker_items,
+        sandbox_tier=sandbox_tier,
+        session_workspace_dir=session_workspace_dir,
     )
     if not fresh:
         return ''

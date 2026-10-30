@@ -212,6 +212,7 @@ from .tool_contract import (
     pinned_contract_section_values,
     pinned_contract_state,
     pinned_skill_ids_for,
+    session_mode_text,
     skill_roster_epoch_for,
     split_pinned_contract_from_system_text,
     strip_frontdoor_tool_contract_echo,
@@ -3446,6 +3447,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         没动，四处拿到的是同一串原文。头部一改就顶掉身后全部前缀，四处不一致比不钉严重。
         """
         normalized_session_key = str(session_key or "").strip()
+        policy = session_policy(normalized_session_key) if normalized_session_key else None
+        sandbox_tier = str(getattr(policy, "tier", "") or "") if policy is not None else ""
         pinned_text = frontdoor_pinned_contract_text(
             session,
             skill_items=self._frontdoor_skill_roster_items(
@@ -3457,6 +3460,17 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             skill_roster_epoch=skill_roster_epoch_for(session, session_key=normalized_session_key),
             session_key=normalized_session_key,
             sticker_items=list(safe_scan_packs()),
+            sandbox_tier=sandbox_tier,
+            session_workspace_dir=(
+                ceo_session_workspace_dir(normalized_session_key)
+                if normalized_session_key and sandbox_tier == TIER_LIMITED
+                else ""
+            ),
+            tool_policy_signature=(
+                str(getattr(policy, "tool_policy_signature", "") or "")
+                if policy is not None
+                else ""
+            ),
         )
         if not pinned_text:
             return "", []
@@ -3870,6 +3884,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 adopted_digest=persona_adopted_digest,
                 session_key=normalized_session_key,
             ),
+            mode_provider=lambda **kwargs: self._frontdoor_mode_notice_provider(
+                **kwargs,
+                session_key=normalized_session_key,
+            ),
             contract_sections=self._frontdoor_contract_notice_sections(
                 dict(state or {}),
                 session_key=normalized_session_key,
@@ -3925,7 +3943,17 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             for item in list(state.get("attachment_reopen_targets") or [])
             if isinstance(item, dict)
         ]
+        policy = session_policy(session_key) if session_key else None
+        sandbox_tier = str(getattr(policy, "tier", "") or "") if policy is not None else ""
         sections = {
+            # 档位与工具集合变化由 pinned contract 重印；这一节让模型在重印后仍能一眼
+            # 读到"已切换到什么模式"，并覆盖切档后第一次通知。
+            "session_mode": session_mode_text(sandbox_tier),
+            "session_workspace_dir": (
+                ceo_session_workspace_dir(session_key)
+                if session_key and sandbox_tier == TIER_LIMITED
+                else ""
+            ),
             # 与头部同一取值：头部 `sticker_max_per_reply` 行覆盖这一节时以头部原文为初值，
             # 之后改设置只投这一条变化（不重印头部）。
             "sticker_max_per_reply": str(sticker_config.max_per_reply()),
@@ -3985,6 +4013,40 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 continue
             rows.append(f"`{name or target}`" + (f" → {target}" if target and name else ""))
         return "; ".join(rows)
+
+    _MODE_LIMITS = {
+        "limited": "文件读写限本会话工作目录；默认不执行命令行、不派异步任务；具体可用工具以 tools[] 为准。",
+        "jailed": "命令与文件操作在一次性沙盒内执行；只有 /workspace 与 /shared 可写；网络关闭。",
+        "host_full": "宿主执行，按当前权限运行；不再附加模式限制。",
+        "readonly": "写类工具与命令行不可用。",
+    }
+
+    def _frontdoor_mode_notice_provider(
+        self,
+        *,
+        cursor_signature: str = "",
+        initialized: bool = False,
+        session_key: str = "",
+    ) -> dict[str, Any] | None:
+        """档位/工具列表变化的一次性通知；首次投递只对齐，不重复头部已有内容。"""
+        if not session_key:
+            return None
+        policy = session_policy(session_key)
+        tier = str(getattr(policy, "tier", "") or "")
+        tools_signature = str(getattr(policy, "tool_policy_signature", "") or "")
+        signature = f"{tier}|{tools_signature}"
+        if not initialized:
+            return {"signature": signature, "text": ""}
+        previous_tier, _, previous_tools = str(cursor_signature or "").partition("|")
+        parts: list[str] = []
+        if previous_tier != tier:
+            label = session_mode_text(tier) or f"当前档位：{tier}"
+            limits = self._MODE_LIMITS.get(tier, "")
+            parts.append(f"{label}：{limits}" if limits else label)
+        if previous_tools != tools_signature:
+            names = tuple(getattr(policy, "effective_tool_names", ()) or ())
+            parts.append(f"允许使用的工具列表已更新（{len(names)} 项；以 tools[] 为准）。")
+        return {"signature": signature, "text": "\n".join(parts)}
 
     def _frontdoor_memory_notice_provider(
         self,

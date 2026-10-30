@@ -22,6 +22,7 @@ from g3ku.runtime.frontdoor.capability_snapshot import CapabilitySnapshot, build
 from g3ku.runtime.frontdoor.cron_hidden_prompt import strip_cron_hidden_prompt
 from g3ku.runtime.frontdoor.prompt_cache_contract import DEFAULT_CACHE_FAMILY_REVISION
 from g3ku.runtime.frontdoor.session_temp_dir import ceo_session_temp_dir
+from g3ku.runtime.frontdoor.session_workspace import ceo_session_workspace_dir
 from g3ku.runtime.frontdoor.tool_contract import (
     build_frontdoor_tool_contract,
     frontdoor_pinned_contract_text,
@@ -54,6 +55,7 @@ from g3ku.runtime.web_ceo_sessions import (
     transcript_messages,
     workspace_path,
 )
+from g3ku.sandbox.policy import TIER_LIMITED
 from g3ku.sandbox.policy import session_policy as sandbox_session_policy
 from main.runtime.tool_names import (
     SCHEDULE_WAKE_TOOL_NAME,
@@ -1279,6 +1281,11 @@ class CeoMessageBuilder:
         # 收窄由执行准入与 load 承担。skill 侧头部钉住块带全量可见名单（id|名称|描述）。
         selected_skills = self._visible_only_skill_items(visible_skills)
         skill_trace = self._visible_only_skill_trace(selected_skills)
+        sandbox_tier = (
+            str(sandbox_session_policy(session_key).tier or '')
+            if session_key
+            else ''
+        )
         split_prompt_builder = callable(getattr(self._prompt_builder, 'build_base_prompt', None))
         if split_prompt_builder:
             # 提示词的重新拉取跟着记忆块与 tools[] 的时钟走：这两个戳没动，稳定前缀就不该
@@ -1286,12 +1293,6 @@ class CeoMessageBuilder:
             prompt_refresh_stamp = (
                 f"{str(getattr(session, MEMORY_SNAPSHOT_ADOPTED_AT_ATTR, '') or '').strip()}"
                 f"|{str(getattr(capability_snapshot, 'exposure_revision', '') or '').strip()}"
-            )
-            # 档位只影响头部里那句声明，不进 stamp：切档不重印前缀。
-            sandbox_tier = (
-                str(sandbox_session_policy(session_key).tier or '')
-                if session_key
-                else ''
             )
             system_prompt = self._prompt_builder.build_base_prompt(
                 cache_stamp=prompt_refresh_stamp, sandbox_tier=sandbox_tier
@@ -1302,7 +1303,9 @@ class CeoMessageBuilder:
             system_prompt = f"{system_prompt}\n\n{capability_snapshot.stable_catalog_message}".strip()
         if channel_session:
             channel_block = getattr(self._prompt_builder, 'channel_identity_block', None)
-            channel_text = str(channel_block() if callable(channel_block) else '').strip()
+            channel_text = str(
+                channel_block(sandbox_tier) if callable(channel_block) else ''
+            ).strip()
             if channel_text:
                 system_prompt = f"{system_prompt}\n\n{channel_text}".strip()
         external_trace = self._trace_external_tools(
@@ -1611,6 +1614,13 @@ class CeoMessageBuilder:
         两侧共用 `tool_contract` 里的同一张进程表。
         """
         session_key = self._frontdoor_session_key(persisted_session)
+        policy = sandbox_session_policy(session_key) if session_key else None
+        sandbox_tier = str(getattr(policy, "tier", "") or "") if policy is not None else ""
+        session_workspace = (
+            ceo_session_workspace_dir(session_key)
+            if session_key and sandbox_tier == TIER_LIMITED
+            else ""
+        )
         pinned_text = frontdoor_pinned_contract_text(
             persisted_session,
             skill_items=list(context_sources.get('selected_skills') or []),
@@ -1619,6 +1629,13 @@ class CeoMessageBuilder:
             skill_roster_epoch=skill_roster_epoch_for(persisted_session, session_key=session_key),
             session_key=session_key,
             sticker_items=self._frontdoor_sticker_catalog(),
+            sandbox_tier=sandbox_tier,
+            session_workspace_dir=session_workspace,
+            tool_policy_signature=(
+                str(getattr(policy, "tool_policy_signature", "") or "")
+                if policy is not None
+                else ""
+            ),
         )
         if not pinned_text:
             return '', []

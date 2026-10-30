@@ -403,3 +403,39 @@ def test_pinned_sticker_lines_stay_frozen_between_repaints() -> None:
     repinned = _pinned(sticker_items=grown, **kwargs)
     assert repinned != first
     assert "- `panda` | 熊猫头 | smug(得意)" in repinned
+
+
+def test_pinned_contract_revision_key_tracks_mode_and_tool_policy() -> None:
+    base = dict(
+        exec_runtime_policy=None,
+        session_temp_dir="C:/temp/ceo",
+        skill_roster_epoch=1,
+    )
+    plain = pinned_contract_revision_key(**base)
+    limited = pinned_contract_revision_key(**base, sandbox_tier="limited")
+    limited_a = pinned_contract_revision_key(
+        **base, sandbox_tier="limited", tool_policy_signature="tools-a"
+    )
+    limited_b = pinned_contract_revision_key(
+        **base, sandbox_tier="limited", tool_policy_signature="tools-b"
+    )
+    assert plain != limited
+    assert limited_a != limited_b
+    assert limited_a == pinned_contract_revision_key(
+        **base, sandbox_tier="limited", tool_policy_signature="tools-a"
+    )
+
+
+def test_pinned_contract_renders_mode_and_session_workspace() -> None:
+    text = render_pinned_contract_text(
+        skill_items=[],
+        exec_runtime_policy=None,
+        session_temp_dir="C:/temp/ceo",
+        sandbox_tier="limited",
+        session_workspace_dir="C:/data/session-workspaces/web_ceo-1-abcd",
+    )
+    assert "session_mode: 已切换到受限模式" in text
+    assert "session_workspace_dir: C:/data/session-workspaces/web_ceo-1-abcd" in text
+    values = pinned_contract_section_values(text)
+    assert values["session_mode"] == "已切换到受限模式"
+    assert values["session_workspace_dir"].endswith("web_ceo-1-abcd")

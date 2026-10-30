@@ -1,4 +1,4 @@
-"""头部沙箱声明：档位变化只在重印边界换字，不跟着切档立刻重印。"""
+"""头部沙箱声明：切档立即重印，受限档声明覆盖工作目录/CLI/工具面边界。"""
 
 from __future__ import annotations
 
@@ -33,22 +33,28 @@ def test_readonly_session_declares_the_read_boundary() -> None:
     assert "## Sandbox Environment" not in text
 
 
+def test_limited_session_declares_the_workspace_and_cli_boundary() -> None:
+    text = _render(stamp="s1", tier="limited")
+    assert "## Limited Session" in text
+    assert "本会话工作目录" in text
+    assert "默认不提供命令行执行" in text
+    assert "web_fetch" in text
+
+
 def test_host_full_session_carries_no_declaration() -> None:
     text = _render(stamp="s1", tier="host_full")
     assert "## Sandbox Environment" not in text
     assert "## Read-only Session" not in text
 
 
-def test_tier_change_waits_for_the_next_reprint() -> None:
-    """切档不重印前缀：同一 stamp 下换档，头部保持上一版声明。"""
+def test_tier_change_reprints_immediately() -> None:
+    """切档立即换头部：旧声明不能留在下一回合。"""
     builder = _builder()
     first = builder.build_base_prompt(cache_stamp="stamp-a", sandbox_tier="jailed")
-    same_stamp = builder.build_base_prompt(cache_stamp="stamp-a", sandbox_tier="readonly")
-    assert "## Sandbox Environment" in same_stamp
-    assert "## Read-only Session" not in same_stamp
+    same_stamp = builder.build_base_prompt(cache_stamp="stamp-a", sandbox_tier="limited")
+    assert "## Limited Session" in same_stamp
+    assert "## Sandbox Environment" not in same_stamp
 
-    # 重印时钟（记忆采纳 / 工具面修订）动了，新档位才进头部。
-    next_reprint = builder.build_base_prompt(cache_stamp="stamp-b", sandbox_tier="readonly")
-    assert "## Read-only Session" in next_reprint
-    assert "## Sandbox Environment" not in next_reprint
+    next_reprint = builder.build_base_prompt(cache_stamp="stamp-b", sandbox_tier="limited")
+    assert "## Limited Session" in next_reprint
     assert first != next_reprint

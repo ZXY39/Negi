@@ -314,3 +314,45 @@ def test_first_revision_after_an_empty_alignment_is_still_delivered() -> None:
     )
     assert second is not None
     assert "第一条真实记忆" in str(second.get("content") or "")
+
+
+def test_mode_provider_aligns_then_delivers_mode_changes() -> None:
+    scope = "session:mode-notice"
+    clear_skill_roster_notice_stores()
+    state = {"signature": "limited|tools-a", "text": ""}
+
+    def provider(*, cursor_signature: str = "", initialized: bool = False):
+        if not initialized:
+            return {"signature": state["signature"], "text": ""}
+        if cursor_signature != state["signature"]:
+            return {"signature": state["signature"], "text": state["text"]}
+        return {"signature": state["signature"], "text": ""}
+
+    first, _ = deliver_for_scope(
+        scope,
+        [],
+        now="2026-04-25T00:00:00+08:00",
+        mode_provider=provider,
+    )
+    assert first is None
+    assert notice_context_for(scope)["mode_cursor"] == {
+        "signature": "limited|tools-a",
+        "initialized": True,
+    }
+
+    state.update(
+        signature="jailed|tools-a",
+        text="已切换到沙盒模式：命令与文件操作在一次性沙盒内执行。",
+    )
+    second, _ = deliver_for_scope(
+        scope,
+        [],
+        now="2026-04-25T00:01:00+08:00",
+        mode_provider=provider,
+    )
+    assert second is not None
+    body = str(second.get("content") or "")
+    assert "### Session mode" in body
+    assert "已切换到沙盒模式" in body
+    assert "<!--" not in body
+

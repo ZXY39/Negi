@@ -35,10 +35,13 @@ SKILL_ROSTER_NOTICE_LOAD_HINT = 'Use `load_skill_context(skill_id="...")` to rea
 SKILL_ROSTER_CARRIED_HEADING = '### Skills newly readable in this session (still readable; kept across compaction)'
 # 长期记忆增量与 skill 名单共用一条通知消息；两节之间用空行分隔。
 MEMORY_NOTICE_HEADING = '### Long-term memory updates'
+SESSION_MODE_NOTICE_HEADING = '### Session mode'
 # 头部快照与当刻值的差量：两次重印之间唯一的变化出口。
 RUNTIME_CONTRACT_UPDATE_HEADING = '### Runtime contract updates (supersede the pinned snapshot)'
 # 渲染顺序固定：同一组变化每次投出来的字节稳定，便于模型与测试比对。
 CONTRACT_SECTION_ORDER = (
+    'session_mode',
+    'session_workspace_dir',
     'sticker_max_per_reply',
     'exec_runtime_policy',
     'session_temp_dir',
@@ -93,6 +96,7 @@ def deliver_for_scope(
     covered_skill_ids: list[Any] | None = None,
     memory_provider: Any = None,
     persona_provider: Any = None,
+    mode_provider: Any = None,
     contract_sections: dict[str, Any] | None = None,
     covered_contract_sections: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, list[dict[str, str]]]:
@@ -157,19 +161,37 @@ def deliver_for_scope(
                 persona_text = next_text
             persona_cursor = {'digest': next_digest, 'initialized': True}
     context['persona_cursor'] = persona_cursor
+    mode_text = ''
+    mode_cursor = dict(context.get('mode_cursor') or {})
+    if callable(mode_provider):
+        try:
+            mode_delta = mode_provider(
+                cursor_signature=str(mode_cursor.get('signature') or ''),
+                initialized=bool(mode_cursor.get('initialized')),
+            )
+        except Exception:
+            mode_delta = None
+        if isinstance(mode_delta, dict):
+            next_signature = str(mode_delta.get('signature') or '').strip()
+            next_text = str(mode_delta.get('text') or '').strip()
+            if next_text:
+                mode_text = next_text
+            mode_cursor = {'signature': next_signature, 'initialized': True}
+    context['mode_cursor'] = mode_cursor
     context, changed_contract = record_contract_sections(
         context,
         contract_sections or {},
         now=now,
         covered_sections=covered_contract_sections,
     )
-    if not pending and not memory_text and not persona_text and not changed_contract:
+    if not pending and not memory_text and not persona_text and not mode_text and not changed_contract:
         set_notice_context(scope_key, context)
         return None, []
     message = build_notice_message(
         pending,
         memory_text=memory_text,
         persona_text=persona_text,
+        mode_text=mode_text,
         contract_sections=changed_contract,
     )
     if message is not None:
@@ -303,6 +325,7 @@ def normalize_skill_roster_notice_context(payload: Any) -> dict[str, Any]:
     ]
     cursor_source = source.get('memory_cursor') if isinstance(source.get('memory_cursor'), dict) else {}
     persona_source = source.get('persona_cursor') if isinstance(source.get('persona_cursor'), dict) else {}
+    mode_source = source.get('mode_cursor') if isinstance(source.get('mode_cursor'), dict) else {}
 
     def _cursor_value(name: str) -> int:
         try:
@@ -321,6 +344,10 @@ def normalize_skill_roster_notice_context(payload: Any) -> dict[str, Any]:
         'persona_cursor': {
             'digest': str(persona_source.get('digest') or '')[:64],
             'initialized': bool(persona_source.get('initialized')),
+        },
+        'mode_cursor': {
+            'signature': str(mode_source.get('signature') or '')[:256],
+            'initialized': bool(mode_source.get('initialized')),
         },
         'contract_sections': normalize_contract_sections(source.get('contract_sections')),
     }
@@ -605,6 +632,7 @@ def build_notice_message(
     *,
     memory_text: str = '',
     persona_text: str = '',
+    mode_text: str = '',
     contract_sections: list[tuple[str, str]] | None = None,
 ) -> dict[str, Any] | None:
     """一次性投递那条消息：role=user，落在本轮历史末尾。
@@ -622,6 +650,9 @@ def build_notice_message(
     persona_section = str(persona_text or '').strip()
     if persona_section:
         sections.append(persona_section)
+    mode_section = str(mode_text or '').strip()
+    if mode_section:
+        sections.append('\n'.join([SESSION_MODE_NOTICE_HEADING, mode_section]))
     contract_lines = render_contract_update_lines(contract_sections)
     if contract_lines:
         sections.append('\n'.join(contract_lines))

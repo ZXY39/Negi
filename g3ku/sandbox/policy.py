@@ -253,6 +253,16 @@ class SessionPolicy:
     def exec_allowed(self) -> bool:
         return self.tool_allowed("exec")
 
+    @property
+    def tool_policy_signature(self) -> str:
+        """档位 + 生效工具集合的稳定签名；切档/改工具列表时变化。"""
+        names = "\n".join(sorted(self.allowlist or ()))
+        return f"{self.tier}\n{names}"
+
+    @property
+    def effective_tool_names(self) -> tuple[str, ...]:
+        return tuple(sorted(self.allowlist or ()))
+
     def tool_allowed(self, tool_name: Any) -> bool:
         name = str(tool_name or "").strip()
         if not name:
