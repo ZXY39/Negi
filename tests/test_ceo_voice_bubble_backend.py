@@ -1,13 +1,14 @@
 """语音气泡的后端契约：音频附件是给人回放的素材，不是给模型的输入。
 
-钉住五面：
+钉住六面：
 1. kind 必须判成 ``audio``，否则前端把它画成文件药丸，气泡上没有播放键；
 2. 模型可见面（附件说明行 + ``UserInputMessage.attachments``）必须漏掉它，
    而 ``metadata`` 必须留着它——历史回放要能再播一次；
 3. ``/api/ceo/external-upload-file`` 是新增的读文件车道，越界判定必须比
    "路径字符串看着像"更严；
 4. 两条车道落盘前都把 PCM 压成 MP3，压不动就原样留 WAV（压缩不许把语音打回错误）；
-5. 会话删除/清空要把两个上传根里该会话的目录一起带走。
+5. 会话删除/清空要把两个上传根里该会话的目录一起带走；
+6. 渠道附件的三条显示道（实时帧、快照、列表预览）必须画同一张脸。
 """
 
 from __future__ import annotations
@@ -16,14 +17,17 @@ import base64
 import io
 import struct
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from g3ku.runtime import attachments as attachment_shapes
 from g3ku.runtime import web_ceo_sessions as wcs
 from g3ku.runtime.api import external_v1 as ext_api
 from g3ku.runtime.api import websocket_ceo as ws_api
+from g3ku.runtime.session_agent import RuntimeAgentSession
 from g3ku.stt import audio as stt_audio
 from g3ku.utils.helpers import safe_filename
 
@@ -67,11 +71,11 @@ PNG = {
 
 
 def test_audio_mime_and_extension_both_map_to_the_audio_kind():
-    assert ws_api._upload_kind(mime_type="audio/wav", name="x.bin") == "audio"
+    assert attachment_shapes.upload_kind(mime_type="audio/wav", name="x.bin") == "audio"
     # QQ 的 content_type 是类别词，命名只靠扩展名时必须还落在 audio，否则前端画成文件。
-    assert ws_api._upload_kind(mime_type="application/octet-stream", name="voice.wav") == "audio"
-    assert ws_api._upload_kind(mime_type="", name="pic.png") == "image"
-    assert ws_api._upload_kind(mime_type="application/pdf", name="doc.pdf") == "file"
+    assert attachment_shapes.upload_kind(mime_type="application/octet-stream", name="voice.wav") == "audio"
+    assert attachment_shapes.upload_kind(mime_type="", name="pic.png") == "image"
+    assert attachment_shapes.upload_kind(mime_type="application/pdf", name="doc.pdf") == "file"
 
 
 def test_voice_clip_is_absent_from_the_model_visible_attachment_note():
@@ -151,20 +155,62 @@ def test_snapshot_strips_the_channel_attachment_note_from_the_bubble():
     """
     raw = "在吗"
     attachments = [{**PNG, "kind": "image"}]
-    note = ext_api.channel_attachment_note(attachments)
+    note = attachment_shapes.channel_attachment_note(attachments)
     assert note.startswith("Channel attachments:")
 
     historical = {"role": "user", "content": f"{raw}\n\n{note}",
                   "metadata": {"external_attachments": attachments}}
-    assert ws_api._strip_channel_attachment_note(historical["content"], historical["metadata"]) == raw
+    assert attachment_shapes.strip_channel_attachment_note(historical["content"], historical["metadata"]) == raw
 
     # 纯附件消息：正文只剩说明，剥完是空的（前端只画附件气泡）
     only_note = {"role": "user", "content": note,
                  "metadata": {"external_attachments": attachments}}
-    assert ws_api._strip_channel_attachment_note(only_note["content"], only_note["metadata"]) == ""
+    assert attachment_shapes.strip_channel_attachment_note(only_note["content"], only_note["metadata"]) == ""
 
     # 没有渠道描述符的行原样返回
-    assert ws_api._strip_channel_attachment_note(f"{raw}\n\n{note}", {}) == f"{raw}\n\n{note}"
+    assert attachment_shapes.strip_channel_attachment_note(f"{raw}\n\n{note}", {}) == f"{raw}\n\n{note}"
+
+
+def test_inflight_frame_draws_channel_attachments_like_the_snapshot():
+    """回合进行中的实时帧必须与刷新后的快照画同一张脸。
+
+    实时帧此前只认 web 上传那两个键（``web_ceo_raw_text`` / ``web_ceo_uploads``），
+    渠道入站的说明行于是原样进气泡、附件恒为空——同一句话在回合里是一串路径，
+    刷新后才变回缩略图。实盘取自 ``ext:qq-official-1903529517:f8a8001865631301``。
+    """
+    session_key = "ext:qq-official-1903529517:f8a8001865631301"
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
+        session_key=session_key,
+        channel="ext",
+        chat_id="f8a8001865631301",
+    )
+
+    for raw_text in ("去下载这两个项目", ""):
+        message = ext_api._build_external_user_message(
+            text=raw_text,
+            attachments=[{**PNG, "kind": "image", "size": 72196}],
+            sender=None,
+            metadata={"chat_type": "dm"},
+        )
+        session._last_prompt = message
+        inflight = session._pending_user_messages_snapshot()[-1]
+        snapshot_row = {
+            "role": "user",
+            "content": ws_api._history_text(message.content),
+            "metadata": dict(message.metadata),
+        }
+
+        assert inflight["content"] == raw_text
+        assert inflight["attachments"] == ws_api._normalize_snapshot_attachments(
+            snapshot_row, session_key
+        )
+        assert inflight["attachments"][0]["url"].startswith("/api/ceo/external-upload-file?")
+
+        # 会话列表在飞预览取的就是这份 payload，说明行不许再冒出来。
+        assert "Channel attachments:" not in wcs._inflight_preview_text(
+            {"user_message": inflight}
+        )
 
 
 def test_channel_bubble_hides_the_stored_face_placeholder():

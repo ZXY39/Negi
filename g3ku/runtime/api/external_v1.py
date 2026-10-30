@@ -42,6 +42,7 @@ from g3ku.core.messages import UserInputMessage
 from g3ku.runtime.api.ceo_sessions import _publish_ceo_sessions_snapshot
 from g3ku.runtime.api.external_auth import ExternalApiPrincipal, require_external_api
 from g3ku.runtime.api.external_turns import get_external_turn_service
+from g3ku.runtime.attachments import channel_attachment_note
 from g3ku.runtime.ceo_catalog_offload import build_ceo_session_catalog_async
 from g3ku.runtime.external_events import (
     SSE_HEARTBEAT_INTERVAL_SECONDS,
@@ -941,31 +942,6 @@ def _image_url_from_attachment(attachment: dict[str, Any]) -> str | None:
             encoded = base64.b64encode(candidate.read_bytes()).decode("ascii")
             return f"data:{mime_type};base64,{encoded}"
     return str(attachment.get("url") or "").strip() or None
-
-
-def channel_attachment_note(attachments: list[dict[str, Any]]) -> str:
-    """模型可见的渠道附件说明行。
-
-    它只属于模型输入：网页气泡显示用户原文，按同一份描述符把这段说明从历史行
-    content 里剥掉（见 ``websocket_ceo._strip_channel_attachment_note``），
-    所以两处必须由这一个函数生成。
-    """
-    lines = ["Channel attachments:"]
-    for item in attachments:
-        kind = str(item.get("kind") or "")
-        if kind == "audio":
-            # 语音条的内容已经在正文的转写里；再给一行路径只会让模型以为要去
-            # 打开一个文件。它是给人回放的素材，不是给模型的输入。
-            continue
-        label = "image" if kind == "image" else "file"
-        name = str(item.get("name") or "").strip()
-        source = str(item.get("path") or item.get("url") or "").strip()
-        suffix = f" (local path: {source})" if source else ""
-        lines.append(f"- {label}: {name}{suffix}")
-    if len(lines) <= 1:
-        return ""
-    lines.append("You may inspect the local file paths or URLs above when helpful.")
-    return "\n".join(lines)
 
 
 def _build_external_user_message(

@@ -9,10 +9,14 @@ function cloneCeoSnapshotAttachments(items = []) {
         const name = String(item?.name || "").trim();
         const mimeType = String(item?.mime_type || "").trim();
         const kind = String(item?.kind || "").trim();
+        // 渠道附件不在 web 上传根下，只有服务端给的 url 能取到它；克隆时丢掉
+        // url 会让缓存渲染那一条道回退到 uploads/file，得到 404 的破图。
+        const url = String(item?.url || "").trim();
         const size = Number(item?.size);
         if (name) next.name = name;
         if (mimeType) next.mime_type = mimeType;
         if (kind) next.kind = kind;
+        if (url) next.url = url;
         if (Number.isFinite(size) && size > 0) next.size = size;
         return next;
     }).filter((item) => item.path);

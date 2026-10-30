@@ -88,6 +88,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 打开/切换 CEO 或渠道会话等待数十秒到几分钟、首帧快照体积异常 → `web-and-admin.md`「Web Event Loop Contract」+「CEO Turn Timeline Rendering Contract」（快照只发 delta 与滚动投影合同）
 - 回合进行中看不到新工具调用/新工具组，最终答复落地才一口气出现 → `web-and-admin.md`「CEO Websocket Lane Failure Contract」（单写者与丢帧计数）+「Streamed Reply Delta Contract」（轨道补丁的合并窗口）
 - Multimodal image not reaching model or fabricated image content → `runtime-overview.md` + `web-and-admin.md` (web upload/reopen) or `external-agent-api.md` (bridge inbound attachments)
+- 渠道附件在回合进行中露出 `Channel attachments:` 路径清单、刷新后才成缩略图，或缩略图取不到字节 → `web-and-admin.md`「Attachment Bubble Rendering Contract」（单一作者与三条显示道）
 - A config refresh disrupts an in-flight turn → `config-and-models.md`「配置热刷新」
 - 改了负载均衡组的每成员重试次数或往组里加成员，正在重试的那一发照旧跑旧预算/判组耗尽 → `config-and-models.md`「模型链变更何时作用于在途回合」
 - Same task result pushed to the channel multiple times → `heartbeat-system.md`「Task Terminal Repair Contract」

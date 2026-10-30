@@ -22,6 +22,10 @@ from g3ku.prompt_trace import render_output_trace
 from g3ku.providers.fallback import MODEL_RETRY_LIVE_STATES
 from g3ku.runtime import skill_roster_notice as _skill_roster_notice
 from g3ku.runtime import tool_arg_stash as _tool_arg_stash
+from g3ku.runtime.attachments import (
+    channel_attachment_descriptors,
+    strip_channel_attachment_note,
+)
 from g3ku.runtime.cancellation import ToolCancellationToken
 from g3ku.runtime.frontdoor.message_builder import (
     MEMORY_SNAPSHOT_ADOPTION_TOKEN_COMPRESSION,
@@ -2263,8 +2267,22 @@ class RuntimeAgentSession:
                 return None
             metadata = dict(user_input.metadata or {})
             raw_text = metadata.get("web_ceo_raw_text")
-            text = str(raw_text) if isinstance(raw_text, str) else self._history_text(user_input.content)
+            if isinstance(raw_text, str):
+                text = raw_text
+            else:
+                # 渠道入站的正文里混着模型可见的附件说明行。这一帧同时喂实时气泡与
+                # 在飞列表预览，所以剥说明与抬附件都走快照车道同一个作者，
+                # 否则同一句话在回合进行中与刷新后会长成两样。
+                text = strip_channel_attachment_note(
+                    self._history_text(user_input.content),
+                    metadata,
+                )
             attachments = self._normalize_web_uploads(metadata.get("web_ceo_uploads"))
+            if not attachments:
+                attachments = channel_attachment_descriptors(
+                    metadata,
+                    self._state.session_key,
+                )
             timestamp = user_input.timestamp
             turn_id = str(metadata.get(_TRANSCRIPT_TURN_ID_KEY) or "").strip()
         else:

@@ -2,14 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import mimetypes
 import re
 import shutil
 import uuid
 from inspect import isawaitable
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
 
 from fastapi import (
     APIRouter,
@@ -27,7 +25,12 @@ from g3ku.core.events import AgentEvent
 from g3ku.core.messages import UserInputMessage
 from g3ku.deployment.data_root import data_root
 from g3ku.runtime.api.external_turns import get_external_turn_service
-from g3ku.runtime.api.external_v1 import channel_attachment_note
+from g3ku.runtime.attachments import (
+    channel_attachment_descriptors,
+    guess_upload_mime_type,
+    strip_channel_attachment_note,
+    upload_kind,
+)
 from g3ku.runtime.ceo_catalog_offload import (
     build_ceo_session_catalog_async,
     build_ceo_session_catalog_cached,
@@ -364,39 +367,16 @@ def external_upload_dir_for_session(session_id: str) -> Path:
     return workspace_path() / EXTERNAL_UPLOAD_ROOT / safe_filename(str(session_id or ''))
 
 
-def _guess_upload_mime_type(name: str, content_type: str | None = None) -> str:
-    if isinstance(content_type, str) and content_type.strip():
-        return content_type.strip()
-    guessed, _ = mimetypes.guess_type(name)
-    return guessed or 'application/octet-stream'
-
-
-def _upload_kind(*, mime_type: str, name: str) -> str:
-    mime = str(mime_type or '').lower()
-    if mime.startswith('image/'):
-        return 'image'
-    if mime.startswith('audio/'):
-        # 语音条要渲染成可播放的气泡，不是文件药丸；网页麦克风录出来的就是 WAV。
-        return 'audio'
-    guessed, _ = mimetypes.guess_type(name)
-    if isinstance(guessed, str):
-        if guessed.lower().startswith('image/'):
-            return 'image'
-        if guessed.lower().startswith('audio/'):
-            return 'audio'
-    return 'file'
-
-
 def _serialize_upload_descriptor(path: Path, *, name: str, mime_type: str) -> dict[str, Any]:
     resolved = path.resolve()
-    resolved_mime = _guess_upload_mime_type(name, mime_type)
+    resolved_mime = guess_upload_mime_type(name, mime_type)
     return {
         'name': name,
         'path': str(resolved),
         'relative_path': resolved.relative_to(data_root()).as_posix(),
         'mime_type': resolved_mime,
         'size': resolved.stat().st_size,
-        'kind': _upload_kind(mime_type=resolved_mime, name=name),
+        'kind': upload_kind(mime_type=resolved_mime, name=name),
     }
 
 
@@ -431,10 +411,10 @@ async def _store_uploaded_file(session_id: str, upload: UploadFile) -> dict[str,
     from g3ku.stt import audio as stt_audio
 
     original_name = safe_filename(str(upload.filename or '').strip()) or 'upload.bin'
-    mime_type = _guess_upload_mime_type(original_name, getattr(upload, 'content_type', None))
+    mime_type = guess_upload_mime_type(original_name, getattr(upload, 'content_type', None))
     stored_name = original_name
     clip_bytes: bytes | None = None
-    if _upload_kind(mime_type=mime_type, name=original_name) == 'audio':
+    if upload_kind(mime_type=mime_type, name=original_name) == 'audio':
         # 语音条是给人回放的素材，PCM 没有理由留在盘上：压成 MP3（实测 8×，0.2 秒）。
         # 只读这一格：超过录音上限的音频不是语音条（是有人拿附件口丢了个大文件），
         # 不转码、按原样流式落盘，免得为一个转码决定把整文件吸进内存。
@@ -496,7 +476,7 @@ def _normalize_uploaded_files(session_id: str, uploads_payload: Any) -> list[dic
             continue
         seen_paths.add(path_key)
         name = safe_filename(str(raw.get('name') or path.name).strip()) or path.name
-        mime_type = _guess_upload_mime_type(
+        mime_type = guess_upload_mime_type(
             name,
             str(raw.get('mime_type') or raw.get('mimeType') or '').strip() or None,
         )
@@ -824,7 +804,7 @@ async def get_ceo_external_upload_file(
     name = safe_filename(candidate.name) or candidate.name or 'attachment'
     return FileResponse(
         str(candidate),
-        media_type=_guess_upload_mime_type(name),
+        media_type=guess_upload_mime_type(name),
         filename=name,
         content_disposition_type='inline',
     )
@@ -839,7 +819,7 @@ async def get_ceo_uploaded_file(
     name = safe_filename(candidate.name) or candidate.name or 'attachment'
     return FileResponse(
         str(candidate),
-        media_type=_guess_upload_mime_type(name),
+        media_type=guess_upload_mime_type(name),
         filename=name,
         content_disposition_type='inline',
     )
@@ -870,25 +850,6 @@ def _history_text(content: Any) -> str:
     return str(content or '').strip()
 
 
-def _strip_channel_attachment_note(content: str, metadata: dict[str, Any]) -> str:
-    """把模型可见的渠道附件说明从气泡正文里剥掉，只显示用户原文。
-
-    与 web 上传的 ``web_ceo_raw_text`` 同一纪律（说明行属于模型输入，不属于聊天气泡）。
-    说明在这里按同一份描述符重建，所以说明已经写进 content 的历史行也能剥干净，
-    不必改写转录。
-    """
-    attachments = metadata.get('external_attachments') if isinstance(metadata, dict) else None
-    if not isinstance(attachments, list) or not attachments:
-        return content
-    note = channel_attachment_note([item for item in attachments if isinstance(item, dict)])
-    if not note:
-        return content
-    if content == note:
-        return ''
-    suffix = f'\n\n{note}'
-    return content[: -len(suffix)] if content.endswith(suffix) else content
-
-
 # QQ 小表情/表情包在正文里是协议占位符（`<faceType=6,faceId="0",ext="…">`，表情包的真图
 # 在同一条消息的附件里）。入站归一化归桥：`g3ku/qq_official/bridge.py::_normalize_face_markup`。
 # 这里只处理**已经落盘的历史行**——转录不改写，气泡这一层把占位符隐掉。
@@ -905,7 +866,7 @@ def _strip_channel_bubble_noise(content: str, metadata: dict[str, Any]) -> str:
         or metadata.get('external_trust')
     ):
         return content
-    content = _strip_channel_attachment_note(content, metadata)
+    content = strip_channel_attachment_note(content, metadata)
     if '<faceType=' not in content:
         return content
     attachments = metadata.get('external_attachments')
@@ -928,7 +889,7 @@ def _normalize_snapshot_attachments(message: dict[str, Any], session_id: str = "
             continue
         name = str(raw.get('name') or Path(path).name).strip() or Path(path).name or path
         mime_type = str(raw.get('mime_type') or raw.get('mimeType') or '').strip()
-        kind = str(raw.get('kind') or '').strip() or _upload_kind(mime_type=mime_type, name=name)
+        kind = str(raw.get('kind') or '').strip() or upload_kind(mime_type=mime_type, name=name)
         item = {
             'path': path,
             'name': name,
@@ -940,30 +901,8 @@ def _normalize_snapshot_attachments(message: dict[str, Any], session_id: str = "
             item['size'] = int(size)
         items.append(item)
     # 渠道附件（桥经 /api/v1 推上来的）与 web 上传同形：图片画缩略图、文件画文件卡、
-    # 音频走语音条。它们不在 web 上传根下，所以每一条都要带 external-upload-file 的
-    # 读文件地址；只按 path 让前端回退到 `uploads/file` 会得到 404 的破图。
-    session_id = str(session_id or '').strip()
-    for raw in list(metadata.get('external_attachments') or []):
-        if not isinstance(raw, dict):
-            continue
-        path = str(raw.get('path') or '').strip()
-        if not path or not session_id:
-            continue
-        name = str(raw.get('name') or Path(path).name).strip() or Path(path).name or path
-        mime_type = str(raw.get('mime_type') or '').strip()
-        kind = str(raw.get('kind') or '').strip() or _upload_kind(mime_type=mime_type, name=name)
-        params = urlencode({'session_id': session_id, 'path': path})
-        item = {
-            'path': path,
-            'name': name,
-            'mime_type': mime_type or _guess_upload_mime_type(name),
-            'kind': kind,
-            'url': f'/api/ceo/external-upload-file?{params}',
-        }
-        size = raw.get('size')
-        if isinstance(size, (int, float)):
-            item['size'] = int(size)
-        items.append(item)
+    # 音频走语音条。描述符与实时帧共用同一个作者，回合进行中与刷新后才是同一张脸。
+    items.extend(channel_attachment_descriptors(metadata, str(session_id or '').strip()))
     if items:
         return items
     for raw in list(message.get('attachments') or []):
@@ -971,13 +910,13 @@ def _normalize_snapshot_attachments(message: dict[str, Any], session_id: str = "
         if not path:
             continue
         name = Path(path).name or path
-        mime_type = _guess_upload_mime_type(name)
+        mime_type = guess_upload_mime_type(name)
         items.append(
             {
                 'path': path,
                 'name': name,
                 'mime_type': mime_type,
-                'kind': _upload_kind(mime_type=mime_type, name=name),
+                'kind': upload_kind(mime_type=mime_type, name=name),
             }
         )
     return items
