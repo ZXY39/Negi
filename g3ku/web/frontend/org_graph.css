@@ -17360,6 +17360,8 @@ textarea {
 
 .project-settings-qr-image {
     display: block;
+    /* 弹层落在 .confirm-dialog 的 clip 盒内，可用高度只有 240px：图片带群名抬头
+       （972×1299），码体按 contain 落回 ~128px，再拉高就会被弹窗底边裁掉。 */
     width: 196px;
     height: 196px;
     border-radius: 8px;

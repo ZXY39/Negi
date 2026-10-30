@@ -80,10 +80,13 @@ test("设置标题旁的信息行与二维码入口写在页面骨架里", () =>
     const html = fs.readFileSync(HTML_PATH, "utf8");
     assert.ok(html.includes('href="https://github.com/ZXY39/Negi"'), "缺少 GitHub 仓库链接");
     assert.ok(html.includes('target="_blank" rel="noreferrer noopener"'), "外链必须交系统浏览器打开");
-    assert.ok(html.includes("交流QQ群：1130255086"), "缺少交流 QQ 群号");
+    assert.ok(html.includes("交流QQ群：629681546"), "缺少交流 QQ 群号");
     assert.ok(html.includes('id="project-settings-qq-qr-btn"'), "缺少二维码按钮");
     assert.ok(html.includes('id="project-settings-qq-qr-popover"'), "缺少二维码弹层");
     assert.ok(html.includes('src="assets/qq-group-qrcode.png"'), "二维码图片地址没有预置");
+    // 图片缺席时页面只会退回占位，别处测不出来，所以在这里钉住文件本身。
+    const qrAsset = path.resolve(__dirname, "..", "..", "g3ku", "web", "frontend", "assets", "qq-group-qrcode.png");
+    assert.ok(fs.existsSync(qrAsset), "群二维码图片没有随仓库交付");
 });
 
 test("二维码按钮切换弹层并把展开态写回 aria-expanded", () => {
