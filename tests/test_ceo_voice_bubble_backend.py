@@ -122,13 +122,74 @@ def test_snapshot_without_session_id_cannot_issue_a_url():
     assert ws_api._normalize_snapshot_attachments(message, "") == []
 
 
-def test_snapshot_leaves_channel_files_out_of_the_clip_lane():
+def test_snapshot_lifts_channel_images_and_files_like_web_uploads():
+    """渠道附件与 web 上传同形：图片/文件各画各的气泡，音频仍走语音条。
+
+    它们不在 web 上传根下，所以每条都必须带 external-upload-file 的读文件地址；
+    只给 path 会让前端回退到 `uploads/file` 得到 404（图1 的破图）。"""
     message = {
         "metadata": {
-            "external_attachments": [{**WAVClip, "kind": "file"}, {**PNG, "kind": "image"}]
+            "external_attachments": [
+                {**WAVClip, "kind": "file", "mime_type": "application/octet-stream"},
+                {**PNG, "kind": "image", "size": 12},
+            ]
         }
     }
-    assert ws_api._normalize_snapshot_attachments(message, "qq/ext/demo") == []
+    items = ws_api._normalize_snapshot_attachments(message, "qq/ext/demo")
+
+    assert [item["kind"] for item in items] == ["file", "image"]
+    assert all(item["url"].startswith("/api/ceo/external-upload-file?") for item in items)
+    assert items[1]["size"] == 12
+    assert "session_id=qq%2Fext%2Fdemo" in items[1]["url"]
+
+
+def test_snapshot_strips_the_channel_attachment_note_from_the_bubble():
+    """`Channel attachments:` 是模型输入；气泡只显示用户原文（含历史行）。
+
+    与 web 上传的 `web_ceo_raw_text` 同一纪律：说明由同一份描述符重建后剥掉，
+    所以说明已经写进 content 的旧行也不必改写转录。
+    """
+    raw = "在吗"
+    attachments = [{**PNG, "kind": "image"}]
+    note = ext_api.channel_attachment_note(attachments)
+    assert note.startswith("Channel attachments:")
+
+    historical = {"role": "user", "content": f"{raw}\n\n{note}",
+                  "metadata": {"external_attachments": attachments}}
+    assert ws_api._strip_channel_attachment_note(historical["content"], historical["metadata"]) == raw
+
+    # 纯附件消息：正文只剩说明，剥完是空的（前端只画附件气泡）
+    only_note = {"role": "user", "content": note,
+                 "metadata": {"external_attachments": attachments}}
+    assert ws_api._strip_channel_attachment_note(only_note["content"], only_note["metadata"]) == ""
+
+    # 没有渠道描述符的行原样返回
+    assert ws_api._strip_channel_attachment_note(f"{raw}\n\n{note}", {}) == f"{raw}\n\n{note}"
+
+
+def test_channel_bubble_hides_the_stored_face_placeholder():
+    """历史行里存着小表情/表情包的 `<faceType=…>` 占位符（示例取自实盘转录）。
+
+    气泡按附件形态决定：带图片附件时占位符整段隐掉，只留图片气泡；没有图片时落一个
+    `[表情]`。web 行（没有渠道 metadata）不碰。
+    """
+    sticker_row = {
+        "content": '<faceType=6,faceId="0",ext="eyJ0ZXh0IjoiIn0=">',
+        "metadata": {
+            "chat_type": "dm",
+            "external_attachments": [{**PNG, "kind": "image"}],
+        },
+    }
+    assert ws_api._strip_channel_bubble_noise(sticker_row["content"], sticker_row["metadata"]) == ""
+
+    text_row = {
+        "content": '好耶<faceType=1,faceId="13",ext="eyJ0ZXh0IjoiIn0=">',
+        "metadata": {"chat_type": "group"},
+    }
+    assert ws_api._strip_channel_bubble_noise(text_row["content"], text_row["metadata"]) == "好耶[表情]"
+
+    web_row = {"content": sticker_row["content"], "metadata": {}}
+    assert ws_api._strip_channel_bubble_noise(web_row["content"], web_row["metadata"]) == sticker_row["content"]
 
 
 def test_external_message_keeps_the_clip_out_of_the_note_and_refs():

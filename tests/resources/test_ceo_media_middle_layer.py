@@ -263,3 +263,16 @@ def test_animated_media_keeps_bytes_and_uses_a_local_src(monkeypatch, tmp_path):
     assert staged.read_bytes() == payload
     assert viewer.startswith(ceo_media.VIEWER_ROUTE + "?token=")
 
+
+def test_webp_is_classified_as_an_image_descriptor(tmp_path):
+    """`.webp` 在部分 Windows 上没有 mimetypes 映射（实测 guess_type → (None, None)）；
+    落到 application/octet-stream 会让渠道桥把它当文件发出去（实盘 005.webp 走了
+    file_type=4）。栅格后缀必须由本模块的映射兜住。"""
+    sticker = tmp_path / "005.webp"
+    sticker.write_bytes(b"RIFF\x00\x00\x00\x00WEBPVP8 ")
+
+    descriptor = ceo_media.build_attachment_descriptor(sticker)
+
+    assert descriptor["mime_type"] == "image/webp"
+    assert descriptor["kind"] == "image"
+

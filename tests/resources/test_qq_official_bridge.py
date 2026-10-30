@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import json
 import sys
 import types
@@ -1693,6 +1694,102 @@ async def test_pump_maps_attachment_mime_to_platform_file_type(monkeypatch: pyte
 
 def _group_message(content: str = "在吗", message_id: str = "gm1") -> SimpleNamespace:
     return SimpleNamespace(group_openid="g1", content=content, id=message_id, attachments=[])
+
+
+def _webp_bytes() -> bytes:
+    from PIL import Image, features
+
+    if not features.check("webp"):
+        pytest.skip("本机 Pillow 没有 webp 编解码器")
+    output = io.BytesIO()
+    Image.new("RGBA", (8, 8), (220, 40, 40, 160)).save(output, format="WEBP")
+    return output.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_pump_converts_webp_attachment_into_the_image_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`.webp` 表情包原先带着 application/octet-stream 落到 file_type=4，用户收到的是
+    文件而不是表情。mime 修好之后还要保证字节是平台画得出的格式：非 png/jpg/gif
+    的图片先转 PNG 再上传。实盘 2026-10-30 00:56:01 `005.webp (file_type=4)`。"""
+    records: list[httpx.Request] = []
+    files_url = "https://api.sgroup.qq.com/v2/users/u9/files"
+    webp = _webp_bytes()
+    media = _media_transport(
+        {_absolute_media("w1"): (200, webp), files_url: (200, _upload_reply())}, records
+    )
+    task, client = await _start_bridge(monkeypatch, media)
+    try:
+        await client.on_c2c_message_create(_c2c_message("hi", [], message_id="f9"))
+        ext = FakeExternalApiClient.instances[-1]
+        await ext.events.put(
+            {
+                "type": "outbound.created",
+                "seq": 1,
+                "text": "在的",
+                "external_key": "qq:c2c:u9",
+                "attachments": [_outbound_attachment("005.webp", "image/webp", "w1")],
+            }
+        )
+        await _wait_until(lambda: len(client.api.calls) >= 2)
+
+        uploads = _api_uploads(records)
+        assert len(uploads) == 1
+        body = json.loads(uploads[0].content)
+        assert body["file_type"] == 1  # 图片档，不是任意文件
+        assert base64.b64decode(body["file_data"]).startswith(b"\x89PNG\r\n\x1a\n")
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_bridge_drops_the_face_placeholder_when_the_sticker_image_rides_along(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """纯表情包消息的正文就是 `<faceType=6,…>` 占位符（ext 的 base64 里 text 为空），
+    真正的图在同一条消息的 attachments 里。占位符既不该进模型上下文，也不该出现在
+    网页气泡里。"""
+    media = _media_transport({"https://cdn.example/sticker.jpg": (200, b"jpg-bytes")})
+    task, client = await _start_bridge(monkeypatch, media)
+    try:
+        message = _c2c_message(
+            '<faceType=6,faceId="0",ext="eyJ0ZXh0IjoiIn0=">',
+            [_image_attachment("https://cdn.example/sticker.jpg", content_type="image",
+                               filename="sticker.jpg")],
+        )
+        await client.on_c2c_message_create(message)
+        ext = FakeExternalApiClient.instances[-1]
+        await _wait_until(lambda: ext.sent)
+        _session_id, text, _idem, attachments = ext.sent[0]
+        assert text == ""
+        assert len(attachments) == 1
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_bridge_keeps_a_readable_token_for_a_face_without_an_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    media = _media_transport({})
+    task, client = await _start_bridge(monkeypatch, media)
+    try:
+        await client.on_c2c_message_create(
+            _c2c_message('好耶<faceType=1,faceId="13",ext="eyJ0ZXh0IjoiIn0=">')
+        )
+        ext = FakeExternalApiClient.instances[-1]
+        await _wait_until(lambda: ext.sent)
+        _session_id, text, _idem, _attachments = ext.sent[0]
+        assert text == "好耶[表情]"
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
 
 
 @pytest.mark.asyncio

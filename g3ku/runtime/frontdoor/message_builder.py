@@ -32,7 +32,7 @@ from g3ku.runtime.frontdoor.tool_contract import (
     upsert_frontdoor_tool_contract_message,
 )
 from g3ku.runtime.message_token_estimation import estimate_message_tokens
-from g3ku.runtime.sender_stamp import MESSAGE_SENDER_MARKER, render_sender_stamp, strip_sender_stamp
+from g3ku.runtime.sender_stamp import render_sender_stamp, strip_sender_stamp
 from g3ku.runtime.session_trust import is_third_party_session
 from g3ku.runtime.tool_visibility import (
     CEO_FIXED_BUILTIN_TOOL_NAMES,
@@ -607,11 +607,15 @@ class CeoMessageBuilder:
 
     @staticmethod
     def _sender_stamped_content(content: str, metadata: dict[str, Any] | None) -> str:
-        """第三方消息加一行来源标注（幂等：已带标记的内容原样返回）。"""
-        if content.startswith(MESSAGE_SENDER_MARKER):
-            return content
+        """第三方消息加一行来源标注。
+
+        幂等判据是"正文以本投影渲染出来的那一行开头"，不是"以标记开头"——后者由
+        发送者控制：第三方正文自己写一行 ``[消息来源] ...`` 就能把真标注整行免掉。
+        """
         stamp = render_sender_stamp(metadata)
-        return f"{stamp}{content}" if stamp else content
+        if not stamp or content.startswith(stamp):
+            return content
+        return f"{stamp}{content}"
 
     @staticmethod
     def _decorate_user_projection(message: Any, entry: dict[str, Any]) -> dict[str, Any]:

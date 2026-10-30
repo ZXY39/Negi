@@ -39,6 +39,11 @@ def _short_id(value: Any, *, limit: int = 8) -> str:
     return f"{text[:limit]}…"
 
 
+def _one_line(value: Any) -> str:
+    """发送者身份来自桥的请求体：折成一行，名字里的换行不能伪造出第二行标注。"""
+    return " ".join(str(value or "").split())
+
+
 def render_sender_stamp(metadata: Any) -> str:
     """按消息 metadata 渲染来源标注；不需要标注时返回空串。
 
@@ -53,8 +58,8 @@ def render_sender_stamp(metadata: Any) -> str:
     sender_id = ""
     sender_name = ""
     if isinstance(sender, dict):
-        sender_id = _short_id(sender.get("id"))
-        sender_name = str(sender.get("name") or "").strip()
+        sender_id = _short_id(_one_line(sender.get("id")))
+        sender_name = _one_line(sender.get("name"))
     chat_type = normalize_chat_type(metadata.get("chat_type"))
     kind = _GROUP_LABEL if chat_type in MULTI_PARTY_CHAT_TYPES else _DM_LABEL
     parts = [kind]
