@@ -1094,9 +1094,10 @@ class QqBotAccountConfig(Base):
     sandbox: bool = False
     enabled: bool = True
     label: str = ""
-    # 操作员自己的 openid 白名单（c2c 的 user_openid / 频道私信的 user id）：
-    # 命中即 owner。群聊里的 member_openid 不可跨会话匹配，所以群聊整会话按第三方处理，
-    # 这条白名单对 group/guild 消息不生效。
+    # 操作员自己的 openid（同一 AppID 下 c2c 的 user_openid 与群里的 member_openid 同值，
+    # 实测）：私聊命中即 owner。群聊/频道整会话按第三方是策略（多人短路见
+    # ``g3ku/runtime/session_trust.py::resolve_turn_trust``），填了它不会升级群会话档位，
+    # 但决定转录里本人被标成 ``Master`` 还是第三方编号。
     owner_openids: list[str] = Field(default_factory=list)
 
 

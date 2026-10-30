@@ -13,9 +13,41 @@ external_key shapes (bridge-owned, opaque to g3ku):
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 QQ_BRIDGE_ID = "qq-official"
+
+_ORDERED_LIST_ITEM_RE = re.compile(r"^[ \t]*\d+[.)][ \t]+\S")
+_FENCE_RE = re.compile(r"^[ \t]*(?:```|~~~)")
+
+
+def render_qq_markdown(text: str) -> str:
+    """把回复正文收成 QQ 能按 markdown 渲染的形状。
+
+    实测定的一条：编号列表项紧跟在非空行之后（只隔一个换行）时，QQ 客户端丢掉编号、
+    把它画成上一项的嵌套子项，并且把紧邻的那行正文一起吸进列表层级；前面补一个空行
+    就正常。其余语法（标题、粗斜体、删除线、链接、列表、引用、代码块、行内代码、
+    表格、分割线）真机全部渲染，单换行也直接成行，因此这里不做任何别的改写。
+
+    围栏内的行原样保留：代码块在 QQ 里是按代码块画的，往里面插空就是改用户的代码。
+    """
+    out: list[str] = []
+    in_fence = False
+    for line in str(text or "").split("\n"):
+        if _FENCE_RE.match(line):
+            in_fence = not in_fence
+        elif (
+            not in_fence
+            and out
+            and out[-1].strip()
+            and _ORDERED_LIST_ITEM_RE.match(line)
+            and not _ORDERED_LIST_ITEM_RE.match(out[-1])
+        ):
+            out.append("")
+        out.append(line)
+    return "\n".join(out)
+
 
 
 def bridge_id_for_app_id(app_id: str) -> str:

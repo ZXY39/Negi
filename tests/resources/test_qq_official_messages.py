@@ -8,7 +8,21 @@ from g3ku.qq_official.messages import (
     idempotency_key_for,
     is_deliverable_event,
     parse_external_key,
+    render_qq_markdown,
 )
+
+
+def test_render_qq_markdown_only_adds_blank_line_before_ordered_lists() -> None:
+    """编号列表前补空行是实测出来的唯一一条归一；别的形状一律不动。"""
+    assert render_qq_markdown("结论如下：\n1. 先做这个\n2. 再做这个") == (
+        "结论如下：\n\n1. 先做这个\n2. 再做这个"
+    )
+    # 列表自己连续的行不补；开头就是列表也没有前一行可补
+    assert render_qq_markdown("1. 甲\n2. 乙") == "1. 甲\n2. 乙"
+    # 无序列表实测直接成行，不补
+    assert render_qq_markdown("正文\n- 甲\n- 乙") == "正文\n- 甲\n- 乙"
+    # 围栏内的行是用户的代码，原样保留
+    assert render_qq_markdown("步骤：\n```text\nfoo\n1. bar\n```") == "步骤：\n```text\nfoo\n1. bar\n```"
 
 
 def test_external_key_builders() -> None:

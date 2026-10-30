@@ -63,6 +63,14 @@ class FakeBotHttp:
         return {"file_uuid": "uuid-fd", "file_info": "file-info-fd", "ttl": 0}
 
 
+def _outbound_text(kwargs: dict) -> str:
+    """从两种出站形状里取正文：纯文本走 ``content``，markdown 走 ``markdown.content``。"""
+    markdown = kwargs.get("markdown")
+    if isinstance(markdown, dict):
+        return str(markdown.get("content") or "")
+    return str(kwargs.get("content") or "")
+
+
 class FakeBotApi:
     def __init__(self, is_sandbox: bool = False) -> None:
         self.calls: list[tuple[str, dict]] = []
@@ -264,7 +272,7 @@ async def test_bridge_uses_async_entry_and_wires_messages(monkeypatch: pytest.Mo
         )
         await _wait_until(lambda: client.api.calls)
         assert client.api.calls == [
-            ("post_c2c_message", {"openid": "u1", "content": "提醒", "msg_type": 0})
+            ("post_c2c_message", {"openid": "u1", "markdown": {"content": "提醒"}, "msg_type": 2})
         ]
     finally:
         task.cancel()
@@ -679,10 +687,10 @@ async def test_bridge_delivers_queued_receipt_to_user(monkeypatch: pytest.Monkey
         await client.on_c2c_message_create(_c2c_message("无回执", [], message_id="q2"))
         await _wait_until(lambda: len(client.api.calls) >= 2)
         assert client.api.calls == [
-            ("post_c2c_message", {"openid": "u9", "content": "自定义排队回执", "msg_type": 0}),
+            ("post_c2c_message", {"openid": "u9", "markdown": {"content": "自定义排队回执"}, "msg_type": 2}),
             (
                 "post_c2c_message",
-                {"openid": "u9", "content": bridge_module._QUEUED_RECEIPT_FALLBACK_TEXT, "msg_type": 0},
+                {"openid": "u9", "markdown": {"content": bridge_module._QUEUED_RECEIPT_FALLBACK_TEXT}, "msg_type": 2},
             ),
         ]
     finally:
@@ -724,7 +732,7 @@ async def test_pump_reconnects_after_stream_error(monkeypatch: pytest.MonkeyPatc
         )
         await _wait_until(lambda: client.api.calls)
         assert client.api.calls == [
-            ("post_c2c_message", {"openid": "u9", "content": "重连补投", "msg_type": 0})
+            ("post_c2c_message", {"openid": "u9", "markdown": {"content": "重连补投"}, "msg_type": 2})
         ]
     finally:
         task.cancel()
@@ -761,7 +769,7 @@ async def test_pump_retries_failed_delivery_then_drops_poison(monkeypatch: pytes
     delivered: list[tuple[str, dict]] = []
 
     async def _flaky_post_c2c(**kwargs):
-        content = str(kwargs.get("content") or "")
+        content = _outbound_text(kwargs)
         attempts[content] = attempts.get(content, 0) + 1
         if content == "poison":
             raise RuntimeError("simulated QQ API rejection")
@@ -819,7 +827,7 @@ async def test_pump_retries_failed_delivery_then_drops_poison(monkeypatch: pytes
         # per-id 计数随桥消失）都会给一个平台永久拒投的目标新一轮预算。
         await _wait_until(lambda: ext.ack_status_by_id.get("obx-poison-1") == "undeliverable")
         assert delivered == [
-            ("post_c2c_message", {"openid": "u9", "content": "正常补投", "msg_type": 0})
+            ("post_c2c_message", {"openid": "u9", "markdown": {"content": "正常补投"}, "msg_type": 2})
         ]
     finally:
         task.cancel()
@@ -962,7 +970,7 @@ async def test_active_send_over_rate_budget_is_deferred_not_sent(
             }
         )
         await asyncio.sleep(0.2)
-        assert [call[1]["content"] for call in client.api.calls] == ["第一条"]
+        assert [_outbound_text(call[1]) for call in client.api.calls] == ["第一条"]
         assert ext.ack_status_by_id.get("obx-rate-2") != "undeliverable"
     finally:
         task.cancel()
@@ -1046,7 +1054,7 @@ async def test_deliver_treats_empty_api_response_as_failure(monkeypatch: pytest.
         await _wait_until(lambda: delivered)
         # 第一次无回执 → 判失败 → 重连重放 → 第二次带回执成功。
         assert attempts["n"] == 2
-        assert delivered == [("post_c2c_message", {"openid": "u9", "content": "回执缺失", "msg_type": 0})]
+        assert delivered == [("post_c2c_message", {"openid": "u9", "markdown": {"content": "回执缺失"}, "msg_type": 2})]
     finally:
         task.cancel()
         with suppress(asyncio.CancelledError):
@@ -1065,7 +1073,7 @@ async def test_pump_does_not_resend_unconfirmed_outbox(monkeypatch: pytest.Monke
     delivered: list[tuple[str, dict]] = []
 
     async def _silent_post_c2c(**kwargs):
-        content = str(kwargs.get("content") or "")
+        content = _outbound_text(kwargs)
         attempts[content] = attempts.get(content, 0) + 1
         if content == "回执未知":
             return None  # botpy 超时：请求已发出，回执一个都没回来
@@ -1128,7 +1136,7 @@ async def test_pump_does_not_resend_unconfirmed_outbox(monkeypatch: pytest.Monke
         # 重放副本被闸门拦下：同一条只 POST 一次，销账状态不冒充已送达。
         assert attempts["回执未知"] == 1
         assert delivered == [
-            ("post_c2c_message", {"openid": "u9", "content": "下一条", "msg_type": 0})
+            ("post_c2c_message", {"openid": "u9", "markdown": {"content": "下一条"}, "msg_type": 2})
         ]
     finally:
         task.cancel()
@@ -1156,7 +1164,7 @@ async def test_pump_acks_outbox_after_confirmed_delivery(monkeypatch: pytest.Mon
         )
         await _wait_until(lambda: client.api.calls and ext.acked)
         assert client.api.calls == [
-            ("post_c2c_message", {"openid": "u9", "content": "带账本的推送", "msg_type": 0})
+            ("post_c2c_message", {"openid": "u9", "markdown": {"content": "带账本的推送"}, "msg_type": 2})
         ]
         assert ext.acked == [("ext:qq-official:qq:c2c:u9", "obx-test-1")]
     finally:
@@ -1184,7 +1192,7 @@ async def test_pump_acks_reply_final_carried_outbox_id(monkeypatch: pytest.Monke
         )
         await _wait_until(lambda: client.api.calls and ext.acked)
         assert client.api.calls == [
-            ("post_c2c_message", {"openid": "u9", "content": "下载完成了", "msg_type": 0})
+            ("post_c2c_message", {"openid": "u9", "markdown": {"content": "下载完成了"}, "msg_type": 2})
         ]
         assert ext.acked == [("ext:qq-official:qq:c2c:u9", "obx-reply-1")]
         assert ext.ack_status_by_id["obx-reply-1"] == "delivered"
@@ -1233,7 +1241,7 @@ async def test_bridge_warms_pumps_from_pending_outbox(monkeypatch: pytest.Monkey
         ext = FakeExternalApiClient.instances[-1]
         await _wait_until(lambda: client.api.calls)
         assert client.api.calls == [
-            ("post_c2c_message", {"openid": "u5", "content": "重启滞留的提醒", "msg_type": 0})
+            ("post_c2c_message", {"openid": "u5", "markdown": {"content": "重启滞留的提醒"}, "msg_type": 2})
         ]
         await _wait_until(lambda: ext.acked)
         assert ext.acked == [("ext:qq-official:qq:c2c:u5", "obx-warm-1")]
@@ -1288,7 +1296,7 @@ async def test_bridge_periodically_respawns_pumps_from_pending_outbox(
         )
         await _wait_until(lambda: client.api.calls)
         assert client.api.calls == [
-            ("post_c2c_message", {"openid": "u7", "content": "重启后才产出的日报", "msg_type": 0})
+            ("post_c2c_message", {"openid": "u7", "markdown": {"content": "重启后才产出的日报"}, "msg_type": 2})
         ]
         await _wait_until(lambda: ext.acked)
         assert ext.acked == [("ext:qq-official:qq:c2c:u7", "obx-late-1")]
@@ -1346,7 +1354,7 @@ async def test_bridge_pending_reconcile_survives_list_failure(
         await _wait_until(lambda: client.api.calls)
         assert ext.list_calls >= 3  # 前两次失败没有终结循环
         assert client.api.calls == [
-            ("post_c2c_message", {"openid": "u6", "content": "服务端就绪后的补投", "msg_type": 0})
+            ("post_c2c_message", {"openid": "u6", "markdown": {"content": "服务端就绪后的补投"}, "msg_type": 2})
         ]
         await _wait_until(lambda: ext.acked)
         assert ext.acked == [("ext:qq-official:qq:c2c:u6", "obx-flaky-1")]
@@ -1390,8 +1398,8 @@ async def test_pump_skips_duplicate_copy_of_acked_outbox_id(
         await _wait_until(lambda: len(client.api.calls) >= 2)
         await asyncio.sleep(0.05)  # 给潜在的错误重投留出窗口
         assert client.api.calls == [
-            ("post_c2c_message", {"openid": "u9", "content": "日报", "msg_type": 0}),
-            ("post_c2c_message", {"openid": "u9", "content": "新推送", "msg_type": 0}),
+            ("post_c2c_message", {"openid": "u9", "markdown": {"content": "日报"}, "msg_type": 2}),
+            ("post_c2c_message", {"openid": "u9", "markdown": {"content": "新推送"}, "msg_type": 2}),
         ]
         assert ext.acked == [("ext:qq-official:qq:c2c:u9", "obx-dup")]
     finally:
@@ -1413,7 +1421,7 @@ async def test_pump_caps_total_attempts_per_outbox_id_across_seqs(
     delivered: list[tuple[str, dict]] = []
 
     async def _flaky_post_c2c(**kwargs):
-        content = str(kwargs.get("content") or "")
+        content = _outbound_text(kwargs)
         attempts[content] = attempts.get(content, 0) + 1
         if content == "poison":
             raise RuntimeError("simulated QQ API rejection")
@@ -1469,7 +1477,7 @@ async def test_pump_caps_total_attempts_per_outbox_id_across_seqs(
         await asyncio.sleep(0.05)
         assert attempts["poison"] == 2  # 副本没有触发新的投递尝试
         assert delivered == [
-            ("post_c2c_message", {"openid": "u9", "content": "正常", "msg_type": 0})
+            ("post_c2c_message", {"openid": "u9", "markdown": {"content": "正常"}, "msg_type": 2})
         ]
         assert ("ext:qq-official:qq:c2c:u9", "obx-ok") in ext.acked
         # 判毒的 id 必须留下终态销账：账本不按年龄回收，投递预算是它唯一的上界，
@@ -1558,7 +1566,7 @@ async def test_pump_delivers_event_attachment_via_file_data(monkeypatch: pytest.
             ),
             (
                 "post_c2c_message",
-                {"openid": "u9", "content": "日报已生成：日报", "msg_type": 0},
+                {"openid": "u9", "markdown": {"content": "日报已生成：日报"}, "msg_type": 2},
             ),
         ]
         # 未回退到 url 上传路径（那条路径要求平台能回源本服务端）。
@@ -1608,7 +1616,7 @@ async def test_pump_falls_back_to_url_upload_when_file_data_rejected(
         ) in client.api.calls
         assert client.api.calls[-1] == (
             "post_c2c_message",
-            {"openid": "u9", "content": "简历已渲染：简历.pdf", "msg_type": 0},
+            {"openid": "u9", "markdown": {"content": "简历已渲染：简历.pdf"}, "msg_type": 2},
         )
     finally:
         task.cancel()
@@ -1681,8 +1689,8 @@ async def test_pump_maps_attachment_mime_to_platform_file_type(monkeypatch: pyte
                 "post_group_message",
                 {
                     "group_openid": "g1",
-                    "content": "好了",
-                    "msg_type": 0,
+                    "markdown": {"content": "好了"},
+                    "msg_type": 2,
                     "msg_id": "m9",
                     "msg_seq": 3,
                 },
@@ -1718,6 +1726,62 @@ async def test_group_mentions_use_markdown_at_user_tag(
             '<qqbot-at-user id="ABCDEF1234567890" />\n需要你看一下'
         )
         assert call["msg_id"] == "m-mention"
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_c2c_markdown_body_carries_no_content_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """平台合同：传了 markdown 之后 ``content`` 字段必须留空，两个同时给会被拒。"""
+    task, client = await _start_bridge(monkeypatch, _media_transport({}, []))
+    try:
+        await client.on_c2c_message_create(_c2c_message("hi", [], message_id="md1"))
+        ext = FakeExternalApiClient.instances[-1]
+        await ext.events.put(
+            {"type": "reply.final", "seq": 1, "text": "结论如下：\n1. 先做这个"}
+        )
+        await _wait_until(lambda: bool(client.api.calls))
+        kwargs = client.api.calls[0][1]
+        assert kwargs["msg_type"] == 2
+        assert "content" not in kwargs
+        assert kwargs["markdown"] == {"content": "结论如下：\n\n1. 先做这个"}
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_markdown_rejection_falls_back_to_text_shape_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """平台拒收 markdown 形状时同一份正文换纯文本再发一次：不回落就会被判 transient、
+    吃满 5 次预算后按 undeliverable 销账，用户一条都收不到。"""
+    task, client = await _start_bridge(monkeypatch, _media_transport({}, []))
+    original = client.api.post_c2c_message
+    seen: list[dict] = []
+
+    async def _reject_markdown(**kwargs):
+        seen.append(kwargs)
+        if "markdown" in kwargs:
+            raise RuntimeError("400 Markdown参数有换行符, 请移除Markdown参数中的换行符")
+        return await original(**kwargs)
+
+    client.api.post_c2c_message = _reject_markdown
+    try:
+        await client.on_c2c_message_create(_c2c_message("hi", [], message_id="fb1"))
+        ext = FakeExternalApiClient.instances[-1]
+        await ext.events.put({"type": "reply.final", "seq": 1, "text": "回落正文"})
+        await _wait_until(lambda: any("content" in kwargs for kwargs in seen))
+        await asyncio.sleep(0.05)
+        assert seen[0]["msg_type"] == 2
+        assert seen[-1] == {"openid": "u9", "content": "回落正文", "msg_type": 0}
+        # 一次回落即成功：不进去重/判毒那 5 次预算
+        assert len(seen) == 2
     finally:
         task.cancel()
         with suppress(asyncio.CancelledError):
@@ -1873,8 +1937,8 @@ async def test_pump_delivers_audio_attachment_as_voice_media(
                 "post_group_message",
                 {
                     "group_openid": "g1",
-                    "content": "给你：早间问候.mp3",
-                    "msg_type": 0,
+                    "markdown": {"content": "给你：早间问候.mp3"},
+                    "msg_type": 2,
                     "msg_id": "mv1",
                     "msg_seq": 2,
                 },
@@ -1906,8 +1970,8 @@ async def test_group_reply_replies_to_the_inbound_message_id(
                 "post_group_message",
                 {
                     "group_openid": "g1",
-                    "content": "在。",
-                    "msg_type": 0,
+                    "markdown": {"content": "在。"},
+                    "msg_type": 2,
                     "msg_id": "gm1",
                     "msg_seq": 1,
                 },
@@ -1934,7 +1998,7 @@ async def test_group_reply_falls_back_to_active_shape_outside_the_window(
         await ext.events.put({"type": "reply.final", "seq": 1, "text": "迟到的回答"})
         await _wait_until(lambda: client.api.calls)
         kwargs = client.api.calls[0][1]
-        assert kwargs == {"group_openid": "g1", "content": "迟到的回答", "msg_type": 0}
+        assert kwargs == {"group_openid": "g1", "markdown": {"content": "迟到的回答"}, "msg_type": 2}
         assert "msg_id" not in kwargs
     finally:
         task.cancel()
@@ -1978,7 +2042,7 @@ async def test_c2c_reply_keeps_the_active_shape(monkeypatch: pytest.MonkeyPatch)
         await ext.events.put({"type": "reply.final", "seq": 1, "text": "在。"})
         await _wait_until(lambda: client.api.calls)
         assert client.api.calls == [
-            ("post_c2c_message", {"openid": "u9", "content": "在。", "msg_type": 0})
+            ("post_c2c_message", {"openid": "u9", "markdown": {"content": "在。"}, "msg_type": 2})
         ]
     finally:
         task.cancel()
@@ -2020,8 +2084,8 @@ async def test_pump_degrades_failed_attachment_to_signed_link_text(monkeypatch: 
                 "post_c2c_message",
                 {
                     "openid": "u9",
-                    "content": f"日报已生成：日报\n📎 日报.docx: {_absolute_media('t3')}",
-                    "msg_type": 0,
+                    "markdown": {"content": f"日报已生成：日报\n📎 日报.docx: {_absolute_media('t3')}"},
+                    "msg_type": 2,
                 },
             )
         ]
@@ -2290,7 +2354,7 @@ async def test_bridge_relogin_resumes_from_last_delivered_seq(monkeypatch: pytes
     delivered: list[str] = []
 
     async def _record_post_c2c(**kwargs):
-        delivered.append(str(kwargs.get("content") or ""))
+        delivered.append(_outbound_text(kwargs))
         return {"id": "mid-1"}
 
     api.post_c2c_message = _record_post_c2c
@@ -2415,7 +2479,7 @@ async def test_outbound_after_text_attachment_goes_after_the_body(
         calls = list(client.api.calls)
         assert calls[0] == (
             "post_c2c_message",
-            {"openid": "u9", "content": "好耶", "msg_type": 0},
+            {"openid": "u9", "markdown": {"content": "好耶"}, "msg_type": 2},
         )
         assert calls[1][0] == "post_c2c_message"
         assert calls[1][1]["msg_type"] == 7

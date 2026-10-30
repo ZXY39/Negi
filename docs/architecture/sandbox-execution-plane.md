@@ -223,9 +223,11 @@ pinned contract 同时带 `session_mode` 与受限档的 `session_workspace_dir:
 
 三条硬规则：
 
-- **群聊整会话按第三方**：群消息只带 `member_openid`（无昵称），它与 c2c 的
-  `user_openid` 属两套 id 空间，"群里谁是操作员"在协议层不可判定；即便发送者在白名单里，
-  也不把群会话升级成 owner。
+- **群聊整会话按第三方**：这是策略，不是协议限制。同一 AppID 下同一个人的 `member_openid`
+  与 c2c 的 `user_openid` 同值（QQ 也会把该值解析成群里的 @），所以"群里谁是操作员"判得出来；
+  但群里操作员只是众多听众之一，发送者在白名单里也不把群会话升级成 owner。白名单在群里的作用
+  落在转录标注上（`g3ku/runtime/sender_stamp.py::sender_number_map`：本人标 `Master`、不占
+  第三方编号），档位不变。
 - **信任只降不升**：注册表条目记"见过的最受限信任级"，一条自称操作员的后继消息不能
   把先前的第三方判定抬回去。
 - **失败关闭**：空 sender 永不等于操作员；未登记的 `ext:` 键与 `china:` 归档键按第三方。

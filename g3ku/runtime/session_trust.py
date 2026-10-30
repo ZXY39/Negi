@@ -5,9 +5,12 @@ Contract owner: ``docs/architecture/sandbox-execution-plane.md`` §信任分级.
 The runtime has exactly one notion of "who is speaking to this session":
 ``owner`` (the operator's own local surface, or a whitelisted openid on a
 direct channel) and ``third_party`` (anyone else). Multi-party chats are third
-party **wholesale** — the QQ group payload carries no nickname and its
-``member_openid`` cannot be matched against a c2c ``user_openid``, so "which
-member of the group is the operator" is undecidable at the protocol layer.
+party **wholesale, by policy** — not because the sender is unidentifiable: one
+AppID gives one person one openid, shared by the c2c ``user_openid`` and the
+group ``member_openid`` (measured, and QQ resolves that value into a live
+@mention inside the group), so ``owner_openids`` does identify the operator in
+a group transcript. The group session still lands on the most restrictive
+level because the operator is one listener among many there.
 
 Two rules matter for callers:
 

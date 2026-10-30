@@ -61,6 +61,7 @@ from g3ku.qq_official.messages import (
     idempotency_key_for,
     is_deliverable_event,
     parse_external_key,
+    render_qq_markdown,
 )
 
 StateCallback = Callable[[str, str], None]
@@ -314,6 +315,34 @@ def _classify_send_failure(exc: Exception) -> str:
     if all(marker in lowered for marker in _PASSIVE_EXPIRED_MARKERS):
         return "passive_expired"
     return "transient"
+
+
+# 平台对 markdown 形状的拒绝（``Markdown参数…`` / ``markdown内容…`` 一族文案）。
+# 这是唯一一类"同一份正文换成纯文本形状就可能发出去"的平台拒绝。
+_MARKDOWN_REJECTION_MARKERS = ("markdown",)
+
+
+def _is_markdown_rejection(exc: Exception) -> bool:
+    lowered = str(exc).lower()
+    return any(marker in lowered for marker in _MARKDOWN_REJECTION_MARKERS)
+
+
+def _send_failure(kind: str, external_key: str, exc: Exception, passive: dict[str, Any]) -> ChannelSendError:
+    """分档平台异常并落那条 `send failed` 日志，返回要抛的异常（调用方 raise）。"""
+    failure = _classify_send_failure(exc)
+    logger.warning(
+        "qq-official send failed kind={} shape={} target={} ({})",
+        failure,
+        "passive" if passive else "active",
+        external_key,
+        str(exc)[:200],
+    )
+    return ChannelSendError(
+        failure,
+        f"{kind} send failed ({failure}): {exc}",
+        shape="passive" if passive else "active",
+        passive_window_open=bool(passive),
+    )
 
 
 def _lru_remember(mapping: "OrderedDict[str, Any]", key: str, value: Any = None, *, limit: int = _PUMP_OUTBOX_HISTORY_MAX_IDS) -> None:
@@ -1029,6 +1058,28 @@ async def run_qq_official_bridge(
                 external_key,
             )
 
+    async def _post_markdown_body(
+        kind: str, target: dict[str, str], text: str, passive: dict[str, Any]
+    ) -> Any:
+        """群/单聊正文走 markdown 形状。传了 markdown 后 ``content`` 字段必须留空。"""
+        payload: dict[str, Any] = {
+            "markdown": {"content": render_qq_markdown(text)},
+            "msg_type": 2,
+            **passive,
+        }
+        if kind == "group":
+            return await bridge_api.post_group_message(group_openid=target["group_openid"], **payload)
+        return await bridge_api.post_c2c_message(openid=target["user_openid"], **payload)
+
+    async def _post_plain_body(
+        kind: str, target: dict[str, str], text: str, passive: dict[str, Any]
+    ) -> Any:
+        """markdown 被平台拒时的兜底形状（频道两支从一开始就走这条）。"""
+        payload: dict[str, Any] = {"content": text, "msg_type": 0, **passive}
+        if kind == "group":
+            return await bridge_api.post_group_message(group_openid=target["group_openid"], **payload)
+        return await bridge_api.post_c2c_message(openid=target["user_openid"], **payload)
+
     async def deliver(
         external_key: str,
         text: str,
@@ -1066,28 +1117,15 @@ async def run_qq_official_bridge(
         if kind == "group":
             passive = _passive_reply_kwargs(state, kind, external_key)
         _gate_active_send(state, kind, external_key, passive)
+        # 群 @ 只支持 markdown（msg_type=2）：<qqbot-at-user id="member_openid" />。
+        tag_line = " ".join(f'<qqbot-at-user id="{item}" />' for item in mention_ids)
+        outbound_text = f"{tag_line}\n{body}" if (kind == "group" and tag_line) else body
+        use_markdown = kind in ("group", "c2c")
+        sent_format = "text"
         try:
-            if kind == "group":
-                if mention_ids:
-                    # 群 @ 只支持 markdown（msg_type=2）：<qqbot-at-user id="member_openid" />。
-                    markdown_body = " ".join(
-                        f'<qqbot-at-user id="{item}" />' for item in mention_ids
-                    ) + "\n" + body
-                    result = await bridge_api.post_group_message(
-                        group_openid=target["group_openid"],
-                        markdown={"content": markdown_body},
-                        msg_type=2,
-                        **passive,
-                    )
-                else:
-                    result = await bridge_api.post_group_message(
-                        group_openid=target["group_openid"],
-                        content=body,
-                        msg_type=0,
-                        **passive,
-                    )
-            elif kind == "c2c":
-                result = await bridge_api.post_c2c_message(openid=target["user_openid"], content=body, msg_type=0)
+            if use_markdown:
+                result = await _post_markdown_body(kind, target, outbound_text, passive)
+                sent_format = "markdown"
             elif kind == "guild":
                 result = await bridge_api.post_message(channel_id=target["channel_id"], content=body)
             else:
@@ -1095,20 +1133,26 @@ async def run_qq_official_bridge(
         except (asyncio.CancelledError, DeliveryUnconfirmedError):
             raise
         except Exception as exc:
-            failure = _classify_send_failure(exc)
+            if not (use_markdown and _is_markdown_rejection(exc)):
+                raise _send_failure(kind, external_key, exc, passive) from exc
+            # 平台拒了 markdown 形状：同一份正文换回纯文本再发一次。不回落的话这一发
+            # 会被判成 transient、吃满 5 次预算后按 undeliverable 销账，用户一条都收不到。
             logger.warning(
-                "qq-official send failed kind={} shape={} target={} ({})",
-                failure,
-                "passive" if passive else "active",
+                "qq-official markdown rejected for {} ({}); retrying as text",
                 external_key,
                 str(exc)[:200],
             )
-            raise ChannelSendError(
-                failure,
-                f"{kind} send failed ({failure}): {exc}",
-                shape="passive" if passive else "active",
-                passive_window_open=bool(passive),
-            ) from exc
+            if kind == "group":
+                passive = _passive_reply_kwargs(state, kind, external_key)
+            try:
+                # 回落走纯文本时丢掉 @ 标签：文本形状本来就不支持 @，把标签原样发出去
+                # 只会让用户看见一串 `<qqbot-at-user …>`。
+                result = await _post_plain_body(kind, target, body, passive)
+            except (asyncio.CancelledError, DeliveryUnconfirmedError):
+                raise
+            except Exception as fallback_exc:
+                raise _send_failure(kind, external_key, fallback_exc, passive) from fallback_exc
+            sent_format = "text"
         if not passive and kind in ("group", "c2c"):
             state.pacer.record(external_key)
         # botpy 的 http 层对请求超时只打一条 WARNING 就返回 None（吞掉
@@ -1123,13 +1167,16 @@ async def run_qq_official_bridge(
         if isinstance(result, dict):
             message_id = str(result.get("id") or result.get("message_id") or "").strip()
         # 送达回执：排查"发没发出去"时以这行为准（published to hub 不代表送达）。
-        # passive 这一栏分形状：`<消息id>#<seq>` 是被动回复，`-` 是主动消息形状——
-        # 群目标被平台按主动消息拒投（40034105）时，只有这行能说明那一发是出了窗口。
+        # format 这一栏分正文形状：`markdown` 是 msg_type=2，`text` 是纯文本（频道两支
+        # 与 markdown 被拒后的回落）。passive 那一栏分 `<消息id>#<seq>`（被动回复）与
+        # `-`（主动消息形状）——群目标被平台按主动消息拒投（40034105）时，只有这行能说明
+        # 那一发是出了窗口。
         logger.info(
-            "qq-official delivered {} message to {} (id={}, attachments={}, passive={})",
+            "qq-official delivered {} message to {} (id={}, format={}, attachments={}, passive={})",
             kind,
             external_key,
             message_id or "-",
+            sent_format,
             len([item for item in list(attachments or []) if isinstance(item, dict)]),
             f"{passive['msg_id']}#{passive['msg_seq']}" if passive else "-",
         )
@@ -1481,8 +1528,9 @@ async def run_qq_official_bridge(
     def _sender_of(message: Any, chat_type: str) -> dict[str, str]:
         """发送者身份；群消息只有 ``member_openid``（botpy 不给昵称），频道才有用户名。
 
-        群里的 ``member_openid`` 与 c2c 的 ``user_openid`` 属于两套 id 空间，不可互相
-        匹配——所以"群里谁是操作员"在协议层不可判定，群聊整会话按第三方处理。
+        实测：同一 AppID 下同一个人的 ``member_openid`` 与 c2c 的 ``user_openid`` 同值
+        （平台也会把它解析成群里的 @），所以"群里谁是操作员"在协议层判得出来。群聊整会话
+        仍按第三方是策略，多人短路在 ``g3ku/runtime/session_trust.py::resolve_turn_trust``。
         """
         author = getattr(message, "author", None) or {}
         if chat_type == "group":
