@@ -41,13 +41,16 @@ function makeListEl() {
     };
 }
 
-function loadModule({ listEl, statusEl }) {
+function loadModule({ listEl, statusEl, previewReply = null, registerReply = null, activeSession = "ext:qq-official-111:abc" }) {
     const created = [];
     const confirms = [];
+    const calls = { preview: [], register: [] };
+    const toasts = [];
     const context = {
         console,
         setTimeout,
         clearTimeout,
+        activeSessionId: () => activeSession,
         document: {
             getElementById(id) {
                 if (id === "qq-bot-accounts") return listEl;
@@ -62,21 +65,31 @@ function loadModule({ listEl, statusEl }) {
         },
         window: {},
         esc: (value) => String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"),
-        showToast: () => {},
+        showToast: (toast) => { toasts.push(toast); },
         openConfirm: (options) => { confirms.push(options); },
         ApiClient: {
             getQqBotSettings: async () => ({ enabled: true, accounts: [] }),
             updateQqBotSettings: async (body) => body,
+            previewQqBotOwnerRegistration: async (body) => {
+                calls.preview.push(body);
+                if (previewReply instanceof Error) throw previewReply;
+                return previewReply || {};
+            },
+            registerQqBotOwner: async (body) => {
+                calls.register.push(body);
+                if (registerReply instanceof Error) throw registerReply;
+                return registerReply || {};
+            },
         },
     };
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
         `${CODE}
-        this.__t = { QQ_BOT_STATE, renderQqBotAccounts, _collectQqBotRows, _qqBotRowsBody, _qqBotRowStatus, _editQqBotOwners };`,
+        this.__t = { QQ_BOT_STATE, renderQqBotAccounts, _collectQqBotRows, _qqBotRowsBody, _qqBotRowStatus, _editQqBotOwners, _registerQqBotOwner, _confirmQqBotOwnerRegistration };`,
         context,
     );
-    return { t: context.__t, created, confirms };
+    return { t: context.__t, created, confirms, calls, toasts };
 }
 
 const row = (over = {}) => ({
@@ -148,7 +161,7 @@ test("QQ 账号面板：重复 AppID 时整表请求体被拒", () => {
     });
 });
 
-test("QQ 账号面板：操作员入口按名单条数渲染，弹窗写 owner_openids 并挡非法形状", async () => {
+test("QQ 账号面板：名单入口按条数渲染，弹窗写 owner_openids 并挡非法形状", async () => {
     const listEl = makeListEl();
     const { t, confirms } = loadModule({ listEl, statusEl: { textContent: "", className: "" } });
     t.QQ_BOT_STATE.loaded = true;
@@ -166,7 +179,8 @@ test("QQ 账号面板：操作员入口按名单条数渲染，弹窗写 owner_o
 
     t.renderQqBotAccounts();
     const rendered = listEl.children[listEl.children.length - 1];
-    assert.match(rendered.innerHTML, /data-action="edit-owner"[^>]*>操作员 1</);
+    assert.match(rendered.innerHTML, /data-action="register-owner"[^>]*>注册Master</);
+    assert.match(rendered.innerHTML, /data-action="edit-owner"[^>]*>名单 1</);
 
     t._editQqBotOwners(0);
     assert.equal(confirms.length, 1);
@@ -184,6 +198,102 @@ test("QQ 账号面板：操作员入口按名单条数渲染，弹窗写 owner_o
     await confirms[0].onConfirm({ value: "AAAA111122223333, BBBB444455556666" });
     const body = JSON.parse(JSON.stringify(t._qqBotRowsBody()));
     assert.deepEqual(body.accounts[0].owner_openids, ["AAAA111122223333", "BBBB444455556666"]);
+});
+
+test("QQ 账号面板：注册Master 只收编号+口令，预览后二次确认再写入", async () => {
+    const listEl = makeListEl();
+    const previewReply = {
+        ok: true,
+        session: { session_id: "ext:qq-official-111:abc", chat_type: "group", title: "测试群" },
+        sender: { number: 2, number_label: "0002", id_masked: "EB6C8D…0DAE" },
+    };
+    const registerReply = {
+        ok: true,
+        registered: true,
+        enabled: true,
+        accounts: [row({ app_id: "111", has_secret: true, owner_openids: ["EB6C8D4341C1238A627FF73CBE540DAE"] })],
+    };
+    const { t, confirms, calls, toasts } = loadModule({
+        listEl,
+        statusEl: { textContent: "", className: "" },
+        previewReply,
+        registerReply,
+    });
+    t.QQ_BOT_STATE.loaded = true;
+    t.QQ_BOT_STATE.rows = [row({ app_id: "111", has_secret: true })];
+    const card = makeRowEl();
+    card.dataset.index = "0";
+    card.fields = {
+        ".qq-bot-appid": makeField("111"),
+        ".qq-bot-secret": makeField(""),
+        ".qq-bot-label": makeField(""),
+    };
+    listEl.children = [card];
+    t.renderQqBotAccounts();
+    // 没注册过时不出现名单入口。
+    assert.doesNotMatch(listEl.children[listEl.children.length - 1].innerHTML, /data-action="edit-owner"/);
+
+    t._registerQqBotOwner(0);
+    assert.equal(confirms.length, 1);
+    assert.match(confirms[0].text, /0002/);
+    assert.equal(confirms[0].input.label, "发送者编号");
+
+    await confirms[0].onConfirm({ value: "0002" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(confirms.length, 2);
+    assert.equal(confirms[1].input.type, "password");
+    assert.match(confirms[1].text, /测试群/);
+    assert.match(confirms[1].text, /EB6C8D…0DAE/);
+    assert.deepEqual(JSON.parse(JSON.stringify(calls.preview)), [{
+        session_id: "ext:qq-official-111:abc",
+        number: "0002",
+        app_id: "111",
+    }]);
+
+    await confirms[1].onConfirm({ value: "owner-password" });
+    assert.deepEqual(JSON.parse(JSON.stringify(calls.register)), [{
+        session_id: "ext:qq-official-111:abc",
+        number: "0002",
+        app_id: "111",
+        unlock_password: "owner-password",
+    }]);
+    assert.equal(toasts.at(-1).kind, "success");
+});
+
+test("QQ 账号面板：编号非法或无当前会话时不发预览请求", async () => {
+    const listEl = makeListEl();
+    const { t, confirms, calls, toasts } = loadModule({ listEl, statusEl: { textContent: "", className: "" } });
+    t.QQ_BOT_STATE.loaded = true;
+    t.QQ_BOT_STATE.rows = [row({ app_id: "111", has_secret: true })];
+    const card = makeRowEl();
+    card.dataset.index = "0";
+    card.fields = {
+        ".qq-bot-appid": makeField("111"),
+        ".qq-bot-secret": makeField(""),
+        ".qq-bot-label": makeField(""),
+    };
+    listEl.children = [card];
+    t.renderQqBotAccounts();
+
+    t._registerQqBotOwner(0);
+    await assert.rejects(() => confirms[0].onConfirm({ value: "0001" }));
+    assert.equal(calls.preview.length, 0);
+
+    const blankList = makeListEl();
+    const blankCard = makeRowEl();
+    blankCard.dataset.index = "0";
+    blankCard.fields = {
+        ".qq-bot-appid": makeField("111"),
+        ".qq-bot-secret": makeField(""),
+        ".qq-bot-label": makeField(""),
+    };
+    blankList.children = [blankCard];
+    const blank = loadModule({ listEl: blankList, statusEl: { textContent: "", className: "" }, activeSession: "" });
+    blank.t.QQ_BOT_STATE.loaded = true;
+    blank.t.QQ_BOT_STATE.rows = [row({ app_id: "111", has_secret: true })];
+    blank.t._registerQqBotOwner(0);
+    assert.equal(blank.confirms.length, 0);
+    assert.equal(blank.toasts.at(-1).kind, "error");
 });
 
 test("QQ 账号面板：状态摘要按号计数，行状态区分未配置", () => {

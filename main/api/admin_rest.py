@@ -1249,6 +1249,121 @@ def _qq_bridge_id(app_id: str) -> str:
     return bridge_id_for_app_id(app_id)
 
 
+def _qq_app_id_for_bridge(bridge_id: Any) -> str:
+    raw = str(bridge_id or '').strip()
+    prefix = f'{_QQ_BRIDGE_TOKEN_PREFIX}-'
+    return raw[len(prefix):] if raw.startswith(prefix) else ''
+
+
+def _mask_qq_openid(value: Any) -> str:
+    raw = str(value or '').strip()
+    return f'{raw[:6]}…{raw[-4:]}' if len(raw) > 10 else raw
+
+
+def _parse_qq_sender_number(value: Any) -> int:
+    raw = str(value if value is not None else '').strip()
+    if not raw.isdigit():
+        raise HTTPException(
+            status_code=400,
+            detail={'code': 'sender_number_invalid', 'message': '编号形如 0002'},
+        )
+    number = int(raw)
+    if number < 2:
+        raise HTTPException(
+            status_code=400,
+            detail={'code': 'sender_number_reserved', 'message': '0001 留给 Master；请填气泡上从 0002 起的编号'},
+        )
+    return number
+
+
+def _qq_owner_master_ids() -> frozenset[str]:
+    from g3ku.runtime.session_trust import qq_owner_openids
+
+    return qq_owner_openids()
+
+
+def _qq_owner_session_messages(session_id: str) -> tuple[Any, list[Any]]:
+    """渠道会话的注册表条目 + 当前转录，编号必须按同一份转录解析。"""
+    from g3ku.runtime.external_sessions import get_external_session_registry
+
+    entry = get_external_session_registry().get_by_session_key(session_id)
+    if entry is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                'code': 'qq_session_not_found',
+                'message': '当前打开的会话不是 QQ 渠道会话；先打开要注册的群聊或私聊，再点「注册Master」',
+            },
+        )
+    store = getattr(get_agent(), 'sessions', None)
+    if store is None:
+        raise HTTPException(
+            status_code=503,
+            detail={'code': 'session_store_unavailable', 'message': '会话存储还没就绪'},
+        )
+    session = store.get_or_create(session_id)
+    return entry, list(getattr(session, 'messages', None) or [])
+
+
+def _resolve_qq_sender_number(
+    messages: list[Any],
+    number: int,
+    *,
+    master_ids: frozenset[str] = frozenset(),
+) -> str:
+    """``0002`` 这类会话内编号 → sender id；编号与气泡标签同源（整份转录、首次出现顺序）。"""
+    from g3ku.runtime.sender_stamp import sender_number_map
+
+    for sender_id, assigned in sender_number_map(messages, master_ids=master_ids).items():
+        if int(assigned) != int(number):
+            continue
+        candidate = str(sender_id or '').strip()
+        if not _QQ_OWNER_OPENID_RE.fullmatch(candidate):
+            raise HTTPException(
+                status_code=400,
+                detail={'code': 'sender_id_not_registerable', 'message': '这个发送者的 id 不是可登记的形状'},
+            )
+        return candidate
+    return ''
+
+
+def _qq_owner_registration_target(body: dict[str, Any]) -> tuple[Config, Any, str, int, str]:
+    session_id = str(body.get('session_id') or body.get('sessionId') or '').strip()
+    if not session_id:
+        raise HTTPException(
+            status_code=400,
+            detail={'code': 'session_id_required', 'message': '缺少会话'},
+        )
+    number = _parse_qq_sender_number(body.get('number'))
+    entry, messages = _qq_owner_session_messages(session_id)
+    cfg = load_config()
+    app_id = _qq_app_id_for_bridge(getattr(entry, 'bridge_id', ''))
+    if not app_id or app_id not in dict(getattr(cfg.qq_bot, 'accounts', None) or {}):
+        raise HTTPException(
+            status_code=400,
+            detail={'code': 'qq_account_not_found', 'message': '这个会话对应的 QQ 号不在配置里'},
+        )
+    requested_app_id = str(body.get('app_id') or body.get('appId') or '').strip()
+    if requested_app_id and requested_app_id != app_id:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                'code': 'session_account_mismatch',
+                'message': f'当前打开的会话属于 QQ 号 {app_id}，不是 {requested_app_id}',
+            },
+        )
+    sender_id = _resolve_qq_sender_number(messages, number, master_ids=_qq_owner_master_ids())
+    if not sender_id:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                'code': 'sender_number_not_found',
+                'message': f'当前会话里没有编号 {number:04d} 的第三方发送者',
+            },
+        )
+    return cfg, entry, app_id, number, sender_id
+
+
 def _disable_orphan_qq_bridge_tokens(cfg: Config, keep_bridge_ids: set[str]) -> bool:
     """把不再对应任何已配账号的 QQ 桥凭证置为停用（不删除，重新加回同号可复用）。
 
@@ -1348,6 +1463,85 @@ async def update_qq_bot_settings(payload: dict | None = Body(default=None)):
     save_config(cfg)
     await _refresh_runtime_after_save('admin_qq_bot_settings_update')
     return {'ok': True, **_qq_bot_payload(cfg)}
+
+
+@router.post('/qq-bot/register-owner/preview')
+async def preview_qq_bot_owner_registration(payload: dict | None = Body(default=None)):
+    """把「气泡上的编号」解析成发送者，供二次确认；不写配置、不要口令。"""
+    body = payload if isinstance(payload, dict) else {}
+    _cfg, entry, app_id, number, sender_id = _qq_owner_registration_target(body)
+    from g3ku.runtime.session_trust import chat_type_from_external_key
+
+    chat_type = str(getattr(entry, 'chat_type', '') or '') or chat_type_from_external_key(
+        getattr(entry, 'external_key', '')
+    )
+    return {
+        'ok': True,
+        'session': {
+            'session_id': str(getattr(entry, 'session_key', '') or ''),
+            'bridge_id': str(getattr(entry, 'bridge_id', '') or ''),
+            'app_id': app_id,
+            'chat_type': chat_type,
+            'title': str(getattr(entry, 'title', '') or ''),
+        },
+        'sender': {
+            'number': number,
+            'number_label': f'{number:04d}',
+            'id_masked': _mask_qq_openid(sender_id),
+        },
+    }
+
+
+@router.post('/qq-bot/register-owner')
+async def register_qq_bot_owner(payload: dict | None = Body(default=None)):
+    """按当前会话的发送者编号注册操作员；落盘仍只写 ``ownerOpenids``。"""
+    body = payload if isinstance(payload, dict) else {}
+    password = str(body.get('unlock_password') or body.get('unlockPassword') or '')
+    if not password:
+        raise HTTPException(
+            status_code=403,
+            detail={'code': 'unlock_password_required', 'message': '注册操作员需要项目解锁口令'},
+        )
+    from g3ku.security.bootstrap import verify_unlock_password
+
+    if not verify_unlock_password(password):
+        raise HTTPException(
+            status_code=403,
+            detail={'code': 'unlock_password_invalid', 'message': '口令不正确'},
+        )
+    cfg, entry, app_id, number, sender_id = _qq_owner_registration_target(body)
+    account = cfg.qq_bot.accounts[app_id]
+    owners = list(getattr(account, 'owner_openids', None) or [])
+    registered = sender_id.lower() not in {str(item).lower() for item in owners}
+    if registered:
+        owners.append(sender_id)
+        account.owner_openids = owners
+        save_config(cfg)
+        await _refresh_runtime_after_save('admin_qq_bot_owner_register')
+        audit_events.emit_audit_event(
+            'external_api',
+            'warning',
+            'qq_owner_registered',
+            'QQ operator openid registered from session sender number',
+            detail={
+                'app_id': app_id,
+                'session_id': str(getattr(entry, 'session_key', '') or ''),
+                'number': f'{number:04d}',
+                'sender_id': _mask_qq_openid(sender_id),
+                'actor': 'operator',
+            },
+        )
+    return {
+        'ok': True,
+        'registered': registered,
+        'app_id': app_id,
+        'sender': {
+            'number': number,
+            'number_label': f'{number:04d}',
+            'id_masked': _mask_qq_openid(sender_id),
+        },
+        **_qq_bot_payload(cfg),
+    }
 
 
 @router.get('/qq-bot/status')

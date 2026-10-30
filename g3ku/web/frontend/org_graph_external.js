@@ -526,8 +526,10 @@ function renderQqBotAccounts() {
                 <span class="tool-governance-switch-track" aria-hidden="true"><span class="tool-governance-switch-thumb"></span></span>
                 <span class="tool-governance-switch-label">${row.enabled ? "已启用" : "已停用"}</span>
             </button>
-            <button class="toolbar-btn ghost small" data-action="edit-owner" type="button"
-                title="操作员 openid 名单：命中即按 Master 处理">操作员${ownerCount ? ` ${ownerCount}` : ""}</button>
+            <button class="toolbar-btn ghost small" data-action="register-owner" type="button"
+                title="用群里气泡上的编号注册 Master">注册Master</button>
+            ${ownerCount ? `<button class="toolbar-btn ghost small" data-action="edit-owner" type="button"
+                title="查看或移除已注册的 Master">名单 ${ownerCount}</button>` : ""}
             <button class="toolbar-btn ghost small" data-action="edit-secret" type="button">改密钥</button>
             <button class="toolbar-btn ghost danger small" data-action="remove" type="button">删除</button>`;
         listEl.appendChild(el);
@@ -770,7 +772,7 @@ function _editQqBotOwners(index) {
     if (!target) return;
     const current = Array.isArray(target.owner_openids) ? target.owner_openids : [];
     openConfirm({
-        title: "操作员 openid",
+        title: "Master 名单",
         text: "命中的发送者按 Master 处理：私聊升为 owner 档，群里只改标签、档位仍是第三方。多个用逗号分隔；每个 QQ 号各填自己那份。",
         confirmLabel: "保存",
         confirmKind: "",
@@ -787,6 +789,71 @@ function _editQqBotOwners(index) {
             if (invalid) throw new Error(`openid 形状不对：${invalid}`);
             target.owner_openids = owners;
             await _persistQqBotSettings({ silentEmpty: true });
+        },
+    });
+}
+
+function _qqSessionIdentityLabel(preview) {
+    const chat = String(preview?.session?.chat_type || "").toLowerCase();
+    const kind = (chat === "group" || chat === "guild") ? "群聊" : "私聊";
+    const title = String(preview?.session?.title || "").trim();
+    return title ? `${kind}「${title}」` : kind;
+}
+
+// 编号只在会话内有意义：解析用的是当前打开的那条转录，不跨会话猜。
+function _registerQqBotOwner(index) {
+    const target = _qqBotRowFor(index);
+    if (!target) return;
+    const appId = String(target.app_id || "").trim();
+    const sessionId = String(activeSessionId() || "").trim();
+    if (!sessionId) {
+        showToast({ title: "先打开 QQ 会话", text: "编号取自气泡，先打开要注册的群聊或私聊再点「注册Master」。", kind: "error" });
+        return;
+    }
+    openConfirm({
+        title: "注册 Master",
+        text: "在群里问一句自己的编号，或看自己气泡上的「第三方 0002」；把 0002 填进来即可。只解析当前打开的会话。",
+        confirmLabel: "下一步",
+        confirmKind: "",
+        input: { label: "发送者编号", placeholder: "0002" },
+        onConfirm: async ({ value }) => {
+            const number = String(value || "").trim();
+            if (!/^0*\d{1,4}$/.test(number) || Number(number) < 2) {
+                throw new Error("编号形如 0002；0001 留给 Master");
+            }
+            const preview = await ApiClient.previewQqBotOwnerRegistration({
+                session_id: sessionId,
+                number,
+                app_id: appId,
+            });
+            setTimeout(() => _confirmQqBotOwnerRegistration(preview, { sessionId, number, appId }), 0);
+        },
+    });
+}
+
+function _confirmQqBotOwnerRegistration(preview, { sessionId, number, appId }) {
+    const sender = preview?.sender || {};
+    const masked = String(sender.id_masked || "").trim();
+    const label = String(sender.number_label || number || "").trim();
+    openConfirm({
+        title: "确认注册 Master",
+        text: `${_qqSessionIdentityLabel(preview)} · 编号 ${label} 对应 ${masked}。注册后按 Master 处理；群聊只改标签，私聊升为 owner 档。`,
+        confirmLabel: "注册",
+        confirmKind: "",
+        textFull: true,
+        input: { label: "项目解锁口令", type: "password" },
+        onConfirm: async ({ value }) => {
+            const password = String(value || "").trim();
+            if (!password) throw new Error("需要项目解锁口令");
+            const payload = await ApiClient.registerQqBotOwner({
+                session_id: sessionId,
+                number,
+                app_id: appId,
+                unlock_password: password,
+            });
+            _applyQqBotPayload(payload);
+            renderQqBotAccounts();
+            showToast({ title: "已注册 Master", text: `${masked} 现在按 Master 处理。`, kind: "success" });
         },
     });
 }
@@ -936,6 +1003,10 @@ function initQqBotView() {
             }
             if (event.target.closest("[data-action='edit-secret']")) {
                 _editQqBotSecret(index);
+                return;
+            }
+            if (event.target.closest("[data-action='register-owner']")) {
+                _registerQqBotOwner(index);
                 return;
             }
             if (event.target.closest("[data-action='edit-owner']")) {

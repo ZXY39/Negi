@@ -188,6 +188,125 @@ def test_owner_openids_roundtrip_and_preserved_when_omitted(client: TestClient) 
     assert bad.json()["detail"] == "owner_openid_invalid"
 
 
+_GROUP_OWNER = "EB6C8D4341C1238A627FF73CBE540DAE"
+_GROUP_OTHER = "A73DE6610A4C2793C759D7DF525DB66D"
+
+
+def _user_row(sender_id: str, trust: str = "third_party_group") -> dict:
+    return {
+        "role": "user",
+        "content": "hi",
+        "metadata": {
+            "external_trust": trust,
+            "external_sender": {"id": sender_id, "name": ""},
+            "chat_type": "group",
+        },
+    }
+
+
+def _install_qq_session(monkeypatch: pytest.MonkeyPatch, messages: list[dict], *, bridge_id: str = "qq-official-111") -> None:
+    from types import SimpleNamespace
+
+    entry = SimpleNamespace(
+        session_key="ext:qq-official-111:abc",
+        bridge_id=bridge_id,
+        chat_type="group",
+        title="测试群",
+        external_key="qq:group:ABC",
+    )
+    monkeypatch.setattr(
+        admin_rest,
+        "_qq_owner_session_messages",
+        lambda session_id: (entry, list(messages)),
+    )
+    monkeypatch.setattr(admin_rest, "_qq_owner_master_ids", lambda: frozenset())
+
+
+def _seed_qq_account(client: TestClient) -> None:
+    saved = client.put(
+        "/api/qq-bot/settings",
+        json={"enabled": True, "accounts": [{"app_id": "111", "app_secret": "secret-one"}]},
+    )
+    assert saved.status_code == 200
+
+
+def test_register_master_previews_and_writes_sender_number(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_qq_account(client)
+    _install_qq_session(monkeypatch, [_user_row(_GROUP_OWNER), _user_row(_GROUP_OTHER)])
+
+    preview = client.post(
+        "/api/qq-bot/register-owner/preview",
+        json={"session_id": "ext:qq-official-111:abc", "number": "0002", "app_id": "111"},
+    )
+    assert preview.status_code == 200
+    body = preview.json()
+    assert body["session"]["app_id"] == "111"
+    assert body["session"]["chat_type"] == "group"
+    assert body["sender"]["number_label"] == "0002"
+    assert body["sender"]["id_masked"] == "EB6C8D…0DAE"
+    # 预览只给 masked id，完整 openid 不经这条只读口暴露。
+    assert _GROUP_OWNER not in json.dumps(body, ensure_ascii=False)
+
+    bad = client.post(
+        "/api/qq-bot/register-owner",
+        json={"session_id": "ext:qq-official-111:abc", "number": "0002", "app_id": "111", "unlock_password": "wrong"},
+    )
+    assert bad.status_code == 403
+    assert bad.json()["detail"]["code"] == "unlock_password_invalid"
+
+    saved = client.post(
+        "/api/qq-bot/register-owner",
+        json={
+            "session_id": "ext:qq-official-111:abc",
+            "number": "0002",
+            "app_id": "111",
+            "unlock_password": "owner-password",
+        },
+    )
+    assert saved.status_code == 200
+    assert saved.json()["registered"] is True
+    assert _row(saved.json(), "111")["owner_openids"] == [_GROUP_OWNER]
+
+    again = client.post(
+        "/api/qq-bot/register-owner",
+        json={
+            "session_id": "ext:qq-official-111:abc",
+            "number": "0002",
+            "app_id": "111",
+            "unlock_password": "owner-password",
+        },
+    )
+    assert again.status_code == 200
+    assert again.json()["registered"] is False
+    assert _row(again.json(), "111")["owner_openids"] == [_GROUP_OWNER]
+
+
+def test_register_master_rejects_reserved_missing_and_foreign_number(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_qq_account(client)
+    _install_qq_session(monkeypatch, [_user_row(_GROUP_OWNER)])
+
+    reserved = client.post(
+        "/api/qq-bot/register-owner/preview",
+        json={"session_id": "ext:qq-official-111:abc", "number": "0001", "app_id": "111"},
+    )
+    assert reserved.status_code == 400
+    assert reserved.json()["detail"]["code"] == "sender_number_reserved"
+
+    missing = client.post(
+        "/api/qq-bot/register-owner/preview",
+        json={"session_id": "ext:qq-official-111:abc", "number": "0009", "app_id": "111"},
+    )
+    assert missing.status_code == 404
+    assert missing.json()["detail"]["code"] == "sender_number_not_found"
+
+    foreign = client.post(
+        "/api/qq-bot/register-owner/preview",
+        json={"session_id": "ext:qq-official-111:abc", "number": "0002", "app_id": "222"},
+    )
+    assert foreign.status_code == 400
+    assert foreign.json()["detail"]["code"] == "session_account_mismatch"
+
+
 def test_second_account_does_not_touch_first_secret(client: TestClient) -> None:
     client.put(
         "/api/qq-bot/settings",

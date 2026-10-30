@@ -40,8 +40,10 @@ function openConfirm({
         if (inputEnabled && U.confirmInputLabel) {
             U.confirmInputLabel.textContent = input.label || "";
         }
-        if (inputEnabled && input.placeholder) {
-            U.confirmInput.setAttribute("placeholder", input.placeholder);
+        // 占位符必须跟着这次调用走：上一次弹窗的提示留在这个共享 input 上，
+        // 会让下一个口令框看起来已经填了「0002」。
+        if (inputEnabled) {
+            U.confirmInput.setAttribute("placeholder", String(input.placeholder || ""));
         }
     }
     if (U.confirmOptions && U.confirmCheckbox && U.confirmCheckboxLabel && U.confirmCheckboxHint) {

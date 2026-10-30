@@ -30,6 +30,14 @@
 
     async updateQqBotSettings(payload) {
         return this.put("/api/qq-bot/settings", payload || {});
+    },
+
+    async previewQqBotOwnerRegistration(payload) {
+        return this.post("/api/qq-bot/register-owner/preview", payload || {});
+    },
+
+    async registerQqBotOwner(payload) {
+        return this.post("/api/qq-bot/register-owner", payload || {});
     }
     };
 })();
