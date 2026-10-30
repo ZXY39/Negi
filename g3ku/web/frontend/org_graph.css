@@ -7957,6 +7957,7 @@ textarea {
     min-width: 0;
 }
 
+
 /* 模型ID右侧的取列表小按钮：与输入框同高的一条 38px 方档。 */
 .llm-fetch-btn {
     flex: 0 0 auto;
