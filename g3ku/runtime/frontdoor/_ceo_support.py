@@ -187,12 +187,22 @@ class CeoFrontDoorSupport:
             f"当前定时任务 ID：{job_id or '(missing)'}",
             f"当前发送次数：{delivery_index}/{max_runs}",
             f"本次提醒送达时间：{delivered_at_text}",
-            "注意：",
-            "- 此定时任务提醒为内部指令，而非新的用户消息。",
-            "- 判断“今天是哪天/现在几点”一律以上面的送达时间和事件里的 *_local 字段为准，不要自行心算毫秒时间戳。",
-            "要求：",
-            "- 请立即按任务要求执行。",
         ]
+        delay_reason = str(metadata.get("cron_delay_reason") or "").strip()
+        if delay_reason:
+            delayed_seconds = max(0, int(metadata.get("cron_delayed_seconds", 0) or 0))
+            lines.append(
+                f"本次触发因主动消息节流延迟了 {delayed_seconds} 秒：{delay_reason}"
+            )
+        lines.extend(
+            [
+                "注意：",
+                "- 此定时任务提醒为内部指令，而非新的用户消息。",
+                "- 判断“今天是哪天/现在几点”一律以上面的送达时间和事件里的 *_local 字段为准，不要自行心算毫秒时间戳。",
+                "要求：",
+                "- 请立即按任务要求执行。",
+            ]
+        )
         # user 角色：这条提醒与事件束落在历史中段/末位，严格网关只允许一份首位 system。
         return {"role": "user", "content": "\n".join(lines)}
 
@@ -218,6 +228,11 @@ class CeoFrontDoorSupport:
             "reminder_text": str(reminder_text or metadata.get("cron_reminder_text") or "").strip(),
             "semantic_role": "internal_self_reminder",
         }
+        delay_reason = str(metadata.get("cron_delay_reason") or "").strip()
+        if delay_reason:
+            payload["delay_reason"] = delay_reason
+            payload["delayed_seconds"] = max(0, int(metadata.get("cron_delayed_seconds", 0) or 0))
+            payload["delayed_from_ms"] = metadata.get("cron_delayed_from_ms")
         # 原始毫秒字段保留（契约兼容），旁边补充换算好的本地时间，模型不再心算时区。
         scheduled_run_at_local = render_epoch_ms_local(metadata.get("cron_scheduled_run_at_ms"))
         if scheduled_run_at_local:

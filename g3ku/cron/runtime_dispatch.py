@@ -44,21 +44,37 @@ async def dispatch_cron_job(
     session_key = resolve_cron_session_key(job, session_manager=session_manager)
     delivered_runs = max(0, int(getattr(getattr(job, "state", None), "delivered_runs", 0) or 0))
     max_runs = max(1, int(getattr(payload, "max_runs", 1) or 1))
+    delivered_at_ms = int(time.time() * 1000)
+    delayed_from_ms = getattr(getattr(job, "state", None), "delayed_from_ms", None)
+    delay_reason = str(getattr(getattr(job, "state", None), "delay_reason", "") or "").strip()
+    metadata = {
+        "cron_internal": True,
+        "cron_job_id": str(getattr(job, "id", "") or "").strip(),
+        "cron_max_runs": max_runs,
+        "cron_delivery_index": delivered_runs + 1,
+        "cron_delivered_runs": delivered_runs,
+        "cron_reminder_text": str(getattr(payload, "message", "") or ""),
+        "cron_scheduled_run_at_ms": getattr(getattr(job, "state", None), "next_run_at_ms", None),
+        "cron_last_delivered_at_ms": getattr(getattr(job, "state", None), "last_delivered_at_ms", None),
+        # 本次投递的真实时刻（单一事实来源）：live 种子与转录持久化共用同一
+        # metadata，保证两处渲染出的送达时间文本完全一致。
+        "cron_delivered_at_ms": delivered_at_ms,
+    }
+    if delay_reason and delayed_from_ms:
+        try:
+            delayed_seconds = max(0, int((delivered_at_ms - int(delayed_from_ms)) / 1000))
+        except (TypeError, ValueError):
+            delayed_seconds = 0
+        metadata.update(
+            {
+                "cron_delay_reason": delay_reason,
+                "cron_delayed_from_ms": int(delayed_from_ms),
+                "cron_delayed_seconds": delayed_seconds,
+            }
+        )
     user_message = UserInputMessage(
         content=str(getattr(payload, "message", "") or ""),
-        metadata={
-            "cron_internal": True,
-            "cron_job_id": str(getattr(job, "id", "") or "").strip(),
-            "cron_max_runs": max_runs,
-            "cron_delivery_index": delivered_runs + 1,
-            "cron_delivered_runs": delivered_runs,
-            "cron_reminder_text": str(getattr(payload, "message", "") or ""),
-            "cron_scheduled_run_at_ms": getattr(getattr(job, "state", None), "next_run_at_ms", None),
-            "cron_last_delivered_at_ms": getattr(getattr(job, "state", None), "last_delivered_at_ms", None),
-            # 本次投递的真实时刻（单一事实来源）：live 种子与转录持久化共用同一
-            # metadata，保证两处渲染出的送达时间文本完全一致。
-            "cron_delivered_at_ms": int(time.time() * 1000),
-        },
+        metadata=metadata,
     )
     result = await runtime_bridge.prompt(
         user_message,

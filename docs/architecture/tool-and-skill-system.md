@@ -198,6 +198,7 @@ exec 与 memory 工具：
 `cron` 工具是“结构化提醒”：`message` = 给未来 agent 的提醒动作；`max_runs` = 成功送达上限，省略默认 1；`at` = 只接受创建时仍在未来的单次触发时间，真正执行 `add_job()` 时该时间已过则拒绝创建，并提示 `任务定时已过期，当前时间为<service-local time>，请立即执行或视情况废弃而不要创建过期任务`；`stop_condition` 是兼容字段，不参与运行时停止判断。
 
 - 定时任务触发的回合（`cron_internal`）里，`cron` 工具照常可用 `add` / `list`（新任务仍只绑定创建它的当前会话），只有 `remove` 被限制为只能删除当前正在触发的任务自身——改传其它 `job_id`、或运行上下文缺失 `cron_job_id` 时一律拒绝，防止提醒回合误拆其它任务。
+- **调度类与派发类分开**：`cron` / `schedule_wake` 在受限/沙盒档可用；`create_async_task` / `send_message` / `task_*` 在受限档仍拒。渠道会话的 `cron list` / `remove` 只作用于当前 `payload.session_key` 的任务，跨会话的 id 一律按 not found 拒绝；增删写 `cron` 审计。自动触发受 60 秒主动消息节流，见 `heartbeat-system.md`「Proactive Message Throttle」。
 - 使用规范（提醒写成内部指令、调度三选一、投递目标由运行时从当前会话上下文自动推导、模型不传 `delivery.*` / `sessionTarget` / `payload.*`）放在 cron 工具的 toolskill 里，按需 `load_tool_context("cron")` 加载；模型对 cron 用法理解过时时，改 toolskill 而不是改注入逻辑。
 - 排查“为什么没有自动停止”先看 cron store 的 `payload.max_runs` / `state.delivered_runs`（到达上限由 scheduler 删除，提醒回合内手工 `remove` 只是辅助出口）；排查“cron 到点了但没创建/查询任务、只重复谈 cron 自己”，先检查 frontdoor tool exposure 是否被错误缩成 `cron`，而不是先怀疑 scheduler 没触发。
 - 前门的 `schedule_wake` 是 cron 的另一个生产者，走同一条一次性 `at` 车道（`max_runs=1` + `delete_after_run`），所以它的耐久存储、到点自愈重臂、at-most-once 投递与重启后的过期抑制都不是新机制；投递正文与到点判读归 `heartbeat-system.md`「Cron Reminder Contract」。它与操作员自己建的提醒之间有一条必须成立的边界：**替换只替换自己那一族**——`name` 以 `self-wake: ` 开头 **且** `schedule.kind == 'at'`，两侧都带会话键且不同才保留（CLI 共享会话没有更可分的键，那一族整批让位）。不这样做的话，一个每 40 分钟推进一次的报时回合会攒出一串闹钟，而"重设一次自己的闹钟"也会撞上同会话同毫秒的重复注册闸门。调度器不在（CLI 起的会话、cron 被关闭）时工具返回 `wake_scheduler_unavailable`，而不是 `armed: true` 却永远不会响。

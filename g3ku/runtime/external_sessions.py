@@ -45,6 +45,9 @@ class ExternalSessionEntry:
     # 该会话历史上见过的最受限信任级（见 ``g3ku.runtime.session_trust``）。
     # 空值 = 还没见过入站消息，读取侧按第三方兜底。
     trust: str = ""
+    # 最近一次主动推送（heartbeat / cron / 任务通知 / @ 工具）的发布时刻。
+    # 只由 outbound drain 写；普通回合回复不更新。cron 的 60 秒节流读它。
+    last_proactive_at: str = ""
 
 
 def _registry_workspace() -> Path:
@@ -97,6 +100,7 @@ class ExternalSessionRegistry:
                 hidden=bool(item.get("hidden")),
                 chat_type=str(item.get("chat_type") or ""),
                 trust=str(item.get("trust") or ""),
+                last_proactive_at=str(item.get("last_proactive_at") or ""),
             )
             self._entries[entry.session_key] = entry
             self._index[(entry.bridge_id, entry.external_key)] = entry.session_key
@@ -113,6 +117,7 @@ class ExternalSessionRegistry:
                     "hidden": bool(entry.hidden),
                     "chat_type": entry.chat_type,
                     "trust": entry.trust,
+                    "last_proactive_at": entry.last_proactive_at,
                 }
                 for session_key, entry in self._entries.items()
             },
@@ -263,6 +268,38 @@ class ExternalSessionRegistry:
             if changed:
                 self._save()
             return entry
+
+    def note_proactive_outbound(
+        self,
+        session_key: str,
+        *,
+        at: str | None = None,
+    ) -> ExternalSessionEntry | None:
+        """Record one proactive push for the 60s throttle.
+
+        Only the outbound drain calls this, and only for `outbound.created`
+        notices (heartbeat / cron / task terminal / mention). Ordinary turn
+        replies are not proactive and must not reset the window.
+        """
+        raw = str(session_key or "").strip()
+        if not raw:
+            return None
+        stamp = str(at or datetime.now().isoformat()).strip()
+        with self._lock:
+            entry = self._entries.get(raw)
+            if entry is None:
+                return None
+            entry.last_proactive_at = stamp
+            self._save()
+            return entry
+
+    def last_proactive_at(self, session_key: str) -> str:
+        raw = str(session_key or "").strip()
+        if not raw:
+            return ""
+        with self._lock:
+            entry = self._entries.get(raw)
+            return str(getattr(entry, "last_proactive_at", "") or "") if entry is not None else ""
 
     def session_count(self) -> int:
         """当前加载进来的会话条目数。

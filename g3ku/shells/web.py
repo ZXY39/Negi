@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from datetime import datetime
 from typing import Any, Optional
 
 from loguru import logger
@@ -171,6 +172,36 @@ def _cron_runtime_ready(agent: AgentLoop | None = None) -> bool:
     return False
 
 
+_PROACTIVE_MIN_INTERVAL_SECONDS = 60.0
+
+
+def _admit_proactive_cron_job(job: Any, now_ms: int) -> tuple[bool, int, str]:
+    """60 秒主动消息节流：按会话看上次主动推送时刻。
+
+    普通回合回复不走 outbound bus，因此不会刷新这个窗口；账本重放也不刷新
+    （drain 只在首次发布时记）。只在 `ext:` 会话上生效，web 本地提醒保持原样。
+    """
+    session_key = str(getattr(getattr(job, "payload", None), "session_key", "") or "").strip()
+    if not session_key.startswith(EXTERNAL_SESSION_KEY_PREFIX):
+        return True, 0, ""
+    last_text = get_external_session_registry().last_proactive_at(session_key)
+    if not last_text:
+        return True, 0, ""
+    try:
+        last_ts = datetime.fromisoformat(last_text).timestamp()
+    except (TypeError, ValueError):
+        return True, 0, ""
+    elapsed = max(0.0, (float(now_ms) / 1000.0) - last_ts)
+    if elapsed >= _PROACTIVE_MIN_INTERVAL_SECONDS:
+        return True, 0, ""
+    delay_ms = int((_PROACTIVE_MIN_INTERVAL_SECONDS - elapsed) * 1000)
+    reason = (
+        f"距上次主动消息仅 {elapsed:.0f} 秒（至少 {_PROACTIVE_MIN_INTERVAL_SECONDS:.0f} 秒）；"
+        f"本次唤醒延后 {delay_ms / 1000:.0f} 秒"
+    )
+    return False, max(1, delay_ms), reason
+
+
 def _build_web_cron_service(agent_holder: dict[str, AgentLoop]) -> CronService:
     async def _on_job(job) -> str | None:
         runtime_agent = agent_holder.get("agent")
@@ -187,7 +218,11 @@ def _build_web_cron_service(agent_holder: dict[str, AgentLoop]) -> CronService:
             publish_outbound=bus.publish_outbound if bus is not None else None,
         )
 
-    return CronService(get_data_dir() / "cron" / "jobs.json", on_job=_on_job)
+    return CronService(
+        get_data_dir() / "cron" / "jobs.json",
+        on_job=_on_job,
+        admit_proactive=_admit_proactive_cron_job,
+    )
 
 
 def get_agent() -> AgentLoop:
@@ -464,6 +499,13 @@ def _start_outbound_drain(bus: MessageBus) -> asyncio.Task:
             payload["outbox_id"] = outbox_id
         hub = get_session_event_hub(entry.session_key)
         hub.publish("outbound.created", **payload)
+        # 主动推送节流的时间戳：普通回合回复不走这条 bus 车道，不会被记进来。
+        # 账本重放只是补投同一份主动消息，不能把窗口重新推后。
+        if str(metadata.get("source") or "").strip() != "outbox_replay":
+            try:
+                get_external_session_registry().note_proactive_outbound(entry.session_key)
+            except Exception as exc:  # noqa: BLE001 - 节流记录失败不阻断投递
+                logger.warning("proactive timestamp record failed for {}: {}", entry.session_key, exc)
         # 语义要精确：这一行只代表"事件已发布到该会话的内存 hub"，不代表已送达
         # 渠道——真正送达以桥侧 "qq-official delivered ..." 回执日志为准。
         # 无订阅者 = live 投递必然蒸发（2026-09-14 日报滞留事故的静默失败点），

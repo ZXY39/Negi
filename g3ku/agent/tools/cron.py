@@ -121,10 +121,29 @@ class CronTool(Tool):
                 runtime_context=runtime_context,
             )
         elif action == "list":
-            return self._list_jobs()
+            return self._list_jobs(runtime_context=runtime_context)
         elif action == "remove":
-            return self._remove_job(job_id)
+            return self._remove_job(job_id, runtime_context=runtime_context)
         return f"Unknown action: {action}"
+
+    @staticmethod
+    def _session_key(runtime_context: dict[str, Any] | None) -> str:
+        return str((runtime_context or {}).get("session_key") or "").strip()
+
+    @classmethod
+    def _scope_to_session(cls, runtime_context: dict[str, Any] | None) -> bool:
+        session_key = cls._session_key(runtime_context)
+        channel = str((runtime_context or {}).get("channel") or "").strip().lower()
+        return bool(session_key.startswith("ext:") or channel == "ext")
+
+    @staticmethod
+    def _emit_cron_audit(action: str, payload: dict[str, Any]) -> None:
+        try:
+            from g3ku.audit_events import emit_audit_event
+
+            emit_audit_event("cron", "info", action, "cron job changed", detail=payload)
+        except Exception:  # noqa: BLE001 - 审计失败不阻塞任务
+            pass
 
     def _add_job(
         self,
@@ -181,19 +200,64 @@ class CronTool(Tool):
             )
         except ValueError as exc:
             return f"Error: {exc}"
+        if self._scope_to_session(runtime_context):
+            self._emit_cron_audit(
+                "job_added",
+                {
+                    "session_key": self._session_key(runtime_context),
+                    "job_id": job.id,
+                    "schedule_kind": str(getattr(job.schedule, "kind", "") or ""),
+                    "max_runs": int(getattr(getattr(job, "payload", None), "max_runs", 1) or 1),
+                },
+            )
         return f"Created job '{job.name}' (id: {job.id})"
 
-    def _list_jobs(self) -> str:
+    def _list_jobs(self, *, runtime_context: dict[str, Any] | None = None) -> str:
         jobs = self._cron.list_jobs()
+        if self._scope_to_session(runtime_context):
+            session_key = self._session_key(runtime_context)
+            jobs = [
+                job
+                for job in jobs
+                if str(getattr(getattr(job, "payload", None), "session_key", "") or "").strip()
+                == session_key
+            ]
         if not jobs:
             return "No scheduled jobs."
         lines = [f"- {j.name} (id: {j.id}, {j.schedule.kind})" for j in jobs]
         return "Scheduled jobs:\n" + "\n".join(lines)
 
-    def _remove_job(self, job_id: str | None) -> str:
+    def _remove_job(
+        self,
+        job_id: str | None,
+        *,
+        runtime_context: dict[str, Any] | None = None,
+    ) -> str:
         if not job_id:
             return "Error: job_id is required for remove"
+        if self._scope_to_session(runtime_context):
+            session_key = self._session_key(runtime_context)
+            target = next(
+                (
+                    job
+                    for job in self._cron.list_jobs(include_disabled=True)
+                    if str(getattr(job, "id", "") or "").strip() == job_id
+                ),
+                None,
+            )
+            if target is None or str(
+                getattr(getattr(target, "payload", None), "session_key", "") or ""
+            ).strip() != session_key:
+                return f"Job {job_id} not found in this session"
         if self._cron.remove_job(job_id):
+            if self._scope_to_session(runtime_context):
+                self._emit_cron_audit(
+                    "job_removed",
+                    {
+                        "session_key": self._session_key(runtime_context),
+                        "job_id": job_id,
+                    },
+                )
             return f"Removed job {job_id}"
         return f"Job {job_id} not found"
 

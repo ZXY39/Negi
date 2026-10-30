@@ -84,7 +84,9 @@ def test_revoking_grant_downgrades_on_next_message(registry) -> None:
     assert session_trust(key) == TRUST_THIRD_PARTY_DM
     policy = session_policy(key)
     assert policy.restricted is True
-    assert policy.tool_allowed("filesystem_write") is False
+    # 受限档默认允许工作目录内写文件；派发与命令行仍不可用。
+    assert policy.tool_allowed("filesystem_write") is True
+    assert policy.tool_allowed("exec") is False
     assert policy.tool_allowed("create_async_task") is False
 
 
@@ -96,3 +98,16 @@ def test_forged_gateway_sender_without_grant_stays_third_party(registry) -> None
     assert trust == TRUST_THIRD_PARTY_DM
     assert session_trust(key) == TRUST_THIRD_PARTY_DM
     assert session_policy(key).restricted is True
+
+
+def test_last_proactive_at_persists_across_registry_reload(registry) -> None:
+    from g3ku.runtime.external_sessions import ExternalSessionRegistry
+
+    key = _new_session(registry, "qq:group:proactive")
+    assert registry.last_proactive_at(key) == ""
+
+    registry.note_proactive_outbound(key, at="2026-10-30T12:00:00+08:00")
+    assert registry.last_proactive_at(key) == "2026-10-30T12:00:00+08:00"
+
+    reloaded = ExternalSessionRegistry(registry.workspace)
+    assert reloaded.last_proactive_at(key) == "2026-10-30T12:00:00+08:00"

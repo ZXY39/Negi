@@ -73,6 +73,32 @@ Cron job delivery is claim-before-dispatch with a bounded, self-finalizing dispa
 - An in-flight guard per job id also prevents an overlapping timer tick and a manual `run_job` for the same job from producing a second concurrent dispatch.
 - Hang forensics chain (three complementary instruments): the bridge slow-prompt watchdog warns with the live await chain when any `SessionRuntimeBridge.prompt` exceeds `G3KU_SLOW_PROMPT_WATCHDOG_SECONDS` (default 900s); the cron dispatch watchdog dumps the chain again at its own timeout and then kills the dispatch; the session finalize-tail profiler (`turn finalize tail slow ...` warning) attributes slow-but-completed tails to a stage (transcript persistence / memory-review bookkeeping / terminal emits).
 
+## Proactive Message Throttle
+
+- **Scope**: `ext:` sessions only. The external-session registry stores `last_proactive_at`;
+  the shared outbound drain updates it when it publishes an `outbound.created` notice
+  (heartbeat / cron / task terminal / mention). Ordinary turn replies do not travel that
+  bus lane and therefore do not reset the window; `source="outbox_replay"` is a redelivery
+  and is skipped.
+- **Gate**: `_build_web_cron_service` injects `admit_proactive` into `CronService`. Before
+  a due job is claimed, the callback checks the session's last proactive timestamp; if it
+  is less than 60 seconds old, the job is deferred to the end of the window and left
+  unclaimed. This ordering is load-bearing: claiming a one-shot `at` job before deferring
+  would suppress it forever.
+- **Deferral record**: `CronJobState` stores `delayed_from_ms` / `delayed_until_ms` /
+  `delay_reason` and `last_status="deferred"`; the eventual dispatch carries
+  `cron_delay_reason` / `cron_delayed_seconds` into the cron rule and event bundle, so the
+  model sees why it woke late. Fields are cleared at finalize.
+- **No extra caps**: there is no per-session job count, minimum recurring interval, or
+  max-runs cap beyond the existing `max_runs` semantics. The 60-second window is the rate
+  limit; manual `run_job` bypasses it as an explicit operator action.
+- **Availability**: `cron` / `schedule_wake` are in the limited/jailed tool surface
+  (scheduling is not task dispatch); `create_async_task` / `send_message` / `task_*`
+  remain denied in restricted tiers.
+- **Platform ceiling**: a group without the QQ “主动推送消息能力” permission still wakes
+  the session, but the proactive message is rejected by the bridge as `active_denied` and
+  is recorded as undeliverable; the throttle does not change that.
+
 ## Task Terminal Repair Contract
 
 - Task-terminal heartbeat only repairs or produces the session reply for an existing terminal event; it never auto-runs `continue_task`, creates replacement tasks, or retries failed tasks in place.

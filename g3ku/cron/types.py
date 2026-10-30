@@ -45,8 +45,12 @@ class CronJobState:
     # "running": claimed before dispatch but not yet finalized.
     # "interrupted": a "running" claim found on startup (process restarted
     # mid-dispatch); the run is suppressed to avoid duplicate delivery.
-    last_status: Literal["ok", "error", "skipped", "running", "interrupted"] | None = None
+    last_status: Literal["ok", "error", "skipped", "running", "interrupted", "deferred"] | None = None
     last_error: str | None = None
+    # 主动消息节流：本次触发被推迟时的原触发时刻、允许触发时刻与原因。
+    delayed_from_ms: int | None = None
+    delayed_until_ms: int | None = None
+    delay_reason: str | None = None
 
 
 @dataclass

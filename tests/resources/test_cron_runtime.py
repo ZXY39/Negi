@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfoNotFoundError
@@ -26,6 +26,101 @@ from g3ku.services.cron import (
     DEFAULT_DISPATCH_TIMEOUT_SECONDS,
 )
 from g3ku.session.manager import SessionManager
+
+
+def test_proactive_admission_defers_before_claim(tmp_path: Path) -> None:
+    calls: list[tuple[str, int]] = []
+
+    def _admit(job, now_ms):
+        calls.append((job.id, now_ms))
+        return False, 5000, "just sent a message"
+
+    async def _on_job(job):
+        return "done"
+
+    service = CronService(tmp_path / "jobs.json", on_job=_on_job, admit_proactive=_admit)
+    job = service.add_job(
+        name="reminder",
+        schedule=CronSchedule(kind="every", every_ms=60000),
+        message="ping",
+        session_key="ext:qq-official-1:abc",
+    )
+    job.state.next_run_at_ms = int(time.time() * 1000) - 1000
+    service._save_store()
+
+    asyncio.run(service._on_timer())
+    loaded = next(item for item in service.list_jobs(include_disabled=True) if item.id == job.id)
+    assert calls
+    assert loaded.state.last_status == "deferred"
+    assert loaded.state.last_run_at_ms is None  # 没有 claim：一次性任务不会因此被吞
+    assert loaded.state.delay_reason == "just sent a message"
+    assert loaded.state.next_run_at_ms and loaded.state.next_run_at_ms > int(time.time() * 1000)
+
+
+def test_cron_tool_scopes_list_and_remove_to_current_session(tmp_path: Path) -> None:
+    service = CronService(tmp_path / "jobs.json")
+    mine = service.add_job(
+        name="mine",
+        schedule=CronSchedule(kind="every", every_ms=60000),
+        message="mine",
+        session_key="ext:qq-official-1:a",
+    )
+    other = service.add_job(
+        name="other",
+        schedule=CronSchedule(kind="every", every_ms=60000),
+        message="other",
+        session_key="ext:qq-official-1:b",
+    )
+    tool = CronTool(service)
+    tool.set_context("ext", "qq:group:a")
+    runtime = {"session_key": "ext:qq-official-1:a", "channel": "ext"}
+
+    listed = asyncio.run(tool.execute("list", __g3ku_runtime=runtime))
+    assert mine.id in listed
+    assert other.id not in listed
+
+    refused = asyncio.run(
+        tool.execute("remove", job_id=other.id, __g3ku_runtime=runtime)
+    )
+    assert "not found" in refused
+    assert service.list_jobs(include_disabled=True)  # other 仍在
+
+    removed = asyncio.run(
+        tool.execute("remove", job_id=mine.id, __g3ku_runtime=runtime)
+    )
+    assert "Removed" in removed
+    assert all(item.id != mine.id for item in service.list_jobs(include_disabled=True))
+
+
+def test_web_proactive_admission_uses_last_proactive_at(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Registry:
+        def __init__(self, last: str) -> None:
+            self.last = last
+
+        def last_proactive_at(self, session_key: str) -> str:
+            return self.last
+
+    job = SimpleNamespace(payload=SimpleNamespace(session_key="ext:qq-official-1:a"))
+    now_ms = int(datetime.now().timestamp() * 1000)
+    monkeypatch.setattr(
+        web_shell,
+        "get_external_session_registry",
+        lambda: _Registry((datetime.now() - timedelta(seconds=30)).isoformat()),
+    )
+    allowed, delay_ms, reason = web_shell._admit_proactive_cron_job(job, now_ms)
+    assert allowed is False
+    assert 25000 <= delay_ms <= 31000
+    assert "30" in reason
+
+    monkeypatch.setattr(
+        web_shell,
+        "get_external_session_registry",
+        lambda: _Registry((datetime.now() - timedelta(seconds=120)).isoformat()),
+    )
+    assert web_shell._admit_proactive_cron_job(job, now_ms)[0] is True
+
+    web_job = SimpleNamespace(payload=SimpleNamespace(session_key="web:ceo-1"))
+    assert web_shell._admit_proactive_cron_job(web_job, now_ms)[0] is True
 
 
 class _BridgeRecorder:

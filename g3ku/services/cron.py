@@ -126,9 +126,13 @@ class CronService:
         *,
         dispatch_timeout_s: float | None = None,
         dispatch_cancel_grace_s: float | None = None,
+        admit_proactive: Callable[[CronJob, int], tuple[bool, int, str]] | None = None,
     ):
         self.store_path = store_path
         self.on_job = on_job
+        # 主动消息节流判据（可选）：返回 (allowed, delay_ms, reason)。
+        # web shell 把它接到外部会话注册表的 last_proactive_at；CLI/测试不注入。
+        self._admit_proactive = admit_proactive
         self._store: CronStore | None = None
         self._last_mtime_ns: int = 0
         self._timer_task: asyncio.Task | None = None
@@ -217,6 +221,9 @@ class CronService:
                             last_delivered_at_ms=j.get("state", {}).get("lastDeliveredAtMs"),
                             last_status=j.get("state", {}).get("lastStatus"),
                             last_error=j.get("state", {}).get("lastError"),
+                            delayed_from_ms=j.get("state", {}).get("delayedFromMs"),
+                            delayed_until_ms=j.get("state", {}).get("delayedUntilMs"),
+                            delay_reason=j.get("state", {}).get("delayReason"),
                         ),
                         created_at_ms=j.get("createdAtMs", 0),
                         updated_at_ms=j.get("updatedAtMs", 0),
@@ -278,6 +285,9 @@ class CronService:
                         "lastDeliveredAtMs": j.state.last_delivered_at_ms,
                         "lastStatus": j.state.last_status,
                         "lastError": j.state.last_error,
+                        "delayedFromMs": j.state.delayed_from_ms,
+                        "delayedUntilMs": j.state.delayed_until_ms,
+                        "delayReason": j.state.delay_reason,
                     },
                     "createdAtMs": j.created_at_ms,
                     "updatedAtMs": j.updated_at_ms,
@@ -494,6 +504,25 @@ class CronService:
                         job.id,
                     )
                     continue
+                deferral = self._proactive_deferral(job, now)
+                if deferral is not None:
+                    delay_ms, reason = deferral
+                    next_at = now + max(1, int(delay_ms))
+                    job.state.next_run_at_ms = next_at
+                    job.state.last_status = "deferred"
+                    job.state.last_error = reason
+                    job.state.delayed_from_ms = now
+                    job.state.delayed_until_ms = next_at
+                    job.state.delay_reason = reason
+                    job.updated_at_ms = now
+                    logger.info(
+                        "Cron: deferred job '{}' ({}) for {}ms: {}",
+                        job.name,
+                        job.id,
+                        max(1, int(delay_ms)),
+                        reason,
+                    )
+                    continue
                 if not self._claim_job(job):
                     continue
                 task = asyncio.create_task(
@@ -504,6 +533,31 @@ class CronService:
         finally:
             self._save_store()
             self._arm_timer()
+
+    def _proactive_deferral(self, job: CronJob, now_ms: int) -> tuple[int, str] | None:
+        """Before claiming: ask the host whether this proactive push may fire now.
+
+        The check must happen before `_claim_job`: a one-shot `at` job that is
+        already claimed is treated as run/suppressed, so a deferral after the
+        claim would silently lose the reminder.
+        """
+        callback = self._admit_proactive
+        if not callable(callback):
+            return None
+        try:
+            allowed, delay_ms, reason = callback(job, int(now_ms))
+        except Exception as exc:  # noqa: BLE001 - 判据故障按放行处理，不阻塞调度
+            logger.warning("Cron: proactive admission check failed for {}: {}", job.id, exc)
+            return None
+        if allowed:
+            return None
+        try:
+            normalized_delay = int(delay_ms or 0)
+        except (TypeError, ValueError):
+            normalized_delay = 0
+        if normalized_delay <= 0:
+            return None
+        return normalized_delay, str(reason or "").strip() or "proactive throttle"
 
     def _claim_job(self, job: CronJob) -> bool:
         """Phase 1 (claim): mark the run started and persist it BEFORE any side
@@ -709,6 +763,11 @@ class CronService:
                 job.state.last_status = "error"
                 job.state.last_error = error_text
             job.updated_at_ms = finish_ms
+            # 延迟信息只服务本次 dispatch 的事件载荷；收尾后清掉，避免下一轮
+            # 复用上一轮的延迟原因。
+            job.state.delayed_from_ms = None
+            job.state.delayed_until_ms = None
+            job.state.delay_reason = None
 
             max_runs = max(1, int(getattr(job.payload, "max_runs", 1) or 1))
             terminal_delivery = delivered and int(job.state.delivered_runs or 0) >= max_runs
