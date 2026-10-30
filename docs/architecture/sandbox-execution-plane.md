@@ -136,7 +136,7 @@ pinned contract 同时带 `session_mode` 与受限档的 `session_workspace_dir:
 9. **无常驻**：jail 内 `ps` 没有 Negi 进程；宿主 `netstat` 没有为沙箱新增监听端口。
 10. **WSL 额外**：`ls /mnt` 为空、`/init` 不存在、`exec notepad.exe` 失败。
 11. **降级**：去掉 env 重启 → 群会话回 `limited`，`exec` 默认不可用（除非在会话工具列表显式勾选）。
-12. **缓存**：同一会话切档前后 `tools[]` 字节不变，头部沙箱声明只在重印边界变。
+12. **缓存**：同一会话在未切档、未改工具集合时 `tools[]` 与头部逐字节不变；切档后下一跳两者一起重印，付一次显式前缀 cache miss。
 
 ## 档位存储与 API
 

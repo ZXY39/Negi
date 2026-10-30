@@ -439,3 +439,28 @@ def test_pinned_contract_renders_mode_and_session_workspace() -> None:
     values = pinned_contract_section_values(text)
     assert values["session_mode"] == "已切换到受限模式"
     assert values["session_workspace_dir"].endswith("web_ceo-1-abcd")
+
+
+def test_mode_change_forces_tool_bundle_recommit(monkeypatch) -> None:
+    from g3ku.runtime.frontdoor import _ceo_runtime_ops as ops
+
+    session = SimpleNamespace()
+    state = {"session_key": "ext:qoder:group"}
+    policy = SimpleNamespace(tool_policy_signature="limited\na,b")
+    monkeypatch.setattr(ops, "session_policy", lambda _key: policy)
+    boundary = ops.CeoFrontDoorRuntimeOps._frontdoor_bundle_recommit_boundary
+
+    # 首次只记基线，不凭空重印。
+    assert boundary(object(), session=session, state=state) is False
+    # 切档/改工具集合当天重提交整表，并递增 skill roster epoch。
+    policy.tool_policy_signature = "host_full\n"
+    assert boundary(object(), session=session, state=state) is True
+    assert boundary(object(), session=session, state=state) is False
+    assert skill_roster_epoch_for(session, session_key="ext:qoder:group") == 1
+
+    # 装配路可能只把 session_key 留在会话状态里：仍要认出切档。
+    session2 = SimpleNamespace(state=SimpleNamespace(session_key="ext:qoder:group"))
+    policy.tool_policy_signature = "limited\na,b"
+    assert boundary(object(), session=session2, state={}) is False
+    policy.tool_policy_signature = "host_full\n"
+    assert boundary(object(), session=session2, state={}) is True

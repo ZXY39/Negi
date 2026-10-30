@@ -26,6 +26,9 @@ from g3ku.utils.helpers import safe_filename
 
 GROUP_MEMORY_DIRNAME = "groups"
 _GROUP_SCOPE_MAX = 32
+# 作用域目录名最多 80 字符可读段 + `-` + 8 位摘要。不要复用表情包目录校验
+# （那里按包名限 64 字符）：长 external_key 的群会被静默挡在盘外/包外。
+GROUP_SCOPE_NAME_MAX = 128
 
 # 进程内唯一活动路由：工具调用点（`memory_update` / `memory_note`）拿不到 loop 引用，
 # 节点道也不携带前门视图；没有视图时按会话键问这里，写入才不会掉回本地域。
@@ -176,7 +179,39 @@ class MemoryScopeRouter:
                     "bridge_id": str(getattr(entry, "bridge_id", "") or ""),
                 }
             )
+        # 磁盘发现：配置包导入的群记忆在注册表里还没有会话（新设备尚未见到该群），
+        # 管理页仍要能查看与整理它。只列目录，不创建 manager/worker。
+        for group_key in self._disk_group_scopes():
+            if group_key in seen:
+                continue
+            seen.add(group_key)
+            scopes.append(
+                {
+                    "scope": group_key,
+                    "kind": "group",
+                    "title": group_key,
+                    "session_key": "",
+                    "bridge_id": "",
+                }
+            )
         return scopes
+
+    def _disk_group_scopes(self) -> list[str]:
+        try:
+            children = sorted(self.group_root.iterdir(), key=lambda item: item.name)
+        except OSError:
+            return []
+        return [
+            child.name
+            for child in children
+            if child.is_dir() and not child.is_symlink() and group_scope_name_ok(child.name)
+        ]
+
+    def _disk_scope_exists(self, group_key: str) -> bool:
+        if not group_scope_name_ok(group_key):
+            return False
+        root = self.group_root / group_key
+        return root.is_dir() and not root.is_symlink()
 
     def manager_for_scope(self, scope_key: Any) -> Any | None:
         """管理面按作用域取管理器；未知群作用域返回 None（不回落到本地）。"""
@@ -185,7 +220,9 @@ class MemoryScopeRouter:
             return self.local_manager
         entry = self._entry_for_scope(key)
         if entry is None:
-            return None
+            if not self._disk_scope_exists(key):
+                return None
+            return self._group_manager(key, label=key)
         return self._group_manager(
             key,
             label=str(getattr(entry, "title", "") or "").strip()
@@ -269,6 +306,28 @@ def _group_key_for_entry(entry: Any, *, fallback: str) -> str:
     return _group_key(f"{bridge_id}:{external_key}" if bridge_id else external_key)
 
 
+def group_scope_name_ok(name: Any) -> bool:
+    """A group scope directory name that is safe on disk and inside a bundle.
+
+    Generated keys are ``safe_filename(...)[:80] + '-' + 8 hex``; this accepts
+    them while rejecting path escapes, drive/stream colons, Windows device
+    names and names the platform cannot create.
+    """
+    raw = str(name or "").strip()
+    if not raw or raw != str(name) or raw in {".", ".."}:
+        return False
+    if len(raw) > GROUP_SCOPE_NAME_MAX or raw.startswith(".") or raw.endswith("."):
+        return False
+    if any(char in raw for char in '<>:"/\\|?*') or any(ord(char) < 32 for char in raw):
+        return False
+    stem = raw.split(".", 1)[0].upper()
+    if stem in {"CON", "PRN", "AUX", "NUL", "CLOCK$"}:
+        return False
+    if len(stem) == 4 and stem[:3] in {"COM", "LPT"} and stem[3].isdigit():
+        return False
+    return True
+
+
 def _group_key(external_key: str) -> str:
     raw = str(external_key or "").strip() or "unknown"
     readable = safe_filename(raw.replace(":", "_")).strip("._")[:80] or "group"
@@ -287,8 +346,10 @@ def _clone_config(config: Any) -> Any:
 
 __all__ = [
     "GROUP_MEMORY_DIRNAME",
+    "GROUP_SCOPE_NAME_MAX",
     "MemoryScopeRouter",
     "MemoryScopeView",
     "active_memory_scope_router",
+    "group_scope_name_ok",
     "set_active_memory_scope_router",
 ]

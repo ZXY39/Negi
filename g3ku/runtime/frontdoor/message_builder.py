@@ -1325,6 +1325,7 @@ class CeoMessageBuilder:
             else ''
         )
         split_prompt_builder = callable(getattr(self._prompt_builder, 'build_base_prompt', None))
+        prompt_refresh_stamp = ''
         if split_prompt_builder:
             # 提示词的重新拉取跟着记忆块与 tools[] 的时钟走：这两个戳没动，稳定前缀就不该
             # 出现新的字节；会话中途改写的提示词文件因此等到下一次采纳/曝光变化才生效。
@@ -1550,6 +1551,12 @@ class CeoMessageBuilder:
             'channel_session': channel_session,
             'master_sender_ids': master_sender_ids,
             'system_prompt': system_prompt,
+            'prompt_reprint_stamp': (
+                f'{prompt_refresh_stamp}|tier:{str(sandbox_tier or "").strip()}'
+                if split_prompt_builder
+                else ''
+            ),
+            'sandbox_tier': sandbox_tier,
             'same_session_turn_memory_filtered_count': same_session_turn_memory_filtered_count,
             'user_content': user_content if user_content is not None else query_text,
             'span_timings_ms': {
@@ -1759,6 +1766,8 @@ class CeoMessageBuilder:
         pinned_contract_text: str = "",
         master_ids: frozenset[str] = frozenset(),
         sender_numbers: dict[str, int] | None = None,
+        reprint_head: bool = False,
+        fresh_system_prompt: str = "",
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], str, bool]:
         turn_overlay_text = self._join_turn_overlay_sections(turn_overlay_parts)
         stable_messages = [
@@ -1783,6 +1792,15 @@ class CeoMessageBuilder:
             persona_message,
             *tail,
         ]
+        # 重印边界（档位/工具面变化）必须换掉种子里的旧 system 头：旧头带着旧的
+        # 模式声明与旧曝光快照，继续沿用会让模型按已失效的工具面行动。
+        fresh_system = str(fresh_system_prompt or '').strip()
+        if reprint_head and fresh_system:
+            if has_system:
+                stable_messages = [{"role": "system", "content": fresh_system}, *stable_messages[1:]]
+            else:
+                stable_messages = [{"role": "system", "content": fresh_system}, *stable_messages]
+                has_system = True
         # 钉住的静态声明并进 system 文本尾部：它不是消息项，因此尾部重铺那条剥契约的路
         # 碰不到它；字节只在刷新键变化时改一次。这条路的头部来自上一跳的请求体种子，已经带着
         # 上一跳那份块，必须先摘再拼——直接 concat 会让续跑回合每轮多叠一份（实盘 06:15 抓到）。
@@ -1837,6 +1855,7 @@ class CeoMessageBuilder:
         history_elapsed_ms: float,
         master_ids: frozenset[str] = frozenset(),
         sender_numbers: dict[str, int] | None = None,
+        reprint_head: bool = False,
     ) -> ContextAssemblyResult:
         attachment_reopen_targets = self._frontdoor_attachment_reopen_targets(
             persisted_session=persisted_session,
@@ -1867,6 +1886,8 @@ class CeoMessageBuilder:
             pinned_contract_text=pinned_contract_text,
             master_ids=master_ids,
             sender_numbers=sender_numbers,
+            reprint_head=reprint_head,
+            fresh_system_prompt=str(context_sources.get('system_prompt') or ''),
         )
         # 这条路的头部来自上一跳的请求体种子，不保证首条仍是 system；没并进就不许尾块省略。
         if not pinned_contract_is_carried_by_head(stable_messages, pinned_contract_text):
@@ -2090,6 +2111,17 @@ class CeoMessageBuilder:
             user_metadata=user_metadata,
         )
         request_body_seed_records = self._request_body_seed_records(request_body_seed_messages)
+        current_prompt_stamp = str(context_sources.get('prompt_reprint_stamp') or '')
+        prior_prompt_stamp = getattr(session, '_frontdoor_prompt_reprint_stamp', None)
+        # 续跑种子带着上一跳的 system 头；档位/工具面（prompt stamp）变了而头不换，
+        # 模型会按旧模式与旧工具面行动。首次见到种子（无历史戳）保持原头，不凭空重印。
+        reprint_head = bool(
+            current_prompt_stamp
+            and prior_prompt_stamp is not None
+            and current_prompt_stamp != str(prior_prompt_stamp)
+        )
+        if current_prompt_stamp:
+            setattr(session, '_frontdoor_prompt_reprint_stamp', current_prompt_stamp)
         if request_body_seed_records:
             context_sources = dict(context_sources or {})
             return self._build_direct_request_body_continuation_result(
@@ -2104,6 +2136,7 @@ class CeoMessageBuilder:
                 history_elapsed_ms=0.0,
                 master_ids=master_ids,
                 sender_numbers=sender_numbers,
+                reprint_head=reprint_head,
             )
         # 冷启动新建路径：内部事件消息（cron/heartbeat）不进入续跑种子，改在这里
         # 注入历史区，保证基础系统提示由 _inject_turn_context 正常前置。

@@ -324,3 +324,164 @@ def test_config_bundle_round_trips_group_memory(tmp_path) -> None:
     group_root = target / "memory" / "groups" / "grp-1" / "memory"
     assert (group_root / "MEMORY.md").read_text(encoding="utf-8").strip() == "群记忆"
     assert (group_root / "notes" / "note_group1.md").read_text(encoding="utf-8").strip() == "群笔记"
+
+
+LONG_GROUP_SCOPE = (
+    "qq-official-1903529517_qq_group_E373126E86944E0642F5508C39AFEF9F-3a35c4f7"
+)
+
+
+def test_group_scope_name_accepts_generated_long_keys_and_rejects_unsafe() -> None:
+    from g3ku.runtime.memory_scope_router import _group_key, group_scope_name_ok
+
+    # 真实 QQ 群的作用域键 73 字符，远超表情包目录的 64 字符上限。
+    assert len(LONG_GROUP_SCOPE) > 64
+    assert group_scope_name_ok(LONG_GROUP_SCOPE)
+    assert group_scope_name_ok(_group_key("qoder:p5-acceptance-group"))
+    assert not group_scope_name_ok("")
+    assert not group_scope_name_ok("..")
+    assert not group_scope_name_ok(".hidden")
+    assert not group_scope_name_ok("trailing.")
+    assert not group_scope_name_ok(" padded")
+    assert not group_scope_name_ok("bad:name")
+    assert not group_scope_name_ok("x" * 129)
+    assert not group_scope_name_ok("CON")
+
+
+def test_group_scope_key_is_stable_across_devices_for_the_same_account_and_group() -> None:
+    from g3ku.runtime.memory_scope_router import _group_key_for_entry
+
+    same_account = SimpleNamespace(
+        bridge_id="qq-official-1903529517",
+        external_key="qq:group:48A6F16E277B61B66694A8C756371201",
+        session_key="ext:other-device:local-transcript-hash",
+    )
+    original = SimpleNamespace(
+        bridge_id="qq-official-1903529517",
+        external_key="qq:group:48A6F16E277B61B66694A8C756371201",
+        session_key="ext:qq-official-1903529517:first",
+    )
+    other_account = SimpleNamespace(
+        bridge_id="qq-official-2000000000",
+        external_key="qq:group:48A6F16E277B61B66694A8C756371201",
+        session_key="ext:another-bot:first",
+    )
+    # 键只由 bridge_id + external_key 决定：同一账号同一群在任何设备上落到同一个目录。
+    assert _group_key_for_entry(original, fallback="x") == _group_key_for_entry(same_account, fallback="y")
+    # 不同桥账号是不同作用域，不因为群名相同就串记忆。
+    assert _group_key_for_entry(original, fallback="x") != _group_key_for_entry(other_account, fallback="y")
+
+
+def test_router_discovers_imported_group_scopes_without_a_registry_entry(tmp_path, monkeypatch) -> None:
+    imported = tmp_path / "memory" / GROUP_MEMORY_DIRNAME / LONG_GROUP_SCOPE / "memory"
+    imported.mkdir(parents=True)
+    (imported / "MEMORY.md").write_text("导入的群记忆\n", encoding="utf-8")
+    hidden = tmp_path / "memory" / GROUP_MEMORY_DIRNAME / ".hidden" / "memory"
+    hidden.mkdir(parents=True)
+
+    router, local = _router(tmp_path, monkeypatch, entries=[])
+    try:
+        scopes = router.list_scopes()
+        discovered = [item for item in scopes if item["scope"] == LONG_GROUP_SCOPE]
+        assert len(discovered) == 1
+        assert discovered[0]["kind"] == "group"
+        assert discovered[0]["session_key"] == ""
+        assert all(item["scope"] != ".hidden" for item in scopes)
+        manager = router.manager_for_scope(LONG_GROUP_SCOPE)
+        assert manager is not None
+        assert manager.snapshot_text().strip() == "导入的群记忆"
+        assert router.manager_for_scope("../escape") is None
+    finally:
+        router.close()
+        local.close()
+
+
+def test_config_bundle_round_trips_a_long_group_scope_name(tmp_path) -> None:
+    import sqlite3
+
+    from g3ku.config import config_bundle
+    from g3ku.security import get_bootstrap_security_service
+
+    source = tmp_path / "source"
+    (source / ".g3ku").mkdir(parents=True)
+    (source / ".g3ku" / "config.json").write_text(
+        json.dumps({"resources": {"statePath": ".g3ku/resources.state.json"}}),
+        encoding="utf-8",
+    )
+    local_mem = source / "memory"
+    local_mem.mkdir()
+    (local_mem / "MEMORY.md").write_text("本地记忆\n", encoding="utf-8")
+    with sqlite3.connect(local_mem / "memory_state.sqlite3") as conn:
+        conn.execute("CREATE TABLE memories (memory_id TEXT PRIMARY KEY, memory_body TEXT)")
+        conn.execute("INSERT INTO memories VALUES ('local-1', 'local body')")
+    group_mem = local_mem / "groups" / LONG_GROUP_SCOPE / "memory"
+    group_mem.mkdir(parents=True)
+    (group_mem / "MEMORY.md").write_text("长名群记忆\n", encoding="utf-8")
+    with sqlite3.connect(group_mem / "memory_state.sqlite3") as conn:
+        conn.execute("CREATE TABLE memories (memory_id TEXT PRIMARY KEY, memory_body TEXT)")
+        conn.execute("INSERT INTO memories VALUES ('group-1', 'long group body')")
+    get_bootstrap_security_service(source).setup_initial_realm(password="owner-password")
+
+    archive = Path(
+        config_bundle.export_bundle(
+            source,
+            password="bundle-password",
+            use_project_password=False,
+            scopes=("memory",),
+        )["path"]
+    )
+
+    target = tmp_path / "target"
+    (target / ".g3ku").mkdir(parents=True)
+    (target / ".g3ku" / "config.json").write_text("{}", encoding="utf-8")
+    config_bundle.import_bundle(
+        target,
+        archive_path=archive,
+        password="bundle-password",
+        scopes=("memory",),
+    )
+    restored = target / "memory" / "groups" / LONG_GROUP_SCOPE / "memory"
+    assert (restored / "MEMORY.md").read_text(encoding="utf-8").strip() == "长名群记忆"
+    with sqlite3.connect(restored / "memory_state.sqlite3") as conn:
+        assert conn.execute("SELECT memory_body FROM memories").fetchall() == [("long group body",)]
+
+
+def test_memory_bundle_import_keeps_target_only_group_scopes(tmp_path) -> None:
+    import sqlite3
+
+    from g3ku.config import config_bundle
+    from g3ku.security import get_bootstrap_security_service
+
+    source = tmp_path / "source"
+    (source / ".g3ku").mkdir(parents=True)
+    (source / ".g3ku" / "config.json").write_text("{}", encoding="utf-8")
+    local_mem = source / "memory"
+    local_mem.mkdir()
+    (local_mem / "MEMORY.md").write_text("本地记忆\n", encoding="utf-8")
+    with sqlite3.connect(local_mem / "memory_state.sqlite3") as conn:
+        conn.execute("CREATE TABLE memories (memory_id TEXT PRIMARY KEY)")
+    get_bootstrap_security_service(source).setup_initial_realm(password="owner-password")
+
+    target = tmp_path / "target"
+    (target / ".g3ku").mkdir(parents=True)
+    (target / ".g3ku" / "config.json").write_text("{}", encoding="utf-8")
+    extra = target / "memory" / "groups" / "target-only-group" / "memory"
+    extra.mkdir(parents=True)
+    (extra / "MEMORY.md").write_text("目标机独有群记忆\n", encoding="utf-8")
+
+    archive = Path(
+        config_bundle.export_bundle(
+            source,
+            password="bundle-password",
+            use_project_password=False,
+            scopes=("memory",),
+        )["path"]
+    )
+    config_bundle.import_bundle(
+        target,
+        archive_path=archive,
+        password="bundle-password",
+        scopes=("memory",),
+    )
+    # 导入只覆盖包内同名的群作用域；包外群目录保留（与本地记忆面同一语义）。
+    assert (extra / "MEMORY.md").read_text(encoding="utf-8").strip() == "目标机独有群记忆"

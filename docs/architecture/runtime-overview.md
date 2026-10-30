@@ -582,14 +582,17 @@ main/ 侧所有持久化写在磁盘满（ENOSPC / SQLITE_FULL）条件下的行
 - 群聊会话（外部会话注册表 `chat_type` 为 `group` / `guild`）：读本地 + 本群；写只进本群
   manager，根在 `<workspace>/memory/groups/<safe-scope>-<hash>/`（配置深拷贝，路径相对群根，
   因此每个群有自己的 sqlite、`MEMORY.md`、notes、index、queue 与 worker）。模型可见块 =
-  本地记忆 + `## 群聊长期记忆` 一节；人设仍取本地那一份。
+  本地记忆 + `## 群聊长期记忆` 一节；人设仍取本地那一份。作用域键只由
+  `bridge_id:external_key` 决定，与设备及转录会话键无关：同一桥账号 + 同一群在新设备上
+  解析到同一目录，配置包导入的群记忆随该群重新出现而继续生效；不同桥账号即使
+  `external_key` 相同也是不同作用域。
 - 第三方私聊：读本地记忆与人设，**没有可写管理器**；`memory_update` 返回可读拒绝，
   复核窗口不接收它的轮次。
 - 群 manager 以 `persona_enabled=False` 创建：`persona_text()` 恒为空、`set_persona()` 拒绝，
   记忆 agent 提示词改为"本记忆域是群聊记忆，不含人设"，并要求不把第三方发送者的话写成
   Master 的个人偏好。
 - manager 实例按作用域 LRU 缓存（上限 32，逐出即 `close()`）；管理面 `list_scopes()` 只读
-  注册表，不创建实例。
+  注册表与磁盘上的群目录（导入的群在注册表还没有会话时也可查看/整理），不创建实例。
 - 通知车道有两条游标：`memory_cursor`（本地增量，投给所有能读本地记忆的会话）与
   `group_memory_cursor`（群增量，只投给该群，渲染为 `### Group memory updates`）；
   压缩跳两者同时归零。人设增量对所有会话同源投递。

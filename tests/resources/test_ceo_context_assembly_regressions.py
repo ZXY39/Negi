@@ -3066,3 +3066,39 @@ async def test_continuation_lane_decorates_the_current_user_row_with_arrival_tim
     assert MESSAGE_ARRIVAL_TIME_MARKER in str(user_rows[-1].get("content") or "")
     # 末位仍是用户的这一句，契约/overlay 没有挤到它后面。
     assert str(result.model_messages[-1].get("role") or "") == "user"
+
+
+def test_direct_continuation_reprints_the_system_head_only_at_a_reprint_boundary() -> None:
+    builder = CeoMessageBuilder(
+        loop=_loop(_MemoryManager(response="")),
+        prompt_builder=_SplitPromptBuilder(),
+    )
+    seed = [
+        {"role": "system", "content": "OLD HEAD"},
+        {"role": "user", "content": "上一轮问题"},
+    ]
+
+    def _inject(*, reprint_head: bool):
+        _messages, stable, _appendix, _overlay, _current = (
+            builder._inject_direct_request_body_continuation(
+                request_body_seed_messages=list(seed),
+                user_content="本轮问题",
+                turn_overlay_parts=[],
+                memory_snapshot_text="",
+                persona_text="",
+                query_text="本轮问题",
+                user_metadata=None,
+                pinned_contract_text="",
+                reprint_head=reprint_head,
+                fresh_system_prompt="NEW HEAD",
+            )
+        )
+        return stable
+
+    # 没有重印边界：种子头逐字节保留。
+    assert _inject(reprint_head=False)[0]["content"] == "OLD HEAD"
+    # 切档/工具面变化：换成本跳刚算出的 system 头，历史行原样保留。
+    reprinted = _inject(reprint_head=True)
+    assert reprinted[0]["role"] == "system"
+    assert reprinted[0]["content"] == "NEW HEAD"
+    assert any(str(item.get("content") or "") == "上一轮问题" for item in reprinted)

@@ -31,6 +31,7 @@ from g3ku.agent.persona import (
     PERSONA_PHOTO_SUFFIXES,
 )
 from g3ku.resources.tool_settings import MemoryRuntimeSettings, load_tool_settings_from_manifest
+from g3ku.runtime.memory_scope_router import group_scope_name_ok
 from g3ku.security import (
     PASSWORD_KDF,
     derive_password_key,
@@ -300,7 +301,7 @@ def _collect_group_memory_entries(root: Path) -> dict[str, str]:
         return {}
     entries: dict[str, str] = {}
     for scope_dir in sorted(base.iterdir(), key=lambda item: item.name):
-        if not scope_dir.is_dir() or scope_dir.is_symlink() or not admin_segment_ok(scope_dir.name):
+        if not scope_dir.is_dir() or scope_dir.is_symlink() or not group_scope_name_ok(scope_dir.name):
             continue
         memory_dir = scope_dir / MEMORY_DIR_ROOT
         prefix = f"{GROUP_MEMORY_ROOT}/{scope_dir.name}"
@@ -610,7 +611,7 @@ def _group_memory_entry_target(root: Path, rel: str) -> Path:
     if len(parts) < 4 or parts[0] != MEMORY_DIR_ROOT or parts[1] != "groups":
         raise ValueError(f"unsupported group memory bundle path: {rel}")
     scope = parts[2]
-    if not admin_segment_ok(scope):
+    if not group_scope_name_ok(scope):
         raise ValueError(f"unsafe group memory bundle path rejected: {rel}")
     rest = parts[3:]
     base = _group_memory_base(root) / scope / MEMORY_DIR_ROOT

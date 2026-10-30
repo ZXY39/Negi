@@ -231,6 +231,9 @@ from .tool_contract import (
 
 CeoGraphState = CeoPersistentState
 
+# tools[] 钉住表的切档重印戳：只在档位 + 生效工具集合真的变化时重提交一次。
+_FRONTDOOR_BUNDLE_POLICY_SIGNATURE_ATTR = "_frontdoor_bundle_policy_signature"
+
 
 
 
@@ -4264,19 +4267,41 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         setattr(session, "_frontdoor_request_body_messages", list(stripped))
 
     def _frontdoor_bundle_recommit_boundary(self, *, session: Any, state: CeoGraphState) -> bool:
-        """`tools[]` 与 skill 头部名单共用的唯一重新提交点：压缩。
+        """`tools[]` 与 skill 头部名单共用的唯一重新提交点：压缩 + 档位/工具集合变化。
 
         换车道**不**重印：心跳/定时内部轮与外部轮共用同一份冻结名单，一次车道切换
         不该把身后整段正文的缓存打掉（用户决策，保缓存命中）。内部轮的工具面收窄由
         执行准入承担（派发字典 ∩ 当轮治理可见集），声明面保持冻结；skill 名单同理，
-        全量名单跨车道共享。
+        全量名单跨车道共享。档位或受限档工具列表变化是操作员显式动作，它同时换掉
+        模型可见的 `tools[]` 与头部声明，必须当天重印，不能等下一次压缩。
 
         返回 True 的同一处递增 skill roster epoch：skill 头部名单与 `tools[]` 共用一套
         "什么时候允许变"的口径，两份名单在同一个跳上一起重印。
         """
-        if bool(getattr(session, PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR, False)):
-            setattr(session, PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR, False)
-            bump_skill_roster_epoch(session, session_key=str(state.get("session_key") or ""))
+        session_key = str(
+            state.get("session_key")
+            or getattr(getattr(session, "state", None), "session_key", "")
+            or ""
+        ).strip()
+        current_signature = ""
+        if session_key:
+            try:
+                current_signature = str(session_policy(session_key).tool_policy_signature or "")
+            except Exception:
+                current_signature = ""
+        previous_signature = str(
+            getattr(session, _FRONTDOOR_BUNDLE_POLICY_SIGNATURE_ATTR, "") or ""
+        )
+        signature_changed = bool(
+            previous_signature and current_signature and previous_signature != current_signature
+        )
+        if current_signature and current_signature != previous_signature:
+            setattr(session, _FRONTDOOR_BUNDLE_POLICY_SIGNATURE_ATTR, current_signature)
+        pending = bool(getattr(session, PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR, False))
+        if pending or signature_changed:
+            if pending:
+                setattr(session, PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR, False)
+            bump_skill_roster_epoch(session, session_key=session_key)
             return True
         return False
 
