@@ -505,6 +505,7 @@ function renderQqBotAccounts() {
             return;
         }
         const editing = QQ_BOT_STATE.editingIndex === index;
+        const ownerCount = Array.isArray(row.owner_openids) ? row.owner_openids.length : 0;
         // 编辑态就地换成一个输入框：改备注不该为一行字开一整个弹窗。
         const titleParts = editing
             ? `<input class="resource-search qq-bot-label qq-bot-label-inline" type="text"
@@ -525,6 +526,8 @@ function renderQqBotAccounts() {
                 <span class="tool-governance-switch-track" aria-hidden="true"><span class="tool-governance-switch-thumb"></span></span>
                 <span class="tool-governance-switch-label">${row.enabled ? "已启用" : "已停用"}</span>
             </button>
+            <button class="toolbar-btn ghost small" data-action="edit-owner" type="button"
+                title="操作员 openid 名单：命中即按 Master 处理">操作员${ownerCount ? ` ${ownerCount}` : ""}</button>
             <button class="toolbar-btn ghost small" data-action="edit-secret" type="button">改密钥</button>
             <button class="toolbar-btn ghost danger small" data-action="remove" type="button">删除</button>`;
         listEl.appendChild(el);
@@ -593,6 +596,7 @@ function _collectQqBotRows() {
             sandbox: false,
             enabled: previous.enabled !== false,
             has_secret: !!previous.has_secret,
+            owner_openids: Array.isArray(previous.owner_openids) ? previous.owner_openids.slice() : [],
             service: previous.service || null,
         });
     }
@@ -613,6 +617,7 @@ function _qqBotRowsBody() {
             // 与 `_collectQqBotRows` 同一口径：界面没有沙箱开关，恒为关闭。
             sandbox: false,
             enabled: row.enabled !== false,
+            owner_openids: Array.isArray(row.owner_openids) ? row.owner_openids.slice() : [],
         });
     }
     return { enabled: QQ_BOT_STATE.enabled, accounts };
@@ -627,6 +632,7 @@ function _applyQqBotPayload(payload) {
         sandbox: !!row.sandbox,
         enabled: row.enabled !== false,
         has_secret: !!row.has_secret,
+        owner_openids: Array.isArray(row.owner_openids) ? row.owner_openids.map((item) => String(item || "").trim()).filter(Boolean) : [],
         service: row.service || null,
     }));
     QQ_BOT_STATE.loaded = true;
@@ -688,7 +694,7 @@ function _addQqBotAccountRow() {
     const rows = _collectQqBotRows();
     if (rows) QQ_BOT_STATE.rows = rows;
     QQ_BOT_STATE.editingIndex = -1;
-    QQ_BOT_STATE.rows.push({ app_id: "", app_secret: "", label: "", sandbox: false, enabled: true, has_secret: false, service: null });
+    QQ_BOT_STATE.rows.push({ app_id: "", app_secret: "", label: "", sandbox: false, enabled: true, has_secret: false, owner_openids: [], service: null });
     renderQqBotAccounts();
     const listEl = _qqBotListEl();
     const inputs = listEl ? listEl.querySelectorAll(".qq-bot-appid") : [];
@@ -752,6 +758,34 @@ function _editQqBotSecret(index) {
             const secret = String(value || "").trim();
             if (!secret) return;
             target.app_secret = secret;
+            await _persistQqBotSettings({ silentEmpty: true });
+        },
+    });
+}
+
+// 操作员 openid 名单：命中即 Master。openid 按 AppID 隔离——同一人在不同号上是
+// 不同的串，所以每个号各填一条；服务端读的是所有号的并集。
+function _editQqBotOwners(index) {
+    const target = _qqBotRowFor(index);
+    if (!target) return;
+    const current = Array.isArray(target.owner_openids) ? target.owner_openids : [];
+    openConfirm({
+        title: "操作员 openid",
+        text: "命中的发送者按 Master 处理：私聊升为 owner 档，群里只改标签、档位仍是第三方。多个用逗号分隔；每个 QQ 号各填自己那份。",
+        confirmLabel: "保存",
+        confirmKind: "",
+        textFull: true,
+        input: {
+            label: "openid（十六进制，16 位以上）",
+            type: "text",
+            value: current.join(","),
+            placeholder: "EB6C8D43…",
+        },
+        onConfirm: async ({ value }) => {
+            const owners = String(value || "").split(/[,，;；\s]+/).map((item) => item.trim()).filter(Boolean);
+            const invalid = owners.find((item) => !/^[0-9a-fA-F]{16,128}$/.test(item));
+            if (invalid) throw new Error(`openid 形状不对：${invalid}`);
+            target.owner_openids = owners;
             await _persistQqBotSettings({ silentEmpty: true });
         },
     });
@@ -902,6 +936,10 @@ function initQqBotView() {
             }
             if (event.target.closest("[data-action='edit-secret']")) {
                 _editQqBotSecret(index);
+                return;
+            }
+            if (event.target.closest("[data-action='edit-owner']")) {
+                _editQqBotOwners(index);
                 return;
             }
             if (event.target.closest(".qq-bot-row-switch")) void _toggleQqBotRowEnabled(index);

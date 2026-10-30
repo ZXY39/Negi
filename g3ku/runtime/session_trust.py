@@ -112,11 +112,39 @@ def is_trusted_sender(
     owner_openids: Iterable[Any] = (),
     trusted_senders: Iterable[Any] = (),
 ) -> bool:
-    """空 sender 永不等于操作员：白名单里不含空串，比较也就不会意外命中。"""
+    """空 sender 永不等于操作员：白名单里不含空串，比较也就不会意外命中。
+
+    ``owner_openids`` 是 QQ 的十六进制 openid，按大小写不敏感比较——操作员手填
+    小写时仍然要认得出本人；``trusted_senders`` 是桥自报的任意 id，保持精确匹配。
+    """
     candidate = str(sender_id or "").strip()
     if not candidate:
         return False
-    return candidate in _normalized_set(owner_openids) or candidate in _normalized_set(trusted_senders)
+    if candidate in _normalized_set(trusted_senders):
+        return True
+    owners = _normalized_set(owner_openids)
+    if not owners:
+        return False
+    return candidate.lower() in {item.lower() for item in owners}
+
+
+def qq_owner_openids() -> frozenset[str]:
+    """所有 QQ 账号 ``ownerOpenids`` 的并集。
+
+    openid 按 AppID 隔离（同一人在不同号上是不同的串），但「谁是操作员」不随接入的
+    是哪个号而变：投影标注、快照标签与私聊档位读同一份并集，每个号各填一条即可。
+    """
+    try:
+        from g3ku.config.live_runtime import get_runtime_config
+
+        config = get_runtime_config(force=False)[0]
+    except Exception:  # noqa: BLE001 - 配置读不到就是没有名单（fail-closed）
+        return frozenset()
+    accounts = dict(getattr(getattr(config, "qq_bot", None), "accounts", None) or {})
+    owners: set[str] = set()
+    for account in accounts.values():
+        owners.update(_normalized_set(getattr(account, "owner_openids", None) or []))
+    return frozenset(owners)
 
 
 def _normalized_set(values: Iterable[Any]) -> frozenset[str]:

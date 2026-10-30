@@ -681,6 +681,35 @@ test("R11 addMsg 系统分支把 Fork 排在用量左边的同一行", () => {
     assert.ok(!String(bare.innerHTML).includes("msg-action-fork"), bare.innerHTML);
 });
 
+test("R14 normalizeCeoSnapshotMessage 保留渠道来源标签，渲染签名覆盖它", () => {
+    const api = setup();
+    const row = api.normalizeCeoSnapshotMessage({
+        role: "user",
+        content: "u",
+        turn_id: "t12",
+        sender_label: "第三方 0002（张三）",
+        sender_id: "ABCDEF0123456789",
+    });
+    assert.equal(row.sender_label, "第三方 0002（张三）");
+    assert.equal(row.sender_id, "ABCDEF0123456789");
+
+    // 助手行不接来源标签（服务端只对渠道会话的用户行下发）。
+    const assistant = api.normalizeCeoSnapshotMessage({
+        role: "assistant",
+        content: "a",
+        sender_label: "第三方 0002",
+    });
+    assert.equal(assistant.sender_label, undefined);
+
+    // 标签参与渲染签名：缓存先行渲染无标签、权威快照有标签时必须触发重建。
+    const base = [{ role: "user", content: "u", turn_id: "t12" }];
+    const withLabel = [{ role: "user", content: "u", turn_id: "t12", sender_label: "第三方 0002" }];
+    assert.notEqual(
+        api.buildCeoRenderSignature(base, null, null),
+        api.buildCeoRenderSignature(withLabel, null, null),
+    );
+});
+
 test("R12 normalizeCeoSnapshotMessage 保留 assistant 行的 can_fork_reply", () => {
     const api = setup();
     const row = api.normalizeCeoSnapshotMessage({

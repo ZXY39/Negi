@@ -1213,6 +1213,31 @@ async def delete_external_api_token(bridge_id: str):
 
 
 _QQ_BRIDGE_TOKEN_PREFIX = 'qq-official'
+# QQ 的 openid 是十六进制串；形状校验挡的是把 QQ 号、昵称或整段说明贴进来。
+_QQ_OWNER_OPENID_RE = re.compile(r'^[0-9a-fA-F]{16,128}$')
+
+
+def _normalize_qq_owner_openids(value: Any) -> list[str]:
+    if isinstance(value, str):
+        raw_items = re.split(r'[,，;；\s]+', value)
+    elif isinstance(value, (list, tuple)):
+        raw_items = list(value)
+    else:
+        raise HTTPException(status_code=400, detail='owner_openid_invalid')
+    owners: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        text = str(item or '').strip()
+        if not text:
+            continue
+        if not _QQ_OWNER_OPENID_RE.fullmatch(text):
+            raise HTTPException(status_code=400, detail='owner_openid_invalid')
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        owners.append(text)
+    return owners
 
 
 def _qq_bridge_id(app_id: str) -> str:
@@ -1254,6 +1279,7 @@ def _qq_bot_payload(cfg: Config) -> dict[str, Any]:
             'sandbox': bool(getattr(entry, 'sandbox', False)),
             'enabled': bool(getattr(entry, 'enabled', True)),
             'label': str(getattr(entry, 'label', '') or ''),
+            'owner_openids': list(getattr(entry, 'owner_openids', None) or []),
             'service': {
                 'state': str(state.get('state') or 'stopped'),
                 'detail': str(state.get('detail') or ''),
@@ -1305,6 +1331,13 @@ async def update_qq_bot_settings(payload: dict | None = Body(default=None)):
             )
             if not entry.app_secret and previous is not None:
                 entry.app_secret = str(previous.app_secret or '')
+            # 缺省该字段 = 保留旧名单：改密钥/备注/启停这类整表写入不该顺手把操作员清空。
+            if 'ownerOpenids' in raw:
+                entry.owner_openids = _normalize_qq_owner_openids(raw.get('ownerOpenids'))
+            elif 'owner_openids' in raw:
+                entry.owner_openids = _normalize_qq_owner_openids(raw.get('owner_openids'))
+            elif previous is not None:
+                entry.owner_openids = list(getattr(previous, 'owner_openids', None) or [])
             next_accounts[app_id] = entry
         q.accounts = next_accounts
     keep = {_qq_bridge_id(app_id) for app_id in dict(q.accounts or {})}

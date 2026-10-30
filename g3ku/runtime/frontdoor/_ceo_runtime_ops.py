@@ -81,12 +81,18 @@ from g3ku.runtime.frontdoor.turns import (
 )
 from g3ku.runtime.message_token_estimation import estimate_message_tokens
 from g3ku.runtime.project_environment import current_project_environment
-from g3ku.runtime.sender_stamp import render_sender_stamp, strip_sender_stamp
+from g3ku.runtime.sender_stamp import (
+    render_sender_stamp,
+    resolve_sender_number,
+    sender_identity,
+    sender_number_map,
+    strip_sender_stamp,
+)
 from g3ku.runtime.session_agent import (
     PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR,
 )
 from g3ku.runtime.session_keys import is_channel_session_key
-from g3ku.runtime.session_trust import TRUST_OWNER, is_third_party_session
+from g3ku.runtime.session_trust import TRUST_OWNER, is_third_party_session, qq_owner_openids
 from g3ku.runtime.token_compact_markers import TOKEN_COMPACT_V2_PREFIX
 from g3ku.runtime.tool_context_presence import (
     contract_index_from_revisions,
@@ -909,6 +915,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         )
         if not records or not transcript:
             return records
+        session_key = str(
+            getattr(getattr(persisted_session, "state", None), "session_key", "") or ""
+        ).strip()
+        master_ids = qq_owner_openids() if is_channel_session_key(session_key) else frozenset()
+        numbers = sender_number_map(transcript, master_ids=master_ids)
         # 种子里的用户消息可能带投影追加的来源标注/送达时间戳装饰，转录原文没有；
         # 去重比较前统一剥离，补发时用记录 timestamp 重新装饰，保持
         # "请求体里的用户消息都带时间锚点"的不变量。
@@ -942,7 +953,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 continue
             known_user_texts.add(text)
             stamp = render_arrival_stamp(message.get("timestamp"))
-            body = f"{render_sender_stamp(metadata)}{text}"
+            sender_id, _name = sender_identity(metadata)
+            number = resolve_sender_number(sender_id, numbers) if sender_id else None
+            body = f"{render_sender_stamp(metadata, number=number, master_ids=master_ids)}{text}"
             records.append({"role": "user", "content": f"{body}{stamp}" if stamp else body})
         return records
 

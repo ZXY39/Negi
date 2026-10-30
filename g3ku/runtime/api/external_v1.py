@@ -61,6 +61,7 @@ from g3ku.runtime.session_trust import (
     is_multi_party_chat,
     normalize_chat_type,
     note_inbound_session_shape,
+    qq_owner_openids,
 )
 from g3ku.runtime.web_ceo_sessions import (
     EXTERNAL_UPLOAD_ROOT,
@@ -92,29 +93,25 @@ _QQ_BRIDGE_PREFIX = "qq-official-"
 
 
 def _owner_openids_for_bridge(bridge_id: str) -> tuple[str, ...]:
-    """该桥的操作员 openid 白名单。
+    """操作员 openid 名单：所有 QQ 账号 ``ownerOpenids`` 的并集。
 
-    QQ 号的桥身份由 AppID 派生（``qq-official-<appId>``），白名单是**服务端配置**
-    （``qqBot.accounts.<appId>.ownerOpenids``），不接受桥在请求体里自报——否则被攻破
-    的桥一句 ``trust: owner`` 就把自己提成操作员。
+    白名单是**服务端配置**（``qqBot.accounts.<appId>.ownerOpenids``），不接受桥在
+    请求体里自报——否则被攻破的桥一句 ``trust: owner`` 就把自己提成操作员。
+    openid 按 AppID 隔离（同一人在不同号上是不同的串），但「谁是操作员」不随接入的
+    是哪个号而变，所以这里不分账号：任一账号里填过的 openid，在任何 QQ 桥上都命中。
     """
     bridge = str(bridge_id or "").strip()
     if not bridge.startswith(_QQ_BRIDGE_PREFIX):
         return ()
+    # 桥必须对应一个已配置的号：只剩 token 的孤儿桥不给名单（fail-closed）。
     try:
         config = get_runtime_config(force=False)[0]
-    except Exception:  # noqa: BLE001 - 读不到配置就按没有白名单处理（fail-closed）
+    except Exception:  # noqa: BLE001 - 读不到配置就按没有白名单处理
         return ()
     accounts = dict(getattr(getattr(config, "qq_bot", None), "accounts", None) or {})
-    for app_id, account in accounts.items():
-        if f"{_QQ_BRIDGE_PREFIX}{app_id}" != bridge:
-            continue
-        return tuple(
-            str(item or "").strip()
-            for item in list(getattr(account, "owner_openids", None) or [])
-            if str(item or "").strip()
-        )
-    return ()
+    if bridge[len(_QQ_BRIDGE_PREFIX) :] not in accounts:
+        return ()
+    return tuple(sorted(qq_owner_openids()))
 
 
 def _validated_chat_type(value: Any) -> str:

@@ -62,10 +62,16 @@
 
 服务端把派生结果写回消息 metadata：`external_trust`（`owner` / `third_party_dm` / `third_party_group`）与
 `chat_type`。**桥不能自报信任级**：请求体里的同名字段会被覆盖，白名单来自服务端配置
-（`externalApi.tokens.<id>.trustedSenders`，官方 QQ 适配器读 `qqBot.accounts.<appId>.ownerOpenids`）。
+（`externalApi.tokens.<id>.trustedSenders`；官方 QQ 适配器读 `qqBot.accounts.<appId>.ownerOpenids`
+的**跨账号并集**——openid 按 AppID 隔离，每号各填一条，任一账号里填过的 openid 在任何 QQ 桥上命中，
+比较大小写不敏感）。「外部接入」页 QQ 账号行的「操作员」入口写的就是这份名单。
 
 三条判定不因桥的声明而放宽：群聊整会话按第三方（发送者在白名单里也不升级）；信任只降不升
 （注册表记最受限的那一档）；缺 sender 永不等于操作员。
+
+投影层的 `Master` / `第三方 0002` 编号与网页气泡上的 `sender_label` 都是**显示层派生**
+（规则见 `sandbox-execution-plane.md`「来源标注」）：它们解释"谁在说话"，不参与准入；
+`external_trust` 仍是唯一判据。气泡标签只对渠道会话的用户行下发，web 会话没有。
 
 MCP 网关的身份由 `sender.id = "negi-mcp"` 表达（常量 `GATEWAY_SENDER_ID`，`g3ku/runtime/session_trust.py`），
 **每回合都带**而不是只在建会话时带：信任是逐条入站按 min 合并的，所以撤掉授权后下一条消息就把会话降回第三方。

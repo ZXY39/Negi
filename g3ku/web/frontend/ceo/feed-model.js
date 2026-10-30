@@ -81,6 +81,10 @@ function buildCeoRenderSignature(messages = [], inflightTurn = null, preservedTu
             // 服务端权威快照必须触发重建,否则元信息永远停留在缺失状态。
             item.usage && typeof item.usage === "object" ? JSON.stringify(item.usage) : "",
             String(item.timestamp || ""),
+            // 渠道会话的来源标签参与签名：缓存先行渲染(无标签)后到达的权威快照
+            // 必须触发重建，否则气泡上的 `第三方 0002` 永远不出现。
+            String(item.sender_label || ""),
+            String(item.sender_id || ""),
             // 编辑/Fork 按钮标志参与签名:flag 迟到(缓存渲染无 flag、权威快照
             // 有 flag,或任务派发后 flag 收回)必须触发重建。
             item.can_edit_fork === true ? 1 : 0,

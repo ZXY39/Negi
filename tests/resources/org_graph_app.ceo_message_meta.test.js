@@ -380,6 +380,28 @@ test("用户气泡带 timestamp 渲染 .msg-meta 发送时间行 + 复制按钮(
     assert.ok(!attachmentOnly.innerHTML.includes("msg-copy-btn"), attachmentOnly.innerHTML);
 });
 
+test("渠道会话来源标签排在元信息行最前，openid 只做 tooltip", () => {
+    const api = setup();
+    const feed = new FeedStub({ scrollHeight: 400, clientHeight: 300 });
+    api.U.ceoFeed = feed;
+
+    api.addMsg("hi", "user", {
+        timestamp: "2026-09-14T09:30:00",
+        senderLabel: "第三方 0002",
+        senderId: "EB6C8D4341C1238A627FF73CBE540DAE",
+    });
+    const el = feed.children[feed.children.length - 1];
+    assert.ok(el.innerHTML.includes("第三方 0002"), el.innerHTML);
+    // 标签在时间左边：先看到"谁说的"，再看"什么时候"。
+    assert.ok(el.innerHTML.indexOf("第三方 0002") < el.innerHTML.indexOf("发送于"), el.innerHTML);
+    assert.ok(el.innerHTML.includes('title="EB6C8D4341C1238A627FF73CBE540DAE"'), el.innerHTML);
+
+    // web 会话没有标签时保持老形状。
+    api.addMsg("hi", "user", { timestamp: "2026-09-14T09:30:00" });
+    const plain = feed.children[feed.children.length - 1];
+    assert.ok(!plain.innerHTML.includes("第三方"), plain.innerHTML);
+});
+
 test("轨道回合把复制按钮与 usage 行放在同一行(R7)", () => {
     const api = setup();
     const feed = new FeedStub({ scrollHeight: 400, clientHeight: 300 });

@@ -104,6 +104,11 @@ function normalizeCeoSnapshotMessage(message = {}) {
         return next;
     }
     if (role === "user" && message?.can_edit_fork === true) next.can_edit_fork = true;
+    // 渠道会话的来源标签：白名单不列就会被静默丢掉（快照按字段重建）。
+    const senderLabel = String(message?.sender_label || "").trim();
+    if (role === "user" && senderLabel) next.sender_label = senderLabel;
+    const senderId = String(message?.sender_id || "").trim();
+    if (role === "user" && senderId) next.sender_id = senderId;
     if (role === "user" && !String(next.content || "").trim() && !attachments.length) return null;
     if (role === "system" && !String(next.content || "").trim()) return null;
     return next;

@@ -35,10 +35,18 @@ from g3ku.runtime.ceo_catalog_offload import (
 )
 from g3ku.runtime.external_sessions import ExternalSessionEntry, get_external_session_registry
 from g3ku.runtime.frontdoor.turns import frontdoor_turns_for_turn
+from g3ku.runtime.sender_stamp import (
+    WEB_COMPOSER_SOURCE,
+    resolve_sender_number,
+    sender_display_label,
+    sender_identity,
+    sender_number_map,
+)
 from g3ku.runtime.session_keys import (
     EXTERNAL_SESSION_KEY_PREFIX,
     is_channel_session_key,
 )
+from g3ku.runtime.session_trust import qq_owner_openids
 from g3ku.runtime.web_ceo_sessions import (
     EXTERNAL_UPLOAD_ROOT,
     WEB_CEO_IMAGE_UPLOAD_MAX_BYTES,
@@ -540,6 +548,9 @@ def _build_user_message(text: str, uploads: list[dict[str, Any]]) -> str | UserI
 def _normalize_client_user_messages(session_id: str, payload: dict[str, Any]) -> list[UserInputMessage]:
     batch_payload = payload.get('messages')
     raw_entries = list(batch_payload or []) if isinstance(batch_payload, list) else [payload]
+    # 渠道会话里的网页输入框恒为操作员本人：投影层据此盖 `[来源] 输入框 Master`。
+    # 本地会话（web:）不写这个标记，也永远没有来源行。
+    channel_session = _is_channel_session_id(session_id)
     messages: list[UserInputMessage] = []
     for raw in raw_entries:
         if not isinstance(raw, dict):
@@ -549,10 +560,10 @@ def _normalize_client_user_messages(session_id: str, payload: dict[str, Any]) ->
         if not text.strip() and not uploads:
             continue
         built = _build_user_message(text, uploads)
-        if isinstance(built, UserInputMessage):
-            messages.append(built)
-        else:
-            messages.append(UserInputMessage(content=str(built)))
+        message = built if isinstance(built, UserInputMessage) else UserInputMessage(content=str(built))
+        if channel_session:
+            message.metadata = {**dict(message.metadata or {}), 'external_source': WEB_COMPOSER_SOURCE}
+        messages.append(message)
     return messages
 
 
@@ -1150,6 +1161,14 @@ def _build_ceo_snapshot(
     inflight_payload = inflight_turn if isinstance(inflight_turn, dict) else {}
     inflight_status = str(inflight_payload.get("status") or "").strip().lower()
     hide_pending_users = inflight_status in {"running", "in_progress", "active"}
+    # 气泡标签只在渠道会话下发；编号与投影层同源（整份转录、首次出现顺序）。
+    channel_session = bool(str(session_id or "").strip()) and is_channel_session_key(session_id)
+    master_ids = qq_owner_openids() if channel_session else frozenset()
+    sender_numbers = (
+        sender_number_map(list(messages or []), master_ids=master_ids)
+        if channel_session
+        else {}
+    )
     items: list[dict[str, Any]] = []
     # 按 turn_id 聚合的请求工件扫描要 glob 整个 artifact 目录并逐文件解析
     # （大会话实测 300+ 文件 / 70MB ≈ 1s+）。transcript 级 usage 自收尾起随每轮
@@ -1238,6 +1257,17 @@ def _build_ceo_snapshot(
         if role == 'user':
             if edit_fork_gates and edit_fork_gates.get(index):
                 item['can_edit_fork'] = True
+            if channel_session:
+                sender_id, _sender_name = sender_identity(metadata)
+                sender_label = sender_display_label(
+                    metadata,
+                    number=resolve_sender_number(sender_id, sender_numbers) if sender_id else None,
+                    master_ids=master_ids,
+                )
+                if sender_label:
+                    item['sender_label'] = sender_label
+                    if sender_id:
+                        item['sender_id'] = sender_id
         elif role == 'assistant' and turn_id and reply_fork_turn_ids and turn_id in reply_fork_turn_ids:
             # Fork 只在回复行下发这一颗：turn_id 在提问行与它的回复行上是同一个值，
             # 所以资格必须落在 assistant 侧（判据见 compute_reply_fork_turn_ids），

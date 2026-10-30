@@ -32,8 +32,15 @@ from g3ku.runtime.frontdoor.tool_contract import (
     upsert_frontdoor_tool_contract_message,
 )
 from g3ku.runtime.message_token_estimation import estimate_message_tokens
-from g3ku.runtime.sender_stamp import render_sender_stamp, strip_sender_stamp
-from g3ku.runtime.session_trust import is_third_party_session
+from g3ku.runtime.sender_stamp import (
+    render_sender_stamp,
+    resolve_sender_number,
+    sender_identity,
+    sender_number_map,
+    strip_sender_stamp,
+)
+from g3ku.runtime.session_keys import is_channel_session_key
+from g3ku.runtime.session_trust import is_third_party_session, qq_owner_openids
 from g3ku.runtime.tool_visibility import (
     CEO_FIXED_BUILTIN_TOOL_NAMES,
 )
@@ -587,7 +594,12 @@ class CeoMessageBuilder:
         return str(value or "")
 
     @staticmethod
-    def _history_message(message: Any) -> dict[str, Any]:
+    def _history_message(
+        message: Any,
+        *,
+        numbers: dict[str, int] | None = None,
+        master_ids: frozenset[str] = frozenset(),
+    ) -> dict[str, Any]:
         entry = {
             'role': message_role(message),
             'content': message.get('content') if isinstance(message, dict) else getattr(message, 'content', ''),
@@ -603,22 +615,38 @@ class CeoMessageBuilder:
             value = getattr(message, key, None)
             if value not in (None, '', [], {}):
                 entry[key] = value
-        return CeoMessageBuilder._decorate_user_projection(message, entry)
+        return CeoMessageBuilder._decorate_user_projection(
+            message, entry, numbers=numbers, master_ids=master_ids
+        )
 
     @staticmethod
-    def _sender_stamped_content(content: str, metadata: dict[str, Any] | None) -> str:
-        """第三方消息加一行来源标注。
+    def _sender_stamped_content(
+        content: str,
+        metadata: dict[str, Any] | None,
+        *,
+        numbers: dict[str, int] | None = None,
+        master_ids: frozenset[str] = frozenset(),
+    ) -> str:
+        """渠道消息加一行来源标注。
 
         幂等判据是"正文以本投影渲染出来的那一行开头"，不是"以标记开头"——后者由
-        发送者控制：第三方正文自己写一行 ``[消息来源] ...`` 就能把真标注整行免掉。
+        发送者控制：第三方正文自己写一行 ``[来源] ...`` 就能把真标注整行免掉。
         """
-        stamp = render_sender_stamp(metadata)
+        sender_id, _name = sender_identity(metadata)
+        number = resolve_sender_number(sender_id, numbers) if sender_id else None
+        stamp = render_sender_stamp(metadata, number=number, master_ids=master_ids)
         if not stamp or content.startswith(stamp):
             return content
         return f"{stamp}{content}"
 
     @staticmethod
-    def _decorate_user_projection(message: Any, entry: dict[str, Any]) -> dict[str, Any]:
+    def _decorate_user_projection(
+        message: Any,
+        entry: dict[str, Any],
+        *,
+        numbers: dict[str, int] | None = None,
+        master_ids: frozenset[str] = frozenset(),
+    ) -> dict[str, Any]:
         """投影时给用户消息追加来源标注与送达时间戳（持久化内容保持原文不动）。
 
         模型上下文原本没有任何"现在几点"的信息：system prompt 不含时间，转录的
@@ -639,7 +667,12 @@ class CeoMessageBuilder:
         content = entry.get('content')
         if not isinstance(content, str) or not content.strip():
             return entry
-        stamped = CeoMessageBuilder._sender_stamped_content(content, message_metadata(message))
+        stamped = CeoMessageBuilder._sender_stamped_content(
+            content,
+            message_metadata(message),
+            numbers=numbers,
+            master_ids=master_ids,
+        )
         if MESSAGE_ARRIVAL_TIME_MARKER in stamped:
             entry['content'] = stamped
             return entry
@@ -651,18 +684,35 @@ class CeoMessageBuilder:
         entry['content'] = f"{stamped}{tail}" if tail else stamped
         return entry
 
-    def _transcript_history(self, persisted_session: Any | None) -> list[dict[str, Any]]:
+    def _transcript_history(
+        self,
+        persisted_session: Any | None,
+        *,
+        master_ids: frozenset[str] = frozenset(),
+    ) -> list[dict[str, Any]]:
         if persisted_session is None:
             return []
+        # 编号从**整份转录**算起（不是当前窗口）：同一个人在整个会话里恒定同一个号。
+        numbers = sender_number_map(
+            list(getattr(persisted_session, 'messages', []) or []),
+            master_ids=master_ids,
+        )
         return [
-            self._history_message(message)
+            self._history_message(message, numbers=numbers, master_ids=master_ids)
             for message in prompt_history_messages(persisted_session)
         ]
 
-    def _checkpoint_history(self, checkpoint_messages: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    def _checkpoint_history(
+        self,
+        checkpoint_messages: list[dict[str, Any]] | None,
+        *,
+        master_ids: frozenset[str] = frozenset(),
+    ) -> list[dict[str, Any]]:
+        source = list(checkpoint_messages or [])
+        numbers = sender_number_map(source, master_ids=master_ids)
         history = [
-            self._history_message(message)
-            for message in list(checkpoint_messages or [])
+            self._history_message(message, numbers=numbers, master_ids=master_ids)
+            for message in source
             if message_role(message) in {'user', 'assistant', 'tool'}
             and is_prompt_visible_message(message)
         ]
@@ -1221,6 +1271,10 @@ class CeoMessageBuilder:
         visible_skills = list(exposure.get('skills') or [])
         visible_tools = list(exposure.get('tools') or [])
         capability_snapshot = self._capability_snapshot(exposure)
+        # 渠道会话的身份名单与说明块：本地会话（web:/internal:/CLI）两者都不加。
+        session_key = str(getattr(getattr(session, 'state', None), 'session_key', '') or '').strip()
+        channel_session = is_channel_session_key(session_key)
+        master_sender_ids = qq_owner_openids() if channel_session else frozenset()
         # 名单与候选都不按 query 排序：可见集原样给全，"选哪个"由模型按描述判断，
         # 收窄由执行准入与 load 承担。skill 侧头部钉住块带全量可见名单（id|名称|描述）。
         selected_skills = self._visible_only_skill_items(visible_skills)
@@ -1234,12 +1288,9 @@ class CeoMessageBuilder:
                 f"|{str(getattr(capability_snapshot, 'exposure_revision', '') or '').strip()}"
             )
             # 档位只影响头部里那句声明，不进 stamp：切档不重印前缀。
-            sandbox_session_key = str(
-                getattr(getattr(session, 'state', None), 'session_key', '') or ''
-            ).strip()
             sandbox_tier = (
-                str(sandbox_session_policy(sandbox_session_key).tier or '')
-                if sandbox_session_key
+                str(sandbox_session_policy(session_key).tier or '')
+                if session_key
                 else ''
             )
             system_prompt = self._prompt_builder.build_base_prompt(
@@ -1249,6 +1300,11 @@ class CeoMessageBuilder:
             system_prompt = self._prompt_builder.build(skills=[])
         if capability_snapshot.stable_catalog_message:
             system_prompt = f"{system_prompt}\n\n{capability_snapshot.stable_catalog_message}".strip()
+        if channel_session:
+            channel_block = getattr(self._prompt_builder, 'channel_identity_block', None)
+            channel_text = str(channel_block() if callable(channel_block) else '').strip()
+            if channel_text:
+                system_prompt = f"{system_prompt}\n\n{channel_text}".strip()
         external_trace = self._trace_external_tools(
             visible_tools=visible_tools,
             visible_tool_names=visible_tool_names,
@@ -1449,6 +1505,8 @@ class CeoMessageBuilder:
             'retrieved_markdown': retrieved_markdown,
             'turn_overlay_parts': turn_overlay_parts,
             'split_prompt_builder': split_prompt_builder,
+            'channel_session': channel_session,
+            'master_sender_ids': master_sender_ids,
             'system_prompt': system_prompt,
             'same_session_turn_memory_filtered_count': same_session_turn_memory_filtered_count,
             'user_content': user_content if user_content is not None else query_text,
@@ -1464,9 +1522,10 @@ class CeoMessageBuilder:
         checkpoint_messages: list[dict[str, Any]] | None,
         query_text: str,
         user_metadata: dict[str, Any] | None,
+        master_ids: frozenset[str] = frozenset(),
     ) -> dict[str, Any]:
-        checkpoint_history = self._checkpoint_history(checkpoint_messages)
-        transcript_history = self._transcript_history(persisted_session)
+        checkpoint_history = self._checkpoint_history(checkpoint_messages, master_ids=master_ids)
+        transcript_history = self._transcript_history(persisted_session, master_ids=master_ids)
         current_user_in_checkpoint = self._history_has_current_user(
             history_messages=checkpoint_history,
             query_text=query_text,
@@ -1505,6 +1564,9 @@ class CeoMessageBuilder:
     def _current_user_content_with_arrival_time(
         user_content: Any,
         metadata: dict[str, Any] | None = None,
+        *,
+        numbers: dict[str, int] | None = None,
+        master_ids: frozenset[str] = frozenset(),
     ) -> Any:
         """当前回合用户消息不在历史里、直接追加进请求时，用 now() 盖送达时间戳。
 
@@ -1517,7 +1579,9 @@ class CeoMessageBuilder:
             return user_content
         if not user_content.strip():
             return user_content
-        body = CeoMessageBuilder._sender_stamped_content(user_content, metadata)
+        body = CeoMessageBuilder._sender_stamped_content(
+            user_content, metadata, numbers=numbers, master_ids=master_ids
+        )
         if MESSAGE_ARRIVAL_TIME_MARKER in body:
             return body
         return f"{body}\n\n{MESSAGE_ARRIVAL_TIME_MARKER} {render_local_time()}"
@@ -1580,6 +1644,8 @@ class CeoMessageBuilder:
         current_user_in_history: bool,
         pinned_contract_text: str = '',
         user_metadata: dict[str, Any] | None = None,
+        master_ids: frozenset[str] = frozenset(),
+        sender_numbers: dict[str, int] | None = None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], str]:
         turn_overlay_text = self._join_turn_overlay_sections(turn_overlay_parts)
         system_prompt = merge_pinned_contract_into_system_text(system_prompt, pinned_contract_text)
@@ -1600,7 +1666,10 @@ class CeoMessageBuilder:
                 {
                     "role": "user",
                     "content": self._current_user_content_with_arrival_time(
-                        user_content, user_metadata
+                        user_content,
+                        user_metadata,
+                        numbers=sender_numbers,
+                        master_ids=master_ids,
                     ),
                 }
             )
@@ -1632,6 +1701,8 @@ class CeoMessageBuilder:
         query_text: str,
         user_metadata: dict[str, Any] | None,
         pinned_contract_text: str = "",
+        master_ids: frozenset[str] = frozenset(),
+        sender_numbers: dict[str, int] | None = None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], str, bool]:
         turn_overlay_text = self._join_turn_overlay_sections(turn_overlay_parts)
         stable_messages = [
@@ -1687,7 +1758,10 @@ class CeoMessageBuilder:
                 {
                     "role": "user",
                     "content": self._current_user_content_with_arrival_time(
-                        user_content, user_metadata
+                        user_content,
+                        user_metadata,
+                        numbers=sender_numbers,
+                        master_ids=master_ids,
                     ),
                 }
             )
@@ -1705,6 +1779,8 @@ class CeoMessageBuilder:
         ephemeral_tail_messages: list[dict[str, Any]] | None,
         collect_elapsed_ms: float,
         history_elapsed_ms: float,
+        master_ids: frozenset[str] = frozenset(),
+        sender_numbers: dict[str, int] | None = None,
     ) -> ContextAssemblyResult:
         attachment_reopen_targets = self._frontdoor_attachment_reopen_targets(
             persisted_session=persisted_session,
@@ -1733,6 +1809,8 @@ class CeoMessageBuilder:
             query_text=query_text,
             user_metadata=user_metadata,
             pinned_contract_text=pinned_contract_text,
+            master_ids=master_ids,
+            sender_numbers=sender_numbers,
         )
         # 这条路的头部来自上一跳的请求体种子，不保证首条仍是 system；没并进就不许尾块省略。
         if not pinned_contract_is_carried_by_head(stable_messages, pinned_contract_text):
@@ -1795,7 +1873,10 @@ class CeoMessageBuilder:
             current_user_message = {
                 "role": "user",
                 "content": self._current_user_content_with_arrival_time(
-                    context_sources['user_content'], user_metadata
+                    context_sources['user_content'],
+                    user_metadata,
+                    numbers=sender_numbers,
+                    master_ids=master_ids,
                 ),
             }
             model_messages.append(current_user_message)
@@ -1849,7 +1930,12 @@ class CeoMessageBuilder:
             },
             'history_source': 'session_window',
             'checkpoint_message_count': len(stable_messages),
-            'transcript_message_count': len(self._transcript_history(persisted_session)),
+            # 只数条数，别为了一个读数再投影一遍整份转录（投影本身要算编号映射）。
+            'transcript_message_count': (
+                len(prompt_history_messages(persisted_session))
+                if persisted_session is not None
+                else 0
+            ),
             'raw_history_message_count': len(raw_history_messages),
             'stage_workset_history_message_count': 0,
             'history_zone_message_count': len(history_zone_source),
@@ -1937,6 +2023,11 @@ class CeoMessageBuilder:
             contract_present_tool_names=contract_present_tool_names,
         )
         collect_elapsed_ms = self._elapsed_ms(collect_started_at)
+        master_ids = frozenset(context_sources.get('master_sender_ids') or frozenset())
+        sender_numbers = sender_number_map(
+            list(getattr(persisted_session, 'messages', []) or []),
+            master_ids=master_ids,
+        ) if master_ids or context_sources.get('channel_session') else {}
 
         attachment_reopen_targets = self._frontdoor_attachment_reopen_targets(
             persisted_session=persisted_session,
@@ -1955,6 +2046,8 @@ class CeoMessageBuilder:
                 ephemeral_tail_messages=ephemeral_tail_messages,
                 collect_elapsed_ms=collect_elapsed_ms,
                 history_elapsed_ms=0.0,
+                master_ids=master_ids,
+                sender_numbers=sender_numbers,
             )
         # 冷启动新建路径：内部事件消息（cron/heartbeat）不进入续跑种子，改在这里
         # 注入历史区，保证基础系统提示由 _inject_turn_context 正常前置。
@@ -1965,6 +2058,7 @@ class CeoMessageBuilder:
             checkpoint_messages=checkpoint_messages,
             query_text=query_text,
             user_metadata=user_metadata,
+            master_ids=master_ids,
         )
         history_elapsed_ms = self._elapsed_ms(history_started_at)
         raw_history_messages = [
@@ -2016,6 +2110,8 @@ class CeoMessageBuilder:
             current_user_in_history=bool(history_state['current_user_in_history']),
             pinned_contract_text=pinned_contract_text,
             user_metadata=user_metadata,
+            master_ids=master_ids,
+            sender_numbers=sender_numbers,
         )
         # 锚点量的是"这一跳真要发出去的那一份"：system、长期记忆、人设块、历史与当前
         # 用户都在稳定前缀里；尾部契约块与 ephemeral 尾不算。装配完成后再量，避免

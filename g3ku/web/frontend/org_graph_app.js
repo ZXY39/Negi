@@ -3295,8 +3295,8 @@ function handleCeoVoiceBubbleClick(event) {
     toggle.setAttribute("aria-expanded", panel.hidden ? "false" : "true");
 }
 
-function addCeoUserMessage(text = "", { attachments = [], scrollMode = "preserve", sessionId = activeSessionId(), timestamp = "", turnId = "", canEditFork = false } = {}) {
-    return addMsg(String(text || ""), "user", { attachments, scrollMode, sessionId, timestamp, turnId, canEditFork });
+function addCeoUserMessage(text = "", { attachments = [], scrollMode = "preserve", sessionId = activeSessionId(), timestamp = "", turnId = "", canEditFork = false, senderLabel = "", senderId = "" } = {}) {
+    return addMsg(String(text || ""), "user", { attachments, scrollMode, sessionId, timestamp, turnId, canEditFork, senderLabel, senderId });
 }
 
 // 气泡复制按钮:与元信息同行,点击这条消息才显形,按下后复制气泡里已渲染的可见文本。
@@ -4324,7 +4324,7 @@ const CEO_FEED_SCROLL_UP_KEYS = new Set(["PageUp", "Home", "ArrowUp", "Up"]);
 // 分组被折叠、工具条撑高)时视口会跳变;锚点按「当前可见的 feed 子元素 + 元素内
 // 偏移」还原,高度增减都稳定。用户原本贴底时视为跟随最新内容(聊天 stick-to-bottom),
 // 不再被新产出的内容留在原地。
-function addMsg(text, role, { markdown = false, attachments = [], scrollMode = "preserve", sessionId = activeSessionId(), timestamp = "", usage = null, turnId = "", canEditFork = false, canForkReply = false } = {}) {
+function addMsg(text, role, { markdown = false, attachments = [], scrollMode = "preserve", sessionId = activeSessionId(), timestamp = "", usage = null, turnId = "", canEditFork = false, canForkReply = false, senderLabel = "", senderId = "" } = {}) {
     return mutateCeoFeed(() => {
         const el = document.createElement("div");
         el.className = `message ${role}`;
@@ -4339,7 +4339,7 @@ function addMsg(text, role, { markdown = false, attachments = [], scrollMode = "
         // 两颗动作按钮也挂在这一行、不吃点击门：Fork 排在读数左边（回复行），
         // 编辑排在读数右边（用户行）。有 meta 时用 message-stack 纵向包裹,
         // 保证这一行落在气泡下方而不是 flex 行内并排。
-        const metaText = buildCeoMessageMetaText({ role, timestamp, usage });
+        const metaText = buildCeoMessageMetaText({ role, timestamp, usage, senderLabel });
         const copyMarkup = hasRenderableText(displayText) ? buildCeoBubbleCopyMarkup() : "";
         const forkMarkup = role === "user"
             ? ""
@@ -4347,8 +4347,10 @@ function addMsg(text, role, { markdown = false, attachments = [], scrollMode = "
         const editMarkup = role === "user"
             ? buildCeoUserMessageEditMarkup({ turnId, canEditFork, sessionId })
             : "";
+        // 来源标签的完整 openid 只做 tooltip：气泡上显示编号/名字，不摊哈希。
+        const metaTitle = String(senderId || "").trim();
         const metaMarkup = metaText || copyMarkup || forkMarkup || editMarkup
-            ? `<div class="msg-meta">${forkMarkup}${metaText ? `<span class="msg-meta-text">${esc(metaText)}</span>` : ""}${copyMarkup}${editMarkup}</div>`
+            ? `<div class="msg-meta">${forkMarkup}${metaText ? `<span class="msg-meta-text"${metaTitle ? ` title="${esc(metaTitle)}"` : ""}>${esc(metaText)}</span>` : ""}${copyMarkup}${editMarkup}</div>`
             : "";
         if (voiceClip) {
             el.innerHTML = `<div class="message-stack">${buildCeoVoiceBubbleMarkup(voiceClip, voiceView.text)}${attachmentMarkup}${metaMarkup}</div>`;
@@ -5545,6 +5547,8 @@ function restoreCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = 
                 scrollMode: "preserve",
                 sessionId,
                 timestamp,
+                senderLabel: String(userMessage.sender_label || ""),
+                senderId: String(userMessage.sender_id || ""),
             });
             placeCeoUserBubbleByTimestamp(el, timestamp);
         });
@@ -5571,6 +5575,8 @@ function restoreCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = 
             scrollMode: "preserve",
             sessionId,
             timestamp,
+            senderLabel: String(userMessage.sender_label || ""),
+            senderId: String(userMessage.sender_id || ""),
         });
         placeCeoUserBubbleByTimestamp(el, timestamp);
     }
@@ -5907,6 +5913,8 @@ function renderCeoSnapshotMessageRange(messages, keys, fromIndex, toIndex, targe
                 timestamp: String(item?.timestamp || ""),
                 turnId: String(item?.turn_id || ""),
                 canEditFork: item?.can_edit_fork === true,
+                senderLabel: String(item?.sender_label || ""),
+                senderId: String(item?.sender_id || ""),
             });
             tagRendered();
             continue;
@@ -6401,8 +6409,11 @@ function setCeoTurnUsage(turn, usage = null, { completedAt = "" } = {}) {
 
 // 普通消息气泡(用户/无轨道助手兜底)的元信息文本:时间必带角色语义,
 // usage 仅在数据可用时附加(用户消息只有发送时间)。
-function buildCeoMessageMetaText({ role = "", timestamp = "", usage = null } = {}) {
+function buildCeoMessageMetaText({ role = "", timestamp = "", usage = null, senderLabel = "" } = {}) {
     const parts = [];
+    // 渠道会话的来源标签排在最前：`第三方 0002 · 发送于 14:13`。
+    const label = String(senderLabel || "").trim();
+    if (label) parts.push(label);
     const timeText = formatCompactTime(timestamp);
     if (timeText) {
         const isUser = String(role || "").trim().toLowerCase() === "user";
@@ -7641,6 +7652,8 @@ function finalizeCeoTurn(text, meta = {}) {
                     scrollMode: "preserve",
                     sessionId,
                     timestamp: String(message?.timestamp || ""),
+                    senderLabel: String(message?.sender_label || ""),
+                    senderId: String(message?.sender_id || ""),
                 });
                 // addMsg 不返回元素;同一同步批次内它一定是 feed 的最后一个子节点,
                 // 取出来补稳定 key 并移到回合元素之前。

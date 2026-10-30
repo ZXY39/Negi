@@ -61,6 +61,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 操作员点了暂停、节点 `pause_requested=True` 而 `is_paused` 长期不变 → `main-task-runtime.md`「Node-Level Pause and Recovery」（脱离派发面后的暂停直落）
 - 渠道会话（`ext:`）任务长期静默却收不到失速提醒 → `heartbeat-system.md`「Task Stall Detection」（受众谓词与它要过的两道闸门）
 - 群聊里让它记住某事、跑命令、发文件、读宿主配置 → `sandbox-execution-plane.md` 的「Debugging Entry Points」：先分是信任级判错（注册表 `trust`）、档位名单漏登记，还是读根没下发
+- 群里/私聊里模型认不出发言人、气泡上没有来源标签、渠道会话的 system prompt 少了说明块、或第三方在索要 Master 的私人信息 → `sandbox-execution-plane.md`「来源标注」（`[来源]` 六态、会话内编号、`ownerOpenids` 跨账号并集、本地会话不加标注与说明块）
 - 父节点在验收节点仍非终态时提前进入 `before_model`、或出现意外 `superseded by newer spawn round`（含节点被 resume 后白跑一段再落该原因）、或 `resume` 返回 `entry_settled`、或工具行是 `Error executing spawn_child_nodes` 而它绑定的子节点还在跑、或同一个执行节点在任务树上挂出两颗检验节点（其中一颗的 FAILED 只是清扫疤、从没下过判词）、或一批子节点在存储抖动时刻整批被记成 `Error: CancelledError`（其中有的其实早已成功）、或节点 `failure_reason` 写着 `orphan reaped at task resume` → `operations-and-maintenance.md`「spawn 轮次过早完成或子节点被意外 supersede」+ `main-task-runtime.md`「Node-Level Pause and Recovery」「验收节点：提前创建、激活与握手重派发」+ `tool-hydration-and-callable-chain.md`「统一工具 Timeout 合同」「验收节点：提前创建、激活与握手重派发」
 - 派生评审把整批候选全拦下来、把带 `requires_acceptance` 的候选判成"验收内嵌/自产自销"、或想知道评审请求本身有多大/重发过几次 → `main-task-runtime.md`「任务树深度上限」（送审候选的解析结构、派生审查的 fail-closed 默认结果与 `review_attempts` / `review_request_chars`）
 - 任务已终态但仍有节点显示处理中（`in_progress`）→ `operations-and-maintenance.md`「残留节点自愈」+ `main-task-runtime.md`「Node-Level Pause and Recovery」

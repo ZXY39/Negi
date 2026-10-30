@@ -718,6 +718,8 @@ function promoteRepresentedRuntimeSentCeoFollowUps(sessionId = activeSessionId()
             scrollMode,
             sessionId: key,
             timestamp: String(matched?.timestamp || item?.runtime_sent_at || ""),
+            senderLabel: String(matched?.sender_label || ""),
+            senderId: String(matched?.sender_id || ""),
         });
         // 补充消息应落在当前 live 回合之前,而不是 append 到流式输出之后;
         // 与 finalize 增量路径的 insertBefore 语义保持一致。

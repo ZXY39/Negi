@@ -43,6 +43,7 @@ function makeListEl() {
 
 function loadModule({ listEl, statusEl }) {
     const created = [];
+    const confirms = [];
     const context = {
         console,
         setTimeout,
@@ -62,6 +63,7 @@ function loadModule({ listEl, statusEl }) {
         window: {},
         esc: (value) => String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"),
         showToast: () => {},
+        openConfirm: (options) => { confirms.push(options); },
         ApiClient: {
             getQqBotSettings: async () => ({ enabled: true, accounts: [] }),
             updateQqBotSettings: async (body) => body,
@@ -71,10 +73,10 @@ function loadModule({ listEl, statusEl }) {
     vm.createContext(context);
     vm.runInContext(
         `${CODE}
-        this.__t = { QQ_BOT_STATE, renderQqBotAccounts, _collectQqBotRows, _qqBotRowsBody, _qqBotRowStatus };`,
+        this.__t = { QQ_BOT_STATE, renderQqBotAccounts, _collectQqBotRows, _qqBotRowsBody, _qqBotRowStatus, _editQqBotOwners };`,
         context,
     );
-    return { t: context.__t, created };
+    return { t: context.__t, created, confirms };
 }
 
 const row = (over = {}) => ({
@@ -140,10 +142,48 @@ test("QQ 账号面板：重复 AppID 时整表请求体被拒", () => {
     assert.deepEqual(body, {
         enabled: true,
         accounts: [
-            { app_id: "111", app_secret: "a", label: "", sandbox: false, enabled: true },
-            { app_id: "222", app_secret: "", label: "", sandbox: false, enabled: true },
+            { app_id: "111", app_secret: "a", label: "", sandbox: false, enabled: true, owner_openids: [] },
+            { app_id: "222", app_secret: "", label: "", sandbox: false, enabled: true, owner_openids: [] },
         ],
     });
+});
+
+test("QQ 账号面板：操作员入口按名单条数渲染，弹窗写 owner_openids 并挡非法形状", async () => {
+    const listEl = makeListEl();
+    const { t, confirms } = loadModule({ listEl, statusEl: { textContent: "", className: "" } });
+    t.QQ_BOT_STATE.loaded = true;
+    t.QQ_BOT_STATE.enabled = true;
+    t.QQ_BOT_STATE.rows = [row({ app_id: "111", has_secret: true, owner_openids: ["EB6C8D4341C1238A627FF73CBE540DAE"] })];
+    // 采集口读 DOM：给一行已落库卡片的输入面。
+    const card = makeRowEl();
+    card.dataset.index = "0";
+    card.fields = {
+        ".qq-bot-appid": makeField("111"),
+        ".qq-bot-secret": makeField(""),
+        ".qq-bot-label": makeField(""),
+    };
+    listEl.children = [card];
+
+    t.renderQqBotAccounts();
+    const rendered = listEl.children[listEl.children.length - 1];
+    assert.match(rendered.innerHTML, /data-action="edit-owner"[^>]*>操作员 1</);
+
+    t._editQqBotOwners(0);
+    assert.equal(confirms.length, 1);
+    assert.match(confirms[0].text, /Master/);
+    assert.equal(confirms[0].input.value, "EB6C8D4341C1238A627FF73CBE540DAE");
+
+    let rejected = false;
+    try {
+        await confirms[0].onConfirm({ value: "not-an-openid" });
+    } catch (error) {
+        rejected = true;
+    }
+    assert.equal(rejected, true);
+
+    await confirms[0].onConfirm({ value: "AAAA111122223333, BBBB444455556666" });
+    const body = JSON.parse(JSON.stringify(t._qqBotRowsBody()));
+    assert.deepEqual(body.accounts[0].owner_openids, ["AAAA111122223333", "BBBB444455556666"]);
 });
 
 test("QQ 账号面板：状态摘要按号计数，行状态区分未配置", () => {

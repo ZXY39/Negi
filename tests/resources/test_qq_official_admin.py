@@ -142,6 +142,52 @@ def test_qq_bot_settings_accept_secret_into_overlay_and_mask(client: TestClient)
     assert "super-secret-app" not in json.dumps(reread, ensure_ascii=False)
 
 
+def test_owner_openids_roundtrip_and_preserved_when_omitted(client: TestClient) -> None:
+    """操作员名单走整表替换的同一个 PUT：回显、缺省保留、形状校验。"""
+    owner = "EB6C8D4341C1238A627FF73CBE540DAE"
+    saved = client.put(
+        "/api/qq-bot/settings",
+        json={
+            "enabled": True,
+            "accounts": [{"app_id": "111", "app_secret": "secret-one", "owner_openids": [owner]}],
+        },
+    )
+    assert saved.status_code == 200
+    assert _row(saved.json(), "111")["owner_openids"] == [owner]
+
+    # 改备注/密钥的整表写入不带该字段时保留旧名单（此前会被清空）。
+    saved = client.put(
+        "/api/qq-bot/settings",
+        json={"enabled": True, "accounts": [{"app_id": "111", "app_secret": "", "label": "主号"}]},
+    )
+    assert _row(saved.json(), "111")["owner_openids"] == [owner]
+
+    # 逗号/换行分隔的字符串也接受，按大小写不敏感去重。
+    second = "A73DE661112233445566"
+    saved = client.put(
+        "/api/qq-bot/settings",
+        json={
+            "enabled": True,
+            "accounts": [
+                {
+                    "app_id": "111",
+                    "app_secret": "",
+                    "ownerOpenids": f"{owner},\n{second},{owner.lower()}",
+                }
+            ],
+        },
+    )
+    assert saved.status_code == 200
+    assert _row(saved.json(), "111")["owner_openids"] == [owner, second]
+
+    bad = client.put(
+        "/api/qq-bot/settings",
+        json={"enabled": True, "accounts": [{"app_id": "111", "owner_openids": ["1234567890"]}]},
+    )
+    assert bad.status_code == 400
+    assert bad.json()["detail"] == "owner_openid_invalid"
+
+
 def test_second_account_does_not_touch_first_secret(client: TestClient) -> None:
     client.put(
         "/api/qq-bot/settings",

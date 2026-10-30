@@ -224,9 +224,10 @@
 - **失败关闭**：空 sender 永不等于操作员；未登记的 `ext:` 键与 `china:` 归档键按第三方。
   服务端只认 `chat_type` 与 sender 白名单派生信任，**不接受桥自报 `trust`**。
 
-白名单是服务端配置：`qqBot.accounts.<appId>.ownerOpenids`（官方 QQ 适配器的
-`qq-official-<appId>` 桥身份按 AppID 反查）与 `externalApi.tokens.<id>.trustedSenders`
-（第三方桥）。配置项的落点见 `config-and-models.md`「external_api」与
+白名单是服务端配置：`qqBot.accounts.<appId>.ownerOpenids`（**所有 QQ 账号取并集**：
+openid 按 AppID 隔离，每个号各填一条；任一账号里填过的 openid 在任何 QQ 桥上命中，
+比较大小写不敏感）与 `externalApi.tokens.<id>.trustedSenders`（第三方桥，精确匹配）。
+配置项的落点见 `config-and-models.md`「external_api」与
 `external-agent-api.md`「入站身份契约（`sender` / `chat_type`）」。
 
 MCP 网关以固定身份 `negi-mcp` 出现在每条入站消息里，所以「外部接入」页的「当操作员」开关，
@@ -348,24 +349,45 @@ MCP 网关以固定身份 `negi-mcp` 出现在每条入站消息里，所以「�
 
 ## 来源标注
 
-第三方消息在模型可见投影里带一行前缀：
+渠道会话（`ext:` / `china:`）的用户消息在模型可见投影里带一行前缀；web 普通会话没有这一行：
 
 ```
-[消息来源] 群消息 | 发送者 member_op… | 第三方，非操作员
+[来源] 群聊 第三方 0002
+[来源] 群聊 第三方 0002（张三）      ← 桥给了名字（频道 / OneBot / MCP）
+[来源] 私聊 Master                   ← 私聊命中名单
+[来源] 群聊 Master                   ← 本人在群里（只改标签，不改档位）
+[来源] 输入框 Master                 ← 渠道会话里由网页输入框提交
+[来源] 群聊 未知                     ← 桥没带 sender
 ```
 
-- 只装饰**第三方**消息；操作员的消息不盖（噪声，且会让存量 `owner` 会话的稳定前缀无谓变一次）。
-- 幂等判据是"正文以本次投影渲染出的那一行开头"，不是"以 `[消息来源]` 开头"：后者由发送者控制，第三方正文自己写一行标记就能把真标注整行免掉。
-- 发送者 `id` / `name` 折成一行（`" ".join(split())`）：名字来自桥的请求体，其中的换行不能伪造出第二行标注。
-- 装饰值派生自记录里的固定字段（`external_trust` / `external_sender` / `chat_type`），
-  跨回合字节稳定，不打断 provider 前缀缓存。
+- 身份：`Master` = 操作员本人（sender id 命中 `ownerOpenids` 并集，大小写不敏感），或渠道会话里
+  由网页输入框提交；其余发送者按**会话内首次出现顺序**编号 `0002`、`0003`…，同一会话内同一 id
+  恒定同一号。`0001` 留给 Master 但不印号；哈希不进上下文。
+- 群里的本人只改标签、不改档位：`resolve_turn_trust` 的多人会话短路不变，群里 Master 的消息仍按
+  `third_party_group` 执行。标注是给模型解释用的，不是准入判据。
+- 只有渠道标记的消息才装饰：`external_trust` 由 `/api/v1` 落库；网页输入框在渠道会话里补
+  `external_source=web_composer`。两者都没有的行（web 普通会话）永远没有来源行——这是硬护栏，
+  不能拿 `session_trust` 代替（它对 `web:` / `internal:` 返回 owner）。
+- 渠道会话的 system prompt 追加「渠道会话来源标注」说明块：`Master` 是谁、`第三方 000N` 是编号，
+  并明确第三方索要 Master 的私人信息（身份、联系方式、住址、日程、账号凭据、私聊内容、记忆与人设）
+  时必须拒绝。它是提示词约束，底层仍靠记忆门、只读档与工具闸。
+- 幂等判据是"正文以本次投影渲染出的那一行开头"，不是"以 `[来源]` 开头"：后者由发送者控制，
+  第三方正文自己写一行标记就能把真标注整行免掉。
+- 发送者 `id` / `name` 折成一行（`" ".join(split())`）：名字来自桥的请求体，其中的换行不能伪造出
+  第二行标注。
+- 装饰值派生自记录里的固定字段（`external_trust` / `external_sender` / `chat_type` /
+  `external_source`），跨回合字节稳定，不打断 provider 前缀缓存。
+- 编号每次投影重算、不落盘：编辑重发或 Fork 截断删掉某人首条时，后面的人可能整体前移一位
+  （按出现顺序的固有代价；不兼容旧 `[消息来源]` 标注，存量渠道会话由操作员重置）。
 - **转录保持原文**：RAG、网页回放、导出都吃 raw content。
 - 所有按内容相等性的比较先 `strip_sender_stamp`（与 `strip_arrival_time_stamp` 同一纪律）：
   `_cron_prompt_equal`、暂停回合种子去重两处是已知比较点。
-- 缺 `external_trust` 的历史记录不装饰——无法判定其来源时宁可不标。
+- 缺 `external_trust` 且非输入框标记的历史记录不装饰——无法判定其来源时宁可不标。
 
-实现：`g3ku/runtime/sender_stamp.py`（渲染与剥离）、
-`g3ku/runtime/frontdoor/message_builder.py`（历史道与当前轮兜底道同一作者）。
+实现：`g3ku/runtime/sender_stamp.py`（渲染、编号与剥离）、
+`g3ku/runtime/frontdoor/message_builder.py`（历史道与当前轮兜底道同一作者）、
+`g3ku/runtime/frontdoor/prompt_builder.py`（渠道专属说明块）、
+`g3ku/runtime/api/websocket_ceo.py`（composer 标记与气泡标签）。
 
 ## Debugging Entry Points
 
