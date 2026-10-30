@@ -1,0 +1,108 @@
+schema_version: 1
+kind: tool
+name: search_session_history
+display_name: Search Session History
+description: Search this session's persisted chat transcript by keywords. Keywords are literal and case-insensitive; match=all (default) requires every keyword in one message, match=any requires at least one. Returns message-level hits with role, timestamp, turn id and a match-centered snippet; action=open requires message_index from a previous hit and reads that full message. Reads full history even after context compression. Only the current session is searchable; internal rows, compression markers and the current turn are excluded by default. Tool-call payloads and attachment file contents are not indexed.
+tool_result_delivery_contract: runtime_managed
+protocol: mcp
+mcp:
+  transport: embedded
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    keywords:
+      type: array
+      description: One to eight literal, case-insensitive search terms. With match=all every term must appear in the same message; with match=any at least one must appear. Required for action=search.
+      minItems: 1
+      maxItems: 8
+      items:
+        type: string
+        description: A literal search term; regex syntax is not interpreted.
+    match:
+      type: string
+      description: "all (default) requires every keyword in the same message; any requires at least one."
+      enum:
+        - all
+        - any
+      default: all
+    roles:
+      type: array
+      description: Message roles to search; default is both user and assistant.
+      items:
+        type: string
+        description: One of user or assistant.
+        enum:
+          - user
+          - assistant
+      default:
+        - user
+        - assistant
+    limit:
+      type: integer
+      description: Maximum hits to return (default 8, max 20).
+      minimum: 1
+      maximum: 20
+      default: 8
+    offset:
+      type: integer
+      description: Number of hits to skip for pagination (default 0).
+      minimum: 0
+      default: 0
+    order:
+      type: string
+      description: "recent (default) returns newest hits first; oldest returns oldest first."
+      enum:
+        - recent
+        - oldest
+      default: recent
+    snippet_chars:
+      type: integer
+      description: Maximum characters per hit snippet (default 240, max 800). The snippet is centered on the matched text.
+      minimum: 80
+      maximum: 800
+      default: 240
+    include_internal:
+      type: boolean
+      description: Include internal heartbeat/cron prompt rows and UI-only follow-up archive rows. Default false.
+      default: false
+    include_current_turn:
+      type: boolean
+      description: Include messages from the current turn. Default false; the current user message is already in the transcript.
+      default: false
+    action:
+      type: string
+      description: "search (default) returns hits; open reads one message addressed by message_index."
+      enum:
+        - search
+        - open
+      default: search
+    message_index:
+      type: integer
+      description: Zero-based message index from a search hit; required only for action=open.
+      minimum: 0
+    expected_turn_id:
+      type: string
+      description: Optional turn id copied from the search hit. When set, action=open fails with stale_message_index if the transcript changed.
+  required: []
+governance:
+  display_name: Search Session History
+  description: Message-level keyword search over the current session's persisted chat transcript.
+  risk_level: low
+  destructive: false
+  allowed_roles:
+    - ceo
+recovery_policy:
+  rerun_safe: true
+
+exposure:
+  agent: true
+  main_runtime: false
+toolskill:
+  enabled: true

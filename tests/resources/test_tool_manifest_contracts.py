@@ -261,6 +261,7 @@ def test_rerunnable_tools_are_exactly_the_declared_list():
         'load_tool_context',
         'memory_note',
         'perf_inspect_cn',
+        'search_session_history',  # reads the current session transcript only
         'show_sticker_category',
         'task_failed_nodes_cn',
         'task_fetch_cn',

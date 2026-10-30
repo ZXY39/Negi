@@ -171,6 +171,14 @@ exec 与 memory 工具：
 - 字段级排障入口：`contract_visible_skill_ids` 是 `runtime_service._node_context_selection_inputs()` 当轮记下的 contract-visible skill 快照（输入层证据，随 runtime frame 与 `runtime-frame-messages:{node_id}` artifact 落盘）；`skill_visibility_diagnostics.entries` 携带 `registry_skill_ids` 与逐 skill 的 `enabled` / `available` / `allowed_for_actor_role` / `policy_effect` / `included_in_contract_visible`，用于定位是 live `resource_registry`、`allowed_roles` 还是治理策略拦掉了 skill；节点 context selection cache 与 `persisted_frame_router` 都带 live-visibility freshness gate——复用旧 selection 前重新对照当前 `session_key` / `actor_role` / `visible_tool_names` / `contract_visible_skill_ids` / `registry_skill_ids`，一旦漂移就丢弃旧 selection，重新跑 `_node_context_selection_inputs()` 与 `build_node_context_selection(...)`。这挡的是“外部 resource/governance refresh 改了可见性，但节点长期沿用旧 cache / 旧 frame”的回归（尤其“首轮 skill 可见集为空，后续轮次一直空”）。
 - 前门候选生成诊断同步在 session snapshot 的 `frontdoor_selection_debug`：`tool_selection` 回答命中项为什么没进最终 `candidate_tool_names`。
 
+### 3.2.1 本会话历史检索（`search_session_history`）
+
+`search_session_history` 是 CEO-only 的普通候选工具（资源 `tools/search_session_history`），数据源是当前会话的 `Session.messages`（与 `sessions/<safe_key>.jsonl` 同源），不是 `content_search` 的行级文件扫描。它按 1–8 个字面关键词做大小写不敏感的子串匹配：`match=all` 要求同一条消息命中全部词，`match=any` 命中其一即可；返回 `message_index` / `turn_id` / `role` / `timestamp` / 命中居中片段 `snippet` / `matched_keywords`，并按 `order=recent|oldest` 分页。`action=open` 用命中里的 `message_index` 取整条消息（正文上限 4000 字符，超出时带 `truncated` / `remaining_chars`）；带 `expected_turn_id` 时下标过期返回 `stale_message_index`。
+
+默认排除内部心跳/cron 提示行、压缩区分线、`follow_up_archive` 归档行与当前回合；`include_internal` / `include_current_turn` 才纳入。它不索引工具入参/出参、附件正文或跨会话内容；匹配是子串而非分词/语义，同义词由调用方换词重试。
+
+会话键只从工具运行时取，模型不能传 `session_id` 或 `path`，因此没有跨会话读取面。工具级信任判据只服务 owner 会话：第三方会话即使能看见这颗 CEO 工具（`jailed` 档会拿到 CEO 工具面）也会被拒，因为转录可能包含信任降级前的历史。结果走普通工具结果信封；默认 8 条 × 240 字符，避免把上下文撑爆。
+
 ### 3.3 candidate skills
 
 候选 skill 与 candidate tools 类似，但机制更轻：
