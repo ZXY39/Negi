@@ -193,7 +193,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 入站到首个 provider 请求发出耗时异常 → `context-and-cache-troubleshooting.md`「Prompt Cache Family 与 Actual Request」
 - 会话/节点疑似卡在 provider 退避重试，但界面没有重试次数与错误信息；或回合长时间不出新内容而连接没断（分不清"退避等待中"与"上游只滴分片不给载荷"） → `runtime-overview.md`「Chat provider 超时与重试边界」+ `web-and-admin.md`「Model Retry Visibility UI Contract」
 - 点开会话一直停在 Loading（WebSocket 连上了却一帧不来），而会话列表/任务接口都正常 → `web-and-admin.md`「Local Startup And Launcher Contract」
-- 渠道/会话收到英文 "The turn completed without visible assistant text…"，或回合以「这一轮处理失败：响应流未正常终止」结束 → `runtime-overview.md`「Chat provider 超时与重试边界」（空响应与未终止流两条车道、`finish_reason_seen` 日志锚点）
+- 渠道/会话收到英文 "The turn completed without visible assistant text…"，或回合以「这一轮处理失败：响应流未正常终止」结束，或 `task_terminal` 心跳只交出「系统在整理该结果时连续失败」那句成句 → `runtime-overview.md`「Chat provider 超时与重试边界」（空响应、只想不写、未终止流三条车道与 `finish_reason_seen` 日志锚点）+ `heartbeat-system.md`「Task Terminal Repair Contract」
 - `temp/tasks/` 出现大量无主 `task_*` 目录（目录数远超任务数）→ `operations-and-maintenance.md`「关键状态文件与目录」+ `runtime-overview.md`「任务侧」
 - 临时文件散落在工作区根目录（`.tmp_*` / `tmp_*`、命令重定向落盘），或正式交付物没进默认交付落点 → `runtime-overview.md`「任务侧」+ `tool-and-skill-system.md`「Model Path Anchoring Contract」
 - 直接编辑 `skills/` 或 `tools/` 下的文件后注册表不认（新 skill 看不到、改过的正文仍以旧内容参与）→ `tool-and-skill-system.md`「资源目录代检查与语义目录新鲜度」

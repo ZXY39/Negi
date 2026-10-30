@@ -3255,6 +3255,10 @@ class RuntimeAgentSession:
         """
         return bool(getattr(self, "_last_silent_reply", False))
 
+    def _resolve_reasoning_only_reask_exhausted(self) -> bool:
+        """本轮是不是"重问过一次仍然只想不写"收的口——同样只由 runner 回填通道判定。"""
+        return bool(getattr(self, "_last_reasoning_only_retry_exhausted", False))
+
     def _silent_reply_metadata(self, output: str) -> tuple[dict[str, Any], str]:
         """静默回合的落盘元数据与痕迹正文；非静默时返回 ``({}, output)``。
 
@@ -4047,7 +4051,7 @@ class RuntimeAgentSession:
                 await self._emit("turn_end", session_key=self._state.session_key, status="completed")
                 await self._emit("agent_end", session_key=self._state.session_key, status="completed")
                 await self._emit_state_snapshot()
-                return RunResult(output="" if silent_reply else output, is_silent_reply=silent_reply, events=list(self._event_log))
+                return RunResult(output="" if silent_reply else output, is_silent_reply=silent_reply, events=list(self._event_log), reasoning_only_reask_exhausted=self._resolve_reasoning_only_reask_exhausted())
             logger.opt(exception=exc).error(
                 "Runtime agent turn failed "
                 "(session_key={}, route_kind={}, internal_source={})",
@@ -4294,7 +4298,7 @@ class RuntimeAgentSession:
             await self._emit_state_snapshot()
             tail_profiler.mark("emit_terminal_events")
             tail_profiler.warn_if_slow()
-            return RunResult(output="" if silent_reply else output, is_silent_reply=silent_reply, events=list(self._event_log))
+            return RunResult(output="" if silent_reply else output, is_silent_reply=silent_reply, events=list(self._event_log), reasoning_only_reask_exhausted=self._resolve_reasoning_only_reask_exhausted())
         finally:
             if self._active_cancel_token is cancel_token:
                 self._active_cancel_token = None
@@ -4866,7 +4870,7 @@ class RuntimeAgentSession:
                 dispatched_task_ids=self._turn_dispatched_task_ids(),
             )
             await self._emit_state_snapshot()
-            return RunResult(output="" if silent_reply else str(output or ""), is_silent_reply=silent_reply, events=list(self._event_log))
+            return RunResult(output="" if silent_reply else str(output or ""), is_silent_reply=silent_reply, events=list(self._event_log), reasoning_only_reask_exhausted=self._resolve_reasoning_only_reask_exhausted())
 
     async def cancel(self, *, reason: str = "user_cancelled") -> None:
         await self._emit_safe_stop_notice("cancel")

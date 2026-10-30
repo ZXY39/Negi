@@ -1692,6 +1692,16 @@ class WebSessionHeartbeatService:
             None,
         )
         require_visible_reply = self._events_require_visible_reply(events)
+        if (
+            require_visible_reply
+            and not silent_reply
+            and not output
+            and bool(getattr(result, "reasoning_only_reask_exhausted", False))
+        ):
+            # 前门已经带着上一跳的思考引用原地重问过一轮，模型还是只想不写。这里不再自开
+            # 修复轮（那是把整份请求体按 5 轮重打），直接落固定文案：用户至少知道任务到了
+            # 终态、结果在哪看、可以让我重新整理。
+            output = self._fixed_visible_reply_error_text(events)
         repair_attempt = 0
         repair_failed = False
         while require_visible_reply and not silent_reply and self._visible_reply_requires_repair(output):

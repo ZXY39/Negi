@@ -113,3 +113,6 @@ class RunResult:
     output: str = ""
     events: list[dict[str, Any]] = field(default_factory=list)
     is_silent_reply: bool = False
+    # 前门为「只思考、不产出」那一跳已经原地重问过一轮，仍然拿不到可见正文。
+    # 渠道收口侧读它来决定直接落固定文案，而不是把这个回合当普通空回复再开修复轮。
+    reasoning_only_reask_exhausted: bool = False

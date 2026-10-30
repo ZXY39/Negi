@@ -71,6 +71,10 @@ class CeoPersistentState(TypedDict, total=False):
 
     tool_contract_echo_attempt_count: int
 
+    reasoning_only_retry_count: int
+
+    reasoning_only_retry_exhausted: bool
+
 
 
     empty_response_retry_count: int

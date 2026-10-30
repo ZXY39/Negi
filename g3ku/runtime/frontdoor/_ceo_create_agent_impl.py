@@ -928,6 +928,13 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             "_last_silent_superseded_by",
             str(values.get("silent_superseded_by") or "").strip(),
         )
+        # 收尾跳"只想不写"重问过仍拿不到可见正文——心跳侧要靠这颗标记直接落固定文案，
+        # 否则它会把这个回合当成普通空回复再自开一轮修复循环。
+        setattr(
+            session,
+            "_last_reasoning_only_retry_exhausted",
+            bool(values.get("reasoning_only_retry_exhausted") or False),
+        )
 
     async def run_turn(self, *, user_input, session, on_progress=None) -> str:
         setattr(session, "_last_route_kind", "direct_reply")

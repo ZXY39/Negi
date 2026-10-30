@@ -279,6 +279,62 @@ _TOOL_CONTRACT_ECHO_REPAIR_MESSAGE = (
     'Do not output, summarize, or quote that contract. Return only the '
     'user-facing answer, or use the structured tool-calling interface when a tool is required.'
 )
+_REASONING_ONLY_RETRY_LIMIT = 1
+_REASONING_ONLY_RETRY_QUOTE_CHARS = 4000
+
+
+def _response_carries_reasoning(response_view: Any) -> bool:
+    """这一跳到底想过没有——判据只看有没有思考载荷，不看它能不能被引用。
+
+    Responses 车道的项可能只有密文（`encrypted_content`），那种抄不进提醒也不该放弃重问：
+    形状本身（零正文、零工具调用、正常终止）才是要认的东西。
+    """
+    if str(getattr(response_view, "reasoning_content", "") or "").strip():
+        return True
+    return bool(list(getattr(response_view, "reasoning_items", None) or []))
+
+
+def _reasoning_only_quote_text(response_view: Any) -> str:
+    """这一跳已经想过什么——chat 取 `reasoning_content`，Responses 取项里的 summary。
+
+    密文项（`encrypted_content`）不引用：它只对签发模型可解，抄进 note 等于抄噪声。
+    """
+    reasoning = str(getattr(response_view, "reasoning_content", "") or "").strip()
+    if reasoning:
+        return reasoning
+    parts: list[str] = []
+    for item in list(getattr(response_view, "reasoning_items", None) or []):
+        if not isinstance(item, dict):
+            continue
+        summary = item.get("summary")
+        if isinstance(summary, str):
+            parts.append(summary.strip())
+        elif isinstance(summary, list):
+            for entry in summary:
+                if isinstance(entry, dict):
+                    parts.append(str(entry.get("text") or "").strip())
+    return "\n".join([part for part in parts if part]).strip()
+
+
+def build_reasoning_only_repair_message(reasoning_text: str) -> str:
+    excerpt = str(reasoning_text or "").strip()
+    if len(excerpt) > _REASONING_ONLY_RETRY_QUOTE_CHARS:
+        excerpt = excerpt[:_REASONING_ONLY_RETRY_QUOTE_CHARS].rstrip() + ' ...[truncated]'
+    if not excerpt:
+        return (
+            'Your previous response produced internal reasoning only: no user-visible text '
+            'and no tool call, and then it stopped. This turn must end with actual content: '
+            'either write the user-facing answer, or call a tool.'
+        )
+    return (
+        'Your previous response produced internal reasoning only: no user-visible text '
+        'and no tool call, and then it stopped. Reasoning you had already produced:\n'
+        f'"""{excerpt}"""\n'
+        'Do not repeat that reasoning. Now produce actual content for this turn: '
+        'either write the user-facing answer, or call a tool.'
+    )
+
+
 # 渠道会话（官方 QQ、第三方桥）没有审批界面：条件放行档下需要审批的那几条调用在这一跳就打回。
 # 回执只教模型怎么把这件事讲给用户，不指使它自己去改设置。
 _CHANNEL_REVIEW_REJECTION_TEXT = (
@@ -8370,6 +8426,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "xml_repair_tool_names": [],
             "xml_repair_last_issue": "",
             "tool_contract_echo_attempt_count": 0,
+            "reasoning_only_retry_count": 0,
+            "reasoning_only_retry_exhausted": False,
             "empty_response_retry_count": 0,
             "heartbeat_internal": heartbeat_internal,
             "cron_internal": cron_internal,
@@ -9062,6 +9120,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 "xml_repair_tool_names": [],
                 "xml_repair_last_issue": "",
                 "tool_contract_echo_attempt_count": 0,
+                "reasoning_only_retry_count": 0,
                 "next_step": "review_tool_calls",
             }
 
@@ -9216,6 +9275,34 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     default=current_route_kind,
                     verified_task_ids=list(state.get("verified_task_ids") or []),
                 ),
+                "next_step": "finalize",
+            }
+
+        if _response_carries_reasoning(response_view):
+            # 收尾跳只想不写。那段思考按投影规则不进历史（架构文档「思考内容（reasoning）
+            # 的上下文回放」），重问时模型看不见自己刚想过什么，只丢一句"必须产出内容"
+            # 等于让它从零再推一遍；引用回去比丢弃便宜，且不动历史、不动空响应判据。
+            reasoning_only_retry_count = int(state.get("reasoning_only_retry_count", 0) or 0) + 1
+            if reasoning_only_retry_count <= _REASONING_ONLY_RETRY_LIMIT:
+                return {
+                    "repair_overlay_text": build_reasoning_only_repair_message(
+                        _reasoning_only_quote_text(response_view)
+                    ),
+                    "reasoning_only_retry_count": reasoning_only_retry_count,
+                    "final_output": "",
+                    "next_step": "call_model",
+                }
+            # 二次仍然只想不写：不再替它编一条交付物。空正文交给 `_graph_finalize_turn`
+            # 的既有规则处置（用户轮→静默），这颗标记让心跳直接落固定文案、不再自开修复轮。
+            return {
+                "final_output": "",
+                "route_kind": self._route_kind_for_turn(
+                    used_tools=used_tools,
+                    default=current_route_kind,
+                    verified_task_ids=list(state.get("verified_task_ids") or []),
+                ),
+                "reasoning_only_retry_count": reasoning_only_retry_count,
+                "reasoning_only_retry_exhausted": True,
                 "next_step": "finalize",
             }
 
