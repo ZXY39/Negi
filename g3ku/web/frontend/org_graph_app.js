@@ -6125,6 +6125,8 @@ function createPendingCeoTurn(source = "user", { scrollMode = "preserve", reques
         turn.listEl?.addEventListener?.("click", () => {
             window.requestAnimationFrame?.(() => syncCeoFlowGuideLength(turn));
         });
+        // 列表盒子一变（字号、展开、流式长高、视图重新可见）就重量引导线，不靠调用方记。
+        observeCeoFlowResize(turn);
         icons();
         return turn;
     }, { scrollMode });
@@ -10644,12 +10646,49 @@ const READING_SCALE_DEFAULT = 1.1;
 
 // 阅读面文字变高后，已展开流程框的引导线长度与圆点几何都会过期：按当前 DOM 重量一次，
 // 不等下一次重绘。折叠框与没有流程行的会话会被 syncCeoFlowGuideLength 自己跳过。
-function syncReadingTextGeometry() {
+function syncOpenCeoFlowGeometry() {
     document.querySelectorAll?.(".interaction-flow[open]")?.forEach?.((flow) => {
         const list = flow?.querySelector?.(".interaction-flow-list");
         if (list) syncCeoFlowGuideLength({ flowEl: flow, listEl: list });
     });
+}
+
+function syncReadingTextGeometry() {
+    // 圆点必须先量：引导线的 top 读的就是 --ceo-flow-dot-y，先量线后移点时，
+    // 线的长度是按旧圆心定下的，线尾会正好差一个墨迹中线的位移。
     if (typeof syncCeoFlowDotGeometry === "function") syncCeoFlowDotGeometry();
+    syncOpenCeoFlowGeometry();
+}
+
+// 引导线长度是一段像素快照，字号、展开、流式长高、窗口换行都会让它过期。观察列表盒子的
+// 尺寸，任何一次变化都在下一帧重量，不依赖每个调用方都记得补一次（字号档位、视图切回
+// 可见时同样会走到这里）。盒子本身不变时（列表已达滚动封顶）线本来就封在可见底边。
+const CEO_FLOW_RESIZE_OBSERVED = new WeakSet();
+let ceoFlowResizeObserver = null;
+let ceoFlowGeometryQueued = false;
+
+function scheduleCeoFlowGeometrySync() {
+    if (ceoFlowGeometryQueued) return;
+    ceoFlowGeometryQueued = true;
+    // 布尔闸而不是存 rAF 句柄：同步实现的帧调度（测试桩）里句柄要在回调之后才拿得到，
+    // 存句柄会让下一轮永远被当成"已排队"。
+    const run = () => {
+        ceoFlowGeometryQueued = false;
+        syncReadingTextGeometry();
+    };
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(run);
+    else run();
+}
+
+function observeCeoFlowResize(turn) {
+    const list = turn?.listEl;
+    if (!(list instanceof HTMLElement) || CEO_FLOW_RESIZE_OBSERVED.has(list)) return;
+    if (typeof ResizeObserver !== "function") return;
+    if (!ceoFlowResizeObserver) {
+        ceoFlowResizeObserver = new ResizeObserver(() => scheduleCeoFlowGeometrySync());
+    }
+    CEO_FLOW_RESIZE_OBSERVED.add(list);
+    ceoFlowResizeObserver.observe(list);
 }
 
 function writeReadingScale(scale) {

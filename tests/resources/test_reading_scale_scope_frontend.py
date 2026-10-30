@@ -111,3 +111,6 @@ def test_scale_commit_resyncs_flow_geometry() -> None:
     assert "function syncReadingTextGeometry()" in app_js
     assert "syncCeoFlowGuideLength({ flowEl: flow, listEl: list })" in app_js
     assert "onCommit: syncReadingTextGeometry" in app_js
+    # 引导线长度是像素快照：列表盒子一变就要重量，不能把重算留给每个调用方。
+    assert "new ResizeObserver(() => scheduleCeoFlowGeometrySync())" in app_js
+    assert "observeCeoFlowResize(turn);" in app_js

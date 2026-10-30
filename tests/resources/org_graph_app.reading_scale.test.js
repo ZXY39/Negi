@@ -8,8 +8,9 @@ const CODE = readFrontendSources(["app"]).join("\n");
 
 // 设置里的两行档位共用一套控件逻辑，这里跑的是「字号」那一行（只乘阅读面）。
 // 两行的元素都注册：顶层 initializeScaleRows() 会同时初始化缩放那一行。
-function loadApp({ stored = null, shell = false, zoomApi = null } = {}) {
+function loadApp({ stored = null, shell = false, zoomApi = null, resizeObserver = false } = {}) {
     const store = new Map();
+    let observer = null;
     if (stored !== null) store.set("g3ku.ui.reading-scale.v1", stored);
     const document = new StubDocument();
     const range = new StubHTMLElement("INPUT");
@@ -68,6 +69,19 @@ function loadApp({ stored = null, shell = false, zoomApi = null } = {}) {
             }
         },
     };
+    if (resizeObserver) {
+        context.ResizeObserver = class {
+            constructor(callback) {
+                this.callback = callback;
+                this.observed = [];
+                observer = this;
+            }
+
+            observe(target) {
+                this.observed.push(target);
+            }
+        };
+    }
     context.window = context;
     if (shell) {
         context.chrome = { webview: {} };
@@ -78,7 +92,7 @@ function loadApp({ stored = null, shell = false, zoomApi = null } = {}) {
     }
     vm.createContext(context);
     vm.runInContext(
-        `${CODE}\nthis.__testExports = { readingScaleRow, zoomRow, READING_SCALE_DEFAULT };`,
+        `${CODE}\nthis.__testExports = { readingScaleRow, zoomRow, READING_SCALE_DEFAULT, syncReadingTextGeometry, observeCeoFlowResize };`,
         context
     );
     return {
@@ -90,6 +104,9 @@ function loadApp({ stored = null, shell = false, zoomApi = null } = {}) {
         range,
         shell: shellEl,
         number,
+        get observer() {
+            return observer;
+        },
     };
 }
 
@@ -145,35 +162,56 @@ test("字号滑条的两条路都不回填指针，落盘只在松手那一次",
     assert.equal(app.store.get("g3ku.ui.reading-scale.v1"), "0.1");
 });
 
-test("字号落定后重算已展开流程框的引导线长度与圆点几何", () => {
-    const app = loadApp();
+function installFlowStub(app) {
     const flow = new StubHTMLElement("DETAILS");
     flow.open = true;
     const guide = new StubHTMLElement("SPAN");
-    const removed = [];
+    const list = new StubHTMLElement("DIV");
+    const events = [];
     guide.style = {
         removeProperty(name) {
-            removed.push(name);
+            events.push(`guide:${name}`);
         },
     };
-    const list = new StubHTMLElement("DIV");
     flow.querySelector = (selector) => {
         if (selector === ".interaction-flow-guide") return guide;
         if (selector === ".interaction-flow-list") return list;
         return null;
     };
     app.context.document._qsAll[".interaction-flow[open]"] = [flow];
-    let dotSyncs = 0;
     app.context.syncCeoFlowDotGeometry = () => {
-        dotSyncs += 1;
+        events.push("dot");
     };
+    return { flow, guide, list, events };
+}
+
+test("字号落定后先校圆点再量引导线", () => {
+    const app = loadApp();
+    const { events } = installFlowStub(app);
     app.readingScaleRow.bind();
 
     app.number.value = "150";
     app.number.dispatchEvent({ type: "change", target: app.number });
 
-    assert.deepEqual(removed, ["height"], "展开流程的引导线高度没有按新字号重量");
-    assert.equal(dotSyncs, 1, "字号落定后圆点几何没有重量");
+    // 引导线的 top 读的是圆点变量：先量线后移点，线尾会差一个墨迹中线的位移。
+    assert.deepEqual(events, ["dot", "guide:height"], "圆点必须先于引导线重量");
+});
+
+test("列表盒子一变就在下一帧重量几何，同一列表只观察一次", () => {
+    const app = loadApp({ resizeObserver: true });
+    const list = new StubHTMLElement("DIV");
+    app.observeCeoFlowResize({ listEl: list });
+    app.observeCeoFlowResize({ listEl: list });
+    assert.equal(app.observer.observed.length, 1, "同一列表被重复观察");
+
+    let dotSyncs = 0;
+    app.context.syncCeoFlowDotGeometry = () => {
+        dotSyncs += 1;
+    };
+    app.context.document._qsAll[".interaction-flow[open]"] = [];
+    app.observer.callback([], app.observer);
+
+    assert.equal(dotSyncs, 1, "列表尺寸变化后没有重量几何");
 });
 
 test("字号数字格填任意正数即落盘，非正数与空保留原档位", () => {
