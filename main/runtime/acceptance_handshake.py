@@ -55,6 +55,27 @@ def _coerce_int(value: Any, *, default: int) -> int:
         return int(default)
 
 
+def derive_final_acceptance_status(handshake_state: str) -> str:
+    """Project the handshake's state onto ``task.metadata.final_acceptance.status``.
+
+    The task-level field has no state of its own: ``accepted`` always reads
+    ``passed``, ``rejected_terminal`` always reads ``failed``. ``running`` is
+    deliberately not produced — it described a dispatch decision, not a state.
+    """
+    state = str(handshake_state or "").strip().lower()
+    if state == ACCEPTANCE_STATE_ACCEPTED:
+        return FINAL_ACCEPTANCE_STATUS_PASSED
+    if state == ACCEPTANCE_STATE_REJECTED_TERMINAL:
+        return FINAL_ACCEPTANCE_STATUS_FAILED
+    if state == ACCEPTANCE_STATE_CANCELED_BY_EXECUTION_FAILURE:
+        return ACCEPTANCE_STATE_CANCELED_BY_EXECUTION_FAILURE
+    if state == ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY:
+        return ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY
+    if state == ACCEPTANCE_STATE_WAITING_ACCEPTANCE:
+        return ACCEPTANCE_STATE_WAITING_ACCEPTANCE
+    return FINAL_ACCEPTANCE_STATUS_PENDING
+
+
 def normalize_acceptance_handshake(payload: Any) -> dict[str, Any]:
     current = dict(payload or {}) if isinstance(payload, dict) else {}
     state = str(current.get("state") or "").strip()

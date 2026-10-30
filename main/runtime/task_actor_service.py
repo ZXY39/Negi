@@ -2387,7 +2387,7 @@ class TaskActorService:
                 task=task,
                 acceptance=acceptance,
             )
-        self._update_final_acceptance_state(task_id, node_id=acceptance.node_id, status='running')
+        self._update_final_acceptance_state(task_id, node_id=acceptance.node_id)
         return acceptance
 
     def _find_existing_root_final_acceptance_node(self, *, task_id: str, root) -> object | None:
@@ -2428,13 +2428,11 @@ class TaskActorService:
             )
         return chosen
 
-    def _update_final_acceptance_state(self, task_id: str, *, node_id: str | None = None, status: str | None = None) -> None:
+    def _update_final_acceptance_state(self, task_id: str, *, node_id: str | None = None) -> None:
         def _mutate(metadata):
             final_acceptance = normalize_final_acceptance_metadata(metadata.get('final_acceptance')).model_dump(mode='json')
             if node_id is not None:
                 final_acceptance['node_id'] = str(node_id or '').strip()
-            if status is not None:
-                final_acceptance['status'] = str(status or final_acceptance.get('status') or 'pending').strip().lower() or 'pending'
             metadata['final_acceptance'] = final_acceptance
             return metadata
 

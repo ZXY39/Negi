@@ -58,6 +58,7 @@ from main.monitoring.task_projector import TaskProjector
 from main.protocol import build_envelope, now_iso
 from main.runtime.acceptance_handshake import (
     ACCEPTANCE_HANDSHAKE_KEY,
+    derive_final_acceptance_status,
     normalize_acceptance_handshake,
 )
 from main.runtime.append_notice_context import (
@@ -1730,7 +1731,12 @@ class TaskLogService:
         next_final_acceptance = current.model_dump(mode='json')
         next_final_acceptance['required'] = bool(current.required or acceptance_metadata.get('final_acceptance'))
         next_final_acceptance['node_id'] = str(acceptance_node.node_id or '').strip()
-        next_final_acceptance['status'] = str(status or current.status or 'pending').strip().lower() or 'pending'
+        handshake = normalize_acceptance_handshake(
+            (getattr(accepted_node, 'metadata', None) or {}).get(ACCEPTANCE_HANDSHAKE_KEY)
+            if accepted_node is not None
+            else {}
+        )
+        next_final_acceptance['status'] = derive_final_acceptance_status(str(handshake.get('state') or ''))
         metadata['final_acceptance'] = next_final_acceptance
 
         execution_output = str(getattr(accepted_node, 'final_output', '') or '').strip() if accepted_node is not None else ''

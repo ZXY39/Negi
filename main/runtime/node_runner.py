@@ -49,6 +49,7 @@ from main.runtime.acceptance_handshake import (
     ACCEPTANCE_STATE_REJECTED_TERMINAL,
     ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
     ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY,
+    derive_final_acceptance_status,
     normalize_acceptance_handshake,
     set_acceptance_handshake_state,
 )
@@ -1727,19 +1728,22 @@ class NodeRunner:
         *,
         task_id: str,
         acceptance_node_id: str,
-        status: str,
         final_execution_output: str | None = None,
     ) -> None:
         normalized_node_id = str(acceptance_node_id or '').strip()
-        normalized_status = str(status or '').strip().lower()
         normalized_output = None if final_execution_output is None else str(final_execution_output or '').strip()
+        acceptance = self._store.get_node(normalized_node_id) if normalized_node_id else None
+        execution = self._accepted_execution_node(task_id=task_id, acceptance=acceptance) if acceptance is not None else None
+        handshake = normalize_acceptance_handshake(
+            ((execution.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY) if execution is not None else {})
+        )
+        projected_status = derive_final_acceptance_status(str(handshake.get('state') or ''))
 
         def _mutate(metadata: dict[str, Any]) -> dict[str, Any]:
             final_acceptance = normalize_final_acceptance_metadata(metadata.get('final_acceptance')).model_dump(mode='json')
             if normalized_node_id:
                 final_acceptance['node_id'] = normalized_node_id
-            if normalized_status:
-                final_acceptance['status'] = normalized_status
+            final_acceptance['status'] = projected_status
             metadata['final_acceptance'] = final_acceptance
             if normalized_output is None:
                 return metadata
@@ -1864,7 +1868,6 @@ class NodeRunner:
             self._set_task_final_acceptance_state(
                 task_id=task.task_id,
                 acceptance_node_id=acceptance.node_id,
-                status=ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY,
                 final_execution_output='',
             )
         self._log_service.refresh_task_view(task.task_id, mark_unread=True)
@@ -1898,7 +1901,6 @@ class NodeRunner:
             self._set_task_final_acceptance_state(
                 task_id=task.task_id,
                 acceptance_node_id=acceptance.node_id,
-                status=ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY,
                 final_execution_output='',
             )
         self._log_service.refresh_task_view(task.task_id, mark_unread=True)
@@ -2025,7 +2027,6 @@ class NodeRunner:
             self._set_task_final_acceptance_state(
                 task_id=task.task_id,
                 acceptance_node_id=acceptance.node_id,
-                status='passed',
                 final_execution_output='',
             )
         self._log_service.refresh_task_view(task.task_id, mark_unread=True)
@@ -2099,7 +2100,6 @@ class NodeRunner:
             self._set_task_final_acceptance_state(
                 task_id=task_id,
                 acceptance_node_id=acceptance_node_id,
-                status=ACCEPTANCE_STATE_CANCELED_BY_EXECUTION_FAILURE,
                 final_execution_output='',
             )
         self._log_service.refresh_task_view(task_id, mark_unread=True)
@@ -2270,7 +2270,6 @@ class NodeRunner:
             self._set_task_final_acceptance_state(
                 task_id=task_id,
                 acceptance_node_id=acceptance_node_id,
-                status=ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
                 final_execution_output='',
             )
 

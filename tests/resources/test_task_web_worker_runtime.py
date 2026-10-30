@@ -684,6 +684,89 @@ def test_internal_task_terminal_callback_persists_pending_outbox_and_dedupes(tmp
     assert len(heartbeat.payloads) == 1
 
 
+@pytest.mark.asyncio
+async def test_reterminalized_task_keeps_finished_at_and_refuses_a_second_delivery(tmp_path: Path, monkeypatch):
+    """终态被节点重写后再次终态化：finished_at 只写一次，同一 canonical key 的第二次投递被拒。"""
+    service = _build_service(tmp_path)
+    heartbeat = _HeartbeatRecorder()
+    try:
+        record = await service.create_task("reterminalize", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None and root is not None
+
+        service.log_service.update_node_status(
+            record.task_id,
+            root.node_id,
+            status="success",
+            final_output="done",
+        )
+        first = service.get_task(record.task_id)
+        assert first is not None and first.status == "success"
+        finished_at = first.finished_at
+        assert finished_at
+
+        service.store.update_node(root.node_id, lambda rec: rec.model_copy(update={"status": "in_progress"}))
+        reopened = service.log_service.refresh_task_view(record.task_id, mark_unread=True)
+        assert reopened is not None
+        assert reopened.status == "in_progress"
+        assert reopened.finished_at == finished_at
+
+        service.log_service.update_node_status(
+            record.task_id,
+            root.node_id,
+            status="success",
+            final_output="done again",
+        )
+        second = service.get_task(record.task_id)
+        assert second is not None and second.status == "success"
+        assert second.finished_at == finished_at
+
+        payload = normalize_task_terminal_payload(
+            {
+                "task_id": record.task_id,
+                "session_id": "web:shared",
+                "title": "reterminalize",
+                "status": "success",
+                "brief_text": "done",
+                "finished_at": finished_at,
+            }
+        )
+        canonical_key = build_task_terminal_dedupe_key(
+            task_id=record.task_id,
+            status="success",
+            finished_at=finished_at,
+        )
+        assert payload["dedupe_key"] == canonical_key
+
+        monkeypatch.setenv(TASK_TERMINAL_CALLBACK_TOKEN_ENV, "secret-token")
+        monkeypatch.setattr("main.api.internal_rest.get_agent", lambda: SimpleNamespace(main_task_service=service))
+        monkeypatch.setattr("main.api.internal_rest.get_web_heartbeat_service", lambda _agent=None: heartbeat)
+
+        async def _ensure_services(_agent=None) -> None:
+            return None
+
+        monkeypatch.setattr("main.api.internal_rest.ensure_web_runtime_services", _ensure_services)
+        client = TestClient(_build_app())
+        headers = {"x-g3ku-internal-token": "secret-token"}
+        accepted = client.post("/api/internal/task-terminal", json=payload, headers=headers)
+        assert accepted.status_code == 200
+        assert accepted.json()["duplicate"] is False
+        assert accepted.json()["accepted"] is True
+
+        refused = client.post("/api/internal/task-terminal", json=payload, headers=headers)
+        assert refused.status_code == 200
+        assert refused.json()["duplicate"] is True
+        assert refused.json()["accepted"] is False
+        assert refused.json()["rejected_reason"] == "already_accepted"
+        assert len(heartbeat.payloads) == 1
+
+        rows = service.store.list_pending_task_terminal_outbox(limit=50)
+        assert sum(1 for row in rows if row["task_id"] == record.task_id) == 1
+    finally:
+        await service.close()
+
+
 def test_internal_task_terminal_callback_normalizes_caller_supplied_dedupe_key(tmp_path: Path, monkeypatch):
     """Probe/retry variants of the dedupe key must not re-deliver the same task result."""
     service = MainRuntimeService(
@@ -7948,11 +8031,21 @@ async def test_execution_retry_failure_does_not_overwrite_successful_acceptance(
                 blocking_reason="missing board format",
             ),
         )
-        service.log_service.update_node_status(
-            record.task_id,
-            acceptance.node_id,
-            status="success",
-            final_output="accepted",
+        # Simulate the acceptance pass through its real finalizer: node row success,
+        # handshake accepted and the task-level projection written together.
+        service.node_runner._finalize_acceptance_pass(
+            task=task,
+            execution=root,
+            acceptance=acceptance,
+            result=NodeFinalResult(
+                status="success",
+                delivery_status="final",
+                summary="accepted",
+                answer="accepted",
+                evidence=[],
+                remaining_work=[],
+                blocking_reason="",
+            ),
         )
 
         service.node_runner._mark_finished(
@@ -8036,10 +8129,8 @@ async def test_run_final_acceptance_avoids_duplicate_task_state_rewrites_after_s
 
         original_update_final_acceptance_state = service.task_actor_service._update_final_acceptance_state
 
-        def _guarded_update_final_acceptance_state(task_id: str, *, node_id: str | None = None, status: str | None = None) -> None:
-            if status in {"passed", "failed"}:
-                raise AssertionError("duplicate final_acceptance terminal rewrite")
-            return original_update_final_acceptance_state(task_id, node_id=node_id, status=status)
+        def _guarded_update_final_acceptance_state(task_id: str, *, node_id: str | None = None) -> None:
+            return original_update_final_acceptance_state(task_id, node_id=node_id)
 
         def _forbid_record_final_execution_output(*args, **kwargs) -> None:
             raise AssertionError("duplicate final_execution_output rewrite")
@@ -8359,7 +8450,6 @@ async def test_resubmission_after_terminal_acceptance_resets_and_reopens_handsha
         service.node_runner._set_task_final_acceptance_state(
             task_id=task.task_id,
             acceptance_node_id=acceptance.node_id,
-            status="passed",
         )
 
         # Root resubmits a final result after acceptance passed.
