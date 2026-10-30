@@ -98,6 +98,15 @@ Cron job delivery is claim-before-dispatch with a bounded, self-finalizing dispa
 - **Platform ceiling**: a group without the QQ “主动推送消息能力” permission still wakes
   the session, but the proactive message is rejected by the bridge as `active_denied` and
   is recorded as undeliverable; the throttle does not change that.
+- **Delivery-failure wake**: the bridge ack carries `kind` / `shape` / `passive_window_open`
+  / `text_preview`; the ack route records the capability on the external session registry
+  and enqueues a `delivery_failure` heartbeat event. Dedupe is by `outbox_id` only — every
+  distinct failed message wakes the model, with no time cooldown. The event bundle tells
+  the model not to retry the original message, to use `mention_member` only when a passive
+  window is open, and otherwise to call `silent`. A turn whose events are all
+  `delivery_failure` does not notify the channel at all; the model's text stays in the web
+  transcript. This prevents a failure notification from generating another failing
+  proactive reply.
 
 ## Task Terminal Repair Contract
 

@@ -26,7 +26,9 @@ import base64
 import binascii
 import json
 import mimetypes
+import threading
 import uuid
+from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -46,8 +48,10 @@ from g3ku.runtime.external_events import (
     get_session_event_hub,
 )
 from g3ku.runtime.external_outbox import (
+    PROACTIVE_EVENT,
     REPLY_EVENT,
     ack_outbound_message,
+    get_outbound_record,
     is_pull_consumable,
     load_pending_outbound,
 )
@@ -72,10 +76,32 @@ from g3ku.runtime.web_ceo_sessions import (
     workspace_path,
 )
 from g3ku.session.manager import SessionManager
-from g3ku.shells.web import get_runtime_manager, peek_global_agent
+from g3ku.shells.web import (
+    get_runtime_manager,
+    get_web_heartbeat_service,
+    peek_global_agent,
+)
 from g3ku.utils.helpers import ensure_dir, safe_filename
 
 router = APIRouter()
+
+# 一次失败只唤醒一次：按 outbox_id 去重（不按时间；每次不同的失败都要提醒模型）。
+_DELIVERY_FAILURE_SEEN: "OrderedDict[str, None]" = OrderedDict()
+_DELIVERY_FAILURE_LOCK = threading.RLock()
+_DELIVERY_FAILURE_SEEN_MAX = 1024
+
+
+def _remember_delivery_failure(outbox_id: str) -> bool:
+    target = str(outbox_id or "").strip()
+    if not target:
+        return False
+    with _DELIVERY_FAILURE_LOCK:
+        if target in _DELIVERY_FAILURE_SEEN:
+            return False
+        _DELIVERY_FAILURE_SEEN[target] = None
+        while len(_DELIVERY_FAILURE_SEEN) > _DELIVERY_FAILURE_SEEN_MAX:
+            _DELIVERY_FAILURE_SEEN.popitem(last=False)
+        return True
 
 # 图片附件沿用 web CEO 上传上限；文档/文件类附件单独放宽（渠道传文档常超
 # 5MiB）。超限一律 413 ``attachment_too_large``，桥侧按同值预过滤避免必然失败。
@@ -1255,11 +1281,53 @@ async def ack_outbox_entry(
     仍是 ``delivered``，旧桥的请求形状不变。
     """
     entry = _own_entry(session_id, principal)
-    status = str((payload or {}).get("status") or "").strip().lower()
+    raw = dict(payload or {})
+    status = str(raw.get("status") or "").strip().lower()
     if status not in _OUTBOX_ACK_STATUSES:
         status = "delivered"
+    kind = str(raw.get("kind") or "").strip().lower()
+    shape = str(raw.get("shape") or "").strip().lower()
+    passive_window_open = raw.get("passive_window_open")
+    text_preview = str(raw.get("text_preview") or "").strip()
     acked = ack_outbound_message(outbox_id, session_key=entry.session_key, status=status)
-    return {"ok": True, "acked": bool(acked), "outbox_id": str(outbox_id or ""), "status": status}
+    record = get_outbound_record(outbox_id)
+    proactive = str((record or {}).get("event") or "") == PROACTIVE_EVENT
+    failure_notice = False
+    if proactive and status == "delivered" and shape == "active":
+        # 主动形状送达成功 = 该群确实具备主动消息能力；清掉之前的 denied/quota。
+        get_external_session_registry().note_active_message_state(entry.session_key, "")
+    if proactive and status == "undeliverable" and kind:
+        if kind == "active_denied":
+            get_external_session_registry().note_active_message_state(entry.session_key, "denied")
+        elif kind == "quota_exhausted":
+            get_external_session_registry().note_active_message_state(entry.session_key, "quota")
+        if _remember_delivery_failure(outbox_id):
+            failure_payload = {
+                "session_id": entry.session_key,
+                "external_key": entry.external_key,
+                "outbox_id": str(outbox_id or ""),
+                "kind": kind,
+                "shape": shape,
+                "passive_window_open": (
+                    bool(passive_window_open) if passive_window_open is not None else False
+                ),
+                "text_preview": text_preview[:500],
+                "detail": str(raw.get("detail") or "")[:1000],
+                "received_at": datetime.now().isoformat(),
+            }
+            try:
+                heartbeat = get_web_heartbeat_service()
+                if heartbeat is not None:
+                    failure_notice = bool(heartbeat.enqueue_delivery_failure(failure_payload))
+            except Exception as exc:  # noqa: BLE001 - 唤醒失败不改变 ack 结果
+                logger.warning("delivery failure heartbeat enqueue failed: {}", exc)
+    return {
+        "ok": True,
+        "acked": bool(acked),
+        "outbox_id": str(outbox_id or ""),
+        "status": status,
+        "failure_notice": failure_notice,
+    }
 
 
 # -- events (SSE) -----------------------------------------------------------

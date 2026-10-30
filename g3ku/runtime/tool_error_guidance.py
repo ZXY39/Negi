@@ -53,7 +53,7 @@ _NO_LOAD_NEEDED_NOTE = '「{name}」是常驻内置工具，无需加载说明�
 # registry 也不在两份 `*_FIXED_BUILTIN_TOOL_NAMES` 里。名字正本在
 # `main/runtime/tool_names.SYNTHETIC_RESIDENT_TOOL_NAMES`；本模块是两条车道共用的叶子，不
 # import 它，等价性由 tests 钉住。
-_SYNTHETIC_RESIDENT_TOOL_NAMES = ("silent", "time", "schedule_wake")
+_SYNTHETIC_RESIDENT_TOOL_NAMES = ("silent", "time", "schedule_wake", "mention_member")
 
 
 def tool_supports_context_load(tool: Any) -> bool:

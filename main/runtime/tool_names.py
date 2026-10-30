@@ -18,6 +18,7 @@ VIEW_NODE_TREE_TOOL_NAME = "view_node_tree"
 # `g3ku/runtime/tool_visibility._NO_CONTRACT_SIGNAL_TOOL_NAMES`）。
 TIME_TOOL_NAME = "time"
 SCHEDULE_WAKE_TOOL_NAME = "schedule_wake"
+MENTION_MEMBER_TOOL_NAME = "mention_member"
 
 # 读一次时钟不携带任何进度信息：连续三次 `time` 既不能看门狗判成"没有新信息的循环"，
 # 也不能被跨轮重复熔断打回——否则模型每轮校时就要付一次软拒，而校时正是本次改造要鼓励的
@@ -33,6 +34,7 @@ SYNTHETIC_RESIDENT_TOOL_NAMES: Final[tuple[str, ...]] = (
     SILENT_TOOL_NAME,
     TIME_TOOL_NAME,
     SCHEDULE_WAKE_TOOL_NAME,
+    MENTION_MEMBER_TOOL_NAME,
 )
 
 __all__ = [
@@ -40,6 +42,7 @@ __all__ = [
     "FINAL_RESULT_TOOL_NAME",
     "LIST_CHILD_NODES_TOOL_NAME",
     "MANAGE_CHILD_NODES_TOOL_NAME",
+    "MENTION_MEMBER_TOOL_NAME",
     "PROGRESS_NEUTRAL_TOOL_NAMES",
     "READ_CHILD_PROGRESS_TOOL_NAME",
     "SCHEDULE_WAKE_TOOL_NAME",

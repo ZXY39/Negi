@@ -48,6 +48,11 @@ class ExternalSessionEntry:
     # 最近一次主动推送（heartbeat / cron / 任务通知 / @ 工具）的发布时刻。
     # 只由 outbound drain 写；普通回合回复不更新。cron 的 60 秒节流读它。
     last_proactive_at: str = ""
+    # 最近一次入站消息时刻：mention 工具用它判断被动回复窗口是否还开着。
+    last_inbound_at: str = ""
+    # 平台能力读数：主动消息被拒后记 denied/quota；主动形状送达成功后清空。
+    active_message_state: str = ""
+    active_message_denied_at: str = ""
 
 
 def _registry_workspace() -> Path:
@@ -101,6 +106,9 @@ class ExternalSessionRegistry:
                 chat_type=str(item.get("chat_type") or ""),
                 trust=str(item.get("trust") or ""),
                 last_proactive_at=str(item.get("last_proactive_at") or ""),
+                last_inbound_at=str(item.get("last_inbound_at") or ""),
+                active_message_state=str(item.get("active_message_state") or ""),
+                active_message_denied_at=str(item.get("active_message_denied_at") or ""),
             )
             self._entries[entry.session_key] = entry
             self._index[(entry.bridge_id, entry.external_key)] = entry.session_key
@@ -118,6 +126,9 @@ class ExternalSessionRegistry:
                     "chat_type": entry.chat_type,
                     "trust": entry.trust,
                     "last_proactive_at": entry.last_proactive_at,
+                    "last_inbound_at": entry.last_inbound_at,
+                    "active_message_state": entry.active_message_state,
+                    "active_message_denied_at": entry.active_message_denied_at,
                 }
                 for session_key, entry in self._entries.items()
             },
@@ -265,6 +276,9 @@ class ExternalSessionRegistry:
                 if entry.trust != merged:
                     entry.trust = merged
                     changed = True
+            # 最近入站时刻：mention 的被动窗口判据；每条入站都刷新，重启后仍可读。
+            entry.last_inbound_at = datetime.now().isoformat()
+            changed = True
             if changed:
                 self._save()
             return entry
@@ -300,6 +314,40 @@ class ExternalSessionRegistry:
         with self._lock:
             entry = self._entries.get(raw)
             return str(getattr(entry, "last_proactive_at", "") or "") if entry is not None else ""
+
+    def note_active_message_state(self, session_key: str, state: str) -> ExternalSessionEntry | None:
+        """Record the platform's active-message capability reading (`denied` / `quota` / "")."""
+        raw = str(session_key or "").strip()
+        normalized = str(state or "").strip().lower()
+        with self._lock:
+            entry = self._entries.get(raw)
+            if entry is None:
+                return None
+            changed = entry.active_message_state != normalized
+            entry.active_message_state = normalized
+            if normalized in {"denied", "quota"}:
+                entry.active_message_denied_at = datetime.now().isoformat()
+            elif not normalized:
+                entry.active_message_denied_at = ""
+            if changed:
+                self._save()
+            return entry
+
+    def active_message_state(self, session_key: str) -> str:
+        raw = str(session_key or "").strip()
+        if not raw:
+            return ""
+        with self._lock:
+            entry = self._entries.get(raw)
+            return str(getattr(entry, "active_message_state", "") or "") if entry is not None else ""
+
+    def last_inbound_at(self, session_key: str) -> str:
+        raw = str(session_key or "").strip()
+        if not raw:
+            return ""
+        with self._lock:
+            entry = self._entries.get(raw)
+            return str(getattr(entry, "last_inbound_at", "") or "") if entry is not None else ""
 
     def session_count(self) -> int:
         """当前加载进来的会话条目数。
@@ -393,6 +441,7 @@ async def publish_channel_notice(
     text: str,
     *,
     source: str,
+    metadata: dict[str, Any] | None = None,
 ) -> bool:
     """Put one runtime-originated notice on the external channel outbound lane.
 
@@ -412,12 +461,20 @@ async def publish_channel_notice(
     body = str(text or "").strip()
     if not key or not body:
         return False
+    outbound_metadata = {
+        "source": str(source or "").strip(),
+        "session_key": key,
+    }
+    if isinstance(metadata, dict):
+        outbound_metadata.update(
+            {str(name): value for name, value in metadata.items() if str(name or "").strip()}
+        )
     await bus.publish_outbound(
         OutboundMessage(
             channel=EXTERNAL_OUTBOUND_CHANNEL,
             chat_id=key,
             content=body,
-            metadata={"source": str(source or "").strip(), "session_key": key},
+            metadata=outbound_metadata,
         )
     )
     return True

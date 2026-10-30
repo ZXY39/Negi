@@ -617,6 +617,50 @@ def _frontdoor_node_message_lines(
     return lines
 
 
+def _delivery_failure_lines(
+    event: dict[str, Any],
+    retrieval_parts: list[str],
+) -> list[str]:
+    """One proactive channel message was rejected by the platform."""
+    kind = _non_empty_text(event.get("kind")) or "unknown"
+    external_key = _non_empty_text(event.get("external_key"))
+    preview = _non_empty_text(event.get("text_preview"))
+    passive_window_open = bool(event.get("passive_window_open"))
+    kind_text = {
+        "active_denied": "群未开启主动消息权限（active_denied）",
+        "passive_expired": "被动回复窗口已过期（passive_expired）",
+        "quota_exhausted": "主动消息日额度用尽（quota_exhausted）",
+    }.get(kind, kind)
+    _append_retrieval_parts(
+        retrieval_parts,
+        "delivery_failure",
+        kind,
+        external_key,
+        preview,
+    )
+    lines = [
+        "- A proactive channel message was rejected by the platform",
+        f"  Session: {external_key or 'unknown'}",
+        f"  Failure: {kind_text}",
+    ]
+    if preview:
+        lines.append(f"  Rejected message: {preview}")
+    if kind == "active_denied":
+        if passive_window_open:
+            lines.append(
+                "  处理：现在有被动窗口，可用 mention_member(target=\"Master\", message=...) "
+                "@Master，请群主在机器人资料页开启“主动推送消息能力”。不要重试原消息。"
+            )
+        else:
+            lines.append(
+                "  处理：当前没有被动窗口，@Master 也会被拒；调用 silent，等 Master 下次发言时说明。"
+                "如果 Master 不是群主，说明需要群主操作。不要重试原消息。"
+            )
+    else:
+        lines.append("  处理：不要重试原消息；必要时调用 silent 或等下一次入站再说明。")
+    return lines
+
+
 def _event_bundle_content(
     events: list[dict[str, Any]],
     *,
@@ -663,6 +707,9 @@ def _event_bundle_content(
                     event, retrieval_parts, output_inline_limit=output_inline_limit, externalizer=externalizer
                 )
             )
+            continue
+        if reason == "delivery_failure":
+            lines.extend(_delivery_failure_lines(event, retrieval_parts))
             continue
         if reason == "shutdown_resume":
             lines.extend(shutdown_resume_lines())

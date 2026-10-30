@@ -142,3 +142,73 @@ def test_streamed_reply_ack_is_session_scoped_and_ignores_plain_events(env) -> N
     external_v1._ack_streamed_outbox_event({"type": "reply.final"}, "ext:qoder:owner")
 
     assert [item["id"] for item in external_outbox.load_pending_outbound()] == [foreign]
+
+
+@pytest.mark.asyncio
+async def test_undeliverable_proactive_ack_wakes_session_and_records_capability(env, monkeypatch) -> None:
+    registry, app = env
+    entry, _ = registry.resolve_or_create(
+        bridge_id="qq-official", external_key="qq:group:g1", chat_type="group"
+    )
+    outbox_id = external_outbox.record_outbound_message(
+        session_key=entry.session_key,
+        external_key="qq:group:g1",
+        text="定时提醒",
+    )
+
+    class _Heartbeat:
+        def __init__(self) -> None:
+            self.payloads: list[dict] = []
+
+        def enqueue_delivery_failure(self, payload):
+            self.payloads.append(dict(payload))
+            return True
+
+    heartbeat = _Heartbeat()
+    monkeypatch.setattr(external_v1, "get_web_heartbeat_service", lambda: heartbeat)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as http:
+        response = await http.post(
+            f"/api/v1/sessions/{entry.session_key}/outbox/{outbox_id}/ack",
+            json={
+                "status": "undeliverable",
+                "kind": "active_denied",
+                "shape": "active",
+                "passive_window_open": False,
+                "text_preview": "定时提醒",
+            },
+        )
+        body = response.json()
+        assert body["failure_notice"] is True
+        assert registry.active_message_state(entry.session_key) == "denied"
+        assert heartbeat.payloads and heartbeat.payloads[0]["kind"] == "active_denied"
+
+        duplicate = await http.post(
+            f"/api/v1/sessions/{entry.session_key}/outbox/{outbox_id}/ack",
+            json={"status": "undeliverable", "kind": "active_denied", "shape": "active"},
+        )
+        assert duplicate.json()["failure_notice"] is False
+        assert len(heartbeat.payloads) == 1
+
+
+@pytest.mark.asyncio
+async def test_active_delivery_success_clears_denied_capability(env) -> None:
+    registry, app = env
+    entry, _ = registry.resolve_or_create(
+        bridge_id="qq-official", external_key="qq:group:g2", chat_type="group"
+    )
+    registry.note_active_message_state(entry.session_key, "denied")
+    outbox_id = external_outbox.record_outbound_message(
+        session_key=entry.session_key,
+        external_key="qq:group:g2",
+        text="主动推送",
+    )
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as http:
+        response = await http.post(
+            f"/api/v1/sessions/{entry.session_key}/outbox/{outbox_id}/ack",
+            json={"status": "delivered", "shape": "active"},
+        )
+    assert response.status_code == 200
+    assert registry.active_message_state(entry.session_key) == ""

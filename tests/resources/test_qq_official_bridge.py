@@ -143,6 +143,7 @@ class FakeExternalApiClient:
         self.events: asyncio.Queue = asyncio.Queue()
         self.acked: list[tuple[str, str]] = []
         self.ack_status_by_id: dict[str, str] = {}
+        self.ack_extra_by_id: dict[str, dict] = {}
         self.pending_outbox: list[dict] = []
         self.closed = False
         FakeExternalApiClient.instances.append(self)
@@ -177,9 +178,10 @@ class FakeExternalApiClient:
     async def list_pending_outbox(self) -> list[dict]:
         return list(self.pending_outbox)
 
-    async def ack_outbox(self, session_id: str, outbox_id: str, *, status: str = "delivered") -> None:
+    async def ack_outbox(self, session_id: str, outbox_id: str, *, status: str = "delivered", **extra) -> None:
         self.acked.append((session_id, outbox_id))
         self.ack_status_by_id[outbox_id] = status
+        self.ack_extra_by_id[outbox_id] = dict(extra)
 
     async def stream_events(self, session_id: str, last_seq: int = 0):
         while True:
@@ -1686,6 +1688,36 @@ async def test_pump_maps_attachment_mime_to_platform_file_type(monkeypatch: pyte
                 },
             ),
         ]
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_group_mentions_use_markdown_at_user_tag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task, client = await _start_bridge(monkeypatch, _media_transport({}, []))
+    try:
+        await client.on_group_at_message_create(_group_message("hi", "m-mention"))
+        ext = FakeExternalApiClient.instances[-1]
+        await ext.events.put(
+            {
+                "type": "outbound.created",
+                "seq": 1,
+                "text": "需要你看一下",
+                "external_key": "qq:group:g1",
+                "mentions": ["ABCDEF1234567890"],
+            }
+        )
+        await _wait_until(lambda: any(name == "post_group_message" for name, _ in client.api.calls))
+        call = next(kwargs for name, kwargs in client.api.calls if name == "post_group_message")
+        assert call["msg_type"] == 2
+        assert call["markdown"]["content"] == (
+            '<qqbot-at-user id="ABCDEF1234567890" />\n需要你看一下'
+        )
+        assert call["msg_id"] == "m-mention"
     finally:
         task.cancel()
         with suppress(asyncio.CancelledError):

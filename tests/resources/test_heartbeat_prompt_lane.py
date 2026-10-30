@@ -494,3 +494,43 @@ def test_shutdown_resume_wake_does_not_render_as_a_completed_task() -> None:
     ).read_text(encoding="utf-8")
     assert "shutdown_resume_lines()" in service
     assert "Session resumed automatically" not in service
+
+
+def test_delivery_failure_event_tells_the_model_to_mention_or_stay_silent() -> None:
+    from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane
+
+    lane = build_heartbeat_prompt_lane(
+        provider_model="openai:gpt-4.1",
+        stable_rules_text="Keep the user informed.",
+        events=[
+            {
+                "reason": "delivery_failure",
+                "event_reason": "delivery_failure",
+                "kind": "active_denied",
+                "external_key": "qq:group:g1",
+                "text_preview": "定时提醒",
+                "passive_window_open": False,
+            }
+        ],
+    )
+    bundle = str(_field(lane, "event_bundle_text") or "")
+    assert "A proactive channel message was rejected" in bundle
+    assert "active_denied" in bundle
+    assert "silent" in bundle
+    assert "不要重试原消息" in bundle
+
+    window = build_heartbeat_prompt_lane(
+        provider_model="openai:gpt-4.1",
+        stable_rules_text="Keep the user informed.",
+        events=[
+            {
+                "reason": "delivery_failure",
+                "event_reason": "delivery_failure",
+                "kind": "active_denied",
+                "external_key": "qq:group:g1",
+                "passive_window_open": True,
+            }
+        ],
+    )
+    window_bundle = str(_field(window, "event_bundle_text") or "")
+    assert "mention_member" in window_bundle

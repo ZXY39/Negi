@@ -230,6 +230,32 @@ class WebSessionHeartbeatService:
             self._wake.request(session_id, delay_s=0.25)
         return True
 
+    def enqueue_delivery_failure(self, payload: dict[str, Any] | None) -> bool:
+        """Wake the session once for one undeliverable proactive message.
+
+        Dedupe is by `outbox_id`, not by wall-clock: every distinct failed
+        message wakes the model (the operator explicitly asked not to throttle
+        this lane), while duplicate acks/replays of the same message do not.
+        """
+        normalized = dict(payload or {})
+        session_id = str(normalized.get("session_id") or "").strip()
+        outbox_id = str(normalized.get("outbox_id") or "").strip()
+        if not session_id or not outbox_id:
+            return False
+        event = self._events.enqueue(
+            session_id=session_id,
+            source="external_channel",
+            reason="delivery_failure",
+            dedupe_key=f"delivery-failure:{outbox_id}",
+            payload=normalized,
+            delay_seconds=0.0,
+        )
+        if event is None:
+            return False
+        if self._started:
+            self._wake.request(session_id, delay_s=0.25)
+        return True
+
     def enqueue_shutdown_resume(self, session_id: str) -> bool:
         """Wake a session that was paused by a graceful project shutdown.
 
@@ -1768,7 +1794,14 @@ class WebSessionHeartbeatService:
                 turn_id=heartbeat_turn_id,
             )
             self._publish_ceo(key, "ceo.reply.final", final_payload)
-        await self._notify_reply(key, output)
+        # 投递失败事件只唤醒模型：回给渠道的任何主动消息都可能再次被拒并触发
+        # 新一轮失败通知。模型要触达群里必须显式走 mention_member（有被动窗口时）。
+        delivery_failure_only = bool(events) and all(
+            str(event.reason or "").strip().lower() == "delivery_failure"
+            for event in events
+        )
+        if not delivery_failure_only:
+            await self._notify_reply(key, output)
         event_ids = {event.event_id for event in events}
         popped = self._events.pop_many(key, event_ids=event_ids)
         self._ack_task_terminal_events(events)

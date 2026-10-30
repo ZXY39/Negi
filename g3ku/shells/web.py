@@ -459,6 +459,12 @@ def _start_outbound_drain(bus: MessageBus) -> asyncio.Task:
         metadata = getattr(pending, "metadata", None) or {}
         reply_to = str(getattr(pending, "reply_to", "") or "").strip()
         dedupe_key = str(metadata.get("dedupe_key") or "").strip()
+        raw_mentions = metadata.get("mentions")
+        mentions = (
+            [str(item).strip() for item in raw_mentions if str(item or "").strip()]
+            if isinstance(raw_mentions, list)
+            else []
+        )
         # 附件：重放消息自带（账本持久化过的）直接透传；首次出站从正文提取
         # （markdown 本地文件链接 → 结构化附件，正文留下文件名标签）。重放正文
         # 已是提取后文本，二次提取是幂等空操作。
@@ -483,6 +489,7 @@ def _start_outbound_drain(bus: MessageBus) -> asyncio.Task:
                 reply_to=reply_to,
                 dedupe_key=dedupe_key,
                 attachments=attachments or None,
+                mentions=mentions or None,
             )
         payload: dict[str, Any] = {
             "text": sanitized,
@@ -491,6 +498,8 @@ def _start_outbound_drain(bus: MessageBus) -> asyncio.Task:
         }
         if attachments:
             payload["attachments"] = attachments
+        if mentions:
+            payload["mentions"] = mentions
         if reply_to:
             payload["reply_to"] = reply_to
         if dedupe_key:
@@ -579,6 +588,9 @@ def _outbox_replay_message(record: dict[str, Any]) -> OutboundMessage:
     attachments = record.get("attachments")
     if isinstance(attachments, list) and attachments:
         metadata["attachments"] = [item for item in attachments if isinstance(item, dict)]
+    mentions = record.get("mentions")
+    if isinstance(mentions, list) and mentions:
+        metadata["mentions"] = [str(item) for item in mentions if str(item or "").strip()]
     return OutboundMessage(
         channel=EXTERNAL_OUTBOUND_CHANNEL,
         chat_id=str(record.get("session_key") or ""),

@@ -287,9 +287,18 @@ class ChannelSendError(RuntimeError):
     自己抛的（还没发出去），同样可重试。
     """
 
-    def __init__(self, kind: str, detail: str) -> None:
+    def __init__(
+        self,
+        kind: str,
+        detail: str,
+        *,
+        shape: str = "",
+        passive_window_open: bool = False,
+    ) -> None:
         super().__init__(detail)
         self.kind = kind
+        self.shape = str(shape or "").strip()
+        self.passive_window_open = bool(passive_window_open)
 
 
 # 平台文案里的确定性失败标记：认不出就不当确定性失败（见 ``ChannelSendError``）。
@@ -451,7 +460,12 @@ def _gate_active_send(
         return
     blocked = state.pacer.check(external_key)
     if blocked:
-        raise ChannelSendError(blocked, f"active send {blocked} for {external_key}")
+        raise ChannelSendError(
+            blocked,
+            f"active send {blocked} for {external_key}",
+            shape="active",
+            passive_window_open=False,
+        )
 
 
 def _is_botpy_task(task: asyncio.Task) -> bool:
@@ -937,7 +951,10 @@ async def run_qq_official_bridge(
                     except Exception as exc:
                         failure = _classify_send_failure(exc)
                         raise ChannelSendError(
-                            failure, f"group media send failed ({failure}): {exc}"
+                            failure,
+                            f"group media send failed ({failure}): {exc}",
+                            shape="passive" if media_passive else "active",
+                            passive_window_open=bool(media_passive),
                         ) from exc
                     if not media_passive:
                         state.pacer.record(external_key)
@@ -1013,12 +1030,20 @@ async def run_qq_official_bridge(
             )
 
     async def deliver(
-        external_key: str, text: str, attachments: list[dict[str, Any]] | None = None
-    ) -> None:
+        external_key: str,
+        text: str,
+        attachments: list[dict[str, Any]] | None = None,
+        mentions: list[str] | None = None,
+    ) -> str:
         kind, target = parse_external_key(external_key)
         if kind not in ("group", "c2c", "guild", "guilddm"):
             logger.warning("qq-official cannot deliver to target external_key={}", external_key)
-            return
+            return ""
+        mention_ids = [
+            str(item or "").strip()
+            for item in list(mentions or [])
+            if re.fullmatch(r"[0-9a-fA-F]{8,128}", str(item or "").strip())
+        ]
         incoming = [item for item in list(attachments or []) if isinstance(item, dict)]
         # 附件默认先于正文投递；`after_text` 的（表情包）反过来，等正文发完再发，
         # 否则用户先收到一张图、再收到那句话。
@@ -1036,19 +1061,31 @@ async def run_qq_official_bridge(
         if not body:
             # 纯表情回合：正文为空，但 after_text 附件仍要发。
             await _deliver_trailing(kind, target, external_key, trailing)
-            return
+            return ""
         passive: dict[str, Any] = {}
         if kind == "group":
             passive = _passive_reply_kwargs(state, kind, external_key)
         _gate_active_send(state, kind, external_key, passive)
         try:
             if kind == "group":
-                result = await bridge_api.post_group_message(
-                    group_openid=target["group_openid"],
-                    content=body,
-                    msg_type=0,
-                    **passive,
-                )
+                if mention_ids:
+                    # 群 @ 只支持 markdown（msg_type=2）：<qqbot-at-user id="member_openid" />。
+                    markdown_body = " ".join(
+                        f'<qqbot-at-user id="{item}" />' for item in mention_ids
+                    ) + "\n" + body
+                    result = await bridge_api.post_group_message(
+                        group_openid=target["group_openid"],
+                        markdown={"content": markdown_body},
+                        msg_type=2,
+                        **passive,
+                    )
+                else:
+                    result = await bridge_api.post_group_message(
+                        group_openid=target["group_openid"],
+                        content=body,
+                        msg_type=0,
+                        **passive,
+                    )
             elif kind == "c2c":
                 result = await bridge_api.post_c2c_message(openid=target["user_openid"], content=body, msg_type=0)
             elif kind == "guild":
@@ -1066,7 +1103,12 @@ async def run_qq_official_bridge(
                 external_key,
                 str(exc)[:200],
             )
-            raise ChannelSendError(failure, f"{kind} send failed ({failure}): {exc}") from exc
+            raise ChannelSendError(
+                failure,
+                f"{kind} send failed ({failure}): {exc}",
+                shape="passive" if passive else "active",
+                passive_window_open=bool(passive),
+            ) from exc
         if not passive and kind in ("group", "c2c"):
             state.pacer.record(external_key)
         # botpy 的 http 层对请求超时只打一条 WARNING 就返回 None（吞掉
@@ -1092,6 +1134,7 @@ async def run_qq_official_bridge(
             f"{passive['msg_id']}#{passive['msg_seq']}" if passive else "-",
         )
         await _deliver_trailing(kind, target, external_key, trailing)
+        return "passive" if passive else "active"
 
     async def _pump(session_id: str, external_key: str) -> None:
         """Per-session SSE consumer with a real reconnect loop.
@@ -1126,6 +1169,12 @@ async def run_qq_official_bridge(
                     attachments = (
                         [item for item in raw_attachments if isinstance(item, dict)]
                         if isinstance(raw_attachments, list)
+                        else []
+                    )
+                    raw_mentions = event.get("mentions")
+                    mentions = (
+                        [str(item or "").strip() for item in raw_mentions if str(item or "").strip()]
+                        if isinstance(raw_mentions, list)
                         else []
                     )
                     if not is_deliverable_event(event_type) or (not text and not attachments):
@@ -1180,11 +1229,15 @@ async def run_qq_official_bridge(
                         backoff = _PUMP_RECONNECT_INITIAL_BACKOFF_SECONDS
                         continue
                     try:
-                        await deliver(target_key, text, attachments)
+                        delivery_shape = await deliver(
+                            target_key, text, attachments, mentions=mentions
+                        )
                     except asyncio.CancelledError:
                         raise
                     except Exception as exc:  # noqa: BLE001 - retry via reconnect replay
                         failure_kind = str(getattr(exc, "kind", "") or "transient")
+                        failure_shape = str(getattr(exc, "shape", "") or "")
+                        passive_window_open = bool(getattr(exc, "passive_window_open", False))
                         deterministic = failure_kind in _NON_RETRYABLE_SEND_KINDS
                         if outbox_id:
                             _lru_remember(
@@ -1233,7 +1286,14 @@ async def run_qq_official_bridge(
                             # 永久拒绝的目标重新拿到 5 次预算。
                             try:
                                 await client.ack_outbox(
-                                    session_id, outbox_id, status="undeliverable"
+                                    session_id,
+                                    outbox_id,
+                                    status="undeliverable",
+                                    kind=failure_kind,
+                                    detail=str(exc),
+                                    shape=failure_shape,
+                                    passive_window_open=passive_window_open,
+                                    text_preview=text,
                                 )
                             except Exception as exc:  # noqa: BLE001 - 销账失败只多几份副本
                                 logger.warning(
@@ -1252,7 +1312,9 @@ async def run_qq_official_bridge(
                     backoff = _PUMP_RECONNECT_INITIAL_BACKOFF_SECONDS
                     if outbox_id:
                         try:
-                            await client.ack_outbox(session_id, outbox_id)
+                            await client.ack_outbox(
+                                session_id, outbox_id, shape=delivery_shape
+                            )
                         except Exception as exc:  # noqa: BLE001 - ack 失败不影响本条已送达
                             # 代价是下次重启后本条可能重复投递一次（at-least-once）。
                             logger.warning(

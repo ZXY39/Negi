@@ -51,6 +51,9 @@ _NO_CONTRACT_SIGNAL_TOOL_NAMES: frozenset[str] = frozenset(
         "load_tool_context_v2",
         "load_skill_context",
         "load_skill_context_v2",
+        # 群聊主动 @：合成常驻实例，没有 toolskill；由 SYNTHETIC_RESIDENT_TOOL_NAMES
+        # 注入，不走契约在场判据。
+        "mention_member",
     }
 )
 

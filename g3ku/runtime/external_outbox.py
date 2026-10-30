@@ -163,6 +163,7 @@ def record_outbound_message(
     reply_to: str = "",
     dedupe_key: str = "",
     attachments: list[dict[str, Any]] | None = None,
+    mentions: list[str] | None = None,
     event: str = PROACTIVE_EVENT,
 ) -> str:
     """Register one pending outbound record; returns its outbox id.
@@ -188,6 +189,13 @@ def record_outbound_message(
         record["dedupe_key"] = str(dedupe_key).strip()
     if attachments:
         record["attachments"] = [dict(item) for item in attachments if isinstance(item, dict)]
+    normalized_mentions = [
+        str(item or "").strip()
+        for item in list(mentions or [])
+        if str(item or "").strip()
+    ]
+    if normalized_mentions:
+        record["mentions"] = normalized_mentions
     if not _append_record(record):
         return ""
     if str(event or PROACTIVE_EVENT) == REPLY_EVENT:
@@ -221,6 +229,20 @@ def _retire_superseded_replies(*, session_key: str, keep_id: str) -> None:
             ack_outbound_message(record_id, session_key=key, status="superseded")
         except Exception:
             continue
+
+
+def get_outbound_record(outbox_id: str) -> dict[str, Any] | None:
+    """Read one msg record from the append-only ledger (ack tombstones ignored)."""
+    target = str(outbox_id or "").strip()
+    if not target:
+        return None
+    with _LOCK:
+        for record in _read_records():
+            if str(record.get("kind") or "") != "msg":
+                continue
+            if str(record.get("id") or "").strip() == target:
+                return dict(record)
+    return None
 
 
 def ack_outbound_message(outbox_id: str, *, session_key: str = "", status: str = "delivered") -> bool:

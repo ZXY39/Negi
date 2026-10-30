@@ -89,7 +89,18 @@ class ExternalApiClient:
         items = payload.get("items") if isinstance(payload, dict) else None
         return [item for item in list(items or []) if isinstance(item, dict)]
 
-    async def ack_outbox(self, session_id: str, outbox_id: str, *, status: str = "delivered") -> None:
+    async def ack_outbox(
+        self,
+        session_id: str,
+        outbox_id: str,
+        *,
+        status: str = "delivered",
+        kind: str = "",
+        detail: str = "",
+        shape: str = "",
+        passive_window_open: bool | None = None,
+        text_preview: str = "",
+    ) -> None:
         """Mark an outbox entry closed after the channel API confirms.
 
         ``status="undeliverable"`` 是投递预算耗尽时的终态销账：账本已不按年龄
@@ -98,7 +109,20 @@ class ExternalApiClient:
         不再重发，用户才不会被同一条回答打两遍。
         默认值保持与旧调用完全相同的请求体（不带 body）。
         """
-        payload = None if status == "delivered" else {"status": status}
+        payload: dict[str, object] | None = None if status == "delivered" else {"status": status}
+        extras: dict[str, object] = {}
+        if kind:
+            extras["kind"] = str(kind)
+        if detail:
+            extras["detail"] = str(detail)[:1000]
+        if shape:
+            extras["shape"] = str(shape)
+        if passive_window_open is not None:
+            extras["passive_window_open"] = bool(passive_window_open)
+        if text_preview:
+            extras["text_preview"] = str(text_preview)[:500]
+        if extras:
+            payload = {**(payload or {}), **extras}
         response = await self._client.post(
             f"/sessions/{session_id}/outbox/{outbox_id}/ack",
             json=payload,

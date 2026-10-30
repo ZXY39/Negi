@@ -8,6 +8,8 @@ import hashlib
 import json
 import math
 import re
+import threading
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -20,6 +22,7 @@ from loguru import logger
 
 from g3ku.agent.persona import persona_digest, render_persona_notice
 from g3ku.agent.tools.base import Tool
+from g3ku.agent.tools.mention_member import MentionMemberTool
 from g3ku.config.live_runtime import get_runtime_config, peek_runtime_revision
 from g3ku.core.messages import UserInputMessage
 from g3ku.core.timefmt import render_arrival_stamp, strip_arrival_time_stamp
@@ -65,6 +68,10 @@ from g3ku.runtime.chunk_compression_plan import (
 from g3ku.runtime.config_refresh import refresh_loop_runtime_config
 from g3ku.runtime.context.image_metrics import bmp_dimensions, webp_dimensions
 from g3ku.runtime.context.summarizer import estimate_tokens
+from g3ku.runtime.external_sessions import (
+    get_external_session_registry,
+    publish_channel_notice,
+)
 from g3ku.runtime.frontdoor import pinned_tool_bundle
 from g3ku.runtime.frontdoor.message_builder import (
     PERSONA_DIGEST_ATTR,
@@ -147,6 +154,7 @@ from g3ku.runtime.web_ceo_sessions import (
     persist_frontdoor_actual_request,
     strip_multimodal_blocks_from_message_records,
     trailing_turn_record,
+    transcript_messages,
     upload_dir_for_session,
     workspace_path,
 )
@@ -179,6 +187,7 @@ from main.runtime.tool_call_repair import (
     recover_tool_calls_from_json_payload,
 )
 from main.runtime.tool_names import (
+    MENTION_MEMBER_TOOL_NAME,
     SCHEDULE_WAKE_TOOL_NAME,
     SILENT_TOOL_NAME,
     SYNTHETIC_RESIDENT_TOOL_NAMES,
@@ -225,6 +234,12 @@ CeoGraphState = CeoPersistentState
 
 
 _TASK_ID_PATTERN = re.compile(r"task:[A-Za-z0-9][\w:-]*")
+
+# `mention_member` 的进程内频控：同一会话 60 秒一发、1 小时最多 10 发。
+_MENTION_RATE_LOCK = threading.RLock()
+_MENTION_SEND_TIMES: dict[str, list[float]] = {}
+_MENTION_MIN_INTERVAL_SECONDS = 60.0
+_MENTION_MAX_PER_HOUR = 10
 # 旧文案静默哨兵的字面值。P4 之后它不再是任何判据，只作为"该被清洗掉的噪声"保留一份：
 # 转录里仍存有历史轮次的这类尾巴，模型有模仿上下文的倾向，不剥就会当正文发给用户。
 # 实盘该形态出现 11 次（占全部静默尝试的 11/11），所以这条清洗有真实对象。
@@ -7018,6 +7033,173 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             TIME_TOOL_NAME: TimeTool(),
             SCHEDULE_WAKE_TOOL_NAME: ScheduleWakeTool(
                 lambda **payload: self._frontdoor_schedule_wake(state=state, runtime=runtime, **payload)
+            ),
+            MENTION_MEMBER_TOOL_NAME: MentionMemberTool(
+                lambda **payload: self._frontdoor_publish_mention(**payload)
+            ),
+        }
+
+    def _mention_roster(self, session_key: str) -> tuple[dict[int, str], str]:
+        """会话内编号 → sender id，以及 Master 的 sender id。"""
+        try:
+            session = self._loop.sessions.get_or_create(session_key)
+            history = list(transcript_messages(session) or [])
+        except Exception:
+            return {}, ""
+        master_ids = qq_owner_openids()
+        number_map = sender_number_map(history, master_ids=master_ids)
+        by_number = {int(number): sender_id for sender_id, number in number_map.items()}
+        normalized_masters = {str(item or "").strip().lower() for item in master_ids}
+        master_id = ""
+        for item in history:
+            if str(item.get("role") or "").strip().lower() != "user":
+                continue
+            metadata = item.get("metadata") if isinstance(item, dict) else None
+            sender = (metadata or {}).get("external_sender") if isinstance(metadata, dict) else None
+            sender_id = str((sender or {}).get("id") or "").strip()
+            if sender_id and sender_id.lower() in normalized_masters:
+                master_id = sender_id
+                break
+        return by_number, master_id
+
+    async def _frontdoor_publish_mention(
+        self,
+        *,
+        target: str,
+        message: str,
+        runtime: dict[str, Any],
+    ) -> dict[str, Any]:
+        session_key = str(runtime.get("session_key") or "").strip()
+        if not session_key.startswith("ext:"):
+            return {"ok": False, "status": "rejected", "reason": "not_a_channel_session"}
+        try:
+            entry = get_external_session_registry().get_by_session_key(session_key)
+        except Exception:
+            entry = None
+        if entry is None:
+            return {"ok": False, "status": "rejected", "reason": "session_not_registered"}
+        chat_type = str(getattr(entry, "chat_type", "") or "").strip().lower()
+        if chat_type not in {"group", "guild"}:
+            return {"ok": False, "status": "rejected", "reason": "mention_requires_group"}
+        registry = get_external_session_registry()
+        if registry.active_message_state(session_key) == "denied":
+            last_inbound = registry.last_inbound_at(session_key)
+            in_window = False
+            if last_inbound:
+                try:
+                    in_window = (datetime.now() - datetime.fromisoformat(last_inbound)).total_seconds() < 300
+                except (TypeError, ValueError):
+                    in_window = False
+            if not in_window:
+                return {
+                    "ok": False,
+                    "status": "rejected",
+                    "reason": "no_passive_window",
+                    "message": (
+                        "The group has not enabled active messages and there has been no "
+                        "inbound message in the last 5 minutes, so an @ would also be rejected. "
+                        "Do not retry; wait for Master's next message or ask the group owner to enable active push."
+                    ),
+                }
+        body = str(message or "").strip()
+        if not body:
+            return {"ok": False, "status": "rejected", "reason": "message_required"}
+        if len(body) > 1000:
+            return {"ok": False, "status": "rejected", "reason": "message_too_long"}
+        normalized_target = str(target or "").strip()
+        if re.fullmatch(r"[0-9a-fA-F]{16,128}", normalized_target):
+            return {
+                "ok": False,
+                "status": "rejected",
+                "reason": "raw_openid_not_allowed",
+                "message": "Use `Master` or a session-local member number; raw openids are not accepted.",
+            }
+        by_number, master_id = self._mention_roster(session_key)
+        target_label = normalized_target
+        if normalized_target.lower() == "master":
+            target_id = master_id
+            target_label = "Master"
+            if not target_id:
+                return {
+                    "ok": False,
+                    "status": "failed",
+                    "reason": "master_not_in_roster",
+                    "message": (
+                        "Master has not spoken in this group, so there is no member_openid to mention. "
+                        "Ask Master to send a message, then add their group member_openid to ownerOpenids."
+                    ),
+                }
+        else:
+            digits = re.sub(r"\D", "", normalized_target)
+            if not digits:
+                return {
+                    "ok": False,
+                    "status": "rejected",
+                    "reason": "target_not_found",
+                    "known_numbers": sorted(f"第三方 {number:04d}" for number in by_number),
+                }
+            target_id = by_number.get(int(digits))
+            target_label = f"第三方 {int(digits):04d}"
+            if not target_id:
+                return {
+                    "ok": False,
+                    "status": "rejected",
+                    "reason": "target_not_found",
+                    "known_numbers": sorted(f"第三方 {number:04d}" for number in by_number),
+                }
+        now = time.monotonic()
+        with _MENTION_RATE_LOCK:
+            stamps = [
+                stamp
+                for stamp in list(_MENTION_SEND_TIMES.get(session_key) or [])
+                if now - stamp < 3600
+            ]
+            if stamps and now - stamps[-1] < _MENTION_MIN_INTERVAL_SECONDS:
+                return {
+                    "ok": False,
+                    "status": "rejected",
+                    "reason": "rate_limited",
+                    "retry_after_seconds": int(
+                        _MENTION_MIN_INTERVAL_SECONDS - (now - stamps[-1])
+                    ),
+                }
+            if len(stamps) >= _MENTION_MAX_PER_HOUR:
+                return {"ok": False, "status": "rejected", "reason": "hourly_limit"}
+            stamps.append(now)
+            _MENTION_SEND_TIMES[session_key] = stamps[-_MENTION_MAX_PER_HOUR:]
+        bus = getattr(self._loop, "bus", None)
+        published = await publish_channel_notice(
+            bus,
+            session_key,
+            body,
+            source="mention_tool",
+            metadata={"mentions": [target_id]},
+        )
+        if not published:
+            return {"ok": False, "status": "failed", "reason": "outbound_unavailable"}
+        try:
+            from g3ku.audit_events import emit_audit_event
+
+            emit_audit_event(
+                "external_api",
+                "info",
+                "mention_sent",
+                "group mention queued",
+                detail={
+                    "session_key": session_key,
+                    "external_key": str(getattr(entry, "external_key", "") or ""),
+                    "target": target_label,
+                },
+            )
+        except Exception:  # noqa: BLE001 - 审计失败不阻塞投递
+            pass
+        return {
+            "ok": True,
+            "status": "queued",
+            "target": target_label,
+            "message": (
+                "Queued. Delivery is asynchronous; if the group has not enabled active "
+                "messages the platform may reject it."
             ),
         }
 

@@ -98,7 +98,8 @@ Negi 的工具/技能体系分成几层，而不是一次性把所有东西注�
 - `load_skill_context`
 - `load_tool_context`
 - 节点树与信箱工具：`list_child_nodes`、`read_child_progress`、`view_node_tree`（`scope=subtree|family`，带 `messageable`/`controllable`/`acceptance`）、`view_message_history`、`enter_wait`（仅 `note`）、`send_message`（`to/content/ref`）、`manage_child_nodes`（仅执行节点；验收节点只保留 `submit_final_result` + RBAC `inspection` 类工具）。
-- 时钟与自设闹钟：`time`、`schedule_wake`。两颗都没有 `tools/<name>/resource.yaml`，因此**不在**上面那份常量里（`NODE_FIXED_BUILTIN_TOOL_NAMES` / `CEO_FIXED_BUILTIN_TOOL_NAMES` 同时是 RBAC 与可见性口径，把合成工具写进去等于给它编一条治理记录），而是由 `main/runtime/tool_names.py::SYNTHETIC_RESIDENT_TOOL_NAMES` 与 `silent` 一起恒定注入。注入点少一处的症状见「3.1.1 为什么"常驻"需要独立机制」。
+- 时钟、自设闹钟与群聊主动 @：`time`、`schedule_wake`、`mention_member`。三颗都没有 `tools/<name>/resource.yaml`，因此**不在**上面那份常量里（`NODE_FIXED_BUILTIN_TOOL_NAMES` / `CEO_FIXED_BUILTIN_TOOL_NAMES` 同时是 RBAC 与可见性口径，把合成工具写进去等于给它编一条治理记录），而是由 `main/runtime/tool_names.py::SYNTHETIC_RESIDENT_TOOL_NAMES` 与 `silent` 一起恒定注入。注入点少一处的症状见「3.1.1 为什么"常驻"需要独立机制」。
+- `mention_member(target, message)` 只在 `ext:` 群聊/频道会话有实际效果：`target` 是 `Master` 或来源标注里的会话内编号（如 `0002`），解析不到或传原始 openid 一律拒绝；同一会话 60 秒最多 1 发、1 小时最多 10 发。它通过 `publish_channel_notice` 走持久 outbox，`metadata["mentions"]` 由 QQ 桥渲染成群 markdown `<qqbot-at-user id="member_openid" />`。主动消息权限不足时由桥判 `undeliverable`，工具只返回“已提交”。
 
 CEO/frontdoor 另有任务生命周期、分发控制与贴纸选图类固定工具。治理记录、RBAC、启停、删除、核心保护都以**工具**为单位：一个 `tools/<name>/` 目录就是一条记录，没有中间的分组层。各工具的当前契约与守卫如下：
 
