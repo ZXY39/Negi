@@ -26,6 +26,11 @@
       providerId: "",
       baseUrl: "",
       apiKey: "",
+      apiKeyMasked: false,
+      apiKeyMaskValue: "",
+      apiKeyCount: 0,
+      apiKeyRevealed: false,
+      revealedApiKey: "",
       defaultModel: "",
       jsonText: "",
       initialJsonText: "",
@@ -171,12 +176,14 @@
     return String(value);
   }
 
-  function expandSingleApiKeyMaxConcurrencyForEditor(value, apiKeyValue) {
+  function expandSingleApiKeyMaxConcurrencyForEditor(value, apiKeyValue, apiKeyCountOverride = null) {
     if (Array.isArray(value)) return value.join(",");
     if (value === null || value === undefined || value === "") return "";
     const parsed = Number.parseInt(String(value), 10);
     if (!Number.isInteger(parsed) || parsed < 1) return trim(value);
-    const apiKeyCount = apiKeyCountFromValue(apiKeyValue);
+    const apiKeyCount = Number.isInteger(apiKeyCountOverride) && apiKeyCountOverride >= 0
+      ? apiKeyCountOverride
+      : apiKeyCountFromValue(apiKeyValue);
     if (apiKeyCount > 1) return Array(apiKeyCount).fill(parsed).join(",");
     return String(parsed);
   }
@@ -202,10 +209,12 @@
     return parsed;
   }
 
-  function validateSingleApiKeyMaxConcurrencyInput(raw, apiKeyValue) {
+  function validateSingleApiKeyMaxConcurrencyInput(raw, apiKeyValue, apiKeyCountOverride = null) {
     const parsed = parseSingleApiKeyMaxConcurrencyInput(raw);
     if (!Array.isArray(parsed)) return parsed;
-    const apiKeyCount = apiKeyCountFromValue(apiKeyValue);
+    const apiKeyCount = Number.isInteger(apiKeyCountOverride) && apiKeyCountOverride >= 0
+      ? apiKeyCountOverride
+      : apiKeyCountFromValue(apiKeyValue);
     if (parsed.length !== apiKeyCount) {
       throw new Error(`最大并发数数量必须与 API key 数量一致，当前共有 ${apiKeyCount} 个 key`);
     }
@@ -213,6 +222,17 @@
       throw new Error("最大并发数至少保留一个大于 0 的值");
     }
     return parsed;
+  }
+
+  // 掩码值只说明"还有一把存着的 key"，数不出真实 key 数量；详情读面带上 api_key_count，
+  // 所以按掩码编辑时用服务端读数，操作员改出新值时再按框里的内容数。
+  function effectiveApiKeyCount(apiKeyValue, editor = llmState().editor) {
+    const value = String(apiKeyValue == null ? "" : apiKeyValue);
+    const maskValue = String(editor?.apiKeyMaskValue || "");
+    if (editor?.apiKeyMasked && maskValue && value === maskValue) {
+      if (Number.isInteger(editor?.apiKeyCount) && editor.apiKeyCount >= 0) return editor.apiKeyCount;
+    }
+    return apiKeyCountFromValue(value);
   }
 
   function bindingNotesTitle() {
@@ -452,9 +472,21 @@
     if (!binding) return;
     // 记录已经不在了的行不请求详情：那次调用只会 404，而抽屉必须打得开，
     // 否则「删除配置」这条修路够不到，坏行既看不见也删不掉。
-    const record = binding.record_missing ? null : await ApiClient.getLlmConfig(binding.config_id || binding.llm_config_id, { includeSecrets: true });
+    // 默认读面只给掩码；明文要经「查看」+ 项目解锁口令（详见 revealEditorApiKey）。
+    const record = binding.record_missing ? null : await ApiClient.getLlmConfig(binding.config_id || binding.llm_config_id);
     const draft = withThinkingOutputParameterDefaults(draftFromConfig(record));
+    // 脱敏读面会清空请求头（那里也可能藏密钥），编辑抽屉按绑定行把它们补回来，
+    // 否则保存任意字段都会把自定义请求头一起写没。
+    const bindingHeaders = binding.extra_headers && typeof binding.extra_headers === "object" && !Array.isArray(binding.extra_headers)
+      ? binding.extra_headers
+      : null;
+    if (bindingHeaders && Object.keys(bindingHeaders).length) draft.extra_headers = { ...bindingHeaders };
     const jsonText = JSON.stringify(draft, null, 2);
+    const apiKeyValue = String(draft.api_key || "");
+    const apiKeyMasked = Boolean(record?.api_key_redacted);
+    const apiKeyCount = Number.isInteger(Number(record?.api_key_count))
+      ? Number(record?.api_key_count)
+      : apiKeyCountFromValue(apiKeyValue);
     llmState().editor = {
       ...emptyEditorState(),
       open: true,
@@ -467,7 +499,10 @@
       editName: "",
       editNameOriginal: "",
       baseUrl: String(draft.base_url || ""),
-      apiKey: String(draft.api_key || ""),
+      apiKey: apiKeyValue,
+      apiKeyMasked,
+      apiKeyMaskValue: apiKeyMasked ? apiKeyValue : "",
+      apiKeyCount,
       defaultModel: String(draft.default_model || ""),
       jsonText,
       initialJsonText: jsonText,
@@ -475,7 +510,8 @@
       retryCount: Number.isInteger(Number(binding.retry_count)) ? Math.max(0, Number(binding.retry_count)) : 0,
       singleApiKeyMaxConcurrency: expandSingleApiKeyMaxConcurrencyForEditor(
         binding.single_api_key_max_concurrency ?? binding.singleApiKeyMaxConcurrency ?? "",
-        draft.api_key || ""
+        apiKeyValue,
+        apiKeyCount
       ),
       contextWindowTokens: trim(binding.context_window_tokens),
       initialContextWindowTokens: trim(binding.context_window_tokens),
@@ -540,7 +576,10 @@
     if (modelKeyInput) editor.modelKey = trim(modelKeyInput.value || editor.modelKey);
     if (providerSelect) editor.providerId = trim(providerSelect.value || editor.providerId);
     if (baseUrlInput) editor.baseUrl = String(baseUrlInput.value ?? editor.baseUrl ?? "");
-    if (apiKeyInput) editor.apiKey = String(apiKeyInput.value ?? editor.apiKey ?? "");
+    if (apiKeyInput) {
+      editor.apiKey = String(apiKeyInput.value ?? editor.apiKey ?? "");
+      noteApiKeyValueChanged(editor.apiKey);
+    }
     if (defaultModelInput) editor.defaultModel = String(defaultModelInput.value ?? editor.defaultModel ?? "");
     if (jsonEditor) editor.jsonText = String(jsonEditor.value || editor.jsonText || "");
     if (retryOnInput) editor.retryOn = parseBindingRetryOn(retryOnInput.value || "");
@@ -783,6 +822,7 @@
     if (!editor) return false;
     const normalized = String(value ?? "");
     editor.apiKey = normalized;
+    noteApiKeyValueChanged(normalized);
     const input = document.getElementById("llm-binding-api-key");
     if (input && String(input.value || "") !== normalized) input.value = normalized;
     return true;
@@ -828,6 +868,7 @@
     if (!editor) return;
     const input = document.getElementById("llm-binding-api-key");
     editor.apiKey = String(input?.value ?? editor.apiKey ?? "");
+    noteApiKeyValueChanged(editor.apiKey);
     syncDraftFieldIntoJsonEditor("api_key", editor.apiKey);
   }
 
@@ -907,6 +948,134 @@
     }
   }
 
+  // 操作员把这格改成别的值以后，保存语义就回到"提交他写的内容"，掩码/已查看都不再适用。
+  function noteApiKeyValueChanged(value) {
+    const editor = llmState().editor;
+    if (!editor) return;
+    const text = String(value == null ? "" : value);
+    if (editor.apiKeyMasked && text !== String(editor.apiKeyMaskValue || "")) editor.apiKeyMasked = false;
+    if (editor.apiKeyRevealed && text !== String(editor.revealedApiKey || "")) {
+      editor.apiKeyRevealed = false;
+      editor.revealedApiKey = "";
+    }
+  }
+
+  function rewriteApiKeyInDraftText(text, value, providerId) {
+    try {
+      const draft = parseDraftJson(text, providerId);
+      draft.api_key = value;
+      return JSON.stringify(draft, null, 2);
+    } catch (_error) {
+      return "";
+    }
+  }
+
+  function replaceEditorApiKeyValue(value) {
+    const editor = llmState().editor;
+    if (!editor) return false;
+    const normalized = String(value == null ? "" : value);
+    editor.apiKey = normalized;
+    const input = document.getElementById("llm-binding-api-key");
+    if (input && String(input.value || "") !== normalized) input.value = normalized;
+    const providerId = trim(document.getElementById("llm-provider-select")?.value || editor.providerId);
+    // 初值与当前值一起换：查看/隐藏不是配置改动，不能让「保存修改」亮起重点色。
+    ["jsonText", "initialJsonText"].forEach((key) => {
+      const next = rewriteApiKeyInDraftText(String(editor[key] || ""), normalized, providerId);
+      if (next) editor[key] = next;
+    });
+    const jsonEditor = document.getElementById("llm-json-editor");
+    if (jsonEditor && String(jsonEditor.value || "") !== String(editor.jsonText || "")) {
+      jsonEditor.value = String(editor.jsonText || "");
+    }
+    return true;
+  }
+
+  function applyRevealedApiKey(result) {
+    const editor = llmState().editor;
+    const item = result?.item || null;
+    if (!editor || !item) return false;
+    const plain = String(item.auth?.api_key ?? item.api_key ?? "");
+    if (!plain) return false;
+    const expiresIn = Number(result?.expiresInSeconds ?? 0);
+    const minutes = expiresIn > 0 ? Math.max(1, Math.ceil(expiresIn / 60)) : 5;
+    editor.apiKeyRevealed = true;
+    editor.apiKeyMasked = false;
+    editor.revealedApiKey = plain;
+    editor.apiKeyCount = apiKeyCountFromValue(plain);
+    replaceEditorApiKeyValue(plain);
+    renderAll();
+    showToast({
+      title: "已解锁",
+      text: `${minutes} 分钟内可免密码查看 Apikey。`,
+      kind: "success",
+      durationMs: 3200,
+    });
+    return true;
+  }
+
+  function promptEditorApiKeyPassword(configId) {
+    return new Promise((resolve) => {
+      let settled = false;
+      openConfirm({
+        title: "查看 Apikey",
+        text: "输入项目解锁口令后显示 Apikey；5 分钟内可免密码再次查看。",
+        confirmLabel: "查看",
+        confirmKind: "",
+        input: { label: "项目解锁口令", type: "password", placeholder: "输入后显示 Apikey", required: true },
+        inputPlain: true,
+        onConfirm: async ({ value }) => {
+          const password = String(value || "");
+          if (!password) throw new Error("请输入项目解锁口令。");
+          const result = await ApiClient.revealLlmConfigApiKey(configId, password);
+          settled = true;
+          resolve(result);
+        },
+        onClose: () => {
+          if (!settled) resolve(null);
+        },
+      });
+    });
+  }
+
+  async function requestEditorApiKeyReveal() {
+    const editor = llmState().editor;
+    if (!editor || editor.mode !== "detail") return false;
+    const configId = trim(editor.configId);
+    if (!configId) return false;
+    let result = null;
+    try {
+      // 先按「窗口内免密」试一次：服务端授权仍活着就不必再打扰操作员。
+      result = await ApiClient.revealLlmConfigApiKey(configId, "");
+    } catch (error) {
+      if (error?.code !== "api_key_password_required") throw error;
+    }
+    if (!result) result = await promptEditorApiKeyPassword(configId);
+    if (!result) return false;
+    return applyRevealedApiKey(result);
+  }
+
+  async function ensureEditorApiKeyRevealed() {
+    const editor = llmState().editor;
+    if (!editor || editor.mode !== "detail" || !editor.apiKeyMasked) return true;
+    return await requestEditorApiKeyReveal();
+  }
+
+  function hideEditorApiKey() {
+    const editor = llmState().editor;
+    if (!editor?.apiKeyRevealed) return;
+    const unchanged = String(editor.apiKey || "") === String(editor.revealedApiKey || "");
+    editor.apiKeyRevealed = false;
+    editor.revealedApiKey = "";
+    if (unchanged && editor.apiKeyMaskValue) {
+      editor.apiKeyMasked = true;
+      replaceEditorApiKeyValue(editor.apiKeyMaskValue);
+    } else {
+      // 已经改成别的值：那不是需要遮起来的存量秘密，保留操作员的输入。
+      editor.apiKeyMasked = false;
+    }
+    renderAll();
+  }
+
   function reconcileBindingContextWindowTokens() {
     const editor = syncBindingInputs();
     if (!editor) return editor;
@@ -950,7 +1119,8 @@
     const draft = parseDraftJson(editor?.jsonText || "", editor?.providerId || "");
     const singleApiKeyMaxConcurrency = validateSingleApiKeyMaxConcurrencyInput(
       String(editor?.singleApiKeyMaxConcurrency ?? ""),
-      draft.api_key || ""
+      draft.api_key || "",
+      effectiveApiKeyCount(draft.api_key, editor)
     );
     const contextWindowTokens = validContextWindowTokensValue(editor?.contextWindowTokens);
     if (!Number.isInteger(retryCount) || retryCount < 0) {
@@ -1143,6 +1313,25 @@
       </div>`;
   }
 
+  // 查看/隐藏只在编辑档出现：新建档里 key 还是操作员刚输入的，没有存着的秘密可遮。
+  function renderApiKeyField(editor) {
+    const toggleVisible = editor.mode === "detail" && Boolean(editor.apiKeyRevealed || editor.apiKeyMasked);
+    const toggleAction = editor.apiKeyRevealed ? "hide-api-key" : "reveal-api-key";
+    const toggleLabel = editor.apiKeyRevealed ? "隐藏" : "查看";
+    const inputTitle = editor.apiKeyMasked ? ' title="Apikey 已隐藏，点「查看」并输入项目解锁口令后显示"' : "";
+    const toggleMarkup = toggleVisible
+      ? `<button type="button" class="toolbar-btn ghost small llm-api-key-reveal-btn" data-llm-action="${toggleAction}">${toggleLabel}</button>`
+      : "";
+    return `
+        <div class="resource-field">
+          <span class="resource-field-label">Apikey *</span>
+          <div class="llm-api-key-input-row">
+            <input id="llm-binding-api-key" class="resource-search" type="text" aria-label="Apikey"${inputTitle} value="${escv(editor.apiKey)}" placeholder="支持用逗号分隔填写多个 key">
+            ${toggleMarkup}
+          </div>
+        </div>`;
+  }
+
   function renderConnectionFields() {
     const state = llmState();
     return `
@@ -1156,10 +1345,7 @@
           <span class="resource-field-label">请求地址 *</span>
           <input id="llm-binding-base-url" class="resource-search" type="text" value="${escv(state.editor.baseUrl)}" placeholder="例如：https://api.example.com/v1">
         </label>
-        <label class="resource-field">
-          <span class="resource-field-label">Apikey *</span>
-          <input id="llm-binding-api-key" class="resource-search" type="text" value="${escv(state.editor.apiKey)}" placeholder="支持用逗号分隔填写多个 key">
-        </label>
+        ${renderApiKeyField(state.editor)}
         ${renderContextWindowField(state.editor)}
       </div>`;
   }
@@ -1560,6 +1746,8 @@
 
   async function handleTest() {
     const state = llmState();
+    // 掩码值发不出可用请求：测试前先走一次查看流程（窗口内免密，否则弹口令）。
+    if (!(await ensureEditorApiKeyRevealed())) return;
     reconcileBindingContextWindowTokens();
     const jsonText = document.getElementById("llm-json-editor")?.value || state.editor.jsonText;
     const providerId = trim(document.getElementById("llm-provider-select")?.value || state.editor.providerId);
@@ -1602,6 +1790,7 @@
 
   async function handleFetchModelList() {
     const state = llmState();
+    if (!(await ensureEditorApiKeyRevealed())) return;
     syncBindingInputs();
     const editor = state.editor;
     const providerId = trim(document.getElementById("llm-provider-select")?.value || editor.providerId);
@@ -1673,6 +1862,7 @@
       confirmKind: "danger",
     });
     if (!confirmed) return;
+    if (!(await ensureEditorApiKeyRevealed())) return;
     const jsonText = document.getElementById("llm-json-editor")?.value || state.editor.jsonText;
     const providerId = trim(document.getElementById("llm-provider-select")?.value || state.editor.providerId);
     state.editor.jsonText = jsonText;
@@ -1772,7 +1962,7 @@
       throw new Error(state.error);
     }
     const bindingDraft = bindingDraftPayload();
-    if (apiKeyCountFromValue(String(bindingDraft.draft?.api_key || "").trim()) > 1) {
+    if (effectiveApiKeyCount(bindingDraft.draft?.api_key) > 1) {
       const message = "每个配置只允许一个 API Key（单 key 模式）；需要多个模型或容灾回退时，请添加多个配置并组成模型链。";
       state.error = message;
       renderAll();
@@ -1873,7 +2063,7 @@
     state.editor.jsonText = jsonText;
     const draft = bindingDraft.draft;
     const configChanged = trim(jsonText) !== trim(state.editor.initialJsonText || "");
-    if (configChanged && apiKeyCountFromValue(String(draft.api_key || "").trim()) > 1) {
+    if (configChanged && effectiveApiKeyCount(draft.api_key) > 1) {
       const message = "每个配置只允许一个 API Key（单 key 模式）；需要多个模型或容灾回退时，请添加多个配置并组成模型链。";
       state.error = message;
       renderAll();
@@ -2097,6 +2287,8 @@
       }
       const action = event.target.closest("[data-llm-action]")?.dataset.llmAction;
       if (!action) return;
+      if (action === "reveal-api-key") { void requestEditorApiKeyReveal().catch((error) => { showToast({ title: "查看失败", text: error?.message || "查看 Apikey 失败", kind: "error" }); }); return; }
+      if (action === "hide-api-key") { hideEditorApiKey(); return; }
       if (action === "close") { closeEditor(); return; }
       if (action === "edit-name") { enterModelNameEditMode(); return; }
       if (action === "name-cancel") { cancelModelNameEdit(); return; }
@@ -2234,6 +2426,12 @@
     llmEditorDirty,
     syncLlmEditorDirtyAffordance,
     syncBindingInputs,
+    effectiveApiKeyCount,
+    applyRevealedApiKey,
+    replaceEditorApiKeyValue,
+    hideEditorApiKey,
+    noteApiKeyValueChanged,
+    requestEditorApiKeyReveal,
   };
   window.handleModelRoleEditorAction = async function handleModelRoleEditorAction() {
     if (!S.modelCatalog.rolesDirty) return;

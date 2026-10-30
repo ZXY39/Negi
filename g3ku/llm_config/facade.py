@@ -158,12 +158,29 @@ class LLMConfigFacade:
 
     def get_config_record(self, config_id: str, *, include_secrets: bool = False) -> dict[str, Any]:
         record = self._hydrate_record_secrets(self.repository.get(config_id))
-        if not include_secrets:
+        api_key = str(record.auth.get("api_key", "") or "")
+        redacted = not include_secrets
+        if redacted:
             auth = dict(record.auth)
-            api_key = str(auth.get("api_key", "") or "")
             auth["api_key"] = MASKED_SECRET_VALUE if api_key else ""
             record = record.model_copy(update={"auth": auth, "headers": {}})
-        return record.model_dump(mode="json")
+        payload = record.model_dump(mode="json")
+        # 编辑面靠这两个读数区分「框里是掩码」与「这份配置本来就没有 key」，
+        # 并按真实 key 数校验每 key 并发格；掩码本身对不出数量。
+        payload["api_key_redacted"] = redacted and bool(api_key)
+        payload["api_key_count"] = len(parse_api_keys(api_key))
+        return payload
+
+    def verify_reveal_password(self, password: str) -> bool:
+        """只读校验：口令解得开本机信封才算通过，不激活、不落盘。"""
+        try:
+            return bool(self.security.unwrap_with_password(str(password or "")))
+        except Exception:
+            return False
+
+    def passwordless_secret_reveal_allowed(self) -> bool:
+        """没有口令信封的项目（只用主密钥解锁）没有可核对的秘密，免密查看不削弱边界。"""
+        return self.security.is_unlocked() and not self.security.has_installed_envelope()
 
     def create_config_record(self, payload: dict[str, Any]) -> dict[str, Any]:
         draft = ProviderConfigDraft.model_validate(payload)
@@ -180,7 +197,7 @@ class LLMConfigFacade:
         # 保存只做字段校验与落盘，不发真实推理：`last_probe_status=None` 表示这份配置
         # 还没被测过，落一次盘不会把旧的探测结果继续挂在新内容上。
         self._persist_record(normalized)
-        return self.get_config_record(normalized.config_id, include_secrets=True)
+        return self.get_config_record(normalized.config_id)
 
     def update_config_record(self, config_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         current = self._hydrate_record_secrets(self.repository.get(config_id))
@@ -199,7 +216,7 @@ class LLMConfigFacade:
             }
         )
         self._persist_record(updated)
-        return self.get_config_record(updated.config_id, include_secrets=True)
+        return self.get_config_record(updated.config_id)
 
     def delete_config_record(self, config_id: str) -> None:
         self.repository.delete(config_id)
