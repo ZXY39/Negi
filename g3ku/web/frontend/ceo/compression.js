@@ -77,9 +77,25 @@ function normalizeCeoSnapshotCompressionMarker(marker = null) {
     return next;
 }
 
+// 手动压缩的发起账本按会话记：服务端每条会话各有自己的 manual state
+// （`_manual_compression_view(runtime_session)`），两条会话可以同时压缩。
+// 单个全局槽会把「A 正在压缩」读成「什么都不能再发起」，B 的长按因此连请求都不发。
+function ceoContextCompressionEntry(sessionId, create = false) {
+    const key = String(sessionId || "").trim();
+    if (!key) return null;
+    if (!S.ceoContextCompression[key]) {
+        if (!create) return null;
+        S.ceoContextCompression[key] = { status: "idle", pollId: null, pollFails: 0 };
+    }
+    return S.ceoContextCompression[key];
+}
+
+function ceoManualCompressionRunning(sessionId) {
+    return String(ceoContextCompressionEntry(sessionId)?.status || "").trim().toLowerCase() === "running";
+}
+
 function activeCeoManualCompressionRunning() {
-    return String(S.ceoContextCompressionStatus || "").trim().toLowerCase() === "running"
-        && String(S.ceoContextCompressionSessionId || "") === String(activeSessionId() || "").trim();
+    return ceoManualCompressionRunning(activeSessionId());
 }
 
 function activeCeoSessionCompressionState() {
@@ -480,11 +496,11 @@ function applyCeoInflightCompressionRule(messages = [], inflightTurn = null) {
     });
 }
 
-function stopCeoContextCompressionPolling() {
-    if (S.ceoContextCompressionPollId !== null) {
-        window.clearInterval(S.ceoContextCompressionPollId);
-        S.ceoContextCompressionPollId = null;
-    }
+function stopCeoContextCompressionPolling(sessionId) {
+    const entry = ceoContextCompressionEntry(sessionId);
+    if (!entry || entry.pollId === null) return;
+    window.clearInterval(entry.pollId);
+    entry.pollId = null;
 }
 
 function ceoContextCompressionTerminalText(reason) {
@@ -497,35 +513,36 @@ function ceoContextCompressionTerminalText(reason) {
     return "没有可压缩的历史，或所选模型没有可用的上下文窗口（需大于 25000 token）。";
 }
 
-function applyCeoContextCompressionStatus(payload = {}) {
+function applyCeoContextCompressionStatus(sessionId, payload = {}) {
+    const key = String(sessionId || "").trim();
+    if (!key) return;
+    const entry = ceoContextCompressionEntry(key, true);
     const status = String(payload?.status || "idle").trim().toLowerCase();
-    const sessionId = String(S.ceoContextCompressionSessionId || activeSessionId() || "").trim();
-    const previous = String(S.ceoContextCompressionStatus || "").trim().toLowerCase();
-    S.ceoContextCompressionStatus = status;
-    S.ceoContextCompressionCancelRequested = payload?.cancel_requested === true;
-    if (status !== "running") {
-        stopCeoContextCompressionPolling();
-        S.ceoContextCompressionSessionId = "";
-    }
+    const previous = String(entry.status || "").trim().toLowerCase();
+    entry.status = status;
+    if (status !== "running") stopCeoContextCompressionPolling(key);
     if (status === "running") {
-        mirrorCeoContextCompression(sessionId, {
+        mirrorCeoContextCompression(key, {
             status: "running",
             source: "manual_context_compression",
         });
     } else {
         if (previous === "running") {
             // 先就地改成终态，避免“先删线、再等重连”的空白窗口。
-            if (status === "completed" || status === "paused" || status === "failed") {
-                convertCeoRunningDividerToTerminal(
-                    status,
-                    status === "failed" ? String(payload?.reason || "") : "",
-                );
-            } else {
-                removeCeoCompressionLiveDivider();
+            // 线只属于当下看得见的那条会话：切走之后这一帧改的是别人 feed 里的线。
+            if (key === String(activeSessionId() || "").trim()) {
+                if (status === "completed" || status === "paused" || status === "failed") {
+                    convertCeoRunningDividerToTerminal(
+                        status,
+                        status === "failed" ? String(payload?.reason || "") : "",
+                    );
+                } else {
+                    removeCeoCompressionLiveDivider();
+                }
             }
         }
         // 终局写 null 清缓存，防止 activeCeoSessionCompressionState 从旧镜像复活 running。
-        if (sessionId) setCeoSessionSnapshotCache(sessionId, { compression: null });
+        setCeoSessionSnapshotCache(key, { compression: null });
     }
     if (previous === "running" && status !== "running") {
         if (status === "not_needed") {
@@ -539,22 +556,24 @@ function applyCeoContextCompressionStatus(payload = {}) {
         }
         // 区分线由转录里的持久标记行承载；终局后重开会话才能拿到它，这里强制刷新一次。
         S.ceoFeedRenderSignature = "";
-        if (sessionId) void reloadCeoSessionSnapshot(sessionId);
+        void reloadCeoSessionSnapshot(key);
     }
-    syncCeoCompressionDivider();
-    syncCeoComposerUsageOutline();
+    if (key === String(activeSessionId() || "").trim()) {
+        syncCeoCompressionDivider();
+        syncCeoComposerUsageOutline();
+    }
 }
 
 function startCeoContextCompressionPolling(sessionId) {
-    stopCeoContextCompressionPolling();
     const key = String(sessionId || "").trim();
-    if (!key) return;
-    S.ceoContextCompressionPollFails = 0;
+    const entry = ceoContextCompressionEntry(key, true);
+    if (!key || !entry) return;
+    stopCeoContextCompressionPolling(key);
     let inFlight = false;
-    S.ceoContextCompressionPollId = window.setInterval(async () => {
+    entry.pollId = window.setInterval(async () => {
         if (String(activeSessionId() || "").trim() !== key) {
-            // 切走会话时停轮询；切回来由 ensureCeoContextCompressionPolling 续上。
-            stopCeoContextCompressionPolling();
+            // 切走会话时停这一条的轮询；切回来由 ensureCeoContextCompressionPolling 续上。
+            stopCeoContextCompressionPolling(key);
             return;
         }
         // 大会话收尾会把事件循环占住数秒，单次请求可能叠在上一条后面，别并发打出去。
@@ -562,14 +581,14 @@ function startCeoContextCompressionPolling(sessionId) {
         inFlight = true;
         try {
             const payload = await ApiClient.getCeoContextCompression(key);
-            S.ceoContextCompressionPollFails = 0;
-            applyCeoContextCompressionStatus(payload || {});
+            entry.pollFails = 0;
+            applyCeoContextCompressionStatus(key, payload || {});
         } catch (error) {
             // 一次超时不能当作终局：停掉轮询就等于永久收不到 completed，区分线会挂在
             // 「压缩中」直到刷新。攒到连续多次失败才放弃。
-            S.ceoContextCompressionPollFails += 1;
-            if (S.ceoContextCompressionPollFails >= CEO_COMPRESSION_POLL_FAIL_LIMIT) {
-                stopCeoContextCompressionPolling();
+            entry.pollFails += 1;
+            if (entry.pollFails >= CEO_COMPRESSION_POLL_FAIL_LIMIT) {
+                stopCeoContextCompressionPolling(key);
             }
         } finally {
             inFlight = false;
@@ -578,10 +597,11 @@ function startCeoContextCompressionPolling(sessionId) {
 }
 
 function ensureCeoContextCompressionPolling() {
-    const key = String(S.ceoContextCompressionSessionId || "").trim();
-    if (!key || S.ceoContextCompressionPollId !== null) return;
-    if (String(S.ceoContextCompressionStatus || "").trim().toLowerCase() !== "running") return;
-    if (String(activeSessionId() || "").trim() !== key) return;
+    // 只跟当前这条会话：其它会话的在途压缩由各自的账本记着，切过去才重新起轮询。
+    const key = String(activeSessionId() || "").trim();
+    if (!key) return;
+    if (!ceoManualCompressionRunning(key)) return;
+    if (ceoContextCompressionEntry(key)?.pollId !== null) return;
     startCeoContextCompressionPolling(key);
 }
 
@@ -601,10 +621,10 @@ function mirrorCeoContextCompression(sessionId, compression) {
 async function beginCeoContextCompression(sessionId) {
     const key = String(sessionId || "").trim();
     if (!key) return;
-    if (String(S.ceoContextCompressionStatus || "").trim().toLowerCase() === "running") return;
-    S.ceoContextCompressionSessionId = key;
-    S.ceoContextCompressionStatus = "running";
-    S.ceoContextCompressionCancelRequested = false;
+    // 闸门只看这一条会话：别的会话在压缩不该拦住这里（服务端按会话各记一份 manual state）。
+    if (ceoManualCompressionRunning(key)) return;
+    const entry = ceoContextCompressionEntry(key, true);
+    entry.status = "running";
     mirrorCeoContextCompression(key, {
         status: "running",
         source: "manual_context_compression",
@@ -612,13 +632,10 @@ async function beginCeoContextCompression(sessionId) {
     syncCeoCompressionDivider();
     try {
         const payload = await ApiClient.startCeoContextCompression(key);
-        applyCeoContextCompressionStatus(payload || {});
-        if (String(S.ceoContextCompressionStatus || "").trim().toLowerCase() === "running") {
-            startCeoContextCompressionPolling(key);
-        }
+        applyCeoContextCompressionStatus(key, payload || {});
+        if (ceoManualCompressionRunning(key)) startCeoContextCompressionPolling(key);
     } catch (error) {
-        S.ceoContextCompressionStatus = "idle";
-        S.ceoContextCompressionSessionId = "";
+        entry.status = "idle";
         syncCeoCompressionDivider();
         showToast({
             title: "压缩失败",
@@ -629,7 +646,8 @@ async function beginCeoContextCompression(sessionId) {
 }
 
 function requestCeoContextCompressionPause() {
-    const key = String(S.ceoContextCompressionSessionId || activeSessionId() || "").trim();
+    // 暂停按钮挂在当前 feed 的线上，目标永远是这一条会话，而不是「最后一次发起的那条」。
+    const key = String(activeSessionId() || "").trim();
     if (!key) return;
     openConfirm({
         title: "暂停上下文压缩",
@@ -637,13 +655,10 @@ function requestCeoContextCompressionPause() {
         confirmLabel: "暂停压缩",
         confirmKind: "danger",
         onConfirm: async () => {
-            S.ceoContextCompressionCancelRequested = true;
-            syncCeoCompressionDivider();
             try {
                 const payload = await ApiClient.cancelCeoContextCompression(key);
-                applyCeoContextCompressionStatus(payload || {});
+                applyCeoContextCompressionStatus(key, payload || {});
             } catch (error) {
-                S.ceoContextCompressionCancelRequested = false;
                 showToast({
                     title: "暂停失败",
                     text: String(error?.message || "当前没有可暂停的上下文压缩。"),
@@ -656,20 +671,16 @@ function requestCeoContextCompressionPause() {
 
 function adoptCeoContextCompression(sessionId, compression) {
     // 回合外的手动压缩没有 inflight turn，进行中状态只活在服务端会话级 `compression` 里
-    // （state 快照与 snapshot.ceo 都带）。刷新会清空本机 S.ceoContextCompression*，不认领
-    // 回来就再也看不到区分线，也收不到终局——必须再刷一次才看得到「会话已压缩」。
+    // （state 快照与 snapshot.ceo 都带）。刷新会清空本机账本，不认领回来就再也
+    // 看不到区分线，也收不到终局——必须再刷一次才看得到「会话已压缩」。
     const key = String(sessionId || "").trim();
     const normalized = normalizeCeoSnapshotCompression(compression);
     if (!key) return;
     if (String(normalized?.status || "").trim().toLowerCase() !== "running") return;
     if (String(normalized?.source || "").trim().toLowerCase() !== "manual_context_compression") return;
-    if (String(S.ceoContextCompressionSessionId || "").trim() === key
-        && String(S.ceoContextCompressionStatus || "").trim().toLowerCase() === "running") {
-        return;
-    }
-    S.ceoContextCompressionSessionId = key;
-    S.ceoContextCompressionStatus = "running";
-    S.ceoContextCompressionCancelRequested = false;
+    if (ceoManualCompressionRunning(key)) return;
+    const entry = ceoContextCompressionEntry(key, true);
+    entry.status = "running";
     mirrorCeoContextCompression(key, normalized);
     syncCeoCompressionDivider();
 }

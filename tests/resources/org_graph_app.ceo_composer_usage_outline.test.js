@@ -194,8 +194,7 @@ test("idle session renders the brain neutral grey while keeping the reading", ()
     S.ceoTurnActive = false;
 
     // 回合外的手动压缩也算「正在进行」。
-    S.ceoContextCompressionStatus = "running";
-    S.ceoContextCompressionSessionId = "web:test";
+    S.ceoContextCompression["web:test"] = { status: "running", pollId: null, pollFails: 0 };
     syncCeoComposerUsageOutline();
     assert.match(String(U.ceoComposerUsageBrain.style["--ceo-context-usage-color"] || ""), /^hsl\(/);
 });

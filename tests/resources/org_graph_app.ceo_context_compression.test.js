@@ -276,6 +276,15 @@ function dividers(feed) {
     return feed.children.filter((child) => String(child.className || "").includes("ceo-compression-divider"));
 }
 
+// 手动压缩的发起账本按会话记，测试直接落这一本账，不去碰已经删掉的旧全局槽。
+function setManual(api, sessionId, status = "running") {
+    api.S.ceoContextCompression[sessionId] = { status, pollId: null, pollFails: 0 };
+}
+
+function manualEntry(api, sessionId) {
+    return api.S.ceoContextCompression[sessionId] || null;
+}
+
 test("长按未满 2 秒松手不发起压缩，进度环归零", () => {
     const api = loadApp();
     api.context.beginCeoContextCompression = (sessionId) => {
@@ -360,15 +369,38 @@ test("渠道会话同样可以长按压缩，上传中与正在压缩才拒绝",
     assert.equal(api.ceoBrainHoldBlockedReason(), "附件上传中，请稍后再试");
 
     api.S.ceoUploadBusy = false;
-    api.S.ceoContextCompressionStatus = "running";
-    api.S.ceoContextCompressionSessionId = "ext:qq";
+    setManual(api, "ext:qq");
     assert.equal(api.ceoBrainHoldBlockedReason(), "正在压缩上下文");
+});
+
+test("另一条会话在压缩不拦住这条会话的长按：账本按会话记", async () => {
+    const api = loadApp();
+    const started = [];
+    api.ApiClient.startCeoContextCompression = async (sessionId) => {
+        started.push(sessionId);
+        return { status: "running", session_id: sessionId };
+    };
+    api.ApiClient.getCeoContextCompression = async () => ({ status: "running" });
+
+    // web:other 正在压缩（本机账本 + 它自己的镜像），当前看的是 web:test。
+    setManual(api, "web:other");
+    assert.equal(api.ceoBrainHoldBlockedReason(), "");
+    assert.equal(api.activeCeoSessionCompressionState(), null);
+
+    await api.context.beginCeoContextCompression("web:test");
+
+    assert.deepEqual(started, ["web:test"], "别条会话在压缩时这条必须真发出请求");
+    assert.equal(manualEntry(api, "web:test").status, "running");
+    assert.equal(manualEntry(api, "web:other").status, "running", "两条同时在飞时旧那条不能被顶掉");
+    const live = dividers(api.U.ceoFeed);
+    assert.equal(live.length, 1, "发起当场就要有压缩条");
+    assert.equal(live[0].dataset.ceoCompressionState, "running");
+    assert.notEqual(manualEntry(api, "web:test").pollId, null, "这一条自己起轮询");
 });
 
 test("轮询按失败上限容错：单次超时不停跟踪", async () => {
     const api = loadApp();
-    api.S.ceoContextCompressionSessionId = "web:test";
-    api.S.ceoContextCompressionStatus = "running";
+    setManual(api, "web:test");
     const limit = api.CEO_COMPRESSION_POLL_FAIL_LIMIT;
     let remainingFailures = limit - 1;
     api.ApiClient.getCeoContextCompression = async () => {
@@ -385,17 +417,16 @@ test("轮询按失败上限容错：单次超时不停跟踪", async () => {
         await poll.callback();
         // 大会话收尾会把事件循环占住数秒，单次超时不能把还在跑的压缩判成结束。
         assert.equal(poll.cleared, false);
-        assert.equal(api.S.ceoContextCompressionStatus, "running");
+        assert.equal(manualEntry(api, "web:test").status, "running");
     }
     await poll.callback();
-    assert.equal(api.S.ceoContextCompressionStatus, "completed");
+    assert.equal(manualEntry(api, "web:test").status, "completed");
     assert.equal(poll.cleared, true);
 });
 
 test("轮询连续失败到上限才放弃跟踪", async () => {
     const api = loadApp();
-    api.S.ceoContextCompressionSessionId = "web:test";
-    api.S.ceoContextCompressionStatus = "running";
+    setManual(api, "web:test");
     api.ApiClient.getCeoContextCompression = async () => {
         throw new Error("Request timeout");
     };
@@ -412,10 +443,9 @@ test("轮询连续失败到上限才放弃跟踪", async () => {
 
 test("压缩没有落区分线时给出原因而不是让线凭空消失", () => {
     const api = loadApp();
-    api.S.ceoContextCompressionSessionId = "web:test";
-    api.S.ceoContextCompressionStatus = "running";
+    setManual(api, "web:test");
 
-    api.applyCeoContextCompressionStatus({ status: "not_needed", reason: "no_compressible_history" });
+    api.applyCeoContextCompressionStatus("web:test", { status: "not_needed", reason: "no_compressible_history" });
 
     const toast = api.toasts.find((entry) => entry.title === "上下文未压缩");
     assert.ok(toast, "not_needed 终局必须解释一句");
@@ -448,20 +478,18 @@ test("只读的渠道会话照样拉 composer 预估", async () => {
 test("手动压缩进行中即视为该会话正在压缩", () => {
     const api = loadApp();
 
-    api.S.ceoContextCompressionStatus = "running";
-    api.S.ceoContextCompressionSessionId = "web:other";
+    setManual(api, "web:other");
     assert.equal(api.activeCeoManualCompressionRunning(), false);
     assert.equal(api.activeCeoSessionCompressionState(), null);
 
-    api.S.ceoContextCompressionSessionId = "web:test";
+    setManual(api, "web:test");
     assert.equal(api.activeCeoManualCompressionRunning(), true);
     assert.equal(api.activeCeoSessionCompressionState().status, "running");
 });
 
 test("实时区分线只挂一条，进行中的图标即暂停按钮", () => {
     const api = loadApp();
-    api.S.ceoContextCompressionStatus = "running";
-    api.S.ceoContextCompressionSessionId = "web:test";
+    setManual(api, "web:test");
 
     api.syncCeoCompressionDivider();
     api.syncCeoCompressionDivider();
@@ -476,7 +504,7 @@ test("实时区分线只挂一条，进行中的图标即暂停按钮", () => {
     assert.match(live[0].innerHTML, /<i><\/i><i><\/i>/);
     assert.doesNotMatch(live[0].innerHTML, /data-lucide/);
 
-    api.S.ceoContextCompressionStatus = "idle";
+    setManual(api, "web:test", "idle");
     api.syncCeoCompressionDivider();
     assert.equal(dividers(api.U.ceoFeed).length, 0);
 });
@@ -508,8 +536,7 @@ test("终态区分线不带暂停按钮，完成态只有文案", () => {
 test("切走再切回同一会话，实时区分线与轮询都要恢复", () => {
     const api = loadApp();
     api.S.activeSessionId = "ext:qq";
-    api.S.ceoContextCompressionSessionId = "ext:qq";
-    api.S.ceoContextCompressionStatus = "running";
+    setManual(api, "ext:qq");
 
     api.syncCeoCompressionDivider();
     assert.equal(dividers(api.U.ceoFeed).length, 1);
@@ -519,49 +546,41 @@ test("切走再切回同一会话，实时区分线与轮询都要恢复", () =>
     api.syncCeoCompressionDivider();
     assert.equal(dividers(api.U.ceoFeed).length, 0);
     // 切走时轮询自停（真实代码里由 stopCeoContextCompressionPolling 做）。
-    api.S.ceoContextCompressionPollId = null;
+    manualEntry(api, "ext:qq").pollId = null;
 
     // 切回：线必须重新挂上，轮询必须续上，否则终局永远收不到，只能靠刷新网页。
     api.S.activeSessionId = "ext:qq";
     api.syncCeoCompressionDivider();
     assert.equal(dividers(api.U.ceoFeed).length, 1);
-    assert.notEqual(api.S.ceoContextCompressionPollId, null);
-    api.S.ceoContextCompressionStatus = "idle";
-    api.S.ceoContextCompressionSessionId = "";
-    api.stopCeoContextCompressionPolling?.();
+    assert.notEqual(manualEntry(api, "ext:qq").pollId, null);
 });
 
 test("刷新页面后收到 state.compression 仍会恢复进行中的压缩标识", () => {
     const api = loadApp();
     // 模拟刚刷新：本机没有任何发起痕迹，只有服务端 state 里的进行中压缩。
-    api.S.ceoContextCompressionStatus = "idle";
-    api.S.ceoContextCompressionSessionId = "";
-    api.S.ceoContextCompressionPollId = null;
+    api.S.ceoContextCompression = {};
 
     api.adoptCeoContextCompression("web:test", {
         status: "running", text: "上下文压缩中", source: "manual_context_compression",
     });
 
-    assert.equal(api.S.ceoContextCompressionStatus, "running");
-    assert.equal(api.S.ceoContextCompressionSessionId, "web:test");
+    assert.equal(manualEntry(api, "web:test").status, "running");
     const live = dividers(api.U.ceoFeed);
     assert.equal(live.length, 1);
     assert.equal(live[0].dataset.ceoCompressionState, "running");
     // 接回跟踪必须同时续上轮询，否则终局照样收不到。
-    assert.notEqual(api.S.ceoContextCompressionPollId, null);
+    assert.notEqual(manualEntry(api, "web:test").pollId, null);
 });
 
 test("自动压缩的进行中状态不走手动恢复通道", () => {
     const api = loadApp();
-    api.S.ceoContextCompressionStatus = "idle";
-    api.S.ceoContextCompressionSessionId = "";
+    api.S.ceoContextCompression = {};
 
     api.adoptCeoContextCompression("web:test", {
         status: "running", text: "上下文压缩中", source: "token_compression",
     });
 
-    assert.equal(api.S.ceoContextCompressionStatus, "idle");
-    assert.equal(api.S.ceoContextCompressionSessionId, "");
+    assert.equal(manualEntry(api, "web:test"), null);
     assert.equal(dividers(api.U.ceoFeed).length, 0);
     // 接线本身也要有断言：两条权威消息（ceo.state 与 snapshot.ceo）都得认领，
     // 少一条就退化成"看消息顺序运气"的恢复。
@@ -589,8 +608,7 @@ test("快照整页重建后必须重挂进行中的区分线", () => {
     );
 
     // 往上翻历史时重挂不得把用户拽回底部（给足几何余量，避免被 maxTop 钳住干扰判断）。
-    api.S.ceoContextCompressionStatus = "running";
-    api.S.ceoContextCompressionSessionId = "web:test";
+    setManual(api, "web:test");
     api.S.ceoFeedFollowLatest = false;
     api.U.ceoFeed.scrollHeight = 5000;
     api.U.ceoFeed.clientHeight = 800;
@@ -819,8 +837,7 @@ test("回合内自动压缩那条线不挂暂停按钮：端点只认手动任�
     assert.match(live[0].innerHTML, /ceo-compression-divider-icon/);
 
     const manual = loadApp();
-    manual.S.ceoContextCompressionStatus = "running";
-    manual.S.ceoContextCompressionSessionId = "web:test";
+    setManual(manual, "web:test");
     manual.syncCeoCompressionDivider();
     assert.match(dividers(manual.U.ceoFeed)[0].innerHTML, /data-ceo-compress-pause/);
 });
@@ -1034,8 +1051,7 @@ test("P1-b running 缓存镜像带 seen_at，过期旧镜像不画线", () => {
     assert.equal(typeof cached.compression.seen_at, "number");
     assert.equal(api.activeCeoSessionCompressionState().status, "running");
 
-    api.S.ceoContextCompressionStatus = "";
-    api.S.ceoContextCompressionSessionId = "";
+    api.S.ceoContextCompression = {};
     api.setCeoSessionSnapshotCache("web:test", {
         compression: {
             status: "running",
@@ -1048,8 +1064,7 @@ test("P1-b running 缓存镜像带 seen_at，过期旧镜像不画线", () => {
 
 test("P1-b 终局就地改线：running -> completed，不先消失", () => {
     const api = loadApp();
-    api.S.ceoContextCompressionStatus = "running";
-    api.S.ceoContextCompressionSessionId = "web:test";
+    setManual(api, "web:test");
     api.syncCeoCompressionDivider();
     const before = dividers(api.U.ceoFeed);
     assert.equal(before.length, 1);
@@ -1065,8 +1080,7 @@ test("P1-b 终局就地改线：running -> completed，不先消失", () => {
 
 test("P1-b 批次内 sync 延迟到批次结束，running 线在 feed 尾部", () => {
     const api = loadApp();
-    api.S.ceoContextCompressionStatus = "running";
-    api.S.ceoContextCompressionSessionId = "web:test";
+    setManual(api, "web:test");
     const feed = new api.StubHTMLElement();
     api.U.ceoFeed = feed;
 

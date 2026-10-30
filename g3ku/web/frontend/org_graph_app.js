@@ -150,12 +150,9 @@ const S = {
     ceoComposerUsageRequestSeq: 0,
     ceoComposerUsageBusy: false,
     ceoComposerUsageNeedsRefresh: false,
-    // 手动上下文压缩：本机按住脑图标满 2 秒后由服务端起跑，这里只记发起方与轮询。
-    ceoContextCompressionStatus: "idle",
-    ceoContextCompressionCancelRequested: false,
-    ceoContextCompressionSessionId: "",
-    ceoContextCompressionPollId: null,
-    ceoContextCompressionPollFails: 0,
+    // 手动上下文压缩：本机按住脑图标满 2 秒后由服务端起跑。按会话记账
+    // （sessionId → {status, pollId, pollFails}），服务端本来就每条会话各跑一个压缩任务。
+    ceoContextCompression: {},
     ceoBrainHold: { active: false, startedAt: 0, rafId: null, sessionId: "" },
     // 长按满阈值后到达的那次 click 是副产物，不能顺带弹开模型面板。
     ceoBrainHoldConsumedClick: false,
