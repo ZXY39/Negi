@@ -165,6 +165,19 @@ def test_both_installers_read_the_list_from_the_payload() -> None:
         assert "sparse" in text, f"{installer.name} lost its git-lane exclusion step"
 
 
+def test_the_exe_payload_build_reads_the_same_list() -> None:
+    """The setup program embeds a checkout, so it is a third consumer of the list.
+
+    Dropping it there would put the development tree inside the exe while the two
+    command-line lanes stayed trimmed - the difference a device would never see.
+    """
+    text = (REPO_ROOT / "packaging" / "build-setup.ps1").read_text(
+        encoding="utf-8", errors="replace"
+    )
+    assert "distribution-excludes.txt" in text, "the payload build stopped reading the list"
+    assert "sparse-checkout" in text, "the payload build stopped applying the list"
+
+
 def test_exclusion_leaves_the_device_repository_clean(tmp_path: Path) -> None:
     """The whole point of sparse rules over deleting: git still believes the tree.
 
