@@ -46,14 +46,20 @@ PYTHON_VERSION = (3, 12)  # .python-version; a kit is per interpreter minor vers
 PLATFORMS: dict[str, dict] = {
     "win-x64": {"sys_platform": "win32", "os_name": "nt", "platform_machine": "AMD64",
                 "platform_patterns": (r"^win_amd64$",)},
+    # linux-x64 is the glibc lane. musllinux wheels are deliberately not accepted: a musl
+    # build cannot install on a glibc device, and a kit that ships one fails the offline
+    # install with "no wheels with a matching platform tag" while looking fine in the plan.
     "linux-x64": {"sys_platform": "linux", "os_name": "posix", "platform_machine": "x86_64",
                   "platform_patterns": (r"^manylinux\d*_\d+_\d+_x86_64$",
                                         r"^manylinux\d+x86_64$",
-                                        r"^musllinux_\d+_\d+_x86_64$",
                                         r"^linux_x86_64$")},
     "macos-arm64": {"sys_platform": "darwin", "os_name": "posix", "platform_machine": "arm64",
                     "platform_patterns": (r"^macosx_\d+_\d+_(arm64|universal2)$",)},
 }
+
+# manylinux aliases stand for the glibc they were built against; a kit wants the oldest
+# one a package publishes, because every newer glibc still runs it.
+_MANYLINUX_ALIASES = {"1": (2, 5), "2010": (2, 12), "2014": (2, 17)}
 
 _WHEEL_NAME = re.compile(
     r"^(?P<name>[^\s-]+(?:_[^\s-]+)*)-(?P<ver>[^\s-]+?)"
@@ -110,6 +116,30 @@ def _rank(filename: str) -> tuple[int, int]:
     if abi == "abi3":
         return (1, 0)
     return (0, 0)
+
+
+def _portability(filename: str) -> tuple[int, int, int]:
+    """How old a glibc a platform wheel needs, low meaning more machines can run it.
+
+    A kit is installed on unknown Linux machines, so among equal-quality wheels the one
+    built against the oldest glibc wins: manylinux_2_17 before 2_28 before 2_34. musl and
+    anything else sort last - they are only reachable when nothing glibc-built exists,
+    and on this lane they are refused outright by the platform patterns.
+    """
+    m = _WHEEL_NAME.match(filename)
+    if not m:
+        return (9, 99, 0)
+    for tag in m.group("plat").split("."):
+        nm = re.fullmatch(r"manylinux_(\d+)_(\d+)_x86_64", tag)
+        if nm:
+            return (0, int(nm.group(1)), int(nm.group(2)))
+        nm = re.fullmatch(r"manylinux(\d+)_x86_64", tag)
+        if nm:
+            major, minor = _MANYLINUX_ALIASES.get(nm.group(1), (99, 0))
+            return (0, major, minor)
+        if tag.startswith("musllinux"):
+            return (1, 99, 0)
+    return (2, 99, 0)
 
 
 def _marker_ok(marker: str, platform: str, python_version: tuple[int, int] = PYTHON_VERSION) -> bool:
@@ -242,9 +272,15 @@ def plan(platform: str, python_version: tuple[int, int] = PYTHON_VERSION,
         if compatible:
             # Exactly one file per package, preferring the build that actually fits the
             # machine: an ABI-specific platform wheel, then an abi3 wheel (forward
-            # compatible), then the pure-python one. Carrying every compatible variant
-            # doubled the kit for no benefit - uv only ever installs one.
-            chosen = sorted(compatible, key=lambda w: (_rank(w["url"].rsplit("/", 1)[-1]), w["url"]))[0]
+            # compatible), then the pure-python one; among equals, the wheel that needs
+            # the oldest glibc, because the kit meets machines this runner has never
+            # seen. Carrying every compatible variant doubled the kit for no benefit -
+            # uv only ever installs one.
+            chosen = sorted(compatible, key=lambda w: (
+                _rank(w["url"].rsplit("/", 1)[-1]),
+                _portability(w["url"].rsplit("/", 1)[-1]),
+                w["url"],
+            ))[0]
             artifacts.append(_entry(name, pkg.get("version", ""), chosen, "lock-wheel"))
         elif sdists:
             prebuild.append(_entry(name, pkg.get("version", ""), sdists[0], "prebuild-sdist"))

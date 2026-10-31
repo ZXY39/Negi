@@ -57,6 +57,27 @@ def test_wheel_tag_matching_covers_the_shapes_the_lock_actually_uses() -> None:
     assert kit.wheel_matches("pythonnet-3.2.1-cp311.cp312.cp313.cp314.cp315-none-any.whl", "win-x64", (3, 12))
 
 
+def test_linux_kits_carry_glibc_wheels_and_the_oldest_one() -> None:
+    """linux-x64 is the glibc lane, and a kit meets machines nobody has measured.
+
+    A musl wheel installs on no glibc device, and among glibc builds the one needing the
+    oldest glibc runs on the most of them. Measured: a linux kit carrying
+    cryptography's musllinux wheel passed plan and --verify, then failed its own offline
+    gate with "no wheels with a matching platform tag".
+    """
+    assert not kit.wheel_matches(
+        "cryptography-44.0.3-cp39-abi3-musllinux_1_2_x86_64.whl", "linux-x64", (3, 12))
+    old = kit._portability("cryptography-44.0.3-cp37-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl")
+    newer = kit._portability("cryptography-44.0.3-cp37-abi3-manylinux_2_34_x86_64.whl")
+    musl = kit._portability("cryptography-44.0.3-cp37-abi3-musllinux_1_2_x86_64.whl")
+    assert old < newer < musl, (old, newer, musl)
+    plan = _plan("linux-x64")
+    filenames = [a["filename"] for a in plan["artifacts"]]
+    assert not any("musllinux" in name for name in filenames), "a musl wheel cannot install on a glibc device"
+    crypto = [name for name in filenames if name.startswith("cryptography-")]
+    assert crypto and "manylinux_2_17" in crypto[0], crypto
+
+
 def test_every_platform_plan_is_satisfiable_and_carries_one_file_per_package() -> None:
     for platform in PLATFORMS:
         result = _plan(platform)

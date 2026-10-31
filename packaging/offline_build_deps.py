@@ -26,10 +26,11 @@ PIN_FILE = REPO_ROOT / "packaging" / "build-requires.txt"
 PYPI_JSON = "https://pypi.org/pypi/{name}/{version}/json"
 
 # Same platform families as offline_kit_plan.py; kept literal so this module has no
-# import edge into the planner.
+# import edge into the planner. linux-x64 is the glibc lane there too, so a musllinux
+# wheel is not a candidate here either.
 PLATFORM_FILES = {
     "win-x64": (re.compile(r"win_amd64\.whl$"),),
-    "linux-x64": (re.compile(r"(manylinux|musllinux)[\w.]*x86_64\.whl$"),),
+    "linux-x64": (re.compile(r"manylinux[\w.]*x86_64\.whl$"),),
     "macos-arm64": (re.compile(r"macosx_\d+_\d+_(arm64|universal2)\.whl$"),),
 }
 
