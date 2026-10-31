@@ -1,13 +1,15 @@
 (() => {
     "use strict";
 
-    const PERSONA_CHAIN_TOAST = "为了使人设生效，主agent和记忆agent模型链不能为空，点击保存后生效";
+    const PERSONA_CHAIN_TOAST = "为了使人设生效，请先配置必需的模型链；记忆Agent未配置时人设暂不处理";
+    // 全局保存模型链的必需角色；记忆 Agent 的模型链允许为空（人设整理会降级为暂不处理）。
+    const REQUIRED_CHAIN_SCOPES = ["ceo", "execution", "inspection"];
     // The memory agent writes the persona in the background; the dot has no server push, so
     // poll while the page is visible. 15s matches the memory view's refresh cadence.
     const PERSONA_INDICATOR_POLL_MS = 15000;
     const DRAG_TOAST_TITLE = "可拖动至 Agent";
     const DRAG_TOAST_TEXT = "把模型或负载均衡组拖到右侧任一 Agent 模型链即可加入。";
-    const ONBOARDING_DRAG_TOAST_TEXT = "把模型或负载均衡组拖到右侧任一 Agent 模型链即可加入；主Agent和记忆Agent都需要至少一个角色。";
+    const ONBOARDING_DRAG_TOAST_TEXT = "把模型或负载均衡组拖到右侧任一 Agent 模型链即可加入；主Agent、执行Agent和检验Agent都需要至少一个角色。";
 
     const state = {
         started: false,
@@ -248,9 +250,9 @@
     function chainsReadyForDragToast() {
         if (typeof S === "undefined" || !S.modelCatalog) return false;
         const source = S.modelCatalog.roleEditing ? S.modelCatalog.roleDrafts : S.modelCatalog.roles;
-        const ceoChain = Array.isArray(source?.ceo) ? source.ceo.filter(Boolean) : [];
-        const memoryChain = Array.isArray(source?.memory) ? source.memory.filter(Boolean) : [];
-        return ceoChain.length > 0 && memoryChain.length > 0;
+        return REQUIRED_CHAIN_SCOPES.every((scope) => (
+            Array.isArray(source?.[scope]) && source[scope].filter(Boolean).length > 0
+        ));
     }
 
     function closeDragToast() {
@@ -392,14 +394,10 @@
     function savedChainsReadyForOnboarding() {
         if (typeof S === "undefined" || !S.modelCatalog) return false;
         const roles = S.modelCatalog.roles || {};
-        const required = ["ceo", "execution", "inspection"].every((scope) => {
+        return REQUIRED_CHAIN_SCOPES.every((scope) => {
             const chain = Array.isArray(roles[scope]) ? roles[scope].filter(Boolean) : [];
             return chain.length > 0;
         });
-        if (!required) return false;
-        if (!hasPersonaInput()) return true;
-        const memoryChain = Array.isArray(roles.memory) ? roles.memory.filter(Boolean) : [];
-        return memoryChain.length > 0;
     }
 
     async function completeOnboardingNow() {
@@ -408,12 +406,22 @@
             const result = await ApiClient.completeOnboarding();
             state.active = false;
             closeDragToast();
-            if (hadPersonaInput && Array.isArray(result?.jobs) && result.jobs.length) {
-                showToast({
-                    title: "人设已提交",
-                    text: "记忆 Agent 正在处理",
-                    kind: "success",
-                });
+            const jobs = Array.isArray(result?.jobs) ? result.jobs : [];
+            if (hadPersonaInput && jobs.length) {
+                if (jobs.includes("persona_enqueued") || jobs.includes("photo_session_started")) {
+                    showToast({
+                        title: "人设已提交",
+                        text: "记忆 Agent 正在处理",
+                        kind: "success",
+                    });
+                } else {
+                    // 记忆链未配置：人设 note 已写，但没有可执行的整理请求/照片回合。
+                    showToast({
+                        title: "人设暂未处理",
+                        text: "记忆 Agent 未配置模型；人设内容已保存，暂不自动整理。",
+                        kind: "info",
+                    });
+                }
             }
         } catch (error) {
             showToast({
@@ -459,13 +467,9 @@
     }
 
     function validateChainsBeforeSave() {
-        if (!state.active) return "";
-        if (!hasPersonaInput()) return "";
-        const drafts = (typeof S !== "undefined" && S.modelCatalog?.roleDrafts) || {};
-        const ceoChain = Array.isArray(drafts.ceo) ? drafts.ceo.filter(Boolean) : [];
-        const memoryChain = Array.isArray(drafts.memory) ? drafts.memory.filter(Boolean) : [];
-        if (ceoChain.length && memoryChain.length) return "";
-        return PERSONA_CHAIN_TOAST;
+        // 记忆 Agent 的模型链可以为空：保存时只由模型页的统一校验约束
+        // `ceo` / `execution` / `inspection`，人设整理在记忆链缺失时降级为暂不处理。
+        return "";
     }
 
     async function onProviderSaved() {

@@ -216,46 +216,50 @@ async def complete_onboarding():
 
     ceo_chain = _role_chain("ceo")
     memory_chain = _role_chain("memory")
-    if not ceo_chain or not memory_chain:
-        missing = [
-            label
-            for label, chain in (("ceo", ceo_chain), ("memory", memory_chain))
-            if not chain
-        ]
+    if not ceo_chain:
         raise HTTPException(
             status_code=409,
             detail={
                 "code": "onboarding_chains_missing",
-                "message": "main and memory model chains must not be empty",
-                "missing": missing,
+                "message": "main model chain must not be empty",
+                "missing": ["ceo"],
             },
         )
 
-    manager = _memory_manager()
     jobs: list[str] = []
     description = str(state.get("description") or "").strip()
     if description:
+        manager = _memory_manager()
         manager.set_persona(description)
-        if not str(state.get("persona_request_id") or "").strip():
-            result = await manager.enqueue_operator_request(
-                op="write",
-                decision_source="user",
-                trigger_source="persona_onboarding",
-                session_key=PERSONA_MEMORY_SESSION_KEY,
-                payload_text=(
-                    "用户刚在引导页写下了人设描述，并已写入人设 note。"
-                    "请核对这份描述：需要整理就直接改人设 note；不要新增普通记忆，也不要重复追加已有内容。\n"
-                    "---\n"
-                    f"{description}"
-                ),
-            )
-            state["persona_request_id"] = str((result or {}).get("request_id") or "").strip()
-        jobs.append("persona_enqueued")
+        if memory_chain:
+            if not str(state.get("persona_request_id") or "").strip():
+                result = await manager.enqueue_operator_request(
+                    op="write",
+                    decision_source="user",
+                    trigger_source="persona_onboarding",
+                    session_key=PERSONA_MEMORY_SESSION_KEY,
+                    payload_text=(
+                        "用户刚在引导页写下了人设描述，并已写入人设 note。"
+                        "请核对这份描述：需要整理就直接改人设 note；不要新增普通记忆，也不要重复追加已有内容。\n"
+                        "---\n"
+                        f"{description}"
+                    ),
+                )
+                state["persona_request_id"] = str((result or {}).get("request_id") or "").strip()
+            jobs.append("persona_enqueued")
+        else:
+            # 记忆 Agent 没有模型链：人设 note 已经落盘，但没有可执行整理请求的模型。
+            # 不往队列塞一条注定 blocked 的请求；操作员之后配置记忆链时再走正常写入。
+            jobs.append("persona_saved")
         state["description"] = ""
 
     photo_names = [str(name) for name in list(state.get("photos") or []) if str(name).strip()]
     if photo_names and not str(state.get("photo_session_started_at") or "").strip():
-        if _start_photo_session(store, photo_names):
+        if not memory_chain:
+            # 照片回合的产出走 `memory_update`，没有记忆模型时启动它只会造一个
+            # 注定无法落记忆的隐藏回合。
+            jobs.append("photo_session_skipped_memory_missing")
+        elif _start_photo_session(store, photo_names):
             state["photo_session_started_at"] = datetime.now().astimezone().isoformat()
             jobs.append("photo_session_started")
 

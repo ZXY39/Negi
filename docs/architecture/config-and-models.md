@@ -523,7 +523,7 @@ Project-config side keys:
 - `agents.roleIterations.memory` controls the memory agent's model-call round cap.
 - `agents.roleConcurrency.memory` is fixed to `1`; it is persisted for config/UI symmetry but is not an operator-tunable parallelism knob.
 - `models.roles.memory` may be empty, but when it is non-empty every referenced binding must have `capability=chat`. The admin route rejects non-chat bindings for the memory role.
-- Unlike `ceo`, `execution`, and `inspection`, the `memory` role is allowed to be empty; that does not fail config load. The first-run onboarding chain gate is the one place that additionally requires a non-empty `memory` chain when persona input exists; that gate lives in the web-side onboarding flow and is not a config-load requirement (详见 `web-and-admin.md`「First-Run Onboarding And Persona Contract」).
+- Unlike `ceo`, `execution`, and `inspection`, the `memory` role is allowed to be empty; that does not fail config load, does not block the model-chain save, and does not block first-run onboarding completion. With an empty memory chain the memory runtime blocks incoming batches with `memory role not configured`, and onboarding saves the persona note without enqueuing the review request or starting the photo turn (详见 `web-and-admin.md`「First-Run Onboarding And Persona Contract」).
 - If the queue head is already inside `processing` when an operator changes `models.roles.memory`, the already dispatched provider call is not hot-swapped. Before the next internal memory repair attempt, the runtime re-reads the latest revision and re-resolves the memory model chain.
 
 The active internal memory writer prompt is the file-backed runtime asset `main/prompts/memory_agent.md`.

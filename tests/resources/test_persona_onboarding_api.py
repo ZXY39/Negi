@@ -88,11 +88,11 @@ def test_photo_session_prompt_names_every_photo_and_the_folder(tmp_path: Path) -
     assert "不要再复制" in prompt
 
 
-def test_complete_onboarding_requires_ceo_and_memory_chains(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_complete_onboarding_requires_ceo_chain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     store = _store(tmp_path)
     store.update(description="你是玲音。", persona_step_done=True)
     monkeypatch.setattr(api, "_store", lambda: store)
-    monkeypatch.setattr(api, "_role_chain", lambda scope: ["ceo-model"] if scope == "ceo" else [])
+    monkeypatch.setattr(api, "_role_chain", lambda scope: [])
 
     with pytest.raises(api.HTTPException) as excinfo:
         import asyncio
@@ -101,8 +101,50 @@ def test_complete_onboarding_requires_ceo_and_memory_chains(tmp_path: Path, monk
     assert excinfo.value.status_code == 409
     detail = excinfo.value.detail
     assert detail["code"] == "onboarding_chains_missing"
-    assert detail["missing"] == ["memory"]
+    assert detail["missing"] == ["ceo"]
     assert store.load()["completed"] is False
+
+
+def test_complete_onboarding_allows_empty_memory_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """记忆 Agent 的模型链是可选的：人设 note 照写，但不排注定 blocked 的整理请求。"""
+    store = _store(tmp_path)
+    photo = store_persona_photo(tmp_path, _png_bytes(), filename="me.png", mime_type="image/png")
+    store.update(description="你是玲音。", persona_step_done=True, photos=[photo["name"]])
+
+    calls: dict[str, object] = {}
+
+    class _MemoryManager:
+        def set_persona(self, text: str) -> dict:
+            calls["persona"] = text
+            return {"ref": "note_persona"}
+
+        async def enqueue_operator_request(self, **kwargs):
+            raise AssertionError(f"must not enqueue without a memory model: {kwargs}")
+
+    monkeypatch.setattr(api, "_store", lambda: store)
+    monkeypatch.setattr(api, "_role_chain", lambda scope: ["ceo-model"] if scope == "ceo" else [])
+    monkeypatch.setattr(api, "_memory_manager", lambda: _MemoryManager())
+    monkeypatch.setattr(
+        api,
+        "_start_photo_session",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("must not start a memory_update photo turn without a memory model")
+        ),
+    )
+
+    import asyncio
+
+    result = asyncio.run(api.complete_onboarding())
+    assert result["ok"] is True
+    assert result["jobs"] == ["persona_saved", "photo_session_skipped_memory_missing"]
+    assert calls["persona"] == "你是玲音。"
+    state = store.load()
+    assert state["completed"] is True
+    assert state["description"] == ""
+    assert state["persona_request_id"] == ""
+    assert state["photo_session_started_at"] == ""
 
 
 def test_complete_onboarding_writes_enqueues_and_starts_the_photo_session(
