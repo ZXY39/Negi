@@ -85,6 +85,18 @@ def _pyproject_fingerprint() -> str:
     return f"pyproject:{digest}"
 
 
+def _write_installed_marker() -> str:
+    """Record that this venv matches the current pyproject.
+
+    One implementation, two callers: ``_ensure_project_installed`` writes it after a
+    network sync, and ``negi mark-installed`` writes it after an offline kit install.
+    Installers must not compute the fingerprint themselves, or the two would drift.
+    """
+    fingerprint = _pyproject_fingerprint()
+    BOOTSTRAP_MARKER.write_text(fingerprint + "\n", encoding="utf-8")
+    return fingerprint
+
+
 def _marker_matches_current() -> bool:
     if not BOOTSTRAP_MARKER.exists():
         return False
@@ -186,7 +198,7 @@ def _ensure_project_installed() -> None:
             f"[negi] No usable package installer: uv is not on PATH and {VENV_DIR} has no pip. "
             "Install uv (https://docs.astral.sh/uv/) or recreate the virtualenv with pip, then retry."
         )
-    BOOTSTRAP_MARKER.write_text(_pyproject_fingerprint() + "\n", encoding="utf-8")
+    _write_installed_marker()
 
 
 def _config_path() -> Path:
@@ -773,6 +785,16 @@ def _run_start(extra_args: list[str]) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     os.chdir(PROJECT_ROOT)
+    early = list(argv if argv is not None else sys.argv[1:])
+    if early[:1] == ["mark-installed"]:
+        # An offline (kit) install just built the environment itself, with no index to
+        # go back to. Recording the marker is the only thing that keeps the next
+        # `negi` from calling _ensure_project_installed(), which would run `uv sync
+        # --frozen` and need the network. It is handled before that guard, and the
+        # fingerprint stays in one function so installers cannot drift from it.
+        fingerprint = _write_installed_marker()
+        print(f"[negi] recorded the installed environment ({fingerprint})", flush=True)
+        return 0
     _ensure_venv()
     _ensure_project_installed()
     args = list(argv if argv is not None else sys.argv[1:])

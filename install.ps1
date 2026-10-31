@@ -22,6 +22,7 @@ param(
     [switch]$NoUninstallEntry,
     [string]$SourceArchive = '',
     [string]$UvPath = '',
+    [string]$Kit = '',
     [switch]$Mirror,
     [switch]$NoMirror
 )
@@ -104,6 +105,102 @@ function Install-BundledUv {
         return $null
     }
     return $target
+}
+
+function Get-DeviceKitPlatform {
+    # Keeps the check honest: a kit is named for the machine it installs on, and a
+    # win-x64 kit on an arm64 device (or a linux kit here) must be refused, not half-applied.
+    if ($env:OS -ne 'Windows_NT') { return 'unknown' }
+    $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
+    return "win-$arch"
+}
+
+function Clear-LongPathTree {
+    param([string]$Path)
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return }
+    # A kit staging directory contains a copied CPython tree, and Remove-Item on
+    # Windows PowerShell 5.1 cannot delete paths past MAX_PATH. Mirroring an empty
+    # directory with robocopy is the purge that can.
+    if ($env:OS -ne 'Windows_NT') {
+        Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
+        return
+    }
+    $empty = Join-Path ([System.IO.Path]::GetTempPath()) ('negi-empty-' + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $empty | Out-Null
+    $saved = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & robocopy $empty $Path /MIR /NFL /NDL /NJH /NJS /NP | Out-Null
+        $code = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $saved
+        Remove-Item -LiteralPath $empty -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    if ($code -gt 7) { Write-Step "could not clear the kit staging directory (robocopy exit $code)" }
+    Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+function Resolve-OfflineKit {
+    param([string]$KitArg, [string]$RefValue, [switch]$RefExplicit, [string]$StageRoot)
+    # A kit is a directory or a zip holding source/, wheels/, runtime/, uv and kit.json.
+    # Nothing here reaches the network: the point of the kit is a device that cannot.
+    if (-not (Test-Path -LiteralPath $KitArg)) {
+        Write-Error "[install] -Kit not found: $KitArg"
+    }
+    $root = (Resolve-Path -LiteralPath $KitArg).Path
+    if (-not (Test-Path -LiteralPath (Join-Path $root 'kit.json'))) {
+        $tar = Join-Path $env:SystemRoot 'System32	ar.exe'
+        if (-not (Test-Path -LiteralPath $tar)) { Write-Error '[install] bsdtar is required to open a kit archive' }
+        $extracted = Join-Path $StageRoot 'kit'
+        New-Item -ItemType Directory -Force -Path $extracted | Out-Null
+        Invoke-Checked @($tar, '-xf', $root, '-C', $extracted) -Where $extracted
+        $root = $extracted
+    }
+    $manifestPath = Join-Path $root 'kit.json'
+    if (-not (Test-Path -LiteralPath $manifestPath)) { Write-Error "[install] no kit.json under $root" }
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+
+    $device = Get-DeviceKitPlatform
+    if ($manifest.platform -ne $device) {
+        Write-Error "[install] this kit is for $($manifest.platform); this device is $device"
+    }
+    $initText = Get-Content -LiteralPath (Join-Path $root 'source\g3ku\__init__.py') -Raw
+    if ($initText -notmatch '__version__\s*=\s*"([^"]+)"') {
+        Write-Error '[install] the kit source declares no version'
+    }
+    $sourceVersion = $Matches[1]
+    if ($sourceVersion -ne $manifest.version) {
+        Write-Error "[install] kit.json says $($manifest.version) but its source declares $sourceVersion"
+    }
+    if ($RefExplicit -and $RefValue -and $RefValue -ne "v$sourceVersion") {
+        Write-Error "[install] -Ref $RefValue conflicts with the kit's version v$sourceVersion"
+    }
+    $checked = 0
+    $bytes = 0
+    foreach ($wheel in @($manifest.wheels)) {
+        $wheelPath = Join-Path (Join-Path $root 'wheels') $wheel.filename
+        if (-not (Test-Path -LiteralPath $wheelPath)) {
+            Write-Error "[install] kit is missing $($wheel.filename)"
+        }
+        $actual = (Get-FileHash -LiteralPath $wheelPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actual -ne $wheel.sha256) {
+            Write-Error "[install] kit wheel $($wheel.filename) does not match its recorded sha256"
+        }
+        $checked++
+        $bytes += [int64]$wheel.size
+    }
+    $python = Join-Path $root $manifest.python_executable
+    if (-not (Test-Path -LiteralPath $python)) { Write-Error "[install] kit interpreter is missing: $python" }
+    Write-Step ("kit v$sourceVersion verified: $checked wheels ({0:N1} MB)" -f ($bytes / 1MB))
+    return [pscustomobject]@{
+        Root = $root
+        Source = (Join-Path $root 'source')
+        Wheels = (Join-Path $root 'wheels')
+        Python = $python
+        Uv = (Join-Path $root $manifest.uv_binary)
+        Version = $sourceVersion
+    }
 }
 
 function Ensure-Uv {
@@ -207,7 +304,13 @@ function Get-CheckoutVersion {
 }
 
 function Get-CheckoutStage {
-    param([string]$StageRoot, [switch]$Archive)
+    param([string]$StageRoot, [switch]$Archive, [object]$Kit = $null)
+    if ($Kit) {
+        # The kit already holds the tree; no clone and no archive download, because the
+        # device it is meant for cannot reach GitHub either.
+        Write-Step "using the offline kit's source tree (v$($Kit.Version))"
+        return $Kit.Source
+    }
     if ($SourceArchive) {
         $target = Join-Path $StageRoot 'checkout'
         if (-not (Test-Path -LiteralPath $SourceArchive)) {
@@ -275,14 +378,14 @@ function Get-CheckoutStage {
 }
 
 function Install-CodeInto {
-    param([string]$Root, [switch]$KeepProtected, [switch]$Archive)
+    param([string]$Root, [switch]$KeepProtected, [switch]$Archive, [object]$Kit = $null)
     # Code always lands in a staging directory first and is merged top-level:
     # `git clone` refuses a non-empty target, and a keep-data uninstall leaves
     # exactly that (a directory holding only .g3ku).
     $stageRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('negi-stage-' + [Guid]::NewGuid().ToString('N'))
     try {
         New-Item -ItemType Directory -Force -Path $stageRoot | Out-Null
-        $checkout = Get-CheckoutStage -StageRoot $stageRoot -Archive:$Archive
+        $checkout = Get-CheckoutStage -StageRoot $stageRoot -Archive:$Archive -Kit $Kit
         Copy-CheckoutInto -Source $checkout -Root $Root -KeepProtected:$KeepProtected
     }
     finally {
@@ -388,7 +491,28 @@ function Update-GitCheckout {
 }
 
 function Update-Code {
-    param([string]$Root)
+    param([string]$Root, [object]$Kit = $null)
+    if ($Kit) {
+        if (Test-Path (Join-Path $Root 'pyproject.toml')) {
+            if (-not $Upgrade) {
+                Write-Step "checkout already present at $Root, code untouched (pass -Upgrade to update it)"
+                return
+            }
+            if (Test-Path (Join-Path $Root '.git')) {
+                # Copying a kit over a git checkout leaves that .git describing a
+                # different tree, and -Upgrade's first guard is "no tracked changes" -
+                # the device would be unable to upgrade by either lane afterwards.
+                Write-Step "[install] $Root is a git checkout; a kit upgrade would leave it inconsistent with its own .git. Remove $Root\.git first if the kit should own this tree."
+                exit 1
+            }
+            Write-Step "upgrading code from the kit v$($Kit.Version) (keeping .venv and .g3ku)"
+            Install-CodeInto -Root $Root -KeepProtected -Kit $Kit
+            return
+        }
+        New-Item -ItemType Directory -Force -Path $Root | Out-Null
+        Install-CodeInto -Root $Root -Kit $Kit
+        return
+    }
     if (Test-Path (Join-Path $Root 'pyproject.toml')) {
         if (-not $Upgrade) {
             Write-Step "checkout already present at $Root, code untouched (pass -Upgrade to update it)"
@@ -466,8 +590,61 @@ function Sync-ProjectEnvironment {
     }
 }
 
+function Install-OfflineEnvironment {
+    param([object]$Kit, [string]$Root)
+    # The venv records its base interpreter, so the kit's runtime has to be somewhere
+    # permanent before the venv is built - not inside the staging directory that is
+    # deleted when the install finishes.
+    $runtimeHome = Join-Path $Root '.runtime'
+    $runtimeTarget = Join-Path $runtimeHome 'negi-python'
+    $sourceRuntime = Split-Path -Parent $Kit.Python
+    if ((Split-Path -Leaf $sourceRuntime) -eq 'bin') { $sourceRuntime = Split-Path -Parent $sourceRuntime }
+    if (Test-Path -LiteralPath $runtimeTarget) { Clear-LongPathTree -Path $runtimeTarget }
+    New-Item -ItemType Directory -Force -Path $runtimeHome | Out-Null
+    Copy-Item -LiteralPath $sourceRuntime -Destination $runtimeTarget -Recurse -Force
+    $python = if ($env:OS -eq 'Windows_NT') { Join-Path $runtimeTarget 'python.exe' } else { Join-Path $runtimeTarget 'bin/python3' }
+    if (-not (Test-Path -LiteralPath $python)) {
+        Write-Error "[install] the copied kit runtime has no interpreter at $python"
+    }
+    $uv = Get-UvCommand
+    if (-not $uv) { $uv = Install-BundledUv -Path $Kit.Uv }
+    if (-not $uv) {
+        Write-Error '[install] neither the kit nor the device provides uv, so the environment cannot be built offline'
+    }
+    if (-not (Test-Path (Join-Path $Root '.venv'))) {
+        Write-Step 'creating the virtual environment from the kit runtime'
+        Invoke-Checked @($uv, 'venv', '--relocatable', '--python', $python, (Join-Path $Root '.venv')) -Where $Root
+    }
+    Write-Step 'uv sync --frozen --offline (kit wheels, no index)'
+    $savedOffline = $env:UV_OFFLINE
+    $env:UV_OFFLINE = '1'
+    try {
+        Push-Location -LiteralPath $Root
+        try {
+            Invoke-Checked @($uv, 'sync', '--frozen', '--offline', '--no-index', '--python', $python,
+                '--find-links', $Kit.Wheels, '--project', $Root) -Where $Root
+        }
+        finally { Pop-Location }
+        # Without this, the first `negi` run calls _ensure_project_installed(), which
+        # runs `uv sync --frozen` and reaches for an index this device does not have.
+        Invoke-Checked @(
+            (Get-VenvPython -Root $Root),
+            (Join-Path $Root 'negi_bootstrap.py'),
+            'mark-installed'
+        ) -Where $Root
+    }
+    finally {
+        if ($null -eq $savedOffline) { Remove-Item Env:UV_OFFLINE -ErrorAction SilentlyContinue }
+        else { $env:UV_OFFLINE = $savedOffline }
+    }
+}
+
 function Install-Environment {
-    param([string]$uv, [string]$Root)
+    param([string]$uv, [string]$Root, [object]$Kit = $null)
+    if ($Kit) {
+        Install-OfflineEnvironment -Kit $Kit -Root $Root
+        return
+    }
     $pin = Get-ProjectPin -Root $Root
     if ($pin) { Install-ProjectPython -uv $uv -Pin $pin }
     Push-Location -LiteralPath $Root
@@ -684,9 +861,20 @@ if ($Mirror) {
     $env:UV_PYTHON_INSTALL_MIRROR = $PythonMirror
     Write-Step "mirror mode: index=$PyPiMirror python=$PythonMirror"
 }
+$kit = $null
+$kitStage = ''
+if ($Kit) {
+    $kitStage = Join-Path ([System.IO.Path]::GetTempPath()) ('negi-kit-' + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $kitStage | Out-Null
+    $kit = Resolve-OfflineKit -KitArg $Kit -RefValue $Ref -RefExplicit:($PSBoundParameters.ContainsKey('Ref')) -StageRoot $kitStage
+    # Persist uv before Ensure-Uv, or a device without uv would be sent to astral.sh -
+    # the one network call an offline install must not make.
+    if (-not (Get-UvCommand)) { $null = Install-BundledUv -Path $kit.Uv }
+}
 $uv = Ensure-Uv
-Update-Code -Root $Dir
-Install-Environment -uv $uv -Root $Dir
+Update-Code -Root $Dir -Kit $kit
+Install-Environment -uv $uv -Root $Dir -Kit $kit
+Clear-LongPathTree -Path $kitStage
 
 $icon = Copy-NegiIcon -Root $Dir
 Install-EntryPoint -Root $Dir
