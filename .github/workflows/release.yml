@@ -30,7 +30,7 @@ jobs:
             *) gh api --jq .message "repos/$GITHUB_REPOSITORY/git/commits/$2" > release-notes.md ;;
           esac
           [ -s release-notes.md ] || printf 'Negi %s\n' "$GITHUB_REF_NAME" > release-notes.md
-          printf '\nThe two attached scripts are the one-line install and upgrade entry points (`iwr ... | iex`). Negi-Setup-<version>.exe is the same install.ps1 behind a folder-picking wizard, for a device that should not open a terminal; the Windows job attaches it. Negi-<version>-offline-win-x64.zip is the offline kit: the trimmed source tree plus the wheels this release resolves for win-x64, a pinned CPython and uv, so a device that cannot reach a package index can still install. Full source is in the Source code archive at the bottom of this page.\n' >> release-notes.md
+          printf '\nThe two attached scripts are the one-line install and upgrade entry points (`iwr ... | iex`). Negi-Setup-<version>.exe is the same install.ps1 behind a folder-picking wizard, for a device that should not open a terminal; the Windows job attaches it. Negi-<version>-offline-<platform>.zip, in win-x64, linux-x64 and macos-arm64, is the offline kit: the trimmed source tree plus every wheel this release resolves for that platform, a pinned CPython, uv and the pinned requirement list, so a device that cannot reach a package index installs with `install.ps1 -Kit <zip>` or `install.sh --kit <zip>`. Pick the file named for your machine. Full source is in the Source code archive at the bottom of this page.\n' >> release-notes.md
           gh release create "$GITHUB_REF_NAME" install.ps1 install.sh \
             --title "$GITHUB_REF_NAME" \
             --notes-file release-notes.md \
@@ -69,15 +69,29 @@ jobs:
         run: gh release upload $env:GITHUB_REF_NAME $env:SETUP_ASSET --clobber
 
   # A kit is the same version's tree plus everything needed to install it without an
-  # index: the wheels uv.lock resolves for that platform, the two source-only packages
-  # pre-built into wheels, a pinned CPython, and uv. It is built on its own platform
-  # because the interpreter is installed by uv, which only builds one for its host.
-  # The build's last step is the gate: `uv sync --frozen --offline` in a fresh venv, so
-  # a kit that is missing one artifact fails here instead of on a device.
-  offline-kit-windows:
-    name: Build the win-x64 offline kit
+  # index: every wheel this release's lock resolves for that platform (extras followed,
+  # because a parent can ask for lxml[html-clean] and that edge lives in the child's
+  # optional-dependencies table), the pinned requirement list uv exports from the same
+  # lock, the source-only packages pre-built into wheels, a pinned CPython, and uv.
+  # Each kit is built on the machine it installs to: the interpreter comes from uv, and
+  # uv only provides one for its own host. The build ends with the gate that matters -
+  # the device's own `uv pip install --offline --no-index --find-links`, run against an
+  # empty --cache-dir, so a kit that cannot install by itself fails here instead of on a
+  # machine that has no index to fall back on.
+  offline-kits:
+    name: Build the ${{ matrix.platform }} offline kit
     needs: installer-assets
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: win-x64
+            runs_on: windows-latest
+          - platform: linux-x64
+            runs_on: ubuntu-latest
+          - platform: macos-arm64
+            runs_on: macos-latest
+    runs-on: ${{ matrix.runs_on }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -86,7 +100,9 @@ jobs:
       - name: Build and self-check the kit
         shell: pwsh
         run: |
-          $zip = (.\packaging\build-offline-kit.ps1 -Platform 'win-x64' -Ref $env:GITHUB_REF_NAME |
+          # Forward slashes because this same step runs on a Linux and a macOS runner,
+          # where a backslash inside a path is part of the file's name.
+          $zip = (./packaging/build-offline-kit.ps1 -Platform '${{ matrix.platform }}' -Ref $env:GITHUB_REF_NAME |
               Select-Object -Last 1)
           if (-not (Test-Path -LiteralPath $zip)) { throw "build-offline-kit.ps1 returned '$zip' but the file is missing" }
           "KIT_ASSET=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
