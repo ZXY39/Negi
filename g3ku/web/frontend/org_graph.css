@@ -1774,33 +1774,6 @@ textarea {
     font-size: 13px;
 }
 
-/* QQ 机器人申请入口：应用内嵌第三方页面。z-index 同样要压过 9285 行那条
-   `.detail-drawer`（文件里更靠后），否则遮罩会盖在窗口上面。 */
-#qq-bot-apply-backdrop.detail-backdrop {
-    z-index: 111;
-}
-
-#qq-bot-apply-drawer.qq-bot-apply-drawer {
-    width: min(1200px, calc(calc(100vw / var(--ui-zoom, 1)) - 32px));
-    height: min(88vh, calc(calc(100dvh / var(--ui-zoom, 1)) - 48px));
-    z-index: 112;
-}
-
-.qq-bot-apply-body {
-    padding: 0;
-    gap: 0;
-    overflow: hidden;
-}
-
-.qq-bot-apply-frame {
-    flex: 1;
-    width: 100%;
-    min-height: 0;
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius-lg);
-    background: var(--bg-app);
-}
-
 @media (max-width: 960px) {
     #media-viewer-drawer.media-viewer-drawer {
         width: calc(calc(100vw / var(--ui-zoom, 1)) - 20px);
@@ -7262,6 +7235,8 @@ textarea {
     background: color-mix(in srgb, var(--bg-panel) 90%, var(--bg-app) 10%);
     color: var(--text-primary);
     font-weight: 700;
+    /* 这一档也用在 `<a>` 上（如「申请入口」外链），链接默认下划线要落掉。 */
+    text-decoration: none;
     display: inline-flex;
     align-items: center;
     justify-content: center;

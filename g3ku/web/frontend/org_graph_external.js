@@ -1011,80 +1011,6 @@ async function _toggleQqBotRowEnabled(index) {
     await _persistQqBotSettings({ silentEmpty: true });
 }
 
-// ---- QQ 机器人申请入口：应用内嵌第三方页面 ----
-const QQ_BOT_APPLY_URL = "https://q.qq.com/qqbot/openclaw/login.html";
-
-const qqBotApplyState = { backdrop: null, drawer: null, frame: null, open: false };
-
-function ensureQqBotApplySurface() {
-    if (qqBotApplyState.backdrop && qqBotApplyState.drawer) return;
-    const backdrop = document.createElement("div");
-    backdrop.id = "qq-bot-apply-backdrop";
-    backdrop.className = "detail-backdrop";
-    backdrop.setAttribute("aria-hidden", "true");
-
-    const drawer = document.createElement("section");
-    drawer.id = "qq-bot-apply-drawer";
-    drawer.className = "panel detail-drawer qq-bot-apply-drawer";
-    drawer.setAttribute("role", "dialog");
-    drawer.setAttribute("aria-modal", "true");
-    drawer.setAttribute("aria-hidden", "true");
-    drawer.setAttribute("aria-labelledby", "qq-bot-apply-title");
-    drawer.tabIndex = -1;
-    drawer.innerHTML = `
-        <div class="detail-modal-header">
-            <div>
-                <h2 id="qq-bot-apply-title">申请 QQ 机器人</h2>
-                <p class="subtitle">在 QQ 开放平台创建机器人，拿到 AppID 与 AppSecret 后填到账号里。登录被拦时点右上角用浏览器打开。</p>
-            </div>
-            <div class="detail-modal-actions">
-                <a id="qq-bot-apply-external" class="toolbar-btn ghost" href="${QQ_BOT_APPLY_URL}"
-                    target="_blank" rel="noreferrer noopener">浏览器打开</a>
-                <button id="qq-bot-apply-close" class="toolbar-btn ghost" type="button" data-modal-close>关闭</button>
-            </div>
-        </div>
-        <div class="detail-modal-body qq-bot-apply-body">
-            <iframe id="qq-bot-apply-frame" class="qq-bot-apply-frame" title="QQ 开放平台 · 创建机器人"></iframe>
-        </div>`;
-
-    document.body.appendChild(backdrop);
-    document.body.appendChild(drawer);
-    qqBotApplyState.backdrop = backdrop;
-    qqBotApplyState.drawer = drawer;
-    qqBotApplyState.frame = drawer.querySelector("#qq-bot-apply-frame");
-
-    drawer.querySelector("#qq-bot-apply-close")?.addEventListener("click", () => closeQqBotApply());
-    backdrop.addEventListener("click", (event) => {
-        if (event.target === backdrop) closeQqBotApply();
-    });
-    document.addEventListener("keydown", (event) => {
-        if (event.key !== "Escape" || !qqBotApplyState.open) return;
-        event.preventDefault();
-        closeQqBotApply();
-    });
-}
-
-function openQqBotApply() {
-    ensureQqBotApplySurface();
-    // src 只在打开时写：页面一加载就挂上去会白跑一次第三方请求。
-    if (qqBotApplyState.frame && qqBotApplyState.frame.src !== QQ_BOT_APPLY_URL) {
-        qqBotApplyState.frame.src = QQ_BOT_APPLY_URL;
-    }
-    setDrawerOpen(qqBotApplyState.backdrop, qqBotApplyState.drawer, true);
-    qqBotApplyState.open = true;
-    if (typeof icons === "function") icons(true);
-    return true;
-}
-
-function closeQqBotApply() {
-    if (!qqBotApplyState.open) return false;
-    setDrawerOpen(qqBotApplyState.backdrop, qqBotApplyState.drawer, false);
-    qqBotApplyState.open = false;
-    // 摘掉 src：别把一个已登录的第三方页面留在后台继续跑。
-    if (qqBotApplyState.frame) qqBotApplyState.frame.src = "about:blank";
-    return true;
-}
-
 function initQqBotView() {
     const bindCopy = document.getElementById("qq-master-bind-copy");
     if (bindCopy) bindCopy.addEventListener("click", () => void _copyQqMasterCode());
@@ -1102,11 +1028,6 @@ function initQqBotView() {
     if (addBtn) addBtn.addEventListener("click", (event) => {
         event.preventDefault();
         _addQqBotAccountRow();
-    });
-    const applyBtn = document.getElementById("qq-bot-apply-entry-btn");
-    if (applyBtn) applyBtn.addEventListener("click", (event) => {
-        event.preventDefault();
-        openQqBotApply();
     });
     const listEl = _qqBotListEl();
     if (listEl) {
