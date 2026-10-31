@@ -69,7 +69,7 @@ Source: "{#KitZip}"; DestDir: "{tmp}"; DestName: "negi-kit.zip"; Flags: deleteaf
 ; [Run] waits for the process to exit by default; the install must finish before
 ; the wizard can report success.
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{tmp}\setup-run.ps1"" -Dir ""{code:TargetDir}"" -Quiet -NoUninstallEntry -Kit ""{tmp}\negi-kit.zip"""; StatusMsg: "正在安装 Negi：从随包套件解出代码并建立环境（不访问网络，需要几分钟）……"; Flags: runhidden
-Filename: "{app}\negi.cmd"; Parameters: "start --window"; Description: "启动 Negi（独立窗口）"; Flags: postinstall nowait skipifsilent skipifdoesntexist runhidden
+Filename: "{app}\negi.cmd"; Parameters: "start"; Description: "启动 Negi（浏览器）"; Flags: postinstall nowait skipifsilent skipifdoesntexist runhidden
 
 [Code]
 function SuggestRoot(Param: String): String;

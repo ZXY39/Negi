@@ -130,6 +130,19 @@ def test_both_installers_retry_failed_downloads_through_mirrors() -> None:
     assert "--no-mirror" in sh
 
 
+def test_icon_and_postinstall_launch_the_browser() -> None:
+    """The desktop/start-menu icon and the installer's finish action start Negi
+    with `start` alone. `--window` stays an explicit opt-in for the WebView2
+    shell, so the default entry never depends on it.
+    """
+    install = INSTALL_PS1.read_text(encoding="utf-8")
+    assert '$link.Arguments = """$Root\\negi_bootstrap.py"" start"' in install
+    assert "start --window" not in install
+    iss = ISS.read_text(encoding="utf-8")
+    assert 'Parameters: "start"; Description: "启动 Negi（浏览器）"' in iss
+    assert "start --window" not in iss
+
+
 def test_version_pins_are_still_compared_before_building() -> None:
     build = BUILD.read_text(encoding="utf-8")
     assert re.search(r"cannot read the \$Ref pin", build)

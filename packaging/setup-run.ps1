@@ -92,13 +92,11 @@ $parameters = @{ Dir = $Dir; NoStart = $true }
 # -NoStart is not optional here: without it install.ps1 ends by running the web server
 # in the foreground, and the wizard's [Run] entry waits for that process to exit - so
 # the install never reports success and the postinstall "launch" entry never runs.
-# Launching belongs to the wizard's own [Run] entry (`negi.cmd start --window`).
+# Launching belongs to the wizard's own [Run] entry (`negi.cmd start`).
 if ($upgrade) {
     # Without -Upgrade, install.ps1 leaves an existing checkout alone but still
-    # rewrites the shortcuts and the stub. That combination is the one state where
-    # the icon can be broken: the new shortcut args (`start --window`) would point
-    # at code old enough not to know the flag, and it passes the argument through
-    # to `g3ku web`, which refuses it.
+    # rewrites the shortcuts and the stub. The device would report a successful
+    # install while its entry points still launched the old tree.
     $parameters['Upgrade'] = $true
 }
 if ($NoUninstallEntry) {

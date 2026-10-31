@@ -358,7 +358,7 @@ def window(
     target = shell_url(port)
     if not server_reachable(target):
         console.print(f"[yellow]Negi 没有在 {target} 上运行[/yellow]")
-        console.print("  先启动服务：[bold]negi[/bold]（它会起服务并打开窗口或浏览器）")
+        console.print("  先运行 [bold]negi[/bold] 起服务（它会在浏览器打开界面），再运行 [bold]negi window[/bold]")
         raise typer.Exit(code=1)
     raise typer.Exit(code=run_desktop_shell(url=target))
 

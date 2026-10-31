@@ -15,7 +15,7 @@
 #>
 param(
     [string]$Dir = (Join-Path $env:USERPROFILE 'Negi'),
-    [string]$Ref = 'v2.9.1',
+    [string]$Ref = 'v1.11.1',
     [switch]$NoStart,
     [switch]$Upgrade,
     [switch]$NoPath,
@@ -737,11 +737,11 @@ function Install-DesktopIcons {
     foreach ($target in $targets) {
         $link = $shell.CreateShortcut($target)
         # pythonw allocates no console, so the icon starts Negi without the
-        # window flash a .cmd or -WindowStyle Hidden would still show. `--window`
-        # asks for the desktop shell; it falls back to the browser when the shell
-        # cannot start, so the icon never ends up doing nothing.
+        # window flash a .cmd or -WindowStyle Hidden would still show. The icon
+        # opens the browser: the desktop shell stays available through
+        # `negi window`, but the default entry must not depend on WebView2.
         $link.TargetPath = $pythonw
-        $link.Arguments = """$Root\negi_bootstrap.py"" start --window"
+        $link.Arguments = """$Root\negi_bootstrap.py"" start"
         $link.WorkingDirectory = $Root
         $link.Description = 'Start Negi and open the browser'
         if ($IconPath) { $link.IconLocation = "$IconPath,0" }

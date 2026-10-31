@@ -78,8 +78,8 @@ def test_existing_checkout_is_upgraded_not_reinstalled(tmp_path: Path) -> None:
     bound = _bound(out)
     assert bound["dir"] == str(root)
     # Without -Upgrade, install.ps1 leaves the code alone but still rewrites the
-    # shortcuts, and the new `start --window` argument would then be handed to a
-    # bootstrap old enough not to know it.
+    # shortcuts and the stub, so the device reports a successful install while its
+    # entry points still launch the old tree.
     assert bound["upgrade"] is True
 
 
