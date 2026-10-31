@@ -162,31 +162,85 @@ test("up to date never borrows the newer wording", () => {
     assert.equal(api.U.projectSettingsCheckDot.hidden, true);
 });
 
+// 层级契约：按"选择器 + 开括号"定位规则块，再从块里取 z-index 数值（避免正则转义脆弱）。
+function zIndexOf(css, blockOpen) {
+    const start = css.indexOf(blockOpen);
+    assert.ok(start >= 0, `缺少规则块：${blockOpen}`);
+    const body = css.slice(start, css.indexOf("}", start));
+    const declared = body.match(/z-index:[ \t]*(\d+)/);
+    assert.ok(declared, `规则里没有 z-index：${blockOpen}`);
+    return Number(declared[1]);
+}
+
+const MODAL_CSS = fs.readFileSync("g3ku/web/frontend/org_graph.css", "utf8");
+
 test("确认框层级压过叫它起来的弹窗，但仍在 toast 之下", () => {
-    const css = fs.readFileSync("g3ku/web/frontend/org_graph.css", "utf8");
+    const css = MODAL_CSS;
 
-    // 按"选择器 + 开括号"定位规则块，再从块里取 z-index 数值（避免正则转义脆弱）。
-    const zIndexOf = (blockOpen) => {
-        const start = css.indexOf(blockOpen);
-        assert.ok(start >= 0, `缺少规则块：${blockOpen}`);
-        const body = css.slice(start, css.indexOf("}", start));
-        const declared = body.match(/z-index:[ \t]*(\d+)/);
-        assert.ok(declared, `规则里没有 z-index：${blockOpen}`);
-        return Number(declared[1]);
-    };
-
-    const confirm = zIndexOf("#confirm-backdrop {");
-    const dialog = zIndexOf(".confirm-backdrop {");
-    const rename = zIndexOf("#rename-session-backdrop {");
-    const memoryEdit = zIndexOf(".memory-browser-edit-dialog {");
-    const toast = zIndexOf(".app-toast-viewport {");
-    const approval = zIndexOf(".ceo-approval-viewport {");
+    const confirm = zIndexOf(css, "#confirm-backdrop {");
+    const dialog = zIndexOf(css, ".confirm-backdrop {");
+    const rename = zIndexOf(css, "#rename-session-backdrop {");
+    const memoryEdit = zIndexOf(css, ".memory-browser-edit-dialog {");
+    const toast = zIndexOf(css, ".app-toast-viewport {");
+    const approval = zIndexOf(css, ".ceo-approval-viewport {");
 
     // 同为 1000 时按 DOM 顺序决胜，而 #confirm-backdrop 排在各弹窗之前 ⇒ 必须靠层级压过
     assert.ok(confirm > dialog && confirm > rename && confirm > memoryEdit,
         `确认框必须压过弹窗族：${confirm} vs ${dialog}/${rename}/${memoryEdit}`);
     assert.ok(confirm < toast && confirm < approval,
         `toast 与审批浮层必须仍在确认框之上：${toast}/${approval} vs ${confirm}`);
+});
+
+test("预览层压过叫它起来的弹窗族，但仍在 toast 之下", () => {
+    const css = MODAL_CSS;
+
+    const viewer = zIndexOf(css, "#media-viewer-drawer.media-viewer-drawer {");
+    const viewerBackdrop = zIndexOf(css, "#media-viewer-backdrop.detail-backdrop {");
+    const drawer = zIndexOf(css, ".detail-drawer.project-detail-drawer {");
+    const dialog = zIndexOf(css, ".confirm-backdrop {");
+    const rename = zIndexOf(css, "#rename-session-backdrop {");
+    const memoryEdit = zIndexOf(css, ".memory-browser-edit-dialog {");
+    const confirm = zIndexOf(css, "#confirm-backdrop {");
+    const toast = zIndexOf(css, ".app-toast-viewport {");
+    const approval = zIndexOf(css, ".ceo-approval-viewport {");
+
+    // 人设照片是从弹窗里点开的：预览层若留在抽屉族那一档（96～112），整扇窗会沉到
+    // 叫它起来的那张弹窗后面，点了像没反应。它不叫起任何弹窗，所以按叶子层压在弹窗族之上。
+    assert.ok(viewer > dialog && viewer > rename && viewer > memoryEdit && viewer > confirm
+            && viewer > drawer,
+        `预览层必须压过叫它起来的弹窗族：${viewer} vs ${dialog}/${rename}/${memoryEdit}/${confirm}/${drawer}`);
+    assert.ok(viewerBackdrop < viewer, `遮罩必须在预览窗之下：${viewerBackdrop} vs ${viewer}`);
+    assert.ok(viewer < toast && viewer < approval,
+        `toast 与审批浮层必须仍在预览层之上：${toast}/${approval} vs ${viewer}`);
+});
+
+test("Escape 阶梯按层位收：预览层排在弹窗族之前", () => {
+    const guard = 'if (e.key !== "Escape") return;';
+    const start = APP_CODE.indexOf(guard);
+    assert.ok(start >= 0, "找不到 Escape 阶梯入口");
+    const end = APP_CODE.indexOf("\n    });", start);
+    assert.ok(end > start, "Escape 阶梯整块没取到");
+    const ladder = APP_CODE.slice(start, end);
+
+    const order = [
+        "closeMediaViewer()",
+        "closeResourceSelects(",
+        "closeCeoModelModePanel()",
+        "isPasswordChangeOpen()",
+        "isProjectSettingsOpen()",
+        "closeConfirm()",
+    ].map((token) => {
+        const at = ladder.indexOf(token);
+        assert.ok(at >= 0, `Escape 阶梯里找不到 ${token}`);
+        return [token, at];
+    });
+
+    // 预览层压在弹窗族之上，所以它也第一个收：反过来会先关掉被盖住的那一层，
+    // 屏幕上留下一扇关不掉的图片窗。
+    const [viewerToken, viewerAt] = order[0];
+    order.slice(1).forEach(([token, at]) => {
+        assert.ok(viewerAt < at, `预览层必须排在 ${token} 之前：${viewerToken}@${viewerAt} vs ${at}`);
+    });
 });
 
 test("升级终态不回落成\"正在重启\"：失败占行、成功让回版本对", () => {

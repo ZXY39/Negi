@@ -116,6 +116,8 @@ function buildHarness({
         loadModels: 0,
         startCreateModel: 0,
         toastClosed: 0,
+        viewerOpens: [],
+        viewerOpen: false,
     };
 
     const document = {
@@ -192,7 +194,16 @@ function buildHarness({
     context.startModelRoleEditing = () => {
         calls.editing += 1;
     };
-    context.openMediaViewer = () => true;
+    context.openMediaViewer = (payload) => {
+        calls.viewerOpens.push(payload);
+        calls.viewerOpen = true;
+        return true;
+    };
+    context.closeMediaViewer = () => {
+        if (!calls.viewerOpen) return false;
+        calls.viewerOpen = false;
+        return true;
+    };
     context.window.loadModels = async () => {
         calls.loadModels += 1;
     };
@@ -469,6 +480,48 @@ test("the onboarding drag hint stays until both main and memory chains have role
     harness.context.S.modelCatalog.roleDrafts = { ceo: ["m1"], memory: ["m2"] };
     harness.intervals[0].handler();
     assert.equal(harness.calls.toastClosed, 1);
+});
+
+test("Escape 先收压在弹窗之上的预览层，再收弹窗自己", async () => {
+    const harness = buildHarness({
+        status: {
+            should_run: false,
+            completed: true,
+            persona_step_done: true,
+            has_models: true,
+            has_persona: true,
+            has_persona_input: true,
+            description: "测试人设",
+            photos: [],
+            photo_album: [],
+        },
+        persona: { description: "测试人设", photos: [{ name: "a.png", url: "/media/a.png" }] },
+    });
+    harness.documentListeners.DOMContentLoaded();
+    await harness.context.G3kuOnboarding.openPersonaDialog();
+    assert.equal(harness.elements["persona-dialog-backdrop"].hidden, false);
+
+    const pressEscape = () => {
+        const event = { key: "Escape" };
+        let stopped = false;
+        event.preventDefault = () => {};
+        event.stopPropagation = () => {
+            stopped = true;
+        };
+        harness.documentListeners.keydown(event);
+        return stopped;
+    };
+
+    // 预览层是这一串里最上面那层（层位归 org_graph.css 的媒体查看器那一档）：
+    // Escape 必须先收它，否则关掉的是被图片窗盖住、看不见的人设弹窗。
+    harness.context.openMediaViewer({ mode: "image", url: "/media/a.png", title: "a.png" });
+    assert.equal(pressEscape(), true, "预览层收掉后不许把同一次 Escape 再交给下层");
+    assert.equal(harness.calls.viewerOpen, false);
+    assert.equal(harness.elements["persona-dialog-backdrop"].hidden, false, "人设弹窗仍要在");
+
+    // 预览层没了，才轮到弹窗自己。
+    assert.equal(pressEscape(), true);
+    assert.equal(harness.elements["persona-dialog-backdrop"].hidden, true);
 });
 
 test("persona settings dialog initializes an empty description and keeps photos chat-only", () => {

@@ -560,6 +560,12 @@
 
         document.addEventListener("keydown", (event) => {
             if (event.key !== "Escape") return;
+            // 预览层压在弹窗族之上，收的顺序也按最上面那层：否则 Escape 关掉的是被图片窗盖住的人设弹窗。
+            if (closeMediaViewer()) {
+                event.preventDefault();
+                event.stopPropagation();
+                return;
+            }
             if (U.personaBackdrop && !U.personaBackdrop.hidden) {
                 event.preventDefault();
                 event.stopPropagation();

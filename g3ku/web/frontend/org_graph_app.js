@@ -8651,7 +8651,7 @@ async function submitConfigBundleImport() {
     const snapshot = await ApiClient.getBootstrapExitCheck().catch(() => null);
     const hasRunning = !!snapshot?.has_running_work;
     const summary = String(snapshot?.summary_text || "").trim();
-    // confirm 弹窗在层叠里排在配置包之后，必须先收掉本层才会露出来。
+    // 叫起确认框前先收掉配置包与设置两层。
     closeConfigBundleDialog();
     closeProjectSettingsDialog();
     openConfirm({
@@ -11532,6 +11532,9 @@ function bindGlobalOverlays() {
     });
     document.addEventListener("keydown", (e) => {
         if (e.key !== "Escape") return;
+        // 预览层压在弹窗族之上（org_graph.css 的媒体查看器层位），所以它也第一个收：
+        // 排在确认框之后会先关掉下面那张看不见的弹窗，屏幕上仍留着图片窗。
+        if (closeMediaViewer()) return;
         if (closeResourceSelects({ restoreFocus: true })) return;
         if (closeCeoModelModePanel()) {
             U.ceoComposerUsageBrain?.focus?.();
@@ -11555,7 +11558,6 @@ function bindGlobalOverlays() {
             closeConfirm();
             return;
         }
-        if (closeMediaViewer()) return;
         if (closeTaskMenus({ restoreFocus: true })) return;
         if (S.taskErrorLogOpen) {
             setTaskErrorLogOpen(false);

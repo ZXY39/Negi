@@ -1695,16 +1695,20 @@ textarea {
 }
 
 /* 程序内媒体查看器：显示面按视口封顶，长内容在本层滚动，盒子不跟内容一起长。
-   宽度与 z-index 必须压过 9285 行那条 `.detail-drawer`：它在文件里更靠后，只写类名会
-   被它的 `z-index: 96` 与 `width: 980px` 顶掉——遮罩是 111，于是加暗跑到窗口前面。 */
+   宽度必须压过 9285 行那条 `.detail-drawer`：它在文件里更靠后，只写类名会被它的
+   `width: 980px` 顶掉。
+   层位上这一具是叶子：它是从弹窗里点开的（设置 → 人设 → 照片），自身不叫起任何弹窗，
+   所以要压过整个弹窗族（`.confirm-backdrop` 1000、`#rename-session-backdrop` 1001、
+   `.memory-browser-edit-dialog` 1200、`#confirm-backdrop` 1300）——按抽屉族的 112 写就会
+   整块沉到叫它起来的那张弹窗后面。toast 1400 与审批浮层 1450 仍必须在它之上。 */
 #media-viewer-drawer.media-viewer-drawer {
     width: min(1180px, calc(calc(100vw / var(--ui-zoom, 1)) - 32px));
     height: min(86vh, calc(calc(100dvh / var(--ui-zoom, 1)) - 48px));
-    z-index: 112;
+    z-index: 1360;
 }
 
 #media-viewer-backdrop.detail-backdrop {
-    z-index: 111;
+    z-index: 1350;
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
     background: var(--modal-backdrop);
