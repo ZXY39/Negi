@@ -308,6 +308,37 @@ class ExternalSessionRegistry:
                 self._save()
             return entry
 
+    def clear_owner_trust(self, bridge_id: str) -> int:
+        """Drop owner trust from every DM of one bridge (Master unregister).
+
+        Group entries are untouched: they are third-party wholesale. DMs go back
+        to ``third_party_dm``; their transcripts and memory roots stay.
+        """
+        from g3ku.runtime.session_trust import (
+            TRUST_OWNER,
+            TRUST_THIRD_PARTY_DM,
+            is_multi_party_chat,
+        )
+
+        bridge = normalize_bridge_id(bridge_id)
+        changed = 0
+        with self._lock:
+            for entry in self._entries.values():
+                if entry.bridge_id != bridge:
+                    continue
+                if is_multi_party_chat(
+                    chat_type=getattr(entry, "chat_type", ""),
+                    external_key=getattr(entry, "external_key", ""),
+                ):
+                    continue
+                if entry.trust != TRUST_OWNER:
+                    continue
+                entry.trust = TRUST_THIRD_PARTY_DM
+                changed += 1
+            if changed:
+                self._save()
+        return changed
+
     def note_proactive_outbound(
         self,
         session_key: str,

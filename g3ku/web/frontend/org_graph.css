@@ -8762,6 +8762,62 @@ textarea {
     background: transparent;
 }
 
+/* Master 绑定码弹窗：码要整串可见、可复制，倒计时与识别状态同排。 */
+.confirm-dialog.qq-master-bind-dialog {
+    width: min(560px, calc(calc(100vw / var(--ui-zoom, 1)) - 48px));
+}
+
+.qq-master-bind-dialog .qq-master-bind-hint {
+    max-height: none;
+    overflow: visible;
+    padding-right: 0;
+    text-align: left;
+    /* 共享 .confirm-text 用 pre-wrap 保留用户文案里的换行；这里的 HTML 缩进
+       会被原样画出来，看起来像居中。绑定说明是一段连续文字，按普通换行折。 */
+    white-space: normal;
+}
+
+.qq-master-bind-code-row {
+    display: flex;
+    align-items: stretch;
+    gap: 10px;
+}
+
+.qq-master-bind-code {
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: 12px 14px;
+    border-radius: 14px;
+    border: 1px dashed var(--border-color);
+    background: var(--bg-elevated);
+    color: var(--text-primary);
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    font-size: 1rem;
+    letter-spacing: 0.04em;
+    line-height: 1.5;
+    word-break: break-all;
+    user-select: all;
+}
+
+.qq-master-bind-status {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+
+.qq-master-bind-countdown {
+    flex: 0 0 auto;
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.qq-master-bind-status[data-state="success"] {
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
 .confirm-checkbox-row {
     display: flex;
     align-items: flex-start;

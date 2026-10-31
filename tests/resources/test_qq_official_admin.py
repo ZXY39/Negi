@@ -393,6 +393,102 @@ def test_register_master_does_not_upgrade_group_session(client: TestClient, monk
     assert registry.calls == []
 
 
+@pytest.fixture(autouse=True)
+def _reset_master_binding_registry():
+    from g3ku.runtime import qq_master_binding as binding
+
+    binding.reset_qq_master_binding_registry()
+    yield
+    binding.reset_qq_master_binding_registry()
+
+
+def test_master_binding_requires_password_and_returns_code(client: TestClient) -> None:
+    _seed_qq_account(client)
+    missing = client.post("/api/qq-bot/master-binding", json={"app_id": "111"})
+    assert missing.status_code == 403
+    assert missing.json()["detail"]["code"] == "unlock_password_required"
+
+    wrong = client.post(
+        "/api/qq-bot/master-binding",
+        json={"app_id": "111", "unlock_password": "wrong"},
+    )
+    assert wrong.status_code == 403
+    assert wrong.json()["detail"]["code"] == "unlock_password_invalid"
+
+    issued = client.post(
+        "/api/qq-bot/master-binding",
+        json={"app_id": "111", "unlock_password": "owner-password"},
+    )
+    assert issued.status_code == 200
+    body = issued.json()
+    assert body["token"].startswith("NEGI-MASTER-")
+    assert body["expires_in_seconds"] == 300
+
+    status = client.get("/api/qq-bot/master-binding/status", params={"app_id": "111"})
+    assert status.status_code == 200
+    assert status.json()["pending"] is True
+    assert status.json()["registered"] is False
+    assert status.json()["expires_in_seconds"] > 0
+
+
+def test_master_binding_refuses_when_owner_exists(client: TestClient) -> None:
+    _seed_qq_account(client)
+    owner = "EB6C8D4341C1238A627FF73CBE540DAE"
+    client.put(
+        "/api/qq-bot/settings",
+        json={"enabled": True, "accounts": [{"app_id": "111", "owner_openids": [owner]}]},
+    )
+    issued = client.post(
+        "/api/qq-bot/master-binding",
+        json={"app_id": "111", "unlock_password": "owner-password"},
+    )
+    assert issued.status_code == 409
+    assert issued.json()["detail"]["code"] == "master_already_registered"
+
+
+def test_unregister_master_clears_owners_and_dm_trust(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import g3ku.runtime.external_sessions as external_sessions
+    from g3ku.runtime import qq_master_binding as binding
+
+    _seed_qq_account(client)
+    owner = "EB6C8D4341C1238A627FF73CBE540DAE"
+    client.put(
+        "/api/qq-bot/settings",
+        json={"enabled": True, "accounts": [{"app_id": "111", "owner_openids": [owner]}]},
+    )
+
+    class _FakeRegistry:
+        def __init__(self) -> None:
+            self.cleared: list[str] = []
+
+        def clear_owner_trust(self, bridge_id: str) -> int:
+            self.cleared.append(bridge_id)
+            return 1
+
+    fake = _FakeRegistry()
+    monkeypatch.setattr(
+        external_sessions, "get_external_session_registry", lambda *args, **kwargs: fake
+    )
+
+    async def _noop_refresh(reason: str) -> None:
+        return None
+
+    monkeypatch.setattr(binding, "_refresh_after_save", _noop_refresh)
+
+    result = client.post("/api/qq-bot/unregister-master", json={"app_id": "111"})
+    assert result.status_code == 200
+    body = result.json()
+    assert body["cleared_owner_count"] == 1
+    assert body["dm_sessions_downgraded"] == 1
+    assert fake.cleared == ["qq-official-111"]
+    assert _row(body, "111")["owner_openids"] == []
+
+    status = client.get("/api/qq-bot/master-binding/status", params={"app_id": "111"})
+    assert status.json()["registered"] is False
+
+
 def test_second_account_does_not_touch_first_secret(client: TestClient) -> None:
     client.put(
         "/api/qq-bot/settings",

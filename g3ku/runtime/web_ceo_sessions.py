@@ -2231,6 +2231,9 @@ def _external_channel_row(
         "channel_id": f"ext:{bridge_id}",
         "account_id": bridge_id,
         "chat_type": _external_chat_type(external_key),
+        # 注册表里的信任级：会话卡片用它标「第三方私聊 / Master」。空值按未注册处理，
+        # 由 chat_type 落到第三方；不要在 UI 另判一次"是否注册"。
+        "trust": str(getattr(entry, "trust", "") or ""),
         "peer_id": external_key or None,
         "thread_id": None,
         "is_virtual": False,

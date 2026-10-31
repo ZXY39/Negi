@@ -365,8 +365,13 @@ function renderCeoSessionCard(item, { allowActions = false, index = -1 } = {}) {
     const unreadText = unreadCount > 99 ? "99+" : String(unreadCount);
     const createdText = formatSessionTime(item?.created_at);
     const type = String(item?.chat_type || "").trim();
-    // DM 是渠道会话的默认形态，标出来只是噪音；群/线程才是能帮人区分的那两档。
-    const typeLabel = type === "group" ? "群" : type === "thread" ? "Thread" : "";
+    const trust = String(item?.trust || "").trim().toLowerCase();
+    // 私聊要标出信任档：未注册按第三方私聊，注册后是 Master；群聊的信任整会话
+    // 恒为第三方，仍只标「群」，避免每张群卡都挂同一条噪音。
+    let typeLabel = type === "group" ? "群" : type === "thread" ? "Thread" : "";
+    if (type === "dm" || type === "guild_dm") {
+        typeLabel = trust === "owner" ? "Master" : "第三方私聊";
+    }
     const badges = [
         typeLabel ? `<span class="ceo-session-pill">${esc(typeLabel)}</span>` : "",
         item?.is_readonly && !item?.can_message ? '<span class="ceo-session-pill readonly">只读</span>' : "",

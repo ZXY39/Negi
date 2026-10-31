@@ -542,3 +542,129 @@ async def test_terminal_turn_records_evicted_beyond_memory_limit():
     assert "running-1" in service._turns
     assert result["turn_id"] in service._turns
     assert "old-0" not in service._turns
+
+# -- QQ Master one-time binding codes ---------------------------------------
+
+_MASTER_OWNER = "EB6C8D4341C1238A627FF73CBE540DAE"
+
+
+@pytest.fixture(autouse=True)
+def _reset_qq_master_binding_registry():
+    from g3ku.runtime import qq_master_binding as binding
+
+    binding.reset_qq_master_binding_registry()
+    yield
+    binding.reset_qq_master_binding_registry()
+
+
+def _qq_principal(app) -> None:
+    app.dependency_overrides[require_external_api] = lambda: ExternalApiPrincipal(
+        bridge_id="qq-official-111", label="qq"
+    )
+
+
+@pytest.mark.asyncio
+async def test_dm_binding_code_is_consumed_before_a_turn(harness, registry, monkeypatch):
+    from g3ku.runtime import qq_master_binding as binding
+
+    issued = binding.get_qq_master_binding_registry().issue("111")
+    calls: list[tuple[str, str, str]] = []
+
+    async def _fake_complete(app_id, sender_id, *, session_key):
+        calls.append((app_id, sender_id, session_key))
+        binding.get_qq_master_binding_registry().consume(app_id)
+        return {"registered": True, "already_registered": False}
+
+    monkeypatch.setattr(binding, "complete_binding", _fake_complete)
+    app, bridge = harness(session=_FakeSession())
+    _qq_principal(app)
+    async with _client(app) as client:
+        created = (
+            await client.post(
+                "/api/v1/sessions",
+                json={"external_key": f"qq:c2c:{_MASTER_OWNER}", "chat_type": "dm"},
+            )
+        ).json()
+        session_id = created["session_id"]
+        response = await client.post(
+            f"/api/v1/sessions/{session_id}/messages",
+            json={
+                "text": issued["token"],
+                "sender": {"id": _MASTER_OWNER, "name": ""},
+                "chat_type": "dm",
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "queued"
+        assert body["binding"] is True
+        assert "已注册为 Master" in body["receipt"]
+        assert calls == [("111", _MASTER_OWNER, session_id)]
+        assert bridge.prompts == []
+        assert binding.get_qq_master_binding_registry().has_active("111") is False
+
+
+@pytest.mark.asyncio
+async def test_group_code_is_invalidated_without_binding(harness, registry, monkeypatch):
+    from g3ku.runtime import qq_master_binding as binding
+
+    issued = binding.get_qq_master_binding_registry().issue("111")
+    calls: list[tuple[str, str, str]] = []
+
+    async def _fake_complete(app_id, sender_id, *, session_key):
+        calls.append((app_id, sender_id, session_key))
+        return {"registered": True, "already_registered": False}
+
+    monkeypatch.setattr(binding, "complete_binding", _fake_complete)
+    app, bridge = harness(session=_FakeSession())
+    _qq_principal(app)
+    async with _client(app) as client:
+        created = (
+            await client.post(
+                "/api/v1/sessions",
+                json={"external_key": "qq:group:g1", "chat_type": "group"},
+            )
+        ).json()
+        session_id = created["session_id"]
+        response = await client.post(
+            f"/api/v1/sessions/{session_id}/messages",
+            json={
+                "text": issued["token"],
+                "sender": {"id": _MASTER_OWNER, "name": ""},
+                "chat_type": "group",
+            },
+        )
+        body = response.json()
+        assert body["status"] == "queued"
+        assert body["binding"] is True
+        assert "只接受私聊" in body["receipt"]
+        assert calls == []
+        assert bridge.prompts == []
+        assert binding.get_qq_master_binding_registry().has_active("111") is False
+
+
+@pytest.mark.asyncio
+async def test_no_active_code_does_not_intercept_token_shaped_text(harness, registry):
+    app, bridge = harness(session=_FakeSession())
+    _qq_principal(app)
+    token_shaped = "NEGI-MASTER-AAAA-BBBB-CCCC-DDDD"
+    async with _client(app) as client:
+        created = (
+            await client.post(
+                "/api/v1/sessions",
+                json={"external_key": f"qq:c2c:{_MASTER_OWNER}", "chat_type": "dm"},
+            )
+        ).json()
+        session_id = created["session_id"]
+        response = await client.post(
+            f"/api/v1/sessions/{session_id}/messages",
+            json={
+                "text": token_shaped,
+                "sender": {"id": _MASTER_OWNER, "name": ""},
+                "chat_type": "dm",
+            },
+        )
+        assert response.json()["status"] == "started"
+        await _wait_terminal(session_id)
+        assert len(bridge.prompts) == 1
+        assert bridge.prompts[0].content == token_shaped

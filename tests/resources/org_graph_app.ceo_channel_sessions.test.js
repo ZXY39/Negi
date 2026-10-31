@@ -382,6 +382,25 @@ function railHarness() {
     return app;
 }
 
+test("channel cards mark unregistered DMs as third-party and registered DMs as Master", () => {
+    const { S, U, renderCeoSessions } = railHarness();
+    S.ceoChannelGroups = [{
+        channel_id: "ext:qq-official",
+        label: "QQ",
+        items: [
+            extChannelItem({ session_id: "ext:qq-official:d1", chat_type: "dm", trust: "third_party_dm" }),
+            extChannelItem({ session_id: "ext:qq-official:d2", chat_type: "dm", trust: "owner" }),
+            extChannelItem({ session_id: "ext:qq-official:g1", chat_type: "group", trust: "third_party_group" }),
+        ],
+    }];
+    S.ceoSessions = S.ceoChannelGroups[0].items;
+    renderCeoSessions();
+    const html = U.ceoSessionList.innerHTML;
+    assert.match(html, /第三方私聊/);
+    assert.match(html, />Master</);
+    assert.match(html, />群</);
+});
+
 test("collapsed channel group turns the title into a caret button and stops rendering its cards", () => {
     const { S, U, renderCeoSessions, toggleCeoChannelCollapse } = railHarness();
 

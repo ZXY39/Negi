@@ -526,10 +526,11 @@ function renderQqBotAccounts() {
                 <span class="tool-governance-switch-track" aria-hidden="true"><span class="tool-governance-switch-thumb"></span></span>
                 <span class="tool-governance-switch-label">${row.enabled ? "已启用" : "已停用"}</span>
             </button>
-            <button class="toolbar-btn ghost small" data-action="register-owner" type="button"
-                title="用群里气泡上的编号注册 Master">注册Master</button>
-            ${ownerCount ? `<button class="toolbar-btn ghost small" data-action="edit-owner" type="button"
-                title="查看或移除已注册的 Master">名单 ${ownerCount}</button>` : ""}
+            ${ownerCount
+                ? `<button class="toolbar-btn ghost danger small" data-action="unregister-master" type="button"
+                    title="清空该 QQ 号的所有 Master 身份与标签">注销 Master</button>`
+                : `<button class="toolbar-btn ghost small" data-action="register-master" type="button"
+                    title="生成 5 分钟一次性绑定码，用 QQ 私聊发送给机器人">注册Master</button>`}
             <button class="toolbar-btn ghost small" data-action="edit-secret" type="button">改密钥</button>
             <button class="toolbar-btn ghost danger small" data-action="remove" type="button">删除</button>`;
         listEl.appendChild(el);
@@ -765,123 +766,214 @@ function _editQqBotSecret(index) {
     });
 }
 
-// 操作员 openid 名单：命中即 Master。openid 按 AppID 隔离——同一人在不同号上是
-// 不同的串，所以每个号各填一条；服务端读的是所有号的并集。
-function _editQqBotOwners(index) {
-    const target = _qqBotRowFor(index);
-    if (!target) return;
-    const current = Array.isArray(target.owner_openids) ? target.owner_openids : [];
-    openConfirm({
-        title: "Master 名单",
-        text: "命中的发送者按 Master 处理：私聊升为 owner 档，群里只改标签、档位仍是第三方。多个用逗号分隔；每个 QQ 号各填自己那份。",
-        confirmLabel: "保存",
-        confirmKind: "",
-        textFull: true,
-        input: {
-            label: "openid（十六进制，16 位以上）",
-            type: "text",
-            value: current.join(","),
-            placeholder: "EB6C8D43…",
-        },
-        onConfirm: async ({ value }) => {
-            const owners = String(value || "").split(/[,，;；\s]+/).map((item) => item.trim()).filter(Boolean);
-            const invalid = owners.find((item) => !/^[0-9a-fA-F]{16,128}$/.test(item));
-            if (invalid) throw new Error(`openid 形状不对：${invalid}`);
-            target.owner_openids = owners;
-            await _persistQqBotSettings({ silentEmpty: true });
-        },
-    });
+// ---- Master 绑定码 ---------------------------------------------------------
+// 生成前必须验项目口令；码 5 分钟有效，只接受私聊发送。入站匹配由服务端在
+// 活动期内完成，注册成功后这里只负责轮询到成功并刷新账号行。
+const QQ_MASTER_BIND = {
+    appId: "",
+    token: "",
+    expiresAt: 0,
+    countdownTimer: null,
+    pollTimer: null,
+    active: false,
+};
+
+function _qqMasterBindElements() {
+    return {
+        backdrop: document.getElementById("qq-master-bind-backdrop"),
+        code: document.getElementById("qq-master-bind-code"),
+        copy: document.getElementById("qq-master-bind-copy"),
+        status: document.getElementById("qq-master-bind-status"),
+        statusText: document.getElementById("qq-master-bind-status-text"),
+        countdown: document.getElementById("qq-master-bind-countdown"),
+    };
 }
 
-function _qqSessionIdentityLabel(preview) {
-    const chat = String(preview?.session?.chat_type || "").toLowerCase();
-    const kind = (chat === "group" || chat === "guild") ? "群聊" : "私聊";
-    const title = String(preview?.session?.title || "").trim();
-    return title ? `${kind}「${title}」` : kind;
+function _stopQqMasterTimers() {
+    if (QQ_MASTER_BIND.countdownTimer) {
+        window.clearInterval(QQ_MASTER_BIND.countdownTimer);
+        QQ_MASTER_BIND.countdownTimer = null;
+    }
+    if (QQ_MASTER_BIND.pollTimer) {
+        window.clearInterval(QQ_MASTER_BIND.pollTimer);
+        QQ_MASTER_BIND.pollTimer = null;
+    }
 }
 
-// 编号只在会话内有意义：群聊按当前转录里的编号解析，私聊直接定位唯一的对方。
-function _registerQqBotOwner(index) {
+function _qqMasterBindingRemainingSeconds() {
+    return Math.max(0, Math.ceil((Number(QQ_MASTER_BIND.expiresAt || 0) - Date.now()) / 1000));
+}
+
+function _setQqMasterBindStatus(state, text) {
+    const els = _qqMasterBindElements();
+    if (!els.status || !els.statusText) return;
+    els.status.dataset.state = String(state || "");
+    els.statusText.textContent = String(text || "");
+}
+
+function _renderQqMasterBindCountdown() {
+    const els = _qqMasterBindElements();
+    if (!els.countdown) return;
+    const remaining = _qqMasterBindingRemainingSeconds();
+    const minutes = Math.floor(remaining / 60);
+    const seconds = remaining % 60;
+    els.countdown.textContent = remaining > 0
+        ? `${minutes}:${String(seconds).padStart(2, "0")}`
+        : "0:00";
+    if (remaining <= 0 && QQ_MASTER_BIND.active) _expireQqMasterBinding();
+}
+
+function _expireQqMasterBinding() {
+    if (!QQ_MASTER_BIND.active) return;
+    QQ_MASTER_BIND.active = false;
+    _stopQqMasterTimers();
+    _setQqMasterBindStatus("expired", "绑定码已过期，请关闭后重新生成。");
+    const els = _qqMasterBindElements();
+    if (els.copy) els.copy.disabled = true;
+}
+
+function _closeQqMasterBindingModal() {
+    _stopQqMasterTimers();
+    QQ_MASTER_BIND.active = false;
+    QQ_MASTER_BIND.appId = "";
+    QQ_MASTER_BIND.token = "";
+    const els = _qqMasterBindElements();
+    if (els.backdrop) {
+        els.backdrop.hidden = true;
+        els.backdrop.classList.remove("is-open");
+    }
+    if (els.code) els.code.textContent = "";
+    if (els.copy) els.copy.disabled = false;
+}
+
+async function _pollQqMasterBinding() {
+    if (!QQ_MASTER_BIND.active) return;
+    if (_qqMasterBindingRemainingSeconds() <= 0) {
+        _expireQqMasterBinding();
+        return;
+    }
+    try {
+        const payload = await ApiClient.getQqMasterBindingStatus(QQ_MASTER_BIND.appId);
+        if (!QQ_MASTER_BIND.active) return;
+        if (payload?.registered === true) {
+            QQ_MASTER_BIND.active = false;
+            _stopQqMasterTimers();
+            _setQqMasterBindStatus("success", "已注册 Master。");
+            const els = _qqMasterBindElements();
+            if (els.countdown) els.countdown.textContent = "已识别";
+            await loadQqBotView();
+            window.setTimeout(() => _closeQqMasterBindingModal(), 1500);
+            return;
+        }
+        if (payload?.pending === false) {
+            _expireQqMasterBinding();
+            return;
+        }
+        const remaining = Number(payload?.expires_in_seconds);
+        if (Number.isFinite(remaining) && remaining > 0) {
+            QQ_MASTER_BIND.expiresAt = Date.now() + remaining * 1000;
+            _renderQqMasterBindCountdown();
+        }
+    } catch (error) {
+        void error;
+    }
+}
+
+function openQqMasterBindingModal({ appId, token, expiresInSeconds = 300 }) {
+    const els = _qqMasterBindElements();
+    if (!els.backdrop || !els.code) return;
+    _stopQqMasterTimers();
+    QQ_MASTER_BIND.appId = String(appId || "").trim();
+    QQ_MASTER_BIND.token = String(token || "").trim();
+    QQ_MASTER_BIND.expiresAt = Date.now() + Math.max(1, Number(expiresInSeconds) || 300) * 1000;
+    QQ_MASTER_BIND.active = true;
+    els.code.textContent = QQ_MASTER_BIND.token;
+    if (els.copy) els.copy.disabled = false;
+    _setQqMasterBindStatus("waiting", "等待识别中…");
+    _renderQqMasterBindCountdown();
+    els.backdrop.hidden = false;
+    els.backdrop.classList.add("is-open");
+    QQ_MASTER_BIND.countdownTimer = window.setInterval(_renderQqMasterBindCountdown, 1000);
+    QQ_MASTER_BIND.pollTimer = window.setInterval(() => void _pollQqMasterBinding(), 2000);
+    void _pollQqMasterBinding();
+}
+
+async function _copyQqMasterCode() {
+    const token = String(QQ_MASTER_BIND.token || "").trim();
+    if (!token) return;
+    try {
+        await navigator.clipboard.writeText(token);
+    } catch (error) {
+        void error;
+        const area = document.createElement("textarea");
+        area.value = token;
+        area.setAttribute("readonly", "");
+        area.style.position = "fixed";
+        area.style.opacity = "0";
+        document.body.appendChild(area);
+        area.select();
+        document.execCommand("copy");
+        area.remove();
+    }
+    showToast({ title: "已复制绑定码", text: "用 QQ 私聊发给机器人即可。", kind: "success" });
+}
+
+function _registerQqMaster(index) {
     const target = _qqBotRowFor(index);
     if (!target) return;
     const appId = String(target.app_id || "").trim();
-    const sessionId = String(activeSessionId() || "").trim();
-    if (!sessionId) {
-        showToast({ title: "先打开 QQ 会话", text: "编号取自气泡，先打开要注册的群聊或私聊再点「注册Master」。", kind: "error" });
-        return;
-    }
-    const active = typeof activeSessionItem === "function" ? activeSessionItem() : null;
-    const chatType = String(active?.chat_type || "").toLowerCase();
-    if (chatType === "dm" || chatType === "guild_dm") {
-        // 私聊只有一个对方：服务端按当前转录自动定位，操作员只确认口令。
-        void _previewQqBotOwner({ sessionId, number: "", appId });
-        return;
-    }
+    if (!appId) return;
     openConfirm({
         title: "注册 Master",
-        text: "在群里问一句自己的编号，或看自己气泡上的「第三方 0002」；把 0002 填进来即可。只解析当前打开的会话。",
-        confirmLabel: "下一步",
+        text: "注册后这个 QQ 号的私聊按 owner 档处理：可写本地记忆、读取人设，任务门按 owner。群聊仍按第三方整会话执行，只改标签。\n\n下一步生成一个 5 分钟有效的绑定码，用你的 QQ 私聊发给机器人；只接受私聊，群里发送会作废。",
+        confirmLabel: "生成绑定码",
         confirmKind: "",
-        input: { label: "发送者编号", placeholder: "0002" },
-        onConfirm: async ({ value }) => {
-            const number = String(value || "").trim();
-            if (!/^0*\d{1,4}$/.test(number) || Number(number) < 2) {
-                throw new Error("编号形如 0002；0001 留给 Master");
-            }
-            const preview = await ApiClient.previewQqBotOwnerRegistration({
-                session_id: sessionId,
-                number,
-                app_id: appId,
-            });
-            setTimeout(() => _confirmQqBotOwnerRegistration(preview, { sessionId, number, appId }), 0);
+        textFull: true,
+        onConfirm: async () => {
+            window.setTimeout(() => _confirmQqMasterPassword(appId), 0);
         },
     });
 }
 
-async function _previewQqBotOwner({ sessionId, number, appId }) {
-    try {
-        const preview = await ApiClient.previewQqBotOwnerRegistration({
-            session_id: sessionId,
-            number,
-            app_id: appId,
-        });
-        _confirmQqBotOwnerRegistration(preview, { sessionId, number, appId });
-    } catch (error) {
-        showToast({ title: "注册 Master 失败", text: error?.message || "Unknown error", kind: "error" });
-    }
-}
-
-function _confirmQqBotOwnerRegistration(preview, { sessionId, number, appId }) {
-    const sender = preview?.sender || {};
-    const masked = String(sender.id_masked || "").trim();
-    const label = String(sender.number_label || number || "").trim();
-    const identity = preview?.auto_number === true
-        ? `对方 ${masked}`
-        : `编号 ${label} 对应 ${masked}`;
+function _confirmQqMasterPassword(appId) {
     openConfirm({
-        title: "确认注册 Master",
-        text: `${_qqSessionIdentityLabel(preview)} · ${identity}。注册后按 Master 处理；群聊只改标签，私聊升为 owner 档。`,
-        confirmLabel: "注册",
+        title: "确认生成绑定码",
+        text: "生成绑定码需要项目解锁口令。",
+        confirmLabel: "生成",
         confirmKind: "",
-        textFull: true,
         input: { label: "项目解锁口令", type: "password" },
         onConfirm: async ({ value }) => {
             const password = String(value || "").trim();
             if (!password) throw new Error("需要项目解锁口令");
-            const payload = await ApiClient.registerQqBotOwner({
-                session_id: sessionId,
-                number,
+            const payload = await ApiClient.createQqMasterBinding({
                 app_id: appId,
                 unlock_password: password,
             });
+            window.setTimeout(() => openQqMasterBindingModal({
+                appId,
+                token: payload?.token,
+                expiresInSeconds: payload?.expires_in_seconds,
+            }), 0);
+        },
+    });
+}
+
+function _unregisterQqMaster(index) {
+    const target = _qqBotRowFor(index);
+    if (!target) return;
+    const appId = String(target.app_id || "").trim();
+    if (!appId) return;
+    openConfirm({
+        title: "注销 Master",
+        text: "将清空这个 QQ 号的全部 Master 身份与标签；对应私聊会退回第三方，本地记忆重新只读。群聊仍按第三方处理。确定注销？",
+        confirmLabel: "注销",
+        confirmKind: "danger",
+        textFull: true,
+        onConfirm: async () => {
+            const payload = await ApiClient.unregisterQqMaster({ app_id: appId });
             _applyQqBotPayload(payload);
             renderQqBotAccounts();
-            const upgraded = payload?.session_trust_upgraded === true;
-            showToast({
-                title: "已注册 Master",
-                text: `${masked} 现在按 Master 处理。${upgraded ? "当前私聊会话已可写本地记忆。" : ""}`,
-                kind: "success",
-            });
+            showToast({ title: "已注销 Master", text: "该 QQ 号已退回第三方私聊。", kind: "success" });
         },
     });
 }
@@ -994,6 +1086,14 @@ function closeQqBotApply() {
 }
 
 function initQqBotView() {
+    const bindCopy = document.getElementById("qq-master-bind-copy");
+    if (bindCopy) bindCopy.addEventListener("click", () => void _copyQqMasterCode());
+    const bindClose = document.getElementById("qq-master-bind-close");
+    if (bindClose) bindClose.addEventListener("click", () => _closeQqMasterBindingModal());
+    const bindBackdrop = document.getElementById("qq-master-bind-backdrop");
+    if (bindBackdrop) bindBackdrop.addEventListener("click", (event) => {
+        if (event.target === bindBackdrop) _closeQqMasterBindingModal();
+    });
     const toggle = document.getElementById("qq-bot-enabled-toggle");
     if (toggle) toggle.addEventListener("click", () => void toggleQqBotEnabled(toggle.getAttribute("aria-pressed") !== "true"));
     const form = document.getElementById("qq-bot-settings-form");
@@ -1033,12 +1133,12 @@ function initQqBotView() {
                 _editQqBotSecret(index);
                 return;
             }
-            if (event.target.closest("[data-action='register-owner']")) {
-                _registerQqBotOwner(index);
+            if (event.target.closest("[data-action='register-master']")) {
+                _registerQqMaster(index);
                 return;
             }
-            if (event.target.closest("[data-action='edit-owner']")) {
-                _editQqBotOwners(index);
+            if (event.target.closest("[data-action='unregister-master']")) {
+                _unregisterQqMaster(index);
                 return;
             }
             if (event.target.closest(".qq-bot-row-switch")) void _toggleQqBotRowEnabled(index);

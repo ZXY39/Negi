@@ -1141,6 +1141,30 @@
                 </div>
             </div>
 
+            <div id="qq-master-bind-backdrop" class="confirm-backdrop" hidden>
+                <section id="qq-master-bind-dialog" class="confirm-dialog qq-master-bind-dialog" role="dialog"
+                    aria-modal="true" aria-labelledby="qq-master-bind-title">
+                    <div class="confirm-header">
+                        <h2 id="qq-master-bind-title">注册 Master</h2>
+                    </div>
+                    <p class="confirm-text qq-master-bind-hint">
+                        用你的 QQ 私聊把这串字符发给机器人；任意已有私聊都可以，5 分钟内有效。
+                        只接受私聊，群里发送会作废。
+                    </p>
+                    <div class="qq-master-bind-code-row">
+                        <code id="qq-master-bind-code" class="qq-master-bind-code"></code>
+                        <button id="qq-master-bind-copy" class="toolbar-btn ghost small" type="button">复制</button>
+                    </div>
+                    <p id="qq-master-bind-status" class="qq-master-bind-status" aria-live="polite">
+                        <span id="qq-master-bind-status-text">等待识别中…</span>
+                        <span id="qq-master-bind-countdown" class="qq-master-bind-countdown"></span>
+                    </p>
+                    <div class="confirm-actions">
+                        <button id="qq-master-bind-close" class="toolbar-btn ghost" type="button">关闭</button>
+                    </div>
+                </section>
+            </div>
+
             <div id="project-settings-backdrop" class="confirm-backdrop" hidden>
                 <section id="project-settings-dialog" class="confirm-dialog project-settings-dialog" role="dialog"
                     aria-modal="true" aria-labelledby="project-settings-title" tabindex="-1">

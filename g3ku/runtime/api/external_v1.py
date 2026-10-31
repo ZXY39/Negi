@@ -990,6 +990,67 @@ def _build_external_user_message(
     )
 
 
+async def _maybe_handle_qq_master_binding(
+    *,
+    bridge_id: str,
+    effective_chat_type: str,
+    external_key: str,
+    session_key: str,
+    sender_id: str,
+    text: str,
+) -> dict[str, Any] | None:
+    """Consume a one-time Master binding code before it becomes a turn.
+
+    Only called while the account has an active code; the registry lookup is a
+    dict hit, so steady state pays nothing. Group texts that match are consumed
+    too: ``member_openid`` cannot bind the c2c identity, and leaving a leaked
+    code active would let a group member use it in private chat.
+    """
+    from g3ku.runtime import qq_master_binding as binding
+
+    app_id = binding.app_id_for_bridge(bridge_id)
+    if not app_id or not str(sender_id or "").strip():
+        return None
+    registry = binding.get_qq_master_binding_registry()
+    if not registry.has_active(app_id):
+        return None
+    if not registry.match(app_id, text):
+        return None
+    if is_multi_party_chat(chat_type=effective_chat_type, external_key=external_key):
+        registry.consume(app_id)
+        return {
+            "ok": True,
+            "session_id": session_key,
+            "status": "queued",
+            "receipt": "绑定码只接受私聊发送；这串已作废，请重新生成后在私聊里发给我。",
+            "binding": True,
+        }
+    try:
+        result = await binding.complete_binding(
+            app_id, str(sender_id or ""), session_key=session_key
+        )
+    except Exception as exc:  # noqa: BLE001 - 给用户一句可重试的回执，失败不吞日志
+        registry.consume(app_id)
+        logger.warning("qq master binding failed for app {}: {}", app_id, exc)
+        return {
+            "ok": True,
+            "session_id": session_key,
+            "status": "queued",
+            "receipt": "绑定失败，请重新生成绑定码后再试。",
+            "binding": True,
+        }
+    _publish_ceo_catalog_best_effort()
+    return {
+        "ok": True,
+        "session_id": session_key,
+        "status": "queued",
+        "receipt": "已注册为 Master。当前私聊现在可写本地记忆；群聊仍按第三方处理。",
+        "binding": True,
+        "registered": bool(result.get("registered")),
+        "already_registered": bool(result.get("already_registered")),
+    }
+
+
 @router.post("/sessions/{session_id}/messages")
 async def post_external_message(
     session_id: str,
@@ -1043,6 +1104,16 @@ async def post_external_message(
         payload.get("chat_type") or (extra_metadata or {}).get("chat_type")
     )
     effective_chat_type = _effective_chat_type(claimed=claimed_chat_type, entry=entry)
+    binding_response = await _maybe_handle_qq_master_binding(
+        bridge_id=principal.bridge_id,
+        effective_chat_type=effective_chat_type,
+        external_key=entry.external_key,
+        session_key=entry.session_key,
+        sender_id=(sender_payload or {}).get("id", ""),
+        text=text,
+    )
+    if binding_response is not None:
+        return binding_response
     # 信任级在这里定型并落到注册表（粘性、只降不升）：记忆门、控制面拒绝与投影标注
     # 全部读同一个值，不各自再判一次来源。
     turn_trust = note_inbound_session_shape(

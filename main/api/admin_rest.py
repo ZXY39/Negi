@@ -1621,6 +1621,89 @@ async def register_qq_bot_owner(payload: dict | None = Body(default=None)):
     }
 
 
+@router.post('/qq-bot/master-binding')
+async def create_qq_master_binding(payload: dict | None = Body(default=None)):
+    """生成一次性 Master 绑定码；明文只在这次响应里出现。"""
+    body = payload if isinstance(payload, dict) else {}
+    password = str(body.get('unlock_password') or body.get('unlockPassword') or '')
+    if not password:
+        raise HTTPException(
+            status_code=403,
+            detail={'code': 'unlock_password_required', 'message': '生成绑定码需要项目解锁口令'},
+        )
+    from g3ku.security.bootstrap import verify_unlock_password
+
+    if not verify_unlock_password(password):
+        raise HTTPException(
+            status_code=403,
+            detail={'code': 'unlock_password_invalid', 'message': '口令不正确'},
+        )
+    app_id = str(body.get('app_id') or body.get('appId') or '').strip()
+    if not app_id:
+        raise HTTPException(status_code=400, detail={'code': 'qq_app_id_required', 'message': '缺少 QQ 号'})
+    from g3ku.runtime import qq_master_binding as binding
+
+    try:
+        issued = binding.generate_binding(app_id)
+    except binding.QqMasterBindingError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={'code': exc.code, 'message': exc.message},
+        ) from exc
+    audit_events.emit_audit_event(
+        'external_api',
+        'warning',
+        'qq_master_binding_issued',
+        'QQ Master one-time binding code issued',
+        detail={
+            'app_id': app_id,
+            'expires_in_seconds': int(issued.get('expires_in_seconds') or 0),
+            'actor': 'operator',
+        },
+    )
+    return {'ok': True, **issued}
+
+
+@router.get('/qq-bot/master-binding/status')
+async def get_qq_master_binding_status(app_id: str = Query('')):
+    from g3ku.runtime import qq_master_binding as binding
+
+    try:
+        state = binding.binding_status(app_id)
+    except binding.QqMasterBindingError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={'code': exc.code, 'message': exc.message},
+        ) from exc
+    return {'ok': True, **state}
+
+
+@router.post('/qq-bot/unregister-master')
+async def unregister_qq_master(payload: dict | None = Body(default=None)):
+    """注销 Master：清空该账号全部 owner，DM 会话退回第三方；群聊不变。"""
+    body = payload if isinstance(payload, dict) else {}
+    app_id = str(body.get('app_id') or body.get('appId') or '').strip()
+    if not app_id:
+        raise HTTPException(status_code=400, detail={'code': 'qq_app_id_required', 'message': '缺少 QQ 号'})
+    from g3ku.runtime import qq_master_binding as binding
+
+    try:
+        result = await binding.unregister_master(app_id)
+    except binding.QqMasterBindingError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={'code': exc.code, 'message': exc.message},
+        ) from exc
+    try:
+        from g3ku.runtime.api.external_v1 import _publish_ceo_catalog_best_effort
+
+        _publish_ceo_catalog_best_effort()
+    except Exception:
+        pass
+    cfg = load_config()
+    return {'ok': True, **result, **_qq_bot_payload(cfg)}
+
+
 @router.get('/qq-bot/status')
 async def get_qq_bot_status():
     return {'ok': True, 'accounts': _qq_bridge_service_states()}

@@ -1329,6 +1329,12 @@ class CeoMessageBuilder:
             memory_view is not None
             and str(getattr(memory_view, 'kind', '') or '').strip() == 'group'
         )
+        # readonly_local 只可能是第三方私聊：本地会话不走渠道块，群聊是 group。
+        third_party_dm = bool(
+            channel_session
+            and memory_view is not None
+            and str(getattr(memory_view, 'kind', '') or '').strip() == 'readonly_local'
+        )
         split_prompt_builder = callable(getattr(self._prompt_builder, 'build_base_prompt', None))
         prompt_refresh_stamp = ''
         if split_prompt_builder:
@@ -1348,7 +1354,11 @@ class CeoMessageBuilder:
         if channel_session:
             channel_block = getattr(self._prompt_builder, 'channel_identity_block', None)
             channel_text = str(
-                channel_block(sandbox_tier, group_memory=group_memory)
+                channel_block(
+                    sandbox_tier,
+                    group_memory=group_memory,
+                    third_party_dm=third_party_dm,
+                )
                 if callable(channel_block)
                 else ''
             ).strip()

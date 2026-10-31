@@ -32,12 +32,16 @@
         return this.put("/api/qq-bot/settings", payload || {});
     },
 
-    async previewQqBotOwnerRegistration(payload) {
-        return this.post("/api/qq-bot/register-owner/preview", payload || {});
+    async createQqMasterBinding(payload) {
+        return this.post("/api/qq-bot/master-binding", payload || {});
     },
 
-    async registerQqBotOwner(payload) {
-        return this.post("/api/qq-bot/register-owner", payload || {});
+    async getQqMasterBindingStatus(appId) {
+        return this.get(`/api/qq-bot/master-binding/status?app_id=${encodeURIComponent(String(appId || ""))}`);
+    },
+
+    async unregisterQqMaster(payload) {
+        return this.post("/api/qq-bot/unregister-master", payload || {});
     }
     };
 })();
