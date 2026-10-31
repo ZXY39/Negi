@@ -2,13 +2,21 @@
 <#
   Negi uninstaller (Windows).
 
-  Registered as the "已安装的应用" entry by install.ps1, and runnable by hand:
+  Started by the Windows uninstall entry (Negi-Setup.exe's wizard passes the data
+  decision as a switch) and by install.ps1's own installed-apps row, and runnable
+  by hand:
 
     powershell -NoProfile -ExecutionPolicy Bypass -File uninstall.ps1 [-KeepData|-PurgeData] [-Yes]
 
   Deleting data is the only irreversible step here, so the default branch is
   "keep": the program goes, the operator's sessions, tasks and key envelopes
   stay where they are and the next install adopts them.
+
+  This script never opens a window and never reads the console. The uninstall
+  entry runs it inside a hidden process whose first GUI window is created hidden
+  too, so a question asked here has no answer to wait for and the whole
+  uninstallation stalls; keep/purge is decided by the caller (the wizard asks it
+  in its own thread) and every line this script produces goes to a log file.
 #>
 param(
     [switch]$KeepData,
@@ -24,10 +32,21 @@ $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $StateDir = Join-Path $env:LOCALAPPDATA $AppDisplayName
 $PointerFile = Join-Path $StateDir 'install-root.json'
 $UninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$AppDisplayName"
+# %TEMP% and nowhere else: the program directory and the data root are both about to
+# be deleted, and the operator's only account of a finished (or failed) uninstall has
+# to outlive them.
+$LogFile = Join-Path $env:TEMP ('negi-uninstall-' + (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ') + '.log')
 
 function Write-Step {
     param([string]$Message)
-    Write-Host "[uninstall] $Message"
+    $line = "[uninstall] $Message"
+    Write-Host $line
+    try {
+        Add-Content -LiteralPath $LogFile -Value $line -Encoding UTF8 -ErrorAction Stop
+    } catch {
+        # A machine whose TEMP is not writable still gets the console output, and an
+        # unwritable log must never be the reason an uninstall stops halfway.
+    }
 }
 
 function Read-Pointer {
@@ -47,31 +66,6 @@ function Get-PointerValue {
     return $property.Value
 }
 
-function Get-TreeSizeBytes {
-    param([string]$Path)
-    $total = 0
-    $stack = New-Object 'System.Collections.Generic.Stack[string]'
-    $stack.Push($Path)
-    while ($stack.Count -gt 0) {
-        $entries = @()
-        try { $entries = [System.IO.Directory]::EnumerateFileSystemEntries($stack.Pop()) } catch { continue }
-        foreach ($entry in $entries) {
-            try {
-                if ([System.IO.Directory]::Exists($entry)) { $stack.Push($entry) }
-                else { $total += (New-Object System.IO.FileInfo($entry)).Length }
-            } catch { }
-        }
-    }
-    return $total
-}
-
-function Format-Size {
-    param([long]$Bytes)
-    if ($Bytes -ge 1GB) { return ('{0:N1f} GB' -f ($Bytes / 1GB)) }
-    if ($Bytes -ge 1MB) { return ('{0:N1f} MB' -f ($Bytes / 1MB)) }
-    return ('{0:N0} KB' -f ($Bytes / 1KB))
-}
-
 function Get-WebPort {
     param([string]$Root)
     $configPath = Join-Path $Root '.g3ku\config.json'
@@ -86,6 +80,12 @@ function Get-WebPort {
 
 function Get-NegiManagedProcesses {
     param([string]$Root)
+    # Two judgements, both needed: the command-line shape says what the process does,
+    # the install root says whose process it is, because a second checkout on this
+    # machine is not ours to stop. Beyond web/worker the list carries the desktop shell
+    # (pythonw -m g3ku window) and the MCP stdio gateway: both run from this root, both
+    # keep a file inside .venv image-locked, and neither has an exit endpoint that would
+    # answer a graceful request.
     $rootPattern = [regex]::Escape($Root)
     Get-CimInstance Win32_Process | Where-Object {
         $_.Name -like 'python*' -and
@@ -94,7 +94,9 @@ function Get-NegiManagedProcesses {
         (
             $_.CommandLine -match 'negi_bootstrap\.py"?\s+(web|start)' -or
             $_.CommandLine -match '-m\s+g3ku\s+web' -or
-            $_.CommandLine -match '-m\s+g3ku\s+worker'
+            $_.CommandLine -match '-m\s+g3ku\s+worker' -or
+            $_.CommandLine -match '-m\s+g3ku\s+window' -or
+            $_.CommandLine -match '-m\s+g3ku\s+mcp'
         )
     }
 }
@@ -117,6 +119,30 @@ function Stop-NegiRuntime {
         $remaining = @(Get-NegiManagedProcesses -Root $Root)
         if (-not $remaining) { return @() }
         Start-Sleep -Milliseconds 500
+    }
+    # The graceful lane only reaches the web server. Everything still listed here was
+    # picked by this install root in its own command line, so ending it is not a guess,
+    # and it is the same move negi_bootstrap.py's reaper makes before a start: a locked
+    # .venv is what turns "uninstalled" into "some files are still on disk".
+    $pids = ($remaining | ForEach-Object { $_.ProcessId }) -join ', '
+    Write-Step "graceful exit timed out; ending this install's processes (PID: $pids)"
+    foreach ($proc in $remaining) {
+        # taskkill writes its result to stderr in the machine's ANSI code page, and
+        # `2>&1` under ErrorActionPreference=Stop turns that text into a terminating
+        # error - which would abort the uninstall over a process that is already gone.
+        # The exit code is the fact: 0 ended it, 128 means somebody else already did.
+        $saved = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        & taskkill.exe /T /F /PID $proc.ProcessId 2>$null | Out-Null
+        $killCode = $LASTEXITCODE
+        $ErrorActionPreference = $saved
+        Write-Step ("  taskkill PID {0}: exit {1}" -f $proc.ProcessId, $killCode)
+    }
+    $deadline = (Get-Date).AddSeconds(5)
+    while ((Get-Date) -lt $deadline) {
+        $remaining = @(Get-NegiManagedProcesses -Root $Root)
+        if (-not $remaining) { return @() }
+        Start-Sleep -Milliseconds 250
     }
     return $remaining
 }
@@ -168,150 +194,114 @@ function Remove-ProgramKeepingData {
     # "Keep data" has to survive its own recursive delete: the data root lives
     # inside the program directory on a default install, so only the code goes.
     Get-ChildItem -LiteralPath $Path -Force | ForEach-Object {
-        if ($KeepNames -contains $_.Name) { return }
+        $item = $_
+        if ($KeepNames -contains $item.Name) { return }
         try {
-            Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction Stop
+            Remove-Item -LiteralPath $item.FullName -Recurse -Force -ErrorAction Stop
+            Write-Step "removed (program entry): $($item.FullName)"
         } catch {
-            Write-Step "could not remove $($_.FullName) -- $($_.Exception.Message)"
+            # In a catch block $_ is the error record, and Set-StrictMode makes reading
+            # .FullName off it a terminating error: one locked file would abort the whole
+            # deletion mid-tree. Name the captured item and report the failure instead.
+            Write-Step "could not remove $($item.FullName) -- $($_.Exception.Message)"
         }
     }
 }
 
-function Ask-KeepOrPurge {
-    param([string]$DataPath, [string]$DataSize, [string]$ProgramSize)
-    Add-Type -AssemblyName System.Windows.Forms
-    Add-Type -AssemblyName System.Drawing
-    # Click handlers run in the script scope, so the answer is carried on a
-    # script-scope name; a function-local would stay 'cancel' whatever was clicked.
-    $script:NegiUninstallChoice = 'cancel'
-    $form = New-Object System.Windows.Forms.Form
-    $form.Text = '卸载 Negi'
-    $form.FormBorderStyle = 'FixedDialog'
-    $form.MaximizeBox = $false
-    $form.MinimizeBox = $false
-    $form.StartPosition = 'CenterScreen'
-    $form.ClientSize = New-Object System.Drawing.Size(520, 210)
-    $label = New-Object System.Windows.Forms.Label
-    $label.Location = New-Object System.Drawing.Point(18, 16)
-    $label.Size = New-Object System.Drawing.Size(484, 96)
-    $label.Text = "Negi 将从这台电脑卸载。`r`n`r`n程序本体：$ProgramSize`r`n会话、任务与配置数据：$DataSize`r`n$DataPath`r`n`r`n保留数据：只删程序，下次安装直接认领这些数据。`r`n全部删除：连同上面的目录一起删掉，无法恢复。"
-    $form.Controls.Add($label)
-    $keep = New-Object System.Windows.Forms.Button
-    $keep.Text = '保留数据并卸载'
-    $keep.Location = New-Object System.Drawing.Point(18, 150)
-    $keep.Size = New-Object System.Drawing.Size(150, 34)
-    $keep.Add_Click({ $script:NegiUninstallChoice = 'keep'; $this.Parent.Close() })
-    $purge = New-Object System.Windows.Forms.Button
-    $purge.Text = '全部删除'
-    $purge.Location = New-Object System.Drawing.Point(186, 150)
-    $purge.Size = New-Object System.Drawing.Size(150, 34)
-    $purge.Add_Click({ $script:NegiUninstallChoice = 'purge'; $this.Parent.Close() })
-    $cancel = New-Object System.Windows.Forms.Button
-    $cancel.Text = '取消'
-    $cancel.Location = New-Object System.Drawing.Point(354, 150)
-    $cancel.Size = New-Object System.Drawing.Size(148, 34)
-    $cancel.Add_Click({ $script:NegiUninstallChoice = 'cancel'; $this.Parent.Close() })
-    $form.Controls.Add($keep)
-    $form.Controls.Add($purge)
-    $form.Controls.Add($cancel)
-    [void]$form.ShowDialog()
-    $form.Dispose()
-    return $script:NegiUninstallChoice
-}
-
 $ProgramMarkers = @('negi_bootstrap.py', '.g3ku\config.json')
 
-$pointer = Read-Pointer
-$root = [string](Get-PointerValue -Pointer $pointer -Name 'root' -Default $ProjectRoot)
-$binDir = [string](Get-PointerValue -Pointer $pointer -Name 'bin_dir' -Default (Join-Path $env:USERPROFILE '.local\bin'))
-$pathEntryAdded = [bool](Get-PointerValue -Pointer $pointer -Name 'path_entry_added' -Default $false)
-
-Write-Step "program directory: $root"
-
-$dataDir = Join-Path $root '.g3ku'
-$dataEnv = "$env:G3KU_DATA_DIR".Trim()
-if ($dataEnv -and (Test-Path -LiteralPath $dataEnv)) { $dataDir = $dataEnv }
-elseif (Test-Path -LiteralPath (Join-Path $root '.g3ku\data-root.json')) {
-    try {
-        $pointed = (Get-Content -LiteralPath (Join-Path $root '.g3ku\data-root.json') -Raw | ConvertFrom-Json).data_dir
-        if ($pointed -and (Test-Path -LiteralPath $pointed)) { $dataDir = [string]$pointed }
-    } catch { }
-}
-
-$port = Get-WebPort -Root $root
-$leftover = Stop-NegiRuntime -Root $root -Port $port
-if ($leftover) {
-    $pids = ($leftover | ForEach-Object { $_.ProcessId }) -join ', '
-    Write-Step "Negi processes are still running (PID: $pids). Nothing was deleted."
-    Write-Step 'close them from the web UI or end those processes, then run this again.'
-    exit 1
-}
-
-$programBytes = Get-TreeSizeBytes -Path $root
-$dataBytes = 0
-if (Test-Path -LiteralPath $dataDir) { $dataBytes = Get-TreeSizeBytes -Path $dataDir }
-
-$decision = 'cancel'
 if ($KeepData -and $PurgeData) {
     Write-Step '-KeepData and -PurgeData are mutually exclusive'
     exit 2
 }
-if ($KeepData) { $decision = 'keep' }
-elseif ($PurgeData) { $decision = 'purge' }
-elseif ($Yes) { $decision = 'keep' }
-else {
-    $decision = Ask-KeepOrPurge -DataPath $dataDir -DataSize (Format-Size $dataBytes) -ProgramSize (Format-Size $programBytes)
-}
-if ($decision -eq 'cancel') {
-    Write-Step 'cancelled; nothing was deleted'
+
+# The caller decides; this script has no window to ask with. The default is keep, so
+# the only branch that destroys data is the one that says so explicitly. -Yes stays
+# accepted because uninstall.sh's --yes means the same thing and the README documents
+# one flag list for both lanes.
+$decision = 'keep'
+if ($PurgeData) { $decision = 'purge' }
+
+try {
+    $pointer = Read-Pointer
+    $root = [string](Get-PointerValue -Pointer $pointer -Name 'root' -Default $ProjectRoot)
+    $binDir = [string](Get-PointerValue -Pointer $pointer -Name 'bin_dir' -Default (Join-Path $env:USERPROFILE '.local\bin'))
+    $pathEntryAdded = [bool](Get-PointerValue -Pointer $pointer -Name 'path_entry_added' -Default $false)
+
+    Write-Step "program directory: $root"
+    Write-Step "data decision: $decision"
+
+    $dataDir = Join-Path $root '.g3ku'
+    $dataEnv = "$env:G3KU_DATA_DIR".Trim()
+    if ($dataEnv -and (Test-Path -LiteralPath $dataEnv)) { $dataDir = $dataEnv }
+    elseif (Test-Path -LiteralPath (Join-Path $root '.g3ku\data-root.json')) {
+        try {
+            $pointed = (Get-Content -LiteralPath (Join-Path $root '.g3ku\data-root.json') -Raw | ConvertFrom-Json).data_dir
+            if ($pointed -and (Test-Path -LiteralPath $pointed)) { $dataDir = [string]$pointed }
+        } catch { }
+    }
+
+    $port = Get-WebPort -Root $root
+    $leftover = Stop-NegiRuntime -Root $root -Port $port
+    if ($leftover) {
+        $pids = ($leftover | ForEach-Object { $_.ProcessId }) -join ', '
+        Write-Step "these Negi processes refused to end, even forced (PID: $pids). Nothing was deleted."
+        Write-Step 'end them yourself and run this again.'
+        exit 1
+    }
+
+    # Entry surface first: these live outside the program directory.
+    Remove-Tree -Path (Join-Path $binDir 'negi.cmd') -For 'command stub'
+    Remove-Tree -Path (Join-Path $binDir 'negi-root.cmd') -For 'install root pointer'
+    foreach ($folder in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))) {
+        if ($folder) { Remove-Tree -Path (Join-Path $folder "$AppDisplayName.lnk") -For 'shortcut' }
+    }
+    Remove-Tree -Path $StateDir -For 'icon and pointer state'
+
+    if ($pathEntryAdded) {
+        $current = [Environment]::GetEnvironmentVariable('Path', 'User')
+        $parts = @()
+        if ($current) { $parts = @($current -split ';' | Where-Object { $_ }) }
+        $wanted = $binDir.TrimEnd('\')
+        $kept = @($parts | Where-Object { $_.TrimEnd('\') -ine $wanted })
+        if ($kept.Count -ne $parts.Count) {
+            [Environment]::SetEnvironmentVariable('Path', ($kept -join ';'), 'User')
+            Write-Step "removed $binDir from the user PATH (this install added it)"
+        }
+    }
+
+    if (Test-Path $UninstallKey) {
+        Remove-Item -Path $UninstallKey -Force -ErrorAction SilentlyContinue
+        Write-Step 'removed the installed-apps entry'
+    }
+
+    if ($decision -eq 'purge') {
+        $dataFull = Assert-DeletableDataRoot -Path $dataDir
+        $rootFull = Assert-DeletablePath -Path $root -Markers $ProgramMarkers -For 'program directory'
+        if (-not $dataFull.StartsWith($rootFull, [StringComparison]::OrdinalIgnoreCase)) {
+            Remove-Tree -Path $dataFull -For 'data root'
+        }
+    }
+
+    Assert-DeletablePath -Path $root -Markers $ProgramMarkers -For 'program directory' | Out-Null
+    if ($decision -eq 'purge') {
+        Remove-Tree -Path $root -For 'program directory'
+    } else {
+        Remove-ProgramKeepingData -Path $root -KeepNames @('.g3ku')
+    }
+
+    if ($decision -eq 'keep') {
+        Write-Step "kept the data root: $dataDir (the next install into $root adopts it)"
+    } else {
+        Write-Step 'program and data removed'
+    }
+    Write-Step 'uv and the Python it manages were left alone (shared toolchain)'
+    Write-Step 'done'
     exit 0
+} catch {
+    Write-Step ("FAILED: {0}" -f $_.Exception.Message)
+    Write-Step 'the uninstall stopped here; whatever is listed above was already removed'
+    exit 1
+} finally {
+    Write-Step "log: $LogFile"
 }
-
-# Entry surface first: these live outside the program directory.
-Remove-Tree -Path (Join-Path $binDir 'negi.cmd') -For 'command stub'
-Remove-Tree -Path (Join-Path $binDir 'negi-root.cmd') -For 'install root pointer'
-foreach ($folder in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))) {
-    if ($folder) { Remove-Tree -Path (Join-Path $folder "$AppDisplayName.lnk") -For 'shortcut' }
-}
-Remove-Tree -Path $StateDir -For 'icon and pointer state'
-
-if ($pathEntryAdded) {
-    $current = [Environment]::GetEnvironmentVariable('Path', 'User')
-    $parts = @()
-    if ($current) { $parts = @($current -split ';' | Where-Object { $_ }) }
-    $wanted = $binDir.TrimEnd('\')
-    $kept = @($parts | Where-Object { $_.TrimEnd('\') -ine $wanted })
-    if ($kept.Count -ne $parts.Count) {
-        [Environment]::SetEnvironmentVariable('Path', ($kept -join ';'), 'User')
-        Write-Step "removed $binDir from the user PATH (this install added it)"
-    }
-}
-
-if (Test-Path $UninstallKey) {
-    Remove-Item -Path $UninstallKey -Force -ErrorAction SilentlyContinue
-    Write-Step 'removed the installed-apps entry'
-}
-
-if ($decision -eq 'purge') {
-    $dataFull = Assert-DeletableDataRoot -Path $dataDir
-    $rootFull = Assert-DeletablePath -Path $root -Markers $ProgramMarkers -For 'program directory'
-    if (-not $dataFull.StartsWith($rootFull, [StringComparison]::OrdinalIgnoreCase)) {
-        Remove-Tree -Path $dataFull -For 'data root'
-    }
-}
-
-Assert-DeletablePath -Path $root -Markers $ProgramMarkers -For 'program directory' | Out-Null
-if ($decision -eq 'purge') {
-    Remove-Tree -Path $root -For 'program directory'
-} else {
-    Remove-ProgramKeepingData -Path $root -KeepNames @('.g3ku')
-}
-
-if ($decision -eq 'keep') {
-    Write-Step "kept the data root: $dataDir (the next install into $root adopts it)"
-} else {
-    Write-Step 'program and data removed'
-}
-Write-Step 'uv and the Python it manages were left alone (shared toolchain)'
-Write-Step 'done'
-exit 0

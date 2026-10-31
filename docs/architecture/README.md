@@ -236,6 +236,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 主题切换不生效或刷新后丢失、亮色主题出现大面积灰底、亮色主题下解锁/初始化窗口仍是暗卡片、侧栏折叠后审计角标消失、页面卡片列数在某宽度错乱、某颗勾选框仍画成系统默认方框、样式写进了不加载的样式文件→ `web-and-admin.md`「Frontend Theme And Layout Contract」
 - 新设备一行指令装完发现 skill/tools 比开发机少、重跑安装指令为什么没更新代码、`negi status` 的 `Release:` 行为什么不出现、仓库改名之后已装设备为什么照常更新、`install -Upgrade` 为什么动的是另一个目录 → `operations-and-maintenance.md`「新设备首次安装与升级」
 - 装了但终端里 `negi` 不出现、图标点了没反应、系统「已安装的应用」里没有 Negi、卸载后重装说目录非空、或卸载只该删程序却连数据一起没了 → `operations-and-maintenance.md`「新设备首次安装与升级」+「首选一键启动脚本」
+- 应用管理里点卸载后进度条一直不动、或卸完了程序还在 → `operations-and-maintenance.md`「卸载与安装面回收」；逐项落点读 `%TEMP%` 里的 `negi-uninstall-<UTC>.log` 与 `Negi Uninstallation Log`
 - 设置按钮红点不亮或误亮、没查过/查失败也被点亮成"有新版"、「重启并更新」点了服务没回来 → `web-and-admin.md`「Update Notification And Restart-And-Upgrade Contract」+ `operations-and-maintenance.md`「自动检查新版本与「重启并更新」」
 - 升级已经成功红点仍亮到下一次检查、或没人改过目录却被报"有本地改动"拒绝换码 → `web-and-admin.md`「Update Notification And Restart-And-Upgrade Contract」+「Frontend Vendor Asset Update Contract」
 - 点输入框麦克风提示未就绪／未启用、新设备首点迟迟不出录音、录音结果仍是繁体、或局域网 http 打开时浏览器拒绝麦克风 → `speech-to-text.md`「分发与就绪」「已知边界」

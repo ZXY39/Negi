@@ -145,12 +145,21 @@ def test_installer_is_pure_ascii() -> None:
     assert offenders == [], offenders
 
 
-def test_uninstaller_keeps_its_bom_for_cjk_dialog_text() -> None:
-    # uninstall.ps1 runs through `-File`, where PowerShell 5.1 without a BOM
-    # decodes the script as ANSI and the Chinese dialog strings break parsing.
-    # It is never piped through iex, so the BOM that kills install.ps1 is what
-    # keeps this one readable.
-    assert (REPO_ROOT / "uninstall.ps1").read_bytes().startswith(BOM)
+def test_uninstaller_stays_readable_through_the_file_channel() -> None:
+    # uninstall.ps1 is reached only by path (`-File`, from the uninstall wizard or from
+    # the installed-apps row), never through `iwr | iex`. PowerShell 5.1 decodes a
+    # non-BOM script in the machine ANSI code page, which is fatal as soon as the file
+    # carries non-ASCII text. The file is ASCII today and keeps its BOM as the safety
+    # net; the check below is what fails loudly if either half drifts.
+    raw = (REPO_ROOT / "uninstall.ps1").read_bytes()
+    assert raw.startswith(BOM)
+    body = raw[3:]
+    offenders = [
+        (number, line.decode("utf-8", "replace")[:70])
+        for number, line in enumerate(body.split(b"\n"), start=1)
+        if any(byte > 127 for byte in line)
+    ]
+    assert offenders == [], offenders
 
 
 def test_every_shipped_powershell_script_is_ascii_or_bom_marked() -> None:
