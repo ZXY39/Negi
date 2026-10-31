@@ -84,6 +84,8 @@ curl -LsSf https://github.com/ZXY39/Negi/releases/latest/download/install.sh | b
 
 用安装包装的时候，「取代码」和「装 uv」不经过网络：两者都在 exe 里。仍要联网的是 Python 解释器（从 python-build-standalone 下载）和 PyPI 依赖，这两步直连失败会自动换镜像重试一次（清华 PyPI、SJTU 的 python-build-standalone 镜像）。用脚本安装时想一开始就走镜像，把脚本下载下来加 `-Mirror` / `--mirror`（一行命令不能传参）；只想直连用 `-NoMirror` / `--no-mirror`；自己设了 `UV_DEFAULT_INDEX` / `UV_PYTHON_INSTALL_MIRROR` 就按你的来，脚本不覆盖。
 
+连 PyPI 也去不了的设备（内网、完全离线）用**全离线套件**：release 页里的 `Negi-<版本>-offline-<平台>.zip`，按本机挑 `win-x64` / `linux-x64` / `macos-arm64`。它带齐了源码、这台机器要的全部依赖 wheel、Python 解释器和 uv，装完不访问任何索引：`install.ps1 -Kit <文件>` 或 `install.sh --kit <文件>`。装之前套件先跟自己对本机对账——平台、版本、每颗 wheel 的 sha256——对不上就拒绝安装，不会装出一半。这台设备之后靠换一份新套件更新，`git fetch` 那条道对它不适用。
+
 一行命令那条通道没有内置载荷：脚本本身和代码都还从 GitHub 取。GitHub 连不上时优先用安装包；只取脚本这一步想走镜像，仓库地址和参数都不变：
 
 ```powershell
@@ -233,6 +235,7 @@ Windows 在「设置 → 应用 → 已安装的应用」里找到 Negi 点卸�
 | `-NoShortcut` / `--no-shortcut` | 不创建桌面与开始菜单图标 |
 | `-Mirror` / `--mirror` | Python 与依赖直接从内置镜像下载 |
 | `-NoMirror` / `--no-mirror` | 只走直连，失败不自动换镜像 |
+| `-Kit PATH` / `--kit PATH` | 从离线套件安装，全程不访问包索引 |
 
 ### 启动脚本参数
 
