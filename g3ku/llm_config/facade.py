@@ -141,16 +141,38 @@ class LLMConfigFacade:
         draft = ProviderConfigDraft.model_validate(payload)
         return self.config_service.validate_draft(draft).model_dump(mode="json")
 
+    def _draft_request_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """带上 `config_id` 的草稿可以把掩码换成这份记录存着的 key。
+
+        编辑面的默认读面只回 `MASKED_SECRET_VALUE`，那个值不是真钥匙。探测、取模型
+        目录与并发探测请求不走「查看」入口，所以由服务端在这里回填存储密钥；明文
+        key（新建、已解锁或操作员改写的值）原样使用。记录不存在或读不到时退回原草稿，
+        让校验或上游把失败说清楚，而不是悄悄换一把空钥匙。
+        """
+        request = {key: value for key, value in payload.items() if key != "config_id"}
+        if str(request.get("api_key") or "") != MASKED_SECRET_VALUE:
+            return request
+        config_id = str(payload.get("config_id") or "").strip()
+        if not config_id:
+            return request
+        try:
+            stored = str(self._hydrate_record_secrets(self.repository.get(config_id)).auth.get("api_key", "") or "")
+        except Exception:
+            return request
+        if stored:
+            request["api_key"] = stored
+        return request
+
     def probe_draft(self, payload: dict[str, Any]) -> dict[str, Any]:
-        draft = ProviderConfigDraft.model_validate(payload)
+        draft = ProviderConfigDraft.model_validate(self._draft_request_payload(payload))
         return self.config_service.probe_draft(draft).model_dump(mode="json")
 
     async def probe_max_concurrency_draft(self, payload: dict[str, Any]) -> dict[str, Any]:
-        draft = ProviderConfigDraft.model_validate(payload)
+        draft = ProviderConfigDraft.model_validate(self._draft_request_payload(payload))
         return (await self.config_service.probe_max_concurrency_draft(draft)).model_dump(mode="json")
 
     async def list_draft_models(self, payload: dict[str, Any]) -> dict[str, Any]:
-        draft = ProviderConfigDraft.model_validate(payload)
+        draft = ProviderConfigDraft.model_validate(self._draft_request_payload(payload))
         return (await self.config_service.list_draft_models(draft)).model_dump(mode="json")
 
     def list_config_records(self) -> list[dict[str, Any]]:

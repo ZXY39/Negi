@@ -8,9 +8,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -189,3 +191,67 @@ def test_write_responses_never_carry_the_plaintext_key(tmp_path: Path) -> None:
 
     plain = facade.get_config_record(created["config_id"], include_secrets=True)
     assert plain["auth"]["api_key"] == "sk-created-secret"
+
+
+def _masked_draft_payload(config_id: str, *, api_key: str = MASKED_SECRET_VALUE) -> dict[str, object]:
+    return {
+        "config_id": config_id,
+        "provider_id": "openai",
+        "capability": "chat",
+        "auth_mode": "api_key",
+        "api_key": api_key,
+        "base_url": "https://example.invalid/v1",
+        "default_model": "gpt-test",
+        "parameters": {"context_window_tokens": 200000},
+        "extra_headers": {},
+        "extra_options": {},
+    }
+
+
+def _catalog_transport(seen: list[str | None]) -> httpx.MockTransport:
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("authorization"))
+        return httpx.Response(200, json={"data": [{"id": "model-z"}]})
+
+    return httpx.MockTransport(handler)
+
+
+def test_masked_draft_with_config_id_authenticates_with_the_stored_key(reveal_env) -> None:
+    _client, facade = reveal_env
+    seen: list[str | None] = []
+    facade.config_service.transport = _catalog_transport(seen)
+
+    result = asyncio.run(facade.list_draft_models(_masked_draft_payload("cfg-reveal")))
+
+    assert result["success"] is True
+    assert result["models"] == ["model-z"]
+    assert seen == ["Bearer sk-live-1"]
+
+
+def test_a_draft_plaintext_key_wins_over_the_stored_key(reveal_env) -> None:
+    _client, facade = reveal_env
+    seen: list[str | None] = []
+    facade.config_service.transport = _catalog_transport(seen)
+
+    result = asyncio.run(
+        facade.list_draft_models(_masked_draft_payload("cfg-reveal", api_key="sk-operator-typed"))
+    )
+
+    assert result["success"] is True
+    assert seen == ["Bearer sk-operator-typed"]
+
+
+def test_an_unknown_config_id_leaves_the_mask_untouched(reveal_env) -> None:
+    _client, facade = reveal_env
+    seen: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("authorization"))
+        return httpx.Response(401, json={"error": "unauthorized"})
+
+    facade.config_service.transport = httpx.MockTransport(handler)
+
+    result = asyncio.run(facade.list_draft_models(_masked_draft_payload("cfg-missing")))
+
+    assert result["success"] is False
+    assert seen == ["Bearer ********"]

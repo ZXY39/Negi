@@ -397,6 +397,15 @@
     return target?.probe?.message || fallback;
   }
 
+  // 详情草稿里的 Apikey 是服务端掩码：带上 config_id，让探测/取目录/并发探测
+  // 在服务端用这份记录存着的 key 认证。明文仍然只从「查看」入口出屏。
+  function draftWithConfigId(draft) {
+    const editor = llmState().editor;
+    const configId = trim(editor?.configId || "");
+    if (!editor || editor.mode !== "detail" || !configId) return draft;
+    return { ...draft, config_id: configId };
+  }
+
   async function probeDraft(draft) {
     const state = llmState();
     state.editor.validation = await ApiClient.validateLlmDraft(draft);
@@ -405,7 +414,7 @@
       renderAll();
       return false;
     }
-    state.editor.probe = await ApiClient.probeLlmDraft(draft);
+    state.editor.probe = await ApiClient.probeLlmDraft(draftWithConfigId(draft));
     renderAll();
     return !!state.editor.probe?.success;
   }
@@ -1066,12 +1075,6 @@
     void requestEditorApiKeyReveal().catch((error) => {
       showToast({ title: "查看失败", text: error?.message || "查看 Apikey 失败", kind: "error" });
     });
-  }
-
-  async function ensureEditorApiKeyRevealed() {
-    const editor = llmState().editor;
-    if (!editor || editor.mode !== "detail" || !editor.apiKeyMasked) return true;
-    return await requestEditorApiKeyReveal();
   }
 
   function hideEditorApiKey() {
@@ -1758,8 +1761,6 @@
 
   async function handleTest() {
     const state = llmState();
-    // 掩码值发不出可用请求：测试前先走一次查看流程（窗口内免密，否则弹口令）。
-    if (!(await ensureEditorApiKeyRevealed())) return;
     reconcileBindingContextWindowTokens();
     const jsonText = document.getElementById("llm-json-editor")?.value || state.editor.jsonText;
     const providerId = trim(document.getElementById("llm-provider-select")?.value || state.editor.providerId);
@@ -1802,7 +1803,6 @@
 
   async function handleFetchModelList() {
     const state = llmState();
-    if (!(await ensureEditorApiKeyRevealed())) return;
     syncBindingInputs();
     const editor = state.editor;
     const providerId = trim(document.getElementById("llm-provider-select")?.value || editor.providerId);
@@ -1822,7 +1822,7 @@
     editor.modelList = { loading: true, error: "", items: [], filter: "" };
     renderModelListPanel();
     try {
-      const result = await ApiClient.listLlmDraftModels(draft);
+      const result = await ApiClient.listLlmDraftModels(draftWithConfigId(draft));
       if (result?.success) {
         const items = Array.isArray(result.models) ? result.models.map((item) => trim(item)).filter(Boolean) : [];
         editor.modelList = { loading: false, error: "", items, filter: "" };
@@ -1874,13 +1874,16 @@
       confirmKind: "danger",
     });
     if (!confirmed) return;
-    if (!(await ensureEditorApiKeyRevealed())) return;
     const jsonText = document.getElementById("llm-json-editor")?.value || state.editor.jsonText;
     const providerId = trim(document.getElementById("llm-provider-select")?.value || state.editor.providerId);
     state.editor.jsonText = jsonText;
     state.editor.providerId = providerId;
     const draft = parseDraftJson(jsonText, providerId);
-    validateSingleApiKeyMaxConcurrencyInput(String(state.editor.singleApiKeyMaxConcurrency ?? ""), draft.api_key || "");
+    validateSingleApiKeyMaxConcurrencyInput(
+      String(state.editor.singleApiKeyMaxConcurrency ?? ""),
+      draft.api_key || "",
+      effectiveApiKeyCount(draft.api_key),
+    );
     showToast({
       title: "测试最大并发数中",
       text: "先测试连接，再测试每个 API key 的最大并发数...",
@@ -1891,7 +1894,7 @@
     if (!ok) {
       throw new Error(draftFailureMessage(state.editor, "连接测试未通过，请先修正当前 JSON 配置。"));
     }
-    const result = await ApiClient.probeLlmDraftMaxConcurrency(draft);
+    const result = await ApiClient.probeLlmDraftMaxConcurrency(draftWithConfigId(draft));
     const suggestedLimits = Array.isArray(result?.suggested_limits) ? result.suggested_limits : [];
     state.editor.singleApiKeyMaxConcurrency = formatSingleApiKeyMaxConcurrencyValue(suggestedLimits);
     renderAll();
@@ -2461,7 +2464,9 @@
     normalizeBindingNameText,
     withThinkingOutputParameterDefaults,
     handleBindingJsonEditorInput,
+    handleTest,
     handleFetchModelList,
+    handleTestMaxConcurrency,
     applyModelListItem,
     llmEditorDirty,
     syncLlmEditorDirtyAffordance,

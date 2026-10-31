@@ -34,21 +34,29 @@ _LLM_HARNESS = r"""
         function makeEl() {
           return {
             innerHTML: "", value: "", hidden: false, open: false,
-            style: {}, dataset: {},
-            classList: { add() {}, remove() {}, contains() { return false; } },
+            style: {}, dataset: {}, children: [],
+            classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
             querySelector() { return null; },
             querySelectorAll() { return []; },
             setAttribute() {}, getAttribute() { return null; },
             addEventListener() {},
+            getBoundingClientRect() { return { top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 }; },
+            appendChild(child) {
+              this.children.push(child);
+              if (child.id) elementsById[child.id] = child;
+              return child;
+            },
           };
         }
         const elementsById = {};
         global.document = {
+          body: makeEl(),
           getElementById(id) {
             if (!elementsById[id]) elementsById[id] = makeEl();
             return elementsById[id];
           },
           querySelector() { return makeEl(); },
+          createElement() { return makeEl(); },
           addEventListener() {},
         };
         global.window = global;
@@ -379,6 +387,92 @@ def test_reveal_flow_cancel_leaves_the_mask_in_place() -> None:
     assert result["masked"] is True
     assert result["revealed"] is False
     assert result["toasts"] == 0
+
+
+def test_test_connection_and_model_list_never_ask_for_the_reveal_password() -> None:
+    result = _run_node_script(
+        _LLM_HARNESS
+        + r"""
+        bootLlm(detailEditor());
+        const calls = { reveals: [], validated: [], probes: [], lists: [], concurrency: [] };
+        global.ApiClient = {
+          revealLlmConfigApiKey: async (configId, password) => {
+            calls.reveals.push({ configId, password });
+            return { item: { auth: { api_key: "sk-plain" } }, expiresInSeconds: 300 };
+          },
+          validateLlmDraft: async (draft) => {
+            calls.validated.push(draft);
+            return { valid: true, errors: [] };
+          },
+          probeLlmDraft: async (draft) => {
+            calls.probes.push(draft);
+            return { success: true, message: "ok" };
+          },
+          listLlmDraftModels: async (draft) => {
+            calls.lists.push(draft);
+            return { success: true, models: ["gpt-4.1"] };
+          },
+          probeLlmDraftMaxConcurrency: async (draft) => {
+            calls.concurrency.push(draft);
+            return { success: true, suggested_limits: [2, 3], message: "ok" };
+          },
+        };
+        global.requestInlineConfirm = async () => ({ confirmed: true });
+
+        (async () => {
+          await window.__llmTestHooks.handleTest();
+          await window.__llmTestHooks.handleFetchModelList();
+          global.S.llmCenter.editor.singleApiKeyMaxConcurrency = "2,3";
+          await window.__llmTestHooks.handleTestMaxConcurrency();
+          console.log(JSON.stringify(calls));
+        })();
+        """
+    )
+
+    assert result["reveals"] == []
+    assert result["probes"][0]["config_id"] == "cfg-1"
+    assert result["probes"][0]["api_key"] == "********"
+    assert result["lists"][0]["config_id"] == "cfg-1"
+    assert result["lists"][0]["api_key"] == "********"
+    assert result["concurrency"][0]["config_id"] == "cfg-1"
+    assert result["concurrency"][0]["api_key"] == "********"
+
+
+def test_create_mode_draft_requests_carry_no_config_id() -> None:
+    result = _run_node_script(
+        _LLM_HARNESS
+        + r"""
+        bootLlm(detailEditor({ mode: "create", bindingKey: "", configId: "", apiKey: "sk-typed", apiKeyMasked: false }));
+        const typedDraft = {
+          provider_id: "openai", capability: "chat", auth_mode: "api_key",
+          api_key: "sk-typed", base_url: "https://api.test/v1", default_model: "gpt-4o",
+          parameters: { context_window_tokens: 200000 }, extra_headers: {}, extra_options: {},
+        };
+        global.S.llmCenter.editor.jsonText = JSON.stringify(typedDraft, null, 2);
+        document.getElementById("llm-json-editor").value = global.S.llmCenter.editor.jsonText;
+        const calls = { probes: [], lists: [] };
+        global.ApiClient = {
+          validateLlmDraft: async () => ({ valid: true, errors: [] }),
+          probeLlmDraft: async (draft) => {
+            calls.probes.push(draft);
+            return { success: true, message: "ok" };
+          },
+          listLlmDraftModels: async (draft) => {
+            calls.lists.push(draft);
+            return { success: true, models: [] };
+          },
+        };
+        (async () => {
+          await window.__llmTestHooks.handleTest();
+          await window.__llmTestHooks.handleFetchModelList();
+          console.log(JSON.stringify(calls));
+        })();
+        """
+    )
+
+    assert "config_id" not in result["probes"][0]
+    assert "config_id" not in result["lists"][0]
+    assert result["probes"][0]["api_key"] == "sk-typed"
 
 
 def test_api_client_reveal_posts_password_and_reads_expiry() -> None:
