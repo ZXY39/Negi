@@ -800,7 +800,7 @@ function _qqSessionIdentityLabel(preview) {
     return title ? `${kind}「${title}」` : kind;
 }
 
-// 编号只在会话内有意义：解析用的是当前打开的那条转录，不跨会话猜。
+// 编号只在会话内有意义：群聊按当前转录里的编号解析，私聊直接定位唯一的对方。
 function _registerQqBotOwner(index) {
     const target = _qqBotRowFor(index);
     if (!target) return;
@@ -808,6 +808,13 @@ function _registerQqBotOwner(index) {
     const sessionId = String(activeSessionId() || "").trim();
     if (!sessionId) {
         showToast({ title: "先打开 QQ 会话", text: "编号取自气泡，先打开要注册的群聊或私聊再点「注册Master」。", kind: "error" });
+        return;
+    }
+    const active = typeof activeSessionItem === "function" ? activeSessionItem() : null;
+    const chatType = String(active?.chat_type || "").toLowerCase();
+    if (chatType === "dm" || chatType === "guild_dm") {
+        // 私聊只有一个对方：服务端按当前转录自动定位，操作员只确认口令。
+        void _previewQqBotOwner({ sessionId, number: "", appId });
         return;
     }
     openConfirm({
@@ -831,13 +838,29 @@ function _registerQqBotOwner(index) {
     });
 }
 
+async function _previewQqBotOwner({ sessionId, number, appId }) {
+    try {
+        const preview = await ApiClient.previewQqBotOwnerRegistration({
+            session_id: sessionId,
+            number,
+            app_id: appId,
+        });
+        _confirmQqBotOwnerRegistration(preview, { sessionId, number, appId });
+    } catch (error) {
+        showToast({ title: "注册 Master 失败", text: error?.message || "Unknown error", kind: "error" });
+    }
+}
+
 function _confirmQqBotOwnerRegistration(preview, { sessionId, number, appId }) {
     const sender = preview?.sender || {};
     const masked = String(sender.id_masked || "").trim();
     const label = String(sender.number_label || number || "").trim();
+    const identity = preview?.auto_number === true
+        ? `对方 ${masked}`
+        : `编号 ${label} 对应 ${masked}`;
     openConfirm({
         title: "确认注册 Master",
-        text: `${_qqSessionIdentityLabel(preview)} · 编号 ${label} 对应 ${masked}。注册后按 Master 处理；群聊只改标签，私聊升为 owner 档。`,
+        text: `${_qqSessionIdentityLabel(preview)} · ${identity}。注册后按 Master 处理；群聊只改标签，私聊升为 owner 档。`,
         confirmLabel: "注册",
         confirmKind: "",
         textFull: true,

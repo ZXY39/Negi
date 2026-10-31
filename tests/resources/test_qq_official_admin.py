@@ -335,21 +335,27 @@ def test_register_master_rejects_reserved_missing_and_foreign_number(client: Tes
 
 
 def test_register_master_upgrades_current_dm_session(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    """旧 DM 会话的粘性信任不会因为加白名单自动变 owner；注册请求当场抬它。"""
+    """私聊只有一个对方：编号可留空自动定位；旧 DM 的粘性信任当场抬成 owner。"""
     _seed_qq_account(client)
     entry, registry = _install_qq_session(
         monkeypatch,
-        [_user_row(_GROUP_OWNER)],
+        [_user_row(_GROUP_OWNER), _user_row("negi-mcp")],
         chat_type="dm",
         external_key=f"qq:c2c:{_GROUP_OWNER}",
         session_key="ext:qq-official-111:dm",
         title="",
     )
+    preview = client.post(
+        "/api/qq-bot/register-owner/preview",
+        json={"session_id": "ext:qq-official-111:dm", "app_id": "111"},
+    )
+    assert preview.status_code == 200
+    assert preview.json()["auto_number"] is True
+    assert preview.json()["sender"]["id_masked"] == "EB6C8D…0DAE"
     saved = client.post(
         "/api/qq-bot/register-owner",
         json={
             "session_id": "ext:qq-official-111:dm",
-            "number": "0002",
             "app_id": "111",
             "unlock_password": "owner-password",
         },
@@ -357,6 +363,17 @@ def test_register_master_upgrades_current_dm_session(client: TestClient, monkeyp
     assert saved.status_code == 200
     assert saved.json()["session_trust_upgraded"] is True
     assert registry.calls == [entry.session_key]
+
+
+def test_register_master_requires_number_for_group(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_qq_account(client)
+    _install_qq_session(monkeypatch, [_user_row(_GROUP_OWNER)])
+    preview = client.post(
+        "/api/qq-bot/register-owner/preview",
+        json={"session_id": "ext:qq-official-111:abc", "app_id": "111"},
+    )
+    assert preview.status_code == 400
+    assert preview.json()["detail"]["code"] == "sender_number_required"
 
 
 def test_register_master_does_not_upgrade_group_session(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

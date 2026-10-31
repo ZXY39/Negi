@@ -41,7 +41,7 @@ function makeListEl() {
     };
 }
 
-function loadModule({ listEl, statusEl, previewReply = null, registerReply = null, activeSession = "ext:qq-official-111:abc" }) {
+function loadModule({ listEl, statusEl, previewReply = null, registerReply = null, activeSession = "ext:qq-official-111:abc", activeSessionItemValue = null }) {
     const created = [];
     const confirms = [];
     const calls = { preview: [], register: [] };
@@ -51,6 +51,7 @@ function loadModule({ listEl, statusEl, previewReply = null, registerReply = nul
         setTimeout,
         clearTimeout,
         activeSessionId: () => activeSession,
+        activeSessionItem: () => activeSessionItemValue,
         document: {
             getElementById(id) {
                 if (id === "qq-bot-accounts") return listEl;
@@ -259,6 +260,63 @@ test("QQ 账号面板：注册Master 只收编号+口令，预览后二次确认
         unlock_password: "owner-password",
     }]);
     assert.equal(toasts.at(-1).kind, "success");
+    assert.match(toasts.at(-1).text, /当前私聊会话已可写本地记忆/);
+});
+
+test("QQ 账号面板：私聊注册直接定位对方，不再要求编号", async () => {
+    const listEl = makeListEl();
+    const previewReply = {
+        ok: true,
+        auto_number: true,
+        session: { session_id: "ext:qq-official-111:dm", chat_type: "dm", title: "" },
+        sender: { number: 2, number_label: "0002", id_masked: "EB6C8D…0DAE" },
+    };
+    const registerReply = {
+        ok: true,
+        registered: true,
+        session_trust_upgraded: true,
+        enabled: true,
+        accounts: [row({ app_id: "111", has_secret: true, owner_openids: ["EB6C8D4341C1238A627FF73CBE540DAE"] })],
+    };
+    const { t, confirms, calls, toasts } = loadModule({
+        listEl,
+        statusEl: { textContent: "", className: "" },
+        previewReply,
+        registerReply,
+        activeSession: "ext:qq-official-111:dm",
+        activeSessionItemValue: { session_id: "ext:qq-official-111:dm", chat_type: "dm" },
+    });
+    t.QQ_BOT_STATE.loaded = true;
+    t.QQ_BOT_STATE.rows = [row({ app_id: "111", has_secret: true })];
+    const card = makeRowEl();
+    card.dataset.index = "0";
+    card.fields = {
+        ".qq-bot-appid": makeField("111"),
+        ".qq-bot-secret": makeField(""),
+        ".qq-bot-label": makeField(""),
+    };
+    listEl.children = [card];
+    t.renderQqBotAccounts();
+
+    t._registerQqBotOwner(0);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(confirms.length, 1);
+    assert.equal(confirms[0].input.type, "password");
+    assert.match(confirms[0].text, /对方 EB6C8D…0DAE/);
+    assert.doesNotMatch(confirms[0].text, /编号 0002/);
+    assert.deepEqual(JSON.parse(JSON.stringify(calls.preview)), [{
+        session_id: "ext:qq-official-111:dm",
+        number: "",
+        app_id: "111",
+    }]);
+
+    await confirms[0].onConfirm({ value: "owner-password" });
+    assert.deepEqual(JSON.parse(JSON.stringify(calls.register)), [{
+        session_id: "ext:qq-official-111:dm",
+        number: "",
+        app_id: "111",
+        unlock_password: "owner-password",
+    }]);
     assert.match(toasts.at(-1).text, /当前私聊会话已可写本地记忆/);
 });
 

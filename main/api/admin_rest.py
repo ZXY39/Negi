@@ -1260,14 +1260,19 @@ def _mask_qq_openid(value: Any) -> str:
     return f'{raw[:6]}…{raw[-4:]}' if len(raw) > 10 else raw
 
 
-def _qq_dm_peer_matches(external_key: Any, sender_id: Any) -> bool:
-    """DM 的 external_key 末尾就是对方 openid；只有它等于被注册者才允许上抬信任。"""
+def _qq_dm_peer_id(external_key: Any) -> str:
+    """DM 的 external_key 末尾就是对方 openid；不是 QQ 私聊形状时返回空串。"""
     parts = str(external_key or '').strip().split(':')
     peer = ''
     if len(parts) == 3 and parts[0] == 'qq' and parts[1] == 'c2c':
         peer = parts[2]
     elif len(parts) == 4 and parts[0] == 'qq' and parts[1] == 'guilddm':
         peer = parts[3]
+    return peer if _QQ_OWNER_OPENID_RE.fullmatch(peer) else ''
+
+
+def _qq_dm_peer_matches(external_key: Any, sender_id: Any) -> bool:
+    peer = _qq_dm_peer_id(external_key)
     return bool(peer) and peer.lower() == str(sender_id or '').strip().lower()
 
 
@@ -1338,14 +1343,13 @@ def _resolve_qq_sender_number(
     return ''
 
 
-def _qq_owner_registration_target(body: dict[str, Any]) -> tuple[Config, Any, str, int, str]:
+def _qq_owner_registration_target(body: dict[str, Any]) -> tuple[Config, Any, str, int, str, bool]:
     session_id = str(body.get('session_id') or body.get('sessionId') or '').strip()
     if not session_id:
         raise HTTPException(
             status_code=400,
             detail={'code': 'session_id_required', 'message': '缺少会话'},
         )
-    number = _parse_qq_sender_number(body.get('number'))
     entry, messages = _qq_owner_session_messages(session_id)
     cfg = load_config()
     app_id = _qq_app_id_for_bridge(getattr(entry, 'bridge_id', ''))
@@ -1363,16 +1367,51 @@ def _qq_owner_registration_target(body: dict[str, Any]) -> tuple[Config, Any, st
                 'message': f'当前打开的会话属于 QQ 号 {app_id}，不是 {requested_app_id}',
             },
         )
-    sender_id = _resolve_qq_sender_number(messages, number, master_ids=_qq_owner_master_ids())
-    if not sender_id:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                'code': 'sender_number_not_found',
-                'message': f'当前会话里没有编号 {number:04d} 的第三方发送者',
-            },
+    from g3ku.runtime.session_trust import is_multi_party_chat
+
+    multi_party = is_multi_party_chat(
+        chat_type=getattr(entry, 'chat_type', ''),
+        external_key=getattr(entry, 'external_key', ''),
+    )
+    raw_number = str(body.get('number') if body.get('number') is not None else '').strip()
+    auto_number = False
+    if raw_number:
+        number = _parse_qq_sender_number(raw_number)
+        sender_id = _resolve_qq_sender_number(
+            messages, number, master_ids=_qq_owner_master_ids()
         )
-    return cfg, entry, app_id, number, sender_id
+        if not sender_id:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    'code': 'sender_number_not_found',
+                    'message': f'当前会话里没有编号 {number:04d} 的第三方发送者',
+                },
+            )
+    elif multi_party:
+        raise HTTPException(
+            status_code=400,
+            detail={'code': 'sender_number_required', 'message': '群聊注册需要气泡上的发送者编号'},
+        )
+    else:
+        # 私聊的对方就在 external_key 里：直接定位，不让操作员再抄一遍编号。
+        # 同一会话里可能还有其它桥自报的发送者（如 MCP 网关），不能按"唯一编号"猜。
+        peer = _qq_dm_peer_id(getattr(entry, 'external_key', ''))
+        if not peer:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    'code': 'sender_number_required',
+                    'message': '无法从会话键定位私聊对方，请填气泡上的编号',
+                },
+            )
+        from g3ku.runtime.sender_stamp import sender_number_map
+
+        numbers = sender_number_map(messages, master_ids=_qq_owner_master_ids())
+        number = int(numbers.get(peer, 0))
+        sender_id = peer
+        auto_number = True
+    return cfg, entry, app_id, number, sender_id, auto_number
 
 
 def _disable_orphan_qq_bridge_tokens(cfg: Config, keep_bridge_ids: set[str]) -> bool:
@@ -1480,7 +1519,7 @@ async def update_qq_bot_settings(payload: dict | None = Body(default=None)):
 async def preview_qq_bot_owner_registration(payload: dict | None = Body(default=None)):
     """把「气泡上的编号」解析成发送者，供二次确认；不写配置、不要口令。"""
     body = payload if isinstance(payload, dict) else {}
-    _cfg, entry, app_id, number, sender_id = _qq_owner_registration_target(body)
+    _cfg, entry, app_id, number, sender_id, auto_number = _qq_owner_registration_target(body)
     from g3ku.runtime.session_trust import chat_type_from_external_key
 
     chat_type = str(getattr(entry, 'chat_type', '') or '') or chat_type_from_external_key(
@@ -1488,6 +1527,7 @@ async def preview_qq_bot_owner_registration(payload: dict | None = Body(default=
     )
     return {
         'ok': True,
+        'auto_number': auto_number,
         'session': {
             'session_id': str(getattr(entry, 'session_key', '') or ''),
             'bridge_id': str(getattr(entry, 'bridge_id', '') or ''),
@@ -1497,7 +1537,7 @@ async def preview_qq_bot_owner_registration(payload: dict | None = Body(default=
         },
         'sender': {
             'number': number,
-            'number_label': f'{number:04d}',
+            'number_label': f'{number:04d}' if number else '',
             'id_masked': _mask_qq_openid(sender_id),
         },
     }
@@ -1520,7 +1560,7 @@ async def register_qq_bot_owner(payload: dict | None = Body(default=None)):
             status_code=403,
             detail={'code': 'unlock_password_invalid', 'message': '口令不正确'},
         )
-    cfg, entry, app_id, number, sender_id = _qq_owner_registration_target(body)
+    cfg, entry, app_id, number, sender_id, auto_number = _qq_owner_registration_target(body)
     account = cfg.qq_bot.accounts[app_id]
     owners = list(getattr(account, 'owner_openids', None) or [])
     registered = sender_id.lower() not in {str(item).lower() for item in owners}
@@ -1559,7 +1599,7 @@ async def register_qq_bot_owner(payload: dict | None = Body(default=None)):
             detail={
                 'app_id': app_id,
                 'session_id': str(getattr(entry, 'session_key', '') or ''),
-                'number': f'{number:04d}',
+                'number': f'{number:04d}' if number else 'auto',
                 'sender_id': _mask_qq_openid(sender_id),
                 'registered': registered,
                 'session_trust_upgraded': session_trust_upgraded,
@@ -1570,10 +1610,11 @@ async def register_qq_bot_owner(payload: dict | None = Body(default=None)):
         'ok': True,
         'registered': registered,
         'session_trust_upgraded': session_trust_upgraded,
+        'auto_number': auto_number,
         'app_id': app_id,
         'sender': {
             'number': number,
-            'number_label': f'{number:04d}',
+            'number_label': f'{number:04d}' if number else '',
             'id_masked': _mask_qq_openid(sender_id),
         },
         **_qq_bot_payload(cfg),
