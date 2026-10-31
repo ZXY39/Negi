@@ -114,6 +114,8 @@ def impulse_receipt(
             f'Tool contract for "{tool_name}" loaded - the tool is now callable.\n'
             "This call's arguments passed validation and were staged.\n"
             "This call did not run the tool - call it again to execute it.\n"
+            "The next hop is the next model call after this tool result; do not stop "
+            "with a plain-text reply if you still intend to run it.\n"
             "Targets and other runtime references are resolved only when the call runs."
         )
     if is_last_of_batch and (outcome != IMPULSE_INVALID or batch_total > 1):

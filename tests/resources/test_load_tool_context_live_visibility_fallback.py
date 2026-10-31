@@ -92,7 +92,7 @@ async def test_gate_rejects_tool_missing_from_snapshot_and_live_registry():
 async def test_gate_falls_back_to_live_registry_for_mid_turn_registered_tool():
     """回合中途注册进 registry 的工具不在回合起点快照里；实时探针放行后 load 照常走
     服务端（服务端 v2 自己按治理实时可见再校验一次），投影不得把实时放行的名字按
-    stale 快照清成 not_in_this_turn_candidates。"""
+    stale 快照清成 not_in_this_hop_candidates。"""
 
     payload = dict(LOAD_PAYLOAD)
     service = _StubService(
@@ -105,9 +105,10 @@ async def test_gate_falls_back_to_live_registry_for_mid_turn_registered_tool():
 
     parsed = json.loads(result)
     assert parsed["ok"] is True
-    assert parsed["promotion"] == "promoted_next_turn"
+    assert parsed["promotion"] == "promoted_next_hop"
     assert parsed["hydration_targets"] == ["mid-turn-tool"]
-    assert parsed["will_be_hydrated_next_turn"] is True
+    assert parsed["will_be_hydrated_next_hop"] is True
+    assert "下一次模型调用" in parsed["promotion_help"]
     assert service.v2_calls and service.v2_calls[0]["tool_id"] == "mid-turn-tool"
 
 
@@ -123,7 +124,7 @@ async def test_snapshot_hit_skips_live_probe():
 
     parsed = json.loads(result)
     assert parsed["ok"] is True
-    assert parsed["promotion"] == "promoted_next_turn"
+    assert parsed["promotion"] == "promoted_next_hop"
     assert service.visible_calls == []
 
 
@@ -134,7 +135,7 @@ async def test_gate_serves_a_registered_toolskill_even_when_the_role_cannot_call
     实盘 task:d657c1f554e3 / node:6c826522f86f：11:52:35 加载 exec 被答成
     "常驻内置工具…没有可加载的 toolskill"，而 tools/exec/toolskills 是存在的，
     只是 inspection 角色不在它的 RBAC 可见集里。可读性与可调用性必须分开：
-    正文照常返回，callable_this_turn 如实为 false。
+    正文照常返回，callable_this_hop 如实为 false。
     """
 
     class _DocService(_StubService):

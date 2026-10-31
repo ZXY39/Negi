@@ -15,16 +15,19 @@ from main.governance.exec_tool_policy import (
 )
 
 # 模型读到的 ok:true 必须自带"这次加载到底会不会提升"。此前 payload 只有
-# callable_now（治理层"对该角色可调用"），本轮真不真的能调要另看曝光集，两者被混成
+# callable_now（治理层"对该角色可调用"），本次调用真不真的能调要另看曝光集，两者被混成
 # 一件事，模型于是反复拿到"说它可用、调它报错"的循环。
 PROMOTION_HELP = {
-    "promoted_next_turn": "契约说明已随本次加载进入上下文，下一跳可直接调用；本轮仍不可调用。",
-    "already_callable": "本轮已可直接调用，无需再加载本说明。",
-    "not_in_this_turn_candidates": (
-        "该名字不在本轮候选工具里，本次加载只返回说明、不会提升它；"
-        "请从合同里的本轮候选工具名单中选择，或直接使用本轮可调用名单中的工具。"
+    "promoted_next_hop": (
+        "契约说明已随本次加载进入上下文；工具结果返回后的下一次模型调用"
+        "即可直接调用，本次调用不执行工具。"
     ),
-    "not_promotable": "该工具不需要水合（常驻内置工具本轮直接可调用），请改用本轮可调用名单中的工具。",
+    "already_callable": "本次调用已可直接调用，无需再加载本说明。",
+    "not_in_this_hop_candidates": (
+        "该名字不在本次调用的候选工具里，本次加载只返回说明、不会提升它；"
+        "请从本次候选工具名单中选择，或直接使用本次可调用名单中的工具。"
+    ),
+    "not_promotable": "该工具不需要水合（常驻内置工具本次调用直接可调用），请使用本次可调用名单中的工具。",
 }
 
 
@@ -77,12 +80,12 @@ def apply_runtime_tool_context_projection(
     runtime: dict[str, Any] | None = None,
     live_visible_tool_names: list[str] | None = None,
 ) -> dict[str, Any]:
-    """把"本轮视角"字段（promotion / callable_this_turn / hydration_targets）投影进 load 结果。
+    """把"本次调用视角"字段（promotion / callable_this_hop / hydration_targets）投影进 load 结果。
 
     `live_visible_tool_names` 承载门槛层实时探针放行的名字：回合中途注册进 registry
     的工具永远不在回合起点算出的候选快照里，若只按 stale 快照判 candidate_hit，
     投影会把服务端按治理实时可见算出的 hydration_targets 清空，promotion 落成
-    not_in_this_turn_candidates，前门与节点两条提升路径都会丢掉这次 load。实时放行
+    not_in_this_hop_candidates，前门与节点两条提升路径都会丢掉这次 load。实时放行
     名字与候选命中同权，视为可提升。
     """
     projected = dict(payload or {}) if isinstance(payload, dict) else {}
@@ -97,22 +100,22 @@ def apply_runtime_tool_context_projection(
     # callable 视图只取 `callable_tool_names`：两条车道的这一跳 callable 已经是
     # 「常驻内置 ∪ 契约在场」的结果（见 runtime_service._select_model_visible_tool_schema_payload
     # 与 _frontdoor_callable_tool_names_for_state）。回退到 `tool_names` 会拿"已授权"当
-    # "可调用来"，而水合台账删除后这两个集合不再相同——回执就会对模型谎称"本轮已可直接调用"。
+    # "可调用来"，而水合台账删除后这两个集合不再相同——回执就会对模型谎称"本次调用已可直接调用"。
     callable_names = set(_normalized_runtime_name_list(runtime_payload.get("callable_tool_names")))
     normalized_targets = _normalized_runtime_name_list(projected.get("hydration_targets"))
     candidate_hit = any(
         name in candidate_names or name in live_visible_names for name in target_names
     )
     callable_hit = any(name in callable_names for name in target_names)
-    projected["callable_this_turn"] = bool(callable_hit)
+    projected["callable_this_hop"] = bool(callable_hit)
     if target_names:
         if candidate_hit and not callable_hit:
-            projected["will_be_hydrated_next_turn"] = bool(normalized_targets)
-            projected["promotion"] = "promoted_next_turn" if normalized_targets else "not_promotable"
+            projected["will_be_hydrated_next_hop"] = bool(normalized_targets)
+            projected["promotion"] = "promoted_next_hop" if normalized_targets else "not_promotable"
         else:
             normalized_targets = []
-            projected["will_be_hydrated_next_turn"] = False
-            projected["promotion"] = "already_callable" if callable_hit else "not_in_this_turn_candidates"
+            projected["will_be_hydrated_next_hop"] = False
+            projected["promotion"] = "already_callable" if callable_hit else "not_in_this_hop_candidates"
         help_text = PROMOTION_HELP.get(str(projected.get("promotion") or ""))
         if help_text:
             projected["promotion_help"] = help_text

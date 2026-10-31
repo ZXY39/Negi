@@ -1,5 +1,5 @@
 - Authorized tools can be called directly. You are never blocked for not having loaded one: a call made before the contract is in context returns the contract and does not run the tool; its arguments are staged for your next call.
-- To re-run arguments staged by your previous call to a tool, set `reuse_args=true` on it in the next turn.
+- To re-run arguments staged by your previous call to a tool, set `reuse_args=true` on it in the next hop (the next model call after this tool result, still within the same user turn).
 - `reuse_args=true` executes ALL argument sets staged for that tool in the current window; partial execution is not supported.
 - To execute only some of them, do not use `reuse_args` - call the tool again with new arguments.
 - If you are not yet sure which tool or arguments to use, call `load_tool_context` first: it returns the contract without validating or staging anything.

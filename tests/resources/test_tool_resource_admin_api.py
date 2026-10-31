@@ -4985,7 +4985,7 @@ async def test_load_tool_context_v2_returns_full_tool_body_by_default(tmp_path: 
         assert dict(payload['example_arguments']).get('query')
         assert '## Parameter Contract' in str(payload['parameter_contract_markdown'])
         assert payload['callable_now'] is True
-        assert payload['will_be_hydrated_next_turn'] is True
+        assert payload['will_be_hydrated_next_hop'] is True
         assert payload['hydration_targets'] == ['content_search']
     finally:
         await service.close()

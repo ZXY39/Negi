@@ -235,7 +235,7 @@ def test_fingerprint_follows_source_bytes_not_runtime_segments() -> None:
     with_policy["example_arguments"] = {"path": "/tmp/x"}
     with_policy["callable"] = False
     with_policy["available"] = False
-    with_policy["will_be_hydrated_next_turn"] = True
+    with_policy["will_be_hydrated_next_hop"] = True
     assert build_tool_context_fingerprint(with_policy) == build_tool_context_fingerprint(base)
 
     # 源正文变 ⇒ 必须换号（运营改一次 SKILL.md 就是一次新契约）。

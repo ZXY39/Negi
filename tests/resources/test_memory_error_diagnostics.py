@@ -86,7 +86,7 @@ async def test_react_loop_records_memory_probe_before_direct_load_repeat_check()
                 "available": True,
                 "repair_required": False,
                 "callable_now": True,
-                "will_be_hydrated_next_turn": False,
+                "will_be_hydrated_next_hop": False,
                 "hydration_targets": [],
                 "tool_context_fingerprint": "tcf:current",
             }
@@ -110,7 +110,7 @@ async def test_react_loop_records_memory_probe_before_direct_load_repeat_check()
         "available": True,
         "repair_required": False,
         "callable_now": True,
-        "will_be_hydrated_next_turn": False,
+        "will_be_hydrated_next_hop": False,
         "hydration_targets": [],
     }
     prior_payload["tool_context_fingerprint"] = build_tool_context_fingerprint(prior_payload)

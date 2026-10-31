@@ -138,7 +138,7 @@ def test_load_tool_context_returns_a_registered_toolskill_for_a_non_visible_tool
     )
     service._tool_context_contract_payload = lambda **kwargs: {
         'callable_now': False,
-        'will_be_hydrated_next_turn': False,
+        'will_be_hydrated_next_hop': False,
         'hydration_targets': [],
         'exec_runtime_policy': None,
     }

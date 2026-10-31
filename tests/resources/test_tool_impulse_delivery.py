@@ -105,6 +105,9 @@ def test_valid_arguments_are_staged_and_the_contract_is_delivered(tmp_path: Path
     assert f'Staged sets for "{TOOL_ID}": 1.' in content
     # 回执必须自己说"这一跳没执行"：只写契约已加载/入参通过校验会被读成执行成功。
     assert "did not run the tool - call it again to execute it" in content
+    # "下一跳"必须定义成工具结果后的下一次模型调用，而不是下一条用户消息。
+    assert "The next hop is the next model call after this tool result" in content
+    assert "plain-text reply" in content
     # "passed validation" 只覆盖参数形状：目标/引用要到真执行时才判，回执不能说成已校验。
     assert "resolved only when the call runs" in content
     assert "/abs/a" not in content

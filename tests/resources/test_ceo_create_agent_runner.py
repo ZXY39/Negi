@@ -1162,7 +1162,7 @@ async def test_create_agent_postprocess_does_not_make_contract_absent_tool_calla
                     "name": "load_tool_context",
                     "content": (
                         '{"ok": true, "tool_id": "filesystem_write", '
-                        '"callable_now": true, "will_be_hydrated_next_turn": true, '
+                        '"callable_now": true, "will_be_hydrated_next_hop": true, '
                         '"hydration_targets": ["filesystem_write"]}'
                     ),
                 },
@@ -1210,7 +1210,7 @@ async def test_create_agent_graph_execute_tools_makes_loaded_contract_callable()
                 "ok": True,
                 "tool_id": tool_id,
                 "callable_now": True,
-                "will_be_hydrated_next_turn": True,
+                "will_be_hydrated_next_hop": True,
                 # 真 loader 的 ok 载荷必带 fingerprint（`main/governance/tool_context.py`
                 # 的 build_tool_context_fingerprint），且交付时把契约**块**写进 `content`
                 # ——在场判据只认那颗块头，fingerprint 键本身不再算载体。

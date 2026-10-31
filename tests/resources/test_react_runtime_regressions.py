@@ -1611,22 +1611,27 @@ def test_load_tool_context_projection_reports_promotion_and_keeps_fingerprint_st
         runtime={'candidate_tool_names': [], 'callable_tool_names': ['exec']},
     )
 
-    assert promotable['promotion'] == 'promoted_next_turn'
-    assert promotable['will_be_hydrated_next_turn'] is True
-    assert promotable['callable_this_turn'] is False
+    assert promotable['promotion'] == 'promoted_next_hop'
+    assert promotable['will_be_hydrated_next_hop'] is True
+    assert promotable['callable_this_hop'] is False
     assert promotable['hydration_targets'] == ['content_open']
+    assert '下一次模型调用' in promotable['promotion_help']
+    assert '本次调用不执行工具' in promotable['promotion_help']
 
     assert already_callable['promotion'] == 'already_callable'
-    assert already_callable['will_be_hydrated_next_turn'] is False
-    assert already_callable['callable_this_turn'] is True
+    assert already_callable['will_be_hydrated_next_hop'] is False
+    assert already_callable['callable_this_hop'] is True
     assert already_callable['hydration_targets'] == []
     assert '无需再加载' in already_callable['promotion_help']
 
     # 第 4 态：加载被放行、提升被拒，就必须把"不会提升"讲明白，而不是留下一个沉默的 ok:true
-    assert hidden['promotion'] == 'not_in_this_turn_candidates'
+    assert hidden['promotion'] == 'not_in_this_hop_candidates'
     assert hidden['hydration_targets'] == []
-    assert hidden['callable_this_turn'] is False
+    assert hidden['callable_this_hop'] is False
     assert '不会提升' in hidden['promotion_help']
+    for item in (promotable, already_callable, hidden):
+        assert '本轮' not in item['promotion_help']
+        assert '下一跳' not in item['promotion_help']
 
     assert promotable['tool_context_fingerprint'] == already_callable['tool_context_fingerprint']
     assert promotable['tool_context_fingerprint'] == hidden['tool_context_fingerprint']
@@ -4115,7 +4120,7 @@ async def test_load_tool_context_direct_read_guard_blocks_duplicate_inline_tools
                 "available": True,
                 "repair_required": False,
                 "callable_now": True,
-                "will_be_hydrated_next_turn": False,
+                "will_be_hydrated_next_hop": False,
                 "hydration_targets": [],
                 "exec_runtime_policy": {
                     "mode": "governed",
@@ -4139,7 +4144,7 @@ async def test_load_tool_context_direct_read_guard_blocks_duplicate_inline_tools
         "available": True,
         "repair_required": False,
         "callable_now": True,
-        "will_be_hydrated_next_turn": False,
+        "will_be_hydrated_next_hop": False,
         "hydration_targets": [],
         "exec_runtime_policy": {
             "mode": "governed",
@@ -4200,7 +4205,7 @@ async def test_load_tool_context_direct_read_guard_allows_refresh_when_fingerpri
                 "available": True,
                 "repair_required": False,
                 "callable_now": True,
-                "will_be_hydrated_next_turn": False,
+                "will_be_hydrated_next_hop": False,
                 "hydration_targets": [],
                 "exec_runtime_policy": {
                     "mode": "full_access",
@@ -4226,7 +4231,7 @@ async def test_load_tool_context_direct_read_guard_allows_refresh_when_fingerpri
         "available": True,
         "repair_required": False,
         "callable_now": True,
-        "will_be_hydrated_next_turn": False,
+        "will_be_hydrated_next_hop": False,
         "hydration_targets": [],
         "exec_runtime_policy": {
             "mode": "governed",

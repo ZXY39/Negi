@@ -55,7 +55,7 @@
 ### 1.1 Skill / Tool 上下文加载规则
 
 - 如需使用工具，查看对应工具的 toolskill，或调用 `load_tool_context` / `load_skill_context` 读取完整上下文。
-- 部分未调用过的工具需要预热后才能调用，预热那一跳**不执行工具**：只把契约随结果交回，同一跳里的入参同时被暂存。要真正执行，必须在下一跳再调一次（原样重发入参，或带 `reuse_args=true` 复用暂存）。常驻内置工具始终可调用。
+- 部分未调用过的工具需要预热后才能调用，预热那一跳**不执行工具**：只把契约随结果交回，同一跳里的入参同时被暂存。要真正执行，必须在**紧接着的下一次模型调用**（工具结果返回后、仍在同一条用户消息内）再调一次（原样重发入参，或带 `reuse_args=true` 复用暂存）；如果你需要它执行，不要用纯文本回复结束这一轮。常驻内置工具始终可调用。
 - `candidate_tools`（以及 `undeclared_candidates`）列的是"已授权、契约还没进上下文"的名字：既可以直接调用拿契约，也可以按精确 `tool_id` 调 `load_tool_context(tool_id="<tool_id>")` 先读说明；`undeclared_candidates` 是治理刚放行、`tools[]` 还没在压缩那一跳重印的名字。运行时不要求你另行点名单。
 - 需要 skill 正文时，对当前轮提示中已经列出的候选 `skill_id` 调用 `load_skill_context(skill_id="...")`。
 {{> shared_tool_reuse_rules.md}}

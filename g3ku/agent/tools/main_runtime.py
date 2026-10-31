@@ -67,7 +67,7 @@ def _toolskill_available_for_documentation(service: Any, tool_id: str) -> bool:
     可加载性与可调用性是两件事：`exec` 是节点道的常驻内置，同时又是一份带
     `tools/exec/toolskills` 的资源。验收节点读它的契约来判断子节点命令是否合规，
     旧闸门把"不可调用"误答成"没有可加载的 toolskill"，模型只能凭猜测继续。
-    正文存在即可读；是否可调用由载荷里的 callable_this_turn / callable 如实给出。
+    正文存在即可读；是否可调用由载荷里的 callable_this_hop / callable 如实给出。
     """
     getter = getattr(service, "get_tool_toolskill", None)
     if not callable(getter):
@@ -314,7 +314,7 @@ class LoadToolContextTool(_MainRuntimeTool):
                 requested_tool_id=tool_name,
                 runtime=__g3ku_runtime,
                 # 门槛被实时探针放行的名字不在回合初候选快照里；不带这份名单进投影，
-                # 投影会按 stale 快照把 promotion 清成 not_in_this_turn_candidates，
+                # 投影会按 stale 快照把 promotion 清成 not_in_this_hop_candidates，
                 # 前门提升与节点提升都读不到 hydration_targets，load 就白做了。
                 live_visible_tool_names=[tool_name] if live_visible_via_fallback else None,
             )

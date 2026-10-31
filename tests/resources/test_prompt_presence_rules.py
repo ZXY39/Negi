@@ -92,6 +92,8 @@ def test_both_lanes_receive_the_rules_byte_for_byte() -> None:
     frontdoor = CeoPromptBuilder(loop=SimpleNamespace(workspace=None))._read_prompt("ceo_frontdoor.md")
     assert rules in frontdoor
     assert rules in load_prompt("node_execution.md")
+    assert "next hop" in rules
+    assert "next turn" not in rules
 
 
 def test_presence_wording_replaces_the_callable_line() -> None:
@@ -105,6 +107,8 @@ def test_presence_wording_replaces_the_callable_line() -> None:
     frontdoor = CeoPromptBuilder(loop=SimpleNamespace(workspace=None))._read_prompt("ceo_frontdoor.md")
     assert "契约随结果交回" in frontdoor
     assert "不执行工具" in frontdoor
+    assert "同一条用户消息内" in frontdoor
+    assert "下一次模型调用" in frontdoor
 
 
 def _receipt(*, staged_count: int, batch_total: int = 1, batch_position: int = 1) -> str:

@@ -8424,7 +8424,7 @@ class MainRuntimeService:
         requested_or_resolved_tool_id = str(requested_tool_id or '').strip() or str(resolved_tool_id or '').strip()
         return {
             'callable_now': callable_now,
-            'will_be_hydrated_next_turn': callable_now and bool(hydration_targets),
+            'will_be_hydrated_next_hop': callable_now and bool(hydration_targets),
             'hydration_targets': list(hydration_targets),
             'exec_runtime_policy': (
                 self._current_exec_runtime_policy_payload()
@@ -8831,7 +8831,7 @@ class MainRuntimeService:
             return {'ok': False, 'error': 'Resource manager unavailable'}
         toolskill = self.get_tool_toolskill(tool_name) or {}
         # 说明可读性与调用授权分开：本角色不可调用的工具，只要注册过 toolskill，
-        # 仍返回正文（callable_this_turn 如实为 false）。exec 就是这类——它是节点
+        # 仍返回正文（callable_this_hop 如实为 false）。exec 就是这类——它是节点
         # 道的常驻内置，同时带 tools/exec/toolskills；验收节点读它的契约来判断子
         # 节点的命令是否合规，旧闸门把"不可调用"误答成"没有 toolskill"。
         documentation_only = tool_name not in visible and bool(str(toolskill.get('content') or '').strip())
@@ -8899,7 +8899,7 @@ class MainRuntimeService:
             return {'ok': False, 'error': 'Resource manager unavailable'}
         toolskill = self.get_tool_toolskill(tool_name) or {}
         # 说明可读性与调用授权分开：本角色不可调用的工具，只要注册过 toolskill，
-        # 仍返回正文（callable_this_turn 如实为 false）。见 load_tool_context。
+        # 仍返回正文（callable_this_hop 如实为 false）。见 load_tool_context。
         documentation_only = tool_name not in visible and bool(str(toolskill.get('content') or '').strip())
         if tool_name not in visible and not documentation_only:
             return {'ok': False, 'error': f'Tool not visible: {tool_id}'}

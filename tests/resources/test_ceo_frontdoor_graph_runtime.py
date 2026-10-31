@@ -352,7 +352,7 @@ async def test_frontdoor_duplicate_load_tool_context_guard_blocks_same_uncompres
         "available": True,
         "repair_required": False,
         "callable_now": True,
-        "will_be_hydrated_next_turn": False,
+        "will_be_hydrated_next_hop": False,
         "hydration_targets": [],
         "exec_runtime_policy": {
             "mode": "governed",
@@ -411,7 +411,7 @@ async def test_frontdoor_duplicate_load_tool_context_guard_allows_refresh_when_f
         "available": True,
         "repair_required": False,
         "callable_now": True,
-        "will_be_hydrated_next_turn": False,
+        "will_be_hydrated_next_hop": False,
         "hydration_targets": [],
         "exec_runtime_policy": {
             "mode": "full_access",
@@ -433,7 +433,7 @@ async def test_frontdoor_duplicate_load_tool_context_guard_allows_refresh_when_f
         "available": True,
         "repair_required": False,
         "callable_now": True,
-        "will_be_hydrated_next_turn": False,
+        "will_be_hydrated_next_hop": False,
         "hydration_targets": [],
         "exec_runtime_policy": {
             "mode": "governed",
