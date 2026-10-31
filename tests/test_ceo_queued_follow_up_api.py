@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from urllib.parse import quote
 
 import pytest
 from fastapi import FastAPI
@@ -89,6 +90,31 @@ def test_withdraw_endpoint_rejects_consumed_turn(env):
 
     assert response.status_code == 409
     assert response.json()["detail"] == "follow_up_not_queued"
+
+
+def test_withdraw_endpoint_accepts_channel_session(env):
+    """渠道会话同样有队列条目：撤回口不能再按 web: 前缀把整族会话判成不存在。"""
+    channel_key = "ext:qq-official-1903529517:abc123"
+    session = env.manager.get_or_create(channel_key)
+    session.messages.append({
+        "role": "user",
+        "content": "渠道里排队的一条",
+        "timestamp": "2026-11-01T10:00:00",
+        "metadata": {"_transcript_turn_id": "t-channel-1", "_transcript_state": "pending"},
+    })
+    env.manager.save(session)
+    runtime = _RuntimeStub(result=True)
+    env.holder["session"] = runtime
+
+    response = env.client.post(
+        f"/api/ceo/sessions/{quote(channel_key, safe='')}/queued-follow-ups/withdraw",
+        json={"turn_id": "t-channel-1"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["session_id"] == channel_key
+    assert runtime.withdrawn == ["t-channel-1"]
+    assert runtime.emitted == 1
 
 
 def test_withdraw_endpoint_requires_turn_id(env):

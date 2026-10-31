@@ -1,5 +1,7 @@
 (() => {
-  const DEFAULT_RETRY_ON = ["network", "429"];
+  const DEFAULT_RETRY_ON = ["network", "429", "tpm", "rpm"];
+  // 新建配置的退避重试轮数预填：10 轮是操作员要的默认档，既不是 0（不重试）也不是无限。
+  const DEFAULT_RETRY_COUNT = 10;
   const DEFAULT_MAX_OUTPUT_TOKENS = 65536;
   // 新档上下文窗口的默认写法：200K 就是 200000，落盘走换算后的整数。
   const DEFAULT_CONTEXT_WINDOW_TOKENS_TEXT = "200K";
@@ -36,8 +38,8 @@
       initialJsonText: "",
       retryOn: [...DEFAULT_RETRY_ON],
       initialRetryOn: [...DEFAULT_RETRY_ON],
-      retryCount: 0,
-      initialRetryCount: 0,
+      retryCount: DEFAULT_RETRY_COUNT,
+      initialRetryCount: DEFAULT_RETRY_COUNT,
       singleApiKeyMaxConcurrency: "",
       initialSingleApiKeyMaxConcurrency: "",
       contextWindowTokens: "",
@@ -447,7 +449,7 @@
       jsonText: JSON.stringify(draft, null, 2),
       initialJsonText: JSON.stringify(draft, null, 2),
       retryOn: [...DEFAULT_RETRY_ON],
-      retryCount: 0,
+      retryCount: DEFAULT_RETRY_COUNT,
       contextWindowTokens: contextWindowDefault,
       initialContextWindowTokens: contextWindowDefault,
       imageMultimodalEnabled: false,
@@ -1004,6 +1006,11 @@
     editor.apiKeyCount = apiKeyCountFromValue(plain);
     replaceEditorApiKeyValue(plain);
     renderAll();
+    // 明文态把焦点交给格子：失焦即按 focusout 收起，明文不在屏上滞留。
+    const revealedInput = document.getElementById("llm-binding-api-key");
+    if (revealedInput && typeof revealedInput.focus === "function") {
+      revealedInput.focus();
+    }
     showToast({
       title: "已解锁",
       text: `${minutes} 分钟内可免密码查看 Apikey。`,
@@ -1052,6 +1059,12 @@
     if (!result) result = await promptEditorApiKeyPassword(configId);
     if (!result) return false;
     return applyRevealedApiKey(result);
+  }
+
+  function revealEditorApiKeyFromGesture() {
+    void requestEditorApiKeyReveal().catch((error) => {
+      showToast({ title: "查看失败", text: error?.message || "查看 Apikey 失败", kind: "error" });
+    });
   }
 
   async function ensureEditorApiKeyRevealed() {
@@ -1226,7 +1239,7 @@
           </label>
           <label class="resource-field">
             <span class="resource-field-label">重试次数</span>
-            <input id="llm-binding-retry-count" class="resource-search" type="number" min="0" step="1" inputmode="numeric" value="${escv(String(editor.retryCount ?? 0))}" placeholder="0" title="命中自动重试关键词时的最大重试轮数（一轮 = 完整轮过该模型所有 Key），轮间按指数退避加抖动；填 0 就是不重试（只发首那一趟）。未命中关键词的错误每个 Key 只试一次即切换下一模型。">
+            <input id="llm-binding-retry-count" class="resource-search" type="number" min="0" step="1" inputmode="numeric" value="${escv(String(editor.retryCount ?? DEFAULT_RETRY_COUNT))}" placeholder="${DEFAULT_RETRY_COUNT}" title="命中自动重试关键词时的最大重试轮数（一轮 = 完整轮过该模型所有 Key），轮间按指数退避加抖动；填 0 就是不重试（只发首那一趟）。未命中关键词的错误每个 Key 只试一次即切换下一模型。">
           </label>
           ${renderConcurrencyField(editor)}
         </div>
@@ -1240,7 +1253,7 @@
         </label>
         <label class="resource-field">
           <span class="resource-field-label">重试次数</span>
-          <input id="llm-binding-retry-count" class="resource-search" type="number" min="0" step="1" inputmode="numeric" value="${escv(String(editor.retryCount ?? 0))}" placeholder="0" title="命中自动重试关键词时的最大重试轮数（一轮 = 完整轮过该模型所有 Key），轮间按指数退避加抖动；填 0 就是不重试（只发首那一趟）。未命中关键词的错误每个 Key 只试一次即切换下一模型。">
+          <input id="llm-binding-retry-count" class="resource-search" type="number" min="0" step="1" inputmode="numeric" value="${escv(String(editor.retryCount ?? DEFAULT_RETRY_COUNT))}" placeholder="${DEFAULT_RETRY_COUNT}" title="命中自动重试关键词时的最大重试轮数（一轮 = 完整轮过该模型所有 Key），轮间按指数退避加抖动；填 0 就是不重试（只发首那一趟）。未命中关键词的错误每个 Key 只试一次即切换下一模型。">
         </label>
         ${renderConcurrencyField(editor)}
       </div>`;
@@ -1313,21 +1326,19 @@
       </div>`;
   }
 
-  // 查看/隐藏只在编辑档出现：新建档里 key 还是操作员刚输入的，没有存着的秘密可遮。
+  // 掩码读面整格就是「查看」按钮：没有右侧按钮，点击整条输入框即走口令。
+  // 查看后整格回到可编辑输入；离开编辑区时若没改过值，重新落回掩码。
   function renderApiKeyField(editor) {
-    const toggleVisible = editor.mode === "detail" && Boolean(editor.apiKeyRevealed || editor.apiKeyMasked);
-    const toggleAction = editor.apiKeyRevealed ? "hide-api-key" : "reveal-api-key";
-    const toggleLabel = editor.apiKeyRevealed ? "隐藏" : "查看";
-    const inputTitle = editor.apiKeyMasked ? ' title="Apikey 已隐藏，点「查看」并输入项目解锁口令后显示"' : "";
-    const toggleMarkup = toggleVisible
-      ? `<button type="button" class="toolbar-btn ghost small llm-api-key-reveal-btn" data-llm-action="${toggleAction}">${toggleLabel}</button>`
+    const viewTrigger = editor.mode === "detail" && Boolean(editor.apiKeyMasked);
+    const viewAttrs = viewTrigger
+      ? ' readonly role="button" data-llm-action="reveal-api-key" aria-label="查看 Apikey" aria-haspopup="dialog" title="点击查看 Apikey（需项目解锁口令）"'
       : "";
+    const inputTitle = !viewTrigger && editor.apiKeyMasked ? ' title="Apikey 已隐藏"' : "";
     return `
         <div class="resource-field">
           <span class="resource-field-label">Apikey *</span>
           <div class="llm-api-key-input-row">
-            <input id="llm-binding-api-key" class="resource-search" type="text" aria-label="Apikey"${inputTitle} value="${escv(editor.apiKey)}" placeholder="支持用逗号分隔填写多个 key">
-            ${toggleMarkup}
+            <input id="llm-binding-api-key" class="resource-search${viewTrigger ? " llm-api-key-view-trigger" : ""}" type="text"${viewAttrs}${inputTitle} value="${escv(editor.apiKey)}" placeholder="支持用逗号分隔填写多个 key">
           </div>
         </div>`;
   }
@@ -2262,6 +2273,34 @@
         handleBindingDefaultModelInput();
       }
     });
+    // 整格查看入口同时接键盘：Enter/Space 与点击走同一条口令流程。
+    U.llmEditorShell?.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      if (!event.target?.closest?.('[data-llm-action="reveal-api-key"]')) return;
+      event.preventDefault();
+      revealEditorApiKeyFromGesture();
+    });
+    // 明文只在输入框聚焦期间留在屏上：焦点离开整张编辑区就收回掩码。
+    // 焦点仍在编辑区（例如点「保存修改」）时不动，避免重绘把这次点击吃掉。
+    U.llmEditorShell?.addEventListener("focusout", (event) => {
+      if (event.target?.id !== "llm-binding-api-key") return;
+      // 查看成功后 renderAll 会替换掉刚聚焦的旧输入框；那次移除也会冒 focusout，
+      // 不能把它当成"操作员离开编辑区"而立刻收回明文。
+      if (typeof U.llmEditorShell.contains === "function" && !U.llmEditorShell.contains(event.target)) return;
+      const editor = llmState().editor;
+      if (!editor || editor.mode !== "detail" || !editor.apiKeyRevealed) return;
+      const next = event.relatedTarget;
+      if (next && U.llmEditorShell?.contains?.(next)) return;
+      // 延后一拍再判：点击「保存修改」这类编辑区内的非聚焦单元时，焦点可能先落回
+      // body，当场重绘就会把这次点击吃掉。真正的判定看下一拍焦点最终在哪。
+      window.setTimeout(() => {
+        const current = llmState().editor;
+        if (!current || current.mode !== "detail" || !current.open || !current.apiKeyRevealed) return;
+        const active = document.activeElement;
+        if (active && U.llmEditorShell?.contains?.(active)) return;
+        hideEditorApiKey();
+      }, 0);
+    });
     U.llmEditorShell?.addEventListener("click", (event) => {
       const noteToggle = event.target.closest("[data-llm-note-toggle]");
       if (noteToggle) {
@@ -2287,7 +2326,7 @@
       }
       const action = event.target.closest("[data-llm-action]")?.dataset.llmAction;
       if (!action) return;
-      if (action === "reveal-api-key") { void requestEditorApiKeyReveal().catch((error) => { showToast({ title: "查看失败", text: error?.message || "查看 Apikey 失败", kind: "error" }); }); return; }
+      if (action === "reveal-api-key") { revealEditorApiKeyFromGesture(); return; }
       if (action === "hide-api-key") { hideEditorApiKey(); return; }
       if (action === "close") { closeEditor(); return; }
       if (action === "edit-name") { enterModelNameEditMode(); return; }

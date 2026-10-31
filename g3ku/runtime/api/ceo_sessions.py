@@ -842,16 +842,20 @@ async def withdraw_ceo_queued_follow_up(session_id: str, payload: dict = Body(..
     turn_id = str((payload or {}).get("turn_id") or "").strip()
     if not turn_id:
         raise HTTPException(status_code=400, detail="turn_id_required")
-    session = _assert_known_session(session_manager, session_id)
-    runtime_session = _runtime_session(runtime_manager, session.key)
+    # 队列是所有会话族共有的：web 本地会话与 ext/china 渠道会话都可能在
+    # queued_follow_up_messages 里挂过条目，撤回入口必须走同一套会话解析。
+    session_key, runtime_session = _resolve_frontdoor_session(
+        session_manager, runtime_manager, session_id, create=True
+    )
     if runtime_session is None:
-        # 队列的 durable 那一半在盘上：没有 live 对象时先实例化，再走同一个删除口。
-        runtime_session = _recreate_runtime_session(runtime_manager, session)
+        # 没有 live 对象时，web 的 durable 那一半在盘上，创建后走同一个删除口；
+        # 渠道会话没有可重建的运行时就不存在可撤的队列。
+        raise HTTPException(status_code=409, detail="follow_up_not_queued")
     withdraw = getattr(runtime_session, "withdraw_queued_follow_up", None)
     if not callable(withdraw) or not bool(withdraw(turn_id)):
         raise HTTPException(status_code=409, detail="follow_up_not_queued")
     await _emit_runtime_state_snapshot(runtime_session)
-    return {"ok": True, "session_id": session.key, "turn_id": turn_id}
+    return {"ok": True, "session_id": session_key, "turn_id": turn_id}
 
 
 def _tool_arguments_from_turns(turns: object, tool_call_id: str) -> dict | None:

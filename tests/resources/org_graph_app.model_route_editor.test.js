@@ -661,7 +661,7 @@ test("旧配置（记录里没写过 retry_on）打开详情时不许一上来�
     const editor = hooks.llmState().editor;
     assert.equal(editor.mode, "detail");
     // 面板把缺席的 retry_on 填成默认关键词：颜色必须按「打开那一刻」判，而不是按服务端字段有无判。
-    sameJson(editor.retryOn, ["network", "429"]);
+    sameJson(editor.retryOn, ["network", "429", "tpm", "rpm"]);
     assert.equal(hooks.llmEditorDirty(), false, "刚打开就是基线，没有任何改动可言");
     assert.equal(saveButton.classes.has("is-dirty"), false);
 
@@ -691,6 +691,21 @@ test("模型配置面板的确认键：内容改了才填重点色，关闭键�
     hooks.llmState().editor.createName = "";
     hooks.syncLlmEditorDirtyAffordance();
     assert.equal(saveButton.classes.has("is-dirty"), false, "改回原值等于没改");
+});
+
+test("新建配置预填 10 轮重试，默认关键词含 tpm/rpm", async () => {
+    const { context } = loadModelPageWithLlm();
+    const hooks = context.__llmTestHooks;
+
+    await hooks.openCreateModal();
+    const editor = hooks.llmState().editor;
+
+    assert.equal(editor.mode, "create");
+    assert.equal(editor.retryCount, 10);
+    assert.equal(editor.initialRetryCount, 10, "预填值就是打开那一刻的基线");
+    assert.equal(hooks.llmEditorDirty(), false, "预填默认值不等于未保存改动");
+    sameJson(editor.retryOn, ["network", "429", "tpm", "rpm"]);
+    sameJson(editor.initialRetryOn, ["network", "429", "tpm", "rpm"]);
 });
 
 test("配置面板的重试次数：负数原样交给保存校验，不许静默夹成 0", () => {

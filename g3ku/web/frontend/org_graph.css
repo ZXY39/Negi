@@ -7969,12 +7969,20 @@ textarea {
     min-width: 0;
 }
 
-/* 查看/隐藏是字段右侧的动作，跟输入框同高；不要落进 32px 的工具按钮档。 */
-:root .llm-api-key-input-row .llm-api-key-reveal-btn {
-    flex: 0 0 auto;
-    height: 38px;
-    min-height: 38px;
-    padding: 0 14px;
+/* 掩码读面整格就是「查看 Apikey」按钮：没有右侧动作键，整条输入框吃满这一格。 */
+:root .llm-api-key-input-row .llm-api-key-view-trigger {
+    cursor: pointer;
+    padding-right: 38px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='18' height='18' viewBox='0 0 24 24' fill='none' stroke='%23808a99' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z'/%3E%3Ccircle cx='12' cy='12' r='3'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+    background-size: 18px 18px;
+}
+
+:root .llm-api-key-input-row .llm-api-key-view-trigger:hover,
+:root .llm-api-key-input-row .llm-api-key-view-trigger:focus-visible {
+    border-color: color-mix(in srgb, var(--brand-primary) 48%, var(--border-color));
+    background-color: color-mix(in srgb, var(--brand-primary) 6%, var(--bg-panel));
 }
 
 /* 模型ID右侧的取列表小按钮：与输入框同高的一条 38px 方档。 */

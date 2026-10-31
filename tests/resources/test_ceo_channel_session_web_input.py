@@ -199,6 +199,41 @@ def test_queued_channel_input_pushes_state_frame_same_turn():
     assert "_push_stream_event('ceo.state'" in body
 
 
+def test_channel_session_error_events_are_relayed_to_ceo_error():
+    """渠道回合没有 `_run_user_turn` catch：供应商报错必须从 session 事件转发，
+    否则实时回合等不到收尾帧，暂停按钮会一直挂在已停下的会话上。"""
+    body = _block("async def _relay_session_event(", "if event.type == 'frontdoor_interrupt':")
+
+    assert "if event.type == 'error':" in body
+    assert "if not is_channel_session:" in body
+    assert "'ceo.error'" in body
+
+
+def test_channel_error_frame_carries_turn_identity():
+    frame = websocket_ceo._ceo_error_frame_from_event(
+        {
+            "code": "legacy_session_error",
+            "message": "quota exhausted",
+            "turn_id": "turn-1",
+            "turn_source": "user",
+        }
+    )
+    assert frame == {
+        "code": "legacy_session_error",
+        "message": "quota exhausted",
+        "source": "user",
+        "turn_id": "turn-1",
+    }
+    # 旧事件没有 turn 字段时，回退到在飞快照给出的身份。
+    fallback = websocket_ceo._ceo_error_frame_from_event(
+        {"message": "boom"},
+        {"turn_id": "turn-2", "source": "heartbeat"},
+    )
+    assert fallback["source"] == "heartbeat"
+    assert fallback["turn_id"] == "turn-2"
+    assert fallback["code"] == "legacy_session_error"
+
+
 def test_channel_input_branch_never_reads_the_channel_transcript():
     body = _block("async def _handle_channel_user_input(", "async def sender(")
 

@@ -929,6 +929,53 @@ def _snapshot_message_transcript_state(message: dict[str, Any] | None) -> str:
     return str(metadata.get("_transcript_state") or "").strip().lower()
 
 
+def _queued_follow_up_turn_ids(session: Any) -> set[str]:
+    """当前仍在 runtime 队列里的补充消息所对应的转录 turn_id。
+
+    快照层用它把「排队中」的 pending 用户行从历史气泡里摘掉：同一个条目已经由
+    输入框上方的候选条承载，再在转录里画一遍就是同一句话两份。
+    """
+    state = getattr(session, "state", None)
+    turn_ids: set[str] = set()
+    for item in list(getattr(state, "queued_follow_up_messages", []) or []):
+        metadata = getattr(item, "metadata", None)
+        if not isinstance(metadata, dict):
+            continue
+        turn_id = str(metadata.get("_transcript_turn_id") or "").strip()
+        if turn_id:
+            turn_ids.add(turn_id)
+    return turn_ids
+
+
+def _ceo_error_frame_from_event(
+    event_payload: dict[str, Any] | None,
+    snapshot: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """把 session 的 ``error`` 事件折成 ``ceo.error`` 帧的载荷。
+
+    渠道回合没有 `_run_user_turn` 的 catch，错误只能从 session 事件转发；turn 身份
+    优先取事件自带的（`turn_source` / `turn_id`），旧事件缺字段时回退到在飞快照。
+    """
+    payload = dict(event_payload or {})
+    live_turn = snapshot if isinstance(snapshot, dict) else {}
+    source = str(
+        payload.get("turn_source")
+        or live_turn.get("source")
+        or "user"
+    ).strip().lower() or "user"
+    turn_id = str(
+        payload.get("turn_id")
+        or live_turn.get("turn_id")
+        or ""
+    ).strip()
+    return {
+        "code": str(payload.get("code") or "legacy_session_error"),
+        "message": str(payload.get("message") or "").strip() or "unknown error",
+        "source": source,
+        "turn_id": turn_id,
+    }
+
+
 def _transcript_message_token_usage(value: Any) -> dict[str, int] | None:
     """校验 transcript 消息级持久化的轮次 token 用量（收尾时随 transcript 写入）。"""
     if not isinstance(value, dict):
@@ -1089,6 +1136,7 @@ def _build_ceo_snapshot(
     edit_fork_gates: dict[int, bool] | None = None,
     reply_fork_turn_ids: set[str] | None = None,
     frontdoor_turns: list[dict[str, Any]] | None = None,
+    queued_follow_up_turn_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     turns_by_turn_id: dict[str, list[dict[str, Any]]] = {}
     for turn in list(frontdoor_turns or []):
@@ -1100,6 +1148,11 @@ def _build_ceo_snapshot(
     inflight_payload = inflight_turn if isinstance(inflight_turn, dict) else {}
     inflight_status = str(inflight_payload.get("status") or "").strip().lower()
     hide_pending_users = inflight_status in {"running", "in_progress", "active"}
+    queued_pending_turn_ids = {
+        str(item or "").strip()
+        for item in (queued_follow_up_turn_ids or set())
+        if str(item or "").strip()
+    }
     # 气泡标签只在渠道会话下发；编号与投影层同源（整份转录、首次出现顺序）。
     channel_session = bool(str(session_id or "").strip()) and is_channel_session_key(session_id)
     master_ids = qq_owner_openids() if channel_session else frozenset()
@@ -1148,8 +1201,11 @@ def _build_ceo_snapshot(
             continue
         if is_internal_ceo_user_message(raw):
             continue
-        if hide_pending_users and role == "user" and _snapshot_message_transcript_state(raw) == "pending":
-            continue
+        if role == "user" and _snapshot_message_transcript_state(raw) == "pending":
+            # 运行中的在飞轮由 inflight 帧承载本轮用户行；排队中的补充由输入区
+            # 上方的候选条承载。两种情况下都不能再从平铺转录里画一颗历史气泡。
+            if hide_pending_users or (row_turn_id and row_turn_id in queued_pending_turn_ids):
+                continue
         content = _history_text(raw.get('content'))
         if role == 'user':
             content = _strip_channel_bubble_noise(content, metadata)
@@ -1460,6 +1516,7 @@ async def ceo_websocket(websocket: WebSocket):
         memory_chat_id=(str(memory_scope.get('chat_id') or 'shared') if not is_channel_session else None),
     )
     turn_payload = _build_live_turn_payload(session, session_id, persisted_session)
+    queued_follow_up_turn_ids = _queued_follow_up_turn_ids(session)
     # 快照构建遍历整份转录消息做投影/重写，同样卸载出事件循环。
     # 编辑/Fork 门槛在同一次卸载内计算（转录行走 + 边界快照目录列举 + 可选任务表兜底）。
     def _compose_ceo_snapshot() -> list[dict[str, Any]]:
@@ -1479,6 +1536,7 @@ async def ceo_websocket(websocket: WebSocket):
             edit_fork_gates=edit_gates,
             reply_fork_turn_ids=_reply_fork_turn_id_set(raw_messages, fork_gates),
             frontdoor_turns=list(getattr(session, "_frontdoor_turns", []) or []),
+            queued_follow_up_turn_ids=queued_follow_up_turn_ids,
         )
 
     persisted_messages = await run_off_event_loop(_compose_ceo_snapshot)
@@ -1805,6 +1863,20 @@ async def ceo_websocket(websocket: WebSocket):
             logger.exception('CEO websocket relay failed for {} event {}', session_id, event.type)
 
     async def _relay_session_event(event: AgentEvent) -> None:
+        if event.type == 'error':
+            # 本地会话的可见轮由 `_run_user_turn` 的 catch 单独发 ceo.error；渠道会话
+            # 的回合由 ExternalTurnService 驱动，没有那条 catch，错误只能从这里转发。
+            # 不转的话，供应商报错后网页的实时回合永远等不到收尾帧：气泡停在加载态、
+            # 主按钮按「会话未停稳」一直显示暂停，而服务端其实已经没有可暂停的回合。
+            if not is_channel_session:
+                return
+            payload = dict(event.payload or {})
+            snapshot = _build_inflight_turn_snapshot(session, session_id, persisted_session)
+            await _push_stream_event(
+                'ceo.error',
+                _ceo_error_frame_from_event(payload, snapshot),
+            )
+            return
         if event.type == 'frontdoor_interrupt':
             payload = dict(event.payload or {})
             await _push_stream_event(

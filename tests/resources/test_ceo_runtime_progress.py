@@ -7234,6 +7234,66 @@ def test_websocket_build_ceo_snapshot_hides_pending_user_messages_while_running_
     assert snapshot == []
 
 
+def test_websocket_build_ceo_snapshot_hides_queued_pending_users_when_idle() -> None:
+    """排队中的补充只由输入区上方的候选条承载；空闲快照不能再把它画成历史气泡。"""
+    rows = [
+        {
+            "role": "user",
+            "content": "already answered",
+            "metadata": {"_transcript_turn_id": "turn-answered"},
+        },
+        {
+            "role": "assistant",
+            "content": "answer",
+            "metadata": {"_transcript_turn_id": "turn-answered"},
+        },
+        {
+            "role": "user",
+            "content": "still queued",
+            "metadata": {
+                "_transcript_turn_id": "turn-queued",
+                "_transcript_state": "pending",
+            },
+        },
+        {
+            "role": "user",
+            "content": "orphan pending row not in queue",
+            "metadata": {
+                "_transcript_turn_id": "turn-orphan",
+                "_transcript_state": "pending",
+            },
+        },
+    ]
+
+    snapshot = websocket_ceo._build_ceo_snapshot(
+        rows,
+        inflight_turn=None,
+        queued_follow_up_turn_ids={"turn-queued"},
+    )
+
+    assert [item["content"] for item in snapshot] == [
+        "already answered",
+        "answer",
+        "orphan pending row not in queue",
+    ]
+
+
+def test_queued_follow_up_turn_ids_reads_runtime_queue_metadata() -> None:
+    session = SimpleNamespace(
+        state=SimpleNamespace(
+            queued_follow_up_messages=[
+                SimpleNamespace(metadata={"_transcript_turn_id": "turn-a"}),
+                SimpleNamespace(metadata={"_transcript_turn_id": "turn-b"}),
+                SimpleNamespace(metadata={}),
+                object(),
+            ]
+        )
+    )
+
+    assert websocket_ceo._queued_follow_up_turn_ids(session) == {"turn-a", "turn-b"}
+    assert websocket_ceo._queued_follow_up_turn_ids(SimpleNamespace()) == set()
+
+
 def test_context_assembly_always_keeps_tool_execution_control_tools_visible() -> None:
     selected = CeoMessageBuilder._callable_tool_names(
         visible_tool_names=[

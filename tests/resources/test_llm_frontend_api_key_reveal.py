@@ -1,4 +1,4 @@
-"""模型配置页的 Apikey 读面：默认遮罩、查看/隐藏、口令窗口与草稿脏位。
+"""模型配置页的 Apikey 读面：默认遮罩、整格查看、口令窗口与草稿脏位。
 
 这些用例把"查看不是配置改动"钉死：查看/隐藏只换 key 的显示值，`llmEditorDirty()` 必须
 保持原判，否则操作员点一次「查看」就会被提示有未保存修改。
@@ -143,7 +143,7 @@ _LLM_HARNESS = r"""
 """
 
 
-def test_detail_render_shows_mask_and_reveal_toggle_only_when_masked() -> None:
+def test_detail_render_makes_the_masked_input_itself_the_reveal_trigger() -> None:
     result = _run_node_script(
         _LLM_HARNESS
         + r"""
@@ -170,17 +170,24 @@ def test_detail_render_shows_mask_and_reveal_toggle_only_when_masked() -> None:
 
     masked_html = str(result["maskedHtml"])
     assert 'value="********"' in masked_html
+    # 掩码读面的整条输入框就是查看入口：不再有右侧动作键。
+    assert 'class="resource-search llm-api-key-view-trigger"' in masked_html
     assert 'data-llm-action="reveal-api-key"' in masked_html
-    assert ">查看<" in masked_html
+    assert 'readonly' in masked_html
+    assert 'id="llm-binding-api-key"' in masked_html
+    assert "llm-api-key-reveal-btn" not in masked_html
+    assert ">查看<" not in masked_html
 
     revealed_html = str(result["revealedHtml"])
     assert 'value="sk-plain"' in revealed_html
-    assert 'data-llm-action="hide-api-key"' in revealed_html
-    assert ">隐藏<" in revealed_html
+    assert 'data-llm-action="hide-api-key"' not in revealed_html
     assert 'data-llm-action="reveal-api-key"' not in revealed_html
+    assert "llm-api-key-view-trigger" not in revealed_html
+    assert "llm-api-key-reveal-btn" not in revealed_html
 
     create_html = str(result["createHtml"])
     assert "llm-api-key-reveal-btn" not in create_html
+    assert "llm-api-key-view-trigger" not in create_html
 
 
 def test_apply_revealed_key_keeps_the_editor_clean_and_hide_restores_mask() -> None:

@@ -4159,6 +4159,8 @@ class RuntimeAgentSession:
                 message=error.message,
                 recoverable=error.recoverable,
                 source="runtime",
+                turn_id=str(self._active_turn_id or "").strip(),
+                turn_source=str(internal_source or "user").strip().lower() or "user",
             )
             await self._emit("agent_end", session_key=self._state.session_key, status="error")
             await self._emit_state_snapshot()

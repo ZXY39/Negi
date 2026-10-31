@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-DEFAULT_RETRY_ON_KEYWORDS = ["network", "429"]
+DEFAULT_RETRY_ON_KEYWORDS = ["network", "429", "tpm", "rpm"]
 
 RETRYABLE_ERROR_PRESETS: dict[str, tuple[str, ...]] = {
     "network": (

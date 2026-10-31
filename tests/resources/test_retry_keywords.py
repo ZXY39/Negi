@@ -58,8 +58,15 @@ def test_expand_retry_keywords_presets_and_literals() -> None:
     assert "datainspectionfailed" in tokens
 
 
-def test_default_keywords_are_network_and_429() -> None:
-    assert DEFAULT_RETRY_ON_KEYWORDS == ["network", "429"]
+def test_default_keywords_include_network_429_and_quota_dimensions() -> None:
+    assert DEFAULT_RETRY_ON_KEYWORDS == ["network", "429", "tpm", "rpm"]
+
+
+def test_default_keywords_match_provider_tpm_rpm_limit_text() -> None:
+    # 上游把限流写成 `inference exceeds tpm/rpm limit` 而不带可解析状态时，默认表也要命中。
+    assert fallback_module.is_retryable_model_error(RuntimeError("inference exceeds tpm/rpm limit")) is True
+    assert fallback_module.is_retryable_model_error(RuntimeError("tpm exhausted")) is True
+    assert fallback_module.is_retryable_model_error(RuntimeError("rpm exhausted")) is True
 
 
 def test_custom_keyword_hits_provider_error_text() -> None:
