@@ -284,11 +284,8 @@ class ScheduleWakeTool(Tool):
     @property
     def model_description(self) -> str:
         return (
-            'Arm one wake-up for yourself: `note` plus exactly one of `after_seconds` or a future `at` '
-            '(copy it from the time tool). Arming replaces your previous pending wake-up and does not '
-            'end this turn; when it fires you get a message carrying your note and the current time. '
-            'Use it instead of sleeping inside a long-running command — this deadline survives a '
-            'restart, that one does not.'
+            'Arm one self-wake (note + after_seconds or a future at); it replaces the pending one '
+            'and survives restart.'
         )
 
     @property

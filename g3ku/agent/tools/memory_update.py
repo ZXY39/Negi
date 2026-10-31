@@ -24,20 +24,8 @@ class MemoryUpdateTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Queue a durable long-term memory request in natural language.\n"
-            "Use this when the user explicitly asks the system to remember, revise, or forget a stable rule, "
-            "preference, identity detail, default, constraint, or project fact.\n"
-            "State what should change; a memory agent decides whether that becomes a new item, a rewrite of an "
-            "existing one, or a deletion.\n"
-            "所有关于记忆的处理都通过此工具交给记忆 agent，禁止自己改 `memory/` 下的文件。\n"
-            "Scope: in the operator's own sessions this updates local long-term memory; in a group "
-            "session it updates only that group's memory block, never the operator's local memory. "
-            "Any member's message in a group can justify a group-memory update; decide by content, "
-            "not by sender.\n"
-            "This call only queues the request: nothing has changed yet, so tell the user what you submitted "
-            "and never say the memory is already saved, revised, or removed.\n"
-            "任意数量的记忆处理需求可通过自然语言描述后，一次调用即可处理，禁止批量调用。\n"
-            "Do not use this for temporary execution state or speculative guesses."
+            "Queue a long-term memory change; do not edit `memory/` files. This only submits it—never say "
+            "it is saved, revised or removed."
         )
 
     @property

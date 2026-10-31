@@ -22,11 +22,8 @@ class StickerRegisterTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Register images that were copied into a sticker pack folder. Files sitting in a "
-            "category are NOT sendable until registered; registration renames them to the "
-            "next free index (001, 002, …) and they become visible to the model. Omit "
-            "`category` to register every pending file in the pack. A category is capped at "
-            "36 images — split it instead of forcing more in."
+            "Register copied images into a sticker pack category; unregistered files are not sendable, "
+            "max 36 per category."
         )
 
     @property

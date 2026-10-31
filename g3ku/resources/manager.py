@@ -9,6 +9,10 @@ from typing import Any, Callable
 
 from loguru import logger
 
+from g3ku.resources.description_limits import (
+    description_limit_for,
+    description_too_long_error,
+)
 from g3ku.resources.loader import ResourceLoader
 from g3ku.resources.locks import ResourceLockManager
 from g3ku.resources.models import (
@@ -55,10 +59,17 @@ class ResourceManager:
         self._snapshot = ResourceSnapshot(generation=0)
         self._started = False
         self._state_path = self.workspace / str(self._resources_cfg_value("state_path", ".g3ku/resources.state.json"))
+        # Description budgets: the first snapshot (or a state file written before
+        # the budget existed) is the baseline; manifest descriptions in it are
+        # grandfathered. Resources added afterwards must fit the one-sentence cap.
+        self._description_baseline: dict[str, int] = {}
+        self._description_baseline_bootstrapping = True
+        self._load_description_baseline()
         self._registry = self._build_registry()
         self._loader = ResourceLoader(self.workspace, app_config=app_config)
         self._locks = ResourceLockManager(windows_fs_lock=bool(self._resources_cfg_value("locks.windows_fs_lock", True)))
         self.reload_now(trigger="init")
+        self._description_baseline_bootstrapping = False
 
     def bind_app_config(self, app_config: Any) -> None:
         stale_instances: list[Any] = []
@@ -284,6 +295,7 @@ class ResourceManager:
             old_descriptor = old.skills.get(name)
             if old_descriptor and old_descriptor.fingerprint == descriptor.fingerprint:
                 descriptor = old_descriptor
+            self._apply_skill_description_budget(descriptor)
             new_skills[name] = descriptor
             self._locks.register_path(ResourceKind.SKILL, name, descriptor.main_path or descriptor.manifest_path)
             self._locks.clear_pending_delete(ResourceKind.SKILL, name)
@@ -296,6 +308,7 @@ class ResourceManager:
                 new_skills[name] = old_descriptor
             else:
                 self._locks.unregister_path(ResourceKind.SKILL, name)
+                self._description_baseline.pop(self._description_key("skill", name), None)
 
         services = self._resolved_services()
         for name, descriptor in discovery.tools.items():
@@ -328,6 +341,7 @@ class ResourceManager:
                 new_tool_instances[name] = old_instance
             else:
                 self._locks.unregister_path(ResourceKind.TOOL, name)
+                self._description_baseline.pop(self._description_key("tool", name), None)
 
         return ResourceSnapshot(generation=generation, tools=new_tools, skills=new_skills, tool_instances=new_tool_instances)
 
@@ -447,6 +461,7 @@ class ResourceManager:
                 logger.debug("skip duplicate skill name during targeted refresh: {}", descriptor.name)
                 continue
             descriptor.generation = generation
+            self._apply_skill_description_budget(descriptor)
             new_skills[descriptor.name] = descriptor
             self._locks.register_path(ResourceKind.SKILL, descriptor.name, descriptor.main_path or descriptor.manifest_path)
             self._locks.clear_pending_delete(ResourceKind.SKILL, descriptor.name)
@@ -478,6 +493,7 @@ class ResourceManager:
             return
         new_skills.pop(name, None)
         self._locks.unregister_path(ResourceKind.SKILL, name)
+        self._description_baseline.pop(self._description_key("skill", name), None)
 
     def _remove_tool_name(
         self,
@@ -499,6 +515,7 @@ class ResourceManager:
         new_tools.pop(name, None)
         new_tool_instances.pop(name, None)
         self._locks.unregister_path(ResourceKind.TOOL, name)
+        self._description_baseline.pop(self._description_key("tool", name), None)
 
     def _apply_tool_descriptor(
         self,
@@ -552,6 +569,18 @@ class ResourceManager:
             if descriptor.available:
                 instance = self._loader.load_tool(descriptor, services=services)
                 if instance is not None:
+                    budget_errors = self._description_budget_errors(
+                        "tool",
+                        descriptor.name,
+                        self._tool_model_description(instance),
+                    )
+                    if budget_errors:
+                        descriptor.available = False
+                        descriptor.errors.extend(budget_errors)
+                        return self._loader.load_repair_required_tool(
+                            descriptor,
+                            reason=budget_errors[0],
+                        )
                     return instance
                 return self._loader.load_repair_required_tool(descriptor, reason='tool_handler_unavailable')
             return self._loader.load_repair_required_tool(descriptor, reason='resource_unavailable')
@@ -588,11 +617,86 @@ class ResourceManager:
         base = Path(base_dir).resolve(strict=False)
         return {base / name for name in changed}
 
+    @staticmethod
+    def _description_key(kind: str, name: str) -> str:
+        return f'{str(kind).strip().lower()}:{str(name).strip()}'
+
+    def _load_description_baseline(self) -> None:
+        try:
+            payload = json.loads(self._state_path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        if not isinstance(payload, dict):
+            return
+        baseline = payload.get("description_baseline")
+        if not isinstance(baseline, dict):
+            # State written before the budget existed: the first reload is the
+            # baseline, so upgrading does not turn existing skills unavailable.
+            return
+        for kind in ("tool", "skill"):
+            bucket = baseline.get(kind)
+            if not isinstance(bucket, dict):
+                continue
+            for name, length in bucket.items():
+                normalized = str(name or "").strip()
+                if normalized:
+                    try:
+                        self._description_baseline[self._description_key(kind, normalized)] = int(length)
+                    except (TypeError, ValueError):
+                        continue
+        self._description_baseline_bootstrapping = False
+
+    def _description_budget_errors(self, kind: str, name: str, text: Any) -> list[str]:
+        """Return the add/load errors for an over-budget description.
+
+        Accepted names join the baseline; a rejected resource stays out of it so
+        the next refresh keeps rejecting it until the text is shortened.
+        """
+        key = self._description_key(kind, name)
+        description = str(text or "").strip()
+        length = len(description)
+        limit = description_limit_for(kind)
+        if not self._description_baseline_bootstrapping:
+            baseline_length = self._description_baseline.get(key)
+            if length > limit and (baseline_length is None or length > baseline_length):
+                return [description_too_long_error(kind, description, limit=limit)]
+        self._description_baseline[key] = length
+        return []
+
+    def _apply_skill_description_budget(self, descriptor: SkillResourceDescriptor) -> None:
+        errors = self._description_budget_errors("skill", descriptor.name, descriptor.description)
+        if not errors:
+            return
+        descriptor.available = False
+        for message in errors:
+            if message not in descriptor.errors:
+                descriptor.errors.append(message)
+
+    @staticmethod
+    def _tool_model_description(instance: Any) -> str:
+        return str(
+            getattr(instance, "model_description", "")
+            or getattr(instance, "description", "")
+            or ""
+        ).strip()
+
     def _persist_state(self, snapshot: ResourceSnapshot) -> None:
         try:
             self._state_path.parent.mkdir(parents=True, exist_ok=True)
             payload = {
                 "generation": snapshot.generation,
+                "description_baseline": {
+                    "tool": {
+                        key.split(":", 1)[1]: length
+                        for key, length in self._description_baseline.items()
+                        if key.startswith("tool:")
+                    },
+                    "skill": {
+                        key.split(":", 1)[1]: length
+                        for key, length in self._description_baseline.items()
+                        if key.startswith("skill:")
+                    },
+                },
                 "tools": [
                     {
                         "name": descriptor.name,

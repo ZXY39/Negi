@@ -597,7 +597,7 @@ def test_compact_schema_resource_tool_uses_manifest_model_visible_overrides(tmp_
     schema = tool.to_model_schema()["function"]
     content_schema = schema["parameters"]["properties"]["content"]
 
-    assert schema["description"].startswith("Queue a durable long-term memory request in natural language.")
+    assert schema["description"].startswith("Queue a long-term memory change")
     assert content_schema["type"] == "string"
     assert "queue for the memory agent" in str(content_schema.get("description") or "")
 

@@ -2,7 +2,7 @@ schema_version: 1
 kind: tool
 display_name: "处理暂停节点"
 name: manage_task_nodes
-description: Manage task nodes after an error pause or operator review - resume, keep_paused, fail, or pause single nodes, whole subtrees (cascade), a whole task (task_id alone), or mixed per-node targets in one atomic call.
+description: Resume, keep_paused, fail or pause task nodes (single, subtree, whole task) in one atomic call.
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''
@@ -60,7 +60,7 @@ parameters:
   required: [task_id]
 governance:
   display_name: Manage Task Nodes
-  description: Manage task nodes after an error pause or operator review - resume, keep_paused, fail, or pause single nodes, whole subtrees (cascade), a whole task (task_id alone), or mixed per-node targets in one atomic call.
+  description: Resume, keep_paused, fail or pause task nodes (single, subtree, whole task) in one atomic call.
   risk_level: medium
   destructive: true
   allowed_roles:

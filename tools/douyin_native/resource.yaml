@@ -2,18 +2,8 @@ schema_version: 1
 kind: tool
 name: douyin_native
 description: >-
-  Native Douyin capability for Negi, fully independent of DSH. Drives the local
-  real logged-in Microsoft Edge via Playwright (channel=msedge, persistent
-  user-data dir, windowed). Read-only first: open/feed/search browse, video info,
-  comments (no DMs), storyboard frame sampling, and Markdown watch reports.
-  Sending actions (comment / forward / @ ) are OFF by default and require the
-  user to explicitly edit data/douyin_native/send_policy.json AND pass
-  allow_send=true; every send obeys per-day/session quotas, an interval, and a
-  post-send receipt check that reports "未确认送达" when not verifiable.
-  Login guidance is a runtime step: when not logged in the tool screenshots and
-  asks the human to scan/confirm in the open Edge window; it never fakes login.
-  Anti-bot walls (captcha / 502 / rate limit) are screenshotted and reported
-  honestly, never retried in a burst.
+  Douyin browsing via the local logged-in Edge; sending stays off until
+  send_policy.json and allow_send permit it.
 tool_result_delivery_contract: runtime_managed
 source:
   type: git

@@ -28,11 +28,7 @@ class CronTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Schedule reminders and recurring tasks. Actions: add, list, remove. "
-            "Each job is bound to the session that creates it and, when it fires, only wakes (resumes) "
-            "that same session — it cannot be pointed at another session. "
-            "Reminder messages must be written as internal instructions to your future self. "
-            "Recurring reminders stop after `max_runs` successful deliveries; omitted counts default to one-shot."
+            "Schedule, list or remove session-bound reminders; firing wakes only the creating session."
         )
 
     @property

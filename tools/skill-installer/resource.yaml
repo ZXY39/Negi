@@ -2,9 +2,7 @@ schema_version: 1
 kind: tool
 name: skill-installer
 display_name: Skill Installer
-description: Install or import a skill from a GitHub repo/path into the current workspace
-  skills directory, generating a minimal Negi resource manifest when the upstream
-  skill only ships SKILL.md.
+description: Install a skill from a GitHub repo/path and generate a minimal resource manifest when only SKILL.md ships.
 tool_result_delivery_contract: runtime_managed
 source:
   type: builtin-wrapper

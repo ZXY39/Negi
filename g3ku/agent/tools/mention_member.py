@@ -30,12 +30,8 @@ class MentionMemberTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Send a message in this group and @-mention one known member. "
-            "`target` is `Master` or a member number shown in the source stamp "
-            "(for example `0002`). Raw openids are rejected. "
-            "Use this when you need Master's attention or must remind a specific "
-            "member; do not use it for spam. Delivery is asynchronous and may be "
-            "rejected if the group has not enabled active messages."
+            "Mention Master or a listed member number in this group; raw openids are rejected and delivery "
+            "may be refused."
         )
 
     @property

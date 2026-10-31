@@ -58,13 +58,7 @@ class ModelConfigTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Manage .g3ku/config.json model catalog, provider templates/drafts/bindings, "
-            "and the ordered fallback chain for ceo/execution/inspection/memory scopes. "
-            "get_scope_chain reads a chain as it is actually stored (ordered entries, load-balance "
-            "group slots, per-role iteration and concurrency); set_scope_chain writes it back through "
-            "the same payload shape the model config page uses, so group slots survive an edit. "
-            "On update actions, leave out every field you do not want to change — a field sent as null "
-            "counts as left out, and an empty string clears the ones that can be cleared."
+            "Manage model catalog, provider bindings and fallback chains; updates only the fields you pass."
         )
 
     @property

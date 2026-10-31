@@ -1,9 +1,7 @@
 schema_version: 1
 kind: tool
 name: exec
-description: Execute shell commands with structured summaries plus content
-  refs. Commands run in the host shell and default to the task-scoped temp directory
-  when the runtime provides `task_temp_dir`, unless an explicit working_dir is provided.
+description: Run shell commands directly (PowerShell/sh, no nested wrapper); use background=true for long-lived processes and process_kill to stop them.
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''

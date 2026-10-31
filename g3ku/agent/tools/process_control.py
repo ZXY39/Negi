@@ -25,9 +25,7 @@ class ProcessKillTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Stop a background process that exec started with background=true. Only pids owned by "
-            "the current session/task are accepted: pass the exact `pid` from the exec result. "
-            "Arbitrary pids, name-based kills, and the runtime's own processes are rejected."
+            "Stop a pid started by exec background=true; only pids owned by this session/task are accepted."
         )
 
     @property

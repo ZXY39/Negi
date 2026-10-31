@@ -3,12 +3,8 @@ kind: tool
 name: web_fetch
 display_name: Web Fetch
 description: &tool_description >-
-  Fetch one or more public web pages and extract readable text without a browser runtime.
-  Pass `url` for a single page, or `urls` (a list of URL strings, up to 20 per call) for a batch.
-  Every page that comes back is written in full to a text file and its row reports `saved_path`;
-  `text` is only an excerpt capped by `max_chars`. Set `include_text=false` to keep page bodies out
-  of the conversation and read or process the saved files instead. `save_dir` sends the files to a
-  directory you name; the default is `{temp}/web_fetch`.
+  Fetch public pages and extract readable text; full text is saved to files,
+  inline text is an excerpt.
 tool_result_delivery_contract: runtime_managed
 source:
   type: self_maintained

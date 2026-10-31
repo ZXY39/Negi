@@ -19,6 +19,10 @@ from typing import Any
 
 import yaml
 
+from g3ku.resources.description_limits import (
+    SKILL_DESCRIPTION_MAX_CHARS,
+    description_too_long_error,
+)
 from g3ku.resources.tool_settings import SkillInstallerToolSettings, runtime_tool_settings
 from g3ku.runtime.cancellation import ToolCancellationRequested
 
@@ -36,6 +40,10 @@ _TOKEN_ALLOWED_HOSTS = {
 
 class InstallError(Exception):
     """Raised when a skill import cannot be completed."""
+
+
+class DescriptionTooLongError(InstallError):
+    """The imported skill's manifest description exceeds the one-sentence cap."""
 
 
 class GitHubSource:
@@ -277,11 +285,20 @@ class SkillInstallerTool:
                 self._copy_skill_tree(skill_root, destination, cancel_token=cancel_token)
                 self._emit_progress_sync(loop, runtime, f"skill-installer: copied files into {destination}")
 
-            manifest_created = self._ensure_resource_manifest(
-                skill_root=destination,
-                requested_name=requested_name,
-                source=source,
-            )
+            upstream_manifest = destination / "resource.yaml"
+            upstream_description = self._read_manifest_description(upstream_manifest)
+            if len(upstream_description) > SKILL_DESCRIPTION_MAX_CHARS:
+                shutil.rmtree(destination, ignore_errors=True)
+                raise DescriptionTooLongError(description_too_long_error("skill", upstream_description))
+            try:
+                manifest_created = self._ensure_resource_manifest(
+                    skill_root=destination,
+                    requested_name=requested_name,
+                    source=source,
+                )
+            except DescriptionTooLongError:
+                shutil.rmtree(destination, ignore_errors=True)
+                raise
             detected_skill_id = self._read_manifest_name(destination / "resource.yaml") or requested_name
 
             refresh_payload = self._refresh_resources(destination)
@@ -547,6 +564,8 @@ class SkillInstallerTool:
             description = (
                 f"Imported from {source.owner}/{source.repo} ({source.ref}) at {source.path}."
             )
+        if len(description) > SKILL_DESCRIPTION_MAX_CHARS:
+            raise DescriptionTooLongError(description_too_long_error("skill", description))
 
         keywords = [requested_name, Path(source.path).name]
         frontmatter_name = str(frontmatter.get("name") or "").strip()
@@ -666,6 +685,16 @@ class SkillInstallerTool:
                 continue
             lines.append(line)
         return " ".join(lines).strip()
+
+    @staticmethod
+    def _read_manifest_description(path: Path) -> str:
+        if not path.exists():
+            return ''
+        try:
+            payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            return ''
+        return str((payload or {}).get("description") or "").strip() if isinstance(payload, dict) else ''
 
     @staticmethod
     def _read_manifest_name(path: Path) -> str | None:

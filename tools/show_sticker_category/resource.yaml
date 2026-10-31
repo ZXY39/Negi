@@ -2,7 +2,7 @@ schema_version: 1
 kind: tool
 name: show_sticker_category
 display_name: Sticker Category Sheet
-description: Show one sticker category as a single image with every tile badged by its index, so the model can pick an exact sticker. The image is attached to this turn's next request only; to send tile N write `[[sticker:<pack>/<category>/<N>]]` as the last line. Non-multimodal models get a reminder to fall back to the category marker.
+description: Render one sticker category as an indexed sheet for exact pick; the sheet attaches only to the next request.
 tool_result_delivery_contract: runtime_managed
 protocol: mcp
 mcp:

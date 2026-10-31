@@ -2,7 +2,7 @@ schema_version: 1
 kind: tool
 name: search_session_history
 display_name: Search Session History
-description: Search this session's persisted chat transcript by keywords. Keywords are literal and case-insensitive; match=all (default) requires every keyword in one message, match=any requires at least one. Returns message-level hits with role, timestamp, turn id and a match-centered snippet; action=open requires message_index from a previous hit and reads that full message. Reads full history even after context compression. Only the current session is searchable; internal rows, compression markers and the current turn are excluded by default. Tool-call payloads and attachment file contents are not indexed.
+description: Search this session's transcript by literal keywords; action=open reads one hit by message_index.
 tool_result_delivery_contract: runtime_managed
 protocol: mcp
 mcp:

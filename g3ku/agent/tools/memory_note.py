@@ -21,7 +21,7 @@ class MemoryNoteTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Load the full body of one memory note. `ref` is the handle token alone - the block prints it after a 'note:' label, and you pass what follows the label (e.g. nb16a5), not the label. A real note name also resolves, without the '.md' suffix."
+            "Load one memory note by the handle printed after 'note:' (pass the handle, not the label)."
         )
 
     @property

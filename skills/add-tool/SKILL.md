@@ -77,6 +77,7 @@ externaltools/          # 仅当这个工具驱动一份第三方安装时
 额外规则：
 
 - 必须有 `main/tool.py`，且它能被装载成工具对象。
+- `description` 是模型每轮都能看到的字节，硬上限 160 字符：只写一句话作用，细节写进 `toolskills/SKILL.md`。超限时资源会以待修复状态注册，`load_tool_context` 返回 `description_too_long`（含实际字符数与上限）。
 - `install_dir` 只作为陈旧记录的读取痕迹存在，新写的清单不要带。
 - 第三方本体落在 `<workspace>/externaltools/<tool_id>/`，不在 `tools/` 内。
 

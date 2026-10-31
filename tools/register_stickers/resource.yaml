@@ -2,7 +2,7 @@ schema_version: 1
 kind: tool
 name: register_stickers
 display_name: Register Stickers
-description: Register images that were copied into a sticker pack folder. Unregistered files are invisible to the model; registration renames them to the next free index (001, 002, …) and a category is capped at 36.
+description: Register copied images into a sticker pack category; unregistered files are not sendable, max 36 per category.
 tool_result_delivery_contract: runtime_managed
 protocol: mcp
 mcp:

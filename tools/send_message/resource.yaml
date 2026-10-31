@@ -2,7 +2,7 @@ schema_version: 1
 kind: tool
 display_name: "发送节点消息"
 name: send_message
-description: Send a message from the frontdoor to execution nodes in tasks owned by this session. Each target is judged on its own; terminal targets reject with a reason, and an under-acceptance target queues the message without waking the node (consumed only if the submission is rejected and the node is reactivated; the receipt says so).
+description: Send a message to execution nodes in this session's tasks; under-acceptance targets queue without waking.
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''

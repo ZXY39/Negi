@@ -34,12 +34,8 @@ class StickerSheetTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Show one sticker category as a single image: every sticker in it, each tile "
-            "badged with its index. Call it when a category-level pick is too coarse and you "
-            "want to choose the exact picture. The sheet is attached to THIS turn's next "
-            "request only — decide and send in the same reply. To send tile N write "
-            "`[[sticker:<pack>/<category>/<N>]]` as the last line; never invent an index. "
-            "At most one call per reply."
+            "Render one sticker category as an indexed sheet for exact pick; the sheet attaches only to "
+            "the next request."
         )
 
     @property

@@ -89,7 +89,7 @@
 
 1. `schema_version` 必须是 `1`，`kind` 必须是 `skill`。
 2. `name` 必须是最终要在本地使用的稳定 skill id，并与安装目录、后续调用 id 保持一致。
-3. `description` 必须完整、准确、适合检索；不能保留被截断、多行丢失、语义含糊或与真实用途不符的描述。
+3. `description` 必须完整、准确、适合检索；不能保留被截断、多行丢失、语义含糊或与真实用途不符的描述；硬上限 160 字符，超限安装会被拒绝并回滚。
 4. `trigger.keywords` 必须覆盖真实触发表达；如果当前关键词不足以让模型稳定想到它，要立即补齐。
 5. `requires.tools / bins / env` 必须反映 skill 的真实依赖；不能因为自动生成时未识别就长期保留空数组。
 6. `content.main` 必须指向 `SKILL.md`；若存在 `references/`、`scripts/`、`assets/`，`content` 中也应显式声明。
@@ -126,6 +126,7 @@
 - 如果是目录冲突，删除旧目录后重试
 - 如果是下载失败，改用 `method="git"` 或安装 `git`
 - 如果上游结构不标准，先安装可行部分，再交给 `skill-creator` 做二次适配
+- `description_too_long`：上游 or 生成出的 description 超过 160 字符；安装目录已回滚，先把上游 `SKILL.md` 的 description 改写成一句话，再重新安装
 - 如果日志里出现 `WinError 5` 指向临时目录中的 `.git/objects/pack/*`，优先升级到当前修复版本后再重试
 - 安装成功后 `load_skill_context` 不可加载，**不属于安装失败，不要重装**；按「安装后必须复核」的三态（B：待修复→修声明/装依赖后复核；C：未注册→核查 resource_refresh/catalog 并补注册）处置
 

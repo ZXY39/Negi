@@ -2,7 +2,7 @@ schema_version: 1
 kind: tool
 name: filesystem_stat
 display_name: Filesystem Stat
-description: Read-only measurement of files and directories (existence, real byte size, mtime, bounded listings and size aggregates).
+description: "Measure files/dirs: existence, real size, mtime, bounded listings; never searches contents or modifies."
 tool_result_delivery_contract: runtime_managed
 protocol: mcp
 mcp:
@@ -35,7 +35,7 @@ parameters:
     - paths
 governance:
   display_name: Measure Paths
-  description: Read-only measurement of files and directories (existence, real byte size, mtime, bounded listings and size aggregates).
+  description: "Measure files/dirs: existence, real size, mtime, bounded listings; never searches contents or modifies."
   risk_level: low
   destructive: false
   allowed_roles:

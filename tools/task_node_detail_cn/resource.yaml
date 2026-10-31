@@ -3,10 +3,7 @@ kind: tool
 display_name: "查询节点详情"
 name: task_node_detail
 description: >-
-  View a task node's detail and its related artifacts. Agents always receive the full execution
-  trace: every tool call with its arguments and its resolved output. Large results are
-  externalised to a content ref, so continue with content_search / content_open on that ref
-  instead of expecting the payload inline.
+  View one task node's detail and artifacts; large results are externalized to a content ref.
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''

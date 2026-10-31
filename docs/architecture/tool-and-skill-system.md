@@ -181,6 +181,10 @@ exec 与 memory 工具：
 
 会话键只从工具运行时取，模型不能传 `session_id` 或 `path`，因此没有跨会话读取面。工具级信任判据只服务 owner 会话：第三方会话即使能看见这颗 CEO 工具（`jailed` 档会拿到 CEO 工具面）也会被拒，因为转录可能包含信任降级前的历史。结果走普通工具结果信封；默认 8 条 × 240 字符，避免把上下文撑爆。
 
+### 3.2.2 描述预算（160 字符）
+
+工具的函数级 description 与 skill 的 `resource.yaml` description 各限 160 字符（常量住 `g3ku/resources/description_limits.py`）。运行时按资源首次出现建立基线：基线内的存量描述原样放行；基线之后新增或改名的资源超限即 `description_too_long`，工具以 `RepairRequiredTool` 进入待修复、skill 在 `load_skill_context` 返回 `skill_repair_required`，错误正文给出实际字符数与上限。`skill-installer` 在写入后复核同一上限，超限即删除本次安装目录并返回 `ok:false`，不留下半装资源。细节住 toolskill / SKILL.md 正文，description 只写一句话作用。
+
 ### 3.3 candidate skills
 
 候选 skill 与 candidate tools 类似，但机制更轻：

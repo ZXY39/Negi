@@ -182,9 +182,8 @@ class DouyinNativeTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Douyin browsing via the local logged-in Edge (feed/search/video/comments/"
-            "storyboard/watch reports); sending stays off until send_policy.json and "
-            "allow_send permit it."
+            "Douyin browsing via the local logged-in Edge; sending stays off until send_policy.json "
+            "and allow_send permit it."
         )
 
     @property

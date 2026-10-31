@@ -1,7 +1,7 @@
 schema_version: 1
 kind: tool
 name: memory_update
-description: Queue natural-language durable memory requests for the memory agent.
+description: Queue a long-term memory change; do not edit `memory/` files. This only submits it—never say it is saved, revised or removed.
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''

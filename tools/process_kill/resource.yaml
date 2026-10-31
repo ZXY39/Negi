@@ -2,8 +2,7 @@ schema_version: 1
 kind: tool
 name: process_kill
 display_name: Process Kill
-description: Stop a background process that exec started with background=true
-  (session/task-scoped ownership, not arbitrary pids).
+description: Stop a pid started by exec background=true; only pids owned by this session/task are accepted.
 tool_result_delivery_contract: runtime_managed
 protocol: mcp
 mcp:

@@ -109,6 +109,7 @@ timeout_policy:            # 可选：统一 timeout 合同行为声明（缺省
 ## Toolskill 规则
 
 - 所有工具都要提供 `toolskills/SKILL.md`
+- description 硬上限 160 字符：tool 的函数级 description 与 skill 的 `resource.yaml` description 同限，只写一句话作用；超限的新增资源以待修复状态注册，`load_tool_context` / `load_skill_context` 返回 `description_too_long`
 - `toolskills/SKILL.md` 需要和 `resource.yaml`、实际实现保持一致；参数、默认行为、输出结构变化时必须同步更新
 - 驱动第三方安装的工具必须说明：
   - 何时使用
