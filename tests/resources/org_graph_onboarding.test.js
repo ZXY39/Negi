@@ -15,7 +15,7 @@ const CSS = fs
     .readFileSync(path.join(__dirname, "..", "..", "g3ku", "web", "frontend", "org_graph.css"), "utf8")
     .replace(/\r\n/g, "\n");
 
-const PERSONA_CHAIN_TOAST = "为了使人设生效，请先配置必需的模型链；记忆Agent未配置时人设暂不处理";
+const PERSONA_CHAIN_TOAST = "为了使人设生效，主agent和记忆agent模型链不能为空，点击保存后生效";
 
 function makeElement(id, { backdrop = false } = {}) {
     const listeners = {};
@@ -265,7 +265,7 @@ test("persona onboarding opens on first run, skip moves to the model step", asyn
     assert.ok(!harness.calls.toasts.some((item) => item.text === PERSONA_CHAIN_TOAST));
 });
 
-test("onboarding chain gate does not block saving when the memory chain is empty", async () => {
+test("chain gate requires both main and memory chains when persona input exists", async () => {
     const harness = buildHarness({
         status: {
             should_run: true,
@@ -282,10 +282,10 @@ test("onboarding chain gate does not block saving when the memory chain is empty
     harness.documentListeners.DOMContentLoaded();
     await flush();
 
-    // 记忆 Agent 的模型链是可选配置；保存只由模型页的全局必需角色校验。
-    harness.context.S.modelCatalog.roleDrafts = { ceo: ["m1"], execution: ["m1"], inspection: ["m1"], memory: [] };
-    assert.equal(harness.context.G3kuOnboarding.validateChainsBeforeSave(), "");
-    harness.context.S.modelCatalog.roleDrafts = { ceo: [], execution: [], inspection: [], memory: [] };
+    assert.equal(harness.context.G3kuOnboarding.validateChainsBeforeSave(), PERSONA_CHAIN_TOAST);
+    harness.context.S.modelCatalog.roleDrafts = { ceo: ["m1"], memory: [] };
+    assert.equal(harness.context.G3kuOnboarding.validateChainsBeforeSave(), PERSONA_CHAIN_TOAST);
+    harness.context.S.modelCatalog.roleDrafts = { ceo: ["m1"], memory: ["m2"] };
     assert.equal(harness.context.G3kuOnboarding.validateChainsBeforeSave(), "");
 });
 
@@ -316,32 +316,6 @@ test("saving chains completes onboarding once and reports the jobs", async () =>
     assert.equal(harness.calls.completed, 1);
 });
 
-test("completion with an unconfigured memory agent reports persona saved without processing", async () => {
-    const harness = buildHarness({
-        status: {
-            should_run: true,
-            completed: false,
-            persona_step_done: true,
-            has_models: true,
-            has_persona: false,
-            has_persona_input: true,
-            description: "",
-            photos: ["me.png"],
-            photo_album: [{ name: "me.png", url: "u", thumb_url: "t" }],
-        },
-        completeResult: { ok: true, jobs: ["persona_saved", "photo_session_skipped_memory_missing"] },
-    });
-    harness.documentListeners.DOMContentLoaded();
-    await flush();
-
-    await harness.context.G3kuOnboarding.onChainsSaved();
-    assert.equal(harness.calls.completed, 1);
-    const toast = harness.calls.toasts.find((item) => item.title === "人设暂未处理");
-    assert.ok(toast, JSON.stringify(harness.calls.toasts));
-    assert.equal(toast.kind, "info");
-    assert.ok(!harness.calls.toasts.some((item) => item.title === "人设已提交"));
-});
-
 test("already-configured chains complete onboarding without forcing a chain edit", async () => {
     const harness = buildHarness({
         status: {
@@ -360,7 +334,7 @@ test("already-configured chains complete onboarding without forcing a chain edit
         ceo: ["m1"],
         execution: ["m1"],
         inspection: ["m1"],
-        memory: [],
+        memory: ["m2"],
     };
     harness.documentListeners.DOMContentLoaded();
     await flush();
@@ -368,7 +342,7 @@ test("already-configured chains complete onboarding without forcing a chain edit
     assert.equal(harness.calls.editing, 0);
 });
 
-test("a persona with an empty saved memory chain completes onboarding", async () => {
+test("a persona with an empty saved memory chain still enters chain editing", async () => {
     const harness = buildHarness({
         status: {
             should_run: true,
@@ -390,8 +364,12 @@ test("a persona with an empty saved memory chain completes onboarding", async ()
     };
     harness.documentListeners.DOMContentLoaded();
     await flush();
+    assert.equal(harness.calls.completed, 0);
+    assert.equal(harness.calls.editing, 1);
+
+    harness.context.S.modelCatalog.roles.memory = ["m2"];
+    await harness.context.G3kuOnboarding.onChainsSaved();
     assert.equal(harness.calls.completed, 1);
-    assert.equal(harness.calls.editing, 0);
 });
 
 test("empty persona shows red dots and can be initialized from the dialog", async () => {
@@ -474,7 +452,7 @@ test("submitting the onboarding description writes it and clears the red dots im
     assert.equal(harness.elements["persona-dialog-description"].textContent, "你是测试助手。");
 });
 
-test("the onboarding drag hint closes once the required chains have roles", async () => {
+test("the onboarding drag hint waits for all four required chains", async () => {
     const harness = buildHarness({
         status: {
             should_run: true,
@@ -496,9 +474,7 @@ test("the onboarding drag hint closes once the required chains have roles", asyn
     assert.ok(dragToast, JSON.stringify(harness.calls.toasts));
     assert.equal(dragToast.persistent, true);
     assert.equal(dragToast.closable, false);
-    // 记忆 Agent 不在必需链里；提示只点名全局必需角色。
-    assert.ok(!String(dragToast.text || "").includes("记忆"));
-    assert.ok(String(dragToast.text || "").includes("执行Agent"));
+    assert.ok(String(dragToast.text || "").includes("记忆Agent"));
     assert.ok(harness.intervals.length >= 1);
 
     harness.context.S.modelCatalog.roleEditing = true;
@@ -508,6 +484,10 @@ test("the onboarding drag hint closes once the required chains have roles", asyn
         inspection: ["m1"],
         memory: [],
     };
+    harness.intervals[0].handler();
+    assert.equal(harness.calls.toastClosed, 0, "空记忆链不许关掉拖拽提示");
+
+    harness.context.S.modelCatalog.roleDrafts.memory = ["m2"];
     harness.intervals[0].handler();
     assert.equal(harness.calls.toastClosed, 1);
 });

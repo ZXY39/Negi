@@ -124,7 +124,8 @@
   }
 
   function missingRequiredModelRoleLabels() {
-    return ["ceo", "execution", "inspection"]
+    // 记忆 Agent 的模型链不是可选项：任何一次模型链保存都必须先把它配齐。
+    return ["ceo", "execution", "inspection", "memory"]
       .filter((scope) => !normalizeModelRoleChain(S.modelCatalog.roleDrafts?.[scope] || []).length)
       .map((scope) => SCOPE_LABELS[scope] || scope);
   }

@@ -432,7 +432,7 @@ class ModelManager:
                 self._require_chain_model(normalized_scope, key)
                 seen.add(key)
                 cleaned.append(key)
-            if not cleaned and normalized_scope != "memory":
+            if not cleaned:
                 raise ValueError("model_keys must not be empty")
             prepared["model_keys"] = cleaned
         if max_iterations is not _UNSET:

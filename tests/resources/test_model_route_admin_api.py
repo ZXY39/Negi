@@ -223,6 +223,28 @@ def test_legacy_model_keys_payload_still_saves_flat_shape(tmp_path: Path, monkey
     assert saved['models']['roles']['inspection'] == ['m_a', 'm_b']
 
 
+def test_bulk_route_save_rejects_empty_memory_chain(tmp_path: Path, monkeypatch) -> None:
+    """记忆 Agent 的模型链不是可选项：批量保存也不能把它留空。"""
+    path = _write_config(tmp_path, roles=_LEGACY_ROLES)
+    monkeypatch.chdir(tmp_path)
+
+    response = _client().put(
+        '/api/llm/routes',
+        json={
+            'updates': {
+                'ceo': {'model_keys': ['m_x']},
+                'memory': {'model_keys': []},
+            }
+        },
+    )
+
+    assert response.status_code == 400
+    assert 'model_keys must not be empty' in response.text
+    saved = json.loads(path.read_text(encoding='utf-8'))
+    # 校验发生在写盘之前：同一次批量里合法的 scope 也不能半提交。
+    assert saved['models']['roles']['memory'] == []
+
+
 def test_explicit_route_entries_reject_duplicates(tmp_path: Path, monkeypatch) -> None:
     _write_config(tmp_path, roles=_LEGACY_ROLES)
     monkeypatch.chdir(tmp_path)

@@ -217,11 +217,13 @@ def test_org_graph_app_blocks_role_chain_save_until_required_scopes_are_filled()
     assert result["updateCallCount"] == 0
     assert "执行Agent" in str(result["error"])
     assert "检验Agent" in str(result["error"])
+    assert "记忆Agent" in str(result["error"])
     assert "执行Agent" in str(result["toastText"])
     assert "检验Agent" in str(result["toastText"])
+    assert "记忆Agent" in str(result["toastText"])
 
 
-def test_org_graph_llm_blocks_role_chain_save_until_required_scopes_are_filled() -> None:
+def test_org_graph_llm_blocks_role_chain_save_when_memory_scope_is_empty() -> None:
     result = _run_node_script(
         """
         const fs = require("fs");
@@ -240,8 +242,8 @@ def test_org_graph_llm_blocks_role_chain_save_until_required_scopes_are_filled()
             rolesDirty: true,
             roleDrafts: {
               ceo: ["gpt-5.4"],
-              execution: [],
-              inspection: [],
+              execution: ["gpt-5.4"],
+              inspection: ["gpt-5.4"],
               memory: [],
             },
             roleIterationDrafts: { ceo: 8, execution: 8, inspection: 8, memory: 5 },
@@ -351,7 +353,5 @@ def test_org_graph_llm_blocks_role_chain_save_until_required_scopes_are_filled()
     )
 
     assert result["updateCallCount"] == 0
-    assert "执行Agent" in str(result["error"])
-    assert "检验Agent" in str(result["error"])
-    assert any("执行Agent" in str(item.get("text") or "") for item in result["toasts"])
-    assert any("检验Agent" in str(item.get("text") or "") for item in result["toasts"])
+    assert "记忆Agent" in str(result["error"])
+    assert any("记忆Agent" in str(item.get("text") or "") for item in result["toasts"])

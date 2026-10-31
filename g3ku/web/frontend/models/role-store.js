@@ -6,8 +6,8 @@ function modelScopeLabel(scope) {
 }
 
 function missingRequiredModelRoleLabels(source = "draft") {
+    // 四个角色都是保存模型链的必需项；记忆 Agent 不能留空。
     return MODEL_SCOPES
-        .filter((item) => item.key !== "memory")
         .map((item) => item.key)
         .filter((scope) => modelScopeChain(scope, source).length < 1)
         .map((scope) => modelScopeLabel(scope));
