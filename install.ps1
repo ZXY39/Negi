@@ -870,19 +870,22 @@ if ($Mirror) {
     $env:UV_PYTHON_INSTALL_MIRROR = $PythonMirror
     Write-Step "mirror mode: index=$PyPiMirror python=$PythonMirror"
 }
-$kit = $null
+# PowerShell variable names are case-insensitive: a local spelled $kit is the same
+# variable as the -Kit parameter, and assigning it there silently un-installs the kit
+# argument (the first probe ran the online lane with -Kit pointing at a real kit).
+$resolvedKit = $null
 $kitStage = ''
 if ($Kit) {
     $kitStage = Join-Path ([System.IO.Path]::GetTempPath()) ('negi-kit-' + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Force -Path $kitStage | Out-Null
-    $kit = Resolve-OfflineKit -KitArg $Kit -RefValue $Ref -RefExplicit:($PSBoundParameters.ContainsKey('Ref')) -StageRoot $kitStage
+    $resolvedKit = Resolve-OfflineKit -KitArg $Kit -RefValue $Ref -RefExplicit:($PSBoundParameters.ContainsKey('Ref')) -StageRoot $kitStage
     # Persist uv before Ensure-Uv, or a device without uv would be sent to astral.sh -
     # the one network call an offline install must not make.
-    if (-not (Get-UvCommand)) { $null = Install-BundledUv -Path $kit.Uv }
+    if (-not (Get-UvCommand)) { $null = Install-BundledUv -Path $resolvedKit.Uv }
 }
 $uv = Ensure-Uv
-Update-Code -Root $Dir -Kit $kit
-Install-Environment -uv $uv -Root $Dir -Kit $kit
+Update-Code -Root $Dir -Kit $resolvedKit
+Install-Environment -uv $uv -Root $Dir -Kit $resolvedKit
 Clear-LongPathTree -Path $kitStage
 
 $icon = Copy-NegiIcon -Root $Dir
