@@ -10,6 +10,7 @@ rather than deleted files (a delete would show up as tracked changes and
 
 from __future__ import annotations
 
+import ast
 import os
 import re
 import shutil
@@ -76,16 +77,45 @@ def test_every_listed_name_is_a_tracked_top_level() -> None:
         assert name in tracked, f"{name} is excluded but not tracked, so the list is stale"
 
 
+def _docstring_lines(path: Path) -> set[int]:
+    """Line numbers occupied by docstrings, which are prose like any comment.
+
+    A module docstring pointing at a plan document is not the module reading that
+    document, and the plan documents are exactly what the exclusion is for.
+    """
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+    except (SyntaxError, ValueError):
+        return set()
+    occupied: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        body = getattr(node, "body", None)
+        if not body:
+            continue
+        first = body[0]
+        if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(
+            first.value.value, str
+        ):
+            occupied.update(range(first.lineno, (first.end_lineno or first.lineno) + 1))
+    return occupied
+
+
 def _code_lines(path: Path):
-    """Yield (line number, text) for lines that are not whole-line comments.
+    """Yield (line number, text) for lines that are not prose.
 
     Naming a test file in prose is not the same as reading that path at runtime, and
-    four shipped modules do exactly that (their equivalence notes point at
-    `tests/resources/...`). Only lines that can execute count as readers.
+    shipped modules do exactly that (equivalence notes point at
+    `tests/resources/...`, a sticker docstring points at a `work/` plan). Only lines
+    that can execute count as readers.
     """
+    docstring_lines = _docstring_lines(path) if path.suffix == ".py" else set()
     for lineno, line in enumerate(
         path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1
     ):
+        if lineno in docstring_lines:
+            continue
         stripped = line.strip()
         if stripped.startswith(("#", "//", "/*", "* ")):
             continue
@@ -111,6 +141,18 @@ def test_no_runtime_code_reads_an_excluded_top_level() -> None:
                 if re.search(rf"(?<![\w.-]){re.escape(name)}[/\\]", line):
                     offenders.append(f"{installer.name}:{lineno} -> {name}/")
     assert not offenders, "an excluded path has a reader: " + ", ".join(offenders)
+
+
+def test_prose_is_not_a_reader_but_code_is(tmp_path: Path) -> None:
+    """The judge has to stay asymmetric, or it waves through a real path read."""
+    sample = tmp_path / "sample.py"
+    sample.write_text(
+        '"""See work/plan.md for the measured recipe."""' + "\n" + 'PATH = "work/plan.md"' + "\n",
+        encoding="utf-8",
+    )
+    judged = dict(_code_lines(sample))
+    assert 1 not in judged, "a docstring line must not read as a reader"
+    assert "work/" in judged[2], "an executable string must still be judged"
 
 
 def test_both_installers_read_the_list_from_the_payload() -> None:
