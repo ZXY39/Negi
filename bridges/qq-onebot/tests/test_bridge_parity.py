@@ -2,7 +2,7 @@
 
 Fakes stand in for the OneBot endpoint and the g3ku API; the dispatcher is
 exercised against the legacy QQ semantics parity table (control commands,
-session mapping, require-at triggering, queued receipts, progress throttling,
+session mapping, require-at triggering, queued submissions, progress throttling,
 final splitting, outbound push).
 """
 
@@ -338,12 +338,15 @@ async def test_stop_command_cancels_session():
 
 
 @pytest.mark.asyncio
-async def test_queued_status_forwards_receipt():
+async def test_queued_status_does_not_send_receipt():
+    """服务端排队时响应照旧带 `receipt`，桥不发这一句：消息已提交，渠道端不该
+    再多出一条机器回执。"""
     dispatcher, g3ku, onebot = _dispatcher(send_status="queued")
     await dispatcher.handle_onebot_event(
         {"post_type": "message", "message_type": "private", "user_id": 7, "message": "追一句"}
     )
-    assert onebot.private == [("7", "收到，将在当前任务中一并处理。")]
+    assert [item["text"] for item in g3ku.sent] == ["追一句"]
+    assert onebot.private == []
 
 
 @pytest.mark.asyncio

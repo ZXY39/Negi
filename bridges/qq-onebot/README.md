@@ -33,7 +33,7 @@ python -m qq_onebot_bridge --config bridge.config.json
 | 私聊/群聊会话隔离 | `external_key = qq:dm:{user_id} / qq:group:{group_id}`（群聊共享上下文） |
 | 「暂停/暫停/pause//pause」+ 标点变体 | 桥侧归一化识别 → `POST /turns/{turn_id}/pause`；回执「已暂停。」/「当前没有正在进行的任务。」 |
 | 「停止//stop」 | → `POST /sessions/{id}/cancel` |
-| 运行中追发回执「收到，将在当前任务中一并处理。」 | messages 返回 `status:"queued"` 时转发 `receipt` |
+| 运行中追发回执「收到，将在当前任务中一并处理。」 | 不转发：messages 回 `status:"queued"` 时桥保持静默（`receipt` 仍在响应里供对接方读，排队条目由服务端以 durable `pending` 行接住，会话回到空闲后一并回答） |
 | progressMode 里程碑（5s 节流、≤3 行、🔧/⚠️） | 消费 `progress` 事件，桥侧按 `progress_min_interval_seconds` / `progress_max_lines_per_message` 节流合并（**g3ku 发全量，节流职责在桥**——这是重建的关键职责转移） |
 | replyFinalOnly | `behavior.final_only=true`：忽略 progress，只发 `reply.final` |
 | QQ 单条长度上限 | `split_outbound_text` 按 `max_message_length` 优先按行分段 |
@@ -57,5 +57,5 @@ python -m pytest bridges/qq-onebot/tests -q
 ```
 
 真机验证清单（需 QQ 凭据 + NapCat）：私聊/群聊各一轮 发消息→progress 里程碑
-→final；运行中追发→回执；「暂停」→暂停生效；g3ku heartbeat 定时提醒→主动送达；
+→final；运行中追发→渠道端静默、会话空闲后一并回答；「暂停」→暂停生效；g3ku heartbeat 定时提醒→主动送达；
 重启桥→SSE 重连不丢事件。

@@ -113,7 +113,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 渠道会话短暂出现在本地 web 会话列表、刷新后激活会话被切回本地会话、渠道回合无法在网页暂停 → `web-and-admin.md`「CEO Session List Interaction Contract」+「Active-Turn Button Semantics」
 - 网页在渠道会话里发不出消息（回 `channel_session_readonly`）、或发出去了但渠道端没有回复 → `external-agent-api.md`「会话注册表与 key 命名空间」+「回合契约」
 - 节点反复调用文件编辑类工具失败、或同一编辑被重复提交 → `tool-and-skill-system.md`「fixed builtin tools」（`filesystem_edit` 平面字段契约）（模型面平面字段与校验面宽车道的分工、`Already applied:` 幂等车道）
-- 用户连续发送消息时助手只看到最后一条、或渠道消息收到重复回复 → `runtime-overview.md`「prompt_batch 批次回合内容合并」+ `external-agent-api.md`「回合契约」与「内置官方 QQ 适配器」
+- 用户连续发送消息时助手只看到最后一条、渠道消息收到重复回复、或运行中追发时渠道端一句回执都不出现 → `runtime-overview.md`「prompt_batch 批次回合内容合并」+ `external-agent-api.md`「回合契约」与「内置官方 QQ 适配器」
 - Node error pause is not delivered to the source session, or node-error heartbeats retry forever -> `heartbeat-system.md`「Task Node Error Delivery」
 - 验收反复打回同一交付、任务长时间停在「执行→验收」循环而没有判失败（是否存在打回次数上限）→ `main-task-runtime.md`「验收节点：提前创建、激活与握手重派发」（验收拒收无次数上限：打回只发反馈并复活执行节点，不终态化任务）
 - 节点详情里 `submit_final_result` 的 `summary` 是 `auto-wrapped plain-text final result`、`evidence` 全是 `Auto-collected tool result from X.` → 该轮没有真实提交，纯文本被当成规划的残留；判据与两条打回车道见 `tool-hydration-and-callable-chain.md`「严格纯文本打回与固定内置集合」

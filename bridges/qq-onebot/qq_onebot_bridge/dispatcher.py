@@ -509,17 +509,16 @@ class Dispatcher:
         event_id = str(event.get("event_id") or "").strip() or f"ob:{event.get('message_id')}"
         sender = {"id": str(event.get("user_id") or ""), "name": str(event.get("sender", {}).get("nickname") or "")} if isinstance(event.get("sender"), dict) else None
 
-        result = await self._g3ku.send_message(
+        # 会话正忙时服务端排队并回 `status:"queued"` + `receipt`。桥不转发那句回执：
+        # 排队条目以转录 pending 行为 durable 记录，会话回到空闲后照常接住，追发的
+        # 用户已经看得见自己那条消息。`receipt` 仍留在 /api/v1 响应里给对接方读。
+        await self._g3ku.send_message(
             session_id,
             text=text,
             attachments=attachments or None,
             sender=sender,
             idempotency_key=event_id,
         )
-        if result.get("status") == "queued":
-            receipt = str(result.get("receipt") or "")
-            if receipt:
-                await self._send_to(external_key, receipt)
 
     async def stop(self) -> None:
         self._streaming.set()

@@ -127,9 +127,6 @@ def _media_upload_timeout(body_bytes: int) -> float:
     return _MEDIA_UPLOAD_FIXED_BUDGET_SECONDS + transfer
 
 
-# 服务端排队回执兜底文案（正常取 /api/v1 响应里的 receipt）。
-_QUEUED_RECEIPT_FALLBACK_TEXT = "收到，将在当前任务中一并处理。"
-
 # 语音转写进正文时带来源标记：不带标记，听错的语音和手打文字在模型眼里无法区分，
 # 它就没办法说"你刚发的语音里那句我没听清"。识别失败另起一行措辞——把失败也写成
 # "机器识别结果：" 等于让模型把一句失败说明当成用户说的话。
@@ -791,14 +788,20 @@ async def run_qq_official_bridge(
             metadata={"chat_type": chat_type} if chat_type else None,
         )
         payload = response if isinstance(response, dict) else {}
-        if str(payload.get("status") or "").strip() == "queued":
-            # 会话正忙、消息已排队：回执必须送达用户，否则用户看不到任何反馈，
-            # 会以为消息被吞掉而重复发送。
-            receipt = str(payload.get("receipt") or "").strip() or _QUEUED_RECEIPT_FALLBACK_TEXT
-            try:
-                await deliver(external_key, receipt)
-            except Exception:  # noqa: BLE001 - 回执失败不影响消息本身
-                logger.warning("qq-official failed to deliver queued receipt to {}", external_key)
+        if payload.get("binding"):
+            # 绑定码的确认与排队回执共用 `receipt` 这一个字段，但只有前者要投给用户：
+            # 绑定不创建回合、不入转录，私聊里发完码若一句都不回，操作者无从知道码
+            # 是注册成功、作废了、还是失败了。
+            receipt = str(payload.get("receipt") or "").strip()
+            if receipt:
+                try:
+                    await deliver(external_key, receipt)
+                except Exception:  # noqa: BLE001 - 回执失败不影响码本身的处理
+                    logger.warning("qq-official failed to deliver binding receipt to {}", external_key)
+        # 会话正忙、消息已排队（`status:"queued"`）时桥保持静默：排队条目在转录里是
+        # durable 的 `pending` 行，会话回到空闲后由派发通道照常接住，追发的用户已经
+        # 看得见自己那条消息，再回一句机器话只是噪音。`receipt` 仍留在 /api/v1 的
+        # 响应里给对接方读（网页与 MCP 网关用它分辨"追加还是撞车"）。
 
     def _absolute_media_url(url: str) -> str:
         """Event attachment URLs are root-relative signed viewer paths; the

@@ -656,8 +656,8 @@ async def test_bridge_sends_no_idempotency_key_when_event_id_missing(monkeypatch
 
 
 class _QueuedFakeExternalApiClient(FakeExternalApiClient):
-    """Every submission reports the session busy so the bridge must surface the
-    queued receipt to the QQ user instead of staying silent."""
+    """Every submission reports the session busy, and one of them is a Master
+    binding confirmation that shares the same ``receipt`` field."""
 
     async def send_message(
         self,
@@ -671,28 +671,42 @@ class _QueuedFakeExternalApiClient(FakeExternalApiClient):
     ) -> dict:
         _ = (sender, metadata)
         self.sent.append((session_id, text, idempotency_key or "", list(attachments or [])))
-        if text == "有回执":
-            return {"ok": True, "status": "queued", "receipt": "自定义排队回执", "turn_id": None}
+        if text == "绑定码":
+            return {
+                "ok": True,
+                "status": "queued",
+                "receipt": "已注册为 Master。",
+                "binding": True,
+                "turn_id": None,
+            }
+        if text == "带回执":
+            return {"ok": True, "status": "queued", "receipt": "收到，将在当前任务中一并处理。", "turn_id": None}
         return {"ok": True, "status": "queued", "turn_id": None}
 
 
 @pytest.mark.asyncio
-async def test_bridge_delivers_queued_receipt_to_user(monkeypatch: pytest.MonkeyPatch) -> None:
-    """会话正忙、消息已排队时必须把回执送达用户：静默会让用户以为消息被吞
-    而重复发送（P2）。响应缺 receipt 时用兜底文案。"""
+async def test_bridge_stays_silent_on_queue_but_delivers_binding_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """运行中追发（`status:"queued"`）不再向用户回一句机器话——排队条目已在转录里
+    是 durable 的 pending 行，回合回到空闲后照常接住。绑定码确认（同一个 `receipt`
+    字段、另带 `binding`）照旧必须送达：它不创建回合、不入转录，不发就是彻底静默。"""
     media = _media_transport({})
     task, client = await _start_bridge(monkeypatch, media, client_cls=_QueuedFakeExternalApiClient)
     try:
-        await client.on_c2c_message_create(_c2c_message("有回执", [], message_id="q1"))
-        await client.on_c2c_message_create(_c2c_message("无回执", [], message_id="q2"))
-        await _wait_until(lambda: len(client.api.calls) >= 2)
+        await client.on_c2c_message_create(_c2c_message("无回执追发", [], message_id="q1"))
+        ext = FakeExternalApiClient.instances[-1]
+        await _wait_until(lambda: ext.sent)
+        await client.on_c2c_message_create(_c2c_message("带回执", [], message_id="q2"))
+        await _wait_until(lambda: len(ext.sent) >= 2)
+        await client.on_c2c_message_create(_c2c_message("绑定码", [], message_id="q3"))
+        await _wait_until(lambda: len(client.api.calls) >= 1)
+        # 两条追发都在回执之前提交完毕，桥若在队列上补发任何东西这里就会多出一行。
+        await asyncio.sleep(0.05)
         assert client.api.calls == [
-            ("post_c2c_message", {"openid": "u9", "markdown": {"content": "自定义排队回执"}, "msg_type": 2}),
-            (
-                "post_c2c_message",
-                {"openid": "u9", "markdown": {"content": bridge_module._QUEUED_RECEIPT_FALLBACK_TEXT}, "msg_type": 2},
-            ),
+            ("post_c2c_message", {"openid": "u9", "markdown": {"content": "已注册为 Master。"}, "msg_type": 2}),
         ]
+        assert [item[1] for item in ext.sent] == ["无回执追发", "带回执", "绑定码"]
     finally:
         task.cancel()
         with suppress(asyncio.CancelledError):
