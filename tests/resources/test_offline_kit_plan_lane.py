@@ -179,6 +179,10 @@ def test_builder_plans_and_snapshots_from_the_same_ref() -> None:
     )
     assert "'sync', '--frozen', '--offline', '--no-index'" in script, "offline is the whole point"
     assert "import main.protocol" in script, "the self-check has to import something real"
+    assert "Push-Location $proj" in script, (
+        "main/ is a top-level directory, not part of the editable install: the "
+        "import check has to run from the installed project, like a device does"
+    )
     assert "$tarExe, '-a', '-cf'" in script, "the zip step must call the pinned bsdtar"
     assert "	" not in script, "a literal tab means an escape was eaten while writing this file"
 

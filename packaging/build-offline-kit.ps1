@@ -378,7 +378,17 @@ if (-not $SkipChecks) {
         }
         $venvPython = Join-Path $proj '.venv\Scripts\python.exe'
         if (-not (Test-Path -LiteralPath $venvPython)) { $venvPython = Join-Path $proj '.venv/bin/python' }
-        Invoke-Checked @($venvPython, '-c', 'import main.protocol, g3ku.cli.commands, g3ku.web.launcher; import g3ku; print("[kit] offline import ok, version " + g3ku.__version__)') -Where $proj
+        # From the project directory, like a device: only g3ku is installed as an
+        # editable package, while main/ is a top-level directory the app imports from
+        # its working directory. No nested quotes either - PowerShell eats them.
+        Push-Location $proj
+        try {
+            Invoke-Checked @($venvPython, '-c',
+                'import main.protocol, g3ku.cli.commands, g3ku.web.launcher, g3ku; print(g3ku.__version__)') -Where $proj
+        }
+        finally {
+            Pop-Location
+        }
     }
     finally {
         Remove-Tree -Path $probe
