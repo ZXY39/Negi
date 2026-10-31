@@ -13,7 +13,7 @@
 <p align="center">
   <a href="https://qm.qq.com/q/zQWjzUD7x0"><img src="assets/qq-group.png" alt="QQ 群二维码：葱烧大肥鱼厨艺分享，群号 629681546" width="260"></a>
   <br>
-  扫码加入 QQ 群「葱烧大肥鱼厨艺分享」，群号 629681546
+  扫码加入 QQ 群「葱烧大肥鱼厨艺分享」反馈，群号 629681546
 </p>
 
 ## 它能做什么
