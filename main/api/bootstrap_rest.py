@@ -555,7 +555,10 @@ async def bootstrap_config_bundle_export(payload: dict = Body(...)):
         _bundle_flag(payload, "include_stickers", "includeStickers", default=False),
     )
     try:
-        item = export_bundle(
+        # 打包是纯 CPU/磁盘活，贴纸面能跑上百秒：放线程里，WebSocket、审计与
+        # 其它接口照常服务，页面也能收到自己发起的进度。
+        item = await asyncio.to_thread(
+            export_bundle,
             Path.cwd(),
             password=str(payload.get("password") or ""),
             use_project_password=use_project,
@@ -575,6 +578,11 @@ async def bootstrap_config_bundle_download(filename: str):
     if not path.is_file():
         raise HTTPException(status_code=404, detail="bundle_not_found")
     return FileResponse(path, media_type="application/octet-stream", filename=path.name)
+
+
+def _stage_bundle_upload(file: UploadFile, staged: Path) -> None:
+    with staged.open("wb") as handle:
+        shutil.copyfileobj(file.file, handle)
 
 
 @router.post("/bootstrap/config-bundle/import")
@@ -601,15 +609,16 @@ async def bootstrap_config_bundle_import(
     staged = staging_dir / f"{uuid4().hex}{BUNDLE_EXTENSION}"
     try:
         staging_dir.mkdir(parents=True, exist_ok=True)
-        with staged.open("wb") as handle:
-            shutil.copyfileobj(file.file, handle)
+        await asyncio.to_thread(_stage_bundle_upload, file, staged)
     except Exception as exc:
         logger.warning("config bundle import: staging failed: {}", exc)
         staged.unlink(missing_ok=True)
         raise HTTPException(status_code=500, detail="bundle_staging_failed") from exc
     try:
         try:
-            item = import_bundle(
+            # 解密、解压、整面替换同样可能跑上分钟；在线程里跑，事件循环继续服务。
+            item = await asyncio.to_thread(
+                import_bundle,
                 Path.cwd(),
                 archive_path=staged,
                 password=password,

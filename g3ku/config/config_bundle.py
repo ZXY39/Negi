@@ -15,6 +15,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import zlib
 from collections.abc import Sequence
 from contextlib import closing
 from datetime import UTC, datetime
@@ -49,19 +50,29 @@ from g3ku.stickers.catalog import (
 from g3ku.stickers.registry import REGISTRY_NAME
 
 BUNDLE_KIND = "g3ku-config-bundle"
-BUNDLE_VERSION = 5
-# v2 只有配置面，v3 增加记忆面，v4 增加人设面；旧文件都继续认，不能因为我们多加了面就失效。
+BUNDLE_VERSION = 6
+# v2 只有配置面，v3 增加记忆面，v4 增加人设面，v5 增加表情包面；旧文件都继续认，
+# 不能因为我们多加了面就失效。v6 起载荷在 Fernet 前经 zlib 压缩：条目的 base64 文本
+# 自带 1/3 冗余，压缩把信封从 2.4 倍素材体积拉回约 1.4 倍。压缩与否只由外层版本决定，
+# 旧版本包按原样解，不做猜测。
 CONFIG_ONLY_BUNDLE_VERSION = 2
 MEMORY_BUNDLE_VERSION = 3
 PERSONA_BUNDLE_VERSION = 4
 STICKERS_BUNDLE_VERSION = 5
+COMPRESSED_BUNDLE_VERSION = 6
 SUPPORTED_BUNDLE_VERSIONS = (
     CONFIG_ONLY_BUNDLE_VERSION,
     MEMORY_BUNDLE_VERSION,
     PERSONA_BUNDLE_VERSION,
     STICKERS_BUNDLE_VERSION,
+    COMPRESSED_BUNDLE_VERSION,
 )
 BUNDLE_EXTENSION = ".g3kucb"
+# v6 是「明文头 + 原始令牌」的二进制信封：头里只有元数据，令牌是 Fernet 的
+# bytes，不再 base64 进 JSON。信封再套一层 base64 就是最后一个 4/3。
+BUNDLE_MAGIC = b"G3KU-CONFIG-BUNDLE\n"
+BUNDLE_HEADER_LIMIT = 4 * 1024 * 1024
+_ENVELOPE_TOKEN_KEY = "_token"
 BUNDLE_OUTPUT_DIR = ".g3ku/config-bundles"
 IMPORT_BACKUP_DIR = ".g3ku/config-bundle-imports"
 KEY_SOURCE_PROJECT_PASSWORD = "project_password"
@@ -266,15 +277,6 @@ def _envelope_scopes(envelope: dict[str, Any]) -> tuple[str, ...]:
     return _validate_scopes(envelope.get("scopes"), allowed=allowed)
 
 
-def _bundle_version_for_scopes(scopes: Sequence[str]) -> int:
-    # 版本闸门逐面抬高：只带配置/记忆的包保持 v3，带人设是 v4，带表情包才需要 v5。
-    if SCOPE_STICKERS in scopes:
-        return STICKERS_BUNDLE_VERSION
-    if SCOPE_PERSONA in scopes:
-        return PERSONA_BUNDLE_VERSION
-    return MEMORY_BUNDLE_VERSION
-
-
 def _count_by_scope(rels: Sequence[str], scope: str) -> int:
     return sum(1 for rel in rels if _entry_scope(rel) == scope)
 
@@ -458,6 +460,17 @@ def _encode_file(path: Path) -> str:
     return base64.b64encode(blob).decode("ascii")
 
 
+def _pack_payload(raw: bytes) -> bytes:
+    """v6 载荷压缩：level 1 已吃掉 base64 的结构性冗余（约 23%），再抬档只省 1–2%、
+    却多花十几秒，所以选低档 + 高 memLevel 换速度。"""
+    compressor = zlib.compressobj(level=1, memLevel=9)
+    return compressor.compress(raw) + compressor.flush()
+
+
+def _unpack_payload(blob: bytes) -> bytes:
+    return zlib.decompress(blob)
+
+
 def _validate_password(password: str) -> str:
     text = str(password or "")
     if not text:
@@ -516,11 +529,11 @@ def export_bundle(
         # 只带记忆或人设的包不必再拷一份主密钥：那面根本不动密钥，少一份副本就少一个泄漏面。
         payload["master_key"] = master_key
     token = fernet_from_key(bundle_key).encrypt(
-        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        _pack_payload(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8"))
     )
     envelope = {
         "kind": BUNDLE_KIND,
-        "version": _bundle_version_for_scopes(clean_scopes),
+        "version": COMPRESSED_BUNDLE_VERSION,
         # 格式版本决定能不能读，程序版本只用于对照：跨设备排障时"两端构建不一致"
         # 是最常见的原因，光靠 version 字段查不出来。
         "app_version": __version__,
@@ -531,14 +544,13 @@ def export_bundle(
         "kdf": {} if use_project_password else dict(PASSWORD_KDF),
         "salt_b64": base64.b64encode(salt).decode("ascii") if salt else "",
         "unlock_envelope": unlock_envelope,
-        "payload_b64": base64.b64encode(token).decode("ascii"),
     }
 
     output_dir = root / BUNDLE_OUTPUT_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
     filename = f"{BUNDLE_KIND}-{stamp}{BUNDLE_EXTENSION}"
     path = output_dir / filename
-    path.write_text(json.dumps(envelope, ensure_ascii=False, indent=1), encoding="utf-8")
+    _write_bundle_file(path, envelope, token)
     os.chmod(path, 0o600)
 
     return {
@@ -559,10 +571,49 @@ def export_bundle(
     }
 
 
+def _write_bundle_file(path: Path, header: dict[str, Any], token: bytes) -> None:
+    """v6 落盘：magic + 头长度 + 明文头 JSON + 原始令牌（不 base64）。"""
+    header_bytes = json.dumps(header, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    if len(header_bytes) > BUNDLE_HEADER_LIMIT:
+        raise ValueError("config bundle header too large")
+    # 逐段写：令牌本身已是几百 MB，再拼成一个完整 bytes 只是多一份峰值内存。
+    with path.open("wb") as handle:
+        handle.write(BUNDLE_MAGIC)
+        handle.write(len(header_bytes).to_bytes(8, "big"))
+        handle.write(header_bytes)
+        handle.write(token)
+
+
 def _read_envelope(archive_path: Path) -> dict[str, Any]:
+    """读外层：v6 二进制头 + 原始令牌；v2–v5 是纯 JSON 文本。
+
+    令牌挂在返回字典的 `_token` 键上，只在本进程里用，不写回。
+    """
+    path = Path(archive_path)
     try:
-        envelope = json.loads(Path(archive_path).read_text(encoding="utf-8"))
-    except Exception as exc:
+        with path.open("rb") as handle:
+            prefix = handle.read(len(BUNDLE_MAGIC))
+            if prefix == BUNDLE_MAGIC:
+                size_bytes = handle.read(8)
+                if len(size_bytes) != 8:
+                    raise ValueError("invalid config bundle header")
+                header_size = int.from_bytes(size_bytes, "big")
+                if header_size <= 0 or header_size > BUNDLE_HEADER_LIMIT:
+                    raise ValueError("invalid config bundle header")
+                header_bytes = handle.read(header_size)
+                if len(header_bytes) != header_size:
+                    raise ValueError("invalid config bundle header")
+                envelope = json.loads(header_bytes.decode("utf-8"))
+                if not isinstance(envelope, dict):
+                    raise ValueError("invalid config bundle header")
+                token = handle.read()
+                if not token:
+                    raise ValueError("invalid config bundle envelope")
+                envelope[_ENVELOPE_TOKEN_KEY] = token
+            else:
+                handle.seek(0)
+                envelope = json.loads(handle.read().decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("not a config bundle file") from exc
     if not isinstance(envelope, dict) or envelope.get("kind") != BUNDLE_KIND:
         raise ValueError("not a config bundle file")
@@ -572,8 +623,13 @@ def _read_envelope(archive_path: Path) -> dict[str, Any]:
 
 
 def _decrypt_payload(envelope: dict[str, Any], password: str) -> dict[str, Any]:
-    payload_b64 = str(envelope.get("payload_b64") or "").strip()
-    if not payload_b64:
+    token = envelope.get(_ENVELOPE_TOKEN_KEY)
+    if token is None:
+        payload_b64 = str(envelope.get("payload_b64") or "").strip()
+        if not payload_b64:
+            raise ValueError("invalid config bundle envelope")
+        token = base64.b64decode(payload_b64)
+    elif not isinstance(token, (bytes, bytearray)) or not token:
         raise ValueError("invalid config bundle envelope")
     if str(envelope.get("key_source") or "") == KEY_SOURCE_PROJECT_PASSWORD:
         unlock_envelope = envelope.get("unlock_envelope")
@@ -586,10 +642,14 @@ def _decrypt_payload(envelope: dict[str, Any], password: str) -> dict[str, Any]:
             raise ValueError("invalid config bundle envelope")
         bundle_key = _key_for(password, base64.b64decode(salt_b64))
     try:
-        decrypted = fernet_from_key(bundle_key).decrypt(base64.b64decode(payload_b64))
+        decrypted = fernet_from_key(bundle_key).decrypt(token)
+        if int(envelope.get("version") or 0) >= COMPRESSED_BUNDLE_VERSION:
+            decrypted = _unpack_payload(decrypted)
         payload = json.loads(decrypted.decode("utf-8"))
     except InvalidToken as exc:
         raise ValueError("invalid password") from exc
+    except (zlib.error, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("invalid config bundle payload") from exc
     if not isinstance(payload, dict):
         raise ValueError("invalid config bundle payload")
     return payload

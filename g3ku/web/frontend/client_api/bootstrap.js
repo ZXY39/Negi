@@ -155,7 +155,9 @@
                 include_persona: !!includePersona,
                 include_stickers: !!includeStickers,
             },
-            timeoutMs: 60000,
+            // 贴纸面会把几百 MB 图片打进包里，耗时由磁盘与素材量决定；客户端掐表
+            // 只会在服务端已经写出包之后再报一次假失败。进度由页面自己的 toast 承担。
+            timeoutMs: 0,
         });
         return data.item || null;
     },
@@ -180,7 +182,8 @@
         formData.append("include_stickers", includeStickers ? "true" : "false");
         const data = await this._request("POST", "/api/bootstrap/config-bundle/import", {
             body: formData,
-            timeoutMs: 180000,
+            // 上传与逐面替换的时长跟着包体走：大包的读、解压和落盘都可能超过几分钟。
+            timeoutMs: 0,
         });
         return data.item || null;
     },

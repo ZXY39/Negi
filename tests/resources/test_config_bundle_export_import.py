@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import shutil
 import sqlite3
 from pathlib import Path
@@ -102,8 +103,8 @@ def test_project_lane_carries_the_envelope_and_not_the_plain_key(tmp_path: Path)
     master_key = get_bootstrap_security_service(workspace).active_master_key()
 
     archive = Path(config_bundle.export_bundle(workspace)["path"])
-    text = archive.read_text(encoding="utf-8")
-    envelope = json.loads(text)
+    blob = archive.read_bytes()
+    envelope = config_bundle._read_envelope(archive)
 
     assert envelope["salt_b64"] == ""
     assert envelope["kdf"] == {}
@@ -116,8 +117,8 @@ def test_project_lane_carries_the_envelope_and_not_the_plain_key(tmp_path: Path)
         "created_at",
         "updated_at",
     }
-    assert master_key not in text
-    assert "super-secret-app" not in text
+    assert master_key.encode() not in blob
+    assert b"super-secret-app" not in blob
 
 
 def test_project_lane_imports_with_the_project_password(tmp_path: Path) -> None:
@@ -168,7 +169,7 @@ def test_custom_lane_round_trip_restores_config_overlay_and_governance(tmp_path:
     original_config = (source / ".g3ku" / "config.json").read_text(encoding="utf-8")
 
     archive = _export_custom(source)
-    assert "super-secret-app" not in archive.read_text(encoding="utf-8")
+    assert b"super-secret-app" not in archive.read_bytes()
 
     target = _fresh_target(tmp_path)
     restored = config_bundle.import_bundle(target, archive_path=archive, password=BUNDLE_PASSWORD)
@@ -421,7 +422,9 @@ def test_export_route_returns_summary_and_downloadable_bundle(tmp_path: Path, mo
     downloaded = client.get("/api/bootstrap/config-bundle/download", params={"filename": item["filename"]})
     assert downloaded.status_code == 200
     assert "attachment" in downloaded.headers["content-disposition"]
-    assert json.loads(downloaded.text)["kind"] == config_bundle.BUNDLE_KIND
+    download_path = tmp_path / "downloaded.g3kucb"
+    download_path.write_bytes(downloaded.content)
+    assert config_bundle._read_envelope(download_path)["kind"] == config_bundle.BUNDLE_KIND
     assert client.get(
         "/api/bootstrap/config-bundle/download", params={"filename": "../config.json"}
     ).status_code == 400
@@ -562,7 +565,9 @@ def test_bundle_envelope_shape_and_tamper_rejection(tmp_path: Path) -> None:
     _unlock(workspace)
 
     archive = _export_custom(workspace)
-    envelope = json.loads(archive.read_text(encoding="utf-8"))
+    read = config_bundle._read_envelope(archive)
+    token = read.pop(config_bundle._ENVELOPE_TOKEN_KEY)
+    envelope = read
 
     assert envelope["kind"] == config_bundle.BUNDLE_KIND
     assert set(envelope) == {
@@ -576,9 +581,9 @@ def test_bundle_envelope_shape_and_tamper_rejection(tmp_path: Path) -> None:
         "kdf",
         "salt_b64",
         "unlock_envelope",
-        "payload_b64",
     }
-    assert envelope["version"] == 3
+    assert archive.read_bytes().startswith(config_bundle.BUNDLE_MAGIC)
+    assert envelope["version"] == config_bundle.COMPRESSED_BUNDLE_VERSION
     assert envelope["scopes"] == ["config"]
     assert envelope["app_version"] == config_bundle.__version__
     # 手工按同一 KDF 复算一次，确认自定义口令就是这条车道的唯一凭据。
@@ -589,14 +594,15 @@ def test_bundle_envelope_shape_and_tamper_rejection(tmp_path: Path) -> None:
         r=int(envelope["kdf"]["r"]),
         p=int(envelope["kdf"]["p"]),
     )
-    payload = json.loads(Fernet(key.encode()).decrypt(base64.b64decode(envelope["payload_b64"])).decode("utf-8"))
+    raw = Fernet(key.encode()).decrypt(token)
+    payload = json.loads(config_bundle._unpack_payload(raw).decode("utf-8"))
     assert payload["master_key"] == get_bootstrap_security_service(workspace).active_master_key()
 
+    # 令牌里任意一个字节坏掉都不能解开；v6 的令牌就在文件尾部。
     tampered = archive.with_name("tampered" + config_bundle.BUNDLE_EXTENSION)
-    shutil.copy2(archive, tampered)
-    broken = json.loads(tampered.read_text(encoding="utf-8"))
-    broken["payload_b64"] = base64.b64encode(b"not-a-fernet-token").decode("ascii")
-    tampered.write_text(json.dumps(broken), encoding="utf-8")
+    blob = bytearray(archive.read_bytes())
+    blob[-1] ^= 0xFF
+    tampered.write_bytes(bytes(blob))
     with pytest.raises(ValueError, match="invalid password"):
         config_bundle.import_bundle(
             tmp_path / "target",
@@ -612,6 +618,29 @@ MEMORY_KEYS = {
     "memory/notes/note_beta.md",
     "memory/index/note_category.md",
 }
+
+
+def test_v6_payload_is_compressed_and_recovers_base64_overhead(tmp_path: Path) -> None:
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+    base = _seed_stickers(source)
+    # 贴纸本身就是压缩格式；用一份不可压缩的图片让 base64 的 4/3 膨胀显出来。
+    (base / "packA" / "happy" / "003.png").write_bytes(os.urandom(256 * 1024))
+
+    archive = _export_scopes(source, (config_bundle.SCOPE_STICKERS,))
+    envelope, token = _read_archive(archive)
+    raw = Fernet(_bundle_key(envelope)).decrypt(token)
+    payload = json.loads(config_bundle._unpack_payload(raw).decode("utf-8"))
+    plain = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    blob = archive.read_bytes()
+
+    assert envelope["version"] == config_bundle.COMPRESSED_BUNDLE_VERSION
+    assert blob.startswith(config_bundle.BUNDLE_MAGIC)
+    assert STICKER_KEYS <= set(payload["entries"])
+    assert raw != plain
+    assert len(raw) < len(plain)
+    # 信封不再给令牌套 base64：文件只比令牌多一个头。
+    assert len(blob) < len(base64.b64encode(token))
 
 
 def _seed_memory(workspace: Path, *, marker: str, rows: int = 3) -> Path:
@@ -689,26 +718,50 @@ def builtin_pack_keys(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(catalog, "BUILTIN_PACK_KEYS", frozenset({"deepseek-fanart"}))
 
 
-def _rewrite_payload(archive: Path, mutate) -> Path:
-    """改写包载荷，模拟旧版本导出（当时预置包还会随包走）。"""
-    envelope = json.loads(archive.read_text(encoding="utf-8"))
-    key = derive_password_key(
+def _bundle_key(envelope: dict) -> bytes:
+    return derive_password_key(
         BUNDLE_PASSWORD,
         salt=base64.b64decode(envelope["salt_b64"]),
         n=int(envelope["kdf"]["n"]),
         r=int(envelope["kdf"]["r"]),
         p=int(envelope["kdf"]["p"]),
-    )
-    fernet = Fernet(key.encode())
+    ).encode()
+
+
+def _read_archive(archive: Path) -> tuple[dict, bytes]:
+    envelope = config_bundle._read_envelope(archive)
+    token = envelope.pop(config_bundle._ENVELOPE_TOKEN_KEY, None)
+    if token is None:
+        token = base64.b64decode(envelope["payload_b64"])
+    return envelope, token
+
+
+def _write_archive(path: Path, envelope: dict, token: bytes, *, legacy: bool) -> None:
+    header = {
+        key: value
+        for key, value in envelope.items()
+        if key not in {"payload_b64", config_bundle._ENVELOPE_TOKEN_KEY}
+    }
+    if legacy:
+        # v2–v5 是纯 JSON 信封，载荷不压缩：模拟旧包时要连载体一起换。
+        header["payload_b64"] = base64.b64encode(token).decode("ascii")
+        path.write_text(json.dumps(header, ensure_ascii=False), encoding="utf-8")
+    else:
+        config_bundle._write_bundle_file(path, header, token)
+
+
+def _rewrite_payload(archive: Path, mutate) -> Path:
+    """改写包载荷，模拟旧版本导出（当时预置包还会随包走）。"""
+    envelope, token = _read_archive(archive)
     payload = json.loads(
-        fernet.decrypt(base64.b64decode(envelope["payload_b64"])).decode("utf-8")
+        config_bundle._unpack_payload(Fernet(_bundle_key(envelope)).decrypt(token)).decode("utf-8")
     )
     mutate(payload)
-    envelope["payload_b64"] = base64.b64encode(
-        fernet.encrypt(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8"))
-    ).decode("ascii")
+    raw = config_bundle._pack_payload(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    )
     forged = archive.with_name(f"payload-{archive.stem}.g3kucb")
-    forged.write_text(json.dumps(envelope), encoding="utf-8")
+    _write_archive(forged, envelope, Fernet(_bundle_key(envelope)).encrypt(raw), legacy=False)
     return forged
 
 
@@ -767,27 +820,30 @@ def _export_scopes(workspace: Path, scopes: tuple[str, ...]) -> Path:
 
 
 def _payload_of(archive: Path) -> dict:
-    envelope = json.loads(archive.read_text(encoding="utf-8"))
-    key = derive_password_key(
-        BUNDLE_PASSWORD,
-        salt=base64.b64decode(envelope["salt_b64"]),
-        n=int(envelope["kdf"]["n"]),
-        r=int(envelope["kdf"]["r"]),
-        p=int(envelope["kdf"]["p"]),
-    )
-    return json.loads(Fernet(key.encode()).decrypt(base64.b64decode(envelope["payload_b64"])).decode("utf-8"))
+    return config_bundle._decrypt_payload(config_bundle._read_envelope(archive), BUNDLE_PASSWORD)
 
 
 def _rescoped(archive: Path, *, version: int, scopes: list[str] | None) -> Path:
-    """改写外层声明，模拟旧版本包与"声明与条目不符"的包：载荷里的字节不动。"""
-    envelope = json.loads(archive.read_text(encoding="utf-8"))
+    """改写外层声明，模拟旧版本包与"声明与条目不符"的包。
+
+    旧版本读方不会解压 v6 载荷，所以这里按目标版本重编码载荷；只改外层会让
+    "旧包仍能导入"的用例退化成验压缩兼容性，而不是验版本契约。
+    """
+    envelope, token = _read_archive(archive)
+    payload = config_bundle._decrypt_payload(
+        {**envelope, config_bundle._ENVELOPE_TOKEN_KEY: token}, BUNDLE_PASSWORD
+    )
     envelope["version"] = version
     if scopes is None:
         envelope.pop("scopes", None)
     else:
         envelope["scopes"] = scopes
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    compressed = version >= config_bundle.COMPRESSED_BUNDLE_VERSION
+    if compressed:
+        raw = config_bundle._pack_payload(raw)
     forged = archive.with_name(f"forged-{version}-{archive.stem}.g3kucb")
-    forged.write_text(json.dumps(envelope), encoding="utf-8")
+    _write_archive(forged, envelope, Fernet(_bundle_key(envelope)).encrypt(raw), legacy=not compressed)
     return forged
 
 
@@ -799,7 +855,7 @@ def test_memory_scope_carries_store_mirror_and_notes_but_not_history(tmp_path: P
 
     archive = _export_scopes(source, (config_bundle.SCOPE_MEMORY,))
 
-    envelope = json.loads(archive.read_text(encoding="utf-8"))
+    envelope = config_bundle._read_envelope(archive)
     payload = _payload_of(archive)
     assert envelope["scopes"] == ["memory"]
     assert set(payload["entries"]) == MEMORY_KEYS
@@ -831,8 +887,11 @@ def test_both_scopes_count_each_face_separately(tmp_path: Path) -> None:
     assert summary["config_entry_count"] == len(summary["entries"]) - summary["memory_entry_count"]
     assert summary["memory_entry_count"] == len(MEMORY_KEYS)
     assert summary["persona_entry_count"] == 0
-    # 没有人设面时保持 v3，旧程序仍能读这份包。
-    assert json.loads(Path(summary["path"]).read_text(encoding="utf-8"))["version"] == 3
+    # 版本只由格式决定：v6 起所有面组合的载荷都压缩，不再按面抬版本。
+    assert (
+        config_bundle._read_envelope(Path(summary["path"]))["version"]
+        == config_bundle.COMPRESSED_BUNDLE_VERSION
+    )
 
 
 def test_memory_scope_excludes_the_persona_note(tmp_path: Path) -> None:
@@ -859,10 +918,10 @@ def test_persona_scope_carries_description_and_photos_only(tmp_path: Path) -> No
         scopes=(config_bundle.SCOPE_PERSONA,),
     )
     archive = Path(summary["path"])
-    envelope = json.loads(archive.read_text(encoding="utf-8"))
+    envelope = config_bundle._read_envelope(archive)
     payload = _payload_of(archive)
 
-    assert envelope["version"] == 4
+    assert envelope["version"] == config_bundle.COMPRESSED_BUNDLE_VERSION
     assert envelope["scopes"] == ["persona"]
     assert set(payload["entries"]) == PERSONA_KEYS
     assert "master_key" not in payload
@@ -900,7 +959,9 @@ def test_all_three_scopes_count_each_face_separately(tmp_path: Path) -> None:
     assert summary["config_entry_count"] == (
         len(summary["entries"]) - summary["memory_entry_count"] - summary["persona_entry_count"]
     )
-    assert json.loads(Path(summary["path"]).read_text(encoding="utf-8"))["version"] == 4
+    assert config_bundle._read_envelope(Path(summary["path"]))["version"] == (
+        config_bundle.COMPRESSED_BUNDLE_VERSION
+    )
 
 
 def test_stickers_scope_carries_pack_tree_and_ignores_stray_files(tmp_path: Path) -> None:
@@ -915,10 +976,10 @@ def test_stickers_scope_carries_pack_tree_and_ignores_stray_files(tmp_path: Path
         scopes=(config_bundle.SCOPE_STICKERS,),
     )
     archive = Path(summary["path"])
-    envelope = json.loads(archive.read_text(encoding="utf-8"))
+    envelope = config_bundle._read_envelope(archive)
     payload = _payload_of(archive)
 
-    assert envelope["version"] == 5
+    assert envelope["version"] == config_bundle.COMPRESSED_BUNDLE_VERSION
     assert envelope["scopes"] == ["stickers"]
     assert set(payload["entries"]) == STICKER_KEYS
     assert "master_key" not in payload
@@ -1092,6 +1153,29 @@ def test_stickers_import_with_only_builtin_entries_leaves_operator_packs(
         (target / "stickers" / "packA" / "manifest.json").read_text(encoding="utf-8")
     )["theme"] == "TGT theme"
     assert (builtin / "happy" / "001.webp").read_bytes() == b"TGT-webp"
+
+
+def test_v5_stickers_bundle_still_imports(tmp_path: Path) -> None:
+    """v5 包载荷不压缩，读方必须按版本原样解，不能一律当 v6 解压。"""
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+    _seed_stickers(source)
+    archive = _rescoped(
+        _export_scopes(source, (config_bundle.SCOPE_STICKERS,)),
+        version=5,
+        scopes=["stickers"],
+    )
+
+    target = _write_workspace(tmp_path / "target")
+    item = config_bundle.import_bundle(
+        target,
+        archive_path=archive,
+        password=BUNDLE_PASSWORD,
+        scopes=(config_bundle.SCOPE_STICKERS,),
+    )
+
+    assert item["sticker_scope_applied"] is True
+    assert (target / "stickers" / "packA" / "happy" / "001.png").read_bytes() == b"png-bytes"
 
 
 def test_v4_bundle_cannot_claim_the_stickers_scope(tmp_path: Path) -> None:

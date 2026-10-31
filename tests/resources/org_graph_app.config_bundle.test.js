@@ -152,6 +152,7 @@ function loadApp(apiClientOverrides = {}) {
             usesProjectBundlePassword,
             closeProjectSettingsDialog,
             openProjectSettingsDialog,
+            confirmConfigBundleStickerExport,
         };`,
         context
     );
@@ -742,6 +743,51 @@ test("勾上表情包才提交 includeStickers，提示按四面报数", async (
     assert.equal(app.toasts.at(-1).text, "共 12 个文件（配置 4、记忆 0、人设 0、表情包 8）。下载已发起，取消保存则不会落盘；导入时输项目解锁密码。");
 });
 
+test("勾上表情包先确认导出成本，取消则回退勾选", () => {
+    const app = loadApp();
+    app.U.configBundleExportStickers.checked = true;
+
+    app.confirmConfigBundleStickerExport();
+    const confirm = app.confirmCalls.at(-1);
+    assert.match(confirm.title, /大幅增加导出时间/);
+    assert.match(confirm.text, /几分钟/);
+    assert.equal(confirm.confirmLabel, "包含表情包");
+
+    // 取消（onClose 只在未确认时触发）→ 回退勾选，不能让下一次导出悄悄带上大包。
+    confirm.onClose();
+    assert.equal(app.U.configBundleExportStickers.checked, false);
+
+    app.U.configBundleExportStickers.checked = true;
+    app.confirmConfigBundleStickerExport();
+    app.confirmCalls.at(-1).onConfirm();
+    assert.equal(app.U.configBundleExportStickers.checked, true);
+});
+
+test("导出与导入都先亮进度 toast，结束后被结果覆盖", async () => {
+    const app = loadApp();
+    app.openConfigBundleDialog();
+
+    await app.submitConfigBundleExport();
+    const exportProgress = app.toasts.find((toast) => toast.title === "正在导出配置包");
+    assert.ok(exportProgress);
+    assert.match(exportProgress.text, /已等 0 秒/);
+    assert.equal(app.toasts.at(-1).title, "配置包已生成");
+
+    app.U.configBundleImportFile.files = [{ name: "bundle.g3kucb" }];
+    app.U.configBundleImportPassword.value = "secret-pass-123";
+    app.syncConfigBundleFileName();
+    await app.submitConfigBundleImport();
+    const confirm = app.confirmCalls.at(-1);
+    assert.match(confirm.text, /整体替换当前配置/);
+    await confirm.onConfirm({ checked: false, value: "local-pass-1" });
+    await flush();
+
+    const importProgress = app.toasts.find((toast) => toast.title === "正在导入配置包");
+    assert.ok(importProgress);
+    assert.match(importProgress.text, /已等 0 秒/);
+    assert.equal(app.toasts.at(-1).title, "配置包已导入");
+});
+
 test("只勾表情包时确认文案与载荷都按表情包面走", async () => {
     const app = loadApp();
     app.U.configBundleImportFile.files = [{ name: "bundle.g3kucb" }];
@@ -752,6 +798,7 @@ test("只勾表情包时确认文案与载荷都按表情包面走", async () =>
     await app.submitConfigBundleImport();
     const confirm = app.confirmCalls.at(-1);
     assert.match(confirm.text, /整体替换当前表情包/);
+    assert.match(confirm.text, /显著增加导入时间/);
 
     await confirm.onConfirm({ checked: false, value: "local-pass-1" });
     await flush();

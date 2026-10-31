@@ -8569,6 +8569,50 @@ function downloadConfigBundleFile(filename) {
     triggerMediaDownload(ApiClient.getConfigBundleDownloadUrl(filename), filename);
 }
 
+// 配置包的长请求没有服务端进度流：页面能诚实给出的只有一个自己计时的等待读数。
+// 成功/失败会用各自的结果 toast 覆盖它，调用方在 finally 里停表。
+let bundleProgressTimer = null;
+
+function stopConfigBundleProgress() {
+    if (bundleProgressTimer) {
+        clearInterval(bundleProgressTimer);
+        bundleProgressTimer = null;
+    }
+}
+
+function startConfigBundleProgress(title, detail) {
+    stopConfigBundleProgress();
+    const startedAt = Date.now();
+    const render = () => {
+        const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+        showToast({
+            title,
+            text: `${detail} · 已等 ${seconds} 秒`,
+            kind: "info",
+            persistent: true,
+            spin: true,
+        });
+    };
+    render();
+    bundleProgressTimer = setInterval(render, 1000);
+}
+
+function confirmConfigBundleStickerExport() {
+    if (!U.configBundleExportStickers?.checked) return;
+    openConfirm({
+        title: "表情包会大幅增加导出时间",
+        text: "整套表情图片都会打进包里：导出通常要几分钟，包体也会一起变大。仍要包含表情包吗？",
+        confirmLabel: "包含表情包",
+        confirmKind: "warn",
+        returnFocus: U.configBundleExportStickers,
+        onConfirm: () => {},
+        // 只有"未确认"才会走 onClose：取消后回退勾选，避免下一次导出悄悄带上大包。
+        onClose: () => {
+            if (U.configBundleExportStickers) U.configBundleExportStickers.checked = false;
+        },
+    });
+}
+
 async function submitConfigBundleExport() {
     const useProject = usesProjectBundlePassword();
     const scopes = configBundleExportScopes();
@@ -8590,6 +8634,10 @@ async function submitConfigBundleExport() {
         }
     }
     setConfigBundleBusy(true);
+    startConfigBundleProgress(
+        "正在导出配置包",
+        scopes.includeStickers ? `${scopeLabels}（表情包较大）` : scopeLabels,
+    );
     try {
         const item = await ApiClient.exportConfigBundle({
             password,
@@ -8612,6 +8660,7 @@ async function submitConfigBundleExport() {
     } catch (error) {
         showToast({ title: "导出失败", text: projectSettingsErrorText(error), kind: "error" });
     } finally {
+        stopConfigBundleProgress();
         setConfigBundleBusy(false);
     }
 }
@@ -8651,14 +8700,15 @@ async function submitConfigBundleImport() {
     const snapshot = await ApiClient.getBootstrapExitCheck().catch(() => null);
     const hasRunning = !!snapshot?.has_running_work;
     const summary = String(snapshot?.summary_text || "").trim();
+    const heavyNote = scopes.includeStickers ? "表情包会显著增加导入时间。" : "";
     // 叫起确认框前先收掉配置包与设置两层。
     closeConfigBundleDialog();
     closeProjectSettingsDialog();
     openConfirm({
         title: "确认导入配置包？",
         text: hasRunning
-            ? `检测到${summary}。导入会整体替换${scopeLabels}，需要先暂停它们。`
-            : `导入会整体替换当前${scopeLabels}；输入当前项目解锁口令，导入后仍用它解锁。`,
+            ? `${heavyNote}检测到${summary}。导入会整体替换${scopeLabels}，需要先暂停它们。`
+            : `${heavyNote}导入会整体替换当前${scopeLabels}；输入当前项目解锁口令，导入后仍用它解锁。`,
         confirmLabel: "导入配置包",
         confirmKind: "danger",
         // 本机口令是这台机器自己的秘密，包不带着它走：先验一遍证明来的人知道，
@@ -8683,14 +8733,23 @@ async function submitConfigBundleImport() {
             if (!currentPassword) {
                 throw new Error("请输入当前项目解锁口令。");
             }
-            const item = await ApiClient.importConfigBundle(file, password, {
-                confirmRunningWork: !!checked,
-                currentPassword,
-                includeConfig: scopes.includeConfig,
-                includeMemory: scopes.includeMemory,
-                includePersona: scopes.includePersona,
-                includeStickers: scopes.includeStickers,
-            });
+            startConfigBundleProgress(
+                "正在导入配置包",
+                scopes.includeStickers ? `${scopeLabels}（包体较大）` : scopeLabels,
+            );
+            let item = null;
+            try {
+                item = await ApiClient.importConfigBundle(file, password, {
+                    confirmRunningWork: !!checked,
+                    currentPassword,
+                    includeConfig: scopes.includeConfig,
+                    includeMemory: scopes.includeMemory,
+                    includePersona: scopes.includePersona,
+                    includeStickers: scopes.includeStickers,
+                });
+            } finally {
+                stopConfigBundleProgress();
+            }
             applyConfigBundleImportResult(item);
         },
     });
@@ -10787,6 +10846,7 @@ function bindProjectSettings() {
         if (e.target === U.configBundleBackdrop) closeConfigBundleDialog();
     });
     U.configBundleExport?.addEventListener("click", () => void submitConfigBundleExport());
+    U.configBundleExportStickers?.addEventListener("change", () => confirmConfigBundleStickerExport());
     U.configBundleUseProjectPassword?.addEventListener("change", () => syncConfigBundlePasswordField());
     U.configBundleImport?.addEventListener("click", () => void submitConfigBundleImport());
     U.configBundleImportPick?.addEventListener("click", () => U.configBundleImportFile?.click());
