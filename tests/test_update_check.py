@@ -348,20 +348,48 @@ def test_upgrade_output_lands_in_the_log_not_in_a_window(monkeypatch, tmp_path: 
     """升级子进程的输出必须实时进日志：捕获到结束才落盘的话，慢网络下用户看到的
     就是一个空窗口 + 一行 upgrade start，没有任何判据（实盘就是这句）。"""
     import sys
+    import threading
+    import time as clock
 
     import g3ku.update_apply as apply_mod
 
     log_file = tmp_path / "update-apply.log"
-    monkeypatch.setattr(apply_mod, "LOG_FILE", log_file)
-    monkeypatch.setattr(
-        apply_mod,
-        "_upgrade_command",
-        lambda ref: [sys.executable, "-c", "print('正在解析依赖 🥬')"],
+    release = tmp_path / "release-child"
+    # 子进程显式切 UTF-8：stdout 重定向到文件时默认跟随宿主代码页（本机 cp936），
+    # 中文与 emoji 会让它在 print 处 UnicodeEncodeError 退出，测到的就不是落日志。
+    # 打印后停住等释放：那句话必须在子进程还活着时就已经在文件里，才叫实时落盘。
+    child = "\n".join(
+        [
+            "import pathlib, sys, time",
+            "sys.stdout.reconfigure(encoding='utf-8')",
+            "print('正在解析依赖 🥬', flush=True)",
+            f"gate = pathlib.Path({str(release)!r})",
+            "while not gate.exists():",
+            "    time.sleep(0.05)",
+        ]
     )
+    monkeypatch.setattr(apply_mod, "LOG_FILE", log_file)
+    monkeypatch.setattr(apply_mod, "_upgrade_command", lambda ref: [sys.executable, "-c", child])
 
-    assert apply_mod._run_upgrade("v9.9.9") is True
+    outcome: list[bool] = []
+    runner = threading.Thread(target=lambda: outcome.append(apply_mod._run_upgrade("v9.9.9")))
+    runner.start()
+    try:
+        deadline = clock.monotonic() + 20
+        mid_run = ""
+        while clock.monotonic() < deadline:
+            if log_file.exists():
+                mid_run = log_file.read_text(encoding="utf-8", errors="replace")
+                if "正在解析依赖" in mid_run:
+                    break
+            clock.sleep(0.05)
+        assert "正在解析依赖" in mid_run, f"子进程未退出时日志里还没有它的输出：{mid_run!r}"
+    finally:
+        release.write_text("go", encoding="utf-8")
+    runner.join(timeout=30)
+    assert not runner.is_alive(), "释放后升级子进程仍未结束"
+    assert outcome == [True]
     text = log_file.read_text(encoding="utf-8")
-    assert "正在解析依赖" in text
     assert "upgrade exit=0" in text
 
 
