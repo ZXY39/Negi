@@ -509,6 +509,45 @@ def test_resolve_active_ceo_session_id_falls_back_for_unknown_ext_key(tmp_path: 
         reset_external_session_registry()
 
 
+def test_resolve_active_ceo_session_id_drops_hidden_ext_session(tmp_path: Path) -> None:
+    """删过（隐身）的渠道会话不能再当 active：目录不画这一行，发布出去的
+    `active_session_id` 也不能指它——网页按它接 WebSocket 拿到的是 `session_not_found`，
+    表现为「删除 QQ 会话后弹连接失败」。转录还在也一样隐身（条目是唯一减项）。"""
+    from g3ku.runtime.external_sessions import (
+        ExternalSessionRegistry,
+        reset_external_session_registry,
+    )
+    from g3ku.runtime.web_ceo_sessions import (
+        WebCeoStateStore,
+        list_channel_ceo_sessions,
+        resolve_active_ceo_session_id,
+    )
+
+    reset_external_session_registry()
+    try:
+        registry = ExternalSessionRegistry(tmp_path)
+        entry, _ = registry.resolve_or_create(bridge_id="qq-official", external_key="qq:c2c:user-1")
+        registry.set_hidden(entry.session_key, True)
+
+        # 转录仍在这台机器上：判据只能取注册表的隐身标记，不能取文件存在性。
+        store = _RefreshStore(tmp_path, ["web:newer-local", entry.session_key])
+        state_store = WebCeoStateStore(workspace=tmp_path)
+        state_store.set_active_session_id(entry.session_key)
+
+        resolved = resolve_active_ceo_session_id(store, state_store)
+
+        assert resolved == "web:newer-local"
+        assert state_store.get_active_session_id() == "web:newer-local"
+        drawn = {
+            str(row.get("session_id") or "")
+            for row in list_channel_ceo_sessions(store, active_session_id=resolved)
+        }
+        assert entry.session_key not in drawn
+        assert resolved not in drawn
+    finally:
+        reset_external_session_registry()
+
+
 def test_build_channel_ceo_session_item_keeps_channel_shape(tmp_path: Path) -> None:
     """补丁/快照构建器必须给渠道键返回渠道形状（P4 根因的契约侧）：
     本地构建器对渠道键返回 None，通用兜底会把它标成普通 web 会话。"""

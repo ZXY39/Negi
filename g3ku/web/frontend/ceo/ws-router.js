@@ -40,13 +40,28 @@ function handleCeoSnapshotFrame(payload, effectiveSessionId) {
     }
 }
 
+// error 帧的标题与档位按码给：这条车道上的 error 不一定都是"连不上"，全兜成
+// 「连接失败」会把"这条会话已经没有行可接了"报成网络故障。文案优先取帧里带的 `message`，
+// 其次取本档的 `text`，最后才是 ApiClient 的通用文案——服务端在这条道上只印 `code`，
+// 所以 `session_not_found` 这句必须长在显示侧，否则标题与正文会复读同一个词。
+const CEO_WS_ERROR_TOASTS = {
+    no_model_configured: { title: "未配置模型", kind: "warn" },
+    session_not_found: {
+        title: "会话已不存在",
+        kind: "warn",
+        text: "这条会话已经不在了（被删除，或作为渠道会话隐了身）。",
+    },
+};
+
 function handleCeoWsErrorFrame(payload) {
     const code = ApiClient.getErrorCode(payload.data || {});
-    const message = ApiClient.friendlyErrorMessage(payload.data || {}, payload.data?.message || "连接失败");
     if (code === "ceo_approval_pending") {
         showToast({
             title: "等待审批",
-            text: message || "当前存在待审批工具调用，请先完成审批。",
+            text: ApiClient.friendlyErrorMessage(
+                payload.data || {},
+                payload.data?.message || "当前存在待审批工具调用，请先完成审批。",
+            ),
             kind: "warn",
             durationMs: 2600,
         });
@@ -55,15 +70,15 @@ function handleCeoWsErrorFrame(payload) {
         }
         return;
     }
-    if (code && code !== S.ceoWsLastErrorCode) {
-        S.ceoWsLastErrorCode = code;
-        showToast({
-            title: code === "no_model_configured" ? "未配置模型" : "连接失败",
-            text: message,
-            kind: code === "no_model_configured" ? "warn" : "error",
-            durationMs: 5200,
-        });
-    }
+    if (!code || code === S.ceoWsLastErrorCode) return;
+    S.ceoWsLastErrorCode = code;
+    const toast = CEO_WS_ERROR_TOASTS[code] || { title: "连接失败", kind: "error" };
+    showToast({
+        title: toast.title,
+        text: ApiClient.friendlyErrorMessage(payload.data || {}, toast.text || "连接失败"),
+        kind: toast.kind,
+        durationMs: 5200,
+    });
 }
 
 function handleCeoTurnInterruptFrame(payload, effectiveSessionId) {

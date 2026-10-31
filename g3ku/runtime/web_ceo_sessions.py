@@ -2161,6 +2161,15 @@ def list_channel_ceo_sessions(
     )
 
 
+def _external_entry_hidden(entry: ExternalSessionEntry | None) -> bool:
+    """注册表条目上「操作员删过这条渠道会话」的标记。
+
+    它是目录可见性的唯一减项：画行一侧（`_external_channel_row`，目录与补丁两条道共用）
+    和 active 解析器（`_external_channel_session_exists`）都问这一个问题，两边不许各判一次。
+    """
+    return bool(getattr(entry, "hidden", False))
+
+
 def _external_channel_row(
     session_manager: Any,
     key: str,
@@ -2175,7 +2184,7 @@ def _external_channel_row(
     if len(parts) != 3 or not parts[1].strip() or not parts[2].strip():
         return None
     bridge_id = parts[1].strip()
-    if bool(getattr(entry, "hidden", False)):
+    if _external_entry_hidden(entry):
         # 操作员在网页删过这个渠道会话、而该桥 token 还在：身份保留、列表隐身，
         # 入站经 `resolve_or_create` 清掉标记后回来。
         return None
@@ -2580,33 +2589,39 @@ def _recent_local_session_keys(session_manager: Any) -> list[str]:
 
 
 def _external_channel_session_exists(session_manager: Any, session_id: str) -> bool:
-    """``ext:`` 会话在外部会话注册表或有转录即视为存在。
+    """``ext:`` 会话在目录里画不画得出一行——与 `_external_channel_row` 同一个判据。
 
-    与目录行同源（见 `_list_external_channel_rows`）：注册表是权威来源，
-    转录扫描兜底孤儿会话。保证 `resolve_active_ceo_session_id` 不会把正在
-    查看的 ext 渠道会话误判为无效并切换回本地 web 会话。"""
+    有条目按条目判（被标 `hidden` 的条目目录不画行，这里也必须判"不存在"），没有条目的
+    孤儿转录才退回文件扫描。注册表优先于文件是必须的：删一条渠道会话会清转录但留着条目
+    打隐身标记，反过来「条目隐身 + 转录恰好还在」这种中间态也照隐身处理，两边才不会分叉。
+
+    这条道必须与画行一侧同源，否则 `resolve_active_ceo_session_id` 会把操作员刚删掉（隐身）
+    的渠道会话留在 active 上，发布出去的 `active_session_id` 指向一行目录外的会话；网页照它
+    接 WebSocket 拿到的是 `session_not_found`，落在错误帧上就是一个「连接失败」提示。"""
     target = str(session_id or "").strip()
     parts = target.split(":")
     if len(parts) != 3 or not parts[1].strip() or not parts[2].strip():
         return False
+    manager_workspace = getattr(session_manager, "workspace", None)
+    if manager_workspace is not None:
+        try:
+            registry = ExternalSessionRegistry(Path(manager_workspace))
+        except Exception:
+            registry = None
+        if registry is not None:
+            try:
+                entry = registry.get_by_session_key(target)
+            except Exception:
+                entry = None
+            if entry is not None:
+                return not _external_entry_hidden(entry)
     try:
         for item in session_manager.list_sessions():
             if str(item.get("key") or "").strip() == target:
                 return True
     except Exception:
         pass
-    manager_workspace = getattr(session_manager, "workspace", None)
-    if manager_workspace is None:
-        return False
-    try:
-        registry = ExternalSessionRegistry(Path(manager_workspace))
-    except Exception:
-        return False
-    try:
-        entries = registry.list_entries()
-    except Exception:
-        return False
-    return any(str(getattr(entry, "session_key", "") or "").strip() == target for entry in entries)
+    return False
 
 
 def _channel_session_exists(session_manager: Any, session_id: str) -> bool:
