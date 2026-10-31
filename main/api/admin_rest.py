@@ -1260,6 +1260,17 @@ def _mask_qq_openid(value: Any) -> str:
     return f'{raw[:6]}…{raw[-4:]}' if len(raw) > 10 else raw
 
 
+def _qq_dm_peer_matches(external_key: Any, sender_id: Any) -> bool:
+    """DM 的 external_key 末尾就是对方 openid；只有它等于被注册者才允许上抬信任。"""
+    parts = str(external_key or '').strip().split(':')
+    peer = ''
+    if len(parts) == 3 and parts[0] == 'qq' and parts[1] == 'c2c':
+        peer = parts[2]
+    elif len(parts) == 4 and parts[0] == 'qq' and parts[1] == 'guilddm':
+        peer = parts[3]
+    return bool(peer) and peer.lower() == str(sender_id or '').strip().lower()
+
+
 def _parse_qq_sender_number(value: Any) -> int:
     raw = str(value if value is not None else '').strip()
     if not raw.isdigit():
@@ -1518,6 +1529,28 @@ async def register_qq_bot_owner(payload: dict | None = Body(default=None)):
         account.owner_openids = owners
         save_config(cfg)
         await _refresh_runtime_after_save('admin_qq_bot_owner_register')
+    # 旧 DM 会话的注册表信任是粘性的，只加白名单不会让它变可写；注册本身就是
+    # 口令门控的操作员断言，因此同一请求把这条 DM 会话抬到 owner（群聊拒绝）。
+    session_trust_upgraded = False
+    try:
+        from g3ku.runtime.external_sessions import get_external_session_registry
+        from g3ku.runtime.session_trust import is_multi_party_chat
+
+        if _qq_dm_peer_matches(
+            getattr(entry, 'external_key', ''), sender_id
+        ) and not is_multi_party_chat(
+            chat_type=getattr(entry, 'chat_type', ''),
+            external_key=getattr(entry, 'external_key', ''),
+        ):
+            session_trust_upgraded = (
+                get_external_session_registry().trust_owner(
+                    str(getattr(entry, 'session_key', '') or '')
+                )
+                is not None
+            )
+    except Exception:
+        session_trust_upgraded = False
+    if registered or session_trust_upgraded:
         audit_events.emit_audit_event(
             'external_api',
             'warning',
@@ -1528,12 +1561,15 @@ async def register_qq_bot_owner(payload: dict | None = Body(default=None)):
                 'session_id': str(getattr(entry, 'session_key', '') or ''),
                 'number': f'{number:04d}',
                 'sender_id': _mask_qq_openid(sender_id),
+                'registered': registered,
+                'session_trust_upgraded': session_trust_upgraded,
                 'actor': 'operator',
             },
         )
     return {
         'ok': True,
         'registered': registered,
+        'session_trust_upgraded': session_trust_upgraded,
         'app_id': app_id,
         'sender': {
             'number': number,

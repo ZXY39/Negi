@@ -283,6 +283,31 @@ class ExternalSessionRegistry:
                 self._save()
             return entry
 
+    def trust_owner(self, session_key: str) -> ExternalSessionEntry | None:
+        """口令门控的注册动作：把一条 DM 会话的粘性信任显式抬到 owner。
+
+        入站消息仍只降不升（走 `note_inbound`）；只有管理面的注册入口在验过项目
+        解锁口令后调用这里。群聊一律拒绝：多人会话按第三方整会话处理。
+        """
+        from g3ku.runtime.session_trust import TRUST_OWNER, is_multi_party_chat
+
+        raw = str(session_key or "").strip()
+        if not raw:
+            return None
+        with self._lock:
+            entry = self._entries.get(raw)
+            if entry is None:
+                return None
+            if is_multi_party_chat(
+                chat_type=getattr(entry, "chat_type", ""),
+                external_key=getattr(entry, "external_key", ""),
+            ):
+                return None
+            if entry.trust != TRUST_OWNER:
+                entry.trust = TRUST_OWNER
+                self._save()
+            return entry
+
     def note_proactive_outbound(
         self,
         session_key: str,

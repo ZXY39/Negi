@@ -853,7 +853,12 @@ function _confirmQqBotOwnerRegistration(preview, { sessionId, number, appId }) {
             });
             _applyQqBotPayload(payload);
             renderQqBotAccounts();
-            showToast({ title: "已注册 Master", text: `${masked} 现在按 Master 处理。`, kind: "success" });
+            const upgraded = payload?.session_trust_upgraded === true;
+            showToast({
+                title: "已注册 Master",
+                text: `${masked} 现在按 Master 处理。${upgraded ? "当前私聊会话已可写本地记忆。" : ""}`,
+                kind: "success",
+            });
         },
     });
 }

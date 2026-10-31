@@ -138,6 +138,21 @@ def test_registry_records_sticky_trust(registry) -> None:
     assert session_trust(owner_entry.session_key) == TRUST_OWNER
 
 
+def test_operator_registration_lifts_only_the_current_dm(registry) -> None:
+    """注册是口令门控的操作员断言：可以抬当前 DM，群聊不在这条道上。"""
+    dm, _ = registry.resolve_or_create(
+        bridge_id="qq-official-1", external_key="qq:c2c:owner", chat_type="dm"
+    )
+    assert registry.trust_owner(dm.session_key) is not None
+    assert session_trust(dm.session_key) == TRUST_OWNER
+
+    group, _ = registry.resolve_or_create(
+        bridge_id="qq-official-1", external_key="qq:group:g1", chat_type="group"
+    )
+    assert registry.trust_owner(group.session_key) is None
+    assert session_trust(group.session_key) == TRUST_THIRD_PARTY_GROUP
+
+
 def test_unknown_external_session_fails_closed(registry) -> None:
     assert session_trust("ext:unknown-bridge:deadbeef") == TRUST_THIRD_PARTY_DM
     assert session_trust("china:qq:acct:group:123") == TRUST_THIRD_PARTY_GROUP

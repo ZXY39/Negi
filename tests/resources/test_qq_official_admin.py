@@ -204,15 +204,26 @@ def _user_row(sender_id: str, trust: str = "third_party_group") -> dict:
     }
 
 
-def _install_qq_session(monkeypatch: pytest.MonkeyPatch, messages: list[dict], *, bridge_id: str = "qq-official-111") -> None:
+def _install_qq_session(
+    monkeypatch: pytest.MonkeyPatch,
+    messages: list[dict],
+    *,
+    bridge_id: str = "qq-official-111",
+    chat_type: str = "group",
+    external_key: str = "qq:group:ABC",
+    session_key: str = "ext:qq-official-111:abc",
+    title: str = "测试群",
+):
     from types import SimpleNamespace
 
+    import g3ku.runtime.external_sessions as external_sessions
+
     entry = SimpleNamespace(
-        session_key="ext:qq-official-111:abc",
+        session_key=session_key,
         bridge_id=bridge_id,
-        chat_type="group",
-        title="测试群",
-        external_key="qq:group:ABC",
+        chat_type=chat_type,
+        title=title,
+        external_key=external_key,
     )
     monkeypatch.setattr(
         admin_rest,
@@ -220,6 +231,22 @@ def _install_qq_session(monkeypatch: pytest.MonkeyPatch, messages: list[dict], *
         lambda session_id: (entry, list(messages)),
     )
     monkeypatch.setattr(admin_rest, "_qq_owner_master_ids", lambda: frozenset())
+
+    class _OwnerTrustRegistry:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def trust_owner(self, target_session_key: str):
+            self.calls.append(target_session_key)
+            return SimpleNamespace(trust="owner")
+
+    registry = _OwnerTrustRegistry()
+    monkeypatch.setattr(
+        external_sessions,
+        "get_external_session_registry",
+        lambda *args, **kwargs: registry,
+    )
+    return entry, registry
 
 
 def _seed_qq_account(client: TestClient) -> None:
@@ -305,6 +332,48 @@ def test_register_master_rejects_reserved_missing_and_foreign_number(client: Tes
     )
     assert foreign.status_code == 400
     assert foreign.json()["detail"]["code"] == "session_account_mismatch"
+
+
+def test_register_master_upgrades_current_dm_session(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """旧 DM 会话的粘性信任不会因为加白名单自动变 owner；注册请求当场抬它。"""
+    _seed_qq_account(client)
+    entry, registry = _install_qq_session(
+        monkeypatch,
+        [_user_row(_GROUP_OWNER)],
+        chat_type="dm",
+        external_key=f"qq:c2c:{_GROUP_OWNER}",
+        session_key="ext:qq-official-111:dm",
+        title="",
+    )
+    saved = client.post(
+        "/api/qq-bot/register-owner",
+        json={
+            "session_id": "ext:qq-official-111:dm",
+            "number": "0002",
+            "app_id": "111",
+            "unlock_password": "owner-password",
+        },
+    )
+    assert saved.status_code == 200
+    assert saved.json()["session_trust_upgraded"] is True
+    assert registry.calls == [entry.session_key]
+
+
+def test_register_master_does_not_upgrade_group_session(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_qq_account(client)
+    _entry, registry = _install_qq_session(monkeypatch, [_user_row(_GROUP_OWNER)])
+    saved = client.post(
+        "/api/qq-bot/register-owner",
+        json={
+            "session_id": "ext:qq-official-111:abc",
+            "number": "0002",
+            "app_id": "111",
+            "unlock_password": "owner-password",
+        },
+    )
+    assert saved.status_code == 200
+    assert saved.json()["session_trust_upgraded"] is False
+    assert registry.calls == []
 
 
 def test_second_account_does_not_touch_first_secret(client: TestClient) -> None:

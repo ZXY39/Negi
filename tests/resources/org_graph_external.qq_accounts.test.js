@@ -210,6 +210,7 @@ test("QQ 账号面板：注册Master 只收编号+口令，预览后二次确认
     const registerReply = {
         ok: true,
         registered: true,
+        session_trust_upgraded: true,
         enabled: true,
         accounts: [row({ app_id: "111", has_secret: true, owner_openids: ["EB6C8D4341C1238A627FF73CBE540DAE"] })],
     };
@@ -258,6 +259,7 @@ test("QQ 账号面板：注册Master 只收编号+口令，预览后二次确认
         unlock_password: "owner-password",
     }]);
     assert.equal(toasts.at(-1).kind, "success");
+    assert.match(toasts.at(-1).text, /当前私聊会话已可写本地记忆/);
 });
 
 test("QQ 账号面板：编号非法或无当前会话时不发预览请求", async () => {
