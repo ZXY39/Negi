@@ -18,6 +18,7 @@ set -euo pipefail
 REPO_OWNER='ZXY39'
 REPO_NAME='Negi'
 REF="${G3KU_REF:-v2.8.0}"
+REF_SET=0
 DIR="${G3KU_DIR:-$HOME/Negi}"
 NO_START=0
 UPGRADE=0
@@ -30,6 +31,15 @@ PYPI_MIRROR='https://pypi.tuna.tsinghua.edu.cn/simple'
 PYTHON_MIRROR='https://mirror.sjtu.edu.cn/github-release/astral-sh/python-build-standalone/releases/download'
 MIRROR=0
 NO_MIRROR=0
+KIT=''
+KIT_STAGE=''
+KIT_ROOT=''
+KIT_SRC=''
+KIT_WHEELS=''
+KIT_PYTHON=''
+KIT_UV=''
+KIT_REQUIREMENTS=''
+KIT_VERSION=''
 # Kept across upgrades: the environment and everything the operator created.
 PROTECTED_ENTRIES='.venv .g3ku .git'
 STAGE_DIR=''
@@ -39,6 +49,11 @@ STASH_LABEL=''
 cleanup() {
   if [ -n "$STAGE_DIR" ]; then
     rm -rf "$STAGE_DIR"
+  fi
+  # A kit that failed halfway leaves an unpacked tree (with a CPython inside) in /tmp;
+  # the trap is the only thing that runs on every exit path, including fail().
+  if [ -n "${KIT_STAGE:-}" ]; then
+    rm -rf "$KIT_STAGE" 2>/dev/null || true
   fi
 }
 trap cleanup EXIT
@@ -55,6 +70,7 @@ Usage: install.sh [--dir PATH] [--ref TAG] [--no-start] [--upgrade] [--no-path] 
   --no-shortcut    skip the desktop entry
   --mirror         start Python and package downloads on the built-in mirrors
   --no-mirror      only use the direct sources; no automatic mirror retry
+  --kit PATH       install fully offline from a release kit (zip or unpacked directory)
 EOF
 }
 
@@ -73,6 +89,7 @@ while [ $# -gt 0 ]; do
       ;;
     --ref)
       REF="${2:?--ref needs a tag}"
+      REF_SET=1
       REPO_ZIP="https://github.com/${REPO_OWNER}/${REPO_NAME}/archive/${REF}.zip"
       shift 2
       ;;
@@ -99,6 +116,10 @@ while [ $# -gt 0 ]; do
     --no-mirror)
       NO_MIRROR=1
       shift
+      ;;
+    --kit)
+      KIT="${2:?--kit needs a kit path (zip or unpacked directory)}"
+      shift 2
       ;;
     -h | --help)
       usage
@@ -144,6 +165,184 @@ ensure_uv() {
   UV="$(find_uv || true)"
   [ -n "${UV}" ] || fail 'uv installer finished but uv is still not reachable; add ~/.local/bin to PATH and rerun'
   log "using uv: $UV"
+}
+
+device_kit_platform() {
+  # The kit asset is named for the machine it installs on; installing the wrong one
+  # produces a tree that cannot start, so this is a refusal and not a warning.
+  local os arch
+  os="$(uname -s)"
+  arch="$(uname -m)"
+  case "$os/$arch" in
+    MINGW*/*|MSYS*/*|CYGWIN*/*|Windows_NT/*)
+      case "$arch" in
+        aarch64|arm64) printf 'win-arm64\n' ;;
+        *) printf 'win-x64\n' ;;
+      esac
+      ;;
+    Darwin/arm64) printf 'macos-arm64\n' ;;
+    Darwin/x86_64) printf 'macos-x64\n' ;;
+    Linux/x86_64|Linux/amd64) printf 'linux-x64\n' ;;
+    Linux/aarch64|Linux/arm64) printf 'linux-arm64\n' ;;
+    *) printf 'unknown\n' ;;
+  esac
+}
+
+sha256_of() {
+  # Three names for one job across the platforms a kit can land on.
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d' ' -f1
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | cut -d' ' -f1
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 "$1" | awk '{print $NF}'
+  else
+    return 1
+  fi
+}
+
+kit_field() {
+  # kit.json is written by the release build; the four scalars the installer needs are
+  # read with sed rather than pulling in a JSON parser a minimal device may not have.
+  # The sed program stays single-quoted with the key spliced in: escaped quotes inside
+  # a double-quoted command substitution do not survive parsing (bash -n rejects it).
+  local file="$1" key="$2" value
+  value=$(sed -n 's/.*"'${key}'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$file" | head -n 1)
+  [ -n "$value" ] || { echo "[install] kit.json has no '$key'" >&2; return 1; }
+  printf '%s' "$value"
+}
+
+kit_wheel_pairs() {
+  # kit.json records every wheel it ships with its digest, one property per line. Pairing
+  # a filename with the sha256 that follows it is enough, so a device needs no JSON parser.
+  # An object that ends before its digest is malformed, not something to skip quietly:
+  # skipping would install an unchecked file.
+  awk '
+    /"filename"[[:space:]]*:[[:space:]]*"/ {
+      if (pending != "") {
+        print "kit.json records " pending " without a digest" > "/dev/stderr"
+        exit 4
+      }
+      name = $0
+      sub(/.*"filename"[[:space:]]*:[[:space:]]*"/, "", name)
+      sub(/".*/, "", name)
+      pending = name
+      next
+    }
+    /"sha256"[[:space:]]*:[[:space:]]*"/ {
+      if (pending == "") next
+      digest = $0
+      sub(/.*"sha256"[[:space:]]*:[[:space:]]*"/, "", digest)
+      sub(/".*/, "", digest)
+      print digest " " pending
+      pending = ""
+      next
+    }
+    END {
+      if (pending != "") {
+        print "kit.json records " pending " without a digest" > "/dev/stderr"
+        exit 4
+      }
+    }'
+}
+
+resolve_kit() {
+  # Unpack if needed, then check what is inside against the device and against itself
+  # before a single file is copied: a corrupt or mismatched kit must fail early, and
+  # nothing on this lane reaches the network - that is the whole point of the kit.
+  local manifest platform device declared pair digest wheel_file actual pairs
+  if [ -d "$KIT" ] && [ -f "$KIT/kit.json" ]; then
+    KIT_ROOT="$KIT"
+  elif [ -e "$KIT" ]; then
+    KIT_STAGE="$(mktemp -d)"
+    # Unpack inside the staging directory, never next to the file the operator handed
+    # over: a read-only media path is a normal place to keep a kit.
+    mkdir -p "$KIT_STAGE/unpacked"
+    if command -v unzip >/dev/null 2>&1; then
+      unzip -q "$KIT" -d "$KIT_STAGE/unpacked" || fail "kit archive could not be unpacked: $KIT"
+    else
+      # bsdtar reads a zip too, and the kit is written by bsdtar on every platform.
+      tar -xf "$KIT" -C "$KIT_STAGE/unpacked" || fail "kit archive could not be unpacked: $KIT"
+    fi
+    # The archive holds kit.json at the top; a plain unzip can add one wrapper directory.
+    if [ -f "$KIT_STAGE/unpacked/kit.json" ]; then
+      KIT_ROOT="$KIT_STAGE/unpacked"
+    else
+      manifest="$(find "$KIT_STAGE/unpacked" -mindepth 2 -maxdepth 2 -name kit.json | head -n 1)"
+      [ -n "${manifest:-}" ] || fail "no kit.json inside $KIT"
+      KIT_ROOT="${manifest%/*}"
+    fi
+  else
+    fail "kit not found: $KIT"
+  fi
+  manifest="$KIT_ROOT/kit.json"
+  platform="$(kit_field "$manifest" platform)" || fail 'unreadable kit'
+  device="$(device_kit_platform)"
+  [ "$platform" = "$device" ] \
+    || fail "this kit is for $platform; this device is $device"
+  KIT_VERSION="$(kit_field "$manifest" version)"
+  KIT_SRC="$KIT_ROOT/source"
+  KIT_WHEELS="$KIT_ROOT/wheels"
+  [ -d "$KIT_SRC" ] || fail 'the kit carries no source tree'
+  [ -f "$KIT_SRC/pyproject.toml" ] || fail 'the kit source has no pyproject.toml'
+  [ -d "$KIT_WHEELS" ] || fail 'the kit carries no wheels directory'
+  declared="$(sed -n 's/.*__version__[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$KIT_SRC/g3ku/__init__.py" | head -n 1)"
+  [ "$declared" = "$KIT_VERSION" ] \
+    || fail "kit.json says $KIT_VERSION but its source declares ${declared:-nothing}"
+  if [ "$REF_SET" = "1" ] && [ "$REF" != "v$KIT_VERSION" ]; then
+    fail "--ref $REF conflicts with the kit's version v$KIT_VERSION"
+  fi
+  local count=0
+  # The pairs go through a variable, not a process substitution: `fail` inside <(...) only
+  # ends the subshell, so a kit with a bad manifest would sail on to the copy step.
+  pairs="$(kit_wheel_pairs < "$manifest")" || fail 'kit.json holds a wheel without a digest'
+  while IFS= read -r pair; do
+    [ -n "$pair" ] || continue
+    digest="${pair%% *}"
+    wheel_file="${pair#* }"
+    [ -f "$KIT_WHEELS/$wheel_file" ] || fail "kit is missing $wheel_file"
+    actual="$(sha256_of "$KIT_WHEELS/$wheel_file")" || fail 'no sha256 tool available to verify the kit'
+    [ "$actual" = "$digest" ] \
+      || fail "kit wheel $wheel_file does not match its recorded sha256"
+    count=$((count + 1))
+  done <<EOF
+$pairs
+EOF
+  [ "$count" -gt 0 ] || fail 'the kit lists no wheels'
+  KIT_PYTHON="$(kit_field "$manifest" python_executable)" || fail 'unreadable kit'
+  KIT_UV="$(kit_field "$manifest" uv_binary)" || fail 'unreadable kit'
+  KIT_REQUIREMENTS="$(kit_field "$manifest" requirements)" || fail 'unreadable kit'
+  KIT_PYTHON="$KIT_ROOT/$KIT_PYTHON"
+  KIT_UV="$KIT_ROOT/$KIT_UV"
+  KIT_REQUIREMENTS="$KIT_ROOT/$KIT_REQUIREMENTS"
+  [ -f "$KIT_PYTHON" ] || fail "kit interpreter missing: $KIT_PYTHON"
+  [ -f "$KIT_UV" ] || fail "kit uv missing: $KIT_UV"
+  [ -s "$KIT_REQUIREMENTS" ] || fail "kit requirement list missing: $KIT_REQUIREMENTS"
+  log "kit v$KIT_VERSION verified: $count wheels, platform $platform"
+}
+
+clear_kit_stage() {
+  [ -n "${KIT_STAGE:-}" ] || return 0
+  # A staging directory holds a copied CPython tree, and on some platforms rm -rf is
+  # not enough to let go of it; failing to clear it is noise, not a failed install.
+  rm -rf "$KIT_STAGE" 2>/dev/null || true
+  KIT_STAGE=''
+}
+
+install_kit_uv() {
+  # uv is the only thing that can read uv.lock, so the kit carries its own copy. It lands
+  # in the same ~/.local/bin uv's installer uses, so a later `negi` finds it offline too.
+  local target
+  target="$BIN_DIR/$(basename "$KIT_UV")"
+  mkdir -p "$BIN_DIR" || return 1
+  cp -f "$KIT_UV" "$target" || return 1
+  chmod +x "$target" || return 1
+  "$target" --version >/dev/null 2>&1 || { rm -f "$target" 2>/dev/null || true; return 1; }
+  # Reachable for the rest of this run as well, not only after the operator's next login:
+  # BIN_DIR is usually not on PATH yet on a machine that has never had uv.
+  PATH="$BIN_DIR:$PATH"
+  export PATH
+  log "uv from the kit: $target"
 }
 
 exclude_names_from_stream() {
@@ -296,7 +495,37 @@ update_git_checkout() {
   restore_tracked_changes
 }
 
+update_code_from_kit() {
+  # 离线 kit 车道：代码来自 kit 里的快照，取码这一步不碰网络。
+  if [ -f "$DIR/pyproject.toml" ]; then
+    if [ "$UPGRADE" -eq 0 ]; then
+      log "checkout already present at $DIR, code untouched (pass --upgrade to update it)"
+      return
+    fi
+    if [ -d "$DIR/.git" ]; then
+      # 留着 .git 却换上 kit 的代码，index 立刻和树不一致——而升级的门禁正是"跟踪文件
+      # 没动过"，于是这台设备永久升不动。和 Windows 侧同一句话，宁可拒也不放行。
+      fail "$DIR is a git checkout; a kit upgrade would leave it inconsistent with its own .git. Remove $DIR/.git first if the kit should own this tree."
+    fi
+    log "upgrading code from the kit v$KIT_VERSION (keeping .venv and .g3ku)"
+    CHECKOUT_DIR="$KIT_SRC"
+    copy_checkout_into_root 1
+    return
+  fi
+  mkdir -p "$DIR"
+  if [ -f "$DIR/.g3ku/config.json" ]; then
+    log "adopting the data root already present at $DIR (config, sessions and keys kept)"
+  fi
+  log "installing code from the offline kit v$KIT_VERSION"
+  CHECKOUT_DIR="$KIT_SRC"
+  copy_checkout_into_root 0
+}
+
 update_code() {
+  if [ -n "$KIT_ROOT" ]; then
+    update_code_from_kit
+    return
+  fi
   if [ -f "$DIR/pyproject.toml" ]; then
     if [ "$UPGRADE" -eq 0 ]; then
       log "checkout already present at $DIR, code untouched (pass --upgrade to update it)"
@@ -353,7 +582,62 @@ sync_environment() {
   (cd "$DIR" && "$UV" sync --frozen) || fail "uv sync failed direct and via $PYPI_MIRROR"
 }
 
+install_offline_environment() {
+  # The venv records its base interpreter, so the kit runtime has to live somewhere
+  # permanent before the venv is built - not in the staging directory this script deletes
+  # when it finishes.
+  local runtime_home="$DIR/.runtime"
+  local runtime_target="$runtime_home/negi-python"
+  local python src_home venv_python
+  src_home="$(dirname "$KIT_PYTHON")"
+  # Windows ships <dir>/python.exe, the standalone builds <dir>/bin/python3.
+  [ "$(basename "$src_home")" = "bin" ] && src_home="$(dirname "$src_home")"
+  [ -d "$src_home" ] || fail "kit runtime directory is missing: $src_home"
+  rm -rf "$runtime_target" 2>/dev/null || true
+  mkdir -p "$runtime_home" || fail "could not create $runtime_home"
+  cp -Rf "$src_home" "$runtime_target" || fail "could not copy the kit runtime into $runtime_target"
+  if [ -x "$runtime_target/bin/python3" ]; then
+    python="$runtime_target/bin/python3"
+  elif [ -f "$runtime_target/python.exe" ]; then
+    python="$runtime_target/python.exe"
+  else
+    fail "the copied kit runtime has no interpreter under $runtime_target"
+  fi
+  UV="$(find_uv || true)"
+  [ -n "${UV:-}" ] || fail 'neither the kit nor the device provides uv, so the environment cannot be built offline'
+  if [ ! -d "$DIR/.venv" ]; then
+    log 'creating the virtual environment from the kit runtime'
+    (cd "$DIR" && "$UV" venv --relocatable --python "$python" .venv) \
+      || fail 'uv venv failed while creating the environment from the kit runtime'
+  fi
+  venv_python="$DIR/.venv/bin/python"
+  [ -x "$venv_python" ] || venv_python="$DIR/.venv/Scripts/python.exe"
+  [ -x "$venv_python" ] || fail 'the offline environment has no interpreter to install into'
+  # `uv pip install` and not `uv sync`: sync goes looking for the URLs recorded in
+  # uv.lock, and with --offline it reads them from uv's cache - so a machine that has
+  # never downloaded anything fails there even when every wheel sits in the kit. pip
+  # install treats --find-links as the source of the packages themselves, which is what
+  # an offline device actually has.
+  local install_args=("$UV" pip install --python "$venv_python" --offline --no-index
+    --find-links "$KIT_WHEELS")
+  log 'uv pip install --offline --no-index (kit wheels, no index)'
+  (cd "$DIR" && "${install_args[@]}" -r "$KIT_REQUIREMENTS") \
+    || fail 'offline install failed: the kit does not carry every wheel the lock pins'
+  # The project itself last: building its editable wheel needs the [build-system] wheels,
+  # which is why the kit carries hatchling and friends too.
+  (cd "$DIR" && "${install_args[@]}" -e "$DIR") \
+    || fail 'offline install failed: the kit cannot build the project itself'
+  # Without this the first `negi` run calls _ensure_project_installed(), which runs
+  # `uv sync --frozen` and reaches for an index this device does not have.
+  (cd "$DIR" && "$venv_python" negi_bootstrap.py mark-installed) \
+    || fail 'recording the installed environment failed; the next negi run would reach for the network'
+}
+
 install_environment() {
+  if [ -n "$KIT_ROOT" ]; then
+    install_offline_environment
+    return
+  fi
   if [ -f "$DIR/.python-version" ]; then
     pin="$(head -n 1 "$DIR/.python-version" | tr -d '[:space:]')"
     if [ -n "$pin" ]; then
@@ -453,9 +737,18 @@ EOF
 }
 
 log "target directory: $DIR"
+if [ -n "$KIT" ]; then
+  resolve_kit
+  # uv comes from the kit when the device has none: astral.sh's installer is a network
+  # call, and a device that needs a kit usually cannot make it.
+  if ! find_uv >/dev/null 2>&1; then
+    install_kit_uv || fail 'the kit carries no runnable uv; install uv and rerun'
+  fi
+fi
 ensure_uv
 update_code
 install_environment
+clear_kit_stage
 
 PATH_ENTRY_ADDED=false
 if path_has_bin_dir; then
