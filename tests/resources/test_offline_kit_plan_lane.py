@@ -335,6 +335,14 @@ def test_builder_plans_and_snapshots_from_the_same_ref() -> None:
     assert "[Environment]::OSVersion.Version.Platform" not in script, (
         "Windows PowerShell 5.1 has no such property and Set-StrictMode throws; use $env:OS"
     )
+    assert "$onWindows = $env:OS -eq 'Windows_NT'" in script, (
+        "the platform test needs a name of its own: PowerShell 7 makes $IsWindows a "
+        "read-only automatic variable, and assigning it (case-insensitively) is a "
+        "terminating error on the runners that build this kit - all three jobs died on it"
+    )
+    assert "\n$isWindows = " not in script and "\n    $isWindows = " not in script, (
+        "never assign $isWindows/$IsWindows: read-only in PowerShell 7"
+    )
     assert "$pythonRel" in script and "$uvName" in script, (
         "manifest paths must be computed, not guessed from whether a name already exists"
     )

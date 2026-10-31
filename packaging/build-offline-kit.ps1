@@ -31,9 +31,12 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-# ($env:OS is the check that works on Windows PowerShell 5.1, which has no $IsWindows;
-# [Environment]::OSVersion.Version has no Platform property and StrictMode says so.)
-$isWindows = $env:OS -eq 'Windows_NT'
+# Named $onWindows, not $isWindows: PowerShell 7 defines $IsWindows as a read-only
+# automatic variable, and a case-insensitive assignment to it is a terminating error on
+# the very runners this script builds on. $env:OS is set on Windows only, and it also
+# works on Windows PowerShell 5.1, which has no $IsWindows at all;
+# [Environment]::OSVersion.Version has no Platform property and StrictMode says so.
+$onWindows = $env:OS -eq 'Windows_NT'
 
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
@@ -85,7 +88,7 @@ function Find-Uv {
 function Remove-Tree {
     param([string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) { return }
-    if (-not $isWindows) {
+    if (-not $onWindows) {
         # MAX_PATH is a Windows problem. Elsewhere the plain recursive delete is the one
         # that works - robocopy does not exist, and pretending otherwise turns cleanup
         # into a build failure.
@@ -149,7 +152,7 @@ $uv = Find-Uv -Explicit $UvPath
 # reads a drive-letter path as remote-host syntax (Cannot connect to C: resolve failed),
 # which is how the source snapshot extraction died on the first local run. On the other
 # two platforms the system tar is the only tar there is, and macOS' is bsdtar.
-if ($isWindows) {
+if ($onWindows) {
     $tarExe = Join-Path $env:SystemRoot 'System32\tar.exe'
     if (-not (Test-Path -LiteralPath $tarExe)) {
         throw '[kit] Windows bsdtar (System32\tar.exe) is required to open the source archive'
@@ -274,7 +277,7 @@ $python = $kitPythonExe
 # destination already exists is how the first run produced an unrunnable 'uv'.
 # ($env:OS is the check that works on Windows PowerShell 5.1, which has no $IsWindows;
 # [Environment]::OSVersion.Version has no Platform property and StrictMode says so.)
-$uvName = if ($isWindows) { 'uv.exe' } else { 'uv' }
+$uvName = if ($onWindows) { 'uv.exe' } else { 'uv' }
 Copy-Item -LiteralPath $uv -Destination (Join-Path $kitDir $uvName) -Force
 Invoke-Step "interpreter: $pythonRel ($probeVersion); uv: $uvName"
 
