@@ -1,7 +1,7 @@
 kind: skill
 name: multi-search-engine
 version: "2.0.1"
-description: "Multi search engine integration with 17 engines (8 CN + 9 Global). Supports advanced search operators, time filters, site search, privacy engines, and WolframAlpha knowledge queries. No API keys required."
+description: "多搜索引擎集成（17 个引擎，8 中文 + 9 全球）：高级检索、时间过滤、站点搜索、隐私引擎与 WolframAlpha，无需 API Key。"
 license: MIT
 source:
   type: clawhub

@@ -1,7 +1,7 @@
 schema_version: 1
 kind: skill
 name: "contributor-codebase-analyzer"
-description: "Deep-dive code analysis with periodic saving. Contributor mode reads every commit diff for annual reviews, accuracy rates, and promotion readiness. Codebase mode maps repository structure, cross-repo relationships, and enterprise governance. Works with GitHub (gh) and GitLab (glab)."
+description: "深度代码分析并按周期存档：贡献者模式读提交 diff，代码库模式梳理仓库结构、跨仓关系与治理。"
 trigger:
   keywords:
     - "contributor-codebase-analyzer"

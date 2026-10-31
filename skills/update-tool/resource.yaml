@@ -1,7 +1,7 @@
 schema_version: 1
 kind: skill
 name: update-tool
-description: 更新、升级、追踪或审核 `tools/<tool_id>/` 下已有工具时使用。适用于按 `tool_type` 区分内置工具与外置工具，依据 `resource.yaml -> source/current_version/install_dir` 查询上游、执行升级，并同步更新 `toolskills/SKILL.md`、版本说明和治理信息。
+description: 更新、升级或审核 `tools/<tool_id>/` 已有工具：按 `source/current_version` 查上游并同步 toolskill 与治理信息。
 trigger:
   keywords:
     - 更新工具

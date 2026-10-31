@@ -1,7 +1,7 @@
 schema_version: 1
 kind: skill
 name: repair-tool
-description: 修复已注册但当前不可用、缺少本地安装、缺少依赖、未出现在 callable function tool list，或 `load_tool_context` 仍可见的工具资源时使用。适用于排查并修复 `tools/<tool_id>/resource.yaml`、`toolskills/SKILL.md`、`main/tool.py`、`externaltools/<tool_id>/` 本地安装、`temp/<tool_id>/` 临时目录、`requires.paths` / `requires.bins` / `requires.env`、以及“已启用但未注册”这类工具可见性问题，并要求修复后重新验证工具恢复可用。
+description: 修复已注册但不可用、缺依赖/本地安装或不在 callable 列表的工具资源；修复后用 `load_tool_context` 复核。
 trigger:
   keywords:
     - repair-tool
