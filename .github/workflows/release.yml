@@ -30,7 +30,7 @@ jobs:
             *) gh api --jq .message "repos/$GITHUB_REPOSITORY/git/commits/$2" > release-notes.md ;;
           esac
           [ -s release-notes.md ] || printf 'Negi %s\n' "$GITHUB_REF_NAME" > release-notes.md
-          printf '\nThe two attached scripts are the one-line install and upgrade entry points (`iwr ... | iex`). Negi-Setup-<version>.exe is the same install.ps1 behind a folder-picking wizard, for a device that should not open a terminal; the Windows job attaches it. Negi-<version>-offline-<platform>.zip, in win-x64, linux-x64 and macos-arm64, is the offline kit: the trimmed source tree plus every wheel this release resolves for that platform, a pinned CPython, uv and the pinned requirement list, so a device that cannot reach a package index installs with `install.ps1 -Kit <zip>` or `install.sh --kit <zip>`. Pick the file named for your machine. Full source is in the Source code archive at the bottom of this page.\n' >> release-notes.md
+          printf '\nThe two attached scripts are the one-line install and upgrade entry points (`iwr ... | iex`). Negi-Setup-<version>.exe is one downloaded file that installs with no network at all: it carries the win-x64 offline kit (the trimmed source tree, every wheel this release resolves, a pinned CPython and uv) and installs it with `--offline --no-index`, behind a folder-picking wizard. Negi-<version>-offline-<platform>.zip, in win-x64, linux-x64 and macos-arm64, is that same kit as a plain archive, for the script lane and the other two platforms: `install.ps1 -Kit <zip>` or `install.sh --kit <zip>`. Pick the file named for your machine. Full source is in the Source code archive at the bottom of this page.\n' >> release-notes.md
           gh release create "$GITHUB_REF_NAME" install.ps1 install.sh \
             --title "$GITHUB_REF_NAME" \
             --notes-file release-notes.md \
@@ -42,10 +42,15 @@ jobs:
   # accumulates, so it buys nothing a person installing their own tool needs.
   windows-installer:
     name: Build Negi-Setup.exe
-    needs: installer-assets
+    needs: [installer-assets, offline-kit-windows]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Take the win-x64 kit the wizard embeds
+        uses: actions/download-artifact@v4
+        with:
+          name: offline-kit-win-x64
+          path: dist\kit
       - name: Install Inno Setup
         run: choco install innosetup --no-progress --yes
       - name: Build the wizard
@@ -58,7 +63,10 @@ jobs:
           if ($declared -ne $version) {
               throw "tag is $env:GITHUB_REF_NAME but g3ku/__init__.py declares '$declared': the asset name would not match the release"
           }
-          .\packaging\build-setup.ps1 -Version $version
+          $kit = @(Get-ChildItem -LiteralPath 'dist\kit' -Filter 'Negi-*-offline-win-x64.zip' -Recurse |
+              Select-Object -First 1)
+          if (-not $kit) { throw 'the win-x64 kit artifact did not arrive; the exe would not be offline' }
+          .\packaging\build-setup.ps1 -Version $version -Kit $kit.FullName
           $exe = Join-Path 'dist' "Negi-Setup-$version.exe"
           if (-not (Test-Path -LiteralPath $exe)) { throw "build-setup.ps1 reported success but $exe is missing" }
           "SETUP_ASSET=$exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
@@ -67,6 +75,39 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: gh release upload $env:GITHUB_REF_NAME $env:SETUP_ASSET --clobber
+
+  # The Windows kit is built once and used twice: published as the win-x64 asset, and
+  # embedded in Negi-Setup.exe by the job below. A kit is the trimmed source tree plus
+  # every wheel the release's lock resolves for that platform, the source-only packages
+  # pre-built into wheels, a pinned CPython and uv; its build ends with the gate that
+  # matters - an offline `uv pip install --no-index --find-links` into a fresh venv.
+  offline-kit-windows:
+    name: Build the win-x64 offline kit
+    needs: installer-assets
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Build and self-check the kit
+        shell: pwsh
+        run: |
+          $zip = (./packaging/build-offline-kit.ps1 -Platform 'win-x64' -Ref $env:GITHUB_REF_NAME |
+              Select-Object -Last 1)
+          if (-not (Test-Path -LiteralPath $zip)) { throw "build-offline-kit.ps1 returned '$zip' but the file is missing" }
+          "KIT_ASSET=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Attach the kit to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: gh release upload $env:GITHUB_REF_NAME $env:KIT_ASSET --clobber
+      - name: Hand the kit to the wizard job
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-kit-win-x64
+          path: dist/Negi-*-offline-win-x64.zip
+          if-no-files-found: error
 
   # A kit is the same version's tree plus everything needed to install it without an
   # index: every wheel this release's lock resolves for that platform (extras followed,
@@ -85,8 +126,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: win-x64
-            runs_on: windows-latest
           - platform: linux-x64
             runs_on: ubuntu-latest
           - platform: macos-arm64

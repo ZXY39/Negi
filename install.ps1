@@ -8,9 +8,10 @@
   pinned checkout, syncs the locked environment and hands off to negi_bootstrap.py.
   Runtime code is not modified by this script.
 
-  The exe passes -SourceArchive and -UvPath so a fresh install copies the tag's
-  checkout out of negi-source.zip and reuses the bundled uv instead of touching
-  GitHub. Both are optional: without them the network lanes below run as before.
+  Negi-Setup.exe passes -Kit: the win-x64 offline kit it carries, holding the trimmed
+  source tree, every wheel, a pinned CPython, uv and kit.json. That lane verifies the
+  kit against this device and installs without touching an index or GitHub. Without
+  -Kit the network lanes below are the install.
 #>
 param(
     [string]$Dir = (Join-Path $env:USERPROFILE 'Negi'),
@@ -20,8 +21,6 @@ param(
     [switch]$NoPath,
     [switch]$NoShortcut,
     [switch]$NoUninstallEntry,
-    [string]$SourceArchive = '',
-    [string]$UvPath = '',
     [string]$Kit = '',
     [switch]$Mirror,
     [switch]$NoMirror
@@ -220,14 +219,6 @@ function Ensure-Uv {
         Write-Step "using uv: $uv"
         return $uv
     }
-    if ($UvPath) {
-        $bundled = Install-BundledUv -Path $UvPath
-        if ($bundled) {
-            Write-Step "using bundled uv: $bundled"
-            return $bundled
-        }
-        Write-Step "bundled uv is missing at $UvPath; falling back to astral.sh"
-    }
     Write-Step 'uv not found, installing it from astral.sh'
     Invoke-Checked @('powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', "irm $UvInstaller | iex") -Where 'installer'
     $uv = Get-UvCommand
@@ -291,20 +282,6 @@ function Copy-CheckoutInto {
     }
 }
 
-function Expand-SourceArchive {
-    param([string]$ArchivePath, [string]$Target)
-    try {
-        Add-Type -AssemblyName System.IO.Compression.FileSystem
-        [System.IO.Compression.ZipFile]::ExtractToDirectory($ArchivePath, $Target)
-        return
-    }
-    catch {
-        # Constrained Language mode blocks Add-Type; Expand-Archive is slower but
-        # ships with Windows PowerShell.
-        Expand-Archive -LiteralPath $ArchivePath -DestinationPath $Target -Force
-    }
-}
-
 function Get-CheckoutVersion {
     param([string]$Checkout)
     $initFile = Join-Path $Checkout 'g3ku\__init__.py'
@@ -321,42 +298,6 @@ function Get-CheckoutStage {
         # device it is meant for cannot reach GitHub either.
         Write-Step "using the offline kit's source tree (v$($Kit.Version))"
         return $Kit.Source
-    }
-    if ($SourceArchive) {
-        $target = Join-Path $StageRoot 'checkout'
-        if (-not (Test-Path -LiteralPath $SourceArchive)) {
-            Write-Step "bundled source not found at $SourceArchive; using the network checkout"
-        }
-        else {
-            Write-Step "extracting bundled source: $SourceArchive"
-            $ready = $true
-            try {
-                New-Item -ItemType Directory -Force -Path $target | Out-Null
-                Expand-SourceArchive -ArchivePath $SourceArchive -Target $target
-            }
-            catch {
-                Write-Step "bundled source could not be extracted: $($_.Exception.Message)"
-                $ready = $false
-            }
-            if ($ready) {
-                $version = Get-CheckoutVersion -Checkout $target
-                if ($version -ne $Ref.TrimStart('v')) {
-                    Write-Step "bundled source declares '$version' instead of $Ref; using the network checkout"
-                    $ready = $false
-                }
-            }
-            if ($ready -and -not (Get-Command git -ErrorAction SilentlyContinue)) {
-                # Without git the install stays on the archive lane; leaving .git
-                # behind would make every later -Upgrade demand an install of git.
-                Write-Step 'git is unavailable: dropping .git from the bundled source (archive lane)'
-                Remove-Item -LiteralPath (Join-Path $target '.git') -Recurse -Force -ErrorAction SilentlyContinue
-            }
-            if ($ready) {
-                Write-Step "using bundled source at $target"
-                return $target
-            }
-            Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue
-        }
     }
     if (-not $Archive -and (Get-Command git -ErrorAction SilentlyContinue)) {
         $target = Join-Path $StageRoot 'checkout'

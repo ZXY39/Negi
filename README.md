@@ -82,9 +82,9 @@ curl -LsSf https://github.com/ZXY39/Negi/releases/latest/download/install.sh | b
 
 ### 网络慢或连不上 GitHub
 
-用安装包装的时候，「取代码」和「装 uv」不经过网络：两者都在 exe 里。仍要联网的是 Python 解释器（从 python-build-standalone 下载）和 PyPI 依赖，这两步直连失败会自动换镜像重试一次（清华 PyPI、SJTU 的 python-build-standalone 镜像）。用脚本安装时想一开始就走镜像，把脚本下载下来加 `-Mirror` / `--mirror`（一行命令不能传参）；只想直连用 `-NoMirror` / `--no-mirror`；自己设了 `UV_DEFAULT_INDEX` / `UV_PYTHON_INSTALL_MIRROR` 就按你的来，脚本不覆盖。
+Windows 用 `Negi-Setup-<版本>.exe` 时**一个文件就够，全程不访问网络**：它自带这个版本的源码、这台机器要的全部依赖 wheel、Python 解释器和 uv，安装时只做本机校验与环境拼装。用一行命令或仓库里的 `install.ps1` / `install.sh` 装则不同——脚本本身和依赖仓库外的解释器仍要联网：解释器从 python-build-standalone 下载、依赖从 PyPI 取，这两步直连失败会自动换镜像重试一次（清华 PyPI、SJTU 的 python-build-standalone 镜像）。想一开始就走镜像，把脚本下载下来加 `-Mirror` / `--mirror`（一行命令不能传参）；只想直连用 `-NoMirror` / `--no-mirror`；自己设了 `UV_DEFAULT_INDEX` / `UV_PYTHON_INSTALL_MIRROR` 就按你的来，脚本不覆盖。
 
-连 PyPI 也去不了的设备（内网、完全离线）用**全离线套件**：release 页里的 `Negi-<版本>-offline-<平台>.zip`，按本机挑 `win-x64` / `linux-x64` / `macos-arm64`。它带齐了源码、这台机器要的全部依赖 wheel、Python 解释器和 uv，装完不访问任何索引：`install.ps1 -Kit <文件>` 或 `install.sh --kit <文件>`。装之前套件先跟自己对本机对账——平台、版本、每颗 wheel 的 sha256——对不上就拒绝安装，不会装出一半。这台设备之后靠换一份新套件更新，`git fetch` 那条道对它不适用。
+连 PyPI 也去不了的设备（内网、完全离线）用**全离线套件**：release 页里的 `Negi-<版本>-offline-<平台>.zip`，按本机挑 `win-x64` / `linux-x64` / `macos-arm64`。它带齐了源码、这台机器要的全部依赖 wheel、Python 解释器和 uv，装完不访问任何索引：`install.ps1 -Kit <文件>` 或 `install.sh --kit <文件>`。Windows 的 exe 里嵌的就是 win-x64 那一份，所以两个通道装出来的东西完全一样。装之前套件先跟自己对本机对账——平台、版本、每颗 wheel 的 sha256——对不上就拒绝安装，不会装出一半。这台设备之后靠换一份新套件更新，`git fetch` 那条道对它不适用。
 
 一行命令那条通道没有内置载荷：脚本本身和代码都还从 GitHub 取。GitHub 连不上时优先用安装包；只取脚本这一步想走镜像，仓库地址和参数都不变：
 

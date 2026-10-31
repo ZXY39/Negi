@@ -166,16 +166,24 @@ def test_both_installers_read_the_list_from_the_payload() -> None:
 
 
 def test_the_exe_payload_build_reads_the_same_list() -> None:
-    """The setup program embeds a checkout, so it is a third consumer of the list.
+    """The setup program embeds the kit, so the kit build is the third consumer.
 
-    Dropping it there would put the development tree inside the exe while the two
-    command-line lanes stayed trimmed - the difference a device would never see.
+    Negi-Setup.exe no longer packs a checkout of its own: it embeds the win-x64 kit,
+    whose snapshot applies this list. A kit build that stopped reading it would put
+    the development tree inside the exe while the two command-line lanes stayed
+    trimmed - a difference no device would ever see.
     """
-    text = (REPO_ROOT / "packaging" / "build-setup.ps1").read_text(
+    kit = (REPO_ROOT / "packaging" / "build-offline-kit.ps1").read_text(
         encoding="utf-8", errors="replace"
     )
-    assert "distribution-excludes.txt" in text, "the payload build stopped reading the list"
-    assert "sparse-checkout" in text, "the payload build stopped applying the list"
+    assert "packaging/distribution-excludes.txt" in kit, "the kit build stopped reading the list"
+    assert "distribution-excludes" in kit
+    # And the exe build must not grow a second, untrimmed checkout of its own.
+    exe_build = (REPO_ROOT / "packaging" / "build-setup.ps1").read_text(
+        encoding="utf-8", errors="replace"
+    )
+    assert "git', '-c', 'core.autocrlf=false', 'clone'" not in exe_build
+    assert "sparse-checkout" not in exe_build
 
 
 def test_exclusion_leaves_the_device_repository_clean(tmp_path: Path) -> None:

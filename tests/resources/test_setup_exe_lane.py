@@ -23,16 +23,14 @@ param(
     [switch]$Upgrade,
     [switch]$NoUninstallEntry,
     [switch]$NoStart,
-    [string]$SourceArchive,
-    [string]$UvPath
+    [string]$Kit
 )
 $payload = [ordered]@{
     dir = $Dir
     upgrade = $Upgrade.IsPresent
     no_uninstall_entry = $NoUninstallEntry.IsPresent
     no_start = $NoStart.IsPresent
-    source_archive = $SourceArchive
-    uv_path = $UvPath
+    kit = $Kit
 }
 $payload | ConvertTo-Json | Set-Content -LiteralPath $env:NEGI_STUB_OUT -Encoding ascii
 exit 3
@@ -124,19 +122,38 @@ def test_pointer_without_code_under_it_stays_a_fresh_install(tmp_path: Path) -> 
     assert bound["upgrade"] is False
 
 
-def test_payload_next_to_the_scripts_is_handed_to_install_ps1(tmp_path: Path) -> None:
+def test_kit_is_forwarded_and_nothing_is_auto_discovered(tmp_path: Path) -> None:
+    # The wizard unpacks one kit and names it; this script only hands the path on.
     stage, local, script = _stage(tmp_path)
-    source = stage / "negi-source.zip"
-    source.write_bytes(b"PK\x03\x04")
-    uv = stage / "uv.exe"
-    uv.write_bytes(b"MZ")
+    kit = stage / "negi-kit.zip"
+    kit.write_bytes(b"PK\x03\x04")
+    out = tmp_path / "bound.json"
+
+    _run(script, local, out, ["-Dir", str(tmp_path / "fresh"), "-Quiet", "-Kit", str(kit)])
+
+    bound = _bound(out)
+    assert bound["kit"] == str(kit)
+
+    # An older payload file lying next to the script must not be picked up: a second
+    # implicit payload is exactly how an exe stops being offline without anyone noticing.
+    (stage / "negi-source.zip").write_bytes(b"PK\x03\x04")
+    (stage / "uv.exe").write_bytes(b"MZ")
+    out2 = tmp_path / "bound2.json"
+    _run(script, local, out2, ["-Dir", str(tmp_path / "fresh"), "-Quiet"])
+    assert _bound(out2)["kit"] == ""
+
+
+def test_setup_never_starts_the_server_inside_the_install_step(tmp_path: Path) -> None:
+    # install.ps1 ends by running the web server in the foreground, and a [Run] entry
+    # waits for that process to exit: without -NoStart the wizard never reports success
+    # and its own postinstall launch entry never runs (measured on the 2.9.0 build -
+    # the install sat on "negi_bootstrap.py web" until it was killed).
+    stage, local, script = _stage(tmp_path)
     out = tmp_path / "bound.json"
 
     _run(script, local, out, ["-Dir", str(tmp_path / "fresh"), "-Quiet"])
 
-    bound = _bound(out)
-    assert bound["source_archive"] == str(source)
-    assert bound["uv_path"] == str(uv)
+    assert _bound(out)["no_start"] is True
 
 
 def test_setup_keeps_a_log_a_user_can_send_back(tmp_path: Path) -> None:

@@ -6,10 +6,14 @@
 ; What the exe owns: the wizard, the folder choice, and the Add/Remove Programs
 ; entry. Everything about installing Negi itself stays in install.ps1, which the
 ; wizard hands the chosen folder to with -NoUninstallEntry so the two installers
-; cannot leave two "Negi" rows that uninstall differently. The payload carries
-; the tag's shallow checkout (negi-source.zip) and a pinned uv.exe, so a fresh
-; install does not fetch code from GitHub and does not download uv from
-; astral.sh; install.ps1 keeps its network lanes as the fallback.
+; cannot leave two "Negi" rows that uninstall differently.
+;
+; The payload is the win-x64 offline kit: the trimmed source tree, every wheel this
+; release resolves, a pinned CPython, uv and kit.json. install.ps1 -Kit installs
+; from it with --offline --no-index, so one downloaded exe needs no index, no
+; python-build-standalone download and no GitHub checkout. The generic installer
+; ships the same kit as Negi-<version>-offline-<platform>.zip; this file only
+; wraps its Windows member in the wizard.
 ;
 ; PrivilegesRequired=lowest on purpose - the per-user layout (HKCU uninstall key,
 ; %LOCALAPPDATA% state, ~/.local/bin stub) never needs admin, and asking for it
@@ -19,10 +23,10 @@
 #define MyAppPublisher "ZXY39"
 #define MyAppURL "https://github.com/ZXY39/Negi"
 #define AppGuid "7B4F0C6E-2D91-4C58-9A73-5E1C0D8A4F62"
-; build-setup.ps1 passes an absolute path; the default keeps a manual ISCC run
-; working after that script has prepared dist\payload.
-#ifndef PayloadDir
-  #define PayloadDir "..\dist\payload"
+; build-setup.ps1 passes an absolute path. The default names the payload a local
+; build leaves behind, so a manual ISCC run works after that script has run.
+#ifndef KitZip
+  #define KitZip "..\dist\payload\negi-kit.zip"
 #endif
 
 [Setup]
@@ -55,13 +59,16 @@ SetupLogging=yes
 [Files]
 Source: "..\install.ps1"; DestDir: "{tmp}"; Flags: deleteafterinstall
 Source: "setup-run.ps1"; DestDir: "{tmp}"; Flags: deleteafterinstall
-Source: "{#PayloadDir}\negi-source.zip"; DestDir: "{tmp}"; Flags: deleteafterinstall
-Source: "{#PayloadDir}\uv.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall
+; One archive, the same bytes the release publishes as the win-x64 kit. Passed
+; through as-is: install.ps1 opens it with the tar.exe every Windows 10 1803+ and
+; Windows 11 ships, verifies kit.json against the device and every wheel's sha256,
+; then unpacks it into its own staging directory.
+Source: "{#KitZip}"; DestDir: "{tmp}"; DestName: "negi-kit.zip"; Flags: deleteafterinstall
 
 [Run]
 ; [Run] waits for the process to exit by default; the install must finish before
 ; the wizard can report success.
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{tmp}\setup-run.ps1"" -Dir ""{code:TargetDir}"" -Quiet -NoUninstallEntry -SourceArchive ""{tmp}\negi-source.zip"" -UvPath ""{tmp}\uv.exe"""; StatusMsg: "正在安装 Negi：解出代码并建立环境（首次会下载依赖）……"; Flags: runhidden
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{tmp}\setup-run.ps1"" -Dir ""{code:TargetDir}"" -Quiet -NoUninstallEntry -Kit ""{tmp}\negi-kit.zip"""; StatusMsg: "正在安装 Negi：从随包套件解出代码并建立环境（不访问网络，需要几分钟）……"; Flags: runhidden
 Filename: "{app}\negi.cmd"; Parameters: "start --window"; Description: "启动 Negi（独立窗口）"; Flags: postinstall nowait skipifsilent skipifdoesntexist runhidden
 
 [Code]

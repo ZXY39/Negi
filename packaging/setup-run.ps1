@@ -11,13 +11,16 @@
   On a device that already has Negi, this is also the adoption path: the wizard's
   folder page is a default, not a vote, and running the exe upgrades the install
   the pointer records instead of putting a second copy beside it.
+
+  The wizard unpacks one offline kit next to this script and hands it over as -Kit.
+  install.ps1 owns every check on it (platform, version, each wheel's sha256), so
+  this file forwards the path and nothing else.
 #>
 param(
     [string]$Dir,
     [switch]$Quiet,
     [switch]$NoUninstallEntry,
-    [string]$SourceArchive,
-    [string]$UvPath
+    [string]$Kit
 )
 
 $ErrorActionPreference = 'Stop'
@@ -26,18 +29,6 @@ $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $installer = Join-Path $here 'install.ps1'
 if (-not (Test-Path -LiteralPath $installer)) {
     Write-Error "[setup] install.ps1 is missing next to this script"
-}
-
-# The wizard unpacks these next to the scripts. They are optional: an older exe,
-# or a manual run of this script, simply falls through to install.ps1's network
-# lanes.
-if (-not $SourceArchive) {
-    $candidate = Join-Path $here 'negi-source.zip'
-    if (Test-Path -LiteralPath $candidate) { $SourceArchive = $candidate }
-}
-if (-not $UvPath) {
-    $candidate = Join-Path $here 'uv.exe'
-    if (Test-Path -LiteralPath $candidate) { $UvPath = $candidate }
 }
 
 function Get-InstalledRoot {
@@ -97,7 +88,11 @@ if ($upgrade) {
     Write-Host '[setup] 已存在安装：按升级处理（换代码 + 补依赖 + 重写入口面）' -ForegroundColor Cyan
 }
 
-$parameters = @{ Dir = $Dir }
+$parameters = @{ Dir = $Dir; NoStart = $true }
+# -NoStart is not optional here: without it install.ps1 ends by running the web server
+# in the foreground, and the wizard's [Run] entry waits for that process to exit - so
+# the install never reports success and the postinstall "launch" entry never runs.
+# Launching belongs to the wizard's own [Run] entry (`negi.cmd start --window`).
 if ($upgrade) {
     # Without -Upgrade, install.ps1 leaves an existing checkout alone but still
     # rewrites the shortcuts and the stub. That combination is the one state where
@@ -111,8 +106,7 @@ if ($NoUninstallEntry) {
     # its own: two "Negi" entries that uninstall differently is worse than none.
     $parameters['NoUninstallEntry'] = $true
 }
-if ($SourceArchive) { $parameters['SourceArchive'] = $SourceArchive }
-if ($UvPath) { $parameters['UvPath'] = $UvPath }
+if ($Kit) { $parameters['Kit'] = $Kit }
 
 Write-Host "[setup] 安装到 $Dir" -ForegroundColor Cyan
 $logDir = Join-Path $env:LOCALAPPDATA 'Negi\logs'
