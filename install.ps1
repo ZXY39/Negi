@@ -150,7 +150,7 @@ function Resolve-OfflineKit {
     }
     $root = (Resolve-Path -LiteralPath $KitArg).Path
     if (-not (Test-Path -LiteralPath (Join-Path $root 'kit.json'))) {
-        $tar = Join-Path $env:SystemRoot 'System32	ar.exe'
+        $tar = Join-Path $env:SystemRoot 'System32\tar.exe'
         if (-not (Test-Path -LiteralPath $tar)) { Write-Error '[install] bsdtar is required to open a kit archive' }
         $extracted = Join-Path $StageRoot 'kit'
         New-Item -ItemType Directory -Force -Path $extracted | Out-Null
@@ -192,13 +192,24 @@ function Resolve-OfflineKit {
     }
     $python = Join-Path $root $manifest.python_executable
     if (-not (Test-Path -LiteralPath $python)) { Write-Error "[install] kit interpreter is missing: $python" }
+    $uvPath = Join-Path $root $manifest.uv_binary
+    if (-not (Test-Path -LiteralPath $uvPath)) { Write-Error "[install] kit uv is missing: $uvPath" }
+    # The requirement list is what the offline install actually reads. A kit built before
+    # it existed carries no such field; under StrictMode reading a missing property is a
+    # terminating error, so it is looked for by name first and refused with a sentence.
+    $reqName = ''
+    if ($manifest.PSObject.Properties.Name -contains 'requirements') { $reqName = [string]$manifest.requirements }
+    if (-not $reqName) { Write-Error '[install] this kit has no requirements list; rebuild it from a newer tag' }
+    $requirements = Join-Path $root $reqName
+    if (-not (Test-Path -LiteralPath $requirements)) { Write-Error "[install] kit requirement list is missing: $requirements" }
     Write-Step ("kit v$sourceVersion verified: $checked wheels ({0:N1} MB)" -f ($bytes / 1MB))
     return [pscustomobject]@{
         Root = $root
         Source = (Join-Path $root 'source')
         Wheels = (Join-Path $root 'wheels')
         Python = $python
-        Uv = (Join-Path $root $manifest.uv_binary)
+        Uv = $uvPath
+        Requirements = $requirements
         Version = $sourceVersion
     }
 }
@@ -615,28 +626,26 @@ function Install-OfflineEnvironment {
         Write-Step 'creating the virtual environment from the kit runtime'
         Invoke-Checked @($uv, 'venv', '--relocatable', '--python', $python, (Join-Path $Root '.venv')) -Where $Root
     }
-    Write-Step 'uv sync --frozen --offline (kit wheels, no index)'
-    $savedOffline = $env:UV_OFFLINE
-    $env:UV_OFFLINE = '1'
+    $venvPython = Get-VenvPython -Root $Root
+    # `uv pip install` and not `uv sync`: sync goes looking for the URLs recorded in
+    # uv.lock, and with --offline it reads them out of uv's download cache - so a device
+    # that has never downloaded anything fails there even with every wheel sitting in the
+    # kit. pip install treats --find-links as the source of the packages themselves, which
+    # is all an offline machine actually has.
+    $installArgs = @($uv, 'pip', 'install', '--python', $venvPython, '--offline', '--no-index',
+        '--find-links', $Kit.Wheels)
+    Write-Step 'uv pip install --offline --no-index (kit wheels, no index)'
+    Push-Location -LiteralPath $Root
     try {
-        Push-Location -LiteralPath $Root
-        try {
-            Invoke-Checked @($uv, 'sync', '--frozen', '--offline', '--no-index', '--python', $python,
-                '--find-links', $Kit.Wheels, '--project', $Root) -Where $Root
-        }
-        finally { Pop-Location }
+        Invoke-Checked ($installArgs + @('-r', $Kit.Requirements)) -Where $Root
+        # The project itself last: its editable build needs the [build-system] wheels the
+        # kit carries, and that is the part no device can fetch without an index.
+        Invoke-Checked ($installArgs + @('-e', $Root)) -Where $Root
         # Without this, the first `negi` run calls _ensure_project_installed(), which
         # runs `uv sync --frozen` and reaches for an index this device does not have.
-        Invoke-Checked @(
-            (Get-VenvPython -Root $Root),
-            (Join-Path $Root 'negi_bootstrap.py'),
-            'mark-installed'
-        ) -Where $Root
+        Invoke-Checked @($venvPython, (Join-Path $Root 'negi_bootstrap.py'), 'mark-installed') -Where $Root
     }
-    finally {
-        if ($null -eq $savedOffline) { Remove-Item Env:UV_OFFLINE -ErrorAction SilentlyContinue }
-        else { $env:UV_OFFLINE = $savedOffline }
-    }
+    finally { Pop-Location }
 }
 
 function Install-Environment {

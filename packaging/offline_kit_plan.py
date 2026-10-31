@@ -15,9 +15,13 @@ kit to 263 MB across 271 files.
 
 Usage:
     python packaging/offline_kit_plan.py --platform win-x64 [--json out.json]
+    python packaging/offline_kit_plan.py --platform win-x64 --verify \
+        --requirements dist/.../requirements.kit.txt --wheels-dir dist/.../wheels
 
 Exit status is non-zero when a needed package has no artifact the kit can carry,
-because that kit would only fail once it reaches a device.
+because that kit would only fail once it reaches a device. ``--verify`` is the same
+claim measured against uv's own resolver rather than against this file's reading of
+the lock.
 """
 
 from __future__ import annotations
@@ -157,22 +161,41 @@ def load_packages(text: str) -> dict[str, dict]:
 
 
 def closure(packages: dict[str, dict], platform: str, python_version: tuple[int, int] = PYTHON_VERSION) -> list[str]:
-    """Transitive runtime dependency set for one platform, extras excluded."""
+    """Transitive runtime dependency set for one platform, extras followed on demand.
+
+    An entry carrying extra = ["html-clean"] is not "optional, skip it": it says the
+    parent needs that child *with* that extra, and the extra's own edges live in the
+    child's [package.optional-dependencies] table. readability-lxml -> lxml[html-clean]
+    -> lxml-html-clean is exactly the edge a plain name-only walk loses, and a kit that
+    loses it cannot install on a device that has no index.
+    """
     root = packages.get(PROJECT_NAME)
     if root is None:
         raise KeyError(f"{PROJECT_NAME} is absent from {LOCK}")
+
+    def edges(pkg: dict, extras: frozenset[str]) -> list[dict]:
+        found = list(pkg.get("dependencies") or [])
+        optional = pkg.get("optional-dependencies") or {}
+        for name in sorted(extras):
+            found.extend(list(optional.get(name) or []))
+        return [d for d in found if _marker_ok(d.get("marker", ""), platform, python_version)]
+
     seen: set[str] = set()
-    queue = [d["name"] for d in root.get("dependencies", []) if _marker_ok(d.get("marker", ""), platform, python_version)]
+    # (package, extras requested of it): the same package can be needed plainly by one
+    # parent and with an extra by another, so a name alone is not enough to stop.
+    queue = [(d["name"], frozenset(d.get("extra") or ())) for d in edges(root, frozenset())]
+    walked: set[tuple[str, frozenset[str]]] = set()
     while queue:
-        name = queue.pop()
-        if name in seen or name == PROJECT_NAME:
+        name, extras = queue.pop()
+        if (name, extras) in walked or name == PROJECT_NAME:
             continue
+        walked.add((name, extras))
         pkg = packages.get(name)
         if pkg is None:
             raise KeyError(f"{name} is required but absent from the lock")
         seen.add(name)
         queue.extend(
-            d["name"] for d in pkg.get("dependencies", []) if _marker_ok(d.get("marker", ""), platform, python_version)
+            (d["name"], frozenset(d.get("extra") or ())) for d in edges(pkg, extras)
         )
     return sorted(seen)
 
@@ -245,6 +268,60 @@ def plan(platform: str, python_version: tuple[int, int] = PYTHON_VERSION,
     }
 
 
+def wheel_pin(filename: str) -> tuple[str, str] | None:
+    """(name, version) a wheel filename stands for, per PEP 427."""
+    if not filename.endswith(".whl"):
+        return None
+    parts = filename.split("-")
+    if len(parts) < 3:
+        return None
+    return (parts[0].replace("_", "-").lower(), parts[1])
+
+
+def read_requirement_pins(text: str) -> list[dict]:
+    """Parse a requirements file into name / version / marker, rejecting noise loudly."""
+    pins: list[dict] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or line.startswith("-") or line.endswith("\\"):
+            continue
+        marker = ""
+        if ";" in line:
+            line, marker = line.split(";", 1)
+            marker = marker.strip()
+        match = re.fullmatch(r"([A-Za-z0-9._-]+)==([^ ;]+)", line.strip())
+        if not match:
+            raise ValueError("not a pinned requirement line: " + raw)
+        pins.append({"name": match.group(1).lower().replace("_", "-"),
+                     "version": match.group(2), "marker": marker})
+    return pins
+
+
+def verify_requirements(platform: str, requirements: Path, wheels_dir: Path,
+                        python_version: tuple[int, int] = PYTHON_VERSION) -> dict:
+    """Prove the kit holds a file for every pin uv itself says this platform needs.
+
+    The pin list comes from ``uv export --frozen`` of the same lock the kit is built
+    from, so it carries uv's own resolution - extras, groups, markers. The closure above
+    is this repository's reading of the lock, and reading it wrong is how the first kit
+    shipped without lxml-html-clean: readability-lxml asks for lxml[html-clean], and the
+    extra's own edge lives in a table a name-only walk never opens. A pin this check
+    cannot satisfy fails the build instead of failing an offline device.
+    """
+    pins = read_requirement_pins(requirements.read_text(encoding="utf-8"))
+    have = {pin for pin in (wheel_pin(f.name) for f in sorted(wheels_dir.iterdir())) if pin}
+    unsatisfied: list[str] = []
+    inactive = 0
+    for pin in pins:
+        if not _marker_ok(pin["marker"], platform, python_version):
+            inactive += 1
+            continue
+        if (pin["name"], pin["version"]) not in have:
+            unsatisfied.append("%s==%s" % (pin["name"], pin["version"]))
+    return {"requirements": len(pins), "inactive": inactive,
+            "unsatisfied": unsatisfied, "wheels": len(have)}
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--platform", required=True, choices=sorted(PLATFORMS))
@@ -252,8 +329,30 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--quiet", action="store_true")
     ap.add_argument("--lock", dest="lock", default="",
                     help="uv.lock to plan from (default: the one in this repository)")
+    ap.add_argument("--verify", action="store_true",
+                    help="check a kit's wheels against a requirements file instead of planning")
+    ap.add_argument("--requirements", default="",
+                    help="requirements file for --verify (usually uv export of the same lock)")
+    ap.add_argument("--wheels-dir", default="", help="directory of built kit wheels for --verify")
     args = ap.parse_args(argv)
     lock_path = Path(args.lock) if args.lock else LOCK
+    if args.verify:
+        if not (args.requirements and args.wheels_dir):
+            print("--verify needs --requirements and --wheels-dir", file=sys.stderr)
+            return 2
+        report = verify_requirements(args.platform, Path(args.requirements), Path(args.wheels_dir))
+        payload = json.dumps(report, indent=2, sort_keys=True)
+        if args.out:
+            Path(args.out).write_text(payload, encoding="utf-8")
+        elif not args.quiet:
+            print(payload)
+        if report["unsatisfied"]:
+            print("KIT WHEELS MISSING: " + ", ".join(report["unsatisfied"]), file=sys.stderr)
+            return 1
+        if not args.quiet:
+            print("%s: %d of %d pins need a wheel, all present" % (
+                args.platform, report["requirements"] - report["inactive"], report["requirements"]))
+        return 0
     result = plan(args.platform, lock_path=lock_path)
     payload = json.dumps(result, indent=2, sort_keys=True)
     if args.out:
