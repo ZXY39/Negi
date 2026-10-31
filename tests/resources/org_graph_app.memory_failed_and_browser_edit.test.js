@@ -9,6 +9,8 @@ const { readFrontendSources } = require("./support/frontend_sources.js");
 
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
 const APP_CODE = readFrontendSources(["app"]).join("\n");
+const CSS_PATH = "g3ku/web/frontend/org_graph.css";
+const CSS = fs.readFileSync(CSS_PATH, "utf8").replace(/\r\n/g, "\n");
 
 class StubElement {}
 class StubHTMLElement extends StubElement {
@@ -576,6 +578,16 @@ test("the memory browser never promises a synchronous save", () => {
     assert.match(APP_CODE, /已提交修改/);
     assert.match(APP_CODE, /已提交删除/);
     assert.match(APP_CODE, /交给记忆 agent/);
+});
+
+test("the memory table wrap contains its own overflow so the drawer cannot scroll", () => {
+    // 行勾选框聚焦会连带滚动所有可滚动祖先。CSS zoom > 1 时表格的溢出量曾外溢成
+    // 抽屉的 scrollHeight，抽屉被整块推上去只剩白底与被切掉一半的「共 N 条」。
+    // 抽屉没有续读口可以退回来，所以溢出边界必须钉在表格层。
+    const block = /\.memory-browser-table-wrap\s*\{([\s\S]*?)\n\}/.exec(CSS);
+    assert.ok(block, "memory-browser-table-wrap 规则不存在");
+    assert.match(block[1], /overflow:\s*auto/);
+    assert.match(block[1], /contain:\s*paint/);
 });
 
 test("the capacity rungs read as their own outcomes, not as generic failures", () => {

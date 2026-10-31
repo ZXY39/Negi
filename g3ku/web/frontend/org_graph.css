@@ -11803,6 +11803,12 @@ textarea {
     overflow: auto;
     border-radius: 16px;
     background: color-mix(in srgb, var(--bg-panel) 84%, var(--bg-app) 16%);
+    /* 表格是这一层的滚动内容，但 Chromium 在 CSS zoom > 1 时把它的溢出量
+       也算进抽屉的 scrollHeight（实测 UI 144%：抽屉 462 → 1461）。勾选框获得
+       焦点时浏览器会连带滚动所有可滚动祖先，抽屉于是被整块推上去：标题、搜索
+       和表头移出剪裁区，只剩空白色块与顶上被切一半的「共 N 条」。把表格层钉成
+       paint containment，溢出到此为止，不再外溢到抽屉。 */
+    contain: paint;
 }
 
 .memory-browser-table {
