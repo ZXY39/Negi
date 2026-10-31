@@ -1,0 +1,187 @@
+schema_version: 1
+kind: tool
+name: bili
+display_name: Bilibili Capability Pack
+source:
+  type: git
+  url: https://github.com/c1overzz/dsh-bili-scroll
+  ref: v2.3.1
+  commit: 2c7b3f14f525
+  mirror_note: >-
+    源码镜像自上游 main HEAD @2c7b3f14f525（2026-10-28，对应 v2.3.1 release）。
+    本工具是 Negi 原生移植，不携带 DSH 运行时代码；能力思路参考 vendor/bilibili-mcp
+    （MIT, Copyright (c) 2026 AGI_Ananas）与 bilibili-api-python（MIT）。
+    检查更新：gh api repos/c1overzz/dsh-bili-scroll/releases/latest --jq .tag_name
+current_version:
+  summary: Negi native port of dsh-bili-scroll v2.3.1 (bilibili-api-python based).
+  compare_rule: Treat main/tool.py, resource.yaml and toolskills changes as version-relevant.
+  source_of_truth: resource.yaml, main/tool.py and toolskills together define effective behavior.
+description: B站能力包：搜索/热榜/排行/视频详情/UP主/字幕/评论/弹幕/收藏夹/日报；评论与私信默认关闭，需 config 开启并受单日配额限制。
+tool_result_delivery_contract: runtime_managed
+protocol: mcp
+mcp:
+  transport: embedded
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: true
+  filesystem:
+    - data
+    - workspace
+parameters:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - search
+        - hot
+        - rank
+        - video_info
+        - user_info
+        - user_videos
+        - login
+        - login_check
+        - check_credential
+        - status
+        - subtitle
+        - comments
+        - danmaku
+        - favorite_lists
+        - favorite_content
+        - watch_later
+        - reply
+        - send_message
+        - config
+        - daily_report
+      description: 要执行的动作。无需登录：search/hot/rank/video_info/user_info/user_videos；登录与状态：login/login_check/check_credential/status；需登录：subtitle/comments/danmaku/favorite_lists/favorite_content/watch_later；发送类（默认关闭）：reply/send_message；开关与配额：config；工作流：daily_report。
+    keyword:
+      type: string
+      description: 搜索关键词（search / daily_report）。
+    keywords:
+      type: string
+      description: 日报关键词组，逗号/分号/换行分隔（daily_report）。
+    num:
+      type: integer
+      minimum: 1
+      maximum: 50
+      description: 返回条数（search/comments/danmaku）。
+    order:
+      type: string
+      enum:
+        - totalrank
+        - click
+        - pubdate
+        - dm
+      description: 搜索排序（search）。
+    page:
+      type: integer
+      minimum: 1
+      description: 页码（search/favorite_content）。
+    bvid:
+      type: string
+      description: 视频BV号（video_info/subtitle/comments/danmaku/reply）。
+    uid:
+      type: integer
+      minimum: 1
+      description: 用户UID（user_info/user_videos/favorite_lists；0=自己）。
+    pn:
+      type: integer
+      minimum: 1
+      description: 页码（hot/user_videos）。
+    ps:
+      type: integer
+      minimum: 1
+      maximum: 50
+      description: 每页数量（hot/user_videos）。
+    category:
+      type: string
+      enum:
+        - all
+        - animal
+        - car
+        - cinephile
+        - dance
+        - douga
+        - ent
+        - fashion
+        - food
+        - game
+        - knowledge
+        - life
+        - music
+        - original
+        - rookie
+        - sports
+        - technology
+      description: 排行榜分区（rank）。
+    day:
+      type: integer
+      enum:
+        - 3
+        - 7
+      description: 排行时间维度（rank）。
+    media_id:
+      type: integer
+      minimum: 1
+      description: 收藏夹ID（favorite_content）。
+    text:
+      type: string
+      description: 评论/私信正文（reply/send_message）。
+    rpid:
+      type: integer
+      minimum: 0
+      description: 目标评论ID，0=发表新评论（reply）。
+    root:
+      type: integer
+      minimum: 0
+      description: 楼层根评论ID，回复一级评论时填0（reply）。
+    at_name:
+      type: string
+      description: "@ 提及的昵称，会将正文前缀 '@昵称 ' 后发出（reply，可选）。"
+    receiver_uid:
+      type: integer
+      minimum: 1
+      description: 私信接收者UID（send_message）。
+    send_enabled:
+      type: boolean
+      description: 发送类动作总开关（config）。
+    daily_quota:
+      type: integer
+      minimum: 0
+      description: 单日发送配额（config）。
+    days:
+      type: integer
+      minimum: 1
+      maximum: 30
+      description: 日报时间范围天数，默认7（daily_report）。
+    limit:
+      type: integer
+      minimum: 1
+      maximum: 20
+      description: 最多逐条读字幕的候选数，默认8（daily_report）。
+    picks:
+      type: integer
+      minimum: 1
+      maximum: 10
+      description: 报告挑中条数上限，默认5（daily_report）。
+    out_dir:
+      type: string
+      description: 报告输出目录，默认 <data>/output（daily_report）。
+  required:
+    - action
+governance:
+  display_name: Bilibili Capability Pack
+  description: B站能力包：只读查询 + 扫码登录 + 日报输出；发送类默认关闭，需显式开关与单日配额。
+  risk_level: medium
+  destructive: false
+  allowed_roles:
+    - ceo
+    - execution
+exposure:
+  agent: true
+  main_runtime: true
+toolskill:
+  enabled: true

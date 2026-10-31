@@ -1,0 +1,117 @@
+schema_version: 1
+kind: tool
+name: douyin_native
+description: >-
+  Native Douyin capability for Negi, fully independent of DSH. Drives the local
+  real logged-in Microsoft Edge via Playwright (channel=msedge, persistent
+  user-data dir, windowed). Read-only first: open/feed/search browse, video info,
+  comments (no DMs), storyboard frame sampling, and Markdown watch reports.
+  Sending actions (comment / forward / @ ) are OFF by default and require the
+  user to explicitly edit data/douyin_native/send_policy.json AND pass
+  allow_send=true; every send obeys per-day/session quotas, an interval, and a
+  post-send receipt check that reports "未确认送达" when not verifiable.
+  Login guidance is a runtime step: when not logged in the tool screenshots and
+  asks the human to scan/confirm in the open Edge window; it never fakes login.
+  Anti-bot walls (captcha / 502 / rate limit) are screenshotted and reported
+  honestly, never retried in a burst.
+tool_result_delivery_contract: runtime_managed
+source:
+  type: git
+  url: https://github.com/LockyBee/dsh-douyin-agent
+  ref: v1.4.6
+  commit: 7989640e340f
+  mirror_note: >-
+    源码镜像自上游 main HEAD @7989640e340f（2026-10-30）；release v1.4.6 对应
+    912873e2556d。本工具是 Negi 原生实现，不携带 DSH 运行时代码；分镜为 Pillow
+    原生拼图，未 vendoring 上游 storyboard 库（SAOS-3624/dsh-video-storyboard, MIT）。
+    检查更新：gh api repos/LockyBee/dsh-douyin-agent/releases/latest --jq .tag_name
+current_version:
+  summary: Negi native implementation in tools/douyin_native/main/tool.py. No DSH/cordis/@deepseek-ai dependency.
+  compare_rule: Treat main/, resource.yaml, and toolskills changes as version-relevant.
+  source_of_truth: resource.yaml, main/, and toolskills together define the effective behavior.
+protocol: mcp
+mcp:
+  transport: embedded
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: true
+  filesystem:
+  - workspace
+parameters:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+      - open
+      - login_status
+      - login_check
+      - feed
+      - search
+      - video
+      - storyboard
+      - comments
+      - watch_report
+      - send_comment
+      - send_forward
+      - usage
+      - health
+      - close
+      description: >-
+        Which Douyin capability to run. open = ensure windowed Edge + douyin
+        home + login detection (screenshot). login_status = report login state.
+        login_check = re-check after the human logs in (must be called after
+        user confirms in the window). feed = read current recommend/selected
+        feed items. search = open the search page for keyword and parse results
+        (may be blocked without login; failure is reported honestly). video =
+        open player for feed slot N and return title/author/duration/stats.
+        storyboard = sample N frames of the current player video and compose a
+        numbered grid PNG. comments = read comments of the current video (no
+        DMs). watch_report = browse a topic feed round and generate a Markdown
+        report. send_comment / send_forward = SENDING, OFF by default, gated by
+        send_policy.json + allow_send + quotas + receipt check. usage = local
+        daily usage ledger. health = environment diagnostics. close = close the
+        Edge session.
+    keyword:
+      type: string
+      description: Search keyword or topic for feed/watch_report (e.g. "贵州 美食").
+    max_items:
+      type: integer
+      description: Max feed items to parse / include in a report (1-40).
+    frame_count:
+      type: integer
+      description: Number of storyboard frames to sample (2-16).
+    slot:
+      type: integer
+      description: 1-based feed item index to open in the player (used by video/storyboard/comments/send_*).
+    text:
+      type: string
+      description: Comment text to send (only for send_comment; gated).
+    allow_send:
+      type: boolean
+      description: >-
+        Must be true to even attempt a send. Sending still requires
+        send_policy.json to allow the specific action and the caller to be
+        logged in. Default false; every send is additionally quota + interval
+        limited and receipt-checked.
+    include_frames:
+      type: boolean
+      description: Whether watch_report samples storyboard frames for the first few items.
+  required:
+  - action
+exposure:
+  agent: true
+  main_runtime: true
+toolskill:
+  enabled: true
+governance:
+  display_name: Douyin Native
+  description: Playwright-driven local Edge for read-only Douyin browsing, storyboard sampling, watch reports; sending gated by explicit user permission.
+  risk_level: medium
+  destructive: false
+  allowed_roles:
+  - ceo
+  - execution

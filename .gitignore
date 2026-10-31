@@ -99,3 +99,5 @@ g3ku/web/frontend/*.py
 # Frontend memory-page module (the runtime memory store stays ignored above)
 !g3ku/web/frontend/memory/
 !g3ku/web/frontend/memory/**
+# douyin_native tool runtime data (persistent Edge profile holds douyin login state)
+data/douyin_native/
