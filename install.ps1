@@ -15,7 +15,7 @@
 #>
 param(
     [string]$Dir = (Join-Path $env:USERPROFILE 'Negi'),
-    [string]$Ref = 'v2.9.0',
+    [string]$Ref = 'v2.9.1',
     [switch]$NoStart,
     [switch]$Upgrade,
     [switch]$NoPath,

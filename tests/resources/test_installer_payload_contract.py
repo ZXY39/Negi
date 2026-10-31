@@ -98,9 +98,22 @@ def test_the_installer_job_reuses_the_windows_kit() -> None:
     installer = release[release.index("windows-installer:"):release.index("offline-kit-windows:")]
     assert "download-artifact" in installer
     assert "-Kit $kit.FullName" in installer
-    # The matrix would build the same kit a second time for Windows.
-    matrix = release[release.index("offline-kits:"):]
-    assert "win-x64" not in matrix.split("jobs:")[0]
+
+
+def test_the_release_publishes_one_installer_per_platform() -> None:
+    """Assets are the two scripts and the offline exe - no kit archives.
+
+    The Windows kit is an input to the exe, so publishing it next to the exe would
+    ship the same hundred megabytes twice. Linux and macOS install from the scripts;
+    a kit for them is built where it is needed.
+    """
+    release = RELEASE.read_text(encoding="utf-8")
+    assert "offline-kits:" not in release, "the kit matrix is back; it would publish duplicates"
+    uploads = [ln.strip() for ln in release.splitlines() if "gh release upload" in ln]
+    assert uploads, "nothing is uploaded any more"
+    assert all("INSTALLER" in up or "SETUP_ASSET" in up or "install.ps1 install.sh" in up for up in uploads), uploads
+    kit_job = release[release.index("offline-kit-windows:"):release.index("windows-installer:")]
+    assert "gh release upload" not in kit_job
 
 
 def test_both_installers_retry_failed_downloads_through_mirrors() -> None:

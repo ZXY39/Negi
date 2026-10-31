@@ -30,7 +30,7 @@ jobs:
             *) gh api --jq .message "repos/$GITHUB_REPOSITORY/git/commits/$2" > release-notes.md ;;
           esac
           [ -s release-notes.md ] || printf 'Negi %s\n' "$GITHUB_REF_NAME" > release-notes.md
-          printf '\nThe two attached scripts are the one-line install and upgrade entry points (`iwr ... | iex`). Negi-Setup-<version>.exe is one downloaded file that installs with no network at all: it carries the win-x64 offline kit (the trimmed source tree, every wheel this release resolves, a pinned CPython and uv) and installs it with `--offline --no-index`, behind a folder-picking wizard. Negi-<version>-offline-<platform>.zip, in win-x64, linux-x64 and macos-arm64, is that same kit as a plain archive, for the script lane and the other two platforms: `install.ps1 -Kit <zip>` or `install.sh --kit <zip>`. Pick the file named for your machine. Full source is in the Source code archive at the bottom of this page.\n' >> release-notes.md
+          printf '\nThe two attached scripts are the one-line install and upgrade entry points (`iwr ... | iex`). Negi-Setup-<version>.exe is one downloaded file that installs with no network at all: it carries the trimmed source tree, every wheel this release resolves, a pinned CPython and uv, and installs them with `--offline --no-index` behind a folder-picking wizard. It is the only installer asset; Linux and macOS use the two scripts. Full source is in the Source code archive at the bottom of this page.\n' >> release-notes.md
           gh release create "$GITHUB_REF_NAME" install.ps1 install.sh \
             --title "$GITHUB_REF_NAME" \
             --notes-file release-notes.md \
@@ -76,11 +76,13 @@ jobs:
         shell: pwsh
         run: gh release upload $env:GITHUB_REF_NAME $env:SETUP_ASSET --clobber
 
-  # The Windows kit is built once and used twice: published as the win-x64 asset, and
-  # embedded in Negi-Setup.exe by the job below. A kit is the trimmed source tree plus
-  # every wheel the release's lock resolves for that platform, the source-only packages
-  # pre-built into wheels, a pinned CPython and uv; its build ends with the gate that
-  # matters - an offline `uv pip install --no-index --find-links` into a fresh venv.
+  # The Windows kit is an input, not an asset: it is embedded into Negi-Setup.exe by
+  # the job below and stops there, so the release page carries one installer per
+  # platform instead of an exe plus a copy of the archive inside it. A kit is the
+  # trimmed source tree plus every wheel the release's lock resolves, the source-only
+  # packages pre-built into wheels, a pinned CPython and uv; its build ends with the
+  # gate that matters - an offline `uv pip install --no-index --find-links` into a
+  # fresh venv.
   offline-kit-windows:
     name: Build the win-x64 offline kit
     needs: installer-assets
@@ -96,57 +98,9 @@ jobs:
           $zip = (./packaging/build-offline-kit.ps1 -Platform 'win-x64' -Ref $env:GITHUB_REF_NAME |
               Select-Object -Last 1)
           if (-not (Test-Path -LiteralPath $zip)) { throw "build-offline-kit.ps1 returned '$zip' but the file is missing" }
-          "KIT_ASSET=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-      - name: Attach the kit to the release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: pwsh
-        run: gh release upload $env:GITHUB_REF_NAME $env:KIT_ASSET --clobber
       - name: Hand the kit to the wizard job
         uses: actions/upload-artifact@v4
         with:
           name: offline-kit-win-x64
           path: dist/Negi-*-offline-win-x64.zip
           if-no-files-found: error
-
-  # A kit is the same version's tree plus everything needed to install it without an
-  # index: every wheel this release's lock resolves for that platform (extras followed,
-  # because a parent can ask for lxml[html-clean] and that edge lives in the child's
-  # optional-dependencies table), the pinned requirement list uv exports from the same
-  # lock, the source-only packages pre-built into wheels, a pinned CPython, and uv.
-  # Each kit is built on the machine it installs to: the interpreter comes from uv, and
-  # uv only provides one for its own host. The build ends with the gate that matters -
-  # the device's own `uv pip install --offline --no-index --find-links`, run against an
-  # empty --cache-dir, so a kit that cannot install by itself fails here instead of on a
-  # machine that has no index to fall back on.
-  offline-kits:
-    name: Build the ${{ matrix.platform }} offline kit
-    needs: installer-assets
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux-x64
-            runs_on: ubuntu-latest
-          - platform: macos-arm64
-            runs_on: macos-latest
-    runs-on: ${{ matrix.runs_on }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-      - name: Build and self-check the kit
-        shell: pwsh
-        run: |
-          # Forward slashes because this same step runs on a Linux and a macOS runner,
-          # where a backslash inside a path is part of the file's name.
-          $zip = (./packaging/build-offline-kit.ps1 -Platform '${{ matrix.platform }}' -Ref $env:GITHUB_REF_NAME |
-              Select-Object -Last 1)
-          if (-not (Test-Path -LiteralPath $zip)) { throw "build-offline-kit.ps1 returned '$zip' but the file is missing" }
-          "KIT_ASSET=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-      - name: Attach the kit to the release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: pwsh
-        run: gh release upload $env:GITHUB_REF_NAME $env:KIT_ASSET --clobber
