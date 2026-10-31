@@ -289,3 +289,43 @@ def test_external_api_token_operator_grant_preserves_manual_senders(client: Test
 
     client.patch("/api/external-api/tokens/mcp", json={"operator": False})
     assert _saved_token_entry()["trustedSenders"] == ["manual-id"]
+
+
+def test_builtin_qq_bridge_tokens_are_not_listed(client: TestClient) -> None:
+    """列表只画操作员签发的桥：内置 QQ 那条凭证由建号流程自动签发，账号的增删/启停/Master
+    都在「QQ 机器人」那一页管，混在这里等于让操作员去管一个他不认识的 AppID。"""
+    client.post("/api/external-api/tokens", json={"bridge_id": "napcat", "label": "家里 NapCat"})
+    path = Path.cwd() / ".g3ku" / "config.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["externalApi"]["tokens"]["qq-official-1903529517"] = {
+        "token": "qq-issued-secret",
+        "label": "官方 QQ 机器人 1903529517",
+        "enabled": True,
+    }
+    payload["externalApi"]["tokens"]["qq-official"] = {
+        "token": "legacy-qq-secret",
+        "label": "官方 QQ 机器人",
+        "enabled": False,
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    listing = client.get("/api/external-api/settings").json()
+    assert [item["bridge_id"] for item in listing["items"]] == ["napcat"]
+    rendered = json.dumps(listing, ensure_ascii=False)
+    assert "qq-official" not in rendered
+    assert "qq-issued-secret" not in rendered
+    # 被摘掉的只是显示面：该桥的凭证仍然有效，列表不画不等于停用。
+    on_disk = json.loads(path.read_text(encoding="utf-8"))
+    assert on_disk["externalApi"]["tokens"]["qq-official-1903529517"]["enabled"] is True
+
+
+def test_external_api_token_create_reserves_the_qq_bridge_prefix(client: TestClient) -> None:
+    """`qq-official` 前缀归内置桥占用：列表把它藏起来之后，放行一次手工签发就等于造一条
+    没人看得见、也没人停得掉的凭证。只认这个前缀，叫 `qq` 的自建桥照旧能签。"""
+    rejected = client.post("/api/external-api/tokens", json={"bridge_id": "qq-official-111"})
+    assert rejected.status_code == 400
+    assert rejected.json()["detail"]["code"] == "bridge_id_reserved"
+
+    created = client.post("/api/external-api/tokens", json={"bridge_id": "qq"})
+    assert created.status_code == 200
+    assert [item["bridge_id"] for item in created.json()["items"]] == ["qq"]

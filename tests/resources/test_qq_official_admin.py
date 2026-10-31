@@ -522,10 +522,10 @@ def test_second_account_does_not_touch_first_secret(client: TestClient) -> None:
     save_config(seeded)
 
     client.put("/api/qq-bot/settings", json={"enabled": True, "accounts": [{"app_id": "111", "app_secret": ""}]})
-    cfg = client.get("/api/external-api/settings").json()
-    tokens = {entry["bridge_id"]: entry for entry in cfg["items"]}
-    assert tokens["qq-official-222"]["enabled"] is False
-    assert tokens["qq-official-111"]["enabled"] is True
+    # 读配置本身：内置 QQ 的凭证不出现在「外部接入」的 token 列表里（列表只画操作员签发的桥）。
+    tokens = load_config().external_api.tokens
+    assert tokens["qq-official-222"].enabled is False
+    assert tokens["qq-official-111"].enabled is True
 
 
 def test_legacy_single_account_folds_without_losing_the_secret(

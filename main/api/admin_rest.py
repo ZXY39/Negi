@@ -1057,10 +1057,24 @@ def _entry_trusted_senders(entry: Any) -> list[str]:
     ]
 
 
+def _is_builtin_qq_token_id(bridge_id: Any) -> bool:
+    """这条 `externalApi.tokens` 键属不属于内置官方 QQ 桥（裸名与按号的 `qq-official-<AppID>`）。
+
+    QQ 那条凭证不是操作员签发的外部桥：`QqOfficialService._ensure_bridge_token` 建号时按
+    AppID 自动签发，账号的增删/启停/Master 全在「QQ 机器人」那一页，孤儿号的凭证由
+    `_disable_orphan_qq_bridge_tokens` 自动停用。所以它不进「外部接入」的 token 列表，
+    也不能被手工签发占用（列表把它藏起来之后，一条看不见的有效凭证没人能关）。
+    """
+    name = str(bridge_id or '').strip().lower()
+    return name == _QQ_BRIDGE_TOKEN_PREFIX or name.startswith(f'{_QQ_BRIDGE_TOKEN_PREFIX}-')
+
+
 def _external_api_payload(cfg: Config) -> dict[str, Any]:
     external_api = cfg.external_api
     items: list[dict[str, Any]] = []
     for bridge_id, entry in dict(getattr(external_api, 'tokens', None) or {}).items():
+        if _is_builtin_qq_token_id(bridge_id):
+            continue
         token = str(getattr(entry, 'token', '') or '')
         items.append(
             {
@@ -1113,6 +1127,16 @@ async def create_external_api_token(payload: dict | None = Body(default=None)):
     if not raw_bridge_id:
         raise HTTPException(status_code=400, detail={'code': 'bridge_id_required', 'message': '需要桥接标识（bridge_id）'})
     bridge_id = _normalize_external_token_id(raw_bridge_id)
+    if _is_builtin_qq_token_id(bridge_id):
+        # 该前缀是内置 QQ 桥的命名空间，且它的凭证不在 token 列表里显示：放行就等于
+        # 造一条操作员看不见也没法停用的有效凭证。
+        raise HTTPException(
+            status_code=400,
+            detail={
+                'code': 'bridge_id_reserved',
+                'message': f'{_QQ_BRIDGE_TOKEN_PREFIX} 前缀归内置 QQ 机器人占用，请换一个桥接标识',
+            },
+        )
     cfg = load_config()
     tokens = cfg.external_api.tokens or {}
     if bridge_id in tokens:
@@ -1421,10 +1445,9 @@ def _disable_orphan_qq_bridge_tokens(cfg: Config, keep_bridge_ids: set[str]) -> 
     """
     changed = False
     for token_id, entry in dict(cfg.external_api.tokens or {}).items():
-        name = str(token_id or '')
-        if name != _QQ_BRIDGE_TOKEN_PREFIX and not name.startswith(f'{_QQ_BRIDGE_TOKEN_PREFIX}-'):
+        if not _is_builtin_qq_token_id(token_id):
             continue
-        if name in keep_bridge_ids or entry.enabled is False:
+        if str(token_id) in keep_bridge_ids or entry.enabled is False:
             continue
         entry.enabled = False
         changed = True
