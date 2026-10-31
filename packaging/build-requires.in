@@ -1,0 +1,8 @@
+# The project's own build backend. uv.lock does not cover [build-system] requires,
+# so an offline kit has to carry them separately or `uv sync` cannot build the
+# editable install of the project itself (measured: it fails resolving hatchling).
+# Regenerate the resolved list with:
+#   uv pip compile packaging/build-requires.in --python-version 3.12 -o packaging/build-requires.txt
+# Keep it in step with pyproject.toml's [build-system].
+hatchling
+editables>=0.5,<1.0.0
