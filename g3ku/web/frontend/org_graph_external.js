@@ -528,7 +528,7 @@ function renderQqBotAccounts() {
             </button>
             ${ownerCount
                 ? `<button class="toolbar-btn ghost danger small" data-action="unregister-master" type="button"
-                    title="清空该 QQ 号的所有 Master 身份与标签">注销 Master</button>`
+                    title="清空该 QQ 号的所有 Master 身份与标签">注销Master</button>`
                 : `<button class="toolbar-btn ghost small" data-action="register-master" type="button"
                     title="生成 5 分钟一次性绑定码，用 QQ 私聊发送给机器人">注册Master</button>`}
             <button class="toolbar-btn ghost small" data-action="edit-secret" type="button">改密钥</button>

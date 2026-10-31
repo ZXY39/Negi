@@ -239,7 +239,7 @@ test("QQ 账号面板：未注册显示注册Master，已注册显示注销 Mast
     t.QQ_BOT_STATE.rows = [row({ app_id: "111", has_secret: true, owner_openids: ["EB6C8D4341C1238A627FF73CBE540DAE"] })];
     t.renderQqBotAccounts();
     html = listEl.children[listEl.children.length - 1].innerHTML;
-    assert.match(html, /data-action="unregister-master"[^>]*>注销 Master</);
+    assert.match(html, /data-action="unregister-master"[^>]*>注销Master</);
     assert.doesNotMatch(html, /data-action="register-master"/);
 });
 
