@@ -947,6 +947,21 @@ def _queued_follow_up_turn_ids(session: Any) -> set[str]:
     return turn_ids
 
 
+def _ceo_error_event_ends_turn(event_payload: dict[str, Any] | None) -> bool:
+    """这条 session ``error`` 事件是否代表「这一轮已经停了」。
+
+    ``code == "tool_error"`` 不是：它是单次工具调用的状态回执
+    （`session_agent._handle_progress` 发完就 return，回合照旧跑下一跳），而
+    ``ceo.error`` 的语义是回合终结帧 —— 前端收到就 `finalizeCeoTurn`，把当前实时回合
+    收尾并印一颗「运行出错」气泡。混发的形状是：工具结果里带 `ok:false`（例如
+    web_fetch 抓两个 URL 有一个失败）⇒ 整段外部化信封被印成回合错误，而服务端那一轮
+    还在继续，后续帧又把它重开成第二行。其余 error 事件都出自 `_run_turn` 的 catch，
+    回合确实终结了，必须继续转发（否则渠道会话的实时回合等不到收尾帧）。
+    """
+    payload = dict(event_payload or {})
+    return str(payload.get("code") or "").strip() != "tool_error"
+
+
 def _ceo_error_frame_from_event(
     event_payload: dict[str, Any] | None,
     snapshot: dict[str, Any] | None = None,
@@ -1868,9 +1883,13 @@ async def ceo_websocket(websocket: WebSocket):
             # 的回合由 ExternalTurnService 驱动，没有那条 catch，错误只能从这里转发。
             # 不转的话，供应商报错后网页的实时回合永远等不到收尾帧：气泡停在加载态、
             # 主按钮按「会话未停稳」一直显示暂停，而服务端其实已经没有可暂停的回合。
+            # 转的是回合级错误；单次工具调用的状态回执不在这条道上（见
+            # `_ceo_error_event_ends_turn`）。
             if not is_channel_session:
                 return
             payload = dict(event.payload or {})
+            if not _ceo_error_event_ends_turn(payload):
+                return
             snapshot = _build_inflight_turn_snapshot(session, session_id, persisted_session)
             await _push_stream_event(
                 'ceo.error',

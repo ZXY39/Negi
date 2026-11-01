@@ -207,6 +207,34 @@ def test_channel_session_error_events_are_relayed_to_ceo_error():
     assert "if event.type == 'error':" in body
     assert "if not is_channel_session:" in body
     assert "'ceo.error'" in body
+    # 转发口必须先过回合判定，否则工具回执又会把在飞回合收尾。
+    assert "_ceo_error_event_ends_turn(payload)" in body
+    assert body.index("_ceo_error_event_ends_turn(payload)") < body.index("_ceo_error_frame_from_event(")
+
+
+def test_tool_status_receipts_do_not_close_the_channel_turn():
+    """`tool_error` 是单次工具调用的状态回执，不是回合错误。
+
+    实盘形状：`web_fetch` 一次抓两个 URL、其中一个失败 ⇒ 结果 `ok:false` ⇒ 前门按
+    `tool_error` 发进度 ⇒ 外部化信封整段被印成「运行出错」气泡，而那一轮还在跑
+    （同一 turn 的助手行随后正常落库）。回合级错误必须照旧转发，否则渠道回合等不到收尾帧。
+    """
+    tool_receipt = {
+        "code": "tool_error",
+        "message": '{"next_actions": ["content_open"], "ref": "artifact:487a11693e6b"}',
+        "recoverable": True,
+        "source": "tool",
+    }
+    assert websocket_ceo._ceo_error_event_ends_turn(tool_receipt) is False
+
+    for terminal in (
+        {"code": "legacy_session_error", "message": "boom", "source": "runtime"},
+        {"code": "frontdoor_context_window_exceeded", "message": "装不下", "source": "runtime"},
+        # 缺 code 的旧事件按 legacy 形状处理，不能因为读不到字段就吞掉收尾帧。
+        {"message": "boom"},
+        None,
+    ):
+        assert websocket_ceo._ceo_error_event_ends_turn(terminal) is True
 
 
 def test_channel_error_frame_carries_turn_identity():
