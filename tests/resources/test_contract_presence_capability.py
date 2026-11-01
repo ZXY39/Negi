@@ -753,6 +753,55 @@ def test_rejection_hint_prefers_denied_over_declared() -> None:
     assert "load_tool_context" not in hint
 
 
+def test_rejection_hint_separates_repair_required_from_permission_revocation() -> None:
+    """待修复不能说成"角色无权限"，并且要自带真实原因。
+
+    实盘（`ext:qq-official-1903529517:f8a8001865631301`，2026-11-01）：一次描述超预算让
+    `douyin_native` 进 repair 态，同一跳的 `[RUNTIME_NOTICE]` 里 `denied_tools` 与
+    `repair_required` 两行都带着这个名字，而每一跳的拒绝回执说的是"你当前角色已无权限调用它，
+    重试或改名都不会放行"。模型按那句话去查 RBAC/角色，最后结论是"运行侧缓存脏了，要重启"——
+    真正该改的是 `tools/douyin_native/main/tool.py` 里那 317 个字符。名字进 denied 是由
+    repair 派生的结果，不是操作员收回权限，判据必须分档；原因随行给出，不承诺模型这一跳
+    看不见的别处读数。
+    """
+    reason = (
+        'description_too_long: tool description is 317 characters (limit 160); '
+        'tools/douyin_native/main/tool.py'
+    )
+
+    hint = availability_hint(
+        requested=OTHER_ID,
+        callable_names=["exec"],
+        candidate_names=[],
+        denied_names=[OTHER_ID],
+        declared_names=["exec", OTHER_ID],
+        repair_required_reasons={OTHER_ID: reason},
+    )
+
+    assert "无权限" not in hint
+    assert OTHER_ID in hint
+    assert "repair_required" in hint
+    assert reason in hint
+    # 与"改名/重试"那一档同一个收口：这一跳只能换工具
+    assert "当前可直接调用的工具" in hint
+
+
+def test_rejection_hint_keeps_permission_wording_when_nothing_is_repair_required() -> None:
+    """对照臂：没有待修复记录时，收回权限那一档的措辞一个字都不许漂。"""
+
+    hint = availability_hint(
+        requested=OTHER_ID,
+        callable_names=["exec"],
+        candidate_names=[],
+        denied_names=[OTHER_ID],
+        declared_names=["exec", OTHER_ID],
+        repair_required_reasons={},
+    )
+
+    assert "无权限" in hint
+    assert "repair_required" not in hint
+
+
 
 
 

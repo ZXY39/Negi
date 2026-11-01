@@ -9,7 +9,9 @@ from typing import Any, Callable
 
 from loguru import logger
 
+from g3ku.agent.tools.base import Tool
 from g3ku.resources.description_limits import (
+    description_carrier,
     description_limit_for,
     description_too_long_error,
 )
@@ -573,6 +575,7 @@ class ResourceManager:
                         "tool",
                         descriptor.name,
                         self._tool_model_description(instance),
+                        source=self._tool_model_description_source(descriptor, instance),
                     )
                     if budget_errors:
                         descriptor.available = False
@@ -646,7 +649,14 @@ class ResourceManager:
                         continue
         self._description_baseline_bootstrapping = False
 
-    def _description_budget_errors(self, kind: str, name: str, text: Any) -> list[str]:
+    def _description_budget_errors(
+        self,
+        kind: str,
+        name: str,
+        text: Any,
+        *,
+        source: str = '',
+    ) -> list[str]:
         """Return the add/load errors for an over-budget description.
 
         Accepted names join the baseline; a rejected resource stays out of it so
@@ -659,12 +669,18 @@ class ResourceManager:
         if not self._description_baseline_bootstrapping:
             baseline_length = self._description_baseline.get(key)
             if length > limit and (baseline_length is None or length > baseline_length):
-                return [description_too_long_error(kind, description, limit=limit)]
+                return [description_too_long_error(kind, description, limit=limit, source=source)]
         self._description_baseline[key] = length
         return []
 
     def _apply_skill_description_budget(self, descriptor: SkillResourceDescriptor) -> None:
-        errors = self._description_budget_errors("skill", descriptor.name, descriptor.description)
+        # skill 侧没有 handler 覆盖这一层：量的就是清单 `description:`。
+        errors = self._description_budget_errors(
+            "skill",
+            descriptor.name,
+            descriptor.description,
+            source=description_carrier(descriptor.manifest_path, 'description', base=self.workspace),
+        )
         if not errors:
             return
         descriptor.available = False
@@ -679,6 +695,40 @@ class ResourceManager:
             or getattr(instance, "description", "")
             or ""
         ).strip()
+
+    def _tool_model_description_source(self, descriptor: ToolResourceDescriptor, instance: Any) -> str:
+        """点名 `_tool_model_description` 量到的到底是哪一份文本。
+
+        判据顺序与两条装载包装类同源（`g3ku/resources/loader.py`、
+        `g3ku/resources/embedded_mcp.py` 的 `model_description`）：handler（`Tool` 子类）自己的
+        描述优先——包装类问的是 `handler.model_description`，而基类那句默认转读 `description`，
+        所以属性名要说"这个类真正写的那一层"，让模型 grep `model_description` 却一无所获就等于
+        没指。其次清单 metadata 的 `model_description`，最后才是清单 `description:`。
+        这一步不能省：repair 态印进 `tools[]` 的那句取的是清单值，模型看得见的是清单值，
+        被拒的却是主模块里那句——只报长度就会让它反复改同一份没有参与判定的文本。
+        """
+        manifest_label = description_carrier(descriptor.manifest_path, 'description', base=self.workspace)
+        handler = getattr(instance, '_handler', None)
+        if isinstance(handler, Tool):
+            # 包装类问的是 `handler.model_description`，基类那句默认转读 `description`；属性名只报这个
+            # 类真正写的那一层，没覆盖却报 `model_description` 会让模型在模块里 grep 不到可改的地方。
+            if str(getattr(handler, 'model_description', '') or '').strip():
+                overrides_model_description = (
+                    getattr(type(handler), 'model_description', None) is not Tool.model_description
+                )
+                entry = descriptor.entrypoint_path or descriptor.main_root or descriptor.manifest_path
+                label = description_carrier(
+                    entry,
+                    'model_description' if overrides_model_description else 'description',
+                    base=self.workspace,
+                )
+                if str(descriptor.description or '').strip():
+                    return f'{label} (not {manifest_label})'
+                return label
+        metadata = descriptor.metadata or {}
+        if str(metadata.get('model_description') or '').strip():
+            return description_carrier(descriptor.manifest_path, 'model_description', base=self.workspace)
+        return manifest_label
 
     def _persist_state(self, snapshot: ResourceSnapshot) -> None:
         try:

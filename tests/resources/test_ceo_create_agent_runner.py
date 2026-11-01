@@ -5755,6 +5755,81 @@ async def test_create_agent_postprocess_accumulates_multiple_verified_task_ids()
 
 
 @pytest.mark.asyncio
+async def test_graph_execute_tools_repair_required_refusal_names_the_real_reason(monkeypatch) -> None:
+    """待修复的拒绝回执必须取自 state 上那份原因，不能退回"角色无权限"。
+
+    实盘（`ext:qq-official-1903529517:f8a8001865631301`，2026-11-01 22:19–22:44）：
+    `douyin_native` 因描述超预算进 repair 态，名字同时出现在 `denied_tools` 与
+    `repair_required` 两行里，而每一跳的回执都说"你当前角色已无权限调用它，重试或改名都不会
+    放行"。模型按那句话去查 RBAC，最后向操作员要"重启运行时"——真正该改的是主模块里那
+    317 个字符，它一次也没被指出来。这条用例从车道进口喂：state 里带原因，回执就得带原因。
+    """
+    reason = (
+        'description_too_long: tool description is 317 characters (limit 160); '
+        'Measured text lives in tools/douyin_native/main/tool.py:description'
+    )
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            tools=SimpleNamespace(
+                push_runtime_context=lambda context: object(),
+                pop_runtime_context=lambda token: None,
+            )
+        )
+    )
+    monkeypatch.setattr(
+        runner,
+        "_registered_tools_for_state",
+        lambda state: {"demo_tool": _DemoTool()},
+    )
+    # 不带 `runtime_session`：契约投递那条路整个不适用，这一跳必须走到名称准入的拒绝回执。
+    monkeypatch.setattr(
+        runner,
+        "_build_tool_runtime_context",
+        lambda **kwargs: {
+            "on_progress": None,
+            "actor_role": "ceo",
+            "session_key": "web:shared",
+            "tool_contract_enforced": True,
+            "candidate_tool_names": [],
+            "candidate_skill_ids": [],
+            "declared_tool_names": ["demo_tool", "douyin_native"],
+            "declared_denied_tool_names": ["douyin_native"],
+        },
+    )
+
+    result = await runner._graph_execute_tools(
+        {
+            **_canonical_frontdoor_state(
+                tool_names=["demo_tool", "douyin_native"],
+                rbac_visible_tool_names=["demo_tool"],
+                repair_required_tool_items=[{"tool_id": "douyin_native", "reason": reason}],
+            ),
+            "tool_call_payloads": [
+                {"id": "call-1", "name": "douyin_native", "arguments": {"action": "feed"}}
+            ],
+            "messages": [],
+            "used_tools": [],
+            "route_kind": "direct_reply",
+            "parallel_enabled": False,
+            "max_parallel_tool_calls": 1,
+            "synthetic_tool_calls_used": False,
+            "response_payload": {"content": "", "tool_calls": []},
+        },
+        runtime=SimpleNamespace(context=SimpleNamespace()),
+    )
+
+    refusal_text = "\n".join(
+        str(item.get("content") or "")
+        for item in list(result.get("messages") or [])
+        if isinstance(item, dict) and item.get("role") == "tool"
+    )
+    assert "tool not available: douyin_native" in refusal_text
+    assert "repair_required" in refusal_text
+    assert reason in refusal_text
+    assert "无权限" not in refusal_text
+
+
+@pytest.mark.asyncio
 async def test_create_agent_graph_execute_tools_does_not_mark_duplicate_rejection_as_dispatch(monkeypatch) -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
         loop=SimpleNamespace(

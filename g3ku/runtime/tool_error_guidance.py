@@ -49,6 +49,18 @@ _NOT_HYDRATED_NOTE = (
 )
 _NO_LOAD_NEEDED_NOTE = '「{name}」是常驻内置工具，无需加载说明即可直接调用；它没有可加载的 toolskill。'
 
+# 待修复 ≠ 收回权限：名字进 `denied_tools` 是 repair 状态的派生结果（实时授权读拿不到它），
+# 说成"角色无权限"模型就去查 RBAC，而真正超限的那份文本它一次也没看见。原因由装载路径记进
+# `reason`——上一条 `description_too_long` 的载体点名就是靠它把模型送到可改的那一行。
+# 新增的模型可见文案一律英文；"下一次装载会重新放行"由
+# `tests/resources/test_description_budget.py::test_shortening_a_rejected_tool_makes_it_available` 钉。
+_REPAIR_REQUIRED_NOTE = (
+    '`{name}` is registered but its resource is in repair_required state: the last load rejected it, so '
+    'this turn declares the name while execution stays closed. This is not a permission change: retrying '
+    'the call, renaming it, or changing roles will not open it. Fix what the recorded reason points at, '
+    'and the next resource reload re-opens the name. Recorded reason: {reason}'
+)
+
 # 合成实例的常驻工具（`silent` / `time` / `schedule_wake`）：没有 resource.yaml，所以既不在
 # registry 也不在两份 `*_FIXED_BUILTIN_TOOL_NAMES` 里。名字正本在
 # `main/runtime/tool_names.SYNTHETIC_RESIDENT_TOOL_NAMES`；本模块是两条车道共用的叶子，不
@@ -97,6 +109,24 @@ def _format_availability_group(prefix: str, names: list[str]) -> str:
     return format_name_group(prefix, names)
 
 
+def _repair_required_reason_map(repair_required_reasons: Any) -> dict[str, str]:
+    """`{tool_id: reason}`，容忍空、重复名与缺原因的那一条。
+
+    原因由资源装载路径记录（描述超预算、handler 装载失败……），拒绝回执只照抄，
+    不替运行时猜原因——猜成"权限"就是把模型送去查 RBAC 的那条路。
+    """
+    reasons: dict[str, str] = {}
+    if isinstance(repair_required_reasons, dict):
+        rows = [(str(key or '').strip(), str(value or '')) for key, value in repair_required_reasons.items()]
+    else:
+        rows = [(str(item or '').strip(), '') for item in list(repair_required_reasons or [])]
+    for name, raw_reason in rows:
+        if not name or name in reasons:
+            continue
+        reasons[name] = raw_reason.strip() or 'no reason recorded on the resource'
+    return reasons
+
+
 def availability_hint(
     *,
     requested: str,
@@ -104,16 +134,27 @@ def availability_hint(
     candidate_names: Any = None,
     denied_names: Any = None,
     declared_names: Any = None,
+    repair_required_reasons: Any = None,
 ) -> str:
-    """名称被拒时说明"什么能用"：候选未水化、纯未知名、已声明但无权限三者的修法不同，必须分开讲。
+    """名称被拒时说明"什么能用"：候选未水化、纯未知名、待修复、已收回权限四者的修法不同，必须分开讲。
 
     `declared_names` 是钉住的 `tools[]` 名单（可加载面）。它比候选集宽：钉住清单里没进本轮
     callable 的名字照样能按名 load，所以"声明里有、callable 里没有"一律先给 load 指引，不落到
     "未知名字"那一档——否则模型会以为这个能力不存在。
+
+    `repair_required_reasons` 优先于"无权限"那一档：待修复的名字照样会进 `declared_denied_tool_names`
+    （实时授权读拿不到它），可那一次拒绝并没有发生权限收回，把派生结果说成收回，模型就会去查角色。
     """
     name = str(requested or "").strip()
+    callable_list = _availability_name_list(callable_names)
+    candidate_list = _availability_name_list(candidate_names)
+    declared_list = _availability_name_list(declared_names)
     denied_list = _availability_name_list(denied_names)
-    if name and name in set(denied_list):
+    reasons = _repair_required_reason_map(repair_required_reasons)
+    parts: list[str] = []
+    if name and name in reasons:
+        parts.append(_REPAIR_REQUIRED_NOTE.format(name=name, reason=reasons[name]))
+    elif name and name in set(denied_list):
         # 名字仍在 tools[] 里（钉住的声明不随权限收回摘名），模型看得见参数表，
         # 但执行准入已经关掉——不说清就会变成反复重试或换个名字再试。
         return (
@@ -121,12 +162,8 @@ def availability_hint(
             "重试或改名都不会放行；请改用下面「当前可直接调用的工具」名单里的工具，"
             "或换一种达成路径"
         )
-    callable_list = _availability_name_list(callable_names)
-    candidate_list = _availability_name_list(candidate_names)
-    declared_list = _availability_name_list(declared_names)
-    parts: list[str] = []
     loadable_names = set(candidate_list) | set(declared_list)
-    if name and name in loadable_names:
+    if name and name in loadable_names and name not in reasons:
         parts.append(_NOT_HYDRATED_NOTE.format(name=name))
     group = _format_availability_group(_AVAILABILITY_CALLABLE_PREFIX, callable_list)
     if group:

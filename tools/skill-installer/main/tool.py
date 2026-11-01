@@ -21,6 +21,7 @@ import yaml
 
 from g3ku.resources.description_limits import (
     SKILL_DESCRIPTION_MAX_CHARS,
+    description_carrier,
     description_too_long_error,
 )
 from g3ku.resources.tool_settings import SkillInstallerToolSettings, runtime_tool_settings
@@ -289,7 +290,13 @@ class SkillInstallerTool:
             upstream_description = self._read_manifest_description(upstream_manifest)
             if len(upstream_description) > SKILL_DESCRIPTION_MAX_CHARS:
                 shutil.rmtree(destination, ignore_errors=True)
-                raise DescriptionTooLongError(description_too_long_error("skill", upstream_description))
+                raise DescriptionTooLongError(
+                    description_too_long_error(
+                        "skill",
+                        upstream_description,
+                        source=description_carrier(upstream_manifest, "description", base=self._workspace),
+                    )
+                )
             try:
                 manifest_created = self._ensure_resource_manifest(
                     skill_root=destination,
@@ -565,7 +572,13 @@ class SkillInstallerTool:
                 f"Imported from {source.owner}/{source.repo} ({source.ref}) at {source.path}."
             )
         if len(description) > SKILL_DESCRIPTION_MAX_CHARS:
-            raise DescriptionTooLongError(description_too_long_error("skill", description))
+            raise DescriptionTooLongError(
+                description_too_long_error(
+                    "skill",
+                    description,
+                    source=description_carrier(skill_root / "SKILL.md", "description", base=self._workspace),
+                )
+            )
 
         keywords = [requested_name, Path(source.path).name]
         frontmatter_name = str(frontmatter.get("name") or "").strip()

@@ -4553,6 +4553,28 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             if isinstance(item, dict) and str(item.get("tool_id") or "").strip()
         }
 
+    @staticmethod
+    def _frontdoor_repair_required_reasons_for_state(
+        state: CeoGraphState | dict[str, Any] | None,
+    ) -> dict[str, str]:
+        """待修复名字 → 资源上记的原因，与上面的名字集同一份 state 键。
+
+        名字集管"进不进 callable"，这里管"被拒时怎么说"。两处必须同源：回执一旦退回
+        "角色无权限"那句，模型就失去唯一能看到真实成因的地方（实盘 2026-11-01，
+        `douyin_native` 描述超预算后被连续拒绝，每一跳都说成权限收回，模型因此去查 RBAC
+        并向操作员要"重启运行时"）。
+        """
+        if not isinstance(state, dict):
+            return {}
+        reasons: dict[str, str] = {}
+        for item in list(state.get("repair_required_tool_items") or []):
+            if not isinstance(item, dict):
+                continue
+            tool_id = str(item.get("tool_id") or "").strip()
+            if tool_id and tool_id not in reasons:
+                reasons[tool_id] = str(item.get("reason") or "").strip()
+        return reasons
+
     def _frontdoor_candidate_tool_view(
         self,
         state: CeoGraphState | dict[str, Any] | None,
@@ -10042,6 +10064,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     candidate_names=(runtime_context or {}).get("candidate_tool_names") or [],
                     denied_names=(runtime_context or {}).get("declared_denied_tool_names") or [],
                     declared_names=(runtime_context or {}).get("declared_tool_names") or [],
+                    repair_required_reasons=self._frontdoor_repair_required_reasons_for_state(state),
                 )
                 return await _error_result(payload, f"tool not available: {tool_name}" + (f"\n{hint}" if hint else ""))
             async def _reuse_execute_one(call_arguments: dict[str, Any]) -> tuple[str, str]:

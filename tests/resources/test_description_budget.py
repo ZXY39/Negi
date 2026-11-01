@@ -33,7 +33,7 @@ def _write_skill(workspace: Path, name: str, description: str) -> Path:
     return root
 
 
-def _write_tool(workspace: Path, name: str, description: str) -> Path:
+def _write_tool(workspace: Path, name: str, description: str, *, handler_field: str = 'description') -> Path:
     root = workspace / 'tools' / name
     (root / 'main').mkdir(parents=True)
     (root / 'resource.yaml').write_text(
@@ -61,6 +61,15 @@ def _write_tool(workspace: Path, name: str, description: str) -> Path:
         ),
         encoding='utf-8',
     )
+    # `description` 是抽象成员，必须存在；`handler_field` 决定哪一层写那句超限文本，
+    # 用来钉拒绝文案点的属性名跟的是"这个类真正写的那一层"。
+    short_property = (
+        ''
+        if handler_field == 'description'
+        else '    @property\n'
+        '    def description(self):\n'
+        "        return 'Short handler description.'\n"
+    )
     (root / 'main' / 'tool.py').write_text(
         'from g3ku.agent.tools.base import Tool\n'
         '\n'
@@ -68,8 +77,9 @@ def _write_tool(workspace: Path, name: str, description: str) -> Path:
         '    @property\n'
         '    def name(self):\n'
         "        return %r\n"
+        f'{short_property}'
         '    @property\n'
-        '    def description(self):\n'
+        f'    def {handler_field}(self):\n'
         "        return %r\n"
         '    @property\n'
         '    def parameters(self):\n'
@@ -229,6 +239,109 @@ def test_installer_rejects_an_over_cap_generated_description(tmp_path: Path) -> 
         )
     assert 'description_too_long' in str(excinfo.value)
     assert not (skill_root / 'resource.yaml').exists()
+
+
+def test_rejected_tool_description_names_its_carrier_and_quotes_the_text(tmp_path: Path) -> None:
+    """拒绝文案必须自己回答"量的是哪一份、原文是什么"。
+
+    实盘（`ext:qq-official-1903529517:f8a8001865631301`，2026-11-01 22:19–22:44）：装载路径量的是
+    handler 类里的 `description`（那份 317 字符），而 repair 态印进 `tools[]` 的【待修复】句子取的是
+    `resource.yaml` 的 `description:`。同一个"工具描述"两个读者两套来源，模型看到的只有后者，
+    于是它把 yaml 从 112 改到 93、每一跳都被同一个 317 拒掉，最后只能向操作员要"重启运行时"。
+    原文案只报字符数与"rewrite it as one sentence"，没有指明被量的载体，模型没有任何线索能找到那
+    317 个字符——所以这里钉三件事：点名 handler 文件与属性、引到有界的原文、并把清单那一份明确
+    标成"不是它"。
+    """
+    manager = ResourceManager(tmp_path)
+    try:
+        offending = 'CARRIERPROBE ' * 30
+        assert len(offending) > TOOL_DESCRIPTION_MAX_CHARS
+        _write_tool(tmp_path, 'carrier_tool', offending)
+        manager.reload_now()
+        descriptor = manager.get_tool_descriptor('carrier_tool')
+        assert descriptor is not None
+        assert descriptor.available is False
+        error = next(item for item in descriptor.errors if 'description_too_long' in item)
+        assert 'tools/carrier_tool/main/tool.py:description' in error
+        assert 'CARRIERPROBE' in error
+        # 被拒文本必然超上限，全文回贴会让这条拒绝自己变成一个新的长块
+        assert '...(truncated)' in error
+        # 点名"不是清单那一份"才是这一刀的落点：模型上一轮改的正是 resource.yaml
+        assert 'not tools/carrier_tool/resource.yaml' in error
+    finally:
+        manager.close()
+
+
+def test_shortening_a_rejected_tool_makes_it_available(tmp_path: Path) -> None:
+    """拒绝回执承诺的"修好后下一次装载就放行"必须有实现兜着。
+
+    与 skill 侧同名用例同形：工具档过去没有正样本，回执里那句"next resource reload re-opens it"
+    就是空头承诺。
+    """
+    manager = ResourceManager(tmp_path)
+    try:
+        root = _write_tool(tmp_path, 'fix_tool', 'x' * (TOOL_DESCRIPTION_MAX_CHARS + 1))
+        manager.reload_now()
+        assert manager.get_tool_descriptor('fix_tool').available is False
+        (root / 'main' / 'tool.py').write_text(
+            (root / 'main' / 'tool.py').read_text(encoding='utf-8').replace(
+                'x' * (TOOL_DESCRIPTION_MAX_CHARS + 1), 'One short sentence.'
+            ),
+            encoding='utf-8',
+        )
+        manager.reload_now()
+        assert manager.get_tool_descriptor('fix_tool').available is True
+    finally:
+        manager.close()
+
+
+def test_rejected_tool_description_names_the_overridden_model_description(tmp_path: Path) -> None:
+    """属性名跟着这个类真正写的那一层走。
+
+    装载包装类问的是 `handler.model_description`，基类默认转读 `description`。两类写法都能触发
+    超限，但只有覆盖 `model_description` 的那一类，让模型去 grep `model_description` 才找得到；
+    上一条用例钉的是默认转读那一档，这里钉覆盖那一档，两条互为对照臂。
+    """
+    manager = ResourceManager(tmp_path)
+    try:
+        _write_tool(
+            tmp_path,
+            'model_field_tool',
+            'MODELFIELDCAR ' * 20,
+            handler_field='model_description',
+        )
+        manager.reload_now()
+        descriptor = manager.get_tool_descriptor('model_field_tool')
+        assert descriptor is not None
+        assert descriptor.available is False
+        error = next(item for item in descriptor.errors if 'description_too_long' in item)
+        assert 'tools/model_field_tool/main/tool.py:model_description' in error
+        assert 'MODELFIELDCAR' in error
+    finally:
+        manager.close()
+
+
+def test_rejected_skill_description_names_the_manifest_as_its_carrier(tmp_path: Path) -> None:
+    """载体标签跟着实际胜出的那一份走，不是硬编码 tool.py。
+
+    skill 侧没有 handler 覆盖：量的是 `skills/<name>/resource.yaml` 的 `description:`，
+    所以这一档必须点名清单文件。它是上一条用例的对照臂——把载体判据写死成"永远是主模块"
+    会在这里当场红。
+    """
+    manager = ResourceManager(tmp_path)
+    try:
+        offending = 'SKILLCARRIER ' * 20
+        assert len(offending) > SKILL_DESCRIPTION_MAX_CHARS
+        _write_skill(tmp_path, 'carrier_skill', offending)
+        manager.reload_now()
+        descriptor = manager.get_skill('carrier_skill')
+        assert descriptor is not None
+        assert descriptor.available is False
+        error = next(item for item in descriptor.errors if 'description_too_long' in item)
+        assert 'skills/carrier_skill/resource.yaml' in error
+        assert 'SKILLCARRIER' in error
+    finally:
+        manager.close()
 
 
 def test_repo_tool_manifests_fit_the_description_budget() -> None:
