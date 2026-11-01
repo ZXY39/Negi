@@ -639,7 +639,7 @@ wheels = [
 
 [[package]]
 name = "g3ku-ai"
-version = "1.11.3"
+version = "1.11.4"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
