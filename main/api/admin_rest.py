@@ -16,6 +16,7 @@ from typing import Any
 
 from fastapi import APIRouter, Body, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
+from loguru import logger
 
 from g3ku import audit_events
 from g3ku.config.loader import load_config, save_config
@@ -43,6 +44,11 @@ from main.governance import (
 from main.governance.exec_tool_policy import (
     exec_tool_supports_execution_mode,
     merge_exec_execution_mode_metadata,
+)
+from main.governance.operator_actions import (
+    AUDIENCE_ALL,
+    AUDIENCE_FRONTDOOR,
+    memory_scope,
 )
 from main.governance.review_policy import (
     GOVERNANCE_MODE_META_KEY,
@@ -72,6 +78,27 @@ def _service():
     if service is None:
         raise HTTPException(status_code=503, detail='main_task_service_unavailable')
     return service
+
+
+def _record_console_action(
+    *,
+    category: str,
+    audience: str,
+    scope: str = '',
+    action: str,
+) -> None:
+    """记一条控制台动作供模型侧通知使用；失败只告警，不影响原写入。"""
+    try:
+        service = _service()
+    except Exception:
+        return
+    recorder = getattr(service, 'record_operator_action', None)
+    if not callable(recorder):
+        return
+    try:
+        recorder(category=category, audience=audience, scope=scope, action=action)
+    except Exception as exc:  # noqa: BLE001 - 通知不是写操作的前置条件
+        logger.warning('operator action record failed: {}', exc)
 
 
 def _llm_facade():
@@ -2303,6 +2330,11 @@ async def update_skill_file(skill_id: str, file_key: str, payload: dict = Body(.
             item = await service.write_skill_file_async(skill_id, file_key, str(payload.get('content') or ''), session_id=session_id)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        _record_console_action(
+            category='skill',
+            audience=AUDIENCE_ALL,
+            action=f'edited skill `{skill_id}` file `{file_key}`',
+        )
         return {'ok': True, 'item': item}
 
 
@@ -2319,6 +2351,8 @@ async def update_skill_policy(skill_id: str, payload: dict = Body(...), session_
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     with _resource_service() as service:
+        getter = getattr(service, 'get_skill_resource', None)
+        before = getter(skill_id) if callable(getter) else None
         item = service.update_skill_policy(
             skill_id,
             session_id=session_id,
@@ -2327,24 +2361,46 @@ async def update_skill_policy(skill_id: str, payload: dict = Body(...), session_
         )
         if item is None:
             raise HTTPException(status_code=404, detail='skill_not_found')
+        if before is None or bool(before.enabled) != bool(item.enabled) or list(before.allowed_roles or []) != list(item.allowed_roles or []):
+            _record_console_action(
+                category='skill',
+                audience=AUDIENCE_ALL,
+                action=f'changed the access policy for skill `{skill_id}`',
+            )
         return {'ok': True, 'item': item.model_dump(mode='json')}
 
 
 @router.post('/resources/skills/{skill_id}/enable')
 async def enable_skill(skill_id: str, session_id: str = Query('web:shared')):
     with _resource_service() as service:
+        getter = getattr(service, 'get_skill_resource', None)
+        before = getter(skill_id) if callable(getter) else None
         item = service.enable_skill(skill_id, session_id=session_id)
         if item is None:
             raise HTTPException(status_code=404, detail='skill_not_found')
+        if before is None or not bool(before.enabled):
+            _record_console_action(
+                category='skill',
+                audience=AUDIENCE_ALL,
+                action=f'enabled skill `{skill_id}`',
+            )
         return {'ok': True, 'item': item.model_dump(mode='json')}
 
 
 @router.post('/resources/skills/{skill_id}/disable')
 async def disable_skill(skill_id: str, session_id: str = Query('web:shared')):
     with _resource_service() as service:
+        getter = getattr(service, 'get_skill_resource', None)
+        before = getter(skill_id) if callable(getter) else None
         item = service.disable_skill(skill_id, session_id=session_id)
         if item is None:
             raise HTTPException(status_code=404, detail='skill_not_found')
+        if before is None or bool(before.enabled):
+            _record_console_action(
+                category='skill',
+                audience=AUDIENCE_ALL,
+                action=f'disabled skill `{skill_id}`',
+            )
         return {'ok': True, 'item': item.model_dump(mode='json')}
 
 
@@ -2355,6 +2411,11 @@ async def delete_skill(skill_id: str, session_id: str = Query('web:shared')):
             item = await service.delete_skill_resource_async(skill_id, session_id=session_id)
         except ValueError as exc:
             raise _resource_delete_http_error(exc) from exc
+        _record_console_action(
+            category='skill',
+            audience=AUDIENCE_ALL,
+            action=f'deleted skill `{skill_id}`',
+        )
         return {'ok': True, 'item': item}
 
 
@@ -2491,6 +2552,8 @@ async def update_tool_policy(tool_id: str, payload: dict = Body(...), session_id
     if isinstance(roles_payload, list):
         normalized_roles = [str(role) for role in roles_payload]
     with _resource_service() as service:
+        getter = getattr(service, 'get_tool', None)
+        before = getter(tool_id) if callable(getter) else None
         try:
             item = service.update_tool_policy(
                 tool_id,
@@ -2503,30 +2566,58 @@ async def update_tool_policy(tool_id: str, payload: dict = Body(...), session_id
             raise _resource_delete_http_error(exc) from exc
         if item is None:
             raise HTTPException(status_code=404, detail='tool_not_found')
+        if (
+            before is None
+            or bool(before.enabled) != bool(item.enabled)
+            or list(before.allowed_roles or []) != list(item.allowed_roles or [])
+            or str((getattr(before, 'metadata', {}) or {}).get('execution_mode') or '')
+            != str((getattr(item, 'metadata', {}) or {}).get('execution_mode') or '')
+        ):
+            _record_console_action(
+                category='tool',
+                audience=AUDIENCE_ALL,
+                action=f'changed the policy for tool `{tool_id}`',
+            )
         return {'ok': True, 'item': item.model_dump(mode='json')}
 
 
 @router.post('/resources/tools/{tool_id}/enable')
 async def enable_tool(tool_id: str, session_id: str = Query('web:shared')):
     with _resource_service() as service:
+        getter = getattr(service, 'get_tool', None)
+        before = getter(tool_id) if callable(getter) else None
         try:
             item = service.enable_tool(tool_id, session_id=session_id)
         except ValueError as exc:
             raise _resource_delete_http_error(exc) from exc
         if item is None:
             raise HTTPException(status_code=404, detail='tool_not_found')
+        if before is None or not bool(before.enabled):
+            _record_console_action(
+                category='tool',
+                audience=AUDIENCE_ALL,
+                action=f'enabled tool `{tool_id}`',
+            )
         return {'ok': True, 'item': item.model_dump(mode='json')}
 
 
 @router.post('/resources/tools/{tool_id}/disable')
 async def disable_tool(tool_id: str, session_id: str = Query('web:shared')):
     with _resource_service() as service:
+        getter = getattr(service, 'get_tool', None)
+        before = getter(tool_id) if callable(getter) else None
         try:
             item = service.disable_tool(tool_id, session_id=session_id)
         except ValueError as exc:
             raise _resource_delete_http_error(exc) from exc
         if item is None:
             raise HTTPException(status_code=404, detail='tool_not_found')
+        if before is None or bool(before.enabled):
+            _record_console_action(
+                category='tool',
+                audience=AUDIENCE_ALL,
+                action=f'disabled tool `{tool_id}`',
+            )
         return {'ok': True, 'item': item.model_dump(mode='json')}
 
 
@@ -2537,6 +2628,11 @@ async def delete_tool(tool_id: str, session_id: str = Query('web:shared')):
             item = await service.delete_tool_resource_async(tool_id, session_id=session_id)
         except ValueError as exc:
             raise _resource_delete_http_error(exc) from exc
+        _record_console_action(
+            category='tool',
+            audience=AUDIENCE_ALL,
+            action=f'deleted tool `{tool_id}`',
+        )
         return {'ok': True, 'item': item}
 
 
@@ -2723,6 +2819,11 @@ async def update_sticker_settings(payload: dict | None = Body(default=None)):
     if changed:
         save_config(cfg)
         await _refresh_runtime_after_save('admin_stickers_settings_update')
+        _record_console_action(
+            category='sticker',
+            audience=AUDIENCE_FRONTDOOR,
+            action=f'changed the sticker send limit to {int(getattr(cfg.stickers, "max_per_reply", 1))}',
+        )
     return {'ok': True, **_stickers_settings_payload(cfg)}
 
 
@@ -2764,6 +2865,11 @@ async def update_sticker_theme(pack: str, payload: dict = Body(...)):
         sticker_admin.set_theme(pack, payload.get('theme'))
     except sticker_admin.StickerAdminError as exc:
         raise _sticker_http_error(exc) from exc
+    _record_console_action(
+        category='sticker',
+        audience=AUDIENCE_FRONTDOOR,
+        action=f'changed the theme of sticker pack `{pack}`',
+    )
     return {'ok': True, 'item': _sticker_pack_after(pack)}
 
 
@@ -2776,6 +2882,11 @@ async def set_sticker_pack_enabled(pack: str, payload: dict | None = Body(defaul
         )
     except sticker_admin.StickerAdminError as exc:
         raise _sticker_http_error(exc) from exc
+    _record_console_action(
+        category='sticker',
+        audience=AUDIENCE_FRONTDOOR,
+        action=f'{"enabled" if enabled else "disabled"} sticker pack `{pack}`',
+    )
     return {'ok': True, 'dir_name': new_name, 'item': _sticker_pack_after(new_name)}
 
 
@@ -2789,6 +2900,11 @@ async def create_sticker_category(pack: str, payload: dict = Body(...)):
         )
     except sticker_admin.StickerAdminError as exc:
         raise _sticker_http_error(exc) from exc
+    _record_console_action(
+        category='sticker',
+        audience=AUDIENCE_FRONTDOOR,
+        action=f'created sticker category `{pack}/{dir_name}`',
+    )
     return {'ok': True, 'dir_name': dir_name, 'item': _sticker_pack_after(pack)}
 
 
@@ -2798,6 +2914,12 @@ async def register_sticker_category(pack: str, category: str):
         registered = sticker_admin.register_pending(pack, category)
     except sticker_admin.StickerAdminError as exc:
         raise _sticker_http_error(exc) from exc
+    if registered:
+        _record_console_action(
+            category='sticker',
+            audience=AUDIENCE_FRONTDOOR,
+            action=f'registered {len(registered)} images in sticker category `{pack}/{category}`',
+        )
     return {
         'ok': True,
         'registered': registered,
@@ -2833,6 +2955,11 @@ async def update_sticker_category_description(
         sticker_admin.set_category_description(pack, category, payload.get('description'))
     except sticker_admin.StickerAdminError as exc:
         raise _sticker_http_error(exc) from exc
+    _record_console_action(
+        category='sticker',
+        audience=AUDIENCE_FRONTDOOR,
+        action=f'updated the description of sticker category `{pack}/{category}`',
+    )
     return {'ok': True, 'item': _sticker_pack_after(pack)}
 
 
@@ -2847,6 +2974,11 @@ async def set_sticker_category_enabled(
         )
     except sticker_admin.StickerAdminError as exc:
         raise _sticker_http_error(exc) from exc
+    _record_console_action(
+        category='sticker',
+        audience=AUDIENCE_FRONTDOOR,
+        action=f'{"enabled" if enabled else "disabled"} sticker category `{pack}/{category}`',
+    )
     return {'ok': True, 'item': _sticker_pack_after(pack)}
 
 
@@ -2874,6 +3006,11 @@ async def upload_sticker_images(
         items = sticker_admin.store_uploads(pack, category, uploads)
     except sticker_admin.StickerAdminError as exc:
         raise _sticker_http_error(exc) from exc
+    _record_console_action(
+        category='sticker',
+        audience=AUDIENCE_FRONTDOOR,
+        action=f'uploaded {len(items)} images to sticker category `{pack}/{category}`',
+    )
     return {'ok': True, 'items': items, 'item': _sticker_pack_after(pack)}
 
 
@@ -2889,6 +3026,11 @@ async def delete_sticker_image(pack: str, category: str, name: str = Query(...))
         pack=pack,
         category=category,
         name=name,
+    )
+    _record_console_action(
+        category='sticker',
+        audience=AUDIENCE_FRONTDOOR,
+        action=f'deleted image `{name}` from sticker category `{pack}/{category}`',
     )
     return {'ok': True, 'item': _sticker_pack_after(pack)}
 
@@ -2906,6 +3048,11 @@ async def delete_sticker_category(pack: str, category: str):
         category=category,
         **deleted,
     )
+    _record_console_action(
+        category='sticker',
+        audience=AUDIENCE_FRONTDOOR,
+        action=f'deleted sticker category `{pack}/{category}` ({deleted["images"]} images)',
+    )
     return {'ok': True, 'deleted': deleted, 'item': _sticker_pack_after(pack)}
 
 
@@ -2921,6 +3068,11 @@ async def delete_sticker_pack(pack: str):
         pack=pack,
         **deleted,
     )
+    _record_console_action(
+        category='sticker',
+        audience=AUDIENCE_FRONTDOOR,
+        action=f'deleted sticker pack `{pack}` ({deleted["images"]} images)',
+    )
     return {'ok': True, 'deleted': deleted}
 
 
@@ -2932,6 +3084,16 @@ def _memory_normalize_scope(value: Any) -> str:
 
 def _memory_scope_from_request(request: Request) -> str:
     return _memory_normalize_scope((request.query_params or {}).get('scope'))
+
+
+def _memory_action_label(manager: Any, memory_id: str) -> str:
+    """Model-facing label: the block prints no ids, so name the current line."""
+    resolver = getattr(manager, 'memory_line_for_id', None)
+    try:
+        number = int(resolver(memory_id)) if callable(resolver) else 0
+    except Exception:
+        number = 0
+    return f'line {number}' if number else f'id `{memory_id}`'
 
 
 def _runtime_memory_manager(scope: str = ''):
@@ -3342,6 +3504,12 @@ async def update_current_memory(request: Request, payload: dict | None = Body(de
         'request_id': str(queued.get('request_id') or ''),
         'reason': str(body.get('reason') or 'manual').strip() or 'manual',
     }
+    _record_console_action(
+        category='memory',
+        audience=AUDIENCE_FRONTDOOR,
+        scope=memory_scope(_memory_scope_from_request(request)),
+        action=f'requested an update to long-term memory ({_memory_action_label(manager, memory_id)})',
+    )
     try:
         _append_memory_admin_audit_event(
             manager,
@@ -3400,6 +3568,13 @@ async def uncompress_current_memory(request: Request, payload: dict | None = Bod
             status_code=503,
             detail={'code': 'memory_current_uncompress_failed', 'message': str(exc or 'memory un-compress failed')},
         ) from exc
+    if bool((item or {}).get('changed')):
+        _record_console_action(
+            category='memory',
+            audience=AUDIENCE_FRONTDOOR,
+            scope=memory_scope(_memory_scope_from_request(request)),
+            action=f're-expanded long-term memory ({_memory_action_label(manager, memory_id)})',
+        )
     try:
         _append_memory_admin_audit_event(
             manager,
@@ -3478,6 +3653,16 @@ async def delete_current_memories(request: Request, payload: dict | None = Body(
         'request_id': str(queued.get('request_id') or ''),
         'reason': reason,
     }
+    _record_console_action(
+        category='memory',
+        audience=AUDIENCE_FRONTDOOR,
+        scope=memory_scope(_memory_scope_from_request(request)),
+        action=(
+            'requested deletion of long-term memory ('
+            + ', '.join(_memory_action_label(manager, memory_id) for memory_id in memory_ids)
+            + ')'
+        ),
+    )
     try:
         _append_memory_admin_audit_event(
             manager,
@@ -3623,6 +3808,12 @@ async def update_memory_note(request: Request, ref: str, payload: dict | None = 
             },
         ) from exc
     item = dict(result or {})
+    _record_console_action(
+        category='memory',
+        audience=AUDIENCE_FRONTDOOR,
+        scope=memory_scope(_memory_scope_from_request(request)),
+        action=f'updated the body of memory note `{normalized_ref}`',
+    )
     try:
         _append_memory_admin_audit_event(
             manager,
@@ -3654,6 +3845,12 @@ async def retry_memory_queue_head(request: Request, payload: dict | None = Body(
         manager,
         reason=reason,
         request_id=request_id,
+    )
+    _record_console_action(
+        category='memory',
+        audience=AUDIENCE_FRONTDOOR,
+        scope=memory_scope(_memory_scope_from_request(request)),
+        action='requested a retry of the memory queue head',
     )
     return {'ok': True, 'item': item}
 
@@ -3862,6 +4059,12 @@ async def retry_memory_failed_record(request: Request, failed_id: str, payload: 
         reason=reason,
         request_id=request_id,
     )
+    _record_console_action(
+        category='memory',
+        audience=AUDIENCE_FRONTDOOR,
+        scope=memory_scope(_memory_scope_from_request(request)),
+        action='requested a retry of a failed memory batch',
+    )
     return {'ok': True, 'item': item}
 
 
@@ -3876,6 +4079,12 @@ async def discard_memory_failed_record(request: Request, failed_id: str, payload
         action='discard',
         reason=reason,
         request_id=request_id,
+    )
+    _record_console_action(
+        category='memory',
+        audience=AUDIENCE_FRONTDOOR,
+        scope=memory_scope(_memory_scope_from_request(request)),
+        action='discarded a failed memory batch',
     )
     return {'ok': True, 'item': item}
 

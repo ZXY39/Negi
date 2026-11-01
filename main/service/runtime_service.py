@@ -87,6 +87,13 @@ from main.governance.exec_tool_policy import (
     merge_exec_execution_mode_metadata,
     resolve_exec_runtime_policy_payload,
 )
+from main.governance.operator_actions import (
+    AUDIENCE_ALL,
+    AUDIENCE_NODE,
+    MAX_ACTIONS_PER_NOTICE,
+    format_operator_action,
+    scope_keys_for_node,
+)
 from main.governance.review_policy import (
     GOVERNANCE_MODE_META_KEY,
     GOVERNANCE_MODE_UPDATED_AT_META_KEY,
@@ -856,6 +863,9 @@ class MainRuntimeService:
         # 节点道 skill 名单的每跳取数口：react_loop 无 service 引用，只能由这里递进去
         # （与 `_tool_snapshot_supplier` 同一条 side-channel）。
         self.node_runner._skill_roster_supplier = self._node_skill_roster_supplier
+        # 控制台操作的一次性通知取数口：节点只收工具/skill 的全局动作，与 skill 取数口
+        # 同一条 side-channel（react_loop 没有 service 引用）。
+        self.node_runner._operator_action_supplier = self._node_operator_action_supplier
         # 节点头部快照与一次性通知的 exec 策略取数口：节点不持 service 引用，
         # 与 skill 取数口同一条 side-channel；每跳实时读治理记录（无缓存）。
         self.node_runner._exec_runtime_policy_supplier = self._current_exec_runtime_policy_payload
@@ -11055,6 +11065,80 @@ class MainRuntimeService:
             write_review_free_tool_ids(self.governance_store, whitelist_tools)
         self.governance_store.set_meta(GOVERNANCE_MODE_UPDATED_AT_META_KEY, now_iso())
         return self.get_governance_mode()
+
+    # -- operator actions (console provenance for model-facing notices) ---------
+    def record_operator_action(
+        self,
+        *,
+        category: str,
+        audience: str,
+        scope: str = '',
+        action: str,
+    ) -> dict[str, object] | None:
+        """Append one console mutation for the runtime notice lane.
+
+        The console write path calls this after the mutation succeeds; recording
+        never gates the mutation itself (callers swallow failures).
+        """
+        return self.governance_store.append_operator_action(
+            created_at=now_iso(),
+            category=str(category or '').strip(),
+            audience=str(audience or '').strip(),
+            scope=str(scope or '').strip(),
+            text=format_operator_action(action),
+        )
+
+    def list_operator_actions(
+        self,
+        *,
+        after_id: int,
+        audiences: Any,
+        scopes: Any,
+        limit: int = MAX_ACTIONS_PER_NOTICE,
+    ) -> dict[str, Any]:
+        normalized_after = int(after_id or 0)
+        # 先取快照上界：没有匹配动作时游标可以安全推进到上界，跳过本会话无关的行；
+        # 快照之后并发追加的动作 id 更大，不会被这一跳跳过。
+        snapshot_latest = max(
+            self.governance_store.latest_operator_action_id(),
+            normalized_after,
+        )
+        actions = self.governance_store.list_operator_actions(
+            after_id=normalized_after,
+            audiences=audiences,
+            scopes=scopes,
+            limit=max(1, int(limit or MAX_ACTIONS_PER_NOTICE)),
+        )
+        latest_matching = (
+            max(int(item.get('id') or 0) for item in actions)
+            if actions
+            else snapshot_latest
+        )
+        return {
+            'actions': actions,
+            'latest_id': max(latest_matching, normalized_after),
+        }
+
+    def latest_operator_action_id(self) -> int:
+        return self.governance_store.latest_operator_action_id()
+
+    def _node_operator_action_supplier(
+        self,
+        *,
+        after_id: int = 0,
+        initialized: bool = False,
+    ) -> dict[str, Any]:
+        """Node lane supplier: tool/skill actions only, global scope.
+
+        Nodes render ``sticker_max_per_reply`` but not the sticker catalog, and
+        memory/persona are session-scoped, so those actions are front-door only.
+        """
+        _ = initialized
+        return self.list_operator_actions(
+            after_id=int(after_id or 0),
+            audiences=(AUDIENCE_NODE, AUDIENCE_ALL),
+            scopes=scope_keys_for_node(),
+        )
 
     @staticmethod
     def _normalize_permission_risk_level(value: Any, *, default: str = 'medium') -> str:

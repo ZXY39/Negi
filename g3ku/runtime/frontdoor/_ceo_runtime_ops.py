@@ -164,6 +164,12 @@ from g3ku.stickers import config as sticker_config
 from g3ku.stickers import safe_scan_packs, sticker_contract_sections
 from g3ku.utils.helpers import safe_filename, tools_bundle_single_source_enabled
 from main.governance.exec_tool_policy import render_exec_runtime_policy_body
+from main.governance.operator_actions import (
+    AUDIENCE_ALL,
+    AUDIENCE_FRONTDOOR,
+    MAX_ACTIONS_PER_NOTICE,
+    scope_keys_for_frontdoor,
+)
 from main.governance.tool_context import apply_runtime_tool_context_projection
 from main.models import normalize_execution_policy_metadata
 from main.protocol import build_envelope, now_iso
@@ -3970,6 +3976,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 **kwargs,
                 session_key=normalized_session_key,
             ),
+            operator_actions_provider=lambda **kwargs: self._frontdoor_operator_action_provider(
+                **kwargs,
+                session_key=normalized_session_key,
+            ),
             contract_sections=self._frontdoor_contract_notice_sections(
                 dict(state or {}),
                 session_key=normalized_session_key,
@@ -4129,6 +4139,41 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             names = tuple(getattr(policy, "effective_tool_names", ()) or ())
             parts.append(f"允许使用的工具列表已更新（{len(names)} 项；以 tools[] 为准）。")
         return {"signature": signature, "text": "\n".join(parts)}
+
+    def _frontdoor_operator_action_provider(
+        self,
+        *,
+        cursor_id: int = 0,
+        initialized: bool = False,
+        session_key: str = "",
+    ) -> dict[str, Any] | None:
+        """控制台动作的增量：谁在这个会话的作用域里改了东西。
+
+        首次投递只对齐（操作发生在会话存在之前，不重播）；之后按游标取增量。
+        作用域＝全局 + 本会话 + 本地记忆 + 本群记忆（群会话才多这一项）。
+        """
+        service = getattr(self._loop, "main_task_service", None)
+        lister = getattr(service, "list_operator_actions", None)
+        if not callable(lister):
+            return None
+        if not initialized:
+            latest_getter = getattr(service, "latest_operator_action_id", None)
+            try:
+                latest = int(latest_getter() or 0) if callable(latest_getter) else 0
+            except Exception:
+                return None
+            return {"actions": [], "latest_id": latest}
+        view = _memory_view_for_session(self._loop, session_key)
+        group_key = str(getattr(view, "group_key", "") or "") if view is not None else ""
+        try:
+            return lister(
+                after_id=int(cursor_id or 0),
+                audiences=(AUDIENCE_FRONTDOOR, AUDIENCE_ALL),
+                scopes=scope_keys_for_frontdoor(session_key, group_key=group_key),
+                limit=MAX_ACTIONS_PER_NOTICE,
+            )
+        except Exception:
+            return None
 
     def _frontdoor_memory_notice_provider(
         self,

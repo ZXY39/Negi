@@ -46,6 +46,31 @@ def _store() -> OnboardingStore:
     return OnboardingStore(workspace_path())
 
 
+def _record_persona_operator_action() -> None:
+    """人设是控制台写的：给模型侧通知留一条“操作员做的”，失败不阻塞保存。"""
+    try:
+        from g3ku.shells.web import get_agent
+        from main.governance.operator_actions import AUDIENCE_FRONTDOOR
+
+        agent = get_agent()
+    except Exception:
+        # 新项目还没有模型运行时，也就没有可通知的会话。
+        return
+    service = getattr(agent, "main_task_service", None)
+    recorder = getattr(service, "record_operator_action", None)
+    if not callable(recorder):
+        return
+    try:
+        recorder(
+            category="persona",
+            audience=AUDIENCE_FRONTDOOR,
+            scope="",
+            action="updated the persona",
+        )
+    except Exception as exc:  # noqa: BLE001 - 通知不是人设写入的前置条件
+        logger.warning("persona operator action record failed: {}", exc)
+
+
 def _memory_manager():
     from g3ku.shells.web import get_agent
 
@@ -192,6 +217,7 @@ async def save_onboarding_persona(payload: dict | None = Body(default=None)):
             manager.set_persona(description)
         except Exception:
             write_persona_file(workspace_path(), description)
+        _record_persona_operator_action()
     state = _store().update(description=description, persona_step_done=True)
     return {
         "ok": True,
@@ -308,14 +334,17 @@ async def save_persona(payload: dict | None = Body(default=None)):
         if exc.status_code != 503:
             raise
         path = write_persona_file(workspace_path(), description)
+        _record_persona_operator_action()
         return {"ok": True, "description": description, "enqueued": False, "path": str(path)}
     except Exception:
         # A fresh project has no CEO model, so get_agent() raises before the memory
         # manager exists. The settings dialog can still initialize the reserved note.
         path = write_persona_file(workspace_path(), description)
+        _record_persona_operator_action()
         return {"ok": True, "description": description, "enqueued": False, "path": str(path)}
 
     manager.set_persona(description)
+    _record_persona_operator_action()
     enqueued = False
     if _role_chain("memory"):
         try:

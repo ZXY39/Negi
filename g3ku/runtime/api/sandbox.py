@@ -83,6 +83,29 @@ def _normalized_mode(value: Any) -> str:
     return raw
 
 
+def _record_session_operator_action(*, session_key: str, action: str) -> None:
+    """会话档位/工具列表是控制台写的：留一条模型侧可见的操作者归因。"""
+    try:
+        from g3ku.shells.web import get_agent
+        from main.governance.operator_actions import AUDIENCE_FRONTDOOR, session_scope
+
+        service = getattr(get_agent(), "main_task_service", None)
+    except Exception:
+        return
+    recorder = getattr(service, "record_operator_action", None)
+    if not callable(recorder):
+        return
+    try:
+        recorder(
+            category="session",
+            audience=AUDIENCE_FRONTDOOR,
+            scope=session_scope(session_key),
+            action=action,
+        )
+    except Exception as exc:  # noqa: BLE001 - 通知不是开关的前置条件
+        logger.warning("session operator action record failed: {}", exc)
+
+
 def _ui_labels(reading: dict[str, Any]) -> dict[str, str]:
     state = str(reading.get("state") or "")
     if state in {"ready", "partial"}:
@@ -211,6 +234,11 @@ async def patch_session_sandbox(session_id: str, payload: dict = Body(...)):
     # 档位只在回合边界生效：这里只落意图，正在跑的回合不受影响。
     item = _session_item(key)
     item["effective_from"] = "next_turn"
+    if mode is not None and mode_changed:
+        _record_session_operator_action(
+            session_key=key,
+            action=f'switched this session to `{str(item.get("resolved_tier") or mode)}` tier',
+        )
     if mode is not None:
         try:
             emit_audit_event(
@@ -282,6 +310,11 @@ async def patch_session_sandbox_tools(session_id: str, payload: dict = Body(...)
     note_operator_unlock(key, at=datetime.now().astimezone().isoformat(), by="operator")
     current = session_policy(key)
     current_allowed = set(current.allowlist or ()) if current.tier == TIER_LIMITED else set()
+    if previous_allowed != current_allowed:
+        _record_session_operator_action(
+            session_key=key,
+            action="updated this session's allowed tool list",
+        )
     try:
         emit_audit_event(
             "sandbox",

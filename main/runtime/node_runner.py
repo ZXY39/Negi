@@ -3398,6 +3398,12 @@ class NodeRunner:
                 if callable(getattr(self, '_skill_roster_supplier', None))
                 else None
             ),
+            # 控制台操作的一次性通知：节点只收工具/skill 的全局动作，按游标取增量。
+            'operator_action_supplier': (
+                (lambda **kwargs: self._operator_action_supplier(**kwargs))
+                if callable(getattr(self, '_operator_action_supplier', None))
+                else None
+            ),
             'exec_runtime_policy_supplier': (
                 (lambda: self._exec_runtime_policy_supplier())
                 if callable(getattr(self, '_exec_runtime_policy_supplier', None))

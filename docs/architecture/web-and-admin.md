@@ -7,6 +7,7 @@ This document describes how the web shell, admin APIs, and browser runtime fit t
 - `g3ku/shells/web.py` owns web runtime startup and binds the backend service into HTTP routes.
 - `g3ku/web/frontend/*` owns browser-side rendering, interaction logic, and shell state presentation.
 - `main/api/*` and `g3ku/runtime/api/*` own backend contracts consumed by the frontend.
+- Console mutations that change model-visible state (stickers, long-term memory and notes, tools, skills, persona, session tier and the limited-tier tool list) append one operator-action row after the mutation succeeds. The action feed, its scopes and the model-facing `### Operator actions` contract are owned by `tool-and-skill-system.md`「Pinned Static Declarations」; a feed write failure is logged and never fails the mutation.
 - The browser shell should present backend state; authoritative project/runtime state remains backend-owned.
 
 When debugging behavior, first identify which side owns the state transition:

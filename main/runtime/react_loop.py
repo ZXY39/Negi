@@ -615,6 +615,7 @@ class ReActToolLoop:
                 covered_contract_sections=_pinned_contract_section_values(
                     _pinned_contract_state(None, session_key=skill_roster_scope)[0]
                 ),
+                operator_actions_provider=runtime_context.get('operator_action_supplier'),
             )
             selected_skill_ids = self._normalized_name_list(
                 [
@@ -3960,11 +3961,13 @@ class ReActToolLoop:
     def _hydrate_node_skill_roster_notice(self, *, node) -> None:
         """进程表空而节点 metadata 有 ⇒ 补一份。重启/续跑后靠这个不重复投。"""
         scope = self._node_skill_roster_notice_scope(node)
-        if not scope or _skill_roster_notice.notice_context_for(scope)['records']:
+        if not scope or _skill_roster_notice.context_has_state(
+            _skill_roster_notice.notice_context_for(scope)
+        ):
             return
         metadata = getattr(node, 'metadata', None)
         stored = metadata.get(_skill_roster_notice.SKILL_ROSTER_NOTICE_CONTEXT_KEY) if isinstance(metadata, dict) else None
-        if isinstance(stored, dict) and list(stored.get('records') or []):
+        if isinstance(stored, dict) and _skill_roster_notice.context_has_state(stored):
             _skill_roster_notice.set_notice_context(scope, stored)
 
     def _persist_node_skill_roster_notice(self, *, node) -> None:
@@ -3972,7 +3975,7 @@ class ReActToolLoop:
         if not scope:
             return
         context = _skill_roster_notice.notice_context_for(scope)
-        if not context['records']:
+        if not _skill_roster_notice.context_has_state(context):
             return
         mutator = getattr(self._log_service, 'update_node_metadata', None)
         if not callable(mutator):
@@ -3998,6 +4001,7 @@ class ReActToolLoop:
         skill_roster_items: list[dict[str, str]] | None = None,
         contract_sections: dict[str, str] | None = None,
         covered_contract_sections: dict[str, str] | None = None,
+        operator_actions_provider: Any = None,
     ) -> list[dict[str, Any]]:
         """一次性提示：落在本轮历史末尾，投过就不再投。skill 与合同增量共用一条。
 
@@ -4021,6 +4025,7 @@ class ReActToolLoop:
             covered_skill_ids=_pinned_skill_ids_for(None, session_key=scope),
             contract_sections=contract_sections,
             covered_contract_sections=covered_contract_sections,
+            operator_actions_provider=operator_actions_provider,
         )
         if message is None:
             return base_messages

@@ -10,6 +10,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 from main.governance.models import RolePolicyMatrixRecord, SkillResourceRecord, ToolRecord
+from main.governance.operator_actions import RETENTION_ROWS
 from main.governance.roles import (
     split_public_allowed_roles,
     to_public_actor_role,
@@ -106,6 +107,17 @@ class GovernanceStore:
             'CREATE INDEX IF NOT EXISTS idx_exec_approvals_command ON exec_command_approvals(command_norm, status)',
             'CREATE INDEX IF NOT EXISTS idx_exec_approvals_context ON exec_command_approvals(context_id)',
             'CREATE INDEX IF NOT EXISTS idx_role_policy_lookup ON role_policy_matrix(actor_role, resource_kind, resource_id)',
+            '''
+            CREATE TABLE IF NOT EXISTS operator_actions (
+                action_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                category TEXT NOT NULL,
+                audience TEXT NOT NULL,
+                scope TEXT NOT NULL DEFAULT '',
+                text TEXT NOT NULL
+            )
+            ''',
+            'CREATE INDEX IF NOT EXISTS idx_operator_actions_lookup ON operator_actions(audience, scope, action_id)',
         ]
         with self._lock, self._conn:
             for statement in statements:
@@ -308,6 +320,98 @@ class GovernanceStore:
 
     def set_bool_meta(self, key: str, value: bool) -> None:
         self.set_meta(key, 'true' if bool(value) else 'false')
+
+    # -- operator actions (console provenance for model-facing notices) ---------
+    def append_operator_action(
+        self,
+        *,
+        created_at: str,
+        category: str,
+        audience: str,
+        scope: str,
+        text: str,
+    ) -> dict[str, object]:
+        """Append one console action and prune rows older than the retention window."""
+        stamp = str(created_at or now_iso())
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                'INSERT INTO operator_actions(created_at, category, audience, scope, text) '
+                'VALUES (?, ?, ?, ?, ?)',
+                (
+                    stamp,
+                    str(category or ''),
+                    str(audience or ''),
+                    str(scope or ''),
+                    str(text or ''),
+                ),
+            )
+            action_id = int(cursor.lastrowid or 0)
+            if action_id > RETENTION_ROWS:
+                self._conn.execute(
+                    'DELETE FROM operator_actions WHERE action_id <= ?',
+                    (action_id - RETENTION_ROWS,),
+                )
+        return {
+            'id': action_id,
+            'created_at': stamp,
+            'category': str(category or ''),
+            'audience': str(audience or ''),
+            'scope': str(scope or ''),
+            'text': str(text or ''),
+        }
+
+    def list_operator_actions(
+        self,
+        *,
+        after_id: int,
+        audiences: object,
+        scopes: object,
+        limit: int,
+    ) -> list[dict[str, object]]:
+        audience_values = tuple(
+            dict.fromkeys(
+                str(item or '').strip()
+                for item in list(audiences or [])
+                if str(item or '').strip()
+            )
+        )
+        scope_values = tuple(
+            dict.fromkeys(
+                str(item)
+                for item in list(scopes or [])
+                if item is not None
+            )
+        )
+        if not audience_values or not scope_values:
+            return []
+        audience_slots = ','.join('?' for _ in audience_values)
+        scope_slots = ','.join('?' for _ in scope_values)
+        bound = max(1, int(limit or 1))
+        rows = self._fetchall(
+            'SELECT action_id, created_at, category, audience, scope, text '
+            'FROM operator_actions '
+            f'WHERE action_id > ? AND audience IN ({audience_slots}) AND scope IN ({scope_slots}) '
+            'ORDER BY action_id LIMIT ?',
+            (int(after_id or 0), *audience_values, *scope_values, bound),
+        )
+        return [
+            {
+                'id': int(row['action_id'] or 0),
+                'created_at': str(row['created_at'] or ''),
+                'category': str(row['category'] or ''),
+                'audience': str(row['audience'] or ''),
+                'scope': str(row['scope'] or ''),
+                'text': str(row['text'] or ''),
+            }
+            for row in rows
+        ]
+
+    def latest_operator_action_id(self) -> int:
+        row = self._fetchone(
+            'SELECT COALESCE(MAX(action_id), 0) AS action_id FROM operator_actions',
+            (),
+        )
+        return int(row['action_id'] or 0) if row is not None else 0
 
     # -- exec command approvals ------------------------------------------------
 

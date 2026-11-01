@@ -37,6 +37,8 @@ SKILL_ROSTER_CARRIED_HEADING = '### Skills newly readable in this session (still
 MEMORY_NOTICE_HEADING = '### Long-term memory updates'
 GROUP_MEMORY_NOTICE_HEADING = '### Group memory updates'
 SESSION_MODE_NOTICE_HEADING = '### Session mode'
+# 控制台操作的一次性声明：写明"这是操作员（用户）做的"，与状态差分行分开。
+OPERATOR_ACTIONS_HEADING = '### Operator actions (from the console)'
 # 头部快照与当刻值的差量：两次重印之间唯一的变化出口。
 RUNTIME_CONTRACT_UPDATE_HEADING = '### Runtime contract updates (supersede the pinned snapshot)'
 # 渲染顺序固定：同一组变化每次投出来的字节稳定，便于模型与测试比对。
@@ -55,6 +57,8 @@ CONTRACT_SECTION_ORDER = (
 SKILL_ROSTER_NOTICE_CONTEXT_KEY = 'skill_roster_notice_context'
 
 _MAX_RECORDS = 64
+# 一条通知最多写这么多条操作行；余下的留在下一条（游标只推进已渲染的行）。
+_OPERATOR_ACTION_LINE_LIMIT = 20
 
 # 进程内台账：会话道按 `session:<session_key>`、节点道按 `node:<task_id>:<node_id>` 分桶。
 # 只有一处装配点读写它（旧机制的失效原因就是一条回合内四个读者共用一次消耗式读）。
@@ -99,6 +103,7 @@ def deliver_for_scope(
     group_memory_provider: Any = None,
     persona_provider: Any = None,
     mode_provider: Any = None,
+    operator_actions_provider: Any = None,
     contract_sections: dict[str, Any] | None = None,
     covered_contract_sections: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, list[dict[str, str]]]:
@@ -206,13 +211,49 @@ def deliver_for_scope(
                 mode_text = next_text
             mode_cursor = {'signature': next_signature, 'initialized': True}
     context['mode_cursor'] = mode_cursor
+    operator_actions: list[dict[str, Any]] = []
+    operator_cursor = dict(context.get('operator_action_cursor') or {})
+    operator_cursor_id = max(int(operator_cursor.get('id') or 0), 0)
+    operator_initialized = bool(operator_cursor.get('initialized'))
+    if callable(operator_actions_provider):
+        try:
+            action_delta = operator_actions_provider(
+                cursor_id=operator_cursor_id,
+                initialized=operator_initialized,
+            )
+        except Exception:
+            action_delta = None
+        if isinstance(action_delta, dict):
+            latest_id = max(int(action_delta.get('latest_id') or 0), 0)
+            if not operator_initialized:
+                # 新会话/新节点只对齐：操作发生在它存在之前，不重播。
+                next_id = latest_id
+            else:
+                rows = [
+                    dict(item)
+                    for item in list(action_delta.get('actions') or [])
+                    if isinstance(item, dict) and str(item.get('text') or '').strip()
+                ]
+                operator_actions = rows[:_OPERATOR_ACTION_LINE_LIMIT]
+                if operator_actions:
+                    next_id = max(
+                        operator_cursor_id,
+                        max(int(item.get('id') or 0) for item in operator_actions),
+                    )
+                else:
+                    # 全是别的会话/作用域的动作：推进到最新，避免每跳重扫。
+                    next_id = max(operator_cursor_id, latest_id)
+            context['operator_action_cursor'] = {
+                'id': int(next_id),
+                'initialized': True,
+            }
     context, changed_contract = record_contract_sections(
         context,
         contract_sections or {},
         now=now,
         covered_sections=covered_contract_sections,
     )
-    if not pending and not memory_text and not group_memory_text and not persona_text and not mode_text and not changed_contract:
+    if not pending and not memory_text and not group_memory_text and not persona_text and not mode_text and not changed_contract and not operator_actions:
         set_notice_context(scope_key, context)
         return None, []
     message = build_notice_message(
@@ -222,6 +263,7 @@ def deliver_for_scope(
         persona_text=persona_text,
         mode_text=mode_text,
         contract_sections=changed_contract,
+        operator_actions=operator_actions,
     )
     if message is not None:
         if pending:
@@ -360,6 +402,11 @@ def normalize_skill_roster_notice_context(payload: Any) -> dict[str, Any]:
     )
     persona_source = source.get('persona_cursor') if isinstance(source.get('persona_cursor'), dict) else {}
     mode_source = source.get('mode_cursor') if isinstance(source.get('mode_cursor'), dict) else {}
+    operator_action_source = (
+        source.get('operator_action_cursor')
+        if isinstance(source.get('operator_action_cursor'), dict)
+        else {}
+    )
 
     def _cursor_value(name: str, cursor: dict[str, Any] | None = None) -> int:
         active = cursor if isinstance(cursor, dict) else cursor_source
@@ -389,8 +436,37 @@ def normalize_skill_roster_notice_context(payload: Any) -> dict[str, Any]:
             'signature': str(mode_source.get('signature') or '')[:256],
             'initialized': bool(mode_source.get('initialized')),
         },
+        'operator_action_cursor': {
+            'id': _cursor_value('id', operator_action_source),
+            'initialized': bool(operator_action_source.get('initialized')),
+        },
         'contract_sections': normalize_contract_sections(source.get('contract_sections')),
     }
+
+
+def context_has_state(payload: Any) -> bool:
+    """该台账是否已经记过任何东西（决定节点侧要不要补写/落盘）。
+
+    不能只看 skill `records`：只投过合同分节或控制台动作的节点，records 为空，
+    旧判据会让它的游标永远不落盘、重启后重复投一遍。
+    """
+    normalized = normalize_skill_roster_notice_context(payload)
+    if (
+        normalized.get('records')
+        or normalized.get('carried_stages')
+        or normalized.get('contract_sections')
+    ):
+        return True
+    return any(
+        bool(normalized.get(key, {}).get('initialized'))
+        for key in (
+            'memory_cursor',
+            'group_memory_cursor',
+            'persona_cursor',
+            'mode_cursor',
+            'operator_action_cursor',
+        )
+    )
 
 
 def readable_skill_items(records: list[Any]) -> list[Any]:
@@ -667,6 +743,19 @@ def render_carried_text(records: list[Any]) -> str:
     ).strip()
 
 
+def render_operator_action_lines(actions: list[Any] | None) -> list[str]:
+    """控制台动作一节：每条只写"操作员做了什么"，不重复状态值。"""
+    rows: list[str] = []
+    for item in list(actions or []):
+        text = str(item.get('text') if isinstance(item, dict) else item or '').strip()
+        if not text:
+            continue
+        rows.append(f'- {text}')
+    if not rows:
+        return []
+    return [OPERATOR_ACTIONS_HEADING, *rows]
+
+
 def build_notice_message(
     records: list[Any],
     *,
@@ -675,16 +764,22 @@ def build_notice_message(
     persona_text: str = '',
     mode_text: str = '',
     contract_sections: list[tuple[str, str]] | None = None,
+    operator_actions: list[Any] | None = None,
 ) -> dict[str, Any] | None:
     """一次性投递那条消息：role=user，落在本轮历史末尾。
 
-    各节共用一条消息：skill 名单在前，记忆增量居中，群聊专属记忆紧随其后，人设更新在其后，
-    运行时合同变化在最后（最近处，便于模型把"以最新通知为准"落在下一次判断上）；空节省略。
+    各节共用一条消息：控制台动作在前（先交代是谁改的），skill 名单其次，记忆增量居中，
+    群聊专属记忆紧随其后，人设更新在其后，运行时合同变化在最后（最近处，便于模型把
+    "以最新通知为准"落在下一次判断上）；空节省略。
     """
     sections: list[str] = []
-    skill_text = render_notice_text(records) if records else ''
-    if len(skill_text.splitlines()) > 2:
-        sections.append(skill_text)
+    operator_lines = render_operator_action_lines(operator_actions)
+    if operator_lines:
+        sections.append('\n'.join(operator_lines))
+    skill_lines = render_notice_lines(records, heading=SKILL_ROSTER_NOTICE_HEADING)
+    if len(skill_lines) > 1:
+        # 标记由本函数最后统一补；这里只放正文，避免通知中段出现第二个标记。
+        sections.append('\n'.join([*skill_lines, SKILL_ROSTER_NOTICE_LOAD_HINT]))
     memory_section = str(memory_text or '').strip()
     if memory_section:
         sections.append('\n'.join([MEMORY_NOTICE_HEADING, memory_section]))
@@ -703,10 +798,11 @@ def build_notice_message(
     if not sections:
         return None
     body = '\n\n'.join(sections).strip()
-    # `render_notice_text` 自带标记；此前这里再拼一次，实盘通知变成
-    # `[RUNTIME_NOTICE]` 连写两行（节点道用例一直是红的）。标记只保留一份。
+    # 标记只保留一份：skill 名单单独出现时保持旧字节（标记后只隔一个换行），
+    # 其它节沿用"标记 + 空行"的形状。
     if not body.startswith(SKILL_ROSTER_NOTICE_MARKER):
-        body = '\n\n'.join([SKILL_ROSTER_NOTICE_MARKER, body])
+        separator = '\n' if body.startswith(SKILL_ROSTER_NOTICE_HEADING) else '\n\n'
+        body = f'{SKILL_ROSTER_NOTICE_MARKER}{separator}{body}'
     return {'role': SKILL_ROSTER_NOTICE_ROLE, 'content': body}
 
 
@@ -780,7 +876,12 @@ def drop_records_after(context: Any, *, cutoff_iso: str) -> dict[str, Any]:
     normalized = normalize_skill_roster_notice_context(context)
     cutoff = str(cutoff_iso or '').strip()
     if not cutoff:
-        return {'records': [], 'carried_stages': [], 'contract_sections': {}}
+        return {
+            'records': [],
+            'carried_stages': [],
+            'contract_sections': {},
+            'operator_action_cursor': normalized['operator_action_cursor'],
+        }
     kept = [
         dict(record)
         for record in normalized['records']
@@ -796,12 +897,15 @@ def drop_records_after(context: Any, *, cutoff_iso: str) -> dict[str, Any]:
         'records': kept,
         'carried_stages': normalized['carried_stages'] if kept else [],
         'contract_sections': kept_contract,
+        # 截断只撤历史帧；操作游标保留，避免把截断后、下一跳前发生的动作静默跳过。
+        'operator_action_cursor': normalized['operator_action_cursor'],
     }
 
 
 __all__ = [
     'CONTRACT_SECTION_ORDER',
     'MEMORY_NOTICE_HEADING',
+    'OPERATOR_ACTIONS_HEADING',
     'RUNTIME_CONTRACT_UPDATE_HEADING',
     'RUNTIME_NOTICE_MARKER',
     'SKILL_ROSTER_CARRIED_HEADING',
@@ -818,6 +922,7 @@ __all__ = [
     'carry_for_scope',
     'carry_records_for_compression',
     'clear_skill_roster_notice_stores',
+    'context_has_state',
     'contract_section_digest',
     'deliver_for_scope',
     'drop_notice_scope',
@@ -839,6 +944,7 @@ __all__ = [
     'render_contract_update_lines',
     'render_notice_lines',
     'render_notice_text',
+    'render_operator_action_lines',
     'reset_contract_sections_for_compaction',
     'reset_memory_cursor',
     'reset_persona_cursor',

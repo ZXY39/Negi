@@ -184,6 +184,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 升级旧实例后，某条工具的角色/启停看起来回到默认，或工具停用后没有任何东西把它捞回来 → `tool-and-skill-system.md`「Tool Admin RBAC」（一次性展开迁移；核心工具允许停用、禁止删除，且没有自动拉起）
 - 前门改了尾块运行时契约的一个字段却不出现在请求体里 → `tool-and-skill-system.md`「Provider Tool Surface」（发送前会用 state 重建契约块，装配层那份会被覆盖）
 - 上下文里找不到 skill 名单、或头部那份名单看着过期、或相邻跳头部字节反复变 → `tool-and-skill-system.md`「Pinned Static Declarations」+ `context-and-cache-troubleshooting.md`「静态声明钉在请求体头部」
+- 控制台改了表情包/记忆/工具/skill/人设/档位后，模型不知道是谁改的，或把停用误读成权限问题 → `tool-and-skill-system.md`「Pinned Static Declarations」（`### Operator actions` 与 `operator_action_cursor`）
 - 交付物/脚本出现在项目根以外的意外目录（尤其 `C:\Users\<近似拼写的用户名>\...` 这种镜像树）、或模型传的相对路径落点与预期不符 → `tool-and-skill-system.md`「Model Path Anchoring Contract」+ `config-and-models.md`「`agents`」
 - 模型报告的日期/时间与事实不符（心算毫秒时间戳出错、引用陈旧时间、日报归属日期错误），或模型压根没有"现在是几点"的读数 → `tool-and-skill-system.md`「fixed builtin tools」的 `time` 一条 + `heartbeat-system.md`「Internal-turn time anchors」+ `runtime-overview.md`「用户消息时间锚点」
 - 节点/会话设的自设唤醒没响、响得太晚，或一次设闹钟攒出好几份 → `main-task-runtime.md`「节点信箱与唤醒（现行）」+ `heartbeat-system.md`「Cron Reminder Contract」
