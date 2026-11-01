@@ -203,6 +203,12 @@ async def test_frontdoor_compression_chunks_when_single_shot_exceeds_window(
 ) -> None:
     runner = _build_runner(monkeypatch, context_window_tokens=2_000)
     captured: list[list[dict[str, object]]] = []
+    snapshots: list[dict[str, object]] = []
+
+    async def _capture_snapshot(*, state=None, **_kwargs):
+        snapshots.append(dict((state or {}).get("compression_state") or {}))
+
+    monkeypatch.setattr(runner, "_emit_frontdoor_runtime_snapshot", _capture_snapshot, raising=False)
 
     async def _call_model_with_tools(**kwargs):
         messages = list(kwargs.get("messages") or [])
@@ -267,9 +273,27 @@ async def test_frontdoor_compression_chunks_when_single_shot_exceeds_window(
     assert len(chunk_calls) >= 2
     assert len(merge_calls) == 1
     assert result.diagnostics["mode"] == "llm_chunked"
-    assert result.diagnostics["chunk_count"] == len(chunk_calls)
+    planned_chunks = int(result.diagnostics["chunk_count"])
+    assert planned_chunks == len(chunk_calls)
     assert result.diagnostics["merge_pass_applied"] is True
     assert "归并后的总摘要" in str(result.request_messages[1].get("content") or "")
+    # 前端「上下文分块压缩中（i/x）」的契约：状态帧带结构化块号，文案按块号现算。
+    chunk_states = [
+        item
+        for item in snapshots
+        if str(item.get("status") or "") == "running"
+        and int(item.get("chunk_count") or 0) == planned_chunks
+        and str(item.get("phase") or "") != "merge"
+    ]
+    assert {int(item.get("chunk_index") or 0) for item in chunk_states} == set(range(1, planned_chunks + 1))
+    assert all(
+        str(item.get("text") or "") == f"上下文分块压缩中（{int(item['chunk_index'])}/{planned_chunks}）"
+        for item in chunk_states
+    )
+    merge_states = [item for item in snapshots if str(item.get("phase") or "") == "merge"]
+    assert merge_states, snapshots
+    assert str(merge_states[0].get("text") or "") == "上下文分块压缩中（归并摘要）"
+    assert int(merge_states[0].get("chunk_count") or 0) == planned_chunks
 
 
 def _history_body(groups: int) -> list[dict[str, object]]:

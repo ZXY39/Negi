@@ -2534,7 +2534,22 @@ class RuntimeAgentSession:
             "source": str(raw.get("source") or "").strip(),
             "needs_recheck": bool(raw.get("needs_recheck")),
         }
-        if not snapshot["status"] and not snapshot["text"] and not snapshot["source"] and not snapshot["needs_recheck"]:
+        # 分块压缩的单块进度：前端按这两个数画「上下文分块压缩中（i/x）」。
+        # 单发压缩没有块号，字段缺失即沿用普通「上下文压缩中」。
+        for key in ("chunk_index", "chunk_count"):
+            value = raw.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                snapshot[key] = value
+        phase = str(raw.get("phase") or "").strip().lower()
+        if phase:
+            snapshot["phase"] = phase
+        if (
+            not snapshot["status"]
+            and not snapshot["text"]
+            and not snapshot["source"]
+            and not snapshot["needs_recheck"]
+            and "chunk_index" not in snapshot
+        ):
             return {}
         return snapshot
 

@@ -30,10 +30,24 @@ function escapeCeoCompressionText(value) {
     })[ch]);
 }
 
-function ceoCompressionDividerText(state, detail) {
-    const label = String(CEO_COMPRESSION_TEXT[state] || "");
+// 分块压缩的实时进度只认结构化字段，不解析后端文案：
+// chunk_count 缺失 = 单发压缩，沿用普通「上下文压缩中」。
+// 归并阶段把最后一块的块号留作分母，文案改说这一跳在做什么。
+function ceoCompressionRunningLabel(compression = null) {
+    const total = Math.floor(Number(compression?.chunk_count));
+    if (!Number.isFinite(total) || total <= 0) return CEO_COMPRESSION_TEXT.running;
+    if (String(compression?.phase || "").trim().toLowerCase() === "merge") {
+        return "上下文分块压缩中（归并摘要）";
+    }
+    const rawIndex = Math.floor(Number(compression?.chunk_index));
+    const index = Number.isFinite(rawIndex) ? Math.min(total, Math.max(1, rawIndex)) : 1;
+    return `上下文分块压缩中（${index}/${total}）`;
+}
+
+function ceoCompressionDividerText(state, detail, label = "") {
+    const textLabel = String(label || CEO_COMPRESSION_TEXT[state] || "");
     const text = String(detail || "").trim();
-    return text ? `${label}：${escapeCeoCompressionText(text)}` : label;
+    return text ? `${textLabel}：${escapeCeoCompressionText(text)}` : textLabel;
 }
 
 let ceoCompressionSyncQueued = false;
@@ -47,6 +61,13 @@ function normalizeCeoSnapshotCompression(compression = null) {
     if (source) next.source = source;
     const text = String(compression?.text || "").trim();
     if (text) next.text = text;
+    // 分块进度：总数缺失即单发压缩；块号缺省按第 1 块画，服务端首帧就给 1。
+    const chunkCount = Math.floor(Number(compression?.chunk_count));
+    if (Number.isFinite(chunkCount) && chunkCount > 0) next.chunk_count = chunkCount;
+    const chunkIndex = Math.floor(Number(compression?.chunk_index));
+    if (Number.isFinite(chunkIndex) && chunkIndex >= 0) next.chunk_index = chunkIndex;
+    const phase = String(compression?.phase || "").trim().toLowerCase();
+    if (phase) next.phase = phase;
     // 缓存里的 running 需要过期保护；seen_at 由前端在每次状态帧/轮询确认 running 时刷新。
     const seenAt = Number(compression?.seen_at);
     if (Number.isFinite(seenAt)) next.seen_at = seenAt;
@@ -99,8 +120,6 @@ function activeCeoManualCompressionRunning() {
 }
 
 function activeCeoSessionCompressionState() {
-    // 回合外的手动压缩没有 inflight turn，进度只存在于本机发起状态里；自动压缩仍读快照。
-    if (activeCeoManualCompressionRunning()) return { status: "running", source: "manual_context_compression" };
     const cacheEntry = getCeoSessionSnapshotCache(activeSessionId());
     // 缓存里的 running 必须有新鲜度：页面切走/断线/终局回调丢失时，不能让它永久复活。
     const cacheFreshness = (compression) => {
@@ -119,6 +138,10 @@ function activeCeoSessionCompressionState() {
         const freshness = cacheFreshness(sessionCompression);
         if (Number.isFinite(freshness) && Date.now() - freshness <= CEO_COMPRESSION_STALE_MS) return sessionCompression;
     }
+    // 回合外的手动压缩没有 inflight turn：服务端 state 帧没到之前，进度只存在于
+    // 本机发起状态里。缓存里已有 running（含服务端发来的块号）时优先用它，
+    // 否则这条线会被本机账本的"只有状态"盖回普通文案。
+    if (activeCeoManualCompressionRunning()) return { status: "running", source: "manual_context_compression" };
     const inflightTurn = normalizeCeoSnapshotInflight(cacheEntry?.inflight_turn);
     const inflightStatus = String(inflightTurn?.status || "").trim().toLowerCase();
     if (inflightStatus && !["running", "in_progress", "active"].includes(inflightStatus)) return null;
@@ -158,8 +181,8 @@ function buildCeoCompressionRetryControl() {
            title="${CEO_COMPRESSION_RETRY_TITLE}">${CEO_COMPRESSION_RETRY_LABEL}</button>`;
 }
 
-function ceoCompressionDividerInner(state, { interactive = false, retry = false, detail = "" } = {}) {
-    return `<div class="ceo-compression-divider-inner"><span>${ceoCompressionDividerText(state, detail)}</span>${
+function ceoCompressionDividerInner(state, { interactive = false, retry = false, detail = "", label = "" } = {}) {
+    return `<div class="ceo-compression-divider-inner"><span>${ceoCompressionDividerText(state, detail, label)}</span>${
         retry ? buildCeoCompressionRetryControl() : buildCeoCompressionDividerControl(state, interactive)
     }</div>`;
 }
@@ -178,25 +201,28 @@ function syncCeoCompressionRetryAffordances() {
         row.innerHTML = ceoCompressionDividerInner(state, {
             retry: eligible,
             detail: String(row.dataset.ceoCompressionDetail || ""),
+            label: String(row.dataset.ceoCompressionLabel || ""),
         });
     });
 }
 
 function buildCeoCompressionDividerElement(
     state,
-    { interactive = true, turnId = "", boundary = "", origin = "", detail = "" } = {},
+    { interactive = true, turnId = "", boundary = "", origin = "", detail = "", label = "" } = {},
 ) {
     if (!CEO_COMPRESSION_TEXT[state]) return null;
     const el = document.createElement("div");
     el.className = `message system ${CEO_COMPRESSION_DIVIDER_CLASS} is-${state}`;
     el.dataset.ceoCompressionState = state;
     if (detail) el.dataset.ceoCompressionDetail = String(detail);
+    if (label) el.dataset.ceoCompressionLabel = String(label);
+    if (state === "running") el.dataset.ceoCompressionInteractive = interactive ? "1" : "";
     if (turnId) el.dataset.ceoCompressionTurn = turnId;
     if (boundary !== "" && boundary !== null) el.dataset.ceoCompressionBoundary = String(boundary);
     if (origin) el.dataset.ceoCompressionOrigin = String(origin);
     el.setAttribute("role", "status");
     el.setAttribute("aria-live", state === "running" ? "polite" : "off");
-    el.innerHTML = ceoCompressionDividerInner(state, { interactive, detail });
+    el.innerHTML = ceoCompressionDividerInner(state, { interactive, detail, label });
     return el;
 }
 
@@ -270,20 +296,34 @@ function syncCeoCompressionDivider() {
     const state = activeCeoSessionCompressionState();
     const running = !!state;
     const existing = U.ceoFeed.querySelector(`.${CEO_COMPRESSION_DIVIDER_CLASS}.is-running`);
-    if (running && !existing) {
-        // 只有手动压缩那条线挂暂停按钮：它打的是 /compress-context/cancel，而回合内的
-        // 自动压缩由那条端点返回 409（它只认手动任务的状态），点了只会得到一个假承诺。
-        // 自动压缩的停手本来就是 composer 那颗主暂停键（服务端 pause() 掐同一颗代际）。
-        appendCeoCompressionDivider("running", {
-            interactive: String(state.source || "").trim().toLowerCase() === "manual_context_compression",
-        });
-        // 只有本来就在跟随最新时才钉底：这条线现在也由 renderCeoSnapshot 在每次整页重建后
-        // 重挂，若无条件钉底会把正在往上翻历史的用户每次重建都拽回底部。
-        if (S.ceoFeedFollowLatest !== false) scrollCeoFeedToBottom();
-        syncCeoCompressionRetryAffordances();
-        return;
+    // 只有手动压缩那条线挂暂停按钮：它打的是 /compress-context/cancel，而回合内的
+    // 自动压缩由那条端点返回 409（它只认手动任务的状态），点了只会得到一个假承诺。
+    // 自动压缩的停手本来就是 composer 那颗主暂停键（服务端 pause() 掐同一颗代际）。
+    const interactive = String(state?.source || "").trim().toLowerCase() === "manual_context_compression";
+    if (running) {
+        const label = ceoCompressionRunningLabel(state);
+        if (!existing) {
+            appendCeoCompressionDivider("running", { interactive, label });
+            // 只有本来就在跟随最新时才钉底：这条线现在也由 renderCeoSnapshot 在每次整页重建后
+            // 重挂，若无条件钉底会把正在往上翻历史的用户每次重建都拽回底部。
+            if (S.ceoFeedFollowLatest !== false) scrollCeoFeedToBottom();
+            syncCeoCompressionRetryAffordances();
+            return;
+        }
+        // 块进度是覆盖写而不是新线：每块到达时只改同一行的文案，绝不追加第二条。
+        const currentLabel = String(existing.dataset?.ceoCompressionLabel || "");
+        const currentInteractive = String(existing.dataset?.ceoCompressionInteractive ?? "") === "1";
+        if (currentLabel !== label || currentInteractive !== interactive) {
+            if (existing.dataset) {
+                existing.dataset.ceoCompressionLabel = label;
+                existing.dataset.ceoCompressionInteractive = interactive ? "1" : "";
+            }
+            existing.innerHTML = ceoCompressionDividerInner("running", { interactive, label });
+            icons();
+        }
+    } else if (existing) {
+        removeCeoCompressionLiveDivider();
     }
-    if (!running && existing) removeCeoCompressionLiveDivider();
     syncCeoCompressionRetryAffordances();
 }
 
@@ -522,10 +562,15 @@ function applyCeoContextCompressionStatus(sessionId, payload = {}) {
     entry.status = status;
     if (status !== "running") stopCeoContextCompressionPolling(key);
     if (status === "running") {
-        mirrorCeoContextCompression(key, {
-            status: "running",
-            source: "manual_context_compression",
-        });
+        // 手动压缩的轮询只负责"还活着/到终局"；块进度由 state 帧推进并留在缓存里。
+        // 轮询帧没有块号时不能拿一份干净状态覆盖它，否则每秒把「分块 i/x」抹回
+        // 普通「上下文压缩中」。轮询自己带了块号（新服务端）则按它更新。
+        const cached = normalizeCeoSnapshotCompression(getCeoSessionSnapshotCache(key)?.compression) || {};
+        const next = { ...cached, status: "running", source: "manual_context_compression" };
+        for (const field of ["chunk_index", "chunk_count", "phase"]) {
+            if (payload && payload[field] !== undefined && payload[field] !== null) next[field] = payload[field];
+        }
+        mirrorCeoContextCompression(key, next);
     } else {
         if (previous === "running") {
             // 先就地改成终态，避免“先删线、再等重连”的空白窗口。

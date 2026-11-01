@@ -2282,12 +2282,22 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     },
                 )
             chunked_mode = bool(compression_pass.mode == COMPRESSION_MODE_CHUNKED)
+            planned_chunk_count = max(1, int(compression_pass.planned_chunks or 0))
             compression_state = {
                 "status": "running",
-                "text": "上下文压缩中（分块）" if chunked_mode else "上下文压缩中",
+                "text": (
+                    f"上下文分块压缩中（1/{planned_chunk_count}）"
+                    if chunked_mode
+                    else "上下文压缩中"
+                ),
                 "source": compression_source,
                 "needs_recheck": False,
             }
+            if chunked_mode:
+                # 结构化进度：显示侧按这两个数画「上下文分块压缩中（i/x）」，
+                # 不解析文案。第一块在循环里会再发一次同样的读数。
+                compression_state["chunk_index"] = 1
+                compression_state["chunk_count"] = planned_chunk_count
             await self._emit_frontdoor_runtime_snapshot(
                 runtime=runtime,
                 state={**dict(state or {}), "compression_state": compression_state},
@@ -2622,6 +2632,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         is_cancelled: Any,
         model_info: dict[str, Any],
         progress_text: str = "上下文压缩中",
+        progress_meta: dict[str, Any] | None = None,
         compression_source: str = "token_compression",
         max_tokens: int | None = None,
     ) -> tuple[str, Any, str]:
@@ -2719,17 +2730,20 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 # ＝"这一 pass 没拿到摘要"，由调用方放弃压缩；绝不把空产物当压缩结果，那等于
                 # 静默丢历史。
                 return "", None, last_error_text
+            retry_state = {
+                "status": "running",
+                "text": f"{progress_text}（重试 {empty_response_retry_count}）",
+                "source": compression_source,
+                "needs_recheck": False,
+            }
+            # 重试帧也要带块号：否则一次空响应的退避就会把前端的
+            # 「分块 i/x」退回普通「上下文压缩中」。
+            for key in ("chunk_index", "chunk_count", "phase"):
+                if isinstance(progress_meta, dict) and key in progress_meta:
+                    retry_state[key] = progress_meta[key]
             await self._emit_frontdoor_runtime_snapshot(
                 runtime=runtime,
-                state={
-                    **dict(state or {}),
-                    "compression_state": {
-                        "status": "running",
-                        "text": f"{progress_text}（重试 {empty_response_retry_count}）",
-                        "source": compression_source,
-                        "needs_recheck": False,
-                    },
-                },
+                state={**dict(state or {}), "compression_state": retry_state},
             )
             await asyncio.sleep(float(min(10, max(1, empty_response_retry_count))))
 
@@ -2797,7 +2811,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 if callable(is_cancelled) and bool(is_cancelled()):
                     raise asyncio.CancelledError()
                 index = len(summaries) + 1
-                progress = f"上下文压缩中（分块 {index}/{planned_chunks}）"
+                progress = f"上下文分块压缩中（{index}/{planned_chunks}）"
+                progress_meta = {
+                    "chunk_index": index,
+                    "chunk_count": planned_chunks,
+                }
                 await self._emit_frontdoor_runtime_snapshot(
                     runtime=runtime,
                     state={
@@ -2807,6 +2825,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                             "text": progress,
                             "source": compression_source,
                             "needs_recheck": False,
+                            **progress_meta,
                         },
                     },
                 )
@@ -2840,6 +2859,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                             is_cancelled=is_cancelled,
                             model_info=model_info,
                             progress_text=progress,
+                            progress_meta=progress_meta,
                             max_tokens=max_tokens,
                         )
                     )
@@ -2885,15 +2905,21 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         ) > capacity:
             if callable(is_cancelled) and bool(is_cancelled()):
                 raise asyncio.CancelledError()
+            merge_progress_meta = {
+                "chunk_index": planned_chunks,
+                "chunk_count": planned_chunks,
+                "phase": "merge",
+            }
             await self._emit_frontdoor_runtime_snapshot(
                 runtime=runtime,
                 state={
                     **dict(state or {}),
                     "compression_state": {
                         "status": "running",
-                        "text": "上下文压缩中（归并分块摘要）",
+                        "text": "上下文分块压缩中（归并摘要）",
                         "source": compression_source,
                         "needs_recheck": False,
+                        **merge_progress_meta,
                     },
                 },
             )
@@ -2918,7 +2944,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 runtime=runtime,
                 is_cancelled=is_cancelled,
                 model_info=model_info,
-                progress_text="上下文压缩中（归并分块摘要）",
+                progress_text="上下文分块压缩中（归并摘要）",
+                progress_meta=merge_progress_meta,
                 max_tokens=max_tokens,
             )
             if merge_error_text:

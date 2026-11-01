@@ -509,6 +509,76 @@ test("实时区分线只挂一条，进行中的图标即暂停按钮", () => {
     assert.equal(dividers(api.U.ceoFeed).length, 0);
 });
 
+test("分块压缩的实时线显示块号并在同一行推进", () => {
+    const api = loadApp();
+    api.setCeoSessionSnapshotCache("web:test", {
+        compression: {
+            status: "running",
+            source: "token_compression",
+            chunk_index: 1,
+            chunk_count: 3,
+        },
+    });
+
+    let live = dividers(api.U.ceoFeed);
+    assert.equal(live.length, 1);
+    assert.match(live[0].innerHTML, /上下文分块压缩中（1\/3）/);
+    assert.match(live[0].innerHTML, /ceo-compression-divider-spinner/);
+
+    api.setCeoSessionSnapshotCache("web:test", {
+        compression: {
+            status: "running",
+            source: "token_compression",
+            chunk_index: 2,
+            chunk_count: 3,
+        },
+    });
+
+    live = dividers(api.U.ceoFeed);
+    assert.equal(live.length, 1, "块进度只改同一行，不追加第二条线");
+    assert.match(live[0].innerHTML, /上下文分块压缩中（2\/3）/);
+    assert.doesNotMatch(live[0].innerHTML, /上下文分块压缩中（1\/3）/);
+
+    api.setCeoSessionSnapshotCache("web:test", {
+        compression: {
+            status: "running",
+            source: "manual_context_compression",
+            chunk_index: 3,
+            chunk_count: 3,
+            phase: "merge",
+        },
+    });
+    live = dividers(api.U.ceoFeed);
+    assert.equal(live.length, 1);
+    assert.match(live[0].innerHTML, /上下文分块压缩中（归并摘要）/);
+
+    api.setCeoSessionSnapshotCache("web:test", { compression: null });
+    assert.equal(dividers(api.U.ceoFeed).length, 0);
+});
+
+test("手动压缩轮询不把块进度抹回单发文案", () => {
+    const api = loadApp();
+    api.setCeoSessionSnapshotCache("web:test", {
+        compression: {
+            status: "running",
+            source: "manual_context_compression",
+            chunk_index: 2,
+            chunk_count: 4,
+        },
+    });
+    assert.match(dividers(api.U.ceoFeed)[0].innerHTML, /上下文分块压缩中（2\/4）/);
+
+    // 轮询帧只说明"还活着"，不带块号；缓存里的进度必须保留。
+    api.applyCeoContextCompressionStatus("web:test", {
+        status: "running",
+        source: "manual_context_compression",
+    });
+
+    const live = dividers(api.U.ceoFeed);
+    assert.equal(live.length, 1);
+    assert.match(live[0].innerHTML, /上下文分块压缩中（2\/4）/);
+});
+
 test("终态区分线不带暂停按钮，完成态只有文案", () => {
     const api = loadApp();
 
