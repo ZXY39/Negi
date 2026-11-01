@@ -1,9 +1,8 @@
 schema_version: 1
 kind: tool
+tool_type: internal
 name: douyin_native
-description: >-
-  Douyin browsing via the local logged-in Edge; sending stays off until
-  send_policy.json and allow_send permit it.
+description: Douyin browsing on the local logged-in Edge, with comment/reply/publish gated by send_policy.
 tool_result_delivery_contract: runtime_managed
 source:
   type: git
@@ -39,32 +38,49 @@ parameters:
       - open
       - login_status
       - login_check
+      - login_export
+      - login_restore
       - feed
       - search
       - video
       - storyboard
       - comments
       - watch_report
+      - my_works
       - send_comment
+      - reply_to_comment
       - send_forward
+      - publish
       - usage
       - health
       - close
       description: >-
         Which Douyin capability to run. open = ensure windowed Edge + douyin
-        home + login detection (screenshot). login_status = report login state.
-        login_check = re-check after the human logs in (must be called after
-        user confirms in the window). feed = read current recommend/selected
-        feed items. search = open the search page for keyword and parse results
-        (may be blocked without login; failure is reported honestly). video =
-        open player for feed slot N and return title/author/duration/stats.
-        storyboard = sample N frames of the current player video and compose a
-        numbered grid PNG. comments = read comments of the current video (no
-        DMs). watch_report = browse a topic feed round and generate a Markdown
-        report. send_comment / send_forward = SENDING, OFF by default, gated by
-        send_policy.json + allow_send + quotas + receipt check. usage = local
+        home + login detection (screenshot). login_status = report login state
+        with multi-signal basis (UI header + server API + cookie names; never
+        cookie-name-only). login_check = re-check after the human logs in and
+        export the session cookies to login_state.json. login_export = force
+        export cookies to login_state.json (current-user ACL). login_restore =
+        inject login_state.json into the live context and verify. feed = read
+        current recommend/selected feed items (also writes feed_snapshot.json
+        pinning slot -> aweme_id). search = open the search page for
+        keyword and parse results (login-walled while logged out; reported
+        honestly, never faked). video = open player for feed slot N (verified
+        against feed_snapshot.json; status=mismatch on drift) and return
+        title/author/duration/publish_time/stats. storyboard = sample N frames of
+        the current player video and compose a numbered grid PNG. comments = read
+        real comment bodies of the current video (no DMs; re-verified after read). watch_report = browse a
+        topic feed round and generate a Markdown report. my_works = read this
+        account's own published works from the creator centre content list
+        (read-only; title/duration/publish time/status/stats). send_comment /
+        reply_to_comment / send_forward = SENDING, OFF by default, gated by
+        send_policy.json + allow_send + quotas + receipt check. publish =
+        upload a local video to creator.douyin.com/creator-micro/content/upload
+        with real keyboard typing for title/description/topics; mode=draft
+        (default) only stores a draft (暂存离开), mode=publish clicks 发布 and
+        additionally requires send_policy allow_publish=true. usage = local
         daily usage ledger. health = environment diagnostics. close = close the
-        Edge session.
+        Edge session gracefully (flushes cookies, preserves login_state.json).
     keyword:
       type: string
       description: Search keyword or topic for feed/watch_report (e.g. "贵州 美食").
@@ -76,20 +92,91 @@ parameters:
       description: Number of storyboard frames to sample (2-16).
     slot:
       type: integer
-      description: 1-based feed item index to open in the player (used by video/storyboard/comments/send_*).
+      description: >-
+        1-based feed item index to open in the player (used by
+        video/storyboard/comments/send_*/reply_to_comment). The slot is resolved
+        to a concrete aweme_id through data/douyin_native/feed_snapshot.json
+        (written by the last feed/watch_report run), and the opened video is
+        verified to be that aweme_id.
     text:
       type: string
-      description: Comment text to send (only for send_comment; gated).
+      description: Comment or reply body text (only for send_comment / reply_to_comment; gated).
+    comment_index:
+      type: integer
+      description: >-
+        1-based index of the target comment in the comments list returned by
+        action=comments (reply_to_comment only). Either comment_index or
+        comment_text_match is required to locate the comment being replied to.
+    comment_text_match:
+      type: string
+      description: >-
+        Substring matched against a comment body text or author name to locate
+        the reply target (reply_to_comment only; alternative to comment_index).
     allow_send:
       type: boolean
       description: >-
         Must be true to even attempt a send. Sending still requires
-        send_policy.json to allow the specific action and the caller to be
+        send_policy.json to allow the specific action (allow_comment /
+        allow_reply / allow_forward / allow_publish) and the caller to be
         logged in. Default false; every send is additionally quota + interval
         limited and receipt-checked.
+    allow_publish:
+      type: boolean
+      description: >-
+        Explicit publishing acknowledgement for mode=publish. A real public post
+        requires ALL THREE: mode=publish, this flag true, and send_policy.json
+        allow_publish=true. If any is missing the tool returns status=blocked and
+        publishes nothing. mode=draft never needs it.
+    video_path:
+      type: string
+      description: >-
+        Absolute local path of the video to upload (publish only; mp4/mov/webm/
+        m4v/avi/mkv). The file is picked through the creator page's real
+        input[type=file]. Required for action=publish.
+    title:
+      type: string
+      description: >-
+        Work title, typed into the creator publish form with real keyboard
+        events (React editor only syncs on real keystrokes; DOM fill() is never
+        used). Optional but recommended; read back and compared before saving.
+    desc:
+      type: string
+      description: >-
+        Work description (作品简介), typed with real keyboard events into the
+        contenteditable zone-container. Optional.
+    tags:
+      type: array
+      items:
+        type: string
+      description: >-
+        Topic tags; accepts an array or a comma / 、 / space separated string.
+        Each tag is typed as '#tag' + Space into the description editor so the
+        site turns it into a real topic chip, then the editor is read back and
+        compared. Optional.
+    mode:
+      type: string
+      enum:
+      - draft
+      - publish
+      description: >-
+        publish only. draft (default) = upload + fill title/desc/topics +
+        click 暂存离开 (store draft); no 发布 click, no real public post.
+        publish = click 发布 and additionally requires send_policy.json
+        allow_publish=true AND the caller passing mode=publish explicitly. The
+        tool refuses mode=publish otherwise (returns blocked).
     include_frames:
       type: boolean
       description: Whether watch_report samples storyboard frames for the first few items.
+    verify_aweme_id:
+      type: boolean
+      description: >-
+        Default true. Every slot-based action resolves the target aweme_id from
+        data/douyin_native/feed_snapshot.json and verifies the mounted video
+        identity (detail panel data-e2e-aweme-id / player-container video_<id>
+        class) matches it; on drift it retries once by aweme_id, then returns
+        status=mismatch with target_aweme_id + actual_aweme_id and performs no
+        comment/reply/send. Set false only for debugging: both ids and
+        aweme_match are still reported, verification is marked disabled.
   required:
   - action
 exposure:

@@ -41,12 +41,16 @@ from __future__ import annotations
 import asyncio
 import os
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
+import yaml
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from g3ku.agent.tools.base import Tool
+
+_MANIFEST = yaml.safe_load((Path(__file__).resolve().parents[1] / 'resource.yaml').read_text(encoding='utf-8'))
 
 
 def _cancelled(runtime: dict[str, Any]) -> bool:
@@ -172,7 +176,9 @@ def build(runtime):
     command = [str(root / '.venv' / 'Scripts' / 'python.exe'), '-m', 'their_mcp_server']
     return ScreenInventoryTool(
         tool_name='screen_inventory',
-        description='读取显示器布局、分辨率与 DPI 缩放。只读，不改变任何窗口状态。',
+        # 模型面那句的唯一可写处是 resource.yaml：这里读它，不在代码里再抄一份（抄了也不上线，
+        # 只会让装载侧留一条 description_source_drift 警告）
+        description=str(_MANIFEST.get('description') or ''),
         server_command=command,
         remote_tool='DisplayInventory',
         server_env={'THEIR_MCP_HOME': str(root)},

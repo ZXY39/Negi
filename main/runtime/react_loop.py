@@ -86,6 +86,7 @@ from g3ku.runtime.tool_context_presence import (
 from g3ku.runtime.tool_error_guidance import (
     append_parameter_error_guidance,
     availability_hint,
+    format_repair_notice_row,
     is_parameter_like_tool_exception,
 )
 from g3ku.runtime.tool_history import (
@@ -622,6 +623,14 @@ class ReActToolLoop:
                 skill_roster_items=skill_roster_items,
             )
             dynamic_contract_payload = dynamic_contract.to_message_payload()
+            # 拒绝文案的两份供数：钉住的 tools[] 名单（可加载面比 callable 宽）与当刻待修复原因。
+            # 都取这一跳已经算好的结构（选择结果 + 合同 payload），不在文案侧按名字再判一次。
+            runtime_context['declared_tool_names'] = provider_tool_names
+            runtime_context['repair_required_tool_reasons'] = {
+                str(item.get('tool_id') or '').strip(): str(item.get('reason') or '').strip()
+                for item in list(dynamic_contract_payload.get('repair_required_tools') or [])
+                if isinstance(item, dict) and str(item.get('tool_id') or '').strip()
+            }
             # 运行时合同的一次性通知：与 skill 通知同一条消息、同一个单生产者。
             # 放在选择结果之后，才能拿到当跳的 denied/candidate/repair。
             model_messages = self._apply_node_skill_roster_notice(
@@ -4110,14 +4119,15 @@ class ReActToolLoop:
                 continue
             tool_id = str(item.get('tool_id') or '').strip()
             if tool_id:
-                reason = str(item.get('reason') or '').strip()
-                repair_rows.append(f'`{tool_id}`' + (f' ({reason})' if reason else ''))
+                repair_rows.append(format_repair_notice_row(f'`{tool_id}`', item.get('reason')))
         for item in list(payload.get('repair_required_skills') or []):
             if not isinstance(item, dict):
                 continue
             skill_id = str(item.get('skill_id') or '').strip()
             if skill_id:
-                repair_rows.append(f'skill `{skill_id}`')
+                # 与前门同一行形状：原因由装载记录带进 payload，skill 这一档过去只印名字，
+                # 模型看得见"待修复"却不知道卡在哪一条。
+                repair_rows.append(format_repair_notice_row(f'skill `{skill_id}`', item.get('reason')))
         denied_names = [
             str(name or '').strip()
             for name in list((runtime_context or {}).get('declared_denied_tool_names') or [])
@@ -5333,12 +5343,16 @@ class ReActToolLoop:
         tool = tools.get(tool_name)
         if tool is None:
             # 只说"不可用"模型无从判断该改名、该先加载、还是该换工具；两个名单都
-            # 在本轮 runtime payload 里，必须随错误一起给。
+            # 在本轮 runtime payload 里，必须随错误一起给。待修复的名字同样会进
+            # `declared_denied_tool_names`（实时授权读拿不到它），所以原因要在前先判，
+            # 否则一次装载拒绝会被说成"角色无权限"，模型就去查 RBAC。
             hint = availability_hint(
                 requested=tool_name,
                 callable_names=list(tools.keys()),
                 candidate_names=runtime_context.get('candidate_tool_names') or [],
                 denied_names=runtime_context.get('declared_denied_tool_names') or [],
+                declared_names=runtime_context.get('declared_tool_names') or [],
+                repair_required_reasons=runtime_context.get('repair_required_tool_reasons') or {},
             )
             return f'Error: tool not available: {tool_name}' + (f'\n{hint}' if hint else '')
         search_signature = self._search_overflow_signature_for_call(tool_name=tool_name, arguments=arguments)

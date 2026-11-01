@@ -33,7 +33,14 @@ def _write_skill(workspace: Path, name: str, description: str) -> Path:
     return root
 
 
-def _write_tool(workspace: Path, name: str, description: str, *, handler_field: str = 'description') -> Path:
+def _write_tool(
+    workspace: Path,
+    name: str,
+    description: str,
+    *,
+    handler_field: str = 'description',
+    manifest_description: str = 'Short manifest description.',
+) -> Path:
     root = workspace / 'tools' / name
     (root / 'main').mkdir(parents=True)
     (root / 'resource.yaml').write_text(
@@ -42,7 +49,7 @@ def _write_tool(workspace: Path, name: str, description: str, *, handler_field: 
                 'schema_version': 1,
                 'kind': 'tool',
                 'name': name,
-                'description': 'Short manifest description.',
+                'description': manifest_description,
                 'protocol': 'mcp',
                 'mcp': {'transport': 'embedded'},
                 'tool_result_delivery_contract': 'runtime_managed',
@@ -121,7 +128,12 @@ def test_new_over_cap_skill_is_repair_required(tmp_path: Path) -> None:
 def test_new_over_cap_tool_is_repair_required(tmp_path: Path) -> None:
     manager = ResourceManager(tmp_path)
     try:
-        _write_tool(tmp_path, 'long_tool', 'x' * (TOOL_DESCRIPTION_MAX_CHARS + 1))
+        _write_tool(
+            tmp_path,
+            'long_tool',
+            'Short handler description.',
+            manifest_description='x' * (TOOL_DESCRIPTION_MAX_CHARS + 1),
+        )
         manager.reload_now()
         descriptor = manager.get_tool_descriptor('long_tool')
         assert descriptor is not None
@@ -242,32 +254,32 @@ def test_installer_rejects_an_over_cap_generated_description(tmp_path: Path) -> 
 
 
 def test_rejected_tool_description_names_its_carrier_and_quotes_the_text(tmp_path: Path) -> None:
-    """拒绝文案必须自己回答"量的是哪一份、原文是什么"。
+    """拒绝文案必须自己回答"量的是哪一份、原文是什么"，而那份就是清单。
 
     实盘（`ext:qq-official-1903529517:f8a8001865631301`，2026-11-01 22:19–22:44）：装载路径量的是
     handler 类里的 `description`（那份 317 字符），而 repair 态印进 `tools[]` 的【待修复】句子取的是
     `resource.yaml` 的 `description:`。同一个"工具描述"两个读者两套来源，模型看到的只有后者，
     于是它把 yaml 从 112 改到 93、每一跳都被同一个 317 拒掉，最后只能向操作员要"重启运行时"。
-    原文案只报字符数与"rewrite it as one sentence"，没有指明被量的载体，模型没有任何线索能找到那
-    317 个字符——所以这里钉三件事：点名 handler 文件与属性、引到有界的原文、并把清单那一份明确
-    标成"不是它"。
+    现在的合同是清单为唯一权威（`g3ku/resources/model_text.py`）：预算量的、`tools[]` 发的、
+    回执点名的是同一份 `resource.yaml:description`，所以这里钉三件事——点名清单、引到有界的
+    原文、不再需要"不是另一份"这种对照句（那条从句的存在本身就是两个载体的痕迹）。
     """
     manager = ResourceManager(tmp_path)
     try:
         offending = 'CARRIERPROBE ' * 30
         assert len(offending) > TOOL_DESCRIPTION_MAX_CHARS
-        _write_tool(tmp_path, 'carrier_tool', offending)
+        _write_tool(tmp_path, 'carrier_tool', 'Short handler description.', manifest_description=offending)
         manager.reload_now()
         descriptor = manager.get_tool_descriptor('carrier_tool')
         assert descriptor is not None
         assert descriptor.available is False
         error = next(item for item in descriptor.errors if 'description_too_long' in item)
-        assert 'tools/carrier_tool/main/tool.py:description' in error
+        assert 'tools/carrier_tool/resource.yaml:description' in error
         assert 'CARRIERPROBE' in error
         # 被拒文本必然超上限，全文回贴会让这条拒绝自己变成一个新的长块
         assert '...(truncated)' in error
-        # 点名"不是清单那一份"才是这一刀的落点：模型上一轮改的正是 resource.yaml
-        assert 'not tools/carrier_tool/resource.yaml' in error
+        # 唯一权威源不该在同一行里再造一个"另一个读者"
+        assert '(not' not in error
     finally:
         manager.close()
 
@@ -276,15 +288,20 @@ def test_shortening_a_rejected_tool_makes_it_available(tmp_path: Path) -> None:
     """拒绝回执承诺的"修好后下一次装载就放行"必须有实现兜着。
 
     与 skill 侧同名用例同形：工具档过去没有正样本，回执里那句"next resource reload re-opens it"
-    就是空头承诺。
+    就是空头承诺。改的位置就是回执点名的位置——清单。
     """
     manager = ResourceManager(tmp_path)
     try:
-        root = _write_tool(tmp_path, 'fix_tool', 'x' * (TOOL_DESCRIPTION_MAX_CHARS + 1))
+        root = _write_tool(
+            tmp_path,
+            'fix_tool',
+            'Short handler description.',
+            manifest_description='x' * (TOOL_DESCRIPTION_MAX_CHARS + 1),
+        )
         manager.reload_now()
         assert manager.get_tool_descriptor('fix_tool').available is False
-        (root / 'main' / 'tool.py').write_text(
-            (root / 'main' / 'tool.py').read_text(encoding='utf-8').replace(
+        (root / 'resource.yaml').write_text(
+            (root / 'resource.yaml').read_text(encoding='utf-8').replace(
                 'x' * (TOOL_DESCRIPTION_MAX_CHARS + 1), 'One short sentence.'
             ),
             encoding='utf-8',
@@ -295,30 +312,66 @@ def test_shortening_a_rejected_tool_makes_it_available(tmp_path: Path) -> None:
         manager.close()
 
 
-def test_rejected_tool_description_names_the_overridden_model_description(tmp_path: Path) -> None:
-    """属性名跟着这个类真正写的那一层走。
+def test_class_authored_description_does_not_drive_the_budget_or_the_wire(tmp_path: Path) -> None:
+    """包内类自撰一句超限文本：放行，模型看到的是清单那句，并留下一条漂移警告。
 
-    装载包装类问的是 `handler.model_description`，基类默认转读 `description`。两类写法都能触发
-    超限，但只有覆盖 `model_description` 的那一类，让模型去 grep `model_description` 才找得到；
-    上一条用例钉的是默认转读那一档，这里钉覆盖那一档，两条互为对照臂。
+    这一条是"改 yaml 依旧没用"的反面钉子。旧合同把类里那句排在清单前面，于是 yaml 改多少遍都
+    不生效；现在清单赢，类里那句只剩两个后果——不进预算判据、不进 `tools[]`。警告是留给维护者的
+    （改类里那行不会生效），不是给模型的，所以它不许同时把资源打成不可用：一个"类里把清单搬回来"
+    的正常包不该在装载时集体掉线。
     """
+    from loguru import logger
+
+    records: list[str] = []
+    sink_id = logger.add(records.append, level='WARNING')
     manager = ResourceManager(tmp_path)
     try:
-        _write_tool(
-            tmp_path,
-            'model_field_tool',
-            'MODELFIELDCAR ' * 20,
-            handler_field='model_description',
-        )
+        _write_tool(tmp_path, 'drift_tool', 'CLASSPROBE ' * 30, manifest_description='Manifest wins here.')
         manager.reload_now()
-        descriptor = manager.get_tool_descriptor('model_field_tool')
+        descriptor = manager.get_tool_descriptor('drift_tool')
         assert descriptor is not None
-        assert descriptor.available is False
-        error = next(item for item in descriptor.errors if 'description_too_long' in item)
-        assert 'tools/model_field_tool/main/tool.py:model_description' in error
-        assert 'MODELFIELDCAR' in error
+        assert descriptor.available is True
+        assert descriptor.errors == []
+        instance = manager.get_tool('drift_tool')
+        assert type(instance).__name__ != 'RepairRequiredTool'
+        assert instance.model_description == 'Manifest wins here.'
+        warnings_text = '\n'.join(records)
+        assert 'description_source_drift' in warnings_text
+        assert 'tools/drift_tool/resource.yaml:description' in warnings_text
+        assert 'tools/drift_tool/main/tool.py:description' in warnings_text
     finally:
+        logger.remove(sink_id)
         manager.close()
+
+
+def test_tool_without_a_manifest_description_falls_back_to_the_class_sentence(tmp_path: Path) -> None:
+    """兜底档才是量类里那句的地方，属性名跟着这个类真正写的那一层走。
+
+    清单两处文本都没有（第三方安装体、合成常驻工具）时，判据落到装载对象自己那句；这时回执
+    必须点名主模块，否则模型又被支去改一份空文件。装载包装类问的是 `handler.model_description`，
+    基类默认转读 `description`——两类写法都能触发超限，但只有覆盖 `model_description` 的那一类，
+    让模型去 grep `model_description` 才找得到，所以属性名要分档。两条互为对照臂。
+    """
+    for field, marker in (('description', 'FALLBACKDESCR'), ('model_description', 'MODELFIELDCAR')):
+        manager = ResourceManager(tmp_path)
+        try:
+            name = f'fallback_{field}_tool'
+            _write_tool(
+                tmp_path,
+                name,
+                f'{marker} ' * 30,
+                handler_field=field,
+                manifest_description='',
+            )
+            manager.reload_now()
+            descriptor = manager.get_tool_descriptor(name)
+            assert descriptor is not None, name
+            assert descriptor.available is False, name
+            error = next(item for item in descriptor.errors if 'description_too_long' in item)
+            assert f'tools/{name}/main/tool.py:{field}' in error, error
+            assert marker in error, error
+        finally:
+            manager.close()
 
 
 def test_rejected_skill_description_names_the_manifest_as_its_carrier(tmp_path: Path) -> None:
@@ -342,6 +395,105 @@ def test_rejected_skill_description_names_the_manifest_as_its_carrier(tmp_path: 
         assert 'SKILLCARRIER' in error
     finally:
         manager.close()
+
+
+def test_manifest_metadata_model_description_outranks_the_manifest_description(tmp_path: Path) -> None:
+    """三档优先链的最高一档也要可测：显式 `model_description` 覆盖 `description:`。
+
+    包内没人用这一档（38 包扫描为 0），但它是"清单是唯一可写处"的一部分；判据与装载共用
+    `resolve_model_description`，所以这里直接打在解析器上，而不是再造一条装载夹具。
+    """
+    from g3ku.agent.tools.base import Tool
+    from g3ku.resources.model_text import (
+        MODEL_TEXT_SOURCE_HANDLER,
+        MODEL_TEXT_SOURCE_MANIFEST,
+        MODEL_TEXT_SOURCE_METADATA,
+        resolve_model_description,
+    )
+
+    descriptor = SimpleNamespace(
+        metadata={'model_description': 'Explicit model sentence.'},
+        description='Manifest sentence.',
+    )
+    assert resolve_model_description(descriptor, None) == ('Explicit model sentence.', MODEL_TEXT_SOURCE_METADATA)
+    assert resolve_model_description(
+        SimpleNamespace(metadata={}, description='Manifest sentence.'),
+        SimpleNamespace(),
+    )[1] == MODEL_TEXT_SOURCE_MANIFEST
+
+    # 清单两处都空才轮到装载对象自己那句；判据只认 `Tool`，非 Tool 的壳没有自撰权
+    class _Handler(Tool):
+        @property
+        def name(self) -> str:
+            return 'fallback_handler'
+
+        @property
+        def description(self) -> str:
+            return 'Handler sentence.'
+
+        @property
+        def parameters(self) -> dict:
+            return {'type': 'object', 'properties': {}}
+
+        async def execute(self, **kwargs):
+            return 'ok'
+
+    assert resolve_model_description(SimpleNamespace(metadata={}, description=''), _Handler()) == (
+        'Handler sentence.',
+        MODEL_TEXT_SOURCE_HANDLER,
+    )
+    assert resolve_model_description(SimpleNamespace(metadata={}, description=''), object()) == ('', '')
+
+
+def test_no_repo_pack_authors_a_description_that_its_manifest_does_not_carry() -> None:
+    """仓库里的每个包：类里自撰的那句必须与清单一致，或者干脆搬回清单。
+
+    这是"模型自己加的工具以后还会不会踩同一个坑"的钉子。判据不能靠装载真实包（38 包里 18 包的
+    `build()` 需要 `runtime.services.*`，离线装载只会得到 RepairRequiredTool），所以走静态 AST：
+    凡是 `description` / `model_description` 属性能静态求值出字符串、且不是 `_MANIFEST` 转发的，
+    就拿它和清单的 `description:` 比。漂移在这里红，在装载侧只是一条警告——也就是说这条用例是
+    唯一能把漂移钉死的地方。
+    """
+    import ast
+
+    root = Path(__file__).resolve().parents[2] / 'tools'
+
+    def _static(node: ast.expr) -> str | None:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left = _static(node.left)
+            right = _static(node.right)
+            return left + right if left is not None and right is not None else None
+        return None
+
+    def _delegates(fn: ast.FunctionDef) -> bool:
+        return 'MANIFEST' in ast.dump(fn)
+
+    drift: list[tuple[str, int, int]] = []
+    for manifest_path in sorted(root.glob('*/resource.yaml')):
+        payload = yaml.safe_load(manifest_path.read_text(encoding='utf-8')) or {}
+        manifest_text = str(payload.get('description') or '').strip()
+        main_py = manifest_path.parent / 'main' / 'tool.py'
+        if not main_py.exists():
+            continue
+        tree = ast.parse(main_py.read_text(encoding='utf-8'), filename=str(main_py))
+        for cls in (node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)):
+            for fn in cls.body:
+                if not isinstance(fn, ast.FunctionDef) or fn.name not in {'description', 'model_description'}:
+                    continue
+                if not any(isinstance(d, ast.Name) and d.id == 'property' for d in fn.decorator_list):
+                    continue
+                authored = next(
+                    (_static(stmt.value) for stmt in fn.body if isinstance(stmt, ast.Return) and stmt.value is not None),
+                    None,
+                )
+                if authored is None or _delegates(fn):
+                    continue
+                authored = authored.strip()
+                if authored and authored != manifest_text:
+                    drift.append((manifest_path.parent.name, len(authored), len(manifest_text)))
+    assert drift == [], f'class-authored descriptions that the manifest does not carry: {drift}'
 
 
 def test_repo_tool_manifests_fit_the_description_budget() -> None:

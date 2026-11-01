@@ -1,7 +1,7 @@
 ﻿schema_version: 1
 kind: tool
 name: load_skill_context
-description: Load full context for a visible skill by exact skill_id. This tool is not a skill discovery interface.
+description: Load full context for a currently visible skill by exact skill_id. Do not use this tool to discover or search for skills.
 tool_result_delivery_contract: direct_load_inline
 source:
   type: ''

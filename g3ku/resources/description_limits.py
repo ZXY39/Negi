@@ -10,11 +10,13 @@ baseline is initialized from the resources present on first load so existing
 manifests are grandfathered instead of turning every long-lived skill into a
 repair-required resource overnight.  New and re-added resources must fit.
 
-The rejection has to name the carrier it measured.  A tool's measured text is
-the loaded module's own `model_description` / `description`, not the manifest's
-`description:` — and the repair projection shown in `tools[]` prints the
-manifest value, so a refusal that only reports a length sends the model back to
-the file it has already shortened.
+The rejection has to name the carrier it measured.  The authority is the manifest:
+`g3ku/resources/model_text.resolve_model_description` picks the loaded tool's model-facing
+sentence as `metadata.model_description` → `resource.yaml` `description:` → the loaded object's
+own text (fallback for installs with no manifest prose), and the gate measures exactly that
+value — the same one `to_model_schema()` sends and the repair projection prints.  A refusal
+that only reports a length would send the model back to a file it has already shortened, so
+the carrier and a bounded preview of the offending text ride along.
 """
 
 from __future__ import annotations

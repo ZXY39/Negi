@@ -747,7 +747,15 @@ def test_tool_model_visible_schema_uses_override_without_changing_validation_con
     assert tool.validate_params({"summary": "preview"}) == ["missing required full_value"]
 
 
-def test_embedded_mcp_tool_prefers_handler_model_visible_contract() -> None:
+def test_embedded_mcp_tool_model_description_follows_the_manifest_authority() -> None:
+    """模型面那句的唯一权威源是清单；参数表那一档的覆盖面不变。
+
+    旧合同把 handler 自撰的 `model_description` 排在清单之前，于是"改了 `resource.yaml` 不生效"
+    是结构性的（实盘 `ext:qq-official-1903529517:f8a8001865631301`：模型把清单从 112 字改到 93 字，
+    每一跳仍被类里那句 317 字判超预算）。判据现在住在 `g3ku/resources/model_text.py`，顺序是
+    metadata 的 `model_description` → 清单 `description:` → handler 兜底。这条用例给的就是三档
+    读数，同时留一根对照针：参数表仍由 handler 的 `model_parameters` 覆盖，两件事不许混成一句。
+    """
     class _DynamicTool(Tool):
         @property
         def name(self) -> str:
@@ -780,26 +788,40 @@ def test_embedded_mcp_tool_prefers_handler_model_visible_contract() -> None:
         async def execute(self, **kwargs: Any) -> Any:
             return kwargs
 
-    descriptor = ToolResourceDescriptor(
-        kind=ResourceKind.TOOL,
-        name="dynamic_tool",
-        description="Manifest description should not win.",
-        root=Path.cwd(),
-        manifest_path=Path.cwd() / "resource.yaml",
-        fingerprint="dynamic",
-        parameters={
-            "type": "object",
-            "properties": {"command": {"type": "string"}},
-            "required": ["command"],
-        },
-    )
+    def _descriptor(*, description: str, metadata: dict[str, Any] | None = None) -> ToolResourceDescriptor:
+        return ToolResourceDescriptor(
+            kind=ResourceKind.TOOL,
+            name="dynamic_tool",
+            description=description,
+            root=Path.cwd(),
+            manifest_path=Path.cwd() / "resource.yaml",
+            fingerprint="dynamic",
+            metadata=dict(metadata or {}),
+            parameters={
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+            },
+        )
 
-    tool = EmbeddedMCPTool(descriptor, _DynamicTool())
-
+    # 1) 清单有文本：清单赢，类里那句既不进模型面、也不进预算判据
+    tool = EmbeddedMCPTool(_descriptor(description='Manifest wins for the model.'), _DynamicTool())
     assert tool.to_model_schema()["function"]["description"] == (
-        f"Runtime model-facing contract. {REUSE_ARGS_MODEL_DESCRIPTION_SENTENCE}"
+        f"Manifest wins for the model. {REUSE_ARGS_MODEL_DESCRIPTION_SENTENCE}"
     )
+    # 对照针：参数表的覆盖面仍在 handler 那一侧
     assert tool.to_model_schema()["function"]["parameters"]["required"] == ["summary"]
+
+    # 2) 显式 metadata 覆盖清单
+    override = EmbeddedMCPTool(
+        _descriptor(description='Manifest wins for the model.', metadata={'model_description': 'Explicit sentence.'}),
+        _DynamicTool(),
+    )
+    assert override.model_description == "Explicit sentence."
+
+    # 3) 清单两处都没写时才轮到装载对象自己那句（第三方安装体、合成常驻工具）
+    fallback = EmbeddedMCPTool(_descriptor(description=''), _DynamicTool())
+    assert fallback.model_description == "Runtime model-facing contract."
 
 
 def test_tool_model_visible_schema_api_docs_call_out_non_authoritative_contract() -> None:
@@ -2858,6 +2880,73 @@ async def test_react_loop_names_available_tools_when_a_tool_name_is_not_callable
     assert 'tool not available: submit_final_resultt' in str(result)
     assert '当前可直接调用的工具：submit_final_result' in str(result)
     assert '本轮其他候选工具（排名选中，可加载）：agent_browser' in str(result)
+
+
+@pytest.mark.asyncio
+async def test_react_loop_refusal_distinguishes_repair_revoked_and_loadable_names() -> None:
+    """节点车道的拒绝要分清三档：待修复（带原因）、已收回权限、声明里有但还没水化。
+
+    前门那三档已经钉过，节点道过去只交 `denied_names` 一份供数，于是：待修复的名字照样会进
+    `declared_denied_tool_names`（实时授权读拿不到它），节点回执就把它说成"角色已无权限"，模型
+    去查 RBAC 而看不见真正超限的那份文本；钉住的 `tools[]` 名单也没交出去，"能按名 load"这一档
+    整个丢掉。两份供数都来自这一跳已经算好的结构，不在文案侧按名字再判一次。
+    """
+    class _NoCallBackend:
+        async def chat(self, **kwargs):
+            raise AssertionError('chat must not be called')
+
+    loop = ReActToolLoop(chat_backend=_NoCallBackend(), log_service=_FakeLogService(), max_iterations=3)
+    runtime_context = {
+        'candidate_tool_names': ['agent_browser'],
+        'node_kind': 'execution',
+        'declared_tool_names': ['submit_final_result', 'stuck_tool', 'revoked_tool', 'lazy_tool'],
+        'declared_denied_tool_names': ['stuck_tool', 'revoked_tool'],
+        'repair_required_tool_reasons': {
+            'stuck_tool': (
+                'description_too_long: tool description is 317 characters (limit 160); rewrite it as one '
+                'sentence. Measured text lives in tools/stuck_tool/resource.yaml:description'
+            ),
+        },
+    }
+
+    repair_result = str(
+        await loop._execute_tool_raw(
+            tools={'submit_final_result': _submit_final_result_tool()},
+            tool_name='stuck_tool',
+            arguments={},
+            runtime_context=dict(runtime_context),
+        )
+    )
+    assert 'repair_required state' in repair_result
+    assert 'description_too_long' in repair_result
+    assert 'tools/stuck_tool/resource.yaml:description' in repair_result
+    # 待修复 ≠ 权限收回：把派生结果说成收回，模型就去查角色
+    assert '无权限' not in repair_result
+    # 原因那一档不吞掉可执行面：名单照旧给
+    assert '当前可直接调用的工具：submit_final_result' in repair_result
+
+    revoked_result = str(
+        await loop._execute_tool_raw(
+            tools={'submit_final_result': _submit_final_result_tool()},
+            tool_name='revoked_tool',
+            arguments={},
+            runtime_context=dict(runtime_context),
+        )
+    )
+    assert '已无权限调用它' in revoked_result
+    # 这一支早退，回执里没有"下面"那份名单：文案不许指一个不存在的下文
+    assert '请改用下面' not in revoked_result
+
+    lazy_result = str(
+        await loop._execute_tool_raw(
+            tools={'submit_final_result': _submit_final_result_tool()},
+            tool_name='lazy_tool',
+            arguments={},
+            runtime_context=dict(runtime_context),
+        )
+    )
+    # 钉住的声明比 callable 宽：能按名 load 的名字不许落到"未知名字"那一档
+    assert 'load_tool_context(tool_id="lazy_tool")' in lazy_result
 
 
 @pytest.mark.asyncio

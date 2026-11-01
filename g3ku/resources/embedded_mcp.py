@@ -11,6 +11,7 @@ from mcp import types
 from mcp.server.fastmcp import FastMCP
 
 from g3ku.agent.tools.base import Tool
+from g3ku.resources.model_text import resolve_model_description
 from g3ku.resources.models import ToolResourceDescriptor
 from g3ku.resources.tool_settings import resolve_recovery_rerun_safe, resolve_universal_timeout_flag
 
@@ -254,12 +255,8 @@ class EmbeddedMCPTool(Tool):
 
     @property
     def model_description(self) -> str:
-        if isinstance(self._handler, Tool):
-            runtime_description = str(getattr(self._handler, "model_description", "") or "").strip()
-            if runtime_description:
-                return runtime_description
-        configured = str((self._descriptor.metadata or {}).get("model_description") or "").strip()
-        return configured or self.description
+        text, _source = resolve_model_description(self._descriptor, self._handler)
+        return text
 
     @property
     def parameters(self) -> dict[str, Any]:

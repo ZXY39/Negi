@@ -8197,7 +8197,7 @@ class MainRuntimeService:
             'placeholder': 0,
         }
         schema_fallback_opportunities = 0
-        # 单源化读路径（开关 `G3KU_TOOLS_BUNDLE_SINGLE_SOURCE`，默认关）：参数表只有整表这一个
+        # 单源化读路径（开关 `G3KU_TOOLS_BUNDLE_SINGLE_SOURCE`，默认开）：参数表只有整表这一个
         # 来源。派发字典内的名字也一样——它们今天由 `react_loop` 现场 `to_model_schema()`，
         # 于是"同名工具被编辑"会在重印边界之外改字节；改读整表后编辑要到边界才被吸收。
         # 整表缺名（含存量第一份整表还没有后来新增的成员）时，这一跳就地按当轮可见源重建并

@@ -108,7 +108,7 @@ from g3ku.runtime.tool_context_presence import (
     contract_presence_reading,
     loader_contract_revisions,
 )
-from g3ku.runtime.tool_error_guidance import availability_hint
+from g3ku.runtime.tool_error_guidance import availability_hint, format_repair_notice_row
 from g3ku.runtime.tool_history import (
     align_compaction_keep_recent,
     extract_call_id,
@@ -4092,11 +4092,16 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             for item in list(state.get("repair_required_tool_items") or [])
             if isinstance(item, dict)
         ]
-        repair_skill_ids = [
-            str(item.get("skill_id") or '').strip()
-            for item in list(state.get("repair_required_skill_items") or [])
-            if isinstance(item, dict) and str(item.get("skill_id") or '').strip()
-        ]
+        repair_skill_items: list[dict[str, Any]] = []
+        seen_repair_skill_ids: set[str] = set()
+        for item in list(state.get("repair_required_skill_items") or []):
+            if not isinstance(item, dict):
+                continue
+            skill_id = str(item.get("skill_id") or '').strip()
+            if not skill_id or skill_id in seen_repair_skill_ids:
+                continue
+            seen_repair_skill_ids.add(skill_id)
+            repair_skill_items.append(dict(item))
         attachment_targets = [
             dict(item)
             for item in list(state.get("attachment_reopen_targets") or [])
@@ -4124,7 +4129,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 self._frontdoor_declared_denied_tool_names_for_state(state)
             ),
             "candidate_tools": self._render_notice_names(candidate_names),
-            "repair_required": self._render_repair_notice(repair_items, repair_skill_ids),
+            "repair_required": self._render_repair_notice(repair_items, repair_skill_items),
             "attachment_targets": self._render_attachment_notice(attachment_targets),
         }
         # 每个表情包一节（`sticker_pack:<pack>`）：两次重印之间增删包或分类只改对应那一节，
@@ -4145,19 +4150,29 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
     def _render_repair_notice(
         cls,
         tool_items: list[dict[str, Any]],
-        skill_ids: list[str],
+        skill_items: list[Any],
     ) -> str:
+        """待修复名单：工具与 skill 同一形状，各自带上装载路径记下的原因。
+
+        skill 行过去只有名字——`description_too_long` 这类原因就在名字之外，模型看得见
+        "这个 skill 待修复"却不知道卡在哪，只能猜。`reason` 取自装载记录，不从正文再算一遍；
+        行形状与节点车道共用 `format_repair_notice_row`，两条道不会各自漂开。
+        """
         rows: list[str] = []
         for item in list(tool_items or []):
             tool_id = str(item.get("tool_id") or "").strip()
             if not tool_id:
                 continue
-            reason = str(item.get("reason") or "").strip()
-            rows.append(f"`{tool_id}`" + (f" ({reason})" if reason else ""))
-        for skill_id in list(skill_ids or []):
-            cleaned = str(skill_id or "").strip()
-            if cleaned:
-                rows.append(f"skill `{cleaned}`")
+            rows.append(format_repair_notice_row(f"`{tool_id}`", item.get("reason")))
+        for item in list(skill_items or []):
+            if isinstance(item, dict):
+                skill_id = str(item.get("skill_id") or "").strip()
+                reason: Any = item.get("reason")
+            else:
+                skill_id = str(item or "").strip()
+                reason = ''
+            if skill_id:
+                rows.append(format_repair_notice_row(f"skill `{skill_id}`", reason))
         return "; ".join(rows)
 
     @staticmethod
@@ -6582,7 +6597,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         # 整表引用：上一次名单真的变化时渲出来的原字节。实例与删除前快照都是进程内的，
         # 重启即空，而钉住的名单会从会话基线里活过来——没有这一档，重启后那一跳只能删名。
         bundled_schemas = dict(getattr(session, "_frontdoor_pinned_tool_schema_bundle", None) or {})
-        # 单源化（开关 `G3KU_TOOLS_BUNDLE_SINGLE_SOURCE`，默认关）：参数表只有整表这一个来源，
+        # 单源化（开关 `G3KU_TOOLS_BUNDLE_SINGLE_SOURCE`，默认开）：参数表只有整表这一个来源，
         # 声明面/注册表的活实例只在"构建整表"的那一刻被读。于是同名工具被编辑不再于冻结跳
         # 改字节；整表缺名（含存量第一份还没有后来的成员）就地重建，重建也拿不到才占位。
         if tools_bundle_single_source_enabled():

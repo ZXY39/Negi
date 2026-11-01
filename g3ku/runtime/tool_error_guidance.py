@@ -109,6 +109,20 @@ def _format_availability_group(prefix: str, names: list[str]) -> str:
     return format_name_group(prefix, names)
 
 
+def format_repair_notice_row(label: str, reason: Any) -> str:
+    """`[RUNTIME_NOTICE]` 待修复一节里的一行：标签 + 装载记录的原因。
+
+    两条车道（前门 / 节点）共用这一份形状，工具行与 skill 行也共用：skill 那一档过去只印
+    名字，原因就落在名字之外——模型看得见"这个 skill 待修复"却不知道卡在哪一条，只能猜。
+    `reason` 由装载路径记进 payload，这里只照抄，不从正文再算一遍。
+    """
+    label_text = str(label or '').strip()
+    if not label_text:
+        return ''
+    cleaned = str(reason or '').strip()
+    return f'{label_text} ({cleaned})' if cleaned else label_text
+
+
 def _repair_required_reason_map(repair_required_reasons: Any) -> dict[str, str]:
     """`{tool_id: reason}`，容忍空、重复名与缺原因的那一条。
 
@@ -157,10 +171,11 @@ def availability_hint(
     elif name and name in set(denied_list):
         # 名字仍在 tools[] 里（钉住的声明不随权限收回摘名），模型看得见参数表，
         # 但执行准入已经关掉——不说清就会变成反复重试或换个名字再试。
+        # 这一支早退，所以后面那两份名单根本不会出现在回执里：过去文案写"请改用下面
+        # 「当前可直接调用的工具」名单里的工具"，指的是一个不存在的下文。
         return (
             f"`{name}` 的参数表仍在本次 tools[] 声明里，但你当前角色已无权限调用它，"
-            "重试或改名都不会放行；请改用下面「当前可直接调用的工具」名单里的工具，"
-            "或换一种达成路径"
+            "重试或改名都不会放行"
         )
     loadable_names = set(candidate_list) | set(declared_list)
     if name and name in loadable_names and name not in reasons:
@@ -426,6 +441,7 @@ __all__ = [
     "append_parameter_error_guidance",
     "availability_hint",
     "format_name_group",
+    "format_repair_notice_row",
     "is_parameter_like_tool_exception",
     "no_load_needed_hint",
     "parameter_error_guidance",

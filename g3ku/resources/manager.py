@@ -17,6 +17,12 @@ from g3ku.resources.description_limits import (
 )
 from g3ku.resources.loader import ResourceLoader
 from g3ku.resources.locks import ResourceLockManager
+from g3ku.resources.model_text import (
+    MODEL_TEXT_SOURCE_HANDLER,
+    MODEL_TEXT_SOURCE_METADATA,
+    manifest_overrides_handler,
+    resolve_model_description,
+)
 from g3ku.resources.models import (
     ResourceKind,
     ResourceSnapshot,
@@ -584,6 +590,7 @@ class ResourceManager:
                             descriptor,
                             reason=budget_errors[0],
                         )
+                    self._warn_description_source_drift(descriptor, instance)
                     return instance
                 return self._loader.load_repair_required_tool(descriptor, reason='tool_handler_unavailable')
             return self._loader.load_repair_required_tool(descriptor, reason='resource_unavailable')
@@ -699,36 +706,51 @@ class ResourceManager:
     def _tool_model_description_source(self, descriptor: ToolResourceDescriptor, instance: Any) -> str:
         """点名 `_tool_model_description` 量到的到底是哪一份文本。
 
-        判据顺序与两条装载包装类同源（`g3ku/resources/loader.py`、
-        `g3ku/resources/embedded_mcp.py` 的 `model_description`）：handler（`Tool` 子类）自己的
-        描述优先——包装类问的是 `handler.model_description`，而基类那句默认转读 `description`，
-        所以属性名要说"这个类真正写的那一层"，让模型 grep `model_description` 却一无所获就等于
-        没指。其次清单 metadata 的 `model_description`，最后才是清单 `description:`。
-        这一步不能省：repair 态印进 `tools[]` 的那句取的是清单值，模型看得见的是清单值，
-        被拒的却是主模块里那句——只报长度就会让它反复改同一份没有参与判定的文本。
+        判据与装载侧同源（`g3ku/resources/model_text.resolve_model_description`）：清单是权威，
+        装载对象自己那句只在清单两处都没写时兜底。所以落点只有三种——metadata 的
+        `model_description`、清单 `description:`、主模块里的属性。第三种要报"这个类真正写的
+        那一层"（属性名），让模型能在模块里 grep 到可改的地方；前两种一律指向 `resource.yaml`，
+        因为那才是唯一可写处。
         """
-        manifest_label = description_carrier(descriptor.manifest_path, 'description', base=self.workspace)
         handler = getattr(instance, '_handler', None)
-        if isinstance(handler, Tool):
-            # 包装类问的是 `handler.model_description`，基类那句默认转读 `description`；属性名只报这个
-            # 类真正写的那一层，没覆盖却报 `model_description` 会让模型在模块里 grep 不到可改的地方。
-            if str(getattr(handler, 'model_description', '') or '').strip():
-                overrides_model_description = (
-                    getattr(type(handler), 'model_description', None) is not Tool.model_description
-                )
-                entry = descriptor.entrypoint_path or descriptor.main_root or descriptor.manifest_path
-                label = description_carrier(
-                    entry,
-                    'model_description' if overrides_model_description else 'description',
-                    base=self.workspace,
-                )
-                if str(descriptor.description or '').strip():
-                    return f'{label} (not {manifest_label})'
-                return label
-        metadata = descriptor.metadata or {}
-        if str(metadata.get('model_description') or '').strip():
+        _text, source = resolve_model_description(descriptor, handler)
+        if source == MODEL_TEXT_SOURCE_METADATA:
             return description_carrier(descriptor.manifest_path, 'model_description', base=self.workspace)
-        return manifest_label
+        if source != MODEL_TEXT_SOURCE_HANDLER:
+            return description_carrier(descriptor.manifest_path, 'description', base=self.workspace)
+        return self._handler_description_carrier(descriptor, handler)
+
+    def _handler_description_carrier(self, descriptor: ToolResourceDescriptor, handler: Any) -> str:
+        """装载对象自己那句话的落点（兜底档与漂移警告共用）。
+
+        基类 `Tool.model_description` 默认转读 `description`；属性名只报这个类真正写的那一层，
+        没覆盖却报 `model_description` 会让模型在模块里 grep 不到可改的地方。
+        """
+        entry = descriptor.entrypoint_path or descriptor.main_root or descriptor.manifest_path
+        field = 'description'
+        if str(getattr(handler, 'model_description', '') or '').strip():
+            if getattr(type(handler), 'model_description', None) is not Tool.model_description:
+                field = 'model_description'
+        return description_carrier(entry, field, base=self.workspace)
+
+    def _warn_description_source_drift(self, descriptor: ToolResourceDescriptor, instance: Any) -> None:
+        """包内类自撰了一句与清单不同的模型面描述——装载放行，但模型看到的是清单那份。
+
+        只警告、不拒绝：判据在 `model_text`，改 `resource.yaml` 同时改到预算与 `tools[]`，
+        所以这条漂不再影响模型能不能用工具；把它当错误会让每个"类里把清单搬回来"的正常包
+        在装载时集体掉线。留一条日志是为了让维护者知道改类里的句子不会生效。
+        """
+        handler = getattr(instance, '_handler', None)
+        if not manifest_overrides_handler(descriptor, handler):
+            return
+        logger.warning(
+            'description_source_drift: {} - the loaded module authors its own model-facing description, '
+            'but the manifest is the authority. The model is shown {}, and the budget measures that same '
+            'text. Ignored module text lives in {}',
+            descriptor.name,
+            description_carrier(descriptor.manifest_path, 'description', base=self.workspace),
+            self._handler_description_carrier(descriptor, handler),
+        )
 
     def _persist_state(self, snapshot: ResourceSnapshot) -> None:
         try:

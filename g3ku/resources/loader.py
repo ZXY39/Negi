@@ -11,6 +11,7 @@ from typing import Any
 from g3ku.agent.tools.base import Tool
 from g3ku.agent.tools.repair_required import RepairRequiredTool
 from g3ku.resources.embedded_mcp import EmbeddedMCPTool
+from g3ku.resources.model_text import resolve_model_description
 from g3ku.resources.models import ToolResourceDescriptor
 from g3ku.resources.tool_settings import (
     raw_tool_secrets_from_config,
@@ -35,12 +36,8 @@ class ManifestBackedTool(Tool):
 
     @property
     def model_description(self) -> str:
-        if isinstance(self._handler, Tool):
-            runtime_description = str(getattr(self._handler, "model_description", "") or "").strip()
-            if runtime_description:
-                return runtime_description
-        configured = str((self._descriptor.metadata or {}).get("model_description") or "").strip()
-        return configured or self.description
+        text, _source = resolve_model_description(self._descriptor, self._handler)
+        return text
 
     @property
     def parameters(self) -> dict[str, Any]:

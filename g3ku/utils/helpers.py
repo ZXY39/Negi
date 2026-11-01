@@ -124,20 +124,21 @@ def path_anchor_policy() -> dict[str, Any]:
 
 
 TOOLS_BUNDLE_SINGLE_SOURCE_ENV = "G3KU_TOOLS_BUNDLE_SINGLE_SOURCE"
+_TOOLS_BUNDLE_SINGLE_SOURCE_OFF_VALUES = {"0", "false", "no", "off"}
 
 
 def tools_bundle_single_source_enabled() -> bool:
-    """`tools[]` 参数表是否只从钉住整表取字节（单源化读路径的灰度开关）。
+    """`tools[]` 参数表是否只从钉住整表取字节（单源化读路径）。
 
     两条车道读同一个函数：开关若各读各的，两车道会跑出不同形状的清单，而这条改造要买的
-    正是"同一份声明在两条道上同形"。默认关；旧档退役时这个函数与它的分支一起删。
+    正是"同一份声明在两条道上同形"。默认开——改 `resource.yaml` 的描述不再于冻结跳改字节，
+    一次编辑因此不会顶掉缓存命中，新句子落到下一次重印边界；装载侧的可用性与通知行照旧
+    逐跳生效，合规过的工具当场就能调用。留 `G3KU_TOOLS_BUNDLE_SINGLE_SOURCE=0` 作退役通道。
     """
-    return str(os.getenv(TOOLS_BUNDLE_SINGLE_SOURCE_ENV, "") or "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    raw = str(os.getenv(TOOLS_BUNDLE_SINGLE_SOURCE_ENV, "") or "").strip().lower()
+    if not raw:
+        return True
+    return raw not in _TOOLS_BUNDLE_SINGLE_SOURCE_OFF_VALUES
 
 
 UNDECLARED_CANDIDATE_LINE_PREFIX = (
