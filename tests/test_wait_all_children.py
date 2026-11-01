@@ -173,3 +173,68 @@ async def test_spawn_tool_forwards_wait_flag_and_echoes_batch():
     assert calls and calls[0][1] == 'call:batch' and calls[0][2] is True
     assert payload['wait_all_children'] is True
     assert payload['batch_id'] == 'call:batch'
+
+
+@pytest.mark.asyncio
+async def test_startup_reconcile_detail_names_task_pause_and_pending_entries(tmp_path):
+    """放不出来时把任务暂停位与没终态的 entry 直接印出来，省掉逐层重查。"""
+    service = _service(tmp_path)
+    _seed(service, wait_all=True)
+    task = service.store.get_task(TASK)
+    service.store.upsert_task(
+        task.model_copy(update={'is_paused': True, 'pause_requested': True})
+    )
+    child2 = service.store.get_node(CHILD2)
+    service.store.upsert_node(
+        child2.model_copy(
+            update={'is_paused': True, 'pause_requested': True, 'pause_reason': 'task'}
+        )
+    )
+
+    detail = service._describe_unreleased_wait_all_batch(
+        task_id=TASK,
+        parent_node_id=PARENT,
+        batch_id='call:batch',
+    )
+
+    assert 'task_paused=True' in detail
+    assert f'{CHILD1}' not in detail
+    assert f'{CHILD2}:in_progress/task' in detail
+
+
+@pytest.mark.asyncio
+async def test_startup_reconcile_detail_reports_missing_batch_payload(tmp_path):
+    service = _service(tmp_path)
+    _seed(service, wait_all=True)
+
+    detail = service._describe_unreleased_wait_all_batch(
+        task_id=TASK,
+        parent_node_id=PARENT,
+        batch_id='call:absent',
+    )
+
+    assert 'batch_payload=missing' in detail
+
+
+@pytest.mark.asyncio
+async def test_startup_reconcile_warning_carries_detail(tmp_path, monkeypatch):
+    service = _service(tmp_path)
+    _seed(service, wait_all=True)
+    _stub_wake(service, monkeypatch)
+    await service._deliver_child_final_message(task_id=TASK, node_id=CHILD1)
+
+    captured: list[tuple] = []
+
+    class _Logger:
+        def warning(self, message, *args, **kwargs):
+            captured.append((message, args))
+
+    monkeypatch.setattr('main.service.runtime_service.logger', _Logger())
+
+    await service._reconcile_wait_all_batches()
+
+    assert captured, 'an unreleased held batch must still warn'
+    message, args = captured[0]
+    assert 'detail={}' in message
+    assert 'pending_entries=' in str(args[-1])
+    assert f'{CHILD2}:in_progress' in str(args[-1])

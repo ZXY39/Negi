@@ -5453,12 +5453,67 @@ class MainRuntimeService:
             )
             if not released:
                 logger.warning(
-                    'held child_final batch not releasable at startup: task={} parent={} batch={} rows={}',
+                    'held child_final batch not releasable at startup: task={} parent={} batch={} rows={} detail={}',
                     task_id,
                     parent_node_id,
                     batch_id,
                     count,
+                    self._describe_unreleased_wait_all_batch(
+                        task_id=task_id,
+                        parent_node_id=parent_node_id,
+                        batch_id=batch_id,
+                    ),
                 )
+
+    def _describe_unreleased_wait_all_batch(
+        self,
+        *,
+        task_id: str,
+        parent_node_id: str,
+        batch_id: str,
+    ) -> str:
+        """给上面那条 WARNING 补事实：任务是否暂停、批次里还差哪几个 entry。
+
+        这不是释放判据——放不放行仍由 `release_wait_all_batch_if_settled` 一处决定，
+        本方法只把操作员接下来要翻的那几格直接印进日志。读失败时返回原因串，
+        绝不影响启动对账本身。
+        """
+        try:
+            task = self.store.get_task(task_id)
+            if task is None:
+                paused = 'unknown'
+            else:
+                paused = str(
+                    bool(getattr(task, 'is_paused', False) or getattr(task, 'pause_requested', False))
+                )
+            parent = self.store.get_node(parent_node_id)
+            metadata = dict(getattr(parent, 'metadata', None) or {}) if parent is not None else {}
+            operations = metadata.get('spawn_operations') if isinstance(metadata, dict) else {}
+            payload = operations.get(batch_id) if isinstance(operations, dict) else None
+            if not isinstance(payload, dict):
+                return f'task_paused={paused} batch_payload=missing'
+            pending: list[str] = []
+            for item in list(payload.get('entries') or []):
+                if not isinstance(item, dict):
+                    continue
+                child_id = str(item.get('child_node_id') or '').strip()
+                if not child_id:
+                    pending.append('entry_without_child')
+                    continue
+                child = self.store.get_node(child_id)
+                if child is None:
+                    pending.append(f'{child_id}:missing')
+                    continue
+                status = str(getattr(child, 'status', '') or '').strip().lower()
+                if status in {'success', 'failed'}:
+                    continue
+                reason = str(getattr(child, 'pause_reason', '') or '').strip()
+                suffix = f'/{reason}' if reason else ''
+                pending.append(f'{child_id}:{status}{suffix}')
+            listed = ','.join(pending) if pending else 'none'
+            return f'task_paused={paused} pending_entries={listed}'
+        except Exception as exc:  # noqa: BLE001 - 日志读数失败不得打断启动对账
+            return f'detail_unavailable:{exc!r}'
 
     def _subtree_node_ids(self, task_id: str, root_node_id: str) -> list[str]:
         records = list(self.store.list_nodes(str(task_id or '').strip()) or [])
