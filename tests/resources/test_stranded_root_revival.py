@@ -15,6 +15,7 @@ entry + 信箱无未读」就把任务当停靠交回，`run_task` 收尾关闭 
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -22,7 +23,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from g3ku.providers.base import LLMResponse, ToolCallRequest
-from main.models import NodeFinalResult
+from main.models import NodeFinalResult, TaskNodeNotification
 from main.service.runtime_service import MainRuntimeService
 
 
@@ -197,6 +198,104 @@ async def test_parked_root_is_not_revived(tmp_path: Path) -> None:
         assert backend.calls == [], "停靠中的根不得被点火"
         assert control_only is True
     finally:
+        await service.close()
+
+
+def _write_parked_frame(service: MainRuntimeService, task_id: str, node_id: str) -> None:
+    """干净的停靠现场：没有在飞工具，只等消息。"""
+    service.log_service.update_frame(
+        task_id,
+        node_id,
+        lambda frame: {**frame, "phase": "waiting_explicit"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_parked_root_with_unread_is_not_forced_awake(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """信箱里有可注入未读时，停靠根不是「没人会来唤醒」的死锁。"""
+    service = _build_service(tmp_path, chat_backend=_QueuedChatBackend([]))
+    forced: list[str] = []
+
+    async def _force(**_kwargs) -> bool:
+        forced.append(str(_kwargs.get("task_id") or ""))
+        return True
+
+    monkeypatch.setattr(service.task_actor_service, "_force_wake_parked", _force)
+    try:
+        record = await service.create_task("parked with mail", session_id="web:shared")
+        task_id, root_id = record.task_id, record.root_node_id
+        _write_parked_frame(service, task_id, root_id)
+        service.store.upsert_task_node_notification(
+            TaskNodeNotification(
+                notification_id="notif:wait-graph-unread",
+                task_id=task_id,
+                node_id=root_id,
+                epoch_id="",
+                message="子节点完成",
+                status="delivered",
+                created_at="2026-11-01T05:35:44+08:00",
+                delivered_at="2026-11-01T05:35:44+08:00",
+            )
+        )
+
+        broke = await service.task_actor_service._break_wait_cycles(task_id)
+
+        assert broke is False
+        assert forced == []
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_live_entry_is_waited_before_the_wait_graph(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """先让活执行器跑，再判等待图。
+
+    把「刚派发、尚未被事件循环调度」读成死锁，会让强制唤醒沿着一条没有
+    让出点的路径每拍重试一次，事件循环因此永远轮不到那个 entry。
+    """
+    service = _build_service(tmp_path, chat_backend=_QueuedChatBackend([]))
+    entry_task = asyncio.create_task(asyncio.sleep(3600))
+    events: list[str] = []
+    try:
+        record = await service.create_task("live entry", session_id="web:shared")
+        task_id, root_id = record.task_id, record.root_node_id
+        _write_parked_frame(service, task_id, root_id)
+        dispatcher = service.task_actor_service._create_dispatcher(task_id)
+        dispatcher._entries[root_id] = SimpleNamespace(
+            node_id=root_id,
+            task=entry_task,
+            future=asyncio.get_running_loop().create_future(),
+        )
+
+        async def _fake_break(_task_id: str) -> bool:
+            events.append("break")
+            return False
+
+        async def _fake_wait(timeout: float = 0.5) -> None:
+            events.append("wait")
+            dispatcher._entries.pop(root_id, None)
+
+        monkeypatch.setattr(service.task_actor_service, "_break_wait_cycles", _fake_break)
+        monkeypatch.setattr(dispatcher, "wait_activity", _fake_wait)
+
+        _result, control_only = await service.task_actor_service._drive_scheduler_loop(
+            task_id=task_id,
+            dispatcher=dispatcher,
+            root_node_id=root_id,
+            current_result=_control_only_result(),
+        )
+
+        assert events[0] == "wait", events
+        assert control_only is True
+    finally:
+        entry_task.cancel()
+        await asyncio.gather(entry_task, return_exceptions=True)
         await service.close()
 
 

@@ -291,6 +291,29 @@ def test_shallowest_parked_node_is_listed_first():
     assert find_all_parked_waits(nodes) == ['node:shallow', 'node:deep']
 
 
+def test_a_node_with_injectable_unread_is_not_forced_awake():
+    # 信箱里的可注入未读就是唤醒源；派发路径会为它开回合，不需要死锁兜底点火。
+    a = _parked(_node('node:a', parent='root'))
+    b = _parked(_node('node:b', parent='root'))
+    nodes = build_wait_nodes(records=[a, b], frames=_frames('node:a', 'node:b'))
+    assert find_all_parked_waits(nodes, wakeable_node_ids={'node:a'}) == ['node:b']
+
+
+def test_all_parked_but_wakeable_means_no_deadlock():
+    a = _parked(_node('node:a', parent='root'))
+    nodes = build_wait_nodes(records=[a], frames=_frames('node:a'))
+    assert find_all_parked_waits(nodes, wakeable_node_ids={'node:a'}) is None
+
+
+def test_a_node_still_running_tools_is_not_a_silent_park():
+    # 相位写着停靠、帧里却还有在飞工具调用：这是 stranded 形态，交给重派与看门狗，
+    # 等待图不能抢在它们前面把节点叫醒。
+    a = _parked(_node('node:a', parent='root'))
+    b = _parked(_node('node:b', parent='root'))
+    nodes = build_wait_nodes(records=[a, b], frames=_frames('node:a', 'node:b'))
+    assert find_all_parked_waits(nodes, busy_node_ids={'node:b'}) is None
+
+
 # --- targeted wake ----------------------------------------------------------
 
 

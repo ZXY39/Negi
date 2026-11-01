@@ -20,6 +20,7 @@ legitimately parked node.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -138,7 +139,12 @@ def _wait_edges(nodes_by_id: dict[str, WaitNode]) -> dict[str, list[str]]:
     return edges
 
 
-def find_all_parked_waits(nodes: list[WaitNode]) -> list[str] | None:
+def find_all_parked_waits(
+    nodes: list[WaitNode],
+    *,
+    wakeable_node_ids: Iterable[str] = (),
+    busy_node_ids: Iterable[str] = (),
+) -> list[str] | None:
     """Return the ids to force-wake when a task has no reachable waker.
 
     A task is provably stuck when every non-terminal execution node sits in an
@@ -148,14 +154,29 @@ def find_all_parked_waits(nodes: list[WaitNode]) -> list[str] | None:
     stuck. Acceptance nodes are excluded: they are driven by the handshake and
     never wake anyone by sending.
 
+    ``wakeable_node_ids`` are nodes whose mailbox already holds injectable
+    unread. That unread *is* a wake source — the dispatch path opens a turn to
+    consume it — so those nodes are not part of "nobody will wake them".
+
+    ``busy_node_ids`` are nodes whose frame still carries in-flight tool calls.
+    They are doing work, not parked silently; that shape belongs to the
+    stranded-root revival and the watchdog, and the wait graph must not get
+    ahead of them and pointlessly fire a turn.
+
     Returns the explicitly parked ids ordered shallowest-first, or ``None``.
     """
+    wakeable = {str(item or '').strip() for item in list(wakeable_node_ids or ())}
+    busy = {str(item or '').strip() for item in list(busy_node_ids or ())}
     explicit: list[WaitNode] = []
     external = False
     for node in list(nodes or []):
         if node.node_kind != 'execution' or _is_terminal(node):
             continue
+        if node.node_id in busy:
+            return None
         if node.phase == 'waiting_explicit':
+            if node.node_id in wakeable:
+                continue
             explicit.append(node)
             if node.wait_external:
                 external = True

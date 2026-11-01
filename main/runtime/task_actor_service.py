@@ -1411,6 +1411,10 @@ class TaskActorService:
 
         判据只读持久事实：节点行 + 帧相位 + 握手状态。停靠节点可被任意消息唤醒，
         不参与成环；终态节点会发出终局消息，也不参与。
+
+        全员停靠分支还要排掉两类"其实有人能推进"的形态：信箱里有可注入未读
+        （派发路径会开回合）、帧里挂着在飞工具调用（它在做事，交给 stranded
+        重派与看门狗）。缺这两条会把正常排队读成死锁。
         """
         task = self._store.get_task(task_id)
         if task is None:
@@ -1430,6 +1434,17 @@ class TaskActorService:
                 frame = None
             if isinstance(frame, dict):
                 frames[node_id] = dict(frame)
+        wakeable_node_ids: list[str] = []
+        busy_node_ids: list[str] = []
+        for node_id, frame in frames.items():
+            if str(frame.get('phase') or '').strip() != 'waiting_explicit':
+                continue
+            if self._node_has_unread(task_id, node_id):
+                # 可注入未读本身就是唤醒源：派发路径会为它开回合。
+                wakeable_node_ids.append(node_id)
+            if self._frame_has_inflight_tools(frame):
+                # 相位写着停靠、工具却还在飞：这是 stranded 形态，不归等待图点火。
+                busy_node_ids.append(node_id)
         nodes = build_wait_nodes(
             records=records,
             frames=frames,
@@ -1444,7 +1459,11 @@ class TaskActorService:
             # 没有可证明的环，仍可能全员停靠：每个执行节点都不持有回合，而没有任何
             # 一个声明在等外部输入。那种状态没有唤醒源，只能等失速告警——把它当成
             # 一个环来打破，让"静默全员停靠"在结构上不可达。
-            all_parked = find_all_parked_waits(nodes)
+            all_parked = find_all_parked_waits(
+                nodes,
+                wakeable_node_ids=wakeable_node_ids,
+                busy_node_ids=busy_node_ids,
+            )
             if not all_parked:
                 return False
             return await self._force_wake_parked(
@@ -1531,11 +1550,16 @@ class TaskActorService:
                 continue
             if await self._dispatch_runnable_nodes(task_id, dispatcher):
                 continue
-            # 只剩停靠节点时哨一次等待图：成环就强制唤醒最靠近根的节点。
-            if await self._break_wait_cycles(task_id):
-                continue
+            # 有执行器活着就还没到"全员停靠"：先让它跑，结束（`_finish_entry` 会
+            # set 活动事件）后再判等待图。顺序反了会把"刚派发、尚未被事件循环
+            # 调度"的 entry 读成死锁；而强制唤醒这条路径没有真正的让出点，
+            # 事件循环被独占后那个 entry 永远拿不到 CPU——实盘
+            # task:fae072c92fb6 同一对日志重复 291,777 次、持续 5.8 小时。
             if dispatcher.has_live_entries():
                 await dispatcher.wait_activity()
+                continue
+            # 只剩停靠节点时哨一次等待图：成环就强制唤醒最靠近根的节点。
+            if await self._break_wait_cycles(task_id):
                 continue
             # 静止一拍：让最后排定的唤醒/投递任务先跑，避免把"消息还在路上"当成无事可做。
             await asyncio.sleep(0)
