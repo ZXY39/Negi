@@ -112,6 +112,8 @@
 
 归一化后的边界是"不投递，但保留正文"：外部渠道与 cron 都不外发（`RunResult.is_silent_reply=true`，`RunResult.output` 为空，channel transport 与 cron dispatch 据此闸门）、`message_end` 带 `text=正文` + `silent_reply` + `silent_reason`（外部 relay 依据 flag 跳过）、回合生命周期照常走完（`turn_end` / `agent_end` / `state_snapshot`、状态 `completed`），本回合的 turns 账本与工具调用保持完整可见。
 
+静默的范围是**整轮**，而两条车道的"可见"不同名：渠道端只在收尾那一跳投递一次，随早前各跳工具一起给出的正文本来就不上渠道（表情轮是唯一的例外，`_sticker_sheet_turn_text_prefix` 把那一跳正文垫回出站正文），所以静默轮对渠道用户是零字节；Web 端把整轮折成一行「静默消息」，正文留在 DOM 里、要用户点开才看得见（渲染合同见 `web-and-admin.md`「CEO Turn Silent Reply Contract」）。模型如果按 Web 的可见性推断渠道，就会写出"本轮已通过正文说明"这类理由——实盘发生过一次，用户侧什么都没收到。因此模型可见的契约必须自己把范围与两条车道讲清，它落在 `SilentTool.model_description`：前门按 `_model_visible_tool_contract` 优先取 `model_description`，`description` 只进权威面（校验与治理读），改 `description` 不会上线。回执同时交出运行时才知道、模型自己推不出的那个数：`undelivered_text_chars` = 本回合账本里已落行的正文 + 当前这一跳随工具给出的 `analysis_text`（`_frontdoor_undelivered_turn_text_chars`，账本或 turn id 拿不到时该字段整体缺席，不报 0 之外的事实）。`reason` 只落转录与后续轮次，不显示给用户。
+
 静默轮与普通可见回合共用同一条回合收尾路径，区别只在投递与文案：本轮照样落进 turns 账本（`text` 取同一条助手消息的正文；模型只给工具不给正文时退回 `reason`），工具调用照常记账。账本里没有“未收口的回合”这种状态——回合随 `finalize` 结束，下一次可见轮从新的一行开始。
 
 transcript 落一条 assistant 行，带 `silent_reply=true`、`prompt_visible=true`、`ui_visible=true` 以及 `silent_reason` / `silent_subject` / `silent_superseded_by`，正文原样保留。`prompt_visible=true` 是这条车道的关键不变量：取消机器侧的静默闸门之后，"这一轮为什么没说话"的唯一记录者就是模型自己，而它要能反悔就必须看得见自己上次的选择。基线侧同样不重复回填该正文——带 `tool_calls` 的那行助手记录已经把它带进请求体基线，再 append 一次就是同文两份。因此静默回合的正文在请求体里只有一份，这一点由回归断言钉住。

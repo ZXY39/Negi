@@ -7149,7 +7149,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         名单——四处少任何一处，症状都是"模型看得见名字却调不动"或"从不使用它"。
         """
         return {
-            SILENT_TOOL_NAME: SilentTool(),
+            SILENT_TOOL_NAME: SilentTool(
+                pending_reply_chars=lambda: self._frontdoor_undelivered_turn_text_chars(
+                    state=state,
+                    runtime=runtime,
+                )
+            ),
             TIME_TOOL_NAME: TimeTool(),
             SCHEDULE_WAKE_TOOL_NAME: ScheduleWakeTool(
                 lambda **payload: self._frontdoor_schedule_wake(state=state, runtime=runtime, **payload)
@@ -7158,6 +7163,38 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 lambda **payload: self._frontdoor_publish_mention(**payload)
             ),
         }
+
+    def _frontdoor_undelivered_turn_text_chars(
+        self,
+        *,
+        state: CeoGraphState | dict[str, Any] | None,
+        runtime: CeoRuntime | None,
+    ) -> int:
+        """本轮已经给出、静默收尾后不会送达用户眼前的正文字数。
+
+        渠道端只投递收尾那一跳，随早前各跳工具一起给出的正文从来没到过用户眼前；Web 把
+        整轮折成一行，要用户点开才看得见。实盘出现过"本轮已通过正文说明"这种自述，所以
+        回执把这一个模型自己推不出来的读数交给它，而不是再多加一句提示词。
+
+        当前这一跳的正文还没落进回合账本（同步发生在工具阶段之后），所以单独取
+        `analysis_text`；拿不到 turn id 或账本时返回 0，回执里就不带该字段。
+        """
+        snapshot = dict(state or {})
+        session = getattr(getattr(runtime, "context", None), "session", None)
+        turn_id = str(snapshot.get("frontdoor_turn_id") or "").strip()
+        if not turn_id and session is not None:
+            getter = getattr(session, "_current_turn_id", None)
+            turn_id = str(getter() or "").strip() if callable(getter) else ""
+        if not turn_id:
+            return 0
+        rows = normalize_frontdoor_turns(getattr(session, "_frontdoor_turns", None) if session is not None else None)
+        total = sum(
+            len(str(row.get("text") or ""))
+            for row in rows
+            if str(row.get("turn_id") or "").strip() == turn_id
+        )
+        total += len(str(snapshot.get("analysis_text") or "").strip())
+        return total
 
     def _mention_roster(self, session_key: str) -> tuple[dict[int, str], str]:
         """会话内编号 → sender id，以及 Master 的 sender id。"""

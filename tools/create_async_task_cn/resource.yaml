@@ -2,7 +2,9 @@
 kind: tool
 display_name: "创建异步任务"
 name: create_async_task
-description: Create a background task in the main runtime.
+description: >-
+  Create a background task. Judge `requires_final_acceptance` before you call: omitting it is not
+  an answer, and the node's own self-test is not acceptance.
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''

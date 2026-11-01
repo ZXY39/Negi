@@ -38,9 +38,19 @@ class SilentTool(Tool):
     恰好等于哨兵串，实盘 11 次尝试全部写成「正文 + 空行 + 哨兵」而静默失败。调工具
     把「不外发」变成一个与正文彼此独立的通道，正文照常进上下文，于是同一动作既是
     静默也是痕迹。参数落进转录行，审计与后续轮次都能读到判据。
+
+    「静默」的范围是**整轮**，而两条车道的可见性不一样：Web 把整轮折成一行「静默消息」，
+    正文仍在 DOM 里但要用户点开才看得见；渠道端只在收尾那跳按 `message_end` 投递一次，
+    静默就整条不发（`g3ku/transports/channel_session.py`），随工具一起给出的正文从来
+    没到过渠道。所以实盘出现过「本轮已通过正文说明」这种自述——它在 Web 上像真的，在
+    渠道上从不成立。判据不能只靠提示词讲道理：`pending_reply_chars` 让前门在回执里
+    交出运行时才知道的被压字数，节点侧没有这个读数就不带该字段。
     """
 
     hide_universal_timeout_parameter = True
+
+    def __init__(self, pending_reply_chars: Callable[[], int] | None = None) -> None:
+        self._pending_reply_chars = pending_reply_chars
 
     @property
     def name(self) -> str:
@@ -49,17 +59,26 @@ class SilentTool(Tool):
     @property
     def description(self) -> str:
         return (
-            'End this turn without delivering a reply to the user or the channel. Your accompanying '
-            'text is still kept in the conversation and visible to you on later turns; only delivery '
-            'is suppressed. Call it when a later reply in this session already covered the same '
-            'deliverable — name that covering reply in `superseded_by`. When the deliverable has not '
-            'actually been reported yet, reply normally instead: never use this to dodge a result '
-            'the user is waiting for.'
+            'End this turn with nothing delivered. The scope is the whole turn, not just the reply '
+            'you are about to write: text you gave alongside a tool call in an earlier hop of this '
+            'turn reaches a chat channel only in the closing hop, and on web the turn survives as '
+            'one collapsed line the user has to open. Call it only when this turn leaves no result '
+            'the user still needs and no question of theirs unanswered. When another reply already '
+            'covered the deliverable, name it in `superseded_by`. `reason` is recorded on the turn '
+            'and read back to you on later turns; it is not shown to the user. While the user is '
+            'waiting on an answer, reply normally instead - never use this to withhold a result.'
         )
 
     @property
     def model_description(self) -> str:
-        return 'Stay silent this turn: keep the text for context, deliver nothing.'
+        return (
+            'End this turn with nothing delivered. This covers the whole turn: text you wrote '
+            'alongside a tool call earlier in this same turn is not delivered either - a chat '
+            'channel only receives your closing hop, and on web the turn is one collapsed line the '
+            'user must open. Call it only when this turn has no result the user still needs and no '
+            'question of theirs is unanswered; if another reply already covered the deliverable, '
+            'name it in `superseded_by`. When the user is waiting on an answer, reply normally.'
+        )
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -69,8 +88,8 @@ class SilentTool(Tool):
                 'reason': {
                     'type': 'string',
                     'description': (
-                        'Why nothing is being delivered. On a user-initiated turn this doubles as '
-                        'the fallback text, so it must read as something the user could be shown.'
+                        'Why nothing is being delivered. Recorded on the turn and quoted back to you '
+                        'on later turns; it is not shown to the user.'
                     ),
                     'minLength': 1,
                 },
@@ -122,16 +141,27 @@ class SilentTool(Tool):
         **kwargs: Any,
     ) -> str:
         _ = kwargs
-        return json.dumps(
-            {
-                'silenced': True,
-                'reason': str(reason or '').strip(),
-                'subject': str(subject or '').strip(),
-                'superseded_by': str(superseded_by or '').strip(),
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-        )
+        payload: dict[str, Any] = {
+            'silenced': True,
+            'reason': str(reason or '').strip(),
+            'subject': str(subject or '').strip(),
+            'superseded_by': str(superseded_by or '').strip(),
+        }
+        pending = self._pending_undelivered_chars()
+        if pending > 0:
+            payload['undelivered_text_chars'] = pending
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+    def _pending_undelivered_chars(self) -> int:
+        """本轮已经给出、静默之后不会送到用户眼前的正文字数；拿不到读数就报 0。"""
+        provider = self._pending_reply_chars
+        if not callable(provider):
+            return 0
+        try:
+            value = int(provider() or 0)
+        except Exception:  # noqa: BLE001 - 观测值缺失不许影响收尾本身
+            return 0
+        return value if value > 0 else 0
 
 
 class EnterWaitTool(Tool):
@@ -504,7 +534,10 @@ class SpawnChildNodesTool(Tool):
             'to wait for mail. Set `wait_all_children` to deliver the batch\'s results only after all '
             'its children finish. Never put a node that consumes its siblings’ outputs in the same '
             'batch; create it after you have their results. Optional per-child `seed_tools` seeds '
-            'those tool contracts into the child’s first request.'
+            'those tool contracts into the child’s first request. Per child, '
+            '`requires_acceptance=true` + `acceptance_prompt` adds an acceptance node that judges it '
+            'independently after it submits; leaving it out is not an answer - judge the two '
+            'conditions in your prompt, and never count your own self-check as that verdict.'
         )
 
     @property
