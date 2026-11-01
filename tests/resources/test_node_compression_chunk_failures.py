@@ -9,10 +9,9 @@
 
 现在的合同（两条车道同一个规划器 `g3ku/runtime/chunk_compression_plan.py`）：
 - C1：块数 = 贪心装箱(原子组) 的自然结果，容量 = 窗口 − 实测信封 − 输出余量；
-- C2：一块失败就停在那里——已压好的最长成功前缀照常交付，失败那块及其后的原文
-  原样留在本跳请求里，由下一跳按那时的窗口重算；
-- C3：第一块就失败 ⇒ 一块都没收下 ⇒ 空产物 ⇒ 预检按压缩失败拒发，原因写明
-  `0/N chunks committed` 并带 provider 原话。
+- C2：任一块失败 ⇒ 整次作废，不提交已成功前缀；失败块号与 provider 原话带回调用方，
+  由发送层按当前成员失败跳过并 fallback 下一个成员；
+- C3：第一块就失败 ⇒ 同样空产物，原因写明 `chunk 1/N` 与 provider 原话。
 """
 
 from __future__ import annotations
@@ -169,11 +168,11 @@ def test_frontdoor_and_node_derive_the_same_chunk_count_from_the_same_capacity()
 
 
 # ---------------------------------------------------------------------------
-# C2：一块失败就停在在那里，前缀照常交付、其余原文留在请求里
+# C2：任一块失败 ⇒ all-or-nothing，不提交已成功前缀
 # ---------------------------------------------------------------------------
 
 
-def test_partial_chunk_failure_commits_the_prefix_and_keeps_the_rest_raw() -> None:
+def test_partial_chunk_failure_discards_all_summaries() -> None:
     calls: list[dict] = []
     messages = _history(60, 12000)
     estimator = _make_loop(lambda *a, **k: _Resp(content='占位'))._estimate_node_compression_message_tokens
@@ -183,13 +182,17 @@ def test_partial_chunk_failure_commits_the_prefix_and_keeps_the_rest_raw() -> No
 
     assert payload.get('compression_mode') == 'llm_chunked'
     assert list(payload.get('chunk_failed_indexes') or []) == [2]
-    assert int(payload.get('chunk_committed_count') or 0) == 1
-    assert int(payload.get('deferred_message_count') or 0) > 0
-    assert payload.get('deferred_raw_messages'), '未压中的原文要交回调用方留在请求里'
-    assert payload.get('chunk_error_text', '').startswith('HTTP 429')
-    assert text.strip(), '部分失败仍要产出可用摘要（交回前缀，不再谎称全量收口）'
-    assert '未取得摘要' not in text, f'停下的那块不许留缺口行：{text[:160]}'
-    assert '下一跳按那时的窗口继续压缩' in text
+    assert int(payload.get('chunk_committed_count') or 0) == 0
+    assert int(payload.get('deferred_message_count') or 0) == 0
+    assert not payload.get('deferred_raw_messages'), '失败时不应把已成功摘要或原始历史按部分产物交回'
+    assert payload.get('failure_kind') == 'provider'
+    assert payload.get('chunk_error_text', '').startswith('chunk 2/')
+    assert 'HTTP 429' in payload.get('chunk_error_text', '')
+    assert text == '', '部分失败不能产出看起来成功的摘要'
+    reason = ReActToolLoop._compression_failure_reason(payload)
+    assert 'chunks committed' in reason
+    assert 'chunk 2/' in reason
+    assert 'HTTP 429: inference exceeds tpm/rpm limit' in reason
 
 
 # ---------------------------------------------------------------------------

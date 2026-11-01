@@ -2148,7 +2148,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     tool_schemas=tool_schemas,
                 ),
                 history_shrink_reason="",
-                diagnostics={"applied": False, "reason": "no_compressible_history"},
+                diagnostics={
+                    "applied": False,
+                    "reason": "no_compressible_history",
+                    "failure_kind": "no_history",
+                },
             )
         older_history_messages = [dict(item) for item in normalized_body[:-recent_tail_count]]
         recent_tail = [dict(item) for item in normalized_body[-recent_tail_count:]]
@@ -2269,6 +2273,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     history_shrink_reason="",
                     diagnostics={
                         "applied": False,
+                        "failure_kind": "capacity",
                         "compression_pass_failed": str(compression_pass.refusal.reason or ""),
                         "capacity_tokens": int(compression_pass.capacity_tokens or 0),
                         "capacity_source": compression_pass.capacity_source,
@@ -2344,14 +2349,17 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     history_shrink_reason="",
                     diagnostics={
                         "applied": False,
+                        "failure_kind": "compression",
                         "mode": "llm_chunked" if chunked_mode else "llm",
                         "compression_pass_failed": (
                             helper_error_text or "compression helper returned no summary"
                         ),
+                        "compression_provider_error": str(helper_error_text or "").strip(),
                         "final_request_tokens": int(single_shot_tokens or 0),
                         "estimated_total_tokens": int(single_shot_tokens or 0),
                         "chunk_count": int(chunk_count or 0),
                         "chunk_failed_count": int(chunk_failed_count or 0),
+                        "chunk_committed_count": 0,
                     },
                 )
             # 收口：摘要正文直接成为压缩块。
@@ -2761,13 +2769,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         compression_source: str = "token_compression",
         max_tokens: int | None = None,
     ) -> tuple[str, int, bool, int, int, list[dict[str, Any]], int, str]:
-        """执行规划器给出的块，提交最长成功前缀，其余原始历史留在本跳请求里。
+        """执行规划器给出的块；all-or-nothing：任一块失败就丢弃整次压缩。
 
         块是 system+user 重打包形态（块不构成对话前缀，体量与正常流量同级）。一块
-        没拿到摘要就停在这儿：压好的块照常交付，这一块及其之后的原始历史整体保留，
-        由下一跳按那时的窗口重算。比"整次作废、下一跳重烧所有块"省，也比"在摘要里
-        插一行缺口却声称历史已收口"诚实——那行缺口下面根本没跟内容。
-        没命中 `retry_on` 的失败由 helper 直接抛原文，不在这个循环里被降级成"没拿到摘要"。
+        没拿到摘要（重试耗尽/空摘要）就立即返回空产物，不提交已成功的摘要前缀；调用方
+        按"当前成员压缩失败"跳过该成员并 fallback 下一个。没命中 `retry_on` 的 provider
+        失败由 helper 直接抛原文（带 chunk 号），同样由调用方按失败处理。
         返回 (合并摘要, 计划块数, 是否归并, 未取得摘要的块数, 实跑轮数, 留在请求里的原始历史, 收下的块数, provider 错误原文)。
         """
 
@@ -2823,25 +2830,40 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         ),
                     },
                 ]
-                chunk_text, _chunk_message, chunk_error_text = await self._run_frontdoor_compression_helper_request(
-                    messages=chunk_messages,
-                    model_refs=list(model_refs or []),
-                    state=state,
-                    runtime=runtime,
-                    is_cancelled=is_cancelled,
-                    model_info=model_info,
-                    progress_text=progress,
-                    max_tokens=max_tokens,
-                )
+                try:
+                    chunk_text, _chunk_message, chunk_error_text = (
+                        await self._run_frontdoor_compression_helper_request(
+                            messages=chunk_messages,
+                            model_refs=list(model_refs or []),
+                            state=state,
+                            runtime=runtime,
+                            is_cancelled=is_cancelled,
+                            model_info=model_info,
+                            progress_text=progress,
+                            max_tokens=max_tokens,
+                        )
+                    )
+                except FrontdoorCompressionRuntimeError as exc:
+                    if not getattr(exc, "chunk_index", None):
+                        setattr(exc, "chunk_index", int(index))
+                        setattr(exc, "chunk_planned", int(planned_chunks))
+                    raise
                 if not str(chunk_text or "").strip():
-                    # 这一块耗尽重试仍没拿到摘要：停在这里，本块及其后的原始历史原样留在
-                    # 请求里，由下一跳重算。压好的前缀照常交付，不整次作废重烧。
-                    if chunk_error_text:
-                        last_error_text = chunk_error_text
+                    # all-or-nothing：任一块失败就丢弃整次压缩，不提交已成功的前缀。
+                    # 当前成员按重试耗尽处理，由发送层跳过并 fallback 下一个成员。
                     failed_chunks += 1
-                    queue = batch[offset:] + remaining
-                    interrupted = True
-                    break
+                    detail = str(chunk_error_text or "").strip() or "compression helper returned no summary"
+                    last_error_text = f"chunk {index}/{planned_chunks}: {detail}"
+                    return (
+                        "",
+                        planned_chunks,
+                        False,
+                        failed_chunks,
+                        rounds,
+                        [],
+                        0,
+                        last_error_text,
+                    )
                 summaries.append(f"[分块摘要 {index}/{planned_chunks}]\n{chunk_text}")
                 committed_group_end = end
             if interrupted or rounds >= COMPRESSION_MAX_PASS_ROUNDS:
@@ -7854,7 +7876,15 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         on_model_retry_status: Any = None,
         required_context_window_tokens: int = 0,
         max_tokens: int | None = None,
+        window_shortfall_compressor: Any = None,
+        on_window_shortfall_compressed: Any = None,
+        initial_tried_model_refs: list[str] | None = None,
     ) -> dict[str, Any]:
+        # 压缩 helper 自己也会走这里：递归守卫必须在唯一入口生效，否则压缩请求会被
+        # send-layer 再压一次（无限递归）。前门压缩闭包在调用 helper 前置位。
+        compression_helper_in_progress = bool(
+            getattr(self, "_frontdoor_compression_in_progress", False)
+        )
         response = await self._resolve_chat_backend().chat(
             messages=[dict(item) for item in list(messages or []) if isinstance(item, dict)],
             tools=list(tool_schemas or []) or None,
@@ -7867,8 +7897,134 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             on_model_retry_status=on_model_retry_status,
             required_context_window_tokens=int(required_context_window_tokens or 0),
             max_tokens=max_tokens,
+            window_shortfall_compressor=(
+                None if compression_helper_in_progress else window_shortfall_compressor
+            ),
+            on_window_shortfall_compressed=(
+                None if compression_helper_in_progress else on_window_shortfall_compressed
+            ),
+            initial_tried_model_refs=(
+                None if compression_helper_in_progress else initial_tried_model_refs
+            ),
         )
         return self._model_response_payload_dict(response)
+
+    def _build_frontdoor_window_shortfall_compressor(
+        self,
+        *,
+        state: CeoGraphState,
+        runtime: CeoRuntime,
+        tool_schemas: list[dict[str, Any]],
+    ) -> Any:
+        """send-layer 的当前成员压缩入口：按这颗成员的声明窗口重跑同一条压缩管线。
+
+        失败返回带 `failure` 的 dict（provider/compression 由发送层跳过并 fallback；
+        system/capacity 由发送层停止）。压缩 helper 自己也会走 `_call_model_with_tools`，
+        期间用 `_frontdoor_compression_in_progress` 关掉短压，避免递归。
+        """
+
+        async def _compress(
+            messages: list[dict[str, Any]],
+            target_window_tokens: int,
+            model_ref: str,
+            candidate_refs: tuple[str, ...] = (),
+        ) -> dict[str, Any] | None:
+            del candidate_refs
+            target = int(target_window_tokens or 0)
+            member = str(model_ref or "").strip()
+            if target <= 0 or not member:
+                return {
+                    "failure": {
+                        "kind": "invalid_target",
+                        "detail": f"target={target} member={member}",
+                        "model_ref": member,
+                    }
+                }
+            self._frontdoor_compression_in_progress = True
+            try:
+                result = await self._run_frontdoor_llm_token_compression(
+                    state=state,
+                    runtime=runtime,
+                    request_messages=[
+                        dict(item)
+                        for item in list(messages or [])
+                        if isinstance(item, dict)
+                    ],
+                    model_refs=[member],
+                    tool_schemas=list(tool_schemas or []),
+                    compression_source="window_shortfall",
+                )
+            except FrontdoorCompressionRuntimeError as exc:
+                kind = (
+                    "provider"
+                    if str(getattr(exc, "code", "") or "")
+                    == "frontdoor_compression_provider_rejected"
+                    else "system"
+                )
+                return {
+                    "failure": {
+                        "kind": kind,
+                        "detail": str(exc),
+                        "model_ref": member,
+                        "chunk_index": int(getattr(exc, "chunk_index", 0) or 0),
+                        "chunk_planned": int(getattr(exc, "chunk_planned", 0) or 0),
+                    }
+                }
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if exc.__class__.__name__ in {"TaskPausedError", "NodePausedError"}:
+                    raise
+                return {
+                    "failure": {
+                        "kind": "system",
+                        "detail": str(exc or exc.__class__.__name__),
+                        "model_ref": member,
+                    }
+                }
+            finally:
+                self._frontdoor_compression_in_progress = False
+            if (
+                str(result.history_shrink_reason or "").strip() == "token_compression"
+                and list(result.request_messages or [])
+            ):
+                diagnostics = dict(result.diagnostics or {})
+                return {
+                    "messages": [
+                        dict(item)
+                        for item in list(result.request_messages or [])
+                        if isinstance(item, dict)
+                    ],
+                    "estimated_tokens": int(result.final_request_tokens or 0),
+                    "compression_mode": str(
+                        diagnostics.get("mode")
+                        or diagnostics.get("compression_mode")
+                        or "llm"
+                    ),
+                    "chunk_count": int(diagnostics.get("chunk_count") or 1),
+                    "chunk_failed_count": int(diagnostics.get("chunk_failed_count") or 0),
+                }
+            diagnostics = dict(result.diagnostics or {})
+            failed_indexes = [
+                int(item or 0)
+                for item in list(diagnostics.get("chunk_failed_indexes") or [])
+            ]
+            return {
+                "failure": {
+                    "kind": str(diagnostics.get("failure_kind") or "compression"),
+                    "detail": str(
+                        diagnostics.get("compression_provider_error")
+                        or diagnostics.get("compression_pass_failed")
+                        or diagnostics.get("reason")
+                        or ""
+                    ),
+                    "model_ref": member,
+                    "chunk_index": int(failed_indexes[0] if failed_indexes else 0),
+                    "chunk_planned": int(diagnostics.get("chunk_count") or 0),
+                }
+            }
+
+        return _compress
 
     async def _graph_prepare_turn(
         self,
@@ -8755,6 +8911,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 "image_estimation_method": str(preflight_snapshot.get("image_estimation_method") or ""),
             }
             preflight_shrink_reason = ""
+            failure_kind = ""
+            preflight_skip_model_refs: list[str] = []
             should_attempt_token_compression = bool(
                 preflight_snapshot.get("would_trigger_token_compression")
                 or preflight_snapshot.get("would_exceed_context_window")
@@ -8764,13 +8922,45 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 if runtime_session is not None:
                     setattr(runtime_session, "_frontdoor_pending_shrink_reason", "token_compression")
                 pre_compaction_diagnostics = dict(preflight_diagnostics)
-                preflight = await self._run_frontdoor_llm_token_compression(
-                    state=state_for_request,
-                    runtime=runtime,
-                    request_messages=request_messages,
-                    model_refs=list(state_for_request.get("model_refs") or []),
-                    tool_schemas=actual_tool_schemas,
-                )
+                try:
+                    preflight = await self._run_frontdoor_llm_token_compression(
+                        state=state_for_request,
+                        runtime=runtime,
+                        request_messages=request_messages,
+                        model_refs=list(state_for_request.get("model_refs") or []),
+                        tool_schemas=actual_tool_schemas,
+                    )
+                except FrontdoorCompressionRuntimeError as exc:
+                    if str(getattr(exc, "code", "") or "") != "frontdoor_compression_provider_rejected":
+                        raise
+                    head_ref = str(
+                        (list(state_for_request.get("model_refs") or []) or [""])[0] or ""
+                    ).strip()
+                    logger.warning(
+                        "frontdoor token compression failed; skipping current member for this "
+                        "request: model={} chunk={}/{} detail={}",
+                        head_ref,
+                        int(getattr(exc, "chunk_index", 0) or 0),
+                        int(getattr(exc, "chunk_planned", 0) or 0),
+                        str(exc)[:300],
+                    )
+                    preflight = FrontdoorTokenPreflightResult(
+                        request_messages=list(request_messages),
+                        final_request_tokens=int(
+                            preflight_diagnostics.get("estimated_total_tokens") or 0
+                        ),
+                        history_shrink_reason="",
+                        diagnostics={
+                            "applied": False,
+                            "failure_kind": "provider",
+                            "compression_pass_failed": str(exc),
+                            "compression_provider_error": str(exc),
+                            "chunk_index": int(getattr(exc, "chunk_index", 0) or 0),
+                            "chunk_count": int(getattr(exc, "chunk_planned", 0) or 0),
+                        },
+                    )
+                    if head_ref:
+                        preflight_skip_model_refs = [head_ref]
                 request_messages = list(preflight.request_messages)
                 # 压缩把整份正文重写了，一次性提示会随之离开上下文。那一跳可复用前缀反正
                 # 已经断在这里，把仍可读的名字带到压缩产物之后不额外付缓存；读不到的名字
@@ -8885,6 +9075,28 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     **dict(preflight.diagnostics or {}),
                 }
                 preflight_shrink_reason = str(preflight.history_shrink_reason or "").strip()
+                failure_kind = str(
+                    dict(preflight.diagnostics or {}).get("failure_kind") or ""
+                ).strip()
+                if not preflight_shrink_reason and failure_kind in {"provider", "compression"}:
+                    head_ref = str(
+                        (list(state_for_request.get("model_refs") or []) or [""])[0] or ""
+                    ).strip()
+                    logger.warning(
+                        "frontdoor token compression produced no usable result; skipping current "
+                        "member for this request: model={} kind={} chunk={}/{} detail={}",
+                        head_ref,
+                        failure_kind,
+                        int(dict(preflight.diagnostics or {}).get("chunk_index") or 0),
+                        int(dict(preflight.diagnostics or {}).get("chunk_count") or 0),
+                        str(
+                            dict(preflight.diagnostics or {}).get("compression_provider_error")
+                            or dict(preflight.diagnostics or {}).get("compression_pass_failed")
+                            or ""
+                        )[:300],
+                    )
+                    if head_ref:
+                        preflight_skip_model_refs = [head_ref]
                 if preflight_shrink_reason == "token_compression":
                     # 记录“本轮真实发生内联 token 压缩”，供轮末记忆复核冲刷判定；
                     # 与跨轮残留的 frontdoor_history_shrink_reason 是两个概念。
@@ -8975,7 +9187,20 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         state_for_request = compression_state
                 if runtime_session is not None and preflight_shrink_reason:
                     setattr(runtime_session, "_frontdoor_pending_shrink_reason", "")
-                if int(preflight_diagnostics.get("final_request_tokens") or preflight.final_request_tokens or 0) > context_window_tokens:
+                if preflight_skip_model_refs:
+                    # provider/compression 失败：当前成员按重试耗尽处理，交给 send-layer
+                    # 从下一个成员开始；不再用"原请求继续"或整跳超窗错误兜底。
+                    pass
+                elif failure_kind in {"capacity", "system"}:
+                    raise self._frontdoor_context_window_exceeded_error(
+                        model_info=model_info,
+                        detail=str(
+                            preflight_diagnostics.get("compression_pass_failed")
+                            or preflight_diagnostics.get("compression_provider_error")
+                            or "token compression refused"
+                        ).strip(),
+                    )
+                elif int(preflight_diagnostics.get("final_request_tokens") or 0) > context_window_tokens:
                     raise self._frontdoor_context_window_exceeded_error(
                         model_info=model_info,
                         # 区分三种"超窗"：压了还超、压缩没拿到摘要、压缩被 provider 拒。
@@ -9003,6 +9228,50 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     tool_schemas=actual_tool_schemas,
                 ),
             }
+            shortfall_compressed_this_hop = False
+
+            def _on_frontdoor_shortfall_compressed(payload: dict[str, Any]) -> None:
+                nonlocal request_messages, durable_request_messages
+                nonlocal shortfall_compressed_this_hop
+                compressed_messages = [
+                    dict(item)
+                    for item in list(payload.get("messages") or [])
+                    if isinstance(item, dict)
+                ]
+                if not compressed_messages:
+                    return
+                request_messages = compressed_messages
+                durable_request_messages = strip_multimodal_blocks_from_message_records(
+                    compressed_messages
+                )
+                shortfall_compressed_this_hop = True
+                if runtime_session is not None:
+                    setattr(runtime_session, "_frontdoor_token_compression_applied_turn", True)
+                    setattr(runtime_session, PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR, True)
+                state_for_request["frontdoor_live_request_messages"] = list(compressed_messages)
+                state_for_request["frontdoor_history_shrink_reason"] = "token_compression"
+                diagnostics = dict(
+                    state_for_request.get("frontdoor_token_preflight_diagnostics")
+                    or preflight_diagnostics
+                    or {}
+                )
+                diagnostics["window_shortfall_compaction"] = {
+                    "applied": True,
+                    "model_ref": str(payload.get("model_ref") or ""),
+                    "target_window_tokens": int(payload.get("target_window_tokens") or 0),
+                    "estimated_tokens": int(payload.get("estimated_tokens") or 0),
+                    "required_before": int(payload.get("required_before") or 0),
+                    "compression_mode": str(payload.get("compression_mode") or ""),
+                    "chunk_count": int(payload.get("chunk_count") or 0),
+                    "chunk_failed_count": int(payload.get("chunk_failed_count") or 0),
+                }
+                state_for_request["frontdoor_token_preflight_diagnostics"] = diagnostics
+
+            frontdoor_shortfall_compressor = self._build_frontdoor_window_shortfall_compressor(
+                state=state_for_request,
+                runtime=runtime,
+                tool_schemas=actual_tool_schemas,
+            )
             provider_retry_count = 0
             empty_response_retry_count = 0
             restart_with_refreshed_runtime = False
@@ -9024,6 +9293,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         # 前门没有回合准入，链上"塞不下这一发"的成员过去照样会被发到；
                         # 这里把预检算出来的本轮体量交给发送层做同一判据。
                         required_context_window_tokens=int(preflight_diagnostics.get("estimated_total_tokens") or 0),
+                        # 链前进到预检没预测到的更窄成员时，按那颗的声明窗口现压一次；
+                        # 压缩失败由发送层跳过该成员并 fallback 下一个。
+                        window_shortfall_compressor=frontdoor_shortfall_compressor,
+                        on_window_shortfall_compressed=_on_frontdoor_shortfall_compressed,
+                        initial_tried_model_refs=(
+                            list(preflight_skip_model_refs) or None
+                        ),
                     )
                     # 这一跳的模型流到这里就结束了，后面是工具执行。思考段必须在这儿收口，
                     # 否则表要一直走到下一次 attempt 起点（或回合收尾）才停，工具跑多久
@@ -9095,6 +9371,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             usage=self._model_response_usage(message),
             provider_request_started_at=provider_request_started_at,
         )
+        if shortfall_compressed_this_hop:
+            # 压缩后的正文是新的前缀：让下一跳按新 body 重算 cache key，不沿用旧正文
+            # 的命名空间。本跳 artifact 已按实际发送的 key 落盘。
+            prompt_cache_key = ""
         message_state_update = (
             self._replace_messages_update(
                 list(self._strip_frontdoor_turn_only_artifacts(durable_request_messages))

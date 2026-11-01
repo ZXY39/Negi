@@ -342,13 +342,12 @@ async def test_frontdoor_overflow_defers_the_tail_and_keeps_it_in_the_request(
 
 
 @pytest.mark.asyncio
-async def test_frontdoor_failed_chunk_ships_the_committed_prefix_only(
+async def test_frontdoor_failed_chunk_discards_all_summaries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """第 3 块没拿到摘要：前 2 块照常交付，第 3 块及其后的原文留在请求里。
+    """第 3 块没拿到摘要：all-or-nothing，前 2 块摘要也不交付，原请求体整体保留。
 
-    旧行为有两处不对：在摘要里插一行"本块原文未被摘要替代"却把原文删掉（等于谎报），
-    以及任何一块失败都整次作废、下一跳把已压好的块重烧一遍。
+    失败块号与 provider 原话回给调用方；发送层按当前成员压缩失败跳过并 fallback。
     """
     runner = _build_runner(monkeypatch, context_window_tokens=4_000)
     captured: list[list[dict[str, object]]] = []
@@ -396,16 +395,16 @@ async def test_frontdoor_failed_chunk_ships_the_committed_prefix_only(
     )
 
     diagnostics = result.diagnostics
-    assert diagnostics.get("applied") is True, diagnostics
+    assert diagnostics.get("applied") is False, diagnostics
+    assert diagnostics.get("failure_kind") == "compression"
     assert int(diagnostics.get("chunk_count") or 0) == 8
     assert int(diagnostics.get("chunk_failed_count") or 0) == 1
-    assert int(diagnostics.get("deferred_message_count") or 0) == 6
-    contents = [str(item.get("content") or "") for item in result.request_messages]
-    summary_block = contents[1]
-    assert "[分块摘要 1/8]" in summary_block and "[分块摘要 2/8]" in summary_block
-    assert "3/8" not in summary_block, f"停下的那块不许留缺口行：{summary_block}"
-    assert "未取得摘要，本块原文未被摘要替代" not in summary_block
-    assert "h2" in contents and "h7" in contents, f"未压中的原文必须在场：{contents}"
+    assert int(diagnostics.get("chunk_committed_count") or 0) == 0
+    assert int(diagnostics.get("deferred_message_count") or 0) == 0
+    failure_text = str(diagnostics.get("compression_pass_failed") or "")
+    assert "chunk 3/8" in failure_text
+    assert "HTTP 429" in failure_text
+    assert result.request_messages == _history_body(8), "失败时原请求体整体保留，不交付前缀摘要"
 
 
 @pytest.mark.asyncio

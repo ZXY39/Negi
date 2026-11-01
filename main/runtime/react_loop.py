@@ -1105,6 +1105,16 @@ class ReActToolLoop:
                                 required_context_window_tokens=int(
                                     (token_preflight_diagnostics or {}).get('estimated_total_tokens') or 0
                                 ),
+                                excluded_model_keys=frozenset(
+                                    str(item or '').strip()
+                                    for item in list(
+                                        (token_preflight_diagnostics or {}).get(
+                                            'preflight_skip_model_keys'
+                                        )
+                                        or []
+                                    )
+                                    if str(item or '').strip()
+                                ),
                             ),
                         ),
                     )
@@ -1213,6 +1223,15 @@ class ReActToolLoop:
                                 tool_schemas=tool_schemas,
                             ),
                             on_window_shortfall_compressed=_on_window_shortfall_compressed,
+                            initial_tried_model_refs=(
+                                list(
+                                    (token_preflight_diagnostics or {}).get(
+                                        'preflight_skip_model_keys'
+                                    )
+                                    or []
+                                )
+                                or None
+                            ),
                             # 含组的链只能按 route plan 活刷新：扁平候选列表不是 fallback 顺序。
                             model_routes_supplier=(model_routes_supplier if callable(model_routes_supplier) else None),
                             single_request_timeout_seconds=self._resolved_model_response_timeout_seconds(
@@ -6202,6 +6221,26 @@ class ReActToolLoop:
         )
 
     @staticmethod
+    def _compression_skip_observations(info: dict[str, Any]) -> list[str]:
+        """终态正文里的压缩失败成员：成员 + 原因 + 失败块号 + provider 原话（有界）。"""
+        parts: list[str] = []
+        for item in list((info or {}).get("window_skip_reasons") or []):
+            if not isinstance(item, dict):
+                continue
+            model_ref = str(item.get("model_ref") or "?")
+            kind = str(item.get("reason_kind") or "compression_failed")
+            chunk_index = int(item.get("chunk_index") or 0)
+            chunk = (
+                f" chunk {chunk_index}/{int(item.get('chunk_planned') or 0)}"
+                if chunk_index > 0
+                else ""
+            )
+            detail = str(item.get("detail") or "").strip()
+            detail_text = f": {detail[:160]}" if detail else ""
+            parts.append(f"{model_ref}:{kind}{chunk}{detail_text}")
+        return [f"压缩失败成员={'; '.join(parts)}"] if parts else []
+
+    @staticmethod
     def _token_preflight_failure(*, reason: str, diagnostics: dict[str, Any] | None = None) -> NodeFinalResult:
         """发送前预检拒发：运行时机械拒绝，不是模型的自愿阻塞声明。
 
@@ -6215,6 +6254,7 @@ class ReActToolLoop:
         observed = [
             f'预估={int(info.get("estimated_total_tokens") or info.get("final_estimate_tokens") or 0)}',
             f'本轮发送窗口={int(info.get("context_window_tokens") or 0)}',
+            *ReActToolLoop._compression_skip_observations(info),
         ]
         # 标记与观测值都写进 blocking_reason：错误行正文取 failure_text
         # （= blocking_reason 优先），心跳归类读的就是这一份。
@@ -6246,6 +6286,7 @@ class ReActToolLoop:
             f'预估={int(info.get("estimated_total_tokens") or info.get("final_estimate_tokens") or 0)}',
             f'请求要求窗口={int(getattr(exc, "required_window_tokens", 0) or 0)}',
             f'链上候选最大窗口={int(getattr(exc, "largest_candidate_window_tokens", 0) or 0)}',
+            *ReActToolLoop._compression_skip_observations(info),
         ]
         return NodeFinalResult(
             status='failed',
@@ -6672,7 +6713,8 @@ class ReActToolLoop:
         预检那把尺子取的是**这一跳预测落到的组**；链在 429 之后前进到更窄的一档时，
         预检已经过去，体量不会再自己变小。这里让发送层在真正跳过候选之前回调一次：
         用候选窗口当容量重跑同一条分片压缩管线，压完再交回发送层重绑。
-        没有可压历史、压缩 helper 失败或压完仍超窗时返回 None，发送层保留原有兜底。
+        失败时返回带 `failure` 的 dict（含 chunk 号/provider 原话），发送层按当前成员
+        压缩失败跳过并 fallback 下一个；不再保留“跳过/强发”的旧兜底。
         """
 
         async def _compress(
@@ -6683,14 +6725,26 @@ class ReActToolLoop:
         ) -> dict[str, Any] | None:
             target_window = max(0, int(target_window_tokens or 0))
             if target_window <= 0:
-                return None
+                return {
+                    "failure": {
+                        "kind": "invalid_target",
+                        "detail": f"target_window={target_window}",
+                        "model_ref": str(model_ref or ""),
+                    }
+                }
             helper_refs = [
                 str(item or "").strip()
                 for item in list(candidate_refs or ())
                 if str(item or "").strip()
             ] or ([str(model_ref or "").strip()] if str(model_ref or "").strip() else [])
             if not helper_refs:
-                return None
+                return {
+                    "failure": {
+                        "kind": "no_compressor",
+                        "detail": "no helper model ref",
+                        "model_ref": str(model_ref or ""),
+                    }
+                }
             try:
                 compressed_text, helper_call = await self._request_node_token_compression_summary(
                     task_id=task_id,
@@ -6713,20 +6767,44 @@ class ReActToolLoop:
                     target_window,
                     str(exc or exc.__class__.__name__),
                 )
-                return None
+                return {
+                    "failure": {
+                        "kind": "system",
+                        "detail": str(exc or exc.__class__.__name__),
+                        "model_ref": str(model_ref or ""),
+                    }
+                }
             if not str(compressed_text or '').strip():
+                failed_indexes = [
+                    int(item or 0)
+                    for item in list(helper_call.get('chunk_failed_indexes') or [])
+                ]
+                failure_kind = str(helper_call.get('failure_kind') or 'compression').strip()
+                detail = str(
+                    helper_call.get('chunk_refused_reason')
+                    or helper_call.get('chunk_error_text')
+                    or 'node compression produced no summary'
+                ).strip()
                 logger.warning(
                     'node window shortfall compression produced no summary: task={} node={} '
-                    'target_window={} mode={} chunks={} failed_chunks={} reason={}',
+                    'target_window={} mode={} chunks={} failed_chunks={} detail={}',
                     task_id,
                     node_id,
                     target_window,
                     str(helper_call.get('compression_mode') or ''),
                     int(helper_call.get('chunk_count') or 0),
                     int(helper_call.get('chunk_failed_count') or 0),
-                    str(helper_call.get('chunk_refused_reason') or helper_call.get('chunk_error_text') or ''),
+                    detail[:300],
                 )
-                return None
+                return {
+                    "failure": {
+                        "kind": failure_kind,
+                        "detail": detail,
+                        "model_ref": str(model_ref or ""),
+                        "chunk_index": int(failed_indexes[0] if failed_indexes else 0),
+                        "chunk_planned": int(helper_call.get('chunk_count') or 0),
+                    }
+                }
             rewritten, compact_payload = self._rewrite_request_messages_for_token_compaction(
                 node_id=node_id,
                 request_messages=messages,
@@ -6734,7 +6812,13 @@ class ReActToolLoop:
                 preserved_raw_messages=list(helper_call.get('deferred_raw_messages') or []),
             )
             if not rewritten:
-                return None
+                return {
+                    "failure": {
+                        "kind": "compression_failed",
+                        "detail": "rewrite produced no messages",
+                        "model_ref": str(model_ref or ""),
+                    }
+                }
             estimated_tokens = int(
                 runtime_send_token_preflight.estimate_runtime_provider_request_preview_tokens(
                     provider_request_body=None,
@@ -6744,7 +6828,13 @@ class ReActToolLoop:
                 or 0
             )
             if estimated_tokens <= 0:
-                return None
+                return {
+                    "failure": {
+                        "kind": "compression_failed",
+                        "detail": "rewritten messages estimated 0 tokens",
+                        "model_ref": str(model_ref or ""),
+                    }
+                }
             logger.warning(
                 'node window shortfall compression finished: task={} node={} target_window={} '
                 'estimated_tokens={} fits={} mode={} chunks={} failed_chunks={} helper_refs={}',
@@ -6809,6 +6899,7 @@ class ReActToolLoop:
             "merge_pass_applied": False,
         }
         if not older_history_messages:
+            helper_payload["failure_kind"] = "no_history"
             return "", helper_payload
         task_goal = self._node_token_compression_task_goal(
             task_id=task_id,
@@ -6860,6 +6951,7 @@ class ReActToolLoop:
             # 窗口连一块压缩请求的信封都装不下：这一 pass 一次都不发，交回拒因由调用方
             # 按压缩失败处理（可恢复暂停 + 心跳点名）。
             helper_payload["chunk_refused_reason"] = str(compression_pass.refusal.reason or "")
+            helper_payload["failure_kind"] = "capacity"
             return "", helper_payload
         if compression_pass.mode == COMPRESSION_MODE_CHUNKED:
             helper_payload["compression_mode"] = "llm_chunked"
@@ -6890,9 +6982,11 @@ class ReActToolLoop:
             helper_payload["deferred_message_count"] = len(list(deferred_messages or []))
             if str(chunk_error_text or '').strip():
                 helper_payload["chunk_error_text"] = str(chunk_error_text or '').strip()
+                helper_payload["failure_kind"] = "provider"
             if not str(compressed_text or '').strip():
-                # 连第一段前缀都没压出来：产物只剩缺口，不能当压缩结果发出去。
-                # 交回空串，由调用方按压缩失败拒发（可恢复暂停）。
+                # all-or-nothing：任一块失败就没有产物，不提交前缀。调用方按当前成员
+                # 压缩失败跳过并 fallback；provider 原话与失败块号留在 payload 里。
+                helper_payload.setdefault("failure_kind", "compression")
                 return "", helper_payload
             # 没压中的原始历史跟着摘要一起交回：调用方重写请求体时把它们留在摘要块之后，
             # 否则"压缩成功"等于把这几组内容静默删掉。
@@ -6909,6 +7003,9 @@ class ReActToolLoop:
             compressed_text = ""
             # provider 原话要能追到：限流与"模型真的回空包"是两种处置，别都写成空摘要。
             helper_payload["helper_error_text"] = helper_error_text
+            helper_payload["failure_kind"] = "provider"
+        elif not compressed_text:
+            helper_payload["failure_kind"] = "compression"
         raw_usage = getattr(response, 'usage', None)
         if isinstance(raw_usage, dict):
             helper_payload["helper_usage"] = dict(raw_usage)
@@ -7022,12 +7119,11 @@ class ReActToolLoop:
         model_refs: list[str],
         max_tokens: int | None = None,
     ) -> tuple[str, int, bool, list[int], str, int, list[dict[str, Any]], int]:
-        """执行规划器给出的块，提交最长成功前缀，其余原始历史留在本跳请求里。
+        """执行规划器给出的块；all-or-nothing：任一块失败就丢弃整次压缩。
 
         容量、块数、溢出块都由 `plan_compression_pass` 在这一跳之前算好（与前门车道同
-        一个规划器），这里只负责执行。一块没拿到摘要就停在这儿：压好的前缀照常交付，
-        这一块及其之后的原始历史整体保留，由下一跳按那时的窗口重算——比整次作废重烧所
-        有块省，也比在摘要里插一行"本块未取得"却把原文删掉诚实。
+        一个规划器），这里只负责执行。一块没拿到摘要（重试耗尽/空摘要）就立即返回空产物，
+        不提交已成功的摘要前缀；调用方按"当前成员压缩失败"跳过该成员并 fallback 下一个。
         返回 (合并摘要, 计划块数, 是否归并, 未取得摘要的块号, 最后一次 provider 错误原文, 实跑轮数, 留在请求里的原始历史)。"""
         capacity = int(compression_pass.capacity_tokens or 0)
         planned_chunks = max(1, int(compression_pass.planned_chunks or 0))
@@ -7078,12 +7174,21 @@ class ReActToolLoop:
                 chunk_error_text = str(getattr(response, 'error_text', None) or '').strip()
                 chunk_text = "" if chunk_error_text else str(getattr(response, 'content', '') or '').strip()
                 if not chunk_text:
+                    # all-or-nothing：任一块失败就丢弃整次压缩，不提交已成功的前缀。
+                    # 当前成员按重试耗尽处理，由发送层跳过并 fallback 下一个成员。
                     failed_indexes.append(index)
-                    if chunk_error_text:
-                        last_error_text = chunk_error_text
-                    queue = batch[offset:] + remaining
-                    interrupted = True
-                    break
+                    detail = str(chunk_error_text or '').strip() or 'compression helper returned no summary'
+                    last_error_text = f'chunk {index}/{planned_chunks}: {detail}'
+                    return (
+                        '',
+                        planned_chunks,
+                        False,
+                        failed_indexes,
+                        last_error_text,
+                        rounds,
+                        [],
+                        0,
+                    )
                 summaries.append(f"[分块摘要 {index}/{planned_chunks}]\n{chunk_text}")
                 committed_group_end = end
             if interrupted or rounds >= COMPRESSION_MAX_PASS_ROUNDS:
@@ -7716,8 +7821,53 @@ class ReActToolLoop:
                         "token compression helper call failed: "
                         f"{str(exc or exc.__class__.__name__).strip() or exc.__class__.__name__}"
                     )
+                failure_kind = str(compression_helper_call.get('failure_kind') or '').strip()
                 if not compression_failure and not str(compressed_text or '').strip():
                     if int(compression_helper_call.get('history_message_count') or 0) > 0:
+                        if failure_kind in {"provider", "compression"}:
+                            # 当前成员压缩失败：不在这里暂停。记录失败成员，run loop 把它
+                            # 加入本请求的准入排除集，按模型链 fallback 下一个成员；原请求体
+                            # 保留（下一个成员按自己的声明窗口再决定直发/再压）。
+                            skip_model_ref = str(
+                                (hop_ruler or {}).get('model_key')
+                                or (normalized_model_refs[0] if normalized_model_refs else '')
+                            ).strip()
+                            failed_indexes = [
+                                int(item or 0)
+                                for item in list(compression_helper_call.get('chunk_failed_indexes') or [])
+                            ]
+                            skip_reason = {
+                                "model_ref": skip_model_ref,
+                                "reason_kind": failure_kind,
+                                "detail": str(
+                                    compression_helper_call.get('chunk_error_text')
+                                    or compression_helper_call.get('helper_error_text')
+                                    or ''
+                                ).strip(),
+                                "chunk_index": int(failed_indexes[0] if failed_indexes else 0),
+                                "chunk_planned": int(compression_helper_call.get('chunk_count') or 0),
+                                "required_window_tokens": int(final_estimate_tokens or 0),
+                                "declared_window_tokens": int(context_window_tokens or 0),
+                            }
+                            logger.warning(
+                                "Node token compression failed; skipping predicted member for this "
+                                "request: task={} node={} model={} kind={} chunk={}/{} detail={}",
+                                task_id,
+                                node_id,
+                                skip_model_ref,
+                                failure_kind,
+                                int(skip_reason["chunk_index"]),
+                                int(skip_reason["chunk_planned"]),
+                                str(skip_reason["detail"] or "")[:300],
+                            )
+                            token_preflight_diagnostics.setdefault('window_skip_reasons', []).append(
+                                skip_reason
+                            )
+                            if skip_model_ref:
+                                token_preflight_diagnostics.setdefault(
+                                    'preflight_skip_model_keys', []
+                                ).append(skip_model_ref)
+                            return (request_messages, token_preflight_diagnostics, '', '')
                         compression_failure = self._compression_failure_reason(compression_helper_call)
                 # 压缩读数在失败时也要留下：拒发那跳本来就没有模型跳次可查，
                 # 而 chunk_count / 失败块号是判读"分块没跑起来"还是"跑起来但没产物"的唯一线索。

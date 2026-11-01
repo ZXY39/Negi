@@ -6,7 +6,8 @@
 
 1. direct 链：塞不下的候选先回调压缩器，压完仍用这颗发；
 2. 负载均衡组：整组被窗口筛空时，按组内最宽可用成员窗口压一次再重绑；
-3. 没有压缩器或压缩失败：保留原来的"留到最后兜底"语义，不新增失败面。
+3. 没有压缩器或压缩失败：跳过该成员、fallback 下一个；全链不可用时报
+   `NoModelFitsWindow`（required/widest/每成员原因），不再强发最宽一颗。
 """
 
 from __future__ import annotations
@@ -134,7 +135,7 @@ async def test_direct_model_over_window_is_compressed_then_sent(monkeypatch) -> 
 
 
 @pytest.mark.asyncio
-async def test_direct_model_compression_failure_keeps_legacy_fallback(monkeypatch) -> None:
+async def test_direct_model_compression_failure_skips_member_and_reports_no_model(monkeypatch) -> None:
     _patch(monkeypatch, {"m_small": 100})
 
     async def _compress(messages, target_window_tokens, model_ref, candidate_refs=()):
@@ -149,9 +150,102 @@ async def test_direct_model_compression_failure_keeps_legacy_fallback(monkeypatc
         window_shortfall_compressor=_compress,
     )
 
+    assert response.finish_reason == "error"
+    assert response.error_kind == "NoModelFitsWindow"
+    assert "required=200" in (response.error_text or "")
+    assert "widest_declared=100" in (response.error_text or "")
+    assert "m_small:declared=100:compression_failed" in (response.error_text or "")
+    assert [item[0] for item in CALLS] == [], "压缩失败的成员不允许再直发原请求"
+
+
+@pytest.mark.asyncio
+async def test_direct_model_compression_failure_falls_back_to_next_member(monkeypatch) -> None:
+    _patch(monkeypatch, {"m_small": 100, "m_big": 300})
+
+    async def _compress(messages, target_window_tokens, model_ref, candidate_refs=()):
+        _ = messages, target_window_tokens, model_ref, candidate_refs
+        return None
+
+    response = await _backend().chat(
+        messages=[{"role": "user", "content": "original"}],
+        tools=None,
+        model_refs=["m_small", "m_big"],
+        required_context_window_tokens=200,
+        window_shortfall_compressor=_compress,
+    )
+
     assert response.content == "ok"
-    assert [item[0] for item in CALLS] == ["m_small"]
+    assert [item[0] for item in CALLS] == ["m_big"]
     assert CALLS[0][1] == [{"role": "user", "content": "original"}]
+
+
+@pytest.mark.asyncio
+async def test_direct_model_compression_failure_dict_reports_chunk_in_terminal(monkeypatch) -> None:
+    _patch(monkeypatch, {"m_small": 100})
+
+    async def _compress(messages, target_window_tokens, model_ref, candidate_refs=()):
+        _ = messages, target_window_tokens, model_ref, candidate_refs
+        return {
+            "failure": {
+                "kind": "provider",
+                "detail": "chunk 2/3: HTTP 429: token plan entitlement exhausted",
+                "model_ref": "m_small",
+                "chunk_index": 2,
+                "chunk_planned": 3,
+            }
+        }
+
+    response = await _backend().chat(
+        messages=[{"role": "user", "content": "original"}],
+        tools=None,
+        model_refs=["m_small"],
+        required_context_window_tokens=200,
+        window_shortfall_compressor=_compress,
+    )
+
+    assert response.finish_reason == "error"
+    text = response.error_text or ""
+    assert "m_small:declared=100:provider:chunk 2/3" in text
+    assert "HTTP 429" in text
+    assert [item[0] for item in CALLS] == []
+
+
+@pytest.mark.asyncio
+async def test_direct_model_compression_system_failure_raises(monkeypatch) -> None:
+    _patch(monkeypatch, {"m_small": 100})
+
+    async def _compress(messages, target_window_tokens, model_ref, candidate_refs=()):
+        _ = messages, target_window_tokens, model_ref, candidate_refs
+        return {"failure": {"kind": "system", "detail": "boom", "model_ref": "m_small"}}
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await _backend().chat(
+            messages=[{"role": "user", "content": "original"}],
+            tools=None,
+            model_refs=["m_small"],
+            required_context_window_tokens=200,
+            window_shortfall_compressor=_compress,
+        )
+    assert [item[0] for item in CALLS] == []
+
+
+@pytest.mark.asyncio
+async def test_direct_model_compression_capacity_failure_raises(monkeypatch) -> None:
+    _patch(monkeypatch, {"m_small": 100})
+
+    async def _compress(messages, target_window_tokens, model_ref, candidate_refs=()):
+        _ = messages, target_window_tokens, model_ref, candidate_refs
+        return {"failure": {"kind": "capacity", "detail": "capacity_non_positive", "model_ref": "m_small"}}
+
+    with pytest.raises(RuntimeError, match="capacity_non_positive"):
+        await _backend().chat(
+            messages=[{"role": "user", "content": "original"}],
+            tools=None,
+            model_refs=["m_small"],
+            required_context_window_tokens=200,
+            window_shortfall_compressor=_compress,
+        )
+    assert [item[0] for item in CALLS] == []
 
 
 class _FakeController:

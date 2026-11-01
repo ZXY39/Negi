@@ -94,6 +94,7 @@ class ChatBackend(Protocol):
         required_context_window_tokens: int = 0,
         window_shortfall_compressor: Any = None,
         on_window_shortfall_compressed: Any = None,
+        initial_tried_model_refs: list[str] | None = None,
     ) -> LLMResponse: ...
 
 
@@ -1191,13 +1192,14 @@ class ConfigChatBackend:
         required_context_window_tokens: int = 0,
         window_shortfall_compressor: Any = None,
         on_window_shortfall_compressed: Any = None,
+        initial_tried_model_refs: list[str] | None = None,
     ) -> LLMResponse:
         refs = [str(item or '').strip() for item in list(model_refs or []) if str(item or '').strip()]
         if not refs:
             raise ValueError('model_refs must not be empty')
         # 本轮请求体需要的窗口下限（压缩/预检之后的真实体量）。>0 时声明窗口塞不下的
-        # 候选不会首发；有压缩器时先按候选窗口补压再发，没有时留到最后兜底。默认 0 =
-        # 不判，helper/评审等没有体量读数的车道保持原行为。
+        # 候选先按自己的窗口补压；压不下来或没有压缩器就跳过该成员、前进到下一个。
+        # 默认 0 = 不判，helper/评审等没有体量读数的车道保持原行为。
         required_window = max(0, int(required_context_window_tokens or 0))
         # route plan 里出现负载均衡组时，模型序列由 balancer 的绑定驱动；纯 direct 链
         # 沿用现有 refs 走位，行为与改造前一致。
@@ -1307,19 +1309,55 @@ class ConfigChatBackend:
         # （退避那次已带"下次重试时间"，再发一发 delay=0 会把它盖掉）。
         suppress_next_request_retry_emission = False
         # 已耗尽预算/已试过的模型 ref：模型前进边界的链刷新后据此跳过，不回头重试。
-        tried_model_refs: set[str] = set()
+        tried_model_refs: set[str] = {
+            str(item or '').strip()
+            for item in list(initial_tried_model_refs or [])
+            if str(item or '').strip()
+        }
         # 本请求在负载均衡组内已经换过几个成员：决定下一次换人前的退避档位。
         group_member_rotations = 0
         # 链变更重启次数：链在重试途中被改写时按新链重启，此计数跨重启累计，
         # 只兜底病态抖动，不随单模型轮预算重置。
         chain_restart_count = 0
-        # 声明窗口塞不下本轮请求体的候选：`(chain 下标, ref, 声明窗口)`。塞得下的成员
-        # 全部试过之后才回头用它们（最后一轮兜底），保证不会因为判据而一条都发不出去。
-        window_skipped: list[tuple[int, str, int]] = []
-        window_fallback_used = False
+        # 声明窗口塞不下本轮请求体、压缩器也没把它压下来的成员。只用于日志与终态点名；
+        # 不再有"塞得下的成员全失败后回头强发最宽一颗"的第二轮。
+        window_skipped: list[dict[str, Any]] = []
+        # 最近一次 _fit_body_to_window 失败的原因（成功时清空）。压缩器返回带 failure
+        # 的 dict 时带上 chunk 号/provider 原文；没有就落通用原因。
+        window_fit_last_failure: dict[str, Any] = {}
         # 按候选窗口压缩过的请求体：键是目标窗口。同一跳里多个成员共用一档窗口时只压一次；
-        # 压缩失败的档也记 None，避免对同一档反复烧压缩 helper。
+        # 压缩失败的档也缓存下来，避免对同一档反复烧压缩 helper。
         window_shortfall_cache: dict[int, dict[str, Any] | None] = {}
+
+        def _window_skip_summary() -> str:
+            """终态点名：required / 最宽声明 / 每个被跳过成员及其压缩失败原因。"""
+            widest_declared = max(
+                (int(item.get("declared_window_tokens") or 0) for item in window_skipped),
+                default=0,
+            )
+            required = (
+                int(window_skipped[0].get("required_window_tokens") or required_window)
+                if window_skipped
+                else int(required_window)
+            )
+            parts: list[str] = []
+            for item in window_skipped:
+                piece = (
+                    f"{str(item.get('model_ref') or '?')}:"
+                    f"declared={int(item.get('declared_window_tokens') or 0)}:"
+                    f"{str(item.get('reason_kind') or 'compression_failed')}"
+                )
+                chunk_index = int(item.get("chunk_index") or 0)
+                if chunk_index > 0:
+                    piece += f":chunk {chunk_index}/{int(item.get('chunk_planned') or 0)}"
+                detail = str(item.get("detail") or "").strip()
+                if detail:
+                    piece += f":{detail[:200]}"
+                parts.append(piece)
+            return (
+                f"required={required} widest_declared={int(widest_declared)} "
+                f"[{'; '.join(parts) if parts else '-'}]"
+            )
 
         async def _fit_body_to_window(
             *,
@@ -1330,14 +1368,25 @@ class ConfigChatBackend:
             """把请求体压到 `target_window_tokens` 以内；成功返回 True 并就地替换 `messages`。
 
             窗口不再是"拒收候选"的理由：链前进到更窄的档时，用那一档的窗口重做一次分片
-            压缩再发。压缩器由调用方（节点车道）注入；没有压缩器（前门/辅助车道）或压完
-            仍塞不下时返回 False，调用方保留原来的跳过/兜底语义。
+            压缩再发。压缩器由调用方（前门/节点）注入；没有压缩器、压完仍塞不下或压缩器
+            返回 failure 时返回 False，调用方按"当前成员失败"跳过并前进到下一个成员。
             """
-            nonlocal messages, required_window
+            nonlocal messages, required_window, window_fit_last_failure
+            window_fit_last_failure = {}
             if not callable(window_shortfall_compressor):
+                window_fit_last_failure = {
+                    "kind": "no_compressor",
+                    "detail": "window_shortfall_compressor is not callable",
+                    "model_ref": str(model_ref or ""),
+                }
                 return False
             target = max(0, int(target_window_tokens or 0))
             if target <= 0 or required_window <= 0 or target >= required_window:
+                window_fit_last_failure = {
+                    "kind": "invalid_target",
+                    "detail": f"target={target} required={int(required_window)}",
+                    "model_ref": str(model_ref or ""),
+                }
                 return False
             required_before = int(required_window)
             if target not in window_shortfall_cache:
@@ -1364,22 +1413,58 @@ class ConfigChatBackend:
                         target,
                         str(exc or exc.__class__.__name__),
                     )
-                    compressed = None
+                    # 压缩器自身没归类的异常 = 系统错误：停止，不冒充 provider fallback。
+                    raise
                 window_shortfall_cache[target] = compressed if isinstance(compressed, dict) else None
             compressed = window_shortfall_cache.get(target)
             if not isinstance(compressed, dict):
+                window_fit_last_failure = {
+                    "kind": "compression_failed",
+                    "detail": "",
+                    "model_ref": str(model_ref or ""),
+                }
+                return False
+            failure = compressed.get("failure")
+            if isinstance(failure, dict):
+                window_fit_last_failure = {
+                    **dict(failure),
+                    "model_ref": str(failure.get("model_ref") or model_ref or ""),
+                }
+                failure_kind = str(window_fit_last_failure.get("kind") or "").strip()
+                if failure_kind in {"system", "capacity"}:
+                    # 系统/配置错误：按裁决停止，不冒充 provider fallback。
+                    raise RuntimeError(
+                        f"window compression {failure_kind} for {str(model_ref or '')}: "
+                        f"{str(window_fit_last_failure.get('detail') or '')[:300]}"
+                    )
                 return False
             compressed_messages = compressed.get("messages")
             if not isinstance(compressed_messages, list) or not compressed_messages:
+                window_fit_last_failure = {
+                    "kind": "compression_failed",
+                    "detail": "compressor returned no messages",
+                    "model_ref": str(model_ref or ""),
+                }
                 return False
             try:
                 compressed_tokens = max(0, int(compressed.get("estimated_tokens") or 0))
             except (TypeError, ValueError):
+                window_fit_last_failure = {
+                    "kind": "compression_failed",
+                    "detail": "invalid estimated_tokens",
+                    "model_ref": str(model_ref or ""),
+                }
                 return False
             if compressed_tokens <= 0 or compressed_tokens > target:
+                window_fit_last_failure = {
+                    "kind": "compression_failed",
+                    "detail": f"estimated_tokens={compressed_tokens} target={target}",
+                    "model_ref": str(model_ref or ""),
+                }
                 return False
             messages = [dict(item) for item in compressed_messages if isinstance(item, dict)]
             required_window = compressed_tokens
+            window_fit_last_failure = {}
             logger.warning(
                 "Model window shortfall compressed to candidate window: model={} target_window={} "
                 "required_before={} required_after={} compression_mode={} chunks={}",
@@ -1468,27 +1553,6 @@ class ConfigChatBackend:
                 while model_index < len(refs) and refs[model_index] in tried_model_refs:
                     model_index += 1
                 if model_index >= len(refs):
-                    if window_skipped and not window_fallback_used:
-                        # 塞得下的候选都试过了：放开尺寸判据，从头再走一遍链，让被留在后面的
-                        # 成员有机会接手。宁可发出去被裁（下一跳的 `window_integrity_fault`
-                        # 会点名），也不要因为这条判据把整跳打成"链耗尽"。
-                        window_fallback_used = True
-                        widest = max(window_skipped, key=lambda item: item[2])
-                        logger.warning(
-                            "No model on the chain can hold this request body: required_window={} "
-                            "widest_declared_window={} ({}); sending to the widest slot anyway "
-                            "(provider_requests={} window_skipped_slots={})",
-                            int(required_window),
-                            int(widest[2]),
-                            widest[1],
-                            int(provider_request_count),
-                            ", ".join(f"{item[1]}={item[2]}" for item in window_skipped),
-                        )
-                        for _skipped_index, skipped_ref, _skipped_window in window_skipped:
-                            tried_model_refs.discard(str(skipped_ref))
-                        required_window = 0
-                        model_index = 0
-                        continue
                     break
                 ref = refs[model_index]
                 route_slot = _route_slot_at(route_slots, model_index)
@@ -1565,8 +1629,32 @@ class ConfigChatBackend:
                     ):
                         tried_model_refs.discard(ref)
                         continue
-                    if not any(item[1] == ref for item in window_skipped):
-                        window_skipped.append((int(model_index), str(ref), int(declared_window)))
+                    if not any(str(item.get("model_ref") or "") == ref for item in window_skipped):
+                        window_skipped.append(
+                            {
+                                "model_index": int(model_index),
+                                "model_ref": str(ref),
+                                "declared_window_tokens": int(declared_window),
+                                "required_window_tokens": int(required_window),
+                                "reason_kind": str(
+                                    window_fit_last_failure.get("kind") or "compression_failed"
+                                ),
+                                "detail": str(window_fit_last_failure.get("detail") or ""),
+                                "chunk_index": int(window_fit_last_failure.get("chunk_index") or 0),
+                                "chunk_planned": int(window_fit_last_failure.get("chunk_planned") or 0),
+                            }
+                        )
+                        logger.warning(
+                            "Model window compression failed; skipping member: model={} "
+                            "declared_window={} required_window={} reason={} chunk={}/{} detail={}",
+                            str(ref),
+                            int(declared_window),
+                            int(required_window),
+                            str(window_fit_last_failure.get("kind") or "compression_failed"),
+                            int(window_fit_last_failure.get("chunk_index") or 0),
+                            int(window_fit_last_failure.get("chunk_planned") or 0),
+                            str(window_fit_last_failure.get("detail") or "")[:300],
+                        )
                     model_index += 1
                     continue
                 configured_api_key_indexes = getattr(base_target, "api_key_indexes", None)
@@ -2002,6 +2090,10 @@ class ConfigChatBackend:
                     continue
                 # 全链（含刷新新增模型）都已耗尽：落终态。
                 if model_last_error is not None:
+                    if window_skipped:
+                        logger.warning(
+                            "Model chain exhausted with window skips: {}", _window_skip_summary()
+                        )
                     if should_fallback_model_error(model_last_error):
                         raise exhausted_model_chain_error(
                             model_last_error, retry_on=model_retry_on, model_chain=list(refs)
@@ -2009,14 +2101,56 @@ class ConfigChatBackend:
                     raise model_last_error
                 if model_last_response is not None:
                     model_last_response.attempts = list(attempts)
+                    if window_skipped:
+                        summary = _window_skip_summary()
+                        logger.warning("Model chain exhausted with window skips: {}", summary)
+                        previous_text = str(model_last_response.error_text or "").strip()
+                        model_last_response.error_text = (
+                            (previous_text + "\n" if previous_text else "")
+                            + f"window_skip: {summary}"
+                        )
                     return sanitize_terminal_model_error(model_last_response)
+                if window_skipped:
+                    summary = _window_skip_summary()
+                    logger.warning(
+                        "Model chain exhausted without a servable member: {}", summary
+                    )
+                    return LLMResponse(
+                        content="",
+                        finish_reason="error",
+                        error_text=f"no model can hold this request: {summary}",
+                        error_kind="NoModelFitsWindow",
+                    )
                 raise RuntimeError('chat backend returned no response')
             if last_error is not None:
+                if window_skipped:
+                    logger.warning(
+                        "Model chain exhausted with window skips: {}", _window_skip_summary()
+                    )
                 if should_fallback_model_error(last_error):
                     raise exhausted_model_chain_error(last_error, model_chain=list(refs)) from last_error
                 raise last_error
-            if last_response is None:
-                raise RuntimeError('chat backend returned no response')
+            if last_response is not None:
+                if window_skipped:
+                    summary = _window_skip_summary()
+                    logger.warning("Model chain exhausted with window skips: {}", summary)
+                    previous_text = str(last_response.error_text or "").strip()
+                    last_response.error_text = (
+                        (previous_text + "\n" if previous_text else "")
+                        + f"window_skip: {summary}"
+                    )
+                last_response.attempts = list(attempts)
+                return sanitize_terminal_model_error(last_response)
+            if window_skipped:
+                summary = _window_skip_summary()
+                logger.warning("Model chain exhausted without a servable member: {}", summary)
+                return LLMResponse(
+                    content="",
+                    finish_reason="error",
+                    error_text=f"no model can hold this request: {summary}",
+                    error_kind="NoModelFitsWindow",
+                )
+            raise RuntimeError('chat backend returned no response')
             last_response.attempts = list(attempts)
             return sanitize_terminal_model_error(last_response)
         finally:
