@@ -11,15 +11,21 @@ import json
 import os
 import re
 import subprocess
+import urllib.request
 from datetime import datetime
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
 _TAG_REF = re.compile(r"refs/tags/(v\d+\.\d+\.\d+)$")
 _VERSION = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
+_GITHUB_REMOTE = re.compile(r"github\.com[:/]+([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$")
 LEDGER_FILE = 'update-check.json'
 DEFAULT_INTERVAL_SECONDS = 5 * 3600.0
 REMOTE_UNREACHABLE = 'remote_unreachable'
+DEFAULT_REPO_SLUG = 'ZXY39/Negi'
+RELEASE_NOTES_TIMEOUT_SECONDS = 8.0
+RELEASE_NOTES_UNAVAILABLE = 'release_notes_unavailable'
 
 
 def parse_version(text: str) -> tuple[int, int, int] | None:
@@ -225,3 +231,200 @@ def write_apply_result(payload: dict[str, Any], path: Path | None = None) -> Non
         os.replace(tmp, target)
     except OSError:
         return
+
+
+# ---- 发布说明 ---------------------------------------------------------------
+#
+# 发布页正文由 .github/workflows/release.yml 从**附注标签的正文**生成，所以"这一版
+# 改了什么"在生产链路里只有这一份来源：检查更新只读标签名，正文要单独取。取不到
+# 正文不是错误状态 —— 升级走 git，和网页取不到说明互不影响。
+
+_RELEASE_NOTES_CACHE: dict[str, dict[str, Any]] = {}
+
+
+def parse_repo_slug(remote_url: str) -> str | None:
+    """从 origin 地址取 `owner/repo`，兼容 https / ssh / 镜像前缀。"""
+    match = _GITHUB_REMOTE.search(str(remote_url or "").strip())
+    if not match:
+        return None
+    owner, repo = match.group(1), match.group(2)
+    return f"{owner}/{repo}" if owner and repo else None
+
+
+def origin_repo_slug(project_root: Path | None = None) -> str | None:
+    popen_kwargs: dict[str, Any] = {}
+    create_no_window = getattr(subprocess, "CREATE_NO_WINDOW", None)
+    if create_no_window is not None and os.name == "nt":
+        popen_kwargs["creationflags"] = create_no_window
+    try:
+        completed = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=str(project_root or Path.cwd()),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=2.0,
+            **popen_kwargs,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    return parse_repo_slug(completed.stdout or "")
+
+
+class _ReleaseBodyParser(HTMLParser):
+    """收集 GitHub 发布页里 `.markdown-body` 那一段的文字。
+
+    HTML 兜底只在 API 被限流时用到，所以只保段落/列表/换行的形状：不还原链接地址、
+    不保留图片（正文里它们只是说明），最终按纯文本画进弹窗。
+    """
+
+    _BLOCK = {
+        "p", "div", "section", "article", "blockquote", "pre", "tr",
+        "h1", "h2", "h3", "h4", "h5", "h6", "li",
+    }
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._capturing = False
+        self._div_depth = 0
+        self._skip = 0
+        self._parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        classes = (dict(attrs).get("class") or "").split()
+        if not self._capturing:
+            if tag == "div" and "markdown-body" in classes:
+                self._capturing = True
+            return
+        if tag == "div":
+            self._div_depth += 1
+        if tag in {"script", "style", "svg"}:
+            self._skip += 1
+            return
+        if tag == "br":
+            self._parts.append("\n")
+            return
+        if tag in self._BLOCK:
+            self._parts.append("\n")
+            if tag == "li":
+                self._parts.append("- ")
+
+    def handle_endtag(self, tag: str) -> None:
+        if not self._capturing:
+            return
+        if tag in {"script", "style", "svg"}:
+            self._skip = max(0, self._skip - 1)
+        if tag in self._BLOCK:
+            self._parts.append("\n")
+        if tag == "div":
+            if self._div_depth == 0:
+                self._capturing = False
+                return
+            self._div_depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        if not self._capturing or self._skip:
+            return
+        text = data.replace("\r\n", "\n").replace("\r", "\n")
+        if not text.strip():
+            # 块级标签之间那些只用来缩进源码的换行不参与排版。
+            return
+        # `<br>` 已在流里放了换行，HTML 源码里紧跟的那个换行不能再叠一层，
+        # 否则 GitHub 的软换行会变成一行一个空行。
+        if self._parts and self._parts[-1].endswith("\n"):
+            text = text.lstrip("\n")
+        self._parts.append(text)
+
+    def text(self) -> str:
+        raw = "".join(self._parts).replace("\r\n", "\n").replace("\r", "\n")
+        lines = [re.sub(r"[ \t\f\v]+", " ", line).strip() for line in raw.split("\n")]
+        collapsed: list[str] = []
+        for line in lines:
+            if not line and (not collapsed or not collapsed[-1]):
+                continue
+            collapsed.append(line)
+        return "\n".join(collapsed).strip()
+
+
+def extract_release_body(page_html: str) -> str:
+    parser = _ReleaseBodyParser()
+    try:
+        parser.feed(page_html or "")
+    except Exception:
+        return ""
+    return parser.text()
+
+
+def _http_get_text(url: str, timeout: float, accept: str) -> str:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": accept,
+            "User-Agent": "Negi-UpdateCheck",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return response.read().decode("utf-8", "replace")
+
+
+def fetch_release_notes(
+    tag: str,
+    *,
+    project_root: Path | None = None,
+    timeout: float = RELEASE_NOTES_TIMEOUT_SECONDS,
+    use_cache: bool = True,
+) -> dict[str, Any]:
+    """取某一版的发布说明；取不到时 `error` 非空、`body` 为空。
+
+    先走 API（一次请求拿到正文），被限流或离线再读发布页 HTML。失败不缓存，
+    下一次点开还会重试；成功按 tag 缓存在进程内，弹窗反复开关不重复联网。
+    """
+    ref = str(tag or "").strip()
+    if ref and not ref.startswith("v"):
+        ref = f"v{ref}"
+    slug = origin_repo_slug(project_root) or DEFAULT_REPO_SLUG
+    cache_key = f"{slug}:{ref}"
+    if use_cache and cache_key in _RELEASE_NOTES_CACHE:
+        return dict(_RELEASE_NOTES_CACHE[cache_key])
+
+    page_url = f"https://github.com/{slug}/releases/tag/{ref}"
+    payload: dict[str, Any] = {
+        "ref": ref,
+        "title": ref,
+        "body": "",
+        "html_url": page_url,
+        "source": "",
+        "error": "",
+    }
+    api_url = f"https://api.github.com/repos/{slug}/releases/tags/{ref}"
+    try:
+        detail = json.loads(_http_get_text(api_url, timeout, "application/vnd.github+json"))
+        body = str((detail or {}).get("body") or "").strip()
+        if body:
+            payload.update(
+                title=str(detail.get("name") or ref),
+                body=body,
+                html_url=str(detail.get("html_url") or page_url),
+                source="api",
+            )
+            if use_cache:
+                _RELEASE_NOTES_CACHE[cache_key] = dict(payload)
+            return payload
+    except Exception:
+        pass
+
+    try:
+        body = extract_release_body(_http_get_text(page_url, timeout, "text/html"))
+        if body:
+            payload.update(body=body, source="page")
+            if use_cache:
+                _RELEASE_NOTES_CACHE[cache_key] = dict(payload)
+            return payload
+    except Exception:
+        pass
+
+    payload["error"] = RELEASE_NOTES_UNAVAILABLE
+    return payload

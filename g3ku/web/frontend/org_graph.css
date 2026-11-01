@@ -15260,7 +15260,7 @@ textarea {
     box-shadow: none;
 }
 
-/* 有新版本时亮在按钮左上角；顶栏设置键与设置弹窗里的「检查更新」共用这一颗
+/* 有新版本时亮在按钮左上角；顶栏设置键与设置弹窗里的更新按钮共用这一颗
    （折叠态按钮变窄，同一个偏移仍然贴角）。 */
 :root .update-dot {
     position: absolute;
@@ -17301,9 +17301,8 @@ textarea {
 /* ---- 设置弹窗与 QQ 沙箱（V2 合并后的最终值） ------------------------------- */
 
 /* 设置弹窗沿用 confirm 皮肤，只补分节、右上角叉号与底部左右按钮位。
-   宽度按底部那一行的最坏情况定：☑记住密码自动解锁 + 检查更新 + 重启并更新 + 锁定 + 退出
-   实测 130+78+91+52+52 加四段 12px 间距 = 451px，460 宽的弹窗只剩 410px 可用，
-   「退出」会被折成孤零零第二行；这一族弹窗（设置 / 修改密码 / 配置包）同档，堆叠时宽窄一致。 */
+   宽度与这一族（设置 / 修改密码 / 配置包）同档：底部行装得下常规内容，出现较长的
+   版本对时按 flex-wrap 折成两行，宽度不跟着内容变——堆叠时几扇窗的宽窄保持一致。 */
 .project-settings-dialog {
     position: relative;
     width: min(520px, calc(calc(100vw / var(--ui-zoom, 1)) - 48px));
@@ -17642,7 +17641,7 @@ textarea {
     box-shadow: 0 0 0 3px var(--ui-brand-soft);
 }
 
-/* 底部那一行现在装四颗按钮加自动解锁勾选：出现「重启并更新」时整行会折成两行，
+/* 底部那一行装三颗按钮加自动解锁勾选：出现版本对（v1.11.3 → v1.12.0）时整行会折成两行，
    所以留出行间距，别把两行按钮挤在一起。 */
 .project-settings-footer {
     justify-content: flex-end;
@@ -17651,16 +17650,19 @@ textarea {
 }
 
 /* 「检查更新 + 当前版本」自成一组靠左，其余按钮留在右侧：靠 margin-right:auto 把剩余
-   空间全吃掉，加按钮时不必再动这一行的对齐。 */
+   空间全吃掉，加按钮时不必再动这一行的对齐。
+   基线对齐：版本号与按钮文案同字号，但「v1.11.3」是拉丁字形、按钮文案是汉字，
+   两行各自居中后汉字墨迹会低 2px；按第一基线排才是同一行文字的高度。 */
 .project-settings-footer-left {
     display: flex;
-    align-items: center;
+    align-items: baseline;
     gap: var(--ui-space-2);
     margin-right: auto;
 }
 
 .project-settings-version {
     color: var(--ui-text-muted);
+    font-size: 13px;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
 }
@@ -17673,6 +17675,36 @@ textarea {
 /* 检查更新按钮带红点，得自己当定位父。 */
 #project-settings-check-update-btn {
     position: relative;
+}
+
+/* 发布说明弹窗：「查看新版本」点开的那一页。正文固定上限、自己滚（一版说明最多几十行，
+   不让长文把底部的两颗按钮顶出视口），行内换行按词折而不是按标点。 */
+.confirm-dialog.update-release-dialog {
+    width: min(560px, calc(calc(100vw / var(--ui-zoom, 1)) - 48px));
+}
+
+.update-release-notes {
+    min-height: 96px;
+    max-height: min(360px, calc(calc(100vh / var(--ui-zoom, 1)) - 320px));
+    overflow-y: auto;
+    padding-right: 4px;
+    color: var(--ui-text-secondary);
+    font-size: 0.92rem;
+    line-height: 1.65;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+/* 读不到正文时只降一档颜色：这一行说的是"说明取不到"，不是"更新不可用"。 */
+.update-release-notes.is-unavailable {
+    color: var(--ui-text-muted);
+}
+
+.update-release-hint {
+    margin: 0;
+    color: var(--ui-text-muted);
+    font-size: 12px;
+    line-height: 1.5;
 }
 
 /* 隐藏的 file input 由「选择配置包」按钮代挑，回显只当状态行用。 */

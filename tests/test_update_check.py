@@ -708,3 +708,123 @@ def test_relaunch_never_hands_the_server_its_own_console_window(monkeypatch, tmp
         assert not flags & subprocess.DETACHED_PROCESS
     else:
         assert captured["kwargs"]["start_new_session"] is True
+
+
+def test_parse_repo_slug_reads_github_remotes():
+    from g3ku.update_check import parse_repo_slug
+
+    assert parse_repo_slug("https://github.com/ZXY39/Negi.git") == "ZXY39/Negi"
+    assert parse_repo_slug("https://github.com/ZXY39/Negi") == "ZXY39/Negi"
+    assert parse_repo_slug("git@github.com:ZXY39/Negi.git") == "ZXY39/Negi"
+    assert parse_repo_slug("ssh://git@github.com/ZXY39/Negi.git") == "ZXY39/Negi"
+    # raw/镜像入口把真地址接在后面，取的是 github.com 那段。
+    assert parse_repo_slug("https://ghfast.top/https://github.com/ZXY39/Negi.git") == "ZXY39/Negi"
+    assert parse_repo_slug("https://gitlab.com/owner/repo.git") is None
+    assert parse_repo_slug("") is None
+
+
+def test_extract_release_body_keeps_paragraph_shape():
+    from g3ku.update_check import extract_release_body
+
+    page = (
+        '<html><body><div class="release-entry">'
+        '<div class="markdown-body tmp-my-3">'
+        "<p>修复了 A。</p><ul><li>一</li><li>二</li></ul>"
+        "<pre><code>a &amp; b</code></pre>"
+        "</div></div></body></html>"
+    )
+    body = extract_release_body(page)
+    assert "修复了 A。" in body
+    assert "- 一" in body and "- 二" in body
+    assert "a & b" in body
+    assert extract_release_body("<html></html>") == ""
+    # GitHub 的软换行是 `<br>` + 源码换行；两层都算会变成一行一个空行。
+    assert extract_release_body(
+        '<div class="markdown-body"><p>line one<br>\nline two</p></div>'
+    ) == "line one\nline two"
+
+
+def test_release_notes_use_the_api_then_the_release_page(monkeypatch, tmp_path: Path):
+    import g3ku.update_check as update_check
+
+    update_check._RELEASE_NOTES_CACHE.clear()
+    monkeypatch.setattr(update_check, "origin_repo_slug", lambda root=None: "owner/repo")
+    calls = []
+
+    def _page_only(url, timeout, accept):
+        calls.append(url)
+        if "api.github.com" in url:
+            raise OSError("api blocked")
+        return '<div class="markdown-body">ignored</div>'
+
+    monkeypatch.setattr(update_check, "_http_get_text", _page_only)
+    monkeypatch.setattr(
+        update_check,
+        "extract_release_body",
+        lambda page: "页面上这一版的说明",
+    )
+    item = update_check.fetch_release_notes("1.2.3", project_root=tmp_path, use_cache=False)
+    assert item["source"] == "page"
+    assert item["ref"] == "v1.2.3", "不带 v 的版本按标签名补上"
+    assert item["body"] == "页面上这一版的说明"
+    assert item["error"] == ""
+    assert any("api.github.com" in url for url in calls)
+    assert calls[-1].endswith("/owner/repo/releases/tag/v1.2.3")
+
+    def _api(url, timeout, accept):
+        calls.append(url)
+        return '{"name": "v1.2.3", "body": "API 正文", "html_url": "https://github.com/owner/repo/releases/tag/v1.2.3"}'
+
+    monkeypatch.setattr(update_check, "_http_get_text", _api)
+    item = update_check.fetch_release_notes("v1.2.3", project_root=tmp_path, use_cache=False)
+    assert item["source"] == "api"
+    assert item["body"] == "API 正文"
+
+
+def test_release_notes_failure_is_reported_not_invented(monkeypatch, tmp_path: Path):
+    import g3ku.update_check as update_check
+
+    update_check._RELEASE_NOTES_CACHE.clear()
+    monkeypatch.setattr(update_check, "origin_repo_slug", lambda root=None: "owner/repo")
+    monkeypatch.setattr(update_check, "_http_get_text", lambda url, timeout, accept: (_ for _ in ()).throw(OSError("offline")))
+
+    item = update_check.fetch_release_notes("v1.2.3", project_root=tmp_path, use_cache=False)
+    assert item["body"] == ""
+    assert item["error"] == update_check.RELEASE_NOTES_UNAVAILABLE
+    assert item["html_url"].endswith("/owner/repo/releases/tag/v1.2.3")
+
+
+def test_release_notes_are_cached_per_tag(monkeypatch, tmp_path: Path):
+    import g3ku.update_check as update_check
+
+    update_check._RELEASE_NOTES_CACHE.clear()
+    monkeypatch.setattr(update_check, "origin_repo_slug", lambda root=None: "owner/repo")
+    hits = []
+
+    def _api(url, timeout, accept):
+        hits.append(url)
+        return '{"name": "v9.9.8", "body": "缓存正文"}'
+
+    monkeypatch.setattr(update_check, "_http_get_text", _api)
+    first = update_check.fetch_release_notes("v9.9.8", project_root=tmp_path)
+    second = update_check.fetch_release_notes("v9.9.8", project_root=tmp_path)
+    assert first["body"] == second["body"] == "缓存正文"
+    assert len(hits) == 1, "同一版反复打开弹窗不重复联网"
+
+
+async def test_release_notes_endpoint_checks_the_ref_shape(monkeypatch):
+    from fastapi import HTTPException
+
+    import main.api.update_rest as update_api
+
+    with pytest.raises(HTTPException) as refused:
+        await update_api.update_release_notes(ref="main")
+    assert refused.value.status_code == 400
+
+    monkeypatch.setattr(
+        update_api,
+        "fetch_release_notes",
+        lambda tag, **kwargs: {"ref": tag, "body": "这一版改了什么", "error": ""},
+    )
+    result = await update_api.update_release_notes(ref="v1.2.3")
+    assert result["item"]["body"] == "这一版改了什么"

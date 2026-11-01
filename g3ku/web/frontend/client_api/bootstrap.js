@@ -130,6 +130,11 @@
         return data.item || null;
     },
 
+    async getUpdateReleaseNotes(ref) {
+        const data = await this.get("/api/update/release-notes", { ref: String(ref || "").trim() });
+        return data.item || null;
+    },
+
     async changeBootstrapPassword(payload) {
         const data = await this.post("/api/bootstrap/change-password", payload || {});
         return data.item || null;

@@ -1242,13 +1242,12 @@
                     </div>
                     <div class="confirm-actions project-settings-footer">
                         <div class="project-settings-footer-left">
-                            <button id="project-settings-check-update-btn" class="toolbar-btn ghost" type="button">检查更新
+                            <button id="project-settings-check-update-btn" class="toolbar-btn ghost" type="button">
+                                <span id="project-settings-check-update-label">检查更新</span>
                                 <span id="project-settings-check-dot" class="update-dot" title="有新版本" hidden></span>
                             </button>
                             <span id="project-settings-version" class="project-settings-version"></span>
                         </div>
-                        <button id="project-settings-apply-update-btn" class="toolbar-btn" type="button"
-                            hidden>重启并更新</button>
                         <label class="ui-checkbox-row" for="project-settings-auto-unlock">
                             <input id="project-settings-auto-unlock" class="ui-checkbox-input" type="checkbox">
                             <span class="ui-checkbox-box" aria-hidden="true"></span>
@@ -1256,6 +1255,23 @@
                         </label>
                         <button id="project-settings-lock-btn" class="toolbar-btn ghost" type="button">锁定</button>
                         <button id="project-settings-exit-btn" class="toolbar-btn danger" type="button">退出</button>
+                    </div>
+                </section>
+            </div>
+
+            <!-- 「查看新版本」打开的发布说明：正文按纯文本画，长度由这个框自己滚动，
+                 底部两颗按钮是这一步唯一的动作入口（更新会暂停在跑的会话与任务）。 -->
+            <div id="update-release-backdrop" class="confirm-backdrop" hidden>
+                <section id="update-release-dialog" class="confirm-dialog update-release-dialog" role="dialog"
+                    aria-modal="true" aria-labelledby="update-release-title" tabindex="-1">
+                    <div class="confirm-header">
+                        <h2 id="update-release-title">新版本</h2>
+                    </div>
+                    <div id="update-release-notes" class="update-release-notes" aria-live="polite"></div>
+                    <p class="update-release-hint">更新会先暂停正在进行的对话与任务，完成后服务自动重启。</p>
+                    <div class="confirm-actions">
+                        <button id="update-release-cancel-btn" class="toolbar-btn ghost" type="button">取消</button>
+                        <button id="update-release-apply-btn" class="toolbar-btn danger" type="button">更新并重启</button>
                     </div>
                 </section>
             </div>

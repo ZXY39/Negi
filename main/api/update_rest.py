@@ -1,9 +1,9 @@
-"""/api/update —— 已安装设备的版本状态、手动复检与「重启并更新」。
+"""/api/update —— 已安装设备的版本状态、手动复检、发布说明与「重启并更新」。
 
-三个端点都不做常驻工作：状态只读 `.g3ku/update-check.json` 台账（零网络），
-复检是一次 `git ls-remote`，apply 只负责把脱离执行体踢起来后返回。关停语义不
-在这里复制 —— 执行体走现成的 `POST /api/bootstrap/exit`，因此"有在跑的活未确认"
-的 409 只有一份实现。
+四个端点都不做常驻工作：状态只读 `.g3ku/update-check.json` 台账（零网络），
+复检是一次 `git ls-remote`，发布说明是一次 GitHub 读取（取不到只回错误码），
+apply 只负责把脱离执行体踢起来后返回。关停语义不在这里复制 —— 执行体走现成的
+`POST /api/bootstrap/exit`，因此"有在跑的活未确认"的 409 只有一份实现。
 """
 
 from __future__ import annotations
@@ -16,8 +16,9 @@ from fastapi import APIRouter, Body, HTTPException, Request
 from loguru import logger
 
 from g3ku import __version__
-from g3ku.update_apply import apply_in_flight, spawn_runner
+from g3ku.update_apply import PROJECT_ROOT, apply_in_flight, spawn_runner
 from g3ku.update_check import (
+    fetch_release_notes,
     ledger_newer_now,
     read_apply_result,
     read_update_ledger,
@@ -83,6 +84,22 @@ async def update_check_now():
         logger.debug("manual update check failed: {}", exc)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     return {"ok": True, "item": {**_status_payload(), "checked": ledger is not None}}
+
+
+@router.get("/update/release-notes")
+async def update_release_notes(ref: str = ""):
+    """某一版的发布说明（GitHub release 正文），供「查看新版本」弹窗展示。
+
+    取不到正文不是 5xx：升级走 git，说明只是阅读材料，前端照常允许更新。
+    """
+    tag = str(ref or "").strip()
+    if not _REF_RE.match(tag):
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "invalid_ref", "message": f"版本号格式不正确：{tag}"},
+        )
+    item = await asyncio.to_thread(fetch_release_notes, tag, project_root=PROJECT_ROOT)
+    return {"ok": True, "item": item}
 
 
 @router.post("/update/apply")

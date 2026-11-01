@@ -743,8 +743,14 @@ const U = {
     updateNavDot: document.getElementById("update-nav-dot"),
     projectSettingsCheckDot: document.getElementById("project-settings-check-dot"),
     projectSettingsCheckUpdate: document.getElementById("project-settings-check-update-btn"),
+    projectSettingsCheckUpdateLabel: document.getElementById("project-settings-check-update-label"),
     projectSettingsVersion: document.getElementById("project-settings-version"),
-    projectSettingsApplyUpdate: document.getElementById("project-settings-apply-update-btn"),
+    updateReleaseBackdrop: document.getElementById("update-release-backdrop"),
+    updateReleaseDialog: document.getElementById("update-release-dialog"),
+    updateReleaseTitle: document.getElementById("update-release-title"),
+    updateReleaseNotes: document.getElementById("update-release-notes"),
+    updateReleaseCancel: document.getElementById("update-release-cancel-btn"),
+    updateReleaseApply: document.getElementById("update-release-apply-btn"),
     configBundleBackdrop: document.getElementById("config-bundle-backdrop"),
     configBundleDialog: document.getElementById("config-bundle-dialog"),
     configBundleClose: document.getElementById("config-bundle-close-btn"),
@@ -8310,6 +8316,7 @@ function closeProjectSettingsDialog() {
     closeProjectSettingsQrPopover();
     closePasswordChangeDialog();
     closeConfigBundleDialog();
+    closeUpdateReleaseDialog({ restoreFocus: false });
     U.projectSettingsBackdrop.hidden = true;
     U.projectSettingsBackdrop.classList.remove("is-open");
     U.projectSettings?.setAttribute("aria-expanded", "false");
@@ -10086,7 +10093,7 @@ function updateSettingsButtonTitle(item) {
     } else if (item.error) {
         parts.push(`上次检查失败：${item.error}`);
     } else if (item.newer) {
-        parts.push(`发现新版本 ${item.latest_tag}（当前 v${item.current_version}）`);
+        parts.push(`发现新版本 ${item.latest_tag}（当前 v${item.current_version}），点开看发布说明`);
     } else {
         parts.push(`已是最新 v${item.current_version}`);
     }
@@ -10105,14 +10112,21 @@ function projectSettingsVersionText(item) {
     return latest ? `v${current} → ${latest}` : `v${current}`;
 }
 
+function projectSettingsCheckUpdateText(item) {
+    // 有新版时这颗按钮换一档语义：点它是打开发布说明，不再重查；没有新版时才是"检查更新"。
+    return item?.newer ? "查看新版本" : "检查更新";
+}
+
 function renderProjectSettingsUpdate(item) {
     if (U.projectSettingsCheckUpdate) U.projectSettingsCheckUpdate.title = updateSettingsButtonTitle(item);
+    if (U.projectSettingsCheckUpdateLabel) {
+        U.projectSettingsCheckUpdateLabel.textContent = projectSettingsCheckUpdateText(item);
+    }
     if (U.projectSettingsVersion) {
         U.projectSettingsVersion.textContent = projectSettingsVersionText(item);
         U.projectSettingsVersion.classList.toggle("is-newer", Boolean(item?.newer));
     }
     if (U.projectSettingsCheckDot) U.projectSettingsCheckDot.hidden = !Boolean(item?.newer);
-    if (U.projectSettingsApplyUpdate) U.projectSettingsApplyUpdate.hidden = !Boolean(item?.newer);
 }
 
 async function refreshUpdateStatus() {
@@ -10231,29 +10245,97 @@ function watchApplyUpdateFinish(targetVersion, { intervalMs = UPDATE_APPLY_WATCH
     }, intervalMs);
 }
 
-function requestApplyUpdate() {
+let updateReleaseRequestSeq = 0;
+
+function isUpdateReleaseOpen() {
+    return !!U.updateReleaseBackdrop && !U.updateReleaseBackdrop.hidden;
+}
+
+function closeUpdateReleaseDialog({ restoreFocus = true } = {}) {
+    if (!U.updateReleaseBackdrop || U.updateReleaseBackdrop.hidden) return false;
+    // 关掉或换一版之后，还在路上的那次读取不许回填。
+    updateReleaseRequestSeq += 1;
+    U.updateReleaseBackdrop.hidden = true;
+    U.updateReleaseBackdrop.classList.remove("is-open");
+    if (U.updateReleaseApply) U.updateReleaseApply.disabled = false;
+    if (U.updateReleaseCancel) U.updateReleaseCancel.disabled = false;
+    if (restoreFocus) U.projectSettingsCheckUpdate?.focus?.();
+    return true;
+}
+
+function setUpdateReleaseNotes(text, { unavailable = false } = {}) {
+    if (!U.updateReleaseNotes) return;
+    U.updateReleaseNotes.textContent = text;
+    U.updateReleaseNotes.classList.toggle("is-unavailable", Boolean(unavailable));
+}
+
+async function loadUpdateReleaseNotes(tag, requestSeq) {
+    // 只认最后一次打开的请求：慢网络下先点开的那一页不许盖掉后点开的那一页。
+    const stillCurrent = () => isUpdateReleaseOpen() && requestSeq === updateReleaseRequestSeq;
+    try {
+        const notes = await ApiClient.getUpdateReleaseNotes(tag);
+        if (!stillCurrent()) return;
+        const body = String(notes?.body || "").trim();
+        if (body) {
+            setUpdateReleaseNotes(body);
+            return;
+        }
+        setUpdateReleaseNotes("读不到这一版的发布说明，可以直接更新，或到 GitHub 发布页查看。", { unavailable: true });
+    } catch {
+        if (!stillCurrent()) return;
+        setUpdateReleaseNotes("读不到这一版的发布说明，可以直接更新，或到 GitHub 发布页查看。", { unavailable: true });
+    }
+}
+
+function openUpdateReleaseDialog() {
+    if (!U.updateReleaseBackdrop) return;
     const item = S.updateStatus || {};
-    openConfirm({
-        title: `重启并更新到 ${item.latest_tag || "新版本"}`,
-        text: "服务会先暂停正在进行的对话与任务，更新完成后自动重启。",
-        confirmLabel: "重启并更新",
-        confirmKind: "danger",
-        onConfirm: async () => {
-            try {
-                const result = await ApiClient.applyUpdate({ ref: item.latest_tag || "", pause_running_work: true });
-                const target = updateApplyTargetVersion(result?.ref || item.latest_tag);
-                showToast({ title: "正在重启", text: "服务回来本页会自动恢复。", kind: "info", persistent: true });
-                if (target) watchApplyUpdateFinish(target);
-            } catch (error) {
-                showToast({ title: "更新未启动", text: String(error?.message || error), kind: "error" });
-            }
-        },
-    });
+    const tag = String(item.latest_tag || "").trim();
+    if (U.updateReleaseTitle) U.updateReleaseTitle.textContent = tag ? `新版本 ${tag}` : "新版本";
+    setUpdateReleaseNotes("正在读取发布说明…");
+    if (U.updateReleaseApply) U.updateReleaseApply.disabled = false;
+    if (U.updateReleaseCancel) U.updateReleaseCancel.disabled = false;
+    U.updateReleaseBackdrop.hidden = false;
+    U.updateReleaseBackdrop.classList.add("is-open");
+    window.requestAnimationFrame(() => U.updateReleaseDialog?.focus?.());
+    const requestSeq = ++updateReleaseRequestSeq;
+    void loadUpdateReleaseNotes(tag, requestSeq);
+}
+
+async function applyUpdateFromReleaseDialog() {
+    const item = S.updateStatus || {};
+    const tag = String(item.latest_tag || "").trim();
+    if (U.updateReleaseApply) U.updateReleaseApply.disabled = true;
+    if (U.updateReleaseCancel) U.updateReleaseCancel.disabled = true;
+    try {
+        const result = await ApiClient.applyUpdate({ ref: tag, pause_running_work: true });
+        const target = updateApplyTargetVersion(result?.ref || tag);
+        closeUpdateReleaseDialog({ restoreFocus: false });
+        showToast({ title: "正在重启", text: "服务回来本页会自动恢复。", kind: "info", persistent: true });
+        if (target) watchApplyUpdateFinish(target);
+    } catch (error) {
+        // 失败还留在这一页：用户能重试，也能看到后端拒绝的原话。
+        if (U.updateReleaseApply) U.updateReleaseApply.disabled = false;
+        if (U.updateReleaseCancel) U.updateReleaseCancel.disabled = false;
+        showToast({ title: "更新未启动", text: String(error?.message || error), kind: "error" });
+    }
+}
+
+function handleCheckUpdateClick() {
+    if (S.updateStatus?.newer) {
+        openUpdateReleaseDialog();
+        return;
+    }
+    void checkForUpdatesNow();
 }
 
 function bindUpdateNotice() {
-    U.projectSettingsCheckUpdate?.addEventListener("click", () => void checkForUpdatesNow());
-    U.projectSettingsApplyUpdate?.addEventListener("click", () => requestApplyUpdate());
+    U.projectSettingsCheckUpdate?.addEventListener("click", () => handleCheckUpdateClick());
+    U.updateReleaseCancel?.addEventListener("click", () => closeUpdateReleaseDialog());
+    U.updateReleaseApply?.addEventListener("click", () => void applyUpdateFromReleaseDialog());
+    U.updateReleaseBackdrop?.addEventListener("click", (e) => {
+        if (e.target === U.updateReleaseBackdrop) closeUpdateReleaseDialog();
+    });
 }
 
 function bindMemoryCardToggles() {
@@ -11601,6 +11683,10 @@ function bindGlobalOverlays() {
             return;
         }
         if (closeCeoSessionMenus({ restoreFocus: true })) return;
+        if (isUpdateReleaseOpen()) {
+            closeUpdateReleaseDialog();
+            return;
+        }
         if (isPasswordChangeOpen()) {
             closePasswordChangeDialog();
             return;

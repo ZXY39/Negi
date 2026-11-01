@@ -5,7 +5,7 @@ const vm = require("node:vm");
 const { readFrontendSources } = require("./support/frontend_sources.js");
 
 // 新版本提醒的渲染契约：红点只认台账里的 `newer`；"从未检查"与"检查失败"都不亮，
-// 也不能被写成"已是最新"。设置面板的「重启并更新」按钮同样只在新版本时出现。
+// 也不能被写成"已是最新"。有新版时「检查更新」换成「查看新版本」，点它是打开发布说明。
 
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
 const APP_CODE = readFrontendSources(["app"]).join("\n");
@@ -20,7 +20,18 @@ class StubHTMLElement extends StubElement {
         this.textContent = "";
         this.attributes = {};
         this.children = [];
-        this.classList = { add: () => {}, remove: () => {}, contains: () => false, toggle: () => {} };
+        const classes = new Set();
+        this.classList = {
+            add: (...names) => names.forEach((name) => classes.add(name)),
+            remove: (...names) => names.forEach((name) => classes.delete(name)),
+            contains: (name) => classes.has(name),
+            toggle: (name, force) => {
+                const on = force === undefined ? !classes.has(name) : Boolean(force);
+                if (on) classes.add(name);
+                else classes.delete(name);
+                return on;
+            },
+        };
         this.style = {};
     }
 
@@ -99,8 +110,9 @@ function stubbedUpdateApi() {
     const api = loadApp();
     api.U.updateNavDot = new StubHTMLElement();
     api.U.projectSettingsCheckUpdate = new StubHTMLElement();
+    api.U.projectSettingsCheckUpdateLabel = new StubHTMLElement();
     api.U.projectSettingsCheckDot = new StubHTMLElement();
-    api.U.projectSettingsApplyUpdate = new StubHTMLElement();
+    api.U.projectSettingsVersion = new StubHTMLElement();
     return api;
 }
 
@@ -120,13 +132,14 @@ test("nav dot lights only on a newer ledger entry", () => {
     assert.equal(api.U.updateNavDot.hidden, true, "检查失败不得亮");
 });
 
-test("弹窗里只有红点认新版，版本对与失败读数收进按钮 title", () => {
+test("弹窗里只有红点认新版，按钮文案与版本对跟着台账走", () => {
     const api = stubbedUpdateApi();
 
     api.renderProjectSettingsUpdate({ has_ledger: false });
     assert.match(api.U.projectSettingsCheckUpdate.title, /还没查过远端标签/);
+    assert.equal(api.U.projectSettingsCheckUpdateLabel.textContent, "检查更新");
     assert.equal(api.U.projectSettingsCheckDot.hidden, true, "没查过不得亮");
-    assert.equal(api.U.projectSettingsApplyUpdate.hidden, true);
+    assert.equal(api.U.projectSettingsVersion.textContent, "");
 
     api.renderProjectSettingsUpdate({
         has_ledger: true,
@@ -136,18 +149,23 @@ test("弹窗里只有红点认新版，版本对与失败读数收进按钮 titl
         checked_at: "2026-09-25T17:45:04+08:00",
     });
     assert.equal(api.U.projectSettingsCheckDot.hidden, false, "有新版必须亮");
+    assert.equal(api.U.projectSettingsCheckUpdateLabel.textContent, "查看新版本");
+    assert.equal(api.U.projectSettingsVersion.textContent, "v1.0.1 → v1.0.2");
     const newerTitle = api.U.projectSettingsCheckUpdate.title;
     assert.match(newerTitle, /发现新版本 v1\.0\.2（当前 v1\.0\.1）/);
+    assert.match(newerTitle, /点开看发布说明/);
     assert.match(newerTitle, /检查于 \d{2}-\d{2} \d{2}:\d{2}/);
-    assert.equal(api.U.projectSettingsApplyUpdate.hidden, false);
 
     api.renderProjectSettingsUpdate({
         has_ledger: true,
         newer: false,
+        current_version: "1.0.1",
         error: "remote_unreachable",
         checked_at: "2026-09-25T17:45:04+08:00",
     });
     assert.equal(api.U.projectSettingsCheckDot.hidden, true, "检查失败不得亮");
+    assert.equal(api.U.projectSettingsCheckUpdateLabel.textContent, "检查更新");
+    assert.equal(api.U.projectSettingsVersion.textContent, "v1.0.1");
     const failedTitle = api.U.projectSettingsCheckUpdate.title;
     assert.match(failedTitle, /上次检查失败：remote_unreachable/);
     assert.doesNotMatch(failedTitle, /已是最新/);
@@ -160,6 +178,135 @@ test("up to date never borrows the newer wording", () => {
     assert.match(title, /已是最新 v1\.0\.1/);
     assert.doesNotMatch(title, /发现新版本/);
     assert.equal(api.U.projectSettingsCheckDot.hidden, true);
+});
+
+function loadDialogContext() {
+    const context = baseContext();
+    context.window = context;
+    vm.createContext(context);
+    vm.runInContext(
+        `${APP_CODE}\nthis.__testExports = {
+            U,
+            S,
+            handleCheckUpdateClick,
+            openUpdateReleaseDialog,
+            closeUpdateReleaseDialog,
+            isUpdateReleaseOpen,
+        };`,
+        context
+    );
+    const api = context.__testExports;
+    api.U.updateReleaseBackdrop = new StubHTMLElement();
+    api.U.updateReleaseBackdrop.hidden = true;
+    api.U.updateReleaseDialog = new StubHTMLElement();
+    api.U.updateReleaseTitle = new StubHTMLElement();
+    api.U.updateReleaseNotes = new StubHTMLElement();
+    api.U.updateReleaseCancel = new StubHTMLElement();
+    api.U.updateReleaseApply = new StubHTMLElement();
+    api.U.projectSettingsCheckUpdate = new StubHTMLElement();
+    return { context, api };
+}
+
+const tick = () => new Promise((resolve) => setTimeout(resolve, 10));
+
+test("有新版时点按钮打开说明，没有新版才重新检查", () => {
+    const { context, api } = loadDialogContext();
+    context.__opened = 0;
+    context.__checked = 0;
+    vm.runInContext(
+        `openUpdateReleaseDialog = () => { __opened += 1; };
+         checkForUpdatesNow = async () => { __checked += 1; };`,
+        context
+    );
+
+    api.S.updateStatus = { newer: true, latest_tag: "v1.9.0" };
+    api.handleCheckUpdateClick();
+    assert.equal(context.__opened, 1, "有新版时这颗按钮是查看说明");
+    assert.equal(context.__checked, 0, "不许在同一次点击里再联网检查");
+
+    api.S.updateStatus = { newer: false, latest_tag: "v1.9.0" };
+    api.handleCheckUpdateClick();
+    assert.equal(context.__checked, 1, "没有新版时仍是检查更新");
+    assert.equal(context.__opened, 1);
+});
+
+test("查看新版本弹窗先占位再填入 release 正文", async () => {
+    const { context, api } = loadDialogContext();
+    api.S.updateStatus = { newer: true, latest_tag: "v1.9.0", current_version: "1.8.0" };
+    let asked = "";
+    context.ApiClient = {
+        getUpdateReleaseNotes: async (ref) => {
+            asked = ref;
+            return { body: "这一版修了 A 和 B。", error: "" };
+        },
+    };
+
+    api.openUpdateReleaseDialog();
+    assert.equal(api.U.updateReleaseBackdrop.hidden, false);
+    assert.equal(api.U.updateReleaseTitle.textContent, "新版本 v1.9.0");
+    assert.equal(api.U.updateReleaseNotes.textContent, "正在读取发布说明…");
+
+    await tick();
+    assert.equal(asked, "v1.9.0", "按台账里的标签取说明");
+    assert.equal(api.U.updateReleaseNotes.textContent, "这一版修了 A 和 B。");
+    assert.equal(api.U.updateReleaseNotes.classList.contains("is-unavailable"), false);
+});
+
+test("读不到说明时照实说，更新按钮仍然可用", async () => {
+    const { context, api } = loadDialogContext();
+    api.S.updateStatus = { newer: true, latest_tag: "v1.9.0", current_version: "1.8.0" };
+    context.ApiClient = {
+        getUpdateReleaseNotes: async () => ({ body: "", error: "release_notes_unavailable" }),
+    };
+
+    api.openUpdateReleaseDialog();
+    await tick();
+    assert.match(api.U.updateReleaseNotes.textContent, /读不到这一版的发布说明/);
+    assert.equal(api.U.updateReleaseNotes.classList.contains("is-unavailable"), true);
+    assert.equal(api.U.updateReleaseApply.disabled, false, "说明取不到不影响更新");
+});
+
+test("关掉弹窗后迟到的说明不回填", async () => {
+    const { context, api } = loadDialogContext();
+    api.S.updateStatus = { newer: true, latest_tag: "v1.9.0", current_version: "1.8.0" };
+    let release;
+    context.ApiClient = {
+        getUpdateReleaseNotes: () => new Promise((resolve) => {
+            release = () => resolve({ body: "迟到的正文", error: "" });
+        }),
+    };
+
+    api.openUpdateReleaseDialog();
+    api.closeUpdateReleaseDialog({ restoreFocus: false });
+    assert.equal(api.isUpdateReleaseOpen(), false);
+    release();
+    await tick();
+    assert.equal(api.U.updateReleaseNotes.textContent, "正在读取发布说明…", "关了就不再动这一页");
+});
+
+test("重新打开另一版时，先发出的慢响应不许盖掉后一版", async () => {
+    const { context, api } = loadDialogContext();
+    api.S.updateStatus = { newer: true, latest_tag: "v1.9.0", current_version: "1.8.0" };
+    const pending = [];
+    context.ApiClient = {
+        getUpdateReleaseNotes: (ref) => new Promise((resolve) => {
+            pending.push({ ref, resolve });
+        }),
+    };
+
+    api.openUpdateReleaseDialog();
+    api.closeUpdateReleaseDialog({ restoreFocus: false });
+    api.S.updateStatus = { newer: true, latest_tag: "v1.9.1", current_version: "1.8.0" };
+    api.openUpdateReleaseDialog();
+    assert.equal(pending.at(-1).ref, "v1.9.1");
+
+    pending[0].resolve({ body: "旧版说明", error: "" });
+    await tick();
+    assert.equal(api.U.updateReleaseNotes.textContent, "正在读取发布说明…", "旧响应不得回填");
+
+    pending[1].resolve({ body: "新版说明", error: "" });
+    await tick();
+    assert.equal(api.U.updateReleaseNotes.textContent, "新版说明");
 });
 
 // 层级契约：按"选择器 + 开括号"定位规则块，再从块里取 z-index 数值（避免正则转义脆弱）。
