@@ -18,12 +18,33 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from types import SimpleNamespace
 
 import pytest
 
 from g3ku.runtime.chunk_compression_plan import output_headroom_tokens
-from main.runtime.react_loop import ReActToolLoop
+from main.runtime.react_loop import _NODE_TOKEN_COMPRESSION_SYSTEM_PROMPT, ReActToolLoop
+
+_NODE_CHUNK_MARK_RE = re.compile(r'第 (\d+)/(\d+) 块')
+
+
+def _is_node_chunk_request(messages: list[dict]) -> bool:
+    """块请求按形状认：首位是节点压缩 system，块内是真实角色行，末位写明 `第 i/x 块`。
+
+    单发的末位也带【上下文压缩指令】，但它首位是任务自己的 system 提示，正文写的是
+    "完整历史"而不是块号——两者必须能分开判，估算桩才不会把块请求当单发读数。
+    """
+    items = list(messages or [])
+    if not items:
+        return False
+    first = str((items[0] or {}).get('content') or '')
+    last = str((items[-1] or {}).get('content') or '')
+    return (
+        first == _NODE_TOKEN_COMPRESSION_SYSTEM_PROMPT
+        and last.startswith('【上下文压缩指令】')
+        and bool(_NODE_CHUNK_MARK_RE.search(last))
+    )
 
 
 class _Resp:
@@ -87,20 +108,20 @@ def _compress(loop, messages, window):
 
 def _chunk_chat(estimator, calls, *, fail_indexes=(), always_fail=False):
     async def fake_chat(*args, messages=None, **kwargs):
-        payload = str((messages or [{}])[-1].get('content') or '')
+        items = list(messages or [])
+        last = str((items[-1] or {}).get('content') or '') if items else ''
+        rendered = json.dumps(items, ensure_ascii=False, default=str)
         kind, index, total = 'single_shot', 0, 1
-        try:
-            data = json.loads(payload)
-            kind = str(data.get('kind') or '')
-            index = int(data.get('chunk_index') or 0)
-            total = int(data.get('chunk_count') or 1)
-        except Exception:
-            data = {}
+        if 'node_token_compression_merge' in rendered:
+            kind = 'node_token_compression_merge'
+        elif _is_node_chunk_request(items):
+            match = _NODE_CHUNK_MARK_RE.search(last)
+            kind, index, total = 'node_token_compression_chunk', int(match.group(1)), int(match.group(2))
         calls.append({
             'kind': kind,
             'index': index,
             'total': total,
-            'tokens': int(estimator(list(messages or []))),
+            'tokens': int(estimator(items)),
         })
         if always_fail or (kind.endswith('_chunk') and index in fail_indexes):
             return _Resp(content='', error_text='HTTP 429: inference exceeds tpm/rpm limit')

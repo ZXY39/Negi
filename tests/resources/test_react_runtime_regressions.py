@@ -6854,9 +6854,9 @@ async def test_node_send_preflight_does_not_compress_below_threshold(
 def _is_node_token_compression_helper_request(messages) -> bool:
     """节点 token 压缩 helper 调用的识别。
 
-    新合同为 append-only：末尾 user 消息携带「【上下文压缩指令】」；分块/归并
-    请求携带 `node_token_compression_chunk` / `node_token_compression_merge` kind；
-    兼容旧 JSON 巨包形态的 `node_token_compression` kind（存量断言）。"""
+    合同为 append-only：末尾 user 消息携带「【上下文压缩指令】」；单发与分块同形，
+    分块只是把这段历史换成一个原子组切片，并在同一条指令里写明 `第 i/x 块`。
+    归并请求仍带 `node_token_compression_merge` kind。"""
     for item in list(messages or []):
         if not isinstance(item, dict):
             continue
@@ -6868,6 +6868,24 @@ def _is_node_token_compression_helper_request(messages) -> bool:
         ):
             return True
     return False
+
+
+def _is_node_token_compression_chunk_request(messages) -> bool:
+    """块请求按形状认：首位是节点压缩 system，末位是写明 `第 i/x 块` 的 user 指令。"""
+    import re
+
+    import main.runtime.react_loop as react_loop_module
+
+    items = list(messages or [])
+    if len(items) < 3:
+        return False
+    first = str((items[0] or {}).get("content") or "")
+    last = str((items[-1] or {}).get("content") or "")
+    return (
+        first == react_loop_module._NODE_TOKEN_COMPRESSION_SYSTEM_PROMPT
+        and last.startswith("【上下文压缩指令】")
+        and bool(re.search(r"第 \d+/\d+ 块", last))
+    )
 
 
 def _node_compression_summary_response() -> LLMResponse:
@@ -7500,13 +7518,13 @@ async def test_node_preflight_attempts_compression_before_failing_when_pre_compa
     # 超窗新合同：单发压缩请求自身放不下窗口 → 分块压缩（多次 helper 调用：
     # 若干分块 + 可选归并），压缩后重算仍超窗才失败。
     assert len(helper_calls) >= 2
-    chunk_requests = [
-        str(item.get("content") or "")
-        for call in helper_calls
-        for item in call
-        if isinstance(item, dict) and "node_token_compression_chunk" in str(item.get("content") or "")
-    ]
-    assert chunk_requests
+    chunk_requests = [call for call in helper_calls if _is_node_token_compression_chunk_request(call)]
+    assert chunk_requests, "分块请求必须带块号指令与真实角色历史行"
+    assert any(
+        str(item.get("role") or "") in {"user", "assistant"}
+        and str(item.get("content") or "").startswith("filler")
+        for item in chunk_requests[0]
+    ), "块内历史要按真实角色逐条发，而不是打包成 JSON"
     assert diagnostics.get("compression_mode") == "llm_chunked"
     assert int(diagnostics.get("chunk_count") or 0) >= 1
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +13,29 @@ from g3ku.runtime.chunk_compression_plan import output_headroom_tokens
 from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
 from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
 from g3ku.runtime.frontdoor.state_models import CeoRuntimeContext
+
+
+def _is_chunk_request(messages: list[dict[str, object]]) -> bool:
+    """块请求按形状认：首位是压缩 system，块内是真实角色行，末位写明 `第 i/x 块`。
+
+    单发的末位也带【上下文压缩指令】，但它的首位是会话自己的 system（不是压缩
+    system），正文写的是"完整历史"而不是块号——两者必须能分开判，否则估算桩会把
+    块请求当单发读数。
+    """
+    if not messages:
+        return False
+    first = str((messages[0] or {}).get("content") or "")
+    last = str((messages[-1] or {}).get("content") or "")
+    return (
+        first == ceo_runtime_ops._FRONTDOOR_TOKEN_COMPRESSION_SYSTEM_PROMPT
+        and last.startswith("【上下文压缩指令】")
+        and bool(re.search(r"第 \d+/\d+ 块", last))
+    )
+
+
+def _chunk_index_of(messages: list[dict[str, object]]) -> int:
+    match = re.search(r"第 (\d+)/\d+ 块", str((messages[-1] or {}).get("content") or ""))
+    return int(match.group(1)) if match else 0
 
 
 def _build_runner(monkeypatch: pytest.MonkeyPatch, *, context_window_tokens: int = 100_000):
@@ -214,9 +238,10 @@ async def test_frontdoor_compression_chunks_when_single_shot_exceeds_window(
         messages = list(kwargs.get("messages") or [])
         captured.append(messages)
         rendered = json.dumps(messages, ensure_ascii=False, default=str)
-        if "frontdoor_token_compression_chunk" in rendered:
-            index = len([item for item in captured if "chunk" in json.dumps(item, ensure_ascii=False, default=str)])
-            return {"content": f"块摘要{index}"}
+        if "frontdoor_token_compression_merge" in rendered:
+            return {"content": "归并后的总摘要"}
+        if _is_chunk_request(messages):
+            return {"content": f"块摘要{_chunk_index_of(messages)}"}
         return {"content": "归并后的总摘要"}
 
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
@@ -234,7 +259,7 @@ async def test_frontdoor_compression_chunks_when_single_shot_exceeds_window(
         rendered = json.dumps(messages, ensure_ascii=False, default=str)
         if "frontdoor_token_compression_merge" in rendered:
             return 100
-        if "frontdoor_token_compression_chunk" in rendered:
+        if _is_chunk_request(messages):
             return 100
         if len(messages) == 1 and str((messages[0] or {}).get("role") or "") == "assistant":
             text = str((messages[0] or {}).get("content") or "")
@@ -260,11 +285,7 @@ async def test_frontdoor_compression_chunks_when_single_shot_exceeds_window(
         tool_schemas=[],
     )
 
-    chunk_calls = [
-        messages
-        for messages in captured
-        if any("frontdoor_token_compression_chunk" in str(item.get("content") or "") for item in messages)
-    ]
+    chunk_calls = [messages for messages in captured if _is_chunk_request(messages)]
     merge_calls = [
         messages
         for messages in captured
@@ -272,6 +293,20 @@ async def test_frontdoor_compression_chunks_when_single_shot_exceeds_window(
     ]
     assert len(chunk_calls) >= 2
     assert len(merge_calls) == 1
+    # 块的形状与单发同形：压缩 system 在首位，块内历史按真实角色逐条发，
+    # 末尾才是那条 user 压缩指令；整段历史不再被打包成一个 user JSON。
+    sample_chunk = chunk_calls[0]
+    history_rows = sample_chunk[1:-1]
+    assert str(sample_chunk[0].get("content") or "") == ceo_runtime_ops._FRONTDOOR_TOKEN_COMPRESSION_SYSTEM_PROMPT
+    assert str((sample_chunk[-1] or {}).get("role") or "") == "user"
+    assert history_rows, "块内必须带上这段历史的真实角色行"
+    assert {str(item.get("role") or "") for item in history_rows} <= {"user", "assistant"}
+    assert all(
+        str(item.get("content") or "").startswith("o") for item in history_rows
+    ), "块内正文就是历史行本身（超容量时允许被收成头尾两段）"
+    assert not any(
+        '"history_messages"' in str(item.get("content") or "") for item in sample_chunk
+    ), "历史不得再打包成 JSON 大包"
     assert result.diagnostics["mode"] == "llm_chunked"
     planned_chunks = int(result.diagnostics["chunk_count"])
     assert planned_chunks == len(chunk_calls)
@@ -323,8 +358,9 @@ async def test_frontdoor_overflow_defers_the_tail_and_keeps_it_in_the_request(
         rendered = json.dumps(messages, ensure_ascii=False, default=str)
         if "frontdoor_token_compression_merge" in rendered:
             return {"content": "归并后的总摘要"}
-        index = len([item for item in captured if "frontdoor_token_compression_chunk" in json.dumps(item, ensure_ascii=False, default=str)])
-        return {"content": f"块摘要{index}"}
+        if _is_chunk_request(messages):
+            return {"content": f"块摘要{_chunk_index_of(messages)}"}
+        return {"content": "块摘要0"}
 
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
     monkeypatch.setattr(runner, "_estimate_frontdoor_send_total_tokens", lambda **kwargs: 1_000, raising=False)
@@ -332,6 +368,8 @@ async def test_frontdoor_overflow_defers_the_tail_and_keeps_it_in_the_request(
     def _module_estimate(provider_request_body=None, request_messages=None, tool_schemas=None):
         messages = list(request_messages or [])
         rendered = json.dumps(messages, ensure_ascii=False, default=str)
+        if _is_chunk_request(messages):
+            return 900
         if "【上下文压缩指令】" in rendered:
             loaded = sum(1 for item in messages if str(item.get("content") or "").startswith("h"))
             return 900 + 2100 * loaded
@@ -378,15 +416,10 @@ async def test_frontdoor_failed_chunk_discards_all_summaries(
 
     async def _call_model_with_tools(**kwargs):
         messages = list(kwargs.get("messages") or [])
-        rendered = json.dumps(messages, ensure_ascii=False, default=str)
-        if "frontdoor_token_compression_chunk" in rendered:
+        if _is_chunk_request(messages):
             captured.append(messages)
             # 按块号判失败，不按调用次数：helper 自己会重试，次数会漂。
-            chunk_index = 0
-            for item in messages:
-                text = str(item.get("content") or "")
-                if '"chunk_index"' in text:
-                    chunk_index = int(json.loads(text).get("chunk_index") or 0)
+            chunk_index = _chunk_index_of(messages)
             if chunk_index == 3:
                 return {"content": "", "error_text": "HTTP 429: token plan entitlement exhausted"}
             return {"content": f"块摘要{chunk_index}"}
@@ -399,6 +432,8 @@ async def test_frontdoor_failed_chunk_discards_all_summaries(
     def _module_estimate(provider_request_body=None, request_messages=None, tool_schemas=None):
         messages = list(request_messages or [])
         rendered = json.dumps(messages, ensure_ascii=False, default=str)
+        if _is_chunk_request(messages):
+            return 100
         if "【上下文压缩指令】" in rendered:
             loaded = sum(1 for item in messages if str(item.get("content") or "").startswith("h"))
             return 900 + 2100 * loaded
@@ -472,9 +507,11 @@ async def test_frontdoor_append_only_request_under_window_stays_single_when_span
     )
 
     assert len(captured) == 1
-    chunked = "frontdoor_token_compression_chunk" in json.dumps(captured[0], ensure_ascii=False, default=str)
-    assert not chunked
+    assert not _is_chunk_request(captured[0])
+    # 单发仍是 append-only：首位是会话自己的 system（不是压缩 system），末尾才是指令。
+    assert str((captured[0][0] or {}).get("content") or "") == "SYSTEM"
     assert str((captured[0][-1] or {}).get("content") or "").startswith("【上下文压缩指令】")
+    assert "第 " not in str((captured[0][-1] or {}).get("content") or "")
     assert result.diagnostics.get("mode") == "llm"
     assert int(result.diagnostics.get("capacity_tokens") or 0) == int(1_500 * 0.9)
 
@@ -625,8 +662,7 @@ async def test_frontdoor_chunk_and_merge_requests_share_the_same_output_budget(
     async def _call_model_with_tools(**kwargs):
         messages = list(kwargs.get("messages") or [])
         captured.append(dict(kwargs))
-        rendered = json.dumps(messages, ensure_ascii=False, default=str)
-        if "frontdoor_token_compression_chunk" in rendered:
+        if _is_chunk_request(messages):
             return {"content": "块摘要"}
         return {"content": "归并后的总摘要"}
 
@@ -636,6 +672,8 @@ async def test_frontdoor_chunk_and_merge_requests_share_the_same_output_budget(
     def _module_estimate(provider_request_body=None, request_messages=None, tool_schemas=None):
         messages = list(request_messages or [])
         rendered = json.dumps(messages, ensure_ascii=False, default=str)
+        if _is_chunk_request(messages):
+            return 900
         if "【上下文压缩指令】" in rendered:
             loaded = sum(1 for item in messages if str(item.get("content") or "").startswith("h"))
             return 900 + 2100 * loaded

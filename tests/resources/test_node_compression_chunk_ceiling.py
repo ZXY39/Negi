@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -32,7 +33,47 @@ from g3ku.runtime.chunk_compression_plan import (
     plan_chunk_groups,
     resolve_chunk_capacity,
 )
-from main.runtime.react_loop import ReActToolLoop
+from main.runtime.react_loop import _NODE_TOKEN_COMPRESSION_SYSTEM_PROMPT, ReActToolLoop
+
+_NODE_CHUNK_MARK_RE = re.compile(r'第 (\d+)/(\d+) 块')
+
+
+def _node_chunk_index(messages: list[dict]) -> int:
+    """块请求按形状认，并给出这块的块号；单发 / 归并返回 0。
+
+    块形状：首位是节点压缩 system，块内是真实角色行，末位是写明 `第 i/x 块` 的 user
+    指令。单发的末位也带【上下文压缩指令】，但它首位是任务自己的 system 提示，正文写
+    "完整历史"而不是块号——两者必须能分开判。
+    """
+    items = list(messages or [])
+    if not items:
+        return 0
+    first = str((items[0] or {}).get('content') or '')
+    last = str((items[-1] or {}).get('content') or '')
+    if first != _NODE_TOKEN_COMPRESSION_SYSTEM_PROMPT or not last.startswith('【上下文压缩指令】'):
+        return 0
+    match = _NODE_CHUNK_MARK_RE.search(last)
+    return int(match.group(1)) if match else 0
+
+
+def _is_node_chunk_request(messages: list[dict]) -> bool:
+    return _node_chunk_index(messages) > 0
+
+
+def _assert_no_orphan_tool_rows(messages: list[dict]) -> None:
+    """块内每一条 tool 结果都必须能在同一发请求里找到声明它的 assistant 行。
+
+    分块按原子组装箱，工具调用组不可分；把历史改成真实角色后，这条不变量会从
+    "JSON 里的形状"变成"provider 会不会直接 400"，所以必须逐块核对。
+    """
+    declared: set[str] = set()
+    for item in list(messages or []):
+        if str(item.get('role') or '') == 'assistant':
+            for call in list(item.get('tool_calls') or []):
+                declared.add(str((call or {}).get('id') or ''))
+        elif str(item.get('role') or '') == 'tool':
+            tool_call_id = str(item.get('tool_call_id') or '')
+            assert tool_call_id in declared, f'孤儿工具结果会在咽喉点被拒：{tool_call_id}'
 
 
 class _Resp:
@@ -77,12 +118,9 @@ def _node_loop(record: list[int], *, fail: bool = False, calls: list | None = No
         if fail:
             return _Resp(content='', error_text='HTTP 429: inference exceeds tpm/rpm limit')
         if fail_chunk_indexes is not None:
-            for item in list(messages or []):
-                text = str(item.get('content') or '')
-                if '"chunk_index"' in text:
-                    if int(json.loads(text).get('chunk_index') or 0) in fail_chunk_indexes:
-                        return _Resp(content='', error_text='HTTP 429: inference exceeds tpm/rpm limit')
-                    break
+            index = _node_chunk_index(list(messages or []))
+            if index and index in fail_chunk_indexes:
+                return _Resp(content='', error_text='HTTP 429: inference exceeds tpm/rpm limit')
         return _Resp(content='【摘要】保留结论与路径。')
 
     # 分块循环每块前查一次暂停/取消，`_check_pause_or_cancel` 要读 store.get_task；
@@ -174,6 +212,23 @@ def test_node_chunks_never_exceed_declared_window() -> None:
     assert text
 
 
+def test_node_chunk_requests_keep_tool_call_groups_intact() -> None:
+    """块改成真实角色后，每发块请求里的 tool 结果都必须由同一发里的 assistant 声明。
+
+    装箱按原子组（工具调用组不可分）+ 超容量只做头尾截断，所以这条不变量本来就该成立；
+    把它钉住是因为现在它直接决定 provider 收不收这发请求，而不再是 JSON 里的形状。
+    """
+    sizes: list[int] = []
+    calls: list[list[dict]] = []
+    _loop, run = _node_loop(sizes, calls=calls)
+    asyncio.run(run(_history(219, 4800), 390000))
+
+    chunk_calls = [call for call in calls if _is_node_chunk_request(call)]
+    assert chunk_calls, '这条用例得真的走到分块'
+    for call in chunk_calls:
+        _assert_no_orphan_tool_rows(call)
+
+
 def test_node_huge_history_stays_inside_capacity() -> None:
     """390 万 tok 的历史按容量切 11 块（≤12 上限）：块块都在窗口内，不再产生巨块。"""
     sizes: list[int] = []
@@ -245,11 +300,13 @@ def test_node_oversized_group_is_head_tail_truncated_and_still_compressed() -> N
     )
 
 
-def test_node_failed_chunk_ships_the_committed_prefix_and_keeps_the_rest_raw() -> None:
-    """第 2 块没拿到摘要：第 1 块照常交付，第 2 块及其后的原文交回调用方留在请求里。
+def test_node_failed_chunk_discards_every_summary_at_ceiling_scale() -> None:
+    """第 2 块没拿到摘要：整次压缩作废，一块摘要都不交付。
 
-    旧行为是在摘要里插一行"本块未取得摘要"却把原文一起吞掉，等于谎报收口；而 helper
-    空响应整次作废又会让下一跳把已压好的块重烧一遍。
+    旧合同是"已成功的第 1 块照样交付，剩下的原文留在请求里"，那会让摘要块只覆盖半段
+    历史而请求里再也找不到另一半。现在任一块失败都按"当前成员重试耗尽"处理：空产物 +
+    失败块号交回调用方，由发送层跳过该成员并 fallback 下一个（同一合同的常规规模版本见
+    `test_node_compression_chunk_failures.py`，这条钉的是装箱到上限的大历史）。
     """
     sizes: list[int] = []
     loop, run = _node_loop(sizes, fail_chunk_indexes={2})
@@ -259,13 +316,11 @@ def test_node_failed_chunk_ships_the_committed_prefix_and_keeps_the_rest_raw() -
 
     assert payload.get('compression_mode') == 'llm_chunked'
     assert payload.get('chunk_failed_indexes') == [2], payload.get('chunk_failed_indexes')
-    assert text.count('[分块摘要 1/') == 1
-    assert '未取得摘要' not in text, f'停下的那块不许留缺口行：{text[:200]}'
-    deferred = list(payload.get('deferred_raw_messages') or [])
-    assert deferred and len(deferred) == int(payload.get('deferred_message_count') or 0)
-    assert len(deferred) < len(history) - 4, '压中的部分必须真的不在场'
-    assert '下一跳按那时的窗口继续压缩' in text
-    assert any(item.get('tool_calls') for item in deferred), '留在请求里的仍是完整工具调用组'
+    assert payload.get('failure_kind') == 'provider', payload.get('failure_kind')
+    assert text == '', f'任一块失败就整次作废：{text[:200]}'
+    assert '[分块摘要' not in text
+    assert not (payload.get('deferred_raw_messages') or []), '作废时不把原文当"已压完"交回'
+    assert 'chunk 2/' in str(payload.get('chunk_error_text') or ''), payload.get('chunk_error_text')
 
 
 # ---------------------------------------------------------------------------
