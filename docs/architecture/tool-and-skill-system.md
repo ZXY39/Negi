@@ -183,7 +183,11 @@ exec 与 memory 工具：
 
 ### 3.2.2 描述预算（160 字符）
 
-工具的函数级 description 与 skill 的 `resource.yaml` description 各限 160 字符（常量住 `g3ku/resources/description_limits.py`）。运行时按资源首次出现建立基线：基线内的存量描述原样放行；基线之后新增或改名的资源超限即 `description_too_long`，工具以 `RepairRequiredTool` 进入待修复、skill 在 `load_skill_context` 返回 `skill_repair_required`，错误正文给出实际字符数与上限。`skill-installer` 在写入后复核同一上限，超限即删除本次安装目录并返回 `ok:false`，不留下半装资源。细节住 toolskill / SKILL.md 正文，description 只写一句话作用。
+这道预算只打在 **manager 的装载路径**上：资源包的函数级 description（`_load_tool_instance` 取装载后实例的模型可见文本）与 skill 的 `resource.yaml` description 各限 160 字符（常量住 `g3ku/resources/description_limits.py`）。运行时按资源首次出现建立基线：基线内的存量描述原样放行；基线之后新增或改名的资源超限即 `description_too_long`，工具以 `RepairRequiredTool` 进入待修复、skill 在 `load_skill_context` 返回 `skill_repair_required`，错误正文给出实际字符数与上限。`skill-installer` 在写入后复核同一上限，超限即删除本次安装目录并返回 `ok:false`，不留下半装资源。
+
+判据的轴是"这颗名字有没有 `tools/<name>/resource.yaml`"，不是"要不要预热/算不算内置"：`create_async_task`、`task_summary`、`task_list`、包版 `send_message` 都在 `CEO_FIXED_BUILTIN_TOOL_NAMES` 里免预热可调用，却因为是资源包照旧受限；反过来，`SYNTHETIC_RESIDENT_TOOL_NAMES`（`silent` / `time` / `schedule_wake` / `mention_member`）与节点侧由 `NodeRunner._build_tools` 在登记表之后注入的内部工具（`spawn_child_nodes` / `enter_wait` / `submit_final_result` 等）就地构造实例，从不经过那道检查，所以它们的函数级描述按需要写多长写多长——这几颗没有 toolskill 正文可搬，函数级描述就是唯一的模型可见载体。用例 `test_synthetic_resident_control_tools_sit_outside_the_budget_lane` 钉住这条边界：名单里的名字必须确实没有资源包、必须存在超预算的描述（否则正样本消失）、前门就地装进来的实例必须仍是各自的工具类。把检查挪到统一入口上等于摘掉静默、时钟、派生这几项能力，症状是"名字还在、调不动"。
+
+细节住 toolskill / SKILL.md 正文，description 只写一句话作用；而"该写在哪一层"（工具级 vs 字段级、`model_description` 优先于 `description`）的合同见 `tool-hydration-and-callable-chain.md`「派发时预置契约」。不受预算约束不等于可以随便写长：管住那批的是分工——判据正文只住提示词，工具级那句只带从别处推不出的出口，这条由 `tests/resources/test_acceptance_gating_contract.py` 断言。
 
 ### 3.3 candidate skills
 

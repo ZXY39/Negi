@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -239,3 +240,44 @@ def test_repo_tool_manifests_fit_the_description_budget() -> None:
         if len(description) > TOOL_DESCRIPTION_MAX_CHARS:
             over.append((manifest_path.parent.name, len(description)))
     assert over == [], f'tool descriptions over {TOOL_DESCRIPTION_MAX_CHARS}: {over}'
+
+
+def test_synthetic_resident_control_tools_sit_outside_the_budget_lane() -> None:
+    """这道闸只打在 manager 的装载路径上：合成常驻控制工具根本不经过它。
+
+    分界线不是"要不要预热/算不算内置"，是有没有 `tools/<name>/resource.yaml`——
+    `create_async_task` / `task_summary` 免预热，却是资源包，照旧受限（上一条用例管它们）。
+    这几颗没有 toolskill 正文可搬，函数级描述就是唯一的模型可见载体，所以允许写到
+    需要那么长；判据正文仍只许住提示词，那条分工由 `test_acceptance_gating_contract.py` 钉。
+
+    正样本（防这条用例白过）：把闸接到统一入口上时，`silent`(500) 与 `time`(169) 的
+    实际读数会当场被判 `description_too_long`、`Resource was not added`，症状不是报错而是
+    静默/时钟/闹钟这几项能力从请求面上消失。所以这里同时钉三件事：名单里的名字确实没有
+    资源包、确实存在超预算的描述、前门就地装进来的实例仍是各自的工具类。
+    """
+    from main.runtime.tool_names import SYNTHETIC_RESIDENT_TOOL_NAMES
+
+    root = Path(__file__).resolve().parents[2] / 'tools'
+    pack_names = set()
+    for manifest_path in sorted(root.glob('*/resource.yaml')):
+        payload = yaml.safe_load(manifest_path.read_text(encoding='utf-8')) or {}
+        pack_names.add(str(payload.get('name') or manifest_path.parent.name).strip())
+    assert not set(SYNTHETIC_RESIDENT_TOOL_NAMES) & pack_names, (
+        '常驻控制工具一旦有了 resource.yaml，它就同时受字数预算；这条用例的前提失效，'
+        '要先决定该名字走哪条道，再改这里。'
+    )
+
+    from g3ku.runtime.frontdoor._ceo_runtime_ops import CeoFrontDoorRuntimeOps
+
+    runtime = SimpleNamespace(context=SimpleNamespace(session=SimpleNamespace(_frontdoor_turns=[])))
+    resident = CeoFrontDoorRuntimeOps.__new__(CeoFrontDoorRuntimeOps)._frontdoor_resident_tools(
+        state={'frontdoor_turn_id': 'turn:test', 'analysis_text': ''},
+        runtime=runtime,
+    )
+    assert set(resident) == set(SYNTHETIC_RESIDENT_TOOL_NAMES)
+
+    lengths = {name: len(str(tool.model_description or '').encode('utf-8')) for name, tool in resident.items()}
+    over = {name: size for name, size in lengths.items() if size > TOOL_DESCRIPTION_MAX_CHARS}
+    assert {'silent', 'time'} <= set(over), f'正样本消失（描述都被压短了？）: {lengths}'
+    for name, tool in resident.items():
+        assert type(tool).__name__ != 'RepairRequiredTool', f'{name} 被闸挡在门外: {lengths[name]} B'

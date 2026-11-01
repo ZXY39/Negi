@@ -104,6 +104,18 @@ def test_acceptance_carriers_keep_the_two_escape_routes_closed() -> None:
     assert "leaving it out is not an answer" in spawn_description
     assert "judge the two conditions in your prompt" in spawn_description
 
+    # 判据正文不许被抄进工具级那层：两份措辞会各自漂移（本轮先抄进 500 字、再摘回来）。
+    criteria_body = (
+        "irreversible",
+        "outward-facing",
+        "production code",
+        "all-of coverage",
+        "cross-source",
+    )
+    for label, text in (("create_async_task", task_description), ("spawn_child_nodes", spawn_description)):
+        leaked = [word for word in criteria_body if word in text.lower()]
+        assert not leaked, f'{label} 的工具级描述抄进了判据正文：{leaked}'
+
 
 def test_spawn_child_nodes_rejects_prompt_without_flag() -> None:
     errors = _spawn_tool().validate_params(
