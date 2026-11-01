@@ -7,6 +7,8 @@ from collections import deque
 from datetime import datetime
 from typing import Any, Callable, Sequence
 
+from loguru import logger
+
 from main.storage.disk_guard import (
     disk_policies,
     disk_waterline_snapshot,
@@ -70,6 +72,14 @@ _ENTRY_THROUGHPUT_WINDOW_SECONDS = 90.0
 # 吞吐基准不能永久钉住：真实负载会自己降下来（树快跑完了）。过了这个时长就再放行一次
 # 试探性抬格，间隔取 4 个节拍，比抖振（此前 45 s 一次来回）慢一个量级。
 _ENTRY_PROBE_AFTER_SECONDS = 180.0
+
+
+# 事件循环停摆的独立线程观测点。压力采样线程不走事件循环，`sample()` 读的是
+# "最后一次排在循环上的探针至今多久"——正常时每拍归零，所以单拍读数就是
+# "循环已经停了多久"，不是瞬时抖动。30 s 告警线按实盘分布选：正常样本最大
+# 665 ms，唯一一次 3 s 尖峰远低于它；活锁那一段在第 47 s 的采样上过线。
+_LOOP_STALL_STACK_MS = 10_000.0
+_LOOP_STALL_ALARM_MS = 30_000.0
 
 
 class _EventLoopLagSampler:
@@ -148,10 +158,22 @@ class WorkerPressureMonitor:
         disk_watermark_paths: Sequence[str] | None = None,
         rate_limit_observer: Callable[[], dict[str, Any]] | None = None,
         loop_observer: Callable[[], dict[str, Any]] | None = None,
+        on_loop_stall: Callable[[float], None] | None = None,
+        on_loop_stack: Callable[[float], None] | None = None,
+        loop_stall_alarm_ms: float = _LOOP_STALL_ALARM_MS,
+        loop_stall_stack_ms: float = _LOOP_STALL_STACK_MS,
     ) -> None:
         self._controller = controller
         self._store = store
         self._system_metrics_sampler = system_metrics_sampler
+        # 循环停摆告警/抓栈：都由采样线程直接调，不经过事件循环——这正是在
+        # 循环被独占时唯一还能执行的位置。回调自身负责同步 IO 和错误吞掉。
+        self._on_loop_stall = on_loop_stall
+        self._on_loop_stack = on_loop_stack
+        self._loop_stall_alarm_ms = max(0.0, float(loop_stall_alarm_ms or 0.0))
+        self._loop_stall_stack_ms = max(0.0, float(loop_stall_stack_ms or 0.0))
+        self._loop_stall_alarm_sent = False
+        self._loop_stack_dumped = False
         # 上游限流观测（回合闸的第四条轴）：由 runtime_service 注入模型负载均衡器的
         # 聚合读数，取不到就当没有这条约束。回合闸不许为了它去新起一套 429 计数。
         self._rate_limit_observer = rate_limit_observer
@@ -1069,6 +1091,38 @@ class WorkerPressureMonitor:
         self._stop_event.set()
         await asyncio.to_thread(thread.join, 5.0)
 
+    def observe_loop_stall(self, lag_ms: float) -> tuple[bool, bool]:
+        """采样线程每拍调用：返回本拍是否发了告警 / 是否抓了栈。
+
+        lag 是累积量（正常时每拍归零），所以单拍过线就说明循环真的停了这么久，
+        不需要"连续 N 拍"确认。同一次停摆只发一次告警、只抓一次栈，回落后重置。
+        """
+        lag = max(0.0, float(lag_ms or 0.0))
+        if lag < min(self._loop_stall_alarm_ms, self._loop_stall_stack_ms):
+            self._loop_stall_alarm_sent = False
+            self._loop_stack_dumped = False
+            return False, False
+        dumped = False
+        if lag >= self._loop_stall_stack_ms and not self._loop_stack_dumped:
+            self._loop_stack_dumped = True
+            dumped = True
+            self._invoke_loop_hook(self._on_loop_stack, lag, label='stack')
+        alarmed = False
+        if lag >= self._loop_stall_alarm_ms and not self._loop_stall_alarm_sent:
+            self._loop_stall_alarm_sent = True
+            alarmed = True
+            self._invoke_loop_hook(self._on_loop_stall, lag, label='alarm')
+        return alarmed, dumped
+
+    @staticmethod
+    def _invoke_loop_hook(hook: Callable[[float], None] | None, lag_ms: float, *, label: str) -> None:
+        if not callable(hook):
+            return
+        try:
+            hook(lag_ms)
+        except Exception as exc:  # noqa: BLE001 - 观测点自己不能把采样线程打死
+            logger.warning('loop stall {} hook failed: {!r}', label, exc)
+
     def _thread_main(self) -> None:
         last_wall = time.perf_counter()
         last_cpu = time.process_time()
@@ -1085,6 +1139,9 @@ class WorkerPressureMonitor:
             event_loop_lag_ms = lag_sampler.sample() if lag_sampler is not None else 0.0
             if lag_sampler is not None:
                 lag_sampler.ping()
+            # 先抓栈（便宜、快），再发告警（可能同步 HTTP 阻塞几秒）：反过来的话
+            # 最需要的那份现场会被告警的超时挡住。
+            self.observe_loop_stall(event_loop_lag_ms)
             runtime_metrics = self._runtime_metrics_snapshot()
             machine = self._sample_machine_metrics(current_wall)
             machine.update(self._disk_waterline_fields())

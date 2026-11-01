@@ -10,6 +10,7 @@ import re
 import shutil
 import threading
 import time
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -963,6 +964,8 @@ class MainRuntimeService:
             ),
             # 回环连接读数：内部回调车道占用的 ESTABLISHED 条数，套接字耗尽的提前信号。
             loop_observer=self.loopback_pressure_snapshot,
+            on_loop_stall=self._notify_loop_stall,
+            on_loop_stack=self._capture_loop_stack,
             disk_watermark_paths=[
                 str(data_root()),
                 str(resolved_store_path.parent),
@@ -6697,6 +6700,152 @@ class MainRuntimeService:
             logger.exception('failed to persist task stall outbox for {}', dedupe_key)
             return
         self._schedule_task_stall_delivery(dedupe_key)
+
+    def _notify_loop_stall(self, lag_ms: float) -> None:
+        """事件循环停摆告警：压力采样线程调用，全程同步、不碰 asyncio。
+
+        web 是独立进程，能收到；按会话各报一条，正文的 `Runtime:` 行写明真正原因是
+        循环停摆。走现有 stall 车道意味着去重、受众判据和心跳入队都复用。
+        """
+        if self.execution_mode != 'worker':
+            return
+        try:
+            payloads = self._build_loop_stall_payloads(lag_ms)
+        except Exception:
+            logger.exception('loop stall payload build failed')
+            return
+        if not payloads:
+            return
+        try:
+            targets = self._internal_callback_targets(workspace=Path.cwd(), callback_kind='stall')
+        except Exception:
+            targets = []
+        if not targets:
+            logger.warning('loop stall alert skipped: callback target unavailable lag_ms={}', int(lag_ms))
+            return
+        url, token = targets[0]
+        headers = self._callback_headers(token=token)
+        for payload in payloads:
+            try:
+                status = self._post_stall_sync(
+                    url,
+                    payload=payload,
+                    headers=headers,
+                    timeout=_INTERNAL_CALLBACK_TIMEOUT_SECONDS,
+                )
+                logger.warning(
+                    'loop stall alert posted: task={} lag_ms={} status={}',
+                    payload.get('task_id'),
+                    int(lag_ms),
+                    status,
+                )
+            except Exception as exc:  # noqa: BLE001 - 告警失败不能打断采样线程
+                logger.warning(
+                    'loop stall alert failed: task={} error={!r}',
+                    payload.get('task_id'),
+                    exc,
+                )
+
+    def _build_loop_stall_payloads(self, lag_ms: float) -> list[dict[str, Any]]:
+        """每个会话一条：取该会话最近有可见输出的未暂停任务。
+
+        事件循环死时无法从 asyncio 侧拿「谁在跑」，只能按持久读数挑一个能让人对上号
+        的入口；同一停摆期内 `(task, 1 min, last_visible_output_at)` 构成稳定去重键，
+        重复拍不会重复打扰。
+        """
+        latest_by_session: dict[str, tuple[str, str]] = {}
+        try:
+            tasks = list(self.store.list_tasks() or [])
+        except Exception:
+            return []
+        for task in tasks:
+            if str(getattr(task, 'status', '') or '').strip().lower() != 'in_progress':
+                continue
+            if (
+                bool(getattr(task, 'is_paused', False))
+                or bool(getattr(task, 'pause_requested', False))
+                or bool(getattr(task, 'cancel_requested', False))
+            ):
+                continue
+            session_id = str(self._task_origin_session_id(task) or '').strip()
+            if not session_id or not task_notice_audience_ok(session_id):
+                continue
+            try:
+                meta = self.log_service.read_task_runtime_meta(task.task_id) or {}
+            except Exception:
+                meta = {}
+            visible_at = str(
+                meta.get('last_visible_output_at') or getattr(task, 'updated_at', '') or ''
+            ).strip()
+            if not visible_at:
+                continue
+            current = latest_by_session.get(session_id)
+            if current is None or visible_at > current[1]:
+                latest_by_session[session_id] = (str(task.task_id), visible_at)
+        lag_seconds = max(1, int(round(max(0.0, float(lag_ms or 0.0)) / 1000.0)))
+        payloads: list[dict[str, Any]] = []
+        for session_id, (task_id, visible_at) in latest_by_session.items():
+            task = self.get_task(task_id)
+            payloads.append(
+                {
+                    'task_id': task_id,
+                    'session_id': session_id,
+                    'title': str(getattr(task, 'title', '') or task_id),
+                    'bucket_minutes': 1,
+                    'stalled_minutes': max(1, lag_seconds // 60),
+                    'last_visible_output_at': visible_at,
+                    'reason': 'suspected_stall',
+                    'runtime_summary_excerpt': (
+                        f'worker event loop stalled: lag={lag_seconds}s sampled off-loop; '
+                        'the task is not advancing and may need a worker restart.'
+                    ),
+                }
+            )
+        return payloads
+
+    @staticmethod
+    def _post_stall_sync(
+        url: str,
+        *,
+        payload: dict[str, Any],
+        headers: dict[str, str],
+        timeout: float,
+    ) -> int:
+        """同步阻塞的 stall 投递：只在事件循环不可用时使用。"""
+        allowed, reason = is_allowed_callback_url(url)
+        if not allowed:
+            raise RuntimeError(f'loop stall callback url not allowed: {reason}')
+        body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+        request = urllib.request.Request(
+            url,
+            data=body,
+            headers={**dict(headers or {}), 'Content-Type': 'application/json'},
+            method='POST',
+        )
+        with urllib.request.urlopen(request, timeout=max(0.5, float(timeout))) as response:
+            return int(getattr(response, 'status', 0) or 0)
+
+    def _capture_loop_stack(self, lag_ms: float) -> None:
+        """把全部线程（含事件循环所在的主线程）的栈追加到固定文件。"""
+        try:
+            import faulthandler
+
+            path = self._loop_stack_log_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open('a', encoding='utf-8') as handle:
+                handle.write(
+                    f'\n=== loop stall lag_ms={int(lag_ms)} at {self._stall_now_iso()} ===\n'
+                )
+                handle.flush()
+                faulthandler.dump_traceback(file=handle, all_threads=True)
+                handle.flush()
+            logger.warning('loop stall stack captured: lag_ms={} path={}', int(lag_ms), path)
+        except Exception:
+            logger.exception('loop stall stack capture failed')
+
+    @staticmethod
+    def _loop_stack_log_path() -> Path:
+        return Path.cwd() / '.g3ku' / 'logs' / 'loop-stall-stacks.log'
 
     def _schedule_pending_task_stall_callbacks(self) -> None:
         if self.execution_mode != 'worker':
