@@ -10072,11 +10072,9 @@ const UPDATE_APPLY_OUTCOME_TEXT = {
 };
 
 // 检查失败的每一档各说一句各的话：只有"没通/超时"配得上"稍后再试"。结构性失败
-// （这台设备没有 git、这份安装不是 git 检出、远端没有发布标签）重试多少次都是同一句
-// 谎话，用户会被留在"再点一次看看"里。
+// （这台设备没有 git、远端没有发布标签）重试多少次都是同一句谎话，用户会被留在"再点一次看看"里。
 const UPDATE_CHECK_ERROR_TEXT = {
     git_missing: "这台设备找不着 git，发布页那条路也没读通。",
-    not_a_checkout: "这份安装不是 git 检出，发布页那条路也没读通。",
     remote_unreachable: "读不到 GitHub，稍后再试。",
     timeout: "远端读超时，稍后再试。",
     no_release_tag: "远端没有 vX.Y.Z 形状的发布标签。",

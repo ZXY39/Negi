@@ -597,7 +597,6 @@ test("每一档各说一句：没通与超时说稍后再试，没有发布标�
         ["remote_unreachable", /GitHub/, /稍后再试/],
         ["timeout", /超时/, /稍后再试/],
         ["no_release_tag", /vX\.Y\.Z/, null],
-        ["not_a_checkout", /不是 git 检出/, null],
     ];
     for (const [code, expected, retry] of cases) {
         const ctx = loadUpdateDialogContext({ has_ledger: true, newer: false, error: code, detail: "" });

@@ -8,7 +8,6 @@ import pytest
 from g3ku.update_check import (
     CODE_GIT_MISSING,
     CODE_NO_RELEASE_TAG,
-    CODE_NOT_A_CHECKOUT,
     CODE_REMOTE_UNREACHABLE,
     CODE_TIMEOUT,
     REMOTE_UNREACHABLE,
@@ -923,12 +922,15 @@ def test_device_without_git_still_reads_the_version_but_says_it_cannot_apply(mon
 
 
 def test_archive_device_is_actionable_even_with_no_git_anywhere(monkeypatch):
-    """归档/离线套件装出来的设备没有 .git，升级走 archive/<ref>.zip，本来就不需要 git。"""
-    _fake_lanes(monkeypatch, checkout=False, git_exe=None, on_path=False, http=("v9.9.9", "", "x"))
+    """归档/离线套件装出来的设备没有 .git：发布页就是它的主车道，读到版本不算降级。"""
+    hits = _fake_lanes(monkeypatch, checkout=False, git_exe=None, on_path=False, http=("v9.9.9", "", "x"))
     result = resolve_latest_release()
     assert result["lane"] == "http"
-    assert result["actionable"] is True
-    assert CODE_NOT_A_CHECKOUT in result["detail"]
+    assert result["checkout"] is False
+    assert result["degraded"] is False, "这类设备从来没有 git 车道可失"
+    assert result["detail"] == ""
+    assert result["actionable"] is True, "升级走 archive/<ref>.zip，不需要 git"
+    assert hits == {"git": 0, "http": 1}
 
 
 def test_non_github_origin_does_not_borrow_the_canonical_release(monkeypatch):

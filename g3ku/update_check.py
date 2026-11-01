@@ -4,8 +4,9 @@
 git 车道在自己的检出里跑 `git ls-remote --tags origin`，HTTP 车道读
 `https://github.com/<slug>/releases/latest` 的重定向目标。两条都只读，不上传任何本地
 信息（版本号也不外发）。任何一条不通都落一条**带档**的 error 台账：查不到不等于已是
-最新，而每一档失败在界面上说的话必须不一样——"没有 git""不是 git 检出""网络没通""超时"
-"远端没有 vX.Y.Z 形状的标签"是五件不同的事。
+最新，而每一档失败在界面上说的话必须不一样——"这台设备没有 git""网络没通""读超时"
+"远端没有 vX.Y.Z 形状的标签"是四件不同的事；这台设备是不是 git 检出由 `checkout` 说，
+不是失败档（归档装的机器主车道本来就是发布页）。
 """
 
 from __future__ import annotations
@@ -34,7 +35,6 @@ DEFAULT_INTERVAL_SECONDS = 5 * 3600.0
 RETRY_INTERVAL_SECONDS = 15 * 60.0
 # 失败档。`remote_unreachable` 是其中一档，不再是所有失败的合称。
 CODE_GIT_MISSING = 'git_missing'
-CODE_NOT_A_CHECKOUT = 'not_a_checkout'
 CODE_REMOTE_UNREACHABLE = 'remote_unreachable'
 CODE_TIMEOUT = 'timeout'
 CODE_NO_RELEASE_TAG = 'no_release_tag'
@@ -303,15 +303,16 @@ def resolve_latest_release(
     slug = origin_repo_slug(root) if checkout else DEFAULT_REPO_SLUG
     attempts: list[str] = []
 
-    if not checkout:
-        attempts.append(f"{CODE_NOT_A_CHECKOUT}: {root} 没有 .git")
-    elif not git_executable:
-        attempts.append(f"{CODE_GIT_MISSING}: PATH、git_path 与常见安装位置都没有 git")
-    else:
-        tag, code, detail = _git_lane(root, git_executable, timeout=git_timeout)
-        if tag:
-            return _release_result(tag, LANE_GIT, attempts, root=root, checkout=checkout)
-        attempts.append(f"{code}: {detail}" if detail else code)
+    if checkout:
+        if not git_executable:
+            attempts.append(f"{CODE_GIT_MISSING}: PATH、git_path 与常见安装位置都没有 git")
+        else:
+            tag, code, detail = _git_lane(root, git_executable, timeout=git_timeout)
+            if tag:
+                return _release_result(tag, LANE_GIT, attempts, root=root, checkout=checkout)
+            attempts.append(f"{code}: {detail}" if detail else code)
+    # 不是 git 检出的设备（归档包、离线套件装出来的）主车道就是发布页：读到版本不算
+    # 降级，它的形态由 `checkout=false` 说，而升级走的 `archive/<ref>.zip` 与这条地址同源。
 
     if slug:
         tag, code, detail = _http_lane(slug, timeout=http_timeout)

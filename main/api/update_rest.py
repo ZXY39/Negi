@@ -59,8 +59,8 @@ def _status_payload() -> dict[str, Any]:
         "current_version": __version__,
         "checked_at": str((ledger or {}).get("checked_at") or ""),
         "source": str((ledger or {}).get("source") or ""),
-        # error 是失败档位（git_missing / not_a_checkout / remote_unreachable /
-        # timeout / no_release_tag），空串表示这次查到了；detail 保留每条车道的原文。
+        # error 是失败档位（git_missing / remote_unreachable / timeout /
+        # no_release_tag），空串表示这次查到了；detail 保留每条车道的原文。
         "error": str((ledger or {}).get("error") or ""),
         "lane": str((ledger or {}).get("lane") or ""),
         "detail": str((ledger or {}).get("detail") or ""),
