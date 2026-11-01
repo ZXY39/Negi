@@ -30,3 +30,12 @@ test("应用里不再有承载申请页的内置窗口", () => {
         assert.ok(!marker.test(readFrontend(file)), `${file} 里还留着内置申请窗口的标记`);
     }
 });
+
+test("申请入口与同排按钮共用一条文字基线", () => {
+    const css = readFrontend("org_graph.css");
+    const tier = css.match(/:root \.toolbar-btn \{[^}]*\}/)?.[0];
+    assert.ok(tier, "没有 :root .toolbar-btn 这一档的定义");
+    // `<button>` 的行高来自 UA 的 normal，`<a>` 继承 body 的行高：同一个 32px 盒里
+    // 两者的字会差约 2px，外链那颗看着就像比旁边的矮一格。行高必须在档位里钉住。
+    assert.match(tier, /line-height:\s*normal;/);
+});

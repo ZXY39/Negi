@@ -15317,6 +15317,10 @@ textarea {
     gap: var(--ui-space-2);
     white-space: nowrap;
     border: 1px solid var(--ui-border);
+    /* 这一档同时用在 `<button>` 和 `<a>` 上（如「申请入口」外链）。`<button>` 的行高走 UA 的
+       normal，`<a>` 继承 body 的行高，两者在同一个 32px 盒里字的位置能差约 2px：外链那格的
+       字会顶得更高，看着就像那颗键比旁边的矮一格。行高钉成 normal 后两种元素同一条基线。 */
+    line-height: normal;
     border-radius: var(--ui-radius-control);
     background: var(--ui-bg-surface);
     color: var(--ui-text);
