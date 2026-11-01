@@ -528,3 +528,127 @@ test("停机窗口里 toast 继续走字，阶段停在最后一次读到的那�
     assert.deepEqual(ctx.__toasts.filter((item) => item.kind === "error"), [], "停机窗口不是失败");
     ctx.__testExports.stopUpdateApplyWatch();
 });
+
+const UPDATE_RELEASE_HINT_PAGE_TEXT = "更新会先暂停正在进行的对话与任务，完成后服务自动重启。";
+
+// 检查失败与发布说明弹窗这一族用例需要真的元素桩：按钮开合与提示句都落在 DOM 上。
+function loadUpdateDialogContext(item) {
+    const elements = {};
+    for (const id of [
+        "project-settings-check-update-btn",
+        "project-settings-check-update-label",
+        "project-settings-check-dot",
+        "project-settings-version",
+        "update-nav-dot",
+        "update-release-backdrop",
+        "update-release-dialog",
+        "update-release-title",
+        "update-release-notes",
+        "update-release-hint",
+        "update-release-cancel-btn",
+        "update-release-apply-btn",
+    ]) {
+        elements[id] = new StubHTMLElement();
+    }
+    // 页面里那句提示是底稿：JS 从 DOM 读它，不抄第二份，所以桩必须先带上原文。
+    elements["update-release-hint"].textContent = UPDATE_RELEASE_HINT_PAGE_TEXT;
+
+    const context = baseContext();
+    context.window = context;
+    context.__toasts = [];
+    context.document.getElementById = (id) => elements[String(id)] || null;
+    vm.createContext(context);
+    vm.runInContext(
+        `${APP_CODE}\nthis.__testExports = {
+            U,
+            checkForUpdatesNow,
+            openUpdateReleaseDialog,
+            closeUpdateReleaseDialog,
+        };`,
+        context
+    );
+    vm.runInContext(`showToast = (opts) => { __toasts.push(opts); };`, context);
+    context.ApiClient = {
+        checkUpdateNow: async () => item,
+        getUpdateStatus: async () => item,
+    };
+    vm.runInContext(`S.updateStatus = ${JSON.stringify(item)};`, context);
+    return context;
+}
+
+test("检查失败按档说话：这台设备没有 git 不是一句「稍后再试」", async () => {
+    const ctx = loadUpdateDialogContext({
+        has_ledger: true,
+        newer: false,
+        error: "git_missing",
+        detail: "git_missing: PATH、git_path 与常见安装位置都没有 git；remote_unreachable: HTTPS 失败",
+    });
+    await ctx.__testExports.checkForUpdatesNow();
+
+    const toast = ctx.__toasts.at(-1);
+    assert.equal(toast.title, "检查失败");
+    assert.match(toast.text, /找不着 git/);
+    assert.doesNotMatch(toast.text, /稍后再试/, "结构性失败让人反复点是同一句谎话");
+    assert.match(ctx.__testExports.U.projectSettingsCheckUpdate.title, /上次检查失败：git_missing/, "档位原文仍进 title");
+});
+
+test("每一档各说一句：没通与超时说稍后再试，没有发布标签说没有标签", async () => {
+    const cases = [
+        ["remote_unreachable", /GitHub/, /稍后再试/],
+        ["timeout", /超时/, /稍后再试/],
+        ["no_release_tag", /vX\.Y\.Z/, null],
+        ["not_a_checkout", /不是 git 检出/, null],
+    ];
+    for (const [code, expected, retry] of cases) {
+        const ctx = loadUpdateDialogContext({ has_ledger: true, newer: false, error: code, detail: "" });
+        await ctx.__testExports.checkForUpdatesNow();
+        assert.match(ctx.__toasts.at(-1).text, expected, `${code} 这一档要说清是哪件事`);
+        if (retry) assert.match(ctx.__toasts.at(-1).text, retry, `${code} 是瞬时失败，许说稍后再试`);
+        else assert.doesNotMatch(ctx.__toasts.at(-1).text, /稍后再试/, `${code} 不是瞬时失败`);
+    }
+});
+
+test("报出的版本这台设备升不动时，弹窗不给「更新并重启」而是说一句能照着做的", () => {
+    const ctx = loadUpdateDialogContext({
+        has_ledger: true,
+        newer: true,
+        latest_tag: "v9.9.9",
+        current_version: "1.0.0",
+        error: "",
+        lane: "http",
+        degraded: true,
+        detail: "git_missing: PATH 里没有 git",
+        actionable: false,
+    });
+    ctx.__testExports.openUpdateReleaseDialog();
+
+    assert.equal(ctx.__testExports.U.updateReleaseApply.disabled, true, "升不动的新版本不该递出那颗按钮");
+    assert.match(ctx.__testExports.U.updateReleaseHint.textContent, /找不着 git/);
+    assert.match(ctx.__testExports.U.updateReleaseHint.textContent, /PATH/);
+
+    ctx.__testExports.closeUpdateReleaseDialog();
+    assert.equal(
+        ctx.__testExports.U.updateReleaseHint.textContent,
+        UPDATE_RELEASE_HINT_PAGE_TEXT,
+        "关掉弹窗要换回页面自己那句，不改掉下一次打开的默认"
+    );
+});
+
+test("换车道读到的版本仍点亮，但 title 留下为什么换了车道", () => {
+    const api = stubbedUpdateApi();
+    const title = api.updateSettingsButtonTitle({
+        has_ledger: true,
+        newer: true,
+        latest_tag: "v9.9.9",
+        current_version: "1.0.0",
+        error: "",
+        degraded: true,
+        detail: "git_missing: PATH 里没有 git",
+        actionable: false,
+        checked_at: "2026-11-01T23:33:43+08:00",
+    });
+    assert.match(title, /发现新版本 v9\.9\.9/);
+    assert.match(title, /主车道没读通，这一版读自发布页：git_missing/);
+    assert.match(title, /本机更新车道跑不起来/);
+});
+

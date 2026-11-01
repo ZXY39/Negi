@@ -659,10 +659,24 @@ def _describe_model_route(config, scope: str) -> str:
 
 def _print_release_status() -> None:
     """Report the local version against the newest release tag. Silent when the
-    remote cannot be read, so an offline device gets no false 'up to date'."""
-    from g3ku.update_check import fetch_latest_release_tag, parse_version
+    remote cannot be read, so an offline device gets no false 'up to date'.
 
-    latest_tag = fetch_latest_release_tag(Path.cwd())
+    读的是**本项目根**而不是当前工作目录：`negi status` 可以在任何目录下敲，按 cwd 判
+    "是不是 git 检出"会让它读到别的仓库的标签。档位与网页红点读同一个解析结果，
+    两边不会各说各话。
+    """
+    from g3ku.update_check import parse_version, resolve_latest_release
+
+    git_path = ""
+    try:
+        from g3ku.config.loader import load_config
+
+        section = getattr(load_config(), "update_check", None)
+        git_path = str(getattr(section, "git_path", "") or "") if section is not None else ""
+    except Exception:
+        git_path = ""
+    result = resolve_latest_release(git_path=git_path)
+    latest_tag = str(result.get("tag") or "")
     if not latest_tag:
         return
     latest = parse_version(latest_tag)

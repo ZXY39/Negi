@@ -6,13 +6,23 @@ from types import SimpleNamespace
 import pytest
 
 from g3ku.update_check import (
+    CODE_GIT_MISSING,
+    CODE_NO_RELEASE_TAG,
+    CODE_NOT_A_CHECKOUT,
+    CODE_REMOTE_UNREACHABLE,
+    CODE_TIMEOUT,
     REMOTE_UNREACHABLE,
     build_ledger_payload,
     check_is_due,
     fetch_latest_release_tag,
+    is_git_checkout,
     latest_release_tag,
+    latest_tag_from_release_target,
+    origin_repo_slug,
     parse_version,
     read_update_ledger,
+    resolve_latest_release,
+    retry_gate_seconds,
     run_update_check,
 )
 
@@ -28,6 +38,18 @@ def _isolate_update_files(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(
         "g3ku.update_check.apply_result_path", lambda: tmp_path / "update-apply-result.json"
     )
+
+
+@pytest.fixture(autouse=True)
+def _upgrade_lane_available(monkeypatch):
+    """默认把"这台设备升得动"桩成成立，需要它的用例再自己改。
+
+    apply 端点动手前先证这条车道能跑（git 检出靠安装脚本按名字调 git），而测试机的
+    PATH 里有没有 git 不该决定这批用例的结论。
+    """
+    import main.api.update_rest as update_api
+
+    monkeypatch.setattr(update_api, "upgrade_lane_available", lambda project_root=None: (True, ""))
 
 
 def test_parse_version_accepts_bare_and_prefixed():
@@ -69,11 +91,16 @@ def test_fetch_returns_none_without_origin(tmp_path: Path):
     assert fetch_latest_release_tag(tmp_path, timeout=10.0) is None
 
 
+def _git_result(tag: str = "v9.9.9", **extra):
+    """车道解析的成功外形，给只关心台账与闸门的用例用。"""
+    return {"tag": tag, "lane": "git", "code": "", "detail": "", "checkout": True, "actionable": True, "degraded": False, **extra}
+
+
 def test_auto_pass_writes_ledger_and_second_pass_skips_network(tmp_path: Path, monkeypatch):
     calls = []
     monkeypatch.setattr(
-        "g3ku.update_check.fetch_latest_release_tag",
-        lambda root, timeout=2.0: calls.append(1) or "v9.9.9",
+        "g3ku.update_check.resolve_latest_release",
+        lambda **kwargs: calls.append(kwargs) or _git_result(),
     )
     ledger_file = tmp_path / "update-check.json"
 
@@ -81,6 +108,8 @@ def test_auto_pass_writes_ledger_and_second_pass_skips_network(tmp_path: Path, m
     assert first["newer"] is True
     assert first["latest_tag"] == "v9.9.9"
     assert first["error"] == ""
+    assert first["lane"] == "git"
+    assert first["actionable"] is True
     assert read_update_ledger(ledger_file)["latest_tag"] == "v9.9.9"
 
     second = run_update_check(source="auto", interval_seconds=3600.0, ledger_file=ledger_file)
@@ -93,12 +122,16 @@ def test_auto_pass_writes_ledger_and_second_pass_skips_network(tmp_path: Path, m
 
 
 def test_unreachable_remote_records_error_not_up_to_date(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr("g3ku.update_check.fetch_latest_release_tag", lambda root, timeout=2.0: None)
+    monkeypatch.setattr(
+        "g3ku.update_check.resolve_latest_release",
+        lambda **kwargs: {"tag": "", "lane": "", "code": CODE_REMOTE_UNREACHABLE, "detail": "boom", "checkout": True, "actionable": True, "degraded": False},
+    )
     payload = run_update_check(source="auto", interval_seconds=1.0, ledger_file=tmp_path / "update-check.json")
     assert payload["latest_tag"] == ""
     assert payload["newer"] is False
     assert payload["error"] == REMOTE_UNREACHABLE
-    assert build_ledger_payload(None, source="auto")["error"] == REMOTE_UNREACHABLE
+    assert payload["detail"] == "boom"
+    assert build_ledger_payload({"tag": "", "code": CODE_REMOTE_UNREACHABLE}, source="auto")["error"] == REMOTE_UNREACHABLE
 
 
 def test_check_is_due_treats_missing_and_malformed_as_due():
@@ -677,7 +710,10 @@ def test_release_tag_probe_never_opens_its_own_console_window(monkeypatch) -> No
     monkeypatch.setattr(subprocess, "run", _fake_run)
 
     assert fetch_latest_release_tag(Path.cwd()) is None
-    assert captured["command"][:2] == ["git", "ls-remote"]
+    # git 既可能是 PATH 里那个名字，也可能是按注册表/默认位置解析出的绝对路径；
+    # 无论哪一种，这条探测都不许自己分配控制台。
+    assert os.path.basename(captured["command"][0]).lower() in {"git", "git.exe"}
+    assert captured["command"][1] == "ls-remote"
     if os.name == "nt":
         assert captured["kwargs"].get("creationflags") == subprocess.CREATE_NO_WINDOW
     else:
@@ -828,3 +864,220 @@ async def test_release_notes_endpoint_checks_the_ref_shape(monkeypatch):
     )
     result = await update_api.update_release_notes(ref="v1.2.3")
     assert result["item"]["body"] == "这一版改了什么"
+
+
+def _fake_lanes(
+    monkeypatch,
+    *,
+    git=None,
+    http=None,
+    checkout=True,
+    git_exe="git",
+    on_path=True,
+    slug="ZXY39/Negi",
+):
+    """把两条车道与三条环境判据桩成指定形状，返回每条被调了几次。
+
+    用例不许真联网，也不许靠测试机有没有 git 得出结论——这里把"能不能升"与"读到谁"
+    都变成显式输入。
+    """
+    hits = {"git": 0, "http": 0}
+
+    def _git(root, exe, timeout=2.0):
+        hits["git"] += 1
+        return git if git is not None else (None, CODE_REMOTE_UNREACHABLE, "stub")
+
+    def _http(slug_arg, timeout=8.0):
+        hits["http"] += 1
+        return http if http is not None else (None, CODE_REMOTE_UNREACHABLE, "stub")
+
+    monkeypatch.setattr("g3ku.update_check._git_lane", _git)
+    monkeypatch.setattr("g3ku.update_check._http_lane", _http)
+    monkeypatch.setattr("g3ku.update_check.is_git_checkout", lambda root=None: checkout)
+    monkeypatch.setattr("g3ku.update_check.resolve_git_executable", lambda configured="": git_exe)
+    monkeypatch.setattr("g3ku.update_check.git_is_on_path", lambda: on_path)
+    monkeypatch.setattr("g3ku.update_check.origin_repo_slug", lambda root=None: slug)
+    return hits
+
+
+def test_checkout_with_git_answers_from_the_git_lane_and_does_not_web(monkeypatch):
+    hits = _fake_lanes(monkeypatch, git=("v9.9.9", "", "ls-remote"))
+    result = resolve_latest_release()
+    assert result["tag"] == "v9.9.9"
+    assert result["lane"] == "git"
+    assert result["code"] == ""
+    assert result["degraded"] is False
+    assert hits == {"git": 1, "http": 0}, "主车道读到了就不该再花第二次网络读取"
+
+
+def test_device_without_git_still_reads_the_version_but_says_it_cannot_apply(monkeypatch):
+    """本机形状：有 .git、PATH 里没有 git ⇒ 读用发布页，报出的这一版自己升不动。"""
+    hits = _fake_lanes(monkeypatch, git_exe=None, on_path=False, http=("v9.9.9", "", "releases/latest"))
+    result = resolve_latest_release()
+    assert result["tag"] == "v9.9.9"
+    assert result["lane"] == "http"
+    assert result["degraded"] is True
+    assert CODE_GIT_MISSING in result["detail"]
+    assert result["actionable"] is False, "安装脚本按名字找 git，读到了也升不上去"
+    assert hits == {"git": 0, "http": 1}, "没有 git 就不该去起那个必然失败的子进程"
+
+
+def test_archive_device_is_actionable_even_with_no_git_anywhere(monkeypatch):
+    """归档/离线套件装出来的设备没有 .git，升级走 archive/<ref>.zip，本来就不需要 git。"""
+    _fake_lanes(monkeypatch, checkout=False, git_exe=None, on_path=False, http=("v9.9.9", "", "x"))
+    result = resolve_latest_release()
+    assert result["lane"] == "http"
+    assert result["actionable"] is True
+    assert CODE_NOT_A_CHECKOUT in result["detail"]
+
+
+def test_non_github_origin_does_not_borrow_the_canonical_release(monkeypatch):
+    """origin 不是 GitHub 地址时不回落到发布页：那条读的是规范仓库，本机升的是自己的 origin。"""
+    hits = _fake_lanes(monkeypatch, slug=None)
+    result = resolve_latest_release()
+    assert result["tag"] == ""
+    assert result["code"] == CODE_REMOTE_UNREACHABLE
+    assert hits == {"git": 1, "http": 0}, "报一个这台设备取不到的版本比不报更坏"
+
+
+@pytest.mark.parametrize(
+    ("git_outcome", "expected_code"),
+    [
+        ((None, CODE_TIMEOUT, "git ls-remote 超过 2 秒"), CODE_TIMEOUT),
+        ((None, CODE_GIT_MISSING, "FileNotFoundError"), CODE_GIT_MISSING),
+        ((None, CODE_REMOTE_UNREACHABLE, "fatal: not a git repository"), CODE_REMOTE_UNREACHABLE),
+        ((None, CODE_NO_RELEASE_TAG, "远端没有 vX.Y.Z 形状的标签"), CODE_NO_RELEASE_TAG),
+    ],
+)
+def test_each_failure_keeps_its_own_code(monkeypatch, git_outcome, expected_code):
+    """四档失败各留各的码：都压成 remote_unreachable 就等于没告诉用户该修什么。"""
+    _fake_lanes(monkeypatch, git=git_outcome, http=(None, expected_code, "stub"))
+    result = resolve_latest_release()
+    assert result["code"] == expected_code
+    payload = build_ledger_payload(result, source="manual")
+    assert payload["error"] == expected_code
+    assert payload["newer"] is False, "读不到不许被渲染成已是最新"
+
+
+def test_latest_tag_only_reads_the_shape_a_release_page_redirect_carries():
+    assert latest_tag_from_release_target("https://github.com/ZXY39/Negi/releases/tag/v1.11.5") == "v1.11.5"
+    assert latest_tag_from_release_target("/ZXY39/Negi/releases/tag/v1.4") is None
+    assert latest_tag_from_release_target("/ZXY39/Negi/releases") is None
+    assert latest_tag_from_release_target("") is None
+
+
+def test_failed_pass_retries_on_the_short_gate(tmp_path: Path, monkeypatch):
+    """上一次什么都没读到 ⇒ 自动道按 15 分钟重试，而不是等满五小时。"""
+    hits = _fake_lanes(monkeypatch, git_exe=None, http=(None, CODE_REMOTE_UNREACHABLE, "stub"))
+    ledger_file = tmp_path / "update-check.json"
+
+    first = run_update_check(source="auto", interval_seconds=5 * 3600.0, ledger_file=ledger_file)
+    assert first["error"] == CODE_REMOTE_UNREACHABLE
+    assert hits["http"] == 1
+
+    second = run_update_check(source="auto", interval_seconds=5 * 3600.0, ledger_file=ledger_file)
+    assert second["checked_at"] == first["checked_at"]
+    assert hits["http"] == 1, "刚失败过就又被长间隔挡住 ⇒ 回退闸门没生效"
+
+    forced = run_update_check(source="manual", interval_seconds=5 * 3600.0, ledger_file=ledger_file, force=True)
+    assert forced["source"] == "manual"
+    assert hits["http"] == 2, "手动点击永远绕开闸门"
+
+    assert retry_gate_seconds(first, 5 * 3600.0) == 900.0
+    read_a_version = build_ledger_payload(_git_result(), source="auto")
+    assert retry_gate_seconds(read_a_version, 5 * 3600.0) == 5 * 3600.0
+    assert retry_gate_seconds(None, 5 * 3600.0) == 5 * 3600.0
+    assert retry_gate_seconds(read_a_version, 60.0) == 60.0, "配置比回退值更短时听配置的"
+
+
+def test_git_config_parsing_uses_this_layers_origin_only(tmp_path: Path, monkeypatch):
+    """只读这一层的 `.git/config`，且只取 `[remote "origin"]` 那一段。
+
+    向上找父仓库是 git 的默认语义，也是"把别人仓库的标签当自己的最新版本"的来路；
+    这台设备上就真有这种目录形状，所以这里用真目录验证判据。
+    """
+    parent = tmp_path / "ancestor"
+    (parent / ".git").mkdir(parents=True)
+    (parent / ".git" / "config").write_text(
+        '[remote "origin"]\n\turl = https://github.com/other/SomeoneElses.git\n',
+        encoding="utf-8",
+    )
+    nested = parent / "Negi"
+    nested.mkdir()
+    assert is_git_checkout(nested) is False, "子目录自己没有 .git 就不算 git 检出"
+    assert origin_repo_slug(nested) is None
+
+    checkout = tmp_path / "device"
+    (checkout / ".git").mkdir(parents=True)
+    (checkout / ".git" / "config").write_text(
+        '[core]\n\trepositoryformatversion = 0\n'
+        '[remote "upstream"]\n\turl = https://example.com/nothing.git\n'
+        '[remote "origin"]\n\turl = git@github.com:ZXY39/Negi.git\n'
+        '[branch "main"]\n\tremote = origin\n',
+        encoding="utf-8",
+    )
+    assert is_git_checkout(checkout) is True
+    assert origin_repo_slug(checkout) == "ZXY39/Negi"
+
+
+async def test_status_payload_carries_the_lane_and_the_live_apply_verdict(monkeypatch, tmp_path: Path):
+    """状态行要说清"哪条车道读到的"和"这一版本机升不升得动"。"""
+    import json
+
+    import main.api.update_rest as update_api
+
+    ledger_file = tmp_path / "update-check.json"
+    ledger_file.write_text(
+        json.dumps(
+            {
+                "checked_at": "2026-11-01T23:33:43+08:00",
+                "current_version": "1.11.4",
+                "latest_tag": "v99.0.0",
+                "newer": True,
+                "source": "manual",
+                "error": "",
+                "lane": "http",
+                "detail": "git_missing: PATH、git_path 与常见安装位置都没有 git",
+                "checkout": True,
+                "actionable": False,
+                "degraded": True,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("g3ku.update_check.ledger_path", lambda: ledger_file)
+    monkeypatch.setattr(update_api, "upgrade_lane_available", lambda project_root=None: (False, CODE_GIT_MISSING))
+
+    item = update_api._status_payload()
+    assert item["newer"] is True
+    assert item["error"] == ""
+    assert item["lane"] == "http"
+    assert item["degraded"] is True
+    assert CODE_GIT_MISSING in item["detail"]
+    assert item["actionable"] is False, "actionable 每次读都现场判，不照抄台账那次检查的环境"
+
+
+async def test_apply_refuses_before_spawning_when_this_device_cannot_run_git(monkeypatch, tmp_path: Path):
+    """读到新版但本机没有 git ⇒ 拒绝，且不花远端读取、不踢执行体。
+
+    放行下去的代价是实测过的那条链：关停服务 → 安装脚本找不到 git 非零退出 → 再把旧
+    版本拉回来，用户白等一次停机，终态只剩一句 upgrade_failed。
+    """
+    from fastapi import HTTPException
+
+    import main.api.update_rest as update_api
+
+    spawned: list[str] = []
+    checked: list[dict] = []
+    monkeypatch.setattr(update_api, "spawn_runner", lambda ref, port=None, pause_running_work=True: spawned.append(ref))
+    monkeypatch.setattr(update_api, "run_update_check", lambda **kwargs: checked.append(kwargs) or _git_result())
+    monkeypatch.setattr(update_api, "upgrade_lane_available", lambda project_root=None: (False, CODE_GIT_MISSING))
+
+    with pytest.raises(HTTPException) as exc:
+        await update_api.update_apply(_FakeRequest(18999), {"ref": "v99.0.0"})
+    assert exc.value.status_code == 409
+    assert exc.value.detail["code"] == "git_unavailable"
+    assert spawned == [] and checked == [], "拒绝要发生在花远端读取和踢执行体之前"
+
+

@@ -749,6 +749,7 @@ const U = {
     updateReleaseDialog: document.getElementById("update-release-dialog"),
     updateReleaseTitle: document.getElementById("update-release-title"),
     updateReleaseNotes: document.getElementById("update-release-notes"),
+    updateReleaseHint: document.getElementById("update-release-hint"),
     updateReleaseCancel: document.getElementById("update-release-cancel-btn"),
     updateReleaseApply: document.getElementById("update-release-apply-btn"),
     configBundleBackdrop: document.getElementById("config-bundle-backdrop"),
@@ -10070,6 +10071,21 @@ const UPDATE_APPLY_OUTCOME_TEXT = {
     not_this_service: "升级未完成：端口上没有本服务",
 };
 
+// 检查失败的每一档各说一句各的话：只有"没通/超时"配得上"稍后再试"。结构性失败
+// （这台设备没有 git、这份安装不是 git 检出、远端没有发布标签）重试多少次都是同一句
+// 谎话，用户会被留在"再点一次看看"里。
+const UPDATE_CHECK_ERROR_TEXT = {
+    git_missing: "这台设备找不着 git，发布页那条路也没读通。",
+    not_a_checkout: "这份安装不是 git 检出，发布页那条路也没读通。",
+    remote_unreachable: "读不到 GitHub，稍后再试。",
+    timeout: "远端读超时，稍后再试。",
+    no_release_tag: "远端没有 vX.Y.Z 形状的发布标签。",
+};
+
+function updateCheckErrorText(item) {
+    return UPDATE_CHECK_ERROR_TEXT[String(item?.error || "").trim()] || "读不到远端标签，稍后再试。";
+}
+
 function updateApplyOutcomeText(item) {
     // apply 端点回的是"已踢起执行体"，不是"升级成功"。执行体把终态写进结果文件，
     // 这里照实说，否则失败时界面永远停在"正在重启"。ok 与没有记录都不占这一行。
@@ -10091,12 +10107,16 @@ function updateSettingsButtonTitle(item) {
     if (!item?.has_ledger) {
         parts.push("还没查过远端标签；点「检查更新」立即查一次。");
     } else if (item.error) {
-        parts.push(`上次检查失败：${item.error}`);
+        parts.push(`上次检查失败：${item.error}${item.detail ? `（${item.detail}）` : ""}`);
     } else if (item.newer) {
         parts.push(`发现新版本 ${item.latest_tag}（当前 v${item.current_version}），点开看发布说明`);
     } else {
         parts.push(`已是最新 v${item.current_version}`);
     }
+    // 主车道失败、发布页读到了：版本号是对的，但这一行要留下"为什么换了车道"的证据，
+    // 否则 git 装坏了这类故障在界面上和正常状态长得一模一样。
+    if (item?.degraded && item?.detail) parts.push(`主车道没读通，这一版读自发布页：${item.detail}`);
+    if (item?.newer && item?.actionable === false) parts.push("本机更新车道跑不起来：git 不在 PATH 上");
     if (item?.has_ledger) parts.push(`检查于 ${formatUpdateCheckedAt(item.checked_at)}`);
     const apply = item?.last_apply;
     const applyNote = apply && apply.outcome && apply.outcome !== "ok"
@@ -10153,7 +10173,7 @@ async function checkForUpdatesNow() {
         if (item?.newer) {
             showToast({ title: "发现新版本", text: `${item.latest_tag}（当前 v${item.current_version}）`, kind: "info" });
         } else if (item?.error) {
-            showToast({ title: "检查失败", text: "读不到远端标签，稍后再试。", kind: "warn" });
+            showToast({ title: "检查失败", text: updateCheckErrorText(item), kind: "warn" });
         }
     } catch (error) {
         showToast({ title: "检查失败", text: String(error?.message || error), kind: "error" });
@@ -10246,6 +10266,9 @@ function watchApplyUpdateFinish(targetVersion, { intervalMs = UPDATE_APPLY_WATCH
 }
 
 let updateReleaseRequestSeq = 0;
+// 提示那句写在 HTML 里，这里只把它读来当底稿：弹窗只在"这台设备现在升不动"时改它，
+// 关掉换回原句。句子抄两份进 JS 迟早会和页面上那句分叉。
+const UPDATE_RELEASE_HINT_DEFAULT_TEXT = U.updateReleaseHint ? U.updateReleaseHint.textContent : "";
 
 function isUpdateReleaseOpen() {
     return !!U.updateReleaseBackdrop && !U.updateReleaseBackdrop.hidden;
@@ -10259,6 +10282,7 @@ function closeUpdateReleaseDialog({ restoreFocus = true } = {}) {
     U.updateReleaseBackdrop.classList.remove("is-open");
     if (U.updateReleaseApply) U.updateReleaseApply.disabled = false;
     if (U.updateReleaseCancel) U.updateReleaseCancel.disabled = false;
+    if (U.updateReleaseHint) U.updateReleaseHint.textContent = UPDATE_RELEASE_HINT_DEFAULT_TEXT;
     if (restoreFocus) U.projectSettingsCheckUpdate?.focus?.();
     return true;
 }
@@ -10293,7 +10317,15 @@ function openUpdateReleaseDialog() {
     const tag = String(item.latest_tag || "").trim();
     if (U.updateReleaseTitle) U.updateReleaseTitle.textContent = tag ? `新版本 ${tag}` : "新版本";
     setUpdateReleaseNotes("正在读取发布说明…");
-    if (U.updateReleaseApply) U.updateReleaseApply.disabled = false;
+    // 报出去的这一版必须是这台设备升得上去的那一版：升不动时不给那颗按钮，而是说一句
+    // 能照着做的真话。放行下去只会让用户白等一次停机再收到 upgrade_failed。
+    const actionable = item.actionable !== false;
+    if (U.updateReleaseApply) U.updateReleaseApply.disabled = !actionable;
+    if (U.updateReleaseHint) {
+        U.updateReleaseHint.textContent = actionable
+            ? UPDATE_RELEASE_HINT_DEFAULT_TEXT
+            : "这台设备找不着 git，更新跑不起来：把 git 放回 PATH 后重启服务，再点「更新并重启」。";
+    }
     if (U.updateReleaseCancel) U.updateReleaseCancel.disabled = false;
     U.updateReleaseBackdrop.hidden = false;
     U.updateReleaseBackdrop.classList.add("is-open");

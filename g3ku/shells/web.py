@@ -738,16 +738,20 @@ async def _reconcile_external_outbox_once() -> tuple[int, int]:
     return (republished, retired)
 
 
-def _update_check_settings() -> tuple[bool, float]:
-    """(enabled, interval_seconds) from live config, never raising."""
+def _update_check_settings() -> tuple[bool, float, str]:
+    """(enabled, interval_seconds, git_path) from live config, never raising."""
     try:
         config, _revision, _changed = get_runtime_config()
         section = getattr(config, 'update_check', None)
         if section is None:
-            return True, DEFAULT_INTERVAL_SECONDS
-        return bool(section.enabled), max(1.0, float(section.interval_hours) * 3600.0)
+            return True, DEFAULT_INTERVAL_SECONDS, ""
+        return (
+            bool(section.enabled),
+            max(1.0, float(section.interval_hours) * 3600.0),
+            str(getattr(section, 'git_path', '') or ''),
+        )
     except Exception:
-        return True, DEFAULT_INTERVAL_SECONDS
+        return True, DEFAULT_INTERVAL_SECONDS, ""
 
 
 async def _run_update_check_pass(source: str) -> None:
@@ -758,11 +762,13 @@ async def _run_update_check_pass(source: str) -> None:
     are swallowed by design: no update information must never disturb the
     outbox recovery lane this rides.
     """
-    enabled, interval_seconds = _update_check_settings()
+    enabled, interval_seconds, git_path = _update_check_settings()
     if not enabled:
         return
     try:
-        await asyncio.to_thread(run_update_check, source=source, interval_seconds=interval_seconds)
+        await asyncio.to_thread(
+            run_update_check, source=source, interval_seconds=interval_seconds, git_path=git_path
+        )
     except asyncio.CancelledError:
         raise
     except Exception:

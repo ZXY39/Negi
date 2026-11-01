@@ -1226,10 +1226,18 @@ class UpdateCheckConfig(Base):
     bus is absent. A check reads one remote tag list and never reports the
     local version, so an offline or non-GitHub remote simply leaves the ledger
     stale — which the UI renders as "unknown", never as "up to date".
+
+    ``git_path`` points the tag check at a git binary that is not reachable by
+    name (a portable install, or a machine whose PATH lost it). It is a read
+    lane only: the upgrade itself runs through the installer script, which
+    still looks git up by name, so a device with ``git_path`` set can read a
+    new release but cannot apply it until git is back on PATH — and the UI says
+    exactly that instead of offering a doomed button.
     """
 
     enabled: bool = True
     interval_hours: float = Field(default=5.0, ge=0.1, le=24.0)
+    git_path: str = ""
 
 
 class Config(BaseSettings):

@@ -95,6 +95,10 @@
 
 表情包发送预算：`maxPerReply`（默认 1；0 = 关闭发送但标记仍会被剥掉、不会漏进正文；上限 4，与单条渠道消息的附件预算 `MAX_CHANNEL_ATTACHMENTS` 对齐）。属于「调过才落盘」的可选旋钮，同时在豁免前缀里——存量 `config.json` 没有这一节必须还能加载。清单本身不在这里配置：它由 `<workspace>/stickers/` 的目录 + 各包 `registry.json` 得到（描述写入上限与注入量提醒口径都在代码常数里，见 `web-and-admin.md`「Sticker Pack Page And Admin Contract」）。这个值能在网页的 表情包 页直接改（`PUT /api/resources/stickers/settings`，落盘后走同一条 runtime refresh）。
 
+### `update_check`
+
+设备自己查新版本用的三个旋钮：`enabled`（默认开；关掉它，自动轮询与网页上的「检查更新」都拒成 `update_check_disabled`）、`interval_hours`（默认 5，界限 0.1–24）、`git_path`（默认空）。`git_path` 只喂**读**这条车道：git 没在 PATH 上、又装在非标准位置的设备用它点名可执行文件，而报出来的那一版仍要 PATH 里按名字找得到 git 才允许点「更新并重启」——升级的执行体是安装脚本，它自己按名字调 git，界面上那颗按钮不能承诺脚本做不到的事。车道选取、失败档位与回退节拍归 `operations-and-maintenance.md`，端点与界面读数归 `web-and-admin.md`。该节属于加载器「显式字段校验」的豁免前缀（`updateCheck`），存量 `config.json` 不写这一节也能启动；落盘键按 camelCase（`gitPath`），环境变量形状是 `G3KU_UPDATE_CHECK__GIT_PATH`。
+
 ## 3. 配置加载时做了什么
 
 `load_config()` 不是简单读 JSON，它会做很多迁移和约束检查：
