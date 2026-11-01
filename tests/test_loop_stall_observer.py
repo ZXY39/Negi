@@ -61,17 +61,19 @@ def test_observe_loop_stall_fires_once_per_episode_and_rearms() -> None:
     monitor = _monitor(alarms=alarms, stacks=stacks)
 
     assert monitor.observe_loop_stall(500) == (False, False)
-    # 抓栈线 10 s，告警线 30 s：先用较低的那条留下现场。
+    # 抓栈线 10 s，告警线 60 s：先用较低的那条留下现场。
     assert monitor.observe_loop_stall(11_000) == (False, True)
-    assert monitor.observe_loop_stall(31_000) == (True, False)
+    # 启动窗口实测到过 29.3 s：留证据，但不打扰。
+    assert monitor.observe_loop_stall(31_000) == (False, False)
+    assert monitor.observe_loop_stall(61_000) == (True, False)
     # 同一次停摆不重复发。
-    assert monitor.observe_loop_stall(45_000) == (False, False)
+    assert monitor.observe_loop_stall(90_000) == (False, False)
     assert stacks == [11_000]
-    assert alarms == [31_000]
+    assert alarms == [61_000]
 
     # 回落即重新武装；下一次停摆两条各再触发一次。
     assert monitor.observe_loop_stall(200) == (False, False)
-    assert monitor.observe_loop_stall(31_000) == (True, True)
+    assert monitor.observe_loop_stall(61_000) == (True, True)
     assert len(alarms) == 2 and len(stacks) == 2
 
 
@@ -86,7 +88,7 @@ def test_loop_stall_hook_failure_does_not_break_the_sampler() -> None:
         on_loop_stack=_boom,
     )
 
-    assert monitor.observe_loop_stall(31_000) == (True, True)
+    assert monitor.observe_loop_stall(61_000) == (True, True)
 
 
 def test_payloads_pick_one_task_per_session(tmp_path: Path) -> None:
