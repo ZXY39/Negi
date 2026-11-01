@@ -234,6 +234,32 @@ def is_prompt_visible_message(message: Any) -> bool:
     return metadata.get('prompt_visible') is not False
 
 
+def injected_heartbeat_event_keys(session: Any) -> set[str]:
+    """事件束已经进入会话上下文的 dedupe key 集合。
+
+    心跳事件的消费点是"成功注入上下文"，不是回合成功；判据必须只有一份，否则
+    session_agent 的注入查重与 session_service 的重投过滤会各自漂移。
+    """
+    keys: set[str] = set()
+    for message in list(getattr(session, 'messages', []) or []):
+        if not isinstance(message, dict):
+            continue
+        metadata = message_metadata(message)
+        if str(metadata.get('internal_prompt_kind') or '').strip() != 'heartbeat_event_bundle':
+            continue
+        if not is_prompt_visible_message(message):
+            continue
+        raw = metadata.get('heartbeat_event_dedupe_keys')
+        if isinstance(raw, (list, tuple, set)):
+            for item in raw:
+                key = str(item or '').strip()
+                if key:
+                    keys.add(key)
+        elif isinstance(raw, str) and raw.strip():
+            keys.add(raw.strip())
+    return keys
+
+
 def is_ui_visible_message(message: Any) -> bool:
     role = message_role(message)
     if role not in {'user', 'assistant', 'tool'}:

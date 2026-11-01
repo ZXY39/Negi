@@ -7,7 +7,7 @@ import re
 import time
 import uuid
 from collections import deque
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -84,6 +84,31 @@ _INTERNAL_PROMPT_KINDS = frozenset(
     {"heartbeat_rule", "heartbeat_event_bundle", "cron_rule", "cron_event_bundle"}
 )
 _TASK_ID_PATTERN = re.compile(r"task:[A-Za-z0-9][\w:-]*")
+
+
+@dataclass(slots=True)
+class InternalPromptInjectionResult:
+    """心跳/cron 内部提示词是否已经进入会话上下文。
+
+    ``event_bundle_added`` 是内存上下文的事实：模型下一跳会看到它。``persisted``
+    只表示转录写盘成功；写盘失败不回滚内存注入，否则重试会叠第二份事件束。
+    """
+
+    event_bundle_added: bool = False
+    event_bundle_already_present: bool = False
+    persisted: bool = False
+    event_dedupe_keys: tuple[str, ...] = ()
+    error: str = ""
+
+
+class InternalPromptInjectionError(RuntimeError):
+    """事件束没有进入上下文；调用方可以保留事件并重试注入。"""
+
+    def __init__(self, message: str, *, result: InternalPromptInjectionResult | None = None) -> None:
+        super().__init__(message)
+        self.result = result
+
+
 _ASSISTANT_STREAM_FLUSH_WINDOW_SECONDS = 0.075
 # 思考分片比正文碎得多（实测短回答也吃掉 102 个分片），所以窗口放宽到 250ms：
 # 一屏能读完一行，帧数又不会把 WS 打成每秒十几帧。
@@ -1796,7 +1821,13 @@ class RuntimeAgentSession:
         except Exception:
             logger.debug("Failed-turn boundary snapshot skipped for {}", session_key)
 
-    def _discard_internal_prompt_messages(self, persisted_session: Any, turn_id: str) -> int:
+    def _discard_internal_prompt_messages(
+        self,
+        persisted_session: Any,
+        turn_id: str,
+        *,
+        preserve_kinds: set[str] | frozenset[str] | None = None,
+    ) -> int:
         """把指定 turn 的内部提示词消息（心跳/cron 规则 system + 事件束 user）翻成 discarded。
 
         这些消息在模型调用前就由 `_persist_internal_prompt_messages` 以 completed 落盘；
@@ -1820,7 +1851,10 @@ class RuntimeAgentSession:
                 continue
             if str(metadata.get(_TRANSCRIPT_TURN_ID_KEY) or "").strip() != resolved_turn_id:
                 continue
-            if str(metadata.get("internal_prompt_kind") or "").strip() not in _INTERNAL_PROMPT_KINDS:
+            kind = str(metadata.get("internal_prompt_kind") or "").strip()
+            if kind not in _INTERNAL_PROMPT_KINDS:
+                continue
+            if preserve_kinds and kind in preserve_kinds:
                 continue
             if str(metadata.get(_TRANSCRIPT_STATE_KEY) or "").strip().lower() == _TRANSCRIPT_STATE_DISCARDED:
                 continue
@@ -2123,17 +2157,58 @@ class RuntimeAgentSession:
             )
         return persisted_session
 
+    @staticmethod
+    def _normalize_event_dedupe_keys(value: Any) -> tuple[str, ...]:
+        raw_items = value if isinstance(value, (list, tuple, set)) else [value]
+        keys: list[str] = []
+        seen: set[str] = set()
+        for item in raw_items:
+            key = str(item or "").strip()
+            if key and key not in seen:
+                seen.add(key)
+                keys.append(key)
+        return tuple(keys)
+
+    @staticmethod
+    def _internal_prompt_text_present(
+        persisted_session: Any,
+        *,
+        kind: str,
+        text: str,
+    ) -> bool:
+        from g3ku.runtime.web_ceo_sessions import is_prompt_visible_message
+
+        expected_kind = str(kind or "").strip()
+        expected_text = str(text or "").strip()
+        if not expected_kind or not expected_text:
+            return False
+        for message in list(getattr(persisted_session, "messages", []) or []):
+            if not isinstance(message, dict):
+                continue
+            if not is_prompt_visible_message(message):
+                continue
+            metadata = message.get("metadata")
+            metadata = metadata if isinstance(metadata, dict) else {}
+            if str(metadata.get("internal_prompt_kind") or "").strip() != expected_kind:
+                continue
+            if str(message.get("content") or "").strip() == expected_text:
+                return True
+        return False
+
     async def _persist_internal_prompt_messages(
         self,
         *,
         user_input: UserInputMessage,
         internal_source: str,
-    ) -> Any | None:
+    ) -> InternalPromptInjectionResult | None:
         normalized_source = str(internal_source or "").strip().lower()
         if normalized_source not in {"heartbeat", "cron"}:
             return None
+        result = InternalPromptInjectionResult()
         persisted_session = None
         try:
+            from g3ku.runtime.web_ceo_sessions import injected_heartbeat_event_keys
+
             persisted_session = self._loop.sessions.get_or_create(self._state.session_key)
             turn_id = self._ensure_user_turn_id(user_input)
             base_metadata = self._build_turn_metadata(
@@ -2149,7 +2224,19 @@ class RuntimeAgentSession:
                     or self._history_text(user_input.content)
                     or ""
                 ).strip()
-                if rule_text:
+                event_keys = self._normalize_event_dedupe_keys(
+                    prompt_metadata.get("heartbeat_event_dedupe_keys")
+                )
+                result.event_dedupe_keys = event_keys
+                already_injected = bool(
+                    event_keys
+                    and set(event_keys).issubset(injected_heartbeat_event_keys(persisted_session))
+                )
+                if rule_text and not self._internal_prompt_text_present(
+                    persisted_session,
+                    kind="heartbeat_rule",
+                    text=rule_text,
+                ):
                     # user 角色：这一行下一回合就成历史中段的 system，而严格网关只允许
                     # 一份首位 system；ui_visible=False 的 metadata 让它继续算内部行。
                     persisted_session.add_message(
@@ -2163,7 +2250,10 @@ class RuntimeAgentSession:
                             ),
                         },
                     )
-                if event_text:
+                if already_injected:
+                    # 同一事件束只能进入上下文一次。这里不再添加；调用方据此消费队列。
+                    result.event_bundle_already_present = True
+                elif event_text:
                     persisted_session.add_message(
                         "user",
                         event_text,
@@ -2172,10 +2262,14 @@ class RuntimeAgentSession:
                             **self._internal_prompt_message_metadata(
                                 source=normalized_source,
                                 internal_prompt_kind="heartbeat_event_bundle",
-                                extra={"heartbeat_internal": True},
+                                extra={
+                                    "heartbeat_internal": True,
+                                    "heartbeat_event_dedupe_keys": list(event_keys),
+                                },
                             ),
                         },
                     )
+                    result.event_bundle_added = True
             elif normalized_source == "cron":
                 cron_job_id = str(prompt_metadata.get("cron_job_id") or "").strip()
                 from g3ku.runtime.frontdoor._ceo_support import CeoFrontDoorSupport
@@ -2221,12 +2315,15 @@ class RuntimeAgentSession:
                             ),
                         },
                     )
+                    result.event_bundle_added = True
             self._loop.sessions.save(persisted_session)
+            result.persisted = True
         except Exception as exc:
+            result.error = str(exc)
             logger.warning(
                 "Internal prompt transcript persistence skipped for {}: {}", self._state.session_key, exc
             )
-        return persisted_session
+        return result
 
     @staticmethod
     def _normalize_web_uploads(uploads: Any) -> list[dict[str, Any]]:
@@ -3863,6 +3960,8 @@ class RuntimeAgentSession:
         *,
         persist_transcript: bool = True,
         live_context: dict[str, str] | None = None,
+        internal_prompt_already_persisted: bool = False,
+        preserve_internal_event_bundle: bool = False,
     ) -> RunResult:
         from g3ku.shells.web import refresh_web_agent_runtime
 
@@ -3932,7 +4031,7 @@ class RuntimeAgentSession:
                     await self._persist_pending_user_messages(
                         user_inputs=self._current_user_batch_inputs(user_input),
                     )
-                else:
+                elif not internal_prompt_already_persisted:
                     persisted_internal_prompt = await self._persist_internal_prompt_messages(
                         user_input=user_input,
                         internal_source=internal_source,
@@ -4140,6 +4239,11 @@ class RuntimeAgentSession:
                     self._discard_internal_prompt_messages(
                         persisted_session,
                         self._current_turn_id(user_input),
+                        preserve_kinds=(
+                            {"heartbeat_event_bundle"}
+                            if preserve_internal_event_bundle
+                            else None
+                        ),
                     )
                     self._loop.sessions.save(persisted_session)
                 if internal_source is None:
@@ -4323,6 +4427,50 @@ class RuntimeAgentSession:
                 user_input,
                 persist_transcript=persist_transcript,
                 live_context=live_context,
+            )
+
+    async def prompt_heartbeat(
+        self,
+        message: str | UserInputMessage,
+        *,
+        on_injected: Callable[[InternalPromptInjectionResult], Awaitable[None]] | None = None,
+        already_injected: bool = False,
+    ) -> RunResult:
+        """心跳回合的唯一入口：注入成功后才跑模型，失败不跑。
+
+        `on_injected` 在同一把 turn lock 内、模型调用前执行；心跳服务在这里消费
+        队列/源表。注入成功之后模型再失败，不会再回到注入点重试。
+        """
+        async with self._turn_lock:
+            user_input = message if isinstance(message, UserInputMessage) else UserInputMessage(content=str(message))
+            if self._internal_prompt_source(user_input) != "heartbeat":
+                raise ValueError("prompt_heartbeat_requires_heartbeat_input")
+            if not already_injected:
+                result = await self._persist_internal_prompt_messages(
+                    user_input=user_input,
+                    internal_source="heartbeat",
+                )
+                if result is None or not (
+                    result.event_bundle_added or result.event_bundle_already_present
+                ):
+                    raise InternalPromptInjectionError(
+                        "heartbeat event bundle was not injected",
+                        result=result,
+                    )
+                if on_injected is not None:
+                    try:
+                        await on_injected(result)
+                    except Exception:
+                        # 注入已经成功；回调（队列/源表消费）失败不能把事件束撤回。
+                        logger.exception(
+                            "heartbeat injection callback failed for {}",
+                            self._state.session_key,
+                        )
+            return await self._prompt_locked(
+                user_input,
+                persist_transcript=True,
+                internal_prompt_already_persisted=True,
+                preserve_internal_event_bundle=True,
             )
 
     def _normalize_user_batch_inputs(

@@ -23,6 +23,7 @@ from g3ku.runtime.web_ceo_sessions import (
     _extract_task_ids_from_text,
     clear_inflight_turn_snapshot,
     ensure_ceo_session_metadata,
+    injected_heartbeat_event_keys,
     normalize_ceo_metadata,
 )
 from main.models import TaskRecord
@@ -1185,8 +1186,79 @@ class WebSessionHeartbeatService:
         if not events:
             return
         event_ids = {event.event_id for event in events}
-        popped = self._events.pop_many(key, event_ids=event_ids)
+        popped = self._events.consume_many(key, event_ids=event_ids)
         self._ack_task_terminal_events(popped if popped else events)
+
+    def _consume_heartbeat_events_at_injection(
+        self,
+        key: str,
+        events: list[SessionHeartbeatEvent],
+        persisted_session: Any,
+    ) -> None:
+        """事件束已进入上下文后的唯一消费点。
+
+        队列、outbox、扫描器源表、会话 dedupe key 都从这里派生。此后模型再失败
+        也不会回到这里；下一次投递只能由新 event key 触发。
+        """
+        if not events:
+            return
+        event_ids = {event.event_id for event in events}
+        self._events.consume_many(key, event_ids=event_ids)
+        self._ack_task_terminal_events(events)
+        self._ack_task_stall_events(events)
+        store = getattr(self._main_task_service, "store", None)
+        for event in events:
+            reason = str(event.reason or "").strip().lower()
+            payload = dict(event.payload or {})
+            try:
+                if reason == "frontdoor_node_message":
+                    mark = getattr(store, "mark_frontdoor_node_message_consumed", None)
+                    message_id = str(payload.get("message_id") or "").strip()
+                    if callable(mark) and message_id:
+                        mark(message_id, consumed_at=now_iso())
+                elif reason == "task_node_error":
+                    mark = getattr(store, "mark_task_node_pause_delivered", None)
+                    pause_id = int(payload.get("pause_row_id") or 0)
+                    if callable(mark) and pause_id > 0:
+                        mark(pause_id)
+                elif reason == "shutdown_resume":
+                    mark = getattr(store, "mark_shutdown_pause_entry_consumed", None)
+                    if callable(mark):
+                        mark(kind="session", ref_id=key)
+            except Exception:
+                logger.exception(
+                    "heartbeat source consume failed at injection for {} reason={} key={}",
+                    key,
+                    reason,
+                    getattr(event, "dedupe_key", ""),
+                )
+        terminal_keys = [
+            str(getattr(event, "dedupe_key", "") or "").strip()
+            for event in self._task_terminal_events(events)
+            if str(getattr(event, "dedupe_key", "") or "").strip()
+        ]
+        if terminal_keys and self._merge_handled_terminal_keys(persisted_session, terminal_keys):
+            try:
+                self._session_manager.save(persisted_session)
+            except Exception:
+                logger.exception(
+                    "heartbeat injection dedupe save failed for {}; in-memory session keeps the keys",
+                    key,
+                )
+        # 注入即消费：旧的重投计数不再适用于这批事件，下一次同 node/同 reason 的新事件
+        # 从干净预算开始。模型失败不会走到这里，因此不会把旧计数留成高水位。
+        self._reset_node_error_retry_state(events, key)
+        self._non_node_error_failure_streaks.pop(
+            (key, tuple(sorted({str(event.reason or "").strip().lower() or "heartbeat" for event in events}))),
+            None,
+        )
+        logger.info(
+            "heartbeat events consumed at injection: session={} events={}",
+            key,
+            ",".join(
+                f"{event.reason}:{getattr(event, 'dedupe_key', '')}" for event in events
+            ),
+        )
 
     def _merge_handled_terminal_keys(self, session: Any, dedupe_keys: list[str]) -> bool:
         new_keys = [
@@ -1533,6 +1605,11 @@ class WebSessionHeartbeatService:
             "heartbeat_reason": heartbeat_reason,
             "heartbeat_task_ids": [str((event.payload or {}).get("task_id") or "").strip() for event in events],
             "heartbeat_node_ids": [str((event.payload or {}).get("node_id") or "").strip() for event in events],
+            "heartbeat_event_dedupe_keys": [
+                str(getattr(event, "dedupe_key", "") or "").strip()
+                for event in events
+                if str(getattr(event, "dedupe_key", "") or "").strip()
+            ],
             "heartbeat_prompt_lane": heartbeat_lane.scope,
             "heartbeat_retrieval_query": heartbeat_lane.retrieval_query,
             "heartbeat_stable_rules_text": stable_rules_text,
@@ -1607,6 +1684,17 @@ class WebSessionHeartbeatService:
         events, handled_terminal_events = self._split_handled_terminal_events(key, events, persisted_session)
         if handled_terminal_events:
             self._consume_handled_terminal_events(key, handled_terminal_events)
+        injected_keys = injected_heartbeat_event_keys(persisted_session)
+        if injected_keys:
+            already_injected = [
+                event
+                for event in events
+                if str(getattr(event, "dedupe_key", "") or "").strip() in injected_keys
+            ]
+            if already_injected:
+                self._consume_heartbeat_events_at_injection(key, already_injected, persisted_session)
+                injected_ids = {event.event_id for event in already_injected}
+                events = [event for event in events if event.event_id not in injected_ids]
         if not events:
             return self._events.next_delay(key)
         reasons = sorted({str(event.reason or "").strip().lower() or "heartbeat" for event in events})
@@ -1618,6 +1706,16 @@ class WebSessionHeartbeatService:
         )
 
         heartbeat_turn_id = ""
+        events_injected = False
+
+        async def _on_injected(_result: Any) -> None:
+            nonlocal events_injected
+            events_injected = True
+            try:
+                self._consume_heartbeat_events_at_injection(key, events, persisted_session)
+            except Exception:
+                # 事件束已经在上下文里；消费失败不能回滚注入，下一轮用会话 key 兜底。
+                logger.exception("heartbeat injection consume failed for {}", key)
 
         async def _relay(event: AgentEvent) -> None:
             nonlocal heartbeat_turn_id
@@ -1633,8 +1731,20 @@ class WebSessionHeartbeatService:
             if serialized is not None:
                 self._publish_ceo(key, "ceo.agent.tool", serialized)
 
-        async def _run_prompt_attempt(prompt_input: UserInputMessage) -> Any:
-            prompt_task = asyncio.create_task(session.prompt(prompt_input, persist_transcript=True))
+        async def _run_prompt_attempt(prompt_input: UserInputMessage, *, inject: bool = False) -> Any:
+            prompt_heartbeat = getattr(session, "prompt_heartbeat", None)
+            if callable(prompt_heartbeat):
+                if inject:
+                    prompt_task = asyncio.create_task(
+                        prompt_heartbeat(prompt_input, on_injected=_on_injected)
+                    )
+                else:
+                    prompt_task = asyncio.create_task(
+                        prompt_heartbeat(prompt_input, already_injected=True)
+                    )
+            else:
+                # 兼容旧 fake session / 测试替身：它们没有注入边界，按注入前失败处理。
+                prompt_task = asyncio.create_task(session.prompt(prompt_input, persist_transcript=True))
             self._prompt_tasks[key] = prompt_task
             register_task = getattr(self._agent, "_register_active_task", None)
             if callable(register_task):
@@ -1648,11 +1758,19 @@ class WebSessionHeartbeatService:
 
         unsubscribe = session.subscribe(_relay)
         try:
-            result = await _run_prompt_attempt(user_input)
+            result = await _run_prompt_attempt(user_input, inject=True)
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception("heartbeat session run failed for {}", key)
+            if events_injected:
+                # 注入已经成功：事件在上下文里，模型失败不回到注入点重投。
+                logger.exception(
+                    "heartbeat turn failed after injection; events stay consumed for {}",
+                    key,
+                )
+                self._publish_ceo(key, "ceo.turn.discard", {"source": "heartbeat"})
+                return self._events.next_delay(key)
+            logger.exception("heartbeat injection failed for {}", key)
             self._publish_ceo(key, "ceo.turn.discard", {"source": "heartbeat"})
             node_error_events = self._task_node_error_events(events)
             if not node_error_events:

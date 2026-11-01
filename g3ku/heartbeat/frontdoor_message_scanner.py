@@ -3,8 +3,6 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from main.protocol import now_iso
-
 
 class FrontdoorMessageScanner:
     """Poll the durable frontdoor inbox and wake the session for pending rows."""
@@ -71,14 +69,13 @@ class FrontdoorMessageScanner:
                 'ref': str(getattr(row, 'ref', '') or ''),
             }
             try:
-                enqueue(session_id, payload)
+                accepted = bool(enqueue(session_id, payload))
             except Exception:
                 continue
-            try:
-                store.mark_frontdoor_node_message_consumed(
-                    message_id, consumed_at=now_iso()
-                )
-            except Exception:
-                pass
+            if not accepted:
+                continue
+            # 消费点不在 enqueue：heartbeat 在事件束成功注入上下文后才
+            # mark_frontdoor_node_message_consumed。这里保持 pending，注入失败下一轮重试；
+            # 队列的 in-flight dedupe 防止同一 message 在两次扫描间重复入队。
             delivered += 1
         return delivered

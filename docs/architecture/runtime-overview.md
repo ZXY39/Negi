@@ -116,6 +116,8 @@
 
 静默轮与普通可见回合共用同一条回合收尾路径，区别只在投递与文案：本轮照样落进 turns 账本（`text` 取同一条助手消息的正文；模型只给工具不给正文时退回 `reason`），工具调用照常记账。账本里没有“未收口的回合”这种状态——回合随 `finalize` 结束，下一次可见轮从新的一行开始。
 
+静默不是心跳事件的消费信号：心跳事件束在成功注入上下文时即消费，此后的 `silent`、空输出或模型失败只影响本轮的用户可见回复，不会把同一事件再重投一次。内部提示词持久化返回注入结果；失败回合保留事件束、只丢弃静态规则，事件在下一用户轮仍可见。事件流与注入点契约见 `heartbeat-system.md`「Task Node Error Delivery」与「Shutdown Resume Wake」。
+
 transcript 落一条 assistant 行，带 `silent_reply=true`、`prompt_visible=true`、`ui_visible=true` 以及 `silent_reason` / `silent_subject` / `silent_superseded_by`，正文原样保留。`prompt_visible=true` 是这条车道的关键不变量：取消机器侧的静默闸门之后，"这一轮为什么没说话"的唯一记录者就是模型自己，而它要能反悔就必须看得见自己上次的选择。基线侧同样不重复回填该正文——带 `tool_calls` 的那行助手记录已经把它带进请求体基线，再 append 一次就是同文两份。因此静默回合的正文在请求体里只有一份，这一点由回归断言钉住。
 
 token 压缩对这条行豁免，否则痕迹活不下来（裸 tool_call 行实盘存活率约 6%）：压缩是位置型切分，白名单无效，所以 `_lift_silent_trace_groups` 把整组（assistant 行 + 它声明的 tool 结果行）摘出待压缩区间，压缩完成后回插在摘要块与最近尾部之间（两侧都保持原相对顺序，assistant 与 tool 结果必须同进同出，否则 provider 拒孤儿结果）。详见 `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」。

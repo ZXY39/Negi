@@ -24,6 +24,9 @@ class SessionHeartbeatEventQueue:
     def __init__(self) -> None:
         self._events: dict[str, list[SessionHeartbeatEvent]] = {}
         self._dedupe: dict[str, set[str]] = {}
+        # 已经注入上下文的事件 key。pop 之后仍要拒绝同一 key 再入队：源表重放、
+        # 扫描器重扫、worker outbox 重投都不允许把同一心跳再送进上下文一次。
+        self._consumed: dict[str, set[str]] = {}
 
     def enqueue(
         self,
@@ -40,7 +43,7 @@ class SessionHeartbeatEventQueue:
         if not key or not dedupe:
             return None
         session_dedupe = self._dedupe.setdefault(key, set())
-        if dedupe in session_dedupe:
+        if dedupe in session_dedupe or dedupe in self._consumed.get(key, set()):
             return None
         event = SessionHeartbeatEvent(
             event_id=f'hb:{uuid4().hex}',
@@ -83,6 +86,19 @@ class SessionHeartbeatEventQueue:
                 self._dedupe.pop(key, None)
         return removed
 
+    def consume_many(self, session_id: str, *, event_ids: set[str]) -> list[SessionHeartbeatEvent]:
+        """弹出事件并记住 dedupe key：这些事件已经进入上下文，不再允许入队。"""
+        key = str(session_id or '').strip()
+        removed = self.pop_many(session_id, event_ids=event_ids)
+        if not key or not removed:
+            return removed
+        consumed = self._consumed.setdefault(key, set())
+        for event in removed:
+            dedupe = str(event.dedupe_key or '').strip()
+            if dedupe:
+                consumed.add(dedupe)
+        return removed
+
     def remove_where(self, session_id: str, *, predicate) -> list[SessionHeartbeatEvent]:
         key = str(session_id or "").strip()
         if not key or not callable(predicate):
@@ -112,10 +128,12 @@ class SessionHeartbeatEventQueue:
             return
         self._events.pop(key, None)
         self._dedupe.pop(key, None)
+        self._consumed.pop(key, None)
 
     def clear_all(self) -> None:
         self._events.clear()
         self._dedupe.clear()
+        self._consumed.clear()
 
     def has_events(self, session_id: str) -> bool:
         key = str(session_id or '').strip()

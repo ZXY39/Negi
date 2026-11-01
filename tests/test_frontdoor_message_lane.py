@@ -155,7 +155,7 @@ async def test_frontdoor_delivers_under_acceptance_but_rejects_wrong_session(tmp
 
 
 @pytest.mark.asyncio
-async def test_scanner_enqueues_and_consumes_pending_row(tmp_path):
+async def test_scanner_enqueues_and_keeps_row_pending_until_injection(tmp_path):
     service = _service(tmp_path)
     _seed(service)
     await service.deliver_frontdoor_message(task_id=TASK, source_node_id=ROOT, content='hello')
@@ -174,5 +174,6 @@ async def test_scanner_enqueues_and_consumes_pending_row(tmp_path):
     assert await scanner.scan_once() == 1
     assert captured[0][0] == SESSION
     assert captured[0][1]['source_node_id'] == ROOT
+    # 消费点是 heartbeat 的事件束注入，不是扫描器 enqueue；注入前消息保持 pending。
     rows = service.list_frontdoor_node_messages(SESSION)
-    assert rows[0].status == 'consumed'
+    assert rows[0].status == 'pending'

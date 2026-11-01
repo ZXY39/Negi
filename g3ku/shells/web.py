@@ -1015,7 +1015,9 @@ async def resume_shutdown_paused_sessions(
         current_manager.get_or_create(session_key=session_key, channel=channel, chat_id=chat_id)
         if enqueue(session_key):
             resumed += 1
-        consume(kind="session", ref_id=session_key)
+        # 消费点不在 enqueue：heartbeat 在事件束成功注入上下文后才
+        # mark_shutdown_pause_entry_consumed。这里保留 ledger 行，注入失败/进程重启后
+        # 启动重放还能再唤醒一次；同一 session 的重复入队由 heartbeat 队列 dedupe 挡住。
     if resumed:
         logger.info("auto-resumed {} session(s) paused by shutdown", resumed)
     return resumed

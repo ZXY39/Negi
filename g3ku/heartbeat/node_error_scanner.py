@@ -72,13 +72,8 @@ class NodeErrorScanner:
                 accepted = False
             if not accepted:
                 continue
-            for item in items:
-                pause_id = int(item.get('pause_row_id') or 0)
-                if pause_id <= 0:
-                    continue
-                try:
-                    store.mark_task_node_pause_delivered(pause_id)
-                    delivered += 1
-                except Exception:
-                    continue
+            # 消费点不在 enqueue：heartbeat 在事件束成功注入上下文后才
+            # mark_task_node_pause_delivered。这里保持 delivered=0，注入失败下一轮重扫；
+            # 队列的 in-flight dedupe 防止同一 pause 在两次扫描间重复入队。
+            delivered += len(items)
         return delivered

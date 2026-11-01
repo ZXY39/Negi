@@ -647,7 +647,7 @@ async def test_control_nodes_fail_in_web_mode_enqueues_remark_as_reason(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_node_error_scanner_delivers_once_and_only_marks_successful_enqueue(tmp_path: Path) -> None:
+async def test_node_error_scanner_enqueues_but_keeps_pause_until_injection(tmp_path: Path) -> None:
     service = _make_service(tmp_path)
     try:
         record = await service.create_task("scanner", session_id="web:scanner")
@@ -669,18 +669,27 @@ async def test_node_error_scanner_delivers_once_and_only_marks_successful_enqueu
         events: list[tuple[str, list[dict]]] = []
 
         class _Heartbeat:
+            def __init__(self) -> None:
+                self.seen: set[str] = set()
+
             def enqueue_task_node_error_payload(self, session_id: str, items: list[dict]) -> bool:
+                key = str(items[0]["dedupe_key"])
+                if key in self.seen:
+                    return False
+                self.seen.add(key)
                 events.append((session_id, items))
                 return True
 
         scanner = NodeErrorScanner(main_task_service=service, heartbeat=_Heartbeat())
         assert await scanner.scan_once() == 1
+        # 扫描器不再消费 pause 行；第二次扫描仍会尝试，由队列 dedupe 拒绝。
         assert await scanner.scan_once() == 0
         assert len(events) == 1
         session_id, items = events[0]
         assert session_id == "web:scanner"
         assert items[0]["dedupe_key"].startswith(f"node-error:{record.task_id}:{record.root_node_id}:")
-        assert service.store.get_task_node_pause(record.root_node_id).delivered is True
+        # 消费点是 heartbeat 的事件束注入，不是扫描器 enqueue；注入前 delivered 保持 False。
+        assert service.store.get_task_node_pause(record.root_node_id).delivered is False
     finally:
         await service.close()
 

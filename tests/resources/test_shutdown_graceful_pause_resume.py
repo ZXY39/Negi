@@ -592,7 +592,7 @@ async def test_wait_shutdown_pause_commands_drained_ignores_other_command_types(
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_resume_shutdown_paused_sessions_enqueues_and_consumes(tmp_path: Path) -> None:
+async def test_resume_shutdown_paused_sessions_enqueues_and_keeps_ledger_until_injection(tmp_path: Path) -> None:
     store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
     store.record_shutdown_pause_entry(kind="session", ref_id="web:resume", channel="web", chat_id="resume")
     store.record_shutdown_pause_entry(kind="session", ref_id="web:missing", channel="web", chat_id="missing")
@@ -630,7 +630,9 @@ async def test_resume_shutdown_paused_sessions_enqueues_and_consumes(tmp_path: P
         assert resumed == 1
         assert woken == ["web:resume"]
         assert manager.created == ["web:resume|web|resume"]
-        assert store.list_shutdown_pause_entries(kind="session") == []
+        # 缺失 session 的 retire 保留；成功 enqueue 的 ledger 行留到 heartbeat 注入后消费。
+        remaining = store.list_shutdown_pause_entries(kind="session")
+        assert [item["ref_id"] for item in remaining] == ["web:resume"]
     finally:
         store.close()
 
