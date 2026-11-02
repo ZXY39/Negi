@@ -6209,23 +6209,34 @@ textarea {
     font-size: 0.88rem;
     color: var(--text-primary);
     /* 一行封顶:补充消息可以是整篇正文,不封顶会把输入区上方撑成一块盖住会话的面板。
-       要看全文靠右侧那颗三角切到下面的滚动块。 */
+       要看全文靠右侧那颗三角切到下面的滚动块。行盒固定,中英混排与纯中文的
+       normal 行高不同,不固定会让序号跟着上下浮。 */
+    line-height: 22px;
+    height: 22px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
 }
 
-/* 展开态:正文换成固定高度的滚动块,行高由它定,序号与动作保持垂直居中。 */
+/* 展开态:正文换成固定高度的滚动块。多行正文时序号与动作贴第一行走,
+   按整块中心摆会让序号比正文第一行低一截。 */
 .ceo-follow-up-chip.is-expanded {
-    align-items: stretch;
+    align-items: flex-start;
 }
 
 .ceo-follow-up-chip.is-expanded .ceo-follow-up-kind,
 .ceo-follow-up-chip.is-expanded .ceo-follow-up-action {
-    align-self: center;
+    align-self: flex-start;
+}
+
+/* 动作按钮 1.9rem 高、正文第一行 22px,负的顶偏移让图标中心落在第一行中心。 */
+.ceo-follow-up-chip.is-expanded .ceo-follow-up-action {
+    margin-top: -4px;
 }
 
 .ceo-follow-up-chip.is-expanded .ceo-follow-up-name {
+    height: auto;
+    line-height: 1.5;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     overflow-x: hidden;
