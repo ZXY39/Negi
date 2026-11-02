@@ -14,9 +14,6 @@ from g3ku.core.messages import UserInputMessage
 from g3ku.heartbeat.prompt_lane import (
     build_heartbeat_prompt_lane,
     format_local_timestamp,
-    shutdown_resume_lines,
-    tool_job_lines,
-    turn_interrupted_lines,
 )
 from g3ku.heartbeat.session_events import SessionHeartbeatEvent, SessionHeartbeatEventQueue
 from g3ku.heartbeat.session_wake import SessionHeartbeatWakeQueue
@@ -35,10 +32,7 @@ from main.runtime.tool_names import SILENT_TOOL_NAME
 from main.service.task_distribution_error_callback import normalize_task_distribution_error_payload
 from main.service.task_stall_callback import (
     TASK_STALL_REASON_SUSPECTED_STALL,
-    TASK_STALL_REASON_USER_PAUSED,
-    TASK_STALL_REASON_WORKER_UNAVAILABLE,
     normalize_task_stall_payload,
-    normalize_task_stall_reason,
 )
 from main.service.task_stall_notifier import (
     effective_silence_start,
@@ -1029,7 +1023,7 @@ class WebSessionHeartbeatService:
             "later turns."
         )
 
-    def _build_prompt(
+    def _build_heartbeat_stable_rules(
         self,
         events: list[SessionHeartbeatEvent],
         *,
@@ -1150,98 +1144,6 @@ class WebSessionHeartbeatService:
         heartbeat_text = _bundled_heartbeat_rules_text()
         if heartbeat_text:
             lines.extend(["", heartbeat_text])
-        lines.append("")
-        lines.append("[SESSION EVENTS]")
-        for event in events:
-            payload = dict(event.payload or {})
-            reason = str(event.reason or "").strip().lower()
-            if reason == "shutdown_resume":
-                lines.extend(shutdown_resume_lines())
-                continue
-            if reason == "turn_interrupted":
-                lines.extend(turn_interrupted_lines(payload))
-                continue
-            if reason == "tool_job":
-                lines.extend(
-                    tool_job_lines(
-                        payload,
-                        [],
-                        output_inline_limit=_TASK_TERMINAL_OUTPUT_INLINE_LIMIT,
-                        externalizer=None,
-                    )
-                )
-                continue
-            if reason == "task_stall":
-                task_id = str(payload.get("task_id") or "").strip()
-                title = str(payload.get("title") or task_id or "task").strip() or "task"
-                stall_reason = normalize_task_stall_reason(payload.get("reason"))
-                stalled_minutes = self._int_value(payload.get("stalled_minutes"))
-                bucket_minutes = self._int_value(payload.get("bucket_minutes"))
-                brief_text = str(payload.get("brief_text") or "").strip() or "No task summary."
-                latest_node_summary = str(payload.get("latest_node_summary") or "").strip() or "No latest node summary."
-                runtime_excerpt = str(payload.get("runtime_summary_excerpt") or "").strip() or "No runtime summary."
-                last_visible_output_at = format_local_timestamp(payload.get("last_visible_output_at"))
-                if stall_reason == TASK_STALL_REASON_USER_PAUSED:
-                    lines.append(f"- Task {title} ({task_id}) was paused by the user")
-                    lines.append("  Reason: user_paused")
-                    lines.append("  Do not investigate the task yet. Wait for the user to resume or redirect it.")
-                    continue
-                if stall_reason == TASK_STALL_REASON_WORKER_UNAVAILABLE:
-                    lines.append(f"- Task {title} ({task_id}) is waiting for the worker to come back")
-                    lines.append("  Reason: worker_unavailable")
-                    lines.append("  Do not treat this as a task logic stall yet. Wait for worker recovery or restart.")
-                    continue
-                lines.append(f"- Task {title} ({task_id}) may be stalled")
-                lines.append(f"  Reason: {stall_reason or TASK_STALL_REASON_SUSPECTED_STALL}")
-                lines.append(f"  Silent for: {stalled_minutes} min")
-                lines.append(f"  Trigger bucket: {bucket_minutes} min")
-                lines.append(f"  Last visible output at: {last_visible_output_at}")
-                lines.append(f"  Brief: {brief_text}")
-                lines.append(f"  Latest node: {latest_node_summary}")
-                lines.append(f"  Runtime: {runtime_excerpt}")
-                perf_summary = str(payload.get("perf_window_summary") or "").strip()
-                if perf_summary:
-                    lines.append(f"  Perf in stall window: {perf_summary}")
-                lines.append("  Suggested first step: task_progress(task_id)")
-                continue
-            title = str(payload.get("title") or payload.get("task_id") or "task").strip() or "task"
-            task_id = str(payload.get("task_id") or "").strip()
-            status = str(payload.get("status") or "").strip().lower() or "unknown"
-            summary = str(payload.get("brief_text") or payload.get("failure_reason") or "").strip() or "No summary."
-            lines.append(f"- Task {title} ({task_id}) completed")
-            lines.append(f"  Status: {status}")
-            lines.append(f"  Summary: {summary}")
-            terminal_node_id = str(payload.get("terminal_node_id") or "").strip()
-            terminal_node_kind = str(payload.get("terminal_node_kind") or "").strip() or 'execution'
-            terminal_reason = str(payload.get("terminal_node_reason") or "").strip()
-            terminal_output = str(payload.get("terminal_output") or "").strip()
-            terminal_output_ref = str(payload.get("terminal_output_ref") or "").strip()
-            terminal_check_result = str(payload.get("terminal_check_result") or "").strip()
-            terminal_failure_reason = str(payload.get("terminal_failure_reason") or "").strip()
-            root_output = str(payload.get("root_output") or "").strip()
-            root_output_ref = str(payload.get("root_output_ref") or "").strip()
-            if terminal_node_id:
-                lines.append(f"  Result node: {terminal_node_kind} {terminal_node_id}")
-            if terminal_reason:
-                lines.append(f"  Result source: {terminal_reason}")
-            if terminal_output:
-                if len(terminal_output) > _TASK_TERMINAL_OUTPUT_INLINE_LIMIT:
-                    lines.append(f"  Result output excerpt: {terminal_output[:_TASK_TERMINAL_OUTPUT_INLINE_LIMIT].rstrip()}...")
-                else:
-                    lines.append(f"  Result output: {terminal_output}")
-            if terminal_output_ref:
-                lines.append(f"  Result output ref: {terminal_output_ref}")
-            if root_output and root_output != terminal_output:
-                if len(root_output) > _TASK_TERMINAL_OUTPUT_INLINE_LIMIT:
-                    lines.append(f"  Execution output excerpt: {root_output[:_TASK_TERMINAL_OUTPUT_INLINE_LIMIT].rstrip()}...")
-                else:
-                    lines.append(f"  Execution output: {root_output}")
-            if root_output_ref and root_output_ref != terminal_output_ref:
-                lines.append(f"  Execution output ref: {root_output_ref}")
-            if terminal_check_result:
-                lines.append(f"  Result check: {terminal_check_result}")
-            if terminal_failure_reason and terminal_failure_reason != summary:
-                lines.append(f"  Result failure reason: {terminal_failure_reason}")
         return "\n".join(lines).strip()
 
     @staticmethod
@@ -1764,12 +1666,11 @@ class WebSessionHeartbeatService:
         repair_attempt: int = 0,
         invalid_output: str = "",
     ) -> UserInputMessage:
-        heartbeat_prompt = self._build_prompt(
+        stable_rules_text = self._build_heartbeat_stable_rules(
             events,
             repair_attempt=repair_attempt,
             invalid_output=invalid_output,
         )
-        stable_rules_text = str(heartbeat_prompt.partition("[SESSION EVENTS]")[0] or "").strip()
         heartbeat_lane = build_heartbeat_prompt_lane(
             provider_model="",
             stable_rules_text=stable_rules_text,

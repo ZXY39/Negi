@@ -71,10 +71,10 @@ def test_turn_interrupted_bundle_uses_the_same_lines() -> None:
     assert "Stopped for:" in text
 
 
-def test_build_prompt_for_turn_interrupted_forces_visible_reply(tmp_path: Path) -> None:
+def test_heartbeat_stable_rules_for_turn_interrupted_force_visible_reply(tmp_path: Path) -> None:
     service = _service(tmp_path)
     events = [_event()]
-    prompt = service._build_prompt(events)
+    prompt = service._build_heartbeat_stable_rules(events)
 
     assert "turn_interrupted" in prompt
     assert "always end with a user-visible reply" in prompt
@@ -99,7 +99,7 @@ def test_mixed_task_terminal_and_turn_interrupted_disallows_silent(tmp_path: Pat
     )
     events = [terminal, _event()]
 
-    prompt = service._build_prompt(events)
+    prompt = service._build_heartbeat_stable_rules(events)
 
     assert "This mixed bundle also contains a restart-resume event" in prompt
     assert "do not use the silent tool" in prompt

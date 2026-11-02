@@ -69,7 +69,13 @@ def test_tool_job_prompt_renders_each_terminal_status(store):
         service._events.clear_all()
         assert service.enqueue_tool_job(_payload(status))
         events = service._events.peek("web:demo")
-        prompt = service._build_prompt(events)
+        # 事件正文的唯一载体是 prompt_lane（`_build_heartbeat_stable_rules` 只出规则段），
+        # 所以这里按模型真正收到的那份束体验证。
+        prompt = build_heartbeat_prompt_lane(
+            provider_model="test",
+            stable_rules_text="",
+            events=[dict(event.payload or {}) for event in events],
+        ).event_bundle_text
         assert "Background tool job tooljob:demo (exec)" in prompt
         if status in {"success", "error", "timeout"}:
             assert "Do not call the tool again" in prompt

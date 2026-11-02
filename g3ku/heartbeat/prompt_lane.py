@@ -779,7 +779,7 @@ def tool_job_lines(
     output_inline_limit: int,
     externalizer: EventTextExternalizer | None,
 ) -> list[str]:
-    """后台工具作业的终态文本；与 `session_service._build_prompt` 保持同文。"""
+    """后台工具作业的终态文本；事件正文的唯一作者就是本模块。"""
     job_id = _non_empty_text(event.get("job_id")) or "unknown"
     tool_name = _non_empty_text(event.get("tool_name")) or "tool"
     status = _non_empty_text(event.get("status")).lower() or "unknown"

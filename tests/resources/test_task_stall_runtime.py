@@ -242,7 +242,7 @@ def test_task_stall_guidance_names_the_exits_that_end_the_repetition(tmp_path: P
         delay_seconds=0.0,
     )
 
-    prompt = service._build_prompt([event])
+    prompt = service._build_heartbeat_stable_rules([event])
 
     assert "Only a task-level state" in prompt
     assert "keep_paused on nodes does not" in prompt

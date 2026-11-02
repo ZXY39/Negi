@@ -488,11 +488,12 @@ def test_shutdown_resume_wake_does_not_render_as_a_completed_task() -> None:
     assert "Complete the user's previously interrupted request now." in bundle
     assert "completed" not in bundle.lower().replace("resume", "")
 
-    # 这句文案只有一个作者：提示词构造那一路必须调用同一份 helper。
+    # 这句文案只有一个作者：会话侧不再自带一份事件渲染（注入方本来就只取稳定段，
+    # 那份第二作者是死代码），所以这里断言的是"会话文件里既没有调用也没有抄写"。
     service = (
         Path(__file__).resolve().parents[2] / "g3ku" / "heartbeat" / "session_service.py"
     ).read_text(encoding="utf-8")
-    assert "shutdown_resume_lines()" in service
+    assert "shutdown_resume_lines()" not in service
     assert "Session resumed automatically" not in service
 
 

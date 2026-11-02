@@ -654,7 +654,9 @@ def _resume_event() -> object:
     )
 
 
-def test_heartbeat_build_prompt_instructs_resume_not_heartbeat_ok(tmp_path: Path) -> None:
+def test_heartbeat_stable_rules_instruct_resume_not_heartbeat_ok(tmp_path: Path) -> None:
+    from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane
+
     service = WebSessionHeartbeatService(
         workspace=tmp_path,
         agent=None,
@@ -664,11 +666,18 @@ def test_heartbeat_build_prompt_instructs_resume_not_heartbeat_ok(tmp_path: Path
         reply_notifier=None,
     )
     events = [_resume_event()]
-    prompt = service._build_prompt(events)
+    prompt = service._build_heartbeat_stable_rules(events)
 
     assert "shutdown_resume" in prompt
     assert "always end with a user-visible reply" in prompt
-    assert "Complete the user's previously interrupted request" in prompt
+    # 事件正文的活载体在 prompt_lane：`_build_heartbeat_stable_rules` 只产稳定规则段，
+    # 束体由 build_heartbeat_prompt_lane 生成，模型实际看到的是后者。
+    bundle = build_heartbeat_prompt_lane(
+        provider_model="test",
+        stable_rules_text="",
+        events=[{"reason": "shutdown_resume", "session_id": "web:shared"}],
+    ).event_bundle_text
+    assert "Complete the user's previously interrupted request" in bundle
     assert service._events_require_visible_reply(events) is True
     # 文本哨兵已删：现在只有空输出算无效，任何实际文本（含旧哨兵字面串）都算正常回复。
     assert service._visible_reply_requires_repair("HEARTBEAT_OK") is False
