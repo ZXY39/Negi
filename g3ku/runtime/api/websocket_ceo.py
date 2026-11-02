@@ -2053,7 +2053,11 @@ async def ceo_websocket(websocket: WebSocket):
         if event.type == 'tool_jobs_changed':
             payload = dict(event.payload or {})
             items = payload.get('items') if isinstance(payload.get('items'), list) else []
-            await _push_stream_event('ceo.tool_jobs', {'count': len(items), 'items': items})
+            finished = payload.get('finished') if isinstance(payload.get('finished'), dict) else None
+            frame = {'count': len(items), 'items': items}
+            if finished:
+                frame['finished'] = finished
+            await _push_stream_event('ceo.tool_jobs', frame)
             return
         if event.type == 'frontdoor_turns_synced':
             # 图节点边界同步后主动推送一次 live turn patch：turns 刚刷新，

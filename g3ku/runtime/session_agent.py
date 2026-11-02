@@ -3342,9 +3342,30 @@ class RuntimeAgentSession:
         self._tool_job_notify_tasks.add(task)
         task.add_done_callback(self._tool_job_notify_tasks.discard)
 
-    async def _emit_tool_jobs_changed(self, items: list[dict[str, Any]]) -> None:
+    def _notify_tool_job_finished(self, item: dict[str, Any]) -> None:
         try:
-            await self._emit("tool_jobs_changed", count=len(items), items=list(items or []))
+            task = asyncio.create_task(
+                self._emit_tool_jobs_changed(self.list_tool_jobs(), finished=item),
+                name=f"tool-job-finished:{self._state.session_key}",
+            )
+        except RuntimeError:
+            return
+        self._tool_job_notify_tasks.add(task)
+        task.add_done_callback(self._tool_job_notify_tasks.discard)
+
+    async def _emit_tool_jobs_changed(
+        self,
+        items: list[dict[str, Any]],
+        *,
+        finished: dict[str, Any] | None = None,
+    ) -> None:
+        try:
+            await self._emit(
+                "tool_jobs_changed",
+                count=len(items),
+                items=list(items or []),
+                finished=dict(finished) if isinstance(finished, dict) else None,
+            )
         except Exception:
             logger.debug("tool_jobs_changed emit failed for {}", self._state.session_key, exc_info=True)
 
@@ -3358,6 +3379,7 @@ class RuntimeAgentSession:
                 store_getter=self._tool_job_store,
                 heartbeat_getter=self._tool_job_heartbeat,
                 changed_callback=self._notify_tool_jobs_changed,
+                finished_callback=self._notify_tool_job_finished,
             )
             self._tool_job_runner = runner
         return runner

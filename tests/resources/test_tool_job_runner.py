@@ -29,17 +29,24 @@ def store(tmp_path) -> SQLiteTaskStore:
     return SQLiteTaskStore(tmp_path / "runtime.sqlite3")
 
 
-def _runner(store: SQLiteTaskStore, heartbeat: _FakeHeartbeat | None = None, changes: list | None = None):
+def _runner(
+    store: SQLiteTaskStore,
+    heartbeat: _FakeHeartbeat | None = None,
+    changes: list | None = None,
+    finished: list | None = None,
+):
     heartbeat = heartbeat or _FakeHeartbeat()
     changes = changes if changes is not None else []
+    finished = finished if finished is not None else []
     runner = ToolJobRunner(
         session_key="web:demo",
         store_getter=lambda: store,
         heartbeat_getter=lambda: heartbeat,
         changed_callback=lambda items: changes.append(list(items)),
+        finished_callback=lambda item: finished.append(dict(item)),
         stop_abandon_grace_seconds=0.05,
     )
-    return runner, heartbeat, changes
+    return runner, heartbeat, changes, finished
 
 
 async def _run_outcome(status: str = TOOL_JOB_STATUS_SUCCESS, text: str = "ok") -> ToolJobOutcome:
@@ -47,7 +54,7 @@ async def _run_outcome(status: str = TOOL_JOB_STATUS_SUCCESS, text: str = "ok") 
 
 
 async def test_fast_job_returns_in_foreground_without_persisting(store):
-    runner, heartbeat, _changes = _runner(store)
+    runner, heartbeat, _changes, finished = _runner(store)
 
     job, reused = runner.start_job(
         turn_id="turn-1",
@@ -65,11 +72,12 @@ async def test_fast_job_returns_in_foreground_without_persisting(store):
     assert outcome is not None and outcome.result_text == "ok"
     assert store.get_tool_job(job.job_id) is None
     assert heartbeat.events == []
+    assert finished == []
     assert runner.list_jobs("web:demo") == []
 
 
 async def test_slow_job_backgrounds_then_emits_one_terminal_event(store):
-    runner, heartbeat, changes = _runner(store)
+    runner, heartbeat, changes, finished = _runner(store)
 
     async def slow() -> ToolJobOutcome:
         await asyncio.sleep(0.15)
@@ -106,10 +114,15 @@ async def test_slow_job_backgrounds_then_emits_one_terminal_event(store):
     pending = store.list_pending_tool_job_outbox()
     assert len(pending) == 1 and pending[0]["job_id"] == job.job_id
     assert runner.list_jobs("web:demo") == []
+    assert len(finished) == 1
+    assert finished[0]["job_id"] == job.job_id
+    assert finished[0]["tool_call_id"] == "call-1"
+    assert finished[0]["status"] == TOOL_JOB_STATUS_SUCCESS
+    assert finished[0]["finished_at"]
 
 
 async def test_same_tool_and_args_reuses_the_inflight_job(store):
-    runner, _heartbeat, _changes = _runner(store)
+    runner, _heartbeat, _changes, _finished = _runner(store)
 
     async def slow() -> ToolJobOutcome:
         await asyncio.sleep(0.2)
@@ -141,7 +154,7 @@ async def test_same_tool_and_args_reuses_the_inflight_job(store):
 
 
 async def test_user_stop_emits_immediately_and_only_once(store):
-    runner, heartbeat, _changes = _runner(store)
+    runner, heartbeat, _changes, finished = _runner(store)
 
     async def slow() -> ToolJobOutcome:
         await asyncio.sleep(10)
@@ -169,10 +182,12 @@ async def test_user_stop_emits_immediately_and_only_once(store):
     assert row is not None and row["status"] == TOOL_JOB_STATUS_STOPPED_BY_USER
     assert len(heartbeat.events) == 1
     assert runner.list_jobs("web:demo") == []
+    assert len(finished) == 1
+    assert finished[0]["status"] == TOOL_JOB_STATUS_STOPPED_BY_USER
 
 
 async def test_cancel_resistant_job_is_abandoned_after_stop_grace(store):
-    runner, heartbeat, _changes = _runner(store)
+    runner, heartbeat, _changes, finished = _runner(store)
 
     async def stubborn() -> ToolJobOutcome:
         try:
@@ -198,6 +213,8 @@ async def test_cancel_resistant_job_is_abandoned_after_stop_grace(store):
     assert row is not None and row["status"] == TOOL_JOB_STATUS_STOPPED_BY_USER
     assert len(heartbeat.events) == 1
     assert runner.list_jobs("web:demo") == []
+    assert len(finished) == 1
+    assert finished[0]["status"] == TOOL_JOB_STATUS_STOPPED_BY_USER
 
 
 async def test_old_pending_outbox_is_replayed_by_dedupe_key(store):

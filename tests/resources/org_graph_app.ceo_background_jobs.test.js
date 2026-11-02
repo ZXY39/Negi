@@ -57,6 +57,10 @@ class StubElement {
         (this.listeners[type] = this.listeners[type] || []).push(handler);
     }
 
+    querySelector(selector) {
+        return selector === ".tool-status-icon" ? this.iconWrap || null : null;
+    }
+
     querySelectorAll(selector) {
         if (selector !== "[data-bg-job-started]") return [];
         const out = [];
@@ -76,6 +80,8 @@ class StubElement {
 class StubDocument {
     constructor() {
         this._byId = new Map();
+        this._chips = [];
+        this._liveRows = [];
         ["ceo-bg-jobs", "ceo-bg-jobs-toggle", "ceo-bg-jobs-count", "ceo-bg-jobs-popover", "ceo-bg-jobs-list"].forEach((id) => {
             const el = new StubElement("DIV");
             el.id = id;
@@ -89,6 +95,12 @@ class StubDocument {
 
     createElement(tag) {
         return new StubElement(tag);
+    }
+
+    querySelectorAll(selector) {
+        if (String(selector).includes(".task-trace-round-chip")) return this._chips.slice();
+        if (String(selector).includes(".task-trace-live-steps")) return this._liveRows.slice();
+        return [];
     }
 }
 
@@ -251,4 +263,92 @@ test("切换会话会清掉旧会话的条目", async () => {
     await context.refreshCeoBackgroundJobs("web:b");
     assert.equal(document.getElementById("ceo-bg-jobs").hidden, true);
     assert.equal(document.getElementById("ceo-bg-jobs-count").textContent, "0");
+});
+
+test("终态帧把账本里的后台工具行改画成完成，原账本对象不变", () => {
+    const { context } = loadModule();
+    context.handleCeoToolJobsFrame({
+        data: {
+            items: [],
+            finished: {
+                job_id: "tooljob:1",
+                tool_name: "exec",
+                status: "success",
+                tool_call_id: "call-1",
+                finished_at: new Date().toISOString(),
+                elapsed_seconds: 12,
+            },
+        },
+    }, "web:a");
+    const turns = [{
+        seq: 1,
+        tools: [
+            { tool_call_id: "call-1|fc-1", tool_name: "exec", status: "background" },
+            { tool_call_id: "call-2", tool_name: "exec", status: "background" },
+        ],
+    }];
+    const decorated = context.ceoBgJobsDecorateTurns(turns);
+    assert.equal(decorated[0].tools[0].status, "success");
+    assert.equal(decorated[0].tools[0].background_finished, true);
+    assert.equal(decorated[0].tools[1].status, "background");
+    assert.equal(turns[0].tools[0].status, "background");
+});
+
+test("终态帧把实时行的转圈时钟换成完成图标", () => {
+    const { context, document } = loadModule();
+    const chip = document.createElement("button");
+    chip.dataset.toolCallId = "call-1|fc-1";
+    const chipIcon = document.createElement("span");
+    chipIcon.className = "tool-status-icon is-running";
+    chip.iconWrap = chipIcon;
+    document._chips.push(chip);
+
+    const liveRow = document.createElement("div");
+    liveRow.dataset.toolCallId = "call-1";
+    liveRow.dataset.stepState = "background";
+    liveRow.dataset.toolName = "exec";
+    document._liveRows.push(liveRow);
+    context.applyCeoToolStepState = (item, options) => {
+        item.dataset.stepState = options.status;
+        item.dataset.appliedTool = options.toolName;
+    };
+
+    context.handleCeoToolJobsFrame({
+        data: {
+            items: [],
+            finished: {
+                job_id: "tooljob:1",
+                tool_name: "exec",
+                status: "success",
+                tool_call_id: "call-1",
+                finished_at: new Date().toISOString(),
+            },
+        },
+    }, "web:a");
+
+    assert.equal(chipIcon.className, "tool-status-icon is-success");
+    assert.match(chipIcon.innerHTML, /lucide="check"/);
+    assert.equal(liveRow.dataset.stepState, "success");
+    assert.equal(liveRow.dataset.appliedTool, "exec");
+});
+
+test("刷新回放的终态按失败/中断映射成 error", async () => {
+    const { context } = loadModule({
+        fetchCeoToolJobs: async () => ({
+            items: [],
+            finished: [{
+                job_id: "tooljob:2",
+                tool_name: "browser",
+                status: "interrupted",
+                tool_call_id: "call-9",
+                finished_at: new Date().toISOString(),
+            }],
+        }),
+    });
+    await context.refreshCeoBackgroundJobs("web:a");
+    const decorated = context.ceoBgJobsDecorateTurns([{
+        seq: 1,
+        tools: [{ tool_call_id: "call-9", tool_name: "browser", status: "background" }],
+    }]);
+    assert.equal(decorated[0].tools[0].status, "error");
 });

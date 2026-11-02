@@ -19,12 +19,16 @@ class _FakeHeartbeat:
 class _FakeRuntimeSession:
     def __init__(self, store: SQLiteTaskStore, session_key: str = "web:demo") -> None:
         self.session_key = session_key
+        self.store = store
         self.runner = ToolJobRunner(
             session_key=session_key,
             store_getter=lambda: store,
             heartbeat_getter=lambda: _FakeHeartbeat(),
             stop_abandon_grace_seconds=0.05,
         )
+
+    def _tool_job_store(self):
+        return self.store
 
     def list_tool_jobs(self):
         return self.runner.list_jobs(self.session_key)
@@ -94,9 +98,27 @@ async def test_get_returns_running_jobs_and_empty_for_missing_runtime(store, mon
     assert payload["items"][0]["elapsed_seconds"] >= 0
 
     empty = await ceo_sessions.get_ceo_session_tool_jobs("web:none")
-    assert empty == {"ok": True, "session_id": "web:none", "count": 0, "items": []}
+    assert empty == {"ok": True, "session_id": "web:none", "count": 0, "items": [], "finished": []}
 
     await session.runner.cancel_all(reason="test_cleanup", suppress_event=True)
+
+
+@pytest.mark.asyncio
+async def test_get_returns_recent_terminal_jobs_for_reload(store, monkeypatch):
+    session = _FakeRuntimeSession(store)
+    manager = _FakeRuntimeManager({"web:demo": session})
+    _patch_sessions(monkeypatch, manager)
+    job = await _background_job(session, seconds=0.05)
+    await asyncio.sleep(0.15)
+
+    payload = await ceo_sessions.get_ceo_session_tool_jobs("web:demo")
+    assert payload["items"] == []
+    assert len(payload["finished"]) == 1
+    row = payload["finished"][0]
+    assert row["job_id"] == job.job_id
+    assert row["tool_call_id"] == "call-1"
+    assert row["status"] == "success"
+    assert row["finished_at"]
 
 
 @pytest.mark.asyncio

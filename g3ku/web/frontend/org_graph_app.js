@@ -5388,7 +5388,10 @@ function renderCeoTurnsIntoTurn(turn, turns = [], { interruptedMarker = false } 
         renderCeoLiveStreamTextIntoTurn(turn);
         return 0;
     }
-    const descriptors = buildTurnGroupDescriptors(stickerSplit.railTurns);
+    const railTurns = typeof ceoBgJobsDecorateTurns === "function"
+        ? ceoBgJobsDecorateTurns(stickerSplit.railTurns)
+        : stickerSplit.railTurns;
+    const descriptors = buildTurnGroupDescriptors(railTurns);
     if (!descriptors.length) {
         // 整轮只有表情工具时轨道画不出任何组：气泡里的流式正文仍要吐回去（收尾与后续帧同源）。
         renderCeoLiveStreamTextIntoTurn(turn);
@@ -7502,6 +7505,7 @@ function applyCeoToolEventToTurn(turn, event = {}) {
     updateCeoTurnMeta(turn, ceoRailMetaLabel(turn) || stage.meta);
     updateCeoBackgroundDetail(item);
     icons();
+    if (status === "background" && typeof ceoBgJobsApplyToFeed === "function") ceoBgJobsApplyToFeed();
     return item;
 }
 

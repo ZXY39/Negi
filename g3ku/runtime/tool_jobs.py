@@ -175,12 +175,14 @@ class ToolJobRunner:
         store_getter: Callable[[], Any],
         heartbeat_getter: Callable[[], Any] | None = None,
         changed_callback: Callable[[list[dict[str, Any]]], Any] | None = None,
+        finished_callback: Callable[[dict[str, Any]], Any] | None = None,
         stop_abandon_grace_seconds: float = TOOL_JOB_STOP_ABANDON_GRACE_SECONDS,
     ) -> None:
         self._session_key = str(session_key or "").strip()
         self._store_getter = store_getter
         self._heartbeat_getter = heartbeat_getter or (lambda: None)
         self._changed_callback = changed_callback
+        self._finished_callback = finished_callback
         self._stop_abandon_grace_seconds = max(0.0, float(stop_abandon_grace_seconds or 0.0))
         self._jobs: dict[str, ToolJob] = {}
         self._inflight: dict[tuple[str, str], str] = {}
@@ -403,6 +405,15 @@ class ToolJobRunner:
                 error_text=error_text,
             )
             self._drop_job(job)
+            if not job.suppress_event:
+                self._notify_finished(
+                    self._finished_item(
+                        job,
+                        status=status,
+                        finished_at=finished_at,
+                        elapsed_seconds=elapsed,
+                    )
+                )
             self._notify_changed()
 
     def _persist_terminal(
@@ -496,6 +507,40 @@ class ToolJobRunner:
         dedupe_key = (job.tool_name, job.args_hash)
         if self._inflight.get(dedupe_key) == job.job_id:
             self._inflight.pop(dedupe_key, None)
+
+    @staticmethod
+    def _finished_item(
+        job: ToolJob,
+        *,
+        status: str,
+        finished_at: str,
+        elapsed_seconds: float,
+    ) -> dict[str, Any]:
+        return {
+            "job_id": job.job_id,
+            "session_id": job.session_key,
+            "turn_id": job.turn_id,
+            "tool_call_id": job.tool_call_id,
+            "tool_name": job.tool_name,
+            "status": status,
+            "started_at": job.started_at,
+            "finished_at": finished_at,
+            "elapsed_seconds": round(max(0.0, float(elapsed_seconds or 0.0)), 1),
+        }
+
+    def _notify_finished(self, item: dict[str, Any]) -> None:
+        callback = self._finished_callback
+        if callback is None:
+            return
+        try:
+            result = callback(dict(item))
+            if inspect.isawaitable(result):
+                try:
+                    asyncio.create_task(result)
+                except RuntimeError:
+                    pass
+        except Exception:
+            logger.debug("tool job finished notification failed", exc_info=True)
 
     def _notify_changed(self) -> None:
         callback = self._changed_callback
@@ -612,14 +657,23 @@ class ToolJobRunner:
                 job.job_id,
                 self._stop_abandon_grace_seconds,
             )
+            finished_at = now_iso()
             self._persist_terminal(
                 job,
                 status=TOOL_JOB_STATUS_STOPPED_BY_USER,
                 outcome=None,
-                finished_at=now_iso(),
+                finished_at=finished_at,
                 error_text="stopped by user; task did not unwind in the grace window",
             )
             self._drop_job(job)
+            self._notify_finished(
+                self._finished_item(
+                    job,
+                    status=TOOL_JOB_STATUS_STOPPED_BY_USER,
+                    finished_at=finished_at,
+                    elapsed_seconds=max(0.0, time.monotonic() - job.started_monotonic),
+                )
+            )
             self._notify_changed()
 
     async def cancel_all(self, *, reason: str = "session_deleted", suppress_event: bool = True) -> int:
@@ -644,14 +698,24 @@ class ToolJobRunner:
                 continue
             job.finalized = True
             job.status = TOOL_JOB_STATUS_INTERRUPTED
+            finished_at = now_iso()
             self._persist_terminal(
                 job,
                 status=TOOL_JOB_STATUS_INTERRUPTED,
                 outcome=None,
-                finished_at=now_iso(),
+                finished_at=finished_at,
                 error_text=reason,
             )
             self._drop_job(job)
+            if not job.suppress_event:
+                self._notify_finished(
+                    self._finished_item(
+                        job,
+                        status=TOOL_JOB_STATUS_INTERRUPTED,
+                        finished_at=finished_at,
+                        elapsed_seconds=max(0.0, time.monotonic() - job.started_monotonic),
+                    )
+                )
         self._notify_changed()
         return len(jobs)
 

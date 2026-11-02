@@ -9,6 +9,7 @@ const CeoBackgroundJobsState = {
     requestToken: 0,
     stopping: new Set(),
     stopped: new Set(),
+    finishedByCallKey: new Map(),
     lifecycleBound: false,
 };
 
@@ -43,6 +44,126 @@ function ceoBgJobsActiveItems(items = CeoBackgroundJobsState.items) {
         const status = String(item.status || "").trim().toLowerCase();
         return status === "running" || status === "stopping";
     });
+}
+
+// 账本里的 tool_call_id 可能是 "call_x|fc_y"，实时帧与 job 行只带前半段；
+// 两边都按前半段比才能认得出同一次调用（与 org_graph_app.js 的 ceoToolCallKey 同口径）。
+function ceoBgJobsCallKey(value = "") {
+    const raw = String(value || "").trim();
+    if (!raw) return "";
+    const separator = raw.indexOf("|");
+    return separator >= 0 ? raw.slice(0, separator) : raw;
+}
+
+function ceoBgJobsDisplayStatus(jobStatus = "") {
+    const normalized = String(jobStatus || "").trim().toLowerCase();
+    if (normalized === "success") return "success";
+    if (["error", "timeout", "interrupted", "stopped_by_user"].includes(normalized)) return "error";
+    return "";
+}
+
+function ceoBgJobsRememberFinished(item) {
+    if (!item || typeof item !== "object") return;
+    const key = ceoBgJobsCallKey(item.tool_call_id);
+    const status = ceoBgJobsDisplayStatus(item.status);
+    if (!key || !status) return;
+    let elapsedSeconds = Number(item.elapsed_seconds);
+    if (!Number.isFinite(elapsedSeconds)) {
+        const startedAt = Date.parse(String(item.started_at || ""));
+        const finishedAt = Date.parse(String(item.finished_at || ""));
+        if (Number.isFinite(startedAt) && Number.isFinite(finishedAt) && finishedAt >= startedAt) {
+            elapsedSeconds = Math.max(0, Math.floor((finishedAt - startedAt) / 1000));
+        }
+    }
+    CeoBackgroundJobsState.finishedByCallKey.set(key, {
+        status,
+        jobStatus: String(item.status || "").trim().toLowerCase(),
+        finishedAt: String(item.finished_at || ""),
+        elapsedSeconds,
+    });
+}
+
+function ceoBgJobsRememberFinishedItems(items) {
+    (Array.isArray(items) ? items : []).forEach(ceoBgJobsRememberFinished);
+}
+
+function ceoBgJobsFinishedFor(toolCallId = "") {
+    const key = ceoBgJobsCallKey(toolCallId);
+    return key ? CeoBackgroundJobsState.finishedByCallKey.get(key) || null : null;
+}
+
+// 历史账本仍保留 background 状态（终态不回写），只把显示状态换成终态：
+// 完成的工具行不再顶着一颗转动的时钟，成功画 √，失败/超时/中断画 ！。
+function ceoBgJobsDecorateTurns(turns) {
+    const source = Array.isArray(turns) ? turns : [];
+    if (!CeoBackgroundJobsState.finishedByCallKey.size) return source;
+    return source.map((turn) => {
+        if (!turn || typeof turn !== "object" || !Array.isArray(turn.tools)) return turn;
+        let changed = false;
+        const tools = turn.tools.map((tool) => {
+            const current = String(tool?.status || "").trim().toLowerCase();
+            if (current !== "background" && current !== "background_running") return tool;
+            const finished = ceoBgJobsFinishedFor(tool?.tool_call_id);
+            if (!finished) return tool;
+            changed = true;
+            const elapsedSeconds = Number.isFinite(finished.elapsedSeconds)
+                ? finished.elapsedSeconds
+                : tool?.elapsed_seconds;
+            return {
+                ...tool,
+                status: finished.status,
+                finished_at: finished.finishedAt || tool?.finished_at || "",
+                elapsed_seconds: elapsedSeconds,
+                background_finished: true,
+            };
+        });
+        return changed ? { ...turn, tools } : turn;
+    });
+}
+
+function ceoBgJobsApplyToFeed() {
+    if (!CeoBackgroundJobsState.finishedByCallKey.size) return;
+    const doc = typeof document !== "undefined" ? document : null;
+    if (!doc || typeof doc.querySelectorAll !== "function") return;
+    let changed = false;
+    Array.from(doc.querySelectorAll(".task-trace-live-steps .interaction-step[data-tool-call-id]")).forEach((item) => {
+        if (!(item instanceof Element)) return;
+        const current = String(item.dataset?.stepState || "").trim().toLowerCase();
+        if (current !== "background" && current !== "background_running") return;
+        const finished = ceoBgJobsFinishedFor(item.dataset?.toolCallId);
+        if (!finished || typeof applyCeoToolStepState !== "function") return;
+        applyCeoToolStepState(item, {
+            status: finished.status,
+            toolName: item.dataset?.toolName || "tool",
+            detail: item.dataset?.detailText || "",
+            toolCallId: item.dataset?.toolCallId || "",
+            kind: item.dataset?.progressKind || "",
+            allowEmptyOutput: true,
+        });
+        if (finished.finishedAt) item.dataset.finishedAt = finished.finishedAt;
+        if (Number.isFinite(finished.elapsedSeconds) && finished.elapsedSeconds >= 0) {
+            item.dataset.elapsedSeconds = String(finished.elapsedSeconds);
+        }
+        changed = true;
+    });
+    Array.from(doc.querySelectorAll(".task-trace-round-chip[data-tool-call-id]")).forEach((chip) => {
+        if (!(chip instanceof Element)) return;
+        const finished = ceoBgJobsFinishedFor(chip.dataset?.toolCallId);
+        if (!finished) return;
+        const iconWrap = chip.querySelector?.(".tool-status-icon");
+        if (!iconWrap) return;
+        const iconName = finished.status === "success" ? "check" : "alert-circle";
+        const tone = finished.status === "success" ? "is-success" : "is-error";
+        iconWrap.className = `tool-status-icon ${tone}`;
+        if (typeof renderCeoToolIcon === "function") {
+            renderCeoToolIcon(iconWrap, iconName);
+        } else {
+            iconWrap.innerHTML = `<i data-lucide="${iconName}"></i>`;
+        }
+        chip.dataset.bgJobStatus = finished.jobStatus;
+        changed = true;
+    });
+    if (changed && typeof icons === "function") icons();
 }
 
 function ceoBgJobsRow(item) {
@@ -187,6 +308,7 @@ async function refreshCeoBackgroundJobs(sessionId = "") {
         CeoBackgroundJobsState.items = [];
         CeoBackgroundJobsState.stopping.clear();
         CeoBackgroundJobsState.stopped.clear();
+        CeoBackgroundJobsState.finishedByCallKey.clear();
         ceoBgJobsSetOpen(false);
         ceoBgJobsRender();
     }
@@ -195,7 +317,9 @@ async function refreshCeoBackgroundJobs(sessionId = "") {
         const data = await ApiClient.fetchCeoToolJobs(target);
         if (token !== CeoBackgroundJobsState.requestToken) return;
         if (typeof activeSessionId === "function" && target !== String(activeSessionId() || "").trim()) return;
+        ceoBgJobsRememberFinishedItems(data?.finished);
         ceoBgJobsSetItems(data?.items, target);
+        ceoBgJobsApplyToFeed();
     } catch (error) {
         if (token !== CeoBackgroundJobsState.requestToken) return;
         void error;
@@ -208,7 +332,9 @@ function handleCeoToolJobsFrame(payload, effectiveSessionId) {
     if (!target) return;
     const active = typeof activeSessionId === "function" ? String(activeSessionId() || "").trim() : "";
     if (active && target !== active) return;
+    ceoBgJobsRememberFinished(payload?.data?.finished);
     ceoBgJobsSetItems(payload?.data?.items, target);
+    ceoBgJobsApplyToFeed();
 }
 
 async function ceoBgJobsStop(jobId) {

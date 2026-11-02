@@ -362,6 +362,7 @@ function renderExecutionRoundToolChip(round, step, toolIndex) {
             type="button"
             class="task-trace-round-chip ${esc(status)}${contextLoad ? ` is-context-load is-${esc(contextLoad.kind)}` : ""}"
             data-tool-key="${esc(toolKey)}"
+            data-tool-call-id="${esc(String(step?.tool_call_id || "").trim())}"
             aria-pressed="false"${titleAttr}
         >
             <span class="task-trace-round-chip-label">

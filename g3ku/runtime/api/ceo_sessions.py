@@ -31,7 +31,11 @@ from g3ku.runtime.session_agent import (
     PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR,
 )
 from g3ku.runtime.session_keys import is_channel_session_key
-from g3ku.runtime.tool_jobs import ToolJobFinishedError, ToolJobNotFoundError
+from g3ku.runtime.tool_jobs import (
+    TOOL_JOB_TERMINAL_STATUSES,
+    ToolJobFinishedError,
+    ToolJobNotFoundError,
+)
 from g3ku.runtime.web_ceo_sessions import (
     SESSION_MODEL_SELECTION_KEY,
     SESSION_MODEL_SELECTION_MODE_CHAIN,
@@ -621,7 +625,38 @@ async def get_ceo_session_tool_jobs(session_id: str):
     runtime_session = _runtime_session(runtime_manager, session_key)
     lister = getattr(runtime_session, "list_tool_jobs", None) if runtime_session is not None else None
     items = list(lister() or []) if callable(lister) else []
-    return {"ok": True, "session_id": session_key, "count": len(items), "items": items}
+    finished: list[dict[str, object]] = []
+    store_getter = getattr(runtime_session, "_tool_job_store", None) if runtime_session is not None else None
+    store = store_getter() if callable(store_getter) else None
+    if store is not None:
+        try:
+            rows = store.list_tool_jobs(
+                session_id=session_key,
+                statuses=tuple(TOOL_JOB_TERMINAL_STATUSES),
+                limit=100,
+            )
+        except Exception:
+            logger.debug("tool job history lookup failed for {}", session_key, exc_info=True)
+            rows = []
+        finished = [
+            {
+                "job_id": str(row.get("job_id") or ""),
+                "tool_name": str(row.get("tool_name") or "tool"),
+                "status": str(row.get("status") or ""),
+                "started_at": str(row.get("started_at") or ""),
+                "finished_at": str(row.get("finished_at") or ""),
+                "tool_call_id": str(row.get("tool_call_id") or ""),
+            }
+            for row in list(rows or [])
+            if isinstance(row, dict)
+        ]
+    return {
+        "ok": True,
+        "session_id": session_key,
+        "count": len(items),
+        "items": items,
+        "finished": finished,
+    }
 
 
 @router.post("/ceo/sessions/{session_id}/tool-jobs/{job_id}/stop")
