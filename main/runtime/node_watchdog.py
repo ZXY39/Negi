@@ -281,6 +281,6 @@ class NodeWatchdog:
             return metadata
 
         self._service.log_service.update_node_metadata(node_id, _mutate)
+        # 父节点升级由 `_mark_node_paused` 统一发出；根节点由 task_node_error 心跳负责。
         runner._mark_node_paused(task_id, node_id, reason='error', remark=remark)
-        runner.notify_parent_abnormal_pause(task_id=task_id, node_id=node_id, reason=remark)
         self._service.log_service.refresh_task_view(task_id, mark_unread=True)

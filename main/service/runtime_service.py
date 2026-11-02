@@ -598,6 +598,24 @@ def _callback_host_for_log(url: str) -> str:
         return str(url or '').strip()
 
 
+def _iso_at_or_after(value: Any, threshold: Any) -> bool:
+    """True only when both ISO stamps parse and `value >= threshold`.
+
+    Unparseable input returns False: a notification that cannot be placed in time
+    must not be read as covering a pause row, or the P8 resend would be skipped.
+    """
+    try:
+        left = datetime.fromisoformat(str(value or '').strip().replace('Z', '+00:00'))
+        right = datetime.fromisoformat(str(threshold or '').strip().replace('Z', '+00:00'))
+    except ValueError:
+        return False
+    if left.tzinfo is None:
+        left = left.replace(tzinfo=timezone.utc)
+    if right.tzinfo is None:
+        right = right.replace(tzinfo=timezone.utc)
+    return left >= right
+
+
 class MainRuntimeService:
     def __init__(
         self,
@@ -2110,14 +2128,23 @@ class MainRuntimeService:
             if str(node.status or '').strip().lower() in {'success', 'failed'}:
                 results.append({'node_id': node_id, 'result': 'conflict', 'reason': 'node_terminal'})
                 continue
-            updated = self.log_service.set_node_pause_state(
-                normalized_task_id,
-                node_id,
-                pause_requested=True,
-                is_paused=True if normalized_reason == 'error' else bool(node.is_paused),
-                pause_reason=normalized_reason,
-                remark=remark,
-            )
+            if normalized_reason == 'error':
+                # error 档走统一异常暂停入口：非根节点必须同时向父节点发
+                # child_abnormal_pause；控制面不能绕过这条升级道。
+                updated = self.node_runner.mark_node_error_paused(
+                    normalized_task_id,
+                    node_id,
+                    remark=remark,
+                )
+            else:
+                updated = self.log_service.set_node_pause_state(
+                    normalized_task_id,
+                    node_id,
+                    pause_requested=True,
+                    is_paused=bool(node.is_paused),
+                    pause_reason=normalized_reason,
+                    remark=remark,
+                )
             results.append({'node_id': node_id, 'result': 'paused' if updated is not None else 'not_found'})
         self._land_pause_for_stranded_nodes(normalized_task_id)
         return {'ok': True, 'task_id': normalized_task_id, 'items': results}
@@ -5653,15 +5680,16 @@ class MainRuntimeService:
         """P8：异常暂停的升级消息丢了就补发（防 P6 第一类死锁从崩溃路径复活）。
 
         判据只看持久事实：节点是 `pause_reason='error'` 的暂停态、有父节点，而父
-        节点信箱里没有来自它的 `child_abnormal_pause`（delivered/consumed 都算已到）。
+        节点信箱里没有覆盖**这一个暂停行**的 `child_abnormal_pause`（delivered/consumed
+        都算已到）。对账按通知 `created_at` ≥ 暂停行 `created_at`：同节点恢复后再次
+        暂停会产生新的暂停行，旧通知不能替它兜底。验收节点的异常暂停同样升级给父节点，
+        心跳的根节点限定不在这里复制一份。
         """
         normalized_task_id = str(task_id or '').strip()
         if not normalized_task_id:
             return []
         resent: list[str] = []
         for node in list(self.store.list_nodes(normalized_task_id) or []):
-            if str(getattr(node, 'node_kind', '') or '').strip().lower() != 'execution':
-                continue
             if str(getattr(node, 'pause_reason', '') or '').strip().lower() != 'error':
                 continue
             if not (bool(getattr(node, 'is_paused', False)) or bool(getattr(node, 'pause_requested', False))):
@@ -5669,10 +5697,14 @@ class MainRuntimeService:
             parent_node_id = str(getattr(node, 'parent_node_id', '') or '').strip()
             if not parent_node_id:
                 continue
+            pause = self.store.get_task_node_pause(str(node.node_id or '').strip())
+            if pause is None:
+                continue
             already = any(
                 str(item.kind or '').strip() == KIND_CHILD_ABNORMAL_PAUSE
                 and str(item.source_node_id or '').strip() == str(node.node_id or '').strip()
                 and str(item.status or '').strip() in {'delivered', 'consumed'}
+                and _iso_at_or_after(item.created_at, pause.created_at)
                 for item in list(self.store.list_task_node_notifications(normalized_task_id, parent_node_id) or [])
             )
             if already:
@@ -5680,7 +5712,7 @@ class MainRuntimeService:
             await self._deliver_child_abnormal_pause(
                 task_id=normalized_task_id,
                 node_id=str(node.node_id or '').strip(),
-                reason=str(getattr(node, 'failure_reason', '') or '异常暂停'),
+                reason=str(pause.remark or getattr(node, 'failure_reason', '') or '异常暂停'),
             )
             resent.append(str(node.node_id or '').strip())
         return resent
