@@ -589,6 +589,17 @@ This is intentional. The composer button means "pause only when the user has not
 - 层位与收口：预览层是从弹窗里点开的叶子（设置 → 人设 → 照片），自身不叫起任何弹窗，所以整具查看器压在弹窗族之上（backdrop/drawer 1350/1360，三档阶梯见「Layering And Ownership」）；写在抽屉族那一档就会整扇沉到叫它起来的那张弹窗后面，点了像没反应。Escape 的收口顺序跟着层位：`org_graph_app.js` 的 document 处理器把 `closeMediaViewer()` 排在弹窗族之前，人设/引导弹窗那条捕获阶段处理器也先交预览层收——被盖住的那一层不该比最上面那层先收到按键。关闭时清空本层内容，让已经展开的 pdf/正文文档停止解码，否则下一层继承这一帧的卡顿。
 - 回归 `tests/resources/org_graph_app.media_viewer.test.js`（锚点形状、分派、委托点击、分页档、下载道）；三档阶梯与 Escape 收口顺序钉在 `tests/resources/org_graph_app.update_notice.test.js`，人设弹窗那条捕获处理器的先后钉在 `tests/resources/org_graph_onboarding.test.js`。
 
+### 2.12. Background Tool Jobs Bubble And Tool-Jobs API
+
+前端在会话 `.chat-wrapper` 右上角常驻一个后台工具气泡，数据只来自下面两个接口和一条 WS 帧；作业生命周期本身归 `runtime-overview.md`「Frontdoor Tool Job Handoff」，心跳事件归 `heartbeat-system.md`「Tool Job Heartbeat Events」。
+
+- `GET /api/ceo/sessions/{session_id}/tool-jobs` → `{ok, session_id, count, items}`；`items[]` 只含 `running` / `stopping`，字段 `job_id / tool_name / status / started_at / elapsed_seconds / turn_id / tool_call_id / hint`。没有运行时会话或没有 runner 时返回空列表而不是 503。会话解析与其它 CEO 会话接口同一套 `_resolve_bulk_session_key`，`ext:` 会话同样可查。
+- `POST /api/ceo/sessions/{session_id}/tool-jobs/{job_id}/stop` → `{ok, job_id, status:"stopping"}`。作业不属于该会话或已清除 → 404 `tool_job_not_found`；已完成/超时/中断 → 409 `tool_job_finished`；已在 stopping → 200 且不重复投事件。停止事件在点击时立即入心跳队列，不等待 task 收尾；前端只把该行置「停止中」并在成功后移除。
+- WS 帧 `ceo.tool_jobs`：`data = {count, items}`，信封自带 `session_id`；由 `RuntimeAgentSession._emit("tool_jobs_changed")` 经 `websocket_ceo.py` relay 推送，作业提升/停止/终态/恢复后各推一次。前端只在 `session_id` 等于当前激活会话时应用。
+- 前端模块 `g3ku/web/frontend/ceo/background-jobs.js` 在 `ceo/ws-router.js` 之前加载（bundle 顺序同步在 `tests/resources/support/frontend_sources.js`）。气泡文案固定 `x个工具正在后台运行`；计数含 `running` + `stopping`；列表行是工具名 + `mm:ss`（超过 1 小时 `h:mm:ss`）+ 停止按钮，`hint` 有值时在工具名下显示一行小字。popover 最大高度 `min(40vh, 320px)` 内部滚动；0 条隐藏并关闭 popover；点击外部/Escape 关闭，`aria-expanded` 同步。
+- 计时器只在 popover 打开且有 items 时每秒更新 `[data-bg-job-started]` 的文本，不重建列表；关闭、切会话、`pagehide` 清理。切换会话时先清空旧会话状态并重新 `GET`；`GET` 失败只隐藏气泡，不 toast。
+- 工具轨道里后台调用行的 `status=background`：`tasks/node-detail.js` 用 `clock-3` 图标 + 「后台运行」，不得画成 success；`org_graph_app.js` 的实时/账本状态映射同样保留该状态。完成的最终结果不写回历史行，只经心跳事件给模型。
+
 ### 3. Context Loader Notices
 
 - Successful context-loading calls do not render as ordinary `Interaction Flow` steps under the assistant bubble. This family has three entry forms: the explicit loaders (`load_tool_context` / `load_skill_context` and their `_v2` variants), a direct call to a tool whose contract is not in the request view — that hop delivers the contract instead of executing, and its tool result carries the runtime-owned `contract_delivery` marker (`staged` / `invalid`) — and a successful sticker-sheet read (`show_sticker_category`, below).

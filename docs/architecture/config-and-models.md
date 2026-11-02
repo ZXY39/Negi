@@ -31,6 +31,8 @@
 - 温度、max tokens、memory window
 - role iterations / concurrency
 - multi-agent 配置
+- 统一工具 timeout 默认值 `toolDefaultTimeoutSeconds`（默认 600，模型可在单次调用显式传更大的 `timeout_seconds`）
+- 前门工具自动转后台的等待窗口 `toolAutoBackgroundSeconds`（默认 60；0 = 关闭，全部前台等待）。它是运行时配置，不是模型入参；行为契约见 `runtime-overview.md`「Frontdoor Tool Job Handoff」
 
 ### `models`
 
@@ -81,7 +83,7 @@
 
 ### `cron`
 
-定义 cron 调度器的投递看门狗预算：`dispatchTimeoutSeconds`（默认 1800，单次 job dispatch 的等待上限，超时会 dump 挂起任务的 await 链、取消 dispatch 并把该次运行收尾为 `timeout`；`<=0` 关闭看门狗回到无限等待）与 `dispatchCancelGraceSeconds`（默认 10，取消后等待任务展开的宽限，超时视为抗取消任务并脱离调度器放弃）。默认预算刻意大于最长合理回合（provider 单次尝试上限 + 退避重试轮），只兜底真正楔死的 dispatch。该节属于加载器「显式字段校验」的豁免前缀：存量 `config.json` 不写 `cron` 节也能启动，取值回落到 schema 默认。行为契约详见 `heartbeat-system.md`「Cron Reminder Contract」。
+cron 调度器没有总时长派发预算：一次 dispatch 的 deadline 只来自 provider 单次尝试超时与本轮工具/作业自己的 timeout。handler 永不返回时该 run 一直保持 in-flight，直到进程重启；启动对账把它收成 `interrupted`。该节保留为空节以兼容存量配置，并仍在加载器「显式字段校验」的豁免前缀里。行为契约详见 `heartbeat-system.md`「Cron Reminder Contract」。
 
 ### `stt`
 
@@ -119,11 +121,11 @@
 
 `save_config()` 把 `config.json` **整份重写**（先写同目录临时文件再 `os.replace`），内容来自 `_runtime_config_payload(cfg)` 这一份显式白名单，不与磁盘上的旧文件合并。因此一条硬规则：**运行期会读的字段必须出现在白名单里，否则任何一次保存都会把它抹回 schema 默认**——操作员调过、界面改过、`G3KU_*` 覆盖过都算写过，而下一次保存就不见了。
 
-白名单对可选字段按「调过才落盘」写：与默认值相同的字段不落盘（不给操作员文件加噪声，存量文件也不会因此长出键），只有被改动的字段进文件，读侧由 pydantic 补回其余默认值。当前按该形状落盘的有 `agents.nodeParallelism`、`agents.toolDefaultTimeoutSeconds`、`mainRuntime.diskGuard`、`mainRuntime.duplicatePrecheck`、`mainRuntime.eventHistory`、`updateCheck`、非空时才落盘的 `models.loadBalanceGroups`，以及 `models.catalog[].reasoningContextEnabled`（这颗开关默认开，只有被操作员关掉的那一行写 `false`——它不落盘就等于下次保存把网关会 400 的那一行重新打开）。
+白名单对可选字段按「调过才落盘」写：与默认值相同的字段不落盘（不给操作员文件加噪声，存量文件也不会因此长出键），只有被改动的字段进文件，读侧由 pydantic 补回其余默认值。当前按该形状落盘的有 `agents.nodeParallelism`、`agents.toolDefaultTimeoutSeconds`、`agents.toolAutoBackgroundSeconds`、`mainRuntime.diskGuard`、`mainRuntime.duplicatePrecheck`、`mainRuntime.eventHistory`、`updateCheck`、非空时才落盘的 `models.loadBalanceGroups`，以及 `models.catalog[].reasoningContextEnabled`（这颗开关默认开，只有被操作员关掉的那一行写 `false`——它不落盘就等于下次保存把网关会 400 的那一行重新打开）。
 
 `agents.nodeParallelism` 里的机器压力读数分档是 `safe < warn < critical`，三条轴（cpu、memory、disk busy）同形，`tool_pressure_monitor` 按这个顺序把样本分成 `normal / warn / critical`，并要求连续 `safe` 采样才算机器侧恢复。写反的档位不会报错，只会静默失效：`machine_safe` 判的是 `读数 <= safe`，一旦 `safe` 高于 `warn`/`critical`，warn 与 critical 区间照样读成"已恢复"，机器侧那半条降档闸门就永远不落地。默认值由 `tests/resources/test_task_web_worker_runtime.py` 的分档用例钉住，改这三组数字要一起过它。
 
-「运行时字段显式性校验」要求白名单里每个叶子都在 `config.json` 出现，缺一个就拒绝加载。豁免前缀（`providers`、`mainRuntime`、`externalApi`、`qqBot`、`cron`、`stt`、`stickers`、`agents.nodeParallelism`、`agents.toolDefaultTimeoutSeconds`、`updateCheck`、`models.loadBalanceGroups`）承担两类情况：存量文件本来没有这些节，以及取值可能来自 `G3KU_*` 环境变量而不是配置文件——被豁免的节没写就是不用，回落到 schema 默认。新增字段时两个判断都要重做：进不进白名单（决定它会不会被保存抹掉），要不要进豁免前缀（决定老文件还能不能加载）。摘掉一个配置段时同样有两步：从 schema 与白名单里删掉它，并在 `_migrate_config()` 里 pop 掉它的磁盘拼写——根配置是 `extra="forbid"`，存量 config.json 里残留的那一节会让 `load_config()` 当场拒绝加载。
+「运行时字段显式性校验」要求白名单里每个叶子都在 `config.json` 出现，缺一个就拒绝加载。豁免前缀（`providers`、`mainRuntime`、`externalApi`、`qqBot`、`cron`、`stt`、`stickers`、`agents.nodeParallelism`、`agents.toolDefaultTimeoutSeconds`、`agents.toolAutoBackgroundSeconds`、`updateCheck`、`models.loadBalanceGroups`）承担两类情况：存量文件本来没有这些节，以及取值可能来自 `G3KU_*` 环境变量而不是配置文件——被豁免的节没写就是不用，回落到 schema 默认。新增字段时两个判断都要重做：进不进白名单（决定它会不会被保存抹掉），要不要进豁免前缀（决定老文件还能不能加载）。摘掉一个配置段时同样有两步：从 schema 与白名单里删掉它，并在 `_migrate_config()` 里 pop 掉它的磁盘拼写——根配置是 `extra="forbid"`，存量 config.json 里残留的那一节会让 `load_config()` 当场拒绝加载。
 
 ## 4. 配置热刷新
 

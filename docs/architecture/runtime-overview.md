@@ -209,6 +209,19 @@ CEO/frontdoor 路径上，`frontdoor_turns` 是“每个回合说了什么、这
 
 heartbeat / cron 的维护语义分两条通道：UI 展示通道上前端通过 inflight / session snapshot 渲染 heartbeat / cron 的原始处理流程（turns 账本、工具调用、压缩状态）；普通历史注入通道上，下一次真实用户 turn 的近场 prompt 历史过滤 internal-only user 消息与 `history_visible=false` 的 assistant 消息。内部轮次的请求组装、隐藏提示消息与工具合同继承详见 `heartbeat-system.md`「Continuation Contract」。
 
+### Frontdoor Tool Job Handoff
+
+前门把每个工具调用都当成一个 job：`run_tool_with_watchdog`（`g3ku/runtime/tool_watchdog.py`）的 task 从第一秒就在跑，前门最多等 `agents.toolAutoBackgroundSeconds`（默认 60s；0 = 关闭，全部前台等待）。
+
+- 窗口内完成：走原有结果路径，状态、渲染、账本逐字节不变；job 不落库、不产生事件。
+- 超过窗口：前门给模型返回一条合成结果 `[BACKGROUND] job_id=… tool=… elapsed=… timeout=…`，它仍是这个 `tool_call_id` 的唯一 tool result；回合继续，job 留在 web 进程内跑完。合成结果明确要求模型不要用相同参数重试，完成结果之后经心跳事件到达。
+- 只有真正后台化的调用才写 `tool_jobs` 行。`GET /api/ceo/sessions/{id}/tool-jobs` 只列 `running/stopping`；`POST …/tool-jobs/{job_id}/stop` 立即投递 `stopped_by_user` 事件，前端气泡只负责把该行移除（API/UI 契约见 `web-and-admin.md`「Background Tool Jobs Bubble And Tool-Jobs API」，事件契约见 `heartbeat-system.md`「Tool Job Heartbeat Events」）。
+- 作业 deadline 仍是工具自己的 `timeout_seconds`（显式值 > 全局默认 600s）：60s 窗口只决定“什么时候停止等”，不延长、不重置 timeout。工具自身 timeout ≤ 窗口时仍在窗口内返回 timeout/error，不会进入后台；`exempt_universal_timeout` 工具没有 deadline，但同样可以交棒和停止。
+- 状态机：`running → success | error | timeout | interrupted | stopped_by_user`。`stopping` 只活在用户点停止到 task 收尾之间；停止事件在点击时立即入队，不等 task 收尾，收尾不了则放弃跟踪并留一条 warning。
+- 取消边界：会话暂停/停止**不**取消后台 job——交棒时 per-call 取消令牌从会话令牌解绑，`pause()` / `cancel()` 只结束当前回合。只有用户点停止、会话删除、进程退出会结束 job；进程退出后启动恢复把残留的 `running` 行收成 `interrupted` 并补事件。后台是“脱离回合”，不是“脱离进程”：job task 在 web 进程内继续跑，进程被杀时它随之消失。
+- 账本：交棒的工具行 `status=background`、`finished_at` 为空，表示“这一调用仍在后台”；前端把它画成后台运行而不是完成。完成结果只经心跳事件回到模型，不回写历史账本行。
+- 范围只限前门（CEO / `web:` / `ext:` / 渠道会话）。任务节点（`main/runtime/react_loop.py`）的 `run_tool_with_watchdog` 语义不变；工具 schema、模型入参、provider-facing `tools[]` 字节均不变。`exec` 继续使用现有 PIPE 捕获，不需要日志文件或 `background=true`。
+
 相关文件：
 
 - `g3ku/runtime/frontdoor/ceo_runner.py`
