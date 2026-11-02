@@ -44,6 +44,7 @@ _TRANSCRIPT_BATCH_ID_KEY = "_transcript_batch_id"
 _TRANSCRIPT_STATE_KEY = "_transcript_state"
 _TRANSCRIPT_STATE_PENDING = "pending"
 _TRANSCRIPT_STATE_PAUSED = "paused"
+_TRANSCRIPT_STATE_INTERRUPTED = "interrupted"
 _TRANSCRIPT_STATE_COMPLETED = "completed"
 # 轮级用量热缓存的条数上限：在飞轮与刚收尾那一帧要读，更早的轮从请求工件取。
 _TURN_USAGE_MEMORY_ENTRIES = 64
@@ -68,6 +69,7 @@ _TRANSCRIPT_STATE_DISCARDED = "discarded"
 # 失败回合写进转录的助手行来源标记。它不是对用户的回答：待重投判据（见
 # `_rehydrate_queued_follow_ups`）按它把该轮从"已回答"里摘出去。
 _TRANSCRIPT_ERROR_REPLY_SOURCE = "runtime_error"
+_TRANSCRIPT_PAUSED_ARCHIVE_SOURCE = "manual_pause_archive"
 # 手动上下文压缩的运行态：由 api/ceo_sessions 写、由 frontdoor_inbound_hold() 读。
 # 常量放在运行层，是为了让四条入站车道问的是同一个字段名（api 层依赖运行层，反向不行）。
 MANUAL_COMPRESSION_STATE_ATTR = "_manual_context_compression"
@@ -234,6 +236,7 @@ class RuntimeAgentSession:
         self._preserved_inflight_turn: dict[str, Any] | None = None
         self._follow_up_transition_snapshot: dict[str, Any] | None = None
         self._paused_execution_context: dict[str, Any] | None = None
+        self._interrupted_turn_recovery: dict[str, Any] | None = None
         self._frontdoor_turns: list[dict[str, Any]] = []
         self._compression_state: dict[str, Any] = {}
         self._semantic_context_state: dict[str, Any] = {}
@@ -308,6 +311,7 @@ class RuntimeAgentSession:
         self._reasoning_est_tokens_total: int = 0
         self._turn_lock = asyncio.Lock()
         self._restore_frontdoor_persistent_state()
+        self._recover_interrupted_primary_turn()
         self._rehydrate_queued_follow_ups()
 
     @property
@@ -1515,26 +1519,50 @@ class RuntimeAgentSession:
         return ""
 
     def _adopt_interrupted_turn_id_for_resume(self, user_input: UserInputMessage) -> str:
-        """停机续跑轮复用被截断回合的 turn_id，让一个请求在转录里只留一行回复。
+        """续跑轮复用被截断回合的 turn_id，让一个请求在转录里只留一行回复。
 
-        只在 `heartbeat_reason` 单独成束为 `shutdown_resume` 时认领：与终态/失速事件混成
-        一束时（reason 变 `mixed`）这一轮答的不是用户那条被截断的提问，并进气泡等于把
-        别人的回复挂到用户的提问下面。
+        只在 `heartbeat_reason` 单独成束为 `shutdown_resume` / `turn_interrupted` 时认领：
+        与终态/失速事件混成一束时（reason 变 `mixed`）这一轮答的不只是用户那条被截断的
+        提问，并进气泡等于把别人的回复挂到用户的提问下面。混合束的收口仍由
+        `_persist_turn_transcript` 按 `turn_interrupted_turn_id` 完成。
         """
         metadata = dict(getattr(user_input, "metadata", None) or {})
         if not bool(metadata.get("heartbeat_internal")):
             return ""
-        if str(metadata.get("heartbeat_reason") or "").strip().lower() != "shutdown_resume":
+        heartbeat_reason = str(metadata.get("heartbeat_reason") or "").strip().lower()
+        if heartbeat_reason not in {"shutdown_resume", "turn_interrupted"}:
             return ""
-        if str(self._active_turn_id or "").strip():
+        active_turn_id = str(self._active_turn_id or "").strip()
+        input_turn_id = str(metadata.get(_TRANSCRIPT_TURN_ID_KEY) or "").strip()
+        # `_persist_internal_prompt_messages` 会先为本条心跳输入生成一个内部 turn_id；
+        # 那是隐藏规则/事件束行的 id，不是用户被截断回合的 id，可以在这一条车道覆盖。
+        # 已有且不属于本输入的 active id 说明有真回合在跑，不能抢。
+        if active_turn_id and input_turn_id != active_turn_id:
             return ""
-        try:
-            persisted_session = self._loop.sessions.get_or_create(self._state.session_key)
-            turn_id = self._find_resumable_paused_archive_turn_id(persisted_session)
-        except Exception:
-            return ""
+        if heartbeat_reason == "turn_interrupted":
+            turn_id = str(metadata.get("turn_interrupted_turn_id") or "").strip()
+            if not turn_id:
+                recovery = getattr(self, "_interrupted_turn_recovery", None)
+                if isinstance(recovery, dict):
+                    turn_id = str(recovery.get("turn_id") or "").strip()
+            if not turn_id:
+                try:
+                    persisted_session = self._loop.sessions.get_or_create(self._state.session_key)
+                    rows = list(getattr(persisted_session, "messages", None) or [])
+                    row = self._latest_unanswered_interrupted_user_row(persisted_session, rows)
+                    turn_id = self._message_turn_id(row) if isinstance(row, dict) else ""
+                except Exception:
+                    turn_id = ""
+        else:
+            try:
+                persisted_session = self._loop.sessions.get_or_create(self._state.session_key)
+                turn_id = self._find_resumable_paused_archive_turn_id(persisted_session)
+            except Exception:
+                turn_id = ""
         if not turn_id:
             return ""
+        metadata[_TRANSCRIPT_TURN_ID_KEY] = turn_id
+        user_input.metadata = metadata
         self._active_turn_id = turn_id
         self._seed_turn_usage_from_artifacts(turn_id)
         return turn_id
@@ -3569,6 +3597,13 @@ class RuntimeAgentSession:
                     assistant_payload=assistant_payload,
                 )
                 self._complete_paused_user_message_for_turn(persisted_session, turn_id)
+            interrupted_turn_id = str(metadata_payload.get("turn_interrupted_turn_id") or "").strip()
+            if interrupted_turn_id:
+                self._complete_interrupted_user_messages(
+                    persisted_session,
+                    turn_id=interrupted_turn_id,
+                    persist=False,
+                )
             # 发送时（自动）压缩在收尾处落线：区分线以上是这轮被折进摘要的历史。
             if str(getattr(self, "_frontdoor_compressed_turn_id", "") or "").strip() == turn_id and turn_id:
                 setattr(self, "_frontdoor_compressed_turn_id", "")
@@ -4210,6 +4245,12 @@ class RuntimeAgentSession:
                     }
                     silent_metadata, silent_trace_text = self._silent_reply_metadata(output)
                     assistant_metadata.update(silent_metadata)
+                    if heartbeat_internal:
+                        turn_interrupted_turn_id = str(
+                            (user_input.metadata or {}).get("turn_interrupted_turn_id") or ""
+                        ).strip()
+                        if turn_interrupted_turn_id:
+                            assistant_metadata["turn_interrupted_turn_id"] = turn_interrupted_turn_id
                     if cron_internal:
                         assistant_metadata["source"] = "cron"
                         assistant_metadata["cron_job_id"] = str(
@@ -4394,6 +4435,12 @@ class RuntimeAgentSession:
                         "prompt_visible": True,
                         "ui_visible": True,
                     }
+                    if heartbeat_internal:
+                        turn_interrupted_turn_id = str(
+                            (user_input.metadata or {}).get("turn_interrupted_turn_id") or ""
+                        ).strip()
+                        if turn_interrupted_turn_id:
+                            assistant_metadata["turn_interrupted_turn_id"] = turn_interrupted_turn_id
                     if cron_internal:
                         assistant_metadata["cron_job_id"] = str((user_input.metadata or {}).get("cron_job_id") or "").strip()
                 if silent_reply:
@@ -4751,6 +4798,278 @@ class RuntimeAgentSession:
         self._state.queued_follow_up_messages.clear()
         return queued_inputs
 
+    @classmethod
+    def _answered_turn_ids_from_rows(
+        cls,
+        rows: Any,
+        *,
+        excluded_sources: tuple[str, ...] = (_TRANSCRIPT_ERROR_REPLY_SOURCE,),
+    ) -> set[str]:
+        normalized_excluded = {
+            str(source or "").strip().lower() for source in excluded_sources if source
+        }
+        answered_turn_ids: set[str] = set()
+        for row in list(rows or []):
+            if not isinstance(row, dict) or str(row.get("role") or "").strip().lower() != "assistant":
+                continue
+            row_metadata = row.get("metadata")
+            row_source = (
+                str(row_metadata.get("source") or "").strip().lower()
+                if isinstance(row_metadata, dict)
+                else ""
+            )
+            if row_source in normalized_excluded:
+                # 错误回复只证明"这一轮跑坏了"，暂停归档也不是对用户的回答。
+                continue
+            turn_id = str(
+                row.get("turn_id")
+                or ((row.get("metadata") or {}).get(_TRANSCRIPT_TURN_ID_KEY))
+                or ""
+            ).strip()
+            if turn_id:
+                answered_turn_ids.add(turn_id)
+        return answered_turn_ids
+
+    @classmethod
+    def _turn_has_answered_assistant_row(
+        cls,
+        rows: Any,
+        turn_id: str,
+        *,
+        excluded_sources: tuple[str, ...] = (_TRANSCRIPT_ERROR_REPLY_SOURCE,),
+    ) -> bool:
+        normalized_turn_id = str(turn_id or "").strip()
+        return bool(normalized_turn_id) and normalized_turn_id in cls._answered_turn_ids_from_rows(
+            rows,
+            excluded_sources=excluded_sources,
+        )
+
+    @staticmethod
+    def _iso_epoch(value: Any) -> float | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+
+    @classmethod
+    def _latest_iso_timestamp(cls, *values: Any) -> str:
+        best_value = ""
+        best_epoch: float | None = None
+        for value in values:
+            text = str(value or "").strip()
+            if not text:
+                continue
+            epoch = cls._iso_epoch(text)
+            if epoch is None:
+                if not best_value:
+                    best_value = text
+                continue
+            if best_epoch is None or epoch > best_epoch:
+                best_epoch = epoch
+                best_value = text
+        return best_value
+
+    def _mark_transcript_user_state(
+        self,
+        persisted_session: Any,
+        *,
+        turn_id: str,
+        state: str,
+        persist: bool = True,
+    ) -> bool:
+        index = self._find_transcript_user_index(persisted_session, turn_id=turn_id)
+        if index is None:
+            return False
+        rows = getattr(persisted_session, "messages", None)
+        if not isinstance(rows, list) or index >= len(rows):
+            return False
+        row = rows[index]
+        if not isinstance(row, dict):
+            return False
+        current_state = self._message_transcript_state(row).strip().lower()
+        normalized_state = str(state or "").strip().lower()
+        if current_state == normalized_state:
+            return True
+        updated = dict(row)
+        metadata = dict(row.get("metadata") or {})
+        metadata[_TRANSCRIPT_STATE_KEY] = normalized_state
+        updated["metadata"] = metadata
+        rows[index] = updated
+        if hasattr(persisted_session, "updated_at"):
+            persisted_session.updated_at = datetime.now()
+        if persist:
+            try:
+                self._loop.sessions.save(persisted_session)
+            except Exception:
+                logger.debug(
+                    "interrupted turn user row state save skipped for {}",
+                    self._state.session_key,
+                )
+        return True
+
+    def _complete_interrupted_user_messages(
+        self,
+        persisted_session: Any,
+        *,
+        turn_id: str = "",
+        persist: bool = True,
+    ) -> int:
+        target_turn_id = str(turn_id or "").strip()
+        recovery = getattr(self, "_interrupted_turn_recovery", None)
+        if not target_turn_id and isinstance(recovery, dict):
+            target_turn_id = str(recovery.get("turn_id") or "").strip()
+        if not target_turn_id:
+            return 0
+        completed = self._mark_transcript_user_state(
+            persisted_session,
+            turn_id=target_turn_id,
+            state=_TRANSCRIPT_STATE_COMPLETED,
+            persist=persist,
+        )
+        if completed and isinstance(recovery, dict):
+            if str(recovery.get("turn_id") or "").strip() == target_turn_id:
+                self._interrupted_turn_recovery = None
+        return 1 if completed else 0
+
+    def _set_interrupted_turn_recovery(
+        self,
+        row: dict[str, Any],
+        *,
+        last_activity_at: str,
+    ) -> None:
+        turn_id = self._message_turn_id(row)
+        if not turn_id:
+            return
+        self._interrupted_turn_recovery = {
+            "turn_id": turn_id,
+            "last_activity_at": str(last_activity_at or row.get("timestamp") or ""),
+            "detected_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "user_message": str(row.get("content") or ""),
+        }
+
+    def _latest_unanswered_interrupted_user_row(
+        self,
+        persisted_session: Any,
+        rows: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        for index in range(len(rows) - 1, -1, -1):
+            row = rows[index]
+            if not isinstance(row, dict) or str(row.get("role") or "").strip().lower() != "user":
+                continue
+            if self._message_transcript_state(row).strip().lower() != _TRANSCRIPT_STATE_INTERRUPTED:
+                continue
+            turn_id = self._message_turn_id(row)
+            if not turn_id:
+                continue
+            if self._turn_has_answered_assistant_row(
+                rows,
+                turn_id,
+                excluded_sources=(
+                    _TRANSCRIPT_ERROR_REPLY_SOURCE,
+                    _TRANSCRIPT_PAUSED_ARCHIVE_SOURCE,
+                ),
+            ):
+                self._mark_transcript_user_state(
+                    persisted_session,
+                    turn_id=turn_id,
+                    state=_TRANSCRIPT_STATE_COMPLETED,
+                )
+                continue
+            return row
+        return None
+
+    def _recover_interrupted_primary_turn(self) -> None:
+        """把崩溃时正在跑的主输入标成 interrupted，而不是接回排队队列。"""
+        session_key = str(self._state.session_key or "").strip()
+        if not session_key or getattr(self._loop, "sessions", None) is None:
+            return
+        try:
+            from g3ku.runtime.web_ceo_sessions import (
+                read_inflight_turn_snapshot,
+                read_paused_execution_context,
+            )
+        except Exception:
+            return
+        # 手动暂停与优雅停机已有自己的续跑车道；这里只认异常退出留下的 inflight sidecar。
+        try:
+            if read_paused_execution_context(session_key) is not None:
+                return
+            snapshot = read_inflight_turn_snapshot(session_key)
+        except Exception:
+            return
+        try:
+            persisted_session = self._loop.sessions.get_or_create(session_key)
+            rows = list(getattr(persisted_session, "messages", None) or [])
+        except Exception:
+            logger.debug("interrupted turn recovery skipped for {}", session_key)
+            return
+        # 上一次启动已经标过 interrupted、但事件尚未走完的行：没有 sidecar 也要继续唤醒。
+        latest_interrupted_row = self._latest_unanswered_interrupted_user_row(
+            persisted_session,
+            rows,
+        )
+        if not isinstance(snapshot, dict) or not snapshot:
+            if latest_interrupted_row is not None:
+                self._set_interrupted_turn_recovery(latest_interrupted_row, last_activity_at="")
+            return
+        if str(snapshot.get("status") or "").strip().lower() == _TRANSCRIPT_STATE_PAUSED:
+            return
+        turn_id = str(snapshot.get("turn_id") or "").strip()
+        if not turn_id:
+            if latest_interrupted_row is not None:
+                self._set_interrupted_turn_recovery(latest_interrupted_row, last_activity_at="")
+            return
+        if self._turn_has_answered_assistant_row(
+            rows,
+            turn_id,
+            excluded_sources=(
+                _TRANSCRIPT_ERROR_REPLY_SOURCE,
+                _TRANSCRIPT_PAUSED_ARCHIVE_SOURCE,
+            ),
+        ):
+            self._mark_transcript_user_state(
+                persisted_session,
+                turn_id=turn_id,
+                state=_TRANSCRIPT_STATE_COMPLETED,
+            )
+            self._interrupted_turn_recovery = None
+            return
+        index = self._find_transcript_user_index(persisted_session, turn_id=turn_id)
+        row = rows[index] if index is not None and index < len(rows) else None
+        if not isinstance(row, dict):
+            row = latest_interrupted_row
+        if not isinstance(row, dict):
+            return
+        state = self._message_transcript_state(row).strip().lower()
+        if state not in {_TRANSCRIPT_STATE_PENDING, _TRANSCRIPT_STATE_INTERRUPTED}:
+            if latest_interrupted_row is not None:
+                self._set_interrupted_turn_recovery(latest_interrupted_row, last_activity_at="")
+            return
+        if state == _TRANSCRIPT_STATE_PENDING:
+            self._mark_transcript_user_state(
+                persisted_session,
+                turn_id=turn_id or self._message_turn_id(row),
+                state=_TRANSCRIPT_STATE_INTERRUPTED,
+            )
+        snapshot_activity = (
+            snapshot.get("persisted_at")
+            if self._message_turn_id(row) == turn_id
+            else ""
+        )
+        last_activity_at = self._latest_iso_timestamp(
+            snapshot_activity,
+            row.get("timestamp"),
+            rows[-1].get("timestamp") if rows and isinstance(rows[-1], dict) else "",
+        )
+        self._set_interrupted_turn_recovery(row, last_activity_at=last_activity_at)
+
+    def interrupted_turn_recovery_state(self) -> dict[str, Any] | None:
+        state = getattr(self, "_interrupted_turn_recovery", None)
+        return dict(state) if isinstance(state, dict) else None
+
     def _rehydrate_queued_follow_ups(self) -> int:
         """把转录里仍是 pending 的用户条目接回内存队列，返回接回的条数。
 
@@ -4771,26 +5090,7 @@ class RuntimeAgentSession:
         except Exception:
             logger.debug("queued follow-up rehydrate skipped for {}", session_key)
             return 0
-        answered_turn_ids = set()
-        for row in rows:
-            if not isinstance(row, dict) or str(row.get("role") or "") != "assistant":
-                continue
-            row_metadata = row.get("metadata")
-            if (
-                isinstance(row_metadata, dict)
-                and str(row_metadata.get("source") or "").strip().lower()
-                == _TRANSCRIPT_ERROR_REPLY_SOURCE
-            ):
-                # 错误回复行只证明"这一轮跑坏了"，不证明"用户被回答了"。把它算进已回答
-                # 集合，等于把失败回合的用户输入永久锁在 pending 之外。
-                continue
-            turn_id = str(
-                row.get("turn_id")
-                or ((row.get("metadata") or {}).get(_TRANSCRIPT_TURN_ID_KEY))
-                or ""
-            ).strip()
-            if turn_id:
-                answered_turn_ids.add(turn_id)
+        answered_turn_ids = self._answered_turn_ids_from_rows(rows)
         restored: list[UserInputMessage] = []
         for row in rows:
             if not isinstance(row, dict) or str(row.get("role") or "") != "user":

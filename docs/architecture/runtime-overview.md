@@ -102,6 +102,17 @@
 
 可以把它看成“一个会话的状态机 + turn 执行器”：名字看起来像简单 session 封装，实际上 user turn、heartbeat / cron internal turn、async dispatch 错误恢复、paused execution context 与 frontdoor 回合账本 / 暂存载体都在这里汇合。
 
+### 崩溃中断回合恢复
+
+异常进程退出会在转录里留下 in-flight 回合的主用户行（`pending`）与 inflight snapshot。它与“排队补充消息”不是同一种输入：重放主行会被模型读成用户又发了一次，并可能重复执行有副作用的工具。会话构造期 `_recover_interrupted_primary_turn()` 把这类主输入改成 `interrupted`，不接回 `queued_follow_up_messages`。
+
+- 识别依据：inflight snapshot 的 `turn_id` + 转录里同 `turn_id` 的 pending 用户行；同 `turn_id` 已有非错误、非暂停归档的助手行时直接把用户行标 `completed`，不产生恢复；没有 snapshot 或没有匹配行时保持旧 pending replay，不猜主输入。`read_paused_execution_context()` 存在的会话不进入这条车道。
+- 只改主输入：其它 `turn_id` 的 pending 行仍是排队补充，继续由 `_rehydrate_queued_follow_ups` 接回队列；上一启动已经留下的 `interrupted` 行即使没有 inflight snapshot 也会继续被接回恢复状态。
+- `last_activity_at` 取 inflight snapshot `persisted_at`、用户行 timestamp、转录最后一行 timestamp 中最新的可解析值；没有则留空，由提示词显示 `unknown`。心跳提示词在唤醒时计算 `now` 与 `stopped_seconds`，不做 TTL。
+- `interrupted` 行是 durable 标记：启动恢复每次扫描 `pending` / `interrupted`，有行且无助手行就重发 `turn_interrupted` 事件；恢复回合成功写转录时按事件里的 `turn_interrupted_turn_id` 把该行标 `completed`，失败/取消保持 `interrupted`，下次启动继续。
+- 原 `turn_id` 复用属于 `_adopt_interrupted_turn_id_for_resume()`：只有单独 `turn_interrupted` 事件束会认领；混合束不认领，但收口仍按 `turn_interrupted_turn_id` 完成，避免回复挂错提问。内部提示词持久化会先给本条心跳输入生成一个隐藏行 `turn_id`，认领时覆盖本条输入的 `_transcript_turn_id`，助手行才挂回原提问而不是那个内部 id。
+- 启动 queued follow-up replay 遇到有恢复状态的会话先跳过，避免与恢复心跳并发起两个回合；恢复回合的 `take_follow_up_batch_for_call_model` 会接走 pending follow-up，之后的空闲 / WS 重连仍可排水。心跳事件契约见 `heartbeat-system.md`「Interrupted Turn Wake」。
+
 ### 3.3 静默回复（`silent` 工具）
 
 静默由一个**工具调用**表达，而不是由回复文本来表达。模型在任意一轮（用户轮、heartbeat、cron）调用 `silent`，本轮就不向用户投递任何回复；参数 `reason`（必填）/ `subject` / `superseded_by` 同时是审计载荷和痕迹内容。这个工具是前门专属的常驻内置控制工具，曝光与终态语义详见 `tool-and-skill-system.md`「fixed builtin tools」。
@@ -719,7 +730,7 @@ CEO/frontdoor 请求收缩只有一个自动信息损失边界：`token_compress
 - 三条入站车道问同一个判定，命中就绝不起回合：web WS 转入候选队列（`queue_follow_up_batch`）、渠道 `/api/v1`（QQ 官方 / onebot / openai-compat 都回环到这里）转入排队回执、heartbeat 沿用"忙则改期"。cron 刻意不加闸门：定时投递没有"稍后再说"的操作语义，排队等于把提醒改期到不可预期；它起的回合由下面的代号仲裁兜住，最坏情况是这一次压缩拒写而不是丢一次投递。
 - durable 基线每前进一次换一代（`_frontdoor_baseline_revision`，只在唯一前进点递增）。手动压缩记下读取输入时的代号，落盘前对不上就不写，并回报 `baseline_advanced`：不落"已压缩"区分线，UI 给专门的文案让人等这条回复结束后再压一次。
 - 为什么闸门还不够、必须再加代号：闸门只挡得住"压缩开始后到达的消息"，挡不住"压缩开始时已经在跑的回合"。渠道回合的任务刻意注册在 `None` 键上（真实键会让 pause 的 `cancel_session_tasks` 自我 gather 死锁），因此 pause 既停不掉它也等不到它，它照常会在摘要落盘之后用压缩前的种子把基线写回去。那种覆盖连摘要里的压缩边界标记一起抹掉，后果是压缩白做，区分线也指错位置。宁可不缩，也不写一份"声称缩小、实际回退"的基线。
-- 排队条目的 durable 记录是转录里的 `pending` 用户行：入队即写，不需要另建队列。可见用户回合开始前与会话构造时都会把仍是 pending、且该 turn 没有**真正的回答行**的条目按转录顺序接回队列（`source=runtime_error` 的错误行只证明回合跑坏了，不证明用户被回答过），接回时沿用行上的原始 `timestamp`——inflight 快照靠它报告送达时间，前端才能把气泡落在时间序上该在的位置。
+- 排队条目的 durable 记录是转录里的 `pending` 用户行：入队即写，不需要另建队列。可见用户回合开始前与会话构造时都会把仍是 pending、且该 turn 没有**真正的回答行**的条目按转录顺序接回队列（`source=runtime_error` 的错误行只证明回合跑坏了，不证明用户被回答过），接回时沿用行上的原始 `timestamp`——inflight 快照靠它报告送达时间，前端才能把气泡落在时间序上该在的位置。崩溃时正在跑的主输入不在重投通道上：构造期改成 `interrupted`，由 `turn_interrupted` 心跳续跑（见「崩溃中断回合恢复」）。
 - `pending` 升回 `completed` 有两条路，缺一不可：消费它的那一回合按 `turn_id` 就地升态（`_persist_turn_transcript` 遍历本批输入），以及正常完成回合收尾时只退役**本批真的接走过的** pending 行——判据是这一行的 `turn_id` 落在本轮批次 `_active_user_batch_inputs` 里、且不在内存队列中。内部（心跳/cron）回合会在 prepare 时消费排队的 follow-up，而它的完成回写整段跳过用户行，靠第二条这些行才不留在 pending：`take_follow_up_batch_for_call_model` 把 drain 到的条目放回 `_active_user_batch_inputs`，所以内部回合同样被这条判据覆盖。判据不放宽成"内存队列没持有它就退役"——别轮遗留的 pending 行不属于任何批次，被一次无关的成功回合升态后，那条提问既没有回答行，也不在待接回名单里，下一次会话重建无从重投。终态的授予权属于成功收尾路径：运行时错误路径既不退役也不升格，并把本轮没有拿到真实模型轮次的用户输入放回队列——内存队列是"仍打算派发"的真相，行只有被队列持有才受退役保护，否则下一次成功收尾会把它当成已消费的排队行翻掉，消息从此在模型上下文里消失。认领待重投输入的是可见用户回合车道，不是内部回合。网页队列上的撤回是唯一的删行入口（`withdraw_queued_follow_up`：内存队列与该 turn_id 的 pending 行一起消失，并重算 `commit_turn_counter`/`last_user_turn_at`），它不走上面两条升态路径，也只在条目尚未被 take/drain 时成立。转录状态机的取证与陷阱见 `context-and-cache-troubleshooting.md`「残留 paused / pending 转录条目与未回答的用户输入」。
 - 排水通道共五条：两条请求内的（WS 的回合链、external 的排空循环，只有发起方进程还连着才有效），加三条"会话回到空闲"的——压缩收尾、WS 重连握手完成后、进程启动重放。启动重放只扫转录头一行加有界尾窗挑出值得构造的会话（全量构造所有会话去问一遍队列太贵），命中后逐个 await 而不是并发。派发器先问 hold 与工具审批，失败把条目放回队首；这三条缝都是低频事件，不构成重试热循环。派发出去的回合也遵守"恰好一个终态事件"的渠道契约，其 relay 只订阅在这次派发期间。
 

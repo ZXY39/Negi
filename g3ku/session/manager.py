@@ -412,6 +412,20 @@ class SessionManager:
 
         这是粗筛：误报的代价只是多构造一个会话（队列为空时派发直接返回），漏报只可能
         发生在 pending 行正好落在尾窗里被截断的那一行上，该会话下次被打开时仍会接回。"""
+        return self.keys_with_user_rows_in_states("pending")
+
+    def keys_with_pending_or_interrupted_user_rows(self) -> list[str]:
+        """启动恢复用粗筛：尾部同时接受 pending 与 interrupted 用户行。"""
+        return self.keys_with_user_rows_in_states("pending", "interrupted")
+
+    def keys_with_user_rows_in_states(self, *states: str) -> list[str]:
+        normalized_states = {
+            str(state or "").strip().lower()
+            for state in states
+            if str(state or "").strip()
+        }
+        if not normalized_states:
+            return []
         keys: list[str] = []
         for path in sorted(self.sessions_dir.glob("*.jsonl")):
             try:
@@ -426,16 +440,16 @@ class SessionManager:
             key = str((self._metadata_entry(head, path) or {}).get("key") or "").strip()
             if not key or key in keys:
                 continue
-            if not self._tail_has_pending_user_row(tail):
+            if not self._tail_has_user_row_in_states(tail, normalized_states):
                 continue
             keys.append(key)
         return keys
 
     @staticmethod
-    def _tail_has_pending_user_row(tail: str) -> bool:
+    def _tail_has_user_row_in_states(tail: str, states: set[str]) -> bool:
         for line in tail.split("\n")[1:]:
             text = line.strip()
-            if not text or '"pending"' not in text:
+            if not text or not any(f'"{state}"' in text for state in states):
                 continue
             try:
                 data = json.loads(text)
@@ -446,7 +460,7 @@ class SessionManager:
             metadata = data.get("metadata") or {}
             if not isinstance(metadata, dict):
                 continue
-            if str(metadata.get("_transcript_state") or "").strip().lower() == "pending":
+            if str(metadata.get("_transcript_state") or "").strip().lower() in states:
                 return True
         return False
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Callable
 
 from g3ku.core.timefmt import render_local_time
@@ -574,6 +575,68 @@ def shutdown_resume_lines() -> list[str]:
     ]
 
 
+def _render_activity_timestamp(value: Any) -> str:
+    text = _non_empty_text(value)
+    if not text or text.lower() == "unknown":
+        return "unknown"
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return text
+    if parsed.tzinfo is None:
+        parsed = parsed.astimezone()
+    return render_local_time(parsed)
+
+
+def _format_elapsed_seconds(total_seconds: int) -> str:
+    total = max(0, int(total_seconds))
+    hours, remainder = divmod(total, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    parts: list[str] = []
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes or hours:
+        parts.append(f"{minutes}m")
+    parts.append(f"{seconds}s")
+    return " ".join(parts)
+
+
+def _stopped_seconds(value: Any, now: datetime) -> int | None:
+    text = _non_empty_text(value)
+    if not text or text.lower() == "unknown":
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.astimezone()
+    return max(0, int((now - parsed).total_seconds()))
+
+
+def turn_interrupted_lines(event: dict[str, Any]) -> list[str]:
+    """崩溃中断回合的唤醒文本：用户没有重发，接着原请求做。"""
+    turn_id = _non_empty_text(event.get("turn_id")) or "unknown"
+    last_activity_at = _non_empty_text(event.get("last_activity_at"))
+    now = datetime.now().astimezone()
+    stopped_seconds = _stopped_seconds(last_activity_at, now)
+    if stopped_seconds is None:
+        stopped_text = "unknown"
+    else:
+        stopped_text = f"{_format_elapsed_seconds(stopped_seconds)} ({stopped_seconds}s)"
+    return [
+        "- The project process restarted while the previous turn was still running. "
+        "The user did not send it again.",
+        f"  Previous turn: {turn_id}",
+        f"  Last activity: {_render_activity_timestamp(last_activity_at)}",
+        f"  Current time: {render_local_time(now)}",
+        f"  Stopped for: {stopped_text}",
+        "  Continue the interrupted user request now. Inspect completed tool calls and background "
+        "job state before retrying side-effecting work; if it cannot be continued safely, tell the "
+        "user what remains.",
+    ]
+
+
 def _frontdoor_node_message_lines(
     event: dict[str, Any],
     retrieval_parts: list[str],
@@ -773,6 +836,9 @@ def _event_bundle_content(
             continue
         if reason == "shutdown_resume":
             lines.extend(shutdown_resume_lines())
+            continue
+        if reason == "turn_interrupted":
+            lines.extend(turn_interrupted_lines(event))
             continue
         if reason == "tool_job":
             lines.extend(

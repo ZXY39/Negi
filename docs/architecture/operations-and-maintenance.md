@@ -402,6 +402,7 @@ Provider retry troubleshooting note:
 - 优雅路径（重启脚本先调 `/api/bootstrap/exit`、或 Ctrl+C 让信号处理器收尾）：所有运行中的任务与会话被暂停并写 `shutdown_pause_registry` 台账，启动时自动恢复、不出现“异常停止”提示。退出前还有一次 ≤10 秒的排水等待（轮询 `pause_task` 命令直到 worker 真正停完 actor），停完才关闭托管 worker。若此时任务仍停在 paused：先分清它是不是「自动恢复跑过、又被上一个进程遗留的暂停命令打回」——这种任务台账已经为空，形态上和用户暂停完全一样，取证口径见 `main-task-runtime.md`「Graceful Shutdown Pause and Startup Auto-Resume」；worker 是否拿到 lease 完成 startup 也要查。直接 `python -m g3ku web` 的启动器在回收旧实例前先请求 `/api/bootstrap/exit` 并等待其暂停/退出，再强杀残留（`g3ku/web/launcher.py`）；`negi web` / `start-negi.*` 仍走 `negi_bootstrap.py` 的同语义回收。
 - 异常路径（进程被强杀、worker 单进程被单独杀死）：任务恢复清洗照常执行，`metadata.recovery_notice` 写「本任务遇到异常停止…」，UI 以可关闭 toast 呈现（`web-and-admin.md`「Task Recovery Notice UI Contract」）。这是预期行为，点击关闭即可。托管 worker 被单杀后 Web 会由看门狗自动重启、无需人工拉起（见本节「托管 worker 看门狗」），但该 worker 当时正在跑的任务仍按异常中断走恢复清洗。
 - 会话侧的自动恢复走 heartbeat `shutdown_resume` 内部轮（`heartbeat-system.md`「Shutdown Resume Wake」）：会话尾气泡会再现一条由系统恢复产生的回复；若没有出现，查启动日志里 `resume_shutdown_paused_sessions` / `auto-resumed` 与 heartbeat 事件投递日志。
+- 异常中断（不是优雅暂停）时，正在跑的 CEO 主回合走 `turn_interrupted` 唤醒：启动顺序是心跳服务 → `resume_shutdown_paused_sessions` → `recover_interrupted_turns` → queued follow-up replay。恢复扫描转录里的 `pending` / `interrupted` 用户行，把主输入标 `interrupted` 并投一条带 `last_activity_at` 的心跳事件；queued replay 会跳过这些会话，避免并发起第二个回合。排查“重启后同一条用户消息又发了一次”：先看转录用户行 `_transcript_state` 是否已从 `pending` 变成 `interrupted`，再看 `interrupted turn recovery` / `turn_interrupted` 启动与心跳日志；仍停在 pending 时检查 inflight snapshot 是否存在、以及是否被 paused context 挡住。
 
 ### 界面停在初始化向导（看着像新项目）但 `memory/` 与 `sessions/` 都有东西
 

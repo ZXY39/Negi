@@ -1071,6 +1071,13 @@ async def replay_queued_follow_ups(
                 channel=str(channel or "web"),
                 chat_id=str(chat_id or "shared"),
             )
+            recovery_state = getattr(session, "interrupted_turn_recovery_state", None)
+            if callable(recovery_state) and recovery_state():
+                logger.info(
+                    "queued follow-up boot replay skipped for interrupted turn: {}",
+                    session_key,
+                )
+                continue
             dispatch = getattr(session, "dispatch_queued_follow_ups_if_idle", None)
             if not callable(dispatch):
                 continue
@@ -1086,6 +1093,70 @@ async def replay_queued_follow_ups(
         replayed,
     )
     return replayed
+
+
+async def recover_interrupted_turns(
+    agent: AgentLoop | None = None,
+    runtime_manager: SessionRuntimeManager | None = None,
+    heartbeat: Any | None = None,
+) -> int:
+    """Wake sessions whose in-flight user turn was cut off by an abnormal exit.
+
+    The transcript row is the durable marker: the session constructor marks the
+    primary input `interrupted`, and this boot pass turns that state into one
+    heartbeat event. A later boot that still sees the row re-enqueues the same
+    dedupe key instead of replaying the user message as a new turn.
+    """
+    runtime_agent = agent if agent is not None else _global_agent
+    current_manager = runtime_manager if runtime_manager is not None else _global_runtime_manager
+    heartbeat_service = heartbeat if heartbeat is not None else _global_web_heartbeat
+    if runtime_agent is None or current_manager is None or heartbeat_service is None:
+        return 0
+    session_manager = getattr(runtime_agent, "sessions", None)
+    scan = getattr(session_manager, "keys_with_pending_or_interrupted_user_rows", None)
+    enqueue = getattr(heartbeat_service, "enqueue_turn_interrupted", None)
+    if not callable(scan) or not callable(enqueue):
+        return 0
+    try:
+        keys = [str(item or "").strip() for item in list(scan() or []) if str(item or "").strip()]
+    except Exception:
+        logger.exception("interrupted turn boot scan skipped on error")
+        return 0
+    if not keys:
+        return 0
+    from g3ku.heartbeat.session_service import _derive_session_channel_chat
+
+    recovered = 0
+    for session_key in keys:
+        channel, chat_id = _derive_session_channel_chat(session_key)
+        try:
+            session = current_manager.get_or_create(
+                session_key=session_key,
+                channel=str(channel or "web"),
+                chat_id=str(chat_id or "shared"),
+            )
+            state_supplier = getattr(session, "interrupted_turn_recovery_state", None)
+            recovery = dict(state_supplier() or {}) if callable(state_supplier) else {}
+            turn_id = str(recovery.get("turn_id") or "").strip()
+            if not turn_id:
+                continue
+            accepted = enqueue(
+                {
+                    "session_id": session_key,
+                    "turn_id": turn_id,
+                    "last_activity_at": str(recovery.get("last_activity_at") or ""),
+                    "detected_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                    "source": "crash_recovery",
+                    "dedupe_key": f"turn-interrupted:{session_key}:{turn_id}",
+                }
+            )
+            if accepted:
+                recovered += 1
+        except Exception:
+            logger.debug("interrupted turn boot recovery skipped for {}", session_key)
+    if recovered:
+        logger.info("interrupted turn recovery: {} session(s) enqueued", recovered)
+    return recovered
 
 
 def _ensure_queued_follow_up_replay_running(agent: AgentLoop | None = None) -> None:
@@ -1213,6 +1284,14 @@ async def ensure_web_runtime_services(agent: AgentLoop | None = None) -> None:
                 await resume_shutdown_paused_sessions(runtime_agent, get_runtime_manager(runtime_agent), _global_web_heartbeat)
             except Exception:
                 logger.debug("shutdown-paused session resume skipped during startup")
+            try:
+                await recover_interrupted_turns(
+                    runtime_agent,
+                    get_runtime_manager(runtime_agent),
+                    _global_web_heartbeat,
+                )
+            except Exception:
+                logger.exception("interrupted turn recovery skipped during startup")
             _ensure_queued_follow_up_replay_running(runtime_agent)
             await _sync_qq_official_service()
             _global_runtime_services_boot_completed = True
@@ -1361,6 +1440,7 @@ __all__ = [
     'get_web_heartbeat_service',
     'no_ceo_model_configured_payload',
     'pause_running_work_for_shutdown',
+    'recover_interrupted_turns',
     'refresh_web_agent_runtime',
     'resume_shutdown_paused_sessions',
     'run_web_shell',

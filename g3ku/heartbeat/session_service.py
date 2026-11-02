@@ -16,6 +16,7 @@ from g3ku.heartbeat.prompt_lane import (
     format_local_timestamp,
     shutdown_resume_lines,
     tool_job_lines,
+    turn_interrupted_lines,
 )
 from g3ku.heartbeat.session_events import SessionHeartbeatEvent, SessionHeartbeatEventQueue
 from g3ku.heartbeat.session_wake import SessionHeartbeatWakeQueue
@@ -312,6 +313,37 @@ class WebSessionHeartbeatService:
             return False
         if self._started:
             self._wake.request(key, delay_s=0.25)
+        return True
+
+    def enqueue_turn_interrupted(self, payload: dict[str, Any] | None) -> bool:
+        """Wake a session whose in-flight user turn was cut off by an abnormal restart.
+
+        The durable marker is the transcript row (`_transcript_state=interrupted`), so
+        this lane only owns the in-memory enqueue and wake request. A later boot that
+        still sees the interrupted row re-enqueues the same dedupe key.
+        """
+        normalized = dict(payload or {})
+        session_id = str(normalized.get("session_id") or "").strip()
+        turn_id = str(normalized.get("turn_id") or "").strip()
+        if not session_id or not turn_id:
+            return False
+        normalized["event_reason"] = "turn_interrupted"
+        normalized["reason"] = "turn_interrupted"
+        dedupe_key = str(
+            normalized.get("dedupe_key") or f"turn-interrupted:{session_id}:{turn_id}"
+        ).strip()
+        event = self._events.enqueue(
+            session_id=session_id,
+            source="frontdoor",
+            reason="turn_interrupted",
+            dedupe_key=dedupe_key,
+            payload=normalized,
+            delay_seconds=0.0,
+        )
+        if event is None:
+            return False
+        if self._started:
+            self._wake.request(session_id, delay_s=0.25)
         return True
 
     def enqueue_task_stall_payload(self, payload: dict[str, Any] | None) -> bool:
@@ -1003,6 +1035,7 @@ class WebSessionHeartbeatService:
         has_task_stall = any(str(event.reason or "").strip().lower() == "task_stall" for event in events)
         has_task_terminal = bool(self._task_terminal_events(events))
         has_shutdown_resume = bool(self._shutdown_resume_events(events))
+        has_turn_interrupted = bool(self._turn_interrupted_events(events))
         has_tool_job = any(str(event.reason or "").strip().lower() == "tool_job" for event in events)
         lines = [
             "This is a background heartbeat. Do not explain internal mechanics.",
@@ -1038,26 +1071,35 @@ class WebSessionHeartbeatService:
                     ]
                 )
                 lines.extend(self._task_terminal_repair_status_lines(events))
-        elif has_shutdown_resume:
-            # 不再给这一支开静默出口，也不再提旧的文本哨兵：shutdown_resume 的语义是
-            # "用户那条被重启打断的请求还没交付"，此时沉默恰恰是错的；后面两行已经说清
-            # 了该怎么办（接着做完，或已满足就简报现状）。旧文案写"不许回 HEARTBEAT_OK"
-            # 却又推荐哨兵，而哨兵的识别在 P4 一并删除 —— 留着就会把哨兵当正文发给用户。
+        elif has_shutdown_resume or has_turn_interrupted:
+            # 不再给这一支开静默出口：这两种事件的语义都是"用户那条被重启打断的请求
+            # 还没交付"，此时沉默恰恰是错的；后面几行已经说清了该怎么办。
+            resume_reason_label = (
+                "turn_interrupted"
+                if has_turn_interrupted and not has_shutdown_resume
+                else "shutdown_resume"
+                if has_shutdown_resume and not has_turn_interrupted
+                else "restart resume"
+            )
             lines.extend(
                 [
-                    "For shutdown_resume events, always end with a user-visible reply.",
-                    "This session was paused by a project restart while the user's request was still being handled.",
-                    "The user's paused request is present in the conversation context above.",
+                    "For shutdown_resume or turn_interrupted events, always end with a user-visible reply.",
+                    "This session resumed after a project restart while the user's request was still being handled.",
+                    "The user's interrupted request is present in the conversation context above; the user did not send it again.",
                     "Continue completing that request directly, using tools as needed, then output the final text to show the user.",
-                    "If the paused request has already been satisfied, briefly report the current status to the user instead.",
+                    "If the request has already been satisfied, briefly report the current status to the user instead.",
                 ]
             )
+            if has_turn_interrupted:
+                lines.append(
+                    "Before retrying side-effecting tool calls, inspect the turn ledger and background job state."
+                )
             if repair_attempt > 0:
                 lines.extend(
                     [
                         f"Repair attempt: {int(repair_attempt)}.",
                         (
-                            "Your previous output was invalid for shutdown_resume because it was "
+                            f"Your previous output was invalid for {resume_reason_label} because it was "
                             f"{self._task_terminal_invalid_output_label(invalid_output)}."
                         ),
                         f"Do not end this repair turn with empty text. {self._silent_tool_instruction()}",
@@ -1070,12 +1112,17 @@ class WebSessionHeartbeatService:
                     "If a user-facing update is needed, output only the text to show the user.",
                 ]
             )
+        if has_task_terminal and (has_turn_interrupted or has_shutdown_resume):
+            lines.append(
+                "This mixed bundle also contains a restart-resume event; do not use the silent tool. "
+                "End with a user-visible reply to the interrupted request."
+            )
         if has_tool_job:
             lines.extend(
                 [
                     "For tool_job events, a background tool call finished, timed out, was interrupted, or was stopped by the user.",
                     "Do not call the same tool again with the same arguments; inspect the result or log first.",
-                    "No user-visible reply is required for a tool_job event unless the result needs one.",
+                    "No user-visible reply is required for a tool_job event unless the result or another event in this bundle requires one.",
                 ]
             )
         if has_task_stall:
@@ -1098,6 +1145,9 @@ class WebSessionHeartbeatService:
             reason = str(event.reason or "").strip().lower()
             if reason == "shutdown_resume":
                 lines.extend(shutdown_resume_lines())
+                continue
+            if reason == "turn_interrupted":
+                lines.extend(turn_interrupted_lines(payload))
                 continue
             if reason == "tool_job":
                 lines.extend(
@@ -1190,20 +1240,37 @@ class WebSessionHeartbeatService:
             if str(event.reason or "").strip().lower() == "shutdown_resume"
         ]
 
+    @staticmethod
+    def _turn_interrupted_events(events: list[SessionHeartbeatEvent]) -> list[SessionHeartbeatEvent]:
+        return [
+            event
+            for event in list(events or [])
+            if str(event.reason or "").strip().lower() == "turn_interrupted"
+        ]
+
     @classmethod
     def _events_require_visible_reply(cls, events: list[SessionHeartbeatEvent]) -> bool:
-        """Task-terminal and shutdown-resume events must always produce a real
+        """Task-terminal and restart-resume events must always produce a real
         user-visible reply; other heartbeat events may be acked silently."""
-        return bool(cls._task_terminal_events(events) or cls._shutdown_resume_events(events))
+        return bool(
+            cls._task_terminal_events(events)
+            or cls._shutdown_resume_events(events)
+            or cls._turn_interrupted_events(events)
+        )
 
     @staticmethod
     def _visible_reply_requires_repair(output: Any) -> bool:
-        """必须对用户说话的那几类事件（task_terminal / shutdown_resume）里，
-        空输出算无效进修复轮；静默由 `silent` 工具表达，其回合根本不走这条路。"""
+        """必须对用户说话的那几类事件（task_terminal / shutdown_resume / turn_interrupted）
+        里，空输出算无效进修复轮；静默由 `silent` 工具表达，其回合根本不走这条路。"""
         return not str(output or "").strip()
 
     @staticmethod
     def _fixed_visible_reply_error_text(events: list[SessionHeartbeatEvent]) -> str:
+        if WebSessionHeartbeatService._turn_interrupted_events(events):
+            return (
+                "本次项目进程重启打断了上一回合，系统尝试继续时整理回复连续失败。"
+                "你可以继续发送指令让我接着处理，或在会话里重新描述需求。"
+            )
         if WebSessionHeartbeatService._shutdown_resume_events(events):
             return (
                 "本次项目重启后系统已自动恢复上次暂停的工作，但整理回复时连续失败。"
@@ -1704,6 +1771,15 @@ class WebSessionHeartbeatService:
             event_bundle_text = str(
                 (heartbeat_lane.request_messages[-1] or {}).get("content") or ""
             ).strip()
+        turn_interrupted_turn_id = next(
+            (
+                str((event.payload or {}).get("turn_id") or "").strip()
+                for event in events
+                if str(event.reason or "").strip().lower() == "turn_interrupted"
+                and str((event.payload or {}).get("turn_id") or "").strip()
+            ),
+            "",
+        )
         metadata: dict[str, Any] = {
             "heartbeat_internal": True,
             "heartbeat_reason": heartbeat_reason,
@@ -1720,6 +1796,8 @@ class WebSessionHeartbeatService:
             "heartbeat_event_bundle_text": event_bundle_text,
             "history_visibility": "internal_event",
         }
+        if turn_interrupted_turn_id:
+            metadata["turn_interrupted_turn_id"] = turn_interrupted_turn_id
         if repair_attempt > 0:
             metadata["heartbeat_repair_attempt"] = int(repair_attempt)
             metadata["heartbeat_invalid_output"] = self._task_terminal_invalid_output_label(invalid_output)
