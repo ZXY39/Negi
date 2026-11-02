@@ -752,8 +752,6 @@ const U = {
     projectSettingsVersion: document.getElementById("project-settings-version"),
     updateConflictBlock: document.getElementById("update-conflict-block"),
     updateConflictHeadline: document.getElementById("update-conflict-headline"),
-    updateConflictPaths: document.getElementById("update-conflict-paths"),
-    updateConflictHint: document.getElementById("update-conflict-hint"),
     updateConflictNegiBtn: document.getElementById("update-conflict-negi-btn"),
     updateReleaseBackdrop: document.getElementById("update-release-backdrop"),
     updateReleaseDialog: document.getElementById("update-release-dialog"),

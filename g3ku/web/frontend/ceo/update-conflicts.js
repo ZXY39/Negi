@@ -1,17 +1,22 @@
 "use strict";
 
-// 「这次更新没能保住的本地改动」这一行：列文件、给一颗把冲突交给 Negi 的按钮。
+// 「这次更新没能保住的本地改动」这一行：只报数量，给一颗把改动交给 Negi 的按钮。
 //
 // 数据来自更新台账的 conflict_* 字段（`g3ku/update_local_edits.py` 写批次、
-// `g3ku/update_apply.py` 并进台账）。这里只读、只列、只投递提示词：
-// - 换码在执行体里已经完成，按钮不许再触发任何换码/重启动作，那会把当前服务连同
-//   新建的会话一起切断；
-// - 投递走 composer 那条现成的发送主路径（先落按会话存好的待发送耐久行，再尝试立即投），
-//   后端不新增"没有连接也要起一轮"的入口；
-// - 一批冲突只投一次：幂等键是台账里的 `conflict_at`，重复点击不堆第二份提示词。
+// `g3ku/update_apply.py` 并进台账）。这一行不印路径：设备上一次撞行动辄几十个文件，
+// 把原始路径铺在设置面板里既读不动也没有下一步动作，清单只在按钮的 title 与批次目录里。
+//
+// 两条不变量：
+// - 换码在执行体里已经完成，按钮不许再触发任何换码/重启动作，那会把当前服务连同新建的
+//   会话一起切断；
+// - **按钮不自动发送**。`/ws/ceo` 是全页共用的一条连接，回合归服务端"当前激活的会话"所有，
+//   帧里带的 `session_id` 不参与路由 —— 实测过一次：新建的本地会话拿到了会话号，消息却落进
+//   一条真实对外的渠道会话，模型在那儿把这条指令当真执行了。所以现在只把提示词写成那条
+//   新会话的输入框草稿（`setCeoComposerDraft` + `restoreCeoComposerDraftForSession`，
+//   本来就按会话存、可跨刷新），发送这一步留给人。
+// - 一批只准备一次：幂等键是台账里的 `conflict_at`，重复点击不堆第二份会话。
 
 const UPDATE_CONFLICT_HANDOFF_KEY = "g3ku.update-conflicts.handoff.v1";
-const UPDATE_CONFLICT_PATH_LIMIT = 20;
 
 function updateConflictSummary(apply) {
     const paths = (Array.isArray(apply?.conflict_paths) ? apply.conflict_paths : [])
@@ -32,17 +37,19 @@ function updateConflictSummary(apply) {
 }
 
 function updateConflictHeadline(summary) {
-    if (summary.lane === "copy-overwrite") {
-        return `这次更新覆盖了 ${summary.count} 个你改过的文件。`;
-    }
-    return `这次更新有 ${summary.count} 个文件和新版本撞在同一行，没能自动合上。`;
+    // 只报数量。车道不同，话说的是不同的事：git 车道是撞在同一行，拷贝车道是被覆盖。
+    return summary.lane === "copy-overwrite"
+        ? `这次更新覆盖了 ${summary.count} 处本地改动。`
+        : `这次更新有 ${summary.count} 处本地改动没能自动合上。`;
 }
 
-function updateConflictRecoveryHint(summary) {
-    if (summary.lane === "copy-overwrite") {
-        return `原件副本在 ${summary.batchDir || "数据根的 update-conflicts 目录"}。`;
-    }
-    return `原件仍在 git stash 里${summary.stashLabel ? `（${summary.stashLabel}）` : ""}，副本在 ${summary.batchDir || "数据根的 update-conflicts 目录"}。`;
+function updateConflictTooltip(summary) {
+    const list = summary.paths.slice(0, 20).join("、");
+    const rest = summary.paths.length > 20 ? ` 等 ${summary.paths.length} 个文件` : "";
+    const originals = summary.stashLabel
+        ? `原件在 git stash（${summary.stashLabel}）与副本目录里`
+        : "原件在副本目录里";
+    return `${list}${rest}；${originals}：${summary.batchDir || "数据根的 update-conflicts 目录"}`;
 }
 
 function readUpdateConflictHandoff() {
@@ -71,23 +78,6 @@ function markUpdateConflictHandedOff(summary) {
     }
 }
 
-function deliverUpdateConflictPrompt(sessionId, text) {
-    // 走 composer 那条现成的发送主路径：条目先落进按会话存好的待发送队列（这一份是浏览器里
-    // 的耐久行，连接没就绪也不会丢），再尝试立刻投递。投成功是"已经交给 Negi"，投不成功
-    // 条目仍挂在待发送里由既有车道重投 —— 两种都算送出去了，因为用户在输入框上方看得见它。
-    const entries = enqueueCeoFollowUp(sessionId, { text, uploads: [] });
-    const stored = (Array.isArray(entries) ? entries : []).find(
-        (item) => String(item?.text || "") === String(text || "") && !item?.runtime_sent_at,
-    );
-    if (!stored) return false;
-    try {
-        flushCeoQueuedFollowUp(String(stored.id || ""));
-    } catch {
-        // 投递失败不改判：耐久行还在，composer 会在安全边界自己重投。
-    }
-    return true;
-}
-
 function updateConflictSessionTitle(summary) {
     return `合并本地改动 · ${summary.ref || summary.conflictAt}`;
 }
@@ -110,44 +100,31 @@ function updateConflictPrompt(summary) {
     ].filter((line) => line !== "").join("\n");
 }
 
-function renderUpdateConflictPaths(container, paths) {
-    container.textContent = "";
-    paths.slice(0, UPDATE_CONFLICT_PATH_LIMIT).forEach((item) => {
-        const li = document.createElement("li");
-        const code = document.createElement("code");
-        code.textContent = item;
-        li.appendChild(code);
-        container.appendChild(li);
-    });
-    const rest = paths.length - Math.min(paths.length, UPDATE_CONFLICT_PATH_LIMIT);
-    if (rest > 0) {
-        const more = document.createElement("li");
-        more.className = "update-conflict-more";
-        more.textContent = `还有 ${rest} 个`;
-        container.appendChild(more);
-    }
-}
-
 function renderUpdateConflictBlock(item) {
     const block = U.updateConflictBlock;
     if (!block) return;
     const summary = updateConflictSummary(item?.last_apply);
     if (!summary) {
         block.hidden = true;
-        block.classList.remove("is-handed-off");
+        block.classList.toggle("is-handed-off", false);
         return;
     }
     block.hidden = false;
     if (U.updateConflictHeadline) U.updateConflictHeadline.textContent = updateConflictHeadline(summary);
-    if (U.updateConflictPaths) renderUpdateConflictPaths(U.updateConflictPaths, summary.paths);
-    if (U.updateConflictHint) U.updateConflictHint.textContent = updateConflictRecoveryHint(summary);
     const handedOff = isUpdateConflictHandedOff(summary);
     block.classList.toggle("is-handed-off", handedOff);
     if (U.updateConflictNegiBtn) {
         U.updateConflictNegiBtn.disabled = handedOff;
-        U.updateConflictNegiBtn.textContent = handedOff ? "已交给 Negi" : "交给 Negi 解决";
+        U.updateConflictNegiBtn.textContent = handedOff ? "已备好，进会话按发送" : "交给 Negi 解决";
+        U.updateConflictNegiBtn.title = updateConflictTooltip(summary);
         U.updateConflictNegiBtn.dataset.conflictAt = summary.conflictAt;
     }
+}
+
+function stageUpdateConflictPrompt(sessionId, text) {
+    // 只把提示词存成那条会话自己的草稿。**不在这里碰可见输入框**：此刻页面上激活的可能
+    // 还是别的会话，把它的草稿刷进去等于再造一次跨会话投递。刷输入框留到激活之后那一步。
+    return Boolean(setCeoComposerDraft(sessionId, { text, uploads: [] }));
 }
 
 async function handUpdateConflictsToNegi() {
@@ -161,34 +138,35 @@ async function handUpdateConflictsToNegi() {
     } catch (error) {
         if (U.updateConflictNegiBtn) U.updateConflictNegiBtn.disabled = false;
         showToast({
-            title: "没能交给 Negi",
+            title: "没能准备给 Negi",
             text: String(error?.message || error || "新建会话失败"),
             kind: "error",
         });
         return;
     }
-    const sessionId = String(created?.item?.session_id || created?.active_session_id || "").trim();
+    const sessionId = String(created?.item?.session_id || "").trim();
     if (!sessionId) {
         if (U.updateConflictNegiBtn) U.updateConflictNegiBtn.disabled = false;
-        showToast({ title: "没能交给 Negi", text: "新建会话没返回会话号，按钮可以再点一次。", kind: "warn" });
+        showToast({ title: "没能准备给 Negi", text: "新建会话没返回会话号，可以再点一次。", kind: "warn" });
+        return;
+    }
+    if (!stageUpdateConflictPrompt(sessionId, updateConflictPrompt(summary))) {
+        if (U.updateConflictNegiBtn) U.updateConflictNegiBtn.disabled = false;
+        showToast({ title: "没能准备给 Negi", text: "提示词没写进那条会话的输入框，可以再点一次。", kind: "warn" });
         return;
     }
     if (typeof activateCeoSession === "function") {
         await activateCeoSession(sessionId);
-    }
-    const text = updateConflictPrompt(summary);
-    if (!deliverUpdateConflictPrompt(sessionId, text)) {
-        // 没送出去就不留幂等标记：条目要么已进待发送队列（那边会自己重投），要么连接还没
-        // 就绪 —— 两种都还能重试，不能让用户以为已经交给了 Negi。
-        if (U.updateConflictNegiBtn) U.updateConflictNegiBtn.disabled = false;
-        return;
+        if (typeof restoreCeoComposerDraftForSession === "function") {
+            restoreCeoComposerDraftForSession(sessionId);
+        }
     }
     markUpdateConflictHandedOff(summary);
     renderUpdateConflictBlock(S.updateStatus);
     closeProjectSettingsDialog?.();
     showToast({
-        title: "已交给 Negi",
-        text: "新建的会话正在处理这些文件；合完后重启一次服务生效。",
+        title: "提示词已备好",
+        text: "已填进新建的那条会话，按发送才交给 Negi；合完后重启一次服务生效。",
         kind: "info",
     });
 }

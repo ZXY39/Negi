@@ -111,6 +111,30 @@ def test_untracked_operator_files_are_never_part_of_the_judgement() -> None:
         assert re.search(r"git[^\n]*\bstatus\b", body) is None
 
 
+def test_the_settings_row_shows_a_count_and_no_path_list() -> None:
+    """面板那一行只报数量：清单收在按钮的 title 与批次目录里，不再是原始路径列表。
+
+    这三份文件必须同时改：页面 markup、注册进 U 的节点、模块本身。任何一处漏改都会让
+    那一行去要一个页面上不存在的容器，或者悄悄把路径列表又画回来。
+    """
+    html = (REPO_ROOT / "g3ku" / "web" / "frontend" / "org_graph.html").read_text(encoding="utf-8")
+    app = (REPO_ROOT / "g3ku" / "web" / "frontend" / "org_graph_app.js").read_text(encoding="utf-8")
+    module = (REPO_ROOT / "g3ku" / "web" / "frontend" / "ceo" / "update-conflicts.js").read_text(encoding="utf-8")
+
+    for name in ("update-conflict-paths", "update-conflict-hint", "updateConflictPaths", "updateConflictHint"):
+        assert name not in html, f"{name} 还在页面里"
+        assert name not in app, f"{name} 还注册在 U 里"
+        assert name not in module, f"{name} 还被模块引用"
+    for name in ("update-conflict-block", "update-conflict-headline", "update-conflict-negi-btn"):
+        assert name in html and name in app
+    # 共用 /ws/ceo 上回合归服务端激活会话，帧里的 session_id 不路由：这条界面不许碰任何
+    # 自动发送车道，只把提示词写成那条会话自己的输入框草稿。
+    assert "setCeoComposerDraft(sessionId" in module
+    assert "restoreCeoComposerDraftForSession" in module
+    for forbidden in ("sendActiveCeoFollowUpsToRuntime", "enqueueCeoFollowUp", "flushCeoQueuedFollowUp"):
+        assert forbidden not in module, f"{forbidden} 会把消息投进别的会话"
+
+
 def test_the_ledger_carries_the_conflict_fields_to_the_surface() -> None:
     source = (REPO_ROOT / "g3ku" / "update_apply.py").read_text(encoding="utf-8")
     for field in ("conflict_paths", "conflict_count", "conflict_lane", "conflict_stash", "conflict_dir", "conflict_at"):
