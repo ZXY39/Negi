@@ -661,6 +661,66 @@ def _delivery_failure_lines(
     return lines
 
 
+def tool_job_lines(
+    event: dict[str, Any],
+    retrieval_parts: list[str],
+    *,
+    output_inline_limit: int,
+    externalizer: EventTextExternalizer | None,
+) -> list[str]:
+    """后台工具作业的终态文本；与 `session_service._build_prompt` 保持同文。"""
+    job_id = _non_empty_text(event.get("job_id")) or "unknown"
+    tool_name = _non_empty_text(event.get("tool_name")) or "tool"
+    status = _non_empty_text(event.get("status")).lower() or "unknown"
+    elapsed = _float_value(event.get("elapsed_seconds"))
+    timeout = _float_value(event.get("timeout_seconds"))
+    preview = _non_empty_text(event.get("result_preview"))
+    result_ref = _non_empty_text(event.get("result_ref"))
+    recovery_policy = _non_empty_text(event.get("recovery_policy")) or "model_decide"
+    body, retrieval = _long_text_body(
+        preview or "<no output captured>",
+        inline_limit=max(500, int(output_inline_limit or 0)),
+        event=event,
+        externalizer=externalizer,
+        continuation_indent="    ",
+    )
+    _append_retrieval_parts(retrieval_parts, "tool_job", job_id, tool_name, status, retrieval)
+    if status == "success":
+        header = f"- Background tool job {job_id} ({tool_name}) finished after {elapsed:.0f}s."
+    elif status == "error":
+        header = (
+            f"- Background tool job {job_id} ({tool_name}) finished with an error after {elapsed:.0f}s."
+        )
+    elif status == "timeout":
+        timeout_text = f"{timeout:.0f}s" if timeout > 0 else "its timeout"
+        header = f"- Background tool job {job_id} ({tool_name}) timed out after {timeout_text}."
+    elif status == "interrupted":
+        header = (
+            f"- Background tool job {job_id} ({tool_name}) was interrupted by the project process "
+            f"restart after {elapsed:.0f}s. It may have stopped or may still be running; inspect "
+            "the result/log before retrying."
+        )
+    elif status == "stopped_by_user":
+        header = (
+            f"- Background tool job {job_id} ({tool_name}) was stopped by the user (用户手动停止) "
+            f"after {elapsed:.0f}s. Do not restart it unless the user asks; inspect any partial output first."
+        )
+    else:
+        header = f"- Background tool job {job_id} ({tool_name}) ended after {elapsed:.0f}s (status: {status})."
+    lines = [header]
+    if status in {"success", "error", "timeout"}:
+        lines.append("  Do not call the tool again with the same arguments; inspect the result first.")
+    if body:
+        lines.append(f"  Result: {body}")
+    if result_ref:
+        lines.append(f"  Result ref: {result_ref}")
+    if recovery_policy == "rerun_safe":
+        lines.append("  Recovery policy: rerun_safe (a retry will not duplicate side effects).")
+    elif status in {"interrupted", "stopped_by_user"}:
+        lines.append("  Recovery policy: inspect before retrying; do not restart automatically.")
+    return lines
+
+
 def _event_bundle_content(
     events: list[dict[str, Any]],
     *,
@@ -713,6 +773,16 @@ def _event_bundle_content(
             continue
         if reason == "shutdown_resume":
             lines.extend(shutdown_resume_lines())
+            continue
+        if reason == "tool_job":
+            lines.extend(
+                tool_job_lines(
+                    event,
+                    retrieval_parts,
+                    output_inline_limit=output_inline_limit,
+                    externalizer=externalizer,
+                )
+            )
             continue
         lines.extend(
             _task_terminal_lines(

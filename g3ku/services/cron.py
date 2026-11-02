@@ -11,7 +11,6 @@ from typing import Any, Callable, Coroutine
 
 from loguru import logger
 
-from g3ku.core.task_diagnostics import format_task_await_chain
 from g3ku.cron.timezones import resolve_timezone, validate_timezone_name
 from g3ku.cron.types import (
     CRON_STORE_VERSION,
@@ -24,38 +23,12 @@ from g3ku.cron.types import (
 
 _FAILED_AT_RETRY_DELAY_MS = 60_000
 
-# 投递级看门狗默认预算：必须大于最长合理回合时长（provider 单次尝试默认上限
-# 10 分钟 + 退避重试轮），只对真正楔死的 dispatch 兜底。<=0 表示关闭看门狗
-# （无限等待，旧行为）。可被构造参数或 config.json 的 cron 节覆盖。
-DEFAULT_DISPATCH_TIMEOUT_SECONDS = 1800.0
-# 看门狗取消 dispatch 后等待其展开（CancelledError 收尾）的宽限；超过即视为
-# 抗取消任务，脱离调度器单独放弃（保留 in-flight 直到任务真正终结）。
-DEFAULT_DISPATCH_CANCEL_GRACE_SECONDS = 10.0
 # 定时器任务意外死亡后的自愈重臂延迟（避免损坏状态下的 0 延迟热循环）。
 _TIMER_SELF_HEAL_DELAY_SECONDS = 5.0
 
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
-
-
-def _configured_cron_value(name: str) -> float | None:
-    """Read one tunable from the live runtime config `cron` section, if any.
-
-    Mirrors the lazy-read pattern of external_events._configured_buffer_size:
-    the cron service stays importable without the config subsystem (CLI shells,
-    unit tests), and any resolution failure falls back to module defaults.
-    """
-    try:
-        from g3ku.config.live_runtime import get_runtime_config
-
-        config = get_runtime_config(force=False)[0]
-        value = getattr(getattr(config, "cron", None), name, None)
-        if value is None:
-            return None
-        return float(value)
-    except Exception:
-        return None
 
 
 def _format_local_time_ms(now_ms: int) -> str:
@@ -124,8 +97,6 @@ class CronService:
         store_path: Path,
         on_job: Callable[[CronJob], Coroutine[Any, Any, str | None]] | None = None,
         *,
-        dispatch_timeout_s: float | None = None,
-        dispatch_cancel_grace_s: float | None = None,
         admit_proactive: Callable[[CronJob, int], tuple[bool, int, str]] | None = None,
     ):
         self.store_path = store_path
@@ -141,32 +112,12 @@ class CronService:
         # Job ids currently inside a claimed dispatch; blocks concurrent
         # dispatch of the same job from overlapping entry points (timer tick vs
         # run_job) and excludes the job's stale next_run from wake arithmetic
-        # while the run is unresolved. An abandoned (cancel-resistant) dispatch
+        # while the run is unresolved. A cancelled (cancel-resistant) dispatch
         # keeps its id here until the detached task really ends.
         self._in_flight: set[str] = set()
         # Independent per-job dispatch tasks spawned by _on_timer. Tracked so
         # stop() can cancel in-flight dispatches instead of orphaning them.
         self._dispatch_tasks: set[asyncio.Task] = set()
-        # Explicit constructor values win; None resolves per-dispatch from the
-        # live runtime config `cron` section, then module defaults.
-        self._dispatch_timeout_s = dispatch_timeout_s
-        self._dispatch_cancel_grace_s = dispatch_cancel_grace_s
-
-    def _resolve_dispatch_timeout_s(self) -> float:
-        if self._dispatch_timeout_s is not None:
-            return float(self._dispatch_timeout_s)
-        configured = _configured_cron_value("dispatch_timeout_seconds")
-        if configured is not None:
-            return configured
-        return DEFAULT_DISPATCH_TIMEOUT_SECONDS
-
-    def _resolve_dispatch_cancel_grace_s(self) -> float:
-        if self._dispatch_cancel_grace_s is not None:
-            return float(self._dispatch_cancel_grace_s)
-        configured = _configured_cron_value("dispatch_cancel_grace_seconds")
-        if configured is not None:
-            return configured
-        return DEFAULT_DISPATCH_CANCEL_GRACE_SECONDS
 
     def _load_store(self) -> CronStore:
         """Load jobs from disk. Reloads automatically if file was modified externally."""
@@ -584,24 +535,21 @@ class CronService:
         return True
 
     async def _dispatch_claimed(self, job: CronJob) -> None:
-        """Phase 2 (dispatch under watchdog) + Phase 3 (finalize, always persisted).
+        """Phase 2 (dispatch) + Phase 3 (finalize, always persisted).
 
         Must only run for a job that _claim_job just claimed. The handler runs
-        in its own task so a wedge inside session.prompt is observable and
-        bounded instead of silently pinning the scheduler:
+        in its own task so a wedge inside session.prompt does not pin the
+        scheduler:
 
-        - watchdog timeout: dump the dispatch task's live await chain (this is
-          the primary post-mortem for hung turns), cancel it, wait a bounded
-          grace for the CancelledError unwind;
-        - cancel-resistant task: abandon it detached with a loud error and keep
-          the job in-flight until the task really ends, so later ticks cannot
-          stack a second dispatch on the same wedged session;
-        - every exit path (ok / error / timeout / interrupted) finalizes the
-          claim in the finally block, so jobs.json can never stay frozen in
+        - no total-duration budget: provider attempt timeout + the handler's own
+          tool/job timeouts are the only deadlines (2026-11-02 operator ruling);
+        - a handler that never returns stays in-flight until the process exits;
+          the next startup marks the running claim interrupted;
+        - every exit path (ok / error / interrupted) finalizes the claim in the
+          finally block, so jobs.json can never stay frozen in
           last_status="running" while the process lives.
         """
         dispatch_task: asyncio.Task | None = None
-        abandoned = False
         delivered = False
         outcome = "ok"
         error_text: str | None = None
@@ -610,67 +558,29 @@ class CronService:
             try:
                 if not callable(self.on_job):
                     raise RuntimeError("cron job handler is not configured")
-                # 先解析看门狗预算再建 dispatch 任务：live config 首次读取可能
-                # 同步耗时几十 ms，放在任务创建与 await 之间会把「handler 已完
-                # 成但结果未被消费」的取消竞态窗口拉大到毫秒级。
-                timeout_s = self._resolve_dispatch_timeout_s()
-                grace_s = self._resolve_dispatch_cancel_grace_s()
                 dispatch_task = asyncio.create_task(
                     self.on_job(job), name=f"cron-dispatch:{job.id}"
                 )
-                done, _pending = await asyncio.wait(
-                    {dispatch_task},
-                    timeout=timeout_s if timeout_s > 0 else None,
-                )
-                if not done:
-                    logger.error(
-                        "Cron: dispatch watchdog timeout for job '{}' ({}) after {:.0f}s; current await chain:\n{}",
-                        job.name,
-                        job.id,
-                        timeout_s,
-                        format_task_await_chain(dispatch_task),
-                    )
-                    dispatch_task.cancel()
-                    _unwound, still_pending = await asyncio.wait(
-                        {dispatch_task}, timeout=max(0.0, grace_s)
-                    )
-                    if still_pending:
-                        abandoned = True
-                        logger.error(
-                            "Cron: dispatch task for job '{}' ({}) ignored cancellation for {:.0f}s; "
-                            "abandoning it detached (job stays in-flight until the task ends)",
-                            job.name,
-                            job.id,
-                            grace_s,
-                        )
-                    outcome = "timeout"
-                    error_text = f"dispatch watchdog timeout after {timeout_s:.0f}s"
-                    if abandoned:
-                        error_text += "; task ignored cancellation and was abandoned"
-                elif dispatch_task.cancelled():
-                    outcome = "interrupted"
-                    error_text = (
-                        "dispatch cancelled before completion "
-                        "(session cancel/pause or runtime shutdown)"
-                    )
+                # shield 只表达"服务停止时要显式 cancel 内部任务"：正常完成走结果，
+                # 取消走下面的 except 分支收口。
+                await asyncio.shield(dispatch_task)
+                exc = dispatch_task.exception()
+                if exc is None:
+                    delivered = True
                 else:
-                    exc = dispatch_task.exception()
-                    if exc is None:
-                        delivered = True
-                    else:
-                        outcome = "error"
-                        error_text = str(exc) or exc.__class__.__name__
-                        logger.error("Cron: job '{}' failed: {}", job.name, exc)
+                    outcome = "error"
+                    error_text = str(exc) or exc.__class__.__name__
+                    logger.error("Cron: job '{}' failed: {}", job.name, exc)
             except Exception as e:
                 outcome = "error"
                 error_text = str(e) or e.__class__.__name__
                 logger.error("Cron: job '{}' failed: {}", job.name, e)
         except asyncio.CancelledError:
             # _dispatch_claimed itself was cancelled (service stop / shutdown).
-            # 取消可能恰好落在「handler 任务已完成、wait 结果尚未被消费」的窗
+            # 取消可能恰好落在「handler 任务已完成、结果尚未被消费」的窗
             # 口：已完成的投递必须按真实结果记账（ delivered / error ），不能被
             # 误记为 interrupted——否则一次成功送达会被 at-most-once 抑制掉后
-            # 续调度。inner 任务未完成时才取消它并记 interrupted；asyncio.wait
+            # 续调度。inner 任务未完成时才取消它并记 interrupted；asyncio.shield
             # 不会把取消传播给它监视的任务，必须显式 cancel。
             if dispatch_task is not None and dispatch_task.done():
                 if dispatch_task.cancelled():
@@ -702,7 +612,6 @@ class CronService:
                 delivered=delivered,
                 outcome=outcome,
                 error_text=error_text,
-                abandoned=abandoned,
                 dispatch_task=dispatch_task,
             )
 
@@ -713,7 +622,6 @@ class CronService:
         delivered: bool,
         outcome: str,
         error_text: str | None,
-        abandoned: bool,
         dispatch_task: asyncio.Task | None,
     ) -> None:
         """Phase 3 (finalize): persist the terminal state of a claimed run.
@@ -826,21 +734,7 @@ class CronService:
                     job.name,
                     job.id,
                 )
-            if abandoned and dispatch_task is not None:
-                def _release(task: asyncio.Task) -> None:
-                    self._in_flight.discard(job.id)
-                    logger.warning(
-                        "Cron: abandoned dispatch task for job '{}' ({}) finally ended (cancelled={})",
-                        job.name,
-                        job.id,
-                        task.cancelled(),
-                    )
-                    if self._running:
-                        self._arm_timer()
-
-                dispatch_task.add_done_callback(_release)
-            else:
-                self._in_flight.discard(job.id)
+            self._in_flight.discard(job.id)
             # The tick armed the timer BEFORE this run resolved (in-flight jobs
             # are excluded from wake arithmetic), so every finalize re-arms to
             # pick up this job's freshly advanced next_run.
@@ -852,8 +746,8 @@ class CronService:
 
         Phase 1 (claim):    mark the run started and persist it BEFORE any side
                             effect (see _claim_job).
-        Phase 2 (dispatch): invoke the job handler in an independent task under
-                            a delivery watchdog (see _dispatch_claimed).
+        Phase 2 (dispatch): invoke the job handler in an independent task; there
+                            is no total-duration budget (see _dispatch_claimed).
         Phase 3 (finalize): persist delivery counters and the next run on every
                             exit path (see _finalize_dispatched_job).
 

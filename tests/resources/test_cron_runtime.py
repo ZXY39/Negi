@@ -21,10 +21,6 @@ from g3ku.core.task_diagnostics import format_task_await_chain
 from g3ku.cron.runtime_dispatch import dispatch_cron_job, resolve_cron_session_key
 from g3ku.cron.service import CronService
 from g3ku.cron.types import CronJob, CronJobState, CronPayload, CronSchedule
-from g3ku.services.cron import (
-    DEFAULT_DISPATCH_CANCEL_GRACE_SECONDS,
-    DEFAULT_DISPATCH_TIMEOUT_SECONDS,
-)
 from g3ku.session.manager import SessionManager
 
 
@@ -1284,39 +1280,28 @@ async def _wait_until(
 
 
 @pytest.mark.asyncio
-async def test_cron_watchdog_timeout_finalizes_store_and_other_jobs_keep_running(
-    tmp_path: Path,
-) -> None:
-    """A wedged dispatch must not pin the tick: the watchdog cancels it, the
-    claim is finalized as "timeout" with the schedule advanced, an unrelated
-    due job still completes in the same tick, and the timer stays armed."""
+async def test_cron_dispatch_has_no_total_duration_budget(tmp_path: Path) -> None:
+    """No scheduler-level deadline: a long handler stays in-flight until it
+    returns; the tick itself returns immediately and unrelated jobs still
+    complete in the same tick (2026-11-02 operator ruling)."""
     store_path = tmp_path / "jobs.json"
-    hang_entered = asyncio.Event()
-    hang_cancelled = asyncio.Event()
+    entered = asyncio.Event()
+    release = asyncio.Event()
     ok_calls: list[str] = []
 
     async def _on_job(job: CronJob) -> str | None:
-        if job.name == "hang":
-            hang_entered.set()
-            try:
-                await asyncio.sleep(30)
-            except asyncio.CancelledError:
-                hang_cancelled.set()
-                raise
-            return "never"
+        if job.name == "long":
+            entered.set()
+            await release.wait()
+            return "ok"
         ok_calls.append(job.id)
         return "ok"
 
-    service = CronService(
-        store_path,
-        on_job=_on_job,
-        dispatch_timeout_s=0.05,
-        dispatch_cancel_grace_s=0.5,
-    )
-    job_hang = service.add_job(
-        name="hang",
+    service = CronService(store_path, on_job=_on_job)
+    job_long = service.add_job(
+        name="long",
         schedule=CronSchedule(kind="every", every_ms=60_000),
-        message="h",
+        message="l",
         max_runs=10,
     )
     job_ok = service.add_job(
@@ -1326,117 +1311,38 @@ async def test_cron_watchdog_timeout_finalizes_store_and_other_jobs_keep_running
         max_runs=10,
     )
     now_ms = int(time.time() * 1000)
-    job_hang.state.next_run_at_ms = now_ms - 1
+    job_long.state.next_run_at_ms = now_ms - 1
     job_ok.state.next_run_at_ms = now_ms - 1
     service._running = True
 
-    messages: list[str] = []
-    sink_id = logger.add(messages.append, level="WARNING")
     try:
         loop = asyncio.get_running_loop()
         started = loop.time()
         await service._on_timer()
-        elapsed = loop.time() - started
-        # 旧实现会在这里 await 挂死的 dispatch（30s+）；新实现立即返回。
-        assert elapsed < 1.0
+        assert loop.time() - started < 1.0
 
-        await asyncio.wait_for(hang_entered.wait(), timeout=2)
-        await asyncio.sleep(0.01)
-        # 无关 job 不受牵连，同一 tick 内正常完成
-        assert ok_calls == [job_ok.id]
-
-        await asyncio.wait_for(hang_cancelled.wait(), timeout=2)
-        await asyncio.sleep(0.05)
-        # 调度器仍然存活：finalize 已重新武装定时器（stop 会清空，先取证）
-        timer_alive = service._timer_task is not None and not service._timer_task.done()
-        hang_released = job_hang.id not in service._in_flight
-    finally:
-        logger.remove(sink_id)
-        service.stop()
-
-    jobs = _store_state_by_id(store_path)
-    hang_state = jobs[job_hang.id]["state"]
-    assert hang_state["lastStatus"] == "timeout"
-    assert "watchdog timeout" in str(hang_state["lastError"])
-    assert hang_state["deliveredRuns"] == 0
-    # 周期任务的调度必须推进，而不是冻结在 claim 时刻
-    assert hang_state["nextRunAtMs"] is not None
-    assert int(hang_state["nextRunAtMs"]) > now_ms
-    ok_state = jobs[job_ok.id]["state"]
-    assert ok_state["lastStatus"] == "ok"
-    assert ok_state["deliveredRuns"] == 1
-    # store 里绝不允许残留 running
-    assert all(j["state"]["lastStatus"] != "running" for j in jobs.values())
-    # 看门狗必须留下可 grep 的取证日志（含挂起任务的 await 链）
-    text = "\n".join(str(item) for item in messages)
-    assert "dispatch watchdog timeout" in text
-    assert "await chain" in text
-    assert "_on_job" in text
-    assert timer_alive
-    assert hang_released
-
-
-@pytest.mark.asyncio
-async def test_cron_watchdog_abandons_cancel_resistant_dispatch(tmp_path: Path) -> None:
-    """A dispatch that ignores cancellation is finalized as timeout (with an
-    "abandoned" marker), stays in-flight so later ticks cannot stack a second
-    dispatch on the wedged session, and is released when it finally ends."""
-    store_path = tmp_path / "jobs.json"
-    entered = asyncio.Event()
-    release = asyncio.Event()
-    calls: list[str] = []
-
-    async def _resist(job: CronJob) -> str | None:
-        calls.append(job.id)
-        entered.set()
-        try:
-            await asyncio.sleep(30)
-        except asyncio.CancelledError:
-            # 抗取消：吞掉第一次取消，直到测试放行才真正退出
-            await release.wait()
-            raise
-        return "never"
-
-    service = CronService(
-        store_path,
-        on_job=_resist,
-        dispatch_timeout_s=0.05,
-        dispatch_cancel_grace_s=0.05,
-    )
-    job = service.add_job(
-        name="resist",
-        schedule=CronSchedule(kind="every", every_ms=60_000),
-        message="r",
-        max_runs=10,
-    )
-    job.state.next_run_at_ms = int(time.time() * 1000) - 1
-    service._running = True
-
-    try:
-        await service._on_timer()
         await asyncio.wait_for(entered.wait(), timeout=2)
-        # 看门狗 0.05s 触发 + 0.05s 宽限 → 0.3s 内必然已放弃并收尾
-        await asyncio.sleep(0.3)
-
-        state = _store_state_by_id(store_path)[job.id]["state"]
-        assert state["lastStatus"] == "timeout"
-        assert "abandoned" in str(state["lastError"])
-        # 僵尸任务存活期间 job 保持 in-flight
-        assert job.id in service._in_flight
-
-        # 后续 tick 不得在同一 job 上叠加第二次 dispatch
-        job.state.next_run_at_ms = int(time.time() * 1000) - 1
-        await service._on_timer()
         await asyncio.sleep(0.05)
-        assert calls == [job.id]
+        assert ok_calls == [job_ok.id]
+        # 长任务仍在跑：没有总时长预算，store 只能停留在 claim 的 running
+        assert job_long.id in service._in_flight
+        state = _store_state_by_id(store_path)[job_long.id]["state"]
+        assert state["lastStatus"] == "running"
+        assert state["deliveredRuns"] == 0
+
+        release.set()
+        await _wait_until(lambda: job_long.id not in service._in_flight, timeout=2)
+        state = _store_state_by_id(store_path)[job_long.id]["state"]
+        assert state["lastStatus"] == "ok"
+        assert state["deliveredRuns"] == 1
+        assert state["nextRunAtMs"] is not None
+        assert int(state["nextRunAtMs"]) > now_ms
+        ok_state = _store_state_by_id(store_path)[job_ok.id]["state"]
+        assert ok_state["lastStatus"] == "ok"
+        assert ok_state["deliveredRuns"] == 1
     finally:
-        # 先 stop（置 _running=False，阻止释放回调再武装 0 延迟 tick），再放行僵尸任务
         service.stop()
         release.set()
-        await asyncio.sleep(0.05)
-
-    assert job.id not in service._in_flight
-    assert calls == [job.id]
 
 
 @pytest.mark.asyncio
@@ -1458,7 +1364,7 @@ async def test_cron_dispatch_cancellation_persists_interrupted(tmp_path: Path) -
             raise
         return "ok"
 
-    service = CronService(store_path, on_job=_slow, dispatch_timeout_s=30)
+    service = CronService(store_path, on_job=_slow)
     job = service.add_job(
         name="slow",
         schedule=CronSchedule(kind="every", every_ms=60_000),
@@ -1496,7 +1402,7 @@ async def test_cron_stop_cancels_inflight_dispatch_and_persists_interrupted(
         await asyncio.sleep(30)
         return "never"
 
-    service = CronService(store_path, on_job=_hang, dispatch_timeout_s=60)
+    service = CronService(store_path, on_job=_hang)
     job = service.add_job(
         name="hang",
         schedule=CronSchedule(kind="every", every_ms=60_000),
@@ -1518,42 +1424,6 @@ async def test_cron_stop_cancels_inflight_dispatch_and_persists_interrupted(
     assert int(state["nextRunAtMs"]) > int(time.time() * 1000)
     assert job.id not in service._in_flight
     assert all(task.cancelled() or task.done() for task in service._dispatch_tasks)
-
-
-@pytest.mark.asyncio
-async def test_cron_watchdog_suppresses_one_shot_at_job(tmp_path: Path) -> None:
-    """At-most-once also applies to watchdog kills: an unfinished one-shot
-    dispatch may already have reached the downstream handler, so the job is
-    suppressed (next_run cleared + disabled) instead of retried."""
-    store_path = tmp_path / "jobs.json"
-
-    async def _hang(job: CronJob) -> str | None:
-        await asyncio.sleep(30)
-        return "never"
-
-    service = CronService(
-        store_path,
-        on_job=_hang,
-        dispatch_timeout_s=0.05,
-        dispatch_cancel_grace_s=0.2,
-    )
-    job = service.add_job(
-        name="once",
-        schedule=CronSchedule(kind="at", at_ms=int(time.time() * 1000) + 3_600_000),
-        message="m",
-        deliver=True,
-        channel="web",
-        to="shared",
-    )
-    job.state.next_run_at_ms = int(time.time() * 1000) - 1
-
-    await service._execute_job(job)
-
-    entry = _store_state_by_id(store_path)[job.id]
-    assert entry["state"]["lastStatus"] == "timeout"
-    assert entry["state"]["nextRunAtMs"] is None
-    assert entry["state"]["deliveredRuns"] == 0
-    assert entry["enabled"] is False
 
 
 @pytest.mark.asyncio
@@ -1591,41 +1461,25 @@ async def test_cron_finalize_reattaches_after_external_store_reload(tmp_path: Pa
     assert job.state.delivered_runs == 0
 
 
-def test_cron_dispatch_timeout_resolves_from_live_config(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Constructor arg wins; otherwise the live runtime config `cron` section
-    is consulted; a broken/missing config falls back to module defaults."""
-    import g3ku.config.live_runtime as live_runtime
+def test_cron_dispatch_has_no_timeout_budget_contract(tmp_path: Path) -> None:
+    """The 30-minute dispatch budget is gone: no constructor knob, no live-config
+    fields, no resolver. Tool/turn timeouts are the only deadlines."""
+    import inspect
 
-    fake_config = SimpleNamespace(
-        cron=SimpleNamespace(
-            dispatch_timeout_seconds=42.0,
-            dispatch_cancel_grace_seconds=1.5,
-        )
-    )
-    monkeypatch.setattr(
-        live_runtime, "get_runtime_config", lambda force=False: (fake_config, "rev", False)
-    )
+    import g3ku.services.cron as cron_module
+    from g3ku.config.schema import CronConfig
+
+    assert "dispatch_timeout_seconds" not in CronConfig.model_fields
+    assert "dispatch_cancel_grace_seconds" not in CronConfig.model_fields
+    params = inspect.signature(CronService.__init__).parameters
+    assert "dispatch_timeout_s" not in params
+    assert "dispatch_cancel_grace_s" not in params
+    assert not hasattr(cron_module, "DEFAULT_DISPATCH_TIMEOUT_SECONDS")
+    assert not hasattr(cron_module, "DEFAULT_DISPATCH_CANCEL_GRACE_SECONDS")
 
     service = CronService(tmp_path / "jobs.json")
-    assert service._resolve_dispatch_timeout_s() == 42.0
-    assert service._resolve_dispatch_cancel_grace_s() == 1.5
-
-    explicit = CronService(
-        tmp_path / "jobs.json", dispatch_timeout_s=7.0, dispatch_cancel_grace_s=2.0
-    )
-    assert explicit._resolve_dispatch_timeout_s() == 7.0
-    assert explicit._resolve_dispatch_cancel_grace_s() == 2.0
-
-    def _boom(force: bool = False):
-        raise RuntimeError("config unavailable")
-
-    monkeypatch.setattr(live_runtime, "get_runtime_config", _boom)
-    fallback = CronService(tmp_path / "jobs.json")
-    assert fallback._resolve_dispatch_timeout_s() == DEFAULT_DISPATCH_TIMEOUT_SECONDS
-    assert fallback._resolve_dispatch_cancel_grace_s() == DEFAULT_DISPATCH_CANCEL_GRACE_SECONDS
-    assert DEFAULT_DISPATCH_TIMEOUT_SECONDS > 0
+    assert not hasattr(service, "_resolve_dispatch_timeout_s")
+    assert not hasattr(service, "_resolve_dispatch_cancel_grace_s")
 
 
 @pytest.mark.asyncio

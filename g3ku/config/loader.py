@@ -643,10 +643,7 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
                 if str(app_id or "").strip()
             },
         },
-        "cron": {
-            "dispatchTimeoutSeconds": cfg.cron.dispatch_timeout_seconds,
-            "dispatchCancelGraceSeconds": cfg.cron.dispatch_cancel_grace_seconds,
-        },
+        "cron": {},
         "stt": {
             "enabled": cfg.stt.enabled,
             "model": cfg.stt.model,
@@ -674,6 +671,9 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
     timeout_default = type(cfg.agents).model_fields["tool_default_timeout_seconds"].default
     if cfg.agents.tool_default_timeout_seconds != timeout_default:
         payload["agents"]["toolDefaultTimeoutSeconds"] = cfg.agents.tool_default_timeout_seconds
+    background_default = type(cfg.agents).model_fields["tool_auto_background_seconds"].default
+    if cfg.agents.tool_auto_background_seconds != background_default:
+        payload["agents"]["toolAutoBackgroundSeconds"] = cfg.agents.tool_auto_background_seconds
     for block_key, block in (
         ("eventHistory", _tuned_block(cfg.main_runtime.event_history)),
         ("diskGuard", _tuned_block(cfg.main_runtime.disk_guard)),
@@ -714,6 +714,7 @@ def _ensure_runtime_fields_explicit(raw_data: dict[str, Any], cfg: Config) -> No
         # 因此不能反过来要求 config.json 显式带这些键。
         ("agents", "nodeParallelism"),
         ("agents", "toolDefaultTimeoutSeconds"),
+        ("agents", "toolAutoBackgroundSeconds"),
         ("updateCheck",),
         # 负载均衡组是可选段：存量 config.json 没有该节也必须能加载，成员预算等
         # 缺省值由 `ModelLoadBalanceGroup` 承担。

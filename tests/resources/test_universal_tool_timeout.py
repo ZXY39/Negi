@@ -47,6 +47,15 @@ def test_resolve_effective_tool_timeout_explicit_wins_without_cap() -> None:
     assert resolve_effective_tool_timeout({"timeout": 3600}, context) == 600.0
 
 
+def test_agents_tool_auto_background_config_default_and_off_switch() -> None:
+    from g3ku.config.schema import AgentsConfig
+
+    assert AgentsConfig().tool_auto_background_seconds == 60.0
+    assert AgentsConfig(tool_auto_background_seconds=0).tool_auto_background_seconds == 0.0
+    assert AgentsConfig(tool_auto_background_seconds=-5).tool_auto_background_seconds == 0.0
+    assert AgentsConfig(tool_auto_background_seconds=0.05).tool_auto_background_seconds == 0.05
+
+
 def test_build_tool_timeout_error_text_shape() -> None:
     text = build_tool_timeout_error_text(tool_name="exec", timeout_seconds=600)
     assert text.startswith("Error executing exec: timed out after 600s.")

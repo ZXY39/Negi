@@ -20,6 +20,7 @@ from g3ku.runtime.tool_error_guidance import (
     is_parameter_like_tool_exception,
 )
 from g3ku.runtime.tool_impulse import PreRenderedToolResult, tool_facing_runtime_context
+from g3ku.runtime.tool_jobs import ToolJobOutcome, stable_tool_args_hash
 from g3ku.runtime.tool_result_status import is_error_like_tool_result
 from g3ku.runtime.tool_watchdog import (
     actor_role_allows_watchdog,
@@ -581,6 +582,41 @@ class CeoFrontDoorSupport:
         return "error" if is_error_like_tool_result(result) else "success"
 
     @staticmethod
+    def _rendered_result_ref(rendered: Any) -> str:
+        envelope = parse_content_envelope(str(rendered or ""))
+        if envelope is None:
+            return ""
+        return str(envelope.resolved_ref or envelope.ref or envelope.wrapper_ref or "").strip()
+
+    @staticmethod
+    def _looks_like_tool_timeout(result: Any, rendered: Any) -> bool:
+        if isinstance(result, dict):
+            error_text = str(result.get("error") or result.get("stderr") or "")
+            lowered = error_text.lower()
+            if "timed out" in lowered or "command timed out" in lowered:
+                return True
+        text = str(rendered or "")
+        lowered = text.lower()
+        return "timed out after" in lowered or "command timed out" in lowered
+
+    @staticmethod
+    def _background_tool_result_text(
+        *,
+        job: Any,
+        tool_name: str,
+        elapsed_seconds: float,
+        timeout_seconds: float,
+    ) -> str:
+        timeout_text = f"{float(timeout_seconds):.0f}s" if float(timeout_seconds or 0) > 0 else "none"
+        return (
+            f"[BACKGROUND] job_id={getattr(job, 'job_id', '')} tool={tool_name} "
+            f"elapsed={float(elapsed_seconds or 0):.0f}s timeout={timeout_text}\n"
+            "This call is still running as a background job.\n"
+            "Do not call it again. The result will arrive as a session event when it finishes, "
+            "times out, or the process restarts."
+        )
+
+    @staticmethod
     def _tool_result_payload_ref(payload: dict[str, Any]) -> str:
         output_ref = str(
             payload.get("output_ref")
@@ -830,75 +866,178 @@ class CeoFrontDoorSupport:
                         return await tool.execute(**execute_kwargs)
                 return await tool.execute(**execute_kwargs)
 
-        token = self._loop.tools.push_runtime_context(per_call_runtime)
-        try:
+        background_state = {"backgrounded": False}
+
+        async def _run_tool_and_render() -> ToolJobOutcome:
             use_watchdog = actor_role_allows_watchdog(per_call_runtime)
-            if use_watchdog:
-                outcome = await run_tool_with_watchdog(
-                    _invoke(),
-                    tool_name=tool_name,
-                    runtime_context=per_call_runtime,
-                    snapshot_supplier=runtime_context.get("tool_snapshot_supplier"),
-                    on_poll=None,
-                    hard_timeout_seconds=None if (self_enforced or timeout_exempt) else effective_timeout,
-                    universal_timeout_exempt=timeout_exempt,
+            timed_out = False
+            try:
+                if use_watchdog:
+                    watchdog_outcome = await run_tool_with_watchdog(
+                        _invoke(),
+                        tool_name=tool_name,
+                        runtime_context=per_call_runtime,
+                        snapshot_supplier=runtime_context.get("tool_snapshot_supplier"),
+                        on_poll=None,
+                        hard_timeout_seconds=None if (self_enforced or timeout_exempt) else effective_timeout,
+                        universal_timeout_exempt=timeout_exempt,
+                    )
+                    result = watchdog_outcome.value
+                    timed_out = bool(getattr(watchdog_outcome, "timed_out", False))
+                elif self_enforced or timeout_exempt:
+                    result = await _invoke()
+                else:
+                    result = await run_tool_with_hard_timeout(
+                        _invoke(),
+                        tool_name=tool_name,
+                        timeout_seconds=effective_timeout,
+                        cancel_token=per_call_cancel_token,
+                    )
+            except Exception as exc:
+                finished_at = now_iso()
+                elapsed_seconds = round(max(0.0, time.monotonic() - started_monotonic), 1)
+                error_text = f"Error executing {tool_name}: {exc}"
+                if is_parameter_like_tool_exception(exc):
+                    error_text = append_parameter_error_guidance(
+                        error_text,
+                        tool_name=tool_name,
+                        tool=tool,
+                        arguments=normalized_arguments,
+                        runtime_context=runtime_context,
+                    )
+                if not background_state["backgrounded"]:
+                    await self._emit_progress(
+                        on_progress,
+                        error_text,
+                        event_kind="tool_error",
+                        event_data={
+                            "tool_name": tool_name,
+                            **({"tool_call_id": normalized_tool_call_id} if normalized_tool_call_id else {}),
+                        },
+                    )
+                return ToolJobOutcome(
+                    status="error",
+                    result_text=error_text,
+                    result_preview=error_text,
+                    elapsed_seconds=float(elapsed_seconds or 0.0),
+                    payload=(error_text, error_text, "error", started_at, finished_at, elapsed_seconds),
                 )
-                result = outcome.value
-            elif self_enforced or timeout_exempt:
-                result = await _invoke()
-            else:
-                result = await run_tool_with_hard_timeout(
-                    _invoke(),
-                    tool_name=tool_name,
-                    timeout_seconds=effective_timeout,
-                    cancel_token=per_call_cancel_token,
-                )
-        except Exception as exc:
-            finished_at = now_iso()
-            elapsed_seconds = round(max(0.0, time.monotonic() - started_monotonic), 1)
-            error_text = f"Error executing {tool_name}: {exc}"
-            if is_parameter_like_tool_exception(exc):
-                error_text = append_parameter_error_guidance(
-                    error_text,
-                    tool_name=tool_name,
-                    tool=tool,
-                    arguments=normalized_arguments,
-                    runtime_context=runtime_context,
-                )
-            await self._emit_progress(
-                on_progress,
-                error_text,
-                event_kind="tool_error",
-                event_data={
-                    "tool_name": tool_name,
-                    **({"tool_call_id": normalized_tool_call_id} if normalized_tool_call_id else {}),
+
+            rendered = self._render_tool_message_content(
+                result,
+                runtime_context=runtime_context,
+                tool_name=tool_name,
+                tool=tool,
+                delivery_metadata={
+                    **self._tool_result_delivery_metadata(tool=tool),
+                    "invocation_text": self._tool_invocation_text(tool_name, normalized_arguments),
                 },
             )
-            return error_text, error_text, "error", started_at, finished_at, elapsed_seconds
-        finally:
+            finished_at = now_iso()
+            elapsed_seconds = round(max(0.0, time.monotonic() - started_monotonic), 1)
+            ledger_status = self._tool_status(result if result is not None else rendered)
+            job_status = (
+                "timeout"
+                if timed_out or self._looks_like_tool_timeout(result, rendered)
+                else ledger_status
+            )
+            return ToolJobOutcome(
+                status=job_status,
+                result_text=str(rendered or ""),
+                result_preview=str(rendered or ""),
+                result_ref=self._rendered_result_ref(rendered),
+                elapsed_seconds=float(elapsed_seconds or 0.0),
+                payload=(result, rendered, ledger_status, started_at, finished_at, elapsed_seconds),
+            )
+
+        runtime_session = runtime_context.get("_runtime_agent_session")
+        auto_background_seconds = 0.0
+        watchdog_config = per_call_runtime.get("tool_watchdog")
+        if isinstance(watchdog_config, dict):
+            try:
+                auto_background_seconds = max(
+                    0.0, float(watchdog_config.get("auto_background_seconds") or 0.0)
+                )
+            except (TypeError, ValueError):
+                auto_background_seconds = 0.0
+        can_background = (
+            auto_background_seconds > 0
+            and runtime_session is not None
+            and callable(getattr(runtime_session, "start_tool_job", None))
+            and callable(getattr(runtime_session, "wait_tool_job", None))
+        )
+        job_timeout_seconds = 0.0 if timeout_exempt else float(effective_timeout or 0.0)
+
+        token = self._loop.tools.push_runtime_context(per_call_runtime)
+        detached_for_background = False
+        try:
+            if not can_background:
+                foreground = await _run_tool_and_render()
+                if foreground.payload is not None:
+                    return tuple(foreground.payload)
+                text = str(foreground.result_text or "")
+                return text, text, "error", started_at, "", foreground.elapsed_seconds
+
+            job, reused = runtime_session.start_tool_job(
+                turn_id=str(per_call_runtime.get("turn_id") or "").strip(),
+                tool_call_id=normalized_tool_call_id,
+                tool_name=tool_name,
+                args_hash=stable_tool_args_hash(normalized_arguments),
+                hint=self._tool_invocation_hint(tool_name, normalized_arguments),
+                run=_run_tool_and_render,
+                timeout_seconds=job_timeout_seconds,
+                recovery_policy=(
+                    "rerun_safe" if bool(getattr(tool, "rerun_safe", False)) else "model_decide"
+                ),
+                cancel_token=per_call_cancel_token,
+            )
+            if reused and bool(getattr(job, "backgrounded", False)):
+                done = False
+                job_outcome = None
+            else:
+                done, job_outcome = await runtime_session.wait_tool_job(
+                    job, auto_background_seconds
+                )
+            if done:
+                if job_outcome is not None and job_outcome.payload is not None:
+                    return tuple(job_outcome.payload)
+                text = str((job_outcome.result_text if job_outcome is not None else "") or "")
+                return (
+                    text,
+                    text,
+                    "error",
+                    started_at,
+                    "",
+                    (job_outcome.elapsed_seconds if job_outcome is not None else None),
+                )
+            background_state["backgrounded"] = True
             if (
                 session_cancel_token is not None
                 and per_call_cancel_token is not None
                 and per_call_cancel_token is not session_cancel_token
                 and hasattr(session_cancel_token, "detach_child")
             ):
+                # 交棒后 job 不再属于这次回合：会话暂停/停止不得级联杀掉它。
+                session_cancel_token.detach_child(per_call_cancel_token)
+                detached_for_background = True
+            elapsed_seconds = round(max(0.0, time.monotonic() - started_monotonic), 1)
+            synthetic = self._background_tool_result_text(
+                job=job,
+                tool_name=tool_name,
+                elapsed_seconds=elapsed_seconds,
+                timeout_seconds=job_timeout_seconds,
+            )
+            return synthetic, synthetic, "background", started_at, "", elapsed_seconds
+        finally:
+            if (
+                not detached_for_background
+                and session_cancel_token is not None
+                and per_call_cancel_token is not None
+                and per_call_cancel_token is not session_cancel_token
+                and hasattr(session_cancel_token, "detach_child")
+            ):
                 session_cancel_token.detach_child(per_call_cancel_token)
             self._loop.tools.pop_runtime_context(token)
-
-        rendered = self._render_tool_message_content(
-            result,
-            runtime_context=runtime_context,
-            tool_name=tool_name,
-            tool=tool,
-            delivery_metadata={
-                **self._tool_result_delivery_metadata(tool=tool),
-                "invocation_text": self._tool_invocation_text(tool_name, normalized_arguments),
-            },
-        )
-        finished_at = now_iso()
-        elapsed_seconds = round(max(0.0, time.monotonic() - started_monotonic), 1)
-        status = self._tool_status(result if result is not None else rendered)
-        return result, rendered, status, started_at, finished_at, elapsed_seconds
 
     @staticmethod
     def _parallel_slot_count(limit: int | None, item_count: int, *, enabled: bool) -> int:

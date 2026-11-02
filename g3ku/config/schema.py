@@ -675,12 +675,26 @@ class AgentsConfig(Base):
     # 统一工具调用最大运行时长默认值（秒）：所有工具的全局保底上限，
     # 模型可在单次调用显式传更大的 timeout_seconds 参数覆盖；无上限约束。
     tool_default_timeout_seconds: float = 600.0
+    # 前门工具自动转后台的等待窗口（秒）：超过这个时间仍未返回的调用继续在进程内
+    # 后台运行，回合先拿到合成结果释放。0 = 关闭（全部前台等待）。
+    tool_auto_background_seconds: float = 60.0
 
     @field_validator("tool_default_timeout_seconds")
     @classmethod
     def _clamp_tool_default_timeout(cls, value: float) -> float:
         # 下限与全局 MIN_TOOL_TIMEOUT_SECONDS 对齐，支持亚秒默认（0.05s）。
         return max(0.05, float(value or 600.0))
+
+    @field_validator("tool_auto_background_seconds")
+    @classmethod
+    def _clamp_tool_auto_background_seconds(cls, value: float) -> float:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return 60.0
+        if parsed <= 0:
+            return 0.0
+        return max(0.05, parsed)
 
 
 class StickersConfig(Base):
@@ -1132,22 +1146,14 @@ class QqBotConfig(Base):
 
 
 class CronConfig(Base):
-    """Cron scheduler dispatch robustness tunables.
+    """Cron scheduler settings.
 
-    ``dispatch_timeout_seconds`` is the delivery-level watchdog budget: a job
-    dispatch that has not returned within it gets its live await chain dumped
-    to the log, is cancelled, and the run is finalized as ``timeout`` so one
-    wedged session turn can never pin the scheduler. The default is
-    deliberately larger than the longest reasonable agent turn (provider
-    attempt timeout 10 min + retry rounds); ``<= 0`` disables the watchdog
-    (unbounded await, legacy behavior).
-    ``dispatch_cancel_grace_seconds`` bounds how long the watchdog waits for
-    the cancelled dispatch to unwind before abandoning it detached (the job
-    stays in-flight until the task really ends).
+    There is deliberately no total-duration dispatch budget (2026-11-02 operator
+    ruling): a cron dispatch may run for as long as its own turn and tool/job
+    timeouts allow. A handler that never returns stays in-flight until the
+    process restarts, at which point startup reconciliation marks the claim
+    ``interrupted``. The empty section stays for config-file compatibility.
     """
-
-    dispatch_timeout_seconds: float = 1800.0
-    dispatch_cancel_grace_seconds: float = 10.0
 
 
 STT_MODEL_NAMES = ("tiny", "base", "small")

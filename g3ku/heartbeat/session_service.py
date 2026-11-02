@@ -15,10 +15,12 @@ from g3ku.heartbeat.prompt_lane import (
     build_heartbeat_prompt_lane,
     format_local_timestamp,
     shutdown_resume_lines,
+    tool_job_lines,
 )
 from g3ku.heartbeat.session_events import SessionHeartbeatEvent, SessionHeartbeatEventQueue
 from g3ku.heartbeat.session_wake import SessionHeartbeatWakeQueue
 from g3ku.runtime.session_keys import normalize_account_id, parse_china_session_key
+from g3ku.runtime.tool_jobs import TOOL_JOB_TERMINAL_STATUSES
 from g3ku.runtime.web_ceo_sessions import (
     _extract_task_ids_from_text,
     clear_inflight_turn_snapshot,
@@ -248,6 +250,36 @@ class WebSessionHeartbeatService:
             source="external_channel",
             reason="delivery_failure",
             dedupe_key=f"delivery-failure:{outbox_id}",
+            payload=normalized,
+            delay_seconds=0.0,
+        )
+        if event is None:
+            return False
+        if self._started:
+            self._wake.request(session_id, delay_s=0.25)
+        return True
+
+    def enqueue_tool_job(self, payload: dict[str, Any] | None) -> bool:
+        """Wake the session for one terminal background tool job.
+
+        The payload is produced by `g3ku.runtime.tool_jobs`; the durable copy lives
+        in `tool_job_outbox`, so this method only owns the in-memory enqueue and
+        wake request. Duplicate dedupe keys are rejected by the event queue.
+        """
+        normalized = dict(payload or {})
+        session_id = str(normalized.get("session_id") or "").strip()
+        job_id = str(normalized.get("job_id") or "").strip()
+        status = str(normalized.get("status") or "").strip().lower()
+        if not session_id or not job_id or status not in TOOL_JOB_TERMINAL_STATUSES:
+            return False
+        normalized["event_reason"] = "tool_job"
+        normalized["reason"] = "tool_job"
+        dedupe_key = str(normalized.get("dedupe_key") or f"tool-job:{job_id}:{status}").strip()
+        event = self._events.enqueue(
+            session_id=session_id,
+            source="frontdoor",
+            reason="tool_job",
+            dedupe_key=dedupe_key,
             payload=normalized,
             delay_seconds=0.0,
         )
@@ -585,11 +617,12 @@ class WebSessionHeartbeatService:
     def replay_pending_outbox(self, *, session_id: str | None = None, limit: int = 500) -> dict[str, int]:
         store = getattr(self._main_task_service, "store", None)
         if store is None:
-            return {"task_terminal": 0, "task_stall": 0}
+            return {"task_terminal": 0, "task_stall": 0, "tool_job": 0}
 
         normalized_session_id = str(session_id or "").strip()
         replayed_terminal = 0
         replayed_stall = 0
+        replayed_tool_job = 0
         max_items = max(1, int(limit or 500))
 
         list_task_terminal = getattr(store, "list_pending_task_terminal_outbox", None)
@@ -626,7 +659,34 @@ class WebSessionHeartbeatService:
                 if self.enqueue_task_stall_payload(payload):
                     replayed_stall += 1
 
-        return {"task_terminal": replayed_terminal, "task_stall": replayed_stall}
+        list_tool_job = getattr(store, "list_pending_tool_job_outbox", None)
+        mark_tool_job_result = getattr(store, "mark_tool_job_outbox_enqueue_result", None)
+        if callable(list_tool_job):
+            for entry in list_tool_job(limit=max_items):
+                payload = dict(entry.get("payload") or {})
+                payload_session_id = str(payload.get("session_id") or entry.get("session_id") or "").strip()
+                if normalized_session_id and payload_session_id != normalized_session_id:
+                    continue
+                dedupe_key = str(payload.get("dedupe_key") or entry.get("dedupe_key") or "").strip()
+                accepted = self.enqueue_tool_job(payload)
+                if accepted and callable(mark_tool_job_result) and dedupe_key:
+                    try:
+                        mark_tool_job_result(
+                            dedupe_key,
+                            accepted=True,
+                            rejected_reason="",
+                            updated_at=now_iso(),
+                        )
+                    except Exception:
+                        logger.debug("tool job enqueue result mark skipped for {}", dedupe_key)
+                if accepted:
+                    replayed_tool_job += 1
+
+        return {
+            "task_terminal": replayed_terminal,
+            "task_stall": replayed_stall,
+            "tool_job": replayed_tool_job,
+        }
 
     def _session_manual_pause_waiting_reason(
         self,
@@ -943,6 +1003,7 @@ class WebSessionHeartbeatService:
         has_task_stall = any(str(event.reason or "").strip().lower() == "task_stall" for event in events)
         has_task_terminal = bool(self._task_terminal_events(events))
         has_shutdown_resume = bool(self._shutdown_resume_events(events))
+        has_tool_job = any(str(event.reason or "").strip().lower() == "tool_job" for event in events)
         lines = [
             "This is a background heartbeat. Do not explain internal mechanics.",
             "These instructions govern this event turn only. A later user message is a new turn: "
@@ -1009,11 +1070,18 @@ class WebSessionHeartbeatService:
                     "If a user-facing update is needed, output only the text to show the user.",
                 ]
             )
+        if has_tool_job:
+            lines.extend(
+                [
+                    "For tool_job events, a background tool call finished, timed out, was interrupted, or was stopped by the user.",
+                    "Do not call the same tool again with the same arguments; inspect the result or log first.",
+                    "No user-visible reply is required for a tool_job event unless the result needs one.",
+                ]
+            )
         if has_task_stall:
             lines.extend(
                 [
-                    "For task_stall events, first inspect the task with task_progress(task_id).",
-                    "In task_progress output, 'in_progress' only means non-terminal, not actively running;",
+                    "For task_stall events, first inspect the task with task_progress(task_id).",                    "In task_progress output, 'in_progress' only means non-terminal, not actively running;",
                     "only lines with a fresh 运行中/检验中 marker plus a recent 最近活动 time count as executing.",
                     "The 'Perf in stall window' line is the worker resource evidence for that window; when it is missing "
                     "or you need a wider window, load and call perf_inspect(mode=window).",
@@ -1030,6 +1098,16 @@ class WebSessionHeartbeatService:
             reason = str(event.reason or "").strip().lower()
             if reason == "shutdown_resume":
                 lines.extend(shutdown_resume_lines())
+                continue
+            if reason == "tool_job":
+                lines.extend(
+                    tool_job_lines(
+                        payload,
+                        [],
+                        output_inline_limit=_TASK_TERMINAL_OUTPUT_INLINE_LIMIT,
+                        externalizer=None,
+                    )
+                )
                 continue
             if reason == "task_stall":
                 task_id = str(payload.get("task_id") or "").strip()
@@ -1206,6 +1284,7 @@ class WebSessionHeartbeatService:
         self._events.consume_many(key, event_ids=event_ids)
         self._ack_task_terminal_events(events)
         self._ack_task_stall_events(events)
+        self._ack_tool_job_events(events)
         store = getattr(self._main_task_service, "store", None)
         for event in events:
             reason = str(event.reason or "").strip().lower()
@@ -1349,6 +1428,31 @@ class WebSessionHeartbeatService:
             store(key, delivered_at=now_iso())
         except Exception:
             logger.debug("task stall outbox ack skipped for {}", key)
+
+    @staticmethod
+    def _tool_job_events(events: list[SessionHeartbeatEvent]) -> list[SessionHeartbeatEvent]:
+        return [
+            event
+            for event in list(events or [])
+            if str(event.reason or "").strip().lower() == "tool_job"
+        ]
+
+    def _ack_tool_job_events(self, events: list[SessionHeartbeatEvent]) -> None:
+        tool_job_events = self._tool_job_events(events)
+        if not tool_job_events:
+            return
+        store = getattr(getattr(self._main_task_service, "store", None), "mark_tool_job_outbox_delivered", None)
+        if not callable(store):
+            return
+        delivered_at = now_iso()
+        for event in tool_job_events:
+            dedupe_key = str(event.dedupe_key or "").strip()
+            if not dedupe_key:
+                continue
+            try:
+                store(dedupe_key, delivered_at=delivered_at)
+            except Exception:
+                logger.debug("tool job outbox ack skipped for {}", dedupe_key)
 
     def _serialize_tool_event(self, event: AgentEvent) -> dict[str, Any] | None:
         payload = event.payload if isinstance(event.payload, dict) else {}

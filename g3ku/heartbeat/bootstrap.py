@@ -93,6 +93,12 @@ def _replay_pending_outbox(main_task_service: Any, heartbeat: WebSessionHeartbea
             payload = dict(entry.get("payload") or {})
             heartbeat.enqueue_task_stall_payload(payload)
 
+    list_tool_job = getattr(store, "list_pending_tool_job_outbox", None)
+    if callable(list_tool_job):
+        for entry in list_tool_job(limit=500):
+            payload = dict(entry.get("payload") or {})
+            heartbeat.enqueue_tool_job(payload)
+
 
 async def start_web_session_heartbeat(
     agent: Any,

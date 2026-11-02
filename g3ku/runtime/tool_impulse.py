@@ -45,6 +45,7 @@ LOOP_INTERNAL_RUNTIME_KEYS = frozenset(
         "impulse_staged_call_ids",
         "impulse_batch_totals",
         "tool_contract_deliveries",
+        "_runtime_agent_session",
     }
 )
 

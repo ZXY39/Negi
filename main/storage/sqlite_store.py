@@ -523,6 +523,48 @@ class SQLiteTaskStore:
             )
             ''',
             '''
+            -- 前门后台工具作业：只有真正越过前台等待窗口的调用才落行。
+            -- running/stopping 由进程内 runner 接管；进程重启后统一收成 interrupted。
+            CREATE TABLE IF NOT EXISTS tool_jobs (
+                job_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                turn_id TEXT NOT NULL,
+                tool_call_id TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                args_hash TEXT NOT NULL DEFAULT '',
+                hint TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL,
+                timeout_seconds REAL NOT NULL DEFAULT 0,
+                owner_pid INTEGER NOT NULL,
+                recovery_policy TEXT NOT NULL DEFAULT 'model_decide',
+                stop_requested_by_user INTEGER NOT NULL DEFAULT 0,
+                result_preview TEXT NOT NULL DEFAULT '',
+                result_ref TEXT NOT NULL DEFAULT '',
+                log_path TEXT NOT NULL DEFAULT '',
+                payload_json TEXT NOT NULL DEFAULT '{}'
+            )
+            ''',
+            '''
+            CREATE TABLE IF NOT EXISTS tool_job_outbox (
+                dedupe_key TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                delivery_state TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                delivered_at TEXT NOT NULL,
+                attempts INTEGER NOT NULL,
+                last_attempt_at TEXT NOT NULL,
+                last_error TEXT NOT NULL,
+                accepted INTEGER,
+                rejected_reason TEXT NOT NULL DEFAULT '',
+                payload_json TEXT NOT NULL
+            )
+            ''',
+            '''
             CREATE TABLE IF NOT EXISTS perf_samples (
                 sampled_at TEXT PRIMARY KEY,
                 worker_id TEXT NOT NULL,
@@ -552,6 +594,9 @@ class SQLiteTaskStore:
             'CREATE INDEX IF NOT EXISTS idx_task_node_rounds_task_parent ON task_node_rounds(task_id, parent_node_id, round_index)',
             'CREATE INDEX IF NOT EXISTS idx_task_model_calls_task_id_seq ON task_model_calls(task_id, seq)',
             'CREATE INDEX IF NOT EXISTS idx_task_terminal_outbox_state_created_at ON task_terminal_outbox(delivery_state, created_at)',
+            'CREATE INDEX IF NOT EXISTS idx_tool_jobs_session_status ON tool_jobs(session_id, status)',
+            'CREATE INDEX IF NOT EXISTS idx_tool_jobs_status_updated_at ON tool_jobs(status, updated_at)',
+            'CREATE INDEX IF NOT EXISTS idx_tool_job_outbox_state_created_at ON tool_job_outbox(delivery_state, created_at)',
             'CREATE INDEX IF NOT EXISTS idx_task_stall_outbox_state_created_at ON task_stall_outbox(delivery_state, created_at)',
             'CREATE INDEX IF NOT EXISTS idx_task_distribution_error_outbox_state_created_at ON task_distribution_error_outbox(delivery_state, created_at)',
             'CREATE INDEX IF NOT EXISTS idx_task_worker_status_outbox_state_updated_at ON task_worker_status_outbox(delivery_state, updated_at)',
@@ -2880,6 +2925,291 @@ class SQLiteTaskStore:
             ('delivered', delivered_at, delivered_at, 1, '', key),
         )
 
+    def put_tool_job(
+        self,
+        *,
+        job_id: str,
+        session_id: str,
+        turn_id: str,
+        tool_call_id: str,
+        tool_name: str,
+        args_hash: str,
+        hint: str,
+        status: str,
+        started_at: str,
+        updated_at: str,
+        timeout_seconds: float,
+        owner_pid: int,
+        recovery_policy: str,
+        payload: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        normalized_job_id = str(job_id or '').strip()
+        if not normalized_job_id:
+            raise ValueError('job_id_required')
+
+        def operation(conn: sqlite3.Connection) -> dict[str, object]:
+            row = conn.execute(
+                'SELECT job_id, session_id, turn_id, tool_call_id, tool_name, args_hash, hint, status, started_at, finished_at, updated_at, timeout_seconds, owner_pid, recovery_policy, stop_requested_by_user, result_preview, result_ref, log_path, payload_json '
+                'FROM tool_jobs WHERE job_id = ?',
+                (normalized_job_id,),
+            ).fetchone()
+            if row is None:
+                payload_json = json.dumps(payload or {}, ensure_ascii=False)
+                conn.execute(
+                    'INSERT INTO tool_jobs (job_id, session_id, turn_id, tool_call_id, tool_name, args_hash, hint, status, started_at, finished_at, updated_at, timeout_seconds, owner_pid, recovery_policy, stop_requested_by_user, result_preview, result_ref, log_path, payload_json) '
+                    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    (
+                        normalized_job_id,
+                        str(session_id or ''),
+                        str(turn_id or ''),
+                        str(tool_call_id or ''),
+                        str(tool_name or 'tool'),
+                        str(args_hash or ''),
+                        str(hint or ''),
+                        str(status or 'running'),
+                        str(started_at or ''),
+                        '',
+                        str(updated_at or started_at or ''),
+                        float(timeout_seconds or 0),
+                        int(owner_pid or 0),
+                        str(recovery_policy or 'model_decide'),
+                        0,
+                        '',
+                        '',
+                        '',
+                        payload_json,
+                    ),
+                )
+                row = conn.execute(
+                    'SELECT job_id, session_id, turn_id, tool_call_id, tool_name, args_hash, hint, status, started_at, finished_at, updated_at, timeout_seconds, owner_pid, recovery_policy, stop_requested_by_user, result_preview, result_ref, log_path, payload_json '
+                    'FROM tool_jobs WHERE job_id = ?',
+                    (normalized_job_id,),
+                ).fetchone()
+            return self._tool_job_row(row)
+
+        return self._run_write(operation)
+
+    def get_tool_job(self, job_id: str) -> dict[str, object] | None:
+        row = self._fetchone(
+            'SELECT job_id, session_id, turn_id, tool_call_id, tool_name, args_hash, hint, status, started_at, finished_at, updated_at, timeout_seconds, owner_pid, recovery_policy, stop_requested_by_user, result_preview, result_ref, log_path, payload_json '
+            'FROM tool_jobs WHERE job_id = ?',
+            (str(job_id or '').strip(),),
+        )
+        return self._tool_job_row(row) if row else None
+
+    def update_tool_job(
+        self,
+        job_id: str,
+        *,
+        updated_at: str,
+        status: str | None = None,
+        finished_at: str | None = None,
+        stop_requested_by_user: bool | None = None,
+        result_preview: str | None = None,
+        result_ref: str | None = None,
+        log_path: str | None = None,
+        payload: dict[str, object] | None = None,
+    ) -> None:
+        normalized_job_id = str(job_id or '').strip()
+        if not normalized_job_id:
+            return
+        assignments: list[str] = ['updated_at = ?']
+        values: list[object] = [str(updated_at or '')]
+        for column, value in (
+            ('status', status),
+            ('finished_at', finished_at),
+            ('result_preview', result_preview),
+            ('result_ref', result_ref),
+            ('log_path', log_path),
+        ):
+            if value is None:
+                continue
+            assignments.append(f'{column} = ?')
+            values.append(str(value))
+        if stop_requested_by_user is not None:
+            assignments.append('stop_requested_by_user = ?')
+            values.append(1 if stop_requested_by_user else 0)
+        if payload is not None:
+            assignments.append('payload_json = ?')
+            values.append(json.dumps(payload, ensure_ascii=False))
+        values.append(normalized_job_id)
+        self._execute_write(
+            f'UPDATE tool_jobs SET {", ".join(assignments)} WHERE job_id = ?',
+            tuple(values),
+        )
+
+    def list_tool_jobs(
+        self,
+        *,
+        session_id: str | None = None,
+        statuses: tuple[str, ...] | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, object]]:
+        clauses: list[str] = []
+        params: list[object] = []
+        normalized_session_id = str(session_id or '').strip()
+        if normalized_session_id:
+            clauses.append('session_id = ?')
+            params.append(normalized_session_id)
+        normalized_statuses = tuple(str(item or '').strip() for item in (statuses or ()) if str(item or '').strip())
+        if normalized_statuses:
+            clauses.append(f'status IN ({", ".join("?" for _ in normalized_statuses)})')
+            params.extend(normalized_statuses)
+        where = f'WHERE {" AND ".join(clauses)} ' if clauses else ''
+        params.append(max(1, int(limit or 200)))
+        rows = self._fetchall(
+            'SELECT job_id, session_id, turn_id, tool_call_id, tool_name, args_hash, hint, status, started_at, finished_at, updated_at, timeout_seconds, owner_pid, recovery_policy, stop_requested_by_user, result_preview, result_ref, log_path, payload_json '
+            f'FROM tool_jobs {where}ORDER BY updated_at DESC LIMIT ?',
+            tuple(params),
+        )
+        return [self._tool_job_row(row) for row in rows]
+
+    def prune_tool_jobs(self, *, before_iso: str) -> int:
+        cutoff = str(before_iso or '').strip()
+        if not cutoff:
+            return 0
+
+        def operation(conn: sqlite3.Connection) -> int:
+            deleted = 0
+            cursor = conn.execute(
+                "DELETE FROM tool_jobs WHERE status NOT IN ('running', 'stopping') AND updated_at < ?",
+                (cutoff,),
+            )
+            deleted += max(0, int(cursor.rowcount or 0))
+            cursor = conn.execute(
+                "DELETE FROM tool_job_outbox WHERE delivery_state IN ('delivered', 'abandoned') AND updated_at < ?",
+                (cutoff,),
+            )
+            deleted += max(0, int(cursor.rowcount or 0))
+            return deleted
+
+        return int(self._run_write(operation) or 0)
+
+    def put_tool_job_outbox(
+        self,
+        *,
+        dedupe_key: str,
+        job_id: str,
+        session_id: str,
+        created_at: str,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        key = str(dedupe_key or '').strip()
+        if not key:
+            raise ValueError('dedupe_key_required')
+
+        def operation(conn: sqlite3.Connection) -> dict[str, object]:
+            row = conn.execute(
+                'SELECT dedupe_key, job_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, accepted, rejected_reason, payload_json '
+                'FROM tool_job_outbox WHERE dedupe_key = ?',
+                (key,),
+            ).fetchone()
+            if row is None:
+                payload_json = json.dumps(payload, ensure_ascii=False)
+                conn.execute(
+                    'INSERT INTO tool_job_outbox (dedupe_key, job_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, accepted, rejected_reason, payload_json) '
+                    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    (key, str(job_id or ''), str(session_id or ''), 'pending', created_at, created_at, '', 0, '', '', None, '', payload_json),
+                )
+                row = conn.execute(
+                    'SELECT dedupe_key, job_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, accepted, rejected_reason, payload_json '
+                    'FROM tool_job_outbox WHERE dedupe_key = ?',
+                    (key,),
+                ).fetchone()
+            return self._tool_job_outbox_row(row)
+
+        return self._run_write(operation)
+
+    def get_tool_job_outbox(self, dedupe_key: str) -> dict[str, object] | None:
+        row = self._fetchone(
+            'SELECT dedupe_key, job_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, accepted, rejected_reason, payload_json '
+            'FROM tool_job_outbox WHERE dedupe_key = ?',
+            (str(dedupe_key or '').strip(),),
+        )
+        return self._tool_job_outbox_row(row) if row else None
+
+    def list_pending_tool_job_outbox(self, *, limit: int = 200) -> list[dict[str, object]]:
+        rows = self._fetchall(
+            'SELECT dedupe_key, job_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, accepted, rejected_reason, payload_json '
+            "FROM tool_job_outbox WHERE delivery_state = ? ORDER BY created_at ASC LIMIT ?",
+            ('pending', max(1, int(limit or 200))),
+        )
+        return [self._tool_job_outbox_row(row) for row in rows]
+
+    def mark_tool_job_outbox_enqueue_result(
+        self,
+        dedupe_key: str,
+        *,
+        accepted: bool | None,
+        rejected_reason: str,
+        updated_at: str,
+    ) -> None:
+        key = str(dedupe_key or '').strip()
+        if not key:
+            return
+
+        def operation(conn: sqlite3.Connection) -> None:
+            row = conn.execute(
+                'SELECT accepted FROM tool_job_outbox WHERE dedupe_key = ?',
+                (key,),
+            ).fetchone()
+            if row is None:
+                return
+            current_accepted_raw = row['accepted']
+            current_accepted = None if current_accepted_raw is None else bool(int(current_accepted_raw))
+            next_accepted = None if accepted is None else bool(accepted)
+            if current_accepted is True and next_accepted is False:
+                return
+            conn.execute(
+                'UPDATE tool_job_outbox SET updated_at = ?, accepted = ?, rejected_reason = ? WHERE dedupe_key = ?',
+                (
+                    str(updated_at or ''),
+                    None if next_accepted is None else (1 if next_accepted else 0),
+                    '' if next_accepted is True else str(rejected_reason or ''),
+                    key,
+                ),
+            )
+
+        self._run_write(operation)
+
+    def mark_tool_job_outbox_attempt(
+        self,
+        dedupe_key: str,
+        *,
+        attempted_at: str,
+        error_text: str,
+        attempt_limit: int = 0,
+    ) -> None:
+        key = str(dedupe_key or '').strip()
+        if not key:
+            return
+        limit = max(0, int(attempt_limit or 0))
+
+        def operation(conn: sqlite3.Connection) -> None:
+            row = conn.execute('SELECT attempts, delivery_state FROM tool_job_outbox WHERE dedupe_key = ?', (key,)).fetchone()
+            if row is None:
+                return
+            delivery_state = str(row['delivery_state'] or '').strip() or 'pending'
+            if delivery_state in {'delivered', 'abandoned'}:
+                return
+            attempts = int(row['attempts'] or 0) + 1
+            next_state = 'abandoned' if limit and attempts >= limit else 'pending'
+            conn.execute(
+                'UPDATE tool_job_outbox SET delivery_state = ?, updated_at = ?, attempts = ?, last_attempt_at = ?, last_error = ? WHERE dedupe_key = ?',
+                (next_state, attempted_at, attempts, attempted_at, str(error_text or ''), key),
+            )
+
+        self._run_write(operation)
+
+    def mark_tool_job_outbox_delivered(self, dedupe_key: str, *, delivered_at: str) -> None:
+        key = str(dedupe_key or '').strip()
+        if not key:
+            return
+        self._execute_write(
+            'UPDATE tool_job_outbox SET delivery_state = ?, updated_at = ?, delivered_at = ?, accepted = ?, rejected_reason = ? WHERE dedupe_key = ?',
+            ('delivered', delivered_at, delivered_at, 1, '', key),
+        )
+
     def put_task_stall_outbox(
         self,
         *,
@@ -4445,6 +4775,55 @@ class SQLiteTaskStore:
         return {
             'dedupe_key': row['dedupe_key'],
             'task_id': row['task_id'],
+            'session_id': row['session_id'],
+            'delivery_state': row['delivery_state'],
+            'created_at': row['created_at'],
+            'updated_at': row['updated_at'],
+            'delivered_at': row['delivered_at'],
+            'attempts': int(row['attempts'] or 0),
+            'last_attempt_at': row['last_attempt_at'],
+            'last_error': row['last_error'],
+            'accepted': None if accepted_raw is None else bool(int(accepted_raw)),
+            'rejected_reason': row['rejected_reason'],
+            'payload': payload if isinstance(payload, dict) else {},
+        }
+
+    @staticmethod
+    def _tool_job_row(row: sqlite3.Row | None) -> dict[str, object]:
+        if row is None:
+            return {}
+        payload = json.loads(row['payload_json'])
+        return {
+            'job_id': row['job_id'],
+            'session_id': row['session_id'],
+            'turn_id': row['turn_id'],
+            'tool_call_id': row['tool_call_id'],
+            'tool_name': row['tool_name'],
+            'args_hash': row['args_hash'],
+            'hint': row['hint'],
+            'status': row['status'],
+            'started_at': row['started_at'],
+            'finished_at': row['finished_at'],
+            'updated_at': row['updated_at'],
+            'timeout_seconds': float(row['timeout_seconds'] or 0),
+            'owner_pid': int(row['owner_pid'] or 0),
+            'recovery_policy': row['recovery_policy'],
+            'stop_requested_by_user': bool(int(row['stop_requested_by_user'] or 0)),
+            'result_preview': row['result_preview'],
+            'result_ref': row['result_ref'],
+            'log_path': row['log_path'],
+            'payload': payload if isinstance(payload, dict) else {},
+        }
+
+    @staticmethod
+    def _tool_job_outbox_row(row: sqlite3.Row | None) -> dict[str, object]:
+        if row is None:
+            return {}
+        payload = json.loads(row['payload_json'])
+        accepted_raw = row['accepted']
+        return {
+            'dedupe_key': row['dedupe_key'],
+            'job_id': row['job_id'],
             'session_id': row['session_id'],
             'delivery_state': row['delivery_state'],
             'created_at': row['created_at'],

@@ -5555,7 +5555,7 @@ def test_web_session_heartbeat_replays_pending_terminal_outbox_and_records_enque
 
     counts = service.replay_pending_outbox(session_id=session_id)
 
-    assert counts == {"task_terminal": 1, "task_stall": 0}
+    assert counts == {"task_terminal": 1, "task_stall": 0, "tool_job": 0}
     assert len(service._events.peek(session_id)) == 1
     assert enqueue_results == [(payload["dedupe_key"], True, "")]
 

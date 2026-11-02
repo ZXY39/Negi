@@ -229,6 +229,8 @@ class RuntimeAgentSession:
         self._pending_tool_name_calls: dict[str, deque[str]] = {}
         self._tool_seq: int = 0
         self._active_cancel_token: ToolCancellationToken | None = None
+        self._tool_job_runner = None
+        self._tool_job_notify_tasks: set[asyncio.Task[Any]] = set()
         self._preserved_inflight_turn: dict[str, Any] | None = None
         self._follow_up_transition_snapshot: dict[str, Any] | None = None
         self._paused_execution_context: dict[str, Any] | None = None
@@ -3321,6 +3323,65 @@ class RuntimeAgentSession:
             if hasattr(result, "__await__"):
                 await result
         return event
+
+    def _tool_job_store(self):
+        service = getattr(self._loop, "main_task_service", None)
+        return getattr(service, "store", None)
+
+    def _tool_job_heartbeat(self):
+        return getattr(self._loop, "web_session_heartbeat", None)
+
+    def _notify_tool_jobs_changed(self, items: list[dict[str, Any]]) -> None:
+        try:
+            task = asyncio.create_task(
+                self._emit_tool_jobs_changed(items),
+                name=f"tool-jobs-changed:{self._state.session_key}",
+            )
+        except RuntimeError:
+            return
+        self._tool_job_notify_tasks.add(task)
+        task.add_done_callback(self._tool_job_notify_tasks.discard)
+
+    async def _emit_tool_jobs_changed(self, items: list[dict[str, Any]]) -> None:
+        try:
+            await self._emit("tool_jobs_changed", count=len(items), items=list(items or []))
+        except Exception:
+            logger.debug("tool_jobs_changed emit failed for {}", self._state.session_key, exc_info=True)
+
+    def _tool_job_runner_instance(self):
+        runner = getattr(self, "_tool_job_runner", None)
+        if runner is None:
+            from g3ku.runtime.tool_jobs import ToolJobRunner
+
+            runner = ToolJobRunner(
+                session_key=self._state.session_key,
+                store_getter=self._tool_job_store,
+                heartbeat_getter=self._tool_job_heartbeat,
+                changed_callback=self._notify_tool_jobs_changed,
+            )
+            self._tool_job_runner = runner
+        return runner
+
+    def start_tool_job(self, **kwargs):
+        return self._tool_job_runner_instance().start_job(**kwargs)
+
+    async def wait_tool_job(self, job, timeout_seconds: float):
+        return await self._tool_job_runner_instance().wait_first(job, timeout_seconds)
+
+    def list_tool_jobs(self) -> list[dict[str, Any]]:
+        runner = getattr(self, "_tool_job_runner", None)
+        if runner is None:
+            return []
+        return runner.list_jobs(self._state.session_key)
+
+    async def stop_tool_job(self, job_id: str) -> dict[str, Any]:
+        return await self._tool_job_runner_instance().stop_job(job_id)
+
+    async def cancel_tool_jobs(self, *, reason: str = "session_deleted", suppress_event: bool = True) -> int:
+        runner = getattr(self, "_tool_job_runner", None)
+        if runner is None:
+            return 0
+        return await runner.cancel_all(reason=reason, suppress_event=suppress_event)
 
     def _sync_persisted_inflight_turn(self) -> None:
         session_key = str(self._state.session_key or "").strip()

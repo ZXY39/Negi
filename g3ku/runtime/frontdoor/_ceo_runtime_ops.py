@@ -3625,7 +3625,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         return pinned_text, pinned_skill_ids_for(session, session_key=normalized_session_key)
 
     def _ceo_tool_watchdog_runtime_config(self) -> dict[str, Any]:
-        """CEO 侧统一工具 timeout 全局默认值入口（读主运行时配置，缺省走内置默认）。"""
+        """CEO 侧统一工具 timeout / 自动转后台窗口入口（读主运行时配置，缺省走内置默认）。"""
         main_service = getattr(self._loop, "main_task_service", None)
         config = getattr(main_service, "_app_config", None)
         agents = getattr(config, "agents", None) if config is not None else None
@@ -3633,7 +3633,16 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             value = float(getattr(agents, "tool_default_timeout_seconds", 0) or 0)
         except (TypeError, ValueError):
             return {}
-        return {"default_timeout_seconds": value} if value >= 1 else {}
+        payload: dict[str, Any] = {}
+        if value >= 1:
+            payload["default_timeout_seconds"] = value
+        try:
+            background_value = float(getattr(agents, "tool_auto_background_seconds", 0) or 0)
+        except (TypeError, ValueError):
+            background_value = 0.0
+        if background_value > 0:
+            payload["auto_background_seconds"] = background_value
+        return payload
 
     def _sandbox_read_roots(self, session_key: str, policy: Any) -> tuple[str, ...]:
         """受限/只读档的可读根：会话工作目录 + 上传目录 + temp；owner 另加工作区。
@@ -3713,6 +3722,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "on_progress": runtime.context.on_progress,
             "emit_lifecycle": True,
             "actor_role": "ceo",
+            "_runtime_agent_session": session,
             "tool_watchdog": self._ceo_tool_watchdog_runtime_config(),
             "session_key": session.state.session_key,
             # 档位：信任级 + 意图 + 解析出的执行面。工具层只读这几个键，不自己判来源。
@@ -7073,10 +7083,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             entry_arguments = dict(entry.get(tool_arg_stash.ARGS_FIELD) or {})
             text, entry_status = await execute_one(entry_arguments)
             text = str(text or '')
+            entry_status_text = str(entry_status or 'success')
             item: dict[str, Any] = {
                 'index': index,
                 'args_digest': str(entry.get(tool_arg_stash.DIGEST_FIELD) or tool_arg_stash.args_digest(entry_arguments)),
-                'ok': str(entry_status or 'success') == 'success',
+                'ok': entry_status_text in {'success', 'background'},
             }
             item['error' if item['ok'] is False else 'result'] = text
             items.append(item)
@@ -10147,16 +10158,17 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             }
             result_text = str(result_payload.get("result_text") or "")
             status = str(result_payload.get("status") or self._tool_status(result_text))
-            await self._emit_progress(
-                on_progress,
-                result_text,
-                event_kind="tool_result" if status == "success" else "tool_error",
-                event_data=self._tool_result_progress_event_data(
-                    tool_name=tool_name,
-                    result_text=result_text,
-                    tool_call_id=str(payload.get("id") or "").strip() or None,
-                ),
-            )
+            if status != "background":
+                await self._emit_progress(
+                    on_progress,
+                    result_text,
+                    event_kind="tool_result" if status == "success" else "tool_error",
+                    event_data=self._tool_result_progress_event_data(
+                        tool_name=tool_name,
+                        result_text=result_text,
+                        tool_call_id=str(payload.get("id") or "").strip() or None,
+                    ),
+                )
             return {
                 "tool_call_id": str(payload.get("id") or "").strip(),
                 "tool_name": tool_name,

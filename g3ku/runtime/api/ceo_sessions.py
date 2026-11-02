@@ -31,6 +31,7 @@ from g3ku.runtime.session_agent import (
     PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR,
 )
 from g3ku.runtime.session_keys import is_channel_session_key
+from g3ku.runtime.tool_jobs import ToolJobFinishedError, ToolJobNotFoundError
 from g3ku.runtime.web_ceo_sessions import (
     SESSION_MODEL_SELECTION_KEY,
     SESSION_MODEL_SELECTION_MODE_CHAIN,
@@ -533,6 +534,13 @@ async def _delete_single_ceo_session(
             await review_manager.enqueue_session_boundary_flush(session_key=session_key)
         except Exception:
             pass
+    runtime_session = _runtime_session(runtime_manager, session_key)
+    cancel_jobs = getattr(runtime_session, "cancel_tool_jobs", None) if runtime_session is not None else None
+    if callable(cancel_jobs):
+        try:
+            await cancel_jobs(reason="session_deleted", suppress_event=True)
+        except Exception:
+            logger.exception("failed to cancel tool jobs for deleted session {}", session_key)
     delete_web_ceo_session_artifacts(
         session_manager=session_manager,
         session_id=session_key,
@@ -599,6 +607,43 @@ async def get_ceo_session_pending_interrupts(session_id: str):
         snapshot = read_paused_execution_context(session.key) or {}
         items = list(snapshot.get("interrupts") or [])
     return {"ok": True, "session_id": session.key, "items": items}
+
+
+@router.get("/ceo/sessions/{session_id}/tool-jobs")
+async def get_ceo_session_tool_jobs(session_id: str):
+    _agent, session_manager, runtime_manager, state_store = _sessions()
+    session_key, _is_channel = _resolve_bulk_session_key(
+        session_manager,
+        runtime_manager,
+        state_store,
+        session_id,
+    )
+    runtime_session = _runtime_session(runtime_manager, session_key)
+    lister = getattr(runtime_session, "list_tool_jobs", None) if runtime_session is not None else None
+    items = list(lister() or []) if callable(lister) else []
+    return {"ok": True, "session_id": session_key, "count": len(items), "items": items}
+
+
+@router.post("/ceo/sessions/{session_id}/tool-jobs/{job_id}/stop")
+async def stop_ceo_session_tool_job(session_id: str, job_id: str):
+    _agent, session_manager, runtime_manager, state_store = _sessions()
+    session_key, _is_channel = _resolve_bulk_session_key(
+        session_manager,
+        runtime_manager,
+        state_store,
+        session_id,
+    )
+    runtime_session = _runtime_session(runtime_manager, session_key)
+    stopper = getattr(runtime_session, "stop_tool_job", None) if runtime_session is not None else None
+    if not callable(stopper):
+        raise HTTPException(status_code=404, detail="tool_job_not_found")
+    try:
+        result = await stopper(str(job_id or "").strip())
+    except ToolJobFinishedError as exc:
+        raise HTTPException(status_code=409, detail="tool_job_finished") from exc
+    except ToolJobNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="tool_job_not_found") from exc
+    return {"ok": True, **dict(result or {})}
 
 
 @router.post("/ceo/sessions/{session_id}/resume-interrupt")

@@ -20,7 +20,8 @@
     },
     "multiAgent": {
       "orchestratorModelKey": null
-    }
+    },
+    "toolAutoBackgroundSeconds": 60
   },
   "models": {
     "catalog": [
@@ -149,8 +150,5 @@
     "appSecret": "",
     "sandbox": false
   },
-  "cron": {
-    "dispatchTimeoutSeconds": 1800,
-    "dispatchCancelGraceSeconds": 10
-  }
+  "cron": {}
 }

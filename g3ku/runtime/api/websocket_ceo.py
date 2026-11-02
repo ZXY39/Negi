@@ -2050,6 +2050,11 @@ async def ceo_websocket(websocket: WebSocket):
                 },
             )
             return
+        if event.type == 'tool_jobs_changed':
+            payload = dict(event.payload or {})
+            items = payload.get('items') if isinstance(payload.get('items'), list) else []
+            await _push_stream_event('ceo.tool_jobs', {'count': len(items), 'items': items})
+            return
         if event.type == 'frontdoor_turns_synced':
             # 图节点边界同步后主动推送一次 live turn patch：turns 刚刷新，
             # 若等到下一工具事件才推，新一轮会在前端晚一拍出现。

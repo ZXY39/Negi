@@ -1181,6 +1181,20 @@ async def ensure_web_runtime_services(agent: AgentLoop | None = None) -> None:
                 # Avoid blocking unlock on worker warmup; the UI can surface worker readiness separately.
                 await ensure_managed_task_worker(main_task_service, wait_timeout_s=1.0)
                 _ensure_task_worker_watchdog_running(main_task_service)
+            try:
+                from g3ku.runtime.tool_jobs import prune_tool_job_rows, recover_tool_jobs
+
+                store = getattr(main_task_service, 'store', None) if main_task_service is not None else None
+                recovered = recover_tool_jobs(store)
+                if recovered.get("recovered"):
+                    logger.info(
+                        "tool job recovery: rows={} events={}",
+                        recovered.get("recovered", 0),
+                        recovered.get("events", 0),
+                    )
+                prune_tool_job_rows(store)
+            except Exception:
+                logger.exception("tool job recovery skipped during startup")
             heartbeat = await start_web_session_heartbeat(
                 runtime_agent,
                 get_runtime_manager(runtime_agent),
