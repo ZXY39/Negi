@@ -253,3 +253,56 @@ async def test_fail_on_acceptance_node_is_rejected_with_a_real_exit_hint(tmp_pat
         assert latest is not None and latest.status == 'in_progress'
     finally:
         await service.close()
+
+
+@pytest.mark.asyncio
+async def test_batch_fail_on_unpaused_acceptance_node_answers_the_acceptance_guard(
+    tmp_path: Path,
+) -> None:
+    """批次形态的入口判据：未暂停的验收节点 `fail` 得先撞上验收守卫。
+
+    车道入口（`control_nodes` + targets）的前置校验原先按 `node_not_paused` 整批打回，
+    模型读到的是"先把它暂停"，于是真会去暂停一颗永远不该被 fail 的节点，再撞第二次拒绝。
+    原子语义不变（整批不生效、items 为空），换的是错误码与 hint 的可行动性。
+    """
+    service = _service(tmp_path)
+    service._assert_worker_available = lambda: None
+    try:
+        _seed(service)
+        # 验收节点回到未暂停（模型还没处置过它），另备一颗已暂停的执行节点作同批对照。
+        service.store.upsert_node(
+            _node(
+                ACCEPTANCE,
+                parent=CHILD,
+                kind='acceptance',
+                depth=2,
+                metadata={'accepted_node_id': CHILD, 'final_acceptance': False},
+            )
+        )
+        service.store.upsert_node(
+            _node('node:paused-exec', parent=ROOT, depth=1, is_paused=True)
+        )
+
+        result = await service.control_nodes(
+            TASK,
+            [],
+            '',
+            targets=[
+                {'node_id': ACCEPTANCE, 'action': 'fail'},
+                {'node_id': 'node:paused-exec', 'action': 'fail'},
+            ],
+            remark='batch give up',
+        )
+
+        assert result['ok'] is False
+        assert result['error'] == 'acceptance_fail_does_not_settle_task'
+        assert result['node_id'] == ACCEPTANCE
+        assert result['inspected_node_id'] == CHILD
+        assert 'fail the inspected execution node' in str(result['hint'])
+        # 原子性：整批没有生效，同批那颗已暂停的执行节点照旧 in_progress
+        assert result['items'] == []
+        for node_id in (ACCEPTANCE, 'node:paused-exec'):
+            node = service.get_node(node_id)
+            assert node is not None and node.status == 'in_progress'
+    finally:
+        await service.close()

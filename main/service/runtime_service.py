@@ -2922,6 +2922,21 @@ class MainRuntimeService:
                 if not entry['cascade']:
                     return {'ok': False, 'error': 'node_already_paused', 'index': entry['index'], 'node_id': entry['node_id'], 'items': []}
             elif entry['action'] in {'resume', 'keep_paused', 'fail'} and not paused:
+                if entry['action'] == 'fail':
+                    # 验收节点的 fail 永远不结算任务，这条守卫比"先把它暂停"更该先应答：
+                    # 按 node_not_paused 打回会让模型先去暂停一个根本不该被 fail 的节点，
+                    # 再撞第二次拒绝。原子语义保持不变（整批打回、不生效），只换错误码。
+                    acceptance_rejection = self._acceptance_fail_rejection(node)
+                    if acceptance_rejection is not None:
+                        return {
+                            'ok': False,
+                            'error': 'acceptance_fail_does_not_settle_task',
+                            'index': entry['index'],
+                            'node_id': entry['node_id'],
+                            'inspected_node_id': acceptance_rejection.get('inspected_node_id', ''),
+                            'hint': acceptance_rejection.get('hint', ''),
+                            'items': [],
+                        }
                 return {'ok': False, 'error': 'node_not_paused', 'index': entry['index'], 'node_id': entry['node_id'], 'items': []}
             if entry['action'] == 'resume' and not entry['cascade']:
                 # 单目标复活：结清判据按原子打回处理（与 node_not_paused 同级）。级联条目
