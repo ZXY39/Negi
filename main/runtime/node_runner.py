@@ -809,14 +809,9 @@ class NodeRunner:
                     error_text=error_text,
                     node_title=node.goal,
                 )
+                # error 暂停的父节点升级由 `_mark_node_paused` 统一发出；非根节点
+                # 漏掉这一跳会让协议修复/预检类暂停在子树上静默悬空。
                 self._mark_node_paused(task_id, node.node_id, reason='error', remark=error_text)
-                # 非根节点的异常暂停必须升级父节点：心跳只报根节点，漏掉这一跳
-                # 就会让协议修复/预检类暂停在子树上静默悬空。
-                self.notify_parent_abnormal_pause(
-                    task_id=task_id,
-                    node_id=node.node_id,
-                    reason=error_text,
-                )
                 raise NodePausedError(task_id, node.node_id)
             if self._pause_requested(task_id):
                 self._mark_finished(task_id, node.node_id, result)
@@ -882,22 +877,16 @@ class NodeRunner:
             # 这两行在磁盘满时二次写盘再炸，导致 31 个节点连锁 error-pause。
             # 记录失败绝不阻断 NodePausedError 的控制流（先例：react_loop "Error-history
             # persistence must never break the ReAct loop"）。
+            # provider 整条链耗尽是从这里落地的；父节点升级由 `_mark_node_paused`
+            # 统一发出，体积区间读数随升级正文一起上去（实盘 2026-10-26 SPAN-PROBE
+            # task:578bebcdf701 node:20bb6c2ea7d1：子节点 400 耗尽后父节点信箱一条都没收到）。
+            span_report = str(getattr(exc, model_size_span.EXCEPTION_REPORT_ATTR, '') or '').strip()
             self._persist_error_and_pause_best_effort(
                 task_id=task_id,
                 node_id=node.node_id,
                 text=text,
                 node_goal=str(getattr(node, 'goal', '') or ''),
-            )
-            # 这条异常道也必须有异常暂停通知：`failure_disposition='pause'` 那条道会通知父节点，
-            # 而 provider 整条链耗尽是从这里落地的（实盘 2026-10-26 SPAN-PROBE task:578bebcdf701
-            # node:20bb6c2ea7d1：子节点 400 耗尽后 pause_reason='error'，父节点信箱一条都没收到，
-            # 根节点停在 enter_wait 等一封永远不会来的信）。心跳只报根节点，非根节点少了这一跳
-            # 就是静默悬空。
-            span_report = str(getattr(exc, model_size_span.EXCEPTION_REPORT_ATTR, '') or '').strip()
-            self.notify_parent_abnormal_pause(
-                task_id=task_id,
-                node_id=node.node_id,
-                reason=f'{text}\n{span_report}' if span_report else text,
+                escalation_reason=f'{text}\n{span_report}' if span_report else text,
             )
             raise NodePausedError(task_id, node.node_id) from exc
         finally:
@@ -1948,11 +1937,6 @@ class NodeRunner:
             execution.node_id,
             reason='error',
             remark=feedback_text or 'acceptance rejected without progress',
-        )
-        self.notify_parent_abnormal_pause(
-            task_id=task.task_id,
-            node_id=execution.node_id,
-            reason=feedback_text or 'acceptance rejected without progress',
         )
         self._log_service.refresh_task_view(task.task_id, mark_unread=True)
 
@@ -7359,7 +7343,15 @@ class NodeRunner:
             return False
         return bool(getattr(node, 'pause_requested', False)) or bool(getattr(node, 'is_paused', False))
 
-    def _persist_error_and_pause_best_effort(self, *, task_id: str, node_id: str, text: str, node_goal: str) -> None:
+    def _persist_error_and_pause_best_effort(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        text: str,
+        node_goal: str,
+        escalation_reason: str = '',
+    ) -> None:
         """尽力落盘节点错误记录与暂停状态；任何一步失败都不外抛。
 
         顺序决策：先 error_log（携带完整异常文本、单行小写、磁盘满时成功率更高），
@@ -7386,7 +7378,13 @@ class NodeRunner:
                 describe_exception_chain(exc),
             )
         try:
-            self._mark_node_paused(task_id, node_id, reason='error', remark=text)
+            self._mark_node_paused(
+                task_id,
+                node_id,
+                reason='error',
+                remark=text,
+                escalation_reason=escalation_reason,
+            )
         except Exception as exc:
             logger.warning(
                 'title=node_fault_report_write_failed stage=pause_record task={} node={} '
@@ -7423,13 +7421,29 @@ class NodeRunner:
             remark='任务级暂停：恢复任务时自动继续',
         )
 
-    def _mark_node_paused(self, task_id: str, node_id: str, *, reason: str = '', remark: str = '') -> NodeRecord | None:
+    def _mark_node_paused(
+        self,
+        task_id: str,
+        node_id: str,
+        *,
+        reason: str = '',
+        remark: str = '',
+        escalation_reason: str = '',
+    ) -> NodeRecord | None:
+        """给节点写暂停标记；`pause_reason='error'` 的唯一写入入口。
+
+        每条 error 暂停都必须到达父节点信箱。升级放在这里而不是各调用方，新增写入方
+        漏不掉：看门狗、回合故障/异常道、`reject_no_progress`、孤儿收尸、spawn 轮停放
+        和 error 档 pause 命令都从这里落地。根节点没有父节点，它的 error pause 由
+        `task_node_error` 心跳报会话。
+        """
         node = self._store.get_node(node_id)
         normalized_reason = str(reason or getattr(node, 'pause_reason', '') if node is not None else '').strip().lower() or 'manual'
         existing = self._store.get_task_node_pause(node_id)
+        already_error_paused = existing is not None and str(existing.pause_reason or '').strip().lower() == 'error'
         if not remark and existing is not None:
             remark = str(existing.remark or '')
-        return self._log_service.set_node_pause_state(
+        updated = self._log_service.set_node_pause_state(
             task_id,
             node_id,
             pause_requested=True,
@@ -7437,6 +7451,39 @@ class NodeRunner:
             pause_reason=normalized_reason,
             remark=remark,
             delivered=bool(existing.delivered) if existing is not None else False,
+        )
+        if updated is not None and normalized_reason == 'error' and not already_error_paused:
+            # 同一暂停的重复写入（例如 NodePausedError 兜底再 mark 一次）不重复升级；
+            # 恢复后再次 error 暂停时暂停行已被清除，会重新走到这里。
+            self._escalate_error_pause(
+                task_id=task_id,
+                node_id=node_id,
+                reason=str(escalation_reason or remark or '异常暂停').strip(),
+            )
+        return updated
+
+    def _escalate_error_pause(self, *, task_id: str, node_id: str, reason: str) -> None:
+        """异常暂停 → 父节点信箱；根节点没有父节点，留给 task_node_error 心跳。"""
+        node = self._store.get_node(node_id)
+        if node is None or not str(getattr(node, 'parent_node_id', '') or '').strip():
+            return
+        self.notify_parent_abnormal_pause(task_id=task_id, node_id=node_id, reason=reason)
+
+    def mark_node_error_paused(
+        self,
+        task_id: str,
+        node_id: str,
+        *,
+        remark: str = '',
+        escalation_reason: str = '',
+    ) -> NodeRecord | None:
+        """控制面（pause 命令 error 档）使用的公开 error 暂停入口。"""
+        return self._mark_node_paused(
+            task_id,
+            node_id,
+            reason='error',
+            remark=remark,
+            escalation_reason=escalation_reason,
         )
 
     def fail_paused_node(

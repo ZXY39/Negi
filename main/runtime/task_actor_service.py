@@ -1879,8 +1879,9 @@ class TaskActorService:
 
         暂停是可逆的：`resume_node` 能救回来，看完现场的会话 agent／操作者也能用它本来就
         有的出口（`manage_task_nodes` 的 fail 要求节点先处于暂停态）把这一批落成 `canceled`。
-        错误行带 `pause_reason='error'`，正好是 `task_node_error` 心跳车道的选择条件，
-        所以这里不需要新通报机制。
+        暂停与父节点升级都由 `_mark_node_paused` 的统一异常暂停道完成：非根节点向父节点
+        信箱发 `child_abnormal_pause`（high 优先级、必唤醒），根节点才由 `task_node_error`
+        心跳报会话。收尸器不自行发第二套通知。
         """
         reason = (
             'spawn_orphan_candidate: in_progress without executor or replay path — '
