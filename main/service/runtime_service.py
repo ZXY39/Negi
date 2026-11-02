@@ -128,6 +128,7 @@ from main.runtime.acceptance_handshake import (
     ACCEPTANCE_HANDSHAKE_KEY,
     ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
     normalize_acceptance_handshake,
+    verifier_recovery_exits,
 )
 from main.runtime.adaptive_tool_budget import AdaptiveToolBudgetController
 from main.runtime.chat_backend import ChatBackend
@@ -2209,13 +2210,19 @@ class MainRuntimeService:
         if str(getattr(node, 'node_kind', '') or '').strip().lower() != 'acceptance':
             return None
         metadata = getattr(node, 'metadata', None) if isinstance(getattr(node, 'metadata', None), dict) else {}
+        inspected_id = str((metadata or {}).get('accepted_node_id') or '').strip()
+        # 最终验收的判据与心跳扫描同一处：标记位，或被验的就是任务根节点。
+        is_final = bool((metadata or {}).get('final_acceptance')) or bool(
+            inspected_id and inspected_id == str(getattr(node, 'root_node_id', '') or '').strip()
+        )
         return {
             'result': 'conflict',
             'reason': 'acceptance_fail_does_not_settle_task',
-            'inspected_node_id': str((metadata or {}).get('accepted_node_id') or '').strip(),
+            'inspected_node_id': inspected_id,
             'hint': (
                 'This is a verifier node: failing it does not settle the task. '
-                'Resume the verifier, or fail the inspected execution node.'
+                'Resume the verifier; if that is impossible, '
+                f'{verifier_recovery_exits(final_acceptance=is_final)}.'
             ),
         }
 

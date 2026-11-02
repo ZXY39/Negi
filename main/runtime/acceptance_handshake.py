@@ -48,6 +48,22 @@ _KNOWN_ACCEPTANCE_STATES = {
 }
 
 
+def verifier_recovery_exits(*, final_acceptance: bool) -> str:
+    """The real exits when a verifier cannot be revived, as one shared phrase.
+
+    Both consumers — the `manage_task_nodes` fail refusal hint and the
+    `task_node_error` event line for an acceptance node — embed this clause, so
+    the tier difference cannot be stated in one place and forgotten in the other.
+    A child acceptance needs only the inspected node's failure: that already
+    closes the waiting-acceptance path. A root final acceptance also has
+    "cancel the task", because abandoning the request and recording a failed
+    delivery are different endings for the user.
+    """
+    if final_acceptance:
+        return "fail the inspected execution node, or cancel the task"
+    return "fail the inspected execution node"
+
+
 def _coerce_int(value: Any, *, default: int) -> int:
     try:
         return int(value)

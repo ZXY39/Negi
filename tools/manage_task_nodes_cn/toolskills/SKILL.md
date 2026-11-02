@@ -14,8 +14,10 @@ Actions:
 - `fail`: mark an actually paused node failed so its parent pipeline can continue.
   Failing an **acceptance** node is rejected with
   `acceptance_fail_does_not_settle_task`: a verifier failure is not a verdict and
-  does not settle the task. Resume the verifier, fail the inspected execution
-  node, or cancel the task instead.
+  does not settle the task. The refusal carries the exits for that node in its
+  `hint`: resume the verifier, and if that is impossible,
+  fail the inspected execution node — on a root final acceptance the same hint
+  reads fail the inspected execution node, or cancel the task.
 - `pause`: request an agent pause for a running or queued node; it takes effect at the next safe boundary.
 
 ## Resume result contract

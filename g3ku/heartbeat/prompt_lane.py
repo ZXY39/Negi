@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any, Callable
 
 from g3ku.core.timefmt import render_local_time
+from main.runtime.acceptance_handshake import verifier_recovery_exits
 from main.service.task_terminal_callback import TASK_TERMINAL_OUTPUT_INLINE_CHAR_LIMIT
 
 
@@ -414,9 +415,12 @@ def _task_node_error_lines(
             '在用户决定前用 manage_task_nodes 的 keep_paused 保持暂停，并在 remark 写明等待用户裁决。'
         )
     elif is_acceptance:
+        # 出口清单与 `manage_task_nodes` 的 fail 回执同源（verifier_recovery_exits）：
+        # 最终验收那一档多一条"取消任务"，因为放弃请求和记一次失败交付是两种结局。
         lines.append(
             '  Resume the verifier with manage_task_nodes(resume, node_ids=[verifier]). '
-            'If it cannot be revived, choose a real exit: fail the inspected execution node. '
+            'If it cannot be revived, choose a real exit: '
+            f'{verifier_recovery_exits(final_acceptance=isinstance(final_acceptance, bool) and final_acceptance)}. '
             'Do not fail the verifier node itself — a verifier failure does not settle the task.'
         )
     else:

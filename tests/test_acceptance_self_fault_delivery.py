@@ -16,7 +16,7 @@ import pytest
 from g3ku.heartbeat.node_error_scanner import NodeErrorScanner
 from g3ku.heartbeat.prompt_lane import _task_node_error_lines
 from main.models import NodeRecord, TaskRecord
-from main.runtime.acceptance_handshake import ACCEPTANCE_HANDSHAKE_KEY
+from main.runtime.acceptance_handshake import ACCEPTANCE_HANDSHAKE_KEY, verifier_recovery_exits
 from main.service.runtime_service import MainRuntimeService
 
 TASK = 'task:acceptance-self-fault'
@@ -342,3 +342,75 @@ async def test_node_ids_fail_on_unpaused_acceptance_node_answers_the_acceptance_
         assert latest is not None and latest.status == 'in_progress'
     finally:
         await service.close()
+def _flat(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _acceptance_event_text(*, final_acceptance: bool) -> str:
+    lines = _task_node_error_lines(
+        {
+            "task_id": TASK,
+            "task_title": "task title",
+            "node_id": ACCEPTANCE,
+            "node_title": "acceptance",
+            "pause_reason": "error",
+            "error_text": "provider chain exhausted",
+            "node_role": "acceptance",
+            "inspected_node_id": CHILD,
+            "inspected_node_status": "in_progress",
+            "handshake_state": "waiting_acceptance",
+            "final_acceptance": final_acceptance,
+        },
+        [],
+        output_inline_limit=4000,
+        externalizer=None,
+    )
+    return '\n'.join(lines)
+
+
+@pytest.mark.asyncio
+async def test_verifier_exits_are_stated_once_per_tier(tmp_path: Path) -> None:
+    """出口清单只有一份事实源：回执 hint、事件束那行、工具契约文案按同一措辞分档。
+
+    这条守卫的措辞以前抄在四处，改一处就留下三份真相（实盘见过 hint 只剩
+    "判被验节点失败"、工具契约还写着"或取消任务"）。现在两处生成串都调
+    `verifier_recovery_exits`，工具契约与心跳规则由本用例钉住同一份清单：
+    子验收节点没有"取消任务"这一档，根最终验收节点必须有。
+    """
+    child_clause = verifier_recovery_exits(final_acceptance=False)
+    final_clause = verifier_recovery_exits(final_acceptance=True)
+    assert "cancel" not in child_clause
+    assert "cancel the task" in final_clause
+
+    service = _service(tmp_path)
+    service._assert_worker_available = lambda: None
+    try:
+        _seed(service)
+        child_result = await service.control_nodes(TASK, [ACCEPTANCE], "fail", remark="give up")
+        child_hint = child_result["items"][0]["hint"]
+        assert child_clause in child_hint
+        assert "cancel the task" not in child_hint
+
+        service.store.update_node(
+            ACCEPTANCE,
+            lambda record: record.model_copy(
+                update={"metadata": {"accepted_node_id": ROOT, "final_acceptance": True}}
+            ),
+        )
+        final_result = await service.control_nodes(TASK, [ACCEPTANCE], "fail", remark="give up")
+        final_hint = final_result["items"][0]["hint"]
+        assert final_clause in final_hint
+        assert "cancel the task" in final_hint
+    finally:
+        await service.close()
+
+    assert child_clause in _acceptance_event_text(final_acceptance=False)
+    assert final_clause in _acceptance_event_text(final_acceptance=True)
+
+    skill = _flat((Path(__file__).resolve().parents[1] / "tools" / "manage_task_nodes_cn" / "toolskills" / "SKILL.md").read_text(encoding="utf-8"))
+    assert child_clause in skill
+    assert final_clause in skill
+
+    rules = (Path(__file__).resolve().parents[1] / "g3ku" / "runtime" / "prompts" / "heartbeat_rules.md").read_text(encoding="utf-8")
+    assert "子验收节点" not in rules
+    assert "这条事件自带的出口那一行" in rules
