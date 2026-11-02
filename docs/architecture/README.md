@@ -114,7 +114,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 网页在渠道会话里发不出消息（回 `channel_session_readonly`）、或发出去了但渠道端没有回复 → `external-agent-api.md`「会话注册表与 key 命名空间」+「回合契约」
 - 节点反复调用文件编辑类工具失败、或同一编辑被重复提交 → `tool-and-skill-system.md`「fixed builtin tools」（`filesystem_edit` 平面字段契约）（模型面平面字段与校验面宽车道的分工、`Already applied:` 幂等车道）
 - 用户连续发送消息时助手只看到最后一条、渠道消息收到重复回复、或运行中追发时渠道端一句回执都不出现 → `runtime-overview.md`「prompt_batch 批次回合内容合并」+ `external-agent-api.md`「回合契约」与「内置官方 QQ 适配器」
-- Node error pause is not delivered to the source session, or node-error heartbeats retry forever -> `heartbeat-system.md`「Task Node Error Delivery」
+- Node error pause is not delivered to the source session, a verifier's own error pause should reach the session rather than wait for the stall timer, or node-error heartbeats retry forever -> `heartbeat-system.md`「Task Node Error Delivery」
 - 验收反复打回同一交付、任务长时间停在「执行→验收」循环而没有判失败（是否存在打回次数上限）→ `main-task-runtime.md`「验收节点：提前创建、激活与握手重派发」（验收拒收无次数上限：打回只发反馈并复活执行节点，不终态化任务）
 - 节点详情里 `submit_final_result` 的 `summary` 是 `auto-wrapped plain-text final result`、`evidence` 全是 `Auto-collected tool result from X.` → 该轮没有真实提交，纯文本被当成规划的残留；判据与两条打回车道见 `tool-hydration-and-callable-chain.md`「严格纯文本打回与固定内置集合」
 - 验收节点上下文里堆着历次交付全文、或对已被取代的提交下结论、验收 bootstrap 每轮都在变 → `context-and-cache-troubleshooting.md`「验收 bootstrap 定稿与回合尾块」+ `main-task-runtime.md`「信箱投递、重激活与上行传播」（交接通知与回合尾块给 ref + 内联额度内的摘要，超限才带头段指回 ref）
@@ -135,7 +135,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - Token统计窗口打开期间表格不随实时事件变化、搜索/筛选与搜索框内容保留、需点「刷新」才更新、点「刷新」看似没反应或总数与明细都不动、Token统计按钮的 tooltip 比窗口顶部五格多一个缓存命中、顶部五格与逐次明细的命中率对不上、明细行数开着开着变少（跨节点同序号顶行）、模型调用明细按时间倒序/搜索只覆盖窗口或本页的行为疑问、底栏共 N 页但翻页时才发消息、停在历史页收不到新调用或「回到最新」后行数变化、任务级统计有数字却显示「尚无按模型明细」、分发期那一段调用在明细里读不到或「类型」列分不清，或总耗时/首 Token 耗时/思考 Token 显示 `--` → `web-and-admin.md`「Task Token Stats Window Contract」
 - Node pause or resume behaves unexpectedly -> `main-task-runtime.md`「Node-Level Pause and Recovery」
 - 节点 error-pause 的 remark 是 `PermissionError: [WinError 5] 拒绝访问` 的改名失败，且网页同时在刷同一节点详情 → `runtime-overview.md`「磁盘写保护与治理」（原子改名的争用重试与错误码判据）
-- 节点被恢复后仍不推进（暂停标志已清、再无模型调用，最后被 `orphan node parked as candidate` 停成人等）→ `main-task-runtime.md`「Node-Level Pause and Recovery」（恢复的 entry 判读与延迟校验清扫）
+- 节点被恢复后仍不推进（暂停标志已清、再无模型调用，最后被 `orphan node parked as candidate` 停成人等），或 `manage_task_nodes resume` 回了 `resumed`/`queued` 却分不清执行器是否真的复活 → `main-task-runtime.md`「Node-Level Pause and Recovery」（resume 结果档位、`task_node_resume_intents`、拾取消费顺序与收尸器跳过；日志锚点见 `operations-and-maintenance.md`「节点投递与冻结/复活排查」）
 - 节点因一次 `submit_final_result` 参数错误就终止，或参数错误文本里没有必填项与类型 → `main-task-runtime.md`「Node-Level Pause and Recovery」（模型交付违约与回包形态故障分账，两道的上限与早停不同）+ `tool-hydration-and-callable-chain.md`「参数错误与状态分类」（必填与可选字段都带类型的契约回贴）
 - 模型反复提交空串 / 空数组 / `start_line=0` 这类越界值、而它看到的 schema 里没有那条边界 → `tool-hydration-and-callable-chain.md`「参数错误与状态分类」（模型面投影只裁篇幅不裁判定；字段级 description 到不了模型）
 - 节点错误历史行首是 `Upstream payload shape fault detected`（reason 带 `[parameter-marker]` / `[output-capped]` / `[window-clamped]`），或节点因此进入错误暂停 → `main-task-runtime.md`「Node-Level Pause and Recovery」（形态故障分账、早停与首跳处置）+ `web-and-admin.md`「Node Detail Error History」（`upstream_raw_*` 是 provider 边界的原样字节）+ `config-and-models.md`「Model Request Parameter Defaults」

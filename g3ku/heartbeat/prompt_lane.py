@@ -328,6 +328,8 @@ def _task_node_error_lines(
     )
     error_line = f'  Error: {error_line}'
     failure_class = _runtime_fault_class(error_text)
+    node_role = _non_empty_text(event.get('node_role'))
+    is_acceptance = node_role == 'acceptance'
     lines = [
         f'- Task {task_title} ({task_id}) has a node paused after an error',
         f'  Node: {node_title} ({node_id})',
@@ -335,6 +337,24 @@ def _task_node_error_lines(
         *([f'  Failure class: {failure_class}'] if failure_class else []),
         error_line,
     ]
+    if is_acceptance:
+        # 验收器自身故障不是对被验节点的裁决：父节点在 waiting_acceptance 时
+        # 不会因非裁决消息醒来，这条事件是前门唯一可行动的直达车道。
+        lines.append(
+            '  Role: acceptance node (the verifier itself paused; '
+            'this is not a verdict on the inspected node)'
+        )
+        inspected_id = _non_empty_text(event.get('inspected_node_id'))
+        if inspected_id:
+            inspected_status = _non_empty_text(event.get('inspected_node_status'))
+            handshake_state = _non_empty_text(event.get('handshake_state'))
+            inspected_bits = inspected_id + (f' [{inspected_status}]' if inspected_status else '')
+            if handshake_state:
+                inspected_bits += f', handshake={handshake_state}'
+            lines.append(f'  Inspected node: {inspected_bits}')
+        final_acceptance = event.get('final_acceptance')
+        if isinstance(final_acceptance, bool):
+            lines.append(f'  Final acceptance: {"yes" if final_acceptance else "no"}')
     # 重试状态：让模型知道这是第几次失败、上次/下次时间，而不是误以为每次都是第一次。
     # 数据由 session_service 从 heartbeat_node_retry_state 表 + task_error_logs 注入。
     failed = _int_value(event.get('retry_attempt'), 0)
@@ -367,6 +387,12 @@ def _task_node_error_lines(
             '你**必须**现在向用户报告并请求裁决，不要继续静默重试。建议措辞：'
             f'"这些节点已经连续 {times} 次无法启动，是否判为失败让任务继续进行？这些节点的任务分别为……"。'
             '在用户决定前用 manage_task_nodes 的 keep_paused 保持暂停，并在 remark 写明等待用户裁决。'
+        )
+    elif is_acceptance:
+        lines.append(
+            '  Resume the verifier with manage_task_nodes(resume, node_ids=[verifier]). '
+            'If it cannot be revived, choose a real exit: fail the inspected execution node, or cancel the task. '
+            'Do not fail the verifier node itself — a verifier failure does not settle the task.'
         )
     else:
         lines.append('  Use manage_task_nodes to resume, keep_paused with a reason, fail, or pause related nodes as appropriate.')

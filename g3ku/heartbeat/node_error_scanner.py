@@ -36,6 +36,62 @@ class NodeErrorScanner:
             await asyncio.sleep(self._interval_seconds)
             await self.scan_once()
 
+    def _acceptance_self_fault_payload(self, *, task, node_id: str) -> dict[str, Any] | None:
+        """验收节点自身 error pause 的载荷扩展；返回 None 表示这是清扫疤、不该直达。
+
+        过滤的两类疤：被检验的执行节点已终态（T15 收口路径）；握手没有待裁定
+        提交（既不在两个裁决等待态，也没有可解析的 submission ref）——那说明
+        验收节点本来就不该在跑，这条例外不该惊动会话。
+        """
+        node_getter = getattr(self._main_task_service, 'get_node', None)
+        if not callable(node_getter):
+            return {}
+        try:
+            node = node_getter(node_id)
+        except Exception:
+            return {}
+        if node is None or str(getattr(node, 'node_kind', '') or '').strip().lower() != 'acceptance':
+            return {}
+        metadata = dict(getattr(node, 'metadata', None) or {}) if isinstance(getattr(node, 'metadata', None), dict) else {}
+        inspected_id = str(metadata.get('accepted_node_id') or '').strip()
+        root_node_id = str(getattr(task, 'root_node_id', '') or '').strip()
+        payload: dict[str, Any] = {
+            'node_role': 'acceptance',
+            'final_acceptance': bool(metadata.get('final_acceptance')) or bool(inspected_id and inspected_id == root_node_id),
+        }
+        if not inspected_id:
+            return payload
+        try:
+            inspected = node_getter(inspected_id)
+        except Exception:
+            return None
+        if inspected is None:
+            return None
+        inspected_status = str(getattr(inspected, 'status', '') or '').strip().lower()
+        if inspected_status in {'success', 'failed'}:
+            return None
+        inspected_metadata = (
+            dict(getattr(inspected, 'metadata', None) or {})
+            if isinstance(getattr(inspected, 'metadata', None), dict)
+            else {}
+        )
+        handshake = (
+            dict(inspected_metadata.get('acceptance_handshake') or {})
+            if isinstance(inspected_metadata.get('acceptance_handshake'), dict)
+            else {}
+        )
+        handshake_state = str(handshake.get('state') or '').strip()
+        submission_ref = str(handshake.get('latest_execution_result_ref') or '').strip()
+        if handshake_state not in {'waiting_acceptance', 'waiting_block_verification'} and not submission_ref:
+            return None
+        payload['inspected_node_id'] = inspected_id
+        payload['inspected_node_status'] = inspected_status
+        if handshake_state:
+            payload['handshake_state'] = handshake_state
+        if submission_ref:
+            payload['submission_ref'] = submission_ref
+        return payload
+
     async def scan_once(self) -> int:
         store = getattr(self._main_task_service, 'store', None)
         list_pending = getattr(store, 'list_new_error_pauses', None)
@@ -51,9 +107,14 @@ class NodeErrorScanner:
             if not task_id or not node_id:
                 continue
             task = self._main_task_service.get_task(task_id) if hasattr(self._main_task_service, 'get_task') else None
+            acceptance_payload = self._acceptance_self_fault_payload(task=task, node_id=node_id)
+            if acceptance_payload is None:
+                continue
+            item.update(acceptance_payload)
             session_id = str(origin_getter(task) if callable(origin_getter) else getattr(task, 'session_id', 'web:shared') or 'web:shared').strip() or 'web:shared'
             pause_id = int(item.get('id') or 0)
             groups[session_id].append({
+                **item,
                 'task_id': task_id,
                 'task_title': str(getattr(task, 'title', '') or task_id),
                 'node_id': node_id,
