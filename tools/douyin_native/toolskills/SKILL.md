@@ -39,7 +39,9 @@ Microsoft Edge（`channel="msedge"` + 常驻 user-data 目录），保留并复�
 1. **单个常驻 Edge 进程**：`main/tool.py` 用 `--remote-debugging-port` 启动一个分离的
    Edge，记录 `pid/port` 到 `data/douyin_native/browser.json`；之后的动作都通过 CDP 复用
    同一个会话，不再每次 action 重建上下文。`action="close"` 会 `context.close()` 优雅关机
-   让 cookie 落盘，并（必要时）结束该进程。
+   让 cookie 落盘，并（必要时）结束该进程。工具实例被资源重载替换时，实例级 `close()`
+   只停掉 Playwright driver 连接并清空 `_browser` / `_context`，不关闭 Edge、不丢登录态；
+   Edge 本身的关闭入口始终是 `action="close"`。
 2. **cookie 导出/注入**：登录成功（`login_check` 等）后立即把 douyin 域 cookie 导出到
    `data/douyin_native/login_state.json`（含 sessionid/sid_guard/sid_tt/uid_tt/ttwid/
    passport_csrf_token 等实际存在的字段名），并执行

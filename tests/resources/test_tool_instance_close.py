@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import inspect
+from pathlib import Path
 
 import yaml
 
@@ -108,3 +110,37 @@ def test_embedded_mcp_tool_close_still_forwards(tmp_path):
 
     assert tool.close() == 'closed'
     assert handler.closed is True
+
+
+class _FakePlaywrightDriver:
+    def __init__(self) -> None:
+        self.stopped = False
+
+    async def stop(self):
+        self.stopped = True
+
+
+def _load_douyin_native_tool():
+    path = Path(__file__).resolve().parents[2] / 'tools' / 'douyin_native' / 'main' / 'tool.py'
+    spec = importlib.util.spec_from_file_location('douyin_native_close_under_test', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.DouyinNativeTool
+
+
+async def test_douyin_native_close_releases_driver_and_keeps_edge(tmp_path):
+    tool = _load_douyin_native_tool()(workspace=tmp_path)
+    driver = _FakePlaywrightDriver()
+    tool._pw = driver
+    tool._browser = object()
+    tool._context = object()
+
+    await tool.close()
+
+    assert driver.stopped is True
+    assert tool._pw is None
+    assert tool._browser is None
+    assert tool._context is None
+
+    await tool.close()
+

@@ -1054,6 +1054,19 @@ class DouyinNativeTool(Tool):
         self._launched_pid: int | None = None
         self._verify_aweme_id = True
 
+    async def close(self) -> None:
+        """Release the Playwright driver; the detached Edge keeps running."""
+        pw = self._pw
+        self._pw = None
+        self._browser = None
+        self._context = None
+        if pw is None:
+            return
+        try:
+            await pw.stop()
+        except Exception:
+            pass
+
     # -- schema -------------------------------------------------------------
 
     @property
