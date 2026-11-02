@@ -104,6 +104,26 @@ Microsoft Edge（`channel="msedge"` + 常驻 user-data 目录），保留并复�
 - `allow_publish` 只覆盖 `mode=publish`（真的公开发作品）；`mode=draft`（默认）**不需要**
   `allow_publish`，也永远不会点「发布」。
 
+### 点赞 / 取消点赞（action="like"）
+
+对当前视频点赞或取消，**幂等**（已是目标状态时不点击），不需要 `send_policy` 开关（它不是发言）。
+
+- **参数**：`like`（true=点赞 / false=取消，默认 true）；用 `aweme_id`（推荐）或 `slot` 定位视频，
+  沿用与评论/回复相同的**身份校验**（`aweme_match=true` 才执行，不匹配则 `status=mismatch` 且不点赞）。
+- **按钮与回执**：点 `[data-e2e="video-player-digg"]` 后，用 `_JS_LIKE_STATE` 回读
+  `data-e2e-state`（`video-player-is-digged`=已赞，注意页面用的是 `is-digged`）与点赞数
+  （innerText 解析，支持「万」），前后一致才算 UI 层确认（`ui_confirmed=true`）。
+- **持久化核验（关键，2026-11-02 实测）**：抖音点赞按钮是**前端乐观更新**——UI 变红 + 计数 +1
+  不代表服务端真的记了这次点赞。工具在 UI 确认后**自动 reload 一次**并重新校验视频身份，
+  再读状态；只有 reload 后仍保持目标状态才算 `receipt=confirmed`（`persisted=true`）。
+  - `status=not_persisted`：UI 已切换但 reload 后回退 → **服务端未接受**，不能算点赞成功。
+    2026-11-02 实测本账号（CDP 自动化会话）点赞后计数 +1 但刷新即回滚，判定为平台侧
+    静默拒绝（反自动化），工具如实返回 `receipt=未持久化`，**不冒充成功**。
+  - `status=persist_unverified`：reload 后未能重新确认视频身份，持久化未核验（既不报成功也不断言失败）。
+  - 若需要"真点赞"，目前只能真人手动在窗口内点；工具不尝试绕过平台风控。
+- **安全**：点赞是可撤销操作（再调 `like=false`），单视频单次，不批量轰炸；
+  出现 `#uc-second-verify` / 登录失效立即中止。
+
 ### 我的作品（action="my_works"，只读）
 
 读**本账号自己发布的作品**，数据源是创作者中心内容管理页
@@ -317,6 +337,10 @@ Microsoft Edge（`channel="msedge"` + 常驻 user-data 目录），保留并复�
   `video_swapped_during_read` / `video_swapped_during_sampling`）
 - 评论：`comments[]`（`author`/`text`/`likes`/`time`/`comment_id`/`reply_count`）+
   `comments_panel`/`comment_list_present`（真实面板状态）
+- 点赞：`status`（`ok` / `not_persisted` / `persist_unverified` / `not_confirm`）、`like`、
+  `changed`、`ui_confirmed`（UI 层是否切换）、`persisted`（reload 后是否保持）、`before`/`after`
+  （点击前后 `{present,state,liked,count,count_text}`）、`after_reload`（reload 后的状态样本或
+  `{skipped,error}`）、`receipt`（`confirmed` / `未持久化` / `未核验` / `未确认送达`）
 - 搜索：`attempts[]`（每个入口的 URL / http_status / cards / login_wall / ok）
 - 分镜：`sheet_path`（拼图 PNG）、`cells[]`（格号/时间/原图路径）
 - 报告：`report_path`（Markdown 绝对路径）
@@ -424,3 +448,15 @@ Microsoft Edge（`channel="msedge"` + 常驻 user-data 目录），保留并复�
     这类聚合行不适合做逐人回复。
   - 通知行**不带回复正文**（只有「回复了你的评论」这类动作短语），正文要定位到视频后
     从评论面板读（`locate.comment_match`），不要臆造通知正文。
+- **like（点赞）已验证到什么程度**（2026-11-02 实测）：
+  - 已验证：`aweme_id` 定位 + 身份校验（`aweme_match=true`）；点击链路三级降级
+    （普通 click → 悬停 + `force=True` → JS 派发 `mouse-down/up/click`），实测普通 click 即可；
+    `_JS_LIKE_STATE` 回读 `data-e2e-state`（未赞 `video-player-no-digged` / 已赞
+    `video-player-is-digged`）与计数（如 855→856）；`_wait_like_stable` 连读两次一致才取样本，
+    过滤页面 hydration 抖动；幂等分支（已是目标态不点击）返回 `changed=false`。
+  - **持久化未达成（重要）**：点赞是前端乐观更新。实测同一视频连续 4 轮：
+    UI 变 `is-digged` 且计数 +1，但 `page.reload()` 后稳定回到 `no-digged`、计数回退，
+    服务端未保留这次点赞。判定为平台对该自动化会话**静默拒绝**（既无报错也无二次验证）。
+    工具因此强制做 reload 核验并返回 `status=not_persisted` + `receipt=未持久化`，
+    **不把 UI 变化当成点赞成功**。
+  - 未尝试：绕过平台风控（不做）。若确实需要点赞生效，只能真人在 Edge 窗口内手动点。

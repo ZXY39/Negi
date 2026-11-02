@@ -43,6 +43,7 @@ parameters:
       - feed
       - search
       - video
+      - like
       - storyboard
       - comments
       - watch_report
@@ -104,6 +105,10 @@ parameters:
         to a concrete aweme_id through data/douyin_native/feed_snapshot.json
         (written by the last feed/watch_report run), and the opened video is
         verified to be that aweme_id.
+    like:
+      type: boolean
+      description: >-
+        like only: true = 点赞, false = 取消点赞 (幂等；已是目标状态时不点击)。
     text:
       type: string
       description: Comment or reply body text (only for send_comment / reply_to_comment; gated).

@@ -438,6 +438,49 @@ _JS_AWEME_ID = r"""
 }
 """
 
+# Like (digg) button state: douyin marks the button with
+# data-e2e-state="video-player-digged" when the current user liked it and
+# "video-player-no-digged" otherwise; innerText carries the raw like count.
+_JS_LIKE_STATE = r"""
+() => {
+  const sel = '[data-e2e="video-player-digg"]';
+  const el = document.querySelector(sel);
+  if (!el) return {present: false, selector: sel};
+  const st = el.getAttribute('data-e2e-state') || '';
+  const liked = st === 'video-player-digged' || (/digged/i.test(st) && !/no-digged/i.test(st));
+  const txt = (el.innerText || '').replace(/\s+/g, ' ').trim();
+  const m = txt.match(/(\d+(?:\.\d+)?)\s*(万|w|W)?/);
+  let count = 0;
+  if (m) count = Math.round(parseFloat(m[1]) * (m[2] ? 10000 : 1));
+  return {
+    present: true,
+    selector: sel,
+    liked,
+    state: st || '',
+    count,
+    count_text: txt,
+    aria: el.getAttribute('aria-label') || '',
+    cls: typeof el.className === 'string' ? el.className : ''
+  };
+}
+"""
+
+_JS_LIKE_CLICK = r"""
+() => {
+  const el = document.querySelector('[data-e2e="video-player-digg"]');
+  if (!el) return false;
+  const r = el.getBoundingClientRect();
+  const opts = {
+    bubbles: true, cancelable: true, view: window, button: 0,
+    clientX: r.left + r.width / 2, clientY: r.top + r.height / 2
+  };
+  el.dispatchEvent(new MouseEvent('mousedown', opts));
+  el.dispatchEvent(new MouseEvent('mouseup', opts));
+  el.dispatchEvent(new MouseEvent('click', opts));
+  return true;
+}
+"""
+
 _JS_PANEL_STATE = r"""
 () => {
   const list = document.querySelector('[data-e2e="comment-list"]');
@@ -1088,7 +1131,7 @@ class DouyinNativeTool(Tool):
                     "type": "string",
                     "enum": [
                         "open", "login_status", "login_check", "login_export", "login_restore",
-                        "feed", "search", "video", "storyboard", "comments", "watch_report",
+                        "feed", "search", "video", "like", "storyboard", "comments", "watch_report",
                         "my_works", "interactions",
                         "send_comment", "reply_to_comment", "send_forward", "publish",
                         "usage", "health", "close",
@@ -1099,6 +1142,12 @@ class DouyinNativeTool(Tool):
                 "max_items": {"type": "integer", "description": "Feed/report/comment item cap (1-40)."},
                 "frame_count": {"type": "integer", "description": "Storyboard frames (2-16)."},
                 "slot": {"type": "integer", "description": "1-based feed item to open in player."},
+                "like": {
+                    "type": "boolean",
+                    "description": (
+                        "like only: true = 点赞, false = 取消点赞（幂等；已是目标状态时不点击）。"
+                    ),
+                },
                 "text": {
                     "type": "string",
                     "description": "Comment/reply body (send_comment / reply_to_comment only).",
@@ -3012,6 +3061,181 @@ class DouyinNativeTool(Tool):
             "screenshot": shot,
         }
 
+    async def _read_like_state(self, page) -> dict[str, Any]:
+        try:
+            got = await page.evaluate(_JS_LIKE_STATE)
+        except Exception:
+            got = {}
+        return got if isinstance(got, dict) else {}
+
+    async def _wait_like_stable(self, page, tries: int = 8, gap: float = 0.5) -> dict[str, Any]:
+        """Player like state may hydrate a beat after the page mounts; keep reading until
+        two consecutive samples agree on state+count (or give up and return the last sample)."""
+        prev = {}
+        for _ in range(tries):
+            cur = await self._read_like_state(page)
+            if (
+                cur.get("present")
+                and prev.get("present")
+                and cur.get("state") == prev.get("state")
+                and cur.get("count_text") == prev.get("count_text")
+            ):
+                return cur
+            prev = cur
+            await asyncio.sleep(gap)
+        return prev or {}
+
+    async def _click_like_button(self, page) -> str:
+        """Try plain click -> hover+force click -> JS dispatch. Player controls may need a hover first."""
+        sel = '[data-e2e="video-player-digg"]'
+        btn = page.locator(sel)
+        try:
+            await btn.click(timeout=5000)
+            return "click"
+        except Exception:
+            pass
+        try:
+            box = await btn.bounding_box()
+            if box:
+                await page.mouse.move(
+                    box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+                )
+                await asyncio.sleep(0.4)
+            await btn.click(timeout=5000, force=True)
+            return "force_click"
+        except Exception:
+            pass
+        try:
+            ok = await page.evaluate(_JS_LIKE_CLICK)
+            if ok:
+                return "js_click"
+        except Exception:
+            pass
+        return "failed"
+
+    async def _act_like(self, page, slot: int | None, aweme_id: str | None, want_like: bool) -> dict[str, Any]:
+        """Like (digg) / unlike a video by clicking [data-e2e="video-player-digg"], then re-reading state to verify."""
+        if aweme_id:
+            info = await self._open_video_by_id(page, aweme_id)
+        else:
+            info = await self._open_player(page, slot)
+        target = info.get("target_aweme_id") or ""
+        actual = info.get("actual_aweme_id") or ""
+        if info.get("status") in ("mismatch", "aweme_unavailable") or not info.get("aweme_match"):
+            return {
+                "status": info.get("status", "mismatch"),
+                "slot": slot,
+                "aweme_id": aweme_id,
+                "target_aweme_id": target,
+                "actual_aweme_id": actual,
+                "aweme_match": bool(info.get("aweme_match")),
+                "message": info.get("message", "视频身份校验未通过，未点赞"),
+                "screenshot": await self._shot(page, "like_mismatch"),
+            }
+        before = await self._wait_like_stable(page)
+        if not before.get("present"):
+            return {
+                "status": "error",
+                "aweme_id": actual,
+                "like": want_like,
+                "message": "未找到点赞按钮 [data-e2e=\"video-player-digg\"]（页面结构变化或视频未就绪）",
+                "before": before,
+                "screenshot": await self._shot(page, "like_no_button"),
+            }
+        if bool(before.get("liked")) == want_like:
+            return {
+                "status": "ok",
+                "action": "like",
+                "like": want_like,
+                "changed": False,
+                "aweme_id": actual,
+                "aweme_match": True,
+                "before": before,
+                "after": before,
+                "message": "已是目标状态，无需操作（幂等）",
+                "screenshot": await self._shot(page, "like_unchanged"),
+            }
+        how = await self._click_like_button(page)
+        if how == "failed":
+            return {
+                "status": "error",
+                "like": want_like,
+                "aweme_id": actual,
+                "message": "点赞按钮点击失败（普通/强制/JS 派发均未成功）",
+                "before": before,
+                "screenshot": await self._shot(page, "like_click_failed"),
+            }
+        await asyncio.sleep(1.4)
+        after = await self._wait_like_stable(page)
+        ui_ok = bool(after.get("liked")) == want_like
+        # 点赞按钮是前端乐观更新：UI 变红 + 计数 +1 不代表服务端真的记了这次点赞。
+        # 必须 reload 一次再读，才能区分「真的点上了」和「只是页面上变了」。
+        persisted: dict[str, Any] = {}
+        persist_ok = False
+        if ui_ok:
+            try:
+                await page.reload(wait_until="domcontentloaded")
+                reidentified = False
+                for _ in range(10):
+                    await asyncio.sleep(0.8)
+                    cur = await self._current_aweme(page)
+                    if str(cur.get("actual") or "") == actual:
+                        reidentified = True
+                        break
+                if reidentified:
+                    persisted = await self._wait_like_stable(page)
+                    persist_ok = bool(persisted.get("liked")) == want_like
+                else:
+                    persisted = {"skipped": "identity_unverified_after_reload"}
+            except Exception as exc:
+                persisted = {"error": f"reload_failed: {exc.__class__.__name__}"}
+        ok = ui_ok and persist_ok
+        skipped = bool(persisted.get("skipped")) or bool(persisted.get("error"))
+        if ok:
+            status, receipt, message = (
+                "ok",
+                "confirmed",
+                "点赞/取消成功，重新加载后状态保持（已持久化）",
+            )
+        elif ui_ok and skipped:
+            status, receipt, message = (
+                "persist_unverified",
+                "未核验",
+                "UI 已切换且计数变化，但刷新后没能重新确认视频身份，持久化未核验（既不算成功也不断言失败）",
+            )
+        elif ui_ok:
+            status, receipt, message = (
+                "not_persisted",
+                "未持久化",
+                "UI 已切换且计数变化，但重新加载后状态回退：服务端未接受这次操作，不能算点赞成功",
+            )
+        else:
+            status, receipt, message = (
+                "not_confirm",
+                "未确认送达",
+                "点击已执行，但回读状态未匹配，请人工核对",
+            )
+        return {
+            "status": status,
+            "action": "like",
+            "like": want_like,
+            "changed": ok
+            and (
+                bool(after.get("liked")) != bool(before.get("liked"))
+                or after.get("count") != before.get("count")
+            ),
+            "aweme_id": actual,
+            "aweme_match": True,
+            "ui_confirmed": ui_ok,
+            "persisted": persist_ok,
+            "before": before,
+            "after": after,
+            "after_reload": persisted,
+            "receipt": receipt,
+            "message": message,
+            "screenshot": await self._shot(page, "like_done" if ok else "like_unconfirmed"),
+        }
+
     async def _act_storyboard(self, page, slot: int, frame_count: int) -> dict[str, Any]:
         info = await self._open_player(page, slot)
         target = info.get("target_aweme_id") or ""
@@ -4817,6 +5041,8 @@ class DouyinNativeTool(Tool):
             return await self._act_search(page, keyword, max_items or 20)
         if action == "video":
             return await self._act_video(page, slot)
+        if action == "like":
+            return await self._act_like(page, slot, kw.get("aweme_id"), bool(kw.get("like", True)))
         if action == "storyboard":
             return await self._act_storyboard(page, slot, frame_count)
         if action == "comments":
