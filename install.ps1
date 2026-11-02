@@ -479,8 +479,19 @@ function Update-GitCheckout {
         $stashed = $true
     }
     try {
-        Write-Step "git fetch --depth 1 origin $Ref"
-        Invoke-Checked @('git', '-C', $Root, 'fetch', '--depth', '1', 'origin', $Ref) -Where $Root
+        # Fetch depth follows this tree's own shape. A one-line-installed device is
+        # already shallow, so `--depth 1` skips history it never had; a full-history
+        # checkout (a developer's own machine) collapses to one commit under `--depth 1`,
+        # which takes `git log`, `git blame` and any history-based reading down with it
+        # (measured: 3 -> 1 commits, plus a new `.git/shallow`). Keep the fast path only
+        # where it costs nothing.
+        if (Test-Path -LiteralPath (Join-Path $Root '.git\shallow')) {
+            Write-Step "git fetch --depth 1 origin $Ref"
+            Invoke-Checked @('git', '-C', $Root, 'fetch', '--depth', '1', 'origin', $Ref) -Where $Root
+        } else {
+            Write-Step "git fetch origin $Ref (this checkout keeps its history: not a shallow clone)"
+            Invoke-Checked @('git', '-C', $Root, 'fetch', 'origin', $Ref) -Where $Root
+        }
         Invoke-Checked @('git', '-C', $Root, 'checkout', '--detach', 'FETCH_HEAD') -Where $Root
         Write-Step "code updated to $Ref"
     }

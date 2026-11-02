@@ -135,6 +135,21 @@ def test_the_settings_row_shows_a_count_and_no_path_list() -> None:
         assert forbidden not in module, f"{forbidden} 会把消息投进别的会话"
 
 
+def test_fetch_depth_follows_the_trees_own_shape() -> None:
+    """`--depth 1` 只给本来就是浅仓的设备；全历史树被它取一次就把历史塌成一个提交。
+
+    实测过损坏形状：一次升级让 `git log` 从 3 个提交变成 1 个，并多出 `.git/shallow`。
+    """
+    ps = INSTALL_PS1.read_text(encoding="utf-8")
+    sh = INSTALL_SH.read_text(encoding="utf-8")
+    assert ".git\\shallow" in ps and "git fetch --depth 1" in ps
+    assert ps.index("Test-Path -LiteralPath (Join-Path $Root '.git\\shallow')") < ps.index("'fetch', '--depth', '1'")
+    assert "fetch', 'origin', $Ref" in ps, "非浅仓要走保留历史的 fetch"
+    assert '.git/shallow' in sh and 'fetch --depth 1 origin "$REF"' in sh
+    assert sh.index('if [ -f "$DIR/.git/shallow" ]') < sh.index('fetch --depth 1 origin "$REF"')
+    assert 'fetch origin "$REF"' in sh
+
+
 def test_the_ledger_carries_the_conflict_fields_to_the_surface() -> None:
     source = (REPO_ROOT / "g3ku" / "update_apply.py").read_text(encoding="utf-8")
     for field in ("conflict_paths", "conflict_count", "conflict_lane", "conflict_stash", "conflict_dir", "conflict_at"):

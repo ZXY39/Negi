@@ -1083,3 +1083,83 @@ async def test_apply_refuses_before_spawning_when_this_device_cannot_run_git(mon
     assert spawned == [] and checked == [], "拒绝要发生在花远端读取和踢执行体之前"
 
 
+async def test_apply_refuses_when_this_checkout_already_contains_that_release(monkeypatch):
+    """HEAD 已经包含目标标签 ⇒ 拒绝换码，一次停机都不发起。
+
+    放行下去做的事是把工作区切回那个标签：代码一行不会变新，代价却是停机、把本地改动
+    stash 走、以及浅仓化/游离 HEAD —— 开发者自己的树上是真损失（实测过一次 `git log`
+    从 3 个提交塌成 1 个）。
+    """
+    from fastapi import HTTPException
+
+    import main.api.update_rest as update_api
+
+    spawned: list[str] = []
+    monkeypatch.setattr(update_api, "spawn_runner", lambda ref, port=None, pause_running_work=True: spawned.append(ref))
+    monkeypatch.setattr(update_api, "upgrade_lane_available", lambda project_root=None: (True, ""))
+    monkeypatch.setattr(update_api, "release_in_local_head", lambda ref, **kwargs: True)
+
+    with pytest.raises(HTTPException) as exc:
+        await update_api.update_apply(_FakeRequest(18999), {"ref": "v9.9.9"})
+    assert exc.value.status_code == 409
+    assert exc.value.detail["code"] == "already_at_or_ahead_of_release"
+    assert exc.value.detail["ref"] == "v9.9.9"
+    assert spawned == []
+
+
+async def test_apply_still_runs_when_head_ancestry_cannot_be_read(monkeypatch):
+    """判不出历史就放行：浅仓设备上标签对象常常根本不在本地。
+
+    读不出来不能变成新的拦点 —— 那会把设备群里正常的一条车道整个关掉。
+    """
+    import main.api.update_rest as update_api
+
+    spawned: list[str] = []
+    monkeypatch.setattr(update_api, "spawn_runner", lambda ref, port=None, pause_running_work=True: spawned.append(ref))
+    monkeypatch.setattr(update_api, "upgrade_lane_available", lambda project_root=None: (True, ""))
+    monkeypatch.setattr(update_api, "release_in_local_head", lambda ref, **kwargs: None)
+    monkeypatch.setattr(update_api, "run_update_check", lambda **kwargs: _git_result())
+
+    await update_api.update_apply(_FakeRequest(18999), {"ref": "v9.9.9"})
+    assert spawned == ["v9.9.9"]
+
+
+def test_release_in_local_head_answers_only_for_a_git_checkout(tmp_path: Path, monkeypatch):
+    from g3ku import update_check
+
+    monkeypatch.setattr(update_check, "is_git_checkout", lambda root=None: False)
+    assert update_check.release_in_local_head("v1.2.3", project_root=tmp_path) is None
+
+    monkeypatch.setattr(update_check, "is_git_checkout", lambda root=None: True)
+    monkeypatch.setattr(update_check, "resolve_git_executable", lambda configured="": None)
+    assert update_check.release_in_local_head("v1.2.3", project_root=tmp_path) is None
+
+    calls: list[list[str]] = []
+    timeouts: list[object] = []
+
+    def _fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        timeouts.append(kwargs.get("timeout"))
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(update_check, "resolve_git_executable", lambda configured="": "git")
+    monkeypatch.setattr(update_check.subprocess, "run", _fake_run)
+    assert update_check.release_in_local_head("v1.2.3", project_root=tmp_path) is True
+    assert calls[-1][-2:] == ["refs/tags/v1.2.3", "HEAD"]
+    # 超时必须是数字：这个模块里 `CODE_TIMEOUT` 是失败**档位字符串**，把它当秒数传进去会
+    # 在 subprocess 里炸成 TypeError，而调用方是「点一下更新」那条路。
+    assert isinstance(timeouts[-1], (int, float)) and not isinstance(timeouts[-1], bool)
+
+    def _unknown(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, returncode=128, stdout="", stderr="fatal: Not a valid object name")
+
+    monkeypatch.setattr(update_check.subprocess, "run", _unknown)
+    assert update_check.release_in_local_head("v1.2.3", project_root=tmp_path) is None
+
+    def _behind(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, returncode=1, stdout="", stderr="")
+
+    monkeypatch.setattr(update_check.subprocess, "run", _behind)
+    assert update_check.release_in_local_head("v1.2.3", project_root=tmp_path) is False
+
+

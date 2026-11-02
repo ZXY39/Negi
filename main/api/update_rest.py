@@ -23,6 +23,7 @@ from g3ku.update_check import (
     ledger_newer_now,
     read_apply_result,
     read_update_ledger,
+    release_in_local_head,
     run_update_check,
     upgrade_lane_available,
 )
@@ -189,6 +190,23 @@ async def update_apply(request: Request, payload: dict | None = Body(default=Non
         raise HTTPException(
             status_code=400,
             detail={"code": "invalid_ref", "message": f"版本号格式不正确：{ref}"},
+        )
+    # 这一版已经在这棵树的 HEAD 历史里时先把话说清：换码只会把工作区切回那个标签，代码一行不会
+    # 变新，却要付一次停机、一次本地改动 stash、以及浅仓化/游离 HEAD 的代价（开发者自己的树上
+    # 这是真损失）。判不出来的设备（浅仓上标签对象不在本地、没有 git、超时）一律放行——读不出
+    # 历史不能反过来拦掉正常升级。
+    if release_in_local_head(ref, git_path=git_path) is True:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "already_at_or_ahead_of_release",
+                "message": (
+                    f"这棵树的代码已经包含 {ref}，再点一次只会把工作区切回那个标签"
+                    "（代码不会变新，还会停一次服务）。要升到更新的版本就等下一次发布，"
+                    "或点名那个版本。"
+                ),
+                "ref": ref,
+            },
         )
     # 没点名版本时只在真有新版本时才动作，避免把设备无谓地重启一次。
     if not requested_ref and not ledger_newer_now(ledger):

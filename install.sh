@@ -527,8 +527,20 @@ update_git_checkout() {
   if [ "$TRACKED_DIRTY" -ne 0 ]; then
     save_tracked_changes
   fi
-  log "git fetch --depth 1 origin $REF"
-  if ! git -C "$DIR" fetch --depth 1 origin "$REF"; then
+  # 取码深度按这棵树自己的形状定。一行安装出来的设备本来就是浅仓，`--depth 1` 省的正是
+  # 它本来就没有的那段历史；而全历史树（开发者自己的机器）被 `--depth 1` 取一次就把历史
+  # 塌成一个提交，`git log`/`git blame` 与按历史比对判读一起失去依据（实测 3→1，并多出
+  # `.git/shallow`）。所以只在本来就浅的树上保留那条快路。
+  if [ -f "$DIR/.git/shallow" ]; then
+    log "git fetch --depth 1 origin $REF"
+    fetch_ok=1
+    git -C "$DIR" fetch --depth 1 origin "$REF" || fetch_ok=0
+  else
+    log "git fetch origin $REF (this checkout keeps its history: not a shallow clone)"
+    fetch_ok=1
+    git -C "$DIR" fetch origin "$REF" || fetch_ok=0
+  fi
+  if [ "$fetch_ok" -eq 0 ]; then
     # 取码失败时树还停在旧提交，先把改动放回去：升级失败不能顺带把本地改动藏进 stash。
     restore_tracked_changes
     fail 'git fetch failed'

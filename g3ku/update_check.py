@@ -139,6 +139,48 @@ def git_is_on_path() -> bool:
     return shutil.which("git") is not None
 
 
+def release_in_local_head(
+    ref: str,
+    *,
+    project_root: Path | None = None,
+    git_path: str = "",
+    timeout: float = GIT_TIMEOUT_SECONDS,
+) -> bool | None:
+    """这台检出的 HEAD 是否已经把 `ref` 那一版包含在自己的历史里。
+
+    回答 `True` 意味着"这一版你树上已经有了"，再走一遍换码只是把树切回那个标签：代码不会
+    变新，却要付一次停机、一次 stash、以及浅仓化/游离 HEAD 的代价（开发者自己的树上这是
+    真损失，实测过一次 `git log` 从 3 个提交塌成 1 个）。`False` 是"这版还没有，去升"。
+    `None` 是判不了——没有 `.git`、git 找不到、标签对象不在本地（浅仓设备通常如此）、或者
+    超时；调用方**必须**把 `None` 当放行，读不出来的时候不许拦正常升级。
+    """
+    root = Path(project_root or PROJECT_ROOT)
+    tag = str(ref or "").strip()
+    if not tag or not is_git_checkout(root):
+        return None
+    git = resolve_git_executable(git_path)
+    if not git:
+        return None
+    try:
+        probe = subprocess.run(
+            [git, "-C", str(root), "merge-base", "--is-ancestor", f"refs/tags/{tag}", "HEAD"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+            **_no_window_kwargs(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if probe.returncode == 0:
+        return True
+    if probe.returncode == 1:
+        return False
+    return None
+
+
 def upgrade_lane_available(project_root: Path | None = None) -> tuple[bool, str]:
     """这台设备自己动手升级的那条车道现在能不能跑。
 
