@@ -9,6 +9,8 @@ Microsoft Edge（`channel="msedge"` + 常驻 user-data 目录），保留并复�
 
 - 用户要「刷抖音」「看推荐流」「按主题出观看报告」「取视频信息/互动数据」「读评论」
 - 用户要「看我自己发了什么视频 / 我的作品列表 / 作品数据」（`action="my_works"`，只读，见「我的作品」）
+- 用户要「看谁回复了我 / 谁 @ 了我 / 互动消息 / 24 小时内的新回复」并据此**针对性回复**
+  （`action="interactions"`，只读，见「互动消息与针对性回复」）
 - 用户要「分镜/取帧/关键画面采样」（把同一作品多张实拍画面拼成带格编号的图）
 - 用户明确允许后要「评论/回复/转发」（发送类默认全部关闭，见「发送许可」）
 - 用户要「发作品 / 上传视频 / 存草稿」（`action="publish"`，**草稿箱模式优先**，见「发作品」）
@@ -83,6 +85,8 @@ Microsoft Edge（`channel="msedge"` + 常驻 user-data 目录），保留并复�
      comment_id，取自 `[data-e2e="comment-item"]`；**不含私信**）
    - `action="watch_report", keyword=..., max_items=..., include_frames=true`：看一轮并产出 Markdown 报告
    - `action="my_works"`：读自己账号已发布作品（创作者中心内容管理页，只读；标题/时长/发布时间/状态/播放点赞等统计）
+   - `action="interactions", hours=24, tab="comment"`：读互动消息（他人回复我的评论 / @我 / 赞），
+     按时间窗与动作类型过滤，并可用 `locate_item` 定位到「原视频 aweme_id + 目标评论」
 4. **发送类（默认关闭）**：见下节。
 5. `action="usage"` / `action="health"` / `action="close"`。
 
@@ -116,6 +120,63 @@ Microsoft Edge（`channel="msedge"` + 常驻 user-data 目录），保留并复�
 - **解析不到卡片**：返回 `status=ok` + 说明（可能确实没有作品，`total=0`；或创作者中心列表结构
   变了），带截图核对，**不臆造条目**。
 - 只列已发布/审核中等当前列表里的作品；草稿箱不在这个页面（内容管理没有草稿 Tab）。
+
+### 互动消息与针对性回复（action="interactions"，只读；回复复用 reply_to_comment）
+
+闭环：**发评论 → 他人回复/@我 → 读互动消息 → 定位原视频与评论 → 针对性回复**。
+
+本条动作本身**纯只读**（只点开面板、点开缩略图看视频、读评论），不发送任何内容；
+真正的发送只在 `reply_to_comment` 里，受 `send_policy.json` + `allow_send` 双重闸门约束。
+
+- **入口（实测结论，勿凭直觉改）**：互动消息图标在 `https://www.douyin.com/user/self` 的
+  头部导航里（`#douyin-header` → `#douyin-header-menuCt`，图标行文本含「通知」「消息」）。
+  推荐流页（`/jingxuan`、`/?recommend=1`）的 header 是精简版，**没有**通知图标 → 本动作
+  先 `_goto` 到 `/user/self` 再点。点击后下拉第一行是「互动消息 全部消息」，
+  **必须再点「全部消息」** 才展开 tab 行：`全部消息 | 粉丝 | @我的 | 评论 | 赞 | 推荐`。
+- **参数**：
+  - `hours`（默认 24，即「24 小时内」）：时间窗过滤，行内相对时间会被换算成
+    `age_hours_estimate` + `time_precision`（`exact` = 「刚刚/N分钟前/N小时前」可精确到小时；
+    `coarse` = 「昨天/前天/N天前/M-D/YYYY-MM-DD」只能粗估，如「昨天」按 24h 计）。
+  - `tab`：`all | comment | mention | like | fan | recommend`，映射到上面的 tab 行；
+    `comment`（回复/评论我）与 `mention`（@我）是闭环主要入口。
+  - `max_items`：返回条数上限（1-50，默认 20），按页面顺序（新→旧）取。
+  - `locate_item`：对**将要返回的某条通知**（用返回里的 `index`）做二次定位，产出
+    「原视频 aweme_id + 目标评论」，见下。
+  - `comment_text_match`：定位时在目标视频评论里按正文/作者子串找定位锚点（不传则只给视频与评论列表）。
+- **返回结构**：`items[]{index, author, action, is_reply_to_me, is_mention, is_about_my_comment,
+  content, content_kind, time_text, age_hours_estimate, time_precision, within_hours,
+  source_aweme_id, author_user_ids, row_lines, rect[, comment_id, matched_comment_author]}`；
+  还有 `filter{rows_seen, rows_after_tab_filter, kept, dropped_by_time, dropped_time_labels,
+  coarse_time_rows}`、`panel{row_count, text_head}`、`panel_probe`、`expand`、`tab_switch`、
+  `login`、`second_verify`、`locate`、`screenshot`。
+- **`content_kind` 必须看**：`action_phrase` = 通知行自带的动作短语（如「赞了你的评论」），
+  **不是**对方正文；`comment_body` = 已通过 `locate_item` 落到视频评论区读到的真实正文。
+  通知行本身通常没有正文、也没有 `/video/` 链接，所以普通列表调用拿不到 `source_aweme_id`
+  与 `comment_id`——这是站点结构决定的，不是解析失败，报告里要说清楚。
+- **定位（`locate_item`）**：行内**没有** `/video/` 链接，必须点开才拿到视频身份。
+  - 必须点**行右侧缩略图端**（`via=row_thumbnail_end`）：点左侧会打开 `/user/<sec_uid>`
+    个人主页（还会开新标签页）。代码里用 `preferVideo=true` 的 `_JS_NOTIFY_ROW_POINT` 取点。
+  - 点开后 URL 变成 `/user/self?modal_id=<aweme_id>`，代码从 `modal_id` 取 aweme_id，
+    再用 `_open_video_by_id` 到 `/video/<id>` 并用页面元素（`detail-video-info` 属性 /
+    `player-container` 的 `video_<id>` class）**二次校验身份**，不一致会返回
+    `video.status=mismatch` 并附 `target/actual`，不静默继续。
+  - 定位成功输出 `locate{resolved_aweme_id, video{status,...}, comments_read, comment_match{
+    index, author, text, likes, time, comment_id}, reply_hint{action:"reply_to_comment",
+    aweme_id, comment_text_match, comment_id, allow_send}, ok}`。
+  - `reply_hint` 可直接原样作为下一次调用的参数，**免去手工改 `feed_snapshot.json` 的 slot**。
+- **针对性回复**：`reply_to_comment` 现在支持 `aweme_id`（推荐，闭环用）与 `slot`（原有路径，未变）：
+  ```json
+  {"action": "interactions", "tab": "comment", "hours": 24, "locate_item": 8, "comment_text_match": "大肥鱼"}
+  {"action": "reply_to_comment", "aweme_id": "7703073192813989105", "comment_text_match": "大肥鱼",
+   "text": "同感，谢谢补充", "allow_send": true}
+  ```
+  传 `aweme_id` 时走 `_open_video_by_id`（同样做页面身份校验）；不传则仍按 `slot` 打开 feed，
+  原有行为与返回值不变。
+- **发送闸门（必须在报告里如实体现）**：`reply_to_comment` 的先决条件是
+  `send_policy.json` 里 `enabled=true` **且** `allow_reply=true`，**再**要 `allow_send=true`，
+  并且要已登录。任一不满足 → `status="blocked"` + `nothing_happened=true`，**一个字符都不会输入**。
+- **安全**：`/user/self` 与视频页打开后会先查 `#uc-second-verify` 短信/账号安全二次验证遮罩，
+  命中即 `status="blocked_second_verify"` + `nothing_happened=true` 立即中止，**不绕过、不重试**。
 
 ### 发作品（action="publish"，草稿箱模式优先）
 
@@ -207,6 +268,10 @@ Microsoft Edge（`channel="msedge"` + 常驻 user-data 目录），保留并复�
 {"action": "feed", "max_items": 10}
 {"action": "watch_report", "keyword": "美食", "max_items": 8, "include_frames": true, "frame_count": 4}
 {"action": "my_works", "max_items": 20}
+{"action": "interactions", "hours": 24, "tab": "comment", "max_items": 10}
+{"action": "interactions", "hours": 24, "tab": "mention", "max_items": 10}
+{"action": "interactions", "tab": "comment", "hours": 24, "locate_item": 8, "comment_text_match": "大肥鱼"}
+{"action": "reply_to_comment", "aweme_id": "7703073192813989105", "comment_text_match": "大肥鱼", "text": "同感，谢谢补充", "allow_send": true}
 {"action": "storyboard", "slot": 1, "frame_count": 4}
 {"action": "comments", "slot": 1, "max_items": 30}
 {"action": "send_comment", "slot": 1, "text": "好看，感谢分享", "allow_send": true}
@@ -218,15 +283,19 @@ Microsoft Edge（`channel="msedge"` + 常驻 user-data 目录），保留并复�
 ```
 
 - `action`（必填）：`open | login_status | login_check | login_export | login_restore |
-  feed | search | video | storyboard | comments | watch_report | my_works | send_comment |
-  reply_to_comment | send_forward | publish | usage | health | close`
+  feed | search | video | storyboard | comments | watch_report | my_works | interactions |
+  send_comment | reply_to_comment | send_forward | publish | usage | health | close`
 - `keyword`：搜索词/报告主题；`max_items`：1-40（comments 时是评论条数上限，默认 30）；
   `frame_count`：2-16；`slot`：第几个 feed 条目进播放器（1 起）；`text`：评论/回复正文；
   `comment_index`：回复目标评论的 1-based 序号（取 comments 返回的 `index`）；
   `comment_text_match`：按正文/作者子串定位回复目标（与 `comment_index` 二选一）；
   `allow_send`：发送显式许可；`verify_aweme_id`：默认 true，关闭后不因不一致中止
   （仍返回两个 aweme_id 与 `aweme_match`，仅调试用）；
-  `video_path`/`title`/`desc`/`tags`/`mode`/`allow_publish`：发作品专用，见「发作品」。
+  `video_path`/`title`/`desc`/`tags`/`mode`/`allow_publish`：发作品专用，见「发作品」；
+  `hours`：互动消息时间窗（小时，默认 24）；`tab`：互动消息分类
+  `all|comment|mention|like|fan|recommend`（默认 all）；`locate_item`：对即将返回的第 N 条
+  通知（`index`）做视频+评论定位，产出 `locate.reply_hint`；`aweme_id`：`reply_to_comment`
+  按视频 id 直接定位（替代 `slot`，两者二选一；同时给时以 `aweme_id` 优先）。
 
 ## 返回结构
 
@@ -300,10 +369,11 @@ Microsoft Edge（`channel="msedge"` + 常驻 user-data 目录），保留并复�
 
 ## 已知限制（实测记录，勿写成已验收）
 
-- **当前记录账号的会话已过期**（服务端 `account/info` 返回“会话过期”，UI 右上角显示
-  「登录」）：工具会如实判定未登录；`feed`/`video`/`comments` 可只读使用，`search` 与
-  `send_*`/`reply_to_comment` 需先扫码登录。发送链路在**用户授权 + 扫码登录**前只验证到
-  闸门拦截，未做端到端发送。
+- **登录态判定以页面实测为准（2026-11-02 复核）**：服务端 `/passport/web/account/info/`
+  返回 `error_code=1011`「用户不存在」是**模糊信号**（不代表掉登录），只查 cookie 名也会误判。
+  现在的判据是「header 有头像 + 没有『登录』按钮」→ `logged_in=true`
+  （`basis=ui_header_avatar_no_login_button_with_api_ambiguous`）。2026-11-02 实测该账号
+  **已登录**，`feed`/`video`/`comments`/`search`/`interactions`/`my_works` 均已跑通。
 - 未登录状态下：网站本身可浏览精选/推荐流；**搜索页/评论输入框被登录墙拦截**；
   部分点击会弹出登录弹窗（工具保留扫码框供用户扫码，不自动关闭）。
 - 评论面板按可见节点读取：首屏通常 5~10 条，滚动可多载一些；拿到的条数是“当前面板已渲染
@@ -326,3 +396,29 @@ Microsoft Edge（`channel="msedge"` + 常驻 user-data 目录），保留并复�
     首次真发布前请由用户本人开启 `allow_publish` 并人工观察一次。
   - 草稿箱模式会在账号里留下一条草稿（可用「放弃」清除）；当前创作者中心「内容管理」没有
     草稿箱 Tab，草稿存在性只能通过上传页提示 + 继续编辑回读确认。
+- **interactions（互动消息）已验证到什么程度**（2026-11-02 实测，见
+  `output/douyin_native/reports/interactions_selftest_*.md`）：
+  - 已验证：`/user/self` 头部 `#douyin-header-menuCt` 点「通知」→「全部消息」展开 tab 行
+    （`全部消息|粉丝|@我的|评论|赞|推荐`）；`tab=comment` 过滤生效（9 行里 8 行「赞了你的作品」
+    被剔掉，只剩 1 行「赞了你的评论」）；`hours=24` 时间过滤生效；`locate_item` 点缩略图端 →
+    `modal_id` 解析 → `/video/<id>` 身份校验一致（`aweme_match=true`）→ 读到 4 条评论 →
+    `comment_text_match` 命中目标评论并给出 `comment_id` + `reply_hint`；
+    `reply_to_comment(aweme_id=…, allow_send=false)` 与 `send_policy.enabled=false` 两种闸门
+    场景均返回 `blocked` + `nothing_happened=true`（**没有真发任何评论/回复**）。
+  - **未验证**：`allow_send=true` 的真实发送（本轮安全约束禁止真发，且 `delete_comment` 尚未
+    实现，发出去撤不回）；`tab=mention/like/fan/recommend` 的逐项实测（过滤规则已写，
+    `comment` 路径已实测通过）；「回复通知」在 24h 窗口内目前**没有**真实数据可测（当前
+    24h 内只有「赞了你的评论」，没有「回复了你的评论」）。
+  - **时间精度**：行内时间只有相对文本（`刚刚/N分钟前/N小时前/昨天/N天前/M-D`），
+    「昨天」只能按 24h 粗估（`time_precision=coarse`），因此 `hours=24` 的边界行属于
+    「大致在窗口内」，报告里必须带 `time_precision` 说明，不能当作精确时间戳。
+  - **tab 行点完会收起**：实测 `tabs_after_tab_click=[]`，所以 tab 过滤不能只靠页面点击，
+    代码在 Python 侧还按动作类型做了二次过滤（`tab_action_filter`），返回里能看到
+    `filter.rows_seen` 与 `rows_after_tab_filter` 的差值。
+  - **行内没有 `/video/` 链接**：必须点开缩略图端才能拿到 `modal_id`；点行左侧会打开
+    `/user/<sec_uid>` 个人主页（还会开新标签页），所以定位点固定取「行右侧缩略图端」。
+  - 列表里会出现聚合文案（如「9969697 等8人赞了你的作品」），此时作者字段是
+    「首作者 + 等N人」，`author_group` 单独保留原文，`author_user_ids` 可能含多个用户 id；
+    这类聚合行不适合做逐人回复。
+  - 通知行**不带回复正文**（只有「回复了你的评论」这类动作短语），正文要定位到视频后
+    从评论面板读（`locate.comment_match`），不要臆造通知正文。

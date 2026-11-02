@@ -82,6 +82,8 @@ _DOUYIN_SEARCH = "https://www.douyin.com/search/{q}?type=video"
 _DOUYIN_SEARCH_GENERAL = "https://www.douyin.com/search/{q}"
 _DOUYIN_AISEARCH = "https://www.douyin.com/aisearch?keyword={q}"
 _DOUYIN_VIDEO = "https://www.douyin.com/video/{vid}"
+_DOUYIN_USER_SELF = "https://www.douyin.com/user/self"
+_DOUYIN_ACCOUNT_INFO_PAGE = "https://www.douyin.com/user/self"
 _DOUYIN_CREATOR_UPLOAD = "https://creator.douyin.com/creator-micro/content/upload"
 _DOUYIN_CREATOR_POST_VIDEO = "https://creator.douyin.com/creator-micro/content/post/video"
 _DOUYIN_CREATOR_MANAGE = "https://creator.douyin.com/creator-micro/content/manage"
@@ -563,6 +565,256 @@ async (needle) => {
 }
 """
 
+# -- notification ("互动消息") dropdown, measured 2026-11-02 on www.douyin.com/user/self --
+#
+# Where it lives (page-level facts, not guesses):
+#   * /user/self renders the *rich* www header: `#douyin-header` contains
+#     `#douyin-header-menuCt` whose icon row reads 「搜索 充钻石 客户端 壁纸 通知 消息 投稿」。
+#     (The bare feed pages /?recommend=1 and /jingxuan render the slim nav-only header,
+#     which has NO 通知 icon — so interactions must land on /user/self first.)
+#   * The 通知 entry is `[data-e2e="something-button"]` whose visible text is 通知; clicking it
+#     renders a dropdown INSIDE the same `#douyin-header-menuCt` container.
+#   * The dropdown's first line is 「互动消息」+「全部消息」; expanding shows a tab row
+#     「粉丝 | @我的 | 评论 | 赞 | 推荐」and then one row per notification. A row is
+#     avatar(s) + nickname + action text (「赞了你的作品」「赞了你的评论」「回复了你的评论」…) + time
+#     (「刚刚」/「N分钟前」/「N小时前」/「昨天」/「N天前」/「M-D」).
+#   * Row / list class names are build hashes (e.g. `yBIrNfj_`, `Vdu9fhYD`) and MUST NOT be
+#     used as anchors. This reader therefore anchors on: the stable id `#douyin-header-menuCt`,
+#     visible text (通知 / 互动消息 / tab labels / action wording / time wording) and structure
+#     (a scroll list whose children repeat with a similar height).
+_NOTIFY_ACTION_RE_SRC = (
+    r"(?:赞了你(?:的作品|的评论|的视频)?|回复了你的评论|回复了你|评论了你的作品|评论了你|"
+    r"@了你|提到了你|关注了你|收藏了你的作品|转发了你的作品|分享了你)"
+)
+_JS_NOTIFY_PANEL = r"""
+() => {
+  const clean = (s) => (s || '').replace(/[\u200B-\u200F\uFEFF]/g, '').replace(/\s+/g, ' ').trim();
+  const ACT = new RegExp('(?:赞了你(?:的作品|的评论|的视频)?|回复了你的评论|回复了你|评论了你的作品|评论了你|@了你|提到了你|关注了你|收藏了你的作品|转发了你的作品|分享了你)');
+  const rect = (el) => { const r = el.getBoundingClientRect();
+    return {x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height)}; };
+  const menu = document.querySelector('#douyin-header-menuCt');
+  const scope = menu || document.body;
+  if (!scope) return {found: false, reason: 'no_scope'};
+  // panel container = smallest element that mentions 互动消息 AND carries at least one row action
+  let root = null, best = Infinity;
+  for (const el of Array.from(scope.querySelectorAll('*'))) {
+    const tag = el.tagName;
+    if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'SVG' || tag === 'PATH') continue;
+    const t = clean(el.innerText);
+    if (!t.includes('互动消息')) continue;
+    if (!ACT.test(t)) continue;
+    const n = el.querySelectorAll('*').length;
+    if (n > 2 && n < best) { best = n; root = el; }
+  }
+  if (!root) return {found: false, reason: 'panel_not_rendered'};
+  // tab row (text anchors only)
+  const TABS = ['全部消息', '粉丝', '@我的', '评论', '赞', '推荐', '更多'];
+  const tabs = [];
+  for (const el of Array.from(root.querySelectorAll('div,span,a,li'))) {
+    const t = clean(el.innerText);
+    if (!TABS.includes(t)) continue;
+    if (el.querySelectorAll('*').length > 2) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 8 || r.height < 8) continue;
+    tabs.push({text: t, ...rect(el)});
+  }
+  // scroll list = container whose children repeat with a similar height and hold row actions
+  let listEl = null, rows = [], bestScore = -1;
+  for (const cand of Array.from(root.querySelectorAll('div,ul'))) {
+    const kids = Array.from(cand.children).filter(k => k.getBoundingClientRect().height >= 28);
+    if (kids.length < 2) continue;
+    const hs = kids.map(k => Math.round(k.getBoundingClientRect().height));
+    const avg = hs.reduce((a, b) => a + b, 0) / hs.length;
+    const similar = hs.filter(h => Math.abs(h - avg) <= 16).length;
+    if (similar < Math.max(2, Math.floor(kids.length * 0.6))) continue;
+    const score = similar * 10 + kids.length + (ACT.test(clean(cand.innerText)) ? 30 : 0);
+    if (score > bestScore) { bestScore = score; listEl = cand; rows = kids; }
+  }
+  const rowOut = rows.map((k, i) => {
+    const lines = [];
+    for (const lf of Array.from(k.querySelectorAll('*'))) {
+      if (lf.children.length > 0) continue;
+      const t = clean(lf.innerText);
+      if (!t) continue;
+      if (lines[lines.length - 1] === t) continue;
+      lines.push(t.slice(0, 120));
+    }
+    const hrefs = Array.from(k.querySelectorAll('a[href]'))
+      .map(a => a.getAttribute('href') || '').filter(Boolean).slice(0, 6);
+    const imgs = Array.from(k.querySelectorAll('img'))
+      .map(im => (im.getAttribute('src') || '')).filter(Boolean).slice(0, 6);
+    return {index: i + 1, lines: lines.slice(0, 14), hrefs, imgs, rect: rect(k)};
+  });
+  return {
+    found: true,
+    reason: '',
+    panel: rect(root),
+    url: location.href,
+    panel_text: clean(root.innerText).slice(0, 1500),
+    tabs: tabs.slice(0, 12),
+    list_present: !!listEl,
+    list_class_prefix: (listEl && typeof listEl.className === 'string') ? (listEl.className.split(' ')[0] || '') : '',
+    row_count: rowOut.length,
+    rows: rowOut.slice(0, 40),
+    row_html_sample: rows.length ? rows[0].outerHTML.slice(0, 1200) : '',
+  };
+}
+"""
+
+_JS_NOTIFY_TAB = r"""
+(tabText) => {
+  const clean = (s) => (s || '').replace(/[\u200B-\u200F\uFEFF]/g, '').replace(/\s+/g, ' ').trim();
+  const menu = document.querySelector('#douyin-header-menuCt') || document.body;
+  if (!menu) return {ok: false, reason: 'no_scope'};
+  for (const el of Array.from(menu.querySelectorAll('div,span,a,li'))) {
+    if (clean(el.innerText) !== tabText) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 8 || r.height < 8) continue;
+    // climb to the outermost node whose whole text is exactly this label (the real click target)
+    let target = el;
+    for (let i = 0; i < 3; i++) {
+      const p = target.parentElement;
+      if (!p || clean(p.innerText) !== tabText) break;
+      target = p;
+    }
+    try { target.scrollIntoView({block: 'center'}); } catch (e) {}
+    target.click();
+    return {ok: true, text: tabText, tag: target.tagName.toLowerCase()};
+  }
+  return {ok: false, reason: 'tab_not_found:' + tabText};
+}
+"""
+
+_JS_NOTIFY_ROW_POINT = r"""
+(payload) => {
+  const index = (payload && payload.index) || 0;
+  const preferVideo = !!(payload && payload.preferVideo);
+  const clean = (s) => (s || '').replace(/[\u200B-\u200F\uFEFF]/g, '').replace(/\s+/g, ' ').trim();
+  const ACT = new RegExp('(?:赞了你(?:的作品|的评论|的视频)?|回复了你的评论|回复了你|评论了你的作品|评论了你|@了你|提到了你|关注了你|收藏了你的作品|转发了你的作品|分享了你)');
+  const menu = document.querySelector('#douyin-header-menuCt') || document.body;
+  if (!menu) return {ok: false, reason: 'no_scope'};
+  let root = null, best = Infinity;
+  for (const el of Array.from(menu.querySelectorAll('*'))) {
+    const tag = el.tagName;
+    if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'SVG' || tag === 'PATH') continue;
+    const t = clean(el.innerText);
+    if (!t.includes('互动消息') || !ACT.test(t)) continue;
+    const n = el.querySelectorAll('*').length;
+    if (n > 2 && n < best) { best = n; root = el; }
+  }
+  if (!root) return {ok: false, reason: 'panel_not_rendered'};
+  let listEl = null, rows = [], bestScore = -1;
+  for (const cand of Array.from(root.querySelectorAll('div,ul'))) {
+    const kids = Array.from(cand.children).filter(k => k.getBoundingClientRect().height >= 28);
+    if (kids.length < 2) continue;
+    const hs = kids.map(k => Math.round(k.getBoundingClientRect().height));
+    const avg = hs.reduce((a, b) => a + b, 0) / hs.length;
+    const similar = hs.filter(h => Math.abs(h - avg) <= 16).length;
+    if (similar < Math.max(2, Math.floor(kids.length * 0.6))) continue;
+    const score = similar * 10 + kids.length + (ACT.test(clean(cand.innerText)) ? 30 : 0);
+    if (score > bestScore) { bestScore = score; listEl = cand; rows = kids; }
+  }
+  const row = rows[index];
+  if (!row) return {ok: false, reason: 'row_out_of_range', row_count: rows.length};
+  try { row.scrollIntoView({block: 'center'}); } catch (e) {}
+  // A notification row's left part (avatar / nickname) links to the *user* profile, while the
+  // thumbnail side opens the *video*. So the click point must be deliberately chosen:
+  // prefer an explicit /video/ link inside the row, else the thumbnail end of the row.
+  let vlink = null;
+  if (preferVideo) {
+    const cands = Array.from(row.querySelectorAll('a[href*="/video/"]'));
+    if (cands.length) vlink = cands[0];
+  }
+  const r0 = row.getBoundingClientRect();
+  const b = vlink ? vlink.getBoundingClientRect() : r0;
+  const x = vlink
+    ? Math.round(b.x + b.width / 2)
+    : (preferVideo ? Math.round(r0.x + r0.width - Math.min(45, Math.max(20, r0.width * 0.12)))
+                   : Math.round(r0.x + Math.min(60, r0.width / 2)));
+  return {ok: true, x, y: Math.round(b.y + b.height / 2),
+          via: vlink ? 'video_link' : (preferVideo ? 'row_thumbnail_end' : 'row_left'),
+          row_text: clean(row.innerText).slice(0, 200)};
+}
+"""
+
+_JS_CLICK_NOTIFY_ICON = r"""
+() => {
+  const clean = (s) => (s || '').replace(/[\u200B-\u200F\uFEFF]/g, '').replace(/\s+/g, ' ').trim();
+  const menu = document.querySelector('#douyin-header-menuCt') || document.body;
+  if (!menu) return {ok: false, reason: 'no_header_menu'};
+  for (const el of Array.from(menu.querySelectorAll('*'))) {
+    const t = clean(el.innerText);
+    if (t !== '通知') continue;
+    if (el.querySelectorAll('*').length > 0 && t.length === 2) continue; // prefer leaf
+    let target = el;
+    for (let i = 0; i < 5; i++) {
+      const p = target.parentElement;
+      if (!p || clean(p.innerText) !== '通知') break;
+      target = p;
+    }
+    target.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, view: window}));
+    return {ok: true, tag: target.tagName.toLowerCase()};
+  }
+  return {ok: false, reason: 'notice_icon_not_found'};
+}
+"""
+
+# The dropdown's first state only shows the compact 赞/评论 feed and a 「全部消息」 entry.
+# The tabbed inbox (粉丝 | @我的 | 评论 | 赞 | 推荐) — the one that actually holds comment replies
+# and @ mentions — appears only after 「全部消息」 is clicked. Measured 2026-11-02.
+_JS_NOTIFY_EXPAND = r"""
+() => {
+  const clean = (s) => (s || '').replace(/[\u200B-\u200F\uFEFF]/g, '').replace(/\s+/g, ' ').trim();
+  const menu = document.querySelector('#douyin-header-menuCt') || document.body;
+  if (!menu) return {ok: false, reason: 'no_header_menu'};
+  for (const el of Array.from(menu.querySelectorAll('a,div,span,button'))) {
+    const t = clean(el.innerText);
+    if (t !== '全部消息') continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 4 || r.height < 4) continue;
+    let target = el;
+    for (let i = 0; i < 3; i++) {
+      const p = target.parentElement;
+      if (!p || clean(p.innerText) !== '全部消息') break;
+      target = p;
+    }
+    target.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, view: window}));
+    return {ok: true, tag: target.tagName.toLowerCase(), href: el.getAttribute('href') || ''};
+  }
+  return {ok: false, reason: 'all_messages_entry_not_found'};
+}
+"""
+
+_JS_NOTIFY_TAB_LABELS = r"""
+() => {
+  const clean = (s) => (s || '').replace(/[\u200B-\u200F\uFEFF]/g, '').replace(/\s+/g, ' ').trim();
+  const MENU = document.querySelector('#douyin-header-menuCt') || document.body;
+  const TABS = ['全部消息', '粉丝', '@我的', '评论', '赞', '推荐'];
+  const out = [];
+  for (const el of Array.from(MENU.querySelectorAll('div,span,a,li'))) {
+    const t = clean(el.innerText);
+    if (!TABS.includes(t)) continue;
+    if (el.querySelectorAll('*').length > 2) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 8 || r.height < 8) continue;
+    out.push(t);
+  }
+  return Array.from(new Set(out));
+}
+"""
+
+# A notification row's thumbnail opens the video as an in-page modal on /user/self:
+# the URL becomes /user/self?modal_id=<aweme_id>. That query param is the only reliable
+# id the row exposes (rows carry no /video/ link for like/comment notifications), so the
+# modal_id is what the locate step turns into a plain /video/<id> verification.
+_JS_CURRENT_VIDEO_ID = r"""
+() => {
+  const q = new URLSearchParams(location.search || '');
+  const m = (location.pathname || '').match(/\/video\/(\d{8,})/);
+  return {url: location.href, modal_id: q.get('modal_id') || '', path_id: m ? m[1] : ''};
+}
+"""
+
 
 # ---------------------------------------------------------------------------
 # module-level helpers
@@ -708,9 +960,80 @@ def _is_login_wall(body_text: str) -> bool:
     return any(t in head for t in _LOGIN_WALL_TEXTS)
 
 
-# ---------------------------------------------------------------------------
-# the tool
-# ---------------------------------------------------------------------------
+# -- notification row parsing (pure functions, unit-checkable) ----------------
+
+_NOTIFY_ACTION_FULL_RE = re.compile(
+    r"(?P<action>"
+    r"赞了你的作品|赞了你的评论|赞了你的视频|回复了你的评论|回复了你|评论了你的作品|评论了你|"
+    r"@了你|提到了你|关注了你|收藏了你的作品|转发了你的作品|分享了你"
+    r")"
+)
+_NOTIFY_ACTION_WORD_RE = re.compile(_NOTIFY_ACTION_RE_SRC)
+_NOTIFY_TIME_RE = re.compile(
+    r"^(?:刚刚|刚刚好|\d+\s*秒前|\d+\s*分钟前|\d+\s*小时前|昨天|前天|"
+    r"\d+\s*天前|\d+\s*周前|\d+\s*(?:个月|月)前|\d+\s*年前|"
+    r"\d{1,2}-\d{1,2}|\d{1,2}月\d{1,2}日|\d{4}-\d{1,2}-\d{1,2})$"
+)
+_NOTIFY_TABS = {"all": None, "comment": "评论", "mention": "@我的", "like": "赞", "fan": "粉丝", "recommend": "推荐"}
+
+
+def _notify_age_hours(text: str, now: datetime | None = None) -> tuple[float | None, str]:
+    """Estimate how old a douyin notification is, from its own time label.
+
+    Returns ``(age_hours, precision)`` where precision is ``exact`` (site gave a
+    relative label resolvable to the hour or better), ``coarse`` (昨天/前天/N天前/
+    月-日 — the site only gives a calendar-ish label, so the value is a lower bound
+    style estimate) or ``unknown``. Nothing is invented: unparsable labels return
+    ``(None, 'unknown')`` and the caller keeps the raw text.
+    """
+    t = (text or "").strip()
+    if not t:
+        return None, "unknown"
+    now = now or datetime.now(_BEIJING_TZ)
+    if t == "刚刚":
+        return 0.0, "exact"
+    m = re.fullmatch(r"(\d+)\s*秒前", t)
+    if m:
+        return int(m.group(1)) / 3600.0, "exact"
+    m = re.fullmatch(r"(\d+)\s*分钟前", t)
+    if m:
+        return int(m.group(1)) / 60.0, "exact"
+    m = re.fullmatch(r"(\d+)\s*小时前", t)
+    if m:
+        return float(int(m.group(1))), "exact"
+    if t == "昨天":
+        return 24.0, "coarse"   # 12~48h ago
+    if t == "前天":
+        return 48.0, "coarse"
+    m = re.fullmatch(r"(\d+)\s*天前", t)
+    if m:
+        return float(int(m.group(1)) * 24), "coarse"
+    m = re.fullmatch(r"(\d+)\s*周前", t)
+    if m:
+        return float(int(m.group(1)) * 24 * 7), "coarse"
+    m = re.fullmatch(r"(\d+)\s*(?:个月|月)前", t)
+    if m:
+        return float(int(m.group(1)) * 24 * 30), "coarse"
+    m = re.fullmatch(r"(\d+)\s*年前", t)
+    if m:
+        return float(int(m.group(1)) * 24 * 365), "coarse"
+    for pat in (r"(\d{4})-(\d{1,2})-(\d{1,2})", r"(\d{1,2})月(\d{1,2})日", r"(\d{1,2})-(\d{1,2})"):
+        m = re.fullmatch(pat, t)
+        if not m:
+            continue
+        try:
+            if len(m.groups()) == 3:
+                yy, mm, dd = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            else:
+                mm, dd = int(m.group(1)), int(m.group(2))
+                yy = now.year
+            when = datetime(yy, mm, dd, tzinfo=_BEIJING_TZ)
+            delta = (now - when).total_seconds() / 3600.0
+            return max(0.0, delta), "coarse"
+        except Exception:
+            return None, "unknown"
+    return None, "unknown"
+
 
 class DouyinNativeTool(Tool):
     self_enforced_timeout = True
@@ -753,7 +1076,7 @@ class DouyinNativeTool(Tool):
                     "enum": [
                         "open", "login_status", "login_check", "login_export", "login_restore",
                         "feed", "search", "video", "storyboard", "comments", "watch_report",
-                        "my_works",
+                        "my_works", "interactions",
                         "send_comment", "reply_to_comment", "send_forward", "publish",
                         "usage", "health", "close",
                     ],
@@ -779,6 +1102,40 @@ class DouyinNativeTool(Tool):
                     "description": (
                         "Substring used to locate the target comment by its body text "
                         "or author name (reply_to_comment)."
+                    ),
+                },
+                "hours": {
+                    "type": "number",
+                    "description": (
+                        "interactions only. Time window in hours (default 24). Rows whose own time "
+                        "label (刚刚/N分钟前/N小时前/昨天/N天前/M-D) resolves to an age above this "
+                        "are dropped and counted in filter.dropped_by_time."
+                    ),
+                },
+                "tab": {
+                    "type": "string",
+                    "enum": ["comment", "mention", "like", "fan", "recommend", "all"],
+                    "description": (
+                        "interactions only. Which tab of the 互动消息 panel to read: comment = 评论 "
+                        "(replies to my comments, default), mention = @我的, like = 赞, fan = 粉丝, "
+                        "recommend = 推荐, all = whatever the panel opens on."
+                    ),
+                },
+                "locate_item": {
+                    "type": "integer",
+                    "description": (
+                        "interactions only. 1-based index of an item in `items`; the tool follows that "
+                        "notification into its source video, verifies the mounted aweme_id, and (with "
+                        "comment_text_match) reports the matched comment + comment_id, i.e. exactly what "
+                        "reply_to_comment(aweme_id=...) needs. Read-only; sends nothing."
+                    ),
+                },
+                "aweme_id": {
+                    "type": "string",
+                    "description": (
+                        "reply_to_comment only. Target video id taken from an interactions item "
+                        "(source_aweme_id) — replies there instead of resolving a feed slot: the video "
+                        "is opened by id and its mounted identity is verified before anything is sent."
                     ),
                 },
                 "allow_send": {"type": "boolean", "description": "Explicit send permission flag."},
@@ -2918,6 +3275,7 @@ class DouyinNativeTool(Tool):
         comment_index: int | None,
         comment_text_match: str | None,
         allow_send: bool,
+        aweme_id: str | None = None,
     ) -> dict[str, Any]:
         body_text = (text or "").strip()
         if not body_text:
@@ -2927,24 +3285,44 @@ class DouyinNativeTool(Tool):
             return {
                 "status": "blocked",
                 "reason": reason,
+                "nothing_happened": True,
                 "policy_path": str(self.state_dir / "send_policy.json"),
                 "policy_hint": "用户本人需在 send_policy.json 设 enabled=true 且 allow_reply=true，并在调用时传 allow_send=true",
             }
-        info = await self._open_player(page, slot)
+        # Identity: an explicit aweme_id (e.g. taken from an 互动消息 notification) wins over the
+        # feed slot; the slot path keeps its old behaviour (feed_snapshot.json + verification).
+        if aweme_id:
+            info = await self._open_video_by_id(page, aweme_id)
+        else:
+            info = await self._open_player(page, slot)
         if info.get("status") in ("mismatch", "aweme_unavailable"):
             return {
                 "status": info.get("status"),
                 "action": "reply_to_comment",
                 "slot": slot,
+                "identity_source": info.get("identity_source") or "feed_slot",
                 "target_aweme_id": info.get("target_aweme_id") or "",
                 "actual_aweme_id": info.get("actual_aweme_id") or "",
                 "aweme_match": bool(info.get("aweme_match")),
                 "message": info.get("message", ""),
+                "nothing_happened": True,
                 "info": info,
                 "screenshot": await self._shot(page, "reply_mismatch"),
             }
         if not info.get("video_present"):
-            return {"status": "blocked", "reason": "player not open (login wall or page change); reply aborted"}
+            return {"status": "blocked", "reason": "player not open (login wall or page change); reply aborted", "nothing_happened": True}
+        second_verify = await self._check_second_verify(page)
+        if second_verify.get("blocked"):
+            return {
+                "status": "blocked_second_verify",
+                "reason": (
+                    "页面出现短信/账号安全二次验证遮罩：按要求立即中止，不绕过、不重试，"
+                    "没有输入任何内容，也没有发送任何内容"
+                ),
+                "second_verify": second_verify,
+                "nothing_happened": True,
+                "screenshot": await self._shot(page, "reply_second_verify"),
+            }
         login = await self._detect_login(page)
         if not login["logged_in"]:
             return {
@@ -3479,6 +3857,581 @@ class DouyinNativeTool(Tool):
             )
         return result
 
+    # -- interaction notifications (互动消息) --------------------------------
+
+    async def _open_notify_panel(self, page) -> dict[str, Any]:
+        """Open the 通知 dropdown in the www header and report what actually rendered.
+
+        Anchors are stable ids / visible text only: `#douyin-header-menuCt` (the header icon
+        row) + the visible label 通知, then the dropdown panel's own 互动消息 header text.
+        The header icon only exists on `/user/self` in the current build (the feed pages render
+        a slim nav-only header), so the caller navigates there first.
+        """
+        probe: dict[str, Any] = {"clicked": False, "click_strategy": "", "panel_found": False}
+        state = await page.evaluate(
+            "() => { const m = document.querySelector('#douyin-header-menuCt'); "
+            "const has = (document.body ? document.body.innerText : '').includes('互动消息'); "
+            "return {menu: !!m, panel: has, url: location.href, "
+            "menu_text: m ? (m.innerText || '').slice(0, 200) : ''}; }"
+        )
+        probe.update(state or {})
+        if not probe.get("menu"):
+            probe["reason"] = "header_message_menu_missing"
+            return probe
+
+        async def poll(rounds: int = 10) -> bool:
+            for _ in range(rounds):
+                await asyncio.sleep(0.6)
+                ok = bool(
+                    await page.evaluate(
+                        "() => (document.body ? document.body.innerText : '').includes('互动消息')"
+                    )
+                )
+                if ok:
+                    return True
+            return False
+
+        if probe.get("panel"):
+            probe["panel_found"] = True
+            probe["click_strategy"] = "already_open"
+            return probe
+
+        # The 「下载客户端，实时接收消息通知」toast can sit over the icon and eat the pointer
+        # event, so the first attempt is a synthetic DOM click on the icon itself (no hit test),
+        # then a real locator/mouse click as fallback. Measured 2026-11-02: both paths have been
+        # observed to open the dropdown; the synthetic one is the reliable one when the toast shows.
+        for strategy in ("dispatch", "locator", "mouse"):
+            probe["click_strategy"] = strategy
+            try:
+                if strategy == "dispatch":
+                    res = await page.evaluate(_JS_CLICK_NOTIFY_ICON)
+                    probe["click_dispatch"] = res
+                    if not (res or {}).get("ok"):
+                        continue
+                    probe["clicked"] = True
+                elif strategy == "locator":
+                    await page.locator("#douyin-header-menuCt >> text=通知").first.click(timeout=6000)
+                    probe["clicked"] = True
+                else:
+                    box = await page.evaluate(
+                        """() => { const root = document.querySelector('#douyin-header-menuCt');
+                           if (!root) return null;
+                           for (const el of Array.from(root.querySelectorAll('div,p,span,li'))) {
+                             if ((el.innerText || '').trim() !== '通知') continue;
+                             const r = el.getBoundingClientRect();
+                             if (r.width > 4 && r.height > 4) {
+                               return [Math.round(r.x + r.width / 2), Math.round(r.y + r.height / 2)];
+                             }
+                           }
+                           return null; }"""
+                    )
+                    if not box:
+                        continue
+                    await page.mouse.click(box[0], box[1])
+                    probe["clicked"] = True
+            except Exception as exc:
+                probe.setdefault("click_errors", []).append(f"{strategy}: {str(exc)[:160]}")
+                continue
+            if await poll():
+                probe["panel_found"] = True
+                break
+        return probe
+
+    async def _click_notify_tab(self, page, label: str) -> dict[str, Any]:
+        """Switch the notification dropdown to one tab (评论 / @我的 / 赞 / 粉丝 / 推荐).
+
+        Prefers a real pointer click (locator, then mouse at the label centre) because the
+        dropdown may ignore synthetic (isTrusted=false) events; dispatch is only the last resort.
+        """
+        errors: list[str] = []
+        try:
+            await page.locator(f"#douyin-header-menuCt >> text={label}").first.click(timeout=6000)
+            return {"ok": True, "label": label, "method": "locator"}
+        except Exception as exc:
+            errors.append(f"locator: {str(exc)[:150]}")
+        box = await self._notify_label_center(page, label)
+        if box:
+            try:
+                await page.mouse.click(box[0], box[1])
+                return {"ok": True, "label": label, "method": "mouse"}
+            except Exception as exc:
+                errors.append(f"mouse: {str(exc)[:150]}")
+        try:
+            res = await page.evaluate(_JS_NOTIFY_TAB, label)
+            if isinstance(res, dict) and res.get("ok"):
+                await asyncio.sleep(2.0)
+                return {"ok": True, "label": label, "method": "dispatch", "res": res}
+            errors.append(f"dispatch: {res}")
+        except Exception as exc:
+            errors.append(f"dispatch: {str(exc)[:150]}")
+        await asyncio.sleep(2.0)
+        return {"ok": False, "label": label, "errors": errors}
+
+    async def _notify_label_center(self, page, label: str) -> list[int] | None:
+        try:
+            return await page.evaluate(
+                f"""() => {{ const menu = document.querySelector('#douyin-header-menuCt') || document.body;
+                  const clean = (s) => (s || '').replace(/[\\u200B-\\u200F\\uFEFF]/g, '').trim();
+                  for (const el of Array.from(menu.querySelectorAll('div,span,a,li'))) {{
+                    if (el.children.length > 2) continue;
+                    if (clean(el.innerText) !== '{label}') continue;
+                    const r = el.getBoundingClientRect();
+                    if (r.width >= 8 && r.height >= 8) return [Math.round(r.x + r.width / 2), Math.round(r.y + r.height / 2)];
+                  }}
+                  return null; }}"""
+            )
+        except Exception:
+            return None
+
+    async def _expand_notify_panel(self, page) -> dict[str, Any]:
+        """Reveal the tabbed inbox (粉丝/@我的/评论/赞/推荐) by clicking 「全部消息」.
+
+        The dropdown's compact first state only shows the like feed; comment replies and
+        @ mentions live in the tabbed view that appears after 全部消息. Measured 2026-11-02.
+        """
+        errors: list[str] = []
+        try:
+            await page.locator("#douyin-header-menuCt >> text=全部消息").first.click(timeout=6000)
+            method = "locator"
+        except Exception as exc:
+            errors.append(f"locator: {str(exc)[:150]}")
+            box = await self._notify_label_center(page, "全部消息")
+            if box:
+                try:
+                    await page.mouse.click(box[0], box[1])
+                    method = "mouse"
+                except Exception as exc2:
+                    errors.append(f"mouse: {str(exc2)[:150]}")
+                    res = await page.evaluate(_JS_NOTIFY_EXPAND)
+                    method = f"dispatch:{res}"
+            else:
+                res = await page.evaluate(_JS_NOTIFY_EXPAND)
+                method = f"dispatch:{res}"
+        await asyncio.sleep(2.5)
+        tabs = await self._notify_tabs(page)
+        return {"ok": bool(tabs), "method": method, "tabs": tabs, "errors": errors[:4]}
+
+    async def _notify_tabs(self, page) -> list[str]:
+        try:
+            tabs = await page.evaluate(_JS_NOTIFY_TAB_LABELS)
+        except Exception:
+            return []
+        return [str(t) for t in (tabs or [])]
+
+    @staticmethod
+    def _notify_row_to_item(row: dict[str, Any], hours: float, now: datetime) -> dict[str, Any]:
+        """Turn one measured notification row (text lines + hrefs) into a structured item."""
+        lines = [str(x) for x in (row.get("lines") or []) if str(x).strip()]
+        action = ""
+        action_idx = -1
+        for i, ln in enumerate(lines):
+            m = _NOTIFY_ACTION_FULL_RE.search(ln)
+            if m:
+                action = m.group("action")
+                action_idx = i
+                break
+        time_text = ""
+        time_idx = -1
+        for i in range(len(lines) - 1, -1, -1):
+            if _NOTIFY_TIME_RE.match(lines[i].strip()):
+                time_text = lines[i].strip()
+                time_idx = i
+                break
+        consumed: set[int] = {i for i in (action_idx, time_idx) if i >= 0}
+        author = ""
+        group = ""
+        if action_idx >= 0:
+            inline = lines[action_idx].split(action)[0].strip()
+            if inline.startswith("等"):
+                # douyin groups likes as「昵称 / 等N人赞了你的作品」on two lines
+                group = inline
+                if action_idx > 0:
+                    prev = lines[action_idx - 1].strip()
+                    if prev and not _NOTIFY_TIME_RE.match(prev):
+                        author = f"{prev} {inline}".strip()
+                        consumed.add(action_idx - 1)
+                if not author:
+                    author = inline
+            elif inline:
+                author = inline
+            elif action_idx > 0 and action_idx - 1 not in consumed:
+                author = lines[action_idx - 1].strip()
+                consumed.add(action_idx - 1)
+        if not author:
+            for i, ln in enumerate(lines):
+                if i in consumed:
+                    continue
+                author = ln.strip()
+                consumed.add(i)
+                break
+        content_parts = [
+            t for i, t in ((i, ln.strip()) for i, ln in enumerate(lines))
+            if t and i not in consumed and not _NOTIFY_ACTION_FULL_RE.search(t)
+            and not _NOTIFY_TIME_RE.match(t)
+        ]
+        age_hours, precision = _notify_age_hours(time_text, now)
+        aweme_ids = []
+        for href in row.get("hrefs") or []:
+            m = re.search(r"/video/(\d{8,})", str(href))
+            if m and m.group(1) not in aweme_ids:
+                aweme_ids.append(m.group(1))
+        profile_ids = []
+        for href in row.get("hrefs") or []:
+            m = re.search(r"/user/([A-Za-z0-9_\-]+)", str(href))
+            if m and m.group(1) not in profile_ids:
+                profile_ids.append(m.group(1))
+        within = age_hours is not None and age_hours <= hours
+        content_text = " ".join(content_parts)[:300]
+        content_kind = "comment_body" if content_text else ""
+        if not content_text and action_idx >= 0:
+            # 通知行本身通常不携带正文（只有「赞了你的评论 / 回复了你的评论」这类动作短语）；
+            # 此时 content 如实回填该动作行原文，并用 content_kind 标明这不是对方正文，
+            # 真正文要用 locate_item 落到视频后从评论面板读。绝不臆造。
+            content_text = lines[action_idx].strip()[:300]
+            content_kind = "action_phrase"
+        return {
+            "index": int(row.get("index") or 0),
+            "author": author[:80],
+            "author_group": group,
+            "action": action,
+            "is_reply_to_me": bool(action in ("回复了你的评论", "回复了你")),
+            "is_mention": bool(action in ("@了你", "提到了你")),
+            "is_about_my_comment": bool(action in ("赞了你的评论", "回复了你的评论", "回复了你")),
+            "content": content_text,
+            "content_kind": content_kind,
+            "time_text": time_text,
+            "age_hours_estimate": None if age_hours is None else round(age_hours, 2),
+            "time_precision": precision,
+            "within_hours": within,
+            "source_aweme_id": aweme_ids[0] if aweme_ids else "",
+            "source_aweme_ids": aweme_ids,
+            "author_user_ids": profile_ids,
+            "row_lines": lines[:10],
+            "rect": row.get("rect") or {},
+        }
+
+    async def _open_video_by_id(self, page, aweme_id: str) -> dict[str, Any]:
+        """Navigate straight to /video/<aweme_id> and prove which video is mounted.
+
+        This is the aweme_id-based twin of `_open_player`: `_open_player` resolves a *slot*
+        through feed_snapshot.json (which is only meaningful for feed/watch_report reads),
+        while a notification already carries the concrete video, so no snapshot is involved.
+        Identity verification is identical: URL alone is never accepted as proof.
+        """
+        target = re.sub(r"\D", "", str(aweme_id or ""))
+        result: dict[str, Any] = {
+            "target_aweme_id": target,
+            "actual_aweme_id": "",
+            "aweme_match": False,
+            "identity_source": "aweme_id",
+            "snapshot_state": "not_applicable",
+        }
+        if len(target) < 8:
+            result["status"] = "aweme_unavailable"
+            result["message"] = "aweme_id 无效（需要 8 位以上数字）"
+            return result
+        verify = bool(getattr(self, "_verify_aweme_id", True))
+        actual = ""
+        url_only = False
+        for attempt in range(1, (2 if verify else 1) + 1):
+            await self._goto(page, _DOUYIN_VIDEO.format(vid=target), wait_ms=1800)
+            deadline = time.monotonic() + 12.0
+            while True:
+                ident = await self._current_aweme(page)
+                actual = str(ident.get("actual") or "")
+                url_only = bool(ident.get("url_only"))
+                if actual == target and not url_only:
+                    break
+                if time.monotonic() >= deadline:
+                    break
+                await asyncio.sleep(0.6)
+            result["nav_attempt"] = attempt
+            if (actual == target and not url_only) or not verify:
+                break
+        info = await self._current_video_info(page)
+        identity = info.get("aweme_identity") or {}
+        dom_actual = str(identity.get("panel") or identity.get("player_class") or "")
+        if dom_actual:
+            actual = dom_actual
+        result["actual_aweme_id"] = actual
+        result["url_only"] = url_only
+        result["aweme_match"] = bool(actual and actual == target)
+        info.update(result)
+        if actual:
+            info["link"] = f"https://www.douyin.com/video/{actual}"
+        if not result["aweme_match"] and verify:
+            info["status"] = "mismatch"
+            info["message"] = (
+                f"要定位的是 aweme_id={target}（来自互动消息通知），但页面实际挂载的是 "
+                f"aweme_id={actual or '未识别'}；已按 aweme_id 重新跳转一次仍未对齐，"
+                "因此不返回另一条视频的数据，也不做后续动作"
+            )
+            return info
+        info["verification"] = "verified" if result["aweme_match"] else ("disabled" if not verify else "mismatch")
+        if not info.get("status"):
+            info["status"] = "ok"
+        return info
+
+    async def _act_interactions(
+        self,
+        page,
+        hours: float,
+        max_items: int,
+        tab: str,
+        locate_index: int | None,
+        comment_text_match: str | None,
+    ) -> dict[str, Any]:
+        """Read the 互动消息 (comment replies / @ mentions / likes) and optionally locate one.
+
+        Read-only: opens the header 通知 dropdown, switches to the requested tab, and parses the
+        rendered rows. It never types or clicks a send control. `locate_index` only follows a row
+        into its video page to prove the aweme_id (and, with `comment_text_match`, which comment),
+        i.e. exactly the information `reply_to_comment(aweme_id=…)` needs next.
+        """
+        hours = max(1.0, float(hours or 24))
+        max_items = max(1, min(50, int(max_items or 20)))
+        tab_key = (tab or "comment").strip().lower()
+        tab_label = _NOTIFY_TABS.get(tab_key, None)
+        now = datetime.now(_BEIJING_TZ)
+        result: dict[str, Any] = {
+            "action": "interactions",
+            "source": "www.douyin.com header 通知 → 互动消息 面板",
+            "hours": hours,
+            "max_items": max_items,
+            "tab": tab_key,
+            "tab_label": tab_label or "(面板默认)",
+            "items": [],
+            "item_count": 0,
+            "notes": [],
+            "status": "ok",
+        }
+        await self._goto(page, _DOUYIN_USER_SELF, wait_ms=5000)
+        await self._dismiss_overlays(page)
+        second_verify = await self._check_second_verify(page)
+        result["second_verify"] = second_verify
+        if second_verify.get("blocked"):
+            result.update(
+                {
+                    "status": "blocked_second_verify",
+                    "message": (
+                        "页面出现短信/账号安全二次验证遮罩（#uc-second-verify 或相关文案）："
+                        "按要求立即中止，不绕过、不重试，也没有读取任何通知内容"
+                    ),
+                    "screenshot": await self._shot(page, "interactions_second_verify"),
+                }
+            )
+            return result
+        body = await self._page_text(page)
+        login_wall = _is_login_wall(body)
+        result["login_wall_text"] = login_wall
+        panel = await self._open_notify_panel(page)
+        result["panel_probe"] = panel
+        login = await self._detect_login(page)
+        # keep only the verdict in the payload: cookie names / api raw payload are not needed here
+        result["login"] = {
+            "logged_in": login.get("logged_in"),
+            "basis": login.get("basis"),
+            "cookie_valid": login.get("cookie_valid"),
+            "login_modal": login.get("login_modal"),
+            "nav_login": login.get("nav_login"),
+        }
+        if not panel.get("panel_found"):
+            result["status"] = "login_required" if login_wall else "panel_not_open"
+            result["message"] = (
+                "互动消息面板没有渲染出来：页面出现登录墙文案，需要先在打开的 Edge 窗口里登录"
+                if login_wall
+                else (
+                    "互动消息面板没有渲染出来（header 通知 入口未出现或点击后面板未挂载）。"
+                    "本轮不做猜测：没有条目就不返回条目，请按截图核对站点结构是否变化"
+                )
+            )
+            result["screenshot"] = await self._shot(page, "interactions_panel_missing")
+            return result
+
+        if tab_label:
+            expand = await self._expand_notify_panel(page)
+            result["expand"] = expand
+            result["tabs_seen"] = await self._notify_tabs(page)
+            tab_res = await self._click_notify_tab(page, tab_label)
+            result["tab_switch"] = tab_res
+            if not tab_res.get("ok"):
+                result["notes"].append(
+                    f"未找到「{tab_label}」tab（站点结构可能变化）；保留面板当前列表并如实标注"
+                )
+            result["tabs_after_tab_click"] = await self._notify_tabs(page)
+
+        data = await page.evaluate(_JS_NOTIFY_PANEL)
+        result["panel"] = {
+            "found": bool(data.get("found")),
+            "url": data.get("url", ""),
+            "tabs": [t.get("text") for t in (data.get("tabs") or [])],
+            "row_count": int(data.get("row_count") or 0),
+            "list_present": bool(data.get("list_present")),
+            "list_class_prefix": data.get("list_class_prefix", ""),
+            "text_head": str(data.get("panel_text") or "")[:400],
+        }
+        rows = list(data.get("rows") or [])
+        all_items = [self._notify_row_to_item(r, hours, now) for r in rows]
+        # The dropdown's tab row is a site-side view switch; it collapses again as soon as a tab is
+        # picked in the current build, so the tab choice is additionally enforced here by action
+        # type. That keeps `tab=` deterministic instead of "whatever the panel happened to show".
+        tab_actions = {
+            "comment": ("回复了你的评论", "回复了你", "赞了你的评论", "评论了你的作品", "评论了你"),
+            "mention": ("@了你", "提到了你"),
+            "like": ("赞了你的作品", "赞了你的评论", "赞了你的视频"),
+            "fan": ("关注了你",),
+        }
+        wanted = tab_actions.get(tab_key)
+        items = [it for it in all_items if it.get("action") in wanted] if wanted else list(all_items)
+        result["tab_action_filter"] = list(wanted) if wanted else "(全部动作)"
+        kept = [it for it in items if it.get("within_hours")]
+        dropped = [it for it in items if not it.get("within_hours")]
+        result["filter"] = {
+            "hours": hours,
+            "rows_seen": len(all_items),
+            "rows_after_tab_filter": len(items),
+            "kept": len(kept),
+            "dropped_by_time": len(dropped),
+            "dropped_time_labels": [it.get("time_text") for it in dropped][:10],
+            "coarse_time_rows": len([it for it in items if it.get("time_precision") == "coarse"]),
+        }
+        result["items"] = kept[:max_items]
+        result["item_count"] = len(result["items"])
+        result["reply_items"] = [it for it in result["items"] if it.get("is_reply_to_me")]
+        result["mention_items"] = [it for it in result["items"] if it.get("is_mention")]
+        result["panel_row_sample"] = data.get("row_html_sample", "")
+        if not all_items:
+            result["notes"].append(
+                "面板已打开但没解析到通知行：可能当前 tab 下确实没有通知，或行结构变了；"
+                "不臆造条目，按截图与 panel.row_count 核对"
+            )
+        elif not items:
+            result["notes"].append(
+                f"面板有 {len(all_items)} 行通知，但没有符合 tab={tab_key} 的动作类型"
+                f"（{result['tab_action_filter']}）"
+            )
+        elif not kept:
+            result["notes"].append(f"面板有 {len(items)} 行通知，但没有一行落在 {hours:g} 小时内")
+
+        # optional: follow one row into its video to prove aweme_id (+ comment) for the reply step
+        if locate_index:
+            locate: dict[str, Any] = {"index": int(locate_index)}
+            # locate_index addresses the *item* (match by raw row index among kept items), because
+            # items is the tab/hours-filtered view the caller is looking at
+            target_item = next(
+                (it for it in kept if int(it.get("index") or 0) == int(locate_index)), None
+            )
+            if target_item is None:
+                locate.update(
+                    {
+                        "ok": False,
+                        "reason": "item_out_of_range_or_filtered",
+                        "item_count": len(kept),
+                        "available_indexes": [int(it.get("index") or 0) for it in kept][:20],
+                    }
+                )
+                result["locate"] = locate
+            else:
+                raw_idx = int(target_item.get("index") or 1) - 1
+                pre_pages = list(page.context.pages)
+                point = await page.evaluate(_JS_NOTIFY_ROW_POINT, {"index": raw_idx, "preferVideo": True})
+                locate["row_point"] = point
+                opened_new = False
+                if point.get("ok"):
+                    try:
+                        await page.mouse.click(int(point["x"]), int(point["y"]))
+                    except Exception as exc:
+                        locate["click_error"] = str(exc)[:200]
+                    await asyncio.sleep(3.5)
+                    target_page = page
+                    for pg in page.context.pages:
+                        if pg not in pre_pages:
+                            target_page = pg
+                            opened_new = True
+                            break
+                    locate["opened_new_page"] = opened_new
+                    url_probe = await target_page.evaluate(_JS_CURRENT_VIDEO_ID)
+                    locate["url_probe"] = url_probe
+                    known_id = (
+                        target_item.get("source_aweme_id")
+                        or url_probe.get("modal_id")
+                        or url_probe.get("path_id")
+                        or ""
+                    )
+                    if known_id:
+                        locate["resolved_aweme_id"] = known_id
+                    info = await self._open_video_by_id(target_page, known_id) if known_id else {
+                        "status": "no_known_aweme_id"
+                    }
+                    if info.get("status") == "no_known_aweme_id":
+                        ident = await self._current_aweme(target_page)
+                        info = {
+                            "status": "ok" if ident.get("actual") else "aweme_unavailable",
+                            "actual_aweme_id": str(ident.get("actual") or ""),
+                            "url_only": bool(ident.get("url_only")),
+                            "page_url": target_page.url,
+                        }
+                    locate["video"] = {
+                        "status": info.get("status"),
+                        "target_aweme_id": info.get("target_aweme_id", ""),
+                        "actual_aweme_id": info.get("actual_aweme_id", ""),
+                        "aweme_match": info.get("aweme_match"),
+                        "link": info.get("link", ""),
+                        "page_url": info.get("page_url") or getattr(target_page, "url", ""),
+                        "message": info.get("message", ""),
+                    }
+                    located_id = str(info.get("actual_aweme_id") or "")
+                    if located_id and not target_item.get("source_aweme_id"):
+                        target_item["source_aweme_id"] = located_id
+                        if located_id not in (target_item.get("source_aweme_ids") or []):
+                            target_item.setdefault("source_aweme_ids", []).append(located_id)
+                        locate["resolved_aweme_id"] = located_id
+                    if located_id:
+                        comments = await self._read_comments(target_page, target=30)
+                        needle = (comment_text_match or "").strip()
+                        match = None
+                        for c in comments.get("comments", []):
+                            hay = f"{c.get('author', '')} {c.get('text', '')}"
+                            if needle and needle in hay:
+                                match = c
+                                break
+                        locate["comments_read"] = int(comments.get("comment_count") or 0)
+                        locate["comment_match"] = match
+                        if match:
+                            target_item["content"] = str(match.get("text", ""))[:300]
+                            target_item["content_kind"] = "comment_body"
+                            target_item["comment_id"] = str(match.get("comment_id") or "")
+                            target_item["matched_comment_author"] = str(match.get("author") or "")
+                        if needle and not match:
+                            locate["note"] = (
+                                f"该视频评论区前 {locate['comments_read']} 条里没有匹配「{needle}」的评论；"
+                                "站点按热度/时间排序，可能需要滚动更多或换一个更精确的子串"
+                            )
+                        locate["reply_hint"] = {
+                            "action": "reply_to_comment",
+                            "aweme_id": located_id,
+                            "comment_text_match": needle or "(必填：目标评论的一段正文或作者名)",
+                            "comment_id": (match or {}).get("comment_id", ""),
+                            "allow_send": "true（仍需 send_policy.json allow_reply=true）",
+                        }
+                    locate["ok"] = bool(located_id)
+                else:
+                    locate["ok"] = False
+                    locate["reason"] = point.get("reason", "row_point_unavailable")
+                if opened_new:
+                    try:
+                        await target_page.close()
+                    except Exception:
+                        pass
+                result["locate"] = locate
+
+        result["screenshot"] = await self._shot(page, "interactions")
+        if result["items"]:
+            result["status"] = "ok"
+        elif result["status"] == "ok":
+            result["status"] = "empty"
+        return result
+
     async def _act_publish(
         self,
         page,
@@ -3869,6 +4822,16 @@ class DouyinNativeTool(Tool):
                 int(kw["comment_index"]) if kw.get("comment_index") is not None else None,
                 kw.get("comment_text_match"),
                 bool(kw.get("allow_send", False)),
+                kw.get("aweme_id"),
+            )
+        if action == "interactions":
+            return await self._act_interactions(
+                page,
+                float(kw.get("hours") or 24),
+                max_items or 20,
+                kw.get("tab") or "comment",
+                int(kw["locate_item"]) if kw.get("locate_item") is not None else None,
+                kw.get("comment_text_match"),
             )
         if action == "send_forward":
             return await self._act_send_forward(page, slot, bool(kw.get("allow_send", False)))

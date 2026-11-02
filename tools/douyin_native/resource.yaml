@@ -47,6 +47,7 @@ parameters:
       - comments
       - watch_report
       - my_works
+      - interactions
       - send_comment
       - reply_to_comment
       - send_forward
@@ -72,9 +73,14 @@ parameters:
         real comment bodies of the current video (no DMs; re-verified after read). watch_report = browse a
         topic feed round and generate a Markdown report. my_works = read this
         account's own published works from the creator centre content list
-        (read-only; title/duration/publish time/status/stats). send_comment /
+        (read-only; title/duration/publish time/status/stats). interactions =
+        read the 互动消息 notifications panel (评论/@我的/赞/粉丝/推荐 tabs,
+        hours-filtered, newest first) so "comment -> reply -> targeted reply"
+        works; optional locate_item follows one row into its source video and
+        reports aweme_id + matched comment. send_comment /
         reply_to_comment / send_forward = SENDING, OFF by default, gated by
-        send_policy.json + allow_send + quotas + receipt check. publish =
+        send_policy.json + allow_send + quotas + receipt check (reply_to_comment
+        also accepts aweme_id to target a notification's video directly). publish =
         upload a local video to creator.douyin.com/creator-micro/content/upload
         with real keyboard typing for title/description/topics; mode=draft
         (default) only stores a draft (暂存离开), mode=publish clicks 发布 and
@@ -112,6 +118,38 @@ parameters:
       description: >-
         Substring matched against a comment body text or author name to locate
         the reply target (reply_to_comment only; alternative to comment_index).
+    hours:
+      type: number
+      description: >-
+        interactions only. Time window in hours (default 24). Rows whose own time
+        label (刚刚 / N分钟前 / N小时前 / 昨天 / N天前 / M-D) resolves to an age above
+        this are dropped and counted in filter.dropped_by_time.
+    tab:
+      type: string
+      enum:
+      - comment
+      - mention
+      - like
+      - fan
+      - recommend
+      - all
+      description: >-
+        interactions only. Which tab of the 互动消息 panel to read: comment = 评论
+        (replies to my comments, default), mention = @我的, like = 赞, fan = 粉丝,
+        recommend = 推荐, all = whatever the panel opens on.
+    locate_item:
+      type: integer
+      description: >-
+        interactions only. 1-based index of an item in items; the tool follows that
+        notification into its source video, verifies the mounted aweme_id, and (with
+        comment_text_match) reports the matched comment + comment_id, i.e. exactly what
+        reply_to_comment(aweme_id=...) needs. Read-only; sends nothing.
+    aweme_id:
+      type: string
+      description: >-
+        reply_to_comment only. Target video id taken from an interactions item
+        (source_aweme_id): replies there instead of resolving a feed slot; the video is
+        opened by id and its mounted identity is verified before anything is sent.
     allow_send:
       type: boolean
       description: >-
