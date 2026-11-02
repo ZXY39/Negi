@@ -460,6 +460,8 @@ provider-facing schema 刻意保持最小：
 
 skill / tool 目录可能被编辑器、git 或外部进程直接改动，注册表不会自己收到通知，所以运行时按节拍做一次"代"比对：
 
+重载按指纹重建实例；被替换的实例在丢弃前调用 `close()`，这是工具释放跨调用资源（驱动 / 连接 / 子进程）的唯一挂点。
+
 - 节拍由 `resources.reload.poll_interval_ms`（JSON 侧 `resources.reload.pollIntervalMs`）节流，默认 1000ms；配成 0 表示每个调用点都允许比对。
 - 比对面是 `capture_resource_tree_state()` 产出的 `{"skills": {name: 目录树指纹}, "tools": {...}}`，指纹来自 `ResourceRegistry._tree_fingerprint(资源目录)`。注册表缺失或目录为空时快照为空，比对直接返回"无变化"，这不是错误态。
 - 指纹覆盖目录树里每个文件的相对路径、`mtime_ns` 与字节数，`__pycache__` / `node_modules` / `.git` / `.venv` / `venv` / `env` / `.pytest_cache` / `.ruff_cache` 这些目录整体不参与；软链接目录不进入递归。也就是说"改了正文一个字节"能被发现，而"原地替换成一个同大小且 mtime 未变的文件"不能。
