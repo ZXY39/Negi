@@ -345,9 +345,10 @@ def preserve_copy(
     ledger = read_tree_ledger(data_root)
     if not ledger:
         return None
+    new_root = Path(new_checkout)
     changed: list[str] = []
     originals: list[tuple[str, Path]] = []
-    for rel in _walk_files(Path(new_checkout)):
+    for rel in _walk_files(new_root):
         installed_digest = ledger.get(rel)
         if not installed_digest:
             continue
@@ -356,6 +357,12 @@ def preserve_copy(
             continue
         current_digest = _sha256(current)
         if not current_digest or current_digest == installed_digest:
+            continue
+        # 与新版本内容一致的文件绝不主张：上一轮换码后没记成指纹（解释器当时不在、或那次
+        # 升级中途失败）时，指纹还是更老那一版，只比指纹就会把新版本改过的每个文件都说成
+        # 设备改的。实测过这种形状 —— 同一棵树连着覆盖两次，第二次白报了两个文件。
+        new_digest = _sha256(new_root / rel)
+        if new_digest and new_digest == current_digest:
             continue
         changed.append(rel)
         originals.append((rel, current))

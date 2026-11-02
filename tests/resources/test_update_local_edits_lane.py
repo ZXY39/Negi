@@ -87,6 +87,34 @@ def test_copy_lane_without_fingerprint_claims_nothing(device: dict[str, Path]) -
     assert u.list_batches(data) == []
 
 
+def test_stale_fingerprint_does_not_claim_files_the_release_already_put_in(device: dict[str, Path]) -> None:
+    """A fingerprint left behind by an un-recorded upgrade must not invent losses.
+
+    Measured shape: copying the same release over the tree twice, with `record` only run
+    before the first copy. The second pass sees content that differs from the old
+    fingerprint for every file the release changed -- without the "already equal to the
+    release" filter it reports those as the device's own edits.
+    """
+    root, data = device["root"], device["data"]
+    _write(root / "notes.md", "v8")
+    _write(root / "tools" / "foo" / "tool.py", "v8")
+    assert u.record_tree(root, "v8", data_root=data) == 2
+
+    _write(root / "notes.md", "DEVICE FIX")
+    release = root.parent / "release"
+    _write(release / "notes.md", "v9")
+    _write(release / "tools" / "foo" / "tool.py", "v9")
+
+    first = u.preserve_copy(root, release, "v9", data_root=data)
+    assert first is not None and first["paths"] == ["notes.md"]
+
+    # The copy lands, and no `record` runs afterwards (installer interrupted, no interpreter).
+    _write(root / "notes.md", "v9")
+    _write(root / "tools" / "foo" / "tool.py", "v9")
+    second = u.preserve_copy(root, release, "v9", data_root=data)
+    assert second is None, "与新版内容一致的文件不是设备的损失"
+
+
 def test_record_skips_the_environment_and_operator_data(device: dict[str, Path]) -> None:
     root, data = device["root"], device["data"]
     _write(root / "g3ku" / "app.py", "code")
