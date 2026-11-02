@@ -515,6 +515,11 @@ const U = {
     ceoComposerUsageBrainHint: document.getElementById("ceo-context-usage-brain-hint"),
     ceoModelRetryToast: document.getElementById("ceo-model-retry-toast"),
     ceoModelRetryToastText: document.getElementById("ceo-model-retry-toast-text"),
+    ceoBgJobs: document.getElementById("ceo-bg-jobs"),
+    ceoBgJobsToggle: document.getElementById("ceo-bg-jobs-toggle"),
+    ceoBgJobsCount: document.getElementById("ceo-bg-jobs-count"),
+    ceoBgJobsPopover: document.getElementById("ceo-bg-jobs-popover"),
+    ceoBgJobsList: document.getElementById("ceo-bg-jobs-list"),
     ceoSend: document.getElementById("ceo-send-btn"),
     viewCeo: document.getElementById("view-ceo"),
     viewTasks: document.getElementById("view-tasks-list"),
@@ -6967,6 +6972,7 @@ function ceoToolStatusIcon(status = "running") {
     const normalized = String(status || "").trim().toLowerCase();
     if (normalized === "success") return { name: "check", tone: "is-success" };
     if (normalized === "error") return { name: "alert-circle", tone: "is-error" };
+    if (normalized === "background" || normalized === "background_running") return { name: "clock-3", tone: "is-running" };
     return { name: "loader", tone: "is-running" };
 }
 
@@ -7150,7 +7156,7 @@ function toggleCeoToolHistory(turn) {
 
 function applyCeoToolStepState(item, { status = "running", toolName = "tool", detail = "", toolCallId = "", kind = "", allowEmptyOutput = false } = {}) {
     if (!(item instanceof HTMLElement)) return;
-    const statusLabel = ({ running: "进行中", success: "完成", error: "出错" })[status] || "更新";
+    const statusLabel = ({ running: "进行中", success: "完成", error: "出错", background: "后台运行", background_running: "后台运行" })[status] || "更新";
     item.className = `interaction-step ${status}`;
     item.dataset.stepState = status;
     item.dataset.toolName = String(toolName || "tool").trim() || "tool";
@@ -8995,6 +9001,8 @@ async function activateCeoSession(sessionId) {
         return;
     }
     initCeoWs();
+    ceoBgJobsClose();
+    void refreshCeoBackgroundJobs(targetId);
     try {
         const payload = await ApiClient.activateCeoSession(targetId);
         if (switchToken !== S.ceoSessionSwitchToken || activeSessionId() !== targetId) return;
@@ -9375,6 +9383,8 @@ function initCeoWs() {
         if (token !== S.ceoWsToken || S.ceoWs !== socket) return;
         // 编辑重发的"截断→重连→发送"时序依赖 open 信号(whenCeoWsOpen)。
         settleCeoWsOpenWaiters(true);
+        // 重连期间后台作业可能已提升/停止/终态；帧只在变化时推，重连后补拉一次。
+        void refreshCeoBackgroundJobs(activeSessionId());
         // S.ceoSessionBusy 的两个解除点都依赖服务端产帧（snapshot.ceo / onclose），
         // 而这条车道已观测到静默不产出。忙标志挂住会把编辑/Fork 的点击整个吃掉
         // （ceoHistoryEditBusyReason），表现为"等一会儿才能点"。再挂一个不依赖对端的兜底。
@@ -11685,6 +11695,7 @@ function bindResourcePages() {
 
 
 function bindGlobalOverlays() {
+    bindCeoBackgroundJobs();
     U.toastClose?.addEventListener("click", closeToast);
     // 行首箭头：先收起 toast，再跑这一次的动作（动作里可能切视图 / 换会话）。
     U.toastAction?.addEventListener("click", () => {
@@ -11706,6 +11717,7 @@ function bindGlobalOverlays() {
         if (!e.target.closest(".ceo-session-actions.toolbar-dropdown")) closeCeoSessionMenus();
         if (!e.target.closest(".toolbar-dropdown")) closeTaskMenus();
         if (!e.target.closest(".project-settings-meta")) closeProjectSettingsQrPopover();
+        if (!e.target.closest("#ceo-bg-jobs")) ceoBgJobsClose();
     });
     document.addEventListener("keydown", (e) => {
         if (e.key !== "Escape") return;
@@ -11717,6 +11729,7 @@ function bindGlobalOverlays() {
             U.ceoComposerUsageBrain?.focus?.();
             return;
         }
+        if (ceoBgJobsClose()) return;
         if (closeCeoSessionMenus({ restoreFocus: true })) return;
         if (isUpdateReleaseOpen()) {
             closeUpdateReleaseDialog();
@@ -11826,7 +11839,9 @@ function init() {
     void loadTasks();
     void restoreTaskDetailSession();
     S.ceoScrollToLatestOnSnapshot = true;
-    void refreshCeoSessions({ reconnect: true }).catch(() => {
+    void refreshCeoSessions({ reconnect: true }).then(() => {
+        void refreshCeoBackgroundJobs(activeSessionId());
+    }).catch(() => {
         initCeoWs();
     });
 }

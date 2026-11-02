@@ -331,6 +331,7 @@ function traceToolStatusIconName(status) {
     const normalized = String(status || "").trim().toLowerCase();
     if (normalized === "success") return "check";
     if (normalized === "error") return "alert-circle";
+    if (normalized === "background" || normalized === "background_running") return "clock-3";
     if (normalized === "running" || normalized === "queued") return "loader";
     return "";
 }

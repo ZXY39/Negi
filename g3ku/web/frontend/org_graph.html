@@ -177,6 +177,16 @@
                                 <span id="ceo-model-retry-toast-text" class="model-retry-toast-text"></span>
                             </span>
                         </div>
+                        <div id="ceo-bg-jobs" class="ceo-bg-jobs" hidden>
+                            <button id="ceo-bg-jobs-toggle" class="ceo-bg-jobs-toggle" type="button"
+                                aria-expanded="false" aria-controls="ceo-bg-jobs-popover">
+                                <span id="ceo-bg-jobs-count" class="ceo-bg-jobs-count">0</span>个工具正在后台运行
+                            </button>
+                            <div id="ceo-bg-jobs-popover" class="ceo-bg-jobs-popover" role="dialog"
+                                aria-label="后台工具" hidden>
+                                <div id="ceo-bg-jobs-list" class="ceo-bg-jobs-list" role="list"></div>
+                            </div>
+                        </div>
                         <div class="chat-feed" id="ceo-chat-feed">
                             <div class="message system">
                                 <div class="msg-content">欢迎使用 Negi。这里会展示 Leader 回合中的工具调用过程与最终回复。</div>
@@ -1626,6 +1636,7 @@
     <script src="ceo/feed-view.js"></script>
     <script src="ceo/sessions-panel.js"></script>
     <script src="ceo/session-store.js"></script>
+    <script src="ceo/background-jobs.js"></script>
     <script src="ceo/ws-router.js"></script>
     <script src="memory/store.js"></script>
     <script src="memory/actions.js"></script>

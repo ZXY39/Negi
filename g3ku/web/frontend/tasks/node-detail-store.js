@@ -196,7 +196,7 @@ function roundTraceStatus(round) {
     if (tools.some((item) => ["warning", "interrupted"].includes(String(item?.status || "")))) {
         return "warning";
     }
-    if (tools.some((item) => String(item?.status || "") === "running" || String(item?.status || "") === "queued")) {
+    if (tools.some((item) => ["running", "queued", "background", "background_running"].includes(String(item?.status || "")))) {
         return "running";
     }
     return "success";

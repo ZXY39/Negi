@@ -2484,6 +2484,44 @@ def test_execution_trace_round_status_supports_warning_and_interrupted() -> None
     assert result["roundStatus"] == "warning"
 
 
+def test_execution_trace_round_status_keeps_background_tool_running() -> None:
+    """A background tool row must not make its group look completed."""
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = { liveFrameMap: {} };
+        global.U = {};
+        global.ApiClient = {};
+        global.showToast = () => {};
+        global.isAbortLike = () => false;
+        global.renderTree = () => {};
+        global.esc = (value) => String(value ?? "");
+        global.readableText = (value, { emptyText = "" } = {}) => {
+          const text = String(value ?? "").trim();
+          return text || emptyText;
+        };
+        global.normalizeInt = (value, fallback = 0) => {
+          const parsed = Number.parseInt(String(value ?? ""), 10);
+          return Number.isFinite(parsed) ? parsed : fallback;
+        };
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
+        vm.runInThisContext(code);
+
+        console.log(JSON.stringify({
+          backgroundStatus: roundTraceStatus({ tools: [{ tool_name: "exec", status: "background" }] }),
+          backgroundRunningStatus: roundTraceStatus({ tools: [{ tool_name: "exec", status: "background_running" }] }),
+          backgroundIcon: traceToolStatusIconName("background"),
+        }));
+        """
+    )
+
+    assert result["backgroundStatus"] == "running"
+    assert result["backgroundRunningStatus"] == "running"
+    assert result["backgroundIcon"] == "clock-3"
+
+
 
 
 def test_load_selected_node_latest_context_preserves_detail_and_context_scroll() -> None:

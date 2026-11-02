@@ -225,6 +225,9 @@ const CEO_WS_HANDLERS = {
     },
     "ceo.sessions.snapshot": handleCeoSessionsSnapshotFrame,
     "ceo.sessions.patch": handleCeoSessionsPatchFrame,
+    "ceo.tool_jobs": (payload, effectiveSessionId) => {
+        if (typeof handleCeoToolJobsFrame === "function") handleCeoToolJobsFrame(payload, effectiveSessionId);
+    },
     "task.artifact.applied": (payload) => {
         if (payload.data?.task_id === S.currentTaskId) handleTaskArtifactAppliedFrame(payload);
     },

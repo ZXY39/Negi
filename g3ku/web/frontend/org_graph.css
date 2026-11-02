@@ -6641,6 +6641,154 @@ textarea {
     margin: 12px clamp(28px, 6vw, 80px) 0 clamp(16px, 2.4vw, 32px);
 }
 
+/* 会话右上角的后台工具气泡：不占聊天流、不触发自动滚动。 */
+.ceo-bg-jobs {
+    position: absolute;
+    top: 12px;
+    right: max(24px, 4vw);
+    z-index: 6;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: var(--ui-space-2);
+    pointer-events: none;
+}
+
+.ceo-bg-jobs[hidden] {
+    display: none;
+}
+
+/* 重试 toast 在流内占住顶部时把气泡下移，避免同屏互相遮挡。 */
+.chat-wrapper:has(.ceo-model-retry-toast:not([hidden])) .ceo-bg-jobs {
+    top: 58px;
+}
+
+.ceo-bg-jobs-toggle {
+    pointer-events: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 12px;
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-pill);
+    background: var(--ui-bg-elevated);
+    color: var(--ui-text-secondary);
+    font: inherit;
+    font-size: 0.78rem;
+    line-height: 1.4;
+    cursor: pointer;
+    box-shadow: var(--ui-shadow-sm);
+}
+
+.ceo-bg-jobs-toggle:hover {
+    border-color: var(--ui-border-strong);
+    color: var(--ui-text);
+}
+
+.ceo-bg-jobs-toggle:focus-visible {
+    outline: 2px solid var(--ui-brand);
+    outline-offset: 2px;
+}
+
+.ceo-bg-jobs-count {
+    min-width: 1.2em;
+    color: var(--ui-brand);
+    font-variant-numeric: tabular-nums;
+    text-align: center;
+}
+
+.ceo-bg-jobs-popover {
+    pointer-events: auto;
+    width: min(360px, calc(100vw - 24px));
+    max-height: min(40vh, 320px);
+    overflow: auto;
+    padding: var(--ui-space-2);
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-card);
+    background: var(--ui-bg-elevated);
+    box-shadow: var(--ui-shadow-md);
+}
+
+.ceo-bg-jobs-popover[hidden] {
+    display: none;
+}
+
+.ceo-bg-jobs-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.ceo-bg-jobs-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: var(--ui-space-2);
+    padding: 6px 8px;
+    border-radius: var(--ui-radius-control);
+}
+
+.ceo-bg-jobs-row:hover {
+    background: var(--ui-bg-subtle);
+}
+
+.ceo-bg-jobs-main {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+}
+
+.ceo-bg-jobs-tool {
+    overflow: hidden;
+    color: var(--ui-text);
+    font-size: 0.8rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ceo-bg-jobs-hint {
+    overflow: hidden;
+    color: var(--ui-text-muted);
+    font-size: 0.72rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ceo-bg-jobs-elapsed {
+    color: var(--ui-text-secondary);
+    font-size: 0.75rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.ceo-bg-jobs-stop {
+    padding: 2px 9px;
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-pill);
+    background: transparent;
+    color: var(--ui-text-secondary);
+    font: inherit;
+    font-size: 0.72rem;
+    cursor: pointer;
+}
+
+.ceo-bg-jobs-stop:hover:not(:disabled) {
+    border-color: var(--ui-danger);
+    color: var(--ui-danger);
+}
+
+.ceo-bg-jobs-stop:disabled {
+    border-color: var(--ui-border);
+    color: var(--ui-text-disabled);
+    cursor: default;
+}
+
+@media (max-width: 720px) {
+    .ceo-bg-jobs {
+        right: 12px;
+    }
+}
+
 .task-node-model-retry-toast {
     flex: 0 0 auto;
     margin-top: 0;

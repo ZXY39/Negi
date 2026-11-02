@@ -170,6 +170,21 @@
 
     async prepareCeoVoice() {
         return await this._request("POST", "/api/ceo/voice/prepare", { timeoutMs: 15000 });
+    },
+
+    async fetchCeoToolJobs(sessionId) {
+        const data = await this.get(`/api/ceo/sessions/${encodeURIComponent(sessionId)}/tool-jobs`);
+        return {
+            ...data,
+            items: Array.isArray(data?.items) ? data.items : [],
+        };
+    },
+
+    async stopCeoToolJob(sessionId, jobId) {
+        return this.post(
+            `/api/ceo/sessions/${encodeURIComponent(sessionId)}/tool-jobs/${encodeURIComponent(jobId)}/stop`,
+            {}
+        );
     }
     };
 })();

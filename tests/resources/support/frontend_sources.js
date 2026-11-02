@@ -38,6 +38,7 @@ const FRONTEND_BUNDLES = Object.freeze({
         "ceo/feed-view.js",
         "ceo/sessions-panel.js",
         "ceo/session-store.js",
+        "ceo/background-jobs.js",
         "ceo/ws-router.js",
         "memory/store.js",
         "memory/actions.js",
