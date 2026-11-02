@@ -53,6 +53,18 @@
   （每条含"为什么值得"（播放量+字幕关键词命中）+ 一句话结论（字幕首句）+ BV 号）。
 - 失败项如实写"无字幕/跳过"并给原因，不编造；未登录时字幕读不到，报告会明确标注"未登录"。
 
+## 关注 / 粉丝 / 点赞（following / followers / like）
+
+- 需要登录（凭证有效）。
+- `following` / `followers`：参数 `uid`（默认当前登录 uid）、`pn`（页码）、`ps`（每页 1-50，默认 50）；返回
+  `{code, message, total, list:[{mid, uname, sign, ...}]}`，code=0 表示成功。接口是
+  `/x/relation/followings|followers?vmid=<uid>`，cookie 用 `SESSDATA/bili_jct/buvid3/DedeUserID`
+  （**SESSDATA 必须大写**，带 Referer `space.bilibili.com/<uid>`）。
+- `like`：参数 `bvid`（或 `aid`）必填、`like`（true=点赞 / false=取消，幂等，默认 true）；走
+  `POST /x/web-interface/archive/like`，需要 `bili_jct` 作为 csrf；返回操作前后点赞状态
+  （`before/after{count, liked}`），点赞后必须可取消恢复，取消失败要如实报。
+- 注意：点赞是真实改变账号状态的操作（幂等可撤销），不要批量轰炸；单视频单次。
+
 ## 安装 / 更新
 
 - **代码**：位于 `tools/bili/main/tool.py`，无需独立安装；更新方式是修改仓库内实现与 `resource.yaml` 参数契约。

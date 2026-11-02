@@ -56,7 +56,10 @@ parameters:
         - send_message
         - config
         - daily_report
-      description: 要执行的动作。无需登录：search/hot/rank/video_info/user_info/user_videos；登录与状态：login/login_check/check_credential/status；需登录：subtitle/comments/danmaku/favorite_lists/favorite_content/watch_later；发送类（默认关闭）：reply/send_message；开关与配额：config；工作流：daily_report。
+        - following
+        - followers
+        - like
+      description: 要执行的动作。无需登录：search/hot/rank/video_info/user_info/user_videos；登录与状态：login/login_check/check_credential/status；需登录：subtitle/comments/danmaku/favorite_lists/favorite_content/watch_later/following/followers/like；发送类（默认关闭）：reply/send_message；开关与配额：config；工作流：daily_report。
     keyword:
       type: string
       description: 搜索关键词（search / daily_report）。
@@ -170,6 +173,9 @@ parameters:
     out_dir:
       type: string
       description: 报告输出目录，默认 <data>/output（daily_report）。
+    like:
+      type: boolean
+      description: 点赞目标状态：true=点赞，false=取消点赞（like，幂等，默认 true）。
   required:
     - action
 governance:

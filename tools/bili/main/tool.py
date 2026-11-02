@@ -55,6 +55,7 @@ _ACTIONS = [
     "search", "hot", "rank", "video_info", "user_info", "user_videos",
     "login", "login_check", "check_credential", "status",
     "subtitle", "comments", "danmaku", "favorite_lists", "favorite_content", "watch_later",
+    "following", "followers", "like",
     "reply", "send_message", "config", "daily_report",
 ]
 
@@ -731,6 +732,309 @@ async def _action_watch_later(kwargs: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+# ============ 关注 / 粉丝 / 点赞（原生 relation & archive 接口） ============
+
+
+def _cookie_header(cred: dict[str, str]) -> str:
+    """B站 Web 接口 cookie 头；键名必须是 SESSDATA / bili_jct / buvid3 / DedeUserID（大小写敏感）。"""
+    return (
+        f"SESSDATA={cred.get('sessdata') or ''}; "
+        f"bili_jct={cred.get('bili_jct') or ''}; "
+        f"buvid3={cred.get('buvid3') or ''}; "
+        f"DedeUserID={cred.get('dedeuserid') or ''}"
+    )
+
+
+def _api_headers(cred: dict[str, str], referer: str) -> dict[str, str]:
+    return {"User-Agent": _UA, "Referer": referer, "Cookie": _cookie_header(cred)}
+
+
+async def _get_json(url: str, headers: dict[str, str]) -> tuple[dict[str, Any] | None, str]:
+    """GET 一个 B站 web 接口，返回 (json dict, 错误说明)。"""
+    import aiohttp
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=_HTTP_TIMEOUT) as resp:
+                status = resp.status
+                data = await resp.json(content_type=None)
+    except Exception as e:  # noqa: BLE001
+        return None, f"{type(e).__name__}: {str(e)[:200]}"
+    if not isinstance(data, dict):
+        return None, f"响应不是 JSON 对象（HTTP {status}）"
+    return data, ""
+
+
+async def _post_form_json(
+    url: str, form: dict[str, str], headers: dict[str, str]
+) -> tuple[dict[str, Any] | None, str]:
+    """POST 表单到 B站 web 接口（csrf 会出现在 form data 里），返回 (json dict, 错误说明)。"""
+    import aiohttp
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, data=form, headers=headers, timeout=_HTTP_TIMEOUT) as resp:
+                status = resp.status
+                data = await resp.json(content_type=None)
+    except Exception as e:  # noqa: BLE001
+        return None, f"{type(e).__name__}: {str(e)[:200]}"
+    if not isinstance(data, dict):
+        return None, f"响应不是 JSON 对象（HTTP {status}）"
+    return data, ""
+
+
+async def _relation_page(
+    kind: str, uid: int, pn: int, ps: int, cred: dict[str, str]
+) -> dict[str, Any]:
+    """拉取关注（followings）或粉丝（followers）列表的一页。"""
+    endpoint = "followings" if kind == "following" else "followers"
+    url = f"https://api.bilibili.com/x/relation/{endpoint}?vmid={uid}&pn={pn}&ps={ps}"
+    headers = _api_headers(cred, f"https://space.bilibili.com/{uid}")
+    data, why = await _get_json(url, headers)
+    if data is None:
+        return {"ok": False, "action": kind, "error": why}
+    code = int(data.get("code") or 0)
+    if code != 0:
+        return {
+            "ok": False,
+            "action": kind,
+            "code": code,
+            "error": f"{data.get('message') or '接口返回错误'}（code={code}）",
+        }
+    body = data.get("data") or {}
+    items = [
+        {
+            "mid": it.get("mid", 0),
+            "uname": it.get("uname", ""),
+            "sign": (it.get("sign") or "")[:200],
+        }
+        for it in (body.get("list") or [])
+        if isinstance(it, dict)
+    ]
+    return {
+        "ok": True,
+        "action": kind,
+        "code": 0,
+        "uid": uid,
+        "total": int(body.get("total") or 0),
+        "page": pn,
+        "ps": ps,
+        "count": len(items),
+        "list": items,
+    }
+
+
+async def _action_following(kwargs: dict[str, Any]) -> dict[str, Any]:
+    cred, err = _require_cred()
+    if not cred:
+        return {"ok": False, "action": "following", "error": err}
+    uid = int(kwargs.get("uid") or cred.get("dedeuserid") or 0)
+    if uid <= 0:
+        return {"ok": False, "action": "following", "error": "uid 必须为正整数（或先执行 bili login 登录）"}
+    pn = max(1, int(kwargs.get("pn") or 1))
+    ps = max(1, min(int(kwargs.get("ps") or 20), 50))
+    return await _relation_page("following", uid, pn, ps, cred)
+
+
+async def _action_followers(kwargs: dict[str, Any]) -> dict[str, Any]:
+    cred, err = _require_cred()
+    if not cred:
+        return {"ok": False, "action": "followers", "error": err}
+    uid = int(kwargs.get("uid") or cred.get("dedeuserid") or 0)
+    if uid <= 0:
+        return {"ok": False, "action": "followers", "error": "uid 必须为正整数（或先执行 bili login 登录）"}
+    pn = max(1, int(kwargs.get("pn") or 1))
+    ps = max(1, min(int(kwargs.get("ps") or 20), 50))
+    return await _relation_page("followers", uid, pn, ps, cred)
+
+
+async def _read_like_state(
+    cred: dict[str, str], bvid: str, aid: int
+) -> tuple[int | None, str]:
+    """读当前是否已点赞：返 (1/0, "")；读不到返 (None, 原因)。"""
+    query = f"bvid={bvid}" if bvid else f"aid={aid}"
+    url = f"https://api.bilibili.com/x/web-interface/archive/has/like?{query}"
+    referer = f"https://www.bilibili.com/video/{bvid}" if bvid else "https://www.bilibili.com"
+    data, why = await _get_json(url, _api_headers(cred, referer))
+    if data is None:
+        return None, why
+    code = int(data.get("code") or 0)
+    if code != 0:
+        return None, f"has/like 不可用：{data.get('message') or '接口返回错误'}（code={code}）"
+    raw = data.get("data")
+    if isinstance(raw, int):  # 含 bool，True->1
+        return (1 if raw else 0), ""
+    return None, f"has/like 返回结构异常：{raw!r}"
+
+
+async def _read_stat_like(
+    cred: dict[str, str], bvid: str, aid: int
+) -> tuple[int | None, str]:
+    """回退方案：读 video view 接口的 stat.like 数值。"""
+    query = f"bvid={bvid}" if bvid else f"aid={aid}"
+    url = f"https://api.bilibili.com/x/web-interface/view?{query}"
+    referer = f"https://www.bilibili.com/video/{bvid}" if bvid else "https://www.bilibili.com"
+    data, why = await _get_json(url, _api_headers(cred, referer))
+    if data is None:
+        return None, why
+    code = int(data.get("code") or 0)
+    if code != 0:
+        return None, f"view 接口不可用：{data.get('message') or '接口返回错误'}（code={code}）"
+    stat = (data.get("data") or {}).get("stat") or {}
+    val = stat.get("like")
+    if isinstance(val, int):
+        return val, ""
+    return None, "view 接口未返回 stat.like"
+
+
+async def _action_like(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """点赞 / 取消点赞（幂等：已处于目标状态不重复提交；提交后复读状态确认）。"""
+    cred, err = _require_cred()
+    if not cred:
+        return {"ok": False, "action": "like", "error": err}
+    bvid = str(kwargs.get("bvid") or "").strip()
+    aid = int(kwargs.get("aid") or 0)
+    if not bvid and aid <= 0:
+        return {"ok": False, "action": "like", "error": "bvid 与 aid 至少提供一个"}
+    like = bool(kwargs.get("like", True))
+    target = 1 if like else 0
+    csrf = cred.get("bili_jct") or ""
+    if not csrf:
+        return {"ok": False, "action": "like", "error": "凭证缺少 bili_jct，无法点赞；请重新执行 bili login。"}
+    referer = f"https://www.bilibili.com/video/{bvid}" if bvid else "https://www.bilibili.com"
+    headers = _api_headers(cred, referer)
+    base: dict[str, Any] = {
+        "action": "like",
+        "bvid": bvid,
+        "aid": aid or None,
+        "target_state": target,
+    }
+    # 只有 bvid 时补一次 aid，便于 POST 用 aid 定视频（两处都带上更稳）
+    if aid <= 0 and bvid:
+        view, _why = await _get_json(
+            f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}", headers
+        )
+        if view and int(view.get("code") or 0) == 0:
+            resolved = int((view.get("data") or {}).get("aid") or 0)
+            if resolved > 0:
+                aid = resolved
+                base["aid"] = aid
+
+    before, why_before = await _read_like_state(cred, bvid, aid)
+    stat_before: int | None = None
+    if before is None:  # has/like 不可用 → 回退 stat.like 数值对比
+        stat_before, why_stat = await _read_stat_like(cred, bvid, aid)
+        if stat_before is None:
+            base.update({"ok": False, "error": f"无法读取当前点赞状态：{why_before or why_stat}"})
+            return base
+
+    if before is not None and before == target:
+        base.update(
+            {
+                "ok": True,
+                "code": 0,
+                "like_before": before,
+                "like_after": before,
+                "changed": False,
+                "already_in_target_state": True,
+                "confirmed": True,
+                "message": "已处于目标状态，未重复提交 POST",
+            }
+        )
+        return base
+
+    form: dict[str, str] = {"like": "1" if like else "2", "csrf": csrf}
+    if bvid:
+        form["bvid"] = bvid
+    if aid > 0:
+        form["aid"] = str(aid)
+    posted, why_post = await _post_form_json(
+        "https://api.bilibili.com/x/web-interface/archive/like", form, headers
+    )
+    if posted is None:
+        base.update(
+            {
+                "ok": False,
+                "like_before": before,
+                "like_after": before,
+                "changed": False,
+                "already_in_target_state": False,
+                "error": f"点赞请求失败：{why_post}",
+            }
+        )
+        return base
+    code = int(posted.get("code") or 0)
+    if code != 0:
+        base.update(
+            {
+                "ok": False,
+                "code": code,
+                "like_before": before,
+                "like_after": before,
+                "changed": False,
+                "already_in_target_state": False,
+                "error": f"{posted.get('message') or '点赞接口返回错误'}（code={code}）",
+            }
+        )
+        return base
+
+    after, why_after = await _read_like_state(cred, bvid, aid)
+    if after is not None and after != target:
+        # B 站 has/like 接口有点延迟：刚 POST 完立刻读常拿到旧值，
+        # 轮询几次再判定，避免把「已经点上了」误报成「未确认」。
+        for _ in range(6):
+            await asyncio.sleep(0.8)
+            again, why_again = await _read_like_state(cred, bvid, aid)
+            if again is None:
+                why_after = why_after or why_again
+                break
+            after = again
+            if after == target:
+                break
+    if after is not None:
+        like_before: Any = before
+        like_after: Any = after
+        changed = before != after if before is not None else stat_before != after
+        confirmed = after == target
+        if before is None and stat_before is not None:
+            like_before = stat_before
+    else:
+        stat_after, why_stat_after = await _read_stat_like(cred, bvid, aid)
+        if stat_after is None or stat_before is None:
+            base.update(
+                {
+                    "ok": False,
+                    "code": 0,
+                    "like_before": before if before is not None else stat_before,
+                    "like_after": before if before is not None else stat_before,
+                    "changed": False,
+                    "already_in_target_state": False,
+                    "error": f"点赞已提交（code=0），但无法复读状态确认：{why_after or why_stat_after}",
+                }
+            )
+            return base
+        like_before = stat_before
+        like_after = stat_after
+        delta = stat_after - stat_before
+        changed = delta != 0
+        confirmed = delta == 1 if like else delta == -1
+
+    base.update(
+        {
+            "ok": bool(confirmed),
+            "code": 0,
+            "like_before": like_before,
+            "like_after": like_after,
+            "changed": bool(changed),
+            "already_in_target_state": False,
+            "confirmed": bool(confirmed),
+        }
+    )
+    if not confirmed:
+        base["error"] = "点赞接口返回 code=0，但复读到的状态未变成目标状态"
+    return base
+
+
 async def _action_reply(kwargs: dict[str, Any]) -> dict[str, Any]:
     from bilibili_api import comment, video
 
@@ -1131,17 +1435,18 @@ class BiliTool(Tool):
                 "action": {
                     "type": "string",
                     "enum": _ACTIONS,
-                    "description": "要执行的动作：search/hot/rank/video_info/user_info/user_videos（无需登录）；login/login_check/check_credential/status（登录与状态）；subtitle/comments/danmaku/favorite_lists/favorite_content/watch_later（需登录）；reply/send_message（发送类，默认关闭）；config（发送开关与配额）；daily_report（刷一轮B站日报工作流）。",
+                    "description": "要执行的动作：search/hot/rank/video_info/user_info/user_videos（无需登录）；login/login_check/check_credential/status（登录与状态）；subtitle/comments/danmaku/favorite_lists/favorite_content/watch_later（需登录）；following/followers（关注/粉丝列表，需登录）；like（点赞/取消点赞，需登录）；reply/send_message（发送类，默认关闭）；config（发送开关与配额）；daily_report（刷一轮B站日报工作流）。",
                 },
                 "keyword": {"type": "string", "description": "搜索关键词（search / daily_report）。"},
                 "keywords": {"type": "string", "description": "日报关键词组，逗号/分号/换行分隔（daily_report）。"},
                 "num": {"type": "integer", "minimum": 1, "maximum": 50, "description": "返回条数（search/comments/danmaku）。"},
                 "order": {"type": "string", "enum": ["totalrank", "click", "pubdate", "dm"], "description": "搜索排序（search）。"},
                 "page": {"type": "integer", "minimum": 1, "description": "页码（search/favorite_content）。"},
-                "bvid": {"type": "string", "description": "视频BV号（video_info/subtitle/comments/danmaku/reply）。"},
-                "uid": {"type": "integer", "minimum": 1, "description": "用户UID（user_info/user_videos/favorite_lists；0=自己）。"},
-                "pn": {"type": "integer", "minimum": 1, "description": "页码（hot/user_videos）。"},
-                "ps": {"type": "integer", "minimum": 1, "maximum": 50, "description": "每页数量（hot/user_videos）。"},
+                "bvid": {"type": "string", "description": "视频BV号（video_info/subtitle/comments/danmaku/reply/like）。"},
+                "aid": {"type": "integer", "minimum": 1, "description": "视频AV号（like，与 bvid 二选一，至少给一个）。"},
+                "uid": {"type": "integer", "minimum": 1, "description": "用户UID（user_info/user_videos/favorite_lists/following/followers；0=自己）。"},
+                "pn": {"type": "integer", "minimum": 1, "description": "页码（hot/user_videos/following/followers）。"},
+                "ps": {"type": "integer", "minimum": 1, "maximum": 50, "description": "每页数量（hot/user_videos/following/followers，1-50）。"},
                 "category": {"type": "string", "enum": sorted(_RANK_TYPE_MAP), "description": "排行榜分区（rank）。"},
                 "day": {"type": "integer", "enum": [3, 7], "description": "排行时间维度（rank）。"},
                 "media_id": {"type": "integer", "minimum": 1, "description": "收藏夹ID（favorite_content）。"},
@@ -1150,6 +1455,7 @@ class BiliTool(Tool):
                 "root": {"type": "integer", "minimum": 0, "description": "楼层根评论ID，回复一级评论时填0（reply）。"},
                 "at_name": {"type": "string", "description": "@ 提及的昵称，会将正文前缀 '@昵称 ' 后发出（reply，可选）。"},
                 "receiver_uid": {"type": "integer", "minimum": 1, "description": "私信接收者UID（send_message）。"},
+                "like": {"type": "boolean", "description": "点赞目标状态：true=点赞，false=取消点赞（like，幂等，默认 true）。"},
                 "send_enabled": {"type": "boolean", "description": "发送类动作总开关（config）。"},
                 "daily_quota": {"type": "integer", "minimum": 0, "description": "单日发送配额（config）。"},
                 "days": {"type": "integer", "minimum": 1, "maximum": 30, "description": "日报时间范围天数，默认7（daily_report）。"},
@@ -1192,6 +1498,9 @@ class BiliTool(Tool):
             "favorite_lists": _action_favorite_lists,
             "favorite_content": _action_favorite_content,
             "watch_later": _action_watch_later,
+            "following": _action_following,
+            "followers": _action_followers,
+            "like": _action_like,
             "reply": _action_reply,
             "send_message": _action_send_message,
             "daily_report": _action_daily_report,
