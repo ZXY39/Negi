@@ -3132,6 +3132,12 @@ class TaskLogService:
             self._store.delete_task_node_resume_intents_for_task(task.task_id)
         except Exception:
             logger.exception('resume intent cleanup failed for terminal task {}', task.task_id)
+        # 暂停台账同批退休：任务已结案，任何"还停着"的行都是过期状态；失败与错误原文
+        # 另有 task_error_logs 承载，这里不清历史表。
+        try:
+            self._store.delete_task_node_pauses_for_task(task.task_id)
+        except Exception:
+            logger.exception('node pause ledger cleanup failed for terminal task {}', task.task_id)
         if not self._store.count_unsettled_task_nodes(task.task_id):
             return swept
         for node in self._store.iter_nodes(task.task_id):

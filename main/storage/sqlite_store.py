@@ -1800,6 +1800,16 @@ class SQLiteTaskStore:
     def delete_task_node_pause(self, node_id: str) -> None:
         self._execute_write('DELETE FROM task_node_pauses WHERE node_id = ?', (str(node_id or '').strip(),))
 
+    def delete_task_node_pauses_for_task(self, task_id: str) -> None:
+        """任务结案时整批退休暂停台账。
+
+        暂停行是"这颗节点现在还停着、等人处置"的活状态：投递判据要求节点
+        `status='in_progress'`，异常暂停补发也要求节点仍带暂停位。节点或任务一旦终态，
+        这些行既不会被任何车道读成待办，又会让节点详情挂着一句过期备注。失败原因与
+        错误原文另有 `task_error_logs` 承载，不靠这张表留史。
+        """
+        self._execute_write('DELETE FROM task_node_pauses WHERE task_id = ?', (str(task_id or '').strip(),))
+
     def mark_task_node_pause_delivered(self, pause_id: int) -> None:
         self._execute_write('UPDATE task_node_pauses SET delivered = 1, updated_at = ? WHERE id = ?', (datetime.now().astimezone().isoformat(timespec='microseconds'), int(pause_id or 0)))
 

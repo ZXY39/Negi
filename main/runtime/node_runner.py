@@ -7173,6 +7173,13 @@ class NodeRunner:
             self._store.delete_task_node_resume_intent(node_id)
         except Exception:
             pass
+        # 同一处退休暂停台账：暂停行说的是"现在还停着、等人处置"，节点签发终态后
+        # 它既不会被投递车道读成待办（那条要求节点 in_progress），也不会被异常暂停
+        # 补发读成待补（那条要求节点仍带暂停位），但节点详情会一直挂着那句过期备注。
+        try:
+            self._store.delete_task_node_pause(node_id)
+        except Exception:
+            pass
         if node is not None and self._normalized_status(getattr(node, 'status', '')) in {
             STATUS_SUCCESS,
             STATUS_FAILED,

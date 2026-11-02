@@ -232,6 +232,53 @@ async def test_node_error_becomes_error_pause_and_keeps_node_non_terminal(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_terminal_node_and_terminal_task_retire_the_pause_ledger(tmp_path: Path) -> None:
+    """结案不留暂停台账：节点终态、任务终态各退休一次，错误历史仍留在 task_error_logs。
+
+    实盘残骸是取消后留下的两条 `delivered=0` 暂停行——节点上的暂停标记已经被终态写清掉，
+    台账行却还在，节点详情于是长期挂着一句"这节点还停着"的过期备注，而没有任何车道会把它
+    读成待办（投递要求节点 in_progress，异常暂停补发要求节点仍带暂停位）。
+    """
+    service = _make_service(tmp_path)
+    try:
+        record = await service.create_task("ledger retire", session_id="web:shared")
+        service.log_service.set_node_pause_state(
+            record.task_id,
+            record.root_node_id,
+            pause_requested=True,
+            is_paused=True,
+            pause_reason="manual",
+            remark="operator hold",
+        )
+        assert service.store.get_task_node_pause(record.root_node_id) is not None
+
+        service.node_runner.fail_paused_node(record.task_id, record.root_node_id, "operator decided")
+        assert service.store.get_task_node_pause(record.root_node_id) is None
+        failed = service.get_node(record.root_node_id)
+        assert failed is not None and failed.status == "failed"
+        assert "operator decided" in str(failed.failure_reason or "")
+
+        second = await service.create_task("ledger retire via sweep", session_id="web:shared")
+        service.log_service.set_node_pause_state(
+            second.task_id,
+            second.root_node_id,
+            pause_requested=True,
+            is_paused=True,
+            pause_reason="manual",
+            remark="stale hold",
+        )
+        service.store.update_task(
+            second.task_id,
+            lambda item: item.model_copy(update={"status": "success"}),
+        )
+        assert service.store.get_task_node_pause(second.root_node_id) is not None
+        service.log_service.sweep_residual_nodes(second.task_id)
+        assert service.store.get_task_node_pause(second.root_node_id) is None
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_task_node_error_log_payload_is_scoped_to_node(tmp_path: Path) -> None:
     service = _make_service(tmp_path)
     try:

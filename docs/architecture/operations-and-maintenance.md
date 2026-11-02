@@ -394,7 +394,7 @@ Provider retry troubleshooting note:
 
 ### 残留节点自愈
 
-任务终态仅由根节点 + 最终验收推导，终态流转本身不强制收尾残留节点（见 `main-task-runtime.md`「Node-Level Pause and Recovery」）。真正“不会再被驱动”的残留节点由 worker 启动自愈清理：启动引导对每个终态任务调用 `log_service.sweep_residual_nodes`，把仍 `in_progress` 的节点置为 `failed`，`failure_reason` 带 `task_terminal_cleanup` 前缀并附产物定位（`execution_trace_ref` / `result_payload_ref`），只改状态、不删转录/产物，并发布 node patch 事件。因此终端里“重启后残留节点自动落终态”是预期行为，不是数据丢失；进行中任务不参与清扫。
+任务终态仅由根节点 + 最终验收推导，终态流转本身不强制收尾残留节点（见 `main-task-runtime.md`「Node-Level Pause and Recovery」）。真正“不会再被驱动”的残留节点由 worker 启动自愈清理：启动引导对每个终态任务调用 `log_service.sweep_residual_nodes`，把仍 `in_progress` 的节点置为 `failed`，`failure_reason` 带 `task_terminal_cleanup` 前缀并附产物定位（`execution_trace_ref` / `result_payload_ref`），只改状态、不删转录/产物，并发布 node patch 事件。同一条清扫把该任务的暂停台账行整批退休，节点终态写也退休自己那一行（合同与理由见 `main-task-runtime.md`「暂停行、终态推导与孤儿收割」）：暂停行说的是"此刻还停着、等人处置"，结案后留着它只会让节点详情挂着一句过期备注，而失败与错误原文另有 `failure_reason` 与 `task_error_logs` 承载，不靠这张表留史。因此终端里“重启后残留节点自动落终态”是预期行为，不是数据丢失；进行中任务不参与清扫。排查时看到"终态节点仍带暂停行"就是异常形态，按那条合同查退休点有没有被跳过，不要把它当成历史。
 
 ### 任务执行了全局进程清理 / Web 与 worker 同时退出
 
