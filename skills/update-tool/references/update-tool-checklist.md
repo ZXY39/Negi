@@ -19,6 +19,7 @@
 - [ ] 已同步更新 `current_version.summary`
 - [ ] 已同步更新 `current_version.compare_rule`
 - [ ] 已同步更新 `current_version.source_of_truth`
+- [ ] 生命周期变化时（新增长命客户端/进程），已同步 `close()` 或调用内起停，并重跑 add-tool checklist 的进程计数项
 
 ## 三、toolskill 同步
 

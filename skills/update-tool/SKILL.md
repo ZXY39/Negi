@@ -7,7 +7,7 @@
 ## 目标
 
 - 升级判断来自 `source` 和 `current_version`，不是来自印象。
-- 更新后，代码 / 安装结果、`resource.yaml`、`toolskills/` 三者必须同步；运行时长特征变化时（新增长时编排步骤、改为自持子进程收尾等），同步增删 `resource.yaml -> timeout_policy` 声明；写入行为变化时（新加一次落库、一次投递、一次注册），同步撤掉或保住 `resource.yaml -> recovery_policy.rerun_safe` 声明成立的前提。
+- 更新后，代码 / 安装结果、`resource.yaml`、`toolskills/` 三者必须同步；运行时长特征变化时（新增长时编排步骤、改为自持子进程收尾等），同步增删 `resource.yaml -> timeout_policy` 声明；跨调用资源变化时（新增长命客户端 / 进程），同步 `close()` 或调用内起停；写入行为变化时（新加一次落库、一次投递、一次注册），同步撤掉或保住 `resource.yaml -> recovery_policy.rerun_safe` 声明成立的前提。
 - 驱动第三方安装的工具，更新的是 `<workspace>/externaltools/<tool_id>/` 里的真实安装与它的 handler，不得偷偷把上游 vendored 回 `main/`。
 - 安装过程中的下载、缓存、解压、备份中转文件统一放在 `<workspace>/temp/<tool_id>/`。
 
