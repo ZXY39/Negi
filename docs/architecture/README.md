@@ -240,7 +240,8 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 装了但终端里 `negi` 不出现、图标点了没反应、系统「已安装的应用」里没有 Negi、卸载后重装说目录非空、或卸载只该删程序却连数据一起没了 → `operations-and-maintenance.md`「新设备首次安装与升级」+「首选一键启动脚本」
 - 应用管理里点卸载后进度条一直不动、或卸完了程序还在 → `operations-and-maintenance.md`「卸载与安装面回收」；逐项落点读 `%TEMP%` 里的 `negi-uninstall-<UTC>.log` 与 `Negi Uninstallation Log`
 - 设置按钮红点不亮或误亮、没查过/查失败也被点亮成"有新版"、「重启并更新」点了服务没回来、或明明能上 GitHub 却一直"读不到远端标签"（`git_missing` 说的是这台设备的形态，不是网络） → `web-and-admin.md`「Update Notification And Restart-And-Upgrade Contract」+ `operations-and-maintenance.md`「自动检查新版本与「重启并更新」」
-- 升级已经成功红点仍亮到下一次检查、或没人改过目录却被报"有本地改动"拒绝换码 → `web-and-admin.md`「Update Notification And Restart-And-Upgrade Contract」+「Frontend Vendor Asset Update Contract」
+- 更新后用户说"我改的东西不见了"、设置里那一行列了哪些文件、`交给 Negi 解决` 走的是哪条投递车道，或 `copy-overwrite` 与 `merge-conflict` 分不清 → `operations-and-maintenance.md`「换码没能保住的本地改动」+ `web-and-admin.md`「Update Notification And Restart-And-Upgrade Contract」
+- 升级已经成功红点仍亮到下一次检查、或没人改过目录却被判成"有本地改动"而白跑一次 stash → `web-and-admin.md`「Update Notification And Restart-And-Upgrade Contract」+「Frontend Vendor Asset Update Contract」
 - 点输入框麦克风提示未就绪／未启用、新设备首点迟迟不出录音、录音结果仍是繁体、或局域网 http 打开时浏览器拒绝麦克风 → `speech-to-text.md`「分发与就绪」「已知边界」
 - QQ 发来的语音变成一行本地路径注记、或只有「用户语音，机器识别失败：…」、或语音条迟迟等不到回复 → `external-agent-api.md`「内置官方 QQ 适配器」+ `speech-to-text.md`「常见排障入口」
 - 语音气泡播放不出来、语音条右端的 `T` 点开是空的、或用户气泡里仍然显示 `用户语音，机器识别结果：` 这行字 → `speech-to-text.md`「语音气泡与音频字段的存放」+ `web-and-admin.md`「Attachment Bubble Rendering Contract」

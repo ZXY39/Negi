@@ -750,6 +750,11 @@ const U = {
     projectSettingsCheckUpdate: document.getElementById("project-settings-check-update-btn"),
     projectSettingsCheckUpdateLabel: document.getElementById("project-settings-check-update-label"),
     projectSettingsVersion: document.getElementById("project-settings-version"),
+    updateConflictBlock: document.getElementById("update-conflict-block"),
+    updateConflictHeadline: document.getElementById("update-conflict-headline"),
+    updateConflictPaths: document.getElementById("update-conflict-paths"),
+    updateConflictHint: document.getElementById("update-conflict-hint"),
+    updateConflictNegiBtn: document.getElementById("update-conflict-negi-btn"),
     updateReleaseBackdrop: document.getElementById("update-release-backdrop"),
     updateReleaseDialog: document.getElementById("update-release-dialog"),
     updateReleaseTitle: document.getElementById("update-release-title"),
@@ -10164,6 +10169,7 @@ function renderProjectSettingsUpdate(item) {
         U.projectSettingsVersion.classList.toggle("is-newer", Boolean(item?.newer));
     }
     if (U.projectSettingsCheckDot) U.projectSettingsCheckDot.hidden = !Boolean(item?.newer);
+    renderUpdateConflictBlock(item);
 }
 
 async function refreshUpdateStatus() {
@@ -10992,6 +10998,9 @@ function bindProjectSettings() {
     U.projectSettingsExit?.addEventListener("click", () => {
         closeProjectSettingsDialog();
         void requestProjectExit();
+    });
+    U.updateConflictNegiBtn?.addEventListener("click", () => {
+        void handUpdateConflictsToNegi();
     });
 }
 

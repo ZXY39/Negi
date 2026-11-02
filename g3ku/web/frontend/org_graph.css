@@ -17845,6 +17845,61 @@ textarea {
     color: var(--danger-color, #ef4444);
 }
 
+/* 这次更新没能保住的本地改动：状态与那颗动作键同一排，不画分隔线。路径条数不封顶在
+   盒子上 —— 框子固定高度、里面自己滚，文件再多也不把设置面板撑开。 */
+.update-conflict-block {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.update-conflict-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.update-conflict-headline {
+    color: var(--ui-text-muted);
+    font-size: 13px;
+}
+
+.update-conflict-block.is-handed-off .update-conflict-headline {
+    color: var(--ui-text-muted);
+}
+
+.update-conflict-paths {
+    margin: 0;
+    padding: 6px 8px;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-height: 132px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    font-size: 12px;
+}
+
+.update-conflict-paths code {
+    display: block;
+    white-space: pre;
+    overflow-x: auto;
+    color: var(--ui-text-primary, inherit);
+}
+
+.update-conflict-paths .update-conflict-more {
+    color: var(--ui-text-muted);
+    font-size: 12px;
+}
+
+.update-conflict-hint {
+    color: var(--ui-text-muted);
+    font-size: 12px;
+    word-break: break-all;
+}
+
 /* 检查更新按钮带红点，得自己当定位父。 */
 #project-settings-check-update-btn {
     position: relative;
