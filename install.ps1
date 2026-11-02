@@ -274,6 +274,13 @@ function Copy-CheckoutInto {
     # Top-level merge: environment and operator data are never touched on an
     # upgrade. Files the new release deleted stay behind until a reinstall.
     $excludes = Get-DistributionExcludes -Source $Source
+    if ($KeepProtected) {
+        # Only an upgrade has a "previous version" to compare against: the copy lane has no
+        # index, so the installed-tree fingerprint is what separates a file this device edited
+        # from a file the release itself changed. With no fingerprint yet (the first upgrade
+        # after a fresh install) nothing is claimed -- no false positives.
+        Invoke-LocalEdits -From $Source -Root $Root -Arguments @('preserve-copy', '--root', $Root, '--new', $Source, '--ref', $Ref, '--data-root', (Join-Path $Root '.g3ku'))
+    }
     Get-ChildItem -LiteralPath $Source -Force | ForEach-Object {
         if ($KeepProtected -and $ProtectedEntries -contains $_.Name) { return }
         if ($_.Name -eq '.git' -and (Test-Path (Join-Path $Root '.git'))) { return }
@@ -345,6 +352,50 @@ function Install-CodeInto {
     }
 }
 
+function Resolve-UpgradePython {
+    param([string]$Root)
+    foreach ($candidate in @((Join-Path $Root '.venv\bin\python'), (Join-Path $Root '.venv\Scripts\python.exe'))) {
+        if (Test-Path -LiteralPath $candidate) { return $candidate }
+    }
+    return $null
+}
+
+function Invoke-LocalEdits {
+    param([string]$From, [string]$Root, [string[]]$Arguments)
+    # Local edits that the swap cannot keep are described by one module on both lanes
+    # (`g3ku/update_local_edits.py` owns the manifest shape, the batch directory and the
+    # retention bound). This helper only calls it at the right moment, and a protection
+    # step must never hold up the upgrade: with no interpreter yet (a fresh install has no
+    # venv) or no module yet (a device upgrading from before this release) it stays silent.
+    $python = Resolve-UpgradePython -Root $Root
+    if (-not $python) { return }
+    $savedPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    # The protection step reads the operator's own tree; it must not leave __pycache__ behind.
+    $env:PYTHONDONTWRITEBYTECODE = '1'
+    $line = ''
+    try {
+        Push-Location $From
+        try {
+            $line = & $python '-m' 'g3ku.update_local_edits' @Arguments 2>$null | Select-Object -Last 1
+        }
+        finally {
+            Pop-Location
+        }
+    }
+    finally {
+        $ErrorActionPreference = $savedPreference
+    }
+    $line = [string]$line
+    if ($line -notlike 'NEGI_LOCAL_EDITS*') { return }
+    if ($line -like '*error:*') {
+        Write-Step "local-edit protection failed: $($line -replace '^NEGI_LOCAL_EDITS\s*', '')"
+        return
+    }
+    if ($line -eq 'NEGI_LOCAL_EDITS none') { return }
+    Write-Step "local edits batch: $($line -replace '^NEGI_LOCAL_EDITS\s*', '')"
+}
+
 function Test-TrackedChanges {
     param([string]$Root)
     # Only content differences of tracked files count: untracked entries (market
@@ -394,19 +445,18 @@ function Save-TrackedChanges {
 
 function Restore-TrackedChanges {
     param([string]$Root, [string]$Label)
-    # A conflict means the new release touched the same lines. Drop the merge
-    # result -- the edits themselves stay in the stash -- because a tree left with
-    # conflict markers cannot serve: the installer is about to hand it to a live
-    # process.
+    # A conflict means the new release touched the same lines. The old repair dropped the
+    # whole merge with `reset --hard`, which also wiped the edits that did *not* conflict,
+    # and the operator only ever saw "update succeeded". Now only the genuinely unmerged
+    # paths go back to the release content -- a tree handed to a live process must carry no
+    # conflict markers -- the rest stays applied, and the batch is written out as an object
+    # the settings row and Negi can both read.
     $savedPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     $code = 1
     try {
         & git -C $Root stash pop --quiet 'stash@{0}' 2>&1 | ForEach-Object { [string]$_ } | Out-Host
         $code = $LASTEXITCODE
-        if ($code -ne 0) {
-            & git -C $Root reset --hard HEAD 2>&1 | Out-Null
-        }
     }
     finally {
         $ErrorActionPreference = $savedPreference
@@ -416,6 +466,7 @@ function Restore-TrackedChanges {
         return
     }
     Write-Step "local edits conflict with $Ref; kept in git stash as $Label (resolve with: git -C $Root stash pop)"
+    Invoke-LocalEdits -From $Root -Root $Root -Arguments @('preserve-git', '--root', $Root, '--ref', $Ref, '--label', $Label, '--data-root', (Join-Path $Root '.g3ku'))
 }
 
 function Update-GitCheckout {
@@ -827,6 +878,7 @@ if ($Kit) {
 $uv = Ensure-Uv
 Update-Code -Root $Dir -Kit $resolvedKit
 Install-Environment -uv $uv -Root $Dir -Kit $resolvedKit
+Invoke-LocalEdits -From $Dir -Root $Dir -Arguments @('record', '--root', $Dir, '--ref', $Ref, '--data-root', (Join-Path $Dir '.g3ku'))
 Clear-LongPathTree -Path $kitStage
 
 $icon = Copy-NegiIcon -Root $Dir

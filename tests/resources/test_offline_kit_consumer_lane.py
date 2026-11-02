@@ -30,7 +30,8 @@ BASH_FUNCTIONS = (
     "log", "fail", "find_uv", "device_kit_platform", "sha256_of", "kit_field",
     "kit_wheel_pairs", "resolve_kit", "clear_kit_stage", "install_kit_uv",
     "install_offline_environment", "exclude_names_from_stream",
-    "is_excluded_top_level", "copy_checkout_into_root", "update_code_from_kit",
+    "is_excluded_top_level", "upgrade_python_bin", "run_local_edits",
+    "record_installed_tree", "copy_checkout_into_root", "update_code_from_kit",
 )
 
 

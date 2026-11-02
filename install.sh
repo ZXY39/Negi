@@ -425,6 +425,11 @@ copy_checkout_into_root() {
     EXCLUDED_TOP_LEVELS="$(exclude_names_from_stream < "$CHECKOUT_DIR/packaging/distribution-excludes.txt")" \
       || fail 'packaging/distribution-excludes.txt is malformed'
   fi
+  if [ "$keep_protected" = "1" ]; then
+    # 升级才有"上一版"可比较：覆盖之前按安装指纹挑出这台设备自己改过的文件，把原件
+    # 拷进批次目录。首装后的第一轮没有指纹，什么都不做（不误报，行为与今天一致）。
+    run_local_edits "$CHECKOUT_DIR" preserve-copy --root "$DIR" --new "$CHECKOUT_DIR" --ref "$REF" --data-root "$DIR/.g3ku"
+  fi
   for entry in "$CHECKOUT_DIR"/.* "$CHECKOUT_DIR"/*; do
     name="$(basename "$entry")"
     case "$name" in
@@ -446,6 +451,45 @@ copy_checkout_into_root() {
   done
 }
 
+# ---- 换码没能保住的本地改动：落成对象，交给界面和 Negi 接手 -----------------
+#
+# 清单的形状、批次目录与保留策略都在 `g3ku/update_local_edits.py`（两条车道共用一份
+# 实现），这里只负责在正确的时刻调它。保护动作绝不能拖住升级：没有解释器（首装还没有
+# venv）或模块还不存在（升级到这个版本之前的旧码）时静默跳过。
+upgrade_python_bin() {
+  local candidate
+  for candidate in "$DIR/.venv/bin/python" "$DIR/.venv/Scripts/python.exe"; do
+    if [ -x "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+run_local_edits() {
+  # 参数：<用哪棵树里的模块> <子命令与参数...>
+  local from_dir="$1"
+  shift
+  local py line
+  py="$(upgrade_python_bin)" || return 0
+  [ -n "$py" ] || return 0
+  line="$(cd "$from_dir" && PYTHONDONTWRITEBYTECODE=1 "$py" -m g3ku.update_local_edits "$@" 2>/dev/null)" || return 0
+  case "$line" in
+    "NEGI_LOCAL_EDITS none" | "NEGI_LOCAL_EDITS ledger:"*) : ;;
+    "NEGI_LOCAL_EDITS error:"*) log "local-edit protection failed: $line" ;;
+    "NEGI_LOCAL_EDITS "*) log "local edits batch: ${line#NEGI_LOCAL_EDITS }" ;;
+    *) log "local-edit protection answered nothing recognisable" ;;
+  esac
+  return 0
+}
+
+record_installed_tree() {
+  # 记下这一版装出来的文件指纹：拷贝车道没有 git index，下一轮只能靠它区分"这台设备
+  # 自己改过的文件"和"新版本本来就改了的文件"。没有指纹的那一轮什么都不做，不误报。
+  run_local_edits "$DIR" record --root "$DIR" --ref "$REF" --data-root "$DIR/.g3ku"
+}
+
 save_tracked_changes() {
   # 本地改动既不能被新版本覆盖，也不能变成"永久升不动"的理由：换代码前把整棵跟踪
   # 工作树存进 stash，换完再原样放回。`git stash` 要写提交对象、因此需要身份，而刚装
@@ -461,12 +505,14 @@ restore_tracked_changes() {
   [ -n "$STASH_LABEL" ] || return 0
   if git -C "$DIR" stash pop --quiet 'stash@{0}'; then
     log 'local edits restored'
-  else
-    # 冲突说明新版本动过同一批行：丢弃这次合并结果（改动本身仍在 stash 里），代码树
-    # 必须保持干净可运行 —— 带冲突标记的文件交给服务就是起不来。
-    git -C "$DIR" reset --hard HEAD >/dev/null 2>&1 || true
-    log "local edits conflict with $REF; kept in git stash as $STASH_LABEL (resolve with: git -C $DIR stash pop)"
+    STASH_LABEL=''
+    return 0
   fi
+  # 撞行说明新版本动过同一批行。旧做法是整树 reset --hard —— 那会把同一批里*没*撞行的
+  # 改动也一起抹掉，而界面只说"更新成功"。现在只回退真正未合并的路径（带冲突标记的文件
+  # 一个都不留，这棵树马上要交给活进程），其余留在树上，并把这一批落成清单交出去。
+  log "local edits conflict with $REF; kept in git stash as $STASH_LABEL (resolve with: git -C $DIR stash pop)"
+  run_local_edits "$DIR" preserve-git --root "$DIR" --ref "$REF" --label "$STASH_LABEL" --data-root "$DIR/.g3ku"
   STASH_LABEL=''
 }
 
@@ -748,6 +794,7 @@ fi
 ensure_uv
 update_code
 install_environment
+record_installed_tree
 clear_kit_stage
 
 PATH_ENTRY_ADDED=false

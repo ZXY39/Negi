@@ -53,7 +53,13 @@ def _log(message: str) -> None:
         pass
 
 
-def _record(outcome: str, ref: str, detail: str = "", stage: str = "") -> None:
+def _record(
+    outcome: str,
+    ref: str,
+    detail: str = "",
+    stage: str = "",
+    extra: dict[str, Any] | None = None,
+) -> None:
     """把这一跳的结局写给 web 侧读，界面才有"没升级成"可说。
 
     `apply` 端点在踢起执行体那一刻只能回 `restarting: true`；之后执行体无论停在
@@ -63,6 +69,9 @@ def _record(outcome: str, ref: str, detail: str = "", stage: str = "") -> None:
 
     中间阶段一律带 `outcome="started"` 再配一个 `stage`：单飞闸门判的就是
     `outcome == "started"`，把阶段写成新终态会让用户在升级途中再踢一次执行体。
+
+    `extra` 只往同一份 payload 里并字段（换码没能保住的本地改动），不新增终态码，
+    所以单飞闸门的判据不受影响。
     """
     from datetime import datetime
 
@@ -74,6 +83,8 @@ def _record(outcome: str, ref: str, detail: str = "", stage: str = "") -> None:
         "outcome": outcome,
         "detail": detail,
     }
+    if extra:
+        payload.update(extra)
     if stage:
         payload["stage"] = stage
         payload["stage_at"] = payload["at"]
@@ -84,6 +95,35 @@ def _record(outcome: str, ref: str, detail: str = "", stage: str = "") -> None:
 
 def _stage(ref: str, stage: str, detail: str = "") -> None:
     _record("started", ref, detail, stage=stage)
+
+
+def _conflict_extra(since_utc: str) -> dict[str, Any] | None:
+    """把安装脚本这一轮落下的"本地改动没能保住"批次并进台账，没有就返回 None。
+
+    清单由安装脚本写（它才知道撞了哪些行），这里只读、只顺带把超出保留批数的旧批次清掉。
+    读不到不能当成错误：没有这一份对象，界面照常报升级成功，只是不列文件。
+    """
+    from pathlib import Path
+
+    from g3ku.update_local_edits import prune, read_latest
+
+    try:
+        record = read_latest(since=since_utc)
+    except OSError:
+        return None
+    if record is None:
+        return None
+    prune()
+    paths = [str(item) for item in record.get("paths") or []]
+    _log(f"local edits not kept by this upgrade: lane={record.get('lane')} count={len(paths)}")
+    return {
+        "conflict_count": len(paths),
+        "conflict_paths": paths,
+        "conflict_lane": str(record.get("lane") or ""),
+        "conflict_stash": str(record.get("stash_label") or ""),
+        "conflict_dir": str(Path(str(record.get("batch_dir") or ""))),
+        "conflict_at": str(record.get("at") or ""),
+    }
 
 
 def _read_config_port() -> int | None:
@@ -341,7 +381,11 @@ def spawn_runner(ref: str, *, port: int | None = None, pause_running_work: bool 
 
 def run(ref: str, *, port: int | None = None, pause_running_work: bool = True) -> int:
     global _RUN_STARTED_MONOTONIC
+    from datetime import datetime, timezone
+
     _RUN_STARTED_MONOTONIC = time.monotonic()
+    # 安装脚本给冲突批次起的目录名与 `at` 都是 UTC 串，比较走同一格式。
+    run_started = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     _log(f"apply start ref={ref} pause_running_work={pause_running_work}")
     resolved = _resolve_port(port)
     if resolved is None:
@@ -367,14 +411,21 @@ def run(ref: str, *, port: int | None = None, pause_running_work: bool = True) -
         return 3
     _stage(ref, "upgrading", "取新代码并同步环境")
     upgraded = _run_upgrade(ref)
+    conflicts = _conflict_extra(run_started)
     if not upgraded:
         _log("upgrade failed; relaunching the previous version")
     _stage(ref, "relaunching", f"port={resolved}")
     _relaunch_web(resolved)
     if upgraded:
-        _record("ok", ref, f"relaunched on port {resolved}", stage="ok")
+        _record("ok", ref, f"relaunched on port {resolved}", stage="ok", extra=conflicts)
     else:
-        _record("upgrade_failed", ref, f"{label}; install -Upgrade 非零退出，旧版本已重新拉起", stage="upgrade_failed")
+        _record(
+            "upgrade_failed",
+            ref,
+            f"{label}; install -Upgrade 非零退出，旧版本已重新拉起",
+            stage="upgrade_failed",
+            extra=conflicts,
+        )
     return 0 if upgraded else 1
 
 
