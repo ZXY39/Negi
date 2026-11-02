@@ -90,6 +90,11 @@ class ManifestBackedTool(Tool):
             return self._handler.set_context(*args, **kwargs)
         return None
 
+    def close(self) -> Any:
+        if hasattr(self._handler, "close"):
+            return self._handler.close()
+        return None
+
     async def execute(self, **kwargs: Any) -> Any:
         if isinstance(self._handler, Tool):
             return await self._handler.execute(**kwargs)
