@@ -306,3 +306,39 @@ async def test_batch_fail_on_unpaused_acceptance_node_answers_the_acceptance_gua
             assert node is not None and node.status == 'in_progress'
     finally:
         await service.close()
+
+
+@pytest.mark.asyncio
+async def test_node_ids_fail_on_unpaused_acceptance_node_answers_the_acceptance_guard(
+    tmp_path: Path,
+) -> None:
+    """单动作批次形态（`node_ids`）同样先撞验收守卫，而不是先被告知"没暂停"。
+
+    实盘字节是 `conflict / node_not_paused`：这条回包不带任何出口指引，模型读到就
+    会去暂停一颗永远不该被 fail 的验收器；targets 形态已经改成先答验收守卫，两条形态
+    对同一个动作必须给同一个理由（形状仍按各自语义：targets 整批原子打回，node_ids 逐节点 conflict）。
+    """
+    service = _service(tmp_path)
+    service._assert_worker_available = lambda: None
+    try:
+        _seed(service)
+        # 现场 = 实盘 C2：验收器被恢复后正在核验（暂停位已清、暂停行已退休）。
+        service.store.update_node(
+            ACCEPTANCE,
+            lambda record: record.model_copy(
+                update={'is_paused': False, 'pause_requested': False, 'pause_reason': ''}
+            ),
+        )
+        service.store.delete_task_node_pause(ACCEPTANCE)
+        acceptance = service.get_node(ACCEPTANCE)
+        assert acceptance is not None and acceptance.is_paused is False
+        result = await service.control_nodes(TASK, [ACCEPTANCE], 'fail', remark='give up')
+        item = result['items'][0]
+        assert item['result'] == 'conflict'
+        assert item['reason'] == 'acceptance_fail_does_not_settle_task'
+        assert item['inspected_node_id'] == CHILD
+        assert 'fail the inspected execution node' in item['hint']
+        latest = service.get_node(ACCEPTANCE)
+        assert latest is not None and latest.status == 'in_progress'
+    finally:
+        await service.close()

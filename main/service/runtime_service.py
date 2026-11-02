@@ -2777,6 +2777,14 @@ class MainRuntimeService:
             if action == 'pause' and paused:
                 results.append({'node_id': node_id, 'result': 'conflict', 'reason': 'node_already_paused'})
                 continue
+            if action == 'fail':
+                # 验收节点的守卫排在暂停位判据之前：批次车道与 scoped/级联车道对同一个请求
+                # 必须给同一个理由，而"它现在没暂停"会把真正的出口指引（恢复验收器 / fail
+                # 被验执行节点 / 取消任务）整个丢掉。
+                acceptance_rejection = self._acceptance_fail_rejection(node)
+                if acceptance_rejection is not None:
+                    results.append({'node_id': node_id, **acceptance_rejection})
+                    continue
             if action in {'resume', 'keep_paused', 'fail'} and not paused:
                 results.append({'node_id': node_id, 'result': 'conflict', 'reason': 'node_not_paused'})
                 continue
