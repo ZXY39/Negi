@@ -33,7 +33,7 @@ parameters:
     action:
       type: string
       enum: [resume, keep_paused, fail, pause]
-      description: Action applied to every node in node_ids (single-action batch form), or to the whole task when no node_ids/targets are given. Mutually exclusive with targets.
+      description: Action applied to every node in node_ids (single-action batch form), or to the whole task when no node_ids/targets are given. Mutually exclusive with targets. For resume, read each item's result - resumed means an executor is running, queued means a durable intent was recorded and the next pickup must consume it, deferred means a designed stop (waiting_acceptance / waiting_explicit) that is not a failure; verify queued with task_progress.
     cascade:
       type: boolean
       description: Propagate the action down to the whole subtree rooted at each node. With node_ids it applies to every node in the batch; with targets it serves as the default for entries that omit their own cascade flag. An atomic validated batch results whenever cascade is true. Targeting the task root node with cascade=true, and omitting node_ids entirely, both mean "the whole task" and behave identically - including flipping the task itself to Paused (and back) in the task hall.
@@ -48,7 +48,7 @@ parameters:
           action:
             type: string
             enum: [resume, keep_paused, fail, pause]
-            description: Action for this node or subtree.
+            description: Action for this node or subtree. resume reports per-node resumed/queued/deferred; queued is not failure.
           cascade:
             type: boolean
             description: When true, apply the action to the whole subtree rooted at node_id; when omitted, inherit the top-level cascade flag. The task root node with cascade=true targets the entire tree.

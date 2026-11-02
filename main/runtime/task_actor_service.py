@@ -13,6 +13,7 @@ from main.models import (
     normalize_final_acceptance_metadata,
     normalize_result_payload,
 )
+from main.protocol import now_iso
 from main.runtime.acceptance_handshake import (
     ACCEPTANCE_HANDSHAKE_KEY,
     ACCEPTANCE_STATE_ACCEPTED,
@@ -915,6 +916,9 @@ class TaskActorService:
                 # C：孤儿收尸/重派发——每次 worker 拾取都决断"DB 非终态但无执行器
                 # 也无重放路径"的节点，杜绝幽灵 in_progress（2026-09-15 事故 L3）。
                 await self._resume_task_paused_nodes(task_id)
+                # resume 意图必须先于收尸器消费：它留下的 entry 是"这个非终态节点
+                # 有人点名要复活"的唯一凭据；先收尸会把刚清位的节点重新 park。
+                await self._consume_resume_intents(task_id, dispatcher)
                 await self._reconcile_orphan_in_progress_nodes(task_id, dispatcher)
                 # 先扫一次可派发集合，再做通知复派。复派是逐节点串行 `await` 回合的，
                 # 一个长回合就能把待验节点饿在它后面（实盘 task:4555863a6a49：22:08 那趟
@@ -1783,6 +1787,168 @@ class TaskActorService:
                 pass
         return resumed
 
+    async def _consume_resume_intents(self, task_id: str, dispatcher: 'TaskNodeDispatcher') -> list[str]:
+        """在拾取道里消费点名 resume 意图，返回本轮落定的节点 id。
+
+        顺序是合同的一部分：本条先于孤儿收尸。点名 resume 已把暂停位清掉，
+        此刻节点"非终态 + 有帧 + 无执行器"与真正孤儿无法区分；唯一能证明它
+        该被复活的就是这条持久意图。
+        """
+        list_due = getattr(self._store, 'list_due_task_node_resume_intents', None)
+        claim = getattr(self._store, 'claim_task_node_resume_intent', None)
+        finish = getattr(self._store, 'finish_task_node_resume_intent', None)
+        if not callable(list_due) or not callable(claim) or not callable(finish):
+            return []
+        current = now_iso()
+        try:
+            intents = list(list_due(task_id, now=current) or [])
+        except Exception:
+            # 意图读不出来时按"没有意图"处理：收尸器照旧 park，不猜测（I4）。
+            logger.exception('resume intent list failed: task={}', task_id)
+            return []
+        settled: list[str] = []
+        for intent in intents:
+            node_id = str(getattr(intent, 'node_id', '') or '').strip()
+            if not node_id:
+                continue
+            claimed = claim(node_id, claimed_at=current)
+            if claimed is None:
+                continue  # 另一个拾取已领走
+            try:
+                outcome, reason, done = await self._apply_resume_intent(task_id, dispatcher, node_id)
+            except Exception:
+                # 不落 failed：消费途中异常（存储抖动/进程收尾）留给下一个拾取
+                # 在 claim 过期后重试；failed 只表达确定不会复活的结局。
+                logger.exception('resume intent consume failed: task={} node={}', task_id, node_id)
+                settled.append(node_id)
+                continue
+            if not done:
+                # 没有 dispatcher 等非常规形态：保留 pending，让下一次拾取再来。
+                logger.info(
+                    'resume intent deferred at pickup: task={} node={} outcome={} reason={}',
+                    task_id,
+                    node_id,
+                    outcome,
+                    reason,
+                )
+                settled.append(node_id)
+                continue
+            finish(
+                node_id=node_id,
+                command_id=str(getattr(claimed, 'command_id', '') or ''),
+                state='applied',
+                outcome=outcome,
+                reason=reason,
+                finished_at=now_iso(),
+            )
+            try:
+                logger.info(
+                    'resume intent consumed: task={} node={} outcome={} reason={}',
+                    task_id,
+                    node_id,
+                    outcome,
+                    reason,
+                )
+            except Exception:
+                pass
+            settled.append(node_id)
+        return settled
+
+    async def _apply_resume_intent(
+        self,
+        task_id: str,
+        dispatcher: 'TaskNodeDispatcher',
+        node_id: str,
+    ) -> tuple[str, str, bool]:
+        """执行一条已领取的 intent，返回 `(outcome, reason, settled)`。
+
+        `settled=False` 表示意图必须保持 pending（dispatcher 意外缺席）。
+        """
+        task = self._store.get_task(task_id)
+        if task is None:
+            return 'task_terminal', 'task_missing', True
+        if str(getattr(task, 'status', '') or '').strip().lower() != 'in_progress':
+            return 'task_terminal', str(getattr(task, 'status', '') or ''), True
+        if bool(getattr(task, 'cancel_requested', False)):
+            return 'cancel_requested', 'task_cancel_requested', True
+        root_node_id = str(getattr(task, 'root_node_id', '') or '').strip()
+        if (
+            bool(getattr(task, 'is_paused', False)) or bool(getattr(task, 'pause_requested', False))
+        ) and str(node_id or '').strip() != root_node_id:
+            # 根节点的 resume 就是任务级恢复（根暂停态回填任务标志）；其余节点
+            # 在暂停任务里恢复不会产生执行，如实消耗成 task_paused。
+            return 'task_paused', 'task_paused', True
+        node = self._store.get_node(node_id)
+        if node is None or str(getattr(node, 'task_id', '') or '').strip() != str(task_id or '').strip():
+            return 'not_found', 'node_missing', True
+        if str(getattr(node, 'status', '') or '').strip().lower() in {'success', 'failed'}:
+            return 'node_terminal', 'node_terminal', True
+        try:
+            settled_reason = str(self._node_runner.spawn_entry_settlement_reason(node_id) or '').strip()
+        except Exception:
+            settled_reason = ''
+        if settled_reason:
+            # 父节点已把这一轮读成失败：复活不会被采纳，下一轮清扫还会连验收一起取代。
+            return 'entry_settled', settled_reason, True
+        handshake = normalize_acceptance_handshake(
+            (getattr(node, 'metadata', None) or {}).get(ACCEPTANCE_HANDSHAKE_KEY)
+        )
+        if str(handshake.get('state') or '').strip() == ACCEPTANCE_STATE_WAITING_ACCEPTANCE:
+            return 'deferred', 'waiting_acceptance', True
+        phase = self._frame_phase(task_id, node_id)
+        if str(phase or '').strip() in PARKED_PHASES:
+            return 'deferred', f'parked_phase:{phase}', True
+        try:
+            self._log_service.set_node_pause_state(
+                task_id,
+                node_id,
+                pause_requested=False,
+                is_paused=False,
+                pause_reason='',
+                remark='',
+            )
+        except Exception:
+            logger.exception('resume intent pause clear failed: task={} node={}', task_id, node_id)
+        if dispatcher.node_is_being_driven(node_id) is True:
+            return 'resumed', 'already_driven', True
+        entry_outcome = await self.resume_node_entry(task_id, node_id)
+        outcome, reason = self._resume_outcome_from_entry(entry_outcome)
+        if outcome == 'queued':
+            return outcome, reason, False
+        return outcome, reason, True
+
+    @staticmethod
+    def _resume_outcome_from_entry(entry_outcome: str) -> tuple[str, str]:
+        normalized = str(entry_outcome or '').strip()
+        if normalized == 'resumed':
+            return 'resumed', ''
+        if normalized == 'deferred':
+            return 'deferred', ''
+        if normalized == 'no_dispatcher':
+            return 'queued', 'no_dispatcher'
+        if normalized == 'skipped:node_missing':
+            return 'not_found', 'node_missing'
+        if normalized == 'skipped:node_terminal':
+            return 'node_terminal', 'node_terminal'
+        if normalized == 'skipped:operator_paused':
+            return 'deferred', 'operator_paused'
+        if normalized:
+            return 'deferred', normalized
+        return 'queued', 'unknown_entry_outcome'
+
+    def _resume_intent_blocks_orphan_reap(self, node_id: str) -> bool:
+        """持有未落定 resume 意图的节点不是孤儿；读失败按"没有意图"处理（I4）。"""
+        getter = getattr(self._store, 'get_task_node_resume_intent', None)
+        if not callable(getter):
+            return False
+        try:
+            intent = getter(node_id)
+        except Exception:
+            return False
+        if intent is None:
+            return False
+        return str(getattr(intent, 'state', '') or '').strip() in {'pending', 'claimed'}
+
     async def _reconcile_orphan_in_progress_nodes(self, task_id: str, dispatcher: 'TaskNodeDispatcher') -> None:
         """C：孤儿收尸/重派发（每次 run_task 拾取时执行，幂等）。
 
@@ -1825,6 +1991,10 @@ class TaskActorService:
                 # 未挂派生轮的节点（非常规形态）不武断收尸，交由父管线/失速监控。
                 continue
             if self._node_operator_paused(node):
+                continue
+            if self._resume_intent_blocks_orphan_reap(node_id):
+                # 点名 resume 已清位、consumer 还没跑或正在跑：这不是孤儿，
+                # 是"下一次拾取必须先消费的复活请求"。
                 continue
             # 非阻塞派生下，"in_progress 且没有执行器"有四种正常形态，收尸器不能
             # 把其中任何一种读成幽灵：

@@ -3125,6 +3125,11 @@ class TaskLogService:
         so the partial work stays traceable. Must be called with the task lock held.
         """
         swept: list[NodeRecord] = []
+        # 任务终态后没有任何节点还能被复活：resume 意图按任务整批退休。
+        try:
+            self._store.delete_task_node_resume_intents_for_task(task.task_id)
+        except Exception:
+            logger.exception('resume intent cleanup failed for terminal task {}', task.task_id)
         if not self._store.count_unsettled_task_nodes(task.task_id):
             return swept
         for node in self._store.iter_nodes(task.task_id):

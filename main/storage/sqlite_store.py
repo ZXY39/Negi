@@ -11,7 +11,7 @@ import sys
 import tempfile
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Iterator, TypeVar
 
@@ -26,6 +26,7 @@ from main.models import (
     TaskMessageDistributionEpoch,
     TaskNodeNotification,
     TaskNodePauseRecord,
+    TaskNodeResumeIntentRecord,
     TaskNodeTimerRecord,
     TaskRecord,
 )
@@ -220,6 +221,19 @@ class SQLiteTaskStore:
                 delivered INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
+            )
+            ''',
+            '''
+            CREATE TABLE IF NOT EXISTS task_node_resume_intents (
+                node_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                command_id TEXT NOT NULL DEFAULT '',
+                state TEXT NOT NULL DEFAULT 'pending',
+                outcome TEXT NOT NULL DEFAULT '',
+                reason TEXT NOT NULL DEFAULT '',
+                requested_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT '',
+                consumed_at TEXT NOT NULL DEFAULT ''
             )
             ''',
             '''
@@ -575,6 +589,7 @@ class SQLiteTaskStore:
             'CREATE INDEX IF NOT EXISTS idx_nodes_parent_node_id ON nodes(parent_node_id)',
             'CREATE INDEX IF NOT EXISTS idx_task_node_pauses_task_id ON task_node_pauses(task_id)',
             'CREATE INDEX IF NOT EXISTS idx_task_node_pauses_error_pending ON task_node_pauses(pause_reason, delivered)',
+            'CREATE INDEX IF NOT EXISTS idx_task_node_resume_intents_task_state ON task_node_resume_intents(task_id, state)',
             'CREATE INDEX IF NOT EXISTS idx_task_node_timers_wake_at ON task_node_timers(wake_at_ms)',
             'CREATE INDEX IF NOT EXISTS idx_task_error_logs_task_id_seq ON task_error_logs(task_id, seq)',
             'CREATE INDEX IF NOT EXISTS idx_artifacts_task_id ON artifacts(task_id)',
@@ -1056,6 +1071,7 @@ class SQLiteTaskStore:
             conn.execute(f'DELETE FROM task_node_tool_results WHERE node_id IN ({placeholders})', tuple(normalized_ids))
             conn.execute(f'DELETE FROM task_node_details WHERE node_id IN ({placeholders})', tuple(normalized_ids))
             conn.execute(f'DELETE FROM task_node_pauses WHERE node_id IN ({placeholders})', tuple(normalized_ids))
+            conn.execute(f'DELETE FROM task_node_resume_intents WHERE node_id IN ({placeholders})', tuple(normalized_ids))
             conn.execute(f'DELETE FROM task_error_logs WHERE node_id IN ({placeholders})', tuple(normalized_ids))
             conn.execute(f'DELETE FROM task_node_rounds WHERE parent_node_id IN ({placeholders})', tuple(normalized_ids))
             conn.execute(f'DELETE FROM task_nodes WHERE node_id IN ({placeholders})', tuple(normalized_ids))
@@ -1707,6 +1723,7 @@ class SQLiteTaskStore:
             conn.execute('DELETE FROM task_model_calls WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM task_runtime_meta WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM task_node_pauses WHERE task_id = ?', (task_id,))
+            conn.execute('DELETE FROM task_node_resume_intents WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM task_node_timers WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM task_error_logs WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM task_commands WHERE task_id = ?', (task_id,))
@@ -1788,6 +1805,169 @@ class SQLiteTaskStore:
 
     def mark_pause_delivered(self, pause_id: int) -> None:
         self.mark_task_node_pause_delivered(pause_id)
+
+    # --- 节点 resume 持久意图 -------------------------------------------------------
+    # 意图是"下一次任务拾取必须消费"的持久请求，不是时间 TTL：worker 离线时保留，
+    # 任务终态/取消/节点终态时由清理点删除。`claimed` 只是消费中的领取凭证，
+    # 超过 stale 窗口未落定说明消费进程死了，下一个拾取可以重新领取。
+    _RESUME_CLAIM_STALE_SECONDS = 120
+
+    @staticmethod
+    def _parse_task_node_resume_intent(row: Any) -> TaskNodeResumeIntentRecord:
+        return TaskNodeResumeIntentRecord(
+            node_id=str(row['node_id'] or ''),
+            task_id=str(row['task_id'] or ''),
+            command_id=str(row['command_id'] or ''),
+            state=str(row['state'] or 'pending'),
+            outcome=str(row['outcome'] or ''),
+            reason=str(row['reason'] or ''),
+            requested_at=str(row['requested_at'] or ''),
+            updated_at=str(row['updated_at'] or ''),
+            consumed_at=str(row['consumed_at'] or ''),
+        )
+
+    def upsert_task_node_resume_intent(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        command_id: str = '',
+        requested_at: str,
+        updated_at: str,
+    ) -> TaskNodeResumeIntentRecord:
+        """写入/刷新一次点名 resume；任何既有状态都被新请求重置为 `pending`。"""
+
+        def operation(conn: sqlite3.Connection) -> TaskNodeResumeIntentRecord:
+            conn.execute(
+                'INSERT INTO task_node_resume_intents '
+                '(node_id, task_id, command_id, state, outcome, reason, requested_at, updated_at, consumed_at) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) '
+                'ON CONFLICT(node_id) DO UPDATE SET task_id=excluded.task_id, command_id=excluded.command_id, '
+                "state='pending', outcome='', reason='', requested_at=excluded.requested_at, "
+                "updated_at=excluded.updated_at, consumed_at=''",
+                (
+                    str(node_id or '').strip(),
+                    str(task_id or '').strip(),
+                    str(command_id or ''),
+                    'pending',
+                    '',
+                    '',
+                    str(requested_at or ''),
+                    str(updated_at or ''),
+                    '',
+                ),
+            )
+            row = conn.execute(
+                'SELECT node_id, task_id, command_id, state, outcome, reason, requested_at, updated_at, consumed_at '
+                'FROM task_node_resume_intents WHERE node_id = ?',
+                (str(node_id or '').strip(),),
+            ).fetchone()
+            return self._parse_task_node_resume_intent(row)
+        return self._run_write(operation)
+
+    def get_task_node_resume_intent(self, node_id: str) -> TaskNodeResumeIntentRecord | None:
+        row = self._fetchone(
+            'SELECT node_id, task_id, command_id, state, outcome, reason, requested_at, updated_at, consumed_at '
+            'FROM task_node_resume_intents WHERE node_id = ?',
+            (str(node_id or '').strip(),),
+        )
+        return self._parse_task_node_resume_intent(row) if row is not None else None
+
+    def list_due_task_node_resume_intents(self, task_id: str, *, now: str) -> list[TaskNodeResumeIntentRecord]:
+        """待消费意图：`pending`，加上超过领取窗口仍未落定的 `claimed`。"""
+        stale_floor = str(now or '')
+        try:
+            stale_floor = (
+                datetime.fromisoformat(str(now))
+                - timedelta(seconds=self._RESUME_CLAIM_STALE_SECONDS)
+            ).isoformat(timespec='microseconds')
+        except (TypeError, ValueError):
+            pass
+        rows = self._fetchall(
+            'SELECT node_id, task_id, command_id, state, outcome, reason, requested_at, updated_at, consumed_at '
+            "FROM task_node_resume_intents WHERE task_id = ? AND (state = 'pending' "
+            "OR (state = 'claimed' AND (consumed_at = '' OR consumed_at <= ?))) "
+            'ORDER BY requested_at ASC, node_id ASC',
+            (str(task_id or '').strip(), stale_floor),
+        )
+        return [self._parse_task_node_resume_intent(row) for row in rows]
+
+    def claim_task_node_resume_intent(
+        self,
+        node_id: str,
+        *,
+        claimed_at: str,
+    ) -> TaskNodeResumeIntentRecord | None:
+        """条件领取：只有真正把 `pending`（或过期 `claimed`）翻成 `claimed` 的那一方拿到。"""
+        normalized_node_id = str(node_id or '').strip()
+        current = str(claimed_at or '')
+        stale_floor = current
+        try:
+            stale_floor = (
+                datetime.fromisoformat(current)
+                - timedelta(seconds=self._RESUME_CLAIM_STALE_SECONDS)
+            ).isoformat(timespec='microseconds')
+        except (TypeError, ValueError):
+            pass
+
+        def operation(conn: sqlite3.Connection) -> TaskNodeResumeIntentRecord | None:
+            row = conn.execute(
+                'UPDATE task_node_resume_intents SET state = ?, consumed_at = ?, updated_at = ? '
+                "WHERE node_id = ? AND (state = 'pending' "
+                "OR (state = 'claimed' AND (consumed_at = '' OR consumed_at <= ?))) "
+                'RETURNING node_id, task_id, command_id, state, outcome, reason, requested_at, updated_at, consumed_at',
+                ('claimed', current, current, normalized_node_id, stale_floor),
+            ).fetchone()
+            return self._parse_task_node_resume_intent(row) if row is not None else None
+        return self._run_write(operation)
+
+    def finish_task_node_resume_intent(
+        self,
+        *,
+        node_id: str,
+        command_id: str,
+        state: str,
+        outcome: str,
+        reason: str = '',
+        finished_at: str,
+    ) -> bool:
+        """落定本次领取；期间若已有更新的 resume 请求（command_id 变了）则不覆盖。"""
+        normalized_state = str(state or 'applied').strip().lower()
+        if normalized_state not in {'applied', 'failed'}:
+            normalized_state = 'applied'
+        row = self._fetchone(
+            'SELECT command_id FROM task_node_resume_intents WHERE node_id = ?',
+            (str(node_id or '').strip(),),
+        )
+        if row is None:
+            return False
+        if str(row['command_id'] or '') != str(command_id or ''):
+            return False
+        self._execute_write(
+            "UPDATE task_node_resume_intents SET state = ?, outcome = ?, reason = ?, updated_at = ? "
+            "WHERE node_id = ? AND state IN ('claimed', 'pending') AND command_id = ?",
+            (
+                normalized_state,
+                str(outcome or ''),
+                str(reason or ''),
+                str(finished_at or ''),
+                str(node_id or '').strip(),
+                str(command_id or ''),
+            ),
+        )
+        return True
+
+    def delete_task_node_resume_intent(self, node_id: str) -> None:
+        self._execute_write(
+            'DELETE FROM task_node_resume_intents WHERE node_id = ?',
+            (str(node_id or '').strip(),),
+        )
+
+    def delete_task_node_resume_intents_for_task(self, task_id: str) -> None:
+        self._execute_write(
+            'DELETE FROM task_node_resume_intents WHERE task_id = ?',
+            (str(task_id or '').strip(),),
+        )
 
     # --- 节点自设的一次性唤醒（`schedule_wake`）-------------------------------------
     # 领取凭证的有效期：投递一条唤醒要读节点行、写通知行、可能再拉一次 task actor，正常都在
@@ -1912,9 +2092,11 @@ class SQLiteTaskStore:
             "FROM task_node_pauses p JOIN nodes n ON n.node_id = p.node_id "
             "WHERE p.pause_reason = 'error' AND p.delivered = 0 AND n.status = 'in_progress' "
             "AND COALESCE(json_extract(n.payload_json, '$.is_paused'), 0) = 1 "
-            # P6：心跳只报根节点。非根节点的异常暂停走父节点信箱（child_abnormal_pause），
-            # 否则一个深度 5 的子节点也能直接惊动会话 agent。
-            "AND n.node_id = (SELECT json_extract(t.payload_json, '$.root_node_id') FROM tasks t WHERE t.task_id = p.task_id) "
+            # P6：非根执行节点的异常暂停走父节点信箱（child_abnormal_pause）。验收节点是
+            # 例外：它的父节点在 waiting_acceptance 时不会被非裁决消息唤醒，只有直达会话
+            # 才有人能把"验收器自身故障"与"被验节点被拒"分开处理。
+            "AND (n.node_id = (SELECT json_extract(t.payload_json, '$.root_node_id') FROM tasks t WHERE t.task_id = p.task_id) "
+            "OR json_extract(n.payload_json, '$.node_kind') = 'acceptance') "
             "ORDER BY p.created_at ASC, p.id ASC"
         )
         return [dict(row) for row in rows]

@@ -181,6 +181,7 @@ from main.runtime.node_runner import NodeRunner
 from main.runtime.node_seed_contracts import seed_drop_reason, trim_seed_contracts
 from main.runtime.node_turn_controller import NodeTurnController
 from main.runtime.node_wake import (
+    PARKED_PHASES,
     WakeDeps,
     node_park_state,
     wake_parked_node,
@@ -276,6 +277,12 @@ _TASK_TERMINAL_OUTBOX_ATTEMPT_LIMIT = 10
 _TASK_TERMINAL_DELIVERY_MAX_INFLIGHT = 8
 _WORKER_RUNTIME_REFRESH_TIMEOUT_SECONDS = 5.0
 _WORKER_RUNTIME_REFRESH_POLL_SECONDS = 0.1
+# resume 命令必须诚实：web leader 等 worker 的命令结果，worker 等拾取道消费意图。
+# 两个窗口都有界——离线 worker 不能把一次工具调用挂成无限等待。
+_RESUME_COMMAND_WAIT_SECONDS = 10.0
+_RESUME_COMMAND_POLL_SECONDS = 0.2
+_RESUME_INTENT_CONSUME_WAIT_SECONDS = 5.0
+_RESUME_INTENT_POLL_SECONDS = 0.2
 _WORKER_NODE_MESSAGE_TIMEOUT_SECONDS = 10.0
 _WORKER_NODE_MESSAGE_POLL_SECONDS = 0.05
 _WORKER_NODE_MESSAGE_FIELDS = (
@@ -1751,8 +1758,9 @@ class MainRuntimeService:
         task_id: str | None,
         session_id: str,
         payload: dict[str, Any] | None = None,
+        command_id: str | None = None,
     ) -> str:
-        command_id = new_command_id()
+        command_id = str(command_id or '').strip() or new_command_id()
         self.store.enqueue_task_command(
             command_id=command_id,
             task_id=task_id,
@@ -2184,6 +2192,26 @@ class MainRuntimeService:
                 landed.append(node.node_id)
         return landed
 
+    @staticmethod
+    def _acceptance_fail_rejection(node) -> dict[str, Any] | None:
+        """验收节点不能靠 fail 收尾：节点级失败不会短路任务，只会留下悬空。
+
+        任务终态由执行节点与握手派生；要闭合验收器故障，只能 resume 验收器、
+        fail 被验执行节点，或取消整个任务。
+        """
+        if str(getattr(node, 'node_kind', '') or '').strip().lower() != 'acceptance':
+            return None
+        metadata = getattr(node, 'metadata', None) if isinstance(getattr(node, 'metadata', None), dict) else {}
+        return {
+            'result': 'conflict',
+            'reason': 'acceptance_fail_does_not_settle_task',
+            'inspected_node_id': str((metadata or {}).get('accepted_node_id') or '').strip(),
+            'hint': (
+                'This is a verifier node: failing it does not settle the task. '
+                'Resume the verifier, fail the inspected execution node, or cancel the task.'
+            ),
+        }
+
     def _resume_entry_settled_conflict(self, node_id: str) -> dict[str, Any] | None:
         """复活"结果已交付父节点"的子节点不会被采纳：父节点已经把它读成失败，
         下一次派开会连同其绑定的验收节点一起按 superseded 清扫掉。返回 None 表示可复活。
@@ -2197,15 +2225,260 @@ class MainRuntimeService:
             'hint': '父节点已按失败读到该子节点；请让父节点重派，或先对父节点执行控制动作。',
         }
 
-    async def _apply_resume_node_command(self, task_id: str, *, node_ids: list[str], force: bool = False, schedule_if_inactive: bool = True) -> dict[str, Any]:
+    def _resume_task_gate_items(self, task, node_ids: list[str]) -> list[dict[str, Any]] | None:
+        """任务级闸门：暂停/终态/取消时，节点级 resume 不允许点火。"""
+        normalized_ids: list[str] = []
+        seen: set[str] = set()
+        for item in list(node_ids or []):
+            node_id = str(item or '').strip()
+            if not node_id or node_id in seen:
+                continue
+            seen.add(node_id)
+            normalized_ids.append(node_id)
+        root_node_id = str(getattr(task, 'root_node_id', '') or '').strip()
+        status = str(getattr(task, 'status', '') or '').strip().lower()
+        if status != 'in_progress':
+            return [
+                {'node_id': node_id, 'result': 'task_terminal', 'reason': status or 'task_terminal'}
+                for node_id in normalized_ids
+            ]
+        if bool(getattr(task, 'cancel_requested', False)):
+            return [
+                {'node_id': node_id, 'result': 'cancel_requested', 'reason': 'task_cancel_requested'}
+                for node_id in normalized_ids
+            ]
+        if (
+            bool(getattr(task, 'is_paused', False)) or bool(getattr(task, 'pause_requested', False))
+        ) and root_node_id not in normalized_ids:
+            # 恢复任务根节点就是恢复任务本身（根暂停态会回填任务标志）；恢复其他
+            # 节点在一个暂停任务里不会产生任何执行——如实报 task_paused。
+            return [
+                {'node_id': node_id, 'result': 'task_paused', 'reason': 'task_paused'}
+                for node_id in normalized_ids
+            ]
+        return None
+
+    def _record_resume_intent(self, *, task_id: str, node_id: str, command_id: str) -> None:
+        current = now_iso()
+        self.store.upsert_task_node_resume_intent(
+            task_id=task_id,
+            node_id=node_id,
+            command_id=command_id,
+            requested_at=current,
+            updated_at=current,
+        )
+        try:
+            logger.info(
+                'resume intent recorded: task={} node={} command={}',
+                task_id,
+                node_id,
+                command_id,
+            )
+        except Exception:
+            pass
+
+    def _finish_resume_intent(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        command_id: str,
+        outcome: str,
+        reason: str = '',
+    ) -> None:
+        try:
+            self.store.finish_task_node_resume_intent(
+                node_id=node_id,
+                command_id=command_id,
+                state='applied',
+                outcome=outcome,
+                reason=reason,
+                finished_at=now_iso(),
+            )
+        except Exception:
+            logger.exception('resume intent finish failed: task={} node={}', task_id, node_id)
+
+    async def _await_resume_command(
+        self,
+        command_id: str,
+        *,
+        timeout_s: float = _RESUME_COMMAND_WAIT_SECONDS,
+    ) -> dict[str, Any] | None:
+        """web leader 等 worker 的命令结果；超时/失败返回 None，由调用方降级成 queued。"""
+        deadline = time.monotonic() + max(0.1, float(timeout_s or _RESUME_COMMAND_WAIT_SECONDS))
+        while True:
+            current = self.store.get_task_command(command_id)
+            if current:
+                status = str(current.get('status') or '').strip().lower()
+                if status == 'completed':
+                    result = current.get('result') if isinstance(current.get('result'), dict) else {}
+                    return dict(result or {})
+                if status == 'failed':
+                    return {
+                        'ok': False,
+                        'error': str(current.get('error_text') or 'worker_command_failed'),
+                    }
+            if time.monotonic() >= deadline:
+                return None
+            await asyncio.sleep(_RESUME_COMMAND_POLL_SECONDS)
+
+    async def _await_resume_intents(
+        self,
+        node_ids: list[str],
+        *,
+        timeout_s: float = _RESUME_INTENT_CONSUME_WAIT_SECONDS,
+    ) -> dict[str, dict[str, Any]]:
+        """worker 缺席 dispatcher 时，等拾取道把意图推到 applied/failed。"""
+        pending = {str(item or '').strip() for item in list(node_ids or []) if str(item or '').strip()}
+        settled: dict[str, dict[str, Any]] = {}
+        if not pending:
+            return settled
+        deadline = time.monotonic() + max(0.1, float(timeout_s or _RESUME_INTENT_CONSUME_WAIT_SECONDS))
+        while pending:
+            for node_id in list(pending):
+                intent = self.store.get_task_node_resume_intent(node_id)
+                if intent is None:
+                    settled[node_id] = {'node_id': node_id, 'result': 'node_terminal', 'reason': 'intent_removed'}
+                    pending.discard(node_id)
+                    continue
+                if str(intent.state or '').strip() in {'applied', 'failed'}:
+                    settled[node_id] = {
+                        'node_id': node_id,
+                        'result': str(intent.outcome or '').strip() or 'queued',
+                        **(
+                            {'reason': str(intent.reason or '').strip()}
+                            if str(intent.reason or '').strip()
+                            else {}
+                        ),
+                    }
+                    pending.discard(node_id)
+            if not pending or time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(_RESUME_INTENT_POLL_SECONDS)
+        return settled
+
+    async def _apply_resume_node_command_via_worker(
+        self,
+        task_id: str,
+        task,
+        *,
+        node_ids: list[str],
+        schedule_if_inactive: bool,
+        command_id: str = '',
+    ) -> dict[str, Any]:
+        """web leader 只校验目标、写意图、入队命令，并等 worker 的逐节点结果。
+
+        leader 不本地清暂停位、也不返回裸 `resumed`：清位不等于复活，
+        只有 worker 的 triage 才知道执行器是否真的活下来了。
+        """
+        authoritative_command_id = str(command_id or '').strip() or new_command_id()
+        results: list[dict[str, Any]] = []
+        valid_ids: list[str] = []
+        gate_items = self._resume_task_gate_items(task, node_ids)
+        if gate_items is not None:
+            return {
+                'ok': True,
+                'task_id': task_id,
+                'command_id': authoritative_command_id,
+                'items': gate_items,
+            }
+        for raw_node_id in list(node_ids or []):
+            node_id = self.normalize_node_id(str(raw_node_id or '').strip())
+            node = self.get_node(node_id)
+            if node is None or str(node.task_id or '').strip() != task_id:
+                results.append({'node_id': node_id, 'result': 'not_found'})
+                continue
+            if str(node.status or '').strip().lower() in {'success', 'failed'}:
+                results.append({'node_id': node_id, 'result': 'conflict', 'reason': 'node_terminal'})
+                continue
+            if not (bool(node.is_paused) or bool(node.pause_requested)):
+                results.append({'node_id': node_id, 'result': 'conflict', 'reason': 'node_not_paused'})
+                continue
+            settled = self._resume_entry_settled_conflict(node_id)
+            if settled is not None:
+                results.append({'node_id': node_id, 'result': 'conflict', **settled})
+                continue
+            valid_ids.append(node_id)
+        if not valid_ids:
+            return {'ok': True, 'task_id': task_id, 'command_id': authoritative_command_id, 'items': results}
+        for node_id in valid_ids:
+            self._record_resume_intent(
+                task_id=task_id,
+                node_id=node_id,
+                command_id=authoritative_command_id,
+            )
+        self._enqueue_task_command(
+            command_type='resume_node',
+            task_id=task_id,
+            session_id=str(getattr(task, 'session_id', '') or 'web:shared'),
+            payload={'node_ids': list(valid_ids)},
+            command_id=authoritative_command_id,
+        )
+        # worker 不在线时等命令结果没有意义（`_assert_worker_available` 已拦过一次，
+        # 这里兜住它刚好掉线的窗口）：命令留着，结果如实报 queued。
+        if self.worker_state() in {_WORKER_STATE_ONLINE, _WORKER_STATE_STARTING}:
+            worker_result = await self._await_resume_command(authoritative_command_id)
+        else:
+            worker_result = None
+        worker_items: dict[str, dict[str, Any]] = {}
+        if worker_result and bool(worker_result.get('ok')):
+            for item in list(worker_result.get('items') or []):
+                if isinstance(item, dict) and str(item.get('node_id') or '').strip():
+                    worker_items[str(item['node_id']).strip()] = dict(item)
+        worker_error = str((worker_result or {}).get('error') or '').strip()
+        for node_id in valid_ids:
+            item = worker_items.get(node_id)
+            if item is None:
+                item = {
+                    'node_id': node_id,
+                    'result': 'queued',
+                    'reason': 'worker_not_consumed',
+                    'command_id': authoritative_command_id,
+                }
+                if worker_error:
+                    item['worker_error'] = worker_error
+            results.append(item)
+        return {
+            'ok': True,
+            'task_id': task_id,
+            'command_id': authoritative_command_id,
+            'items': results,
+        }
+
+    async def _apply_resume_node_command(
+        self,
+        task_id: str,
+        *,
+        node_ids: list[str],
+        force: bool = False,
+        schedule_if_inactive: bool = True,
+        command_id: str = '',
+    ) -> dict[str, Any]:
         normalized_task_id = self.normalize_task_id(task_id)
         task = self.get_task(normalized_task_id)
         if task is None:
             return {'ok': False, 'error': 'task_not_found', 'items': []}
+        normalized_ids = [
+            self.normalize_node_id(str(item or '').strip())
+            for item in list(node_ids or [])
+            if str(item or '').strip()
+        ]
+        if self.execution_mode == 'web':
+            return await self._apply_resume_node_command_via_worker(
+                normalized_task_id,
+                task,
+                node_ids=normalized_ids,
+                schedule_if_inactive=schedule_if_inactive,
+                command_id=command_id,
+            )
+        gate_items = self._resume_task_gate_items(task, normalized_ids)
+        if gate_items is not None:
+            return {'ok': True, 'task_id': normalized_task_id, 'items': gate_items}
         dispatcher = self.task_actor_service._dispatchers.get(normalized_task_id)
+        authoritative_command_id = str(command_id or '').strip() or new_command_id()
         results: list[dict[str, Any]] = []
-        for raw_node_id in list(node_ids or []):
-            node_id = self.normalize_node_id(str(raw_node_id or '').strip())
+        pending_ids: list[str] = []
+        for node_id in normalized_ids:
             node = self.get_node(node_id)
             if node is None or str(node.task_id or '').strip() != normalized_task_id:
                 results.append({'node_id': node_id, 'result': 'not_found'})
@@ -2222,6 +2495,13 @@ class MainRuntimeService:
                 if settled is not None:
                     results.append({'node_id': node_id, 'result': 'conflict', **settled})
                     continue
+            # 意图必须先于清位落盘：清位后进程死掉时，它是"有人点名要复活"的
+            # 唯一持久证据；先清位再写意图会重新造出假 resume 事故形态。
+            self._record_resume_intent(
+                task_id=normalized_task_id,
+                node_id=node_id,
+                command_id=authoritative_command_id,
+            )
             updated = self.log_service.set_node_pause_state(
                 normalized_task_id,
                 node_id,
@@ -2230,6 +2510,16 @@ class MainRuntimeService:
                 pause_reason='',
                 remark='',
             )
+            if updated is None:
+                self._finish_resume_intent(
+                    task_id=normalized_task_id,
+                    node_id=node_id,
+                    command_id=authoritative_command_id,
+                    outcome='not_found',
+                    reason='node_missing',
+                )
+                results.append({'node_id': node_id, 'result': 'not_found'})
+                continue
             handshake = normalize_acceptance_handshake(
                 ((updated.metadata if updated is not None else node.metadata) or {}).get(ACCEPTANCE_HANDSHAKE_KEY)
             )
@@ -2237,16 +2527,72 @@ class MainRuntimeService:
                 # 已提交、裁决在途：清暂停位就够了。再起一个执行回合会与正在跑的验收
                 # 并行（实盘 task:a0d1bd9bc9fa：15:48 resume 根节点后它和最终验收同时
                 # 跑到 15:53；验收通过把任务置 success，迟到的回合随后把根改写成 failed）。
+                self._finish_resume_intent(
+                    task_id=normalized_task_id,
+                    node_id=node_id,
+                    command_id=authoritative_command_id,
+                    outcome='deferred',
+                    reason='waiting_acceptance',
+                )
                 results.append({'node_id': node_id, 'result': 'deferred', 'reason': 'waiting_acceptance'})
+                continue
+            frame_phase = self.task_actor_service._frame_phase(normalized_task_id, node_id)
+            if str(frame_phase or '').strip() in PARKED_PHASES:
+                # 停靠相位不是唤醒对象：resume 只清位，等原来的唤醒源。
+                self._finish_resume_intent(
+                    task_id=normalized_task_id,
+                    node_id=node_id,
+                    command_id=authoritative_command_id,
+                    outcome='deferred',
+                    reason=f'parked_phase:{frame_phase}',
+                )
+                results.append({'node_id': node_id, 'result': 'deferred', 'reason': f'parked_phase:{frame_phase}'})
                 continue
             if dispatcher is not None and updated is not None:
                 # 走 TaskActorService 的复活入口：清标志不等于复活，必须留下活执行器
                 # 或把现场落进日志，并由延迟校验兜底（见 resume_node_entry）。
-                await self.task_actor_service.resume_node_entry(normalized_task_id, node_id)
-            results.append({'node_id': node_id, 'result': 'resumed' if updated is not None else 'not_found'})
-        if schedule_if_inactive and dispatcher is None and any(item.get('result') == 'resumed' for item in results) and str(task.status or '').strip().lower() == 'in_progress' and not bool(task.is_paused):
-            await self.global_scheduler.enqueue_task(normalized_task_id)
-        return {'ok': True, 'task_id': normalized_task_id, 'items': results}
+                entry_outcome = await self.task_actor_service.resume_node_entry(normalized_task_id, node_id)
+                outcome, reason = self.task_actor_service._resume_outcome_from_entry(entry_outcome)
+                if outcome == 'queued':
+                    pending_ids.append(node_id)
+                    results.append({'node_id': node_id, 'result': 'queued', 'reason': reason})
+                    continue
+                self._finish_resume_intent(
+                    task_id=normalized_task_id,
+                    node_id=node_id,
+                    command_id=authoritative_command_id,
+                    outcome=outcome,
+                    reason=reason,
+                )
+                results.append({'node_id': node_id, 'result': outcome, **({'reason': reason} if reason else {})})
+                continue
+            pending_ids.append(node_id)
+            results.append({'node_id': node_id, 'result': 'queued', 'reason': 'awaiting_worker_pickup'})
+        if schedule_if_inactive and dispatcher is None and pending_ids:
+            # 重读任务：恢复根节点会把根暂停态回填成任务标志，调用开始时那份
+            # 快照仍写着 paused，会误判成"任务还暂停"而跳过重排。
+            latest_task = self.get_task(normalized_task_id) or task
+            if (
+                str(getattr(latest_task, 'status', '') or '').strip().lower() == 'in_progress'
+                and not bool(getattr(latest_task, 'is_paused', False))
+                and not bool(getattr(latest_task, 'pause_requested', False))
+                and not bool(getattr(latest_task, 'cancel_requested', False))
+            ):
+                await self.global_scheduler.enqueue_task(normalized_task_id)
+                if self.execution_mode == 'worker':
+                    settled = await self._await_resume_intents(pending_ids)
+                    for item in results:
+                        if str(item.get('node_id') or '').strip() not in settled:
+                            continue
+                        if str(item.get('result') or '').strip() != 'queued':
+                            continue
+                        item.update(settled[str(item['node_id']).strip()])
+        return {
+            'ok': True,
+            'task_id': normalized_task_id,
+            'command_id': authoritative_command_id,
+            'items': results,
+        }
 
     async def _apply_fail_node_command(self, task_id: str, *, node_ids: list[str], reason: str = '', force: bool = False) -> dict[str, Any]:
         normalized_task_id = self.normalize_task_id(task_id)
@@ -2263,6 +2609,10 @@ class MainRuntimeService:
                 continue
             if str(node.status or '').strip().lower() in {'success', 'failed'} and not (force and dispatcher is not None and node_id in dispatcher._entries):
                 results.append({'node_id': node_id, 'result': 'conflict', 'reason': 'node_terminal'})
+                continue
+            acceptance_rejection = self._acceptance_fail_rejection(node)
+            if acceptance_rejection is not None:
+                results.append({'node_id': node_id, **acceptance_rejection})
                 continue
             if not force and not (bool(node.is_paused) or bool(node.pause_requested)):
                 results.append({'node_id': node_id, 'result': 'conflict', 'reason': 'node_not_paused'})
@@ -2312,23 +2662,16 @@ class MainRuntimeService:
     async def resume_node(self, task_id: str, node_id: str) -> NodeRecord | None:
         normalized_task_id = self.normalize_task_id(task_id)
         normalized_node_id = self.normalize_node_id(node_id)
-        task, _node = self._require_node_control_target(normalized_task_id, normalized_node_id)
+        self._require_node_control_target(normalized_task_id, normalized_node_id)
         if self.execution_mode == 'web':
             self._assert_worker_available()
-        applied = await self._apply_resume_node_command(normalized_task_id, node_ids=[normalized_node_id], schedule_if_inactive=self.execution_mode != 'web')
-        # 否决过的节点不得再入队：worker 侧按 force=True 应用，会绕过同一判据。
-        resumed = any(
-            str(item.get('result') or '').strip() == 'resumed'
-            for item in list(applied.get('items') or [])
-            if isinstance(item, dict)
+        # web 分支在 _apply_resume_node_command 内部写意图、入队并等 worker 结果；
+        # 调用方不再二次入队（否决过的节点本就到不了这里）。
+        await self._apply_resume_node_command(
+            normalized_task_id,
+            node_ids=[normalized_node_id],
+            schedule_if_inactive=self.execution_mode != 'web',
         )
-        if self.execution_mode == 'web' and resumed:
-            self._enqueue_task_command(
-                command_type='resume_node',
-                task_id=normalized_task_id,
-                session_id=task.session_id,
-                payload={'node_ids': [normalized_node_id]},
-            )
         return self.get_node(normalized_node_id)
 
     async def fail_node(self, task_id: str, node_id: str, reason: str = '') -> NodeRecord | None:
@@ -2450,8 +2793,10 @@ class MainRuntimeService:
         # keep_paused is applied leader-locally and has no worker command type;
         # enqueuing one here previously fell through to fail_node and terminated
         # the node that was meant to stay paused.
-        if self.execution_mode == 'web' and valid_ids and action != 'keep_paused':
-            command_type = 'pause_node' if action == 'pause' else ('resume_node' if action == 'resume' else 'fail_node')
+        # resume 的 worker 命令由 _apply_resume_node_command 自己入队（它必须把
+        # command_id 先写进意图才能等待同一条命令的结果）；这里只补 pause/fail。
+        if self.execution_mode == 'web' and valid_ids and action in {'pause', 'fail'}:
+            command_type = 'pause_node' if action == 'pause' else 'fail_node'
             self._enqueue_task_command(
                 command_type=command_type,
                 task_id=normalized_task_id,
@@ -2607,6 +2952,13 @@ class MainRuntimeService:
         # —— 阶段 2：施加（校验全过才会执行到这里）——
         dispatcher = self.task_actor_service._dispatchers.get(normalized_task_id)
         root_node_id = str(task.root_node_id or '').strip()
+        # 整任务 resume 必须先清任务级暂停：否则 worker 应用逐节点 resume 时
+        # 任务仍是 paused，非根节点会被闸门如实打回 task_paused。
+        if self.execution_mode == 'web' and any(
+            entry['action'] == 'resume' and root_node_id and root_node_id in set(ids)
+            for entry, ids in zip(kept_entries, kept_expansions)
+        ):
+            await self.resume_task(normalized_task_id)
         items: list[dict[str, Any]] = []
         target_summaries: list[dict[str, Any]] = []
         enqueue_requests: list[dict[str, Any]] = []
@@ -2647,7 +2999,6 @@ class MainRuntimeService:
                     items.append({'node_id': node_id, 'result': 'paused', 'target_index': entry['index']})
                     applied_ids.append(node_id)
             elif action == 'resume':
-                # 两遍式：先全清旗再续跑，避免被唤醒的父协程命中尚未清旗的后代重新暂停。
                 resume_candidates: list[str] = []
                 for node_id in ids:
                     node = self.get_node(node_id)
@@ -2668,6 +3019,9 @@ class MainRuntimeService:
                         items.append({'node_id': node_id, 'result': 'conflict', 'target_index': entry['index'], **settled})
                         skipped += 1
                         continue
+                    if self.execution_mode == 'web':
+                        resume_candidates.append(node_id)
+                        continue
                     updated = self.log_service.set_node_pause_state(
                         normalized_task_id,
                         node_id,
@@ -2683,7 +3037,27 @@ class MainRuntimeService:
                     resume_candidates.append(node_id)
                     items.append({'node_id': node_id, 'result': 'resumed', 'target_index': entry['index']})
                     applied_ids.append(node_id)
-                if dispatcher is not None:
+                if self.execution_mode == 'web':
+                    # leader 不本地清位：写意图、入队命令、等 worker 的逐节点 triage。
+                    if resume_candidates:
+                        applied_resume = await self._apply_resume_node_command(
+                            normalized_task_id,
+                            node_ids=resume_candidates,
+                            schedule_if_inactive=False,
+                        )
+                        applied_by_id = {
+                            str(item.get('node_id') or '').strip(): item
+                            for item in list(applied_resume.get('items') or [])
+                            if isinstance(item, dict)
+                        }
+                        for node_id in resume_candidates:
+                            entry_item = dict(applied_by_id.get(node_id) or {'node_id': node_id, 'result': 'queued'})
+                            entry_item['target_index'] = entry['index']
+                            items.append(entry_item)
+                            if str(entry_item.get('result') or '').strip() not in {'not_found', 'conflict'}:
+                                applied_ids.append(node_id)
+                elif dispatcher is not None:
+                    # 两遍式：先全清旗再续跑，避免被唤醒的父协程命中尚未清旗的后代重新暂停。
                     for node_id in resume_candidates:
                         await self.task_actor_service.resume_node_entry(normalized_task_id, node_id)
                 any_resumed = any_resumed or bool(resume_candidates)
@@ -2698,6 +3072,11 @@ class MainRuntimeService:
                         continue
                     if str(node.status or '').strip().lower() in {'success', 'failed'}:
                         items.append({'node_id': node_id, 'result': 'conflict', 'reason': 'node_terminal', 'target_index': entry['index']})
+                        skipped += 1
+                        continue
+                    acceptance_rejection = self._acceptance_fail_rejection(node)
+                    if acceptance_rejection is not None:
+                        items.append({'node_id': node_id, 'target_index': entry['index'], **acceptance_rejection})
                         skipped += 1
                         continue
                     if not (bool(node.is_paused) or bool(node.pause_requested)):
@@ -2744,9 +3123,11 @@ class MainRuntimeService:
                 'applied': len(applied_ids),
                 'skipped': skipped,
             })
-            if action != 'keep_paused' and applied_ids:
+            resume_handled_by_worker_contract = self.execution_mode == 'web' and action == 'resume'
+            if action != 'keep_paused' and applied_ids and not resume_handled_by_worker_contract:
                 enqueue_requests.append({'entry': entry, 'node_ids': list(applied_ids)})
-                if action in {'pause', 'resume'} and root_node_id and root_node_id in ids:
+            if action in {'pause', 'resume'} and root_node_id and root_node_id in ids:
+                if not resume_handled_by_worker_contract:
                     global_scope_actions.append(action)
         # 全局作用域（动作覆盖任务根节点）⇒ 复用 pause_task/resume_task 的任务级运行时
         # 副作用：「根节点 + cascade ≡ 全局」不只是状态一致，取消调度排队、唤醒排队等待、
@@ -2815,6 +3196,11 @@ class MainRuntimeService:
                     session_id=task.session_id,
                     payload={'task_id': task.task_id},
                 )
+        # 取消是终局：任何点名 resume 的意图都不得在取消后复活节点。
+        try:
+            self.store.delete_task_node_resume_intents_for_task(task_id)
+        except Exception:
+            logger.exception('resume intent cleanup failed for canceled task {}', task_id)
         return self.get_task(task_id)
 
     async def pause_task(self, task_id: str) -> TaskRecord | None:

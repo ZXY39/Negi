@@ -743,7 +743,14 @@ class TestAcceptanceActivationGate:
 
         monkeypatch.setattr(service.task_actor_service, 'resume_node_entry', fake_resume)
 
-        result = await service._apply_resume_node_command(TASK, node_ids=[CHILD])
+        # web leader 只写意图并等 worker；这条用例钉的是 worker 侧 triage 的 deferred 档。
+        service.execution_mode = 'embedded'
+        try:
+            result = await service._apply_resume_node_command(
+                TASK, node_ids=[CHILD], schedule_if_inactive=False
+            )
+        finally:
+            service.execution_mode = 'web'
 
         assert result['items'] == [
             {'node_id': CHILD, 'result': 'deferred', 'reason': 'waiting_acceptance'}

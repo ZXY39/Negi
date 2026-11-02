@@ -103,6 +103,20 @@ def _execution_child(service: MainRuntimeService, *, task, parent, name: str):
     )
 
 
+async def _apply_resume_as_worker(service: MainRuntimeService, task_id: str, node_ids: list[str]):
+    """模拟 worker 侧应用 resume（web leader 只写意图、入队、等结果）。"""
+    previous = service.execution_mode
+    service.execution_mode = "embedded"
+    try:
+        return await service._apply_resume_node_command(
+            task_id,
+            node_ids=list(node_ids),
+            schedule_if_inactive=False,
+        )
+    finally:
+        service.execution_mode = previous
+
+
 async def _wait_until(predicate, *, timeout: float = 2.0) -> None:
     deadline = time.perf_counter() + timeout
     while time.perf_counter() < deadline:
@@ -351,7 +365,8 @@ async def test_react_circuit_breakers_become_resumable_error_pauses(
         assert service.log_service.list_task_error_logs(record.task_id)[0].error_text == guarded_result.failure_text
         assert (paused.metadata or {}).get("result_payload") is None
 
-        resumed = await service.resume_node(record.task_id, record.root_node_id)
+        await _apply_resume_as_worker(service, record.task_id, [record.root_node_id])
+        resumed = service.get_node(record.root_node_id)
         assert resumed is not None
         assert resumed.pause_requested is False
         assert resumed.is_paused is False
@@ -475,7 +490,7 @@ async def test_dispatcher_keeps_paused_child_waiter_pending_and_resume_resolves_
         await _wait_until(lambda: calls == 1)
         assert not waiter.done()
 
-        await service.resume_node(record.task_id, child.node_id)
+        await _apply_resume_as_worker(service, record.task_id, [child.node_id])
         result = await asyncio.wait_for(waiter, timeout=2.0)
         assert result.status == "success"
         assert calls == 2
@@ -533,7 +548,8 @@ async def test_failing_paused_child_resolves_parent_waiter_and_parent_continues(
 
 @pytest.mark.asyncio
 async def test_control_nodes_support_cascade_actions_and_keep_paused_remark(tmp_path: Path) -> None:
-    service = _make_service(tmp_path)
+    service = _make_embedded_service(tmp_path)
+    service.global_scheduler._closed = True
     try:
         record = await service.create_task("control nodes", session_id="web:shared")
         task = service.get_task(record.task_id)
@@ -557,7 +573,8 @@ async def test_control_nodes_support_cascade_actions_and_keep_paused_remark(tmp_
         assert service.store.get_task_node_pause(root.node_id).remark == "等待人工确认"
 
         resumed = await service.control_nodes(record.task_id, [root.node_id], "resume")
-        assert resumed["items"][0]["result"] == "resumed"
+        # 没有 dispatcher 的进程只能留下持久意图：结果必须是 queued，不是裸 resumed。
+        assert resumed["items"][0]["result"] == "queued"
         assert service.store.get_task_node_pause(root.node_id) is None
 
         await service.control_nodes(record.task_id, [root.node_id], "pause")
@@ -833,7 +850,8 @@ async def test_control_nodes_targets_subtree_overlap_rejects_whole_batch(tmp_pat
 
 @pytest.mark.asyncio
 async def test_control_nodes_same_action_overlap_merges_into_covering_target(tmp_path: Path) -> None:
-    service = _make_service(tmp_path)
+    service = _make_embedded_service(tmp_path)
+    service.global_scheduler._closed = True
     try:
         record = await service.create_task("same action merge", session_id="web:shared")
         task = service.get_task(record.task_id)
@@ -960,7 +978,8 @@ async def test_control_nodes_cascade_pause_skips_error_paused_descendants(tmp_pa
 
 @pytest.mark.asyncio
 async def test_control_nodes_cascade_resume_clears_subtree_and_skips_conflicts(tmp_path: Path) -> None:
-    service = _make_service(tmp_path)
+    service = _make_embedded_service(tmp_path)
+    service.global_scheduler._closed = True
     try:
         record = await service.create_task("cascade resume", session_id="web:shared")
         task = service.get_task(record.task_id)
@@ -990,7 +1009,8 @@ async def test_control_nodes_cascade_resume_clears_subtree_and_skips_conflicts(t
 
 @pytest.mark.asyncio
 async def test_control_nodes_root_cascade_targets_whole_tree(tmp_path: Path) -> None:
-    service = _make_service(tmp_path)
+    service = _make_embedded_service(tmp_path)
+    service.global_scheduler._closed = True
     try:
         record = await service.create_task("root cascade", session_id="web:shared")
         task = service.get_task(record.task_id)
@@ -1475,11 +1495,13 @@ async def test_resume_refuses_child_whose_spawn_entry_was_already_delivered(tmp_
         latest_child = service.get_node(child.node_id)
         assert latest_child is not None and latest_child.is_paused is True
 
-        # 正向对照：轮次结果尚未交付父节点时，复活照旧允许
+        # 正向对照：轮次结果尚未交付父节点时，复活照旧允许（无 dispatcher ⇒ queued）
         completed["value"] = False
         service.log_service.update_node_metadata(root.node_id, _write_round)
-        allowed = await service.control_nodes(record.task_id, [child.node_id], "resume", remark="继续修")
-        assert allowed["items"][0]["result"] == "resumed"
+        allowed = await _apply_resume_as_worker(service, record.task_id, [child.node_id])
+        assert allowed["items"][0]["result"] == "queued"
+        latest_allowed = service.get_node(child.node_id)
+        assert latest_allowed is not None and latest_allowed.is_paused is False
     finally:
         await service.close()
 

@@ -7,9 +7,36 @@ paused nodes, and pause running ones. It is the entry point for acting on
 Actions:
 
 - `resume`: continue an actually paused node from its persisted runtime frame.
+  Read the per-node result instead of assuming success (see the result contract
+  below). `queued` is not a failure: the durable intent is recorded and the next
+  task pickup must consume it; confirm with `task_progress`.
 - `keep_paused`: keep the node paused and include a concrete reason in `remark`.
 - `fail`: mark an actually paused node failed so its parent pipeline can continue.
+  Failing an **acceptance** node is rejected with
+  `acceptance_fail_does_not_settle_task`: a verifier failure is not a verdict and
+  does not settle the task. Resume the verifier, fail the inspected execution
+  node, or cancel the task instead.
 - `pause`: request an agent pause for a running or queued node; it takes effect at the next safe boundary.
+
+## Resume result contract
+
+`resume` returns `items[]` with one result per node. Do not read `resumed` as
+"the pause flag was cleared" — it means an executor is alive (or was just
+created) for that node.
+
+| result | meaning |
+| --- | --- |
+| `resumed` | A live executor exists; the node should make progress. |
+| `queued` | A durable resume intent was recorded. The next task pickup consumes it; this is not a failure and needs no re-click. Verify with `task_progress` (fresh active frame or new model calls) before telling the user it is running. |
+| `deferred` | The pause flag is cleared, but the node sits at a designed stop (`waiting_acceptance`, `waiting_explicit`). Its existing wake source continues it; do not keep clicking resume. |
+| `entry_settled` | The parent already read this spawn round as failed; reviving it would not be adopted. Let the parent re-spawn or control the parent instead. |
+| `task_paused` / `task_terminal` / `cancel_requested` | The task-level gate refuses to start work. |
+| `not_found` / `conflict (node_terminal, node_not_paused)` | Existing validation conflicts. |
+
+In web mode the call waits for the worker command result (bounded); when the
+worker does not report back in time every node comes back as `queued` with a
+`command_id`. When `resumed` is absent, say "已排队/已记录，等待执行器确认",
+not "已恢复".
 
 `remark` is one batch-wide annotation shared by all entries of the call: the
 failure reason for `fail`, the registration remark for `keep_paused` (required

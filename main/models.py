@@ -300,6 +300,25 @@ class TaskNodePauseRecord(Model):
     error_text: str = ''
 
 
+class TaskNodeResumeIntentRecord(Model):
+    """一次点名 resume 的持久意图。
+
+    `pending` 表示"下一次任务拾取必须先消费它"；`claimed` 是消费者领取后的中间态
+    （`consumed_at` 是领取时刻，超过 stale 窗口可被重新领取，防止进程在消费途中
+    被杀后意图永久悬空）；`applied` / `failed` 携带最终 `outcome`。
+    """
+
+    node_id: str
+    task_id: str = ''
+    command_id: str = ''
+    state: str = 'pending'
+    outcome: str = ''
+    reason: str = ''
+    requested_at: str = ''
+    updated_at: str = ''
+    consumed_at: str = ''
+
+
 class TaskNodeTimerRecord(Model):
     """节点自己设的一次性唤醒（`schedule_wake`）。
 

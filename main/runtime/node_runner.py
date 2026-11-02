@@ -7167,6 +7167,12 @@ class NodeRunner:
     ) -> NodeFinalResult:
         task = self._store.get_task(task_id)
         node = self._store.get_node(node_id)
+        # 终态节点不会再被复活：点名 resume 的持久意图在这里退休（包括终态吸收
+        # 那一支——它是迟到的 resume 与已有终局相遇时唯一会留下的残骸）。
+        try:
+            self._store.delete_task_node_resume_intent(node_id)
+        except Exception:
+            pass
         if node is not None and self._normalized_status(getattr(node, 'status', '')) in {
             STATUS_SUCCESS,
             STATUS_FAILED,
