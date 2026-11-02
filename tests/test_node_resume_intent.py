@@ -373,3 +373,84 @@ async def test_terminal_node_and_task_delete_retire_intents(tmp_path: Path) -> N
         assert service.store.get_task_node_resume_intent(ROOT) is None
     finally:
         await service.close()
+
+
+@pytest.mark.asyncio
+async def test_worker_command_lane_keeps_the_leaders_command_id(tmp_path: Path) -> None:
+    """从 worker 的命令入口喂：台账行必须留着发起方（leader）那条命令的 id。
+
+    实盘读数是 leader 回执写 `command:0d8487287a60`、行里却是 worker 自造的
+    `command:9b172f5360a1`——拿回执上的编号查不到台账，追踪链在第二个进程里断掉。
+    """
+    service = _service(tmp_path, mode='worker')
+    try:
+        _seed(service)
+        _pause(service)
+        enqueued: list[str] = []
+
+        class _Scheduler:
+            async def enqueue_task(self, task_id: str) -> None:
+                enqueued.append(task_id)
+
+            async def close(self) -> None:
+                return None
+
+        service.global_scheduler = _Scheduler()  # type: ignore[assignment]
+        await service._process_worker_command(
+            {
+                'command_id': 'command:leader',
+                'command_type': 'resume_node',
+                'task_id': TASK,
+                'payload': {'node_ids': [CHILD]},
+            }
+        )
+        intent = service.store.get_task_node_resume_intent(CHILD)
+        assert intent is not None
+        assert intent.command_id == 'command:leader'
+        assert intent.state == 'pending'
+        assert enqueued == [TASK]
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_pickup_settled_receipt_does_not_keep_the_queued_reason(tmp_path: Path) -> None:
+    """拾取道把意图落成 `resumed` 后，回执不能再留着 queued 阶段那句"等下一次拾取"。
+
+    实盘字节是 `{"result": "resumed", "reason": "awaiting_worker_pickup"}`：同一行里
+    同时说"执行器已活"和"还没人消费"，正是这一刀要消灭的混合语义。
+    """
+    service = _service(tmp_path, mode='worker')
+    try:
+        _seed(service)
+        _pause(service)
+        service.store.upsert_task_runtime_frame(
+            TaskProjectionRuntimeFrameRecord(task_id=TASK, node_id=CHILD, phase='before_model')
+        )
+        dispatcher = _FakeDispatcher()
+
+        async def fake_resume_entry(task_id: str, node_id: str, **_kwargs) -> str:
+            dispatcher.driven[node_id] = True
+            return 'resumed'
+
+        service.task_actor_service.resume_node_entry = fake_resume_entry  # type: ignore[method-assign]
+
+        class _PickupScheduler:
+            async def enqueue_task(self, task_id: str) -> None:
+                # 拾取真的发生（不只是排进去），意图在下一次轮询前就被消费成 resumed。
+                await service.task_actor_service._consume_resume_intents(task_id, dispatcher)
+
+            async def close(self) -> None:
+                return None
+
+        service.global_scheduler = _PickupScheduler()  # type: ignore[assignment]
+        result = await service._apply_resume_node_command(
+            TASK, node_ids=[CHILD], force=True, command_id='command:leader'
+        )
+        item = result['items'][0]
+        assert item['result'] == 'resumed'
+        assert 'reason' not in item
+        intent = service.store.get_task_node_resume_intent(CHILD)
+        assert intent is not None and intent.state == 'applied' and intent.outcome == 'resumed'
+    finally:
+        await service.close()

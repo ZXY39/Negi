@@ -1699,7 +1699,14 @@ class MainRuntimeService:
                 success = True
             elif command_type == 'resume_node':
                 if task_id:
-                    result_payload = await self._apply_resume_node_command(task_id, node_ids=list(payload.get('node_ids') or []), force=True)
+                    # 命令 id 必须透传：意图行要带上发起方（web leader）那条命令的 id，
+                    # 否则回执里的 command_id 查不到台账行，追踪链在第二个进程里断掉。
+                    result_payload = await self._apply_resume_node_command(
+                        task_id,
+                        node_ids=list(payload.get('node_ids') or []),
+                        force=True,
+                        command_id=command_id,
+                    )
                 success = True
             elif command_type == 'fail_node':
                 if task_id:
@@ -2581,12 +2588,15 @@ class MainRuntimeService:
                 await self.global_scheduler.enqueue_task(normalized_task_id)
                 if self.execution_mode == 'worker':
                     settled = await self._await_resume_intents(pending_ids)
-                    for item in results:
-                        if str(item.get('node_id') or '').strip() not in settled:
+                    for index, item in enumerate(results):
+                        node_id = str(item.get('node_id') or '').strip()
+                        if node_id not in settled:
                             continue
                         if str(item.get('result') or '').strip() != 'queued':
                             continue
-                        item.update(settled[str(item['node_id']).strip()])
+                        # 整份替换，不做 merge：queued 阶段写的 reason（"等下一次拾取"）
+                        # 已经被台账的最终档位取代，留着会让回执同时说"已复活"和"还在等"。
+                        results[index] = dict(settled[node_id])
         return {
             'ok': True,
             'task_id': normalized_task_id,
