@@ -6264,6 +6264,15 @@ textarea {
     font-weight: 600;
 }
 
+/* 已交给 runtime 的条目:插话按钮的位置换成状态提示,编辑与删除仍在。 */
+.ceo-follow-up-pending {
+    flex: 0 0 auto;
+    align-self: center;
+    font-size: 0.76rem;
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
 .ceo-follow-up-remove:hover,
 .ceo-follow-up-action:hover,
 .ceo-follow-up-remove:focus-visible,
@@ -15213,6 +15222,11 @@ textarea {
 }
 
 :root .nav-item > span:not(.nav-badge) {
+    /* 拉丁标签（Skill / Tool）与中文标签的 normal 行盒高度不同，各自按基线居中
+       会错开；统一成和图标一样的 18px 行盒，图标与文字落在同一高度。 */
+    display: block;
+    height: 18px;
+    line-height: 18px;
     white-space: nowrap;
 }
 

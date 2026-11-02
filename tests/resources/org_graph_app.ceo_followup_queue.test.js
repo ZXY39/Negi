@@ -323,11 +323,10 @@ test("正文默认一行，点三角切到滚动块并活过重绘", () => {
     assert.doesNotMatch(U.ceoFollowUpQueue.innerHTML, /is-expanded/);
 });
 
-test("in-flight item paints no affordance and no state text until it is represented", () => {
+test("已交给 runtime 的条目：插话换成“下一跳即将发送”，编辑与删除仍在", () => {
     const { S, U, setCeoQueuedFollowUps } = loadApp();
     S.ceoTurnActive = true;
-    // 已转出去、服务端状态帧还没跟上的那一小段：runtime 已经持有它，
-    // 既不能再"插话"，也没有可撤的对象。
+    // 已转出去、服务端状态帧还没跟上的那一小段：runtime 已经持有它，不能再来一次"插话"。
     setCeoQueuedFollowUps("web:test", [
         { id: "sent", text: "已经转出去的补充", runtime_sent_at: "2026-09-24T18:00:00.000Z" },
     ]);
@@ -335,8 +334,10 @@ test("in-flight item paints no affordance and no state text until it is represen
     assert.match(U.ceoFollowUpQueue.innerHTML, /已经转出去的补充/);
     assert.doesNotMatch(U.ceoFollowUpQueue.innerHTML, /已受理/);
     assert.doesNotMatch(U.ceoFollowUpQueue.innerHTML, /data-follow-up-flush/);
-    assert.doesNotMatch(U.ceoFollowUpQueue.innerHTML, /data-follow-up-withdraw/);
-    assert.doesNotMatch(U.ceoFollowUpQueue.innerHTML, /data-follow-up-remove/);
+    assert.match(U.ceoFollowUpQueue.innerHTML, /下一跳即将发送/);
+    // 这一行仍可编辑与删除：两者都先撤服务端那一行，不会点完还挂在上方。
+    assert.match(U.ceoFollowUpQueue.innerHTML, /data-follow-up-withdraw="sent"/);
+    assert.match(U.ceoFollowUpQueue.innerHTML, /data-follow-up-remove="sent"/);
 });
 
 test("立即发送 arms a single queued item on the runtime lane", () => {
@@ -358,6 +359,104 @@ test("立即发送 arms a single queued item on the runtime lane", () => {
     assert.ok(String(local.find((item) => item.id === "a").runtime_sent_at || ""));
     assert.equal(String(local.find((item) => item.id === "b").runtime_sent_at || ""), "");
     assert.match(U.ceoFollowUpQueue.innerHTML, /第二条/);
+    // 点完插话当帧就换成状态提示，不等服务端镜像帧。
+    assert.match(U.ceoFollowUpQueue.innerHTML, /下一跳即将发送/);
+    assert.doesNotMatch(U.ceoFollowUpQueue.innerHTML, /data-follow-up-flush="a"/);
+});
+
+test("撤下服务端条目时本地在飞副本一起清掉，不复活成幽灵", async () => {
+    const api = loadApp();
+    const { U, applyCeoState, setCeoQueuedFollowUps, getMergedCeoQueuedFollowUps, withdrawCeoQueuedFollowUp } = api;
+    setCeoQueuedFollowUps("web:test", [
+        { id: "local-sent", text: "同一条", runtime_sent_at: "2026-09-21T13:06:01" },
+    ]);
+    applyCeoState({
+        status: "running",
+        queued_follow_up_messages: [
+            { content: "同一条", attachments: [], metadata: { _transcript_turn_id: "t-2" } },
+        ],
+    });
+    assert.equal(getMergedCeoQueuedFollowUps("web:test").length, 1);
+
+    assert.equal(await withdrawCeoQueuedFollowUp("server:t-2"), true);
+
+    // 服务端镜像撤下后，本地那份 runtime_sent_at 副本不得从去重里重新冒出来：
+    // 它没有动作按钮，也不会再发送，只会永远卡在输入区上方。
+    assert.equal(getMergedCeoQueuedFollowUps("web:test").length, 0);
+    assert.equal(U.ceoFollowUpQueue.hidden, true);
+});
+
+test("清理已交给 runtime 的副本时不误删同文的未发送草稿", async () => {
+    const api = loadApp();
+    const { setCeoQueuedFollowUps, applyCeoState, getMergedCeoQueuedFollowUps, discardCeoQueuedFollowUp } = api;
+    setCeoQueuedFollowUps("web:test", [
+        { id: "sent", text: "同一条", runtime_sent_at: "2026-09-21T13:06:01" },
+        { id: "draft", text: "同一条" },
+    ]);
+    applyCeoState({
+        status: "running",
+        queued_follow_up_messages: [
+            { content: "同一条", attachments: [], metadata: { _transcript_turn_id: "t-20" } },
+        ],
+    });
+
+    // 镜像代表的是已经交出去的那一份，用户另写的未发送草稿不属于它。
+    const merged = getMergedCeoQueuedFollowUps("web:test");
+    assert.equal(merged.length, 2);
+    assert.equal(merged.filter((item) => item.id === "draft").length, 1);
+
+    assert.equal(await discardCeoQueuedFollowUp("server:t-20"), true);
+    const remaining = getMergedCeoQueuedFollowUps("web:test");
+    assert.equal(remaining.length, 1);
+    assert.equal(remaining[0].id, "draft");
+});
+
+test("在飞条目在 turn_id 回来前被编辑：立即消失、不发送，镜像到达后补撤服务端", async () => {
+    const api = loadApp();
+    const { S, U, applyCeoState, setCeoQueuedFollowUps, withdrawCeoQueuedFollowUp, socket, __context } = api;
+    S.ceoTurnActive = true;
+    setCeoQueuedFollowUps("web:test", [
+        { id: "sent", text: "还在飞的补充", runtime_sent_at: "2026-09-24T18:00:00.000Z" },
+    ]);
+    U.ceoInput.value = "";
+
+    assert.equal(await withdrawCeoQueuedFollowUp("sent"), true);
+
+    // 点击当帧就退场并回填输入框；此时还没有 turn_id，先不碰服务端。
+    assert.equal(U.ceoFollowUpQueue.hidden, true);
+    assert.equal(U.ceoInput.value, "还在飞的补充");
+    assert.equal((__context.__withdrawCalls || []).length, 0);
+    assert.equal(socket.sent.length, 0);
+
+    // 镜像帧带着 turn_id 回来：自动补一次服务端撤回，条目不会再出现在上方。
+    applyCeoState({
+        status: "running",
+        queued_follow_up_messages: [
+            { content: "还在飞的补充", attachments: [], metadata: { _transcript_turn_id: "t-11" } },
+        ],
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const calls = __context.__withdrawCalls || [];
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].payload.turn_id, "t-11");
+    assert.equal(U.ceoFollowUpQueue.hidden, true);
+});
+
+test("在飞条目在 turn_id 回来前被删除：立即消失、不回填、不发送", async () => {
+    const api = loadApp();
+    const { S, U, setCeoQueuedFollowUps, discardCeoQueuedFollowUp, socket } = api;
+    S.ceoTurnActive = true;
+    setCeoQueuedFollowUps("web:test", [
+        { id: "sent", text: "还在飞的补充", runtime_sent_at: "2026-09-24T18:00:00.000Z" },
+    ]);
+    U.ceoInput.value = "";
+
+    assert.equal(await discardCeoQueuedFollowUp("sent"), true);
+
+    assert.equal(U.ceoFollowUpQueue.hidden, true);
+    assert.equal(U.ceoInput.value, "");
+    assert.equal(socket.sent.length, 0);
 });
 
 test("撤回已受理条目走服务端删除并回填输入框", async () => {

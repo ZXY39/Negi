@@ -3616,7 +3616,12 @@ function applyCeoState(state = {}, meta = {}) {
     }
     // 候选条以 runtime 的队列为真相：换标签页/重启后 sessionStorage 里没有的东西，
     // 也要在输入框上方看得见（它已经落在转录里，只是还没成回合）。
-    if (adoptCeoServerQueuedFollowUpsFromState(state)) renderQueuedCeoFollowUps(activeSessionId());
+    if (adoptCeoServerQueuedFollowUpsFromState(state)) {
+        // 镜像带着 turn_id 回来后，本地那份已经交出去的副本并进镜像；在飞条目如果在
+        // turn_id 回来之前就被编辑/删除过，也在这里补撤服务端那一行。
+        reconcileCeoQueuedFollowUpsWithServerMirror(activeSessionId());
+        renderQueuedCeoFollowUps(activeSessionId());
+    }
     const activeTurn = source || turnId ? getActiveCeoTurn(source, turnId) : getActiveCeoTurn();
     const hadTurnContext = !!activeTurn || !!S.ceoTurnActive;
     // 一帧 status 不为 running 不足以证明"这条会话没有回合在跑"：两个可见轮之间、

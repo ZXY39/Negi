@@ -12,6 +12,9 @@ const CEO_FOLLOW_UP_QUEUE_PER_SESSION_LIMIT = 20;
 let ceoFollowUpResizeObserver = null;
 let ceoVoiceEngineReady = false;
 let ceoVoicePreparing = null;
+// 在 runtime 的 turn_id 尚未随 state 帧回来之前就被编辑/删除的在飞条目：已经从上方拿走，
+// 等镜像帧把它带回 turn_id 时再补一次服务端撤回。键是会话 id。
+const ceoPendingFollowUpWithdrawals = new Map();
 
 function normalizeCeoComposerDraftEntry(sessionId, entry = {}) {
     const key = String(sessionId || entry?.session_id || "").trim();
@@ -454,7 +457,12 @@ function ceoServerFollowUpText(content) {
 function normalizeCeoServerQueuedFollowUpList(items = []) {
     return (Array.isArray(items) ? items : [])
         .map((item, index) => {
-            const uploads = cloneCeoSnapshotAttachments(item?.attachments);
+            // state 帧里的 attachments 是 UserInputMessage 的路径串列表，不是 upload 对象；
+            // 两者都要认，否则镜像条会丢掉附件、也就无法和本地那份按附件对齐。
+            const uploads = cloneCeoSnapshotAttachments(
+                (Array.isArray(item?.attachments) ? item.attachments : [])
+                    .map((attachment) => (typeof attachment === "string" ? { path: attachment } : attachment))
+            );
             const text = ceoServerFollowUpText(item?.content);
             if (!text && !uploads.length) return null;
             const turnId = String(item?.metadata?.["_transcript_turn_id"] || "").trim();
@@ -468,6 +476,25 @@ function normalizeCeoServerQueuedFollowUpList(items = []) {
             };
         })
         .filter(Boolean);
+}
+
+function ceoFollowUpAttachmentPaths(uploads = []) {
+    return cloneCeoSnapshotAttachments(uploads)
+        .map((item) => String(item.path || "").trim())
+        .filter(Boolean);
+}
+
+function ceoFollowUpsEquivalent(left = null, right = null) {
+    if (!left || !right) return false;
+    const leftText = String(left.text || "").trim();
+    const rightText = String(right.text || "").trim();
+    if (leftText !== rightText) return false;
+    // 只比路径:服务端镜像的附件来自 UserInputMessage 的路径串,没有 name/kind,
+    // 按整个对象比会把同一条补充判成两条。
+    const leftPaths = ceoFollowUpAttachmentPaths(left.uploads);
+    const rightPaths = ceoFollowUpAttachmentPaths(right.uploads);
+    if (!leftText && !leftPaths.length && !rightPaths.length) return false;
+    return JSON.stringify(leftPaths) === JSON.stringify(rightPaths);
 }
 
 function pruneCeoFollowUpQueueCache(cache = {}) {
@@ -550,12 +577,12 @@ function getCeoServerQueuedFollowUps(sessionId = activeSessionId()) {
 
 function getMergedCeoQueuedFollowUps(sessionId = activeSessionId()) {
     const serverItems = getCeoServerQueuedFollowUps(sessionId);
-    const represented = new Set(serverItems.map((item) => String(item.text || "").trim()).filter(Boolean));
     // 浏览器这一侧只保留"还没发给 runtime"的条目：带 runtime_sent_at 的那一半服务端已经
-    // 知道了，两份都画就会在候选条里重复出现。
+    // 知道了，两份都画就会在候选条里重复出现。判等连附件一起比：只比正文会把一条
+    // 带附件的补充错当成镜像。
     const localItems = getCeoQueuedFollowUps(sessionId).filter((item) => {
         if (!String(item?.runtime_sent_at || "").trim()) return true;
-        return !represented.has(String(item.text || "").trim());
+        return !serverItems.some((serverItem) => ceoFollowUpsEquivalent(item, serverItem));
     });
     return [...serverItems, ...localItems];
 }
@@ -570,6 +597,92 @@ function adoptCeoServerQueuedFollowUpsFromState(state = {}, sessionId = activeSe
     if (JSON.stringify(next) === JSON.stringify(current)) return false;
     S.ceoServerQueuedFollowUps = { ...(S.ceoServerQueuedFollowUps || {}), [key]: next };
     return true;
+}
+
+function removeEquivalentCeoQueuedFollowUps(sessionId, target = null) {
+    const key = String(sessionId || "").trim();
+    if (!key || !target) return false;
+    const current = getCeoQueuedFollowUps(key);
+    // 只清"已经交给 runtime"的那一份：同文的未发送草稿是用户另写的一条，不能一起删。
+    const kept = current.filter((item) => !(
+        String(item?.runtime_sent_at || "").trim()
+        && ceoFollowUpsEquivalent(item, target)
+    ));
+    if (kept.length === current.length) return false;
+    setCeoQueuedFollowUps(key, kept);
+    return true;
+}
+
+function rememberPendingCeoFollowUpWithdrawal(sessionId, item = null) {
+    const key = String(sessionId || "").trim();
+    if (!key || !item) return;
+    const entries = ceoPendingFollowUpWithdrawals.get(key) || [];
+    entries.push({
+        text: String(item.text || ""),
+        uploads: cloneCeoSnapshotAttachments(item.uploads),
+    });
+    ceoPendingFollowUpWithdrawals.set(key, entries);
+}
+
+async function withdrawCeoServerQueuedFollowUpEntry(sessionId, item = null) {
+    const key = String(sessionId || "").trim();
+    const turnId = ceoServerQueuedFollowUpTurnId(item?.id);
+    if (!key || !turnId) return false;
+    try {
+        await ApiClient.withdrawCeoQueuedFollowUp(key, { turn_id: turnId });
+    } catch (error) {
+        const code = typeof ApiClient?.getErrorCode === "function" ? ApiClient.getErrorCode(error) : "";
+        if (Number(error?.status) === 409 || code === "follow_up_not_queued") {
+            pruneCeoServerQueuedFollowUpByTurn(key, turnId);
+            renderQueuedCeoFollowUps(key);
+            showToast({
+                title: "已被本轮接走",
+                text: "这条补充已经交给当前回合，不再排在待发送里。",
+                kind: "info",
+            });
+            return false;
+        }
+        throw error;
+    }
+    pruneCeoServerQueuedFollowUpByTurn(key, turnId);
+    renderQueuedCeoFollowUps(key);
+    return true;
+}
+
+function reconcileCeoQueuedFollowUpsWithServerMirror(sessionId = activeSessionId()) {
+    const key = String(sessionId || "").trim();
+    if (!key) return false;
+    const serverItems = getCeoServerQueuedFollowUps(key);
+    let changed = false;
+    // 本地那份 runtime 已经持有的副本与镜像指向同一条时，本地副本退场：两份并成一行，
+    // 之后编辑/删除只处理镜像那一行，不会在镜像被撤下后冒出没有动作的幽灵条目。
+    const localItems = getCeoQueuedFollowUps(key);
+    const keptLocal = localItems.filter((item) => {
+        if (!String(item?.runtime_sent_at || "").trim()) return true;
+        return !serverItems.some((serverItem) => ceoFollowUpsEquivalent(item, serverItem));
+    });
+    if (keptLocal.length !== localItems.length) {
+        setCeoQueuedFollowUps(key, keptLocal);
+        changed = true;
+    }
+    // 条目在 turn_id 回来之前就被编辑/删除了：镜像一出现就替用户撤掉服务端那一行。
+    const pending = ceoPendingFollowUpWithdrawals.get(key) || [];
+    if (pending.length) {
+        const remaining = [];
+        pending.forEach((entry) => {
+            const matched = serverItems.find((serverItem) => ceoFollowUpsEquivalent(entry, serverItem));
+            if (!matched) {
+                remaining.push(entry);
+                return;
+            }
+            void withdrawCeoServerQueuedFollowUpEntry(key, matched).catch(() => {});
+        });
+        if (remaining.length !== pending.length) {
+            if (remaining.length) ceoPendingFollowUpWithdrawals.set(key, remaining);
+            else ceoPendingFollowUpWithdrawals.delete(key);
+        }
+    }
+    return changed;
 }
 
 function setCeoQueuedFollowUps(sessionId, items = []) {
@@ -819,25 +932,24 @@ function renderQueuedCeoFollowUps(sessionId = activeSessionId()) {
                         <i data-lucide="${expanded ? "chevron-up" : "chevron-down"}"></i>
                     </button>
                 `];
-                // 三态分开：服务端队列里的条目（重启也还在，编辑与删除都对应服务端那行）／
-                // 已转出去在飞的条目（runtime 已持有，既不能"插话"也没有可撤的对象，只能等它
-                // 被那一轮代表后由 consumeRepresentedRuntimeSentCeoFollowUps 收掉）／还没出门的本地草稿。
-                // 行上不写状态字：条目还挂在输入区上面就代表没发出去。
-                const inFlight = !item.accepted_by_runtime && !!String(item.runtime_sent_at || "").trim();
-                if (!inFlight) {
-                    if (S.ceoTurnActive && !item.accepted_by_runtime) {
-                        actions.push(`<button type="button" class="ceo-follow-up-action ceo-follow-up-flush" data-follow-up-flush="${entryId}"
-                                aria-label="插话" title="插话：现在就并进正在跑的这一轮">
-                                <i data-lucide="send"></i><span>插话</span>
-                            </button>`);
-                    }
-                    actions.push(`<button type="button" class="ceo-follow-up-action" data-follow-up-withdraw="${entryId}" aria-label="编辑" title="编辑：把正文取回输入框继续改">
-                            <i data-lucide="pencil"></i>
-                        </button>`);
-                    actions.push(`<button type="button" class="ceo-follow-up-action ceo-follow-up-remove" data-follow-up-remove="${entryId}" aria-label="删除" title="删除这条待发送补充">
-                            <i data-lucide="trash-2"></i>
+                // 已交给 runtime 的条目（服务端已在排队，或本地刚转出去、镜像帧还没回来）
+                // 不再给"插话"：那颗按钮的位置换成同一句话的状态提示。编辑与删除留着，
+                // 两者都会先撤服务端那一行再退场，点完不会继续挂在输入区上方。
+                const runtimeHeld = !!item.accepted_by_runtime || !!String(item.runtime_sent_at || "").trim();
+                if (runtimeHeld) {
+                    actions.push(`<span class="ceo-follow-up-pending" title="已交给运行时，会在下一次安全边界发出">下一跳即将发送</span>`);
+                } else if (S.ceoTurnActive) {
+                    actions.push(`<button type="button" class="ceo-follow-up-action ceo-follow-up-flush" data-follow-up-flush="${entryId}"
+                            aria-label="插话" title="插话：现在就并进正在跑的这一轮">
+                            <i data-lucide="send"></i><span>插话</span>
                         </button>`);
                 }
+                actions.push(`<button type="button" class="ceo-follow-up-action" data-follow-up-withdraw="${entryId}" aria-label="编辑" title="编辑：把正文取回输入框继续改">
+                        <i data-lucide="pencil"></i>
+                    </button>`);
+                actions.push(`<button type="button" class="ceo-follow-up-action ceo-follow-up-remove" data-follow-up-remove="${entryId}" aria-label="删除" title="删除这条待发送补充">
+                        <i data-lucide="trash-2"></i>
+                    </button>`);
                 return `
                 <div class="ceo-follow-up-chip${expanded ? " is-expanded" : ""}" role="listitem" data-follow-up-id="${entryId}">
                     <span class="ceo-follow-up-kind">${index + 1}</span>
@@ -914,37 +1026,28 @@ async function releaseCeoQueuedFollowUp(entryId, { refillComposer }) {
     const item = findCeoQueuedFollowUpEntry(sessionId, entryId);
     if (!sessionId || !item) return false;
     const turnId = ceoServerQueuedFollowUpTurnId(item.id);
-    if (item.accepted_by_runtime && turnId) {
-        // 已受理的条目活在服务端（内存队列 + 转录 pending 行），必须先删那边，
-        // 否则下一次 state 帧会把它原样画回来。
-        try {
-            await ApiClient.withdrawCeoQueuedFollowUp(sessionId, { turn_id: turnId });
-        } catch (error) {
-            const code = typeof ApiClient?.getErrorCode === "function" ? ApiClient.getErrorCode(error) : "";
-            if (Number(error?.status) === 409 || code === "follow_up_not_queued") {
-                // 409 说的是"这条已经不在服务端队列里"（被某个安全边界接走了），
-                // 那是退场信号而不是失败：条目留着只会让人再点一次同样的错。
-                pruneCeoServerQueuedFollowUpByTurn(sessionId, turnId);
-                removeCeoQueuedFollowUp(sessionId, item.id);
-                showToast({
-                    title: "已被本轮接走",
-                    text: "这条补充已经交给当前回合，不再排在待发送里。",
-                    kind: "info",
-                });
-                return false;
-            }
-            showToast({
-                title: "撤下失败",
-                text: String(error?.message || "该条补充可能已被本轮接走，无法撤回。"),
-                kind: "error",
-            });
-            return false;
-        }
+    const accepted = !!item.accepted_by_runtime && !!turnId;
+    ceoFollowUpExpandedIds.delete(String(item.id || ""));
+
+    // 先把条目从输入区上方拿走：编辑与删除都该立即生效，不等一次网络往返。
+    // 这里还必须顺手清掉本地那份 runtime_sent_at 副本：服务端镜像撤下后它会从
+    // 文本去重里重新冒出来，画成一个没有动作按钮、也不会再发送的幽灵条目。
+    let previousServerItems = null;
+    if (accepted) {
+        previousServerItems = Array.isArray(S.ceoServerQueuedFollowUps?.[sessionId])
+            ? [...S.ceoServerQueuedFollowUps[sessionId]]
+            : [];
         pruneCeoServerQueuedFollowUpByTurn(sessionId, turnId);
+        removeEquivalentCeoQueuedFollowUps(sessionId, item);
     } else {
         removeCeoQueuedFollowUp(sessionId, item.id);
+        removeEquivalentCeoQueuedFollowUps(sessionId, item);
+        // 已经转出去、镜像帧还没带回 turn_id：先记下这一条，镜像一出现就补撤回。
+        // 还没出门的草稿没有任何服务端状态，删掉即不会再发送。
+        if (String(item.runtime_sent_at || "").trim()) {
+            rememberPendingCeoFollowUpWithdrawal(sessionId, item);
+        }
     }
-    ceoFollowUpExpandedIds.delete(String(item.id || ""));
     if (refillComposer) {
         // 编辑的落点是输入框，不是转录：回填后可继续编辑，不自动发送。
         setCeoComposerDraft(sessionId, {
@@ -955,7 +1058,42 @@ async function releaseCeoQueuedFollowUp(entryId, { refillComposer }) {
     }
     renderQueuedCeoFollowUps(sessionId);
     syncCeoPrimaryButton();
-    return true;
+    if (!accepted) return true;
+
+    try {
+        await ApiClient.withdrawCeoQueuedFollowUp(sessionId, { turn_id: turnId });
+        removeEquivalentCeoQueuedFollowUps(sessionId, item);
+        return true;
+    } catch (error) {
+        const code = typeof ApiClient?.getErrorCode === "function" ? ApiClient.getErrorCode(error) : "";
+        if (Number(error?.status) === 409 || code === "follow_up_not_queued") {
+            // 409 说的是"这条已经不在服务端队列里"（被某个安全边界接走了），
+            // 那是退场信号而不是失败：条目已经拿走，不再画回来。
+            pruneCeoServerQueuedFollowUpByTurn(sessionId, turnId);
+            removeEquivalentCeoQueuedFollowUps(sessionId, item);
+            renderQueuedCeoFollowUps(sessionId);
+            showToast({
+                title: "已被本轮接走",
+                text: "这条补充已经交给当前回合，不再排在待发送里。",
+                kind: "info",
+            });
+            return false;
+        }
+        // 服务端那一行还在：恢复镜像，免得界面说撤下了而下一轮照旧发出去。
+        if (previousServerItems) {
+            S.ceoServerQueuedFollowUps = {
+                ...(S.ceoServerQueuedFollowUps || {}),
+                [sessionId]: previousServerItems,
+            };
+        }
+        renderQueuedCeoFollowUps(sessionId);
+        showToast({
+            title: "撤下失败",
+            text: String(error?.message || "该条补充可能已被本轮接走，无法撤回。"),
+            kind: "error",
+        });
+        return false;
+    }
 }
 
 function withdrawCeoQueuedFollowUp(entryId) {

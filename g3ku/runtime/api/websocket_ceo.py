@@ -2208,6 +2208,15 @@ async def ceo_websocket(websocket: WebSocket):
                         )
                     )
                     continue
+                # 受理成功后立刻广播一次队列读数：浏览器靠 state 帧里的 turn_id 才能在
+                # “下一跳即将发送”期间撤回这一条，等到下一个安全边界会让编辑/删除没有对象。
+                # 广播失败不影响已经落队的输入。
+                try:
+                    emit_state_snapshot = getattr(session, '_emit_state_snapshot', None)
+                    if callable(emit_state_snapshot):
+                        await _maybe_await(emit_state_snapshot())
+                except Exception:
+                    logger.debug('state snapshot after follow-up enqueue skipped', exc_info=True)
                 preview_text = _history_text(user_messages[-1].content)
                 _publish_ceo_session_patch(
                     agent=agent,
