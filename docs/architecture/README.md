@@ -120,6 +120,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 验收节点上下文里堆着历次交付全文、或对已被取代的提交下结论、验收 bootstrap 每轮都在变 → `context-and-cache-troubleshooting.md`「验收 bootstrap 定稿与回合尾块」+ `main-task-runtime.md`「信箱投递、重激活与上行传播」（交接通知与回合尾块给 ref + 内联额度内的摘要，超限才带头段指回 ref）
 - False "task may be stalled" heartbeat while a long node tool (e.g. `exec` with a large `timeout_seconds`) legitimately runs, or a genuine hang after a tool timeout goes unreported -> `heartbeat-system.md`「Task Stall Detection」
 - 想判断任务停滞是不是资源排队造成 → `heartbeat-system.md`「Task Stall Detection」（失速事件自带 `stall_detail`：共享池闸位、本任务闸外排队、上游限流与占位任务，只有事实没有建议）；要看过去那段区间 → `runtime-overview.md`「Worker Performance History」（同一行窗口判读，更长区间用 `perf_inspect`）；性能条「节点队列」等待恒 0 而闸口其实在排队 → `runtime-overview.md`「节点回合闸（执行器存在的成本也要闸）」
+- 停滞提醒连收好几条、会话已经处置节点也已经向用户汇报，提醒照旧 → `heartbeat-system.md`「Task Stall Detection」（重投的停止条件与任务级出口都在停滞引导块那几句里）
 - 同时在跑节点数上不去、或界面「限」这个数与配置 `node_dispatch_concurrency` 不一致、想知道池位这一拍为什么加/为什么收、或"某类节点在闸外等而另一类有空格" → `runtime-overview.md`「节点回合闸」与 `main-task-runtime.md`「节点调度读数与共享池」
 - 网页刷新打不开（服务端一条 `GET /` 都没记下来，而 `/api/*` 仍照常 200）、日志刷 `WinError 10055`、模型调用频率同时塌下去 → `runtime-overview.md`「worker→web 事件回流车道」（回环连接攒满内核缓冲的取证与判读口径都在那里）
 - 节点失败但无系统报错、模型回复疑似被输出上限截断(无工具调用、顶格 output_tokens) → `web-and-admin.md`「Node Detail Error History」+ `config-and-models.md`「Model Request Parameter Defaults」

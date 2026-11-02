@@ -2208,7 +2208,7 @@ class MainRuntimeService:
             'inspected_node_id': str((metadata or {}).get('accepted_node_id') or '').strip(),
             'hint': (
                 'This is a verifier node: failing it does not settle the task. '
-                'Resume the verifier, fail the inspected execution node, or cancel the task.'
+                'Resume the verifier, or fail the inspected execution node.'
             ),
         }
 

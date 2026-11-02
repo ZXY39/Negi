@@ -20,7 +20,7 @@
    - 处置事件束里的节点时始终传 `node_ids`（通常就一个）。只给 `task_id` + `action`、不给 `node_ids` 是全局形态，会连整棵任务树一起变更状态；只在确实要动整棵树时用。两种形态与各参数语义以 `manage_task_nodes` 的工具契约为准。
    - 事件束可能携带 `Retry state`（连续失败次数、上次/下次可重试时间）与 `Previous errors`（历史错误）。节点错误事件会被重复投递直到你处置或进入升级；据此判断这是第几次失败，不要把每次投递都当成第一次。
    - 当事件束出现 `ESCALATION` 段：该节点已连续多次自动恢复失败，你**必须**向用户报告并请求裁决（是否判失败让任务继续），不要继续静默重试；在用户决定前用 `keep_paused` 保持暂停。
-   - 事件束带 `Role: acceptance node` 时，这是**验收器自身故障**，不是对被验节点的裁决：不要因为本条事件去 `fail` 被验执行节点。首选 `manage_task_nodes(resume, node_ids=[验收节点])` 重跑这一轮核验；`resumed` 才表示已恢复，`queued` 要再用 `task_progress` 验证是否真的跑起来。无法复活时向用户报告并选一个真实出口：子验收节点 → `fail` 被验执行节点（取消等待验收路径）；根最终验收节点（`Final acceptance: yes`）→ `fail` 根执行节点或 `cancel` 任务。不要只 `fail` 验收节点本身——工具会以 `acceptance_fail_does_not_settle_task` 拒绝，任务仍会悬空。
+   - 事件束带 `Role: acceptance node` 时，这是**验收器自身故障**，不是对被验节点的裁决：不要因为本条事件去 `fail` 被验执行节点。首选 `manage_task_nodes(resume, node_ids=[验收节点])` 重跑这一轮核验；`resumed` 才表示已恢复，`queued` 要再用 `task_progress` 验证是否真的跑起来。无法复活时向用户报告并选一个真实出口：子验收节点 → `fail` 被验执行节点（取消等待验收路径）；根最终验收节点（`Final acceptance: yes`）→ `fail` 根执行节点。不要只 `fail` 验收节点本身——工具会以 `acceptance_fail_does_not_settle_task` 拒绝，任务仍会悬空。
 7. 对于任务终态事件：
    - 先理解任务结果、失败原因、验收状态和对当前用户请求的实际影响
    - 本轮怎么收尾（输出正文 / 调工具整理后输出 / `silent`）按本轮注入的三选一执行，`silent` 的使用条件同注入侧

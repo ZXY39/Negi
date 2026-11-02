@@ -145,6 +145,28 @@ def format_local_timestamp(value: Any) -> str:
     return parsed.astimezone().isoformat(timespec="seconds")
 
 
+def _running_tool_deadline_line(deadline: str) -> str:
+    """按截止时间相对现在的哪一面渲染这一行。
+
+    投递前 `_refresh_task_stall_events` 会把「截止时间还没到」的停滞事件整条丢掉，所以走到
+    这里的几乎总是已过期的时间；照一种时态写死会把已经结束说成仍在跑（实盘里五条停滞束都
+    印了已过期的截止时间，读起来像「节点合法在忙，不用处置」）。时态在这里判，不靠调用方保证。
+    渲染统一走 `format_local_timestamp`：这条时间戳上游是 UTC，束里其余时间是本地带偏移。
+    """
+    from datetime import datetime, timezone
+
+    local = format_local_timestamp(deadline)
+    try:
+        parsed = datetime.fromisoformat(str(deadline).replace("Z", "+00:00"))
+    except ValueError:
+        return f"  A node tool call deadline: {local}"
+    if parsed.tzinfo is None:
+        parsed = parsed.astimezone()
+    if parsed > datetime.now(timezone.utc):
+        return f"  A node tool call is still inside its own deadline until: {local}"
+    return f"  Silence is measured from a node tool call's deadline, which passed at: {local}"
+
+
 def _task_stall_lines(event: dict[str, Any], retrieval_parts: list[str]) -> list[str]:
     task_id = _non_empty_text(event.get("task_id"))
     title = _non_empty_text(event.get("title")) or task_id or "task"
@@ -187,7 +209,7 @@ def _task_stall_lines(event: dict[str, Any], retrieval_parts: list[str]) -> list
         f"  Reason: {stall_reason}",
         f"  Silent for: {stalled_minutes} min",
         f"  Trigger bucket: {bucket_minutes} min",
-        f"  Last visible output at: {last_visible_output_at}",
+        f"  Silence measured from: {last_visible_output_at}",
         f"  Brief: {brief_text}",
         f"  Latest node: {latest_node_summary}",
         f"  Runtime: {runtime_excerpt}",
@@ -290,7 +312,7 @@ def _task_stall_detail_lines(detail: Any) -> list[str]:
             lines.append(f"  Distribution barrier active: state={state} epoch={lane.get('distribution_epoch_id') or ''}")
         deadline = str(lane.get("running_tool_deadline") or "").strip()
         if deadline:
-            lines.append(f"  A node tool call is still inside its own deadline until: {deadline}")
+            lines.append(_running_tool_deadline_line(deadline))
         frames = lane.get("frames")
         if isinstance(frames, list) and frames:
             lines.append(
@@ -391,7 +413,7 @@ def _task_node_error_lines(
     elif is_acceptance:
         lines.append(
             '  Resume the verifier with manage_task_nodes(resume, node_ids=[verifier]). '
-            'If it cannot be revived, choose a real exit: fail the inspected execution node, or cancel the task. '
+            'If it cannot be revived, choose a real exit: fail the inspected execution node. '
             'Do not fail the verifier node itself — a verifier failure does not settle the task.'
         )
     else:

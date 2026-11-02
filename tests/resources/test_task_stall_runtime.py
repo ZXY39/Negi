@@ -209,6 +209,149 @@ async def test_task_stall_heartbeat_prompt_includes_diagnostics_and_actions(tmp_
     await service.close()
 
 
+def test_task_stall_guidance_names_the_exits_that_end_the_repetition(tmp_path: Path) -> None:
+    """停滞轮要自带「重投怎么停」：节点级处置与向用户汇报都不算停。
+
+    实盘同一条会话收到五条停滞束。前三条里会话按规则做了 resume、keep_paused，也给用户写了
+    长正文，重投照旧；束里那一行还把两小时前的截止时间说成「仍在截止时间内」，读起来像「节点
+    合法在忙，不用处置」。于是"已经管过了"与"还会再来"之间的账只能靠猜。这一段就是猜不出来的
+    那句判据。
+    """
+    from g3ku.heartbeat.session_events import SessionHeartbeatEventQueue
+
+    service = WebSessionHeartbeatService(
+        workspace=tmp_path,
+        agent=None,
+        runtime_manager=None,
+        main_task_service=None,
+        session_manager=None,
+        reply_notifier=None,
+    )
+    event = SessionHeartbeatEventQueue().enqueue(
+        session_id="web:ceo-stall-guidance",
+        source="main_runtime",
+        reason="task_stall",
+        dedupe_key="task-stall:task:abcd:20:2026-11-02T09:33:36+00:00",
+        payload={
+            "task_id": "task:abcd",
+            "title": "guidance",
+            "reason": "suspected_stall",
+            "stalled_minutes": 20,
+            "bucket_minutes": 20,
+        },
+        delay_seconds=0.0,
+    )
+
+    prompt = service._build_prompt([event])
+
+    assert "Only a task-level state" in prompt
+    assert "keep_paused on nodes does not" in prompt
+    assert "action=pause" in prompt
+    assert "action=fail" in prompt
+    assert "subtree_not_fully_paused" in prompt
+    # 模型侧的动作面只有 resume/keep_paused/fail/pause，没有 cancel 工具，提示词不许点名它
+    assert "or cancel the task" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_task_stall_bundle_prints_the_anchor_it_measures_and_past_tenses_the_deadline(
+    tmp_path: Path,
+) -> None:
+    """事件束印出的锚点必须就是它算时长用的那一份，已过期的截止时间不得写成「仍在截止时间内」。
+
+    实盘五条束同时印「最后可见输出 17:24:11」与「已静默 130 分钟」（后者从更晚的工具截止时间
+    算），两个数互相算不出对方，也与入队时按该截止时间建的去重键不同源。
+    """
+    session_id = "web:ceo-stall-anchor"
+    session_manager = SessionManager(tmp_path)
+    persisted = session_manager.get_or_create(session_id)
+    session_manager.save(persisted)
+    live_session = _FakeHeartbeatSession()
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
+    task = await service.create_task("stall anchor heartbeat", session_id=session_id)
+    now = datetime.now(timezone.utc)
+    visible_at = (now - timedelta(minutes=120)).isoformat(timespec="seconds")
+    service.log_service.update_task_runtime_meta(
+        task.task_id,
+        last_visible_output_at=visible_at,
+        last_stall_notice_bucket_minutes=0,
+    )
+    # 一个仍在 running 的工具调用：120 分钟前起算、超时 5400 秒 ⇒ 截止时间在 30 分钟前，
+    # 晚于节点最近可见输出，于是静默锚点由它接管。
+    service.log_service.update_frame(
+        task.task_id,
+        task.root_node_id,
+        lambda frame: {
+            **frame,
+            "node_id": task.root_node_id,
+            "tool_calls": [
+                {
+                    "tool_call_id": "call-1",
+                    "tool_name": "exec",
+                    "status": "running",
+                    "started_at": visible_at,
+                    "timeout_seconds": 5400.0,
+                }
+            ],
+        },
+    )
+    heartbeat = WebSessionHeartbeatService(
+        workspace=tmp_path,
+        agent=SimpleNamespace(tool_execution_manager=None),
+        runtime_manager=_RuntimeManager(live_session),
+        main_task_service=service,
+        session_manager=session_manager,
+    )
+    heartbeat.enqueue_task_stall_payload(
+        service.build_task_stall_payload(
+            task.task_id,
+            bucket_minutes=30,
+            last_visible_output_at=visible_at,
+        )
+    )
+    heartbeat._started = True
+
+    await heartbeat._run_session(session_id)
+
+    assert len(live_session.prompts) == 1
+    prompt = str(live_session.prompts[0].content)
+    assert "Silence measured from:" in prompt
+    assert "Last visible output at:" not in prompt
+    anchor_text = prompt.split("Silence measured from: ", 1)[1].splitlines()[0].strip()
+    silent_minutes = int(prompt.split("Silent for: ", 1)[1].split(" min", 1)[0])
+    anchor = datetime.fromisoformat(anchor_text)
+    assert abs((now - anchor).total_seconds() / 60.0 - silent_minutes) <= 2.0
+    # 这一档锚点是工具截止时间（约 30 分钟前），不是节点的最近可见输出（120 分钟前）
+    assert anchor > datetime.fromisoformat(visible_at)
+    assert "which passed at" in prompt
+    assert "still inside its own deadline" not in prompt
+    await service.close()
+
+
+def test_running_tool_deadline_line_switches_tense_at_the_deadline() -> None:
+    """时态在这条渲染里判，不靠调用方保证：投递前那道门只丢「截止时间未到」的事件。"""
+    from g3ku.heartbeat.prompt_lane import _running_tool_deadline_line, format_local_timestamp
+
+    now = datetime.now(timezone.utc)
+    past = (now - timedelta(minutes=45)).isoformat(timespec="seconds")
+    future = (now + timedelta(minutes=45)).isoformat(timespec="seconds")
+    past_line = _running_tool_deadline_line(past)
+    assert "which passed at" in past_line
+    assert "still inside" not in past_line
+    assert "still inside its own deadline until" in _running_tool_deadline_line(future)
+    # 渲染统一本地带偏移，不原样吐上游的 UTC
+    assert past_line.endswith(format_local_timestamp(past))
+
+
 @pytest.mark.asyncio
 async def test_task_stall_heartbeat_discards_stale_event_after_new_output(tmp_path: Path) -> None:
     session_id = "web:ceo-stall-stale"

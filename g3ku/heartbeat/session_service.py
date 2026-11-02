@@ -589,7 +589,11 @@ class WebSessionHeartbeatService:
                     "reason": current_reason,
                     "stalled_minutes": stalled_minutes_since(baseline_iso),
                     "bucket_minutes": current_bucket,
-                    "last_visible_output_at": last_visible_output_at,
+                    # 时长与展示锚点必须同源：这里曾经写原始 meta 值，而上面两行的读数从
+                    # `baseline_iso`（运行中工具截止时间晚于最近可见输出时用它）算出，于是束里
+                    # 同时印「最后可见输出 17:24:11」与「已静默 130 分钟」两个互相算不出的数，
+                    # 也与入队时按 baseline 建的去重键不一致。发射侧本来就写 baseline。
+                    "last_visible_output_at": baseline_iso,
                     "brief_text": str((latest.payload or {}).get("brief_text") or getattr(task, "brief_text", "") or "").strip(),
                     "latest_node_summary": (
                         service._task_stall_latest_node_summary(detail)
@@ -1128,10 +1132,18 @@ class WebSessionHeartbeatService:
         if has_task_stall:
             lines.extend(
                 [
-                    "For task_stall events, first inspect the task with task_progress(task_id).",                    "In task_progress output, 'in_progress' only means non-terminal, not actively running;",
+                    "For task_stall events, first inspect the task with task_progress(task_id).",
+                    "In task_progress output, 'in_progress' only means non-terminal, not actively running;",
                     "only lines with a fresh 运行中/检验中 marker plus a recent 最近活动 time count as executing.",
                     "The 'Perf in stall window' line is the worker resource evidence for that window; when it is missing "
                     "or you need a wider window, load and call perf_inspect(mode=window).",
+                    "This notice repeats while the task stays non-terminal and unpaused: keep_paused on nodes does not "
+                    "stop it, and neither does replying to the user. Only a task-level state does.",
+                    "To park the task and continue it later: manage_task_nodes with the whole-task form "
+                    "(task_id + action=pause, no node_ids) pauses the tree and ends the repetition.",
+                    "To close a task that should not run again: that same pause first, then the whole-task form with "
+                    "action=fail and a remark; a fail comes back subtree_not_fully_paused while any non-terminal node of "
+                    "the tree is unpaused.",
                     "After any stop decision, explain the likely cause and the next follow-up action.",
                 ]
             )
