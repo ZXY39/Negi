@@ -178,6 +178,7 @@ def _task_stall_lines(event: dict[str, Any], retrieval_parts: list[str]) -> list
     )
     stalled_minutes = _int_value(event.get("stalled_minutes"), 0)
     bucket_minutes = _int_value(event.get("bucket_minutes"), 0)
+    delivery_index = _int_value(event.get("delivery_index"), 0)
     brief_text = _non_empty_text(event.get("brief_text")) or "No task summary."
     latest_node_summary = _non_empty_text(event.get("latest_node_summary")) or "No latest node summary."
     runtime_excerpt = _non_empty_text(event.get("runtime_summary_excerpt")) or "No runtime summary."
@@ -209,6 +210,8 @@ def _task_stall_lines(event: dict[str, Any], retrieval_parts: list[str]) -> list
         f"  Reason: {stall_reason}",
         f"  Silent for: {stalled_minutes} min",
         f"  Trigger bucket: {bucket_minutes} min",
+        # 送达序号由注入侧富化从运行元数据读；拿不到读数就不写这行，不填 0。
+        *([f"  Delivery: {delivery_index} notice(s) for this silent window"] if delivery_index > 0 else []),
         f"  Silence measured from: {last_visible_output_at}",
         f"  Brief: {brief_text}",
         f"  Latest node: {latest_node_summary}",

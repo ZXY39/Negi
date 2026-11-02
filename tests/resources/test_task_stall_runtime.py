@@ -244,8 +244,9 @@ def test_task_stall_guidance_names_the_exits_that_end_the_repetition(tmp_path: P
 
     prompt = service._build_heartbeat_stable_rules([event])
 
-    assert "Only a task-level state" in prompt
-    assert "keep_paused on nodes does not" in prompt
+    assert "only a task-level state stops it" in prompt
+    assert "keep_paused on nodes and replying to the user both leave that count" in prompt
+    assert "the bundle's `Delivery` line counts" in prompt
     assert "action=pause" in prompt
     assert "action=fail" in prompt
     assert "subtree_not_fully_paused" in prompt

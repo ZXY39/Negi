@@ -185,6 +185,10 @@ def normalize_task_stall_payload(payload: dict[str, Any] | None) -> dict[str, An
         "stalled_minutes": stalled_minutes,
         "bucket_minutes": bucket_minutes,
         "last_visible_output_at": last_visible_output_at,
+        # 同一次静默窗口里这份通知是第几次送达（0 = 没有读数，渲染侧不印这行）。
+        # 富化点在注入侧 `session_service._enrich_event_payload_for_lane`；这里保留字段
+        # 是因为归一化白名单一旦把它漏掉，任何"先归一化再富化"的重排都会静默丢读数。
+        "delivery_index": _coerce_positive_int(source.get("delivery_index") or source.get("deliveryIndex"), default=0),
         "reason": normalize_task_stall_reason(source.get("reason")),
         "brief_text": str(source.get("brief_text") or source.get("briefText") or "").strip(),
         # 停滞的**事实**细节（闸位/上游限流/谁占容量/卡在哪个相位）。这份只增判读材料，

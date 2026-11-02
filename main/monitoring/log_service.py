@@ -668,6 +668,8 @@ class TaskLogService:
             'updated_at': now_iso(),
             'last_visible_output_at': str(last_visible_output_at or '').strip(),
             'last_stall_notice_bucket_minutes': 0,
+            'stall_notice_anchor': '',
+            'stall_delivery_count': 0,
             'task_temp_dir': self._fallback_task_temp_dir(),
             'dispatch_limits': {'execution': 0, 'inspection': 0, 'pool': 0},
             'dispatch_running': {'execution': 0, 'inspection': 0},
@@ -3183,6 +3185,15 @@ class TaskLogService:
                     current['last_stall_notice_bucket_minutes'] = max(0, int(payload.get('last_stall_notice_bucket_minutes') or 0))
                 except (TypeError, ValueError):
                     current['last_stall_notice_bucket_minutes'] = 0
+            # 停滞送达计数与它所属的静默锚点成对存放：锚点变了就是新一次静默，
+            # 计数从 1 重起，不需要单独的清理通路（meta 行随任务终态/删除一起走）。
+            if 'stall_notice_anchor' in payload:
+                current['stall_notice_anchor'] = str(payload.get('stall_notice_anchor') or '').strip()
+            if 'stall_delivery_count' in payload:
+                try:
+                    current['stall_delivery_count'] = max(0, int(payload.get('stall_delivery_count') or 0))
+                except (TypeError, ValueError):
+                    current['stall_delivery_count'] = 0
             if 'task_temp_dir' in payload:
                 current['task_temp_dir'] = self._normalize_task_temp_dir(payload.get('task_temp_dir'))
             if 'dispatch_limits' in payload:

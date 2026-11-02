@@ -886,6 +886,58 @@ class WebSessionHeartbeatService:
             except Exception:
                 logger.debug("reset_heartbeat_node_retry_state failed for {}", node_id)
 
+    def _task_stall_delivery_index(self, task_id: str, anchor: str) -> int:
+        """同一次静默窗口里这份通知是第几次送达（读数缺失时返回 0 = 不印这行）。
+
+        计数与它所属的静默锚点成对存放在任务运行元数据里：锚点一变（节点重新产出可见输出、
+        或任务级 pause/resume 之后重新静默）就是新一次窗口，从 1 重起，不需要额外的清零通路。
+        这里只**读** `stored + 1`，写发生在注入成功那一刻（`_record_task_stall_deliveries`），
+        所以注入失败重投时同一份通知仍是同一个序号。
+        """
+        clean_task = str(task_id or "").strip()
+        clean_anchor = str(anchor or "").strip()
+        if not clean_task or not clean_anchor:
+            return 0
+        service = self._main_task_service
+        reader = getattr(getattr(service, "log_service", None), "read_task_runtime_meta", None)
+        if not callable(reader):
+            return 0
+        try:
+            meta = dict(reader(clean_task) or {})
+        except Exception:
+            return 0
+        if str(meta.get("stall_notice_anchor") or "").strip() != clean_anchor:
+            return 1
+        try:
+            return max(0, int(meta.get("stall_delivery_count") or 0)) + 1
+        except (TypeError, ValueError):
+            return 1
+
+    def _record_task_stall_deliveries(self, events: list[SessionHeartbeatEvent]) -> None:
+        """把本轮渲染出的送达序号落账；只在成功注入这一处调用。
+
+        best-effort：写失败绝不阻断注入收尾（这条读数不是投递的前置条件），只留日志。
+        """
+        service = self._main_task_service
+        writer = getattr(getattr(service, "log_service", None), "update_task_runtime_meta", None)
+        if not callable(writer):
+            return
+        for event in list(events or []):
+            if str(event.reason or "").strip().lower() != "task_stall":
+                continue
+            payload = dict(event.payload or {})
+            task_id = str(payload.get("task_id") or "").strip()
+            anchor = str(payload.get("last_visible_output_at") or "").strip()
+            # 与渲染侧同一次读：本轮注入的那份束印的是第 index 次，落账就写 index。
+            # 注入失败重投时读数不变，所以序号不会跳号。
+            index = self._task_stall_delivery_index(task_id, anchor)
+            if index <= 0:
+                continue
+            try:
+                writer(task_id, stall_notice_anchor=anchor, stall_delivery_count=index)
+            except Exception:
+                logger.debug("stall delivery record skipped for %s", task_id)
+
     def _enrich_event_payload_for_lane(self, event: SessionHeartbeatEvent) -> dict[str, Any]:
         """给事件 payload 附上重试状态，供 prompt_lane 渲染进事件束（计划 2.4）。
 
@@ -895,7 +947,14 @@ class WebSessionHeartbeatService:
         store 不可用或读取失败时静默跳过富化（事件束退回原始渲染，不阻断投递）。
         """
         payload = {**dict(event.payload or {}), "event_reason": str(event.reason or "").strip()}
-        if str(event.reason or "").strip().lower() != "task_node_error":
+        reason = str(event.reason or "").strip().lower()
+        if reason == "task_stall":
+            payload["delivery_index"] = self._task_stall_delivery_index(
+                str(payload.get("task_id") or ""),
+                str(payload.get("last_visible_output_at") or ""),
+            )
+            return payload
+        if reason != "task_node_error":
             return payload
         node_id = str(payload.get("node_id") or "").strip()
         task_id = str(payload.get("task_id") or "").strip()
@@ -1131,8 +1190,9 @@ class WebSessionHeartbeatService:
                     "only lines with a fresh 运行中/检验中 marker plus a recent 最近活动 time count as executing.",
                     "The 'Perf in stall window' line is the worker resource evidence for that window; when it is missing "
                     "or you need a wider window, load and call perf_inspect(mode=window).",
-                    "This notice repeats while the task stays non-terminal and unpaused: keep_paused on nodes does not "
-                    "stop it, and neither does replying to the user. Only a task-level state does.",
+                    "This notice repeats while the task stays non-terminal and unpaused; the bundle's `Delivery` line counts",
+                    "the notices for this silence window. keep_paused on nodes and replying to the user both leave that count",
+                    "rising - only a task-level state stops it, and a rising count means the previous disposition did not land.",
                     "To park the task and continue it later: manage_task_nodes with the whole-task form "
                     "(task_id + action=pause, no node_ids) pauses the tree and ends the repetition.",
                     "To close a task that should not run again: that same pause first, then the whole-task form with "
@@ -1265,6 +1325,7 @@ class WebSessionHeartbeatService:
         self._events.consume_many(key, event_ids=event_ids)
         self._ack_task_terminal_events(events)
         self._ack_task_stall_events(events)
+        self._record_task_stall_deliveries(events)
         self._ack_tool_job_events(events)
         store = getattr(self._main_task_service, "store", None)
         for event in events:
