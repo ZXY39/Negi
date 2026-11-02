@@ -595,7 +595,7 @@ This is intentional. The composer button means "pause only when the user has not
 
 - `GET /api/ceo/sessions/{session_id}/tool-jobs` → `{ok, session_id, count, items}`；`items[]` 只含 `running` / `stopping`，字段 `job_id / tool_name / status / started_at / elapsed_seconds / turn_id / tool_call_id / hint`。没有运行时会话或没有 runner 时返回空列表而不是 503。会话解析与其它 CEO 会话接口同一套 `_resolve_bulk_session_key`，`ext:` 会话同样可查。
 - `POST /api/ceo/sessions/{session_id}/tool-jobs/{job_id}/stop` → `{ok, job_id, status:"stopping"}`。作业不属于该会话或已清除 → 404 `tool_job_not_found`；已完成/超时/中断 → 409 `tool_job_finished`；已在 stopping → 200 且不重复投事件。停止事件在点击时立即入心跳队列，不等待 task 收尾；前端只把该行置「停止中」并在成功后移除。
-- WS 帧 `ceo.tool_jobs`：`data = {count, items}`，信封自带 `session_id`；由 `RuntimeAgentSession._emit("tool_jobs_changed")` 经 `websocket_ceo.py` relay 推送，作业提升/停止/终态/恢复后各推一次。前端只在 `session_id` 等于当前激活会话时应用。
+- WS 帧 `ceo.tool_jobs`：`data = {count, items}`，信封自带 `session_id`；由 `RuntimeAgentSession._emit("tool_jobs_changed")` 经 `websocket_ceo.py` relay 推送，作业提升/停止/终态/恢复后各推一次。WS 建连并发送 `snapshot.ceo` 后再主动推一次当前列表，覆盖页面初始化/重连窗口里已经提升、但变化帧可能早于前端状态就绪的作业。前端只在 `session_id` 等于当前激活会话时应用。
 - 前端模块 `g3ku/web/frontend/ceo/background-jobs.js` 在 `ceo/ws-router.js` 之前加载（bundle 顺序同步在 `tests/resources/support/frontend_sources.js`）。气泡文案固定 `x个工具正在后台运行`；计数含 `running` + `stopping`；列表行是工具名 + `mm:ss`（超过 1 小时 `h:mm:ss`）+ 停止按钮，`hint` 有值时在工具名下显示一行小字。popover 最大高度 `min(40vh, 320px)` 内部滚动；0 条隐藏并关闭 popover；点击外部/Escape 关闭，`aria-expanded` 同步。
 - 计时器只在 popover 打开且有 items 时每秒更新 `[data-bg-job-started]` 的文本，不重建列表；关闭、切会话、`pagehide` 清理。切换会话时先清空旧会话状态并重新 `GET`；`GET` 失败只隐藏气泡，不 toast。
 - 工具轨道里后台调用行的 `status=background`：`tasks/node-detail.js` 用 `clock-3` 图标 + 「后台运行」，不得画成 success；`org_graph_app.js` 的实时/账本状态映射同样保留该状态。完成的最终结果不写回历史行，只经心跳事件给模型。

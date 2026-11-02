@@ -2106,6 +2106,15 @@ async def ceo_websocket(websocket: WebSocket):
                 data={'messages': persisted_messages, **turn_payload},
             )
         )
+        # 建连时主动推一次后台作业摘要：作业可能在页面初始化/重连的窗口里已提升，
+        # 只靠变化帧会漏掉那一次。之后的变化仍由 `tool_jobs_changed` 推送。
+        list_tool_jobs = getattr(session, 'list_tool_jobs', None)
+        if callable(list_tool_jobs):
+            initial_tool_jobs = list(list_tool_jobs() or [])
+            await _push_stream_event(
+                'ceo.tool_jobs',
+                {'count': len(initial_tool_jobs), 'items': initial_tool_jobs},
+            )
         # 重连也是"会话回到空闲"的时刻之一（进程重启后第一次连上来就走这里，构造期已把
         # 转录里仍是 pending 的条目接回队列）。起任务而不是 await：这条回合会把握手后的
         # 第一个 read 挡到回合结束。
