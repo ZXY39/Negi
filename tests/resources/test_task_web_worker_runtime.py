@@ -11061,9 +11061,12 @@ async def test_pause_requested_after_valid_result_flushes_node_output_before_tas
 
         paused = service.get_task(record.task_id)
         assert paused is not None
-        assert paused.status in {"in_progress", "success"}
-        assert paused.is_paused is True
-        assert paused.pause_requested is True
+        # 这一轮交回了**有效结果**，任务因此进终态；`c55c5cffe3` 之后节点暂停不再镜像到
+        # 任务旗标，终态任务由 refresh_task_view 丢弃暂停位。这里要保的是前半段：节点正文
+        # 在暂停抢走之前已经落账，而不是任务停在 paused。
+        assert paused.status == "success"
+        assert paused.is_paused is False
+        assert paused.pause_requested is False
 
         root = service.get_node(record.root_node_id)
         assert root is not None
@@ -13684,8 +13687,11 @@ def test_spawn_review_prompt_states_parsed_structure_and_merge_template() -> Non
     execution_prompt = load_prompt("node_execution.md")
 
     assert "这就是结构上独立的验收节点" in execution_prompt
-    assert "验收闭环按候选逐条判定" in execution_prompt
-    assert "这两种情况不要带验收" in execution_prompt
+    # 措辞按 `bd5e647e6`（验收默认不开、要显式开）之后的现行文本钉：判据仍逐条按候选
+    # 走，另外必须留着"没开验收的那条分支由谁兜"——汇总前核对就是它的替代闸。
+    assert "开不开验收按候选逐条判定" in execution_prompt
+    assert "不要开验收" in execution_prompt
+    assert "汇总前核对（必做）" in execution_prompt
     assert "把判据一次列全" in execution_prompt
 
 

@@ -2069,9 +2069,13 @@ class _SecretRevealGrant:
             self._expires_at = time.monotonic() + self.ttl_seconds
 
     def remaining_seconds(self) -> int:
+        # 读 `_expires_at` 必须在锁内，且报出去的剩余时间不能超过刚授予的窗口：
+        # 同一个进程内如果有一次更长的授权残留（这块是进程级单例），一个比 TTL 还大的
+        # 倒计时会把"5 分钟免密"这条对外合同说成别的东西。
         with self._lock:
             remaining = self._expires_at - time.monotonic()
-        return max(0, math.ceil(remaining))
+            ceiling = math.ceil(float(self.ttl_seconds))
+        return max(0, min(ceiling, math.ceil(remaining)))
 
     def reset(self) -> None:
         with self._lock:

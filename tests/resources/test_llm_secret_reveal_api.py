@@ -255,3 +255,18 @@ def test_an_unknown_config_id_leaves_the_mask_untouched(reveal_env) -> None:
 
     assert result["success"] is False
     assert seen == ["Bearer ********"]
+
+
+def test_remaining_countdown_never_exceeds_the_granted_window() -> None:
+    """倒计时读数不得越过被授予的窗口——哪怕进程级单例里留着一次更长的授权。
+
+    实盘形状：CI 上同一片里先跑过别的用例，这条 5 分钟窗口读回 `301`，而 `<= 300` 是
+    对外合同（`reveal_ttl_seconds` 同一份里就在旁边）。
+    """
+    grant = admin_rest._SecretRevealGrant(ttl_seconds=300)
+    grant._expires_at = 10_000_000.0
+
+    assert grant.remaining_seconds() == 300
+
+    grant._expires_at = 0.0
+    assert grant.remaining_seconds() == 0
