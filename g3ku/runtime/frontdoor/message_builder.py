@@ -18,7 +18,12 @@ from g3ku.core.timefmt import (
 )
 from g3ku.llm_config.runtime_resolver import resolve_chat_target
 from g3ku.runtime.context.types import ContextAssemblyResult, RetrievedContextBundle
-from g3ku.runtime.frontdoor.capability_snapshot import CapabilitySnapshot, build_capability_snapshot
+from g3ku.runtime.frontdoor.capability_snapshot import (
+    CapabilitySnapshot,
+    build_capability_snapshot,
+    pinned_exposure_revision_for,
+    render_stable_catalog_message,
+)
 from g3ku.runtime.frontdoor.cron_hidden_prompt import strip_cron_hidden_prompt
 from g3ku.runtime.frontdoor.prompt_cache_contract import DEFAULT_CACHE_FAMILY_REVISION
 from g3ku.runtime.frontdoor.session_temp_dir import ceo_session_temp_dir
@@ -1324,6 +1329,18 @@ class CeoMessageBuilder:
             if session_key
             else ''
         )
+        # 稳定块里的能力曝光锚按会话钉住：实时可见集只服务诊断/准入，资源增删不再
+        # 改 system 首条。唯一更新点是沙箱档位切换（用户允许的显式边界）；压缩也不换，
+        # 压缩只按当刻名单重印钉住块。
+        pinned_exposure_revision = pinned_exposure_revision_for(
+            session,
+            session_key=session_key,
+            live_revision=str(getattr(capability_snapshot, 'exposure_revision', '') or '').strip(),
+            sandbox_tier=sandbox_tier,
+        )
+        pinned_catalog_message = render_stable_catalog_message(
+            exposure_revision=pinned_exposure_revision or DEFAULT_CACHE_FAMILY_REVISION
+        )
         memory_view = _memory_view_for_session(self._loop, session_key)
         group_memory = bool(
             memory_view is not None
@@ -1338,19 +1355,19 @@ class CeoMessageBuilder:
         split_prompt_builder = callable(getattr(self._prompt_builder, 'build_base_prompt', None))
         prompt_refresh_stamp = ''
         if split_prompt_builder:
-            # 提示词的重新拉取跟着记忆块与 tools[] 的时钟走：这两个戳没动，稳定前缀就不该
-            # 出现新的字节；会话中途改写的提示词文件因此等到下一次采纳/曝光变化才生效。
+            # 提示词的重新拉取跟着记忆块与钉住曝光锚的时钟走：这两个戳没动，稳定前缀
+            # 就不该出现新的字节；资源增删只走尾部通知，不触发这里的重渲。
             prompt_refresh_stamp = (
                 f"{str(getattr(session, MEMORY_SNAPSHOT_ADOPTED_AT_ATTR, '') or '').strip()}"
-                f"|{str(getattr(capability_snapshot, 'exposure_revision', '') or '').strip()}"
+                f"|{pinned_exposure_revision}"
             )
             system_prompt = self._prompt_builder.build_base_prompt(
                 cache_stamp=prompt_refresh_stamp, sandbox_tier=sandbox_tier
             )
         else:
             system_prompt = self._prompt_builder.build(skills=[])
-        if capability_snapshot.stable_catalog_message:
-            system_prompt = f"{system_prompt}\n\n{capability_snapshot.stable_catalog_message}".strip()
+        if pinned_catalog_message:
+            system_prompt = f"{system_prompt}\n\n{pinned_catalog_message}".strip()
         if channel_session:
             channel_block = getattr(self._prompt_builder, 'channel_identity_block', None)
             channel_text = str(
@@ -1567,6 +1584,7 @@ class CeoMessageBuilder:
             'channel_session': channel_session,
             'master_sender_ids': master_sender_ids,
             'system_prompt': system_prompt,
+            'cache_family_revision': pinned_exposure_revision,
             'prompt_reprint_stamp': (
                 f'{prompt_refresh_stamp}|tier:{str(sandbox_tier or "").strip()}'
                 if split_prompt_builder
@@ -1931,7 +1949,7 @@ class CeoMessageBuilder:
             rbac_visible_tool_names=list(context_sources['capability_snapshot'].visible_tool_ids),
             rbac_visible_skill_ids=list(context_sources['capability_snapshot'].visible_skill_ids),
             contract_revision=(
-                str(context_sources['capability_snapshot'].exposure_revision or '').strip()
+                str(context_sources.get('cache_family_revision') or '').strip()
                 or DEFAULT_CACHE_FAMILY_REVISION
             ),
             exec_runtime_policy=(
@@ -2086,7 +2104,7 @@ class CeoMessageBuilder:
             trace=trace,
             turn_overlay_text=turn_overlay_text,
             cache_family_revision=(
-                str(context_sources['capability_snapshot'].exposure_revision or '').strip()
+                str(context_sources.get('cache_family_revision') or '').strip()
                 or DEFAULT_CACHE_FAMILY_REVISION
             ),
         )
@@ -2245,7 +2263,7 @@ class CeoMessageBuilder:
             rbac_visible_tool_names=list(context_sources['capability_snapshot'].visible_tool_ids),
             rbac_visible_skill_ids=list(context_sources['capability_snapshot'].visible_skill_ids),
             contract_revision=(
-                str(context_sources['capability_snapshot'].exposure_revision or '').strip()
+                str(context_sources.get('cache_family_revision') or '').strip()
                 or DEFAULT_CACHE_FAMILY_REVISION
             ),
             exec_runtime_policy=(
@@ -2363,7 +2381,7 @@ class CeoMessageBuilder:
             trace=trace,
             turn_overlay_text=turn_overlay_text,
             cache_family_revision=(
-                str(context_sources['capability_snapshot'].exposure_revision or '').strip()
+                str(context_sources.get('cache_family_revision') or '').strip()
                 or DEFAULT_CACHE_FAMILY_REVISION
             ),
         )

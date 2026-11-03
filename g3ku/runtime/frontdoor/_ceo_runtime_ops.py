@@ -237,8 +237,9 @@ from .tool_contract import (
 
 CeoGraphState = CeoPersistentState
 
-# tools[] 钉住表的切档重印戳：只在档位 + 生效工具集合真的变化时重提交一次。
-_FRONTDOOR_BUNDLE_POLICY_SIGNATURE_ATTR = "_frontdoor_bundle_policy_signature"
+# tools[] 钉住表的切档重印戳：只在沙箱档位真的变化时重提交一次。
+# 同一档位内改受限工具白名单不算切档——那由尾部 denied_tools/candidate_tools 通知承担。
+_FRONTDOOR_BUNDLE_TIER_ATTR = "_frontdoor_bundle_tier"
 
 
 
@@ -4028,9 +4029,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         )
         message, delivered = _skill_roster_notice.deliver_for_scope(
             scope,
-            _skill_roster_notice.readable_skill_items(
-                self._frontdoor_live_visible_skills(session_key)
-            ),
+            self._frontdoor_live_visible_skills(session_key),
             now=now_iso(),
             # 头部钉住块那份名单算"已宣布"：否则第一跳会把整份名单重播一遍。
             # 钉住表按裸 session_key 分桶（`session:` 前缀只是台账的作用域写法），
@@ -4460,13 +4459,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         setattr(session, "_frontdoor_request_body_messages", list(stripped))
 
     def _frontdoor_bundle_recommit_boundary(self, *, session: Any, state: CeoGraphState) -> bool:
-        """`tools[]` 与 skill 头部名单共用的唯一重新提交点：压缩 + 档位/工具集合变化。
+        """`tools[]` 与 skill 头部名单共用的唯一重新提交点：压缩 + 沙箱档位切换。
 
         换车道**不**重印：心跳/定时内部轮与外部轮共用同一份冻结名单，一次车道切换
         不该把身后整段正文的缓存打掉（用户决策，保缓存命中）。内部轮的工具面收窄由
         执行准入承担（派发字典 ∩ 当轮治理可见集），声明面保持冻结；skill 名单同理，
-        全量名单跨车道共享。档位或受限档工具列表变化是操作员显式动作，它同时换掉
-        模型可见的 `tools[]` 与头部声明，必须当天重印，不能等下一次压缩。
+        全量名单跨车道共享。同一档位内改受限工具白名单也不重印：收回/放行由尾部
+        `denied_tools` / `candidate_tools` 通知，执行准入当跳生效。只有沙箱档位切换
+        （操作员显式动作，同时换掉模型可见的 `tools[]` 与头部声明）当天重印。
 
         返回 True 的同一处递增 skill roster epoch：skill 头部名单与 `tools[]` 共用一套
         "什么时候允许变"的口径，两份名单在同一个跳上一起重印。
@@ -4476,22 +4476,22 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             or getattr(getattr(session, "state", None), "session_key", "")
             or ""
         ).strip()
-        current_signature = ""
+        current_tier = ""
         if session_key:
             try:
-                current_signature = str(session_policy(session_key).tool_policy_signature or "")
+                current_tier = str(session_policy(session_key).tier or "")
             except Exception:
-                current_signature = ""
-        previous_signature = str(
-            getattr(session, _FRONTDOOR_BUNDLE_POLICY_SIGNATURE_ATTR, "") or ""
+                current_tier = ""
+        previous_tier = str(
+            getattr(session, _FRONTDOOR_BUNDLE_TIER_ATTR, "") or ""
         )
-        signature_changed = bool(
-            previous_signature and current_signature and previous_signature != current_signature
+        tier_changed = bool(
+            previous_tier and current_tier and previous_tier != current_tier
         )
-        if current_signature and current_signature != previous_signature:
-            setattr(session, _FRONTDOOR_BUNDLE_POLICY_SIGNATURE_ATTR, current_signature)
+        if current_tier and current_tier != previous_tier:
+            setattr(session, _FRONTDOOR_BUNDLE_TIER_ATTR, current_tier)
         pending = bool(getattr(session, PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR, False))
-        if pending or signature_changed:
+        if pending or tier_changed:
             if pending:
                 setattr(session, PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR, False)
             bump_skill_roster_epoch(session, session_key=session_key)

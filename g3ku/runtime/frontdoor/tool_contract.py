@@ -97,6 +97,11 @@ def clear_pinned_contract_stores() -> None:
     """测试隔离：钉住表是进程级的，跨用例可见。"""
     _PINNED_CONTRACT_STORES.clear()
     _SKILL_ROSTER_EPOCH_STORES.clear()
+    from g3ku.runtime.frontdoor.capability_snapshot import (
+        clear_pinned_exposure_revision_stores,
+    )
+
+    clear_pinned_exposure_revision_stores()
 
 
 def pinned_head_carrier(*, session_key: str) -> dict[str, Any]:
@@ -196,6 +201,9 @@ def drop_pinned_contract_state(session: Any, *, session_key: str | None = None) 
         return
     _PINNED_CONTRACT_STORES.pop(key, None)
     _SKILL_ROSTER_EPOCH_STORES.pop(key, None)
+    from g3ku.runtime.frontdoor.capability_snapshot import drop_pinned_exposure_revision
+
+    drop_pinned_exposure_revision(key)
 
 
 def pinned_contract_revision_key(
@@ -206,18 +214,43 @@ def pinned_contract_revision_key(
     sandbox_tier: str = "",
     tool_policy_signature: str = "",
 ) -> str:
-    """头部块的重印判据：roster epoch + 档位 + 生效工具集合。
+    """头部块的重印判据：roster epoch + 沙箱档位。
 
-    执行策略与临时目录**刻意不进判据**：缓存命中第一。它们变化时不重印头部，改由一次性
-    `[RUNTIME_NOTICE]` 消息纠正；下次压缩 epoch 跳变时，头部才用当刻值重印。可见集本身
-    同样不进键：两次重印之间可见集怎么变，头部都逐字节不动——新增的可读 skill 由一次性
-    持久提示落进历史，被删/被收回的名字留在头部直到下一次重印（`load_skill_context`
-    三态回执告知原因）。把可见集或策略算进键会让一次资源/配置变化把整段头部（连同它
-    后面的全部前缀）打掉。
+    执行策略、临时目录、受限档工具白名单**刻意不进判据**：缓存命中第一。它们变化时
+    不重印头部，改由一次性 `[RUNTIME_NOTICE]` 消息纠正；下次压缩 epoch 跳变时，头部
+    才用当刻值重印。可见集本身同样不进键：两次重印之间可见集怎么变，头部都逐字节
+    不动——新增的可读 skill 由一次性持久提示落进历史，被删/被收回的名字留在头部直到
+    下一次重印（`load_skill_context` 三态回执告知原因），删除/收回另有一条尾部通知。
 
-    例外是**档位与受限档工具集合**：切档/改工具列表会同时换掉模型可见的 `tools[]` 与
-    头部声明，继续沿用旧前缀会让模型按旧工具面行动。这两项变化一次前缀是操作员显式动作，
-    接受这一次 cache miss。
+    唯一的显式例外是**沙箱档位切换**：切档会同时换掉模型可见的 `tools[]` 与头部声明，
+    继续沿用旧前缀会让模型按旧工具面行动；这是一次操作员显式动作，接受这一次 cache miss。
+    同一档位内改受限工具白名单不算切档，走 `denied_tools` / `candidate_tools` 通知。
+    """
+    _ = (exec_runtime_policy, session_temp_dir, tool_policy_signature)
+    digest = hashlib.sha256(
+        '\n'.join(
+            (
+                PINNED_CONTRACT_RENDERER_VERSION,
+                str(int(skill_roster_epoch or 0)),
+                str(sandbox_tier or "").strip(),
+            )
+        ).encode('utf-8')
+    ).hexdigest()[:16]
+    return f'pc:{digest}'
+
+
+def _pinned_contract_legacy_revision_key(
+    *,
+    exec_runtime_policy: dict[str, Any] | None,
+    session_temp_dir: str | None,
+    skill_roster_epoch: int,
+    sandbox_tier: str = "",
+    tool_policy_signature: str = "",
+) -> str:
+    """上线迁移用：旧公式把 tool_policy_signature 算进 digest。
+
+    存量会话的侧车/进程表里存的是旧键；新键查不到时用旧键回查一次，命中就把同一串
+    原文收养到新键下，避免上线首跳整段重印头部。
     """
     _ = (exec_runtime_policy, session_temp_dir)
     digest = hashlib.sha256(
@@ -500,6 +533,30 @@ def frontdoor_pinned_contract_text(
     )
     if stored_text:
         return stored_text
+    # 上线迁移：旧键把 tool_policy_signature 算进 digest。新键查不到时按旧公式回查一次，
+    # 命中就把同一串原文收养到新键下；否则存量会话会在首跳整段重印头部。
+    legacy_revision = _pinned_contract_legacy_revision_key(
+        exec_runtime_policy=exec_runtime_policy,
+        session_temp_dir=session_temp_dir,
+        skill_roster_epoch=skill_roster_epoch,
+        sandbox_tier=sandbox_tier,
+        tool_policy_signature=tool_policy_signature,
+    )
+    if legacy_revision and legacy_revision != revision:
+        legacy_text, legacy_skill_ids = _read_pinned_contract_entry(
+            session,
+            session_key=normalized_session_key,
+            revision=legacy_revision,
+        )
+        if legacy_text:
+            _write_pinned_contract_entry(
+                session,
+                session_key=normalized_session_key,
+                revision=revision,
+                text=legacy_text,
+                skill_ids=list(legacy_skill_ids),
+            )
+            return legacy_text
     fresh = render_pinned_contract_text(
         skill_items=skill_items,
         exec_runtime_policy=exec_runtime_policy,

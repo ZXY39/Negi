@@ -16,6 +16,17 @@ import pytest
 from g3ku.deployment.data_root import DATA_DIR_ENV
 from g3ku.deployment.data_root import reset_cache as reset_data_root_cache
 from g3ku.runtime import external_outbox
+from g3ku.runtime.frontdoor.capability_snapshot import (
+    clear_pinned_exposure_revision_stores,
+)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_pinned_exposure_revision() -> None:
+    """进程级钉住曝光锚跨用例可见；每个用例从空表开始。"""
+    clear_pinned_exposure_revision_stores()
+    yield
+    clear_pinned_exposure_revision_stores()
 
 
 @pytest.fixture(autouse=True)

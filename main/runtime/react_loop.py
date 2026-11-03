@@ -4071,7 +4071,7 @@ class ReActToolLoop:
         self._hydrate_node_skill_roster_notice(node=node)
         message, _delivered = _skill_roster_notice.deliver_for_scope(
             scope,
-            _skill_roster_notice.readable_skill_items(list(skill_roster_items or [])),
+            list(skill_roster_items or []),
             now=now_iso(),
             # 头部钉住块那份名单算"已宣布"：否则节点第一跳会重播整份名单。
             covered_skill_ids=_pinned_skill_ids_for(None, session_key=scope),
