@@ -918,10 +918,10 @@ async def test_retry_of_oversized_parked_record_splits_into_queue_rows(tmp_path:
     module = _load_memory_agent_runtime_module()
     manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
-        stages = [{"stage_id": f"s{i}", "stage_goal": f"目标{i}", "completed_stage_summary": "z" * 4000} for i in range(8)]
+        records = [{"tool_name": f"tool-{i}", "result_text": "z" * 4000} for i in range(8)]
         payload = (
-            "[session_key] web:split\n\n## 窗口回合 1\n[turn_id] t1\nuser_messages:\n- 把这些阶段记下来\n"
-            "stages:\n" + json.dumps({"stages": stages}, ensure_ascii=False, indent=2)
+            "[session_key] web:split\n\n## 窗口回合 1\n[turn_id] t1\nuser_messages:\n- 把这些工具记录记下来\n"
+            "tool_records:\n" + json.dumps(records, ensure_ascii=False, indent=2)
         )
         batch = module.MemoryBatch(
             op="write",
@@ -958,8 +958,16 @@ async def test_retry_of_oversized_parked_record_splits_into_queue_rows(tmp_path:
             body = str(row["payload_text"] or "")
             assert module.estimate_tokens(body) <= 2000, f"片仍超目标: {module.estimate_tokens(body)}"
             assert body.startswith("[session_key] web:split")
-            collected.extend(re.findall(r'"stage_id": "s(\d+)"', body))
-        assert sorted(collected) == sorted(str(i) for i in range(8)), f"阶段不许丢: {sorted(collected)}"
+            collected.extend(re.findall(r'"tool_name": "(tool-\d+)"', body))
+        assert sorted(collected) == sorted(f"tool-{i}" for i in range(8)), f"工具记录不许丢: {sorted(collected)}"
+
+        # 对照臂：一条记录是不可分原子组——单条就超目标的载荷照原样发出，由闸门按真实
+        # 原因拒，拆片器不许把一条记录腰斩。
+        atomic = (
+            "[session_key] web:split\n\n## 窗口回合 9\n[turn_id] t9\nuser_messages:\n- 一条超大记录\n"
+            "tool_records:\n" + json.dumps([{"tool_name": "huge", "result_text": "y" * 12000}], ensure_ascii=False, indent=2)
+        )
+        assert len(module.MemoryManager._split_window_payload(atomic, max_tokens=2000)) == 1
 
         stored = manager._read_failed_records()[0]["items"][0]["payload_text"]
         assert stored == payload, "停车区存的仍是整份原文（拆片只发生在回队的那份拷贝上）"
