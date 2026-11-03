@@ -304,6 +304,20 @@ def _prepare_agent_for_turn(agent, *, turn_id, batch_inputs):
     agent._last_verified_task_ids = []
 
 
+def _drained_into_this_turn(record):
+    """把一条 durable pending 行表示成"本回合真的接走过它"。
+
+    `take_follow_up_batch_for_call_model` 把 drain 到的行放回 `_active_user_batch_inputs`，
+    而 `c9426d056`（2026-10-23）之后退役判据只认这份批次：孤儿 pending 行的终态只能由
+    真正回答它的那一轮授予（实盘 `web:ceo-f2fa04192251`：一次心跳回合把与本批无关的行
+    退役成 completed，那条提问就此同时失去回答与重投资格）。
+    """
+    return UserInputMessage(
+        content=record["content"],
+        metadata={"_transcript_turn_id": record["metadata"]["_transcript_turn_id"]},
+    )
+
+
 async def _persist(agent, *, user_input, user_text, assistant_text, internal_source):
     return await agent._persist_turn_transcript(
         user_input=user_input,
@@ -317,20 +331,29 @@ async def _persist(agent, *, user_input, user_text, assistant_text, internal_sou
 
 
 def test_internal_turn_completion_retires_consumed_pending_rows():
-    """回归：心跳/cron 回合在 prepare 阶段消费排队的 follow-up，但完成路径整段跳过
-    用户行回写，被消费的 pending 行永远停在转录里；下一次会话重建按 `_rehydrate_queued_follow_ups`
-    把它当作从未回答的提问重新投喂。实测一条渠道会话因此把 9 条跨 10 天的旧消息并成
-    一个批次重答了一遍，并且顶掉了当轮真正要回答的那条。"""
+    """回归：心跳/cron 回合在 prepare 阶段消费排队的 follow-up，完成路径必须把接走过的
+    那几条 pending 行退役；留在 pending 的行会被下一次会话重建按 `_rehydrate_queued_follow_ups`
+    当作从未回答的提问重新投喂。实盘一条渠道会话因此把 9 条跨 10 天的旧消息并成一个批次
+    重答了一遍，并且顶掉了当轮真正要回答的那条。
+
+    同一轮里那条**没被接走**的 pending 行必须留在 pending——它才是 10-23 收紧判据要保的
+    对象，两条放在一起互为对照臂。
+    """
     import asyncio
 
     consumed = _pending_record("日报任务立即停止", turn_id="turn-queued")
-    session = _FakePersistedSession([consumed])
+    untouched = _pending_record("与本批无关的一条提问", turn_id="turn-orphan")
+    session = _FakePersistedSession([consumed, untouched])
     agent = _build_drained_agent(session)
     heartbeat_input = UserInputMessage(
         content="This is a background heartbeat.",
         metadata={"heartbeat_internal": True, "_transcript_turn_id": "turn-hb"},
     )
-    _prepare_agent_for_turn(agent, turn_id="turn-hb", batch_inputs=[])
+    _prepare_agent_for_turn(
+        agent,
+        turn_id="turn-hb",
+        batch_inputs=[heartbeat_input, _drained_into_this_turn(consumed)],
+    )
 
     asyncio.run(
         _persist(
@@ -343,11 +366,13 @@ def test_internal_turn_completion_retires_consumed_pending_rows():
     )
 
     assert session.messages[0]["metadata"]["_transcript_state"] == _TRANSCRIPT_STATE_COMPLETED
+    assert session.messages[1]["metadata"]["_transcript_state"] == _TRANSCRIPT_STATE_PENDING
 
 
 def test_pending_rows_still_held_by_live_queue_survive_completion():
     """内存队列仍是排队真相的那一半不能被退役：回合跑到尾部才排进来的消息要由
-    排空通道继续派发，提前翻成 completed 会让它在重启后彻底消失。"""
+    排空通道继续派发，提前翻成 completed 会让它在重启后彻底消失。同一回合接走过的
+    那条（在批次里）照旧退役，两条正好把判据的两端钉住。"""
     import asyncio
 
     stale = _pending_record("密码是三个字母:qaz", turn_id="turn-stale")
@@ -358,7 +383,11 @@ def test_pending_rows_still_held_by_live_queue_survive_completion():
         UserInputMessage(content="清理也派发任务完成", metadata={"_transcript_turn_id": "turn-live"})
     )
     user_input = UserInputMessage(content="继续", metadata={"_transcript_turn_id": "turn-now"})
-    _prepare_agent_for_turn(agent, turn_id="turn-now", batch_inputs=[user_input])
+    _prepare_agent_for_turn(
+        agent,
+        turn_id="turn-now",
+        batch_inputs=[user_input, _drained_into_this_turn(stale)],
+    )
 
     asyncio.run(
         _persist(
@@ -418,7 +447,11 @@ def test_internal_turn_completion_stops_the_rehydrate_resurrection_loop():
         metadata={"cron_internal": True, "_transcript_turn_id": "turn-cron"},
     )
     first._state.queued_follow_up_messages.clear()
-    _prepare_agent_for_turn(first, turn_id="turn-cron", batch_inputs=[])
+    _prepare_agent_for_turn(
+        first,
+        turn_id="turn-cron",
+        batch_inputs=[cron_input, _drained_into_this_turn(rows[0])],
+    )
     asyncio.run(
         _persist(
             first,

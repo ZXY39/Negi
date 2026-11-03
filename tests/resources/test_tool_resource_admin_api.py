@@ -4251,35 +4251,41 @@ def test_llm_routes_memory_scope_rejects_non_chat_binding(
     assert 'chat-capable' in str(response.json().get('detail') or '')
 
 
-def test_llm_routes_memory_scope_accepts_empty_chain(
+def test_llm_routes_memory_scope_rejects_empty_chain(
     tmp_path: Path,
     monkeypatch,
 ):
+    """单 scope 车道（`/api/llm/routes/{scope}`）也不许把空链写下去。
+
+    2026-04-18（`f47589cac`）这条用例写的是"空链可以保存"，2026-11-01（`a0ab8b74a`）
+    改成每次保存都要求记忆 Agent 有链：空链的 memory scope 会让每一次记忆调用
+    当场失败，界面上却显示"已保存"。批量车道早已有同名用例，这条补的是单 scope 那道门。
+    """
     workspace = tmp_path / 'workspace'
     workspace.mkdir(parents=True, exist_ok=True)
     _write_runtime_config(workspace)
     monkeypatch.chdir(workspace)
+    config_file = workspace / '.g3ku' / 'config.json'
 
     app = FastAPI()
     app.include_router(admin_rest.router, prefix='/api')
     client = TestClient(app)
+
+    # 读一次再取基线：`ModelManager.load()` 会把缺失的 scope 键补齐并落盘（实测一次 GET
+    # 就重写文件），拿写入前的字节比会把这条正常归一化误判成"被拒的保存写了盘"。
+    client.get('/api/llm/routes')
+    before = json.loads(config_file.read_text(encoding='utf-8'))
 
     response = client.put(
         '/api/llm/routes/memory',
         json={'model_keys': [], 'max_iterations': 5, 'max_concurrency': 1},
     )
 
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload['route']['scope'] == 'memory'
-    assert payload['routes']['memory'] == []
-    assert payload['role_iterations']['memory'] == 5
-    assert payload['role_concurrency']['memory'] == 1
-
-    saved = json.loads((workspace / '.g3ku' / 'config.json').read_text(encoding='utf-8'))
-    assert saved['models']['roles']['memory'] == []
-    assert saved['agents']['roleIterations']['memory'] == 5
-    assert saved['agents']['roleConcurrency']['memory'] == 1
+    assert response.status_code == 400, response.text
+    assert 'model_keys must not be empty' in response.text
+    # 校验发生在写盘之前：被拒的这一次连合法的迭代数/并发数也不许半提交。
+    assert json.loads(config_file.read_text(encoding='utf-8')) == before
+    assert before['agents']['roleIterations'].get('memory') != 5
 
 
 def test_llm_routes_bulk_endpoint_updates_multiple_scopes_with_single_refresh(tmp_path: Path, monkeypatch):
