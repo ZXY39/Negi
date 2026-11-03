@@ -46,6 +46,9 @@ _TRANSCRIPT_STATE_PENDING = "pending"
 _TRANSCRIPT_STATE_PAUSED = "paused"
 _TRANSCRIPT_STATE_INTERRUPTED = "interrupted"
 _TRANSCRIPT_STATE_COMPLETED = "completed"
+# 可见回合因模型/供应商错误终止：用户行落终态，退出 pending 队列语义。
+# 它不再被重投（消息已在失败请求的请求体里），错误行在下一次 prepare 时对账进续跑种子。
+_TRANSCRIPT_STATE_FAILED = "failed"
 # 轮级用量热缓存的条数上限：在飞轮与刚收尾那一帧要读，更早的轮从请求工件取。
 _TURN_USAGE_MEMORY_ENTRIES = 64
 
@@ -1794,19 +1797,29 @@ class RuntimeAgentSession:
             )
         return flipped
 
-    def _requeue_unanswered_user_inputs(self, user_input: UserInputMessage) -> int:
-        """把没有拿到真实模型轮次的用户输入退回排队队列，返回放回条数。
+    def _settle_unanswered_user_inputs(
+        self,
+        user_input: UserInputMessage,
+        *,
+        persisted_session: Any = None,
+    ) -> int:
+        """把失败回合本批用户行落 `failed` 终态，返回落态条数。
 
-        ``pending`` 的真相是"内存队列还打算派发它"，所以只有放回队列才允许行留在
-        pending；否则下一个成功回合的 `_retire_consumed_pending_user_messages` 会把它
-        当成已消费的排队行翻成 completed，消息重新变成永久缺席。
+        `pending` 的旧含义是"内存队列还打算派发它"；失败回合的输入已经进了失败请求的
+        请求体（续跑基线），继续留在队列只会让下一次激活把同一句话再发一遍。终态化之后
+        重连/启动/下一轮都不会再接回它；错误信息由 frontdoor prepare 的对账进入下一轮
+        上下文，模型从中断处自行决定继续或说明。
         """
-        live_turn_ids = {
-            self._user_input_turn_id(item)
-            for item in list(self._state.queued_follow_up_messages or [])
-            if self._user_input_turn_id(item)
-        }
-        restored = 0
+        if persisted_session is None:
+            try:
+                persisted_session = self._loop.sessions.get_or_create(self._state.session_key)
+            except Exception:
+                logger.debug(
+                    "failed turn user row settlement skipped for {}",
+                    self._state.session_key,
+                )
+                return 0
+        settled = 0
         for item in self._current_user_batch_inputs(user_input):
             if not isinstance(item, UserInputMessage):
                 continue
@@ -1814,19 +1827,42 @@ class RuntimeAgentSession:
             if not text.strip() and not item.attachments:
                 continue
             turn_id = self._user_input_turn_id(item)
-            if turn_id and turn_id in live_turn_ids:
+            if not turn_id:
                 continue
-            self._state.queued_follow_up_messages.append(item)
-            if turn_id:
-                live_turn_ids.add(turn_id)
-            restored += 1
-        if restored:
+            index = self._find_transcript_user_index(persisted_session, turn_id=turn_id)
+            rows = getattr(persisted_session, "messages", None)
+            if index is None or not isinstance(rows, list) or index >= len(rows):
+                continue
+            row = rows[index]
+            if not isinstance(row, dict):
+                continue
+            current_state = self._message_transcript_state(row).strip().lower()
+            if current_state == _TRANSCRIPT_STATE_FAILED:
+                continue
+            if current_state != _TRANSCRIPT_STATE_PENDING:
+                # 成功收尾/暂停归档等其它终态不允许被失败路径降级。
+                continue
+            if self._mark_transcript_user_state(
+                persisted_session,
+                turn_id=turn_id,
+                state=_TRANSCRIPT_STATE_FAILED,
+                persist=False,
+            ):
+                settled += 1
+        if settled:
+            try:
+                self._loop.sessions.save(persisted_session)
+            except Exception:
+                logger.debug(
+                    "failed turn user row settlement save skipped for {}",
+                    self._state.session_key,
+                )
             logger.info(
-                "Requeued {} unanswered user message(s) for {} after turn failure",
-                restored,
+                "Settled {} failed user message(s) for {} after turn failure",
+                settled,
                 self._state.session_key,
             )
-        return restored
+        return settled
 
     def _mirror_completed_continuity_as_turn_boundary(self, *, session_key: str, turn_id: str) -> None:
         """失败轮的边界快照 = 基线在上一成功轮停下的那份样子。
@@ -4400,10 +4436,13 @@ class RuntimeAgentSession:
                     )
                     self._loop.sessions.save(persisted_session)
                 if internal_source is None:
-                    # 用户输入保持提交点写下的 pending 并放回队列：派发它的只能是下一个
-                    # 可见用户回合（`dispatch_queued_follow_ups_if_idle` 与两条 drain 通道
-                    # 都在用户车道上），失败在这里不会静默吞进内部回合。
-                    self._requeue_unanswered_user_inputs(user_input)
+                    # 失败回合不重投：本批用户消息已经在失败请求的请求体里（续跑基线），
+                    # 再排一次会让模型看到两条相同的提问。用户行落 failed 终态、退出
+                    # pending 队列；错误行由下一次 prepare 对账进上下文。
+                    self._settle_unanswered_user_inputs(
+                        user_input,
+                        persisted_session=persisted_session,
+                    )
                     failed_turn_id = str(self._active_turn_id or "").strip()
                     if failed_turn_id:
                         self._mirror_completed_continuity_as_turn_boundary(
@@ -4418,6 +4457,9 @@ class RuntimeAgentSession:
                 source="runtime",
                 turn_id=str(self._active_turn_id or "").strip(),
                 turn_source=str(internal_source or "user").strip().lower() or "user",
+                # 本批用户消息已经随失败请求进了上下文，不再重投。前端靠这份读数把
+                # 「插话」提交的本地在飞副本退役，避免服务端队列清空后留下幽灵 chip。
+                user_messages=self._pending_user_messages_snapshot(),
             )
             await self._emit("agent_end", session_key=self._state.session_key, status="error")
             await self._emit_state_snapshot()
@@ -4858,6 +4900,28 @@ class RuntimeAgentSession:
             excluded_sources=excluded_sources,
         )
 
+    @classmethod
+    def _runtime_error_reply_turn_ids(cls, rows: Any) -> set[str]:
+        """带错误回复行的 turn_id。
+
+        这类回合已经实际跑过：用户消息进了失败的请求体，错误行也落了盘。旧契约让
+        用户行继续停在 pending（队列的 durable 记录），新契约把它当失败终态收口，
+        否则升级前的遗留行会被 `_rehydrate_queued_follow_ups` 重新接回并重投。
+        """
+        turn_ids: set[str] = set()
+        for row in list(rows or []):
+            if not isinstance(row, dict) or str(row.get("role") or "").strip().lower() != "assistant":
+                continue
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            if str(metadata.get("source") or "").strip().lower() != _TRANSCRIPT_ERROR_REPLY_SOURCE:
+                continue
+            if metadata.get("history_visible") is False or metadata.get("prompt_visible") is False:
+                continue
+            turn_id = str(row.get("turn_id") or metadata.get(_TRANSCRIPT_TURN_ID_KEY) or "").strip()
+            if turn_id:
+                turn_ids.add(turn_id)
+        return turn_ids
+
     @staticmethod
     def _iso_epoch(value: Any) -> float | None:
         text = str(value or "").strip()
@@ -5093,19 +5157,26 @@ class RuntimeAgentSession:
         `_TRANSCRIPT_STATE_PENDING` 全仓零读者，所以重启后队列归零，那条消息停在转录里
         显示成"已发送"，却再也不会被回答。
 
-        已经有助手行的 turn 不接回：那一轮已经答过，只是崩在状态翻转之前，重发就是重复回答。"""
+        已经有助手行的 turn 不接回：那一轮已经答过，只是崩在状态翻转之前，重发就是重复回答。
+
+        带 `runtime_error` 助手行的 pending 行是旧契约留下的失败回合：用户消息已经在失败
+        请求的请求体里，接回重投就是同一句话问两遍。这里把它落 `failed` 终态并跳过，
+        升级前的遗留数据也按新契约收口。"""
         session_key = str(self._state.session_key or "").strip()
         if not session_key or getattr(self._loop, "sessions", None) is None:
             return 0
         if list(self._state.queued_follow_up_messages or []):
             return 0
         try:
-            rows = list(self._loop.sessions.get_or_create(session_key).messages or [])
+            persisted_session = self._loop.sessions.get_or_create(session_key)
+            rows = list(getattr(persisted_session, "messages", None) or [])
         except Exception:
             logger.debug("queued follow-up rehydrate skipped for {}", session_key)
             return 0
         answered_turn_ids = self._answered_turn_ids_from_rows(rows)
+        failed_turn_ids = self._runtime_error_reply_turn_ids(rows)
         restored: list[UserInputMessage] = []
+        settled_failed = 0
         for row in rows:
             if not isinstance(row, dict) or str(row.get("role") or "") != "user":
                 continue
@@ -5113,6 +5184,15 @@ class RuntimeAgentSession:
             if str(metadata.get(_TRANSCRIPT_STATE_KEY) or "").strip().lower() != _TRANSCRIPT_STATE_PENDING:
                 continue
             turn_id = str(metadata.get(_TRANSCRIPT_TURN_ID_KEY) or "").strip()
+            if turn_id and turn_id in failed_turn_ids:
+                if self._mark_transcript_user_state(
+                    persisted_session,
+                    turn_id=turn_id,
+                    state=_TRANSCRIPT_STATE_FAILED,
+                    persist=False,
+                ):
+                    settled_failed += 1
+                continue
             if turn_id and turn_id in answered_turn_ids:
                 continue
             content = str(row.get("content") or "")
@@ -5128,6 +5208,16 @@ class RuntimeAgentSession:
                     # 快照把很久以前排队的消息报成刚发送，前端也就无法按时间落位气泡。
                     timestamp=str(row.get("timestamp") or "").strip() or None,
                 )
+            )
+        if settled_failed:
+            try:
+                self._loop.sessions.save(persisted_session)
+            except Exception:
+                logger.debug("failed user row settlement save skipped for {}", session_key)
+            logger.info(
+                "Settled {} legacy failed user message(s) during rehydrate for {}",
+                settled_failed,
+                session_key,
             )
         if restored:
             self._state.queued_follow_up_messages.extend(restored)

@@ -1063,6 +1063,138 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             records.append({"role": "user", "content": f"{body}{stamp}" if stamp else body})
         return records
 
+    @staticmethod
+    def _runtime_error_notice_text(turn_id: str, error_row: dict[str, Any]) -> str:
+        """失败回合给模型看的结构化通知。
+
+        它在 seed 里以 assistant 角色追加，正文带 `turn_id` 作为幂等键——seed 只存
+        `{role, content}`，没有 metadata 可用来判重。错误原文截断，完整文本留在转录
+        与运行时错误文件里。
+        """
+        metadata = error_row.get("metadata") if isinstance(error_row.get("metadata"), dict) else {}
+        code = str(metadata.get("error_code") or "").strip() or "runtime_error"
+        status = str(metadata.get("error_status") or "").strip()
+        kind = str(metadata.get("error_kind") or "").strip()
+        recoverable_raw = metadata.get("recoverable")
+        facts = [f"code={code}"]
+        if status:
+            facts.append(f"status={status}")
+        if kind:
+            facts.append(f"kind={kind}")
+        if recoverable_raw is not None:
+            facts.append(f"retryable={'true' if bool(recoverable_raw) else 'false'}")
+        message = str(metadata.get("error_message") or error_row.get("content") or "").strip()
+        if len(message) > 2000:
+            message = message[:2000].rstrip() + "…"
+        lines = [f"[上一回合未完成 turn_id={turn_id}] {' '.join(facts)}"]
+        if message:
+            lines.append(message)
+        lines.append(
+            "用户的问题已在上方上下文中，这不是一条新的用户消息。若任务尚未完成，请从中断处继续；"
+            "若错误不可重试，请向用户说明并等待指示。"
+        )
+        return "\n".join(lines)
+
+    @classmethod
+    def _reconcile_failed_turns_into_seed(
+        cls,
+        seed_messages: list[dict[str, Any]] | None,
+        persisted_session: Any,
+        current_turn_user_content: Any = None,
+    ) -> list[dict[str, Any]]:
+        """把失败回合的用户消息与错误通知补进续跑种子。
+
+        正常失败时用户消息已经在失败请求的请求体（基线）里，这里只补错误通知；
+        prepare 期就失败、基线还没写进这条消息时，用户消息与通知一起补。锚点是转录里
+        `_transcript_state=failed` 的用户行，所以心跳/cron 内部回合的错误不会进来。
+        幂等：通知正文带 `turn_id`；冷启动路径已经带原始错误行时按原文判重。
+        """
+        records = [dict(item) for item in list(seed_messages or []) if isinstance(item, dict)]
+        transcript = (
+            list(getattr(persisted_session, "messages", []) or [])
+            if persisted_session is not None
+            else []
+        )
+        if not records or not transcript:
+            return records
+        session_key = str(
+            getattr(getattr(persisted_session, "state", None), "session_key", "") or ""
+        ).strip()
+        master_ids = qq_owner_openids() if is_channel_session_key(session_key) else frozenset()
+        numbers = sender_number_map(transcript, master_ids=master_ids)
+        known_user_texts = {
+            strip_arrival_time_stamp(
+                strip_sender_stamp(cls._content_text(record.get("content")).strip())
+            )
+            for record in records
+            if str(record.get("role") or "").strip().lower() == "user"
+        }
+        known_user_texts.discard("")
+        current_text = strip_arrival_time_stamp(
+            strip_sender_stamp(cls._content_text(current_turn_user_content).strip())
+        )
+        if current_text:
+            known_user_texts.add(current_text)
+        assistant_texts = {
+            cls._content_text(record.get("content")).strip()
+            for record in records
+            if str(record.get("role") or "").strip().lower() == "assistant"
+        }
+        error_rows_by_turn: dict[str, dict[str, Any]] = {}
+        for row in transcript:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("role") or "").strip().lower() != "assistant":
+                continue
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            if str(metadata.get("source") or "").strip().lower() != "runtime_error":
+                continue
+            if not is_prompt_visible_message(row):
+                continue
+            turn_id = str(row.get("turn_id") or metadata.get("_transcript_turn_id") or "").strip()
+            if turn_id:
+                error_rows_by_turn.setdefault(turn_id, row)
+        if not error_rows_by_turn:
+            return records
+        for message in transcript:
+            if not isinstance(message, dict):
+                continue
+            if str(message.get("role") or "").strip().lower() != "user":
+                continue
+            metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+            if str(metadata.get("_transcript_state") or "").strip().lower() != "failed":
+                continue
+            if not is_prompt_visible_message(message):
+                continue
+            turn_id = str(metadata.get("_transcript_turn_id") or "").strip()
+            error_row = error_rows_by_turn.get(turn_id)
+            if not error_row:
+                continue
+            text = strip_arrival_time_stamp(
+                strip_sender_stamp(cls._content_text(message.get("content")).strip())
+            )
+            if text and text not in known_user_texts:
+                known_user_texts.add(text)
+                stamp = render_arrival_stamp(message.get("timestamp"))
+                sender_id, _name = sender_identity(metadata)
+                number = resolve_sender_number(sender_id, numbers) if sender_id else None
+                body = f"{render_sender_stamp(metadata, number=number, master_ids=master_ids)}{text}"
+                records.append({"role": "user", "content": f"{body}{stamp}" if stamp else body})
+            marker = f"[上一回合未完成 turn_id={turn_id}]"
+            if any(marker in cls._content_text(record.get("content")) for record in records):
+                continue
+            error_content = cls._content_text(error_row.get("content")).strip()
+            if error_content and error_content in assistant_texts:
+                # 冷启动请求体已经原样带过这条错误行，不再追加一份通知。
+                continue
+            records.append(
+                {
+                    "role": "assistant",
+                    "content": cls._runtime_error_notice_text(turn_id, error_row),
+                }
+            )
+        return records
+
     def _quarantine_frontdoor_shrink(
         self,
         session: Any,
@@ -8232,6 +8364,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             # 手动暂停回合的请求从未发出，其用户消息不在基线里；按转录对账补回，
             # 避免“发送后立即暂停再补发”时暂停消息从模型上下文消失。
             request_body_seed_messages = self._reconcile_paused_user_turns_into_seed(
+                request_body_seed_messages,
+                runtime_session,
+                current_turn_user_content=current_turn_user_content,
+            )
+            # 失败回合不重投用户消息；它的错误行在下一次 prepare 时对账进上下文，
+            # 模型据此知道上一轮断在哪、要不要继续。
+            request_body_seed_messages = self._reconcile_failed_turns_into_seed(
                 request_body_seed_messages,
                 runtime_session,
                 current_turn_user_content=current_turn_user_content,

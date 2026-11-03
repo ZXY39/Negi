@@ -7,6 +7,7 @@ from g3ku.core.messages import UserInputMessage
 from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.session_agent import (
     _TRANSCRIPT_STATE_COMPLETED,
+    _TRANSCRIPT_STATE_FAILED,
     _TRANSCRIPT_STATE_PENDING,
     RuntimeAgentSession,
 )
@@ -85,71 +86,93 @@ def _persist(agent, *, user_input, text, promote=True, retire=False, assistant_t
     )
 
 
-def test_error_path_leaves_submit_point_pending_row_unpromoted():
-    """失败收尾不得给用户行终态：提交点写的 pending 必须原样留下。"""
-    pending = _user_record("对项目机制进行检查", turn_id="turn-f", state=_TRANSCRIPT_STATE_PENDING)
-    session = _FakePersistedSession([pending])
+def test_failed_turn_settles_batch_user_rows_and_leaves_no_queue():
+    """失败收尾把本批用户行落 failed 终态，不再放回队列。"""
+    session = _FakePersistedSession([])
     agent = _build_agent(session)
     user_input = _input("对项目机制进行检查", turn_id="turn-f")
+    session.messages.append(_user_record("对项目机制进行检查", turn_id="turn-f", state=_TRANSCRIPT_STATE_PENDING))
 
     _persist(agent, user_input=user_input, text="对项目机制进行检查", promote=False, assistant_text="这一轮处理失败")
 
-    assert session.messages[0]["metadata"]["_transcript_state"] == _TRANSCRIPT_STATE_PENDING
-    assert session.messages[1]["role"] == "assistant"
-
-
-def test_requeue_returns_unanswered_input_once_and_keeps_order():
-    session = _FakePersistedSession([])
-    agent = _build_agent(session)
-    user_input = _input("对项目机制进行检查", turn_id="turn-f")
-
-    assert agent._requeue_unanswered_user_inputs(user_input) == 1
-    assert [item.content for item in agent._state.queued_follow_up_messages] == ["对项目机制进行检查"]
-    # 已在队列里的同一 turn 不重复放回，否则派发会双答
-    assert agent._requeue_unanswered_user_inputs(user_input) == 0
-    assert len(agent._state.queued_follow_up_messages) == 1
-
-
-def test_requeue_skips_blank_and_internal_only_inputs():
-    session = _FakePersistedSession([])
-    agent = _build_agent(session)
-    agent._active_user_batch_inputs = [UserInputMessage(content="   ", metadata={"_transcript_turn_id": "turn-e"})]
-
-    assert agent._requeue_unanswered_user_inputs(_input("x", turn_id="turn-e")) == 0
+    assert agent._settle_unanswered_user_inputs(user_input, persisted_session=session) == 1
+    assert session.messages[0]["metadata"]["_transcript_state"] == _TRANSCRIPT_STATE_FAILED
     assert agent._state.queued_follow_up_messages == []
+    # 同一条再次收尾幂等：已经终态，不重复计数、不降级
+    assert agent._settle_unanswered_user_inputs(user_input, persisted_session=session) == 0
+    assert session.messages[0]["metadata"]["_transcript_state"] == _TRANSCRIPT_STATE_FAILED
 
 
-def test_rehydrate_adopts_pending_row_behind_error_reply_only():
-    """接回的判据是"该 turn 拿到过真正的回答"，错误回复行不算。"""
+def test_settle_skips_blank_inputs_and_non_pending_rows():
+    session = _FakePersistedSession([])
+    agent = _build_agent(session)
+    blank_input = UserInputMessage(content="   ", metadata={"_transcript_turn_id": "turn-e"})
+    agent._active_user_batch_inputs = [blank_input]
+    assert agent._settle_unanswered_user_inputs(blank_input) == 0
+
+    answered = _input("已经答过", turn_id="turn-a")
+    session.messages.append(_user_record("已经答过", turn_id="turn-a", state=_TRANSCRIPT_STATE_COMPLETED))
+    agent._active_user_batch_inputs = [answered]
+    assert agent._settle_unanswered_user_inputs(answered) == 0
+    assert session.messages[0]["metadata"]["_transcript_state"] == _TRANSCRIPT_STATE_COMPLETED
+
+
+def test_settle_marks_every_turn_in_the_batch_once():
+    session = _FakePersistedSession([])
+    agent = _build_agent(session)
+    primary = _input("主输入", turn_id="turn-1")
+    follow_up = _input("补充", turn_id="turn-2")
+    agent._active_user_batch_inputs = [primary, follow_up]
+    session.messages.append(_user_record("主输入", turn_id="turn-1", state=_TRANSCRIPT_STATE_PENDING))
+    session.messages.append(_user_record("补充", turn_id="turn-2", state=_TRANSCRIPT_STATE_PENDING))
+
+    assert agent._settle_unanswered_user_inputs(primary) == 2
+    assert [row["metadata"]["_transcript_state"] for row in session.messages] == [
+        _TRANSCRIPT_STATE_FAILED,
+        _TRANSCRIPT_STATE_FAILED,
+    ]
+
+
+def test_rehydrate_settles_legacy_pending_row_behind_error_reply():
+    """升级前的失败回合：pending + runtime_error 行按新契约收口，不再接回队列。"""
     failed_pair = [
         _user_record("对项目机制进行检查", turn_id="turn-f", state=_TRANSCRIPT_STATE_PENDING),
         _assistant_record("这一轮处理失败", turn_id="turn-f", source="runtime_error"),
     ]
-    agent = _build_agent(_FakePersistedSession(failed_pair))
+    session = _FakePersistedSession(failed_pair)
+    agent = _build_agent(session)
 
-    assert agent._rehydrate_queued_follow_ups() == 0  # 构造时已接回，队列非空即短路
-    assert len(agent._state.queued_follow_up_messages) == 1
-    restored = agent._state.queued_follow_up_messages[0]
-    assert restored.content == "对项目机制进行检查"
-    # durable 行的原始送达时间必须带回来，否则前端气泡会落到最新位置
-    assert restored.timestamp == failed_pair[0]["timestamp"]
+    assert agent._state.queued_follow_up_messages == []
+    assert session.messages[0]["metadata"]["_transcript_state"] == _TRANSCRIPT_STATE_FAILED
+    # 再次接回也不会复活
+    assert agent._rehydrate_queued_follow_ups() == 0
+    assert agent._state.queued_follow_up_messages == []
 
+
+def test_rehydrate_skips_answered_pending_row():
     answered_pair = [
         _user_record("已经答过的排队行", turn_id="turn-g", state=_TRANSCRIPT_STATE_PENDING),
         _assistant_record("真正的回答", turn_id="turn-g"),
     ]
-    answered_agent = _build_agent(_FakePersistedSession(answered_pair))
+    agent = _build_agent(_FakePersistedSession(answered_pair))
 
-    assert answered_agent._state.queued_follow_up_messages == []
+    assert agent._state.queued_follow_up_messages == []
 
 
-def test_success_turn_does_not_retire_row_still_owned_by_queue():
-    """重投的行在派发前必须扛得住后续成功回合的退役。"""
-    failed = _user_record("对项目机制进行检查", turn_id="turn-f", state=_TRANSCRIPT_STATE_PENDING)
-    followup = _user_record("继续", turn_id="turn-n", state=_TRANSCRIPT_STATE_PENDING)
-    session = _FakePersistedSession([failed, _assistant_record("这一轮处理失败", turn_id="turn-f", source="runtime_error"), followup])
+def test_rehydrate_still_restores_a_real_queued_follow_up():
+    pending = _user_record("还没派发的补充", turn_id="turn-q", state=_TRANSCRIPT_STATE_PENDING)
+    agent = _build_agent(_FakePersistedSession([pending]))
+
+    assert [item.content for item in agent._state.queued_follow_up_messages] == ["还没派发的补充"]
+    assert agent._state.queued_follow_up_messages[0].metadata["_transcript_state"] == _TRANSCRIPT_STATE_PENDING
+
+
+def test_unrelated_success_turn_does_not_touch_failed_row():
+    failed = _user_record("对项目机制进行检查", turn_id="turn-f", state=_TRANSCRIPT_STATE_FAILED)
+    session = _FakePersistedSession(
+        [failed, _assistant_record("这一轮处理失败", turn_id="turn-f", source="runtime_error")]
+    )
     agent = _build_agent(session)
-    agent._rehydrate_queued_follow_ups()
 
     _persist(
         agent,
@@ -159,8 +182,7 @@ def test_success_turn_does_not_retire_row_still_owned_by_queue():
         assistant_text="好的，接着看那条检查请求",
     )
 
-    assert session.messages[0]["metadata"]["_transcript_state"] == _TRANSCRIPT_STATE_PENDING
-    assert session.messages[2]["metadata"]["_transcript_state"] == _TRANSCRIPT_STATE_COMPLETED
+    assert session.messages[0]["metadata"]["_transcript_state"] == _TRANSCRIPT_STATE_FAILED
 
 
 def test_failed_turn_boundary_snapshot_mirrors_baseline_and_skips_empty(monkeypatch):
