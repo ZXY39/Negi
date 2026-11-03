@@ -2645,10 +2645,25 @@ class DouyinNativeTool(Tool):
             return False, ""
         try:
             await container.scroll_into_view_if_needed()
-            await container.click(timeout=4000)
-            await asyncio.sleep(0.9)
             ce = page.locator('.comment-input-inner-container [contenteditable="true"]').first
-            if await ce.count() and await ce.is_visible():
+            activated = False
+            # 2026-11-03 实测：send_comment（不点「回复」直接发顶级评论）时，输入框
+            # 容器在，但点一次不一定会生成 contenteditable；reply 之所以稳，是因为
+            # _reply_trigger 先点过「回复」把输入框激活了。这里改成点击→等待→再检查，
+            # 最多试 3 次，避免"容器在却激活不出来"直接判失败。
+            for _attempt in range(3):
+                try:
+                    await container.click(timeout=4000)
+                except Exception:
+                    pass
+                await asyncio.sleep(0.9 if _attempt == 0 else 1.2)
+                try:
+                    if await ce.count() and await ce.is_visible():
+                        activated = True
+                        break
+                except Exception:
+                    pass
+            if activated:
                 await ce.click(timeout=3000)
                 try:
                     await ce.focus()
@@ -2834,6 +2849,7 @@ class DouyinNativeTool(Tool):
             self._record_seen(result_items)
             login = await self._detect_login(page)
             if result_items:
+                self._write_feed_snapshot(result_items[:max_items], source="search", page=page)
                 return {
                     "status": "ok",
                     "keyword": kw,
@@ -3495,8 +3511,10 @@ class DouyinNativeTool(Tool):
             "message": (
                 "发送完成并做回执核对；核对不到即如实报「未确认送达」"
                 if send.get("sent")
-                else "发送按钮未定位到，未发送"
+                else (send.get("message") or "输入框/发送按钮未定位到，未发送")
             ),
+            "fill_error": send.get("message", ""),
+            "editor_filled": bool(send.get("filled")),
             "text_snippet": body_text[:40],
             "editor_selector": send.get("editor_selector", ""),
             "comments_after": comments.get("comment_count", 0),
