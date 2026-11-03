@@ -18751,7 +18751,7 @@ textarea {
     overflow-y: auto;
 }
 
-/* 提交输出 / 验收结果：15 行视窗，右上角常驻复制按钮（滚动时浮在框上）。 */
+/* 提交输出 / 验收结果：15 行视窗，右上角一个裸图标复制按钮（滚动时浮在框上，空态不画）。 */
 .task-output-shell {
     position: relative;
 }
@@ -18768,14 +18768,20 @@ textarea {
     right: 8px;
     width: 30px;
     height: 30px;
-    background: color-mix(in srgb, var(--bg-panel) 88%, transparent);
-    border: 1px solid color-mix(in srgb, var(--border-color) 80%, transparent);
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--text-secondary);
 }
 
 .task-output-copy:hover {
-    border-color: color-mix(in srgb, var(--brand-primary) 55%, var(--border-color));
-    background: color-mix(in srgb, var(--brand-primary) 10%, var(--bg-panel));
+    border: 0;
+    background: none;
     color: var(--brand-primary);
+}
+
+.task-output-copy[hidden] {
+    display: none !important;
 }
 
 /* ---- 执行流程总框：整段流程共用一张卡，内部条目扁平化 ---- */

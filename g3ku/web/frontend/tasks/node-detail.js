@@ -1298,27 +1298,34 @@ function flashTraceCopyButton(button, succeeded = true) {
     }, 1400));
 }
 
+const TASK_OUTPUT_COPY_TARGETS = [
+    { targetId: "ad-output", buttonId: "ad-output-copy", label: "提交输出", emptyText: "暂无提交输出" },
+    { targetId: "ad-check", buttonId: "ad-check-copy", label: "验收结果", emptyText: "暂无验收结果" },
+];
+
+function taskOutputCopyText(entry) {
+    return String(document.getElementById(entry.targetId)?.textContent || "").trim();
+}
+
+// 判空与复制同源：读同一份 textContent，空态不画按钮，而不是留一颗点了报错的。
+function syncTaskOutputCopyButtons() {
+    TASK_OUTPUT_COPY_TARGETS.forEach((entry) => {
+        const button = document.getElementById(entry.buttonId);
+        if (!(button instanceof HTMLButtonElement)) return;
+        const text = taskOutputCopyText(entry);
+        button.hidden = !text || text === entry.emptyText;
+    });
+}
+
 function bindTaskOutputCopyActions() {
-    const targets = [
-        { targetId: "ad-output", buttonId: "ad-output-copy", label: "提交输出", emptyText: "暂无提交输出" },
-        { targetId: "ad-check", buttonId: "ad-check-copy", label: "验收结果", emptyText: "暂无验收结果" },
-    ];
-    targets.forEach(({ targetId, buttonId, label, emptyText }) => {
-        const button = document.getElementById(buttonId);
+    TASK_OUTPUT_COPY_TARGETS.forEach((entry) => {
+        const button = document.getElementById(entry.buttonId);
         if (!(button instanceof HTMLButtonElement) || button.dataset.copyBound === "true") return;
         button.dataset.copyBound = "true";
         button.addEventListener("click", async (event) => {
             event.preventDefault();
             event.stopPropagation();
-            const target = document.getElementById(targetId);
-            const text = String(target?.textContent || "").trim();
-            if (!text || text === emptyText) {
-                flashTraceCopyButton(button, false);
-                if (typeof showToast === "function") {
-                    showToast({ title: "没有可复制的内容", text: `${label}当前为空。`, kind: "error" });
-                }
-                return;
-            }
+            const text = taskOutputCopyText(entry);
             let copied = false;
             try {
                 copied = typeof copyTextToClipboard === "function" && await copyTextToClipboard(text);
@@ -1329,12 +1336,13 @@ function bindTaskOutputCopyActions() {
             if (typeof showToast === "function") {
                 showToast({
                     title: copied ? "已复制" : "复制失败",
-                    text: copied ? `${label}已复制到剪贴板。` : "请手动选中文本后复制。",
+                    text: copied ? `${entry.label}已复制到剪贴板。` : "请手动选中文本后复制。",
                     kind: copied ? "success" : "error",
                 });
             }
         });
     });
+    syncTaskOutputCopyButtons();
 }
 
 async function resolveTraceFieldCopyText(code) {
@@ -1560,6 +1568,7 @@ function renderFinalOutput(text) {
     const nextText = readableText(text, { decodeEscapes: true, emptyText: "暂无提交输出" });
     const changed = U.adOutput.textContent !== nextText;
     if (changed) U.adOutput.textContent = nextText;
+    syncTaskOutputCopyButtons();
     return changed;
 }
 
@@ -1568,6 +1577,7 @@ function renderAcceptanceResult(text) {
     const nextText = readableText(text, { decodeEscapes: true, emptyText: "暂无验收结果" });
     const changed = U.adAcceptance.textContent !== nextText;
     if (changed) U.adAcceptance.textContent = nextText;
+    syncTaskOutputCopyButtons();
     return changed;
 }
 
@@ -1797,8 +1807,8 @@ function showTaskNodeLoadingState(node) {
     renderMessageHeading(0);
     renderSpawnReviewHeading(0);
     syncNoticeComposerState();
-    renderFinalOutput("Loading node output...");
-    renderAcceptanceResult("Loading acceptance result...");
+    renderFinalOutput("");
+    renderAcceptanceResult("");
     if (U.nodeContextDisclosure) U.nodeContextDisclosure.open = false;
     renderNodeContextPlaceholder();
     U.feedTitle.textContent = formatNodeDetailHeading(node);

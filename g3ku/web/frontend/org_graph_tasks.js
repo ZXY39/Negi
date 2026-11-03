@@ -1342,6 +1342,7 @@ function resetTaskView() {
     if (U.adOutput) U.adOutput.textContent = "暂无提交输出";
     if (U.adFlow) U.adFlow.innerHTML = '<div class="empty-state task-trace-empty">选择任务树中的节点后，这里会显示执行流程。</div>';
     if (U.adAcceptance) U.adAcceptance.textContent = "暂无验收结果";
+    syncTaskOutputCopyButtons();
     if (U.adTokenSummary) U.adTokenSummary.textContent = "";
     if (U.nodeEmpty) U.nodeEmpty.style.display = "block";
     if (U.artifactList) U.artifactList.innerHTML = '<div class="empty-state" style="padding: 10px;">No file changes yet.</div>';
