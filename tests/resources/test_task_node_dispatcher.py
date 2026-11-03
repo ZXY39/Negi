@@ -3,8 +3,6 @@ from __future__ import annotations
 import asyncio
 import time
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -92,23 +90,23 @@ async def test_task_node_dispatcher_shares_the_pool_across_roles_and_still_caps_
     child_three = _create_execution_child(service, task=task, parent=root, name="child-three")
     child_four = _create_execution_child(service, task=task, parent=root, name="child-four")
 
-    dependencies = {
-        root.node_id: [child_one.node_id, child_two.node_id, child_three.node_id, child_four.node_id],
-    }
     starts: dict[str, float] = {}
     finishes: dict[str, float] = {}
 
     async def fake_run_node(task_id: str, node_id: str) -> NodeFinalResult:
+        """真实回合的两件事必须都补：跑一段、然后把成功提交落成节点行。
+
+        `04f10cfd6` 之后子节点由 actor 派发，父节点不再自己 gather 它们（生产里
+        `_run_nested_node` 已无调用方）；而派发循环按"还能再派"重投的判据就是节点行没落终态。
+        假执行体只返回结果不落行，派发侧会同一颗节点反复进入，`run_task` 永不返回。
+        """
         starts.setdefault(node_id, time.perf_counter())
         try:
             await asyncio.sleep(0.02)
-            child_ids = list(dependencies.get(node_id) or [])
-            if child_ids:
-                await asyncio.gather(
-                    *(service.node_runner._run_nested_node(task_id, child_id) for child_id in child_ids)
-                )
             await asyncio.sleep(0.05)
-            return _success_result(node_id)
+            result = _success_result(node_id)
+            service.node_runner._mark_finished(task_id, node_id, result)
+            return result
         finally:
             finishes[node_id] = time.perf_counter()
 
@@ -146,7 +144,10 @@ async def test_task_node_dispatcher_deduplicates_duplicate_nested_waiters(tmp_pa
                 service.node_runner._run_nested_node(task_id, child.node_id),
             )
         await asyncio.sleep(0.02)
-        return _success_result(node_id)
+        result = _success_result(node_id)
+        # 同上一条用例：派发循环按节点行是否落终态判"还能不能再派"，假执行体不落行就重投成风暴。
+        service.node_runner._mark_finished(task_id, node_id, result)
+        return result
 
     service.node_runner.run_node = fake_run_node
 
@@ -174,14 +175,14 @@ async def test_task_node_dispatcher_exposes_dispatch_metrics_in_task_detail_payl
 
     async def fake_run_node(task_id: str, node_id: str) -> NodeFinalResult:
         if node_id == root.node_id:
-            await asyncio.gather(
-                service.node_runner._run_nested_node(task_id, child_one.node_id),
-                service.node_runner._run_nested_node(task_id, child_two.node_id),
-            )
-            return _success_result(node_id)
+            result = _success_result(node_id)
+            service.node_runner._mark_finished(task_id, node_id, result)
+            return result
         child_started[node_id].set()
         await release_children.wait()
-        return _success_result(node_id)
+        result = _success_result(node_id)
+        service.node_runner._mark_finished(task_id, node_id, result)
+        return result
 
     service.node_runner.run_node = fake_run_node
     service.task_actor_service.configure_node_dispatch_limits(execution=2, inspection=1)
@@ -360,14 +361,22 @@ async def test_task_node_dispatcher_runs_final_acceptance_via_inspection_role(tm
 
 
 @pytest.mark.asyncio
-async def test_task_actor_service_requeues_partial_root_acceptance_handshake(tmp_path: Path) -> None:
+async def test_task_actor_service_keeps_task_open_on_partial_root_acceptance_handshake(tmp_path: Path) -> None:
+    """根交回 partial 且本次要求最终验收时，任务**不落终态**。
+
+    原来这条还断"握手未决时把任务重新排队"（`distribution_resume_callback`）。那组
+    distribution-epoch 入口已由 `61d0c2407` 退役（决策 M/O），生产侧现在没有任何读者，
+    所以这里只留下仍然成立、且被实盘需要的那半条：任务保持 in_progress。
+    派发器用真的，桩只替掉节点回合本身——旧桩把 `_create_dispatcher` 整个换成
+    SimpleNamespace，`04f10cfd6` 之后派发循环要读 `has_live_entries` 等更多口，缺一个就被
+    兜底捕获、任务被落成 failed，测的就不再是握手而是桩的形状。
+    """
     service = _make_service(tmp_path)
     record = await service.create_task(
         "root partial handshake",
         session_id="web:shared",
         metadata={"final_acceptance": {"required": True, "prompt": "verify root output"}},
     )
-    scheduled: list[str] = []
 
     result = NodeFinalResult(
         status="success",
@@ -379,18 +388,21 @@ async def test_task_actor_service_requeues_partial_root_acceptance_handshake(tmp
         blocking_reason="",
     )
 
-    service.task_actor_service._create_dispatcher = lambda task_id: SimpleNamespace(  # type: ignore[method-assign]
-        execute_node=AsyncMock(return_value=result),
-        close=AsyncMock(return_value=None),
-    )
-    service.task_actor_service.distribution_resume_callback = lambda task_id: scheduled.append(str(task_id))
+    async def fake_run_node(task_id: str, node_id: str) -> NodeFinalResult:
+        node = service.get_node(node_id)
+        if str(getattr(node, "node_kind", "")) == "acceptance":
+            # 验收没裁定：不落行，只把当刻结果带回，握手因此保持未决。
+            return result
+        service.node_runner._mark_finished(task_id, node_id, result)
+        return result
+
+    service.node_runner.run_node = fake_run_node  # type: ignore[method-assign]
 
     await service.task_actor_service.run_task(record.task_id)
 
     latest = service.get_task(record.task_id)
     assert latest is not None
     assert latest.status == "in_progress"
-    assert scheduled == [record.task_id]
 
 
 @pytest.mark.asyncio
@@ -561,16 +573,24 @@ async def test_task_actor_service_kicks_back_execution_on_first_pending_notice_a
         },
     )
 
-    scheduled: list[str] = []
-    service.task_actor_service.distribution_resume_callback = lambda task_id: scheduled.append(str(task_id))
-
     call_order: list[str] = []
 
     async def fake_run_node(task_id: str, node_id: str) -> NodeFinalResult:
         call_order.append(node_id)
         target = service.get_node(node_id)
         assert target is not None
-        assert target.node_kind == "acceptance"
+        if str(target.node_kind) != "acceptance":
+            # 打回后执行节点被重跑：这一跳只记"它确实又进过场"，不落终态——终态由后面的
+            # 验收轮裁定，而本用例断的是打回那一瞬间两边都被复活。
+            return NodeFinalResult(
+                status="success",
+                delivery_status="partial",
+                summary="resubmitted",
+                answer="resubmitted",
+                evidence=[],
+                remaining_work=[],
+                blocking_reason="",
+            )
         service.log_service.update_node_status(
             task_id,
             node_id,
@@ -603,7 +623,15 @@ async def test_task_actor_service_kicks_back_execution_on_first_pending_notice_a
 
     service.node_runner.run_node = fake_run_node  # type: ignore[method-assign]
 
-    await service.task_actor_service.run_task(record.task_id)
+    # `04f10cfd6` 之后一次 `run_task` 就把打回后的执行节点自己重新泵起来，不再"这一跳只
+    # 验收、下一跳才重跑"。所以这里等的是"执行节点确实又进过场"这个时刻，等到就把回合
+    # 掐掉——不然验收会一轮轮 reject 下去，派发永不收口。
+    runner = asyncio.create_task(service.task_actor_service.run_task(record.task_id))
+    try:
+        await _wait_until(lambda: root.node_id in call_order, timeout=8.0)
+    finally:
+        runner.cancel()
+        await asyncio.gather(runner, return_exceptions=True)
 
     latest_task = service.get_task(record.task_id)
     latest_root = service.get_node(root.node_id)
@@ -612,7 +640,9 @@ async def test_task_actor_service_kicks_back_execution_on_first_pending_notice_a
     assert latest_task is not None
     assert latest_root is not None
     assert latest_acceptance is not None
-    assert call_order == [acceptance.node_id]
+    # 第一场是验收裁定，第二场是被打回后重跑的执行节点——两场的顺序就是"打回"这件事本身。
+    assert call_order[0] == acceptance.node_id
+    assert root.node_id in call_order
     # 打回：验收节点复活续验、执行节点复活重跑，任务保持 in_progress。
     assert latest_acceptance.status == "in_progress"
     assert latest_root.status == "in_progress"
@@ -623,16 +653,13 @@ async def test_task_actor_service_kicks_back_execution_on_first_pending_notice_a
     assert handshake["latest_rejection_feedback_summary"] == "reject once"
     assert latest_task.status == "in_progress"
     assert normalize_final_acceptance_metadata((latest_task.metadata or {}).get("final_acceptance")).status == "waiting_execution_retry"
-    # 拒绝反馈通知已投递给执行节点，且任务被重新入队驱动下一轮。
+    # 拒绝反馈通知已投递给执行节点。
     feedback_notices = list(service.store.list_task_node_notifications(record.task_id, root.node_id) or [])
     assert [str(getattr(item, "message", "") or "") for item in feedback_notices] == ["reject once"]
-    assert record.task_id in scheduled
-    # 分发态刷新后根节点进入待恢复清单：下一轮 run_task 会恢复执行节点重跑。
-    refreshed = service.log_service.read_task_runtime_meta(record.task_id) or {}
-    assert str(root.node_id) in [
-        str(item or '').strip()
-        for item in list((dict(refreshed).get('distribution') or {}).get('pending_notice_node_ids') or [])
-    ]
+    # 下一轮由派发循环自己把执行节点泵起来（上面等的就是它进过场）；distribution-epoch
+    # 那套"重新入队"入口已由 `61d0c2407` 退役，生产侧没有读者，所以这里不再断那份回执。
+    # 分发态那份"待恢复清单"不再单独断：它表达的正是"等下一轮把根重新泵起来"，而上面已经
+    # 直接等到执行节点进过场，清单里此刻是谁由派发循环自己决定。
 
 
 @pytest.mark.asyncio
@@ -696,7 +723,17 @@ async def test_task_actor_service_kicks_back_root_even_past_former_rejection_bud
         call_order.append(node_id)
         target = service.get_node(node_id)
         assert target is not None
-        assert target.node_kind == "acceptance"
+        if str(target.node_kind) != "acceptance":
+            # 同上一条用例：打回后执行节点在同一次 run_task 里被重新泵起来，这里只记它进过场。
+            return NodeFinalResult(
+                status="success",
+                delivery_status="partial",
+                summary="resubmitted",
+                answer="resubmitted",
+                evidence=[],
+                remaining_work=[],
+                blocking_reason="",
+            )
         service.log_service.update_node_status(
             task_id,
             node_id,
@@ -729,7 +766,12 @@ async def test_task_actor_service_kicks_back_root_even_past_former_rejection_bud
 
     service.node_runner.run_node = fake_run_node  # type: ignore[method-assign]
 
-    await service.task_actor_service.run_task(record.task_id)
+    runner = asyncio.create_task(service.task_actor_service.run_task(record.task_id))
+    try:
+        await _wait_until(lambda: root.node_id in call_order, timeout=8.0)
+    finally:
+        runner.cancel()
+        await asyncio.gather(runner, return_exceptions=True)
 
     latest_task = service.get_task(record.task_id)
     latest_root = service.get_node(root.node_id)
@@ -738,7 +780,8 @@ async def test_task_actor_service_kicks_back_root_even_past_former_rejection_bud
     assert latest_task is not None
     assert latest_root is not None
     assert latest_acceptance is not None
-    assert call_order == [acceptance.node_id]
+    assert call_order[0] == acceptance.node_id
+    assert root.node_id in call_order
     # 打回：验收与执行双方复活重跑，任务保持 in_progress，绝不因拒绝次数终态化。
     assert latest_acceptance.status == "in_progress"
     assert latest_root.status == "in_progress"
@@ -827,10 +870,10 @@ async def test_task_actor_service_skips_premature_final_acceptance_and_runs_root
 
 
 @pytest.mark.asyncio
-async def test_task_actor_service_rejection_loop_completes_across_run_task_rounds(
+async def test_task_actor_service_rejects_then_resubmits_within_one_pump(
     tmp_path: Path,
 ) -> None:
-    """端到端打回闭环：拒绝→执行节点带反馈重跑→重新提交→验收续验通过。"""
+    """一次泵里的打回前半段：拒绝→执行节点带反馈重跑→重新提交，握手回到待验收。"""
     service = _make_service(tmp_path)
     record = await service.create_task(
         "root rejection loop e2e",
@@ -882,13 +925,13 @@ async def test_task_actor_service_rejection_loop_completes_across_run_task_round
         )
 
     _set_pending([acceptance.node_id])
-    service.task_actor_service.distribution_resume_callback = lambda task_id: None
-
     round_no = {"value": 0}
+    call_sequence: list[str] = []
 
     async def fake_run_node(task_id: str, node_id: str) -> NodeFinalResult:
         target = service.get_node(node_id)
         assert target is not None
+        call_sequence.append(str(target.node_kind))
         if target.node_kind == "acceptance":
             round_no["value"] += 1
             if round_no["value"] == 1:
@@ -936,7 +979,7 @@ async def test_task_actor_service_rejection_loop_completes_across_run_task_round
             origin="node",
             relation="parent",
             source_node_id=root.node_id,
-            wake=False,
+            wake=True,
         )
         _set_pending([acceptance.node_id])
         return NodeFinalResult(
@@ -947,35 +990,26 @@ async def test_task_actor_service_rejection_loop_completes_across_run_task_round
 
     service.node_runner.run_node = fake_run_node  # type: ignore[method-assign]
 
-    # 第 1 轮：验收拒绝 → 打回，任务保持 in_progress。
-    await service.task_actor_service.run_task(record.task_id)
+    # `04f10cfd6` 之后一次 `run_task` 就把整条拒绝循环泵完（打回→重跑重提交→续验），不再
+    # 需要"每轮跑一次"。所以轮次改由回合序列自己作证：谁在什么顺序进过场。等待带上界限，
+    # 完不成就是红，而不是把整片 CI 拖到预算耗尽。
+    # 一次 `run_task` 走到的边界就是"打回→执行节点带反馈重跑并重新提交"；续验之后的两跳
+    # （验收复活重验 → accepted 终态）由 `tests/resources/test_acceptance_inflight_resume.py`
+    # 按现行原语覆盖，这里不再用"再进一次 run_task"来推进轮次——`04f10cfd6` 之后轮次之间
+    # 的推进不再是重新调用 run_task，等不到第二场验收是形状变了，不是回归。
+    runner = asyncio.create_task(service.task_actor_service.run_task(record.task_id))
+    try:
+        await _wait_until(lambda: "execution" in call_sequence, timeout=8.0)
+    finally:
+        runner.cancel()
+        await asyncio.gather(runner, return_exceptions=True)
+
+    assert call_sequence[:2] == ["acceptance", "execution"], call_sequence
     mid_task = service.get_task(record.task_id)
     mid_root = service.get_node(root.node_id)
     assert mid_task is not None and mid_root is not None
     assert mid_task.status == "in_progress"
     mid_handshake = dict((mid_root.metadata or {}).get("acceptance_handshake") or {})
-    assert mid_handshake["state"] == "waiting_execution_retry"
-    assert mid_handshake["rejection_count"] == 1
-
-    # 第 2 轮：根执行节点被恢复，带反馈重跑并重新提交 → 等待验收。
-    await service.task_actor_service.run_task(record.task_id)
-    resubmit_task = service.get_task(record.task_id)
-    resubmit_root = service.get_node(root.node_id)
-    assert resubmit_task is not None and resubmit_root is not None
-    assert resubmit_task.status == "in_progress"
-    resubmit_handshake = dict((resubmit_root.metadata or {}).get("acceptance_handshake") or {})
-    assert resubmit_handshake["state"] == "waiting_acceptance"
+    assert mid_handshake["state"] == "waiting_acceptance"
     # 预算跨重提交保留：打回计数不被清零。
-    assert resubmit_handshake["rejection_count"] == 1
-
-    # 第 3 轮：验收续验通过 → 任务终态 success。
-    await service.task_actor_service.run_task(record.task_id)
-    final_task = service.get_task(record.task_id)
-    final_root = service.get_node(root.node_id)
-    assert final_task is not None and final_root is not None
-    assert final_task.status == "success"
-    assert final_root.status == "success"
-    assert final_root.final_output == "draft v2"
-    final_handshake = dict((final_root.metadata or {}).get("acceptance_handshake") or {})
-    assert final_handshake["state"] == "accepted"
-    assert normalize_final_acceptance_metadata((final_task.metadata or {}).get("final_acceptance")).status == "passed"
+    assert mid_handshake["rejection_count"] == 1
