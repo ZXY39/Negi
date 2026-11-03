@@ -63,15 +63,26 @@ def _backend() -> chat_backend_module.ConfigChatBackend:
     return chat_backend_module.ConfigChatBackend(config=SimpleNamespace(get_model_runtime_profile=lambda ref: None))
 
 
-async def _send(monkeypatch, refs: list[str], required: int) -> list[str]:
-    windows = {"m_small": 390000, "m_big": 690000}
-    _patch(monkeypatch, {key: _target(key, window=windows.get(key)) for key in refs})
-    response = await _backend().chat(
+async def _chat(
+    monkeypatch,
+    refs: list[str],
+    required: int,
+    *,
+    windows: dict[str, int | None] | None = None,
+):
+    merged = {"m_small": 390000, "m_big": 690000}
+    merged.update(windows or {})
+    _patch(monkeypatch, {key: _target(key, window=merged.get(key)) for key in refs})
+    return await _backend().chat(
         messages=[{"role": "user", "content": "demo"}],
         tools=None,
         model_refs=list(refs),
         required_context_window_tokens=required,
     )
+
+
+async def _send(monkeypatch, refs: list[str], required: int, **kwargs) -> list[str]:
+    response = await _chat(monkeypatch, refs, required, **kwargs)
     assert response.content == "ok"
     return list(CALLS)
 
@@ -92,13 +103,26 @@ async def test_zero_required_keeps_the_existing_chain_order(monkeypatch) -> None
 
 @pytest.mark.asyncio
 async def test_unknown_declared_window_does_not_block_the_send(monkeypatch) -> None:
-    """记录里读不到窗口 ⇒ 判不出来就不拦，保持原行为。"""
-    calls = await _send(monkeypatch, ["m_small"], required=500_000)
+    """记录里读不到窗口 ⇒ 判不出来就不拦，保持原行为。
+
+    这一条要的是"没有声明窗口"这个形状，所以钉窗口的那位成员得真的不带
+    `context_window_tokens`：带着 39 万去测"读不到窗口"，测的其实是下一位的"塞不下"。
+    """
+    calls = await _send(monkeypatch, ["m_small"], required=500_000, windows={"m_small": None})
     assert calls == ["m_small"]
 
 
 @pytest.mark.asyncio
-async def test_when_nothing_fits_the_chain_is_walked_in_order(monkeypatch) -> None:
-    """整条链都塞不下：不新增失败面，仍按链序发（宁可被裁并留下被裁读数，也不打死这一跳）。"""
-    calls = await _send(monkeypatch, ["m_small", "m_big"], required=900_000)
-    assert calls == ["m_small"]
+async def test_when_nothing_fits_the_chain_returns_a_structured_error(monkeypatch) -> None:
+    """整条链都塞不下（且这一发没带压缩器）⇒ 不发任何人，回一条结构化 no-model 错误。
+
+    旧形状是"按链序硬发出去"，代价是网关静默把 completion 预算裁成 `真实窗口 − 输入`，
+    症状是一跳被裁的输出。现在宁可这一跳明确失败，也不发一份注定被裁的体。
+    """
+    response = await _chat(monkeypatch, ["m_small", "m_big"], required=900_000)
+    assert CALLS == [], "没有装得下的成员就不该有人被调用"
+    assert response.content == ""
+    assert response.finish_reason == "error"
+    assert response.error_kind == "NoModelFitsWindow"
+    assert "900000" in response.error_text and "690000" in response.error_text
+    assert "m_small" in response.error_text and "m_big" in response.error_text

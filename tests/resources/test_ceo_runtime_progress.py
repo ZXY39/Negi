@@ -35,6 +35,7 @@ from g3ku.runtime.frontdoor.tool_contract import (
 from g3ku.runtime.session_agent import MANUAL_COMPRESSION_STATE_ATTR, RuntimeAgentSession
 from g3ku.runtime.tool_contract_block import render_tool_contract_block
 from g3ku.session.manager import SessionManager
+from main.runtime.tool_names import SYNTHETIC_RESIDENT_TOOL_NAMES
 from main.storage.artifact_store import TaskArtifactStore
 
 
@@ -6142,9 +6143,7 @@ async def test_ceo_frontdoor_prepare_turn_heartbeat_inherits_previous_tool_state
         "create_async_task",
         "task_list",
         "filesystem_write",
-        "silent",
-        "time",
-        "schedule_wake",
+        *SYNTHETIC_RESIDENT_TOOL_NAMES,
     ]
     assert state_update["frontdoor_selection_debug"]["candidate_tool_names"] == ["web_fetch"]
     assert state_update["frontdoor_selection_debug"]["contract_present_tool_names"] == ["filesystem_write"]
@@ -6173,7 +6172,7 @@ async def test_ceo_frontdoor_prepare_turn_heartbeat_inherits_previous_tool_state
     ]
     assert (
         list(state_update["frontdoor_selection_debug"]["callable_tool_names"])
-        == ["create_async_task", "task_list", "filesystem_write", "silent", "time", "schedule_wake"]
+        == ["create_async_task", "task_list", "filesystem_write", *SYNTHETIC_RESIDENT_TOOL_NAMES]
     )
     # 名单钉在请求体头部的 system 里（每跳逐字节复用），尾块不再抄第二份。
     inherited_head_text = str(
@@ -6351,9 +6350,7 @@ async def test_ceo_frontdoor_prepare_turn_cron_inherits_previous_tool_state_with
         "create_async_task",
         "task_list",
         "filesystem_write",
-        "silent",
-        "time",
-        "schedule_wake",
+        *SYNTHETIC_RESIDENT_TOOL_NAMES,
     ]
     assert state_update["frontdoor_selection_debug"]["candidate_tool_names"] == ["web_fetch"]
     assert state_update["frontdoor_selection_debug"]["contract_present_tool_names"] == ["filesystem_write"]
@@ -6415,7 +6412,7 @@ async def test_ceo_frontdoor_prepare_turn_cron_inherits_previous_tool_state_with
     ]
     assert (
         list(state_update["frontdoor_selection_debug"]["callable_tool_names"])
-        == ["create_async_task", "task_list", "filesystem_write", "silent", "time", "schedule_wake"]
+        == ["create_async_task", "task_list", "filesystem_write", *SYNTHETIC_RESIDENT_TOOL_NAMES]
     )
     # 名单钉在请求体头部的 system 里（每跳逐字节复用），尾块不再抄第二份。
     inherited_head_text = str(
@@ -7312,9 +7309,7 @@ def test_context_assembly_always_keeps_tool_execution_control_tools_visible() ->
         "stop_tool_execution",
         "create_async_task",
         "skill-installer",
-        "silent",
-        "time",
-        "schedule_wake",
+        *SYNTHETIC_RESIDENT_TOOL_NAMES,
     ]
 
 

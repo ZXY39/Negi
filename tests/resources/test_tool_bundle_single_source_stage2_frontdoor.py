@@ -51,6 +51,7 @@ def _runner(tools: dict[str, _Tool], *, declared: dict[str, _Tool] | None = None
         'silent': _Tool('silent', 'reply with nothing'),
         'time': _Tool('time', 'read the wall clock'),
         'schedule_wake': _Tool('schedule_wake', 'arm one self wake-up'),
+        'mention_member': _Tool('mention_member', 'mention a member in the group'),
     }
     runner._frontdoor_execution_bundle = lambda **kwargs: SimpleNamespace(
         declared_tools={**tools, **(declared or control)}

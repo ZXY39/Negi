@@ -63,9 +63,7 @@ from g3ku.runtime.web_ceo_sessions import (
 from g3ku.sandbox.policy import TIER_LIMITED
 from g3ku.sandbox.policy import session_policy as sandbox_session_policy
 from main.runtime.tool_names import (
-    SCHEDULE_WAKE_TOOL_NAME,
-    SILENT_TOOL_NAME,
-    TIME_TOOL_NAME,
+    SYNTHETIC_RESIDENT_TOOL_NAMES,
 )
 
 # 动态 overlay 块头（跨轮可比性投影按这些常量识别并剥离，禁止散文匹配）。
@@ -322,13 +320,10 @@ class CeoMessageBuilder:
     # 与 RESERVED_INTERNAL_TOOLS 的区别只在一点：这些名字**不要求已经可见**，因此
     # 不依赖任何 tools/*/resource.yaml 声明族。RESERVED_INTERNAL_TOOLS 只保证
     # 「已可见时排在本轮 callable 最前面」，不具备注入能力 —— 照它加是加不进 schema 的。
-    # 目前成员是静默收尾信号 + 两条车道共用的时钟与自设唤醒：它们都是合同的一部分，
-    # 不是可被选中的能力，所以实例在 `_frontdoor_execution_bundle` 里就地构造。
-    ALWAYS_CALLABLE_INTERNAL_TOOLS: tuple[str, ...] = (
-        SILENT_TOOL_NAME,
-        TIME_TOOL_NAME,
-        SCHEDULE_WAKE_TOOL_NAME,
-    )
+    # 名单只有一份来源：`main.runtime.tool_names.SYNTHETIC_RESIDENT_TOOL_NAMES`。这里
+    # 曾手写一份三名字的子集，而实例束、`tools[]` 渲染与状态侧点名读的都是那份四名字名单，
+    # 少的那一名就是"名字看得见、参数表也渲得出来，但这条装配路径不点名它"的失败形状。
+    ALWAYS_CALLABLE_INTERNAL_TOOLS: tuple[str, ...] = SYNTHETIC_RESIDENT_TOOL_NAMES
     FIXED_BUILTIN_TOOL_NAMES: tuple[str, ...] = CEO_FIXED_BUILTIN_TOOL_NAMES
     ATTACHMENT_REOPEN_TARGET_LIMIT = 8
 

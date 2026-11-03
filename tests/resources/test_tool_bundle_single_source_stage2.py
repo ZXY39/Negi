@@ -106,7 +106,8 @@ def _frame_with_bundle(ref: str, revision: str, names: list[str]) -> dict:
 
 
 def test_flag_off_keeps_the_old_chain_and_hands_over_no_index(monkeypatch) -> None:
-    monkeypatch.delenv('G3KU_TOOLS_BUNDLE_SINGLE_SOURCE', raising=False)
+    # 退役通道是显式关掉，不是"不设"：这条读路径默认开，删掉变量等于开着。
+    monkeypatch.setenv('G3KU_TOOLS_BUNDLE_SINGLE_SOURCE', '0')
     tools = {'alpha': _Tool('alpha'), 'beta': _Tool('beta')}
     service = _service(frame=None, tools=tools)
 
