@@ -4985,12 +4985,41 @@ textarea {
     height: 18px;
 }
 
-/* 发送/暂停坐在输入框内部的右下角，与左下角的脑图标、附件同一带。 */
-#ceo-send-btn {
+/* 发送/暂停坐在输入框内部的右下角，与左下角的脑图标、附件同一带；
+   模型徽标跟在按钮左侧，同一个绝对定位簇里排布。 */
+.ceo-send-cluster {
     position: absolute;
     right: 28px;
     bottom: 8px;
     z-index: 2;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    max-width: calc(100% - 40px);
+}
+
+.ceo-model-live-badge {
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: min(220px, 34vw);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    padding: 3px 8px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--bg-app) 82%, var(--bg-panel) 18%);
+    color: var(--text-muted);
+    font-size: 11px;
+    line-height: 1.4;
+}
+
+.ceo-model-live-badge[hidden] {
+    display: none !important;
+}
+
+#ceo-send-btn {
+    flex: none;
     height: 40px;
     min-height: 40px;
     padding: 0 var(--ui-space-3);
@@ -5037,11 +5066,23 @@ textarea {
     display: none !important;
 }
 
-.ceo-model-mode-headline {
+.ceo-model-mode-meter-row {
     display: flex;
     align-items: center;
     gap: 8px;
     min-width: 0;
+}
+
+.ceo-model-mode-meter-row > .ceo-model-mode-usage-text {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ceo-model-mode-meter-row > .ceo-model-mode-badge {
+    margin-left: auto;
 }
 
 .ceo-model-mode-badge {

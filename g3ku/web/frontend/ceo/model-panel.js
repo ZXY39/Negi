@@ -577,13 +577,36 @@ function finishCeoModelChainDrag(event) {
 function ceoModelBadgeTitle(estimate) {
     const sessionId = String(activeSessionId() || "").trim();
     const effectiveKey = ceoModelEffectivePinnedKey(ceoModelSelectionFor(sessionId));
-    // 绑定 key 优先：多条绑定可以共用同一个 provider 模型名，只按模型名解析必然撞名，
-    // 显示出来的会是另一条绑定的标题。
+    // 运行中先认这一跳实际服务的模型（observed）；其余情况绑定 key 优先：多条绑定
+    // 可以共用同一个 provider 模型名，只按模型名解析必然撞名，显示出来的会是另一条绑定的标题。
     const fromEstimate = estimate
-        ? (ceoModelUsageHeadlineTitle(estimate.resolved_model_key)
+        ? (ceoModelUsageHeadlineTitle(estimate.observed_provider_model)
+            || ceoModelUsageHeadlineTitle(estimate.resolved_model_key)
             || ceoModelUsageHeadlineTitle(estimate.provider_model))
         : "";
     return fromEstimate || ceoModelDisplayTitle(ceoModelCatalogItem(effectiveKey)) || "";
+}
+
+// 发送按钮左侧那颗徽标印的是模型 ID，不是展示名：它回答"这一跳到底打的是哪颗"。
+// 运行中优先取该跳实际服务的模型（observed_input_truth）；空闲退回下一回合预检
+// 解析出的 provider_model，再退回固定模型/链首的 provider_model。
+function ceoLiveModelIdText(estimate, { running = false } = {}) {
+    const observed = String(estimate?.observed_provider_model || "").trim();
+    if (running && observed) return observed;
+    const preflight = String(estimate?.provider_model || "").trim();
+    if (preflight) return preflight;
+    if (running) return "";
+    const sessionId = String(activeSessionId() || "").trim();
+    const selection = ceoModelSelectionFor(sessionId);
+    const pinnedKey = ceoModelEffectivePinnedKey(selection);
+    const keys = pinnedKey ? [pinnedKey] : ceoModelChainKeys();
+    for (const key of keys) {
+        const item = ceoModelCatalogItem(key);
+        if (!item || item.enabled === false) continue;
+        const label = String(item.provider_model || "").trim() || ceoModelDisplayTitle(item);
+        if (label) return label;
+    }
+    return "";
 }
 
 function syncCeoModelModePanelUsage() {

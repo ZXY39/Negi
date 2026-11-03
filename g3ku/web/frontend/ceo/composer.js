@@ -272,7 +272,25 @@ function scheduleSyncCeoComposerUsageOutline() {
     window.requestAnimationFrame(() => syncCeoComposerUsageOutline());
 }
 
+// 发送按钮左侧的模型徽标：运行中印这一跳实际服务的模型（逐跳随快照更新，降档后
+// 下一跳立即改印新成员）；空闲时印下一回合将使用的模型。两者都取不到就整个隐藏。
+function syncCeoModelLiveBadge() {
+    const badge = U.ceoModelLiveBadge;
+    if (!badge) return;
+    const sessionId = String(activeSessionId() || "").trim();
+    const running = !!ceoRunningInflightTurnForSession(sessionId) || !!S.ceoTurnActive;
+    const modelId = ceoLiveModelIdText(ceoCurrentUsageEstimate(), { running });
+    badge.textContent = modelId;
+    badge.hidden = !modelId;
+    if (!modelId) {
+        badge.removeAttribute?.("title");
+        return;
+    }
+    badge.setAttribute?.("title", running ? `当前运行模型：${modelId}` : `下次发送将使用：${modelId}`);
+}
+
 function syncCeoComposerUsageOutline() {
+    syncCeoModelLiveBadge();
     const shell = U.ceoComposerUsageBrain;
     const fill = U.ceoComposerUsageBrainFill;
     if (!shell || !fill) return;

@@ -256,16 +256,16 @@
                                         </button>
                                         <div id="ceo-model-mode-panel" class="ceo-model-mode-panel" role="dialog"
                                             aria-label="模型与上下文" hidden>
-                                            <div class="ceo-model-mode-headline">
-                                                <span id="ceo-model-mode-badge"
-                                                    class="ceo-model-mode-badge">模型链</span>
-                                            </div>
                                             <div class="ceo-model-mode-usage" aria-hidden="true">
                                                 <span id="ceo-model-mode-usage-fill"
                                                     class="ceo-model-mode-usage-fill"></span>
                                             </div>
-                                            <div id="ceo-model-mode-usage-text" class="ceo-model-mode-usage-text"
-                                                hidden></div>
+                                            <div class="ceo-model-mode-meter-row">
+                                                <div id="ceo-model-mode-usage-text" class="ceo-model-mode-usage-text"
+                                                    hidden></div>
+                                                <span id="ceo-model-mode-badge"
+                                                    class="ceo-model-mode-badge">模型链</span>
+                                            </div>
                                             <div class="ceo-model-mode-options" role="radiogroup" aria-label="模型模式">
                                                 <button id="ceo-model-mode-chain" class="ceo-model-mode-option"
                                                     type="button" role="radio" aria-checked="true">模型链</button>
@@ -361,9 +361,12 @@
                                     </div>
                                     <textarea id="ceo-input" rows="1"
                                         placeholder="输入你的任务，可保留换行；也可以上传图片或文件作为补充"></textarea>
-                                    <button id="ceo-send-btn" class="btn-primary" type="button" aria-label="发送消息">
-                                        <i data-lucide="send"></i> 发送
-                                    </button>
+                                    <div class="ceo-send-cluster">
+                                        <span id="ceo-model-live-badge" class="ceo-model-live-badge" hidden></span>
+                                        <button id="ceo-send-btn" class="btn-primary" type="button" aria-label="发送消息">
+                                            <i data-lucide="send"></i> 发送
+                                        </button>
+                                    </div>
                                 </div>
                             </div>
                         </div>

@@ -712,6 +712,114 @@ test("active turn does not enqueue composer-preflight refreshes while runtime re
     assert.equal(S.ceoComposerUsageEstimate, null);
 });
 
+test("send button model badge shows the served model as soon as a running hop reports it", () => {
+    const { S, U, __context } = loadApp();
+    S.activeSessionId = "web:test";
+    S.ceoTurnActive = true;
+    U.ceoComposerUsageBrain = new StubHTMLElement();
+    U.ceoComposerUsageBrainFill = new StubHTMLElement();
+    U.ceoModelLiveBadge = new StubHTMLElement();
+
+    __context.setCeoSessionSnapshotCache("web:test", {
+        inflight_turn: {
+            status: "running",
+            frontdoor_token_preflight_diagnostics: {
+                final_request_tokens: 21000,
+                max_context_tokens: 240000,
+                provider_model: "deepseek-flash-3",
+                observed_input_truth: { provider_model: "glm-5.2-2" },
+            },
+        },
+    });
+
+    assert.equal(U.ceoModelLiveBadge.hidden, false);
+    assert.equal(U.ceoModelLiveBadge.textContent, "glm-5.2-2");
+    assert.match(String(U.ceoModelLiveBadge.attributes.title || ""), /当前运行模型.*glm-5\.2-2/);
+});
+
+test("send button model badge shows the next-send model while idle", () => {
+    const { S, U, syncCeoComposerUsageOutline } = loadApp();
+    S.activeSessionId = "web:test";
+    S.ceoTurnActive = false;
+    S.ceoSnapshotCache = {};
+    S.ceoComposerUsageEstimate = {
+        session_id: "web:test",
+        ratio: 0.4,
+        estimated_total_tokens: 12800,
+        context_window_tokens: 32000,
+        provider_model: "openai:gpt-5.2",
+    };
+    U.ceoComposerUsageBrain = new StubHTMLElement();
+    U.ceoComposerUsageBrainFill = new StubHTMLElement();
+    U.ceoModelLiveBadge = new StubHTMLElement();
+
+    syncCeoComposerUsageOutline();
+
+    assert.equal(U.ceoModelLiveBadge.hidden, false);
+    assert.equal(U.ceoModelLiveBadge.textContent, "openai:gpt-5.2");
+    assert.match(String(U.ceoModelLiveBadge.attributes.title || ""), /下次发送将使用.*openai:gpt-5\.2/);
+});
+
+test("send button model badge falls back to the chain head before any estimate exists", () => {
+    const { S, U, syncCeoComposerUsageOutline } = loadApp();
+    S.activeSessionId = "web:test";
+    S.ceoTurnActive = false;
+    S.ceoSnapshotCache = {};
+    S.ceoComposerUsageEstimate = null;
+    S.modelCatalog = {
+        catalog: [{ key: "alpha", name: "Alpha 配置", provider_model: "openai:a", enabled: true }],
+        roles: { ceo: ["alpha"] },
+    };
+    U.ceoComposerUsageBrain = new StubHTMLElement();
+    U.ceoComposerUsageBrainFill = new StubHTMLElement();
+    U.ceoModelLiveBadge = new StubHTMLElement();
+
+    syncCeoComposerUsageOutline();
+
+    assert.equal(U.ceoModelLiveBadge.hidden, false);
+    assert.equal(U.ceoModelLiveBadge.textContent, "openai:a");
+});
+
+test("send button model badge hides when neither a running nor a next-send model is known", () => {
+    const { S, U, syncCeoComposerUsageOutline } = loadApp();
+    S.activeSessionId = "web:test";
+    S.ceoTurnActive = false;
+    S.ceoSnapshotCache = {};
+    S.ceoComposerUsageEstimate = null;
+    S.modelCatalog = { catalog: [], roles: { ceo: [] } };
+    U.ceoComposerUsageBrain = new StubHTMLElement();
+    U.ceoComposerUsageBrainFill = new StubHTMLElement();
+    U.ceoModelLiveBadge = new StubHTMLElement();
+
+    syncCeoComposerUsageOutline();
+
+    assert.equal(U.ceoModelLiveBadge.hidden, true);
+    assert.equal(U.ceoModelLiveBadge.textContent, "");
+});
+
+test("send cluster places the model badge left of the send button", () => {
+    const clusterIndex = APP_HTML.indexOf('class="ceo-send-cluster"');
+    const badgeIndex = APP_HTML.indexOf('id="ceo-model-live-badge"');
+    const sendIndex = APP_HTML.indexOf('id="ceo-send-btn"');
+    assert.ok(clusterIndex >= 0);
+    assert.ok(badgeIndex > clusterIndex);
+    assert.ok(sendIndex > badgeIndex);
+    assert.ok(APP_CSS.includes(".ceo-send-cluster {"));
+    assert.equal(/#ceo-send-btn \{\n    position: absolute;/.test(APP_CSS), false);
+});
+
+test("model panel puts the model badge on the token line, right aligned", () => {
+    const usageTextIndex = APP_HTML.indexOf('id="ceo-model-mode-usage-text"');
+    const badgeIndex = APP_HTML.indexOf('id="ceo-model-mode-badge"');
+    const optionsIndex = APP_HTML.indexOf('id="ceo-model-mode-chain"');
+    assert.ok(usageTextIndex >= 0);
+    assert.ok(badgeIndex > usageTextIndex);
+    assert.ok(optionsIndex > badgeIndex);
+    assert.equal(APP_HTML.includes("ceo-model-mode-headline"), false);
+    assert.ok(APP_CSS.includes(".ceo-model-mode-meter-row {"));
+    assert.ok(APP_CSS.includes(".ceo-model-mode-meter-row > .ceo-model-mode-badge {\n    margin-left: auto;"));
+});
+
 test("active turn prefers runtime next-request snapshot over stale composer estimate and refreshes immediately", () => {
     const { S, U, __context, activeCeoRuntimeUsageEstimate } = loadApp();
     S.activeSessionId = "web:test";

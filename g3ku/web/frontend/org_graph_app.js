@@ -521,6 +521,7 @@ const U = {
     ceoBgJobsPopover: document.getElementById("ceo-bg-jobs-popover"),
     ceoBgJobsList: document.getElementById("ceo-bg-jobs-list"),
     ceoSend: document.getElementById("ceo-send-btn"),
+    ceoModelLiveBadge: document.getElementById("ceo-model-live-badge"),
     viewCeo: document.getElementById("view-ceo"),
     viewTasks: document.getElementById("view-tasks-list"),
     viewSkills: document.getElementById("view-skills"),
@@ -1638,6 +1639,11 @@ function normalizeCeoRuntimeUsageDiagnostics(payload = null) {
     );
     const providerModel = String(item.provider_model || item.providerModel || "").trim();
     if (finalRequestTokens <= 0 || maxContextTokens <= 0 || !providerModel) return null;
+    // 这一跳真正服务的模型：链上换成员（429 降档）后 provider_model 仍是预检那颗，
+    // 实际服务的是 provider_request_body.model，落在 observed_input_truth 里。
+    const observedTruth = item.observed_input_truth && typeof item.observed_input_truth === "object"
+        ? item.observed_input_truth
+        : {};
     return {
         final_request_tokens: finalRequestTokens,
         max_context_tokens: maxContextTokens,
@@ -1647,6 +1653,13 @@ function normalizeCeoRuntimeUsageDiagnostics(payload = null) {
         estimate_source: String(item.estimate_source || item.estimateSource || "").trim(),
         provider_model: providerModel,
         resolved_model_key: String(item.resolved_model_key || item.resolvedModelKey || "").trim(),
+        observed_provider_model: String(
+            observedTruth.provider_model
+            || observedTruth.providerModel
+            || item.observed_provider_model
+            || item.observedProviderModel
+            || ""
+        ).trim(),
         applied: !!item.applied,
     };
 }
@@ -1671,6 +1684,7 @@ function normalizeCeoRuntimeUsageEstimate(sessionId, inflightTurn = null) {
         ratio,
         provider_model: String(diagnostics.provider_model || "").trim(),
         resolved_model_key: String(diagnostics.resolved_model_key || "").trim(),
+        observed_provider_model: String(diagnostics.observed_provider_model || "").trim(),
         trigger_tokens: activeTriggerTokens > 0 ? Math.floor(activeTriggerTokens) : 0,
         would_trigger_token_compression: activeTriggerTokens > 0 && estimatedTotalTokens >= activeTriggerTokens,
         would_exceed_context_window: estimatedTotalTokens > contextWindowTokens,
