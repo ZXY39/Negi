@@ -10221,7 +10221,7 @@ function updateApplyOutcomeText(item) {
 }
 
 function updateSettingsButtonTitle(item) {
-    // 版本对常显在按钮右侧，title 只留那一行放不下的读数：检查时间、错误码、上次升级结果。
+    // 版本与"已是最新"常显在按钮右侧，title 只留那一行放不下的读数：检查时间、错误码、上次升级结果。
     const parts = [];
     const outcome = updateApplyOutcomeText(item);
     if (outcome) parts.push(outcome);
@@ -10231,8 +10231,6 @@ function updateSettingsButtonTitle(item) {
         parts.push(`上次检查失败：${item.error}${item.detail ? `（${item.detail}）` : ""}`);
     } else if (item.newer) {
         parts.push(`发现新版本 ${item.latest_tag}（当前 v${item.current_version}），点开看发布说明`);
-    } else {
-        parts.push(`已是最新 v${item.current_version}`);
     }
     // 主车道失败、发布页读到了：版本号是对的，但这一行要留下"为什么换了车道"的证据，
     // 否则 git 装坏了这类故障在界面上和正常状态长得一模一样。
@@ -10249,8 +10247,14 @@ function updateSettingsButtonTitle(item) {
 function projectSettingsVersionText(item) {
     const current = String(item?.current_version || "").trim();
     if (!current) return "";
-    const latest = item?.newer ? String(item?.latest_tag || "").trim() : "";
-    return latest ? `v${current} → ${latest}` : `v${current}`;
+    if (item?.newer) {
+        const latest = String(item?.latest_tag || "").trim();
+        return latest ? `v${current} → ${latest}` : `v${current}`;
+    }
+    // "已是最新"只认"这次查成功了而且没有更新的版本"这一档：没查过与查失败仍只报版本号。
+    // 分隔用中点而不是全角括号——括号那版实测 204px，超过这一行的 200px 预算会把按钮挤到第二行。
+    const checkedClean = Boolean(item?.has_ledger) && !item?.error;
+    return checkedClean ? `v${current} · 已是最新` : `v${current}`;
 }
 
 function projectSettingsCheckUpdateText(item) {

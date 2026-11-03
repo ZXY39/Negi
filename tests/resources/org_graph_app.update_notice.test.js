@@ -173,11 +173,31 @@ test("弹窗里只有红点认新版，按钮文案与版本对跟着台账走",
 
 test("up to date never borrows the newer wording", () => {
     const api = stubbedUpdateApi();
-    api.renderProjectSettingsUpdate({ has_ledger: true, newer: false, latest_tag: "v1.0.1", current_version: "1.0.1" });
-    const title = api.U.projectSettingsCheckUpdate.title;
-    assert.match(title, /已是最新 v1\.0\.1/);
-    assert.doesNotMatch(title, /发现新版本/);
+    api.renderProjectSettingsUpdate({ has_ledger: true, newer: false, latest_tag: "v1.0.1", current_version: "1.0.1", checked_at: "2026-11-04T09:12:00+08:00" });
+    // "已是最新"这一档由行内说话，title 不再把同一句印第二遍。
+    assert.equal(api.U.projectSettingsVersion.textContent, "v1.0.1 · 已是最新");
+    assert.equal(api.U.projectSettingsVersion.classList.contains("is-newer"), false);
+    assert.doesNotMatch(api.U.projectSettingsCheckUpdate.title, /发现新版本/);
+    assert.doesNotMatch(api.U.projectSettingsCheckUpdate.title, /已是最新/, "同一句只在一处");
+    assert.match(api.U.projectSettingsCheckUpdate.title, /检查于 \d{2}-\d{2} \d{2}:\d{2}/, "title 仍留检查时间");
     assert.equal(api.U.projectSettingsCheckDot.hidden, true);
+});
+
+test("没查过与查失败都不许借「已是最新」", () => {
+    const api = stubbedUpdateApi();
+
+    // 后端即使从没查过也照回 current_version，所以这一档必须在行内就说"没查过"的反面：只报版本号。
+    api.renderProjectSettingsUpdate({ has_ledger: false, newer: false, current_version: "1.0.1", checked_at: "" });
+    assert.equal(api.U.projectSettingsVersion.textContent, "v1.0.1");
+    assert.match(api.U.projectSettingsCheckUpdate.title, /还没查过远端标签/);
+
+    api.renderProjectSettingsUpdate({ has_ledger: true, newer: false, current_version: "1.0.1", error: "timeout", detail: "timeout" });
+    assert.equal(api.U.projectSettingsVersion.textContent, "v1.0.1");
+    assert.match(api.U.projectSettingsCheckUpdate.title, /上次检查失败：timeout/);
+
+    // 换车道读到版本且没有更新：这一档是"查成功了"，可以点亮行内提示。
+    api.renderProjectSettingsUpdate({ has_ledger: true, newer: false, current_version: "1.0.1", error: "", degraded: true });
+    assert.equal(api.U.projectSettingsVersion.textContent, "v1.0.1 · 已是最新");
 });
 
 function loadDialogContext() {
