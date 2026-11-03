@@ -314,8 +314,9 @@ class ScheduleWakeTool(Tool):
     @property
     def model_description(self) -> str:
         return (
-            'Arm one self-wake (note + after_seconds or a future at); it replaces the pending one '
-            'and survives restart.'
+            'Arm one self-wake with exactly one of `after_seconds` or a future `at` (take `at` from '
+            'the time tool, never compute it); it replaces your previous pending wake-up, does not '
+            'end this turn, and survives a restart.'
         )
 
     @property
