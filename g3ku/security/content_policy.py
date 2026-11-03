@@ -304,7 +304,7 @@ def count_user_row_markers(messages: list[Any]) -> int:
 def content_policy_notice_body(hits: int) -> str:
     return (
         f"{_CONTENT_POLICY_NOTICE_HEADING}\n"
-        f"- 本轮发给模型的发起方正文里有 {max(0, int(hits))} 处命中安全审查词表，已被替换成占位符。"
+        f"- 这一批消息里的发起方正文有 {max(0, int(hits))} 处命中安全审查词表，已被替换成占位符。"
         "占位符是系统盖的标记，不是用户写的原文：不要复述它，不要据此说内容读不到，"
         "也不要要用户重发同一句。"
     )
@@ -314,8 +314,9 @@ def append_content_policy_notice(messages: list[Any], hits: int) -> list[Any]:
     """把这条说明并进本轮末尾那条 `[RUNTIME_NOTICE]`；没有就新起一条通知消息。
 
     说明绝不写进被替换的那条用户消息里：那等于在用户的话语中间插一句系统话，模型会把它
-    当成用户自己发的提醒。通知也只在发送副本里带一次，不进 durable 基线，否则它会以"用户
-    消息"的形态在之后每一跳重播。
+    当成用户自己发的提醒。并进已有通知行时，这一节会随那条通知在下一跳被重新读到（实测：
+    它会出现在回写的基线里），所以措辞只讲"这一批消息里的发起方正文"，不用"本轮"这种
+    只在一跳成立的说法。
     """
     body = content_policy_notice_body(hits)
     result = list(messages)

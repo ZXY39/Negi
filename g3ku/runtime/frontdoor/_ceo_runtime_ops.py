@@ -9113,9 +9113,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             durable_request_messages = apply_content_policy(durable_request_messages)
             inbound_masked = count_user_row_markers(request_messages) - masked_before
             if inbound_masked > 0:
-                # 掩掉了发起方正文就在本轮通知里说明一句（并进已有的那条，没有就新起一条）：
-                # 写进被掩的那条消息会被读成"用户自己写的提醒"，留在 durable 基线里又会每跳
-                # 以用户话语重播，所以只挂在这一发的副本上。
+                # 掩掉了发起方正文就在通知里说明一句（并进已有的那条，没有就新起一条）：写进
+                # 被掩的那条消息会被读成"用户自己写的提醒"。这一节不写进会话 state，但并入已有
+                # 通知行时会随那一行进回写基线、被下一跳重读，所以正文只用"这一批消息"的说法。
                 request_messages = append_content_policy_notice(request_messages, inbound_masked)
             prompt_cache_key = str(preflight_snapshot.get("prompt_cache_key") or "")
             prompt_cache_diagnostics = dict(preflight_snapshot.get("prompt_cache_diagnostics") or {})
