@@ -1370,7 +1370,7 @@
           <label class="resource-field">
             <span class="resource-field-label">最大并发数</span>
             <div class="llm-concurrency-input-row">
-              <input id="llm-binding-single-api-key-max-concurrency" class="resource-search" type="text" value="${escv(String(editor.singleApiKeyMaxConcurrency ?? ""))}" placeholder="留空表示不限制；多 key 可写 3,5,7">
+              <input id="llm-binding-single-api-key-max-concurrency" class="resource-search" type="text" value="${escv(String(editor.singleApiKeyMaxConcurrency ?? ""))}" placeholder="留空表示不限制">
               <button type="button" class="icon-btn llm-kebab-btn" data-llm-action="toggle-concurrency-test" title="并发测试" aria-label="显示并发测试"><i data-lucide="more-horizontal"></i></button>
             </div>
             <div class="llm-concurrency-test-row" hidden>
