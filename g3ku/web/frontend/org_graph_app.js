@@ -3698,6 +3698,14 @@ function handleCeoControlAck(payload = {}) {
 }
 
 function handleCeoError(payload = {}) {
+    const sessionId = activeSessionId();
+    const representedUserMessages = normalizeCeoSnapshotUserMessages(payload?.user_messages);
+    if (sessionId && representedUserMessages.length) {
+        // 失败回合的用户消息已经进了请求上下文，不再重投。这里只退役「插话」提交的
+        // 本地在飞副本；服务端镜像条由随后那帧空队列读数清掉，不在这里重复处理。
+        consumeRepresentedRuntimeSentCeoFollowUps(sessionId, representedUserMessages);
+        retireCeoTakenFollowUpsFromRepresentedMessages(sessionId, representedUserMessages);
+    }
     S.ceoTurnActive = false;
     S.ceoPauseBusy = false;
     if (patchCeoSessionRuntimeState(activeSessionId(), false)) renderCeoSessions();
