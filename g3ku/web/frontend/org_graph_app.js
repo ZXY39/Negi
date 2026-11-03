@@ -4634,16 +4634,22 @@ function renderCeoSilentTurn(turn, { text = "", timestamp = "" } = {}) {
         line.className = "ceo-silent-line";
         const label = document.createElement("span");
         label.className = "ceo-silent-label";
+        const count = document.createElement("span");
+        count.className = "ceo-silent-count";
+        count.hidden = true;
         const rule = document.createElement("span");
         rule.className = "ceo-silent-rule";
         const caret = document.createElement("span");
         caret.className = "ceo-silent-caret";
         line.appendChild(label);
+        line.appendChild(count);
         line.appendChild(rule);
         line.appendChild(caret);
         line.addEventListener("click", () => {
             const expanded = turn.el.classList.toggle("ceo-silent-expanded");
             line.setAttribute("aria-expanded", expanded ? "true" : "false");
+            // 组内其余回合的显隐从组头的展开态派生，开合后重算一次即可。
+            syncCeoSilentTurnGroups();
         });
         turn.el.insertBefore(line, turn.el.children[0] || null);
         turn.silentLineEl = line;
@@ -4651,6 +4657,70 @@ function renderCeoSilentTurn(turn, { text = "", timestamp = "" } = {}) {
     const clock = formatCompactTime(timestamp || turn.completedAt || "");
     line.children[0].textContent = clock ? `静默消息 ${clock}` : "静默消息";
     line.setAttribute("aria-expanded", turn.el.classList.contains("ceo-silent-expanded") ? "true" : "false");
+}
+
+// 相邻静默回合合并成一行：心跳/cron 连着一串静默时，每轮各占一行会把会话刷成一片
+// 时间戳。只留第一轮的折叠行，行尾补「共N条」，其余回合整条收进组内、不占高度。
+// 分组是纯派生态——不动 DOM 顺序、不动 data-ceo-key、折叠仍由各轮自己的
+// ceo-silent-expanded 决定——所以任何一次重算都幂等；翻页补插、压缩线增删、
+// 回合被丢弃引起的相邻关系变化，都靠重算收敛。
+const CEO_SILENT_GROUP_MIN_SIZE = 2;
+
+function ceoSilentGroupCountEl(turnEl = null) {
+    if (!turnEl?.classList?.contains?.("ceo-silent-message")) return null;
+    for (const child of Array.from(turnEl.children || [])) {
+        if (!child?.classList?.contains?.("ceo-silent-line")) continue;
+        for (const part of Array.from(child.children || [])) {
+            if (part?.classList?.contains?.("ceo-silent-count")) return part;
+        }
+    }
+    return null;
+}
+
+function syncCeoSilentTurnGroups() {
+    const host = typeof ceoFeedAppendHost === "function" ? ceoFeedAppendHost() : U.ceoFeed;
+    if (!host || !host.children) return;
+    const children = Array.from(host.children || []);
+    const runs = [];
+    let run = [];
+    children.forEach((child) => {
+        if (child?.classList?.contains?.("ceo-silent-message")) {
+            run.push(child);
+            return;
+        }
+        if (run.length) runs.push(run);
+        run = [];
+    });
+    if (run.length) runs.push(run);
+    // 先全量复位再按本次扫描重建：上一轮的分组可能已过期（中间插进了分隔线、
+    // 成员被移除，或组头后来才补上）。组头自身的展开态不动，它是开合的唯一真相。
+    children.forEach((child) => {
+        child?.classList?.remove?.("ceo-silent-group-head");
+        child?.classList?.remove?.("ceo-silent-group-member");
+        child?.classList?.remove?.("ceo-silent-group-open");
+        const countEl = ceoSilentGroupCountEl(child);
+        if (!countEl) return;
+        // 只在真变了才写：这个函数跑在每个批次尾巴上，无谓的 textContent 赋值
+        // 会换掉文本节点，白触发一轮样式与布局。
+        if (countEl.textContent) countEl.textContent = "";
+        if (!countEl.hidden) countEl.hidden = true;
+    });
+    runs.forEach((members) => {
+        if (members.length < CEO_SILENT_GROUP_MIN_SIZE) return;
+        const [head, ...rest] = members;
+        const open = !!head.classList?.contains?.("ceo-silent-expanded");
+        head.classList?.add?.("ceo-silent-group-head");
+        const countEl = ceoSilentGroupCountEl(head);
+        if (countEl) {
+            const label = `· 共${members.length}条`;
+            if (countEl.textContent !== label) countEl.textContent = label;
+            countEl.hidden = false;
+        }
+        rest.forEach((member) => {
+            member.classList?.add?.("ceo-silent-group-member");
+            member.classList?.toggle?.("ceo-silent-group-open", open);
+        });
+    });
 }
 
 // --- 思维链实时行（正文下方一行）--------------------------------------------------

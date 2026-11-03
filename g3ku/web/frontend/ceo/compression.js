@@ -279,6 +279,8 @@ function removeCeoCompressionLiveDivider() {
     const rows = [...new Set([first, ...all].filter(Boolean))];
     if (!rows.length) return false;
     rows.forEach((el) => el?.remove?.());
+    // 压缩线把两段静默隔开，线一撤就可能连成一组：分组必须跟着重算。
+    if (typeof syncCeoSilentTurnGroups === "function") syncCeoSilentTurnGroups();
     return true;
 }
 

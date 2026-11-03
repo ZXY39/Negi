@@ -3305,6 +3305,26 @@ textarea {
     flex: 0 0 auto;
 }
 
+/* 相邻静默回合合并：组内只留第一行，行尾读「共N条」；组头展开后其余回合逐条显形，
+   每条仍是各自可开合的折叠行。成员整条 display:none，不占高度也不进朗读树。 */
+.ceo-silent-count {
+    flex: 0 0 auto;
+    color: var(--text-muted);
+    opacity: 0.78;
+}
+
+.ceo-silent-count[hidden] {
+    display: none;
+}
+
+.ceo-silent-message.ceo-silent-group-member {
+    display: none;
+}
+
+.ceo-silent-message.ceo-silent-group-member.ceo-silent-group-open {
+    display: flex;
+}
+
 .ceo-silent-caret {
     flex: 0 0 auto;
     width: 7px;

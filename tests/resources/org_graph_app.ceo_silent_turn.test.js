@@ -534,3 +534,121 @@ test("历史静默行没有回合轨道时也要渲染折叠行", () => {
     assert.ok(turn);
     assert.equal(String(labelOf(turn)).startsWith("静默消息"), true, "没有时间时也只写「静默消息」");
 });
+
+// 相邻静默合并：心跳/cron 连着一串静默时只留第一行，行尾读「共N条」；
+// 展开后其余回合逐条显形，每条仍可各自点开正文。
+function countOf(turn) {
+    const line = lineOf(turn);
+    if (!line) return null;
+    return (line.children || []).find((item) => String(item?.className || "").split(/\s+/).includes("ceo-silent-count")) || null;
+}
+
+function renderSilentHistoryRow(api, turnId) {
+    api.renderPersistedCeoAssistantTurn({
+        role: "assistant",
+        content: `${turnId} 的静默正文`,
+        silent_reply: true,
+        turn_id: turnId,
+        timestamp: SILENT_AT,
+    });
+}
+
+test("相邻静默回合合并成一行：组头读「共N条」，其余整条收进组内", () => {
+    const api = setup();
+    const feed = new FeedStub({ children: [], scrollHeight: 400, clientHeight: 300 });
+    api.U.ceoFeed = feed;
+    const pushed = trackPushedTurns(api);
+
+    ["t1", "t2", "t3"].forEach((turnId) => renderSilentHistoryRow(api, turnId));
+
+    assert.equal(feed.children.length, 3, "每轮仍是独立元素，锚点与分页 key 不动");
+    const [head, second, third] = pushed.filter((item) => item && item.textEl);
+    assert.equal(String(head.el.className).includes("ceo-silent-group-head"), true);
+    assert.equal(String(second.el.className).includes("ceo-silent-group-member"), true);
+    assert.equal(String(third.el.className).includes("ceo-silent-group-member"), true);
+    assert.match(labelOf(head), /^静默消息 (\d\d[-/]\d\d )?\d{2}:\d{2}:\d{2}$/, "组头仍读第一条开始时间");
+    const headCount = countOf(head);
+    assert.ok(headCount, "组头必须有计数位");
+    assert.equal(headCount.hidden, false);
+    assert.equal(String(headCount.textContent), "· 共3条");
+    assert.equal(countOf(second).hidden, true, "成员不挂计数");
+    assert.equal(String(second.el.className).includes("ceo-silent-group-open"), false, "默认收起");
+    assert.equal(String(third.el.className).includes("ceo-silent-group-open"), false);
+});
+
+test("点开合并行放出组内各条，再点收回；成员仍各自可开合", () => {
+    const api = setup();
+    const feed = new FeedStub({ children: [], scrollHeight: 400, clientHeight: 300 });
+    api.U.ceoFeed = feed;
+    const pushed = trackPushedTurns(api);
+
+    ["t1", "t2"].forEach((turnId) => renderSilentHistoryRow(api, turnId));
+    const [head, second] = pushed.filter((item) => item && item.textEl);
+
+    lineOf(head).click();
+    assert.equal(String(head.el.className).includes("ceo-silent-expanded"), true, "组头连同自己的正文一起展开");
+    assert.equal(String(second.el.className).includes("ceo-silent-group-open"), true, "组内其余回合显形");
+
+    lineOf(second).click();
+    assert.equal(String(second.el.className).includes("ceo-silent-expanded"), true, "成员仍可单独点开正文");
+    assert.equal(String(head.el.className).includes("ceo-silent-expanded"), true, "成员开合不影响组头");
+
+    lineOf(head).click();
+    assert.equal(String(head.el.className).includes("ceo-silent-expanded"), false);
+    assert.equal(String(second.el.className).includes("ceo-silent-group-open"), false, "收回后成员整条隐藏");
+});
+
+test("中间隔着可见回合的静默不合并", () => {
+    const api = setup();
+    const feed = new FeedStub({ children: [], scrollHeight: 400, clientHeight: 300 });
+    api.U.ceoFeed = feed;
+    const pushed = trackPushedTurns(api);
+
+    renderSilentHistoryRow(api, "t1");
+    api.renderPersistedCeoAssistantTurn({ role: "assistant", content: "一条正常回复", turn_id: "t2" });
+    renderSilentHistoryRow(api, "t3");
+
+    const turns = pushed.filter((item) => item && item.textEl);
+    turns.forEach((turn) => {
+        assert.equal(String(turn.el.className).includes("ceo-silent-group-head"), false);
+        assert.equal(String(turn.el.className).includes("ceo-silent-group-member"), false);
+    });
+    const silentTurns = turns.filter((turn) => String(turn.el.className).includes("ceo-silent-message"));
+    assert.equal(silentTurns.length, 2);
+    silentTurns.forEach((turn) => assert.equal(countOf(turn).hidden, true, "单条静默不显示计数"));
+});
+
+test("live 连续静默收尾并进同一组，组头计数随新回合增长", () => {
+    const api = setup();
+    const feed = new FeedStub({ children: [], scrollHeight: 400, clientHeight: 300 });
+    api.U.ceoFeed = feed;
+
+    const finalizeIntoFeed = (turn) => {
+        api.S.ceoSnapshotCache["s1"] = { session_id: "s1", messages: [{ role: "user", content: "q1" }] };
+        api.S.ceoFeedRenderedMessageKeys = ["m:-:user:0"];
+        api.S.ceoPendingTurns = [turn];
+        api.finalizeCeoTurn(SILENT_TEXT, {
+            source: "user",
+            turn_id: turn.turnId,
+            silent_reply: true,
+            silent_reason: SILENT_REASON,
+            turns: TURN_TRACE,
+            timestamp: SILENT_AT,
+        });
+    };
+
+    const first = makeTurn({ turnId: "h1" });
+    feed.appendChild(first.el);
+    finalizeIntoFeed(first);
+    assert.equal(countOf(first).hidden, true, "单条时没有计数");
+
+    const second = makeTurn({ turnId: "h2" });
+    feed.appendChild(second.el);
+    finalizeIntoFeed(second);
+
+    assert.equal(String(first.el.className).includes("ceo-silent-group-head"), true);
+    assert.equal(String(second.el.className).includes("ceo-silent-group-member"), true);
+    assert.equal(String(countOf(first).textContent), "· 共2条");
+    assert.equal(countOf(first).hidden, false);
+    assert.equal(countOf(second).hidden, true);
+});
