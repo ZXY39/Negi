@@ -658,7 +658,17 @@ async def _collect_attachments(
         )
     if not raw_items:
         return payloads, voice_lines
-    stt_ready = await stt_engine.inbound_voice_enabled()
+    try:
+        stt_ready = await stt_engine.inbound_voice_enabled()
+    except Exception as exc:
+        # 读配置只是想知道"要不要转写"，它不该把整条附件道打死：读不到就按 STT 不可用
+        # 处理，音频照旧作为文件转发（与下载失败同一档降级）。没有配置的设备（CI 上没有
+        # `.g3ku/config.json`）以前是九条附件用例一起抛在这里。
+        logger.warning(
+            "qq-official inbound STT gate unavailable ({}); forwarding attachments as files",
+            type(exc).__name__,
+        )
+        stt_ready = False
     for item in raw_items:
         if len(payloads) >= _MAX_INBOUND_ATTACHMENTS:
             logger.warning(
