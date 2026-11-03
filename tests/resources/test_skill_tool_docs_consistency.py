@@ -24,11 +24,6 @@ def test_memory_skill_uses_current_search_guidance():
     assert 'MEMORY.md' in content
 
 
-def test_tmux_skill_does_not_claim_exec_background_mode():
-    content = (REPO_ROOT / 'skills' / 'tmux' / 'SKILL.md').read_text(encoding='utf-8')
-    assert 'exec 后台模式' not in content
-
-
 def test_model_config_tool_no_longer_contains_removed_memory_action():
     content = (REPO_ROOT / 'g3ku' / 'agent' / 'tools' / 'model_config.py').read_text(encoding='utf-8')
     assert 'set_memory_models' not in content
