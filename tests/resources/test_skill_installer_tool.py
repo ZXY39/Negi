@@ -471,6 +471,10 @@ def test_skill_installer_run_git_uses_timeout_and_noninteractive_env(monkeypatch
             return None
 
     monkeypatch.setattr(module.subprocess, "Popen", _FakeProcess)
+    # 继承值必须是"被覆盖"而不是"被沿用"：CI 上真实见过 `GCM_INTERACTIVE=Never`（大写）从
+    # 宿主环境带进来，git 不认大写值，等于这条非交互闸门形同虚设。
+    monkeypatch.setenv("GIT_TERMINAL_PROMPT", "1")
+    monkeypatch.setenv("GCM_INTERACTIVE", "Never")
 
     module._run_git(["git", "clone", "demo"], timeout=77)
 

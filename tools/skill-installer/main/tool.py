@@ -140,8 +140,11 @@ def _safe_extract_zip(zip_file: zipfile.ZipFile, dest_dir: str, *, cancel_token:
 
 def _run_git(args: list[str], *, timeout: int, cancel_token: Any | None = None) -> None:
     env = dict(os.environ)
-    env.setdefault("GIT_TERMINAL_PROMPT", "0")
-    env.setdefault("GCM_INTERACTIVE", "never")
+    # 这两个开关的语义是"绝不允许弹交互式凭据提示"，不是偏好项：`setdefault` 会把宿主或
+    # 同进程里先前设置过的值原样带下去（实盘 CI 上继承到 `GCM_INTERACTIVE=Never`，git 认的是
+    # 小写 never/0/true，大写值等于没设过），所以这里强制覆盖成规范值。
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GCM_INTERACTIVE"] = "never"
     process: subprocess.Popen[str] | None = None
     timeout_seconds = max(1, int(timeout or 120))
     deadline = time.monotonic() + timeout_seconds
