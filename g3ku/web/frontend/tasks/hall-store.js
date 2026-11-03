@@ -76,9 +76,22 @@ async function performTaskBatchAction(action, eligible) {
     }
     S.taskBusy = true;
     renderTasksIfVisible();
+    // 删除与清临时文件按磁盘规模能跑到几十秒：进行中的 toast 是唯一进度信号，
+    // 与失败记忆删除同一形状（常驻 + 转圈），直到请求全部返回才换结果。
+    const showBusy = action === "delete" || action === "clear_temp";
+    const busyTitle = action === "delete" ? "正在删除任务" : "正在清除临时文件";
+    let processedCount = 0;
+    function showBusyToast(text) {
+        if (!showBusy) return;
+        showToast({ title: busyTitle, text, kind: "info", durationMs: 0, persistent: true, spin: true });
+    }
     try {
+        showBusyToast(action === "delete"
+            ? `${eligible.length} 个任务`
+            : `已处理 0 / ${eligible.length} 个`);
         let succeeded = [];
         let failed = [];
+        let clearTempTotals = null;
         if (action === "delete") {
             const payload = await ApiClient.bulkDeleteTasks(
                 eligible.map((task) => task.task_id),
@@ -110,7 +123,14 @@ async function performTaskBatchAction(action, eligible) {
         } else {
             const results = await settleTaskActionBatch(
                 eligible,
-                (task) => requestTaskAction(task.task_id, action),
+                async (task) => {
+                    try {
+                        return await requestTaskAction(task.task_id, action);
+                    } finally {
+                        processedCount += 1;
+                        showBusyToast(`已处理 ${processedCount} / ${eligible.length} 个`);
+                    }
+                },
                 { concurrency: taskBatchActionConcurrency(action) },
             );
             succeeded = results
@@ -119,6 +139,21 @@ async function performTaskBatchAction(action, eligible) {
             failed = results
                 .map((result, index) => (result.status === "rejected" ? { taskId: eligible[index].task_id, error: result.reason } : null))
                 .filter(Boolean);
+            if (action === "clear_temp") {
+                // 逐任务返回值在这里汇总成一份账：卡片上的占用大小只有靠
+                // freed_bytes / removed_dirs 的总量才看得出这次到底腾出了多少。
+                let removedDirs = 0;
+                let failedDirs = 0;
+                let freedBytes = 0;
+                results.forEach((result) => {
+                    if (result?.status !== "fulfilled") return;
+                    const value = result.value || {};
+                    removedDirs += Array.isArray(value.removed_dirs) ? value.removed_dirs.length : 0;
+                    failedDirs += Array.isArray(value.failed_dirs) ? value.failed_dirs.length : 0;
+                    freedBytes += Number(value.freed_bytes || 0);
+                });
+                clearTempTotals = { removedDirs, failedDirs, freedBytes };
+            }
         }
         await loadTasks();
         if (action === "delete") {
@@ -157,7 +192,17 @@ async function performTaskBatchAction(action, eligible) {
         const successText = action === "delete"
             ? `已删除 ${succeeded.length} 个任务`
             : `${succeeded.length} 个任务已${taskActionText(action)}`;
-        if (action !== "pause") {
+        if (action === "clear_temp") {
+            const totals = clearTempTotals || { removedDirs: 0, failedDirs: 0, freedBytes: 0 };
+            const clearedText = totals.removedDirs
+                ? `已清除 ${totals.removedDirs} 个目录，释放 ${formatTaskBytes(totals.freedBytes)}`
+                : `${succeeded.length} 个任务没有可清除的临时目录`;
+            showToast({
+                title: totals.failedDirs ? "部分临时目录未删除" : taskActionSuccessTitle(action),
+                text: totals.failedDirs ? `${clearedText}，${totals.failedDirs} 个目录未删除` : clearedText,
+                kind: totals.failedDirs ? "warn" : "success",
+            });
+        } else if (action !== "pause") {
             // 批量暂停的成功反馈由各卡片内的「暂停中→暂停成功」提示承担。
             showToast({
                 title: taskActionSuccessTitle(action),
@@ -168,6 +213,11 @@ async function performTaskBatchAction(action, eligible) {
         if (failed.some((item) => Number(item?.error?.status || 0) === 503)) {
             void refreshTaskWorkerStatus({ render: S.view === "tasks" });
         }
+    } catch (error) {
+        // 请求本身失败（断连、服务重启）时也必须给一条终态 toast：进行中的那条
+        // 是常驻的，没有这里它就一直在屏上转。
+        if (Number(error?.status || 0) === 503) void refreshTaskWorkerStatus({ render: S.view === "tasks" });
+        showToast({ title: taskActionFailureTitle(action), text: taskActionErrorText(action, error), kind: "error" });
     } finally {
         S.taskBusy = false;
         renderTasksIfVisible();

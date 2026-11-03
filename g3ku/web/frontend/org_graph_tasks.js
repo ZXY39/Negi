@@ -913,7 +913,7 @@ async function loadTasks() {
 function updateTaskToolbar() {
     syncTaskSelection();
     const selected = getSelectedTasks();
-    // 头部只留一颗「多选」；点开才在同一行里出现选区读数、按状态选与三个动作。
+    // 头部只留一颗「多选」；点开才在同一行里出现选区读数、按状态选与批量动作。
     if (U.taskMultiToggle) {
         U.taskMultiToggle.setAttribute("aria-pressed", S.multiSelectMode ? "true" : "false");
         U.taskMultiToggle.classList.toggle("active", S.multiSelectMode);
@@ -934,7 +934,9 @@ function updateTaskToolbar() {
             ? selected.some((task) => canPause(task))
             : action === "resume"
                 ? selected.some((task) => canResume(task))
-                : selected.some((task) => canDelete(task)));
+                : action === "clear_temp"
+                    ? selected.some((task) => canClearTemp(task))
+                    : selected.some((task) => canDelete(task)));
         button.disabled = S.taskBusy || !enabled;
     });
     setTaskMenuVisibility();
@@ -998,7 +1000,10 @@ function taskActionRequiresWorker(action) {
 
 function taskActionRequestOptions(action, options = {}) {
     const normalized = options && typeof options === "object" && !Array.isArray(options) ? { ...options } : {};
-    if (["delete", "clear_temp"].includes(action) && !Number.isFinite(normalized.timeoutMs)) normalized.timeoutMs = 30000;
+    // 删除与清临时文件的时长由服务端磁盘决定（实测：一次批量删除 40.1 秒、单个
+    // 清临时文件 20.0 秒）。客户端掐表只会把已经在跑的删除报成失败，用户还得刷新
+    // 才知道删掉了，所以这两条走 `timeoutMs: 0`（见 client_api/core.js 的同款决定）。
+    if (["delete", "clear_temp"].includes(action) && !Number.isFinite(normalized.timeoutMs)) normalized.timeoutMs = 0;
     return normalized;
 }
 
@@ -1091,6 +1096,18 @@ async function performTaskAction(taskId, action) {
     S.taskBusy = true;
     renderTasksIfVisible();
     try {
+        if (action === "delete" || action === "clear_temp") {
+            // 这两条按磁盘规模能跑到几十秒，进行中的 toast 是唯一进度信号，
+            // 与失败记忆删除同一形状：常驻 + 转圈，直到请求返回才换结果。
+            showToast({
+                title: action === "delete" ? "正在删除任务" : "正在清除临时文件",
+                text: "",
+                kind: "info",
+                durationMs: 0,
+                persistent: true,
+                spin: true,
+            });
+        }
         const result = await requestTaskAction(taskId, action);
         if (action === "pause") {
             // 同步暂停：卡片内提示跟踪 worker 真实排水进度，直到 actor 停完
@@ -1130,11 +1147,24 @@ async function runTaskBatchAction(action, { returnFocus = null } = {}) {
     const eligible = selected.filter((task) => {
         if (action === "pause") return canPause(task);
         if (action === "resume") return canResume(task);
+        if (action === "clear_temp") return canClearTemp(task);
         if (action === "delete") return canDelete(task);
         return false;
     });
     if (!eligible.length) {
         showToast({ title: "No eligible tasks", text: "Current selection cannot perform this action.", kind: "warn" });
+        return;
+    }
+    if (action === "clear_temp") {
+        // 与单卡清除同一句规则，同一个出处，不在此处再印一份。
+        openConfirm({
+            title: "清除临时文件",
+            text: taskClearTempConfirmText(),
+            confirmLabel: "清除",
+            confirmKind: "warn",
+            returnFocus,
+            onConfirm: () => performTaskBatchAction(action, eligible),
+        });
         return;
     }
     if (action === "delete") {

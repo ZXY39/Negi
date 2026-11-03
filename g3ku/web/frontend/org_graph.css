@@ -9152,6 +9152,8 @@ textarea {
     display: flex;
     align-items: center;
     gap: var(--ui-space-2);
+    /* 选区条比头部其余项更长：窄窗口下让它自己折行，避免多出的一颗动作把整条挤出可视区。 */
+    flex-wrap: wrap;
 }
 
 .task-selection-bar[hidden] {

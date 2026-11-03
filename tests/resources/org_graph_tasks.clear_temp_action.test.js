@@ -77,7 +77,23 @@ test("clear_temp asks for confirmation before issuing the request", async () => 
 
     await context.__confirms[0].onConfirm();
     assert.deepEqual(context.__requests.map((item) => item.taskId), ["task:1"]);
-    assert.equal(context.__requests[0].options.timeoutMs, 30000);
+    // 清临时文件的时长由服务端磁盘决定（实测单个任务 20 秒），客户端不设超时；
+    // 进行中的常驻 toast 负责把"还在跑"说清楚，见下一条用例。
+    assert.equal(context.__requests[0].options.timeoutMs, 0);
+});
+
+test("clear_temp keeps a spinning toast up until the request returns", async () => {
+    const context = loadTasksModule({ response: { removed_dirs: ["a"], freed_bytes: 1024 } });
+
+    await context.performTaskAction("task:1", "clear_temp");
+
+    const toasts = context.__toasts;
+    assert.equal(toasts[0].title, "正在清除临时文件");
+    assert.equal(toasts[0].persistent, true);
+    assert.equal(toasts[0].spin, true);
+    // 结果 toast 收尾：常驻进行中的那条必须被终态读数覆盖掉，不能留在屏上转。
+    assert.equal(toasts.at(-1).kind, "success");
+    assert.notEqual(toasts.at(-1).persistent, true);
 });
 
 test("clear_temp success toast reports removed dirs and freed bytes", async () => {

@@ -114,7 +114,9 @@
     },
 
     async getCeoSessionDeleteCheck(sessionId) {
-        return this.get(`/api/ceo/sessions/${encodeURIComponent(sessionId)}/delete-check`);
+        // 预检要扫该会话名下的任务记录，会话删除的耗时同一量级；默认 10 秒会掐在
+        // 成功前一刻。与批量预检（bulk check）用同一个预算。
+        return this._request("GET", `/api/ceo/sessions/${encodeURIComponent(sessionId)}/delete-check`, { timeoutMs: 30000 });
     },
 
     async getCeoSessionsBulkDeleteCheck(sessionIds = []) {
@@ -125,8 +127,10 @@
         return data || {};
     },
 
+    // 会话删除会连带删掉该会话创建的任务目录，时长由服务端磁盘决定；客户端掐表
+    // 只会把已经在跑的删除报成失败。任务侧删除走的是同一条决定（org_graph_tasks.js）。
     async deleteCeoSession(sessionId, payload = {}) {
-        return this.delete(`/api/ceo/sessions/${encodeURIComponent(sessionId)}`, { body: payload || {} });
+        return this.delete(`/api/ceo/sessions/${encodeURIComponent(sessionId)}`, { body: payload || {}, timeoutMs: 0 });
     },
 
     async bulkDeleteCeoSessions(sessionIds = [], payload = {}) {
@@ -135,7 +139,7 @@
                 session_ids: Array.isArray(sessionIds) ? sessionIds : [],
                 ...(payload && typeof payload === "object" && !Array.isArray(payload) ? payload : {}),
             },
-            timeoutMs: 30000,
+            timeoutMs: 0,
         });
         return data || {};
     },
