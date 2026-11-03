@@ -251,6 +251,34 @@ def resolve_sticker_attachments(
     return cleaned, _with_sticker_attachments(attachments, paths)
 
 
+def _log_external_reply_skip(
+    *,
+    session_key: str,
+    turn_id: str,
+    hub: SessionEventHub,
+    reason: str,
+    raw_text: str,
+) -> None:
+    """两个"这一句不投递"的早退共用的读数。
+
+    这两条 return 在 `record_outbound_message` 与 `hub.publish("reply.final")` 之前，所以
+    账本里不会有任何行：调用方看到的只是 `no_final_written`，事后既分不清"模型自己静默"
+    "心跳内部轮"还是"正文被整段判成内部回声"，也分不清"从没写过"与"写过没被 ack"。
+    `raw_chars` 给的是进 sanitize 之前的正文长度，非 0 而 reason 是 sanitized_empty 就说明
+    是洗空的。有人正等这句（订阅者 > 0）时按 INFO，没人等时留 DEBUG——静默轮与心跳轮
+    本来就大量存在，按 INFO 会把这条读数淹掉。
+    """
+    waiting = int(hub.subscriber_count() or 0)
+    message = (
+        "external reply skipped: session={} turn={} reason={} raw_chars={} waiting={}"
+    )
+    args = (session_key, turn_id, reason, len(str(raw_text or "")), waiting)
+    if waiting > 0:
+        logger.info(message, *args)
+    else:
+        logger.debug(message, *args)
+
+
 def make_session_event_relay(
     session_key: str,
     *,
@@ -299,10 +327,25 @@ def make_session_event_relay(
                 )
                 return
             if event_type == "message_end":
+                raw_text = str(payload.get("text") or "")
                 if payload.get("heartbeat_internal") or payload.get("silent_reply"):
+                    _log_external_reply_skip(
+                        session_key=session_key,
+                        turn_id=turn_id,
+                        hub=hub,
+                        reason="heartbeat_internal" if payload.get("heartbeat_internal") else "silent_reply",
+                        raw_text=raw_text,
+                    )
                     return
-                text = sanitize_channel_outbound_text(str(payload.get("text") or ""))
+                text = sanitize_channel_outbound_text(raw_text)
                 if not text:
+                    _log_external_reply_skip(
+                        session_key=session_key,
+                        turn_id=turn_id,
+                        hub=hub,
+                        reason="sanitized_empty",
+                        raw_text=raw_text,
+                    )
                     return
                 text, sticker_paths = _resolve_sticker_markers(text)
                 # 纯表情回合：正文被标记清空、但仍有图要发，不能在这里早退。

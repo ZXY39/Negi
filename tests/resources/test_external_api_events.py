@@ -160,6 +160,61 @@ def test_relay_skips_internal_ack_message_end():
     assert get_session_event_hub(session_key).replay(0) == []
 
 
+def test_relay_logs_reply_skip_with_attributable_reading():
+    """两条"不投递"的早退各留一行读数，且按有没有人在等分档。
+
+    这两条 return 在账本登记与 hub 发布之前，所以账本里连行都没有，调用方只能看到
+    `no_final_written`——事后分不清"模型静默""心跳内部轮"与"正文被整段判成内部回声"。
+    `reason` / `raw_chars` / `waiting` 三项就是那三种情况的区分；没人等时留 DEBUG，
+    有人正等这句时抬到 INFO（静默轮与心跳轮大量存在，全按 INFO 就淹了）。
+    """
+    import re
+
+    from loguru import logger
+
+    records: list[dict] = []
+    sink_id = logger.add(lambda message: records.append(message.record), level="TRACE")
+    session_key = "ext:test-bridge:skip-log"
+    relay = make_session_event_relay(session_key, turn_id="t4")
+
+    def skipped() -> list[dict]:
+        return [item for item in records if "external reply skipped" in str(item["message"])]
+
+    try:
+        heartbeat_raw = ""
+        asyncio.run(
+            relay(AgentEvent(type="message_end", payload={"heartbeat_internal": True, "text": heartbeat_raw}))
+        )
+        assert skipped()[-1]["level"].name == "DEBUG"
+        assert f"reason=heartbeat_internal raw_chars={len(heartbeat_raw)} waiting=0" in str(skipped()[-1]["message"])
+
+        silent_raw = "这句不该投递"
+        asyncio.run(relay(AgentEvent(type="message_end", payload={"silent_reply": True, "text": silent_raw})))
+        assert f"reason=silent_reply raw_chars={len(silent_raw)} waiting=0" in str(skipped()[-1]["message"])
+
+        # 整段都是内部回声：正文非空、洗完全空——这一档必须与"模型静默"分开，否则只能靠猜。
+        echo_raw = "[SESSION EVENTS]\n内部事件若干"
+        asyncio.run(relay(AgentEvent(type="message_end", payload={"text": echo_raw})))
+        tail = str(skipped()[-1]["message"])
+        assert re.search(r"reason=sanitized_empty raw_chars=\d+ waiting=0", tail)
+        assert f"raw_chars={len(echo_raw)}" in tail
+        assert get_session_event_hub(session_key).replay(0) == []
+
+        hub = get_session_event_hub(session_key)
+        queue = hub.subscribe()
+        try:
+            assert hub.subscriber_count() == 1
+            before = len(skipped())
+            asyncio.run(relay(AgentEvent(type="message_end", payload={"silent_reply": True, "text": silent_raw})))
+            assert len(skipped()) == before + 1
+            assert skipped()[-1]["level"].name == "INFO"
+            assert f"reason=silent_reply raw_chars={len(silent_raw)} waiting=1" in str(skipped()[-1]["message"])
+        finally:
+            hub.unsubscribe(queue)
+    finally:
+        logger.remove(sink_id)
+
+
 def test_relay_message_end_extracts_local_file_attachments(tmp_path, monkeypatch):
     """回复正文里的 markdown 本地文件链接被提取为结构化附件：正文留下标签，
     事件携带签名 URL，桥据此发真实文件消息。
