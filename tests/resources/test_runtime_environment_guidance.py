@@ -120,7 +120,7 @@ def test_node_runner_runtime_environment_uses_task_temp_dir_from_runtime_meta(mo
     assert os.path.normcase(payload['task_temp_dir']) == os.path.normcase(task_temp_dir)
     assert payload['path_policy']['exec_default_working_dir'] == 'task_temp_dir'
     assert 'task_temp_dir' in prompt
-    assert '所有文件都放在' in prompt
+    assert '默认都写到 `runtime_environment.task_temp_dir`' in prompt
 
 
 def test_acceptance_prompt_mentions_task_temp_dir_rule(monkeypatch) -> None:
@@ -137,7 +137,7 @@ def test_acceptance_prompt_mentions_task_temp_dir_rule(monkeypatch) -> None:
     prompt = runner._build_system_prompt(node=SimpleNamespace(node_kind='acceptance'))
 
     assert 'task_temp_dir' in prompt
-    assert '所有文件都放在' in prompt
+    assert '默认都写到 `runtime_environment.task_temp_dir`' in prompt
 
 
 def test_execution_and_acceptance_prompts_forbid_self_task_progress_polling(monkeypatch) -> None:
@@ -187,7 +187,7 @@ def test_execution_and_acceptance_prompts_do_not_allow_blocked_failure_for_tempo
     execution_prompt = runner._build_system_prompt(node=SimpleNamespace(node_kind='execution'))
     acceptance_prompt = runner._build_system_prompt(node=SimpleNamespace(node_kind='acceptance'))
 
-    expected = '除非工具即使经过了`load_tool_context`也无法使用，否则不允许因为暂时无法使用工具而将节点判定为阻塞失败'
+    expected = '除非工具即使经过了 `load_tool_context` 也无法使用，否则不允许因为暂时无法使用工具而把节点判成阻塞失败'
 
     assert expected in execution_prompt
     assert expected in acceptance_prompt
