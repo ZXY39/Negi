@@ -581,7 +581,6 @@ const U = {
     memoryNoteBody: null,
     memoryNoteClose: null,
     modelHint: document.getElementById("sidebar-model-hint"),
-    modelRefresh: document.getElementById("model-refresh-btn"),
     modelCreate: document.getElementById("model-create-btn"),
     modelRolesCancel: document.getElementById("model-roles-cancel-btn"),
     modelRolesSave: document.getElementById("model-roles-save-btn"),
@@ -11435,7 +11434,6 @@ function bindCeoComposerAndFeedActions() {
 
 
 function bindModelPage() {
-    U.modelRefresh?.addEventListener("click", () => void loadModels());
     U.modelCreate?.addEventListener("click", startCreateModel);
     U.modelRolesCancel?.addEventListener("click", cancelModelRoleEditing);
     U.modelRolesSave?.addEventListener("click", () => void handleModelRoleEditorAction());

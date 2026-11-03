@@ -90,7 +90,6 @@ def test_org_graph_app_blocks_role_chain_save_until_required_scopes_are_filled()
           "model-search-input": new StubHTMLInputElement("model-search-input"),
           "model-list": new StubHTMLElement("model-list"),
           "model-role-editors": new StubHTMLElement("model-role-editors"),
-          "model-refresh-btn": new StubHTMLButtonElement("model-refresh-btn"),
           "model-create-btn": new StubHTMLButtonElement("model-create-btn"),
           "llm-bindings-list": new StubHTMLElement("llm-bindings-list"),
           "llm-editor-shell": new StubHTMLElement("llm-editor-shell"),

@@ -150,6 +150,30 @@
         return data.items || [];
     },
 
+    async getContentPolicy() {
+        const data = await this.get("/api/content-policy");
+        return {
+            enabled: !!data.enabled,
+            words: Array.isArray(data.words) ? data.words : [],
+            count: Number(data.count ?? 0) || 0,
+            updatedAt: String(data.updated_at || data.updatedAt || ""),
+        };
+    },
+
+    async saveContentPolicy(payload) {
+        const body = {
+            enabled: !!(payload && payload.enabled),
+            words: Array.isArray(payload && payload.words) ? payload.words : [],
+        };
+        const data = await this._request("PUT", "/api/content-policy", { body });
+        return {
+            enabled: !!data.enabled,
+            words: Array.isArray(data.words) ? data.words : [],
+            count: Number(data.count ?? 0) || 0,
+            updatedAt: String(data.updated_at || data.updatedAt || ""),
+        };
+    },
+
     async getLlmTemplate(providerId) {
         const data = await this.get(`/api/llm/templates/${encodeURIComponent(providerId)}`);
         return data.item || null;

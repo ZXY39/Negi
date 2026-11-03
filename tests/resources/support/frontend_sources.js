@@ -56,6 +56,7 @@ const FRONTEND_BUNDLES = Object.freeze({
     stickers: ["org_graph_stickers.js"],
     governance: ["org_graph_ceo_governance.js"],
     llm: ["org_graph_llm.js"],
+    content_policy: ["models/content-policy.js"],
     onboarding: ["org_graph_onboarding.js"],
     external: ["org_graph_external.js"],
 });

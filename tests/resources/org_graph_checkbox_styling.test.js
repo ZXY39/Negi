@@ -55,6 +55,7 @@ const LEDGER = [
     { token: "td-expand-all-input", tier: "ui" },
     { token: "ceo-risk-tool-input", tier: "ui" },
     { token: "id=\"confirm-check\"", tier: "ui" },
+    { token: "id=\"content-policy-enabled\"", tier: "ui" },
 ];
 
 function collectSites() {

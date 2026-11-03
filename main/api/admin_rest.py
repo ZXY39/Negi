@@ -28,6 +28,7 @@ from g3ku.resources.models import ResourceKind
 from g3ku.resources.retired_schemas import record_tool_schema
 from g3ku.runtime.core_tools import configured_core_tools, resolve_core_tool_targets
 from g3ku.runtime.session_trust import GATEWAY_SENDER_ID
+from g3ku.security import content_policy as content_policy_store
 from g3ku.shells.web import get_agent, is_no_ceo_model_configured_error, refresh_web_agent_runtime
 from g3ku.stickers import admin as sticker_admin
 from g3ku.stickers import catalog as sticker_catalog
@@ -1789,6 +1790,37 @@ async def get_model_load_balance_status():
         'group_drift_findings': list(payload.get('model_route_group_drift_findings') or []),
         'groups': list(payload.get('model_route_groups') or []),
     }
+
+
+def _content_policy_payload(policy: dict[str, Any]) -> dict[str, Any]:
+    words = [str(item) for item in list(policy.get('words') or [])]
+    return {
+        'ok': True,
+        'enabled': bool(policy.get('enabled')),
+        'words': words,
+        'count': len(words),
+        'updated_at': str(policy.get('updated_at') or ''),
+    }
+
+
+@router.get('/content-policy')
+async def get_content_policy():
+    return _content_policy_payload(content_policy_store.load_policy(force=True))
+
+
+@router.put('/content-policy')
+async def update_content_policy(payload: dict = Body(...)):
+    enabled = payload.get('enabled')
+    if not isinstance(enabled, bool):
+        raise HTTPException(status_code=400, detail='enabled must be a boolean')
+    words = payload.get('words')
+    if not isinstance(words, list) or any(not isinstance(item, str) for item in words):
+        raise HTTPException(status_code=400, detail='words must be a list of strings')
+    try:
+        policy = content_policy_store.save_policy(enabled, words)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _content_policy_payload(policy)
 
 
 @router.post('/models')

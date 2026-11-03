@@ -127,6 +127,7 @@ from g3ku.runtime.tool_watchdog import (
     run_tool_with_hard_timeout,
     run_tool_with_watchdog,
 )
+from g3ku.security.content_policy import apply_to_tool_messages
 from g3ku.utils.path_roots import pinned_read_roots
 from main.errors import (
     NodePausedError,
@@ -721,6 +722,9 @@ class ReActToolLoop:
                     request_seed_source = 'fallback_seed_empty'
                 else:
                     request_seed_source = self._fallback_source_from_state(seed_state_for_source)
+            # 内容审查词替换的定稿点：只改模型面 tool 结果，放在 token 预检之前，
+            # 压缩 helper 与实际发送读同一份正文。
+            request_messages = apply_to_tool_messages(request_messages)
             previous_actual_request_messages = self._prompt_message_records(request_messages)
             pending_request_delta_messages = []
             repair_overlay_text = None
