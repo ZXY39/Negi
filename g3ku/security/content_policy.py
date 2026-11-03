@@ -26,8 +26,8 @@ NOTICE_PREFIX = "[CONTENT_POLICY_NOTICE]"
 
 _NOTICE_TEMPLATE = (
     NOTICE_PREFIX
-    + " 本次工具结果出现了违规词，已替换 {hits} 处；"
-    "后续需要避免再次从同一来源（相同 URL/文件/查询）获取，否则会出错停止。"
+    + " 这条工具结果里有片段命中安全审查词表，已替换 {hits} 处；"
+    "不要再从同一来源（相同 URL/文件/查询）重新获取，取回来仍会被上游拒掉。"
 )
 
 # marker 与提示本身也在下一次请求的扫描范围内；若词表恰好包含其中的词，
@@ -335,7 +335,7 @@ def apply_to_tool_messages(
     *,
     notice_indices: Iterable[int] | None = None,
 ) -> list[Any]:
-    """替换 `role=tool` 消息里的词表命中；末段连续 tool 消息（当前 hop）才加提示。"""
+    """替换 `role=tool` 消息里的词表命中；最后一次 assistant 之后的 tool 消息（当前 hop）才加提示。"""
     if not isinstance(messages, list):
         return messages
     policy = load_policy()
