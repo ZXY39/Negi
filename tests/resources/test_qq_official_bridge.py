@@ -1506,13 +1506,21 @@ async def test_pump_caps_total_attempts_per_outbox_id_across_seqs(
             await task
 
 
-def _outbound_attachment(name: str, mime_type: str, token: str = "t1") -> dict:
-    return {
+def _outbound_attachment(
+    name: str, mime_type: str, token: str = "t1", *, inline_media: bool = True
+) -> dict:
+    """出站附件描述符。`inline_media` 记录正文用的引用形态（`![...]` 为真），
+    缺省按真实现里占多数的图片语法给。"""
+    descriptor = {
         "name": name,
         "mime_type": mime_type,
+        "kind": "image" if mime_type.startswith("image/") else "file",
         "size": 9,
         "url": f"/api/ceo/media/original?token={token}",
     }
+    if inline_media:
+        descriptor["inline_media"] = True
+    return descriptor
 
 
 def _absolute_media(token: str) -> str:
@@ -1948,7 +1956,7 @@ async def test_pump_delivers_audio_attachment_as_voice_media(
             {
                 "type": "reply.final",
                 "seq": 1,
-                "text": "给你：早间问候.mp3",
+                "text": "给你：",
                 "attachments": [_outbound_attachment("早间问候.mp3", "audio/mpeg", "v1")],
             }
         )
@@ -1959,6 +1967,8 @@ async def test_pump_delivers_audio_attachment_as_voice_media(
         body = json.loads(uploads[0].content)
         assert body["file_type"] == 3  # 平台口径的"语音"档
         assert base64.b64decode(body["file_data"]) == b"mp3-bytes"
+        # 语音条不显示文件名，这一档的请求体不带 `file_name`（形状与带名之前逐字一致）。
+        assert "file_name" not in body
         assert client.api.calls == [
             (
                 "post_group_message",
@@ -1974,13 +1984,53 @@ async def test_pump_delivers_audio_attachment_as_voice_media(
                 "post_group_message",
                 {
                     "group_openid": "g1",
-                    "markdown": {"content": "给你：早间问候.mp3"},
+                    "markdown": {"content": "给你："},
                     "msg_type": 2,
                     "msg_id": "mv1",
                     "msg_seq": 2,
                 },
             ),
         ]
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_pump_delivers_link_form_audio_as_a_plain_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`[文件名](路径)` 引用音频 = 用户要的是文件本体，落「任意文件」档（file_type=4）
+    并带上外显名；`![...]` 那一档才是语音条。判据是描述符的引用形态，不是扩展名。"""
+    records: list[httpx.Request] = []
+    files_url = "https://api.sgroup.qq.com/v2/users/u9/files"
+    media = _media_transport(
+        {_absolute_media("v2"): (200, b"mp3-bytes"), files_url: (200, _upload_reply())},
+        records,
+    )
+    task, client = await _start_bridge(monkeypatch, media)
+    try:
+        await client.on_c2c_message_create(_c2c_message("要文件", message_id="mv2"))
+        ext = FakeExternalApiClient.instances[-1]
+        await ext.events.put(
+            {
+                "type": "reply.final",
+                "seq": 1,
+                "text": "音频文件在这里：",
+                "attachments": [
+                    _outbound_attachment("晚安_20261104.mp3", "audio/mpeg", "v2", inline_media=False)
+                ],
+            }
+        )
+        await _wait_until(lambda: len(client.api.calls) >= 2)
+
+        uploads = _api_uploads(records)
+        assert [str(request.url) for request in uploads] == [files_url]
+        body = json.loads(uploads[0].content)
+        assert body["file_type"] == 4  # 文件档，不是语音档
+        assert base64.b64decode(body["file_data"]) == b"mp3-bytes"
+        assert body["file_name"] == "晚安_20261104.mp3"
     finally:
         task.cancel()
         with suppress(asyncio.CancelledError):

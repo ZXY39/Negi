@@ -216,7 +216,7 @@ def test_relay_logs_reply_skip_with_attributable_reading():
 
 
 def test_relay_message_end_extracts_local_file_attachments(tmp_path, monkeypatch):
-    """回复正文里的 markdown 本地文件链接被提取为结构化附件：正文留下标签，
+    """回复正文里的 markdown 本地文件链接被提取为结构化附件：引用整段从正文摘掉，
     事件携带签名 URL，桥据此发真实文件消息。
 
     渠道白名单只放行 workspace，所以这里把 workspace 一并指到 tmp_path。
@@ -244,7 +244,7 @@ def test_relay_message_end_extracts_local_file_attachments(tmp_path, monkeypatch
     assert len(events) == 1
     final = events[0]
     assert final["type"] == "reply.final"
-    assert final["text"] == "已完成：日报文件"
+    assert final["text"] == "已完成："
     assert str(doc) not in final["text"]
     assert len(final["attachments"]) == 1
     attachment = final["attachments"][0]

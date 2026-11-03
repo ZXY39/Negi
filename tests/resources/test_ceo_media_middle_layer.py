@@ -120,7 +120,9 @@ def test_original_endpoint_404_after_delete(monkeypatch, tmp_path, client):
     assert client.get("/api/ceo/media/original", params={"token": token}).status_code == 404
 
 
-def test_extract_attachments_replaces_local_links_with_labels(monkeypatch, tmp_path):
+def test_extract_attachments_removes_local_references_from_the_body(monkeypatch, tmp_path):
+    """被提取成附件的引用整段从正文消失：文件本体由附件送达，卡片上就带名字，
+    正文再留一行标签等于在气泡底下印一串文件名。"""
     monkeypatch.chdir(tmp_path)
     doc = tmp_path / "report.docx"
     doc.write_bytes(b"doc-bytes")
@@ -132,9 +134,12 @@ def test_extract_attachments_replaces_local_links_with_labels(monkeypatch, tmp_p
         content, allowed_roots=(tmp_path,)
     )
 
-    assert "日报" in text and "chart.png" in text
+    assert "日报" not in text
+    assert "chart.png" not in text and "report.docx" not in text
     assert f"({doc})" not in text and f"({chart})" not in text
+    # 非本地的引用照旧原样留着（它不成为附件，由签名改写兜底）。
     assert "[外部](https://example.com/a.png)" in text
+    assert text.startswith("已完成：") and text.endswith("另见 [外部](https://example.com/a.png)")
     by_name = {item["name"]: item for item in attachments}
     assert set(by_name) == {"report.docx", "chart.png"}
     assert by_name["report.docx"]["mime_type"].endswith("wordprocessingml.document")
@@ -144,6 +149,46 @@ def test_extract_attachments_replaces_local_links_with_labels(monkeypatch, tmp_p
     assert by_name["chart.png"]["kind"] == "image"
     for item in attachments:
         assert item["url"].startswith(ceo_media.VIEWER_ROUTE + "?token=")
+
+
+def test_extract_attachments_records_the_reference_form_on_the_descriptor(monkeypatch, tmp_path):
+    """`![...]` 与 `[...](path)` 是模型唯一写下「放成媒体气泡」还是「把文件给我」的地方，
+    提取时按形态打在描述符上：渠道桥据此分档，`kind` 只有 image/file 两值担不起这个区分。"""
+    monkeypatch.chdir(tmp_path)
+    voice = tmp_path / "晚安.mp3"
+    voice.write_bytes(b"ID3\x04fake-mp3")
+
+    inline_text, inline_atts = ceo_media.extract_local_media_attachments(
+        f"![晚安]({voice})", allowed_roots=(tmp_path,)
+    )
+    file_text, file_atts = ceo_media.extract_local_media_attachments(
+        f"[晚安]({voice})", allowed_roots=(tmp_path,)
+    )
+
+    assert inline_text == "" and file_text == ""
+    assert inline_atts[0]["inline_media"] is True
+    # 链接形态不带这个键（缺省即 False），同一份文件两次引用不会都成为附件。
+    assert "inline_media" not in file_atts[0]
+    assert file_atts[0]["name"] == "晚安.mp3"
+
+
+def test_extract_attachments_leaves_no_blank_line_where_the_reference_stood(monkeypatch, tmp_path):
+    """引用独占一行时摘掉不能留下空行；写在句中时左边那枚空格跟着一起吞。"""
+    monkeypatch.chdir(tmp_path)
+    shot = tmp_path / "shot.png"
+    shot.write_bytes(b"\x89PNG fake")
+
+    own_line, atts = ceo_media.extract_local_media_attachments(
+        f"好了，给你：\n\n![结果]({shot})", allowed_roots=(tmp_path,)
+    )
+    mid_line, _ = ceo_media.extract_local_media_attachments(
+        f"看图 ![结果]({shot}) 清楚吗", allowed_roots=(tmp_path,)
+    )
+
+    assert own_line == "好了，给你："
+    # 吞掉的是引用左边那枚空格，右边那枚留下，句中读起来仍是一个空格。
+    assert mid_line == "看图 清楚吗"
+    assert len(atts) == 1
 
 
 def test_extract_attachments_skips_missing_and_dedupes(monkeypatch, tmp_path):
@@ -216,8 +261,9 @@ def test_extract_attachments_accepts_file_url_form_of_an_audio_target(monkeypatc
     assert len(attachments) == 1
     assert attachments[0]["name"] == "voice note.mp3"
     assert attachments[0]["mime_type"].startswith("audio/")
-    # 标记本身从正文里摘掉，由附件承担投递（正文只留标签）。
-    assert "file:///" not in text and "早间问候" in text
+    # 标记整段从正文摘掉，投递由附件承担（正文一个字都不留）。
+    assert text == ""
+    assert "file:///" not in text and "早间问候" not in text
 
 
 def test_extract_attachments_still_rejects_file_url_outside_allowed_roots(monkeypatch, tmp_path):

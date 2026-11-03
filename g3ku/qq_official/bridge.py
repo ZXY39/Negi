@@ -864,15 +864,23 @@ async def run_qq_official_bridge(
         origin = f"{parsed.scheme}://{parsed.netloc}"
         return f"{origin}{raw if raw.startswith('/') else '/' + raw}"
 
-    def _media_file_type(mime_type: str) -> int:
+    def _media_file_type(mime_type: str, *, inline_media: bool) -> int:
+        """平台档位。图片一律内联；音频与视频按**引用形态**分气泡与文件。
+
+        描述符的 ``kind`` 只有 image/file 两值，分不开「放成语音条」与「把文件给我」；
+        唯一记录了这个意图的位置是模型写的 markdown 语法形态（``![...]`` 与
+        ``[...](path)``），提取时原样带在 ``inline_media`` 上。
+        """
         mime = str(mime_type or "").lower()
         if mime.startswith("image/"):
             return 1  # 图片（平台支持 png/jpg）
+        if not inline_media:
+            return 4  # 任意文件（docx/pdf/zip，以及点名要文件形态的音视频）
         if mime == "video/mp4":
             return 2  # 视频
         if mime.startswith("audio/"):
             return 3  # 语音
-        return 4  # 任意文件（docx/pdf/zip…）
+        return 4
 
     def _media_files_route(kind: str, target: dict[str, str]) -> Any:
         from botpy.http import Route  # 惰性：botpy 只在桥运行时可用
@@ -1003,7 +1011,7 @@ async def run_qq_official_bridge(
             return False
         try:
             if kind in ("group", "c2c"):
-                file_type = _media_file_type(mime)
+                file_type = _media_file_type(mime, inline_media=bool(attachment.get("inline_media")))
                 data = await _download_attachment_bytes(
                     media_client, url, max_bytes=_MAX_OUTBOUND_ATTACHMENT_BYTES
                 )

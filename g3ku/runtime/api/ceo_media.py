@@ -71,6 +71,12 @@ _KNOWN_DOCUMENT_MIME = {
 
 _MD_IMAGE_RE = re.compile(r'!\[([^\]]*)\]\(([^)\s]+(?:\s+"[^"]*")?)\)')
 _MD_LINK_RE = re.compile(r'\[([^\]]+)\]\(([^)\s]+(?:\s+"[^"]*")?)\)')
+# 被提取成附件的引用要从正文里整段消失，左边那一枚水平空白跟着一起吞：模型常把引用
+# 写在句中（"看图 ![](x.png)"），只摘标记会留下一枚孤空格。
+_MD_IMAGE_REF_RESIDUE_RE = re.compile(rf"[ \t]?{_MD_IMAGE_RE.pattern}")
+_MD_LINK_REF_RESIDUE_RE = re.compile(rf"[ \t]?{_MD_LINK_RE.pattern}")
+_TRAILING_SPACES_RE = re.compile(r"[ \t]+\n")
+_EXCESS_BLANK_LINES_RE = re.compile(r"\n{3,}")
 _TITLE_RE = re.compile(r'\s+"([^"]*)"$')
 _PLACEHOLDER_RE = re.compile(r"\x00(\d+)\x00")
 
@@ -183,13 +189,20 @@ def original_view_url(path: Path) -> str:
     return f"{VIEWER_ROUTE}?token={mint_original_token(path)}"
 
 
-def build_attachment_descriptor(source: Path, *, after_text: bool = False) -> dict[str, Any]:
+def build_attachment_descriptor(
+    source: Path, *, after_text: bool = False, inline_media: bool = False
+) -> dict[str, Any]:
     """Channel attachment descriptor for one local file.
 
     ``kind`` is what the OneBot bridge keys on to send ``[CQ:image]`` instead of
     a file upload. ``after_text`` keeps the bridge from sending the attachment
     before the reply body at all (stickers read as punctuation, not as a
-    lead-in).
+    lead-in). ``inline_media`` records the reference the user-facing text used
+    to carry this file: ``![...]`` (an inline media embed) or ``[...](path)`` (a
+    link). The QQ official lane needs it because audio and video have no
+    container hint of their own to tell "play it as a voice bubble" apart from
+    "hand me the file", and the syntax form is the only place that intent is
+    written down.
     """
     try:
         size = source.stat().st_size
@@ -203,6 +216,8 @@ def build_attachment_descriptor(source: Path, *, after_text: bool = False) -> di
         "size": int(size),
         "url": original_view_url(source),
     }
+    if inline_media:
+        descriptor["inline_media"] = True
     if after_text:
         descriptor["after_text"] = True
     return descriptor
@@ -388,13 +403,21 @@ def extract_local_media_attachments(
     """Turn markdown references to existing local files into channel attachments.
 
     Channel-facing variant of the signed rewrite: every markdown image/link
-    whose target resolves to an existing local file is REPLACED by its label
-    (fallback: the file name) and collected as an attachment descriptor with a
-    signed viewer URL (root-relative; bridges join it with their /api base
-    URL). Bare paths are never matched — only explicit markdown references are
-    sent as file messages. Tokens beyond ``MAX_CHANNEL_ATTACHMENTS`` (and
-    duplicate paths) are left untouched so the caller's signed-URL rewrite can
-    still turn them into clickable fallback links.
+    whose target resolves to an existing local file is REMOVED from the body and
+    collected as an attachment descriptor with a signed viewer URL
+    (root-relative; bridges join it with their /api base URL). Nothing of it
+    stays in the text: the file itself arrives as a media message and its card
+    already carries the name, so a leftover label reads as a stray filename
+    printed under a voice bubble. Bare paths are never matched — only explicit
+    markdown references are sent as file messages. Tokens beyond
+    ``MAX_CHANNEL_ATTACHMENTS`` (and duplicate paths) are left untouched so the
+    caller's signed-URL rewrite can still turn them into clickable fallback
+    links, and an attachment a bridge fails to deliver comes back as the
+    ``📎 <name>: <link>`` line the bridge appends to the body.
+
+    The syntax form is kept in the descriptor (``inline_media``) because it is
+    the only record of what the reference asked for: ``![...]`` embeds the file
+    as media, ``[...](path)`` hands it over as a file.
 
     ``allowed_roots`` is required on purpose (pass ``channel_attachment_roots()``
     for channel-bound text): it is the only thing standing between a
@@ -406,32 +429,35 @@ def extract_local_media_attachments(
     attachments: list[dict[str, Any]] = []
     seen: set[str] = set()
 
-    def stash(source: Path, label: str) -> str | None:
+    def stash(source: Path, *, inline_media: bool) -> bool:
         key = str(source)
         if key in seen or len(attachments) >= MAX_CHANNEL_ATTACHMENTS:
-            return None
+            return False
         seen.add(key)
-        attachments.append(build_attachment_descriptor(source))
-        return label.strip() or source.name
+        attachments.append(build_attachment_descriptor(source, inline_media=inline_media))
+        return True
 
     def replace_image(match: re.Match[str]) -> str:
-        alt, target = match.group(1), match.group(2)
-        source = _resolve_local_source(_TITLE_RE.sub("", target).strip(), allowed_roots)
+        source = _resolve_local_source(
+            _TITLE_RE.sub("", match.group(2)).strip(), allowed_roots
+        )
         if source is None or not source.is_file():
             return match.group(0)
-        replacement = stash(source, alt)
-        return match.group(0) if replacement is None else replacement
+        return "" if stash(source, inline_media=True) else match.group(0)
 
     def replace_link(match: re.Match[str]) -> str:
-        label, target = match.group(1), match.group(2)
-        source = _resolve_local_source(_TITLE_RE.sub("", target).strip(), allowed_roots)
+        source = _resolve_local_source(
+            _TITLE_RE.sub("", match.group(2)).strip(), allowed_roots
+        )
         if source is None or not source.is_file():
             return match.group(0)
-        replacement = stash(source, label)
-        return match.group(0) if replacement is None else replacement
+        return "" if stash(source, inline_media=False) else match.group(0)
 
-    text = _MD_IMAGE_RE.sub(replace_image, content)
-    text = _MD_LINK_RE.sub(replace_link, text)
+    text = _MD_IMAGE_REF_RESIDUE_RE.sub(replace_image, content)
+    text = _MD_LINK_REF_RESIDUE_RE.sub(replace_link, text)
+    if attachments:
+        text = _TRAILING_SPACES_RE.sub("\n", text)
+        text = _EXCESS_BLANK_LINES_RE.sub("\n\n", text).strip()
     return text, attachments
 
 

@@ -82,7 +82,7 @@ async def test_heartbeat_ext_reply_ignores_empty_text(env):
 @pytest.mark.asyncio
 async def test_outbound_reply_extracts_file_attachments_into_event_and_outbox(env, tmp_path, monkeypatch):
     """主动推送正文里的 markdown 本地文件链接在统一出口（drain）被提取：
-    事件携带结构化附件，正文留标签，账本持久化附件供重启重放。
+    事件携带结构化附件，引用整段从正文摘掉，账本持久化附件供重启重放。
 
     渠道白名单只放行 workspace，所以这里把 workspace 一并指到 tmp_path。
     """
@@ -100,11 +100,13 @@ async def test_outbound_reply_extracts_file_attachments_into_event_and_outbox(en
         await _wait_until(lambda: hub.last_seq >= 1)
         event = hub.replay(0)[0]
         assert event["type"] == "outbound.created"
-        assert event["text"] == "日报已生成：日报"
+        assert event["text"] == "日报已生成："
         assert str(doc) not in event["text"]
         assert len(event["attachments"]) == 1
         attachment = event["attachments"][0]
         assert attachment["name"] == "日报.docx"
+        # 链接形态的引用不带 `inline_media`（缺省即「按文件递」）。
+        assert "inline_media" not in attachment
         assert attachment["url"].startswith("/api/ceo/media/original?token=")
         pending = external_outbox.load_pending_outbound()
         assert len(pending) == 1
