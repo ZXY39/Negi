@@ -39,11 +39,12 @@ def _isolate_stores():
     notice.clear_skill_roster_notice_stores()
 
 
-def _item(skill_id: str) -> dict[str, str]:
+def _item(skill_id: str, *, available: bool = True) -> dict[str, object]:
     return {
         "skill_id": skill_id,
         "display_name": skill_id.replace("-", " ").title(),
         "description": f"{skill_id} 的描述。",
+        "available": available,
     }
 
 
@@ -553,6 +554,83 @@ def test_notice_copy_is_english_and_scope_bounded() -> None:
     )
     assert "kept across compaction" in carried
     assert "load_skill_context" not in carried
+
+
+def test_removed_skill_is_announced_once_from_the_pinned_head() -> None:
+    """头部钉住 alpha/beta，实时只剩 alpha ⇒ 一次删除通知；第二跳不再投。"""
+    message, delivered = notice.deliver_for_scope(
+        SCOPE,
+        [_item("alpha")],
+        now="2026-11-03T00:00:00+08:00",
+        covered_skill_ids=["alpha", "beta"],
+    )
+    assert delivered == []
+    text = str((message or {}).get("content") or "")
+    assert "Skills removed from this session:" in text
+    assert "`beta`" in text
+    assert "`alpha`" not in text
+    assert "load_skill_context" in text
+
+    second, _ = notice.deliver_for_scope(
+        SCOPE,
+        [_item("alpha")],
+        now="2026-11-03T00:00:01+08:00",
+        covered_skill_ids=["alpha", "beta"],
+    )
+    assert second is None
+
+
+def test_repair_required_skill_still_visible_is_not_a_removal() -> None:
+    """还在可见集里的 repair-required 不算删除；它的出口是 repair_required 节。"""
+    message, _ = notice.deliver_for_scope(
+        SCOPE,
+        [_item("alpha"), _item("beta", available=False)],
+        now="2026-11-03T00:00:00+08:00",
+        covered_skill_ids=["alpha", "beta"],
+    )
+    text = str((message or {}).get("content") or "")
+    assert "Skills removed from this session:" not in text
+    assert "`beta`" not in text
+
+
+def test_removed_skill_readded_is_announced_as_newly_readable() -> None:
+    """删除后重新授权：旧 additions 台账已被撤掉，回归按新增再投一次。"""
+    first, _ = notice.deliver_for_scope(
+        SCOPE,
+        [_item("alpha")],
+        now="2026-11-03T00:00:00+08:00",
+        covered_skill_ids=["alpha", "beta"],
+    )
+    assert "`beta`" in str((first or {}).get("content") or "")
+
+    second, delivered = notice.deliver_for_scope(
+        SCOPE,
+        [_item("alpha"), _item("beta")],
+        now="2026-11-03T00:00:01+08:00",
+        covered_skill_ids=["alpha"],
+    )
+    text = str((second or {}).get("content") or "")
+    assert "Skills newly readable in this session:" in text
+    assert "`beta`" in text
+    assert [item["skill_id"] for item in delivered] == ["beta"]
+
+
+def test_compression_reset_does_not_reannounce_removals() -> None:
+    """压缩清游标；下一跳以新头部/实时集播种，不把旧删除再报一遍。"""
+    notice.deliver_for_scope(
+        SCOPE,
+        [_item("alpha")],
+        now="2026-11-03T00:00:00+08:00",
+        covered_skill_ids=["alpha", "beta"],
+    )
+    notice.reset_contract_sections_for_compaction(SCOPE, now="2026-11-03T00:00:01+08:00")
+    message, _ = notice.deliver_for_scope(
+        SCOPE,
+        [_item("alpha")],
+        now="2026-11-03T00:00:02+08:00",
+        covered_skill_ids=["alpha"],
+    )
+    assert message is None
 
 
 def test_node_compression_strips_old_notice_and_resets_ledger() -> None:

@@ -1710,6 +1710,49 @@ async def test_message_builder_uses_exposure_revision_when_capability_snapshot_e
     assert "## Visible Tool Context Ids" not in stable_system
 
 
+@pytest.mark.asyncio
+async def test_message_builder_stable_head_does_not_follow_live_skill_changes() -> None:
+    prompt_builder = _SplitPromptBuilder()
+    builder = CeoMessageBuilder(loop=_loop(_MemoryManager(response="")), prompt_builder=prompt_builder)
+    session = _session()
+    session.state.session_key = "web:stable-head"
+
+    def _exposure(skill_ids: list[str]) -> dict:
+        skills = [_skill(skill_id, f"{skill_id} summary.") for skill_id in skill_ids]
+        snapshot = build_capability_snapshot(
+            visible_skills=skills,
+            visible_tools=[_tool_resource_record("agent_browser", "Browser automation.")],
+            visible_tool_names=["agent_browser"],
+        )
+        return {
+            "skills": skills,
+            "tools": [_tool_resource_record("agent_browser", "Browser automation.")],
+            "tool_names": ["agent_browser"],
+            "capability_snapshot": snapshot,
+        }
+
+    first = await builder.build_for_ceo(
+        session=session,
+        query_text="first",
+        exposure=_exposure(["alpha", "beta"]),
+        persisted_session=session,
+    )
+    # 可见集少了 beta，但 epoch/档位没动：system 首条必须逐字节复用。
+    second = await builder.build_for_ceo(
+        session=session,
+        query_text="second",
+        exposure=_exposure(["alpha"]),
+        persisted_session=session,
+    )
+
+    assert first.stable_messages[0] == second.stable_messages[0]
+    assert first.cache_family_revision == second.cache_family_revision
+    first_system = str(first.stable_messages[0]["content"] or "")
+    second_system = str(second.stable_messages[0]["content"] or "")
+    assert "`beta`" in first_system
+    assert "`beta`" in second_system
+
+
 def test_context_assembly_result_dynamic_appendix_model_messages_stays_combined_compatibility_view() -> None:
     from g3ku.runtime.context.types import ContextAssemblyResult
 

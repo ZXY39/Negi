@@ -405,7 +405,7 @@ def test_pinned_sticker_lines_stay_frozen_between_repaints() -> None:
     assert "- `panda` | 熊猫头 | smug(得意)" in repinned
 
 
-def test_pinned_contract_revision_key_tracks_mode_and_tool_policy() -> None:
+def test_pinned_contract_revision_key_tracks_mode_only_and_ignores_tool_policy() -> None:
     base = dict(
         exec_runtime_policy=None,
         session_temp_dir="C:/temp/ceo",
@@ -420,7 +420,8 @@ def test_pinned_contract_revision_key_tracks_mode_and_tool_policy() -> None:
         **base, sandbox_tier="limited", tool_policy_signature="tools-b"
     )
     assert plain != limited
-    assert limited_a != limited_b
+    # 同一档位内改受限工具白名单不重印头部：由 denied_tools/candidate_tools 通知承担。
+    assert limited_a == limited_b
     assert limited_a == pinned_contract_revision_key(
         **base, sandbox_tier="limited", tool_policy_signature="tools-a"
     )
@@ -441,18 +442,70 @@ def test_pinned_contract_renders_mode_and_session_workspace() -> None:
     assert values["session_workspace_dir"].endswith("web_ceo-1-abcd")
 
 
+def test_legacy_revision_key_adopts_existing_head_without_repinning() -> None:
+    """上线迁移：旧键（含 tool_policy_signature）存下的原文收养到新键，不重印头部。"""
+    from g3ku.runtime.frontdoor import tool_contract as tc
+
+    session = SimpleNamespace()
+    legacy_revision = tc._pinned_contract_legacy_revision_key(
+        exec_runtime_policy=None,
+        session_temp_dir="C:/t",
+        skill_roster_epoch=0,
+        sandbox_tier="",
+        tool_policy_signature="host_full\n",
+    )
+    setattr(session, tc.FRONTDOOR_PINNED_CONTRACT_TEXT_ATTR, "## OLD HEAD")
+    setattr(session, tc.FRONTDOOR_PINNED_CONTRACT_REVISION_ATTR, legacy_revision)
+    setattr(session, tc.FRONTDOOR_PINNED_CONTRACT_SKILLS_ATTR, ["alpha"])
+
+    adopted = tc.frontdoor_pinned_contract_text(
+        session,
+        skill_items=_items("beta"),
+        exec_runtime_policy=None,
+        session_temp_dir="C:/t",
+        skill_roster_epoch=0,
+        session_key="web:legacy",
+        sandbox_tier="",
+        tool_policy_signature="host_full\n",
+    )
+    assert adopted == "## OLD HEAD"
+    new_revision = tc.pinned_contract_revision_key(
+        exec_runtime_policy=None,
+        session_temp_dir="C:/t",
+        skill_roster_epoch=0,
+        sandbox_tier="",
+        tool_policy_signature="host_full\n",
+    )
+    assert tc.pinned_contract_revision_key(
+        exec_runtime_policy=None,
+        session_temp_dir="C:/t",
+        skill_roster_epoch=0,
+        sandbox_tier="",
+        tool_policy_signature="other\n",
+    ) == new_revision
+    stored_text, stored_skill_ids = tc._read_pinned_contract_entry(
+        session, session_key="web:legacy", revision=new_revision
+    )
+    assert stored_text == "## OLD HEAD"
+    assert stored_skill_ids == ["alpha"]
+
+
 def test_mode_change_forces_tool_bundle_recommit(monkeypatch) -> None:
     from g3ku.runtime.frontdoor import _ceo_runtime_ops as ops
 
     session = SimpleNamespace()
     state = {"session_key": "ext:qoder:group"}
-    policy = SimpleNamespace(tool_policy_signature="limited\na,b")
+    policy = SimpleNamespace(tier="limited", tool_policy_signature="limited\na,b")
     monkeypatch.setattr(ops, "session_policy", lambda _key: policy)
     boundary = ops.CeoFrontDoorRuntimeOps._frontdoor_bundle_recommit_boundary
 
     # 首次只记基线，不凭空重印。
     assert boundary(object(), session=session, state=state) is False
-    # 切档/改工具集合当天重提交整表，并递增 skill roster epoch。
+    # 同一档位内改受限工具白名单不重提交整表：召回由 denied_tools/candidate_tools 通知。
+    policy.tool_policy_signature = "limited\na,b,c"
+    assert boundary(object(), session=session, state=state) is False
+    # 切档当天重提交整表，并递增 skill roster epoch。
+    policy.tier = "host_full"
     policy.tool_policy_signature = "host_full\n"
     assert boundary(object(), session=session, state=state) is True
     assert boundary(object(), session=session, state=state) is False
@@ -460,7 +513,9 @@ def test_mode_change_forces_tool_bundle_recommit(monkeypatch) -> None:
 
     # 装配路可能只把 session_key 留在会话状态里：仍要认出切档。
     session2 = SimpleNamespace(state=SimpleNamespace(session_key="ext:qoder:group"))
+    policy.tier = "limited"
     policy.tool_policy_signature = "limited\na,b"
     assert boundary(object(), session=session2, state={}) is False
+    policy.tier = "host_full"
     policy.tool_policy_signature = "host_full\n"
     assert boundary(object(), session=session2, state={}) is True

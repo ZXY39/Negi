@@ -1,14 +1,17 @@
-"""会话/节点存活期内新增可读 skill 的持久提示。
+"""会话/节点存活期内 skill 可见集变化的持久提示。
 
-形状与维护者 2026-10-19 定的口径一致：提示**落进上下文、只注入一次**，不进每轮尾块；
-压缩那一跳若该技能仍可读就把同一份名单带到压缩产物之后，不可读的在那一跳退场。
+形状：新增可读与删除/收回各一节，提示**落进上下文、只注入一次**，不进每轮尾块。
+台账按作用域分桶；新增看 `records`，删除/收回看 `skill_visibility_cursor`。压缩跳
+清空游标，下一跳以新头部/实时集重新播种；`carry_records_for_compression` 保留为
+兼容搬运原语，当前压缩收口不走它。
 
 三条判据口径：
 
 - 台账是唯一权威。"是否已经说过"读台账列，不扫渲染文本。
 - 投递与检测同点、且**只有一个读者**（真正落请求体的那处装配点）。旧机制的失效原因
   就是一条回合内四个装配点共用一个消耗式读，第一个读者领走差集，上线那处永远拿空。
-- 退场只发生在压缩跳——那一跳整份正文已被重写、可复用前缀反正已断，带一行不额外付。
+- 压缩跳清空游标与合同/记忆游标，下一跳由单生产者以新头部/实时集重新播种；
+  那一跳整份正文已被重写、可复用前缀反正已断，不额外付。
 
 两车道共用本模块的归一与渲染，字节同形（同 `render_candidate_tool_line` 的做法）。
 """
@@ -31,6 +34,13 @@ SKILL_ROSTER_NOTICE_ROLE = 'user'
 # （名字 + 一句描述 + 取正文的入口），并限定作用域在本会话，不写运行时承诺。
 SKILL_ROSTER_NOTICE_HEADING = 'Skills newly readable in this session:'
 SKILL_ROSTER_NOTICE_LOAD_HINT = 'Use `load_skill_context(skill_id="...")` to read a skill body.'
+# 删除/收回与新增共用同一条通知；这一节只说"本会话不再可读"，原因交给
+# `load_skill_context` 的三态回执。钉住名单可能还留着旧名，末句把这层说清。
+SKILL_REMOVAL_HEADING = 'Skills removed from this session:'
+SKILL_REMOVAL_HINT = (
+    'The pinned skill list may still name them until the next compaction; '
+    '`load_skill_context` reports why they are unavailable.'
+)
 # 压缩跳带过去的那一段：抬头写明它没被压缩移出，模型不必再猜名单是否还有效。
 SKILL_ROSTER_CARRIED_HEADING = '### Skills newly readable in this session (still readable; kept across compaction)'
 # 长期记忆增量与 skill 名单共用一条通知消息；两节之间用空行分隔。
@@ -120,11 +130,18 @@ def deliver_for_scope(
     是头部快照里已经覆盖的那几组（初值用它，避免把头部已有的值再宣布一遍）。两组只在值
     变化时进通知，台账按摘要去重。
     """
+    readable_skills = readable_skill_items(list(live_skills or []))
     context, _fresh = record_live_skills(
         notice_context_for(scope_key),
-        live_skills,
+        readable_skills,
         now=now,
         covered_skill_ids=covered_skill_ids,
+    )
+    context, removed_skills = record_skill_visibility_changes(
+        context,
+        list(live_skills or []),
+        covered_skill_ids=covered_skill_ids,
+        now=now,
     )
     pending = pending_notice_records(context)
     cursor = dict(context.get('memory_cursor') or {})
@@ -253,11 +270,12 @@ def deliver_for_scope(
         now=now,
         covered_sections=covered_contract_sections,
     )
-    if not pending and not memory_text and not group_memory_text and not persona_text and not mode_text and not changed_contract and not operator_actions:
+    if not pending and not removed_skills and not memory_text and not group_memory_text and not persona_text and not mode_text and not changed_contract and not operator_actions:
         set_notice_context(scope_key, context)
         return None, []
     message = build_notice_message(
         pending,
+        removed_skills=removed_skills,
         memory_text=memory_text,
         group_memory_text=group_memory_text,
         persona_text=persona_text,
@@ -379,6 +397,16 @@ def normalize_contract_sections(payload: Any) -> dict[str, dict[str, str]]:
     return normalized
 
 
+def normalize_skill_visibility_cursor(payload: Any) -> dict[str, list[str]]:
+    source = payload if isinstance(payload, dict) else {}
+    return {
+        'known_live_skill_ids': _normalized_skill_ids(source.get('known_live_skill_ids')),
+        'known_readable_skill_ids': _normalized_skill_ids(
+            source.get('known_readable_skill_ids')
+        ),
+    }
+
+
 def normalize_skill_roster_notice_context(payload: Any) -> dict[str, Any]:
     """台账归一：按 skill_id 去重（后写的覆盖先写的），并丢掉退场条目以外的畸形行。"""
     source = payload if isinstance(payload, dict) else {}
@@ -440,6 +468,9 @@ def normalize_skill_roster_notice_context(payload: Any) -> dict[str, Any]:
             'id': _cursor_value('id', operator_action_source),
             'initialized': bool(operator_action_source.get('initialized')),
         },
+        'skill_visibility_cursor': normalize_skill_visibility_cursor(
+            source.get('skill_visibility_cursor')
+        ),
         'contract_sections': normalize_contract_sections(source.get('contract_sections')),
     }
 
@@ -456,6 +487,9 @@ def context_has_state(payload: Any) -> bool:
         or normalized.get('carried_stages')
         or normalized.get('contract_sections')
     ):
+        return True
+    visibility = dict(normalized.get('skill_visibility_cursor') or {})
+    if visibility.get('known_live_skill_ids') or visibility.get('known_readable_skill_ids'):
         return True
     return any(
         bool(normalized.get(key, {}).get('initialized'))
@@ -532,6 +566,66 @@ def record_live_skills(
         )
     normalized['records'] = [*kept, *fresh]
     return normalized, fresh
+
+
+def _normalized_skill_ids(values: Any) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in list(values or []):
+        text = str(item or '').strip()
+        if text and text not in seen:
+            seen.add(text)
+            ordered.append(text)
+    return ordered
+
+
+def record_skill_visibility_changes(
+    context: Any,
+    live_skills: list[Any],
+    *,
+    covered_skill_ids: list[Any] | None = None,
+    now: str = '',
+) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    """记录可见集游标，返回"曾经可读、现在整条不见"的 skill。
+
+    只有真正离开可见集的才算删除；仍在可见集里的 repair-required（如 tmux）由
+    `repair_required` 节负责，不重复报。首次以头部钉住名单为初值，所以上线首跳能把
+    钉住时点之后消失的名字补报一次；之后每次装配更新游标，同一批只报一次。
+    """
+    normalized = normalize_skill_roster_notice_context(context)
+    live_items = list(live_skills or [])
+    live_all = _normalized_skill_ids(
+        _record_value(item, 'skill_id') for item in live_items
+    )
+    live_all_set = set(live_all)
+    readable_all = _normalized_skill_ids(
+        _record_value(item, 'skill_id') for item in readable_skill_items(live_items)
+    )
+    cursor = dict(normalized.get('skill_visibility_cursor') or {})
+    cursor_live = _normalized_skill_ids(cursor.get('known_live_skill_ids'))
+    cursor_readable = _normalized_skill_ids(cursor.get('known_readable_skill_ids'))
+    if not cursor_live and not cursor_readable:
+        previous_readable = _normalized_skill_ids(covered_skill_ids) or list(readable_all)
+    else:
+        previous_readable = cursor_readable
+    removed = sorted(
+        {skill_id for skill_id in previous_readable if skill_id not in live_all_set}
+    )
+    if removed:
+        removed_set = set(removed)
+        # 重新授权时按"新增可读"再宣布一次：旧 additions 台账不能把这个名字永久记成
+        # 已读过，否则它从删除通知里消失后模型再也看不到回归提示。
+        normalized['records'] = [
+            record
+            for record in list(normalized.get('records') or [])
+            if str(record.get('skill_id') or '').strip() not in removed_set
+        ]
+    normalized['skill_visibility_cursor'] = {
+        'known_live_skill_ids': live_all,
+        'known_readable_skill_ids': readable_all,
+    }
+    _ = now
+    return normalized, [{'skill_id': skill_id} for skill_id in removed]
 
 
 def pending_notice_records(context: Any) -> list[dict[str, str]]:
@@ -689,6 +783,12 @@ def reset_contract_sections_for_compaction(scope_key: str, *, now: str = '') -> 
     context['contract_sections'] = {}
     context['memory_cursor'] = {'rev': 0, 'base_rev': 0, 'initialized': False}
     context['persona_cursor'] = {'digest': '', 'initialized': False}
+    # 头部已按当刻名单重印；可见集游标跟着归零，下一跳以新头部/实时集重新播种，
+    # 不把压缩前那批删除再报一遍。
+    context['skill_visibility_cursor'] = {
+        'known_live_skill_ids': [],
+        'known_readable_skill_ids': [],
+    }
     _ = now
     set_notice_context(scope_key, context)
     return context
@@ -734,6 +834,24 @@ def render_notice_text(records: list[Any]) -> str:
     return '\n'.join([SKILL_ROSTER_NOTICE_MARKER, *lines]).strip()
 
 
+def render_removal_lines(records: list[Any] | None) -> list[str]:
+    """删除/收回一节：只列 id，原因交给 `load_skill_context` 三态回执。"""
+    skill_ids = sorted(
+        {
+            str(_record_value(item, 'skill_id') or '').strip()
+            for item in list(records or [])
+            if str(_record_value(item, 'skill_id') or '').strip()
+        }
+    )
+    if not skill_ids:
+        return []
+    return [
+        SKILL_REMOVAL_HEADING,
+        *[f'- `{skill_id}`' for skill_id in skill_ids],
+        SKILL_REMOVAL_HINT,
+    ]
+
+
 def render_carried_text(records: list[Any]) -> str:
     return '\n'.join(
         [
@@ -759,6 +877,7 @@ def render_operator_action_lines(actions: list[Any] | None) -> list[str]:
 def build_notice_message(
     records: list[Any],
     *,
+    removed_skills: list[Any] | None = None,
     memory_text: str = '',
     group_memory_text: str = '',
     persona_text: str = '',
@@ -768,9 +887,9 @@ def build_notice_message(
 ) -> dict[str, Any] | None:
     """一次性投递那条消息：role=user，落在本轮历史末尾。
 
-    各节共用一条消息：控制台动作在前（先交代是谁改的），skill 名单其次，记忆增量居中，
-    群聊专属记忆紧随其后，人设更新在其后，运行时合同变化在最后（最近处，便于模型把
-    "以最新通知为准"落在下一次判断上）；空节省略。
+    各节共用一条消息：控制台动作在前（先交代是谁改的），skill 名单其次（新增在前、
+    删除/收回紧随），记忆增量居中，群聊专属记忆紧随其后，人设更新在其后，运行时合同
+    变化在最后（最近处，便于模型把"以最新通知为准"落在下一次判断上）；空节省略。
     """
     sections: list[str] = []
     operator_lines = render_operator_action_lines(operator_actions)
@@ -780,6 +899,9 @@ def build_notice_message(
     if len(skill_lines) > 1:
         # 标记由本函数最后统一补；这里只放正文，避免通知中段出现第二个标记。
         sections.append('\n'.join([*skill_lines, SKILL_ROSTER_NOTICE_LOAD_HINT]))
+    removal_lines = render_removal_lines(removed_skills)
+    if removal_lines:
+        sections.append('\n'.join(removal_lines))
     memory_section = str(memory_text or '').strip()
     if memory_section:
         sections.append('\n'.join([MEMORY_NOTICE_HEADING, memory_section]))
@@ -801,7 +923,11 @@ def build_notice_message(
     # 标记只保留一份：skill 名单单独出现时保持旧字节（标记后只隔一个换行），
     # 其它节沿用"标记 + 空行"的形状。
     if not body.startswith(SKILL_ROSTER_NOTICE_MARKER):
-        separator = '\n' if body.startswith(SKILL_ROSTER_NOTICE_HEADING) else '\n\n'
+        separator = (
+            '\n'
+            if body.startswith((SKILL_ROSTER_NOTICE_HEADING, SKILL_REMOVAL_HEADING))
+            else '\n\n'
+        )
         body = f'{SKILL_ROSTER_NOTICE_MARKER}{separator}{body}'
     return {'role': SKILL_ROSTER_NOTICE_ROLE, 'content': body}
 
@@ -880,6 +1006,10 @@ def drop_records_after(context: Any, *, cutoff_iso: str) -> dict[str, Any]:
             'records': [],
             'carried_stages': [],
             'contract_sections': {},
+            'skill_visibility_cursor': {
+                'known_live_skill_ids': [],
+                'known_readable_skill_ids': [],
+            },
             'operator_action_cursor': normalized['operator_action_cursor'],
         }
     kept = [
@@ -897,6 +1027,12 @@ def drop_records_after(context: Any, *, cutoff_iso: str) -> dict[str, Any]:
         'records': kept,
         'carried_stages': normalized['carried_stages'] if kept else [],
         'contract_sections': kept_contract,
+        # 截断后头部会按当刻全集重钉；游标归零让下一跳从新头部/实时集播种，
+        # 不把截断点之前那批消失名字重报一遍。
+        'skill_visibility_cursor': {
+            'known_live_skill_ids': [],
+            'known_readable_skill_ids': [],
+        },
         # 截断只撤历史帧；操作游标保留，避免把截断后、下一跳前发生的动作静默跳过。
         'operator_action_cursor': normalized['operator_action_cursor'],
     }
@@ -909,6 +1045,8 @@ __all__ = [
     'RUNTIME_CONTRACT_UPDATE_HEADING',
     'RUNTIME_NOTICE_MARKER',
     'SKILL_ROSTER_CARRIED_HEADING',
+    'SKILL_REMOVAL_HEADING',
+    'SKILL_REMOVAL_HINT',
     'SKILL_ROSTER_NOTICE_CONTEXT_KEY',
     'SKILL_ROSTER_NOTICE_HEADING',
     'SKILL_ROSTER_NOTICE_LOAD_HINT',
@@ -934,17 +1072,20 @@ __all__ = [
     'normalize_contract_sections',
     'normalize_notice_record',
     'normalize_skill_roster_notice_context',
+    'normalize_skill_visibility_cursor',
     'notice_context_for',
     'pending_contract_sections',
     'pending_notice_records',
     'readable_skill_items',
     'record_contract_sections',
     'record_live_skills',
+    'record_skill_visibility_changes',
     'render_carried_text',
     'render_contract_update_lines',
     'render_notice_lines',
     'render_notice_text',
     'render_operator_action_lines',
+    'render_removal_lines',
     'reset_contract_sections_for_compaction',
     'reset_memory_cursor',
     'reset_persona_cursor',
