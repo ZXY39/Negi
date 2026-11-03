@@ -23,10 +23,12 @@ import os
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Awaitable, Callable
 
 from loguru import logger
 
+from g3ku.runtime import owned_processes
 from main.protocol import now_iso
 
 TOOL_JOB_STATUS_RUNNING = "running"
@@ -51,6 +53,9 @@ TOOL_JOB_EVENT_REASON = "tool_job"
 TOOL_JOB_RESULT_PREVIEW_CHARS = 1200
 TOOL_JOB_STOP_ABANDON_GRACE_SECONDS = 5.0
 TOOL_JOB_RETENTION_SECONDS = 7 * 24 * 3600
+
+OWNED_PROCESS_JOB_PREFIX = "proc:"
+OWNED_PROCESS_TOOL_NAME = "exec"
 
 
 class ToolJobNotFoundError(RuntimeError):
@@ -117,6 +122,108 @@ def tool_job_dedupe_key(job_id: str, status: str) -> str:
     return f"tool-job:{str(job_id or '').strip()}:{str(status or '').strip()}"
 
 
+def owned_process_job_id(pid: int) -> str:
+    return f"{OWNED_PROCESS_JOB_PREFIX}{int(pid)}"
+
+
+def parse_owned_process_job_id(job_id: str) -> int | None:
+    """`proc:<pid>` 是 exec 后台进程在气泡里的行 id；不是这个形态就返回 None。"""
+    raw = str(job_id or "").strip()
+    if not raw.startswith(OWNED_PROCESS_JOB_PREFIX):
+        return None
+    try:
+        pid = int(raw[len(OWNED_PROCESS_JOB_PREFIX):])
+    except (TypeError, ValueError):
+        return None
+    return pid if pid > 0 else None
+
+
+def _elapsed_seconds_since(started_at: Any) -> float:
+    try:
+        started = datetime.fromisoformat(str(started_at or "").strip())
+    except (TypeError, ValueError):
+        return 0.0
+    now = datetime.now(started.tzinfo) if started.tzinfo is not None else datetime.now()
+    return round(max(0.0, (now - started).total_seconds()), 1)
+
+
+def owned_process_items(session_key: str) -> list[dict[str, Any]]:
+    """会话 scope 下 `exec background=true` 起的活进程，映射成气泡行。
+
+    与 tool job 行共用 `job_id / tool_name / status / started_at / elapsed_seconds /
+    hint`；`kind=process` 区分来源，`proc:` 前缀让停止接口分流回归属表。
+    `list_owned` 读时顺手清掉已退出/身份不符的条目，气泡因此能自愈。
+    """
+    scope = owned_processes.scope_key(session_key=session_key)
+    items: list[dict[str, Any]] = []
+    for entry in owned_processes.list_owned(scope):
+        try:
+            pid = int(entry.get("pid") or 0)
+        except (TypeError, ValueError):
+            continue
+        if pid <= 0:
+            continue
+        started_at = str(entry.get("started_at") or "")
+        items.append(
+            {
+                "kind": "process",
+                "job_id": owned_process_job_id(pid),
+                "pid": pid,
+                "tool_name": OWNED_PROCESS_TOOL_NAME,
+                "status": TOOL_JOB_STATUS_RUNNING,
+                "started_at": started_at,
+                "elapsed_seconds": _elapsed_seconds_since(started_at),
+                "turn_id": "",
+                "tool_call_id": "",
+                "hint": str(entry.get("cmd") or ""),
+                "log_path": str(entry.get("log_path") or ""),
+            }
+        )
+    items.sort(key=lambda item: (str(item.get("started_at") or ""), int(item.get("pid") or 0)))
+    return items
+
+
+def build_owned_process_stopped_payload(
+    entry: dict[str, Any],
+    *,
+    session_id: str,
+    finished_at: str,
+    result_preview: str = "",
+) -> dict[str, Any]:
+    """用户从 UI 停掉 exec 后台进程时投给模型的心跳事件。
+
+    复用 tool_job 车道（reason/status 集合不变），`kind=process` 让渲染层按
+    “后台进程”而不是“后台工具作业”措辞，并带上 pid/cmd 供模型核对。
+    """
+    started_at = str(entry.get("started_at") or "")
+    try:
+        pid = int(entry.get("pid") or 0)
+    except (TypeError, ValueError):
+        pid = 0
+    return {
+        "event_reason": TOOL_JOB_EVENT_REASON,
+        "reason": TOOL_JOB_EVENT_REASON,
+        "kind": "process",
+        "session_id": str(session_id or "").strip(),
+        "job_id": owned_process_job_id(pid),
+        "pid": pid,
+        "tool_name": OWNED_PROCESS_TOOL_NAME,
+        "status": TOOL_JOB_STATUS_STOPPED_BY_USER,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "elapsed_seconds": _elapsed_seconds_since(started_at),
+        "timeout_seconds": 0.0,
+        "turn_id": "",
+        "tool_call_id": "",
+        "result_preview": _clip_preview(result_preview),
+        "result_ref": "",
+        "log_path": str(entry.get("log_path") or ""),
+        "recovery_policy": "model_decide",
+        "stopped_by": "user",
+        "cmd": str(entry.get("cmd") or ""),
+    }
+
+
 def _clip_preview(text: Any, limit: int = TOOL_JOB_RESULT_PREVIEW_CHARS) -> str:
     value = str(text or "").strip()
     if len(value) <= limit:
@@ -143,6 +250,7 @@ def build_tool_job_event_payload(
     return {
         "event_reason": TOOL_JOB_EVENT_REASON,
         "reason": TOOL_JOB_EVENT_REASON,
+        "kind": "tool_job",
         "session_id": job.session_key,
         "job_id": job.job_id,
         "tool_name": job.tool_name,
@@ -517,6 +625,7 @@ class ToolJobRunner:
         elapsed_seconds: float,
     ) -> dict[str, Any]:
         return {
+            "kind": "tool_job",
             "job_id": job.job_id,
             "session_id": job.session_key,
             "turn_id": job.turn_id,
@@ -569,6 +678,7 @@ class ToolJobRunner:
                 continue
             items.append(
                 {
+                    "kind": "tool_job",
                     "job_id": job.job_id,
                     "tool_name": job.tool_name,
                     "status": job.status,
@@ -849,10 +959,8 @@ def recover_tool_jobs(store: Any, *, now: str | None = None) -> dict[str, int]:
 
 
 def _retention_cutoff_iso(*, now_epoch: float | None = None) -> str:
-    import datetime as _datetime
-
     cutoff_epoch = float(now_epoch if now_epoch is not None else time.time()) - TOOL_JOB_RETENTION_SECONDS
-    return _datetime.datetime.fromtimestamp(cutoff_epoch).astimezone().replace(microsecond=0).isoformat()
+    return datetime.fromtimestamp(cutoff_epoch).astimezone().replace(microsecond=0).isoformat()
 
 
 def _find_existing_job_outbox(store: Any, job_id: str) -> dict[str, Any] | None:
@@ -886,6 +994,8 @@ def prune_tool_job_rows(store: Any, *, now_epoch: float | None = None) -> int:
 
 
 __all__ = [
+    "OWNED_PROCESS_JOB_PREFIX",
+    "OWNED_PROCESS_TOOL_NAME",
     "TOOL_JOB_ACTIVE_STATUSES",
     "TOOL_JOB_EVENT_REASON",
     "TOOL_JOB_STATUS_ERROR",
@@ -901,7 +1011,11 @@ __all__ = [
     "ToolJobNotFoundError",
     "ToolJobOutcome",
     "ToolJobRunner",
+    "build_owned_process_stopped_payload",
     "build_tool_job_event_payload",
+    "owned_process_items",
+    "owned_process_job_id",
+    "parse_owned_process_job_id",
     "prune_tool_job_rows",
     "recover_tool_jobs",
     "stable_tool_args_hash",

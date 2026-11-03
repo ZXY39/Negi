@@ -8,6 +8,7 @@
     <link rel="icon" href="/favicon.ico">
     <link rel="stylesheet" href="vendor/fonts/google-fonts.css">
     <link rel="stylesheet" href="org_graph.css">
+    <link rel="stylesheet" href="models/content-policy.css">
     <script src="vendor/lucide.min.js"></script>
 </head>
 
@@ -256,16 +257,16 @@
                                         </button>
                                         <div id="ceo-model-mode-panel" class="ceo-model-mode-panel" role="dialog"
                                             aria-label="模型与上下文" hidden>
-                                            <div class="ceo-model-mode-headline">
-                                                <span id="ceo-model-mode-badge"
-                                                    class="ceo-model-mode-badge">模型链</span>
-                                            </div>
                                             <div class="ceo-model-mode-usage" aria-hidden="true">
                                                 <span id="ceo-model-mode-usage-fill"
                                                     class="ceo-model-mode-usage-fill"></span>
                                             </div>
-                                            <div id="ceo-model-mode-usage-text" class="ceo-model-mode-usage-text"
-                                                hidden></div>
+                                            <div class="ceo-model-mode-meter-row">
+                                                <div id="ceo-model-mode-usage-text" class="ceo-model-mode-usage-text"
+                                                    hidden></div>
+                                                <span id="ceo-model-mode-badge"
+                                                    class="ceo-model-mode-badge">模型链</span>
+                                            </div>
                                             <div class="ceo-model-mode-options" role="radiogroup" aria-label="模型模式">
                                                 <button id="ceo-model-mode-chain" class="ceo-model-mode-option"
                                                     type="button" role="radio" aria-checked="true">模型链</button>
@@ -361,9 +362,12 @@
                                     </div>
                                     <textarea id="ceo-input" rows="1"
                                         placeholder="输入你的任务，可保留换行；也可以上传图片或文件作为补充"></textarea>
-                                    <button id="ceo-send-btn" class="btn-primary" type="button" aria-label="发送消息">
-                                        <i data-lucide="send"></i> 发送
-                                    </button>
+                                    <div class="ceo-send-cluster">
+                                        <span id="ceo-model-live-badge" class="ceo-model-live-badge" hidden></span>
+                                        <button id="ceo-send-btn" class="btn-primary" type="button" aria-label="发送消息">
+                                            <i data-lucide="send"></i> 发送
+                                        </button>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -692,8 +696,8 @@
                         <p class="subtitle">给每个 Agent 排模型链；模型库与负载均衡组在下方统一管理。</p>
                     </div>
                     <div class="resource-header-actions model-page-actions">
-                        <button id="model-refresh-btn" class="toolbar-btn ghost" type="button">刷新</button>
                         <button id="llm-config-create-btn" class="toolbar-btn ghost" type="button">添加配置</button>
+                        <button id="content-policy-btn" class="toolbar-btn ghost" type="button">安全审查词替换</button>
                         <button id="model-iterations-toggle-btn" class="toolbar-btn ghost" type="button" hidden aria-expanded="false">最大轮数</button>
                         <input id="model-iterations-value-input" class="spinless-number-input model-iterations-toolbar-input" type="number" min="-1" step="1" inputmode="numeric" value="-1" title="-1 代表不限制" aria-label="最大轮数" hidden>
                         <button id="model-roles-save-btn" class="toolbar-btn success" type="button" hidden>保存</button>
@@ -757,6 +761,51 @@
                         <div class="confirm-actions">
                             <button id="model-group-cancel-btn" class="toolbar-btn ghost" type="button">取消</button>
                             <button id="model-group-confirm-btn" class="toolbar-btn success" type="button">确定</button>
+                        </div>
+                    </section>
+                </div>
+
+                <div id="content-policy-backdrop" class="confirm-backdrop" hidden>
+                    <section id="content-policy-dialog" class="confirm-dialog content-policy-dialog" role="dialog"
+                        aria-modal="true" aria-labelledby="content-policy-title" tabindex="-1">
+                        <div class="confirm-header">
+                            <h2 id="content-policy-title">安全审查词替换</h2>
+                            <button id="content-policy-close-btn" class="icon-btn dialog-close-btn" type="button"
+                                aria-label="关闭安全审查词替换">
+                                <i data-lucide="x" aria-hidden="true"></i>
+                            </button>
+                        </div>
+                        <div class="content-policy-body">
+                            <label class="content-policy-switch">
+                                <input id="content-policy-enabled" class="ui-checkbox-input" type="checkbox">
+                                <span class="ui-checkbox-box" aria-hidden="true"></span>
+                                <span>启用安全审查词替换</span>
+                            </label>
+                            <p class="content-policy-hint">
+                                开启后，发给模型的工具结果里命中的词会被替换成占位符；历史结果只替换不提示，当前这一跳会附一条提示。
+                            </p>
+                            <label class="resource-field" for="content-policy-words">
+                                <span class="resource-field-label">词表（一行一个词）</span>
+                                <textarea id="content-policy-words" class="content-policy-words" rows="10"
+                                    spellcheck="false" placeholder="每行一个屏蔽词"></textarea>
+                            </label>
+                            <p id="content-policy-count" class="content-policy-count" aria-live="polite">0 个词</p>
+                            <p id="content-policy-warning" class="content-policy-warning" role="alert" hidden></p>
+                            <div class="content-policy-actions-row">
+                                <button id="content-policy-import-btn" class="toolbar-btn ghost" type="button">导入 .txt</button>
+                                <input id="content-policy-import-input" type="file" accept=".txt,text/plain" hidden>
+                                <button id="content-policy-export-btn" class="toolbar-btn ghost" type="button">导出</button>
+                                <button id="content-policy-clear-btn" class="toolbar-btn ghost" type="button">清空</button>
+                            </div>
+                            <p class="content-policy-source">
+                                项目不内置词表：请自行从
+                                <a href="https://github.com/konsheng/Sensitive-lexicon" target="_blank" rel="noreferrer">konsheng/Sensitive-lexicon</a>
+                                下载 .txt 后导入（一行一个词）。
+                            </p>
+                        </div>
+                        <div class="confirm-actions">
+                            <button id="content-policy-cancel-btn" class="toolbar-btn ghost" type="button">取消</button>
+                            <button id="content-policy-save-btn" class="toolbar-btn success" type="button">保存</button>
                         </div>
                     </section>
                 </div>
@@ -1665,6 +1714,7 @@
     <script src="org_graph_stickers.js"></script>
     <script src="org_graph_ceo_governance.js"></script>
     <script src="org_graph_llm.js"></script>
+    <script src="models/content-policy.js"></script>
     <script src="org_graph_external.js"></script>
     <script src="org_graph_onboarding.js"></script>
     <script>

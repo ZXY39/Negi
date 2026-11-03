@@ -832,6 +832,7 @@ class ExecTool(Tool):
             actor_role=str(runtime.get("actor_role") or ""),
             owner_pid=os.getpid(),
         )
+        self._notify_background_items_changed(runtime)
         return self._build_payload(
             status="success",
             exit_code=None,
@@ -847,6 +848,16 @@ class ExecTool(Tool):
                 f"stop it with process_kill(pid={entry['pid']})."
             ],
         )
+
+    @staticmethod
+    def _notify_background_items_changed(runtime: dict[str, Any]) -> None:
+        notify = runtime.get("_notify_background_items_changed")
+        if not callable(notify):
+            return
+        try:
+            notify()
+        except Exception:
+            pass
 
     def _build_subprocess_env(self, *, runtime: dict[str, Any], cwd: str) -> dict[str, str]:
         env = os.environ.copy()

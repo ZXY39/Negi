@@ -95,6 +95,17 @@
 - content 车道的**行号栏**是引用行号的唯一解释来源：`content_open` 的行模式（默认、`start_line`/`end_line`、`around_line`/`window`）与 `content_search` 的命中 preview，每行前缀 `N: `，`N` 是该目标的**绝对行号**，与 `rg -n`、编辑器、`content_search` 的 `line` 字段同一个数。不加栏的两类正文：字符模式（`start_char`/`end_char`，切的不是整行，标行号等于标一个假事实）、上一条的二进制/图片占位正文。首行超限的单行字符兜底仍带栏，那一段确实是目标的第 `start_line` 行。栏宽计入上限累加，所以"一屏正文"不会因为加栏被推过 `OPEN_EXCERPT_CHAR_LIMIT`；`excerpt_shown_chars` / `remaining_chars` / `total_range_chars` 仍只数原文字符，内联闸门与截断提示的读数口径不变。为什么必须有栏：交付物要求「路径 + 行号范围」类证据时，无栏正文只能靠肉眼数行，数错以两种形状出现——窗口起始行被当成第 1 行（偏移等于 `start_line-1`），以及 preview 的 `before`/`after` 上下文行没有号（偏移等于上下文行数）。判据是"被引行号能不能指回一次返回里带该数字的行"。模型侧与网页侧读同一份正文，实现不分支，节点详情抽屉与 CEO feed 同样显示行号。
 - 只读测量通道 `filesystem_stat`：`paths` 逐条返回存在性、`size_bytes`（磁盘真实字节数）、`mtime`，目录另给 `file_count` / `total_bytes` / 最大最小文件与有界条目清单；只做 stat/遍历，不写不删。它是一条独立治理记录，`allowed_roles` 含 `inspection` 而写类工具不含——与 `write` / `edit` / `delete` / `propose_patch` 等写动作的 inspection 拒绝互不影响，验收节点因此能测量「这批产物有几个、多大、哪些是本轮写的、真实文件名是什么」，而不必依赖内容通道的占位串统计或凭清单外推文件名。同一套测量口径也写给**产出方**：执行节点「结束前自检」点名这个工具与验收只认的三类二进制证据（`size_bytes`、`binary` / `content_display_replaced` 与 `mime_type` 标记、`content_search` 的字节级命中）。只告诉裁判而不告诉选手，产出的证据形态天然不合规，代价是持续返工与重跑。
 
+### 内容审查词替换（模型面工具结果）
+
+- 词表是操作员数据，不是配置项：它落在数据根的 `.g3ku/content-policy.json`（`{version, enabled, words, updated_at}`），默认 `enabled=false`，文件不存在等价于关闭 + 空表。项目不内置任何词表，也不自动下载——词表由人在模型页手动导入 / 导出，一行一个词（详见 `web-and-admin.md`「Model Config Page And Admin Contract」）。
+- 替换只发生在**模型面**：命中的 `role=tool` 消息内容被改写后再发给 provider，user / assistant / system 消息不动。原始工具工件、会话转录与旧请求工件保留原文；被改写的只有这一发请求体，以及由此写回的下一次基线。
+- 落点在请求装配之后、发模型之前，三条车道共用同一个 helper：前门 `_graph_call_model`、节点 `ReActLoop.run`、记忆 Agent 的每轮请求。压缩 helper 与实际发送读同一份正文——手动压缩或 token 压缩若读到未替换的旧工具结果，会在同一段内容上被上游拒掉。
+- 匹配是字面子串、大小写不敏感、不设最短长度（单字符词允许），长词优先避免短词吃掉长词；命中片段替换为 `***命中违规内容已被Negi替换***`。JSON 对象替换其中全部字符串值（键不改）并在顶层加 `_content_policy_notice`；纯文本、数组与标量在首行加一条提示行。
+- 提示只给**当前 hop** 的工具结果，即最后一次 assistant 之后的那些 tool 消息（判据不是"末尾连续 tool"：前门每跳会在工具结果之后追加一条 `[RUNTIME_NOTICE]` 用户消息，节点道也会追加中插通知，尾部因此不是工具段）。当前 hop 的提示行写明替换次数，并要求后续不要从同一来源（相同 URL / 文件 / 查询）再取，否则会出错停止；历史工具结果只替换、不加提示。
+- 防自噬：替换只跑原文，提示与占位符在替换之后插入；占位符与提示片段在后续扫描里受保护，JSON 的 `_content_policy_notice` 字段整体跳过，已含提示的内容不重复加提示。否则词表里出现"违规"一类词时，掩码文本会被逐轮改写成套娃。
+- 掩码结果按（内容哈希, 词表修订）缓存，避免每跳重扫整段历史。开启后的第一次请求会重扫全部历史工具消息，命中处开始断前缀缓存；替换后的请求体成为新基线，之后扫到的已是掩码文本，缓存稳定。
+- 替换不可逆：历史一旦被替换，基线里就没有原词，关掉开关也不会还原；需要原文时从旧请求工件与转录取。词表是手动维护的尽力而为——未列出的词仍会被上游拦下。
+
 ### 统一工具 Timeout 合同
 
 - 每次工具调用都有最大运行时长保底：显式传入的 `timeout_seconds` 参数（秒，**支持小数/亚秒、无上限**；下限 `MIN_TOOL_TIMEOUT_SECONDS=0.05s`，更小的值抬到下限）优先，否则用全局默认（`agents.tool_default_timeout_seconds`，默认 600，热更新生效；`G3KU_TOOL_DEFAULT_TIMEOUT_SECONDS` 环境变量是应急覆盖）。参数名自带单位（`_seconds`）以杜绝秒/毫秒歧义：裸 `timeout` 名一旦被模型误当毫秒就会把上限放大千倍（想要 60s 却传 60000，在秒语义下 ≈16.6h，既卡住工具、又把失速判定截止一并推到同样 16h 之后，见 `heartbeat-system.md`「Task Stall Detection」）。解析只认 `timeout_seconds`，不读旧名 `timeout`（无兜底）。`timeout_seconds` 经 `Tool.to_model_schema()` 统一注入模型可见 schema，两类工具不注入：瞬时内部协议工具（`silent` / `time` / `schedule_wake` / `spawn_child_nodes` / `submit_final_result` / `submit_message_distribution` / `submit_notice_inspection_decision` / `task_append_notice` / `stop_tool_execution` / `process_kill`）与内部入队工具（`memory_update` / `memory_note`）带 `hide_universal_timeout_parameter`（按类属性声明，落在 `main/runtime/internal_tools.py`、`g3ku/agent/tools/tool_execution_control.py`、`g3ku/agent/tools/process_control.py`、`g3ku/agent/tools/memory_*.py` 与 `main/service/runtime_service.py`），不向模型暴露该参数，但机械保底仍然适用；长时编排/控制类工具带 `exempt_universal_timeout`，整体豁免外层时限（见下条）。

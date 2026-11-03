@@ -12,7 +12,11 @@ Three things are deliberately *not* done here:
 * a terminal node is not woken and not messaged (terminal is absorbing);
 * nothing here decides *whether* the message should wake: any injectable unread
   wakes; ``priority=high`` is the unconditional bypass. Batch holds are a
-  delivery-time state on ``child_final`` rows, not a wake policy.
+  delivery-time state on ``child_final`` rows, not a wake policy;
+* a paused node is not woken by a message at all. The pause is a state, not a
+  one-shot request: only an explicit resume action clears it (A5=A). Callers
+  that *are* the explicit resume lane (``manage_child_nodes(resume)``) pass
+  ``allow_pause_clear=True``.
 
 Dependencies are injected so the decision and the dispatch loop can be tested
 without a runtime, a database, or an event loop full of workers.
@@ -36,6 +40,7 @@ OUTCOME_IN_FLIGHT = 'in_flight'
 OUTCOME_RESUMED = 'resumed'
 OUTCOME_SCHEDULED = 'scheduled'
 OUTCOME_TASK_PAUSED = 'skipped_task_paused'
+OUTCOME_PAUSED = 'skipped_paused'
 OUTCOME_TASK_TERMINAL = 'skipped_task_terminal'
 OUTCOME_NO_NODE = 'skipped_missing_node'
 OUTCOME_NO_RUNNING_LOOP = 'skipped_no_loop'
@@ -84,8 +89,14 @@ async def wake_parked_node(
     task_id: str,
     node_id: str,
     deps: WakeDeps,
+    allow_pause_clear: bool = False,
 ) -> str:
-    """Wake ``node_id`` if it is parked. Returns an outcome string for logs/tests."""
+    """Wake ``node_id`` if it is parked. Returns an outcome string for logs/tests.
+
+    A paused node is left untouched unless ``allow_pause_clear`` is set: the
+    message lands in the mailbox and the pause flag stays. Only the explicit
+    resume lane passes ``True``.
+    """
     normalized_task_id = str(task_id or '').strip()
     normalized_node_id = str(node_id or '').strip()
     if not normalized_task_id or not normalized_node_id:
@@ -119,9 +130,13 @@ async def wake_parked_node(
         if bool(getattr(task, 'is_paused', False)):
             return OUTCOME_TASK_PAUSED
 
-    if state == 'paused' and deps.clear_pause is not None:
-        # Clearing the flag is not resuming; it only lets the executor start.
-        await deps.clear_pause(normalized_task_id, normalized_node_id)
+    if state == 'paused':
+        if not allow_pause_clear:
+            # A5=A：消息不清暂停位。落箱、计未读，等显式恢复动作。
+            return OUTCOME_PAUSED
+        if deps.clear_pause is not None:
+            # Clearing the flag is not resuming; it only lets the executor start.
+            await deps.clear_pause(normalized_task_id, normalized_node_id)
 
     dispatcher = deps.dispatcher_for(normalized_task_id)
     if dispatcher is not None:
@@ -146,7 +161,13 @@ def enter_wait_verdict(
     return True, ''
 
 
-def schedule_wake(*, task_id: str, node_id: str, deps: WakeDeps) -> str:
+def schedule_wake(
+    *,
+    task_id: str,
+    node_id: str,
+    deps: WakeDeps,
+    allow_pause_clear: bool = False,
+) -> str:
     """Fire-and-forget variant for synchronous delivery sites.
 
     Returns ``OUTCOME_NO_RUNNING_LOOP`` when called outside an event loop instead
@@ -157,5 +178,12 @@ def schedule_wake(*, task_id: str, node_id: str, deps: WakeDeps) -> str:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return OUTCOME_NO_RUNNING_LOOP
-    loop.create_task(wake_parked_node(task_id=task_id, node_id=node_id, deps=deps))
+    loop.create_task(
+        wake_parked_node(
+            task_id=task_id,
+            node_id=node_id,
+            deps=deps,
+            allow_pause_clear=allow_pause_clear,
+        )
+    )
     return 'scheduled_async'

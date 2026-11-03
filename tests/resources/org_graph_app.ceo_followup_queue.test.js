@@ -171,6 +171,7 @@ function loadApp() {
             U,
             syncCeoPrimaryButton,
             handleCeoPrimaryAction,
+            handleCeoError,
             setCeoQueuedFollowUps,
             removeCeoQueuedFollowUp,
             enqueueCeoFollowUp,
@@ -726,4 +727,36 @@ test("补充消息被本轮接走之后，迟到的排队读数不得把它画�
         ],
     });
     assert.equal(getMergedCeoQueuedFollowUps("web:test").length, 0);
+});
+
+test("失败回合的 ceo.error 带上本批用户消息时，本地在飞副本退场", () => {
+    const { S, U, handleCeoError, setCeoQueuedFollowUps, getMergedCeoQueuedFollowUps } = loadApp();
+    S.ceoTurnActive = true;
+    setCeoQueuedFollowUps("web:test", [
+        { id: "sent", text: "插话的那条", runtime_sent_at: "2026-09-24T18:00:00.000Z" },
+    ]);
+    assert.equal(getMergedCeoQueuedFollowUps("web:test").length, 1);
+
+    handleCeoError({
+        code: "turn_failed",
+        message: "boom",
+        source: "user",
+        turn_id: "t-1",
+        user_messages: [{ role: "user", content: "插话的那条", turn_id: "t-1", attachments: [] }],
+    });
+
+    assert.equal(getMergedCeoQueuedFollowUps("web:test").length, 0);
+    assert.equal(U.ceoFollowUpQueue.hidden, true);
+});
+
+test("旧帧没有 user_messages 时，失败事件不会误删本地在飞副本", () => {
+    const { S, handleCeoError, setCeoQueuedFollowUps, getMergedCeoQueuedFollowUps } = loadApp();
+    S.ceoTurnActive = true;
+    setCeoQueuedFollowUps("web:test", [
+        { id: "sent", text: "插话的那条", runtime_sent_at: "2026-09-24T18:00:00.000Z" },
+    ]);
+
+    handleCeoError({ code: "turn_failed", message: "boom", source: "user", turn_id: "t-1" });
+
+    assert.equal(getMergedCeoQueuedFollowUps("web:test").length, 1);
 });

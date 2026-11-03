@@ -404,7 +404,6 @@ function renderModelDetail() {
 }
 
 function renderModelCatalog() {
-    if (U.modelRefresh) U.modelRefresh.disabled = S.modelCatalog.loading || S.modelCatalog.saving;
     if (U.modelCreate) U.modelCreate.disabled = S.modelCatalog.loading || S.modelCatalog.saving;
     if (U.modelRolesCancel) {
         U.modelRolesCancel.hidden = !S.modelCatalog.rolesDirty;

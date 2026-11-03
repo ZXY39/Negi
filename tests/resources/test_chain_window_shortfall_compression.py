@@ -135,6 +135,43 @@ async def test_direct_model_over_window_is_compressed_then_sent(monkeypatch) -> 
 
 
 @pytest.mark.asyncio
+async def test_send_layer_awaits_async_shortfall_callback(monkeypatch) -> None:
+    """发送层回调可以是协程：必须在本次发送返回前被 await（压缩标记落线依赖它）。"""
+    _patch(monkeypatch, {"m_small": 100})
+    notified: list[dict] = []
+    events: list[str] = []
+
+    async def _compress(messages, target_window_tokens, model_ref, candidate_refs=()):
+        _ = messages, target_window_tokens, model_ref, candidate_refs
+        return {
+            "messages": [{"role": "user", "content": "compressed"}],
+            "estimated_tokens": 90,
+            "compression_mode": "llm",
+            "chunk_count": 1,
+        }
+
+    async def _on_compressed(payload):
+        notified.append(dict(payload))
+        events.append("notify")
+
+    response = await _backend().chat(
+        messages=[{"role": "user", "content": "original"}],
+        tools=None,
+        model_refs=["m_small"],
+        required_context_window_tokens=200,
+        window_shortfall_compressor=_compress,
+        on_window_shortfall_compressed=_on_compressed,
+    )
+
+    assert response.content == "ok"
+    assert events == ["notify"]
+    assert len(notified) == 1
+    assert notified[0]["estimated_tokens"] == 90
+    assert notified[0]["required_before"] == 200
+    assert [item[0] for item in CALLS] == ["m_small"]
+
+
+@pytest.mark.asyncio
 async def test_direct_model_compression_failure_skips_member_and_reports_no_model(monkeypatch) -> None:
     _patch(monkeypatch, {"m_small": 100})
 

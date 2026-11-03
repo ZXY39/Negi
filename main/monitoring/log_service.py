@@ -1585,13 +1585,6 @@ class TaskLogService:
             if updated is not None and task is not None:
                 self._sync_node_read_models_locked(updated)
                 self._publish_task_node_patch_locked(task=task, node=updated)
-                if (
-                    str(status or '').strip().lower() in {'success', 'failed'}
-                    and str(task.root_node_id or '').strip() == str(updated.node_id or '').strip()
-                ):
-                    # 根节点终态 ⇒ 任务不再处于暂停态。任务大厅先看 is_paused 再看 status，
-                    # 不清旗会把已经成功/失败的任务显示成 Paused。
-                    self._mirror_root_pause_to_task_locked(task, pause_requested=False, is_paused=False)
                 for propagated_node_id in propagated_node_ids:
                     if not str(propagated_node_id or '').strip() or propagated_node_id == node_id:
                         continue
@@ -1819,7 +1812,6 @@ class TaskLogService:
         cancel_requested: bool | None = None,
         pause_requested: bool | None = None,
         is_paused: bool | None = None,
-        sync_root: bool = True,
     ) -> TaskRecord | None:
         with self._task_lock(task_id):
             def _mutate(task: TaskRecord) -> TaskRecord:
@@ -1837,11 +1829,6 @@ class TaskLogService:
                 return None
             if bool(updated.is_paused) or bool(updated.pause_requested) or bool(updated.cancel_requested):
                 self.flush_live_patch_history(task_id)
-            if sync_root and (pause_requested is not None or is_paused is not None):
-                # 根节点驱动口径：任务级暂停标志与任务根节点暂停态恒等。任务侧先行写入
-                # （pause_task / resume_task / 观察式暂停）时把根节点拉到一致态，否则全局
-                # 恢复只清任务标志、根节点仍带暂停旗，会被回填路径立刻重新置为 Paused。
-                self._align_root_node_pause_locked(updated)
             return self.refresh_task_view(task_id, mark_unread=False) or updated
 
     def update_task_metadata(self, task_id: str, metadata_mutator: Callable[[dict[str, Any]], dict[str, Any]], *, mark_unread: bool = True) -> TaskRecord | None:
@@ -2763,73 +2750,6 @@ class TaskLogService:
         """窗口观测下界：provider 超窗不报错，只能从台账的实测和里取这个数。"""
         return self._store.max_observed_request_span_tokens(task_id, node_id)
 
-    def _align_root_node_pause_locked(self, task: TaskRecord) -> NodeRecord | None:
-        """任务级暂停标志变化后把任务根节点拉到一致态（根节点驱动口径的一半）。
-
-        只做两种写入，绝不把仍在运行的根节点谎标成已暂停：
-        - 任务侧暂停 → 根节点 `pause_requested=True`，`is_paused` 保持其自身排空状态。
-        - 任务侧完全清除 → 根节点两个旗一起清除（全局恢复必须能真正清掉根节点暂停态）。
-        两侧已一致时不写，因此与 `_mirror_root_pause_to_task_locked` 互调不会振荡。
-        """
-        root_id = str(task.root_node_id or '').strip()
-        if not root_id:
-            return None
-        root = self._store.get_node(root_id)
-        if root is None:
-            return None
-        active = bool(task.pause_requested) or bool(task.is_paused)
-        if active:
-            if bool(root.pause_requested):
-                return None
-            desired_requested, desired_paused = True, bool(root.is_paused)
-        else:
-            if not (bool(root.pause_requested) or bool(root.is_paused)):
-                return None
-            desired_requested, desired_paused = False, False
-        next_reason = str(root.pause_reason or '').strip().lower() or 'manual'
-        updated = self._store.update_node(
-            root_id,
-            lambda record: record.model_copy(update={
-                'pause_requested': desired_requested,
-                'is_paused': desired_paused,
-                'pause_reason': next_reason if (desired_requested or desired_paused) else '',
-                'updated_at': now_iso(),
-            }),
-        )
-        if updated is None:
-            return None
-        if desired_requested or desired_paused:
-            self.register_node_pause(task.task_id, root_id, pause_reason=next_reason, remark='', delivered=False)
-        else:
-            self.clear_node_pause(task.task_id, root_id)
-        self._sync_node_read_models_locked(updated)
-        self._publish_task_node_patch_locked(task=task, node=updated)
-        return updated
-
-    def _mirror_root_pause_to_task_locked(
-        self,
-        task: TaskRecord,
-        *,
-        pause_requested: bool,
-        is_paused: bool,
-    ) -> TaskRecord | None:
-        """根节点暂停态变化后回填任务级标志（根节点驱动口径的另一半）。
-
-        `task.is_paused` 取「请求暂停 or 已暂停」：与 `pause_task` 立即置 `is_paused=True`
-        的既有口径一致，让全局暂停在节点真正排空前就体现为大厅 Paused，而不是节点停了
-        任务还显示在跑。值未变则不写，避免无谓 patch 与两侧互调递归。
-        """
-        desired_requested = bool(pause_requested)
-        desired_paused = bool(pause_requested) or bool(is_paused)
-        if bool(task.pause_requested) == desired_requested and bool(task.is_paused) == desired_paused:
-            return task
-        return self.update_task_control(
-            task.task_id,
-            pause_requested=desired_requested,
-            is_paused=desired_paused,
-            sync_root=False,
-        )
-
     def set_node_pause_state(
         self,
         task_id: str,
@@ -2878,14 +2798,6 @@ class TaskLogService:
             task = self._store.get_task(task_id)
             if task is not None:
                 self._publish_task_node_patch_locked(task=task, node=updated)
-                if str(task.root_node_id or '').strip() == str(updated.node_id or '').strip():
-                    # 根节点是全任务唯一的暂停真源：改它就把任务级标志一并回填，否则
-                    # 「根节点 + cascade」暂停整棵树后大厅仍显示处理中。
-                    self._mirror_root_pause_to_task_locked(
-                        task,
-                        pause_requested=next_requested,
-                        is_paused=next_paused,
-                    )
             self.refresh_task_view(task_id, mark_unread=True)
             return updated
 
@@ -3096,6 +3008,8 @@ class TaskLogService:
                         'failure_reason': text,
                         'updated_at': now_iso(),
                         'finished_at': now_iso(),
+                        'pause_requested': False,
+                        'is_paused': False,
                     }
                 ),
             )
@@ -3624,6 +3538,11 @@ class TaskLogService:
                 next_failure_class = FAILURE_CLASS_NON_RETRYABLE_BLOCKED
             next_metadata = self._task_metadata_with_failure_class(dict(task.metadata or {}), failure_class=next_failure_class)
             next_finished_at = now_iso() if next_status in {'success', 'failed'} and not task.finished_at else task.finished_at
+            # 任务级终态不变量：终态任务不得携带暂停旗标（任务大厅先看 is_paused 再看
+            # status，不清旗会把已成功/失败的任务显示成 Paused）。
+            next_terminal = self._is_terminal_status(next_status)
+            next_pause_requested = False if next_terminal else bool(task.pause_requested)
+            next_is_paused = False if next_terminal else bool(task.is_paused)
             if (
                 str(task.status or '').strip() == str(next_status or '').strip()
                 and str(task.brief_text or '') == str(brief_text or '')
@@ -3632,6 +3551,8 @@ class TaskLogService:
                 and str(task.final_output_ref or '') == next_final_output_ref
                 and str(task.failure_reason or '') == next_failure_reason
                 and str(task.finished_at or '') == str(next_finished_at or '')
+                and bool(task.pause_requested) == next_pause_requested
+                and bool(task.is_paused) == next_is_paused
                 and dict(task.metadata or {}) == next_metadata
             ):
                 self._record_debug('log_service.refresh_task_view', started_at=started_at, started_mono=started_mono)
@@ -3646,6 +3567,8 @@ class TaskLogService:
                     'final_output_ref': next_final_output_ref,
                     'failure_reason': next_failure_reason,
                     'finished_at': next_finished_at,
+                    'pause_requested': next_pause_requested,
+                    'is_paused': next_is_paused,
                     'metadata': next_metadata,
                 }
             )

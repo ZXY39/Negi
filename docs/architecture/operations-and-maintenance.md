@@ -331,6 +331,8 @@
 - 工具回 `queued` 后没有模型调用：先查 `task_node_resume_intents` 该节点的 `state`/`outcome`。`pending` = 还没有拾取消费（看任务是否被暂停/取消、worker 是否在线）；`claimed` 超过领取窗口 = 消费者死在途中，下一个拾取会重领；`applied + outcome=task_paused/task_terminal` = 任务级闸门拒绝，不是 worker 故障。`applied + resumed` 但节点仍无 fresh frame/新 `task_model_calls` 时，再按 `main-task-runtime.md`「Node-Level Pause and Recovery」的 entry triage 与延迟校验排查。
 - 验收器自身故障的直达事件带 `Role: acceptance node` 与 `Inspected node` 行：先确认被验节点与握手（`waiting_acceptance` / 提交 ref）仍在，再 resume 验收节点；事件里的 `Final acceptance: yes` 决定无出口时 fail 哪一颗执行节点（根最终验收 → fail 根执行节点）；任务级 cancel 不在会话可达的动作面上，是操作员在 web 侧的动作。`manage_task_nodes fail` 对验收节点回 `acceptance_fail_does_not_settle_task` 是设计行为，不是工具故障。
 - 父节点被看门狗判停不等于崩溃：三条结构性判据 `repeated_identical_tool_call` / `tool_error_streak` / `no_new_events`（`main/runtime/node_watchdog.py`）只把节点标成异常暂停，不杀正在进行的回合。在飞的模型回合（等闸、重试、流式返回）与正在跑的工具一样不算失速；只有请求层报告 `waiting_upstream` 且静默已满一个失速窗口才落 `no_new_events`。非根节点的异常暂停只经父节点信箱升级（`child_abnormal_pause`，high 优先级、必唤醒），只有根节点的异常暂停惊动会话 agent；父节点不处理时，前端「暂停·异常」是唯一可见面。
+- 任务大厅显示「进行中」但任务停滞不推进、任务树根节点是「暂停·异常」：根节点暂停只停根，任务旗标不动；非根节点跑完后任务会静止等显式恢复。先看 `task_node_pauses` 根行与 `task_node_error` 心跳确认暂停来源，再 `manage_task_nodes(resume)` 根节点。恢复顺序：任务级暂停先 `resume` 任务（任务级形态）、再按需 resume 根；根节点自己的 error 暂停不会被任务恢复代清。
+- 给暂停节点发消息后节点照旧不动、也没有报错：设计内。暂停是粘性状态，任何消息（人工、`child_final`、前门通知、`wake_timer`）都只落箱不清位，唯一例外是父节点执行 `manage_child_nodes(resume)`。操作员恢复用 `manage_task_nodes(resume)`。
 - 信箱投递、看门狗判据与恢复重放的合同字段详见 `main-task-runtime.md`「节点信箱与唤醒（现行）」与「Node-Level Pause and Recovery」。
 
 如果任务已经创建，但表现为“响应明显变慢”“长时间停在 `model.chat.await_response`”或“前端只看到 task-event 在刷”，优先同时对照：
@@ -405,7 +407,7 @@ Provider retry troubleshooting note:
 
 这条边界拦的是**命令形态**，所以它同时会误伤"模型停掉自己起的测试服务"——实盘一条会话里模型起了三个 Node 测试实例，自己停不掉，只能让用户手动结束。回收权因此住在**归属车道**上，这条边界本身不放松：
 
-- `exec background=true`：运行时自己 spawn（POSIX `start_new_session`，Windows `CREATE_NEW_PROCESS_GROUP`），stdout/stderr 直接落 `owned-processes/<scope>/<…>.log`，立即返回 `pid` + `log_path`，并把 `{pid, create_time, cmd, log_path, owner_pid}` 登记进 `g3ku/runtime/owned_processes.py`。进程不继承 exec 的管道，也不受 exec 超时/取消管辖。
+- `exec background=true`：运行时自己 spawn（POSIX `start_new_session`，Windows `CREATE_NEW_PROCESS_GROUP`），stdout/stderr 直接落 `owned-processes/<scope>/<…>.log`，立即返回 `pid` + `log_path`，并把 `{pid, create_time, cmd, log_path, owner_pid}` 登记进 `g3ku/runtime/owned_processes.py`。进程不继承 exec 的管道，也不受 exec 超时/取消管辖。会话 scope 的活进程以 `kind=process` 行出现在会话右上角后台气泡；用户在那里点停止等同本 scope 的归属终止，并投一条 `stopped_by_user` 心跳事件告诉模型服务已经不在（气泡/API 契约见 `web-and-admin.md`「Background Tool Jobs Bubble And Tool-Jobs API」）。
 - `process_kill(pid)`（候选工具，水合后可用，`allowed_roles` = `ceo` + `execution`）：只认本 scope 的登记条目，校验 `create_time` 后整树终止，回日志尾部；未登记的 pid 一律拒绝并给出本 scope 台账。
 - 生命周期三处回收：会话清空（`clear_web_ceo_session_artifacts`）、任务终态（`MainRuntimeService._reap_task_owned_processes`）、运行时启动（`launcher._reap_owned_background_processes`，只收 `owner_pid` 已死的孤儿）。
 

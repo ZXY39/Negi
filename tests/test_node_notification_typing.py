@@ -121,7 +121,7 @@ class TestEveryNotificationIsTyped:
         try:
             _seed(service)
 
-            async def noop_wake(*, task_id: str, node_id: str) -> str:
+            async def noop_wake(*, task_id: str, node_id: str, allow_pause_clear: bool = False) -> str:
                 return 'resumed'
 
             monkeypatch.setattr(service, 'wake_node_on_message', noop_wake)

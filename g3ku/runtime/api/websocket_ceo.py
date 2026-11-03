@@ -983,12 +983,20 @@ def _ceo_error_frame_from_event(
         or live_turn.get("turn_id")
         or ""
     ).strip()
-    return {
+    frame = {
         "code": str(payload.get("code") or "legacy_session_error"),
         "message": str(payload.get("message") or "").strip() or "unknown error",
         "source": source,
         "turn_id": turn_id,
     }
+    user_messages = payload.get("user_messages")
+    if not isinstance(user_messages, list):
+        user_messages = live_turn.get("user_messages")
+    if isinstance(user_messages, list) and user_messages:
+        # 失败回合本批用户消息：前端据此退役本地在飞副本，避免服务端队列清空后
+        # 「下一跳即将发送」的幽灵条目一直挂着。
+        frame["user_messages"] = user_messages
+    return frame
 
 
 def _transcript_message_token_usage(value: Any) -> dict[str, int] | None:
@@ -1764,6 +1772,7 @@ async def ceo_websocket(websocket: WebSocket):
                     'message': error_message or 'unknown error',
                     'source': str((snapshot or {}).get('source') or 'user').strip().lower() or 'user',
                     'turn_id': str((snapshot or {}).get('turn_id') or '').strip(),
+                    'user_messages': list((snapshot or {}).get('user_messages') or []),
                 },
             )
             return

@@ -399,6 +399,25 @@ test("面板头部展示当前模型展示名与上下文数字", () => {
     assert.equal(app.U.ceoModelModeUsageText.textContent, "12000/390000 TOKEN");
 });
 
+test("面板模型胶囊优先显示这一跳实际服务的模型", () => {
+    const app = loadApp();
+    mountControl(app);
+    app.openCeoModelModePanel();
+    app.S.ceoComposerUsageEstimate = {
+        session_id: "web:test",
+        provider_model: "alpha",
+        observed_provider_model: "openai:b",
+        estimated_total_tokens: 12000,
+        context_window_tokens: 390000,
+        ratio: 0.0308,
+    };
+
+    app.syncCeoModelModePanelUsage();
+
+    // 预检那颗（alpha）不是这一跳真正服务的模型：降档后按 observed 显示 beta。
+    assert.equal(app.U.ceoModelModeBadge.textContent, "beta");
+});
+
 test("没有上下文预估时进度条下方整行隐藏", () => {
     const app = loadApp();
     mountControl(app);

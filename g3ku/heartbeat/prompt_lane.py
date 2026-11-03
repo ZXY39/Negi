@@ -779,6 +779,18 @@ def _delivery_failure_lines(
     return lines
 
 
+def _owned_process_label(event: dict[str, Any]) -> str:
+    try:
+        pid = int(event.get("pid") or 0)
+    except (TypeError, ValueError):
+        pid = 0
+    label = f"Background process pid {pid}" if pid > 0 else "Background process"
+    cmd = _non_empty_text(event.get("cmd"))
+    if cmd:
+        label = f"{label} ({cmd})"
+    return label
+
+
 def tool_job_lines(
     event: dict[str, Any],
     retrieval_parts: list[str],
@@ -789,6 +801,7 @@ def tool_job_lines(
     """后台工具作业的终态文本；事件正文的唯一作者就是本模块。"""
     job_id = _non_empty_text(event.get("job_id")) or "unknown"
     tool_name = _non_empty_text(event.get("tool_name")) or "tool"
+    kind = _non_empty_text(event.get("kind")) or "tool_job"
     status = _non_empty_text(event.get("status")).lower() or "unknown"
     elapsed = _float_value(event.get("elapsed_seconds"))
     timeout = _float_value(event.get("timeout_seconds"))
@@ -819,10 +832,16 @@ def tool_job_lines(
             "the result/log before retrying."
         )
     elif status == "stopped_by_user":
-        header = (
-            f"- Background tool job {job_id} ({tool_name}) was stopped by the user (用户手动停止) "
-            f"after {elapsed:.0f}s. Do not restart it unless the user asks; inspect any partial output first."
-        )
+        if kind == "process":
+            header = (
+                f"- {_owned_process_label(event)} was stopped by the user (用户手动停止) "
+                f"after {elapsed:.0f}s. Do not restart it unless the user asks; inspect any partial output first."
+            )
+        else:
+            header = (
+                f"- Background tool job {job_id} ({tool_name}) was stopped by the user (用户手动停止) "
+                f"after {elapsed:.0f}s. Do not restart it unless the user asks; inspect any partial output first."
+            )
     else:
         header = f"- Background tool job {job_id} ({tool_name}) ended after {elapsed:.0f}s (status: {status})."
     lines = [header]

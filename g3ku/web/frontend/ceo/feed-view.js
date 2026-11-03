@@ -29,6 +29,9 @@ function loadOlderCeoFeedMessages({ upToKey = "", maxPages = 1 } = {}) {
         const beforeHeight = U.ceoFeed.scrollHeight || 0;
         const anchorChild = U.ceoFeed.firstChild;
         while (host.firstChild) U.ceoFeed.insertBefore(host.firstChild, anchorChild);
+        // 新补的一页与既有顶部可能同属一段静默：分组要跨插入点重算，而且必须在量
+        // grew 之前——被隐藏成员的高度变化不进入补偿量，视口就会漂。
+        if (typeof syncCeoSilentTurnGroups === "function") syncCeoSilentTurnGroups();
         const grew = (U.ceoFeed.scrollHeight || 0) - beforeHeight;
         if (grew > 0) {
             markCeoFeedProgrammaticScroll();
@@ -223,6 +226,9 @@ function withCeoFeedBatch(mutator, { scrollMode = "preserve" } = {}) {
         ceoCompressionSyncQueued = false;
         syncCeoCompressionDivider();
     }
+    // 静默回合分组是纯派生态：一轮 DOM 落定后重算一次。压缩线增删、回合被丢、
+    // 翻页补插都会改变相邻关系；成员整条隐藏还会改高度，所以必须在还原滚动之前算。
+    if (typeof syncCeoSilentTurnGroups === "function") syncCeoSilentTurnGroups();
     if (scrollMode === "bottom") {
         scrollCeoFeedToBottom();
     } else {
@@ -237,6 +243,7 @@ function mutateCeoFeed(mutator, { scrollMode = "preserve" } = {}) {
     if (ceoFeedBatchDepth > 0) return mutator();
     const snapshot = scrollMode === "bottom" ? null : captureCeoFeedScrollSnapshot();
     const result = mutator();
+    if (typeof syncCeoSilentTurnGroups === "function") syncCeoSilentTurnGroups();
     if (scrollMode === "bottom") {
         scrollCeoFeedToBottom();
     } else {

@@ -1848,24 +1848,41 @@ def _is_qq_official_bridge(bridge_id: str) -> bool:
     return normalized == QQ_OFFICIAL_BRIDGE_ID or normalized.startswith(f"{QQ_OFFICIAL_BRIDGE_ID}-")
 
 
-def _qq_bot_accounts() -> list[Any]:
+def _qq_bot_accounts() -> dict[str, Any]:
     try:
         config, _revision, _changed = get_runtime_config()
     except Exception:
-        return []
+        return {}
     accounts = getattr(getattr(config, "qq_bot", None), "accounts", None)
     if not isinstance(accounts, dict):
-        return []
-    return [accounts[key] for key in sorted(accounts)]
+        return {}
+    return {str(key): accounts[key] for key in sorted(accounts)}
 
 
-def _qq_account_remark() -> str:
-    """QQ 账号卡片上的备注；多号取第一个非空的（按 AppID 排序，读数稳定不抖）。"""
-    for account in _qq_bot_accounts():
-        label = str(getattr(account, "label", "") or "").strip()
-        if label:
-            return label
-    return ""
+def _qq_app_id_for_bridge(bridge_id: str) -> str:
+    raw = str(bridge_id or "").strip()
+    prefix = f"{QQ_OFFICIAL_BRIDGE_ID}-"
+    return raw[len(prefix):] if raw.lower().startswith(prefix) else ""
+
+
+def _qq_account_remark(bridge_id: str) -> str:
+    """QQ 账号卡片上的备注，按桥身份定位到该号那一行。
+
+    裸 `qq-official` 是单号时代的桥身份，键里没有 AppID，回退到第一个非空备注。
+    """
+    accounts = _qq_bot_accounts()
+    app_id = _qq_app_id_for_bridge(bridge_id)
+    if not app_id:
+        for key in accounts:
+            label = str(getattr(accounts[key], "label", "") or "").strip()
+            if label:
+                return label
+        return ""
+    account = accounts.get(app_id)
+    if account is None:
+        folded = {key.casefold(): value for key, value in accounts.items()}
+        account = folded.get(app_id.casefold())
+    return "" if account is None else str(getattr(account, "label", "") or "").strip()
 
 
 def _external_bridge_remark(bridge_id: str) -> str:
@@ -1936,7 +1953,7 @@ def _channel_label(channel_id: str) -> str:
     if raw.startswith("ext:"):
         bridge_id = raw[len("ext:"):].strip()
         if _is_qq_official_bridge(bridge_id):
-            return _qq_account_remark() or _external_bridge_remark(bridge_id) or "QQ"
+            return _qq_account_remark(bridge_id) or _external_bridge_remark(bridge_id) or "QQ"
         return _external_bridge_remark(bridge_id) or "外部桥接"
     return CHINA_CHANNEL_LABELS.get(raw, raw or "渠道")
 

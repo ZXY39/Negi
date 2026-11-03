@@ -9,7 +9,7 @@ source:
   url: ''
   ref: ''
 current_version:
-  summary: Resource-local task runtime tool for reviewing and controlling paused nodes, with whole-task scope (task_id alone), subtree cascade, per-target actions, and atomic overlap rejection.
+  summary: Resource-local task runtime tool for reviewing and controlling paused nodes, with task-level scope (task_id alone), subtree cascade, per-target actions, and atomic overlap rejection.
   compare_rule: Treat manifest, main/, parameter contract, or toolskills changes as version-relevant.
   source_of_truth: resource.yaml, main/, and toolskills together define the effective behavior.
 requires:
@@ -24,19 +24,19 @@ parameters:
   properties:
     task_id:
       type: string
-      description: Target task id. Pass an action with no node_ids and no targets to act on the whole task - that is equivalent to targeting the task root node with cascade=true.
+      description: Target task id. Pass action with no node_ids and no targets to act on the task itself - pause/resume go through the task-level implementation (task flags, scheduling, in-flight suspension); fail/keep_paused apply to the task root with cascade.
     node_ids:
       type: array
       items:
         type: string
-      description: Single-action batch form - one or more node ids that all receive the same action. Combine with action; mutually exclusive with targets. Omit (or leave empty) together with an action to act on the whole task instead.
+      description: Single-action batch form - one or more node ids that all receive the same action. Combine with action; mutually exclusive with targets. Omit (or leave empty) together with an action to act on the task itself instead.
     action:
       type: string
       enum: [resume, keep_paused, fail, pause]
-      description: Action applied to every node in node_ids (single-action batch form), or to the whole task when no node_ids/targets are given. Mutually exclusive with targets. For resume, read each item's result - resumed means an executor is running, queued means a durable intent was recorded and the next pickup must consume it, deferred means a designed stop (waiting_acceptance / waiting_explicit) that is not a failure; verify queued with task_progress.
+      description: Action applied to every node in node_ids (single-action batch form), or to the task itself when no node_ids/targets are given (pause/resume are task-level; fail/keep_paused stay root+cascade). Mutually exclusive with targets. For resume, read each item's result - resumed means an executor is running, queued means a durable intent was recorded and the next pickup must consume it, deferred means a designed stop (waiting_acceptance / waiting_explicit) that is not a failure; verify queued with task_progress.
     cascade:
       type: boolean
-      description: Propagate the action down to the whole subtree rooted at each node. With node_ids it applies to every node in the batch; with targets it serves as the default for entries that omit their own cascade flag. An atomic validated batch results whenever cascade is true. Targeting the task root node with cascade=true, and omitting node_ids entirely, both mean "the whole task" and behave identically - including flipping the task itself to Paused (and back) in the task hall.
+      description: Propagate the action down to the whole subtree rooted at each node. With node_ids it applies to every node in the batch; with targets it serves as the default for entries that omit their own cascade flag. An atomic validated batch results whenever cascade is true. Cascade acts on nodes only - pausing the task root with cascade pauses the whole node tree but does not move the task itself. To pause/resume the task, omit node_ids and targets.
     targets:
       type: array
       items:
@@ -51,7 +51,7 @@ parameters:
             description: Action for this node or subtree. resume reports per-node resumed/queued/deferred; queued is not failure.
           cascade:
             type: boolean
-            description: When true, apply the action to the whole subtree rooted at node_id; when omitted, inherit the top-level cascade flag. The task root node with cascade=true targets the entire tree.
+            description: When true, apply the action to the whole subtree rooted at node_id; when omitted, inherit the top-level cascade flag. Cascading from the task root targets the entire node tree; it does not pause or resume the task itself.
         required: [node_id, action]
       description: Per-node actions in one atomic call (e.g. pause subtree a while failing subtree b). The batch validates before applying anything. Subtrees claimed by different actions reject the whole call with error subtree_overlap listing the covered node ids; same-action nested subtrees are auto-merged (the absorbed target is reported in the response merged list). A cascade fail requires every non-terminal descendant to be paused first, otherwise the batch is rejected with subtree_not_fully_paused. Mutually exclusive with node_ids+action.
     remark:

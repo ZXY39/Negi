@@ -147,7 +147,7 @@ async def test_worker_command_executes_local_delivery_and_reports_receipt(
     _seed(service)
     service.execution_mode = 'worker'
 
-    async def _wake(task_id: str, node_id: str) -> str:
+    async def _wake(task_id: str, node_id: str, allow_pause_clear: bool = False) -> str:
         return 'resumed'
 
     monkeypatch.setattr(service, 'wake_node_on_message', _wake)

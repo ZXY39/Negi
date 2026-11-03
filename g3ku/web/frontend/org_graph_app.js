@@ -521,6 +521,7 @@ const U = {
     ceoBgJobsPopover: document.getElementById("ceo-bg-jobs-popover"),
     ceoBgJobsList: document.getElementById("ceo-bg-jobs-list"),
     ceoSend: document.getElementById("ceo-send-btn"),
+    ceoModelLiveBadge: document.getElementById("ceo-model-live-badge"),
     viewCeo: document.getElementById("view-ceo"),
     viewTasks: document.getElementById("view-tasks-list"),
     viewSkills: document.getElementById("view-skills"),
@@ -580,7 +581,6 @@ const U = {
     memoryNoteBody: null,
     memoryNoteClose: null,
     modelHint: document.getElementById("sidebar-model-hint"),
-    modelRefresh: document.getElementById("model-refresh-btn"),
     modelCreate: document.getElementById("model-create-btn"),
     modelRolesCancel: document.getElementById("model-roles-cancel-btn"),
     modelRolesSave: document.getElementById("model-roles-save-btn"),
@@ -1638,6 +1638,11 @@ function normalizeCeoRuntimeUsageDiagnostics(payload = null) {
     );
     const providerModel = String(item.provider_model || item.providerModel || "").trim();
     if (finalRequestTokens <= 0 || maxContextTokens <= 0 || !providerModel) return null;
+    // 这一跳真正服务的模型：链上换成员（429 降档）后 provider_model 仍是预检那颗，
+    // 实际服务的是 provider_request_body.model，落在 observed_input_truth 里。
+    const observedTruth = item.observed_input_truth && typeof item.observed_input_truth === "object"
+        ? item.observed_input_truth
+        : {};
     return {
         final_request_tokens: finalRequestTokens,
         max_context_tokens: maxContextTokens,
@@ -1647,6 +1652,13 @@ function normalizeCeoRuntimeUsageDiagnostics(payload = null) {
         estimate_source: String(item.estimate_source || item.estimateSource || "").trim(),
         provider_model: providerModel,
         resolved_model_key: String(item.resolved_model_key || item.resolvedModelKey || "").trim(),
+        observed_provider_model: String(
+            observedTruth.provider_model
+            || observedTruth.providerModel
+            || item.observed_provider_model
+            || item.observedProviderModel
+            || ""
+        ).trim(),
         applied: !!item.applied,
     };
 }
@@ -1671,6 +1683,7 @@ function normalizeCeoRuntimeUsageEstimate(sessionId, inflightTurn = null) {
         ratio,
         provider_model: String(diagnostics.provider_model || "").trim(),
         resolved_model_key: String(diagnostics.resolved_model_key || "").trim(),
+        observed_provider_model: String(diagnostics.observed_provider_model || "").trim(),
         trigger_tokens: activeTriggerTokens > 0 ? Math.floor(activeTriggerTokens) : 0,
         would_trigger_token_compression: activeTriggerTokens > 0 && estimatedTotalTokens >= activeTriggerTokens,
         would_exceed_context_window: estimatedTotalTokens > contextWindowTokens,
@@ -3684,6 +3697,14 @@ function handleCeoControlAck(payload = {}) {
 }
 
 function handleCeoError(payload = {}) {
+    const sessionId = activeSessionId();
+    const representedUserMessages = normalizeCeoSnapshotUserMessages(payload?.user_messages);
+    if (sessionId && representedUserMessages.length) {
+        // 失败回合的用户消息已经进了请求上下文，不再重投。这里只退役「插话」提交的
+        // 本地在飞副本；服务端镜像条由随后那帧空队列读数清掉，不在这里重复处理。
+        consumeRepresentedRuntimeSentCeoFollowUps(sessionId, representedUserMessages);
+        retireCeoTakenFollowUpsFromRepresentedMessages(sessionId, representedUserMessages);
+    }
     S.ceoTurnActive = false;
     S.ceoPauseBusy = false;
     if (patchCeoSessionRuntimeState(activeSessionId(), false)) renderCeoSessions();
@@ -4634,16 +4655,22 @@ function renderCeoSilentTurn(turn, { text = "", timestamp = "" } = {}) {
         line.className = "ceo-silent-line";
         const label = document.createElement("span");
         label.className = "ceo-silent-label";
+        const count = document.createElement("span");
+        count.className = "ceo-silent-count";
+        count.hidden = true;
         const rule = document.createElement("span");
         rule.className = "ceo-silent-rule";
         const caret = document.createElement("span");
         caret.className = "ceo-silent-caret";
         line.appendChild(label);
+        line.appendChild(count);
         line.appendChild(rule);
         line.appendChild(caret);
         line.addEventListener("click", () => {
             const expanded = turn.el.classList.toggle("ceo-silent-expanded");
             line.setAttribute("aria-expanded", expanded ? "true" : "false");
+            // 组内其余回合的显隐从组头的展开态派生，开合后重算一次即可。
+            syncCeoSilentTurnGroups();
         });
         turn.el.insertBefore(line, turn.el.children[0] || null);
         turn.silentLineEl = line;
@@ -4651,6 +4678,70 @@ function renderCeoSilentTurn(turn, { text = "", timestamp = "" } = {}) {
     const clock = formatCompactTime(timestamp || turn.completedAt || "");
     line.children[0].textContent = clock ? `静默消息 ${clock}` : "静默消息";
     line.setAttribute("aria-expanded", turn.el.classList.contains("ceo-silent-expanded") ? "true" : "false");
+}
+
+// 相邻静默回合合并成一行：心跳/cron 连着一串静默时，每轮各占一行会把会话刷成一片
+// 时间戳。只留第一轮的折叠行，行尾补「共N条」，其余回合整条收进组内、不占高度。
+// 分组是纯派生态——不动 DOM 顺序、不动 data-ceo-key、折叠仍由各轮自己的
+// ceo-silent-expanded 决定——所以任何一次重算都幂等；翻页补插、压缩线增删、
+// 回合被丢弃引起的相邻关系变化，都靠重算收敛。
+const CEO_SILENT_GROUP_MIN_SIZE = 2;
+
+function ceoSilentGroupCountEl(turnEl = null) {
+    if (!turnEl?.classList?.contains?.("ceo-silent-message")) return null;
+    for (const child of Array.from(turnEl.children || [])) {
+        if (!child?.classList?.contains?.("ceo-silent-line")) continue;
+        for (const part of Array.from(child.children || [])) {
+            if (part?.classList?.contains?.("ceo-silent-count")) return part;
+        }
+    }
+    return null;
+}
+
+function syncCeoSilentTurnGroups() {
+    const host = typeof ceoFeedAppendHost === "function" ? ceoFeedAppendHost() : U.ceoFeed;
+    if (!host || !host.children) return;
+    const children = Array.from(host.children || []);
+    const runs = [];
+    let run = [];
+    children.forEach((child) => {
+        if (child?.classList?.contains?.("ceo-silent-message")) {
+            run.push(child);
+            return;
+        }
+        if (run.length) runs.push(run);
+        run = [];
+    });
+    if (run.length) runs.push(run);
+    // 先全量复位再按本次扫描重建：上一轮的分组可能已过期（中间插进了分隔线、
+    // 成员被移除，或组头后来才补上）。组头自身的展开态不动，它是开合的唯一真相。
+    children.forEach((child) => {
+        child?.classList?.remove?.("ceo-silent-group-head");
+        child?.classList?.remove?.("ceo-silent-group-member");
+        child?.classList?.remove?.("ceo-silent-group-open");
+        const countEl = ceoSilentGroupCountEl(child);
+        if (!countEl) return;
+        // 只在真变了才写：这个函数跑在每个批次尾巴上，无谓的 textContent 赋值
+        // 会换掉文本节点，白触发一轮样式与布局。
+        if (countEl.textContent) countEl.textContent = "";
+        if (!countEl.hidden) countEl.hidden = true;
+    });
+    runs.forEach((members) => {
+        if (members.length < CEO_SILENT_GROUP_MIN_SIZE) return;
+        const [head, ...rest] = members;
+        const open = !!head.classList?.contains?.("ceo-silent-expanded");
+        head.classList?.add?.("ceo-silent-group-head");
+        const countEl = ceoSilentGroupCountEl(head);
+        if (countEl) {
+            const label = `· 共${members.length}条`;
+            if (countEl.textContent !== label) countEl.textContent = label;
+            countEl.hidden = false;
+        }
+        rest.forEach((member) => {
+            member.classList?.add?.("ceo-silent-group-member");
+            member.classList?.toggle?.("ceo-silent-group-open", open);
+        });
+    });
 }
 
 // --- 思维链实时行（正文下方一行）--------------------------------------------------
@@ -11343,7 +11434,6 @@ function bindCeoComposerAndFeedActions() {
 
 
 function bindModelPage() {
-    U.modelRefresh?.addEventListener("click", () => void loadModels());
     U.modelCreate?.addEventListener("click", startCreateModel);
     U.modelRolesCancel?.addEventListener("click", cancelModelRoleEditing);
     U.modelRolesSave?.addEventListener("click", () => void handleModelRoleEditorAction());

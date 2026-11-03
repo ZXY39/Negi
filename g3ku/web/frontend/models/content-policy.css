@@ -1,0 +1,70 @@
+/* 安全审查词替换弹窗：沿用 confirm-dialog 外壳，只补词表这块的排版。 */
+
+.confirm-dialog.content-policy-dialog {
+    width: min(640px, calc(calc(100vw / var(--ui-zoom, 1)) - 48px));
+    max-height: min(760px, calc(calc(100vh / var(--ui-zoom, 1)) - 48px));
+}
+
+.content-policy-body {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-height: 0;
+    overflow: auto;
+}
+
+.content-policy-switch {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.86rem;
+    color: var(--text-primary);
+}
+
+.content-policy-hint,
+.content-policy-source {
+    margin: 0;
+    font-size: 0.74rem;
+    line-height: 1.5;
+    color: var(--text-muted);
+}
+
+.content-policy-source a {
+    color: var(--accent-color, var(--text-primary));
+}
+
+.content-policy-words {
+    width: 100%;
+    min-height: 220px;
+    resize: vertical;
+    padding: 10px 12px;
+    border-radius: 12px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-input, var(--bg-panel));
+    color: var(--text-primary);
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 0.8rem;
+    line-height: 1.5;
+}
+
+.content-policy-count {
+    margin: 0;
+    font-size: 0.74rem;
+    color: var(--text-muted);
+}
+
+.content-policy-warning {
+    margin: 0;
+    padding: 8px 10px;
+    border-radius: 10px;
+    background: var(--warning-bg, rgba(214, 158, 46, 0.12));
+    color: var(--text-primary);
+    font-size: 0.76rem;
+    line-height: 1.5;
+}
+
+.content-policy-actions-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}

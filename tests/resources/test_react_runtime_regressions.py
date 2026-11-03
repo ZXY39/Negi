@@ -8437,3 +8437,68 @@ async def test_node_round_without_thought_chunks_reports_no_seconds(tmp_path: Pa
 
     assert float(appended.get('reasoning_seconds') or 0.0) == 0.0
 
+
+
+@pytest.mark.asyncio
+async def test_node_round_masks_tool_results_with_content_policy(tmp_path: Path, monkeypatch) -> None:
+    """节点请求面只替换 tool 结果里的词表命中；原始消息对象不被就地改写。"""
+    from g3ku.deployment import data_root as data_root_module
+    from g3ku.security import content_policy as cp
+
+    monkeypatch.setenv("G3KU_DATA_DIR", str(tmp_path))
+    data_root_module.reset_cache()
+    cp.load_policy(force=True)
+    cp.save_policy(True, ["六四"])
+    try:
+        calls: list[list[dict[str, object]]] = []
+
+        class _Backend:
+            async def chat(self, **kwargs):
+                calls.append([dict(item) for item in list(kwargs.get("messages") or [])])
+                return LLMResponse(
+                    content="not json",
+                    tool_calls=[],
+                    finish_reason="stop",
+                    usage={"input_tokens": 8, "output_tokens": 3},
+                )
+
+        loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=2)
+        initial_messages = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": '{"task_id":"task-1","goal":"demo"}'},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-a",
+                        "type": "function",
+                        "function": {"name": "filesystem", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "name": "filesystem", "tool_call_id": "call-a", "content": '{"ok": true, "text": "六四"}'},
+        ]
+
+        try:
+            await loop.run(
+                task=SimpleNamespace(task_id='task-1'),
+                node=SimpleNamespace(node_id='node-1', depth=0, node_kind='execution', goal='demo'),
+                messages=initial_messages,
+                tools={},
+                model_refs=['fake'],
+                runtime_context={'task_id': 'task-1', 'node_id': 'node-1'},
+                max_iterations=2,
+            )
+        except RuntimeError:
+            # 后端从不提交最终结果：这轮会撞轮次上限，读数已经在第一次调用里拿到。
+            pass
+
+        assert calls
+        sent_tool = [item for item in calls[0] if item.get('role') == 'tool'][0]
+        assert cp.REPLACEMENT_MARKER in str(sent_tool.get('content'))
+        assert '六四' not in str(sent_tool.get('content'))
+        # 原始消息对象保持原文：替换只发生在发出去的那份副本上。
+        assert initial_messages[3]['content'] == '{"ok": true, "text": "六四"}'
+    finally:
+        data_root_module.reset_cache()

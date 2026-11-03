@@ -66,7 +66,7 @@ def _seed(service: MainRuntimeService) -> None:
 def _capture_wakes(service: MainRuntimeService, monkeypatch) -> list[str]:
     calls: list[str] = []
 
-    async def wake(*, task_id: str, node_id: str) -> str:
+    async def wake(*, task_id: str, node_id: str, allow_pause_clear: bool = False) -> str:
         calls.append(node_id)
         return 'resumed'
 

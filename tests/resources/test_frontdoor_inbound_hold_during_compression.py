@@ -463,6 +463,32 @@ async def test_dispatch_refuses_while_compression_holds(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_dispatch_refuses_after_compression_failure_until_released(tmp_path: Path) -> None:
+    """压缩失败不是空闲边界：失败保持立住时，WS 重连/收尾排水都不许起回合。"""
+    key = "ext:test-bridge:dispatch-compression-failed"
+    session = _real_session(tmp_path, key)
+    recorder = _RecordingSession(session)
+    session.prompt_batch = recorder._prompt_batch  # type: ignore[method-assign]
+    await session.queue_follow_up_batch(["在排队"], persist_transcript=True)
+    session.hold_queued_follow_ups_after_compression_failure()
+
+    # 失败保持不挡入站：操作员下一条消息照常起回合（由 _prompt_locked 解除保持）。
+    assert session.frontdoor_inbound_hold() == ""
+    result = await session.dispatch_queued_follow_ups_if_idle(source="ws_reconnect")
+
+    assert recorder.calls == []
+    assert result["reason"] == "held:compression_failed"
+    assert [str(item.content) for item in session._state.queued_follow_up_messages] == ["在排队"]
+
+    # 可见用户回合（或重新发起压缩）解除之后，队列恢复既有排水语义。
+    session.release_queued_follow_ups_after_compression_failure()
+    result = await session.dispatch_queued_follow_ups_if_idle(source="test")
+
+    assert result["dispatched"] == 1
+    assert recorder.calls == [["在排队"]]
+
+
+@pytest.mark.asyncio
 async def test_dispatch_waits_for_a_pending_tool_approval(tmp_path: Path) -> None:
     """审批中的回合会把基线一起改掉，派发必须排在它后面。"""
     key = "ext:test-bridge:dispatch-approval"
@@ -667,18 +693,20 @@ async def test_compression_finish_seam_dispatches_after_the_hold_is_released(
 
     app = FastAPI()
     app.include_router(ceo_sessions.router, prefix="/api")
-    client = TestClient(app)
-    response = client.post("/api/ceo/sessions/web:shared/compress-context")
-    assert response.status_code == 200
-    for _ in range(60):
-        if runtime_session.dispatch_calls:
-            break
-        await asyncio.sleep(0.05)
+    # TestClient 作为上下文使用时 portal 活到 with 结束；否则请求一结束就把后台
+    # 压缩任务连带取消，dispatch 断言会永远等不到。
+    with TestClient(app) as client:
+        response = client.post("/api/ceo/sessions/web:shared/compress-context")
+        assert response.status_code == 200
+        for _ in range(60):
+            if runtime_session.dispatch_calls:
+                break
+            await asyncio.sleep(0.05)
 
-    assert runtime_session.dispatch_calls == [("manual_compression_finished", "")]
-    view = client.get("/api/ceo/sessions/web:shared/compress-context").json()
-    assert view["status"] == "completed"
-    assert view["post_tokens"] == 17_956
+        assert runtime_session.dispatch_calls == [("manual_compression_finished", "")]
+        view = client.get("/api/ceo/sessions/web:shared/compress-context").json()
+        assert view["status"] == "completed"
+        assert view["post_tokens"] == 17_956
 
 
 # -- h) 重启后的启动重放 ------------------------------------------------------

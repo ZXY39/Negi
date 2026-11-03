@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from fastapi import APIRouter, BackgroundTasks, Body, HTTPException
 from loguru import logger
 
+from g3ku.runtime import owned_processes
 from g3ku.runtime import skill_roster_notice as _skill_roster_notice
 from g3ku.runtime.ceo_catalog_offload import (
     build_ceo_session_catalog_async,
@@ -35,6 +36,9 @@ from g3ku.runtime.tool_jobs import (
     TOOL_JOB_TERMINAL_STATUSES,
     ToolJobFinishedError,
     ToolJobNotFoundError,
+    build_owned_process_stopped_payload,
+    owned_process_items,
+    parse_owned_process_job_id,
 )
 from g3ku.runtime.web_ceo_sessions import (
     SESSION_MODEL_SELECTION_KEY,
@@ -71,7 +75,7 @@ from g3ku.shells.web import (
     get_web_heartbeat_service,
     is_no_ceo_model_configured_error,
 )
-from main.protocol import build_envelope
+from main.protocol import build_envelope, now_iso
 
 router = APIRouter()
 
@@ -624,7 +628,11 @@ async def get_ceo_session_tool_jobs(session_id: str):
     )
     runtime_session = _runtime_session(runtime_manager, session_key)
     lister = getattr(runtime_session, "list_tool_jobs", None) if runtime_session is not None else None
-    items = list(lister() or []) if callable(lister) else []
+    if callable(lister):
+        items = list(lister() or [])
+    else:
+        # 会话不驻留时 tool job 无从取（纯内存），但 exec 后台进程在盘上，必须照常列出。
+        items = owned_process_items(session_key)
     finished: list[dict[str, object]] = []
     store_getter = getattr(runtime_session, "_tool_job_store", None) if runtime_session is not None else None
     store = store_getter() if callable(store_getter) else None
@@ -661,24 +669,77 @@ async def get_ceo_session_tool_jobs(session_id: str):
 
 @router.post("/ceo/sessions/{session_id}/tool-jobs/{job_id}/stop")
 async def stop_ceo_session_tool_job(session_id: str, job_id: str):
-    _agent, session_manager, runtime_manager, state_store = _sessions()
+    agent, session_manager, runtime_manager, state_store = _sessions()
     session_key, _is_channel = _resolve_bulk_session_key(
         session_manager,
         runtime_manager,
         state_store,
         session_id,
     )
+    normalized_job_id = str(job_id or "").strip()
+    pid = parse_owned_process_job_id(normalized_job_id)
+    if pid is not None:
+        return await _stop_owned_process(session_key, pid, normalized_job_id, agent=agent, runtime_manager=runtime_manager)
     runtime_session = _runtime_session(runtime_manager, session_key)
     stopper = getattr(runtime_session, "stop_tool_job", None) if runtime_session is not None else None
     if not callable(stopper):
         raise HTTPException(status_code=404, detail="tool_job_not_found")
     try:
-        result = await stopper(str(job_id or "").strip())
+        result = await stopper(normalized_job_id)
     except ToolJobFinishedError as exc:
         raise HTTPException(status_code=409, detail="tool_job_finished") from exc
     except ToolJobNotFoundError as exc:
         raise HTTPException(status_code=404, detail="tool_job_not_found") from exc
     return {"ok": True, **dict(result or {})}
+
+
+async def _stop_owned_process(
+    session_key: str,
+    pid: int,
+    job_id: str,
+    *,
+    agent,
+    runtime_manager,
+) -> dict[str, object]:
+    """停掉 exec background=true 的进程；不依赖会话是否驻留。
+
+    进程在盘上登记（`owned_processes`），所以会话被回收后仍能停。停成功后投一条
+    `tool_job` 心跳事件（`kind=process`），让模型知道服务已经不在了。
+    """
+    result = owned_processes.kill_owned(
+        owned_processes.scope_key(session_key=session_key),
+        pid,
+    )
+    reason = str(result.get("reason") or "")
+    if reason == "not_owned":
+        raise HTTPException(status_code=404, detail="tool_job_not_found")
+    if reason in {"already_exited", "identity_mismatch"}:
+        raise HTTPException(status_code=409, detail="tool_job_finished")
+    if not result.get("ok"):
+        raise HTTPException(status_code=500, detail="process_stop_failed")
+    entry = result.get("entry")
+    entry = dict(entry) if isinstance(entry, dict) else {}
+    heartbeat = get_web_heartbeat_service(agent) if agent is not None else None
+    if heartbeat is not None:
+        try:
+            heartbeat.enqueue_tool_job(
+                build_owned_process_stopped_payload(
+                    entry,
+                    session_id=session_key,
+                    finished_at=now_iso(),
+                    result_preview=str(result.get("log_tail") or ""),
+                )
+            )
+        except Exception:
+            logger.debug("owned process stop event enqueue failed", exc_info=True)
+    runtime_session = _runtime_session(runtime_manager, session_key)
+    notify = getattr(runtime_session, "notify_background_items_changed", None)
+    if callable(notify):
+        try:
+            notify()
+        except Exception:
+            logger.debug("owned process change notification failed", exc_info=True)
+    return {"ok": True, "job_id": job_id, "status": "stopped"}
 
 
 @router.post("/ceo/sessions/{session_id}/resume-interrupt")
@@ -1296,6 +1357,12 @@ async def _finish_manual_compression(
     stats: dict,
     reason: str,
 ) -> None:
+    # 失败不是"会话回到空闲"：先立住队列派发保持，后面的状态快照会让浏览器重连
+    # CEO WS，重连那条排水通道必须已经看到这一位，否则排队补充会在失败处自动开跑。
+    if status == MANUAL_COMPRESSION_FAILED:
+        hold = getattr(runtime_session, "hold_queued_follow_ups_after_compression_failure", None)
+        if callable(hold):
+            hold()
     if marker_state:
         # 区分线要重写整份转录，而渠道会话的 JSONL 可达数十 MB：按本仓库的会话 IO
         # 合同离开事件循环，否则一次收尾就把所有在跑的会话流一起卡住。
@@ -1328,12 +1395,14 @@ async def _finish_manual_compression(
     # 压缩收尾就是"会话回到空闲"的那个时刻，而队列的排水通道原本只长在请求处理里：
     # 压缩在途时受理的消息（web 候选 / 渠道排队）到这里才该发出去。谁让会话变空闲，
     # 谁在自己的收尾调用派发；它内部会再问一次 hold，重复调用与并发终局都安全。
-    dispatch_queued = getattr(runtime_session, "dispatch_queued_follow_ups_if_idle", None)
-    if callable(dispatch_queued):
-        try:
-            await dispatch_queued(source="manual_compression_finished")
-        except Exception:
-            pass
+    # 失败档例外：失败处不自动起回合，排队消息留给操作员的下一条消息或下一次压缩。
+    if status != MANUAL_COMPRESSION_FAILED:
+        dispatch_queued = getattr(runtime_session, "dispatch_queued_follow_ups_if_idle", None)
+        if callable(dispatch_queued):
+            try:
+                await dispatch_queued(source="manual_compression_finished")
+            except Exception:
+                pass
 
 
 async def _execute_manual_context_compression(agent, runtime_session, *, pause_first: bool) -> None:
@@ -1472,6 +1541,11 @@ async def compress_ceo_session_context(session_id: str):
     current = _manual_compression_view(runtime_session)
     if current.get("status") == MANUAL_COMPRESSION_RUNNING:
         return {"ok": True, "session_id": session_key, **current}
+    # 重新发起压缩是操作员的明确动作：解除上一次失败留下的派发保持。新一轮压缩
+    # 自己会占住入站闸门；成功收尾按既有规则排水，失败则重新立住保持。
+    release_hold = getattr(runtime_session, "release_queued_follow_ups_after_compression_failure", None)
+    if callable(release_hold):
+        release_hold()
     # 会话是否正在跑要在起任务前问一次：这一步只是读内存状态，真正的停手交给任务，
     # 端点本身必须在浏览器请求超时之前返回（见 _execute_manual_context_compression）。
     pause_first = _session_is_running(runtime_manager, session_key)

@@ -10,6 +10,7 @@ from main.runtime.node_wake import (
     OUTCOME_IN_FLIGHT,
     OUTCOME_NO_NODE,
     OUTCOME_NO_RUNNING_LOOP,
+    OUTCOME_PAUSED,
     OUTCOME_RESUMED,
     OUTCOME_SCHEDULED,
     OUTCOME_TASK_PAUSED,
@@ -124,9 +125,20 @@ class TestWakeParkedNode:
         assert record.enqueued == ['task:1']
 
     @pytest.mark.asyncio
-    async def test_paused_node_clears_the_flag_first(self):
+    async def test_paused_node_not_woken_by_message(self):
         deps, record = _deps(node=_node(is_paused=True), phase='before_model')
-        assert await wake_parked_node(task_id='task:1', node_id='n', deps=deps) == OUTCOME_RESUMED
+        assert await wake_parked_node(task_id='task:1', node_id='n', deps=deps) == OUTCOME_PAUSED
+        assert record.cleared == [] and record.resumed == [] and record.enqueued == []
+
+    @pytest.mark.asyncio
+    async def test_paused_node_clears_the_flag_only_for_explicit_resume(self):
+        deps, record = _deps(node=_node(is_paused=True), phase='before_model')
+        assert (
+            await wake_parked_node(
+                task_id='task:1', node_id='n', deps=deps, allow_pause_clear=True
+            )
+            == OUTCOME_RESUMED
+        )
         assert record.cleared == [('task:1', 'n')]
         assert record.resumed == [('task:1', 'n')]
 

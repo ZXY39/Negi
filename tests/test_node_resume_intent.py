@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from main.models import NodeRecord, TaskRecord
+from main.models import NodeRecord, TaskNodeNotification, TaskRecord
 from main.monitoring.models import TaskProjectionRuntimeFrameRecord
 from main.service.runtime_service import MainRuntimeService
 
@@ -169,6 +169,18 @@ async def test_task_level_gates_refuse_node_resume(tmp_path: Path) -> None:
         )
         assert paused['items'][0]['result'] == 'task_paused'
         assert service.get_node(CHILD).is_paused is True
+        # 根节点也一样：任务暂停时恢复根不是任务恢复，如实拒绝。
+        service.log_service.set_node_pause_state(
+            TASK, ROOT, pause_requested=True, is_paused=True, pause_reason='manual'
+        )
+        root_refused = await service._apply_resume_node_command(
+            TASK, node_ids=[ROOT], schedule_if_inactive=False
+        )
+        assert root_refused['items'][0]['result'] == 'task_paused'
+        assert service.get_node(ROOT).is_paused is True
+        service.log_service.set_node_pause_state(
+            TASK, ROOT, pause_requested=False, is_paused=False, pause_reason=''
+        )
 
         service.log_service.set_pause_state(TASK, pause_requested=False, is_paused=False)
         service.log_service.request_cancel(TASK)
@@ -219,7 +231,7 @@ async def test_worker_resume_with_dispatcher_reports_resumed_and_settles_intent(
 
 
 @pytest.mark.asyncio
-async def test_root_resume_unpauses_the_task_and_requeues_it(tmp_path: Path) -> None:
+async def test_root_resume_only_clears_the_root_and_requeues(tmp_path: Path) -> None:
     service = _service(tmp_path, mode='embedded')
     try:
         _seed(service)
@@ -238,6 +250,9 @@ async def test_root_resume_unpauses_the_task_and_requeues_it(tmp_path: Path) -> 
         service.global_scheduler = _Scheduler()  # type: ignore[assignment]
         result = await service._apply_resume_node_command(TASK, node_ids=[ROOT])
         assert result['items'][0]['result'] == 'queued'
+        root = service.get_node(ROOT)
+        assert root is not None and root.is_paused is False and root.pause_requested is False
+        # 节点恢复不移动任务：任务旗标本来就与节点暂停无关。
         task = service.get_task(TASK)
         assert task is not None and task.is_paused is False and task.pause_requested is False
         assert enqueued == [TASK]
@@ -452,5 +467,83 @@ async def test_pickup_settled_receipt_does_not_keep_the_queued_reason(tmp_path: 
         assert 'reason' not in item
         intent = service.store.get_task_node_resume_intent(CHILD)
         assert intent is not None and intent.state == 'applied' and intent.outcome == 'resumed'
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_of_a_parked_node_requeues_the_task_when_mail_is_waiting(tmp_path: Path) -> None:
+    """A5=A 收口：暂停期落箱的未读在显式 resume 后必须重新成为唤醒源。"""
+    service = _service(tmp_path, mode='embedded')
+    try:
+        _seed(service)
+        service.log_service.set_node_pause_state(
+            TASK, ROOT, pause_requested=True, is_paused=True, pause_reason='manual'
+        )
+        service.store.upsert_task_runtime_frame(
+            TaskProjectionRuntimeFrameRecord(task_id=TASK, node_id=ROOT, phase='waiting_explicit')
+        )
+        service.store.upsert_task_node_notification(
+            TaskNodeNotification(
+                notification_id='notif:parked-unread',
+                task_id=TASK,
+                node_id=ROOT,
+                epoch_id='',
+                message='child finished',
+                status='delivered',
+                created_at=STAMP,
+                delivered_at=STAMP,
+            )
+        )
+        enqueued: list[str] = []
+
+        class _Scheduler:
+            async def enqueue_task(self, task_id: str) -> None:
+                enqueued.append(task_id)
+
+            async def close(self) -> None:
+                return None
+
+        service.global_scheduler = _Scheduler()  # type: ignore[assignment]
+        result = await service._apply_resume_node_command(
+            TASK, node_ids=[ROOT], schedule_if_inactive=True
+        )
+        item = result['items'][0]
+        assert item['result'] == 'deferred'
+        assert item['reason'] == 'parked_phase:waiting_explicit'
+        node = service.get_node(ROOT)
+        assert node is not None and node.is_paused is False and node.pause_requested is False
+        assert enqueued == [TASK]
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_pickup_consumed_intent_clears_pause_even_at_a_parked_phase(tmp_path: Path) -> None:
+    """拾取道结算 deferred 时也一样清位：暂停位不能留在结算过的意图后面。"""
+    service = _service(tmp_path, mode='embedded')
+    try:
+        _seed(service)
+        service.log_service.set_node_pause_state(
+            TASK, ROOT, pause_requested=True, is_paused=True, pause_reason='manual'
+        )
+        service.store.upsert_task_runtime_frame(
+            TaskProjectionRuntimeFrameRecord(task_id=TASK, node_id=ROOT, phase='waiting_explicit')
+        )
+        service.store.upsert_task_node_resume_intent(
+            task_id=TASK,
+            node_id=ROOT,
+            command_id='command:pickup',
+            requested_at=STAMP,
+            updated_at=STAMP,
+        )
+
+        await service.task_actor_service._consume_resume_intents(TASK, _FakeDispatcher())
+
+        intent = service.store.get_task_node_resume_intent(ROOT)
+        assert intent is not None and intent.state == 'applied'
+        assert intent.outcome == 'deferred' and intent.reason == 'parked_phase:waiting_explicit'
+        node = service.get_node(ROOT)
+        assert node is not None and node.is_paused is False and node.pause_requested is False
     finally:
         await service.close()

@@ -2934,6 +2934,83 @@ def test_paused_user_turn_reconcile_noop_without_seed() -> None:
     assert reconciled == []
 
 
+def _failed_user_transcript_message(text: str, *, turn_id: str) -> dict[str, object]:
+    return {
+        "role": "user",
+        "content": text,
+        "metadata": {"_transcript_state": "failed", "_transcript_turn_id": turn_id},
+    }
+
+
+def _runtime_error_transcript_message(text: str, *, turn_id: str) -> dict[str, object]:
+    return {
+        "role": "assistant",
+        "content": f"这一轮处理失败：{text}",
+        "turn_id": turn_id,
+        "metadata": {
+            "source": "runtime_error",
+            "error_code": "legacy_session_error",
+            "error_message": text,
+            "recoverable": True,
+        },
+    }
+
+
+def test_failed_user_turn_missing_from_seed_is_reconciled() -> None:
+    """prepare 期失败、请求从未发出时，用户消息与错误通知一起进下一轮种子。"""
+    seed = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "更早的消息"},
+    ]
+    persisted_session = SimpleNamespace(
+        messages=[
+            _failed_user_transcript_message("失败的问题", turn_id="turn-f"),
+            _runtime_error_transcript_message("boom", turn_id="turn-f"),
+        ]
+    )
+
+    reconciled = CreateAgentCeoFrontDoorRunner._reconcile_failed_turns_into_seed(
+        seed, persisted_session, current_turn_user_content="新的一条"
+    )
+
+    assert reconciled[:2] == seed
+    assert reconciled[2] == {"role": "user", "content": "失败的问题"}
+    assert reconciled[3]["role"] == "assistant"
+    assert "[上一回合未完成 turn_id=turn-f]" in str(reconciled[3]["content"])
+
+
+def test_failed_user_turn_reconcile_is_idempotent() -> None:
+    seed = [{"role": "user", "content": "失败的问题"}]
+    persisted_session = SimpleNamespace(
+        messages=[
+            _failed_user_transcript_message("失败的问题", turn_id="turn-f"),
+            _runtime_error_transcript_message("boom", turn_id="turn-f"),
+        ]
+    )
+
+    first = CreateAgentCeoFrontDoorRunner._reconcile_failed_turns_into_seed(
+        seed, persisted_session, current_turn_user_content="新的一条"
+    )
+    second = CreateAgentCeoFrontDoorRunner._reconcile_failed_turns_into_seed(
+        first, persisted_session, current_turn_user_content="新的一条"
+    )
+
+    assert second == first
+
+
+def test_failed_turn_reconcile_noop_without_seed() -> None:
+    persisted_session = SimpleNamespace(
+        messages=[
+            _failed_user_transcript_message("失败的问题", turn_id="turn-f"),
+            _runtime_error_transcript_message("boom", turn_id="turn-f"),
+        ]
+    )
+    reconciled = CreateAgentCeoFrontDoorRunner._reconcile_failed_turns_into_seed(
+        [], persisted_session, current_turn_user_content="新的一条"
+    )
+    assert reconciled == []
+
+
 @pytest.mark.asyncio
 async def test_builder_fresh_path_injects_internal_seed_messages_after_base_prompt() -> None:
     # 冷启动（无续跑种子）的 cron 内部轮：内部事件消息必须走新建路径注入，

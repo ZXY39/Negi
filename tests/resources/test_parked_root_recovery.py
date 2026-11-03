@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 
 import pytest
 
 import g3ku.web.launcher as launcher
-from main.models import NodeFinalResult, normalize_final_acceptance_metadata
-from main.runtime.task_actor_service import TaskActorService
+from main.errors import NodePausedError
+from main.models import NodeFinalResult, SpawnChildSpec, normalize_final_acceptance_metadata
+from main.runtime.task_actor_service import TaskActorService, TaskNodeDispatcher
 from main.service.runtime_service import MainRuntimeService
 from main.types import KIND_ACCEPTANCE
 
@@ -131,6 +133,205 @@ async def test_run_task_does_not_execute_parked_root(tmp_path: Path) -> None:
         )
         await service.task_actor_service.run_task(task_id)
         assert service._chat_backend.calls == 0
+    finally:
+        await service.close()
+
+
+def _success_result(node_id: str) -> NodeFinalResult:
+    text = f"{node_id} complete"
+    return NodeFinalResult(
+        status="success",
+        delivery_status="final",
+        summary=text,
+        answer=text,
+        evidence=[],
+        remaining_work=[],
+        blocking_reason="",
+    )
+
+
+def _execution_child(service: MainRuntimeService, *, task, parent, name: str):
+    return service.node_runner._create_execution_child(
+        task=task,
+        parent=parent,
+        spec=SpawnChildSpec(
+            goal=f"{name} goal",
+            prompt=f"{name} prompt",
+            execution_policy={"mode": "focus"},
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_task_paused_root_runs_in_the_same_pickup_that_clears_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """任务恢复清掉根的 `pause_reason='task'` 后，同一趟拾取必须执行根回合。"""
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task("task pause pickup", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None and root is not None
+        # 任务暂停时根被标成 task；随后用户恢复任务（任务旗标已清，节点位还在，
+        # 等本次拾取的 `_resume_task_paused_nodes` 清）。
+        service.log_service.set_node_pause_state(
+            record.task_id,
+            root.node_id,
+            pause_requested=True,
+            is_paused=True,
+            pause_reason="task",
+        )
+
+        calls: list[str] = []
+
+        async def fake_run_node(task_id: str, node_id: str):
+            calls.append(node_id)
+            return _success_result(node_id)
+
+        monkeypatch.setattr(service.node_runner, "run_node", fake_run_node)
+
+        await service.task_actor_service.run_task(record.task_id)
+
+        assert calls == [root.node_id]
+        latest_root = service.get_node(root.node_id)
+        assert latest_root is not None and latest_root.is_paused is False
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_interrupted_task_recovery_keeps_root_pause(tmp_path: Path) -> None:
+    """启动恢复只重置任务行；根节点的独立暂停保留，交给下一次 resume。"""
+    service = _build_service(tmp_path)
+    try:
+        task_id, root, _acceptance = await _create_task_with_acceptance(
+            service, prompt="recovery keeps root pause"
+        )
+        service.log_service.set_node_pause_state(
+            task_id,
+            root.node_id,
+            pause_requested=True,
+            is_paused=True,
+            pause_reason="error",
+            remark="provider unavailable",
+        )
+
+        service._recover_interrupted_task(task_id)
+
+        task = service.get_task(task_id)
+        assert task is not None and task.status == "in_progress"
+        assert task.is_paused is False and task.pause_requested is False
+        latest_root = service.get_node(root.node_id)
+        assert latest_root is not None and latest_root.is_paused is True
+        assert latest_root.pause_reason == "error"
+        pause_row = service.store.get_task_node_pause(root.node_id)
+        assert pause_row is not None and pause_row.remark == "provider unavailable"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_root_error_pause_keeps_actor_alive_until_children_settle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """根回合因暂停退出时，actor 继续驱动非根节点，dispatcher 最后才关闭。"""
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task("root pause", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None and root is not None
+        child_a = _execution_child(service, task=task, parent=root, name="a")
+        child_b = _execution_child(service, task=task, parent=root, name="b")
+
+        original_execute = TaskNodeDispatcher.execute_node
+
+        async def execute_node(self, task_id: str, node_id: str):
+            if node_id == root.node_id:
+                raise NodePausedError(task_id, node_id)
+            return await original_execute(self, task_id, node_id)
+
+        monkeypatch.setattr(TaskNodeDispatcher, "execute_node", execute_node)
+
+        async def fake_run_node(task_id: str, node_id: str):
+            await asyncio.sleep(0.02)
+            service.log_service.update_node_status(
+                task_id, node_id, status="success", final_output="done"
+            )
+            return _success_result(node_id)
+
+        monkeypatch.setattr(service.node_runner, "run_node", fake_run_node)
+        closed_snapshot: dict[str, str] = {}
+        original_close = TaskNodeDispatcher.close
+
+        async def close(self):
+            for node_id in (child_a.node_id, child_b.node_id):
+                node = service.get_node(node_id)
+                closed_snapshot[node_id] = str(getattr(node, "status", "") or "")
+            return await original_close(self)
+
+        monkeypatch.setattr(TaskNodeDispatcher, "close", close)
+
+        await service.task_actor_service.run_task(record.task_id)
+
+        # 子节点跑到终态，没有被 dispatcher.close 取消。
+        for node_id in (child_a.node_id, child_b.node_id):
+            node = service.get_node(node_id)
+            assert node is not None and node.status == "success"
+            assert closed_snapshot.get(node_id) == "success"
+        # 根保持暂停，任务旗标不因根暂停而移动。
+        latest_root = service.get_node(root.node_id)
+        assert latest_root is not None and latest_root.is_paused is True
+        latest_task = service.get_task(record.task_id)
+        assert latest_task is not None and latest_task.status == "in_progress"
+        assert latest_task.is_paused is False and latest_task.pause_requested is False
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_paused_root_skips_the_turn_and_still_drives_children(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task("paused root pickup", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None and root is not None
+        child = _execution_child(service, task=task, parent=root, name="child")
+        service.log_service.set_node_pause_state(
+            record.task_id,
+            root.node_id,
+            pause_requested=True,
+            is_paused=True,
+            pause_reason="manual",
+        )
+
+        async def execute_node(self, task_id: str, node_id: str):
+            if node_id == root.node_id:
+                raise AssertionError("a paused root must not start a turn")
+            raise AssertionError(f"unexpected direct dispatch: {node_id}")
+
+        monkeypatch.setattr(TaskNodeDispatcher, "execute_node", execute_node)
+
+        async def fake_run_node(task_id: str, node_id: str):
+            service.log_service.update_node_status(
+                task_id, node_id, status="success", final_output="done"
+            )
+            return _success_result(node_id)
+
+        monkeypatch.setattr(service.node_runner, "run_node", fake_run_node)
+
+        await service.task_actor_service.run_task(record.task_id)
+
+        latest_child = service.get_node(child.node_id)
+        assert latest_child is not None and latest_child.status == "success"
+        latest_root = service.get_node(root.node_id)
+        assert latest_root is not None and latest_root.is_paused is True
+        latest_task = service.get_task(record.task_id)
+        assert latest_task is not None and latest_task.is_paused is False
     finally:
         await service.close()
 

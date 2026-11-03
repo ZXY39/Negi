@@ -45,6 +45,7 @@ from g3ku.providers.base import normalize_usage_payload
 from g3ku.providers.chatmodels import build_chat_model
 from g3ku.runtime.chunk_compression_plan import resolve_chunk_capacity
 from g3ku.runtime.context.summarizer import estimate_tokens
+from g3ku.security.content_policy import apply_to_tool_messages
 from main.prompts import load_prompt
 from main.runtime.chat_backend import (
     build_actual_request_diagnostics,
@@ -3643,7 +3644,7 @@ class MemoryManager:
         round_limit = max(round_limit, 1)
         final_text = ""
         for _ in range(round_limit):
-            request_messages = self._memory_request_messages(messages)
+            request_messages = apply_to_tool_messages(self._memory_request_messages(messages))
             self._memory_window_guard(
                 runtime_config=runtime_config,
                 model_chain=list(model_chain or []),

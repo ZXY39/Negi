@@ -171,7 +171,7 @@ function buildCeoCompressionDividerControl(state, interactive) {
     if (state === "paused") {
         return `<span class="ceo-compression-divider-icon">${buildCeoCompressionPauseGlyph(false)}</span>`;
     }
-    // 完成态按需求只留文案，不再挂图标。
+    // 完成态与失败态只留文案：失败的重试动作由行内按钮承担，不另挂图标。
     return "";
 }
 
@@ -182,9 +182,17 @@ function buildCeoCompressionRetryControl() {
 }
 
 function ceoCompressionDividerInner(state, { interactive = false, retry = false, detail = "", label = "" } = {}) {
-    return `<div class="ceo-compression-divider-inner"><span>${ceoCompressionDividerText(state, detail, label)}</span>${
+    // 失败的原话是整段外部文本：与标签同排会把两条线挤没、把重试按钮压成竖排。
+    // 线上只留「压缩失败 · 重新压缩」，原话在线下按线条同宽铺开。
+    const detailText = String(detail || "").trim();
+    const rowText = state === "failed"
+        ? ceoCompressionDividerText(state, "", label)
+        : ceoCompressionDividerText(state, detailText, label);
+    const row = `<div class="ceo-compression-divider-inner"><span>${rowText}</span>${
         retry ? buildCeoCompressionRetryControl() : buildCeoCompressionDividerControl(state, interactive)
     }</div>`;
+    if (state !== "failed" || !detailText) return row;
+    return `${row}<div class="ceo-compression-divider-detail"><span class="ceo-compression-divider-detail-text">${escapeCeoCompressionText(detailText)}</span></div>`;
 }
 
 function syncCeoCompressionRetryAffordances() {
@@ -279,6 +287,8 @@ function removeCeoCompressionLiveDivider() {
     const rows = [...new Set([first, ...all].filter(Boolean))];
     if (!rows.length) return false;
     rows.forEach((el) => el?.remove?.());
+    // 压缩线把两段静默隔开，线一撤就可能连成一组：分组必须跟着重算。
+    if (typeof syncCeoSilentTurnGroups === "function") syncCeoSilentTurnGroups();
     return true;
 }
 

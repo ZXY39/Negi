@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
+import sys
+import time
 from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
 
+from g3ku.deployment import data_root as data_root_module
+from g3ku.runtime import owned_processes
 from g3ku.runtime.api import ceo_sessions
-from g3ku.runtime.tool_jobs import ToolJobOutcome, ToolJobRunner
+from g3ku.runtime.tool_jobs import ToolJobOutcome, ToolJobRunner, owned_process_items
 from main.storage.sqlite_store import SQLiteTaskStore
 
 
@@ -31,7 +36,10 @@ class _FakeRuntimeSession:
         return self.store
 
     def list_tool_jobs(self):
-        return self.runner.list_jobs(self.session_key)
+        return [
+            *self.runner.list_jobs(self.session_key),
+            *owned_process_items(self.session_key),
+        ]
 
     async def stop_tool_job(self, job_id: str):
         return await self.runner.stop_job(job_id)
@@ -45,9 +53,48 @@ class _FakeRuntimeManager:
         return self._sessions.get(str(session_id or "").strip())
 
 
+@pytest.fixture(autouse=True)
+def _isolated_data_root(tmp_path, monkeypatch):
+    # GET 在会话不驻留时会直接读盘上的 owned-processes；不隔离会扫到真实数据根。
+    monkeypatch.setenv("G3KU_DATA_DIR", str(tmp_path))
+    data_root_module.reset_cache()
+    try:
+        yield
+    finally:
+        data_root_module.reset_cache()
+
+
 @pytest.fixture()
 def store(tmp_path) -> SQLiteTaskStore:
     return SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+
+
+def _spawn_sleeper(seconds: int = 60) -> subprocess.Popen:
+    return subprocess.Popen([sys.executable, "-c", f"import time; time.sleep({seconds})"])
+
+
+def _wait_gone(process: subprocess.Popen, timeout: float = 15.0) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        # poll() 顺手回收子进程；POSIX 僵尸在 is_alive 里仍算活着。
+        process.poll()
+        if not owned_processes.is_alive(process.pid):
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def _cleanup_process(process: subprocess.Popen, scope: str) -> None:
+    if process.poll() is None:
+        try:
+            process.kill()
+        except Exception:
+            pass
+    try:
+        process.wait(timeout=5)
+    except Exception:
+        pass
+    owned_processes.drop(scope, process.pid)
 
 
 async def _background_job(session: _FakeRuntimeSession, *, seconds: float = 10.0, tool_hash: str = "h"):
@@ -183,3 +230,95 @@ async def test_jobs_are_isolated_by_session(store, monkeypatch):
     assert payload["count"] == 0
 
     await other.runner.cancel_all(reason="test_cleanup", suppress_event=True)
+
+
+@pytest.mark.asyncio
+async def test_owned_process_listed_and_stopped_without_resident_session(monkeypatch):
+    manager = _FakeRuntimeManager({})
+    _patch_sessions(monkeypatch, manager)
+    session_key = "web:proc"
+    scope = owned_processes.scope_key(session_key=session_key)
+    process = _spawn_sleeper()
+    try:
+        owned_processes.register(
+            scope=scope,
+            pid=process.pid,
+            cmd="sleep 60",
+            log_path="",
+            session_key=session_key,
+        )
+
+        payload = await ceo_sessions.get_ceo_session_tool_jobs(session_key)
+        assert payload["count"] == 1
+        item = payload["items"][0]
+        assert item["kind"] == "process"
+        assert item["job_id"] == f"proc:{process.pid}"
+        assert item["tool_name"] == "exec"
+        assert item["hint"] == "sleep 60"
+
+        stopped = await ceo_sessions.stop_ceo_session_tool_job(session_key, item["job_id"])
+        assert stopped == {"ok": True, "job_id": item["job_id"], "status": "stopped"}
+        assert _wait_gone(process)
+        assert owned_processes.list_owned(scope) == []
+
+        after = await ceo_sessions.get_ceo_session_tool_jobs(session_key)
+        assert after["items"] == []
+    finally:
+        _cleanup_process(process, scope)
+
+
+@pytest.mark.asyncio
+async def test_owned_process_stop_rejects_unowned_pid(monkeypatch):
+    manager = _FakeRuntimeManager({})
+    _patch_sessions(monkeypatch, manager)
+
+    with pytest.raises(HTTPException) as missing:
+        await ceo_sessions.stop_ceo_session_tool_job("web:proc", "proc:99999999")
+    assert missing.value.status_code == 404
+    assert missing.value.detail == "tool_job_not_found"
+
+
+@pytest.mark.asyncio
+async def test_owned_process_stop_enqueues_model_event(monkeypatch):
+    manager = _FakeRuntimeManager({})
+    monkeypatch.setattr(
+        ceo_sessions,
+        "_sessions",
+        lambda: (object(), SimpleNamespace(), manager, SimpleNamespace()),
+    )
+    monkeypatch.setattr(
+        ceo_sessions,
+        "_resolve_bulk_session_key",
+        lambda _manager, _runtime_manager, _state_store, session_id: (str(session_id), False),
+    )
+    events: list[dict] = []
+    monkeypatch.setattr(
+        ceo_sessions,
+        "get_web_heartbeat_service",
+        lambda _agent: SimpleNamespace(enqueue_tool_job=events.append),
+    )
+    session_key = "web:proc"
+    scope = owned_processes.scope_key(session_key=session_key)
+    process = _spawn_sleeper()
+    try:
+        owned_processes.register(
+            scope=scope,
+            pid=process.pid,
+            cmd="sleep 60",
+            log_path="",
+            session_key=session_key,
+        )
+
+        await ceo_sessions.stop_ceo_session_tool_job(session_key, f"proc:{process.pid}")
+
+        assert len(events) == 1
+        event = events[0]
+        assert event["kind"] == "process"
+        assert event["reason"] == "tool_job"
+        assert event["status"] == "stopped_by_user"
+        assert event["job_id"] == f"proc:{process.pid}"
+        assert event["session_id"] == session_key
+        assert event["pid"] == process.pid
+        assert event["cmd"] == "sleep 60"
+    finally:
+        _cleanup_process(process, scope)

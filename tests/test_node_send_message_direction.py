@@ -96,7 +96,7 @@ def _seed(service: MainRuntimeService) -> None:
 def _stub_wake(service: MainRuntimeService, monkeypatch) -> list[str]:
     woke: list[str] = []
 
-    async def wake(*, task_id: str, node_id: str) -> str:
+    async def wake(*, task_id: str, node_id: str, allow_pause_clear: bool = False) -> str:
         woke.append(node_id)
         return 'resumed'
 

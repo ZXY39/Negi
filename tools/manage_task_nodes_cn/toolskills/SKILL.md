@@ -54,37 +54,42 @@ into separate calls if different reasons matter.
 2. `targets`: a list of `{node_id, action, cascade?}` entries — one atomic call
    that can mix actions (e.g. pause subtree a while failing subtree b). Entries
    omitting `cascade` inherit the top-level `cascade` flag.
-3. Whole task: `task_id` + `action`, with no `node_ids` and no `targets`.
+3. Task-level: `task_id` + `action`, with no `node_ids` and no `targets`.
 
-## Whole-task scope
+## Node actions vs the task
 
-Shape 3 and "the task root node with `cascade=true`" are the **same operation**
-sharing one code path — use whichever reads better:
+Node actions only do nodes; the task-level shape is the only way to move the
+task itself:
 
 ```
-manage_task_nodes(task_id="task:abc", action="pause")                    # whole task
+manage_task_nodes(task_id="task:abc", action="pause")                    # pauses the task
 manage_task_nodes(task_id="task:abc", node_ids=["node:root"], action="pause", cascade=True)
+                                                                         # pauses nodes, task keeps running
 ```
 
-A whole-task action moves the **task itself**, not only its nodes: a whole-task
-`pause` makes the task show as Paused in the task hall and stops it being
-scheduled or queued, and a whole-task `resume` clears that. So there is no
-separate "pause the task" call to reach for. The task reads as Paused **iff its
-root node is paused** (a root node is the task root unless you were given a
-different one) — pausing some other node affects only that subtree and leaves
-the task status alone.
-
+- `pause` / `resume` with no `node_ids` and no `targets` go through the
+  task-level implementation: the task shows as Paused in the task hall, stops
+  being scheduled, and in-flight nodes are suspended. This is the **only** way
+  to pause or resume a task; there is no root-node shortcut.
+- Pausing the task root with `cascade=true` pauses the whole node tree but
+  leaves the task running (the hall still shows 进行中; the tree shows the
+  paused nodes). Resuming the root likewise only resumes nodes.
+- While the task is paused, `resume` on any node (including the root) is refused
+  with `task_paused`. Resume the task first, then resume nodes if needed.
 - A whole-task `fail` terminates the entire task (the two-step recipe below
-  still applies: pause first, then fail).
+  still applies: pause the nodes first, then fail).
 - A whole-task `keep_paused` still requires a non-empty `remark`.
 - An explicit empty `targets` array is rejected rather than treated as
-  whole-task — omit `targets` entirely to mean the whole task.
+  task-level — omit `targets` entirely to mean the task itself.
+
+Messages never lift a pause: delivering a message to a paused node just lands
+mail; only the explicit `resume` actions above clear the pause flag.
 
 ## Cascade (propagate down)
 
 With `cascade=true` the action applies to the whole subtree rooted at the node.
-Passing the task root node with `cascade=true` targets the entire tree (and the
-task status, see above). The
+Passing the task root node with `cascade=true` targets the entire node tree (it
+does not move the task; see above). The
 subtree membership is a snapshot taken at call time: nodes spawned afterwards are
 not covered (a paused ancestor defers their dispatch anyway).
 

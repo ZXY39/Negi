@@ -192,6 +192,15 @@ def test_waiting_on_a_human_never_forms_an_edge():
     assert find_wait_cycles(nodes) == []
 
 
+def test_paused_node_forms_no_wait_edge():
+    a = _with_targets(_node('node:a', parent='root'), 'node:b')
+    b = _with_targets(_node('node:b', parent='root'), 'node:a')
+    b.is_paused = True
+    nodes = build_wait_nodes(records=[a, b], frames=_frames('node:a', 'node:b'))
+    # 暂停只由显式恢复动作清位：它既不是唤醒源，也不会被消息叫醒。
+    assert find_wait_cycles(nodes) == []
+
+
 # --- wake notice ------------------------------------------------------------
 
 
@@ -303,6 +312,16 @@ def test_all_parked_but_wakeable_means_no_deadlock():
     a = _parked(_node('node:a', parent='root'))
     nodes = build_wait_nodes(records=[a], frames=_frames('node:a'))
     assert find_all_parked_waits(nodes, wakeable_node_ids={'node:a'}) is None
+
+
+def test_paused_nodes_do_not_make_an_all_parked_deadlock():
+    a = _parked(_node('node:a', parent='root'))
+    b = _parked(_node('node:b', parent='root'))
+    a.is_paused = True
+    b.is_paused = True
+    nodes = build_wait_nodes(records=[a, b], frames=_frames('node:a', 'node:b'))
+    # 显式暂停等的是恢复动作，不是唤醒源：不能当成死锁反复点火。
+    assert find_all_parked_waits(nodes) is None
 
 
 def test_a_node_still_running_tools_is_not_a_silent_park():
