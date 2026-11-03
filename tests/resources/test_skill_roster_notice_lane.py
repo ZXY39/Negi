@@ -57,8 +57,7 @@ def _frontdoor_runner(live_skills: list[dict[str, str]]):
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
         loop=SimpleNamespace(main_task_service=service)
     )
-    # 这些用例只测 skill 通知；合同分节（临时目录等）另有专门用例。头部是 roster-only，
-    # 不在这条链上，所以把临时目录置空，避免首跳多出一条合同通知。
+    # 临时目录真取会落到数据根；这条链只测通知，置空即可（头部与分节同源，见 `_pin_head`）。
     runner._ceo_session_temp_dir = lambda _session_key: ""
     return runner
 
@@ -72,20 +71,22 @@ def _notice_texts(messages: list[dict]) -> list[str]:
 
 
 def _pin_head(skill_ids: list[str]) -> str:
-    """按真实前门口径钉头部：**裸 session_key**（`session:` 前缀只是台账作用域写法）。
+    """头部走**生产那条进口**钉：`_frontdoor_pinned_contract`。
 
-    曾经把前缀键传给钉住表，测试里 covered 取得到、线上取不到，于是新会话第一跳
-    把整份名单重播了一遍——键径必须与 `_frontdoor_pinned_contract` 一致。
+    曾经这里是手写一次 `frontdoor_pinned_contract_text(..., include_extras=False)`，并且
+    把带 `session:` 前缀的台账键传给钉住表——两个偏差都让测试里的 covered 与线上不一致：
+    键径不一致时新会话首跳会把整份名单重播一遍；`include_extras=False` 的头部不带
+    `session_mode:` / `sticker_pack:` 这些行，于是"首跳静默"测的是一条线上根本不存在的头部，
+    真实偏差（分节值与头部原文不同源）反而照不到。生产的头部带 extras，且档位、表情包、
+    临时目录都从同一份 policy/扫描取数，所以这里直接调它，让 covered 判据与
+    `_frontdoor_contract_notice_sections` 必然同源。
     """
-    return frontdoor_pinned_contract_text(
-        None,
-        skill_items=[_item(skill_id) for skill_id in skill_ids],
-        exec_runtime_policy=None,
-        session_temp_dir=None,
-        skill_roster_epoch=skill_roster_epoch_for(None, session_key=SESSION_KEY),
+    runner = _frontdoor_runner([_item(skill_id) for skill_id in skill_ids])
+    text, _pinned_skill_ids = runner._frontdoor_pinned_contract(
         session_key=SESSION_KEY,
-        include_extras=False,
+        skill_ids=list(skill_ids),
     )
+    return text
 
 
 def test_frontdoor_first_hop_of_new_session_stays_silent() -> None:

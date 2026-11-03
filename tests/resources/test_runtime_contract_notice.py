@@ -112,6 +112,25 @@ def test_frontdoor_head_covered_sections_are_not_reannounced() -> None:
     assert len(_notice_texts(second)) == len(texts)
 
 
+def test_head_and_notice_sections_agree_on_every_covered_key() -> None:
+    """头部声称覆盖的每一节，必须与通知侧的当刻值逐字相同——两侧都从生产进口取。
+
+    "不重播"的前提是可比：`covered` 取的是头部原文，分节取的是 `_frontdoor_contract_notice_sections`
+    的当刻值。只要写法差一个词——实例：头部 `session_mode: 全权限模式`，分节却写
+    `已切换到全权限模式`——台账就把头部已经说过的事当成一次变化宣布，而且此后每个重印
+    边界都再宣布一遍；模型读到的是"刚刚切过档"，那一刻什么都没切。
+    """
+    _reset_stores()
+    runner = _frontdoor_runner({"policy": dict(GOVERNED)})
+    head, _pinned_skill_ids = runner._frontdoor_pinned_contract(session_key=SESSION_KEY, skill_ids=[])
+    covered = pinned_contract_section_values(head)
+    assert covered, "夹具头部没带任何可覆盖的分节，这条用例白过"
+
+    sections = runner._frontdoor_contract_notice_sections(_frontdoor_state(), session_key=SESSION_KEY)
+    for key, head_text in covered.items():
+        assert str(sections.get(key, "")) == head_text, (key, head_text, sections.get(key))
+
+
 def test_frontdoor_policy_change_is_one_notice_and_head_stays_frozen() -> None:
     _reset_stores()
     holder = {"policy": dict(GOVERNED)}

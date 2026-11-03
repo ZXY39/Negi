@@ -300,14 +300,25 @@ _TIER_LABELS = {
 }
 
 
-def session_mode_text(sandbox_tier: Any) -> str:
+def session_mode_state_text(sandbox_tier: Any) -> str:
+    """当刻档位叫什么名字——头部快照与合同分节用这一档。
+
+    分节值会与头部原文逐字比对（`pinned_contract_section_values` → 台账初值），所以
+    这一份不许带事件词：一条静态快照写成"已切换到 X"就是在宣布一次没发生过的切档
+    （实盘：新会话首跳的通知里出现 `session_mode: 已切换到全权限模式`）。
+    """
     tier = str(sandbox_tier or "").strip()
-    label = _TIER_LABELS.get(tier, "")
+    return _TIER_LABELS.get(tier, "")
+
+
+def session_mode_switch_text(sandbox_tier: Any) -> str:
+    """真的换了档才用这一档（`### Session mode` 的一次性通知）。"""
+    label = session_mode_state_text(sandbox_tier)
     return f"已切换到{label}" if label else ""
 
 
 def _session_mode_line(sandbox_tier: Any) -> str:
-    mode_text = session_mode_text(sandbox_tier)
+    mode_text = session_mode_state_text(sandbox_tier)
     return f'session_mode: {mode_text}' if mode_text else ""
 
 

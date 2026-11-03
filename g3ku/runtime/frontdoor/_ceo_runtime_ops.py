@@ -233,7 +233,8 @@ from .tool_contract import (
     pinned_contract_section_values,
     pinned_contract_state,
     pinned_skill_ids_for,
-    session_mode_text,
+    session_mode_state_text,
+    session_mode_switch_text,
     skill_roster_epoch_for,
     split_pinned_contract_from_system_text,
     strip_frontdoor_tool_contract_echo,
@@ -4257,8 +4258,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         sandbox_tier = str(getattr(policy, "tier", "") or "") if policy is not None else ""
         sections = {
             # 档位与工具集合变化由 pinned contract 重印；这一节让模型在重印后仍能一眼
-            # 读到"已切换到什么模式"，并覆盖切档后第一次通知。
-            "session_mode": session_mode_text(sandbox_tier),
+            # 读到"现在是什么模式"，并覆盖切档后第一次通知。这里必须是状态措辞：它与
+            # 头部原文逐字比对来判"有没有变"，写成事件词会让新会话首跳宣布一次没发生
+            # 过的切档。真的切档走 `### Session mode`（`session_mode_switch_text`）。
+            "session_mode": session_mode_state_text(sandbox_tier),
             "session_workspace_dir": (
                 ceo_session_workspace_dir(session_key)
                 if session_key and sandbox_tier == TIER_LIMITED
@@ -4352,15 +4355,19 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if not session_key:
             return None
         policy = session_policy(session_key)
-        tier = str(getattr(policy, "tier", "") or "")
-        tools_signature = str(getattr(policy, "tool_policy_signature", "") or "")
+        # 签名两侧必须按同一形状算：`tool_policy_signature` 是 `tier + "\n" + 名单`，
+        # 名单为空时留下一个尾随换行，而投递层把游标 `.strip()` 后存进台账
+        # （`skill_roster_notice.deliver_for_scope`）。未归一的当刻值 vs 已归一的游标
+        # ＝每一跳都"变了"，全权限会话因此每轮重复宣布"工具列表已更新（0 项）"。
+        tier = str(getattr(policy, "tier", "") or "").strip()
+        tools_signature = str(getattr(policy, "tool_policy_signature", "") or "").strip()
         signature = f"{tier}|{tools_signature}"
         if not initialized:
             return {"signature": signature, "text": ""}
         previous_tier, _, previous_tools = str(cursor_signature or "").partition("|")
         parts: list[str] = []
         if previous_tier != tier:
-            label = session_mode_text(tier) or f"当前档位：{tier}"
+            label = session_mode_switch_text(tier) or f"当前档位：{tier}"
             limits = self._MODE_LIMITS.get(tier, "")
             parts.append(f"{label}：{limits}" if limits else label)
         if previous_tools != tools_signature:

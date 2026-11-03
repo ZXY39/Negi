@@ -435,10 +435,12 @@ def test_pinned_contract_renders_mode_and_session_workspace() -> None:
         sandbox_tier="limited",
         session_workspace_dir="C:/data/session-workspaces/web_ceo-1-abcd",
     )
-    assert "session_mode: 已切换到受限模式" in text
+    # 头部这一行是静态快照，不是事件：写"已切换到 X"会让新会话首跳的通知声称一次没发生
+    # 过的切档（真事件走 `### Session mode` 那条一次性通知，仍用 `session_mode_switch_text`）。
+    assert "session_mode: 受限模式" in text
     assert "session_workspace_dir: C:/data/session-workspaces/web_ceo-1-abcd" in text
     values = pinned_contract_section_values(text)
-    assert values["session_mode"] == "已切换到受限模式"
+    assert values["session_mode"] == "受限模式"
     assert values["session_workspace_dir"].endswith("web_ceo-1-abcd")
 
 
