@@ -130,7 +130,10 @@ async def test_graph_call_model_masks_history_and_notices_current_hop(monkeypatc
     assert cp.REPLACEMENT_MARKER in tool_messages[1]["content"]
     assert cp.NOTICE_PREFIX in tool_messages[1]["content"]
     assert tool_messages[2]["content"].startswith(cp.NOTICE_PREFIX)
-    assert sent[1]["content"] == "older 六四"
+    # 发起方正文也被换、且不带提示：用户自己打来的词是 400 的主来源；
+    # state 里那一行仍是原文（上面 `state["messages"] == original` 钉的就是这件事）。
+    assert sent[1]["content"] == f"older {cp.REPLACEMENT_MARKER}"
+    assert cp.NOTICE_PREFIX not in sent[1]["content"]
     assert persisted[0] == sent
 
     durable = result["messages"]

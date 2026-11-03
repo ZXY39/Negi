@@ -192,7 +192,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 用户消息在请求体里同时出现原文与带 `[消息送达时间]` 行的两个版本，或装饰后缓存命中率骤降 → `context-and-cache-troubleshooting.md`「用户消息时间装饰破坏前缀稳定或相等性去重」
 - 某配置整条模型链 400「The input messages must contain no more than one system message」（`InternalError.Algo.InvalidParameter`）、换 key 无效 → `context-and-cache-troubleshooting.md`「线体角色合同」
 - 某颗成员反复回通用 400（`inference request is invalid`）而同体量的请求在链上另一颗通过过，或想知道它实际塞得下多大 → `context-and-cache-troubleshooting.md`「节点 400 不一定是 payload 畸形」（`model_size_span:` 那一行报告）+ `config-and-models.md`「Frontdoor Context Window Contract」的观测值清单
-- 同一段工具结果被上游按内容安全理由拒掉（`400 code=18`、`Inappropriate input/output rejected for security reasons`）、想在发给模型前把词表里的词替换掉 → `tool-hydration-and-callable-chain.md`「内容审查词替换（模型面工具结果）」+ `web-and-admin.md`「Model Config Page And Admin Contract」
+- 同一段工具结果被上游按内容安全理由拒掉（`400 code=18`、`Inappropriate input/output rejected for security reasons`）、想在发给模型前把词表里的词替换掉 → `tool-hydration-and-callable-chain.md`「内容审查词替换（模型面正文）」+ `web-and-admin.md`「Model Config Page And Admin Contract」
 - 入站到首个 provider 请求发出耗时异常 → `context-and-cache-troubleshooting.md`「Prompt Cache Family 与 Actual Request」
 - 会话/节点疑似卡在 provider 退避重试，但界面没有重试次数与错误信息；或回合长时间不出新内容而连接没断（分不清"退避等待中"与"上游只滴分片不给载荷"） → `runtime-overview.md`「Chat provider 超时与重试边界」+ `web-and-admin.md`「Model Retry Visibility UI Contract」
 - 点开会话一直停在 Loading（WebSocket 连上了却一帧不来），而会话列表/任务接口都正常 → `web-and-admin.md`「Local Startup And Launcher Contract」

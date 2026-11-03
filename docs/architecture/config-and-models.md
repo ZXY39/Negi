@@ -20,7 +20,7 @@
 
 该路径始终相对安装根（进程 cwd），与数据根无关——选过自定义数据目录后配置仍在代码检出目录里。
 
-不在 `config.json` 里的运行期数据另有一批，它们各有自己的落点与加载规则，其中安全审查词表落在数据根：`.g3ku/content-policy.json`（`{version, enabled, words, updated_at}`）。它默认关闭，文件不存在等价于关闭 + 空表；词表由操作员在模型页手动导入 / 导出，一行一个词，项目不内置词表也不自动下载。它不属于配置 schema，也不在 `save_config()` 的字段白名单里，因此任何一次保存配置都不会抹掉它；运行时按文件的 `(mtime, size)` 热读，改完下一次请求即生效，无需重启。模型面替换合同见 `tool-hydration-and-callable-chain.md`「内容审查词替换（模型面工具结果）」，界面与 API 见 `web-and-admin.md`「Model Config Page And Admin Contract」。
+不在 `config.json` 里的运行期数据另有一批，它们各有自己的落点与加载规则，其中安全审查词表落在数据根：`.g3ku/content-policy.json`（`{version, enabled, words, updated_at}`）。它默认关闭，文件不存在等价于关闭 + 空表；词表由操作员在模型页手动导入 / 导出，一行一个词，项目不内置词表也不自动下载。它不属于配置 schema，也不在 `save_config()` 的字段白名单里，因此任何一次保存配置都不会抹掉它；运行时按文件的 `(mtime, size)` 热读，改完下一次请求即生效，无需重启。模型面替换合同见 `tool-hydration-and-callable-chain.md`「内容审查词替换（模型面正文）」，界面与 API 见 `web-and-admin.md`「Model Config Page And Admin Contract」。
 
 ## 2. 配置模型的几个核心部分
 

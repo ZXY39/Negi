@@ -160,7 +160,7 @@ from g3ku.runtime.web_ceo_sessions import (
     workspace_path,
 )
 from g3ku.sandbox.policy import TIER_JAILED, TIER_LIMITED, TIER_READONLY, session_policy
-from g3ku.security.content_policy import apply_to_tool_messages
+from g3ku.security.content_policy import apply_content_policy
 from g3ku.stickers import config as sticker_config
 from g3ku.stickers import safe_scan_packs, sticker_contract_sections
 from g3ku.utils.helpers import safe_filename, tools_bundle_single_source_enabled
@@ -9103,9 +9103,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             request_messages = list(preflight_snapshot.get("request_messages") or [])
             durable_request_messages = list(preflight_snapshot.get("durable_request_messages") or request_messages)
             # 内容审查词替换的定稿点：预检、压缩请求（含短窗压缩）和实际发送都必须读这一份，
-            # 压缩 helper 不能拿到未替换的旧工具结果，否则压缩请求自己会被 400 拦下。
-            request_messages = apply_to_tool_messages(request_messages)
-            durable_request_messages = apply_to_tool_messages(durable_request_messages)
+            # 压缩 helper 不能拿到未替换的旧正文，否则压缩请求自己会被 400 拦下。
+            request_messages = apply_content_policy(request_messages)
+            durable_request_messages = apply_content_policy(durable_request_messages)
             prompt_cache_key = str(preflight_snapshot.get("prompt_cache_key") or "")
             prompt_cache_diagnostics = dict(preflight_snapshot.get("prompt_cache_diagnostics") or {})
             actual_tool_schemas = list(preflight_snapshot.get("tool_schemas") or [])

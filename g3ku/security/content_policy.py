@@ -330,12 +330,54 @@ def _current_hop_tool_indices(messages: list[Any]) -> set[int]:
     return tail
 
 
-def apply_to_tool_messages(
+def _mask_user_parts(
+    content: list[Any],
+    matcher: re.Pattern[str] | None,
+    revision: str,
+) -> tuple[list[Any], int]:
+    """多模态用户消息：逐部件替换 `text`，图片一类部件原样返回。
+
+    渠道入站的图文消息是部件列表，`content` 不是字符串；只改文本部件，否则整条消息被
+    当成"非字符串内容"跳过，用户自己打来的拦截词就永远漏出去。图片不是文本替换能救的
+    （实盘：一张表情包拼接图触发的 `code=18`，词表覆盖不到）。
+    """
+    total = 0
+    parts: list[Any] = []
+    for part in content:
+        if not isinstance(part, dict):
+            parts.append(part)
+            continue
+        text = part.get("text")
+        kind = str(part.get("type") or "").strip().lower()
+        if not isinstance(text, str) or (kind and kind != "text"):
+            parts.append(part)
+            continue
+        masked, hits = replace_content(text, matcher, notice=False, revision=revision)
+        if hits <= 0:
+            parts.append(part)
+            continue
+        total += hits
+        parts.append({**part, "text": masked})
+    if total <= 0:
+        return content, 0
+    return parts, total
+
+
+_MASKED_ROLES = ("tool", "user")
+
+
+def apply_content_policy(
     messages: list[Any],
     *,
     notice_indices: Iterable[int] | None = None,
 ) -> list[Any]:
-    """替换 `role=tool` 消息里的词表命中；最后一次 assistant 之后的 tool 消息（当前 hop）才加提示。"""
+    """替换发给模型的消息正文里命中的词表片段：`role=tool` 与 `role=user`。
+
+    - `role=tool`：最后一次 assistant 之后的那些（当前 hop）另加一条提示；历史行只替换。
+    - `role=user`：只替换，不加提示。提示说的是"别再从同一来源重取"，对发起方自己的问句
+      没有意义，而多出来的一行会被模型当成用户说的话；用户消息在转录与网页气泡里保留原文。
+    - `role=assistant` / `role=system` 不动：改写模型自己说过的话会让它对不上自己的历史。
+    """
     if not isinstance(messages, list):
         return messages
     policy = load_policy()
@@ -354,17 +396,25 @@ def apply_to_tool_messages(
         if not isinstance(message, dict):
             result.append(message)
             continue
-        if str(message.get("role") or "").strip().lower() != "tool":
+        role = str(message.get("role") or "").strip().lower()
+        if role not in _MASKED_ROLES:
             result.append(message)
             continue
         content = message.get("content")
+        if isinstance(content, list) and role == "user":
+            replaced, hits = _mask_user_parts(content, matcher, revision)
+            if hits <= 0:
+                result.append(message)
+                continue
+            result.append({**message, "content": replaced})
+            continue
         if not isinstance(content, str):
             result.append(message)
             continue
         replaced, hits = replace_content(
             content,
             matcher,
-            notice=index in indexed,
+            notice=role == "tool" and index in indexed,
             revision=revision,
         )
         if hits <= 0:

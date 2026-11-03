@@ -164,7 +164,7 @@ def test_replace_content_does_not_add_second_notice() -> None:
     assert hits == 1
 
 
-def test_apply_to_tool_messages_only_marks_trailing_tool_messages_and_does_not_mutate() -> None:
+def test_apply_content_policy_masks_tool_rows_and_user_rows_without_mutating() -> None:
     cp.save_policy(True, ["六四"])
     messages = [
         {"role": "user", "content": "六四"},
@@ -174,17 +174,49 @@ def test_apply_to_tool_messages_only_marks_trailing_tool_messages_and_does_not_m
         {"role": "tool", "content": "newer 六四"},
     ]
     before = [dict(item) for item in messages]
-    result = cp.apply_to_tool_messages(messages)
+    result = cp.apply_content_policy(messages)
     assert messages == before
-    assert result[0] == messages[0]
+    # 发起方正文同样要换：用户自己打来的词是上游拦下的主来源，只处理工具结果救不活这种会话。
+    assert result[0]["content"] == cp.REPLACEMENT_MARKER
+    assert cp.NOTICE_PREFIX not in result[0]["content"]
     assert result[1]["content"] == f"old {cp.REPLACEMENT_MARKER}"
     assert cp.NOTICE_PREFIX not in result[1]["content"]
     # assistant 消息把旧工具结果和当前 hop 隔开：只有末尾连续两条加提示。
     assert result[3]["content"].startswith(cp.NOTICE_PREFIX)
     assert result[4]["content"].startswith(cp.NOTICE_PREFIX)
+    # 模型自己说过的话不换：改了它对不上自己的历史。
+    assert result[2]["content"] == "ok"
 
 
-def test_apply_to_tool_messages_adds_notice_to_current_hop() -> None:
+def test_apply_content_policy_masks_text_parts_of_multimodal_user_message() -> None:
+    cp.save_policy(True, ["六四", "法轮功"])
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "六四 和 法轮功"},
+                {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,AAAA"}},
+            ],
+        }
+    ]
+    result = cp.apply_content_policy(messages)
+    parts = result[0]["content"]
+    assert parts[0] == {"type": "text", "text": f"{cp.REPLACEMENT_MARKER} 和 {cp.REPLACEMENT_MARKER}"}
+    assert cp.NOTICE_PREFIX not in json.dumps(parts, ensure_ascii=False)
+    # 图片部件原样：文本替换管不到图片触发的拦截。
+    assert parts[1]["image_url"]["url"] == "data:image/jpeg;base64,AAAA"
+
+
+def test_apply_content_policy_never_rewrites_assistant_or_system_rows() -> None:
+    cp.save_policy(True, ["六四"])
+    messages = [
+        {"role": "system", "content": "契约里写着 六四"},
+        {"role": "assistant", "content": "我上次答过 六四"},
+    ]
+    assert cp.apply_content_policy(messages) == messages
+
+
+def test_apply_content_policy_adds_notice_to_current_hop() -> None:
     cp.save_policy(True, ["六四"])
     messages = [
         {"role": "tool", "content": "old 六四"},
@@ -192,50 +224,50 @@ def test_apply_to_tool_messages_adds_notice_to_current_hop() -> None:
         {"role": "tool", "content": "new 六四"},
         {"role": "tool", "content": "newer 六四"},
     ]
-    result = cp.apply_to_tool_messages(messages)
+    result = cp.apply_content_policy(messages)
     assert cp.NOTICE_PREFIX not in result[0]["content"]
     assert result[2]["content"].startswith(cp.NOTICE_PREFIX)
     assert result[3]["content"].startswith(cp.NOTICE_PREFIX)
 
 
-def test_apply_to_tool_messages_notices_tools_before_a_trailing_runtime_notice() -> None:
+def test_apply_content_policy_notices_tools_before_a_trailing_runtime_notice() -> None:
     cp.save_policy(True, ["六四"])
     messages = [
         {"role": "assistant", "content": "call tool"},
         {"role": "tool", "content": "new 六四"},
         {"role": "user", "content": "[RUNTIME_NOTICE] 合同更新"},
     ]
-    result = cp.apply_to_tool_messages(messages)
+    result = cp.apply_content_policy(messages)
     assert result[1]["content"].startswith(cp.NOTICE_PREFIX)
 
 
-def test_apply_to_tool_messages_keeps_non_string_and_non_tool_content() -> None:
+def test_apply_content_policy_keeps_non_string_tool_content() -> None:
     cp.save_policy(True, ["六四"])
     messages = [
         {"role": "tool", "content": [{"type": "text", "text": "六四"}]},
         {"role": "assistant", "content": "六四"},
     ]
-    result = cp.apply_to_tool_messages(messages)
+    result = cp.apply_content_policy(messages)
     assert result == messages
 
 
-def test_apply_to_tool_messages_disabled_returns_unchanged() -> None:
+def test_apply_content_policy_disabled_returns_unchanged() -> None:
     cp.save_policy(False, ["六四"])
     messages = [{"role": "tool", "content": "六四"}]
-    assert cp.apply_to_tool_messages(messages) == messages
+    assert cp.apply_content_policy(messages) == messages
 
 
 def test_mask_cache_is_keyed_by_content_and_revision() -> None:
     cp.save_policy(True, ["alpha"])
     messages = [{"role": "tool", "content": "alpha"}]
-    first = cp.apply_to_tool_messages(messages)
+    first = cp.apply_content_policy(messages)
     cache_size = len(cp._MASK_CACHE)
     assert cache_size >= 1
-    second = cp.apply_to_tool_messages(messages)
+    second = cp.apply_content_policy(messages)
     assert second == first
     assert len(cp._MASK_CACHE) == cache_size
 
     cp.save_policy(True, ["beta"])
-    third = cp.apply_to_tool_messages(messages)
+    third = cp.apply_content_policy(messages)
     assert third[0]["content"] == "alpha"
     assert len(cp._MASK_CACHE) > cache_size
