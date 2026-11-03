@@ -1031,9 +1031,26 @@ function ceoSessionGlyph(item = {}) {
 function formatSessionTime(value) {
     const raw = String(value || "").trim();
     if (!raw) return "No activity yet";
+    return formatClock(raw, { withDate: true, withYear: true });
+}
+
+// 时钟读数的唯一出口：形状自己拼，一次都不问宿主 locale。
+// `toLocaleString()` 在英文浏览器给 `9/23/2026, 11:55:11 PM`（连 12 小时制一起换）、
+// 德文给 `23.9.2026, 23:55:11`，而这一串被静默行、回合轨道、记忆行、节点详情、
+// 任务卡与会话列表共用；显式传 `"zh-CN"` 也仍随 ICU 数据变（月日不补零、年用斜杠），
+// 判据只能写成正则——那正是这三条断言在英文 runner 上长期红着的成因。
+function formatClock(value, { withDate = false, withYear = false } = {}) {
+    const raw = String(value || "").trim();
+    if (!raw) return "";
     const parsed = new Date(raw);
     if (Number.isNaN(parsed.getTime())) return raw;
-    return parsed.toLocaleString();
+    const pad = (part) => String(part).padStart(2, "0");
+    const clock = `${pad(parsed.getHours())}:${pad(parsed.getMinutes())}:${pad(parsed.getSeconds())}`;
+    if (!withDate) return clock;
+    const month = pad(parsed.getMonth() + 1);
+    const day = pad(parsed.getDate());
+    if (!withYear) return `${month}/${day} ${clock}`;
+    return `${parsed.getFullYear()}-${month}-${day} ${clock}`;
 }
 
 function formatCompactTime(value) {
@@ -1045,16 +1062,9 @@ function formatCompactTime(value) {
     const sameDay = parsed.getFullYear() === now.getFullYear()
         && parsed.getMonth() === now.getMonth()
         && parsed.getDate() === now.getDate();
-    // 形状自己拼，不交给宿主 locale：`toLocaleString([], …)` 在英文浏览器上会给出
-    // `09/23, 23:55:11`（日期与时分之间多一个逗号）、德文环境给出 `23.09., 23:55:11`，
-    // 而这一串是 19 处显示面共用的读数（静默行、轨道轮次、记忆行、节点详情）。
-    const clock = [parsed.getHours(), parsed.getMinutes(), parsed.getSeconds()]
-        .map((part) => String(part).padStart(2, "0"))
-        .join(":");
-    if (sameDay) return clock;
-    const month = String(parsed.getMonth() + 1).padStart(2, "0");
-    const day = String(parsed.getDate()).padStart(2, "0");
-    return `${month}/${day} ${clock}`;
+    // 同日只留时分秒，跨日补 `MM/DD`：这条形状的判据在
+    // `org_graph_app.ceo_silent_turn.test.js` 里，形状本身归 formatClock。
+    return formatClock(raw, { withDate: !sameDay });
 }
 
 function ceoSessionDisplayTime(session) {
