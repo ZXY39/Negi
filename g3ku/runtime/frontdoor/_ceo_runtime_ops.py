@@ -9323,7 +9323,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             }
             shortfall_compressed_this_hop = False
 
-            def _on_frontdoor_shortfall_compressed(payload: dict[str, Any]) -> None:
+            async def _on_frontdoor_shortfall_compressed(payload: dict[str, Any]) -> None:
                 nonlocal request_messages, durable_request_messages
                 nonlocal shortfall_compressed_this_hop
                 compressed_messages = [
@@ -9338,9 +9338,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     compressed_messages
                 )
                 shortfall_compressed_this_hop = True
-                if runtime_session is not None:
-                    setattr(runtime_session, "_frontdoor_token_compression_applied_turn", True)
-                    setattr(runtime_session, PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR, True)
                 state_for_request["frontdoor_live_request_messages"] = list(compressed_messages)
                 state_for_request["frontdoor_history_shrink_reason"] = "token_compression"
                 diagnostics = dict(
@@ -9359,6 +9356,35 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     "chunk_failed_count": int(payload.get("chunk_failed_count") or 0),
                 }
                 state_for_request["frontdoor_token_preflight_diagnostics"] = diagnostics
+                if runtime_session is not None:
+                    setattr(runtime_session, "_frontdoor_token_compression_applied_turn", True)
+                    setattr(runtime_session, PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR, True)
+                    compressed_turn_id = str(
+                        getattr(runtime_session, "_active_turn_id", "") or ""
+                    ).strip()
+                    boundary_turn_seq = len(
+                        list(getattr(runtime_session, "_frontdoor_turns", []) or [])
+                    )
+                    last_turn_id = str(
+                        getattr(runtime_session, "_frontdoor_compressed_turn_id", "") or ""
+                    ).strip()
+                    last_boundary = int(
+                        getattr(runtime_session, "_frontdoor_compression_boundary_turn_seq", 0) or 0
+                    )
+                    # 同一回合同一落点只 announce 一次：同一次发送里预检已压过、或换成员又压
+                    # 一次时落点相同，第二条线会叠在同一位置（重建路径不会按 boundary 去重
+                    # after/before 段）。
+                    if not (last_turn_id == compressed_turn_id and last_boundary == boundary_turn_seq):
+                        setattr(runtime_session, "_frontdoor_compressed_turn_id", compressed_turn_id)
+                        setattr(
+                            runtime_session,
+                            "_frontdoor_compression_boundary_turn_seq",
+                            boundary_turn_seq,
+                        )
+                        await runtime_session.announce_context_compression_boundary(
+                            turn_id=compressed_turn_id,
+                            boundary_turn_seq=boundary_turn_seq,
+                        )
 
             frontdoor_shortfall_compressor = self._build_frontdoor_window_shortfall_compressor(
                 state=state_for_request,
