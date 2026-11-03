@@ -6495,8 +6495,11 @@ textarea {
 
 /* 上下文压缩区分线：线色取品牌青绿 #39c5bb（与 unread 角标同色）。
    进行中的那条是 live-only，终态的两条由转录里的持久标记行渲染，永久留在历史里。
-   左右两条线等宽所以文字居中；整条线两端各留一段空白，不顶到会话区边缘。 */
-.message.ceo-compression-divider {
+   左右两条线等宽所以文字居中；整条线两端各留一段空白，不顶到会话区边缘。
+   失败档的正文是外部原话，按线条同宽另起一块挂在线下。 */
+.message.message.ceo-compression-divider {
+    flex-direction: column;
+    align-items: stretch;
     justify-content: center;
     padding: 8px 0;
 }
@@ -6523,11 +6526,27 @@ textarea {
     background: color-mix(in srgb, var(--ceo-context-compress-color) 55%, transparent);
 }
 
-/* 带图标的两种状态里，图标排在文字右侧会把文字推离中轴；左侧线后留一段与
-   「图标 + 间距」等宽的透明间隙，两条线仍然等长，而文字自己正好落在正中。 */
-.ceo-compression-divider.is-running .ceo-compression-divider-inner::before,
-.ceo-compression-divider.is-paused .ceo-compression-divider-inner::before {
-    margin-right: calc(1.15em + 10px);
+/* 图标/重试按钮和标签是同一个居中内容组：两条线等权，左右都不留补偿空白，
+   于是「压缩已暂停 · 重新压缩」「压缩失败 · 重新压缩」整体居中，线两端对称。 */
+
+/* 失败原话在线下铺开：与上方线条同宽（同一档左右留白），不再收进中间窄列。 */
+.ceo-compression-divider-detail {
+    width: 100%;
+    margin-top: 6px;
+    padding-inline: clamp(20px, 7%, 88px);
+    box-sizing: border-box;
+}
+
+.ceo-compression-divider-detail-text {
+    display: block;
+    color: color-mix(in srgb, var(--text-muted) 88%, var(--ceo-context-compress-color));
+    font-size: calc(0.74rem * var(--reading-font-scale));
+    line-height: 1.55;
+    letter-spacing: 0.01em;
+    text-align: left;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
 }
 
 .ceo-compression-divider-icon,
@@ -6538,10 +6557,11 @@ textarea {
 }
 
 .ceo-compression-divider-action {
+    flex: 0 0 auto;
     border: 0;
     padding: 2px;
     /* 负外边距抵掉这 2px 内边距的布局宽度：可点区域和悬停底不变，但按钮版与非按钮版
-       的图标推进宽度一致，上面的左侧补偿间隙因此对两种行都把文字精确留在正中。 */
+       的图标推进宽度一致，整组的居中落点不因是否可点而移动。 */
     margin: -2px;
     background: none;
     border-radius: 999px;
@@ -6553,18 +6573,14 @@ textarea {
     background: color-mix(in srgb, var(--ceo-context-compress-color) 16%, transparent);
 }
 
-/* 重试那颗是文字不是图标：推进宽度按 em 固定下来，下面那条左侧补偿间隙才能跟它等宽，
-   标签仍然落在中轴上（`line-height: 0` 是按钮版图标的继承值，文字必须盖回来）。 */
+/* 重试那颗是文字不是图标：推进宽度按 em 固定下来，标签与它作为一个整体居中
+   （`line-height: 0` 是按钮版图标的继承值，文字必须盖回来）。 */
 .ceo-compression-divider-retry {
     width: 4.6em;
     justify-content: center;
     line-height: 1.2;
     letter-spacing: 0.02em;
     color: var(--ceo-context-compress-color);
-}
-
-.ceo-compression-divider.is-paused:has(.ceo-compression-divider-retry) .ceo-compression-divider-inner::before {
-    margin-right: calc(4.6em + 10px);
 }
 
 /* 图标尺寸按 em 跟随上面的字号，与文字同大；外圈只画一段旋转弧（不画整环底轨）、

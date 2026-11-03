@@ -80,6 +80,10 @@ MANUAL_COMPRESSION_RUNNING = "running"
 # 手动压缩自己失败（provider 拒、异常）用这一档，不复用 paused：paused 只描述"操作员取消了
 # 在跑的压缩"这件真发生过的事，把失败写成暂停会让操作员去找一个从没按下的按钮。
 MANUAL_COMPRESSION_FAILED = "failed"
+# 失败不是"可以接着走"的空闲边界：压缩失败后排队中的补充消息不自动开跑，直到操作员
+# 发起下一个可见用户回合（或重新发起压缩）。只在内存里：它挡的是同进程里的自动排水
+# （压缩收尾 / WS 重连），durable 队列本身保持原样。
+QUEUED_FOLLOW_UP_COMPRESSION_FAILURE_HOLD_ATTR = "_queued_follow_up_compression_failure_hold"
 # 待重印的 provider tools[] 标记：手动压缩跑在回合外、够不到 preflight，所以由 api 层挂
 # 一个标记，下一跳的清单定形把它当成重印边界消费掉（内联压缩自带 token_compression 信号）。
 PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR = "_pending_provider_bundle_recommit"
@@ -4155,6 +4159,9 @@ class RuntimeAgentSession:
         cron_internal = internal_source == "cron"
         reset_frontdoor_turn_state = internal_source in {None, "heartbeat", "cron"}
         if internal_source is None:
+            # 可见用户回合是唯一能解除"压缩失败保持"的操作：这一轮自己的批次会接走
+            # 排队条目，之后队列恢复正常排水。心跳/cron 不解除。
+            self.release_queued_follow_ups_after_compression_failure()
             await self._archive_paused_execution_context_for_ui_history()
             self._clear_manual_pause_waiting_reason_for_user_turn()
             if not self._active_user_batch_inputs or self._active_user_batch_inputs[-1] is not user_input:
@@ -5230,6 +5237,14 @@ class RuntimeAgentSession:
             )
         return len(restored)
 
+    def hold_queued_follow_ups_after_compression_failure(self) -> None:
+        """压缩失败后保持停手：自动排水（收尾 / WS 重连）不得从这里起回合。"""
+        setattr(self, QUEUED_FOLLOW_UP_COMPRESSION_FAILURE_HOLD_ATTR, True)
+
+    def release_queued_follow_ups_after_compression_failure(self) -> None:
+        """下一个可见用户回合或新一轮压缩解除失败保持。"""
+        setattr(self, QUEUED_FOLLOW_UP_COMPRESSION_FAILURE_HOLD_ATTR, False)
+
     async def dispatch_queued_follow_ups_if_idle(self, *, source: str = "") -> dict[str, Any]:
         """会话回到空闲时把排队中的消息发出去。返回 {dispatched, reason}。
 
@@ -5243,11 +5258,16 @@ class RuntimeAgentSession:
         web 会话不需要额外投递：WS 的订阅是 socket 级而非按消息的，转录与会话摘要负责重连。
 
         失败时把条目放回队列（转录那行仍是 pending，重启后也会被重新接回），因为这三个
-        缝都是低频事件，不会形成重试热循环。"""
+        缝都是低频事件，不会形成重试热循环。
+
+        手动压缩失败不等同于空闲边界：失败保持期间这里直接拒绝，排队消息留在队列里，
+        由操作员的下一条消息或重新压缩带出去，失败处不开新回合。"""
         session_key = str(self._state.session_key or "").strip()
         hold = self.frontdoor_inbound_hold()
         if hold:
             return {"dispatched": 0, "reason": f"held:{hold}", "source": source}
+        if getattr(self, QUEUED_FOLLOW_UP_COMPRESSION_FAILURE_HOLD_ATTR, False):
+            return {"dispatched": 0, "reason": "held:compression_failed", "source": source}
         if list(self._state.pending_interrupts or []):
             return {"dispatched": 0, "reason": "tool_approval_pending", "source": source}
         queued = self.drain_queued_follow_up_messages()

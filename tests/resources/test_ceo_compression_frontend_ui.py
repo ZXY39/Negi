@@ -47,6 +47,33 @@ def test_compression_progress_renders_as_feed_divider_not_composer_toast() -> No
     assert "data-ceo-compress-pause" in app_js
 
 
+def test_failed_compression_keeps_the_rule_and_puts_error_text_below_it() -> None:
+    css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
+    compression_js = (REPO_ROOT / "g3ku/web/frontend/ceo/compression.js").read_text(encoding="utf-8")
+
+    match = re.search(r"\.message\.message\.ceo-compression-divider\s*\{(?P<body>.*?)\n\}", css, re.S)
+    assert match is not None
+    body = match.group("body")
+    # 线本身仍是「左线 + 标签 + 右线」的行；失败原话另起一块挂在线下。
+    assert "flex-direction: column;" in body
+    assert "align-items: stretch;" in body
+
+    detail = re.search(r"\.ceo-compression-divider-detail\s*\{(?P<body>.*?)\n\}", css, re.S)
+    assert detail is not None
+    detail_body = detail.group("body")
+    # 失败正文与上方线条同宽：同一档左右留白，不收进中间窄列。
+    assert "width: 100%;" in detail_body
+    assert "max-width" not in detail_body
+    assert "padding-inline: clamp(20px, 7%, 88px);" in detail_body
+    assert "overflow-wrap: anywhere;" in css
+
+    # 重试按钮留在行内（与暂停线一致），正文块里不再有第二个按钮。
+    assert ".ceo-compression-divider-detail .ceo-compression-divider-retry" not in css
+    assert "ceo-compression-divider-alert" not in compression_js
+    assert "ceo-compression-divider-detail-text" in compression_js
+    assert "escapeCeoCompressionText(detailText)" in compression_js
+
+
 def test_ceo_context_load_notice_uses_single_right_aligned_column_and_kind_icons() -> None:
     css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
     app_js = (REPO_ROOT / "g3ku/web/frontend/org_graph_app.js").read_text(encoding="utf-8")

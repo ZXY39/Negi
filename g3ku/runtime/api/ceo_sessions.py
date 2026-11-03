@@ -1357,6 +1357,12 @@ async def _finish_manual_compression(
     stats: dict,
     reason: str,
 ) -> None:
+    # 失败不是"会话回到空闲"：先立住队列派发保持，后面的状态快照会让浏览器重连
+    # CEO WS，重连那条排水通道必须已经看到这一位，否则排队补充会在失败处自动开跑。
+    if status == MANUAL_COMPRESSION_FAILED:
+        hold = getattr(runtime_session, "hold_queued_follow_ups_after_compression_failure", None)
+        if callable(hold):
+            hold()
     if marker_state:
         # 区分线要重写整份转录，而渠道会话的 JSONL 可达数十 MB：按本仓库的会话 IO
         # 合同离开事件循环，否则一次收尾就把所有在跑的会话流一起卡住。
@@ -1389,12 +1395,14 @@ async def _finish_manual_compression(
     # 压缩收尾就是"会话回到空闲"的那个时刻，而队列的排水通道原本只长在请求处理里：
     # 压缩在途时受理的消息（web 候选 / 渠道排队）到这里才该发出去。谁让会话变空闲，
     # 谁在自己的收尾调用派发；它内部会再问一次 hold，重复调用与并发终局都安全。
-    dispatch_queued = getattr(runtime_session, "dispatch_queued_follow_ups_if_idle", None)
-    if callable(dispatch_queued):
-        try:
-            await dispatch_queued(source="manual_compression_finished")
-        except Exception:
-            pass
+    # 失败档例外：失败处不自动起回合，排队消息留给操作员的下一条消息或下一次压缩。
+    if status != MANUAL_COMPRESSION_FAILED:
+        dispatch_queued = getattr(runtime_session, "dispatch_queued_follow_ups_if_idle", None)
+        if callable(dispatch_queued):
+            try:
+                await dispatch_queued(source="manual_compression_finished")
+            except Exception:
+                pass
 
 
 async def _execute_manual_context_compression(agent, runtime_session, *, pause_first: bool) -> None:
@@ -1533,6 +1541,11 @@ async def compress_ceo_session_context(session_id: str):
     current = _manual_compression_view(runtime_session)
     if current.get("status") == MANUAL_COMPRESSION_RUNNING:
         return {"ok": True, "session_id": session_key, **current}
+    # 重新发起压缩是操作员的明确动作：解除上一次失败留下的派发保持。新一轮压缩
+    # 自己会占住入站闸门；成功收尾按既有规则排水，失败则重新立住保持。
+    release_hold = getattr(runtime_session, "release_queued_follow_ups_after_compression_failure", None)
+    if callable(release_hold):
+        release_hold()
     # 会话是否正在跑要在起任务前问一次：这一步只是读内存状态，真正的停手交给任务，
     # 端点本身必须在浏览器请求超时之前返回（见 _execute_manual_context_compression）。
     pause_first = _session_is_running(runtime_manager, session_key)

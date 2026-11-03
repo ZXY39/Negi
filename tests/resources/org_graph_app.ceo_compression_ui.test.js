@@ -92,7 +92,7 @@ function loadApp() {
     vm.createContext(context);
     vm.runInContext(
         `${APP_CODE}
-        this.__testExports = { S, U, syncCeoCompressionDivider, syncCeoModelRetryToast, setCeoSessionSnapshotCache, handleCeoError, syncCeoPrimaryButton, normalizeCeoSnapshotCompressionMarker, ceoCompressionDividerText, syncCeoCompressionRetryAffordances, convertCeoRunningDividerToTerminal };`,
+        this.__testExports = { S, U, syncCeoCompressionDivider, syncCeoModelRetryToast, setCeoSessionSnapshotCache, handleCeoError, syncCeoPrimaryButton, normalizeCeoSnapshotCompressionMarker, ceoCompressionDividerInner, syncCeoCompressionRetryAffordances, convertCeoRunningDividerToTerminal };`,
         context
     );
     context.__testExports.U.ceoModelRetryToast = new StubHTMLElement();
@@ -261,7 +261,7 @@ test("model retry toast 不把未知状态当成等待上游", () => {
     assert.equal(U.ceoModelRetryToast.hidden, true);
     assert.equal(U.ceoModelRetryToastText.textContent, "");
 });
-test("压缩失败的区分线自己带着外部原话，不再只靠一句会消失的 toast", () => {
+test("压缩失败线与暂停线一致：行内重新压缩，外部原话落到线下同宽一块", () => {
     const app = loadApp();
     const rejection = "Inappropriate input/output rejected for security reasons";
     const marker = app.normalizeCeoSnapshotCompressionMarker({
@@ -273,20 +273,34 @@ test("压缩失败的区分线自己带着外部原话，不再只靠一句会�
     assert.equal(marker.error_text, rejection);
     // 未知档仍然不画线：状态词表是白名单，不是"任何字符串都当一档"。
     assert.equal(app.normalizeCeoSnapshotCompressionMarker({ state: "cancelled", stats: {} }), null);
+
+    const html = app.ceoCompressionDividerInner("failed", { detail: rejection, retry: true });
+    // 线上只有标签与行内重试按钮，失败不再挂感叹号；原话不能挤进同一行。
+    assert.match(html, /<div class="ceo-compression-divider-inner"><span>压缩失败<\/span><button[^>]*data-ceo-compress-retry/);
+    assert.equal(html.includes("ceo-compression-divider-alert"), false);
+    assert.equal(html.includes("压缩失败："), false);
+    // 原话在线下独立的块里，重试动作留在线上。
+    const retryIndex = html.indexOf("重新压缩");
+    const detailIndex = html.indexOf('class="ceo-compression-divider-detail"');
+    assert.ok(detailIndex > html.indexOf('class="ceo-compression-divider-inner"'));
+    assert.ok(html.indexOf(rejection) > detailIndex);
+    assert.ok(retryIndex > 0 && retryIndex < detailIndex);
+    // 没有原话时只有线，不出现空的「：」，也不凭空长出一块正文。
     assert.equal(
-        app.ceoCompressionDividerText("failed", rejection),
-        `压缩失败：${rejection}`,
+        app.ceoCompressionDividerInner("paused", {}).includes("ceo-compression-divider-detail"),
+        false,
     );
-    // 没带原话时只剩标签，不出现空的「：」。
-    assert.equal(app.ceoCompressionDividerText("paused", ""), "压缩已暂停");
+    assert.equal(
+        app.ceoCompressionDividerInner("failed", { retry: true }).includes("ceo-compression-divider-detail"),
+        false,
+    );
 });
 
 test("失败线上的原话按文本处理，不当结构交给 innerHTML", () => {
     const app = loadApp();
-    const rendered = app.ceoCompressionDividerText(
-        "failed",
-        'rejected <img src=x onerror=alert(1)> & "quoted"',
-    );
+    const rendered = app.ceoCompressionDividerInner("failed", {
+        detail: 'rejected <img src=x onerror=alert(1)> & "quoted"',
+    });
     assert.equal(rendered.includes("<img"), false);
     assert.equal(rendered.includes("&lt;img"), true);
     assert.equal(rendered.includes("&amp;"), true);
@@ -304,8 +318,11 @@ test("失败那条线也挂「重新压缩」，且只挂在最后一条上", ()
     app.syncCeoCompressionRetryAffordances();
     assert.equal(row.dataset.ceoCompressionRetry, "1");
     assert.equal(row.innerHTML.includes("重新压缩"), true);
-    // 重挂时原话不能被丢掉：按钮档与文案档共用同一份正文。
-    assert.equal(row.innerHTML.includes("provider said no"), true);
+    // 重挂时原话不能被丢掉，且重试按钮必须回到行内，而不是落进正文块。
+    const retryIndex = row.innerHTML.indexOf("重新压缩");
+    const detailIndex = row.innerHTML.indexOf('class="ceo-compression-divider-detail"');
+    assert.ok(row.innerHTML.indexOf("provider said no") > detailIndex);
+    assert.ok(retryIndex > 0 && retryIndex < detailIndex);
     assert.equal(older.dataset.ceoCompressionRetry || "", "");
 });
 
@@ -329,5 +346,9 @@ test("轮询到 failed 时把进行中的线就地转成终态，不先删再等
     assert.equal(running.dataset.ceoCompressionDetail, "upstream refused the summary");
     assert.equal(running.className.includes("is-running"), false);
     assert.equal(running.className.includes("is-failed"), true);
-    assert.equal(running.innerHTML.includes("压缩失败：upstream refused the summary"), true);
+    assert.equal(running.innerHTML.includes("<span>压缩失败</span>"), true);
+    assert.equal(running.innerHTML.includes("压缩失败："), false);
+    assert.equal(running.innerHTML.includes("ceo-compression-divider-alert"), false);
+    assert.equal(running.innerHTML.includes("upstream refused the summary"), true);
+    assert.equal(running.innerHTML.includes("ceo-compression-divider-detail"), true);
 });

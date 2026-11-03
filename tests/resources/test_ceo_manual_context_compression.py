@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -27,6 +28,19 @@ def _build_app() -> FastAPI:
     app = FastAPI()
     app.include_router(ceo_sessions.router, prefix="/api")
     return app
+
+
+def _wait_until(predicate, *, attempts: int = 100) -> bool:
+    """后台压缩任务跑在自己的事件循环里；用环境无关的轮询等它收口。
+
+    TestClient 作为上下文使用时，其 portal 活到 with 结束；不这么写的话每个请求
+    结束后 portal 立即关闭，端点里 create_task 的后台任务会被连带取消，断言就会
+    跑在 status=running 那一拍上。"""
+    for _ in range(attempts):
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return bool(predicate())
 
 
 class _MarkerHost:
@@ -435,18 +449,19 @@ def test_compress_context_endpoint_accepts_channel_session(tmp_path: Path, monke
         session_key="ext:qq",
     )
 
-    client = TestClient(_build_app())
-    response = client.post("/api/ceo/sessions/ext:qq/compress-context")
+    with TestClient(_build_app()) as client:
+        response = client.post("/api/ceo/sessions/ext:qq/compress-context")
 
-    assert response.status_code == 200
-    assert response.json()["session_id"] == "ext:qq"
-    assert runner.calls == 1
-    assert markers and markers[-1]["state"] == "completed"
+        assert response.status_code == 200
+        assert response.json()["session_id"] == "ext:qq"
+        assert _wait_until(lambda: bool(markers))
+        assert runner.calls == 1
+        assert markers and markers[-1]["state"] == "completed"
 
-    # 没有转录的渠道会话没有可压缩基线，按不存在处理而不是静默建会话。
-    missing = client.post("/api/ceo/sessions/ext:none/compress-context")
-    assert missing.status_code == 404
-    assert missing.json()["detail"] == "session_not_found"
+        # 没有转录的渠道会话没有可压缩基线，按不存在处理而不是静默建会话。
+        missing = client.post("/api/ceo/sessions/ext:none/compress-context")
+        assert missing.status_code == 404
+        assert missing.json()["detail"] == "session_not_found"
 
 
 def test_compress_context_endpoint_runs_and_writes_completed_marker(tmp_path: Path, monkeypatch) -> None:
@@ -456,19 +471,20 @@ def test_compress_context_endpoint_runs_and_writes_completed_marker(tmp_path: Pa
     runtime_session.append_context_compression_marker = lambda **kwargs: markers.append(kwargs) or True
     _install_endpoint_runtime(monkeypatch, tmp_path, runner=runner, runtime_session=runtime_session)
 
-    client = TestClient(_build_app())
-    response = client.post("/api/ceo/sessions/web:shared/compress-context")
+    with TestClient(_build_app()) as client:
+        response = client.post("/api/ceo/sessions/web:shared/compress-context")
 
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["session_id"] == "web:shared"
-    assert runner.calls == 1
-    assert payload["status"] in {"running", "completed"}
-    assert markers and markers[-1]["state"] == "completed"
-    assert markers[-1]["source"] == "manual"
-    assert markers[-1]["stats"]["post_tokens"] == 9_000
-    # 收尾必须把进度复位，否则区分线一直挂在「进行中」。
-    assert runtime_session._compression_state["status"] == ""
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["session_id"] == "web:shared"
+        assert _wait_until(lambda: bool(markers))
+        assert runner.calls == 1
+        assert payload["status"] in {"running", "completed"}
+        assert markers and markers[-1]["state"] == "completed"
+        assert markers[-1]["source"] == "manual"
+        assert markers[-1]["stats"]["post_tokens"] == 9_000
+        # 收尾必须把进度复位，否则区分线一直挂在「进行中」。
+        assert runtime_session._compression_state["status"] == ""
 
 
 def test_compress_context_endpoint_pauses_running_turn_first(tmp_path: Path, monkeypatch) -> None:
@@ -480,16 +496,17 @@ def test_compress_context_endpoint_pauses_running_turn_first(tmp_path: Path, mon
     runtime_session.pause = lambda **kwargs: paused.append(True) or asyncio.sleep(0)
     _install_endpoint_runtime(monkeypatch, tmp_path, runner=runner, runtime_session=runtime_session)
 
-    client = TestClient(_build_app())
-    response = client.post("/api/ceo/sessions/web:shared/compress-context")
+    with TestClient(_build_app()) as client:
+        response = client.post("/api/ceo/sessions/web:shared/compress-context")
 
-    assert response.status_code == 200
-    # 端点自己不再 await pause：大会话的 pause 要整份重写转录（实测 73MB 是秒级的），
-    # 留在请求里就会撑爆浏览器侧 20 秒超时，前端会把还在跑的压缩误判成失败。
-    assert response.json()["status"] in {"running", "completed"}
-    # 但压缩开始前必须先停手，这件事由后台任务保证。
-    assert paused == [True]
-    assert runner.paused_before_compress is True
+        assert response.status_code == 200
+        # 端点自己不再 await pause：大会话的 pause 要整份重写转录（实测 73MB 是秒级的），
+        # 留在请求里就会撑爆浏览器侧 20 秒超时，前端会把还在跑的压缩误判成失败。
+        assert response.json()["status"] in {"running", "completed"}
+        # 但压缩开始前必须先停手，这件事由后台任务保证。
+        assert _wait_until(lambda: runner.paused_before_compress is True)
+        assert paused == [True]
+        assert runner.paused_before_compress is True
 
 
 def test_cancel_endpoint_rejects_when_nothing_is_running(tmp_path: Path, monkeypatch) -> None:
@@ -624,7 +641,8 @@ async def test_manual_compression_marker_carries_the_turn_boundary() -> None:
     assert captured[0]["stats"]["boundary_turn_seq"] == 2
 
 
-def test_compress_context_endpoint_failure_lands_failed_with_verbatim(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_compress_context_endpoint_failure_lands_failed_with_verbatim(tmp_path: Path, monkeypatch) -> None:
     """手动压缩自己失败：落 failed 档的区分线，正文就是外部原话。
 
     实盘 2026-10-28 会话 ext:qq-official-1903529517:f8a8001865631301：某一被供应商拒绝的块
@@ -650,20 +668,76 @@ def test_compress_context_endpoint_failure_lands_failed_with_verbatim(tmp_path: 
     runtime_session.append_context_compression_marker = lambda **kwargs: markers.append(kwargs) or True
     _install_endpoint_runtime(monkeypatch, tmp_path, runner=runner, runtime_session=runtime_session)
 
-    client = TestClient(_build_app())
-    response = client.post("/api/ceo/sessions/web:shared/compress-context")
+    with TestClient(_build_app()) as client:
+        response = client.post("/api/ceo/sessions/web:shared/compress-context")
 
-    assert response.status_code == 200
-    assert runner.calls == 1
-    state = getattr(runtime_session, MANUAL_COMPRESSION_STATE_ATTR, None) or {}
-    assert state.get("status") == "failed", state
-    assert state.get("reason") == rejection, state
-    # 失败是一次真的发生过的事件，所以它必须有持久落点：线自己带着原话。
-    assert markers and markers[-1]["state"] == "failed", markers
-    assert markers[-1]["stats"]["error_text"] == rejection, markers
-    assert "paused" not in {str(item.get("state")) for item in markers}, markers
-    # 进度复位，否则实时线一直挂在「上下文压缩中」。
-    assert runtime_session._compression_state["status"] == ""
+        assert response.status_code == 200
+        # 端点在后台任务里压缩；这里等它真的收口，避免断言跑在 "running" 那一拍上。
+        state: dict = {}
+        for _ in range(60):
+            state = getattr(runtime_session, MANUAL_COMPRESSION_STATE_ATTR, None) or {}
+            if state.get("status") == "failed":
+                break
+            await asyncio.sleep(0.05)
+
+        assert runner.calls == 1
+        assert state.get("status") == "failed", state
+        assert state.get("reason") == rejection, state
+        # 失败是一次真的发生过的事件，所以它必须有持久落点：线自己带着原话。
+        assert markers and markers[-1]["state"] == "failed", markers
+        assert markers[-1]["stats"]["error_text"] == rejection, markers
+        assert "paused" not in {str(item.get("state")) for item in markers}, markers
+        # 进度复位，否则实时线一直挂在「上下文压缩中」。
+        assert runtime_session._compression_state["status"] == ""
+
+
+@pytest.mark.asyncio
+async def test_compress_context_failure_holds_the_queue_instead_of_continuing(tmp_path, monkeypatch) -> None:
+    """压缩失败不是"会话回到空闲"：收尾不排水，并立住失败保持挡住重连排水。
+
+    实盘形状：压缩在途时受理的补充消息排在队列里，失败收尾若照常排水，会在失败处
+    自动起一个新回合——操作员看到的是"压缩刚失败，会话自己又跑起来了"。
+    """
+    rejection = "Inappropriate input/output rejected for security reasons"
+
+    class _RejectingRunner:
+        async def compress_session_context(self, *, session):
+            _ = session
+            raise FrontdoorCompressionRuntimeError(
+                code="frontdoor_compression_provider_rejected",
+                message=rejection,
+                recoverable=True,
+            )
+
+    runtime_session = _idle_runtime_session()
+    holds: list[bool] = []
+    dispatches: list[str] = []
+
+    def _hold() -> None:
+        holds.append(True)
+
+    async def _dispatch(*, source: str = "") -> dict:
+        dispatches.append(source)
+        return {"dispatched": 0, "reason": "empty", "source": source}
+
+    runtime_session.hold_queued_follow_ups_after_compression_failure = _hold
+    runtime_session.dispatch_queued_follow_ups_if_idle = _dispatch
+    _install_endpoint_runtime(monkeypatch, tmp_path, runner=_RejectingRunner(), runtime_session=runtime_session)
+
+    with TestClient(_build_app()) as client:
+        response = client.post("/api/ceo/sessions/web:shared/compress-context")
+        assert response.status_code == 200
+
+        state: dict = {}
+        for _ in range(60):
+            state = getattr(runtime_session, MANUAL_COMPRESSION_STATE_ATTR, None) or {}
+            if state.get("status") == "failed":
+                break
+            await asyncio.sleep(0.05)
+
+        assert state.get("status") == "failed", state
+        assert holds == [True]
+        assert dispatches == []
 
 
 def test_manual_compression_cancel_still_lands_paused_marker(tmp_path: Path) -> None:
