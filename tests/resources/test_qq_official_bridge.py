@@ -1557,6 +1557,9 @@ async def test_pump_delivers_event_attachment_via_file_data(monkeypatch: pytest.
         assert body["file_type"] == 4  # 任意文件
         assert base64.b64decode(body["file_data"]) == b"doc-bytes"
         assert body["srv_send_msg"] is False
+        # 外显名跟着上传走：平台把 ``file_name`` 定为二进制上传的必填项，缺了它收件端
+        # 只会看到「未命名」，同一回合连发几份文件就无从区分。
+        assert body["file_name"] == "日报.docx"
         # 预算从请求体字节数推导：12 字节的 base64 只落在固定开销那一档，连接判死仍是 5 秒。
         timeout = upload.extensions["timeout"]
         assert timeout["connect"] == 5.0
@@ -1638,6 +1641,21 @@ async def test_pump_falls_back_to_url_upload_when_file_data_rejected(
             await task
 
 
+def test_upload_file_name_is_the_local_name_sanitized_for_the_recipient() -> None:
+    """外显名是收件端分辨文件的唯一依据：剥掉路径、丢掉控制字符、把存盘非法的字符换成
+    下划线；超长只截外显名并保住后缀，上传字节不动。"""
+    assert bridge_module._upload_file_name("00_summary.md") == "00_summary.md"
+    assert bridge_module._upload_file_name("日报 (终版).docx") == "日报 (终版).docx"
+    assert bridge_module._upload_file_name("C:\\workspace\\out\\报告.docx") == "报告.docx"
+    assert bridge_module._upload_file_name("notes: 周报?.md") == "notes_ 周报_.md"
+    assert bridge_module._upload_file_name("  \t早间问候\x01.mp3 ") == "早间问候.mp3"
+    assert bridge_module._upload_file_name("///") == ""
+    assert bridge_module._upload_file_name("") == ""
+    capped = bridge_module._upload_file_name("x" * 200 + ".md")
+    assert capped == f"{'x' * 117}.md"
+    assert len(capped) == bridge_module._MAX_UPLOAD_FILE_NAME_CHARS
+
+
 @pytest.mark.asyncio
 async def test_pump_maps_attachment_mime_to_platform_file_type(monkeypatch: pytest.MonkeyPatch) -> None:
     """mime → file_type 映射：图片 1、mp4 2、语音 3、其余（文档）4；群聊走群接口。
@@ -1678,6 +1696,11 @@ async def test_pump_maps_attachment_mime_to_platform_file_type(monkeypatch: pyte
         uploads = _api_uploads(records)
         assert [str(request.url) for request in uploads] == [group_files_url, group_files_url]
         assert [json.loads(request.content)["file_type"] for request in uploads] == [1, 4]
+        # 外显名只随「任意文件」那一档上去：图片渲染成内联卡片、不带名，请求体形状与
+        # 带名之前逐字一致（那档实盘 177 发，多一个键就多一份被平台按后缀校验的暴露面）。
+        bodies = [json.loads(request.content) for request in uploads]
+        assert ["file_name" in body for body in bodies] == [False, True]
+        assert bodies[1].get("file_name") == "报告.docx"
         assert client.api.calls == [
             (
                 "post_group_message",

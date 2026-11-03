@@ -219,6 +219,32 @@ def _platform_image_bytes(data: bytes) -> tuple[bytes, str]:
         return data, ""
 
 
+# 平台媒体上传接口把 ``file_name`` 定为「分片上传或者二进制上传时必填」。不带这一枚时
+# 收件端只显示「未命名」，同一回合连发几份文件就无从区分（实盘 22 发 file_type=4 全走这
+# 一档）。长度上限文档没给，收在一个明显不会触顶的量级：只截外显名，不动上传字节。
+_MAX_UPLOAD_FILE_NAME_CHARS = 120
+_UPLOAD_FILE_NAME_ILLEGAL = '\\/:*?"<>|'
+
+
+def _upload_file_name(name: str) -> str:
+    """外显名：剥掉路径与控制字符，把收件端存盘时非法的字符换成下划线，保住后缀。"""
+    raw = str(name or "").replace("\\", "/").rsplit("/", 1)[-1]
+    raw = "".join(
+        "_" if char in _UPLOAD_FILE_NAME_ILLEGAL else char
+        for char in raw
+        if char >= " " and char != "\x7f"
+    ).strip()
+    if not raw:
+        return ""
+    if len(raw) <= _MAX_UPLOAD_FILE_NAME_CHARS:
+        return raw
+    suffix = Path(raw).suffix
+    if len(suffix) >= _MAX_UPLOAD_FILE_NAME_CHARS:
+        return raw[:_MAX_UPLOAD_FILE_NAME_CHARS]
+    stem = raw[: _MAX_UPLOAD_FILE_NAME_CHARS - len(suffix)].rstrip(" ")
+    return f"{stem}{suffix}"
+
+
 # pump 重连退避。SSE 流断开（服务端事件循环阻塞超过读超时、网络抖动、进程重启）
 # 后必须自动重连：pump 一旦终结且不再重建，该会话的所有主动推送（心跳升级、
 # cron 提醒、任务终态）都会永久滞留在服务端事件缓冲里，形成"能收不能发"的
@@ -605,10 +631,15 @@ async def _collect_attachments(
 
     ``audio/*`` is the exception: forwarded as a file it reaches the model as
     one local-path line and the utterance itself is lost, so when local
-    speech-to-text is enabled the bytes are transcribed here and the text is
-    returned instead of an attachment. With speech-to-text off, audio keeps
-    its old file treatment byte-for-byte — the feature must never make an
-    existing deployment see less than it used to.
+    speech-to-text is ready the bytes are transcribed here and the text is
+    returned instead of an attachment. Enabled but not installed yet -- a fresh
+    device whose first voice arrives over QQ before anyone opened the composer --
+    asks the engine for the artifacts in the background and keeps this clip on the
+    file lane, because a turn must not wait minutes on a download. With
+    speech-to-text switched off, audio keeps its old file treatment
+    byte-for-byte and nothing is fetched: the switch is the operator's permission,
+    not a suggestion, and the feature must never make an existing deployment see
+    less than it used to.
     """
     from g3ku.stt import engine as stt_engine
 
@@ -688,6 +719,11 @@ async def _collect_attachments(
                     f"{_VOICE_FAILURE_PREFIX}{result.error or result.error_code}"
                 )
             continue
+        # 未就绪不代表这台机器不打算就绪：渠道语音是新设备第一次碰到那 157 MB 的入口。
+        # 在这里提一次后台取得（单飞、冷却、开关都归引擎判），这一条仍按文件车道走——
+        # 下载要几分钟，一个回合不能等它，下一条语音就能转写。
+        if is_audio:
+            await stt_engine.request_provisioning(source="qq-voice")
         # 走文件车道时同理：类别词不能当 MIME 用，扩展名要按识别出的媒体形态兜。
         declared = _declared_mime(content_type)
         # 猜扩展名用可猜的 MIME（guess_extension('audio/x-silk') 是 None → 会退回 .png）；
@@ -838,7 +874,11 @@ async def run_qq_official_bridge(
         return Route("POST", "/v2/users/{openid}/files", openid=target["user_openid"])
 
     async def _upload_media_data(
-        kind: str, target: dict[str, str], data: bytes, file_type: int
+        kind: str,
+        target: dict[str, str],
+        data: bytes,
+        file_type: int,
+        file_name: str = "",
     ) -> str:
         """``file_data``（base64）直传媒体，返回 ``file_info``（空串=失败）。
 
@@ -851,9 +891,14 @@ async def run_qq_official_bridge(
         自己的 WARNING 就返回 ``None``，桥侧连失败原因都拿不到。这里沿用 SDK 的
         Route（域名与路径参数）和它的鉴权头续期，把 POST 发到桥自己的媒体 client
         上，预算由 ``_media_upload_timeout`` 按请求体字节数推导。
+
+        ``file_name`` 是收件端看到的文件名，由调用方按档位决定要不要带（见
+        ``_deliver_attachment``）；空串时不写这个键，请求体形状与带名之前一致。
         """
         file_data = base64.b64encode(data).decode("ascii")
         body = {"file_type": file_type, "file_data": file_data, "srv_send_msg": False}
+        if file_name:
+            body["file_name"] = file_name
         budget = _media_upload_timeout(len(file_data))
         route = _media_files_route(kind, target)
         started = time.perf_counter()
@@ -963,7 +1008,11 @@ async def run_qq_official_bridge(
                             "qq-official converted image attachment {} to {}", name, converted_mime
                         )
                         data = converted
-                file_info = await _upload_media_data(kind, target, data, file_type)
+                # 只有「任意文件」那一档在收件端显示文件名。图片/语音/视频渲染成内联
+                # 卡片，带名会让平台按后缀去校验这一发字节（图片转码后的后缀与原文件名
+                # 已经不一致），那两档的请求体形状保持不动。
+                upload_name = _upload_file_name(name) if file_type == 4 else ""
+                file_info = await _upload_media_data(kind, target, data, file_type, upload_name)
                 if not file_info:
                     file_info = await _upload_media_url(kind, target, url, file_type)
                 if not file_info:
