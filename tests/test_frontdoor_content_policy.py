@@ -135,11 +135,19 @@ async def test_graph_call_model_masks_history_and_notices_current_hop(monkeypatc
     assert sent[1]["content"] == f"older {cp.REPLACEMENT_MARKER}"
     assert cp.NOTICE_PREFIX not in sent[1]["content"]
     assert persisted[0] == sent
+    # 掩掉发起方正文后的说明走通知车道：挂在本轮发送的最后一条上，且不带工具行那种提示。
+    tail = sent[-1]
+    assert tail.get("role") == "user"
+    assert str(tail.get("content") or "").startswith(cp.RUNTIME_NOTICE_MARKER)
+    assert "安全审查词替换" in str(tail.get("content") or "")
+    assert "1 处" in str(tail.get("content") or "")
 
     durable = result["messages"]
     durable_tools = [item for item in durable if item.get("role") == "tool"]
     assert cp.REPLACEMENT_MARKER in durable_tools[0]["content"]
     assert cp.REPLACEMENT_MARKER in durable_tools[1]["content"]
+    # 说明只活在这一发的副本里：进了 durable 基线就会以"用户消息"的形态每跳重播。
+    assert "安全审查词替换" not in str(durable)
 
 
 @pytest.mark.asyncio

@@ -207,6 +207,30 @@ def test_apply_content_policy_masks_text_parts_of_multimodal_user_message() -> N
     assert parts[1]["image_url"]["url"] == "data:image/jpeg;base64,AAAA"
 
 
+def test_user_row_notice_goes_out_on_the_notice_lane_not_inside_the_row() -> None:
+    """掩掉发起方正文后的说明走 `[RUNTIME_NOTICE]`，不写进那条消息里。
+
+    写进行内会被读成"用户自己发了一句系统提醒"——那正是要避免的误读形状；说明也只挂在
+    这一发的副本上，不进 durable 基线。
+    """
+    cp.save_policy(True, ["六四"])
+    messages = [{"role": "user", "content": "六四 是什么"}]
+    masked = cp.apply_content_policy(messages)
+    assert cp.count_user_row_markers(masked) - cp.count_user_row_markers(messages) == 1
+    assert cp.NOTICE_PREFIX not in masked[0]["content"]
+
+    with_notice = cp.append_content_policy_notice(masked, 1)
+    assert len(with_notice) == 2
+    notice = with_notice[1]["content"]
+    assert notice.startswith(cp.RUNTIME_NOTICE_MARKER)
+    assert "安全审查词替换" in notice and "1 处" in notice
+    # 已有通知时并进去，不再新起一条。
+    merged = cp.append_content_policy_notice(with_notice, 2)
+    assert len(merged) == 2
+    assert merged[1]["content"].count(cp.RUNTIME_NOTICE_MARKER) == 1
+    assert "2 处" in merged[1]["content"]
+
+
 def test_apply_content_policy_never_rewrites_assistant_or_system_rows() -> None:
     cp.save_policy(True, ["六四"])
     messages = [

@@ -270,6 +270,68 @@ def _notice_text(hits: int) -> str:
     return _NOTICE_TEMPLATE.format(hits=int(hits))
 
 
+# `[RUNTIME_NOTICE]` 是运行时往模型眼前放系统话的既定车道。本模块是两条车道共用的叶子，
+# 与 `tool_error_guidance` 同样不反向 import runtime，按冻结标记写常量。
+RUNTIME_NOTICE_MARKER = "[RUNTIME_NOTICE]"
+
+_CONTENT_POLICY_NOTICE_HEADING = "### 安全审查词替换"
+
+
+def count_user_row_markers(messages: list[Any]) -> int:
+    """数 `role=user` 行里已带的占位符个数（含多模态文本部件）。
+
+    调用方拿"替换前后之差"就是这一跳新掩掉的处数：掩码只对首次命中的行生效，所以这个
+    数天然一跳一次，不需要额外的状态位。
+    """
+    if not isinstance(messages, list):
+        return 0
+    total = 0
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if str(message.get("role") or "").strip().lower() != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            total += content.count(REPLACEMENT_MARKER)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict):
+                    total += str(part.get("text") or "").count(REPLACEMENT_MARKER)
+    return total
+
+
+def content_policy_notice_body(hits: int) -> str:
+    return (
+        f"{_CONTENT_POLICY_NOTICE_HEADING}\n"
+        f"- 本轮发给模型的发起方正文里有 {max(0, int(hits))} 处命中安全审查词表，已被替换成占位符。"
+        "占位符是系统盖的标记，不是用户写的原文：不要复述它，不要据此说内容读不到，"
+        "也不要要用户重发同一句。"
+    )
+
+
+def append_content_policy_notice(messages: list[Any], hits: int) -> list[Any]:
+    """把这条说明并进本轮末尾那条 `[RUNTIME_NOTICE]`；没有就新起一条通知消息。
+
+    说明绝不写进被替换的那条用户消息里：那等于在用户的话语中间插一句系统话，模型会把它
+    当成用户自己发的提醒。通知也只在发送副本里带一次，不进 durable 基线，否则它会以"用户
+    消息"的形态在之后每一跳重播。
+    """
+    body = content_policy_notice_body(hits)
+    result = list(messages)
+    if result and isinstance(result[-1], dict):
+        last = result[-1]
+        last_content = str(last.get("content") or "")
+        if (
+            str(last.get("role") or "").strip().lower() == "user"
+            and last_content.startswith(RUNTIME_NOTICE_MARKER)
+        ):
+            result[-1] = {**last, "content": f"{last_content}\n\n{body}"}
+            return result
+    result.append({"role": "user", "content": f"{RUNTIME_NOTICE_MARKER}\n\n{body}"})
+    return result
+
+
 def replace_content(
     content: str,
     matcher: re.Pattern[str] | None,
