@@ -201,6 +201,7 @@ frontdoor / 节点的工具状态分两层，且都由持久化状态维护而�
 CEO/frontdoor 路径上，`frontdoor_turns` 是“每个回合说了什么、这一回合调了哪些工具”的权威账本，节点详情与会话轨道读同一套 `turns[]` 形状：
 
 - 写入：`append_frontdoor_turn()` 在工具循环完成时按 `turn_id` 追加或合并。同一 `turn_id` 再出现同一批 `tool_call_id` 是在补正文，不产生第二行；出现新的一批工具调用才是下一轮工具循环。`seq` 单调递增，账本上限 `FRONTDOOR_TURNS_MAX = 200`，超限从最老的 turn 开始淘汰。
+- `turn_id` 归属：每个 prompt——可见用户轮、heartbeat、cron——各自持有一个 `turn_id`，内部轮不继承可见轮的 `_active_turn_id`；唯一复用是续跑轮按 `_adopt_interrupted_turn_id_for_resume` 显式认领被截断回合的 id。账本按 `turn_id` 切片（`frontdoor_turns_for_turn`）后下发给网页，每个回合元素的轨道只画自己那一片：两轮共用一个 id 时，上一轮的正文与工具会出现在下一轮（尤其是折叠的静默回合）的轨道里再画一遍。
 - 每条工具记录携带稳定身份（`tool_call_id`）与展示字段（`tool_name`、`status`、`arguments_text`、`arguments_ref`、`output_text`、`output_ref`、`started_at`、`finished_at`、`elapsed_seconds`，以及直接调用交付的 `contract_delivery`）。入参与出参在账本里保留全量：Web 轨道裁剪的是渲染层，入参回读接口 `GET /ceo/sessions/{id}/tool-arguments` 以账本（会话未驻留时读完成态 sidecar 的同名字段）为唯一来源。
 - 叙述文本：每个 turn 的 `text` 是该循环里模型给出的正文，`text_ref` 指向外置正文。它是展示字段，只服务 Web 时间线，不参与 prompt 组装，也不进转录权威链。
 - 持久化：`RuntimeAgentSession._frontdoor_turns` 随会话状态与 `state_snapshot` 下发，轮末写进 completed continuity sidecar，进程重启后按 sidecar 恢复。

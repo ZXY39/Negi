@@ -1324,7 +1324,12 @@ class RuntimeAgentSession:
 
     def _ensure_user_turn_id(self, user_input: UserInputMessage, *, reuse_active: bool = True) -> str:
         metadata = dict(user_input.metadata or {})
-        active_turn_id = self._active_turn_id if reuse_active else None
+        # 心跳 / cron 是独立回合，不继承可见轮的 active id：两轮共用一个 turn_id 会把
+        # 上一轮的正文与工具并进本轮的 turns 账本（frontdoor_turns 按 turn_id 切片），
+        # 网页按 turn 画轨道时就会把上一轮的中途输出与工具再重复画一遍。续跑轮复用
+        # 被截断回合 id 的行为由 `_adopt_interrupted_turn_id_for_resume` 显式覆盖。
+        internal_prompt = self._internal_prompt_source(user_input) is not None
+        active_turn_id = self._active_turn_id if (reuse_active and not internal_prompt) else None
         turn_id = str(metadata.get(_TRANSCRIPT_TURN_ID_KEY) or active_turn_id or "").strip()
         if not turn_id:
             turn_id = self._new_turn_id()
@@ -1388,16 +1393,8 @@ class RuntimeAgentSession:
     def _current_turn_id(self, prompt: Any | None = None) -> str:
         current = self._last_prompt if prompt is None else prompt
         if isinstance(current, UserInputMessage):
-            if self._internal_prompt_source(current) is None:
-                return self._ensure_user_turn_id(current)
-            metadata = dict(current.metadata or {})
-            turn_id = str(metadata.get(_TRANSCRIPT_TURN_ID_KEY) or self._active_turn_id or "").strip()
-            if not turn_id:
-                turn_id = self._new_turn_id()
-                metadata[_TRANSCRIPT_TURN_ID_KEY] = turn_id
-                current.metadata = metadata
-                self._active_turn_id = turn_id
-            return turn_id
+            # 内部轮（心跳/cron）与可见轮同一套判据，见 `_ensure_user_turn_id`。
+            return self._ensure_user_turn_id(current)
         return str(self._active_turn_id or "").strip()
 
     def _turn_usage_payload(self, turn_id: str) -> dict[str, int] | None:
