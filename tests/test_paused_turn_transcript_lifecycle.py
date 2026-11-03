@@ -466,7 +466,7 @@ def test_internal_turn_completion_stops_the_rehydrate_resurrection_loop():
     assert reopened._state.queued_follow_up_messages == [], "退役后不再被当作未回答消息重投"
 
 
-def test_pending_user_persistence_failure_leaves_a_visible_log() -> None:
+def test_pending_user_persistence_failure_leaves_a_visible_log(monkeypatch) -> None:
     """用户行没写进转录是一次可见的降级，不是 debug 噪声。
 
     这一趟吞掉的是"用户说过的那句话在转录里不存在"，事后按 session_key 查日志要能查到
@@ -476,7 +476,12 @@ def test_pending_user_persistence_failure_leaves_a_visible_log() -> None:
 
     from loguru import logger
 
+    import g3ku.runtime.session_agent as session_agent_module
     from g3ku.runtime.session_agent import RuntimeAgentSession
+
+    # 合跑时同片里有用例把模块的 `logger` 换成过捕获桩，这条用例读的是"真实日志面有没有
+    # 这一行"，所以先把那个口钉回真 logger，否则它会安静地收到空串。
+    monkeypatch.setattr(session_agent_module, "logger", logger)
 
     def _boom(_key):
         raise RuntimeError("session store down")
