@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -73,7 +74,17 @@ def main(argv: list[str] | None = None) -> int:
 
     targets = [str(path) for path in picked]
     print(f"running pytest on {len(targets)} explicit file arguments", flush=True)
-    return subprocess.run([sys.executable, "-m", "pytest", "-q", *targets], cwd=str(REPO_ROOT)).returncode
+    # 看门狗：一条用例不返回时，分片预算会被它整片吃掉且日志里连名字都没有
+    # （实测 shard3 停在 64% 之后 16 分钟无输出）。插件在 scripts/ 里，靠 PYTHONPATH
+    # 交给 pytest 导入；UNBUFFERED 让点号即时落进日志，不被块缓冲推迟到进程结束。
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join([str(REPO_ROOT / "scripts"), env.get("PYTHONPATH", "")]).strip(os.pathsep)
+    env["PYTHONUNBUFFERED"] = "1"
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "ci_test_watchdog", *targets],
+        cwd=str(REPO_ROOT),
+        env=env,
+    ).returncode
 
 
 if __name__ == "__main__":
