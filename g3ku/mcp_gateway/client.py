@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
 import httpx
+from loguru import logger
 
 from g3ku.runtime.session_trust import GATEWAY_SENDER_ID
 
@@ -187,17 +188,29 @@ class G3kuMcpClient:
         response.raise_for_status()
 
     @asynccontextmanager
-    async def event_stream(self, session_id: str, *, last_seq: int = 0) -> AsyncIterator[AsyncIterator[dict[str, Any]]]:
+    async def event_stream(
+        self,
+        session_id: str,
+        *,
+        last_seq: int = 0,
+        self_ack: bool = True,
+    ) -> AsyncIterator[AsyncIterator[dict[str, Any]]]:
         """Open the session SSE stream; yields an async iterator of parsed
         events and tracks the per-session replay cursor. SSE frames are
         ``id: {seq}\\nevent: {type}\\ndata: {json}``; the 15s heartbeat comment
-        keeps the httpx read timeout (30s) from firing."""
+        keeps the httpx read timeout (30s) from firing.
+
+        ``self_ack`` 默认为真：本网关拿到哪条就自己销哪条（见 ``_settle``）。服务端
+        若在帧写出时就替这条连接销账，一次点名错回合的续取会把别人那条回复的账签掉，
+        帧被丢弃、账已交付，真正等它的人此后取不到——所以这里声明由自己 ack。
+        """
         headers = self._headers({"Accept": "text/event-stream"})
         cursor = int(last_seq or 0) or self.last_seq(session_id)
         if cursor > 0:
             headers["Last-Event-ID"] = str(cursor)
+        params = {"self_ack": "true"} if self_ack else None
         async with self._client.stream(
-            "GET", f"/sessions/{session_id}/events", headers=headers
+            "GET", f"/sessions/{session_id}/events", headers=headers, params=params
         ) as response:
             response.raise_for_status()
 
@@ -312,6 +325,17 @@ class G3kuMcpClient:
                         "task_ids": list(event.get("task_ids") or []),
                         "transcript_turn_id": str(event.get("transcript_turn_id") or "") or None,
                     }
+                # 点名要的是别的回合：这一帧不是我们的，也不由我们销账。留一行读数——
+                # 没有它，"那条回复生成了却谁也没拿到"只能靠重放猜（本次改动前正是如此）。
+                logger.warning(
+                    "mcp gateway skipped a reply.final of another turn: session={} wanted={} "
+                    "frame_turn={} seq={} outbox={}",
+                    session_id,
+                    str(turn_id or ""),
+                    event_turn_id,
+                    seq,
+                    str(event.get("outbox_id") or ""),
+                )
                 continue
             if event_type == "turn.completed":
                 if queued:

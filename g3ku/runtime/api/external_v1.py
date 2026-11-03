@@ -1385,12 +1385,21 @@ def _sse_chunk(event: dict[str, Any]) -> str:
     return f"id: {event.get('seq')}\nevent: {event.get('type')}\ndata: {data}\n\n"
 
 
-def _ack_streamed_outbox_event(event: dict[str, Any], session_key: str) -> None:
+def _ack_streamed_outbox_event(
+    event: dict[str, Any],
+    session_key: str,
+    *,
+    self_ack: bool = False,
+) -> None:
     """外部 SSE 把 `reply.final` 写出去了 = 拉取式客户端已经拿到正文，就地销账。
 
     与桥在渠道 API 确认后发起的 ack 同义；重复 ack 是幂等墓碑。跨进程的
     MCP 网关（negi_get_reply 走这条 SSE）过去没有任何 ack 点，未取走的回复
     只能靠对账循环无限重投。
+
+    `self_ack=True` 时这一条整体让位：连接方声明"我拿到哪条就自己销哪条"（MCP 网关
+    就这么接），服务端替它销账会出事——这一次连接点名要的是别的回合，帧被它丢弃，
+    账却已经签了，真正等这条回复的人此后永远取不到，账面还显示"已送达"。
 
     只销 `reply.final`：主动推送那一类（`outbound.created`）在这一条流上有现成的
     消费者（渠道桥），也有根本没有消费者的（纯拉取式会话），服务端看不出客户端会不会
@@ -1398,6 +1407,8 @@ def _ack_streamed_outbox_event(event: dict[str, Any], session_key: str) -> None:
     标成已交付——正文仍在转录里，但待投递这个事实没了。主动推送由真正取走它的一方
     ack：桥发送成功后调 `/outbox/{id}/ack`，拉取式客户端返回它时同样调这一颗。
     """
+    if self_ack:
+        return
     if str((event or {}).get("type") or "") != REPLY_EVENT:
         return
     outbox_id = str((event or {}).get("outbox_id") or "").strip()
@@ -1415,6 +1426,10 @@ async def stream_external_events(
     request: Request,
     principal: ExternalApiPrincipal = Depends(require_external_api),
     last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+    self_ack: bool = Query(
+        default=False,
+        description="连接方自己认领拿到的正文：为真时服务端不再在帧写出时替它销账。",
+    ),
 ):
     entry = _resolve_entry(session_id, principal)
     hub = get_session_event_hub(entry.session_key)
@@ -1436,7 +1451,7 @@ async def stream_external_events(
             for event in hub.replay(last_seq):
                 emitted_seq = max(emitted_seq, int(event.get("seq") or 0))
                 yield _sse_chunk(event)
-                _ack_streamed_outbox_event(event, entry.session_key)
+                _ack_streamed_outbox_event(event, entry.session_key, self_ack=self_ack)
             while True:
                 if await request.is_disconnected():
                     break
@@ -1447,7 +1462,7 @@ async def stream_external_events(
                         continue
                     emitted_seq = max(emitted_seq, seq)
                     yield _sse_chunk(event)
-                    _ack_streamed_outbox_event(event, entry.session_key)
+                    _ack_streamed_outbox_event(event, entry.session_key, self_ack=self_ack)
                 except asyncio.TimeoutError:
                     yield ": keep-alive\n\n"
         finally:

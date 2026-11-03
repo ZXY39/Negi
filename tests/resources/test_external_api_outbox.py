@@ -128,6 +128,28 @@ def test_streamed_reply_acks_the_outbox_record(env) -> None:
     assert external_outbox.load_pending_outbound() == []
 
 
+def test_self_ack_stream_leaves_the_record_for_the_consumer_that_takes_it(env) -> None:
+    """点名错回合的续取不再替别人销账：连接声明自己 ack 时，服务端不代签。
+
+    代签的形状是：帧推给一个不认它的连接、被丢弃，账却已经写成"已送达"，真正等这条
+    回复的人此后取不到（实盘 2026-11-03 用 `negi_get_reply` 点名另一回合复现）。
+    """
+    outbox_id = external_outbox.record_outbound_message(
+        session_key="ext:qoder:selfack",
+        external_key="mcp:probe",
+        text="等主人来取",
+        event=external_outbox.REPLY_EVENT,
+    )
+    event = {"type": "reply.final", "outbox_id": outbox_id}
+
+    external_v1._ack_streamed_outbox_event(event, "ext:qoder:selfack", self_ack=True)
+    pending = external_outbox.load_pending_outbound()
+    assert [item.get("id") for item in pending] == [outbox_id]
+
+    external_v1._ack_streamed_outbox_event(event, "ext:qoder:selfack")
+    assert external_outbox.load_pending_outbound() == []
+
+
 def test_streamed_reply_ack_is_session_scoped_and_ignores_plain_events(env) -> None:
     foreign = external_outbox.record_outbound_message(
         session_key="ext:qoder:owner",
