@@ -670,7 +670,7 @@ def test_tool_managed_builtin_tool_seeds_default_governance_roles_on_first_disco
     records = {item.tool_id: item for item in build_tool_records(list(snapshot.tools.values()))}
     record = records['exec']
 
-    assert record.allowed_roles == ['ceo', 'execution']
+    assert record.allowed_roles == ['ceo', 'execution', 'inspection']
     assert record.risk_level == 'high'
     assert record.destructive is True
     # exec_runtime 这个族名不再是一条记录，动作 id 'run' 也不复存在。

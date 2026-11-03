@@ -23,7 +23,9 @@ DEFAULT_TOOL_GOVERNANCE: dict[str, dict[str, Any]] = {
         'description': 'Execute shell commands.',
         'risk_level': 'high',
         'destructive': True,
-        'allowed_roles': WRITE_ALLOWED_ROLES,
+        # 三个 actor 全开：验收节点拿到的共享提示块（main/prompts/shared_tool_discipline.md）
+        # 就点名用 exec 做目录与环境探查，默认表少 inspection 时那句话兑现不了。
+        'allowed_roles': DEFAULT_ALLOWED_ROLES,
     },
     'model_config': {
         'display_name': 'Manage Models',

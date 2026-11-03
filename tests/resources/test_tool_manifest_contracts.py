@@ -232,6 +232,10 @@ def test_every_tool_manifest_satisfies_the_tool_level_governance_contract():
     for tool_id in implicit_governance:
         assert tool_id in DEFAULT_TOOL_GOVERNANCE, f'{tool_id} has no explicit governance and no default entry'
     assert set(implicit_governance) == set(DEFAULT_TOOL_GOVERNANCE)
+    # exec 的默认角色面是三个 actor 全开：验收节点拿到的共享提示块
+    # main/prompts/shared_tool_discipline.md 点名用 exec 做目录与环境探查，默认表少
+    # inspection 时那句话在验收车道上兑现不了（RBAC 才是可见性的最高判据）。
+    assert set(DEFAULT_TOOL_GOVERNANCE['exec']['allowed_roles']) == GOVERNANCE_ACTOR_ROLES
 
 
 def test_recovery_policy_blocks_only_declare_a_boolean_rerun_safe():
