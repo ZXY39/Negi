@@ -32,14 +32,17 @@ def test_memory_update_keeps_the_one_call_rule_on_the_provider_surface() -> None
     """实盘：38 条记忆要求被发成 38 次调用，队列行边到边被 1 秒节拍切成两批，内部 agent 因此多跑一轮。
 
     规则只能钉在函数级 description：字段级 description 在 provider 边界会被剥掉，写在那里等于没写。
+    模型可见文案是英文的（`runtime-overview.md` 那条约束用英文落在清单与类两处），所以这里钉的是
+    英文原句，并顺手确认中文没有回流到这一面。
     """
     tool = MemoryUpdateTool(manager=object())
 
     description, _schema = _provider_visible_tool_contract(tool)
 
-    assert "任意数量的记忆处理需求" in description
-    assert "一次调用即可处理" in description
-    assert "禁止批量调用" in description
+    assert "One call covers many needs" in description
+    assert "This only submits it" in description
+    assert "never say it is saved, revised or removed" in description
+    assert not any("\u4e00" <= ch <= "\u9fff" for ch in description)
 
 
 def test_frontdoor_selected_tool_schemas_strip_provider_unsupported_combinators() -> None:

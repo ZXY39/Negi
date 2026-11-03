@@ -24,8 +24,8 @@ class MemoryUpdateTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Queue a long-term memory change; do not edit `memory/` files. This only submits it—never say "
-            "it is saved, revised or removed."
+            "Queue a long-term memory change; do not edit `memory/` files. One call covers many needs. "
+            "This only submits it—never say it is saved, revised or removed."
         )
 
     @property

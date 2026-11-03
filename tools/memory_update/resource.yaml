@@ -1,7 +1,7 @@
 schema_version: 1
 kind: tool
 name: memory_update
-description: Queue a long-term memory change; do not edit `memory/` files. This only submits it—never say it is saved, revised or removed.
+description: Queue a long-term memory change; do not edit `memory/` files. One call covers many needs. This only submits it—never say it is saved, revised or removed.
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''

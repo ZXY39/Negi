@@ -38,9 +38,14 @@ def _registered_routes() -> set[tuple[str, tuple[str, ...]]]:
 
 def _frontend_calls() -> list[tuple[str, tuple[str, ...], str]]:
     calls: list[tuple[str, tuple[str, ...], str]] = []
-    for js_file in sorted(FRONTEND_DIR.glob("*.js")):
-        if js_file.name.endswith(".test.js"):
-            continue
+    # 递归：门面拆包后调用点在 `client_api/<domain>.js`、`ceo/*.js` 这些子目录里，
+    # 只扫顶层会把整族 API 调用看成"前端不再调用"，探针从此什么也证不了。
+    js_files = sorted(
+        path
+        for path in FRONTEND_DIR.rglob("*.js")
+        if "vendor" not in path.parts and not path.name.endswith(".test.js")
+    )
+    for js_file in js_files:
         text = js_file.read_text(encoding="utf-8", errors="replace")
         for match in _CALL_RE.finditer(text):
             raw_path = match.group(2) or match.group(3) or ""
@@ -50,7 +55,7 @@ def _frontend_calls() -> list[tuple[str, tuple[str, ...], str]]:
             # `${...}` interpolations become a path segment wildcard placeholder
             stem = re.sub(r"\$\{[^}]*\}", "*", raw_path.split("?", 1)[0])
             segments = tuple(seg for seg in stem.split("/") if seg)
-            calls.append((method, segments, js_file.name))
+            calls.append((method, segments, js_file.relative_to(FRONTEND_DIR).as_posix()))
     return calls
 
 

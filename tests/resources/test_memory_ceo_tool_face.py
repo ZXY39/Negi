@@ -141,9 +141,14 @@ def test_a_note_ref_copied_straight_off_the_block_resolves(tmp_path: Path) -> No
 
 
 def test_the_note_tool_describes_the_argument_without_its_label() -> None:
-    """上一版的描述写的是\"照块里显示的原样传\"，实盘 3/3 都连 `note:` 一起传进来。"""
+    """上一版的描述写的是"照块里显示的原样传"，实盘 3/3 都连 `note:` 一起传进来。"""
     tools = importlib.import_module("g3ku.agent.tools.memory_note")
-    description = tools.MemoryNoteTool(manager=None).description
+    tool = tools.MemoryNoteTool(manager=None)
+    description = tool.description
     assert "not the label" in description
     assert "exactly as shown" not in description
-    assert "without the '.md' suffix" in description
+    # `.md` 那条写在参数说明上：模型可见的这一跳是"函数描述 + 参数表"两处，
+    # 单看函数描述会把这条判据读成消失了。
+    import json as _json
+
+    assert ".md suffix" in _json.dumps(tool.to_model_schema(), ensure_ascii=False)

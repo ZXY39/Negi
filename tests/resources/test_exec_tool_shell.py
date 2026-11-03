@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import time
+from pathlib import Path
 
 import pytest
 
@@ -607,7 +608,18 @@ def test_exec_tool_model_description_is_mode_invariant() -> None:
 
     assert governed.model_description == full_access.model_description
     description = governed.model_description
-    assert 'exec_runtime_policy' in description
+    # 模型可见描述只有一份来源：`tools/exec/resource.yaml` 的 description。类里另写一句
+    # （此前那句带 `exec_runtime_policy`）在单源化后被忽略并记 drift，所以这里比对清单原文，
+    # 而不是钉类文本；权威仍然在头部合同段 `exec_runtime_policy`，不在 `tools[]` 的说明里。
+    manifest_description = next(
+        line.split(':', 1)[1].strip()
+        for line in (
+            Path(__file__).resolve().parents[2] / 'tools' / 'exec' / 'resource.yaml'
+        ).read_text(encoding='utf-8').splitlines()
+        if line.startswith('description:')
+    )
+    assert description == manifest_description
+    assert 'exec_runtime_policy' not in description
     for forbidden in (
         'full_access',
         'governed',
