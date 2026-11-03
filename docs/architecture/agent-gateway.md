@@ -42,6 +42,7 @@
 进程内"提交 → 等终稿"原语，网关两面共用同一套规则（MCP 侧是其 SSE 客户端镜像 `G3kuMcpClient.wait_for_reply`）：
 
 - **无竞态次序**：调用方先取 `after_seq = hub.last_seq`，再 submit；等待器先 subscribe、先消费 `replay(after_seq)` 再进 live 队列，seen-seq 集合去重（publish 在锁外扇出，到达顺序不保证——匹配按类型/turn_id，选择按 max-seq，从不按到达序）。
+- **网关侧的每会话游标只跟到"取走或判定完"的那一帧**（`G3kuMcpClient.wait_for_reply` 里的 `_mark_consumed`）：不匹配、被丢弃的帧不前移游标。否则一次空手而归的点名读会把还没人取的回复甩在游标后面，之后即使点对该回合也只会从更后面开始重放，症状是"回复就挂在待投递账本里，而 `negi_get_reply` 永远 `found:false`"（实盘踩过）。丢弃别人回合的帧时留一行 `mcp gateway skipped a reply.final of another turn: …` 读数，用来区分"没收到"与"收到又丢弃"。
 - **started**：等 `seq > after_seq` 且 turn_id 匹配的第一个 `reply.final`。
 - **没点名回合的续取**（`negi_get_reply` 不带 `turn_id`）：除 `reply.final` 外还接 `outbound.created` 作为正文，回包带 `source: proactive` 标出来路，并顺手 `ack_reply` 销掉这条账本记录（服务端对这一类**不**自动销账，判据与理由见 `external-agent-api.md`「持久 outbox」）。点名等某一回合时不接这一类——一条无关的主动推送不能顶掉本轮的答案。必要性：心跳来源的回合从不产 `reply.final`，它的正文只以主动推送记录进账。
 - **queued**（消息并入在跑回合链）：链上**前一条消息**的 final 会先到，drain 批次在同一 turn_id 下追加新 final、且发生在唯一终态 `turn.completed` 之前——规则是收集 finals 直到终态、取 max-seq 的那条。**"等下一个 final"对 queued 是错的。**

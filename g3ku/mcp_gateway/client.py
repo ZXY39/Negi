@@ -227,9 +227,10 @@ class G3kuMcpClient:
                         continue
                     if not isinstance(event, dict):
                         continue
-                    seq = int(event.get("seq") or 0)
-                    if seq:
-                        self._last_seq[session_id] = max(self.last_seq(session_id), seq)
+                    # 游标不在这里推进。一次没取到东西的点名读只要把游标推过某条还没人取的
+                    # 回复，之后点对号也拿不到它（实盘 2026-11-03 22:53：同一会话先被一次
+                    # 不匹配的读动过游标，随后点名正确回合的读回 found:false，而回复就挂在
+                    # 待投递账本里）。推进交给 wait_for_reply 里真正取走或判定的那一处。
                     yield event
 
             yield _events()
@@ -262,7 +263,20 @@ class G3kuMcpClient:
         seen: set[int] = set()
         finals: list[dict[str, Any]] = []
 
+        def _mark_consumed(event: dict[str, Any]) -> None:
+            """游标只跟到"真正取走或判定完"的那一帧。
+
+            不匹配、被丢弃的帧不前移游标：否则一次空手而归的点名读会把还没人取的回复
+            甩在游标后面，之后点对号也重放不到它（`event_stream` 里同一条注释）。
+            """
+            if not session_id:
+                return
+            seq_value = int(event.get("seq") or 0)
+            if seq_value > 0:
+                self._last_seq[session_id] = max(self.last_seq(session_id), seq_value)
+
         async def _settle(event: dict[str, Any]) -> None:
+            _mark_consumed(event)
             outbox_id = str(event.get("outbox_id") or "").strip()
             if not (outbox_id and session_id):
                 return
@@ -342,6 +356,8 @@ class G3kuMcpClient:
                     if finals:
                         best = max(finals, key=lambda item: int(item.get("seq") or 0))
                         await _settle(best)
+                        # 这一帧的终态就是本次等待的判定，取完即前移；未匹配的帧不算消费。
+                        _mark_consumed(event)
                         return {
                             "kind": "reply",
                             "text": str(best.get("text") or ""),
@@ -354,8 +370,10 @@ class G3kuMcpClient:
                     return {"kind": "cancelled" if event.get("cancelled") else "no_reply"}
                 if turn_id is not None and event_turn_id != str(turn_id):
                     continue
+                _mark_consumed(event)
                 return {"kind": "cancelled" if event.get("cancelled") else "no_reply"}
             if event_type == "turn.failed":
                 if turn_id is not None and event_turn_id != str(turn_id):
                     continue
+                _mark_consumed(event)
                 return {"kind": "failed", "error": str(event.get("error") or "unknown error")}

@@ -368,11 +368,47 @@ async def test_client_wait_for_reply_started_match():
     client = _client(transport)
     try:
         async with client.event_stream("ext:test:s1", last_seq=1) as events:
-            outcome = await client.wait_for_reply(events, turn_id="t1", after_seq=1, timeout=5)
+            outcome = await client.wait_for_reply(
+                events, turn_id="t1", after_seq=1, timeout=5, session_id="ext:test:s1"
+            )
         assert outcome["kind"] == "reply"
         assert outcome["text"] == "答案"
         assert outcome["usage"] == {"input_tokens": 1}
         assert client.last_seq("ext:test:s1") == 3  # final 后立刻返回，未消费 completed
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_client_mismatched_named_read_leaves_the_reply_retrievable():
+    """点名错回合的读不把游标推过那条回复：下一次点对号照样取得到。
+
+    实盘 2026-11-03 22:53：同一会话先被一次不匹配的读动过游标，随后点名正确回合的读回
+    `found:false`，而那条回复一直挂在待投递账本里。
+    """
+    transport, _ = _transport(
+        events=[
+            {"type": "reply.final", "seq": 3, "turn_id": "t1", "text": "答案"},
+            {"type": "turn.completed", "seq": 4, "turn_id": "t1"},
+        ]
+    )
+    client = _client(transport)
+    try:
+        async with client.event_stream("ext:test:s1", last_seq=1) as events:
+            miss = await client.wait_for_reply(
+                events, turn_id="other", after_seq=1, timeout=1, session_id="ext:test:s1"
+            )
+        assert miss["kind"] in {"timeout", "no_reply"}
+        # 游标一动没动：0 是它本来没有记录，"未推进"才是这条用例要钉的东西。
+        assert client.last_seq("ext:test:s1") == 0
+
+        async with client.event_stream("ext:test:s1") as events:
+            hit = await client.wait_for_reply(
+                events, turn_id="t1", after_seq=1, timeout=5, session_id="ext:test:s1"
+            )
+        assert hit["kind"] == "reply"
+        assert hit["text"] == "答案"
+        assert client.last_seq("ext:test:s1") == 3
     finally:
         await client.aclose()
 
@@ -390,7 +426,9 @@ async def test_client_wait_for_reply_queued_chain_rule():
     client = _client(transport)
     try:
         async with client.event_stream("ext:test:s1", last_seq=1) as events:
-            outcome = await client.wait_for_reply(events, queued=True, after_seq=1, timeout=5)
+            outcome = await client.wait_for_reply(
+                events, queued=True, after_seq=1, timeout=5, session_id="ext:test:s1"
+            )
         assert outcome["kind"] == "reply"
         assert outcome["text"] == "batch answer"
         assert client.last_seq("ext:test:s1") == 4

@@ -118,6 +118,9 @@ class TestStreamOutAck:
 
 def _client(acks: list[str]) -> G3kuMcpClient:
     client = G3kuMcpClient.__new__(G3kuMcpClient)
+    # 游标现在由消费点推进（`wait_for_reply` 取走哪帧才前移），所以要给这个绕过
+    # `__init__` 的桩带上它要用的状态，否则测的是另一个形状。
+    client._last_seq = {}
 
     async def _ack_reply(session_id: str, outbox_id: str) -> None:
         acks.append(f'{session_id}|{outbox_id}')
