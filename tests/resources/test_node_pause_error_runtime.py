@@ -5,6 +5,7 @@ import importlib.util
 import json
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -1425,6 +1426,57 @@ def _make_embedded_service(tmp_path: Path) -> MainRuntimeService:
 class _FakeDispatcher:
     def __init__(self, entries: dict[str, object]) -> None:
         self._entries = entries
+
+
+@pytest.mark.asyncio
+async def test_requested_pause_lands_past_a_finished_dispatch_entry(tmp_path: Path) -> None:
+    """已结束的 entry 会留在 _entries 里；它不能把暂停请求永远挡在 is_paused 之外。"""
+    service = _make_embedded_service(tmp_path)
+    try:
+        record = await service.create_task("stranded entry pause", session_id="web:shared")
+        service.log_service.set_node_pause_state(
+            record.task_id,
+            record.root_node_id,
+            pause_requested=True,
+            pause_reason="manual",
+        )
+        done_task = SimpleNamespace(done=lambda: True)
+        service.task_actor_service._dispatchers[record.task_id] = _FakeDispatcher(
+            {record.root_node_id: SimpleNamespace(task=done_task)}
+        )
+
+        landed = service._land_pause_for_stranded_nodes(record.task_id)
+
+        assert landed == [record.root_node_id]
+        node = service.get_node(record.root_node_id)
+        assert node is not None and node.is_paused is True and node.pause_requested is True
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_requested_pause_does_not_land_while_the_entry_is_alive(tmp_path: Path) -> None:
+    service = _make_embedded_service(tmp_path)
+    try:
+        record = await service.create_task("live entry pause", session_id="web:shared")
+        service.log_service.set_node_pause_state(
+            record.task_id,
+            record.root_node_id,
+            pause_requested=True,
+            pause_reason="manual",
+        )
+        live_task = SimpleNamespace(done=lambda: False)
+        service.task_actor_service._dispatchers[record.task_id] = _FakeDispatcher(
+            {record.root_node_id: SimpleNamespace(task=live_task)}
+        )
+
+        landed = service._land_pause_for_stranded_nodes(record.task_id)
+
+        assert landed == []
+        node = service.get_node(record.root_node_id)
+        assert node is not None and node.is_paused is False and node.pause_requested is True
+    finally:
+        await service.close()
 
 
 @pytest.mark.asyncio

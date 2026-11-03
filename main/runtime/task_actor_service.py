@@ -1952,14 +1952,8 @@ class TaskActorService:
         if settled_reason:
             # 父节点已把这一轮读成失败：复活不会被采纳，下一轮清扫还会连验收一起取代。
             return 'entry_settled', settled_reason, True
-        handshake = normalize_acceptance_handshake(
-            (getattr(node, 'metadata', None) or {}).get(ACCEPTANCE_HANDSHAKE_KEY)
-        )
-        if str(handshake.get('state') or '').strip() == ACCEPTANCE_STATE_WAITING_ACCEPTANCE:
-            return 'deferred', 'waiting_acceptance', True
-        phase = self._frame_phase(task_id, node_id)
-        if str(phase or '').strip() in PARKED_PHASES:
-            return 'deferred', f'parked_phase:{phase}', True
+        # 点名 resume 的第一效果是清位；设计内停靠（等验收 / 停靠相位）也照清，
+        # 只是不起新回合——否则意图结算成 deferred 却把暂停位留在节点上。
         try:
             self._log_service.set_node_pause_state(
                 task_id,
@@ -1971,6 +1965,14 @@ class TaskActorService:
             )
         except Exception:
             logger.exception('resume intent pause clear failed: task={} node={}', task_id, node_id)
+        handshake = normalize_acceptance_handshake(
+            (getattr(node, 'metadata', None) or {}).get(ACCEPTANCE_HANDSHAKE_KEY)
+        )
+        if str(handshake.get('state') or '').strip() == ACCEPTANCE_STATE_WAITING_ACCEPTANCE:
+            return 'deferred', 'waiting_acceptance', True
+        phase = self._frame_phase(task_id, node_id)
+        if str(phase or '').strip() in PARKED_PHASES:
+            return 'deferred', f'parked_phase:{phase}', True
         if dispatcher.node_is_being_driven(node_id) is True:
             return 'resumed', 'already_driven', True
         entry_outcome = await self.resume_node_entry(task_id, node_id)

@@ -2182,14 +2182,22 @@ class MainRuntimeService:
             return []
         normalized_task_id = self.normalize_task_id(task_id)
         dispatcher = self.task_actor_service._dispatchers.get(normalized_task_id)
-        live_entries = getattr(dispatcher, '_entries', None) or {}
+        entries = getattr(dispatcher, '_entries', None) or {}
+        # 只有协程还活着的 entry 才叫"仍在运行"；已结束的 entry 会一直留在
+        # `_entries` 直到 dispatcher 关闭，按它跳过会让暂停请求永远不落地
+        # （实盘：根节点泊位被暂停，pause_requested=1 而 is_paused 长期为 0）。
+        running_node_ids = {
+            node_id
+            for node_id, entry in entries.items()
+            if getattr(entry, 'task', None) is None or not entry.task.done()
+        }
         landed: list[str] = []
         for node in self.list_nodes(normalized_task_id):
             if not bool(node.pause_requested) or bool(node.is_paused):
                 continue
             if str(node.status or '').strip().lower() in {'success', 'failed'}:
                 continue
-            if node.node_id in live_entries:
+            if node.node_id in running_node_ids:
                 continue
             updated = self.log_service.set_node_pause_state(
                 normalized_task_id,
@@ -2560,6 +2568,22 @@ class MainRuntimeService:
                     reason=f'parked_phase:{frame_phase}',
                 )
                 results.append({'node_id': node_id, 'result': 'deferred', 'reason': f'parked_phase:{frame_phase}'})
+                # A5=A 的收口：暂停期间到达的消息只落箱、唤醒被跳过。显式 resume
+                # 清位后，箱里已有的可注入未读必须重新成为唤醒源，否则它会永远
+                # 躺在 delivered（live：根 resume 返回 deferred 后无人消费）。
+                if self.task_actor_service._node_has_unread(normalized_task_id, node_id):
+                    if dispatcher is not None:
+                        dispatcher.schedule_node(node_id)
+                    elif schedule_if_inactive:
+                        latest_task = self.get_task(normalized_task_id)
+                        if (
+                            latest_task is not None
+                            and str(latest_task.status or '').strip().lower() == 'in_progress'
+                            and not bool(latest_task.is_paused)
+                            and not bool(latest_task.pause_requested)
+                            and not bool(latest_task.cancel_requested)
+                        ):
+                            await self.global_scheduler.enqueue_task(normalized_task_id)
                 continue
             if dispatcher is not None and updated is not None:
                 # 走 TaskActorService 的复活入口：清标志不等于复活，必须留下活执行器
