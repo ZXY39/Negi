@@ -105,6 +105,14 @@ test("通用自绘组件与三档专用规则都还在样式里", () => {
     assert.match(base, /\.role-toggle input \{[^}]*opacity: 0/);
 });
 
+test("设置窗口底行的勾选文字与按钮文字共用一个行盒", () => {
+    // 实盘读数：通用档的行高 20.8 把这行 13px 的勾选文字抬到墨迹上缘 344.59，而旁边同为
+    // 13px 的 锁定 按钮文字在 346.50——差 1.91px。按钮用的是字体自然行盒，所以这一行的
+    // 行高必须交回字体本身，两处墨迹才落在同一坐标源。
+    const css = fs.readFileSync("g3ku/web/frontend/org_graph.css", "utf8");
+    assert.match(css, /\.project-settings-footer \.ui-checkbox-row\s*\{[^}]*line-height:\s*normal/);
+});
+
 test("不存在裸 input[type=checkbox] 全局兜底规则", () => {
     // 这条断言钉的是判据本身：一旦有人加了全局兜底，"某颗没样式"的读法就全变了，
     // 台账必须重新分档而不是继续按现状登记。
