@@ -193,7 +193,7 @@ class TestDelivery:
         assert calls == []
 
     @pytest.mark.asyncio
-    async def test_paused_target_accepts_a_machine_message(self, tmp_path, monkeypatch):
+    async def test_paused_target_accepts_a_machine_message_without_waking(self, tmp_path, monkeypatch):
         service = _service(tmp_path)
         _seed(service, phase='before_model')
         calls = _stub_wake(monkeypatch, service)
@@ -209,6 +209,46 @@ class TestDelivery:
             relation='parent',
         )
         assert result['status'] == 'delivered'
+        assert result['wake'] == ''
+        assert calls == []
+        assert service.store.get_node(CHILD).is_paused is True
+
+    @pytest.mark.asyncio
+    async def test_frontdoor_notice_to_a_paused_target_stays_unwoken(self, tmp_path, monkeypatch):
+        service = _service(tmp_path)
+        _seed(service, phase='waiting_explicit')
+        calls = _stub_wake(monkeypatch, service)
+        service.store.update_node(
+            CHILD, lambda record: record.model_copy(update={'is_paused': True})
+        )
+
+        result = await service.deliver_node_message(
+            task_id=TASK, target_node_id=CHILD, message='operator note', origin='frontdoor'
+        )
+        assert result['status'] == 'delivered'
+        assert result['wake'] == ''
+        assert calls == []
+        assert service.store.get_node(CHILD).is_paused is True
+
+    @pytest.mark.asyncio
+    async def test_explicit_resume_lane_may_wake_a_paused_target(self, tmp_path, monkeypatch):
+        service = _service(tmp_path)
+        _seed(service, phase='before_model')
+        calls = _stub_wake(monkeypatch, service)
+        service.store.update_node(
+            CHILD, lambda record: record.model_copy(update={'is_paused': True})
+        )
+
+        result = await service.deliver_node_message(
+            task_id=TASK,
+            target_node_id=CHILD,
+            message='resume from parent',
+            origin='node',
+            relation='parent',
+            allow_pause_clear=True,
+        )
+        assert result['status'] == 'delivered'
+        assert result['wake'] == 'resumed'
         assert calls == [(TASK, CHILD)]
 
     @pytest.mark.asyncio

@@ -168,6 +168,31 @@ async def test_worker_startup_auto_resumes_shutdown_paused_task(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_worker_startup_resumes_shutdown_paused_task_but_keeps_root_pause(tmp_path: Path) -> None:
+    service = _make_worker_service(tmp_path)
+    _seed_task(service, "task:root-pause", "node:root-pause", is_paused=True)
+    service.log_service.set_node_pause_state(
+        "task:root-pause",
+        "node:root-pause",
+        pause_requested=True,
+        is_paused=True,
+        pause_reason="error",
+    )
+    service.store.record_shutdown_pause_entry(kind="task", ref_id="task:root-pause")
+
+    await service.startup()
+
+    task = service.store.get_task("task:root-pause")
+    assert task is not None
+    assert bool(task.is_paused) is False and bool(task.pause_requested) is False
+    root = service.store.get_node("node:root-pause")
+    assert root is not None and root.is_paused is True and root.pause_requested is True
+    assert root.pause_reason == "error"
+    assert "task:root-pause" in service.global_scheduler.enqueued
+    await service.close()
+
+
+@pytest.mark.asyncio
 async def test_worker_startup_keeps_user_paused_task_paused(tmp_path: Path) -> None:
     service = _make_worker_service(tmp_path)
     _seed_task(service, "task:user-pause", "node:user-pause", is_paused=True)

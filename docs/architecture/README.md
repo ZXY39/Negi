@@ -51,7 +51,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 
 - Node cache misses, restart-seed continuity, token preflight/compression questions → `context-and-cache-troubleshooting.md` (+ `runtime-overview.md`)
 - 节点信箱投递（`send_message` / 验收驳回 / `child_abnormal_pause`）、`waiting_children` 重放、停在等待档的节点被唤醒 → `main-task-runtime.md`「节点信箱与唤醒（现行）」+ `operations-and-maintenance.md`「节点投递与冻结/复活排查」
-- 网页给暂停节点发了消息、节点照旧不动且没有报错 → 设计内：该档落箱不唤醒，恢复按钮在操作员手上，合同见 `main-task-runtime.md`「节点信箱与唤醒（现行）」+ `web-and-admin.md`「Task Message Distribution UI Contract（已删除）」的节点消息输入框一条
+- 给暂停节点发了消息（网页、前门、`child_final`、`wake_timer` 任一道）、节点照旧不动且没有报错 → 设计内：A5=A 粘性暂停，消息一律落箱不清位；唯一消息型恢复是 `manage_child_nodes(resume)`，操作员用 `manage_task_nodes(resume)`。见 `main-task-runtime.md`「节点信箱与唤醒（现行）」+ `operations-and-maintenance.md`「节点投递与冻结/复活排查」
 - （历史，已删除）追加通知后任务停在 paused / 红色「消息分发失败」横幅 / epoch state=failed：distribution epoch 已整体删除，按 `main-task-runtime.md`「附录 A：已删除的 distribution epoch（历史说明，勿据此实现）」理解旧库数据，不要按它排障。
 - 想知道"每条节点消息走到哪一步"（待处理 / 已消费 / 旧库里的 received·frozen 投影）→ `web-and-admin.md`「Task Message Distribution UI Contract（已删除）」的信箱三态三条 + `main-task-runtime.md`「节点信箱与唤醒（现行）」；节点详情已显示重试中而 toast 不出现 → `web-and-admin.md`「Model Retry Visibility UI Contract」
 - 任务非终态、一批验收节点长期 `in_progress` 而派发计数为 0 → 先按 `operations-and-maintenance.md`「节点投递与冻结/复活排查」的签名分诊（`final acceptance round re-dispatched after interruption` = 验收轮按持久状态重派；`orphan node parked as candidate` = 无人驱动又无重放路径，已可见地暂停），合同见 `main-task-runtime.md`「验收三档裁决（P4）」与「Node-Level Pause and Recovery」；派发计数始终为 0 时再核 `main-task-runtime.md`「验收节点：提前创建、激活与握手重派发」的两个催命点（提交后重排一趟、扫描先于通知复派）
@@ -142,7 +142,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 节点错误历史行首是 `Upstream payload shape fault detected`（reason 带 `[parameter-marker]` / `[output-capped]` / `[window-clamped]`），或节点因此进入错误暂停 → `main-task-runtime.md`「Node-Level Pause and Recovery」（形态故障分账、早停与首跳处置）+ `web-and-admin.md`「Node Detail Error History」（`upstream_raw_*` 是 provider 边界的原样字节）+ `config-and-models.md`「Model Request Parameter Defaults」
 - 节点被可恢复暂停且理由写着 `closed before finish_reason`、渠道看到「响应流未正常终止」，或 worker 日志某跳写着 `finish_reason_seen=0` 而 Token统计该行输入/缓存为 `--` → `main-task-runtime.md`「Node-Level Pause and Recovery」（未终止的流由 provider 标成提供侧故障、链内换槽，不记交付违约）+ `web-and-admin.md`「Task Token Stats Window Contract」
 - 停机或暂停打断一批工具调用后，已完成的那条被重新执行一遍（重复外部动作）、或新加的工具在恢复时被自动重放／该重放的只读调用被白问一次模型 → `main-task-runtime.md`「Node-Level Pause and Recovery」（帧活状态留痕与恢复逐条判档）+ `tool-hydration-and-callable-chain.md`「工具可重放声明」
-- 任务树节点已显示暂停但任务大厅仍显示处理中、或全局恢复后大厅卡在已暂停 -> `main-task-runtime.md`「Node-Level Pause and Recovery」+ `web-and-admin.md`「Task Hall Action Contract」（状态胶囊判读）
+- 任务树节点已显示暂停但任务大厅仍显示处理中（含根节点「暂停·异常」而任务卡显示进行中）、或全局恢复后大厅卡在已暂停 -> `main-task-runtime.md`「Node-Level Pause and Recovery」+ `web-and-admin.md`「Task Hall Action Contract」（状态胶囊判读）
 - 重启后任务未自动恢复、优雅重启后仍停在 paused、恢复跑过一次却又落回暂停（上一个进程遗留的 `pause_task` 命令被新 worker 迟到应用）、或出现「本任务遇到异常停止」toast → `main-task-runtime.md`「Graceful Shutdown Pause and Startup Auto-Resume」+ `operations-and-maintenance.md`「重启后任务未自动恢复 / 出现“异常停止”toast」
 - 验收节点长期停在「待检验」、被检验的执行节点却在一轮轮重跑（半截验收回合无人接手）→ `main-task-runtime.md`「验收节点：提前创建、激活与握手重派发」（最终验收的两个派发选择器：通知账本 + 握手承诺重派发），worker 日志锚点 `final acceptance round re-dispatched after interruption`
 - 验收节点下了「交付物不存在」的结论、而被检验的执行节点从没提交过结果（批量恢复节点后尤其成串），或一份旧拒收被当成本轮裁定 → `main-task-runtime.md`「验收节点：提前创建、激活与握手重派发」（闭合提交冻结闸门 + 派验前前置检查与消费点退回 + 终态判词作废）

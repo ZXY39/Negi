@@ -169,6 +169,18 @@ async def test_task_level_gates_refuse_node_resume(tmp_path: Path) -> None:
         )
         assert paused['items'][0]['result'] == 'task_paused'
         assert service.get_node(CHILD).is_paused is True
+        # 根节点也一样：任务暂停时恢复根不是任务恢复，如实拒绝。
+        service.log_service.set_node_pause_state(
+            TASK, ROOT, pause_requested=True, is_paused=True, pause_reason='manual'
+        )
+        root_refused = await service._apply_resume_node_command(
+            TASK, node_ids=[ROOT], schedule_if_inactive=False
+        )
+        assert root_refused['items'][0]['result'] == 'task_paused'
+        assert service.get_node(ROOT).is_paused is True
+        service.log_service.set_node_pause_state(
+            TASK, ROOT, pause_requested=False, is_paused=False, pause_reason=''
+        )
 
         service.log_service.set_pause_state(TASK, pause_requested=False, is_paused=False)
         service.log_service.request_cancel(TASK)
@@ -219,7 +231,7 @@ async def test_worker_resume_with_dispatcher_reports_resumed_and_settles_intent(
 
 
 @pytest.mark.asyncio
-async def test_root_resume_unpauses_the_task_and_requeues_it(tmp_path: Path) -> None:
+async def test_root_resume_only_clears_the_root_and_requeues(tmp_path: Path) -> None:
     service = _service(tmp_path, mode='embedded')
     try:
         _seed(service)
@@ -238,6 +250,9 @@ async def test_root_resume_unpauses_the_task_and_requeues_it(tmp_path: Path) -> 
         service.global_scheduler = _Scheduler()  # type: ignore[assignment]
         result = await service._apply_resume_node_command(TASK, node_ids=[ROOT])
         assert result['items'][0]['result'] == 'queued'
+        root = service.get_node(ROOT)
+        assert root is not None and root.is_paused is False and root.pause_requested is False
+        # 节点恢复不移动任务：任务旗标本来就与节点暂停无关。
         task = service.get_task(TASK)
         assert task is not None and task.is_paused is False and task.pause_requested is False
         assert enqueued == [TASK]

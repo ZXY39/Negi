@@ -326,6 +326,79 @@ def test_task_pause_projects_over_non_terminal_tree_nodes_without_mutating_node_
     assert result["resumed"]["local"] == ["\u6682\u505c\u00b7\u666e\u901a", True, True]
 
 
+def test_root_node_error_pause_renders_abnormal_while_task_stays_running() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = {
+          currentTaskId: "task:test",
+          currentTask: { task_id: "task:test", status: "in_progress", is_paused: false, pause_requested: false },
+          treeRootNodeId: "root",
+          treeNodesById: {},
+          treeSnapshotVersion: "",
+          treeShowTerminal: true,
+          treeView: null,
+          treeLargeMode: false,
+          treeDirtyParentsById: {},
+          treeBranchSyncInFlightById: {},
+          treeBranchSyncQueuedById: {},
+          treeBranchSyncTokenById: {},
+          treeSelectedRoundByNodeId: {},
+          taskNodeDetails: {},
+          liveFrameMap: { running: { node_id: "running", phase: "waiting_tool_results", tool_calls: [{ tool_call_id: "t1", tool_name: "exec", status: "running" }], child_pipelines: [] } },
+        };
+        global.U = {};
+        global.ApiClient = {};
+        global.showToast = () => {};
+        global.isAbortLike = () => false;
+        global.renderTree = () => {};
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
+        vm.runInThisContext(code);
+
+        applyTaskTreeSnapshotPayload({
+          task_id: "task:test",
+          root_node_id: "root",
+          snapshot_version: "1",
+          nodes_by_id: {
+            root: {
+              node_id: "root",
+              title: "root",
+              status: "in_progress",
+              node_kind: "execution",
+              is_paused: true,
+              pause_reason: "error",
+              rounds: [{ round_id: "r1", label: "Round 1", is_latest: true, child_ids: ["running"] }],
+              auxiliary_child_ids: [],
+              all_child_ids: ["running"],
+            },
+            running: {
+              node_id: "running",
+              parent_node_id: "root",
+              title: "running",
+              status: "in_progress",
+              node_kind: "execution",
+              rounds: [],
+              auxiliary_child_ids: [],
+            },
+          },
+        });
+
+        const tree = buildExecutionTreeFromSnapshot();
+        const byId = Object.fromEntries([tree, ...tree.children].map((node) => [node.node_id, node]));
+        console.log(JSON.stringify({
+          root: [byId.root.display_state, byId.root.effective_is_paused, byId.root.task_paused],
+          running: [byId.running.display_state, byId.running.effective_is_paused],
+        }));
+        """
+    )
+
+    # 根节点自己的 error 暂停按节点渲染为「暂停·异常」；任务没暂停，其余节点不出现「任务暂停」。
+    assert result["root"] == ["\u6682\u505c\u00b7\u5f02\u5e38", True, False]
+    assert result["running"] == ["\u8fd0\u884c\u4e2d\uff08\u5de5\u5177\u5728\u9014\uff09", False]
+
+
 def test_ensure_task_tree_subtree_uses_new_snapshot_endpoint() -> None:
     result = _run_node_script(
         """

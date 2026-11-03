@@ -71,7 +71,7 @@ async def test_history_returns_artifact_and_hides_held_content(tmp_path, monkeyp
     service = _service(tmp_path)
     _seed(service)
 
-    async def wake(*, task_id, node_id):
+    async def wake(*, task_id, node_id, allow_pause_clear: bool = False):
         return 'resumed'
 
     monkeypatch.setattr(service, 'wake_node_on_message', wake)

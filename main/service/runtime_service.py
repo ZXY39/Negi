@@ -182,6 +182,7 @@ from main.runtime.node_runner import NodeRunner
 from main.runtime.node_seed_contracts import seed_drop_reason, trim_seed_contracts
 from main.runtime.node_turn_controller import NodeTurnController
 from main.runtime.node_wake import (
+    OUTCOME_PAUSED,
     PARKED_PHASES,
     WakeDeps,
     node_park_state,
@@ -301,6 +302,7 @@ _WORKER_NODE_MESSAGE_FIELDS = (
     'wake',
     'held',
     'batch_id',
+    'allow_pause_clear',
 )
 _WORKER_LEASE_ROLE = 'task_worker'
 _WORKER_LEASE_TTL_SECONDS = 20.0
@@ -2174,7 +2176,7 @@ class MainRuntimeService:
         2026-09-23 task:321604599eb0 实测 `pause_requested=True` 挂了 50 分钟没落地。
 
         只处理"已经有人要求暂停"的节点，且只在看得见派发面的进程里判；仍在运行的节点
-        一律不动，保留 `_align_root_node_pause_locked` 的"绝不谎标仍在运行的节点"约束。
+        一律不动，保留"绝不谎标仍在运行的节点"约束。
         """
         if self.execution_mode not in {'embedded', 'worker'}:
             return []
@@ -2249,7 +2251,6 @@ class MainRuntimeService:
                 continue
             seen.add(node_id)
             normalized_ids.append(node_id)
-        root_node_id = str(getattr(task, 'root_node_id', '') or '').strip()
         status = str(getattr(task, 'status', '') or '').strip().lower()
         if status != 'in_progress':
             return [
@@ -2261,11 +2262,9 @@ class MainRuntimeService:
                 {'node_id': node_id, 'result': 'cancel_requested', 'reason': 'task_cancel_requested'}
                 for node_id in normalized_ids
             ]
-        if (
-            bool(getattr(task, 'is_paused', False)) or bool(getattr(task, 'pause_requested', False))
-        ) and root_node_id not in normalized_ids:
-            # 恢复任务根节点就是恢复任务本身（根暂停态会回填任务标志）；恢复其他
-            # 节点在一个暂停任务里不会产生任何执行——如实报 task_paused。
+        if bool(getattr(task, 'is_paused', False)) or bool(getattr(task, 'pause_requested', False)):
+            # 任务暂停时恢复任何节点（含根）都不会产生执行——如实报 task_paused；
+            # 恢复任务走 resume_task。
             return [
                 {'node_id': node_id, 'result': 'task_paused', 'reason': 'task_paused'}
                 for node_id in normalized_ids
@@ -2583,8 +2582,7 @@ class MainRuntimeService:
             pending_ids.append(node_id)
             results.append({'node_id': node_id, 'result': 'queued', 'reason': 'awaiting_worker_pickup'})
         if schedule_if_inactive and dispatcher is None and pending_ids:
-            # 重读任务：恢复根节点会把根暂停态回填成任务标志，调用开始时那份
-            # 快照仍写着 paused，会误判成"任务还暂停"而跳过重排。
+            # 重读任务而不是用调用开始时的快照：恢复可能刚落定暂停位。
             latest_task = self.get_task(normalized_task_id) or task
             if (
                 str(getattr(latest_task, 'status', '') or '').strip().lower() == 'in_progress'
@@ -2718,14 +2716,36 @@ class MainRuntimeService:
         targets: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         normalized_task_id = self.normalize_task_id(task_id)
-        # 全局形态：只给 task_id + action（不给任何节点）⇒ 作用于整棵任务树。它与「传任务
-        # 根节点 + cascade=True」走同一条 _control_nodes_scoped 路径，因此前置校验、错误码、
-        # 重叠合并、任务级暂停同步全部一致——不引入第二套「全局」语义。
+        # 任务级形态：只给 task_id + action（不给任何节点）。pause/resume 是任务动作的
+        # 唯一入口——只写任务旗标，不伪造根节点暂停；fail/keep_paused 不是暂停/恢复
+        # 语义（且 fail 根=终止任务是既有契约），仍按根 + cascade 应用到整棵树。
         normalized_action = str(action or '').strip().lower()
         if not list(node_ids or []) and not list(targets or []) and normalized_action:
             scoped_task = self.get_task(normalized_task_id)
             if scoped_task is None:
                 return {'ok': False, 'error': 'task_not_found', 'items': []}
+            if normalized_action in {'pause', 'resume'}:
+                status = str(scoped_task.status or '').strip().lower()
+                if status != 'in_progress':
+                    return {
+                        'ok': False,
+                        'error': 'task_terminal',
+                        'scope': 'task',
+                        'action': normalized_action,
+                        'task_id': normalized_task_id,
+                        'result': status or 'task_terminal',
+                        'items': [],
+                    }
+                paused = bool(scoped_task.is_paused) or bool(scoped_task.pause_requested)
+                if normalized_action == 'pause':
+                    if paused:
+                        return {'ok': True, 'scope': 'task', 'action': 'pause', 'task_id': normalized_task_id, 'result': 'already_paused'}
+                    await self.pause_task(normalized_task_id)
+                    return {'ok': True, 'scope': 'task', 'action': 'pause', 'task_id': normalized_task_id, 'result': 'paused'}
+                if not paused:
+                    return {'ok': True, 'scope': 'task', 'action': 'resume', 'task_id': normalized_task_id, 'result': 'not_paused'}
+                await self.resume_task(normalized_task_id)
+                return {'ok': True, 'scope': 'task', 'action': 'resume', 'task_id': normalized_task_id, 'result': 'resumed'}
             root_node_id = str(scoped_task.root_node_id or '').strip()
             if not root_node_id:
                 return {'ok': False, 'error': 'task_root_missing', 'items': []}
@@ -2991,18 +3011,9 @@ class MainRuntimeService:
                 }
         # —— 阶段 2：施加（校验全过才会执行到这里）——
         dispatcher = self.task_actor_service._dispatchers.get(normalized_task_id)
-        root_node_id = str(task.root_node_id or '').strip()
-        # 整任务 resume 必须先清任务级暂停：否则 worker 应用逐节点 resume 时
-        # 任务仍是 paused，非根节点会被闸门如实打回 task_paused。
-        if self.execution_mode == 'web' and any(
-            entry['action'] == 'resume' and root_node_id and root_node_id in set(ids)
-            for entry, ids in zip(kept_entries, kept_expansions)
-        ):
-            await self.resume_task(normalized_task_id)
         items: list[dict[str, Any]] = []
         target_summaries: list[dict[str, Any]] = []
         enqueue_requests: list[dict[str, Any]] = []
-        global_scope_actions: list[str] = []
         any_resumed = False
         for entry, ids in zip(kept_entries, kept_expansions):
             action = entry['action']
@@ -3166,17 +3177,6 @@ class MainRuntimeService:
             resume_handled_by_worker_contract = self.execution_mode == 'web' and action == 'resume'
             if action != 'keep_paused' and applied_ids and not resume_handled_by_worker_contract:
                 enqueue_requests.append({'entry': entry, 'node_ids': list(applied_ids)})
-            if action in {'pause', 'resume'} and root_node_id and root_node_id in ids:
-                if not resume_handled_by_worker_contract:
-                    global_scope_actions.append(action)
-        # 全局作用域（动作覆盖任务根节点）⇒ 复用 pause_task/resume_task 的任务级运行时
-        # 副作用：「根节点 + cascade ≡ 全局」不只是状态一致，取消调度排队、唤醒排队等待、
-        # 分发失败态复位也走同一条实现，避免两套「全局」语义漂移。
-        for global_action in dict.fromkeys(global_scope_actions):
-            if global_action == 'pause':
-                await self.pause_task(normalized_task_id)
-            else:
-                await self.resume_task(normalized_task_id)
         if any_resumed:
             # 沿用 _apply_resume_node_command 的调度恢复语义。重读任务而不是用调用开始时的
             # 快照：恢复刚把暂停标志清掉，旧快照会误判「仍在暂停」而跳过重新入队。
@@ -5115,11 +5115,23 @@ class MainRuntimeService:
             clear_pause=_clear_pause,
         )
 
-    async def wake_node_on_message(self, *, task_id: str, node_id: str) -> str:
+    async def wake_node_on_message(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        allow_pause_clear: bool = False,
+    ) -> str:
         blocker = getattr(self.task_actor_service, 'web_role_blocked', None)
         if self.execution_mode == 'web' and callable(blocker) and blocker():
             # web 角色在 worker 在线时没有任务执行体：本地 enqueue 会拉起第二个
             # task actor，与 worker 并发驱动同一棵树。唤醒命令交给 worker 执行。
+            # 只有显式恢复车道允许借这条命令清暂停位；其余消息唤醒对暂停节点
+            # 在 `_delivery_wakes_target` 就被挡下，不会走到这里。
+            if not allow_pause_clear:
+                _, park_state = self.node_park_snapshot(task_id, node_id)
+                if str(park_state or '').strip().lower() == 'paused':
+                    return OUTCOME_PAUSED
             task = self.get_task(task_id)
             command_id = self._enqueue_task_command(
                 command_type='resume_node',
@@ -5134,7 +5146,12 @@ class MainRuntimeService:
                 command_id,
             )
             return 'delegated_worker'
-        outcome = await wake_parked_node(task_id=task_id, node_id=node_id, deps=self.node_wake_deps())
+        outcome = await wake_parked_node(
+            task_id=task_id,
+            node_id=node_id,
+            deps=self.node_wake_deps(),
+            allow_pause_clear=allow_pause_clear,
+        )
         try:
             logger.info('node wake: task={} node={} outcome={}', task_id, node_id, outcome)
         except Exception:
@@ -5150,16 +5167,20 @@ class MainRuntimeService:
         priority: str,
         park_state: str = '',
         sender_origin: str = '',
+        allow_pause_clear: bool = False,
     ) -> bool:
-        """停靠策略：任何可注入未读都会唤醒，只有一档例外。
+        """停靠策略：任何可注入未读都会唤醒，暂停节点例外。
 
-        例外由 `main/runtime/node_mailbox.delivery_defers_wake` 判：人发给暂停
-        节点的消息只落箱，唤醒会把操作员按下的暂停位顺手清掉。
+        A5=A：暂停是一个状态，消息投递本身不清暂停位（任何来源都一样，不只是
+        人发消息）。唯一允许借消息车道清位的是显式恢复动作
+        `manage_child_nodes(resume)`，它传 `allow_pause_clear=True`。
 
         `priority` 保留在签名里是因为调用方与测试仍按投递判定传值；批次等待是
         落箱时的 held 状态，不在这里判。
         """
         _ = task_id, node_id, node, priority
+        if str(park_state or '').strip().lower() == 'paused' and not allow_pause_clear:
+            return False
         if delivery_defers_wake(target_park_state=park_state, sender_origin=sender_origin):
             return False
         return True
@@ -5196,6 +5217,7 @@ class MainRuntimeService:
         wake: bool = True,
         held: bool = False,
         batch_id: str = '',
+        allow_pause_clear: bool = False,
     ) -> dict[str, Any]:
         """一条定向投递：判定矩阵 → 机械推导 → 指纹去重 → 落箱 → 唤醒。
 
@@ -5204,8 +5226,9 @@ class MainRuntimeService:
         `wake=False` 用于「必须留痕、但不得叫醒收件人」的系统消息：pass 裁决的
         收件人即将终局，reject_no_progress 裁决的收件人刚被判暂停（唤醒会立刻清掉
         暂停位）。消息照常落箱并带 kind/priority，只是不触发 R2 唤醒。
-        同一档后果还有一条不走这个参数：人发给暂停节点的消息由
-        `_delivery_wakes_target` 内部按 `delivery_defers_wake` 免唤醒，落箱待操作员恢复。
+        暂停节点一律落箱不唤醒（A5=A：消息不清暂停位），由
+        `_delivery_wakes_target` 判定；唯一例外是显式恢复车道
+        `manage_child_nodes(resume)`，它传 `allow_pause_clear=True`。
         `held=True` 用于 wait_all_children 批次：行照常落箱，但在批次释放前既不
         计入待注入也不唤醒。
         """
@@ -5278,11 +5301,14 @@ class MainRuntimeService:
                         priority=priority,
                         park_state=park_state,
                         sender_origin=origin,
+                        allow_pause_clear=allow_pause_clear,
                     )
                 ):
                     try:
                         wake_outcome = await self.wake_node_on_message(
-                            task_id=normalized_task_id, node_id=normalized_node_id
+                            task_id=normalized_task_id,
+                            node_id=normalized_node_id,
+                            allow_pause_clear=allow_pause_clear,
                         )
                     except Exception as exc:  # noqa: BLE001 - 消息已在箱里，唤醒失败不回滚
                         wake_outcome = f'wake_error:{type(exc).__name__}'
@@ -5331,10 +5357,13 @@ class MainRuntimeService:
             priority=priority,
             park_state=park_state,
             sender_origin=origin,
+            allow_pause_clear=allow_pause_clear,
         ):
             try:
                 wake_outcome = await self.wake_node_on_message(
-                    task_id=normalized_task_id, node_id=normalized_node_id
+                    task_id=normalized_task_id,
+                    node_id=normalized_node_id,
+                    allow_pause_clear=allow_pause_clear,
                 )
             except Exception as exc:  # noqa: BLE001 - 投递已落箱，唤醒失败不能回滚它
                 # 消息已经在信箱里；把调用打成失败会让发送方以为没送达并重发。
@@ -6259,6 +6288,8 @@ class MainRuntimeService:
                     # 我是发送方、也是收件人的父 ⇒ relation='parent' ⇒ parent_notice。
                     relation=RELATION_PARENT,
                     source_node_id=str(sender.node_id or '').strip(),
+                    # 唯一的"消息型恢复"车道：显式 resume 借投递唤醒并清暂停位。
+                    allow_pause_clear=True,
                 )
                 if str(delivered.get('status') or '') in {'delivered', 'deduplicated'}:
                     items.append(

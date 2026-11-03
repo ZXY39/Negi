@@ -741,6 +741,9 @@ class TaskActorService:
                 skipped_premature_acceptance = True
                 continue
             node = self._store.get_node(node_id)
+            if node is not None and self._node_operator_paused(node):
+                # 暂停节点只由显式恢复动作复活；通知复派不是唤醒源（A5=A）。
+                continue
             if (
                 node is not None
                 and str(getattr(node, 'node_kind', '') or '').strip().lower() == KIND_ACCEPTANCE
@@ -837,6 +840,9 @@ class TaskActorService:
         """
         node_id = str(self._node_runner.resumable_final_acceptance_node_id(task_id) or '').strip()
         if not node_id:
+            return False
+        acceptance_node = self._store.get_node(node_id)
+        if acceptance_node is not None and self._node_operator_paused(acceptance_node):
             return False
         dispatcher = self._dispatchers.get(str(task_id or '').strip())
         entry = None if dispatcher is None else dispatcher._entries.get(node_id)
@@ -947,14 +953,15 @@ class TaskActorService:
                         return
                 else:
                     root_phase = self._frame_phase(task_id, root_node.node_id)
-                    if root_phase in PARKED_PHASES:
-                        # 根节点也是停靠节点：没有信箱唤醒源时，恢复拾取不得点火。
-                        # 第一回合没有帧，仍由这里执行；停靠后的复活交给
-                        # `_resume_pending_notice_nodes` / `_dispatch_runnable_nodes`
-                        # 的根节点唤醒分支（它们会按 wake_on 判据决定）。
+                    if root_phase in PARKED_PHASES or self._node_operator_paused(root_node):
+                        # 根节点停下时恢复拾取不得点火：
+                        # - 停靠相位：等下一次投递按 wake_on 判据复活（第一回合没有帧，
+                        #   由下面的执行分支处理）；
+                        # - 暂停态：只停根，不退出 actor；非根节点照常驱动（P2）。
                         logger.info(
-                            'root turn deferred: parked phase={} task={}',
+                            'root turn deferred: phase={} paused={} task={}',
                             root_phase,
+                            self._node_operator_paused(root_node),
                             task_id,
                         )
                         result = NodeFinalResult(
@@ -967,11 +974,30 @@ class TaskActorService:
                             blocking_reason='',
                         )
                     else:
-                        result = await dispatcher.execute_node(task_id, root_node.node_id)
-                        if self._is_final_submission_result(result):
-                            result = await self._run_final_acceptance_if_needed(task_id)
+                        try:
+                            result = await dispatcher.execute_node(task_id, root_node.node_id)
+                        except NodePausedError as exc:
+                            # 根在回合中暂停（error/manual/agent）：落暂停，根停着，
+                            # actor 继续把非根节点驱动到静止，而不是直接 return 让
+                            # finally 的 dispatcher.close() 取消全部在飞子节点。
+                            self._land_node_pause_from_signal(
+                                task_id,
+                                exc.node_id or root_node.node_id,
+                            )
+                            result = NodeFinalResult(
+                                status='success',
+                                delivery_status='partial',
+                                summary='root paused; driving remaining nodes',
+                                answer='',
+                                evidence=[],
+                                remaining_work=[],
+                                blocking_reason='',
+                            )
+                        else:
+                            if self._is_final_submission_result(result):
+                                result = await self._run_final_acceptance_if_needed(task_id)
                     # 根回合（或最终验收）结束后，子节点与验收节点由派发循环独立推进；
-                    # 根停靠时循环返回 control_only，等下一次投递把它叫醒。
+                    # 根停靠/暂停时循环返回 control_only，等下一次投递或显式 resume。
                     result, control_only_return = await self._drive_scheduler_loop(
                         task_id=task_id,
                         dispatcher=dispatcher,
@@ -984,15 +1010,31 @@ class TaskActorService:
             control_only_return = True
             # 磁盘治理（P0）：pause 状态落库是表现层写入，磁盘满时失败只丢展示，
             # 不得让二次写盘异常穿透 run_task（2026-09-09 连锁暂停事故路径）。
+            self._land_node_pause_from_signal(
+                task_id,
+                exc.node_id or str(getattr(root_node, 'node_id', '') or ''),
+            )
+            # 兜底：根暂停也绝不以 dispatcher.close() 取消仍活着的非根 entry。
+            # 先把它们驱动到静止，actor 才退出。
             try:
-                self._log_service.set_node_pause_state(
-                    task_id,
-                    exc.node_id or str(getattr(root_node, 'node_id', '') or ''),
-                    pause_requested=True,
-                    is_paused=True,
+                await self._drive_scheduler_loop(
+                    task_id=task_id,
+                    dispatcher=dispatcher,
+                    root_node_id=str(
+                        getattr(root_node, 'node_id', '') or task_record.root_node_id or ''
+                    ),
+                    current_result=NodeFinalResult(
+                        status='success',
+                        delivery_status='partial',
+                        summary='root paused; driving remaining nodes',
+                        answer='',
+                        evidence=[],
+                        remaining_work=[],
+                        blocking_reason='',
+                    ),
                 )
             except Exception:
-                pass
+                logger.exception('root-pause fallback scheduler drive failed: task={}', task_id)
             return
         except TaskPausedError:
             try:
@@ -1509,6 +1551,14 @@ class TaskActorService:
         node_id = str((node_ids or [''])[0] or '').strip()
         if not node_id:
             return False
+        node = self._store.get_node(node_id)
+        if node is not None and self._node_operator_paused(node):
+            # 等待图不是唤醒源：暂停节点只由显式恢复动作复活。
+            try:
+                logger.info('parked-wake skipped: node paused task={} node={}', task_id, node_id)
+            except Exception:
+                pass
+            return False
         try:
             await self.resume_node_entry(task_id, node_id)
         except Exception:
@@ -1683,6 +1733,21 @@ class TaskActorService:
             if str(item.get('status') or '').strip().lower() in {'running', 'queued'}:
                 return True
         return False
+
+    def _land_node_pause_from_signal(self, task_id: str, node_id: str) -> None:
+        """把 `NodePausedError` 落的暂停位写进节点行（幂等，失败只丢展示）。"""
+        normalized_node_id = str(node_id or '').strip()
+        if not normalized_node_id:
+            return
+        try:
+            self._log_service.set_node_pause_state(
+                task_id,
+                normalized_node_id,
+                pause_requested=True,
+                is_paused=True,
+            )
+        except Exception:
+            pass
 
     def _park_stranded_root(self, task_id: str, root_node_id: str) -> None:
         """重派也点不着火：可见地 park，交给有裁定权的一方。
@@ -1871,12 +1936,9 @@ class TaskActorService:
             return 'task_terminal', str(getattr(task, 'status', '') or ''), True
         if bool(getattr(task, 'cancel_requested', False)):
             return 'cancel_requested', 'task_cancel_requested', True
-        root_node_id = str(getattr(task, 'root_node_id', '') or '').strip()
-        if (
-            bool(getattr(task, 'is_paused', False)) or bool(getattr(task, 'pause_requested', False))
-        ) and str(node_id or '').strip() != root_node_id:
-            # 根节点的 resume 就是任务级恢复（根暂停态回填任务标志）；其余节点
-            # 在暂停任务里恢复不会产生执行，如实消耗成 task_paused。
+        if bool(getattr(task, 'is_paused', False)) or bool(getattr(task, 'pause_requested', False)):
+            # 任务暂停时恢复任何节点（含根）都不会产生执行，如实消耗成 task_paused；
+            # 恢复任务走 resume_task。
             return 'task_paused', 'task_paused', True
         node = self._store.get_node(node_id)
         if node is None or str(getattr(node, 'task_id', '') or '').strip() != str(task_id or '').strip():

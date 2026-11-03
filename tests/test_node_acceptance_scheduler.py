@@ -123,7 +123,7 @@ def _capture_calls(service: MainRuntimeService, monkeypatch) -> tuple[list[str],
     wakes: list[str] = []
     deliveries: list[dict] = []
 
-    async def wake(*, task_id: str, node_id: str) -> str:
+    async def wake(*, task_id: str, node_id: str, allow_pause_clear: bool = False) -> str:
         wakes.append(node_id)
         return 'resumed'
 
@@ -670,7 +670,7 @@ class TestAcceptanceActivationGate:
         service = _service(tmp_path)
         _seed(service)
 
-        async def noop_wake(*, task_id: str, node_id: str) -> str:
+        async def noop_wake(*, task_id: str, node_id: str, allow_pause_clear: bool = False) -> str:
             return 'resumed'
 
         monkeypatch.setattr(service, 'wake_node_on_message', noop_wake)

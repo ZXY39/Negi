@@ -53,6 +53,7 @@ class WaitNode:
     handshake_state: str = ''
     wait_targets: tuple[str, ...] = ()
     wait_external: bool = False
+    is_paused: bool = False
 
 
 def build_wait_nodes(
@@ -90,6 +91,8 @@ def build_wait_nodes(
                 handshake_state=str(handshake.get('state') or '').strip(),
                 wait_targets=wait_targets,
                 wait_external=bool(metadata.get(NODE_WAIT_EXTERNAL_KEY)),
+                is_paused=bool(getattr(record, 'is_paused', False))
+                or bool(getattr(record, 'pause_requested', False)),
             )
         )
     return nodes
@@ -100,6 +103,10 @@ def _is_terminal(node: WaitNode) -> bool:
 
 
 def _is_parked(node: WaitNode) -> bool:
+    if node.is_paused:
+        # 显式暂停不是"停靠在等消息"：消息与等待图都不清暂停位，它等的是
+        # 恢复动作，因此不参与成环，也不是"无人唤醒"的候选。
+        return False
     return node.phase in PARKED_PHASES
 
 
@@ -171,6 +178,9 @@ def find_all_parked_waits(
     external = False
     for node in list(nodes or []):
         if node.node_kind != 'execution' or _is_terminal(node):
+            continue
+        if node.is_paused:
+            # 暂停节点等的是显式恢复，不是唤醒源；把它算进死锁只会反复点火。
             continue
         if node.node_id in busy:
             return None

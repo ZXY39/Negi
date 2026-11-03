@@ -79,8 +79,8 @@ class _ManageTaskNodesHandler(Tool):
             return json.dumps(result, ensure_ascii=False)
         if not legacy_action:
             return _error('action is required together with node_ids')
-        # 只给 action 不给节点 ⇒ 全局形态：服务层解析任务根节点并级联，与
-        # 「传根节点 + cascade=True」是同一条路径，不是第二套语义。
+        # 只给 action 不给节点 ⇒ 任务级形态：服务层按任务动作实现（pause/resume），
+        # fail/keep_paused 保持根 + 级联；节点级动作与它不再等价。
         result = await self._service.control_nodes(
             str(task_id or '').strip(),
             legacy_node_ids,
