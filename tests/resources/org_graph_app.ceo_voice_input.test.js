@@ -507,6 +507,24 @@ test("T 与播放键同格，并贴在语音条最右端", () => {
     assert.doesNotMatch(toggle, /border:/, "条里已经有一颗实心圆钮，T 不再套方框");
 });
 
+test("录音环与按钮同心同形，自动发送行贴输入框左边缘", () => {
+    const css = fs
+        .readFileSync("g3ku/web/frontend/org_graph.css", "utf8")
+        .replace(/\r\n/g, "\n");
+    const ring = css.match(/\.ceo-voice-btn\.is-recording::after \{([^}]*)\}/)[1];
+    // 环的圆角由「按钮圆角 + inset」推出。写死数字时环比方按钮圆一圈：平边留缝、
+    // 四角压进按钮边框，呼吸动画看起来就像一圈在来回收缩的错位圆。
+    assert.match(ring, /border-radius: calc\(var\(--ui-radius-control\) \+ 3px\)/);
+    const offset = Number(ring.match(/inset: (-[\d.]+)px/)[1]);
+    assert.equal(offset, -3, "inset 要和圆角里加的那一项同值，否则环不再和按钮同心");
+    const options = css.match(/\.ceo-voice-options \{([^}]*)\}/)[1];
+    assert.doesNotMatch(
+        options,
+        /margin-inline-start/,
+        "选项行按前置控件宽度缩进后，既不贴输入框左边也不贴任何图标"
+    );
+});
+
 test("audio attachments never render as file pills", () => {
     const { renderStructuredChatAttachments } = loadApp();
     const html = renderStructuredChatAttachments([

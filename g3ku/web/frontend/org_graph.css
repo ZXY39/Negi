@@ -5875,11 +5875,13 @@ textarea {
     background: color-mix(in srgb, #ef4444 12%, var(--bg-panel));
 }
 
+/* 圆角必须是「按钮圆角 + inset」，环才和按钮同心同形。写死 22px 时环接近正圆：
+   平边处留 1px 缝、四角处压进按钮边框，呼吸时看起来像在来回收缩。 */
 .ceo-voice-btn.is-recording::after {
     content: "";
     position: absolute;
     inset: -3px;
-    border-radius: 22px;
+    border-radius: calc(var(--ui-radius-control) + 3px);
     border: 2px solid color-mix(in srgb, #ef4444 70%, transparent);
     animation: ceo-voice-pulse 1.4s ease-in-out infinite;
     opacity: 0.25;
@@ -5897,11 +5899,11 @@ textarea {
     }
 }
 
-/* 语音选项行：只在点过麦克风后出现在输入行上方，左缩进跟 composer 其余子行
-   用同一条计算式（要让开绝对定位的那组前置控件）。 */
+/* 语音选项行：只在点过麦克风后出现在输入行上方。左边缘与输入框左边缘对齐，
+   不再按前置控件的宽度缩进——那组控件是绝对定位浮在输入框里的，缩进后这一行
+   既不贴框边也不贴任何图标。 */
 .ceo-voice-options {
     display: flex;
-    margin-inline-start: calc(var(--ceo-input-leading-width) + var(--ceo-input-row-gap));
 }
 
 .ceo-voice-option {
