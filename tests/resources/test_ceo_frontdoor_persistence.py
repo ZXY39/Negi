@@ -44,14 +44,31 @@ def _frontdoor_tool_contract_payload(message: dict[str, object]) -> dict[str, ob
 
 
 def _without_pinned_head(messages):
-    """比较持久化正文时剥掉 system 首条上的头部快照块（P0 之后它总会存在）。"""
+    """比较持久化正文时剥掉**注入车道**：system 首条上的头部快照块，以及请求尾部的
+    `[RUNTIME_NOTICE]` 行（P0 之后两者都会存在）。
+
+    这两样都是装配点当轮注入的，不是会话正文的一部分；它们各有自己的合同用例
+    （`test_runtime_contract_notice.py` / `test_skill_roster_notice_lane.py`），这里把它们
+    剥掉才能让"正文 append-only / 工具面稳定"这两条判据不被一次通知投递牵着红。
+    """
+    from g3ku.runtime import skill_roster_notice as _notice_lane
     from g3ku.runtime.frontdoor.tool_contract import split_pinned_contract_from_system_text
 
+    markers = (
+        _notice_lane.RUNTIME_NOTICE_MARKER,
+        _notice_lane.SKILL_ROSTER_NOTICE_MARKER,
+    )
     normalized = []
     for item in list(messages or []):
-        if isinstance(item, dict) and str(item.get("role") or "").strip() == "system":
-            base, _pinned = split_pinned_contract_from_system_text(item.get("content"))
+        if not isinstance(item, dict):
+            normalized.append(item)
+            continue
+        content = item.get("content")
+        if str(item.get("role") or "").strip() == "system":
+            base, _pinned = split_pinned_contract_from_system_text(content)
             normalized.append({**item, "content": base})
+        elif isinstance(content, str) and content.startswith(markers):
+            continue
         else:
             normalized.append(item)
     return normalized
