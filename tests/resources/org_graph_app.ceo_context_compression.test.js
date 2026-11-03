@@ -860,10 +860,16 @@ test("区分线两端留白且文字居中，图标自绘旋转，长按 2 秒�
     // 进行中图标：环在转、中间两条竖杠，尺寸按 em 与文字同号。
     assert.match(CSS_CODE, /\.ceo-compression-divider-spinner\s*\{[^}]*width: 1\.15em/);
     assert.match(CSS_CODE, /\.ceo-compression-divider-spinner::before\s*\{[^}]*interaction-step-icon-spin/);
-    // 图标占住文字右侧的推进宽度，左侧线留一段等宽间隙把文字补回正中。
+    // 图标/重试按钮和标签是同一个居中内容组：两条线等权、左右都不留补偿空白，
+    // 所以进行中那条的 ::before 只带脉冲动画，不再按图标的推进宽度补一段 margin-right。
     assert.match(
         CSS_CODE,
-        /\.ceo-compression-divider\.is-running \.ceo-compression-divider-inner::before,[^}]*margin-right/
+        /\.ceo-compression-divider\.is-running \.ceo-compression-divider-inner::before,[^}]*animation: ceo-compression-pulse/
+    );
+    assert.equal(
+        CSS_CODE.includes("margin-right: calc(1.15em + 10px)"),
+        false,
+        "左侧补偿间隙已取消：补回去整组就偏离中轴，线两端也不再对称"
     );
     // 全局 prefers-reduced-motion 规则把所有 animation 打成 none；压缩环必须豁免，
     // 否则「进行中」图标在这类机器上就是静态的（用户报的正是这个）。
@@ -965,11 +971,16 @@ test("只有最后一条中断线带重试按钮，更早的与完成线都不�
     assert.equal(hasRetry(rows[1]), false, "完成态没有待办动作");
     assert.equal(hasRetry(rows[2]), true);
     assert.match(rows[2].innerHTML, /重新压缩/);
-    // 静态符号版与按钮版的标签都得落在中轴上：CSS 里左侧补偿按按钮宽度另给一条规则。
+    // 静态符号版与按钮版的标签一起居中：重试那颗是文字，推进宽度按 em 固定，
+    // 按钮自己的内边距再由同宽负外边距抵掉，所以「可点与否」不移动整组落点。
+    // 旧档是靠给左线补一段等宽 margin-right 把文字顶回中轴，那条已经取消。
     assert.match(CSS_CODE, /\.ceo-compression-divider-retry\s*\{[^}]*width: 4\.6em/);
-    assert.match(
-        CSS_CODE,
-        /\.ceo-compression-divider\.is-paused:has\(\.ceo-compression-divider-retry\)[^}]*margin-right: calc\(4\.6em \+ 10px\)/
+    assert.match(CSS_CODE, /\.ceo-compression-divider-retry\s*\{[^}]*justify-content: center/);
+    assert.match(CSS_CODE, /\.ceo-compression-divider-action\s*\{[^}]*margin: -2px/);
+    assert.equal(
+        CSS_CODE.includes(":has(.ceo-compression-divider-retry)"),
+        false,
+        ":has 补偿规则已随整组居中档一起删除"
     );
 });
 
