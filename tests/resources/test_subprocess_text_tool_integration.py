@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 import g3ku.agent.tools.filesystem_mutation as filesystem_mutation_module
+import g3ku.utils.subprocess_text as subprocess_text_module
 from g3ku.agent.tools.filesystem_mutation import FilesystemTool
 
 
@@ -28,6 +29,9 @@ async def test_filesystem_validation_command_decodes_legacy_codepage_output_and_
 
     monkeypatch.setattr(filesystem_mutation_module.os, 'name', 'nt', raising=False)
     monkeypatch.setattr(filesystem_mutation_module.asyncio, 'create_subprocess_exec', _fake_create_subprocess_exec)
+    # 这条用例喂的是 GBK 字节，读法必须钉在同一个码页上：否则它测的其实是"跑它的这台
+    # 机器是什么 locale"（zh-CN 本机过、en-US runner 上按 cp1252 解出一串假字符还"成功"）。
+    monkeypatch.setattr(subprocess_text_module, '_oem_encoding', lambda: 'cp936')
 
     tool = FilesystemTool(workspace=tmp_path)
     result = await tool._run_validation_command(

@@ -12,6 +12,7 @@ import g3ku.agent.tools.shell as shell_module
 from g3ku.agent.tools.shell import ExecTool
 from g3ku.content import ContentNavigationService, parse_content_envelope
 from g3ku.content.navigation import INLINE_CHAR_LIMIT
+from g3ku.utils import subprocess_text as subprocess_text_module
 from main.storage.artifact_store import TaskArtifactStore
 from main.storage.sqlite_store import SQLiteTaskStore
 
@@ -467,6 +468,9 @@ async def test_exec_tool_windows_decodes_legacy_codepage_output(monkeypatch, tmp
 
     monkeypatch.setattr(shell_module.os, 'name', 'nt', raising=False)
     monkeypatch.setattr(shell_module.asyncio, 'create_subprocess_exec', _fake_create_subprocess_exec)
+    # 同 test_subprocess_text_tool_integration：GBK 字节 + 钉住读它的码页，用例不能跟着
+    # 跑它的机器 locale 变结论。
+    monkeypatch.setattr(subprocess_text_module, '_oem_encoding', lambda: 'cp936')
 
     payload = json.loads(await tool.execute(command='python -c "pass"', __g3ku_runtime={'session_key': 'web:shared'}))
 
