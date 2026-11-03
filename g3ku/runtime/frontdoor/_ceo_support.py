@@ -835,11 +835,23 @@ class CeoFrontDoorSupport:
             if session_cancel_token is not None and hasattr(session_cancel_token, "derive_child")
             else session_cancel_token
         )
+        background_items_changed = getattr(
+            runtime_context.get("_runtime_agent_session"),
+            "notify_background_items_changed",
+            None,
+        )
         per_call_runtime = {
             **tool_facing_runtime_context(runtime_context),
             "tool_name": tool_name,
             "cancel_token": per_call_cancel_token,
             **({"tool_call_id": normalized_tool_call_id} if normalized_tool_call_id else {}),
+            # 会话对象被 `tool_facing_runtime_context` 剥掉，工具只剩这个窄回调：
+            # exec 后台进程启动/停止后，气泡与其它标签页要立刻重取，不能等下一次刷新。
+            **(
+                {"_notify_background_items_changed": background_items_changed}
+                if callable(background_items_changed)
+                else {}
+            ),
         }
         if self._accepts_runtime_context(tool):
             execute_kwargs["__g3ku_runtime"] = per_call_runtime

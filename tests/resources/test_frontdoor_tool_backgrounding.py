@@ -36,6 +36,7 @@ class _FakeLoop:
 
 class _FakeRuntimeSession:
     def __init__(self, store, heartbeat) -> None:
+        self.notified = 0
         self.runner = ToolJobRunner(
             session_key="web:test",
             store_getter=lambda: store,
@@ -50,6 +51,9 @@ class _FakeRuntimeSession:
 
     def list_tool_jobs(self):
         return self.runner.list_jobs("web:test")
+
+    def notify_background_items_changed(self) -> None:
+        self.notified += 1
 
 
 class _Harness(CeoFrontDoorSupport):
@@ -93,6 +97,30 @@ class _SlowTool(Tool):
     async def execute(self, **kwargs):
         await asyncio.sleep(self._seconds)
         return "slow-result"
+
+
+class _CaptureRuntimeTool(Tool):
+    def __init__(self) -> None:
+        self.runtime: dict | None = None
+
+    @property
+    def name(self) -> str:
+        return "capture_runtime"
+
+    @property
+    def description(self) -> str:
+        return "capture"
+
+    @property
+    def parameters(self) -> dict:
+        return {"type": "object", "properties": {}}
+
+    async def execute(self, **kwargs):
+        self.runtime = dict(kwargs.get("__g3ku_runtime") or {})
+        notify = self.runtime.get("_notify_background_items_changed")
+        if callable(notify):
+            notify()
+        return "captured"
 
 
 @pytest.fixture()
@@ -144,6 +172,27 @@ async def test_fast_tool_path_is_unchanged_and_does_not_persist(store):
     assert started_at and finished_at
     assert store.list_tool_jobs(limit=10) == []
     assert heartbeat.events == []
+
+
+@pytest.mark.asyncio
+async def test_tool_gets_narrow_background_change_callback_not_the_session(store):
+    heartbeat = _FakeHeartbeat()
+    session = _FakeRuntimeSession(store, heartbeat)
+    harness = _Harness(_FakeLoop())
+    tool = _CaptureRuntimeTool()
+
+    await _run_tool(
+        harness,
+        tool,
+        _context(session, auto_background_seconds=0.2),
+    )
+
+    assert tool.runtime is not None
+    # 会话对象不进工具视图（`tool_facing_runtime_context` 会剥掉它），
+    # 否则 exec 后台进程的启动帧永远发不出去。
+    assert "_runtime_agent_session" not in tool.runtime
+    assert callable(tool.runtime.get("_notify_background_items_changed"))
+    assert session.notified == 1
 
 
 @pytest.mark.asyncio

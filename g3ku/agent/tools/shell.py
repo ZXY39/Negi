@@ -851,8 +851,7 @@ class ExecTool(Tool):
 
     @staticmethod
     def _notify_background_items_changed(runtime: dict[str, Any]) -> None:
-        session = runtime.get("_runtime_agent_session")
-        notify = getattr(session, "notify_background_items_changed", None)
+        notify = runtime.get("_notify_background_items_changed")
         if not callable(notify):
             return
         try:
