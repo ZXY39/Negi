@@ -57,9 +57,14 @@
 立即重印 system prompt、`tools[]` 与 pinned contract——旧声明留在下一回合会让模型按旧工具面
 行动，安全面与能力面都会错。代价是每次显式切档一次完整前缀 cache miss，这是操作员主动
 动作，接受。渠道会话的头部渠道块同步追加当前模式与限制；`host_full` 不写模式段。
-pinned contract 同时带 `session_mode` 与受限档的 `session_workspace_dir:` 绝对路径；变化
-经 `[RUNTIME_NOTICE]` 的 `### Session mode` 节投递一次（首次只对齐，不重复头部已有内容），
-工具列表变化也复用同一条通知。压缩跳后新头部以当刻值重钉。
+pinned contract 同时带 `session_mode` 与受限档的 `session_workspace_dir:` 绝对路径。这两处
+的措辞分两档，各有唯一用途：头部的 `session_mode:` 是**状态**快照，只写档位名
+（`session_mode_state_text`），因为它要和一次性通知的分节值逐字比对来判"有没有变"；
+`[RUNTIME_NOTICE]` 的 `### Session mode` 才是**事件**，只在真切档时带"已切换到 X"与那一档
+的限制（`session_mode_switch_text`），工具列表变化也复用同一条通知。静态快照写成事件句
+就是向模型宣布一次没发生过的切档。判"变没变"的两条游标两侧必须同一形状：签名存进
+台账时会被归一（去首尾空白），比较也必须拿归一后的当刻值，否则名单为空这类尾字符
+会让每一跳都"刚变过"。压缩跳后新头部以当刻值重钉。
 
 ## jail 基础设施（后端 / 布局 / 助手 / 文件桥）
 

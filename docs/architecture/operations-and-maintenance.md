@@ -721,7 +721,7 @@ IM 渠道有两条：内置官方 QQ 适配器（`g3ku/qq_official/`，进程内
 - `scripts/lint.sh` / `scripts/lint.ps1`（等价于 `python -m ruff check g3ku main tools scripts bridges tests negi_bootstrap.py`）
 - `python -m pytest --collect-only -q`
 - `python -m pytest tests/resources/test_resource_runtime_smoke.py -q`（冒烟子集）
-- `.github/workflows/ci.yml` 的 Python 门禁把 `tests/` 按文件体量摊成 4 片并行跑（`python scripts/ci_test_shard.py --shard N --shards 4`，每片只收显式文件名，不把目录参数交给 pytest），单片预算 20 分钟。理由是一条 `pytest tests/` 的整跑量到 25 分钟以上，而作业并发写着 `cancel-in-progress`：main 越忙，那条长作业越会被下一次推送顶掉，结果是 CI 上根本没有红数可读。分片选择本身（哪个文件进哪片、按什么排序）只由 `scripts/ci_test_shard.py` 回答。
+- `.github/workflows/ci.yml` 的 Python 门禁把 `tests/` 按文件体量摊成 4 片并行跑（`python scripts/ci_test_shard.py --shard N --shards 4`，每片只收显式文件名，不把目录参数交给 pytest），单片预算 20 分钟。理由是一条 `pytest tests/` 的整跑量到 25 分钟以上，而作业并发写着 `cancel-in-progress`：main 越忙，那条长作业越会被下一次推送顶掉，结果是 CI 上根本没有红数可读。分片选择本身（哪个文件进哪片、按什么排序）只由 `scripts/ci_test_shard.py` 回答。分片解决总时长，解决不了单条用例不返回：`scripts/ci_test_watchdog.py` 由分片脚本以 `-p` 挂进去，一条用例超过 90 秒先点名，超过 300 秒把用例名与全部线程栈直写复制到 fd 1（绕过 pytest 的捕获——被 `os._exit` 砍掉的进程不会倒出缓冲），再以 124 退出。读一片没有结论的作业日志时，先分清它是被预算整点砍掉还是被看门狗点名：后者日志里有 `KILLING run:` 一行，直接给出凶手用例与它停在哪一帧。
 
 自动化通过后，再至少人工验证下面的清单：
 
