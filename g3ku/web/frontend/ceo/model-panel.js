@@ -590,10 +590,16 @@ function ceoModelBadgeTitle(estimate) {
 // 发送按钮左侧那颗徽标印的是模型 ID，不是展示名：它回答"这一跳到底打的是哪颗"。
 // 运行中优先取该跳实际服务的模型（observed_input_truth）；空闲退回下一回合预检
 // 解析出的 provider_model，再退回固定模型/链首的 provider_model。
+// provider_model 的字段形状是 `协议:模型ID`，徽标只显示协议后面那段。
 function ceoLiveModelIdText(estimate, { running = false } = {}) {
-    const observed = String(estimate?.observed_provider_model || "").trim();
+    const modelIdOnly = (value) => {
+        const text = String(value || "").trim();
+        const separator = text.indexOf(":");
+        return separator >= 0 ? text.slice(separator + 1).trim() : text;
+    };
+    const observed = modelIdOnly(estimate?.observed_provider_model);
     if (running && observed) return observed;
-    const preflight = String(estimate?.provider_model || "").trim();
+    const preflight = modelIdOnly(estimate?.provider_model);
     if (preflight) return preflight;
     if (running) return "";
     const sessionId = String(activeSessionId() || "").trim();
@@ -603,7 +609,7 @@ function ceoLiveModelIdText(estimate, { running = false } = {}) {
     for (const key of keys) {
         const item = ceoModelCatalogItem(key);
         if (!item || item.enabled === false) continue;
-        const label = String(item.provider_model || "").trim() || ceoModelDisplayTitle(item);
+        const label = modelIdOnly(item.provider_model) || ceoModelDisplayTitle(item);
         if (label) return label;
     }
     return "";

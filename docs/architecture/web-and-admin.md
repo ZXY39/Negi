@@ -1031,10 +1031,10 @@ The context-usage brain is also the composer's model-and-context entry: clicking
 
 ### Composer Model Badge
 
-- 输入行右下角的发送/暂停按钮左侧常驻一颗模型徽标（`.ceo-model-live-badge`），印的是模型 ID（`provider_model`，如 `glm-5.2-2`），不是展示名；按钮与徽标同属一个绝对定位簇，定位由簇统一承担，因此两者的间距与右边界随按钮宽度一起走。
+- 输入行右下角的发送/暂停按钮左侧常驻一颗模型徽标（`.ceo-model-live-badge`），印的是模型 ID，不是展示名；`provider_model` 的字段形状是 `协议:模型ID`，徽标取冒号后那段（`openai:gpt-5.2` 显示为 `gpt-5.2`），取值链里的每一档都按这条规则裁。按钮与徽标同属一个绝对定位簇，定位由簇统一承担，因此两者的间距与右边界随按钮宽度一起走。
 - 运行中印这一回合该跳实际服务的模型：源是 inflight `frontdoor_token_preflight_diagnostics.observed_input_truth.provider_model`（provider 请求体里真正发出去的 `model`），缺失时退回同一份诊断的 `provider_model`。它随 `ceo.state` / `ceo.turn.patch` 的 inflight 快照逐跳刷新，链上换成员（429 降档）之后下一跳就改印新成员；取不到任何模型时整颗隐藏，不拿链首或固定模型顶替。
 - 空闲时印下一回合发送将使用的模型：优先取 composer preflight 的 `provider_model`；还没有预估时退回会话固定模型的 `provider_model`，再退回模型链上第一颗可用成员的 `provider_model`。同样取不到就隐藏。
-- 徽标的 `title` 说明读数口径（`当前运行模型：<id>` / `下次发送将使用：<id>`），正文不带图标、不做动画；它只读，不打开面板。
+- 徽标是裸文本：不带边框、圆角外框、底色与内边距，靠字号与 `--text-muted` 着色和按钮区分，超长由 `max-width` 截成省略号。它的 `title` 说明读数口径（`当前运行模型：<id>` / `下次发送将使用：<id>`），正文不带图标、不做动画；它只读，不打开面板。
 
 ### Composer Context Usage Meter
 

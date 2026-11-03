@@ -737,6 +737,29 @@ test("send button model badge shows the served model as soon as a running hop re
     assert.match(String(U.ceoModelLiveBadge.attributes.title || ""), /当前运行模型.*glm-5\.2-2/);
 });
 
+test("send button model badge drops the protocol prefix from a provider:model ID", () => {
+    const { S, U, __context } = loadApp();
+    S.activeSessionId = "web:test";
+    S.ceoTurnActive = true;
+    U.ceoComposerUsageBrain = new StubHTMLElement();
+    U.ceoComposerUsageBrainFill = new StubHTMLElement();
+    U.ceoModelLiveBadge = new StubHTMLElement();
+
+    __context.setCeoSessionSnapshotCache("web:test", {
+        inflight_turn: {
+            status: "running",
+            frontdoor_token_preflight_diagnostics: {
+                final_request_tokens: 21000,
+                max_context_tokens: 240000,
+                provider_model: "deepseek:flash-3",
+                observed_input_truth: { provider_model: "zhipu:glm-5.2-2" },
+            },
+        },
+    });
+
+    assert.equal(U.ceoModelLiveBadge.textContent, "glm-5.2-2");
+});
+
 test("send button model badge shows the next-send model while idle", () => {
     const { S, U, syncCeoComposerUsageOutline } = loadApp();
     S.activeSessionId = "web:test";
@@ -756,8 +779,8 @@ test("send button model badge shows the next-send model while idle", () => {
     syncCeoComposerUsageOutline();
 
     assert.equal(U.ceoModelLiveBadge.hidden, false);
-    assert.equal(U.ceoModelLiveBadge.textContent, "openai:gpt-5.2");
-    assert.match(String(U.ceoModelLiveBadge.attributes.title || ""), /下次发送将使用.*openai:gpt-5\.2/);
+    assert.equal(U.ceoModelLiveBadge.textContent, "gpt-5.2");
+    assert.match(String(U.ceoModelLiveBadge.attributes.title || ""), /下次发送将使用.*gpt-5\.2/);
 });
 
 test("send button model badge falls back to the chain head before any estimate exists", () => {
@@ -777,7 +800,7 @@ test("send button model badge falls back to the chain head before any estimate e
     syncCeoComposerUsageOutline();
 
     assert.equal(U.ceoModelLiveBadge.hidden, false);
-    assert.equal(U.ceoModelLiveBadge.textContent, "openai:a");
+    assert.equal(U.ceoModelLiveBadge.textContent, "a");
 });
 
 test("send button model badge hides when neither a running nor a next-send model is known", () => {
@@ -806,6 +829,14 @@ test("send cluster places the model badge left of the send button", () => {
     assert.ok(sendIndex > badgeIndex);
     assert.ok(APP_CSS.includes(".ceo-send-cluster {"));
     assert.equal(/#ceo-send-btn \{\n    position: absolute;/.test(APP_CSS), false);
+});
+
+test("model badge is bare text with no pill frame", () => {
+    const badgeCss = APP_CSS.match(/\.ceo-model-live-badge \{[^}]*\}/)?.[0] || "";
+    assert.ok(badgeCss);
+    for (const pillPart of ["border:", "border-radius:", "background:", "padding:"]) {
+        assert.equal(badgeCss.includes(pillPart), false, pillPart);
+    }
 });
 
 test("model panel puts the model badge on the token line, right aligned", () => {

@@ -5005,10 +5005,6 @@ textarea {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    padding: 3px 8px;
-    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--bg-app) 82%, var(--bg-panel) 18%);
     color: var(--text-muted);
     font-size: 11px;
     line-height: 1.4;
