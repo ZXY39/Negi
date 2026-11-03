@@ -14,9 +14,16 @@ concurrency:
 
 jobs:
   tests:
-    name: Tests (Windows)
+    name: Tests (Windows, shard ${{ matrix.shard }}/${{ matrix.shards }})
     runs-on: windows-latest
-    timeout-minutes: 30
+    # 单片预算 20 分钟：整跑量到过 25 分钟以上，而 main 每几分钟就有一次推送，
+    # cancel-in-progress 会把那条长作业顶掉——分片后每片都该在两次推送之间跑完。
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shards: [4]
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -24,8 +31,10 @@ jobs:
           enable-cache: true
       - name: Install dependencies
         run: uv sync --frozen --extra dev
-      - name: Run tests
-        run: uv run python -m pytest tests/ -q
+      # 切法与理由在 scripts/ci_test_shard.py：按文件体量贪心装箱，逐片只传显式文件名，
+      # 不把 tests 目录参数交给 pytest。
+      - name: Run this shard
+        run: uv run python scripts/ci_test_shard.py --shard ${{ matrix.shard }} --shards ${{ matrix.shards }}
 
   frontend:
     name: Frontend (Node)
