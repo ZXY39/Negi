@@ -140,8 +140,13 @@
         return data.item || null;
     },
 
-    async setBootstrapAutoUnlock(enabled) {
-        const data = await this.post("/api/bootstrap/auto-unlock", { enabled: !!enabled });
+    async getBootstrapAutostart() {
+        const data = await this.get("/api/bootstrap/autostart");
+        return data.item || null;
+    },
+
+    async setBootstrapAutostart(enabled) {
+        const data = await this.post("/api/bootstrap/autostart", { enabled: !!enabled });
         return data.item || null;
     },
 

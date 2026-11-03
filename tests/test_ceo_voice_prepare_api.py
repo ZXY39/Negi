@@ -1,13 +1,17 @@
-"""首次点麦克风时的按需下载车道（/api/ceo/voice/status 与 /prepare）。
+"""按需取得语音资产这条车道（引擎单飞 + /api/ceo/voice/status 与 /prepare）。
 
-新设备默认就开着语音，但缺那 157 MB：这里钉住的是"点一次就下、下完自己好"
-的对外契约——单飞（第二个点击不许重开一个下载）、进度可见、失败有原因，
-以及状态口只报布尔与字节，不把绝对路径漏给浏览器。
+新设备默认就开着语音，但缺那 157 MB。钉住的是"谁提的、提了几次、失败怎么说"：
+
+* 单飞——第二个入口（网页再点一次、渠道又来一条语音）不许重开一个下载；
+* 许可归 `stt.enabled`——关掉它之后任何入口都不能替操作员下载；
+* 失败可重试但有冷却——渠道语音没有"操作员再点一次"这个出口，弱网里每条语音都重开
+  一次下载会把线程池占满；网页上的一次点击是明确动作，立刻重试。
 """
 
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 from fastapi import FastAPI
@@ -19,10 +23,16 @@ from g3ku.stt import engine as stt_engine
 
 @pytest.fixture(autouse=True)
 def clean_state():
-    ws_api._VOICE_PREPARE.update({"state": "idle", "stage": "", "done_bytes": 0, "total_bytes": None, "error": ""})
-    ws_api._voice_prepare_task = None
+    stt_engine._PROVISION_STATE.update(
+        {"state": "idle", "stage": "", "done_bytes": 0, "total_bytes": None, "error": ""}
+    )
+    stt_engine._provision_task = None
+    stt_engine._provision_finished_at = 0.0
     yield
-    ws_api._voice_prepare_task = None
+    task = stt_engine._provision_task
+    if task is not None and not task.done():
+        task.cancel()
+    stt_engine._provision_task = None
 
 
 @pytest.fixture
@@ -48,6 +58,22 @@ def _not_ready(monkeypatch, *, enabled=True):
     )
 
 
+def _records_preparations(monkeypatch):
+    calls: list[str] = []
+
+    def fake_prepare_binary(cfg=None, on_progress=None):
+        calls.append("binary")
+        return {"ok": True}
+
+    def fake_prepare_model(cfg=None, on_progress=None):
+        calls.append("model")
+        return {"ok": True}
+
+    monkeypatch.setattr(stt_engine, "prepare_binary", fake_prepare_binary)
+    monkeypatch.setattr(stt_engine, "prepare_model", fake_prepare_model)
+    return calls
+
+
 def test_status_reports_gates_sizes_and_progress_without_paths(client, monkeypatch):
     _not_ready(monkeypatch)
 
@@ -62,8 +88,7 @@ def test_status_reports_gates_sizes_and_progress_without_paths(client, monkeypat
 
 def test_prepare_on_a_ready_box_starts_nothing(client, monkeypatch):
     monkeypatch.setattr(stt_engine, "status", lambda cfg=None: {"enabled": True, "ready": True})
-    calls = []
-    monkeypatch.setattr(stt_engine, "prepare_binary", lambda *a, **k: calls.append("binary"))
+    calls = _records_preparations(monkeypatch)
 
     body = client.post("/api/ceo/voice/prepare").json()
 
@@ -72,14 +97,13 @@ def test_prepare_on_a_ready_box_starts_nothing(client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_voice_prepare_walks_both_parts_and_records_progress(monkeypatch):
+async def test_run_provisioning_walks_both_parts_and_records_progress(monkeypatch):
     """下载顺序与台账：二进制先、模型后，进度按阶段回写。
 
     这里直接调协程而不是走 TestClient——TestClient 每个请求跑在自己的 loop 上，
     后台任务会随请求结束一起被切掉，测不到"跨请求还在下"。
     """
     order = []
-    seen = []
 
     def fake_prepare_binary(cfg=None, on_progress=None):
         order.append("binary")
@@ -96,35 +120,45 @@ async def test_run_voice_prepare_walks_both_parts_and_records_progress(monkeypat
     monkeypatch.setattr(stt_engine, "prepare_binary", fake_prepare_binary)
     monkeypatch.setattr(stt_engine, "prepare_model", fake_prepare_model)
 
-    await ws_api._run_voice_prepare()
+    await stt_engine._run_provisioning()
 
     assert order == ["binary", "model"]
-    snapshot = ws_api._voice_prepare_snapshot()
+    snapshot = stt_engine.provisioning_snapshot()
     assert snapshot["state"] == "ready"
     assert snapshot["stage"] == "model"
     assert snapshot["done_bytes"] == 147951465
-    assert seen == []
 
 
 @pytest.mark.asyncio
-async def test_a_second_click_reuses_the_running_download(monkeypatch):
+async def test_a_second_request_reuses_the_running_download(monkeypatch):
     started = []
 
-    async def slow_prepare(cfg=None, on_progress=None):
+    async def slow_provisioning():
         started.append(1)
         await asyncio.sleep(5)
 
     monkeypatch.setattr(stt_engine, "status", lambda cfg=None: {"enabled": True, "ready": False})
-    monkeypatch.setattr(ws_api, "_run_voice_prepare", slow_prepare)
+    monkeypatch.setattr(stt_engine, "_run_provisioning", slow_provisioning)
 
-    first = await ws_api.start_ceo_voice_prepare()
-    second = await ws_api.start_ceo_voice_prepare()
+    first = await stt_engine.request_provisioning(source="web-composer")
+    second = await stt_engine.request_provisioning(source="qq-voice")
 
     assert first["state"] == "running"
     assert second["state"] == "running"
-    assert started == [], "第二个点击不许再起一个下载"
-    assert ws_api._voice_prepare_task is not None
-    ws_api._voice_prepare_task.cancel()
+    assert started == [], "第二个入口不许再起一个下载"
+    assert stt_engine._provision_task is not None
+
+
+@pytest.mark.asyncio
+async def test_a_disabled_switch_refuses_every_surface(monkeypatch):
+    """`stt.enabled=false` 是操作员的许可：关掉之后网页首点与渠道语音都不该下载。"""
+    _not_ready(monkeypatch, enabled=False)
+    calls = _records_preparations(monkeypatch)
+
+    snapshot = await stt_engine.request_provisioning(source="qq-voice")
+
+    assert snapshot["state"] == "disabled"
+    assert calls == []
 
 
 @pytest.mark.asyncio
@@ -134,8 +168,44 @@ async def test_a_failed_download_is_reported_not_swallowed(monkeypatch):
 
     monkeypatch.setattr(stt_engine, "prepare_binary", boom)
 
-    await ws_api._run_voice_prepare()
+    await stt_engine._run_provisioning()
 
-    snapshot = ws_api._voice_prepare_snapshot()
+    snapshot = stt_engine.provisioning_snapshot()
     assert snapshot["state"] == "error"
     assert "校验失败" in snapshot["error"]
+
+
+@pytest.mark.asyncio
+async def test_channel_voice_retries_a_failed_download_only_after_the_cooldown(monkeypatch):
+    """渠道侧没有"再点一次"的出口：刚失败就每条语音重开一次下载等于把线程池占满。"""
+    _not_ready(monkeypatch)
+    calls = _records_preparations(monkeypatch)
+    stt_engine._PROVISION_STATE["state"] = "error"
+
+    stt_engine._provision_finished_at = time.monotonic()
+    in_cooldown = await stt_engine.request_provisioning(source="qq-voice")
+    assert in_cooldown["state"] == "error"
+    assert calls == []
+
+    # 冷却窗走完，下一条语音自己把下载再提起来。
+    stt_engine._provision_finished_at = time.monotonic() - (stt_engine._PROVISION_RETRY_AFTER_SECONDS + 1)
+    after_cooldown = await stt_engine.request_provisioning(source="qq-voice")
+
+    assert after_cooldown["state"] == "running"
+    # 请求只负责把任务挂上 loop，两步下载在任务里跑：断言要等它落完。
+    await stt_engine._provision_task
+    assert calls == ["binary", "model"]
+
+
+@pytest.mark.asyncio
+async def test_an_operator_click_ignores_the_cooldown(monkeypatch):
+    _not_ready(monkeypatch)
+    calls = _records_preparations(monkeypatch)
+    stt_engine._PROVISION_STATE["state"] = "error"
+    stt_engine._provision_finished_at = time.monotonic()
+
+    snapshot = await stt_engine.request_provisioning(source="web-composer", force=True)
+
+    assert snapshot["state"] == "running"
+    await stt_engine._provision_task
+    assert calls == ["binary", "model"]

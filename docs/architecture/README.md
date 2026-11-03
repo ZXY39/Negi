@@ -25,7 +25,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - `main-task-runtime.md`
   Use for the task side of the runtime: node mailbox and wake semantics, acceptance three-tier verdicts, node-level pause/resume/cancel and the structural watchdog, and graceful shutdown pause with startup auto-resume.
 - `operations-and-maintenance.md`
-  Use for startup workflows (including the `negi` command stub, icons and the uninstall entry that install writes), troubleshooting order, high-risk change types, memory queue/reset workflows, the persona photo folder and onboarding state, and Docker deployment.
+  Use for startup workflows (including the `negi` command stub, icons, the logon autostart registration and the uninstall entry that install writes), troubleshooting order, high-risk change types, memory queue/reset workflows, the persona photo folder and onboarding state, and Docker deployment.
 - `context-and-cache-troubleshooting.md`
   Use for prompt cache misses, context shrink/continuity regressions, actual-request artifact forensics, and before changing node or CEO context strategies.
 - `tool-and-skill-system.md`
@@ -244,6 +244,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 更新后用户说"我改的东西不见了"、设置里那一行只报数量而清单在按钮 title 上、`交给 Negi 解决` 为什么只准备会话不自动发送，或 `copy-overwrite` 与 `merge-conflict` 分不清 → `operations-and-maintenance.md`「换码没能保住的本地改动」+ `web-and-admin.md`「Update Notification And Restart-And-Upgrade Contract」
 - 界面上的动作想把消息送进某条指定会话，结果落进了另一条（含真实对外渠道会话）→ `web-and-admin.md`「CEO Composer Runtime」
 - 升级已经成功红点仍亮到下一次检查、或没人改过目录却被判成"有本地改动"而白跑一次 stash → `web-and-admin.md`「Update Notification And Restart-And-Upgrade Contract」+「Frontend Vendor Asset Update Contract」
+- 装完的机器登录后 Negi 没自己起来、设置里那颗「开机自启」整行看不见、或升级后自启状态变了 → `operations-and-maintenance.md`「开机自启登记」
 - 点输入框麦克风提示未就绪／未启用、新设备首点迟迟不出录音、录音结果仍是繁体、或局域网 http 打开时浏览器拒绝麦克风 → `speech-to-text.md`「分发与就绪」「已知边界」
 - QQ 发来的语音变成一行本地路径注记、或只有「用户语音，机器识别失败：…」、或语音条迟迟等不到回复 → `external-agent-api.md`「内置官方 QQ 适配器」+ `speech-to-text.md`「常见排障入口」
 - 语音气泡播放不出来、语音条右端的 `T` 点开是空的、或用户气泡里仍然显示 `用户语音，机器识别结果：` 这行字 → `speech-to-text.md`「语音气泡与音频字段的存放」+ `web-and-admin.md`「Attachment Bubble Rendering Contract」
@@ -282,4 +283,4 @@ These rules prevent the docs from re-accumulating redundancy. Every edit to this
 | Agent gateway contract: OpenAI-compatible endpoint (`/api/v1/chat/completions`, session mapping, wait/200-honest-text policy, streaming diff) and MCP stdio gateway (`negi mcp serve`, tool surface, stdout purity) | `agent-gateway.md` |
 | Local speech-to-text contract: whisper.cpp subprocess engine and slot serialization, audio normalization and silence/language gating, traditional→simplified post-pass, binary/model provisioning (`stt` defaults' measured basis), voice-clip storage and the model-visibility exclusion, known latency and accuracy envelope | `speech-to-text.md` |
 | Sandbox execution plane: session trust tiers and their derivation (`owner` / `third_party_dm` / `third_party_group`, sticky downgrade, fail-closed on unknown), install-state-driven tier model (`restricted` / `unrestricted` → `limited` / `jailed` / `host_full`), limited-mode per-session tool allowlist and fixed primitives, session workspace with read/write roots, optional `exec` grant with `governed` clamp, control-plane rejection on the synthetic lane, memory gate intake points and read-side suppression, third-party sender stamp | `sandbox-execution-plane.md` |
-| Startup/deploy/troubleshooting order, the post-install entry surface (`negi` command stub, install-root pointer, desktop/Start Menu shortcuts, uninstall entry and its keep/purge guards), install root vs data root storage layout (which paths hang on which root, where to read the effective data root) and data-root resolution order, memory CLI, Docker compose | `operations-and-maintenance.md` |
+| Startup/deploy/troubleshooting order, the post-install entry surface (`negi` command stub, install-root pointer, desktop/Start Menu shortcuts, logon autostart registration, uninstall entry and its keep/purge guards), install root vs data root storage layout (which paths hang on which root, where to read the effective data root) and data-root resolution order, memory CLI, Docker compose | `operations-and-maintenance.md` |

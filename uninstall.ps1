@@ -258,6 +258,17 @@ try {
     }
     Remove-Tree -Path $StateDir -For 'icon and pointer state'
 
+    # The logon registration points into this folder, so it goes with the folder. It is
+    # deleted here instead of through `g3ku autostart off` because uninstalling must work
+    # on a broken environment too; the value name is the one g3ku/deployment/autostart.py writes.
+    $runKeyPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+    if (Test-Path -LiteralPath $runKeyPath) {
+        if (Get-ItemProperty -LiteralPath $runKeyPath -Name $AppDisplayName -ErrorAction SilentlyContinue) {
+            Remove-ItemProperty -LiteralPath $runKeyPath -Name $AppDisplayName -ErrorAction SilentlyContinue
+            Write-Step 'removed the logon autostart registration'
+        }
+    }
+
     if ($pathEntryAdded) {
         $current = [Environment]::GetEnvironmentVariable('Path', 'User')
         $parts = @()

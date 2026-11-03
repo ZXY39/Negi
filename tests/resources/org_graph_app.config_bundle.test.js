@@ -195,7 +195,8 @@ function mountDialogs(app) {
     U.projectSettingsNewPassword = new StubHTMLElement();
     U.projectSettingsNewPasswordConfirm = new StubHTMLElement();
     U.projectSettingsChangePassword = new StubHTMLElement();
-    U.projectSettingsAutoUnlock = new StubHTMLElement();
+    U.projectSettingsAutostartRow = new StubHTMLElement();
+    U.projectSettingsAutostart = new StubHTMLElement();
     U.projectSettingsLock = new StubHTMLElement();
     U.projectSettingsExit = new StubHTMLElement();
     U.configBundleBackdrop = new StubHTMLElement();

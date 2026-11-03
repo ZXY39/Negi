@@ -762,22 +762,28 @@ def _run_start(extra_args: list[str]) -> int:
     # typing `negi` must outlive the window it was started from. Watching the
     # process itself is what `negi web` is for. `--window` swaps the browser tab
     # for the desktop shell; the server lane is identical either way.
+    # `--no-browser` is what the autostart登记 uses: a logon must not end in a
+    # browser tab, and the port probe below is why logon cannot reap a live server.
     web_args, _ = _take_hidden_flag(list(extra_args))
     web_args, want_window = _take_window_flag(web_args)
+    # 这里不能用 `_take_bool_flag`：它对"写了 --no-x"和"没写"都返回 False，而这条道
+    # 三态都要区分——没写＝开浏览器（今天的默认），写了 --no-browser＝不开。
+    want_browser = "--no-browser" not in web_args
+    web_args = [part for part in web_args if part != "--no-browser"]
     port = _web_bind_port(_port_override(web_args))
     if _probe_web_ready(port):
         url = _web_url(port)
         print(f"[negi] Negi is already running on port {port}: {url}", flush=True)
         if want_window:
             _open_desktop_window(port)
-        else:
+        elif want_browser:
             _open_browser(url)
         return 0
     print(f"[negi] Negi is not running yet; starting the web UI on port {port}", flush=True)
     return _launch_web(
         ["web", *web_args],
         port=port,
-        open_browser=not want_window,
+        open_browser=want_browser and not want_window,
         hidden=True,
         open_window=want_window,
     )

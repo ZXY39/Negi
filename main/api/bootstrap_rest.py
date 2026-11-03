@@ -24,6 +24,8 @@ from g3ku.config.config_bundle import (
     import_bundle,
 )
 from g3ku.config.loader import load_config
+from g3ku.deployment.autostart import apply_enabled as apply_autostart
+from g3ku.deployment.autostart import describe as describe_autostart
 from g3ku.deployment.data_root import DataRootError, describe_data_root, write_data_root_pointer
 from g3ku.security import get_bootstrap_security_service
 from g3ku.shells.web import (
@@ -399,8 +401,9 @@ async def bootstrap_unlock(payload: dict = Body(...)):
     service = _service()
     try:
         service.unlock(password=password)
-        if remember:
-            service.set_auto_unlock(enabled=True)
+        # 这颗勾选是双向的：取消勾选要真的把已存凭据摘掉。设置窗口不再挂自动解锁的开关，
+        # 解锁页就是这个开关唯一的家，只有"开"没有"关"等于关不掉。
+        service.set_auto_unlock(enabled=remember)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     try:
@@ -434,6 +437,32 @@ async def bootstrap_auto_unlock(payload: dict | None = Body(default=None)):
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"ok": True, "item": item}
+
+
+@router.get("/bootstrap/autostart")
+async def bootstrap_autostart_status():
+    """这台机器的自启登记读数（登记面、在不在、不在的原因）。
+
+    单独一个口而不是塞进 /bootstrap/status：status 被启动轮询每秒打一次，而这里读的是
+    操作系统登记，systemd 那条还要跑一次 `systemctl`。设置窗口打开时才需要它。
+    """
+    _assert_unlocked()
+    return {"ok": True, "item": await asyncio.to_thread(describe_autostart)}
+
+
+@router.post("/bootstrap/autostart")
+async def bootstrap_autostart(payload: dict = Body(...)):
+    """Install or remove this user's logon registration for Negi.
+
+    返回的永远是重读一遍的登记事实，不是请求的那个值：容器或没有可用登记面的机器上，
+    答案是"不支持，原因是这个"，界面要把它说出来，而不是画一颗什么都没发生的勾选框。
+    """
+    _assert_unlocked()
+    enabled = bool(payload.get("enabled"))
+    state = await asyncio.to_thread(apply_autostart, enabled)
+    if not state.get("ok"):
+        raise HTTPException(status_code=400, detail=str(state.get("reason") or "autostart_unavailable"))
+    return {"ok": True, "item": state}
 
 
 @router.post("/bootstrap/lock")

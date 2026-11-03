@@ -127,6 +127,37 @@ def test_cold_start_detaches_so_the_window_can_close(monkeypatch) -> None:
     assert opened == ['http://127.0.0.1:9555/']
 
 
+def test_no_browser_flag_starts_the_server_without_touching_a_browser(monkeypatch) -> None:
+    """登录自启登记跑的就是这一格：起服务，但不替操作员开一个页签。"""
+    spawned = {}
+    opened = []
+    monkeypatch.setattr(negi_bootstrap, '_load_bootstrap_config', lambda: {})
+    monkeypatch.setattr(negi_bootstrap, '_probe_web_ready', lambda port: False)
+    monkeypatch.setattr(negi_bootstrap, '_open_runtime_console_log_stream', lambda: None)
+    monkeypatch.setattr(negi_bootstrap, '_open_browser', lambda url: opened.append(url) or True)
+    monkeypatch.setattr(negi_bootstrap, '_wait_for_web_ready', lambda child, port: True)
+
+    def _capture(args, *, hidden, console_log_stream):
+        spawned['args'] = list(args)
+        return _FakeChild()
+
+    monkeypatch.setattr(negi_bootstrap, '_spawn_web_runtime', _capture)
+
+    assert negi_bootstrap._run_start(['--no-browser']) == 0
+    assert spawned['args'] == ['web']
+    assert opened == []
+
+
+def test_no_browser_flag_also_holds_when_a_server_already_answers(monkeypatch) -> None:
+    opened = []
+    monkeypatch.setattr(negi_bootstrap, '_load_bootstrap_config', lambda: {'web': {'port': 18790}})
+    monkeypatch.setattr(negi_bootstrap, '_probe_web_ready', lambda port: True)
+    monkeypatch.setattr(negi_bootstrap, '_open_browser', lambda url: opened.append(url) or True)
+
+    assert negi_bootstrap._run_start(['--no-browser']) == 0
+    assert opened == []
+
+
 def test_start_still_consumes_the_hidden_flag_of_older_shortcuts(monkeypatch) -> None:
     spawned = {}
     monkeypatch.setattr(negi_bootstrap, '_load_bootstrap_config', lambda: {})

@@ -967,6 +967,51 @@ def stt_prepare(
     console.print(f"就绪：{snapshot['ready']}")
 
 
+autostart_app = typer.Typer(help="开机自启（登录后拉起 Negi 的系统登记）")
+app.add_typer(autostart_app, name="autostart")
+
+
+@autostart_app.command("status")
+def autostart_status():
+    """Print which登记面 this machine offers and whether Negi is registered in it."""
+    from g3ku.deployment.autostart import describe
+
+    state = describe()
+    console.print(f"登记面：{state['backend']}")
+    console.print(f"可用：{state['supported']}")
+    console.print(f"已开启：{state['installed']}")
+    console.print(f"命令：{' '.join(state['command'])}")
+    if state.get("reason"):
+        console.print(f"说明：{state['reason']}")
+
+
+@autostart_app.command("on")
+def autostart_on():
+    """Register Negi to start at this user's logon."""
+    from g3ku.deployment.autostart import apply_enabled
+
+    _print_autostart_result(apply_enabled(True))
+
+
+@autostart_app.command("off")
+def autostart_off():
+    """Remove the logon registration, leaving the running server untouched."""
+    from g3ku.deployment.autostart import apply_enabled
+
+    _print_autostart_result(apply_enabled(False))
+
+
+def _print_autostart_result(state: dict[str, object]) -> None:
+    if not state.get("supported"):
+        console.print(f"[red]这台机器无法登记自启：{state.get('reason')}[/red]")
+        raise typer.Exit(code=1)
+    if not state.get("ok") and state.get("reason"):
+        console.print(f"[red]{state['reason']}[/red]")
+        console.print(f"当前已开启：{state['installed']}")
+        raise typer.Exit(code=1)
+    console.print(f"已开启自启（{state['backend']}）" if state.get("installed") else f"已关闭自启（{state['backend']}）")
+
+
 if __name__ == "__main__":
     app()
 

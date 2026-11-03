@@ -30,7 +30,7 @@ const FILES = collectFrontendFiles(FRONTEND_DIR);
 const LEDGER = [
     { token: "boot-legacy-confirm", tier: "ui" },
     { token: "boot-remember-unlock", tier: "ui" },
-    { token: "project-settings-auto-unlock", tier: "ui" },
+    { token: "project-settings-autostart", tier: "ui" },
     { token: "config-bundle-use-project-password", tier: "ui" },
     { token: "config-bundle-export-config", tier: "ui" },
     { token: "config-bundle-export-memory", tier: "ui" },

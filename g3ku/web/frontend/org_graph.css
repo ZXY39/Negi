@@ -17893,7 +17893,7 @@ textarea {
     box-shadow: 0 0 0 3px var(--ui-brand-soft);
 }
 
-/* 底部那一行装三颗按钮加自动解锁勾选：出现版本对（v1.11.3 → v1.12.0）时整行会折成两行，
+/* 底部那一行装三颗按钮加开机自启勾选：出现版本对（v1.11.3 → v1.12.0）时整行会折成两行，
    所以留出行间距，别把两行按钮挤在一起。 */
 .project-settings-footer {
     justify-content: flex-end;

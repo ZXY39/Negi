@@ -783,6 +783,27 @@ function Copy-NegiIcon {
     return $target
 }
 
+function Register-NegiAutostart {
+    param([string]$Root)
+    # Only a fresh install registers autostart: an upgrade must not touch a system
+    # registration behind the operator's back. The Python side owns the registration
+    # shape (same value the settings checkbox writes), so this is a call, not a second
+    # implementation. A failure here never fails the install - autostart is a
+    # convenience, a broken environment is the incident.
+    $python = Join-Path $Root '.venv\Scripts\python.exe'
+    if (-not (Test-Path -LiteralPath $python)) {
+        Write-Step 'autostart skipped: no venv python under this root'
+        return
+    }
+    $output = & $python -m g3ku autostart on 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        Write-Step 'autostart: registered for this user logon'
+    }
+    else {
+        Write-Step ('autostart not registered: ' + (($output | Out-String).Trim()))
+    }
+}
+
 function Install-DesktopIcons {
     param([string]$Root, [string]$IconPath)
     $pythonw = Join-Path $Root '.venv\Scripts\pythonw.exe'
@@ -895,6 +916,7 @@ Clear-LongPathTree -Path $kitStage
 $icon = Copy-NegiIcon -Root $Dir
 Install-EntryPoint -Root $Dir
 if (-not $NoShortcut) { Install-DesktopIcons -Root $Dir -IconPath $icon }
+if (-not $Upgrade) { Register-NegiAutostart -Root $Dir }
 $setupExeOwner = Get-SetupExeOwner -Root $Dir
 if ($setupExeOwner) {
     # The setup program's row already describes this folder. Retire the row an older

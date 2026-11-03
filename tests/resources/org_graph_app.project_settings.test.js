@@ -108,9 +108,13 @@ function loadApp(apiClientOverrides = {}) {
                 calls.push(["change", payload]);
                 return { mode: "unlocked" };
             },
-            setBootstrapAutoUnlock: async (enabled) => {
-                calls.push(["auto", enabled]);
-                return { mode: "unlocked", auto_unlock: !!enabled };
+            setBootstrapAutostart: async (enabled) => {
+                calls.push(["autostart-set", enabled]);
+                return { supported: true, backend: "windows", installed: !!enabled, command: [], reason: "" };
+            },
+            getBootstrapAutostart: async () => {
+                calls.push(["autostart"]);
+                return { supported: true, backend: "windows", installed: false, command: [], reason: "" };
             },
             lockBootstrap: async () => {
                 calls.push(["lock"]);
@@ -146,7 +150,7 @@ function loadApp(apiClientOverrides = {}) {
             closePasswordChangeDialog,
             isPasswordChangeOpen,
             submitProjectPasswordChange,
-            applyProjectAutoUnlockChange,
+            applyProjectAutostartChange,
             lockProjectFromSettings,
         };`,
         context
@@ -180,7 +184,9 @@ function mountDialog(app) {
     U.projectSettingsNewPassword = new StubHTMLElement();
     U.projectSettingsNewPasswordConfirm = new StubHTMLElement();
     U.projectSettingsChangePassword = new StubHTMLElement();
-    U.projectSettingsAutoUnlock = new StubHTMLElement();
+    U.projectSettingsAutostartRow = new StubHTMLElement();
+    U.projectSettingsAutostartRow.hidden = false;
+    U.projectSettingsAutostart = new StubHTMLElement();
     U.projectSettingsLock = new StubHTMLElement();
     U.projectSettingsExit = new StubHTMLElement();
 }
@@ -189,9 +195,9 @@ const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 // vm 内构造的载荷跨 realm，先序列化回宿主对象再做严格比较。
 const callsOf = (app) => JSON.parse(JSON.stringify(app.calls));
 
-test("打开设置弹窗会拉一次解锁状态并按状态回填自动解锁勾选", async () => {
+test("打开设置弹窗会读一次自启登记并按登记回填勾选", async () => {
     const app = loadApp({
-        getBootstrapStatus: async () => ({ mode: "unlocked", auto_unlock: true }),
+        getBootstrapAutostart: async () => ({ supported: true, backend: "windows", installed: true }),
     });
 
     app.openProjectSettingsDialog();
@@ -199,7 +205,25 @@ test("打开设置弹窗会拉一次解锁状态并按状态回填自动解锁�
 
     assert.equal(app.U.projectSettingsBackdrop.hidden, false);
     assert.equal(app.U.projectSettings.attributes["aria-expanded"], "true");
-    assert.equal(app.U.projectSettingsAutoUnlock.checked, true);
+    assert.equal(app.U.projectSettingsAutostart.checked, true);
+    assert.equal(app.U.projectSettingsAutostartRow.hidden, false);
+});
+
+test("这台机器没有可用登记面时整颗勾选不画", async () => {
+    // 容器里没有"这个人登录一次"这件事；一颗永远勾不上的勾选框比没有更让人怀疑界面坏了。
+    const app = loadApp({
+        getBootstrapAutostart: async () => ({
+            supported: false,
+            backend: "none",
+            installed: false,
+            reason: "容器里的 web 与 worker 由入口脚本和容器重启策略负责。",
+        }),
+    });
+
+    app.openProjectSettingsDialog();
+    await flush();
+
+    assert.equal(app.U.projectSettingsAutostartRow.hidden, true);
 });
 
 test("关闭设置弹窗清空密码输入并复位 aria", () => {
@@ -262,27 +286,36 @@ test("后端报错文案翻成中文提示", async () => {
     assert.equal(app.toasts.at(-1).text, "当前密码不正确");
 });
 
-test("自动解锁失败时回滚勾选", async () => {
+test("自启设置失败时回滚勾选", async () => {
     const app = loadApp({
-        setBootstrapAutoUnlock: async () => {
+        setBootstrapAutostart: async () => {
             throw new Error("project is locked");
         },
     });
-    app.U.projectSettingsAutoUnlock.checked = false;
+    app.U.projectSettingsAutostart.checked = false;
 
-    await app.applyProjectAutoUnlockChange(true);
+    await app.applyProjectAutostartChange(true);
 
-    assert.equal(app.U.projectSettingsAutoUnlock.checked, false);
+    assert.equal(app.U.projectSettingsAutostart.checked, false);
     assert.equal(app.toasts.at(-1).text, "项目已锁定，请先解锁");
 });
 
-test("自动解锁成功按服务端返回的状态回填", async () => {
+test("自启成功按服务端重读的登记回填", async () => {
     const app = loadApp();
 
-    await app.applyProjectAutoUnlockChange(true);
+    await app.applyProjectAutostartChange(true);
 
-    assert.deepEqual(app.calls, [["auto", true]]);
-    assert.equal(app.U.projectSettingsAutoUnlock.checked, true);
+    assert.deepEqual(callsOf(app).at(-1), ["autostart-set", true]);
+    assert.equal(app.U.projectSettingsAutostart.checked, true);
+});
+
+test("自启成功不会把这台机器现在跑着的实例说成受影响", async () => {
+    const app = loadApp();
+
+    await app.applyProjectAutostartChange(false);
+
+    assert.equal(app.toasts.at(-1).title, "已关闭开机自启");
+    assert.match(app.toasts.at(-1).text, /已经在跑的实例不受影响/);
 });
 
 test("锁定项目成功后关闭弹窗并刷新页面", async () => {

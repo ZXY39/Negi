@@ -69,6 +69,22 @@ def fake_download(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(bridge, "_download_attachment_bytes", _download)
 
 
+@pytest.fixture(autouse=True)
+def provisioning_requests(monkeypatch: pytest.MonkeyPatch):
+    """未就绪的语音会往后台提一次模型包取得，测试里绝不真下载：只记台账调用。
+
+    返回值是这份列表，所以断言"提了几次、为什么提"不用再造第二个桩。
+    """
+    requests: list[dict[str, object]] = []
+
+    async def _record(*, source: str = "", force: bool = False):
+        requests.append({"source": source, "force": force})
+        return {"state": "running", "stage": "binary", "done_bytes": 0, "total_bytes": None, "error": ""}
+
+    monkeypatch.setattr(stt_engine, "request_provisioning", _record)
+    yield requests
+
+
 # autouse 桩会把真实现盖掉；测真下载函数本身的用例先把它换回来。
 _REAL_DOWNLOAD = bridge._download_attachment_bytes
 
@@ -150,6 +166,41 @@ async def test_voice_stays_a_file_attachment_when_stt_is_off(monkeypatch):
     assert voice_lines == []
     assert [item["kind"] for item in payloads] == ["file"]
     assert payloads[0]["mime_type"] == "audio/wav"
+
+
+@pytest.mark.asyncio
+async def test_voice_on_an_unprovisioned_machine_asks_for_the_artifacts(monkeypatch, provisioning_requests):
+    """新设备的第一条 QQ 语音就是那 157 MB 的入口：往后台提一次取得，本条仍按文件车道走。
+
+    回合不能等下载——一条语音的转写在弱网里要几分钟，而渠道侧的收口只有一次。
+    """
+    monkeypatch.setattr(stt_engine, "inbound_voice_enabled", ready(False))
+
+    payloads, voice_lines = await bridge._collect_attachments(None, make_message(QQ_REAL_VOICE))
+
+    assert [item["kind"] for item in payloads] == ["file"]
+    assert voice_lines == []
+    assert provisioning_requests == [{"source": "qq-voice", "force": False}]
+
+
+@pytest.mark.asyncio
+async def test_image_on_an_unprovisioned_machine_asks_for_nothing(monkeypatch, provisioning_requests):
+    """只有音频才提取得：图片/文档在未就绪的机器上是常态，不该顺带把模型拖下来。"""
+    monkeypatch.setattr(stt_engine, "inbound_voice_enabled", ready(False))
+
+    await bridge._collect_attachments(None, make_message(IMAGE))
+
+    assert provisioning_requests == []
+
+
+@pytest.mark.asyncio
+async def test_ready_box_does_not_re_request_the_artifacts(monkeypatch, provisioning_requests):
+    monkeypatch.setattr(stt_engine, "inbound_voice_enabled", ready(True))
+    monkeypatch.setattr(stt_engine, "transcribe_bytes", transcribes(SttResult(True, text="已经装好了")))
+
+    await bridge._collect_attachments(None, make_message(VOICE))
+
+    assert provisioning_requests == []
 
 
 @pytest.mark.asyncio

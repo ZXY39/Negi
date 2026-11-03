@@ -161,6 +161,18 @@ def test_unlock_route_passes_remember_flag_to_auto_unlock(monkeypatch):
     assert stub.calls == [("unlock", "alpha-pass"), ("auto-unlock", True)]
 
 
+def test_unlock_without_remember_clears_a_stored_credential(monkeypatch):
+    """解锁页那颗勾选是这个开关唯一的家（设置窗口那格已让给开机自启），
+    所以取消勾选必须真的把凭据摘掉，否则它只有"开"没有"关"。"""
+    stub = _Stub(unlocked=False)
+    client = _client_for(stub, monkeypatch)
+
+    response = client.post("/bootstrap/unlock", json={"password": "alpha-pass"})
+
+    assert response.status_code == 200
+    assert stub.calls == [("unlock", "alpha-pass"), ("auto-unlock", False)]
+
+
 def test_change_password_route_validates_confirmation(monkeypatch):
     stub = _Stub()
     client = _client_for(stub, monkeypatch)

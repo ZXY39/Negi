@@ -512,6 +512,10 @@ def test_bootstrap_unlock_succeeds_when_runtime_start_is_deferred(monkeypatch):
         def unlock(self, *, password: str) -> None:
             calls.append(f"unlock:{password}")
 
+        def set_auto_unlock(self, *, enabled: bool) -> None:
+            # 解锁页那颗勾选现在是双向的：没勾选的解锁要把已存凭据摘掉。
+            calls.append(f"auto-unlock:{enabled}")
+
         def status(self):
             return {"mode": "unlocked"}
 
@@ -541,7 +545,7 @@ def test_bootstrap_unlock_succeeds_when_runtime_start_is_deferred(monkeypatch):
     response = client.post("/bootstrap/unlock", json={"password": "demo"})
 
     assert response.status_code == 200
-    assert calls == ["unlock:demo"]
+    assert calls == ["unlock:demo", "auto-unlock:False"]
     assert response.json()["item"]["runtime_ready"] is False
 
 

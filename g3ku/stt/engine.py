@@ -572,3 +572,110 @@ def _extract_archive(archive: Path, directory: Path) -> list[str]:
             (directory / name).write_bytes(source.read())
             kept.append(name)
     return kept
+
+
+# ---------------------------------------------------------------------------
+# 后台取得：把缺的二进制与模型补齐，一个进程一份状态
+# ---------------------------------------------------------------------------
+
+# 一条失败的下载在弱网里可以挂满超时，所以刚失败过就先进冷却：渠道语音每来一条都
+# 重开一次下载等于把线程池占满，而操作员在网页上再点一次麦克风仍然立刻重试（见
+# ``request_provisioning`` 的 ``force``）。
+_PROVISION_RETRY_AFTER_SECONDS = 600.0
+
+_PROVISION_STATE: dict[str, Any] = {
+    "state": "idle",
+    "stage": "",
+    "done_bytes": 0,
+    "total_bytes": None,
+    "error": "",
+}
+_provision_task: "asyncio.Task | None" = None
+_provision_finished_at = 0.0
+
+
+def provisioning_snapshot() -> dict[str, Any]:
+    """The provisioning ledger the composer polls; safe to read from any surface."""
+    return {
+        "state": str(_PROVISION_STATE.get("state") or "idle"),
+        "stage": str(_PROVISION_STATE.get("stage") or ""),
+        "done_bytes": int(_PROVISION_STATE.get("done_bytes") or 0),
+        "total_bytes": _PROVISION_STATE.get("total_bytes"),
+        "error": str(_PROVISION_STATE.get("error") or ""),
+    }
+
+
+def _set_provision_state(state: str, *, stage: str | None = None, error: str = "") -> None:
+    """Move the ledger; an unstated stage keeps the one already shown.
+
+    走完的两步里最后那步是"下到哪了"的读数，收尾把它抹成空字符串会让台账说不出
+    这次到底补齐了什么。
+    """
+    _PROVISION_STATE["state"] = state
+    if stage is not None:
+        _PROVISION_STATE["stage"] = stage
+    _PROVISION_STATE["error"] = error
+
+
+def _note_provision_progress(stage: str, done: int, total: int | None) -> None:
+    _PROVISION_STATE["stage"] = stage
+    _PROVISION_STATE["done_bytes"] = int(done)
+    _PROVISION_STATE["total_bytes"] = int(total) if total else None
+
+
+async def _run_provisioning() -> None:
+    global _provision_finished_at
+
+    loop = asyncio.get_running_loop()
+    try:
+        for step in (prepare_binary, prepare_model):
+            # 下载是同步 httpx + 落盘，放线程里跑，别把 uvicorn 的 loop 挂住十几分钟。
+            await loop.run_in_executor(None, lambda current=step: current(None, _note_provision_progress))
+        _set_provision_state("ready")
+        logger.info("stt on-demand provisioning finished")
+    except Exception as exc:  # noqa: BLE001 - 后台任务，异常只能记进台账
+        logger.exception("stt on-demand provisioning failed")
+        _set_provision_state("error", error=str(exc) or type(exc).__name__)
+    _provision_finished_at = time.monotonic()
+
+
+async def request_provisioning(*, source: str = "", force: bool = False) -> dict[str, Any]:
+    """Fetch whatever ``prepare`` would still fetch, in the background.
+
+    Two surfaces call this and share the one ledger: the web composer's first mic
+    click, and the first channel voice that lands on a machine without the artifacts.
+    Ready, already running, or refused by the ``stt.enabled`` switch each return the
+    ledger instead of opening a second task.
+    """
+    global _provision_task
+
+    snapshot = status()
+    if snapshot["ready"]:
+        _set_provision_state("ready")
+        return provisioning_snapshot()
+    if not snapshot["enabled"]:
+        # 开关是操作员的许可，不是"还没装好"：关掉它之后谁都不能替他下载。
+        _set_provision_state("disabled")
+        return provisioning_snapshot()
+    if _provision_task is not None and not _provision_task.done():
+        return provisioning_snapshot()
+    if (
+        not force
+        and _provision_state_name() == "error"
+        and time.monotonic() - _provision_finished_at < _PROVISION_RETRY_AFTER_SECONDS
+    ):
+        return provisioning_snapshot()
+    _PROVISION_STATE.update({
+        "state": "running",
+        "stage": "binary",
+        "done_bytes": 0,
+        "total_bytes": None,
+        "error": "",
+    })
+    _provision_task = asyncio.create_task(_run_provisioning())
+    logger.info("stt on-demand provisioning started ({})", source or "unspecified")
+    return provisioning_snapshot()
+
+
+def _provision_state_name() -> str:
+    return str(_PROVISION_STATE.get("state") or "idle")

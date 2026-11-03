@@ -796,7 +796,8 @@ const U = {
     projectSettingsNewPassword: document.getElementById("project-settings-new-password"),
     projectSettingsNewPasswordConfirm: document.getElementById("project-settings-new-password-confirm"),
     projectSettingsChangePassword: document.getElementById("project-settings-change-password-btn"),
-    projectSettingsAutoUnlock: document.getElementById("project-settings-auto-unlock"),
+    projectSettingsAutostartRow: document.getElementById("project-settings-autostart-row"),
+    projectSettingsAutostart: document.getElementById("project-settings-autostart"),
     projectSettingsLock: document.getElementById("project-settings-lock-btn"),
     projectSettingsExit: document.getElementById("project-settings-exit-btn"),
 };
@@ -8389,7 +8390,7 @@ function isProjectSettingsOpen() {
 
 function setProjectSettingsBusy(busy) {
     const disabled = Boolean(busy);
-    [U.projectSettingsChangePassword, U.projectSettingsAutoUnlock, U.projectSettingsLock, U.projectSettingsExit]
+    [U.projectSettingsChangePassword, U.projectSettingsAutostart, U.projectSettingsLock, U.projectSettingsExit]
         .forEach((element) => {
             if (element) element.disabled = disabled;
         });
@@ -8425,7 +8426,7 @@ function openProjectSettingsDialog() {
     U.projectSettingsBackdrop.hidden = false;
     U.projectSettingsBackdrop.classList.add("is-open");
     U.projectSettings?.setAttribute("aria-expanded", "true");
-    void syncProjectSettingsAutoUnlock();
+    void syncProjectSettingsAutostart();
     renderProjectSettingsUpdate(S.updateStatus);
     void refreshUpdateStatus();
     window.requestAnimationFrame(() => U.projectSettingsDialog?.focus?.());
@@ -8482,11 +8483,16 @@ function bindProjectSettingsQr() {
     });
 }
 
-async function syncProjectSettingsAutoUnlock() {
+async function syncProjectSettingsAutostart() {
     try {
-        const status = await ApiClient.getBootstrapStatus();
-        if (U.projectSettingsAutoUnlock) {
-            U.projectSettingsAutoUnlock.checked = Boolean(status?.auto_unlock);
+        const autostart = await ApiClient.getBootstrapAutostart();
+        // 没有可用登记面（容器、没有 systemd 用户实例的机器）时这颗整颗不画：
+        // 一颗永远勾不上的勾选框比没有更让人怀疑是界面坏了。
+        if (U.projectSettingsAutostartRow) {
+            U.projectSettingsAutostartRow.hidden = !Boolean(autostart && autostart.supported);
+        }
+        if (U.projectSettingsAutostart) {
+            U.projectSettingsAutostart.checked = Boolean(autostart && autostart.installed);
         }
     } catch (error) {
         // 状态读不到时保持勾选框原样，让操作者自己决定。
@@ -8521,23 +8527,23 @@ async function submitProjectPasswordChange() {
     }
 }
 
-async function applyProjectAutoUnlockChange(enabled) {
+async function applyProjectAutostartChange(enabled) {
     setProjectSettingsBusy(true);
     try {
-        const status = await ApiClient.setBootstrapAutoUnlock(enabled);
-        if (U.projectSettingsAutoUnlock) {
-            U.projectSettingsAutoUnlock.checked = Boolean(status?.auto_unlock);
+        const item = await ApiClient.setBootstrapAutostart(enabled);
+        if (U.projectSettingsAutostart) {
+            U.projectSettingsAutostart.checked = Boolean(item?.installed);
         }
         showToast({
-            title: enabled ? "已开启自动解锁" : "已关闭自动解锁",
+            title: enabled ? "已开启开机自启" : "已关闭开机自启",
             text: enabled
-                ? "解锁凭据已写入环境变量与 .g3ku 本地文件，下次启动自动解锁。"
-                : "已删除环境变量与 .g3ku 本地保存的解锁凭据。",
+                ? "这台机器登录后自动拉起 Negi；已经在跑的实例不受影响。"
+                : "登录时不再自动拉起；已经在跑的实例不受影响。",
             kind: "success",
         });
     } catch (error) {
-        if (U.projectSettingsAutoUnlock) U.projectSettingsAutoUnlock.checked = !enabled;
-        showToast({ title: "自动解锁设置失败", text: projectSettingsErrorText(error), kind: "error" });
+        if (U.projectSettingsAutostart) U.projectSettingsAutostart.checked = !enabled;
+        showToast({ title: "开机自启设置失败", text: projectSettingsErrorText(error), kind: "error" });
     } finally {
         setProjectSettingsBusy(false);
     }
@@ -11096,7 +11102,7 @@ function bindProjectSettings() {
         if (e.target === U.passwordChangeBackdrop) closePasswordChangeDialog();
     });
     U.projectSettingsChangePassword?.addEventListener("click", () => void submitProjectPasswordChange());
-    U.projectSettingsAutoUnlock?.addEventListener("change", (e) => void applyProjectAutoUnlockChange(Boolean(e.target?.checked)));
+    U.projectSettingsAutostart?.addEventListener("change", (e) => void applyProjectAutostartChange(Boolean(e.target?.checked)));
     U.projectSettingsLock?.addEventListener("click", () => void lockProjectFromSettings());
     U.projectSettingsExit?.addEventListener("click", () => {
         closeProjectSettingsDialog();

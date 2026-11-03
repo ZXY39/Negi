@@ -125,6 +125,20 @@ if [ "$DECIDED" -eq 0 ]; then ask; fi
 rm -f "$BIN_DIR/negi" && log "removed (command stub): $BIN_DIR/negi"
 rm -f "$APPS_DIR/negi.desktop" && log "removed (desktop entry): $APPS_DIR/negi.desktop"
 rm -f "$ICON_DIR/negi.png" && log "removed (icon): $ICON_DIR/negi.png"
+
+# The login registration points into this folder, so it goes with the folder. The unit
+# name and LaunchAgent label are the ones g3ku/deployment/autostart.py writes; clearing
+# them here does not depend on the venv still working.
+USER_UNIT="$HOME/.config/systemd/user/negi.service"
+if [ -f "$USER_UNIT" ] && command -v systemctl >/dev/null 2>&1; then
+  systemctl --user disable negi.service >/dev/null 2>&1
+  rm -f "$USER_UNIT" && log "removed (systemd user unit): $USER_UNIT"
+  systemctl --user daemon-reload >/dev/null 2>&1
+fi
+if [ "$(uname -s)" = "Darwin" ] && [ -f "$HOME/Library/LaunchAgents/com.negi.web.plist" ]; then
+  launchctl bootout "gui/$(id -u)/com.negi.web" >/dev/null 2>&1
+  rm -f "$HOME/Library/LaunchAgents/com.negi.web.plist" && log 'removed (LaunchAgent): com.negi.web.plist'
+fi
 if [ "$PATH_ENTRY_ADDED" = "true" ]; then
   for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
     if [ -f "$rc" ] && grep -qs '# Added by Negi install.sh' "$rc"; then

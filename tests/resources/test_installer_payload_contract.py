@@ -143,6 +143,29 @@ def test_icon_and_postinstall_launch_the_browser() -> None:
     assert "start --window" not in iss
 
 
+def test_fresh_install_registers_logon_autostart_and_upgrade_does_not() -> None:
+    """默认开启只发生在全新安装：升级不替操作员动系统登记，卸载必须收干净。
+
+    这条登记写的是操作员账户的登录钩子，装错一处就是每次登录失败一次，所以两个安装器
+    与两个卸载器都按文本钉住，实现侧的判据在 tests/resources/test_autostart_registration.py。
+    """
+    install = INSTALL_PS1.read_text(encoding="utf-8")
+    assert "if (-not $Upgrade) { Register-NegiAutostart -Root $Dir }" in install
+    assert "& $python -m g3ku autostart on 2>&1" in install
+
+    install_sh = INSTALL_SH.read_text(encoding="utf-8")
+    assert 'if [ "$UPGRADE" -eq 1 ]; then' in install_sh
+    assert '"$DIR/.venv/bin/python" -m g3ku autostart on 2>&1' in install_sh
+
+    uninstall = (REPO_ROOT / "uninstall.ps1").read_text(encoding="utf-8")
+    assert "CurrentVersion\\Run" in uninstall
+    assert "$AppDisplayName" in uninstall
+
+    uninstall_sh = (REPO_ROOT / "uninstall.sh").read_text(encoding="utf-8")
+    assert "systemctl --user disable negi.service" in uninstall_sh
+    assert "com.negi.web.plist" in uninstall_sh
+
+
 def test_version_pins_are_still_compared_before_building() -> None:
     build = BUILD.read_text(encoding="utf-8")
     assert re.search(r"cannot read the \$Ref pin", build)

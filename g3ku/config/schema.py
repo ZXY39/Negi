@@ -1164,10 +1164,13 @@ class SttConfig(Base):
 
     On by default: a fresh install is *allowed* to transcribe, and turning this
     off is the operator's way of saying "never touch my microphone lane". What
-    stays explicit is the ~157 MB of artifacts (15 MB binary + 142 MB ``base``
-    model) -- nothing here downloads or runs inference because a default said
-    so: the engine only reports ``ready=False`` until ``negi stt prepare`` (or
-    the composer's first-click download) has placed them.
+    stays explicit is the permission, not the fetch: the artifacts (15 MB binary +
+    142 MB ``base`` model, ~157 MB) are downloaded in the background by whichever
+    surface meets audio first -- the composer's first mic click, or a channel
+    voice landing on a machine where ``negi stt prepared`` nothing -- and the clip
+    that triggered it still goes through the file lane rather than waiting on the
+    download. ``enabled=False`` refuses every one of those paths, including the
+    download.
 
     Every default below is measured on this product's own floor (2 vCPU / 4
     logical CPUs, 7.7 GB RAM, no GPU) against a 22.9s Mandarin clip, not copied

@@ -794,6 +794,23 @@ EOF
   log "desktop entry: $APPS_DIR/negi.desktop"
 }
 
+register_autostart() {
+  # Only a fresh install registers autostart: an upgrade must not touch a system
+  # registration behind the operator's back. The Python side owns the registration
+  # shape (what the settings checkbox writes too), and a refusal there - a container
+  # has no logon to register against - must never fail the install.
+  if [ "$UPGRADE" -eq 1 ]; then
+    log 'autostart left untouched (--upgrade)'
+    return
+  fi
+  local output
+  if output=$("$DIR/.venv/bin/python" -m g3ku autostart on 2>&1); then
+    log 'autostart: registered for this user login'
+  else
+    log "autostart not registered: $output"
+  fi
+}
+
 log "target directory: $DIR"
 if [ -n "$KIT" ]; then
   resolve_kit
@@ -823,6 +840,7 @@ if [ "$NO_SHORTCUT" -eq 0 ]; then
 else
   log "skipping the desktop entry (--no-shortcut)"
 fi
+register_autostart
 log 'from any terminal now on: negi'
 
 if [ "$NO_START" -eq 1 ]; then
