@@ -1045,16 +1045,16 @@ function formatCompactTime(value) {
     const sameDay = parsed.getFullYear() === now.getFullYear()
         && parsed.getMonth() === now.getMonth()
         && parsed.getDate() === now.getDate();
-    return sameDay
-        ? parsed.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })
-        : parsed.toLocaleString([], {
-            month: "2-digit",
-            day: "2-digit",
-            hour: "2-digit",
-            minute: "2-digit",
-            second: "2-digit",
-            hour12: false,
-        });
+    // 形状自己拼，不交给宿主 locale：`toLocaleString([], …)` 在英文浏览器上会给出
+    // `09/23, 23:55:11`（日期与时分之间多一个逗号）、德文环境给出 `23.09., 23:55:11`，
+    // 而这一串是 19 处显示面共用的读数（静默行、轨道轮次、记忆行、节点详情）。
+    const clock = [parsed.getHours(), parsed.getMinutes(), parsed.getSeconds()]
+        .map((part) => String(part).padStart(2, "0"))
+        .join(":");
+    if (sameDay) return clock;
+    const month = String(parsed.getMonth() + 1).padStart(2, "0");
+    const day = String(parsed.getDate()).padStart(2, "0");
+    return `${month}/${day} ${clock}`;
 }
 
 function ceoSessionDisplayTime(session) {

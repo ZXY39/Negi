@@ -297,7 +297,7 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { S, U, finalizeCeoTurn, renderPersistedCeoAssistantTurn };`,
+        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { S, U, finalizeCeoTurn, renderPersistedCeoAssistantTurn, formatCompactTime };`,
         context
     );
     return context.__testExports;
@@ -651,4 +651,23 @@ test("live 连续静默收尾并进同一组，组头计数随新回合增长", 
     assert.equal(String(countOf(first).textContent), "· 共2条");
     assert.equal(countOf(first).hidden, false);
     assert.equal(countOf(second).hidden, true);
+});
+
+test("静默行的时间形状由代码钉住，不交给宿主 locale", () => {
+    const api = loadApp();
+
+    // 跨日给 MM/DD HH:MM:SS：`toLocaleString([], …)` 在英文宿主给 `09/23, 23:55:11`
+    // （日期与时分之间多一个逗号）、德文宿主给 `23.09., 23:55:11`，两种都会让这一行
+    // 与其余共用它的读数分叉，也会让 CI 那种英文 runner 永远读不齐。
+    assert.equal(api.formatCompactTime("2026-09-23T23:55:11"), "09/23 23:55:11");
+    assert.equal(api.formatCompactTime("2026-01-02T03:04:05"), "01/02 03:04:05");
+
+    // 同一天只剩时分秒，24 小时制且个位补零：午夜画成 00:07:05，不是 12:07 AM 也不是 24:07。
+    const today = new Date();
+    const stamp = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}T00:07:05`;
+    assert.equal(api.formatCompactTime(stamp), "00:07:05");
+
+    // 读不出的一律原样回显，不编一个时间出来。
+    assert.equal(api.formatCompactTime("not-a-time"), "not-a-time");
+    assert.equal(api.formatCompactTime(""), "");
 });
