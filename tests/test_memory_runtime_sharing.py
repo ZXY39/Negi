@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import re
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from g3ku.providers.responses_protocol_helpers import _convert_messages
 from g3ku.resources import ResourceManager
@@ -227,6 +229,16 @@ def test_sync_internal_tool_runtimes_reads_memory_runtime_manifest(tmp_path):
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
     shutil.copytree(Path(__file__).resolve().parents[1] / 'tools' / 'memory_runtime', workspace / 'tools' / 'memory_runtime')
 
+    # 这条用例的名字说的是"清单值能进到运行时"，所以被同步的两项用**哨兵值**：抄清单里的
+    # 真实数字会在别人调参时变红，也会在清单与默认值相等时白过（读不到清单也是同一个数）。
+    pack_root = Path(__file__).resolve().parents[1] / 'tools' / 'memory_runtime'
+    declared = yaml.safe_load((pack_root / 'resource.yaml').read_text(encoding='utf-8'))['settings']
+    manifest_file = workspace / 'tools' / 'memory_runtime' / 'resource.yaml'
+    patched, hit_document = re.subn(r'document_max_chars: \d+', 'document_max_chars: 4321', manifest_file.read_text(encoding='utf-8'))
+    patched, hit_wait = re.subn(r'max_wait_seconds: \d+', 'max_wait_seconds: 7', patched)
+    assert hit_document == 1 and hit_wait == 1, f'清单里不再有这两行，用例没再对着载体：{pack_root}'
+    manifest_file.write_text(patched, encoding='utf-8')
+
     manager = ResourceManager(
         workspace,
         app_config=SimpleNamespace(
@@ -268,10 +280,10 @@ def test_sync_internal_tool_runtimes_reads_memory_runtime_manifest(tmp_path):
         assert changed is True
         assert loop._memory_runtime_settings is not None
         assert loop._memory_runtime_settings.enabled is True
-        assert loop._memory_runtime_settings.document.summary_max_chars == 300
-        assert loop._memory_runtime_settings.document.document_max_chars == 20000
-        assert loop._memory_runtime_settings.queue.batch_max_chars == 50000
-        assert loop._memory_runtime_settings.queue.max_wait_seconds == 3
+        assert loop._memory_runtime_settings.document.summary_max_chars == declared['document']['summary_max_chars']
+        assert loop._memory_runtime_settings.document.document_max_chars == 4321, '清单值没进运行时'
+        assert loop._memory_runtime_settings.queue.batch_max_chars == declared['queue']['batch_max_chars']
+        assert loop._memory_runtime_settings.queue.max_wait_seconds == 7, '清单值没进运行时'
         assert loop.memory_manager is not None
     finally:
         manager.close()

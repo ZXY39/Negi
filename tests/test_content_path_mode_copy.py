@@ -55,7 +55,18 @@ def test_combined_target_results_are_documented() -> None:
 
 
 def test_stat_description_declares_it_does_not_search_contents() -> None:
-    assert "does not search file contents" in FilesystemStatTool().model_description
+    """`filesystem_stat` 的模型可见面必须把"不搜正文、不改东西"这条边界说出口。
+
+    句子本体是 `115328b17` 为 160 字预算压短后的现行版本（原来写 "does not search file
+    contents"，被压成 "never searches contents"，事实没变）。这条用例按现行载体逐字钉，
+    并要求三处载体同文：任何一处单独被改，模型就会从一份载体学到另一份载体的反面。
+    """
+    sentence = "never searches contents or modifies."
+    text = FilesystemStatTool().model_description
+    assert sentence in text, text
+    manifest = _manifest("filesystem_stat")
+    assert manifest["description"].strip() == text.strip(), "清单与类内文本分叉：清单赢上线，类的句子没人读"
+    assert manifest["governance"]["description"].strip() == text.strip(), "管理面与上线面分叉"
 
 
 def test_directory_error_offers_a_lane_on_every_path_mode_entry() -> None:
