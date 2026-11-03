@@ -922,6 +922,12 @@ class TaskActorService:
                 # C：孤儿收尸/重派发——每次 worker 拾取都决断"DB 非终态但无执行器
                 # 也无重放路径"的节点，杜绝幽灵 in_progress（2026-09-15 事故 L3）。
                 await self._resume_task_paused_nodes(task_id)
+                # 上面这一步会清掉节点的 `pause_reason='task'` 位；开头那份 root_node
+                # 快照还带着旧旗标，不重读会把刚恢复的根误判成"暂停根"而跳过回合
+                # （waiting_children 的未完成 spawn 轮就永远等不到重放）。
+                refreshed_root = self._store.get_node(root_node.node_id)
+                if refreshed_root is not None:
+                    root_node = refreshed_root
                 # resume 意图必须先于收尸器消费：它留下的 entry 是"这个非终态节点
                 # 有人点名要复活"的唯一凭据；先收尸会把刚清位的节点重新 park。
                 await self._consume_resume_intents(task_id, dispatcher)

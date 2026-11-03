@@ -163,6 +163,44 @@ def _execution_child(service: MainRuntimeService, *, task, parent, name: str):
 
 
 @pytest.mark.asyncio
+async def test_task_paused_root_runs_in_the_same_pickup_that_clears_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """任务恢复清掉根的 `pause_reason='task'` 后，同一趟拾取必须执行根回合。"""
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task("task pause pickup", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None and root is not None
+        # 任务暂停时根被标成 task；随后用户恢复任务（任务旗标已清，节点位还在，
+        # 等本次拾取的 `_resume_task_paused_nodes` 清）。
+        service.log_service.set_node_pause_state(
+            record.task_id,
+            root.node_id,
+            pause_requested=True,
+            is_paused=True,
+            pause_reason="task",
+        )
+
+        calls: list[str] = []
+
+        async def fake_run_node(task_id: str, node_id: str):
+            calls.append(node_id)
+            return _success_result(node_id)
+
+        monkeypatch.setattr(service.node_runner, "run_node", fake_run_node)
+
+        await service.task_actor_service.run_task(record.task_id)
+
+        assert calls == [root.node_id]
+        latest_root = service.get_node(root.node_id)
+        assert latest_root is not None and latest_root.is_paused is False
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_interrupted_task_recovery_keeps_root_pause(tmp_path: Path) -> None:
     """启动恢复只重置任务行；根节点的独立暂停保留，交给下一次 resume。"""
     service = _build_service(tmp_path)
