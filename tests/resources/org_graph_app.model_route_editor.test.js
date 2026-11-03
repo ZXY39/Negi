@@ -759,7 +759,7 @@ test("模型页由 org_graph_llm.js 渲染：renderAll 画得出组列，链里�
 
 test("组卡的叉号先于整卡点击区判定：点它是移出链，不是弹配置", () => {
     const elements = modelPageElements();
-    const app = loadApp(elements, { renderTaskSessionScope: () => {} });
+    const app = loadApp(elements, { renderTaskSessionScope: () => {}, bindStickerPage: () => {} });
     app.bind();
     app.applyModelCatalog(catalogPayload(), { preserveRoleDrafts: false });
     app.startModelRoleEditing();
@@ -777,7 +777,7 @@ test("组卡的叉号先于整卡点击区判定：点它是移出链，不是�
 
 test("组卡本体仍然整张可点：查看态也打开配置", () => {
     const elements = modelPageElements();
-    const app = loadApp(elements, { renderTaskSessionScope: () => {} });
+    const app = loadApp(elements, { renderTaskSessionScope: () => {}, bindStickerPage: () => {} });
     app.bind();
     app.applyModelCatalog(catalogPayload(), { preserveRoleDrafts: false });
 
