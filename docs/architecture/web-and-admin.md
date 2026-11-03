@@ -47,7 +47,7 @@ Each token card carries two switches (启用 / 当操作员), the 可会话范�
 
 QQ 账号行的 Master 注册是**一次性绑定码**：点「注册Master」先看权限说明，再输入项目解锁口令（`POST /api/qq-bot/master-binding`；`403 unlock_password_required` / `unlock_password_invalid`；已有 owner 回 409 `master_already_registered`）。成功响应只回一次明文码与 `expires_in_seconds`（300 秒）；服务端按 AppID 在内存里只存 sha256，单号单码，生成新码替换旧码。前端弹窗显示码、复制按钮、`mm:ss` 倒计时与「等待识别中」，每 2 秒 `GET /api/qq-bot/master-binding/status?app_id=…` 轮询 `registered` / `pending` / `expires_in_seconds` / masked owners；成功后刷新账号行。操作员把码用 QQ **私聊**发给该号，`/api/v1` 入站只在活动码存在时匹配文本：DM 命中即写 `ownerOpenids`、消费码、把该 bridge 下同一对方 openid 的 DM 会话信任抬到 owner，并返回 `status:"queued"` + receipt（不创建回合、不入转录）；群里发送不绑定并立即作废该码，回执提示改用私聊。注册成功或过期后没有活动码，入站完全不扫描文本。已有 owner 时行上显示「注销Master」：二次确认后 `POST /api/qq-bot/unregister-master` 清空该号全部 owner，并把该 bridge 下 trust=owner 的 DM 会话降回 `third_party_dm`（群聊不变）；旧「名单 N / openid 编辑」入口退役，整表 `PUT /api/qq-bot/settings` 的 `owner_openids` 仍作为配置面字段保留。审计记 `qq_master_binding_issued` / `qq_master_registered` / `qq_master_unregistered`（只记 masked id）。
 
-渠道会话目录行带 `trust`（注册表原值）：会话卡片把 `dm`/`guild_dm` 且非 owner 的行标「第三方私聊」，owner 标「Master」，群保持「群」。这个徽标与气泡来源标签、记忆分域共用同一个信任判据，不在前端另判“是否注册”。
+渠道会话目录行带 `trust`（注册表原值）：会话卡片把 `dm`/`guild_dm` 且非 owner 的行标「第三方私聊」，owner 标「Master」，群保持「群」。这个徽标与气泡来源标签、记忆分域共用同一个信任判据，不在前端另判“是否注册”。渠道分组标题取备注而不是桥接 id：QQ 官方桥按 `qq-official-<AppID>` 找到该号账号行的 `label`（每个号各自的备注），第三方桥取 `externalApi.tokens.<bridge_id>.label`；两者都没有才退化成 `QQ` / `外部桥接`。
 
 Full contract (endpoints, turn terminal invariant, event mapping, outbound routing): 详见 `external-agent-api.md`.
 
