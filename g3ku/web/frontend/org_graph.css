@@ -14162,8 +14162,10 @@ textarea {
 
 .execution-tree-node-pause-action {
     position: absolute;
-    top: 7px;
-    right: 8px;
+    /* 圆心压在顶边框线上、距左缘 18px；下沿收到卡片上内边距为止，
+       dense/wide 档内边距更小时整颗钮自动上移，不顶到标题首行。 */
+    top: calc(var(--tree-node-padding-y) - 25px);
+    left: 5px;
     z-index: 2;
     display: inline-flex;
     align-items: center;
