@@ -151,12 +151,19 @@ def test_symlinked_category_outside_root_is_not_listed_and_not_resolvable(tmp_pa
     try:
         (pack / "linked").symlink_to(outside, target_is_directory=True)
     except (OSError, NotImplementedError):
-        pytest.skip("symlink 不可用")
+        pytest.skip("这台机器/这个权限档建不出符号链接，这条防线在本环境不可构造")
 
     assert sticker_admin.scan_admin_packs(root=tmp_path / "stickers")[0].categories == ()
     with pytest.raises(sticker_admin.StickerAdminError) as excinfo:
         sticker_admin.image_path("demo", "linked", "x.png", root=tmp_path / "stickers")
-    assert excinfo.value.code == "category_not_found"
+    # 解析在 `_child` 就把越出表情包根的分类挡下，给出的理由是"越界"而不是"找不到"：
+    # 这条用例要的是"不可解析"，而生产的落点是那条防线本身。
+    assert excinfo.value.code == "sticker_path_escaped"
+    # 对照臂：`sticker_path_escaped` 不是万能码——同一条路径上没越界的分类仍按
+    # `category_not_found` 拒，否则上面那条断言就只是"什么名字都被同一个码挡"。
+    with pytest.raises(sticker_admin.StickerAdminError) as missing:
+        sticker_admin.image_path("demo", "not-there", "x.png", root=tmp_path / "stickers")
+    assert missing.value.code == "category_not_found"
 
 
 def test_symlinked_image_outside_root_is_refused(tmp_path: Path):
