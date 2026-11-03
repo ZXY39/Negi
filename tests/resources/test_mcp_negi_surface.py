@@ -586,7 +586,13 @@ def test_wake_watermark_is_one_shape_and_never_drops_the_boundary_second():
     task = {"task_id": "task:late", "status": "success", "updated_at": "2026-10-11T12:37:12+08:00"}
     reply = {"id": "obx-1", "ts": "2026-10-11T12:37:12.500000", "event": "reply.final", "text": "答复"}
     first = summarize_external_session_wake(cursor="", task_rows=[task], pending_records=[reply])
-    assert first["next_since"] == _wake_wall_second(task["updated_at"]) == "2026-10-11T12:37:12"
+    # 游标必须是"同一个瞬间的本机墙钟秒"，而不是某个固定偏移下的字面串：`_wake_wall_second`
+    # 对 aware 输入做的是 `astimezone()`，硬编码 `12:37:12` 等于把用例钉在 +08 这台机器上
+    # （UTC runner 上同一行输入归一到 04:37:12，红的是用例不是车道）。
+    assert first["next_since"] == _wake_wall_second(task["updated_at"])
+    assert datetime.fromisoformat(first["next_since"]).astimezone() == datetime.fromisoformat(
+        task["updated_at"]
+    ).replace(microsecond=0)
     assert "+" not in first["next_since"] and "." not in first["next_since"].split("T")[1]
 
     again = summarize_external_session_wake(
