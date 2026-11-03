@@ -189,3 +189,22 @@ def test_spill_probe_isolates_the_temp_dir_from_the_database(
     assert 'point=ok' in detail
     env_line = store._environment_probe()
     assert repr(str(missing)) in env_line
+
+
+def test_environment_probe_survives_a_cross_drive_store_path(store, monkeypatch: pytest.MonkeyPatch) -> None:
+    """数据根与 cwd 不在同一个盘时，这条诊断照常给出读数，而不是把调用方打死。
+
+    实盘形状：Windows runner 上仓库在 `D:`、临时目录在 `C:`，`os.path.relpath` 直接
+    `ValueError: path is on mount 'C:', start on mount 'D:'`，而这段文本正是 CANTOPEN
+    现场唯一 readable 的那一格里长的——诊断自己抛异常，等于事故发生时什么读数都没有。
+    """
+
+    def _boom(*_args, **_kwargs):
+        raise ValueError("path is on mount 'C:', start on mount 'D:'")
+
+    monkeypatch.setattr(sqlite_store_module.os.path, 'relpath', _boom)
+
+    text = store._environment_probe()
+
+    assert 'rel_open=n/a(cross-drive)' in text
+    assert 'cwd_exists=' in text and 'tmpdir=' in text

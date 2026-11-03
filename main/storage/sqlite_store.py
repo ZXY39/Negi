@@ -4786,16 +4786,24 @@ class SQLiteTaskStore:
         # SQLite 在 Windows 上按这两个变量找临时目录，而 tempfile 不可用时会静默回落到
         # 工作目录：只印 gettempdir() 会把"被拦的那条路"显示成一个可写的目录。
         parts.append(f'env_tmp={os.environ.get("TMP", "")!r} env_temp={os.environ.get("TEMP", "")!r}')
-        relative = os.path.relpath(str(self.path))
         try:
+            relative = os.path.relpath(str(self.path))
+        except ValueError:
+            # Windows 上 cwd 与数据根不同盘时 `relpath` 直接抛 ValueError（CI 上就是这样：
+            # 仓库在 D:、临时目录在 C:）。这条诊断是给 CANTOPEN 读因用的，不能因为算不出
+            # 相对路径就把调用方打死。
+            parts.append('rel_open=n/a(cross-drive)')
+        else:
             if relative.startswith('..'):
                 parts.append('rel_open=n/a(outside cwd)')
             else:
-                handle = os.open(relative, os.O_RDONLY)
-                os.close(handle)
-                parts.append('rel_open=ok')
-        except OSError as exc:
-            parts.append(f'rel_open={type(exc).__name__}:{getattr(exc, "errno", "")}')
+                try:
+                    handle = os.open(relative, os.O_RDONLY)
+                except OSError as exc:
+                    parts.append(f'rel_open={type(exc).__name__}:{getattr(exc, "errno", "")}')
+                else:
+                    os.close(handle)
+                    parts.append('rel_open=ok')
         return ' '.join(parts)
 
     # 排序输入 ~4.9 MB：实测 1.4 MB 还在内存里排，3.4 MB 起才落盘，留一倍余量。
