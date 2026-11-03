@@ -1,11 +1,14 @@
 // 会话右上角的后台工具气泡：只依赖 GET/POST /tool-jobs 与 `ceo.tool_jobs` 帧。
 // 本文件在 ws-router.js 之前加载，顶层只允许声明函数/常量，不得读写 S/U/document。
 
+const CEO_BG_JOBS_RECONCILE_MS = 10000;
+
 const CeoBackgroundJobsState = {
     sessionId: "",
     items: [],
     open: false,
     timerId: 0,
+    reconcileTimerId: 0,
     requestToken: 0,
     stopping: new Set(),
     stopped: new Set(),
@@ -172,12 +175,18 @@ function ceoBgJobsRow(item) {
     row.setAttribute("role", "listitem");
     const jobId = String(item.job_id || "").trim();
     row.dataset.bgJobId = jobId;
+    const kind = String(item.kind || "").trim().toLowerCase();
+    if (kind) row.dataset.bgJobKind = kind;
 
     const main = document.createElement("span");
     main.className = "ceo-bg-jobs-main";
     const tool = document.createElement("span");
     tool.className = "ceo-bg-jobs-tool";
-    tool.textContent = String(item.tool_name || "tool").trim() || "tool";
+    // exec background=true 起的 OS 进程与超时交棒的工具作业同列一行，来源不同：
+    // 前者没有工具终态、只能按 pid 整树终止，行首标成「exec 进程」避免误读。
+    tool.textContent = kind === "process"
+        ? "exec 进程"
+        : (String(item.tool_name || "tool").trim() || "tool");
     main.appendChild(tool);
     const hint = String(item.hint || "").trim();
     if (hint) {
@@ -216,12 +225,16 @@ function ceoBgJobsRender() {
     CeoBackgroundJobsState.items = items;
     if (!items.length) {
         ceoBgJobsSetOpen(false);
+        ceoBgJobsStopReconcile();
         const emptyCountEl = ceoBgJobsEl("ceo-bg-jobs-count");
         if (emptyCountEl) emptyCountEl.textContent = "0";
         root.hidden = true;
         return;
     }
     root.hidden = false;
+    // exec background 进程没有“终态帧”：进程自己退出时只能靠读接口 prune。
+    // 气泡非空时低频对账，清空即停，不常驻轮询。
+    ceoBgJobsStartReconcile();
     const countEl = ceoBgJobsEl("ceo-bg-jobs-count");
     if (countEl) countEl.textContent = String(items.length);
     const list = ceoBgJobsEl("ceo-bg-jobs-list");
@@ -277,6 +290,26 @@ function ceoBgJobsStopTimer() {
     CeoBackgroundJobsState.timerId = 0;
 }
 
+function ceoBgJobsStartReconcile() {
+    if (CeoBackgroundJobsState.reconcileTimerId) return;
+    CeoBackgroundJobsState.reconcileTimerId = window.setInterval(() => {
+        if (!ceoBgJobsActiveItems().length) {
+            ceoBgJobsStopReconcile();
+            return;
+        }
+        void refreshCeoBackgroundJobs(
+            CeoBackgroundJobsState.sessionId
+            || (typeof activeSessionId === "function" ? activeSessionId() : "")
+        );
+    }, CEO_BG_JOBS_RECONCILE_MS);
+}
+
+function ceoBgJobsStopReconcile() {
+    if (!CeoBackgroundJobsState.reconcileTimerId) return;
+    window.clearInterval(CeoBackgroundJobsState.reconcileTimerId);
+    CeoBackgroundJobsState.reconcileTimerId = 0;
+}
+
 function ceoBgJobsSetItems(items, sessionId = "") {
     const target = String(sessionId || CeoBackgroundJobsState.sessionId || "").trim();
     if (
@@ -294,6 +327,7 @@ function ceoBgJobsSetItems(items, sessionId = "") {
 
 function ceoBgJobsClear() {
     CeoBackgroundJobsState.items = [];
+    ceoBgJobsStopReconcile();
     ceoBgJobsRender();
 }
 
@@ -393,5 +427,6 @@ function bindCeoBackgroundJobs() {
     if (!CeoBackgroundJobsState.lifecycleBound) {
         CeoBackgroundJobsState.lifecycleBound = true;
         window.addEventListener("pagehide", ceoBgJobsStopTimer);
+        window.addEventListener("pagehide", ceoBgJobsStopReconcile);
     }
 }

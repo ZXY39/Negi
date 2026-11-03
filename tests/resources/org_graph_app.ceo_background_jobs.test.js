@@ -155,6 +155,7 @@ function loadModule(overrides = {}) {
         setActiveSession: (value) => {
             active = String(value || "");
         },
+        intervalCount: () => intervals.size,
         flushIntervals: () => intervals.forEach((handler) => handler()),
     };
     context.window.window = context.window;
@@ -263,6 +264,36 @@ test("切换会话会清掉旧会话的条目", async () => {
     await context.refreshCeoBackgroundJobs("web:b");
     assert.equal(document.getElementById("ceo-bg-jobs").hidden, true);
     assert.equal(document.getElementById("ceo-bg-jobs-count").textContent, "0");
+});
+
+test("exec background 进程与工具作业同列一行，行首标明来源", () => {
+    const { context, document } = loadModule();
+    context.ceoBgJobsSetItems([{
+        kind: "process",
+        job_id: "proc:4242",
+        pid: 4242,
+        tool_name: "exec",
+        status: "running",
+        started_at: new Date(Date.now() - 3_000).toISOString(),
+        elapsed_seconds: 3,
+        hint: "node server.js",
+        log_path: "owned-processes/x.log",
+    }], "web:a");
+    const list = document.getElementById("ceo-bg-jobs-list");
+    assert.equal(document.getElementById("ceo-bg-jobs-count").textContent, "1");
+    assert.equal(list.children[0].dataset.bgJobId, "proc:4242");
+    assert.equal(list.children[0].dataset.bgJobKind, "process");
+    assert.equal(list.children[0].children[0].children[0].textContent, "exec 进程");
+    assert.equal(list.children[0].children[0].children[1].textContent, "node server.js");
+});
+
+test("气泡非空时启动对账轮询，清空后停止", () => {
+    const { context } = loadModule();
+    assert.equal(context.intervalCount(), 0);
+    context.ceoBgJobsSetItems(itemsFixture(), "web:a");
+    assert.equal(context.intervalCount(), 1);
+    context.ceoBgJobsClear();
+    assert.equal(context.intervalCount(), 0);
 });
 
 test("终态帧把账本里的后台工具行改画成完成，原账本对象不变", () => {

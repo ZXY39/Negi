@@ -3403,7 +3403,11 @@ class RuntimeAgentSession:
                 session_key=self._state.session_key,
                 store_getter=self._tool_job_store,
                 heartbeat_getter=self._tool_job_heartbeat,
-                changed_callback=self._notify_tool_jobs_changed,
+                # 帧里的 items 必须和 GET 同源：作业变化时也要带上磁盘里的 exec 后台进程，
+                # 否则一次作业帧就会把前端气泡中的进程行整批冲掉。
+                changed_callback=lambda _items: self._notify_tool_jobs_changed(
+                    self.list_tool_jobs()
+                ),
                 finished_callback=self._notify_tool_job_finished,
             )
             self._tool_job_runner = runner
@@ -3417,9 +3421,22 @@ class RuntimeAgentSession:
 
     def list_tool_jobs(self) -> list[dict[str, Any]]:
         runner = getattr(self, "_tool_job_runner", None)
-        if runner is None:
-            return []
-        return runner.list_jobs(self._state.session_key)
+        items = runner.list_jobs(self._state.session_key) if runner is not None else []
+        try:
+            from g3ku.runtime.tool_jobs import owned_process_items
+
+            items = [*items, *owned_process_items(self._state.session_key)]
+        except Exception:
+            logger.debug(
+                "owned process listing failed for {}",
+                self._state.session_key,
+                exc_info=True,
+            )
+        return items
+
+    def notify_background_items_changed(self) -> None:
+        """exec 后台进程启动/停止后，让气泡与其它标签页立即重取列表。"""
+        self._notify_tool_jobs_changed(self.list_tool_jobs())
 
     async def stop_tool_job(self, job_id: str) -> dict[str, Any]:
         return await self._tool_job_runner_instance().stop_job(job_id)

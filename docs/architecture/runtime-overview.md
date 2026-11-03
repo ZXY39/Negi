@@ -227,7 +227,7 @@ heartbeat / cron 的维护语义分两条通道：UI 展示通道上前端通过
 
 - 窗口内完成：走原有结果路径，状态、渲染、账本逐字节不变；job 不落库、不产生事件。
 - 超过窗口：前门给模型返回一条合成结果 `[BACKGROUND] job_id=… tool=… elapsed=… timeout=…`，它仍是这个 `tool_call_id` 的唯一 tool result；回合继续，job 留在 web 进程内跑完。合成结果明确要求模型不要用相同参数重试，完成结果之后经心跳事件到达。
-- 只有真正后台化的调用才写 `tool_jobs` 行。`GET /api/ceo/sessions/{id}/tool-jobs` 的 `items` 只列 `running/stopping`，同一响应另带保留窗口内的 `finished[]` 供历史工具行回放终态；`POST …/tool-jobs/{job_id}/stop` 立即投递 `stopped_by_user` 事件，前端气泡只负责把该行移除（API/UI 契约见 `web-and-admin.md`「Background Tool Jobs Bubble And Tool-Jobs API」，事件契约见 `heartbeat-system.md`「Tool Job Heartbeat Events」）。
+- 只有真正后台化的调用才写 `tool_jobs` 行。气泡与 `GET /api/ceo/sessions/{id}/tool-jobs` 的 `items` 是两条登记道的并集：工具作业（`kind=tool_job`，只列 `running/stopping`）与该会话 `exec background=true` 起的活进程（`kind=process`，来自盘上的 `owned_processes`，不写 `tool_jobs` 行、不产生 `finished[]`）。同一响应另带保留窗口内的 `finished[]` 供历史工具行回放终态；`POST …/tool-jobs/{job_id}/stop` 对 `tooljob:` 行立即投递 `stopped_by_user` 事件，对 `proc:<pid>` 行走归属表整树终止并投 `kind=process` 的同类事件（API/UI 契约见 `web-and-admin.md`「Background Tool Jobs Bubble And Tool-Jobs API」，事件契约见 `heartbeat-system.md`「Tool Job Heartbeat Events」）。
 - 作业 deadline 仍是工具自己的 `timeout_seconds`（显式值 > 全局默认 600s）：60s 窗口只决定“什么时候停止等”，不延长、不重置 timeout。工具自身 timeout ≤ 窗口时仍在窗口内返回 timeout/error，不会进入后台；`exempt_universal_timeout` 工具没有 deadline，但同样可以交棒和停止。
 - 状态机：`running → success | error | timeout | interrupted | stopped_by_user`。`stopping` 只活在用户点停止到 task 收尾之间；停止事件在点击时立即入队，不等 task 收尾，收尾不了则放弃跟踪并留一条 warning。
 - 取消边界：会话暂停/停止**不**取消后台 job——交棒时 per-call 取消令牌从会话令牌解绑，`pause()` / `cancel()` 只结束当前回合。只有用户点停止、会话删除、进程退出会结束 job；进程退出后启动恢复把残留的 `running` 行收成 `interrupted` 并补事件。后台是“脱离回合”，不是“脱离进程”：job task 在 web 进程内继续跑，进程被杀时它随之消失。

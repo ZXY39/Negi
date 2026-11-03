@@ -66,6 +66,13 @@ class ProcessKillTool(Tool):
             )
 
         result = owned_processes.kill_owned(scope, normalized_pid)
+        session = runtime_payload.get("_runtime_agent_session")
+        notify = getattr(session, "notify_background_items_changed", None)
+        if callable(notify):
+            try:
+                notify()
+            except Exception:
+                pass
         payload: dict[str, Any] = {
             "ok": bool(result.get("ok")),
             "pid": normalized_pid,

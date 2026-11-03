@@ -92,6 +92,28 @@ def test_tool_job_prompt_renders_each_terminal_status(store):
     assert "用户手动停止" in bundle
 
 
+def test_stopped_owned_process_renders_as_process_not_tool_job(store):
+    service = _service(store)
+    payload = _payload(
+        "stopped_by_user",
+        kind="process",
+        job_id="proc:4242",
+        pid=4242,
+        cmd="node server.js",
+        result_preview="listening on :3000",
+    )
+    assert service.enqueue_tool_job(payload)
+    events = service._events.peek("web:demo")
+    prompt = build_heartbeat_prompt_lane(
+        provider_model="test",
+        stable_rules_text="",
+        events=[dict(event.payload or {}) for event in events],
+    ).event_bundle_text
+    assert "Background process pid 4242 (node server.js)" in prompt
+    assert "用户手动停止" in prompt
+    assert "Background tool job" not in prompt
+
+
 def test_replay_and_ack_mark_the_outbox_delivered(store):
     service = _service(store)
     payload = _payload("success")

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from fastapi import APIRouter, BackgroundTasks, Body, HTTPException
 from loguru import logger
 
+from g3ku.runtime import owned_processes
 from g3ku.runtime import skill_roster_notice as _skill_roster_notice
 from g3ku.runtime.ceo_catalog_offload import (
     build_ceo_session_catalog_async,
@@ -35,6 +36,9 @@ from g3ku.runtime.tool_jobs import (
     TOOL_JOB_TERMINAL_STATUSES,
     ToolJobFinishedError,
     ToolJobNotFoundError,
+    build_owned_process_stopped_payload,
+    owned_process_items,
+    parse_owned_process_job_id,
 )
 from g3ku.runtime.web_ceo_sessions import (
     SESSION_MODEL_SELECTION_KEY,
@@ -71,7 +75,7 @@ from g3ku.shells.web import (
     get_web_heartbeat_service,
     is_no_ceo_model_configured_error,
 )
-from main.protocol import build_envelope
+from main.protocol import build_envelope, now_iso
 
 router = APIRouter()
 
@@ -624,7 +628,11 @@ async def get_ceo_session_tool_jobs(session_id: str):
     )
     runtime_session = _runtime_session(runtime_manager, session_key)
     lister = getattr(runtime_session, "list_tool_jobs", None) if runtime_session is not None else None
-    items = list(lister() or []) if callable(lister) else []
+    if callable(lister):
+        items = list(lister() or [])
+    else:
+        # 会话不驻留时 tool job 无从取（纯内存），但 exec 后台进程在盘上，必须照常列出。
+        items = owned_process_items(session_key)
     finished: list[dict[str, object]] = []
     store_getter = getattr(runtime_session, "_tool_job_store", None) if runtime_session is not None else None
     store = store_getter() if callable(store_getter) else None
@@ -661,24 +669,77 @@ async def get_ceo_session_tool_jobs(session_id: str):
 
 @router.post("/ceo/sessions/{session_id}/tool-jobs/{job_id}/stop")
 async def stop_ceo_session_tool_job(session_id: str, job_id: str):
-    _agent, session_manager, runtime_manager, state_store = _sessions()
+    agent, session_manager, runtime_manager, state_store = _sessions()
     session_key, _is_channel = _resolve_bulk_session_key(
         session_manager,
         runtime_manager,
         state_store,
         session_id,
     )
+    normalized_job_id = str(job_id or "").strip()
+    pid = parse_owned_process_job_id(normalized_job_id)
+    if pid is not None:
+        return await _stop_owned_process(session_key, pid, normalized_job_id, agent=agent, runtime_manager=runtime_manager)
     runtime_session = _runtime_session(runtime_manager, session_key)
     stopper = getattr(runtime_session, "stop_tool_job", None) if runtime_session is not None else None
     if not callable(stopper):
         raise HTTPException(status_code=404, detail="tool_job_not_found")
     try:
-        result = await stopper(str(job_id or "").strip())
+        result = await stopper(normalized_job_id)
     except ToolJobFinishedError as exc:
         raise HTTPException(status_code=409, detail="tool_job_finished") from exc
     except ToolJobNotFoundError as exc:
         raise HTTPException(status_code=404, detail="tool_job_not_found") from exc
     return {"ok": True, **dict(result or {})}
+
+
+async def _stop_owned_process(
+    session_key: str,
+    pid: int,
+    job_id: str,
+    *,
+    agent,
+    runtime_manager,
+) -> dict[str, object]:
+    """停掉 exec background=true 的进程；不依赖会话是否驻留。
+
+    进程在盘上登记（`owned_processes`），所以会话被回收后仍能停。停成功后投一条
+    `tool_job` 心跳事件（`kind=process`），让模型知道服务已经不在了。
+    """
+    result = owned_processes.kill_owned(
+        owned_processes.scope_key(session_key=session_key),
+        pid,
+    )
+    reason = str(result.get("reason") or "")
+    if reason == "not_owned":
+        raise HTTPException(status_code=404, detail="tool_job_not_found")
+    if reason in {"already_exited", "identity_mismatch"}:
+        raise HTTPException(status_code=409, detail="tool_job_finished")
+    if not result.get("ok"):
+        raise HTTPException(status_code=500, detail="process_stop_failed")
+    entry = result.get("entry")
+    entry = dict(entry) if isinstance(entry, dict) else {}
+    heartbeat = get_web_heartbeat_service(agent) if agent is not None else None
+    if heartbeat is not None:
+        try:
+            heartbeat.enqueue_tool_job(
+                build_owned_process_stopped_payload(
+                    entry,
+                    session_id=session_key,
+                    finished_at=now_iso(),
+                    result_preview=str(result.get("log_tail") or ""),
+                )
+            )
+        except Exception:
+            logger.debug("owned process stop event enqueue failed", exc_info=True)
+    runtime_session = _runtime_session(runtime_manager, session_key)
+    notify = getattr(runtime_session, "notify_background_items_changed", None)
+    if callable(notify):
+        try:
+            notify()
+        except Exception:
+            logger.debug("owned process change notification failed", exc_info=True)
+    return {"ok": True, "job_id": job_id, "status": "stopped"}
 
 
 @router.post("/ceo/sessions/{session_id}/resume-interrupt")
