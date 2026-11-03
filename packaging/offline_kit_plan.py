@@ -50,7 +50,12 @@ PLATFORMS: dict[str, dict] = {
     # build cannot install on a glibc device, and a kit that ships one fails the offline
     # install with "no wheels with a matching platform tag" while looking fine in the plan.
     "linux-x64": {"sys_platform": "linux", "os_name": "posix", "platform_machine": "x86_64",
+                  # `manylinux1_x86_64` / `manylinux2014_x86_64` are the alias form of a glibc
+                  # version, and `_portability` already reads them through _MANYLINUX_ALIASES;
+                  # without this pattern they were parsed but never admitted, so playwright's
+                  # only linux wheel (44 MB) fell out of the plan as "missing".
                   "platform_patterns": (r"^manylinux\d*_\d+_\d+_x86_64$",
+                                        r"^manylinux\d+_x86_64$",
                                         r"^manylinux\d+x86_64$",
                                         r"^linux_x86_64$")},
     "macos-arm64": {"sys_platform": "darwin", "os_name": "posix", "platform_machine": "arm64",

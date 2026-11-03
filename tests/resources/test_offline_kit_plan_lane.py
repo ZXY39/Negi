@@ -42,6 +42,13 @@ def test_wheel_tag_matching_covers_the_shapes_the_lock_actually_uses() -> None:
     assert kit.wheel_matches("cryptography-44.0.3-cp37-abi3-win_amd64.whl", "win-x64", (3, 12))
     assert kit.wheel_matches("cryptography-44.0.3-cp37-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
                              "linux-x64", (3, 12))
+    # legacy alias form: `manylinux1_x86_64` is a glibc 2.5 build. `_portability` always read
+    # the alias, but only the three-number form was admitted - and this alias is the only
+    # linux wheel playwright publishes, so its 44 MB driver fell out of every linux kit.
+    assert kit.wheel_matches("playwright-1.64.1-py3-none-manylinux1_x86_64.whl", "linux-x64", (3, 12))
+    assert kit.wheel_matches("playwright-1.64.1-py3-none-manylinux2014_x86_64.whl", "linux-x64", (3, 12))
+    assert not kit.wheel_matches("playwright-1.64.1-py3-none-manylinux1_i686.whl", "linux-x64", (3, 12))
+    assert not kit.wheel_matches("playwright-1.64.1-py3-none-win_amd64.whl", "linux-x64", (3, 12))
     # exact interpreter match
     assert kit.wheel_matches("pywin32-311-cp312-cp312-win_amd64.whl", "win-x64", (3, 12))
     # same interpreter, wrong machine or wrong bitness
@@ -93,11 +100,17 @@ def test_every_platform_plan_is_satisfiable_and_carries_one_file_per_package() -
 
 
 def test_plans_stay_the_size_that_makes_a_kit_worth_shipping() -> None:
-    """A ceiling, not a fingerprint: the bug this guards was a 7x inflation."""
+    """A ceiling, not a fingerprint: the bug this guards was a 7x inflation.
+
+    Measured on this lock: 75.3 / 78.2 / 81.8 MB for win/linux/mac, of which playwright's
+    driver wheel alone is ~44 MB. The band therefore has to sit above that dependency and
+    still below the 263 MB, 271-file shape that ABI inflation once produced - dropping
+    the driver would read as "the kit got smaller", not as a missing package.
+    """
     for platform in PLATFORMS:
         result = _plan(platform)
         megabytes = result["bytes_total"] / 1048576
-        assert 15 < megabytes < 60, f"{platform}: {megabytes:.1f} MB is outside the plausible kit"
+        assert 60 < megabytes < 110, f"{platform}: {megabytes:.1f} MB is outside the plausible kit"
 
 
 def test_windows_only_members_follow_the_markers() -> None:
@@ -112,12 +125,20 @@ def test_windows_only_members_follow_the_markers() -> None:
         assert name in win and name in linux and name in mac, f"{name} vanished from a plan"
 
 
-def test_the_retired_browser_stack_is_not_planned_anywhere() -> None:
-    gone = {"playwright", "greenlet", "pyee"}
+def test_the_browser_driver_trio_is_planned_on_every_platform() -> None:
+    """`playwright` + `greenlet` + `pyee` are a dependency again, so the kit must carry them.
+
+    `douyin_native` drives the machine's own Edge through the wheel's driver (`channel=msedge`,
+    no browser download), so an offline device that cannot install this trio loses the tool at
+    install time instead of at first use. The linux lane is the reason the plan's tag patterns
+    list the alias form: playwright ships `manylinux1_x86_64` only, which parsed as a glibc
+    version but was never admitted.
+    """
+    wanted = {"playwright", "greenlet", "pyee"}
     for platform in PLATFORMS:
         names = set(_plan(platform)["package_names"])
-        assert not (names & gone), f"{platform} still plans {sorted(names & gone)}"
-    assert "playwright" not in (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        assert wanted <= names, f"{platform} lost {sorted(wanted - names)}"
+    assert "playwright" in (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
 
 def test_source_only_packages_are_named_for_prebuilding() -> None:

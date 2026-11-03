@@ -164,6 +164,10 @@ const changedJson = JSON.stringify({
   extra_headers: {},
   extra_options: {},
 });
+const llmEditorActionNodes = ["save-detail", "save-create"].map((action) => ({
+  dataset: { llmAction: action },
+  classList: { toggle: () => {} },
+}));
 const elements = {
   "llm-json-editor": { value: changedJson },
   "llm-binding-retry-on": { value: "network,429,5xx" },
@@ -172,7 +176,14 @@ const elements = {
   "llm-binding-context-window-tokens": { value: "32000" },
   "llm-binding-image-multimodal-enabled": { checked: false },
   "llm-bindings-list": { innerHTML: "", addEventListener: () => {} },
-  "llm-editor-shell": { innerHTML: "", addEventListener: () => {} },
+  // handleDetailSave 走完保存会调 `syncLlmEditorDirtyAffordance`，它按选择器点保存条；
+  // 桩不给 querySelectorAll 就等于让这条产品路径在这套用例里根本跑不到（真 DOM 下的
+  // 脏位表现由 org_graph_app.model_route_editor.test.js 钉）。
+  "llm-editor-shell": {
+    innerHTML: "",
+    addEventListener: () => {},
+    querySelectorAll: (selector) => (selector === "[data-llm-action]" ? llmEditorActionNodes : []),
+  },
   "llm-editor-backdrop": { addEventListener: () => {} },
   "llm-memory-settings-btn": { addEventListener: () => {} },
   "llm-config-create-btn": { addEventListener: () => {} },
