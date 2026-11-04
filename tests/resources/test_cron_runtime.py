@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -20,7 +21,13 @@ from g3ku.core.messages import UserInputMessage
 from g3ku.core.task_diagnostics import format_task_await_chain
 from g3ku.cron.runtime_dispatch import dispatch_cron_job, resolve_cron_session_key
 from g3ku.cron.service import CronService
-from g3ku.cron.types import CronJob, CronJobState, CronPayload, CronSchedule
+from g3ku.cron.types import (
+    CRON_STORE_VERSION,
+    CronJob,
+    CronJobState,
+    CronPayload,
+    CronSchedule,
+)
 from g3ku.session.manager import SessionManager
 
 
@@ -1459,6 +1466,90 @@ async def test_cron_finalize_reattaches_after_external_store_reload(tmp_path: Pa
     assert entry["state"]["deliveredRuns"] == 1
     # 脱钩的旧对象不再承载权威状态
     assert job.state.delivered_runs == 0
+
+
+def test_cron_reload_sees_an_external_write_that_keeps_the_same_mtime(tmp_path: Path) -> None:
+    """外部改写即使没挪动 mtime 也必须被重载——mtime 在这台机器上会说谎。
+
+    Windows 的文件时间戳约 1ms 量化，两次背靠背写入常取到同一个 `st_mtime_ns`（本机
+    实测 400 轮里 304 轮相同，`CI` 的红就是这条撞上的）。`negi cron` CLI 与服务进程共用
+    一份 jobs.json，同刻度里那次改写读不到，下一份写盘就把对方的改动整份覆盖掉——
+    定时任务静默丢一次更新，而且没有任何一行日志。这里把 mtime 按回原值，让判据在任何
+    机器上都被踩到，而不只在那台时间戳够粗的机器上偶尔红。
+    """
+    store_path = tmp_path / "jobs.json"
+    service = CronService(store_path)
+    service.add_job(
+        name="demo",
+        schedule=CronSchedule(kind="every", every_ms=60_000),
+        message="m",
+    )
+    assert service.list_jobs()[0].name == "demo"
+
+    before = store_path.stat().st_mtime_ns
+    raw = json.loads(store_path.read_text(encoding="utf-8"))
+    raw["jobs"][0]["name"] = "renamed-externally"
+    store_path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+    os.utime(store_path, ns=(before, before))
+
+    jobs = service.list_jobs()
+    assert jobs[0].name == "renamed-externally", "内容变了就必须重载，不许只比时间戳"
+
+
+def test_cron_own_write_is_not_read_as_an_external_change(tmp_path: Path) -> None:
+    """自己刚写的那份不许判成外部改动：一次误判就把在途 job 换成新副本，持有旧引用的那一跳
+    收尾就写进脱钩对象上——正是 `test_cron_finalize_reattaches_after_external_store_reload`
+    那条规则的反面。
+
+    这条是修的过程中本机踩出来的：Windows 上文本模式写文件会把 `\n` 换成 `\r\n`，落盘字节
+    与按字符串算的指纹不等，于是每一次读都触发一次重载。
+    """
+    store_path = tmp_path / "jobs.json"
+    service = CronService(store_path)
+    job = service.add_job(
+        name="demo",
+        schedule=CronSchedule(kind="every", every_ms=60_000),
+        message="m",
+    )
+
+    seen: list[str] = []
+    sink_id = logger.add(lambda message: seen.append(str(message)), level="INFO")
+    try:
+        for _ in range(3):
+            assert [j.id for j in service.list_jobs()] == [job.id]
+    finally:
+        logger.remove(sink_id)
+
+    assert sum("modified externally" in line for line in seen) == 0
+
+
+def test_cron_unreadable_store_warns_once_not_per_read(tmp_path: Path) -> None:
+    """读坏的盘按内容记账一次，之后每个读口不得再重解析再喊一次。
+
+    这条把改动的边界钉住：判据换成内容指纹后，失败分支仍要记住"这些字节我读过了"，
+    否则每个 tick、每次 `list_jobs` 都重新解析一遍并重贴一行 warning——日志风暴正是
+    磁盘写保护那类事故现场最缺的东西。
+    """
+    store_path = tmp_path / "jobs.json"
+    store_path.write_text("{ not json", encoding="utf-8")
+    service = CronService(store_path)
+
+    seen: list[str] = []
+    sink_id = logger.add(lambda message: seen.append(str(message)), level="INFO")
+    try:
+        for _ in range(3):
+            assert service.list_jobs() == []
+        assert sum("Failed to load cron store" in line for line in seen) == 1, "一次坏盘只说一遍"
+
+        # 记账不能把后来真正的新内容也挡在门外
+        store_path.write_text(
+            json.dumps({"version": CRON_STORE_VERSION, "jobs": []}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        assert service.list_jobs() == []
+        assert sum("modified externally" in line for line in seen) == 1
+    finally:
+        logger.remove(sink_id)
 
 
 def test_cron_dispatch_has_no_timeout_budget_contract(tmp_path: Path) -> None:

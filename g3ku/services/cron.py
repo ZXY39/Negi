@@ -1,6 +1,7 @@
 """Cron service for scheduling agent tasks."""
 
 import asyncio
+import hashlib
 import json
 import os
 import time
@@ -105,7 +106,8 @@ class CronService:
         # web shell 把它接到外部会话注册表的 last_proactive_at；CLI/测试不注入。
         self._admit_proactive = admit_proactive
         self._store: CronStore | None = None
-        self._last_mtime_ns: int = 0
+        # 最后一次由本进程写下/读回的那份字节指纹（见 `_load_store`）。
+        self._last_saved_digest: str = ""
         self._timer_task: asyncio.Task | None = None
         self._heal_task: asyncio.Task | None = None
         self._running = False
@@ -119,19 +121,33 @@ class CronService:
         # stop() can cancel in-flight dispatches instead of orphaning them.
         self._dispatch_tasks: set[asyncio.Task] = set()
 
-    def _load_store(self) -> CronStore:
-        """Load jobs from disk. Reloads automatically if file was modified externally."""
-        if self._store and self.store_path.exists():
-            mtime_ns = self.store_path.stat().st_mtime_ns
-            if mtime_ns != self._last_mtime_ns:
-                logger.info("Cron: jobs.json modified externally, reloading")
-                self._store = None
-        if self._store:
-            return self._store
+    def _read_store_bytes(self) -> bytes | None:
+        try:
+            return self.store_path.read_bytes()
+        except OSError:
+            return None
 
-        if self.store_path.exists():
+    def _load_store(self) -> CronStore:
+        """Load jobs from disk, reloading when the file's contents changed.
+
+        判据是内容指纹，不是 mtime：Windows 的文件时间戳约 1ms 量化，两次背靠背写入常取到
+        同一个 `st_mtime_ns`（本机实测 400 轮里 304 轮相同）。`negi cron` CLI 和这个进程共用
+        一份 jobs.json，按 mtime 等值判就把对方刚写的那份说成"没变"，下一次 `_save_store()`
+        再整份覆盖回去——定时任务静默丢一次更新，且没有一行日志留下。指纹判据读的是本来就要
+        解析的那几个字节，代价与原来的 stat 同量级。
+        """
+        raw = self._read_store_bytes()
+        digest = hashlib.sha256(raw).hexdigest() if raw is not None else ""
+        if self._store is not None:
+            # 盘被删时沿用原语义：不丢弃内存库，下一次写盘把它重建出来。
+            if raw is None or digest == self._last_saved_digest:
+                return self._store
+            logger.info("Cron: jobs.json modified externally, reloading")
+            self._store = None
+
+        if raw is not None:
             try:
-                data = json.loads(self.store_path.read_text(encoding="utf-8"))
+                data = json.loads(raw.decode("utf-8"))
                 version = int(data.get("version", 0) or 0)
                 if version < CRON_STORE_VERSION:
                     logger.warning(
@@ -181,14 +197,15 @@ class CronService:
                         delete_after_run=j.get("deleteAfterRun", False),
                     ))
                 self._store = CronStore(version=CRON_STORE_VERSION, jobs=jobs)
-                self._last_mtime_ns = self.store_path.stat().st_mtime_ns
+                self._last_saved_digest = digest
             except Exception as e:
                 logger.warning("Failed to load cron store: {}", e)
                 self._store = CronStore()
-                self._last_mtime_ns = self.store_path.stat().st_mtime_ns
+                # 坏字节同样记账：不记就等于每个读口都重解析一遍、每遍都重贴一行 warning。
+                self._last_saved_digest = digest
         else:
             self._store = CronStore()
-            self._last_mtime_ns = 0
+            self._last_saved_digest = ""
 
         return self._store
 
@@ -249,9 +266,13 @@ class CronService:
         }
 
         tmp_path = self.store_path.with_name(self.store_path.name + ".tmp")
-        tmp_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        payload = json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
+        # 写字节而不是文本：文本模式在 Windows 上把 `\n` 换成 `\r\n`，落盘的字节就不是
+        # 指纹所描述的那一份，下一次读会把自己刚写的那份判成"别人改的"。
+        tmp_path.write_bytes(payload)
         os.replace(tmp_path, self.store_path)
-        self._last_mtime_ns = self.store_path.stat().st_mtime_ns
+        # 记的是落盘那份字节的指纹：下一次 `_load_store` 读到同一串字节就是"没有外部改动"。
+        self._last_saved_digest = hashlib.sha256(payload).hexdigest()
 
     async def start(self) -> None:
         """Start the cron service."""
