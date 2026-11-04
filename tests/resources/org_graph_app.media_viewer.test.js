@@ -130,6 +130,22 @@ test("`![]()` 包住非图片文件时渲染成文件卡片而不是破图", () 
     assert.match(bare, /<img class="msg-inline-image"/);
 });
 
+test("带空格的本地路径仍渲染成图片，而不是把 markdown 和 token 漏成文本", () => {
+    const { renderInlineMarkdown } = loadApp();
+    const path = "E:\\Projects\\Negi Data\\.g3ku\\web-ceo-uploads\\sess\\inline_media\\anim_abc.gif";
+    const markup = renderInlineMarkdown(
+        `![小N酱的表情包.gif](${path} "/api/ceo/media/original?token=abc")`
+    );
+    assert.match(markup, /<img class="msg-inline-image"/);
+    assert.match(markup, /data-media-name="anim_abc\.gif"/);
+    assert.match(markup, /data-media-title="小N酱的表情包\.gif"/);
+    assert.doesNotMatch(markup, /E:\\Projects/);
+
+    const bracketed = renderInlineMarkdown(`![图](<${path}>)`);
+    assert.match(bracketed, /<img class="msg-inline-image"/);
+    assert.doesNotMatch(bracketed, /E:\\Projects/);
+});
+
 test("会话附件卡按类型标记，图片显式声明 image", () => {
     const { renderStructuredChatAttachmentCard } = loadApp();
 

@@ -2861,6 +2861,23 @@ function createMarkdownToken(tokens, html) {
     return token;
 }
 
+// Markdown destination 里允许空格：Windows 路径（E:\Projects\Negi Data\…）几乎都有。
+// 旧正则把空白当 destination 结束符，整条 `![]()` 原样漏成文本，签名 token 也跟着
+// 摊在会话里。这里统一拆出 `<路径>` 尖括号形态和结尾的 ` "标题"` 槽。
+function splitMarkdownTarget(value) {
+    let target = String(value || "").trim();
+    let title = "";
+    const titleMatch = /^(.*?)\s+"([^"]*)"\s*$/.exec(target);
+    if (titleMatch) {
+        target = String(titleMatch[1] || "").trim();
+        title = String(titleMatch[2] || "").trim();
+    }
+    if (target.startsWith("<") && target.endsWith(">")) {
+        target = target.slice(1, -1).trim();
+    }
+    return { target, title };
+}
+
 // `![](路径)` 现在承载所有文件类型，不止图片：后缀决定渲染成图片还是文件卡片。
 const CEO_MARKDOWN_IMAGE_SUFFIXES = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"]);
 
@@ -2884,18 +2901,17 @@ function renderInlineMarkdown(value, { allowLinks = true } = {}) {
 
     text = text.replace(/`([^`\n]+)`/g, (_match, code) => createMarkdownToken(tokens, `<code>${esc(code)}</code>`));
     if (allowLinks) {
-        text = text.replace(/!\[([^\]]*)\]\(([^)\s]+(?:\s+"[^"]*")?)\)/g, (_match, alt, target) => {
-            const titleMatch = /\s+"([^"]*)"$/.exec(String(target || ""));
-            const rawSrc = String(target || "").replace(/\s+"[^"]*"$/, "");
+        text = text.replace(/!\[([^\]]*)\]\(([^)\n]+)\)/g, (_match, alt, target) => {
+            const parsed = splitMarkdownTarget(target);
+            const rawSrc = parsed.target;
             const safeSrc = ceoMarkdownImageSrc(rawSrc);
             if (!safeSrc) return _match;
             const label = esc(String(alt || "image").trim() || "image");
             // 后缀取自路径而不是 alt：alt 常是「三季度报告」这类描述，不带扩展名。
             const fileName = ceoMarkdownFileName(rawSrc);
-            const clickHref =
-                titleMatch && /^\/api\/ceo\/media\/original\?/.test(String(titleMatch[1] || "").trim())
-                    ? esc(String(titleMatch[1]).trim())
-                    : "";
+            const clickHref = /^\/api\/ceo\/media\/original\?/.test(parsed.title)
+                ? esc(parsed.title)
+                : "";
             const openHref = clickHref || safeSrc;
             const openName = esc(fileName || String(alt || "file").trim() || "file");
             if (!CEO_MARKDOWN_IMAGE_SUFFIXES.has(ceoMarkdownFileSuffix(fileName))) {
@@ -2917,8 +2933,8 @@ function renderInlineMarkdown(value, { allowLinks = true } = {}) {
                 `<a class="msg-inline-image-link" href="${openHref}" data-media-open="auto" data-media-name="${openName}" data-media-title="${label}">${imgTag}</a>`
             );
         });
-        text = text.replace(/\[([^\]]+)\]\(([^)\s]+(?:\s+"[^"]*")?)\)/g, (_match, label, target) => {
-            const href = String(target || "").replace(/\s+"[^"]*"$/, "");
+        text = text.replace(/\[([^\]]+)\]\(([^)\n]+)\)/g, (_match, label, target) => {
+            const href = splitMarkdownTarget(target).target;
             if (/^\/api\/ceo\/media\/original\?/.test(href)) {
                 const chipLabel = esc(String(label || "file").trim() || "file");
                 return createMarkdownToken(
