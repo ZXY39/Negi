@@ -57,3 +57,33 @@ def test_single_match_does_not_log_a_warning(tmp_path: Path) -> None:
     finally:
         logger.remove(sink_id)
     assert seen == []
+
+
+def test_same_second_duplicates_route_to_the_later_insert(tmp_path: Path) -> None:
+    """两条落在同一秒时，取"后插入的那条"，不能按会话键的字面序判新旧。
+
+    `created_at` 只到秒的写入形状下，改名后的新会话与旧会话可能拿到完全相同的串；此
+    时用 `session_key` 兜底会翻车：`'…qq-official:…'` 按字符排在 `'…qq-official-1…:…'`
+    之后（`:` 比 `-` 大），于是被判成"最新"，推送发回旧会话。本机跑得慢就跨秒、跑得
+    快就同秒，所以这条只在合跑里红。
+    """
+    from g3ku.runtime.external_sessions import ExternalSessionEntry
+
+    registry = _registry(tmp_path)
+    stamp = "2026-11-04T10:00:12"
+    old_key = build_external_session_key(bridge_id="qq-official", external_key=EXTERNAL_KEY)
+    new_key = build_external_session_key(bridge_id="qq-official-1903529517", external_key=EXTERNAL_KEY)
+    registry._entries[old_key] = ExternalSessionEntry(
+        bridge_id="qq-official",
+        external_key=EXTERNAL_KEY,
+        session_key=old_key,
+        created_at=stamp,
+    )
+    registry._entries[new_key] = ExternalSessionEntry(
+        bridge_id="qq-official-1903529517",
+        external_key=EXTERNAL_KEY,
+        session_key=new_key,
+        created_at=stamp,
+    )
+
+    assert registry.find_by_any_key(EXTERNAL_KEY).session_key == new_key

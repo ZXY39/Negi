@@ -440,7 +440,11 @@ class ExternalSessionRegistry:
         if not candidates:
             return None
         if len(candidates) > 1:
-            candidates.sort(key=lambda item: (str(item.created_at or ""), item.session_key))
+            # 只按 `created_at` 稳定排序，同刻就取**后插入**的那条（`_entries` 保插入序，
+            # 稳定排序把它留在末尾）。键名兜底会翻车：改名后的新键 `…qq-official-1…:…` 按字符
+            # 排在旧键 `…qq-official:…` 之前（`-` < `:`），于是旧会话被判成最新——
+            # `created_at` 只到秒时两条同串，本机慢一点跨秒就不红。
+            candidates.sort(key=lambda item: str(item.created_at or ""))
             chosen = candidates[-1]
             logger.warning(
                 "external_key {} resolves to {} sessions; routing to newest {} — 把直连该目标的"
