@@ -19654,7 +19654,7 @@ textarea {
 
 .qq-group-history-strip {
     display: flex;
-    align-items: center;
+    align-items: baseline;
     justify-content: flex-end;
     gap: var(--ui-space-2);
     padding: 4px 8px;
