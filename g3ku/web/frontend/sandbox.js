@@ -515,17 +515,30 @@ function selectSession(sessionId) {
   void loadSessionDetail();
 }
 
+function collectSessionOptions(payload) {
+  // 目录接口把会话拆成两个容器：`items` 只装 `web:` 本地会话，渠道会话（含官方 QQ 的
+  // `ext:`）在 `channel_groups[].items`。档位是逐会话的，两边都要能选中。
+  const rows = [
+    ...(Array.isArray(payload && payload.items) ? payload.items : []),
+    ...(Array.isArray(payload && payload.channel_groups) ? payload.channel_groups : [])
+      .flatMap((group) => (Array.isArray(group && group.items) ? group.items : [])),
+  ];
+  const seen = new Set();
+  const options = [];
+  for (const row of rows) {
+    const id = String((row && (row.session_id || row.id || row.session_key)) || '').trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    options.push({ id, title: String((row && row.title) || '') });
+  }
+  return options;
+}
+
 async function loadSessions() {
   const preset = String(state.preset || '').trim();
   try {
     const payload = await api('/api/ceo/sessions');
-    const items = payload.items || [];
-    state.sessions = items
-      .map((item) => ({
-        id: item.session_id || item.id || item.session_key || '',
-        title: item.title || '',
-      }))
-      .filter((item) => item.id);
+    state.sessions = collectSessionOptions(payload);
     if (preset && state.sessions.some((item) => item.id === preset)) {
       state.sessionId = preset;
       $('manual-session-field').hidden = true;
@@ -931,6 +944,8 @@ async function main() {
     await loadSessionDetail();
   }
 }
+
+window.__sandboxTestHooks = { collectSessionOptions, loadSessions, state };
 
 document.addEventListener('DOMContentLoaded', main);
 
