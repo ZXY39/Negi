@@ -594,44 +594,49 @@ def cron_run(
     from g3ku.cron.types import CronJob
     from g3ku.runtime import SessionRuntimeBridge, SessionRuntimeManager
     logger.disable("g3ku")
+    try:
+        config = load_config()
+        provider = _make_provider(config)
+        bus = MessageBus()
+        agent_loop = _make_agent_loop(config, bus, provider)
 
-    config = load_config()
-    provider = _make_provider(config)
-    bus = MessageBus()
-    agent_loop = _make_agent_loop(config, bus, provider)
+        store_path = get_data_dir() / "cron" / "jobs.json"
+        service = CronService(store_path)
 
-    store_path = get_data_dir() / "cron" / "jobs.json"
-    service = CronService(store_path)
+        result_holder = []
+        runtime_manager = SessionRuntimeManager(agent_loop)
+        runtime_bridge = SessionRuntimeBridge(runtime_manager)
+        task_registrar = getattr(agent_loop, "_register_active_task", None)
 
-    result_holder = []
-    runtime_manager = SessionRuntimeManager(agent_loop)
-    runtime_bridge = SessionRuntimeBridge(runtime_manager)
-    task_registrar = getattr(agent_loop, "_register_active_task", None)
+        async def on_job(job: CronJob) -> str | None:
+            response = await dispatch_cron_job(
+                job,
+                runtime_bridge=runtime_bridge,
+                session_manager=getattr(agent_loop, "sessions", None),
+                register_task=task_registrar if callable(task_registrar) else None,
+            )
+            result_holder.append(str(response or ""))
+            return response
 
-    async def on_job(job: CronJob) -> str | None:
-        response = await dispatch_cron_job(
-            job,
-            runtime_bridge=runtime_bridge,
-            session_manager=getattr(agent_loop, "sessions", None),
-            register_task=task_registrar if callable(task_registrar) else None,
-        )
-        result_holder.append(str(response or ""))
-        return response
+        service.on_job = on_job
 
-    service.on_job = on_job
+        async def run():
+            try:
+                return await service.run_job(job_id, force=force)
+            finally:
+                await agent_loop.close_mcp()
 
-    async def run():
-        try:
-            return await service.run_job(job_id, force=force)
-        finally:
-            await agent_loop.close_mcp()
-
-    if asyncio.run(run()):
-        console.print("[green]OK[/green] Job executed")
-        if result_holder:
-            _print_agent_response(result_holder[0], render_markdown=True)
-    else:
-        console.print(f"[red]Failed to run job {job_id}[/red]")
+        if asyncio.run(run()):
+            console.print("[green]OK[/green] Job executed")
+            if result_holder:
+                _print_agent_response(result_holder[0], render_markdown=True)
+        else:
+            console.print(f"[red]Failed to run job {job_id}[/red]")
+    finally:
+        # 关库日志只是这条命令自己的显示需要；不还原就会把同进程后面所有
+        # `logger.warning` 一起吞掉——跑过 `cron run` 的那一片里，凡是数日志行数的用例
+        # 都会读到 0 行，红在哪个文件上只取决于分片怎么切。
+        logger.enable("g3ku")
 
 
 # ============================================================================
