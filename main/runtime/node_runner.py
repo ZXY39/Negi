@@ -189,10 +189,10 @@ _SPAWN_REVIEW_BLOCKED_CHECK_RESULT = '派生已被拦截'
 _SPAWN_REVIEW_SYSTEM_FAILURE_CHECK_RESULT = '派生未审查（系统故障）'
 _SPAWN_REVIEW_DEFAULT_BLOCK_REASON = '检验派生未批准该候选派生。'
 # 兜底建议不能只说「收缩为单一派生」：父节点会据此把可并行分支继续拆轮，或删掉
-# requires_acceptance 来凑批量，两条都是往错误方向收敛。
+# acceptance_prompt 来凑批量，两条都是往错误方向收敛。
 _SPAWN_REVIEW_DEFAULT_BLOCK_SUGGESTION = (
     '请在当前父节点内自行执行；确需派生时把互不依赖的分支合并为一次 spawn_child_nodes 批量派生，'
-    '需要独立验收的分支在该候选上设置 requires_acceptance=true 并给出 acceptance_prompt。'
+    '需要独立验收的分支在该候选上写 acceptance_prompt。'
 )
 _SPAWN_REVIEW_RETRY_DELAY_SECONDS = 0.1
 _SPAWN_REVIEW_MAX_ATTEMPTS = 5

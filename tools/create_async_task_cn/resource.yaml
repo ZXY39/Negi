@@ -3,8 +3,8 @@ kind: tool
 display_name: "创建异步任务"
 name: create_async_task
 description: >-
-  Create a background task. Judge `requires_final_acceptance` before you call: omitting it is not
-  an answer, and the node's own self-test is not acceptance.
+  Create a background task. `final_acceptance_prompt` is the only acceptance opt-in: leaving it
+  empty is not an answer, and self-test is not acceptance.
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''
@@ -51,12 +51,9 @@ parameters:
           ref:
             type: [string, "null"]
             description: Exact artifact or content ref to reopen.
-    requires_final_acceptance:
-      type: boolean
-      description: Whether the root execution gets a final acceptance node. Off by default; set true only when a wrong final result is costly and you cannot verify it cheaply yourself.
     final_acceptance_prompt:
       type: string
-      description: Acceptance criteria for the final result. Required when `requires_final_acceptance=true`; rejected when the flag is not true.
+      description: Acceptance criteria for the final result. Writing them spawns a final acceptance node; leave it empty when you can verify inline.
   required: [task, core_requirement, execution_policy]
 governance:
   display_name: Create Async Task

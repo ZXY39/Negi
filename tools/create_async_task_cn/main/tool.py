@@ -90,15 +90,6 @@ class _CreateAsyncTaskHandler(Tool):
                 errors.append('core_requirement must not be empty')
         if 'continuation_of_task_id' in (normalized or {}) or 'reuse_existing' in (normalized or {}):
             errors.append('create_async_task_no_longer_supports_continuation')
-        requires_final_acceptance = (normalized or {}).get('requires_final_acceptance')
-        final_acceptance_prompt = str((normalized or {}).get('final_acceptance_prompt') or '').strip()
-        if requires_final_acceptance is True and not final_acceptance_prompt:
-            errors.append('final_acceptance_prompt is required when requires_final_acceptance=true')
-        elif final_acceptance_prompt and requires_final_acceptance is not True:
-            errors.append(
-                'final_acceptance_prompt is set but requires_final_acceptance is not true; '
-                'set requires_final_acceptance=true or drop the prompt'
-            )
         errors.extend(validate_create_async_task_file_targets((normalized or {}).get('file_targets')))
         return errors
 
@@ -122,13 +113,10 @@ class _CreateAsyncTaskHandler(Tool):
         file_target_errors = validate_create_async_task_file_targets(normalized_file_targets)
         if file_target_errors:
             raise ValueError('; '.join(file_target_errors))
+        # 判据文本本身就是开关。不读入参里的 `requires_final_acceptance`：那个键已退役，
+        # 读它等于让陈旧调用建出一条没有判据的验收节点。
         final_acceptance_prompt = str(kwargs.get('final_acceptance_prompt') or '').strip()
-        requires_final_acceptance = bool(kwargs.get('requires_final_acceptance'))
-        if final_acceptance_prompt and not requires_final_acceptance:
-            raise ValueError(
-                'final_acceptance_prompt is set but requires_final_acceptance is not true; '
-                'set requires_final_acceptance=true or drop the prompt'
-            )
+        requires_final_acceptance = bool(final_acceptance_prompt)
         precheck = await self._service.precheck_async_task_creation(
             session_id=session_id,
             task_text=str(task or '').strip(),

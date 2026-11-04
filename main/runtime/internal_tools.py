@@ -522,9 +522,9 @@ class SpawnChildNodesTool(Tool):
             'messages until every created execution child in the batch is terminal, then delivers '
             'them together; default false delivers each result as it lands. Only mutually independent '
             'branches belong in one batch; a node that consumes its siblings\' outputs must be '
-            'created in a later call, after you have received those siblings\' results. Use '
-            'requires_acceptance for per-child acceptance; the acceptance node is created with the '
-            'child and runs after the child submits.'
+            'created in a later call, after you have received those siblings\' results. Write '
+            'acceptance criteria in a child\'s `acceptance_prompt` to give that child an acceptance '
+            'node; it is created with the child and runs after the child submits.'
         )
 
     @property
@@ -536,9 +536,10 @@ class SpawnChildNodesTool(Tool):
             'its children finish. Never put a node that consumes its siblings’ outputs in the same '
             'batch; create it after you have their results. Optional per-child `seed_tools` seeds '
             'those tool contracts into the child’s first request. Per child, '
-            '`requires_acceptance=true` + `acceptance_prompt` adds an acceptance node that judges it '
-            'independently after it submits; leaving it out is not an answer - judge the two '
-            'conditions in your prompt, and never count your own self-check as that verdict.'
+            '`acceptance_prompt` alone adds an acceptance node that judges it independently after it '
+            'submits; writing the criteria is the whole opt-in, and leaving it out is not an answer - '
+            'judge the two conditions in your prompt, and never count your own self-check as that '
+            'verdict.'
         )
 
     @property
@@ -564,21 +565,14 @@ class SpawnChildNodesTool(Tool):
                         '`coverage` means still start with the highest-value actions, then expand scope when the child goal explicitly needs broader coverage.'
                     ),
                 ),
-                'requires_acceptance': {
-                    'type': 'boolean',
-                    'description': (
-                        'Whether this child gets a follow-up acceptance node. Off by default. Set true only when BOTH hold: '
-                        '(1) an error is costly — an irreversible or external action, finance/compliance/production code, or a '
-                        'batch/coverage requirement where a silent omission would go unnoticed; and (2) you cannot certify the '
-                        'output yourself in one cheap pass at wrap-up — it needs a dedicated round of checks. Do not request '
-                        'acceptance merely because the output is a deliverable or will be aggregated into your answer; verify '
-                        'those inline before submitting. The acceptance node is activated only after this child pipeline is '
-                        'terminal — never spawn a sibling acceptance node in the same batch for it.'
-                    ),
-                },
                 'acceptance_prompt': {
                     'type': 'string',
-                    'description': 'Prompt for the acceptance node. Required only when requires_acceptance=true.',
+                    'description': (
+                        'Acceptance criteria for this child. Writing them is what spawns its '
+                        'acceptance node; leave it empty to verify inline yourself. The acceptance '
+                        'node activates only after this child pipeline is terminal - never spawn a '
+                        'sibling acceptance node in the same batch for it.'
+                    ),
                 },
                 'seed_tools': {
                     'type': 'array',
@@ -631,7 +625,6 @@ class SpawnChildNodesTool(Tool):
                 'execution_policy': build_execution_policy_schema(
                     description='How broadly the child should explore the task.',
                 ),
-                'requires_acceptance': {'type': 'boolean'},
                 'acceptance_prompt': {'type': 'string'},
                 'seed_tools': {
                     'type': 'array',
@@ -657,22 +650,6 @@ class SpawnChildNodesTool(Tool):
             'required': ['children'],
         }
 
-    def validate_params(self, params: dict[str, Any]) -> list[str]:
-        errors = super().validate_params(params)
-        for index, item in enumerate(list((params or {}).get('children') or [])):
-            if not isinstance(item, dict):
-                continue
-            requires_acceptance = item.get('requires_acceptance')
-            acceptance_prompt = str(item.get('acceptance_prompt') or '').strip()
-            if requires_acceptance is True and not acceptance_prompt:
-                errors.append(f'children[{index}].acceptance_prompt is required when requires_acceptance=true')
-            elif acceptance_prompt and requires_acceptance is not True:
-                errors.append(
-                    f'children[{index}].acceptance_prompt is set but requires_acceptance is not true; '
-                    'set requires_acceptance=true or drop the prompt'
-                )
-        return errors
-
     async def execute(
         self,
         children: list[dict[str, Any]],
@@ -684,7 +661,16 @@ class SpawnChildNodesTool(Tool):
         if not runtime:
             fallback = kwargs.get('__g3ku_runtime')
             runtime = fallback if isinstance(fallback, dict) else {}
-        specs = [SpawnChildSpec.model_validate(item) for item in list(children or [])]
+        # 入口剥掉已退出模型面的 `requires_acceptance`：派生与否只看 `acceptance_prompt`，
+        # 陈旧调用凭这个键建不出没有判据的验收节点。历史轮重放仍按显式开关读。
+        specs = [
+            SpawnChildSpec.model_validate(
+                {key: value for key, value in item.items() if key != 'requires_acceptance'}
+                if isinstance(item, dict)
+                else item
+            )
+            for item in list(children or [])
+        ]
         batch_id = str(runtime.get('current_tool_call_id') or '')
         results = await self._spawn_callback(
             specs,

@@ -1,8 +1,8 @@
-"""验收按判据逐条判定：提示词两条件 + 工具面显式成对。
+"""验收按判据逐条判定：提示词两条件 + 判据文本即开关。
 
 验收节点只应在「错误代价高」且「父节点收尾验不完」时出现。提示词与工具级 description
-负责判据，工具契约负责让 acceptance prompt 不能单独开启一个验收节点。倾向句（"默认不
-开""拿不准不建"）不在契约里：实盘被模型当作结论直接引用过一次。
+负责判据；工具契约只有一条出口——写了 `acceptance_prompt` 即派生，退役的显式开关在入口
+被剥掉。倾向句（"默认不开""拿不准不建"）不在契约里：实盘被模型当作结论直接引用过一次。
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from g3ku.json_schema_utils import normalize_openai_tool_definition
 from g3ku.resources.description_limits import TOOL_DESCRIPTION_MAX_CHARS
 from main.prompts import load_prompt
 from main.runtime.internal_tools import SpawnChildNodesTool
+from main.runtime.node_runner import _spec_requires_acceptance
 from tools.create_async_task_cn.main.tool import _CreateAsyncTaskHandler
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -95,7 +96,7 @@ def test_acceptance_carriers_keep_the_two_escape_routes_closed() -> None:
     manifest = yaml.safe_load(CREATE_TASK_RESOURCE.read_text(encoding="utf-8"))
     task_description = str(manifest.get("description") or "")
     assert len(task_description) <= TOOL_DESCRIPTION_MAX_CHARS
-    assert "omitting it is not an answer" in task_description
+    assert "leaving it empty is not an answer" in task_description
     assert "self-test is not acceptance" in task_description
 
     spawn_description = str(
@@ -117,20 +118,30 @@ def test_acceptance_carriers_keep_the_two_escape_routes_closed() -> None:
         assert not leaked, f'{label} 的工具级描述抄进了判据正文：{leaked}'
 
 
-def test_spawn_child_nodes_rejects_prompt_without_flag() -> None:
+def test_spawn_child_nodes_accepts_prompt_without_flag() -> None:
+    """判据文本就是开关：它单独出现不再被当成参数错误。"""
     errors = _spawn_tool().validate_params(
         {"children": [_child(acceptance_prompt="核验落盘产物")]}
     )
 
-    assert any("requires_acceptance is not true" in error for error in errors)
+    assert errors == []
 
 
-def test_spawn_child_nodes_rejects_flag_without_prompt() -> None:
-    errors = _spawn_tool().validate_params(
-        {"children": [_child(requires_acceptance=True)]}
-    )
+@pytest.mark.asyncio
+async def test_spawn_child_nodes_retired_flag_cannot_enable_acceptance() -> None:
+    """退役开关在入口被剥掉：陈旧调用不能凭它建出一条没有判据的验收节点。"""
+    captured: dict[str, object] = {}
 
-    assert any("acceptance_prompt is required" in error for error in errors)
+    async def _spawn(specs, round_id, wait_all):
+        captured["specs"] = list(specs)
+        return []
+
+    tool = SpawnChildNodesTool(_spawn)
+    await tool.execute(children=[_child(requires_acceptance=True)])
+
+    spec = list(captured["specs"])[0]
+    assert spec.requires_acceptance is None
+    assert _spec_requires_acceptance(spec) is False
 
 
 def test_spawn_child_nodes_accepts_paired_acceptance() -> None:
@@ -141,7 +152,7 @@ def test_spawn_child_nodes_accepts_paired_acceptance() -> None:
     assert errors == []
 
 
-def test_create_async_task_rejects_prompt_without_flag() -> None:
+def test_create_async_task_accepts_prompt_without_flag() -> None:
     errors = _create_tool().validate_params(
         {
             "task": "t",
@@ -151,25 +162,38 @@ def test_create_async_task_rejects_prompt_without_flag() -> None:
         }
     )
 
-    assert any("requires_final_acceptance is not true" in error for error in errors)
+    assert errors == []
 
 
 @pytest.mark.asyncio
-async def test_create_async_task_execute_does_not_infer_acceptance_from_prompt() -> None:
-    tool = _create_tool()
+async def test_create_async_task_derives_acceptance_from_prompt() -> None:
+    captured: dict[str, object] = {}
 
-    with pytest.raises(ValueError, match="requires_final_acceptance is not true"):
-        await tool.execute(
-            "t",
-            core_requirement="c",
-            execution_policy={"mode": "focus"},
-            final_acceptance_prompt="核验最终交付物",
-            __g3ku_runtime={"session_key": "web:test"},
-        )
+    class _CapturingService:
+        async def precheck_async_task_creation(self, **kwargs):
+            captured.update(kwargs)
+            return {
+                "decision": "reject_use_append_notice",
+                "matched_task_id": "task:stub",
+                "reason": "stub",
+            }
+
+    tool = _create_tool(_CapturingService())
+    await tool.execute(
+        "t",
+        core_requirement="c",
+        execution_policy={"mode": "focus"},
+        final_acceptance_prompt="核验最终交付物",
+        __g3ku_runtime={"session_key": "web:test"},
+    )
+
+    assert captured["requires_final_acceptance"] is True
+    assert captured["final_acceptance_prompt"] == "核验最终交付物"
 
 
 @pytest.mark.asyncio
-async def test_create_async_task_forwards_explicit_acceptance_flag() -> None:
+async def test_create_async_task_retired_flag_cannot_enable_acceptance() -> None:
+    """退役开关不再被读取：它单独出现时不能建出没有判据的最终验收节点。"""
     captured: dict[str, object] = {}
 
     class _CapturingService:
@@ -187,9 +211,7 @@ async def test_create_async_task_forwards_explicit_acceptance_flag() -> None:
         core_requirement="c",
         execution_policy={"mode": "focus"},
         requires_final_acceptance=True,
-        final_acceptance_prompt="核验最终交付物",
         __g3ku_runtime={"session_key": "web:test"},
     )
 
-    assert captured["requires_final_acceptance"] is True
-    assert captured["final_acceptance_prompt"] == "核验最终交付物"
+    assert captured["requires_final_acceptance"] is False
