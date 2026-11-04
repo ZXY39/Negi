@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import errno
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -34,11 +35,31 @@ def policies_guard():
 
 @pytest.fixture()
 def sleeps(monkeypatch):
+    """只换 `artifact_store` 自己那份 `time` 名字绑定，不动标准库。
+
+    打在 `time.sleep` 上，作用域就是整个进程：任何在跑的线程睡一次都会被记进同一个列表，
+    两条断言就此凭空失败；而 `while …: time.sleep(x)` 那种按节拍轮询的收尾循环失去 sleep
+    就等于空转。CI 上一次整片作业卡满 300 秒被看门狗砍掉，卡的位置是 pytest 在给这条
+    断言排版读数的那一步。
+    """
     recorded: list[float] = []
-    sleeper = getattr(artifact_store_module, 'time', None)
-    if sleeper is not None:
-        monkeypatch.setattr(sleeper, 'sleep', lambda seconds: recorded.append(seconds))
+    monkeypatch.setattr(
+        artifact_store_module,
+        'time',
+        SimpleNamespace(sleep=lambda seconds: recorded.append(seconds)),
+    )
     return recorded
+
+
+def test_sleeps_fixture_leaves_the_process_clock_alone(sleeps):
+    """别的车道睡觉不许被记进来：这条记录只归 `artifact_store` 的重试跳。
+
+    钉住上面那个夹具的边界——它一旦改回 patch 标准库，这里立刻红。
+    """
+    import time as stdlib_time
+
+    stdlib_time.sleep(0)
+    assert sleeps == []
 
 
 def _flaky_replace(monkeypatch, failures: list[Exception]):
