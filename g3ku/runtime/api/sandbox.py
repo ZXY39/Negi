@@ -2,11 +2,11 @@
 
 契约 owner：``docs/architecture/sandbox-execution-plane.md``「档位模型（意图 × 安装态）」。
 
-- `GET  /api/ceo/sessions/{id}/sandbox` —— 当前意图、解析出的档位、安装态、逐维度强制力，
-  以及**服务端给出的 UI 标签**（前端不自己判安装态，避免两处口径漂移）。
-- `PATCH /api/ceo/sessions/{id}/sandbox` —— 只改意图；**任何信任级的开/关沙箱**
-  （mode 与当前意图不同）都必须带项目解锁口令（服务端只读校验，不顺便解锁项目）。
-  只改 `writable_roots`、或 mode 与原意图相同，则不需要口令。
+- `GET  /api/ceo/sessions/{id}/sandbox` —— 当前模式与沙箱意图、解析出的档位、安装态、
+  逐维度强制力，以及服务端给出的 UI 标签（前端不自己判安装态，避免两处口径漂移）。
+- `PATCH /api/ceo/sessions/{id}/sandbox` —— 只改意图（`mode` 与 `sandbox`）；
+  **任何信任级的模式切换或进/出沙箱**都必须带项目解锁口令（服务端只读校验，不顺便解锁
+  项目）。只改 `writable_roots`、或两个意图值都不变，则不需要口令。
 - `GET  /api/sandbox/status` —— 全局安装态与后端读数（进程内缓存，过期后台重探，
   `?refresh=1` 同步重探）。
 - `POST /api/sandbox/refresh` —— 重探安装态。
@@ -64,14 +64,16 @@ from g3ku.sandbox.state import (
     refresh_install_state,
     set_session_allowed_tools,
     set_session_mode,
+    set_session_sandbox,
     set_writable_roots,
 )
 from g3ku.utils.helpers import safe_filename
 
 router = APIRouter()
 
-_LABELS_NOT_INSTALLED = {"restricted": "受限", "unrestricted": "全权限"}
-_LABELS_INSTALLED = {"restricted": "开启沙箱", "unrestricted": "关闭沙箱"}
+# 模式开关只表达"受限 / 全权限"：进沙箱是独立的逐会话动作（`sandbox` 字段），
+# 不再由安装态把同一颗开关改名成"沙箱"。开关管的就是数据面在宿主上受不受限。
+_LABELS_MODE = {"restricted": "受限", "unrestricted": "全权限"}
 _TIER_LABELS = {
     TIER_LIMITED: "受限",
     TIER_READONLY: "只读",
@@ -85,6 +87,14 @@ def _normalized_mode(value: Any) -> str:
     if raw not in {MODE_RESTRICTED, MODE_UNRESTRICTED}:
         raise HTTPException(status_code=400, detail="sandbox_mode_invalid")
     return raw
+
+
+def _normalized_sandbox_flag(payload: dict) -> bool:
+    """`sandbox` 只收布尔：字符串 "false" 在这里等于意图不明，宁可直接拒。"""
+    value = payload.get("sandbox")
+    if not isinstance(value, bool):
+        raise HTTPException(status_code=400, detail="sandbox_value_must_be_bool")
+    return value
 
 
 def _record_session_operator_action(*, session_key: str, action: str) -> None:
@@ -111,10 +121,8 @@ def _record_session_operator_action(*, session_key: str, action: str) -> None:
 
 
 def _ui_labels(reading: dict[str, Any]) -> dict[str, str]:
-    state = str(reading.get("state") or "")
-    if state in {"ready", "partial"}:
-        return dict(_LABELS_INSTALLED)
-    return dict(_LABELS_NOT_INSTALLED)
+    _ = reading
+    return dict(_LABELS_MODE)
 
 
 def _session_exists(session_key: str) -> bool:
@@ -141,6 +149,8 @@ def _session_item(session_key: str) -> dict[str, Any]:
     policy = session_policy(session_key)
     stored_mode = get_session_mode(session_key)
     unlock_note = operator_unlock_note(session_key)
+    install_ok = str(reading.get("state") or "") in {"ready", "partial"}
+    sandbox_enabled = bool(getattr(policy, "sandbox_enabled", False))
     return {
         "session_id": session_key,
         "trust": policy.trust,
@@ -176,6 +186,11 @@ def _session_item(session_key: str) -> dict[str, Any]:
         # 文件面板按这两个读数决定列卷、还是只给宿主落点：卷只属于真的在 jail 里跑的会话。
         "runs_in_jail": policy.tier == TIER_JAILED,
         "session_workspace": _session_workspace_path(session_key),
+        # 沙箱是逐会话的显式动作：装好不等于接管。`sandbox_enabled` 是操作员的意图，
+        # `sandbox_failed` 表示意图在、jail 却没接住（后端坏掉/闸门未开）——此时跑受限档。
+        "sandbox_enabled": sandbox_enabled,
+        "sandbox_available": install_ok and jail_backends_available(),
+        "sandbox_failed": sandbox_enabled and policy.tier != TIER_JAILED,
     }
 
 
@@ -223,10 +238,16 @@ async def patch_session_sandbox(session_id: str, payload: dict = Body(...)):
     trust = session_trust(key)
     current = session_policy(key)
     mode = _normalized_mode(payload.get("mode")) if "mode" in payload else None
-    # 开/关沙箱都是安全边界的改变：任何信任级都要用项目解锁口令二次确认，
-    # 不只是第三方会话切 unrestricted。只改可写根（mode 缺省或与原意图相同）不走这道闸。
+    sandbox = _normalized_sandbox_flag(payload) if "sandbox" in payload else None
+    if sandbox is not None:
+        target_mode = mode if mode is not None else current.mode
+        if target_mode != MODE_RESTRICTED:
+            raise HTTPException(status_code=400, detail="sandbox_requires_restricted")
+    # 开/关沙箱（模式或"进 jail"意图）都是安全边界的改变：任何信任级都要用项目解锁
+    # 口令二次确认。只改可写根、或 intent 不变时不走这道闸。
     mode_changed = mode is not None and mode != current.mode
-    if mode_changed:
+    sandbox_changed = sandbox is not None and sandbox != bool(current.sandbox_enabled)
+    if mode_changed or sandbox_changed:
         password = str(payload.get("unlock_password") or payload.get("unlockPassword") or "")
         if not password:
             raise HTTPException(status_code=403, detail="unlock_password_required")
@@ -237,6 +258,12 @@ async def patch_session_sandbox(session_id: str, payload: dict = Body(...)):
         note_operator_unlock(key, at=datetime.now().astimezone().isoformat(), by="operator")
     if mode is not None:
         set_session_mode(key, mode)
+        if mode != MODE_RESTRICTED:
+            # 离开受限档时"进沙箱"的意图失去载体，必须一并清掉，免得再切回受限时
+            # 悄悄恢复一个操作员早已看不见的沙箱状态。
+            set_session_sandbox(key, False)
+    if sandbox is not None:
+        set_session_sandbox(key, sandbox)
     if "writable_roots" in payload:
         if trust != TRUST_OWNER:
             raise HTTPException(status_code=403, detail="writable_roots_owner_only")
@@ -254,7 +281,16 @@ async def patch_session_sandbox(session_id: str, payload: dict = Body(...)):
             session_key=key,
             action=f'switched this session to `{str(item.get("resolved_tier") or mode)}` tier',
         )
-    if mode is not None:
+    if sandbox_changed:
+        _record_session_operator_action(
+            session_key=key,
+            action=(
+                "asked this session to run inside the sandbox"
+                if sandbox
+                else "took this session out of the sandbox, back to the restricted host tier"
+            ),
+        )
+    if mode is not None or sandbox is not None:
         try:
             emit_audit_event(
                 "sandbox",
@@ -263,12 +299,15 @@ async def patch_session_sandbox(session_id: str, payload: dict = Body(...)):
                 "session sandbox mode changed",
                 detail={
                     "session_id": key,
-                    "mode": mode,
+                    "mode": mode if mode is not None else current.mode,
                     "previous_mode": current.mode,
                     "changed": mode_changed,
+                    "sandbox": item.get("sandbox_enabled"),
+                    "previous_sandbox": bool(current.sandbox_enabled),
+                    "sandbox_changed": sandbox_changed,
                     "tier": item.get("resolved_tier"),
                     "trust": item.get("trust"),
-                    "unlocked": mode_changed,
+                    "unlocked": mode_changed or sandbox_changed,
                 },
             )
         except Exception as exc:  # noqa: BLE001 - 审计失败不阻塞开关

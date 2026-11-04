@@ -51,6 +51,7 @@ function ensureCeoGovernanceState() {
     if (!U.ceoRiskPanel) U.ceoRiskPanel = document.getElementById("ceo-risk-panel");
     if (!U.ceoRiskSandboxButton) U.ceoRiskSandboxButton = document.getElementById("ceo-risk-sandbox-btn");
     if (!U.ceoRiskSandboxTitle) U.ceoRiskSandboxTitle = document.getElementById("ceo-risk-sandbox-title");
+    if (!U.ceoRiskSandboxJailButton) U.ceoRiskSandboxJailButton = document.getElementById("ceo-risk-sandbox-jail-btn");
     if (!U.ceoRiskModeAll) U.ceoRiskModeAll = document.getElementById("ceo-risk-mode-all");
     if (!U.ceoRiskModeConditional) U.ceoRiskModeConditional = document.getElementById("ceo-risk-mode-conditional");
     if (!U.ceoRiskWhitelistButton) U.ceoRiskWhitelistButton = document.getElementById("ceo-risk-whitelist-btn");
@@ -548,6 +549,11 @@ function renderCeoRiskPanel() {
 let ceoSandboxTierCache = {
     sessionId: "",
     restricted: null,
+    mode: "",
+    sandboxEnabled: false,
+    sandboxFailed: false,
+    runsInJail: false,
+    sandboxAvailable: false,
     trust: "",
     installState: "",
     execAllowed: false,
@@ -555,6 +561,25 @@ let ceoSandboxTierCache = {
     allowedToolsCustomized: false,
     at: 0,
 };
+
+// 一处映射：刷新 / 改档 / 改工具列表三个入口都走它，避免字段各写一份。
+function ceoSandboxCacheFromItem(item, sessionId, at) {
+    return {
+        sessionId,
+        restricted: item?.mode === "restricted",
+        mode: String(item?.mode || ""),
+        sandboxEnabled: !!item?.sandbox_enabled,
+        sandboxFailed: !!item?.sandbox_failed,
+        runsInJail: !!item?.runs_in_jail,
+        sandboxAvailable: !!item?.sandbox_available,
+        trust: String(item?.trust || ""),
+        installState: String(item?.install_state || ""),
+        execAllowed: !!item?.exec_allowed,
+        allowedTools: Array.isArray(item?.allowed_tools) ? item.allowed_tools.slice() : [],
+        allowedToolsCustomized: !!item?.allowed_tools_customized,
+        at: at || Date.now(),
+    };
+}
 
 function ceoRiskToolsVisible() {
     return ceoSandboxTierCache.restricted === true;
@@ -574,17 +599,43 @@ function renderCeoRiskEntryVisibility() {
     if (U.ceoRiskExecSettingsBtn) U.ceoRiskExecSettingsBtn.hidden = !ceoRiskExecSettingsVisible();
 }
 
-// 行标题直接写当前状态：没装后端时是「只读模式」，装好之后才是「沙箱模式」。
-// 开/关都写进标题（已开启 / 已关闭），光写"无限制"读不出开关方向。
+// 行标题写当前**实际**状态：受限 / 沙箱 / 全权限。装好沙箱不再等于"沙箱已开启"，
+// 进沙箱是旁边那颗独立按钮的显式动作。
 function ceoSandboxRowTitle() {
     if (ceoSandboxTierCache.restricted === null) return "沙箱模式";
-    const label = ceoSandboxInstalled() ? "沙箱模式" : "受限模式";
-    return ceoSandboxTierCache.restricted ? `${label}已开启` : `${label}已关闭`;
+    if (ceoSandboxTierCache.mode === "unrestricted") return "全权限模式已开启";
+    if (ceoSandboxTierCache.sandboxEnabled && ceoSandboxTierCache.runsInJail) return "沙箱模式已开启";
+    return "受限模式已开启";
+}
+
+// 三个动作：进沙箱 / 退出沙箱 / 失效。未安装或不在受限档时整颗按钮不出现。
+function ceoSandboxJailAction() {
+    if (!ceoSandboxInstalled()) return "";
+    if (ceoSandboxTierCache.mode !== "restricted") return "";
+    if (!ceoSandboxTierCache.sandboxEnabled) return "enter";
+    return ceoSandboxTierCache.runsInJail ? "exit" : "failed";
+}
+
+function renderCeoRiskSandboxJail() {
+    const button = U.ceoRiskSandboxJailButton;
+    if (!button) return;
+    const action = ceoSandboxJailAction();
+    button.hidden = !action;
+    if (!action) return;
+    button.dataset.jailAction = action;
+    button.disabled = action === "failed";
+    button.textContent = action === "exit" ? "退出沙箱" : action === "failed" ? "沙箱失效" : "切换沙箱";
+    button.title = action === "failed"
+        ? "沙箱当前不可用，这个会话正在受限模式下运行。"
+        : action === "exit"
+            ? "退出后回到受限模式。"
+            : "让这个会话的数据面在沙箱内执行。";
 }
 
 function renderCeoRiskSandboxState() {
     if (U.ceoRiskSandboxTitle) U.ceoRiskSandboxTitle.textContent = ceoSandboxRowTitle();
     U.ceoRiskSandboxButton?.setAttribute?.("aria-pressed", ceoSandboxTierCache.restricted ? "true" : "false");
+    renderCeoRiskSandboxJail();
     renderCeoRiskEntryVisibility();
 }
 
@@ -596,6 +647,11 @@ async function refreshCeoRiskSandboxHint() {
         ceoSandboxTierCache = {
             sessionId: "",
             restricted: null,
+            mode: "",
+            sandboxEnabled: false,
+            sandboxFailed: false,
+            runsInJail: false,
+            sandboxAvailable: false,
             trust: "",
             installState: "",
             execAllowed: false,
@@ -606,6 +662,7 @@ async function refreshCeoRiskSandboxHint() {
         if (U.ceoRiskSandboxTitle) U.ceoRiskSandboxTitle.textContent = "沙箱模式";
         button?.setAttribute?.("aria-pressed", "false");
         if (button) button.disabled = true;
+        renderCeoRiskSandboxJail();
         return;
     }
     if (button) button.disabled = false;
@@ -628,16 +685,7 @@ async function refreshCeoRiskSandboxHint() {
         }
         const payload = await response.json();
         const item = payload.item || {};
-        ceoSandboxTierCache = {
-            sessionId,
-            restricted: item.mode === "restricted",
-            trust: String(item.trust || ""),
-            installState: String(item.install_state || ""),
-            execAllowed: !!item.exec_allowed,
-            allowedTools: Array.isArray(item.allowed_tools) ? item.allowed_tools.slice() : [],
-            allowedToolsCustomized: !!item.allowed_tools_customized,
-            at: now,
-        };
+        ceoSandboxTierCache = ceoSandboxCacheFromItem(item, sessionId, now);
         renderCeoRiskSandboxState();
     } catch (error) {
         if (U.ceoRiskSandboxTitle) U.ceoRiskSandboxTitle.textContent = "档位不可用";
@@ -649,6 +697,8 @@ function ceoSandboxModeErrorText(detail) {
         unlock_password_required: "这次切换需要项目解锁口令",
         unlock_password_invalid: "口令不正确",
         sandbox_mode_invalid: "档位取值不合法",
+        sandbox_requires_restricted: "先进入受限模式，才能切换沙箱",
+        sandbox_value_must_be_bool: "沙箱意图取值不合法",
         session_not_found: "会话不存在",
         allowed_tools_must_be_list: "工具列表格式不对",
         tool_id_too_long: "工具名过长",
@@ -656,9 +706,7 @@ function ceoSandboxModeErrorText(detail) {
     return map[detail] || `切换失败：${detail || "未知错误"}`;
 }
 
-async function patchCeoSandboxMode(sessionId, restricted, password) {
-    const body = { mode: restricted ? "restricted" : "unrestricted" };
-    if (password) body.unlock_password = password;
+async function patchCeoSandboxBody(sessionId, body) {
     const response = await fetch(`/api/ceo/sessions/${encodeURIComponent(sessionId)}/sandbox`, {
         method: "PATCH",
         credentials: "same-origin",
@@ -680,17 +728,20 @@ async function patchCeoSandboxMode(sessionId, restricted, password) {
     return payload?.item || null;
 }
 
+async function patchCeoSandboxMode(sessionId, restricted, password) {
+    const body = { mode: restricted ? "restricted" : "unrestricted" };
+    if (password) body.unlock_password = password;
+    return patchCeoSandboxBody(sessionId, body);
+}
+
+async function patchCeoSandboxJail(sessionId, enabled, password) {
+    const body = { sandbox: !!enabled };
+    if (password) body.unlock_password = password;
+    return patchCeoSandboxBody(sessionId, body);
+}
+
 function applyCeoSandboxMode(item, sessionId) {
-    ceoSandboxTierCache = {
-        sessionId,
-        restricted: item?.mode === "restricted",
-        trust: String(item?.trust || ""),
-        installState: String(item?.install_state || ""),
-        execAllowed: !!item?.exec_allowed,
-        allowedTools: Array.isArray(item?.allowed_tools) ? item.allowed_tools.slice() : [],
-        allowedToolsCustomized: !!item?.allowed_tools_customized,
-        at: Date.now(),
-    };
+    ceoSandboxTierCache = ceoSandboxCacheFromItem(item, sessionId, Date.now());
     if (U.ceoRiskSandboxButton) U.ceoRiskSandboxButton.disabled = false;
     renderCeoRiskSandboxState();
     if (typeof notifySandboxSessionModeChanged === "function") notifySandboxSessionModeChanged(sessionId);
@@ -701,18 +752,12 @@ function ceoSandboxInstalled() {
 }
 
 // 没装成后端时没有"沙箱"可开：同一颗开关表达的是"只读 / 无限制"，文案跟着安装态走。
+// 模式开关只表达"受限 / 全权限"：进沙箱是旁边那颗独立按钮的事，文案不再借用"沙箱"。
 function ceoSandboxConfirmLabels(turningOn) {
-    if (ceoSandboxInstalled()) {
-        return {
-            title: turningOn ? "开启沙箱模式？" : "关闭沙箱模式？",
-            confirm: turningOn ? "开启沙箱模式" : "关闭沙箱模式",
-            done: turningOn ? "已开启沙箱模式" : "已关闭沙箱模式",
-        };
-    }
     return {
-        title: turningOn ? "进入受限模式？" : "退出受限模式？",
-        confirm: turningOn ? "进入受限模式" : "退出受限模式",
-        done: turningOn ? "已进入受限模式" : "已退出受限模式",
+        title: turningOn ? "进入受限模式？" : "切到全权限模式？",
+        confirm: turningOn ? "进入受限模式" : "切到全权限模式",
+        done: turningOn ? "已进入受限模式" : "已切到全权限模式",
     };
 }
 
@@ -739,6 +784,56 @@ function ceoSandboxImpactText(targetRestricted) {
             ? "安全：控制面拒绝与记忆门仍然生效，但宿主文件与命令只剩 exec 自身的形态守卫；这个群的发送者因此能触达本机能力。"
             : "安全：工具按你当前系统账号的权限执行；误操作没有第二道边界。",
     ].join("\n\n");
+}
+
+async function toggleCeoRiskSandboxJail() {
+    const button = U.ceoRiskSandboxJailButton;
+    const action = String(button?.dataset?.jailAction || "");
+    const sessionId = String(typeof activeSessionId === "function" ? activeSessionId() : "").trim();
+    if (!sessionId) {
+        showToast({ title: "先选择会话", text: "沙箱按会话生效。", kind: "warn", durationMs: 2400 });
+        return;
+    }
+    if (action !== "enter" && action !== "exit") return;
+    const entering = action === "enter";
+    openConfirm({
+        title: entering ? "进入沙箱模式？" : "退出沙箱？",
+        text: entering
+            ? "这个会话的数据面工具改为在沙箱内执行：文件读写落在会话卷，命令在 jail 里跑；控制面（记忆、任务、cron、配置）仍然拒绝或走宿主正常车道。"
+            : "退出后回到受限模式：数据面回到宿主执行，只保留工具白名单与 exec 守卫；沙箱卷里的文件不再参与本会话。",
+        confirmLabel: entering ? "进入沙箱模式" : "退出沙箱",
+        input: { label: "项目解锁口令", type: "password", placeholder: "仅本次切换使用", required: true },
+        textFull: true,
+        inputPlain: true,
+        onConfirm: async ({ value }) => {
+            const password = String(value || "").trim();
+            if (!password) throw new Error("请输入项目解锁口令。");
+            if (button) button.disabled = true;
+            try {
+                const item = await patchCeoSandboxJail(sessionId, entering, password);
+                applyCeoSandboxMode(item, sessionId);
+                if (entering && item && item.sandbox_failed) {
+                    showToast({
+                        title: "已记录，沙箱暂不可用",
+                        text: "jail 后端还没接进执行道，本会话继续按受限模式运行。",
+                        kind: "warn",
+                        durationMs: 3200,
+                    });
+                    return;
+                }
+                showToast({
+                    title: entering ? "已进入沙箱模式" : "已退出沙箱",
+                    text: "下一回合生效。",
+                    kind: "success",
+                    durationMs: 2200,
+                });
+            } catch (error) {
+                throw new Error(ceoSandboxModeErrorText(error.detail || error.message));
+            } finally {
+                if (button) button.disabled = false;
+            }
+        },
+    });
 }
 
 async function toggleCeoRiskSandboxMode() {
@@ -1013,16 +1108,7 @@ async function saveCeoRiskTools() {
             throw new Error(ceoSandboxModeErrorText(detail));
         }
         const item = payload.item || {};
-        ceoSandboxTierCache = {
-            sessionId,
-            restricted: item.mode === "restricted",
-            trust: String(item.trust || ""),
-            installState: String(item.install_state || ""),
-            execAllowed: !!item.exec_allowed,
-            allowedTools: Array.isArray(item.allowed_tools) ? item.allowed_tools.slice() : [],
-            allowedToolsCustomized: !!item.allowed_tools_customized,
-            at: Date.now(),
-        };
+        ceoSandboxTierCache = ceoSandboxCacheFromItem(item, sessionId, Date.now());
         renderCeoRiskSandboxState();
         closeCeoRiskToolsDialog();
         showToast({ title: "工具列表已保存", text: "下一回合生效。", kind: "success", durationMs: 2200 });
@@ -1269,6 +1355,7 @@ function bindCeoRiskUi() {
             else if (target.closest("#ceo-risk-whitelist-btn")) void openCeoReviewWhitelistDialog();
             else if (target.closest("#ceo-risk-tools-btn")) void openCeoRiskToolsDialog();
             else if (target.closest("#ceo-risk-sandbox-btn")) void toggleCeoRiskSandboxMode();
+            else if (target.closest("#ceo-risk-sandbox-jail-btn")) void toggleCeoRiskSandboxJail();
             else if (target.closest("#ceo-risk-exec-settings-btn")) {
                 closeCeoRiskPanel();
                 openExecToolSettings();

@@ -85,6 +85,13 @@ def test_session_policy_honors_stored_mode(isolated_state: Path, registry) -> No
     assert policy.tool_allowed("exec") is False
     assert policy.tool_allowed("filesystem_write") is True
 
+    # 装了沙箱不会自动接管：受限档默认停在 limited，显式意图才带上 sandbox_enabled
+    sandbox_state.set_session_sandbox("web:ceo-1", True)
+    intent = session_policy("web:ceo-1")
+    assert intent.sandbox_enabled is True
+    assert intent.tier == TIER_LIMITED  # 闸门默认关 → 沙箱失效，仍走宿主受限
+    sandbox_state.set_session_sandbox("web:ceo-1", False)
+
     # 第三方默认 restricted；显式放成 unrestricted 后回宿主（口令 gate 在 API 层）
     entry, _ = registry.resolve_or_create(
         bridge_id="qq-official-1", external_key="qq:group:g1", chat_type="group"
@@ -99,22 +106,34 @@ def test_session_policy_honors_stored_mode(isolated_state: Path, registry) -> No
 def test_jailed_is_never_granted_without_backends(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("G3KU_SANDBOX_ENABLE_JAIL", raising=False)
     assert JAIL_BACKENDS_AVAILABLE is False
-    # 安装态说 ready，但闸门没开 → 仍然受限
+    # 安装态说 ready，但闸门没开 → 仍然受限，即使显式要求进沙箱
     assert (
         resolve_tier(
             trust=TRUST_THIRD_PARTY_GROUP,
             mode=MODE_RESTRICTED,
             install_state="ready",
+            sandbox_enabled=True,
         )
         == TIER_LIMITED
     )
-    # 显式传 jail_available=True 才发放（装配侧测试用这个口子）
+    # 闸门口子打开后，没有显式"进沙箱"意图也停在受限：装了不等于接管
     assert (
         resolve_tier(
             trust=TRUST_THIRD_PARTY_GROUP,
             mode=MODE_RESTRICTED,
             install_state="ready",
             jail_available=True,
+        )
+        == TIER_LIMITED
+    )
+    # 意图 + 后端可用才发放 jailed
+    assert (
+        resolve_tier(
+            trust=TRUST_THIRD_PARTY_GROUP,
+            mode=MODE_RESTRICTED,
+            install_state="ready",
+            jail_available=True,
+            sandbox_enabled=True,
         )
         == TIER_JAILED
     )
@@ -129,6 +148,15 @@ def test_jail_gate_env_switch(monkeypatch: pytest.MonkeyPatch) -> None:
     assert jail_backends_available() is True
     assert (
         resolve_tier(trust=TRUST_THIRD_PARTY_GROUP, mode=MODE_RESTRICTED, install_state="ready")
+        == TIER_LIMITED
+    )
+    assert (
+        resolve_tier(
+            trust=TRUST_THIRD_PARTY_GROUP,
+            mode=MODE_RESTRICTED,
+            install_state="ready",
+            sandbox_enabled=True,
+        )
         == TIER_JAILED
     )
 
@@ -390,6 +418,55 @@ async def test_sandbox_api_owner_and_third_party_gate(
     with pytest.raises(Exception) as bad:
         await sandbox_api.patch_session_sandbox("web:ceo-1", {"mode": "root"})
     assert getattr(bad.value, "status_code", None) == 400
+
+
+@pytest.mark.asyncio
+async def test_sandbox_intent_is_explicit_and_password_gated(
+    isolated_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """进入沙箱是逐会话动作：要口令、只接受布尔、非受限模式不许开、离开受限即清意图。"""
+    from g3ku.runtime.api import sandbox as sandbox_api
+
+    monkeypatch.setattr(sandbox_api, "_session_exists", lambda key: True)
+    monkeypatch.setattr(sandbox_api, "install_state", lambda: {"state": "ready", "backend": "wsl_bwrap"})
+    monkeypatch.setattr(sandbox_api, "_verify_unlock_password", lambda pw: pw == "right")
+    key = "web:ceo-intent"
+
+    await sandbox_api.patch_session_sandbox(key, {"mode": MODE_RESTRICTED, "unlock_password": "right"})
+
+    with pytest.raises(Exception) as missing:
+        await sandbox_api.patch_session_sandbox(key, {"sandbox": True})
+    assert getattr(missing.value, "status_code", None) == 403
+    assert sandbox_state.get_session_sandbox(key) is False
+
+    entered = await sandbox_api.patch_session_sandbox(
+        key, {"sandbox": True, "unlock_password": "right"}
+    )
+    item = entered["item"]
+    assert item["sandbox_enabled"] is True
+    # 闸门默认关：意图在、jail 没接住 → 跑受限档，UI 据此显示"沙箱失效"
+    assert item["sandbox_failed"] is True
+    assert item["runs_in_jail"] is False
+    assert item["resolved_tier"] == TIER_LIMITED
+
+    with pytest.raises(Exception) as bad_value:
+        await sandbox_api.patch_session_sandbox(
+            key, {"sandbox": "yes", "unlock_password": "right"}
+        )
+    assert getattr(bad_value.value, "status_code", None) == 400
+
+    # 离开受限档会清掉沙箱意图，之后不许在 unrestricted 上补开
+    left = await sandbox_api.patch_session_sandbox(
+        key, {"mode": MODE_UNRESTRICTED, "unlock_password": "right"}
+    )
+    assert left["item"]["sandbox_enabled"] is False
+    assert sandbox_state.get_session_sandbox(key) is False
+    with pytest.raises(Exception) as wrong_mode:
+        await sandbox_api.patch_session_sandbox(
+            key, {"sandbox": True, "unlock_password": "right"}
+        )
+    assert getattr(wrong_mode.value, "status_code", None) == 400
 
 
 @pytest.mark.asyncio

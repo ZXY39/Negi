@@ -335,18 +335,25 @@ test("点面板外面收起风险面板，点面板内部不收起", async () =>
     assert.equal(ctx.elements.get("ceo-risk-panel").hidden, true);
 });
 
-function stubSandboxFetch(ctx, { mode, thirdParty, installState = "not_installed" }) {
-    const state = { mode };
+function stubSandboxFetch(ctx, { mode, thirdParty, installState = "not_installed", sandbox = false, runsInJail }) {
+    const state = { mode, sandbox };
     const patched = [];
+    const jailed = () => (
+        runsInJail !== undefined
+            ? Boolean(runsInJail)
+            : state.mode === "restricted" && state.sandbox && installState === "ready"
+    );
     const item = () => ({
         session_id: "web:shared",
         trust: thirdParty ? "third_party_dm" : "owner",
         mode: state.mode,
-        resolved_tier: state.mode === "restricted"
-            ? (installState === "ready" ? "jailed" : "readonly")
-            : "host_full",
+        resolved_tier: state.mode === "restricted" ? (jailed() ? "jailed" : "limited") : "host_full",
         install_state: installState,
         unlock_required: true,
+        sandbox_enabled: state.sandbox,
+        sandbox_available: installState === "ready" || installState === "partial",
+        sandbox_failed: state.sandbox && !jailed(),
+        runs_in_jail: jailed(),
     });
     ctx.fetch = async (_url, options = {}) => {
         if (!options.method || options.method === "GET") {
@@ -358,6 +365,7 @@ function stubSandboxFetch(ctx, { mode, thirdParty, installState = "not_installed
             return { ok: false, status: 403, json: async () => ({ detail: "unlock_password_invalid" }) };
         }
         state.mode = body.mode || state.mode;
+        if (typeof body.sandbox === "boolean") state.sandbox = body.sandbox;
         return { ok: true, json: async () => ({ ok: true, item: item() }) };
     };
     return patched;
@@ -366,7 +374,7 @@ function stubSandboxFetch(ctx, { mode, thirdParty, installState = "not_installed
 test("沙箱模式一行：行标题直接写状态，开关方向先弹二次确认", async () => {
     const ctx = loadGovernance({
         governanceItem: { enabled: false, mode: "all_pass", whitelist_tools: [], whitelist_customized: false },
-        extraIds: ["ceo-risk-sandbox-btn", "ceo-risk-sandbox-title"],
+        extraIds: ["ceo-risk-sandbox-btn", "ceo-risk-sandbox-title", "ceo-risk-sandbox-jail-btn"],
     });
     const patched = stubSandboxFetch(ctx, { mode: "unrestricted", thirdParty: false });
     const notified = [];
@@ -379,11 +387,16 @@ test("沙箱模式一行：行标题直接写状态，开关方向先弹二次�
     const row = ctx.elements.get("ceo-risk-sandbox-btn");
     const title = ctx.elements.get("ceo-risk-sandbox-title");
     assert.equal(row.attrs["aria-pressed"], "false");
-    assert.equal(title.textContent, "受限模式已关闭");
+    assert.equal(title.textContent, "全权限模式已开启");
+    assert.equal(
+        ctx.elements.get("ceo-risk-sandbox-jail-btn").hidden,
+        true,
+        "没装沙箱时没有沙箱按钮",
+    );
 
     ctx.elements.get("ceo-risk-panel").dispatch("click", { target: row });
     await settle();
-    assert.equal(dialog?.title, "进入受限模式？", "没装沙箱时开关表达的是受限");
+    assert.equal(dialog?.title, "进入受限模式？", "开关表达的是受限，不是沙箱");
     assert.equal(dialog?.confirmLabel, "进入受限模式");
     assert.equal(dialog?.input?.type, "password");
     assert.equal(dialog?.textFull, true, "影响说明要整段展示");
@@ -400,35 +413,72 @@ test("沙箱模式一行：行标题直接写状态，开关方向先弹二次�
     assert.deepEqual(notified, ["web:shared"], "切完要通知沙箱 iframe 重读");
 });
 
-test("装好沙箱后，同一开关的二次确认改叫开启/关闭沙箱模式", async () => {
+test("装好沙箱后：受限档多出「切换沙箱」，确认后意图入沙箱、标题改沙箱模式", async () => {
     const ctx = loadGovernance({
         governanceItem: { enabled: false, mode: "all_pass", whitelist_tools: [], whitelist_customized: false },
-        extraIds: ["ceo-risk-sandbox-btn", "ceo-risk-sandbox-title"],
+        extraIds: ["ceo-risk-sandbox-btn", "ceo-risk-sandbox-title", "ceo-risk-sandbox-jail-btn"],
     });
-    stubSandboxFetch(ctx, { mode: "unrestricted", thirdParty: false, installState: "ready" });
+    const patched = stubSandboxFetch(ctx, {
+        mode: "restricted",
+        thirdParty: false,
+        installState: "ready",
+        sandbox: false,
+    });
     let dialog = null;
     ctx.openConfirm = (options) => { dialog = options; };
 
     ctx.elements.get("ceo-risk-btn").dispatch("click");
     await settle();
-    assert.equal(
-        ctx.elements.get("ceo-risk-sandbox-title").textContent,
-        "沙箱模式已关闭",
-        "装好后同一行也按开/关写状态",
-    );
-    ctx.elements.get("ceo-risk-panel").dispatch("click", {
-        target: ctx.elements.get("ceo-risk-sandbox-btn"),
-    });
+    const title = ctx.elements.get("ceo-risk-sandbox-title");
+    const jail = ctx.elements.get("ceo-risk-sandbox-jail-btn");
+    assert.equal(title.textContent, "受限模式已开启", "装了不会自动显示成沙箱");
+    assert.equal(jail.hidden, false);
+    assert.equal(jail.textContent, "切换沙箱");
+    assert.equal(jail.disabled, false);
+
+    ctx.elements.get("ceo-risk-panel").dispatch("click", { target: jail });
     await settle();
-    assert.equal(dialog?.title, "开启沙箱模式？");
-    assert.equal(dialog?.confirmLabel, "开启沙箱模式");
-    assert.match(dialog?.text || "", /jail 内执行/);
+    assert.equal(dialog?.title, "进入沙箱模式？");
+    assert.equal(dialog?.confirmLabel, "进入沙箱模式");
+    assert.match(dialog?.text || "", /沙箱内执行/);
+    assert.deepEqual(plain(patched), [], "确认之前只弹窗");
+
+    await dialog.onConfirm({ value: "live-test-pass" });
+    assert.deepEqual(plain(patched), [{ sandbox: true, unlock_password: "live-test-pass" }]);
+    assert.equal(title.textContent, "沙箱模式已开启");
+    assert.equal(jail.textContent, "退出沙箱");
+});
+
+test("沙箱忙/坏掉时：标题回到受限，按钮显示「沙箱失效」且不可点", async () => {
+    const ctx = loadGovernance({
+        governanceItem: { enabled: false, mode: "all_pass", whitelist_tools: [], whitelist_customized: false },
+        extraIds: ["ceo-risk-sandbox-btn", "ceo-risk-sandbox-title", "ceo-risk-sandbox-jail-btn"],
+    });
+    stubSandboxFetch(ctx, {
+        mode: "restricted",
+        thirdParty: true,
+        installState: "ready",
+        sandbox: true,
+        runsInJail: false,
+    });
+    let dialog = null;
+    ctx.openConfirm = (options) => { dialog = options; };
+
+    ctx.elements.get("ceo-risk-btn").dispatch("click");
+    await settle();
+    const jail = ctx.elements.get("ceo-risk-sandbox-jail-btn");
+    assert.equal(ctx.elements.get("ceo-risk-sandbox-title").textContent, "受限模式已开启");
+    assert.equal(jail.textContent, "沙箱失效");
+    assert.equal(jail.disabled, true);
+    ctx.elements.get("ceo-risk-panel").dispatch("click", { target: jail });
+    await settle();
+    assert.equal(dialog, null, "失效态点击不弹确认");
 });
 
 test("第三方会话关闭沙箱：口令错留在二次确认里，口令对才切", async () => {
     const ctx = loadGovernance({
         governanceItem: { enabled: false, mode: "all_pass", whitelist_tools: [], whitelist_customized: false },
-        extraIds: ["ceo-risk-sandbox-btn", "ceo-risk-sandbox-title"],
+        extraIds: ["ceo-risk-sandbox-btn", "ceo-risk-sandbox-title", "ceo-risk-sandbox-jail-btn"],
     });
     const patched = stubSandboxFetch(ctx, { mode: "restricted", thirdParty: true });
     let dialog = null;
@@ -442,7 +492,7 @@ test("第三方会话关闭沙箱：口令错留在二次确认里，口令对�
 
     ctx.elements.get("ceo-risk-panel").dispatch("click", { target: row });
     await settle();
-    assert.equal(dialog?.title, "退出受限模式？");
+    assert.equal(dialog?.title, "切到全权限模式？");
     assert.match(dialog?.text || "", /exec 自身的形态守卫/);
 
     await assert.rejects(() => dialog.onConfirm({ value: "wrong" }), /口令不正确/);
@@ -451,7 +501,7 @@ test("第三方会话关闭沙箱：口令错留在二次确认里，口令对�
 
     await dialog.onConfirm({ value: "live-test-pass" });
     assert.equal(row.attrs["aria-pressed"], "false");
-    assert.equal(ctx.elements.get("ceo-risk-sandbox-title").textContent, "受限模式已关闭");
+    assert.equal(ctx.elements.get("ceo-risk-sandbox-title").textContent, "全权限模式已开启");
 });
 
 test("工具列表弹窗给长名称和说明留宽度，说明独占第二行", () => {

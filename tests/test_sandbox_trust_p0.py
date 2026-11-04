@@ -164,21 +164,30 @@ def test_unknown_external_session_fails_closed(registry) -> None:
 
 
 @pytest.mark.parametrize(
-    ("trust", "mode", "install", "expected"),
+    ("trust", "mode", "install", "sandbox", "expected"),
     [
-        (TRUST_OWNER, MODE_UNRESTRICTED, INSTALL_NOT_INSTALLED, TIER_HOST_FULL),
-        (TRUST_OWNER, MODE_RESTRICTED, INSTALL_NOT_INSTALLED, TIER_LIMITED),
-        (TRUST_OWNER, MODE_RESTRICTED, INSTALL_READY, TIER_JAILED),
-        (TRUST_THIRD_PARTY_GROUP, MODE_RESTRICTED, INSTALL_NOT_INSTALLED, TIER_LIMITED),
-        (TRUST_THIRD_PARTY_GROUP, MODE_RESTRICTED, INSTALL_READY, TIER_JAILED),
-        (TRUST_THIRD_PARTY_GROUP, MODE_UNRESTRICTED, INSTALL_READY, TIER_HOST_FULL),
+        (TRUST_OWNER, MODE_UNRESTRICTED, INSTALL_NOT_INSTALLED, False, TIER_HOST_FULL),
+        (TRUST_OWNER, MODE_RESTRICTED, INSTALL_NOT_INSTALLED, False, TIER_LIMITED),
+        # 装了不等于接管：没有逐会话沙箱意图就停在受限档
+        (TRUST_OWNER, MODE_RESTRICTED, INSTALL_READY, False, TIER_LIMITED),
+        (TRUST_OWNER, MODE_RESTRICTED, INSTALL_READY, True, TIER_JAILED),
+        (TRUST_THIRD_PARTY_GROUP, MODE_RESTRICTED, INSTALL_NOT_INSTALLED, True, TIER_LIMITED),
+        (TRUST_THIRD_PARTY_GROUP, MODE_RESTRICTED, INSTALL_READY, False, TIER_LIMITED),
+        (TRUST_THIRD_PARTY_GROUP, MODE_RESTRICTED, INSTALL_READY, True, TIER_JAILED),
+        (TRUST_THIRD_PARTY_GROUP, MODE_UNRESTRICTED, INSTALL_READY, True, TIER_HOST_FULL),
     ],
 )
-def test_tier_matrix(trust: str, mode: str, install: str, expected: str) -> None:
+def test_tier_matrix(trust: str, mode: str, install: str, sandbox: bool, expected: str) -> None:
     # `jail_available=True` 模拟 P1a 后端接进执行道之后的状态；默认（未接后端时）
     # 永不发放 jailed，见 test_jailed_is_never_granted_without_backends。
     assert (
-        resolve_tier(trust=trust, mode=mode, install_state=install, jail_available=True)
+        resolve_tier(
+            trust=trust,
+            mode=mode,
+            install_state=install,
+            jail_available=True,
+            sandbox_enabled=sandbox,
+        )
         == expected
     )
 

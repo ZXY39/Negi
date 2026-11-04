@@ -44,6 +44,8 @@ const MODE_ERROR_TEXT = {
   unlock_password_required: '这次切换需要项目解锁口令',
   unlock_password_invalid: '口令不正确',
   sandbox_mode_invalid: '档位取值不合法',
+  sandbox_requires_restricted: '先进入受限模式，才能切换沙箱',
+  sandbox_value_must_be_bool: '沙箱意图取值不合法',
   session_not_found: '会话不存在',
   writable_roots_owner_only: '只有 owner 会话能配额外可写目录',
 };
@@ -57,6 +59,9 @@ const state = {
   pollTimer: null,
   pendingMode: '',
   confirmMode: '',
+  // 确认弹窗弹的是模式还是"进/出沙箱"；两者共用一套口令确认。
+  confirmKind: '',
+  confirmSandbox: false,
   area: 'workspace',
 };
 
@@ -648,7 +653,31 @@ function renderSession(item) {
   $('roots-input').value = roots.join('\n');
   rootsField.open = roots.length > 0;
   syncSaveVisibility();
+  renderSandboxJailButton(item);
   renderFileSection();
+}
+
+// 进沙箱是独立动作：装了不代表接管，点了才切；jail 不可用时显示"沙箱失效"。
+function sandboxJailAction(item) {
+  if (!item || !isInstalled(state.status)) return '';
+  if (item.mode !== 'restricted') return '';
+  if (!item.sandbox_enabled) return 'enter';
+  return item.runs_in_jail ? 'exit' : 'failed';
+}
+
+function renderSandboxJailButton(item) {
+  const button = $('sandbox-jail-btn');
+  const action = sandboxJailAction(item);
+  button.hidden = !action;
+  if (!action) return;
+  button.dataset.jailAction = action;
+  button.disabled = action === 'failed';
+  button.textContent = action === 'exit' ? '退出沙箱' : action === 'failed' ? '沙箱失效' : '切换沙箱';
+  button.title = action === 'failed'
+    ? '沙箱当前不可用，这个会话正在受限模式下运行。'
+    : action === 'exit'
+      ? '退出后回到受限模式。'
+      : '让这个会话的数据面在沙箱内执行。';
 }
 
 function collectRoots() {
@@ -684,15 +713,12 @@ function syncSaveVisibility() {
 function impactItems(targetMode) {
   const current = state.current || {};
   const thirdParty = current.trust !== 'owner';
-  const installed = isInstalled(state.status);
   const cacheText = '切档在下一回合生效；暴露给模型的工具清单会变，下一次请求的缓存前缀失效，首回合要重新预热。';
   if (targetMode === 'restricted') {
     return [
       {
         title: '工具面',
-        text: installed
-          ? '收窄到受限集合；数据面工具在 jail 内执行。具体可用工具以会话的允许列表为准。'
-          : '收窄到受限集合：文件写入限本会话工作目录；默认不执行命令行、不派异步任务；具体可用工具以会话的允许列表为准。',
+        text: '收窄到受限集合；数据面在宿主受限执行（文件限本会话工作目录、exec 走 governed），要进沙箱请用「切换沙箱」。具体可用工具以会话的允许列表为准。',
       },
       { title: '缓存', text: cacheText },
       {
@@ -718,23 +744,71 @@ function impactItems(targetMode) {
   ];
 }
 
-// 没装成后端时没有"沙箱"可开：开关表达的是受限 / 无限制，确认文案跟着安装态走。
+// 模式开关只表达"受限 / 全权限"：进沙箱由独立按钮负责，文案不再借用"沙箱"。
 function modeLabels(turningOn) {
-  if (isInstalled(state.status)) {
-    return {
-      title: turningOn ? '开启沙箱模式？' : '关闭沙箱模式？',
-      confirm: turningOn ? '开启沙箱模式' : '关闭沙箱模式',
-      done: turningOn ? '已开启沙箱模式' : '已关闭沙箱模式',
-    };
-  }
   return {
-    title: turningOn ? '进入受限模式？' : '退出受限模式？',
-    confirm: turningOn ? '进入受限模式' : '退出受限模式',
-    done: turningOn ? '已进入受限模式' : '已退出受限模式',
+    title: turningOn ? '进入受限模式？' : '切到全权限模式？',
+    confirm: turningOn ? '进入受限模式' : '切到全权限模式',
+    done: turningOn ? '已进入受限模式' : '已切到全权限模式',
   };
 }
 
+function sandboxImpactItems(entering) {
+  const cacheText = '切档在下一回合生效；暴露给模型的工具清单会变，下一次请求的缓存前缀失效，首回合要重新预热。';
+  if (entering) {
+    return [
+      {
+        title: '工具面',
+        text: '数据面工具改为在沙箱内执行：文件读写落在会话卷，命令在 jail 里跑；具体可用工具以会话的允许列表为准。',
+      },
+      { title: '缓存', text: cacheText },
+      {
+        title: '安全',
+        text: '控制面（记忆、任务、cron、配置）仍然拒绝或走宿主正常车道；jail 后端不可用时本会话自动回到受限模式。',
+      },
+    ];
+  }
+  return [
+    {
+      title: '工具面',
+      text: '数据面回到宿主执行，只保留受限档的工具白名单与 exec 守卫。',
+    },
+    { title: '缓存', text: cacheText },
+    {
+      title: '安全',
+      text: '沙箱卷里的文件不再参与本会话；宿主受限档的读根边界继续生效。',
+    },
+  ];
+}
+
+function openSandboxConfirm(entering) {
+  state.confirmKind = 'sandbox';
+  state.confirmSandbox = Boolean(entering);
+  const labels = entering
+    ? { title: '进入沙箱模式？', confirm: '进入沙箱模式' }
+    : { title: '退出沙箱？', confirm: '退出沙箱' };
+  $('mode-confirm-title').textContent = labels.title;
+  const list = $('mode-confirm-impact');
+  list.textContent = '';
+  sandboxImpactItems(entering).forEach(({ title, text }) => {
+    const row = document.createElement('li');
+    const heading = document.createElement('strong');
+    heading.textContent = title;
+    const body = document.createElement('span');
+    body.textContent = text;
+    row.append(heading, body);
+    list.appendChild(row);
+  });
+  $('mode-confirm-password').value = '';
+  $('mode-confirm-error').hidden = true;
+  $('mode-confirm-accept').textContent = labels.confirm;
+  $('mode-confirm-backdrop').hidden = false;
+  window.requestAnimationFrame(() => $('mode-confirm-password').focus());
+}
+
 function openModeConfirm(targetMode) {
+  state.confirmKind = 'mode';
+  state.confirmSandbox = false;
   state.confirmMode = targetMode;
   const turningOn = targetMode === 'restricted';
   const labels = modeLabels(turningOn);
@@ -760,6 +834,8 @@ function openModeConfirm(targetMode) {
 function closeModeConfirm() {
   $('mode-confirm-backdrop').hidden = true;
   state.confirmMode = '';
+  state.confirmKind = '';
+  state.confirmSandbox = false;
 }
 
 function modeErrorText(error) {
@@ -768,8 +844,9 @@ function modeErrorText(error) {
 
 async function applyModeChange() {
   const sessionId = currentSessionId();
+  const kind = state.confirmKind;
   const targetMode = state.confirmMode;
-  if (!sessionId || !targetMode) return;
+  if (!sessionId || !kind) return;
   const password = $('mode-confirm-password').value.trim();
   const errorNode = $('mode-confirm-error');
   if (!password) {
@@ -777,9 +854,14 @@ async function applyModeChange() {
     errorNode.hidden = false;
     return;
   }
-  const body = { mode: targetMode, unlock_password: password };
-  const roots = collectRoots();
-  if (roots) body.writable_roots = roots;
+  const enteringSandbox = kind === 'sandbox' && state.confirmSandbox;
+  const body = kind === 'sandbox'
+    ? { sandbox: Boolean(state.confirmSandbox), unlock_password: password }
+    : { mode: targetMode, unlock_password: password };
+  if (kind === 'mode') {
+    const roots = collectRoots();
+    if (roots) body.writable_roots = roots;
+  }
   const accept = $('mode-confirm-accept');
   accept.disabled = true;
   try {
@@ -789,6 +871,15 @@ async function applyModeChange() {
     });
     closeModeConfirm();
     renderSession(payload.item || {});
+    if (kind === 'sandbox') {
+      const item = payload.item || {};
+      if (enteringSandbox && item.sandbox_failed) {
+        toast('已记录，沙箱暂不可用：jail 后端还没接进执行道，本会话继续按受限模式运行');
+        return;
+      }
+      toast(`${enteringSandbox ? '已进入沙箱模式' : '已退出沙箱'}，下一回合生效`);
+      return;
+    }
     toast(`${modeLabels(targetMode === 'restricted').done}，下一回合生效`);
   } catch (error) {
     errorNode.textContent = modeErrorText(error);
@@ -907,6 +998,11 @@ function bindEvents() {
   });
 
   $('save-mode-btn').addEventListener('click', onSave);
+  $('sandbox-jail-btn').addEventListener('click', () => {
+    const action = $('sandbox-jail-btn').dataset.jailAction || '';
+    if (action === 'enter') openSandboxConfirm(true);
+    else if (action === 'exit') openSandboxConfirm(false);
+  });
   $('roots-input').addEventListener('input', syncSaveVisibility);
   $('mode-confirm-cancel').addEventListener('click', closeModeConfirm);
   $('mode-confirm-accept').addEventListener('click', applyModeChange);
@@ -974,7 +1070,15 @@ async function main() {
   }
 }
 
-window.__sandboxTestHooks = { collectSessionOptions, loadSessions, renderFileSection, state };
+window.__sandboxTestHooks = {
+  collectSessionOptions,
+  loadSessions,
+  renderFileSection,
+  renderSandboxJailButton,
+  openSandboxConfirm,
+  applyModeChange,
+  state,
+};
 
 document.addEventListener('DOMContentLoaded', main);
 

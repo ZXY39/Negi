@@ -5682,6 +5682,46 @@ textarea {
 
 /* 沙箱模式一行：标题 + 状态在左，开关在右，整行可点。开关只画状态，
    语义由外层按钮的 aria-pressed 表达（读屏不会多出一个无名的开关）。 */
+.ceo-risk-sandbox-row {
+    display: flex;
+    align-items: stretch;
+    gap: 6px;
+}
+
+.ceo-risk-sandbox-row .ceo-risk-entry-sandbox {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+/* 进/出沙箱是独立动作：不加确认就不会切，开关本身只管受限/全权限。 */
+.ceo-risk-jail-btn {
+    flex: 0 0 auto;
+    padding: 0 10px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+    border-radius: 11px;
+    background: color-mix(in srgb, var(--bg-app) 80%, transparent);
+    color: var(--text-primary);
+    font-size: 0.72rem;
+    font-weight: 600;
+    line-height: 1.2;
+    cursor: pointer;
+    transition: border-color 0.16s ease, background-color 0.16s ease;
+}
+
+.ceo-risk-jail-btn:hover:not(:disabled) {
+    border-color: color-mix(in srgb, var(--brand-primary) 40%, var(--border-color));
+    background: var(--bg-panel);
+}
+
+.ceo-risk-jail-btn[hidden] {
+    display: none !important;
+}
+
+.ceo-risk-jail-btn:disabled {
+    opacity: 0.55;
+    cursor: default;
+}
+
 .ceo-risk-entry-sandbox {
     flex-direction: row;
     align-items: center;

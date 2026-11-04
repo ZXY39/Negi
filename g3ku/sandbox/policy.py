@@ -189,11 +189,19 @@ def resolve_tier(
     mode: Any,
     install_state: Any,
     jail_available: bool | None = None,
+    sandbox_enabled: bool = False,
 ) -> str:
-    """意图 × 安装态 → 实际执行面。"""
+    """意图 × 安装态 → 实际执行面。
+
+    `sandbox_enabled` 是逐会话的显式"进沙箱"意图：装好沙箱不会自动接管执行，
+    受限档默认停在宿主（``limited``），只有操作员点过"切换沙箱"才可能拿到
+    ``jailed``；jail 不可用时该意图照旧回落 ``limited``（UI 显示"沙箱失效"）。
+    """
     normalized_mode = str(mode or "").strip().lower()
     if normalized_mode != MODE_RESTRICTED:
         return TIER_HOST_FULL
+    if not sandbox_enabled:
+        return TIER_LIMITED
     if jail_available is None:
         jail_available = jail_backends_available()
     if not jail_available:
@@ -219,6 +227,8 @@ class SessionPolicy:
     # 受限档生效集合；None = 用默认集合。两项都只在 limited 档有意义。
     allowed_tool_names: frozenset[str] | None = None
     explicit_allowed_tool_names: frozenset[str] | None = None
+    # 操作员是否显式要求这个会话进沙箱（与 mode 正交；只在 restricted 下有意义）。
+    sandbox_enabled: bool = False
 
     @property
     def restricted(self) -> bool:
@@ -311,7 +321,13 @@ def session_policy(
     if normalized_mode not in {MODE_RESTRICTED, MODE_UNRESTRICTED}:
         normalized_mode = _stored_mode(raw_key) or default_mode_for_trust(trust)
     install = str(install_state or "").strip().lower() or _probed_install_state()
-    tier = resolve_tier(trust=trust, mode=normalized_mode, install_state=install)
+    sandbox_enabled = normalized_mode == MODE_RESTRICTED and _stored_sandbox(raw_key)
+    tier = resolve_tier(
+        trust=trust,
+        mode=normalized_mode,
+        install_state=install,
+        sandbox_enabled=sandbox_enabled,
+    )
     effective_tools: frozenset[str] | None = None
     explicit_tools: frozenset[str] | None = None
     if tier == TIER_LIMITED:
@@ -324,9 +340,22 @@ def session_policy(
         mode=normalized_mode,
         install_state=install,
         tier=tier,
+        sandbox_enabled=sandbox_enabled,
         allowed_tool_names=effective_tools,
         explicit_allowed_tool_names=explicit_tools,
     )
+
+
+def _stored_sandbox(session_key: str) -> bool:
+    # 惰性导入：`state` 依赖本模块的常量，模块级导入会成环。
+    try:
+        from g3ku.sandbox.state import get_session_sandbox
+    except Exception:  # noqa: BLE001
+        return False
+    try:
+        return bool(get_session_sandbox(session_key))
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _stored_mode(session_key: str) -> str:

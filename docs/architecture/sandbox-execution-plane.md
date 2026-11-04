@@ -17,29 +17,35 @@
 
 ## 档位模型（意图 × 安装态）
 
-会话只存**一档意图**（`Session.metadata["sandbox"]["mode"]`），实际执行面由**安装态**
-解析，档位本身不入库：
+会话存两层意图：`mode`（`restricted` / `unrestricted`）与逐会话的**沙箱意图**
+（`<数据根>/sandbox/session-modes.json` 的 `sandbox` 段，布尔）。实际执行面由
+`mode + 沙箱意图 + 安装态 + jail 闸门` 解析，档位本身不入库：
 
-| 安装态 | `restricted` | `unrestricted` |
-|---|---|---|
-| `not_installed` / `runtime_missing` / `partial`（该信任档必需维度不全） | `limited` | `host_full` |
-| `ready`，且 jail 后端已接进执行道 | `jailed` | `host_full` |
-| `ready`，闸门未开 | `limited` | `host_full` |
+| `mode` | 沙箱意图 | 安装态 / 闸门 | 实际档位 |
+|---|---|---|---|
+| `unrestricted` | 忽略（离开受限档即清掉） | 任意 | `host_full` |
+| `restricted` | 无 | 任意 | `limited` |
+| `restricted` | 有 | jail 后端已接进执行道且安装态满足该信任档 | `jailed` |
+| `restricted` | 有 | jail 后端不可用 / 闸门未开 / 必需维度不全 | `limited`（沙箱失效） |
 
+- **装了不等于接管**：安装态 `ready` 只让「切换沙箱」按钮变得可用；`restricted` 会话
+  不会自动升 `jailed`——进沙箱是操作员在会话卡上点「切换沙箱」并过口令确认的显式动作。
 - **默认意图按信任派生**：`third_party*` → `restricted`，`owner` → `unrestricted`。
   操作员本地会话因此保持既有行为（宿主执行 + 现有 guards + 记忆注入 + 可派任务）。
-- **装/卸沙箱不改任何会话元数据**：意图不动，档位随安装态变；`restricted` 会话在
-  安装后自动升 `jailed`，卸载后自动回 `limited`。安装态读数最多滞后一个重探周期
-  （见「档位存储与 API」的安装态条目），所以自动升降发生在重探之后的下一个回合边界。
+- **沙箱失效自动回落**：意图还在、jail 却接不住（后端坏掉、闸门关闭、`partial` 对
+  第三方缺维度）时解析为 `limited`，界面把按钮显示成「沙箱失效」并禁用；后端恢复后
+  下一回合自动回到 `jailed`。安装态读数最多滞后一个重探周期（见「档位存储与 API」
+  的安装态条目）。
+- **离开受限档清意图**：`mode` 切成 `unrestricted` 时服务端同时清掉沙箱意图，避免再切回
+  `restricted` 时恢复一个界面上早已看不见的沙箱状态；`unrestricted` 上直接开沙箱回 400。
 - **`partial` 只服务 owner**：`third_party` 的必需维度（`fs_read` / `fs_write` / `network`）
   缺一维就不给它 jail——把"缺一维"当"全缺"或反过来，两种都是假安全。
 - 档位变化**只在回合边界生效**，不打断在飞回合。
 - 空会话键（无会话上下文的装配、CLI、检查实例）按 `host_full` 处理：外部渠道的每一轮
   都带 `ext:` 键，走不到这一支；按第三方处理会让所有无会话的装配路径失去工具。
 
-本层解析出 `limited` 与 `host_full`；`jailed` 的分支在 `resolve_tier` 里已经写好，
-但要等 jail 后端（manager + router）接进执行道、`JAIL_BACKENDS_AVAILABLE` 打开之后才会发放。
-在那之前工具面与读根判据已经就位，接后端只改这一处开关。
+`jailed` 分支的实际发放仍由 `JAIL_BACKENDS_AVAILABLE`（或 `G3KU_SANDBOX_ENABLE_JAIL`）
+把最后一道门：装好后端不等于接管执行道。
 
 ## 头部沙箱声明
 
@@ -148,8 +154,9 @@ pinned contract 同时带 `session_mode` 与受限档的 `session_workspace_dir:
 ## 档位存储与 API
 
 - **意图存储**：`<数据根>/sandbox/session-modes.json`，进程内缓存、变更时整份原子落盘。
-  换工作区不丢开关；每回合解析只读内存。`operator_unlocks` 同文件记"谁在什么时候用口令
-  把会话放到 `unrestricted`"。
+  换工作区不丢开关；每回合解析只读内存。`sessions` 存 `mode`，`sandbox` 存逐会话的
+  进沙箱意图；`operator_unlocks` 同文件记"谁在什么时候用口令把会话放到
+  `unrestricted`"或切进/切出沙箱。
 - **安装态**：`g3ku/sandbox/probe.py` 探测（Windows 扫已安装的 WSL 发行版、Linux 查 bwrap 与
   非特权 userns、macOS 查 `sandbox-exec`、任意平台回退容器运行时），结论按逐维度强制力
   上报并缓存在进程内。缓存超过 `INSTALL_STATE_TTL_SECONDS` 后，下一次读取**返回旧值并在后台
@@ -175,7 +182,7 @@ pinned contract 同时带 `session_mode` 与受限档的 `session_workspace_dir:
 | 端点 | 契约 |
 |---|---|
 | `GET /api/ceo/sessions/{id}/sandbox` | 返回 `{trust, mode, stored_mode, default_mode, resolved_tier, tier_label, install_state, backend, enforcement, ui_labels, unlock_required, operator_unlock, tasks_allowed, writable_roots, allowed_tools, allowed_tools_customized, default_allowed_tools, fixed_tools, tool_warnings, exec_allowed, exec_requires_governed}` |
-| `PATCH /api/ceo/sessions/{id}/sandbox` | 改意图：`{mode?, unlock_password?, writable_roots?}`；**任何信任级的开/关沙箱**（`mode` 与当前意图不同）都必须带项目解锁口令（`unwrap_with_password` 只读校验），通过后记 `operator_unlock` + 审计；`mode` 与原意图相同或只传 `writable_roots` 时不走口令闸。`writable_roots` 只对 owner 开放（D14：交付目录常在工作区外），third_party 传了直接 403；返回体带 `effective_from: "next_turn"` |
+| `PATCH /api/ceo/sessions/{id}/sandbox` | 改意图：`{mode?, sandbox?, unlock_password?, writable_roots?}`；**任何信任级的模式切换或进/出沙箱**（`mode` 或 `sandbox` 与当前值不同）都必须带项目解锁口令（`unwrap_with_password` 只读校验），通过后记 `operator_unlock` + 审计；两个值都没变或只传 `writable_roots` 时不走口令闸。`sandbox` 只收布尔，且要求目标是 `restricted`（`unrestricted` 上开沙箱回 400）；`mode` 切到 `unrestricted` 时服务端同时清掉沙箱意图。`writable_roots` 只对 owner 开放（D14：交付目录常在工作区外），third_party 传了直接 403；返回体带 `effective_from: "next_turn"` |
 | `GET/PATCH /api/ceo/sessions/{id}/sandbox/tools` | 受限模式的按会话工具列表。GET 返回生效集合、默认集合、运行时固定项、逐工具 warning 与 `exec_allowed`；PATCH（`{allowed_tools, unlock_password}`）必须带项目解锁口令，写入 session state 并写 `sandbox_tools_changed` 审计；与默认集合完全一致时清掉 override。返回 `effective_from: "next_turn"` |
 | `GET /api/sandbox/status` | 全局安装态、后端、逐维度强制力、`ui_labels`；`?refresh=1` 重探 |
 | `POST /api/sandbox/refresh` | 重探并返回新读数 |
@@ -191,17 +198,19 @@ pinned contract 同时带 `session_mode` 与受限档的 `session_workspace_dir:
 左主列（会话 + 文件）与右副列（运行时 + 安装）。右副列的运行时默认展开、
 安装卡默认折叠，两卡自上而下排列，右列底边与左列对齐。开页即重探一次安装态。
 入口有两处：侧栏「沙箱」、CEO 权限面板里的**就地开关**——排在「命令行风险拦截设置」上面，
-整行可点、右侧画开关。行标题把开关方向和当前状态写在一起，名字跟安装态走：后端没装成时
-`unrestricted` → 「受限模式已关闭」、`restricted` → 「受限模式已开启」；后端装好时
-`unrestricted` → 「沙箱模式已关闭」、`restricted` → 「沙箱模式已开启」；档位还没读到时只写
-中性标题「沙箱模式」。行内只有这一行标题。
+整行可点、右侧画开关。模式开关只表达受限/全权限：行标题写
+`unrestricted` → 「全权限模式已开启」、`restricted` → 「受限模式已开启」、档位还没读到 → 中性
+「沙箱模式」。装好沙箱后，受限行右侧多出**沙箱按钮**，三态由服务端读数决定：无沙箱意图 →
+「切换沙箱」；意图在且 `runs_in_jail` → 「退出沙箱」；意图在但 jail 接不住 → 「沙箱失效」
+（禁用）。未安装或不在受限档时整颗按钮不出现。进/出沙箱各自弹二次确认并要项目解锁口令，
+退出文案明确"回到受限模式：数据面回宿主执行，只保留白名单与 exec 守卫"。
 受限模式下同一面板显示「允许使用的工具列表」；「命令行风险拦截设置」只在 `unrestricted`
 或受限且生效工具包含 `exec` 时显示。工具列表对话框列出 CEO 可见工具，运行时固定项勾选且
 不可改，危险工具（`exec` / `process_kill` / `create_async_task` / `skill-installer` /
 `register_stickers`）默认不勾选但可勾选并附后果说明；保存必须输入项目解锁口令。
 **开和关都弹二次确认**（`openConfirm` 的 password 输入，`textFull` + `inputPlain`：影响说明
-整段展示不出滚动条、口令行不带外层框），确认里逐条写工具面 / 缓存 / 安全的变化；未装后端时
-标题用「进入受限模式 / 退出受限模式」，装好后才是「开启沙箱模式 / 关闭沙箱模式」。成功后停在
+整段展示不出滚动条、口令行不带外层框），确认里逐条写工具面 / 缓存 / 安全的变化；模式切换的
+标题固定用「进入受限模式 / 切到全权限模式」，装好沙箱后也不改口。成功后停在
 本面板并通知沙箱 iframe 重读（`negi-sandbox-refresh`）。页面嵌在同源 iframe 里，主题跟随外壳
 （`data-theme` 由父页经 postMessage 同步）；会话列表拿不到时退化成手填会话 ID，不让页面卡在
 "加载中"。
@@ -217,15 +226,18 @@ pinned contract 同时带 `session_mode` 与受限档的 `session_workspace_dir:
 同样落到 `host_full`），所以渠道会话的档位在本页同样可改。文件卡跟着实际档位走：`jailed`
 会话列卷内 `workspace` / `inbox` / `outbox`；`limited` / `host_full` 会话不列卷，改为显示宿主
 `session-workspaces/<键>-<摘要>` 落点与复制按钮（那里才是模型真正写文件的地方），导入、
-导出、重置对非 jailed 会话一律不出现。额外可写目录收进
+导出、重置对非 jailed 会话一律不出现。会话卡信任/档位徽标旁是同款三态沙箱按钮（切换 / 退出 /
+失效，未安装不出现），它与模式单选项分开：单选项始终只是「受限 / 全权限」，进沙箱走按钮的
+二次确认 + 口令。额外可写目录收进
 `<details>` 折叠区、owner 才出现且已有值时默认展开。运行时默认展开、卡头不写副标题，
 安装卡默认折叠；运行时卡内只显示读数与提示，不设第二个安装入口。两卡自上而下排列，
 右列底边与左列对齐（差值由卡间距吸收）；运行时的空按钮行与空提示不占布局，避免把右列撑高。改档保存走页内二次确认
 弹窗（影响说明 + 项目解锁口令），只存可写目录时不弹口令框；「保存」按钮只在档位或可写目录
 与已存值不同时出现。
 
-`ui_labels` 由服务端按安装态给出（未安装「受限 / 全权限」、已安装「开启沙箱 / 关闭沙箱」），
-前端不自己判安装态。文件管理一族端点按**实际档位**发口：安装态 `ready` / `partial` 之上
+`ui_labels` 固定给模式开关的「受限 / 全权限」两档；沙箱状态由
+`mode`、`sandbox_enabled`、`runs_in_jail`、`sandbox_failed` 四个读数表达。
+文件管理一族端点按**实际档位**发口：安装态 `ready` / `partial` 之上
 还要会话被发放了 `jailed`，否则 409 `session_not_jailed`——受限档在宿主跑时卷是空壳，
 列出它等于告诉操作员"没有文件"。`/sandbox/status.file_management_available` 用同一条判据
 （安装态且 jail 闸门已开），页面据此在非 jailed 会话上改给宿主 `session-workspaces` 落点。
@@ -435,6 +447,11 @@ MCP 网关以固定身份 `negi-mcp` 出现在每条入站消息里，所以「�
   （前门 `_sandbox_read_roots` / `_sandbox_write_roots`）。
 - 群聊工具"看不到但不报错" → 曝光层收窄；"看得到但被拒" → 执行层打回，两者文案不同。
 - 群聊本来能用的工具突然没了 → 查注册表条目的 `trust`（粘性，只降不升）。
+- 装好沙箱后会话仍显示受限模式 → 正常：进沙箱是逐会话点「切换沙箱」，装了不会自动接管；
+  看 `sandbox_enabled` 是否为 true。
+- 沙箱按钮显示「沙箱失效」 → 意图在、`runs_in_jail=false`：查
+  `GET /api/sandbox/status` 的 `install_state` 与 `file_management_available`（后者并入
+  jail 闸门），闸门没开时任何会话都不会被发放 `jailed`。
 - 装了/卸了沙箱但会话档位没变 → 安装态是全局读数、档位在回合边界才生效，且读数最多
   滞后一个重探周期；先看 `GET /api/sandbox/status` 的 `install_state`，不对就 `?refresh=1`。
 - 文件卡是空的 → 先看该会话 `runs_in_jail`：`false` 表示它跑在宿主受限档，文件在

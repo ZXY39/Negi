@@ -36,6 +36,8 @@ _MODES_PATH: Path | None = None
 _UNLOCKS: dict[str, dict[str, str]] = {}
 _ROOTS: dict[str, list[str]] = {}
 _TOOLS: dict[str, list[str]] = {}
+# 逐会话的"进沙箱"意图。只在 `restricted` 之上生效：没有它，受限档停在宿主。
+_SANDBOX: dict[str, bool] = {}
 _INSTALL: dict[str, Any] | None = None
 _INSTALL_CHECKED_AT: float = 0.0
 _INSTALL_PROBING = False
@@ -104,6 +106,13 @@ def _load_locked() -> dict[str, str]:
                 cleaned = _normalized_tool_names(value)
                 if cleaned:
                     _TOOLS[normalized_key] = cleaned
+    sandbox = payload.get("sandbox") if isinstance(payload, dict) else None
+    if isinstance(sandbox, dict):
+        _SANDBOX.clear()
+        for key, value in sandbox.items():
+            normalized_key = str(key or "").strip()
+            if normalized_key and value:
+                _SANDBOX[normalized_key] = True
     _MODES = modes
     return modes
 
@@ -248,11 +257,39 @@ def clear_session_mode(session_key: Any) -> None:
         removed = _TOOLS.pop(key, None) is not None or removed
         removed = _ROOTS.pop(key, None) is not None or removed
         removed = _UNLOCKS.pop(key, None) is not None or removed
+        removed = _SANDBOX.pop(key, None) is not None or removed
         if not removed:
             return
         _write_locked(modes)
         _MODES.clear()
         _MODES.update(modes)
+
+
+def get_session_sandbox(session_key: Any) -> bool:
+    """该会话是否显式要求进沙箱。默认 False：装了沙箱也不自动接管执行。"""
+    key = str(session_key or "").strip()
+    if not key:
+        return False
+    with _LOCK:
+        _load_locked()
+        return bool(_SANDBOX.get(key))
+
+
+def set_session_sandbox(session_key: Any, enabled: Any) -> bool:
+    key = str(session_key or "").strip()
+    if not key:
+        raise ValueError("session_key_required")
+    value = bool(enabled)
+    with _LOCK:
+        modes = dict(_load_locked())
+        if bool(_SANDBOX.get(key)) == value:
+            return value
+        if value:
+            _SANDBOX[key] = True
+        else:
+            _SANDBOX.pop(key, None)
+        _write_locked(modes)
+    return value
 
 
 def _write_locked(modes: dict[str, str]) -> None:
@@ -266,6 +303,7 @@ def _write_locked(modes: dict[str, str]) -> None:
         "operator_unlocks": _UNLOCKS,
         "writable_roots": {key: list(value) for key, value in sorted(_ROOTS.items())},
         "allowed_tools": {key: list(value) for key, value in sorted(_TOOLS.items())},
+        "sandbox": {key: True for key in sorted(_SANDBOX)},
     }
     temp = path.with_suffix(path.suffix + ".tmp")
     temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -356,6 +394,7 @@ def reset_sandbox_state_for_tests() -> None:
         _UNLOCKS.clear()
         _ROOTS.clear()
         _TOOLS.clear()
+        _SANDBOX.clear()
 
 
 __all__ = [
@@ -363,6 +402,7 @@ __all__ = [
     "clear_session_mode",
     "get_session_allowed_tools",
     "get_session_mode",
+    "get_session_sandbox",
     "get_writable_roots",
     "install_state",
     "install_state_name",
@@ -372,5 +412,6 @@ __all__ = [
     "reset_sandbox_state_for_tests",
     "set_session_allowed_tools",
     "set_session_mode",
+    "set_session_sandbox",
     "set_writable_roots",
 ]
