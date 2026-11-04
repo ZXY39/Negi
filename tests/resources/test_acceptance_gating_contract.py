@@ -187,8 +187,8 @@ async def test_create_async_task_derives_acceptance_from_prompt() -> None:
         __g3ku_runtime={"session_key": "web:test"},
     )
 
-    assert captured["requires_final_acceptance"] is True
     assert captured["final_acceptance_prompt"] == "核验最终交付物"
+    assert "requires_final_acceptance" not in captured
 
 
 @pytest.mark.asyncio
@@ -214,4 +214,5 @@ async def test_create_async_task_retired_flag_cannot_enable_acceptance() -> None
         __g3ku_runtime={"session_key": "web:test"},
     )
 
-    assert captured["requires_final_acceptance"] is False
+    assert captured["final_acceptance_prompt"] == ""
+    assert "requires_final_acceptance" not in captured

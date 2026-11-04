@@ -4871,10 +4871,9 @@ class MainRuntimeService:
         task_text: str,
         core_requirement: str,
         execution_policy: dict[str, Any] | None,
-        requires_final_acceptance: bool,
         final_acceptance_prompt: str,
     ) -> dict[str, Any]:
-        _ = execution_policy, requires_final_acceptance, final_acceptance_prompt
+        _ = execution_policy, final_acceptance_prompt
         candidate_target = self._normalize_async_task_target_text(core_requirement or task_text)
         candidate_keywords = self._async_task_keyword_fingerprint(core_requirement or task_text)
         matched_task_ids: list[str] = []
@@ -4962,7 +4961,6 @@ class MainRuntimeService:
         task_text: str,
         core_requirement: str,
         execution_policy: dict[str, Any] | None,
-        requires_final_acceptance: bool,
         final_acceptance_prompt: str,
     ) -> dict[str, Any] | None:
         model_refs = list(self.node_runner._acceptance_model_refs or self.node_runner._execution_model_refs)
@@ -4982,7 +4980,6 @@ class MainRuntimeService:
                                 'task_text': str(task_text or '').strip(),
                                 'core_requirement': str(core_requirement or '').strip(),
                                 'execution_policy': dict(execution_policy or {}),
-                                'requires_final_acceptance': bool(requires_final_acceptance),
                                 'final_acceptance_prompt': str(final_acceptance_prompt or '').strip(),
                             },
                             'running_session_tasks': self._running_async_task_review_payload(session_id),
@@ -5025,7 +5022,6 @@ class MainRuntimeService:
         task_text: str,
         core_requirement: str,
         execution_policy: dict[str, Any] | None,
-        requires_final_acceptance: bool,
         final_acceptance_prompt: str,
     ) -> dict[str, Any]:
         normalized_session_id = self._normalize_session_key(session_id)
@@ -5034,7 +5030,6 @@ class MainRuntimeService:
             task_text=task_text,
             core_requirement=core_requirement,
             execution_policy=dict(execution_policy or {}),
-            requires_final_acceptance=bool(requires_final_acceptance),
             final_acceptance_prompt=str(final_acceptance_prompt or '').strip(),
         )
         if str(rule_decision.get('decision') or '').strip() != 'approve_new':
@@ -5055,7 +5050,6 @@ class MainRuntimeService:
                 task_text=task_text,
                 core_requirement=core_requirement,
                 execution_policy=dict(execution_policy or {}),
-                requires_final_acceptance=bool(requires_final_acceptance),
                 final_acceptance_prompt=str(final_acceptance_prompt or '').strip(),
             )
         except Exception:
@@ -5076,7 +5070,6 @@ class MainRuntimeService:
         task_text: str,
         core_requirement: str,
         execution_policy: dict[str, Any] | None,
-        requires_final_acceptance: bool,
         final_acceptance_prompt: str,
     ) -> dict[str, Any]:
         normalized_session_id = self._normalize_session_key(session_id)
@@ -5086,7 +5079,6 @@ class MainRuntimeService:
             task_text=task_text,
             core_requirement=core_requirement,
             execution_policy=dict(execution_policy or {}),
-            requires_final_acceptance=bool(requires_final_acceptance),
             final_acceptance_prompt=str(final_acceptance_prompt or '').strip(),
         )
 

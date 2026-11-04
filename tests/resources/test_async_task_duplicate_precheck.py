@@ -54,7 +54,6 @@ async def test_precheck_rejects_exact_core_requirement_duplicate(tmp_path: Path)
             task_text="整理本周用户投诉并给出处理建议",
             core_requirement="整理本周用户投诉并给出处理建议",
             execution_policy={"mode": "focus"},
-            requires_final_acceptance=False,
             final_acceptance_prompt="",
         )
 
@@ -102,7 +101,6 @@ async def test_precheck_reports_all_matched_duplicate_task_ids(tmp_path: Path):
             task_text="整理本周用户投诉并给出处理建议",
             core_requirement="整理本周用户投诉并给出处理建议",
             execution_policy={"mode": "focus"},
-            requires_final_acceptance=False,
             final_acceptance_prompt="",
         )
 
@@ -148,7 +146,6 @@ async def test_precheck_skips_llm_review_when_disabled_in_config(tmp_path: Path)
             task_text="设计续费流失挽回实验方案",
             core_requirement="设计续费流失挽回实验方案",
             execution_policy={"mode": "focus"},
-            requires_final_acceptance=False,
             final_acceptance_prompt="",
         )
 
@@ -189,7 +186,6 @@ async def test_precheck_excludes_paused_tasks_from_duplicate_pool(tmp_path: Path
             task_text="整理北美客户续费流失原因",
             core_requirement="整理北美客户续费流失原因",
             execution_policy={"mode": "focus"},
-            requires_final_acceptance=False,
             final_acceptance_prompt="",
         )
 
@@ -231,7 +227,6 @@ async def test_precheck_excludes_failed_terminal_tasks_from_duplicate_pool(tmp_p
             task_text="整理北美客户续费流失原因",
             core_requirement="整理北美客户续费流失原因",
             execution_policy={"mode": "focus"},
-            requires_final_acceptance=False,
             final_acceptance_prompt="",
         )
 
@@ -262,7 +257,6 @@ async def test_precheck_allows_new_task_when_session_has_no_unfinished_tasks(tmp
             task_text="设计续费流失挽回实验方案",
             core_requirement="设计续费流失挽回实验方案",
             execution_policy={"mode": "focus"},
-            requires_final_acceptance=False,
             final_acceptance_prompt="",
         )
 
@@ -315,7 +309,6 @@ async def test_precheck_uses_llm_to_allow_distinct_new_task(tmp_path: Path):
             task_text="设计续费流失挽回实验方案",
             core_requirement="设计续费流失挽回实验方案",
             execution_policy={"mode": "focus"},
-            requires_final_acceptance=False,
             final_acceptance_prompt="",
         )
 
@@ -369,7 +362,6 @@ async def test_precheck_uses_llm_to_reject_fuzzy_duplicate(tmp_path: Path):
             task_text="汇总重点客户流失预警并整理结论",
             core_requirement="汇总重点客户流失预警并整理结论",
             execution_policy={"mode": "focus"},
-            requires_final_acceptance=False,
             final_acceptance_prompt="",
         )
 
@@ -423,7 +415,6 @@ async def test_precheck_returns_append_notice_decision_when_old_task_needs_new_c
             task_text="整理重点客户流失信号并新增董事会验收格式",
             core_requirement="整理重点客户流失信号并新增董事会验收格式",
             execution_policy={"mode": "focus"},
-            requires_final_acceptance=True,
             final_acceptance_prompt="必须按董事会模板输出",
         )
 
@@ -466,7 +457,6 @@ async def test_precheck_falls_back_to_approve_when_llm_review_is_unavailable(tmp
             task_text="汇总重点客户流失预警并整理结论",
             core_requirement="汇总重点客户流失预警并整理结论",
             execution_policy={"mode": "focus"},
-            requires_final_acceptance=False,
             final_acceptance_prompt="",
         )
 

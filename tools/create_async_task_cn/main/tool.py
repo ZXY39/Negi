@@ -122,7 +122,6 @@ class _CreateAsyncTaskHandler(Tool):
             task_text=str(task or '').strip(),
             core_requirement=normalized_core_requirement,
             execution_policy=normalized_execution_policy.model_dump(mode='json'),
-            requires_final_acceptance=requires_final_acceptance,
             final_acceptance_prompt=final_acceptance_prompt,
         )
         decision = str(precheck.get('decision') or '').strip()
@@ -142,7 +141,6 @@ class _CreateAsyncTaskHandler(Tool):
                 task_text=str(task or '').strip(),
                 core_requirement=normalized_core_requirement,
                 execution_policy=normalized_execution_policy.model_dump(mode='json'),
-                requires_final_acceptance=requires_final_acceptance,
                 final_acceptance_prompt=final_acceptance_prompt,
             )
             guard_decision = str((create_guard or {}).get('decision') or '').strip()
