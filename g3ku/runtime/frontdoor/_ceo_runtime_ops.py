@@ -211,7 +211,7 @@ from main.service.create_async_task_contract import (
 
 from . import skill_roster as _skill_roster
 from ._ceo_support import CeoFrontDoorSupport
-from .message_builder import CeoMessageBuilder, drop_existing_internal_rule_seeds
+from .message_builder import CeoMessageBuilder, prepare_internal_prompt_seeds
 from .prompt_cache_contract import DEFAULT_CACHE_FAMILY_REVISION, build_frontdoor_prompt_contract
 from .session_temp_dir import ceo_session_temp_dir
 from .session_workspace import ceo_session_workspace_dir
@@ -5683,6 +5683,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "This is a background heartbeat.",
             "## EVENT BUNDLE",
             "# Heartbeat Rules",
+            "[CRON INTERNAL EVENT]",
+            "你接收到了之前你定时的任务，如下：",
         )
         count = 0
         for item in list(messages or []):
@@ -5752,6 +5754,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "This is a background heartbeat.",
             "## EVENT BUNDLE",
             "# Heartbeat Rules",
+            "[CRON INTERNAL EVENT]",
+            "你接收到了之前你定时的任务，如下：",
         )
         if not any(marker in first_text or marker in first_user_text for marker in markers):
             return False
@@ -8467,7 +8471,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         # 那会让本轮被误判为续跑、走假定种子已含基础系统提示的续跑分支，从而静默
         # 丢掉基础提示。冷启动时内部事件单独传给 builder，由新建路径注入。
         if internal_seed_messages and request_body_seed_messages:
-            internal_seed_messages = drop_existing_internal_rule_seeds(
+            request_body_seed_messages, internal_seed_messages = prepare_internal_prompt_seeds(
                 internal_seed_messages, request_body_seed_messages
             )
             if internal_seed_messages:

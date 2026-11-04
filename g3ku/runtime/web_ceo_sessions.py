@@ -515,15 +515,24 @@ def _internal_prompt_kind(value: Any) -> str:
     if kind:
         return kind
     # 续跑基线（frontdoor_request_body_messages）只存 {role, content}、剥掉了 metadata，
-    # 故按内容前缀识别内部提示词，使折叠对 warm 基线路径也生效。前缀标记与
-    # _ceo_runtime_ops._frontdoor_internal_only_message_count 一致；用 startswith 精确匹配，
-    # 普通用户消息几乎不可能以这些运行时前缀开头，误判风险极低。
+    # 故按内容前缀识别内部提示词，使折叠对 warm 基线路径也生效。heartbeat 与 cron
+    # 的规则/事件束都走同一判据；用 startswith 精确匹配，普通用户消息几乎不可能
+    # 以这些运行时前缀开头，误判风险极低。
     text = _message_content_text(value).lstrip()
     if text.startswith("This is a background heartbeat") or text.startswith("# Heartbeat Rules"):
         return "heartbeat_rule"
     if text.startswith("[SESSION EVENTS]"):
         return "heartbeat_event_bundle"
+    if text.startswith("你接收到了之前你定时的任务，如下："):
+        return "cron_rule"
+    if text.startswith("[CRON INTERNAL EVENT]"):
+        return "cron_event_bundle"
     return ""
+
+
+def internal_prompt_kind(value: Any) -> str:
+    """Read the internal prompt kind with the same warm-baseline prefix fallback."""
+    return _internal_prompt_kind(value)
 
 
 _INTERNAL_RULE_PROMPT_KINDS: frozenset[str] = frozenset({"heartbeat_rule", "cron_rule"})

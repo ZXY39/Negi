@@ -51,6 +51,7 @@ from g3ku.runtime.tool_visibility import (
     CEO_FIXED_BUILTIN_TOOL_NAMES,
 )
 from g3ku.runtime.web_ceo_sessions import (
+    internal_prompt_kind,
     is_internal_ceo_user_message,
     is_prompt_visible_message,
     message_metadata,
@@ -284,60 +285,78 @@ def _resolve_ceo_context_window_tokens(loop: Any) -> int:
     return 0
 
 
-def internal_prompt_rule_identity(message: Any) -> tuple[str, str] | None:
-    """规则类内部提示词的身份：``internal_prompt_kind`` + 去首尾空白的全文。
+def internal_prompt_identity(message: Any) -> tuple[str, str] | None:
+    """Identity of an internal prompt: kind plus the exact stripped content.
 
-    只认 ``*_rule``（``heartbeat_rule`` / ``cron_rule``）。事件束不参与按文本
-    去重：每一份事件束有自己的 dedupe key，相同文本也可能是新一轮同一提醒。
+    The kind reader falls back to the stable content prefixes for warm
+    ``{role, content}`` baselines that lost their metadata.
     """
     if not isinstance(message, dict):
         return None
-    metadata = message.get("metadata")
-    metadata = metadata if isinstance(metadata, dict) else {}
     content = str(message.get("content") or "").strip()
-    kind = str(metadata.get("internal_prompt_kind") or "").strip()
+    if not content:
+        return None
+    kind = internal_prompt_kind(message)
     if not kind:
-        if content.startswith(("This is a background heartbeat", "# Heartbeat Rules")):
-            # 续跑基线只存 {role, content}，规则身份只能按稳定前缀认；与
-            # web_ceo_sessions._internal_prompt_kind 的暖基线判据保持一致。
-            kind = "heartbeat_rule"
-        elif content.startswith("你接收到了之前你定时的任务，如下："):
-            # cron 规则首行是运行时固定文案；后续字段（任务 ID、发送次数）随轮次
-            # 变化，真变化时身份自然不同，不会误挡新一轮提醒。
-            kind = "cron_rule"
-    if not kind.endswith("_rule") or not content:
         return None
     return kind, content
 
 
-def drop_existing_internal_rule_seeds(
+def prepare_internal_prompt_seeds(
     seed_messages: list[dict[str, Any]] | None,
     existing_messages: list[dict[str, Any]] | None,
-) -> list[dict[str, Any]]:
-    """Drop rule seeds already present in the request/history being assembled.
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Deduplicate current internal prompt seeds against the assembled history.
 
-    Persistence skips a second copy of the same rule, but the request layer used
-    to merge the current seed into the previous request body anyway, so the model
-    saw the identical block twice. Only an exact kind+text match is dropped: a
-    changed rule text is injected normally.
+    Returns ``(existing_messages, seeds_to_append)``.
+
+    - Rule seed already present with the same kind+text: drop the seed; the
+      persisted copy stays where it is.
+    - Event-bundle seed already present with the same kind+text: remove the older
+      copies and keep the current seed, so the current event remains exactly once
+      at the turn tail. A new event (different content) is always appended.
+    - Different text is never dropped: rule changes and new events still inject.
     """
     seeds = [dict(item) for item in list(seed_messages or []) if isinstance(item, dict)]
-    if not seeds:
-        return []
-    existing: set[tuple[str, str]] = set()
-    for message in list(existing_messages or []):
+    existing = [
+        dict(item) for item in list(existing_messages or []) if isinstance(item, dict)
+    ]
+    if not seeds or not existing:
+        return existing, seeds
+    visible: list[tuple[int, tuple[str, str]]] = []
+    for index, message in enumerate(existing):
         if not is_prompt_visible_message(message):
             continue
-        identity = internal_prompt_rule_identity(message)
+        identity = internal_prompt_identity(message)
         if identity is not None:
-            existing.add(identity)
-    if not existing:
-        return seeds
-    return [
-        seed
-        for seed in seeds
-        if internal_prompt_rule_identity(seed) not in existing
-    ]
+            visible.append((index, identity))
+    if not visible:
+        return existing, seeds
+    existing_identities = {identity for _, identity in visible}
+    drop_indexes: set[int] = set()
+    kept: list[dict[str, Any]] = []
+    for seed in seeds:
+        identity = internal_prompt_identity(seed)
+        if identity is None:
+            kept.append(seed)
+            continue
+        kind = identity[0]
+        if kind.endswith("_rule"):
+            if identity in existing_identities:
+                continue
+            kept.append(seed)
+            continue
+        if kind.endswith("_event_bundle") and identity in existing_identities:
+            drop_indexes.update(
+                index for index, existing_identity in visible if existing_identity == identity
+            )
+        kept.append(seed)
+    if not drop_indexes:
+        return existing, kept
+    return (
+        [message for index, message in enumerate(existing) if index not in drop_indexes],
+        kept,
+    )
 
 
 class CeoMessageBuilder:
@@ -2257,9 +2276,9 @@ class CeoMessageBuilder:
             for item in list(history_state.get("history_messages") or [])
             if isinstance(item, dict)
         ]
-        # 去重必须在 `_request_body_seed_records` 剥掉 metadata 之前做：规则身份
-        # 依赖 `internal_prompt_kind`，只对比正文会把普通用户消息误当成规则。
-        internal_seed_messages = drop_existing_internal_rule_seeds(
+        # 去重必须在 `_request_body_seed_records` 剥掉 metadata 之前做：身份依赖
+        # `internal_prompt_kind`，只对比正文会把普通用户消息误当成内部提示词。
+        raw_history_messages, internal_seed_messages = prepare_internal_prompt_seeds(
             internal_seed_messages, raw_history_messages
         )
         internal_seed_records = self._request_body_seed_records(internal_seed_messages)

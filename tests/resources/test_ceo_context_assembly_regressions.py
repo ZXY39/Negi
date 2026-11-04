@@ -14,8 +14,8 @@ from g3ku.runtime.frontdoor.capability_snapshot import build_capability_snapshot
 from g3ku.runtime.frontdoor.message_builder import (
     CeoMessageBuilder,
     adopt_memory_snapshot,
-    drop_existing_internal_rule_seeds,
     memory_snapshot_provenance,
+    prepare_internal_prompt_seeds,
 )
 from g3ku.runtime.frontdoor.prompt_builder import CeoPromptBuilder
 from g3ku.runtime.frontdoor.tool_contract import (
@@ -3012,7 +3012,7 @@ def test_failed_turn_reconcile_noop_without_seed() -> None:
     assert reconciled == []
 
 
-def test_drop_existing_internal_rule_seeds_only_matches_same_kind_and_text() -> None:
+def test_prepare_internal_prompt_seeds_dedupes_rules_and_moves_events_to_tail() -> None:
     existing_rule = {
         "role": "user",
         "content": "HEARTBEAT RULES",
@@ -3035,19 +3035,21 @@ def test_drop_existing_internal_rule_seeds_only_matches_same_kind_and_text() -> 
     }
     existing = [existing_rule, event_bundle, {"role": "user", "content": "chat"}]
 
-    kept = drop_existing_internal_rule_seeds(
+    rebuilt, kept = prepare_internal_prompt_seeds(
         [existing_rule, changed_rule, cron_rule, event_bundle], existing
     )
 
+    # 规则同文丢弃；规则变化保留。事件束同文从旧位置移除，当前 seed 留到末尾。
     assert [item["content"] for item in kept] == [
         "HEARTBEAT RULES v2",
         "CRON RULES",
         "EVENT BUNDLE",
     ]
+    assert [item["content"] for item in rebuilt] == ["HEARTBEAT RULES", "chat"]
 
-    # 暖基线只存 {role, content}，规则身份靠稳定前缀识别。
+    # 暖基线只存 {role, content}，身份靠稳定前缀识别。
     bare_rule = "This is a background heartbeat. Do not explain internal mechanics."
-    assert drop_existing_internal_rule_seeds(
+    rebuilt, kept = prepare_internal_prompt_seeds(
         [
             {
                 "role": "user",
@@ -3056,10 +3058,11 @@ def test_drop_existing_internal_rule_seeds_only_matches_same_kind_and_text() -> 
             }
         ],
         [{"role": "user", "content": bare_rule}],
-    ) == []
+    )
+    assert kept == [] and len(rebuilt) == 1
 
     bare_cron = "你接收到了之前你定时的任务，如下：\n当前定时任务 ID：job-1"
-    assert drop_existing_internal_rule_seeds(
+    _, kept = prepare_internal_prompt_seeds(
         [
             {
                 "role": "user",
@@ -3068,7 +3071,22 @@ def test_drop_existing_internal_rule_seeds_only_matches_same_kind_and_text() -> 
             }
         ],
         [{"role": "user", "content": bare_cron}],
-    ) == []
+    )
+    assert kept == []
+
+    bare_cron_event = "[CRON INTERNAL EVENT]\n{\"cron_job_id\":\"job-1\"}"
+    rebuilt, kept = prepare_internal_prompt_seeds(
+        [
+            {
+                "role": "user",
+                "content": bare_cron_event,
+                "metadata": {"internal_prompt_kind": "cron_event_bundle"},
+            }
+        ],
+        [{"role": "user", "content": bare_cron_event}],
+    )
+    assert rebuilt == []
+    assert [item["content"] for item in kept] == [bare_cron_event]
 
 
 @pytest.mark.asyncio

@@ -2455,6 +2455,26 @@ def test_fold_internal_prompt_history_collapses_duplicates_keeping_last() -> Non
     assert contents.index(bundle_a) < contents.index("我恢复了节点") < contents.index(bundle_b)
 
 
+def test_fold_internal_prompt_history_recognizes_cron_prefixes_without_metadata() -> None:
+    """暖基线剥掉 metadata 后，cron 规则/事件束也要能被折叠识别。"""
+    cron_rule = "你接收到了之前你定时的任务，如下：\n当前定时任务 ID：job-1"
+    cron_event = '[CRON INTERNAL EVENT]\n{"cron_job_id":"job-1"}'
+    messages = [
+        {"role": "user", "content": cron_rule},
+        {"role": "user", "content": cron_event},
+        {"role": "assistant", "content": "上一轮回复", "metadata": {}},
+        {"role": "user", "content": cron_rule},
+        {"role": "user", "content": cron_event},
+    ]
+
+    folded = web_ceo_sessions.fold_internal_prompt_history(messages)
+
+    contents = [m["content"] for m in folded]
+    assert contents.count(cron_rule) == 1
+    assert contents.count(cron_event) == 1
+    assert contents[-2:] == [cron_rule, cron_event]
+
+
 def test_is_prompt_visible_message_excludes_discarded_state() -> None:
     discarded = _internal_prompt_message("user", "[SESSION EVENTS] stale", "heartbeat_event_bundle", state="discarded")
     completed = _internal_prompt_message("user", "[SESSION EVENTS] live", "heartbeat_event_bundle", state="completed")
