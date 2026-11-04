@@ -284,6 +284,62 @@ def _resolve_ceo_context_window_tokens(loop: Any) -> int:
     return 0
 
 
+def internal_prompt_rule_identity(message: Any) -> tuple[str, str] | None:
+    """规则类内部提示词的身份：``internal_prompt_kind`` + 去首尾空白的全文。
+
+    只认 ``*_rule``（``heartbeat_rule`` / ``cron_rule``）。事件束不参与按文本
+    去重：每一份事件束有自己的 dedupe key，相同文本也可能是新一轮同一提醒。
+    """
+    if not isinstance(message, dict):
+        return None
+    metadata = message.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    content = str(message.get("content") or "").strip()
+    kind = str(metadata.get("internal_prompt_kind") or "").strip()
+    if not kind:
+        if content.startswith(("This is a background heartbeat", "# Heartbeat Rules")):
+            # 续跑基线只存 {role, content}，规则身份只能按稳定前缀认；与
+            # web_ceo_sessions._internal_prompt_kind 的暖基线判据保持一致。
+            kind = "heartbeat_rule"
+        elif content.startswith("你接收到了之前你定时的任务，如下："):
+            # cron 规则首行是运行时固定文案；后续字段（任务 ID、发送次数）随轮次
+            # 变化，真变化时身份自然不同，不会误挡新一轮提醒。
+            kind = "cron_rule"
+    if not kind.endswith("_rule") or not content:
+        return None
+    return kind, content
+
+
+def drop_existing_internal_rule_seeds(
+    seed_messages: list[dict[str, Any]] | None,
+    existing_messages: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Drop rule seeds already present in the request/history being assembled.
+
+    Persistence skips a second copy of the same rule, but the request layer used
+    to merge the current seed into the previous request body anyway, so the model
+    saw the identical block twice. Only an exact kind+text match is dropped: a
+    changed rule text is injected normally.
+    """
+    seeds = [dict(item) for item in list(seed_messages or []) if isinstance(item, dict)]
+    if not seeds:
+        return []
+    existing: set[tuple[str, str]] = set()
+    for message in list(existing_messages or []):
+        if not is_prompt_visible_message(message):
+            continue
+        identity = internal_prompt_rule_identity(message)
+        if identity is not None:
+            existing.add(identity)
+    if not existing:
+        return seeds
+    return [
+        seed
+        for seed in seeds
+        if internal_prompt_rule_identity(seed) not in existing
+    ]
+
+
 class CeoMessageBuilder:
     MEMORY_WRITE_STRONG_TERMS: tuple[str, ...] = (
         '记住',
@@ -2187,7 +2243,6 @@ class CeoMessageBuilder:
             )
         # 冷启动新建路径：内部事件消息（cron/heartbeat）不进入续跑种子，改在这里
         # 注入历史区，保证基础系统提示由 _inject_turn_context 正常前置。
-        internal_seed_records = self._request_body_seed_records(internal_seed_messages)
         history_started_at = time.perf_counter()
         history_state = self._resolve_history_injection(
             persisted_session=persisted_session,
@@ -2202,6 +2257,12 @@ class CeoMessageBuilder:
             for item in list(history_state.get("history_messages") or [])
             if isinstance(item, dict)
         ]
+        # 去重必须在 `_request_body_seed_records` 剥掉 metadata 之前做：规则身份
+        # 依赖 `internal_prompt_kind`，只对比正文会把普通用户消息误当成规则。
+        internal_seed_messages = drop_existing_internal_rule_seeds(
+            internal_seed_messages, raw_history_messages
+        )
+        internal_seed_records = self._request_body_seed_records(internal_seed_messages)
         effective_history_source = str(history_state["history_source"] or "").strip()
         current_user_in_history = bool(history_state["current_user_in_history"])
         history_zone_source = [

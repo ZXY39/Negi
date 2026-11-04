@@ -14,6 +14,7 @@ from g3ku.runtime.frontdoor.capability_snapshot import build_capability_snapshot
 from g3ku.runtime.frontdoor.message_builder import (
     CeoMessageBuilder,
     adopt_memory_snapshot,
+    drop_existing_internal_rule_seeds,
     memory_snapshot_provenance,
 )
 from g3ku.runtime.frontdoor.prompt_builder import CeoPromptBuilder
@@ -3009,6 +3010,112 @@ def test_failed_turn_reconcile_noop_without_seed() -> None:
         [], persisted_session, current_turn_user_content="新的一条"
     )
     assert reconciled == []
+
+
+def test_drop_existing_internal_rule_seeds_only_matches_same_kind_and_text() -> None:
+    existing_rule = {
+        "role": "user",
+        "content": "HEARTBEAT RULES",
+        "metadata": {"internal_prompt_kind": "heartbeat_rule", "prompt_visible": True},
+    }
+    changed_rule = {
+        "role": "user",
+        "content": "HEARTBEAT RULES v2",
+        "metadata": {"internal_prompt_kind": "heartbeat_rule", "prompt_visible": True},
+    }
+    cron_rule = {
+        "role": "user",
+        "content": "CRON RULES",
+        "metadata": {"internal_prompt_kind": "cron_rule", "prompt_visible": True},
+    }
+    event_bundle = {
+        "role": "user",
+        "content": "EVENT BUNDLE",
+        "metadata": {"internal_prompt_kind": "heartbeat_event_bundle", "prompt_visible": True},
+    }
+    existing = [existing_rule, event_bundle, {"role": "user", "content": "chat"}]
+
+    kept = drop_existing_internal_rule_seeds(
+        [existing_rule, changed_rule, cron_rule, event_bundle], existing
+    )
+
+    assert [item["content"] for item in kept] == [
+        "HEARTBEAT RULES v2",
+        "CRON RULES",
+        "EVENT BUNDLE",
+    ]
+
+    # 暖基线只存 {role, content}，规则身份靠稳定前缀识别。
+    bare_rule = "This is a background heartbeat. Do not explain internal mechanics."
+    assert drop_existing_internal_rule_seeds(
+        [
+            {
+                "role": "user",
+                "content": bare_rule,
+                "metadata": {"internal_prompt_kind": "heartbeat_rule"},
+            }
+        ],
+        [{"role": "user", "content": bare_rule}],
+    ) == []
+
+    bare_cron = "你接收到了之前你定时的任务，如下：\n当前定时任务 ID：job-1"
+    assert drop_existing_internal_rule_seeds(
+        [
+            {
+                "role": "user",
+                "content": bare_cron,
+                "metadata": {"internal_prompt_kind": "cron_rule"},
+            }
+        ],
+        [{"role": "user", "content": bare_cron}],
+    ) == []
+
+
+@pytest.mark.asyncio
+async def test_builder_fresh_path_skips_rule_seed_already_in_history() -> None:
+    prompt_builder = _PromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+    rule = {
+        "role": "user",
+        "content": "HEARTBEAT RULES",
+        "metadata": {"internal_prompt_kind": "heartbeat_rule", "prompt_visible": True},
+    }
+
+    persisted_session = SimpleNamespace(messages=[dict(rule)])
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="digest",
+        exposure={"skills": [], "tools": [], "tool_names": []},
+        persisted_session=persisted_session,
+        checkpoint_messages=[],
+        request_body_seed_messages=[],
+        internal_seed_messages=[dict(rule)],
+        user_content="[SESSION EVENTS]",
+    )
+
+    contents = [str(item.get("content") or "") for item in result.stable_messages]
+    assert contents.count("HEARTBEAT RULES") == 1
+
+    # 规则文本变化时仍要注入新版本；旧版本作为历史保留。
+    changed = {
+        "role": "user",
+        "content": "HEARTBEAT RULES v2",
+        "metadata": {"internal_prompt_kind": "heartbeat_rule", "prompt_visible": True},
+    }
+    changed_result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="digest",
+        exposure={"skills": [], "tools": [], "tool_names": []},
+        persisted_session=SimpleNamespace(messages=[dict(rule)]),
+        checkpoint_messages=[],
+        request_body_seed_messages=[],
+        internal_seed_messages=[dict(changed)],
+        user_content="[SESSION EVENTS]",
+    )
+    changed_contents = [str(item.get("content") or "") for item in changed_result.stable_messages]
+    assert changed_contents.count("HEARTBEAT RULES") == 1
+    assert changed_contents.count("HEARTBEAT RULES v2") == 1
 
 
 @pytest.mark.asyncio
