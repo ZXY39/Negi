@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import textwrap
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -50,6 +53,8 @@ _DRAFT_JSON_TEXT = json.dumps(
 
 
 def _run_node_script(editor_overrides: dict, input_overrides: dict | None = None) -> dict:
+    if not shutil.which("node"):
+        pytest.skip("node is required to run this frontend harness")
     inputs = {
         "llm-model-key-input": {"value": "demo"},
         "llm-provider-select": {"value": "demo"},

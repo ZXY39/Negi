@@ -61,6 +61,10 @@ def test_list_is_a_pinned_set_of_zero_reader_top_levels() -> None:
 
 
 def test_every_listed_name_is_a_tracked_top_level() -> None:
+    git = shutil.which("git")
+    if not git or not (REPO_ROOT / ".git").exists():
+        # 判据是"跟踪集"，没有 git 或不是检出（从压缩包打开的工作副本）就没有这份事实可读。
+        pytest.skip("git and a git checkout are required to read the tracked set")
     tracked = {
         line.split("/", 1)[0]
         for line in subprocess.run(

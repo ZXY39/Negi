@@ -8,9 +8,12 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import textwrap
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -168,6 +171,8 @@ vm.runInThisContext(code);
 
 
 def _run_node_script(mode: str, body: str) -> dict[str, object]:
+    if not shutil.which("node"):
+        pytest.skip("node is required to run this frontend harness")
     prelude = _COMMON.replace("__MODE__", json.dumps(mode)).replace("__DRAFT__", json.dumps(DRAFT_TEXT))
     completed = subprocess.run(
         ["node", "-"],

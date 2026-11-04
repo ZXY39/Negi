@@ -2,14 +2,19 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 import textwrap
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _run_node_script(script: str) -> dict[str, object]:
+    if not shutil.which("node"):
+        pytest.skip("node is required to run this frontend harness")
     completed = subprocess.run(
         ["node", "-"],
         input=textwrap.dedent(script),
