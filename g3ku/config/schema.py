@@ -701,7 +701,7 @@ class StickersConfig(Base):
     """表情包发送策略。
 
     `max_per_reply` 是每轮最多发几张：0 = 关掉发送（标记仍会被剥掉，不会漏到正文）；
-    上限 4 与渠道单条消息的附件预算（`MAX_CHANNEL_ATTACHMENTS`）对齐。
+    上限 4 是表情包这一档自己的封顶，与文件附件的条数无关。
     """
 
     max_per_reply: int = 1

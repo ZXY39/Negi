@@ -206,10 +206,10 @@ def test_extract_attachments_skips_missing_and_dedupes(monkeypatch, tmp_path):
     assert f"[二]({doc})" in text and f"[缺]({tmp_path / 'nope.txt'})" in text
 
 
-def test_extract_attachments_caps_count(monkeypatch, tmp_path):
+def test_extract_attachments_has_no_per_reply_count_cap(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     parts = []
-    for index in range(ceo_media.MAX_CHANNEL_ATTACHMENTS + 1):
+    for index in range(7):
         file = tmp_path / f"f{index}.txt"
         file.write_text(str(index), encoding="utf-8")
         parts.append(f"[f{index}]({file})")
@@ -218,8 +218,8 @@ def test_extract_attachments_caps_count(monkeypatch, tmp_path):
         " ".join(parts), allowed_roots=(tmp_path,)
     )
 
-    assert len(attachments) == ceo_media.MAX_CHANNEL_ATTACHMENTS
-    assert f"[f{ceo_media.MAX_CHANNEL_ATTACHMENTS}](" in text
+    assert len(attachments) == 7
+    assert not any(f"[f{index}](" in text for index in range(7))
 
 
 def test_extract_attachments_rejects_paths_outside_allowed_roots(monkeypatch, tmp_path):

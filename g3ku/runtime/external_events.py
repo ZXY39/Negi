@@ -217,26 +217,22 @@ def _strip_sticker_markers_for_stream(text: str) -> str:
 def _with_sticker_attachments(
     attachments: list[dict[str, Any]], sticker_paths: tuple[Any, ...]
 ) -> list[dict[str, Any]]:
-    """Append sticker descriptors under the same per-message attachment budget.
+    """Append the chosen stickers after the reply's own attachments.
 
     Stickers are marked ``after_text`` so the bridges send them after the reply
-    body instead of before it.
+    body instead of before it. Their per-reply count is already decided by
+    ``stickers.max_per_reply`` in the marker resolver, so this lane adds no
+    budget of its own.
+
+    Lazy import for the same reason as the media helpers: the sticker catalog
+    resolves the workspace through the runtime config.
     """
     if not sticker_paths:
         return attachments
-    from g3ku.runtime.api.ceo_media import (
-        MAX_CHANNEL_ATTACHMENTS,
-        build_attachment_descriptor,
-    )
+    from g3ku.runtime.api.ceo_media import build_attachment_descriptor
 
-    budget = max(0, MAX_CHANNEL_ATTACHMENTS - len(attachments))
-    for path in sticker_paths[:budget]:
+    for path in sticker_paths:
         attachments.append(build_attachment_descriptor(path, after_text=True))
-    if len(sticker_paths) > budget:
-        logger.warning(
-            "sticker attachments trimmed: {} over the channel attachment budget",
-            len(sticker_paths) - budget,
-        )
     return attachments
 
 

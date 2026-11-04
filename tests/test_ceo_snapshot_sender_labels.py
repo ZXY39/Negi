@@ -142,10 +142,11 @@ def test_channel_identity_block_allows_group_memory_updates_from_any_member() ->
     assert "不因发送者是普通成员而拒绝" not in dm_text
 
 
-def test_qq_channel_attachment_limits_block_states_20mib_cap() -> None:
+def test_qq_channel_attachment_limits_block_states_10mib_cap() -> None:
     from g3ku.runtime.frontdoor.prompt_builder import CeoPromptBuilder
 
     text = CeoPromptBuilder.qq_channel_attachment_limits_block()
-    assert "20MiB" in text
-    assert "5MiB" in text
-    assert "无法成功发送" in text
+    assert "10MiB" in text
+    # 图片那一档的 5MiB 是入站上传闸门，不是出站限制：出站对所有类型同一档。
+    assert "5MiB" not in text
+    assert "同一档" in text

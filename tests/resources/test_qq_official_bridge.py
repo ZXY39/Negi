@@ -1769,10 +1769,10 @@ async def test_pump_delivers_event_attachment_via_file_data(monkeypatch: pytest.
         # 这一发不经 botpy 的 http.request（那条道带的是文本消息用的共用旋钮）。
         assert client.api.http_calls == []
         # 全局旋钮是 15 秒（SDK 默认 5 秒对文本太紧，见 test_bridge_raises_the_shared_http_
-        # timeout_above_the_sdk_default），但它服务不了上传：20MiB 那一档按字节推导需要
-        # 68 秒，把共用一把抬到那个量级就等于让一个卡住的文本 POST 顶住这条会话的 pump。
+        # timeout_above_the_sdk_default），但它服务不了上传：下载封顶那一档按字节推导需要
+        # 42 秒，把共用一把抬到那个量级就等于让一个卡住的文本 POST 顶住这条会话的 pump。
         assert client.init_kwargs.get("timeout") == bridge_module._BRIDGE_HTTP_TIMEOUT_SECONDS
-        big_upload_body = len(base64.b64encode(bytes(20 * 1024 * 1024)))
+        big_upload_body = len(base64.b64encode(bytes(bridge_module._MAX_OUTBOUND_ATTACHMENT_BYTES)))
         assert (
             bridge_module._media_upload_timeout(big_upload_body)
             > bridge_module._BRIDGE_HTTP_TIMEOUT_SECONDS
@@ -2376,16 +2376,63 @@ async def test_pump_degrades_failed_attachment_to_signed_link_text(monkeypatch: 
             await task
 
 
+@pytest.mark.asyncio
+async def test_pump_refuses_upload_above_the_outbound_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """封顶按实测平台边界取值，不是平台文档那几档（图片/语音 20MB、视频 30MB、文件 200MB）：
+    实盘请求体到 10MiB 上下就被拒（文件档 9.7MiB 请求体回 500/850012），所以 12MiB 的附件
+    在取字节这一步就该拦下，一次平台上传都不发，正文补一行 📎 链接。"""
+    records: list[httpx.Request] = []
+    files_url = "https://api.sgroup.qq.com/v2/users/u9/files"
+    over_cap = bytes(12 * 1024 * 1024)
+    assert len(over_cap) > bridge_module._MAX_OUTBOUND_ATTACHMENT_BYTES
+    media = _media_transport(
+        {_absolute_media("t8"): (200, over_cap), files_url: (200, _upload_reply())},
+        records,
+    )
+    task, client = await _start_bridge(monkeypatch, media)
+    try:
+        await client.on_c2c_message_create(_c2c_message("hi", [], message_id="f8"))
+        ext = FakeExternalApiClient.instances[-1]
+        await ext.events.put(
+            {
+                "type": "outbound.created",
+                "seq": 1,
+                "text": "大文件",
+                "external_key": "qq:c2c:u9",
+                "attachments": [
+                    _outbound_attachment(
+                        "big.bin", "application/octet-stream", "t8", inline_media=False
+                    )
+                ],
+            }
+        )
+        await _wait_until(lambda: client.api.calls)
+        await asyncio.sleep(0.05)
+        assert _api_uploads(records) == []
+        assert client.api.calls[0][1]["markdown"]["content"] == (
+            f"大文件\n📎 big.bin: {_absolute_media('t8')}"
+        )
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
 def test_media_upload_budget_derives_from_payload_size() -> None:
     """上传预算由请求体字节数推导（固定开销 + 按最低吞吐折算的传输时间），不是拍的：
-    零字节只吃固定档，1MiB 加 2 秒，桥的下载封顶（20MiB 原始文件）对应的 base64
-    请求体落在 68 秒档——这是带附件的那一发能占住 pump 的最长时间。"""
+    零字节只吃固定档，1MiB 加 2 秒，桥的下载封顶（`_MAX_OUTBOUND_ATTACHMENT_BYTES`
+    原始文件）对应的 base64 请求体是这一发预算的上档——这是带附件的那一发能占住
+    pump 的最长时间。"""
     budget = bridge_module._media_upload_timeout
     mib = 1024 * 1024
     assert budget(0) == bridge_module._MEDIA_UPLOAD_FIXED_BUDGET_SECONDS
     assert budget(1 * mib) == pytest.approx(17.0)
-    body_for_capped_file = len(base64.b64encode(bytes(20 * mib)))
-    assert budget(body_for_capped_file) == pytest.approx(68.3, abs=0.1)
+    body_for_capped_file = len(
+        base64.b64encode(bytes(bridge_module._MAX_OUTBOUND_ATTACHMENT_BYTES))
+    )
+    assert budget(body_for_capped_file) == pytest.approx(41.7, abs=0.1)
     assert budget(body_for_capped_file) > budget(1 * mib)
 
 

@@ -42,8 +42,8 @@ class CeoPromptBuilder:
     def qq_channel_attachment_limits_block() -> str:
         return (
             "## QQ 渠道附件上限\n"
-            "- 单文件上限 20MiB（图片 5MiB）。超过 20MiB 的文件无法成功发送；"
-            "需要交付大文件时请拆分，或给出可访问的外链/路径。"
+            "- 单文件上限 10MiB，图片/视频/音频/文档同一档。"
+            "要交付更大的文件，先压到 10MiB 以内或拆成多份，或给出可访问的外链。"
         )
 
     _REDUNDANT_PROMPT_FRAGMENTS = (

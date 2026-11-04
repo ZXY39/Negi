@@ -35,8 +35,6 @@ router = APIRouter()
 THUMBNAIL_MAX_BYTES = 100 * 1024
 ORIGINAL_TOKEN_TTL_SECONDS = 24 * 60 * 60
 VIEWER_ROUTE = "/api/ceo/media/original"
-# 单条渠道回复最多转为文件消息的附件数；超出的链接保留原样，由签名改写兜底。
-MAX_CHANNEL_ATTACHMENTS = 4
 
 _TOKEN_SECRET = secrets.token_bytes(32)
 _RASTER_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
@@ -431,11 +429,13 @@ def extract_local_media_attachments(
     stays in the text: the file itself arrives as a media message and its card
     already carries the name, so a leftover label reads as a stray filename
     printed under a voice bubble. Bare paths are never matched — only explicit
-    markdown references are sent as file messages. Tokens beyond
-    ``MAX_CHANNEL_ATTACHMENTS`` (and duplicate paths) are left untouched so the
-    caller's signed-URL rewrite can still turn them into clickable fallback
-    links, and an attachment a bridge fails to deliver comes back as the
-    ``📎 <name>: <link>`` line the bridge appends to the body.
+    markdown references are sent as file messages. There is no per-reply count
+    cap: every reference that resolves to an existing file inside
+    ``allowed_roots`` becomes an attachment, and the bridge sends each one as
+    its own media message. A duplicate path is left untouched so the caller's
+    signed-URL rewrite can still turn it into a clickable fallback link, and an
+    attachment a bridge fails to deliver comes back as the ``📎 <name>: <link>``
+    line the bridge appends to the body.
 
     The syntax form is kept in the descriptor (``inline_media``) because it is
     the only record of what the reference asked for: ``![...]`` embeds the file
@@ -453,7 +453,7 @@ def extract_local_media_attachments(
 
     def stash(source: Path, *, inline_media: bool) -> bool:
         key = str(source)
-        if key in seen or len(attachments) >= MAX_CHANNEL_ATTACHMENTS:
+        if key in seen:
             return False
         seen.add(key)
         attachments.append(build_attachment_descriptor(source, inline_media=inline_media))

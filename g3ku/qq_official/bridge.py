@@ -112,9 +112,14 @@ _MEDIA_DOWNLOAD_CHUNK_BYTES = 64 * 1024
 # 返回 200 audio/mp3），所以取一次不算数：允许一次短延时重试。
 _ATTACHMENT_DOWNLOAD_MAX_ATTEMPTS = 2
 _ATTACHMENT_DOWNLOAD_RETRY_DELAY_SECONDS = 1.5
-# 出站附件：桥从本机签名媒体 URL 取字节的下载上限（与服务端出站产出上限一致）。
-# 超过即降级为签名链接文本，不向平台发起必然失败的巨型上传。
-_MAX_OUTBOUND_ATTACHMENT_BYTES = 20 * 1024 * 1024
+# 出站附件：桥从本机签名媒体 URL 取字节的下载上限。超过即降级为签名链接文本，
+# 不向平台发起必然失败的上传。这条闸门按**实测**的平台边界取值，而不是按平台文档：
+# 文档写的是图片/语音 20MB、视频 30MB、文件 200MB 的软限制，实盘在同一发 `file_data`
+# （base64）直传上，请求体到 10MiB 上下就被拒（文件档 9.7MiB 请求体回 500/850012，
+# 图片档 15.7MiB 回 400/40093011，22.5MiB 起网关直接 413），文档那几档说的是回源/分片
+# 道。回退的 `url` 道在这台机器上永远失败（签名链接是回环地址，QQ 服务器取不到），
+# 所以 `file_data` 被拒就是这一发的终局，本地封顶比它紧一些换的是少挨一次 3~5 秒的注定失败往返。
+_MAX_OUTBOUND_ATTACHMENT_BYTES = 10 * 1024 * 1024
 
 # 媒体上传的预算不能借 SDK 那枚全局超时：``botpy.Client`` 的 timeout 默认 5 秒，套在桥
 # 的每一个 API 请求上（文本消息也是它），且 ``http.request`` 对超时只打一条 WARNING 就返回
@@ -122,7 +127,7 @@ _MAX_OUTBOUND_ATTACHMENT_BYTES = 20 * 1024 * 1024
 # 媒体存储）加上按可接受的最低上行吞吐折算的传输时间；低于该吞吐就该判失败，而不是
 # 无限等。固定开销这一档目前只有握手的实测（本机到 api.sgroup.qq.com 的 DNS+TLS
 # 0.56s），网关落媒体要多久靠 ``qq-official file_data uploaded`` 逐发记录的实耗重定。
-# 上限由上面的下载封顶决定：20MiB 原始文件的 base64 请求体约 27MiB，预算 68s，
+# 上限由上面的下载封顶决定：10MiB 原始文件的 base64 请求体约 13.3MiB，预算 42s，
 # 且只发生在带附件的那一发上。
 _MEDIA_UPLOAD_FIXED_BUDGET_SECONDS = 15.0
 _MEDIA_UPLOAD_MIN_THROUGHPUT_BYTES_PER_SECOND = 512 * 1024

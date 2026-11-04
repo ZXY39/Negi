@@ -111,7 +111,7 @@ curl -N $BASE/sessions/$SESSION_ID/events -H "Authorization: Bearer $TOKEN" \
 | `progress` | `kind`, `text` | `kind: milestone/tool/tool_error`；Negi 发全量，**节流是桥的职责** |
 | `outbound.created` | `external_key`, `session_key`, `text`, `dedupe_key?`, `attachments?` | 主动推送（cron/heartbeat/任务终态回流） |
 
-`attachments`（出站附件）：回复正文中以 markdown 链接引用、且解析为存在的本地文件的条目会被提取为 `[{name, mime_type, size, url}]`，`url` 是根相对签名媒体链接（24h 时效），桥按自己的 `/api/v1` base_url 的 origin 拼绝对地址下载。桥应把附件作为平台的文件/图片消息投递（先于正文），投递失败降级为把签名链接并入正文。单条事件至多 4 个附件；契约细节见 `docs/architecture/external-agent-api.md`「事件流」出站附件契约。
+`attachments`（出站附件）：回复正文中以 markdown 链接引用、且解析为存在的本地文件的条目会被提取为 `[{name, mime_type, size, url}]`，`url` 是根相对签名媒体链接（24h 时效），桥按自己的 `/api/v1` base_url 的 origin 拼绝对地址下载。桥应把附件作为平台的文件/图片消息投递（先于正文），投递失败逐个降级为把签名链接并入正文，其余附件照发。服务端不设每条回复的附件数量上限；单文件的大小闸门由各桥自己按平台实测边界封顶（官方 QQ 桥 10MiB）。契约细节见 `docs/architecture/external-agent-api.md`「事件流」出站附件契约。
 
 **终态不变量**：每回合在**一切路径**上恰好发一个 `turn.completed` 或 `turn.failed`（含取消）。桥必须等到终态再发下一轮，或显式 pause/cancel；不要假设提交即串行排队。
 
