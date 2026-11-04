@@ -20,7 +20,7 @@
 ## 投递目标
 
 - **任务只会在创建它的当前会话中被唤醒**：运行时在创建时就固定了 `session_key`，触发时只会回到那个会话，不存在把提醒改派到其它会话的选项。
-- 提醒的投递目标由运行时**自动**从当前会话上下文推导（工具内部已持有 `channel`/`chat_id`），模型**不需要也不应该**在调用里传任何 `delivery.*`/`sessionTarget`/`payload.*` 字段——该工具只接受 `action/message/max_runs/every_seconds/cron_expr/tz/at/job_id`。
+- 提醒的投递目标由运行时**自动**取自发起这次调用的会话（与提醒绑定的会话同一个来源），模型**不需要也不应该**在调用里传任何 `delivery.*`/`sessionTarget`/`payload.*` 字段——该工具只接受 `action/message/max_runs/every_seconds/cron_expr/tz/at/job_id`。
 - 因此提醒会自然回到发起它的通道/会话；多通道环境下不存在 `channel="last"` 这类用法，也不要尝试指定。
 - 若确实需要把提醒发往别的通道/对象，而当前上下文无法表达，先用一句简短追问确认目标，而不是在 `message` 里塞投递指令。
 

@@ -13,13 +13,6 @@ class CronTool(Tool):
 
     def __init__(self, cron_service: CronService):
         self._cron = cron_service
-        self._channel = ""
-        self._chat_id = ""
-
-    def set_context(self, channel: str, chat_id: str) -> None:
-        """Set the current session context for delivery."""
-        self._channel = channel
-        self._chat_id = chat_id
 
     @property
     def name(self) -> str:
@@ -155,7 +148,12 @@ class CronTool(Tool):
     ) -> str:
         if not message:
             return "Error: message is required for add"
-        if not self._channel or not self._chat_id:
+        # 投递目标与 session_key 同源于这次调用的会话上下文：工具实例是进程内
+        # 共享缓存对象，并发会话的另一轮装配会覆盖实例字段，任务会因此把正文
+        # 永久推到那条会话。
+        channel = str((runtime_context or {}).get("channel") or "").strip()
+        chat_id = str((runtime_context or {}).get("chat_id") or "").strip()
+        if not channel or not chat_id:
             return "Error: no session context (channel/chat_id)"
         if tz and not cron_expr:
             return "Error: tz can only be used with cron_expr"
@@ -187,8 +185,8 @@ class CronTool(Tool):
                 schedule=schedule,
                 message=message,
                 deliver=True,
-                channel=self._channel,
-                to=self._chat_id,
+                channel=channel,
+                to=chat_id,
                 session_key=str((runtime_context or {}).get("session_key") or "").strip() or None,
                 stop_condition=stop_condition,
                 max_runs=max_runs,

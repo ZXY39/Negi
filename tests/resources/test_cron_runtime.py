@@ -75,7 +75,6 @@ def test_cron_tool_scopes_list_and_remove_to_current_session(tmp_path: Path) -> 
         session_key="ext:qq-official-1:b",
     )
     tool = CronTool(service)
-    tool.set_context("ext", "qq:group:a")
     runtime = {"session_key": "ext:qq-official-1:a", "channel": "ext"}
 
     listed = asyncio.run(tool.execute("list", __g3ku_runtime=runtime))
@@ -93,6 +92,41 @@ def test_cron_tool_scopes_list_and_remove_to_current_session(tmp_path: Path) -> 
     )
     assert "Removed" in removed
     assert all(item.id != mine.id for item in service.list_jobs(include_disabled=True))
+
+
+@pytest.mark.asyncio
+async def test_cron_tool_takes_delivery_target_from_the_calling_turn() -> None:
+    """投递目标只来自这次调用所属的会话，不读工具实例上的共享字段。
+
+    工具实例是进程内共享缓存对象，回合却跑在并发会话里：群会话这一轮调
+    `add` 之前，别一条会话的装配可以把那份字段覆盖成自己的目标，任务于是
+    永久把正文推到那条会话。
+    """
+    service = _CronToolService()
+    tool = CronTool(service)
+    group = {"session_key": "ext:qq-official-1:g", "channel": "ext", "chat_id": "qq:group:G"}
+    dm = {"session_key": "ext:qq-official-1:d", "channel": "ext", "chat_id": "qq:c2c:D"}
+
+    created = await tool.execute(
+        action="add",
+        message="群提醒",
+        every_seconds=60,
+        __g3ku_runtime=group,
+    )
+    assert created == "Created job 'job' (id: job-1)"
+    await tool.execute(
+        action="add",
+        message="单聊提醒",
+        every_seconds=60,
+        __g3ku_runtime=dm,
+    )
+
+    assert [call["to"] for call in service.add_calls] == ["qq:group:G", "qq:c2c:D"]
+    assert [call["channel"] for call in service.add_calls] == ["ext", "ext"]
+    assert [call["session_key"] for call in service.add_calls] == [
+        "ext:qq-official-1:g",
+        "ext:qq-official-1:d",
+    ]
 
 
 def test_web_proactive_admission_uses_last_proactive_at(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -187,7 +221,14 @@ class _CronToolService:
 
     def add_job(self, **kwargs):
         self.add_calls.append(dict(kwargs))
-        return SimpleNamespace(name="job", id="job-1")
+        # `ext:` 会话建任务会走审计落点，它读 job.schedule/job.payload.max_runs；
+        # 这里补上这两份形状，渠道会话的用例才不会只测到半条路径。
+        return SimpleNamespace(
+            name="job",
+            id="job-1",
+            schedule=kwargs.get("schedule"),
+            payload=SimpleNamespace(max_runs=kwargs.get("max_runs", 1)),
+        )
 
     def list_jobs(self):
         return []
@@ -492,7 +533,6 @@ def test_cron_service_conflict_check_ignores_disabled_jobs(tmp_path: Path) -> No
 async def test_cron_tool_accepts_asia_shanghai_without_zoneinfo_tzdata(monkeypatch) -> None:
     service = _CronToolService()
     tool = CronTool(service)
-    tool.set_context("web", "shared")
 
     class _MissingZoneInfo:
         def __init__(self, key: str) -> None:
@@ -506,6 +546,7 @@ async def test_cron_tool_accepts_asia_shanghai_without_zoneinfo_tzdata(monkeypat
         cron_expr="0 10 * * *",
         tz="Asia/Shanghai",
         max_runs=2,
+        __g3ku_runtime={"channel": "web", "chat_id": "shared"},
     )
 
     assert result == "Created job 'job' (id: job-1)"
@@ -523,12 +564,12 @@ async def test_cron_tool_reports_expired_at_jobs_clearly() -> None:
 
     service = _RejectExpiredCronService()
     tool = CronTool(service)
-    tool.set_context("web", "shared")
 
     result = await tool.execute(
         action="add",
         message="hello",
         at="2026-04-22T13:07:21+08:00",
+        __g3ku_runtime={"channel": "web", "chat_id": "shared"},
     )
 
     assert (
@@ -556,13 +597,12 @@ def test_resolve_timezone_reports_missing_tzdata_helpfully(monkeypatch) -> None:
 async def test_cron_tool_cron_internal_rounds_allow_add_and_list_but_restrict_remove_to_self() -> None:
     service = _CronToolService()
     tool = CronTool(service)
-    tool.set_context("web", "shared")
 
     add_result = await tool.execute(
         action="add",
         message="hello",
         every_seconds=60,
-        __g3ku_runtime={"cron_internal": True, "cron_job_id": "job-1"},
+        __g3ku_runtime={"cron_internal": True, "cron_job_id": "job-1", "channel": "web", "chat_id": "shared"},
     )
     list_result = await tool.execute(
         action="list",

@@ -8381,14 +8381,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if main_service is not None:
             await main_service.startup()
 
-        for name in ("cron",):
-            tool = self._loop.tools.get(name)
-            if tool is not None and hasattr(tool, "set_context"):
-                tool.set_context(
-                    getattr(session, "_channel", "cli"),
-                    getattr(session, "_chat_id", session.state.session_key),
-                )
-
         paused_manual_snapshot = (
             self._paused_manual_frontdoor_snapshot(session)
             if not heartbeat_internal and not cron_internal
