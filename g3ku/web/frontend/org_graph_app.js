@@ -758,6 +758,7 @@ const U = {
     updateReleaseTitle: document.getElementById("update-release-title"),
     updateReleaseNotes: document.getElementById("update-release-notes"),
     updateReleaseHint: document.getElementById("update-release-hint"),
+    updateReleaseManualLink: document.getElementById("update-release-manual-link"),
     updateReleaseCancel: document.getElementById("update-release-cancel-btn"),
     updateReleaseApply: document.getElementById("update-release-apply-btn"),
     configBundleBackdrop: document.getElementById("config-bundle-backdrop"),
@@ -10425,6 +10426,16 @@ function setUpdateReleaseNotes(text, { unavailable = false } = {}) {
     U.updateReleaseNotes.classList.toggle("is-unavailable", Boolean(unavailable));
 }
 
+function setUpdateReleaseManualLink(url) {
+    if (!U.updateReleaseManualLink) return;
+    // href 是服务端台账带来的值，这里只按协议放行：读不出一个能点的绝对地址就不递链接，
+    // 因为「点了停在原页」比没有这一枚更像界面坏了。
+    const href = String(url || "").trim();
+    const usable = /^https?:\/\//i.test(href);
+    U.updateReleaseManualLink.hidden = !usable;
+    U.updateReleaseManualLink.href = usable ? href : "#";
+}
+
 async function loadUpdateReleaseNotes(tag, requestSeq) {
     // 只认最后一次打开的请求：慢网络下先点开的那一页不许盖掉后点开的那一页。
     const stillCurrent = () => isUpdateReleaseOpen() && requestSeq === updateReleaseRequestSeq;
@@ -10448,6 +10459,7 @@ function openUpdateReleaseDialog() {
     const item = S.updateStatus || {};
     const tag = String(item.latest_tag || "").trim();
     if (U.updateReleaseTitle) U.updateReleaseTitle.textContent = tag ? `新版本 ${tag}` : "新版本";
+    setUpdateReleaseManualLink(item.release_url);
     setUpdateReleaseNotes("正在读取发布说明…");
     // 报出去的这一版必须是这台设备升得上去的那一版：升不动时不给那颗按钮，而是说一句
     // 能照着做的真话。放行下去只会让用户白等一次停机再收到 upgrade_failed。

@@ -589,6 +589,22 @@ def origin_repo_slug(project_root: Path | None = None) -> str | None:
     return parse_repo_slug(_origin_url_from_config(text) or "")
 
 
+def release_page_url(ref: str, *, project_root: Path | None = None) -> str:
+    """某一版的发布页地址，供界面上的「手动安装」入口用；没有版本时回空串。
+
+    slug 与检查车道同源（这台设备自己的 origin，其次规范仓库）：报出去的这一版必须是
+    这台设备自己取得到的那一版，链接也不能例外——指向规范仓库会让 mirror 上的设备
+    照着别人家的资产手动装。
+    """
+    tag = str(ref or "").strip()
+    if not tag:
+        return ""
+    if not tag.startswith("v"):
+        tag = f"v{tag}"
+    slug = origin_repo_slug(project_root) or DEFAULT_REPO_SLUG
+    return f"https://github.com/{slug}/releases/tag/{tag}"
+
+
 
 class _ReleaseBodyParser(HTMLParser):
     """收集 GitHub 发布页里 `.markdown-body` 那一段的文字。
@@ -706,7 +722,7 @@ def fetch_release_notes(
     if use_cache and cache_key in _RELEASE_NOTES_CACHE:
         return dict(_RELEASE_NOTES_CACHE[cache_key])
 
-    page_url = f"https://github.com/{slug}/releases/tag/{ref}"
+    page_url = release_page_url(ref, project_root=project_root)
     payload: dict[str, Any] = {
         "ref": ref,
         "title": ref,

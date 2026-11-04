@@ -170,6 +170,21 @@ async def test_status_endpoint_exposes_ledger(monkeypatch, tmp_path: Path):
     assert item["latest_tag"] == "v99.0.0"
 
 
+async def test_status_carries_the_release_page_of_the_reported_tag(monkeypatch, tmp_path: Path):
+    """弹窗旁那一枚「手动安装」的地址由状态供出：前端不认识这台设备的 origin 是谁。"""
+    monkeypatch.setattr("g3ku.update_check.origin_repo_slug", lambda root=None: "acme/Negi-fork")
+
+    # 从没查过的设备没有版本，也就没有地址可递（放在前面：写过的台账文件在同一路径上留着）
+    assert _status_payload_with(monkeypatch, tmp_path, None)["release_url"] == ""
+
+    item = _status_payload_with(
+        monkeypatch,
+        tmp_path,
+        {"checked_at": "2026-11-04T09:12:00+08:00", "current_version": "1.8.0", "latest_tag": "v1.9.0", "newer": True, "source": "auto", "error": ""},
+    )
+    assert item["release_url"] == "https://github.com/acme/Negi-fork/releases/tag/v1.9.0"
+
+
 async def test_status_newer_is_recomputed_against_the_live_version(monkeypatch, tmp_path: Path):
     """升级成功后红点必须自己灭：台账存的 `newer` 是检查那一刻的结论，不许照抄。
 
@@ -756,6 +771,27 @@ def test_parse_repo_slug_reads_github_remotes():
     assert parse_repo_slug("https://ghfast.top/https://github.com/ZXY39/Negi.git") == "ZXY39/Negi"
     assert parse_repo_slug("https://gitlab.com/owner/repo.git") is None
     assert parse_repo_slug("") is None
+
+
+def test_release_page_url_follows_the_device_own_origin(monkeypatch, tmp_path: Path):
+    """「手动安装」那一枚的地址与检查车道同源：指向别人家的发布页，就是让人手动装错码。"""
+    from g3ku.update_check import release_page_url
+
+    monkeypatch.setattr("g3ku.update_check.origin_repo_slug", lambda root=None: "acme/Negi-fork")
+    assert (
+        release_page_url("v1.2.3", project_root=tmp_path)
+        == "https://github.com/acme/Negi-fork/releases/tag/v1.2.3"
+    )
+    # 裸版本号也要长成 GitHub 的标签形状
+    assert release_page_url("1.2.3", project_root=tmp_path).endswith("/releases/tag/v1.2.3")
+
+    # 没有 origin 的设备（归档包、离线套件装出来的）回落规范仓库——那正是它能取到码的那一家
+    monkeypatch.setattr("g3ku.update_check.origin_repo_slug", lambda root=None: None)
+    assert release_page_url("v1.2.3", project_root=tmp_path) == "https://github.com/ZXY39/Negi/releases/tag/v1.2.3"
+
+    # 没版本就没有那一页：不拼出一张 /releases/tag/ 结尾的空地址给人点开
+    assert release_page_url("", project_root=tmp_path) == ""
+    assert release_page_url("   ", project_root=tmp_path) == ""
 
 
 def test_extract_release_body_keeps_paragraph_shape():

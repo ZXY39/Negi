@@ -565,6 +565,7 @@ function loadUpdateDialogContext(item) {
         "update-release-title",
         "update-release-notes",
         "update-release-hint",
+        "update-release-manual-link",
         "update-release-cancel-btn",
         "update-release-apply-btn",
     ]) {
@@ -638,18 +639,62 @@ test("报出的版本这台设备升不动时，弹窗不给「更新并重启�
         degraded: true,
         detail: "git_missing: PATH 里没有 git",
         actionable: false,
+        release_url: "https://github.com/acme/Negi-fork/releases/tag/v9.9.9",
     });
     ctx.__testExports.openUpdateReleaseDialog();
 
     assert.equal(ctx.__testExports.U.updateReleaseApply.disabled, true, "升不动的新版本不该递出那颗按钮");
     assert.match(ctx.__testExports.U.updateReleaseHint.textContent, /找不着 git/);
     assert.match(ctx.__testExports.U.updateReleaseHint.textContent, /PATH/);
+    // 那颗按钮被禁用时，这一枚是这一步仅剩的出口：禁用按钮不许把它一起带走。
+    assert.equal(ctx.__testExports.U.updateReleaseManualLink.hidden, false, "升不动时更要给手动安装");
 
     ctx.__testExports.closeUpdateReleaseDialog();
     assert.equal(
         ctx.__testExports.U.updateReleaseHint.textContent,
         UPDATE_RELEASE_HINT_PAGE_TEXT,
         "关掉弹窗要换回页面自己那句，不改掉下一次打开的默认"
+    );
+});
+
+test("「手动安装」指向报出来的那一版，地址来自服务端的发布页读数", () => {
+    const ctx = loadUpdateDialogContext({
+        has_ledger: true,
+        newer: true,
+        latest_tag: "v1.9.0",
+        current_version: "1.8.0",
+        actionable: true,
+        release_url: "https://github.com/acme/Negi-fork/releases/tag/v1.9.0",
+    });
+    ctx.__testExports.openUpdateReleaseDialog();
+
+    const link = ctx.__testExports.U.updateReleaseManualLink;
+    assert.equal(link.hidden, false);
+    assert.equal(link.href, "https://github.com/acme/Negi-fork/releases/tag/v1.9.0");
+});
+
+test("读不出可用地址时不递一颗点了停在原页的链接", () => {
+    for (const url of ["", "  ", "javascript:alert(1)", "/releases/tag/v1.9.0"]) {
+        const ctx = loadUpdateDialogContext({
+            has_ledger: true, newer: true, latest_tag: "v1.9.0", current_version: "1.8.0", release_url: url,
+        });
+        ctx.__testExports.openUpdateReleaseDialog();
+        const link = ctx.__testExports.U.updateReleaseManualLink;
+        assert.equal(link.hidden, true, `${url || "(空)"} 不是能点开的发布页`);
+        assert.equal(link.href, "#");
+    }
+});
+
+test("手动安装是一颗真的外链，开在弹窗之外", () => {
+    const html = fs.readFileSync("g3ku/web/frontend/org_graph.html", "utf8");
+    const at = html.indexOf('id="update-release-manual-link"');
+    assert.ok(at > 0, "org_graph.html 缺了「手动安装」那一枚");
+    const anchor = html.slice(html.lastIndexOf("<a", at), html.indexOf(">", at) + 1);
+    assert.match(anchor, /target="_blank"/);
+    assert.match(anchor, /rel="noreferrer noopener"/);
+    assert.ok(
+        html.indexOf('id="update-release-apply-btn"') < at,
+        "它写在「更新并重启」旁边，不是另起一处",
     );
 });
 

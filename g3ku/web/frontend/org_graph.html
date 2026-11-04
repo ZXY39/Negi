@@ -1328,7 +1328,8 @@
             </div>
 
             <!-- 「查看新版本」打开的发布说明：正文按纯文本画，长度由这个框自己滚动，
-                 底部两颗按钮是这一步唯一的动作入口（更新会暂停在跑的会话与任务）。 -->
+                 底部两颗按钮是这一步唯一的动作入口（更新会暂停在跑的会话与任务），
+                 旁边那枚「手动安装」是退路——它自己升不动时（actionable=false）是唯一走得通的道。 -->
             <div id="update-release-backdrop" class="confirm-backdrop" hidden>
                 <section id="update-release-dialog" class="confirm-dialog update-release-dialog" role="dialog"
                     aria-modal="true" aria-labelledby="update-release-title" tabindex="-1">
@@ -1340,6 +1341,8 @@
                     <div class="confirm-actions">
                         <button id="update-release-cancel-btn" class="toolbar-btn ghost" type="button">取消</button>
                         <button id="update-release-apply-btn" class="toolbar-btn danger" type="button">更新并重启</button>
+                        <a id="update-release-manual-link" class="update-release-manual" href="#" target="_blank"
+                            rel="noreferrer noopener" title="打开这一版的 GitHub 发布页，自己下载资产安装" hidden>手动安装</a>
                     </div>
                 </section>
             </div>

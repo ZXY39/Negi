@@ -240,7 +240,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 新设备一行指令装完发现 skill/tools 比开发机少、重跑安装指令为什么没更新代码、`negi status` 的 `Release:` 行为什么不出现、仓库改名之后已装设备为什么照常更新、`install -Upgrade` 为什么动的是另一个目录 → `operations-and-maintenance.md`「新设备首次安装与升级」
 - 装了但终端里 `negi` 不出现、图标点了没反应、系统「已安装的应用」里没有 Negi、卸载后重装说目录非空、或卸载只该删程序却连数据一起没了 → `operations-and-maintenance.md`「新设备首次安装与升级」+「首选一键启动脚本」
 - 应用管理里点卸载后进度条一直不动、或卸完了程序还在 → `operations-and-maintenance.md`「卸载与安装面回收」；逐项落点读 `%TEMP%` 里的 `negi-uninstall-<UTC>.log` 与 `Negi Uninstallation Log`
-- 设置按钮红点不亮或误亮、没查过/查失败也被点亮成"有新版"、「重启并更新」点了服务没回来、或明明能上 GitHub 却一直"读不到远端标签"（`git_missing` 说的是这台设备的形态，不是网络） → `web-and-admin.md`「Update Notification And Restart-And-Upgrade Contract」+ `operations-and-maintenance.md`「自动检查新版本与「重启并更新」」
+- 设置按钮红点不亮或误亮、没查过/查失败也被点亮成"有新版"、「重启并更新」点了服务没回来、「手动安装」那枚链接不开或开的是另一家的发布页、或明明能上 GitHub 却一直"读不到远端标签"（`git_missing` 说的是这台设备的形态，不是网络） → `web-and-admin.md`「Update Notification And Restart-And-Upgrade Contract」+ `operations-and-maintenance.md`「自动检查新版本与「重启并更新」」
 - 更新后用户说"我改的东西不见了"、设置里那一行只报数量而清单在按钮 title 上、`交给 Negi 解决` 为什么只准备会话不自动发送，或 `copy-overwrite` 与 `merge-conflict` 分不清 → `operations-and-maintenance.md`「换码没能保住的本地改动」+ `web-and-admin.md`「Update Notification And Restart-And-Upgrade Contract」
 - 界面上的动作想把消息送进某条指定会话，结果落进了另一条（含真实对外渠道会话）→ `web-and-admin.md`「CEO Composer Runtime」
 - 升级已经成功红点仍亮到下一次检查、或没人改过目录却被判成"有本地改动"而白跑一次 stash → `web-and-admin.md`「Update Notification And Restart-And-Upgrade Contract」+「Frontend Vendor Asset Update Contract」

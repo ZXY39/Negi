@@ -17995,6 +17995,22 @@ textarea {
     line-height: 1.5;
 }
 
+/* 「手动安装」贴在「更新并重启」旁边：那颗按钮被 actionable 禁用时它是这一步仅剩的入口，
+   所以它不跟着禁用、也不许被同一颗按钮的样式吃掉。字号与提示行同级，动作行仍归按钮。 */
+.update-release-manual {
+    align-self: center;
+    color: var(--ui-text-secondary);
+    font-size: 12px;
+    text-decoration: none;
+    white-space: nowrap;
+}
+
+.update-release-manual:hover,
+.update-release-manual:focus-visible {
+    color: var(--ui-text);
+    text-decoration: underline;
+}
+
 /* 隐藏的 file input 由「选择配置包」按钮代挑，回显只当状态行用。 */
 .config-bundle-file-name {
     margin: 0;

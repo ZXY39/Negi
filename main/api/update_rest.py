@@ -24,6 +24,7 @@ from g3ku.update_check import (
     read_apply_result,
     read_update_ledger,
     release_in_local_head,
+    release_page_url,
     run_update_check,
     upgrade_lane_available,
 )
@@ -57,6 +58,8 @@ def _status_payload() -> dict[str, Any]:
         "has_ledger": ledger is not None,
         "newer": ledger_newer_now(ledger),
         "latest_tag": str((ledger or {}).get("latest_tag") or ""),
+        # 台账里那一版的发布页，供弹窗旁的「手动安装」用；没有版本就是空串。
+        "release_url": release_page_url(str((ledger or {}).get("latest_tag") or "")),
         "current_version": __version__,
         "checked_at": str((ledger or {}).get("checked_at") or ""),
         "source": str((ledger or {}).get("source") or ""),
