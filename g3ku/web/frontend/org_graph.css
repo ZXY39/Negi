@@ -19626,6 +19626,21 @@ textarea {
     display: none;
 }
 
+/* 清除历史是低频操作，和占用信息排成一行文字即可，不需要一颗红色按钮。 */
+.qq-group-history-clear {
+    border: none;
+    background: none;
+    padding: 0;
+    font-family: inherit;
+    font-size: inherit;
+    color: var(--status-failed-text);
+    cursor: pointer;
+}
+
+.qq-group-history-clear:hover:not(:disabled) {
+    text-decoration: underline;
+}
+
 /* 群聊设置弹窗：四行策略，数字输入不显示上下调整箭头。 */
 .qq-group-settings-dialog {
     width: min(620px, calc(100vw - 32px));
