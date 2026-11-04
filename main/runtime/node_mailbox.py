@@ -18,6 +18,7 @@ reconstructed from scattered guards.
 from __future__ import annotations
 
 import hashlib
+import re
 from typing import Final
 
 PARK_TERMINAL: Final = 'terminal'
@@ -35,6 +36,10 @@ REJECT_TARGET_LIST_UNPARSED: Final = 'target_list_unparsed'
 # 形状档附给模型的那一句。措辞只说本条 `to` 接受什么，不指任何全局设置。
 TARGET_LIST_UNPARSED_HINT: Final = (
     'Pass `to` as one node id, or as a real JSON list of node ids.'
+)
+TASK_TARGET_ROOT_NOTICE: Final = (
+    'Task id accepted; delivered to the task root node. The root decides whether and '
+    'how to carry it down to its children.'
 )
 
 # 用户自由文本是唯一「落箱但不叫醒」的发送方，其余发送方照常被唤醒。
@@ -127,6 +132,40 @@ def normalize_targets(raw: object) -> list[str]:
         seen.add(value)
         ordered.append(value)
     return ordered
+
+
+def normalize_address_token(raw: object) -> str:
+    """Repair the spelling variants a model may put in a target field.
+
+    Whitespace around the value or the namespace separator, a full-width colon,
+    and doubled separators all name the same address; none of them should become
+    ``target_not_in_task``.
+    """
+    text = str(raw or '').strip()
+    if not text:
+        return ''
+    text = text.replace('\uff1a', ':')
+    text = re.sub(r'\s*:\s*', ':', text)
+    text = re.sub(r':+', ':', text)
+    return re.sub(r'\s+', '', text)
+
+
+def split_address_target(raw: object) -> tuple[str, str]:
+    """Return ``(namespace, value)`` for one target token.
+
+    The namespace is lowercase and empty for a bare id. A token that carries an
+    unrecognised namespace keeps it, so an id from the wrong namespace is never
+    read as a bare id by mistake.
+    """
+    token = normalize_address_token(raw)
+    prefix, separator, value = token.partition(':')
+    if not separator:
+        return '', token
+    prefix = prefix.strip().lower()
+    value = value.strip()
+    if not prefix or not value:
+        return 'invalid', token
+    return prefix, value
 
 
 def unresolved_target_reason(raw: object) -> str:

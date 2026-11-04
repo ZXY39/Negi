@@ -400,8 +400,10 @@ class SendMessageTool(Tool):
             'a machine message (that is how it gets unstuck), a target awaiting acceptance queues a '
             'parent message without waking it (it is consumed only if the submission is rejected and '
             'the node is reactivated; the receipt says so), and an out-of-scope target is rejected '
-            'with the addresses you may use. Sending does not make you wait; call `enter_wait` when '
-            'you need a reply. Large bodies belong in `ref`; the message itself should stay a summary.'
+            'with the addresses you may use. Node ids may be written bare or with the `node:` prefix; '
+            'spacing and full-width colons are normalized. A `task:` id is not a node address here. '
+            'Sending does not make you wait; call `enter_wait` when you need a reply. Large bodies '
+            'belong in `ref`; the message itself should stay a summary.'
         )
 
     @property
@@ -421,7 +423,8 @@ class SendMessageTool(Tool):
                     'type': ['string', 'array'],
                     'items': {'type': 'string'},
                     'description': (
-                        "`parent`, `frontdoor` (root only), a node id you may message, or a list of them."
+                        "`parent`, `frontdoor` (root only), a node id you may message, or a list of "
+                        "them. Node ids may be bare or `node:`-prefixed; stray spaces are accepted."
                     ),
                     'minLength': 1,
                 },

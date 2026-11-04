@@ -3949,6 +3949,20 @@ class SQLiteTaskStore:
         rows = self._fetchall('SELECT payload_json FROM task_nodes WHERE task_id = ? ORDER BY sort_key ASC, node_id ASC', (task_id,))
         return [self._parse(row['payload_json'], TaskProjectionNodeRecord) for row in rows]
 
+    def list_messageable_node_ids(self, task_id: str, *, limit: int = 50) -> list[str]:
+        """Non-acceptance node ids in tree order, for a bounded address book."""
+        rows = self._fetchall(
+            "SELECT node_id FROM nodes WHERE task_id = ? "
+            "AND lower(trim(coalesce(json_extract(payload_json, '$.node_kind'), ''))) <> 'acceptance' "
+            'ORDER BY depth ASC, created_at ASC, node_id ASC LIMIT ?',
+            (str(task_id or '').strip(), max(1, int(limit))),
+        )
+        return [
+            str(row['node_id'] or '').strip()
+            for row in rows
+            if str(row['node_id'] or '').strip()
+        ]
+
     def list_task_node_activity(self, task_id: str, *, limit: int = 6) -> list[dict[str, Any]]:
         """节点活性摘要：平铺列、`updated_at` 倒序、只取前 limit 行。
 

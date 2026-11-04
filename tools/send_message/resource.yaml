@@ -2,14 +2,14 @@ schema_version: 1
 kind: tool
 display_name: "发送节点消息"
 name: send_message
-description: Send a message to execution nodes in this session's tasks; under-acceptance targets queue without waking.
+description: Send a message to a task's root node or to execution nodes in this session's tasks; under-acceptance targets queue without waking.
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''
   url: ''
   ref: ''
 current_version:
-  summary: Frontdoor-lane node messaging; same to/content/ref shape as the node-side tool, execution-node targets only.
+  summary: Frontdoor-lane messaging; same to/content/ref shape as the node-side tool, task-root or node targets.
   compare_rule: Treat manifest, main/, parameter contract, or returned payload changes as version-relevant.
   source_of_truth: resource.yaml and main/tool.py define the effective behavior.
 requires:
@@ -26,7 +26,7 @@ parameters:
       type: [string, array]
       items:
         type: string
-      description: Execution node id, or a list of them, in a task owned by this session.
+      description: Task id (delivers to that task's root node) or execution node id, or a list of either. `task:` / `node:` prefixes and stray spaces are accepted.
       minLength: 1
     content:
       type: string

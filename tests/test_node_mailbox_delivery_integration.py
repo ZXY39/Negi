@@ -309,6 +309,40 @@ class TestAddressingRejectionArms:
         assert 'JSON list of node ids' in rejection['hint']
 
     @pytest.mark.asyncio
+    async def test_bare_and_spaced_node_ids_are_normalized(self, tmp_path, monkeypatch):
+        service = _service(tmp_path)
+        _seed(service)
+        _stub_wake(monkeypatch, service)
+
+        for index, target in enumerate(('child', 'node:child', ' node : child ', 'node：child')):
+            result = await service._deliver_node_message_from_node(
+                task_id=TASK,
+                sender_node_id=ROOT,
+                sender_is_root=True,
+                to=target,
+                content=f'hi-{index}',
+            )
+            assert result['ok'] is True
+            assert result['results'][0]['status'] == 'delivered'
+
+    @pytest.mark.asyncio
+    async def test_task_namespace_stays_out_of_the_node_lane(self, tmp_path, monkeypatch):
+        service = _service(tmp_path)
+        _seed(service)
+        _stub_wake(monkeypatch, service)
+
+        result = await service._deliver_node_message_from_node(
+            task_id=TASK,
+            sender_node_id=ROOT,
+            sender_is_root=True,
+            to='task:mailbox',
+            content='hi',
+        )
+        rejection = result['results'][0]
+        assert rejection['reason'] == 'target_not_in_task'
+        assert CHILD in result['legal_targets']
+
+    @pytest.mark.asyncio
     async def test_repaired_list_shape_delivers_to_every_target(self, tmp_path, monkeypatch):
         service = _service(tmp_path)
         _seed(service)

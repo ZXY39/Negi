@@ -124,6 +124,95 @@ async def test_frontdoor_can_message_execution_node_only(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_frontdoor_accepts_bare_and_prefixed_node_ids_with_spacing(tmp_path):
+    service = _service(tmp_path, execution_mode='worker')
+    _seed(service)
+
+    for index, target in enumerate(('child', 'node:child', ' node : child ', 'node：child')):
+        result = await service.deliver_frontdoor_node_message(
+            session_id=SESSION, to=target, content=f'keep going {index}'
+        )
+        receipt = result['results'][0]
+        assert receipt['status'] == 'delivered'
+        assert receipt['target_kind'] == 'node'
+        assert receipt['resolved_node_id'] == CHILD
+
+
+@pytest.mark.asyncio
+async def test_task_id_target_delivers_to_root_with_relay_notice(tmp_path):
+    service = _service(tmp_path, execution_mode='worker')
+    _seed(service)
+
+    result = await service.deliver_frontdoor_node_message(
+        session_id=SESSION, to=' task： frontdoor ', content='new constraint'
+    )
+    receipt = result['results'][0]
+    assert receipt['status'] == 'delivered'
+    assert receipt['target_kind'] == 'task'
+    assert receipt['resolved_node_id'] == ROOT
+    assert 'root' in receipt['notice'].lower()
+    assert service.store.list_task_node_notifications(TASK, ROOT)[-1].message == 'new constraint'
+
+
+@pytest.mark.asyncio
+async def test_bare_task_id_is_tried_after_nodes(tmp_path):
+    service = _service(tmp_path, execution_mode='worker')
+    _seed(service)
+
+    result = await service.deliver_frontdoor_node_message(
+        session_id=SESSION, to='frontdoor', content='bare task id'
+    )
+    receipt = result['results'][0]
+    assert receipt['status'] == 'delivered'
+    assert receipt['target_kind'] == 'task'
+    assert receipt['resolved_node_id'] == ROOT
+
+
+@pytest.mark.asyncio
+async def test_task_target_is_not_blocked_by_session(tmp_path):
+    service = _service(tmp_path, execution_mode='worker')
+    _seed(service)
+
+    result = await service.deliver_frontdoor_node_message(
+        session_id='web:other', to='task:frontdoor', content='cross-session task mail'
+    )
+    receipt = result['results'][0]
+    assert receipt['status'] == 'delivered'
+    assert receipt['target_kind'] == 'task'
+    assert receipt['resolved_node_id'] == ROOT
+
+
+@pytest.mark.asyncio
+async def test_unknown_target_returns_reason_and_bounded_legal_targets(tmp_path):
+    service = _service(tmp_path, execution_mode='worker')
+    _seed(service)
+
+    result = await service.deliver_frontdoor_node_message(
+        session_id=SESSION, to='node:missing', content='x'
+    )
+    receipt = result['results'][0]
+    assert receipt['reason'] == 'target_not_in_task'
+    assert ROOT in result['legal_targets']
+    assert CHILD in result['legal_targets']
+    assert VERIFIER not in result['legal_targets']
+    assert result['legal_targets_truncated'] is False
+
+
+@pytest.mark.asyncio
+async def test_unparsed_list_shape_keeps_the_shape_arm(tmp_path):
+    service = _service(tmp_path, execution_mode='worker')
+    _seed(service)
+
+    result = await service.deliver_frontdoor_node_message(
+        session_id=SESSION, to='["node:root"', content='x'
+    )
+    receipt = result['results'][0]
+    assert receipt['reason'] == 'target_list_unparsed'
+    assert 'JSON list of node ids' in receipt['hint']
+    assert ROOT in result['legal_targets']
+
+
+@pytest.mark.asyncio
 async def test_frontdoor_delivers_under_acceptance_but_rejects_wrong_session(tmp_path):
     service = _service(tmp_path, execution_mode='worker')
     _seed(service)

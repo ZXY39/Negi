@@ -60,6 +60,8 @@ def test_toolskill_is_enabled_and_carries_the_target_rule() -> None:
 
     body = SKILL_BODY.read_text(encoding='utf-8')
     assert 'root node only' in body
+    assert 'goes to **the task id**' in body
+    assert '`task:` / `node:` prefixes' in body
     assert 'Do not put several nodes in one call' in body
     assert 'a parent never receives a copy of the mail addressed to its children' in body
 
@@ -68,6 +70,7 @@ def test_frontdoor_prompt_does_not_offer_the_broadcast_escape_hatch() -> None:
     """提示词只留一句指针，规则本体住在那份随契约到达的 toolskill 里。"""
     prompt = FRONTDOOR_PROMPT.read_text(encoding='utf-8')
     assert '必要时同时给相关执行节点' not in prompt
+    assert '发给该任务的 task id' in prompt
     assert '只有针对某个节点的定向通知才点名那个节点' in prompt
     assert '收件人规则按该工具说明执行' in prompt
 

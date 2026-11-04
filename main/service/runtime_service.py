@@ -142,12 +142,14 @@ from main.runtime.model_route import build_model_route_plan
 from main.runtime.node_mailbox import (
     REJECT_TARGET_LIST_UNPARSED,
     TARGET_LIST_UNPARSED_HINT,
+    TASK_TARGET_ROOT_NOTICE,
     delivery_defers_wake,
     error_escalation_hint,
     message_fingerprint,
     normalize_targets,
     notification_is_held,
     plan_delivery,
+    split_address_target,
     unresolved_target_reason,
 )
 from main.runtime.node_message_kind import (
@@ -5526,15 +5528,16 @@ class MainRuntimeService:
 
         results: list[dict[str, Any]] = []
         for requested_target in requested:
-            target_id = requested_target
-            if requested_target == 'parent':
+            namespace, value = split_address_target(requested_target)
+            target_id = ''
+            if namespace == '' and value == 'parent':
                 target_id = str(getattr(sender, 'parent_node_id', '') or '').strip()
                 if not target_id:
                     results.append(
                         {'target': 'parent', 'status': 'rejected', 'reason': 'sender_has_no_parent'}
                     )
                     continue
-            elif requested_target == 'frontdoor':
+            elif namespace == '' and value == 'frontdoor':
                 if not sender_is_root:
                     results.append(
                         {
@@ -5553,8 +5556,12 @@ class MainRuntimeService:
                     )
                 )
                 continue
+            elif namespace == 'node':
+                target_id = f'node:{value}'
+            elif namespace == '':
+                target_id = f'node:{value}'
 
-            target = node_map.get(str(target_id or '').strip())
+            target = node_map.get(target_id) if target_id else None
             if target is None:
                 reason = unresolved_target_reason(requested_target)
                 rejection: dict[str, Any] = {
@@ -5678,7 +5685,12 @@ class MainRuntimeService:
         content: str,
         ref: str = '',
     ) -> dict[str, Any]:
-        """Frontdoor → execution nodes in tasks owned by this session."""
+        """Frontdoor → nodes in this session's tasks, or any task by task id.
+
+        ``to`` accepts a task id, a node id, or a list of either. A task id lands
+        on that task's root node; a bare id resolves as a node first, then as a
+        task. The two namespaces are not shared, so explicit prefixes win.
+        """
         normalized_session = str(session_id or '').strip()
         body = str(content or '').strip()
         if not normalized_session:
@@ -5690,39 +5702,160 @@ class MainRuntimeService:
             return {'ok': False, 'error': 'no_targets', 'results': [], 'legal_targets': []}
         results: list[dict[str, Any]] = []
         for target in requested:
-            node = self.store.get_node(str(target or '').strip())
-            if node is None:
-                results.append({'target': target, 'status': 'rejected', 'reason': 'target_missing'})
-                continue
-            task = self.store.get_task(str(getattr(node, 'task_id', '') or '').strip())
-            if task is None or str(getattr(task, 'session_id', '') or '').strip() != normalized_session:
-                results.append(
-                    {'target': target, 'status': 'rejected', 'reason': 'not_session_task'}
-                )
-                continue
-            if str(getattr(node, 'node_kind', '') or '').strip().lower() == 'acceptance':
-                results.append(
-                    {
-                        'target': target,
-                        'status': 'rejected',
-                        'reason': 'acceptance_node_not_messageable',
-                    }
-                )
-                continue
             results.append(
-                await self.deliver_control_node_message(
-                    task_id=str(getattr(node, 'task_id', '') or '').strip(),
-                    target_node_id=str(node.node_id or '').strip(),
-                    message=body,
-                    origin='frontdoor',
+                await self._deliver_frontdoor_target(
+                    session_id=normalized_session,
+                    target=target,
+                    content=body,
                     ref=ref,
                 )
             )
+        legal_targets: list[str] = []
+        legal_truncated = False
+        if any(
+            str(item.get('reason') or '').strip()
+            in {'target_not_in_task', 'target_list_unparsed', 'not_session_task'}
+            for item in results
+        ):
+            legal_targets, legal_truncated = self._frontdoor_legal_targets(normalized_session)
         return {
             'ok': bool(results) and all(item.get('status') != 'rejected' for item in results),
             'results': results,
-            'legal_targets': [],
+            'legal_targets': legal_targets,
+            'legal_targets_truncated': legal_truncated,
         }
+
+    async def _deliver_frontdoor_target(
+        self,
+        *,
+        session_id: str,
+        target: str,
+        content: str,
+        ref: str,
+    ) -> dict[str, Any]:
+        namespace, value = split_address_target(target)
+        if namespace == 'task':
+            task = self.get_task(value)
+            if task is None:
+                return self._frontdoor_target_rejection(target, unresolved_target_reason(target))
+            return await self._deliver_frontdoor_task_target(
+                target=target, task=task, content=content, ref=ref
+            )
+        if namespace == 'node':
+            node = self.store.get_node(f'node:{value}')
+            if node is None:
+                return self._frontdoor_target_rejection(target, unresolved_target_reason(target))
+            return await self._deliver_frontdoor_node_target(
+                session_id=session_id, target=target, node=node, content=content, ref=ref
+            )
+        if namespace:
+            return self._frontdoor_target_rejection(target, unresolved_target_reason(target))
+
+        node = self.store.get_node(f'node:{value}') if value else None
+        if node is not None:
+            return await self._deliver_frontdoor_node_target(
+                session_id=session_id, target=target, node=node, content=content, ref=ref
+            )
+        task = self.get_task(value) if value else None
+        if task is not None:
+            return await self._deliver_frontdoor_task_target(
+                target=target, task=task, content=content, ref=ref
+            )
+        return self._frontdoor_target_rejection(target, unresolved_target_reason(target))
+
+    async def _deliver_frontdoor_node_target(
+        self,
+        *,
+        session_id: str,
+        target: str,
+        node: Any,
+        content: str,
+        ref: str,
+    ) -> dict[str, Any]:
+        task = self.store.get_task(str(getattr(node, 'task_id', '') or '').strip())
+        if task is None or str(getattr(task, 'session_id', '') or '').strip() != session_id:
+            return self._frontdoor_target_rejection(target, 'not_session_task')
+        if str(getattr(node, 'node_kind', '') or '').strip().lower() == 'acceptance':
+            return self._frontdoor_target_rejection(target, 'acceptance_node_not_messageable')
+        receipt = dict(
+            await self.deliver_control_node_message(
+                task_id=str(getattr(node, 'task_id', '') or '').strip(),
+                target_node_id=str(node.node_id or '').strip(),
+                message=content,
+                origin='frontdoor',
+                ref=ref,
+            )
+            or {}
+        )
+        receipt['target'] = target
+        receipt['target_kind'] = 'node'
+        receipt['resolved_node_id'] = str(node.node_id or '').strip()
+        return receipt
+
+    async def _deliver_frontdoor_task_target(
+        self,
+        *,
+        target: str,
+        task: Any,
+        content: str,
+        ref: str,
+    ) -> dict[str, Any]:
+        root_id = str(getattr(task, 'root_node_id', '') or '').strip()
+        root = self.store.get_node(root_id)
+        if root is None:
+            return self._frontdoor_target_rejection(target, 'target_missing')
+        if str(getattr(root, 'node_kind', '') or '').strip().lower() == 'acceptance':
+            return self._frontdoor_target_rejection(target, 'acceptance_node_not_messageable')
+        receipt = dict(
+            await self.deliver_control_node_message(
+                task_id=str(getattr(task, 'task_id', '') or '').strip(),
+                target_node_id=root_id,
+                message=content,
+                origin='frontdoor',
+                ref=ref,
+            )
+            or {}
+        )
+        receipt['target'] = target
+        receipt['target_kind'] = 'task'
+        receipt['resolved_node_id'] = root_id
+        if str(receipt.get('status') or '').strip() == 'delivered':
+            receipt.setdefault('notice', TASK_TARGET_ROOT_NOTICE)
+        return receipt
+
+    @staticmethod
+    def _frontdoor_target_rejection(target: str, reason: str) -> dict[str, Any]:
+        rejection: dict[str, Any] = {'target': target, 'status': 'rejected', 'reason': reason}
+        if reason == REJECT_TARGET_LIST_UNPARSED:
+            rejection['hint'] = TARGET_LIST_UNPARSED_HINT
+        return rejection
+
+    def _frontdoor_legal_targets(
+        self, session_id: str, *, limit: int = 50
+    ) -> tuple[list[str], bool]:
+        targets: list[str] = []
+        seen: set[str] = set()
+        truncated = False
+        for task in self.store.list_tasks(session_id):
+            if len(targets) >= limit:
+                truncated = True
+                break
+            reader = getattr(self.store, 'list_messageable_node_ids', None)
+            node_ids = (
+                list(reader(task.task_id, limit=limit + 1) or [])
+                if callable(reader)
+                else []
+            )
+            for node_id in node_ids:
+                normalized = str(node_id or '').strip()
+                if not normalized or normalized in seen:
+                    continue
+                if len(targets) >= limit:
+                    truncated = True
+                    break
+                seen.add(normalized)
+                targets.append(normalized)
+        return targets, truncated
 
     def list_frontdoor_node_messages(self, session_id: str) -> list[FrontdoorNodeMessage]:
         return list(self.store.list_frontdoor_node_messages(str(session_id or '').strip()) or [])
