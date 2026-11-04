@@ -599,7 +599,19 @@ textarea:focus {
 
 /* ---- 会话档位 ---- */
 .session-panel { display: grid; gap: 14px; }
-.session-meta { display: flex; flex-wrap: wrap; gap: var(--ui-space-2); }
+.session-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ui-space-2);
+}
+
+/* 徽标行里的动作按钮跟药丸同一基准线：同高、居中，不吃 toolbar-btn 的 32px 默认高度。 */
+.session-meta .toolbar-btn {
+  flex: 0 0 auto;
+  height: 28px;
+  min-height: 28px;
+}
 
 .mode-switch {
   display: grid;

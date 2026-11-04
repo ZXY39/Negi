@@ -183,3 +183,12 @@ test("退出沙箱的确认文案说明回到受限模式", async () => {
     const patchCalls = calls.filter((call) => call.body && "sandbox" in call.body);
     assert.deepEqual(patchCalls[0].body, { sandbox: false, unlock_password: "right" });
 });
+
+test("徽标行：沙箱按钮与信任/档位药丸同一基准线（居中、同高）", () => {
+    const css = fs.readFileSync(path.join(FRONTEND_DIR, "sandbox.css"), "utf8");
+    const meta = (css.match(/\.session-meta \{([^}]*)\}/) || [])[1] || "";
+    assert.match(meta, /align-items:\s*center/);
+    const button = (css.match(/\.session-meta \.toolbar-btn \{([^}]*)\}/) || [])[1] || "";
+    assert.match(button, /height:\s*28px/);
+    assert.match(button, /min-height:\s*28px/);
+});
