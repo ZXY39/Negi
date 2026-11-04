@@ -5,7 +5,9 @@
 * 档位意图（`mode`）：每个会话一个值，每回合解析档位都要读它。放磁盘上逐跳读会把
   µs 级判定变成毫秒级，所以启动时读一次、之后只读写内存，变更时整份原子落盘。
 * 安装态：探测要跑子进程（`bwrap --version` / `wsl -l` / `docker info`），
-  结论缓存到进程生命周期；只有显式 `refresh_install_state()` 才重探。
+  结论在进程内缓存；超过 ``INSTALL_STATE_TTL_SECONDS`` 后由下一次读取**在后台
+  重探**（stale-while-revalidate，单飞），读取本身永远返回缓存值，不把子进程
+  探测塞进回合构造。`refresh_install_state()` 仍是同步强制重探。
 
 落点：`<数据根>/sandbox/session-modes.json`。数据根而不是工作区——档位是运行时
 状态，不是项目配置；换工作区不该丢会话的开关。
@@ -15,6 +17,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +37,11 @@ _UNLOCKS: dict[str, dict[str, str]] = {}
 _ROOTS: dict[str, list[str]] = {}
 _TOOLS: dict[str, list[str]] = {}
 _INSTALL: dict[str, Any] | None = None
+_INSTALL_CHECKED_AT: float = 0.0
+_INSTALL_PROBING = False
+# 安装态的后台重探间隔。探测要起子进程（wsl.exe / bwrap），不能每回合都跑；
+# 但也不能像以前那样缓存到进程结束——机器侧修好了/坏了，下一回合就该看到。
+INSTALL_STATE_TTL_SECONDS = 60.0
 _MAX_WRITABLE_ROOTS = 16
 _MAX_ALLOWED_TOOLS = 256
 
@@ -284,13 +292,48 @@ def operator_unlock_note(session_key: Any) -> dict[str, Any]:
         return dict(_UNLOCKS.get(key) or {})
 
 
+def _schedule_install_probe() -> None:
+    """后台重探安装态；同一时刻最多一个探测线程。"""
+    global _INSTALL, _INSTALL_CHECKED_AT, _INSTALL_PROBING
+    with _LOCK:
+        if _INSTALL_PROBING:
+            return
+        _INSTALL_PROBING = True
+
+    def run() -> None:
+        global _INSTALL, _INSTALL_CHECKED_AT, _INSTALL_PROBING
+        reading: dict[str, Any] | None = None
+        try:
+            reading = probe_install_state()
+        except Exception as exc:  # noqa: BLE001 - 探测失败沿用旧读数
+            logger.warning("sandbox install re-probe failed: {}", exc)
+        with _LOCK:
+            if reading is not None:
+                _INSTALL = reading
+            # 失败也刷新时间戳：否则每个回合都会再起一个必败的探测线程。
+            _INSTALL_CHECKED_AT = time.monotonic()
+            _INSTALL_PROBING = False
+
+    threading.Thread(target=run, name="sandbox-install-probe", daemon=True).start()
+
+
 def install_state(*, refresh: bool = False) -> dict[str, Any]:
-    """当前机器的安装态读数（进程内缓存）。"""
-    global _INSTALL
+    """当前机器的安装态读数（进程内缓存，过期由后台重探）。
+
+    首次读取同步探测（调用方需要真实结论）；``refresh=True`` 同步重探；
+    其余读取在超过 TTL 时返回旧值并触发一次后台重探。
+    """
+    global _INSTALL, _INSTALL_CHECKED_AT
     with _LOCK:
         if _INSTALL is None or refresh:
             _INSTALL = probe_install_state()
-        return dict(_INSTALL)
+            _INSTALL_CHECKED_AT = time.monotonic()
+            return dict(_INSTALL)
+        stale = (time.monotonic() - _INSTALL_CHECKED_AT) > INSTALL_STATE_TTL_SECONDS
+        reading = dict(_INSTALL)
+    if stale:
+        _schedule_install_probe()
+    return reading
 
 
 def install_state_name() -> str:
@@ -303,11 +346,13 @@ def refresh_install_state() -> dict[str, Any]:
 
 def reset_sandbox_state_for_tests() -> None:
     """测试钩子：丢掉进程内缓存（不动磁盘）。"""
-    global _MODES, _MODES_PATH, _INSTALL
+    global _MODES, _MODES_PATH, _INSTALL, _INSTALL_CHECKED_AT, _INSTALL_PROBING
     with _LOCK:
         _MODES = None
         _MODES_PATH = None
         _INSTALL = None
+        _INSTALL_CHECKED_AT = 0.0
+        _INSTALL_PROBING = False
         _UNLOCKS.clear()
         _ROOTS.clear()
         _TOOLS.clear()

@@ -23,12 +23,14 @@
 | 安装态 | `restricted` | `unrestricted` |
 |---|---|---|
 | `not_installed` / `runtime_missing` / `partial`（该信任档必需维度不全） | `limited` | `host_full` |
-| `ready` | `jailed` | `host_full` |
+| `ready`，且 jail 后端已接进执行道 | `jailed` | `host_full` |
+| `ready`，闸门未开 | `limited` | `host_full` |
 
 - **默认意图按信任派生**：`third_party*` → `restricted`，`owner` → `unrestricted`。
   操作员本地会话因此保持既有行为（宿主执行 + 现有 guards + 记忆注入 + 可派任务）。
 - **装/卸沙箱不改任何会话元数据**：意图不动，档位随安装态变；`restricted` 会话在
-  安装后自动升 `jailed`，卸载后自动回 `limited`。
+  安装后自动升 `jailed`，卸载后自动回 `limited`。安装态读数最多滞后一个重探周期
+  （见「档位存储与 API」的安装态条目），所以自动升降发生在重探之后的下一个回合边界。
 - **`partial` 只服务 owner**：`third_party` 的必需维度（`fs_read` / `fs_write` / `network`）
   缺一维就不给它 jail——把"缺一维"当"全缺"或反过来，两种都是假安全。
 - 档位变化**只在回合边界生效**，不打断在飞回合。
@@ -150,7 +152,9 @@ pinned contract 同时带 `session_mode` 与受限档的 `session_workspace_dir:
   把会话放到 `unrestricted`"。
 - **安装态**：`g3ku/sandbox/probe.py` 探测（Windows 扫已安装的 WSL 发行版、Linux 查 bwrap 与
   非特权 userns、macOS 查 `sandbox-exec`、任意平台回退容器运行时），结论按逐维度强制力
-  上报并缓存在进程内；`POST /api/sandbox/refresh` 才重探。
+  上报并缓存在进程内。缓存超过 `INSTALL_STATE_TTL_SECONDS` 后，下一次读取**返回旧值并在后台
+  重探**（stale-while-revalidate，单飞）：档位解析不跑子进程，机器侧修好/坏掉最迟一个
+  TTL 后的回合看到；`POST /api/sandbox/refresh` 仍是同步强制重探。
 
   **Windows 不要求专有发行版**：`wsl -l -q` 列出的发行版逐个探能力，一个发行版要能承载
   jail 需同时有 `bubblewrap` 与 `python3`（后者跑 `fsop`）。专用发行版 `negi-sandbox`
@@ -210,8 +214,10 @@ pinned contract 同时带 `session_mode` 与受限档的 `session_workspace_dir:
 的**两个容器**：`items` 只装 `web:` 本地会话，渠道会话（`ext:` 与 `china:` 归档）在
 `channel_groups[].items`，两个容器都要进下拉。`/api/ceo/sessions/{id}/sandbox` 一族按外部会话
 注册表解析 `ext:` 键，逐会话意图与 `resolve_tier` 都不分会话族（third_party 的 `unrestricted`
-同样落到 `host_full`），所以渠道会话的档位与卷在本页同样可读写。
-额外可写目录收进
+同样落到 `host_full`），所以渠道会话的档位在本页同样可改。文件卡跟着实际档位走：`jailed`
+会话列卷内 `workspace` / `inbox` / `outbox`；`limited` / `host_full` 会话不列卷，改为显示宿主
+`session-workspaces/<键>-<摘要>` 落点与复制按钮（那里才是模型真正写文件的地方），导入、
+导出、重置对非 jailed 会话一律不出现。额外可写目录收进
 `<details>` 折叠区、owner 才出现且已有值时默认展开。运行时默认展开、卡头不写副标题，
 安装卡默认折叠；运行时卡内只显示读数与提示，不设第二个安装入口。两卡自上而下排列，
 右列底边与左列对齐（差值由卡间距吸收）；运行时的空按钮行与空提示不占布局，避免把右列撑高。改档保存走页内二次确认
@@ -219,7 +225,10 @@ pinned contract 同时带 `session_mode` 与受限档的 `session_workspace_dir:
 与已存值不同时出现。
 
 `ui_labels` 由服务端按安装态给出（未安装「受限 / 全权限」、已安装「开启沙箱 / 关闭沙箱」），
-前端不自己判安装态。文件管理一族端点只在安装态 `ready` / `partial` 时有意义；
+前端不自己判安装态。文件管理一族端点按**实际档位**发口：安装态 `ready` / `partial` 之上
+还要会话被发放了 `jailed`，否则 409 `session_not_jailed`——受限档在宿主跑时卷是空壳，
+列出它等于告诉操作员"没有文件"。`/sandbox/status.file_management_available` 用同一条判据
+（安装态且 jail 闸门已开），页面据此在非 jailed 会话上改给宿主 `session-workspaces` 落点。
 `install_available` / 安装计划由 `g3ku/sandbox/installer.py` 按平台计算，`partial` 与
 `runtime_missing` 允许走「修复」路径。
 
@@ -426,4 +435,7 @@ MCP 网关以固定身份 `negi-mcp` 出现在每条入站消息里，所以「�
   （前门 `_sandbox_read_roots` / `_sandbox_write_roots`）。
 - 群聊工具"看不到但不报错" → 曝光层收窄；"看得到但被拒" → 执行层打回，两者文案不同。
 - 群聊本来能用的工具突然没了 → 查注册表条目的 `trust`（粘性，只降不升）。
-- 装了/卸了沙箱但会话档位没变 → 安装态是全局读数、档位在回合边界才生效。
+- 装了/卸了沙箱但会话档位没变 → 安装态是全局读数、档位在回合边界才生效，且读数最多
+  滞后一个重探周期；先看 `GET /api/sandbox/status` 的 `install_state`，不对就 `?refresh=1`。
+- 文件卡是空的 → 先看该会话 `runs_in_jail`：`false` 表示它跑在宿主受限档，文件在
+  `session-workspaces`，卷里本来就没有；`true` 才去查卷的三个区。

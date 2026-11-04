@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,7 @@ from g3ku.sandbox.policy import (
     TIER_HOST_FULL,
     TIER_JAILED,
     TIER_LIMITED,
+    jail_backends_available,
     resolve_tier,
     session_policy,
 )
@@ -400,8 +402,10 @@ async def test_sandbox_status_reports_no_file_management_without_backend(
     item = payload["item"]
     assert item["install_state"] in {"ready", "partial", "runtime_missing", "not_installed"}
     if item["install_state"] not in {"ready", "partial"}:
-        assert item["file_management_available"] is False
         assert item["ui_labels"]["restricted"] == "受限"
+    # 卷文件管理要安装态与 jail 闸门同时成立；只看安装态会广告一个永远列不出文件的面板。
+    if item["install_state"] not in {"ready", "partial"} or not jail_backends_available():
+        assert item["file_management_available"] is False
     assert item["install_available"] is False
 
 
@@ -444,3 +448,52 @@ def test_wsl_jail_rejects_writable_roots_it_cannot_mount(
     )
     assert result["ok"] is True
     assert sandbox_state.get_writable_roots("web:ceo-local")
+
+
+def test_install_state_within_ttl_does_not_reprobe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """TTL 内不许起探测子进程：档位解析每回合都要读它，不能变成每回合跑 wsl.exe。"""
+    sandbox_state.reset_sandbox_state_for_tests()
+    calls: list[int] = []
+
+    def fake_probe():
+        calls.append(1)
+        return {"state": "ready", "backend": "fake", "enforcement": {}, "detail": {}}
+
+    monkeypatch.setattr(sandbox_state, "probe_install_state", fake_probe)
+    monkeypatch.setattr(sandbox_state, "INSTALL_STATE_TTL_SECONDS", 3600.0)
+    try:
+        assert sandbox_state.install_state()["state"] == "ready"
+        assert sandbox_state.install_state()["state"] == "ready"
+        assert len(calls) == 1
+    finally:
+        sandbox_state.reset_sandbox_state_for_tests()
+
+
+def test_install_state_reprobes_in_background_after_ttl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """装好/修好或坏掉，最迟一个 TTL 后下一回合读到新结论；读取本身不等子进程。"""
+    sandbox_state.reset_sandbox_state_for_tests()
+    readings = [
+        {"state": "ready", "backend": "fake", "enforcement": {}, "detail": {}},
+        {"state": "not_installed", "backend": "", "enforcement": {}, "detail": {}},
+    ]
+
+    def flip_probe():
+        # 第一次同步探测拿走 ready，之后都是 not_installed
+        return readings.pop(0) if len(readings) > 1 else readings[0]
+
+    monkeypatch.setattr(sandbox_state, "probe_install_state", flip_probe)
+    monkeypatch.setattr(sandbox_state, "INSTALL_STATE_TTL_SECONDS", 0.0)
+    try:
+        assert sandbox_state.install_state()["state"] == "ready"
+        # 过期读取先返回旧值（不阻塞），同时起后台重探。
+        assert sandbox_state.install_state()["state"] == "ready"
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            if sandbox_state.install_state()["state"] == "not_installed":
+                break
+            time.sleep(0.01)
+        assert sandbox_state.install_state()["state"] == "not_installed"
+    finally:
+        sandbox_state.reset_sandbox_state_for_tests()

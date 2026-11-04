@@ -15,9 +15,21 @@ from starlette.datastructures import UploadFile
 
 import main  # noqa: F401  (production import order)
 from g3ku.runtime.api import sandbox as sandbox_api
+from g3ku.runtime.session_trust import TRUST_OWNER
 from g3ku.sandbox.backend_base import Enforcement
 from g3ku.sandbox.manager import SandboxManager
+from g3ku.sandbox.policy import MODE_RESTRICTED, TIER_JAILED, TIER_LIMITED, SessionPolicy
 from g3ku.sandbox.probe import FULL
+
+
+def _policy(tier: str) -> SessionPolicy:
+    return SessionPolicy(
+        session_key="web:ceo-1",
+        trust=TRUST_OWNER,
+        mode=MODE_RESTRICTED,
+        install_state="ready",
+        tier=tier,
+    )
 
 
 class HostMappedBackend:
@@ -56,6 +68,7 @@ def sandbox_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(sandbox_api, "install_state", lambda: {"state": "ready"})
     monkeypatch.setattr(sandbox_api, "_sandbox_manager", lambda: manager)
     monkeypatch.setattr(sandbox_api, "_staging_dir", lambda: staging)
+    monkeypatch.setattr(sandbox_api, "session_policy", lambda key: _policy(TIER_JAILED))
     return manager, tmp_path
 
 
@@ -72,6 +85,22 @@ async def test_files_are_not_listed_when_not_installed(
     with pytest.raises(Exception) as excinfo:
         await sandbox_api.get_session_sandbox_files("web:ceo-1", area="inbox")
     assert getattr(excinfo.value, "status_code", None) == 409
+
+
+@pytest.mark.asyncio
+async def test_host_limited_session_is_not_given_the_volume_lane(
+    sandbox_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """安装态 ready 但会话没被发放 jailed 时，卷里没有它的文件，必须 409 而不是空列表。"""
+    monkeypatch.setattr(sandbox_api, "session_policy", lambda key: _policy(TIER_LIMITED))
+    with pytest.raises(Exception) as excinfo:
+        await sandbox_api.get_session_sandbox_files("web:ceo-1", area="workspace")
+    assert getattr(excinfo.value, "status_code", None) == 409
+    assert getattr(excinfo.value, "detail", None) == "session_not_jailed"
+
+    with pytest.raises(Exception) as reset_excinfo:
+        await sandbox_api.post_session_sandbox_reset("web:ceo-1", {"confirm": True})
+    assert getattr(reset_excinfo.value, "detail", None) == "session_not_jailed"
 
 
 @pytest.mark.asyncio

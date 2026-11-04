@@ -96,7 +96,7 @@
               <p id="files-hint">会话卷里的文件；导入只进 inbox，模型写出的文件在 outbox。</p>
             </div>
           </div>
-          <div class="panel-body">
+          <div class="panel-body" id="files-body">
             <div class="segmented" id="area-tabs" role="tablist" aria-label="文件区域">
               <button class="tab" type="button" role="tab" data-area="workspace">workspace</button>
               <button class="tab" type="button" role="tab" data-area="inbox">inbox</button>
@@ -112,6 +112,12 @@
             </div>
             <ul id="file-list" class="file-list"></ul>
             <p class="hint" id="files-empty" hidden>这个区还没有文件。</p>
+          </div>
+          <div class="panel-body" id="files-unjailed" hidden>
+            <p class="hint" id="files-unjailed-hint"></p>
+            <div class="panel-actions">
+              <button id="copy-workspace-btn" class="toolbar-btn" type="button">复制目录路径</button>
+            </div>
           </div>
         </section>
       </div>

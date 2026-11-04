@@ -7,11 +7,13 @@
 - `PATCH /api/ceo/sessions/{id}/sandbox` —— 只改意图；**任何信任级的开/关沙箱**
   （mode 与当前意图不同）都必须带项目解锁口令（服务端只读校验，不顺便解锁项目）。
   只改 `writable_roots`、或 mode 与原意图相同，则不需要口令。
-- `GET  /api/sandbox/status` —— 全局安装态与后端读数（进程内缓存，`?refresh=1` 重探）。
+- `GET  /api/sandbox/status` —— 全局安装态与后端读数（进程内缓存，过期后台重探，
+  `?refresh=1` 同步重探）。
 - `POST /api/sandbox/refresh` —— 重探安装态。
 
-沙箱页面里的文件/包/磁盘一族端点属于 jail 后端落地之后的事，本模块不提供——
-没有后端时"管理沙箱内容"没有对象可管。
+文件/包/磁盘一族端点只服务**真在 jail 里跑**的会话（`tier == jailed`）：宿主受限档的文件在
+`session-workspaces`，它的卷是空壳，所以这些端点对它回 409 `session_not_jailed`，
+页面改为显示宿主落点。
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ from loguru import logger
 
 from g3ku.audit_events import emit_audit_event
 from g3ku.runtime.external_sessions import get_external_session_registry
+from g3ku.runtime.frontdoor.session_workspace import ceo_session_workspace_dir
 from g3ku.runtime.session_trust import TRUST_OWNER, session_trust
 from g3ku.sandbox.errors import SandboxDeniedError, SandboxUnavailableError
 from g3ku.sandbox.installer import (
@@ -47,6 +50,7 @@ from g3ku.sandbox.policy import (
     TIER_LIMITED,
     TIER_READONLY,
     default_mode_for_trust,
+    jail_backends_available,
     session_policy,
 )
 from g3ku.sandbox.probe import BACKEND_WSL_BWRAP
@@ -169,7 +173,18 @@ def _session_item(session_key: str) -> dict[str, Any]:
         "tasks_allowed": policy.tier == TIER_HOST_FULL,
         # D14：owner 的额外可写根；third_party 恒空（列表只读，写入走 PATCH 的 owner 闸门）。
         "writable_roots": get_writable_roots(session_key),
+        # 文件面板按这两个读数决定列卷、还是只给宿主落点：卷只属于真的在 jail 里跑的会话。
+        "runs_in_jail": policy.tier == TIER_JAILED,
+        "session_workspace": _session_workspace_path(session_key),
     }
+
+
+def _session_workspace_path(session_key: str) -> str:
+    """受限档在宿主上的会话工作目录（只解析路径，不创建）。"""
+    try:
+        return ceo_session_workspace_dir(session_key, create=False)
+    except Exception:  # noqa: BLE001 - 读数缺了不该让整张卡片失败
+        return ""
 
 
 def _roots_unreachable_in_jail(session_key: str) -> bool:
@@ -441,13 +456,19 @@ def _sandbox_manager():
 
 
 def _installed_handle(session_id: str):
-    """文件管理只在装好之后才有对象可管；没装就是 409，不是空列表。"""
+    """文件管理只在会话真的在 jail 里跑时才有对象可管。
+
+    安装态好看不等于会话被发放了 `jailed`（`JAIL_BACKENDS_AVAILABLE` 是另一道闸门）：
+    受限档在宿主上跑时，文件在 `session-workspaces`，卷是空壳，列它只会骗人。
+    """
     key = str(session_id or "").strip()
     if not _session_exists(key):
         raise HTTPException(status_code=404, detail="session_not_found")
     reading = install_state()
     if str(reading.get("state") or "") not in {"ready", "partial"}:
         raise HTTPException(status_code=409, detail="sandbox_not_installed")
+    if str(session_policy(key).tier or "") != TIER_JAILED:
+        raise HTTPException(status_code=409, detail="session_not_jailed")
 
     manager = _sandbox_manager()
     if manager is None:
@@ -474,7 +495,11 @@ async def get_sandbox_status(refresh: int = Query(0)):
             "ui_labels": _ui_labels(reading),
             "install_available": bool(plan.installable),
             "install_plan_reason": plan.reason,
-            "file_management_available": str(reading.get("state") or "") in {"ready", "partial"},
+            # 卷文件管理要两件事同时成立：装好了，并且 jail 后端真的接进了执行道。
+            # 只看安装态会在闸门关闭时给出一个永远列不出文件的入口。
+            "file_management_available": (
+                str(reading.get("state") or "") in {"ready", "partial"} and jail_backends_available()
+            ),
         },
     }
 

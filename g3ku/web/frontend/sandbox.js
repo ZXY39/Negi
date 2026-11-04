@@ -325,7 +325,8 @@ function renderFiles(entries) {
 
 async function loadFiles() {
   const sessionId = currentSessionId();
-  if (!sessionId || !state.status || !state.status.file_management_available) return;
+  // 卷只属于真在 jail 里跑的会话；宿主受限档的文件在 session-workspaces。
+  if (!sessionId || !state.current || !state.current.runs_in_jail) return;
   try {
     const payload = await api(
       `/api/ceo/sessions/${encodeURIComponent(sessionId)}/sandbox/files?area=${encodeURIComponent(state.area)}`,
@@ -333,7 +334,12 @@ async function loadFiles() {
     renderFiles((payload.item || {}).entries || []);
   } catch (error) {
     renderFiles([]);
-    $('files-hint').textContent = error.status === 409 ? '沙箱尚未安装，文件管理不可用。' : `读取失败：${error.message}`;
+    $('files-hint').textContent =
+      error.status === 409
+        ? error.message === 'session_not_jailed'
+          ? '本会话不在沙箱里运行，卷文件管理不可用。'
+          : '沙箱尚未安装，文件管理不可用。'
+        : `读取失败：${error.message}`;
   }
 }
 
@@ -375,9 +381,29 @@ function syncAreaTabs() {
 }
 
 function renderFileSection() {
-  const available = Boolean(state.status && state.status.file_management_available && state.current);
-  $('files-card').hidden = !available;
-  if (!available) return;
+  const current = state.current;
+  $('files-card').hidden = !current;
+  if (!current) return;
+  // 卷只属于真在 jail 里跑的会话：宿主受限档的文件在 session-workspaces，
+  // 列卷只会呈现一个空壳（旧行为就是这么误导的）。
+  const jailed = Boolean(current.runs_in_jail) && Boolean(state.status && state.status.file_management_available);
+  $('files-body').hidden = !jailed;
+  $('files-unjailed').hidden = jailed;
+  if (!jailed) {
+    const workspace = String(current.session_workspace || '');
+    const jailedButUnavailable = Boolean(current.runs_in_jail);
+    $('files-unjailed-hint').textContent = jailedButUnavailable
+      ? 'jail 后端还没接进执行道，卷文件管理暂不可用。'
+      : workspace
+        ? `本会话在宿主受限档运行，文件写在：${workspace}`
+        : '本会话在宿主受限档运行，目录路径暂不可用。';
+    $('files-hint').textContent = jailedButUnavailable
+      ? '会话卷里的文件；导入只进 inbox，模型写出的文件在 outbox。'
+      : '本会话不在沙箱里跑，卷内没有文件；下方给出宿主落点。';
+    $('copy-workspace-btn').disabled = !workspace;
+    return;
+  }
+  $('files-hint').textContent = '会话卷里的文件；导入只进 inbox，模型写出的文件在 outbox。';
   syncAreaTabs();
   loadFiles();
 }
@@ -907,6 +933,9 @@ function bindEvents() {
     });
   });
   $('files-refresh-btn').addEventListener('click', loadFiles);
+  $('copy-workspace-btn').addEventListener('click', () => {
+    if (state.current) void copyText(state.current.session_workspace || '');
+  });
   $('upload-input').addEventListener('change', async (event) => {
     const file = event.target.files && event.target.files[0];
     event.target.value = '';
@@ -945,7 +974,7 @@ async function main() {
   }
 }
 
-window.__sandboxTestHooks = { collectSessionOptions, loadSessions, state };
+window.__sandboxTestHooks = { collectSessionOptions, loadSessions, renderFileSection, state };
 
 document.addEventListener('DOMContentLoaded', main);
 
