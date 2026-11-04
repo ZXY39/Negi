@@ -140,16 +140,20 @@ function closeConfirm({ restoreFocus = true } = {}) {
 }
 
 async function acceptConfirm() {
-    if (!S.confirmState?.onConfirm) return;
+    const state = S.confirmState;
+    if (!state?.onConfirm) return;
     U.confirmAccept.disabled = true;
     U.confirmCancel.disabled = true;
     if (U.confirmCheckbox) U.confirmCheckbox.disabled = true;
     try {
-        S.confirmState.accepted = true;
-        await S.confirmState.onConfirm({ checked: !!U.confirmCheckbox?.checked, value: String(U.confirmInput?.value || "") });
-        closeConfirm();
+        state.accepted = true;
+        await state.onConfirm({ checked: !!U.confirmCheckbox?.checked, value: String(U.confirmInput?.value || "") });
+        // `onConfirm` 里 resolve 时，等待这张弹窗的调用方拿到的正是第一个微任务：
+        // 串联下一张弹窗已经在这里建好并换了 S.confirmState。这句收尾若照旧执行，
+        // 拆掉的是那张新弹窗，还会触发它的 onClose 把用户判成"取消"，操作无声失败。
+        if (S.confirmState === state) closeConfirm();
     } catch (error) {
-        if (S.confirmState) S.confirmState.accepted = false;
+        if (S.confirmState === state) state.accepted = false;
         showToast({ title: "操作失败", text: error?.message || "Unknown error", kind: "error" });
     } finally {
         U.confirmAccept.disabled = false;

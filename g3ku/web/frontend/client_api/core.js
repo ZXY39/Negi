@@ -143,6 +143,11 @@ class ApiCore {
                 return "查看 Apikey 需要项目解锁口令。";
             case "api_key_password_invalid":
                 return "项目解锁口令不正确。";
+            case "session_busy":
+                // 只有清除群历史会返回这个码：会话正在出回合或摘要还等着注入。
+                return "这个会话正在回复或还有待注入的群摘要，等这一轮结束后再清除。";
+            case "qq_group_session_required":
+                return "这个会话不是 QQ 官方群会话，没有群历史文件可清除。";
             default:
                 return "";
         }

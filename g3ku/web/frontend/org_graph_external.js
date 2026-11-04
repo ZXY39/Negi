@@ -1153,10 +1153,41 @@ async function refreshQqGroupHistoryStrip() {
     }
 }
 
+const QQ_HISTORY_CLEAR_TITLE = "正在清除群历史";
+
+function _qqHistoryClearProgressText(startedAt) {
+    const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+    return `删除 JSONL、媒体与摘要 artifact 中… 已用时 ${elapsedSeconds}s（请不要关闭页面）`;
+}
+
+// 请求期间唯一的进度信号：秒数在走说明它还活着。只改文本节点，不重复走
+// showToast——那会每秒重建一次 toast 图标。
+function _startQqHistoryClearProgress() {
+    const startedAt = Date.now();
+    showToast({
+        title: QQ_HISTORY_CLEAR_TITLE,
+        text: _qqHistoryClearProgressText(startedAt),
+        kind: "info",
+        persistent: true,
+        spin: true,
+    });
+    const ticker = window.setInterval(() => {
+        const text = document.getElementById("app-toast-text");
+        if (!text || String(document.getElementById("app-toast-title")?.textContent || "") !== QQ_HISTORY_CLEAR_TITLE) return;
+        text.textContent = _qqHistoryClearProgressText(startedAt);
+    }, 1000);
+    return () => window.clearInterval(ticker);
+}
+
 async function _clearQqGroupHistory() {
     const strip = document.getElementById("qq-group-history-strip");
     const sessionId = String(strip?.dataset.sessionId || "").trim();
-    if (!sessionId) return;
+    if (!sessionId) {
+        // 占用条和 dataset 由同一次刷新写入，走到这里说明这条已经过期。
+        // 静默返回最像"按钮坏了"，必须留一句话。
+        showToast({ title: "没有可清除的群历史", text: "当前会话不是 QQ 官方群会话，切进群会话后再试。", kind: "info" });
+        return;
+    }
     const first = await requestInlineConfirm({
         title: "清除该群历史文件",
         text: "将删除该群的群聊历史 JSONL、媒体文件与摘要 artifact；不会删除会话转录、记忆或 @ 名单。",
@@ -1171,6 +1202,7 @@ async function _clearQqGroupHistory() {
         confirmKind: "danger",
     });
     if (!second.confirmed) return;
+    const stopProgress = _startQqHistoryClearProgress();
     try {
         const result = await ApiClient.clearQqGroupHistory(sessionId);
         showToast({
@@ -1181,6 +1213,8 @@ async function _clearQqGroupHistory() {
         await refreshQqGroupHistoryStrip();
     } catch (error) {
         showToast({ title: "清除失败", text: error?.message || "Unknown error", kind: "error" });
+    } finally {
+        stopProgress();
     }
 }
 

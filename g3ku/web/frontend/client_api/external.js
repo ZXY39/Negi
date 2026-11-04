@@ -57,7 +57,12 @@
     },
 
     async clearQqGroupHistory(sessionId) {
-        return this.post("/api/qq-bot/history/clear", { session_id: String(sessionId || ""), confirm: true });
+        // 群文件上限按 2GB 配，删媒体目录的时长由磁盘决定。客户端 10s 超时只会把
+        // 已经删成功的操作报成 "Request timeout"，所以这里不设超时。
+        return this._request("POST", "/api/qq-bot/history/clear", {
+            body: { session_id: String(sessionId || ""), confirm: true },
+            timeoutMs: 0,
+        });
     }
     };
 })();
