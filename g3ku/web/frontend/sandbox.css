@@ -606,11 +606,13 @@ textarea:focus {
   gap: var(--ui-space-2);
 }
 
-/* 徽标行里的动作按钮跟药丸同一基准线：同高、居中，不吃 toolbar-btn 的 32px 默认高度。 */
+/* 徽标行里的动作按钮跟药丸同一基准线：同高、居中，不吃 toolbar-btn 的 32px 默认高度；
+   行高也必须跟随，否则 UA 的 line-height: normal 会让文字比药丸低约 1.7px。 */
 .session-meta .toolbar-btn {
   flex: 0 0 auto;
   height: 28px;
   min-height: 28px;
+  line-height: inherit;
 }
 
 .mode-switch {
