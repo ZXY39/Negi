@@ -5061,3 +5061,37 @@ def test_detail_boxes_are_line_capped_and_outputs_have_copy_buttons() -> None:
     assert 'id="ad-token-summary" class="task-flow-usage"' in html
     # 前门展开钮与引导线使用 #39c5bb。
     assert "background: #39c5bb" in css
+
+
+def test_tree_node_pause_chip_sits_inside_top_left_and_title_yields() -> None:
+    """节点行的暂停钮占卡片左上内侧，标题首行为它让位。
+
+    压在边框线上会切进连线，直接叠在标题上会盖住首字，两条规则是一对：
+    只留定位会把遮挡挪到标题，只留让位等于没让。
+    """
+    css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
+    rules = [
+        (match.group("sel").strip(), match.group("body"))
+        for match in re.finditer(r"(?P<sel>[^{}]+)\{(?P<body>[^{}]*)\}", css)
+    ]
+
+    chip_bodies = [body for sel, body in rules if sel == ".execution-tree-node-pause-action"]
+    assert chip_bodies, "找不到 .execution-tree-node-pause-action 规则"
+    # 大控件档会在文件后段另起一条同名规则改圆角，按层叠后的读数一起收。
+    declarations: dict[str, str] = {}
+    for body in chip_bodies:
+        declarations.update(
+            {name.strip(): value.strip() for name, value in re.findall(r"([a-z-]+)\s*:\s*([^;]+)", body)}
+        )
+    assert "right" not in declarations, declarations
+    for corner in ("top", "left"):
+        # 字面非负像素才算"在卡片内侧"：calc(内边距 - 25px) 这类负偏移是压在边框线上。
+        assert re.fullmatch(r"\d+(\.\d+)?px", declarations.get(corner, "")), declarations
+
+    yield_rules = [
+        rule_body
+        for sel, rule_body in rules
+        if sel.endswith(".execution-tree-node-title") and "execution-tree-node-pause-action" in sel
+    ]
+    assert len(yield_rules) == 1, yield_rules
+    assert re.search(r"\btext-indent\s*:", yield_rules[0]), yield_rules[0]

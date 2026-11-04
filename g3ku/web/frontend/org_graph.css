@@ -14164,10 +14164,8 @@ textarea {
 
 .execution-tree-node-pause-action {
     position: absolute;
-    /* 圆心压在顶边框线上、距左缘 18px；下沿收到卡片上内边距为止，
-       dense/wide 档内边距更小时整颗钮自动上移，不顶到标题首行。 */
-    top: calc(var(--tree-node-padding-y) - 25px);
-    left: 5px;
+    top: 8px;
+    left: 8px;
     z-index: 2;
     display: inline-flex;
     align-items: center;
@@ -14181,6 +14179,12 @@ textarea {
     font-size: 0.72rem;
     line-height: 1;
     cursor: pointer;
+}
+
+/* 暂停钮落在卡片左上内侧，标题首行给它让位；后续行照旧满宽，卡片高度不变。
+   只在真有这颗钮的节点行上生效（终态节点与整任务暂停时不画它）。 */
+.execution-tree-node:has(.execution-tree-node-pause-action) .execution-tree-node-title {
+    text-indent: 28px;
 }
 
 .execution-tree-node-pause-action:hover,
