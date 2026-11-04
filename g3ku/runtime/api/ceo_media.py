@@ -69,8 +69,11 @@ _KNOWN_DOCUMENT_MIME = {
     ".md": "text/markdown",
 }
 
-_MD_IMAGE_RE = re.compile(r'!\[([^\]]*)\]\(([^)\s]+(?:\s+"[^"]*")?)\)')
-_MD_LINK_RE = re.compile(r'\[([^\]]+)\]\(([^)\s]+(?:\s+"[^"]*")?)\)')
+# 目标里允许空格：Windows 路径几乎都带（实盘 `E:\Projects\Negi Data\...`），
+# 旧写法把空格当目标结束符，整条引用连附件都提取不到，QQ 端只剩文件名。
+# 标题仍在 `_TITLE_RE` 里按结尾的 ` "..."` 剥离，括号内不支持再嵌 `)`。
+_MD_IMAGE_RE = re.compile(r'!\[([^\]]*)\]\(([^)]+)\)')
+_MD_LINK_RE = re.compile(r'\[([^\]]+)\]\(([^)]+)\)')
 # 被提取成附件的引用要从正文里整段消失，左边那一枚水平空白跟着一起吞：模型常把引用
 # 写在句中（"看图 ![](x.png)"），只摘标记会留下一枚孤空格。
 _MD_IMAGE_REF_RESIDUE_RE = re.compile(rf"[ \t]?{_MD_IMAGE_RE.pattern}")
@@ -96,7 +99,7 @@ def is_raster_image(name: str) -> bool:
     return Path(str(name or "")).suffix.lower() in _RASTER_SUFFIXES
 
 
-def channel_attachment_roots() -> tuple[Path, ...]:
+def channel_attachment_roots(session_key: str = "") -> tuple[Path, ...]:
     """Roots a channel-bound reply is allowed to reference.
 
     Channel replies leave the machine (QQ / OneBot), so a model-injected
@@ -104,10 +107,25 @@ def channel_attachment_roots() -> tuple[Path, ...]:
     workspace covers both agent output and ``<workspace>/.g3ku/external-uploads``
     (where inbound channel attachments land).
 
+    Channel sessions also write into their own session workspace
+    (``<data-root>/session-workspaces/<session>``, where stickers and copied
+    media live). Without that root a reply referencing its own workspace file
+    degraded to raw markdown: QQ rendered only the alt text, i.e. the file name.
+
     Web snapshots pass ``None`` instead: the operator is looking at their own
     machine, so restricting there would only break legitimate previews.
     """
-    return (workspace_path(),)
+    roots: list[Path] = [workspace_path()]
+    normalized = str(session_key or "").strip()
+    if normalized:
+        try:
+            # Lazy import: `g3ku.runtime.frontdoor` imports this package at load time.
+            from g3ku.runtime.frontdoor.session_workspace import ceo_session_workspace_dir
+
+            roots.append(Path(ceo_session_workspace_dir(normalized)).resolve())
+        except Exception:  # noqa: BLE001 - a missing workspace must not drop the global root
+            pass
+    return tuple(dict.fromkeys(roots))
 
 
 def _file_url_to_path(src: str) -> str:
@@ -134,7 +152,11 @@ def _file_url_to_path(src: str) -> str:
 
 
 def _resolve_local_source(raw_src: str, allowed_roots: tuple[Path, ...] | None = None) -> Path | None:
-    src = _file_url_to_path(str(raw_src or "").strip())
+    src = str(raw_src or "").strip()
+    if src.startswith("<") and src.endswith(">"):
+        # Markdown 对带空格目标的合法写法：![alt](<C:\path with space.png>)
+        src = src[1:-1].strip()
+    src = _file_url_to_path(src)
     if not src or src.startswith(("#", "data:")):
         return None
     if src.startswith("/api/ceo/media/original") or src.startswith("/api/ceo/uploads/file"):

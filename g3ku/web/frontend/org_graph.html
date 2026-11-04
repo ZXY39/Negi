@@ -203,6 +203,10 @@
                                 aria-atomic="true" hidden></div>
                             <div id="ceo-context-load-notice" class="ceo-context-load-notice" role="status"
                                 aria-live="polite" aria-hidden="true" hidden></div>
+                            <div id="qq-group-history-strip" class="qq-group-history-strip" hidden>
+                                <span id="qq-group-history-usage" class="qq-group-history-usage"></span>
+                                <button id="qq-group-history-clear" class="toolbar-btn ghost danger small" type="button">清除历史文件</button>
+                            </div>
                             <div class="ceo-composer">
                                 <div id="ceo-upload-list" class="ceo-upload-list" hidden aria-live="polite"></div>
                                 <div id="ceo-follow-up-queue" class="ceo-follow-up-queue" hidden aria-live="polite">
@@ -829,9 +833,10 @@
                         <div class="panel-header">
                             <div>
                                 <h3>官方 QQ 机器人</h3>
-                                <p class="subtitle external-panel-subtitle">填 AppID + AppSecret（QQ 开放平台）即连；主动提醒受官方消息配额限制。</p>
+                                <p class="subtitle external-panel-subtitle">填 AppID + AppSecret（QQ 开放平台）即连；主动提醒受官方消息配额限制。群聊需开启『机器人主动在群聊内发言』，否则摘要只能读不能回。</p>
                             </div>
                             <div class="panel-header-actions">
+                                <button id="qq-group-settings-btn" class="toolbar-btn ghost small" type="button">群聊设置</button>
                                 <button id="qq-bot-enabled-toggle" class="tool-governance-switch" type="button"
                                     aria-pressed="false" aria-label="启用官方 QQ 机器人">
                                     <span class="tool-governance-switch-track" aria-hidden="true"><span class="tool-governance-switch-thumb"></span></span>
@@ -1202,6 +1207,58 @@
                 </div>
             </div>
 
+            <div id="qq-group-settings-backdrop" class="confirm-backdrop" hidden>
+                <section id="qq-group-settings-dialog" class="confirm-dialog qq-group-settings-dialog" role="dialog"
+                    aria-modal="true" aria-labelledby="qq-group-settings-title">
+                    <header class="confirm-header">
+                        <h2 id="qq-group-settings-title">群聊设置</h2>
+                    </header>
+                    <div class="qq-group-settings-rows">
+                        <label class="qq-group-settings-row" for="qq-group-scan-min">
+                            <span class="qq-group-settings-label">查看群全局消息随机时间间隔</span>
+                            <span class="qq-group-settings-control">
+                                <input id="qq-group-scan-min" class="resource-search qq-group-number" type="number"
+                                    min="0" max="1440" step="1" inputmode="numeric" autocomplete="off">
+                                <span class="qq-group-settings-sep">–</span>
+                                <input id="qq-group-scan-max" class="resource-search qq-group-number" type="number"
+                                    min="0" max="1440" step="1" inputmode="numeric" autocomplete="off">
+                                <span class="qq-group-settings-unit">分钟</span>
+                            </span>
+                        </label>
+                        <label class="qq-group-settings-row is-single" for="qq-group-history-days">
+                            <span class="qq-group-settings-label" title="未被心跳读取的群历史（含媒体）保留天数">群文件保留日期</span>
+                            <span class="qq-group-settings-control">
+                                <input id="qq-group-history-days" class="resource-search qq-group-number" type="number"
+                                    min="1" max="365" step="1" inputmode="numeric" autocomplete="off"
+                                    title="未被心跳读取的群历史（含媒体）保留天数">
+                                <span class="qq-group-settings-unit">天</span>
+                            </span>
+                        </label>
+                        <label class="qq-group-settings-row is-single" for="qq-group-consumed-days">
+                            <span class="qq-group-settings-label" title="被心跳读取后保留天数">已读群消息保留日期</span>
+                            <span class="qq-group-settings-control">
+                                <input id="qq-group-consumed-days" class="resource-search qq-group-number" type="number"
+                                    min="1" max="365" step="1" inputmode="numeric" autocomplete="off"
+                                    title="被心跳读取后保留天数">
+                                <span class="qq-group-settings-unit">天</span>
+                            </span>
+                        </label>
+                        <label class="qq-group-settings-row is-single" for="qq-group-history-max">
+                            <span class="qq-group-settings-label">单群文件最大上限</span>
+                            <span class="qq-group-settings-control">
+                                <input id="qq-group-history-max" class="resource-search qq-group-number" type="number"
+                                    min="0.1" max="50" step="0.1" inputmode="decimal" autocomplete="off">
+                                <span class="qq-group-settings-unit">GB</span>
+                            </span>
+                        </label>
+                    </div>
+                    <div class="confirm-actions">
+                        <button id="qq-group-settings-cancel" class="toolbar-btn ghost" type="button">取消</button>
+                        <button id="qq-group-settings-save" class="toolbar-btn success qq-group-settings-save"
+                            type="button" aria-disabled="true">保存</button>
+                    </div>
+                </section>
+            </div>
             <div id="qq-master-bind-backdrop" class="confirm-backdrop" hidden>
                 <section id="qq-master-bind-dialog" class="confirm-dialog qq-master-bind-dialog" role="dialog"
                     aria-modal="true" aria-labelledby="qq-master-bind-title">

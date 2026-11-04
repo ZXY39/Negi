@@ -1490,6 +1490,27 @@ def _qq_bot_payload(cfg: Config) -> dict[str, Any]:
         secret = str(getattr(entry, 'app_secret', '') or '')
         bridge_id = _qq_bridge_id(app_id)
         state = states.get(bridge_id) or {}
+        try:
+            from g3ku.qq_official.group_history import account_history_usage
+
+            history_bytes = int(account_history_usage(app_id))
+        except Exception:
+            history_bytes = 0
+        active_message_state = ''
+        try:
+            from g3ku.runtime.external_sessions import get_external_session_registry
+
+            active_states = [
+                str(getattr(item, 'active_message_state', '') or '')
+                for item in get_external_session_registry().list_bridge_sessions(bridge_id)
+                if str(getattr(item, 'chat_type', '') or '') in {'group', 'guild'}
+            ]
+            if 'denied' in active_states:
+                active_message_state = 'denied'
+            elif 'quota' in active_states:
+                active_message_state = 'quota'
+        except Exception:
+            active_message_state = ''
         accounts.append({
             'app_id': str(app_id),
             'bridge_id': bridge_id,
@@ -1499,6 +1520,8 @@ def _qq_bot_payload(cfg: Config) -> dict[str, Any]:
             'enabled': bool(getattr(entry, 'enabled', True)),
             'label': str(getattr(entry, 'label', '') or ''),
             'owner_openids': list(getattr(entry, 'owner_openids', None) or []),
+            'history_bytes': history_bytes,
+            'active_message_state': active_message_state,
             'service': {
                 'state': str(state.get('state') or 'stopped'),
                 'detail': str(state.get('detail') or ''),
@@ -1542,21 +1565,26 @@ async def update_qq_bot_settings(payload: dict | None = Body(default=None)):
             if not app_id:
                 continue
             previous = q.accounts.get(app_id) if isinstance(q.accounts, dict) else None
+            owners = (
+                _normalize_qq_owner_openids(raw.get('ownerOpenids'))
+                if 'ownerOpenids' in raw
+                else _normalize_qq_owner_openids(raw.get('owner_openids'))
+                if 'owner_openids' in raw
+                else list(getattr(previous, 'owner_openids', None) or [])
+                if previous is not None
+                else []
+            )
+            if len(owners) > 1:
+                raise HTTPException(status_code=400, detail='qq_owner_openids_single_master')
             entry = QqBotAccountConfig(
                 app_secret=str(raw.get('appSecret', raw.get('app_secret')) or '').strip(),
                 sandbox=bool(raw.get('sandbox', False)),
                 enabled=bool(raw.get('enabled', True)),
                 label=str(raw.get('label') or '').strip(),
+                owner_openids=owners,
             )
             if not entry.app_secret and previous is not None:
                 entry.app_secret = str(previous.app_secret or '')
-            # 缺省该字段 = 保留旧名单：改密钥/备注/启停这类整表写入不该顺手把操作员清空。
-            if 'ownerOpenids' in raw:
-                entry.owner_openids = _normalize_qq_owner_openids(raw.get('ownerOpenids'))
-            elif 'owner_openids' in raw:
-                entry.owner_openids = _normalize_qq_owner_openids(raw.get('owner_openids'))
-            elif previous is not None:
-                entry.owner_openids = list(getattr(previous, 'owner_openids', None) or [])
             next_accounts[app_id] = entry
         q.accounts = next_accounts
     keep = {_qq_bridge_id(app_id) for app_id in dict(q.accounts or {})}
@@ -1564,6 +1592,118 @@ async def update_qq_bot_settings(payload: dict | None = Body(default=None)):
     save_config(cfg)
     await _refresh_runtime_after_save('admin_qq_bot_settings_update')
     return {'ok': True, **_qq_bot_payload(cfg)}
+
+
+def _qq_group_settings_payload(cfg: Config) -> dict[str, Any]:
+    q = cfg.qq_bot
+    return {
+        'scan_min_minutes': float(getattr(q, 'group_scan_min_minutes', 2.0) or 0.0),
+        'scan_max_minutes': float(getattr(q, 'group_scan_max_minutes', 5.0) or 0.0),
+        'history_retention_days': int(getattr(q, 'group_history_retention_days', 30) or 30),
+        'consumed_retention_days': int(getattr(q, 'group_consumed_retention_days', 7) or 7),
+        'history_max_gb': float(getattr(q, 'group_history_max_gb', 2.0) or 2.0),
+    }
+
+
+@router.get('/qq-bot/group-settings')
+async def get_qq_group_settings():
+    cfg = load_config()
+    return {'ok': True, **_qq_group_settings_payload(cfg)}
+
+
+@router.put('/qq-bot/group-settings')
+async def update_qq_group_settings(payload: dict | None = Body(default=None)):
+    body = payload if isinstance(payload, dict) else {}
+    cfg = load_config()
+    q = cfg.qq_bot
+    try:
+        scan_min = float(body.get('scan_min_minutes', q.group_scan_min_minutes))
+        scan_max = float(body.get('scan_max_minutes', q.group_scan_max_minutes))
+        history_days = int(body.get('history_retention_days', q.group_history_retention_days))
+        consumed_days = int(body.get('consumed_retention_days', q.group_consumed_retention_days))
+        max_gb = float(body.get('history_max_gb', q.group_history_max_gb))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail='qq_group_settings_invalid')
+    if scan_min < 0 or scan_max < 0 or scan_min > scan_max or scan_max > 1440:
+        raise HTTPException(status_code=400, detail='qq_group_scan_range_invalid')
+    if not (1 <= history_days <= 365) or not (1 <= consumed_days <= 365):
+        raise HTTPException(status_code=400, detail='qq_group_retention_invalid')
+    if not (0.1 <= max_gb <= 50.0):
+        raise HTTPException(status_code=400, detail='qq_group_history_max_invalid')
+    q.group_scan_min_minutes = scan_min
+    q.group_scan_max_minutes = scan_max
+    q.group_history_retention_days = history_days
+    q.group_consumed_retention_days = consumed_days
+    q.group_history_max_gb = max_gb
+    save_config(cfg)
+    await _refresh_runtime_after_save('admin_qq_group_settings_update')
+    return {'ok': True, **_qq_group_settings_payload(cfg)}
+
+
+@router.get('/qq-bot/history/usage')
+async def get_qq_group_history_usage(session_id: str = Query(...)):
+    sid = str(session_id or '').strip()
+    if not sid.startswith('ext:qq-official-'):
+        raise HTTPException(status_code=400, detail='qq_group_session_required')
+    from g3ku.qq_official.group_history import GroupHistoryStore, group_history_root
+
+    store = GroupHistoryStore(root=group_history_root(sid), session_key=sid)
+    return {
+        'ok': True,
+        'session_id': sid,
+        'bytes': int(store.usage_bytes()),
+        'messages': len(store.read_messages()),
+    }
+
+
+@router.post('/qq-bot/history/clear')
+async def clear_qq_group_history(payload: dict | None = Body(default=None)):
+    body = payload if isinstance(payload, dict) else {}
+    sid = str(body.get('session_id') or body.get('sessionId') or '').strip()
+    if not sid.startswith('ext:qq-official-'):
+        raise HTTPException(status_code=400, detail='qq_group_session_required')
+    if body.get('confirm') is not True:
+        raise HTTPException(status_code=400, detail='confirm_required')
+    try:
+        from g3ku.runtime.api.external_turns import get_external_turn_service
+
+        service = get_external_turn_service()
+        if service.inflight_turn_id_for(sid):
+            raise HTTPException(status_code=409, detail='session_busy')
+        from g3ku.shells.web import get_web_heartbeat_service
+
+        heartbeat = get_web_heartbeat_service()
+        events = getattr(heartbeat, "_events", None) if heartbeat is not None else None
+        if events is not None and events.has_events(sid):
+            raise HTTPException(status_code=409, detail='session_busy')
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+    from g3ku.qq_official.group_history import (
+        GroupHistoryStore,
+        digest_artifact_task_id,
+        group_history_root,
+    )
+
+    store = GroupHistoryStore(root=group_history_root(sid), session_key=sid)
+    removed = int(store.clear())
+    artifact_error = ''
+    try:
+        from g3ku.shells.web import peek_global_agent
+
+        agent = peek_global_agent()
+        artifact_store = getattr(getattr(agent, 'main_task_service', None), 'artifact_store', None)
+        if artifact_store is not None:
+            artifact_store.delete_artifacts_for_task(digest_artifact_task_id(sid))
+    except Exception as exc:  # noqa: BLE001 - history clear must not fail on artifact cleanup
+        artifact_error = str(exc)[:200]
+    return {
+        'ok': True,
+        'session_id': sid,
+        'bytes_removed': removed,
+        'artifact_error': artifact_error,
+    }
 
 
 @router.post('/qq-bot/register-owner/preview')
@@ -1615,8 +1755,10 @@ async def register_qq_bot_owner(payload: dict | None = Body(default=None)):
     account = cfg.qq_bot.accounts[app_id]
     owners = list(getattr(account, 'owner_openids', None) or [])
     registered = sender_id.lower() not in {str(item).lower() for item in owners}
+    if registered and owners:
+        raise HTTPException(status_code=409, detail='qq_master_already_registered')
     if registered:
-        owners.append(sender_id)
+        owners = [sender_id]
         account.owner_openids = owners
         save_config(cfg)
         await _refresh_runtime_after_save('admin_qq_bot_owner_register')

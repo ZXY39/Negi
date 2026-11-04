@@ -81,6 +81,28 @@ class ExternalApiClient:
         response.raise_for_status()
         return response.json()
 
+    async def report_identity(self, *, bot_id: str = "", nickname: str = "") -> dict[str, Any]:
+        response = await self._client.post(
+            "/qq-official/identity",
+            json={"bot_id": str(bot_id or ""), "nickname": str(nickname or "")},
+            headers=self._headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def send_digest(
+        self,
+        session_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        response = await self._client.post(
+            f"/sessions/{session_id}/digest",
+            json=dict(payload or {}),
+            headers=self._headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
     async def list_pending_outbox(self) -> list[dict[str, Any]]:
         """Pending durable pushes for this bridge (startup pump warm-up list)."""
         response = await self._client.get("/outbox/pending", headers=self._headers())

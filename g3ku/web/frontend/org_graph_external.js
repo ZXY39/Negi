@@ -9,6 +9,15 @@ const EXTERNAL_API_VIEW_STATE = {
     items: [],
 };
 
+function _formatQqBytes(value) {
+    const bytes = Number(value || 0);
+    if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+    if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+    if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+    if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${Math.round(bytes)} B`;
+}
+
 function _externalListEl() {
     return document.getElementById("external-token-list");
 }
@@ -443,6 +452,12 @@ function initExternalApiView() {
 // ---- 官方 QQ 机器人面板：一个 AppID 一行账号 ----
 const QQ_BOT_STATE = { loaded: false, busy: false, enabled: false, rows: [], editingIndex: -1 };
 
+function _qqNumberInput(input, fallback) {
+    const raw = input ? String(input.value || "").trim() : "";
+    const value = Number(raw);
+    return raw !== "" && Number.isFinite(value) ? value : fallback;
+}
+
 function _qqBotListEl() {
     return document.getElementById("qq-bot-accounts");
 }
@@ -519,8 +534,14 @@ function renderQqBotAccounts() {
             ${editing ? "" : `<input class="qq-bot-label" type="hidden" value="${esc(row.label || "")}">`}
             ${titleParts}
             <span class="qq-bot-account-appid-text">AppID ${esc(appId)}</span>
+            <span class="qq-bot-history-total" title="该账号所有群历史文件合计">群文件 ${_formatQqBytes(row.history_bytes)}</span>
             <span class="status-badge qq-bot-account-status" data-status="${esc(status.badge)}"
                 title="${esc(status.text)}">${esc(status.text)}</span>
+            ${row.active_message_state === "denied"
+                ? `<span class="status-badge" data-status="error" title="有群未开启『机器人主动在群聊内发言』；摘要回合可能只能读不能回">主动发言被拒</span>`
+                : row.active_message_state === "quota"
+                ? `<span class="status-badge" data-status="warning" title="官方主动消息额度已用尽">主动额度用尽</span>`
+                : ""}
             <button class="tool-governance-switch qq-bot-row-switch" type="button"
                 aria-pressed="${row.enabled ? "true" : "false"}" aria-label="切换该号启用状态">
                 <span class="tool-governance-switch-track" aria-hidden="true"><span class="tool-governance-switch-thumb"></span></span>
@@ -600,6 +621,8 @@ function _collectQqBotRows() {
             enabled: previous.enabled !== false,
             has_secret: !!previous.has_secret,
             owner_openids: Array.isArray(previous.owner_openids) ? previous.owner_openids.slice() : [],
+            history_bytes: previous.history_bytes || 0,
+            active_message_state: previous.active_message_state || "",
             service: previous.service || null,
         });
     }
@@ -636,6 +659,8 @@ function _applyQqBotPayload(payload) {
         enabled: row.enabled !== false,
         has_secret: !!row.has_secret,
         owner_openids: Array.isArray(row.owner_openids) ? row.owner_openids.map((item) => String(item || "").trim()).filter(Boolean) : [],
+        history_bytes: Number(row.history_bytes || 0),
+        active_message_state: String(row.active_message_state || ""),
         service: row.service || null,
     }));
     QQ_BOT_STATE.loaded = true;
@@ -697,7 +722,7 @@ function _addQqBotAccountRow() {
     const rows = _collectQqBotRows();
     if (rows) QQ_BOT_STATE.rows = rows;
     QQ_BOT_STATE.editingIndex = -1;
-    QQ_BOT_STATE.rows.push({ app_id: "", app_secret: "", label: "", sandbox: false, enabled: true, has_secret: false, owner_openids: [], service: null });
+    QQ_BOT_STATE.rows.push({ app_id: "", app_secret: "", label: "", sandbox: false, enabled: true, has_secret: false, owner_openids: [], history_bytes: 0, active_message_state: "", service: null });
     renderQqBotAccounts();
     const listEl = _qqBotListEl();
     const inputs = listEl ? listEl.querySelectorAll(".qq-bot-appid") : [];
@@ -1029,6 +1054,22 @@ function initQqBotView() {
         event.preventDefault();
         _addQqBotAccountRow();
     });
+    const historyClearBtn = document.getElementById("qq-group-history-clear");
+    if (historyClearBtn) historyClearBtn.addEventListener("click", () => void _clearQqGroupHistory());
+    const groupSettingsBtn = document.getElementById("qq-group-settings-btn");
+    if (groupSettingsBtn) groupSettingsBtn.addEventListener("click", () => void openQqGroupSettings());
+    const groupSettingsCancel = document.getElementById("qq-group-settings-cancel");
+    if (groupSettingsCancel) groupSettingsCancel.addEventListener("click", _closeQqGroupSettings);
+    const groupSettingsSave = document.getElementById("qq-group-settings-save");
+    if (groupSettingsSave) groupSettingsSave.addEventListener("click", () => void saveQqGroupSettings());
+    const groupSettingsBackdrop = document.getElementById("qq-group-settings-backdrop");
+    if (groupSettingsBackdrop) groupSettingsBackdrop.addEventListener("click", (event) => {
+        if (event.target === groupSettingsBackdrop) _closeQqGroupSettings();
+    });
+    const groupSettingsInputs = _qqGroupSettingsInputs();
+    Object.values(groupSettingsInputs).forEach((input) => {
+        if (input) input.addEventListener("input", _syncQqGroupSettingsSave);
+    });
     const listEl = _qqBotListEl();
     if (listEl) {
         listEl.addEventListener("click", (event) => {
@@ -1083,5 +1124,181 @@ function initQqBotView() {
             if (!input) return;
             void _commitQqBotLabel(Number(input.dataset.inlineLabel), input.value);
         }, true);
+    }
+}
+
+// ---- 群聊历史文件占用条 ----
+async function refreshQqGroupHistoryStrip() {
+    const strip = document.getElementById("qq-group-history-strip");
+    const usage = document.getElementById("qq-group-history-usage");
+    if (!strip || !usage) return;
+    const sessionId = typeof activeSessionId === "function" ? String(activeSessionId() || "").trim() : "";
+    const item = typeof activeSessionItem === "function" ? activeSessionItem() : null;
+    const chatType = String(item?.chat_type || "").toLowerCase();
+    const externalKey = String(item?.external_key || item?.channel_id || "");
+    const isGroup = chatType === "group" || externalKey.startsWith("qq:group:");
+    if (!sessionId.startsWith("ext:qq-official-") || !isGroup) {
+        strip.hidden = true;
+        strip.dataset.sessionId = "";
+        return;
+    }
+    try {
+        const data = await ApiClient.getQqGroupHistoryUsage(sessionId);
+        usage.textContent = `群聊历史 ${_formatQqBytes(data.bytes)} · ${Number(data.messages || 0)} 条消息`;
+        strip.dataset.sessionId = sessionId;
+        strip.hidden = false;
+    } catch (error) {
+        strip.hidden = true;
+        strip.dataset.sessionId = "";
+    }
+}
+
+async function _clearQqGroupHistory() {
+    const strip = document.getElementById("qq-group-history-strip");
+    const sessionId = String(strip?.dataset.sessionId || "").trim();
+    if (!sessionId) return;
+    const first = await requestInlineConfirm({
+        title: "清除该群历史文件",
+        text: "将删除该群的群聊历史 JSONL、媒体文件与摘要 artifact；不会删除会话转录、记忆或 @ 名单。",
+        confirmLabel: "继续",
+        confirmKind: "danger",
+    });
+    if (!first.confirmed) return;
+    const second = await requestInlineConfirm({
+        title: "再次确认",
+        text: "清除后不可恢复；正在读取的摘要可能失效。确定清除？",
+        confirmLabel: "确认清除",
+        confirmKind: "danger",
+    });
+    if (!second.confirmed) return;
+    try {
+        const result = await ApiClient.clearQqGroupHistory(sessionId);
+        showToast({
+            title: "群历史已清除",
+            text: `释放 ${_formatQqBytes(result.bytes_removed || 0)}`,
+            kind: "success",
+        });
+        await refreshQqGroupHistoryStrip();
+    } catch (error) {
+        showToast({ title: "清除失败", text: error?.message || "Unknown error", kind: "error" });
+    }
+}
+
+// ---- 群聊设置弹窗（全局策略） ----
+const QQ_GROUP_SETTINGS = { saved: null, open: false };
+
+function _qqGroupSettingsInputs() {
+    return {
+        scan_min_minutes: document.getElementById("qq-group-scan-min"),
+        scan_max_minutes: document.getElementById("qq-group-scan-max"),
+        history_retention_days: document.getElementById("qq-group-history-days"),
+        consumed_retention_days: document.getElementById("qq-group-consumed-days"),
+        history_max_gb: document.getElementById("qq-group-history-max"),
+    };
+}
+
+function _qqGroupSettingsValues() {
+    const inputs = _qqGroupSettingsInputs();
+    return {
+        scan_min_minutes: _qqNumberInput(inputs.scan_min_minutes, 2),
+        scan_max_minutes: _qqNumberInput(inputs.scan_max_minutes, 5),
+        history_retention_days: _qqNumberInput(inputs.history_retention_days, 30),
+        consumed_retention_days: _qqNumberInput(inputs.consumed_retention_days, 7),
+        history_max_gb: _qqNumberInput(inputs.history_max_gb, 2),
+    };
+}
+
+function _qqGroupSettingsDirty() {
+    if (!QQ_GROUP_SETTINGS.saved) return false;
+    const current = _qqGroupSettingsValues();
+    const saved = QQ_GROUP_SETTINGS.saved;
+    return Object.keys(current).some((key) => Number(current[key]) !== Number(saved[key]));
+}
+
+function _syncQqGroupSettingsSave() {
+    const btn = document.getElementById("qq-group-settings-save");
+    if (!btn) return;
+    const dirty = _qqGroupSettingsDirty();
+    btn.disabled = false;
+    btn.setAttribute("aria-disabled", dirty ? "false" : "true");
+    btn.classList.toggle("is-dirty", dirty);
+}
+
+function _closeQqGroupSettings() {
+    const backdrop = document.getElementById("qq-group-settings-backdrop");
+    if (backdrop) {
+        backdrop.hidden = true;
+        backdrop.classList.remove("is-open");
+    }
+    QQ_GROUP_SETTINGS.open = false;
+}
+
+async function openQqGroupSettings() {
+    const backdrop = document.getElementById("qq-group-settings-backdrop");
+    const inputs = _qqGroupSettingsInputs();
+    if (!backdrop || !inputs.scan_min_minutes) return;
+    try {
+        const data = await ApiClient.getQqGroupSettings();
+        QQ_GROUP_SETTINGS.saved = {
+            scan_min_minutes: Number(data.scan_min_minutes ?? 2),
+            scan_max_minutes: Number(data.scan_max_minutes ?? 5),
+            history_retention_days: Number(data.history_retention_days ?? 30),
+            consumed_retention_days: Number(data.consumed_retention_days ?? 7),
+            history_max_gb: Number(data.history_max_gb ?? 2),
+        };
+        inputs.scan_min_minutes.value = String(QQ_GROUP_SETTINGS.saved.scan_min_minutes);
+        inputs.scan_max_minutes.value = String(QQ_GROUP_SETTINGS.saved.scan_max_minutes);
+        inputs.history_retention_days.value = String(QQ_GROUP_SETTINGS.saved.history_retention_days);
+        inputs.consumed_retention_days.value = String(QQ_GROUP_SETTINGS.saved.consumed_retention_days);
+        inputs.history_max_gb.value = String(QQ_GROUP_SETTINGS.saved.history_max_gb);
+        QQ_GROUP_SETTINGS.open = true;
+        backdrop.hidden = false;
+        backdrop.classList.add("is-open");
+        _syncQqGroupSettingsSave();
+        inputs.scan_min_minutes.focus();
+    } catch (error) {
+        showToast({ title: "读取群聊设置失败", text: ApiClient.friendlyErrorMessage(error), kind: "error" });
+    }
+}
+
+async function saveQqGroupSettings() {
+    if (!QQ_GROUP_SETTINGS.saved || !_qqGroupSettingsDirty()) {
+        showToast({ title: "没有更改", text: "当前设置没有改动，无法保存。", kind: "info" });
+        return;
+    }
+    const values = _qqGroupSettingsValues();
+    if (values.scan_min_minutes < 0 || values.scan_max_minutes < 0 || values.scan_min_minutes > values.scan_max_minutes) {
+        showToast({ title: "时间间隔不合法", text: "下限必须不大于上限，且都不能为负。", kind: "error" });
+        return;
+    }
+    if (values.history_retention_days < 1 || values.history_retention_days > 365
+        || values.consumed_retention_days < 1 || values.consumed_retention_days > 365) {
+        showToast({ title: "保留天数不合法", text: "保留天数需在 1–365 天之间。", kind: "error" });
+        return;
+    }
+    if (values.history_max_gb < 0.1 || values.history_max_gb > 50) {
+        showToast({ title: "容量上限不合法", text: "单群上限需在 0.1–50 GB 之间。", kind: "error" });
+        return;
+    }
+    const btn = document.getElementById("qq-group-settings-save");
+    if (btn) {
+        btn.disabled = true;
+        btn.setAttribute("aria-disabled", "true");
+    }
+    try {
+        const data = await ApiClient.updateQqGroupSettings(values);
+        QQ_GROUP_SETTINGS.saved = {
+            scan_min_minutes: Number(data.scan_min_minutes ?? values.scan_min_minutes),
+            scan_max_minutes: Number(data.scan_max_minutes ?? values.scan_max_minutes),
+            history_retention_days: Number(data.history_retention_days ?? values.history_retention_days),
+            consumed_retention_days: Number(data.consumed_retention_days ?? values.consumed_retention_days),
+            history_max_gb: Number(data.history_max_gb ?? values.history_max_gb),
+        };
+        _syncQqGroupSettingsSave();
+        _closeQqGroupSettings();
+        showToast({ title: "群聊设置已保存", text: "新的间隔与保留策略已生效。", kind: "success" });
+    } catch (error) {
+        showToast({ title: "保存群聊设置失败", text: ApiClient.friendlyErrorMessage(error), kind: "error" });
+        _syncQqGroupSettingsSave();
     }
 }

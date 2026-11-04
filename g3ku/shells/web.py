@@ -405,7 +405,9 @@ def _make_heartbeat_reply_notifier():
     return _notify
 
 
-def _extract_outbound_media_attachments(text: str) -> tuple[str, list[dict[str, Any]]]:
+def _extract_outbound_media_attachments(
+    text: str, *, session_key: str = ""
+) -> tuple[str, list[dict[str, Any]]]:
     """Lazy wrapper over ceo_media extraction (same circular-import constraint
     as ``g3ku.runtime.external_events``: ``g3ku.runtime.api`` imports this
     shell, so it must not be imported at module load here)."""
@@ -415,7 +417,7 @@ def _extract_outbound_media_attachments(text: str) -> tuple[str, list[dict[str, 
     )
 
     cleaned, attachments = extract_local_media_attachments(
-        text, allowed_roots=channel_attachment_roots()
+        text, allowed_roots=channel_attachment_roots(session_key)
     )
     return (cleaned if isinstance(cleaned, str) else text), list(attachments or [])
 
@@ -472,7 +474,9 @@ def _start_outbound_drain(bus: MessageBus) -> asyncio.Task:
         if isinstance(carried, list):
             attachments = [item for item in carried if isinstance(item, dict)]
         else:
-            sanitized, attachments = _extract_outbound_media_attachments(sanitized)
+            sanitized, attachments = _extract_outbound_media_attachments(
+                sanitized, session_key=entry.session_key
+            )
         # 贴纸标记：心跳/cron/任务终态/回合失败通知都不经过回合 relay，这里是它们
         # 唯一能把标记换成图片的出口。正文已剥过的重放消息不做任何事；旧账本里
         # 带标记的滞留记录也会在这里被修掉。

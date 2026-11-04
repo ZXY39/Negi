@@ -1113,6 +1113,11 @@ class QqBotAccountConfig(Base):
     # ``g3ku/runtime/session_trust.py::resolve_turn_trust``），填了它不会升级群会话档位，
     # 但决定转录里本人被标成 ``Master`` 还是第三方编号。
     owner_openids: list[str] = Field(default_factory=list)
+    # 兼容旧版本写进账号行的全量群消息字段；运行只读 qqBot 上的全局同名策略，
+    # 保存面也只写全局字段。保留声明是为了旧 config.json 仍能加载。
+    history_max_gb: float = 2.0
+    scan_min_minutes: float = 2.0
+    scan_max_minutes: float = 5.0
 
 
 def _normalize_qq_app_id(value: Any) -> str:
@@ -1133,6 +1138,12 @@ class QqBotConfig(Base):
 
     enabled: bool = False
     accounts: dict[str, QqBotAccountConfig] = Field(default_factory=dict)
+    # 全量群消息的历史与 digest 是账号无关的全局策略；账号行只保留启停和名单。
+    group_scan_min_minutes: float = 2.0
+    group_scan_max_minutes: float = 5.0
+    group_history_retention_days: int = 30
+    group_consumed_retention_days: int = 7
+    group_history_max_gb: float = 2.0
 
     @field_validator("accounts", mode="before")
     @classmethod

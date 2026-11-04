@@ -535,3 +535,37 @@ def test_delivery_failure_event_tells_the_model_to_mention_or_stay_silent() -> N
     )
     window_bundle = str(_field(window, "event_bundle_text") or "")
     assert "mention_member" in window_bundle
+
+
+def test_channel_digest_renders_brief_and_artifact_ref() -> None:
+    from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane
+
+    lane = build_heartbeat_prompt_lane(
+        provider_model="openai:gpt-4.1",
+        stable_rules_text="Background rules.",
+        events=[
+            {
+                "reason": "channel_digest",
+                "window_start": "2026-11-05T10:00:00+08:00",
+                "window_end": "2026-11-05T10:05:00+08:00",
+                "message_count": 23,
+                "file_count": 4,
+                "participant_count": 7,
+                "has_master": True,
+                "session": "qq:group:g1",
+                "n_start": 10,
+                "n_end": 32,
+                "artifact_ref": "artifact:digest-1",
+            }
+        ],
+    )
+    text = "\n".join(
+        str(message.get("content") or "")
+        for message in _field(lane, "request_messages")
+        if isinstance(message, dict)
+    )
+    assert "Background group digest" in text
+    assert "Messages: 23, files: 4, participants: 7, contains_master: yes" in text
+    assert "Range: 10–32" in text
+    assert 'content_open(ref="artifact:digest-1")' in text
+    assert "untrusted data" in text

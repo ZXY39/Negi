@@ -49,6 +49,7 @@ GROUP_MEMORY_NOTICE_HEADING = '### Group memory updates'
 SESSION_MODE_NOTICE_HEADING = '### Session mode'
 # 控制台操作的一次性声明：写明"这是操作员（用户）做的"，与状态差分行分开。
 OPERATOR_ACTIONS_HEADING = '### Operator actions (from the console)'
+QQ_IDENTITY_NOTICE_HEADING = '### QQ 身份'
 # 头部快照与当刻值的差量：两次重印之间唯一的变化出口。
 RUNTIME_CONTRACT_UPDATE_HEADING = '### Runtime contract updates (supersede the pinned snapshot)'
 # 渲染顺序固定：同一组变化每次投出来的字节稳定，便于模型与测试比对。
@@ -114,6 +115,7 @@ def deliver_for_scope(
     persona_provider: Any = None,
     mode_provider: Any = None,
     operator_actions_provider: Any = None,
+    qq_identity_provider: Any = None,
     contract_sections: dict[str, Any] | None = None,
     covered_contract_sections: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, list[dict[str, str]]]:
@@ -228,6 +230,24 @@ def deliver_for_scope(
                 mode_text = next_text
             mode_cursor = {'signature': next_signature, 'initialized': True}
     context['mode_cursor'] = mode_cursor
+    qq_identity_text = ''
+    qq_identity_cursor = dict(context.get('qq_identity_cursor') or {})
+    if callable(qq_identity_provider):
+        try:
+            identity_delta = qq_identity_provider(
+                cursor_nickname=str(qq_identity_cursor.get('nickname') or ''),
+                initialized=bool(qq_identity_cursor.get('initialized')),
+            )
+        except Exception:
+            identity_delta = None
+        if isinstance(identity_delta, dict):
+            next_nickname = ' '.join(str(identity_delta.get('nickname') or '').split()).strip()
+            next_text = str(identity_delta.get('text') or '').strip()
+            if next_text:
+                qq_identity_text = next_text
+            if next_nickname:
+                qq_identity_cursor = {'nickname': next_nickname[:128], 'initialized': True}
+    context['qq_identity_cursor'] = qq_identity_cursor
     operator_actions: list[dict[str, Any]] = []
     operator_cursor = dict(context.get('operator_action_cursor') or {})
     operator_cursor_id = max(int(operator_cursor.get('id') or 0), 0)
@@ -270,7 +290,7 @@ def deliver_for_scope(
         now=now,
         covered_sections=covered_contract_sections,
     )
-    if not pending and not removed_skills and not memory_text and not group_memory_text and not persona_text and not mode_text and not changed_contract and not operator_actions:
+    if not pending and not removed_skills and not memory_text and not group_memory_text and not persona_text and not mode_text and not qq_identity_text and not changed_contract and not operator_actions:
         set_notice_context(scope_key, context)
         return None, []
     message = build_notice_message(
@@ -280,6 +300,7 @@ def deliver_for_scope(
         group_memory_text=group_memory_text,
         persona_text=persona_text,
         mode_text=mode_text,
+        qq_identity_text=qq_identity_text,
         contract_sections=changed_contract,
         operator_actions=operator_actions,
     )
@@ -435,6 +456,11 @@ def normalize_skill_roster_notice_context(payload: Any) -> dict[str, Any]:
         if isinstance(source.get('operator_action_cursor'), dict)
         else {}
     )
+    qq_identity_source = (
+        source.get('qq_identity_cursor')
+        if isinstance(source.get('qq_identity_cursor'), dict)
+        else {}
+    )
 
     def _cursor_value(name: str, cursor: dict[str, Any] | None = None) -> int:
         active = cursor if isinstance(cursor, dict) else cursor_source
@@ -468,6 +494,10 @@ def normalize_skill_roster_notice_context(payload: Any) -> dict[str, Any]:
             'id': _cursor_value('id', operator_action_source),
             'initialized': bool(operator_action_source.get('initialized')),
         },
+        'qq_identity_cursor': {
+            'nickname': ' '.join(str(qq_identity_source.get('nickname') or '').split()).strip()[:128],
+            'initialized': bool(qq_identity_source.get('initialized')),
+        },
         'skill_visibility_cursor': normalize_skill_visibility_cursor(
             source.get('skill_visibility_cursor')
         ),
@@ -499,6 +529,7 @@ def context_has_state(payload: Any) -> bool:
             'persona_cursor',
             'mode_cursor',
             'operator_action_cursor',
+            'qq_identity_cursor',
         )
     )
 
@@ -783,6 +814,7 @@ def reset_contract_sections_for_compaction(scope_key: str, *, now: str = '') -> 
     context['contract_sections'] = {}
     context['memory_cursor'] = {'rev': 0, 'base_rev': 0, 'initialized': False}
     context['persona_cursor'] = {'digest': '', 'initialized': False}
+    context['qq_identity_cursor'] = {'nickname': '', 'initialized': False}
     # 头部已按当刻名单重印；可见集游标跟着归零，下一跳以新头部/实时集重新播种，
     # 不把压缩前那批删除再报一遍。
     context['skill_visibility_cursor'] = {
@@ -882,6 +914,7 @@ def build_notice_message(
     group_memory_text: str = '',
     persona_text: str = '',
     mode_text: str = '',
+    qq_identity_text: str = '',
     contract_sections: list[tuple[str, str]] | None = None,
     operator_actions: list[Any] | None = None,
 ) -> dict[str, Any] | None:
@@ -892,6 +925,9 @@ def build_notice_message(
     变化在最后（最近处，便于模型把"以最新通知为准"落在下一次判断上）；空节省略。
     """
     sections: list[str] = []
+    qq_identity_section = str(qq_identity_text or '').strip()
+    if qq_identity_section:
+        sections.append('\n'.join([QQ_IDENTITY_NOTICE_HEADING, qq_identity_section]))
     operator_lines = render_operator_action_lines(operator_actions)
     if operator_lines:
         sections.append('\n'.join(operator_lines))

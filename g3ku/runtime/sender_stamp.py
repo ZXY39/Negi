@@ -67,6 +67,19 @@ def sender_identity(metadata: Any) -> tuple[str, str]:
     return _one_line(sender.get("id")), _one_line(sender.get("name"))
 
 
+_ROLE_LABELS = {"owner": "群主", "admin": "管理员", "member": "成员"}
+
+
+def sender_role_label(metadata: Any) -> str:
+    if not isinstance(metadata, dict):
+        return ""
+    sender = metadata.get("external_sender")
+    if not isinstance(sender, dict):
+        return ""
+    role = str(sender.get("role") or "").strip().lower()
+    return _ROLE_LABELS.get(role, "")
+
+
 def sender_number_map(
     messages: Iterable[Any],
     *,
@@ -128,12 +141,14 @@ def sender_display_label(
     if not trust:
         return ""
     sender_id, sender_name = sender_identity(metadata)
+    role_label = sender_role_label(metadata)
     if trust == TRUST_OWNER or is_trusted_sender(sender_id, owner_openids=master_ids):
-        return _MASTER_LABEL
+        return f"{_MASTER_LABEL}（{role_label}）" if role_label else _MASTER_LABEL
     if not sender_id and not sender_name:
         return _UNKNOWN_LABEL
     label = f"{_THIRD_PARTY_LABEL} {int(number):04d}" if number is not None else _THIRD_PARTY_LABEL
-    return f"{label}（{sender_name}）" if sender_name else label
+    detail = "，".join(part for part in (sender_name, role_label) if part)
+    return f"{label}（{detail}）" if detail else label
 
 
 def render_sender_stamp(

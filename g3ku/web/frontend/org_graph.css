@@ -19590,3 +19590,134 @@ textarea {
         flex-wrap: wrap;
     }
 }
+
+/* QQ 群历史：账号行的容量/区间输入与合计读数，以及会话输入框上方的占用条。 */
+.qq-bot-history-total {
+    flex: 0 0 96px;
+    width: 96px;
+    min-width: 96px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    text-align: right;
+}
+
+.qq-bot-history-max,
+.qq-bot-scan-min,
+.qq-bot-scan-max {
+    flex: 0 0 auto;
+    width: 66px;
+    min-width: 66px;
+    padding-inline: 8px;
+    text-align: right;
+}
+
+.qq-group-history-strip {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--ui-space-2);
+    padding: 4px 8px;
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.qq-group-history-strip[hidden] {
+    display: none;
+}
+
+/* 群聊设置弹窗：四行策略，数字输入不显示上下调整箭头。 */
+.qq-group-settings-dialog {
+    width: min(620px, calc(100vw - 32px));
+}
+
+.qq-group-settings-rows {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ui-space-3);
+    padding: var(--ui-space-3) 0;
+}
+
+.qq-group-settings-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 280px;
+    align-items: center;
+    gap: var(--ui-space-3);
+}
+
+.qq-group-settings-label {
+    color: var(--text-primary);
+    font-size: 13px;
+    line-height: 1.4;
+}
+
+.qq-group-settings-control {
+    display: grid;
+    grid-template-columns: 84px 10px 84px minmax(28px, auto);
+    align-items: center;
+    justify-content: end;
+    column-gap: 6px;
+    row-gap: 0;
+}
+
+.qq-group-settings-control > input:nth-of-type(1) {
+    grid-column: 1;
+}
+
+.qq-group-settings-control > input:nth-of-type(2) {
+    grid-column: 3;
+}
+
+.qq-group-settings-row.is-single .qq-group-settings-control > input {
+    grid-column: 3;
+}
+
+.qq-group-settings-control > .qq-group-settings-sep {
+    grid-column: 2;
+    text-align: center;
+}
+
+.qq-group-settings-control > .qq-group-settings-unit {
+    grid-column: 4;
+    justify-self: start;
+}
+
+.qq-group-settings-sep,
+.qq-group-settings-unit {
+    color: var(--text-secondary);
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+.qq-group-number {
+    width: 84px;
+    min-width: 84px;
+    padding-inline: 8px;
+    text-align: right;
+    -webkit-appearance: none;
+    appearance: textfield;
+    -moz-appearance: textfield;
+}
+
+.qq-group-number::-webkit-outer-spin-button,
+.qq-group-number::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+
+.qq-group-settings-save.is-dirty:not([aria-disabled="true"]):not(:disabled) {
+    background: #39c5bb !important;
+    border-color: #39c5bb !important;
+    color: #062b28 !important;
+}
+
+/* 无改动时与旁边的「取消」同色，但仍可点击以给出 toast。 */
+.qq-group-settings-save[aria-disabled="true"],
+.qq-group-settings-save:disabled {
+    background: color-mix(in srgb, var(--bg-app) 78%, transparent) !important;
+    border-color: var(--ui-border) !important;
+    color: var(--text-secondary) !important;
+    box-shadow: none !important;
+    cursor: not-allowed;
+    opacity: 1;
+}

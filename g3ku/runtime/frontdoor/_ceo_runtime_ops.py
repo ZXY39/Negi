@@ -4194,6 +4194,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 **kwargs,
                 session_key=normalized_session_key,
             ),
+            qq_identity_provider=lambda **kwargs: self._frontdoor_qq_identity_provider(
+                **kwargs,
+                session_key=normalized_session_key,
+            ),
             contract_sections=self._frontdoor_contract_notice_sections(
                 dict(state or {}),
                 session_key=normalized_session_key,
@@ -4374,6 +4378,36 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             names = tuple(getattr(policy, "effective_tool_names", ()) or ())
             parts.append(f"允许使用的工具列表已更新（{len(names)} 项；以 tools[] 为准）。")
         return {"signature": signature, "text": "\n".join(parts)}
+
+    def _frontdoor_qq_identity_provider(
+        self,
+        *,
+        cursor_nickname: str = "",
+        initialized: bool = False,
+        session_key: str = "",
+    ) -> dict[str, Any] | None:
+        """QQ 昵称的首次/变更通知；压缩后游标归零，下一跳按当前昵称重投。"""
+        key = str(session_key or "").strip()
+        if not key.startswith("ext:qq-official-"):
+            return None
+        try:
+            bridge_id = key.split(":", 2)[1]
+        except IndexError:
+            return None
+        from g3ku.runtime.qq_bot_identity import get_qq_bot_identity
+
+        identity = get_qq_bot_identity(bridge_id)
+        nickname = " ".join(str(identity.get("nickname") or "").split()).strip()
+        if not nickname:
+            return None
+        previous = " ".join(str(cursor_nickname or "").split()).strip()
+        if initialized and previous == nickname:
+            return {"nickname": nickname, "text": ""}
+        if previous and previous != nickname:
+            text = f"你在 QQ 的昵称已从「{previous}」变为「{nickname}」。"
+        else:
+            text = f"你在 QQ 的昵称是「{nickname}」。"
+        return {"nickname": nickname, "text": text}
 
     def _frontdoor_operator_action_provider(
         self,
@@ -7500,33 +7534,52 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         total += len(str(snapshot.get("analysis_text") or "").strip())
         return total
 
-    def _mention_roster(self, session_key: str) -> tuple[dict[int, str], str]:
-        """会话内编号 → sender id，以及 Master 的 sender id。"""
+    def _mention_roster(self, session_key: str):
+        """Seed the persistent roster from transcript history; return its numbers/Master."""
+        from g3ku.runtime.external_member_roster import get_member_roster
+
         try:
             session = self._loop.sessions.get_or_create(session_key)
             history = list(transcript_messages(session) or [])
         except Exception:
-            return {}, ""
+            history = []
         master_ids = qq_owner_openids()
-        number_map = sender_number_map(history, master_ids=master_ids)
-        by_number = {int(number): sender_id for sender_id, number in number_map.items()}
         normalized_masters = {str(item or "").strip().lower() for item in master_ids}
-        master_id = ""
+        entries: list[dict[str, Any]] = []
         for item in history:
             if str(item.get("role") or "").strip().lower() != "user":
                 continue
             metadata = item.get("metadata") if isinstance(item, dict) else None
             sender = (metadata or {}).get("external_sender") if isinstance(metadata, dict) else None
             sender_id = str((sender or {}).get("id") or "").strip()
-            if sender_id and sender_id.lower() in normalized_masters:
-                master_id = sender_id
-                break
-        return by_number, master_id
+            if not sender_id:
+                continue
+            entries.append(
+                {
+                    "id": sender_id,
+                    "name": str((sender or {}).get("name") or "").strip(),
+                    "role": str((sender or {}).get("role") or "").strip(),
+                    "master": sender_id.lower() in normalized_masters,
+                }
+            )
+        roster = get_member_roster(session_key)
+        members = roster.update_many(entries)
+        by_number = {
+            int(item.get("number")): sender_id
+            for sender_id, item in members.items()
+            if isinstance(item.get("number"), int) and int(item.get("number")) >= 2
+        }
+        master_id = next(
+            (sender_id for sender_id, item in members.items() if bool(item.get("master"))),
+            "",
+        )
+        return by_number, master_id, roster
 
     async def _frontdoor_publish_mention(
         self,
         *,
-        target: str,
+        target: str = "",
+        targets: list[str] | None = None,
         message: str,
         runtime: dict[str, Any],
     ) -> dict[str, Any]:
@@ -7567,47 +7620,65 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             return {"ok": False, "status": "rejected", "reason": "message_required"}
         if len(body) > 1000:
             return {"ok": False, "status": "rejected", "reason": "message_too_long"}
-        normalized_target = str(target or "").strip()
-        if re.fullmatch(r"[0-9a-fA-F]{16,128}", normalized_target):
+        raw_targets = [str(target or "").strip(), *[str(item or "").strip() for item in list(targets or [])]]
+        normalized_targets: list[str] = []
+        for item in raw_targets:
+            if item and item not in normalized_targets:
+                normalized_targets.append(item)
+        if not normalized_targets:
+            return {"ok": False, "status": "rejected", "reason": "target_required"}
+        for item in normalized_targets:
+            if re.fullmatch(r"[0-9a-fA-F]{16,128}", item):
+                return {
+                    "ok": False,
+                    "status": "rejected",
+                    "reason": "raw_openid_not_allowed",
+                    "target": item,
+                    "message": "Use `Master`, a member number, or a unique nickname; raw openids are not accepted.",
+                }
+        by_number, master_id, roster = self._mention_roster(session_key)
+        resolved: list[dict[str, Any]] = []
+        failures: list[dict[str, Any]] = []
+        for item in normalized_targets:
+            result = roster.resolve(item)
+            if not result.get("ok"):
+                if item.lower() == "master" and master_id:
+                    result = {"ok": True, "id": master_id, "name": "Master", "number": 1}
+                else:
+                    failure = dict(result)
+                    failure["target"] = item
+                    if failure.get("reason") == "master_not_in_roster":
+                        failure["message"] = (
+                            "Master has not spoken in this group, so there is no member_openid to mention. "
+                            "Ask Master to send a message, then add their group member_openid to ownerOpenids."
+                        )
+                    failures.append(failure)
+                    continue
+            sender_id = str(result.get("id") or "").strip()
+            if not sender_id:
+                failures.append({"target": item, "reason": "target_not_found"})
+                continue
+            label = "Master" if item.lower() == "master" or bool(result.get("master")) else (
+                f"#{int(result.get('number') or 0):04d}"
+            )
+            name = str(result.get("name") or "").strip()
+            resolved.append(
+                {
+                    "id": sender_id,
+                    "target": item,
+                    "label": f"{label}（{name}）" if name and label != "Master" else label,
+                }
+            )
+        if failures:
             return {
                 "ok": False,
                 "status": "rejected",
-                "reason": "raw_openid_not_allowed",
-                "message": "Use `Master` or a session-local member number; raw openids are not accepted.",
+                "reason": "target_resolution_failed",
+                "results": failures,
+                "known_numbers": sorted(f"第三方 {number:04d}" for number in by_number),
+                "message": "Retry with the member number for any target that failed name resolution.",
             }
-        by_number, master_id = self._mention_roster(session_key)
-        target_label = normalized_target
-        if normalized_target.lower() == "master":
-            target_id = master_id
-            target_label = "Master"
-            if not target_id:
-                return {
-                    "ok": False,
-                    "status": "failed",
-                    "reason": "master_not_in_roster",
-                    "message": (
-                        "Master has not spoken in this group, so there is no member_openid to mention. "
-                        "Ask Master to send a message, then add their group member_openid to ownerOpenids."
-                    ),
-                }
-        else:
-            digits = re.sub(r"\D", "", normalized_target)
-            if not digits:
-                return {
-                    "ok": False,
-                    "status": "rejected",
-                    "reason": "target_not_found",
-                    "known_numbers": sorted(f"第三方 {number:04d}" for number in by_number),
-                }
-            target_id = by_number.get(int(digits))
-            target_label = f"第三方 {int(digits):04d}"
-            if not target_id:
-                return {
-                    "ok": False,
-                    "status": "rejected",
-                    "reason": "target_not_found",
-                    "known_numbers": sorted(f"第三方 {number:04d}" for number in by_number),
-                }
+        mention_ids = list(dict.fromkeys(item["id"] for item in resolved))
         now = time.monotonic()
         with _MENTION_RATE_LOCK:
             stamps = [
@@ -7634,10 +7705,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             session_key,
             body,
             source="mention_tool",
-            metadata={"mentions": [target_id]},
+            metadata={"mentions": mention_ids},
         )
         if not published:
             return {"ok": False, "status": "failed", "reason": "outbound_unavailable"}
+        target_labels = [item["label"] for item in resolved]
         try:
             from g3ku.audit_events import emit_audit_event
 
@@ -7649,7 +7721,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 detail={
                     "session_key": session_key,
                     "external_key": str(getattr(entry, "external_key", "") or ""),
-                    "target": target_label,
+                    "target": ", ".join(target_labels),
                 },
             )
         except Exception:  # noqa: BLE001 - 审计失败不阻塞投递
@@ -7657,7 +7729,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         return {
             "ok": True,
             "status": "queued",
-            "target": target_label,
+            "targets": target_labels,
             "message": (
                 "Queued. Delivery is asynchronous; if the group has not enabled active "
                 "messages the platform may reject it."

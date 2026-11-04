@@ -266,6 +266,28 @@ def test_extract_attachments_accepts_file_url_form_of_an_audio_target(monkeypatc
     assert "file:///" not in text and "早间问候" not in text
 
 
+def test_extract_attachments_accepts_paths_with_spaces(tmp_path):
+    """Windows 路径带空格是常态；空格不能把 markdown 目标截断，否则整条引用退化成文件名。"""
+    workspace = tmp_path / "Negi Data"
+    workspace.mkdir()
+    gif = workspace / "from assistant.gif"
+    gif.write_bytes(b"GIF89a-fake-animated")
+
+    text, attachments = ceo_media.extract_local_media_attachments(
+        f"![问候]({gif})", allowed_roots=(workspace,)
+    )
+    assert text == ""
+    assert [item["name"] for item in attachments] == ["from assistant.gif"]
+
+    # 合法写法里的尖括号包目标，以及签名标题槽，都不能被当成路径的一部分。
+    text, attachments = ceo_media.extract_local_media_attachments(
+        f'![问候](<{gif}> "{ceo_media.VIEWER_ROUTE}?token=x")',
+        allowed_roots=(workspace,),
+    )
+    assert text == ""
+    assert [item["name"] for item in attachments] == ["from assistant.gif"]
+
+
 def test_extract_attachments_still_rejects_file_url_outside_allowed_roots(monkeypatch, tmp_path):
     """归一化只换形态，不放宽闸门：`file:///` 指到工作区外仍然既不转附件也不发链接。"""
     monkeypatch.chdir(tmp_path)
@@ -290,6 +312,49 @@ def test_extract_attachments_still_rejects_file_url_outside_allowed_roots(monkey
 def test_channel_attachment_roots_are_workspace_only():
     roots = ceo_media.channel_attachment_roots()
     assert roots == (ceo_media.workspace_path(),)
+
+
+def test_channel_attachment_roots_include_the_session_workspace(monkeypatch, tmp_path):
+    from g3ku.runtime.frontdoor import session_workspace as session_workspace_module
+
+    session_dir = tmp_path / "session-workspace"
+    monkeypatch.setattr(
+        session_workspace_module,
+        "ceo_session_workspace_dir",
+        lambda session_key, create=False: str(session_dir),
+    )
+    roots = ceo_media.channel_attachment_roots("ext:qq-official:qq:group:g1")
+    assert ceo_media.workspace_path() in roots
+    assert session_dir.resolve() in roots
+
+
+def test_session_workspace_media_is_extracted_for_its_own_channel(monkeypatch, tmp_path):
+    """会话工作目录里的表情包必须能作为附件发出；QQ 只显示文件名就是丢在这一步。"""
+    from g3ku.runtime.frontdoor import session_workspace as session_workspace_module
+
+    session_dir = tmp_path / "session-workspace"
+    session_dir.mkdir()
+    gif = session_dir / "wave.gif"
+    gif.write_bytes(b"GIF89a-fake-animated")
+    monkeypatch.setattr(
+        session_workspace_module,
+        "ceo_session_workspace_dir",
+        lambda session_key, create=False: str(session_dir),
+    )
+    text = f"![wave]({gif})"
+    cleaned, attachments = ceo_media.extract_local_media_attachments(
+        text, allowed_roots=ceo_media.channel_attachment_roots("ext:qq-official:qq:group:g1")
+    )
+    assert cleaned == ""
+    assert len(attachments) == 1
+    assert attachments[0]["name"] == "wave.gif"
+    assert attachments[0]["kind"] == "image"
+    assert attachments[0]["inline_media"] is True
+    # 没有会话键时白名单仍只有全局工作区，越界路径不放行。
+    _, denied = ceo_media.extract_local_media_attachments(
+        text, allowed_roots=ceo_media.channel_attachment_roots()
+    )
+    assert denied == []
 
 
 def test_animated_media_keeps_bytes_and_uses_a_local_src(monkeypatch, tmp_path):

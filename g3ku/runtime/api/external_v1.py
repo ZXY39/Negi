@@ -39,6 +39,7 @@ from loguru import logger
 
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.core.messages import UserInputMessage
+from g3ku.qq_official.group_history import digest_artifact_task_id
 from g3ku.runtime.api.ceo_sessions import _publish_ceo_sessions_snapshot
 from g3ku.runtime.api.external_auth import ExternalApiPrincipal, require_external_api
 from g3ku.runtime.api.external_turns import get_external_turn_service
@@ -48,6 +49,7 @@ from g3ku.runtime.external_events import (
     SSE_HEARTBEAT_INTERVAL_SECONDS,
     get_session_event_hub,
 )
+from g3ku.runtime.external_member_roster import get_member_roster
 from g3ku.runtime.external_outbox import (
     PROACTIVE_EVENT,
     REPLY_EVENT,
@@ -60,6 +62,7 @@ from g3ku.runtime.external_sessions import (
     ExternalSessionEntry,
     get_external_session_registry,
 )
+from g3ku.runtime.qq_bot_identity import set_qq_bot_identity
 from g3ku.runtime.session_keys import sanitize_channel_outbound_text
 from g3ku.runtime.session_trust import (
     chat_type_from_external_key,
@@ -1147,6 +1150,156 @@ async def post_external_message(
         idempotency_key=idempotency_key,
     )
     return {"ok": True, "session_id": entry.session_key, **result}
+
+
+@router.post("/qq-official/identity")
+async def report_qq_official_identity(
+    payload: dict[str, Any] = Body(...),
+    principal: ExternalApiPrincipal = Depends(require_external_api),
+):
+    """The in-process QQ adapter reports its own bot id/nickname for prompt notices."""
+    bot_id = str(payload.get("bot_id") or "").strip()
+    nickname = " ".join(str(payload.get("nickname") or "").split()).strip()
+    if not bot_id and not nickname:
+        raise HTTPException(status_code=400, detail="identity_required")
+    if len(bot_id) > 128 or len(nickname) > 128:
+        raise HTTPException(status_code=400, detail="identity_too_long")
+    entry = set_qq_bot_identity(principal.bridge_id, bot_id=bot_id, nickname=nickname)
+    return {"ok": True, "bridge_id": principal.bridge_id, **entry}
+
+
+@router.post("/sessions/{session_id}/digest")
+async def post_external_digest(
+    session_id: str,
+    payload: dict[str, Any] = Body(...),
+    principal: ExternalApiPrincipal = Depends(require_external_api),
+):
+    """Queue a background group-history digest as an internal heartbeat turn.
+
+    The bridge owns the random timer and writes the history file. This endpoint
+    only externalizes the model-facing digest text into an artifact and enqueues
+    one ``channel_digest`` heartbeat; it never creates a normal user turn.
+    """
+    entry = _resolve_entry(session_id, principal)
+    claimed_chat_type = _validated_chat_type(payload.get("chat_type"))
+    effective_chat_type = _effective_chat_type(claimed=claimed_chat_type, entry=entry)
+    if effective_chat_type not in {"group", "guild", "guild_dm"}:
+        raise HTTPException(status_code=400, detail="digest_requires_group_session")
+    raw_messages = payload.get("messages")
+    messages = [item for item in list(raw_messages or []) if isinstance(item, dict)]
+    text = str(payload.get("artifact_text") or "").strip()
+    if messages:
+        roster = get_member_roster(entry.session_key)
+        trusted_masters = {
+            str(item or "").strip().lower()
+            for item in _owner_openids_for_bridge(principal.bridge_id)
+            if str(item or "").strip()
+        }
+        members = roster.update_many(
+            [
+                {
+                    "id": str(item.get("sender_id") or ""),
+                    "name": str(item.get("sender_name") or ""),
+                    "role": str(item.get("role") or ""),
+                    "master": str(item.get("sender_id") or "").strip().lower() in trusted_masters,
+                }
+                for item in messages
+            ]
+        )
+        rendered: list[str] = []
+        file_count = 0
+        sender_ids: set[str] = set()
+        has_master = False
+        times: list[str] = []
+        numbers: list[int] = []
+        for item in messages:
+            sender_id = str(item.get("sender_id") or "").strip()
+            member = members.get(sender_id) or {}
+            master = sender_id.lower() in trusted_masters
+            has_master = has_master or master
+            if sender_id:
+                sender_ids.add(sender_id)
+            file_count += len(list(item.get("files") or []))
+            if item.get("ts"):
+                times.append(str(item.get("ts")))
+            if item.get("n"):
+                numbers.append(int(item.get("n")))
+            number = 1 if master else int(member.get("number") or 0)
+            row = {
+                "n": int(item.get("n") or 0),
+                "time": str(item.get("ts") or ""),
+                "sender_no": number,
+                "sender_name": "Master" if master else str(member.get("name") or item.get("sender_name") or ""),
+                "role": str(item.get("role") or member.get("role") or ""),
+                "master": master,
+                "text": str(item.get("text") or ""),
+                "files": list(item.get("files") or []),
+            }
+            rendered.append(json.dumps(row, ensure_ascii=False, separators=(",", ":")))
+        text = "\n".join(rendered).strip()
+        computed_stats = {
+            "window_start": min(times) if times else "",
+            "window_end": max(times) if times else "",
+            "message_count": len(messages),
+            "file_count": file_count,
+            "participant_count": len(sender_ids),
+            "has_master": has_master,
+            "n_start": min(numbers) if numbers else 0,
+            "n_end": max(numbers) if numbers else 0,
+        }
+    else:
+        computed_stats = {}
+    if not text:
+        raise HTTPException(status_code=400, detail="digest_text_required")
+    if len(text) > 512_000:
+        raise HTTPException(status_code=413, detail="digest_text_too_large")
+
+    artifact_ref = ""
+    agent = peek_global_agent()
+    content_store = getattr(getattr(agent, "main_task_service", None), "content_store", None)
+    if content_store is not None:
+        try:
+            envelope = content_store.maybe_externalize_text(
+                text,
+                runtime={"task_id": digest_artifact_task_id(entry.session_key), "session_key": entry.session_key},
+                force=True,
+                display_name=f"QQ group digest {entry.external_key}",
+                source_kind="channel_digest",
+            )
+            artifact_ref = str(getattr(envelope, "ref", "") or "").strip()
+        except Exception as exc:  # noqa: BLE001 - fallback to inline digest
+            logger.warning("channel digest artifact externalization failed: {}", exc)
+
+    try:
+        heartbeat = get_web_heartbeat_service(agent)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail="heartbeat_unavailable") from exc
+    enqueue = getattr(heartbeat, "enqueue_channel_digest", None)
+    if not callable(enqueue):
+        raise HTTPException(status_code=503, detail="heartbeat_unavailable")
+
+    normalized: dict[str, Any] = {
+        "session": entry.external_key,
+        "window_start": str(computed_stats.get("window_start") or payload.get("window_start") or ""),
+        "window_end": str(computed_stats.get("window_end") or payload.get("window_end") or ""),
+        "message_count": int(computed_stats.get("message_count") or payload.get("message_count") or 0),
+        "file_count": int(computed_stats.get("file_count") or payload.get("file_count") or 0),
+        "participant_count": int(computed_stats.get("participant_count") or payload.get("participant_count") or 0),
+        "has_master": bool(computed_stats.get("has_master", payload.get("has_master"))),
+        "n_start": int(computed_stats.get("n_start") or payload.get("n_start") or 0),
+        "n_end": int(computed_stats.get("n_end") or payload.get("n_end") or 0),
+        "digest_id": str(payload.get("digest_id") or ""),
+        "artifact_ref": artifact_ref,
+    }
+    if not artifact_ref:
+        normalized["digest_text"] = text
+    queued = bool(enqueue(entry.session_key, normalized))
+    return {
+        "ok": True,
+        "queued": queued,
+        "artifact_ref": artifact_ref,
+        "session_id": entry.session_key,
+    }
 
 
 @router.post("/turns/{turn_id}/pause")

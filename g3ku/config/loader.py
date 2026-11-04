@@ -631,6 +631,11 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
         },
         "qqBot": {
             "enabled": cfg.qq_bot.enabled,
+            "groupScanMinMinutes": float(getattr(cfg.qq_bot, "group_scan_min_minutes", 2.0) or 0.0),
+            "groupScanMaxMinutes": float(getattr(cfg.qq_bot, "group_scan_max_minutes", 5.0) or 0.0),
+            "groupHistoryRetentionDays": int(getattr(cfg.qq_bot, "group_history_retention_days", 30) or 30),
+            "groupConsumedRetentionDays": int(getattr(cfg.qq_bot, "group_consumed_retention_days", 7) or 7),
+            "groupHistoryMaxGb": float(getattr(cfg.qq_bot, "group_history_max_gb", 2.0) or 2.0),
             "accounts": {
                 str(app_id): {
                     "appSecret": entry.app_secret,

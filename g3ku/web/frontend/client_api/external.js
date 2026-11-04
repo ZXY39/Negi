@@ -32,6 +32,14 @@
         return this.put("/api/qq-bot/settings", payload || {});
     },
 
+    async getQqGroupSettings() {
+        return this.get("/api/qq-bot/group-settings");
+    },
+
+    async updateQqGroupSettings(payload) {
+        return this.put("/api/qq-bot/group-settings", payload || {});
+    },
+
     async createQqMasterBinding(payload) {
         return this.post("/api/qq-bot/master-binding", payload || {});
     },
@@ -42,6 +50,14 @@
 
     async unregisterQqMaster(payload) {
         return this.post("/api/qq-bot/unregister-master", payload || {});
+    },
+
+    async getQqGroupHistoryUsage(sessionId) {
+        return this.get(`/api/qq-bot/history/usage?session_id=${encodeURIComponent(String(sessionId || ""))}`);
+    },
+
+    async clearQqGroupHistory(sessionId) {
+        return this.post("/api/qq-bot/history/clear", { session_id: String(sessionId || ""), confirm: true });
     }
     };
 })();

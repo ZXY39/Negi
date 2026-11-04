@@ -13,7 +13,11 @@ Real-device seam: the botpy SDK surface is verified against ``qq-botpy==1.2.1`` 
 ``filename`` — image and file payloads are downloaded and forwarded to
 ``/api/v1`` as ``data_base64`` attachments, see docs/architecture/external-agent-api.md
 「回合契约」), and ``post_message`` / ``post_group_message`` /
-``post_c2c_message`` / ``post_dms`` signatures. Outbound media uploads go
+``post_c2c_message`` / ``post_dms`` signatures. `GROUP_MESSAGE_CREATE` (the
+platform's full-group-message event when the group grants「获取群内全部消息」)
+is absent from that SDK release and upstream master; the bridge installs the
+parser on ``ConnectionState`` before constructing the client, so the event
+reaches ``on_group_message_create`` instead of being dropped as unknown. Outbound media uploads go
 through ``file_data`` (base64) on the same `/files` routes: botpy's
 ``post_group_file`` / ``post_c2c_file`` wrappers only expose the ``url``
 parameter, which the platform fetches itself (public reachability required),
@@ -39,6 +43,7 @@ import asyncio
 import base64
 import io
 import mimetypes
+import random
 import re
 import time
 from collections import OrderedDict
@@ -51,6 +56,16 @@ import httpx
 from loguru import logger
 
 from g3ku.qq_official.client import ExternalApiClient
+from g3ku.qq_official.group_history import (
+    CONSUMED_RETENTION_DAYS,
+    DEFAULT_HISTORY_MAX_GB,
+    DEFAULT_SCAN_MAX_MINUTES,
+    DEFAULT_SCAN_MIN_MINUTES,
+    HISTORY_RETENTION_DAYS,
+    GroupHistoryStore,
+    group_history_root,
+    list_group_histories,
+)
 from g3ku.qq_official.messages import (
     OUTBOUND_EVENT,
     bridge_id_for_app_id,
@@ -750,6 +765,208 @@ async def _collect_attachments(
     return payloads, voice_lines
 
 
+_MENTION_TAG_RE = re.compile(r"<@!?([A-Za-z0-9_=-]{8,128})>")
+_MENTION_PROBE_REMAINING = 50
+
+
+def _content_mention_ids(content: Any) -> set[str]:
+    return {match.group(1) for match in _MENTION_TAG_RE.finditer(str(content or ""))}
+
+
+def _mention_ids_of(item: Any) -> set[str]:
+    """一条 mention 上可能同时挂着群内 openid 与全局 bot id，全部收下再判。
+
+    平台给机器人 mention 的 ``member_openid`` 与 ``me().id`` 不一定同一命名空间；
+    只取第一个命中的属性会让正文 id 与 mentions id 对不上，差集规则把别的机器人
+    当成自己。
+    """
+    ids: set[str] = set()
+    for attr in ("member_openid", "user_openid", "id", "union_openid"):
+        value = str(getattr(item, attr, "") or "").strip()
+        if value:
+            ids.add(value)
+    return ids
+
+
+def _message_mention_ids(message: Any) -> set[str]:
+    ids: set[str] = set()
+    for item in list(getattr(message, "mentions", None) or []):
+        ids.update(_mention_ids_of(item))
+    return ids
+
+
+def _short_mention_id(value: Any) -> str:
+    text = str(value or "").strip()
+    return text[-6:] if len(text) > 6 else text
+
+
+def _is_bot_mentioned(message: Any) -> bool:
+    """无身份时的快速判据：``content`` 里的 <@id> 减去 ``mentions``。
+
+    全量档的 ``mentions`` 可能包含机器人自身，单靠差集会漏；生产路径必须用
+    ``_bot_mention_ids(..., bot_id=..., bot_name=...)``。本函数只保留给无身份
+    场景，唯一 bot mention 时按兜底判真。@all 不是直接 @，不走进这条判据。
+    """
+    return bool(_bot_mention_ids(message))
+
+
+def _bot_mention_ids(
+    message: Any,
+    *,
+    bot_id: str = "",
+    bot_name: str = "",
+) -> set[str]:
+    content_ids = _content_mention_ids(getattr(message, "content", ""))
+    mention_ids = _message_mention_ids(message)
+    found = content_ids - mention_ids
+    normalized_bot_id = str(bot_id or "").strip()
+    normalized_bot_name = str(bot_name or "").strip()
+    if normalized_bot_id and normalized_bot_id in content_ids:
+        found.add(normalized_bot_id)
+    bot_mention_groups: list[set[str]] = []
+    for item in list(getattr(message, "mentions", None) or []):
+        if not bool(getattr(item, "bot", False)):
+            continue
+        ids = _mention_ids_of(item)
+        if not ids:
+            continue
+        bot_mention_groups.append(ids)
+        username = str(getattr(item, "username", "") or "").strip()
+        id_match = bool(normalized_bot_id and normalized_bot_id in ids)
+        name_match = bool(
+            normalized_bot_name
+            and username
+            and username.casefold() == normalized_bot_name.casefold()
+        )
+        if id_match or name_match:
+            found.update(ids)
+            continue
+        if normalized_bot_name and username and username.casefold() != normalized_bot_name.casefold():
+            # 明确是另一个机器人：正文与 mentions 的 id 命名空间不一致时，差集
+            # 也可能把它错算成自己。平台昵称对不上就不认。
+            found.difference_update(ids)
+    if not normalized_bot_id and not normalized_bot_name and not found and len(bot_mention_groups) == 1:
+        # 身份完全拿不到时才按「唯一被 @ 的机器人」兜底；已知身份后绝不再猜，
+        # 否则同群第二个机器人会把本机叫醒。
+        found.update(bot_mention_groups[0])
+    return found
+
+
+def _mention_label_map(message: Any, *, bot_ids: set[str], bot_name: str) -> dict[str, str]:
+    labels: dict[str, str] = {}
+    for raw in list(getattr(message, "raw_mentions", None) or []):
+        if not isinstance(raw, dict):
+            continue
+        ids = {
+            str(raw.get(attr) or "").strip()
+            for attr in ("member_openid", "user_openid", "id", "union_openid")
+        } - {""}
+        if not ids:
+            continue
+        username = str(raw.get("username") or "").strip()
+        label = username or ("机器人" if bool(raw.get("bot")) else "成员")
+        for mention_id in ids:
+            labels[mention_id] = label
+    for item in list(getattr(message, "mentions", None) or []):
+        ids = _mention_ids_of(item)
+        if not ids:
+            continue
+        username = str(getattr(item, "username", "") or "").strip()
+        label = username or ("机器人" if bool(getattr(item, "bot", False)) else "成员")
+        for mention_id in ids:
+            labels.setdefault(mention_id, label)
+    for item in bot_ids:
+        labels[item] = str(bot_name or "").strip() or "机器人"
+    return labels
+
+
+def _normalize_mention_tags(message: Any, *, bot_ids: set[str], bot_name: str) -> str:
+    labels = _mention_label_map(message, bot_ids=bot_ids, bot_name=bot_name)
+    text = str(getattr(message, "content", "") or "")
+    for mention_id, label in sorted(labels.items(), key=lambda pair: len(pair[0]), reverse=True):
+        text = text.replace(f"<@!{mention_id}>", f"@{label}").replace(f"<@{mention_id}>", f"@{label}")
+    # 最后兜底：不把任何原始 openid 形状的 @ 标记留给模型或历史文件。
+    return re.sub(r"<@!?[A-Za-z0-9_=-]{8,128}>", "@成员", text).strip()
+
+
+def _enrich_group_message(message: Any, payload: dict[str, Any]) -> Any:
+    """botpy 的 GroupMessage 只保留 member_openid；补回昵称、角色与原始上下文。"""
+    author = payload.get("author") if isinstance(payload, dict) else None
+    if isinstance(author, dict) and getattr(message, "author", None) is not None:
+        for attr in ("username", "member_role", "id", "bot"):
+            value = author.get(attr)
+            if value not in (None, ""):
+                try:
+                    setattr(message.author, attr, value)
+                except Exception:  # noqa: BLE001 - 只做尽力增强，不阻断消息
+                    pass
+    if isinstance(payload, dict):
+        raw_mentions = payload.get("mentions")
+        if isinstance(raw_mentions, list):
+            try:
+                message.raw_mentions = list(raw_mentions)
+            except Exception:  # noqa: BLE001
+                pass
+            for item, raw in zip(list(getattr(message, "mentions", None) or []), raw_mentions):
+                if not isinstance(raw, dict):
+                    continue
+                for attr in ("id", "username", "bot", "member_openid", "user_openid", "union_openid"):
+                    value = raw.get(attr)
+                    if value not in (None, ""):
+                        try:
+                            setattr(item, attr, value)
+                        except Exception:  # noqa: BLE001
+                            pass
+        try:
+            message.msg_elements = list(payload.get("msg_elements") or [])
+            message.message_scene = dict(payload.get("message_scene") or {})
+        except Exception:  # noqa: BLE001
+            pass
+    return message
+
+
+def _install_botpy_group_message_parser() -> bool:
+    """qq-botpy 1.2.1 没有 ``GROUP_MESSAGE_CREATE`` 的解析器。
+
+    群管理里把「机器人可获取的群聊消息范围」设成「获取群内全部消息」后，平台把
+    该群所有消息（含 @ 机器人的消息）改走 ``GROUP_MESSAGE_CREATE``，不再发
+    ``GROUP_AT_MESSAGE_CREATE``。SDK 的网关对未知事件只打一行
+    ``_parser unknown event group_message_create.`` 就丢弃，于是全量档下群聊整条
+    静默。PyPI 上 qq-botpy 的最后一版就是 1.2.1，上游 master 也没有这个解析器，
+    因此在桥里补一个（上游以后加了就跳过）。intent 不用改：该事件属于
+    ``GROUP_AND_C2C_EVENT``（1<<25），现有 ``public_messages=True`` 已覆盖。
+
+    ``GROUP_AT_MESSAGE_CREATE`` 也换成同一套带昵称/角色的解析器：只修全量事件
+    时，切回「最近 10 条」档昵称又会丢。
+    """
+    try:
+        from botpy.connection import ConnectionState
+        from botpy.message import GroupMessage
+    except Exception:  # noqa: BLE001 - 单测里的假 botpy 没有 connection 子模块
+        return False
+    if getattr(ConnectionState, "_g3ku_enriched_group_parser", False):
+        return False
+
+    def parse_group_message_create(self, payload):
+        data = payload.get("d", {}) if isinstance(payload, dict) else {}
+        message = _enrich_group_message(
+            GroupMessage(self.api, payload.get("id", None), data), data
+        )
+        self._dispatch("group_message_create", message)
+
+    def parse_group_at_message_create(self, payload):
+        data = payload.get("d", {}) if isinstance(payload, dict) else {}
+        message = _enrich_group_message(
+            GroupMessage(self.api, payload.get("id", None), data), data
+        )
+        self._dispatch("group_at_message_create", message)
+
+    ConnectionState.parse_group_message_create = parse_group_message_create
+    ConnectionState.parse_group_at_message_create = parse_group_at_message_create
+    ConnectionState._g3ku_enriched_group_parser = True
+    return True
+
+
 async def run_qq_official_bridge(
     *,
     app_id: str,
@@ -758,6 +975,12 @@ async def run_qq_official_bridge(
     token: str,
     base_url: str,
     on_state: StateCallback,
+    history_max_bytes: int = int(DEFAULT_HISTORY_MAX_GB * 1024**3),
+    scan_min_minutes: float = DEFAULT_SCAN_MIN_MINUTES,
+    scan_max_minutes: float = DEFAULT_SCAN_MAX_MINUTES,
+    history_retention_days: int = HISTORY_RETENTION_DAYS,
+    consumed_retention_days: int = CONSUMED_RETENTION_DAYS,
+    owner_openids: list[str] | None = None,
 ) -> None:
     """Run until cancelled/error. ``on_state`` reports coarse status."""
     try:
@@ -765,6 +988,11 @@ async def run_qq_official_bridge(
     except Exception as exc:  # noqa: BLE001
         on_state("error", f"botpy 未安装（pip install qq-botpy）: {exc}")
         return
+
+    # ``ConnectionState`` 在构造时用 inspect 收集 ``parse_*``，所以必须在
+    # ``QqOfficialClient`` 实例化之前装好。
+    if _install_botpy_group_message_parser():
+        logger.info("qq-official installed GROUP_MESSAGE_CREATE parser for qq-botpy")
 
     try:
         intents = botpy.Intents(public_guild_messages=True, direct_message=True, public_messages=True)
@@ -785,6 +1013,24 @@ async def run_qq_official_bridge(
     # pump 句柄属于这一轮登录，随桥的 finally 一起取消，绝不跨登录复用任务。
     pumps: set[asyncio.Task] = set()
     pump_tasks: dict[str, asyncio.Task] = {}
+    owner_ids = {
+        str(item or "").strip().lower()
+        for item in list(owner_openids or [])
+        if str(item or "").strip()
+    }
+    history_stores: dict[str, GroupHistoryStore] = {}
+    digest_tasks: dict[str, asyncio.Task] = {}
+    bot_identity: dict[str, str] = {"id": "", "username": ""}
+    last_identity_report: tuple[str, str] = ("", "")
+
+    async def _history_cleanup_loop() -> None:
+        while True:
+            await asyncio.sleep(3600.0)
+            for store in list(history_stores.values()):
+                try:
+                    await asyncio.to_thread(store.enforce_limits)
+                except Exception:  # noqa: BLE001 - cleanup must survive one bad group
+                    logger.exception("qq-official group history cleanup failed")
 
     async def on_incoming(
         external_key: str,
@@ -848,6 +1094,148 @@ async def run_qq_official_bridge(
         # durable 的 `pending` 行，会话回到空闲后由派发通道照常接住，追发的用户已经
         # 看得见自己那条消息，再回一句机器话只是噪音。`receipt` 仍留在 /api/v1 的
         # 响应里给对接方读（网页与 MCP 网关用它分辨"追加还是撞车"）。
+
+    async def _store_for_group(external_key: str) -> tuple[GroupHistoryStore, str] | None:
+        session_id = sessions.get(external_key)
+        if session_id is None:
+            session_id = await client.ensure_session(external_key, chat_type="group")
+            if not session_id:
+                return None
+            sessions[external_key] = session_id
+        store = history_stores.get(session_id)
+        if store is None:
+            store = GroupHistoryStore(
+                root=group_history_root(session_id, create=True),
+                app_id=app_id,
+                external_key=external_key,
+                session_key=session_id,
+                max_bytes=history_max_bytes,
+                retention_days=history_retention_days,
+                consumed_retention_days=consumed_retention_days,
+            )
+            store.ensure()
+            store.write_meta()
+            history_stores[session_id] = store
+        return store, session_id
+
+    async def _record_group_message(message) -> None:
+        external_key = external_key_for_group(getattr(message, "group_openid", ""))
+        resolved = await _store_for_group(external_key)
+        if resolved is None:
+            return
+        store, session_id = resolved
+        attachments, voice_lines = await _collect_attachments(media_client, message)
+        text = _normalize_face_markup(
+            _content_of(message),
+            has_image_attachment=any(
+                str(item.get("kind") or "") == "image" for item in attachments
+            ),
+        )
+        if voice_lines:
+            text = "\n".join([text, *[line for line in voice_lines if line]]).strip()
+        media: list[dict[str, Any]] = []
+        for item in attachments:
+            raw = str(item.get("data_base64") or "").strip()
+            if not raw:
+                continue
+            try:
+                data = base64.b64decode(raw)
+            except Exception:  # noqa: BLE001
+                continue
+            media.append(
+                {
+                    "kind": str(item.get("kind") or "file"),
+                    "name": str(item.get("name") or "file"),
+                    "mime": str(item.get("mime_type") or "application/octet-stream"),
+                    "data": data,
+                }
+            )
+        sender = _sender_of(message, "group")
+        sender_id = str(sender.get("id") or "")
+        # 非 @ 消息也记被动引用：digest 在 5 分钟窗口内回复时仍可走被动形状，
+        # 不必依赖群主动消息权限。
+        _note_passive_ref(state, external_key, getattr(message, "id", ""))
+        await asyncio.to_thread(
+            store.append,
+            text=text,
+            sender_id=sender_id,
+            sender_name=str(sender.get("name") or ""),
+            role=str(sender.get("role") or ""),
+            is_master=sender_id.lower() in owner_ids,
+            files=media,
+            message_id=str(getattr(message, "id", "") or ""),
+        )
+        _ensure_digest_task(session_id)
+
+    def _ensure_digest_task(session_id: str) -> None:
+        existing = digest_tasks.get(session_id)
+        if existing is not None and not existing.done():
+            return
+        task = asyncio.create_task(
+            _digest_loop(session_id), name=f"qq-official-digest:{session_id}"
+        )
+        digest_tasks[session_id] = task
+        task.add_done_callback(lambda _task, key=session_id: digest_tasks.pop(key, None))
+
+    async def _digest_loop(session_id: str) -> None:
+        store = history_stores.get(session_id)
+        if store is None:
+            return
+        low = max(0.0, float(scan_min_minutes))
+        high = max(low, float(scan_max_minutes))
+        pending_n = 0
+        pending_since = 0.0
+        while True:
+            if pending_n > 0:
+                consumed = await asyncio.to_thread(store.last_consumed_n)
+                elapsed = time.monotonic() - pending_since
+                if consumed >= pending_n:
+                    pending_n = 0
+                elif elapsed < 600:
+                    await asyncio.sleep(15.0)
+                    continue
+                else:
+                    # 心跳排队超过 10 分钟仍未注入：允许重发同一区间；重复事件由
+                    # heartbeat dedupe key 吸收，真丢失则这次会重新入队。
+                    pending_n = 0
+            interval_seconds = max(1.0, random.uniform(low, high) * 60.0)
+            await asyncio.sleep(interval_seconds)
+            rows, stats = await asyncio.to_thread(store.build_digest)
+            if not rows:
+                continue
+            payload = {
+                "digest_id": f"qq-digest:{session_id}:{stats.n_end}",
+                "window_start": stats.window_start,
+                "window_end": stats.window_end,
+                "message_count": stats.message_count,
+                "file_count": stats.file_count,
+                "participant_count": stats.participant_count,
+                "has_master": stats.has_master,
+                "n_start": stats.n_start,
+                "n_end": stats.n_end,
+                "messages": rows,
+            }
+            try:
+                response = await client.send_digest(session_id, payload)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - keep the pending digest for retry
+                logger.warning(
+                    "qq-official digest enqueue failed for {}: {}; retrying in 30s",
+                    session_id, exc,
+                )
+                await asyncio.sleep(30.0)
+                continue
+            if bool(response.get("ok")):
+                pending_n = stats.n_end
+                pending_since = time.monotonic()
+                logger.info(
+                    "qq-official digest queued session={} range={}-{} messages={} files={} master={}",
+                    session_id, stats.n_start, stats.n_end, stats.message_count,
+                    stats.file_count, stats.has_master,
+                )
+            else:
+                await asyncio.sleep(30.0)
 
     def _absolute_media_url(url: str) -> str:
         """Event attachment URLs are root-relative signed viewer paths; the
@@ -1536,7 +1924,53 @@ async def run_qq_official_bridge(
                 logger.exception("qq-official pending outbox reconcile pass failed")
 
     class QqOfficialClient(botpy.Client):
+        async def _refresh_bot_identity(self):
+            nonlocal last_identity_report
+            try:
+                me = await self.api.me()
+            except Exception as exc:  # noqa: BLE001 - identity lookup is best effort
+                logger.warning("qq-official failed to read bot profile: {}", exc)
+                return
+            if isinstance(me, dict):
+                bot_identity["id"] = str(me.get("id") or me.get("union_openid") or "").strip() or bot_identity.get("id", "")
+                bot_identity["username"] = str(me.get("username") or "").strip() or bot_identity.get("username", "")
+            else:
+                bot_identity["id"] = str(getattr(me, "id", "") or "").strip() or bot_identity.get("id", "")
+                bot_identity["username"] = (
+                    str(getattr(me, "username", "") or "").strip() or bot_identity.get("username", "")
+                )
+            if not bot_identity.get("id") and not bot_identity.get("username"):
+                return
+            signature = (bot_identity.get("id", ""), bot_identity.get("username", ""))
+            if signature == last_identity_report:
+                return
+            reporter = getattr(client, "report_identity", None)
+            if not callable(reporter):
+                return
+            try:
+                await reporter(bot_id=signature[0], nickname=signature[1])
+            except Exception as exc:  # noqa: BLE001 - identity report must not kill the bridge
+                logger.warning("qq-official identity report failed: {}", exc)
+                return
+            last_identity_report = signature
+            logger.info(
+                "qq-official bot identity loaded: id={} username={}",
+                signature[0],
+                signature[1],
+            )
+
+        async def _identity_poll(self):
+            while True:
+                await asyncio.sleep(60.0)
+                await self._refresh_bot_identity()
+
         async def on_ready(self):
+            nonlocal identity_task
+            await self._refresh_bot_identity()
+            if identity_task is None or identity_task.done():
+                identity_task = asyncio.create_task(
+                    self._identity_poll(), name=f"qq-official-identity:{app_id}"
+                )
             on_state("connected", "")
 
         async def _dispatch(self, external_key: str, message, *, chat_type: str):
@@ -1560,12 +1994,70 @@ async def run_qq_official_bridge(
                 chat_type,
             )
 
-        async def on_group_at_message_create(self, message):
+        async def _dispatch_group(self, message):
             await self._dispatch(
                 external_key_for_group(getattr(message, "group_openid", "")),
                 message,
                 chat_type="group",
             )
+
+        async def _background_group_message(self, message):
+            # 非 @ 消息只做历史记录，不调用 /messages、不创建回合。
+            await _record_group_message(message)
+
+        async def on_group_at_message_create(self, message):
+            at_bot_ids = _bot_mention_ids(
+                message,
+                bot_id=bot_identity.get("id", ""),
+                bot_name=bot_identity.get("username", ""),
+            )
+            message.content = _normalize_mention_tags(
+                message,
+                bot_ids=at_bot_ids,
+                bot_name=bot_identity.get("username", ""),
+            )
+            await self._dispatch_group(message)
+
+        async def on_group_message_create(self, message):
+            # 全量档下平台用这个事件替代 GROUP_AT_MESSAGE_CREATE（@ 消息也走它）。
+            # 两条道共用消息 id 幂等键，平台万一两个事件都发也不会起两轮。
+            direct_ids = _bot_mention_ids(
+                message,
+                bot_id=bot_identity.get("id", ""),
+                bot_name=bot_identity.get("username", ""),
+            )
+            global _MENTION_PROBE_REMAINING
+            if _MENTION_PROBE_REMAINING > 0:
+                mentions = list(getattr(message, "mentions", None) or [])
+                logger.info(
+                    "qq-official mention probe: content_ids={} mention_ids={} bot_flags={} direct={} known_bot={} self_id={} self_name={} mention_detail={} content_len={}",
+                    sorted(_short_mention_id(item) for item in _content_mention_ids(getattr(message, "content", ""))),
+                    sorted(_short_mention_id(item) for item in _message_mention_ids(message)),
+                    sum(1 for item in mentions if bool(getattr(item, "bot", False))),
+                    sorted(_short_mention_id(item) for item in direct_ids),
+                    bool(bot_identity.get("id")),
+                    _short_mention_id(bot_identity.get("id", "")),
+                    str(bot_identity.get("username", "") or "")[:24],
+                    [
+                        "{}:{}:{}".format(
+                            ",".join(sorted(_short_mention_id(value) for value in _mention_ids_of(item))) or "-",
+                            "bot" if bool(getattr(item, "bot", False)) else "user",
+                            str(getattr(item, "username", "") or "")[:24] or "-",
+                        )
+                        for item in mentions
+                    ],
+                    len(str(getattr(message, "content", "") or "")),
+                )
+                _MENTION_PROBE_REMAINING -= 1
+            message.content = _normalize_mention_tags(
+                message,
+                bot_ids=direct_ids,
+                bot_name=bot_identity.get("username", ""),
+            )
+            if direct_ids:
+                await self._dispatch_group(message)
+                return
+            await self._background_group_message(message)
 
         async def on_c2c_message_create(self, message):
             await self._dispatch(
@@ -1596,27 +2088,27 @@ async def run_qq_official_bridge(
         return str(content or "").strip()
 
     def _sender_of(message: Any, chat_type: str) -> dict[str, str]:
-        """发送者身份；群消息只有 ``member_openid``（botpy 不给昵称），频道才有用户名。
-
-        实测：同一 AppID 下同一个人的 ``member_openid`` 与 c2c 的 ``user_openid`` 同值
-        （平台也会把它解析成群里的 @），所以"群里谁是操作员"在协议层判得出来。群聊整会话
-        仍按第三方是策略，多人短路在 ``g3ku/runtime/session_trust.py::resolve_turn_trust``。
-        """
+        """发送者身份；群消息的昵称/角色由桥的兼容解析器从原始 payload 补回。"""
         author = getattr(message, "author", None) or {}
         if chat_type == "group":
-            return {"id": str(getattr(author, "member_openid", "") or "").strip(), "name": ""}
+            return {
+                "id": str(getattr(author, "member_openid", "") or "").strip(),
+                "name": str(getattr(author, "username", "") or "").strip(),
+                "role": str(getattr(author, "member_role", "") or "").strip(),
+            }
         if chat_type == "dm":
             return {
                 "id": str(
                     getattr(author, "user_openid", "") or getattr(author, "id", "") or ""
                 ).strip(),
-                "name": "",
+                "name": str(getattr(author, "username", "") or "").strip(),
+                "role": "",
             }
         member = getattr(message, "member", None)
         name = str(getattr(author, "username", "") or "").strip() or str(
             getattr(member, "nick", "") or ""
         ).strip()
-        return {"id": str(getattr(author, "id", "") or "").strip(), "name": name}
+        return {"id": str(getattr(author, "id", "") or "").strip(), "name": name, "role": ""}
 
     def _openid_of(message: Any) -> str:
         author = getattr(message, "author", None) or {}
@@ -1624,6 +2116,27 @@ async def run_qq_official_bridge(
 
     bridge_api: Any = None
     reconcile_task: asyncio.Task | None = None
+    cleanup_task: asyncio.Task | None = None
+    identity_task: asyncio.Task | None = None
+
+    # 重启后没有新入站也要继续处理上次留下的未消费历史。
+    for _session_key, _root in list_group_histories(app_id):
+        if _session_key in history_stores:
+            continue
+        _store = GroupHistoryStore(
+            root=_root,
+            app_id=app_id,
+            session_key=_session_key,
+            max_bytes=history_max_bytes,
+            retention_days=history_retention_days,
+            consumed_retention_days=consumed_retention_days,
+        )
+        _store.ensure()
+        history_stores[_session_key] = _store
+        _ensure_digest_task(_session_key)
+    cleanup_task = asyncio.create_task(
+        _history_cleanup_loop(), name="qq-official-history-cleanup"
+    )
 
     try:
         bridge_client = QqOfficialClient(
@@ -1660,8 +2173,14 @@ async def run_qq_official_bridge(
         # 必须显式取消。
         if reconcile_task is not None:
             reconcile_task.cancel()
+        if cleanup_task is not None:
+            cleanup_task.cancel()
+        if identity_task is not None:
+            identity_task.cancel()
         for pump in list(pumps):
             pump.cancel()
+        for task in list(digest_tasks.values()):
+            task.cancel()
         # botpy's websocket/heartbeat/runner tasks survive the cancellation of
         # ``start()`` (its ``asyncio.wait`` does not cancel its children, and the
         # ws rides a dedicated aiohttp session that ``Client.close()`` cannot
@@ -1669,7 +2188,7 @@ async def run_qq_official_bridge(
         leftovers = [task for task in asyncio.all_tasks(asyncio.get_running_loop()) if _is_botpy_task(task)]
         for task in leftovers:
             task.cancel()
-        reap = list(pumps) + leftovers + ([reconcile_task] if reconcile_task is not None else [])
+        reap = list(pumps) + list(digest_tasks.values()) + leftovers + ([reconcile_task] if reconcile_task is not None else []) + ([cleanup_task] if cleanup_task is not None else []) + ([identity_task] if identity_task is not None else [])
         if reap:
             await asyncio.gather(*reap, return_exceptions=True)
         await media_client.aclose()

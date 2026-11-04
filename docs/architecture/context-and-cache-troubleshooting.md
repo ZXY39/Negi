@@ -327,7 +327,7 @@ Heartbeat / cron 不在主 CEO/frontdoor 路径上使用单独的短 `ceo_heartb
 
 | family | 载体 | 插入位置 | 寿命 | 压缩策略 | generic strip 的落点 |
 |---|---|---|---|---|---|
-| `runtime_notice` | `[RUNTIME_NOTICE]` user 消息（控制台动作 / skill 名单 / 记忆增量 / 合同增量） | 请求尾部；前门排在当轮 user 之后、turn-only 之前，节点排在历史末尾 | 活到下一次压缩 | `drop` + 下一跳状态快照 | `post_compaction` |
+| `runtime_notice` | `[RUNTIME_NOTICE]` user 消息（控制台动作 / skill 名单 / 记忆增量 / 合同增量 / QQ 身份） | 请求尾部；前门排在当轮 user 之后、turn-only 之前，节点排在历史末尾 | 活到下一次压缩 | `drop` + 下一跳状态快照 | `post_compaction` |
 | `turn_only_note` | `System note for this turn only:` user 消息 | 请求尾部，每跳重建，单例 | 只活一轮 | `drop` | `durable` / `prompt_tail` / `projection` |
 | `append_notice` | `[NOTICE_TAIL]` + JSON user 消息 | 节点 bootstrap user 之后（system 保持首位） | 压缩免疫 | `carry`；深层 `raw_notice_window` 由压缩切分原样捞出 | 任何 generic strip 都不许碰 |
 | `retrieval_memory_snapshot` | `## 长期记忆\n` assistant 消息 | stable index 1（system 之后、历史之前） | 每轮重建 | `rebuild` | `durable` / `compaction` / `projection`；`prompt_tail` 保留 |

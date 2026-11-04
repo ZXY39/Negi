@@ -140,3 +140,12 @@ def test_channel_identity_block_allows_group_memory_updates_from_any_member() ->
     # 私聊没有可写记忆域，不能带这条群写许可。
     dm_text = CeoPromptBuilder.channel_identity_block()
     assert "不因发送者是普通成员而拒绝" not in dm_text
+
+
+def test_qq_channel_attachment_limits_block_states_20mib_cap() -> None:
+    from g3ku.runtime.frontdoor.prompt_builder import CeoPromptBuilder
+
+    text = CeoPromptBuilder.qq_channel_attachment_limits_block()
+    assert "20MiB" in text
+    assert "5MiB" in text
+    assert "无法成功发送" in text

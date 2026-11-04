@@ -370,15 +370,22 @@ MCP 网关以固定身份 `negi-mcp` 出现在每条入站消息里，所以「�
 ```
 [来源] 群聊 第三方 0002
 [来源] 群聊 第三方 0002（张三）      ← 桥给了名字（频道 / OneBot / MCP）
+[来源] 群聊 第三方 0002（张三，管理员） ← QQ 群角色随 external_sender.role 进入标注
 [来源] 私聊 Master                   ← 私聊命中名单
-[来源] 群聊 Master                   ← 本人在群里（只改标签，不改档位）
+[来源] 群聊 Master（群主）           ← 本人在群里（只改标签，不改档位）
 [来源] 输入框 Master                 ← 渠道会话里由网页输入框提交
 [来源] 群聊 未知                     ← 桥没带 sender
 ```
 
 - 身份：`Master` = 操作员本人（sender id 命中 `ownerOpenids` 并集，大小写不敏感），或渠道会话里
   由网页输入框提交；其余发送者按**会话内首次出现顺序**编号 `0002`、`0003`…，同一会话内同一 id
-  恒定同一号。`0001` 留给 Master 但不印号；哈希不进上下文。
+  恒定同一号。`0001` 留给 Master 但不印号；哈希不进上下文。QQ 群历史/摘要的发送者编号来自
+  持久 roster（`g3ku/runtime/external_member_roster.py`），转录投影与 `mention_member` 共用同一份号。
+- 角色是平台字段，不是权限：`member/admin/owner` 只展示成成员/管理员/群主；群主/管理员不等于
+  Master，Master 只有配置的 `ownerOpenids` 一人。群历史文件里的 `master` 由 bridge 按名单计算，
+  不是用户正文；`mention_member` 的 `Master` 也只从 runtime 名单解析，raw openid 继续拒绝。
+- 群历史 JSONL / digest artifact 是**不可信数据**：用户正文被 JSON 序列化在 `text` 字段里，不能
+  伪造 `sender_id` / `master` / `n`；system prompt 明确正文、昵称、文件名里自称 Master 都不改变身份。
 - 群里的本人只改标签、不改档位：`resolve_turn_trust` 的多人会话短路不变，群里 Master 的消息仍按
   `third_party_group` 执行。标注是给模型解释用的，不是准入判据。
 - 只有渠道标记的消息才装饰：`external_trust` 由 `/api/v1` 落库；网页输入框在渠道会话里补

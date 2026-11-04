@@ -668,3 +668,149 @@ async def test_no_active_code_does_not_intercept_token_shaped_text(harness, regi
         await _wait_terminal(session_id)
         assert len(bridge.prompts) == 1
         assert bridge.prompts[0].content == token_shaped
+
+
+@pytest.mark.asyncio
+async def test_channel_digest_enqueues_internal_heartbeat(harness, registry, monkeypatch):
+    class _FakeHeartbeat:
+        def __init__(self):
+            self.events = []
+
+        def enqueue_channel_digest(self, session_key, payload):
+            self.events.append((session_key, dict(payload)))
+            return True
+
+    heartbeat = _FakeHeartbeat()
+    monkeypatch.setattr(external_v1, "get_web_heartbeat_service", lambda agent=None: heartbeat)
+    monkeypatch.setattr(external_v1, "peek_global_agent", lambda: None)
+    app, _bridge = harness(session=None)
+    async with _client(app) as client:
+        created = (
+            await client.post(
+                "/api/v1/sessions",
+                json={"external_key": "qq:group:digest", "chat_type": "group"},
+            )
+        ).json()
+        session_id = created["session_id"]
+        response = await client.post(
+            f"/api/v1/sessions/{session_id}/digest",
+            json={
+                "window_start": "2026-11-05T10:00:00+08:00",
+                "window_end": "2026-11-05T10:05:00+08:00",
+                "n_start": 1,
+                "n_end": 2,
+                "message_count": 2,
+                "file_count": 0,
+                "participant_count": 1,
+                "has_master": False,
+                "messages": [
+                    {
+                        "n": 1,
+                        "ts": "2026-11-05T10:00:00+08:00",
+                        "sender_id": "AAAA",
+                        "sender_name": "小明",
+                        "role": "admin",
+                        "master": False,
+                        "text": "第一句",
+                        "files": [],
+                    },
+                    {
+                        "n": 2,
+                        "ts": "2026-11-05T10:01:00+08:00",
+                        "sender_id": "AAAA",
+                        "sender_name": "小明",
+                        "role": "admin",
+                        "master": False,
+                        "text": "第二句",
+                        "files": [],
+                    },
+                ],
+            },
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["queued"] is True
+    assert body["artifact_ref"] == ""
+    session_key, event = heartbeat.events[-1]
+    assert session_key.startswith("ext:test-bridge:")
+    assert event["message_count"] == 2
+    assert event["has_master"] is False
+    assert event["n_start"] == 1 and event["n_end"] == 2
+    assert "第一句" in event["digest_text"]
+    assert "第二句" in event["digest_text"]
+
+
+@pytest.mark.asyncio
+async def test_channel_digest_externalizes_artifact_and_omits_inline_text(harness, registry, monkeypatch):
+    class _FakeHeartbeat:
+        def __init__(self):
+            self.events = []
+
+        def enqueue_channel_digest(self, session_key, payload):
+            self.events.append((session_key, dict(payload)))
+            return True
+
+    class _FakeContentStore:
+        def __init__(self):
+            self.calls = []
+
+        def maybe_externalize_text(self, text, **kwargs):
+            self.calls.append((text, dict(kwargs)))
+            return SimpleNamespace(ref="artifact:digest-test")
+
+    heartbeat = _FakeHeartbeat()
+    store = _FakeContentStore()
+    agent = SimpleNamespace(main_task_service=SimpleNamespace(content_store=store))
+    monkeypatch.setattr(external_v1, "get_web_heartbeat_service", lambda agent=None: heartbeat)
+    monkeypatch.setattr(external_v1, "peek_global_agent", lambda: agent)
+    app, _bridge = harness(session=None)
+    async with _client(app) as client:
+        created = (
+            await client.post(
+                "/api/v1/sessions",
+                json={"external_key": "qq:group:digest-artifact", "chat_type": "group"},
+            )
+        ).json()
+        session_id = created["session_id"]
+        response = await client.post(
+            f"/api/v1/sessions/{session_id}/digest",
+            json={
+                "messages": [
+                    {
+                        "n": 1,
+                        "ts": "2026-11-05T10:00:00+08:00",
+                        "sender_id": "AAAA",
+                        "sender_name": "小明",
+                        "role": "member",
+                        "text": "hi",
+                        "files": [],
+                    }
+                ]
+            },
+        )
+    assert response.status_code == 200
+    assert response.json()["artifact_ref"] == "artifact:digest-test"
+    assert store.calls and store.calls[0][1]["force"] is True
+    _session_key, event = heartbeat.events[-1]
+    assert event["artifact_ref"] == "artifact:digest-test"
+    assert "digest_text" not in event
+    assert event["message_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_qq_official_identity_report_route(harness, monkeypatch):
+    captured = {}
+
+    def _set(bridge_id, *, bot_id="", nickname=""):
+        captured.update({"bridge_id": bridge_id, "bot_id": bot_id, "nickname": nickname})
+        return {"bot_id": bot_id, "nickname": nickname}
+
+    monkeypatch.setattr(external_v1, "set_qq_bot_identity", _set)
+    app, _bridge = harness(session=None)
+    async with _client(app) as client:
+        response = await client.post(
+            "/api/v1/qq-official/identity",
+            json={"bot_id": "BOT123", "nickname": "Negi"},
+        )
+    assert response.status_code == 200
+    assert captured == {"bridge_id": "test-bridge", "bot_id": "BOT123", "nickname": "Negi"}

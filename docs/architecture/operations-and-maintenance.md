@@ -545,6 +545,7 @@ IM 渠道有两条：内置官方 QQ 适配器（`g3ku/qq_official/`，进程内
 
 - `docs/architecture/external-agent-api.md`「常见排障入口」
 - 桥接应用自身的日志与配置（如 `bridges/qq-onebot/README.md`）
+- 官方 QQ 全量群消息的历史文件在 `<数据根>/session-workspaces/<会话>/group-inbox/`（`messages.jsonl`、`media/`、`meta.json`）；单群按 `groupHistoryMaxGb`（默认 2GB）淘汰最旧消息。未被心跳消费的历史保留 `groupHistoryRetentionDays`（默认 30 天），被心跳注入消费后保留 `groupConsumedRetentionDays`（默认 7 天）。占用读数与清除入口在群会话输入框上方；清除保留连续编号 `n` 与成员 roster，不删转录/记忆。账号行的「群文件」是各群历史合计，不设预警阈值。
 
 ### 群聊里工具用不了 / 读不到文件 / 记不住东西
 

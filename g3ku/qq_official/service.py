@@ -66,7 +66,13 @@ class QqOfficialService:
         return f"http://127.0.0.1:{port}/api/v1"
 
     @staticmethod
-    def _signature(app_id: str, account: QqBotAccountConfig | None, *, global_enabled: bool) -> str:
+    def _signature(
+        app_id: str,
+        account: QqBotAccountConfig | None,
+        *,
+        global_enabled: bool,
+        group_settings: Any = None,
+    ) -> str:
         if account is None:
             return ""
         # 密钥摘要必须进签名：签名相等时 sync 直接返回，改过 AppSecret 的号
@@ -74,9 +80,20 @@ class QqOfficialService:
         # 单号时代靠重启蒙对，多号并跑后"改密钥救号"是常规操作）。摘要只取
         # 前 12 位十六进制，密钥原文不进日志与状态。
         secret_digest = hashlib.sha256(str(account.app_secret or "").encode("utf-8")).hexdigest()[:12]
+        group_digest = (
+            f"|{float(getattr(group_settings, 'group_scan_min_minutes', 2.0) or 0.0):.3f}"
+            f"|{float(getattr(group_settings, 'group_scan_max_minutes', 5.0) or 0.0):.3f}"
+            f"|{int(getattr(group_settings, 'group_history_retention_days', 30) or 30)}"
+            f"|{int(getattr(group_settings, 'group_consumed_retention_days', 7) or 7)}"
+            f"|{float(getattr(group_settings, 'group_history_max_gb', 2.0) or 2.0):.3f}"
+            if group_settings is not None
+            else ""
+        )
         return (
             f"{bool(global_enabled and account.enabled)}|{str(app_id).strip()}"
             f"|{bool(account.sandbox)}|{secret_digest}"
+            f"|{','.join(sorted(str(item or '').strip().lower() for item in (getattr(account, 'owner_openids', None) or [])))}"
+            f"{group_digest}"
         )
 
     def _set(self, state: str, detail: str = "") -> None:
@@ -100,24 +117,28 @@ class QqOfficialService:
             await self.stop()
             return
 
-        signature = self._signature(self._app_id, account, global_enabled=global_enabled)
+        signature = self._signature(
+            self._app_id, account, global_enabled=global_enabled, group_settings=cfg.qq_bot
+        )
         if signature == self._config_signature and self._task is not None and not self._task.done():
             return  # config unchanged and still running
 
         self._config_signature = signature
         self._base_url = self._effective_base_url(cfg)
-        await self._restart(account)
+        await self._restart(account, group_settings=cfg.qq_bot)
 
-    async def _restart(self, account: QqBotAccountConfig) -> None:
+    async def _restart(self, account: QqBotAccountConfig, *, group_settings: Any = None) -> None:
         await self.stop()
         token = self._ensure_bridge_token()
         self._set("connecting")
         self._task = asyncio.create_task(
-            self._run(account, token),
+            self._run(account, token, group_settings=group_settings),
             name=f"qq-official-bridge:{self._bridge_id}",
         )
 
-    async def _run(self, account: QqBotAccountConfig, token: str) -> None:
+    async def _run(
+        self, account: QqBotAccountConfig, token: str, *, group_settings: Any = None
+    ) -> None:
         from g3ku.qq_official.bridge import QqGatewaySessionEndedError, run_qq_official_bridge
 
         backoff = _BRIDGE_RETRY_INITIAL_BACKOFF_SECONDS
@@ -133,6 +154,26 @@ class QqOfficialService:
                     token=token,
                     base_url=self._base_url,
                     on_state=self._set,
+                    history_max_bytes=int(
+                        max(
+                            0.1,
+                            float(getattr(group_settings, "group_history_max_gb", 2.0) or 2.0),
+                        )
+                        * 1024**3
+                    ),
+                    scan_min_minutes=max(
+                        0.0, float(getattr(group_settings, "group_scan_min_minutes", 2.0) or 0.0)
+                    ),
+                    scan_max_minutes=max(
+                        0.0, float(getattr(group_settings, "group_scan_max_minutes", 5.0) or 0.0)
+                    ),
+                    history_retention_days=max(
+                        1, int(getattr(group_settings, "group_history_retention_days", 30) or 30)
+                    ),
+                    consumed_retention_days=max(
+                        1, int(getattr(group_settings, "group_consumed_retention_days", 7) or 7)
+                    ),
+                    owner_openids=list(getattr(account, "owner_openids", None) or []),
                 )
                 # bridge 干净返回是它自己报过的环境类终态（如 botpy 缺失），不重试。
                 return

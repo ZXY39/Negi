@@ -8992,6 +8992,7 @@ function applyCeoSessionsPayload(payload = {}, { preferLocalActive = false } = {
         syncCeoPrimaryButton();
     }
     if (S.view === "tasks" && previousActiveId !== nextActiveId) renderTasks();
+    if (typeof refreshQqGroupHistoryStrip === "function") void refreshQqGroupHistoryStrip();
     return nextActiveId;
 }
 
@@ -9074,6 +9075,7 @@ function applyOptimisticCeoSessionSwitch(sessionId, session = null) {
     syncCeoComposerReadonlyState();
     syncCeoSessionActions();
     syncCeoPrimaryButton();
+    if (typeof refreshQqGroupHistoryStrip === "function") void refreshQqGroupHistoryStrip();
     return { previousActiveId, switched: true, renderedFromCache };
 }
 

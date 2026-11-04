@@ -737,6 +737,19 @@ class CeoMessageBuilder:
             list(getattr(persisted_session, 'messages', []) or []),
             master_ids=master_ids,
         )
+        # 摘要/mention 的 roster 与转录投影共用编号：先出现在群历史里的成员，
+        # 后续真人发言的标注不能换成另一个号。
+        session_key = str(getattr(persisted_session, "session_key", "") or "").strip()
+        if session_key.startswith("ext:"):
+            try:
+                from g3ku.runtime.external_member_roster import get_member_roster
+
+                for sender_id, item in get_member_roster(session_key).members().items():
+                    number = item.get("number")
+                    if isinstance(number, int) and number >= 2:
+                        numbers[sender_id] = number
+            except Exception:
+                pass
         return [
             self._history_message(message, numbers=numbers, master_ids=master_ids)
             for message in prompt_history_messages(persisted_session)
@@ -1376,6 +1389,11 @@ class CeoMessageBuilder:
             ).strip()
             if channel_text:
                 system_prompt = f"{system_prompt}\n\n{channel_text}".strip()
+            if str(session_key or "").startswith("ext:qq-official"):
+                limits_block = getattr(self._prompt_builder, "qq_channel_attachment_limits_block", None)
+                limits_text = str(limits_block() if callable(limits_block) else "").strip()
+                if limits_text:
+                    system_prompt = f"{system_prompt}\n\n{limits_text}".strip()
         external_trace = self._trace_external_tools(
             visible_tools=visible_tools,
             visible_tool_names=visible_tool_names,

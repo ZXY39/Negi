@@ -75,11 +75,22 @@ def test_mention_roster_resolves_numbers_and_master(monkeypatch) -> None:
     fake_self = SimpleNamespace(_loop=SimpleNamespace(sessions=sessions))
     monkeypatch.setattr(runtime_ops, "qq_owner_openids", lambda: frozenset({"OWNER"}))
 
-    by_number, master_id = runtime_ops.CeoFrontDoorRuntimeOps._mention_roster(
-        fake_self, "ext:qq-official-1:abc"
+    by_number, master_id, roster = runtime_ops.CeoFrontDoorRuntimeOps._mention_roster(
+        fake_self, "ext:qq-official-1:test-mention-roster"
     )
     assert by_number == {2: "AAAA"}
     assert master_id == "OWNER"
+    assert roster.resolve("master")["id"] == "OWNER"
+
+
+class _FakeRoster:
+    def resolve(self, target: str):
+        raw = str(target or "").strip()
+        if raw.lower() == "master":
+            return {"ok": True, "id": "OWNER", "number": 1, "name": "Master"}
+        if raw in {"0002", "2", "Alice"}:
+            return {"ok": True, "id": "AAAA", "number": 2, "name": "Alice", "role": "member"}
+        return {"ok": False, "reason": "target_not_found"}
 
 
 @pytest.mark.asyncio
@@ -92,7 +103,7 @@ async def test_publish_mention_targets_roster_and_rejects_raw_openid(monkeypatch
     )
     fake_self = SimpleNamespace(
         _loop=SimpleNamespace(bus=bus),
-        _mention_roster=lambda key: ({2: "AAAA"}, "OWNER"),
+        _mention_roster=lambda key: ({2: "AAAA"}, "OWNER", _FakeRoster()),
     )
     published: list[dict] = []
 
@@ -133,3 +144,46 @@ async def test_publish_mention_targets_roster_and_rejects_raw_openid(monkeypatch
     )
     assert rejected["ok"] is False
     assert rejected["reason"] == "raw_openid_not_allowed"
+
+
+@pytest.mark.asyncio
+async def test_publish_mention_accepts_name_and_multiple_targets(monkeypatch) -> None:
+    bus = _Bus()
+    entry = SimpleNamespace(
+        session_key="ext:qq-official-1:multi",
+        external_key="qq:group:g1",
+        chat_type="group",
+    )
+    fake_self = SimpleNamespace(
+        _loop=SimpleNamespace(bus=bus),
+        _mention_roster=lambda key: ({2: "AAAA"}, "OWNER", _FakeRoster()),
+    )
+    published: list[dict] = []
+
+    async def _publish(bus_arg, session_key, text, *, source, metadata=None):
+        published.append({"metadata": dict(metadata or {})})
+        return True
+
+    monkeypatch.setattr(runtime_ops, "get_external_session_registry", lambda: _Registry(entry))
+    monkeypatch.setattr(runtime_ops, "publish_channel_notice", _publish)
+    runtime_ops._MENTION_SEND_TIMES.clear()
+
+    result = await runtime_ops.CeoFrontDoorRuntimeOps._frontdoor_publish_mention(
+        fake_self,
+        targets=["Alice", "Master", "0002"],
+        message="请两位确认",
+        runtime={"session_key": entry.session_key},
+    )
+    assert result["ok"] is True
+    assert published[-1]["metadata"]["mentions"] == ["AAAA", "OWNER"]
+
+    runtime_ops._MENTION_SEND_TIMES.clear()
+    failed = await runtime_ops.CeoFrontDoorRuntimeOps._frontdoor_publish_mention(
+        fake_self,
+        target="Nobody",
+        message="hi",
+        runtime={"session_key": entry.session_key},
+    )
+    assert failed["ok"] is False
+    assert failed["reason"] == "target_resolution_failed"
+    assert failed["results"][0]["reason"] == "target_not_found"

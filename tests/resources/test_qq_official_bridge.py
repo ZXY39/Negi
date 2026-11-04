@@ -282,6 +282,200 @@ async def test_bridge_uses_async_entry_and_wires_messages(monkeypatch: pytest.Mo
     assert FakeExternalApiClient.instances[-1].closed is True
 
 
+def test_botpy_group_message_create_parser_is_installed() -> None:
+    """全量群消息事件在 qq-botpy 1.2.1 的网关里是未知事件，只打一行 error 就丢；
+    桥必须把解析器补进 ConnectionState，且补完的构造结果要真的能收取聚合消息。"""
+    connection = pytest.importorskip("botpy.connection")
+    from botpy.message import GroupMessage
+
+    bridge_module._install_botpy_group_message_parser()
+
+    dispatched: list[tuple] = []
+    state = connection.ConnectionState(lambda *args: dispatched.append(args), SimpleNamespace())
+    payload = {
+        "id": "evt-group",
+        "d": {
+            "id": "msg-group",
+            "group_openid": "g-full",
+            "content": "不 @ 也要收到",
+            "author": {"member_openid": "u-full"},
+        },
+    }
+    state.parsers["group_message_create"](payload)
+
+    event, message = dispatched[-1]
+    assert event == "group_message_create"
+    assert isinstance(message, GroupMessage)
+    assert message.id == "msg-group"
+    assert message.group_openid == "g-full"
+    assert message.content == "不 @ 也要收到"
+    assert message.author.member_openid == "u-full"
+
+
+@pytest.mark.asyncio
+async def test_bridge_routes_full_mode_group_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """「获取群内全部消息」档下平台只推 GROUP_MESSAGE_CREATE（@ 消息也走它），
+    该事件必须落到与 @ 事件相同的群会话入站车道。"""
+    _install_fake_botpy(monkeypatch)
+    monkeypatch.setattr(bridge_module, "ExternalApiClient", FakeExternalApiClient)
+
+    task = asyncio.create_task(
+        bridge_module.run_qq_official_bridge(
+            app_id="100",
+            app_secret="sekrit",
+            sandbox=False,
+            token="t",
+            base_url="http://127.0.0.1:1/api/v1",
+            on_state=lambda state, detail: None,
+        ),
+        name="test-qq-bridge-full-group",
+    )
+    try:
+        await _wait_until(lambda: FakeClient.instances and FakeClient.instances[-1].started)
+        client = FakeClient.instances[-1]
+        message = SimpleNamespace(
+            group_openid="g1", content="<@BOT12345678> 普通群消息", id="m2"
+        )
+        await client.on_group_message_create(message)
+        ext = FakeExternalApiClient.instances[-1]
+        await _wait_until(lambda: ext.sent)
+        assert ext.ensured == ["qq:group:g1"]
+        assert ext.sent == [("ext:qq-official:qq:group:g1", "@机器人 普通群消息", "qq-m2", [])]
+        assert ext.sent_metadata == [{"chat_type": "group"}]
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+def test_bot_mention_detection_uses_content_minus_mentions() -> None:
+    direct = SimpleNamespace(
+        content="<@BOT12345678> 在吗",
+        mentions=[SimpleNamespace(member_openid="OTHER12345678")],
+    )
+    assert bridge_module._is_bot_mentioned(direct) is True
+
+    other_member = SimpleNamespace(
+        content="<@OTHER12345678> 你好",
+        mentions=[SimpleNamespace(member_openid="OTHER12345678")],
+    )
+    assert bridge_module._is_bot_mentioned(other_member) is False
+    assert bridge_module._is_bot_mentioned(SimpleNamespace(content="普通消息", mentions=[])) is False
+
+    bot_flagged = SimpleNamespace(
+        content="<@BOT12345678> 在吗",
+        mentions=[SimpleNamespace(member_openid="BOT12345678", bot=True, username="Negi")],
+    )
+    assert bridge_module._is_bot_mentioned(bot_flagged) is True
+
+
+def test_foreign_bot_mention_does_not_wake_the_local_bot() -> None:
+    """同群第二个机器人被 @ 时不能算成本机；差集规则也不能把它错算进来。"""
+    message = SimpleNamespace(
+        content="<@OTHERBOT1234> 你在哪，你知道自己名字吗",
+        mentions=[
+            SimpleNamespace(
+                member_openid="SOMETHINGELSE",
+                id="OTHERBOT1234",
+                bot=True,
+                username="小N酱",
+            )
+        ],
+    )
+    assert bridge_module._bot_mention_ids(message, bot_id="SELF9876", bot_name="11") == set()
+    normalized = bridge_module._normalize_mention_tags(message, bot_ids=set(), bot_name="11")
+    assert normalized == "@小N酱 你在哪，你知道自己名字吗"
+    # 身份尚未拿到时保留旧兜底（唯一 bot mention → 本机）；拿到身份后绝不再猜。
+    assert bridge_module._bot_mention_ids(message, bot_id="", bot_name="") == {"SOMETHINGELSE", "OTHERBOT1234"}
+
+
+def test_bot_mention_matches_global_id_across_openid_namespaces() -> None:
+    message = SimpleNamespace(
+        content="<@GROUPOPENID99> 在吗",
+        mentions=[
+            SimpleNamespace(
+                member_openid="GROUPOPENID99",
+                id="SELF9876",
+                bot=True,
+                username="11",
+            )
+        ],
+    )
+    assert "GROUPOPENID99" in bridge_module._bot_mention_ids(
+        message, bot_id="SELF9876", bot_name="11"
+    )
+
+
+def test_bot_mention_tags_are_replaced_with_display_names() -> None:
+    message = SimpleNamespace(
+        content="<@BOT12345678> 请 <@USER12345678> 看一下",
+        mentions=[
+            SimpleNamespace(member_openid="BOT12345678", bot=True, username="Negi"),
+            SimpleNamespace(member_openid="USER12345678", bot=False, username="小明"),
+        ],
+        raw_mentions=[
+            {"member_openid": "BOT12345678", "bot": True, "username": "Negi"},
+            {"member_openid": "USER12345678", "bot": False, "username": "小明"},
+        ],
+    )
+    bot_ids = bridge_module._bot_mention_ids(message, bot_id="", bot_name="Negi")
+    normalized = bridge_module._normalize_mention_tags(
+        message, bot_ids=bot_ids, bot_name="Negi"
+    )
+    assert normalized == "@Negi 请 @小明 看一下"
+    assert "<@" not in normalized
+
+
+@pytest.mark.asyncio
+async def test_bridge_records_non_at_group_message_without_turn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    _install_fake_botpy(monkeypatch)
+    monkeypatch.setattr(bridge_module, "ExternalApiClient", FakeExternalApiClient)
+    monkeypatch.setattr(
+        bridge_module,
+        "group_history_root",
+        lambda session_key, create=False: tmp_path / "group-inbox",
+    )
+    task = asyncio.create_task(
+        bridge_module.run_qq_official_bridge(
+            app_id="100",
+            app_secret="sekrit",
+            sandbox=False,
+            token="t",
+            base_url="http://127.0.0.1:1/api/v1",
+            on_state=lambda state, detail: None,
+        ),
+        name="test-qq-bridge-history",
+    )
+    try:
+        await _wait_until(lambda: FakeClient.instances and FakeClient.instances[-1].started)
+        client = FakeClient.instances[-1]
+        message = SimpleNamespace(
+            group_openid="g-history",
+            content="普通群消息",
+            id="m-history",
+            mentions=[],
+            attachments=[],
+        )
+        await client.on_group_message_create(message)
+        ext = FakeExternalApiClient.instances[-1]
+        await _wait_until(lambda: ext.ensured)
+        assert ext.sent == []
+        history_path = tmp_path / "group-inbox" / "messages.jsonl"
+        await _wait_until(
+            lambda: history_path.exists() and history_path.read_text(encoding="utf-8").strip()
+        )
+        row = json.loads(history_path.read_text(encoding="utf-8").splitlines()[0])
+        assert row["n"] == 1
+        assert row["text"] == "普通群消息"
+        assert row["sender_id"] == ""
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
 @pytest.mark.asyncio
 async def test_bridge_raises_the_shared_http_timeout_above_the_sdk_default(
     monkeypatch: pytest.MonkeyPatch,

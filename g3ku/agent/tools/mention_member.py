@@ -30,8 +30,9 @@ class MentionMemberTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Mention Master or a listed member number in this group; raw openids are rejected and delivery "
-            "may be refused."
+            "Mention Master or listed group members in this group. Targets may be `Master`, "
+            "a session-local member number such as `0002`, or a unique nickname; raw openids "
+            "are rejected. Use the `targets` array to mention several members in one message."
         )
 
     @property
@@ -43,22 +44,29 @@ class MentionMemberTool(Tool):
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 64,
-                    "description": "`Master` or a session-local member number such as `0002`.",
+                    "description": "`Master`, a member number such as `0002`, or a unique nickname.",
+                },
+                "targets": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1, "maxLength": 64},
+                    "description": "Mention several members in one message; names must be unique.",
                 },
                 "message": {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 1000,
-                    "description": "Message body sent to the group with the mention.",
+                    "description": "Message body sent to the group with the mentions.",
                 },
             },
-            "required": ["target", "message"],
+            "required": ["message"],
         }
 
     def validate_params(self, params: dict[str, Any]) -> list[str]:
         errors = super().validate_params(params)
-        if not str((params or {}).get("target") or "").strip():
-            errors.append("target must not be empty")
+        raw_targets = params.get("targets")
+        targets = [str(item or "").strip() for item in raw_targets] if isinstance(raw_targets, list) else []
+        if not str((params or {}).get("target") or "").strip() and not any(targets):
+            errors.append("target or targets must not be empty")
         if not str((params or {}).get("message") or "").strip():
             errors.append("message must not be empty")
         if len(str((params or {}).get("message") or "")) > 1000:
@@ -67,13 +75,15 @@ class MentionMemberTool(Tool):
 
     async def execute(
         self,
-        target: str,
-        message: str,
+        target: str = "",
+        message: str = "",
+        targets: list[str] | None = None,
         **kwargs: Any,
     ) -> str:
         runtime = kwargs.get("__g3ku_runtime")
         result = await self._publish(
             target=str(target or "").strip(),
+            targets=[str(item or "").strip() for item in list(targets or []) if str(item or "").strip()],
             message=str(message or "").strip(),
             runtime=runtime if isinstance(runtime, dict) else {},
         )

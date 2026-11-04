@@ -162,8 +162,7 @@ def test_owner_openids_roundtrip_and_preserved_when_omitted(client: TestClient) 
     )
     assert _row(saved.json(), "111")["owner_openids"] == [owner]
 
-    # 逗号/换行分隔的字符串也接受，按大小写不敏感去重。
-    second = "A73DE661112233445566"
+    # 逗号/换行分隔的字符串也接受，大小写不敏感去重后仍只保留一个 Master。
     saved = client.put(
         "/api/qq-bot/settings",
         json={
@@ -172,13 +171,31 @@ def test_owner_openids_roundtrip_and_preserved_when_omitted(client: TestClient) 
                 {
                     "app_id": "111",
                     "app_secret": "",
-                    "ownerOpenids": f"{owner},\n{second},{owner.lower()}",
+                    "ownerOpenids": f"{owner},\n{owner.lower()}",
                 }
             ],
         },
     )
     assert saved.status_code == 200
-    assert _row(saved.json(), "111")["owner_openids"] == [owner, second]
+    assert _row(saved.json(), "111")["owner_openids"] == [owner]
+
+    # Master 唯一：第二个 owner 必须被拒绝，不能静默覆盖或追加。
+    second = "A73DE661112233445566"
+    bad_master = client.put(
+        "/api/qq-bot/settings",
+        json={
+            "enabled": True,
+            "accounts": [
+                {
+                    "app_id": "111",
+                    "app_secret": "",
+                    "ownerOpenids": f"{owner},{second}",
+                }
+            ],
+        },
+    )
+    assert bad_master.status_code == 400
+    assert bad_master.json()["detail"] == "qq_owner_openids_single_master"
 
     bad = client.put(
         "/api/qq-bot/settings",
@@ -555,3 +572,33 @@ def test_qq_bot_status_endpoint_reports_accounts(client: TestClient) -> None:
     status = client.get("/api/qq-bot/status")
     assert status.status_code == 200
     assert isinstance(status.json()["accounts"], list)
+
+
+def test_qq_group_settings_roundtrip_and_on_disk_shape(client: TestClient) -> None:
+    saved = client.put(
+        "/api/qq-bot/group-settings",
+        json={
+            "scan_min_minutes": 0,
+            "scan_max_minutes": 5,
+            "history_retention_days": 30,
+            "consumed_retention_days": 7,
+            "history_max_gb": 3.5,
+        },
+    )
+    assert saved.status_code == 200
+    body = saved.json()
+    assert body["scan_min_minutes"] == 0.0
+    assert body["scan_max_minutes"] == 5.0
+    assert body["history_retention_days"] == 30
+    assert body["consumed_retention_days"] == 7
+    assert body["history_max_gb"] == 3.5
+
+    loaded = client.get("/api/qq-bot/group-settings").json()
+    assert loaded["history_max_gb"] == 3.5
+
+    on_disk = json.loads((Path(".g3ku") / "config.json").read_text(encoding="utf-8"))
+    assert on_disk["qqBot"]["groupHistoryMaxGb"] == 3.5
+    assert on_disk["qqBot"]["groupScanMinMinutes"] == 0.0
+    assert on_disk["qqBot"]["groupScanMaxMinutes"] == 5.0
+    assert on_disk["qqBot"]["groupHistoryRetentionDays"] == 30
+    assert on_disk["qqBot"]["groupConsumedRetentionDays"] == 7

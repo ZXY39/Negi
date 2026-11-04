@@ -163,16 +163,20 @@ def reset_session_event_hubs() -> None:
         _HUBS.clear()
 
 
-def _rewrite_media_signed(text: str) -> str:
+def _rewrite_media_signed(text: str, *, session_key: str = "") -> str:
     # Lazy import: ceo_media lives in g3ku.runtime.api, which must not be
     # imported at module load time here (see module docstring).
     from g3ku.runtime.api.ceo_media import channel_attachment_roots, rewrite_media_links_signed
 
-    rewritten = rewrite_media_links_signed(text, allowed_roots=channel_attachment_roots())
+    rewritten = rewrite_media_links_signed(
+        text, allowed_roots=channel_attachment_roots(session_key)
+    )
     return rewritten if isinstance(rewritten, str) else text
 
 
-def _extract_media_attachments(text: str) -> tuple[str, list[dict[str, Any]]]:
+def _extract_media_attachments(
+    text: str, *, session_key: str = ""
+) -> tuple[str, list[dict[str, Any]]]:
     """Pull markdown-referenced local files out of channel-bound reply text.
 
     Same lazy-import constraint as ``_rewrite_media_signed``. Extraction runs
@@ -186,7 +190,7 @@ def _extract_media_attachments(text: str) -> tuple[str, list[dict[str, Any]]]:
     )
 
     cleaned, attachments = extract_local_media_attachments(
-        text, allowed_roots=channel_attachment_roots()
+        text, allowed_roots=channel_attachment_roots(session_key)
     )
     return (cleaned if isinstance(cleaned, str) else text), list(attachments or [])
 
@@ -351,9 +355,9 @@ def make_session_event_relay(
                 # 纯表情回合：正文被标记清空、但仍有图要发，不能在这里早退。
                 if not text and not sticker_paths:
                     return
-                text, attachments = _extract_media_attachments(text)
+                text, attachments = _extract_media_attachments(text, session_key=session_key)
                 attachments = _with_sticker_attachments(attachments, sticker_paths)
-                text = _rewrite_media_signed(text)
+                text = _rewrite_media_signed(text, session_key=session_key)
                 final_payload: dict[str, Any] = {
                     "text": text,
                     "source": str(payload.get("source") or "user"),
