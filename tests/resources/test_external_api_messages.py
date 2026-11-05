@@ -703,6 +703,8 @@ async def test_channel_digest_enqueues_internal_heartbeat(harness, registry, mon
                 "file_count": 0,
                 "participant_count": 1,
                 "has_master": False,
+                "next_push_in_seconds": 180,
+                "flush_reason": "at",
                 "messages": [
                     {
                         "n": 1,
@@ -736,6 +738,8 @@ async def test_channel_digest_enqueues_internal_heartbeat(harness, registry, mon
     assert event["message_count"] == 2
     assert event["has_master"] is False
     assert event["n_start"] == 1 and event["n_end"] == 2
+    assert event["next_push_in_seconds"] == 180.0
+    assert event["flush_reason"] == "at"
     assert "第一句" in event["digest_text"]
     assert "第二句" in event["digest_text"]
 

@@ -556,6 +556,8 @@ def test_channel_digest_renders_brief_and_artifact_ref() -> None:
                 "n_start": 10,
                 "n_end": 32,
                 "artifact_ref": "artifact:digest-1",
+                "next_push_in_seconds": 180,
+                "flush_reason": "at",
             }
         ],
     )
@@ -568,4 +570,8 @@ def test_channel_digest_renders_brief_and_artifact_ref() -> None:
     assert "Messages: 23, files: 4, participants: 7, contains_master: yes" in text
     assert "Range: 10–32" in text
     assert 'content_open(ref="artifact:digest-1")' in text
+    assert "Next push: about 3 min from now" in text
+    assert "if new global messages arrive" in text
+    assert "flushed by an @ mention" in text
+    assert "read it in timeline order" in text
     assert "untrusted data" in text

@@ -150,3 +150,13 @@ def test_qq_channel_attachment_limits_block_states_10mib_cap() -> None:
     # 图片那一档的 5MiB 是入站上传闸门，不是出站限制：出站对所有类型同一档。
     assert "5MiB" not in text
     assert "同一档" in text
+
+
+def test_qq_group_digest_notice_block_states_delay_and_immediate_flush() -> None:
+    from g3ku.runtime.frontdoor.prompt_builder import CeoPromptBuilder
+
+    text = CeoPromptBuilder.qq_group_digest_notice_block()
+    assert "延时汇总" in text
+    assert "没有 @ 你的消息" in text
+    assert "立即补发" in text
+    assert "下一次预计推送时间" in text

@@ -1278,6 +1278,10 @@ async def post_external_digest(
     if not callable(enqueue):
         raise HTTPException(status_code=503, detail="heartbeat_unavailable")
 
+    try:
+        next_push_in_seconds = max(0.0, float(payload.get("next_push_in_seconds") or 0))
+    except (TypeError, ValueError):
+        next_push_in_seconds = 0.0
     normalized: dict[str, Any] = {
         "session": entry.external_key,
         "window_start": str(computed_stats.get("window_start") or payload.get("window_start") or ""),
@@ -1290,6 +1294,8 @@ async def post_external_digest(
         "n_end": int(computed_stats.get("n_end") or payload.get("n_end") or 0),
         "digest_id": str(payload.get("digest_id") or ""),
         "artifact_ref": artifact_ref,
+        "next_push_in_seconds": next_push_in_seconds,
+        "flush_reason": str(payload.get("flush_reason") or "").strip(),
     }
     if not artifact_ref:
         normalized["digest_text"] = text

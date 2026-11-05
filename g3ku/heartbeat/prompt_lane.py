@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Callable
 
 from g3ku.core.timefmt import render_local_time
@@ -872,6 +872,8 @@ def _channel_digest_lines(
     n_end = _non_empty_text(event.get("n_end")) or "?"
     has_master = "yes" if bool(event.get("has_master")) else "no"
     ref = _non_empty_text(event.get("artifact_ref"))
+    flush_reason = _non_empty_text(event.get("flush_reason"))
+    next_push_seconds = _float_value(event.get("next_push_in_seconds"), 0.0)
     lines = [
         "- Background group digest (not a user request)",
         f"  Window: {window_start} – {window_end}",
@@ -885,6 +887,16 @@ def _channel_digest_lines(
     ]
     if session:
         lines.append(f"  Session: {session}")
+    if next_push_seconds > 0:
+        if next_push_seconds >= 60:
+            span = f"{next_push_seconds / 60:.1f}".rstrip("0").rstrip(".") + " min"
+        else:
+            span = f"{max(1, int(round(next_push_seconds)))} s"
+        next_push_at = datetime.now().astimezone() + timedelta(seconds=next_push_seconds)
+        lines.append(
+            f"  Next push: about {span} from now ({render_local_time(next_push_at)}) "
+            "if new global messages arrive."
+        )
     if ref:
         lines.append(f'  Digest: content_open(ref="{ref}")')
         _append_retrieval_parts(retrieval_parts, "channel_digest", session, n_start, n_end)
@@ -899,6 +911,12 @@ def _channel_digest_lines(
         )
         lines.append(f"  Digest: {inline}")
         _append_retrieval_parts(retrieval_parts, "channel_digest", session, n_start, n_end, retrieval)
+    if flush_reason == "at":
+        lines.append(
+            "  This digest was flushed by an @ mention: the digest file/content below also carries "
+            "unread group messages; read it in timeline order together with the @ message before "
+            "deciding whether to reply."
+        )
     lines.extend(
         [
             "  Decide whether any message needs a reply or a mention; otherwise call `silent`.",

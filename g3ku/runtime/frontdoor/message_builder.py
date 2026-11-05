@@ -1469,6 +1469,11 @@ class CeoMessageBuilder:
                 limits_text = str(limits_block() if callable(limits_block) else "").strip()
                 if limits_text:
                     system_prompt = f"{system_prompt}\n\n{limits_text}".strip()
+                if group_memory:
+                    digest_block = getattr(self._prompt_builder, "qq_group_digest_notice_block", None)
+                    digest_text = str(digest_block() if callable(digest_block) else "").strip()
+                    if digest_text:
+                        system_prompt = f"{system_prompt}\n\n{digest_text}".strip()
         external_trace = self._trace_external_tools(
             visible_tools=visible_tools,
             visible_tool_names=visible_tool_names,

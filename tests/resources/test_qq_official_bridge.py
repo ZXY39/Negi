@@ -153,6 +153,7 @@ class FakeExternalApiClient:
         self.ack_status_by_id: dict[str, str] = {}
         self.ack_extra_by_id: dict[str, dict] = {}
         self.pending_outbox: list[dict] = []
+        self.digests: list[tuple[str, dict]] = []
         self.closed = False
         FakeExternalApiClient.instances.append(self)
 
@@ -182,6 +183,10 @@ class FakeExternalApiClient:
         self.sent_sender.append(dict(sender or {}))
         self.sent_metadata.append(dict(metadata or {}))
         return {"ok": True, "turn_id": "t1"}
+
+    async def send_digest(self, session_id: str, payload: dict) -> dict:
+        self.digests.append((session_id, dict(payload)))
+        return {"ok": True}
 
     async def list_pending_outbox(self) -> list[dict]:
         return list(self.pending_outbox)
@@ -342,6 +347,65 @@ async def test_bridge_routes_full_mode_group_message(monkeypatch: pytest.MonkeyP
         assert ext.ensured == ["qq:group:g1"]
         assert ext.sent == [("ext:qq-official:qq:group:g1", "@机器人 普通群消息", "qq-m2", [])]
         assert ext.sent_metadata == [{"chat_type": "group"}]
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_at_mention_flushes_unread_digest_immediately(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """@ 入站后立刻补发未读群消息，并让随机计时从这一刻重新开始。"""
+    _install_fake_botpy(monkeypatch)
+    monkeypatch.setattr(bridge_module, "ExternalApiClient", FakeExternalApiClient)
+    monkeypatch.setattr(
+        bridge_module,
+        "group_history_root",
+        lambda session_key, create=False: tmp_path / "group-inbox",
+    )
+
+    task = asyncio.create_task(
+        bridge_module.run_qq_official_bridge(
+            app_id="100",
+            app_secret="sekrit",
+            sandbox=False,
+            token="t",
+            base_url="http://127.0.0.1:1/api/v1",
+            on_state=lambda state, detail: None,
+            scan_min_minutes=60.0,
+            scan_max_minutes=60.0,
+        ),
+        name="test-qq-bridge-at-flush",
+    )
+    try:
+        await _wait_until(lambda: FakeClient.instances and FakeClient.instances[-1].started)
+        client = FakeClient.instances[-1]
+        ext = FakeExternalApiClient.instances[-1]
+
+        await client.on_group_message_create(
+            SimpleNamespace(group_openid="g-at-flush", content="先发的普通消息", id="m1")
+        )
+        await _wait_until(lambda: ext.ensured)
+
+        await client.on_group_message_create(
+            SimpleNamespace(group_openid="g-at-flush", content="<@BOT12345678> 在吗", id="m2")
+        )
+        await _wait_until(lambda: ext.digests)
+
+        assert ext.sent and ext.sent[0][1] == "@机器人 在吗"
+        _session_id, digest = ext.digests[0]
+        assert digest["flush_reason"] == "at"
+        assert digest["n_start"] == 1 and digest["n_end"] == 1
+        assert digest["messages"][0]["text"] == "先发的普通消息"
+        assert digest["next_push_in_seconds"] >= 60
+
+        # 上一份 digest 还在等注入时，再一次 @ 不叠发第二份。
+        await client.on_group_message_create(
+            SimpleNamespace(group_openid="g-at-flush", content="<@BOT12345678> 再来", id="m3")
+        )
+        assert len(ext.digests) == 1
     finally:
         task.cancel()
         with suppress(asyncio.CancelledError):

@@ -1182,32 +1182,43 @@ async def run_qq_official_bridge(
         digest_tasks[session_id] = task
         task.add_done_callback(lambda _task, key=session_id: digest_tasks.pop(key, None))
 
-    async def _digest_loop(session_id: str) -> None:
-        store = history_stores.get(session_id)
-        if store is None:
-            return
+    digest_runtime: dict[str, dict[str, Any]] = {}
+
+    def _digest_state(session_id: str) -> dict[str, Any]:
+        state = digest_runtime.get(session_id)
+        if state is None:
+            state = {
+                "lock": asyncio.Lock(),
+                "wake": asyncio.Event(),
+                "pending_n": 0,
+                "pending_since": 0.0,
+                "next_interval_seconds": 0.0,
+                "retry_requested": False,
+            }
+            digest_runtime[session_id] = state
+        return state
+
+    def _digest_interval_seconds() -> float:
         low = max(0.0, float(scan_min_minutes))
         high = max(low, float(scan_max_minutes))
-        pending_n = 0
-        pending_since = 0.0
-        while True:
-            if pending_n > 0:
-                consumed = await asyncio.to_thread(store.last_consumed_n)
-                elapsed = time.monotonic() - pending_since
-                if consumed >= pending_n:
-                    pending_n = 0
-                elif elapsed < 600:
-                    await asyncio.sleep(15.0)
-                    continue
-                else:
-                    # 心跳排队超过 10 分钟仍未注入：允许重发同一区间；重复事件由
-                    # heartbeat dedupe key 吸收，真丢失则这次会重新入队。
-                    pending_n = 0
-            interval_seconds = max(1.0, random.uniform(low, high) * 60.0)
-            await asyncio.sleep(interval_seconds)
+        return max(1.0, random.uniform(low, high) * 60.0)
+
+    async def _send_digest_now(
+        session_id: str, store: GroupHistoryStore, *, source: str
+    ) -> bool:
+        state = _digest_state(session_id)
+        async with state["lock"]:
+            state["retry_requested"] = False
+            consumed = await asyncio.to_thread(store.last_consumed_n)
+            if state["pending_n"] > 0:
+                if consumed < state["pending_n"]:
+                    # 已有一份 digest 在等注入；@ 冲刷和定时器共用同一判据，不叠发。
+                    return False
+                state["pending_n"] = 0
             rows, stats = await asyncio.to_thread(store.build_digest)
             if not rows:
-                continue
+                return False
+            interval_seconds = _digest_interval_seconds()
             payload = {
                 "digest_id": f"qq-digest:{session_id}:{stats.n_end}",
                 "window_start": stats.window_start,
@@ -1219,6 +1230,10 @@ async def run_qq_official_bridge(
                 "n_start": stats.n_start,
                 "n_end": stats.n_end,
                 "messages": rows,
+                # 心跳回合用这个值告诉模型：再有新的全局消息时，下一次汇总大约在多久后。
+                "next_push_in_seconds": round(interval_seconds, 1),
+                # `at` 表示这次是 @ 触发的立即补发；prompt 会额外提示读下方摘要文件。
+                "flush_reason": str(source or "").strip() or "timer",
             }
             try:
                 response = await client.send_digest(session_id, payload)
@@ -1226,21 +1241,80 @@ async def run_qq_official_bridge(
                 raise
             except Exception as exc:  # noqa: BLE001 - keep the pending digest for retry
                 logger.warning(
-                    "qq-official digest enqueue failed for {}: {}; retrying in 30s",
-                    session_id, exc,
+                    "qq-official digest enqueue failed for {} ({}): {}; retrying in 30s",
+                    session_id, source, exc,
                 )
+                state["retry_requested"] = True
+                return False
+            if not bool(response.get("ok")):
+                state["retry_requested"] = True
+                return False
+            state["pending_n"] = stats.n_end
+            state["pending_since"] = time.monotonic()
+            state["next_interval_seconds"] = interval_seconds
+            logger.info(
+                "qq-official digest queued session={} range={}-{} messages={} files={} master={} source={} next_push_in={:.1f}s",
+                session_id, stats.n_start, stats.n_end, stats.message_count,
+                stats.file_count, stats.has_master, source, interval_seconds,
+            )
+            return True
+
+    async def _flush_group_digest_for_at(external_key: str) -> None:
+        """@ 入站后立即把未读群消息送进心跳，并让随机计时从这一刻重新开始。
+
+        「立即」和「一起发送」落在同一条 digest 事件里：HTTP 只提交一次，失败
+        仍由 digest 循环按 30s 重试；@ 回合本身不等待心跳注入。
+        """
+        resolved = await _store_for_group(external_key)
+        if resolved is None:
+            return
+        store, session_id = resolved
+        state = _digest_state(session_id)
+        try:
+            rows, _stats = await asyncio.to_thread(store.build_digest)
+            if rows:
+                _ensure_digest_task(session_id)
+                await _send_digest_now(session_id, store, source="at")
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - @ 回合不能因补发失败而中断
+            logger.exception("qq-official @-triggered digest flush failed for {}", external_key)
+        finally:
+            # 即使没有未读，也要打断当前 sleep，让下一次随机间隔从 @ 这一刻重算。
+            state["wake"].set()
+
+    async def _digest_loop(session_id: str) -> None:
+        store = history_stores.get(session_id)
+        if store is None:
+            return
+        state = _digest_state(session_id)
+        interval_seconds = _digest_interval_seconds()
+        while True:
+            if state.get("retry_requested"):
                 await asyncio.sleep(30.0)
-                continue
-            if bool(response.get("ok")):
-                pending_n = stats.n_end
-                pending_since = time.monotonic()
-                logger.info(
-                    "qq-official digest queued session={} range={}-{} messages={} files={} master={}",
-                    session_id, stats.n_start, stats.n_end, stats.message_count,
-                    stats.file_count, stats.has_master,
-                )
+                await _send_digest_now(session_id, store, source="retry")
             else:
-                await asyncio.sleep(30.0)
+                try:
+                    await asyncio.wait_for(state["wake"].wait(), timeout=interval_seconds)
+                    state["wake"].clear()
+                except asyncio.TimeoutError:
+                    await _send_digest_now(session_id, store, source="timer")
+            while state["pending_n"] > 0:
+                consumed = await asyncio.to_thread(store.last_consumed_n)
+                elapsed = time.monotonic() - state["pending_since"]
+                if consumed >= state["pending_n"]:
+                    state["pending_n"] = 0
+                    break
+                if elapsed < 600.0:
+                    await asyncio.sleep(15.0)
+                    continue
+                # 心跳排队超过 10 分钟仍未注入：允许重发同一区间；重复事件由
+                # heartbeat dedupe key 吸收，真丢失则这次会重新入队。
+                state["pending_n"] = 0
+                break
+            interval_seconds = float(
+                state.pop("next_interval_seconds", 0.0) or _digest_interval_seconds()
+            )
 
     def _absolute_media_url(url: str) -> str:
         """Event attachment URLs are root-relative signed viewer paths; the
@@ -2000,11 +2074,12 @@ async def run_qq_official_bridge(
             )
 
         async def _dispatch_group(self, message):
-            await self._dispatch(
-                external_key_for_group(getattr(message, "group_openid", "")),
-                message,
-                chat_type="group",
-            )
+            external_key = external_key_for_group(getattr(message, "group_openid", ""))
+            try:
+                await self._dispatch(external_key, message, chat_type="group")
+            finally:
+                # @ 回合先提交，随后立刻把未读群消息送进心跳；失败不阻断 @ 回合。
+                await _flush_group_digest_for_at(external_key)
 
         async def _background_group_message(self, message):
             # 非 @ 消息只做历史记录，不调用 /messages、不创建回合。
