@@ -84,6 +84,8 @@ const cloneRoleConcurrency = (concurrency = DEFAULT_ROLE_CONCURRENCY()) => {
 const S = {
     view: "ceo",
     updateStatus: null,
+    // 存储写不进去（隐私模式）时，本次会话内记住用户关过 Star 引导，别让下一拍重绘把它翻回来。
+    starGuideDismissed: false,
     ceoWs: null,
     ceoWsToken: 0,
     ceoWsLastErrorCode: "",
@@ -737,6 +739,8 @@ const U = {
     projectSettingsQrPopover: document.getElementById("project-settings-qq-qr-popover"),
     projectSettingsQrImage: document.getElementById("project-settings-qq-qr-image"),
     projectSettingsQrPlaceholder: document.getElementById("project-settings-qq-qr-placeholder"),
+    starGuideBanner: document.getElementById("star-guide-banner"),
+    starGuideDismiss: document.getElementById("star-guide-dismiss-btn"),
     projectSettingsOpenPassword: document.getElementById("project-settings-open-password-btn"),
     projectSettingsOpenBundle: document.getElementById("project-settings-open-bundle-btn"),
     zoom: document.getElementById("project-settings-zoom"),
@@ -8445,6 +8449,7 @@ function openProjectSettingsDialog() {
     U.projectSettings?.setAttribute("aria-expanded", "true");
     void syncProjectSettingsAutostart();
     renderProjectSettingsUpdate(S.updateStatus);
+    renderStarGuide();
     void refreshUpdateStatus();
     window.requestAnimationFrame(() => U.projectSettingsDialog?.focus?.());
 }
@@ -8459,6 +8464,54 @@ function closeProjectSettingsDialog() {
     U.projectSettingsBackdrop.classList.remove("is-open");
     U.projectSettings?.setAttribute("aria-expanded", "false");
     clearProjectSettingsPasswords();
+}
+
+// Star 引导：坐在设置弹窗之上那一条请求。判据只有两条，都不写在界面上——点叉号之后静默七天，
+// 或者本机换了一个版本号就再出现一次；对用户那里只有那颗叉号。
+const STAR_GUIDE_DISMISS_KEY = "g3ku.ui.star-guide.dismiss.v1";
+const STAR_GUIDE_SILENCE_MS = 7 * 24 * 60 * 60 * 1000;
+
+function starGuideCurrentVersion() {
+    return String(S.updateStatus?.current_version || "").trim();
+}
+
+function starGuideDismissalFromStorage() {
+    try {
+        const raw = window.localStorage?.getItem?.(STAR_GUIDE_DISMISS_KEY);
+        const parsed = raw ? JSON.parse(raw) : null;
+        return parsed && typeof parsed === "object" ? parsed : null;
+    } catch {
+        return null;
+    }
+}
+
+function isStarGuideDismissed(dismissal, currentVersion) {
+    if (!dismissal) return false;
+    const dismissedAt = Number(dismissal.at);
+    if (!Number.isFinite(dismissedAt)) return false;
+    if (Date.now() - dismissedAt >= STAR_GUIDE_SILENCE_MS) return false;
+    // 换档判据要两边都有读数才成立：台账还没回来时只看时间，否则一次关在版本未知时的点击
+    // 会被随后才拿到的版本号判成"换了版"，引导下一秒就回到屏幕上。
+    const dismissedVersion = String(dismissal.v || "").trim();
+    if (dismissedVersion && currentVersion && dismissedVersion !== currentVersion) return false;
+    return true;
+}
+
+function renderStarGuide() {
+    if (!U.starGuideBanner) return;
+    U.starGuideBanner.hidden = S.starGuideDismissed
+        || isStarGuideDismissed(starGuideDismissalFromStorage(), starGuideCurrentVersion());
+}
+
+function dismissStarGuide() {
+    // 先落内存再落盘：隐私模式下写不进 localStorage 时，本次会话也得守住用户刚做的那一次关闭，
+    // 不能靠 30 秒那一拍的重绘把横幅翻回来。
+    S.starGuideDismissed = true;
+    writeStoredUiPreference(
+        STAR_GUIDE_DISMISS_KEY,
+        JSON.stringify({ at: Date.now(), v: starGuideCurrentVersion() })
+    );
+    if (U.starGuideBanner) U.starGuideBanner.hidden = true;
 }
 
 function isProjectSettingsQrOpen() {
@@ -10310,6 +10363,7 @@ async function refreshUpdateStatus() {
     renderUpdateNavDot(S.updateStatus);
     if (U.projectSettingsBackdrop && !U.projectSettingsBackdrop.hidden) {
         renderProjectSettingsUpdate(S.updateStatus);
+        renderStarGuide();
     }
 }
 
@@ -11113,6 +11167,7 @@ function bindProjectSettings() {
         if (e.target === U.projectSettingsBackdrop) closeProjectSettingsDialog();
     });
     U.projectSettingsOpenPassword?.addEventListener("click", () => openPasswordChangeDialog());
+    U.starGuideDismiss?.addEventListener("click", () => dismissStarGuide());
     U.projectSettingsOpenBundle?.addEventListener("click", () => openConfigBundleDialog());
     U.configBundleClose?.addEventListener("click", () => closeConfigBundleDialog());
     U.configBundleBack?.addEventListener("click", () => setConfigBundleView("menu"));

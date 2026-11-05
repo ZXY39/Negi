@@ -18000,6 +18000,70 @@ textarea {
     color: var(--ui-text-muted);
 }
 
+/* Star 引导横幅：贴在设置弹窗上边之外的一条，不参与布局。居中遮罩是 grid + place-items:center，
+   横幅做成遮罩的第二个格子就会把整扇窗口往下推半个横幅高，而操作员记的位置是"设置开在屏幕正中"；
+   弹窗自己也不能为了腾出横幅的高度改档。所以外壳只按弹窗的尺寸占位，横幅绝对定位到外壳顶边之上、
+   按 100% 与窗口同宽：两条边对齐，出现与收起都不挪动窗口一根线。
+   底色是品牌 soft、着色交给边框，文字仍走正文档：带色的盒子说"这是一条提示"，可读性不由 tint 来兜。
+   收放只靠 hidden：页头那条 [hidden] { display: none !important } 压得住这里的 display: flex。 */
+.project-settings-shell {
+    position: relative;
+}
+
+#project-settings-backdrop .star-guide-banner {
+    position: absolute;
+    bottom: calc(100% + 10px);
+    left: 0;
+    display: flex;
+    align-items: center;
+    gap: var(--ui-space-2);
+    width: 100%;
+    padding: 9px 12px;
+    border: 1px solid color-mix(in srgb, var(--ui-brand) 30%, transparent);
+    border-radius: 14px;
+    background: var(--ui-brand-soft);
+    box-shadow: var(--shadow-lg);
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+#project-settings-backdrop .star-guide-banner svg {
+    width: 15px;
+    height: 15px;
+    flex: 0 0 auto;
+}
+
+#project-settings-backdrop .star-guide-icon {
+    color: var(--ui-brand);
+}
+
+#project-settings-backdrop .star-guide-text {
+    flex: 1 1 auto;
+    min-width: 0;
+    color: var(--ui-text-primary);
+    text-decoration: none;
+}
+
+#project-settings-backdrop .star-guide-text:hover,
+#project-settings-backdrop .star-guide-text:focus-visible {
+    color: var(--ui-brand);
+    text-decoration: underline;
+}
+
+#project-settings-backdrop .star-guide-dismiss {
+    flex: 0 0 auto;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border-radius: var(--ui-radius-control);
+    color: var(--ui-text-secondary);
+}
+
+#project-settings-backdrop .star-guide-dismiss:hover,
+#project-settings-backdrop .star-guide-dismiss:focus-visible {
+    color: var(--ui-text-primary);
+}
+
 /* 检查更新按钮带红点，得自己当定位父。 */
 #project-settings-check-update-btn {
     position: relative;
