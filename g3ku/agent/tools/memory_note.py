@@ -21,7 +21,7 @@ class MemoryNoteTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Load a memory note by the handle after 'note:' (pass the handle, not the label). Call it before stating a rule a row points at; the row alone is not an answer."
+            "Load a memory note by the handle after 'note:' (pass the handle, not the label). Call it before you state a rule a row points at - a row alone is not an answer."
         )
 
     @property
