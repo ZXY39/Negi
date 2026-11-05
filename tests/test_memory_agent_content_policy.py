@@ -64,6 +64,11 @@ async def test_memory_agent_request_masks_tool_result(tmp_path: Path, monkeypatc
     manager.scope_label = ""
     manager.notes_dir.mkdir(parents=True, exist_ok=True)
     manager.index_dir.mkdir(parents=True, exist_ok=True)
+    # 离屏重放用 `__new__` 起实例，真实 `__init__` 一定会设 `self.config`；这条尝试路径现在
+    # 读 `config.document` 的预算（与提交闸同源），不补就直接 AttributeError。
+    from g3ku.config.schema import MemoryDocumentConfig
+
+    manager.config = SimpleNamespace(document=MemoryDocumentConfig())
     manager._memory_window_guard = lambda **kwargs: None
     async def _fake_execute(tools, call):
         return {
