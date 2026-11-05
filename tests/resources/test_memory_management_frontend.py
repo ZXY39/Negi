@@ -1508,6 +1508,55 @@ def test_memory_processed_detail_model_chain_shows_the_models_actually_traversed
     assert str(result["legacy"]) == "-"
 
 
+def test_memory_detail_request_count_reads_real_model_rounds_in_both_lanes() -> None:
+    """请求数＝这一批真实发出的模型请求条数，三面里都只认工件账。
+
+    台账自带的 `request_count` 记的是并入的队列请求条数（实盘 126 行里 125 行是 1），
+    退回读它就等于把"发了 3 轮模型"的批次显示成 1 次请求。
+    """
+    result = _run_app_script(
+        """
+        vm.runInContext("renderMemoryDetailPreview = () => {};", context);
+        context.__testExports.S.memoryProcessedItems = [
+          { batch_id: "walked_demo", op: "write", status: "applied",
+            processed_at: "2026-10-16T18:18:29+08:00", request_count: 1,
+            payload_texts: ["原始请求内容"],
+            request_artifact_paths: ["m_1.json", "m_2.json", "m_3.json"] },
+          { batch_id: "no_round_demo", op: "write", status: "discarded",
+            processed_at: "2026-10-16T18:18:29+08:00", request_count: 1,
+            payload_texts: ["原始请求内容"], request_artifact_paths: [] },
+          { batch_id: "legacy_demo", op: "write", status: "applied",
+            processed_at: "2026-10-16T18:18:29+08:00", request_count: 1,
+            payload_texts: ["原始请求内容"] },
+        ];
+        context.__testExports.S.memoryFailedItems = [
+          { failed_id: "parked_demo", op: "write", status: "parked",
+            parked_at: "2026-10-16T18:18:29+08:00",
+            request_ids: ["write_a", "write_b"],
+            items: [{ request_id: "write_a", payload_text: "甲" },
+                    { request_id: "write_b", payload_text: "乙" }],
+            request_artifact_paths: ["m_9.json"] },
+        ];
+        const countField = (kind, key) => {
+          context.__testExports.openMemoryDetailPreview(kind, key);
+          return context.__testExports.S.memoryDetailPreview.fields
+            .find((field) => field.label === "请求数").value;
+        };
+        __out.walked = countField("processed", "walked_demo");
+        __out.noRound = countField("processed", "no_round_demo");
+        __out.legacy = countField("processed", "legacy_demo");
+        __out.parked = countField("failed", "parked_demo");
+        """,
+        ["openMemoryDetailPreview", "S"],
+    )
+
+    assert str(result["walked"]) == "3"
+    assert str(result["noRound"]) == "0"
+    # 工件账落地之前的记录没有这份数据：宁可空着，也不拿队列条数冒充请求次数。
+    assert str(result["legacy"]) == "-"
+    assert str(result["parked"]) == "1"
+
+
 def test_memory_edit_send_clear_only_when_the_field_actually_changed() -> None:
     """清空最小记忆那一格必须真的发出去：留空＝清空，没动这一格才是不改。
 

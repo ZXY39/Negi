@@ -187,6 +187,12 @@ function memoryAttemptedChainText(item) {
     return refs.length ? refs.join(" -> ") : "-";
 }
 
+function memoryModelRequestCountText(item) {
+    // 台账的 request_count 是并入的队列请求条数（几乎恒为 1）；一次真实 model.chat 落一份工件。
+    const paths = item?.request_artifact_paths;
+    return Array.isArray(paths) ? String(paths.length) : "-";
+}
+
 function memoryProcessedIsNoChange(item) {
     const normalized = String(item?.status || "").trim().toLowerCase();
     // 容量停车那一级一行都没写：载荷原文留在失败区，台账这行只是把"停在哪一级"记下来。
@@ -1124,7 +1130,7 @@ function openMemoryDetailPreview(kind, key) {
             { label: "操作", value: memoryProcessedOpLabel(source) || "-" },
             { label: "处理时间", value: formatCompactTime(source?.processed_at) || String(source?.processed_at || "-") },
             { label: "模型链", value: memoryAttemptedChainText(source) },
-            { label: "请求数", value: String(source?.request_count || payloadTexts.length || 0) },
+            { label: "请求数", value: memoryModelRequestCountText(source) },
             { label: "输入", value: String(usage.input_tokens || 0) },
             { label: "输出", value: String(usage.output_tokens || 0) },
         ]
@@ -1133,7 +1139,7 @@ function openMemoryDetailPreview(kind, key) {
                 { label: "记录", value: normalizedKey },
                 { label: "失败类别", value: memoryFailedCategoryLabel(source) },
                 { label: "操作", value: memoryOpLabel(source?.op) },
-                { label: "请求数", value: String(Array.isArray(source?.request_ids) ? source.request_ids.length : 0) },
+                { label: "请求数", value: memoryModelRequestCountText(source) },
                 { label: "首次停车", value: formatCompactTime(source?.first_parked_at) || String(source?.first_parked_at || "-") },
                 { label: "最近停车", value: formatCompactTime(source?.parked_at) || String(source?.parked_at || "-") },
                 { label: "停车次数", value: String(source?.park_count || 0) },
