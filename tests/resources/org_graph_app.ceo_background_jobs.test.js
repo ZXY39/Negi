@@ -196,7 +196,7 @@ test("0 条隐藏，2 条显示计数与列表", () => {
     assert.equal(document.getElementById("ceo-bg-jobs-count").textContent, "2");
     const list = document.getElementById("ceo-bg-jobs-list");
     assert.equal(list.children.length, 2);
-    assert.equal(list.children[0].children[0].children[0].textContent, "exec");
+    assert.equal(list.children[0].children[0].children[0].children[0].textContent, "exec");
     assert.match(list.children[0].children[1].textContent, /^01:0[5-9]$/);
     assert.equal(list.children[0].children[2].textContent, "停止");
     assert.equal(list.children[1].children[2].textContent, "停止中");
@@ -266,25 +266,47 @@ test("切换会话会清掉旧会话的条目", async () => {
     assert.equal(document.getElementById("ceo-bg-jobs-count").textContent, "0");
 });
 
-test("exec background 进程与工具作业同列一行，行首标明来源", () => {
+test("exec background 进程与工具作业同列一行：行首标来源，进程另挂常驻标记", () => {
     const { context, document } = loadModule();
-    context.ceoBgJobsSetItems([{
-        kind: "process",
-        job_id: "proc:4242",
-        pid: 4242,
-        tool_name: "exec",
-        status: "running",
-        started_at: new Date(Date.now() - 3_000).toISOString(),
-        elapsed_seconds: 3,
-        hint: "node server.js",
-        log_path: "owned-processes/x.log",
-    }], "web:a");
+    context.ceoBgJobsSetItems([
+        {
+            kind: "process",
+            job_id: "proc:4242",
+            pid: 4242,
+            tool_name: "exec",
+            status: "running",
+            started_at: new Date(Date.now() - 3_000).toISOString(),
+            elapsed_seconds: 3,
+            hint: "node server.js",
+            log_path: "owned-processes/x.log",
+        },
+        {
+            kind: "tool_job",
+            job_id: "tooljob:7",
+            tool_name: "exec",
+            status: "running",
+            started_at: new Date(Date.now() - 8_000).toISOString(),
+            elapsed_seconds: 8,
+            hint: "python probe.py",
+        },
+    ], "web:a");
     const list = document.getElementById("ceo-bg-jobs-list");
-    assert.equal(document.getElementById("ceo-bg-jobs-count").textContent, "1");
-    assert.equal(list.children[0].dataset.bgJobId, "proc:4242");
-    assert.equal(list.children[0].dataset.bgJobKind, "process");
-    assert.equal(list.children[0].children[0].children[0].textContent, "exec 进程");
-    assert.equal(list.children[0].children[0].children[1].textContent, "node server.js");
+    assert.equal(document.getElementById("ceo-bg-jobs-count").textContent, "2");
+
+    const processRow = list.children[0];
+    assert.equal(processRow.dataset.bgJobId, "proc:4242");
+    assert.equal(processRow.dataset.bgJobKind, "process");
+    const processLabel = processRow.children[0].children[0];
+    assert.equal(processLabel.children[0].textContent, "exec 进程");
+    assert.equal(processLabel.children[1].textContent, "常驻进程");
+    assert.equal(processRow.children[0].children[1].textContent, "node server.js");
+
+    // 交棒的工具作业一定有终态，不是常驻：同一行不许长出第二个标记。
+    const jobRow = list.children[1];
+    assert.equal(jobRow.dataset.bgJobKind, "tool_job");
+    const jobLabel = jobRow.children[0].children[0];
+    assert.equal(jobLabel.children.length, 1);
+    assert.equal(jobLabel.children[0].textContent, "exec");
 });
 
 test("气泡非空时启动对账轮询，清空后停止", () => {

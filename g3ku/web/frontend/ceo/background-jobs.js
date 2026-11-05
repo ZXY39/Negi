@@ -180,6 +180,8 @@ function ceoBgJobsRow(item) {
 
     const main = document.createElement("span");
     main.className = "ceo-bg-jobs-main";
+    const label = document.createElement("span");
+    label.className = "ceo-bg-jobs-label";
     const tool = document.createElement("span");
     tool.className = "ceo-bg-jobs-tool";
     // exec background=true 起的 OS 进程与超时交棒的工具作业同列一行，来源不同：
@@ -187,7 +189,15 @@ function ceoBgJobsRow(item) {
     tool.textContent = kind === "process"
         ? "exec 进程"
         : (String(item.tool_name || "tool").trim() || "tool");
-    main.appendChild(tool);
+    label.appendChild(tool);
+    // 常驻性质的第二眼标记：交棒的工具作业一定有终态，只有 detach 出去的进程没有。
+    if (kind === "process") {
+        const tag = document.createElement("span");
+        tag.className = "ceo-bg-jobs-tag";
+        tag.textContent = "常驻进程";
+        label.appendChild(tag);
+    }
+    main.appendChild(label);
     const hint = String(item.hint || "").trim();
     if (hint) {
         const hintEl = document.createElement("span");

@@ -180,8 +180,8 @@ class ExecTool(Tool):
         # 工具说明不写第二份权威：`tools[]` 是钉住整表，写进 mode 后它在切模式时不刷新，
         # 模型会按过期口径判断拦截边界。细节（管道、临时 .py、终止边界）住 toolskill。
         return (
-            "Run shell commands directly (PowerShell/sh, no nested wrapper); use background=true for "
-            "long-lived processes and process_kill to stop them."
+            "Run shell commands directly (PowerShell/sh, no nested wrapper). background=true only when "
+            "the process must outlive this call; stop it with process_kill."
         )
 
     @property
@@ -200,8 +200,10 @@ class ExecTool(Tool):
                 "background": {
                     "type": "boolean",
                     "description": (
-                        "Start the command as a runtime-owned background process instead of waiting for it. "
-                        "Returns pid + log_path immediately; stop it later with process_kill(pid)."
+                        "Detach the command so it keeps running after this call returns; answers pid + "
+                        "log_path immediately and then ignores timeout_seconds. Use it only when a later "
+                        "call must still find this process (server, browser, crawl driver). A command that "
+                        "is merely slow stays foreground. Stop it with process_kill(pid)."
                     ),
                 }
             },
@@ -343,6 +345,7 @@ class ExecTool(Tool):
                 timeout_message = (
                     f"Command timed out after {_secs_text} seconds. "
                     "如需更长运行时间，请在下一次调用时显式传入更大的 \"timeout_seconds\" 参数（单位：秒，支持小数）。"
+                    "命令只是慢，不等于需要常驻：加大 timeout_seconds 就行，不要用 background=true 绕开超时。"
                 )
                 return self._build_payload(
                     status="error",

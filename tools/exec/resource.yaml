@@ -1,7 +1,7 @@
 schema_version: 1
 kind: tool
 name: exec
-description: Run shell commands directly (PowerShell/sh, no nested wrapper); use background=true for long-lived processes and process_kill to stop them.
+description: Run shell commands directly (PowerShell/sh, no nested wrapper). background=true only when the process must outlive this call; stop it with process_kill.
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''
@@ -51,10 +51,11 @@ parameters:
         inside the workspace.
     background:
       type: boolean
-      description: Start the command as a runtime-owned background process instead
-        of waiting for it. Returns pid + log_path immediately; stop it later with
-        process_kill(pid). Use this for servers, crawl drivers, or any long-lived
-        process instead of hand-detaching it.
+      description: Detach the command so it keeps running after this call returns;
+        answers pid + log_path immediately and then ignores timeout_seconds. Use it
+        only when a later call must still find this process (server, browser, crawl
+        driver). A command that is merely slow stays foreground. Stop it with
+        process_kill(pid).
   required:
   - command
 exposure:
