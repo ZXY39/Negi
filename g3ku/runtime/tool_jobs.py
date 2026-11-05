@@ -56,6 +56,10 @@ TOOL_JOB_RETENTION_SECONDS = 7 * 24 * 3600
 
 OWNED_PROCESS_JOB_PREFIX = "proc:"
 OWNED_PROCESS_TOOL_NAME = "exec"
+# `Popen.poll()` 非阻塞且能直接给出退出码；异步侧没有可移植的子进程退出回调
+# （asyncio 的 child watcher 只认识它自己 spawn 的进程，这里是 subprocess.Popen），
+# 所以退出观测用一条会自己收摊的轮询 task：没有活着的进程可看时它就退出。
+OWNED_PROCESS_EXIT_POLL_SECONDS = 3.0
 
 
 class ToolJobNotFoundError(RuntimeError):
@@ -183,17 +187,33 @@ def owned_process_items(session_key: str) -> list[dict[str, Any]]:
     return items
 
 
-def build_owned_process_stopped_payload(
+def owned_process_event_identity(entry: dict[str, Any]) -> str:
+    """事件去重用的进程身份：pid 会被系统复用，只拿 pid 会让后一个进程的事件被当成重复丢掉。"""
+    pid = int(entry.get("pid") or 0)
+    try:
+        create_time = float(entry.get("create_time") or 0.0)
+    except (TypeError, ValueError):
+        create_time = 0.0
+    if create_time > 0:
+        return f"proc:{pid}@{create_time:.3f}"
+    return f"proc:{pid}@{str(entry.get('started_at') or '')}"
+
+
+def build_owned_process_event_payload(
     entry: dict[str, Any],
     *,
     session_id: str,
     finished_at: str,
+    status: str,
     result_preview: str = "",
+    exit_code: int | None = None,
+    stopped_by: str = "",
 ) -> dict[str, Any]:
-    """用户从 UI 停掉 exec 后台进程时投给模型的心跳事件。
+    """exec 后台进程的终态心跳事件正文；用户停止与自然退出共用这一份形状。
 
     复用 tool_job 车道（reason/status 集合不变），`kind=process` 让渲染层按
-    “后台进程”而不是“后台工具作业”措辞，并带上 pid/cmd 供模型核对。
+    “后台进程”而不是“后台工具作业”措辞，并带上 pid/cmd/log_path 供模型核对。
+    `exit_code` 只有自然退出拿得到；被终止时进程是被外部杀掉的，退出码不是事实来源。
     """
     started_at = str(entry.get("started_at") or "")
     try:
@@ -206,9 +226,10 @@ def build_owned_process_stopped_payload(
         "kind": "process",
         "session_id": str(session_id or "").strip(),
         "job_id": owned_process_job_id(pid),
+        "dedupe_key": tool_job_dedupe_key(owned_process_event_identity(entry), status),
         "pid": pid,
         "tool_name": OWNED_PROCESS_TOOL_NAME,
-        "status": TOOL_JOB_STATUS_STOPPED_BY_USER,
+        "status": str(status or "").strip(),
         "started_at": started_at,
         "finished_at": finished_at,
         "elapsed_seconds": _elapsed_seconds_since(started_at),
@@ -219,7 +240,8 @@ def build_owned_process_stopped_payload(
         "result_ref": "",
         "log_path": str(entry.get("log_path") or ""),
         "recovery_policy": "model_decide",
-        "stopped_by": "user",
+        "stopped_by": str(stopped_by or ""),
+        "exit_code": exit_code,
         "cmd": str(entry.get("cmd") or ""),
     }
 
@@ -295,6 +317,7 @@ class ToolJobRunner:
         self._jobs: dict[str, ToolJob] = {}
         self._inflight: dict[tuple[str, str], str] = {}
         self._finalize_tasks: set[asyncio.Task[Any]] = set()
+        self._owned_process_tasks: set[asyncio.Task[Any]] = set()
 
     def _store(self) -> Any:
         try:
@@ -787,6 +810,7 @@ class ToolJobRunner:
             self._notify_changed()
 
     async def cancel_all(self, *, reason: str = "session_deleted", suppress_event: bool = True) -> int:
+        self._cancel_owned_process_watches()
         jobs = list(self._jobs.values())
         if not jobs:
             return 0
@@ -828,6 +852,82 @@ class ToolJobRunner:
                 )
         self._notify_changed()
         return len(jobs)
+
+    def adopt_owned_process(self, *, entry: dict[str, Any], process: Any) -> None:
+        """盯一个 `exec background=true` 起的进程，它自己跑完时也给模型投一条终态事件。
+
+        交棒给前台看门狗的调用由 job 收尾并投事件；这条登记道 detach 之后没有任何东西
+        在等它——模型只拿到 pid + log_path，进程跑完把输出留在日志里，没人接着处理。
+        没有可 poll 的句柄时不接管：宁可不报，也不凭“进程不在了”猜它是成功还是失败。
+        """
+        poll = getattr(process, "poll", None)
+        if not callable(poll):
+            return
+        try:
+            pid = int(entry.get("pid") or 0)
+        except (TypeError, ValueError):
+            return
+        scope = str(entry.get("scope") or "").strip()
+        if pid <= 0 or not scope:
+            return
+        try:
+            task = asyncio.create_task(
+                self._watch_owned_process_exit(entry=entry, poll=poll, scope=scope, pid=pid),
+                name=f"owned-process-exit:{pid}",
+            )
+        except RuntimeError:
+            return
+        self._owned_process_tasks.add(task)
+        task.add_done_callback(self._owned_process_tasks.discard)
+
+    async def _watch_owned_process_exit(
+        self,
+        *,
+        entry: dict[str, Any],
+        poll: Callable[[], Any],
+        scope: str,
+        pid: int,
+    ) -> None:
+        while True:
+            try:
+                exit_code = poll()
+            except Exception:
+                logger.debug("owned process {} watch lost its handle", pid, exc_info=True)
+                return
+            if exit_code is not None:
+                break
+            await asyncio.sleep(OWNED_PROCESS_EXIT_POLL_SECONDS)
+        try:
+            code = int(exit_code)
+        except (TypeError, ValueError):
+            code = 0
+        # 条目还在盘上＝这个进程是自己退的。被 process_kill、后台气泡停止或 scope 回收
+        # 摘走时，那条道已经把日志交回给模型或已经投过事件，这里不能再报一次。
+        if owned_processes.find(scope, pid) is None:
+            self._notify_changed()
+            return
+        owned_processes.drop(scope, pid)
+        payload = build_owned_process_event_payload(
+            entry,
+            session_id=str(entry.get("session_key") or self._session_key),
+            finished_at=now_iso(),
+            status=TOOL_JOB_STATUS_SUCCESS if code == 0 else TOOL_JOB_STATUS_ERROR,
+            result_preview=owned_processes.read_log_tail(entry),
+            exit_code=code,
+        )
+        heartbeat = self._heartbeat()
+        enqueue = getattr(heartbeat, "enqueue_tool_job", None) if heartbeat is not None else None
+        if callable(enqueue):
+            try:
+                enqueue(payload)
+            except Exception:
+                logger.exception("failed to enqueue owned process exit event {}", payload["job_id"])
+        self._notify_changed()
+
+    def _cancel_owned_process_watches(self) -> None:
+        for task in list(self._owned_process_tasks):
+            if not task.done():
+                task.cancel()
 
 
 def recover_tool_jobs(store: Any, *, now: str | None = None) -> dict[str, int]:
@@ -1011,8 +1111,9 @@ __all__ = [
     "ToolJobNotFoundError",
     "ToolJobOutcome",
     "ToolJobRunner",
-    "build_owned_process_stopped_payload",
+    "build_owned_process_event_payload",
     "build_tool_job_event_payload",
+    "owned_process_event_identity",
     "owned_process_items",
     "owned_process_job_id",
     "parse_owned_process_job_id",

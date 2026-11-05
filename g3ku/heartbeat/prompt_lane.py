@@ -791,6 +791,15 @@ def _owned_process_label(event: dict[str, Any]) -> str:
     return label
 
 
+def _owned_process_exit_text(event: dict[str, Any]) -> str:
+    """后台进程终态里的退出码从句；取不到（被外部终止）时留空，不凭状态猜成败。"""
+    try:
+        code = int(event.get("exit_code"))
+    except (TypeError, ValueError):
+        return ""
+    return f" with exit code {code}"
+
+
 def tool_job_lines(
     event: dict[str, Any],
     retrieval_parts: list[str],
@@ -807,7 +816,13 @@ def tool_job_lines(
     timeout = _float_value(event.get("timeout_seconds"))
     preview = _non_empty_text(event.get("result_preview"))
     result_ref = _non_empty_text(event.get("result_ref"))
+    log_path = _non_empty_text(event.get("log_path"))
     recovery_policy = _non_empty_text(event.get("recovery_policy")) or "model_decide"
+    # `kind=process` 是 `exec background=true` 起的进程。模型在工具回执里已经拿到过它的 pid
+    # 与命令行，所以正文按“进程”说事，不借用它从没见过的“后台工具作业”这套名词。
+    is_process = kind == "process"
+    subject = _owned_process_label(event) if is_process else f"Background tool job {job_id} ({tool_name})"
+    exit_text = _owned_process_exit_text(event) if is_process else ""
     body, retrieval = _long_text_body(
         preview or "<no output captured>",
         inline_limit=max(500, int(output_inline_limit or 0)),
@@ -817,33 +832,28 @@ def tool_job_lines(
     )
     _append_retrieval_parts(retrieval_parts, "tool_job", job_id, tool_name, status, retrieval)
     if status == "success":
-        header = f"- Background tool job {job_id} ({tool_name}) finished after {elapsed:.0f}s."
+        header = f"- {subject} finished{exit_text} after {elapsed:.0f}s."
     elif status == "error":
-        header = (
-            f"- Background tool job {job_id} ({tool_name}) finished with an error after {elapsed:.0f}s."
-        )
+        if exit_text:
+            header = f"- {subject} finished{exit_text} after {elapsed:.0f}s."
+        else:
+            header = f"- {subject} finished with an error after {elapsed:.0f}s."
     elif status == "timeout":
         timeout_text = f"{timeout:.0f}s" if timeout > 0 else "its timeout"
-        header = f"- Background tool job {job_id} ({tool_name}) timed out after {timeout_text}."
+        header = f"- {subject} timed out after {timeout_text}."
     elif status == "interrupted":
         header = (
-            f"- Background tool job {job_id} ({tool_name}) was interrupted by the project process "
+            f"- {subject} was interrupted by the project process "
             f"restart after {elapsed:.0f}s. It may have stopped or may still be running; inspect "
             "the result/log before retrying."
         )
     elif status == "stopped_by_user":
-        if kind == "process":
-            header = (
-                f"- {_owned_process_label(event)} was stopped by the user (用户手动停止) "
-                f"after {elapsed:.0f}s. Do not restart it unless the user asks; inspect any partial output first."
-            )
-        else:
-            header = (
-                f"- Background tool job {job_id} ({tool_name}) was stopped by the user (用户手动停止) "
-                f"after {elapsed:.0f}s. Do not restart it unless the user asks; inspect any partial output first."
-            )
+        header = (
+            f"- {subject} was stopped by the user (用户手动停止) "
+            f"after {elapsed:.0f}s. Do not restart it unless the user asks; inspect any partial output first."
+        )
     else:
-        header = f"- Background tool job {job_id} ({tool_name}) ended after {elapsed:.0f}s (status: {status})."
+        header = f"- {subject} ended after {elapsed:.0f}s (status: {status})."
     lines = [header]
     if status in {"success", "error", "timeout"}:
         lines.append("  Do not call the tool again with the same arguments; inspect the result first.")
@@ -851,6 +861,9 @@ def tool_job_lines(
         lines.append(f"  Result: {body}")
     if result_ref:
         lines.append(f"  Result ref: {result_ref}")
+    if log_path:
+        # 正文是日志尾部，被裁掉的部分仍在那份文件里；给路径模型才能自己取全量。
+        lines.append(f"  Log: {log_path}")
     if recovery_policy == "rerun_safe":
         lines.append("  Recovery policy: rerun_safe (a retry will not duplicate side effects).")
     elif status in {"interrupted", "stopped_by_user"}:

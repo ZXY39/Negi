@@ -3478,6 +3478,10 @@ class RuntimeAgentSession:
         """exec 后台进程启动/停止后，让气泡与其它标签页立即重取列表。"""
         self._notify_tool_jobs_changed(self.list_tool_jobs())
 
+    def adopt_owned_process(self, *, entry: dict[str, Any], process: Any) -> None:
+        """接管一个 `exec background=true` 起的进程：它自然退出时也投一条终态事件。"""
+        self._tool_job_runner_instance().adopt_owned_process(entry=entry, process=process)
+
     async def stop_tool_job(self, job_id: str) -> dict[str, Any]:
         return await self._tool_job_runner_instance().stop_job(job_id)
 

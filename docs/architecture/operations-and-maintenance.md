@@ -417,7 +417,7 @@ Provider retry troubleshooting note:
 
 这条边界拦的是**命令形态**，所以它同时会误伤"模型停掉自己起的测试服务"——实盘一条会话里模型起了三个 Node 测试实例，自己停不掉，只能让用户手动结束。回收权因此住在**归属车道**上，这条边界本身不放松：
 
-- `exec background=true`：运行时自己 spawn（POSIX `start_new_session`，Windows `CREATE_NEW_PROCESS_GROUP`），stdout/stderr 直接落 `owned-processes/<scope>/<…>.log`，立即返回 `pid` + `log_path`，并把 `{pid, create_time, cmd, log_path, owner_pid}` 登记进 `g3ku/runtime/owned_processes.py`。进程不继承 exec 的管道，也不受 exec 超时/取消管辖。会话 scope 的活进程以 `kind=process` 行出现在会话右上角后台气泡；用户在那里点停止等同本 scope 的归属终止，并投一条 `stopped_by_user` 心跳事件告诉模型服务已经不在（气泡/API 契约见 `web-and-admin.md`「Background Tool Jobs Bubble And Tool-Jobs API」）。
+- `exec background=true`：运行时自己 spawn（POSIX `start_new_session`，Windows `CREATE_NEW_PROCESS_GROUP`），stdout/stderr 直接落 `owned-processes/<scope>/<…>.log`，立即返回 `pid` + `log_path`，并把 `{pid, create_time, cmd, log_path, owner_pid}` 登记进 `g3ku/runtime/owned_processes.py`。进程不继承 exec 的管道，也不受 exec 超时/取消管辖。会话 scope 的活进程以 `kind=process` 行出现在会话右上角后台气泡；用户在那里点停止等同本 scope 的归属终止，并投一条 `stopped_by_user` 心跳事件告诉模型服务已经不在（气泡/API 契约见 `web-and-admin.md`「Background Tool Jobs Bubble And Tool-Jobs API」）。前门会话起出来的进程还被一条轮询 task 盯着：它自己跑完时投一条同形状的 `kind=process` 终态事件（`success`/`error` + 退出码 + 日志尾部），模型不必等用户来问“跑完了吗”才想起去读日志。谁摘走归属条目谁交代结果，判据见 `runtime-overview.md`「Frontdoor Tool Job Handoff」。
 - `process_kill(pid)`（候选工具，水合后可用，`allowed_roles` = `ceo` + `execution`）：只认本 scope 的登记条目，校验 `create_time` 后整树终止，回日志尾部；未登记的 pid 一律拒绝并给出本 scope 台账。
 - 生命周期三处回收：会话清空（`clear_web_ceo_session_artifacts`）、任务终态（`MainRuntimeService._reap_task_owned_processes`）、运行时启动（`launcher._reap_owned_background_processes`，只收 `owner_pid` 已死的孤儿）。
 

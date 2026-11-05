@@ -93,6 +93,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - A config refresh disrupts an in-flight turn → `config-and-models.md`「配置热刷新」
 - 改了负载均衡组的每成员重试次数或往组里加成员，正在重试的那一发照旧跑旧预算/判组耗尽 → `config-and-models.md`「模型链变更何时作用于在途回合」
 - Same task result pushed to the channel multiple times → `heartbeat-system.md`「Task Terminal Repair Contract」
+- 模型用 `exec background=true` 起的进程跑完了却没人接着处理，会话右上角那一行悄悄消失 → `heartbeat-system.md`「Tool Job Heartbeat Events」+ `runtime-overview.md`「Frontdoor Tool Job Handoff」（归属条目就是"谁来交代结果"的令牌）
 - Channel/bridge reply emits `## Runtime Tool Contract` or other internal context text -> `runtime-overview.md`「frontdoor 与任务运行时的关系」(回显守卫) + `external-agent-api.md` (outbound sanitize contract)
 - 工具上一轮还直接执行、这一轮调用它只交回契约不产出结果，名字却仍留在 `tools[]` 上（既不在 `denied_tools`、也不在 `undeclared_candidates`）→ 它的 toolskill 契约块被 `token_compression` 移出了上下文，按"契约不在 ⇒ 那一跳先交回契约"处理，下一跳起照旧可调；判据与唯一载体见 `tool-hydration-and-callable-chain.md`「契约在场与 callable」，读数是 `tool_contract_presence`
 - 一批里 `reuse_args=true` 只跑出比暂存份数少的结果、或整批报"没有可复用的入参" → 先确认这是**上一跳**落的条目（严格一跳），再比该工具当轮在场指纹与条目里的指纹是否同修订；份数与执行数都记在工具行的 `execution_path`/`items` 上，机制见 `tool-hydration-and-callable-chain.md`「入参暂存与 `reuse_args` 批量执行」

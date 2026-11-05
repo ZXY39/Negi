@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 import sys
@@ -13,6 +14,7 @@ from g3ku.agent.tools.process_control import ProcessKillTool
 from g3ku.agent.tools.shell import ExecTool
 from g3ku.deployment import data_root as data_root_module
 from g3ku.runtime import owned_processes
+from g3ku.runtime.tool_jobs import ToolJobRunner, build_owned_process_event_payload
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -315,3 +317,193 @@ async def test_exec_background_registers_pid_and_log(isolated_root: Path) -> Non
     )
     assert kill_payload["ok"] is True
     assert _wait_gone(pid)
+
+
+class _RecordingHeartbeat:
+    def __init__(self) -> None:
+        self.payloads: list[dict] = []
+
+    def enqueue_tool_job(self, payload: dict | None) -> bool:
+        self.payloads.append(dict(payload or {}))
+        return True
+
+
+def _runner(heartbeat: _RecordingHeartbeat, session_key: str = "web:ceo-1") -> ToolJobRunner:
+    return ToolJobRunner(
+        session_key=session_key,
+        store_getter=lambda: None,
+        heartbeat_getter=lambda: heartbeat,
+    )
+
+
+def _spawn_finished(log_path: Path, code: str) -> subprocess.Popen:
+    with open(log_path, "ab", buffering=0) as handle:
+        process = subprocess.Popen(
+            [sys.executable, "-c", code], stdout=handle, stderr=subprocess.STDOUT
+        )
+    process.wait(timeout=30)
+    return process
+
+
+async def _wait_for_watchers(runner: ToolJobRunner, timeout: float = 20.0) -> None:
+    deadline = time.time() + timeout
+    while runner._owned_process_tasks and time.time() < deadline:
+        await asyncio.sleep(0.05)
+
+
+@pytest.mark.asyncio
+async def test_owned_process_that_exits_on_its_own_reports_its_output(
+    isolated_root: Path,
+) -> None:
+    session_key = "web:ceo-1"
+    scope = owned_processes.scope_key(session_key=session_key)
+    log_path = owned_processes.new_log_path(scope)
+    process = _spawn_finished(log_path, "print('captured probe output')")
+    entry = owned_processes.register(
+        scope=scope,
+        pid=int(process.pid),
+        cmd="python probe.py",
+        log_path=str(log_path),
+        session_key=session_key,
+        actor_role="ceo",
+    )
+    heartbeat = _RecordingHeartbeat()
+    runner = _runner(heartbeat)
+
+    runner.adopt_owned_process(entry=entry, process=process)
+    await _wait_for_watchers(runner)
+
+    assert [payload["status"] for payload in heartbeat.payloads] == ["success"]
+    payload = heartbeat.payloads[0]
+    assert payload["kind"] == "process"
+    assert payload["job_id"] == f"proc:{process.pid}"
+    assert payload["exit_code"] == 0
+    assert "captured probe output" in payload["result_preview"]
+    assert payload["log_path"] == str(log_path)
+    assert payload["session_id"] == session_key
+    # 报过之后条目摘掉：后台气泡里的行与事件只能各出现一次。
+    assert owned_processes.find(scope, int(process.pid)) is None
+
+
+@pytest.mark.asyncio
+async def test_owned_process_nonzero_exit_reports_an_error(isolated_root: Path) -> None:
+    session_key = "web:ceo-1"
+    scope = owned_processes.scope_key(session_key=session_key)
+    log_path = owned_processes.new_log_path(scope)
+    process = _spawn_finished(log_path, "import sys; sys.exit(3)")
+    entry = owned_processes.register(
+        scope=scope,
+        pid=int(process.pid),
+        cmd="python probe.py",
+        log_path=str(log_path),
+        session_key=session_key,
+        actor_role="ceo",
+    )
+    heartbeat = _RecordingHeartbeat()
+    runner = _runner(heartbeat)
+
+    runner.adopt_owned_process(entry=entry, process=process)
+    await _wait_for_watchers(runner)
+
+    assert heartbeat.payloads[0]["status"] == "error"
+    assert heartbeat.payloads[0]["exit_code"] == 3
+
+
+@pytest.mark.asyncio
+async def test_owned_process_exit_stays_silent_once_another_lane_collected_it(
+    isolated_root: Path,
+) -> None:
+    session_key = "web:ceo-1"
+    scope = owned_processes.scope_key(session_key=session_key)
+    log_path = owned_processes.new_log_path(scope)
+    process = _spawn_finished(log_path, "print('already handed over')")
+    entry = owned_processes.register(
+        scope=scope,
+        pid=int(process.pid),
+        cmd="python probe.py",
+        log_path=str(log_path),
+        session_key=session_key,
+        actor_role="ceo",
+    )
+    # 后台气泡的停止、process_kill、scope 回收都会先摘走条目并各自交代结果。
+    owned_processes.drop(scope, int(process.pid))
+    heartbeat = _RecordingHeartbeat()
+    runner = _runner(heartbeat)
+
+    runner.adopt_owned_process(entry=entry, process=process)
+    await _wait_for_watchers(runner)
+
+    assert heartbeat.payloads == []
+
+
+def test_owned_process_event_identity_survives_pid_reuse() -> None:
+    base = {
+        "pid": 4242,
+        "cmd": "python probe.py",
+        "log_path": "probe.log",
+        "session_key": "web:ceo-1",
+        "started_at": "2026-11-05T20:00:13",
+    }
+    first = build_owned_process_event_payload(
+        {**base, "create_time": 1000.0},
+        session_id="web:ceo-1",
+        finished_at="2026-11-05T20:02:00",
+        status="success",
+        exit_code=0,
+    )
+    second = build_owned_process_event_payload(
+        {**base, "create_time": 2000.0},
+        session_id="web:ceo-1",
+        finished_at="2026-11-05T20:05:00",
+        status="success",
+        exit_code=0,
+    )
+
+    assert first["job_id"] == "proc:4242"
+    assert first["dedupe_key"] != second["dedupe_key"]
+    assert first["stopped_by"] == ""
+    assert first["exit_code"] == 0
+
+
+@pytest.mark.asyncio
+async def test_exec_background_hands_the_process_to_the_adopting_lane(
+    isolated_root: Path,
+) -> None:
+    session_key = "web:ceo-2"
+    workspace = isolated_root / "workspace"
+    workspace.mkdir()
+    captured: dict = {}
+
+    def adopt(*, entry: dict, process: object) -> None:
+        captured["entry"] = entry
+        captured["process"] = process
+
+    tool = ExecTool(
+        working_dir=None,
+        workspace_root=str(workspace),
+        temp_root=str(workspace / "temp"),
+        externaltools_root=str(workspace / "externaltools"),
+        execution_mode_default="full_access",
+    )
+
+    raw = await tool.execute(
+        command=f'"{sys.executable}" -c "import time; time.sleep(60)"',
+        working_dir=str(workspace),
+        background=True,
+        __g3ku_runtime={
+            "session_key": session_key,
+            "actor_role": "ceo",
+            "_adopt_background_process": adopt,
+        },
+    )
+    payload = json.loads(raw)
+    pid = int(payload["pid"])
+    process = captured.get("process")
+
+    assert callable(getattr(process, "poll", None))
+    assert captured["entry"]["pid"] == pid
+    assert captured["entry"]["log_path"] == payload["log_path"]
+    assert captured["entry"]["scope"] == owned_processes.scope_key(session_key=session_key)
+
+    process.kill()
+    process.wait(timeout=20)

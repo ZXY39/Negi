@@ -33,10 +33,11 @@ from g3ku.runtime.session_agent import (
 )
 from g3ku.runtime.session_keys import is_channel_session_key
 from g3ku.runtime.tool_jobs import (
+    TOOL_JOB_STATUS_STOPPED_BY_USER,
     TOOL_JOB_TERMINAL_STATUSES,
     ToolJobFinishedError,
     ToolJobNotFoundError,
-    build_owned_process_stopped_payload,
+    build_owned_process_event_payload,
     owned_process_items,
     parse_owned_process_job_id,
 )
@@ -723,11 +724,13 @@ async def _stop_owned_process(
     if heartbeat is not None:
         try:
             heartbeat.enqueue_tool_job(
-                build_owned_process_stopped_payload(
+                build_owned_process_event_payload(
                     entry,
                     session_id=session_key,
                     finished_at=now_iso(),
+                    status=TOOL_JOB_STATUS_STOPPED_BY_USER,
                     result_preview=str(result.get("log_tail") or ""),
+                    stopped_by="user",
                 )
             )
         except Exception:

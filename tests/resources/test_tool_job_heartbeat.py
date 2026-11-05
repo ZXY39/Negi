@@ -114,6 +114,48 @@ def test_stopped_owned_process_renders_as_process_not_tool_job(store):
     assert "Background tool job" not in prompt
 
 
+def test_exited_owned_process_renders_its_exit_code_and_log(store):
+    service = _service(store)
+    payload = _payload(
+        "error",
+        kind="process",
+        job_id="proc:4242",
+        dedupe_key="tool-job:proc:4242@1762000000.000:error",
+        pid=4242,
+        cmd="python probe.py",
+        exit_code=3,
+        log_path="C:/owned/probe.log",
+        result_preview="Traceback: boom",
+    )
+    assert service.enqueue_tool_job(payload)
+    events = service._events.peek("web:demo")
+    prompt = build_heartbeat_prompt_lane(
+        provider_model="test",
+        stable_rules_text="",
+        events=[dict(event.payload or {}) for event in events],
+    ).event_bundle_text
+
+    assert "Background process pid 4242 (python probe.py) finished with exit code 3" in prompt
+    assert "Traceback: boom" in prompt
+    assert "Log: C:/owned/probe.log" in prompt
+    assert "用户手动停止" not in prompt
+    assert "Background tool job" not in prompt
+
+
+def test_finished_tool_job_line_keeps_its_shape_without_an_exit_code(store):
+    service = _service(store)
+    assert service.enqueue_tool_job(_payload("success"))
+    prompt = build_heartbeat_prompt_lane(
+        provider_model="test",
+        stable_rules_text="",
+        events=[dict(event.payload or {}) for event in service._events.peek("web:demo")],
+    ).event_bundle_text
+
+    assert "- Background tool job tooljob:demo (exec) finished after 125s." in prompt
+    assert "exit code" not in prompt
+    assert "Log:" not in prompt
+
+
 def test_replay_and_ack_mark_the_outbox_delivered(store):
     service = _service(store)
     payload = _payload("success")

@@ -832,6 +832,7 @@ class ExecTool(Tool):
             actor_role=str(runtime.get("actor_role") or ""),
             owner_pid=os.getpid(),
         )
+        self._adopt_background_process(runtime, entry=entry, process=process)
         self._notify_background_items_changed(runtime)
         return self._build_payload(
             status="success",
@@ -848,6 +849,20 @@ class ExecTool(Tool):
                 f"stop it with process_kill(pid={entry['pid']})."
             ],
         )
+
+    @staticmethod
+    def _adopt_background_process(runtime: dict[str, Any], *, entry: dict[str, Any], process: Any) -> None:
+        """把进程句柄交给会话，让它自然退出时也能投一条终态事件。
+
+        只在拿到回调的车道生效（前门 CEO）；节点道不注入，进程照旧只留归属表条目。
+        """
+        adopt = runtime.get("_adopt_background_process")
+        if not callable(adopt):
+            return
+        try:
+            adopt(entry=dict(entry), process=process)
+        except Exception:
+            pass
 
     @staticmethod
     def _notify_background_items_changed(runtime: dict[str, Any]) -> None:

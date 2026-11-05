@@ -840,6 +840,11 @@ class CeoFrontDoorSupport:
             "notify_background_items_changed",
             None,
         )
+        adopt_owned_process = getattr(
+            runtime_context.get("_runtime_agent_session"),
+            "adopt_owned_process",
+            None,
+        )
         per_call_runtime = {
             **tool_facing_runtime_context(runtime_context),
             "tool_name": tool_name,
@@ -850,6 +855,13 @@ class CeoFrontDoorSupport:
             **(
                 {"_notify_background_items_changed": background_items_changed}
                 if callable(background_items_changed)
+                else {}
+            ),
+            # 另一条窄回调：把进程句柄交给会话，`background=true` 的进程自己跑完时
+            # 也能投终态事件。没有它这条道只剩 pid + log_path，结果留在日志里没人读。
+            **(
+                {"_adopt_background_process": adopt_owned_process}
+                if callable(adopt_owned_process)
                 else {}
             ),
         }
