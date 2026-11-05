@@ -202,7 +202,7 @@ def test_memory_runtime_loads_memory_agent_prompt_from_main_prompts(tmp_path: Pa
     assert "不得使用 adds" in system_prompt
     assert "noop_reason" in system_prompt
     assert "already_satisfied" in system_prompt
-    assert "300" in system_prompt
+    assert "入口行预算" in system_prompt
 
 
 @pytest.mark.asyncio

@@ -785,7 +785,7 @@ class MemoryCostConfig(Base):
 class MemoryDocumentConfig(Base):
     """Markdown memory document limits and paths."""
 
-    summary_max_chars: int = Field(default=300, ge=1)
+    summary_max_chars: int = Field(default=200, ge=1)
     document_max_chars: int = Field(default=42000, ge=1)
     compress_trigger_chars: int = Field(default=16000, ge=1)
     compress_target_chars: int = Field(default=13000, ge=1)

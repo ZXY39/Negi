@@ -88,6 +88,43 @@ def _first_note_ref(text: str) -> str:
     return str(match.group("ref") or "").strip() if match else ""
 
 
+def entry_over_budget_error(*, entry: str, chars: int, limit: int, note_ref: str) -> str:
+    """Field error for a staged entry whose body no longer fits one resident line.
+
+    The identity and both counts belong here: this used to collapse into one
+    `errors.batch` string carrying only the limit, so the agent had to guess which
+    entry to fix and by how much.
+    """
+    if chars <= limit:
+        return ""
+    target = (
+        f"细节交给 {note_ref}"
+        if note_ref
+        else "本条没有 note_ref：补 note_ref 并用 note_upserts 把细节交出去"
+    )
+    return (
+        f"{entry} content is {chars} chars, the limit is {limit} (over by {chars - limit})；"
+        f"{target}，正文只留触发条件 + 这套做法解决什么 + note 里有什么。"
+    )
+
+
+def entry_near_budget_warning(*, entry: str, chars: int, limit: int, note_ref: str) -> str:
+    """Soft warning for an entry that fits the cap but not the entry-line shape.
+
+    Priced at half the cap because that half is what the resident line is allowed to
+    hold once the note carries the detail; an entry past it without a note is the shape
+    that lets the frontdoor answer a long-term question from the summary alone.
+    """
+    shape_budget = max(int(limit or 0) // 2, 1)
+    if note_ref or chars <= shape_budget:
+        return ""
+    return (
+        f"{entry} content is {chars}/{limit} chars and has no note_ref；入口行预算约 "
+        f"{shape_budget} 字，再写就装不下「触发条件 + note 里有什么」。把步骤、阈值、"
+        "接口、清单交给 note（补 note_ref + note_upserts），正文只留入口。"
+    )
+
+
 def resolve_note_token(
     token: str,
     ordinary_names: set[str],
@@ -605,6 +642,9 @@ class _MemoryToolSession:
     notes_dir: Path
     index_dir: Path | None = None
     batch_op: str = ""
+    # The char budget the staged entries are priced against, read from config at session
+    # build: the cap is what forces an entry line to stay an entry line.
+    summary_max_chars: int = 300
     staged_document: object = _STAGED_DOCUMENT_UNSET
     staged_notes: dict[str, str] = field(default_factory=dict)
     applied_batch: dict[str, Any] | None = None
@@ -779,6 +819,39 @@ class _MemoryToolSession:
         normalized_note_edits: dict[str, list[dict[str, str]]] = {}
         normalized_inspired_lines: list[int] = []
         normalized_category_deletes: list[str] = []
+        budget_rows: list[dict[str, Any]] = []
+        budget_warnings: list[str] = []
+
+        def price(entry: str, content: str, note_ref: str) -> None:
+            """Charge one staged body against the resident-line budget, once per entry."""
+            if not content:
+                return
+            over = entry_over_budget_error(
+                entry=entry,
+                chars=len(content),
+                limit=self.summary_max_chars,
+                note_ref=note_ref,
+            )
+            if over:
+                errors[f"{entry}.content"] = over
+                return
+            near = entry_near_budget_warning(
+                entry=entry,
+                chars=len(content),
+                limit=self.summary_max_chars,
+                note_ref=note_ref,
+            )
+            if near:
+                budget_warnings.append(near)
+            budget_rows.append(
+                {
+                    "entry": entry,
+                    "chars": len(content),
+                    "limit": self.summary_max_chars,
+                    "note_ref": note_ref,
+                }
+            )
+
         normalized_noop_reason = str(noop_reason or "").strip()
         normalized_already_satisfied = str(already_satisfied or "").strip()
         self.corrections.clear()
@@ -817,6 +890,8 @@ class _MemoryToolSession:
                     hint = self._unresolved_note_ref_hint(note_ref)
                     if hint:
                         errors[f"adds[{index}].note_ref"] = hint
+                if content:
+                    price(f"adds[{index}]", content, note_ref)
                 if content and minimal_memory and decision_source in {"user", "self"}:
                     normalized_adds.append(
                         {
@@ -862,6 +937,7 @@ class _MemoryToolSession:
                     if hint:
                         errors[f"rewrites[{index}].note_ref"] = hint
                 if line and content and minimal_memory:
+                    price(f"rewrites[{index}] (line {line})", content, note_ref)
                     normalized_rewrites.append(
                         {
                             "line": line,
@@ -1017,8 +1093,9 @@ class _MemoryToolSession:
 
         if errors:
             result: dict[str, Any] = {"ok": False, "errors": errors}
-            if self.corrections:
-                result["warnings"] = self._correction_warnings()
+            warnings = [*self._correction_warnings(), *budget_warnings]
+            if warnings:
+                result["warnings"] = warnings
             return result
 
         self.apply_batch_count += 1
@@ -1038,9 +1115,10 @@ class _MemoryToolSession:
             "noop_reason": normalized_noop_reason,
             "already_satisfied": normalized_already_satisfied,
         }
-        result = {"ok": True, "status": "batch_staged"}
-        if self.corrections:
-            result["warnings"] = self._correction_warnings()
+        result = {"ok": True, "status": "batch_staged", "entry_budget": budget_rows}
+        warnings = [*self._correction_warnings(), *budget_warnings]
+        if warnings:
+            result["warnings"] = warnings
         return result
 
 
@@ -3620,6 +3698,7 @@ class MemoryManager:
                 notes_dir=self.notes_dir,
                 index_dir=self.index_dir,
                 batch_op=str(batch.op or "").strip().lower(),
+                summary_max_chars=int(getattr(self.config.document, "summary_max_chars", 300) or 300),
             )
             tools = self._memory_agent_tools(session)
             system_prompt = self._memory_agent_system_prompt()
@@ -5155,14 +5234,6 @@ class MemoryManager:
         return normalized
 
     @staticmethod
-    def _content_exceeds_message(summary_max_chars: int) -> str:
-        limit = max(int(summary_max_chars or 0), 1)
-        return (
-            f"memory content exceeds {limit} chars；"
-            f"请压缩为“摘要 + note”：正文只保留一句不超过 {limit} 字的独立规则，细节放入 note"
-        )
-
-    @staticmethod
     def _minimal_too_long_message(minimal_len: int, body_len: int) -> str:
         return (
             f"minimal_memory 有 {minimal_len} 字，正文只有 {body_len} 字；最小记忆不能比正文长。"
@@ -6070,6 +6141,11 @@ class MemoryManager:
             }
             for item in batch.items
         ]
+        summary_limit = int(getattr(self.config.document, "summary_max_chars", 300) or 300)
+        shape_budget = max(summary_limit // 2, 1)
+        over_limit_lines = sum(
+            1 for line in str(snapshot_text or "").splitlines() if len(line) > summary_limit
+        )
         repair_block = f"\n上一轮输出无效：{repair_reason}\n请修复后重试。\n" if repair_reason else ""
         persona_block = (
             f"人设描述：ref={PERSONA_NOTE_REF}（不是普通记忆行，没有行号，正文按需读）。"
@@ -6089,6 +6165,11 @@ class MemoryManager:
             f"{self._render_numbered_memory_body(snapshot_text)}\n\n"
             f"{persona_block}\n\n"
             f"现有 note refs：{json.dumps(note_index, ensure_ascii=False)}\n"
+            f"字符预算：单条正文上限 {summary_limit} 字，入口行预算约 {shape_budget} 字"
+            f"（上限按入口形状的 2 倍定）；"
+            f"当前正文超过上限的行共 {over_limit_lines} 条——批里碰到这些行时，"
+            f"改成「触发条件 + 这套做法解决什么 + note 里有什么」并给 note_ref，"
+            f"不要指望靠删字压进上限。\n"
             f"当前批次类型：{batch.op}\n"
             f"待处理请求：\n{json.dumps(requests, ensure_ascii=False, indent=2)}\n"
             "提交要求：\n"
@@ -6097,7 +6178,9 @@ class MemoryManager:
             "- adds 条目必须包含 content、minimal_memory 和 decision_source。\n"
             "- content 写法按类型分：用户偏好写成陈述句（用户偏好什么、某对象是什么），"
             "不要写成给自己的命令；经验教训写成条件+要求（当……时，要……）；"
-            "方法论写成读取时机+触发条件——步骤说不清就挂 note_play_ 开头的 note，说得清就不挂。\n"
+            "方法论写成读取时机+触发条件——内容会被复述成答案（步骤、参数、接口路径、阈值、清单、"
+            "对外口径）就一律挂 note_play_ 开头的 note，正文只留「触发条件 + 这套做法解决什么 + "
+            "note 里有什么」，不存在「够短就不挂」这一档。\n"
             "- decision_source 照实填（user=用户本轮亲口给的，self=你复核提炼的），"
             "它只决定来源标记，不决定写法，也不决定存活。\n"
             "- rewrites 条目必须包含 line（正文行首那个行号）、content 和 minimal_memory；"
@@ -6114,8 +6197,9 @@ class MemoryManager:
             "- 整个分类要摘掉时把它那一行末尾括号里的句柄放进 category_deletes（写分类名也算命中）；"
             "这一批会删掉归进该分类的全部已退场记忆，分类 note 正文与归档文件都不删。\n"
             "- inspired_lines 可选，填当前正文里对本批判断有实质帮助的行号。\n"
-            "- minimal_memory 写成 `条件->要求关键词`；方法论无 note 时右侧写做法本身，"
-            "有 note 时右侧写 `读 note_play_xxx`，两种都保留箭头左侧的触发条件。\n"
+            "- minimal_memory 写成 `条件->要求关键词`；方法论无 note 时右侧只写动作名，"
+            "不许把判据、阈值数字、接口路径或选择器写进箭头右侧；有 note 时右侧写 `读 note_play_xxx`；"
+            "两种都保留箭头左侧的触发条件。\n"
             "- 一条记忆要挂 note 时，在 adds/rewrites 条目里给 `note_ref`（note 文件名，不带 .md）；"
             "正文里写 `ref:` 或 `见noteid:` 不再建立关系，会被打回。\n"
             "- 正文里 `note:` 后面那串是读取句柄，`memory_read_note` 两种写法都认；写 note 用上面那个文件名。\n"
@@ -6292,6 +6376,7 @@ class MemoryManager:
         rewrite_by_id: dict[str, str] = {}
         rewrite_minimal_by_id: dict[str, str] = {}
         rewrite_note_ref_by_id: dict[str, str] = {}
+        rewrite_line_by_id: dict[str, int] = {}
         effective_rewrites: list[dict[str, str]] = []
         submitted_note_refs: set[str] = set()
         summary_limit = int(getattr(self.config.document, "summary_max_chars", 300) or 300)
@@ -6299,6 +6384,7 @@ class MemoryManager:
             if not isinstance(item, dict):
                 raise _MemoryAgentValidationError("rewrite item must be an object")
             memory_id = _entry_at_line("rewrites", rewrite_index, item.get("line")).memory_id
+            rewrite_line_by_id[memory_id], _ = coerce_memory_line(item.get("line"))
             content = self._normalize_memory_content_text(str(item.get("content") or ""))
             minimal_memory = self._normalize_minimal_memory_text(
                 str(item.get("minimal_memory") or ""),
@@ -6333,7 +6419,14 @@ class MemoryManager:
                 updated_display_ref = note_handle(explicit_note_ref) if explicit_note_ref else entry.note_ref
                 updated_summary = rewrite_by_id[entry.memory_id]
                 if len(updated_summary) > summary_limit:
-                    raise _MemoryAgentValidationError(self._content_exceeds_message(summary_limit))
+                    raise _MemoryAgentValidationError(
+                        entry_over_budget_error(
+                            entry=f"rewrites (line {rewrite_line_by_id.get(entry.memory_id)})",
+                            chars=len(updated_summary),
+                            limit=summary_limit,
+                            note_ref=explicit_note_ref or entry.note_ref,
+                        )
+                    )
                 updated_minimal = str(rewrite_minimal_by_id.get(entry.memory_id) or "")
                 if len(updated_minimal) > len(updated_summary):
                     # Priced against the new body, not the stored one: a rewrite that shortens
@@ -6372,7 +6465,7 @@ class MemoryManager:
             after_entry_ids.add(entry.memory_id)
 
         effective_adds: list[dict[str, str]] = []
-        for item in adds:
+        for add_index, item in enumerate(adds):
             if not isinstance(item, dict):
                 raise _MemoryAgentValidationError("add item must be an object")
             content = self._normalize_memory_content_text(str(item.get("content") or ""))
@@ -6388,7 +6481,14 @@ class MemoryManager:
                 submitted_note_refs.add(add_note_ref)
             summary = content
             if len(summary) > summary_limit:
-                raise _MemoryAgentValidationError(self._content_exceeds_message(summary_limit))
+                raise _MemoryAgentValidationError(
+                    entry_over_budget_error(
+                        entry=f"adds[{add_index}]",
+                        chars=len(summary),
+                        limit=summary_limit,
+                        note_ref=add_note_ref,
+                    )
+                )
             if len(minimal_memory) > len(content):
                 raise _MemoryAgentValidationError(
                     self._minimal_too_long_message(len(minimal_memory), len(content))

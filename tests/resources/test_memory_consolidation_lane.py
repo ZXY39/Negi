@@ -973,7 +973,7 @@ def test_a_category_purge_removes_the_rows_behind_one_navigation_line(tmp_path: 
         session = _purge_session(manager, module)
         handle = markdown_memory.note_handle("note_local_env", category=True)
         staged = session.apply_batch(category_deletes=[handle])
-        assert staged == {"ok": True, "status": "batch_staged"}, staged
+        assert staged.get("ok") is True and staged.get("status") == "batch_staged", staged
         assert session.batch_has_mutation() is True, "整节摘掉是变更，必须走预览+确认"
 
         session.confirm_batch()

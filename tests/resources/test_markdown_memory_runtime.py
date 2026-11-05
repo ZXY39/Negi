@@ -598,7 +598,7 @@ def test_memory_commit_keeps_snapshot_after_sqlite_rebuild(tmp_path: Path) -> No
         apply_result = session.apply_batch(
             adds=[{"content": "Prefer concise answers", "minimal_memory": "answers->concise", "decision_source": "self"}]
         )
-        assert apply_result == {"ok": True, "status": "batch_staged"}
+        assert apply_result.get("ok") is True and apply_result.get("status") == "batch_staged"
 
         session.confirm_batch()  # the model's second call: a mutating batch lands only after it reads the preview
         validated = manager._build_validated_write_from_apply_batch(
@@ -1013,7 +1013,7 @@ def test_memory_commit_replays_effective_deduped_adds(tmp_path: Path) -> None:
             ]
         )
 
-        assert apply_result == {"ok": True, "status": "batch_staged"}
+        assert apply_result.get("ok") is True and apply_result.get("status") == "batch_staged"
 
         session.confirm_batch()  # the model's second call: a mutating batch lands only after it reads the preview
         validated = manager._build_validated_write_from_apply_batch(
@@ -1074,7 +1074,7 @@ def test_memory_commit_replays_effective_deduped_rewrites(tmp_path: Path) -> Non
             ]
         )
 
-        assert apply_result == {"ok": True, "status": "batch_staged"}
+        assert apply_result.get("ok") is True and apply_result.get("status") == "batch_staged"
 
         session.confirm_batch()  # the model's second call: a mutating batch lands only after it reads the preview
         validated = manager._build_validated_write_from_apply_batch(
@@ -1547,8 +1547,9 @@ def test_memory_agent_apply_batch_rejects_over_limit_content_with_summary_note_h
                 session=session,
                 batch=batch,
             )
-        assert "摘要" in str(exc_info.value)
         assert "note" in str(exc_info.value)
+        assert "adds[0]" in str(exc_info.value), "the message must name the entry it rejects"
+        assert "1" in str(exc_info.value), "and the overshoot, not just the limit"
     finally:
         manager.close()
 

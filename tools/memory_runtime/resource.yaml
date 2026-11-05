@@ -28,7 +28,7 @@ settings:
   enabled: true
   arch_version: v2
   document:
-    summary_max_chars: 300
+    summary_max_chars: 200
     document_max_chars: 42000
     compress_trigger_chars: 16000
     compress_target_chars: 13000

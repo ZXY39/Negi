@@ -4,11 +4,12 @@ Load the detailed body of a note whose token is already visible in the memory bl
 
 ## Must Use
 
-- A memory entry shows a `note:` line, or a `归并记忆` line shows `(note: ...)`, and that topic is what the current turn needs.
+- Before you state a long-term rule, workflow or spec that a memory row points at. A memory entry shows a `note:` line, or a `归并记忆` line shows `(note: ...)`, and that topic is what the current turn needs.
+- The row is the entry only: steps, thresholds and interfaces live in the note body.
 
 ## Input
 
-- `ref`: pass the token exactly as it is shown. A real note file name also resolves.
+- `ref`: pass the handle printed after the `note:` label, not the label itself. A real note file name also resolves, with or without `.md`.
 
 ## Do Not Use
 
