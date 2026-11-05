@@ -2654,6 +2654,15 @@ class SQLiteTaskStore:
             )
         return [self._parse(row['payload_json'], FrontdoorNodeMessage) for row in rows]
 
+    def list_frontdoor_node_messages_by_task(self, task_id: str) -> list[FrontdoorNodeMessage]:
+        """一台任务里所有「节点发往前门」的投递，节点详情发出列表的第二个来源。"""
+        rows = self._fetchall(
+            'SELECT payload_json FROM frontdoor_node_messages '
+            'WHERE task_id = ? ORDER BY created_at ASC, message_id ASC',
+            (str(task_id or '').strip(),),
+        )
+        return [self._parse(row['payload_json'], FrontdoorNodeMessage) for row in rows]
+
     def list_pending_frontdoor_node_messages(self, *, limit: int = 500) -> list[FrontdoorNodeMessage]:
         rows = self._fetchall(
             "SELECT payload_json FROM frontdoor_node_messages WHERE status = 'pending' "

@@ -3348,6 +3348,99 @@ def test_build_node_sent_message_list_steps_shows_target_and_message_only() -> N
     assert result["bodyHtml"].strip() == '<div class="task-trace-message-body">给子节点的要求</div>'
 
 
+def test_build_node_sent_message_list_steps_renders_session_pill_for_frontdoor() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = {};
+        global.U = {};
+        global.normalizeInt = (value, fallback = 0) => {
+          const parsed = Number.parseInt(String(value ?? ""), 10);
+          return Number.isFinite(parsed) ? parsed : fallback;
+        };
+        global.treeNormalizeInt = global.normalizeInt;
+        global.esc = (value) => String(value ?? "");
+        global.readableText = (value, { emptyText = "" } = {}) => {
+          const text = String(value ?? "").trim();
+          return text || emptyText;
+        };
+        global.formatCompactTime = (value) => String(value || "");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
+        vm.runInThisContext(code);
+
+        const steps = buildNodeSentMessageListSteps({
+          sent_message_list: [
+            {
+              notification_id: "fdmsg:1",
+              target_node_id: "",
+              target_kind: "session",
+              target_session_id: "ext:qq-official-1903529517:f8a8001865631301",
+              message: "【进度汇报】无水印地址已拿到",
+              received_at: "2026-11-05T23:48:59+08:00",
+              consumed_at: "2026-11-05T23:49:12+08:00",
+              merged_at: "",
+              status: "consumed",
+            },
+            {
+              notification_id: "fdmsg:2",
+              target_kind: "session",
+              target_session_id: "web:ceo-02c4b7cedc19",
+              message: "本地会话车道",
+              received_at: "2026-11-05T23:40:00+08:00",
+              consumed_at: "",
+              status: "pending",
+            },
+          ],
+        });
+
+        console.log(JSON.stringify({
+          first: steps[0]?.leadHtml || "",
+          second: steps[1]?.leadHtml || "",
+          title: steps[0]?.title || "",
+          body: steps[0]?.bodyHtml || "",
+        }));
+        """
+    )
+
+    assert result["title"] == "【进度汇报】无水印地址已拿到"
+    assert result["body"] == '<div class="task-trace-message-body">【进度汇报】无水印地址已拿到</div>'
+    assert 'data-session-jump="ext:qq-official-1903529517:f8a8001865631301"' in result["first"]
+    assert '<span class="task-node-ref-type">会话</span>' in result["first"]
+    # 药丸宽度与节点 id 一致：取最后一段并截到 12 位，完整会话键只放 title。
+    assert '<span class="task-node-ref-id">f8a800186563</span>' in result["first"]
+    assert 'title="打开会话 ext:qq-official-1903529517:f8a8001865631301"' in result["first"]
+    assert 'data-node-jump' not in result["first"]
+    assert "已消费" in result["first"]
+    # web 车道的 `ceo-` 标签也摘掉，剩下的正好是 12 位。
+    assert '<span class="task-node-ref-id">02c4b7cedc19</span>' in result["second"]
+    assert "待处理" in result["second"]
+
+
+def test_jump_to_ceo_session_switches_view_and_activates_session() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = {};
+        global.U = {};
+        global.esc = (value) => String(value ?? "");
+        const calls = [];
+        global.switchView = (view) => calls.push(["view", view]);
+        global.activateCeoSession = async (sessionId) => { calls.push(["activate", sessionId]); };
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
+        vm.runInThisContext(code);
+
+        jumpToCeoSession("  ext:qq-official-1903529517:f8a8001865631301  ");
+        jumpToCeoSession("");
+
+        console.log(JSON.stringify({ calls }));
+        """
+    )
+
+    assert result["calls"] == [["view", "ceo"], ["activate", "ext:qq-official-1903529517:f8a8001865631301"]]
 
 
 def test_build_spawn_review_trace_steps_lists_nodes_with_mode_and_details() -> None:

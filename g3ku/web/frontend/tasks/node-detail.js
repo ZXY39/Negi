@@ -531,6 +531,13 @@ function bindTaskTraceListInteractions(traceList) {
             void jumpToTaskNodeDetail(nodeRef.dataset.nodeJump || "");
             return;
         }
+        const sessionRef = target.closest("[data-session-jump]");
+        if (sessionRef instanceof HTMLElement) {
+            event.preventDefault();
+            event.stopPropagation();
+            jumpToCeoSession(sessionRef.dataset.sessionJump || "");
+            return;
+        }
         // 展开态的中途输出正文：点文字照常折叠；只有拖选文本或点滚动条时才拦下
         // <details> 的默认切换，否则用户没法在滚动框里选中/拖动滚动条。
         const turnTitle = target.closest(".task-trace-step--turn-text[open] .interaction-step-title");
@@ -870,6 +877,26 @@ function renderTaskNodeRef(nodeId, { icon = "circle-dot", relation = "" } = {}) 
     return `<button type="button" class="task-node-ref" data-node-jump="${esc(raw)}" title="打开节点 ${esc(raw)} 的详情"><i data-lucide="${esc(icon)}"></i><span class="task-node-ref-type">${esc(relationLabel)}</span><span class="task-node-ref-id">${esc(taskNodeDisplayId(raw))}</span></button>`;
 }
 
+// 节点 id 去掉 `node:` 后的长度，会话药丸按同一宽度取值。
+const TASK_REF_ID_DISPLAY_CHARS = 12;
+
+// 会话药丸：与节点药丸同宽，取会话键最后一段（`web:ceo-` 这类车道标签也摘掉）、
+// 截到节点 id 的长度；完整键放 title，点击切到该会话。
+function taskSessionDisplayId(sessionId) {
+    const raw = String(sessionId || "").trim();
+    if (!raw) return "";
+    const tail = raw.slice(raw.lastIndexOf(":") + 1);
+    const id = tail.startsWith("ceo-") ? tail.slice("ceo-".length) : tail;
+    const chars = Array.from(id);
+    return chars.length > TASK_REF_ID_DISPLAY_CHARS ? chars.slice(0, TASK_REF_ID_DISPLAY_CHARS).join("") : id;
+}
+
+function renderTaskSessionRef(sessionId) {
+    const raw = String(sessionId || "").trim();
+    if (!raw) return "";
+    return `<button type="button" class="task-node-ref" data-session-jump="${esc(raw)}" title="打开会话 ${esc(raw)}"><i data-lucide="arrow-up-right"></i><span class="task-node-ref-type">会话</span><span class="task-node-ref-id">${esc(taskSessionDisplayId(raw))}</span></button>`;
+}
+
 function renderTaskMessageStatus(status) {
     const label = String(status?.label || "").trim();
     const icon = String(status?.icon || "circle").trim() || "circle";
@@ -909,16 +936,19 @@ function buildNodeSentMessageListSteps(node = {}) {
     const entries = Array.isArray(node?.sent_message_list) ? node.sent_message_list : [];
     return entries.map((entry, index) => {
         const status = messageListStatusDescriptor(entry?.status);
+        const targetSessionId = String(entry?.target_session_id || "").trim();
         const targetNodeId = String(entry?.target_node_id || "").trim();
         const leadHtml = [
             renderTaskMessageStatus(status),
             `<span class="task-message-time">${esc(taskMessageTimeText(entry))}</span>`,
-            targetNodeId
-                ? renderTaskNodeRef(targetNodeId, {
-                    icon: "arrow-up-right",
-                    relation: taskNodeRelationLabel(entry),
-                })
-                : "",
+            targetSessionId
+                ? renderTaskSessionRef(targetSessionId)
+                : targetNodeId
+                    ? renderTaskNodeRef(targetNodeId, {
+                        icon: "arrow-up-right",
+                        relation: taskNodeRelationLabel(entry),
+                    })
+                    : "",
         ].join("");
         return {
             traceKey: `sent-message:${String(entry?.notification_id || index).trim() || index}`,
@@ -1046,6 +1076,17 @@ function jumpToTaskNodeDetail(nodeId) {
     if (typeof locateTaskNode === "function") {
         void locateTaskNode(key).catch(() => null);
     }
+}
+
+// 发出列表里的会话药丸：先切到 CEO 视图，再按完整会话键激活该会话。
+// 渠道会话（ext:/china:）不在本地会话目录里，activateCeoSession 按前缀归车道，
+// 所以这里不做「目录里有没有」的前置判断。
+function jumpToCeoSession(sessionId) {
+    const key = String(sessionId || "").trim();
+    if (!key) return;
+    if (typeof switchView === "function") switchView("ceo");
+    if (typeof activateCeoSession !== "function") return;
+    void activateCeoSession(key);
 }
 
 function syncTaskMessageTabs() {

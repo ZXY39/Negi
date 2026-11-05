@@ -460,10 +460,12 @@ class TaskQueryService:
         return entries
 
     def _node_sent_message_list(self, *, task_id: str, node_id: str) -> list[dict[str, Any]]:
-        """本节点发出的消息：通知台账里 source_node_id=本节点的行。
+        """本节点发出的消息：通知台账里 `source_node_id=本节点` 的行，加上前门收件箱台账里本节点的行。
 
         `node_id` 列是收件人，发送方只在 payload 里，所以这里按任务读一次再过滤；
         节点详情是低频页，一次任务级读取可接受（(task_id) 索引见建表段）。
+        根节点→前门走 `deliver_frontdoor_message`，只落 `frontdoor_node_messages`、不写通知台账，
+        所以这里必须并第二本账，否则根节点对前门的发言在发出列表里没有落点。
         """
         normalized_node_id = str(node_id or '').strip()
         if not normalized_node_id:
@@ -499,6 +501,30 @@ class TaskQueryService:
                     'consumed_at': consumed_at,
                     'merged_at': merged_at,
                     'status': display_status,
+                }
+            )
+        for item in list(self._store.list_frontdoor_node_messages_by_task(task_id) or []):
+            if str(item.source_node_id or '').strip() != normalized_node_id:
+                continue
+            content = str(item.content or '').strip()
+            if not content:
+                continue
+            consumed_at = str(item.consumed_at or '').strip()
+            entries.append(
+                {
+                    'notification_id': str(item.message_id or '').strip(),
+                    'target_node_id': '',
+                    'target_title': '',
+                    'target_kind': 'session',
+                    'target_session_id': str(item.session_id or '').strip(),
+                    'message': content,
+                    'received_at': str(item.created_at or '').strip(),
+                    'consumed_at': consumed_at,
+                    'merged_at': '',
+                    # 前门台账只有 pending/consumed：被会话取走即「已消费」，没有第三档。
+                    'status': 'consumed'
+                    if consumed_at or str(item.status or '').strip() == 'consumed'
+                    else 'pending',
                 }
             )
         entries.sort(
