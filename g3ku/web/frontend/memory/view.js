@@ -187,10 +187,11 @@ function memoryAttemptedChainText(item) {
     return refs.length ? refs.join(" -> ") : "-";
 }
 
-function memoryModelRequestCountText(item) {
-    // 台账的 request_count 是并入的队列请求条数（几乎恒为 1）；一次真实 model.chat 落一份工件。
-    const paths = item?.request_artifact_paths;
-    return Array.isArray(paths) ? String(paths.length) : "-";
+function memoryUsageCountedRequestText(item) {
+    // 请求数＝把 token 交进这一批 usage 账的那几发，与同一张抽屉里的 输入/输出 同源：
+    // 没发出去的（预检拒发）与回了账外错误的都不算。
+    const count = item?.usage_counted_requests;
+    return Number.isFinite(count) ? String(count) : "-";
 }
 
 function memoryProcessedIsNoChange(item) {
@@ -1130,7 +1131,7 @@ function openMemoryDetailPreview(kind, key) {
             { label: "操作", value: memoryProcessedOpLabel(source) || "-" },
             { label: "处理时间", value: formatCompactTime(source?.processed_at) || String(source?.processed_at || "-") },
             { label: "模型链", value: memoryAttemptedChainText(source) },
-            { label: "请求数", value: memoryModelRequestCountText(source) },
+            { label: "请求数", value: memoryUsageCountedRequestText(source) },
             { label: "输入", value: String(usage.input_tokens || 0) },
             { label: "输出", value: String(usage.output_tokens || 0) },
         ]
@@ -1139,7 +1140,7 @@ function openMemoryDetailPreview(kind, key) {
                 { label: "记录", value: normalizedKey },
                 { label: "失败类别", value: memoryFailedCategoryLabel(source) },
                 { label: "操作", value: memoryOpLabel(source?.op) },
-                { label: "请求数", value: memoryModelRequestCountText(source) },
+                { label: "请求数", value: memoryUsageCountedRequestText(source) },
                 { label: "首次停车", value: formatCompactTime(source?.first_parked_at) || String(source?.first_parked_at || "-") },
                 { label: "最近停车", value: formatCompactTime(source?.parked_at) || String(source?.parked_at || "-") },
                 { label: "停车次数", value: String(source?.park_count || 0) },

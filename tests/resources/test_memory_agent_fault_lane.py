@@ -129,7 +129,7 @@ def _stage_attempt(manager, monkeypatch, *, payload=None, raises=None):
             session=session,
             usage={"input_tokens": 5, "output_tokens": 7, "cache_read_tokens": 0},
             final_text="",
-            request_artifacts=[{"path": "memory/requests/round-1.json"}],
+            request_artifacts=[{"path": "memory/requests/round-1.json", "usage_counted": True}],
         )
 
     monkeypatch.setattr(manager, "_run_memory_agent_attempt", _attempt)
@@ -379,5 +379,125 @@ async def test_a_commit_fault_keeps_the_queue_row(tmp_path: Path, monkeypatch) -
 
         queued = manager._read_queue_requests()
         assert [str(item.request_id) for item in queued] == ["write_1"], "请求行被提前销掉了"
+    finally:
+        manager.close()
+
+
+def test_a_request_artifact_records_the_usage_of_its_own_round(tmp_path: Path) -> None:
+    """工件自己记下这一发交进账的 token，请求数才不是只能运行时读的一份数。
+
+    回包里三项全 0（provider 报错那一族）⇒ `usage_counted` 落 False，
+    终态行与停车记录上的请求数由这个判据逐发相加得到。
+    """
+    from types import SimpleNamespace
+
+    manager = _manager(tmp_path)
+    try:
+        response = SimpleNamespace(
+            provider_request_id="",
+            provider_request_meta={"provider": "openai_chat"},
+            provider_request_body={"model": "memory-primary"},
+            response_metadata={},
+        )
+        billed = manager._persist_memory_request_artifact(
+            phase="agent",
+            batch_op="write",
+            queue_request_ids=["write_1"],
+            model_chain=["memory-primary"],
+            request_messages=[{"role": "user", "content": "记住这条"}],
+            response=response,
+            usage_delta={"input_tokens": 5, "output_tokens": 7, "cache_read_tokens": 0},
+        )
+        silent = manager._persist_memory_request_artifact(
+            phase="agent",
+            batch_op="write",
+            queue_request_ids=["write_1"],
+            model_chain=["memory-primary"],
+            request_messages=[{"role": "user", "content": "记住这条"}],
+            response=response,
+            usage_delta={"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0},
+        )
+
+        assert billed["usage_counted"] is True
+        assert silent["usage_counted"] is False
+        payload = json.loads(Path(billed["path"]).read_text(encoding="utf-8"))
+        assert payload["usage"] == {"input_tokens": 5, "output_tokens": 7, "cache_read_tokens": 0}
+        assert payload["usage_counted"] is True
+        assert manager._usage_counted_request_count([billed, silent]) == 1
+    finally:
+        manager.close()
+
+
+def test_a_park_accumulates_the_counted_rounds_of_every_attempt(tmp_path: Path) -> None:
+    """停车记录上的请求数是这批至今交进账的发数：按 park 累加，与累计 usage 同一条道。"""
+    manager = _manager(tmp_path)
+    try:
+        batch = _batch(manager)
+        first = manager._park_failed_batch(
+            batch,
+            category="provider_error",
+            discard_reason="provider_error",
+            error="HTTP 429: rate limited",
+            usage_counted_requests=2,
+        )
+        second = manager._park_failed_batch(
+            batch,
+            category="protocol",
+            discard_reason="rejected",
+            error="model answered without a tool call",
+            usage_counted_requests=1,
+        )
+
+        assert int(first["usage_counted_requests"]) == 2
+        assert int(second["usage_counted_requests"]) == 3
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_an_applied_row_counts_only_the_rounds_entered_in_usage(tmp_path: Path, monkeypatch) -> None:
+    """applied 行的请求数＝带 token 回来的发数，与同一行的 usage 合计同源。"""
+    mod = _module()
+    manager = _manager(tmp_path)
+    try:
+        _use_runtime_config(mod, tmp_path, monkeypatch)
+        _paint(manager)
+        _stage_attempt(manager, monkeypatch, payload=_valid_add(manager))
+        await manager._append_queue_request(_batch(manager).items[0])
+
+        report = await manager.run_due_batch_once(now_iso="2026-04-25T00:00:40+08:00")
+
+        assert report["status"] == "applied"
+        row = manager._read_processed_batches()[-1]
+        assert int(row["usage_counted_requests"]) == 1
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_a_provider_error_round_reports_zero_counted_requests(tmp_path: Path, monkeypatch) -> None:
+    """报错那一发没把 token 交进账：停车读数与回给前端的报告都记 0，不冒充发过成功请求。"""
+    mod = _module()
+    manager = _manager(tmp_path)
+    try:
+        _use_runtime_config(mod, tmp_path, monkeypatch)
+        _paint(manager)
+        _stage_attempt(
+            manager,
+            monkeypatch,
+            raises=mod._MemoryProviderError(
+                "HTTP 429: rate limited",
+                usage={"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0},
+                request_artifacts=[{"path": "memory/requests/round-1.json", "usage_counted": False}],
+            ),
+        )
+        await manager._append_queue_request(_batch(manager).items[0])
+
+        report = await manager.run_due_batch_once(now_iso="2026-04-25T00:00:40+08:00")
+
+        assert report["status"] == "parked"
+        assert int(report["usage_counted_requests"]) == 0
+        record = manager._read_failed_records()[0]
+        assert int(record["usage_counted_requests"]) == 0
     finally:
         manager.close()

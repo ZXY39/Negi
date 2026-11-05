@@ -3766,7 +3766,8 @@ class MemoryManager:
             )
             response = await model.chat(request_messages, tools=tool_schemas or None)
             self._merge_attempted_model_chain(attempted_chain, getattr(response, "attempted_model_chain", None))
-            self._merge_usage(usage_total, self._extract_usage(response))
+            round_usage = self._extract_usage(response)
+            self._merge_usage(usage_total, round_usage)
             artifact = self._persist_memory_request_artifact(
                 phase="agent",
                 batch_op=batch.op,
@@ -3774,6 +3775,7 @@ class MemoryManager:
                 model_chain=model_chain,
                 request_messages=request_messages,
                 response=response,
+                usage_delta=round_usage,
             )
             if artifact is not None:
                 request_artifacts.append(artifact)
@@ -5391,6 +5393,7 @@ class MemoryManager:
         model_chain: list[str],
         request_messages: list[dict[str, Any]],
         response: Any,
+        usage_delta: dict[str, int] | None = None,
     ) -> dict[str, Any] | None:
         provider_metadata = self._extract_provider_request_metadata(response)
         if not (
@@ -5401,6 +5404,8 @@ class MemoryManager:
             return None
         artifact_id = self._request_id("memory_request")
         artifact_path = self.request_artifacts_dir / f"{artifact_id}.json"
+        round_usage = self._normalized_usage_dict(usage_delta)
+        usage_counted = any(int(value or 0) > 0 for value in round_usage.values())
         payload = {
             "artifact_id": artifact_id,
             "created_at": self._now_iso(),
@@ -5416,13 +5421,24 @@ class MemoryManager:
             "provider_request_id": provider_metadata["provider_request_id"],
             "provider_request_meta": provider_metadata["provider_request_meta"],
             "provider_request_body": provider_metadata["provider_request_body"],
+            "usage": round_usage,
+            "usage_counted": usage_counted,
         }
         self._atomic_write_text(artifact_path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
         return {
             "artifact_id": artifact_id,
             "path": str(artifact_path.resolve()),
             "provider_request_id": provider_metadata["provider_request_id"],
+            "usage_counted": usage_counted,
         }
+
+    @staticmethod
+    def _usage_counted_request_count(request_artifacts: list[dict[str, Any]]) -> int:
+        """这一批把 token 交进 usage 账的请求数，与同一行的 `usage` 合计同源。
+
+        逐发判据只有一条：工件自己记的 `usage_counted`（provider 回包里三项有任一非 0）。
+        """
+        return sum(1 for artifact in list(request_artifacts or []) if (artifact or {}).get("usage_counted"))
 
     @staticmethod
     def _provider_request_ids_from_artifacts(request_artifacts: list[dict[str, Any]]) -> list[str]:
@@ -5468,6 +5484,7 @@ class MemoryManager:
         validated: _MemoryValidatedWrite | None = None,
         provider_request_ids: list[str] | None = None,
         request_artifact_paths: list[str] | None = None,
+        usage_counted_requests: int | None = None,
         error: str = "",
         fallback: str = "",
     ) -> dict[str, Any]:
@@ -5495,6 +5512,8 @@ class MemoryManager:
             "attempt_count": int(attempt_count or 0),
             "provider_request_ids": [str(item or "").strip() for item in list(provider_request_ids or []) if str(item or "").strip()],
             "request_artifact_paths": [str(item or "").strip() for item in list(request_artifact_paths or []) if str(item or "").strip()],
+            # 与上面的 usage 合计同源：只数 provider 回包里真给了 token 的那几发。
+            "usage_counted_requests": int(usage_counted_requests or 0),
         }
         # 按龄冲刷与轮次窗口/压缩冲刷共用同一条入队出口，没有这个字段就数不出"靠龄倒了几次"。
         trigger_sources = sorted(
@@ -6719,6 +6738,7 @@ class MemoryManager:
                 "attempted_model_chain": list(batch_attempted_chain),
                 "provider_request_ids": [],
                 "request_artifact_paths": [],
+                "usage_counted_requests": 0,
             }
 
         current_runtime_config = runtime_config
@@ -6790,6 +6810,7 @@ class MemoryManager:
                     "attempted_model_chain": list(batch_attempted_chain),
                     "provider_request_ids": self._provider_request_ids_from_artifacts(request_artifacts),
                     "request_artifact_paths": self._request_artifact_paths(request_artifacts),
+                    "usage_counted_requests": self._usage_counted_request_count(request_artifacts),
                 }
             except Exception as exc:
                 # Anything else from the model call is transient by origin (transport, a
@@ -6807,6 +6828,7 @@ class MemoryManager:
                     "attempted_model_chain": list(batch_attempted_chain),
                     "provider_request_ids": self._provider_request_ids_from_artifacts(request_artifacts),
                     "request_artifact_paths": self._request_artifact_paths(request_artifacts),
+                    "usage_counted_requests": self._usage_counted_request_count(request_artifacts),
                 }
             self._merge_usage(total_usage, attempt.usage)
             self._merge_attempted_model_chain(batch_attempted_chain, attempt.attempted_chain)
@@ -6832,6 +6854,7 @@ class MemoryManager:
                     "attempted_model_chain": list(batch_attempted_chain),
                     "provider_request_ids": self._provider_request_ids_from_artifacts(request_artifacts),
                     "request_artifact_paths": self._request_artifact_paths(request_artifacts),
+                    "usage_counted_requests": self._usage_counted_request_count(request_artifacts),
                 }
             except _MemoryAgentValidationError as exc:
                 last_error = str(exc or "memory agent output invalid").strip()
@@ -6852,6 +6875,7 @@ class MemoryManager:
                     "attempted_model_chain": list(batch_attempted_chain),
                     "provider_request_ids": self._provider_request_ids_from_artifacts(request_artifacts),
                     "request_artifact_paths": self._request_artifact_paths(request_artifacts),
+                    "usage_counted_requests": self._usage_counted_request_count(request_artifacts),
                 }
         if lane != "consolidate" and last_capacity_overflow:
             # The store still refuses this payload for one reason only: not enough room, and
@@ -6870,6 +6894,7 @@ class MemoryManager:
                 "attempted_model_chain": list(batch_attempted_chain),
                 "provider_request_ids": self._provider_request_ids_from_artifacts(request_artifacts),
                 "request_artifact_paths": self._request_artifact_paths(request_artifacts),
+                "usage_counted_requests": self._usage_counted_request_count(request_artifacts),
             }
         return {
             "validated": None,
@@ -6882,6 +6907,7 @@ class MemoryManager:
             "attempted_model_chain": list(batch_attempted_chain),
             "provider_request_ids": self._provider_request_ids_from_artifacts(request_artifacts),
             "request_artifact_paths": self._request_artifact_paths(request_artifacts),
+            "usage_counted_requests": self._usage_counted_request_count(request_artifacts),
         }
 
     async def run_due_batch_once(self, *, now_iso: str | None = None) -> dict[str, Any]:
@@ -7015,6 +7041,7 @@ class MemoryManager:
                     attempt_count=int(result.get("attempt_count", 0) or 0),
                     provider_request_ids=list(result.get("provider_request_ids") or []),
                     request_artifact_paths=list(result.get("request_artifact_paths") or []),
+                    usage_counted_requests=int(result.get("usage_counted_requests") or 0),
                     trigger="initial",
                     now_iso=effective_now,
                 )
@@ -7027,6 +7054,7 @@ class MemoryManager:
                     model_chain=effective_model_chain,
                     provider_request_ids=list(result.get("provider_request_ids") or []),
                     request_artifact_paths=list(result.get("request_artifact_paths") or []),
+                    usage_counted_requests=int(result.get("usage_counted_requests") or 0),
                 )
 
             # 先提交、后销队列行：`_commit_validated_write` 是显式会抛的（镜像校验失败
@@ -7056,6 +7084,7 @@ class MemoryManager:
                     attempt_count=int(result.get("attempt_count") or 0),
                     provider_request_ids=list(result.get("provider_request_ids") or []),
                     request_artifact_paths=list(result.get("request_artifact_paths") or []),
+                    usage_counted_requests=int(result.get("usage_counted_requests") or 0),
                     trigger="consolidation_noop",
                     now_iso=effective_now,
                 )
@@ -7073,6 +7102,7 @@ class MemoryManager:
                 validated=result["validated"],
                 provider_request_ids=list(result.get("provider_request_ids") or []),
                 request_artifact_paths=list(result.get("request_artifact_paths") or []),
+                usage_counted_requests=int(result.get("usage_counted_requests") or 0),
                 fallback=fallback,
             )
             return {
@@ -7244,6 +7274,7 @@ class MemoryManager:
             attempt_count=int(result.get("attempt_count") or 0),
             provider_request_ids=list(result.get("provider_request_ids") or []),
             request_artifact_paths=list(result.get("request_artifact_paths") or []),
+            usage_counted_requests=int(result.get("usage_counted_requests") or 0),
             trigger="capacity",
             now_iso=now_iso,
         )
@@ -7262,6 +7293,7 @@ class MemoryManager:
             attempt_count=int(result.get("attempt_count") or 0),
             provider_request_ids=list(result.get("provider_request_ids") or []),
             request_artifact_paths=list(result.get("request_artifact_paths") or []),
+            usage_counted_requests=int(result.get("usage_counted_requests") or 0),
         )
         report = self._parked_batch_report(
             batch,
@@ -7290,6 +7322,7 @@ class MemoryManager:
         attempt_count: int = 0,
         provider_request_ids: list[str] | None = None,
         request_artifact_paths: list[str] | None = None,
+        usage_counted_requests: int = 0,
         trigger: str = "initial",
         now_iso: str | None = None,
     ) -> dict[str, Any]:
@@ -7331,6 +7364,8 @@ class MemoryManager:
                     "requeued_at": "",
                     "park_count": int(existing.get("park_count", 0) or 0) + 1,
                     "llm_attempt_count": int(existing.get("llm_attempt_count", 0) or 0) + max(int(attempt_count or 0), 0),
+                    "usage_counted_requests": int(existing.get("usage_counted_requests", 0) or 0)
+                    + max(int(usage_counted_requests or 0), 0),
                     "last_error_text": history_entry["error"],
                     "last_error_at": now,
                     "error_history": history[-50:],
@@ -7370,6 +7405,7 @@ class MemoryManager:
                 "requeued_at": "",
                 "park_count": 1,
                 "llm_attempt_count": max(int(attempt_count or 0), 0),
+                "usage_counted_requests": max(int(usage_counted_requests or 0), 0),
                 "auto_requeue_count": 0,
                 "manual_retry_count": 0,
                 "last_error_text": history_entry["error"],
@@ -7433,6 +7469,7 @@ class MemoryManager:
         model_chain: list[str] | None = None,
         provider_request_ids: list[str] | None = None,
         request_artifact_paths: list[str] | None = None,
+        usage_counted_requests: int | None = None,
     ) -> dict[str, Any]:
         return {
             "ok": True,
@@ -7448,6 +7485,9 @@ class MemoryManager:
             "model_chain": list(model_chain if model_chain is not None else (record.get("model_chain") or [])),
             "provider_request_ids": list(provider_request_ids if provider_request_ids is not None else (record.get("provider_request_ids") or [])),
             "request_artifact_paths": list(request_artifact_paths if request_artifact_paths is not None else (record.get("request_artifact_paths") or [])),
+            "usage_counted_requests": int(
+                usage_counted_requests if usage_counted_requests is not None else (record.get("usage_counted_requests") or 0)
+            ),
             "parked_at": str(record.get("parked_at") or "").strip(),
         }
 
@@ -7749,6 +7789,7 @@ class MemoryManager:
             attempt_count=int(record.get("llm_attempt_count", 0) or 0),
             provider_request_ids=record.get("provider_request_ids"),
             request_artifact_paths=record.get("request_artifact_paths"),
+            usage_counted_requests=int(record.get("usage_counted_requests") or 0),
             error=str(record.get("last_error_text") or "").strip(),
         )
         # 记录可能处于 requeued 状态（行已回到队列），放弃时把队列行一并清掉；
