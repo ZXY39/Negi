@@ -1274,7 +1274,11 @@ async def run_qq_official_bridge(
             rows, _stats = await asyncio.to_thread(store.build_digest)
             if rows:
                 _ensure_digest_task(session_id)
-                await _send_digest_now(session_id, store, source="at")
+                sent = await _send_digest_now(session_id, store, source="at")
+                if not sent:
+                    # 上一份 digest 还在等注入（或这次发送失败）：@ 之后重新抽一次
+                    # 随机间隔，等区间消费完再开始计时，避免沿用旧计时。
+                    state["next_interval_seconds"] = 0.0
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 - @ 回合不能因补发失败而中断
