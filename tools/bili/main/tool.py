@@ -36,6 +36,17 @@ _PASSPORT_POLL = "https://passport.bilibili.com/x/passport-login/web/qrcode/poll
 _SPI = "https://api.bilibili.com/x/frontend/finger/spi"
 _HTTP_TIMEOUT = 25
 
+# ============ 投稿上传/列表/删稿（member 侧 web 接口，2026-11 实测可用） ============
+
+_PREUPLOAD_URL = "https://member.bilibili.com/preupload"
+_ARCHIVE_ADD_URL = "https://member.bilibili.com/x/vu/web/add/v3"
+_ARCHIVE_LIST_URL = "https://member.bilibili.com/x/web/archives"
+_ARCHIVE_DELETE_URL = "https://member.bilibili.com/x/web/archive/delete"
+_COVER_UP_URL = "https://member.bilibili.com/x/vu/web/cover/up"
+# 允许投稿的视频后缀（白名单，防止误投脚本/压缩包）
+_ALLOWED_VIDEO_EXT = {".mp4", ".flv", ".avi", ".wmv", ".mov", ".webm", ".mkv"}
+_ALLOWED_COVER_EXT = {".png", ".jpg", ".jpeg", ".webp"}
+
 _ORDER_MAP = {
     "totalrank": "TOTALRANK",
     "click": "CLICK",
@@ -57,6 +68,7 @@ _ACTIONS = [
     "subtitle", "comments", "danmaku", "favorite_lists", "favorite_content", "watch_later",
     "following", "followers", "like",
     "reply", "send_message", "config", "daily_report",
+    "my_videos", "publish_video", "delete_video",
 ]
 
 # ============ 目录与状态 ============
@@ -1405,6 +1417,651 @@ async def _action_daily_report(kwargs: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# ============ 投稿：我的稿件 / 发布视频 / 删除稿件（2026-11 实测链路） ============
+#
+# 真实链路（每一步都留原始响应，code/OK 字段如实回传，绝不把"上传成功"当"发布成功"）：
+#   1. GET  _PREUPLOAD_URL        -> OK=1，拿 endpoint / upos_uri / auth / biz_id / chunk_size
+#   2. POST <endpoint>/<upos_uri 去 upos://>?uploads  -> OK=1，拿 upload_id
+#   3. PUT  同一 URL，分片 body + partNumber/uploadId -> 文本 MULTIPART_PUT_SUCCESS
+#   4. POST 同一 URL + parts JSON                    -> OK=1，key => videos[].filename / cid
+#   5. POST _ARCHIVE_ADD_URL (csrf + JSON meta)      -> code=0，data.aid/bvid
+#   6. GET  _ARCHIVE_LIST_URL                        -> 回读稿件
+#   7. POST _ARCHIVE_DELETE_URL                      -> 删稿
+# 注意：member 侧 `/x/vu/web/delete` 在 2026-11 已 404，改用 `/x/web/archive/delete`。
+
+
+def _member_headers(cred: dict[str, str]) -> dict[str, str]:
+    """member.bilibili.com 侧请求头（Referer 落到创作中心，部分接口校验来源）。"""
+    return {
+        "User-Agent": _UA,
+        "Referer": "https://member.bilibili.com/platform/upload/center",
+        "Origin": "https://member.bilibili.com",
+        "Cookie": _cookie_header(cred),
+    }
+
+
+async def _post_json_req(
+    url: str, payload: dict[str, Any], headers: dict[str, str]
+) -> tuple[dict[str, Any] | None, str, int]:
+    """POST JSON 到 member 接口，返回 (json, 错误说明, HTTP 状态)。"""
+    import aiohttp
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, headers=headers, timeout=_HTTP_TIMEOUT) as resp:
+                status = resp.status
+                data = await resp.json(content_type=None)
+    except Exception as e:  # noqa: BLE001
+        return None, f"{type(e).__name__}: {str(e)[:200]}", -1
+    if not isinstance(data, dict):
+        return None, f"响应不是 JSON 对象（HTTP {status}）", status
+    return data, "", status
+
+
+def _tags_to_list(raw: Any) -> list[str]:
+    """tags 接受 list 或逗号/分号/空格分隔的字符串，统一成 list（最多 10 个）。"""
+    if isinstance(raw, list):
+        items = [str(t).strip() for t in raw]
+    else:
+        items = [t.strip() for t in re.split(r"[，,;；\s]+", str(raw or ""))]
+    out: list[str] = []
+    for t in items:
+        if t and t not in out:
+            out.append(t)
+    return out[:10]
+
+
+async def _my_archives_page(
+    cred: dict[str, str], pn: int, ps: int, status: str
+) -> dict[str, Any]:
+    """拉一页本账号稿件列表（member 侧）。"""
+    url = (
+        f"{_ARCHIVE_LIST_URL}?status={status}&pn={pn}&ps={ps}"
+        "&coop=1&interactive=1&order=mtime&sort=desc&draft=1"
+    )
+    data, why = await _get_json(url, _member_headers(cred))
+    if data is None:
+        return {"ok": False, "error": why, "url": url}
+    code = int(data.get("code") or 0)
+    if code != 0:
+        return {
+            "ok": False,
+            "url": url,
+            "code": code,
+            "message": data.get("message"),
+            "error": f"稿件列表接口返回 code={code}: {data.get('message')}",
+        }
+    return {"ok": True, "url": url, "data": data.get("data") or {}}
+
+
+async def _action_my_videos(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """回读本账号稿件列表（含审核中/已发布/未通过），用于发布后的平台侧证据。"""
+    cred = _load_credential()
+    if not cred or not cred.get("sessdata"):
+        return {"ok": False, "error": "未登录：缺少 SESSDATA，请先执行 bili login"}
+    pn = max(1, int(kwargs.get("pn") or 1))
+    ps = max(1, min(int(kwargs.get("ps") or 20), 50))
+    status = str(kwargs.get("status") or "is_pubing,pubed,not_pubed").strip() or "is_pubing,pubed,not_pubed"
+
+    page = await _my_archives_page(cred, pn, ps, status)
+    if not page.get("ok"):
+        return {
+            "ok": False,
+            "action": "my_videos",
+            "error": page.get("error"),
+            "code": page.get("code"),
+            "message": page.get("message"),
+            "url": page.get("url"),
+        }
+
+    data = page.get("data") or {}
+    raw_items = data.get("arc_audits") or data.get("archives") or []
+    items: list[dict[str, Any]] = []
+    for it in raw_items:
+        archive = it.get("Archive") if isinstance(it, dict) and "Archive" in it else it
+        archive = archive or {}
+        items.append(
+            {
+                "aid": archive.get("aid"),
+                "bvid": archive.get("bvid", ""),
+                "title": archive.get("title", ""),
+                "state": archive.get("state"),
+                "state_desc": archive.get("state_desc", ""),
+                "pubtime": archive.get("ptime") or archive.get("pubdate"),
+                "ctime": archive.get("ctime"),
+                "duration": archive.get("duration"),
+            }
+        )
+    page_info = data.get("page") or {}
+    return {
+        "ok": True,
+        "action": "my_videos",
+        "query": {"pn": pn, "ps": ps, "status": status},
+        "url": page.get("url"),
+        "code": 0,
+        "total": page_info.get("count", len(items)),
+        "class": data.get("class"),
+        "count": len(items),
+        "items": items,
+        "fetched_at": datetime.now(UTC).isoformat(),
+    }
+
+
+async def _preupload_video(cred: dict[str, str], video: Path, size: int) -> dict[str, Any]:
+    """第 1 步：预上传，拿 endpoint / upos_uri / auth / biz_id / chunk_size。"""
+    import aiohttp
+
+    params = {
+        "profile": "ugcfx/bup",
+        "name": video.name,
+        "size": str(size),
+        "r": "upos",
+        "ssl": "0",
+        "version": "2.14.0",
+        "build": "2100400",
+        "upcdn": "bda2",
+        "probe_version": "20221109",
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                _PREUPLOAD_URL, params=params, headers=_member_headers(cred), timeout=_HTTP_TIMEOUT
+            ) as resp:
+                status = resp.status
+                data = await resp.json(content_type=None)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "step": "preupload", "error": f"{type(e).__name__}: {str(e)[:200]}"}
+    if not isinstance(data, dict):
+        return {"ok": False, "step": "preupload", "error": f"响应不是 JSON（HTTP {status}）"}
+    if int(data.get("OK") or 0) != 1:
+        return {
+            "ok": False,
+            "step": "preupload",
+            "http_status": status,
+            "response": data,
+            "error": f"预上传失败：OK={data.get('OK')} message={data.get('message')}",
+        }
+    return {"ok": True, "step": "preupload", "http_status": status, "response": data, "data": data}
+
+
+async def _upload_video_file(
+    cred: dict[str, str], video: Path, pre: dict[str, Any]
+) -> dict[str, Any]:
+    """第 2-4 步：方向取 upload_id → 分片 PUT → 合片，返回 filename / cid。"""
+    import aiohttp
+
+    size = video.stat().st_size
+    endpoint = str(pre.get("endpoint") or "")
+    host = ("https:" + endpoint) if endpoint.startswith("//") else endpoint
+    upos_uri = str(pre.get("upos_uri") or "")
+    url_up = f"{host}/{upos_uri.removeprefix('upos://')}"
+    auth = str(pre.get("auth") or "")
+    biz_id = pre.get("biz_id")
+    chunk_size = max(1, int(pre.get("chunk_size") or 10485760))
+
+    if not host or not upos_uri:
+        return {
+            "ok": False,
+            "step": "upload",
+            "error": f"预上传返回缺少 endpoint/upos_uri：endpoint={endpoint!r} upos_uri={upos_uri!r}",
+        }
+    if chunk_size > size:
+        chunk_size = size
+
+    steps: list[dict[str, Any]] = []
+    try:
+        async with aiohttp.ClientSession() as session:
+            # --- 取 upload_id ---
+            init_params = {
+                "uploads": "",
+                "output": "json",
+                "profile": "ugcfx/bup",
+                "filesize": str(size),
+                "partsize": str(chunk_size),
+                "biz_id": str(biz_id),
+            }
+            init_headers = {
+                "User-Agent": _UA,
+                "Referer": "https://www.bilibili.com",
+                "Cookie": _cookie_header(cred),
+                "x-upos-auth": auth,
+            }
+            async with session.post(
+                url_up, params=init_params, headers=init_headers, timeout=_HTTP_TIMEOUT
+            ) as resp:
+                init_status = resp.status
+                init = await resp.json(content_type=None)
+            steps.append({"step": "init_upload_id", "url": url_up, "params": init_params,
+                          "http_status": init_status, "response": init})
+            if not isinstance(init, dict) or int(init.get("OK") or 0) != 1:
+                return {"ok": False, "step": "init_upload_id", "steps": steps,
+                        "error": f"取 upload_id 失败：{init}"}
+            upload_id = init.get("upload_id")
+
+            # --- 分片 PUT ---
+            blob = video.read_bytes()
+            offsets = list(range(0, size, chunk_size))
+            total_chunks = len(offsets)
+            for idx, offset in enumerate(offsets):
+                chunk = blob[offset:offset + chunk_size]
+                put_params = {
+                    "partNumber": str(idx + 1),
+                    "uploadId": str(upload_id),
+                    "chunk": str(idx),
+                    "chunks": str(total_chunks),
+                    "size": str(len(chunk)),
+                    "start": str(offset),
+                    "end": str(offset + len(chunk)),
+                    "total": str(size),
+                }
+                async with session.put(
+                    url_up, data=chunk, params=put_params,
+                    headers={"User-Agent": _UA, "x-upos-auth": auth},
+                    timeout=aiohttp.ClientTimeout(total=300),
+                ) as resp:
+                    part_status = resp.status
+                    part_body = (await resp.text())[:200]
+                steps.append({"step": f"chunk_put_{idx + 1}_of_{total_chunks}", "url": url_up,
+                              "params": put_params, "http_status": part_status,
+                              "response": part_body, "bytes": len(chunk)})
+                if part_status >= 400 or part_body not in ("MULTIPART_PUT_SUCCESS", ""):
+                    return {"ok": False, "step": f"chunk_put_{idx + 1}", "steps": steps,
+                            "error": f"分片上传失败：HTTP {part_status} body={part_body!r}"}
+
+            # --- 合片 ---
+            parts = [{"partNumber": i + 1, "eTag": "etag"} for i in range(total_chunks)]
+            done_params = {
+                "output": "json",
+                "name": video.name,
+                "profile": "ugcfx/bup",
+                "uploadId": str(upload_id),
+                "biz_id": str(biz_id),
+            }
+            async with session.post(
+                url_up, data=json.dumps({"parts": parts}), params=done_params,
+                headers={
+                    "User-Agent": _UA,
+                    "Referer": "https://www.bilibili.com",
+                    "Cookie": _cookie_header(cred),
+                    "x-upos-auth": auth,
+                    "content-type": "application/json; charset=UTF-8",
+                },
+                timeout=aiohttp.ClientTimeout(total=300),
+            ) as resp:
+                done_status = resp.status
+                done = await resp.json(content_type=None)
+            steps.append({"step": "complete_upload", "url": url_up, "params": done_params,
+                          "http_status": done_status, "response": done})
+            if not isinstance(done, dict) or int(done.get("OK") or 0) != 1:
+                return {"ok": False, "step": "complete_upload", "steps": steps,
+                        "error": f"合片失败：{done}"}
+            key = str(done.get("key") or "")
+            filename = os.path.splitext(key.removeprefix("/"))[0]
+            if not filename:
+                return {"ok": False, "step": "complete_upload", "steps": steps,
+                        "error": f"合片返回缺少 key：{done}"}
+            return {
+                "ok": True,
+                "steps": steps,
+                "upload_id": upload_id,
+                "filename": filename,
+                "cid": biz_id,
+                "location": done.get("location"),
+            }
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "step": "upload", "steps": steps,
+                "error": f"{type(e).__name__}: {str(e)[:300]}"}
+
+
+async def _upload_cover_file(cred: dict[str, str], cover: Path) -> dict[str, Any]:
+    """可选：把封面图以 dataURI 方式传到 member 侧，返回封面 URL。"""
+    import base64
+
+    mime = "image/png" if cover.suffix.lower() == ".png" else "image/jpeg"
+    try:
+        b64 = base64.b64encode(cover.read_bytes()).decode("utf-8")
+    except OSError as e:
+        return {"ok": False, "error": f"读取封面失败：{e}"}
+    form = {"cover": f"data:{mime};base64,{b64}", "csrf": cred.get("bili_jct", "")}
+    url = f"{_COVER_UP_URL}?csrf={cred.get('bili_jct', '')}"
+    data, why = await _post_form_json(url, form, _member_headers(cred))
+    if data is None:
+        return {"ok": False, "error": why, "url": url}
+    if int(data.get("code") or 0) != 0:
+        return {"ok": False, "url": url, "code": data.get("code"),
+                "message": data.get("message"), "error": f"封面上传失败 code={data.get('code')}"}
+    return {"ok": True, "url": url, "code": 0, "data": data.get("data") or {},
+            "cover_url": (data.get("data") or {}).get("url", "")}
+
+
+async def _action_publish_video(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """上传并投稿一个视频。dry_run=True 只走到合片，不提交稿件。"""
+    cred = _load_credential()
+    if not cred or not cred.get("sessdata"):
+        return {"ok": False, "error": "未登录：缺少 SESSDATA，请先执行 bili login"}
+    if not cred.get("bili_jct"):
+        return {"ok": False, "error": "缺少 bili_jct（csrf），无法提交稿件，请重新 bili login"}
+
+    raw_path = str(kwargs.get("video_path") or "").strip()
+    if not raw_path:
+        return {"ok": False, "error": "video_path 不能为空（必须是绝对路径）"}
+    video = Path(raw_path).expanduser()
+    if not video.is_absolute():
+        return {"ok": False, "error": f"video_path 必须是绝对路径：{raw_path}"}
+    if not video.is_file():
+        return {"ok": False, "error": f"视频文件不存在：{video}"}
+    if video.suffix.lower() not in _ALLOWED_VIDEO_EXT:
+        return {
+            "ok": False,
+            "error": f"不支持的视频后缀 {video.suffix}；仅支持 {sorted(_ALLOWED_VIDEO_EXT)}",
+        }
+    size = video.stat().st_size
+    if size <= 0:
+        return {"ok": False, "error": f"视频文件为空（0 字节）：{video}"}
+
+    title = str(kwargs.get("title") or "").strip()
+    if not title:
+        return {"ok": False, "error": "title 不能为空"}
+    if len(title) > 80:
+        return {"ok": False, "error": f"title 超过 80 字（当前 {len(title)} 字）"}
+    desc = str(kwargs.get("desc") or "")[:2000]
+    tags = _tags_to_list(kwargs.get("tags"))
+    if not tags:
+        return {"ok": False, "error": "tags 至少需要 1 个标签"}
+    try:
+        tid = int(kwargs.get("tid") or 21)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": f"tid 必须是整数分区 id：{kwargs.get('tid')!r}"}
+    copyright_val = 1 if int(kwargs.get("copyright") or 1) == 1 else 2
+    dry_run = bool(kwargs.get("dry_run"))
+
+    cover_path_raw = str(kwargs.get("cover_path") or "").strip()
+    cover: Path | None = None
+    if cover_path_raw:
+        cover = Path(cover_path_raw).expanduser()
+        if not cover.is_file():
+            return {"ok": False, "error": f"封面文件不存在：{cover}"}
+        if cover.suffix.lower() not in _ALLOWED_COVER_EXT:
+            return {"ok": False, "error": f"不支持的封面后缀 {cover.suffix}；仅支持 {sorted(_ALLOWED_COVER_EXT)}"}
+
+    steps: list[dict[str, Any]] = []
+
+    # 第 1 步：预上传
+    pre_res = await _preupload_video(cred, video, size)
+    steps.append({k: v for k, v in pre_res.items() if k != "data"})
+    if not pre_res.get("ok"):
+        return {"ok": False, "action": "publish_video", "step": "preupload",
+                "steps": steps, "error": pre_res.get("error"),
+                "response": pre_res.get("response")}
+    pre = pre_res["data"]
+
+    # 第 2-4 步：取 upload_id → 分片 → 合片
+    up = await _upload_video_file(cred, video, pre)
+    steps.extend(up.get("steps") or [])
+    if not up.get("ok"):
+        return {"ok": False, "action": "publish_video", "step": up.get("step"),
+                "steps": steps, "error": up.get("error")}
+
+    result: dict[str, Any] = {
+        "ok": True,
+        "action": "publish_video",
+        "dry_run": dry_run,
+        "video_path": str(video),
+        "video_size_bytes": size,
+        "preupload": {
+            "endpoint": pre.get("endpoint"),
+            "upos_uri": pre.get("upos_uri"),
+            "biz_id": pre.get("biz_id"),
+            "chunk_size": pre.get("chunk_size"),
+        },
+        "upload": {
+            "upload_id": up.get("upload_id"),
+            "filename": up.get("filename"),
+            "cid": up.get("cid"),
+            "location": up.get("location"),
+        },
+        "steps": steps,
+        "submitted": False,
+    }
+
+    if dry_run:
+        result["message"] = "dry_run=True：已完成预上传/分片/合片校验，未提交稿件（线上无新稿件）"
+        return result
+
+    # 可选封面
+    cover_url = ""
+    if cover is not None:
+        cov = await _upload_cover_file(cred, cover)
+        result["cover_upload"] = {k: v for k, v in cov.items() if k != "data"}
+        if not cov.get("ok"):
+            return {"ok": False, "action": "publish_video", "step": "cover_up",
+                    "steps": steps, "upload": result["upload"],
+                    "error": cov.get("error"), "code": cov.get("code"), "message": cov.get("message")}
+        cover_url = cov.get("cover_url", "")
+
+    # 第 5 步：提交稿件
+    meta: dict[str, Any] = {
+        "title": title,
+        "copyright": copyright_val,
+        "tid": tid,
+        "tag": ",".join(tags),
+        "desc_format_id": 9999,
+        "desc": desc,
+        "recreate": -1,
+        "dynamic": "",
+        "interactive": 0,
+        "act_reserve_create": 0,
+        "no_disturbance": 0,
+        "no_reprint": 1,
+        "subtitle": {"open": 0, "lan": ""},
+        "dolby": 0,
+        "lossless_music": 0,
+        "up_selection_reply": False,
+        "up_close_reply": False,
+        "up_close_danmu": False,
+        "web_os": 1,
+        "source": "",
+        "videos": [
+            {
+                "title": title[:80],
+                "desc": desc[:250],
+                "filename": up.get("filename"),
+                "cid": up.get("cid"),
+            }
+        ],
+        "cover": cover_url,
+    }
+    add_url = f"{_ARCHIVE_ADD_URL}?t={int(time.time() * 1000)}&csrf={cred.get('bili_jct')}"
+    add_data, why, add_status = await _post_json_req(add_url, meta, _member_headers(cred))
+    steps.append({"step": "submit_archive", "url": add_url, "http_status": add_status,
+                  "response": add_data if add_data is not None else why,
+                  "request_meta": {k: v for k, v in meta.items() if k != "cover"}})
+    result["steps"] = steps
+    if add_data is None:
+        return {"ok": False, "action": "publish_video", "step": "submit_archive",
+                "steps": steps, "upload": result["upload"], "error": why}
+    add_code = int(add_data.get("code") or 0)
+    if add_code != 0:
+        return {
+            "ok": False,
+            "action": "publish_video",
+            "step": "submit_archive",
+            "steps": steps,
+            "upload": result["upload"],
+            "code": add_code,
+            "message": add_data.get("message"),
+            "response": add_data,
+            "error": f"投稿接口返回 code={add_code}: {add_data.get('message')}",
+        }
+
+    data = add_data.get("data") or {}
+    result.update(
+        {
+            "submitted": True,
+            "code": add_code,
+            "message": add_data.get("message"),
+            "aid": data.get("aid"),
+            "bvid": data.get("bvid"),
+            "title": title,
+            "tid": tid,
+            "tags": tags,
+            "copyright": copyright_val,
+            "cover_url": cover_url,
+            "submit_response": add_data,
+            "note": "submitted=True 只代表稿件提交成功；是否过审/已发布需用 my_videos 回读 state/state_desc 确认。",
+        }
+    )
+    return result
+
+
+async def _action_delete_video(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """删除稿件。confirm 不为 True 时只返回预览，不动线上数据。"""
+    cred = _load_credential()
+    if not cred or not cred.get("sessdata"):
+        return {"ok": False, "error": "未登录：缺少 SESSDATA，请先执行 bili login"}
+    if not cred.get("bili_jct"):
+        return {"ok": False, "error": "缺少 bili_jct（csrf），无法删除稿件，请重新 bili login"}
+
+    aid = kwargs.get("aid")
+    bvid = str(kwargs.get("bvid") or "").strip()
+    if not aid and not bvid:
+        return {"ok": False, "error": "aid 与 bvid 至少给一个"}
+    confirm = bool(kwargs.get("confirm"))
+
+    resolved: dict[str, Any] = {"aid": None, "bvid": bvid, "title": "", "state": None, "state_desc": ""}
+    # bvid → aid：走公开 view 接口
+    if not aid and bvid:
+        info, why = await _get_json(
+            f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}",
+            _api_headers(cred, "https://www.bilibili.com"),
+        )
+        if info is None:
+            return {"ok": False, "action": "delete_video", "error": f"bvid 换 aid 失败：{why}"}
+        if int(info.get("code") or 0) != 0:
+            return {"ok": False, "action": "delete_video", "code": info.get("code"),
+                    "message": info.get("message"),
+                    "error": f"bvid 换 aid 接口返回 code={info.get('code')}: {info.get('message')}"}
+        vdata = info.get("data") or {}
+        owner_mid = str((vdata.get("owner") or {}).get("mid") or "")
+        if owner_mid and owner_mid != str(cred.get("dedeuserid") or ""):
+            return {"ok": False, "action": "delete_video",
+                    "error": f"该 bvid 不属于当前账号（owner mid={owner_mid}，当前 uid={cred.get('dedeuserid')}）"}
+        aid = int(vdata.get("aid") or 0)
+        resolved.update({
+            "aid": aid,
+            "bvid": vdata.get("bvid", bvid),
+            "title": vdata.get("title", ""),
+            "state": vdata.get("state"),
+            "state_desc": vdata.get("state_desc", ""),
+        })
+    else:
+        aid = int(aid)
+        resolved["aid"] = aid
+        if bvid:
+            resolved["bvid"] = bvid
+
+    if not confirm:
+        return {
+            "ok": True,
+            "action": "delete_video",
+            "will_delete": True,
+            "deleted": False,
+            "confirm_required": True,
+            "target": resolved,
+            "message": "confirm 不为 True：本次只做预览，未调用删稿接口。确认要删请传 confirm=True。",
+        }
+
+    url = f"{_ARCHIVE_DELETE_URL}?csrf={cred.get('bili_jct')}"
+    # 前端 deleteArticle 的真实字段：aid + geetest_challenge + geetest_validate + geetest_seccode。
+    # 这里 json / form 两种都试；只有账号命中 GAIA 风控（需先过验证码）时才需要传 geetest_*。
+    geetest = {k: kwargs.get(k) for k in ("geetest_challenge", "geetest_validate", "geetest_seccode")
+               if kwargs.get(k)}
+    attempts: list[dict[str, Any]] = []
+    final: dict[str, Any] | None = None
+    final_status = -1
+    for form in (False, True):
+        headers = _member_headers(cred)
+        headers["X-Requested-With"] = "XMLHttpRequest"
+        try:
+            import aiohttp
+
+            async with aiohttp.ClientSession() as session:
+                if form:
+                    body = {"aid": str(resolved["aid"]), "csrf": cred.get("bili_jct", ""),
+                            "del_reason": "", **geetest}
+                    async with session.post(url, data=body, headers=headers, timeout=_HTTP_TIMEOUT) as resp:
+                        status = resp.status
+                        data = await resp.json(content_type=None)
+                else:
+                    body = {"aid": resolved["aid"], "del_reason": "", **geetest}
+                    async with session.post(url, json=body, headers=headers, timeout=_HTTP_TIMEOUT) as resp:
+                        status = resp.status
+                        data = await resp.json(content_type=None)
+        except Exception as e:  # noqa: BLE001
+            attempts.append({"body_kind": "form" if form else "json", "error": f"{type(e).__name__}: {str(e)[:200]}"})
+            continue
+        attempts.append({"body_kind": "form" if form else "json", "request_body": body,
+                         "http_status": status, "response": data})
+        final, final_status = data, status
+        if isinstance(data, dict) and int(data.get("code") or 0) == 0:
+            break
+
+    code = int(final.get("code") or 0) if isinstance(final, dict) else None
+    result: dict[str, Any] = {
+        "ok": code == 0,
+        "action": "delete_video",
+        "url": url,
+        "http_status": final_status,
+        "code": code,
+        "message": (final or {}).get("message") if isinstance(final, dict) else None,
+        "deleted": code == 0,
+        "target": resolved,
+        "attempts": attempts,
+        "response": final,
+        "error": None if code == 0 else f"删稿接口返回 code={code}: {(final or {}).get('message') if isinstance(final, dict) else final}",
+        "note": "删除是否生效请用 my_videos 回读确认（删除后稿件不再出现在列表中）。",
+    }
+
+    # code != 0 时追加一次风险网关预检（/x/risk/archive/del），把风控判定一并带回，
+    # 便于定位是「参数错」还是「账号命中 GAIA 风控需人工过验证码」。
+    if code != 0:
+        # 与前端 getArchiveDelRisk 完全一致的参数：platform=web&bvid=<bvid>
+        risk_target = resolved.get("bvid") or ""
+        risk_qs = f"platform=web&bvid={risk_target}" if risk_target else f"platform=web&aid={resolved['aid']}"
+        risk_url = f"https://member.bilibili.com/x/risk/archive/del?{risk_qs}&csrf={cred.get('bili_jct')}"
+        try:
+            risk_headers = _member_headers(cred)
+            risk_headers["X-Requested-With"] = "XMLHttpRequest"
+            import aiohttp
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(risk_url, headers=risk_headers, timeout=_HTTP_TIMEOUT) as resp:
+                    risk_status = resp.status
+                    risk_body = await resp.json(content_type=None)
+                    gaia_vvoucher = resp.headers.get("x-bili-gaia-vvoucher")
+                    gaia_param = resp.headers.get("x-bili-gaia-param")
+        except Exception:  # noqa: BLE001
+            risk_body = None
+            risk_status = -1
+            gaia_vvoucher = None
+            gaia_param = None
+        result["risk_precheck"] = {
+            "url": risk_url,
+            "http_status": risk_status,
+            "response": risk_body,
+            "x_bili_gaia_vvoucher": gaia_vvoucher,
+            "x_bili_gaia_param": gaia_param,
+            "hint": (
+                "B 站删稿走 GAIA 风控网关：/x/web/archive/delete 命中风控时返回 code=340022「验证码错误」，"
+                "配套的 /x/risk/archive/del 会返回 code=340052「您的账号存在风险请先验证」。该挑战需在"
+                "创作中心（https://member.bilibili.com/platform/upload-manager/article）网页端人工通过"
+                "滑块/验证码后才能解除；纯 HTTP 无法自行通过，也不存在可绕过的免验证码删稿接口。"
+            ) if (isinstance(risk_body, dict) and int(risk_body.get("code") or 0) == 340052) else None,
+        }
+
+    return result
+
+
 # ============ 工具主体 ============
 
 
@@ -1435,7 +2092,7 @@ class BiliTool(Tool):
                 "action": {
                     "type": "string",
                     "enum": _ACTIONS,
-                    "description": "要执行的动作：search/hot/rank/video_info/user_info/user_videos（无需登录）；login/login_check/check_credential/status（登录与状态）；subtitle/comments/danmaku/favorite_lists/favorite_content/watch_later（需登录）；following/followers（关注/粉丝列表，需登录）；like（点赞/取消点赞，需登录）；reply/send_message（发送类，默认关闭）；config（发送开关与配额）；daily_report（刷一轮B站日报工作流）。",
+                    "description": "要执行的动作：search/hot/rank/video_info/user_info/user_videos（无需登录）；login/login_check/check_credential/status（登录与状态）；subtitle/comments/danmaku/favorite_lists/favorite_content/watch_later（需登录）；following/followers（关注/粉丝列表，需登录）；like（点赞/取消点赞，需登录）；reply/send_message（发送类，默认关闭）；config（发送开关与配额）；daily_report（刷一轮B站日报工作流）；my_videos/publish_video/delete_video（本账号稿件回读/投稿上传/删除稿件，需登录）。",
                 },
                 "keyword": {"type": "string", "description": "搜索关键词（search / daily_report）。"},
                 "keywords": {"type": "string", "description": "日报关键词组，逗号/分号/换行分隔（daily_report）。"},
@@ -1462,6 +2119,22 @@ class BiliTool(Tool):
                 "limit": {"type": "integer", "minimum": 1, "maximum": 20, "description": "最多逐条读字幕的候选数，默认8（daily_report）。"},
                 "picks": {"type": "integer", "minimum": 1, "maximum": 10, "description": "报告挑中条数上限，默认5（daily_report）。"},
                 "out_dir": {"type": "string", "description": "报告输出目录，默认 <data>/output（daily_report）。"},
+                "video_path": {"type": "string", "description": "视频文件绝对路径（publish_video，必填）。"},
+                "title": {"type": "string", "description": "稿件标题，最多 80 字（publish_video，必填）。"},
+                "desc": {"type": "string", "description": "稿件简介，最多 2000 字（publish_video）。"},
+                "tags": {
+                    "anyOf": [{"type": "array", "items": {"type": "string"}}, {"type": "string"}],
+                    "description": "标签，list 或逗号分隔字符串，1-10 个（publish_video）。",
+                },
+                "tid": {"type": "integer", "minimum": 1, "description": "分区 id，如 21=日常、231=计算机技术；默认 21（publish_video）。"},
+                "copyright": {"type": "integer", "enum": [1, 2], "description": "1=自制（默认），2=转载（publish_video）。"},
+                "cover_path": {"type": "string", "description": "封面图绝对路径，可选（publish_video）。"},
+                "dry_run": {"type": "boolean", "description": "true 时只做预上传/分片/合片校验，不提交稿件（publish_video，默认 false）。"},
+                "confirm": {"type": "boolean", "description": "必须显式 true 才真删；默认 false 只返回 will_delete 预览（delete_video）。"},
+                "geetest_challenge": {"type": "string", "description": "可选。账号命中 GAIA 风控时，网页端过滑块后从删稿请求里取到的 geetest_challenge 透传（delete_video）。"},
+                "geetest_validate": {"type": "string", "description": "可选。过滑块后取到的 geetest_validate 透传（delete_video）。"},
+                "geetest_seccode": {"type": "string", "description": "可选。过滑块后取到的 geetest_seccode 透传（delete_video）。"},
+                "status": {"type": "string", "description": "稿件状态过滤，逗号分隔，默认 is_pubing,pubed,not_pubed（my_videos）。"},
             },
             "required": ["action"],
         }
@@ -1504,6 +2177,9 @@ class BiliTool(Tool):
             "reply": _action_reply,
             "send_message": _action_send_message,
             "daily_report": _action_daily_report,
+            "my_videos": _action_my_videos,
+            "publish_video": _action_publish_video,
+            "delete_video": _action_delete_video,
         }
         fn = dispatch.get(action)
         if fn is None:
