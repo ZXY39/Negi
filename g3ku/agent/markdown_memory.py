@@ -111,6 +111,7 @@ def validate_memory_document(
     *,
     summary_max_chars: int,
     document_max_chars: int,
+    enforce_line_cap: bool = True,
 ) -> None:
     normalized = str(text or "")
     if len(normalized) > int(document_max_chars):
@@ -121,6 +122,12 @@ def validate_memory_document(
     reconstructed = "".join(format_memory_entry(item) for item in parsed).strip()
     if normalized.strip() != reconstructed:
         raise ValueError("memory document contains invalid blocks")
+    if not enforce_line_cap:
+        # The line cap prices a write, not the store's history. Re-rendering what the
+        # library already holds must succeed even when older rows predate a lowered cap,
+        # or every batch dies on a line nobody submitted. Over-cap rows are surfaced as
+        # their own finding (doctor's `over_cap_lines`), which is a work list, not a fault.
+        return
     for item in parsed:
         summary = str(item.summary or "").strip()
         if len(summary) > int(summary_max_chars):

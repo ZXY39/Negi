@@ -2637,6 +2637,7 @@ class MemoryManager:
             entries_text,
             summary_max_chars=int(getattr(self.config.document, "summary_max_chars", 300) or 300),
             document_max_chars=max(int(getattr(self.config.document, "document_max_chars", 42000) or 42000), 1),
+            enforce_line_cap=False,
         )
 
     def _managed_document_text(self, entries_text: str) -> str:
@@ -2860,11 +2861,25 @@ class MemoryManager:
         document_limit = int(getattr(self.config.document, "document_max_chars", 42000) or 42000)
         document_error = ""
         document_valid = True
+        # The migration list for a lowered cap: resident lines still over the write contract.
+        # Read off the rendered document, not the store - doctor also runs against a read-only
+        # manager with no state db, and the rendered line is the thing that can answer in
+        # place of a note. It is a work list, not a document defect, so the shape check below
+        # stops charging the cap and this finding carries it.
+        over_cap_lines = sorted(
+            (
+                (len(str(item.summary or "").strip()), str(item.note_ref or ""))
+                for item in parse_memory_document(entries_text)
+                if len(str(item.summary or "").strip()) > summary_limit
+            ),
+            reverse=True,
+        )
         try:
             validate_memory_document(
                 entries_text,
                 summary_max_chars=summary_limit,
                 document_max_chars=document_limit,
+                enforce_line_cap=False,
             )
         except Exception as exc:
             document_valid = False
@@ -2896,6 +2911,23 @@ class MemoryManager:
                 "detail": "valid"
                 if document_valid
                 else (document_error or "memory document contains invalid blocks"),
+            },
+            {
+                "name": "over_cap_lines",
+                "ok": not over_cap_lines,
+                "detail": (
+                    "none"
+                    if not over_cap_lines
+                    else "%d resident rows over %d chars; longest %s"
+                    % (
+                        len(over_cap_lines),
+                        summary_limit,
+                        ", ".join(
+                            "%d%s" % (chars, ("(note)" if ref else ""))
+                            for chars, ref in over_cap_lines[:5]
+                        ),
+                    )
+                ),
             },
             {
                 "name": "missing_note_refs",
@@ -6526,6 +6558,12 @@ class MemoryManager:
                 document_text,
                 summary_max_chars=summary_limit,
                 document_max_chars=document_limit,
+                # The line cap is charged per written entry above, with the entry's identity
+                # and counts. Re-pricing every resident row here turns a legacy row into an
+                # error no submitted entry can fix - measured when the cap moved 300 -> 200
+                # with 36 of 93 rows still over it: every batch parked on "summary line
+                # exceeds 200 chars" and burned all its repair rounds on that one message.
+                enforce_line_cap=False,
             )
         except ValueError as exc:
             # Measured against the limit directly, not against the error wording: only a

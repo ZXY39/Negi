@@ -9,6 +9,8 @@ from __future__ import annotations
 import importlib
 from pathlib import Path
 
+import pytest
+
 
 def _module():
     return importlib.import_module("g3ku.agent.memory_agent_runtime")
@@ -173,3 +175,115 @@ def test_manager_payload_prints_the_configured_budget(tmp_path: Path) -> None:
     )
 
     assert "173" in prompt
+
+
+def _manager(tmp_path: Path, *, limit: int):
+    mod = _module()
+    schema = importlib.import_module("g3ku.config.schema")
+    cfg = schema.MemoryToolsConfig()
+    cfg.document.summary_max_chars = limit
+    cfg.document.document_max_chars = 20000
+    cfg.queue.max_wait_seconds = 0
+    return mod.MemoryManager(tmp_path, cfg)
+
+
+def _seed(manager, *, body: str, minimal: str) -> None:
+    manager._memory_repo.create_memory(
+        memory_body=body,
+        minimal_memory=minimal,
+        source="self",
+        from_user=False,
+        now_iso="2026-04-25T00:00:00+08:00",
+    )
+    manager._rebuild_memory_snapshot_from_sqlite(now_iso="2026-04-25T00:00:30+08:00")
+
+
+def _write_batch(mod, request_id: str = "write_1"):
+    return mod.MemoryBatch(
+        op="write",
+        items=[
+            mod.MemoryQueueRequest(
+                op="write",
+                decision_source="self",
+                payload_text="把这条长期规则记住",
+                created_at="2026-04-25T00:00:32+08:00",
+                request_id=request_id,
+            )
+        ],
+    )
+
+
+def test_legacy_over_cap_row_does_not_block_an_unrelated_batch(tmp_path: Path) -> None:
+    """A resident row the batch never touched cannot be the reason the batch fails.
+
+    Measured as parked record write_ceb5d98878d5 (2026-11-05 20:31): with the cap moved
+    300 -> 200 while 36 of 93 rows were still over it, every batch raised "summary line
+    exceeds 200 chars" for a row nobody submitted, and spent all three attempts on an
+    error the model cannot fix.
+    """
+    mod = _module()
+    manager = _manager(tmp_path, limit=200)
+    try:
+        _seed(manager, body="旧" * 250, minimal="旧规则->保留")
+        session = _session(tmp_path, limit=200, snapshot=manager.snapshot_text())
+        staged = session.apply_batch(
+            adds=[_add_entry(chars=90, note_ref="note_play_materials")],
+            note_upserts={"note_play_materials": "正文"},
+        )
+        assert staged.get("ok") is True, staged
+
+        validated = manager._build_validated_write_from_apply_batch(
+            before_text=manager.snapshot_text(),
+            session=session,
+            batch=_write_batch(mod),
+        )
+        assert validated is not None
+    finally:
+        manager.close()
+
+
+def test_line_cap_is_a_write_gate_not_a_history_audit(tmp_path: Path) -> None:
+    """Strict mode still prices a document handed in; re-rendering the store does not."""
+    markdown = importlib.import_module("g3ku.agent.markdown_memory")
+    oversized = "260425:" + "长" * 240 + "\n"
+
+    with pytest.raises(ValueError, match="summary line exceeds 200"):
+        markdown.validate_memory_document(oversized, summary_max_chars=200, document_max_chars=20000)
+
+    markdown.validate_memory_document(
+        oversized,
+        summary_max_chars=200,
+        document_max_chars=20000,
+        enforce_line_cap=False,
+    )
+
+    # The other guarantees stay in force when the cap does not.
+    with pytest.raises(ValueError, match="exceeds 100 chars"):
+        markdown.validate_memory_document(
+            oversized,
+            summary_max_chars=200,
+            document_max_chars=100,
+            enforce_line_cap=False,
+        )
+    with pytest.raises(ValueError, match="invalid blocks"):
+        markdown.validate_memory_document(
+            "not a memory line\n",
+            summary_max_chars=200,
+            document_max_chars=20000,
+            enforce_line_cap=False,
+        )
+
+
+def test_doctor_lists_over_cap_rows_as_migration_work(tmp_path: Path) -> None:
+    manager = _manager(tmp_path, limit=200)
+    try:
+        _seed(manager, body="旧" * 250, minimal="旧规则->保留")
+        checks = {str(item.get("name")): item for item in manager.doctor_report()["checks"]}
+
+        assert "over_cap_lines" in checks
+        assert checks["over_cap_lines"]["ok"] is False
+        assert "250" in checks["over_cap_lines"]["detail"]
+        # shape is intact; the cap finding is its own row, not a broken-document alarm
+        assert checks["memory_document"]["ok"] is True
+    finally:
+        manager.close()
