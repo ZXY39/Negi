@@ -14,6 +14,8 @@ Microsoft Edge（`channel="msedge"` + 常驻 user-data 目录），保留并复�
 - 用户要「分镜/取帧/关键画面采样」（把同一作品多张实拍画面拼成带格编号的图）
 - 用户明确允许后要「评论/回复/转发」（发送类默认全部关闭，见「发送许可」）
 - 用户要「发作品 / 上传视频 / 存草稿」（`action="publish"`，**草稿箱模式优先**，见「发作品」）
+- 用户明确要求「删掉我那条作品 / 下架这个视频」（`action="delete_work"`，不可逆，**默认只预览不点按钮**，
+  见「删除作品」）
 
 ## 运行依赖与安装
 
@@ -142,6 +144,40 @@ Microsoft Edge（`channel="msedge"` + 常驻 user-data 目录），保留并复�
 - **解析不到卡片**：返回 `status=ok` + 说明（可能确实没有作品，`total=0`；或创作者中心列表结构
   变了），带截图核对，**不臆造条目**。
 - 只列已发布/审核中等当前列表里的作品；草稿箱不在这个页面（内容管理没有草稿 Tab）。
+
+### 删除作品（action="delete_work"，不可逆）
+
+从创作者中心内容管理页删除本账号的一条作品。删除不可逆，因此**默认一次按钮都不点**。
+
+- **参数**：`aweme_id` 与 `title` 二选一（定位用，都不给 → `status=error` 并点名缺哪个），
+  `confirm`（必须显式 `true` 才真删）。
+- **闸门是参数级，不走 `send_policy`**：删除不是发言，因此不读 `allow_comment` / `allow_publish`
+  那套文件开关，也不占发送配额，只记账（`usage.json` 的 `delete` 计数 + `delete_last_ts`，
+  返回为 `usage_today_delete`）。唯一闸门是 `confirm=true`：`confirm` 缺省或 false →
+  `status=blocked` + `confirm=false` + `reason`，并回显 `target_aweme_id` / `target_title`，
+  页面一次点击都不发生。
+- **定位**：卡片按 `[class*="video-card"]` 最外层取；`aweme_id` 匹配卡片内 `<a>` 的 href、
+  卡片文本或标题，`title` 按标题子串匹配。命中多张取列表里靠前的那一张
+  （`matched_card_index` / `matched_card_title` 回显实际选中的那张）。一张都不匹配 →
+  `status=not_found` + 截图，不做任何删除。
+- **与 `my_works` 的配合**：`my_works` 的条目**不含 aweme_id**（只有
+  title/duration/publish_time/status/stats）。所以常规做法是先用 `my_works` 拿到精确标题、
+  再用同一 `title` 带 `confirm=true` 删除；只有从别处（视频详情、互动消息定位）已经拿到
+  aweme_id 时才按 id 删，那是更可靠的一条匹配路径。
+- **按钮路径（实测）**：每张卡片的操作行直接渲染「编辑作品 / 设置权限 / 作品置顶 / 删除作品」
+  四颗按钮，**没有**「更多」悬浮菜单，所以从卡片上直点「删除作品」（取面积最小的可见匹配元素，
+  真实鼠标点击，失败退化为 DOM dispatch）。随后在弹窗内按 `确认删除 / 删除 / 确定 / 确认` 取
+  限定在 modal/dialog 作用域里的最小按钮。缺按钮 → `status=delete_button_not_found`；
+  缺弹窗 → `status=confirm_dialog_not_found` 并附 `modal_texts`（弹窗文本前 300 字）与截图，
+  两种情况都**不宣称已删除**。
+- **回执按回读判定**：确认点击后重新解析列表，目标卡片仍在 → `status=delete_unverified` +
+  `still_present=true` + 「需人工核对」；卡片消失才 `status=deleted` + `deleted=true`。
+  删除前后各存一张截图（`screenshot_before` / `screenshot_after`），`cards_on_page` 带回本次
+  页面上看到的卡片清单，便于核对定位是否选错。
+- **登录判定沿用 `my_works` 那套页面实测口径**（创作者中心域下 `_detect_login` 的头像探测不适用）：
+  被登录墙挡住 → `status=login_required` + 截图，明确说明未做任何删除。
+- **安全**：`title` 是子串匹配，同名或标题互为前后缀的作品会命中靠前的那一张；一次只删一条，
+  不批量。删除前必须已得到用户本人对"这一条"的明确指示。
 
 ### 互动消息与针对性回复（action="interactions"，只读；回复复用 reply_to_comment）
 
@@ -302,22 +338,28 @@ Microsoft Edge（`channel="msedge"` + 常驻 user-data 目录），保留并复�
 {"action": "comments", "slot": 1, "max_items": 30, "verify_aweme_id": false}
 {"action": "publish", "video_path": "C:\\videos\\demo.mp4", "title": "标题", "desc": "简介", "tags": ["话题A", "话题B"], "mode": "draft", "allow_send": true}
 {"action": "publish", "video_path": "C:\\videos\\demo.mp4", "title": "标题", "mode": "publish", "allow_send": true, "allow_publish": true}
+{"action": "delete_work", "title": "标题片段"}
+{"action": "delete_work", "aweme_id": "7703073192813989105", "confirm": true}
+{"action": "delete_work", "title": "标题片段", "confirm": true}
 ```
 
 - `action`（必填）：`open | login_status | login_check | login_export | login_restore |
   feed | search | video | storyboard | comments | watch_report | my_works | interactions |
-  send_comment | reply_to_comment | send_forward | publish | usage | health | close`
+  send_comment | reply_to_comment | send_forward | publish | delete_work | usage | health | close`
 - `keyword`：搜索词/报告主题；`max_items`：1-40（comments 时是评论条数上限，默认 30）；
   `frame_count`：2-16；`slot`：第几个 feed 条目进播放器（1 起）；`text`：评论/回复正文；
   `comment_index`：回复目标评论的 1-based 序号（取 comments 返回的 `index`）；
   `comment_text_match`：按正文/作者子串定位回复目标（与 `comment_index` 二选一）；
   `allow_send`：发送显式许可；`verify_aweme_id`：默认 true，关闭后不因不一致中止
   （仍返回两个 aweme_id 与 `aweme_match`，仅调试用）；
-  `video_path`/`title`/`desc`/`tags`/`mode`/`allow_publish`：发作品专用，见「发作品」；
+  `video_path`/`title`/`desc`/`tags`/`mode`/`allow_publish`：发作品专用，见「发作品」
+  （`title` 同时是 `delete_work` 的定位口径之一）；
+  `confirm`：删除作品专用，显式 true 才真删，缺省只回 `blocked` 预览，见「删除作品」；
   `hours`：互动消息时间窗（小时，默认 24）；`tab`：互动消息分类
   `all|comment|mention|like|fan|recommend`（默认 all）；`locate_item`：对即将返回的第 N 条
   通知（`index`）做视频+评论定位，产出 `locate.reply_hint`；`aweme_id`：`reply_to_comment`
-  按视频 id 直接定位（替代 `slot`，两者二选一；同时给时以 `aweme_id` 优先）。
+  按视频 id 直接定位（替代 `slot`，两者二选一；同时给时以 `aweme_id` 优先），
+  `delete_work` 也用它按 id 定位作品卡片。
 
 ## 返回结构
 

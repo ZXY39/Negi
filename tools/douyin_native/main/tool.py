@@ -1134,6 +1134,7 @@ class DouyinNativeTool(Tool):
                         "feed", "search", "video", "like", "storyboard", "comments", "watch_report",
                         "my_works", "interactions",
                         "send_comment", "reply_to_comment", "send_forward", "publish",
+                        "delete_work",
                         "usage", "health", "close",
                     ],
                     "description": "Douyin capability to run (see toolskill for details).",
@@ -4914,6 +4915,258 @@ class DouyinNativeTool(Tool):
         )
         return result
 
+    # -- delete own work (创作者中心 内容管理) --------------------------------
+
+    async def _list_work_cards(self, page) -> list[dict[str, Any]]:
+        """Top-level work cards on 内容管理 as index + text + hrefs (read-only)."""
+        cards = await page.evaluate(
+            """() => {
+                const all = [...document.querySelectorAll('[class*="video-card"]')];
+                const top = all.filter(e => !all.some(o => o !== e && o.contains(e)));
+                return top.map((card, idx) => ({
+                    idx: idx,
+                    text: (card.innerText || '').slice(0, 300),
+                    hrefs: Array.from(card.querySelectorAll('a')).map(a => a.getAttribute('href') || '').join(' '),
+                    title: card.querySelector('[class*="info-title-text"]')
+                        ? card.querySelector('[class*="info-title-text"]').innerText.trim() : '',
+                }));
+            }"""
+        )
+        return [c for c in (cards or []) if isinstance(c, dict)]
+
+    async def _click_box(self, page, box: list[int]) -> bool:
+        """Real pointer click at an element centre, with a dispatch fallback."""
+        x, y = int(box[0]), int(box[1])
+        try:
+            await page.mouse.move(x, y)
+            await asyncio.sleep(0.15)
+            await page.mouse.click(x, y)
+            return True
+        except Exception:
+            pass
+        try:
+            await page.evaluate(
+                """([x, y]) => {
+                    const el = document.elementFromPoint(x, y);
+                    if (!el) return false;
+                    const target = el.closest('button,li,a,div[role="menuitem"]') || el;
+                    target.click();
+                    return true;
+                }""",
+                [x, y],
+            )
+            return True
+        except Exception:
+            return False
+
+    async def _act_delete_work(
+        self,
+        page,
+        aweme_id: str | None,
+        title: str | None,
+        confirm: bool,
+    ) -> dict[str, Any]:
+        """Delete one of this account's own works from the creator centre list.
+
+        Locates the card on 内容管理 by aweme_id (matched against any link href or the
+        card text) or by a title substring. ``confirm=False`` is a dry run: it reports
+        what it found and clicks nothing. With ``confirm=True`` it opens the card's
+        更多 menu, clicks 删除, confirms in the modal, then re-reads the list to prove
+        the work is gone. Delete reduces public content, so it is gated on an explicit
+        ``confirm=true`` (mirroring publish's double gate) but intentionally does NOT
+        depend on send_policy allow_publish.
+        """
+        target_id = (aweme_id or "").strip()
+        target_title = (title or "").strip()
+        if not target_id and not target_title:
+            return {
+                "status": "error",
+                "action": "delete_work",
+                "message": "delete_work 需要 aweme_id 或 title 二选一，用于在内容管理页定位作品",
+            }
+        if not confirm:
+            return {
+                "status": "blocked",
+                "action": "delete_work",
+                "confirm": False,
+                "reason": (
+                    "删除是不可逆的破坏性操作：请带 aweme_id/title 并显式 confirm=true 重试。"
+                    "本次未点击任何按钮，未删除任何作品。"
+                ),
+                "target_aweme_id": target_id,
+                "target_title": target_title,
+            }
+
+        result: dict[str, Any] = {
+            "action": "delete_work",
+            "manage_url": _DOUYIN_CREATOR_MANAGE,
+            "target_aweme_id": target_id,
+            "target_title": target_title,
+            "confirm": True,
+            "card_found": False,
+            "matched_card_index": None,
+            "delete_button_clicked": False,
+            "confirm_clicked": False,
+        }
+
+        await self._goto(page, _DOUYIN_CREATOR_MANAGE, wait_ms=6000)
+        wall = await self._creator_login_wall(page)
+        result["login_wall"] = wall
+        if wall.get("blocked"):
+            result.update(
+                {
+                    "status": "login_required",
+                    "message": "创作者中心内容管理页未登录，无法删除作品（未做任何删除操作）",
+                    "screenshot": await self._shot(page, "delete_work_login_required"),
+                }
+            )
+            return result
+
+        # let the list render, then locate the target card
+        cards: list[dict[str, Any]] = []
+        for _ in range(10):
+            cards = await self._list_work_cards(page)
+            if cards:
+                break
+            await asyncio.sleep(1.5)
+        result["cards_on_page"] = [
+            {"index": c.get("idx"), "title": c.get("title"), "head": (c.get("text") or "")[:120]}
+            for c in cards
+        ]
+
+        def _matches(card: dict[str, Any]) -> bool:
+            text = card.get("text") or ""
+            hrefs = card.get("hrefs") or ""
+            ti = card.get("title") or ""
+            if target_id and (target_id in hrefs or target_id in text or target_id in ti):
+                return True
+            if target_title and target_title in ti:
+                return True
+            return False
+
+        matched = [c for c in cards if _matches(c)]
+        if not matched:
+            result.update(
+                {
+                    "status": "not_found",
+                    "message": (
+                        "内容管理页没有匹配到目标作品：按 aweme_id 未在卡片链接/文本命中，"
+                        "按 title 也未在卡片标题命中。未做任何删除。"
+                    ),
+                    "screenshot": await self._shot(page, "delete_work_not_found"),
+                }
+            )
+            return result
+
+        card = matched[0]
+        idx = int(card.get("idx"))
+        result.update({"card_found": True, "matched_card_index": idx, "matched_card_title": card.get("title")})
+        result["screenshot_before"] = await self._shot(page, "delete_work_before")
+
+        # Real DOM (probed 2026-11-05): each card renders an op-btns row with four direct
+        # buttons — 编辑作品 / 设置权限 / 作品置顶 / 删除作品. There is NO 更多 hover menu,
+        # so click 删除作品 straight from the card.
+        del_box = await page.evaluate(
+            """(idx) => {
+                const all = [...document.querySelectorAll('[class*="video-card"]')];
+                const top = all.filter(e => !all.some(o => o !== e && o.contains(e)));
+                const card = top[idx];
+                if (!card) return null;
+                let best = null;
+                for (const el of card.querySelectorAll('div,span,button,a')) {
+                    const tt = (el.innerText || '').trim();
+                    if (!['删除作品', '删除'].includes(tt)) continue;
+                    const b = el.getBoundingClientRect();
+                    if (b.width <= 2 || b.height <= 2) continue;
+                    const area = b.width * b.height;
+                    if (!best || area < best.area) {
+                        best = {area: area, box: [Math.round(b.x + b.width / 2), Math.round(b.y + b.height / 2)], text: tt};
+                    }
+                }
+                return best;
+            }""",
+            idx,
+        )
+        if not del_box:
+            result.update(
+                {
+                    "status": "delete_button_not_found",
+                    "message": "卡片上没找到「删除作品」按钮（页面结构可能变化），未执行删除",
+                    "screenshot": await self._shot(page, "delete_work_button_missing"),
+                }
+            )
+            return result
+        result["delete_button_text"] = del_box.get("text")
+        result["delete_button_clicked"] = await self._click_box(page, del_box["box"])
+        await asyncio.sleep(1.5)
+
+        # confirm inside the modal — prefer 确认删除 / 删除 / 确定, scoped to a modal/dialog
+        confirm_btn = await page.evaluate(
+            """() => {
+                const labels = ['确认删除', '删除', '确定', '确认'];
+                const modals = Array.from(document.querySelectorAll(
+                    '[class*="modal"],[class*="Modal"],[class*="dialog"],[class*="Dialog"],[role="dialog"]'));
+                const scope = modals.length ? modals : [document];
+                let best = null;
+                for (const root of scope) {
+                    for (const el of root.querySelectorAll('button,[role="button"],div,span,a')) {
+                        const tt = (el.innerText || '').trim();
+                        if (!labels.includes(tt)) continue;
+                        const b = el.getBoundingClientRect();
+                        if (b.width <= 2 || b.height <= 2) continue;
+                        const cls = typeof el.className === 'string' ? el.className : '';
+                        const isBtn = el.tagName === 'BUTTON' || /semi-button|btn/i.test(cls);
+                        const score = (isBtn ? 0 : 5000) + b.width * b.height;
+                        if (!best || score < best.score) {
+                            best = {score: score, box: [Math.round(b.x + b.width / 2), Math.round(b.y + b.height / 2)],
+                                    text: tt, cls: cls.slice(0, 80)};
+                        }
+                    }
+                }
+                return best;
+            }"""
+        )
+        if not confirm_btn:
+            modal_dump = await page.evaluate(
+                """() => {
+                    const modals = Array.from(document.querySelectorAll(
+                        '[class*="modal"],[class*="Modal"],[class*="dialog"],[class*="Dialog"],[role="dialog"]'));
+                    return modals.map(m => (m.innerText || '').slice(0, 300));
+                }"""
+            )
+            result["modal_texts"] = modal_dump
+            result.update(
+                {
+                    "status": "confirm_dialog_not_found",
+                    "message": "没找到删除确认弹窗的确认按钮，删除可能未生效",
+                    "screenshot": await self._shot(page, "delete_work_confirm_missing"),
+                }
+            )
+        else:
+            result["confirm_button_text"] = confirm_btn.get("text")
+            result["confirm_button_cls"] = confirm_btn.get("cls")
+            result["confirm_clicked"] = await self._click_box(page, confirm_btn["box"])
+        await asyncio.sleep(3.0)
+
+        # re-read the list to prove the work is gone
+        still = [c for c in (await self._list_work_cards(page)) if _matches(c)]
+        result["still_present"] = bool(still)
+        result["screenshot_after"] = await self._shot(page, "delete_work_after")
+        today = self._record_send_usage("delete")
+        result.update(
+            {
+                "status": "deleted" if (result["confirm_clicked"] and not result["still_present"]) else "delete_unverified",
+                "deleted": bool(result["confirm_clicked"] and not result["still_present"]),
+                "usage_today_delete": today.get("delete", 0),
+                "message": (
+                    "已确认弹窗并回读：该作品已不在内容管理列表"
+                    if (result["confirm_clicked"] and not result["still_present"])
+                    else "删除流程已点击，但回读列表仍能看到目标作品，需人工核对"
+                ),
+            }
+        )
+        return result
+
     async def _act_usage(self) -> dict[str, Any]:
         usage = self._usage()
         policy = self._send_policy()
@@ -5102,6 +5355,13 @@ class DouyinNativeTool(Tool):
                 kw.get("mode") or "draft",
                 bool(kw.get("allow_send", False)),
                 bool(kw.get("allow_publish", False)),
+            )
+        if action == "delete_work":
+            return await self._act_delete_work(
+                page,
+                kw.get("aweme_id"),
+                kw.get("title"),
+                bool(kw.get("confirm", False)),
             )
         return {"status": "error", "message": f"unknown action {action}", "session": session}
 

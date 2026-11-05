@@ -53,6 +53,7 @@ parameters:
       - reply_to_comment
       - send_forward
       - publish
+      - delete_work
       - usage
       - health
       - close
@@ -207,6 +208,12 @@ parameters:
         publish = click 发布 and additionally requires send_policy.json
         allow_publish=true AND the caller passing mode=publish explicitly. The
         tool refuses mode=publish otherwise (returns blocked).
+    confirm:
+      type: boolean
+      description: >-
+        delete_work only. Deleting is irreversible, so the real delete requires an
+        explicit confirm=true. With confirm=false (default) the action is a dry run: it
+        locates the target work and reports what it found but clicks nothing.
     include_frames:
       type: boolean
       description: Whether watch_report samples storyboard frames for the first few items.
