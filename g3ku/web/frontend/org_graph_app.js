@@ -6950,7 +6950,9 @@ function resolveCeoToolEventStatus(event = {}) {
     const { status } = ceoPayloadStatus(event?.text || "");
     if (status === "background_running") return "running";
     if (status === "completed") return "success";
-    if (["stopped", "failed", "error", "not_found", "unavailable"].includes(status)) return "error";
+    // 成败不再在这里扫结果正文判第二遍：帧上的 status 由执行侧按同一条判据算出，
+    // 与账本里那一行同源。这里再判一次就会两条车道分叉——正文写着 "stopped" 的
+    // 成功取消被画成感叹号，退出码非零的 exec 反过来在账本里变回 √。
     return fallback;
 }
 

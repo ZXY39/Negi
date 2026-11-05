@@ -9877,12 +9877,7 @@ class ReActToolLoop:
         role = str((message or {}).get('role') or '').strip().lower()
         if role == 'tool':
             summary, _ref = content_summary_and_ref((message or {}).get('content'))
-            lowered = summary.lower()
-            if (
-                is_error_like_tool_result(summary)
-                or '"status":"error"' in lowered
-                or '"status": "error"' in lowered
-            ):
+            if is_error_like_tool_result(summary):
                 tool_name = str((message or {}).get('name') or 'tool').strip() or 'tool'
                 return self._truncate_compact_text(f'Investigate failed tool result: {tool_name}')
         if role == 'user' and self._is_result_contract_prompt(message):

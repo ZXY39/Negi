@@ -129,7 +129,7 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${APP_CODE}\nthis.__testExports = { ceoFriendlyToolName, applyCeoToolEventToTurn, HTMLElement };`,
+        `${APP_CODE}\nthis.__testExports = { ceoFriendlyToolName, applyCeoToolEventToTurn, resolveCeoToolEventStatus, HTMLElement };`,
         context
     );
     return context.__testExports;
@@ -200,6 +200,47 @@ test("a finished live tool flips the same row to the check icon", () => {
     const icon = item.querySelector(".tool-status-icon");
     assert.equal(icon.className, "tool-status-icon is-success");
     assert.match(icon.innerHTML, /data-lucide="check"/);
+});
+
+test("a failed exec frame keeps the alert icon its ledger row will draw", () => {
+    const { applyCeoToolEventToTurn } = loadApp();
+    const turn = makeTurn();
+
+    const item = applyCeoToolEventToTurn(turn, {
+        tool_name: "exec",
+        tool_call_id: "call_live_err",
+        timestamp: new Date().toISOString(),
+        status: "error",
+        kind: "tool_end",
+        text: '{"status": "error", "exit_code": 1, "head_preview": "STDERR: boom"}',
+    });
+
+    assert.equal(item.dataset.stepState, "error");
+    const icon = item.querySelector(".tool-status-icon");
+    assert.equal(icon.className, "tool-status-icon is-error");
+    assert.match(icon.innerHTML, /data-lucide="alert-circle"/);
+});
+
+test("the live row does not judge failure from the result text a second time", () => {
+    // 成败只读帧上那颗 status（执行侧按唯一判据算出，与账本同一源）。
+    // 在飞行的文本面再扫一遍失败词，会和账本卡片分叉：一次成功的任务取消
+    // （正文写 "stopped"）当场画感叹号，下一帧被 √ 顶掉。
+    const { resolveCeoToolEventStatus } = loadApp();
+
+    assert.equal(
+        resolveCeoToolEventStatus({
+            status: "success",
+            text: '{"status": "stopped", "task_id": "task:a"}',
+        }),
+        "success",
+    );
+    assert.equal(
+        resolveCeoToolEventStatus({
+            status: "running",
+            text: '{"status": "background_running", "job_id": "tooljob:1"}',
+        }),
+        "running",
+    );
 });
 
 test("stylesheets give live rows the tool-card shape, not the rail", () => {
