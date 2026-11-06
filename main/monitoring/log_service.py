@@ -4245,6 +4245,7 @@ class TaskLogService:
                     if str(item or '').strip()
                 ],
                 'active_round_started_at': str(next_frame.get('active_round_started_at') or ''),
+                'acceptance_tail_built_at': str(next_frame.get('acceptance_tail_built_at') or ''),
                 'pending_tool_calls': [dict(item) for item in list(next_frame.get('pending_tool_calls') or []) if isinstance(item, dict)],
                 'pending_child_specs': [dict(item) for item in list(next_frame.get('pending_child_specs') or []) if isinstance(item, dict)],
                 'partial_child_results': [dict(item) for item in list(next_frame.get('partial_child_results') or []) if isinstance(item, dict)],
@@ -4455,6 +4456,7 @@ class TaskLogService:
             # ref/count 必须随帧一起带回：读-改-写回路只有拿到原指针才不会把历史写没。
             'messages_ref': ref,
             'messages_count': len(messages) if messages else stored_messages_count,
+            'acceptance_tail_built_at': str(payload.get('acceptance_tail_built_at') or ''),
             'pending_tool_calls': [dict(item) for item in list(payload.get('pending_tool_calls') or []) if isinstance(item, dict)],
             'pending_child_specs': [dict(item) for item in list(payload.get('pending_child_specs') or []) if isinstance(item, dict)],
             'partial_child_results': [dict(item) for item in list(payload.get('partial_child_results') or []) if isinstance(item, dict)],
@@ -5304,6 +5306,9 @@ class TaskLogService:
             # 本函数按枚举键清洗，漏一个键等于删一个键：messages 指针必须过沙。
             'messages_ref': str(payload.get('messages_ref') or ''),
             'messages_count': int(payload.get('messages_count') or 0),
+            # 验收尾块的装配时刻：随帧一起存活，续跑时据此把锚同步回真正用于
+            # 本轮请求的那份尾块（P4 的未见通知复核读它）。
+            'acceptance_tail_built_at': str(payload.get('acceptance_tail_built_at') or ''),
             'pending_tool_calls': [dict(item) for item in list(payload.get('pending_tool_calls') or []) if isinstance(item, dict)],
             'pending_child_specs': [dict(item) for item in list(payload.get('pending_child_specs') or []) if isinstance(item, dict)],
             'partial_child_results': [dict(item) for item in list(payload.get('partial_child_results') or []) if isinstance(item, dict)],

@@ -188,6 +188,116 @@ async def test_pass_is_held_when_a_notice_arrived_after_the_last_hop_started(tmp
         await service.close()
 
 
+def _stamp_tail_anchor(service: MainRuntimeService, built_at: str) -> None:
+    service.store.update_node(
+        ACCEPTANCE,
+        lambda record: record.model_copy(
+            update={
+                'metadata': {
+                    **dict(record.metadata or {}),
+                    'acceptance_tail_built_at': built_at,
+                }
+            }
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_notice_after_tail_assembly_is_held_before_the_hop_request_starts(tmp_path, monkeypatch):
+    """锚是尾块装配时刻，不是最后一跳请求起点。
+
+    通知在 10:00:01 投递：晚于尾块装配（10:00:00），但早于最后一跳请求起点
+    （10:00:05 收口 - 2000ms = 10:00:03）。按请求起点判会误以为它在本轮请求里，
+    按装配时刻判才知道这一轮根本看不见它。
+    """
+    service = _service(tmp_path)
+    try:
+        _seed(service)
+        service.store.update_node(
+            ACCEPTANCE,
+            lambda record: record.model_copy(
+                update={'status': 'success', 'final_output': '验收裁定：通过'}
+            ),
+        )
+        _stamp_tail_anchor(service, '2026-10-24T10:00:00+08:00')
+        _record_last_hop(service, created_at='2026-10-24T10:00:05+08:00', duration_ms=2000)
+        _queue_delivered(
+            service,
+            node_id=CHILD,
+            message='前门补充：装配后才到',
+            notification_id='notif:unseen:assembly-race',
+            kind='frontdoor_notice',
+            delivered_at='2026-10-24T10:00:01+08:00',
+        )
+        requested: list[str] = []
+        monkeypatch.setattr(service.node_runner, 'acceptance_handoff_requeue_callback', requested.append)
+
+        handled = await service.node_runner._handle_acceptance_node_result(
+            task=service.store.get_task(TASK),
+            acceptance=service.store.get_node(ACCEPTANCE),
+            result=_pass_result(),
+        )
+
+        assert handled.delivery_status == 'partial'
+        assert '验收暂缓' in handled.summary
+        assert requested == [TASK]
+        assert service.store.get_node(ACCEPTANCE).status == 'in_progress'
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_acceptance_prompt_assembly_stamps_metadata_and_frame(tmp_path):
+    service = _service(tmp_path)
+    try:
+        _seed(service)
+        task = service.store.get_task(TASK)
+        acceptance = service.store.get_node(ACCEPTANCE)
+
+        await service.node_runner._build_messages(task=task, node=acceptance)
+
+        stamped = str(
+            dict(service.store.get_node(ACCEPTANCE).metadata or {}).get('acceptance_tail_built_at') or ''
+        ).strip()
+        assert stamped
+        frame = service.log_service.read_runtime_frame(TASK, ACCEPTANCE) or {}
+        assert str(frame.get('acceptance_tail_built_at') or '').strip() == stamped
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_resuming_from_a_frame_restores_that_frames_tail_anchor(tmp_path):
+    """旧帧续跑时，锚要退回该帧装配时的时刻，不能被之后放弃的新构建推前。"""
+    service = _service(tmp_path)
+    try:
+        _seed(service)
+        task = service.store.get_task(TASK)
+        service.log_service.update_frame(
+            TASK,
+            ACCEPTANCE,
+            lambda frame: {
+                **dict(frame or {}),
+                'messages': [{'role': 'user', 'content': 'old acceptance context'}],
+                'acceptance_tail_built_at': '2026-10-24T09:00:00+08:00',
+            },
+        )
+        _stamp_tail_anchor(service, '2026-10-24T10:00:00+08:00')
+
+        state = await service.node_runner._resume_react_state(
+            task=task,
+            node=service.store.get_node(ACCEPTANCE),
+        )
+
+        assert state['message_source'] == 'restored_frame'
+        synced = str(
+            dict(service.store.get_node(ACCEPTANCE).metadata or {}).get('acceptance_tail_built_at') or ''
+        ).strip()
+        assert synced == '2026-10-24T09:00:00+08:00'
+    finally:
+        await service.close()
+
+
 @pytest.mark.asyncio
 async def test_pass_lands_when_the_last_hop_started_after_the_notice(tmp_path, monkeypatch):
     service = _service(tmp_path)

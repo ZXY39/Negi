@@ -149,6 +149,10 @@ ACCEPTANCE_FREEZE_PREFIX = '验收冻结：'
 ACCEPTANCE_FREEZE_PREFIXES = (ACCEPTANCE_FREEZE_PREFIX,)
 # pass 因"这一轮没看过的通知"被暂缓：既不是通过也不是拒收，验收节点要再跑一轮。
 ACCEPTANCE_PASS_HOLD_PREFIX = '验收暂缓：'
+# 验收尾块（当前提交指针 + 追加要求 + 未读镜像）真正装配的时刻。P4 用它当锚：
+# 晚于这个时刻投递的通知不可能出现在本轮请求里，与"最后一跳请求起点"相比，
+# 它把"尾块已装配、请求还没发出"这段窗口也算作未见。
+ACCEPTANCE_TAIL_BUILT_AT_KEY = 'acceptance_tail_built_at'
 
 
 def is_acceptance_freeze_result(result: Any) -> bool:
@@ -953,6 +957,11 @@ class NodeRunner:
         return await self.run_node(task_id, node_id)
 
     async def _resume_react_state(self, *, task, node: NodeRecord) -> dict[str, Any]:
+        if node.node_kind == KIND_ACCEPTANCE:
+            self._sync_acceptance_tail_built_at_from_frame(
+                task_id=task.task_id,
+                node_id=node.node_id,
+            )
         notifications = self._pending_node_notifications(task_id=task.task_id, node_id=node.node_id)
         pending_root_notice_records = self._pending_root_notice_records(node=node)
         wait_note = self._take_wait_note_message(node_id=node.node_id)
@@ -3275,6 +3284,12 @@ class NodeRunner:
             },
         ]
         if node.node_kind == KIND_ACCEPTANCE:
+            built_at = now_iso()
+            self._stamp_acceptance_tail_built_at(
+                task_id=task.task_id,
+                node_id=node.node_id,
+                built_at=built_at,
+            )
             turn_tail = self._acceptance_turn_tail(task=task, node=node)
             if turn_tail:
                 messages.append({'role': 'user', 'content': turn_tail})
@@ -7031,6 +7046,76 @@ class NodeRunner:
             delivered.append(item)
         return delivered
 
+    def _stamp_acceptance_tail_built_at(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        built_at: str,
+    ) -> None:
+        """把尾块装配时刻同时落进节点 metadata 与运行时帧。
+
+        metadata 是 P4 结算时唯一读得到的持久位（成功回合结束会删帧）；
+        帧里的同一份读数用于"续跑旧帧"时把 metadata 同步回真正被使用的那份
+        尾块——中间被放弃的新构建不得把锚往前推。
+        """
+        try:
+            self._log_service.update_node_metadata(
+                node_id,
+                lambda metadata: {**dict(metadata or {}), ACCEPTANCE_TAIL_BUILT_AT_KEY: built_at},
+            )
+        except Exception as exc:  # 帧内容失配时宁可退回旧锚，也不阻断回合
+            logger.debug(f'acceptance tail stamp skipped: {node_id}: {describe_exception(exc)}')
+        try:
+            self._log_service.update_frame(
+                task_id,
+                node_id,
+                lambda frame: {**dict(frame or {}), ACCEPTANCE_TAIL_BUILT_AT_KEY: built_at},
+                publish_snapshot=False,
+            )
+        except Exception as exc:
+            logger.debug(f'acceptance tail frame stamp skipped: {node_id}: {describe_exception(exc)}')
+
+    def _sync_acceptance_tail_built_at_from_frame(self, *, task_id: str, node_id: str) -> None:
+        """续跑已有帧时，把锚对齐到那份帧实际装配尾块的时刻。"""
+        try:
+            frame = self._log_service.read_runtime_frame(task_id, node_id) or {}
+        except Exception:
+            return
+        built_at = str(frame.get(ACCEPTANCE_TAIL_BUILT_AT_KEY) or '').strip()
+        if not built_at:
+            return
+        node = self._store.get_node(node_id)
+        metadata = getattr(node, 'metadata', None) if node is not None else None
+        current = str((dict(metadata or {}) if isinstance(metadata, dict) else {}).get(ACCEPTANCE_TAIL_BUILT_AT_KEY) or '').strip()
+        if current == built_at:
+            return
+        try:
+            self._log_service.update_node_metadata(
+                node_id,
+                lambda metadata: {**dict(metadata or {}), ACCEPTANCE_TAIL_BUILT_AT_KEY: built_at},
+            )
+        except Exception as exc:
+            logger.debug(f'acceptance tail anchor sync skipped: {node_id}: {describe_exception(exc)}')
+
+    def _acceptance_tail_anchor(
+        self,
+        *,
+        task_id: str,
+        acceptance: NodeRecord,
+    ) -> datetime | None:
+        """本轮裁决的未见通知锚：优先尾块装配时刻，旧轮次退回最后一跳请求起点。"""
+        latest = self._store.get_node(acceptance.node_id) or acceptance
+        metadata = getattr(latest, 'metadata', None)
+        metadata = dict(metadata or {}) if isinstance(metadata, dict) else {}
+        built_at = str(metadata.get(ACCEPTANCE_TAIL_BUILT_AT_KEY) or '').strip()
+        if built_at:
+            try:
+                return datetime.fromisoformat(built_at.replace('Z', '+00:00'))
+            except ValueError:
+                pass
+        return self._acceptance_pass_request_started_at(task_id=task_id, acceptance=acceptance)
+
     def _acceptance_pass_request_started_at(
         self,
         *,
@@ -7063,17 +7148,16 @@ class NodeRunner:
         acceptance: NodeRecord,
         execution: NodeRecord | None,
     ) -> list[Any]:
-        """裁决那一跳开始之后才投递、仍未被读到的用户/前门通知。
+        """本轮尾块装配之后才投递、仍未被读到的用户/前门通知。
 
-        这些行在本轮请求里不可能出现（尾块在请求发出前就装配好了），所以 pass
-        必须先扣住：下一轮尾块会带上它们，且下一轮请求起点晚于它们的投递时刻。
+        这些行不可能出现在本轮请求里（尾块在请求发出前就装配完成），所以 pass
+        必须先扣住：下一轮尾块会带上它们，且下一轮尾块装配晚于它们的投递时刻。
+        锚优先取尾块装配时刻；旧轮次没有该读数时才退回最后一跳请求起点。
         """
         if execution is None:
             return []
-        request_started_at = self._acceptance_pass_request_started_at(
-            task_id=task_id, acceptance=acceptance
-        )
-        if request_started_at is None:
+        anchor = self._acceptance_tail_anchor(task_id=task_id, acceptance=acceptance)
+        if anchor is None:
             return []
         unseen: list[Any] = []
         for item in self._delivered_acceptance_notice_rows(accepted_node=execution):
