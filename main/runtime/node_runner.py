@@ -146,8 +146,7 @@ _NODE_MESSAGE_INLINE_CHAR_LIMIT = 16_000
 # `accepted`，根验收还会把任务写 `passed` 并终态化）。前缀集中在这里，生产端与
 # 消费端共用，不做散文匹配。
 ACCEPTANCE_FREEZE_PREFIX = '验收冻结：'
-FINAL_ACCEPTANCE_FREEZE_PREFIX = '最终验收冻结：'
-ACCEPTANCE_FREEZE_PREFIXES = (ACCEPTANCE_FREEZE_PREFIX, FINAL_ACCEPTANCE_FREEZE_PREFIX)
+ACCEPTANCE_FREEZE_PREFIXES = (ACCEPTANCE_FREEZE_PREFIX,)
 
 
 def is_acceptance_freeze_result(result: Any) -> bool:
@@ -1565,14 +1564,16 @@ class NodeRunner:
         150 次模型调用，7 份判词全是「交付物不存在」，其中 2 份是 `failed + blocked`
         终局形态，会在对方真提交时把它直接打死。
 
-        只按根节点的最终验收另有一条：执行节点还压着未消费通知，需等它消费完并重提交。
+        未消费通知不冻结验收：执行节点在等裁决期间本来就只收不读（见
+        `task_actor_service._wake_policy_allows_dispatch` 的 I1 闸），验收回合把
+        这些消息镜像进尾块，pass 落账前再复核"这一轮没看过的通知"（见
+        `_handle_acceptance_node_result`）。
         """
         if str(getattr(node, 'node_kind', '') or '').strip().lower() != KIND_ACCEPTANCE:
             return ''
         execution = self._accepted_execution_node(task_id=task.task_id, acceptance=node)
         if execution is None:
             return ''
-        execution_node_id = str(getattr(execution, 'node_id', '') or '').strip()
         if self._normalized_status(getattr(execution, 'status', '')) in {STATUS_SUCCESS, STATUS_FAILED}:
             return ''
         handshake = normalize_acceptance_handshake((execution.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY))
@@ -1592,15 +1593,7 @@ class NodeRunner:
                 f'{ACCEPTANCE_FREEZE_PREFIX}待裁定的提交绑定的是另一份验收节点，'
                 '需待对应执行节点重新提交。'
             )
-        if execution_node_id != str(getattr(task, 'root_node_id', '') or '').strip():
-            return ''
-        pending_node_ids = set(self.nodes_with_pending_distribution_notices(task_id=task.task_id))
-        if execution_node_id not in pending_node_ids:
-            return ''
-        return (
-            f'{FINAL_ACCEPTANCE_FREEZE_PREFIX}被检验执行节点仍有未消费通知，'
-            '需待其消费通知并重新提交后再继续核验。'
-        )
+        return ''
 
     def acceptance_dispatch_block_reason(self, *, task, node: NodeRecord) -> str:
         """派发层与回合入口共用的唯一验收激活判据。
@@ -6936,10 +6929,11 @@ class NodeRunner:
         return node_ids
 
     def _acceptance_notice_block(self, *, accepted_node: NodeRecord) -> str:
-        # 汇总被检验执行节点已消费的用户/前门通知 + 尚未消费的 root pending 记录。
-        # 节点之间的消息是执行上下文，不进验收回合；旧记录没有 kind 时保留兼容。
-        # 同一逻辑通知会以不同 id（notif:xxx 与 root-notice:...）双写落盘，故按
-        # message 文本去重；已 superseded 的记录不再作为当前要求。
+        # 汇总被检验执行节点已消费的用户/前门通知 + 尚未消费的 root pending 记录
+        # + 仍在信箱里、没被读到的 delivered 行。节点之间的消息是执行上下文，
+        # 不进验收回合；旧记录没有 kind 时保留兼容。同一逻辑通知会以不同 id
+        # （notif:xxx 与 root-notice:...）双写落盘，故按 message 文本去重；
+        # 已 superseded 的记录不再作为当前要求。
         metadata = dict(accepted_node.metadata or {}) if isinstance(getattr(accepted_node, 'metadata', None), dict) else {}
         consumed = normalize_append_notice_context(metadata.get(APPEND_NOTICE_CONTEXT_KEY)).get('notice_records') or []
         pending = normalize_pending_append_notice_records(metadata.get(PENDING_APPEND_NOTICE_RECORDS_KEY))
@@ -6958,10 +6952,51 @@ class NodeRunner:
                 continue
             seen_texts.add(text)
             entries.append(f'- {text}')
-        if not entries:
-            return ''
-        title = '追加任务要求（追加通知，晚于上方验收标准；若两者冲突，以本段要求为准）'
-        return f'{title}\n' + '\n'.join(entries)
+        blocks: list[str] = []
+        if entries:
+            title = '追加任务要求（追加通知，晚于上方验收标准；若两者冲突，以本段要求为准）'
+            blocks.append(f'{title}\n' + '\n'.join(entries))
+        unread_entries: list[str] = []
+        for item in self._delivered_acceptance_notice_rows(accepted_node=accepted_node):
+            text = str(getattr(item, 'message', '') or '').strip()
+            if not text or text in seen_texts:
+                continue
+            seen_texts.add(text)
+            unread_entries.append(f'- {text}')
+        if unread_entries:
+            # 这些行没有被执行节点读过，也永远不会被它消费（验收通过则节点终局）；
+            # 验收方必须在裁决时看见它们，否则就是一次无声丢弃。
+            blocks.append(
+                '【发给被检验节点、它还没读到的消息（尚未生效，不是给你的指令）】\n'
+                + '\n'.join(unread_entries)
+                + '\n若其中任何一条会改变本次裁决：用 reject 打回，反馈只写'
+                '「按这条消息继续完成后重新提交」，不要复述正文——它已在对方信箱里，打回后由对方消费。'
+            )
+        return '\n\n'.join(blocks)
+
+    def _delivered_acceptance_notice_rows(self, *, accepted_node: NodeRecord) -> list[Any]:
+        """被检验节点信箱里仍可注入、且属于用户/前门来源的 delivered 行。"""
+        try:
+            rows = list(
+                self._store.list_task_node_notifications(
+                    str(accepted_node.task_id or '').strip(),
+                    str(accepted_node.node_id or '').strip(),
+                )
+                or []
+            )
+        except Exception:
+            return []
+        delivered: list[Any] = []
+        for item in rows:
+            if str(getattr(item, 'status', '') or '').strip() != 'delivered':
+                continue
+            if notification_is_held(item):
+                continue
+            kind = str(getattr(item, 'kind', '') or '').strip()
+            if kind and kind not in ACCEPTANCE_MIRROR_KINDS:
+                continue
+            delivered.append(item)
+        return delivered
 
     def _compose_acceptance_prompt(
         self,
