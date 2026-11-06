@@ -47,6 +47,17 @@
 - 被验节点终局时验收节点随之终局、状态一致、不发 `child_final`（T15）；被验节点失败时 `_cancel_waiting_acceptance_for_execution_failure` 收口，暂停（异常）时由裁决路径收口，不会把暂停态补写成 failed。
 - **验收器自身故障直达源会话**：验收节点自己进入 `pause_reason='error'`（模型链耗尽、核验回合异常等）时，`task_node_error` 扫描把它选为直达目标，一次扫描窗口内送到任务源会话。父节点信箱的 `child_abnormal_pause` 保留，但父节点在 `waiting_acceptance` 时不会被非 `acceptance_verdict` 的消息唤醒，所以那条路不是可行动车道。事件用 `node_role=acceptance` 标明「验收器自身故障，不是对被验节点的裁决」，并携带 `inspected_node_id` / `inspected_node_status` / `handshake_state` / `submission_ref` / `final_acceptance` 帮助会话判断被验提交是否还值得救；被验节点已终态、或握手既不在裁决等待态又没有可解析提交指针的暂停行视为清扫疤，不直达。处理顺序是 `resume` 验收节点重跑核验；无法复活时选真实出口：子验收节点 → `fail` 被验执行节点（取消等待验收路径），根最终验收节点 → `fail` 根执行节点。会话可达的动作面只有 `resume` / `keep_paused` / `fail` / `pause`，任务级 cancel 不在其上——那是操作员在 web 侧的动作，模型可见文案不得点名它。`manage_task_nodes` 对验收节点的 `fail` 直接拒绝（`acceptance_fail_does_not_settle_task`，附 `inspected_node_id` 与出口提示）——节点级验收失败不会短路任务，只 `fail` 验收节点会把任务留在非终态。。出口清单只由 `main/runtime/acceptance_handshake.py` 的 `verifier_recovery_exits(final_acceptance=…)` 一处生成：回执 hint 与事件束里那行引导语都嵌它的返回值，子验收节点给「判被验执行节点失败」，根最终验收节点多一档「取消任务」（放弃请求与记一次失败交付对用户是两种结局）；工具契约文案与心跳规则各留自己的职责：前者只列同名错误码与两档出口措辞，后者只留判读（不算裁决、resume 优先、`queued` 要用 `task_progress` 复核）并指向本轮事件自带的那一行。
 
+## 1.2 连续（待命）节点
+
+- **标记**：节点的 `metadata.continuous` 是唯一真值，创建时写定、之后不可变——可变会让 `tools[]`、验收要求与恢复指纹同时漂移。子节点由 `spawn_child_nodes` 的 child spec `continuous` 写入；根节点由 `create_async_task` 的 `continuous` 写入。验收节点永不继承该标记。
+- **连续 ⇒ 必过验收**：`_spec_requires_acceptance` 对连续子节点无条件返回真，显式 `requires_acceptance=false` 覆盖不了它；根节点连续时 `final_acceptance.required` 在建任务时强制为真。模型没写 `acceptance_prompt` 时运行时自动分配验收节点，并把连续验收条款注入 `acceptance_prompt_template`；模型写了判据时条款叠加在其前。条款是**确定性常量**，注入发生在恢复指纹之前——重放同一 spawn 轮会复用同一个验收节点，不会建出第二颗。
+- **提交是结束请求，不是终态**：连续节点的 `submit_final_result` 仍存在（摘除会让根节点失去唯一成功出口，也会让验收失去可核验载荷），但它只把节点送进 `waiting_acceptance`；只有验收 `pass` 才由 `finalize_inspected_execution_node` 签 `success`，`reject` 带着 feedback 复活节点继续待命。连续节点因此不可能自己终态化。
+- **回合收尾**：连续节点的正常收尾是 `enter_wait(waiting_for=["frontdoor"])`。`frontdoor` 是活性声明而不是唤醒判据——任何来源的投递（上游、用户、外部订阅事件、`wake_timer`）都能叫醒它；它真正的作用是让等待图把它当合法无限等待，并作为「设计内待命」的判据。只有收到明确结束指令才提交。
+- **父节点被拖住**：连续子节点存活期间，父节点提交会被 `_final_submission_blockers` 拦下（非终态子节点仍存在）；结束整条分支要先按上面的方式逐个结束连续子节点。
+- **spawn 回执**：连续子节点没写判据而由运行时自动建验收时，创建回执带 `acceptance_auto_created` 与一句 `acceptance_note`，父节点不会把验收节点当成自己漏写判据的结果。标记与 `acceptance_node_id` 同源落在 spawn entry 上，重放同一 `call_id` 返回同一批回执。
+- **不做什么**：终态仍是最终态——没有归档状态、没有终态复活、所有终态闸门（投递 `target_terminal`、resume `node_terminal` / `task_terminal`、`_run_node_turn` 短路）保持原样。连续任务靠**不进入终态**获得长期生命，而不是靠终态后再打开。
+- **显示**：连续节点停在声明了外部唤醒源的相位上，任务与节点渲染为「待命」而不是「运行/等待」，合同归 `web-and-admin.md`「Task Hall Action Contract」；停滞判定对这一形态的豁免归 `heartbeat-system.md`「Task Stall Detection」。
+
 ## 附录 A：已删除的 distribution epoch（历史说明，勿据此实现）
 
 > 以下整节描述的 epoch / 子树屏障 / 分发控制回合 / 阻塞核验都已整块删除（包括 `subtree_hold.py`、两个分发提示词、`task_append_notice` 入口与相关工具）。保留它只为解释旧库数据里的 `runtime_meta.distribution` 字段与旧 epoch 行；新代码不得依赖本节任何行为。现行投递见 §1。
