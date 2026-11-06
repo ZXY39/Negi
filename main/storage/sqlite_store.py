@@ -537,6 +537,52 @@ class SQLiteTaskStore:
             )
             ''',
             '''
+            CREATE TABLE IF NOT EXISTS event_subscriptions (
+                subscription_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                target_kind TEXT NOT NULL,
+                session_key TEXT NOT NULL,
+                task_id TEXT NOT NULL DEFAULT '',
+                node_id TEXT NOT NULL DEFAULT '',
+                instruction TEXT NOT NULL,
+                condition_note TEXT NOT NULL DEFAULT '',
+                secret_hash TEXT NOT NULL,
+                credential_path TEXT NOT NULL DEFAULT '',
+                owner_session_key TEXT NOT NULL,
+                owner_task_id TEXT NOT NULL DEFAULT '',
+                owner_node_id TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                removed_at TEXT NOT NULL DEFAULT '',
+                last_event_at TEXT NOT NULL DEFAULT '',
+                last_delivery_error TEXT NOT NULL DEFAULT ''
+            )
+            ''',
+            '''
+            CREATE TABLE IF NOT EXISTS external_event_inbox (
+                event_id TEXT PRIMARY KEY,
+                subscription_id TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                event_type TEXT NOT NULL DEFAULT '',
+                occurred_at TEXT NOT NULL DEFAULT '',
+                payload_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                delivery_detail_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(subscription_id, idempotency_key)
+            )
+            ''',
+            '''
+            CREATE INDEX IF NOT EXISTS idx_external_event_inbox_status
+            ON external_event_inbox (status, updated_at)
+            ''',
+            '''
+            CREATE INDEX IF NOT EXISTS idx_external_event_inbox_subscription
+            ON external_event_inbox (subscription_id, created_at)
+            ''',
+            '''
             -- 前门后台工具作业：只有真正越过前台等待窗口的调用才落行。
             -- running/stopping 由进程内 runner 接管；进程重启后统一收成 interrupted。
             CREATE TABLE IF NOT EXISTS tool_jobs (
@@ -2995,6 +3041,336 @@ class SQLiteTaskStore:
             return bool(cursor.rowcount)
 
         return bool(self._run_write(operation))
+
+    _EVENT_SUBSCRIPTION_COLUMNS = (
+        'subscription_id, name, enabled, target_kind, session_key, task_id, node_id, '
+        'instruction, condition_note, secret_hash, credential_path, owner_session_key, '
+        'owner_task_id, owner_node_id, created_at, updated_at, removed_at, last_event_at, '
+        'last_delivery_error'
+    )
+    _EXTERNAL_EVENT_COLUMNS = (
+        'event_id, subscription_id, idempotency_key, event_type, occurred_at, payload_json, '
+        'status, delivery_detail_json, created_at, updated_at'
+    )
+
+    @staticmethod
+    def _event_subscription_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        record = dict(row)
+        record['enabled'] = bool(record.get('enabled'))
+        record['removed'] = bool(str(record.get('removed_at') or '').strip())
+        return record
+
+    @staticmethod
+    def _external_event_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        record = dict(row)
+        payload_json = str(record.pop('payload_json', '') or '')
+        detail_json = str(record.pop('delivery_detail_json', '') or '{}')
+        try:
+            record['payload'] = json.loads(payload_json) if payload_json else {}
+        except (TypeError, json.JSONDecodeError):
+            record['payload'] = {}
+        try:
+            record['delivery_detail'] = json.loads(detail_json) if detail_json else {}
+        except (TypeError, json.JSONDecodeError):
+            record['delivery_detail'] = {}
+        return record
+
+    def create_event_subscription(self, record: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(record or {})
+        subscription_id = str(payload.get('subscription_id') or '').strip()
+        if not subscription_id:
+            raise ValueError('subscription_id_required')
+
+        def operation(conn: sqlite3.Connection) -> dict[str, Any]:
+            conn.execute(
+                'INSERT INTO event_subscriptions ('
+                + self._EVENT_SUBSCRIPTION_COLUMNS
+                + ') VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                (
+                    subscription_id,
+                    str(payload.get('name') or ''),
+                    1 if payload.get('enabled') else 0,
+                    str(payload.get('target_kind') or ''),
+                    str(payload.get('session_key') or ''),
+                    str(payload.get('task_id') or ''),
+                    str(payload.get('node_id') or ''),
+                    str(payload.get('instruction') or ''),
+                    str(payload.get('condition_note') or ''),
+                    str(payload.get('secret_hash') or ''),
+                    str(payload.get('credential_path') or ''),
+                    str(payload.get('owner_session_key') or ''),
+                    str(payload.get('owner_task_id') or ''),
+                    str(payload.get('owner_node_id') or ''),
+                    str(payload.get('created_at') or ''),
+                    str(payload.get('updated_at') or ''),
+                    str(payload.get('removed_at') or ''),
+                    str(payload.get('last_event_at') or ''),
+                    str(payload.get('last_delivery_error') or ''),
+                ),
+            )
+            row = conn.execute(
+                'SELECT ' + self._EVENT_SUBSCRIPTION_COLUMNS
+                + ' FROM event_subscriptions WHERE subscription_id = ?',
+                (subscription_id,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError('event_subscription_persist_failed')
+            return self._event_subscription_row(row)
+
+        return self._run_write(operation)
+
+    def get_event_subscription(self, subscription_id: str) -> dict[str, Any] | None:
+        row = self._fetchone(
+            'SELECT ' + self._EVENT_SUBSCRIPTION_COLUMNS
+            + ' FROM event_subscriptions WHERE subscription_id = ?',
+            (str(subscription_id or '').strip(),),
+        )
+        return self._event_subscription_row(row)
+
+    def list_event_subscriptions(
+        self,
+        *,
+        owner_session_key: str = '',
+        owner_task_id: str = '',
+        include_removed: bool = False,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[object] = []
+        session_key = str(owner_session_key or '').strip()
+        task_id = str(owner_task_id or '').strip()
+        if session_key:
+            clauses.append('owner_session_key = ?')
+            params.append(session_key)
+        if task_id:
+            clauses.append('owner_task_id = ?')
+            params.append(task_id)
+        if not include_removed:
+            clauses.append("removed_at = ''")
+        where = (' WHERE ' + ' AND '.join(clauses)) if clauses else ''
+        rows = self._fetchall(
+            'SELECT ' + self._EVENT_SUBSCRIPTION_COLUMNS
+            + ' FROM event_subscriptions'
+            + where
+            + ' ORDER BY created_at ASC, subscription_id ASC',
+            tuple(params),
+        )
+        return [self._event_subscription_row(row) for row in rows]
+
+    def set_event_subscription_enabled(
+        self,
+        subscription_id: str,
+        *,
+        enabled: bool,
+        updated_at: str,
+    ) -> dict[str, Any] | None:
+        key = str(subscription_id or '').strip()
+
+        def operation(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            conn.execute(
+                "UPDATE event_subscriptions SET enabled = ?, updated_at = ? "
+                "WHERE subscription_id = ? AND removed_at = ''",
+                (1 if enabled else 0, str(updated_at or ''), key),
+            )
+            row = conn.execute(
+                'SELECT ' + self._EVENT_SUBSCRIPTION_COLUMNS
+                + ' FROM event_subscriptions WHERE subscription_id = ?',
+                (key,),
+            ).fetchone()
+            return self._event_subscription_row(row)
+
+        return self._run_write(operation)
+
+    def update_event_subscription_secret(
+        self,
+        subscription_id: str,
+        *,
+        secret_hash: str,
+        credential_path: str,
+        updated_at: str,
+    ) -> dict[str, Any] | None:
+        key = str(subscription_id or '').strip()
+
+        def operation(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            conn.execute(
+                "UPDATE event_subscriptions SET secret_hash = ?, credential_path = ?, updated_at = ? "
+                "WHERE subscription_id = ? AND removed_at = ''",
+                (str(secret_hash or ''), str(credential_path or ''), str(updated_at or ''), key),
+            )
+            row = conn.execute(
+                'SELECT ' + self._EVENT_SUBSCRIPTION_COLUMNS
+                + ' FROM event_subscriptions WHERE subscription_id = ?',
+                (key,),
+            ).fetchone()
+            return self._event_subscription_row(row)
+
+        return self._run_write(operation)
+
+    def remove_event_subscription(self, subscription_id: str, *, updated_at: str) -> dict[str, Any] | None:
+        key = str(subscription_id or '').strip()
+
+        def operation(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            conn.execute(
+                "UPDATE event_subscriptions SET enabled = 0, removed_at = ?, updated_at = ?, "
+                "last_delivery_error = ? WHERE subscription_id = ? AND removed_at = ''",
+                (str(updated_at or ''), str(updated_at or ''), 'subscription_removed', key),
+            )
+            row = conn.execute(
+                'SELECT ' + self._EVENT_SUBSCRIPTION_COLUMNS
+                + ' FROM event_subscriptions WHERE subscription_id = ?',
+                (key,),
+            ).fetchone()
+            return self._event_subscription_row(row)
+
+        return self._run_write(operation)
+
+    def touch_event_subscription(
+        self,
+        subscription_id: str,
+        *,
+        updated_at: str,
+        last_event_at: str | None = None,
+        last_delivery_error: str | None = None,
+    ) -> None:
+        key = str(subscription_id or '').strip()
+        if not key:
+            return
+        assignments = ['updated_at = ?']
+        params: list[object] = [str(updated_at or '')]
+        if last_event_at is not None:
+            assignments.append('last_event_at = ?')
+            params.append(str(last_event_at or ''))
+        if last_delivery_error is not None:
+            assignments.append('last_delivery_error = ?')
+            params.append(str(last_delivery_error or ''))
+        params.append(key)
+        self._execute_write(
+            'UPDATE event_subscriptions SET ' + ', '.join(assignments) + ' WHERE subscription_id = ?',
+            tuple(params),
+        )
+
+    def insert_external_event(self, record: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        payload = dict(record or {})
+        event_id = str(payload.get('event_id') or '').strip()
+        subscription_id = str(payload.get('subscription_id') or '').strip()
+        idempotency_key = str(payload.get('idempotency_key') or '').strip()
+        if not event_id or not subscription_id or not idempotency_key:
+            raise ValueError('external_event_identity_required')
+        created_at = str(payload.get('created_at') or '')
+        payload_json = json.dumps(payload.get('payload') or {}, ensure_ascii=False)
+        detail_json = json.dumps(payload.get('delivery_detail') or {}, ensure_ascii=False)
+
+        def operation(conn: sqlite3.Connection) -> tuple[dict[str, Any], bool]:
+            try:
+                conn.execute(
+                    'INSERT INTO external_event_inbox ('
+                    + self._EXTERNAL_EVENT_COLUMNS
+                    + ') VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    (
+                        event_id,
+                        subscription_id,
+                        idempotency_key,
+                        str(payload.get('event_type') or ''),
+                        str(payload.get('occurred_at') or ''),
+                        payload_json,
+                        str(payload.get('status') or 'pending'),
+                        detail_json,
+                        created_at,
+                        str(payload.get('updated_at') or created_at),
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                existing = conn.execute(
+                    'SELECT ' + self._EXTERNAL_EVENT_COLUMNS
+                    + ' FROM external_event_inbox WHERE subscription_id = ? AND idempotency_key = ?',
+                    (subscription_id, idempotency_key),
+                ).fetchone()
+                if existing is None:
+                    raise
+                return self._external_event_row(existing), False
+            row = conn.execute(
+                'SELECT ' + self._EXTERNAL_EVENT_COLUMNS
+                + ' FROM external_event_inbox WHERE event_id = ?',
+                (event_id,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError('external_event_persist_failed')
+            conn.execute(
+                'UPDATE event_subscriptions SET last_event_at = ?, updated_at = ? '
+                'WHERE subscription_id = ?',
+                (created_at, created_at, subscription_id),
+            )
+            return self._external_event_row(row), True
+
+        return self._run_write(operation)
+
+    def get_external_event(self, event_id: str) -> dict[str, Any] | None:
+        row = self._fetchone(
+            'SELECT ' + self._EXTERNAL_EVENT_COLUMNS
+            + ' FROM external_event_inbox WHERE event_id = ?',
+            (str(event_id or '').strip(),),
+        )
+        return self._external_event_row(row)
+
+    def list_pending_external_events(self, *, limit: int = 200) -> list[dict[str, Any]]:
+        rows = self._fetchall(
+            'SELECT ' + self._EXTERNAL_EVENT_COLUMNS
+            + " FROM external_event_inbox WHERE status = 'pending' "
+            'ORDER BY created_at ASC, event_id ASC LIMIT ?',
+            (max(1, int(limit or 200)),),
+        )
+        return [self._external_event_row(row) for row in rows]
+
+    def list_external_events_for_subscription(
+        self,
+        subscription_id: str,
+        *,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        rows = self._fetchall(
+            'SELECT ' + self._EXTERNAL_EVENT_COLUMNS
+            + ' FROM external_event_inbox WHERE subscription_id = ? '
+            'ORDER BY created_at DESC, event_id DESC LIMIT ?',
+            (str(subscription_id or '').strip(), max(1, int(limit or 20))),
+        )
+        return [self._external_event_row(row) for row in rows]
+
+    def mark_external_event_status(
+        self,
+        event_id: str,
+        *,
+        status: str,
+        detail: dict[str, Any] | None = None,
+        updated_at: str,
+    ) -> dict[str, Any] | None:
+        key = str(event_id or '').strip()
+        normalized_status = str(status or '').strip().lower() or 'pending'
+        detail_json = json.dumps(dict(detail or {}), ensure_ascii=False)
+
+        def operation(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            if normalized_status == 'pending':
+                conn.execute(
+                    "UPDATE external_event_inbox SET delivery_detail_json = ?, updated_at = ? "
+                    "WHERE event_id = ? AND status = 'pending'",
+                    (detail_json, str(updated_at or ''), key),
+                )
+            else:
+                conn.execute(
+                    "UPDATE external_event_inbox SET status = ?, delivery_detail_json = ?, updated_at = ? "
+                    "WHERE event_id = ? AND status = 'pending'",
+                    (normalized_status, detail_json, str(updated_at or ''), key),
+                )
+            row = conn.execute(
+                'SELECT ' + self._EXTERNAL_EVENT_COLUMNS
+                + ' FROM external_event_inbox WHERE event_id = ?',
+                (key,),
+            ).fetchone()
+            return self._external_event_row(row)
+
+        return self._run_write(operation)
 
     def put_task_terminal_outbox(
         self,
