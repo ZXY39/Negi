@@ -7,7 +7,7 @@ import os
 import platform
 import traceback
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
@@ -147,6 +147,8 @@ _NODE_MESSAGE_INLINE_CHAR_LIMIT = 16_000
 # 消费端共用，不做散文匹配。
 ACCEPTANCE_FREEZE_PREFIX = '验收冻结：'
 ACCEPTANCE_FREEZE_PREFIXES = (ACCEPTANCE_FREEZE_PREFIX,)
+# pass 因"这一轮没看过的通知"被暂缓：既不是通过也不是拒收，验收节点要再跑一轮。
+ACCEPTANCE_PASS_HOLD_PREFIX = '验收暂缓：'
 
 
 def is_acceptance_freeze_result(result: Any) -> bool:
@@ -154,6 +156,13 @@ def is_acceptance_freeze_result(result: Any) -> bool:
     if str(getattr(result, 'delivery_status', '') or '').strip().lower() != 'partial':
         return False
     return str(getattr(result, 'summary', '') or '').strip().startswith(ACCEPTANCE_FREEZE_PREFIXES)
+
+
+def is_acceptance_pass_hold_result(result: Any) -> bool:
+    """这条 partial 表示「pass 还没落账」：裁决期间又到了没被看见的通知。"""
+    if str(getattr(result, 'delivery_status', '') or '').strip().lower() != 'partial':
+        return False
+    return str(getattr(result, 'summary', '') or '').strip().startswith(ACCEPTANCE_PASS_HOLD_PREFIX)
 
 
 def node_message_body(text: str, *, ref: str = '') -> str:
@@ -2104,6 +2113,30 @@ class NodeRunner:
         except Exception as exc:  # 审计是旁路：记账失败绝不影响验收控制流
             logger.debug(f'acceptance evidence audit skipped: {acceptance.node_id}: {describe_exception(exc)}')
         if str(result.status or '').strip() == STATUS_SUCCESS:
+            unseen = self._unseen_acceptance_notices(
+                task_id=task.task_id,
+                acceptance=acceptance,
+                execution=execution,
+            )
+            if unseen:
+                self._hold_acceptance_pass_for_unseen_notices(
+                    task=task,
+                    acceptance=acceptance,
+                    execution=execution,
+                    unseen=unseen,
+                )
+                return NodeFinalResult(
+                    status=STATUS_SUCCESS,
+                    delivery_status='partial',
+                    summary=(
+                        f'{ACCEPTANCE_PASS_HOLD_PREFIX}被检验节点还有本次裁决没看过的消息，'
+                        '需再核验一轮。'
+                    ),
+                    answer='',
+                    evidence=[],
+                    remaining_work=[],
+                    blocking_reason='',
+                )
             # pass 不回流被验收节点：它随这次裁定立即终局，投递只会在一个终态
             # 节点上留下永远读不到的未读消息（还会把树上的未读徽标长期挂住）。
             # "这一份提交被通过"的绑定由握手 latest_execution_submission_id 与
@@ -6997,6 +7030,113 @@ class NodeRunner:
                 continue
             delivered.append(item)
         return delivered
+
+    def _acceptance_pass_request_started_at(
+        self,
+        *,
+        task_id: str,
+        acceptance: NodeRecord,
+    ) -> datetime | None:
+        """裁决最后一跳的请求起点：该节点 seq 最大一行的 `created_at - duration_ms`。"""
+        timing_getter = getattr(self._store, 'latest_model_call_timing', None)
+        if not callable(timing_getter):
+            return None
+        try:
+            timing = timing_getter(task_id, acceptance.node_id)
+        except Exception:
+            return None
+        if not isinstance(timing, dict):
+            return None
+        created_at = str(timing.get('created_at') or '').strip()
+        if not created_at:
+            return None
+        try:
+            ended_at = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+        except ValueError:
+            return None
+        return ended_at - timedelta(milliseconds=max(0, int(timing.get('duration_ms') or 0)))
+
+    def _unseen_acceptance_notices(
+        self,
+        *,
+        task_id: str,
+        acceptance: NodeRecord,
+        execution: NodeRecord | None,
+    ) -> list[Any]:
+        """裁决那一跳开始之后才投递、仍未被读到的用户/前门通知。
+
+        这些行在本轮请求里不可能出现（尾块在请求发出前就装配好了），所以 pass
+        必须先扣住：下一轮尾块会带上它们，且下一轮请求起点晚于它们的投递时刻。
+        """
+        if execution is None:
+            return []
+        request_started_at = self._acceptance_pass_request_started_at(
+            task_id=task_id, acceptance=acceptance
+        )
+        if request_started_at is None:
+            return []
+        unseen: list[Any] = []
+        for item in self._delivered_acceptance_notice_rows(accepted_node=execution):
+            delivered_at = str(
+                getattr(item, 'delivered_at', '') or getattr(item, 'created_at', '') or ''
+            ).strip()
+            if not delivered_at:
+                continue
+            try:
+                delivered = datetime.fromisoformat(delivered_at.replace('Z', '+00:00'))
+            except ValueError:
+                continue
+            started = request_started_at
+            if (delivered.tzinfo is None) != (started.tzinfo is None):
+                # 旧数据可能缺时区：去掉两侧的 tzinfo 再比，至少不比字符串可靠。
+                delivered = delivered.replace(tzinfo=None)
+                started = started.replace(tzinfo=None)
+            if delivered >= started:
+                unseen.append(item)
+        return unseen
+
+    def _hold_acceptance_pass_for_unseen_notices(
+        self,
+        *,
+        task,
+        acceptance: NodeRecord,
+        execution: NodeRecord | None,
+        unseen: list[Any],
+    ) -> None:
+        """pass 不落账：验收节点回到 in_progress，由派发扫描再跑一轮。
+
+        不写 `accepted`、不计拒收次数；本轮提交载荷随之作废（它不是一次裁定），
+        否则裁决收口扫描会把同一份 pass 反复当成本轮结论处理。
+        """
+        logger.info(
+            'acceptance pass held for unseen notices: task={} acceptance={} inspected={} unseen={}',
+            task.task_id,
+            acceptance.node_id,
+            str(getattr(execution, 'node_id', '') or '').strip() if execution is not None else '',
+            len(unseen),
+        )
+
+        def _mutate(record: NodeRecord) -> NodeRecord:
+            metadata = dict(record.metadata or {}) if isinstance(record.metadata, dict) else {}
+            for key in ('result_payload', 'result_payload_ref', 'result_payload_summary'):
+                metadata.pop(key, None)
+            return record.model_copy(
+                update={
+                    'status': 'in_progress',
+                    'final_output': '',
+                    'final_output_ref': '',
+                    'failure_reason': '',
+                    'finished_at': '',
+                    'updated_at': now_iso(),
+                    'metadata': metadata,
+                }
+            )
+
+        reopened = self._store.update_node(acceptance.node_id, _mutate)
+        if reopened is not None:
+            self._log_service.publish_node_state(task.task_id, acceptance.node_id)
+        self._request_acceptance_dispatch(task.task_id)
+        self._log_service.refresh_task_view(task.task_id, mark_unread=True)
 
     def _compose_acceptance_prompt(
         self,

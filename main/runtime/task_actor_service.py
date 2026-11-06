@@ -24,7 +24,7 @@ from main.runtime.acceptance_handshake import (
 )
 from main.runtime.node_mailbox import notification_is_held
 from main.runtime.node_message_kind import KIND_ACCEPTANCE_VERDICT
-from main.runtime.node_runner import SKIPPED_CHECK_RESULT
+from main.runtime.node_runner import SKIPPED_CHECK_RESULT, is_acceptance_pass_hold_result
 from main.runtime.node_wake import PARKED_PHASES
 from main.runtime.wait_graph import build_wait_nodes, find_all_parked_waits, find_wait_cycles
 from main.types import KIND_ACCEPTANCE, KIND_EXECUTION
@@ -839,11 +839,19 @@ class TaskActorService:
         if not self._is_root_final_acceptance_node(task=task, node=node):
             return
         acceptance = node
-        handled = await self._node_runner._handle_acceptance_node_result(
-            task=task, acceptance=acceptance, result=result
-        )
-        if str(handled.delivery_status or '').strip() != 'partial':
-            return
+        while True:
+            handled = await self._node_runner._handle_acceptance_node_result(
+                task=task, acceptance=acceptance, result=result
+            )
+            if not is_acceptance_pass_hold_result(handled):
+                return
+            latest = self._store.get_node(node_id)
+            if latest is None or self._node_operator_paused(latest):
+                return
+            acceptance = latest
+            result = await self._execute_node(task_id, node_id)
+            if result is None:
+                return
 
     async def _resume_inflight_final_acceptance(self, task_id: str) -> bool:
         """重派发「握手在等、但回合半路断掉」的最终验收节点——通知账本之外的兜底路径。
@@ -1196,6 +1204,10 @@ class TaskActorService:
                     acceptance=node,
                     result=result,
                 )
+                if is_acceptance_pass_hold_result(handled):
+                    # pass 没落账：验收节点已被重置回 in_progress，由派发扫描再跑
+                    # 一轮。这里不能算 progressed，否则派发循环会在同一静止拍空转。
+                    continue
                 progressed = True
                 if str(getattr(handled, 'verdict', '') or '').strip() == 'reject_no_progress':
                     continue
@@ -1243,6 +1255,8 @@ class TaskActorService:
                 acceptance=node,
                 result=result,
             )
+            if is_acceptance_pass_hold_result(handled):
+                continue
             progressed = True
             if str(getattr(handled, 'verdict', '') or '').strip() == 'reject_no_progress':
                 # 被验节点已在裁决处理里转暂停·abnormal；这里不能再补终态。
@@ -2637,13 +2651,21 @@ class TaskActorService:
             root=root,
             final_acceptance=final_acceptance,
         )
-        acceptance_result = await self._execute_node(task_id, acceptance.node_id)
-        acceptance = self._store.get_node(acceptance.node_id) or acceptance
-        acceptance_result = await self._node_runner._handle_acceptance_node_result(
-            task=task,
-            acceptance=acceptance,
-            result=acceptance_result,
-        )
+        while True:
+            acceptance_result = await self._execute_node(task_id, acceptance.node_id)
+            acceptance = self._store.get_node(acceptance.node_id) or acceptance
+            acceptance_result = await self._node_runner._handle_acceptance_node_result(
+                task=task,
+                acceptance=acceptance,
+                result=acceptance_result,
+            )
+            if not is_acceptance_pass_hold_result(acceptance_result):
+                break
+            # 这条车道里根已是 success，外层静止判定会把验收按 T15 收掉；
+            # 所以"再核验一轮"必须在本函数内跑完，不能退回派发循环。
+            acceptance = self._store.get_node(acceptance.node_id) or acceptance
+            if self._node_operator_paused(acceptance):
+                break
         if str(acceptance_result.delivery_status or '').strip() == 'partial':
             return acceptance_result
         acceptance = self._store.get_node(acceptance.node_id) or acceptance

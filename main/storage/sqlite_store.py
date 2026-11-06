@@ -4437,6 +4437,28 @@ class SQLiteTaskStore:
             )
         return int(row['total']) if row is not None else 0
 
+    def latest_model_call_timing(self, task_id: str, node_id: str) -> dict[str, object] | None:
+        """某节点最后一跳的请求起点读数（seq / created_at / duration_ms）。
+
+        验收 pass 落账要判断"这条通知是不是在裁决那一跳开始之后才到的"。
+        `list_task_model_calls` 会把整任务 payload 读回并建模（实盘单任务可到数万
+        行），这里只取三格；走 `idx_task_model_calls_task_id_seq` 的 task 前缀。
+        """
+        row = self._fetchone(
+            "SELECT seq, created_at, "
+            "COALESCE(json_extract(payload_json, '$.duration_ms'), 0) AS duration_ms "
+            "FROM task_model_calls WHERE task_id = ? AND node_id = ? "
+            "ORDER BY seq DESC LIMIT 1",
+            (str(task_id or '').strip(), str(node_id or '').strip()),
+        )
+        if row is None:
+            return None
+        return {
+            'seq': int(row['seq'] or 0),
+            'created_at': str(row['created_at'] or ''),
+            'duration_ms': int(row['duration_ms'] or 0),
+        }
+
     def get_task_model_call_max_seq(self, task_id: str) -> int:
         row = self._fetchone(
             'SELECT MAX(seq) AS max_seq FROM task_model_calls WHERE task_id = ?',
