@@ -175,6 +175,9 @@ class EnterWaitTool(Tool):
     `waiting_for` 是给运行时的**活性声明**，不改变唤醒判据（任何消息仍能叫醒）：
     声明了内部节点，停靠就成了等待图的一条边，两个节点互等会被环检测直接打破；
     被等的节点终态或判停时，等待方立刻收到一条带原因的通知，而不是等到失速告警。
+    那条通知只发给"这次确实收不到结果"的人：父节点由自己的 `child_final` /
+    `child_abnormal_pause` 覆盖，豁免按投递回执算，在两个 sink 里定（见
+    `MainRuntimeService._notify_node_waiters`）。
     """
 
     hide_universal_timeout_parameter = True
@@ -192,11 +195,13 @@ class EnterWaitTool(Tool):
             'Stop this turn and wait until a message wakes you. If qualifying mail is already '
             'waiting, this does not park you — it injects that mail and the turn continues. '
             '`note` is echoed back to you once on wake so you remember what you were waiting for. '
-            '`waiting_for` names who can wake you: a node id or list of ids (parent, execution '
-            'descendants, or siblings), `parent`, or `frontdoor` when you are waiting on a human. '
-            'Declaring it lets the runtime break a mutual wait and lets you hear immediately when '
-            'the node you wait for ends or gets paused instead of waiting for nothing; leaving it '
-            'out keeps the old "any message wakes me" behaviour with no liveness guarantee. '
+            '`waiting_for` names who can wake you: a node id or list of ids (your parent, a '
+            'sibling, or a descendant deeper than your own children), `parent`, or `frontdoor` '
+            'when you are waiting on a human. Your own children need no declaration — their '
+            '`child_final` reaches you anyway. Declaring it lets the runtime break a mutual wait '
+            'and lets you hear immediately when the node you wait for ends or gets paused instead '
+            'of waiting for nothing; leaving it out keeps the old "any message wakes me" behaviour '
+            'with no liveness guarantee. '
             'Do not call this while you still have work you can do now.'
         )
 

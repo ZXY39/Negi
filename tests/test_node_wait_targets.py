@@ -500,3 +500,159 @@ async def test_terminal_target_refuses_the_park():
     assert runner._log_service.frames == {}
 
 
+# --- the reverse lookup against the child's own outcome lane -----------------
+
+from main.models import NodeRecord, TaskRecord  # noqa: E402
+
+STAMP = '2026-11-06T09:00:00+08:00'
+TASK = 'task:waiter-lane'
+ROOT = 'node:root'
+PARENT = 'node:parent'
+CHILD = 'node:child'
+SIBLING = 'node:sibling'
+
+
+def _store_service(tmp_path):
+    return MainRuntimeService(
+        chat_backend=SimpleNamespace(),
+        workspace_root=tmp_path,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='web',
+    )
+
+
+def _record(node_id: str, *, parent: str, depth: int, status='in_progress', metadata=None):
+    return NodeRecord(
+        node_id=node_id,
+        task_id=TASK,
+        parent_node_id=parent,
+        root_node_id=ROOT,
+        depth=depth,
+        status=status,
+        node_kind='execution',
+        goal=f'goal of {node_id}',
+        prompt='p',
+        final_output='done' if status == 'success' else '',
+        created_at=STAMP,
+        updated_at=STAMP,
+        metadata=dict(metadata or {}),
+    )
+
+
+def _seed(service, *, wait_all: bool) -> None:
+    service.store.upsert_task(
+        TaskRecord(
+            task_id=TASK,
+            title='t',
+            user_request='u',
+            root_node_id=ROOT,
+            session_id='web:test',
+            created_at=STAMP,
+            updated_at=STAMP,
+        )
+    )
+    declaring = {
+        NODE_WAIT_TARGETS_KEY: [CHILD],
+        'node_wait_note': '等 child 的结论',
+    }
+    service.store.upsert_node(_record(ROOT, parent='', depth=0))
+    service.store.upsert_node(
+        _record(
+            PARENT,
+            parent=ROOT,
+            depth=1,
+            metadata={
+                **declaring,
+                'spawn_operations': {
+                    'call:batch': {
+                        'entries': [{'child_node_id': CHILD}],
+                        'completed': False,
+                        'wait_all_children': wait_all,
+                    }
+                },
+            },
+        )
+    )
+    service.store.upsert_node(
+        _record(CHILD, parent=PARENT, depth=2, status='success',
+                metadata={'spawn_owner_round_id': 'call:batch'})
+    )
+    service.store.upsert_node(_record(SIBLING, parent=PARENT, depth=2, metadata=declaring))
+
+
+def _kinds(service, node_id: str) -> list[str]:
+    return [
+        str(item.kind or '')
+        for item in (service.store.list_task_node_notifications(TASK, node_id) or [])
+    ]
+
+
+def _stub_wake(service, monkeypatch) -> None:
+    async def wake(*, task_id: str, node_id: str, allow_pause_clear: bool = False) -> str:
+        return 'resumed'
+
+    monkeypatch.setattr(service, 'wake_node_on_message', wake)
+
+
+@pytest.mark.asyncio
+async def test_parent_is_not_told_the_result_is_gone_when_child_final_lands(tmp_path, monkeypatch):
+    service = _store_service(tmp_path)
+    _seed(service, wait_all=False)
+    _stub_wake(service, monkeypatch)
+
+    await service._deliver_child_final_message(task_id=TASK, node_id=CHILD)
+
+    assert _kinds(service, PARENT) == ['child_final']
+    assert _kinds(service, SIBLING) == ['frontdoor_notice']
+
+
+@pytest.mark.asyncio
+async def test_held_batch_parent_is_also_exempt_from_the_gone_notice(tmp_path, monkeypatch):
+    service = _store_service(tmp_path)
+    _seed(service, wait_all=True)
+    _stub_wake(service, monkeypatch)
+
+    await service._deliver_child_final_message(task_id=TASK, node_id=CHILD)
+
+    assert _kinds(service, PARENT) == ['child_final']
+    assert _kinds(service, SIBLING) == ['frontdoor_notice']
+
+
+@pytest.mark.asyncio
+async def test_parent_falls_back_to_the_gone_notice_when_child_final_raises(tmp_path, monkeypatch):
+    service = _store_service(tmp_path)
+    _seed(service, wait_all=False)
+    _stub_wake(service, monkeypatch)
+    real_deliver = service.deliver_node_message
+
+    async def deliver(*, system_kind: str = '', **kwargs):
+        if str(system_kind or '') == 'child_final':
+            raise RuntimeError('mailbox down')
+        return await real_deliver(system_kind=system_kind, **kwargs)
+
+    monkeypatch.setattr(service, 'deliver_node_message', deliver)
+
+    with pytest.raises(RuntimeError):
+        await service._deliver_child_final_message(task_id=TASK, node_id=CHILD)
+
+    assert _kinds(service, PARENT) == ['frontdoor_notice']
+    assert _kinds(service, SIBLING) == ['frontdoor_notice']
+
+
+@pytest.mark.asyncio
+async def test_paused_parent_is_not_told_twice(tmp_path, monkeypatch):
+    service = _store_service(tmp_path)
+    _seed(service, wait_all=False)
+    _stub_wake(service, monkeypatch)
+    child = service.store.get_node(CHILD)
+    service.store.upsert_node(
+        child.model_copy(update={'status': 'in_progress', 'is_paused': True})
+    )
+
+    await service._deliver_child_abnormal_pause(task_id=TASK, node_id=CHILD, reason='无进展')
+
+    assert _kinds(service, PARENT) == ['child_abnormal_pause']
+    assert _kinds(service, SIBLING) == ['frontdoor_notice']

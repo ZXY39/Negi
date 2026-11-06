@@ -5889,44 +5889,53 @@ class MainRuntimeService:
         goal = str(getattr(node, 'goal', '') or '').strip()
         parent_node_id = str(getattr(node, 'parent_node_id', '') or '').strip()
         wait_all, batch_id = self._spawn_batch_wait_policy(node=node)
-        # 先叫醒在等它的节点，再走父节点那条道：父节点可能根本不存在（根节点），
-        # 而兄弟之间的等待与父子关系无关。批次持有期间跳过父节点——它的
-        # `child_final` 正被 held，提前唤醒会绕过 wait_all_children 的语义。
+        receipt: dict[str, Any] = {'status': 'skipped', 'reason': 'no_parent'}
+        parent_error: BaseException | None = None
+        if parent_node_id:
+            ref = str(getattr(node, 'final_output_ref', '') or '').strip()
+            if not ref and isinstance(getattr(node, 'metadata', None), dict):
+                ref = str((node.metadata or {}).get('result_payload_ref') or '').strip()
+            verdict_word = '完成' if status == 'success' else '失败'
+            body = f'子节点「{goal or node.node_id}」已{verdict_word}：{summary[:1200]}'
+            try:
+                receipt = await self.deliver_node_message(
+                    task_id=normalized_task_id,
+                    target_node_id=parent_node_id,
+                    message=body,
+                    origin='node',
+                    # 子节点的终局消息：发送方是 child（relation 只是语义对齐，kind 由 system_kind 决定）。
+                    relation=RELATION_CHILD,
+                    system_kind=KIND_CHILD_FINAL,
+                    source_node_id=str(node.node_id or '').strip(),
+                    ref=ref,
+                    held=wait_all,
+                    batch_id=batch_id,
+                )
+            except Exception as exc:  # noqa: BLE001 - 反查通知要先拿到豁免结论，失败在最后原样抛出
+                parent_error = exc
+                receipt = {'status': 'rejected', 'reason': 'delivery_error'}
+            if wait_all and str(receipt.get('status') or '') in {'delivered', 'deduplicated'}:
+                await self._release_wait_all_batch_if_settled(
+                    task_id=normalized_task_id,
+                    parent_node_id=parent_node_id,
+                    batch_id=batch_id,
+                )
+        # 反查通知只发给「这一次拿不到这份结果」的等待方。父节点自己的 `child_final`
+        # 已在上面落箱（批次持有时等释放同样算落箱），对它说"不会再来了"是假话：实盘
+        # 13/13 都是父节点在同一秒先收到"不会再来了"、再收到结果本身。豁免按回执判，
+        # 不按批次策略判——父节点那条道抛错时它确实什么都没收到，那时才交回反查。
+        parent_covered = str(receipt.get('status') or '') in {'delivered', 'deduplicated'}
         await self._notify_node_waiters(
             task_id=normalized_task_id,
             gone_node_id=str(node.node_id or '').strip(),
             event='terminal',
             detail=summary,
             goal=goal,
-            skip_node_ids={parent_node_id} if wait_all and parent_node_id else None,
+            skip_node_ids={parent_node_id} if parent_node_id and parent_covered else None,
         )
-        if not parent_node_id:
-            return {'status': 'skipped', 'reason': 'no_parent'}
-        ref = str(getattr(node, 'final_output_ref', '') or '').strip()
-        if not ref and isinstance(getattr(node, 'metadata', None), dict):
-            ref = str((node.metadata or {}).get('result_payload_ref') or '').strip()
-        verdict_word = '完成' if status == 'success' else '失败'
-        body = f'子节点「{goal or node.node_id}」已{verdict_word}：{summary[:1200]}'
-        delivered = await self.deliver_node_message(
-            task_id=normalized_task_id,
-            target_node_id=parent_node_id,
-            message=body,
-            origin='node',
-            # 子节点的终局消息：发送方是 child（relation 只是语义对齐，kind 由 system_kind 决定）。
-            relation=RELATION_CHILD,
-            system_kind=KIND_CHILD_FINAL,
-            source_node_id=str(node.node_id or '').strip(),
-            ref=ref,
-            held=wait_all,
-            batch_id=batch_id,
-        )
-        if wait_all and str(delivered.get('status') or '') in {'delivered', 'deduplicated'}:
-            await self._release_wait_all_batch_if_settled(
-                task_id=normalized_task_id,
-                parent_node_id=parent_node_id,
-                batch_id=batch_id,
-            )
-        return delivered
+        if parent_error is not None:
+            raise parent_error
+        return receipt
 
     def _spawn_batch_wait_policy(self, *, node: Any) -> tuple[bool, str]:
         """Return `(wait_all_children, batch_id)` for the child's spawn round."""
@@ -5995,6 +6004,10 @@ class MainRuntimeService:
         等操作员的停靠不声明内部 id，扫描命中不了它，不存在广播式唤醒风暴。
         投递走 `origin='frontdoor'`，即 `frontdoor_notice` + high 优先级，必唤醒；
         正文把停靠时的 note 回显与消失原因绑在一起，模型不必自己拼因果。
+
+        `skip_node_ids` 由调用方按**回执**给：已经通过自己那条道（`child_final` /
+        `child_abnormal_pause`）拿到这一次结果的人不在此列——对他说"不会再来了"
+        是假话。两个调用点都在投递之后才算这一步。
         """
         normalized_task_id = self.normalize_task_id(task_id)
         gone_id = str(gone_node_id or '').strip()
@@ -6247,38 +6260,48 @@ class MainRuntimeService:
         parent_node_id = str(getattr(node, 'parent_node_id', '') or '').strip()
         goal = str(getattr(node, 'goal', '') or '').strip() or str(node.node_id or '')
         reason_text = str(reason or '').strip() or '节点被判定为无进展并暂停'
-        # 被等节点的判停同样要叫醒等待方：父节点那条道只覆盖「谁管我」，
-        # 而「谁在等我」与父子关系无关。
+        receipt: dict[str, Any] = {'status': 'skipped', 'reason': 'no_parent'}
+        parent_error: BaseException | None = None
+        if parent_node_id:
+            parent = self.store.get_node(parent_node_id)
+            receiver_is_root = bool(parent is not None) and not str(
+                getattr(parent, 'parent_node_id', '') or ''
+            ).strip()
+            body = (
+                f'子节点「{goal}」已被暂停（异常暂停）。\n'
+                f'原因：{reason_text[:1200]}\n'
+                f'节点 id：{node.node_id}。请决定是继续推进、改写要求还是终止这条分支。\n'
+                f'{error_escalation_hint(receiver_is_root=receiver_is_root)}'
+            )
+            try:
+                receipt = await self.deliver_node_message(
+                    task_id=normalized_task_id,
+                    target_node_id=parent_node_id,
+                    message=body,
+                    origin='node',
+                    # 发送方是 child（relation 只做语义对齐，kind 由 system_kind 决定）。
+                    relation=RELATION_CHILD,
+                    system_kind=KIND_CHILD_ABNORMAL_PAUSE,
+                    source_node_id=str(node.node_id or '').strip(),
+                )
+            except Exception as exc:  # noqa: BLE001 - 反查通知要先拿到豁免结论，失败在最后原样抛出
+                parent_error = exc
+                receipt = {'status': 'rejected', 'reason': 'delivery_error'}
+        # 与终局那条同一个判据：判停已经由 `child_abnormal_pause` 送到父节点时，
+        # 反查只负责「谁在等但收不到」的人（同级、更深的后代），不再对父节点重复
+        # 播报同一次暂停。
+        parent_covered = str(receipt.get('status') or '') in {'delivered', 'deduplicated'}
         await self._notify_node_waiters(
             task_id=normalized_task_id,
             gone_node_id=str(node.node_id or '').strip(),
             event='paused',
             detail=reason_text,
             goal=goal,
+            skip_node_ids={parent_node_id} if parent_node_id and parent_covered else None,
         )
-        parent_node_id = str(getattr(node, 'parent_node_id', '') or '').strip()
-        if not parent_node_id:
-            return {'status': 'skipped', 'reason': 'no_parent'}
-        parent = self.store.get_node(parent_node_id)
-        receiver_is_root = bool(parent is not None) and not str(
-            getattr(parent, 'parent_node_id', '') or ''
-        ).strip()
-        body = (
-            f'子节点「{goal}」已被暂停（异常暂停）。\n'
-            f'原因：{reason_text[:1200]}\n'
-            f'节点 id：{node.node_id}。请决定是继续推进、改写要求还是终止这条分支。\n'
-            f'{error_escalation_hint(receiver_is_root=receiver_is_root)}'
-        )
-        return await self.deliver_node_message(
-            task_id=normalized_task_id,
-            target_node_id=parent_node_id,
-            message=body,
-            origin='node',
-            # 发送方是 child（relation 只做语义对齐，kind 由 system_kind 决定）。
-            relation=RELATION_CHILD,
-            system_kind=KIND_CHILD_ABNORMAL_PAUSE,
-            source_node_id=str(node.node_id or '').strip(),
-        )
+        if parent_error is not None:
+            raise parent_error
+        return receipt
 
     async def resend_lost_abnormal_pause_escalations(self, task_id: str) -> list[str]:
         """P8：异常暂停的升级消息丢了就补发（防 P6 第一类死锁从崩溃路径复活）。
