@@ -1,7 +1,7 @@
 # 节点通知尾块窗口化与历史检索落地计划
 
 日期：2026-11-06
-状态：**已实现（P1–P4）；P5 真机验收待执行**
+状态：**已实现（P1–P4）；P5 真机验收已通过**
 取证基线：`main` @ `75eebcd6`
 实施提交：`095df2cb`（尾窗 + 检索面 + 索引 + 文档）、`6b69ed9e`（latest_at 修正）
 工作区提示：`main/runtime/node_runner.py`、`main/runtime/task_actor_service.py`、`main/storage/sqlite_store.py` 已有未提交改动，非本计划产出；动 P2 前先确认归属，不覆盖、不代提交。
@@ -190,6 +190,15 @@
   - `test_task_web_worker_runtime.py`（222 passed）
   - `ruff check` 与 `scripts/check_architecture_docs.py` 均通过。
 
-P5 真机验收（重启 + 真任务）仍需执行；验收口径见上文「P5 测试与验收」。
+P5 真机验收（2026-11-06，已通过）：
+
+- 重启本机 web（托管 worker）加载新代码；用临时模型 `acceptance-notice-tail-window` + 本地假 provider，把 `context_window_tokens` 临时调到 30000（触发线 22800）。
+- 真实节点任务 `task:5f8586d345ea` / `node:8d604fb5b7ca`，投递 20 条通知；任务最终 `success`。
+- `token_compression` 落地：`prepared_message_chars=66011`、`final_request_tokens=28816 > 22800`、`compaction_mode=llm`。
+- `notice_preservation`：`live_notice_count=5`、`archived_consumed_count=3`、`miss_count=5`、`rolled_stage_id=token-compact:node:8d604fb5b7ca:21`。
+- 压缩后 `[NOTICE_TAIL]` 块为 `compressed_notice_window`，`notice_count=5`，正文只含 live 的通知 4–8；旧通知 1–3、9–20 不在尾块里。
+- 节点调用 `view_message_history`，工具回执 `count=20`；台账 `notice_records` 共 20 条。
+- 清理：临时模型 / 会话 / 测试任务已删除，execution 角色恢复原链；本机 web 保留新代码继续运行。
+- 验收脚本：`work/live_notice_tail_window_acceptance.py`；请求日志证据：`work/notice-window-requests.jsonl`。
 
 工作区注意：`main/runtime/node_runner.py` 有一处与本改造无关的未提交改动（`started = request_started_at` → `boundary = anchor`，约在 `_unseen...` 时区比较处），未纳入本次提交。动它前先确认归属。
