@@ -237,6 +237,17 @@ exec 与 memory 工具：
 - 排查“为什么没有自动停止”先看 cron store 的 `payload.max_runs` / `state.delivered_runs`（到达上限由 scheduler 删除，提醒回合内手工 `remove` 只是辅助出口）；排查“cron 到点了但没创建/查询任务、只重复谈 cron 自己”，先检查 frontdoor tool exposure 是否被错误缩成 `cron`，而不是先怀疑 scheduler 没触发。
 - 前门的 `schedule_wake` 是 cron 的另一个生产者，走同一条一次性 `at` 车道（`max_runs=1` + `delete_after_run`），所以它的耐久存储、到点自愈重臂、at-most-once 投递与重启后的过期抑制都不是新机制；投递正文与到点判读归 `heartbeat-system.md`「Cron Reminder Contract」。它与操作员自己建的提醒之间有一条必须成立的边界：**替换只替换自己那一族**——`name` 以 `self-wake: ` 开头 **且** `schedule.kind == 'at'`，两侧都带会话键且不同才保留（CLI 共享会话没有更可分的键，那一族整批让位）。不这样做的话，一个每 40 分钟推进一次的报时回合会攒出一串闹钟，而"重设一次自己的闹钟"也会撞上同会话同毫秒的重复注册闸门。调度器不在（CLI 起的会话、cron 被关闭）时工具返回 `wake_scheduler_unavailable`，而不是 `armed: true` 却永远不会响。
 
+### External event subscription tool
+
+`event_subscription` 是 CEO 与执行节点共用的普通候选工具，用来管理 agent 自己创建的外部唤醒订阅；它不是常驻工具，也不出现在验收角色或受限档默认工具集里。API、凭证、事件状态与目标约束归 `external-agent-api.md`「Agent 外部事件订阅（external event subscription）」。
+
+- 动作：`create` / `list` / `events` / `set_enabled` / `rotate_credential` / `remove`。
+- 目标从调用时的 runtime context 派生：CEO 默认当前会话，可点名当前会话任务内的执行节点；执行节点默认当前任务节点，也可绑定任务来源会话。工具调用方不能传任意 session_key 跳到别的会话。
+- `create` 接收 `name` / `instruction` / `condition_note` / `target_kind` / `task_id` / `node_id` / `credential_file`。`credential_file` 必须是当前会话工作区或任务临时目录内的绝对路径；工具生成独立 token、原子写凭证文件，返回体只含路径和掩码，不含明文或哈希。
+- `instruction` 是留给未来 agent 的可信处理指令；外部事件正文是不可信数据。目标与 instruction 创建后不可编辑，变化时新建订阅。
+- `events` 只回最近事件的 id、类型、状态、时间和投递阶段，供模型确认 `injected` / `delivered` / `undeliverable`，不把事件正文重新灌回上下文。
+- 配套预置 skill `external-event-subscription` 教模型选择会话/节点目标、写外部轮询程序、生成稳定幂等键、做合成事件验收以及停用/轮换。参考连接器模板在该 skill 的 `assets/polling_connector.py`；平台逻辑与进程生命周期仍由当前任务承担。
+
 ### `manage_task_nodes` 节点控制工具
 
 `tools/manage_task_nodes_cn` 提供给 agent 处理错误暂停节点的 callable tool。它调用 `MainRuntimeService.control_nodes(...)`，一次请求可以包含多个同一任务的节点，并按节点返回结果。

@@ -214,6 +214,31 @@ Frontdoor tool calls that exceed the foreground wait window are handed off to a 
 - Startup recovery of `tool_jobs` rows (owned by `runtime-overview.md`「Frontdoor Tool Job Handoff」) creates the same event for rows left `running`/`stopping`: a running job becomes `interrupted`, a stopping job whose stop event was never written becomes `stopped_by_user`, and an already-written event is repaired without creating a second one. The per-job event dedupe key is the guard.
 - Session pause/stop does not cancel a background job, so it produces no event at pause time; the job's own terminal state wakes the session later. Only the session-delete path cancels jobs without an event.
 
+## External Event Heartbeat Events
+
+This section owns the session half of the agent-created external event subscription lane; the API,
+credential, storage and target contract are owned by `external-agent-api.md`「Agent 外部事件订阅（external event subscription）」.
+
+- `enqueue_external_event(payload)` accepts one durable event row and enqueues `reason=external_event`,
+  `source=external_api`. The dedupe key is server-derived `external-event:{subscription_id}:{event_id}`;
+  callers cannot supply it.
+- The payload carries subscription identity/name, event id/type/occurred-at, the subscription
+  `instruction`, optional trigger note, `text` / `data`, and the fixed target snapshot. The target is
+  always the current source session for this lane.
+- `prompt_lane._external_event_lines` renders the subscription instruction separately from the event
+  content and labels the content as untrusted external data. The event never forces a user-visible
+  reply: the model continues the existing task when action is needed and may call `silent` otherwise.
+  Stronger rules from any mixed `task_terminal` / `shutdown_resume` / `turn_interrupted` event still apply.
+- Busy and compression-holding sessions use the ordinary wake-queue deferral. Events accepted while
+  the target is busy remain durable and batch into the next heartbeat turn.
+- Consumption is marked at injection in `_consume_heartbeat_events_at_injection`: the external event
+  row becomes `injected`, and the subscription's last delivery error is cleared. If marking fails after
+  injection, `injected_heartbeat_event_keys` finds the persisted dedupe key on the next attempt and
+  settles the row without running the model twice.
+- A crash before injection is replayed by the external event service. A model failure after injection
+  does not re-deliver; the event bundle remains in context and later turns handle it. This lane
+  guarantees delivery to the model context, not successful handling or a visible reply.
+
 ## Channel Digest Heartbeat Events
 
 - The official QQ bridge writes non-@ group messages to a per-group history file and enqueues one `channel_digest` event through `POST /api/v1/sessions/{id}/digest`. Source is `external_api`; dedupe key is `channel-digest:<session_key>:<n_end>`.

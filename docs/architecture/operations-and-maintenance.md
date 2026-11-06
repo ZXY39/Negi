@@ -146,6 +146,7 @@
 - Web UI
 - main task runtime
 - heartbeat
+- 外部事件订阅的接收、会话唤醒与节点信箱投递
 
 ### Worker
 
@@ -230,6 +231,8 @@
 
   其中 SQLite（`runtime.sqlite3` 或配置指定的 store 路径）里除任务/节点/帧等表外还有 `shutdown_pause_registry` 台账表：记录上次优雅关闭时被暂停的会话与任务，重启自动恢复后逐行删除。排查“重启后任务没有自动恢复”先查这张表（语义见 `main-task-runtime.md`「Graceful Shutdown Pause and Startup Auto-Resume」）。
 
+  同一库里的 `event_subscriptions` 与 `external_event_inbox` 承载 agent 创建的外部事件订阅与入站事件：订阅行保存目标、处理指令、secret 哈希和最近投递读数，事件行保存 `pending` / `injected` / `delivered` / `undeliverable` 与 `delivery_detail`。排查“外部条件到了但会话/节点没醒”先读这两张表；契约与状态语义见 `external-agent-api.md`「Agent 外部事件订阅（external event subscription）」。
+
   通过 `negi web` 启动并启用 auto worker 时，这里还应重点关注两份日志：
 
   - `.g3ku/main-runtime/manual-web-run.log`
@@ -245,6 +248,9 @@
 
 - `.g3ku/external-outbox/`（安装根，与 `.g3ku/external-sessions/`、`.g3ku/external-uploads/` 同侧）
   外部渠道出站消息（主动推送与回合回复）的持久账本（append-only jsonl，msg 记录 + ack tombstone），没有年龄出口：记录 pending 到被某个消费方 ack 或被判不可达为止。排查「渠道端收不到推送或回复」先看这里有无 pending 滞留、以及它属于哪个 `event`；契约、销账方与重放语义详见 `external-agent-api.md`「持久 outbox」。
+
+- 外部事件订阅凭证文件（数据根下的会话工作区或临时目录）
+  `event_subscription` 创建订阅时把单订阅 token 写入调用方给出的 `credential_file`，位置只能落在当前会话的 `session-workspaces/` 或 `temp/ceo|tasks/` 之内；Negi 库只存哈希。连接器读取它，工具结果、日志、仓库与记忆都不得出现明文。订阅轮换会原子替换同一文件，删除订阅后文件可手动清理。
 
 - `memory/`（安装根）
   本地记忆目录；`memory/groups/<scope>/memory/` 是每个群各自的记忆根（同样的 mirror / sqlite / notes / index / queue），由 `MemoryScopeRouter` 按需创建。排障入口详见本文档「Memory Queue Workflow」章节。
@@ -538,6 +544,20 @@ worker 静默不等于 worker 死亡：空闲 worker 除心跳线程每 1–2s �
 - 保存模型链后没有入队、也没有读图会话：先看 `.g3ku/onboarding.json` 的 `persona_request_id` / `photo_session_started_at` 是否已写，再查 `memory/queue.jsonl` 是否有一条 `trigger_source=persona_onboarding`，以及 `sessions/` 里是否有 `internal_persona_photo` 的转录。`photo_session_error` 非空表示读图会话失败，常见原因是 CEO 链里没有收图成员。
 - 隐藏读图会话不出现在网页会话列表是预期：`internal:` 前缀不进 `web:` 目录、不当活动会话兜底，也不参与记忆复核。它出现在列表或复核批次里属于缺陷。
 - 照片集为空但 `my_image/` 有文件：画廊只列 raster 图片（png/jpg/jpeg/webp/gif/bmp）；缩略图失败会回退原图 URL，不影响陈列。
+
+### 外部事件订阅未唤醒
+
+外部程序调用 `POST /api/v1/event-subscriptions/{id}/events` 后目标没有反应时，按以下顺序分诊：
+
+1. 先用 `event_subscription(action="events", subscription_id=...)` 看事件是否存在、当前状态与 `delivery_detail.stage`。没有事件行说明请求没有落库，先查 HTTP 码（401/403/404/413/503）和外部程序日志，不要查 heartbeat。
+2. `pending` 且 stage 是 `subscription_disabled` / `heartbeat_unavailable` / `node_dispatch_unavailable` / `node_delivery_deferred`：按 stage 查订阅启停、heartbeat 与 worker 在线状态；服务每 60 秒对账，修好依赖后会继续，不需要重新投递。
+3. `pending` 且 stage 是 `node_content_externalization_unavailable`：节点事件正文超过内联额度而 content store 不可用；先修内容存储，事件会保留。
+4. 会话目标卡在 injected 之前：查 `heartbeat events consumed` / `external event heartbeat enqueued` 日志。会话忙或正在压缩时改期是设计内行为，不是丢事件。
+5. 节点目标已 `delivered` 但节点没动：查目标是否暂停、是否停在 `waiting_acceptance`、是否是验收节点。暂停只入箱不唤醒，验收节点只由绑定执行节点的提交激活，恢复/驳回后才消费信箱。
+6. 节点目标 `undeliverable`：读 `delivery_detail.reason`。`target_missing` / `target_terminal` 是永久失效，需按当前任务重建订阅；`subscription_removed` 表示订阅已退休。
+7. 同一个外部事件被处理两次：先查外部程序是否换了 `Idempotency-Key`。订阅内同一键由 SQLite 唯一约束吸收；节点侧另有 `external_event_id` 全状态去重，两条都命不中才查心跳注入。
+
+关键日志：`external event accepted`、`external event duplicate`、`external event heartbeat enqueued`、`external event injected`、`external event delivered to node`、`external event undeliverable`、`external event reconcile`。日志不输出 secret 或凭证文件正文。
 
 ### 外部渠道桥接异常
 

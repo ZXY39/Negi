@@ -194,8 +194,53 @@ bus/hub 全是内存态：桥 pump 断连或进程重启窗口里滞留的消息
 
 主动推送（心跳、cron、任务终态）没有可回的入站，那一发落在窗口之外就是主动形状，群里同样受这项权限约束；推送目标还必须先注册过会话（该用户/群先与机器人产生过消息）。平台侧还有两条不由本桥决定的限制：接收端「允许主动发送」开关关掉时主动消息一律发不出去，而群聊没有单聊那种「互动召回」额度（单聊在用户发起对话后 30 天内可有 4 次周期性下发），群与单聊共享每日一千条的主动上限。
 
-## 8. 常见排障入口
+## 8. Agent 外部事件订阅（external event subscription）
 
+这是一条由 agent 自己建立的唤醒车道：外部程序负责轮询网页、目录、数据库或任意本地条件，条件满足后向 Negi 投递一条已鉴权事件；Negi 只负责订阅、持久收件和唤醒当前来源会话或当前任务执行节点。触发条件 DSL、外部程序生命周期和平台回复都不属于本车道。
+
+### 订阅与凭证
+
+- 模型通过候选工具 `event_subscription` 创建、列出、启停、轮换和删除订阅；工具合同归 `tool-and-skill-system.md`「External event subscription tool」。
+- 目标由服务端从调用上下文固定：CEO 可绑定当前会话及其任务内执行节点，执行节点可绑定任务来源会话或本任务执行节点；验收节点不可作为目标，跨会话/跨任务寻址拒绝。创建后的目标与 `instruction` 不可修改，需要改变时新建订阅。
+- 每个订阅有独立随机 secret，服务端只存 SHA-256 哈希。工具把明文写入调用方指定的 `credential_file`（必须位于当前会话工作区或任务临时目录），工具结果只回订阅 id、接口路径、凭证路径和掩码。轮换使旧 secret 立即失效。
+- 存储是共享 runtime SQLite 的 `event_subscriptions` 与 `external_event_inbox` 两表。订阅拥有者、启用状态、最近事件与最近投递错误都在订阅行；事件正文和投递阶段在事件行，不进入 external outbound 账本。
+- 全局 `externalApi.enabled` 仍是总开关；项目锁继续由 423 中间件兜底。单订阅 secret 不能操作其他订阅，也不能使用 bridge token 的跨会话能力。
+
+### 事件入口
+
+```http
+POST /api/v1/event-subscriptions/{subscription_id}/events
+Authorization: Bearer <subscription secret>
+Idempotency-Key: <stable external event key>
+Content-Type: application/json
+```
+
+请求只能提供 `type`、`occurred_at`、`text`、`data`；`text` 与 `data` 至少一个，`data` 必须是 object，序列化正文上限 256 KiB，幂等键 trim 后 1–128 字符。目标、处理指令、信任级和去重键都不能由调用方覆盖。
+
+- `(subscription_id, Idempotency-Key)` 有持久唯一约束。新事件落库后返回 202 + `event_id` / `status:"pending"`；重复键返回 200、原 `event_id` 与当前状态，派发只发生在首次落库那一次。
+- 401 = secret 缺失/错误；403 = 总开关或订阅停用；404 = 订阅不存在/已退休；413 = 正文超限；503 = web 事件服务尚未就绪。外部程序对网络错误、429、5xx 用同一幂等键退避重试。
+- HTTP 接收不等于模型已处理。外部事件不提供 callback、逐事件回复或结果流；需要平台回复的桥接仍走本文件前述会话回合与 SSE/outbound 车道。
+
+### 派发与状态
+
+事件行只有四个状态：`pending`、`injected`、`delivered`、`undeliverable`。
+
+- **会话目标**：事件作为 `reason=external_event` 的 heartbeat 入队；忙时沿用 heartbeat 改期与合并。事件束进入模型上下文时标 `injected`，此后模型失败不重投。事件束与稳定规则归 `heartbeat-system.md`「External Event Heartbeat Events」。
+- **节点目标**：经 `deliver_control_node_message` 进入现有 worker 命令与节点信箱；信箱接受或按 `external_event_id` 判重后标 `delivered`。暂停节点只落箱不唤醒，等待验收/验收节点不被激活；信箱生命周期归 `main-task-runtime.md`「节点信箱与唤醒（现行）」。
+- `external_event_id` 是节点侧跨全状态去重身份：即使通知行已 consumed，同一外部事件重放也只返回 deduplicated，信箱保持一封。普通节点消息的指纹去重语义不变。
+- 内容超过节点内联额度时写 content store 并以 `ref` 交付；外置不可用则保持 pending，不把截断正文伪装成完整事件。
+- 订阅停用后新事件拒收，已接收的 pending 事件保留到重新启用；订阅删除后 pending 结为 `undeliverable: subscription_removed`。目标永久失效（节点缺失/终态）同样是 `undeliverable`；worker 临时离线、heartbeat 暂不可用与外置失败保持 pending。
+- 事件派发是有界的：内存同时最多 8 个在途任务，SQLite 是真相；启动与每 60 秒对账扫描 pending，因此进程重启不会丢失未注入/未落箱事件。首版不按年龄丢弃事件。
+
+### 安全边界
+
+- 订阅 `instruction` 是创建订阅的 agent 留给未来自己的可信任务指令；`text` / `data` 始终是不可信外部数据，模型可见事件束明确分开两者，并要求不执行正文中的指令。
+- 订阅不能提升目标会话/节点的信任级，也不能恢复暂停节点；目标自身的 RBAC、沙箱档位和节点生命周期仍是执行边界。
+- 第三方受限会话默认拿不到 `event_subscription` 工具；操作员显式放行后也只能绑定自己的会话。
+
+## 9. 常见排障入口
+
+- 外部事件接口 401/403/404/413/503、事件一直 pending、会话没 injected、节点没 delivered 或同一条件重复唤醒：先按「Agent 外部事件订阅（external event subscription）」读状态机与回包，再按 `operations-and-maintenance.md`「外部事件订阅未唤醒」分诊；不要把 HTTP 202 当成模型已处理。连接器模板与验收步骤在 skill `external-event-subscription`。
 - 桥拿到 403 `external_api_disabled`：配置 `externalApi.enabled` 与 tokens；401：token 不匹配或条目被禁用。403 `cross_session_scope_required`：这个 token 的作用域是"仅本桥"，却在请求 `scope=all`。别名下的会话一律 404 `session_not_found`——先分清是"这个键真不存在"还是"作用域把它挡在外面"，判据在「启用与鉴权」的作用域一档：404 也出现在跨桥寻址被关掉的时候，而不是只在拼错键的时候。
 - 消息提交成功但桥收不到回复：先确认 pump 是否真的在跑——锚点 `qq-official pump connecting session=<会话键> last_seq=N`，**每次连接尝试一条 INFO**。它在、而 `qq-official delivered` 不在 ⇒ 事件没到或投递被判失败（找桥侧 WARNING）；它一条都没有 ⇒ pump 从未被执行（任务没被调度/桥没建 pump），此时 18790 上会只剩浏览器 WS 那条回环长连接，`outbox.jsonl` 也是空的——这是"入站正常、出站黑洞"的最小心证；`connecting` 之后紧跟一条 WARNING `qq-official pump cancelled for session <会话键>` 则是第三种形态，指向桥自身在该时刻被重建（pump 随桥的 `finally` 一起取消，判据是同进程里 `[botpy] 登录机器人账号中...` 的条数在涨），先查 sync 是否丢了幂等而不是查 pump。再确认桥订阅的 SSE 会话与消息提交的会话一致（同一 `session_id`）；看事件缓冲是否被 `eventBufferSize` 淘汰（长断线超过缓冲窗口）。回复也登记进持久账本，所以分界在账本里读得到：`GET /outbox/pending`（或 `.g3ku/external-outbox/outbox.jsonl`）里有这条 `event=reply.final` 而未 ack ⇒ 泵/重注入路径的问题；连记录都没有 ⇒ 该会话拿不到 `external_key`（注册表里没有它的孤儿转录，只走内存投递），或登记本身失败（锚点 `external outbox append failed`）。
 - 渠道端收到重复内容（旧回答跟着这一轮的新回答再投一遍）：分三种形态。一种是一次登录里 `qq-official pump connecting ... last_seq=0` 之后紧跟多条 `qq-official delivered`，而 `outbox.jsonl` 里那个会话只剩最新一条 `reply.final`（其余都已 ack 并随每小时压实落盘）——那是桥的投递游标与 `outbox_id` 去重集没了，按「内置官方 QQ 适配器」的桥两层状态查：账本要跨到期重登存活，只有进程重启才该清空（那时 hub 同样是空的，全量重放才是对的）。第二种是同一 `outbox_id` 的两份副本各投一次（服务端周期对账/启动重放注入的正常形状），锚点是 `qq-official outbox ack failed ...; may redeliver after restart`：ack 一直失败才会留下重复送达的窗口。第三种是同一个 `outbox_id` 只有一份事件却被 POST 两次：`qq-official deliver failed ... (attempt 1/5)` 带 `RuntimeError: qq-official delivery unconfirmed (empty API response)`，紧跟一次 `pump connecting ... last_seq=<本条 seq-1>` 与一条 `delivered`——渠道 API 收了请求却没给回执，重放按 at-least-once 又发一份。出站幂等闸门把这类副本拦在同一 id 上：只销账、不重发，落一条 WARNING `qq-official suppressed replayed send for outbox ...`，账本留下 `{"status":"unconfirmed"}` 的 tombstone（机制见「内置官方 QQ 适配器」出站幂等闸门）。分形态先用转录：`sessions/*.jsonl` 里只有一个助手行而渠道端收到两条，是第三种形态；两个助手行才是重复起轮。
