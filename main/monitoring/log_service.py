@@ -2987,6 +2987,31 @@ class TaskLogService:
                 self.refresh_task_view(task_id, mark_unread=True)
             return updated or record
 
+    def externalize_acceptance_external_event_list(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        text: str,
+    ) -> str:
+        """把验收按需读取的外部订阅事件清单写成 artifact，返回可复开的 ref。
+
+        验收尾块只留一行计数与 event id；事件正文不搬进去。清单落盘后由
+        `content_open(ref=...)` 按需读取，避免高频订阅把验收上下文撑大。
+        """
+        body = str(text or '').strip()
+        if not body:
+            return ''
+        _summary, ref = self._summarize_content(
+            body,
+            task_id=task_id,
+            node_id=node_id,
+            display_name=f'acceptance-external-events:{node_id}',
+            source_kind='acceptance_external_events',
+            force=True,
+        )
+        return str(ref or '').strip()
+
     def mark_task_failed(self, task_id: str, *, reason: str) -> TaskRecord | None:
         with self._task_lock(task_id):
             task = self._store.get_task(task_id)

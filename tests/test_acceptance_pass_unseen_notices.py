@@ -103,6 +103,7 @@ def _queue_delivered(
     notification_id: str,
     kind: str,
     delivered_at: str = STAMP,
+    payload: dict | None = None,
 ) -> None:
     service.store.upsert_task_node_notification(
         {
@@ -117,6 +118,7 @@ def _queue_delivered(
             'delivered_at': delivered_at,
             'kind': kind,
             'priority': 'normal',
+            'payload': dict(payload or {}),
         }
     )
 
@@ -294,6 +296,47 @@ async def test_resuming_from_a_frame_restores_that_frames_tail_anchor(tmp_path):
             dict(service.store.get_node(ACCEPTANCE).metadata or {}).get('acceptance_tail_built_at') or ''
         ).strip()
         assert synced == '2026-10-24T09:00:00+08:00'
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_external_event_rows_do_not_hold_a_pass(tmp_path, monkeypatch):
+    """外部订阅事件不进 I2 复核：事件流不参与"验收方看过没有"的判定。"""
+    service = _service(tmp_path)
+    try:
+        _seed(service)
+        service.store.update_node(
+            ACCEPTANCE,
+            lambda record: record.model_copy(
+                update={'status': 'success', 'final_output': '验收裁定：通过'}
+            ),
+        )
+        _stamp_tail_anchor(service, '2026-10-24T10:00:00+08:00')
+        _record_last_hop(service, created_at='2026-10-24T10:00:05+08:00', duration_ms=1000)
+        _queue_delivered(
+            service,
+            node_id=CHILD,
+            message='External event from subscription feeds.',
+            notification_id='notif:unseen:external',
+            kind='frontdoor_notice',
+            delivered_at='2026-10-24T10:00:03+08:00',
+            payload={'external_event_id': 'event:stream-1'},
+        )
+        requested: list[str] = []
+        monkeypatch.setattr(service.node_runner, 'acceptance_handoff_requeue_callback', requested.append)
+
+        handled = await service.node_runner._handle_acceptance_node_result(
+            task=service.store.get_task(TASK),
+            acceptance=service.store.get_node(ACCEPTANCE),
+            result=_pass_result(),
+        )
+
+        assert handled.delivery_status == 'final'
+        assert requested == []
+        child = service.store.get_node(CHILD)
+        handshake = dict((child.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY) or {})
+        assert handshake['state'] == ACCEPTANCE_STATE_ACCEPTED
     finally:
         await service.close()
 

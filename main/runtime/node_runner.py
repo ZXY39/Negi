@@ -7096,6 +7096,16 @@ class NodeRunner:
         # （notif:xxx 与 root-notice:...）双写落盘，故按 message 文本去重；
         # 已 superseded 的记录不再作为当前要求。
         metadata = dict(accepted_node.metadata or {}) if isinstance(getattr(accepted_node, 'metadata', None), dict) else {}
+        mailbox_rows = self._acceptance_mailbox_notice_rows(accepted_node=accepted_node)
+        # 外部订阅是事件流，不是用户/前门给验收方的新要求：正文不进尾块，
+        # 只在尾块里留一行计数 + event id，清单落盘后按需 content_open。
+        external_event_notification_ids = {
+            notification_id
+            for notification_id in (
+                self._external_event_notification_id(item) for item in mailbox_rows
+            )
+            if notification_id
+        }
         consumed = normalize_append_notice_context(metadata.get(APPEND_NOTICE_CONTEXT_KEY)).get('notice_records') or []
         pending = normalize_pending_append_notice_records(metadata.get(PENDING_APPEND_NOTICE_RECORDS_KEY))
         entries: list[str] = []
@@ -7104,6 +7114,11 @@ class NodeRunner:
             if not isinstance(item, dict):
                 continue
             if str(item.get('superseded_at') or '').strip():
+                continue
+            if (
+                str(item.get('notification_id') or '').strip()
+                in external_event_notification_ids
+            ):
                 continue
             kind = str(item.get('kind') or '').strip()
             if kind and kind not in ACCEPTANCE_MIRROR_KINDS:
@@ -7118,7 +7133,10 @@ class NodeRunner:
             title = '追加任务要求（追加通知，晚于上方验收标准；若两者冲突，以本段要求为准）'
             blocks.append(f'{title}\n' + '\n'.join(entries))
         unread_entries: list[str] = []
-        for item in self._delivered_acceptance_notice_rows(accepted_node=accepted_node):
+        for item in self._delivered_acceptance_notice_rows(
+            accepted_node=accepted_node,
+            rows=mailbox_rows,
+        ):
             text = str(getattr(item, 'message', '') or '').strip()
             if not text or text in seen_texts:
                 continue
@@ -7135,10 +7153,9 @@ class NodeRunner:
             )
         return '\n\n'.join(blocks)
 
-    def _delivered_acceptance_notice_rows(self, *, accepted_node: NodeRecord) -> list[Any]:
-        """被检验节点信箱里仍可注入、且属于用户/前门来源的 delivered 行。"""
+    def _acceptance_mailbox_notice_rows(self, *, accepted_node: NodeRecord) -> list[Any]:
         try:
-            rows = list(
+            return list(
                 self._store.list_task_node_notifications(
                     str(accepted_node.task_id or '').strip(),
                     str(accepted_node.node_id or '').strip(),
@@ -7147,17 +7164,180 @@ class NodeRunner:
             )
         except Exception:
             return []
+
+    @staticmethod
+    def _external_event_id_of(item: Any) -> str:
+        """外部订阅事件的投递行：返回 event id，非事件行返回空串。
+
+        身份在投递时写进行 payload（`deliver_node_message(external_event_id=...)`），
+        归档记录不带这个字段，所以消费过的行要按 notification_id 回查同一行。
+        """
+        payload = getattr(item, 'payload', None)
+        if not isinstance(payload, dict):
+            return ''
+        return str(payload.get('external_event_id') or '').strip()
+
+    @classmethod
+    def _external_event_notification_id(cls, item: Any) -> str:
+        if not cls._external_event_id_of(item):
+            return ''
+        return str(getattr(item, 'notification_id', '') or '').strip()
+
+    def _delivered_acceptance_notice_rows(
+        self,
+        *,
+        accepted_node: NodeRecord,
+        rows: list[Any] | None = None,
+    ) -> list[Any]:
+        """被检验节点信箱里仍可注入的用户/前门 delivered 行；外部订阅事件除外。"""
+        mailbox_rows = (
+            list(rows)
+            if rows is not None
+            else self._acceptance_mailbox_notice_rows(accepted_node=accepted_node)
+        )
         delivered: list[Any] = []
-        for item in rows:
+        for item in mailbox_rows:
             if str(getattr(item, 'status', '') or '').strip() != 'delivered':
                 continue
             if notification_is_held(item):
+                continue
+            if self._external_event_id_of(item):
                 continue
             kind = str(getattr(item, 'kind', '') or '').strip()
             if kind and kind not in ACCEPTANCE_MIRROR_KINDS:
                 continue
             delivered.append(item)
         return delivered
+
+    @staticmethod
+    def _parse_iso_datetime(value: Any) -> datetime | None:
+        text = str(value or '').strip()
+        if not text:
+            return None
+        try:
+            return datetime.fromisoformat(text.replace('Z', '+00:00'))
+        except ValueError:
+            return None
+
+    def _acceptance_execution_window_start(
+        self,
+        *,
+        acceptance: NodeRecord,
+        accepted_node: NodeRecord,
+    ) -> datetime | None:
+        """本次执行尝试的起点：上一轮裁定时刻；首轮退回执行节点创建时刻。"""
+        metadata = (
+            dict(getattr(acceptance, 'metadata', None) or {})
+            if isinstance(getattr(acceptance, 'metadata', None), dict)
+            else {}
+        )
+        history = metadata.get(_REJECTION_HISTORY_KEY)
+        if isinstance(history, list):
+            for entry in reversed(history):
+                if not isinstance(entry, dict):
+                    continue
+                parsed = self._parse_iso_datetime(entry.get('at'))
+                if parsed is not None:
+                    return parsed
+        return self._parse_iso_datetime(getattr(accepted_node, 'created_at', ''))
+
+    def _acceptance_external_event_digest(
+        self,
+        *,
+        task,
+        acceptance: NodeRecord,
+        accepted_node: NodeRecord,
+    ) -> str:
+        """一条有界摘要：本次执行以来到达的外部订阅事件数量与 event id。
+
+        窗口从上一轮裁定（或执行节点创建）算起，覆盖执行方可能据以改动交付的
+        全部事件；正文不搬进验收上下文，完整清单（含每条正文与投递时刻）落成
+        artifact，验收方需要时用 `content_open(ref=...)` 读取。
+        """
+        events: dict[str, Any] = {}
+        for item in self._acceptance_mailbox_notice_rows(accepted_node=accepted_node):
+            event_id = self._external_event_id_of(item)
+            if event_id and event_id not in events:
+                events[event_id] = item
+        if not events:
+            return ''
+        window_start = self._acceptance_execution_window_start(
+            acceptance=acceptance,
+            accepted_node=accepted_node,
+        )
+        selected: list[tuple[str, Any]] = []
+        for event_id, item in events.items():
+            delivered_at = self._parse_iso_datetime(
+                getattr(item, 'delivered_at', '') or getattr(item, 'created_at', '')
+            )
+            if window_start is not None and delivered_at is not None:
+                left = window_start
+                right = delivered_at
+                if (left.tzinfo is None) != (right.tzinfo is None):
+                    left = left.replace(tzinfo=None)
+                    right = right.replace(tzinfo=None)
+                if right < left:
+                    continue
+            selected.append((event_id, item))
+        if not selected:
+            return ''
+        selected.sort(
+            key=lambda pair: str(
+                getattr(pair[1], 'delivered_at', '') or getattr(pair[1], 'created_at', '') or ''
+            )
+        )
+        ref = ''
+        externalize = getattr(
+            self._log_service, 'externalize_acceptance_external_event_list', None
+        )
+        if callable(externalize):
+            try:
+                ref = str(
+                    externalize(
+                        task_id=task.task_id,
+                        node_id=accepted_node.node_id,
+                        text=self._acceptance_external_event_list_text(selected),
+                    )
+                    or ''
+                ).strip()
+            except Exception as exc:
+                logger.debug(
+                    f'acceptance external event list externalize skipped: '
+                    f'{accepted_node.node_id}: {describe_exception(exc)}'
+                )
+        event_ids = [event_id for event_id, _item in selected]
+        shown = '、'.join(event_ids[:8])
+        if len(event_ids) > 8:
+            shown += '…'
+        line = (
+            f'【外部订阅事件】本次执行以来执行节点收到 {len(selected)} 条外部订阅事件'
+            f'（event id：{shown}）；正文不镜像。'
+        )
+        if ref:
+            line += f'需要时用 content_open(ref="{ref}") 读取清单（含每条事件正文与投递时刻）。'
+        return line
+
+    @staticmethod
+    def _acceptance_external_event_list_text(selected: list[tuple[str, Any]]) -> str:
+        limit = 200
+        lines = ['外部订阅事件清单（验收按需读取；正文未进入验收尾块）', '']
+        for index, (event_id, item) in enumerate(selected[:limit], start=1):
+            message = str(getattr(item, 'message', '') or '').strip()
+            item_ref = str(getattr(item, 'ref', '') or '').strip()
+            delivered_at = str(
+                getattr(item, 'delivered_at', '') or getattr(item, 'created_at', '') or ''
+            ).strip()
+            lines.append(f'{index}. event id: {event_id}')
+            lines.append(f'   delivered_at: {delivered_at or "(unknown)"}')
+            if item_ref:
+                lines.append(f'   ref: {item_ref}')
+            if len(message) > 4000:
+                message = message[:4000] + '…（截断；完整正文见该行的 ref 或信箱）'
+            lines.append(message or '(empty)')
+            lines.append('')
+        if len(selected) > limit:
+            lines.append(f'…另有 {len(selected) - limit} 条未列入本清单。')
+        return '\n'.join(lines).strip()
 
     def _stamp_acceptance_tail_built_at(
         self,
@@ -7390,6 +7570,13 @@ class NodeRunner:
         notice_block = self._acceptance_notice_block(accepted_node=accepted_node)
         if notice_block:
             lines.append(notice_block)
+        event_digest = self._acceptance_external_event_digest(
+            task=task,
+            acceptance=node,
+            accepted_node=accepted_node,
+        )
+        if event_digest:
+            lines.append(event_digest)
         if not lines:
             return ''
         return '【本轮验收上下文（运行时注入，不是新的用户指令）】\n' + '\n'.join(lines)

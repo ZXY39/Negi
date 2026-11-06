@@ -803,6 +803,7 @@ def _queue_delivered(
     message: str,
     notification_id: str,
     kind: str = 'peer_notice',
+    payload: dict | None = None,
 ) -> str:
     service.store.upsert_task_node_notification(
         {
@@ -817,6 +818,7 @@ def _queue_delivered(
             'delivered_at': STAMP,
             'kind': kind,
             'priority': 'normal',
+            'payload': dict(payload or {}),
         }
     )
     return notification_id
@@ -1305,6 +1307,58 @@ class TestUnreadNoticeMirror:
             assert '前门补充：必须覆盖 Safari' in block
             assert '用 reject 打回' in block
             assert '追加任务要求' not in block
+        finally:
+            await service.close()
+
+    @pytest.mark.asyncio
+    async def test_external_event_rows_are_summarized_not_mirrored(self, tmp_path):
+        """外部订阅是事件流：正文不进验收尾块，只留一行摘要 + 落盘清单 ref。"""
+        service = _service(tmp_path)
+        try:
+            _seed(service)
+            message = 'External event from subscription feeds. secret payload 42'
+            _queue_delivered(
+                service,
+                node_id=CHILD,
+                message=message,
+                notification_id='notif:external:1',
+                kind='frontdoor_notice',
+                payload={'external_event_id': 'event:1'},
+            )
+            # 已消费归档的同一条也不得进「追加任务要求」。
+            service.store.update_node(
+                CHILD,
+                lambda record: record.model_copy(
+                    update={
+                        'metadata': {
+                            **dict(record.metadata or {}),
+                            APPEND_NOTICE_CONTEXT_KEY: {
+                                'notice_records': [
+                                    {
+                                        'notification_id': 'notif:external:1',
+                                        'kind': 'frontdoor_notice',
+                                        'message': message,
+                                        'superseded_at': '',
+                                    }
+                                ]
+                            },
+                        }
+                    }
+                ),
+            )
+            task = service.store.get_task(TASK)
+            acceptance = service.store.get_node(ACCEPTANCE)
+
+            tail = service.node_runner._acceptance_turn_tail(task=task, node=acceptance)
+
+            assert 'secret payload' not in tail
+            assert '【外部订阅事件】' in tail
+            assert '1 条外部订阅事件' in tail
+            assert 'event:1' in tail
+            ref = tail.split('content_open(ref="', 1)[1].split('"', 1)[0]
+            listed = service.log_service.resolve_content_ref(ref) or ''
+            assert 'secret payload' in listed
+            assert 'event:1' in listed
         finally:
             await service.close()
 
