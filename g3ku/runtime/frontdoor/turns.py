@@ -81,6 +81,11 @@ def append_frontdoor_turn(
     created_at: str = "",
 ) -> list[dict[str, Any]]:
     normalized = normalize_frontdoor_turns(turns)
+    # 台账里的跳正文也会被拼进出站回复（表情轮那段前缀），所以同一条定稿规则要在这里
+    # 再走一次：留在台账里的随机标记等于在投递侧再掷一次骰子。
+    from g3ku.stickers import settle_reply_sticker_markers
+
+    text = settle_reply_sticker_markers(str(text or ""))
     tool_payload = [
         tool for tool in (_normalized_tool(candidate) for candidate in list(tools or [])) if tool is not None
     ]

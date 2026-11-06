@@ -153,6 +153,9 @@ class StickerReply:
     # （``[[sticker:pack/category/N]]``），未发出的标记行不进入上下文。
     # 只在 assistant 行第一次写入 baseline 时生成，之后不得再改写。
     context_text: str = ""
+    # 定稿版本：只把**已经取到图**的随机/短标记换成序号形态，其余行（无法识别的、
+    # 有歧义的、超每张上限的）逐字留在原位。投递前用它，之后任何车道都不再掷骰子。
+    settled_text: str = ""
     images: tuple[Path, ...] = ()
     delivered: tuple[str, ...] = ()
     undelivered: tuple[str, ...] = ()
@@ -192,7 +195,7 @@ def resolve_reply_stickers(
     if not isinstance(text, str):
         return StickerReply(text="")
     if _MARKER_PREFIX not in text:
-        return StickerReply(text=text, context_text=text)
+        return StickerReply(text=text, context_text=text, settled_text=text)
     from g3ku.stickers import config as sticker_config
 
     packs = scan_packs(root)
@@ -200,6 +203,7 @@ def resolve_reply_stickers(
     limit = max(0, int(max_per_reply if max_per_reply is not None else sticker_config.max_per_reply()))
     kept: list[str] = []
     context_kept: list[str] = []
+    settled_kept: list[str] = []
     chosen: list[Path] = []
     delivered: list[str] = []
     undelivered: list[str] = []
@@ -211,25 +215,31 @@ def resolve_reply_stickers(
             if _looks_like_marker(line):
                 dropped = True
                 undelivered.append(_marker_label(line))
+                settled_kept.append(raw_line)
                 logger.warning(
                     "sticker marker syntax not recognised; dropped: {!r}", line.strip()[:80]
                 )
                 continue
             kept.append(raw_line)
             context_kept.append(raw_line)
+            settled_kept.append(raw_line)
             continue
         dropped = True
         # From here on the line is always dropped from user-visible text: a marker
         # must never surface. A resolved one re-enters only as the sent index in
         # context_text, never as the user's original two-segment marker.
+        # 未取到图的那些在 settled_text 里原样留着：谁投递谁负责剥掉它，
+        # 而定稿这一步不许改变"发不出去"的形状（记忆面要靠它记未发出）。
         if parsed == "ambiguous":
             undelivered.append(_marker_label(line))
+            settled_kept.append(raw_line)
             continue
         if len(chosen) >= limit:
             # 配额是策略不是失败：已经在上面记过一次 warning，不再进未发出清单。
             logger.warning(
                 "sticker marker dropped: per-reply cap {} already reached", limit
             )
+            settled_kept.append(raw_line)
             continue
         pack_key, value, index = parsed
         if index is not None:
@@ -239,6 +249,7 @@ def resolve_reply_stickers(
         if path is None:
             label = f"{pack_key}/{value}/{index}" if index is not None else f"{pack_key}/{value}"
             undelivered.append(label)
+            settled_kept.append(raw_line)
             continue
         chosen.append(path)
         # 发出去的这一张必须带编号：随机取图时只有运行时知道选了哪张，而用户是对
@@ -246,17 +257,35 @@ def resolve_reply_stickers(
         sent_index = index if index is not None else registry.index_of(path.name)
         delivered.append(f"{pack_key}/{value}/{sent_index}")
         ending = raw_line[len(line):]
-        context_kept.append(f"[[sticker:{pack_key}/{value}/{sent_index}]]{ending}")
+        marker_line = f"[[sticker:{pack_key}/{value}/{sent_index}]]{ending}"
+        context_kept.append(marker_line)
+        settled_kept.append(marker_line)
     if not dropped:
-        return StickerReply(text=text, context_text=text)
+        return StickerReply(text=text, context_text=text, settled_text=text)
     # 删掉末尾的标记行会留下一个悬空换行；渠道正文本来就被 sanitize 收过边。
     return StickerReply(
         text="".join(kept).rstrip(),
         context_text="".join(context_kept).rstrip(),
+        settled_text="".join(settled_kept),
         images=tuple(chosen),
         delivered=tuple(delivered),
         undelivered=tuple(undelivered),
     )
+
+
+def settle_reply_sticker_markers(text: str, *, root: Path | None = None) -> str:
+    """定稿这一次回复的表情包：随机标记换成它实际取到的那张的序号。
+
+    取骰子的种子是**整段回复正文**的哈希，而投递侧有好几条车道各自洗一遍正文
+    （剥回声、把本地 markdown 引用抽成附件、收边），任何一处先于取图跑，种子就变、
+    图就换一张 —— 实盘 2026-11-06 01:59:59 会话里显示 ``greeting/010.gif``、QQ 收到
+    ``greeting/009.gif``。所以随机只在正文产出的这一刻掷一次，之后各车道只按序号取图。
+    """
+    if not isinstance(text, str):
+        return ""
+    if _MARKER_PREFIX not in text:
+        return text
+    return resolve_reply_stickers(text, root=root).settled_text
 
 
 def resolve_markers(

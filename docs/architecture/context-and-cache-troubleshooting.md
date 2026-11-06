@@ -132,7 +132,7 @@ Disk guard 维护要点（写保护契约本体见 `runtime-overview.md`「磁�
 
 - 坑：finalize payload 没重复带 `frontdoor_actual_request_path/history`，同步逻辑误判“没有 actual-request 证据”，final assistant reply 没进下一轮 baseline。
 - 不变量：当前 turn 已有真实 provider request 落盘后，`finalize` 阶段产出的可见最终回复必须补回 session-owned baseline；该规则不限于 `direct_reply`，普通工具（如 `message`）之后产出的用户可见 `final_output` 同样要补回。该规则同样覆盖 heartbeat/cron 内部回合的可见回复：补回与否按回复内容判定，不看回合类型；调用 `silent` 的回合豁免——它的正文已经随带 `tool_calls` 的那行助手记录进了基线，再补一次就是同文两份。“同 turn 已有 actual-request 证据”与“fresh turn 没有 actual-request 证据”是两种不同状态，不能用同一条覆盖规则处理。
-- 不变量（表情包随机标记只定稿一次）：finalize 把可见回复补回 baseline 前，若正文含 `[[sticker:…]]`，随机/短标记先解析成实际发送的序号（`[[sticker:<包>/<分类>]]` → `[[sticker:<包>/<分类>/<序号>]]`），未发出或超限的标记行不进入上下文；同一回复里的多个随机标记按出现顺序去重，分类图总数少于要发送张数时才允许重复；`final_output` 本身保持原样，出站仍按原语法解析成图片。这一行是 finalize 新追加的，产生它的请求里没有它，所以定稿属于 append，不是改写已发前缀；写入后任何一轮都不得重新解析或改写该行，否则从该行起断缓存，并与转录的确定性选图分叉。
+- 不变量（表情包随机标记只定稿一次）：随机标记的取图种子是**整段正文**的哈希，而投递侧每条车道各自洗一遍正文（剥回声、把本地 markdown 引用抽成附件、收边），谁在取图之前洗过，谁就换一张图。因此定稿发生在正文产出的那一刻：`_graph_finalize_turn` 洗完旧静默哨兵就把 `final_output` 换成定稿正文——已取到图的随机/短标记写成 `[[sticker:<包>/<分类>/<序号>]]`，取不到图的标记行原样留在正文（剥掉它是投递车道的职责，"未发出"读数依赖它还看得见）。同一回复里的多个随机标记按出现顺序去重，分类图总数少于要发送张数时才允许重复。台账那一跳的正文（`append_frontdoor_turn`）同样在写入时定稿，因为表情轮的前缀会把台账正文拼进出站回复。基线补回沿用这条定稿正文：随机形态从不进 baseline，序号形态进过一次后任何一轮都不得重新解析或改写；`resolve_reply_stickers` 之后再被任何车道调用，只会按序号反查同一个文件，因此会话显示与渠道投递必然同图。
 - 症状：transcript 里能看到上一轮最终回答，但下一轮第一跳 request body 里完全没有它。
 
 ### 3.5 普通 fresh-turn 第一跳没有沿用上一轮 actual request scaffold

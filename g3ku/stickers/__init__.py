@@ -31,6 +31,7 @@ from g3ku.stickers.marker import (
     render_marker_images,
     resolve_markers,
     resolve_reply_stickers,
+    settle_reply_sticker_markers,
     strip_markers_for_stream,
 )
 
@@ -46,6 +47,7 @@ __all__ = [
     "render_marker_images",
     "resolve_markers",
     "resolve_reply_stickers",
+    "settle_reply_sticker_markers",
     "safe_scan_packs",
     "scan_packs",
     "sticker_contract_sections",

@@ -10347,13 +10347,38 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                             elapsed_seconds=None,
                         ),
                     }
+                refused_candidate_names = [
+                    str(item or "").strip()
+                    for item in list((runtime_context or {}).get("candidate_tool_names") or [])
+                ]
+                refused_declared_names = [
+                    str(item or "").strip()
+                    for item in list((runtime_context or {}).get("declared_tool_names") or [])
+                ]
+                refused_denied_names = [
+                    str(item or "").strip()
+                    for item in list((runtime_context or {}).get("declared_denied_tool_names") or [])
+                ]
+                refused_repair_reasons = self._frontdoor_repair_required_reasons_for_state(state)
                 hint = availability_hint(
                     requested=tool_name,
                     callable_names=list(visible_tools.keys()),
-                    candidate_names=(runtime_context or {}).get("candidate_tool_names") or [],
-                    denied_names=(runtime_context or {}).get("declared_denied_tool_names") or [],
-                    declared_names=(runtime_context or {}).get("declared_tool_names") or [],
-                    repair_required_reasons=self._frontdoor_repair_required_reasons_for_state(state),
+                    candidate_names=refused_candidate_names,
+                    denied_names=refused_denied_names,
+                    declared_names=refused_declared_names,
+                    repair_required_reasons=refused_repair_reasons,
+                )
+                # 四个成员位一次性留下读数：实盘 2026-11-06 那次「文件已修好还被拒」，
+                # 事后只能从回执文本反推名字落在哪一档，而回执里既没说 repair 也没说
+                # 收回——排除它的名单与给出原因的名单不是同一份，没有这行就分不开。
+                logger.warning(
+                    "frontdoor tool call refused: {} callable={} candidate={} declared={} denied={} repair_required={}",
+                    tool_name,
+                    tool_name in visible_tools,
+                    tool_name in set(refused_candidate_names),
+                    tool_name in set(refused_declared_names),
+                    tool_name in set(refused_denied_names),
+                    tool_name in refused_repair_reasons,
                 )
                 return await _error_result(payload, f"tool not available: {tool_name}" + (f"\n{hint}" if hint else ""))
             async def _reuse_execute_one(call_arguments: dict[str, Any]) -> tuple[str, str]:
@@ -10655,6 +10680,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         # [G3KU_SILENT]」，识别已在 P4 删除，若不剥掉这行尾巴就会把它当正文发给用户。
         # 只在首/末整行时剥离，绝不因句子中间出现该串就动正文。
         output = self._strip_legacy_silent_sentinel_line(raw_output)
+        # 表情包在这一刻定稿：随机标记的取图种子是**整段正文**的哈希，而投递侧每条车道
+        # 各自洗一遍正文（剥回声、把本地 markdown 引用抽成附件、收边），谁先跑图就换一张
+        # ——实盘 2026-11-06 01:59:59 会话显示 greeting/010.gif、QQ 收到 greeting/009.gif。
+        # 定稿后正文里只剩序号形态的标记，各车道按序号取同一张。
+        from g3ku.stickers import settle_reply_sticker_markers
+
+        output = settle_reply_sticker_markers(output)
         silent_reply = bool(state.get("silent_reply"))
         silent_reason = str(state.get("silent_reason") or "").strip()
         if not output and not silent_reply and not bool(state.get("heartbeat_internal")):

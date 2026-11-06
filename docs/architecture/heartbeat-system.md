@@ -34,6 +34,7 @@ This document describes the maintenance boundary around the Web CEO heartbeat pa
 - Those internal prompt messages must be persisted with `prompt_visible=true`, `ui_visible=false`, and an `internal_prompt_kind` that distinguishes heartbeat vs cron rule/event records.
 - Because the request is append-only against the previous authoritative scaffold, heartbeat/cron share the same prompt-cache family, token-preflight, token-compression, and continuity rules as ordinary CEO/frontdoor turns.
 - A turn that stays silent does so by calling the `silent` tool; there is no silent-reply sentinel string. The tool signal is what suppresses channel delivery, and the turn still leaves a durable, prompt-visible assistant row carrying its text — the session model is the only party that can judge whether a delivered result is still worth sending, so it must be able to see its own previous decision. Contract owner: `runtime-overview.md`「3.3 静默回复（`silent` 工具）」.
+- 唤醒正常返回就是这条会话回到空闲的时刻：`SessionHeartbeatService._run_session` 在唤醒之后补一刀 `dispatch_queued_follow_ups_if_idle(source="heartbeat_wake")`，cron 分发在投递收尾处走同一条（`source="cron_wake"`）。缺这条缝时，唤醒期间进来的渠道消息只会被入站闸门判成排队，而唯一能替它起回合的链尾 drain 由"用户下一条消息"触发——静默轮不给渠道发任何东西，那条消息往往不会来。落点清单与撤回语义的契约归属：`web-and-admin.md`「Queued Follow-Ups」。唤醒被取消（关机/重启窗口）时不补发，免得在收尾窗口里起重合。
 
 ## Persistence And UI Boundary
 

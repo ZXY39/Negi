@@ -1840,6 +1840,44 @@ class WebSessionHeartbeatService:
         )
 
     async def _run_session(self, session_id: str) -> float | None:
+        """一次心跳唤醒，外加这条会话回到空闲时该做的收尾补发。
+
+        排队补充消息的排水口原本只长在两个请求处理道里（网页 WS 的回合链、渠道
+        ``/api/v1`` 的回合链），心跳唤醒没人提交回合，于是渠道消息在唤醒期间进来就只能
+        挂在队列里读「下一跳即将发送」。静默轮让这件事变成永久：它不给渠道发
+        ``reply.final``（``external_events`` 在登记与发布之前就 return），用户收不到东西
+        也就不会发下一条，而那条排水道正是由下一条消息的回合链尾触发的。
+        """
+        next_delay = await self._run_heartbeat_wake(session_id)
+        # 唤醒被取消（关机/重启）时上面那句会抛出，补发不会在收尾窗口里起新回合。
+        await self._dispatch_queued_follow_ups_after_wake(session_id)
+        return next_delay
+
+    async def _dispatch_queued_follow_ups_after_wake(self, session_id: str) -> None:
+        """唤醒结束时替这条会话把排队的补充消息起成一个回合（没有就什么都不做）。"""
+        get_session = getattr(self._runtime_manager, "get", None)
+        if not callable(get_session):
+            return
+        session = get_session(session_id)
+        dispatch = getattr(session, "dispatch_queued_follow_ups_if_idle", None)
+        if not callable(dispatch):
+            return
+        try:
+            result = dict(await dispatch(source="heartbeat_wake") or {})
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.debug("queued follow-up dispatch after heartbeat wake failed for {}: {}", session_id, exc)
+            return
+        dispatched = int(result.get("dispatched") or 0)
+        if dispatched > 0:
+            logger.info(
+                "queued follow-ups dispatched after heartbeat wake: session={} dispatched={}",
+                session_id,
+                dispatched,
+            )
+
+    async def _run_heartbeat_wake(self, session_id: str) -> float | None:
         key = str(session_id or "").strip()
         if not self._started or not key:
             return None

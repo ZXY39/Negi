@@ -327,6 +327,7 @@ class ResourceManager:
                 new_tools[name] = descriptor
                 new_tool_instances[name] = old_instance
             elif self._locks.is_busy(ResourceKind.TOOL, name) and old_descriptor is not None and old_descriptor.fingerprint != descriptor.fingerprint and old_instance is not None:
+                self._log_tool_carry_forward(name=name, old_instance=old_instance, old_descriptor=old_descriptor)
                 self._locks.mark_pending_delete(ResourceKind.TOOL, name)
                 new_tools[name] = old_descriptor
                 new_tool_instances[name] = old_instance
@@ -542,6 +543,11 @@ class ResourceManager:
             new_tools[descriptor.name] = descriptor
             new_tool_instances[descriptor.name] = old_instance
         elif self._locks.is_busy(ResourceKind.TOOL, descriptor.name) and old_descriptor is not None and old_descriptor.fingerprint != descriptor.fingerprint and old_instance is not None:
+            self._log_tool_carry_forward(
+                name=descriptor.name,
+                old_instance=old_instance,
+                old_descriptor=old_descriptor,
+            )
             self._locks.mark_pending_delete(ResourceKind.TOOL, descriptor.name)
             new_tools[descriptor.name] = old_descriptor
             new_tool_instances[descriptor.name] = old_instance
@@ -555,6 +561,24 @@ class ResourceManager:
             else:
                 new_tool_instances.pop(descriptor.name, None)
         self._locks.register_path(ResourceKind.TOOL, descriptor.name, descriptor.manifest_path)
+
+    def _log_tool_carry_forward(self, *, name: str, old_instance: Any, old_descriptor: Any) -> None:
+        """在飞引用把旧实例原样带过这一次刷新 —— 只有待修复实例值得留一行。
+
+        拒因文案写着「下一次装载会重新放行」，而这条分支恰恰让下一次、下下一次都不放行，
+        直到引用释放。没有这行读数，事后既分不清"文件已修好还被拒"走的是哪条分支，
+        也数不清它发生过几次（实盘 2026-11-06 doubao_web 被记了 12 分钟，只能靠猜）。
+        """
+        if type(old_instance).__name__ != "RepairRequiredTool":
+            return
+        state = self._locks.busy_state(ResourceKind.TOOL, name)
+        logger.warning(
+            "repair_required tool carried across reload: {} refs={} pending_delete={} reason={!r}",
+            name,
+            getattr(state, "refs", "?"),
+            getattr(state, "pending_delete", "?"),
+            str(getattr(old_instance, "_reason", "") or "")[:120],
+        )
 
     @staticmethod
     def _can_reuse_tool_instance(*, old_descriptor: ToolResourceDescriptor | None, descriptor: ToolResourceDescriptor, old_instance: Any) -> bool:

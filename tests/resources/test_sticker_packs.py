@@ -463,3 +463,88 @@ def test_web_reply_delta_frame_never_carries_a_marker():
 
     # 整帧只有半截标记：这一帧没有可显示内容，别推空文本
     assert _reply_delta_frame({"text": "[[sticker:atri/ha"}) is None
+
+
+def _lane_picks(reply: str, root: Path, *, settle: bool) -> dict[str, str]:
+    """同一条回复喂给三条真实投递车道，返回各自取到的那张图的文件名。
+
+    主动推送道（心跳/定时/任务终态走的那条）的顺序是「先抽本地附件、再解贴纸」，
+    回合中继道正好相反；随机标记的骰子由整段正文决定，所以洗正文这一步会换图。
+    """
+    import re
+
+    from g3ku.runtime.api.ceo_media import extract_local_media_attachments
+    from g3ku.runtime.session_keys import sanitize_channel_outbound_text
+    from g3ku.stickers import settle_reply_sticker_markers
+
+    text = settle_reply_sticker_markers(reply, root=root) if settle else reply
+    transcript = render_marker_images(text, root=root)
+    transcript_names = re.findall(r"!\[\]\((.*?)\)", transcript)
+    _relay_text, relay_images = resolve_markers(sanitize_channel_outbound_text(text), root=root)
+    drained, _attachments = extract_local_media_attachments(
+        sanitize_channel_outbound_text(text), allowed_roots=(root,)
+    )
+    _drained_text, drained_images = resolve_markers(drained, root=root)
+    return {
+        "transcript": Path(transcript_names[-1]).name if transcript_names else "",
+        "relay": relay_images[0].name if relay_images else "",
+        "push": drained_images[0].name if drained_images else "",
+    }
+
+
+def _reply_with_a_media_reference(tmp_path: Path) -> str:
+    pack = _write_pack(tmp_path, "atri", {"happy": 12}, theme="t")
+    note = tmp_path / "note.md"
+    note.write_text("# note\n", encoding="utf-8")
+    invalidate_scan_cache()
+    return f"文档在这：\n\n![note.md]({note})\n\n[[sticker:atri/happy]]", pack
+
+
+def test_an_unsettled_random_marker_lets_lanes_roll_their_own_images(tmp_path):
+    """缺陷形状（实盘 2026-11-06 01:59:59：会话里 greeting/010.gif、QQ 收到 009.gif）。
+
+    单配对"必须不同"是 1/12 的掷骰，所以这里跑 8 份只差一个词的正文：洗过一次的
+    正文在新路径上恒等，在旧路径上分叉是常态而不是巧合。
+    """
+    _write_pack(tmp_path, "atri", {"happy": 12}, theme="t")
+    note = tmp_path / "note.md"
+    note.write_text("# note\n", encoding="utf-8")
+    invalidate_scan_cache()
+
+    diverging = 0
+    for word in ("文档", "报告", "笔记", "链接", "图表", "附件", "纪要", "清单"):
+        reply = f"{word}在这里：\n\n![note.md]({note})\n\n[[sticker:atri/happy]]"
+        unsettled = _lane_picks(reply, tmp_path, settle=False)
+        if unsettled["relay"] != unsettled["push"]:
+            diverging += 1
+        settled = _lane_picks(reply, tmp_path, settle=True)
+        assert settled["transcript"] == settled["relay"] == settled["push"]
+
+    assert diverging >= 2
+
+
+def test_a_settled_marker_sends_one_image_through_every_lane(tmp_path):
+    """定稿之后正文里已无随机标记：车道再怎么洗正文都只认那一个序号。"""
+    reply, _pack = _reply_with_a_media_reference(tmp_path)
+
+    picks = _lane_picks(reply, tmp_path, settle=True)
+
+    assert picks["transcript"] == picks["relay"] == picks["push"]
+    assert picks["push"]
+
+
+def test_settling_only_rewrites_the_markers_that_got_an_image(tmp_path):
+    """定稿不许替车道把发不出去的标记抹掉：未发出读数与剥标记仍归投递道。"""
+    from g3ku.stickers import settle_reply_sticker_markers
+
+    _write_pack(tmp_path, "atri", {"happy": 1}, theme="t")
+    invalidate_scan_cache()
+
+    settled = settle_reply_sticker_markers(
+        "两张贴纸\n[[sticker:atri/happy]]\n[[sticker:atri/nope]]", root=tmp_path
+    )
+
+    assert "[[sticker:atri/happy/" in settled
+    assert "[[sticker:atri/nope]]" in settled
+    # 序号形态再过一次定稿必须逐字不动：各车道重复解析不能换图
+    assert settle_reply_sticker_markers(settled, root=tmp_path) == settled

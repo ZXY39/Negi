@@ -228,6 +228,9 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 切回仍在处理的会话看不到期间产生的工具组/工具调用（刷新网页才出现）→ `web-and-admin.md`「CEO Feed View State And Scroll Preservation Contract」
 - 用户气泡的「编辑」或模型回复元信息行里的「Fork」要刷新网页才出现、会话被暂停/审批/压缩挡住输入时找不到 Fork 入口、点了按钮提示「当前不可编辑」、或点击消息后用量/复制仍不显形 → `web-and-admin.md`「Message Edit-Resend And Session Fork Contract」+「Per-Turn Token Usage Contract」
 - 回合进行中发的补充没被回答、待发送条目上的「插话 / 编辑 / 删除」行为疑问、撤下后条目又被画回来，或条目挂着不动、点删除只回 `follow_up_not_queued` → `web-and-admin.md`「Queued Follow-Ups」
+- 心跳或定时唤醒跑完后，渠道里排队中的补充消息一直停在"下一跳即将发送"不发 → `web-and-admin.md`「Queued Follow-Ups」
+- 会话里看到的表情包与渠道实际收到的不是同一张 → `context-and-cache-troubleshooting.md`「3.4 finalize 没把 direct reply 补回 baseline」
+- 修好工具源文件后调用仍被 `repair_required` 拒，或某次 `tool not available` 拒得说不出原因 → `tool-and-skill-system.md`「10. 资源目录代检查与语义目录新鲜度」+ `tool-hydration-and-callable-chain.md`「契约不在场时发生什么」（两条读数：`repair_required tool carried across reload` / `frontdoor tool call refused`）
 - 渠道会话（QQ/第三方桥）里某颗工具一调就立刻回一句英文"被拦截"、条件放行档位改了某会话没反应、白名单勾了不生效、或界面按风险度自己派生出一份和后端不一样的免审集合 → `tool-and-skill-system.md`「CEO Regulatory Governance Mode」（档位与名单都是一份全局设置，判据只在服务端派生一次）
 - 会话页语音按钮右边那颗风险按钮找不到、它的黄色出现在条件放行档上、按钮比附件/语音大一圈、面板与模型链面板叠在一起，或 Tool 页头部还在找监管模式开关 / 命令白名单入口 → `web-and-admin.md`「Composer Risk Panel」+「Exec Approval And Allowlist Admin Contract」（命令白名单入口现在在 exec 工具详情的「执行模式」里）
 - 回合卡在半截、下方一直转圈，刷新网页才同步到最终回复（本地与渠道会话同症状，转录里其实已有完整回复）→ `web-and-admin.md`「CEO Websocket Lane Failure Contract」

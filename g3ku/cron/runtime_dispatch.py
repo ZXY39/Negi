@@ -110,4 +110,14 @@ async def dispatch_cron_job(
             )
         except Exception as exc:
             logger.debug("cron outbound publish skipped for job {}: {}", getattr(job, "id", ""), exc)
+    # 定时投递也是一条"没人提交回合"的车道：这一轮跑完会话就回到空闲，期间进来的渠道
+    # 消息在入站闸门判成排队，除了两条请求处理道的链尾没有别的排水口替它起回合。
+    get_existing = getattr(runtime_bridge, "get_existing_session", None)
+    wake_session = get_existing(session_key) if callable(get_existing) else None
+    dispatch = getattr(wake_session, "dispatch_queued_follow_ups_if_idle", None)
+    if callable(dispatch):
+        try:
+            await dispatch(source="cron_wake")
+        except Exception as exc:
+            logger.debug("cron queued follow-up dispatch skipped for {}: {}", session_key, exc)
     return output

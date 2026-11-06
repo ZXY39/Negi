@@ -27,6 +27,7 @@
 - 声明面（可加载面）与准入面不同源，两条车道各自有个咽喉点：前门 `_frontdoor_dispatch_tool_names` = 钉住的 `tools[]` 声明 ∩ 当轮治理可见，它是**可加载面**；模型可见参数表的**名字源是 state 里那份钉住声明本身**（`provider_tool_names`，按钉住顺序渲染，见 `tool-and-skill-system.md`「Provider Tool Surface」），派发名单只在 state 带不出钉住声明时当播种一支的兜底。准入面另算——`_frontdoor_executable_tool_names` = **本轮 callable**（常驻内置 + 契约在场的名字），声明名再与当轮治理可见求交（RBAC 收回当跳生效），非声明名（mid-turn 注册后由 load 落账的）不受回合初快照误拒；`tool_names` 键缺失的旁路才退回派发名单。`_registered_tools_for_state` 按准入名单取实例，供执行束与调用准入用。模型可见面与执行准入面分源，这是钉死 `tools[]` 的直接推论。
   渲染面不读执行束的准入视图：`_frontdoor_tool_schemas_for_state` 从声明面单独解析出的实例渲染，参数表来源链与回落顺序归 `tool-and-skill-system.md`「Provider Tool Surface」。拿准入视图 `visible_tools` 渲染会把参数表随 callable 一起从 32 收窄到十几个，钉住语义当场失效，而 `tools[]` 一旦逐跳增删名字，前缀缓存每跳都断。
   两层差出来的那批名字（`tools[]` 里带着参数表、块却不在场）本轮调用**不撞墙**：走「契约不在场时发生什么」那条投递路径，同一跳把契约拿回来。第四态才是禁止形态——"既调不动、又发现不了"；声明面始终是可发现、可按名 load 的，`availability_hint` 的 `declared_names` 为钉住清单里没进本轮 callable 的声明名补指引，不落成"未知名字"。
+  第四态是否真的发生过有一行读数可查：每次 `tool not available` 落一行 `frontdoor tool call refused: <name> callable=… candidate=… declared=… denied=… repair_required=…`，五个成员位一次给全，全 False 那一行就是"调不动又发现不了"当场发生。需要它是因为**给出原因的名单与排除名字的名单不同源**——原因读 state 里那批 `repair_required_tool_items`，准入读当轮那份实例表——只抄回执文本分不出某一次拒绝究竟由哪一份名单挡下、又为什么没带原因。
   节点把能力收窄做在选择之前：判据不在场的名字直接摘出本轮 callable 组，选择组出的 callable 与执行准入用同一份收窄结果；收窄只作用执行面，钉住的 `tools[]` 里那个名字由声明侧自带的参数表继续供着，模型真去调它拿到的是契约投递。
 - 非声明的名字（mid-turn 注册的工具）被 RBAC 收回时的出口在工具态收尾的实时卫生：治理实时读不放行的名字当跳从 `tool_names` 摘除（它不在 `tools[]` 里，`denied_tools` 点不到名），callable 不含它；RBAC 重新放行后由发现出口重新送回候选。声明名的收回仍走 `denied_tools`（名单源＝钉住声明）+ 重印边界。
 

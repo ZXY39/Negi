@@ -474,6 +474,8 @@ skill / tool 目录可能被编辑器、git 或外部进程直接改动，注册
 - 三个比对点共用服务侧那一份基线（`_resource_tree_state_cache`）：CEO 前门的节流拍、`exec` 工具每条命令结束（`trigger='tool:exec'`）、管理端显式路径。命令侧不携带自己的快照，所以一条命令只付一次扫描；又因为基线就是"上一次扫描时的树"，命令执行前后之外发生的外部编辑同样会在下一个比对点被抓到，不存在被跳过的变更。
 - 指纹变化时才动作：`refresh_changed_resources(trigger='external-resource-generation-check')` 重建受影响资源，随后清空 `_node_context_selection_cache`（节点上下文选择里缓存着旧的候选与在场结论）。差异集里的 skill / tool 名字只随返回值一起报数：`_sync_catalog_targets` 不回写语义目录，`catalog_synced` 恒为 `False`，所以那个字段的意思是"这里没做同步"，不是"按差异同步过了"。
 - 管理端保存或编辑资源走的是显式路径（`refresh_resource_paths` / `refresh_paths`，trigger 为 `path-change`），它同步刷新注册表并当场重记基线；各条路径共用同一份基线，所以编辑后的一拍不会因为节流而漏掉变化。
+- 装载失败留下的 `RepairRequiredTool` 实例不跨刷新存活：下一次刷新（`reload_now` 或定向 `refresh_paths`）按目录重建描述符并重跑 import，源文件修好即放行。唯一把坏实例带过刷新的分支是**这一次刷新时该工具仍有在飞引用且指纹已变**——`_locks.is_busy` 那一支把旧 descriptor 与旧实例原样搬进新快照并 `mark_pending_delete`，于是拒因仍指向第一次失败那条文本，直到引用释放后的那一拍才换掉。这条分支留一行读数：`repair_required tool carried across reload: <name> refs=N pending_delete=True reason='…'`。排查"文件已改好还被 repair_required 拒"先搜这行；没有这行说明卡点不在资源装载道，而在准入名单，按 `tool-hydration-and-callable-chain.md`「契约不在场时发生什么」那组成员位读数判。
+- web 与 worker 各持一份 `ResourceManager`，各自从 1 开始数 generation，并把状态写进同一份 `resources.state.json` —— 文件里的 generation 与 `available` 只描述"最后一个写它的进程"。判"某一次拒绝时那个进程看到什么"要按进程读日志（`console.log` 是 web，`managed-worker.log` 是 worker，两边的 `resources reloaded via <trigger>` 节拍彼此独立）。
 - 维护要点：新增会进入上下文选择的缓存时，必须在这条差异路径上一起失效，否则外部改动的 skill/tool 正文会长期以旧指纹参与候选与描述投影。
 
 ## 11. Model Path Anchoring Contract

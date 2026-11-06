@@ -7526,3 +7526,90 @@ async def test_ceo_frontdoor_prepare_turn_passes_last_input_turn_id_to_batch_mer
     assert call["current_content"] == "最后一条消息"
     assert call["model_refs"] == ["openai:gpt-4.1"]
     assert call["batch_inputs"] == [sibling_input, last_input]
+
+
+@pytest.mark.asyncio
+async def test_a_silent_heartbeat_wake_still_dispatches_messages_queued_during_it(tmp_path: Path) -> None:
+    """静默轮不给渠道发 reply.final，用户收不到东西也就不会发下一条，而链尾排水正是由
+    下一条消息的回合触发的——所以排队中的渠道消息必须在唤醒收尾这条空闲缝上被起成回合。"""
+    session_id = "ext:qq-official-1903529517:heartbeat-silent-dispatch"
+    session_manager = SessionManager(tmp_path)
+    persisted = session_manager.get_or_create(session_id)
+    session_manager.save(persisted)
+
+    dispatch_calls: list[str] = []
+
+    class _WakingSession(_FakeHeartbeatSession):
+        async def dispatch_queued_follow_ups_if_idle(self, *, source: str = "") -> dict:
+            dispatch_calls.append(source)
+            return {"dispatched": 1, "reason": "", "source": source}
+
+    live_session = _WakingSession(output="")
+    runtime_manager = SimpleNamespace(
+        get_or_create=lambda **_kwargs: live_session,
+        get=lambda _key: live_session,
+    )
+    service = WebSessionHeartbeatService(
+        workspace=tmp_path,
+        agent=SimpleNamespace(tool_execution_manager=None),
+        runtime_manager=runtime_manager,
+        main_task_service=_TaskService(),
+        session_manager=session_manager,
+    )
+    assert (
+        service.enqueue_tool_job(
+            {"session_id": session_id, "job_id": "tooljob:silent-1", "status": "success"}
+        )
+        is True
+    )
+    service._started = True
+
+    await service._run_session(session_id)
+
+    assert len(live_session.prompts) == 1
+    assert dispatch_calls == ["heartbeat_wake"]
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_heartbeat_wake_does_not_start_a_follow_up_turn(tmp_path: Path) -> None:
+    """补发只在唤醒正常结束后发生：关机/重启取消这一轮时不许在收尾窗口里起新回合。"""
+    session_id = "ext:qq-official-1903529517:heartbeat-cancelled-dispatch"
+    session_manager = SessionManager(tmp_path)
+    persisted = session_manager.get_or_create(session_id)
+    session_manager.save(persisted)
+
+    dispatch_calls: list[str] = []
+
+    class _CancellingSession(_FakeHeartbeatSession):
+        async def prompt(self, user_message, persist_transcript: bool = False):
+            self.prompts.append(user_message)
+            raise asyncio.CancelledError()
+
+        async def dispatch_queued_follow_ups_if_idle(self, *, source: str = "") -> dict:
+            dispatch_calls.append(source)
+            return {"dispatched": 1}
+
+    live_session = _CancellingSession()
+    runtime_manager = SimpleNamespace(
+        get_or_create=lambda **_kwargs: live_session,
+        get=lambda _key: live_session,
+    )
+    service = WebSessionHeartbeatService(
+        workspace=tmp_path,
+        agent=SimpleNamespace(tool_execution_manager=None),
+        runtime_manager=runtime_manager,
+        main_task_service=_TaskService(),
+        session_manager=session_manager,
+    )
+    assert (
+        service.enqueue_tool_job(
+            {"session_id": session_id, "job_id": "tooljob:cancel-1", "status": "success"}
+        )
+        is True
+    )
+    service._started = True
+
+    with pytest.raises(asyncio.CancelledError):
+        await service._run_session(session_id)
+
+    assert dispatch_calls == []
