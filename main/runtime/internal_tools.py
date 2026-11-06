@@ -504,10 +504,11 @@ class ViewMessageHistoryTool(Tool):
     def description(self) -> str:
         return (
             'Read every message this node has received since it was created, as a JSON artifact '
-            'reference you can open with content_open/content_search. Each record carries the '
-            'receive time, sender relationship and node id, message id, content and status. '
-            'Messages held by a wait_all_children batch appear as status=held without content '
-            'until the batch settles.'
+            'reference you can open with content_open/content_search. Includes notices already '
+            'consumed and dropped from the live context. Each record carries the receive time, '
+            'sender relationship and node id, message id, content, status (delivered/held/'
+            'consumed/merged/superseded/pending_append) and source. Messages held by a '
+            'wait_all_children batch appear as status=held without content until the batch settles.'
         )
 
     @property

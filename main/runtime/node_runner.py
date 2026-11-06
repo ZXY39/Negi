@@ -1108,14 +1108,66 @@ class NodeRunner:
         return True
 
     async def _view_message_history(self, *, task, node: NodeRecord) -> dict[str, Any]:
+        """本节点收到的消息台账：信箱行 + 已归档通知 + 未注入 root 通知。
+
+        已消费并退出尾块窗口的通知只在这里可见；模型用 content_search(ref=...)
+        按关键词检索，不依赖它们还留在提示词里。
+        """
+        # 工具闭包捕获的 node 可能是本轮开始时的快照；台账在回合中还会变化，
+        # 读前重取一次，保证 inbox/ledger 两部分是同一时点。
+        latest_node = self._store.get_node(str(getattr(node, 'node_id', '') or '').strip()) or node
+        metadata = (
+            dict(getattr(latest_node, 'metadata', None) or {})
+            if isinstance(getattr(latest_node, 'metadata', None), dict)
+            else {}
+        )
+        status_rank = {
+            'pending_append': 0,
+            'delivered': 1,
+            'held': 1,
+            'consumed': 2,
+            'merged': 3,
+            'superseded': 4,
+        }
+        items_by_key: dict[str, dict[str, Any]] = {}
+        order: list[str] = []
+
+        def _add_item(item: dict[str, Any]) -> None:
+            content = str(item.get('content') or '').strip()
+            key = ' '.join(content.split()) or str(item.get('message_id') or '').strip()
+            if not key:
+                return
+            existing = items_by_key.get(key)
+            if existing is None:
+                items_by_key[key] = item
+                order.append(key)
+                return
+            # 同一条逻辑通知会以不同 id（notif:... 与 root-notice:...）双写落盘，
+            # 按正文去重；状态取更靠后的那一档，补全缺失字段。
+            if status_rank.get(str(item.get('status') or ''), 0) > status_rank.get(
+                str(existing.get('status') or ''), 0
+            ):
+                existing['status'] = str(item.get('status') or '')
+            for field in ('ref', 'kind', 'source_node_id', 'received_at', 'from'):
+                if not str(existing.get(field) or '').strip() and str(item.get(field) or '').strip():
+                    existing[field] = item[field]
+            sources = {
+                part
+                for part in (
+                    str(existing.get('source') or '').split('+')
+                    + str(item.get('source') or '').split('+')
+                )
+                if part
+            }
+            existing['source'] = '+'.join(sorted(sources))
+
         rows = list(
             self._store.list_task_node_notifications(task.task_id, node.node_id) or []
         )
-        items: list[dict[str, Any]] = []
         for row in rows:
             held = notification_is_held(row)
             kind = str(getattr(row, 'kind', '') or '').strip()
-            items.append(
+            _add_item(
                 {
                     'message_id': str(getattr(row, 'notification_id', '') or '').strip(),
                     'received_at': str(getattr(row, 'created_at', '') or '').strip(),
@@ -1125,8 +1177,65 @@ class NodeRunner:
                     'status': 'held' if held else str(getattr(row, 'status', '') or '').strip(),
                     'content': '' if held else str(getattr(row, 'message', '') or '').strip(),
                     'ref': '' if held else str(getattr(row, 'ref', '') or '').strip(),
+                    'source': 'mailbox',
                 }
             )
+
+        ledger = normalize_append_notice_context(
+            metadata.get(APPEND_NOTICE_CONTEXT_KEY)
+        ).get('notice_records') or []
+        for record in list(ledger):
+            message = str(record.get('message') or '').strip()
+            if not message:
+                continue
+            superseded = bool(str(record.get('superseded_at') or '').strip())
+            merged = bool(str(record.get('merged_at') or '').strip())
+            consumed = bool(str(record.get('consumed_at') or '').strip())
+            kind = str(record.get('kind') or '').strip()
+            _add_item(
+                {
+                    'message_id': str(record.get('notification_id') or '').strip(),
+                    'received_at': str(
+                        record.get('received_at')
+                        or record.get('consumed_at')
+                        or record.get('merged_at')
+                        or ''
+                    ).strip(),
+                    'source_node_id': str(record.get('source_node_id') or '').strip(),
+                    'from': message_label(kind, system_relay=is_system_relay_notice(record)),
+                    'kind': kind,
+                    'status': (
+                        'superseded'
+                        if superseded
+                        else ('merged' if merged else ('consumed' if consumed else 'delivered'))
+                    ),
+                    'content': message,
+                    'ref': '',
+                    'source': 'notice_ledger',
+                }
+            )
+
+        for record in normalize_pending_append_notice_records(
+            metadata.get(PENDING_APPEND_NOTICE_RECORDS_KEY)
+        ):
+            message = str(record.get('message') or '').strip()
+            if not message:
+                continue
+            _add_item(
+                {
+                    'message_id': str(record.get('notification_id') or '').strip(),
+                    'received_at': str(record.get('created_at') or '').strip(),
+                    'source_node_id': str(record.get('source_node_id') or '').strip(),
+                    'from': message_label('', system_relay=True),
+                    'kind': '',
+                    'status': 'pending_append',
+                    'content': message,
+                    'ref': '',
+                    'source': 'pending_append',
+                }
+            )
+
+        items = [items_by_key[key] for key in order]
         if not items:
             return {'ok': True, 'count': 0, 'ref': '', 'summary': 'no messages received', 'latest_at': ''}
         artifact_text = json.dumps(
@@ -1147,14 +1256,14 @@ class NodeRunner:
                 'error': 'history_artifact_unavailable',
                 'count': len(items),
                 'summary': '',
-                'latest_at': items[-1]['received_at'],
+                'latest_at': str(items[-1].get('received_at') or ''),
             }
         return {
             'ok': True,
             'count': len(items),
             'ref': str(ref).strip(),
             'summary': str(summary or '')[:500],
-            'latest_at': items[-1]['received_at'],
+            'latest_at': str(items[-1].get('received_at') or ''),
         }
 
     def _notifications_by_ids(self, *, task_id: str, node_id: str, notification_ids: list[str]) -> list[dict[str, Any]]:
