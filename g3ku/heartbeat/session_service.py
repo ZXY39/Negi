@@ -1859,6 +1859,18 @@ class WebSessionHeartbeatService:
         if not callable(get_session):
             return
         session = get_session(session_id)
+        # 接棒任务归会话持有：唤醒只请求一次排水，不在这里内联等用户补发回合跑完。
+        # 否则用户回复慢会把心跳自己的事件结算一起拖住（实盘多拖了约十分钟），
+        # 而唤醒与用户回合本来就是两笔账。
+        request_dispatch = getattr(session, "request_queued_follow_up_dispatch", None)
+        if callable(request_dispatch):
+            try:
+                request_dispatch(source="heartbeat_wake")
+            except Exception as exc:
+                logger.debug(
+                    "queued follow-up handoff request failed for {}: {}", session_id, exc
+                )
+            return
         dispatch = getattr(session, "dispatch_queued_follow_ups_if_idle", None)
         if not callable(dispatch):
             return

@@ -1082,10 +1082,17 @@ async def replay_queued_follow_ups(
                     session_key,
                 )
                 continue
-            dispatch = getattr(session, "dispatch_queued_follow_ups_if_idle", None)
-            if not callable(dispatch):
-                continue
-            result = dict(await dispatch(source="boot_replay") or {})
+            # 接棒任务归会话持有：这里仍逐个 await（启动期不把全部会话的回合一起
+            # 放出来），但同一会话若已有别的触发点排了任务，就等那一份而不是再起一轮。
+            request_dispatch = getattr(session, "request_queued_follow_up_dispatch", None)
+            if callable(request_dispatch):
+                handoff = request_dispatch(source="boot_replay")
+                result = dict(await handoff or {}) if handoff is not None else {}
+            else:
+                dispatch = getattr(session, "dispatch_queued_follow_ups_if_idle", None)
+                if not callable(dispatch):
+                    continue
+                result = dict(await dispatch(source="boot_replay") or {})
         except Exception:
             logger.debug("queued follow-up boot replay skipped for {}", session_key)
             continue

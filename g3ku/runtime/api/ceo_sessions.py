@@ -1400,12 +1400,17 @@ async def _finish_manual_compression(
     # 谁在自己的收尾调用派发；它内部会再问一次 hold，重复调用与并发终局都安全。
     # 失败档例外：失败处不自动起回合，排队消息留给操作员的下一条消息或下一次压缩。
     if status != MANUAL_COMPRESSION_FAILED:
+        # 接棒任务归会话持有：压缩收尾只请求一次，已有任务就合并，不在这里内联等
+        # 用户补发回合跑完。
+        request_dispatch = getattr(runtime_session, "request_queued_follow_up_dispatch", None)
         dispatch_queued = getattr(runtime_session, "dispatch_queued_follow_ups_if_idle", None)
-        if callable(dispatch_queued):
-            try:
+        try:
+            if callable(request_dispatch):
+                request_dispatch(source="manual_compression_finished")
+            elif callable(dispatch_queued):
                 await dispatch_queued(source="manual_compression_finished")
-            except Exception:
-                pass
+        except Exception:
+            pass
 
 
 async def _execute_manual_context_compression(agent, runtime_session, *, pause_first: bool) -> None:
