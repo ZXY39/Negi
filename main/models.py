@@ -141,6 +141,8 @@ class SpawnChildSpec(Model):
     execution_policy: ExecutionPolicyState
     acceptance_prompt: str = ''
     requires_acceptance: bool | None = None
+    # 连续/待命节点：创建时写定，之后不可变。连续节点强制拥有验收节点。
+    continuous: bool = False
     # 顺序即优先级：体积超限时按这个顺序裁剪，所以它不是排版字段。
     seed_tools: list[str] = Field(default_factory=list)
 

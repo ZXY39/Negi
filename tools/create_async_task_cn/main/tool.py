@@ -158,6 +158,7 @@ class _CreateAsyncTaskHandler(Tool):
             str(task or ''),
             session_id=session_id,
             max_depth=explicit_max_depth,
+            continuous=bool(kwargs.get('continuous')),
             metadata={
                 'core_requirement': normalized_core_requirement,
                 'execution_policy': normalized_execution_policy.model_dump(mode='json'),

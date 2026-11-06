@@ -557,7 +557,8 @@ class SpawnChildNodesTool(Tool):
             'branches belong in one batch; a node that consumes its siblings\' outputs must be '
             'created in a later call, after you have received those siblings\' results. Write '
             'acceptance criteria in a child\'s `acceptance_prompt` to give that child an acceptance '
-            'node; it is created with the child and runs after the child submits.'
+            'node; it is created with the child and runs after the child submits. A child marked '
+            '`continuous` always gets an acceptance node, even without `acceptance_prompt`.'
         )
 
     @property
@@ -572,7 +573,8 @@ class SpawnChildNodesTool(Tool):
             '`acceptance_prompt` alone adds an acceptance node that judges it independently after it '
             'submits; writing the criteria is the whole opt-in, and leaving it out is not an answer - '
             'judge the two conditions in your prompt, and never count your own self-check as that '
-            'verdict.'
+            'verdict. Set `continuous` on children that must stay alive and wake on messages or '
+            'events; those always get an acceptance node.'
         )
 
     @property
@@ -602,9 +604,20 @@ class SpawnChildNodesTool(Tool):
                     'type': 'string',
                     'description': (
                         'Acceptance criteria for this child. Writing them is what spawns its '
-                        'acceptance node; leave it empty to verify inline yourself. The acceptance '
+                        'acceptance node; leave it empty to verify inline yourself, except for a '
+                        'continuous child which always gets one. The acceptance '
                         'node activates only after this child pipeline is terminal - never spawn a '
                         'sibling acceptance node in the same batch for it.'
+                    ),
+                },
+                'continuous': {
+                    'type': 'boolean',
+                    'description': (
+                        'Mark this child as a continuous (standby) node: it keeps running and wakes '
+                        'on messages/events instead of finishing once. A continuous child always '
+                        'gets an acceptance node, created automatically when you do not write '
+                        '`acceptance_prompt`; that node decides whether a submitted result really '
+                        'ends the responsibility. Omit for one-shot children.'
                     ),
                 },
                 'seed_tools': {

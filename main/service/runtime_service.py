@@ -132,6 +132,10 @@ from main.runtime.acceptance_handshake import (
 )
 from main.runtime.adaptive_tool_budget import AdaptiveToolBudgetController
 from main.runtime.chat_backend import ChatBackend
+from main.runtime.continuous_node import (
+    CONTINUOUS_METADATA_KEY,
+    compose_continuous_acceptance_prompt,
+)
 from main.runtime.debug_recorder import RuntimeDebugRecorder
 from main.runtime.execution_trace_compaction import compact_tool_step_for_summary
 from main.runtime.global_scheduler import GlobalScheduler
@@ -1934,6 +1938,7 @@ class MainRuntimeService:
         max_depth: int | None,
         title: str | None,
         metadata: dict[str, Any] | None,
+        continuous: bool = False,
     ) -> tuple[TaskRecord, NodeRecord]:
         prompt = str(task or '').strip()
         if not prompt:
@@ -1947,6 +1952,18 @@ class MainRuntimeService:
             metadata=metadata,
             task_prompt=prompt,
         )
+        if continuous:
+            # 连续根节点必过最终验收：验收节点是它唯一的成功出口，条款在创建时定稿。
+            final_acceptance = normalize_final_acceptance_metadata(
+                task_metadata.get('final_acceptance')
+            )
+            task_metadata['final_acceptance'] = {
+                **final_acceptance.model_dump(mode='json'),
+                'required': True,
+                'prompt': compose_continuous_acceptance_prompt(final_acceptance.prompt),
+                'node_id': '',
+                'status': 'pending',
+            }
         record = TaskRecord(
             task_id=task_id,
             session_id=str(session_id or 'web:shared').strip() or 'web:shared',
@@ -1990,6 +2007,7 @@ class MainRuntimeService:
             token_usage_by_model=[],
             metadata={
                 'execution_policy': dict(task_metadata.get('execution_policy') or {}),
+                **({CONTINUOUS_METADATA_KEY: True} if continuous else {}),
             },
         )
         return record, root
@@ -2002,6 +2020,7 @@ class MainRuntimeService:
         max_depth: int | None = None,
         title: str | None = None,
         metadata: dict[str, Any] | None = None,
+        continuous: bool = False,
     ) -> TaskRecord:
         await self.startup()
         if self.execution_mode == 'web':
@@ -2012,6 +2031,7 @@ class MainRuntimeService:
             max_depth=max_depth,
             title=title,
             metadata=metadata,
+            continuous=continuous,
         )
         record, root = self.log_service.initialize_task(record, root)
         final_acceptance = normalize_final_acceptance_metadata((record.metadata or {}).get('final_acceptance'))

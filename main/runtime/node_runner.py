@@ -69,6 +69,10 @@ from main.runtime.child_tools import (
     ReadChildProgressTool,
     ViewNodeTreeTool,
 )
+from main.runtime.continuous_node import (
+    CONTINUOUS_METADATA_KEY,
+    compose_continuous_acceptance_prompt,
+)
 from main.runtime.internal_tools import (
     EnterWaitTool,
     ScheduleWakeTool,
@@ -223,7 +227,13 @@ def _spawn_acceptance_goal(goal: str) -> str:
 
 
 def _spec_requires_acceptance(spec: SpawnChildSpec) -> bool:
-    """`requires_acceptance` 未显式给时按 `acceptance_prompt` 非空推断——载荷与建节点必须同源。"""
+    """连续节点无条件要验收；其余按显式开关，未给时看 `acceptance_prompt` 是否非空。
+
+    载荷与建节点必须同源：连续分支排在最前，显式 `requires_acceptance=false`
+    也覆盖不了它。
+    """
+    if bool(getattr(spec, 'continuous', False)):
+        return True
     if spec.requires_acceptance is True:
         return True
     if spec.requires_acceptance is False:
@@ -564,13 +574,17 @@ class NodeRunner:
         normalized_policy = normalize_execution_policy_metadata(
             normalized_spec.execution_policy.model_dump(mode='json')
         ).model_dump(mode='json')
-        return {
+        payload = {
             'goal': str(normalized_spec.goal or ''),
             'prompt': str(normalized_spec.prompt or ''),
             'execution_policy': normalized_policy,
             'acceptance_prompt': str(normalized_spec.acceptance_prompt or ''),
             'requires_acceptance': bool(self._requires_acceptance(normalized_spec)),
         }
+        # 只在为真时出现：存量轮次的指纹逐字不变，升级后旧 spawn_operations 照旧可复用。
+        if bool(getattr(normalized_spec, 'continuous', False)):
+            payload['continuous'] = True
+        return payload
 
     def _spawn_specs_fingerprint(self, specs: list[SpawnChildSpec] | list[dict[str, Any]] | Any) -> str:
         normalized_specs: list[dict[str, Any]] = []
@@ -6497,6 +6511,9 @@ class NodeRunner:
         if acceptance is None:
             acceptance_goal = _spawn_acceptance_goal(spec.goal)
             acceptance_prompt = str(spec.acceptance_prompt or '')
+            if bool(getattr(spec, 'continuous', False)):
+                # 注入发生在复用指纹与建节点之前：条款是常量，重放得到同一份 bootstrap。
+                acceptance_prompt = compose_continuous_acceptance_prompt(acceptance_prompt)
             claimed_acceptance_ids = self._claimed_spawn_node_ids(
                 entries=entries,
                 field='acceptance_node_id',
@@ -6818,6 +6835,8 @@ class NodeRunner:
             'spawn_owner_round_id': str(owner_round_id or '').strip(),
             'spawn_owner_entry_index': int(owner_entry_index),
             'spawn_owner_kind': 'child',
+            # 创建时写定、之后不可变：可变会让 tools[]、验收要求与恢复指纹同时漂移。
+            **({CONTINUOUS_METADATA_KEY: True} if bool(getattr(spec, 'continuous', False)) else {}),
             **self._seed_contract_metadata(task=task, node_kind=KIND_EXECUTION, declared=spec.seed_tools),
         }
         child = NodeRecord(

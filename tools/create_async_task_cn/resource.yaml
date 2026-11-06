@@ -3,8 +3,8 @@ kind: tool
 display_name: "创建异步任务"
 name: create_async_task
 description: >-
-  Create a background task. `final_acceptance_prompt` is the only acceptance opt-in: leaving it
-  empty is not an answer, and self-test is not acceptance.
+  Create a background task. `final_acceptance_prompt` or `continuous` opts into acceptance:
+  leaving it empty is not an answer, and self-test is not acceptance.
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''
@@ -54,6 +54,13 @@ parameters:
     final_acceptance_prompt:
       type: string
       description: Acceptance criteria for the final result. Writing them spawns a final acceptance node; leave it empty when you can verify inline.
+    continuous:
+      type: boolean
+      description: >-
+        Create a continuous (standby) root: it keeps running and wakes on messages/events instead of
+        finishing once. A continuous root always gets a final acceptance node, created automatically
+        when you do not write `final_acceptance_prompt`; that node decides whether a submitted result
+        really ends the responsibility. Omit for one-shot tasks.
   required: [task, core_requirement, execution_policy]
 governance:
   display_name: Create Async Task

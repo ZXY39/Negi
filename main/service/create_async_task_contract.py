@@ -47,6 +47,12 @@ CREATE_ASYNC_TASK_FINAL_ACCEPTANCE_PROMPT_DESCRIPTION = (
     "empty when you can verify the result inline."
 )
 
+CREATE_ASYNC_TASK_CONTINUOUS_DESCRIPTION = (
+    "Create a continuous (standby) root that keeps running and wakes on messages or events "
+    "instead of finishing once. A continuous task always gets a final acceptance node; it "
+    "decides whether a submitted result really ends the responsibility. Omit for one-shot tasks."
+)
+
 
 def normalize_create_async_task_file_targets(value: Any) -> list[dict[str, str]]:
     if value in (None, ""):
@@ -195,6 +201,10 @@ def build_create_async_task_parameters() -> dict[str, Any]:
             "final_acceptance_prompt": {
                 "type": "string",
                 "description": CREATE_ASYNC_TASK_FINAL_ACCEPTANCE_PROMPT_DESCRIPTION,
+            },
+            "continuous": {
+                "type": "boolean",
+                "description": CREATE_ASYNC_TASK_CONTINUOUS_DESCRIPTION,
             },
         },
         "required": ["task", "core_requirement", "execution_policy"],
