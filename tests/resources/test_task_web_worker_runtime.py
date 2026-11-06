@@ -8285,11 +8285,35 @@ async def test_root_final_acceptance_appended_notices_reach_the_turn_tail(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_final_acceptance_frozen_while_root_has_pending_notices(tmp_path: Path) -> None:
-    service = _build_service(tmp_path)
+async def test_final_acceptance_sees_root_pending_notices_instead_of_freezing(tmp_path: Path) -> None:
+    """未读通知不再冻结验收：验收照常开回合，消息进尾块镜像并保持未消费。"""
+    backend = _QueuedChatBackend(
+        [
+            LLMResponse(
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call:accept-final",
+                        name="submit_final_result",
+                        arguments={
+                            "status": "success",
+                            "delivery_status": "final",
+                            "summary": "acceptance passed",
+                            "answer": "acceptance passed",
+                            "evidence": [],
+                            "remaining_work": [],
+                            "blocking_reason": "",
+                        },
+                    )
+                ],
+                content="",
+                finish_reason="tool_calls",
+            )
+        ]
+    )
+    service = _build_service_with_backend(tmp_path, chat_backend=backend)
     try:
         record = await service.create_task(
-            "root acceptance freeze",
+            "root acceptance with pending notice",
             session_id="web:shared",
             metadata={"final_acceptance": {"required": True, "prompt": "verify root output"}},
         )
@@ -8321,18 +8345,25 @@ async def test_final_acceptance_frozen_while_root_has_pending_notices(tmp_path: 
                 created_at=now_iso(),
                 delivered_at=now_iso(),
                 consumed_at="",
+                kind="user_direct",
                 payload={},
             )
         )
 
-        # _build_service uses a backend that raises if called; a frozen acceptance
-        # node must return partial without invoking the model at all.
         result = await service.node_runner.run_node(task.task_id, acceptance.node_id)
         latest_acceptance = service.store.get_node(acceptance.node_id)
 
-        assert result.delivery_status == "partial"
+        assert result.status == "success"
         assert latest_acceptance is not None
-        assert latest_acceptance.status == "in_progress"
+        assert latest_acceptance.status == "success"
+        assert len(backend.calls) == 1
+        request_text = "\n".join(
+            str(message.get("content") or "")
+            for call in backend.calls
+            for message in list(call.get("messages") or [])
+            if isinstance(message, dict)
+        )
+        assert "clarification notice" in request_text
         notices = service.store.list_task_node_notifications(task.task_id, root.node_id)
         assert [item.status for item in notices] == ["delivered"]
     finally:
