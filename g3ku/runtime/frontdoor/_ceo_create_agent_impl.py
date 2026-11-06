@@ -904,6 +904,20 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             elif current == "execute_tools":
                 update = await self._node_execute_tools(current_state, runtime)
                 current_state.update(update)
+                # 跳界：这一批工具跑完就是本轮的边界。会话里还有没被接走的补充消息时，
+                # 不再回去问模型——就地收尾（静默，不投递），补充消息由排队车道起下一轮。
+                interrupt_update = self._frontdoor_follow_up_interrupt_update(runtime=runtime)
+                if interrupt_update:
+                    discard = getattr(
+                        getattr(runtime.context, "session", None),
+                        "discard_follow_up_transition_snapshot",
+                        None,
+                    )
+                    if callable(discard):
+                        discard()
+                    current_state.update(interrupt_update)
+                    current = "finalize"
+                    continue
                 current = self._graph_next_step(current_state)
             elif current == "finalize":
                 update = await self._node_finalize_turn(current_state, runtime)

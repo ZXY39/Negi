@@ -832,7 +832,11 @@ async def test_withdraw_drops_memory_item_and_its_pending_row(tmp_path: Path) ->
 
 @pytest.mark.asyncio
 async def test_withdraw_refuses_a_turn_the_runtime_already_consumed(tmp_path: Path) -> None:
-    """已被 take/drain 接走的条目属转录历史：删它等于删一条已回答的用户消息。"""
+    """已被某轮接走的条目属转录历史：删它等于删一条已回答的用户消息。
+
+    补充消息只在回合开始接棒时被接走（工具边界不再并进同一轮），所以这里的消费点就是
+    排队车道的 drain。
+    """
     key = "ext:test-bridge:queue-withdraw-consumed"
     session = _real_session(tmp_path, key)
     await session.queue_follow_up_batch(["已经并入下一轮"], persist_transcript=True)
@@ -840,9 +844,31 @@ async def test_withdraw_refuses_a_turn_the_runtime_already_consumed(tmp_path: Pa
         (session._state.queued_follow_up_messages[0].metadata or {}).get("_transcript_turn_id") or ""
     ).strip()
 
-    drained = await session.take_follow_up_batch_for_call_model()
+    drained = session.drain_queued_follow_up_messages()
 
     assert [str(item.content) for item in drained] == ["已经并入下一轮"]
     assert session.withdraw_queued_follow_up(turn_id) is False
     rows = [row for row in _transcript_rows(tmp_path, key) if str(row.get("role") or "") == "user"]
     assert [str(row.get("content") or "") for row in rows] == ["已经并入下一轮"]
+
+
+@pytest.mark.asyncio
+async def test_boundary_peek_leaves_the_queued_item_retractable(tmp_path: Path) -> None:
+    """跳界只看一眼：被 peek 过之后条目仍在队列里，撤回仍然有效。
+
+    这条不变量是新语义的前提——补充消息在被某一轮真正接走之前，用户随时能改主意。
+    """
+    key = "ext:test-bridge:queue-peek-keeps-item"
+    session = _real_session(tmp_path, key)
+    await session.queue_follow_up_batch(["还能反悔的补充"], persist_transcript=True)
+    turn_id = str(
+        (session._state.queued_follow_up_messages[0].metadata or {}).get("_transcript_turn_id") or ""
+    ).strip()
+
+    for _round in range(3):
+        assert session.has_queued_follow_up_messages() is True
+
+    assert session.withdraw_queued_follow_up(turn_id) is True
+    assert session.has_queued_follow_up_messages() is False
+    rows = [row for row in _transcript_rows(tmp_path, key) if str(row.get("role") or "") == "user"]
+    assert rows == []

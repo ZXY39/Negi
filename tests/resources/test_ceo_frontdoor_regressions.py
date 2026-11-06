@@ -557,155 +557,103 @@ async def test_ceo_frontdoor_runner_does_not_duplicate_current_user_when_builder
 
 
 @pytest.mark.asyncio
-async def test_graph_call_model_injects_running_turn_follow_up_messages_before_provider_send(
-    monkeypatch,
-    tmp_path,
-) -> None:
-    async def _noop_ready() -> None:
-        return None
+async def test_follow_up_at_tools_boundary_ends_the_turn_without_calling_model(monkeypatch) -> None:
+    """工具批次结束就是本轮的边界：队列里有补充消息 ⇒ 不回去问模型，直接收尾。
 
-    captured: dict[str, object] = {}
-    loop = SimpleNamespace(
-        _ensure_checkpointer_ready=_noop_ready,
-        sessions=SessionManager(tmp_path),
-        _checkpointer=None,
-        _store=None,
-        main_task_service=None,
-        tools=_FakeToolRegistry([]),
-        max_iterations=8,
-        workspace=tmp_path,
-        temp_dir=str(tmp_path / "tmp"),
-    )
-    runner = CeoFrontDoorRunner(loop=loop)
+    旧形态把中途消息并进正在跑的这一轮，于是那一段永远没有自己的收尾行，只能补一条
+    「处理中…」占位行；现在这一轮自己静默收尾，补充消息留给下一轮当输入。
+    """
+    runner = CeoFrontDoorRunner(loop=SimpleNamespace())
+    visited: list[str] = []
 
-    async def _call_model_with_tools(**kwargs):
-        captured["messages"] = list(kwargs.get("messages") or [])
-        return {"content": "done"}
+    async def _execute_tools(state, runtime):
+        _ = (state, runtime)
+        visited.append("execute_tools")
+        # 真工具节点在跳末就是这样交回路由器的：没有这颗读数，路由器会原地重复执行工具。
+        return {"next_step": "call_model"}
 
-    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **_: [])
-    monkeypatch.setattr(
-        runner,
-        "_resolve_frontdoor_send_model_context_window",
-        lambda **_: {
-            "model_key": "openai_codex:gpt-test",
-            "provider_model": "openai_codex:gpt-test",
-            "context_window_tokens": 128000,
-        },
-    )
-    monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
-    monkeypatch.setattr(runner, "_checkpoint_safe_model_response_payload", lambda _message: {"content": "done"})
-    monkeypatch.setattr(runner, "_persist_frontdoor_actual_request", lambda **_: {})
+    async def _call_model(state, runtime):
+        _ = (state, runtime)
+        visited.append("call_model")
+        return {"next_step": "finalize"}
 
-    queued_follow_ups = [UserInputMessage(content="Please also include the risk matrix.")]
+    async def _finalize(state, runtime):
+        _ = runtime
+        visited.append("finalize")
+        assert bool(state.get("follow_up_interrupt")) is True, "收尾侧要能看出这是被打断，不是模型没说"
+        return {"final_output": "", "silent_reply": True}
 
-    async def _take_follow_up_batch_for_call_model():
-        if not queued_follow_ups:
-            return []
-        drained = list(queued_follow_ups)
-        queued_follow_ups.clear()
-        return drained
+    monkeypatch.setattr(runner, "_node_execute_tools", _execute_tools)
+    monkeypatch.setattr(runner, "_node_call_model", _call_model)
+    monkeypatch.setattr(runner, "_node_finalize_turn", _finalize)
 
-    state_snapshot_emits: list[int] = []
-
-    async def _emit_state_snapshot() -> None:
-        state_snapshot_emits.append(len(queued_follow_ups))
-
+    discarded: list[int] = []
     session = SimpleNamespace(
-        state=SimpleNamespace(session_key="web:shared"),
-        _memory_channel="web",
-        _memory_chat_id="shared",
-        _channel="web",
-        _chat_id="shared",
-        _active_cancel_token=None,
-        inflight_turn_snapshot=lambda: None,
-        take_follow_up_batch_for_call_model=_take_follow_up_batch_for_call_model,
-        _emit_state_snapshot=_emit_state_snapshot,
-    )
-    runtime = SimpleNamespace(
-        context=SimpleNamespace(
-            session=session,
-            session_key="web:shared",
-            on_progress=None,
-        )
-    )
-
-    await runner._graph_call_model(
-        {
-            "session_key": "web:shared",
-            "messages": [
-                {"role": "system", "content": "SYSTEM"},
-                {"role": "user", "content": "original request"},
-                {"role": "assistant", "content": "working on it"},
-            ],
-            "frontdoor_request_body_messages": [
-                {"role": "system", "content": "SYSTEM"},
-                {"role": "user", "content": "original request"},
-                {"role": "assistant", "content": "working on it"},
-            ],
-            "prompt_cache_key": "cache-key",
-            "prompt_cache_diagnostics": {},
-            "model_refs": ["openai_codex:gpt-test"],
-            "parallel_enabled": False,
-            "provider_tool_names": [],
-            "tool_names": [],
-            "dynamic_appendix_messages": [],
-            "turn_overlay_text": None,
-        },
-        runtime=runtime,
-    )
-
-    request_messages = list(captured.get("messages") or [])
-    # 运行时通知固定追加在尾部，不参与 follow-up 位置的断言。
-    visible_messages = [
-        item
-        for item in request_messages
-        if not str(item.get("content") or "").startswith("[RUNTIME_NOTICE]")
-    ]
-    assert [str(item.get("content") or "") for item in visible_messages[-2:]] == [
-        "working on it",
-        "Please also include the risk matrix.",
-    ]
-    assert str(request_messages[-1].get("role") or "") == "user"
-
-    # 队列被这一跳接走的那一刻必须自己广播一次：网页候选条的镜像只来自 ceo.state 的
-    # 整表读数，不补这一帧，条目会一直挂到下一次恰好发出的状态帧。
-    assert state_snapshot_emits == [0], state_snapshot_emits
-
-
-@pytest.mark.asyncio
-async def test_graph_call_model_does_not_broadcast_follow_up_take_when_queue_is_empty(
-    tmp_path,
-) -> None:
-    async def _noop_ready() -> None:
-        return None
-
-    loop = SimpleNamespace(
-        _ensure_checkpointer_ready=_noop_ready,
-        sessions=SessionManager(tmp_path),
-        _checkpointer=None,
-        _store=None,
-        main_task_service=None,
-        tools=_FakeToolRegistry([]),
-        max_iterations=8,
-        workspace=tmp_path,
-        temp_dir=str(tmp_path / "tmp"),
-    )
-    runner = CeoFrontDoorRunner(loop=loop)
-    emits: list[int] = []
-    session = SimpleNamespace(
-        take_follow_up_batch_for_call_model=lambda: [],
-        _emit_state_snapshot=lambda: emits.append(1),
+        has_queued_follow_up_messages=lambda: True,
+        discard_follow_up_transition_snapshot=lambda: discarded.append(1),
     )
     runtime = SimpleNamespace(context=SimpleNamespace(session=session))
 
-    update = await runner._consume_session_follow_up_messages_before_call_model(
-        state={"session_key": "web:shared", "messages": []},
+    await runner._run_step_loop(
+        state={"iteration": 1, "next_step": "execute_tools"},
         runtime=runtime,
+        entry="execute_tools",
     )
 
-    assert update == {}
-    # 没接走任何东西就不该多付一帧状态快照。
-    assert emits == []
+    assert visited == ["execute_tools", "finalize"], visited
+    assert discarded == [1], "这一轮已经有自己的收尾行，占位快照必须丢掉，否则同一段正文两份"
+
+
+@pytest.mark.asyncio
+async def test_follow_up_boundary_keeps_the_next_hop_when_nothing_is_queued(monkeypatch) -> None:
+    """队列是空的：边界不做任何决定，照常回到模型继续这一轮。"""
+    runner = CeoFrontDoorRunner(loop=SimpleNamespace())
+    visited: list[str] = []
+
+    async def _execute_tools(state, runtime):
+        _ = (state, runtime)
+        visited.append("execute_tools")
+        return {"next_step": "call_model"}
+
+    async def _call_model(state, runtime):
+        _ = (state, runtime)
+        visited.append("call_model")
+        return {"next_step": "finalize"}
+
+    async def _normalize(state, runtime):
+        _ = (state, runtime)
+        return {"next_step": "finalize"}
+
+    async def _finalize(state, runtime):
+        _ = (state, runtime)
+        visited.append("finalize")
+        return {"final_output": "done"}
+
+    monkeypatch.setattr(runner, "_node_execute_tools", _execute_tools)
+    monkeypatch.setattr(runner, "_node_call_model", _call_model)
+    monkeypatch.setattr(runner, "_node_normalize_model_output", _normalize)
+    monkeypatch.setattr(runner, "_node_finalize_turn", _finalize)
+
+    peek_calls: list[int] = []
+
+    def _peek() -> bool:
+        peek_calls.append(1)
+        return False
+
+    session = SimpleNamespace(
+        has_queued_follow_up_messages=_peek,
+        discard_follow_up_transition_snapshot=lambda: visited.append("discard"),
+    )
+    runtime = SimpleNamespace(context=SimpleNamespace(session=session))
+
+    await runner._run_step_loop(
+        state={"iteration": 1, "next_step": "execute_tools"},
+        runtime=runtime,
+        entry="execute_tools",
+    )
+
+    assert visited == ["execute_tools", "call_model", "finalize"], visited
+    assert peek_calls == [1]
 
 
 @pytest.mark.asyncio

@@ -24,7 +24,6 @@ from g3ku.agent.persona import persona_digest, render_persona_notice
 from g3ku.agent.tools.base import Tool
 from g3ku.agent.tools.mention_member import MentionMemberTool
 from g3ku.config.live_runtime import get_runtime_config, peek_runtime_revision
-from g3ku.core.messages import UserInputMessage
 from g3ku.core.timefmt import render_arrival_stamp, strip_arrival_time_stamp
 from g3ku.cron.types import CronSchedule
 from g3ku.json_schema_utils import (
@@ -9189,89 +9188,22 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "next_step": "call_model",
         }
 
-    async def _consume_session_follow_up_messages_before_call_model(
+    def _frontdoor_follow_up_interrupt_update(
         self,
         *,
-        state: CeoGraphState,
-        runtime: CeoRuntime,
+        runtime: CeoRuntime | None,
     ) -> dict[str, Any]:
+        """工具批次结束这一刻的跳界判据：会话里还有没被任何回合接走的补充消息 ⇒ 本轮收尾。
+
+        中途消息不再并进正在跑的这一轮 —— 它由排队车道（`_run_user_turn` 的 drain 循环）
+        作为下一轮的第一条输入发出。这里只看一眼，不取走：在被接走之前那条消息始终还能
+        撤回或编辑。
+        """
         session = getattr(getattr(runtime, "context", None), "session", None)
-        if session is None:
+        peek = getattr(session, "has_queued_follow_up_messages", None)
+        if not callable(peek) or not bool(peek()):
             return {}
-        take_follow_ups = getattr(session, "take_follow_up_batch_for_call_model", None)
-        if not callable(take_follow_ups):
-            return {}
-        drained = take_follow_ups()
-        if hasattr(drained, "__await__"):
-            drained = await drained
-        queued_inputs = [
-            item
-            for item in list(drained or [])
-            if isinstance(item, UserInputMessage)
-        ]
-        if not queued_inputs:
-            return {}
-        request_body_messages = [
-            dict(item)
-            for item in list(
-                state.get("frontdoor_request_body_messages")
-                or state.get("messages")
-                or getattr(session, "_frontdoor_request_body_messages", [])
-                or []
-            )
-            if isinstance(item, dict)
-        ]
-        if request_body_messages:
-            request_body_messages = self._request_body_messages_without_tool_contracts(request_body_messages)
-        follow_up_messages: list[dict[str, Any]] = []
-        follow_up_texts: list[str] = []
-        model_refs = list(
-            state.get("model_refs")
-            or self._resolve_ceo_model_refs_for_session(state.get("session_key"))
-            or []
-        )
-        for item in queued_inputs:
-            item_metadata = dict(getattr(item, "metadata", {}) or {})
-            expanded_content = self._expand_web_ceo_uploads_for_current_request_content(
-                content=self._model_content(getattr(item, "content", "")),
-                metadata=item_metadata,
-                model_refs=model_refs,
-            )
-            follow_up_messages.append({"role": "user", "content": expanded_content})
-            raw_follow_up_text = str(item_metadata.get("web_ceo_raw_text") or "").strip()
-            follow_up_text = raw_follow_up_text or self._content_text(getattr(item, "content", ""))
-            if follow_up_text.strip():
-                follow_up_texts.append(follow_up_text)
-        if not follow_up_messages:
-            return {}
-        updated_request_body_messages = [*request_body_messages, *follow_up_messages]
-        current_query_text = str(state.get("query_text") or "").strip()
-        appended_query_text = "\n\n".join(follow_up_texts).strip()
-        merged_query_text = "\n\n".join(
-            part
-            for part in (current_query_text, appended_query_text)
-            if str(part or "").strip()
-        ).strip()
-        update = {
-            "messages": self._durable_frontdoor_request_body_messages(updated_request_body_messages),
-            "frontdoor_live_request_messages": list(updated_request_body_messages),
-            "frontdoor_request_body_messages": self._durable_frontdoor_request_body_messages(updated_request_body_messages),
-        }
-        if merged_query_text:
-            update["query_text"] = merged_query_text
-        self._sync_runtime_session_frontdoor_state(
-            state={**dict(state or {}), **update},
-            runtime=runtime,
-        )
-        # 队列被这一跳接走的那一刻必须自己广播一次，与回合尾 drain 那条 (_run_user_turn)
-        # 同形状：网页候选条的真相来自 ceo.state 的整表读数，不补这一帧，条目会一直挂到
-        # 下一次恰好发出的状态帧（实测多画 5.8 秒，期间正文已经进气泡了）。
-        emit_snapshot = getattr(session, "_emit_state_snapshot", None)
-        if callable(emit_snapshot):
-            result = emit_snapshot()
-            if hasattr(result, "__await__"):
-                await result
-        return update
+        return {"follow_up_interrupt": True, "next_step": "finalize"}
 
     async def _graph_call_model(
         self,
@@ -9347,12 +9279,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 ),
                 "provider_tool_exposure_commit_reason": "",
             }
-        follow_up_update = await self._consume_session_follow_up_messages_before_call_model(
-            state=state_for_request,
-            runtime=runtime,
-        )
-        if follow_up_update:
-            state_for_request = {**state_for_request, **follow_up_update}
         tool_schemas = self._frontdoor_tool_schemas_for_state(state=state_for_request, runtime=runtime)
         # 阶段 0 观测先行：对**线上这一份**取读数并比对，不用预检那份（预检走
         # `_selected_tool_schemas`，名单比 wire 少两颗合成控制工具，拿它当断言对象会永远
@@ -10871,6 +10797,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         output = settle_reply_sticker_markers(output)
         silent_reply = bool(state.get("silent_reply"))
         silent_reason = str(state.get("silent_reason") or "").strip()
+        follow_up_interrupt = bool(state.get("follow_up_interrupt"))
+        if follow_up_interrupt:
+            # 被打断的这一轮不投递任何回复：用户看到的只有已经跑过的工具与中途文本，
+            # 接着由补充消息起的下一轮给结论。理由必须与"模型没给正文"分开，否则静默
+            # 计数字段会把机器主动收尾读成模型选择不说。
+            silent_reply = True
+            silent_reason = silent_reason or "本轮在工具批次结束后由待发送补充接管，收尾交给下一轮"
         if not output and not silent_reply and not bool(state.get("heartbeat_internal")):
             # 本轮没有可见正文 = 模型选择不说，机器不得替它编一条推给用户：旧的英文兜底
             # 会在 QQ 侧留下一条内部文案（2026-09-23 23:25:51 `qq_official.bridge:deliver`

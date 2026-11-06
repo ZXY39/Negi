@@ -58,17 +58,6 @@ class _AnswerRunner:
         return self.reply_text
 
 
-class _DrainingRunner(_AnswerRunner):
-    """内部回合：在 call_model 处把排队的补充消息接走（真前门同一动作）。"""
-
-    async def run_turn(self, *, user_input, session, on_progress):
-        await session.take_follow_up_batch_for_call_model()
-        _ = on_progress
-        for item in session._current_user_batch_inputs(user_input):
-            self.seen.append(session._history_text(item.content))
-        return self.reply_text
-
-
 def _build_loop(tmp_path: Path, runner: object, turn_task_ref: dict) -> SimpleNamespace:
     async def _cancel_session_tasks(_session_key: str) -> int:
         task = turn_task_ref.get("task")
@@ -218,11 +207,14 @@ async def test_later_internal_turn_does_not_retire_an_orphan_pending_user_row(
 
 
 @pytest.mark.asyncio
-async def test_internal_turn_still_retires_the_follow_up_it_drained(
+async def test_next_turn_that_takes_the_queued_follow_up_retires_its_row(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """退役判据收窄后，内部回合真正 drain 走的补充行仍然要落终态（原漏点不复发）。"""
+    """补充消息只在回合间接棒：接走它的那一轮必须把 pending 行落成终态。
+
+    内部回合不再在跳界消费补充消息，所以这条车道只剩一个漏点形状——drain 之后没人回答它。
+    """
     monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
 
     turn_task_ref: dict[str, asyncio.Task[object] | None] = {"task": None}
@@ -238,13 +230,11 @@ async def test_internal_turn_still_retires_the_follow_up_it_drained(
     with pytest.raises(asyncio.CancelledError):
         await turn_task
 
-    loop.multi_agent_runner = _DrainingRunner("补充已经被这一轮消费。")
-    await session.prompt(
-        UserInputMessage(
-            content="This is a background heartbeat.",
-            metadata={"heartbeat_internal": True, "heartbeat_reason": "task_terminal"},
-        )
-    )
+    drained = session.drain_queued_follow_up_messages()
+    assert [str(item.content) for item in drained] == ["排队里的补充"]
+
+    loop.multi_agent_runner = _AnswerRunner("补充已经被这一轮回答。")
+    await session.prompt_batch(drained)
 
     messages = SessionManager(tmp_path).get_or_create("web:ceo-drained-retire").messages
     assert _row_by_text(messages, "排队里的补充")["metadata"]["_transcript_state"] == "completed"

@@ -291,7 +291,7 @@ test("chip offers 插话 only for unsent items while a turn runs", () => {
     // 三颗都带悬停文字（图标按钮没有可见文案，功能只能在这里说）。
     assert.match(U.ceoFollowUpQueue.innerHTML, /title="编辑：把正文取回输入框继续改"/);
     assert.match(U.ceoFollowUpQueue.innerHTML, /title="删除这条待发送补充"/);
-    assert.match(U.ceoFollowUpQueue.innerHTML, /title="插话：现在就并进正在跑的这一轮"/);
+    assert.match(U.ceoFollowUpQueue.innerHTML, /title="插话：当前这轮跑完手上的工具就停下，这条接着发"/);
     assert.match(U.ceoFollowUpQueue.innerHTML, /title="展开正文"/);
     // 没量过之前三角一律在（放得下与否要等排版，缺证据就不能藏入口）。
     assert.doesNotMatch(U.ceoFollowUpQueue.innerHTML, /ceo-follow-up-expand[\s\S]{0,160}?hidden/);
@@ -324,7 +324,7 @@ test("正文默认一行，点三角切到滚动块并活过重绘", () => {
     assert.doesNotMatch(U.ceoFollowUpQueue.innerHTML, /is-expanded/);
 });
 
-test("已交给 runtime 的条目：插话换成“下一跳即将发送”，编辑与删除仍在", () => {
+test("已交给 runtime 的条目：插话换成“本轮结束后发送”，编辑与删除仍在", () => {
     const { S, U, setCeoQueuedFollowUps } = loadApp();
     S.ceoTurnActive = true;
     // 已转出去、服务端状态帧还没跟上的那一小段：runtime 已经持有它，不能再来一次"插话"。
@@ -335,7 +335,7 @@ test("已交给 runtime 的条目：插话换成“下一跳即将发送”，�
     assert.match(U.ceoFollowUpQueue.innerHTML, /已经转出去的补充/);
     assert.doesNotMatch(U.ceoFollowUpQueue.innerHTML, /已受理/);
     assert.doesNotMatch(U.ceoFollowUpQueue.innerHTML, /data-follow-up-flush/);
-    assert.match(U.ceoFollowUpQueue.innerHTML, /下一跳即将发送/);
+    assert.match(U.ceoFollowUpQueue.innerHTML, /本轮结束后发送/);
     // 这一行仍可编辑与删除：两者都先撤服务端那一行，不会点完还挂在上方。
     assert.match(U.ceoFollowUpQueue.innerHTML, /data-follow-up-withdraw="sent"/);
     assert.match(U.ceoFollowUpQueue.innerHTML, /data-follow-up-remove="sent"/);
@@ -361,7 +361,7 @@ test("立即发送 arms a single queued item on the runtime lane", () => {
     assert.equal(String(local.find((item) => item.id === "b").runtime_sent_at || ""), "");
     assert.match(U.ceoFollowUpQueue.innerHTML, /第二条/);
     // 点完插话当帧就换成状态提示，不等服务端镜像帧。
-    assert.match(U.ceoFollowUpQueue.innerHTML, /下一跳即将发送/);
+    assert.match(U.ceoFollowUpQueue.innerHTML, /本轮结束后发送/);
     assert.doesNotMatch(U.ceoFollowUpQueue.innerHTML, /data-follow-up-flush="a"/);
 });
 
