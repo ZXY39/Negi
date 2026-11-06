@@ -435,7 +435,7 @@ execution / acceptance 节点在真正发 provider 请求前也走最后一层 n
 | `helper_usage` | 摘要 helper 那次调用的用量（不计入节点与任务累计，账外成本只在这里可见）|
 | `token_preflight_diagnostics.ruler_source` | 这把尺子从哪儿来：`group:<key>`＝按准入预测的那一跳目标组取最小成员窗口，`chain_head:<key>`＝没有组预测（direct 链位、前门、记忆车道）时按这一发落到的那颗（链首）自己的窗口 |
 | `token_preflight_diagnostics.error` | 预检为什么拒发这一跳（压缩助手空包 / 无可压缩历史且预估超过本轮发送窗口）|
-| `notice_preservation` | 压缩对"中途变更要求"的保真读数（`open_count` / `hit_count` / `miss_count` / `rolled_stage_id`）。`open_count` 读的是 live 窗口条数（未消费 + 最近 N 条已消费），不是整本台账；`live_notice_count` / `archived_consumed_count` / `dropped_consumed_count` 给出这一跳退场了多少已消费通知 |
+| `notice_preservation` | 压缩对"中途变更要求"的保真读数（`open_count` / `hit_count` / `miss_count` / `rolled_stage_id`）。`open_count` 读的是这一跳要钉进摘要的未代持 live 通知数（已被代持的段不计），不是整本台账；`live_notice_count` 是完整 live 窗口条数（未消费 + 最近 N 条已消费），`archived_consumed_count` / `dropped_consumed_count` 给出这一跳退场了多少已消费通知 |
 
 压缩尺子的合同（一条，两个载体都要读它）：尺子 = **这一发落到的那颗模型的窗口**；落点是负载均衡组时，取那个组里最小的那颗成员窗口。压缩发生在选择之前，而选择又拿压缩后的体量当筛选条件（`required_context_window_tokens`），所以"打到谁"只能预测：准入侧 `ModelLoadBalancer.peek_selection()` / `NodeTurnController.peek_hop_windows()` 用与 `select()` 同一份资格判据（组启用、成员还在计划里、粘滞成员仍合格），但不看 permit、不看限流、也不看尺寸。组内取最小的理由：请求一旦超过某颗成员的窗口，准入就不把它授予这一跳，组内可用成员随之变少，攒到没人塞得下就是把共享队列钉死的那类停摆。direct 链位与没有回合准入的车道（前门、记忆）**不取整条链最小**，而是按链首那颗自己——拿链尾的窗口去压链首的请求，等于让一条不相干的记录压低本轮预算（实盘一条 CEO 链：链首 500,000 被链尾 390,000 压成 296,400 触发线，而不是它自己的 380,000）。链前进到塞不下的成员时，发送层按**那一颗自己的声明窗口**再压一次（当前跳尺子；预检的 0.8× 提前量只管链首的提前压），压不下来就跳过该成员并 fallback 下一个（见 `runtime-overview.md`「Chat provider 超时与重试边界」），不由预检尺子提前买单；全链没有可服务成员时落 `NoModelFitsWindow`，前门报错、节点暂停/心跳。链首那颗也读不到窗口时才退回链级最小：一个 0 会把尺子打到硬门 `context_window_tokens <= 25000` 以下，等于让一条坏记录把该节点后续所有跳全部拒发。预测偏大不会误发：授予那侧仍按尺寸筛成员，塞不下时先按当前成员窗口补压、压不下来跳过该成员；全组不可服务时落 `node_turn_admission_fault:` 暂停，下一跳用新尺子自愈。
 

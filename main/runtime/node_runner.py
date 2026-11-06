@@ -1236,6 +1236,10 @@ class NodeRunner:
             )
 
         items = [items_by_key[key] for key in order]
+        latest_at = max(
+            (str(item.get('received_at') or '') for item in items),
+            default='',
+        )
         if not items:
             return {'ok': True, 'count': 0, 'ref': '', 'summary': 'no messages received', 'latest_at': ''}
         artifact_text = json.dumps(
@@ -1256,14 +1260,14 @@ class NodeRunner:
                 'error': 'history_artifact_unavailable',
                 'count': len(items),
                 'summary': '',
-                'latest_at': str(items[-1].get('received_at') or ''),
+                'latest_at': latest_at,
             }
         return {
             'ok': True,
             'count': len(items),
             'ref': str(ref).strip(),
             'summary': str(summary or '')[:500],
-            'latest_at': str(items[-1].get('received_at') or ''),
+            'latest_at': latest_at,
         }
 
     def _notifications_by_ids(self, *, task_id: str, node_id: str, notification_ids: list[str]) -> list[dict[str, Any]]:
