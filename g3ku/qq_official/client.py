@@ -122,6 +122,7 @@ class ExternalApiClient:
         shape: str = "",
         passive_window_open: bool | None = None,
         text_preview: str = "",
+        attachment_failures: list[dict[str, Any]] | None = None,
     ) -> None:
         """Mark an outbox entry closed after the channel API confirms.
 
@@ -129,6 +130,8 @@ class ExternalApiClient:
         清理，判毒的条目若不带状态销掉，每次桥重建都会重新拿到一整轮重试。
         ``status="unconfirmed"`` 是「请求已发出、回执未知」的终态销账：这类条目
         不再重发，用户才不会被同一条回答打两遍。
+        ``attachment_failures`` 是正文已送达、但附件没投出去的事实：服务端据此
+        唤醒会话，让模型决定重发还是告知用户。列表截 10 条、错误原文截 200 字。
         默认值保持与旧调用完全相同的请求体（不带 body）。
         """
         payload: dict[str, object] | None = None if status == "delivered" else {"status": status}
@@ -143,6 +146,16 @@ class ExternalApiClient:
             extras["passive_window_open"] = bool(passive_window_open)
         if text_preview:
             extras["text_preview"] = str(text_preview)[:500]
+        trimmed_failures: list[dict[str, Any]] = []
+        for item in list(attachment_failures or [])[:10]:
+            if not isinstance(item, dict):
+                continue
+            record = dict(item)
+            if "platform_message" in record:
+                record["platform_message"] = str(record.get("platform_message") or "")[:200]
+            trimmed_failures.append(record)
+        if trimmed_failures:
+            extras["attachment_failures"] = trimmed_failures
         if extras:
             payload = {**(payload or {}), **extras}
         response = await self._client.post(

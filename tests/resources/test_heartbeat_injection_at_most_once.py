@@ -354,6 +354,12 @@ def test_injection_failure_keeps_event_and_does_not_mark_source(tmp_path: Path) 
             {"outbox_id": "obx-1"},
             "queue_only",
         ),
+        (
+            "attachment_failure",
+            "attachment-failure:obx-2",
+            {"outbox_id": "obx-2", "attachment_failures": [{"name": "a.docx"}]},
+            "queue_only",
+        ),
     ],
 )
 def test_consume_at_injection_marks_every_source_once(
@@ -391,6 +397,22 @@ def test_consume_at_injection_marks_every_source_once(
     else:
         assert store.terminal_acks == []
         assert store.stall_acks == []
+
+
+def test_attachment_failure_does_not_suppress_the_channel_reply() -> None:
+    """附件失败与投递失败是两条 reason：前者正文已送达，模型必须还能回话/重发。"""
+    assert WebSessionHeartbeatService._events_are_delivery_failure_only(
+        [SimpleNamespace(reason="delivery_failure")]
+    )
+    assert not WebSessionHeartbeatService._events_are_delivery_failure_only(
+        [SimpleNamespace(reason="attachment_failure")]
+    )
+    assert not WebSessionHeartbeatService._events_are_delivery_failure_only(
+        [
+            SimpleNamespace(reason="attachment_failure"),
+            SimpleNamespace(reason="delivery_failure"),
+        ]
+    )
 
 
 def test_already_injected_event_is_consumed_without_a_model_turn(tmp_path: Path) -> None:

@@ -110,6 +110,13 @@ Cron job delivery is claim-before-dispatch with a self-finalizing dispatch — t
   transcript. This prevents a failure notification from generating another failing
   proactive reply.
 
+## Attachment Failure Wake
+
+- An outbox ack whose body carries `attachment_failures` records a reply whose text reached the channel but whose files did not. The ack route normalizes the records (list capped at 10, `platform_message` at 200 chars) and enqueues one `attachment_failure` heartbeat event, deduped by `attachment:<outbox_id>` in the same LRU as `delivery_failure` (distinct prefix, so the two branches never consume each other's id).
+- The reason is deliberately separate from `delivery_failure`: that lane suppresses the turn's channel reply (`delivery_failure_only`), which is right for a rejected proactive message and wrong here — the reply body already landed, and the model must be able to resend the file or tell the user. Only a bundle made purely of `delivery_failure` suppresses the reply; `attachment_failure` never matches, including mixed bundles.
+- No termination condition and no error-type allowlist: every failed reply wakes once and the model decides. `stage` (`too_large` / `download` / `upload` / `media_message`), `attempts`, `elapsed_seconds` and `failed_at` distinguish a transient blip from a platform-side outage; the bundle renders the original platform reading (`HTTP <status>`, `code=<n>`, the platform message), the signed-url fallback result, and the exact line the user received (`📎 <name>: <signed link>`) without the signed URL itself. The stable `qq_channel_attachment_limits_block` is unchanged; failure detail lives in the dynamic event bundle.
+- `after_text` sticker failures stay out of this lane: a dropped sticker is logged, not worth a wake-up.
+
 ## Task Terminal Repair Contract
 
 - Task-terminal heartbeat only repairs or produces the session reply for an existing terminal event; it never auto-runs `continue_task`, creates replacement tasks, or retries failed tasks in place.

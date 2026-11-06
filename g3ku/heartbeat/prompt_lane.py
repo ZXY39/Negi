@@ -747,6 +747,8 @@ def _delivery_failure_lines(
     kind_text = {
         "active_denied": "群未开启主动消息权限（active_denied）",
         "passive_expired": "被动回复窗口已过期（passive_expired）",
+        "passive_exhausted": "被动回复时间或次数超过限制（passive_exhausted）",
+        "passive_invalid": "被动回复的 msg_id 无效或越权（passive_invalid）",
         "quota_exhausted": "主动消息日额度用尽（quota_exhausted）",
     }.get(kind, kind)
     _append_retrieval_parts(
@@ -776,6 +778,111 @@ def _delivery_failure_lines(
             )
     else:
         lines.append("  处理：不要重试原消息；必要时调用 silent 或等下一次入站再说明。")
+    return lines
+
+
+def _human_size(value: Any) -> str:
+    try:
+        size = int(value)
+    except (TypeError, ValueError):
+        return ""
+    if size <= 0:
+        return ""
+    for label, factor in (("GiB", 1024**3), ("MiB", 1024**2), ("KiB", 1024)):
+        if size >= factor:
+            return f"{size / factor:.1f} {label}"
+    return f"{size} B"
+
+
+def _attachment_failure_stage_text(failure: dict[str, Any]) -> str:
+    """失败阶段的人读句；只写读数，不替模型做分类或处置决定。"""
+    stage = _non_empty_text(failure.get("stage")).lower() or "unknown"
+    attempts = int(_float_value(failure.get("attempts"), 0.0) or 0)
+    elapsed = _float_value(failure.get("elapsed_seconds"))
+    failed_at = _non_empty_text(failure.get("failed_at"))
+    if stage == "too_large":
+        return "exceeds the local outbound attachment cap"
+    if stage == "download":
+        return "the signed download link could not be read"
+    if stage in {"upload", "media_message"}:
+        subject = "upload rejected" if stage == "upload" else "media message rejected"
+        detail = f"after {max(1, attempts)} attempt(s)"
+        if elapsed > 0:
+            detail += f" in {elapsed:.1f}s"
+        if failed_at:
+            detail += f", last attempt at {failed_at}"
+        return f"{subject} {detail}"
+    return f"delivery failed ({stage})"
+
+
+def _attachment_failure_lines(
+    event: dict[str, Any],
+    retrieval_parts: list[str],
+) -> list[str]:
+    """正文已送达、附件没到：原始错误与文件名交给模型，不预写处置。"""
+    failures = [
+        dict(item)
+        for item in list(event.get("attachment_failures") or [])
+        if isinstance(item, dict)
+    ]
+    if not failures:
+        return []
+    external_key = _non_empty_text(event.get("external_key"))
+    noun = "attachment" if len(failures) == 1 else "attachments"
+    lines = [
+        f"- {len(failures)} {noun} in this reply never reached the channel "
+        "(the text itself was delivered)"
+    ]
+    if external_key:
+        lines.append(f"  Session: {external_key}")
+    for failure in failures:
+        name = _non_empty_text(failure.get("name")) or "attachment"
+        descriptor: list[str] = []
+        size_text = _human_size(failure.get("size"))
+        if size_text:
+            descriptor.append(size_text)
+        mime = _non_empty_text(failure.get("mime_type"))
+        if mime:
+            descriptor.append(mime)
+        file_type = failure.get("file_type")
+        try:
+            if int(file_type or 0) > 0:
+                descriptor.append(f"file_type={int(file_type)}")
+        except (TypeError, ValueError):
+            pass
+        descriptor_text = f" ({', '.join(descriptor)})" if descriptor else ""
+        lines.append(
+            f"  - {name}{descriptor_text}: {_attachment_failure_stage_text(failure)}"
+        )
+        readings: list[str] = []
+        http_status = failure.get("http_status")
+        if http_status is not None:
+            readings.append(f"HTTP {http_status}")
+        platform_code = failure.get("platform_code")
+        if platform_code is not None:
+            readings.append(f"code={platform_code}")
+        platform_message = _non_empty_text(failure.get("platform_message"))
+        if platform_message:
+            readings.append(f'"{platform_message}"')
+        if readings:
+            lines.append(f"    - {' '.join(readings)}")
+        url_fallback = _non_empty_text(failure.get("url_fallback"))
+        if url_fallback:
+            lines.append(f"    - signed-url fallback: {url_fallback}")
+        lines.append(
+            "  The user received this line instead of the file: "
+            f"📎 {name}: <signed link>"
+        )
+        _append_retrieval_parts(
+            retrieval_parts,
+            "attachment_failure",
+            external_key,
+            name,
+            mime,
+            _non_empty_text(failure.get("stage")),
+            platform_message,
+            url_fallback,
+        )
     return lines
 
 
@@ -988,6 +1095,9 @@ def _event_bundle_content(
             continue
         if reason == "delivery_failure":
             lines.extend(_delivery_failure_lines(event, retrieval_parts))
+            continue
+        if reason == "attachment_failure":
+            lines.extend(_attachment_failure_lines(event, retrieval_parts))
             continue
         if reason == "shutdown_resume":
             lines.extend(shutdown_resume_lines())

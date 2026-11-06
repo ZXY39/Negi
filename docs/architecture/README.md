@@ -101,7 +101,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 第三方桥接应用接入（/api/v1 鉴权、外部会话、事件流、主动推送不到达）→ `external-agent-api.md`「常见排障入口」
 - 外部 agent 看不见全部会话、或要把某个 token 的可见范围收回去 → `external-agent-api.md`「启用与鉴权」的跨桥作用域一档
 - 会话转录/Web UI 有回复但渠道端（QQ 等）收不到、群里 @ 了没回复而单聊正常、回合跑坏了渠道端静默、渠道「能收不能发」、重启后旧提醒补投或重复 → `external-agent-api.md`「回合契约」终态不变量 +「出站路由（主动推送）」+「持久 outbox」+「内置官方 QQ 适配器」+「回复形状与主动消息权限」
-- 渠道端只收到文件签名链接、模型回复里引用的图片/文件没有作为媒体消息送达 → `external-agent-api.md`「事件流」出站附件契约 +「内置官方 QQ 适配器」
+- 渠道端只收到文件签名链接、模型回复里引用的图片/文件没有作为媒体消息送达 → `external-agent-api.md`「事件流」出站附件契约 +「内置官方 QQ 适配器」+ `heartbeat-system.md`「Attachment Failure Wake」（上传重试、回环 origin 跳过 url 回退、失败记录回灌）
 - 桥接端 `reply.final` 的 `usage` 缺失或数值不像本轮 → `external-agent-api.md`「事件流」（usage 随 `message_end` 由发出侧带出，relay 只透传）+ `web-and-admin.md`「Per-Turn Token Usage Contract」
 - 会话转录里明明有回复正文、拉取式读口却报 `no_final_written` / `unconsumed_replies:0` → `agent-gateway.md`「等待契约（wait_for_external_reply）」+ `external-agent-api.md`「持久 outbox」（心跳来源的回合只产 `outbound.created`；销账方与可取集合判据都在那里）
 - 渠道会话在网页目录里删了还在、删过的卡片对方再发消息也不回来、清过历史的行仍显示可发消息、删掉正打开的渠道会话后弹「连接失败」、或注销身份被拒（`outbox_pending` / `scheduled_target`）→ `web-and-admin.md`「Channel Session Clear Contract」+「CEO Session List Interaction Contract」+ `external-agent-api.md`「会话注册表与 key 命名空间」

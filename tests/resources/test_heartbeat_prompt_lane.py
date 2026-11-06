@@ -7,6 +7,54 @@ def _field(value, name: str):
     return getattr(value, name)
 
 
+def test_attachment_failure_bundle_renders_original_errors_and_no_signed_url() -> None:
+    """附件失败回灌：原始错误、文件名与用户实际收到的链接行都要在；签名 URL 不进来，
+    也不预写处置指令。"""
+    from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane
+
+    lane = build_heartbeat_prompt_lane(
+        provider_model="",
+        stable_rules_text="rules",
+        events=[
+            {
+                "reason": "attachment_failure",
+                "external_key": "qq:c2c:EB6C8D",
+                "attachment_failures": [
+                    {
+                        "name": "v02_notebook_p10.mp4",
+                        "mime_type": "video/mp4",
+                        "size": 2180442,
+                        "file_type": 4,
+                        "stage": "upload",
+                        "attempts": 3,
+                        "elapsed_seconds": 6.2,
+                        "failed_at": "2026-11-06T16:18:35+08:00",
+                        "http_status": 500,
+                        "platform_code": 850012,
+                        "platform_message": "call inner proxy error",
+                        "url_fallback": 'HTTP 400 code=40093010 "上传URL错误"',
+                    }
+                ],
+            }
+        ],
+    )
+    text = str(_field(lane, "event_bundle_text"))
+    assert "1 attachment in this reply never reached the channel" in text
+    assert "the text itself was delivered" in text
+    assert "Session: qq:c2c:EB6C8D" in text
+    assert "v02_notebook_p10.mp4" in text
+    assert "2.1 MiB" in text and "video/mp4" in text and "file_type=4" in text
+    assert "upload rejected after 3 attempt(s) in 6.2s" in text
+    assert "last attempt at 2026-11-06T16:18:35+08:00" in text
+    assert 'HTTP 500 code=850012 "call inner proxy error"' in text
+    assert 'signed-url fallback: HTTP 400 code=40093010 "上传URL错误"' in text
+    assert "📎 v02_notebook_p10.mp4: <signed link>" in text
+    # 签名 URL 绝不写进模型正文。
+    assert "token=" not in text
+    # 不给处置指令：重发还是告知用户由模型决定。
+    assert "处理" not in text
+
+
 def test_build_heartbeat_lane_keeps_artifact_refs_out_of_retrieval_query_in_heartbeat_lane() -> None:
     from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane
 

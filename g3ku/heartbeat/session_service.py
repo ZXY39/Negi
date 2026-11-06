@@ -285,6 +285,42 @@ class WebSessionHeartbeatService:
             self._wake.request(session_id, delay_s=0.25)
         return True
 
+    def enqueue_attachment_failure(self, payload: dict[str, Any] | None) -> bool:
+        """Wake the session once for one reply whose attachments did not arrive.
+
+        The text itself was delivered, so this lane must stay separate from
+        ``delivery_failure``: that reason suppresses the turn's channel reply
+        (``delivery_failure_only``), while here the model may need to resend the
+        file or tell the user. Dedupe is by outbox id; every distinct failed
+        reply wakes, duplicate acks/replays do not.
+        """
+        normalized = dict(payload or {})
+        session_id = str(normalized.get("session_id") or "").strip()
+        outbox_id = str(normalized.get("outbox_id") or "").strip()
+        failures = [
+            dict(item)
+            for item in list(normalized.get("attachment_failures") or [])[:10]
+            if isinstance(item, dict)
+        ]
+        if not session_id or not outbox_id or not failures:
+            return False
+        normalized["attachment_failures"] = failures
+        normalized["event_reason"] = "attachment_failure"
+        normalized["reason"] = "attachment_failure"
+        event = self._events.enqueue(
+            session_id=session_id,
+            source="external_channel",
+            reason="attachment_failure",
+            dedupe_key=f"attachment-failure:{outbox_id}",
+            payload=normalized,
+            delay_seconds=0.0,
+        )
+        if event is None:
+            return False
+        if self._started:
+            self._wake.request(session_id, delay_s=0.25)
+        return True
+
     def enqueue_tool_job(self, payload: dict[str, Any] | None) -> bool:
         """Wake the session for one terminal background tool job.
 
@@ -2189,10 +2225,8 @@ class WebSessionHeartbeatService:
             self._publish_ceo(key, "ceo.reply.final", final_payload)
         # 投递失败事件只唤醒模型：回给渠道的任何主动消息都可能再次被拒并触发
         # 新一轮失败通知。模型要触达群里必须显式走 mention_member（有被动窗口时）。
-        delivery_failure_only = bool(events) and all(
-            str(event.reason or "").strip().lower() == "delivery_failure"
-            for event in events
-        )
+        # 附件失败不在此列：正文已送达，模型要能回话或重发。
+        delivery_failure_only = self._events_are_delivery_failure_only(events)
         if not delivery_failure_only:
             await self._notify_reply(key, output)
         event_ids = {event.event_id for event in events}
@@ -2201,6 +2235,18 @@ class WebSessionHeartbeatService:
         self._ack_task_stall_events(popped)
         next_delay = self._events.next_delay(key)
         return next_delay
+
+    @staticmethod
+    def _events_are_delivery_failure_only(events: list[SessionHeartbeatEvent]) -> bool:
+        """Only a bundle made purely of ``delivery_failure`` suppresses the reply.
+
+        ``attachment_failure`` describes a reply whose text already landed; the
+        model must remain able to answer or resend, so it never matches here.
+        """
+        return bool(events) and all(
+            str(event.reason or "").strip().lower() == "delivery_failure"
+            for event in events
+        )
 
     async def _notify_reply(self, session_id: str, text: str) -> None:
         notifier = self._reply_notifier
