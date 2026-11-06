@@ -13,6 +13,7 @@ from main.models import (
     NodeRecord,
     SpawnChildResult,
     SpawnChildSpec,
+    TaskNodeNotification,
     TaskRecord,
 )
 from main.runtime.continuous_node import (
@@ -25,6 +26,10 @@ from main.runtime.internal_tools import SpawnChildNodesTool
 from main.runtime.node_runner import _spec_requires_acceptance
 from main.runtime.plain_text_reply import build_node_plain_text_reply_block_message
 from main.service.runtime_service import MainRuntimeService
+from main.service.task_stall_callback import (
+    TASK_STALL_REASON_DESIGNED_IDLE,
+    TASK_STALL_REASON_SUSPECTED_STALL,
+)
 from tools.create_async_task_cn.main.tool import _CreateAsyncTaskHandler
 
 STAMP = '2026-11-06T00:00:00+08:00'
@@ -226,6 +231,76 @@ def test_spawn_spec_payload_keeps_legacy_fingerprint(tmp_path: Path) -> None:
     assert continuous_payload['continuous'] is True
     assert normal_payload['requires_acceptance'] is False
     assert continuous_payload['requires_acceptance'] is True
+
+
+def _mark_waiting(service: MainRuntimeService, task_id: str, node_id: str, *, external: bool, phase: str = 'waiting_explicit') -> None:
+    service.store.update_node(
+        node_id,
+        lambda record: record.model_copy(
+            update={
+                'metadata': {
+                    **dict(record.metadata or {}),
+                    'node_wait_external': bool(external),
+                    'node_wait_targets': [],
+                }
+            }
+        ),
+    )
+    service.log_service.upsert_frame(
+        task_id,
+        {'node_id': node_id, 'depth': 0, 'node_kind': 'execution', 'phase': phase},
+    )
+
+
+def _stall_reason(service: MainRuntimeService, task_id: str) -> str:
+    state = service.log_service.read_runtime_state(task_id, frame_mode='stall') or {}
+    return service.classify_task_stall_reason(task_id, runtime_state=state)
+
+
+def test_designed_idle_when_every_execution_node_waits_external(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    task, parent = _seed_parent(service)
+    _mark_waiting(service, task.task_id, parent.node_id, external=True)
+
+    assert _stall_reason(service, task.task_id) == TASK_STALL_REASON_DESIGNED_IDLE
+    assert service.is_task_stall_designed_idle(task.task_id) is True
+    assert service.is_task_stall_actionable(task.task_id) is False
+
+
+def test_internal_only_wait_is_not_exempt(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    task, parent = _seed_parent(service)
+    _mark_waiting(service, task.task_id, parent.node_id, external=False)
+
+    assert _stall_reason(service, task.task_id) == TASK_STALL_REASON_SUSPECTED_STALL
+
+
+def test_unread_mail_breaks_designed_idle(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    task, parent = _seed_parent(service)
+    _mark_waiting(service, task.task_id, parent.node_id, external=True)
+    service.store.upsert_task_node_notification(
+        TaskNodeNotification(
+            notification_id='notif:1',
+            task_id=task.task_id,
+            node_id=parent.node_id,
+            epoch_id='',
+            status='delivered',
+            created_at=STAMP,
+            delivered_at=STAMP,
+            message='wake up',
+        )
+    )
+
+    assert _stall_reason(service, task.task_id) == TASK_STALL_REASON_SUSPECTED_STALL
+
+
+def test_inflight_phase_breaks_designed_idle(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    task, parent = _seed_parent(service)
+    _mark_waiting(service, task.task_id, parent.node_id, external=True, phase='before_model')
+
+    assert _stall_reason(service, task.task_id) == TASK_STALL_REASON_SUSPECTED_STALL
 
 
 def test_spawn_receipt_marks_auto_acceptance(tmp_path: Path) -> None:

@@ -4671,7 +4671,7 @@ class SQLiteTaskStore:
         """
         return list(
             self._fetchall(
-                'SELECT node_id, active, runnable, waiting, updated_at '
+                'SELECT node_id, phase, active, runnable, waiting, updated_at '
                 'FROM task_runtime_frames WHERE task_id = ? ORDER BY depth ASC, node_id ASC',
                 (str(task_id or '').strip(),),
             )

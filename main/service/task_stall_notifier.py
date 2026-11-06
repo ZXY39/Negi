@@ -236,6 +236,15 @@ class TaskStallNotifier:
         if task is None or not self._has_notice_audience(self._service, task):
             return
         runtime_state = self._service.log_service.read_runtime_state(key, frame_mode='stall') or {}
+        # 设计内待命（连续节点停在声明的外部唤醒源上）既不投递也不重新计时：
+        # 下一次唤醒会经 run_task → start_task 重新装填。
+        designed_idle = getattr(self._service, "is_task_stall_designed_idle", None)
+        if callable(designed_idle):
+            try:
+                if bool(designed_idle(key, runtime_state=runtime_state)):
+                    return
+            except Exception:
+                pass
         is_actionable = getattr(self._service, "is_task_stall_actionable", None)
         if callable(is_actionable):
             try:

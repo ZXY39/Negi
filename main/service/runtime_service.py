@@ -198,7 +198,7 @@ from main.runtime.node_watchdog import NodeWatchdog
 from main.runtime.react_loop import ReActToolLoop
 from main.runtime.task_actor_service import TaskActorService
 from main.runtime.tool_pressure_monitor import WorkerPressureMonitor
-from main.runtime.wait_graph import NODE_WAIT_TARGETS_KEY
+from main.runtime.wait_graph import NODE_WAIT_EXTERNAL_KEY, NODE_WAIT_TARGETS_KEY
 from main.service.event_registry import TaskEventRegistry
 from main.service.task_distribution_error_callback import (
     TASK_DISTRIBUTION_ERROR_CALLBACK_PATH,
@@ -217,6 +217,7 @@ from main.service.task_event_callback import (
 from main.service.task_stall_callback import (
     TASK_STALL_CALLBACK_PATH,
     TASK_STALL_REASON_CANCEL_REQUESTED,
+    TASK_STALL_REASON_DESIGNED_IDLE,
     TASK_STALL_REASON_MISSING_TASK,
     TASK_STALL_REASON_NOT_IN_PROGRESS,
     TASK_STALL_REASON_SUSPECTED_STALL,
@@ -6806,6 +6807,8 @@ class MainRuntimeService:
         if self.execution_mode == 'web':
             if not self.is_worker_online():
                 return TASK_STALL_REASON_WORKER_UNAVAILABLE
+        if self._task_is_designed_idle(task.task_id, runtime_state=current_runtime_state):
+            return TASK_STALL_REASON_DESIGNED_IDLE
         return TASK_STALL_REASON_SUSPECTED_STALL
 
     def is_task_stall_actionable(
@@ -6818,6 +6821,84 @@ class MainRuntimeService:
             task_id,
             runtime_state=runtime_state,
         ) == TASK_STALL_REASON_SUSPECTED_STALL
+
+    def is_task_stall_designed_idle(
+        self,
+        task_id: str,
+        *,
+        runtime_state: dict[str, Any] | None = None,
+    ) -> bool:
+        return self.classify_task_stall_reason(
+            task_id,
+            runtime_state=runtime_state,
+        ) == TASK_STALL_REASON_DESIGNED_IDLE
+
+    def _task_is_designed_idle(
+        self,
+        task_id: str,
+        *,
+        runtime_state: dict[str, Any] | None = None,
+    ) -> bool:
+        """所有非终态执行节点都停在带外部唤醒源的停靠相位 ⇒ 设计内待命。
+
+        判据与等待图同源：有人声明了 `frontdoor`（`node_wait_external`）才是合法的
+        无限等待；只等任务内节点的停靠仍按失速处理，否则会掩盖真死锁。读法走
+        `frame_mode='stall'` 的列（`node_phases`），不搬帧正文。
+        """
+        state = runtime_state if isinstance(runtime_state, dict) else (
+            self.log_service.read_runtime_state(task_id, frame_mode='stall') or {}
+        )
+        phases = {
+            str(key or '').strip(): str(value or '').strip()
+            for key, value in dict(state.get('node_phases') or {}).items()
+        }
+        try:
+            records = list(self.store.list_nodes(task_id) or [])
+        except Exception:
+            return False
+        parked_phases = {'waiting_explicit', 'waiting_children'}
+        execution_count = 0
+        external = False
+        for node in records:
+            node_id = str(getattr(node, 'node_id', '') or '').strip()
+            kind = str(getattr(node, 'node_kind', '') or '').strip().lower()
+            status = str(getattr(node, 'status', '') or '').strip().lower()
+            if not node_id or status in {'success', 'failed'}:
+                continue
+            phase = str(phases.get(node_id) or '').strip()
+            if kind == 'acceptance':
+                # 未派发的验收节点没有帧；在飞或卡住的验收相位不豁免。
+                if phase and phase not in parked_phases and phase != 'waiting_acceptance':
+                    return False
+                continue
+            if kind != 'execution':
+                continue
+            execution_count += 1
+            if bool(getattr(node, 'is_paused', False)) or bool(getattr(node, 'pause_requested', False)):
+                return False
+            if phase not in parked_phases:
+                return False
+            metadata = dict(getattr(node, 'metadata', None) or {})
+            if bool(metadata.get(NODE_WAIT_EXTERNAL_KEY)):
+                external = True
+            # 有可注入未读意味着派发车道马上要开回合；把"该醒没醒"藏进待命会漏报。
+            if self._node_has_unread_notifications(task_id, node_id):
+                return False
+        return bool(execution_count) and external
+
+    def _node_has_unread_notifications(self, task_id: str, node_id: str) -> bool:
+        try:
+            rows = list(self.store.list_task_node_notifications(task_id, node_id) or [])
+        except Exception:
+            # 读不到按"有未读"处理：宁可告警，不把未知读成待命。
+            return True
+        for item in rows:
+            status = str(getattr(item, 'status', '') or '').strip()
+            if status == 'delivered' and not notification_is_held(item):
+                return True
+            if status == 'consumed' and not str(getattr(item, 'merged_at', '') or '').strip():
+                return True
+        return False
 
     def _build_task_stall_detail(
         self,

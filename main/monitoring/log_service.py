@@ -3375,6 +3375,10 @@ class TaskLogService:
                 'active_node_ids': [str(row['node_id']) for row in frame_rows if bool(row['active'])],
                 'runnable_node_ids': [str(row['node_id']) for row in frame_rows if bool(row['runnable'])],
                 'waiting_node_ids': [str(row['node_id']) for row in frame_rows if bool(row['waiting'])],
+                # 相位也是列，不搬帧正文：设计内待命判定要区分 waiting_explicit 与在飞相位。
+                'node_phases': {
+                    str(row['node_id']): str(row['phase'] or '') for row in frame_rows
+                },
             }
         frame_records = list(self._store.list_task_runtime_frames(task_id) or [])
         frames = [

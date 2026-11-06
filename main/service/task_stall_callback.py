@@ -18,6 +18,8 @@ TASK_STALL_REASON_WORKER_UNAVAILABLE = "worker_unavailable"
 TASK_STALL_REASON_CANCEL_REQUESTED = "cancel_requested"
 TASK_STALL_REASON_NOT_IN_PROGRESS = "not_in_progress"
 TASK_STALL_REASON_MISSING_TASK = "missing_task"
+# 连续节点停在声明了外部唤醒源的 waiting_explicit：设计内待命，不投递也不重新计时。
+TASK_STALL_REASON_DESIGNED_IDLE = "designed_idle"
 # 中国渠道子系统移除后，`china:*` 会话只剩可读转录，没有活的投递路径。
 LEGACY_UNDELIVERABLE_SESSION_PREFIX = "china:"
 
@@ -42,6 +44,7 @@ _TASK_STALL_REASONS = {
     TASK_STALL_REASON_CANCEL_REQUESTED,
     TASK_STALL_REASON_NOT_IN_PROGRESS,
     TASK_STALL_REASON_MISSING_TASK,
+    TASK_STALL_REASON_DESIGNED_IDLE,
 }
 
 
