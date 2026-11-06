@@ -7,7 +7,7 @@ import os
 import platform
 import traceback
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
@@ -68,6 +68,12 @@ from main.runtime.child_tools import (
     ManageChildNodesTool,
     ReadChildProgressTool,
     ViewNodeTreeTool,
+)
+from main.runtime.continuous_node import (
+    CONTINUOUS_METADATA_KEY,
+    auto_assigns_acceptance,
+    compose_continuous_acceptance_prompt,
+    is_continuous_metadata,
 )
 from main.runtime.internal_tools import (
     EnterWaitTool,
@@ -146,8 +152,13 @@ _NODE_MESSAGE_INLINE_CHAR_LIMIT = 16_000
 # `accepted`，根验收还会把任务写 `passed` 并终态化）。前缀集中在这里，生产端与
 # 消费端共用，不做散文匹配。
 ACCEPTANCE_FREEZE_PREFIX = '验收冻结：'
-FINAL_ACCEPTANCE_FREEZE_PREFIX = '最终验收冻结：'
-ACCEPTANCE_FREEZE_PREFIXES = (ACCEPTANCE_FREEZE_PREFIX, FINAL_ACCEPTANCE_FREEZE_PREFIX)
+ACCEPTANCE_FREEZE_PREFIXES = (ACCEPTANCE_FREEZE_PREFIX,)
+# pass 因"这一轮没看过的通知"被暂缓：既不是通过也不是拒收，验收节点要再跑一轮。
+ACCEPTANCE_PASS_HOLD_PREFIX = '验收暂缓：'
+# 验收尾块（当前提交指针 + 追加要求 + 未读镜像）真正装配的时刻。P4 用它当锚：
+# 晚于这个时刻投递的通知不可能出现在本轮请求里，与"最后一跳请求起点"相比，
+# 它把"尾块已装配、请求还没发出"这段窗口也算作未见。
+ACCEPTANCE_TAIL_BUILT_AT_KEY = 'acceptance_tail_built_at'
 
 
 def is_acceptance_freeze_result(result: Any) -> bool:
@@ -155,6 +166,13 @@ def is_acceptance_freeze_result(result: Any) -> bool:
     if str(getattr(result, 'delivery_status', '') or '').strip().lower() != 'partial':
         return False
     return str(getattr(result, 'summary', '') or '').strip().startswith(ACCEPTANCE_FREEZE_PREFIXES)
+
+
+def is_acceptance_pass_hold_result(result: Any) -> bool:
+    """这条 partial 表示「pass 还没落账」：裁决期间又到了没被看见的通知。"""
+    if str(getattr(result, 'delivery_status', '') or '').strip().lower() != 'partial':
+        return False
+    return str(getattr(result, 'summary', '') or '').strip().startswith(ACCEPTANCE_PASS_HOLD_PREFIX)
 
 
 def node_message_body(text: str, *, ref: str = '') -> str:
@@ -211,7 +229,13 @@ def _spawn_acceptance_goal(goal: str) -> str:
 
 
 def _spec_requires_acceptance(spec: SpawnChildSpec) -> bool:
-    """`requires_acceptance` 未显式给时按 `acceptance_prompt` 非空推断——载荷与建节点必须同源。"""
+    """连续节点无条件要验收；其余按显式开关，未给时看 `acceptance_prompt` 是否非空。
+
+    载荷与建节点必须同源：连续分支排在最前，显式 `requires_acceptance=false`
+    也覆盖不了它。
+    """
+    if bool(getattr(spec, 'continuous', False)):
+        return True
     if spec.requires_acceptance is True:
         return True
     if spec.requires_acceptance is False:
@@ -552,13 +576,17 @@ class NodeRunner:
         normalized_policy = normalize_execution_policy_metadata(
             normalized_spec.execution_policy.model_dump(mode='json')
         ).model_dump(mode='json')
-        return {
+        payload = {
             'goal': str(normalized_spec.goal or ''),
             'prompt': str(normalized_spec.prompt or ''),
             'execution_policy': normalized_policy,
             'acceptance_prompt': str(normalized_spec.acceptance_prompt or ''),
             'requires_acceptance': bool(self._requires_acceptance(normalized_spec)),
         }
+        # 只在为真时出现：存量轮次的指纹逐字不变，升级后旧 spawn_operations 照旧可复用。
+        if bool(getattr(normalized_spec, 'continuous', False)):
+            payload['continuous'] = True
+        return payload
 
     def _spawn_specs_fingerprint(self, specs: list[SpawnChildSpec] | list[dict[str, Any]] | Any) -> str:
         normalized_specs: list[dict[str, Any]] = []
@@ -945,6 +973,11 @@ class NodeRunner:
         return await self.run_node(task_id, node_id)
 
     async def _resume_react_state(self, *, task, node: NodeRecord) -> dict[str, Any]:
+        if node.node_kind == KIND_ACCEPTANCE:
+            self._sync_acceptance_tail_built_at_from_frame(
+                task_id=task.task_id,
+                node_id=node.node_id,
+            )
         notifications = self._pending_node_notifications(task_id=task.task_id, node_id=node.node_id)
         pending_root_notice_records = self._pending_root_notice_records(node=node)
         wait_note = self._take_wait_note_message(node_id=node.node_id)
@@ -1091,14 +1124,66 @@ class NodeRunner:
         return True
 
     async def _view_message_history(self, *, task, node: NodeRecord) -> dict[str, Any]:
+        """本节点收到的消息台账：信箱行 + 已归档通知 + 未注入 root 通知。
+
+        已消费并退出尾块窗口的通知只在这里可见；模型用 content_search(ref=...)
+        按关键词检索，不依赖它们还留在提示词里。
+        """
+        # 工具闭包捕获的 node 可能是本轮开始时的快照；台账在回合中还会变化，
+        # 读前重取一次，保证 inbox/ledger 两部分是同一时点。
+        latest_node = self._store.get_node(str(getattr(node, 'node_id', '') or '').strip()) or node
+        metadata = (
+            dict(getattr(latest_node, 'metadata', None) or {})
+            if isinstance(getattr(latest_node, 'metadata', None), dict)
+            else {}
+        )
+        status_rank = {
+            'pending_append': 0,
+            'delivered': 1,
+            'held': 1,
+            'consumed': 2,
+            'merged': 3,
+            'superseded': 4,
+        }
+        items_by_key: dict[str, dict[str, Any]] = {}
+        order: list[str] = []
+
+        def _add_item(item: dict[str, Any]) -> None:
+            content = str(item.get('content') or '').strip()
+            key = ' '.join(content.split()) or str(item.get('message_id') or '').strip()
+            if not key:
+                return
+            existing = items_by_key.get(key)
+            if existing is None:
+                items_by_key[key] = item
+                order.append(key)
+                return
+            # 同一条逻辑通知会以不同 id（notif:... 与 root-notice:...）双写落盘，
+            # 按正文去重；状态取更靠后的那一档，补全缺失字段。
+            if status_rank.get(str(item.get('status') or ''), 0) > status_rank.get(
+                str(existing.get('status') or ''), 0
+            ):
+                existing['status'] = str(item.get('status') or '')
+            for field in ('ref', 'kind', 'source_node_id', 'received_at', 'from'):
+                if not str(existing.get(field) or '').strip() and str(item.get(field) or '').strip():
+                    existing[field] = item[field]
+            sources = {
+                part
+                for part in (
+                    str(existing.get('source') or '').split('+')
+                    + str(item.get('source') or '').split('+')
+                )
+                if part
+            }
+            existing['source'] = '+'.join(sorted(sources))
+
         rows = list(
             self._store.list_task_node_notifications(task.task_id, node.node_id) or []
         )
-        items: list[dict[str, Any]] = []
         for row in rows:
             held = notification_is_held(row)
             kind = str(getattr(row, 'kind', '') or '').strip()
-            items.append(
+            _add_item(
                 {
                     'message_id': str(getattr(row, 'notification_id', '') or '').strip(),
                     'received_at': str(getattr(row, 'created_at', '') or '').strip(),
@@ -1108,8 +1193,69 @@ class NodeRunner:
                     'status': 'held' if held else str(getattr(row, 'status', '') or '').strip(),
                     'content': '' if held else str(getattr(row, 'message', '') or '').strip(),
                     'ref': '' if held else str(getattr(row, 'ref', '') or '').strip(),
+                    'source': 'mailbox',
                 }
             )
+
+        ledger = normalize_append_notice_context(
+            metadata.get(APPEND_NOTICE_CONTEXT_KEY)
+        ).get('notice_records') or []
+        for record in list(ledger):
+            message = str(record.get('message') or '').strip()
+            if not message:
+                continue
+            superseded = bool(str(record.get('superseded_at') or '').strip())
+            merged = bool(str(record.get('merged_at') or '').strip())
+            consumed = bool(str(record.get('consumed_at') or '').strip())
+            kind = str(record.get('kind') or '').strip()
+            _add_item(
+                {
+                    'message_id': str(record.get('notification_id') or '').strip(),
+                    'received_at': str(
+                        record.get('received_at')
+                        or record.get('consumed_at')
+                        or record.get('merged_at')
+                        or ''
+                    ).strip(),
+                    'source_node_id': str(record.get('source_node_id') or '').strip(),
+                    'from': message_label(kind, system_relay=is_system_relay_notice(record)),
+                    'kind': kind,
+                    'status': (
+                        'superseded'
+                        if superseded
+                        else ('merged' if merged else ('consumed' if consumed else 'delivered'))
+                    ),
+                    'content': message,
+                    'ref': '',
+                    'source': 'notice_ledger',
+                }
+            )
+
+        for record in normalize_pending_append_notice_records(
+            metadata.get(PENDING_APPEND_NOTICE_RECORDS_KEY)
+        ):
+            message = str(record.get('message') or '').strip()
+            if not message:
+                continue
+            _add_item(
+                {
+                    'message_id': str(record.get('notification_id') or '').strip(),
+                    'received_at': str(record.get('created_at') or '').strip(),
+                    'source_node_id': str(record.get('source_node_id') or '').strip(),
+                    'from': message_label('', system_relay=True),
+                    'kind': '',
+                    'status': 'pending_append',
+                    'content': message,
+                    'ref': '',
+                    'source': 'pending_append',
+                }
+            )
+
+        items = [items_by_key[key] for key in order]
+        latest_at = max(
+            (str(item.get('received_at') or '') for item in items),
+            default='',
+        )
         if not items:
             return {'ok': True, 'count': 0, 'ref': '', 'summary': 'no messages received', 'latest_at': ''}
         artifact_text = json.dumps(
@@ -1130,14 +1276,14 @@ class NodeRunner:
                 'error': 'history_artifact_unavailable',
                 'count': len(items),
                 'summary': '',
-                'latest_at': items[-1]['received_at'],
+                'latest_at': latest_at,
             }
         return {
             'ok': True,
             'count': len(items),
             'ref': str(ref).strip(),
             'summary': str(summary or '')[:500],
-            'latest_at': items[-1]['received_at'],
+            'latest_at': latest_at,
         }
 
     def _notifications_by_ids(self, *, task_id: str, node_id: str, notification_ids: list[str]) -> list[dict[str, Any]]:
@@ -1565,14 +1711,16 @@ class NodeRunner:
         150 次模型调用，7 份判词全是「交付物不存在」，其中 2 份是 `failed + blocked`
         终局形态，会在对方真提交时把它直接打死。
 
-        只按根节点的最终验收另有一条：执行节点还压着未消费通知，需等它消费完并重提交。
+        未消费通知不冻结验收：执行节点在等裁决期间本来就只收不读（见
+        `task_actor_service._wake_policy_allows_dispatch` 的 I1 闸），验收回合把
+        这些消息镜像进尾块，pass 落账前再复核"这一轮没看过的通知"（见
+        `_handle_acceptance_node_result`）。
         """
         if str(getattr(node, 'node_kind', '') or '').strip().lower() != KIND_ACCEPTANCE:
             return ''
         execution = self._accepted_execution_node(task_id=task.task_id, acceptance=node)
         if execution is None:
             return ''
-        execution_node_id = str(getattr(execution, 'node_id', '') or '').strip()
         if self._normalized_status(getattr(execution, 'status', '')) in {STATUS_SUCCESS, STATUS_FAILED}:
             return ''
         handshake = normalize_acceptance_handshake((execution.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY))
@@ -1592,15 +1740,7 @@ class NodeRunner:
                 f'{ACCEPTANCE_FREEZE_PREFIX}待裁定的提交绑定的是另一份验收节点，'
                 '需待对应执行节点重新提交。'
             )
-        if execution_node_id != str(getattr(task, 'root_node_id', '') or '').strip():
-            return ''
-        pending_node_ids = set(self.nodes_with_pending_distribution_notices(task_id=task.task_id))
-        if execution_node_id not in pending_node_ids:
-            return ''
-        return (
-            f'{FINAL_ACCEPTANCE_FREEZE_PREFIX}被检验执行节点仍有未消费通知，'
-            '需待其消费通知并重新提交后再继续核验。'
-        )
+        return ''
 
     def acceptance_dispatch_block_reason(self, *, task, node: NodeRecord) -> str:
         """派发层与回合入口共用的唯一验收激活判据。
@@ -2111,6 +2251,30 @@ class NodeRunner:
         except Exception as exc:  # 审计是旁路：记账失败绝不影响验收控制流
             logger.debug(f'acceptance evidence audit skipped: {acceptance.node_id}: {describe_exception(exc)}')
         if str(result.status or '').strip() == STATUS_SUCCESS:
+            unseen = self._unseen_acceptance_notices(
+                task_id=task.task_id,
+                acceptance=acceptance,
+                execution=execution,
+            )
+            if unseen:
+                self._hold_acceptance_pass_for_unseen_notices(
+                    task=task,
+                    acceptance=acceptance,
+                    execution=execution,
+                    unseen=unseen,
+                )
+                return NodeFinalResult(
+                    status=STATUS_SUCCESS,
+                    delivery_status='partial',
+                    summary=(
+                        f'{ACCEPTANCE_PASS_HOLD_PREFIX}被检验节点还有本次裁决没看过的消息，'
+                        '需再核验一轮。'
+                    ),
+                    answer='',
+                    evidence=[],
+                    remaining_work=[],
+                    blocking_reason='',
+                )
             # pass 不回流被验收节点：它随这次裁定立即终局，投递只会在一个终态
             # 节点上留下永远读不到的未读消息（还会把树上的未读徽标长期挂住）。
             # "这一份提交被通过"的绑定由握手 latest_execution_submission_id 与
@@ -2729,11 +2893,19 @@ class NodeRunner:
 
     def _node_brief(self, task_id: str, node: NodeRecord) -> dict[str, Any]:
         phase = str(self._node_frame_dict(task_id, node.node_id).get('phase') or '')
+        state = self._node_state_label(node, phase)
+        metadata = dict(getattr(node, 'metadata', None) or {})
+        if (
+            state == 'waiting'
+            and is_continuous_metadata(metadata)
+            and bool(metadata.get(NODE_WAIT_EXTERNAL_KEY))
+        ):
+            state = 'standby'
         return {
             'node_id': str(node.node_id or ''),
             'goal': str(node.goal or '')[:200],
             'node_kind': str(node.node_kind or 'execution'),
-            'state': self._node_state_label(node, phase),
+            'state': state,
             'state_detail': phase,
             'settled': str(node.status or '').strip().lower() in {'success', 'failed'},
             'unread_count': self._unread_from_node(task_id, node.node_id),
@@ -3238,6 +3410,8 @@ class NodeRunner:
             'file_targets': self._resolve_file_targets(task),
             'runtime_environment': self._runtime_environment_payload(task=task),
         }
+        if is_continuous_metadata(getattr(node, 'metadata', None)):
+            payload['run_mode'] = 'continuous'
         completion_contract = self._completion_contract_payload(task=task, node=node)
         if completion_contract is not None:
             payload['completion_contract'] = completion_contract
@@ -3249,6 +3423,12 @@ class NodeRunner:
             },
         ]
         if node.node_kind == KIND_ACCEPTANCE:
+            built_at = now_iso()
+            self._stamp_acceptance_tail_built_at(
+                task_id=task.task_id,
+                node_id=node.node_id,
+                built_at=built_at,
+            )
             turn_tail = self._acceptance_turn_tail(task=task, node=node)
             if turn_tail:
                 messages.append({'role': 'user', 'content': turn_tail})
@@ -3260,7 +3440,11 @@ class NodeRunner:
 
     def _build_system_prompt(self, *, node: NodeRecord) -> str:
         system_name = 'acceptance_execution.md' if node.node_kind == KIND_ACCEPTANCE else 'node_execution.md'
-        return load_prompt(system_name).strip()
+        prompt = load_prompt(system_name).strip()
+        if is_continuous_metadata(getattr(node, 'metadata', None)):
+            # 放在稳定 system 提示词尾部：连续契约整个生命周期不变，不随回合漂移。
+            prompt = f'{prompt}\n\n{load_prompt("shared_continuous_idle.md").strip()}'
+        return prompt
 
     def _completion_contract_payload(self, *, task, node: NodeRecord) -> dict[str, Any] | None:
         if node.node_kind != KIND_EXECUTION or node.parent_node_id is not None:
@@ -5681,12 +5865,20 @@ class NodeRunner:
                     )
                 )
                 continue
+            auto_acceptance = bool(entry.get('acceptance_auto_created'))
             receipts.append(
                 SpawnChildResult(
                     goal=goal,
                     state='created',
                     child_node_id=child_node_id,
                     acceptance_node_id=acceptance_node_id,
+                    acceptance_auto_created=auto_acceptance,
+                    acceptance_note=(
+                        f'该子节点是连续节点，运行时已自动为它创建验收节点 {acceptance_node_id}；'
+                        '它提交结果后由验收节点裁定是否结束。'
+                        if auto_acceptance and acceptance_node_id
+                        else ''
+                    ),
                     seed_tools=self._seed_receipt_for_node(child_node_id),
                 )
             )
@@ -6343,6 +6535,9 @@ class NodeRunner:
         if acceptance is None:
             acceptance_goal = _spawn_acceptance_goal(spec.goal)
             acceptance_prompt = str(spec.acceptance_prompt or '')
+            if bool(getattr(spec, 'continuous', False)):
+                # 注入发生在复用指纹与建节点之前：条款是常量，重放得到同一份 bootstrap。
+                acceptance_prompt = compose_continuous_acceptance_prompt(acceptance_prompt)
             claimed_acceptance_ids = self._claimed_spawn_node_ids(
                 entries=entries,
                 field='acceptance_node_id',
@@ -6380,6 +6575,13 @@ class NodeRunner:
                 index=index,
                 acceptance_node_id=acceptance.node_id,
                 check_status='pending',
+                # 标记与绑定同源落账：回执只从 entry 读，重放才与首次逐字一致。
+                acceptance_auto_created=True
+                if auto_assigns_acceptance(
+                    continuous=bool(getattr(spec, 'continuous', False)),
+                    acceptance_prompt=str(spec.acceptance_prompt or ''),
+                )
+                else None,
             )
         self._stamp_spawn_owner_metadata(
             node_id=acceptance.node_id,
@@ -6664,6 +6866,8 @@ class NodeRunner:
             'spawn_owner_round_id': str(owner_round_id or '').strip(),
             'spawn_owner_entry_index': int(owner_entry_index),
             'spawn_owner_kind': 'child',
+            # 创建时写定、之后不可变：可变会让 tools[]、验收要求与恢复指纹同时漂移。
+            **({CONTINUOUS_METADATA_KEY: True} if bool(getattr(spec, 'continuous', False)) else {}),
             **self._seed_contract_metadata(task=task, node_kind=KIND_EXECUTION, declared=spec.seed_tools),
         }
         child = NodeRecord(
@@ -6936,11 +7140,22 @@ class NodeRunner:
         return node_ids
 
     def _acceptance_notice_block(self, *, accepted_node: NodeRecord) -> str:
-        # 汇总被检验执行节点已消费的用户/前门通知 + 尚未消费的 root pending 记录。
-        # 节点之间的消息是执行上下文，不进验收回合；旧记录没有 kind 时保留兼容。
-        # 同一逻辑通知会以不同 id（notif:xxx 与 root-notice:...）双写落盘，故按
-        # message 文本去重；已 superseded 的记录不再作为当前要求。
+        # 汇总被检验执行节点已消费的用户/前门通知 + 尚未消费的 root pending 记录
+        # + 仍在信箱里、没被读到的 delivered 行。节点之间的消息是执行上下文，
+        # 不进验收回合；旧记录没有 kind 时保留兼容。同一逻辑通知会以不同 id
+        # （notif:xxx 与 root-notice:...）双写落盘，故按 message 文本去重；
+        # 已 superseded 的记录不再作为当前要求。
         metadata = dict(accepted_node.metadata or {}) if isinstance(getattr(accepted_node, 'metadata', None), dict) else {}
+        mailbox_rows = self._acceptance_mailbox_notice_rows(accepted_node=accepted_node)
+        # 外部订阅是事件流，不是用户/前门给验收方的新要求：正文不进尾块，
+        # 只在尾块里留一行计数 + event id，清单落盘后按需 content_open。
+        external_event_notification_ids = {
+            notification_id
+            for notification_id in (
+                self._external_event_notification_id(item) for item in mailbox_rows
+            )
+            if notification_id
+        }
         consumed = normalize_append_notice_context(metadata.get(APPEND_NOTICE_CONTEXT_KEY)).get('notice_records') or []
         pending = normalize_pending_append_notice_records(metadata.get(PENDING_APPEND_NOTICE_RECORDS_KEY))
         entries: list[str] = []
@@ -6950,6 +7165,11 @@ class NodeRunner:
                 continue
             if str(item.get('superseded_at') or '').strip():
                 continue
+            if (
+                str(item.get('notification_id') or '').strip()
+                in external_event_notification_ids
+            ):
+                continue
             kind = str(item.get('kind') or '').strip()
             if kind and kind not in ACCEPTANCE_MIRROR_KINDS:
                 continue
@@ -6958,10 +7178,392 @@ class NodeRunner:
                 continue
             seen_texts.add(text)
             entries.append(f'- {text}')
-        if not entries:
+        blocks: list[str] = []
+        if entries:
+            title = '追加任务要求（追加通知，晚于上方验收标准；若两者冲突，以本段要求为准）'
+            blocks.append(f'{title}\n' + '\n'.join(entries))
+        unread_entries: list[str] = []
+        for item in self._delivered_acceptance_notice_rows(
+            accepted_node=accepted_node,
+            rows=mailbox_rows,
+        ):
+            text = str(getattr(item, 'message', '') or '').strip()
+            if not text or text in seen_texts:
+                continue
+            seen_texts.add(text)
+            unread_entries.append(f'- {text}')
+        if unread_entries:
+            # 这些行没有被执行节点读过，也永远不会被它消费（验收通过则节点终局）；
+            # 验收方必须在裁决时看见它们，否则就是一次无声丢弃。
+            blocks.append(
+                '【发给被检验节点、它还没读到的消息（尚未生效，不是给你的指令）】\n'
+                + '\n'.join(unread_entries)
+                + '\n若其中任何一条会改变本次裁决：用 reject 打回，反馈只写'
+                '「按这条消息继续完成后重新提交」，不要复述正文——它已在对方信箱里，打回后由对方消费。'
+            )
+        return '\n\n'.join(blocks)
+
+    def _acceptance_mailbox_notice_rows(self, *, accepted_node: NodeRecord) -> list[Any]:
+        try:
+            return list(
+                self._store.list_task_node_notifications(
+                    str(accepted_node.task_id or '').strip(),
+                    str(accepted_node.node_id or '').strip(),
+                )
+                or []
+            )
+        except Exception:
+            return []
+
+    @staticmethod
+    def _external_event_id_of(item: Any) -> str:
+        """外部订阅事件的投递行：返回 event id，非事件行返回空串。
+
+        身份在投递时写进行 payload（`deliver_node_message(external_event_id=...)`），
+        归档记录不带这个字段，所以消费过的行要按 notification_id 回查同一行。
+        """
+        payload = getattr(item, 'payload', None)
+        if not isinstance(payload, dict):
             return ''
-        title = '追加任务要求（追加通知，晚于上方验收标准；若两者冲突，以本段要求为准）'
-        return f'{title}\n' + '\n'.join(entries)
+        return str(payload.get('external_event_id') or '').strip()
+
+    @classmethod
+    def _external_event_notification_id(cls, item: Any) -> str:
+        if not cls._external_event_id_of(item):
+            return ''
+        return str(getattr(item, 'notification_id', '') or '').strip()
+
+    def _delivered_acceptance_notice_rows(
+        self,
+        *,
+        accepted_node: NodeRecord,
+        rows: list[Any] | None = None,
+    ) -> list[Any]:
+        """被检验节点信箱里仍可注入的用户/前门 delivered 行；外部订阅事件除外。"""
+        mailbox_rows = (
+            list(rows)
+            if rows is not None
+            else self._acceptance_mailbox_notice_rows(accepted_node=accepted_node)
+        )
+        delivered: list[Any] = []
+        for item in mailbox_rows:
+            if str(getattr(item, 'status', '') or '').strip() != 'delivered':
+                continue
+            if notification_is_held(item):
+                continue
+            if self._external_event_id_of(item):
+                continue
+            kind = str(getattr(item, 'kind', '') or '').strip()
+            if kind and kind not in ACCEPTANCE_MIRROR_KINDS:
+                continue
+            delivered.append(item)
+        return delivered
+
+    @staticmethod
+    def _parse_iso_datetime(value: Any) -> datetime | None:
+        text = str(value or '').strip()
+        if not text:
+            return None
+        try:
+            return datetime.fromisoformat(text.replace('Z', '+00:00'))
+        except ValueError:
+            return None
+
+    def _acceptance_execution_window_start(
+        self,
+        *,
+        acceptance: NodeRecord,
+        accepted_node: NodeRecord,
+    ) -> datetime | None:
+        """本次执行尝试的起点：上一轮裁定时刻；首轮退回执行节点创建时刻。"""
+        metadata = (
+            dict(getattr(acceptance, 'metadata', None) or {})
+            if isinstance(getattr(acceptance, 'metadata', None), dict)
+            else {}
+        )
+        history = metadata.get(_REJECTION_HISTORY_KEY)
+        if isinstance(history, list):
+            for entry in reversed(history):
+                if not isinstance(entry, dict):
+                    continue
+                parsed = self._parse_iso_datetime(entry.get('at'))
+                if parsed is not None:
+                    return parsed
+        return self._parse_iso_datetime(getattr(accepted_node, 'created_at', ''))
+
+    def _acceptance_external_event_digest(
+        self,
+        *,
+        task,
+        acceptance: NodeRecord,
+        accepted_node: NodeRecord,
+    ) -> str:
+        """一条有界摘要：本次执行以来到达的外部订阅事件数量与 event id。
+
+        窗口从上一轮裁定（或执行节点创建）算起，覆盖执行方可能据以改动交付的
+        全部事件；正文不搬进验收上下文，完整清单（含每条正文与投递时刻）落成
+        artifact，验收方需要时用 `content_open(ref=...)` 读取。
+        """
+        events: dict[str, Any] = {}
+        for item in self._acceptance_mailbox_notice_rows(accepted_node=accepted_node):
+            event_id = self._external_event_id_of(item)
+            if event_id and event_id not in events:
+                events[event_id] = item
+        if not events:
+            return ''
+        window_start = self._acceptance_execution_window_start(
+            acceptance=acceptance,
+            accepted_node=accepted_node,
+        )
+        selected: list[tuple[str, Any]] = []
+        for event_id, item in events.items():
+            delivered_at = self._parse_iso_datetime(
+                getattr(item, 'delivered_at', '') or getattr(item, 'created_at', '')
+            )
+            if window_start is not None and delivered_at is not None:
+                left = window_start
+                right = delivered_at
+                if (left.tzinfo is None) != (right.tzinfo is None):
+                    left = left.replace(tzinfo=None)
+                    right = right.replace(tzinfo=None)
+                if right < left:
+                    continue
+            selected.append((event_id, item))
+        if not selected:
+            return ''
+        selected.sort(
+            key=lambda pair: str(
+                getattr(pair[1], 'delivered_at', '') or getattr(pair[1], 'created_at', '') or ''
+            )
+        )
+        ref = ''
+        externalize = getattr(
+            self._log_service, 'externalize_acceptance_external_event_list', None
+        )
+        if callable(externalize):
+            try:
+                ref = str(
+                    externalize(
+                        task_id=task.task_id,
+                        node_id=accepted_node.node_id,
+                        text=self._acceptance_external_event_list_text(selected),
+                    )
+                    or ''
+                ).strip()
+            except Exception as exc:
+                logger.debug(
+                    f'acceptance external event list externalize skipped: '
+                    f'{accepted_node.node_id}: {describe_exception(exc)}'
+                )
+        event_ids = [event_id for event_id, _item in selected]
+        shown = '、'.join(event_ids[:8])
+        if len(event_ids) > 8:
+            shown += '…'
+        line = (
+            f'【外部订阅事件】本次执行以来执行节点收到 {len(selected)} 条外部订阅事件'
+            f'（event id：{shown}）；正文不镜像。'
+        )
+        if ref:
+            line += f'需要时用 content_open(ref="{ref}") 读取清单（含每条事件正文与投递时刻）。'
+        return line
+
+    @staticmethod
+    def _acceptance_external_event_list_text(selected: list[tuple[str, Any]]) -> str:
+        limit = 200
+        lines = ['外部订阅事件清单（验收按需读取；正文未进入验收尾块）', '']
+        for index, (event_id, item) in enumerate(selected[:limit], start=1):
+            message = str(getattr(item, 'message', '') or '').strip()
+            item_ref = str(getattr(item, 'ref', '') or '').strip()
+            delivered_at = str(
+                getattr(item, 'delivered_at', '') or getattr(item, 'created_at', '') or ''
+            ).strip()
+            lines.append(f'{index}. event id: {event_id}')
+            lines.append(f'   delivered_at: {delivered_at or "(unknown)"}')
+            if item_ref:
+                lines.append(f'   ref: {item_ref}')
+            if len(message) > 4000:
+                message = message[:4000] + '…（截断；完整正文见该行的 ref 或信箱）'
+            lines.append(message or '(empty)')
+            lines.append('')
+        if len(selected) > limit:
+            lines.append(f'…另有 {len(selected) - limit} 条未列入本清单。')
+        return '\n'.join(lines).strip()
+
+    def _stamp_acceptance_tail_built_at(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        built_at: str,
+    ) -> None:
+        """把尾块装配时刻同时落进节点 metadata 与运行时帧。
+
+        metadata 是 P4 结算时唯一读得到的持久位（成功回合结束会删帧）；
+        帧里的同一份读数用于"续跑旧帧"时把 metadata 同步回真正被使用的那份
+        尾块——中间被放弃的新构建不得把锚往前推。
+        """
+        try:
+            self._log_service.update_node_metadata(
+                node_id,
+                lambda metadata: {**dict(metadata or {}), ACCEPTANCE_TAIL_BUILT_AT_KEY: built_at},
+            )
+        except Exception as exc:  # 帧内容失配时宁可退回旧锚，也不阻断回合
+            logger.debug(f'acceptance tail stamp skipped: {node_id}: {describe_exception(exc)}')
+        try:
+            self._log_service.update_frame(
+                task_id,
+                node_id,
+                lambda frame: {**dict(frame or {}), ACCEPTANCE_TAIL_BUILT_AT_KEY: built_at},
+                publish_snapshot=False,
+            )
+        except Exception as exc:
+            logger.debug(f'acceptance tail frame stamp skipped: {node_id}: {describe_exception(exc)}')
+
+    def _sync_acceptance_tail_built_at_from_frame(self, *, task_id: str, node_id: str) -> None:
+        """续跑已有帧时，把锚对齐到那份帧实际装配尾块的时刻。"""
+        try:
+            frame = self._log_service.read_runtime_frame(task_id, node_id) or {}
+        except Exception:
+            return
+        built_at = str(frame.get(ACCEPTANCE_TAIL_BUILT_AT_KEY) or '').strip()
+        if not built_at:
+            return
+        node = self._store.get_node(node_id)
+        metadata = getattr(node, 'metadata', None) if node is not None else None
+        current = str((dict(metadata or {}) if isinstance(metadata, dict) else {}).get(ACCEPTANCE_TAIL_BUILT_AT_KEY) or '').strip()
+        if current == built_at:
+            return
+        try:
+            self._log_service.update_node_metadata(
+                node_id,
+                lambda metadata: {**dict(metadata or {}), ACCEPTANCE_TAIL_BUILT_AT_KEY: built_at},
+            )
+        except Exception as exc:
+            logger.debug(f'acceptance tail anchor sync skipped: {node_id}: {describe_exception(exc)}')
+
+    def _acceptance_tail_anchor(
+        self,
+        *,
+        task_id: str,
+        acceptance: NodeRecord,
+    ) -> datetime | None:
+        """本轮裁决的未见通知锚：优先尾块装配时刻，旧轮次退回最后一跳请求起点。"""
+        latest = self._store.get_node(acceptance.node_id) or acceptance
+        metadata = getattr(latest, 'metadata', None)
+        metadata = dict(metadata or {}) if isinstance(metadata, dict) else {}
+        built_at = str(metadata.get(ACCEPTANCE_TAIL_BUILT_AT_KEY) or '').strip()
+        if built_at:
+            try:
+                return datetime.fromisoformat(built_at.replace('Z', '+00:00'))
+            except ValueError:
+                pass
+        return self._acceptance_pass_request_started_at(task_id=task_id, acceptance=acceptance)
+
+    def _acceptance_pass_request_started_at(
+        self,
+        *,
+        task_id: str,
+        acceptance: NodeRecord,
+    ) -> datetime | None:
+        """裁决最后一跳的请求起点：该节点 seq 最大一行的 `created_at - duration_ms`。"""
+        timing_getter = getattr(self._store, 'latest_model_call_timing', None)
+        if not callable(timing_getter):
+            return None
+        try:
+            timing = timing_getter(task_id, acceptance.node_id)
+        except Exception:
+            return None
+        if not isinstance(timing, dict):
+            return None
+        created_at = str(timing.get('created_at') or '').strip()
+        if not created_at:
+            return None
+        try:
+            ended_at = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+        except ValueError:
+            return None
+        return ended_at - timedelta(milliseconds=max(0, int(timing.get('duration_ms') or 0)))
+
+    def _unseen_acceptance_notices(
+        self,
+        *,
+        task_id: str,
+        acceptance: NodeRecord,
+        execution: NodeRecord | None,
+    ) -> list[Any]:
+        """本轮尾块装配之后才投递、仍未被读到的用户/前门通知。
+
+        这些行不可能出现在本轮请求里（尾块在请求发出前就装配完成），所以 pass
+        必须先扣住：下一轮尾块会带上它们，且下一轮尾块装配晚于它们的投递时刻。
+        锚优先取尾块装配时刻；旧轮次没有该读数时才退回最后一跳请求起点。
+        """
+        if execution is None:
+            return []
+        anchor = self._acceptance_tail_anchor(task_id=task_id, acceptance=acceptance)
+        if anchor is None:
+            return []
+        unseen: list[Any] = []
+        for item in self._delivered_acceptance_notice_rows(accepted_node=execution):
+            delivered_at = str(
+                getattr(item, 'delivered_at', '') or getattr(item, 'created_at', '') or ''
+            ).strip()
+            if not delivered_at:
+                continue
+            try:
+                delivered = datetime.fromisoformat(delivered_at.replace('Z', '+00:00'))
+            except ValueError:
+                continue
+            boundary = anchor
+            if (delivered.tzinfo is None) != (boundary.tzinfo is None):
+                # 旧数据可能缺时区：去掉两侧的 tzinfo 再比，至少不比字符串可靠。
+                delivered = delivered.replace(tzinfo=None)
+                boundary = boundary.replace(tzinfo=None)
+            if delivered >= boundary:
+                unseen.append(item)
+        return unseen
+
+    def _hold_acceptance_pass_for_unseen_notices(
+        self,
+        *,
+        task,
+        acceptance: NodeRecord,
+        execution: NodeRecord | None,
+        unseen: list[Any],
+    ) -> None:
+        """pass 不落账：验收节点回到 in_progress，由派发扫描再跑一轮。
+
+        不写 `accepted`、不计拒收次数；本轮提交载荷随之作废（它不是一次裁定），
+        否则裁决收口扫描会把同一份 pass 反复当成本轮结论处理。
+        """
+        logger.info(
+            'acceptance pass held for unseen notices: task={} acceptance={} inspected={} unseen={}',
+            task.task_id,
+            acceptance.node_id,
+            str(getattr(execution, 'node_id', '') or '').strip() if execution is not None else '',
+            len(unseen),
+        )
+
+        def _mutate(record: NodeRecord) -> NodeRecord:
+            metadata = dict(record.metadata or {}) if isinstance(record.metadata, dict) else {}
+            for key in ('result_payload', 'result_payload_ref', 'result_payload_summary'):
+                metadata.pop(key, None)
+            return record.model_copy(
+                update={
+                    'status': 'in_progress',
+                    'final_output': '',
+                    'final_output_ref': '',
+                    'failure_reason': '',
+                    'finished_at': '',
+                    'updated_at': now_iso(),
+                    'metadata': metadata,
+                }
+            )
+
+        reopened = self._store.update_node(acceptance.node_id, _mutate)
+        if reopened is not None:
+            self._log_service.publish_node_state(task.task_id, acceptance.node_id)
+        self._request_acceptance_dispatch(task.task_id)
+        self._log_service.refresh_task_view(task.task_id, mark_unread=True)
 
     def _compose_acceptance_prompt(
         self,
@@ -7018,6 +7620,13 @@ class NodeRunner:
         notice_block = self._acceptance_notice_block(accepted_node=accepted_node)
         if notice_block:
             lines.append(notice_block)
+        event_digest = self._acceptance_external_event_digest(
+            task=task,
+            acceptance=node,
+            accepted_node=accepted_node,
+        )
+        if event_digest:
+            lines.append(event_digest)
         if not lines:
             return ''
         return '【本轮验收上下文（运行时注入，不是新的用户指令）】\n' + '\n'.join(lines)

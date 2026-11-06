@@ -132,7 +132,12 @@ from main.runtime.acceptance_handshake import (
 )
 from main.runtime.adaptive_tool_budget import AdaptiveToolBudgetController
 from main.runtime.chat_backend import ChatBackend
+from main.runtime.continuous_node import (
+    CONTINUOUS_METADATA_KEY,
+    compose_continuous_acceptance_prompt,
+)
 from main.runtime.debug_recorder import RuntimeDebugRecorder
+from main.runtime.designed_idle import task_is_designed_idle
 from main.runtime.execution_trace_compaction import compact_tool_step_for_summary
 from main.runtime.global_scheduler import GlobalScheduler
 from main.runtime.internal_tools import build_detail_level_schema
@@ -213,6 +218,7 @@ from main.service.task_event_callback import (
 from main.service.task_stall_callback import (
     TASK_STALL_CALLBACK_PATH,
     TASK_STALL_REASON_CANCEL_REQUESTED,
+    TASK_STALL_REASON_DESIGNED_IDLE,
     TASK_STALL_REASON_MISSING_TASK,
     TASK_STALL_REASON_NOT_IN_PROGRESS,
     TASK_STALL_REASON_SUSPECTED_STALL,
@@ -306,6 +312,7 @@ _WORKER_NODE_MESSAGE_FIELDS = (
     'batch_id',
     'allow_pause_clear',
     'expects_reply',
+    'external_event_id',
 )
 _WORKER_LEASE_ROLE = 'task_worker'
 _WORKER_LEASE_TTL_SECONDS = 20.0
@@ -1933,6 +1940,7 @@ class MainRuntimeService:
         max_depth: int | None,
         title: str | None,
         metadata: dict[str, Any] | None,
+        continuous: bool = False,
     ) -> tuple[TaskRecord, NodeRecord]:
         prompt = str(task or '').strip()
         if not prompt:
@@ -1946,6 +1954,18 @@ class MainRuntimeService:
             metadata=metadata,
             task_prompt=prompt,
         )
+        if continuous:
+            # 连续根节点必过最终验收：验收节点是它唯一的成功出口，条款在创建时定稿。
+            final_acceptance = normalize_final_acceptance_metadata(
+                task_metadata.get('final_acceptance')
+            )
+            task_metadata['final_acceptance'] = {
+                **final_acceptance.model_dump(mode='json'),
+                'required': True,
+                'prompt': compose_continuous_acceptance_prompt(final_acceptance.prompt),
+                'node_id': '',
+                'status': 'pending',
+            }
         record = TaskRecord(
             task_id=task_id,
             session_id=str(session_id or 'web:shared').strip() or 'web:shared',
@@ -1989,6 +2009,7 @@ class MainRuntimeService:
             token_usage_by_model=[],
             metadata={
                 'execution_policy': dict(task_metadata.get('execution_policy') or {}),
+                **({CONTINUOUS_METADATA_KEY: True} if continuous else {}),
             },
         )
         return record, root
@@ -2001,6 +2022,7 @@ class MainRuntimeService:
         max_depth: int | None = None,
         title: str | None = None,
         metadata: dict[str, Any] | None = None,
+        continuous: bool = False,
     ) -> TaskRecord:
         await self.startup()
         if self.execution_mode == 'web':
@@ -2011,6 +2033,7 @@ class MainRuntimeService:
             max_depth=max_depth,
             title=title,
             metadata=metadata,
+            continuous=continuous,
         )
         record, root = self.log_service.initialize_task(record, root)
         final_acceptance = normalize_final_acceptance_metadata((record.metadata or {}).get('final_acceptance'))
@@ -5238,6 +5261,7 @@ class MainRuntimeService:
         batch_id: str = '',
         allow_pause_clear: bool = False,
         expects_reply: bool = False,
+        external_event_id: str = '',
     ) -> dict[str, Any]:
         """一条定向投递：判定矩阵 → 机械推导 → 指纹去重 → 落箱 → 唤醒。
 
@@ -5302,11 +5326,57 @@ class MainRuntimeService:
         fingerprint = message_fingerprint(
             kind=kind, source_node_id=source_node_id, message=body, ref=ref
         )
+        normalized_external_event_id = str(external_event_id or '').strip()
+        notifications = list(
+            self.store.list_task_node_notifications(normalized_task_id, normalized_node_id) or []
+        )
+
+        # 外部事件身份跨全状态去重：普通消息的指纹只对未消费行生效，而外部事件
+        # 在「信箱已消费、web 尚未记账」的窗口中不能因为状态前进而在重放时再投一份。
+        if normalized_external_event_id:
+            for item in notifications:
+                item_payload = dict(getattr(item, 'payload', None) or {})
+                if str(item_payload.get('external_event_id') or '').strip() != normalized_external_event_id:
+                    continue
+                wake_outcome = ''
+                if (
+                    wake
+                    and not notification_is_held(item)
+                    and not suppress_wake
+                    and self._delivery_wakes_target(
+                        task_id=normalized_task_id,
+                        node_id=normalized_node_id,
+                        node=node,
+                        priority=priority,
+                        park_state=park_state,
+                        sender_origin=origin,
+                        allow_pause_clear=allow_pause_clear,
+                    )
+                ):
+                    try:
+                        wake_outcome = await self.wake_node_on_message(
+                            task_id=normalized_task_id,
+                            node_id=normalized_node_id,
+                            allow_pause_clear=allow_pause_clear,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - row is durable; wake retry is separate
+                        wake_outcome = f'wake_error:{type(exc).__name__}'
+                return {
+                    'target': normalized_node_id,
+                    'status': 'deduplicated',
+                    'message_id': str(item.notification_id or ''),
+                    'kind': kind,
+                    'priority': priority,
+                    'wake': wake_outcome,
+                    'reason': '',
+                    'external_event_id': normalized_external_event_id,
+                    **under_acceptance_fields,
+                }
 
         # 去重只对「还没被处理」的同一指纹生效：消费过的重复是一次新的意图。
         # 去重收敛的是消息本身，不是唤醒意图——重发一条仍在箱里的消息（例如重试
         # 一次 resume）如果只回 deduplicated 而不尝试唤醒，失败的唤醒就永远补不上。
-        for item in list(self.store.list_task_node_notifications(normalized_task_id, normalized_node_id) or []):
+        for item in notifications:
             if (
                 str(item.status or '').strip() == 'delivered'
                 and str(item.fingerprint or '').strip() == fingerprint
@@ -5366,7 +5436,14 @@ class MainRuntimeService:
                 batch_id=str(batch_id or '').strip(),
                 held_at=now_iso() if held else '',
                 released_at='',
-                payload={'expects_reply': True} if expects_reply else {},
+                payload={
+                    **({'expects_reply': True} if expects_reply else {}),
+                    **(
+                        {'external_event_id': normalized_external_event_id}
+                        if normalized_external_event_id
+                        else {}
+                    ),
+                },
             )
         )
         self.log_service.refresh_task_view(normalized_task_id, mark_unread=True)
@@ -6731,6 +6808,8 @@ class MainRuntimeService:
         if self.execution_mode == 'web':
             if not self.is_worker_online():
                 return TASK_STALL_REASON_WORKER_UNAVAILABLE
+        if self._task_is_designed_idle(task.task_id, runtime_state=current_runtime_state):
+            return TASK_STALL_REASON_DESIGNED_IDLE
         return TASK_STALL_REASON_SUSPECTED_STALL
 
     def is_task_stall_actionable(
@@ -6743,6 +6822,30 @@ class MainRuntimeService:
             task_id,
             runtime_state=runtime_state,
         ) == TASK_STALL_REASON_SUSPECTED_STALL
+
+    def is_task_stall_designed_idle(
+        self,
+        task_id: str,
+        *,
+        runtime_state: dict[str, Any] | None = None,
+    ) -> bool:
+        return self.classify_task_stall_reason(
+            task_id,
+            runtime_state=runtime_state,
+        ) == TASK_STALL_REASON_DESIGNED_IDLE
+
+    def _task_is_designed_idle(
+        self,
+        task_id: str,
+        *,
+        runtime_state: dict[str, Any] | None = None,
+    ) -> bool:
+        return task_is_designed_idle(
+            store=self.store,
+            log_service=self.log_service,
+            task_id=task_id,
+            runtime_state=runtime_state,
+        )
 
     def _build_task_stall_detail(
         self,

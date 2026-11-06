@@ -1,0 +1,82 @@
+schema_version: 1
+kind: tool
+name: event_subscription
+description: "Create or manage authenticated external-event subscriptions that wake the current session or task node."
+tool_result_delivery_contract: runtime_managed
+source:
+  type: ''
+  url: ''
+  ref: ''
+current_version:
+  summary: Resource-local subscription control plane. Trigger detection and connector lifecycle stay outside Negi.
+  compare_rule: Treat manifest, handler, permission and returned payload changes as version-relevant.
+  source_of_truth: resource.yaml, main/, and toolskills together define the effective behavior.
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem:
+    - data
+parameters:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - create
+        - list
+        - events
+        - set_enabled
+        - rotate_credential
+        - remove
+      description: Action to execute.
+    name:
+      type: string
+      description: Short subscription name for later identification.
+    instruction:
+      type: string
+      description: Instruction for the agent's future self when this subscription wakes the target.
+    condition_note:
+      type: string
+      description: Optional human-readable description of the external trigger condition.
+    target_kind:
+      type: string
+      enum:
+        - session
+        - node
+      description: Wake the current session or one execution node in the current scope.
+    task_id:
+      type: string
+      description: Task id for a node target; may be inferred from node_id.
+    node_id:
+      type: string
+      description: Execution node id for a node target.
+    credential_file:
+      type: string
+      description: Absolute path inside the current session workspace or task temp directory for credential JSON.
+    subscription_id:
+      type: string
+      description: Subscription id for events, set_enabled, rotate_credential or remove.
+    enabled:
+      type: boolean
+      description: Desired enabled state for set_enabled.
+    limit:
+      type: integer
+      description: Maximum recent events to return for events; default 20, max 50.
+  required:
+    - action
+governance:
+  display_name: External Event Subscription
+  description: Create and manage authenticated external triggers that wake the current session or task node.
+  risk_level: medium
+  destructive: false
+  allowed_roles:
+    - ceo
+    - execution
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true

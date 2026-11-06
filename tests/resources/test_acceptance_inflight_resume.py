@@ -229,15 +229,14 @@ async def test_waiting_acceptance_handshake_makes_acceptance_node_resumable(tmp_
 
 
 @pytest.mark.asyncio
-async def test_frozen_acceptance_is_not_resumable(tmp_path: Path) -> None:
+async def test_pending_notices_do_not_block_a_waiting_acceptance_round(tmp_path: Path) -> None:
+    """未读通知不冻结验收：执行节点只收不读，验收回合会把消息镜像进尾块。"""
     service = _build_service(tmp_path)
     try:
-        task_id, root_id, _acceptance_id = await _waiting_acceptance_task(service, prompt="frozen acceptance")
-        # 被检验的执行节点仍有未消费通知：此时派发验收会立刻产出 partial，
-        # 被当成一次凭空打回。
+        task_id, root_id, acceptance_id = await _waiting_acceptance_task(service, prompt="acceptance with notices")
         _give_node_pending_notice(service, node_id=root_id, notification_id="notif:root-pending")
 
-        assert service.node_runner.resumable_final_acceptance_node_id(task_id) == ""
+        assert service.node_runner.resumable_final_acceptance_node_id(task_id) == acceptance_id
     finally:
         await service.close()
 
@@ -355,8 +354,8 @@ async def test_run_task_redispatches_inflight_acceptance_round_without_notice(
         assert acceptance.status == "success"
         assert root.status == "success"
         assert _handshake(service, root_id).get("state") == "accepted"
-        warnings = [str(call) for call in fake_logger.warning.call_args_list]
-        assert any("final acceptance round re-dispatched" in text for text in warnings)
+        dispatches = [str(call) for call in fake_logger.info.call_args_list]
+        assert any("handshake-driven acceptance dispatch" in text for text in dispatches)
     finally:
         await service.close()
 

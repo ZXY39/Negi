@@ -159,6 +159,31 @@ async def test_cancellation_without_any_visible_text_leaves_the_row_recoverable(
 
 
 @pytest.mark.asyncio
+async def test_rehydrate_skips_the_batch_the_current_turn_is_answering(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """本轮正在回答的那条 pending 行不能被接回队列。
+
+    工具边界跳界后，补充消息在"下一轮开始前"被 drain，而它在转录里要等这一轮答完才升
+    completed。这期间按 pending 接回会让本轮再判一次跳界：最后一批工具刚跑完就被静默
+    收尾，同一句话被下一轮重问一遍（实盘 web:ceo-c97688cd50c1）。
+    """
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
+    loop = _build_loop(tmp_path, _AnswerRunner("ok"), {"task": None})
+    session = RuntimeAgentSession(
+        loop, session_key="web:ceo-rehydrate-active", channel="web", chat_id="rehydrate-active"
+    )
+
+    active_input = UserInputMessage(content="补充：接着做完")
+    session._configure_user_batch([active_input])
+    await session._persist_pending_user_messages(user_inputs=[active_input])
+
+    assert session._rehydrate_queued_follow_ups() == 0
+    assert list(session._state.queued_follow_up_messages or []) == []
+
+
+@pytest.mark.asyncio
 async def test_later_internal_turn_does_not_retire_an_orphan_pending_user_row(
     tmp_path: Path,
     monkeypatch,

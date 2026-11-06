@@ -1082,10 +1082,17 @@ async def replay_queued_follow_ups(
                     session_key,
                 )
                 continue
-            dispatch = getattr(session, "dispatch_queued_follow_ups_if_idle", None)
-            if not callable(dispatch):
-                continue
-            result = dict(await dispatch(source="boot_replay") or {})
+            # 接棒任务归会话持有：这里仍逐个 await（启动期不把全部会话的回合一起
+            # 放出来），但同一会话若已有别的触发点排了任务，就等那一份而不是再起一轮。
+            request_dispatch = getattr(session, "request_queued_follow_up_dispatch", None)
+            if callable(request_dispatch):
+                handoff = request_dispatch(source="boot_replay")
+                result = dict(await handoff or {}) if handoff is not None else {}
+            else:
+                dispatch = getattr(session, "dispatch_queued_follow_ups_if_idle", None)
+                if not callable(dispatch):
+                    continue
+                result = dict(await dispatch(source="boot_replay") or {})
         except Exception:
             logger.debug("queued follow-up boot replay skipped for {}", session_key)
             continue
@@ -1297,6 +1304,27 @@ async def ensure_web_runtime_services(agent: AgentLoop | None = None) -> None:
             except Exception:
                 logger.exception("interrupted turn recovery skipped during startup")
             _ensure_queued_follow_up_replay_running(runtime_agent)
+            try:
+                from g3ku.runtime.external_event_service import (
+                    ExternalEventService,
+                    get_external_event_service,
+                    set_external_event_service,
+                )
+
+                previous_event_service = get_external_event_service()
+                if previous_event_service is not None:
+                    await previous_event_service.stop()
+                event_store = getattr(main_task_service, "store", None) if main_task_service is not None else None
+                if event_store is not None:
+                    event_service = ExternalEventService(
+                        store=event_store,
+                        task_service=main_task_service,
+                        heartbeat_getter=lambda: _global_web_heartbeat,
+                    )
+                    set_external_event_service(event_service)
+                    await event_service.start()
+            except Exception:
+                logger.exception("external event service startup skipped")
             await _sync_qq_official_service()
             _global_runtime_services_boot_completed = True
         finally:
@@ -1309,9 +1337,16 @@ async def shutdown_web_runtime() -> None:
     global _global_outbox_reconcile_task, _global_queued_follow_up_replay_task
     global _global_runtime_services_boot_completed, _global_runtime_services_boot_in_flight
 
+    from g3ku.runtime.external_event_service import (
+        get_external_event_service,
+        set_external_event_service,
+    )
+
     agent = _global_agent
     runtime_manager = _global_runtime_manager
     heartbeat = _global_web_heartbeat
+    event_service = get_external_event_service()
+    set_external_event_service(None)
     cron_service = getattr(agent, "cron_service", None) if agent is not None else None
     outbound_drain_task = _global_outbound_drain_task
     task_worker_watchdog_task = _global_task_worker_watchdog_task
@@ -1333,7 +1368,18 @@ async def shutdown_web_runtime() -> None:
     _global_qq_official_services = {}
 
     if agent is None:
+        if event_service is not None:
+            try:
+                await event_service.stop()
+            except Exception:
+                logger.debug("external event service stop skipped during shutdown")
         return
+
+    if event_service is not None:
+        try:
+            await event_service.stop()
+        except Exception:
+            logger.debug("external event service stop skipped during shutdown")
 
     # Freeze all running work first (durably, with a startup-resume ledger row)
     # so no matter how this process exit was triggered, tasks and sessions

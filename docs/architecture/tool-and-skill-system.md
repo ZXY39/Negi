@@ -97,7 +97,7 @@ Negi 的工具/技能体系分成几层，而不是一次性把所有东西注�
 - `exec`
 - `load_skill_context`
 - `load_tool_context`
-- 节点树与信箱工具：`list_child_nodes`、`read_child_progress`、`view_node_tree`（`scope=subtree|family`，带 `messageable`/`controllable`/`acceptance`）、`view_message_history`、`enter_wait`（仅 `note`）、`send_message`（`to/content/ref`）、`manage_child_nodes`（仅执行节点；验收节点只保留 `submit_final_result` + RBAC `inspection` 类工具）。
+- 节点树与信箱工具：`list_child_nodes`、`read_child_progress`、`view_node_tree`（`scope=subtree|family`，带 `messageable`/`controllable`/`acceptance`）、`view_message_history`（信箱行 + `append_notice_context` 台账 + pending root 通知；含已从提示词退场的已消费记录）、`enter_wait`（仅 `note`）、`send_message`（`to/content/ref`）、`manage_child_nodes`（仅执行节点；验收节点只保留 `submit_final_result` + RBAC `inspection` 类工具）。
 - 时钟、自设闹钟与群聊主动 @：`time`、`schedule_wake`、`mention_member`。三颗都没有 `tools/<name>/resource.yaml`，因此**不在**上面那份常量里（`NODE_FIXED_BUILTIN_TOOL_NAMES` / `CEO_FIXED_BUILTIN_TOOL_NAMES` 同时是 RBAC 与可见性口径，把合成工具写进去等于给它编一条治理记录），而是由 `main/runtime/tool_names.py::SYNTHETIC_RESIDENT_TOOL_NAMES` 与 `silent` 一起恒定注入。注入点少一处的症状见「3.1.1 为什么"常驻"需要独立机制」。
 - `mention_member(target, message)` 只在 `ext:` 群聊/频道会话有实际效果：`target` 是 `Master` 或来源标注里的会话内编号（如 `0002`），解析不到或传原始 openid 一律拒绝；同一会话 60 秒最多 1 发、1 小时最多 10 发。它通过 `publish_channel_notice` 走持久 outbox，`metadata["mentions"]` 由 QQ 桥渲染成群 markdown `<qqbot-at-user id="member_openid" />`。主动消息权限不足时由桥判 `undeliverable`，工具只返回“已提交”。
 
@@ -236,6 +236,17 @@ exec 与 memory 工具：
 - **投递目标的取源 = 这次调用所属会话**：`add` 在真正执行 `add_job()` 时才从按调用注入的 runtime context 读 `channel` / `chat_id`，与同一份 context 里的 `session_key` 同源、同一次装配取出。工具实例是进程内共享缓存对象，会话字段一旦写进实例就会让并发会话互相覆盖——另一条会话的请求装配会把本次 `add` 的目标改成它自己的路由，任务从此把每轮正文投到别人那里（渠道会话的装配点在同一个事件循环里交替，最容易撞上）。context 里没有 `channel`/`chat_id` 时这条守卫直接拒绝：`Error: no session context (channel/chat_id)`；节点道（`main/runtime/node_runner.py::_runtime_context`）不带这两个键，所以节点里建不了提醒。排查“提醒发到了别的会话”：比对 cron store 里该任务的 `payload.to` 与 `payload.session_key` 在注册表里的 `external_key`，不一致即目标来自本次调用之外。`payload.to` 落进出站车道后的寻址（裸 external_key 可能命中多条注册表条目）归 `external-agent-api.md`「出站路由（主动推送）」。
 - 排查“为什么没有自动停止”先看 cron store 的 `payload.max_runs` / `state.delivered_runs`（到达上限由 scheduler 删除，提醒回合内手工 `remove` 只是辅助出口）；排查“cron 到点了但没创建/查询任务、只重复谈 cron 自己”，先检查 frontdoor tool exposure 是否被错误缩成 `cron`，而不是先怀疑 scheduler 没触发。
 - 前门的 `schedule_wake` 是 cron 的另一个生产者，走同一条一次性 `at` 车道（`max_runs=1` + `delete_after_run`），所以它的耐久存储、到点自愈重臂、at-most-once 投递与重启后的过期抑制都不是新机制；投递正文与到点判读归 `heartbeat-system.md`「Cron Reminder Contract」。它与操作员自己建的提醒之间有一条必须成立的边界：**替换只替换自己那一族**——`name` 以 `self-wake: ` 开头 **且** `schedule.kind == 'at'`，两侧都带会话键且不同才保留（CLI 共享会话没有更可分的键，那一族整批让位）。不这样做的话，一个每 40 分钟推进一次的报时回合会攒出一串闹钟，而"重设一次自己的闹钟"也会撞上同会话同毫秒的重复注册闸门。调度器不在（CLI 起的会话、cron 被关闭）时工具返回 `wake_scheduler_unavailable`，而不是 `armed: true` 却永远不会响。
+
+### External event subscription tool
+
+`event_subscription` 是 CEO 与执行节点共用的普通候选工具，用来管理 agent 自己创建的外部唤醒订阅；它不是常驻工具，也不出现在验收角色或受限档默认工具集里。API、凭证、事件状态与目标约束归 `external-agent-api.md`「Agent 外部事件订阅（external event subscription）」。
+
+- 动作：`create` / `list` / `events` / `set_enabled` / `rotate_credential` / `remove`。
+- 目标从调用时的 runtime context 派生：CEO 默认当前会话，可点名当前会话任务内的执行节点；执行节点默认当前任务节点，也可绑定任务来源会话。工具调用方不能传任意 session_key 跳到别的会话。
+- `create` 接收 `name` / `instruction` / `condition_note` / `target_kind` / `task_id` / `node_id` / `credential_file`。`credential_file` 必须是当前会话工作区或任务临时目录内的绝对路径；工具生成独立 token、原子写凭证文件，返回体只含路径和掩码，不含明文或哈希。
+- `instruction` 是留给未来 agent 的可信处理指令；外部事件正文是不可信数据。目标与 instruction 创建后不可编辑，变化时新建订阅。
+- `events` 只回最近事件的 id、类型、状态、时间和投递阶段，供模型确认 `injected` / `delivered` / `undeliverable`，不把事件正文重新灌回上下文。
+- 配套预置 skill `external-event-subscription` 教模型选择会话/节点目标、写外部轮询程序、生成稳定幂等键、做合成事件验收以及停用/轮换。参考连接器模板在该 skill 的 `assets/polling_connector.py`；平台逻辑与进程生命周期仍由当前任务承担。
 
 ### `manage_task_nodes` 节点控制工具
 

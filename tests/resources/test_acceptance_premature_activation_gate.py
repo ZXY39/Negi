@@ -156,16 +156,19 @@ def test_terminal_accepted_node_is_never_frozen() -> None:
     assert _freeze(_runner(_execution(status='success'))) == ''
 
 
-def test_root_lane_still_freezes_on_unconsumed_notices() -> None:
-    """根最终验收的旧判据保留：已提交但仍压着通知时不能抢验。"""
+def test_unconsumed_notices_do_not_freeze_the_final_acceptance() -> None:
+    """未读通知不冻结验收：验收只在回合尾块里看见它们，并由 pass 落账复核兜底。
+
+    执行节点在等裁决期间被唤醒，由派发闸（`_wake_policy_allows_dispatch`）拦，
+    不再靠冻结验收来互锁。
+    """
     root = _execution(metadata=_handshake()).model_copy(update={'node_id': ROOT_ID, 'parent_node_id': ''})
     runner = _runner(root, pending_notice_ids=(ROOT_ID,))
-    reason = runner._final_acceptance_freeze_reason(task=_task(), node=_acceptance(ROOT_ID))
-    assert '未消费通知' in reason
+    assert runner._final_acceptance_freeze_reason(task=_task(), node=_acceptance(ROOT_ID)) == ''
 
 
-def test_notice_rule_stays_scoped_to_the_root_final_acceptance() -> None:
-    """未消费通知那条判据不外扩到 spawn 验收：打回反馈本身就是发给执行节点的通知。"""
+def test_notice_rule_never_applied_to_spawn_acceptance() -> None:
+    """打回反馈本身就是发给执行节点的通知；spawn 验收一直不按通知冻结。"""
     runner = _runner(_execution(metadata=_handshake()), pending_notice_ids=(EXEC_ID,))
     assert _freeze(runner) == ''
 
@@ -242,12 +245,10 @@ def test_real_pass_is_still_consumed_as_a_pass() -> None:
 
 def test_every_gate_reason_is_recognised_as_a_freeze_by_the_consumer() -> None:
     """前缀是生产端与消费端唯一的耦合点：文案漂了就等于守卫失效。"""
-    root = _execution(metadata=_handshake()).model_copy(update={'node_id': ROOT_ID, 'parent_node_id': ''})
     reasons = [
         _freeze(_runner(_execution())),
         _freeze(_runner(_execution(metadata=_handshake(latest_execution_result_ref='')))),
         _freeze(_runner(_execution(metadata=_handshake(state='waiting_execution_retry')))),
-        _runner(root, pending_notice_ids=(ROOT_ID,))._final_acceptance_freeze_reason(task=_task(), node=_acceptance(ROOT_ID)),
     ]
     assert all(reasons), reasons
     for reason in reasons:

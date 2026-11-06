@@ -34,7 +34,7 @@ This document describes the maintenance boundary around the Web CEO heartbeat pa
 - Those internal prompt messages must be persisted with `prompt_visible=true`, `ui_visible=false`, and an `internal_prompt_kind` that distinguishes heartbeat vs cron rule/event records.
 - Because the request is append-only against the previous authoritative scaffold, heartbeat/cron share the same prompt-cache family, token-preflight, token-compression, and continuity rules as ordinary CEO/frontdoor turns.
 - A turn that stays silent does so by calling the `silent` tool; there is no silent-reply sentinel string. The tool signal is what suppresses channel delivery, and the turn still leaves a durable, prompt-visible assistant row carrying its text — the session model is the only party that can judge whether a delivered result is still worth sending, so it must be able to see its own previous decision. Contract owner: `runtime-overview.md`「3.3 静默回复（`silent` 工具）」.
-- 唤醒正常返回就是这条会话回到空闲的时刻：`SessionHeartbeatService._run_session` 在唤醒之后补一刀 `dispatch_queued_follow_ups_if_idle(source="heartbeat_wake")`，cron 分发在投递收尾处走同一条（`source="cron_wake"`）。缺这条缝时，唤醒期间进来的渠道消息只会被入站闸门判成排队，而唯一能替它起回合的链尾 drain 由"用户下一条消息"触发——静默轮不给渠道发任何东西，那条消息往往不会来。落点清单与撤回语义的契约归属：`web-and-admin.md`「Queued Follow-Ups」。唤醒被取消（关机/重启窗口）时不补发，免得在收尾窗口里起重合。
+- 唤醒正常返回就是这条会话回到空闲的时刻：`SessionHeartbeatService._run_session` 在唤醒之后**请求**会话持有的接棒任务（`request_queued_follow_up_dispatch(source="heartbeat_wake")`），cron 分发在投递收尾处走同一条请求（`source="cron_wake"`）。请求不内联等待用户补发回合跑完：唤醒/cron 自己的记账与删除在提醒回合结束时就结算，用户回复慢不该拖住它们。同一会话只有一个接棒任务，重复触发合并成一次检查；任务登记在 `_active_tasks` 的会话键上，pause/cancel/shutdown 的 `cancel_session_tasks` 能停掉它。缺这条缝时，唤醒期间进来的渠道消息只会被入站闸门判成排队，而唯一能替它起回合的链尾 drain 由"用户下一条消息"触发——静默轮不给渠道发任何东西，那条消息往往不会来。落点清单、失败/取消结算与撤回语义的契约归属：`web-and-admin.md`「Queued Follow-Ups」。唤醒被取消（关机/重启窗口）时不请求接棒。
 
 ## Persistence And UI Boundary
 
@@ -110,6 +110,13 @@ Cron job delivery is claim-before-dispatch with a self-finalizing dispatch — t
   transcript. This prevents a failure notification from generating another failing
   proactive reply.
 
+## Attachment Failure Wake
+
+- An outbox ack whose body carries `attachment_failures` records a reply whose text reached the channel but whose files did not. The ack route normalizes the records (list capped at 10, `platform_message` at 200 chars) and enqueues one `attachment_failure` heartbeat event, deduped by `attachment:<outbox_id>` in the same LRU as `delivery_failure` (distinct prefix, so the two branches never consume each other's id).
+- The reason is deliberately separate from `delivery_failure`: that lane suppresses the turn's channel reply (`delivery_failure_only`), which is right for a rejected proactive message and wrong here — the reply body already landed, and the model must be able to resend the file or tell the user. Only a bundle made purely of `delivery_failure` suppresses the reply; `attachment_failure` never matches, including mixed bundles.
+- No termination condition and no error-type allowlist: every failed reply wakes once and the model decides. `stage` (`too_large` / `download` / `upload` / `media_message`), `attempts`, `elapsed_seconds` and `failed_at` distinguish a transient blip from a platform-side outage; the bundle renders the original platform reading (`HTTP <status>`, `code=<n>`, the platform message), the signed-url fallback result, and the exact line the user received (`📎 <name>: <signed link>`) without the signed URL itself. The stable `qq_channel_attachment_limits_block` is unchanged; failure detail lives in the dynamic event bundle.
+- `after_text` sticker failures stay out of this lane: a dropped sticker is logged, not worth a wake-up.
+
 ## Task Terminal Repair Contract
 
 - Task-terminal heartbeat only repairs or produces the session reply for an existing terminal event; it never auto-runs `continue_task`, creates replacement tasks, or retries failed tasks in place.
@@ -161,6 +168,7 @@ Cron job delivery is claim-before-dispatch with a self-finalizing dispatch — t
 ## Task Stall Detection
 
 - The task stall notifier (in the process that runs the task) watches in-progress tasks whose origin session has a live delivery audience — `web:` and channel `ext:` sessions alike; only legacy `china:*` (no delivery path since the China channel subsystem removal) and empty session ids are skipped. The audience is one predicate, `task_notice_audience_ok`, and both gates that historically carried their own `startswith("web:")` copy — the notifier's schedule gate and `build_task_stall_payload` — call it; widening only one of the two leaves a silently rescheduling loop that emits nothing. Visible output — recorded node output, node status change, or check result — resets the silence clock via `last_visible_output_at`. With no output, it escalates in 10-minute buckets starting at 20 minutes and emits a `task_stall` heartbeat event per new bucket. A pass that the classifier blocks as non-actionable (distribution barrier, manual pause, worker offline) re-arms the timer instead of returning silently: dropping it leaves the barrier release as the only revival point, and that single second then reports every bucket that came due during the freeze as separate events.
+- 设计内待命不是失速：`classify_task_stall_reason` 在所有非终态执行节点都停在停靠相位（`waiting_explicit` / `waiting_children`）、至少一个声明了外部唤醒源（`node_wait_external`）、没有暂停节点、没有可注入未读、且没有在飞验收回合时返回 `designed_idle`。该档**不投递也不重新计时**——下一次唤醒会经 `run_task → start_task` 重新装填；只等任务内节点的停靠仍按 `suspected_stall` 处理，否则会掩盖真死锁。判据与等待图的「全员停靠不变量」同源，读法走 `frame_mode='stall'` 的列（`node_phases`），不搬帧正文。连续节点的生命周期合同见 `main-task-runtime.md`「连续（待命）节点」。
 - The stall lane has one observer that survives a wedged event loop. The worker pressure sampler runs on its own thread, and its lag reading is cumulative — it resets each time the probe round-trips the loop — so a single sample already reports how long the loop has been blocked. At 10 s it appends every thread's stack (including the loop's) to `.g3ku/logs/loop-stall-stacks.log` through `faulthandler`; at 60 s it posts a `task_stall` event per origin session, synchronously from that thread, choosing the in-progress task with the newest `last_visible_output_at` in each session. The two lines are set apart on purpose: the measured startup-window peak (a web start rebuilding nine tasks against a cold store) is 29.3 s, so a normal-but-heavy start leaves a stack behind — which is the evidence for which recovery step is slow — without raising an alert. The payload reuses `bucket_minutes=1` and carries the real cause in `runtime_summary_excerpt` (`worker event loop stalled: lag=<n>s sampled off-loop`), so the rendered notice stays truthful while the dedupe key stays canonical; paused/cancelled tasks and non-deliverable audiences are skipped. Both hooks fire at most once per episode and re-arm when the lag drops, and a hook failure is swallowed so the sampler thread keeps sampling.
 - Delivery mirrors the distribution-error outbox: worker mode writes a durable `task_stall_outbox` row and POSTs `/api/internal/task-stall`; the web-hosted mode enqueues the heartbeat directly. The canonical dedupe key `task-stall:{task_id}:{bucket}:{last_visible_output_at}` is recomputed server-side so at most one notice lands per (task, bucket, silence-anchor).
 - Silence while a node tool call runs within its universal timeout is expected work, not a stall. When a node tool call starts executing, the loop records the effective universal timeout on the frame's tool live state (`timeout_seconds`); exempt tools (`exempt_universal_timeout`, e.g. `spawn_child_nodes` / `stop_tool_execution`) record nothing because they have no outer bound. The silence baseline is anchored to the latest running tool's deadline (`started_at + timeout_seconds`), and buckets are measured from that anchor: a stall is emitted only if silence persists a full bucket window after the deadline, i.e. the tool neither completed nor was killed by its own timeout. The timeout value follows `tool-hydration-and-callable-chain.md`「统一工具 Timeout 合同」(explicit `timeout_seconds` argument, else the global default). An over-large `timeout_seconds` pushes this deadline out by the same amount and so silences stall detection for that whole window — pair short commands with short values. The deadline comes from the frames' own live state, and that is the only frame-body field this lane reads, so the whole stall lane reads the ledger with `read_runtime_state(..., frame_mode='stall')`: the three node-id tables come from the frame columns, and frame bodies are fetched per-node by SQLite (`json_each` over `$.payload.tool_calls`, filtered to a running call with a positive `timeout_seconds`), so a call returns only the frames that can move the anchor. On a live 161-frame / 6.39 MB ledger the full-frame read costs 121 ms of Python JSON parsing per visible-output event, while the stall read costs 0.2 ms for the columns plus 23 ms inside SQLite (GIL released) — and `tool_calls` is 52 KB of those 6.39 MB. Consequence to keep in mind: in stall mode `frames` carries only `node_id` and `tool_calls`, so any new judgment that needs another frame field must ask for the full read instead of quietly getting a partial frame. The read-side rule is owned by `runtime-overview.md`「运行时里的状态与持久化」.
@@ -206,6 +214,31 @@ Frontdoor tool calls that exceed the foreground wait window are handed off to a 
 - Durability is two-phase through `tool_job_outbox`: the terminal payload is written before enqueue, and `_consume_heartbeat_events_at_injection` marks it delivered only after the bundle is injected. Startup replays pending rows; a crash before injection re-wakes, a model failure after injection does not. `kind=process` 事件（停止与退出都是）没有 `tool_jobs` 行可以锚定 outbox 条目，只活在心跳队列里——进程已经不在了，唯一的落点就是告知模型。退出观测器随会话驻留：运行时重启或会话被回收会把那条轮询 task 一起带走，此后这个进程的退出没有观察者，它的归属条目交给启动回收与 scope 回收处理。
 - Startup recovery of `tool_jobs` rows (owned by `runtime-overview.md`「Frontdoor Tool Job Handoff」) creates the same event for rows left `running`/`stopping`: a running job becomes `interrupted`, a stopping job whose stop event was never written becomes `stopped_by_user`, and an already-written event is repaired without creating a second one. The per-job event dedupe key is the guard.
 - Session pause/stop does not cancel a background job, so it produces no event at pause time; the job's own terminal state wakes the session later. Only the session-delete path cancels jobs without an event.
+
+## External Event Heartbeat Events
+
+This section owns the session half of the agent-created external event subscription lane; the API,
+credential, storage and target contract are owned by `external-agent-api.md`「Agent 外部事件订阅（external event subscription）」.
+
+- `enqueue_external_event(payload)` accepts one durable event row and enqueues `reason=external_event`,
+  `source=external_api`. The dedupe key is server-derived `external-event:{subscription_id}:{event_id}`;
+  callers cannot supply it.
+- The payload carries subscription identity/name, event id/type/occurred-at, the subscription
+  `instruction`, optional trigger note, `text` / `data`, and the fixed target snapshot. The target is
+  always the current source session for this lane.
+- `prompt_lane._external_event_lines` renders the subscription instruction separately from the event
+  content and labels the content as untrusted external data. The event never forces a user-visible
+  reply: the model continues the existing task when action is needed and may call `silent` otherwise.
+  Stronger rules from any mixed `task_terminal` / `shutdown_resume` / `turn_interrupted` event still apply.
+- Busy and compression-holding sessions use the ordinary wake-queue deferral. Events accepted while
+  the target is busy remain durable and batch into the next heartbeat turn.
+- Consumption is marked at injection in `_consume_heartbeat_events_at_injection`: the external event
+  row becomes `injected`, and the subscription's last delivery error is cleared. If marking fails after
+  injection, `injected_heartbeat_event_keys` finds the persisted dedupe key on the next attempt and
+  settles the row without running the model twice.
+- A crash before injection is replayed by the external event service. A model failure after injection
+  does not re-deliver; the event bundle remains in context and later turns handle it. This lane
+  guarantees delivery to the model context, not successful handling or a visible reply.
 
 ## Channel Digest Heartbeat Events
 

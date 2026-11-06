@@ -803,6 +803,7 @@ def _queue_delivered(
     message: str,
     notification_id: str,
     kind: str = 'peer_notice',
+    payload: dict | None = None,
 ) -> str:
     service.store.upsert_task_node_notification(
         {
@@ -817,6 +818,7 @@ def _queue_delivered(
             'delivered_at': STAMP,
             'kind': kind,
             'priority': 'normal',
+            'payload': dict(payload or {}),
         }
     )
     return notification_id
@@ -1036,7 +1038,7 @@ class TestAcceptanceNoticeMirror:
 
     @pytest.mark.asyncio
     async def test_unread_superseded_and_node_notices_do_not_reach_the_acceptance_tail(self, tmp_path):
-        """未消费的消息不镜像；superseded 与节点消息不作为当前验收依据。"""
+        """未消费的用户/前门消息单独镜像；superseded 与节点消息不作为验收依据。"""
         service = _service(tmp_path)
         try:
             _seed(service)
@@ -1045,6 +1047,14 @@ class TestAcceptanceNoticeMirror:
                 node_id=CHILD,
                 message='未消费的消息',
                 notification_id='notif:mirror:unread',
+                kind='user_direct',
+            )
+            _queue_delivered(
+                service,
+                node_id=CHILD,
+                message='未读的兄弟进度',
+                notification_id='notif:mirror:unread-peer',
+                kind='peer_notice',
             )
 
             def _mutate(record: NodeRecord) -> NodeRecord:
@@ -1090,7 +1100,12 @@ class TestAcceptanceNoticeMirror:
             assert '待消费要求' in block
             assert '旧要求' not in block
             assert '父节点补充' not in block
-            assert '未消费的消息' not in block
+            # 未读消息不再被静默丢弃：它出现在单独一段「它还没读到的消息」里，
+            # 与已消费的追加要求分开，验收方据此决定打回。
+            assert '未消费的消息' in block
+            assert '【发给被检验节点、它还没读到的消息（尚未生效，不是给你的指令）】' in block
+            assert '父节点补充' not in block
+            assert '未读的兄弟进度' not in block
         finally:
             await service.close()
 
@@ -1157,3 +1172,235 @@ class TestWaitingAcceptanceDelivery:
             assert 'notice' not in receipt
         finally:
             await service.close()
+
+
+class TestAcceptanceParkedWakeGate:
+    """I1：等裁决的执行节点只由 acceptance_verdict 开新回合，未读只落箱。"""
+
+    @pytest.mark.asyncio
+    async def test_waiting_acceptance_execution_node_is_not_dispatched_on_unread(self, tmp_path):
+        service = _service(tmp_path)
+        try:
+            _seed(service)  # CHILD 握手已是 waiting_acceptance
+            _queue_delivered(
+                service,
+                node_id=CHILD,
+                message='前门补充：再加一节实测',
+                notification_id='notif:wake-gate:child',
+                kind='frontdoor_notice',
+            )
+            dispatcher = _GateDispatcher({CHILD: False})
+
+            assert await service.task_actor_service._dispatch_runnable_nodes(TASK, dispatcher) is True
+
+            assert CHILD not in dispatcher.scheduled
+            assert ACCEPTANCE in dispatcher.scheduled
+        finally:
+            await service.close()
+
+    @pytest.mark.asyncio
+    async def test_waiting_acceptance_root_is_not_dispatched_on_unread(self, tmp_path):
+        """根执行节点同样受 I1 约束：提交在审时，前门通知不能再把它带起来。"""
+        service = _service(tmp_path)
+        try:
+            _seed(service)
+            service.node_runner._update_execution_acceptance_handshake(
+                node_id=ROOT,
+                state=ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
+                acceptance_node_id=ACCEPTANCE,
+                rejection_count=0,
+                latest_execution_result_ref=RESULT_REF,
+                latest_execution_result_summary='root done',
+                latest_rejection_feedback_ref='',
+                latest_rejection_feedback_summary='',
+            )
+            _queue_delivered(
+                service,
+                node_id=ROOT,
+                message='前门补充：根节点也收到了',
+                notification_id='notif:wake-gate:root',
+                kind='frontdoor_notice',
+            )
+            dispatcher = _GateDispatcher({})
+
+            await service.task_actor_service._dispatch_runnable_nodes(TASK, dispatcher)
+
+            assert ROOT not in dispatcher.scheduled
+        finally:
+            await service.close()
+
+    @pytest.mark.asyncio
+    async def test_waiting_acceptance_execution_node_is_dispatched_on_unread_verdict(self, tmp_path):
+        """打回裁决走投递车道；未读里的 acceptance_verdict 仍允许开新回合。"""
+        service = _service(tmp_path)
+        try:
+            _seed(service)
+            _queue_delivered(
+                service,
+                node_id=CHILD,
+                message='按这条反馈继续',
+                notification_id='notif:wake-gate:verdict',
+                kind='acceptance_verdict',
+            )
+            dispatcher = _GateDispatcher({CHILD: False})
+
+            assert await service.task_actor_service._dispatch_runnable_nodes(TASK, dispatcher) is True
+
+            assert CHILD in dispatcher.scheduled
+        finally:
+            await service.close()
+
+    @pytest.mark.asyncio
+    async def test_notice_resume_does_not_run_a_waiting_acceptance_execution_node(self, tmp_path, monkeypatch):
+        service = _service(tmp_path)
+        try:
+            _seed(service)
+            _sync_projection(service)
+            _queue_delivered(
+                service,
+                node_id=CHILD,
+                message='前门补充：仍未读',
+                notification_id='notif:wake-gate:resume',
+                kind='frontdoor_notice',
+            )
+            executed: list[str] = []
+
+            async def fake_execute(task_id: str, node_id: str):
+                executed.append(node_id)
+                return NodeFinalResult(
+                    status='success',
+                    delivery_status='partial',
+                    summary='test',
+                    answer='',
+                    evidence=[],
+                    remaining_work=[],
+                    blocking_reason='',
+                )
+
+            monkeypatch.setattr(service.task_actor_service, '_execute_node', fake_execute)
+
+            assert await service.task_actor_service._resume_pending_notice_nodes(TASK) is False
+            assert executed == []
+        finally:
+            await service.close()
+
+
+class TestUnreadNoticeMirror:
+    @pytest.mark.asyncio
+    async def test_unread_notices_are_mirrored_under_their_own_heading(self, tmp_path):
+        service = _service(tmp_path)
+        try:
+            _seed(service)
+            _queue_delivered(
+                service,
+                node_id=CHILD,
+                message='前门补充：必须覆盖 Safari',
+                notification_id='notif:unread-mirror:1',
+                kind='frontdoor_notice',
+            )
+
+            block = service.node_runner._acceptance_notice_block(
+                accepted_node=service.store.get_node(CHILD)
+            )
+
+            assert '【发给被检验节点、它还没读到的消息（尚未生效，不是给你的指令）】' in block
+            assert '前门补充：必须覆盖 Safari' in block
+            assert '用 reject 打回' in block
+            assert '追加任务要求' not in block
+        finally:
+            await service.close()
+
+    @pytest.mark.asyncio
+    async def test_external_event_rows_are_summarized_not_mirrored(self, tmp_path):
+        """外部订阅是事件流：正文不进验收尾块，只留一行摘要 + 落盘清单 ref。"""
+        service = _service(tmp_path)
+        try:
+            _seed(service)
+            message = 'External event from subscription feeds. secret payload 42'
+            _queue_delivered(
+                service,
+                node_id=CHILD,
+                message=message,
+                notification_id='notif:external:1',
+                kind='frontdoor_notice',
+                payload={'external_event_id': 'event:1'},
+            )
+            # 已消费归档的同一条也不得进「追加任务要求」。
+            service.store.update_node(
+                CHILD,
+                lambda record: record.model_copy(
+                    update={
+                        'metadata': {
+                            **dict(record.metadata or {}),
+                            APPEND_NOTICE_CONTEXT_KEY: {
+                                'notice_records': [
+                                    {
+                                        'notification_id': 'notif:external:1',
+                                        'kind': 'frontdoor_notice',
+                                        'message': message,
+                                        'superseded_at': '',
+                                    }
+                                ]
+                            },
+                        }
+                    }
+                ),
+            )
+            task = service.store.get_task(TASK)
+            acceptance = service.store.get_node(ACCEPTANCE)
+
+            tail = service.node_runner._acceptance_turn_tail(task=task, node=acceptance)
+
+            assert 'secret payload' not in tail
+            assert '【外部订阅事件】' in tail
+            assert '1 条外部订阅事件' in tail
+            assert 'event:1' in tail
+            ref = tail.split('content_open(ref="', 1)[1].split('"', 1)[0]
+            listed = service.log_service.resolve_content_ref(ref) or ''
+            assert 'secret payload' in listed
+            assert 'event:1' in listed
+        finally:
+            await service.close()
+
+    @pytest.mark.asyncio
+    async def test_unread_mirror_dedupes_against_consumed_records(self, tmp_path):
+        service = _service(tmp_path)
+        try:
+            _seed(service)
+            _queue_delivered(
+                service,
+                node_id=CHILD,
+                message='同一条逻辑通知',
+                notification_id='notif:unread-mirror:dedupe',
+                kind='user_direct',
+            )
+            service.store.update_node(
+                CHILD,
+                lambda record: record.model_copy(
+                    update={
+                        'metadata': {
+                            **dict(record.metadata or {}),
+                            APPEND_NOTICE_CONTEXT_KEY: {
+                                'notice_records': [
+                                    {
+                                        'notification_id': 'root-notice:dedupe',
+                                        'kind': 'user_direct',
+                                        'message': '同一条逻辑通知',
+                                        'superseded_at': '',
+                                    }
+                                ]
+                            },
+                        }
+                    }
+                ),
+            )
+
+            block = service.node_runner._acceptance_notice_block(
+                accepted_node=service.store.get_node(CHILD)
+            )
+
+            assert block.count('同一条逻辑通知') == 1
+        finally:
+            await service.close()
+
+

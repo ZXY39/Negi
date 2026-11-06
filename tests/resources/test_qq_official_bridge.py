@@ -17,6 +17,7 @@ import sys
 import types
 from collections import OrderedDict
 from contextlib import suppress
+from datetime import datetime
 from types import SimpleNamespace
 
 import httpx
@@ -1865,12 +1866,17 @@ async def test_pump_falls_back_to_url_upload_when_file_data_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """file_data 被平台拒（非 2xx）时回退 url 回源上传（要求本服务端公网可达），
-    回退成功仍以 msg_type=7 送达，不降级。"""
+    回退成功仍以 msg_type=7 送达，不降级。
+
+    媒体 origin 必须是**非回环**地址：签名链接指向回环时平台取不到，桥现在直接跳过
+    这条注定失败的回退（见 ``_is_loopback_media_url``）。
+    """
     records: list[httpx.Request] = []
     files_url = "https://api.sgroup.qq.com/v2/users/u9/files"
+    media_url = "https://media.example/signed?token=t2"
     media = _media_transport(
         {
-            _absolute_media("t2"): (200, b"pdf-bytes"),
+            media_url: (200, b"pdf-bytes"),
             files_url: (400, b'{"code":40093001,"message":"file_data rejected"}'),
         },
         records,
@@ -1879,12 +1885,14 @@ async def test_pump_falls_back_to_url_upload_when_file_data_rejected(
     try:
         await client.on_c2c_message_create(_c2c_message("hi", [], message_id="f2"))
         ext = FakeExternalApiClient.instances[-1]
+        attachment = _outbound_attachment("简历.pdf", "application/pdf", "t2")
+        attachment["url"] = media_url
         await ext.events.put(
             {
                 "type": "reply.final",
                 "seq": 1,
                 "text": "简历已渲染：简历.pdf",
-                "attachments": [_outbound_attachment("简历.pdf", "application/pdf", "t2")],
+                "attachments": [attachment],
             }
         )
         await _wait_until(lambda: len(client.api.calls) >= 2)
@@ -1892,7 +1900,7 @@ async def test_pump_falls_back_to_url_upload_when_file_data_rejected(
         uploads = _api_uploads(records)
         assert len(uploads) == 1
         assert json.loads(uploads[0].content)["file_type"] == 4
-        assert ("post_c2c_file", {"openid": "u9", "file_type": 4, "url": _absolute_media("t2"), "srv_send_msg": False}) in client.api.calls
+        assert ("post_c2c_file", {"openid": "u9", "file_type": 4, "url": media_url, "srv_send_msg": False}) in client.api.calls
         assert (
             "post_c2c_message",
             {"openid": "u9", "msg_type": 7, "media": {"file_info": "file-info-c"}},
@@ -2396,6 +2404,268 @@ async def test_c2c_reply_keeps_the_active_shape(monkeypatch: pytest.MonkeyPatch)
 
 
 @pytest.mark.asyncio
+async def test_upload_retries_transient_platform_errors_before_delivering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """500/850012 是单发级抖动：隔一小段重试同一份字节，第三次成功就只发一发媒体消息。
+
+    实盘同一批连续三发只有中间那发被 500 打回，前后都成功——这条车道覆盖的就是它。
+    """
+    monkeypatch.setattr(bridge_module, "_MEDIA_UPLOAD_RETRY_DELAYS", (0.0, 0.0))
+    records: list[httpx.Request] = []
+    files_url = "https://api.sgroup.qq.com/v2/users/u9/files"
+    upload_attempts = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        records.append(request)
+        if str(request.url) == files_url:
+            upload_attempts["n"] += 1
+            if upload_attempts["n"] <= 2:
+                return httpx.Response(
+                    500, content=b'{"code":850012,"message":"call inner proxy error"}'
+                )
+            return httpx.Response(200, content=_upload_reply())
+        return httpx.Response(200, content=b"doc-bytes")
+
+    logs: list[str] = []
+    sink_id = bridge_module.logger.add(
+        lambda message: logs.append(message.record["message"]), level="WARNING"
+    )
+    task, client = await _start_bridge(monkeypatch, httpx.MockTransport(handler))
+    try:
+        await client.on_c2c_message_create(_c2c_message("hi", [], message_id="fr1"))
+        ext = FakeExternalApiClient.instances[-1]
+        await ext.events.put(
+            {
+                "type": "reply.final",
+                "seq": 1,
+                "text": "日报已生成：日报",
+                "outbox_id": "obx-retry-ok",
+                "attachments": [_outbound_attachment("日报.docx", "application/octet-stream")],
+            }
+        )
+        await _wait_until(lambda: len(client.api.calls) >= 2)
+
+        assert upload_attempts["n"] == 3
+        assert len(_api_uploads(records)) == 3
+        # 成功的那一发只产生一条媒体消息 + 一条正文，没有降级链接行。
+        assert [name for name, _ in client.api.calls] == [
+            "post_c2c_message",
+            "post_c2c_message",
+        ]
+        assert "📎" not in client.api.calls[-1][1]["markdown"]["content"]
+        retries = [line for line in logs if "file_data retry" in line]
+        assert len(retries) == 2
+        assert ext.ack_extra_by_id["obx-retry-ok"].get("attachment_failures") is None
+    finally:
+        bridge_module.logger.remove(sink_id)
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_upload_retry_exhausted_degrades_and_reports_attachment_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """重试耗尽仍失败：降级成 📎 链接行，同时把原始错误、文件名、耗时与尝试次数
+    交给 ack，服务端据此唤醒模型。回环媒体 origin 的 url 回退被跳过并如实记录。"""
+    monkeypatch.setattr(bridge_module, "_MEDIA_UPLOAD_RETRY_DELAYS", (0.0, 0.0))
+    records: list[httpx.Request] = []
+    files_url = "https://api.sgroup.qq.com/v2/users/u9/files"
+    upload_attempts = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        records.append(request)
+        if str(request.url) == files_url:
+            upload_attempts["n"] += 1
+            return httpx.Response(
+                500, content=b'{"code":850012,"message":"call inner proxy error"}'
+            )
+        return httpx.Response(200, content=b"video-bytes")
+
+    task, client = await _start_bridge(monkeypatch, httpx.MockTransport(handler))
+    try:
+        await client.on_c2c_message_create(_c2c_message("hi", [], message_id="fr2"))
+        ext = FakeExternalApiClient.instances[-1]
+        attachment = _outbound_attachment(
+            "v02_notebook_p10.mp4", "video/mp4", "tv2", inline_media=False
+        )
+        attachment["size"] = 2180442
+        await ext.events.put(
+            {
+                "type": "reply.final",
+                "seq": 1,
+                "text": "视频已渲染",
+                "outbox_id": "obx-retry-fail",
+                "attachments": [attachment],
+            }
+        )
+        await _wait_until(lambda: client.api.calls)
+        await asyncio.sleep(0.05)
+
+        assert upload_attempts["n"] == 3
+        # 回环 origin：不再往平台打一次注定 400/40093010 的回源上传。
+        assert not [call for call in client.api.calls if call[0] == "post_c2c_file"]
+        fallback_text = client.api.calls[0][1]["markdown"]["content"]
+        assert "📎 v02_notebook_p10.mp4:" in fallback_text
+
+        failures = ext.ack_extra_by_id["obx-retry-fail"]["attachment_failures"]
+        assert len(failures) == 1
+        failure = failures[0]
+        assert failure["name"] == "v02_notebook_p10.mp4"
+        assert failure["mime_type"] == "video/mp4"
+        assert failure["file_type"] == 4
+        assert failure["stage"] == "upload"
+        assert failure["attempts"] == 3
+        assert failure["http_status"] == 500
+        assert failure["platform_code"] == 850012
+        assert failure["platform_message"] == "call inner proxy error"
+        assert "loopback" in failure["url_fallback"]
+        assert failure["elapsed_seconds"] > 0
+        # failed_at 是带时区的本地 ISO 串，模型用它与事件时刻相减。
+        assert datetime.fromisoformat(failure["failed_at"]).tzinfo is not None
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (400, b'{"code":40093011,"message":"upload size exceeds limit"}'),
+        (413, b"request entity too large"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_upload_does_not_retry_non_retryable_platform_rejection(
+    monkeypatch: pytest.MonkeyPatch, status: int, body: bytes
+) -> None:
+    """40093011 是档位过大、413 是网关直接拒：换一次结果一样，不烧退避。"""
+    monkeypatch.setattr(bridge_module, "_MEDIA_UPLOAD_RETRY_DELAYS", (0.0, 0.0))
+    records: list[httpx.Request] = []
+    files_url = "https://api.sgroup.qq.com/v2/users/u9/files"
+    upload_attempts = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        records.append(request)
+        if str(request.url) == files_url:
+            upload_attempts["n"] += 1
+            return httpx.Response(status, content=body)
+        return httpx.Response(200, content=b"png-bytes")
+
+    task, client = await _start_bridge(monkeypatch, httpx.MockTransport(handler))
+    try:
+        await client.on_c2c_message_create(_c2c_message("hi", [], message_id="fr3"))
+        ext = FakeExternalApiClient.instances[-1]
+        await ext.events.put(
+            {
+                "type": "reply.final",
+                "seq": 1,
+                "text": "图",
+                "outbox_id": "obx-no-retry",
+                "attachments": [_outbound_attachment("chart.png", "image/png", "ti3")],
+            }
+        )
+        await _wait_until(lambda: client.api.calls)
+        await asyncio.sleep(0.05)
+
+        assert upload_attempts["n"] == 1
+        failure = ext.ack_extra_by_id["obx-no-retry"]["attachment_failures"][0]
+        assert failure["stage"] == "upload"
+        assert failure["attempts"] == 1
+        if status == 400:
+            assert failure["platform_code"] == 40093011
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_upload_retry_wait_budget_is_shared_across_attachments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """退避预算按一次 deliver 共享：第一个附件吃掉额度后，剩余附件只发一发。"""
+    monkeypatch.setattr(bridge_module, "_MEDIA_UPLOAD_RETRY_DELAYS", (10.0, 10.0))
+    monkeypatch.setattr(bridge_module, "_MEDIA_UPLOAD_RETRY_WAIT_BUDGET_SECONDS", 0.02)
+    records: list[httpx.Request] = []
+    files_url = "https://api.sgroup.qq.com/v2/users/u9/files"
+    upload_attempts = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        records.append(request)
+        if str(request.url) == files_url:
+            upload_attempts["n"] += 1
+            return httpx.Response(
+                500, content=b'{"code":850012,"message":"call inner proxy error"}'
+            )
+        return httpx.Response(200, content=b"doc-bytes")
+
+    task, client = await _start_bridge(monkeypatch, httpx.MockTransport(handler))
+    try:
+        await client.on_c2c_message_create(_c2c_message("hi", [], message_id="fr4"))
+        ext = FakeExternalApiClient.instances[-1]
+        await ext.events.put(
+            {
+                "type": "reply.final",
+                "seq": 1,
+                "text": "两份文件",
+                "outbox_id": "obx-budget",
+                "attachments": [
+                    _outbound_attachment("a.docx", "application/octet-stream", "ta"),
+                    _outbound_attachment("b.docx", "application/octet-stream", "tb"),
+                ],
+            }
+        )
+        await _wait_until(lambda: client.api.calls)
+        await asyncio.sleep(0.1)
+
+        # 第一份：首发 + 一次退避重试；第二份：预算已耗尽，只发一发。
+        assert upload_attempts["n"] == 3
+        failures = ext.ack_extra_by_id["obx-budget"]["attachment_failures"]
+        assert [item["attempts"] for item in failures] == [2, 1]
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+def test_measured_platform_rejections_are_deterministic() -> None:
+    """实测文案分档：40034128 / 40034024 一次判死；重复 seq 仍是 transient（重放换 seq）。"""
+    classify = bridge_module._classify_send_failure
+    assert classify(RuntimeError("回复消息失败，被动回复时间或者次数超过限制")) == "passive_exhausted"
+    assert classify(RuntimeError("回复消息的msg_id无效或越权")) == "passive_invalid"
+    assert classify(RuntimeError("消息被去重，请检查请求msgseq")) == "transient"
+    assert "passive_exhausted" in bridge_module._NON_RETRYABLE_SEND_KINDS
+    assert "passive_invalid" in bridge_module._NON_RETRYABLE_SEND_KINDS
+
+
+@pytest.mark.asyncio
+async def test_ack_outbox_trims_attachment_failures() -> None:
+    """ack body 的两道上限：列表 10 条、错误原文 200 字。"""
+    from g3ku.qq_official.client import ExternalApiClient
+
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json={})
+
+    client = ExternalApiClient("http://test", "token", transport=httpx.MockTransport(handler))
+    try:
+        failures = [
+            {"name": f"f{index}", "platform_message": "x" * 300} for index in range(12)
+        ]
+        await client.ack_outbox("s", "obx", attachment_failures=failures)
+    finally:
+        await client.close()
+    assert len(captured["attachment_failures"]) == 10
+    assert len(captured["attachment_failures"][0]["platform_message"]) == 200
+
+
+@pytest.mark.asyncio
 async def test_pump_degrades_failed_attachment_to_signed_link_text(monkeypatch: pytest.MonkeyPatch) -> None:
     """两条上传路径都失败时降级为签名下载链接文本：用户至少拿到可下载链接，
     附件不能静默丢失。"""
@@ -2506,8 +2776,14 @@ async def test_pump_falls_back_to_url_upload_when_upload_never_got_a_response(
 ) -> None:
     """上传连回执都没有（连接断/写超时）也照旧回退 url 路径：botpy 的 http 层在这
     种情况下只打它自己的 WARNING 就返回 None，桥侧什么都不留；换到自己的媒体 client
-    之后这条失败有日志锚点，且不再静默吞掉整发附件。"""
+    之后这条失败有日志锚点，且不再静默吞掉整发附件。
+
+    回环 origin 跳过回退的判据见``_is_loopback_media_url``，所以这里用公网可达的
+    媒体 URL；重试等退避压到 0，测试只关心"最终仍回退"。
+    """
+    monkeypatch.setattr(bridge_module, "_MEDIA_UPLOAD_RETRY_DELAYS", (0.0, 0.0))
     files_url = "https://api.sgroup.qq.com/v2/users/u9/files"
+    media_url = "https://media.example/signed?token=t2"
 
     def handler(request: httpx.Request) -> httpx.Response:
         if str(request.url) == files_url:
@@ -2518,18 +2794,20 @@ async def test_pump_falls_back_to_url_upload_when_upload_never_got_a_response(
     try:
         await client.on_c2c_message_create(_c2c_message("hi", [], message_id="f4"))
         ext = FakeExternalApiClient.instances[-1]
+        attachment = _outbound_attachment("简历.pdf", "application/pdf", "t2")
+        attachment["url"] = media_url
         await ext.events.put(
             {
                 "type": "reply.final",
                 "seq": 1,
                 "text": "简历已渲染：简历.pdf",
-                "attachments": [_outbound_attachment("简历.pdf", "application/pdf", "t2")],
+                "attachments": [attachment],
             }
         )
         await _wait_until(lambda: client.api.calls)
         assert (
             "post_c2c_file",
-            {"openid": "u9", "file_type": 4, "url": _absolute_media("t2"), "srv_send_msg": False},
+            {"openid": "u9", "file_type": 4, "url": media_url, "srv_send_msg": False},
         ) in client.api.calls
         assert client.api.http_calls == []
     finally:

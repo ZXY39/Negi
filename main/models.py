@@ -141,6 +141,8 @@ class SpawnChildSpec(Model):
     execution_policy: ExecutionPolicyState
     acceptance_prompt: str = ''
     requires_acceptance: bool | None = None
+    # 连续/待命节点：创建时写定，之后不可变。连续节点强制拥有验收节点。
+    continuous: bool = False
     # 顺序即优先级：体积超限时按这个顺序裁剪，所以它不是排版字段。
     seed_tools: list[str] = Field(default_factory=list)
 
@@ -173,6 +175,10 @@ class SpawnChildResult(Model):
     # 三个字段都是增量，存量 spawn_operations 里的旧 dict 反序列化时取默认值。
     child_node_id: str = ''
     acceptance_node_id: str = ''
+    # 连续子节点没写判据时验收节点由运行时自动补出：回执要如实说明来源，
+    # 否则父节点会以为自己漏写了验收标准。
+    acceptance_auto_created: bool = False
+    acceptance_note: str = ''
     state: str = ''
     gate: str = ''
     reject_reason: str = ''

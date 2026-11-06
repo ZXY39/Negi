@@ -90,22 +90,64 @@ from g3ku.utils.helpers import ensure_dir, safe_filename
 router = APIRouter()
 
 # 一次失败只唤醒一次：按 outbox_id 去重（不按时间；每次不同的失败都要提醒模型）。
+# 投递失败与附件失败共用这一份 LRU，但键带前缀——同一条 ack 同时带两类事实时，
+# 两个分支不能互相吃掉。
 _DELIVERY_FAILURE_SEEN: "OrderedDict[str, None]" = OrderedDict()
 _DELIVERY_FAILURE_LOCK = threading.RLock()
 _DELIVERY_FAILURE_SEEN_MAX = 1024
 
 
-def _remember_delivery_failure(outbox_id: str) -> bool:
+def _remember_delivery_failure(outbox_id: str, *, prefix: str = "delivery") -> bool:
     target = str(outbox_id or "").strip()
     if not target:
         return False
+    key = f"{prefix}:{target}"
     with _DELIVERY_FAILURE_LOCK:
-        if target in _DELIVERY_FAILURE_SEEN:
+        if key in _DELIVERY_FAILURE_SEEN:
             return False
-        _DELIVERY_FAILURE_SEEN[target] = None
+        _DELIVERY_FAILURE_SEEN[key] = None
         while len(_DELIVERY_FAILURE_SEEN) > _DELIVERY_FAILURE_SEEN_MAX:
             _DELIVERY_FAILURE_SEEN.popitem(last=False)
         return True
+
+
+# 附件失败记录白名单：桥回的字段进心跳事件前先裁掉不认识的键，列表与错误原文
+# 各有一道上限（桥侧也截，这里是服务端边界）。
+_ATTACHMENT_FAILURE_KEYS = (
+    "name",
+    "kind",
+    "mime_type",
+    "size",
+    "file_type",
+    "stage",
+    "attempts",
+    "elapsed_seconds",
+    "failed_at",
+    "http_status",
+    "platform_code",
+    "platform_message",
+    "url_fallback",
+)
+_ATTACHMENT_FAILURES_MAX = 10
+_ATTACHMENT_FAILURE_MESSAGE_MAX = 200
+
+
+def _normalize_attachment_failures(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    failures: list[dict[str, Any]] = []
+    for item in raw[:_ATTACHMENT_FAILURES_MAX]:
+        if not isinstance(item, dict):
+            continue
+        record = {key: item[key] for key in _ATTACHMENT_FAILURE_KEYS if key in item}
+        if not str(record.get("name") or "").strip() and not str(record.get("stage") or "").strip():
+            continue
+        if "platform_message" in record:
+            record["platform_message"] = str(record.get("platform_message") or "")[
+                :_ATTACHMENT_FAILURE_MESSAGE_MAX
+            ]
+        failures.append(record)
+    return failures
 
 # 图片附件沿用 web CEO 上传上限；文档/文件类附件单独放宽（渠道传文档常超
 # 5MiB）。超限一律 413 ``attachment_too_large``，桥侧按同值预过滤避免必然失败。
@@ -1495,10 +1537,12 @@ async def ack_outbox_entry(
     shape = str(raw.get("shape") or "").strip().lower()
     passive_window_open = raw.get("passive_window_open")
     text_preview = str(raw.get("text_preview") or "").strip()
+    attachment_failures = _normalize_attachment_failures(raw.get("attachment_failures"))
     acked = ack_outbound_message(outbox_id, session_key=entry.session_key, status=status)
     record = get_outbound_record(outbox_id)
     proactive = str((record or {}).get("event") or "") == PROACTIVE_EVENT
     failure_notice = False
+    attachment_notice = False
     if proactive and status == "delivered" and shape == "active":
         # 主动形状送达成功 = 该群确实具备主动消息能力；清掉之前的 denied/quota。
         get_external_session_registry().note_active_message_state(entry.session_key, "")
@@ -1507,7 +1551,7 @@ async def ack_outbox_entry(
             get_external_session_registry().note_active_message_state(entry.session_key, "denied")
         elif kind == "quota_exhausted":
             get_external_session_registry().note_active_message_state(entry.session_key, "quota")
-        if _remember_delivery_failure(outbox_id):
+        if _remember_delivery_failure(outbox_id, prefix="delivery"):
             failure_payload = {
                 "session_id": entry.session_key,
                 "external_key": entry.external_key,
@@ -1527,12 +1571,31 @@ async def ack_outbox_entry(
                     failure_notice = bool(heartbeat.enqueue_delivery_failure(failure_payload))
             except Exception as exc:  # noqa: BLE001 - 唤醒失败不改变 ack 结果
                 logger.warning("delivery failure heartbeat enqueue failed: {}", exc)
+    if attachment_failures and _remember_delivery_failure(outbox_id, prefix="attachment"):
+        # 正文送达、附件没投出去：这条车道与 delivery_failure 分开——那条 reason 会
+        # 压掉模型的回复，而这里正文已经落地，模型要能回话或重发。
+        attachment_payload = {
+            "session_id": entry.session_key,
+            "external_key": entry.external_key,
+            "outbox_id": str(outbox_id or ""),
+            "attachment_failures": attachment_failures,
+            "received_at": datetime.now().isoformat(),
+        }
+        try:
+            heartbeat = get_web_heartbeat_service()
+            if heartbeat is not None:
+                attachment_notice = bool(
+                    heartbeat.enqueue_attachment_failure(attachment_payload)
+                )
+        except Exception as exc:  # noqa: BLE001 - 唤醒失败不改变 ack 结果
+            logger.warning("attachment failure heartbeat enqueue failed: {}", exc)
     return {
         "ok": True,
         "acked": bool(acked),
         "outbox_id": str(outbox_id or ""),
         "status": status,
         "failure_notice": failure_notice,
+        "attachment_notice": attachment_notice,
     }
 
 

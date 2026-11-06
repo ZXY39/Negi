@@ -151,8 +151,14 @@ from main.runtime import send_token_preflight as runtime_send_token_preflight
 from main.runtime.append_notice_context import (
     APPEND_NOTICE_CONTEXT_KEY,
     append_notice_tail_prefix_match,
+    append_notice_window_notice_ids,
+    archived_consumed_notice_count,
     build_append_notice_tail_messages,
+    build_notice_index_message,
     dedupe_append_notice_tail_messages,
+    live_append_notice_ids,
+    normalize_append_notice_context,
+    prune_append_notice_context_segments,
     render_append_notice_must_preserve_block,
     roll_append_notice_context_for_compression_stage,
     score_append_notice_preservation,
@@ -162,6 +168,7 @@ from main.runtime.chat_backend import (
     build_actual_request_diagnostics,
     build_stable_prompt_cache_key,
 )
+from main.runtime.continuous_node import is_continuous_metadata
 from main.runtime.model_route import (
     LEASE_OUTCOME_CANCELLED,
     LEASE_OUTCOME_SUCCESS,
@@ -672,6 +679,17 @@ class ReActToolLoop:
                 dynamic_contract,
             )
             overlay_parts = [repair_overlay_text]
+            index_message = self._notice_index_message(runtime_context=runtime_context)
+            if index_message is not None:
+                # 尾索引只报告"有多少已消费通知退场"，不重投正文；放发送尾段
+                # 让同 turn 链每跳刷新它，同时只重付最后几条。插在 turn-only
+                # note 之前，末位仍是本轮的 user 回合提示。
+                request_messages = _mid_insert.insert_mid_messages(
+                    request_messages,
+                    items=[index_message],
+                    position=_mid_insert.POSITION_TAIL,
+                    lane=_mid_insert.LANE_NODE,
+                )
             assembled_request_messages = self._apply_temporary_system_overlay(
                 request_messages,
                 overlay_text='\n\n'.join(str(part or '').strip() for part in overlay_parts if str(part or '').strip()),
@@ -2115,6 +2133,7 @@ class ReActToolLoop:
             plain_text_reply_message = (
                 build_node_plain_text_reply_block_message(
                     node_kind=node.node_kind,
+                    continuous=is_continuous_metadata(getattr(node, 'metadata', None)),
                 )
                 if not matched_raw_final_result_payload
                 and str(response.content or '').strip()
@@ -6409,12 +6428,24 @@ class ReActToolLoop:
     def _is_raw_append_notice_window_message(cls, message: dict[str, Any]) -> bool:
         return cls._append_notice_window_kind(message) == "raw_notice_window"
 
+    @staticmethod
+    def _append_notice_window_is_live(
+        message: dict[str, Any],
+        live_notice_ids: set[str] | None,
+    ) -> bool:
+        if live_notice_ids is None:
+            return True
+        notice_ids = append_notice_window_notice_ids(message)
+        # 解析不出 id 的存量块按未知处理，保守保留。
+        return not notice_ids or bool(notice_ids & live_notice_ids)
+
     @classmethod
     def _split_request_messages_for_token_compaction(
         cls,
         *,
         request_messages: list[dict[str, Any]] | None,
         recent_tail_count: int = _NODE_TOKEN_COMPACTION_RECENT_TAIL_COUNT,
+        live_notice_ids: set[str] | None = None,
     ) -> dict[str, Any]:
         normalized = [
             dict(item)
@@ -6461,12 +6492,16 @@ class ReActToolLoop:
         deep_raw_notice_windows = [
             item for item in compressible_history
             if cls._is_raw_append_notice_window_message(item)
+            and cls._append_notice_window_is_live(item, live_notice_ids)
         ]
         if deep_raw_notice_windows:
             append_notice_tail.extend(deep_raw_notice_windows)
             compressible_history = [
                 item for item in compressible_history
-                if not cls._is_raw_append_notice_window_message(item)
+                if not (
+                    cls._is_raw_append_notice_window_message(item)
+                    and cls._append_notice_window_is_live(item, live_notice_ids)
+                )
             ]
         return {
             "system_prefix": system_prefix,
@@ -6543,22 +6578,49 @@ class ReActToolLoop:
         compressed_text: str = "",
         recent_tail_count: int = _NODE_TOKEN_COMPACTION_RECENT_TAIL_COUNT,
         preserved_raw_messages: list[dict[str, Any]] | None = None,
+        live_notice_ids: set[str] | None = None,
+        live_notice_tail_messages: list[dict[str, Any]] | None = None,
+        append_notice_context: dict[str, Any] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         parts = cls._split_request_messages_for_token_compaction(
             request_messages=request_messages,
             recent_tail_count=recent_tail_count,
+            live_notice_ids=live_notice_ids,
         )
         if not any(list(parts.get(key) or []) for key in parts):
             return [], {}
 
         raw_leftover = [dict(item) for item in list(preserved_raw_messages or []) if isinstance(item, dict)]
+        if append_notice_context is not None:
+            # 压缩后正文已重写：只把 live 通知留在摘要块之前，且跳过仍能在
+            # 保留尾部里看到的原文，避免同一条通知一份 user 正文加一份尾块。
+            visible_user_messages = [
+                str(item.get('content') or '').strip()
+                for item in [*list(parts.get("recent_tail") or []), *raw_leftover]
+                if isinstance(item, dict)
+                and str(item.get('role') or '').strip().lower() == 'user'
+            ]
+            notice_tail = build_append_notice_tail_messages(
+                append_notice_context,
+                visible_user_messages=visible_user_messages,
+            )
+        else:
+            notice_tail = [
+                dict(item)
+                for item in list(
+                    live_notice_tail_messages
+                    if live_notice_tail_messages is not None
+                    else (parts.get("append_notice_tail") or [])
+                )
+                if isinstance(item, dict)
+            ]
         compacted_payload = {
             "kind": "node_token_compaction_llm" if str(compressed_text or "").strip() else "node_send_token_compaction",
             "node_id": str(node_id or "").strip(),
             "history_message_count": len(list(parts.get("compressible_history") or [])),
             "compacted_message_count": len(list(parts.get("compressible_history") or [])),
             "retained_recent_tail_count": len(list(parts.get("recent_tail") or [])),
-            "append_notice_tail_count": len(list(parts.get("append_notice_tail") or [])),
+            "append_notice_tail_count": len(notice_tail),
         }
         if raw_leftover:
             # 分块没压中的原始历史留在请求体里，条数进块元数据：下一跳的规划器按"还没压
@@ -6577,7 +6639,7 @@ class ReActToolLoop:
         rewritten = [
             *list(parts.get("system_prefix") or []),
             *list(parts.get("bootstrap_user") or []),
-            *list(parts.get("append_notice_tail") or []),
+            *notice_tail,
             compacted_block,
             *raw_leftover,
             *cls._bound_node_compaction_tail_messages(parts.get("recent_tail")),
@@ -6614,6 +6676,53 @@ class ReActToolLoop:
                 )
         return records
 
+    def _node_append_notice_context(self, *, node_id: str) -> dict[str, Any]:
+        store = getattr(self._log_service, '_store', None)
+        getter = getattr(store, 'get_node', None) if store is not None else None
+        if not callable(getter):
+            return {}
+        node = getter(str(node_id or '').strip())
+        if node is None or not isinstance(getattr(node, 'metadata', None), dict):
+            return {}
+        return normalize_append_notice_context(node.metadata.get(APPEND_NOTICE_CONTEXT_KEY))
+
+    def _node_live_notice_ids(self, *, node_id: str) -> set[str]:
+        return live_append_notice_ids(self._node_append_notice_context(node_id=node_id))
+
+    def _node_notice_context_stats(self, *, node_id: str) -> dict[str, int]:
+        context = self._node_append_notice_context(node_id=node_id)
+        archived = archived_consumed_notice_count(context)
+        return {
+            'live_notice_count': len(live_append_notice_ids(context)),
+            'archived_consumed_count': archived,
+            'dropped_consumed_count': archived,
+        }
+
+    def _prune_node_notice_context_segments(
+        self,
+        *,
+        node_id: str,
+        live_notice_ids: set[str],
+    ) -> dict[str, int]:
+        updater = getattr(self._log_service, 'update_node_metadata', None)
+        if not callable(updater):
+            return {}
+        result: dict[str, int] = {}
+
+        def _mutate(metadata: dict[str, Any]) -> dict[str, Any]:
+            context = normalize_append_notice_context(metadata.get(APPEND_NOTICE_CONTEXT_KEY))
+            pruned = prune_append_notice_context_segments(
+                context,
+                live_notice_ids=live_notice_ids,
+            )
+            metadata[APPEND_NOTICE_CONTEXT_KEY] = pruned
+            result['segments_before'] = len(list(context.get('compression_segments') or []))
+            result['segments_after'] = len(list(pruned.get('compression_segments') or []))
+            return metadata
+
+        updater(str(node_id or '').strip(), _mutate)
+        return result
+
     def _note_node_compression_notice_preservation(
         self,
         *,
@@ -6628,6 +6737,7 @@ class ReActToolLoop:
         要求此后每跳占位（本次样本 1,567 字符），直到被 supersede 或下一次压缩另立段。
         """
         probe = score_append_notice_preservation(compressed_text, records)
+        probe.update(self._node_notice_context_stats(node_id=node_id))
         if int(probe.get('miss_count') or 0) <= 0:
             return probe
         updater = getattr(self._log_service, 'update_node_metadata', None)
@@ -6847,11 +6957,14 @@ class ReActToolLoop:
                         "chunk_planned": int(helper_call.get('chunk_count') or 0),
                     }
                 }
+            live_notice_ids = self._node_live_notice_ids(node_id=node_id)
             rewritten, compact_payload = self._rewrite_request_messages_for_token_compaction(
                 node_id=node_id,
                 request_messages=messages,
                 compressed_text=compressed_text,
                 preserved_raw_messages=list(helper_call.get('deferred_raw_messages') or []),
+                live_notice_ids=live_notice_ids,
+                append_notice_context=self._node_append_notice_context(node_id=node_id),
             )
             if not rewritten:
                 return {
@@ -6921,8 +7034,11 @@ class ReActToolLoop:
         场景为部分复用，见 `_split_request_messages_for_token_compaction`）。空摘要
         按节点普通路径语义重试（上限 `_PROVIDER_RETRY_LIMIT`）；单发请求自身超窗
         时走分块压缩。"""
+        must_preserve_records = self._node_compression_must_preserve_records(node_id=node_id)
+        live_notice_ids = self._node_live_notice_ids(node_id=node_id)
         parts = self._split_request_messages_for_token_compaction(
             request_messages=request_messages,
+            live_notice_ids=live_notice_ids,
         )
         older_history_messages = [
             dict(item)
@@ -6951,7 +7067,6 @@ class ReActToolLoop:
         instruction_text = _NODE_TOKEN_COMPRESSION_INSTRUCTION_TEMPLATE.format(
             task_goal=task_goal or "（未提供）"
         )
-        must_preserve_records = self._node_compression_must_preserve_records(node_id=node_id)
         must_preserve_block = render_append_notice_must_preserve_block(must_preserve_records)
         if must_preserve_block:
             # 机器取值的必须保留段：任务目标取的是建任务时的 goal，不点名这些要求，
@@ -7950,6 +8065,7 @@ class ReActToolLoop:
                         "",
                         compression_failure,
                     )
+                live_notice_ids = self._node_live_notice_ids(node_id=node_id)
                 if dict(compression_helper_call or {}):
                     token_preflight_diagnostics["merge_pass_applied"] = bool(
                         compression_helper_call.get("merge_pass_applied")
@@ -7967,9 +8083,15 @@ class ReActToolLoop:
                                 compression_stage_id=f'token-compact:{node_id}:{history_count}',
                             )
                         )
+                    else:
+                        # 没有 live 通知时也留一组读数：这一跳的"退场了多少"是压缩效果的一部分。
+                        token_preflight_diagnostics['notice_preservation'] = (
+                            self._node_notice_context_stats(node_id=node_id)
+                        )
                 compressible_history = list(
                     (self._split_request_messages_for_token_compaction(
                         request_messages=request_messages,
+                        live_notice_ids=live_notice_ids,
                     ) or {}).get('compressible_history') or []
                 )
                 if not compressible_history:
@@ -7993,8 +8115,25 @@ class ReActToolLoop:
                     request_messages=request_messages,
                     compressed_text=compressed_text,
                     preserved_raw_messages=list(compression_helper_call.get('deferred_raw_messages') or []),
+                    live_notice_ids=live_notice_ids,
+                    append_notice_context=self._node_append_notice_context(node_id=node_id),
                 )
                 request_messages = rewritten_messages
+                pruned_segments = self._prune_node_notice_context_segments(
+                    node_id=node_id,
+                    live_notice_ids=live_notice_ids,
+                )
+                notice_stats = self._node_notice_context_stats(node_id=node_id)
+                logger.info(
+                    'node notice tail pruned: task=%s node=%s retained=%s archived_consumed=%s '
+                    'segments=%s->%s',
+                    task_id,
+                    node_id,
+                    int(notice_stats.get('live_notice_count') or 0),
+                    int(notice_stats.get('archived_consumed_count') or 0),
+                    int(pruned_segments.get('segments_before') or 0),
+                    int(pruned_segments.get('segments_after') or 0),
+                )
                 pre_compaction_snapshot = dict(token_preflight_diagnostics)
                 rewritten_estimate_payload = self._estimate_node_send_preflight_tokens(
                     task_id=task_id,
@@ -10088,6 +10227,16 @@ class ReActToolLoop:
                 f'node={runtime_context.get("node_id")} dropped={dropped} kept={len(kept)}'
             )
         return kept
+
+    def _notice_index_message(self, *, runtime_context: dict[str, Any]) -> dict[str, Any] | None:
+        store = getattr(self._log_service, '_store', None)
+        getter = getattr(store, 'get_node', None) if store is not None else None
+        if not callable(getter):
+            return None
+        node = getter(str(runtime_context.get('node_id') or '').strip())
+        if node is None or not isinstance(getattr(node, 'metadata', None), dict):
+            return None
+        return build_notice_index_message(node.metadata.get(APPEND_NOTICE_CONTEXT_KEY))
 
     @staticmethod
     def _prompt_message_records(messages: list[dict[str, Any]] | None) -> list[dict[str, Any]]:

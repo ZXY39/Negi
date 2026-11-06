@@ -193,6 +193,7 @@ function buildExecutionTreeFromSnapshot(
         taskPaused,
         pauseReason: String(snapshotNode.pause_reason || "").trim(),
         phase: String(liveFrame?.phase || "").trim().toLowerCase(),
+        standby: !!snapshotNode.continuous && !!snapshotNode.wait_external,
     });
     // 检验节点常驻显示后，"活跃"必须按真实在执行判定，否则每个未派发的检验节点
     // 都会被计入头部计数。
@@ -365,7 +366,7 @@ function effectiveTreeNodePaused(node, taskPaused = taskPauseDisplayActive()) {
     return !isTerminalTreeNodeStatus(status) && (taskPaused || !!node?.is_paused);
 }
 
-function resolveTreeNodeStatusLabel(status, { kind = "", inTurn = false, modelInFlight = false, inspectionPending = false, isPaused = false, taskPaused = false, pauseReason = "", phase = "" } = {}) {
+function resolveTreeNodeStatusLabel(status, { kind = "", inTurn = false, modelInFlight = false, inspectionPending = false, isPaused = false, taskPaused = false, pauseReason = "", phase = "", standby = false } = {}) {
     const normalizedStatus = String(status || "").trim().toLowerCase() || "unknown";
     if (taskPaused && !isTerminalTreeNodeStatus(normalizedStatus)) {
         return {
@@ -391,6 +392,9 @@ function resolveTreeNodeStatusLabel(status, { kind = "", inTurn = false, modelIn
         };
     }
     const normalizedPhase = String(phase || "").trim().toLowerCase();
+    if (normalizedPhase === "waiting_explicit" && standby) {
+        return { visualState: "standby", displayState: "\u5f85\u547d" };
+    }
     if (normalizedPhase === "waiting_explicit") {
         return { visualState: "waiting", displayState: "\u7b49\u5f85\uff08\u663e\u5f0f\uff09" };
     }

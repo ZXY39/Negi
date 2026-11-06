@@ -294,6 +294,10 @@ class RuntimeAgentSession:
         self._frontdoor_turn_usage: dict[str, dict[str, int]] = {}
         self._active_batch_id: str | None = None
         self._active_user_batch_inputs: list[UserInputMessage] = []
+        # 接棒任务（唤醒/压缩/重连结束后替队列起回合）在本会话内单实例：
+        # 多个触发点只合并成一次检查，不叠加模型轮次。
+        self._queued_follow_up_dispatch_task: asyncio.Task[Any] | None = None
+        self._queued_follow_up_dispatch_sources: set[str] = set()
         self._last_verified_task_ids: list[str] = []
         self._last_dispatched_task_ids: list[str] = []
         self._assistant_stream_seq: int = 0
@@ -4774,14 +4778,17 @@ class RuntimeAgentSession:
         if not normalized_inputs:
             raise ValueError("prompt_batch_requires_messages")
         combined_query_text = self._batch_query_text(normalized_inputs)
-        batch_id = self._new_batch_id()
-        self._configure_user_batch(normalized_inputs, batch_id=batch_id)
         last_input = normalized_inputs[-1]
-        last_metadata = dict(last_input.metadata or {})
-        if combined_query_text:
-            last_metadata["web_ceo_batch_query_text"] = combined_query_text
-            last_input.metadata = last_metadata
         async with self._turn_lock:
+            # 批次上下文是共享运行态：写它必须与回合同锁。锁外配置会让等锁的第二批
+            # 在第一批还没收尾时就覆盖 `_active_user_batch_inputs`——第一批的恢复、
+            # 转录升态和工具边界于是都按第二批判，两个回合互相踩。
+            batch_id = self._new_batch_id()
+            self._configure_user_batch(normalized_inputs, batch_id=batch_id)
+            last_metadata = dict(last_input.metadata or {})
+            if combined_query_text:
+                last_metadata["web_ceo_batch_query_text"] = combined_query_text
+                last_input.metadata = last_metadata
             return await self._prompt_locked(
                 last_input,
                 persist_transcript=persist_transcript,
@@ -5202,6 +5209,14 @@ class RuntimeAgentSession:
             return 0
         answered_turn_ids = self._answered_turn_ids_from_rows(rows)
         failed_turn_ids = self._runtime_error_reply_turn_ids(rows)
+        # 本轮自己的批次不能接回：它已经被 `_run_user_turn` 的 drain 接走，转录行要等
+        # 本轮答完才升 completed，这期间按 pending 接回会让本轮误以为还有一条补充，
+        # 在第一批工具结束后静默收尾，同一句话再被下一轮问一遍。
+        active_turn_ids = {
+            str((getattr(item, "metadata", None) or {}).get(_TRANSCRIPT_TURN_ID_KEY) or "").strip()
+            for item in (getattr(self, "_active_user_batch_inputs", None) or [])
+            if isinstance(item, UserInputMessage)
+        }
         restored: list[UserInputMessage] = []
         settled_failed = 0
         for row in rows:
@@ -5211,6 +5226,8 @@ class RuntimeAgentSession:
             if str(metadata.get(_TRANSCRIPT_STATE_KEY) or "").strip().lower() != _TRANSCRIPT_STATE_PENDING:
                 continue
             turn_id = str(metadata.get(_TRANSCRIPT_TURN_ID_KEY) or "").strip()
+            if turn_id and turn_id in active_turn_ids:
+                continue
             if turn_id and turn_id in failed_turn_ids:
                 if self._mark_transcript_user_state(
                     persisted_session,
@@ -5265,97 +5282,323 @@ class RuntimeAgentSession:
         """下一个可见用户回合或新一轮压缩解除失败保持。"""
         setattr(self, QUEUED_FOLLOW_UP_COMPRESSION_FAILURE_HOLD_ATTR, False)
 
+    def _queued_follow_up_dispatch_blocker(self) -> str:
+        """空闲排水此刻为什么不能起回合。空串=可以。
+
+        顺序即优先级：运行中/压缩/锁被持有 → 压缩失败保持 → 审批 → 手动暂停。
+        手动暂停的判据要留到下一次可见回合：`pause(manual=True)` 收尾会把
+        `_state.paused` 清回 false，只靠状态位判不出来；`_last_stop_reason`
+        由下一个可见回合在 `_prompt_locked` 开头复位。
+        """
+        hold = self.frontdoor_inbound_hold()
+        if hold:
+            return f"held:{hold}"
+        if getattr(self, QUEUED_FOLLOW_UP_COMPRESSION_FAILURE_HOLD_ATTR, False):
+            return "held:compression_failed"
+        if list(self._state.pending_interrupts or []):
+            return "tool_approval_pending"
+        if bool(getattr(self._state, "paused", False)) or str(
+            getattr(self._state, "status", "") or ""
+        ).strip().lower() == "paused":
+            return "paused"
+        if str(getattr(self, "_last_stop_reason", "") or "").strip() == "user_pause":
+            return "paused"
+        return ""
+
     async def dispatch_queued_follow_ups_if_idle(self, *, source: str = "") -> dict[str, Any]:
-        """会话回到空闲时把排队中的消息发出去。返回 {dispatched, reason}。
+        """会话回到空闲时把排队中的消息发出去。返回派发读数。
 
         排水通道本来只有两条，且都长在请求处理里：WS 的回合链
         （api/websocket_ceo `_run_user_turn`）和 external 的 `_drain_queued_follow_ups`。
         于是"没有客户端在等回包"的场合——手动压缩刚结束、浏览器刷新过、进程重启过——
         排队的消息会一直躺在队列里。这里补第三条通道：谁让会话变空闲，谁在自己的收尾调用它。
 
+        一次调用会连续接走多批：正常收尾后复查队列，期间新到的消息立刻成为下一批；
+        一批失败、被暂停/审批/压缩挡住就停手，不把失败批次当热重试。
+
         出站沿用渠道自己那条路：`make_session_event_relay` 只要 session_key 和 turn_id
         就能把 reply.final 发到该会话的 hub，QQ 桥的 SSE pump 照收（cron 就是这个形状）。
         web 会话不需要额外投递：WS 的订阅是 socket 级而非按消息的，转录与会话摘要负责重连。
+        外部会话还会在 `ExternalTurnService` 里登记这次批次，状态/暂停接口按同一个
+        turn_id 找得到它。
 
-        失败时把条目放回队列（转录那行仍是 pending，重启后也会被重新接回），因为这三个
-        缝都是低频事件，不会形成重试热循环。
-
-        手动压缩失败不等同于空闲边界：失败保持期间这里直接拒绝，排队消息留在队列里，
-        由操作员的下一条消息或重新压缩带出去，失败处不开新回合。"""
+        异常路径按条目在转录里的真实状态结算：仍是 pending（或没有 durable 行）的
+        条目回到队首，`completed`/`failed`/`paused`/`interrupted` 保留终态不重投。
+        取消同样不重投：整批已经交给本回合，暂停/中断交给既有恢复路径。"""
         session_key = str(self._state.session_key or "").strip()
-        hold = self.frontdoor_inbound_hold()
-        if hold:
-            return {"dispatched": 0, "reason": f"held:{hold}", "source": source}
-        if getattr(self, QUEUED_FOLLOW_UP_COMPRESSION_FAILURE_HOLD_ATTR, False):
-            return {"dispatched": 0, "reason": "held:compression_failed", "source": source}
-        if list(self._state.pending_interrupts or []):
-            return {"dispatched": 0, "reason": "tool_approval_pending", "source": source}
-        queued = self.drain_queued_follow_up_messages()
-        if not queued:
-            return {"dispatched": 0, "reason": "empty", "source": source}
-
-        turn_id = uuid.uuid4().hex
-        unsubscribe: Callable[[], Any] | None = None
-        hub: Any = None
-        try:
-            from g3ku.runtime.external_events import get_session_event_hub, make_session_event_relay
-
-            # 排队补发的回复同样要有兜底：这条车道没有 HTTP 提交方，external_key 只能
-            # 从注册表取（取不到就是孤儿转录，只走内存投递）。
-            route_key = ""
-            try:
-                from g3ku.runtime.external_sessions import get_external_session_registry
-
-                entry = get_external_session_registry().get_by_session_key(session_key)
-                route_key = str(getattr(entry, "external_key", "") or "")
-            except Exception:
-                route_key = ""
-            relay = make_session_event_relay(
-                session_key, turn_id=turn_id, external_key=route_key
-            )
-            unsubscribe = self.subscribe(relay)
-            hub = get_session_event_hub(session_key)
-            hub.publish("turn.started", turn_id=turn_id)
-        except Exception:
-            logger.debug("queued follow-up relay unavailable for {}", session_key)
-
-        try:
-            try:
-                result = await self.prompt_batch(queued)
-            finally:
-                # 订阅必须随这次派发结束：留在 self._listeners 里会让之后每一个回合的
-                # 事件继续往这个已终局的 turn_id 上灌。
-                if callable(unsubscribe):
-                    try:
-                        unsubscribe()
-                    except Exception:
-                        logger.debug("queued follow-up relay unsubscribe failed for {}", session_key)
-        except Exception as exc:
-            self._restore_queued_follow_ups_front(queued)
-            if hub is not None:
-                self._publish_queued_follow_up_terminal(hub, turn_id, failed=True)
-            logger.warning(
-                "Queued follow-up dispatch failed for {} ({} message(s) restored): {}",
-                session_key,
-                len(queued),
-                exc,
-            )
-            return {"dispatched": 0, "reason": "dispatch_failed", "source": source}
-        if hub is not None:
-            self._publish_queued_follow_up_terminal(hub, turn_id, failed=False)
-        logger.info(
-            "Dispatched {} queued follow-up message(s) for {} ({})",
-            len(queued),
-            session_key,
-            source or "idle",
-        )
-        return {
-            "dispatched": len(queued),
-            "reason": "",
-            "source": source,
-            "turn_id": turn_id,
-            "output": str(getattr(result, "output", "") or ""),
+        counters = {
+            "queued": 0,
+            "started": 0,
+            "completed": 0,
+            "failed": 0,
+            "cancelled": 0,
+            "restored": 0,
         }
+        turn_ids: list[str] = []
+        output = ""
+        while True:
+            blocker = self._queued_follow_up_dispatch_blocker()
+            if blocker:
+                return self._queued_follow_up_dispatch_result(
+                    counters,
+                    reason=blocker,
+                    source=source,
+                    turn_ids=turn_ids,
+                    output=output,
+                )
+            queued = self.drain_queued_follow_up_messages()
+            if not queued:
+                return self._queued_follow_up_dispatch_result(
+                    counters,
+                    reason="" if counters["started"] else "empty",
+                    source=source,
+                    turn_ids=turn_ids,
+                    output=output,
+                )
+            # 队列被接走这一刻广播一次 state：候选条来自 state 帧的整表替换，
+            # 只在回合收尾才推会让条目在整段回合里挂着可点，而服务端早已不持有它。
+            await self._emit_queued_follow_up_state_snapshot(
+                on_cancel=lambda: self._restore_queued_follow_ups_front(queued)
+            )
+
+            turn_id = self._user_input_turn_id(queued[-1]) or uuid.uuid4().hex
+            counters["queued"] += len(queued)
+            unsubscribe: Callable[[], Any] | None = None
+            hub: Any = None
+            external_service: Any = None
+            try:
+                from g3ku.runtime.external_events import (
+                    get_session_event_hub,
+                    make_session_event_relay,
+                )
+
+                # 排队补发的回复同样要有兜底：这条车道没有 HTTP 提交方，external_key 只能
+                # 从注册表取（取不到就是孤儿转录，只走内存投递）。
+                route_key = ""
+                try:
+                    from g3ku.runtime.external_sessions import get_external_session_registry
+
+                    entry = get_external_session_registry().get_by_session_key(session_key)
+                    route_key = str(getattr(entry, "external_key", "") or "")
+                except Exception:
+                    route_key = ""
+                relay = make_session_event_relay(
+                    session_key, turn_id=turn_id, external_key=route_key
+                )
+                unsubscribe = self.subscribe(relay)
+                hub = get_session_event_hub(session_key)
+                hub.publish("turn.started", turn_id=turn_id)
+            except Exception:
+                logger.debug("queued follow-up relay unavailable for {}", session_key)
+            external_service = self._register_queued_follow_up_external_turn(
+                turn_id,
+                source=source,
+            )
+            counters["started"] += 1
+
+            try:
+                try:
+                    result = await self.prompt_batch(queued)
+                finally:
+                    # 订阅必须随这次派发结束：留在 self._listeners 里会让之后每一个回合的
+                    # 事件继续往这个已终局的 turn_id 上灌。
+                    if callable(unsubscribe):
+                        try:
+                            unsubscribe()
+                        except Exception:
+                            logger.debug(
+                                "queued follow-up relay unsubscribe failed for {}",
+                                session_key,
+                            )
+            except asyncio.CancelledError:
+                # 取消不重投：整批已经交给本回合；暂停/中断的输入由既有恢复路径接手。
+                # 每个 started 仍必须有一个终态，否则渠道 pump 会把这次派发当成悬挂回合。
+                counters["cancelled"] += 1
+                self._publish_queued_follow_up_terminal(hub, turn_id, status="cancelled")
+                self._settle_queued_follow_up_external_turn(
+                    external_service, turn_id, status="cancelled"
+                )
+                logger.info(
+                    "Queued follow-up dispatch cancelled for {} ({} message(s)); "
+                    "claimed batch left to the existing recovery lane",
+                    session_key,
+                    len(queued),
+                )
+                raise
+            except Exception as exc:
+                restored = self._restore_unclaimed_queued_follow_ups(queued)
+                counters["restored"] += len(restored)
+                counters["failed"] += 1
+                self._publish_queued_follow_up_terminal(hub, turn_id, status="failed")
+                self._settle_queued_follow_up_external_turn(
+                    external_service, turn_id, status="failed"
+                )
+                if restored:
+                    # 失败回合自己的 state 帧发生在回挂之前；回挂后要再推一帧，
+                    # 否则候选条要等下一次无关事件才重新出现。
+                    await self._emit_queued_follow_up_state_snapshot()
+                logger.warning(
+                    "Queued follow-up dispatch failed for {} ({} of {} message(s) restored): {}",
+                    session_key,
+                    len(restored),
+                    len(queued),
+                    exc,
+                )
+                return self._queued_follow_up_dispatch_result(
+                    counters,
+                    reason="dispatch_failed",
+                    source=source,
+                    turn_ids=turn_ids,
+                    output=output,
+                )
+
+            counters["completed"] += len(queued)
+            turn_ids.append(turn_id)
+            output = str(getattr(result, "output", "") or "")
+            self._publish_queued_follow_up_terminal(hub, turn_id, status="completed")
+            self._settle_queued_follow_up_external_turn(
+                external_service, turn_id, status="completed"
+            )
+            logger.info(
+                "Dispatched {} queued follow-up message(s) for {} ({})",
+                len(queued),
+                session_key,
+                source or "idle",
+            )
+            # 正常收尾后回到循环顶部复查：期间新入队的消息成为下一批。
+            # 下一批不等待任何请求方，因此这里没有额外 await 窗口。
+
+    async def _emit_queued_follow_up_state_snapshot(
+        self,
+        *,
+        on_cancel: Callable[[], Any] | None = None,
+    ) -> None:
+        emit_state = getattr(self, "_emit_state_snapshot", None)
+        if not callable(emit_state):
+            return
+        try:
+            await emit_state()
+        except asyncio.CancelledError:
+            # 还没发 turn.started 就被取消：整批算未认领，按原 ID 回到队首。
+            if callable(on_cancel):
+                on_cancel()
+            raise
+        except Exception:
+            logger.debug(
+                "queued follow-up state snapshot skipped for {}",
+                self._state.session_key,
+            )
+
+    @staticmethod
+    def _queued_follow_up_dispatch_result(
+        counters: dict[str, int],
+        *,
+        reason: str,
+        source: str,
+        turn_ids: list[str],
+        output: str,
+    ) -> dict[str, Any]:
+        return {
+            "dispatched": int(counters.get("completed") or 0),
+            "reason": reason,
+            "source": source,
+            "turn_id": turn_ids[-1] if turn_ids else "",
+            "turn_ids": list(turn_ids),
+            "output": output,
+            "queued": int(counters.get("queued") or 0),
+            "started": int(counters.get("started") or 0),
+            "completed": int(counters.get("completed") or 0),
+            "failed": int(counters.get("failed") or 0),
+            "cancelled": int(counters.get("cancelled") or 0),
+            "restored": int(counters.get("restored") or 0),
+            "batches": int(counters.get("started") or 0),
+        }
+
+    def _restore_unclaimed_queued_follow_ups(
+        self,
+        queued: list[UserInputMessage],
+    ) -> list[UserInputMessage]:
+        """失败后只把从未被本回合接走的条目放回队首。
+
+        判据读转录真实状态，不读入队时复制的 metadata：真实错误路径已经把本批
+        用户行落 `failed`（`_settle_unanswered_user_inputs`），把它们再排一次就是
+        同一句话问两遍；暂停/中断行属于既有恢复路径，也不能当新输入重跑副作用。
+        没有 durable 行（或没有 turn_id）的条目按未认领处理，宁可恢复一次也不吞消息。
+        """
+        states = self._queued_follow_up_transcript_states()
+        restored: list[UserInputMessage] = []
+        for item in list(queued or []):
+            if not isinstance(item, UserInputMessage):
+                continue
+            turn_id = self._user_input_turn_id(item)
+            state = str(states.get(turn_id) or "").strip().lower() if turn_id else ""
+            if state and state != _TRANSCRIPT_STATE_PENDING:
+                continue
+            restored.append(item)
+        self._restore_queued_follow_ups_front(restored)
+        return restored
+
+    def _queued_follow_up_transcript_states(self) -> dict[str, str]:
+        session_key = str(self._state.session_key or "").strip()
+        if not session_key or getattr(self._loop, "sessions", None) is None:
+            return {}
+        try:
+            persisted_session = self._loop.sessions.get_or_create(session_key)
+            rows = list(getattr(persisted_session, "messages", None) or [])
+        except Exception:
+            return {}
+        states: dict[str, str] = {}
+        for row in rows:
+            if not isinstance(row, dict) or str(row.get("role") or "").strip().lower() != "user":
+                continue
+            metadata = row.get("metadata")
+            if not isinstance(metadata, dict):
+                continue
+            turn_id = str(metadata.get(_TRANSCRIPT_TURN_ID_KEY) or "").strip()
+            if turn_id:
+                states[turn_id] = self._message_transcript_state(row).strip().lower()
+        return states
+
+    def _register_queued_follow_up_external_turn(self, turn_id: str, *, source: str) -> Any | None:
+        """外部会话的排队批次也进回合登记，状态/暂停接口才能按 turn_id 找到它。"""
+        session_key = str(self._state.session_key or "").strip()
+        if not session_key.startswith("ext:"):
+            return None
+        try:
+            from g3ku.runtime.api.external_turns import get_external_turn_service
+            from g3ku.runtime.external_sessions import get_external_session_registry
+
+            entry = get_external_session_registry().get_by_session_key(session_key)
+            if entry is None:
+                return None
+            service = get_external_turn_service()
+            service.register_queued_batch_turn(
+                turn_id=turn_id,
+                session_key=session_key,
+                bridge_id=str(getattr(entry, "bridge_id", "") or ""),
+                external_key=str(getattr(entry, "external_key", "") or ""),
+                source=source,
+            )
+            return service
+        except Exception:
+            logger.debug(
+                "queued follow-up external turn registration skipped for {}", session_key
+            )
+            return None
+
+    @staticmethod
+    def _settle_queued_follow_up_external_turn(
+        service: Any,
+        turn_id: str,
+        *,
+        status: str,
+    ) -> None:
+        if service is None:
+            return
+        try:
+            service.settle_queued_batch_turn(turn_id, status=status)
+        except Exception:
+            logger.debug("queued follow-up external turn settlement skipped for {}", turn_id)
 
     def _restore_queued_follow_ups_front(self, queued: list[UserInputMessage]) -> None:
         restored = [
@@ -5369,12 +5612,72 @@ class RuntimeAgentSession:
         self._state.queued_follow_up_messages[:] = [*restored, *remaining]
 
     @staticmethod
-    def _publish_queued_follow_up_terminal(hub: Any, turn_id: str, *, failed: bool) -> None:
+    def _publish_queued_follow_up_terminal(
+        hub: Any,
+        turn_id: str,
+        *,
+        status: str,
+    ) -> None:
         """渠道契约：每个回合恰好一个终局事件，派发出去的回合也不能只发 started。"""
+        if hub is None:
+            return
         try:
-            hub.publish("turn.failed" if failed else "turn.completed", turn_id=turn_id)
+            if status == "failed":
+                hub.publish("turn.failed", turn_id=turn_id)
+            elif status == "cancelled":
+                hub.publish("turn.completed", turn_id=turn_id, cancelled=True)
+            else:
+                hub.publish("turn.completed", turn_id=turn_id)
         except Exception:
             return
+
+    def queued_follow_up_dispatch_pending(self) -> bool:
+        task = getattr(self, "_queued_follow_up_dispatch_task", None)
+        return isinstance(task, asyncio.Task) and not task.done()
+
+    def request_queued_follow_up_dispatch(self, *, source: str = "") -> asyncio.Task[Any] | None:
+        """请本会话的接棒任务去排水；已有在跑的任务就只记一次来源。
+
+        单实例的原因：唤醒、cron、重连、压缩收尾可能在同一个空闲窗口各触发一次，
+        每次各起一个任务会叠加模型轮次（后到的那个还会在别人持有批次时等锁）。
+        执行时再问 hold 与队列，所以这里不预先掏空队列。
+
+        任务登记在 `_active_tasks` 的会话键下，pause/cancel/shutdown 已有的
+        `cancel_session_tasks` 因此能停掉它，不需要另建停止通道。
+        """
+        existing = getattr(self, "_queued_follow_up_dispatch_task", None)
+        if isinstance(existing, asyncio.Task) and not existing.done():
+            if source:
+                self._queued_follow_up_dispatch_sources.add(source)
+            return existing
+        task = asyncio.create_task(self._run_queued_follow_up_dispatch(source=source))
+        self._queued_follow_up_dispatch_task = task
+        self._queued_follow_up_dispatch_sources = {source} if source else set()
+        register = getattr(self._loop, "_register_active_task", None)
+        if callable(register):
+            register(self._state.session_key, task)
+        task.add_done_callback(self._clear_queued_follow_up_dispatch_task)
+        return task
+
+    async def _run_queued_follow_up_dispatch(self, *, source: str) -> None:
+        try:
+            await self.dispatch_queued_follow_ups_if_idle(source=source)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "Queued follow-up handoff failed for {}", self._state.session_key
+            )
+
+    def _clear_queued_follow_up_dispatch_task(self, task: asyncio.Task[Any]) -> None:
+        if getattr(self, "_queued_follow_up_dispatch_task", None) is task:
+            self._queued_follow_up_dispatch_task = None
+            self._queued_follow_up_dispatch_sources = set()
+        if not task.cancelled():
+            try:
+                task.exception()
+            except Exception:
+                pass
 
     async def continue_(self, *, live_context: dict[str, str] | None = None) -> RunResult:
         return await self.prompt(self._last_prompt, live_context=live_context)

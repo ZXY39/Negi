@@ -5,7 +5,7 @@ const TASK_SUMMARY_IDLE_RECONCILE_MS = 15_000;
 
 
 function taskStatusLabel(task) {
-    return ({ in_progress: "\u8fd0\u884c", success: "\u6210\u529f", failed: "\u5931\u8d25", blocked: "\u6682\u505c", unpassed: "\u672a\u901a\u8fc7", unknown: "\u672a\u77e5" })[taskStatusKey(task)] || "\u672a\u77e5";
+    return ({ in_progress: "\u8fd0\u884c", success: "\u6210\u529f", failed: "\u5931\u8d25", blocked: "\u6682\u505c", unpassed: "\u672a\u901a\u8fc7", standby: "\u5f85\u547d", unknown: "\u672a\u77e5" })[taskStatusKey(task)] || "\u672a\u77e5";
 }
 
 function statusBucketMatches(task, bucketKey) {
@@ -17,6 +17,7 @@ function statusBucketMatches(task, bucketKey) {
     if (bucketKey === "unpassed") return status === "unpassed";
     if (bucketKey === "unread") return !!task?.is_unread;
     if (bucketKey === "running") return status === "in_progress";
+    if (bucketKey === "standby") return status === "standby";
     return false;
 }
 

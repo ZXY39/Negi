@@ -821,20 +821,36 @@ async function submitNodeNoticeComposer() {
     send.disabled = true;
     send.dataset.busy = "true";
     try {
-        await ApiClient.appendTaskNodeNotice(taskId, nodeId, message);
+        const receipt = await ApiClient.appendTaskNodeNotice(taskId, nodeId, message);
         input.value = "";
-        showToast({
-            title: "消息已发送",
-            text: `已向节点 ${nodeId} 发送消息`,
-            kind: "success",
-        });
+        const targetState = String(receipt?.target_state || "").trim();
+        const deduplicated = String(receipt?.status || "").trim() === "deduplicated";
+        if (targetState === "waiting_acceptance") {
+            // 节点在等验收：消息只落箱，打回并重新激活后才会被读取。
+            showToast({
+                title: "已进入待处理",
+                text: "节点正在等验收，打回并重新激活后才会读取这条消息",
+                kind: "success",
+            });
+        } else {
+            showToast({
+                title: deduplicated ? "消息已在队列中" : "消息已发送",
+                text: deduplicated
+                    ? `节点 ${nodeId} 已有一条相同的待处理消息`
+                    : `已向节点 ${nodeId} 发送消息`,
+                kind: "success",
+            });
+        }
         await loadTaskTreeSnapshot(taskId);
         renderTree();
         const selected = findTreeNode(S.treeView, nodeId);
         if (selected) void showAgent(selected, { preserveViewState: true, forceRefresh: true });
         // 分发是异步的：POST 返回时新消息通常还没落到目标节点的消息列表，
         // 启动局部 settle 轮询，新消息一经记账即局部刷新展示（见下方实现）。
-        settleTaskNoticeAfterSend(taskId, nodeId, message);
+        // 待验收档不轮询：消息在打回前不会被消费，轮询只会和发送回执叠成两条浮层。
+        if (targetState !== "waiting_acceptance") {
+            settleTaskNoticeAfterSend(taskId, nodeId, message);
+        }
     } catch (error) {
         showToast({ title: "消息发送失败", text: error?.message || "提交未完成", kind: "error" });
     } finally {

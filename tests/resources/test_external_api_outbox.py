@@ -215,6 +215,119 @@ async def test_undeliverable_proactive_ack_wakes_session_and_records_capability(
 
 
 @pytest.mark.asyncio
+async def test_delivered_ack_with_attachment_failures_wakes_session_once(env, monkeypatch) -> None:
+    """正文送达、附件没到：ack 带 ``attachment_failures`` 时唤醒一次，重复 ack 不再唤醒。"""
+    registry, app = env
+    entry, _ = registry.resolve_or_create(
+        bridge_id="qq-official", external_key="qq:c2c:u3", chat_type="dm"
+    )
+    outbox_id = external_outbox.record_outbound_message(
+        session_key=entry.session_key,
+        external_key="qq:c2c:u3",
+        text="视频链接在这里",
+        event=external_outbox.REPLY_EVENT,
+    )
+
+    class _Heartbeat:
+        def __init__(self) -> None:
+            self.attachments: list[dict] = []
+            self.deliveries: list[dict] = []
+
+        def enqueue_delivery_failure(self, payload):
+            self.deliveries.append(dict(payload))
+            return True
+
+        def enqueue_attachment_failure(self, payload):
+            self.attachments.append(dict(payload))
+            return True
+
+    heartbeat = _Heartbeat()
+    monkeypatch.setattr(external_v1, "get_web_heartbeat_service", lambda: heartbeat)
+    failures = [
+        {
+            "name": "v02_notebook_p10.mp4",
+            "stage": "upload",
+            "attempts": 3,
+            "platform_code": 850012,
+            "platform_message": "x" * 300,
+        }
+    ]
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as http:
+        response = await http.post(
+            f"/api/v1/sessions/{entry.session_key}/outbox/{outbox_id}/ack",
+            json={"status": "delivered", "shape": "passive", "attachment_failures": failures},
+        )
+        body = response.json()
+        assert body["attachment_notice"] is True
+        assert heartbeat.deliveries == []
+        assert len(heartbeat.attachments) == 1
+        payload = heartbeat.attachments[0]
+        assert payload["session_id"] == entry.session_key
+        assert payload["outbox_id"] == outbox_id
+        assert payload["attachment_failures"][0]["name"] == "v02_notebook_p10.mp4"
+        # 服务端边界也截错误原文。
+        assert len(payload["attachment_failures"][0]["platform_message"]) == 200
+
+        duplicate = await http.post(
+            f"/api/v1/sessions/{entry.session_key}/outbox/{outbox_id}/ack",
+            json={"status": "delivered", "shape": "passive", "attachment_failures": failures},
+        )
+        assert duplicate.json()["attachment_notice"] is False
+        assert len(heartbeat.attachments) == 1
+
+
+@pytest.mark.asyncio
+async def test_delivery_and_attachment_failure_dedupe_prefixes_are_separate(env, monkeypatch) -> None:
+    """同一条 outbox 先判投递失败、再报附件失败：两个分支各唤醒一次，互不吃掉。"""
+    registry, app = env
+    entry, _ = registry.resolve_or_create(
+        bridge_id="qq-official", external_key="qq:group:g9", chat_type="group"
+    )
+    outbox_id = external_outbox.record_outbound_message(
+        session_key=entry.session_key,
+        external_key="qq:group:g9",
+        text="提醒",
+    )
+
+    class _Heartbeat:
+        def __init__(self) -> None:
+            self.attachments: list[dict] = []
+            self.deliveries: list[dict] = []
+
+        def enqueue_delivery_failure(self, payload):
+            self.deliveries.append(dict(payload))
+            return True
+
+        def enqueue_attachment_failure(self, payload):
+            self.attachments.append(dict(payload))
+            return True
+
+    heartbeat = _Heartbeat()
+    monkeypatch.setattr(external_v1, "get_web_heartbeat_service", lambda: heartbeat)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as http:
+        first = await http.post(
+            f"/api/v1/sessions/{entry.session_key}/outbox/{outbox_id}/ack",
+            json={"status": "undeliverable", "kind": "active_denied", "shape": "active"},
+        )
+        assert first.json()["failure_notice"] is True
+        second = await http.post(
+            f"/api/v1/sessions/{entry.session_key}/outbox/{outbox_id}/ack",
+            json={
+                "status": "delivered",
+                "shape": "passive",
+                "attachment_failures": [{"name": "a.docx", "stage": "upload"}],
+            },
+        )
+        assert second.json()["attachment_notice"] is True
+    assert len(heartbeat.deliveries) == 1
+    assert len(heartbeat.attachments) == 1
+
+
+@pytest.mark.asyncio
 async def test_active_delivery_success_clears_denied_capability(env) -> None:
     registry, app = env
     entry, _ = registry.resolve_or_create(

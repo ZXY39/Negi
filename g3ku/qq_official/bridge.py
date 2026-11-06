@@ -48,6 +48,7 @@ import re
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
@@ -131,6 +132,30 @@ _MAX_OUTBOUND_ATTACHMENT_BYTES = 10 * 1024 * 1024
 # 且只发生在带附件的那一发上。
 _MEDIA_UPLOAD_FIXED_BUDGET_SECONDS = 15.0
 _MEDIA_UPLOAD_MIN_THROUGHPUT_BYTES_PER_SECOND = 512 * 1024
+
+# 上传的失败是**单发级抖动**，不是持续故障：实测同一条入站（同一个 msg_id）连发三次，
+# 中间那一发被平台 500/850012 拒掉，前后两发都成功；另一段 16:10:55 失败、16:10:57
+# 的下一发就成功。1~3 秒的退避就覆盖得住这种抖动；持续几分钟的故障救不回来，那种
+# 由失败回灌（ack 带 `attachment_failures`）交给模型决定。重试只在这一个函数里收口，
+# 判定见 `_upload_media_data`：传输异常/超时、429、5xx、平台 code 850012 重试；
+# 其余 4xx（40093011 档位过大、40093010、413）换一次结果一样，不重试。
+_MEDIA_UPLOAD_MAX_ATTEMPTS = 3
+_MEDIA_UPLOAD_RETRY_DELAYS = (1.0, 3.0)
+# 一次 `deliver()` 内所有附件共用的退避预算：4 个文件最坏多花十几秒，而不是四倍。
+# 预算耗尽时剩余附件只发一发，失败照常回灌。
+_MEDIA_UPLOAD_RETRY_WAIT_BUDGET_SECONDS = 12.0
+
+# 签名媒体链接指向回环地址时，平台的 url 回源道在这台机器上必然 400/40093010：
+# 省掉这次注定失败、还要等 1~3 秒的往返，把失败原因如实交给回灌。
+_LOOPBACK_MEDIA_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _is_loopback_media_url(url: str) -> bool:
+    try:
+        host = str(urlparse(str(url or "")).hostname or "").strip().lower()
+    except ValueError:
+        return False
+    return host in _LOOPBACK_MEDIA_HOSTS
 
 # SDK 那枚默认 5 秒的超时对**文本消息**太紧：实测群聊一发被动回复的 POST 会跑过 5 秒，
 # SDK 于是吞掉超时返回 None，桥只能记一次「无回执」——平台其实收了（用户在群里看得到），
@@ -295,9 +320,11 @@ _ACTIVE_SEND_PER_MINUTE = 15
 _ACTIVE_SEND_PER_DAY = 1000
 _ACTIVE_SEND_WINDOW_SECONDS = 60.0
 
-# 不值得再花的投递预算：这三类失败重放多少次结果都一样，一次就够。
+# 不值得再花的投递预算：这几类失败重放多少次结果都一样，一次就够。
 # 其余（网络、无回执、429、5xx、文案认不出的 4xx）照旧吃满 5 次预算。
-_NON_RETRYABLE_SEND_KINDS = frozenset({"passive_expired", "active_denied", "quota_exhausted"})
+_NON_RETRYABLE_SEND_KINDS = frozenset(
+    {"passive_expired", "passive_exhausted", "passive_invalid", "active_denied", "quota_exhausted"}
+)
 
 # 桥侧周期 pending 对账：GET /outbox/pending 不再是启动一次性动作。服务端重启
 # 落在 cron 触发与产出之间时，启动预热会扑空（账本尚空），滞留推送稍后才入账
@@ -319,6 +346,82 @@ class DeliveryUnconfirmedError(RuntimeError):
     相同的答案，因此 pump 把带 ``outbox_id`` 的这类失败记进投递历史并跳过后续副本；
     连接建立前的失败（``ClientConnectorError`` 一类）照旧走重放重试，不受这道闸影响。
     """
+
+
+class MediaUploadError(RuntimeError):
+    """一发附件投递的终态失败，带着可以原样回灌给模型的事实。
+
+    ``stage`` 四档：``too_large``（本地 10MiB 封顶）/ ``download``（签名链接取不到
+    字节）/ ``upload``（平台媒体上传被拒或没有回执）/ ``media_message``（拿到
+    ``file_info`` 之后富媒体消息那一发失败）。``attempts`` 是这一发实际发了几次
+    （含首次）；``http_status`` / ``platform_code`` / ``platform_message`` 只在平台
+    给了对应读数时存在——传输异常那条只有异常文本。
+    """
+
+    def __init__(
+        self,
+        stage: str,
+        message: str,
+        *,
+        http_status: int | None = None,
+        platform_code: int | None = None,
+        platform_message: str = "",
+        attempts: int = 0,
+    ) -> None:
+        super().__init__(message)
+        self.stage = str(stage or "upload")
+        self.http_status = http_status
+        self.platform_code = platform_code
+        self.platform_message = str(platform_message or "")
+        self.attempts = int(attempts or 0)
+
+
+@dataclass(slots=True)
+class DeliveryResult:
+    """``deliver()`` 的回执：正文形状 + 需要回灌给模型的附件失败记录。
+
+    附件失败不再只是日志里的一行：正文已经送达时模型看不到"文件没到"，也就没有
+    机会重发或告知用户。``attachment_failures`` 由 pump 带进 outbox ack，服务端
+    据此唤醒会话；条目形状见 ``_deliver_attachment`` 的失败记录。
+    """
+
+    shape: str = ""
+    attachment_failures: list[dict[str, Any]] = field(default_factory=list)
+
+
+def _platform_error_fields(payload: dict[str, Any] | None, text: str) -> tuple[int | None, str]:
+    """从平台回包或 botpy 异常文本里取 ``(code, message)``；取不到就留空。"""
+    if isinstance(payload, dict):
+        try:
+            code = int(payload.get("code"))
+        except (TypeError, ValueError):
+            code = None
+        message = str(payload.get("message") or payload.get("msg") or "").strip()
+        if message or code is not None:
+            return code, message or str(text or "")[:200]
+    raw = str(text or "")
+    match = re.search(r"\b(\d{5,10})\b", raw)
+    return (int(match.group(1)) if match else None), raw[:200]
+
+
+def _upload_failure_parts(
+    http_status: int | None, platform_code: int | None, platform_message: str
+) -> str:
+    """回灌与日志共用的一行平台读数，不带任何签名 URL。"""
+    parts: list[str] = []
+    if http_status is not None:
+        parts.append(f"HTTP {http_status}")
+    if platform_code is not None:
+        parts.append(f"code={platform_code}")
+    if platform_message:
+        parts.append(f'"{platform_message}"')
+    return " ".join(parts) or "transport error"
+
+
+def _upload_failure_label(error: MediaUploadError) -> str:
+    return _upload_failure_parts(
+        error.http_status, error.platform_code, error.platform_message
+    )
 
 
 class ChannelSendError(RuntimeError):
@@ -346,7 +449,15 @@ class ChannelSendError(RuntimeError):
 
 
 # 平台文案里的确定性失败标记：认不出就不当确定性失败（见 ``ChannelSendError``）。
+# botpy 的 http 层把 HTTP 400 也抛成不带数字码的 ``ServerError``，所以只能按文案认：
+# - 40034128「回复消息失败，被动回复时间或者次数超过限制」：回满 5 次/超窗，重放无用；
+# - 40034024「回复消息的msg_id无效或越权」：拿非 @ 群消息（或越权消息）当被动目标；
+# - 40034005「回复消息msg_id已过期」：窗口过期。
+# 40054005（重复 seq）不在此列：桥每次调用 ``_passive_reply_kwargs`` 都递增 seq，
+# 重放会换新 seq，重试是对的。
 _ACTIVE_DENIED_MARKERS = ("无权限",)
+_PASSIVE_EXHAUSTED_MARKERS = ("被动回复", "次数")
+_PASSIVE_INVALID_MARKERS = ("无效或越权",)
 _PASSIVE_EXPIRED_MARKERS = ("msg_id", "过期")
 
 
@@ -355,6 +466,10 @@ def _classify_send_failure(exc: Exception) -> str:
     if any(marker in text for marker in _ACTIVE_DENIED_MARKERS):
         return "active_denied"
     lowered = text.lower()
+    if all(marker in lowered for marker in _PASSIVE_EXHAUSTED_MARKERS):
+        return "passive_exhausted"
+    if any(marker in lowered for marker in _PASSIVE_INVALID_MARKERS):
+        return "passive_invalid"
     if all(marker in lowered for marker in _PASSIVE_EXPIRED_MARKERS):
         return "passive_expired"
     return "transient"
@@ -580,6 +695,21 @@ async def _download_attachment_bytes(
     therefore part of the contract, not a nicety — without it a pure voice message
     degrades into nothing at all.
     """
+    data, _failure = await _download_attachment_bytes_with_reason(
+        client, url, max_bytes=max_bytes
+    )
+    return data
+
+
+async def _download_attachment_bytes_with_reason(
+    client: httpx.AsyncClient, url: str, *, max_bytes: int
+) -> tuple[bytes | None, str]:
+    """同 ``_download_attachment_bytes``，但把失败档位带出来。
+
+    返回 ``(bytes, "")`` 或 ``(None, "too_large" | "download")``。出站附件要区分
+    「本地 10MiB 封顶」与「签名链接取不到」——前者模型该压小或换文件，后者可以
+    重发一次碰运气。
+    """
     for attempt in range(1, _ATTACHMENT_DOWNLOAD_MAX_ATTEMPTS + 1):
         try:
             async with client.stream("GET", url) as response:
@@ -589,7 +719,7 @@ async def _download_attachment_bytes(
                         response.status_code,
                         url,
                     )
-                    return None
+                    return None, "download"
                 chunks: list[bytes] = []
                 total = 0
                 async for chunk in response.aiter_bytes(_MEDIA_DOWNLOAD_CHUNK_BYTES):
@@ -600,9 +730,9 @@ async def _download_attachment_bytes(
                             max_bytes,
                             url,
                         )
-                        return None
+                        return None, "too_large"
                     chunks.append(chunk)
-                return b"".join(chunks)
+                return b"".join(chunks), ""
         except httpx.HTTPError as exc:
             # 异常类型必须进日志：h11 送上来的 httpx.HTTPError 可以有空 __str__，
             # 只打 {} 会留一条读不出任何信息的 WARNING（实盘就是这样）。
@@ -613,7 +743,7 @@ async def _download_attachment_bytes(
                     type(exc).__name__,
                     exc,
                 )
-                return None
+                return None, "download"
             logger.info(
                 "qq-official attachment download attempt {} failed ({}: {}); retrying in {:.1f}s",
                 attempt,
@@ -622,7 +752,7 @@ async def _download_attachment_bytes(
                 _ATTACHMENT_DOWNLOAD_RETRY_DELAY_SECONDS,
             )
             await asyncio.sleep(_ATTACHMENT_DOWNLOAD_RETRY_DELAY_SECONDS)
-    return None
+    return None, "download"
 
 
 def _attachment_name(item: Any, content_type: str) -> str:
@@ -1368,8 +1498,11 @@ async def run_qq_official_bridge(
         data: bytes,
         file_type: int,
         file_name: str = "",
+        *,
+        name: str = "",
+        retry_wait_budget: dict[str, float] | None = None,
     ) -> str:
-        """``file_data``（base64）直传媒体，返回 ``file_info``（空串=失败）。
+        """``file_data``（base64）直传媒体，返回 ``file_info``；失败抛 ``MediaUploadError``。
 
         botpy 的 ``post_group_file`` / ``post_c2c_file`` 只暴露 ``url`` 参数——那
         条路径由 QQ 服务器回源下载，要求本服务端公网可达；``file_data`` 不回源，
@@ -1381,8 +1514,14 @@ async def run_qq_official_bridge(
         Route（域名与路径参数）和它的鉴权头续期，把 POST 发到桥自己的媒体 client
         上，预算由 ``_media_upload_timeout`` 按请求体字节数推导。
 
+        重试判定收在**这一个函数**里：传输异常/超时、HTTP 429、HTTP 5xx、平台
+        code ``850012`` 重试；其余 4xx（``40093011`` 档位过大、``40093010``、
+        ``413``）换一次结果一样，一次就抛。退避等待从 ``retry_wait_budget`` 里扣，
+        预算耗尽时这一发不再重试——一次 ``deliver()`` 里所有附件共用一份预算。
+
         ``file_name`` 是收件端看到的文件名，由调用方按档位决定要不要带（见
         ``_deliver_attachment``）；空串时不写这个键，请求体形状与带名之前一致。
+        ``name`` 只进重试日志，让实盘那行能点名是哪个附件。
         """
         file_data = base64.b64encode(data).decode("ascii")
         body = {"file_type": file_type, "file_data": file_data, "srv_send_msg": False}
@@ -1390,58 +1529,117 @@ async def run_qq_official_bridge(
             body["file_name"] = file_name
         budget = _media_upload_timeout(len(file_data))
         route = _media_files_route(kind, target)
-        started = time.perf_counter()
-        try:
-            await bridge_api._http.check_session()
-            route.is_sandbox = bridge_api._http.is_sandbox
-            response = await media_client.post(
-                route.url,
-                json=body,
-                headers=dict(bridge_api._http._headers or {}),
-                timeout=httpx.Timeout(budget, connect=5.0),
+        label = name or file_name or "attachment"
+        attempts = 0
+        while True:
+            attempts += 1
+            started = time.perf_counter()
+            http_status: int | None = None
+            platform_code: int | None = None
+            platform_message = ""
+            retryable = False
+            try:
+                await bridge_api._http.check_session()
+                route.is_sandbox = bridge_api._http.is_sandbox
+                response = await media_client.post(
+                    route.url,
+                    json=body,
+                    headers=dict(bridge_api._http._headers or {}),
+                    timeout=httpx.Timeout(budget, connect=5.0),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - 传输异常可重试
+                platform_message = str(exc) or type(exc).__name__
+                retryable = True
+                elapsed = time.perf_counter() - started
+                logger.warning(
+                    "qq-official file_data media upload failed after {:.1f}s "
+                    "(budget {:.1f}s, attempt {}/{}, {})",
+                    elapsed,
+                    budget,
+                    attempts,
+                    _MEDIA_UPLOAD_MAX_ATTEMPTS,
+                    exc,
+                )
+            else:
+                try:
+                    uploaded = response.json()
+                except ValueError:
+                    uploaded = None
+                file_info = ""
+                if isinstance(uploaded, dict):
+                    file_info = str(uploaded.get("file_info") or "").strip()
+                if file_info:
+                    # 逐发实耗是这条车道的读数：预算的固定开销档靠它重定。`file_type=` 是这一发
+                    # 落进平台哪一档媒体（1 图/2 视频/3 语音/4 文件）的唯一落点——音频到底按
+                    # 语音还是按文件递出去，事后只有这行能证。
+                    logger.info(
+                        "qq-official file_data uploaded {} bytes (file_type={}) in {:.1f}s (budget {:.1f}s)",
+                        len(file_data),
+                        file_type,
+                        time.perf_counter() - started,
+                        budget,
+                    )
+                    return file_info
+                http_status = int(response.status_code)
+                platform_code, platform_message = _platform_error_fields(
+                    uploaded if isinstance(uploaded, dict) else None, response.text
+                )
+                retryable = (
+                    http_status == 429
+                    or http_status >= 500
+                    or platform_code == 850012
+                )
+                logger.warning(
+                    "qq-official file_data media upload rejected status={} body={} after {:.1f}s "
+                    "(budget {:.1f}s, attempt {}/{})",
+                    http_status,
+                    str(response.text)[:200],
+                    time.perf_counter() - started,
+                    budget,
+                    attempts,
+                    _MEDIA_UPLOAD_MAX_ATTEMPTS,
+                )
+            error = MediaUploadError(
+                "upload",
+                "file_data upload failed: "
+                f"{_upload_failure_parts(http_status, platform_code, platform_message)}",
+                http_status=http_status,
+                platform_code=platform_code,
+                platform_message=platform_message,
+                attempts=attempts,
             )
-        except Exception as exc:  # noqa: BLE001 - 回退 url 路径
+            if not retryable or attempts >= _MEDIA_UPLOAD_MAX_ATTEMPTS:
+                raise error
+            delay = _MEDIA_UPLOAD_RETRY_DELAYS[
+                min(attempts - 1, len(_MEDIA_UPLOAD_RETRY_DELAYS) - 1)
+            ]
+            delay *= random.uniform(0.75, 1.25)
+            if retry_wait_budget is not None:
+                remaining = float(retry_wait_budget.get("wait_left", 0.0))
+                if remaining <= 0.0:
+                    logger.warning(
+                        "qq-official file_data retry budget exhausted for {} after {} attempt(s); not retrying",
+                        label,
+                        attempts,
+                    )
+                    raise error
+                delay = min(delay, remaining)
+                retry_wait_budget["wait_left"] = max(0.0, remaining - delay)
             logger.warning(
-                "qq-official file_data media upload failed after {:.1f}s (budget {:.1f}s, {}); "
-                "falling back to url upload",
-                time.perf_counter() - started,
-                budget,
-                exc,
+                "qq-official file_data retry {}/{} for {} after {}",
+                attempts + 1,
+                _MEDIA_UPLOAD_MAX_ATTEMPTS,
+                label,
+                _upload_failure_label(error),
             )
-            return ""
-        try:
-            uploaded = response.json()
-        except ValueError:
-            uploaded = None
-        file_info = ""
-        if isinstance(uploaded, dict):
-            file_info = str(uploaded.get("file_info") or "").strip()
-        if not file_info:
-            logger.warning(
-                "qq-official file_data media upload rejected status={} body={} after {:.1f}s "
-                "(budget {:.1f}s); falling back to url upload",
-                response.status_code,
-                str(response.text)[:200],
-                time.perf_counter() - started,
-                budget,
-            )
-            return ""
-        # 逐发实耗是这条车道的读数：预算的固定开销档靠它重定。`file_type=` 是这一发
-        # 落进平台哪一档媒体（1 图/2 视频/3 语音/4 文件）的唯一落点——音频到底按
-        # 语音还是按文件递出去，事后只有这行能证。
-        logger.info(
-            "qq-official file_data uploaded {} bytes (file_type={}) in {:.1f}s (budget {:.1f}s)",
-            len(file_data),
-            file_type,
-            time.perf_counter() - started,
-            budget,
-        )
-        return file_info
+            await asyncio.sleep(delay)
 
     async def _upload_media_url(
         kind: str, target: dict[str, str], url: str, file_type: int
     ) -> str:
-        """回退路径：平台按 URL 回源下载（要求本服务端公网可达）。"""
+        """回退路径：平台按 URL 回源下载（要求本服务端公网可达）。失败抛错。"""
         try:
             if kind == "group":
                 media = await bridge_api.post_group_file(
@@ -1457,38 +1655,116 @@ async def run_qq_official_bridge(
                     url=url,
                     srv_send_msg=False,
                 )
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.warning("qq-official url media upload failed ({})", exc)
-            return ""
-        return str(media.get("file_info") or "").strip() if isinstance(media, dict) else ""
+            code, message = _platform_error_fields(None, str(exc))
+            raise MediaUploadError(
+                "upload",
+                f"url upload failed: {exc}",
+                platform_code=code,
+                platform_message=message,
+                attempts=1,
+            ) from exc
+        file_info = str(media.get("file_info") or "").strip() if isinstance(media, dict) else ""
+        if not file_info:
+            raise MediaUploadError(
+                "upload",
+                "url upload returned no file_info",
+                platform_message="empty file_info",
+                attempts=1,
+            )
+        return file_info
 
     async def _deliver_attachment(
-        kind: str, target: dict[str, str], external_key: str, attachment: dict[str, Any]
-    ) -> bool:
-        """Send one attachment as a real QQ file/media message; False means the
-        caller must degrade it to a signed-URL text line.
+        kind: str,
+        target: dict[str, str],
+        external_key: str,
+        attachment: dict[str, Any],
+        *,
+        retry_wait_budget: dict[str, float] | None = None,
+    ) -> dict[str, Any] | None:
+        """Send one attachment as a real QQ file/media message.
+
+        ``None`` means delivered; otherwise the returned failure record is handed
+        to ``deliver`` (and from there to the outbox ack), while the caller still
+        degrades the attachment to a signed-URL text line.
 
         group/c2c：桥先从本机签名媒体 URL 取字节，再以 ``file_data``（base64）
         直传给平台媒体上传接口——不回源、不要求公网可达；``file_data`` 被拒时
-        回退平台回源上传（``url`` 路径）。拿到 ``file_info`` 后以 ``msg_type=7``
-        富媒体消息发出。
+        回退平台回源上传（``url`` 路径）。签名链接指向回环地址时这一发在平台侧
+        必然失败，跳过回退、把原因如实写进失败记录。拿到 ``file_info`` 后以
+        ``msg_type=7`` 富媒体消息发出。
         guild/guilddm：平台没有文件接口，图片用 ``file_image`` 字节直发，其余降级。
         """
         name = str(attachment.get("name") or "attachment")
         url = _absolute_media_url(str(attachment.get("url") or ""))
         mime = str(attachment.get("mime_type") or "").lower()
+        kind_value = str(
+            attachment.get("kind") or ("image" if mime.startswith("image/") else "file")
+        )
+        try:
+            size_value = int(attachment.get("size") or 0)
+        except (TypeError, ValueError):
+            size_value = 0
+        file_type = 0
+        stage = "download"
+        started = time.perf_counter()
+
+        def _failure(
+            failure_stage: str,
+            *,
+            attempts: int = 1,
+            http_status: int | None = None,
+            platform_code: int | None = None,
+            platform_message: str = "",
+            url_fallback: str = "",
+            elapsed: float | None = None,
+        ) -> dict[str, Any]:
+            """一条可原样回灌的失败记录；没有的读数不补占位符。"""
+            record: dict[str, Any] = {
+                "name": name,
+                "kind": kind_value,
+                "mime_type": mime,
+                "size": size_value,
+                "file_type": file_type,
+                "stage": failure_stage,
+                "attempts": max(1, int(attempts or 1)),
+                "elapsed_seconds": float(
+                    elapsed if elapsed is not None else time.perf_counter() - started
+                ),
+                "failed_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            }
+            if http_status is not None:
+                record["http_status"] = int(http_status)
+            if platform_code is not None:
+                record["platform_code"] = int(platform_code)
+            if platform_message:
+                record["platform_message"] = str(platform_message)[:500]
+            if url_fallback:
+                record["url_fallback"] = str(url_fallback)[:300]
+            return record
+
         if not url:
             logger.warning("qq-official attachment {} carries no url; degrading", name)
-            return False
+            return _failure(
+                "download",
+                platform_message="attachment carries no url",
+            )
         try:
             if kind in ("group", "c2c"):
-                file_type = _media_file_type(mime, inline_media=bool(attachment.get("inline_media")))
-                data = await _download_attachment_bytes(
+                file_type = _media_file_type(
+                    mime, inline_media=bool(attachment.get("inline_media"))
+                )
+                stage = "download"
+                data, download_failure = await _download_attachment_bytes_with_reason(
                     media_client, url, max_bytes=_MAX_OUTBOUND_ATTACHMENT_BYTES
                 )
                 if not data:
-                    raise RuntimeError(
-                        "signed media download failed or exceeds the outbound attachment cap"
+                    raise MediaUploadError(
+                        "too_large" if download_failure == "too_large" else "download",
+                        "signed media download failed or exceeds the outbound attachment cap",
                     )
                 if file_type == 1:
                     converted, converted_mime = _platform_image_bytes(data)
@@ -1501,11 +1777,62 @@ async def run_qq_official_bridge(
                 # 卡片，带名会让平台按后缀去校验这一发字节（图片转码后的后缀与原文件名
                 # 已经不一致），那两档的请求体形状保持不动。
                 upload_name = _upload_file_name(name) if file_type == 4 else ""
-                file_info = await _upload_media_data(kind, target, data, file_type, upload_name)
+                stage = "upload"
+                upload_started = time.perf_counter()
+                upload_error: MediaUploadError | None = None
+                try:
+                    file_info = await _upload_media_data(
+                        kind,
+                        target,
+                        data,
+                        file_type,
+                        upload_name,
+                        name=name,
+                        retry_wait_budget=retry_wait_budget,
+                    )
+                except MediaUploadError as exc:
+                    upload_error = exc
+                    file_info = ""
+                url_fallback = ""
                 if not file_info:
-                    file_info = await _upload_media_url(kind, target, url, file_type)
+                    if _is_loopback_media_url(url):
+                        # QQ 服务器回源取不到回环地址：这一发在平台侧必然 400/40093010。
+                        url_fallback = (
+                            "skipped (loopback media origin; the platform cannot fetch it)"
+                        )
+                        logger.info(
+                            "qq-official skipped url media upload for {} (loopback media origin)",
+                            name,
+                        )
+                    else:
+                        try:
+                            file_info = await _upload_media_url(kind, target, url, file_type)
+                        except MediaUploadError as exc:
+                            url_fallback = _upload_failure_label(exc)
+                            logger.warning(
+                                "qq-official url media upload failed for {} ({})",
+                                name,
+                                url_fallback,
+                            )
                 if not file_info:
-                    raise RuntimeError("media upload failed on both file_data and url paths")
+                    error = upload_error or MediaUploadError(
+                        "upload", "media upload failed on both file_data and url paths"
+                    )
+                    logger.warning(
+                        "qq-official attachment upload failed for {} ({}); degrading to text link",
+                        name,
+                        str(error),
+                    )
+                    return _failure(
+                        "upload",
+                        attempts=error.attempts or 1,
+                        http_status=error.http_status,
+                        platform_code=error.platform_code,
+                        platform_message=error.platform_message or str(error),
+                        url_fallback=url_fallback,
+                        elapsed=time.perf_counter() - upload_started,
+                    )
+                stage = "media_message"
                 if kind == "group":
                     media_passive = _passive_reply_kwargs(state, kind, external_key)
                     _gate_active_send(state, kind, external_key, media_passive)
@@ -1539,19 +1866,25 @@ async def run_qq_official_bridge(
                 logger.info(
                     "qq-official delivered {} attachment {} (file_type={})", kind, name, file_type
                 )
-                return True
+                return None
             if mime.startswith("image/"):
-                data = await _download_attachment_bytes(
+                file_type = 1
+                stage = "download"
+                data, download_failure = await _download_attachment_bytes_with_reason(
                     media_client, url, max_bytes=_MAX_OUTBOUND_ATTACHMENT_BYTES
                 )
                 if not data:
-                    raise RuntimeError("image attachment download failed")
+                    raise MediaUploadError(
+                        "too_large" if download_failure == "too_large" else "download",
+                        "image attachment download failed",
+                    )
                 converted, converted_mime = _platform_image_bytes(data)
                 if converted_mime:
                     logger.info(
                         "qq-official converted image attachment {} to {}", name, converted_mime
                     )
                     data = converted
+                stage = "media_message"
                 if kind == "guild":
                     result = await bridge_api.post_message(
                         channel_id=target["channel_id"], file_image=data
@@ -1563,40 +1896,70 @@ async def run_qq_official_bridge(
                 if result is None:
                     raise RuntimeError("unconfirmed guild media message (empty API response)")
                 logger.info("qq-official delivered {} image attachment {}", kind, name)
-                return True
+                return None
             logger.warning(
                 "qq-official has no file API for {} targets; attachment {} degraded to text link",
                 kind,
                 name,
             )
-            return False
+            return _failure(
+                "media_message",
+                platform_message="no file API for guild/guilddm targets",
+            )
         except (asyncio.CancelledError, ChannelSendError):
             # 额度/确定性失败必须让整条事件走 pump 的重试与判毒，不能降级成链接文本
             # ——降级会把它当成"发出去了"，额度闸就此被绕过。
             raise
+        except MediaUploadError as exc:
+            logger.warning(
+                "qq-official attachment delivery failed for {} ({}); degrading to text link",
+                name,
+                exc,
+            )
+            return _failure(
+                exc.stage,
+                attempts=exc.attempts or 1,
+                http_status=exc.http_status,
+                platform_code=exc.platform_code,
+                platform_message=exc.platform_message or str(exc),
+            )
         except Exception as exc:  # noqa: BLE001 - degrade to signed-URL text line
             logger.warning(
                 "qq-official attachment delivery failed for {} ({}); degrading to text link",
                 name,
                 exc,
             )
-            return False
+            return _failure(stage, platform_message=str(exc)[:200])
 
     async def _deliver_trailing(
-        kind: str, target: dict[str, str], external_key: str, attachments: list[dict[str, Any]]
+        kind: str,
+        target: dict[str, str],
+        external_key: str,
+        attachments: list[dict[str, Any]],
+        *,
+        retry_wait_budget: dict[str, float] | None = None,
     ) -> None:
         """Send ``after_text`` attachments once the reply body is out.
 
         Failures stay silent on purpose: a signed download link where a sticker
-        should have been is worse than no sticker at all.
+        should have been is worse than no sticker at all. 表情包失败只记日志，
+        不进货真价实的 ``attachment_failures``——丢一个表情不值得一次唤醒。
         """
         for attachment in attachments:
-            if await _deliver_attachment(kind, target, external_key, attachment):
+            failure = await _deliver_attachment(
+                kind,
+                target,
+                external_key,
+                attachment,
+                retry_wait_budget=retry_wait_budget,
+            )
+            if failure is None:
                 continue
             logger.warning(
-                "qq-official dropped trailing attachment {} for {}",
+                "qq-official dropped trailing attachment {} for {} ({})",
                 str(attachment.get("name") or "attachment"),
                 external_key,
+                str(failure.get("stage") or "unknown"),
             )
 
     async def _post_markdown_body(
@@ -1626,11 +1989,11 @@ async def run_qq_official_bridge(
         text: str,
         attachments: list[dict[str, Any]] | None = None,
         mentions: list[str] | None = None,
-    ) -> str:
+    ) -> DeliveryResult:
         kind, target = parse_external_key(external_key)
         if kind not in ("group", "c2c", "guild", "guilddm"):
             logger.warning("qq-official cannot deliver to target external_key={}", external_key)
-            return ""
+            return DeliveryResult()
         mention_ids = [
             str(item or "").strip()
             for item in list(mentions or [])
@@ -1641,19 +2004,33 @@ async def run_qq_official_bridge(
         # 否则用户先收到一张图、再收到那句话。
         leading = [item for item in incoming if not item.get("after_text")]
         trailing = [item for item in incoming if item.get("after_text")]
+        # 一次投递里的所有附件共用一份退避预算：4 个文件最坏多花十几秒，而不是四倍。
+        retry_wait_budget = {"wait_left": _MEDIA_UPLOAD_RETRY_WAIT_BUDGET_SECONDS}
         # 附件先于正文投递；失败的附件降级为签名下载链接行并入正文，用户至少
-        # 拿得到可下载的链接。全部附件成功且正文为空时不再补发空文本消息。
+        # 拿得到可下载的链接，同时把失败记录带回给调用方（ack 回灌给模型）。
+        # 全部附件成功且正文为空时不再补发空文本消息。
         fallback_lines: list[str] = []
+        attachment_failures: list[dict[str, Any]] = []
         for attachment in leading:
-            if await _deliver_attachment(kind, target, external_key, attachment):
+            failure = await _deliver_attachment(
+                kind,
+                target,
+                external_key,
+                attachment,
+                retry_wait_budget=retry_wait_budget,
+            )
+            if failure is None:
                 continue
+            attachment_failures.append(failure)
             name = str(attachment.get("name") or "attachment")
             fallback_lines.append(f"📎 {name}: {_absolute_media_url(str(attachment.get('url') or ''))}")
         body = "\n".join(part for part in [str(text or "").strip(), *fallback_lines] if part).strip()
         if not body:
             # 纯表情回合：正文为空，但 after_text 附件仍要发。
-            await _deliver_trailing(kind, target, external_key, trailing)
-            return ""
+            await _deliver_trailing(
+                kind, target, external_key, trailing, retry_wait_budget=retry_wait_budget
+            )
+            return DeliveryResult(attachment_failures=attachment_failures)
         passive: dict[str, Any] = {}
         if kind == "group":
             passive = _passive_reply_kwargs(state, kind, external_key)
@@ -1721,8 +2098,13 @@ async def run_qq_official_bridge(
             len([item for item in list(attachments or []) if isinstance(item, dict)]),
             f"{passive['msg_id']}#{passive['msg_seq']}" if passive else "-",
         )
-        await _deliver_trailing(kind, target, external_key, trailing)
-        return "passive" if passive else "active"
+        await _deliver_trailing(
+            kind, target, external_key, trailing, retry_wait_budget=retry_wait_budget
+        )
+        return DeliveryResult(
+            shape="passive" if passive else "active",
+            attachment_failures=attachment_failures,
+        )
 
     async def _pump(session_id: str, external_key: str) -> None:
         """Per-session SSE consumer with a real reconnect loop.
@@ -1817,7 +2199,7 @@ async def run_qq_official_bridge(
                         backoff = _PUMP_RECONNECT_INITIAL_BACKOFF_SECONDS
                         continue
                     try:
-                        delivery_shape = await deliver(
+                        delivery = await deliver(
                             target_key, text, attachments, mentions=mentions
                         )
                     except asyncio.CancelledError:
@@ -1901,7 +2283,10 @@ async def run_qq_official_bridge(
                     if outbox_id:
                         try:
                             await client.ack_outbox(
-                                session_id, outbox_id, shape=delivery_shape
+                                session_id,
+                                outbox_id,
+                                shape=delivery.shape,
+                                attachment_failures=delivery.attachment_failures or None,
                             )
                         except Exception as exc:  # noqa: BLE001 - ack 失败不影响本条已送达
                             # 代价是下次重启后本条可能重复投递一次（at-least-once）。

@@ -146,6 +146,7 @@
 - Web UI
 - main task runtime
 - heartbeat
+- 外部事件订阅的接收、会话唤醒与节点信箱投递
 
 ### Worker
 
@@ -230,6 +231,8 @@
 
   其中 SQLite（`runtime.sqlite3` 或配置指定的 store 路径）里除任务/节点/帧等表外还有 `shutdown_pause_registry` 台账表：记录上次优雅关闭时被暂停的会话与任务，重启自动恢复后逐行删除。排查“重启后任务没有自动恢复”先查这张表（语义见 `main-task-runtime.md`「Graceful Shutdown Pause and Startup Auto-Resume」）。
 
+  同一库里的 `event_subscriptions` 与 `external_event_inbox` 承载 agent 创建的外部事件订阅与入站事件：订阅行保存目标、处理指令、secret 哈希和最近投递读数，事件行保存 `pending` / `injected` / `delivered` / `undeliverable` 与 `delivery_detail`。排查“外部条件到了但会话/节点没醒”先读这两张表；契约与状态语义见 `external-agent-api.md`「Agent 外部事件订阅（external event subscription）」。
+
   通过 `negi web` 启动并启用 auto worker 时，这里还应重点关注两份日志：
 
   - `.g3ku/main-runtime/manual-web-run.log`
@@ -245,6 +248,9 @@
 
 - `.g3ku/external-outbox/`（安装根，与 `.g3ku/external-sessions/`、`.g3ku/external-uploads/` 同侧）
   外部渠道出站消息（主动推送与回合回复）的持久账本（append-only jsonl，msg 记录 + ack tombstone），没有年龄出口：记录 pending 到被某个消费方 ack 或被判不可达为止。排查「渠道端收不到推送或回复」先看这里有无 pending 滞留、以及它属于哪个 `event`；契约、销账方与重放语义详见 `external-agent-api.md`「持久 outbox」。
+
+- 外部事件订阅凭证文件（数据根下的会话工作区或临时目录）
+  `event_subscription` 创建订阅时把单订阅 token 写入调用方给出的 `credential_file`，位置只能落在当前会话的 `session-workspaces/` 或 `temp/ceo|tasks/` 之内；Negi 库只存哈希。连接器读取它，工具结果、日志、仓库与记忆都不得出现明文。订阅轮换会原子替换同一文件，删除订阅后文件可手动清理。
 
 - `memory/`（安装根）
   本地记忆目录；`memory/groups/<scope>/memory/` 是每个群各自的记忆根（同样的 mirror / sqlite / notes / index / queue），由 `MemoryScopeRouter` 按需创建。排障入口详见本文档「Memory Queue Workflow」章节。
@@ -337,7 +343,8 @@
 
 - 节点之间的投递只有一条道：信箱 `task_node_notifications`（`send_message`、`manage_child_nodes`、验收驳回、异常暂停升级都写这张表），停在等待档的节点由落到信箱的消息唤醒。节点"迟迟不动"时先读该节点行的通知三态（pending / injected / consumed），不要去翻 `runtime_meta.distribution`——现行代码里它没有读写方，旧库行只是历史数据（解释见 `main-task-runtime.md`「节点信箱与唤醒（现行）」）。
 - 单个节点长期 `in_progress` 却既无模型调用也无帧更新，按这个顺序分诊：先确认它是否停在 `waiting_children` / `waiting_explicit` / `waiting_acceptance` 这三档设计态空闲（看门狗刻意把它们排除在停摆判据外），再判父侧有没有重放路径——有则收尸道直接重派，没有才是需要人看的那一类。
-- 冻结/复活/收尸类异常在 worker 日志有固定签名，全部落在 `main/runtime/task_actor_service.py`，先 grep 再看 DB：`resume intent recorded: task=… node=… command=…`（点名 resume 已落持久意图，先于暂停位清除）；`resume intent consumed: task=… node=… outcome=…`（拾取道消费了意图并得到 triage 结果）；`resume intent deferred at pickup: … reason=no_dispatcher`（消费时没有执行器，意图保留给下一次拾取）；`orphan node re-dispatched at task pickup (recoverable via parent replay)`（任务拾取时认定父侧重放路径可用，就地重派）；`orphan node parked as candidate`（无人驱动又无重放路径 ⇒ **可见地暂停**并写一条 `pause_reason='error'` 的错误行；收尸器不签发终态。持有 `pending`/`claimed` resume 意图的节点不会走到这一条——出现即说明意图已被落定或清理，按 `task_node_resume_intents` 行核对）；`release: dispatch future was cancelled while node non-terminal (rebuilding entry)` / `release: dispatch future already failed with stranded exception (rebuilding entry)`（释放路径发现执行体缺席或搁浅，重建入口）；`release verification: node still frozen after release, re-resuming once` 紧跟 `release verification failed: node wedged after re-resume (needs attention)`（释放后未复活的二段核对，第二条 ERROR 就是要人介入的信号）；`node entry crashed; exception parked on dispatch future`（执行体异常留在 future 上，由下一次释放核对接手）；`node resume triage deferred (future resolved while coroutine still runs)`（future 已结但协程仍在收尾，resume 决断推迟一拍）；`final acceptance round re-dispatched after interruption`（验收轮被中断后按持久状态重派，不依赖父进程还活着）；`wait-for cycle broken: task={} cycle={}`（等待图成环被拆开）。
+- 给正在等验收的执行节点发消息后它没有新回合，或验收回合里出现了执行节点还没读到的消息：设计内。I1 让未读只落箱（派发扫描与通知复派都不开回合，只有 `acceptance_verdict` 放行），消息由验收回合尾块单独镜像，pass 落账前还会复核裁决期间到达的通知；打回后执行节点才消费。验收通过时这类消息是知情丢弃，不是投递丢失。
+- 冻结/复活/收尸类异常在 worker 日志有固定签名，全部落在 `main/runtime/task_actor_service.py`，先 grep 再看 DB：`resume intent recorded: task=… node=… command=…`（点名 resume 已落持久意图，先于暂停位清除）；`resume intent consumed: task=… node=… outcome=…`（拾取道消费了意图并得到 triage 结果）；`resume intent deferred at pickup: … reason=no_dispatcher`（消费时没有执行器，意图保留给下一次拾取）；`orphan node re-dispatched at task pickup (recoverable via parent replay)`（任务拾取时认定父侧重放路径可用，就地重派）；`orphan node parked as candidate`（无人驱动又无重放路径 ⇒ **可见地暂停**并写一条 `pause_reason='error'` 的错误行；收尸器不签发终态。持有 `pending`/`claimed` resume 意图的节点不会走到这一条——出现即说明意图已被落定或清理，按 `task_node_resume_intents` 行核对）；`release: dispatch future was cancelled while node non-terminal (rebuilding entry)` / `release: dispatch future already failed with stranded exception (rebuilding entry)`（释放路径发现执行体缺席或搁浅，重建入口）；`release verification: node still frozen after release, re-resuming once` 紧跟 `release verification failed: node wedged after re-resume (needs attention)`（释放后未复活的二段核对，第二条 ERROR 就是要人介入的信号）；`node entry crashed; exception parked on dispatch future`（执行体异常留在 future 上，由下一次释放核对接手）；`node resume triage deferred (future resolved while coroutine still runs)`（future 已结但协程仍在收尾，resume 决断推迟一拍）；`handshake-driven acceptance dispatch: … entry=none`（验收轮被中断后按握手持久状态重派，不依赖父进程还活着）；`node dispatch skipped: under acceptance with unread notice: task=… node=… unread=n`（等裁决的执行节点有未读，但派发扫描与通知复派都不开回合——I1）；`wait-for cycle broken: task={} cycle={}`（等待图成环被拆开）。
 - 工具回 `queued` 后没有模型调用：先查 `task_node_resume_intents` 该节点的 `state`/`outcome`。`pending` = 还没有拾取消费（看任务是否被暂停/取消、worker 是否在线）；`claimed` 超过领取窗口 = 消费者死在途中，下一个拾取会重领；`applied + outcome=task_paused/task_terminal` = 任务级闸门拒绝，不是 worker 故障。`applied + resumed` 但节点仍无 fresh frame/新 `task_model_calls` 时，再按 `main-task-runtime.md`「Node-Level Pause and Recovery」的 entry triage 与延迟校验排查。
 - 验收器自身故障的直达事件带 `Role: acceptance node` 与 `Inspected node` 行：先确认被验节点与握手（`waiting_acceptance` / 提交 ref）仍在，再 resume 验收节点；事件里的 `Final acceptance: yes` 决定无出口时 fail 哪一颗执行节点（根最终验收 → fail 根执行节点）；任务级 cancel 不在会话可达的动作面上，是操作员在 web 侧的动作。`manage_task_nodes fail` 对验收节点回 `acceptance_fail_does_not_settle_task` 是设计行为，不是工具故障。
 - 父节点被看门狗判停不等于崩溃：三条结构性判据 `repeated_identical_tool_call` / `tool_error_streak` / `no_new_events`（`main/runtime/node_watchdog.py`）只把节点标成异常暂停，不杀正在进行的回合。在飞的模型回合（等闸、重试、流式返回）与正在跑的工具一样不算失速；只有请求层报告 `waiting_upstream` 且静默已满一个失速窗口才落 `no_new_events`。非根节点的异常暂停只经父节点信箱升级（`child_abnormal_pause`，high 优先级、必唤醒），只有根节点的异常暂停惊动会话 agent；父节点不处理时，前端「暂停·异常」是唯一可见面。
@@ -538,6 +545,20 @@ worker 静默不等于 worker 死亡：空闲 worker 除心跳线程每 1–2s �
 - 保存模型链后没有入队、也没有读图会话：先看 `.g3ku/onboarding.json` 的 `persona_request_id` / `photo_session_started_at` 是否已写，再查 `memory/queue.jsonl` 是否有一条 `trigger_source=persona_onboarding`，以及 `sessions/` 里是否有 `internal_persona_photo` 的转录。`photo_session_error` 非空表示读图会话失败，常见原因是 CEO 链里没有收图成员。
 - 隐藏读图会话不出现在网页会话列表是预期：`internal:` 前缀不进 `web:` 目录、不当活动会话兜底，也不参与记忆复核。它出现在列表或复核批次里属于缺陷。
 - 照片集为空但 `my_image/` 有文件：画廊只列 raster 图片（png/jpg/jpeg/webp/gif/bmp）；缩略图失败会回退原图 URL，不影响陈列。
+
+### 外部事件订阅未唤醒
+
+外部程序调用 `POST /api/v1/event-subscriptions/{id}/events` 后目标没有反应时，按以下顺序分诊：
+
+1. 先用 `event_subscription(action="events", subscription_id=...)` 看事件是否存在、当前状态与 `delivery_detail.stage`。没有事件行说明请求没有落库，先查 HTTP 码（401/403/404/413/503）和外部程序日志，不要查 heartbeat。
+2. `pending` 且 stage 是 `subscription_disabled` / `heartbeat_unavailable` / `node_dispatch_unavailable` / `node_delivery_deferred`：按 stage 查订阅启停、heartbeat 与 worker 在线状态；服务每 60 秒对账，修好依赖后会继续，不需要重新投递。
+3. `pending` 且 stage 是 `node_content_externalization_unavailable`：节点事件正文超过内联额度而 content store 不可用；先修内容存储，事件会保留。
+4. 会话目标卡在 injected 之前：查 `heartbeat events consumed` / `external event heartbeat enqueued` 日志。会话忙或正在压缩时改期是设计内行为，不是丢事件。
+5. 节点目标已 `delivered` 但节点没动：查目标是否暂停、是否停在 `waiting_acceptance`、是否是验收节点。暂停只入箱不唤醒，验收节点只由绑定执行节点的提交激活，恢复/驳回后才消费信箱。
+6. 节点目标 `undeliverable`：读 `delivery_detail.reason`。`target_missing` / `target_terminal` 是永久失效，需按当前任务重建订阅；`subscription_removed` 表示订阅已退休。
+7. 同一个外部事件被处理两次：先查外部程序是否换了 `Idempotency-Key`。订阅内同一键由 SQLite 唯一约束吸收；节点侧另有 `external_event_id` 全状态去重，两条都命不中才查心跳注入。
+
+关键日志：`external event accepted`、`external event duplicate`、`external event heartbeat enqueued`、`external event injected`、`external event delivered to node`、`external event undeliverable`、`external event reconcile`。日志不输出 secret 或凭证文件正文。
 
 ### 外部渠道桥接异常
 

@@ -23,10 +23,11 @@ from main.runtime.acceptance_handshake import (
     normalize_acceptance_handshake,
 )
 from main.runtime.node_mailbox import notification_is_held
-from main.runtime.node_runner import SKIPPED_CHECK_RESULT
+from main.runtime.node_message_kind import KIND_ACCEPTANCE_VERDICT
+from main.runtime.node_runner import SKIPPED_CHECK_RESULT, is_acceptance_pass_hold_result
 from main.runtime.node_wake import PARKED_PHASES
 from main.runtime.wait_graph import build_wait_nodes, find_all_parked_waits, find_wait_cycles
-from main.types import KIND_ACCEPTANCE
+from main.types import KIND_ACCEPTANCE, KIND_EXECUTION
 
 _DEFAULT_NODE_DISPATCH_LIMITS = {
     'execution': 8,
@@ -752,6 +753,21 @@ class TaskActorService:
                 # 验收节点只由绑定执行节点的待裁定提交开回合；其余未读/待注入
                 # 通知留在原处，等下一次合法验收回合并入。
                 continue
+            unread_rows = self._unread_rows(task_id, node_id) if node is not None else []
+            if node is not None and self._execution_dispatch_held_by_acceptance(
+                node=node,
+                unread_rows=unread_rows,
+            ):
+                # I1：通知复派也不能把等验收的执行节点叫起来；待注入的未读
+                # 留在信箱里，等打回裁决或验收通过终局。
+                logger.debug(
+                    'node dispatch skipped: under acceptance with unread notice: '
+                    'task={} node={} unread={}',
+                    task_id,
+                    node_id,
+                    len(unread_rows),
+                )
+                continue
             result = await self._execute_node(task_id, node_id)
             resumed_any = True
             await self._settle_final_acceptance_notice_result(task_id, node_id, result)
@@ -823,11 +839,19 @@ class TaskActorService:
         if not self._is_root_final_acceptance_node(task=task, node=node):
             return
         acceptance = node
-        handled = await self._node_runner._handle_acceptance_node_result(
-            task=task, acceptance=acceptance, result=result
-        )
-        if str(handled.delivery_status or '').strip() != 'partial':
-            return
+        while True:
+            handled = await self._node_runner._handle_acceptance_node_result(
+                task=task, acceptance=acceptance, result=result
+            )
+            if not is_acceptance_pass_hold_result(handled):
+                return
+            latest = self._store.get_node(node_id)
+            if latest is None or self._node_operator_paused(latest):
+                return
+            acceptance = latest
+            result = await self._execute_node(task_id, node_id)
+            if result is None:
+                return
 
     async def _resume_inflight_final_acceptance(self, task_id: str) -> bool:
         """重派发「握手在等、但回合半路断掉」的最终验收节点——通知账本之外的兜底路径。
@@ -851,9 +875,9 @@ class TaskActorService:
         task = self._store.get_task(task_id)
         root = None if task is None else self._store.get_node(str(task.root_node_id or '').strip())
         handshake = normalize_acceptance_handshake((getattr(root, 'metadata', None) or {}).get(ACCEPTANCE_HANDSHAKE_KEY))
-        logger.warning(
-            'final acceptance round re-dispatched after interruption: '
-            'task={} acceptance_node={} inspected_execution_node={} state={}',
+        logger.info(
+            'handshake-driven acceptance dispatch: '
+            'task={} acceptance_node={} inspected_execution_node={} state={} entry=none',
             task_id,
             node_id,
             str(getattr(root, 'node_id', '') or '').strip(),
@@ -1180,6 +1204,10 @@ class TaskActorService:
                     acceptance=node,
                     result=result,
                 )
+                if is_acceptance_pass_hold_result(handled):
+                    # pass 没落账：验收节点已被重置回 in_progress，由派发扫描再跑
+                    # 一轮。这里不能算 progressed，否则派发循环会在同一静止拍空转。
+                    continue
                 progressed = True
                 if str(getattr(handled, 'verdict', '') or '').strip() == 'reject_no_progress':
                     continue
@@ -1227,6 +1255,8 @@ class TaskActorService:
                 acceptance=node,
                 result=result,
             )
+            if is_acceptance_pass_hold_result(handled):
+                continue
             progressed = True
             if str(getattr(handled, 'verdict', '') or '').strip() == 'reject_no_progress':
                 # 被验节点已在裁决处理里转暂停·abnormal；这里不能再补终态。
@@ -1290,6 +1320,31 @@ class TaskActorService:
     def _node_has_unread(self, task_id: str, node_id: str) -> bool:
         return bool(self._unread_rows(task_id, node_id))
 
+    def _execution_dispatch_held_by_acceptance(
+        self,
+        *,
+        node: Any,
+        unread_rows: list[Any],
+    ) -> bool:
+        """I1：等裁决的执行节点只由 `acceptance_verdict` 开新回合。
+
+        未消费的用户/前门/父级消息只落箱：验收回合尾块会把它们镜像给验收方，
+        pass 落账前还会复核"这一轮没看过的通知"。把有未读当成派发理由，会让
+        节点在"提交在审"期间继续跑（实盘 task:4cbfa55c5ab1：提交后 40 秒被
+        19:16:15 的前门通知重新带起，连续工作 32 分钟，验收一次没起跑）。
+        """
+        if str(getattr(node, 'node_kind', '') or '').strip().lower() != KIND_EXECUTION:
+            return False
+        handshake = normalize_acceptance_handshake(
+            (getattr(node, 'metadata', None) or {}).get(ACCEPTANCE_HANDSHAKE_KEY)
+        )
+        if str(handshake.get('state') or '').strip() != ACCEPTANCE_STATE_WAITING_ACCEPTANCE:
+            return False
+        return not any(
+            str(getattr(row, 'kind', '') or '').strip() == KIND_ACCEPTANCE_VERDICT
+            for row in unread_rows
+        )
+
     def _wake_policy_allows_dispatch(
         self,
         *,
@@ -1298,9 +1353,23 @@ class TaskActorService:
         unread_rows: list[Any],
         records: list[Any],
     ) -> bool:
-        """停靠中的节点只要有可注入未读就复派；批次等待不再参与停靠判据。"""
-        _ = task_id, node, records
-        return bool(unread_rows)
+        """停靠中的节点只要有可注入未读就复派；批次等待不再参与停靠判据。
+
+        唯一例外是 I1：执行节点正在等验收裁决时，未读不构成开回合的理由。
+        """
+        _ = records
+        if not unread_rows:
+            return False
+        if self._execution_dispatch_held_by_acceptance(node=node, unread_rows=unread_rows):
+            logger.debug(
+                'node dispatch skipped: under acceptance with unread notice: '
+                'task={} node={} unread={}',
+                task_id,
+                str(getattr(node, 'node_id', '') or '').strip(),
+                len(unread_rows),
+            )
+            return False
+        return True
 
     async def _dispatch_runnable_nodes(self, task_id: str, dispatcher: 'TaskNodeDispatcher') -> bool:
         """把"现在就该跑、却没人跑"的节点交给调度器。
@@ -1310,6 +1379,8 @@ class TaskActorService:
         * 执行节点：信箱有未读，或**还没有任何运行帧**（刚创建、第一次起跑）。
           有帧且无未读 = 停靠中（等待消息/等验收），再派发只会让它空转一回合。
           停靠中的节点只要有可注入未读就复派；批次 held 行不计入未读。
+          例外是 I1：握手 `waiting_acceptance` 的执行节点不因未读复派，
+          只有 `acceptance_verdict` 能让它开新回合。
         * 验收节点：只认绑定执行节点的待裁定提交（与回合入口同一冻结判据）；
           未读消息、定时唤醒等只落箱，不参与派发。被验节点已终态时不派发
           （没有可检验的对象；T15 的联动由 P4 收口）。
@@ -1373,10 +1444,7 @@ class TaskActorService:
                 # 已提交、正等验收裁决的节点不重派：收尾回合会删掉运行帧，
                 # “无帧”不等于“没起跑过”；再派一次只会在等裁决期间重复提交
                 # （实盘：同一子节点 11 秒内三次交付，把刚通过的验收反复重开）。
-                handshake = normalize_acceptance_handshake(
-                    (node.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY)
-                )
-                if str(handshake.get('state') or '').strip() == ACCEPTANCE_STATE_WAITING_ACCEPTANCE:
+                if self._execution_dispatch_held_by_acceptance(node=node, unread_rows=[]):
                     continue
                 try:
                     frame = self._log_service.read_runtime_frame(task_id, node_id)
@@ -2583,13 +2651,21 @@ class TaskActorService:
             root=root,
             final_acceptance=final_acceptance,
         )
-        acceptance_result = await self._execute_node(task_id, acceptance.node_id)
-        acceptance = self._store.get_node(acceptance.node_id) or acceptance
-        acceptance_result = await self._node_runner._handle_acceptance_node_result(
-            task=task,
-            acceptance=acceptance,
-            result=acceptance_result,
-        )
+        while True:
+            acceptance_result = await self._execute_node(task_id, acceptance.node_id)
+            acceptance = self._store.get_node(acceptance.node_id) or acceptance
+            acceptance_result = await self._node_runner._handle_acceptance_node_result(
+                task=task,
+                acceptance=acceptance,
+                result=acceptance_result,
+            )
+            if not is_acceptance_pass_hold_result(acceptance_result):
+                break
+            # 这条车道里根已是 success，外层静止判定会把验收按 T15 收掉；
+            # 所以"再核验一轮"必须在本函数内跑完，不能退回派发循环。
+            acceptance = self._store.get_node(acceptance.node_id) or acceptance
+            if self._node_operator_paused(acceptance):
+                break
         if str(acceptance_result.delivery_status or '').strip() == 'partial':
             return acceptance_result
         acceptance = self._store.get_node(acceptance.node_id) or acceptance

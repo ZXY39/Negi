@@ -17,6 +17,11 @@ APPEND_NOTICE_TAIL_PREFIXES = (
     LEGACY_APPEND_NOTICE_TAIL_PREFIX,
 )
 
+# 尾块 live 窗口：已并入过的通知只保留最近 N 条，其余在压缩边界退场。
+# 台账（notice_records）全量保留，供 view_message_history / content_search 检索。
+NODE_NOTICE_CONSUMED_TAIL_WINDOW = 5
+NOTICE_INDEX_PREFIX = '[NOTICE_INDEX]'
+
 # 定向通知转述族：系统把用户追加的通知转述给祖先/验收节点时生成的包装消息。
 # 新记录在通知行的 payload 里带 origin 标记；存量行用消息前缀兜底识别。
 NOTICE_ORIGIN_SYSTEM_RELAY = 'system_relay'
@@ -277,12 +282,16 @@ def roll_append_notice_context_for_compression_stage(
         return normalized
     if any(str(item.get('compression_stage_id') or '').strip() == normalized_stage_id for item in list(normalized.get('compression_segments') or [])):
         return normalized
+    # 只代持还在尾窗里的通知：已消费且超出窗口的记录随压缩退场，
+    # 不再另立新段（否则每条历史通知都会变成永久占位的逐字段）。
+    live_ids = live_append_notice_ids(normalized)
     uncovered = [
         item
         for item in list(normalized.get('notice_records') or [])
         if not str(item.get('compression_stage_id') or '').strip()
         and not str(item.get('superseded_at') or '').strip()
         and str(item.get('message') or '').strip()
+        and str(item.get('notification_id') or '').strip() in live_ids
     ]
     if not uncovered:
         return normalized
@@ -320,26 +329,204 @@ def roll_append_notice_context_for_compression_stage(
 APPEND_NOTICE_MUST_PRESERVE_HEADING = '【必须逐条保留的追加要求】'
 
 
-def select_uncovered_append_notices(context: Any) -> list[dict[str, Any]]:
-    """还没被摘要段代持、也没被作废的通知原文。
+def _notice_record_is_consumed(record: dict[str, Any]) -> bool:
+    # merged_at 是"真正并入过上下文"；存量记录缺它时用 consumed_at 兜底。
+    return bool(str(record.get('merged_at') or record.get('consumed_at') or '').strip())
 
-    单一判据、两个载体：通知尾块与压缩指令的「必须保留段」都从这里取，避免一边认
-    `compression_stage_id`、另一边另算一套过滤条件。
+
+def _notice_record_sort_key(record: dict[str, Any]) -> tuple[str, str]:
+    return (
+        str(
+            record.get('received_at')
+            or record.get('consumed_at')
+            or record.get('merged_at')
+            or ''
+        ).strip(),
+        str(record.get('notification_id') or '').strip(),
+    )
+
+
+def select_append_notice_tail_records(
+    context: Any,
+    *,
+    consumed_window: int = NODE_NOTICE_CONSUMED_TAIL_WINDOW,
+) -> list[dict[str, Any]]:
+    """尾块 live 集合：未消费 + 最近 N 条已消费；superseded / 空正文排除。
+
+    台账本身不裁剪：这里只决定哪些记录还需要每跳重投。已消费且落在窗口外的
+    记录由 view_message_history / content_search 按需检索。
     """
     normalized = normalize_append_notice_context(context)
-    return [
-        {
-            'notification_id': str(item.get('notification_id') or '').strip(),
-            'epoch_id': str(item.get('epoch_id') or '').strip(),
-            'source_node_id': str(item.get('source_node_id') or '').strip(),
-            'message': str(item.get('message') or '').strip(),
-            'consumed_at': str(item.get('consumed_at') or '').strip(),
-        }
+    records = [
+        item
         for item in list(normalized.get('notice_records') or [])
-        if not str(item.get('compression_stage_id') or '').strip()
+        if str(item.get('message') or '').strip()
         and not str(item.get('superseded_at') or '').strip()
-        and str(item.get('message') or '').strip()
     ]
+    consumed = [item for item in records if _notice_record_is_consumed(item)]
+    keep_ids = {
+        str(item.get('notification_id') or '').strip()
+        for item in sorted(consumed, key=_notice_record_sort_key)[
+            -max(0, int(consumed_window or 0)) :
+        ]
+    }
+    live: list[dict[str, Any]] = []
+    for item in records:
+        notification_id = str(item.get('notification_id') or '').strip()
+        if _notice_record_is_consumed(item) and notification_id not in keep_ids:
+            continue
+        live.append(
+            {
+                'notification_id': notification_id,
+                'epoch_id': str(item.get('epoch_id') or '').strip(),
+                'source_node_id': str(item.get('source_node_id') or '').strip(),
+                'message': str(item.get('message') or '').strip(),
+                'consumed_at': str(item.get('consumed_at') or '').strip(),
+            }
+        )
+    return live
+
+
+def live_append_notice_ids(
+    context: Any,
+    *,
+    consumed_window: int = NODE_NOTICE_CONSUMED_TAIL_WINDOW,
+) -> set[str]:
+    return {
+        item['notification_id']
+        for item in select_append_notice_tail_records(
+            context,
+            consumed_window=consumed_window,
+        )
+        if item['notification_id']
+    }
+
+
+def archived_consumed_notice_count(
+    context: Any,
+    *,
+    consumed_window: int = NODE_NOTICE_CONSUMED_TAIL_WINDOW,
+) -> int:
+    """已消费但已退出尾块窗口的记录数（压缩边界退场的那一批）。"""
+    normalized = normalize_append_notice_context(context)
+    live_ids = live_append_notice_ids(
+        normalized,
+        consumed_window=consumed_window,
+    )
+    return sum(
+        1
+        for item in list(normalized.get('notice_records') or [])
+        if str(item.get('message') or '').strip()
+        and not str(item.get('superseded_at') or '').strip()
+        and str(item.get('notification_id') or '').strip() not in live_ids
+    )
+
+
+def is_notice_index_message(message: Any) -> bool:
+    content = str((message or {}).get('content') or '').strip()
+    return content.startswith(f'{NOTICE_INDEX_PREFIX}\n')
+
+
+def build_notice_index_message(
+    context: Any,
+    *,
+    consumed_window: int = NODE_NOTICE_CONSUMED_TAIL_WINDOW,
+) -> dict[str, Any] | None:
+    """一条极小的尾索引：告诉模型有多少已消费通知已退出上下文、怎么取回。
+
+    只报告数量与最老时间，不重投正文；没有退场记录时不产行。
+    """
+    normalized = normalize_append_notice_context(context)
+    live_ids = live_append_notice_ids(
+        normalized,
+        consumed_window=consumed_window,
+    )
+    archived = [
+        item
+        for item in list(normalized.get('notice_records') or [])
+        if str(item.get('message') or '').strip()
+        and not str(item.get('superseded_at') or '').strip()
+        and str(item.get('notification_id') or '').strip() not in live_ids
+    ]
+    if not archived:
+        return None
+    oldest = min(
+        (
+            _notice_record_sort_key(item)[0]
+            for item in archived
+            if _notice_record_sort_key(item)[0]
+        ),
+        default='',
+    )
+    lines = [
+        NOTICE_INDEX_PREFIX,
+        f'Older consumed notices outside the live window: {len(archived)}'
+        + (f' (oldest {oldest}).' if oldest else '.'),
+        'They may not be in this request; use view_message_history to list them, then '
+        'content_search(ref=..., query=...) or content_open(ref=...) to read one.',
+    ]
+    return {
+        'role': 'user',
+        'content': '\n'.join(lines),
+        # 不给 internal_prompt_kind：那个键会把消息归到 hidden_internal_event 家族。
+        'metadata': {'ui_visible': False},
+    }
+
+
+def select_uncovered_append_notices(
+    context: Any,
+    *,
+    consumed_window: int = NODE_NOTICE_CONSUMED_TAIL_WINDOW,
+) -> list[dict[str, Any]]:
+    """live 窗口里还没被摘要段代持的通知原文。
+
+    尾块 raw 窗口与压缩「必须保留段」共用这一条判据；已被代持的记录由
+    `compressed_notice_window` 段承载，不重复进 raw 窗口。
+    """
+    normalized = normalize_append_notice_context(context)
+    covered_ids = {
+        str(item.get('notification_id') or '').strip()
+        for item in list(normalized.get('notice_records') or [])
+        if str(item.get('compression_stage_id') or '').strip()
+    }
+    return [
+        item
+        for item in select_append_notice_tail_records(
+            normalized,
+            consumed_window=consumed_window,
+        )
+        if item['notification_id'] not in covered_ids
+    ]
+
+
+def prune_append_notice_context_segments(
+    context: Any,
+    *,
+    live_notice_ids: set[str] | None = None,
+    consumed_window: int = NODE_NOTICE_CONSUMED_TAIL_WINDOW,
+) -> dict[str, Any]:
+    """压缩边界：丢掉只含非 live 通知的代持段；notice_records 全量保留。
+
+    带 `notice_ids` 的段按交集判；没有 `notice_ids` 的存量段无法判断，保守保留。
+    """
+    normalized = normalize_append_notice_context(context)
+    live_ids = (
+        set(live_notice_ids)
+        if live_notice_ids is not None
+        else live_append_notice_ids(normalized, consumed_window=consumed_window)
+    )
+    kept: list[dict[str, Any]] = []
+    for segment in list(normalized.get('compression_segments') or []):
+        notice_ids = {
+            str(item or '').strip()
+            for item in list(segment.get('notice_ids') or [])
+            if str(item or '').strip()
+        }
+        if notice_ids and not (notice_ids & live_ids):
+            continue
+        kept.append(segment)
+    normalized['compression_segments'] = kept
+    return normalized
 
 
 def _notice_anchor(message: Any) -> str:
@@ -411,6 +598,31 @@ def is_append_notice_tail_message(message: Any) -> bool:
     return bool(append_notice_tail_prefix_match(message))
 
 
+def append_notice_window_notice_ids(message: Any) -> set[str]:
+    """从 `raw_notice_window` 块里读通知 id；解析失败返回空集。
+
+    压缩切分靠这个判据决定深埋窗口要不要捞出：空集按"未知"处理，调用方保守保留。
+    """
+    prefix = append_notice_tail_prefix_match(message)
+    if not prefix:
+        return set()
+    content = str((message or {}).get('content') or '').strip()
+    try:
+        payload = json.loads(content[len(prefix) :].strip())
+    except Exception:
+        return set()
+    if not isinstance(payload, dict):
+        return set()
+    ids: set[str] = set()
+    for item in list(payload.get('notices') or []):
+        if not isinstance(item, dict):
+            continue
+        notification_id = str(item.get('notification_id') or '').strip()
+        if notification_id:
+            ids.add(notification_id)
+    return ids
+
+
 def dedupe_append_notice_tail_messages(
     candidates: list[dict[str, Any]],
     existing_messages: list[dict[str, Any]] | None,
@@ -456,6 +668,12 @@ def build_append_notice_tail_messages(
     visible_user_messages: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     normalized = normalize_append_notice_context(context)
+    live_records = select_append_notice_tail_records(normalized)
+    live_ids = {
+        str(item.get('notification_id') or '').strip()
+        for item in live_records
+        if str(item.get('notification_id') or '').strip()
+    }
     visible_texts = {
         strip_node_message_prefix(item)
         for item in list(visible_user_messages or [])
@@ -463,6 +681,14 @@ def build_append_notice_tail_messages(
     }
     messages: list[dict[str, Any]] = []
     for segment in list(normalized.get('compression_segments') or []):
+        segment_notice_ids = {
+            str(item or '').strip()
+            for item in list(segment.get('notice_ids') or [])
+            if str(item or '').strip()
+        }
+        # 只含已退场通知的旧段不再渲染；没有 notice_ids 的存量段保守保留。
+        if segment_notice_ids and not (segment_notice_ids & live_ids):
+            continue
         payload = {
             'kind': 'compressed_notice_window',
             'compression_stage_id': str(segment.get('compression_stage_id') or '').strip(),
@@ -477,7 +703,7 @@ def build_append_notice_tail_messages(
         )
     raw_notices = [
         dict(item)
-        for item in select_uncovered_append_notices(context)
+        for item in select_uncovered_append_notices(normalized)
         if str(item.get('message') or '').strip() not in visible_texts
     ]
     if raw_notices:
@@ -501,7 +727,14 @@ __all__ = [
     'APPEND_NOTICE_TAIL_PREFIX',
     'APPEND_NOTICE_TAIL_PREFIXES',
     'LEGACY_APPEND_NOTICE_TAIL_PREFIX',
+    'NODE_NOTICE_CONSUMED_TAIL_WINDOW',
+    'NOTICE_INDEX_PREFIX',
     'append_notice_tail_prefix_match',
+    'append_notice_window_notice_ids',
+    'archived_consumed_notice_count',
+    'build_notice_index_message',
+    'is_notice_index_message',
+    'live_append_notice_ids',
     'NOTICE_ORIGIN_SYSTEM_RELAY',
     'SYSTEM_RELAY_NOTICE_PREFIXES',
     'is_system_relay_notice',
@@ -509,9 +742,11 @@ __all__ = [
     'consume_pending_append_notice_records',
     'normalize_append_notice_context',
     'normalize_pending_append_notice_records',
+    'prune_append_notice_context_segments',
     'record_pending_append_notice_records',
     'record_consumed_notifications',
     'roll_append_notice_context_for_compression_stage',
+    'select_append_notice_tail_records',
     'supersede_append_notice_records',
     'APPEND_NOTICE_MUST_PRESERVE_HEADING',
     'dedupe_append_notice_tail_messages',

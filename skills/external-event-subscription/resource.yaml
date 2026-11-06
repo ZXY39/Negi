@@ -1,0 +1,27 @@
+schema_version: 1
+kind: skill
+name: external-event-subscription
+description: 让外部程序按任意条件主动唤醒当前 Negi 会话或任务节点。覆盖订阅创建、连接器模板、幂等投递、验收与停用。
+trigger:
+  keywords:
+    - 外部唤醒
+    - 消息订阅
+    - 事件订阅
+    - 监听网页
+    - 监听文件
+    - 条件触发
+    - 主动通知我
+    - external event
+    - event subscription
+    - wake me
+  always: false
+requires:
+  tools:
+    - event_subscription
+  bins: []
+  env: []
+content:
+  main: SKILL.md
+exposure:
+  agent: true
+  main_runtime: true

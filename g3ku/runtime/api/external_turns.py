@@ -105,6 +105,52 @@ class ExternalTurnService:
                 continue
             self._turns.pop(turn_id, None)
 
+    def register_queued_batch_turn(
+        self,
+        *,
+        turn_id: str,
+        session_key: str,
+        bridge_id: str,
+        external_key: str,
+        source: str = "",
+    ) -> TurnRecord | None:
+        """登记一条没有 HTTP 提交方的排队批次回合（唤醒/重连/压缩收尾排水）。
+
+        这条车道过去只在内存 hub 上发 `turn.started`/终态，`get_turn` 与
+        `inflight_turn_id_for` 都看不见它——用户在唤醒之后发的那一轮正在跑时，
+        状态/暂停接口却答"没有在飞回合"。记录 id 直接取运行时批次的转录 turn_id，
+        所以暂停接口、状态读数与回合原文读口指向同一个 id。
+        """
+        key = str(turn_id or "").strip()
+        if not key:
+            return None
+        existing = self._turns.get(key)
+        if existing is not None:
+            return existing
+        record = TurnRecord(
+            turn_id=key,
+            session_key=str(session_key or "").strip(),
+            bridge_id=str(bridge_id or "").strip(),
+            external_key=str(external_key or "").strip(),
+            status="running",
+            started_at=datetime.now().isoformat(),
+            extra={
+                "source": str(source or "").strip(),
+                "queued_follow_up": True,
+            },
+        )
+        self._turns[key] = record
+        self._evict_terminal_turn_records()
+        return record
+
+    def settle_queued_batch_turn(self, turn_id: str, *, status: str) -> None:
+        record = self._turns.get(str(turn_id or "").strip())
+        if record is None:
+            return
+        normalized = str(status or "").strip().lower()
+        if normalized in {"completed", "failed", "cancelled"}:
+            record.status = normalized
+
     # -- submission ---------------------------------------------------------
 
     async def submit(

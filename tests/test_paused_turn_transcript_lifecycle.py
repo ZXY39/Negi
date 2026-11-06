@@ -307,10 +307,10 @@ def _prepare_agent_for_turn(agent, *, turn_id, batch_inputs):
 def _drained_into_this_turn(record):
     """把一条 durable pending 行表示成"本回合真的接走过它"。
 
-    `take_follow_up_batch_for_call_model` 把 drain 到的行放回 `_active_user_batch_inputs`，
-    而 `c9426d056`（2026-10-23）之后退役判据只认这份批次：孤儿 pending 行的终态只能由
-    真正回答它的那一轮授予（实盘 `web:ceo-f2fa04192251`：一次心跳回合把与本批无关的行
-    退役成 completed，那条提问就此同时失去回答与重投资格）。
+    排队车道（`_run_user_turn` 的 drain 循环）把 `drain_queued_follow_up_messages` 取到的行
+    作为下一轮的批次输入，而 `c9426d056`（2026-10-23）之后退役判据只认这份批次：孤儿 pending
+    行的终态只能由真正回答它的那一轮授予（实盘 `web:ceo-f2fa04192251`：一次心跳回合把与本批
+    无关的行退役成 completed，那条提问就此同时失去回答与重投资格）。
     """
     return UserInputMessage(
         content=record["content"],

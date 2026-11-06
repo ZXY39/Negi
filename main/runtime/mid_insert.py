@@ -20,6 +20,7 @@ from g3ku.runtime.tool_history import extract_call_id
 from main.runtime.append_notice_context import (
     SYSTEM_RELAY_NOTICE_PREFIXES,
     append_notice_tail_prefix_match,
+    is_notice_index_message,
 )
 from main.runtime.node_prompt_contract import is_node_dynamic_contract_message
 from main.runtime.tool_names import SILENT_TOOL_NAME
@@ -49,6 +50,7 @@ LEVEL_MARKER = "marker"
 KIND_RUNTIME_NOTICE = "runtime_notice"
 KIND_TURN_ONLY_NOTE = "turn_only_note"
 KIND_APPEND_NOTICE = "append_notice"
+KIND_NOTICE_INDEX = "notice_index"
 KIND_RETRIEVAL_MEMORY_SNAPSHOT = "retrieval_memory_snapshot"
 KIND_RETRIEVAL_OVERLAY = "retrieval_overlay"
 KIND_HIDDEN_INTERNAL_EVENT = "hidden_internal_event"
@@ -268,6 +270,23 @@ MID_INSERT_FAMILIES: tuple[MidInsertFamily, ...] = (
         compaction="carry",
     ),
     MidInsertFamily(
+        kind=KIND_NOTICE_INDEX,
+        level=LEVEL_MESSAGE,
+        priority=25,
+        classify=is_notice_index_message,
+        identity=_content_identity,
+        position=POSITION_TAIL,
+        durability="turn_only",
+        compaction="drop",
+        strip_at=frozenset(
+            {
+                (LANE_NODE, STAGE_PROMPT_TAIL),
+                (LANE_NODE, STAGE_POST_COMPACTION),
+            }
+        ),
+        singleton=True,
+    ),
+    MidInsertFamily(
         kind=KIND_RUNTIME_NOTICE,
         level=LEVEL_MESSAGE,
         priority=30,
@@ -407,9 +426,11 @@ _STAGE_DEFAULTS: dict[tuple[str, str], frozenset[str]] = {
         }
     ),
     (LANE_NODE, STAGE_PROMPT_TAIL): frozenset(
-        {KIND_LEGACY_RUNTIME_CONTRACT, KIND_TURN_ONLY_NOTE}
+        {KIND_LEGACY_RUNTIME_CONTRACT, KIND_NOTICE_INDEX, KIND_TURN_ONLY_NOTE}
     ),
-    (LANE_NODE, STAGE_POST_COMPACTION): frozenset({KIND_RUNTIME_NOTICE}),
+    (LANE_NODE, STAGE_POST_COMPACTION): frozenset(
+        {KIND_NOTICE_INDEX, KIND_RUNTIME_NOTICE}
+    ),
 }
 
 
@@ -648,6 +669,7 @@ __all__ = [
     "KIND_APPEND_NOTICE",
     "KIND_HIDDEN_INTERNAL_EVENT",
     "KIND_LEGACY_RUNTIME_CONTRACT",
+    "KIND_NOTICE_INDEX",
     "KIND_RETRIEVAL_MEMORY_SNAPSHOT",
     "KIND_RETRIEVAL_OVERLAY",
     "KIND_RUNTIME_NOTICE",
