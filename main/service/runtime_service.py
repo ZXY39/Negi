@@ -306,6 +306,7 @@ _WORKER_NODE_MESSAGE_FIELDS = (
     'batch_id',
     'allow_pause_clear',
     'expects_reply',
+    'external_event_id',
 )
 _WORKER_LEASE_ROLE = 'task_worker'
 _WORKER_LEASE_TTL_SECONDS = 20.0
@@ -5238,6 +5239,7 @@ class MainRuntimeService:
         batch_id: str = '',
         allow_pause_clear: bool = False,
         expects_reply: bool = False,
+        external_event_id: str = '',
     ) -> dict[str, Any]:
         """一条定向投递：判定矩阵 → 机械推导 → 指纹去重 → 落箱 → 唤醒。
 
@@ -5302,11 +5304,57 @@ class MainRuntimeService:
         fingerprint = message_fingerprint(
             kind=kind, source_node_id=source_node_id, message=body, ref=ref
         )
+        normalized_external_event_id = str(external_event_id or '').strip()
+        notifications = list(
+            self.store.list_task_node_notifications(normalized_task_id, normalized_node_id) or []
+        )
+
+        # 外部事件身份跨全状态去重：普通消息的指纹只对未消费行生效，而外部事件
+        # 在「信箱已消费、web 尚未记账」的窗口中不能因为状态前进而在重放时再投一份。
+        if normalized_external_event_id:
+            for item in notifications:
+                item_payload = dict(getattr(item, 'payload', None) or {})
+                if str(item_payload.get('external_event_id') or '').strip() != normalized_external_event_id:
+                    continue
+                wake_outcome = ''
+                if (
+                    wake
+                    and not notification_is_held(item)
+                    and not suppress_wake
+                    and self._delivery_wakes_target(
+                        task_id=normalized_task_id,
+                        node_id=normalized_node_id,
+                        node=node,
+                        priority=priority,
+                        park_state=park_state,
+                        sender_origin=origin,
+                        allow_pause_clear=allow_pause_clear,
+                    )
+                ):
+                    try:
+                        wake_outcome = await self.wake_node_on_message(
+                            task_id=normalized_task_id,
+                            node_id=normalized_node_id,
+                            allow_pause_clear=allow_pause_clear,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - row is durable; wake retry is separate
+                        wake_outcome = f'wake_error:{type(exc).__name__}'
+                return {
+                    'target': normalized_node_id,
+                    'status': 'deduplicated',
+                    'message_id': str(item.notification_id or ''),
+                    'kind': kind,
+                    'priority': priority,
+                    'wake': wake_outcome,
+                    'reason': '',
+                    'external_event_id': normalized_external_event_id,
+                    **under_acceptance_fields,
+                }
 
         # 去重只对「还没被处理」的同一指纹生效：消费过的重复是一次新的意图。
         # 去重收敛的是消息本身，不是唤醒意图——重发一条仍在箱里的消息（例如重试
         # 一次 resume）如果只回 deduplicated 而不尝试唤醒，失败的唤醒就永远补不上。
-        for item in list(self.store.list_task_node_notifications(normalized_task_id, normalized_node_id) or []):
+        for item in notifications:
             if (
                 str(item.status or '').strip() == 'delivered'
                 and str(item.fingerprint or '').strip() == fingerprint
@@ -5366,7 +5414,14 @@ class MainRuntimeService:
                 batch_id=str(batch_id or '').strip(),
                 held_at=now_iso() if held else '',
                 released_at='',
-                payload={'expects_reply': True} if expects_reply else {},
+                payload={
+                    **({'expects_reply': True} if expects_reply else {}),
+                    **(
+                        {'external_event_id': normalized_external_event_id}
+                        if normalized_external_event_id
+                        else {}
+                    ),
+                },
             )
         )
         self.log_service.refresh_task_view(normalized_task_id, mark_unread=True)
