@@ -166,3 +166,5 @@ claude mcp add negi -- negi mcp serve --token <bridge token>
 ```
 
 等价 MCP JSON 配置：`{"command": "negi", "args": ["mcp", "serve", "--token", "<t>"]}`（token 也可走 env `NEGI_EXTERNAL_TOKEN`）。暴露九个工具：`negi_chat` / `negi_get_reply` / `negi_get_turn` / `negi_wait_wake` / `negi_session_status` / `negi_pause` / `negi_cancel` / `negi_list_conversations` / `negi_delete_conversation`；每个 `conversation` 名对应一个持久会话。`negi_chat` 的 `attachments` 带文件：传跑 `negi mcp serve` 那台机器上的路径，或 http(s) URL（不传 base64），契约见 `docs/architecture/agent-gateway.md`「附件上行」。
+
+接入 **dev 检出**上跑的运行时时注意：PATH 上的 `negi` 命令桩指向安装根（`~/Negi`）那份检出，不一定是运行中 web 运行时所在的仓库检出。此时网关进程要与运行时同源：用运行时那份检出自己的 venv 解释器执行 `python -m g3ku mcp serve`（参数与 JSON 配置同上，`negi mcp check` 同理；运行时在哪份检出，看 web 进程命令行即知）。
