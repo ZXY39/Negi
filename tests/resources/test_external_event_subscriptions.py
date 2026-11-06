@@ -272,6 +272,16 @@ def test_node_target_must_be_execution_node_in_owner_scope(store, tmp_path: Path
         "node_id": "node:exec",
         "task_temp_dir": str(root / "task-temp"),
     }
+    self_target = manager.create(
+        runtime_context=execution_context,
+        name="self-target",
+        instruction="wake this node",
+        target_kind="node",
+        credential_file=str(root / "task-temp" / "self.json"),
+    )
+    assert self_target["task_id"] == "task:1"
+    assert self_target["node_id"] == "node:exec"
+
     with pytest.raises(ValueError, match="target_outside_task"):
         manager.create(
             runtime_context=execution_context,

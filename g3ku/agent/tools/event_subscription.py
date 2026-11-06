@@ -20,8 +20,7 @@ class EventSubscriptionTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Create or manage authenticated external-event subscriptions that wake the current "
-            "session or task node when an external program reports a condition."
+            "Create or manage authenticated external-event subscriptions that wake the current session or task node."
         )
 
     @property

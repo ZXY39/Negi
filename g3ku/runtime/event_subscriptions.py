@@ -367,6 +367,8 @@ class EventSubscriptionManager:
             raise ValueError("task_service_unavailable")
         normalized_task_id = ""
         normalized_node_id = str(node_id or "").strip()
+        if not normalized_node_id and role == "execution":
+            normalized_node_id = owner["node_id"]
         if normalized_node_id:
             normalized_node_id = service.normalize_node_id(normalized_node_id)
             node = service.get_node(normalized_node_id)
