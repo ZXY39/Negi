@@ -168,6 +168,7 @@ from main.runtime.chat_backend import (
     build_actual_request_diagnostics,
     build_stable_prompt_cache_key,
 )
+from main.runtime.continuous_node import is_continuous_metadata
 from main.runtime.model_route import (
     LEASE_OUTCOME_CANCELLED,
     LEASE_OUTCOME_SUCCESS,
@@ -2132,6 +2133,7 @@ class ReActToolLoop:
             plain_text_reply_message = (
                 build_node_plain_text_reply_block_message(
                     node_kind=node.node_kind,
+                    continuous=is_continuous_metadata(getattr(node, 'metadata', None)),
                 )
                 if not matched_raw_final_result_payload
                 and str(response.content or '').strip()

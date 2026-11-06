@@ -73,6 +73,7 @@ from main.runtime.continuous_node import (
     CONTINUOUS_METADATA_KEY,
     auto_assigns_acceptance,
     compose_continuous_acceptance_prompt,
+    is_continuous_metadata,
 )
 from main.runtime.internal_tools import (
     EnterWaitTool,
@@ -3401,6 +3402,8 @@ class NodeRunner:
             'file_targets': self._resolve_file_targets(task),
             'runtime_environment': self._runtime_environment_payload(task=task),
         }
+        if is_continuous_metadata(getattr(node, 'metadata', None)):
+            payload['run_mode'] = 'continuous'
         completion_contract = self._completion_contract_payload(task=task, node=node)
         if completion_contract is not None:
             payload['completion_contract'] = completion_contract
@@ -3429,7 +3432,11 @@ class NodeRunner:
 
     def _build_system_prompt(self, *, node: NodeRecord) -> str:
         system_name = 'acceptance_execution.md' if node.node_kind == KIND_ACCEPTANCE else 'node_execution.md'
-        return load_prompt(system_name).strip()
+        prompt = load_prompt(system_name).strip()
+        if is_continuous_metadata(getattr(node, 'metadata', None)):
+            # 放在稳定 system 提示词尾部：连续契约整个生命周期不变，不随回合漂移。
+            prompt = f'{prompt}\n\n{load_prompt("shared_continuous_idle.md").strip()}'
+        return prompt
 
     def _completion_contract_payload(self, *, task, node: NodeRecord) -> dict[str, Any] | None:
         if node.node_kind != KIND_EXECUTION or node.parent_node_id is not None:

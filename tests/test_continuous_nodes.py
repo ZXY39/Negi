@@ -23,6 +23,7 @@ from main.runtime.continuous_node import (
 )
 from main.runtime.internal_tools import SpawnChildNodesTool
 from main.runtime.node_runner import _spec_requires_acceptance
+from main.runtime.plain_text_reply import build_node_plain_text_reply_block_message
 from main.service.runtime_service import MainRuntimeService
 from tools.create_async_task_cn.main.tool import _CreateAsyncTaskHandler
 
@@ -310,6 +311,43 @@ async def test_spawn_tool_forwards_auto_acceptance_note() -> None:
 
     assert payload['created'][0]['acceptance_auto_created'] is True
     assert 'node:acceptance' in payload['created'][0]['acceptance_note']
+
+
+@pytest.mark.asyncio
+async def test_continuous_bootstrap_marks_run_mode_and_prompt(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    task, parent = _seed_parent(service)
+    continuous_child = service.node_runner._create_execution_child(
+        task=task, parent=parent, spec=_spec(continuous=True)
+    )
+    normal_child = service.node_runner._create_execution_child(
+        task=task, parent=parent, spec=_spec()
+    )
+
+    continuous_messages = await service.node_runner._build_messages(task=task, node=continuous_child)
+    normal_messages = await service.node_runner._build_messages(task=task, node=normal_child)
+
+    continuous_payload = json.loads(continuous_messages[1]['content'])
+    assert continuous_payload['run_mode'] == 'continuous'
+    assert '连续节点收尾契约' in continuous_messages[0]['content']
+
+    normal_payload = json.loads(normal_messages[1]['content'])
+    assert 'run_mode' not in normal_payload
+    assert '连续节点收尾契约' not in normal_messages[0]['content']
+
+
+def test_plain_text_lane_offers_enter_wait_only_to_continuous() -> None:
+    continuous = build_node_plain_text_reply_block_message(node_kind='execution', continuous=True)
+    assert 'enter_wait(waiting_for=["frontdoor"])' in continuous
+    assert 'submit_final_result' in continuous
+
+    legacy = build_node_plain_text_reply_block_message(node_kind='execution')
+    assert 'enter_wait' not in legacy
+    assert 'spawn child nodes if needed' in legacy
+
+    acceptance = build_node_plain_text_reply_block_message(node_kind='acceptance', continuous=True)
+    assert 'enter_wait' not in acceptance
+    assert 'keep verifying the acceptance criteria' in acceptance
 
 
 @pytest.mark.asyncio
