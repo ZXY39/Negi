@@ -67,10 +67,13 @@ from main.runtime.append_notice_context import (
     normalize_pending_append_notice_records,
 )
 from main.runtime.chat_backend import build_actual_request_diagnostics
+from main.runtime.continuous_node import CONTINUOUS_METADATA_KEY
+from main.runtime.designed_idle import task_is_designed_idle
 from main.runtime.send_token_preflight import (
     build_runtime_estimated_input_truth,
     build_runtime_observed_input_truth,
 )
+from main.runtime.wait_graph import NODE_WAIT_EXTERNAL_KEY
 from main.storage.disk_guard import has_emergency_disk_budget
 from main.token_usage import (
     build_token_usage_from_attempts,
@@ -3816,6 +3819,10 @@ class TaskLogService:
                 'round_options_count': 0,
                 'children_fingerprint': children_fingerprint,
                 'acceptance_handshake_state': acceptance_handshake_state,
+                # 连续/待命标记进投影：树快照窄读不逐节点读 nodes.payload，
+                # 前端据此把「停靠 + 外部唤醒源」渲染成待命而不是普通等待。
+                'continuous': bool((node.metadata or {}).get(CONTINUOUS_METADATA_KEY)),
+                'wait_external': bool((node.metadata or {}).get(NODE_WAIT_EXTERNAL_KEY)),
                 # 树快照窄读路径：pending_notice_count 的元数据部分直接落在投影里，
                 # 快照构建不必为每个节点全量读 nodes.payload（大 payload IO 是大树
                 # tree-snapshot 超时的根因之一）。
@@ -4607,15 +4614,15 @@ class TaskLogService:
     def resolve_content_ref(self, ref: str) -> str:
         return self._resolve_content_ref(ref)
 
-    @classmethod
-    def _task_summary_fingerprint(cls, task: TaskRecord) -> str:
-        payload = cls._task_summary_payload(task)
+    def _task_summary_fingerprint(self, task: TaskRecord, *, standby: bool = False) -> str:
+        payload = self._task_summary_payload(task, standby=standby)
         visible = {
             'title': str(payload.get('title') or ''),
             'brief': str(payload.get('brief') or ''),
             'status': str(payload.get('status') or ''),
             'is_unread': bool(payload.get('is_unread')),
             'is_paused': bool(payload.get('is_paused')),
+            'standby': bool(payload.get('standby')),
             'max_depth': int(payload.get('max_depth') or 0),
             'token_usage': {
                 'input_tokens': int(((payload.get('token_usage') or {}).get('input_tokens') or 0)),
@@ -4652,12 +4659,14 @@ class TaskLogService:
         return next_task
 
     def _publish_task_summary_patch_locked(self, *, task: TaskRecord, previous_task: TaskRecord | None = None) -> bool:
+        standby = self._task_standby_for_summary(task)
         payload_task = self._task_summary_payload(
             task,
             disk_usage_bytes=self._safe_task_disk_usage(task.task_id),
             node_count=self._safe_task_node_count(task.task_id),
+            standby=standby,
         )
-        fingerprint = self._task_summary_fingerprint(task)
+        fingerprint = self._task_summary_fingerprint(task, standby=standby)
         runtime_meta = dict(self._store.get_task_runtime_meta(task.task_id) or self._default_runtime_meta())
         previous_fingerprint = str(runtime_meta.get('summary_fingerprint') or '').strip()
         if previous_fingerprint and previous_fingerprint == fingerprint:
@@ -4719,6 +4728,8 @@ class TaskLogService:
                 'pause_requested': bool(node.pause_requested),
                 'pause_reason': str(node.pause_reason or ''),
                 'pause_remark': str((self._store.get_task_node_pause(node.node_id).remark if self._store.get_task_node_pause(node.node_id) is not None else '') or ''),
+                'continuous': bool((node.metadata or {}).get(CONTINUOUS_METADATA_KEY)),
+                'wait_external': bool((node.metadata or {}).get(NODE_WAIT_EXTERNAL_KEY)),
                 'children_fingerprint': str(
                     getattr(projected, 'children_fingerprint', '')
                     or ((getattr(projected, 'payload', None) or {}).get('children_fingerprint') if projected is not None else '')
@@ -5046,6 +5057,7 @@ class TaskLogService:
         *,
         disk_usage_bytes: int | None = None,
         node_count: int | None = None,
+        standby: bool = False,
     ) -> dict[str, Any]:
         metadata = dict(task.metadata or {})
         payload: dict[str, Any] = {
@@ -5060,6 +5072,9 @@ class TaskLogService:
             'recovery_notice': str(metadata.get('recovery_notice') or '').strip(),
             'is_unread': bool(task.is_unread),
             'is_paused': bool(task.is_paused),
+            # 待命是派生态，不是新状态：任务仍 in_progress，只是所有执行节点都停在
+            # 带外部唤醒源的停靠相位上。
+            'standby': bool(standby),
             'created_at': task.created_at,
             'updated_at': task.updated_at,
             'max_depth': int(task.max_depth or 0),
@@ -5086,6 +5101,19 @@ class TaskLogService:
             return int(self._store.count_task_nodes(task_id) or 0)
         except Exception:
             return None
+
+    def _task_standby_for_summary(self, task: TaskRecord) -> bool:
+        if str(getattr(task, 'status', '') or '').strip().lower() != 'in_progress':
+            return False
+        if bool(getattr(task, 'is_paused', False)) or bool(getattr(task, 'pause_requested', False)):
+            return False
+        return task_is_designed_idle(
+            store=self._store,
+            log_service=self,
+            task_id=task.task_id,
+            # 展示用口径：未读由派发车道负责，卡片不因一条未读在待命/等待之间闪。
+            check_unread=False,
+        )
 
     def _summary_cache_for_task(self, task_id: str) -> dict[str, tuple[str, dict[str, Any]]]:
         cache = self._summary_frame_cache.get(task_id)

@@ -683,6 +683,12 @@ textarea {
     color: #b45309;
 }
 
+/* 待命：连续节点停在声明的外部唤醒源上，是正常空闲而非运行中。 */
+.status-badge[data-status="standby"] {
+    background-color: rgba(234, 179, 8, 0.18);
+    color: #a16207;
+}
+
 
 .status-badge[data-status="queued"],
 .status-badge[data-status="unknown"],

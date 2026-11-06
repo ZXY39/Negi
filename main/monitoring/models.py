@@ -48,6 +48,9 @@ class TaskTreeSnapshotNode(Model):
     distribution_status: str = ''
     parent_visible: bool = True
     acceptance_handshake_state: str = ''
+    # 连续（待命）节点标记：停靠在声明了外部唤醒源的相位时，前端渲染「待命」。
+    continuous: bool = False
+    wait_external: bool = False
 
     @field_validator('distribution_status', mode='before')
     @classmethod

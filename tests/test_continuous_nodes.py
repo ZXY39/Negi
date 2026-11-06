@@ -303,6 +303,59 @@ def test_inflight_phase_breaks_designed_idle(tmp_path: Path) -> None:
     assert _stall_reason(service, task.task_id) == TASK_STALL_REASON_SUSPECTED_STALL
 
 
+def test_summary_standby_and_fingerprint(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    task, parent = _seed_parent(service)
+    _mark_waiting(service, task.task_id, parent.node_id, external=True)
+
+    assert service.log_service._task_standby_for_summary(task) is True
+    assert service.log_service._task_summary_payload(task, standby=True)['standby'] is True
+    assert service.log_service._task_summary_payload(task)['standby'] is False
+    assert service.log_service._task_summary_fingerprint(
+        task, standby=False
+    ) != service.log_service._task_summary_fingerprint(task, standby=True)
+
+
+def test_projection_carries_continuous_and_wait_external(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    task, parent = _seed_parent(service)
+    _mark_waiting(service, task.task_id, parent.node_id, external=True)
+    service.store.update_node(
+        parent.node_id,
+        lambda record: record.model_copy(
+            update={
+                'metadata': {
+                    **dict(record.metadata or {}),
+                    'continuous': True,
+                }
+            }
+        ),
+    )
+    node = service.store.get_node(parent.node_id)
+
+    payload = service.log_service._task_projection_node_record(node).payload
+    assert payload['continuous'] is True
+    assert payload['wait_external'] is True
+
+
+def test_node_brief_reports_standby(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    task, parent = _seed_parent(service)
+    _mark_waiting(service, task.task_id, parent.node_id, external=True)
+
+    waiting_brief = service.node_runner._node_brief(task.task_id, service.store.get_node(parent.node_id))
+    assert waiting_brief['state'] == 'waiting'
+
+    service.store.update_node(
+        parent.node_id,
+        lambda record: record.model_copy(
+            update={'metadata': {**dict(record.metadata or {}), 'continuous': True}}
+        ),
+    )
+    standby_brief = service.node_runner._node_brief(task.task_id, service.store.get_node(parent.node_id))
+    assert standby_brief['state'] == 'standby'
+
+
 def test_spawn_receipt_marks_auto_acceptance(tmp_path: Path) -> None:
     service = _service(tmp_path)
     task, parent = _seed_parent(service)

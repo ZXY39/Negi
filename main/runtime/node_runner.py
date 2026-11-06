@@ -2893,11 +2893,19 @@ class NodeRunner:
 
     def _node_brief(self, task_id: str, node: NodeRecord) -> dict[str, Any]:
         phase = str(self._node_frame_dict(task_id, node.node_id).get('phase') or '')
+        state = self._node_state_label(node, phase)
+        metadata = dict(getattr(node, 'metadata', None) or {})
+        if (
+            state == 'waiting'
+            and is_continuous_metadata(metadata)
+            and bool(metadata.get(NODE_WAIT_EXTERNAL_KEY))
+        ):
+            state = 'standby'
         return {
             'node_id': str(node.node_id or ''),
             'goal': str(node.goal or '')[:200],
             'node_kind': str(node.node_kind or 'execution'),
-            'state': self._node_state_label(node, phase),
+            'state': state,
             'state_detail': phase,
             'settled': str(node.status or '').strip().lower() in {'success', 'failed'},
             'unread_count': self._unread_from_node(task_id, node.node_id),

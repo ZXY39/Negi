@@ -1455,6 +1455,8 @@ class TaskQueryService:
             ),
             parent_visible=parent_visible,
             acceptance_handshake_state=handshake_state,
+            continuous=bool(payload.get('continuous')),
+            wait_external=bool(payload.get('wait_external')),
         )
 
     def _build_tree_snapshot(

@@ -9686,6 +9686,7 @@ const EMPTY_TOKEN_USAGE = () => ({
 function taskStatusKey(task) {
     if (!task) return "unknown";
     if (task.is_paused) return "blocked";
+    if (task.status === "in_progress" && task.standby) return "standby";
     if (taskIsUnpassed(task)) return "unpassed";
     return pStatus(task.status) || "unknown";
 }
