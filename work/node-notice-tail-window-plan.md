@@ -1,8 +1,9 @@
 # 节点通知尾块窗口化与历史检索落地计划
 
 日期：2026-11-06
-状态：**待确认，未动代码**
+状态：**已实现（P1–P4）；P5 真机验收待执行**
 取证基线：`main` @ `75eebcd6`
+实施提交：`095df2cb`（尾窗 + 检索面 + 索引 + 文档）、`6b69ed9e`（latest_at 修正）
 工作区提示：`main/runtime/node_runner.py`、`main/runtime/task_actor_service.py`、`main/storage/sqlite_store.py` 已有未提交改动，非本计划产出；动 P2 前先确认归属，不覆盖、不代提交。
 
 ## 一句话结论
@@ -173,3 +174,22 @@
 2. P3 索引行做不做？我建议做，成本是一行 + 一个 family。
 3. `view_message_history` 是否包含 superseded 行？我建议包含并标状态，检索 / 取证都需要。
 4. 验收块是否在后续计划里同样窗口化？本次只登记风险，不改。
+
+## 实施记录（2026-11-06）
+
+已按默认值落地：
+
+- N = `NODE_NOTICE_CONSUMED_TAIL_WINDOW = 5`（`main/runtime/append_notice_context.py`）。
+- 尾窗、代持段过滤/裁剪、深埋 raw window 按 live 过滤、压缩边界重建尾块：`append_notice_context.py` + `react_loop.py`。
+- `view_message_history` 合并信箱行 / `notice_records` / pending root 通知，按正文去重并带 status/source：`node_runner.py` + `internal_tools.py` + `node_execution.md`。
+- `[NOTICE_INDEX]` 尾索引：`append_notice_context.py` + `mid_insert.py` + `react_loop.py`。
+- 文档：`context-and-cache-troubleshooting.md`、`runtime-overview.md`、`main-task-runtime.md`、`tool-and-skill-system.md`。
+- 测试：新增 `tests/resources/test_node_notice_tail_window.py`；扩展 `tests/test_node_message_history_tool.py`。已通过：
+  - `test_node_notice_tail_window.py`、`test_node_message_history_tool.py`、`test_append_notice_compression_preservation.py`、`test_append_notice_tail_dedupe.py`、`test_mid_insert_registry.py`、`test_react_runtime_regressions.py`、`test_node_acceptance_scheduler.py`（222 passed / 7 skipped）
+  - `test_node_send_compaction_diagnostics.py`、`test_node_compaction_baseline_adoption.py`、`test_resource_runtime_smoke.py`（282 passed / 7 skipped）
+  - `test_task_web_worker_runtime.py`（222 passed）
+  - `ruff check` 与 `scripts/check_architecture_docs.py` 均通过。
+
+P5 真机验收（重启 + 真任务）仍需执行；验收口径见上文「P5 测试与验收」。
+
+工作区注意：`main/runtime/node_runner.py` 有一处与本改造无关的未提交改动（`started = request_started_at` → `boundary = anchor`，约在 `_unseen...` 时区比较处），未纳入本次提交。动它前先确认归属。
