@@ -15,6 +15,7 @@ from loguru import logger
 
 from g3ku.deployment.runtime_startup import auto_unlock_from_env
 from g3ku.runtime.api import router as runtime_router
+from g3ku.runtime.api.external_event_v1 import router as external_event_v1_router
 from g3ku.runtime.api.external_v1 import router as external_v1_router
 from g3ku.runtime.api.openai_compat import router as openai_compat_router
 from g3ku.runtime.api.sandbox import router as sandbox_router
@@ -161,6 +162,7 @@ app.include_router(main_router, prefix='/api')
 app.include_router(runtime_router, prefix='/api')
 app.include_router(sandbox_router, prefix='/api')
 app.include_router(external_v1_router, prefix='/api/v1')
+app.include_router(external_event_v1_router, prefix='/api/v1')
 # OpenAI-compatible gateway mounts under /api/v1 so OpenAI SDK clients work
 # with base_url=http://host:port/api/v1 and the 423 lock middleware applies.
 app.include_router(openai_compat_router, prefix='/api/v1')
