@@ -587,20 +587,69 @@ function ceoModelBadgeTitle(estimate) {
     return fromEstimate || ceoModelDisplayTitle(ceoModelCatalogItem(effectiveKey)) || "";
 }
 
-// 发送按钮左侧那颗徽标印的是模型 ID，不是展示名：它回答"这一跳到底打的是哪颗"。
-// 运行中优先取该跳实际服务的模型（observed_input_truth）；空闲退回下一回合预检
-// 解析出的 provider_model，再退回固定模型/链首的 provider_model。
-// provider_model 的字段形状是 `协议:模型ID`，徽标只显示协议后面那段。
-function ceoLiveModelIdText(estimate, { running = false } = {}) {
-    const modelIdOnly = (value) => {
-        const text = String(value || "").trim();
-        const separator = text.indexOf(":");
-        return separator >= 0 ? text.slice(separator + 1).trim() : text;
+// 发送按钮左侧那颗徽标印的是「配置名称:模型 ID」：它回答"这一跳由哪份配置、打的是哪颗"。
+// 同一颗模型可以挂在多份配置下，只印模型分不出走的是哪份；只印配置又看不出降档后
+// 实际换到了哪颗。
+// provider_model 的字段形状是 `协议:模型ID`，模型 ID 取冒号后面那段。
+function ceoModelProviderModelId(value) {
+    const text = String(value || "").trim();
+    const separator = text.indexOf(":");
+    return separator >= 0 ? text.slice(separator + 1).trim() : text;
+}
+
+function ceoModelBindingName(item) {
+    if (!item) return "";
+    // 配置名称是模型页里填的展示名；老配置可能没填，退回 key。
+    return String(item.name || "").trim() || String(item.key || "").trim();
+}
+
+function ceoModelCatalogItemForProviderModel(value, preferredKey = "") {
+    const raw = String(value || "").trim();
+    if (!raw) return null;
+    const sameModel = (item) => {
+        if (!item) return false;
+        const candidate = String(item.provider_model || "").trim();
+        return candidate === raw
+            || ceoModelProviderModelId(candidate) === ceoModelProviderModelId(raw);
     };
-    const observed = modelIdOnly(estimate?.observed_provider_model);
-    if (running && observed) return observed;
-    const preflight = modelIdOnly(estimate?.provider_model);
-    if (preflight) return preflight;
+    // 多条绑定可以共用同一个 provider 模型名：先认这一跳记录的绑定 key，再退回按模型名匹配。
+    const preferred = ceoModelCatalogItem(preferredKey);
+    if (sameModel(preferred)) return preferred;
+    const catalog = S.modelCatalog.catalog || [];
+    const exact = catalog.find((item) => String(item?.provider_model || "").trim() === raw);
+    if (exact) return exact;
+    const modelId = ceoModelProviderModelId(raw);
+    if (!modelId) return null;
+    return catalog.find((item) => ceoModelProviderModelId(item?.provider_model) === modelId) || null;
+}
+
+function ceoModelBadgeLabel(item) {
+    if (!item) return "";
+    const configName = ceoModelBindingName(item);
+    const modelId = ceoModelProviderModelId(item.provider_model);
+    if (configName && modelId) return `${configName}:${modelId}`;
+    return configName || modelId;
+}
+
+function ceoLiveModelIdText(estimate, { running = false } = {}) {
+    // 运行中优先认这一跳实际服务的模型（observed_input_truth）：resolved_model_key 只是
+    // 起跑时选中的绑定，429 降档后真正服务的是链上的另一份配置。
+    const observed = String(estimate?.observed_provider_model || "").trim();
+    if (running && observed) {
+        const label = ceoModelBadgeLabel(ceoModelCatalogItemForProviderModel(
+            observed,
+            estimate?.resolved_model_key,
+        ));
+        return label || ceoModelProviderModelId(observed);
+    }
+    const preflight = String(estimate?.provider_model || "").trim();
+    if (preflight) {
+        const label = ceoModelBadgeLabel(ceoModelCatalogItemForProviderModel(
+            preflight,
+            estimate?.resolved_model_key,
+        ));
+        return label || ceoModelProviderModelId(preflight);
+    }
     if (running) return "";
     const sessionId = String(activeSessionId() || "").trim();
     const selection = ceoModelSelectionFor(sessionId);
@@ -609,7 +658,7 @@ function ceoLiveModelIdText(estimate, { running = false } = {}) {
     for (const key of keys) {
         const item = ceoModelCatalogItem(key);
         if (!item || item.enabled === false) continue;
-        const label = modelIdOnly(item.provider_model) || ceoModelDisplayTitle(item);
+        const label = ceoModelBadgeLabel(item);
         if (label) return label;
     }
     return "";

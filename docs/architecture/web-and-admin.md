@@ -1035,10 +1035,10 @@ The context-usage brain is also the composer's model-and-context entry: clicking
 
 ### Composer Model Badge
 
-- 输入行右下角的发送/暂停按钮左侧常驻一颗模型徽标（`.ceo-model-live-badge`），印的是模型 ID，不是展示名；`provider_model` 的字段形状是 `协议:模型ID`，徽标取冒号后那段（`openai:gpt-5.2` 显示为 `gpt-5.2`），取值链里的每一档都按这条规则裁。按钮与徽标同属一个绝对定位簇，定位由簇统一承担，因此两者的间距与右边界随按钮宽度一起走。
-- 运行中印这一回合该跳实际服务的模型：源是 inflight `frontdoor_token_preflight_diagnostics.observed_input_truth.provider_model`（provider 请求体里真正发出去的 `model`），缺失时退回同一份诊断的 `provider_model`。它随 `ceo.state` / `ceo.turn.patch` 的 inflight 快照逐跳刷新，链上换成员（429 降档）之后下一跳就改印新成员；取不到任何模型时整颗隐藏，不拿链首或固定模型顶替。
-- 空闲时印下一回合发送将使用的模型：优先取 composer preflight 的 `provider_model`；还没有预估时退回会话固定模型的 `provider_model`，再退回模型链上第一颗可用成员的 `provider_model`。同样取不到就隐藏。
-- 徽标是裸文本：不带边框、圆角外框、底色与内边距，靠字号与 `--text-muted` 着色和按钮区分，超长由 `max-width` 截成省略号。它的 `title` 说明读数口径（`当前运行模型：<id>` / `下次发送将使用：<id>`），正文不带图标、不做动画；它只读，不打开面板。
+- 输入行右下角的发送/暂停按钮左侧常驻一颗模型徽标（`.ceo-model-live-badge`），印的是「配置名称:模型 ID」，不是展示名也不是裸模型 ID：它回答"这一跳由哪份配置、打的是哪颗"。同一颗模型可以挂在多份配置下，只印模型分不出走的是哪份；只印配置又看不出降档后实际换到了哪颗。配置名称取模型目录条目的 `name`（未填时退回 `key`）；`provider_model` 的字段形状是 `协议:模型ID`，模型 ID 取冒号后那段。目录里查不到对应配置时降级为只印模型 ID。按钮与徽标同属一个绝对定位簇，定位由簇统一承担，因此两者的间距与右边界随按钮宽度一起走。
+- 运行中印这一回合该跳实际服务的配置与模型：模型源是 inflight `frontdoor_token_preflight_diagnostics.observed_input_truth.provider_model`（provider 请求体里真正发出去的 `model`），缺失时退回同一份诊断的 `provider_model`。配置按这个模型在目录里解析：先认诊断里的 `resolved_model_key`，再按 `provider_model` / 模型 ID 匹配，所以链上换成员（429 降档）之后下一跳就改印真正服务的那份配置与模型，而不是起跑时选中的那份。它随 `ceo.state` / `ceo.turn.patch` 的 inflight 快照逐跳刷新；取不到任何模型时整颗隐藏，不拿链首或固定模型顶替。
+- 空闲时印下一回合发送将使用的配置与模型：优先按 composer preflight 的 `provider_model` 与 `resolved_model_key` 解析；还没有预估时退回会话固定模型，再退回模型链上第一颗可用成员。同样取不到就隐藏。
+- 徽标是裸文本：不带边框、圆角外框、底色与内边距，靠字号与 `--text-muted` 着色和按钮区分，超长由 `max-width` 截成省略号。它的 `title` 说明读数口径（`当前运行配置：<配置名称:模型ID>` / `下次发送将使用：<配置名称:模型ID>`），正文不带图标、不做动画；它只读，不打开面板。
 
 ### Composer Context Usage Meter
 
