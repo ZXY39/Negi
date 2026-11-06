@@ -182,8 +182,9 @@ def unresolved_target_reason(raw: object) -> str:
 
 
 # 节点不带"改模型链 / 管环境"的能力，所以一条错误消息能给的唯一有效出路是把它交上去。
-# 这句话按收件人能不能直达前门分两档：只有根节点的 `send_message` 接受 `frontdoor`，
-# 对非根节点印那句就是在指一条会被 `frontdoor_root_only` 拒掉的死路。
+# 这句话按收件人分两档，但分的不是"谁能到前门"（任何执行节点都能），而是**一条分支的故障
+# 该由谁汇总**：错误继续交父节点，一次故障只上去一条；前门自己提问要求回复的那一句走
+# `to="frontdoor"`，见 `main/runtime/node_message_text.py` 的回复义务句。
 def error_escalation_hint(*, receiver_is_root: bool) -> str:
     """The one line appended to error-class mailbox messages telling the receiver where to escalate."""
     if receiver_is_root:
@@ -194,7 +195,8 @@ def error_escalation_hint(*, receiver_is_root: bool) -> str:
             'front door decide.'
         )
     return (
-        'If you cannot resolve this, pass it up: `send_message(to="parent", content=...)` — only '
-        'the root node can reach the front door, so name the failing node id and what you tried. '
+        'If you cannot resolve this, pass it up: `send_message(to="parent", content=...)` — your '
+        'parent holds this branch, so name the failing node id and what you tried and let it '
+        'decide whether to take it further. '
         'Model chains, provider keys and runtime configuration are not yours to change.'
     )

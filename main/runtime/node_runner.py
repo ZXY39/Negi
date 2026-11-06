@@ -86,7 +86,11 @@ from main.runtime.node_message_kind import (
     RELATION_CHILD,
     RELATION_PARENT,
 )
-from main.runtime.node_message_text import message_label, render_node_message_text
+from main.runtime.node_message_text import (
+    message_label,
+    notification_expects_reply,
+    render_node_message_text,
+)
 from main.runtime.node_prompt_contract import extract_node_dynamic_contract_payload
 from main.runtime.node_relationships import (
     accepted_node_id,
@@ -247,6 +251,7 @@ def _notification_rendered_text(notice: Any) -> str:
         source_node_id=source,
         message=message,
         system_relay=is_system_relay_notice(notice),
+        expects_reply=notification_expects_reply(notice),
     )
 
 
@@ -3056,8 +3061,6 @@ class NodeRunner:
         return await callback(
             task_id=task_id,
             sender_node_id=str(node.node_id or '').strip(),
-            sender_is_root=str(node.node_id or '').strip()
-            == str(node.root_node_id or '').strip(),
             to=to,
             content=content,
             ref=ref,

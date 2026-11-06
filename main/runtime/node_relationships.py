@@ -89,7 +89,6 @@ def messageable_target_ids(
     *,
     sender: Any,
     node_map: dict[str, Any],
-    sender_is_root: bool,
     limit: int = 50,
 ) -> tuple[list[str], bool]:
     sender_id = node_id(sender)
@@ -105,8 +104,7 @@ def messageable_target_ids(
         if reject_reason or not relation:
             continue
         targets.append(item_id)
-    if sender_is_root:
-        targets.append('frontdoor')
+    targets.append('frontdoor')
     ordered: list[str] = []
     seen: set[str] = set()
     for item in targets:

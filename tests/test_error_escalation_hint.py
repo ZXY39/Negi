@@ -1,11 +1,12 @@
 """Where an error message tells its receiver to escalate, and who must not be told to fix config.
 
 Nodes carry no ability to change model chains, provider keys or runtime configuration, so an
-error that reaches a node has exactly one valid exit: pass it up. The line has to be
-role-aware because only the root node's `send_message` accepts `frontdoor` — printing that
-address for a deeper node points it at a `frontdoor_root_only` rejection. The front-door
-lane needs no such pointer: its own failure already lands in the session as
-「这一轮处理失败：…」 (transcript + web feed + channel notice).
+error that reaches a node has exactly one valid exit: pass it up. The line is role-aware by
+**aggregation**, not by reach: every execution node can address `frontdoor`, but a failure on a
+deep branch goes to its parent first so one fault produces one report. Answering a question the
+front door asked is the other lane and uses `to="frontdoor"` directly (see
+`main/runtime/node_message_text.py`). The front-door lane needs no such pointer: its own failure
+already lands in the session as 「这一轮处理失败：…」 (transcript + web feed + channel notice).
 """
 
 from __future__ import annotations
@@ -60,11 +61,13 @@ class TestHintBuilder:
         assert 'to="frontdoor"' in text
         assert 'to="parent"' not in text
 
-    def test_non_root_is_not_pointed_at_a_lane_that_rejects_it(self):
+    def test_non_root_escalates_to_its_parent_without_a_reach_claim(self):
         text = error_escalation_hint(receiver_is_root=False)
         assert 'to="parent"' in text
         assert 'to="frontdoor"' not in text
-        assert 'only the root node can reach the front door' in text
+        # 非根节点现在也能直达前门，所以这句不能再用"谁能到前门"当理由。
+        assert 'only the root node can reach the front door' not in text
+        assert 'your parent holds this branch' in text
 
     def test_both_arms_declare_the_capability_boundary(self):
         for root_case in (True, False):

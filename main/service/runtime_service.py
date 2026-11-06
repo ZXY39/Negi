@@ -305,6 +305,7 @@ _WORKER_NODE_MESSAGE_FIELDS = (
     'held',
     'batch_id',
     'allow_pause_clear',
+    'expects_reply',
 )
 _WORKER_LEASE_ROLE = 'task_worker'
 _WORKER_LEASE_TTL_SECONDS = 20.0
@@ -5236,10 +5237,13 @@ class MainRuntimeService:
         held: bool = False,
         batch_id: str = '',
         allow_pause_clear: bool = False,
+        expects_reply: bool = False,
     ) -> dict[str, Any]:
         """一条定向投递：判定矩阵 → 机械推导 → 指纹去重 → 落箱 → 唤醒。
 
         `origin`/`relation`/`system_kind` 决定 kind；`system_kind` 只有运行时能传。
+        `expects_reply` 同样只有运行时能传：它记在行的 payload 里，注入时给收件节点补一句
+        回投车道；模型不能自己声明（它不在投递参数面上）。
 
         `wake=False` 用于「必须留痕、但不得叫醒收件人」的系统消息：pass 裁决的
         收件人即将终局，reject_no_progress 裁决的收件人刚被判暂停（唤醒会立刻清掉
@@ -5362,7 +5366,7 @@ class MainRuntimeService:
                 batch_id=str(batch_id or '').strip(),
                 held_at=now_iso() if held else '',
                 released_at='',
-                payload={},
+                payload={'expects_reply': True} if expects_reply else {},
             )
         )
         self.log_service.refresh_task_view(normalized_task_id, mark_unread=True)
@@ -5485,7 +5489,6 @@ class MainRuntimeService:
         *,
         task_id: str,
         sender_node_id: str,
-        sender_is_root: bool,
         to: Any,
         content: str = '',
         ref: str = '',
@@ -5505,7 +5508,6 @@ class MainRuntimeService:
         legal_targets, legal_truncated = self._messageable_targets(
             sender=sender,
             node_map=node_map,
-            sender_is_root=sender_is_root,
         )
 
         requested = normalize_targets(to)
@@ -5530,12 +5532,12 @@ class MainRuntimeService:
                     )
                     continue
             elif namespace == '' and value == 'frontdoor':
-                if not sender_is_root:
+                if str(getattr(sender, 'node_kind', '') or '').strip().lower() == 'acceptance':
                     results.append(
                         {
                             'target': 'frontdoor',
                             'status': 'rejected',
-                            'reason': 'frontdoor_root_only',
+                            'reason': 'acceptance_node_not_messageable',
                         }
                     )
                     continue
@@ -5619,12 +5621,10 @@ class MainRuntimeService:
         *,
         sender: Any,
         node_map: dict[str, Any],
-        sender_is_root: bool,
     ) -> tuple[list[str], bool]:
         return node_messageable_target_ids(
             sender=sender,
             node_map=node_map,
-            sender_is_root=sender_is_root,
         )
 
     async def deliver_frontdoor_message(
@@ -5635,14 +5635,19 @@ class MainRuntimeService:
         content: str,
         ref: str = '',
     ) -> dict[str, Any]:
-        """Root node → frontdoor/session inbox (durable, signed)."""
+        """节点 → frontdoor/session inbox (durable, signed).
+
+        非根节点也走这里：前门直接问哪个节点，就该由那个节点自己答，而不是先把话
+        交给父节点、再由父节点交给根节点转一道。验收节点仍然不通，与前门→节点的
+        `acceptance_node_not_messageable` 同一侧。
+        """
         normalized_task_id = self.normalize_task_id(task_id)
         task = self.store.get_task(normalized_task_id)
         node = self.store.get_node(str(source_node_id or '').strip())
         if task is None or node is None:
             return {'target': 'frontdoor', 'status': 'rejected', 'reason': 'source_missing'}
-        if str(getattr(node, 'node_id', '') or '').strip() != str(getattr(task, 'root_node_id', '') or '').strip():
-            return {'target': 'frontdoor', 'status': 'rejected', 'reason': 'frontdoor_root_only'}
+        if str(getattr(node, 'node_kind', '') or '').strip().lower() == 'acceptance':
+            return {'target': 'frontdoor', 'status': 'rejected', 'reason': 'acceptance_node_not_messageable'}
         body = str(content or '').strip()
         if not body:
             return {'target': 'frontdoor', 'status': 'rejected', 'reason': 'content_required'}
@@ -5776,6 +5781,7 @@ class MainRuntimeService:
                 message=content,
                 origin='frontdoor',
                 ref=ref,
+                expects_reply=True,
             )
             or {}
         )
@@ -5805,6 +5811,7 @@ class MainRuntimeService:
                 message=content,
                 origin='frontdoor',
                 ref=ref,
+                expects_reply=True,
             )
             or {}
         )

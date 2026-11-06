@@ -415,7 +415,7 @@ class SendMessageTool(Tool):
     def model_description(self) -> str:
         return (
             'Message your parent, execution descendants, a sibling, a descendant verifier, or the '
-            'front door (root only). A target awaiting acceptance queues parent messages without '
+            'front door. A target awaiting acceptance queues parent messages without '
             'waking it.'
         )
 
@@ -428,7 +428,7 @@ class SendMessageTool(Tool):
                     'type': ['string', 'array'],
                     'items': {'type': 'string'},
                     'description': (
-                        "`parent`, `frontdoor` (root only), a node id you may message, or a list of "
+                        "`parent`, `frontdoor`, a node id you may message, or a list of "
                         "them. Node ids may be bare or `node:`-prefixed; stray spaces are accepted."
                     ),
                     'minLength': 1,

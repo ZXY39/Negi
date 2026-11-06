@@ -464,8 +464,8 @@ class TaskQueryService:
 
         `node_id` 列是收件人，发送方只在 payload 里，所以这里按任务读一次再过滤；
         节点详情是低频页，一次任务级读取可接受（(task_id) 索引见建表段）。
-        根节点→前门走 `deliver_frontdoor_message`，只落 `frontdoor_node_messages`、不写通知台账，
-        所以这里必须并第二本账，否则根节点对前门的发言在发出列表里没有落点。
+        节点→前门走 `deliver_frontdoor_message`，只落 `frontdoor_node_messages`、不写通知台账，
+        所以这里必须并第二本账，否则节点对前门的发言在发出列表里没有落点。
         """
         normalized_node_id = str(node_id or '').strip()
         if not normalized_node_id:

@@ -53,9 +53,7 @@ def test_relation_matrix():
 def test_messageable_targets_exclude_self_and_own_verifier():
     nodes = _tree()
     sender = nodes['node:c']
-    targets, truncated = messageable_target_ids(
-        sender=sender, node_map=nodes, sender_is_root=False
-    )
+    targets, truncated = messageable_target_ids(sender=sender, node_map=nodes)
     assert truncated is False
     assert 'node:r' in targets
     assert 'node:s' in targets
@@ -66,12 +64,13 @@ def test_messageable_targets_exclude_self_and_own_verifier():
     assert 'node:rv' not in targets
 
 
-def test_root_gets_frontdoor_target():
+def test_frontdoor_target_is_listed_for_every_sender():
     nodes = _tree()
-    targets, _ = messageable_target_ids(
-        sender=nodes['node:r'], node_map=nodes, sender_is_root=True
-    )
-    assert 'frontdoor' in targets
+    root_targets, _ = messageable_target_ids(sender=nodes['node:r'], node_map=nodes)
+    child_targets, _ = messageable_target_ids(sender=nodes['node:c'], node_map=nodes)
+    assert 'frontdoor' in root_targets
+    # 前门直接问子节点时，子节点自己就能回，不需要先经父节点传到根节点。
+    assert 'frontdoor' in child_targets
 
 
 def test_execution_has_acceptance():

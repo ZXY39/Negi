@@ -281,7 +281,6 @@ class TestAddressingRejectionArms:
         result = await service._deliver_node_message_from_node(
             task_id=TASK,
             sender_node_id=CHILD,
-            sender_is_root=False,
             to='node:nobody-here',
             content='hi',
         )
@@ -300,7 +299,6 @@ class TestAddressingRejectionArms:
         result = await service._deliver_node_message_from_node(
             task_id=TASK,
             sender_node_id=CHILD,
-            sender_is_root=False,
             to='["node:root"',
             content='hi',
         )
@@ -318,7 +316,6 @@ class TestAddressingRejectionArms:
             result = await service._deliver_node_message_from_node(
                 task_id=TASK,
                 sender_node_id=ROOT,
-                sender_is_root=True,
                 to=target,
                 content=f'hi-{index}',
             )
@@ -334,7 +331,6 @@ class TestAddressingRejectionArms:
         result = await service._deliver_node_message_from_node(
             task_id=TASK,
             sender_node_id=ROOT,
-            sender_is_root=True,
             to='task:mailbox',
             content='hi',
         )
@@ -351,7 +347,6 @@ class TestAddressingRejectionArms:
         result = await service._deliver_node_message_from_node(
             task_id=TASK,
             sender_node_id=ROOT,
-            sender_is_root=True,
             to=[CHILD],
             content='hi',
         )

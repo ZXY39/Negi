@@ -1,4 +1,4 @@
-"""Frontdoor inbox lane: root-only inbound, execution-node outbound, scanner wake."""
+"""Frontdoor inbox lane: any execution node may post, only execution nodes receive, scanner wakes the session."""
 
 from __future__ import annotations
 
@@ -93,17 +93,75 @@ async def test_root_can_write_frontdoor_inbox(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_non_root_cannot_write_frontdoor_inbox(tmp_path):
+async def test_non_root_writes_frontdoor_inbox_under_its_own_id(tmp_path):
+    """前门直接问子节点，子节点自己就能答，不必经父节点交到根节点转一道。"""
     service = _service(tmp_path)
     _seed(service)
 
     delivered = await service.deliver_frontdoor_message(
         task_id=TASK,
         source_node_id=CHILD,
+        content='播放地址已拿到，只差渲染',
+    )
+
+    assert delivered['status'] == 'delivered'
+    rows = service.list_frontdoor_node_messages(SESSION)
+    assert [item.source_node_id for item in rows] == [CHILD]
+    assert rows[0].content == '播放地址已拿到，只差渲染'
+
+
+@pytest.mark.asyncio
+async def test_acceptance_node_cannot_write_frontdoor_inbox(tmp_path):
+    service = _service(tmp_path)
+    _seed(service)
+
+    delivered = await service.deliver_frontdoor_message(
+        task_id=TASK,
+        source_node_id=VERIFIER,
         content='x',
     )
     assert delivered['status'] == 'rejected'
-    assert delivered['reason'] == 'frontdoor_root_only'
+    assert delivered['reason'] == 'acceptance_node_not_messageable'
+
+
+@pytest.mark.asyncio
+async def test_frontdoor_question_carries_the_reply_lane_tail(tmp_path):
+    from main.runtime.node_runner import _notification_rendered_text
+
+    service = _service(tmp_path, execution_mode='worker')
+    _seed(service)
+
+    await service.deliver_frontdoor_node_message(session_id=SESSION, to=CHILD, content='现在卡在哪一步')
+    row = service.store.list_task_node_notifications(TASK, CHILD)[-1]
+
+    assert row.kind == 'frontdoor_notice'
+    assert row.payload.get('expects_reply') is True
+    text = _notification_rendered_text(row)
+    assert 'send_message(to="frontdoor", content=...)' in text
+    assert 'does not reach the front door' in text
+    # 台账正文一个字不动：尾句只在注入渲染时补，fingerprint 与显示读的仍是原文。
+    assert row.message == '现在卡在哪一步'
+    assert text.startswith('来自会话，内容为：\n现在卡在哪一步')
+
+
+@pytest.mark.asyncio
+async def test_runtime_frontdoor_lane_without_a_question_carries_no_tail(tmp_path):
+    """waiter-gone 这类运行时模板走同一个 origin，但不要求回投，就不挂这句。"""
+    from main.runtime.node_runner import _notification_rendered_text
+
+    service = _service(tmp_path, execution_mode='worker')
+    _seed(service)
+
+    await service.deliver_node_message(
+        task_id=TASK,
+        target_node_id=CHILD,
+        message='你上次停靠时在等：等素材齐\n节点已结束。',
+        origin='frontdoor',
+    )
+    row = service.store.list_task_node_notifications(TASK, CHILD)[-1]
+
+    assert row.payload == {}
+    assert 'send_message(to="frontdoor"' not in _notification_rendered_text(row)
 
 
 @pytest.mark.asyncio
