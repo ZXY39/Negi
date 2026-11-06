@@ -631,7 +631,7 @@ function ceoModelBadgeLabel(item) {
     return configName || modelId;
 }
 
-function ceoLiveModelIdText(estimate, { running = false } = {}) {
+function ceoLiveModelBadgeText(estimate, { running = false } = {}) {
     // 运行中优先认这一跳实际服务的模型（observed_input_truth）：resolved_model_key 只是
     // 起跑时选中的绑定，429 降档后真正服务的是链上的另一份配置。
     const observed = String(estimate?.observed_provider_model || "").trim();

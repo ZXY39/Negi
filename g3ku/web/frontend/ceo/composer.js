@@ -280,7 +280,7 @@ function syncCeoModelLiveBadge() {
     if (!badge) return;
     const sessionId = String(activeSessionId() || "").trim();
     const running = !!ceoRunningInflightTurnForSession(sessionId) || !!S.ceoTurnActive;
-    const label = ceoLiveModelIdText(ceoCurrentUsageEstimate(), { running });
+    const label = ceoLiveModelBadgeText(ceoCurrentUsageEstimate(), { running });
     badge.textContent = label;
     badge.hidden = !label;
     if (!label) {
