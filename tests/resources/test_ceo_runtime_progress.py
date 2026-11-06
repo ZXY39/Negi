@@ -3440,7 +3440,7 @@ async def test_runtime_agent_session_persists_pending_user_turn_before_cancellat
 
 
 @pytest.mark.asyncio
-async def test_runtime_agent_session_archives_running_assistant_before_consumed_follow_up(
+async def test_runtime_agent_session_keeps_queued_follow_up_until_a_turn_takes_it(
     tmp_path: Path,
 ) -> None:
     loop = SimpleNamespace(
@@ -3467,18 +3467,27 @@ async def test_runtime_agent_session_archives_running_assistant_before_consumed_
     await session._persist_pending_user_messages(user_inputs=[original])
 
     await session.queue_follow_up_batch([UserInputMessage(content="Queued follow-up")], persist_transcript=True)
-    drained = await session.take_follow_up_batch_for_call_model()
 
-    assert [websocket_ceo._history_text(item.content) for item in drained] == ["Queued follow-up"]
+    # 跳界判据只看不取：连续两次探测都为真，条目仍归排队车道。
+    assert session.has_queued_follow_up_messages() is True
+    assert session.has_queued_follow_up_messages() is True
+    # 被打断的那一轮自己收尾成行，不再补过渡占位行。
+    session.discard_follow_up_transition_snapshot()
 
     reloaded = SessionManager(tmp_path).get_or_create(session_id)
-    assert [message["role"] for message in reloaded.messages] == ["user", "assistant", "user"]
-    assert reloaded.messages[1]["content"] == "Inspecting repo"
-    assert reloaded.messages[1]["metadata"]["source"] == "follow_up_archive"
-    assert reloaded.messages[1]["metadata"]["prompt_visible"] is False
-    assert reloaded.messages[1]["metadata"]["ui_visible"] is True
-    assert reloaded.messages[2]["content"] == "Queued follow-up"
-    assert reloaded.messages[2]["metadata"]["_transcript_state"] == "pending"
+    assert [message["role"] for message in reloaded.messages] == ["user", "user"]
+    assert reloaded.messages[0]["content"] == "Original request"
+    assert reloaded.messages[0]["metadata"]["_transcript_state"] == "pending"
+    assert reloaded.messages[1]["content"] == "Queued follow-up"
+    assert reloaded.messages[1]["metadata"]["_transcript_state"] == "pending"
+    assert all(
+        str((message.get("metadata") or {}).get("source") or "").strip().lower() != "follow_up_archive"
+        for message in reloaded.messages
+    )
+
+    drained = session.drain_queued_follow_up_messages()
+    assert [websocket_ceo._history_text(item.content) for item in drained] == ["Queued follow-up"]
+    assert session.has_queued_follow_up_messages() is False
 
 
 @pytest.mark.asyncio

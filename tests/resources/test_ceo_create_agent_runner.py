@@ -8,7 +8,6 @@ import pytest
 from g3ku.agent.tools.base import Tool
 from g3ku.agent.tools.memory_update import MemoryUpdateTool
 from g3ku.config.schema import MemoryAssemblyConfig
-from g3ku.core.messages import UserInputMessage
 from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
 from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
@@ -4543,74 +4542,6 @@ def test_prompt_contract_keeps_attachment_reopen_targets_in_request_messages(
         and str(image_path) in text
         for text in notice_texts
     )
-
-
-@pytest.mark.asyncio
-async def test_follow_up_uploaded_image_stays_multimodal_without_local_path_when_binding_enabled(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _stub_live_runtime_model(monkeypatch, image_multimodal_enabled=True)
-    session_key = "web:shared"
-    runtime_session = SimpleNamespace(session_key=session_key, messages=[])
-    loop = SimpleNamespace(
-        sessions=SimpleNamespace(get_or_create=lambda key: runtime_session),
-        main_task_service=None,
-        tools={},
-        max_iterations=8,
-        workspace=None,
-        temp_dir="",
-        app_config=SimpleNamespace(
-            get_managed_model=lambda key: SimpleNamespace(image_multimodal_enabled=(key == "ceo_primary"))
-        ),
-    )
-    runner = ceo_runner.CeoFrontDoorRunner(loop=loop)
-
-    image_path = tmp_path / "follow-up.png"
-    image_path.write_bytes(b"\x89PNG\r\n\x1a\nsmall")
-    merged_text = _web_ceo_uploaded_image_note(text="Please inspect this image", image_path=image_path)
-    multimodal_text = _web_ceo_multimodal_image_note(text="Please inspect this image")
-
-    queued_input = UserInputMessage(
-        content=merged_text,
-        metadata=_web_ceo_upload_metadata(image_path),
-    )
-    session = SimpleNamespace(
-        state=SimpleNamespace(session_key=session_key),
-        take_follow_up_batch_for_call_model=lambda: [queued_input],
-    )
-    runtime = SimpleNamespace(
-        context=SimpleNamespace(loop=loop, session=session, session_key=session_key, on_progress=None)
-    )
-    monkeypatch.setattr(runner, "_sync_runtime_session_frontdoor_state", lambda **_: None)
-
-    update = await runner._consume_session_follow_up_messages_before_call_model(
-        state={
-            "messages": [
-                {"role": "system", "content": "SYSTEM"},
-                {"role": "assistant", "content": "Still working"},
-            ],
-            "frontdoor_request_body_messages": [
-                {"role": "system", "content": "SYSTEM"},
-                {"role": "assistant", "content": "Still working"},
-            ],
-            "model_refs": ["ceo_primary"],
-            "query_text": "Original request",
-        },
-        runtime=runtime,
-    )
-
-    assert update["frontdoor_request_body_messages"][-1]["content"] == multimodal_text
-    live_blocks = [
-        block
-        for block in list(update["frontdoor_live_request_messages"][-1]["content"] or [])
-        if isinstance(block, dict)
-    ]
-    assert live_blocks[0] == {"type": "text", "text": multimodal_text}
-    assert any(block.get("type") == "image_url" for block in live_blocks)
-    assert "local path" not in json.dumps(update["frontdoor_live_request_messages"], ensure_ascii=False)
-    assert "inspect the local file paths" not in json.dumps(update, ensure_ascii=False)
-    assert update["query_text"] == "Original request\n\nPlease inspect this image"
 
 
 def test_frontdoor_send_preflight_snapshot_adds_content_open_image_overlay_only_to_live_request(

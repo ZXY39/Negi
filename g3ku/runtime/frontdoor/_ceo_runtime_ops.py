@@ -1498,9 +1498,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         文本与图片会彻底缺席模型请求（助手只看到最后一条）。这里按时间顺序
         把同批次其它输入的内容块（各自按其元数据展开）并入当前回合内容，
         相同块去重。转录不受影响——合并只发生在请求构建期，完成回写时各行
-        仍按各自原文落盘。中途追加的 follow-up 消息在 prepare 之后才会进入
-        `_active_user_batch_inputs`（见 `_consume_session_follow_up_messages_before_call_model`），
-        不会与本合并重叠。"""
+        仍按各自原文落盘。中途追加的 follow-up 消息不并进本轮，而是由排队车道的 drain
+        循环作为下一轮自己的批次输入，不会与本合并重叠。"""
         batch_inputs = list(getattr(session, "_active_user_batch_inputs", None) or [])
         if len(batch_inputs) < 2 or not current_turn_id:
             return current_content
