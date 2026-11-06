@@ -955,10 +955,10 @@ function renderQueuedCeoFollowUps(sessionId = activeSessionId()) {
                 // 两者都会先撤服务端那一行再退场，点完不会继续挂在输入区上方。
                 const runtimeHeld = !!item.accepted_by_runtime || !!String(item.runtime_sent_at || "").trim();
                 if (runtimeHeld) {
-                    actions.push(`<span class="ceo-follow-up-pending" title="已交给运行时，会在下一次安全边界发出">下一跳即将发送</span>`);
+                    actions.push(`<span class="ceo-follow-up-pending" title="已交给运行时，当前这轮跑完手上的工具就收尾，这条作为下一轮的第一句发出">本轮结束后发送</span>`);
                 } else if (S.ceoTurnActive) {
                     actions.push(`<button type="button" class="ceo-follow-up-action ceo-follow-up-flush" data-follow-up-flush="${entryId}"
-                            aria-label="插话" title="插话：现在就并进正在跑的这一轮">
+                            aria-label="插话" title="插话：当前这轮跑完手上的工具就停下，这条接着发">
                             <i data-lucide="send"></i><span>插话</span>
                         </button>`);
                 }

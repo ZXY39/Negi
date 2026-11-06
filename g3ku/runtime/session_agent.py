@@ -1751,9 +1751,9 @@ class RuntimeAgentSession:
         那一轮授予。
 
         主要漏点是内部（心跳/cron）回合：它在 prepare 阶段清空批次上下文，完成时又
-        整段跳过用户行回写，于是它中途消费的 follow-up 行永远停在 pending。
-        （`take_follow_up_batch_for_call_model` 把 drain 到的行放回 `_active_user_batch_inputs`，
-        所以这条车道仍然覆盖得到。）
+        整段跳过用户行回写，于是它中途消费的 follow-up 行永远停在 pending。补充消息
+        现在只在回合开始时被接走（工具边界不再并进同轮），所以接走它的那一轮一定把
+        它带在 `_active_user_batch_inputs` 里，这条车道仍然覆盖得到。
 
         与 `_complete_lingering_paused_user_messages` 同一条硬约束：只在正常完成路径
         调用。错误/取消路径的内存队列可能仍持有这些条目，提前翻体会让 durable 那一
@@ -4853,45 +4853,24 @@ class RuntimeAgentSession:
             logger.debug("queued follow-up withdraw save failed for {}", key)
         return True
 
-    async def take_follow_up_batch_for_call_model(self) -> list[UserInputMessage]:
-        queued_inputs = [
-            item
+    def has_queued_follow_up_messages(self) -> bool:
+        """本轮之后还有没有没被任何回合接走的补充消息。
+
+        这是跳界的唯一判据：有 ⇒ 当前轮在工具批次结束后就地收尾，补充消息作为下一轮的
+        输入发出。它只看不取，取走仍由 `_run_user_turn` 的 drain 车道负责。
+        """
+        return any(
+            isinstance(item, UserInputMessage)
             for item in list(self._state.queued_follow_up_messages or [])
-            if isinstance(item, UserInputMessage)
-        ]
-        follow_up_turn_ids = {
-            self._user_input_turn_id(item)
-            for item in queued_inputs
-            if self._user_input_turn_id(item)
-        }
-        self._state.queued_follow_up_messages.clear()
-        if not queued_inputs:
-            return []
-        await self._archive_inflight_assistant_for_follow_up_ui_history(
-            pending_follow_up_turn_ids=follow_up_turn_ids,
         )
+
+    def discard_follow_up_transition_snapshot(self) -> None:
+        """被打断的那一轮自己会收尾成行，不再需要为它补一条过渡占位行。
+
+        占位行是给"同轮内插话"准备的：那种形态下这一段永远不会有自己的回合行。工具边界
+        收尾后这一轮有正经的收尾行与轨道，快照再落一份就是同一段正文两份。
+        """
         self._follow_up_transition_snapshot = None
-        drained_inputs = self._assign_transcript_batch_without_activating(queued_inputs)
-        existing_inputs = [
-            item
-            for item in list(self._active_user_batch_inputs or [])
-            if isinstance(item, UserInputMessage)
-        ]
-        seen_turn_ids = {
-            self._user_input_turn_id(item)
-            for item in existing_inputs
-            if self._user_input_turn_id(item)
-        }
-        for item in drained_inputs:
-            turn_id = self._user_input_turn_id(item)
-            if turn_id and turn_id in seen_turn_ids:
-                continue
-            existing_inputs.append(item)
-            if turn_id:
-                seen_turn_ids.add(turn_id)
-        self._active_user_batch_inputs = list(existing_inputs)
-        await self._persist_pending_user_messages(user_inputs=drained_inputs)
-        return list(drained_inputs)
 
     def drain_queued_follow_up_messages(self) -> list[UserInputMessage]:
         queued_inputs = [

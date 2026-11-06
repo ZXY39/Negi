@@ -939,7 +939,7 @@ def _ceo_error_frame_from_event(
         user_messages = live_turn.get("user_messages")
     if isinstance(user_messages, list) and user_messages:
         # 失败回合本批用户消息：前端据此退役本地在飞副本，避免服务端队列清空后
-        # 「下一跳即将发送」的幽灵条目一直挂着。
+        # 「本轮结束后发送」的幽灵条目一直挂着。
         frame["user_messages"] = user_messages
     return frame
 
@@ -2181,7 +2181,7 @@ async def ceo_websocket(websocket: WebSocket):
                     )
                     continue
                 # 受理成功后立刻广播一次队列读数：浏览器靠 state 帧里的 turn_id 才能在
-                # “下一跳即将发送”期间撤回这一条，等到下一个安全边界会让编辑/删除没有对象。
+                # “本轮结束后发送”期间撤回这一条，等到下一轮接走就会让编辑/删除没有对象。
                 # 广播失败不影响已经落队的输入。
                 try:
                     emit_state_snapshot = getattr(session, '_emit_state_snapshot', None)
