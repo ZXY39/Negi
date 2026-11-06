@@ -190,6 +190,9 @@ class TaskListItem(Model):
     recovery_notice: str = ''
     is_unread: bool = False
     is_paused: bool = False
+    # 连续（待命）节点任务卡：REST 列表初填也要带待命态，否则整页刷新后卡片会
+    # 回退成「运行」，直到下一次 summary patch 才修正（判据与 WS 摘要同口径）。
+    standby: bool = False
     created_at: str = ''
     updated_at: str = ''
     # 任务终态时间：仅 success/failed 时有值，供任务卡片「结束」行与总耗时定格。

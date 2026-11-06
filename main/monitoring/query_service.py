@@ -544,10 +544,21 @@ class TaskQueryService:
             summaries = self._store.list_task_summaries(session_id)
         except Exception:
             summaries = None
+        # 待命判定的暂停旗标要和 WS 摘要同口径（pause_requested 单独翻面也算
+        # 暂停中），TaskListItem 不携带该字段，从源行先留一份映射。
+        pause_requested_by_task: dict[str, bool] = {}
         if summaries is None:
-            items = [self._task_list_item_from_record(task) for task in self._store.list_tasks(session_id)]
+            task_records = list(self._store.list_tasks(session_id) or [])
+            items = [self._task_list_item_from_record(task) for task in task_records]
+            pause_requested_by_task = {
+                str(task.task_id or ''): bool(task.pause_requested) for task in task_records
+            }
         else:
             items = [self._task_list_item_from_summary(summary) for summary in summaries]
+            pause_requested_by_task = {
+                str(summary.get('task_id') or ''): bool(summary.get('pause_requested'))
+                for summary in summaries
+            }
         scope = int(task_type)
         if scope == 2:
             items = [item for item in items if item.status == 'in_progress']
@@ -563,9 +574,23 @@ class TaskQueryService:
             node_counts = self._store.count_task_nodes_by_task([item.task_id for item in items])
         except Exception:
             node_counts = {}
+        # 待命（连续节点空闲）是派生态：REST 列表初填也必须带上，否则整页刷新
+        # 后卡片回退成「运行」，直到下一次 summary patch 才修正。只对在跑且未
+        # 暂停的任务做判定（判据内部读帧与节点行，过滤后通常只剩少数任务）。
+        standby_flags: dict[str, bool] = {}
+        for item in items:
+            if item.status != 'in_progress' or bool(item.is_paused):
+                continue
+            standby_flags[item.task_id] = self._log_service.task_standby_for_display(
+                item.task_id,
+                status=item.status,
+                is_paused=bool(item.is_paused),
+                pause_requested=bool(pause_requested_by_task.get(item.task_id, False)),
+            )
         for item in items:
             item.disk_usage_bytes = int(disk_usages.get(item.task_id, 0) or 0)
             item.node_count = int(node_counts.get(item.task_id, 0) or 0)
+            item.standby = bool(standby_flags.get(item.task_id, False))
         return items
 
     def _task_list_item_from_record(self, item: Any) -> TaskListItem:
@@ -776,8 +801,17 @@ class TaskQueryService:
         # `get_task_token_ledger` 取。实测这一格冷页扫全任务明细行 **4447 ms**（989 行 / 71 MB，
         # 85% 是存量内联摘要），热态只要 41–105 ms——所以它只在"重启后第一次点开详情"那一下咬人。
         # 任务级总量走 `task.token_usage`（记录自带），与这一格无关。
+        task_payload = task.model_dump(mode='json')
+        # 详情页头部胶囊与大厅卡同口径：待命（连续节点空闲）随快照一起给出，
+        # 判据与 WS 摘要/列表 item 同源（task_standby_for_display）。
+        task_payload['standby'] = self._log_service.task_standby_for_display(
+            task.task_id,
+            status=task.status,
+            is_paused=bool(task.is_paused),
+            pause_requested=bool(task.pause_requested),
+        )
         payload = {
-            'task': task.model_dump(mode='json'),
+            'task': task_payload,
             'summary': {
                 'task_id': task.task_id,
                 'status': task.status,

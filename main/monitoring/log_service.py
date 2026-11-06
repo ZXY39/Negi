@@ -1817,6 +1817,8 @@ class TaskLogService:
         is_paused: bool | None = None,
     ) -> TaskRecord | None:
         with self._task_lock(task_id):
+            previous = self._store.get_task(task_id)
+
             def _mutate(task: TaskRecord) -> TaskRecord:
                 update: dict[str, Any] = {'updated_at': now_iso()}
                 if cancel_requested is not None:
@@ -1830,9 +1832,21 @@ class TaskLogService:
             updated = self._store.update_task(task_id, _mutate)
             if updated is None:
                 return None
+            control_flags_changed = previous is not None and (
+                bool(previous.is_paused) != bool(updated.is_paused)
+                or bool(previous.pause_requested) != bool(updated.pause_requested)
+                or bool(previous.cancel_requested) != bool(updated.cancel_requested)
+            )
             if bool(updated.is_paused) or bool(updated.pause_requested) or bool(updated.cancel_requested):
                 self.flush_live_patch_history(task_id)
-            return self.refresh_task_view(task_id, mark_unread=False) or updated
+            refreshed = self.refresh_task_view(task_id, mark_unread=False) or updated
+            if control_flags_changed:
+                # 暂停旗标翻面必须发布一次任务摘要：refresh_task_view 的无变化早退
+                # 会在"只有旗标变了"的恢复/暂停瞬间跳过发布，而连续（待命）任务
+                # 恢复后没有任何后续活动，卡片会一直停在旧状态直到下一次 touch。
+                # 指纹去重保证与 refresh_task_view 自身的发布重复时无害。
+                self._publish_task_summary_patch_locked(task=refreshed, previous_task=previous)
+            return refreshed
 
     def update_task_metadata(self, task_id: str, metadata_mutator: Callable[[dict[str, Any]], dict[str, Any]], *, mark_unread: bool = True) -> TaskRecord | None:
         with self._task_lock(task_id):
@@ -5102,17 +5116,39 @@ class TaskLogService:
         except Exception:
             return None
 
+    def task_standby_for_display(
+        self,
+        task_id: str,
+        *,
+        status: str,
+        is_paused: bool,
+        pause_requested: bool,
+    ) -> bool:
+        """任务大厅 REST 列表用的待命判定：与 `_task_standby_for_summary` 同一
+        口径（WS 摘要载荷与列表 item 的 standby 必须同源，否则刷新后会闪）。
+        查询道只有摘要行没有 TaskRecord，用同一组判据入参构造最小判定；
+        读失败按 False 处理（宁可显示运行，不把未知读成待命）。"""
+        if str(status or '').strip().lower() != 'in_progress':
+            return False
+        if bool(is_paused) or bool(pause_requested):
+            return False
+        try:
+            return task_is_designed_idle(
+                store=self._store,
+                log_service=self,
+                task_id=task_id,
+                # 展示用口径：未读由派发车道负责，卡片不因一条未读在待命/等待之间闪。
+                check_unread=False,
+            )
+        except Exception:
+            return False
+
     def _task_standby_for_summary(self, task: TaskRecord) -> bool:
-        if str(getattr(task, 'status', '') or '').strip().lower() != 'in_progress':
-            return False
-        if bool(getattr(task, 'is_paused', False)) or bool(getattr(task, 'pause_requested', False)):
-            return False
-        return task_is_designed_idle(
-            store=self._store,
-            log_service=self,
-            task_id=task.task_id,
-            # 展示用口径：未读由派发车道负责，卡片不因一条未读在待命/等待之间闪。
-            check_unread=False,
+        return self.task_standby_for_display(
+            task.task_id,
+            status=str(getattr(task, 'status', '') or ''),
+            is_paused=bool(getattr(task, 'is_paused', False)),
+            pause_requested=bool(getattr(task, 'pause_requested', False)),
         )
 
     def _summary_cache_for_task(self, task_id: str) -> dict[str, tuple[str, dict[str, Any]]]:

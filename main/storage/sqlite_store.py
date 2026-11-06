@@ -913,6 +913,7 @@ class SQLiteTaskStore:
             "json_extract(payload_json, '$.brief_text') AS brief_text, "
             "json_extract(payload_json, '$.is_unread') AS is_unread, "
             "json_extract(payload_json, '$.is_paused') AS is_paused, "
+            "json_extract(payload_json, '$.pause_requested') AS pause_requested, "
             "json_extract(payload_json, '$.created_at') AS created_at, "
             "json_extract(payload_json, '$.finished_at') AS finished_at, "
             "json_extract(payload_json, '$.max_depth') AS max_depth, "
@@ -939,6 +940,7 @@ class SQLiteTaskStore:
                 # 字段缺失（NULL）对齐 TaskRecord 默认值：is_unread=True。
                 'is_unread': True if raw_unread is None else bool(raw_unread),
                 'is_paused': bool(row['is_paused']),
+                'pause_requested': bool(row['pause_requested']),
                 'created_at': str(row['created_at'] or ''),
                 'finished_at': str(row['finished_at'] or ''),
                 'max_depth': int(row['max_depth'] or 0),

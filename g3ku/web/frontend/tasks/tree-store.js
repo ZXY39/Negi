@@ -52,6 +52,10 @@ function normalizeTaskTreeSnapshotNode(value = {}, existing = null) {
         updated_at: String(value?.updated_at || prior?.updated_at || "").trim(),
         children_fingerprint: String(value?.children_fingerprint || prior?.children_fingerprint || "").trim(),
         all_child_ids: allChildIds,
+        // 连续（待命）节点标记：快照整表/子树都带全；task.node.patch 只带状态字段时
+        // 回退 prior，不能把标记抖掉——树内「待命」徽标靠这两个字段与实时帧相位合成。
+        continuous: value?.continuous ?? prior?.continuous ?? false,
+        wait_external: value?.wait_external ?? prior?.wait_external ?? false,
         pending_notice_count: Math.max(0, treeNormalizeInt(value?.pending_notice_count ?? prior?.pending_notice_count, 0)),
         parent_visible: value?.parent_visible ?? prior?.parent_visible ?? true,
         acceptance_handshake_state: String(value?.acceptance_handshake_state || prior?.acceptance_handshake_state || "").trim(),
