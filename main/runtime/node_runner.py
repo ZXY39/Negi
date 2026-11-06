@@ -7283,12 +7283,12 @@ class NodeRunner:
                 delivered = datetime.fromisoformat(delivered_at.replace('Z', '+00:00'))
             except ValueError:
                 continue
-            started = request_started_at
-            if (delivered.tzinfo is None) != (started.tzinfo is None):
+            boundary = anchor
+            if (delivered.tzinfo is None) != (boundary.tzinfo is None):
                 # 旧数据可能缺时区：去掉两侧的 tzinfo 再比，至少不比字符串可靠。
                 delivered = delivered.replace(tzinfo=None)
-                started = started.replace(tzinfo=None)
-            if delivered >= started:
+                boundary = boundary.replace(tzinfo=None)
+            if delivered >= boundary:
                 unseen.append(item)
         return unseen
 
