@@ -71,6 +71,7 @@ from main.runtime.child_tools import (
 )
 from main.runtime.continuous_node import (
     CONTINUOUS_METADATA_KEY,
+    auto_assigns_acceptance,
     compose_continuous_acceptance_prompt,
 )
 from main.runtime.internal_tools import (
@@ -5849,12 +5850,20 @@ class NodeRunner:
                     )
                 )
                 continue
+            auto_acceptance = bool(entry.get('acceptance_auto_created'))
             receipts.append(
                 SpawnChildResult(
                     goal=goal,
                     state='created',
                     child_node_id=child_node_id,
                     acceptance_node_id=acceptance_node_id,
+                    acceptance_auto_created=auto_acceptance,
+                    acceptance_note=(
+                        f'该子节点是连续节点，运行时已自动为它创建验收节点 {acceptance_node_id}；'
+                        '它提交结果后由验收节点裁定是否结束。'
+                        if auto_acceptance and acceptance_node_id
+                        else ''
+                    ),
                     seed_tools=self._seed_receipt_for_node(child_node_id),
                 )
             )
@@ -6551,6 +6560,13 @@ class NodeRunner:
                 index=index,
                 acceptance_node_id=acceptance.node_id,
                 check_status='pending',
+                # 标记与绑定同源落账：回执只从 entry 读，重放才与首次逐字一致。
+                acceptance_auto_created=True
+                if auto_assigns_acceptance(
+                    continuous=bool(getattr(spec, 'continuous', False)),
+                    acceptance_prompt=str(spec.acceptance_prompt or ''),
+                )
+                else None,
             )
         self._stamp_spawn_owner_metadata(
             node_id=acceptance.node_id,

@@ -31,3 +31,10 @@ def compose_continuous_acceptance_prompt(prompt: str) -> str:
     if not body:
         return CONTINUOUS_ACCEPTANCE_CLAUSE
     return f'{CONTINUOUS_ACCEPTANCE_CLAUSE}\n\n{body}'
+
+
+def auto_assigns_acceptance(*, continuous: bool, acceptance_prompt: str) -> bool:
+    """验收是运行时替连续节点补出来的，而不是模型自己写了判据。"""
+    if not bool(continuous):
+        return False
+    return not str(acceptance_prompt or '').strip()

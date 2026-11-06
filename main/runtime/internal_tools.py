@@ -736,13 +736,17 @@ class SpawnChildNodesTool(Tool):
                     }
                 )
                 continue
-            created.append(
-                {
-                    'node_id': str(item.child_node_id or '').strip(),
-                    'goal': goal,
-                    'acceptance_node_id': str(item.acceptance_node_id or '').strip(),
-                }
-            )
+            created_item = {
+                'node_id': str(item.child_node_id or '').strip(),
+                'goal': goal,
+                'acceptance_node_id': str(item.acceptance_node_id or '').strip(),
+            }
+            if bool(getattr(item, 'acceptance_auto_created', False)):
+                created_item['acceptance_auto_created'] = True
+                created_item['acceptance_note'] = str(
+                    getattr(item, 'acceptance_note', '') or ''
+                ).strip()
+            created.append(created_item)
         if created and wait_all_children:
             summary = (
                 f'已创建 {len(created)} 个子节点；本批结果会在全部子节点结束后一起以 child_final 送达，'

@@ -2,18 +2,26 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from main.models import ExecutionPolicyState, NodeRecord, SpawnChildSpec, TaskRecord
+from main.models import (
+    ExecutionPolicyState,
+    NodeRecord,
+    SpawnChildResult,
+    SpawnChildSpec,
+    TaskRecord,
+)
 from main.runtime.continuous_node import (
     CONTINUOUS_ACCEPTANCE_CLAUSE,
     CONTINUOUS_METADATA_KEY,
     compose_continuous_acceptance_prompt,
     is_continuous_metadata,
 )
+from main.runtime.internal_tools import SpawnChildNodesTool
 from main.runtime.node_runner import _spec_requires_acceptance
 from main.service.runtime_service import MainRuntimeService
 from tools.create_async_task_cn.main.tool import _CreateAsyncTaskHandler
@@ -217,6 +225,91 @@ def test_spawn_spec_payload_keeps_legacy_fingerprint(tmp_path: Path) -> None:
     assert continuous_payload['continuous'] is True
     assert normal_payload['requires_acceptance'] is False
     assert continuous_payload['requires_acceptance'] is True
+
+
+def test_spawn_receipt_marks_auto_acceptance(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    task, parent = _seed_parent(service)
+    spec = _spec(continuous=True)
+    child = service.node_runner._create_execution_child(task=task, parent=parent, spec=spec)
+    cached_payload: dict = {'entries': [{'goal': 'g', 'child_node_id': child.node_id}]}
+
+    acceptance = service.node_runner._ensure_spawn_acceptance_node(
+        task=task,
+        parent=parent,
+        child=child,
+        spec=spec,
+        cache_key='round-1',
+        cached_payload=cached_payload,
+        index=0,
+    )
+    receipts = service.node_runner._spawn_creation_receipts(
+        specs=[spec], entries=cached_payload['entries']
+    )
+
+    assert receipts[0].acceptance_auto_created is True
+    assert acceptance.node_id in receipts[0].acceptance_note
+
+    replay = service.node_runner._spawn_creation_receipts(
+        specs=[spec], entries=cached_payload['entries']
+    )
+    assert replay[0].model_dump() == receipts[0].model_dump()
+
+
+def test_spawn_receipt_does_not_mark_when_prompt_given(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    task, parent = _seed_parent(service)
+    spec = _spec(continuous=True, acceptance_prompt='只有 A 成立才通过')
+    child = service.node_runner._create_execution_child(task=task, parent=parent, spec=spec)
+    cached_payload: dict = {'entries': [{'goal': 'g', 'child_node_id': child.node_id}]}
+
+    service.node_runner._ensure_spawn_acceptance_node(
+        task=task,
+        parent=parent,
+        child=child,
+        spec=spec,
+        cache_key='round-1',
+        cached_payload=cached_payload,
+        index=0,
+    )
+    receipts = service.node_runner._spawn_creation_receipts(
+        specs=[spec], entries=cached_payload['entries']
+    )
+
+    assert receipts[0].acceptance_auto_created is False
+    assert receipts[0].acceptance_note == ''
+
+
+@pytest.mark.asyncio
+async def test_spawn_tool_forwards_auto_acceptance_note() -> None:
+    async def _spawn(specs, round_id, wait_all):
+        return [
+            SpawnChildResult(
+                goal='g',
+                state='created',
+                child_node_id='node:child',
+                acceptance_node_id='node:acceptance',
+                acceptance_auto_created=True,
+                acceptance_note='该子节点是连续节点，运行时已自动为它创建验收节点 node:acceptance。',
+            )
+        ]
+
+    tool = SpawnChildNodesTool(_spawn)
+    payload = json.loads(
+        await tool.execute(
+            children=[
+                {
+                    'goal': 'g',
+                    'prompt': 'p',
+                    'execution_policy': {'mode': 'focus'},
+                    'continuous': True,
+                }
+            ]
+        )
+    )
+
+    assert payload['created'][0]['acceptance_auto_created'] is True
+    assert 'node:acceptance' in payload['created'][0]['acceptance_note']
 
 
 @pytest.mark.asyncio
