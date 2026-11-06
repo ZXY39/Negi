@@ -213,6 +213,64 @@ def test_open_message_truncates_long_content_with_remaining_count():
     assert len(opened["content"]) == 300
 
 
+def _silent_and_visible_messages() -> list[dict]:
+    return [
+        {
+            "role": "assistant",
+            "content": "第十一点（09:54）继续静默，把最后一次额度留到 10:24 收尾。",
+            "turn_id": "s1",
+            "timestamp": "2026-11-05T10:06:17",
+            "metadata": {
+                "source": "cron",
+                "prompt_visible": True,
+                "ui_visible": True,
+                "cron_job_id": "1b285eb9",
+                "silent_reply": True,
+                "silent_reason": "第十一点（09:54）继续静默，把最后一次额度留到 10:24 收尾。",
+                "silent_subject": "09:54 按计划静默",
+            },
+        },
+        {
+            "role": "assistant",
+            "content": "日报已发到群里，含 AI 行业板块。",
+            "turn_id": "v1",
+            "timestamp": "2026-11-06T08:30:00",
+            "metadata": {"source": "cron", "prompt_visible": True, "ui_visible": True},
+        },
+        {
+            "role": "assistant",
+            "content": "普通可见回复，没有来源记录。",
+            "turn_id": "v2",
+            "timestamp": "2026-11-06T09:00:00",
+        },
+    ]
+
+
+def test_silent_hits_carry_silent_reply_and_source():
+    """静默轮的正文当时没送达，命中形状必须说出来，否则模型会把"想过"当成"说过"。"""
+    result = search_messages(_silent_and_visible_messages(), keywords=["额度", "日报", "来源"], match="any")
+
+    by_turn = {hit["turn_id"]: hit for hit in result["hits"]}
+    assert by_turn["s1"]["silent_reply"] is True
+    assert by_turn["s1"]["source"] == "cron"
+    assert by_turn["v1"].get("silent_reply") is None
+    assert by_turn["v1"]["source"] == "cron"
+    # 没有来源记录的可见行两个键都不带（不补默认值，形状本身就是读数）
+    assert "source" not in by_turn["v2"]
+    assert "silent_reply" not in by_turn["v2"]
+
+
+def test_open_message_exposes_the_same_two_flags():
+    messages = _silent_and_visible_messages()
+    opened = open_message(messages, message_index=0)
+    assert opened["silent_reply"] is True
+    assert opened["source"] == "cron"
+
+    plain = open_message(messages, message_index=2)
+    assert "silent_reply" not in plain
+    assert "source" not in plain
+
+
 def _load_tool(loop):
     spec = importlib.util.spec_from_file_location(
         "test_search_session_history_tool", TOOL_ROOT / "main" / "tool.py"

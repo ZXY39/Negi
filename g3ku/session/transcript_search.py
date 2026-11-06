@@ -242,6 +242,12 @@ def _build_hit(
     state = str(metadata.get("_transcript_state") or "").strip().lower()
     if state and state != "completed":
         hit["transcript_state"] = state
+    if metadata.get("silent_reply") is True:
+        # 这条正文当时一个字都没送达：模型据此才能不把"想过"当成"说过"。
+        hit["silent_reply"] = True
+    source = str(metadata.get("source") or "").strip().lower()
+    if source:
+        hit["source"] = source
     attachments = _attachment_names(row)
     if attachments:
         hit["attachment_names"] = attachments
@@ -408,6 +414,11 @@ def open_message(
     state = str(metadata.get("_transcript_state") or "").strip().lower()
     if state and state != "completed":
         payload["transcript_state"] = state
+    if metadata.get("silent_reply") is True:
+        payload["silent_reply"] = True
+    source = str(metadata.get("source") or "").strip().lower()
+    if source:
+        payload["source"] = source
     attachments = list(row.get("attachments") or [])
     if attachments:
         payload["attachments"] = attachments

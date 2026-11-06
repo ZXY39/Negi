@@ -32,6 +32,12 @@ Search returns `hits` with `message_index`, `turn_id`, `role`, `timestamp`,
 `truncated` and `remaining_chars` tell you when it was cut) and any stored
 `attachments`.
 
+A hit or an opened message also carries `silent_reply: true` when that reply
+was never delivered, and `source` when the runtime recorded where the message
+came from (`heartbeat`, `cron`, `runtime_error`, ...). Absent means not silent
+/ no recorded source. Read `silent_reply` before repeating a sentence as
+something the user already received: that text stayed in the transcript only.
+
 ## Boundaries
 
 - Only the current session is searchable. Do not pass a session id or a file
