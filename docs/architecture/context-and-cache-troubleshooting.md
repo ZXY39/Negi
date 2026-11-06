@@ -336,7 +336,8 @@ Heartbeat / cron 不在主 CEO/frontdoor 路径上使用单独的短 `ceo_heartb
 | `hidden_internal_event` | metadata `internal_prompt_kind`，内容前缀 `This is a background heartbeat` / `# Heartbeat Rules` / `[SESSION EVENTS]` / `[CRON INTERNAL EVENT]` | 心跳 / cron 的规则行与事件束 | 持久 | `keep`；durable 基线按 `(kind, content)` 折叠重复副本 | 任何 generic strip 都不许碰 |
 | `legacy_runtime_contract` | `## Runtime Tool Contract` 整条消息（前门与节点头抬同形） | 已退役，只保留识别与剥离 | 无 | `drop` | `durable` / `prompt_tail` / `compaction` / `projection` |
 | `tool_contract_block`（marker） | 嵌在 `role=tool` 结果里的 `[TOOL_CONTRACT:<id>:<fp>]` 块 | 随工具结果进入 | 随工具结果活到压缩 | `keep`；压缩掉工具结果即离场，下次 `load` 重新水合 | 不剥整条工具结果 |
-| `silent_trace`（marker） | assistant 的 `silent` tool_call 行 + 它声明的 tool 结果 | 作为普通回合记录进入 | 到 `subject=task:<id>` 终态为止 | `conditional`：同一 assistant 行的全部 task subject 都 success/failed 才整组退休；非终态、非 task id、读取失败一律保留 | 只整组摘出，不单独摘行 |
+| `silent_trace`（marker） | assistant 的 `silent` tool_call 行 + 它声明的 tool 结果 | 作为普通回合记录进入 | 到其来源终结为止（回执 `source_key`：`cron:<job_id>` 跟任务是否还在跑，`task:<id>` 跟任务是否 success/failed；两者都取不到时按"寿命无从判定"处理） | `conditional`：压缩时整组摘出待压缩区间，逐字行不进压缩后的请求体，改由台账行代表它 | 只整组摘出，不单独摘行 |
+| `silent_trace_ledger`（前门 token 车道自建，非注册家族） | `[SILENT_TRACE_LEDGER]` user 消息，按来源聚合的静默计数（`<source> \| 已静默 N 次 \| 最近：<subject>`） | 压缩后请求体的保留尾部之后、契约尾块之前 | 每次压缩重建；来源终结即掉一行；条目为空时整行不产 | `rebuild`：旧行先从待压缩区间与尾部摘掉再重发，所以既不被摘要复述也不叠两份 | 逐字痕迹与旧台账行都不留在压缩后的正文里 |
 | `system_relay_notice` | 以 `【任务收到用户定向通知】` 等前缀开头的 user 消息 | 通知投递时追加到目标节点历史 | 持久 | `keep` | 任何 generic strip 都不许碰 |
 
 维护者容易误读的四点：
@@ -344,7 +345,7 @@ Heartbeat / cron 不在主 CEO/frontdoor 路径上使用单独的短 `ceo_heartb
 - **识别只认块形，不认正文里提到的字符串**：`[TOOL_CONTRACT]` 只认工具结果开头的块，正文里举例的假块头不构成在场；用户正文中段提到 `[RUNTIME_NOTICE]` 或 `[NOTICE_TAIL]` 不会被剥。
 - **旧合同两族合并**：前门与节点的 `## Runtime Tool Contract` 抬头相同，识别函数对同一字节都成立；注册表只登记一个 `legacy_runtime_contract` 家族，避免“一条消息被两族认领”。
 - **hidden event 的 metadata 会丢**：`sanitize_provider_messages` 与 durable 基线只保留 `role` / `content`，重启后靠内容前缀识别；新增内部提示形态时两处都要能认出它。
-- **silent 组必须整组同进同出**：只搬 assistant 行会留下无声明方的 tool 结果，只搬 tool 行会留下悬空声明；同一 assistant 行混合 silent 与非 silent 调用时，非 silent 结果不在这组里，家族测试要覆盖这种边界。
+- **silent 组必须整组同进同出**：只搬 assistant 行会留下无声明方的 tool 结果，只搬 tool 行会留下悬空声明；同一 assistant 行混合 silent 与非 silent 调用时，非 silent 结果不在这组里，家族测试要覆盖这种边界。摘出来之后不回插逐字行，而是折成台账行：逐字的 `reason` 是模型第一人称写的计划文本，位置又排在摘要之后，它会压过折进摘要的本轮指令（实盘一次压缩轮据此把在飞的采集任务换成了一条旧定时计划里的打招呼）。台账判寿命只认运行时写的来源键，判据落点见 `runtime-overview.md`「静默回复（`silent` 工具）」，可数读数是压缩诊断里的 `silent_trace_group_count` / `silent_trace_dropped_count` / `silent_ledger_entry_count`。
 
 改动任一家族的插入位置、寿命或压缩策略时，先跑 `tests/resources/test_mid_insert_registry.py` 的 family × stage 矩阵，再用 actual-request artifact 核对两条车道的顺序：前门是 `system → 记忆快照 → 历史 → 当轮 user → runtime notice → 动态 appendix（retrieval / overlay）→ turn-only`，节点是 `system → bootstrap user → append notice → runtime notice → turn-only`。
 

@@ -49,8 +49,13 @@ class SilentTool(Tool):
 
     hide_universal_timeout_parameter = True
 
-    def __init__(self, pending_reply_chars: Callable[[], int] | None = None) -> None:
+    def __init__(
+        self,
+        pending_reply_chars: Callable[[], int] | None = None,
+        source_key_provider: Callable[[], str] | None = None,
+    ) -> None:
         self._pending_reply_chars = pending_reply_chars
+        self._source_key_provider = source_key_provider
 
     @property
     def name(self) -> str:
@@ -150,7 +155,26 @@ class SilentTool(Tool):
         pending = self._pending_undelivered_chars()
         if pending > 0:
             payload['undelivered_text_chars'] = pending
+        source_key = self._current_source_key()
+        if source_key:
+            payload['source_key'] = source_key
         return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+    def _current_source_key(self) -> str:
+        """这次静默是为哪个源做的：`cron:<job_id>` / `task:<id>`，取不到就留空。
+
+        痕迹族自己声明的寿命是"到 subject 对应任务终态"，所以寿命必须是运行时能查的
+        键，不能是模型写的自由文本 —— 实测 240 组里只有 1 组的 subject 是任务 id，
+        其余 239 组因此永不退休，跨压缩逐字累积。
+        """
+        provider = self._source_key_provider
+        if not callable(provider):
+            return ''
+        try:
+            value = str(provider() or '').strip()
+        except Exception:  # noqa: BLE001 - 来源读数缺失不许影响收尾本身
+            return ''
+        return value
 
     def _pending_undelivered_chars(self) -> int:
         """本轮已经给出、静默之后不会送到用户眼前的正文字数；拿不到读数就报 0。"""

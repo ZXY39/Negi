@@ -2320,8 +2320,19 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         older_history_messages, preserved_silent_groups = self._lift_silent_trace_groups(
             older_history_messages
         )
-        # 任务已终态的 silent 决策不再跨压缩累积：退休整组，不回插。
-        preserved_silent_groups = self._retire_terminal_silent_messages(preserved_silent_groups)
+        # 逐字痕迹不回插：换成按来源聚合的一行台账，来源终结即失效（判据只有一份，
+        # 在 _frontdoor_silent_source_terminal）。摘组与建台账都发生在这里，尾部那份
+        # 旧台账行也在这里摘掉，所以台账既不进摘要、也不两份叠着发。
+        (
+            older_history_messages,
+            recent_tail,
+            silent_ledger_messages,
+            silent_ledger_counts,
+        ) = self._frontdoor_silent_trace_ledger(
+            older_history_messages=older_history_messages,
+            recent_tail=recent_tail,
+            preserved_silent_groups=preserved_silent_groups,
+        )
         # 防御：可压缩历史末尾若残留「assistant 声明工具调用但结果缺失」的悬空组
         # （正常对齐后不应出现，续跑种子/异常状态可能带入），从压缩请求里丢弃，
         # 避免 provider 拒绝请求；计数仅入诊断。
@@ -2546,16 +2557,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     f"{compressed_text}"
                 ).strip(),
             }
-            # 摘出的静默痕迹回插在摘要块之后、recent_tail 之前：它们比尾部更早，
-            # 放这个位置保持时间顺序单调，不会在摘要与近况之间造出时序空洞。
-            # 契约尾块从压缩区间里拆出，必须原样回插：repair_required / candidate
-            # 这些机器状态不在摘要里，丢了模型就不知道哪些工具当前不可执行。
+            # 台账行排在保留尾部之后、契约尾块之前：它是"到本次压缩为止"的运行时统计，
+            # 比本轮在飞的工具结果更旧，不能插到摘要与近况之间造出时序空洞。
             rewritten_messages = [
                 *system_prefix,
                 compacted_block,
                 *deferred_messages,
-                *preserved_silent_groups,
                 *recent_tail,
+                *silent_ledger_messages,
                 *_contract_messages,
             ]
             rewritten_tokens = self._estimate_frontdoor_send_total_tokens(
@@ -2598,6 +2607,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     "dropped_dangling_tool_groups": int(dropped_dangling_tool_groups or 0),
                     "retained_recent_tail_count": recent_tail_count,
                     "compressed_history_message_count": len(older_history_messages),
+                    **silent_ledger_counts,
                     "final_request_tokens": rewritten_tokens,
                 },
             )
@@ -2701,42 +2711,196 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         return str(getattr(task, "status", "") or "").strip().lower()
 
     @staticmethod
-    def _silent_call_ids(item: dict[str, Any]) -> set[str]:
-        return set(_mid_insert.silent_trace_call_ids(item))
+    def _silent_group_source_key(group: list[dict[str, Any]]) -> str:
+        """这组静默痕迹是为哪个源做的：优先读回执上的 `source_key`，退回 subject 里的任务 id。
 
-    def _retire_terminal_silent_messages(
-        self,
-        messages: list[dict[str, Any]] | None,
-    ) -> list[dict[str, Any]]:
-        """任务已终态的 silent 决策组在压缩时退休；其余原样保留。
-
-        入参是 `_lift_silent_trace_groups` 返回的扁平列表（assistant 行 + 它声明的
-        tool 结果行）。判据：同一 assistant 行里所有 `subject=task:<id>` 的当前状态都在
-        `{success, failed}` 时，退休该 assistant 行和它声明的 tool 结果；没有 task
-        subject、任一任务非终态、或有任何一次读取失败，都保留（保守优先）。
+        回执是运行时自己写的，来源键只能落在它上面；写成模型可填的字段就等于把
+        "这次静默管到什么时候"交给一段自由文本。
         """
-        records = [dict(item) for item in list(messages or []) if isinstance(item, dict)]
-        retire_indexes: set[int] = set()
-        terminal = frozenset({"success", "failed"})
-        for index, item in enumerate(records):
+        for item in list(group or []):
+            if str(item.get("role") or "").strip().lower() != "tool":
+                continue
+            content = item.get("content")
+            if not isinstance(content, str) or not content.strip().startswith("{"):
+                continue
+            try:
+                payload = json.loads(content)
+            except Exception:
+                continue
+            if not isinstance(payload, dict) or payload.get("silenced") is not True:
+                continue
+            source_key = str(payload.get("source_key") or "").strip()
+            if source_key:
+                return source_key
+        for item in list(group or []):
             if str(item.get("role") or "").strip().lower() != "assistant":
                 continue
-            call_ids = self._silent_call_ids(item)
-            if not call_ids:
+            subjects = CeoFrontDoorRuntimeOps._silent_group_task_subjects([item])
+            if subjects:
+                return subjects[0]
+        return ""
+
+    def _frontdoor_silent_source_terminal(self, source_key: str) -> bool:
+        """来源是否已终结；查不到来源按终结处理（寿命无从判定的痕迹不进台账）。"""
+        key = str(source_key or "").strip()
+        if not key or ":" not in key:
+            return True
+        kind, _, value = key.partition(":")
+        value = value.strip()
+        if not value:
+            return True
+        if kind == "task":
+            # 整键交给 get_task：服务侧自己 normalize `task:<id>`，判据只有一份写法。
+            status = self._silent_subject_task_status(key)
+            return bool(status) and status in {"success", "failed"}
+        if kind == "cron":
+            alive = self._frontdoor_cron_job_alive(value)
+            return alive is False
+        return True
+
+    def _frontdoor_cron_job_alive(self, job_id: str) -> bool | None:
+        """`True` 任务还在，`False` 已跑满/已删除，`None` 读不到（保守按还在）。"""
+        cron_service = getattr(self._loop, "cron_service", None)
+        list_jobs = getattr(cron_service, "list_jobs", None)
+        if not callable(list_jobs):
+            return None
+        try:
+            jobs = list(list_jobs(include_disabled=True) or [])
+        except Exception:
+            return None
+        for job in jobs:
+            if str(getattr(job, "id", "") or "").strip() == str(job_id or "").strip():
+                return True
+        return False
+
+    def _frontdoor_silent_trace_ledger(
+        self,
+        *,
+        older_history_messages: list[dict[str, Any]],
+        recent_tail: list[dict[str, Any]],
+        preserved_silent_groups: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], dict[str, int]]:
+        """把逐字静默痕迹换成一行按来源聚合的台账，并按来源终结自动失效。
+
+        旧台账行先从待压缩区间与尾部一起摘掉再重建，所以它既不进摘要（不会被摘要
+        复述成第二份），也不会两份叠着发。痕迹组本身不回插：逐字的第一人称计划会在
+        压缩后压过本轮指令的摘要转述（实盘 2026-11-06 08:02 那条轮就是这么把热搜日报
+        换成了一条打招呼），判据要的只是"这个源我静默过几次"。
+
+        返回 (去掉台账行的待压缩区间, 去掉台账行的尾部, 台账行, 计数)。
+        """
+        prior_entries: list[dict[str, Any]] = []
+        kept_older: list[dict[str, Any]] = []
+        kept_tail: list[dict[str, Any]] = []
+        for item in list(older_history_messages or []):
+            if _mid_insert.is_silent_trace_ledger_message(item):
+                prior_entries.extend(_mid_insert.parse_silent_trace_ledger(item))
                 continue
-            task_subjects = self._silent_group_task_subjects([item])
-            if not task_subjects:
+            kept_older.append(dict(item))
+        for item in list(recent_tail or []):
+            if _mid_insert.is_silent_trace_ledger_message(item):
+                prior_entries.extend(_mid_insert.parse_silent_trace_ledger(item))
                 continue
-            statuses = [self._silent_subject_task_status(subject) for subject in task_subjects]
-            if not statuses or not all(status in terminal for status in statuses):
+            kept_tail.append(dict(item))
+
+        entries: list[dict[str, Any]] = []
+        index_by_source: dict[str, int] = {}
+        dropped = 0
+
+        def _bump(source_key: str, subject: str) -> None:
+            if source_key in index_by_source:
+                entry = entries[index_by_source[source_key]]
+                entry["count"] = int(entry.get("count") or 0) + 1
+                if subject:
+                    entry["subject"] = subject
+                return
+            entries.append({"source_key": source_key, "count": 1, "subject": subject})
+            index_by_source[source_key] = len(entries) - 1
+
+        for entry in prior_entries:
+            source_key = str(entry.get("source_key") or "").strip()
+            if not source_key or source_key in index_by_source:
                 continue
-            retire_indexes.add(index)
-            for other_index, other in enumerate(records):
-                if str(other.get("role") or "").strip().lower() != "tool":
+            entries.append(
+                {
+                    "source_key": source_key,
+                    # 上一次压缩累计的次数照搬，不从 1 起重置。
+                    "count": max(1, int(entry.get("count") or 1)),
+                    "subject": str(entry.get("subject") or ""),
+                }
+            )
+            index_by_source[source_key] = len(entries) - 1
+
+        groups: list[list[dict[str, Any]]] = []
+        current: list[dict[str, Any]] = []
+        for item in list(preserved_silent_groups or []):
+            if str(item.get("role") or "").strip().lower() == "assistant" and current:
+                groups.append(current)
+                current = []
+            current.append(item)
+        if current:
+            groups.append(current)
+
+        group_count = 0
+        for group in groups:
+            if not self._mid_insert_silent_group_has_trace(group):
+                continue
+            group_count += 1
+            source_key = self._silent_group_source_key(group)
+            if not source_key:
+                # 没有可查来源：这条痕迹的寿命按族声明无从判定，不再跨压缩累积。
+                dropped += 1
+                continue
+            _bump(source_key, self._silent_group_subject(group))
+
+        alive: list[dict[str, Any]] = []
+        for entry in entries:
+            if self._frontdoor_silent_source_terminal(str(entry.get("source_key") or "")):
+                dropped += int(entry.get("count") or 1)
+                continue
+            alive.append(entry)
+
+        ledger_messages: list[dict[str, Any]] = []
+        ledger_row = _mid_insert.render_silent_trace_ledger(alive)
+        if ledger_row is not None:
+            ledger_messages.append(ledger_row)
+        counts = {
+            "silent_trace_group_count": group_count,
+            "silent_trace_dropped_count": dropped,
+            "silent_ledger_entry_count": len(alive),
+        }
+        return kept_older, kept_tail, ledger_messages, counts
+
+    @staticmethod
+    def _mid_insert_silent_group_has_trace(group: list[dict[str, Any]]) -> bool:
+        for item in list(group or []):
+            if str(item.get("role") or "").strip().lower() != "assistant":
+                continue
+            if _mid_insert.silent_trace_call_ids(item):
+                return True
+        return False
+
+    @staticmethod
+    def _silent_group_subject(group: list[dict[str, Any]]) -> str:
+        for item in list(group or []):
+            if str(item.get("role") or "").strip().lower() != "assistant":
+                continue
+            for call in list(item.get("tool_calls") or []):
+                function = call.get("function") if isinstance(call, dict) else None
+                name = str((function or {}).get("name") or "").strip() if isinstance(function, dict) else ""
+                if name != SILENT_TOOL_NAME:
                     continue
-                if str(other.get("tool_call_id") or "").strip() in call_ids:
-                    retire_indexes.add(other_index)
-        return [item for index, item in enumerate(records) if index not in retire_indexes]
+                arguments = (function or {}).get("arguments") if isinstance(function, dict) else None
+                if isinstance(arguments, str):
+                    try:
+                        arguments = json.loads(arguments)
+                    except Exception:
+                        continue
+                if isinstance(arguments, dict):
+                    subject = str(arguments.get("subject") or "").strip()
+                    if subject:
+                        return subject
+        return ""
 
     @classmethod
     def _drop_dangling_trailing_tool_call_groups(
@@ -7478,6 +7642,23 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             reason=reason,
         )
 
+    def _frontdoor_silent_source_key(self, state: CeoGraphState) -> str:
+        """本轮静默所属的源：定时任务优先，其次心跳事件覆盖的任务。
+
+        这个键写进静默回执，是台账判"这条痕迹还管不管用"的唯一依据：`cron:<id>` 跟着
+        任务是否还在跑，`task:<id>` 跟着任务是否已终态。本轮不是内部事件驱动的（用户
+        消息引起的静默）就留空——空串在压缩时按"寿命无从判定"处理，不再跨压缩累积。
+        """
+        metadata = _user_input_metadata(state.get("user_input"))
+        job_id = str(state.get("cron_job_id") or metadata.get("cron_job_id") or "").strip()
+        if job_id:
+            return f"cron:{job_id}"
+        for task_id in list(metadata.get("heartbeat_task_ids") or []):
+            task_id = str(task_id or "").strip()
+            if task_id:
+                return f"task:{task_id}"
+        return ""
+
     def _frontdoor_resident_tools(
         self,
         *,
@@ -7495,7 +7676,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 pending_reply_chars=lambda: self._frontdoor_undelivered_turn_text_chars(
                     state=state,
                     runtime=runtime,
-                )
+                ),
+                source_key_provider=lambda: self._frontdoor_silent_source_key(state),
             ),
             TIME_TOOL_NAME: TimeTool(),
             SCHEDULE_WAKE_TOOL_NAME: ScheduleWakeTool(

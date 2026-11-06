@@ -44,6 +44,47 @@ def test_model_visible_silent_contract_states_whole_turn_scope() -> None:
     assert "keep the text for context, deliver nothing" not in description
 
 
+def test_silent_receipt_carries_the_source_it_silences() -> None:
+    """来源键落在回执上：台账判"这条痕迹还管不管用"只认运行时写得出的键。
+
+    让模型自己填就等于把寿命交给一段自由文本——实盘 240 组痕迹里只有 1 组的 subject
+    是任务 id，其余 239 组因此永不退休。
+    """
+    payload = _run(
+        SilentTool(source_key_provider=lambda: "cron:832dea14"),
+        reason="duplicate reminder",
+    )
+    assert payload["source_key"] == "cron:832dea14"
+
+    assert "source_key" not in _run(SilentTool(), reason="r")
+    assert "source_key" not in _run(SilentTool(source_key_provider=lambda: ""), reason="r")
+
+    def _boom() -> str:
+        raise RuntimeError("source unreadable")
+
+    # 来源读不到只丢这个字段，不许把静默收尾本身弄失败。
+    assert _run(SilentTool(source_key_provider=_boom), reason="r")["silenced"] is True
+
+
+def test_frontdoor_silent_source_key_prefers_cron_then_heartbeat_task() -> None:
+    from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
+
+    ops = CeoFrontDoorRunner(loop=SimpleNamespace())
+
+    assert ops._frontdoor_silent_source_key(
+        {"user_input": {"metadata": {"cron_job_id": "832dea14"}}}
+    ) == "cron:832dea14"
+    assert ops._frontdoor_silent_source_key(
+        {
+            "user_input": {
+                "metadata": {"heartbeat_task_ids": ["", "4473dd883cd4"]}
+            }
+        }
+    ) == "task:4473dd883cd4"
+    # 用户轮引起的静默没有可查来源：留空，压缩时按"寿命无从判定"处理。
+    assert ops._frontdoor_silent_source_key({"user_input": {"metadata": {}}}) == ""
+
+
 def test_silent_receipt_carries_undelivered_turn_text_chars() -> None:
     payload = _run(
         SilentTool(pending_reply_chars=lambda: 295),

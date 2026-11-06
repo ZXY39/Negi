@@ -72,6 +72,12 @@ MEMORY_WRITE_HINT_HEADER = "## 长期记忆写入提示"
 RETRIEVED_MEMORY_HINT_HEADER = "## 已检索记忆使用提示"
 MEMORY_SNAPSHOT_HEADING = "## 长期记忆\n"
 
+# 静默台账行的体头：前门 token 压缩用它把"历史上对哪个源选了沉默"收成交替见的
+# 一行运行时记录，取代逐字回插的 assistant 痕迹组。写与读共用本模块这一对函数，
+# 避免两条路各自解析长出第二个答案。
+SILENT_TRACE_LEDGER_PREFIX = "[SILENT_TRACE_LEDGER]"
+SILENT_TRACE_LEDGER_HEADING = "已记录的静默决定："
+
 # 续跑基线只存 role/content，metadata 会丢；内容前缀是第二判据。
 # 与 `g3ku.runtime.web_ceo_sessions._internal_prompt_kind` 及 cron 生产端保持一致。
 _HIDDEN_INTERNAL_CONTENT_PREFIXES = (
@@ -163,6 +169,63 @@ def _is_system_relay_notice_message(message: dict[str, Any]) -> bool:
 def _is_legacy_runtime_contract(message: dict[str, Any]) -> bool:
     # 前门与节点两族的形体相同；剥离语义一致，合并为一族，避免一次命中两族。
     return is_frontdoor_tool_contract_message(message) or is_node_dynamic_contract_message(message)
+
+
+def is_silent_trace_ledger_message(message: Any) -> bool:
+    if _message_role(message) != "user":
+        return False
+    return _content_text(message).lstrip().startswith(SILENT_TRACE_LEDGER_PREFIX)
+
+
+def render_silent_trace_ledger(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """把台账条目写成一行运行时记录；没有条目就不产行。
+
+    条目形如 `{"source_key": "cron:832dea14", "count": 3, "subject": "..."}`，按传入
+    顺序成行。痕迹行落盘时不带时刻（只有 role/content/tool_calls），所以这里聚合的是
+    次数而不是时间——次数正是"连着几轮都静默 ⇒ 该降频"的判据。
+    """
+    lines: list[str] = []
+    for item in list(entries or []):
+        if not isinstance(item, dict):
+            continue
+        source_key = str(item.get("source_key") or "").strip()
+        subject = " ".join(str(item.get("subject") or "").split())[:120]
+        if not source_key:
+            continue
+        count = int(item.get("count") or 0) or 1
+        lines.append(f"- {source_key} | 已静默 {count} 次 | 最近：{subject or '-'}")
+    if not lines:
+        return None
+    return {
+        "role": "user",
+        "content": "\n".join([SILENT_TRACE_LEDGER_PREFIX, SILENT_TRACE_LEDGER_HEADING, *lines]),
+        # 机器记录只给模型看；界面既不是消息也不该是气泡。
+        "metadata": {"ui_visible": False},
+    }
+
+
+def parse_silent_trace_ledger(message: Any) -> list[dict[str, Any]]:
+    """读回台账条目；解析不了的行直接丢，宁可少一条判据也不留旧条目。"""
+    if not is_silent_trace_ledger_message(message):
+        return []
+    entries: list[dict[str, Any]] = []
+    for line in _content_text(message).splitlines():
+        text = line.strip()
+        if not text.startswith("- "):
+            continue
+        parts = [part.strip() for part in text[2:].split("|")]
+        if len(parts) != 3:
+            continue
+        source_key, count_part, subject_part = parts
+        if not source_key:
+            continue
+        digits = "".join(ch for ch in count_part if ch.isdigit())
+        count = int(digits) if digits else 1
+        subject = subject_part.split("：", 1)[1].strip() if "：" in subject_part else ""
+        if subject == "-":
+            subject = ""
+        entries.append({"source_key": source_key, "count": count, "subject": subject})
+    return entries
 
 
 def silent_trace_call_ids(message: dict[str, Any]) -> tuple[str, ...]:
@@ -619,7 +682,10 @@ __all__ = [
     "compaction_policy",
     "family_for",
     "insert_mid_messages",
+    "is_silent_trace_ledger_message",
     "keeps_record_for_stage",
+    "parse_silent_trace_ledger",
+    "render_silent_trace_ledger",
     "scan_markers",
     "silent_trace_call_ids",
     "split_runtime_contract_messages",

@@ -2633,6 +2633,43 @@ class RuntimeAgentSession:
             return local_manager
         return getattr(view, "review_manager", None)
 
+    _MEMORY_FLUSH_SLOW_SECONDS = 30.0
+
+    def _schedule_memory_review_flush_after_compression(self) -> None:
+        """把压缩轮的记忆冲刷挪出交付路径：本轮正文先投递，批次的活随后跑。
+
+        冲刷内部照旧一次跑完（先应用批次、再换头部版本），挪开的只是它站在
+        `message_end` 前面这件事：实测一次压缩轮的批次把交付压后 696.7 秒，而记忆
+        更新另有通知带出，用户不必在回复前等它。同一会话同时只跑一个，后到的并入
+        下一次压缩轮——复核窗口是耐久行，不冲这一次不会丢内容。
+        """
+        running = getattr(self, "_memory_flush_task", None)
+        if running is not None and not running.done():
+            logger.debug(
+                f"memory compression flush already running for {self._state.session_key}: "
+                "this review window rides the next compression turn"
+            )
+            return
+        task = asyncio.create_task(self._memory_review_flush_task())
+        self._memory_flush_task = task
+
+    async def _memory_review_flush_task(self) -> None:
+        started = time.monotonic()
+        try:
+            await self._flush_memory_review_after_compression()
+        except Exception as exc:  # noqa: BLE001 - 后台失败只记账，不许把异常甩给事件循环
+            logger.warning(f"memory compression flush failed for {self._state.session_key}: {exc}")
+        finally:
+            if getattr(self, "_memory_flush_task", None) is asyncio.current_task():
+                self._memory_flush_task = None
+        elapsed = time.monotonic() - started
+        if elapsed >= self._MEMORY_FLUSH_SLOW_SECONDS:
+            logger.warning(
+                f"memory compression flush finished off the delivery path for "
+                f"{self._state.session_key}: {elapsed:.1f}s "
+                f"(threshold {self._MEMORY_FLUSH_SLOW_SECONDS:.0f}s)"
+            )
+
     async def _flush_memory_review_after_compression(self) -> None:
         """压缩轮末：先冲刷复核窗口，再把头部基座更新到最新文档。
 
@@ -4588,7 +4625,7 @@ class RuntimeAgentSession:
                     # _frontdoor_history_shrink_reason 是“baseline 为何比上一轮短”的
                     # 粘滞解释，会跨轮残留，不能当作本轮压缩事件信号。
                     if bool(getattr(self, "_frontdoor_token_compression_applied_turn", False)):
-                        await self._flush_memory_review_after_compression()
+                        self._schedule_memory_review_flush_after_compression()
                         tail_profiler.mark("memory_review_flush")
             final_turn_id = self._current_turn_id(user_input)
             # 同正常收尾：出站正文补齐表情轮那段正文，转录仍写 output 原文。

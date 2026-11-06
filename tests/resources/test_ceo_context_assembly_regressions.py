@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -2760,6 +2761,63 @@ async def test_compression_turn_tail_adopts_the_snapshot_after_the_review_flush(
     assert manager.events == ["flush", "apply", "read"]
     assert "adopted after flush" in str(stub._frontdoor_memory_snapshot_text or "")
     assert emitted == []
+
+
+@pytest.mark.asyncio
+async def test_compression_flush_runs_off_the_delivery_path() -> None:
+    """交付不等冲刷：调度返回时冲刷一次都没跑，让出事件循环后才执行。
+
+    实盘一次压缩轮的批次把 `message_end` 压后 696.7 秒，而记忆更新另有通知带出。
+    """
+    from g3ku.runtime.session_agent import RuntimeAgentSession
+
+    events: list[str] = []
+
+    async def _body() -> None:
+        events.append("flush-start")
+        await asyncio.sleep(0.01)
+        events.append("flush-end")
+
+    stub = SimpleNamespace(
+        _state=SimpleNamespace(session_key="web:shared"),
+        _memory_flush_task=None,
+        _MEMORY_FLUSH_SLOW_SECONDS=30.0,
+        _flush_memory_review_after_compression=_body,
+    )
+
+    stub._memory_review_flush_task = lambda: RuntimeAgentSession._memory_review_flush_task(stub)
+
+    RuntimeAgentSession._schedule_memory_review_flush_after_compression(stub)
+    assert events == [], "冲刷不得再挡在 message_end 前面"
+
+    task = stub._memory_flush_task
+    assert task is not None
+    # 同一会话同时只跑一个：后到的并入下一次压缩轮，不叠第二个任务
+    RuntimeAgentSession._schedule_memory_review_flush_after_compression(stub)
+    assert stub._memory_flush_task is task
+
+    await task
+    assert events == ["flush-start", "flush-end"]
+    assert stub._memory_flush_task is None
+
+
+@pytest.mark.asyncio
+async def test_background_memory_flush_failure_stays_off_the_turn() -> None:
+    from g3ku.runtime.session_agent import RuntimeAgentSession
+
+    async def _boom() -> None:
+        raise RuntimeError("memory worker gone")
+
+    stub = SimpleNamespace(
+        _state=SimpleNamespace(session_key="web:shared"),
+        _memory_flush_task=None,
+        _MEMORY_FLUSH_SLOW_SECONDS=30.0,
+        _flush_memory_review_after_compression=_boom,
+    )
+    stub._memory_review_flush_task = lambda: RuntimeAgentSession._memory_review_flush_task(stub)
+    RuntimeAgentSession._schedule_memory_review_flush_after_compression(stub)
+    await stub._memory_flush_task
+    assert stub._memory_flush_task is None
 
 
 def test_failed_snapshot_read_keeps_the_frozen_value_and_the_old_adoption_stamp() -> None:
