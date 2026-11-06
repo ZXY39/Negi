@@ -5202,6 +5202,14 @@ class RuntimeAgentSession:
             return 0
         answered_turn_ids = self._answered_turn_ids_from_rows(rows)
         failed_turn_ids = self._runtime_error_reply_turn_ids(rows)
+        # 本轮自己的批次不能接回：它已经被 `_run_user_turn` 的 drain 接走，转录行要等
+        # 本轮答完才升 completed，这期间按 pending 接回会让本轮误以为还有一条补充，
+        # 在第一批工具结束后静默收尾，同一句话再被下一轮问一遍。
+        active_turn_ids = {
+            str((getattr(item, "metadata", None) or {}).get(_TRANSCRIPT_TURN_ID_KEY) or "").strip()
+            for item in (getattr(self, "_active_user_batch_inputs", None) or [])
+            if isinstance(item, UserInputMessage)
+        }
         restored: list[UserInputMessage] = []
         settled_failed = 0
         for row in rows:
@@ -5211,6 +5219,8 @@ class RuntimeAgentSession:
             if str(metadata.get(_TRANSCRIPT_STATE_KEY) or "").strip().lower() != _TRANSCRIPT_STATE_PENDING:
                 continue
             turn_id = str(metadata.get(_TRANSCRIPT_TURN_ID_KEY) or "").strip()
+            if turn_id and turn_id in active_turn_ids:
+                continue
             if turn_id and turn_id in failed_turn_ids:
                 if self._mark_transcript_user_state(
                     persisted_session,
