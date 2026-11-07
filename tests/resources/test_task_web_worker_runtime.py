@@ -8616,7 +8616,7 @@ async def test_task_list_projection_omits_legacy_continuation_fields(tmp_path: P
             ),
         )
 
-        items = service.query_service.get_tasks("web:shared", 1)
+        items = service.query_service.get_tasks("web:shared", "all")
         payload = items[0].model_dump(mode="json")
 
         assert "continuation_state" not in payload

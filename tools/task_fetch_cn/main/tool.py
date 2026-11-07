@@ -7,7 +7,9 @@ import yaml
 
 from g3ku.agent.tools.base import Tool
 
-TASK_TYPE_PARAM = '任务类型'
+STATUS_PARAM = '状态'
+LONG_TERM_PARAM = '长期'
+UNREAD_PARAM = '只看未读'
 SCOPE_PARAM = '查询范围'
 SCOPE_GLOBAL = '全局'
 _MANIFEST = yaml.safe_load((Path(__file__).resolve().parents[1] / 'resource.yaml').read_text(encoding='utf-8'))
@@ -39,11 +41,16 @@ class _TaskListHandler(Tool):
     async def execute(self, __g3ku_runtime: dict[str, Any] | None = None, **kwargs: Any) -> str:
         runtime = _runtime_payload(__g3ku_runtime, kwargs)
         await self._service.startup()
-        task_type = int(kwargs.get(TASK_TYPE_PARAM))
         # 查询范围：全局=None（跨会话全量），缺省=当前会话
         scope = str(kwargs.get(SCOPE_PARAM) or '').strip()
         session_key = None if scope == SCOPE_GLOBAL else str(runtime.get('session_key') or 'web:shared')
-        return self._service.get_tasks(session_key, task_type)
+        long_term = kwargs.get(LONG_TERM_PARAM)
+        return self._service.get_tasks(
+            session_key,
+            status=str(kwargs.get(STATUS_PARAM) or '全部').strip(),
+            long_term=None if long_term is None else bool(long_term),
+            unread_only=bool(kwargs.get(UNREAD_PARAM)),
+        )
 
 
 def build(runtime):

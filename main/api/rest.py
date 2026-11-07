@@ -58,7 +58,12 @@ async def list_tasks(session_id: str = Query('web:shared'), scope: int = Query(1
     effective_session_id = None if normalized_session_id.lower() == 'all' else normalized_session_id
 
     def _items_payload() -> list[dict[str, object]]:
-        items = service.query_service.get_tasks(effective_session_id, int(scope))
+        # REST 外部契约保持 scope 整数（前端任务大厅在用），内部映射成
+        # query_service 的状态/未读过滤；未知 scope 按不过滤处理（与旧口径一致）。
+        scope_value = int(scope)
+        status = {1: 'all', 2: 'in_progress', 3: 'failed'}.get(scope_value, 'all')
+        unread_only = scope_value == 4
+        items = service.query_service.get_tasks(effective_session_id, status, unread_only=unread_only)
         return [item.model_dump(mode='json') for item in items]
 
     # 查询与序列化是同步 CPU/IO 重活：卸载到线程池，避免独占事件循环

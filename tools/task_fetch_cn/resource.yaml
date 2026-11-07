@@ -2,14 +2,19 @@ schema_version: 1
 kind: tool
 display_name: "获取任务"
 name: task_list
-description: List task ids for a requested task category within the current session; pass 查询范围=全局 to list across all sessions (global rows carry status and session labels).
+description: List tasks filtered by status and long-term type; rows carry task id, creation time, goal and latest progress. Pass 查询范围=全局 to list across all sessions.
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''
   url: ''
   ref: ''
 current_version:
-  summary: Resource-local task runtime tool with 查询范围 scope parameter (session default / global). Handler and governance live with the resource so discovery can refresh without a host restart.
+  summary: >-
+    Resource-local task runtime tool. The numeric 任务类型 enum (1=all, 2=in progress, 3=failed,
+    4=unread) is replaced by 状态 (全部/进行中/成功/失败) plus 长期 and 只看未读 booleans; rows now
+    carry task id, creation time, task goal and latest progress, with 长期/待命/暂停/未读 folded
+    into the status label. Handler and governance live with the resource so discovery can
+    refresh without a host restart.
   compare_rule: Treat manifest, main/, parameter contract, or returned payload changes as version-relevant.
   source_of_truth: resource.yaml, main/, and toolskills together define the effective behavior.
 requires:
@@ -22,18 +27,24 @@ permissions:
 parameters:
   type: object
   properties:
-    任务类型:
-      type: integer
-      enum: [1, 2, 3, 4]
-      description: "1=all tasks, 2=in progress, 3=failed, 4=unread."
+    状态:
+      type: string
+      enum: ["全部", "进行中", "成功", "失败"]
+      description: "Filter by task status; omit or 全部 = all tasks."
+    长期:
+      type: boolean
+      description: "true=list only long-term (continuous standby) tasks, false=only one-shot tasks; omit for no filter."
+    只看未读:
+      type: boolean
+      description: "true=list only tasks whose updates the session has not seen yet; omit for no filter."
     查询范围:
       type: string
       enum: ["本会话", "全局"]
       description: "本会话 (default) = only tasks of the current session; 全局 = tasks across all sessions."
-  required: [任务类型]
+  required: []
 governance:
   display_name: Task List
-  description: List task ids for a requested task category within the current session; pass 查询范围=全局 to list across all sessions (global rows carry status and session labels).
+  description: List tasks filtered by status and long-term type; rows carry task id, creation time, goal and latest progress. Pass 查询范围=全局 to list across all sessions.
   risk_level: low
   destructive: false
   allowed_roles:

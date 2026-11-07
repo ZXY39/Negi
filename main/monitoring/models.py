@@ -193,6 +193,9 @@ class TaskListItem(Model):
     # 连续（待命）节点任务卡：REST 列表初填也要带待命态，否则整页刷新后卡片会
     # 回退成「运行」，直到下一次 summary patch 才修正（判据与 WS 摘要同口径）。
     standby: bool = False
+    # 长期（连续）任务标记：读根节点 metadata.continuous（唯一真值，见
+    # main/runtime/continuous_node.py），由 get_tasks 批量填充，两条读路径同源。
+    continuous: bool = False
     created_at: str = ''
     updated_at: str = ''
     # 任务终态时间：仅 success/failed 时有值，供任务卡片「结束」行与总耗时定格。

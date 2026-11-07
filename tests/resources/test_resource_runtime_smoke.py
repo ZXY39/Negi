@@ -403,8 +403,15 @@ class _MainTaskService:
     def summary(self, session_id: str) -> str:
         return f'summary:{session_id}'
 
-    def get_tasks(self, session_id: str, task_type: int) -> str:
-        return f'list:{session_id}:{task_type}'
+    def get_tasks(
+        self,
+        session_id: str,
+        *,
+        status: str = '全部',
+        long_term: bool | None = None,
+        unread_only: bool = False,
+    ) -> str:
+        return f'list:{session_id}:{status}:{long_term}:{unread_only}'
 
     async def task_append_notice(self, *, task_ids, node_ids, message: str, session_id: str) -> str:
         _ = node_ids
@@ -1658,7 +1665,7 @@ async def test_main_runtime_query_tools_load_from_resources(tmp_path: Path):
         assert progress_tool is not None
         assert stats_tool is not None
         assert await summary_tool.execute(__g3ku_runtime={'session_key': 'web:shared'}) == 'summary:web:shared'
-        assert await fetch_tool.execute(__g3ku_runtime={'session_key': 'web:shared'}, **{'任务类型': 4}) == 'list:web:shared:4'
+        assert await fetch_tool.execute(__g3ku_runtime={'session_key': 'web:shared'}, **{'状态': '失败', '长期': True}) == 'list:web:shared:失败:True:False'
         assert await delete_tool.execute(mode='preview', **{'任务id列表': ['task:demo']}) == 'task-delete'
         assert await failed_nodes_tool.execute(**{'任务id': 'task:demo'}) == 'failed:task:demo'
         assert json.loads(await node_detail_tool.execute(**{'任务id': 'task:demo', '节点id': 'node:demo'})) == {

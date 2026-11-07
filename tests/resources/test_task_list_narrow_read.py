@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-from main.models import TaskRecord, TokenUsageSummary
+from main.models import NodeRecord, TaskRecord, TokenUsageSummary
 from main.service.runtime_service import MainRuntimeService
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -70,11 +70,13 @@ def _seed(service: MainRuntimeService) -> None:
 
 
 def _full_path_items(service: MainRuntimeService, session_id) -> list:
-    """旧口径基准：整包 TaskRecord 解析 + 同样的磁盘占用附加。"""
+    """旧口径基准：整包 TaskRecord 解析 + 同样的磁盘占用与根节点 continuous 附加。"""
     items = [service.query_service._task_list_item_from_record(task) for task in service.store.list_tasks(session_id)]
     usages = service.store.get_task_disk_usages([item.task_id for item in items])
+    flags = service.store.map_task_root_continuous([item.task_id for item in items])
     for item in items:
         item.disk_usage_bytes = int(usages.get(item.task_id, 0) or 0)
+        item.continuous = bool(flags.get(item.task_id, False))
     return items
 
 
@@ -86,7 +88,7 @@ def test_narrow_read_matches_full_parse_global(tmp_path) -> None:
     service = _make_web_service(tmp_path)
     _seed(service)
 
-    narrow = service.query_service.get_tasks(None, 1)
+    narrow = service.query_service.get_tasks(None, 'all')
     assert _assert_same_items(narrow, _full_path_items(service, None)) is None
     by_id = {item.task_id: item for item in narrow}
     assert by_id['task:a1'].disk_usage_bytes == 12345
@@ -107,22 +109,67 @@ def test_narrow_read_matches_full_parse_session_and_scopes(tmp_path) -> None:
     _seed(service)
 
     assert _assert_same_items(
-        service.query_service.get_tasks('web:one', 1),
+        service.query_service.get_tasks('web:one', 'all'),
         _full_path_items(service, 'web:one'),
     ) is None
-    # 查询范围过滤口径与整包路径一致。
+    # 状态/未读过滤口径与整包路径一致。
     assert _assert_same_items(
-        service.query_service.get_tasks(None, 2),
+        service.query_service.get_tasks(None, 'in_progress'),
         [item for item in _full_path_items(service, None) if item.status == 'in_progress'],
     ) is None
     assert _assert_same_items(
-        service.query_service.get_tasks(None, 3),
+        service.query_service.get_tasks(None, 'failed'),
         [item for item in _full_path_items(service, None) if item.status == 'failed'],
     ) is None
     assert _assert_same_items(
-        service.query_service.get_tasks(None, 4),
+        service.query_service.get_tasks(None, 'all', unread_only=True),
         [item for item in _full_path_items(service, None) if item.is_unread],
     ) is None
+
+
+def test_get_tasks_long_term_flag_and_filter(tmp_path) -> None:
+    """「长期」维度读根节点 metadata.continuous（唯一真值）：填充、过滤与渲染同源。"""
+    service = _make_web_service(tmp_path)
+    _seed(service)
+    # task:a1 的根节点带 continuous 位；task:a2 的根节点不带（一次性）。
+    service.store.upsert_node(
+        NodeRecord(
+            node_id='root:a1',
+            task_id='task:a1',
+            root_node_id='root:a1',
+            goal='g',
+            prompt='p',
+            metadata={'continuous': True},
+            created_at='2026-09-13T10:00:00+08:00',
+            updated_at='2026-09-13T10:00:00+08:00',
+        )
+    )
+    service.store.upsert_node(
+        NodeRecord(
+            node_id='root:a2',
+            task_id='task:a2',
+            root_node_id='root:a2',
+            goal='g',
+            prompt='p',
+            created_at='2026-09-13T10:00:00+08:00',
+            updated_at='2026-09-13T10:00:00+08:00',
+        )
+    )
+
+    flags = {item.task_id: item.continuous for item in service.query_service.get_tasks(None, 'all')}
+    assert flags['task:a1'] is True
+    assert flags['task:a2'] is False
+
+    long_items = service.query_service.get_tasks(None, 'all', long_term=True)
+    assert {item.task_id for item in long_items} == {'task:a1'}
+    short_items = service.query_service.get_tasks(None, 'all', long_term=False)
+    assert 'task:a1' not in {item.task_id for item in short_items}
+
+    # 会话口径渲染：长期标记折叠进状态标签（_rich_task 的 a1 带 is_paused=True，
+    # 标签如实分档为 进行中/暂停）。
+    text = service.get_tasks('web:one', long_term=True)
+    assert '[进行中/暂停·未读·长期]' in text
+    assert '目标：title-task:a1' in text and '进展：brief-task:a1' in text
 
 
 def test_narrow_read_falls_back_when_unavailable(tmp_path) -> None:
@@ -133,7 +180,7 @@ def test_narrow_read_falls_back_when_unavailable(tmp_path) -> None:
         raise RuntimeError('json1 unavailable')
 
     service.store.list_task_summaries = _broken  # type: ignore[method-assign]
-    items = service.query_service.get_tasks(None, 1)
+    items = service.query_service.get_tasks(None, 'all')
     assert {item.task_id for item in items} == {'task:a1', 'task:a2', 'task:b1', 'task:b2'}
     assert any(item.disk_usage_bytes == 12345 for item in items)
 

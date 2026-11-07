@@ -4409,6 +4409,28 @@ class SQLiteTaskStore:
                 counts[str(row['task_id'])] = int(row['total'] or 0)
         return counts
 
+    def map_task_root_continuous(self, task_ids: list[str] | None = None) -> dict[str, bool]:
+        """任务 → 根节点 continuous 位的批量读（任务列表「长期」过滤与标记用）。
+
+        单一真值仍是根节点 metadata 的 continuous 位（main/runtime/continuous_node.py），
+        这里只读不写；根节点按 `node_id = root_node_id` 识别，不依赖 depth 语义。
+        """
+        wanted = [str(item or '').strip() for item in list(task_ids or []) if str(item or '').strip()]
+        if not wanted:
+            return {}
+        flags: dict[str, bool] = {}
+        for start in range(0, len(wanted), 500):
+            chunk = wanted[start:start + 500]
+            placeholders = ','.join('?' for _ in chunk)
+            rows = self._fetchall_light(
+                f"SELECT task_id, json_extract(payload_json, '$.metadata.continuous') AS flag "
+                f'FROM nodes WHERE task_id IN ({placeholders}) AND node_id = root_node_id',
+                tuple(chunk),
+            )
+            for row in rows:
+                flags[str(row['task_id'])] = bool(row['flag'])
+        return flags
+
     def count_task_node_rounds(self, task_id: str) -> int:
         """同上：轮次条数不靠整表建模。"""
         row = self._fetchone(

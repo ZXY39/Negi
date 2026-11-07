@@ -56,7 +56,7 @@
 - **父节点被拖住**：连续子节点存活期间，父节点提交会被 `_final_submission_blockers` 拦下（非终态子节点仍存在）；结束整条分支要先按上面的方式逐个结束连续子节点。
 - **spawn 回执**：连续子节点没写判据而由运行时自动建验收时，创建回执带 `acceptance_auto_created` 与一句 `acceptance_note`，父节点不会把验收节点当成自己漏写判据的结果。标记与 `acceptance_node_id` 同源落在 spawn entry 上，重放同一 `call_id` 返回同一批回执。
 - **不做什么**：终态仍是最终态——没有归档状态、没有终态复活、所有终态闸门（投递 `target_terminal`、resume `node_terminal` / `task_terminal`、`_run_node_turn` 短路）保持原样。连续任务靠**不进入终态**获得长期生命，而不是靠终态后再打开。
-- **显示**：连续节点停在声明了外部唤醒源的相位上，任务与节点渲染为「待命」而不是「运行/等待」，合同归 `web-and-admin.md`「Task Hall Action Contract」；停滞判定对这一形态的豁免归 `heartbeat-system.md`「Task Stall Detection」。
+- **显示**：连续节点停在声明了外部唤醒源的相位上，任务与节点渲染为「待命」而不是「运行/等待」，合同归 `web-and-admin.md`「Task Hall Action Contract」；停滞判定对这一形态的豁免归 `heartbeat-system.md`「Task Stall Detection」。会话侧 `task_list` 的「长期」过滤与行内 `·长期` 标记读的是同一个真值——`SQLiteTaskStore.map_task_root_continuous` 按任务批量取根节点 `metadata.continuous`，不建任务级副本（工具面合同归 `tool-and-skill-system.md` 的 task_list 行）。
 
 ## 附录 A：已删除的 distribution epoch（历史说明，勿据此实现）
 

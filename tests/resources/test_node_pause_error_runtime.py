@@ -1345,7 +1345,7 @@ async def test_manage_task_nodes_tool_param_shapes_and_targets_passthrough(tmp_p
         assert task_after is not None and task_after.is_paused is True
         # 任务大厅载荷（`GET /api/tasks` 的数据源）必须同步可见——「节点已暂停但大厅
         # 仍显示处理中」正是这一层没同步导致的。
-        hall = next(item for item in service.query_service.get_tasks(None, 1) if item.task_id == record.task_id)
+        hall = next(item for item in service.query_service.get_tasks(None, 'all') if item.task_id == record.task_id)
         assert hall.is_paused is True and hall.status == "in_progress"
         again = json.loads(await tool.execute(task_id=record.task_id, action="pause"))
         assert again["ok"] is True and again["result"] == "already_paused"
@@ -1387,7 +1387,7 @@ async def test_control_nodes_task_id_only_drives_task_level_pause(tmp_path: Path
         task = service.get_task(record.task_id)
         assert task is not None and task.is_paused is False
         # 恢复必须同样反映到大厅载荷，否则表现为「全局恢复无效」。
-        hall = next(item for item in service.query_service.get_tasks(None, 1) if item.task_id == record.task_id)
+        hall = next(item for item in service.query_service.get_tasks(None, 'all') if item.task_id == record.task_id)
         assert hall.is_paused is False
 
         # 非法动作走同一条校验路径，不得被静默忽略。

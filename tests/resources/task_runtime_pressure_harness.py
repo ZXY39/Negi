@@ -344,7 +344,7 @@ async def main() -> None:
         latest_worker = service.latest_worker_status()
 
         list_stats, list_payload = _measure_sync(
-            lambda: service.query_service.get_tasks("web:shared", 1),
+            lambda: service.query_service.get_tasks("web:shared", "all"),
             repeats=max(1, int(args.probes or 1)),
         )
         detail_stats, detail_payload = _measure_sync(

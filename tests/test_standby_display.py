@@ -135,7 +135,7 @@ def test_task_list_items_carry_standby(tmp_path: Path) -> None:
     service = _service(tmp_path)
     _seed_continuous_root(service)
 
-    items = {item.task_id: item for item in service.query_service.get_tasks(None, 1)}
+    items = {item.task_id: item for item in service.query_service.get_tasks(None, 'all')}
     item = items['task:standby']
     assert item.status == 'in_progress'
     assert item.standby is True
@@ -143,7 +143,7 @@ def test_task_list_items_carry_standby(tmp_path: Path) -> None:
     service.log_service.update_task_control(
         'task:standby', pause_requested=True, is_paused=True
     )
-    items = {item.task_id: item for item in service.query_service.get_tasks(None, 1)}
+    items = {item.task_id: item for item in service.query_service.get_tasks(None, 'all')}
     assert items['task:standby'].standby is False
     assert items['task:standby'].is_paused is True
 
@@ -175,7 +175,7 @@ def test_task_list_items_mark_plain_task_not_standby(tmp_path: Path) -> None:
     service.store.upsert_task(task)
     service.store.upsert_node(node)
 
-    items = {item.task_id: item for item in service.query_service.get_tasks(None, 1)}
+    items = {item.task_id: item for item in service.query_service.get_tasks(None, 'all')}
     assert items['task:plain'].standby is False
 
 

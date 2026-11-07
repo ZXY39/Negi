@@ -536,7 +536,14 @@ class TaskQueryService:
         )
         return entries
 
-    def get_tasks(self, session_id: str | None, task_type: int) -> list[TaskListItem]:
+    def get_tasks(
+        self,
+        session_id: str | None,
+        status: str = 'all',
+        *,
+        long_term: bool | None = None,
+        unread_only: bool = False,
+    ) -> list[TaskListItem]:
         # 窄读路径优先：json_extract 摘要避免逐任务全量解析 payload_json；
         # 窄读不可用（老 sqlite 无 json1 等）时回退整包 TaskRecord 解析。
         summaries = None
@@ -559,13 +566,25 @@ class TaskQueryService:
                 str(summary.get('task_id') or ''): bool(summary.get('pause_requested'))
                 for summary in summaries
             }
-        scope = int(task_type)
-        if scope == 2:
-            items = [item for item in items if item.status == 'in_progress']
-        elif scope == 3:
-            items = [item for item in items if item.status == 'failed']
-        elif scope == 4:
+        normalized_status = str(status or 'all').strip().lower()
+        if normalized_status not in {'all', 'in_progress', 'success', 'failed'}:
+            raise ValueError('invalid_status')
+        if normalized_status != 'all':
+            items = [item for item in items if item.status == normalized_status]
+        if unread_only:
             items = [item for item in items if bool(item.is_unread)]
+        # 长期（连续）维度：唯一真值是根节点 metadata.continuous
+        # （main/runtime/continuous_node.py），这里批量读一次；过滤与标记共用
+        # 同一份读数，窄读/整包两条路径在汇合后同源填充，等价性不受影响。
+        if items:
+            try:
+                continuous_map = self._store.map_task_root_continuous([item.task_id for item in items])
+            except Exception:
+                continuous_map = {}
+            for item in items:
+                item.continuous = bool(continuous_map.get(item.task_id, False))
+        if long_term is not None:
+            items = [item for item in items if bool(item.continuous) is bool(long_term)]
         try:
             disk_usages = self._store.get_task_disk_usages([item.task_id for item in items])
         except Exception:

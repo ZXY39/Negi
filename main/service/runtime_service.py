@@ -13838,22 +13838,75 @@ class MainRuntimeService:
         normalized = str(session_id or '').strip()
         return self.query_service.summary(normalized or None).text
 
-    def get_tasks(self, session_id: str | None, task_type: int) -> str:
+    _TASK_LIST_STATUS_FILTERS = {
+        '全部': 'all',
+        '进行中': 'in_progress',
+        '成功': 'success',
+        '失败': 'failed',
+    }
+    _TASK_LIST_STATUS_LABELS = {'in_progress': '进行中', 'success': '成功', 'failed': '失败'}
+
+    def get_tasks(
+        self,
+        session_id: str | None,
+        *,
+        status: str = '全部',
+        long_term: bool | None = None,
+        unread_only: bool = False,
+    ) -> str:
         normalized = str(session_id or '').strip()
-        items = self.query_service.get_tasks(normalized or None, task_type)
+        status_key = str(status or '全部').strip()
+        if status_key not in self._TASK_LIST_STATUS_FILTERS:
+            raise ValueError('invalid_status_filter')
+        items = self.query_service.get_tasks(
+            normalized or None,
+            self._TASK_LIST_STATUS_FILTERS[status_key],
+            long_term=long_term,
+            unread_only=bool(unread_only),
+        )
         if not items:
             return '无匹配任务。'
-        if normalized:
-            return '\n'.join(f'- {item.task_id}：{item.brief}' for item in items)
-        # 全局口径：逐行附状态与会话归属；in_progress 且 paused 的任务并没有真在跑，
-        # 标记出来避免模型把暂停僵尸当成运行中任务转述。
         lines: list[str] = []
         for item in items:
-            state = str(item.status or '')
-            if state == 'in_progress' and bool(item.is_paused):
-                state = 'in_progress/paused'
-            lines.append(f'- {item.task_id} [{state}] ({item.session_id})：{item.brief}')
+            state = self._TASK_LIST_STATUS_LABELS.get(str(item.status or ''), str(item.status or ''))
+            # in_progress 且 paused 的任务并没有真在跑，连续任务的待命空闲也不是
+            # 运行：状态标签如实分档，避免模型把暂停/待命当成运行中转述。
+            if state == '进行中' and bool(item.is_paused):
+                state = '进行中/暂停'
+            elif state == '进行中' and bool(item.standby):
+                state = '待命'
+            if bool(item.is_unread):
+                state += '·未读'
+            if bool(item.continuous):
+                state += '·长期'
+            line = f'- {item.task_id} [{state}] 创建于 {self._task_list_time_text(item.created_at)}'
+            # 全局口径：逐行附会话归属；「某会话查不到其它会话的任务」是默认口径而非数据丢失。
+            if not normalized:
+                line += f' ({item.session_id})'
+            goal = self._task_list_clip_text(item.title, 60) if item.title and item.title != item.task_id else ''
+            progress = self._task_list_clip_text(item.brief, 100)
+            # brief 无独立输出时会回退成 user_request，与 title 同文：只写一次，别让
+            # 「目标」「进展」两段重复同一句话。
+            if progress and goal and progress == goal:
+                progress = ''
+            if goal:
+                line += f' ｜ 目标：{goal}'
+            if progress:
+                line += f' ｜ 进展：{progress}'
+            lines.append(line)
         return '\n'.join(lines)
+
+    @staticmethod
+    def _task_list_time_text(value: str) -> str:
+        text = str(value or '').strip()
+        return text.replace('T', ' ')[:16] if text else ''
+
+    @staticmethod
+    def _task_list_clip_text(value: str, limit: int) -> str:
+        text = ' '.join(str(value or '').split())
+        if len(text) <= limit:
+            return text
+        return text[: max(1, limit - 1)] + '…'
 
     def failed_node_ids(self, task_id: str) -> str:
         task_id = self.normalize_task_id(task_id)
@@ -14761,28 +14814,45 @@ class GetTasksTool(Tool):
 
     @property
     def description(self) -> str:
-        return '按任务类型返回任务 id 列表和简要描述；默认当前会话，查询范围=全局时跨会话（全局结果逐行附状态与会话归属）。'
+        return '按状态与长期类型返回任务列表（任务id、创建时间、任务目标、最新进展）；默认当前会话，查询范围=全局时跨会话（全局结果逐行附会话归属）。'
 
     @property
     def parameters(self) -> dict[str, Any]:
         return {
             'type': 'object',
             'properties': {
-                '任务类型': {'type': 'integer', 'enum': [1, 2, 3, 4], 'description': '1=所有任务，2=进行中任务，3=失败任务，4=未读任务。'},
+                '状态': {
+                    'type': 'string',
+                    'enum': ['全部', '进行中', '成功', '失败'],
+                    'description': '按任务状态过滤，缺省=全部。',
+                },
+                '长期': {
+                    'type': 'boolean',
+                    'description': 'true=只列长期（连续待命）任务，false=只列一次性任务；缺省不过滤。',
+                },
+                '只看未读': {
+                    'type': 'boolean',
+                    'description': 'true=只列有会话还没看过的更新的任务；缺省不过滤。',
+                },
                 _TASK_SCOPE_PARAM: {
                     'type': 'string',
                     'enum': ['本会话', '全局'],
                     'description': '本会话（默认）=只列当前会话的任务；全局=列所有会话的任务。',
                 },
             },
-            'required': ['任务类型'],
+            'required': [],
         }
 
     async def execute(self, __g3ku_runtime: dict[str, Any] | None = None, **kwargs: Any) -> str:
         runtime = _tool_runtime_payload(__g3ku_runtime, kwargs)
         await self._service.startup()
-        task_type = int(kwargs.get('任务类型'))
-        return self._service.get_tasks(_tool_session_scope(runtime, kwargs), task_type)
+        long_term = kwargs.get('长期')
+        return self._service.get_tasks(
+            _tool_session_scope(runtime, kwargs),
+            status=str(kwargs.get('状态') or '全部').strip(),
+            long_term=None if long_term is None else bool(long_term),
+            unread_only=bool(kwargs.get('只看未读')),
+        )
 
 
 class TaskStatsTool(Tool):

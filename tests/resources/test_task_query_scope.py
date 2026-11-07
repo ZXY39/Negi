@@ -13,6 +13,8 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from main.models import NodeRecord, TaskRecord
 from main.service.runtime_service import MainRuntimeService
 
@@ -79,22 +81,36 @@ def test_summary_session_vs_global_scope(tmp_path) -> None:
     assert 'global' in service.summary('')
 
 
-def test_get_tasks_global_rows_carry_status_and_session(tmp_path) -> None:
+def test_get_tasks_rows_carry_time_goal_and_progress(tmp_path) -> None:
     service = _make_web_service(tmp_path)
     _seed(service)
 
-    session_list = service.get_tasks('web:qq', 1)
-    assert '- task:qq1：brief-task:qq1' in session_list
-    assert '(web:qq)' not in session_list  # 会话口径保持旧格式
+    session_list = service.get_tasks('web:qq')
+    assert '- task:qq1 [成功·未读] 创建于 2026-09-13 10:00 ｜ 目标：title-task:qq1 ｜ 进展：brief-task:qq1' in session_list
+    assert '(web:qq)' not in session_list  # 会话口径不带会话归属
 
-    global_in_progress = service.get_tasks(None, 2)
-    assert '[in_progress/paused] (web:qq)' in global_in_progress
-    assert '[in_progress] (web:other)' in global_in_progress
-    assert 'task:qq1' not in global_in_progress  # success 不在类型2
+    global_failed = service.get_tasks(None, status='失败')
+    assert global_failed == '- task:web2 [失败] 创建于 2026-09-13 10:00 (web:other) ｜ 目标：title-task:web2 ｜ 进展：brief-task:web2'
 
-    assert service.get_tasks(None, 3) == '- task:web2 [failed] (web:other)：brief-task:web2'
-    assert service.get_tasks('web:qq', 2) != '无匹配任务。'
-    assert service.get_tasks('web:nobody', 2) == '无匹配任务。'
+    # 全局口径逐行附会话归属；in_progress 且 paused 标为 进行中/暂停，不当运行转述。
+    global_in_progress = service.get_tasks(None, status='进行中')
+    assert '[进行中/暂停] 创建于 2026-09-13 10:00 (web:qq)' in global_in_progress
+    assert '(web:other)' in global_in_progress
+    assert 'task:qq1' not in global_in_progress  # success 不在「进行中」
+
+    # 只看未读：只返回有会话还没看过的更新的任务。
+    unread_only = service.get_tasks('web:qq', unread_only=True)
+    assert 'task:qq1' in unread_only and 'task:qq2' not in unread_only
+
+    assert service.get_tasks('web:nobody') == '无匹配任务。'
+
+
+def test_get_tasks_rejects_unknown_status(tmp_path) -> None:
+    service = _make_web_service(tmp_path)
+    _seed(service)
+
+    with pytest.raises(ValueError):
+        service.get_tasks('web:qq', status='暂停')
 
 
 class _RecordingService:
@@ -109,8 +125,8 @@ class _RecordingService:
         self.summary_calls.append(session_id)
         return 'ok'
 
-    def get_tasks(self, session_id, task_type):
-        self.get_tasks_calls.append((session_id, task_type))
+    def get_tasks(self, session_id, *, status='全部', long_term=None, unread_only=False):
+        self.get_tasks_calls.append((session_id, {'status': status, 'long_term': long_term, 'unread_only': unread_only}))
         return 'ok'
 
 
@@ -128,11 +144,18 @@ async def test_builtin_tools_scope_param() -> None:
     assert '查询范围' in summary_tool.parameters['properties']
 
     list_tool = GetTasksTool(stub)
-    await list_tool.execute(__g3ku_runtime=runtime, **{'任务类型': 2})
-    await list_tool.execute(__g3ku_runtime=runtime, **{'任务类型': 2, '查询范围': '全局'})
-    assert stub.get_tasks_calls == [('web:current', 2), (None, 2)]
-    assert '查询范围' in list_tool.parameters['properties']
-    assert list_tool.parameters['required'] == ['任务类型']
+    await list_tool.execute(__g3ku_runtime=runtime)
+    await list_tool.execute(__g3ku_runtime=runtime, **{'状态': '进行中', '查询范围': '全局'})
+    await list_tool.execute(__g3ku_runtime=runtime, **{'长期': True, '只看未读': True})
+    await list_tool.execute(__g3ku_runtime=runtime, **{'长期': False})
+    assert stub.get_tasks_calls == [
+        ('web:current', {'status': '全部', 'long_term': None, 'unread_only': False}),
+        (None, {'status': '进行中', 'long_term': None, 'unread_only': False}),
+        ('web:current', {'status': '全部', 'long_term': True, 'unread_only': True}),
+        ('web:current', {'status': '全部', 'long_term': False, 'unread_only': False}),
+    ]
+    assert {'状态', '长期', '只看未读', '查询范围'} <= set(list_tool.parameters['properties'])
+    assert list_tool.parameters['required'] == []
 
 
 def _load_resource_tool(rel_path: str):
@@ -156,10 +179,16 @@ async def test_resource_tools_scope_param() -> None:
     assert '查询范围' in summary_handler.parameters['properties']
 
     list_handler = fetch_mod.build(SimpleNamespace(services=SimpleNamespace(main_task_service=stub)))
-    await list_handler.execute(__g3ku_runtime=runtime, **{'任务类型': 1})
-    await list_handler.execute(__g3ku_runtime=runtime, **{'任务类型': 1, '查询范围': '全局'})
-    assert stub.get_tasks_calls == [('ext:qq-official:abc', 1), (None, 1)]
-    assert '查询范围' in list_handler.parameters['properties']
+    await list_handler.execute(__g3ku_runtime=runtime)
+    await list_handler.execute(__g3ku_runtime=runtime, **{'状态': '成功', '查询范围': '全局'})
+    await list_handler.execute(__g3ku_runtime=runtime, **{'长期': False, '只看未读': True})
+    assert stub.get_tasks_calls == [
+        ('ext:qq-official:abc', {'status': '全部', 'long_term': None, 'unread_only': False}),
+        (None, {'status': '成功', 'long_term': None, 'unread_only': False}),
+        ('ext:qq-official:abc', {'status': '全部', 'long_term': False, 'unread_only': True}),
+    ]
+    assert {'状态', '长期', '只看未读', '查询范围'} <= set(list_handler.parameters['properties'])
+    assert list_handler.parameters['required'] == []
 
 
 def test_tool_watchdog_snapshot_skips_model_call_ledger(tmp_path) -> None:
