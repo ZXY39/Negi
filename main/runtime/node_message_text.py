@@ -74,6 +74,25 @@ CHATBOX_REPLY_TAIL = (
     'in your own turn does not reach the operator chat box.'
 )
 
+# 验收镜像行的定位说明：正文是被验执行节点收到的原信，镜像行挂在验收节点信箱里，
+# 验收方注入时若不加说明会把"发给被验节点的要求"误读成"发给验收方的新指令"。
+# 与前两条尾句同机制：按行上的 `payload.mirrored_from` 每跳重算，台账正文与
+# fingerprint 一字不动。
+ACCEPTANCE_MIRROR_TAIL = (
+    'This message was addressed to the inspected execution node while it waits for your '
+    'verdict; the runtime mirrored it into your mailbox so you can judge with it in view. '
+    'It is not a new instruction to you: if it changes the requirements, reject the current '
+    'submission and tell the node to continue per this message; if it does not, keep verifying.'
+)
+
+
+def notification_mirrored_from(record: Any) -> str:
+    """镜像行的来源标记：返回被验节点信箱里的原行 id，非镜像行返回空串。"""
+    payload = record.get('payload') if isinstance(record, dict) else getattr(record, 'payload', None)
+    if not isinstance(payload, dict):
+        return ''
+    return str(payload.get('mirrored_from') or '').strip()
+
 
 def notification_expects_reply(record: Any) -> bool:
     """通知行是否带「要求回投」标记：只读 payload，正文一个字都不参与判定。"""
@@ -98,6 +117,7 @@ def render_node_message_text(
     system_relay: bool = False,
     expects_reply: bool = False,
     reply_via: str = '',
+    mirrored_from: str = '',
 ) -> str:
     body = str(message or '').strip()
     label = message_label(kind, system_relay=system_relay)
@@ -110,6 +130,8 @@ def render_node_message_text(
         return f'{text}\n{CHATBOX_REPLY_TAIL}'
     if expects_reply:
         return f'{text}\n{FRONTDOOR_REPLY_TAIL}'
+    if str(mirrored_from or '').strip():
+        return f'{text}\n{ACCEPTANCE_MIRROR_TAIL}'
     return text
 
 

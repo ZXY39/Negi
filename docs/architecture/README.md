@@ -154,7 +154,8 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 重启后任务未自动恢复、优雅重启后仍停在 paused、恢复跑过一次却又落回暂停（上一个进程遗留的 `pause_task` 命令被新 worker 迟到应用）、或出现「本任务遇到异常停止」toast → `main-task-runtime.md`「Graceful Shutdown Pause and Startup Auto-Resume」+ `operations-and-maintenance.md`「重启后任务未自动恢复 / 出现“异常停止”toast」
 - 验收节点长期停在「待检验」、被检验的执行节点却在一轮轮重跑（半截验收回合无人接手）→ `main-task-runtime.md`「验收节点：提前创建、激活与握手重派发」（最终验收的两个派发选择器：通知账本 + 握手承诺重派发），worker 日志锚点 `handshake-driven acceptance dispatch: … entry=none`
 - 验收节点下了「交付物不存在」的结论、而被检验的执行节点从没提交过结果（批量恢复节点后尤其成串），或一份旧拒收被当成本轮裁定 → `main-task-runtime.md`「验收节点：提前创建、激活与握手重派发」（闭合提交冻结闸门 + 派验前前置检查与消费点退回 + 终态判词作废）
-- 验收节点被操作员/peer 消息或 `schedule_wake` 到点带起来、验收上下文看不到执行节点还没读到的用户/前门消息、或给正在等验收的执行节点发消息后它又自己跑起来 → 设计内：验收节点只由绑定执行节点的待裁定提交派发；验收回合尾块把执行节点信箱里未读的用户/前门消息单独镜像（节点间消息不镜像；外部订阅事件只留一行计数 + event id，正文落 artifact 按需 `content_open`），pass 落账前还会复核裁决期间到达的通知；给 `waiting_acceptance` 执行节点的用户/父级/前门消息只落箱——派发扫描与通知复派同样不因未读开回合，只有 `acceptance_verdict` 会唤醒它。见 `main-task-runtime.md`「验收节点：提前创建、激活与握手重派发」与「节点信箱与唤醒（现行）」
+- 验收节点被操作员/peer 消息或 `schedule_wake` 到点带起来、或给正在等验收的执行节点发消息后它又自己跑起来 → 设计内：验收节点只由绑定执行节点的待裁定提交派发；给 `waiting_acceptance` 执行节点的用户/父级/前门消息只落箱——派发扫描与通知复派同样不因未读开回合，只有 `acceptance_verdict` 会唤醒它。见 `main-task-runtime.md`「验收节点：提前创建、激活与握手重派发」与「节点信箱与唤醒（现行）」
+- 验收方没看见发给被验节点的用户/chatbox/前门消息（验收节点接收列缺镜像行、或验收上下文缺正文）→ 先分两条道：投递时同一封信会同步镜像进绑定验收节点信箱（`payload.mirrored_from` 指回原行、不唤醒；运行中的验收回合经在途刷新在下一跳并入，停靠的回合在下一轮入口并入；尾块未读段对已镜像正文退位、pass 复核放行已消费镜像），解析不到绑定验收节点或镜像投递失败只落 WARNING——此时只剩尾块未读段兜底；节点互发消息与外部订阅事件本来就不镜像。见 `main-task-runtime.md`「验收三档裁决（P4）」的镜像行一条与「节点信箱与唤醒（现行）」
 - 任务显示「已取消」但无人取消过（payload `cancel_requested=false`，常伴随 `Managed task worker exited` 日志）→ `main-task-runtime.md`「Node-Level Pause and Recovery」
 - 任务大厅持续显示「worker stale」、托管 worker 崩溃后一直不自动重启、managed-worker.log 长时间不滚动但心跳与进程仍在 → `operations-and-maintenance.md`「托管 worker 看门狗」
 - 会话在重启后自动续跑（`shutdown_resume` 内部轮）行为异常 → `heartbeat-system.md`「Shutdown Resume Wake」

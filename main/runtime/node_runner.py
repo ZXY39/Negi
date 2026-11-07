@@ -95,6 +95,7 @@ from main.runtime.node_message_kind import (
 from main.runtime.node_message_text import (
     message_label,
     notification_expects_reply,
+    notification_mirrored_from,
     notification_reply_via,
     render_node_message_text,
 )
@@ -278,6 +279,7 @@ def _notification_rendered_text(notice: Any) -> str:
         system_relay=is_system_relay_notice(notice),
         expects_reply=notification_expects_reply(notice),
         reply_via=notification_reply_via(notice),
+        mirrored_from=notification_mirrored_from(notice),
     )
 
 
@@ -7141,7 +7143,7 @@ class NodeRunner:
             node_ids.insert(0, root_node_id)
         return node_ids
 
-    def _acceptance_notice_block(self, *, accepted_node: NodeRecord) -> str:
+    def _acceptance_notice_block(self, *, accepted_node: NodeRecord, acceptance: NodeRecord | None = None) -> str:
         # 汇总被检验执行节点已消费的用户/前门通知 + 尚未消费的 root pending 记录
         # + 仍在信箱里、没被读到的 delivered 行。节点之间的消息是执行上下文，
         # 不进验收回合；旧记录没有 kind 时保留兼容。同一逻辑通知会以不同 id
@@ -7149,6 +7151,10 @@ class NodeRunner:
         # 已 superseded 的记录不再作为当前要求。
         metadata = dict(accepted_node.metadata or {}) if isinstance(getattr(accepted_node, 'metadata', None), dict) else {}
         mailbox_rows = self._acceptance_mailbox_notice_rows(accepted_node=accepted_node)
+        # 镜像行已经把同一封信投给了验收节点自己的信箱（运行中经在途刷新、停靠时在
+        # 回合入口并入）。未读段对这部分正文退位：同一段验收上下文里同一份要求只
+        # 出现一次，镜像行在场（任意状态）就不再按被验节点的未读行重复渲染。
+        mirrored_ids, mirrored_texts = self._acceptance_mirror_copy_keys(acceptance=acceptance)
         # 外部订阅是事件流，不是用户/前门给验收方的新要求：正文不进尾块，
         # 只在尾块里留一行计数 + event id，清单落盘后按需 content_open。
         external_event_notification_ids = {
@@ -7192,6 +7198,11 @@ class NodeRunner:
             text = str(getattr(item, 'message', '') or '').strip()
             if not text or text in seen_texts:
                 continue
+            if (
+                str(getattr(item, 'notification_id', '') or '').strip() in mirrored_ids
+                or text in mirrored_texts
+            ):
+                continue
             seen_texts.add(text)
             unread_entries.append(f'- {text}')
         if unread_entries:
@@ -7216,6 +7227,43 @@ class NodeRunner:
             )
         except Exception:
             return []
+
+    @staticmethod
+    def _mirror_source_notification_id(item: Any) -> str:
+        """镜像行的来源行 id（被验节点信箱里的原行）；非镜像行返回空串。"""
+        payload = getattr(item, 'payload', None)
+        if not isinstance(payload, dict):
+            return ''
+        return str(payload.get('mirrored_from') or '').strip()
+
+    def _acceptance_mirror_copy_keys(
+        self,
+        *,
+        acceptance: NodeRecord | None,
+        consumed_only: bool = False,
+    ) -> tuple[set[str], set[str]]:
+        """验收节点信箱里镜像行的身份集：`(原行 id 集, 正文集)`。
+
+        `consumed_only=True` 时只数已消费的镜像行——那是"内容确实并入了验收上下文"
+        的读数（回合入口注入或在途刷新），pass 复核据此放行；仍 delivered 的镜像行
+        说明验收方还没读到，扣 pass 的判据照旧。`consumed_only=False`（尾块未读段
+        退位用）数任意状态的镜像行：镜像行在场，同一段上下文就不该再渲染同一正文。
+        """
+        ids: set[str] = set()
+        texts: set[str] = set()
+        if acceptance is None:
+            return ids, texts
+        for item in self._acceptance_mailbox_notice_rows(accepted_node=acceptance):
+            source_id = self._mirror_source_notification_id(item)
+            if not source_id:
+                continue
+            if consumed_only and str(getattr(item, 'status', '') or '').strip() != 'consumed':
+                continue
+            ids.add(source_id)
+            text = str(getattr(item, 'message', '') or '').strip()
+            if text:
+                texts.add(text)
+        return ids, texts
 
     @staticmethod
     def _external_event_id_of(item: Any) -> str:
@@ -7498,14 +7546,27 @@ class NodeRunner:
         这些行不可能出现在本轮请求里（尾块在请求发出前就装配完成），所以 pass
         必须先扣住：下一轮尾块会带上它们，且下一轮尾块装配晚于它们的投递时刻。
         锚优先取尾块装配时刻；旧轮次没有该读数时才退回最后一跳请求起点。
+        镜像行已把同一封信投进验收节点信箱；其中已消费的（回合入口注入或在途
+        刷新并入）就是"裁决看过"的读数，差分放行，否则 pass 会被永远扣住——
+        每条镜像行在被验节点那一侧仍是 delivered，验收方不会去消费它。
         """
         if execution is None:
             return []
         anchor = self._acceptance_tail_anchor(task_id=task_id, acceptance=acceptance)
         if anchor is None:
             return []
+        seen_mirror_ids, seen_mirror_texts = self._acceptance_mirror_copy_keys(
+            acceptance=acceptance,
+            consumed_only=True,
+        )
         unseen: list[Any] = []
         for item in self._delivered_acceptance_notice_rows(accepted_node=execution):
+            text = str(getattr(item, 'message', '') or '').strip()
+            if (
+                str(getattr(item, 'notification_id', '') or '').strip() in seen_mirror_ids
+                or text in seen_mirror_texts
+            ):
+                continue
             delivered_at = str(
                 getattr(item, 'delivered_at', '') or getattr(item, 'created_at', '') or ''
             ).strip()
@@ -7619,7 +7680,7 @@ class NodeRunner:
             # 没有上一次就无从成立，提示词与运行时都禁用这一档。
             lines.append('【历次验收裁定】这是本节点的首次裁定，不得使用 reject_no_progress。')
         # 决策 J：被验节点的追加要求对任何层级都可见，不再只对根节点开放。
-        notice_block = self._acceptance_notice_block(accepted_node=accepted_node)
+        notice_block = self._acceptance_notice_block(accepted_node=accepted_node, acceptance=node)
         if notice_block:
             lines.append(notice_block)
         event_digest = self._acceptance_external_event_digest(

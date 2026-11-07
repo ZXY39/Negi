@@ -159,6 +159,7 @@ from main.runtime.node_mailbox import (
     unresolved_target_reason,
 )
 from main.runtime.node_message_kind import (
+    ACCEPTANCE_MIRROR_KINDS,
     KIND_ACCEPTANCE_VERDICT,
     KIND_CHILD_ABNORMAL_PAUSE,
     KIND_CHILD_FINAL,
@@ -375,7 +376,9 @@ _WAITING_ACCEPTANCE_DELIVERY_NOTICE = (
     'The target execution node has submitted its output and is awaiting acceptance. '
     'The message was delivered to its mailbox but will not be consumed while the acceptance '
     'is in progress. If the acceptance passes, the node terminates without consuming it; if '
-    'the submission is rejected and the node is reactivated, the node consumes it in its next round.'
+    'the submission is rejected and the node is reactivated, the node consumes it in its next '
+    'round. A mirror copy was also delivered to the acceptance node mailbox, so the verdict '
+    'can see this message before judging.'
 )
 _LOOP_CENSUS_SAMPLE_TASKS = 6
 _LOOP_CENSUS_TOP_SITES = 10
@@ -5266,6 +5269,7 @@ class MainRuntimeService:
         expects_reply: bool = False,
         reply_via: str = '',
         external_event_id: str = '',
+        mirror_of: str = '',
     ) -> dict[str, Any]:
         """一条定向投递：判定矩阵 → 机械推导 → 指纹去重 → 落箱 → 唤醒。
 
@@ -5275,6 +5279,9 @@ class MainRuntimeService:
         `reply_via='chatbox'` 是它的 chatbox 分档：收件节点被引导回投操作员线程
         （`send_message(to="chatbox", ...)`）而不是 frontdoor。同样只认这一个值，
         其余输入一律按空串处理——payload 里永远只出现已知车道。
+        `mirror_of` 只由本方法自己递归传入：它标记这一行是投给等验收执行节点的
+        消息在验收节点信箱里的镜像（值=被验节点上的原行 id），渲染时据此补定位
+        说明，I2 复核与尾块未读段据此识别镜像行。
 
         `wake=False` 用于「必须留痕、但不得叫醒收件人」的系统消息：pass 裁决的
         收件人即将终局，reject_no_progress 裁决的收件人刚被判暂停（唤醒会立刻清掉
@@ -5335,6 +5342,7 @@ class MainRuntimeService:
         )
         normalized_external_event_id = str(external_event_id or '').strip()
         normalized_reply_via = 'chatbox' if str(reply_via or '').strip().lower() == 'chatbox' else ''
+        normalized_mirror_of = str(mirror_of or '').strip()
         notifications = list(
             self.store.list_task_node_notifications(normalized_task_id, normalized_node_id) or []
         )
@@ -5447,6 +5455,7 @@ class MainRuntimeService:
                 payload={
                     **({'expects_reply': True} if expects_reply else {}),
                     **({'reply_via': 'chatbox'} if normalized_reply_via else {}),
+                    **({'mirrored_from': normalized_mirror_of} if normalized_mirror_of else {}),
                     **(
                         {'external_event_id': normalized_external_event_id}
                         if normalized_external_event_id
@@ -5456,6 +5465,30 @@ class MainRuntimeService:
             )
         )
         self.log_service.refresh_task_view(normalized_task_id, mark_unread=True)
+
+        # 验收镜像（第五物化点）：人工/前门消息投给「已提交、等验收」的执行节点时，
+        # 同步把同一封信投进绑定验收节点的信箱（不唤醒——验收节点本就不参与信箱
+        # 唤醒）。运行中的验收回合经在途刷新在下一跳并入并评估是否提前打回；停靠的
+        # 验收回合在下一轮入口并入。只镜像 fresh 投递：deduplicated 说明同一封信
+        # 已在箱里（它的镜像当时已投或由尾块未读段兜底）。外部订阅事件是事件流，
+        # 不是用户/前门给验收方的新要求，不镜像（与尾块、I2 复核同口径）。
+        acceptance_mirror_receipt: dict[str, Any] | None = None
+        if (
+            target_under_acceptance
+            and not normalized_mirror_of
+            and not normalized_external_event_id
+            and kind in ACCEPTANCE_MIRROR_KINDS
+        ):
+            acceptance_mirror_receipt = await self._mirror_delivery_to_acceptance(
+                task_id=normalized_task_id,
+                execution_node_id=normalized_node_id,
+                handshake=handshake,
+                origin=origin,
+                source_node_id=str(source_node_id or '').strip(),
+                body=body,
+                ref=str(ref or '').strip(),
+                mirrored_from=str(notification.notification_id or ''),
+            )
 
         wake_outcome = ''
         if wake and not held and not suppress_wake and self._delivery_wakes_target(
@@ -5495,7 +5528,118 @@ class MainRuntimeService:
             'wake': wake_outcome,
             'reason': '',
             **under_acceptance_fields,
+            **({'acceptance_mirror': acceptance_mirror_receipt} if acceptance_mirror_receipt else {}),
         }
+
+    async def _mirror_delivery_to_acceptance(
+        self,
+        *,
+        task_id: str,
+        execution_node_id: str,
+        handshake: dict[str, Any],
+        origin: str,
+        source_node_id: str,
+        body: str,
+        ref: str,
+        mirrored_from: str,
+    ) -> dict[str, Any] | None:
+        """把发给「等验收执行节点」的人工/前门消息同步镜像进验收节点信箱。
+
+        镜像行带 `mirrored_from`（被验节点信箱里的原行 id）；正文与 fingerprint
+        和原行一字不差。镜像永不唤醒验收节点（验收节点本就不参与信箱唤醒，这里
+        显式 `wake=False`），也绝不影响主投递的结果——解析不到验收节点或投递抛
+        异常时只落一条 WARNING，尾块未读段仍是兜底。
+        """
+        acceptance = self._resolve_acceptance_mirror_target(
+            task_id=task_id,
+            execution_node_id=execution_node_id,
+            handshake=handshake,
+        )
+        if acceptance is None:
+            return None
+        acceptance_node_id = str(acceptance.node_id or '').strip()
+        try:
+            receipt = await self.deliver_node_message(
+                task_id=task_id,
+                target_node_id=acceptance_node_id,
+                message=body,
+                origin=origin,
+                source_node_id=source_node_id,
+                ref=ref,
+                wake=False,
+                mirror_of=mirrored_from,
+            )
+        except Exception as exc:  # noqa: BLE001 - 主投递已落箱；镜像失败不回滚它
+            logger.warning(
+                'acceptance mirror delivery failed: task={} execution={} acceptance={} error={!r}',
+                task_id,
+                execution_node_id,
+                acceptance_node_id,
+                exc,
+            )
+            return None
+        return {
+            'target': acceptance_node_id,
+            'status': str(receipt.get('status') or ''),
+            'message_id': str(receipt.get('message_id') or ''),
+        }
+
+    def _resolve_acceptance_mirror_target(
+        self,
+        *,
+        task_id: str,
+        execution_node_id: str,
+        handshake: dict[str, Any],
+    ) -> NodeRecord | None:
+        """解析「等验收执行节点」当前绑定的验收节点。
+
+        握手进入 `waiting_acceptance` 时必写 `acceptance_node_id`，这是首选读数；
+        指针缺失时按 `metadata.accepted_node_id` 反查兜底。两个来源都要过绑定校验
+        （kind=acceptance、任务归属、`accepted_node_id` 指向本执行节点）：陈旧握手
+        指到别的节点上宁可放弃镜像（尾块未读段仍是兜底），也不投错信箱。绑定存在
+        多份时按「非终态优先、创建时刻最早」取一颗——与验收节点收养/复用的取法同向。
+        """
+        normalized_task_id = self.normalize_task_id(task_id)
+        execution_node_id = str(execution_node_id or '').strip()
+        by_id: dict[str, NodeRecord] = {}
+        named_id = str((handshake or {}).get('acceptance_node_id') or '').strip()
+        if named_id:
+            named = self.store.get_node(named_id)
+            if named is not None:
+                by_id[str(getattr(named, 'node_id', '') or '').strip()] = named
+        try:
+            # list_nodes 返回完整 NodeRecord（带 metadata）；list_task_nodes 是
+            # 投影行（payload_json），在这里读不到 accepted_node_id。
+            records = list(self.store.list_nodes(normalized_task_id) or [])
+        except Exception:
+            records = []
+        for record in records:
+            node_id = str(getattr(record, 'node_id', '') or '').strip()
+            if node_id and node_id not in by_id:
+                by_id[node_id] = record
+        terminal_statuses = {'success', 'failed'}
+        matched: list[NodeRecord] = []
+        for record in by_id.values():
+            if str(getattr(record, 'node_kind', '') or '').strip().lower() != 'acceptance':
+                continue
+            if str(getattr(record, 'task_id', '') or '').strip() != normalized_task_id:
+                continue
+            metadata = dict(getattr(record, 'metadata', None) or {})
+            if str(metadata.get('accepted_node_id') or '').strip() != execution_node_id:
+                continue
+            matched.append(record)
+        if not matched:
+            return None
+        matched.sort(
+            key=lambda item: (
+                0
+                if str(getattr(item, 'status', '') or '').strip().lower() not in terminal_statuses
+                else 1,
+                str(getattr(item, 'created_at', '') or ''),
+                str(getattr(item, 'node_id', '') or ''),
+            )
+        )
+        return matched[0]
 
     async def deliver_control_node_message(self, **payload: Any) -> dict[str, Any]:
         """控制面投递：web 角色把写箱与唤醒交给 worker，绝不本地起 task actor。
