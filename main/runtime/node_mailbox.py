@@ -42,8 +42,9 @@ TASK_TARGET_ROOT_NOTICE: Final = (
     'how to carry it down to its children.'
 )
 
-# 用户自由文本是唯一「落箱但不叫醒」的发送方，其余发送方照常被唤醒。
-_USER_ORIGINS = frozenset({'user'})
+# 人工自由文本（网页节点消息框与 chatbox 输入框）是唯一「落箱但不叫醒」的发送方，
+# 其余发送方照常被唤醒。
+_USER_ORIGINS = frozenset({'user', 'chatbox'})
 
 
 def plan_delivery(*, target_park_state: str, sender_origin: str) -> tuple[bool, str]:

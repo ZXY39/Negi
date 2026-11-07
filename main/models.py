@@ -289,6 +289,24 @@ class FrontdoorNodeMessage(Model):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
+class ChatboxMessage(Model):
+    """A node's reply addressed to the operator chat box (node detail page thread).
+
+    操作员消息走信箱（kind=chatbox_direct），这里只存节点的回投：按
+    (task_id, node_id) 分线程，`status` 只有 unread/read 两档，网页取走即销账。
+    """
+
+    message_id: str
+    task_id: str
+    node_id: str
+    content: str = ''
+    ref: str = ''
+    status: str = 'unread'
+    created_at: str = ''
+    read_at: str = ''
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
 class NodeToolFileChange(Model):
     path: str = ''
     change_type: Literal['created', 'modified', 'deleted'] = 'modified'

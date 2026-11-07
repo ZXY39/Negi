@@ -404,7 +404,7 @@ class ScheduleWakeTool(Tool):
 
 
 class SendMessageTool(Tool):
-    """给父节点、子节点/后代、同级节点、或（仅根节点）前门 agent 发一条消息。
+    """给父节点、子节点/后代、同级节点、前门 agent、或操作员 chatbox 线程发一条消息。
 
     一次可发给多个目标；投递逐目标独立判定。发送本身不会让发送方停靠；需要等
     回应时另行调用 `enter_wait`。工具不做寻址判定：合法目标集合与关系由运行时的
@@ -424,7 +424,9 @@ class SendMessageTool(Tool):
     def description(self) -> str:
         return (
             'Send a message to your parent node, to execution nodes below you, to a sibling, to a '
-            'descendant acceptance node, or (root node only) to the front-door agent. Each target is '
+            'descendant acceptance node, (root or any execution node) to the front-door agent, or '
+            'to the operator chat box (`chatbox`: the web input box on your node detail page — use '
+            'it when a chat-box message asks you to answer there). Each target is '
             'judged on its own: a terminal target rejects and says so, a paused target still accepts '
             'a machine message (that is how it gets unstuck), a target awaiting acceptance queues a '
             'parent message without waking it (it is consumed only if the submission is rejected and '
@@ -438,9 +440,9 @@ class SendMessageTool(Tool):
     @property
     def model_description(self) -> str:
         return (
-            'Message your parent, execution descendants, a sibling, a descendant verifier, or the '
-            'front door. A target awaiting acceptance queues parent messages without '
-            'waking it.'
+            'Message your parent, execution descendants, a sibling, a descendant verifier, the '
+            'front door, or the operator chat box. A target awaiting acceptance queues parent '
+            'messages without waking it.'
         )
 
     @property
@@ -452,7 +454,7 @@ class SendMessageTool(Tool):
                     'type': ['string', 'array'],
                     'items': {'type': 'string'},
                     'description': (
-                        "`parent`, `frontdoor`, a node id you may message, or a list of "
+                        "`parent`, `frontdoor`, `chatbox`, a node id you may message, or a list of "
                         "them. Node ids may be bare or `node:`-prefixed; stray spaces are accepted."
                     ),
                     'minLength': 1,

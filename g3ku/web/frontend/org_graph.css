@@ -12911,6 +12911,44 @@ textarea {
     cursor: not-allowed;
 }
 
+/* chatbox 未读徽标：输入框右侧的数字图标，点击打开线程窗口；无未读时隐藏。 */
+.ad-chatbox-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    flex: none;
+    padding: 3px 9px;
+    border: 1px solid #39c5bb;
+    border-radius: 999px;
+    background: color-mix(in srgb, #39c5bb 14%, transparent);
+    color: #39c5bb;
+    font-size: 0.74rem;
+    font-weight: 700;
+    line-height: 1.4;
+    cursor: pointer;
+}
+
+.ad-chatbox-badge svg {
+    width: 12px;
+    height: 12px;
+    flex: none;
+}
+
+.ad-chatbox-badge:hover {
+    background: color-mix(in srgb, #39c5bb 24%, transparent);
+}
+
+/* 输入框药丸：chatbox 行没有跳转目标，去掉 pointer 光标与 hover 反馈。 */
+.task-node-ref--static {
+    cursor: default;
+}
+
+.task-node-ref--static:hover {
+    border-color: var(--border-color);
+    background: color-mix(in srgb, var(--bg-app) 80%, transparent);
+    color: var(--text-secondary);
+}
+
 .artifact-list {
     display: flex;
     flex-direction: column;

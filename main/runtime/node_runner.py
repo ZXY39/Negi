@@ -95,6 +95,7 @@ from main.runtime.node_message_kind import (
 from main.runtime.node_message_text import (
     message_label,
     notification_expects_reply,
+    notification_reply_via,
     render_node_message_text,
 )
 from main.runtime.node_prompt_contract import extract_node_dynamic_contract_payload
@@ -276,6 +277,7 @@ def _notification_rendered_text(notice: Any) -> str:
         message=message,
         system_relay=is_system_relay_notice(notice),
         expects_reply=notification_expects_reply(notice),
+        reply_via=notification_reply_via(notice),
     )
 
 

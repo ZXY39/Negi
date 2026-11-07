@@ -53,6 +53,7 @@ from main.runtime.append_notice_context import (
     normalize_pending_append_notice_records,
 )
 from main.runtime.execution_trace_compaction import build_execution_trace_summary
+from main.runtime.node_message_kind import KIND_CHATBOX_DIRECT
 from main.token_usage import aggregate_node_token_usage
 
 _CONTROL_TOOL_NAMES = {'wait_tool_execution', 'stop_tool_execution'}
@@ -357,6 +358,8 @@ class TaskQueryService:
                 'notification_id': str(item.get('notification_id') or '').strip(),
                 'epoch_id': epoch_id,
                 'source_node_id': source_node_id,
+                # kind 随行透出：网页消息列表按它分来源药丸（chatbox_direct=输入框）。
+                'kind': str(item.get('kind') or '').strip(),
                 'message': str(item.get('message') or '').strip(),
                 'received_at': received_at,
                 'consumed_at': consumed_at,
@@ -382,6 +385,7 @@ class TaskQueryService:
                 'notification_id': str(item.get('notification_id') or '').strip(),
                 'epoch_id': str(item.get('epoch_id') or '').strip(),
                 'source_node_id': str(item.get('source_node_id') or '').strip(),
+                'kind': '',
                 'message': str(item.get('message') or '').strip(),
                 'received_at': str(item.get('created_at') or '').strip(),
                 'consumed_at': processed_at,
@@ -417,6 +421,7 @@ class TaskQueryService:
                 'notification_id': str(item.get('notification_id') or '').strip(),
                 'epoch_id': epoch_id,
                 'source_node_id': source_node_id,
+                'kind': str(item.get('kind') or '').strip(),
                 'message': str(item.get('message') or '').strip(),
                 'received_at': str(item.get('delivered_at') or item.get('created_at') or '').strip(),
                 'consumed_at': str(item.get('consumed_at') or '').strip(),
@@ -527,6 +532,29 @@ class TaskQueryService:
                     else 'pending',
                 }
             )
+        for item in list(self._store.list_chatbox_messages_by_task(task_id) or []):
+            # chatbox 回投按 (task, node) 分线程：node_id 是发送方，发送列表按它过滤。
+            if str(item.node_id or '').strip() != normalized_node_id:
+                continue
+            content = str(item.content or '').strip()
+            if not content:
+                continue
+            entries.append(
+                {
+                    'notification_id': str(item.message_id or '').strip(),
+                    'target_node_id': '',
+                    'target_title': '',
+                    'target_kind': 'chatbox',
+                    'target_session_id': '',
+                    'message': content,
+                    'received_at': str(item.created_at or '').strip(),
+                    'consumed_at': '',
+                    'merged_at': '',
+                    # chatbox 台账只有 unread/read：操作员取走即「已读」，映射到
+                    # 展示三态时 read=已消费，unread=待处理。
+                    'status': 'consumed' if str(item.status or '').strip() == 'read' else 'pending',
+                }
+            )
         entries.sort(
             key=lambda entry: (
                 str(entry.get('received_at') or entry.get('consumed_at') or ''),
@@ -535,6 +563,51 @@ class TaskQueryService:
             reverse=True,
         )
         return entries
+
+    def node_chatbox_thread(self, *, task_id: str, node_id: str) -> dict[str, Any]:
+        """chatbox 线程读数：操作员来信（信箱 chatbox_direct）+ 节点回投（chatbox 台账）。
+
+        操作员消息只取 chatbox_direct 这一个 kind——普通用户/前门通知留在消息列表
+        的既有展示里，不混进操作员专属线程。回投台账只认本节点的行，线程按
+        (task_id, node_id) 隔离。`unread_count` 只数节点回投（操作员来信没有未读态）。
+        """
+        normalized_node_id = str(node_id or '').strip()
+        messages: list[dict[str, Any]] = []
+        for item in list(self._store.list_task_node_notifications(task_id, normalized_node_id) or []):
+            if str(getattr(item, 'kind', '') or '').strip() != KIND_CHATBOX_DIRECT:
+                continue
+            message = str(item.message or '').strip()
+            if not message:
+                continue
+            messages.append(
+                {
+                    'message_id': str(item.notification_id or '').strip(),
+                    'direction': 'operator',
+                    'message': message,
+                    'ref': str(getattr(item, 'ref', '') or '').strip(),
+                    'created_at': str(item.delivered_at or item.created_at or '').strip(),
+                }
+            )
+        for item in list(self._store.list_chatbox_messages_by_node(task_id, normalized_node_id) or []):
+            content = str(item.content or '').strip()
+            if not content:
+                continue
+            messages.append(
+                {
+                    'message_id': str(item.message_id or '').strip(),
+                    'direction': 'node',
+                    'message': content,
+                    'ref': str(item.ref or '').strip(),
+                    'created_at': str(item.created_at or '').strip(),
+                }
+            )
+        messages.sort(
+            key=lambda entry: (str(entry.get('created_at') or ''), str(entry.get('message_id') or '')),
+        )
+        return {
+            'messages': messages,
+            'unread_count': int(self._store.count_unread_chatbox_messages(task_id, normalized_node_id)),
+        }
 
     def get_tasks(
         self,

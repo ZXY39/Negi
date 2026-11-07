@@ -108,6 +108,7 @@ from main.governance.tool_context import (
 )
 from main.ids import new_command_id, new_node_id, new_task_id, new_worker_id
 from main.models import (
+    ChatboxMessage,
     FrontdoorNodeMessage,
     NodeRecord,
     TaskArtifactRecord,
@@ -162,6 +163,7 @@ from main.runtime.node_message_kind import (
     KIND_CHILD_ABNORMAL_PAUSE,
     KIND_CHILD_FINAL,
     KIND_WAKE_TIMER,
+    ORIGIN_CHATBOX,
     ORIGIN_FRONTDOOR,
     ORIGIN_NODE,
     ORIGIN_USER,
@@ -312,6 +314,7 @@ _WORKER_NODE_MESSAGE_FIELDS = (
     'batch_id',
     'allow_pause_clear',
     'expects_reply',
+    'reply_via',
     'external_event_id',
 )
 _WORKER_LEASE_ROLE = 'task_worker'
@@ -5229,13 +5232,13 @@ class MainRuntimeService:
 
     @staticmethod
     def _delivery_to_waiting_acceptance_allowed(*, origin: str, relation: str) -> bool:
-        """用户/前门/父级节点给正在等验收的执行节点发消息时允许落箱。
+        """用户/操作员/前门/父级节点给正在等验收的执行节点发消息时允许落箱。
 
         验收本身仍在进行，所以这条消息不唤醒目标；它只是排队，等驳回把执行节点
         带回执行态后才被消费。peer/child 的消息仍是执行期上下文，维持拒收。
         """
         normalized_origin = str(origin or '').strip().lower()
-        if normalized_origin in {ORIGIN_USER, ORIGIN_FRONTDOOR}:
+        if normalized_origin in {ORIGIN_USER, ORIGIN_CHATBOX, ORIGIN_FRONTDOOR}:
             return True
         return (
             normalized_origin == ORIGIN_NODE
@@ -5261,6 +5264,7 @@ class MainRuntimeService:
         batch_id: str = '',
         allow_pause_clear: bool = False,
         expects_reply: bool = False,
+        reply_via: str = '',
         external_event_id: str = '',
     ) -> dict[str, Any]:
         """一条定向投递：判定矩阵 → 机械推导 → 指纹去重 → 落箱 → 唤醒。
@@ -5268,6 +5272,9 @@ class MainRuntimeService:
         `origin`/`relation`/`system_kind` 决定 kind；`system_kind` 只有运行时能传。
         `expects_reply` 同样只有运行时能传：它记在行的 payload 里，注入时给收件节点补一句
         回投车道；模型不能自己声明（它不在投递参数面上）。
+        `reply_via='chatbox'` 是它的 chatbox 分档：收件节点被引导回投操作员线程
+        （`send_message(to="chatbox", ...)`）而不是 frontdoor。同样只认这一个值，
+        其余输入一律按空串处理——payload 里永远只出现已知车道。
 
         `wake=False` 用于「必须留痕、但不得叫醒收件人」的系统消息：pass 裁决的
         收件人即将终局，reject_no_progress 裁决的收件人刚被判暂停（唤醒会立刻清掉
@@ -5327,6 +5334,7 @@ class MainRuntimeService:
             kind=kind, source_node_id=source_node_id, message=body, ref=ref
         )
         normalized_external_event_id = str(external_event_id or '').strip()
+        normalized_reply_via = 'chatbox' if str(reply_via or '').strip().lower() == 'chatbox' else ''
         notifications = list(
             self.store.list_task_node_notifications(normalized_task_id, normalized_node_id) or []
         )
@@ -5438,6 +5446,7 @@ class MainRuntimeService:
                 released_at='',
                 payload={
                     **({'expects_reply': True} if expects_reply else {}),
+                    **({'reply_via': 'chatbox'} if normalized_reply_via else {}),
                     **(
                         {'external_event_id': normalized_external_event_id}
                         if normalized_external_event_id
@@ -5627,6 +5636,27 @@ class MainRuntimeService:
                     )
                 )
                 continue
+            elif namespace == '' and value == 'chatbox':
+                # 操作员线程（节点详情页输入框）：与 frontdoor 同侧——任何执行节点
+                # 可回投，验收节点不通。回投只落 chatbox 台账，不进任何会话。
+                if str(getattr(sender, 'node_kind', '') or '').strip().lower() == 'acceptance':
+                    results.append(
+                        {
+                            'target': 'chatbox',
+                            'status': 'rejected',
+                            'reason': 'acceptance_node_not_messageable',
+                        }
+                    )
+                    continue
+                results.append(
+                    await self.deliver_chatbox_message(
+                        task_id=normalized_task_id,
+                        source_node_id=str(sender.node_id or '').strip(),
+                        content=content,
+                        ref=ref,
+                    )
+                )
+                continue
             elif namespace == 'node':
                 target_id = f'node:{value}'
             elif namespace == '':
@@ -5750,6 +5780,74 @@ class MainRuntimeService:
             'wake': 'session_inbox',
             'reason': '',
         }
+
+    async def deliver_chatbox_message(
+        self,
+        *,
+        task_id: str,
+        source_node_id: str,
+        content: str,
+        ref: str = '',
+    ) -> dict[str, Any]:
+        """节点 → 操作员 chatbox 线程（节点详情页输入框）。
+
+        与 frontdoor 车道同侧：任何执行节点可回投，验收节点不通。回投只落
+        `task_chatbox_messages` 台账（unread），由节点详情页取走销账——它不进
+        任何会话，也不唤醒任何执行体，所以没有 wake 语义。
+        """
+        normalized_task_id = self.normalize_task_id(task_id)
+        task = self.store.get_task(normalized_task_id)
+        node = self.store.get_node(str(source_node_id or '').strip())
+        if task is None or node is None:
+            return {'target': 'chatbox', 'status': 'rejected', 'reason': 'source_missing'}
+        if str(getattr(node, 'node_kind', '') or '').strip().lower() == 'acceptance':
+            return {'target': 'chatbox', 'status': 'rejected', 'reason': 'acceptance_node_not_messageable'}
+        body = str(content or '').strip()
+        if not body:
+            return {'target': 'chatbox', 'status': 'rejected', 'reason': 'content_required'}
+        message_id = new_command_id().replace('command:', 'cbx:', 1)
+        record = ChatboxMessage(
+            message_id=message_id,
+            task_id=normalized_task_id,
+            node_id=str(node.node_id or '').strip(),
+            content=body,
+            ref=str(ref or '').strip(),
+            status='unread',
+            created_at=now_iso(),
+        )
+        self.store.upsert_chatbox_message(record)
+        return {
+            'target': 'chatbox',
+            'status': 'delivered',
+            'message_id': message_id,
+            'kind': 'chatbox_reply',
+            'wake': 'chatbox_inbox',
+            'reason': '',
+        }
+
+    def list_node_chatbox_messages(self, task_id: str, node_id: str) -> list[ChatboxMessage]:
+        return list(
+            self.store.list_chatbox_messages_by_node(
+                self.normalize_task_id(task_id), str(node_id or '').strip()
+            )
+            or []
+        )
+
+    def count_unread_node_chatbox_messages(self, task_id: str, node_id: str) -> int:
+        return int(
+            self.store.count_unread_chatbox_messages(
+                self.normalize_task_id(task_id), str(node_id or '').strip()
+            )
+        )
+
+    def mark_node_chatbox_messages_read(self, task_id: str, node_id: str) -> int:
+        return int(
+            self.store.mark_chatbox_messages_read(
+                self.normalize_task_id(task_id),
+                str(node_id or '').strip(),
+                read_at=now_iso(),
+            )
+        )
 
     async def deliver_frontdoor_node_message(
         self,
@@ -12525,6 +12623,16 @@ class MainRuntimeService:
             path=path,
             change_type=change_type,
         )
+
+    def node_chatbox_thread(self, task_id: str, node_id: str) -> dict[str, Any]:
+        """chatbox 线程读数（web 端点）：来信 + 回投合并，未读数只数回投。"""
+        return self.query_service.node_chatbox_thread(
+            task_id=self.normalize_task_id(task_id),
+            node_id=self.normalize_node_id(node_id),
+        )
+
+    def mark_node_chatbox_read(self, task_id: str, node_id: str) -> int:
+        return self.mark_node_chatbox_messages_read(task_id, node_id)
 
     def node_detail(self, task_id: str, node_id: str, detail_level: str = 'summary') -> dict[str, Any] | str:
         normalized_task_id = self.normalize_task_id(task_id)

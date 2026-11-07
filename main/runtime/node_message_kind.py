@@ -23,6 +23,7 @@ from __future__ import annotations
 from typing import Final
 
 KIND_USER_DIRECT: Final = 'user_direct'
+KIND_CHATBOX_DIRECT: Final = 'chatbox_direct'
 KIND_FRONTDOOR_NOTICE: Final = 'frontdoor_notice'
 KIND_PARENT_NOTICE: Final = 'parent_notice'
 KIND_CHILD_PROGRESS: Final = 'child_progress'
@@ -35,6 +36,10 @@ KIND_PEER_NOTICE: Final = 'peer_notice'
 KIND_WAKE_TIMER: Final = 'wake_timer'
 
 ORIGIN_USER: Final = 'user'
+# 操作员在节点详情页输入框（chatbox）发的消息。与 `user` 同为人工来源：同一套
+# 投递语义（粘性暂停、无条件唤醒、验收镜像），只是账本与展示按来源分档，
+# 且收件节点的回投车道被指向 chatbox 而不是 frontdoor。
+ORIGIN_CHATBOX: Final = 'chatbox'
 ORIGIN_FRONTDOOR: Final = 'frontdoor'
 ORIGIN_NODE: Final = 'node'
 ORIGIN_SYSTEM: Final = 'system'
@@ -58,12 +63,14 @@ SYSTEM_KINDS: Final = frozenset(
 
 # 无条件唤醒的 kind：收件人必须动作，否则系统或发送方无法推进（P6）。
 ALWAYS_WAKING_KINDS: Final = frozenset(
-    {KIND_USER_DIRECT, KIND_FRONTDOOR_NOTICE, KIND_CHILD_ABNORMAL_PAUSE}
+    {KIND_USER_DIRECT, KIND_CHATBOX_DIRECT, KIND_FRONTDOOR_NOTICE, KIND_CHILD_ABNORMAL_PAUSE}
 )
 
-# 验收节点只判“用户/前门对结果的要求”。节点之间的消息是执行上下文，不镜像进
-# 验收回合；无 kind 的旧记录与 root 追加通知由消费侧单独保留。
-ACCEPTANCE_MIRROR_KINDS: Final = frozenset({KIND_USER_DIRECT, KIND_FRONTDOOR_NOTICE})
+# 验收节点只判“用户/操作员/前门对结果的要求”。节点之间的消息是执行上下文，
+# 不镜像进验收回合；无 kind 的旧记录与 root 追加通知由消费侧单独保留。
+ACCEPTANCE_MIRROR_KINDS: Final = frozenset(
+    {KIND_USER_DIRECT, KIND_CHATBOX_DIRECT, KIND_FRONTDOOR_NOTICE}
+)
 
 
 class MessageClassificationError(ValueError):
@@ -95,6 +102,8 @@ def derive_message_kind(
         return normalized_system
     if normalized_origin == ORIGIN_USER:
         return KIND_USER_DIRECT
+    if normalized_origin == ORIGIN_CHATBOX:
+        return KIND_CHATBOX_DIRECT
     if normalized_origin == ORIGIN_FRONTDOOR:
         return KIND_FRONTDOOR_NOTICE
     if normalized_origin != ORIGIN_NODE:

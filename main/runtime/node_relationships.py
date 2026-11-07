@@ -105,6 +105,7 @@ def messageable_target_ids(
             continue
         targets.append(item_id)
     targets.append('frontdoor')
+    targets.append('chatbox')
     ordered: list[str] = []
     seen: set[str] = set()
     for item in targets:

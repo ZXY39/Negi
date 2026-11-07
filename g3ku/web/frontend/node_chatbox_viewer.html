@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>chatbox 线程</title>
+    <style>
+        :root {
+            color-scheme: light;
+            --bg: #f4f7fb;
+            --panel: #ffffff;
+            --text: #162033;
+            --muted: #5d6b82;
+            --border: #d7dfeb;
+            --accent: #1f6feb;
+            --teal: #0f9d94;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+            background: linear-gradient(180deg, #eef4ff 0%, var(--bg) 100%);
+            color: var(--text);
+        }
+
+        .shell {
+            max-width: 920px;
+            margin: 0 auto;
+            padding: 24px;
+        }
+
+        .card {
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 18px;
+            box-shadow: 0 18px 50px rgba(23, 38, 67, 0.08);
+            overflow: hidden;
+        }
+
+        .header {
+            padding: 18px 24px 12px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: baseline;
+            gap: 14px;
+            flex-wrap: wrap;
+        }
+
+        .title {
+            margin: 0;
+            font-size: 1.2rem;
+        }
+
+        .meta {
+            color: var(--muted);
+            font-size: 0.85rem;
+            display: flex;
+            gap: 14px;
+            flex-wrap: wrap;
+        }
+
+        .thread {
+            padding: 18px 24px 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+            max-height: calc(100vh - 140px);
+            overflow-y: auto;
+        }
+
+        .entry {
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 10px 14px;
+            background: #fbfdff;
+        }
+
+        .entry.operator {
+            border-left: 3px solid var(--accent);
+        }
+
+        .entry.node {
+            border-left: 3px solid var(--teal);
+        }
+
+        .entry-head {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: var(--muted);
+            font-size: 0.78rem;
+            margin-bottom: 6px;
+        }
+
+        .who {
+            font-weight: 700;
+            color: var(--text);
+        }
+
+        .entry.operator .who { color: var(--accent); }
+        .entry.node .who { color: var(--teal); }
+
+        /* Markdown 正文（与主界面 markdown-content 同族的最小子集） */
+        .md-body { font-size: 0.9rem; line-height: 1.65; word-break: break-word; }
+        .md-body p { margin: 0 0 8px; }
+        .md-body p:last-child { margin-bottom: 0; }
+        .md-body h1, .md-body h2, .md-body h3, .md-body h4 { margin: 10px 0 6px; line-height: 1.4; }
+        .md-body h1 { font-size: 1.15rem; }
+        .md-body h2 { font-size: 1.05rem; }
+        .md-body h3 { font-size: 0.98rem; }
+        .md-body pre {
+            margin: 8px 0;
+            padding: 10px 12px;
+            background: #0f172a;
+            color: #e2e8f0;
+            border-radius: 8px;
+            overflow-x: auto;
+            font-size: 0.82rem;
+        }
+        .md-body code {
+            font-family: Consolas, "Courier New", monospace;
+            font-size: 0.85em;
+        }
+        .md-body :not(pre) > code {
+            background: #eef2f8;
+            border: 1px solid #dde5f0;
+            border-radius: 4px;
+            padding: 0 4px;
+        }
+        .md-body ul, .md-body ol { margin: 6px 0; padding-left: 22px; }
+        .md-body blockquote {
+            margin: 8px 0;
+            padding: 4px 12px;
+            border-left: 3px solid var(--border);
+            color: var(--muted);
+        }
+        .md-body table { border-collapse: collapse; margin: 8px 0; width: 100%; font-size: 0.84rem; }
+        .md-body th, .md-body td { border: 1px solid var(--border); padding: 5px 9px; text-align: left; }
+        .md-body th { background: #f1f5fb; }
+        .md-body a { color: var(--accent); }
+        .md-body hr { border: none; border-top: 1px solid var(--border); margin: 10px 0; }
+
+        .status {
+            color: var(--muted);
+            font-size: 0.85rem;
+            padding: 24px;
+            text-align: center;
+        }
+
+        .status.error { color: #c23b3b; }
+    </style>
+</head>
+<body>
+    <main class="shell">
+        <section class="card">
+            <div class="header">
+                <h1 class="title" id="title">chatbox 线程</h1>
+                <div class="meta">
+                    <span id="task-id">task: -</span>
+                    <span id="node-id">node: -</span>
+                    <span id="unread"></span>
+                </div>
+            </div>
+            <div class="thread" id="thread">
+                <div class="status">加载中…</div>
+            </div>
+        </section>
+    </main>
+    <script>
+        // 与主应用 renderMarkdown 同族的最小实现：先整段 HTML 转义，再做受限的
+        // 结构化替换（代码围栏/行内代码/标题/列表/引用/表格/链接/强调）。任何
+        // 未被替换的字面量都以转义文本呈现，不存在裸 HTML 注入面。
+        function escHtml(value) {
+            return String(value ?? "")
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#39;");
+        }
+
+        function renderInline(text) {
+            let value = escHtml(text);
+            const codes = [];
+            value = value.replace(/`([^`]+)`/g, (_m, code) => {
+                codes.push(`<code>${code}</code>`);
+                return `\u0000${codes.length - 1}\u0000`;
+            });
+            value = value
+                .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+                .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+                .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+            value = value.replace(/\u0000(\d+)\u0000/g, (_m, index) => codes[Number(index)] || "");
+            return value;
+        }
+
+        function renderMarkdown(value) {
+            const text = String(value ?? "").replace(/\r\n?/g, "\n");
+            const lines = text.split("\n");
+            const blocks = [];
+            let index = 0;
+            while (index < lines.length) {
+                const line = lines[index];
+                if (!line.trim()) { index += 1; continue; }
+                const fence = line.match(/^```([\w-]+)?\s*$/);
+                if (fence) {
+                    const codeLines = [];
+                    index += 1;
+                    while (index < lines.length && !/^```/.test(lines[index])) {
+                        codeLines.push(lines[index]);
+                        index += 1;
+                    }
+                    if (index < lines.length) index += 1;
+                    blocks.push(`<pre><code>${escHtml(codeLines.join("\n"))}</code></pre>`);
+                    continue;
+                }
+                const heading = line.match(/^(#{1,4})\s+(.*)$/);
+                if (heading) {
+                    const level = heading[1].length;
+                    blocks.push(`<h${level}>${renderInline(heading[2])}</h${level}>`);
+                    index += 1;
+                    continue;
+                }
+                if (/^(---|\*\*\*|___)\s*$/.test(line)) {
+                    blocks.push("<hr>");
+                    index += 1;
+                    continue;
+                }
+                if (/^\s*\|.*\|\s*$/.test(line) && index + 1 < lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[index + 1])) {
+                    const cells = (row) => row.trim().replace(/^\||\|$/g, "").split("|").map((cell) => cell.trim());
+                    const head = cells(line);
+                    index += 2;
+                    const bodyRows = [];
+                    while (index < lines.length && /^\s*\|.*\|\s*$/.test(lines[index])) {
+                        bodyRows.push(cells(lines[index]));
+                        index += 1;
+                    }
+                    const th = head.map((cell) => `<th>${renderInline(cell)}</th>`).join("");
+                    const tb = bodyRows
+                        .map((row) => `<tr>${row.map((cell) => `<td>${renderInline(cell)}</td>`).join("")}</tr>`)
+                        .join("");
+                    blocks.push(`<table><thead><tr>${th}</tr></thead><tbody>${tb}</tbody></table>`);
+                    continue;
+                }
+                const listMatch = line.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
+                if (listMatch) {
+                    const ordered = /\d/.test(listMatch[2]);
+                    const tag = ordered ? "ol" : "ul";
+                    const items = [];
+                    while (index < lines.length) {
+                        const itemMatch = lines[index].match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
+                        if (!itemMatch || /\d/.test(itemMatch[2]) !== ordered) break;
+                        items.push(`<li>${renderInline(itemMatch[3])}</li>`);
+                        index += 1;
+                    }
+                    blocks.push(`<${tag}>${items.join("")}</${tag}>`);
+                    continue;
+                }
+                if (/^>\s?/.test(line)) {
+                    const quoteLines = [];
+                    while (index < lines.length && /^>\s?/.test(lines[index])) {
+                        quoteLines.push(lines[index].replace(/^>\s?/, ""));
+                        index += 1;
+                    }
+                    blocks.push(`<blockquote>${renderInline(quoteLines.join("\n")).replace(/\n/g, "<br>")}</blockquote>`);
+                    continue;
+                }
+                const paragraph = [];
+                while (index < lines.length && lines[index].trim() && !/^(```|#{1,4}\s|>|\s*([-*+]|\d+[.)])\s|\s*\|)/.test(lines[index]) && !/^(---|\*\*\*|___)\s*$/.test(lines[index])) {
+                    paragraph.push(lines[index]);
+                    index += 1;
+                }
+                if (paragraph.length) {
+                    blocks.push(`<p>${renderInline(paragraph.join("\n")).replace(/\n/g, "<br>")}</p>`);
+                } else {
+                    index += 1;
+                }
+            }
+            return blocks.join("");
+        }
+
+        function queryParam(name) {
+            const value = new URLSearchParams(window.location.search).get(name);
+            return String(value || "").trim();
+        }
+
+        function formatTime(value) {
+            const raw = String(value || "").trim();
+            if (!raw) return "";
+            const parsed = new Date(raw);
+            return Number.isNaN(parsed.getTime()) ? raw : parsed.toLocaleString();
+        }
+
+        async function fetchJson(url, options) {
+            const response = await fetch(url, { headers: { "Accept": "application/json" }, ...(options || {}) });
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(payload?.detail || payload?.message || `HTTP ${response.status}`);
+            }
+            return payload;
+        }
+
+        function renderThread(messages) {
+            const threadEl = document.getElementById("thread");
+            if (!Array.isArray(messages) || !messages.length) {
+                threadEl.innerHTML = '<div class="status">线程还没有消息。在节点详情页输入框发一条消息，节点回复后会出现在这里。</div>';
+                return;
+            }
+            threadEl.innerHTML = messages
+                .map((entry) => {
+                    const isOperator = String(entry?.direction || "") === "operator";
+                    const who = isOperator ? "操作员（输入框）" : "节点回复";
+                    const time = formatTime(entry?.created_at);
+                    return `<div class="entry ${isOperator ? "operator" : "node"}">`
+                        + `<div class="entry-head"><span class="who">${escHtml(who)}</span><span>${escHtml(time)}</span></div>`
+                        + `<div class="md-body">${renderMarkdown(entry?.message)}</div>`
+                        + `</div>`;
+                })
+                .join("");
+        }
+
+        let lastMessageKey = "";
+
+        async function loadThread() {
+            const taskId = queryParam("task_id");
+            const nodeId = queryParam("node_id");
+            if (!taskId || !nodeId) {
+                document.getElementById("thread").innerHTML =
+                    '<div class="status error">缺少 task_id 或 node_id。</div>';
+                return;
+            }
+            document.getElementById("task-id").textContent = `task: ${taskId}`;
+            document.getElementById("node-id").textContent = `node: ${nodeId}`;
+            try {
+                const data = await fetchJson(
+                    `/api/tasks/${encodeURIComponent(taskId)}/nodes/${encodeURIComponent(nodeId)}/chatbox`,
+                );
+                const messages = Array.isArray(data?.messages) ? data.messages : [];
+                renderThread(messages);
+                const unread = Math.max(0, Number(data?.unread_count || 0) || 0);
+                document.getElementById("unread").textContent = unread ? `未读 ${unread} 条` : "";
+                const key = messages.map((item) => String(item?.message_id || "")).join(",");
+                if (key !== lastMessageKey) {
+                    lastMessageKey = key;
+                    threadEl.scrollTop = threadEl.scrollHeight;
+                }
+                // 窗口打开即视为已读：销账后详情页徽标在下一拍归零。
+                if (unread) {
+                    await fetchJson(
+                        `/api/tasks/${encodeURIComponent(taskId)}/nodes/${encodeURIComponent(nodeId)}/chatbox/read`,
+                        { method: "POST" },
+                    ).catch(() => null);
+                    document.getElementById("unread").textContent = "";
+                }
+            } catch (error) {
+                document.getElementById("thread").innerHTML =
+                    `<div class="status error">${escHtml(String(error?.message || error || "加载失败"))}</div>`;
+            }
+        }
+
+        void loadThread();
+        window.setInterval(() => { void loadThread(); }, 5000);
+    </script>
+</body>
+</html>

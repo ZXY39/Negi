@@ -115,11 +115,27 @@
         });
     },
 
-    // 定向通知：对以该节点为根的子树追加用户通知（子树屏障分发）。
+    // 定向通知：节点详情页输入框（chatbox 来源），节点被回投提示引导回操作员线程。
     async appendTaskNodeNotice(taskId, nodeId, message) {
         return this._request("POST", `/api/tasks/${taskId}/nodes/${nodeId}/notice`, {
             body: { message: String(message || "") },
             timeoutMs: 30000,
+        });
+    },
+
+    // chatbox 线程读数：操作员来信 + 节点回投，附未读回投条数。
+    async getNodeChatbox(taskId, nodeId) {
+        return this._request("GET", `/api/tasks/${taskId}/nodes/${nodeId}/chatbox`, {
+            requestKey: `tasks:node-chatbox:${taskId}:${nodeId}`,
+            timeoutMs: 15000,
+        });
+    },
+
+    // 销账该线程全部未读回投，返回 { marked, unread_count }。
+    async markNodeChatboxRead(taskId, nodeId) {
+        return this._request("POST", `/api/tasks/${taskId}/nodes/${nodeId}/chatbox/read`, {
+            body: {},
+            timeoutMs: 15000,
         });
     },
 

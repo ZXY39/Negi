@@ -251,15 +251,40 @@ async def post_task_node_notice(task_id: str, node_id: str, payload: dict | None
     message = str((payload or {}).get('message') or '').strip()
     if not message:
         raise HTTPException(status_code=400, detail='message_required')
+    # 节点详情页输入框固定是 chatbox 来源：账本里 kind=chatbox_direct，收件节点被
+    # 回投提示引导到 `send_message(to="chatbox", ...)`，回复只回操作员线程。
     result = await service.deliver_control_node_message(
         task_id=service.normalize_task_id(task_id),
         target_node_id=node_id,
         message=message,
-        origin='user',
+        origin='chatbox',
+        reply_via='chatbox',
     )
     if str(result.get('status') or '') == 'rejected':
         raise HTTPException(status_code=400, detail=str(result.get('reason') or 'notice_rejected'))
     return result
+
+
+@router.get('/tasks/{task_id}/nodes/{node_id}/chatbox')
+async def get_task_node_chatbox(task_id: str, node_id: str):
+    """chatbox 线程读数：操作员来信 + 节点回投按时间合并，附未读回投条数。"""
+    task_id = _ensure_task_route_id(task_id)
+    service = _service()
+    await service.startup()
+    task_id = service.normalize_task_id(task_id)
+    return await asyncio.to_thread(service.node_chatbox_thread, task_id, node_id)
+
+
+@router.post('/tasks/{task_id}/nodes/{node_id}/chatbox/read')
+async def post_task_node_chatbox_read(task_id: str, node_id: str):
+    """销账该线程全部未读回投，返回剩余未读数（正常为 0）。"""
+    task_id = _ensure_task_route_id(task_id)
+    service = _service()
+    await service.startup()
+    task_id = service.normalize_task_id(task_id)
+    marked = await asyncio.to_thread(service.mark_node_chatbox_read, task_id, node_id)
+    remaining = await asyncio.to_thread(service.count_unread_node_chatbox_messages, task_id, node_id)
+    return {'marked': marked, 'unread_count': remaining}
 
 
 @router.post('/tasks/{task_id}/nodes/{node_id}/pause')

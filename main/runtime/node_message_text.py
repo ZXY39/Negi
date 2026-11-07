@@ -16,6 +16,7 @@ from typing import Any
 
 from main.runtime.node_message_kind import (
     KIND_ACCEPTANCE_VERDICT,
+    KIND_CHATBOX_DIRECT,
     KIND_CHILD_ABNORMAL_PAUSE,
     KIND_CHILD_FINAL,
     KIND_CHILD_PROGRESS,
@@ -35,6 +36,7 @@ _LABEL_BY_KIND = {
     KIND_ACCEPTANCE_VERDICT: '来自验收节点',
     KIND_FRONTDOOR_NOTICE: '来自会话',
     KIND_USER_DIRECT: '来自用户',
+    KIND_CHATBOX_DIRECT: '来自输入框',
     # 唤醒通知走「来自系统」这一档，不是漏填：`_PREFIX_RE` 只认这个家族里的标签，
     # 而 notice tail 的去重与被验节点的正文比对都靠 `strip_node_message_prefix` 剥这一行。
     # 给新 kind 起一个新前缀（例如「来自定时器」）会让剥前缀那条路认不出这行，
@@ -43,7 +45,7 @@ _LABEL_BY_KIND = {
 }
 
 _PREFIX_RE = re.compile(
-    r'^来自(?:父节点|子节点|同级节点|验收节点|会话|用户|系统)'
+    r'^来自(?:父节点|子节点|同级节点|验收节点|会话|用户|输入框|系统)'
     r'(?:，ID是[^，\n]+)?，内容为：$'
 )
 
@@ -63,11 +65,29 @@ FRONTDOOR_REPLY_TAIL = (
     'reach the front door.'
 )
 
+# 同一机制的第二条车道：chatbox（节点详情页输入框）来的消息要求回投到操作员
+# 专属线程，而不是 frontdoor 会话。与 FRONTDOOR_REPLY_TAIL 一样按行上的 payload
+# 标记每跳重算，台账正文与 fingerprint 一字不动。
+CHATBOX_REPLY_TAIL = (
+    'This message came from the operator chat box on your node detail page and expects an '
+    'answer in that same thread: `send_message(to="chatbox", content=...)`. Text you write '
+    'in your own turn does not reach the operator chat box.'
+)
+
 
 def notification_expects_reply(record: Any) -> bool:
     """通知行是否带「要求回投」标记：只读 payload，正文一个字都不参与判定。"""
     payload = record.get('payload') if isinstance(record, dict) else getattr(record, 'payload', None)
     return bool(payload.get('expects_reply')) if isinstance(payload, dict) else False
+
+
+def notification_reply_via(record: Any) -> str:
+    """通知行的回投车道标记：``chatbox`` 表示回投操作员线程，其余值不挂尾句。"""
+    payload = record.get('payload') if isinstance(record, dict) else getattr(record, 'payload', None)
+    if not isinstance(payload, dict):
+        return ''
+    value = str(payload.get('reply_via') or '').strip().lower()
+    return value if value == 'chatbox' else ''
 
 
 def render_node_message_text(
@@ -77,6 +97,7 @@ def render_node_message_text(
     message: str,
     system_relay: bool = False,
     expects_reply: bool = False,
+    reply_via: str = '',
 ) -> str:
     body = str(message or '').strip()
     label = message_label(kind, system_relay=system_relay)
@@ -85,6 +106,8 @@ def render_node_message_text(
     if not body:
         return header
     text = f'{header}\n{body}'
+    if reply_via == 'chatbox':
+        return f'{text}\n{CHATBOX_REPLY_TAIL}'
     if expects_reply:
         return f'{text}\n{FRONTDOOR_REPLY_TAIL}'
     return text

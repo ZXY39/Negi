@@ -19,6 +19,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 from main.models import (
+    ChatboxMessage,
     FrontdoorNodeMessage,
     NodeRecord,
     TaskArtifactRecord,
@@ -342,6 +343,17 @@ class SQLiteTaskStore:
             )
             ''',
             '''
+            CREATE TABLE IF NOT EXISTS task_chatbox_messages (
+                message_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                read_at TEXT NOT NULL,
+                payload_json TEXT NOT NULL
+            )
+            ''',
+            '''
             CREATE TABLE IF NOT EXISTS worker_leases (
                 role TEXT PRIMARY KEY,
                 worker_id TEXT NOT NULL,
@@ -648,6 +660,8 @@ class SQLiteTaskStore:
             'CREATE INDEX IF NOT EXISTS idx_task_nodes_parent_node_id ON task_nodes(parent_node_id)',
             'CREATE INDEX IF NOT EXISTS idx_task_node_notifications_task_id ON task_node_notifications(task_id)',
             'CREATE INDEX IF NOT EXISTS idx_task_node_notifications_task_node ON task_node_notifications(task_id, node_id)',
+            'CREATE INDEX IF NOT EXISTS idx_task_chatbox_messages_task_node ON task_chatbox_messages(task_id, node_id)',
+            'CREATE INDEX IF NOT EXISTS idx_task_chatbox_messages_status ON task_chatbox_messages(task_id, node_id, status)',
             'CREATE INDEX IF NOT EXISTS idx_task_node_details_task_id ON task_node_details(task_id)',
             'CREATE INDEX IF NOT EXISTS idx_task_runtime_frames_task_id ON task_runtime_frames(task_id)',
             'CREATE INDEX IF NOT EXISTS idx_task_node_tool_results_task_node_order ON task_node_tool_results(task_id, node_id, order_index)',
@@ -2739,6 +2753,91 @@ class SQLiteTaskStore:
                 update={'status': 'consumed', 'consumed_at': str(consumed_at or '').strip()}
             )
         )
+
+    def upsert_chatbox_message(
+        self,
+        payload: ChatboxMessage | dict[str, Any],
+    ) -> ChatboxMessage:
+        record = (
+            payload
+            if isinstance(payload, ChatboxMessage)
+            else ChatboxMessage.model_validate(payload)
+        )
+        payload_json = record.model_dump_json()
+
+        def operation(conn: sqlite3.Connection) -> ChatboxMessage:
+            conn.execute(
+                'INSERT INTO task_chatbox_messages '
+                '(message_id, task_id, node_id, status, created_at, read_at, payload_json) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?) '
+                'ON CONFLICT(message_id) DO UPDATE SET '
+                'task_id = excluded.task_id, node_id = excluded.node_id, '
+                'status = excluded.status, created_at = excluded.created_at, '
+                'read_at = excluded.read_at, payload_json = excluded.payload_json',
+                (
+                    record.message_id,
+                    record.task_id,
+                    record.node_id,
+                    record.status,
+                    record.created_at,
+                    record.read_at,
+                    payload_json,
+                ),
+            )
+            return record
+
+        return self._run_write(operation)
+
+    def list_chatbox_messages_by_node(
+        self,
+        task_id: str,
+        node_id: str,
+    ) -> list[ChatboxMessage]:
+        rows = self._fetchall(
+            'SELECT payload_json FROM task_chatbox_messages '
+            'WHERE task_id = ? AND node_id = ? ORDER BY created_at ASC, message_id ASC',
+            (str(task_id or '').strip(), str(node_id or '').strip()),
+        )
+        return [self._parse(row['payload_json'], ChatboxMessage) for row in rows]
+
+    def list_chatbox_messages_by_task(self, task_id: str) -> list[ChatboxMessage]:
+        """一台任务里所有「节点回投 chatbox」的行，节点详情发出列表的第三个来源。"""
+        rows = self._fetchall(
+            'SELECT payload_json FROM task_chatbox_messages '
+            'WHERE task_id = ? ORDER BY created_at ASC, message_id ASC',
+            (str(task_id or '').strip(),),
+        )
+        return [self._parse(row['payload_json'], ChatboxMessage) for row in rows]
+
+    def count_unread_chatbox_messages(self, task_id: str, node_id: str) -> int:
+        rows = self._fetchall(
+            "SELECT COUNT(*) AS n FROM task_chatbox_messages "
+            "WHERE task_id = ? AND node_id = ? AND status = 'unread'",
+            (str(task_id or '').strip(), str(node_id or '').strip()),
+        )
+        return int(rows[0]['n'] if rows else 0)
+
+    def mark_chatbox_messages_read(self, task_id: str, node_id: str, *, read_at: str) -> int:
+        """把该线程全部未读回投销账，返回本次销账条数。幂等：无未读时返回 0。"""
+        normalized_task_id = str(task_id or '').strip()
+        normalized_node_id = str(node_id or '').strip()
+        normalized_read_at = str(read_at or '').strip()
+        rows = self._fetchall(
+            'SELECT payload_json FROM task_chatbox_messages '
+            "WHERE task_id = ? AND node_id = ? AND status = 'unread' "
+            'ORDER BY created_at ASC, message_id ASC',
+            (normalized_task_id, normalized_node_id),
+        )
+        marked = 0
+        for row in rows:
+            record = self._parse(row['payload_json'], ChatboxMessage)
+            if record is None:
+                continue
+            self.upsert_chatbox_message(
+                record.model_copy(update={'status': 'read', 'read_at': normalized_read_at})
+            )
+            marked += 1
+        return marked
 
     def count_task_notifications_awaiting_injection(self, task_id: str) -> int:
         """整任务「还等在飞信箱里的通知」条数，一条 SQL 一个整数。

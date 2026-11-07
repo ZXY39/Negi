@@ -846,7 +846,14 @@ function taskMessageTimeText(entry) {
 }
 
 function renderTaskMessageBody(message) {
-    return `<div class="task-trace-message-body">${esc(String(message || "").trim() || "暂无消息内容")}</div>`;
+    const text = String(message || "").trim();
+    if (!text) return `<div class="task-trace-message-body">暂无消息内容</div>`;
+    // 消息正文按 Markdown 渲染（表格/代码块/列表）；renderMarkdown 内部先转义，
+    // 不可用时回退纯文本转义，与回合文本那一行同一条车道。
+    if (typeof renderMarkdown === "function") {
+        return `<div class="task-trace-message-body markdown-content">${renderMarkdown(text)}</div>`;
+    }
+    return `<div class="task-trace-message-body">${esc(text)}</div>`;
 }
 
 function taskNodeDisplayId(nodeId) {
@@ -894,7 +901,12 @@ function taskSessionDisplayId(sessionId) {
 function renderTaskSessionRef(sessionId) {
     const raw = String(sessionId || "").trim();
     if (!raw) return "";
-    return `<button type="button" class="task-node-ref" data-session-jump="${esc(raw)}" title="打开会话 ${esc(raw)}"><i data-lucide="arrow-up-right"></i><span class="task-node-ref-type">会话</span><span class="task-node-ref-id">${esc(taskSessionDisplayId(raw))}</span></button>`;
+    return `<button type="button" class="task-node-ref" data-session-jump="${esc(raw)}" title="打开会话 ${esc(raw)}"><i data-lucide="${esc("arrow-up-right")}"></i><span class="task-node-ref-type">会话</span><span class="task-node-ref-id">${esc(taskSessionDisplayId(raw))}</span></button>`;
+}
+
+// 输入框药丸：chatbox 来源/去向的消息行没有可跳转的会话或节点，静态展示即可。
+function renderChatboxRef({ icon = "message-square" } = {}) {
+    return `<span class="task-node-ref task-node-ref--static" title="操作员输入框（chatbox 线程）"><i data-lucide="${esc(icon)}"></i><span class="task-node-ref-type">输入框</span></span>`;
 }
 
 function renderTaskMessageStatus(status) {
@@ -908,15 +920,18 @@ function buildNodeMessageListSteps(node = {}) {
     return entries.map((entry, index) => {
         const status = messageListStatusDescriptor(entry?.status);
         const sourceNodeId = String(entry?.source_node_id || "").trim();
+        const isChatbox = String(entry?.kind || "").trim() === "chatbox_direct";
         const leadHtml = [
             renderTaskMessageStatus(status),
             `<span class="task-message-time">${esc(taskMessageTimeText(entry))}</span>`,
-            sourceNodeId
-                ? renderTaskNodeRef(sourceNodeId, {
-                    icon: "arrow-down-left",
-                    relation: taskNodeRelationLabel(entry),
-                })
-                : "",
+            isChatbox
+                ? renderChatboxRef({ icon: "arrow-down-left" })
+                : sourceNodeId
+                    ? renderTaskNodeRef(sourceNodeId, {
+                        icon: "arrow-down-left",
+                        relation: taskNodeRelationLabel(entry),
+                    })
+                    : "",
         ].join("");
         return {
             traceKey: `message:${String(entry?.notification_id || entry?.epoch_id || index).trim() || index}`,
@@ -938,17 +953,20 @@ function buildNodeSentMessageListSteps(node = {}) {
         const status = messageListStatusDescriptor(entry?.status);
         const targetSessionId = String(entry?.target_session_id || "").trim();
         const targetNodeId = String(entry?.target_node_id || "").trim();
+        const isChatbox = String(entry?.target_kind || "").trim() === "chatbox";
         const leadHtml = [
             renderTaskMessageStatus(status),
             `<span class="task-message-time">${esc(taskMessageTimeText(entry))}</span>`,
-            targetSessionId
-                ? renderTaskSessionRef(targetSessionId)
-                : targetNodeId
-                    ? renderTaskNodeRef(targetNodeId, {
-                        icon: "arrow-up-right",
-                        relation: taskNodeRelationLabel(entry),
-                    })
-                    : "",
+            isChatbox
+                ? renderChatboxRef({ icon: "arrow-up-right" })
+                : targetSessionId
+                    ? renderTaskSessionRef(targetSessionId)
+                    : targetNodeId
+                        ? renderTaskNodeRef(targetNodeId, {
+                            icon: "arrow-up-right",
+                            relation: taskNodeRelationLabel(entry),
+                        })
+                        : "",
         ].join("");
         return {
             traceKey: `sent-message:${String(entry?.notification_id || index).trim() || index}`,
@@ -1125,6 +1143,8 @@ function bindTaskMessageTabs() {
 
 function renderMessageList(node, { viewState = null } = {}) {
     if (!U.adMessages) return false;
+    // chatbox 徽标跟随节点详情面板：这里覆盖选中/刷新/切节点的全部路径。
+    if (typeof syncChatboxBadgeState === "function") syncChatboxBadgeState();
     const effectiveViewState = normalizeTaskDetailViewState(viewState || captureTaskDetailViewState());
     const preservedScrollTop = Number(effectiveViewState?.messageScrollTop || 0);
     const stepDescriptors = activeTaskMessageListSteps(node);

@@ -867,6 +867,90 @@ function taskNoticeSettleWindowOpen(now) {
 }
 
 
+// —— chatbox 未读徽标 ——
+// 节点对 chatbox 消息的回投落在 `task_chatbox_messages`（unread），节点详情面板
+// 打开期间低频轮询未读数（面板是低频页，一条小 SQL 可接受）；点击徽标开独立
+// 线程窗口，窗口内销账后徽标在下一拍归零。
+const TASK_CHATBOX_POLL_INTERVAL_MS = 5000;
+let chatboxPollTimer = 0;
+let chatboxPollTaskId = "";
+let chatboxPollNodeId = "";
+let chatboxPollInFlight = false;
+
+function chatboxBadgeSelectionKey() {
+    return `${String(S.currentTaskId || "").trim()}:${String(S.selectedNodeId || S.currentNodeDetail?.node_id || "").trim()}`;
+}
+
+function stopChatboxBadgePoll() {
+    if (chatboxPollTimer) {
+        window.clearTimeout(chatboxPollTimer);
+        chatboxPollTimer = 0;
+    }
+    chatboxPollTaskId = "";
+    chatboxPollNodeId = "";
+    if (U.adChatboxBadge) U.adChatboxBadge.hidden = true;
+}
+
+// 由节点详情的每次渲染调用：选中节点变化时重启轮询，面板没有选中节点时停表。
+function syncChatboxBadgeState() {
+    const taskId = String(S.currentTaskId || "").trim();
+    const nodeId = String(S.selectedNodeId || S.currentNodeDetail?.node_id || "").trim();
+    if (!taskId || !nodeId) {
+        stopChatboxBadgePoll();
+        return;
+    }
+    if (chatboxPollTaskId !== taskId || chatboxPollNodeId !== nodeId) {
+        if (chatboxPollTimer) {
+            window.clearTimeout(chatboxPollTimer);
+            chatboxPollTimer = 0;
+        }
+        chatboxPollTaskId = taskId;
+        chatboxPollNodeId = nodeId;
+    }
+    if (!chatboxPollTimer) {
+        chatboxPollTimer = window.setTimeout(() => { void refreshChatboxBadge(); }, 0);
+    }
+}
+
+async function refreshChatboxBadge() {
+    chatboxPollTimer = 0;
+    const taskId = String(chatboxPollTaskId || "").trim();
+    const nodeId = String(chatboxPollNodeId || "").trim();
+    if (!taskId || !nodeId) return;
+    if (chatboxPollInFlight) return;
+    const isCurrentSelection = () => chatboxBadgeSelectionKey() === `${taskId}:${nodeId}`;
+    if (!isCurrentSelection()) return;
+    chatboxPollInFlight = true;
+    try {
+        const data = await ApiClient.getNodeChatbox(taskId, nodeId);
+        const badge = U.adChatboxBadge;
+        if (badge && isCurrentSelection()) {
+            const count = Math.max(0, Number(data?.unread_count || 0) || 0);
+            badge.hidden = count <= 0;
+            if (U.adChatboxCount) U.adChatboxCount.textContent = String(count);
+        }
+    } catch {
+        // 线程读数失败不打断详情页，下一拍再试。
+    } finally {
+        chatboxPollInFlight = false;
+        if (isCurrentSelection()) {
+            chatboxPollTimer = window.setTimeout(
+                () => { void refreshChatboxBadge(); },
+                TASK_CHATBOX_POLL_INTERVAL_MS,
+            );
+        }
+    }
+}
+
+function openNodeChatboxViewer() {
+    const taskId = String(S.currentTaskId || "").trim();
+    const nodeId = String(S.selectedNodeId || S.currentNodeDetail?.node_id || "").trim();
+    if (!taskId || !nodeId) return;
+    const url = `node_chatbox_viewer.html?task_id=${encodeURIComponent(taskId)}&node_id=${encodeURIComponent(nodeId)}`;
+    window.open(url, "negi-chatbox", "width=880,height=760");
+}
+
+
 function taskNoticeSettleState() {
     if (!S.noticeSettle || typeof S.noticeSettle !== "object") {
         S.noticeSettle = { timer: null, taskId: "", nodeId: "", pending: [] };
