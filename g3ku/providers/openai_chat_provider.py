@@ -13,6 +13,7 @@ from g3ku.json_schema_utils import normalize_openai_tool_definitions
 from g3ku.providers.base import LLMProvider, LLMResponse, ToolCallRequest, normalize_usage_payload
 from g3ku.providers.fallback import normalize_forced_function_tool_choice
 from g3ku.providers.streaming_timeouts import (
+    StreamingChunkTimeoutError,
     StreamingDiagnostics,
     consume_openai_like_chat_stream,
     resolve_non_streaming_timeout_seconds,
@@ -180,12 +181,20 @@ class OpenAIChatProvider(LLMProvider):
         )
         try:
             stream_timeout_seconds = resolve_streaming_timeout_seconds(request_timeout_seconds)
+            from loguru import logger
+
+            logger.debug(
+                "openai_chat attempt start: model={} timeout_seconds={:.0f} mode=stream",
+                kwargs.get("model"),
+                stream_timeout_seconds,
+            )
             stream_kwargs = {
                 **kwargs,
                 "stream": True,
                 "stream_options": {"include_usage": True},
                 "timeout": float(stream_timeout_seconds),
             }
+            attempt_started_at = time.perf_counter()
             try:
                 request_started_at = time.perf_counter()
                 stream = await self._client.chat.completions.create(**stream_kwargs)
@@ -230,12 +239,29 @@ class OpenAIChatProvider(LLMProvider):
                 if not should_fallback_to_non_streaming_from_error(stream_exc):
                     raise
             non_stream_timeout_seconds = resolve_non_streaming_timeout_seconds(request_timeout_seconds)
+            logger.debug(
+                "openai_chat attempt start: model={} timeout_seconds={:.0f} mode=non_stream",
+                kwargs.get("model"),
+                non_stream_timeout_seconds,
+            )
             fallback_response = self._parse(await self._client.chat.completions.create(**{**kwargs, "timeout": float(non_stream_timeout_seconds)}))
             fallback_response.provider_request_meta = provider_request_meta
             fallback_response.provider_request_body = provider_request_body
             return fallback_response
         except Exception as e:
             error_text = _error_text_for(e)
+            # 超时族单独留痕：这类失败在链上表现为"节点长时间零日志"，必须能看到
+            # 是哪道墙（首 chunk / idle / SDK 整体）在多少秒后触发。
+            if isinstance(e, StreamingChunkTimeoutError) or "timed out" in str(e).lower() or "timeout" in type(e).__name__.lower():
+                from loguru import logger
+
+                logger.warning(
+                    "openai_chat attempt timed out: model={} elapsed_ms={} error_kind={} error={}",
+                    kwargs.get("model"),
+                    int((time.perf_counter() - attempt_started_at) * 1000),
+                    type(e).__name__,
+                    str(e)[:300],
+                )
             return LLMResponse(
                 content=error_text,
                 error_text=error_text,
