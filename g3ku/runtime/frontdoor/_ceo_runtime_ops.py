@@ -6986,7 +6986,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     declared_tools=declared_tools,
                     registry_lookup=registry_lookup,
                     prior_index=bundled_schemas,
-                    prior_index_first=compat_rebuild,
+                    # 名单变化（at_boundary）是真正的重印边界：既有成员的编辑必须在
+                    # 这一跳被吸收，否则一次"新成员进名单 + 旧工具改契约"同跳到达时，
+                    # prior-first 会把编辑再推迟一个边界——实机形态：压缩后首跳仍发
+                    # 旧 create_async_task 契约（无 continuous 参数），到下一跳才自愈。
+                    # 只有冻结跳上的纯补名兼容重建才原样复用旧整表字节。
+                    prior_index_first=compat_rebuild and not at_boundary,
                 )
                 if rebuilt.get("index"):
                     bundled_schemas = dict(rebuilt["index"])

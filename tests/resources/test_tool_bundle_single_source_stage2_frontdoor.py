@@ -169,6 +169,30 @@ def test_missing_name_rebuilds_once_and_then_stays_byte_stable() -> None:
     assert str(pinned_tool_bundle._entries[key]['revision']) == second_revision, '冻结跳不该再重写整表'
 
 
+def test_member_addition_boundary_absorbs_a_pending_schema_edit() -> None:
+    """成员增删到达的边界不是冻结跳兼容重建：同跳到达的既有成员编辑必须被吸收。
+
+    实机形态：create_async_task 契约新增 continuous 参数后，用户手动压缩上下文，
+    压缩后首跳恰逢新成员进名单——prior-first 把编辑又推迟一跳，模型整轮看到的
+    都是旧契约（无 continuous），答出「无法创建持续任务」，下一跳才自愈。
+    """
+    key = 'web:boundary-absorbs-edit'
+    tools = {'alpha': _Tool('alpha', 'v1'), 'beta': _Tool('beta')}
+    runner = _runner(tools)
+    session = _session(key)
+    _render(runner, session, key, ['alpha', 'beta'])
+
+    # 同一跳：名单新增 gamma（边界），alpha 也被编辑过——边界重建必须读活实例。
+    tools['alpha'].rewrite('v2 edited before the boundary')
+    after = _render(runner, _session(key), key, ['alpha', 'beta', 'gamma'])
+    descriptions = {
+        str((item.get('function') or {}).get('name')): str((item.get('function') or {}).get('description'))
+        for item in after
+    }
+    assert _names(after)[:3] == ['alpha', 'beta', 'gamma'], '新成员必须进名单'
+    assert descriptions['alpha'] == 'v2 edited before the boundary', '边界重建必须吸收同跳的编辑'
+
+
 def test_unrenderable_name_is_pinned_as_placeholder_and_counted() -> None:
     """三份来源都没有 ⇒ 占位留在名单里、可数，并且下一跳逐字节复用同一份占位。"""
     key = 'web:placeholder'
