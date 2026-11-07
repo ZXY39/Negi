@@ -673,6 +673,7 @@ class TaskLogService:
             'last_stall_notice_bucket_minutes': 0,
             'stall_notice_anchor': '',
             'stall_delivery_count': 0,
+            'stall_standby_disarmed_at': '',
             'task_temp_dir': self._fallback_task_temp_dir(),
             'dispatch_limits': {'execution': 0, 'inspection': 0, 'pool': 0},
             'dispatch_running': {'execution': 0, 'inspection': 0},
@@ -3156,6 +3157,10 @@ class TaskLogService:
                     current['stall_delivery_count'] = max(0, int(payload.get('stall_delivery_count') or 0))
                 except (TypeError, ValueError):
                     current['stall_delivery_count'] = 0
+            # 设计内待命熄表标记：非空表示上次 _schedule 因 designed_idle 退出，下一次
+            # 唤醒的 start_task 据此把静默锚点重算到唤醒时刻（消费后清空）。
+            if 'stall_standby_disarmed_at' in payload:
+                current['stall_standby_disarmed_at'] = str(payload.get('stall_standby_disarmed_at') or '').strip()
             if 'task_temp_dir' in payload:
                 current['task_temp_dir'] = self._normalize_task_temp_dir(payload.get('task_temp_dir'))
             if 'dispatch_limits' in payload:

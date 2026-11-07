@@ -11,6 +11,13 @@ from main.service.task_stall_callback import task_notice_audience_ok
 # 它救活——而救活的那一拍会用两份不同时刻读到的锚点，一次同秒齐发两档。
 _STALL_BLOCKED_POLL_SECONDS = 60.0
 
+# 设计内待命熄表标记（runtime meta）：`_schedule` 因 designed_idle 退出时落下，
+# 下一次唤醒经 run_task → start_task 重新装填时消费。不重锚的话，待命前的旧锚点
+# + 20 分钟首档在长待命下必然已过期（delay=0），而唤醒通知此刻恰好未读，
+# designed_idle 的"无可注入未读"判据被它自己这次的唤醒通知击败——长待命之后的
+# 每一次设计内唤醒都会立即误发一条停滞提醒（2026-11-07 task:c0430f2b6027 实盘）。
+STALL_STANDBY_DISARMED_META_KEY = "stall_standby_disarmed_at"
+
 
 def _parse_iso(value: Any) -> datetime | None:
     text = str(value or "").strip()
@@ -166,14 +173,22 @@ class TaskStallNotifier:
         last_visible_output_at = str(runtime_meta.get("last_visible_output_at") or task.created_at or "").strip()
         if not last_visible_output_at:
             last_visible_output_at = str(getattr(task, "created_at", "") or "").strip()
-        self._service.log_service.update_task_runtime_meta(
-            task.task_id,
-            last_visible_output_at=last_visible_output_at,
-            last_stall_notice_bucket_minutes=max(
-                0,
-                int(runtime_meta.get("last_stall_notice_bucket_minutes") or 0),
+        # 设计内待命的重新装填：静默窗口从唤醒这一拍重算，不沿用待命前的旧锚点。
+        # 非待命路径（真失速恢复、暂停恢复、bootstrap）没有这个标记，行为不变。
+        standby_disarmed = bool(str(runtime_meta.get(STALL_STANDBY_DISARMED_META_KEY) or "").strip())
+        if standby_disarmed:
+            last_visible_output_at = self._service._stall_now_iso()
+        meta_update: dict[str, Any] = {
+            "last_visible_output_at": last_visible_output_at,
+            "last_stall_notice_bucket_minutes": (
+                0
+                if standby_disarmed
+                else max(0, int(runtime_meta.get("last_stall_notice_bucket_minutes") or 0))
             ),
-        )
+        }
+        if standby_disarmed:
+            meta_update[STALL_STANDBY_DISARMED_META_KEY] = ""
+        self._service.log_service.update_task_runtime_meta(task.task_id, **meta_update)
         self._schedule(task.task_id)
 
     def reset_visible_output(self, task_id: str, *, occurred_at: str | None = None) -> None:
@@ -186,6 +201,8 @@ class TaskStallNotifier:
             task.task_id,
             last_visible_output_at=reset_at,
             last_stall_notice_bucket_minutes=0,
+            # 可见输出即待命结束：熄表标记一并清掉（正常情况下已被 start_task 消费）。
+            **{STALL_STANDBY_DISARMED_META_KEY: ""},
         )
         self._schedule(task.task_id)
 
@@ -237,14 +254,16 @@ class TaskStallNotifier:
             return
         runtime_state = self._service.log_service.read_runtime_state(key, frame_mode='stall') or {}
         # 设计内待命（连续节点停在声明的外部唤醒源上）既不投递也不重新计时：
-        # 下一次唤醒会经 run_task → start_task 重新装填。
+        # 下一次唤醒会经 run_task → start_task 重新装填。熄表时落标记，装填方据此重锚。
         designed_idle = getattr(self._service, "is_task_stall_designed_idle", None)
         if callable(designed_idle):
             try:
-                if bool(designed_idle(key, runtime_state=runtime_state)):
-                    return
+                standby = bool(designed_idle(key, runtime_state=runtime_state))
             except Exception:
-                pass
+                standby = False
+            if standby:
+                self._mark_standby_disarm(key)
+                return
         is_actionable = getattr(self._service, "is_task_stall_actionable", None)
         if callable(is_actionable):
             try:
@@ -282,6 +301,24 @@ class TaskStallNotifier:
         )
         self._tasks[key] = scheduled
         scheduled.add_done_callback(lambda done_task, stored_key=key: self._cleanup(stored_key, done_task))
+
+    def _mark_standby_disarm(self, task_id: str) -> None:
+        """设计内待命熄表：落标记，供下一次唤醒的 start_task 重锚静默窗口。
+
+        读到标记已存在就跳过写入——待命期间 blocked-retry 与重复 _schedule 都会走到
+        这里，不做幂等会变成每拍一次 meta 写。写失败只损失"下次唤醒重锚"这一次，
+        待命本身仍按原合同熄表。
+        """
+        try:
+            meta = self._service.log_service.read_task_runtime_meta(task_id) or {}
+            if str(meta.get(STALL_STANDBY_DISARMED_META_KEY) or "").strip():
+                return
+            self._service.log_service.update_task_runtime_meta(
+                task_id,
+                **{STALL_STANDBY_DISARMED_META_KEY: self._service._stall_now_iso()},
+            )
+        except Exception:
+            pass
 
     def _schedule_blocked_retry(self, task_id: str) -> None:
         """屏障/暂停挡住时保持定时器存活：隔一拍再判，别把"屏蔽"做成"停表"。"""
