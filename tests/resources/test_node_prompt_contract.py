@@ -188,7 +188,8 @@ def test_node_runtime_contract_renders_repair_required_sections_separately() -> 
         Path(__file__).resolve().parents[2] / "main/prompts/shared_repair_required.md"
     ).read_text(encoding="utf-8")
     assert "repair-tool" in fragment
-    assert "`writing-skills`" in fragment
+    assert "`skill-creator`" in fragment
+    assert "`writing-skills`" not in fragment
 
 
 def test_inject_node_dynamic_contract_message_strips_legacy_without_appending_tail() -> None:

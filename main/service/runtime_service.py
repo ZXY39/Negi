@@ -13243,12 +13243,12 @@ class MainRuntimeService:
             'error': 'skill_repair_required',
             'skill_id': skill_id,
             'message': f'Skill "{skill_id}" requires repair before its body can be loaded.',
-            'reference_skill': 'writing-skills',
+            'reference_skill': 'skill-creator',
             'warnings': list((dict(self._skill_record_value(record, 'metadata') or {}) if isinstance(self._skill_record_value(record, 'metadata'), dict) else {}).get('warnings') or []),
             'errors': list((dict(self._skill_record_value(record, 'metadata') or {}) if isinstance(self._skill_record_value(record, 'metadata'), dict) else {}).get('errors') or []),
             'next_actions': [
                 'Use `exec` and `filesystem_*` tools to repair the skill files or dependencies.',
-                'Reference skill `writing-skills` before retrying `load_skill_context`.',
+                'Reference skill `skill-creator` (requires declaration and availability probe rules) before retrying `load_skill_context`.',
             ],
         }
 

@@ -1348,13 +1348,20 @@ def test_frontdoor_tool_contract_renders_repair_required_sections_separately() -
     assert "Reference skill:" not in contract_text
     assert "These tools must be repaired before use." not in contract_text
     assert "Do not call `load_skill_context` until repaired." not in contract_text
-    # 唯一载体是稳定提示词，两份都要能在那儿读到
+    # 唯一载体是稳定提示词，两份都要能在那儿读到；requires 写法指引指向在仓库里的 skill-creator
     prompt = (Path(__file__).resolve().parents[2] / "g3ku/runtime/prompts/ceo_frontdoor.md").read_text(encoding="utf-8")
     assert "`repair-tool`" in prompt
-    assert "`writing-skills`" in prompt
+    assert "`skill-creator`" in prompt
+    assert "`writing-skills`" not in prompt
     shared = (Path(__file__).resolve().parents[2] / "main/prompts/shared_repair_required.md").read_text(encoding="utf-8")
     assert "repair-tool" in shared
-    assert "`writing-skills`" in shared
+    assert "`skill-creator`" in shared
+    assert "`writing-skills`" not in shared
+    # 反删规则必须同时住在两份稳定提示词（一处缺失就留一条把真实缺口报成已修复的路径）
+    assert "判据只有两条" in prompt
+    assert "正文仍需要" in prompt
+    assert "判据只有两条" in shared
+    assert "正文仍需要的项一律不许删" in shared
 
 
 def test_frontdoor_tool_contract_renders_attachment_reopen_targets() -> None:

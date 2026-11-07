@@ -208,3 +208,54 @@ def test_node_execution_prompt_mentions_spawn_interception_guidance(monkeypatch)
 
     assert '不合理的派生将被拦截' in prompt
     assert '被拦截时需要参考被拦截的原因和建议' in prompt
+
+
+def test_node_payload_filesystem_guidance_does_not_duplicate_anchor_rule(monkeypatch) -> None:
+    """锚点规则全文只住 `path_policy.path_anchor_rule` 一份；`tool_guidance.filesystem`
+    只留指针与 filesystem 自身的中间文件纪律，不再抄第二份全文。"""
+    from g3ku.utils.helpers import PATH_ANCHOR_RULE_TEXT
+
+    monkeypatch.setattr(node_runner_module, 'current_project_environment', lambda **kwargs: _fake_project_environment())
+    runner = NodeRunner(
+        store=None,
+        log_service=None,
+        react_loop=None,
+        tool_provider=None,
+        execution_model_refs=['execution_model'],
+        acceptance_model_refs=['acceptance_model'],
+    )
+    task = SimpleNamespace(task_id='task:1', session_id='web:shared', metadata={})
+
+    payload = runner._runtime_environment_payload(task=task)
+    filesystem = payload['tool_guidance']['filesystem']
+
+    assert PATH_ANCHOR_RULE_TEXT not in filesystem
+    assert '裸文件名' not in filesystem
+    assert 'path_policy.path_anchor_rule' in filesystem
+    assert 'runtime_environment.task_temp_dir' in filesystem
+    assert payload['path_policy']['path_anchor_rule'] == PATH_ANCHOR_RULE_TEXT
+
+
+def test_completion_contract_skipped_for_continuous_root(monkeypatch) -> None:
+    """连续根节点没有提交通道，`completion_contract` 的提交语义是死信号，不注入 bootstrap payload。"""
+    monkeypatch.setattr(node_runner_module, 'current_project_environment', lambda **kwargs: _fake_project_environment())
+    runner = NodeRunner(
+        store=None,
+        log_service=None,
+        react_loop=None,
+        tool_provider=None,
+        execution_model_refs=['execution_model'],
+        acceptance_model_refs=['acceptance_model'],
+    )
+    task = SimpleNamespace(task_id='task:1', metadata={})
+
+    continuous_root = SimpleNamespace(node_kind='execution', parent_node_id=None, metadata={'continuous': True})
+    assert runner._completion_contract_payload(task=task, node=continuous_root) is None
+
+    normal_root = SimpleNamespace(node_kind='execution', parent_node_id=None, metadata={})
+    payload = runner._completion_contract_payload(task=task, node=normal_root)
+    assert payload is not None
+    assert payload['final_acceptance_required'] is False
+
+    child = SimpleNamespace(node_kind='execution', parent_node_id='node:parent', metadata={})
+    assert runner._completion_contract_payload(task=task, node=child) is None

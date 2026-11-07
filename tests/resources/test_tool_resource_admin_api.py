@@ -4943,7 +4943,7 @@ exposure:
         assert payload['ok'] is False
         assert payload['error'] == 'skill_repair_required'
         assert payload['skill_id'] == 'broken_skill'
-        assert payload['reference_skill'] == 'writing-skills'
+        assert payload['reference_skill'] == 'skill-creator'
         assert 'repair' in str(payload['message'] or '').lower()
     finally:
         await service.close()

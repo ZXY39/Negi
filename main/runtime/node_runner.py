@@ -19,7 +19,7 @@ from g3ku.runtime.memory_scope import normalize_memory_scope
 from g3ku.runtime.project_environment import current_project_environment
 from g3ku.runtime.wake_clock import describe_delay, iso_from_ms
 from g3ku.runtime.wake_clock import now_ms as wake_now_ms
-from g3ku.utils.helpers import PATH_ANCHOR_RULE_TEXT, path_anchor_policy
+from g3ku.utils.helpers import path_anchor_policy
 from main.errors import (
     NodePausedError,
     TaskPausedError,
@@ -3480,6 +3480,10 @@ class NodeRunner:
     def _completion_contract_payload(self, *, task, node: NodeRecord) -> dict[str, Any] | None:
         if node.node_kind != KIND_EXECUTION or node.parent_node_id is not None:
             return None
+        if is_continuous_metadata(getattr(node, 'metadata', None)):
+            # 连续节点没有提交与验收通道（提交工具不在面、常驻职责块明说不要找），
+            # completion_contract 的提交语义对它是死信号，不注入。
+            return None
         final_acceptance = normalize_final_acceptance_metadata((task.metadata or {}).get('final_acceptance'))
         return {
             'result_schema_version': RESULT_SCHEMA_VERSION,
@@ -3705,8 +3709,10 @@ class NodeRunner:
                 'exec_requires_explicit_working_dir_for_target_dir': True,
             },
             'tool_guidance': {
+                # 落点与锚点规则只住在 path_policy.path_anchor_rule 与头部 pinned 块，
+                # 这里只保留 filesystem 自身独有的中间文件纪律，不再抄第二份全文。
                 'filesystem': (
-                    PATH_ANCHOR_RULE_TEXT +
+                    '路径落点与锚点规则见 runtime_environment.path_policy.path_anchor_rule；'
                     '新建脚本、抓取结果、缓存、调试输出和其他中间文件默认写到 '
                     'runtime_environment.task_temp_dir；只有为了满足任务要求且只能写到其他目录时才允许例外。'
                 ),

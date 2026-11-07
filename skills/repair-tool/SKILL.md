@@ -19,7 +19,7 @@
 
 分型排查见下文「故障分类」，复核口径见「刷新与复核」。
 
-合同 `repair_required_skills:` 列出的是 skill 而不是工具：那类资源按 `main/prompts/shared_repair_required.md`「技能待修复规则」与 skill `writing-skills` 处置，不在本技能范围内。
+合同 `repair_required_skills:` 列出的是 skill 而不是工具：那类资源按 `main/prompts/shared_repair_required.md`「技能待修复规则」与 skill `skill-creator` 处置，不在本技能范围内。
 
 只有权限、环境和可用工具都已穷尽，才把剩余缺口（具体缺哪个 bin/env/tool、影响哪个资源、已做过哪些修复动作）如实写进交付说明；禁止笼统写“待复核”，也不许把未修复状态报成已完成。
 
