@@ -12826,6 +12826,34 @@ class MainRuntimeService:
             ),
         }
 
+    def node_chatbox_replies_markdown(
+        self,
+        task_id: str,
+        node_id: str,
+        reply_to: str = '',
+    ) -> str:
+        """把回投拼成一整篇 Markdown 文档，喂给应用内媒体查看器的渲染档。
+
+        与会话里打开 .md 附件同一车道：查看器同源 fetch 这份正文后用聊天同款
+        renderMarkdown 排版。每条回复一个小节（标题带时间），正文原样嵌入——
+        回投本身就是 Markdown。
+        """
+        records = self.list_node_chatbox_messages(task_id, node_id, reply_to=reply_to)
+
+        def _format_time(value: str) -> str:
+            raw = str(value or '').strip()
+            try:
+                return datetime.fromisoformat(raw).strftime('%Y-%m-%d %H:%M:%S')
+            except ValueError:
+                return raw
+
+        sections: list[str] = []
+        for item in records:
+            created = _format_time(item.created_at)
+            body = str(item.content or '').strip() or '（无内容）'
+            sections.append(f'## 回复 · {created}\n\n{body}')
+        return '\n\n---\n\n'.join(sections) if sections else '这条消息还没有回复。'
+
     def mark_node_chatbox_read(self, task_id: str, node_id: str, reply_to: str = '') -> int:
         return self.mark_node_chatbox_messages_read(task_id, node_id, reply_to=reply_to)
 

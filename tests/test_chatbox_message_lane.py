@@ -325,6 +325,43 @@ async def test_chatbox_replies_reader_filters_and_marks_read(tmp_path):
     filtered = service.node_chatbox_replies(TASK, CHILD, reply_to=reply_to)
     assert len(filtered['messages']) == 2
 
+
+@pytest.mark.asyncio
+async def test_replies_markdown_composes_document(tmp_path):
+    service = _service(tmp_path)
+    _seed(service)
+
+    mail_receipt = await service.deliver_node_message(
+        task_id=TASK,
+        target_node_id=CHILD,
+        message='要求',
+        origin='chatbox',
+        reply_via='chatbox',
+    )
+    reply_to = str(mail_receipt['message_id'] or '').strip()
+    await service._deliver_node_message_from_node(
+        task_id=TASK,
+        sender_node_id=CHILD,
+        to='chatbox',
+        content='**第一份**回复\n\n- 要点一',
+    )
+    await service._deliver_node_message_from_node(
+        task_id=TASK,
+        sender_node_id=CHILD,
+        to='chatbox',
+        content='第二份回复',
+    )
+
+    document = service.node_chatbox_replies_markdown(TASK, CHILD, reply_to=reply_to)
+    assert document.count('## 回复 · ') == 2
+    assert '**第一份**回复' in document
+    assert '第二份回复' in document
+    assert '\n\n---\n\n' in document
+    # 回投正文原样嵌入，不做二次转义（查看器渲染档用聊天同款 renderMarkdown 排版）。
+    assert document.index('**第一份**回复') < document.index('第二份回复')
+    # 空档给一句可读占位——查看器渲染档直接吃这份正文。
+    assert service.node_chatbox_replies_markdown(TASK, VERIFIER) == '这条消息还没有回复。'
+
     marked = service.mark_node_chatbox_read(TASK, CHILD, reply_to=reply_to)
     assert marked == 2
     assert service.node_chatbox_replies(TASK, CHILD, reply_to=reply_to)['unread_count'] == 0

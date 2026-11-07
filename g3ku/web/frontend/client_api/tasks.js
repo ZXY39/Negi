@@ -131,6 +131,14 @@
         });
     },
 
+    // 销账未读回投：replyTo 非空只销那条来信名下的；点开「新回复」图标即调用。
+    async markNodeChatboxRead(taskId, nodeId, replyTo = "") {
+        return this._request("POST", `/api/tasks/${taskId}/nodes/${nodeId}/chatbox/read`, {
+            body: { reply_to: String(replyTo || "") },
+            timeoutMs: 15000,
+        });
+    },
+
     async pauseTask(taskId) {
         const data = await this.post(`/api/tasks/${taskId}/pause`);
         return data.task || null;
