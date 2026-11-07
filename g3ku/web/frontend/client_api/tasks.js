@@ -123,18 +123,10 @@
         });
     },
 
-    // chatbox 线程读数：操作员来信 + 节点回投，附未读回投条数。
+    // chatbox 回投读数：该节点的回投清单（行带 reply_to/status），用于「新回复」图标归组。
     async getNodeChatbox(taskId, nodeId) {
         return this._request("GET", `/api/tasks/${taskId}/nodes/${nodeId}/chatbox`, {
             requestKey: `tasks:node-chatbox:${taskId}:${nodeId}`,
-            timeoutMs: 15000,
-        });
-    },
-
-    // 销账该线程全部未读回投，返回 { marked, unread_count }。
-    async markNodeChatboxRead(taskId, nodeId) {
-        return this._request("POST", `/api/tasks/${taskId}/nodes/${nodeId}/chatbox/read`, {
-            body: {},
             timeoutMs: 15000,
         });
     },

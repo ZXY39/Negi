@@ -663,8 +663,6 @@ const U = {
     adNoticeComposer: document.getElementById("ad-notice-composer"),
     adNoticeInput: document.getElementById("ad-notice-input"),
     adNoticeSend: document.getElementById("ad-notice-send"),
-    adChatboxBadge: document.getElementById("ad-chatbox-badge"),
-    adChatboxCount: document.getElementById("ad-chatbox-count"),
     adSpawnReviews: document.getElementById("ad-spawn-reviews"),
     adOutput: document.getElementById("ad-output"),
     adOutputCopy: document.getElementById("ad-output-copy"),
@@ -11882,8 +11880,6 @@ function bindTaskHall() {
             void submitNodeNoticeComposer();
         }
     });
-    // 输入框右侧的 chatbox 徽标：点击打开独立线程窗口（回复的未读数由轮询维护）。
-    U.adChatboxBadge?.addEventListener("click", () => { void openNodeChatboxViewer(); });
     U.taskDetailBackdrop?.addEventListener("click", () => clearAgentSelection());
 }
 

@@ -1,9 +1,10 @@
-"""chatbox 车道：操作员输入框来信（kind=chatbox_direct）+ 节点回投线程。
+"""chatbox 车道：操作员输入框来信（kind=chatbox_direct）+ 节点回投（reply_to 锚定）。
 
 操作员消息与 user_direct 同一套投递语义（人工来源：无条件唤醒、暂停目标落箱
-不清位、等验收目标排队），只多两件事：账本与展示按来源分档，收件节点被
-payload.reply_via 引导回投 `send_message(to="chatbox", ...)`——回投只落
-`task_chatbox_messages`，不进任何会话。
+不清位、等验收目标排队、验收镜像），只多两件事：账本与展示按来源分档，以及
+收件节点被 payload.reply_via 引导回投 `send_message(to="chatbox", ...)`——回投
+落 `task_chatbox_messages`（reply_to 指向触发它的最近一条 chatbox 来信），网页
+在接收列表那条消息行右侧挂「新回复」图标，查看窗口取走即销账。
 """
 
 from __future__ import annotations
@@ -221,7 +222,56 @@ async def test_waiting_acceptance_target_queues_chatbox_mail(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_node_reply_to_chatbox_lands_in_thread_and_reads(tmp_path):
+async def test_node_reply_anchors_to_latest_chatbox_mail(tmp_path):
+    service = _service(tmp_path)
+    _seed(service)
+
+    await service.deliver_node_message(
+        task_id=TASK,
+        target_node_id=CHILD,
+        message='第一条要求',
+        origin='chatbox',
+        reply_via='chatbox',
+    )
+    await service.deliver_node_message(
+        task_id=TASK,
+        target_node_id=CHILD,
+        message='第二条要求',
+        origin='chatbox',
+        reply_via='chatbox',
+    )
+
+    receipt = await service._deliver_node_message_from_node(
+        task_id=TASK,
+        sender_node_id=CHILD,
+        to='chatbox',
+        content='回投正文',
+    )
+
+    assert receipt['ok'] is True
+    assert receipt['results'][0]['status'] == 'delivered'
+    assert receipt['results'][0]['target'] == 'chatbox'
+    # 回投锚定最近一条 chatbox 来信：接收列表按 reply_to 把图标挂到那条消息行。
+    assert receipt['results'][0]['reply_to'] == latest_chatbox_mail_id(service, CHILD)
+    rows = service.list_node_chatbox_messages(TASK, CHILD)
+    assert len(rows) == 1
+    assert rows[0].content == '回投正文'
+    assert rows[0].reply_to == receipt['results'][0]['reply_to']
+    assert rows[0].status == 'unread'
+
+
+def latest_chatbox_mail_id(service, node_id):
+    """与投递侧同一读序：store 按 created_at, notification_id 升序，最后一行即最新。"""
+    rows = [
+        item
+        for item in service.store.list_task_node_notifications(TASK, node_id)
+        if str(item.kind or '').strip() == 'chatbox_direct'
+    ]
+    return str(rows[-1].notification_id or '').strip() if rows else ''
+
+
+@pytest.mark.asyncio
+async def test_reply_without_operator_mail_has_no_anchor(tmp_path):
     service = _service(tmp_path)
     _seed(service)
 
@@ -229,22 +279,56 @@ async def test_node_reply_to_chatbox_lands_in_thread_and_reads(tmp_path):
         task_id=TASK,
         sender_node_id=CHILD,
         to='chatbox',
-        content='已拿到播放地址，见附件',
+        content='主动上报',
     )
 
-    assert receipt['ok'] is True
     assert receipt['results'][0]['status'] == 'delivered'
-    assert receipt['results'][0]['target'] == 'chatbox'
+    assert receipt['results'][0]['reply_to'] == ''
     rows = service.list_node_chatbox_messages(TASK, CHILD)
     assert len(rows) == 1
-    assert rows[0].content == '已拿到播放地址，见附件'
-    assert rows[0].status == 'unread'
-    assert service.count_unread_node_chatbox_messages(TASK, CHILD) == 1
+    assert rows[0].reply_to == ''
 
-    marked = service.mark_node_chatbox_read(TASK, CHILD)
-    assert marked == 1
-    assert service.count_unread_node_chatbox_messages(TASK, CHILD) == 0
-    assert service.mark_node_chatbox_read(TASK, CHILD) == 0
+
+@pytest.mark.asyncio
+async def test_chatbox_replies_reader_filters_and_marks_read(tmp_path):
+    service = _service(tmp_path)
+    _seed(service)
+
+    mail_receipt = await service.deliver_node_message(
+        task_id=TASK,
+        target_node_id=CHILD,
+        message='来自输入框的要求',
+        origin='chatbox',
+        reply_via='chatbox',
+    )
+    reply_to = str(mail_receipt['message_id'] or '').strip()
+    await service._deliver_node_message_from_node(
+        task_id=TASK,
+        sender_node_id=CHILD,
+        to='chatbox',
+        content='回投一',
+    )
+    await service._deliver_node_message_from_node(
+        task_id=TASK,
+        sender_node_id=CHILD,
+        to='chatbox',
+        content='回投二',
+    )
+
+    all_replies = service.node_chatbox_replies(TASK, CHILD)
+    assert len(all_replies['messages']) == 2
+    assert all(item['reply_to'] == reply_to for item in all_replies['messages'])
+    assert all_replies['unread_count'] == 2
+    # 操作员来信不进回投读数——它本来就在接收列表里。
+    assert all(item['message'] != '来自输入框的要求' for item in all_replies['messages'])
+
+    filtered = service.node_chatbox_replies(TASK, CHILD, reply_to=reply_to)
+    assert len(filtered['messages']) == 2
+
+    marked = service.mark_node_chatbox_read(TASK, CHILD, reply_to=reply_to)
+    assert marked == 2
+    assert service.node_chatbox_replies(TASK, CHILD, reply_to=reply_to)['unread_count'] == 0
+    assert service.mark_node_chatbox_read(TASK, CHILD, reply_to=reply_to) == 0
 
 
 @pytest.mark.asyncio
@@ -279,43 +363,6 @@ async def test_chatbox_is_a_listed_legal_target(tmp_path):
     assert receipt['results'][0]['reason'] == 'target_not_in_task'
     assert 'chatbox' in receipt['legal_targets']
     assert 'frontdoor' in receipt['legal_targets']
-
-
-@pytest.mark.asyncio
-async def test_chatbox_thread_merges_both_directions(tmp_path):
-    service = _service(tmp_path)
-    _seed(service)
-
-    await service.deliver_node_message(
-        task_id=TASK,
-        target_node_id=CHILD,
-        message='第一条要求',
-        origin='chatbox',
-        reply_via='chatbox',
-    )
-    await service.deliver_node_message(
-        task_id=TASK,
-        target_node_id=CHILD,
-        message='普通用户通知，不进 chatbox 线程',
-        origin='user',
-    )
-    await service._deliver_node_message_from_node(
-        task_id=TASK,
-        sender_node_id=CHILD,
-        to='chatbox',
-        content='节点回投',
-    )
-
-    thread = service.node_chatbox_thread(TASK, CHILD)
-    assert len(thread['messages']) == 2
-    # 两个方向各一条；按方向断言内容（同秒投递的时间戳并列不参与顺序断言）。
-    by_direction = {item['direction']: item for item in thread['messages']}
-    assert by_direction['operator']['message'] == '第一条要求'
-    assert by_direction['node']['message'] == '节点回投'
-    assert thread['unread_count'] == 1
-
-    service.mark_node_chatbox_read(TASK, CHILD)
-    assert service.node_chatbox_thread(TASK, CHILD)['unread_count'] == 0
 
 
 @pytest.mark.asyncio

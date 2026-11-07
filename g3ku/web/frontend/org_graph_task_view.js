@@ -867,36 +867,48 @@ function taskNoticeSettleWindowOpen(now) {
 }
 
 
-// —— chatbox 未读徽标 ——
-// 节点对 chatbox 消息的回投落在 `task_chatbox_messages`（unread），节点详情面板
-// 打开期间低频轮询未读数（面板是低频页，一条小 SQL 可接受）；点击徽标开独立
-// 线程窗口，窗口内销账后徽标在下一拍归零。
+// —— chatbox「新回复」图标 ——
+// 节点对输入框消息的回投落在 `task_chatbox_messages`（带 reply_to，unread 两态），
+// 不经过任何 ws 节点补丁。节点详情面板打开期间低频轮询一次回投清单，前端按
+// reply_to 归组：接收列表里那条消息行的右端（interaction-step-side 槽位）出现
+// 「新回复」图标；点击开文档式查看窗口（node_chatbox_viewer.html），窗口打开即
+// 销账该条来信名下的回投，图标在下一拍消失。
 const TASK_CHATBOX_POLL_INTERVAL_MS = 5000;
 let chatboxPollTimer = 0;
 let chatboxPollTaskId = "";
 let chatboxPollNodeId = "";
 let chatboxPollInFlight = false;
 
-function chatboxBadgeSelectionKey() {
+function chatboxReplySelectionKey() {
     return `${String(S.currentTaskId || "").trim()}:${String(S.selectedNodeId || S.currentNodeDetail?.node_id || "").trim()}`;
 }
 
-function stopChatboxBadgePoll() {
+function chatboxReplyState() {
+    if (!S.chatboxReplies || typeof S.chatboxReplies !== "object") S.chatboxReplies = {};
+    return S.chatboxReplies;
+}
+
+// 归组读数：`${taskId}:${nodeId}` → { replyTo: { unread, total } }。
+function chatboxReplyGroups(taskId, nodeId) {
+    return chatboxReplyState()[`${String(taskId || "").trim()}:${String(nodeId || "").trim()}`] || null;
+}
+
+function stopChatboxReplyPoll() {
     if (chatboxPollTimer) {
         window.clearTimeout(chatboxPollTimer);
         chatboxPollTimer = 0;
     }
     chatboxPollTaskId = "";
     chatboxPollNodeId = "";
-    if (U.adChatboxBadge) U.adChatboxBadge.hidden = true;
 }
 
 // 由节点详情的每次渲染调用：选中节点变化时重启轮询，面板没有选中节点时停表。
-function syncChatboxBadgeState() {
+// 在飞轮询不重排（refresh 里的局部重绘会回到这里，重排会变成自激循环）。
+function syncChatboxReplyState() {
     const taskId = String(S.currentTaskId || "").trim();
     const nodeId = String(S.selectedNodeId || S.currentNodeDetail?.node_id || "").trim();
     if (!taskId || !nodeId) {
-        stopChatboxBadgePoll();
+        stopChatboxReplyPoll();
         return;
     }
     if (chatboxPollTaskId !== taskId || chatboxPollNodeId !== nodeId) {
@@ -907,47 +919,56 @@ function syncChatboxBadgeState() {
         chatboxPollTaskId = taskId;
         chatboxPollNodeId = nodeId;
     }
-    if (!chatboxPollTimer) {
-        chatboxPollTimer = window.setTimeout(() => { void refreshChatboxBadge(); }, 0);
+    if (!chatboxPollTimer && !chatboxPollInFlight) {
+        chatboxPollTimer = window.setTimeout(() => { void refreshChatboxReplies(); }, 0);
     }
 }
 
-async function refreshChatboxBadge() {
+async function refreshChatboxReplies() {
     chatboxPollTimer = 0;
     const taskId = String(chatboxPollTaskId || "").trim();
     const nodeId = String(chatboxPollNodeId || "").trim();
     if (!taskId || !nodeId) return;
     if (chatboxPollInFlight) return;
-    const isCurrentSelection = () => chatboxBadgeSelectionKey() === `${taskId}:${nodeId}`;
+    const isCurrentSelection = () => chatboxReplySelectionKey() === `${taskId}:${nodeId}`;
     if (!isCurrentSelection()) return;
     chatboxPollInFlight = true;
     try {
         const data = await ApiClient.getNodeChatbox(taskId, nodeId);
-        const badge = U.adChatboxBadge;
-        if (badge && isCurrentSelection()) {
-            const count = Math.max(0, Number(data?.unread_count || 0) || 0);
-            badge.hidden = count <= 0;
-            if (U.adChatboxCount) U.adChatboxCount.textContent = String(count);
+        if (!isCurrentSelection()) return;
+        const groups = {};
+        for (const item of Array.isArray(data?.messages) ? data.messages : []) {
+            const replyTo = String(item?.reply_to || "").trim();
+            if (!replyTo) continue;
+            const group = groups[replyTo] || (groups[replyTo] = { unread: 0, total: 0 });
+            group.total += 1;
+            if (String(item?.status || "").trim() === "unread") group.unread += 1;
+        }
+        chatboxReplyState()[`${taskId}:${nodeId}`] = groups;
+        // 回投不经过 ws 节点补丁：拿到新归组后局部重绘一次消息列表。
+        if (S.currentNodeDetail && typeof renderMessageList === "function") {
+            renderMessageList(S.currentNodeDetail);
         }
     } catch {
-        // 线程读数失败不打断详情页，下一拍再试。
+        // 回投读数失败不打断详情页，下一拍再试。
     } finally {
         chatboxPollInFlight = false;
         if (isCurrentSelection()) {
             chatboxPollTimer = window.setTimeout(
-                () => { void refreshChatboxBadge(); },
+                () => { void refreshChatboxReplies(); },
                 TASK_CHATBOX_POLL_INTERVAL_MS,
             );
         }
     }
 }
 
-function openNodeChatboxViewer() {
+function openNodeChatboxWindow(replyTo) {
     const taskId = String(S.currentTaskId || "").trim();
     const nodeId = String(S.selectedNodeId || S.currentNodeDetail?.node_id || "").trim();
     if (!taskId || !nodeId) return;
-    const url = `node_chatbox_viewer.html?task_id=${encodeURIComponent(taskId)}&node_id=${encodeURIComponent(nodeId)}`;
-    window.open(url, "negi-chatbox", "width=880,height=760");
+    const params = new URLSearchParams({ task_id: taskId, node_id: nodeId });
+    if (String(replyTo || "").trim()) params.set("reply_to", String(replyTo).trim());
+    window.open(`node_chatbox_viewer.html?${params.toString()}`, "negi-chatbox-reply", "width=880,height=760");
 }
 
 

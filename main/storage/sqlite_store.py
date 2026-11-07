@@ -2792,13 +2792,19 @@ class SQLiteTaskStore:
         self,
         task_id: str,
         node_id: str,
+        *,
+        reply_to: str = '',
     ) -> list[ChatboxMessage]:
         rows = self._fetchall(
             'SELECT payload_json FROM task_chatbox_messages '
             'WHERE task_id = ? AND node_id = ? ORDER BY created_at ASC, message_id ASC',
             (str(task_id or '').strip(), str(node_id or '').strip()),
         )
-        return [self._parse(row['payload_json'], ChatboxMessage) for row in rows]
+        records = [self._parse(row['payload_json'], ChatboxMessage) for row in rows]
+        normalized_reply_to = str(reply_to or '').strip()
+        if not normalized_reply_to:
+            return records
+        return [item for item in records if str(item.reply_to or '').strip() == normalized_reply_to]
 
     def list_chatbox_messages_by_task(self, task_id: str) -> list[ChatboxMessage]:
         """一台任务里所有「节点回投 chatbox」的行，节点详情发出列表的第三个来源。"""
@@ -2809,18 +2815,22 @@ class SQLiteTaskStore:
         )
         return [self._parse(row['payload_json'], ChatboxMessage) for row in rows]
 
-    def count_unread_chatbox_messages(self, task_id: str, node_id: str) -> int:
-        rows = self._fetchall(
-            "SELECT COUNT(*) AS n FROM task_chatbox_messages "
-            "WHERE task_id = ? AND node_id = ? AND status = 'unread'",
-            (str(task_id or '').strip(), str(node_id or '').strip()),
-        )
-        return int(rows[0]['n'] if rows else 0)
+    def mark_chatbox_messages_read(
+        self,
+        task_id: str,
+        node_id: str,
+        *,
+        read_at: str,
+        reply_to: str = '',
+    ) -> int:
+        """销账该节点未读回投，返回本次销账条数。幂等：无未读时返回 0。
 
-    def mark_chatbox_messages_read(self, task_id: str, node_id: str, *, read_at: str) -> int:
-        """把该线程全部未读回投销账，返回本次销账条数。幂等：无未读时返回 0。"""
+        `reply_to` 非空时只销账挂在那条来信下的回投（查看窗口按消息行打开），
+        为空销账全部。
+        """
         normalized_task_id = str(task_id or '').strip()
         normalized_node_id = str(node_id or '').strip()
+        normalized_reply_to = str(reply_to or '').strip()
         normalized_read_at = str(read_at or '').strip()
         rows = self._fetchall(
             'SELECT payload_json FROM task_chatbox_messages '
@@ -2832,6 +2842,8 @@ class SQLiteTaskStore:
         for row in rows:
             record = self._parse(row['payload_json'], ChatboxMessage)
             if record is None:
+                continue
+            if normalized_reply_to and str(record.reply_to or '').strip() != normalized_reply_to:
                 continue
             self.upsert_chatbox_message(
                 record.model_copy(update={'status': 'read', 'read_at': normalized_read_at})

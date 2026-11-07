@@ -160,6 +160,7 @@ from main.runtime.node_mailbox import (
 from main.runtime.node_message_kind import (
     ACCEPTANCE_MIRROR_KINDS,
     KIND_ACCEPTANCE_VERDICT,
+    KIND_CHATBOX_DIRECT,
     KIND_CHILD_ABNORMAL_PAUSE,
     KIND_CHILD_FINAL,
     KIND_WAKE_TIMER,
@@ -5930,11 +5931,14 @@ class MainRuntimeService:
         content: str,
         ref: str = '',
     ) -> dict[str, Any]:
-        """节点 → 操作员 chatbox 线程（节点详情页输入框）。
+        """节点 → 操作员 chatbox 回投（节点详情页接收列表的「新回复」图标）。
 
         与 frontdoor 车道同侧：任何执行节点可回投，验收节点不通。回投只落
-        `task_chatbox_messages` 台账（unread），由节点详情页取走销账——它不进
-        任何会话，也不唤醒任何执行体，所以没有 wake 语义。
+        `task_chatbox_messages`（unread），由节点详情页的查看窗口取走销账——它
+        不进任何会话，也不唤醒任何执行体，所以没有 wake 语义。`reply_to` 指向
+        回投时刻该节点最近的一条 chatbox 来信（信箱里 `chatbox_direct` 行），
+        网页据此把「新回复」图标挂到那条消息行右侧；没有来信锚点（节点主动
+        对 chatbox 说话）时留空，不挂图标。
         """
         normalized_task_id = self.normalize_task_id(task_id)
         task = self.store.get_task(normalized_task_id)
@@ -5946,13 +5950,27 @@ class MainRuntimeService:
         body = str(content or '').strip()
         if not body:
             return {'target': 'chatbox', 'status': 'rejected', 'reason': 'content_required'}
+        normalized_node_id = str(node.node_id or '').strip()
+        chatbox_candidates = [
+            item
+            for item in (self.store.list_task_node_notifications(normalized_task_id, normalized_node_id) or [])
+            if str(getattr(item, 'kind', '') or '').strip() == KIND_CHATBOX_DIRECT
+        ]
+        # 锚点取信箱读序的最后一行（store 按 created_at, notification_id 升序）。
+        # now_iso 只有秒级精度，同一秒内的多条来信按库里权威顺序取最新。
+        reply_to = (
+            str(chatbox_candidates[-1].notification_id or '').strip()
+            if chatbox_candidates
+            else ''
+        )
         message_id = new_command_id().replace('command:', 'cbx:', 1)
         record = ChatboxMessage(
             message_id=message_id,
             task_id=normalized_task_id,
-            node_id=str(node.node_id or '').strip(),
+            node_id=normalized_node_id,
             content=body,
             ref=str(ref or '').strip(),
+            reply_to=reply_to,
             status='unread',
             created_at=now_iso(),
         )
@@ -5961,32 +5979,41 @@ class MainRuntimeService:
             'target': 'chatbox',
             'status': 'delivered',
             'message_id': message_id,
+            'reply_to': reply_to,
             'kind': 'chatbox_reply',
             'wake': 'chatbox_inbox',
             'reason': '',
         }
 
-    def list_node_chatbox_messages(self, task_id: str, node_id: str) -> list[ChatboxMessage]:
+    def list_node_chatbox_messages(
+        self,
+        task_id: str,
+        node_id: str,
+        *,
+        reply_to: str = '',
+    ) -> list[ChatboxMessage]:
         return list(
             self.store.list_chatbox_messages_by_node(
-                self.normalize_task_id(task_id), str(node_id or '').strip()
+                self.normalize_task_id(task_id),
+                str(node_id or '').strip(),
+                reply_to=reply_to,
             )
             or []
         )
 
-    def count_unread_node_chatbox_messages(self, task_id: str, node_id: str) -> int:
-        return int(
-            self.store.count_unread_chatbox_messages(
-                self.normalize_task_id(task_id), str(node_id or '').strip()
-            )
-        )
-
-    def mark_node_chatbox_messages_read(self, task_id: str, node_id: str) -> int:
+    def mark_node_chatbox_messages_read(
+        self,
+        task_id: str,
+        node_id: str,
+        *,
+        reply_to: str = '',
+    ) -> int:
         return int(
             self.store.mark_chatbox_messages_read(
                 self.normalize_task_id(task_id),
                 str(node_id or '').strip(),
                 read_at=now_iso(),
+                reply_to=reply_to,
             )
         )
 
@@ -12765,15 +12792,42 @@ class MainRuntimeService:
             change_type=change_type,
         )
 
-    def node_chatbox_thread(self, task_id: str, node_id: str) -> dict[str, Any]:
-        """chatbox 线程读数（web 端点）：来信 + 回投合并，未读数只数回投。"""
-        return self.query_service.node_chatbox_thread(
-            task_id=self.normalize_task_id(task_id),
-            node_id=self.normalize_node_id(node_id),
-        )
+    def node_chatbox_replies(
+        self,
+        task_id: str,
+        node_id: str,
+        reply_to: str = '',
+    ) -> dict[str, Any]:
+        """chatbox 回投读数（web 端点）：该节点的回投列表（可按来信过滤）+ 未读数。
 
-    def mark_node_chatbox_read(self, task_id: str, node_id: str) -> int:
-        return self.mark_node_chatbox_messages_read(task_id, node_id)
+        操作员来信不在这里——它们本来就在节点详情的接收列表里；这里只有节点
+        的回投，网页用它把「新回复」图标挂到对应消息行并喂给查看窗口。
+        """
+        normalized_task_id = self.normalize_task_id(task_id)
+        normalized_node_id = self.normalize_node_id(node_id)
+        records = self.list_node_chatbox_messages(
+            normalized_task_id, normalized_node_id, reply_to=reply_to
+        )
+        messages = [
+            {
+                'message_id': str(item.message_id or '').strip(),
+                'reply_to': str(item.reply_to or '').strip(),
+                'message': str(item.content or '').strip(),
+                'ref': str(item.ref or '').strip(),
+                'created_at': str(item.created_at or '').strip(),
+                'status': str(item.status or '').strip(),
+            }
+            for item in records
+        ]
+        return {
+            'messages': messages,
+            'unread_count': sum(
+                1 for item in records if str(item.status or '').strip() == 'unread'
+            ),
+        }
+
+    def mark_node_chatbox_read(self, task_id: str, node_id: str, reply_to: str = '') -> int:
+        return self.mark_node_chatbox_messages_read(task_id, node_id, reply_to=reply_to)
 
     def node_detail(self, task_id: str, node_id: str, detail_level: str = 'summary') -> dict[str, Any] | str:
         normalized_task_id = self.normalize_task_id(task_id)

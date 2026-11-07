@@ -39,7 +39,7 @@ function formatNodeDetailHeading(node, { maxChars = 72, compact = true } = {}) {
     return `${nodeId} | ${heading}`;
 }
 
-function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = "", open = false, bodyHtml = "", showRuntime = true, showStatus = true, extraClass = "", leadHtml = "", turnText = "", bare = false }) {
+function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = "", open = false, bodyHtml = "", showRuntime = true, showStatus = true, extraClass = "", leadHtml = "", sideHtml = "", turnText = "", bare = false }) {
     if (bare) {
         return `
         <div class="task-trace-step task-trace-step--bare" data-trace-key="${esc(traceKey)}">${bodyHtml}</div>
@@ -64,6 +64,7 @@ function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = 
         const label = String(statusLabel || "").trim() || traceStatusLabel(status);
         sideParts.push(`<span class="interaction-step-status">${esc(label)}</span>`);
     }
+    if (String(sideHtml || "").trim()) sideParts.push(sideHtml);
     // 中途正文行最左侧的展开钮：折叠时朝右，展开后转 90° 朝下。箭头用对称的 SVG 折线，
     // 墨迹中心与盒子中心重合——展开旋转绕的是圆心，不会像「>」或 CSS 折角那样转出偏心。
     const turnToggle = assistantText
@@ -538,6 +539,16 @@ function bindTaskTraceListInteractions(traceList) {
             jumpToCeoSession(sessionRef.dataset.sessionJump || "");
             return;
         }
+        // 「新回复」图标：打开文档式查看窗口（窗口内销账该条来信名下的回投）。
+        const chatboxChip = target.closest("[data-chatbox-open]");
+        if (chatboxChip instanceof HTMLElement) {
+            event.preventDefault();
+            event.stopPropagation();
+            if (typeof openNodeChatboxWindow === "function") {
+                openNodeChatboxWindow(chatboxChip.dataset.chatboxOpen || "");
+            }
+            return;
+        }
         // 展开态的中途输出正文：点文字照常折叠；只有拖选文本或点滚动条时才拦下
         // <details> 的默认切换，否则用户没法在滚动框里选中/拖动滚动条。
         const turnTitle = target.closest(".task-trace-step--turn-text[open] .interaction-step-title");
@@ -915,6 +926,22 @@ function renderTaskMessageStatus(status) {
     return `<span class="task-message-status" data-status="${esc(status?.statusKey || "unknown")}" data-tone="${esc(status?.key || "info")}" title="${esc(label)}" aria-label="${esc(label)}"><i data-lucide="${esc(icon)}"></i></span>`;
 }
 
+// 「新回复」图标：该消息行名下有未读回投时挂在折叠行右端（interaction-step-side
+// 槽位）。归组来自轮询回投清单（chatboxReplyGroups），点击开文档式查看窗口。
+function renderChatboxReplyChip(replyTo, unread) {
+    const label = unread > 1 ? `新回复·${unread}` : "新回复";
+    return `<button type="button" class="task-chatbox-reply-chip" data-chatbox-open="${esc(replyTo)}" title="查看该消息的节点回复（${unread} 条未读）" aria-label="查看节点回复"><i data-lucide="${esc("corner-down-left")}"></i><span>${esc(label)}</span></button>`;
+}
+
+function chatboxReplyChipForEntry(entry) {
+    const replyTo = String(entry?.notification_id || "").trim();
+    if (!replyTo || typeof chatboxReplyGroups !== "function") return "";
+    const groups = chatboxReplyGroups(S.currentTaskId, S.selectedNodeId || S.currentNodeDetail?.node_id);
+    const group = groups ? groups[replyTo] : null;
+    const unread = Number(group?.unread || 0);
+    return unread > 0 ? renderChatboxReplyChip(replyTo, unread) : "";
+}
+
 function buildNodeMessageListSteps(node = {}) {
     const entries = Array.isArray(node?.message_list) ? node.message_list : [];
     return entries.map((entry, index) => {
@@ -935,9 +962,10 @@ function buildNodeMessageListSteps(node = {}) {
         ].join("");
         return {
             traceKey: `message:${String(entry?.notification_id || entry?.epoch_id || index).trim() || index}`,
-            // 折叠态一行：状态图标 · 时间 · 来自节点 id · 内容预览；展开态只给消息正文。
+            // 折叠态一行：状态图标 · 时间 · 来源药丸 · 内容预览；右端挂「新回复」图标。
             title: taskMessagePreviewText(entry?.message),
             leadHtml,
+            sideHtml: chatboxReplyChipForEntry(entry),
             status: status.key,
             showStatus: false,
             open: index === 0,
@@ -1143,8 +1171,8 @@ function bindTaskMessageTabs() {
 
 function renderMessageList(node, { viewState = null } = {}) {
     if (!U.adMessages) return false;
-    // chatbox 徽标跟随节点详情面板：这里覆盖选中/刷新/切节点的全部路径。
-    if (typeof syncChatboxBadgeState === "function") syncChatboxBadgeState();
+    // chatbox 回投轮询跟随节点详情面板：这里覆盖选中/刷新/切节点的全部路径。
+    if (typeof syncChatboxReplyState === "function") syncChatboxReplyState();
     const effectiveViewState = normalizeTaskDetailViewState(viewState || captureTaskDetailViewState());
     const preservedScrollTop = Number(effectiveViewState?.messageScrollTop || 0);
     const stepDescriptors = activeTaskMessageListSteps(node);
@@ -1525,6 +1553,7 @@ function buildTraceRenderSignature(stepDescriptors) {
         String(step?.status || ""),
         String(step?.bodyHtml || ""),
         String(step?.text || ""),
+        String(step?.sideHtml || ""),
         step?.textOnly === true ? "1" : "0",
     ].join("\u0002")).join("\u0001");
 }

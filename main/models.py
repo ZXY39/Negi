@@ -292,8 +292,10 @@ class FrontdoorNodeMessage(Model):
 class ChatboxMessage(Model):
     """A node's reply addressed to the operator chat box (node detail page thread).
 
-    操作员消息走信箱（kind=chatbox_direct），这里只存节点的回投：按
-    (task_id, node_id) 分线程，`status` 只有 unread/read 两档，网页取走即销账。
+    操作员消息走信箱（kind=chatbox_direct），这里只存节点的回投。`reply_to`
+    指向触发它的一条 chatbox 来信（回投时刻该节点最近的一条 chatbox_direct
+    行），网页接收列表按它把「新回复」图标挂到那条消息行右侧；`status` 只有
+    unread/read 两档，查看窗口取走即销账。
     """
 
     message_id: str
@@ -301,6 +303,7 @@ class ChatboxMessage(Model):
     node_id: str
     content: str = ''
     ref: str = ''
+    reply_to: str = ''
     status: str = 'unread'
     created_at: str = ''
     read_at: str = ''

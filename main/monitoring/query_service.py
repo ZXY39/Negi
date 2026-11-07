@@ -53,7 +53,6 @@ from main.runtime.append_notice_context import (
     normalize_pending_append_notice_records,
 )
 from main.runtime.execution_trace_compaction import build_execution_trace_summary
-from main.runtime.node_message_kind import KIND_CHATBOX_DIRECT
 from main.token_usage import aggregate_node_token_usage
 
 _CONTROL_TOOL_NAMES = {'wait_tool_execution', 'stop_tool_execution'}
@@ -563,51 +562,6 @@ class TaskQueryService:
             reverse=True,
         )
         return entries
-
-    def node_chatbox_thread(self, *, task_id: str, node_id: str) -> dict[str, Any]:
-        """chatbox 线程读数：操作员来信（信箱 chatbox_direct）+ 节点回投（chatbox 台账）。
-
-        操作员消息只取 chatbox_direct 这一个 kind——普通用户/前门通知留在消息列表
-        的既有展示里，不混进操作员专属线程。回投台账只认本节点的行，线程按
-        (task_id, node_id) 隔离。`unread_count` 只数节点回投（操作员来信没有未读态）。
-        """
-        normalized_node_id = str(node_id or '').strip()
-        messages: list[dict[str, Any]] = []
-        for item in list(self._store.list_task_node_notifications(task_id, normalized_node_id) or []):
-            if str(getattr(item, 'kind', '') or '').strip() != KIND_CHATBOX_DIRECT:
-                continue
-            message = str(item.message or '').strip()
-            if not message:
-                continue
-            messages.append(
-                {
-                    'message_id': str(item.notification_id or '').strip(),
-                    'direction': 'operator',
-                    'message': message,
-                    'ref': str(getattr(item, 'ref', '') or '').strip(),
-                    'created_at': str(item.delivered_at or item.created_at or '').strip(),
-                }
-            )
-        for item in list(self._store.list_chatbox_messages_by_node(task_id, normalized_node_id) or []):
-            content = str(item.content or '').strip()
-            if not content:
-                continue
-            messages.append(
-                {
-                    'message_id': str(item.message_id or '').strip(),
-                    'direction': 'node',
-                    'message': content,
-                    'ref': str(item.ref or '').strip(),
-                    'created_at': str(item.created_at or '').strip(),
-                }
-            )
-        messages.sort(
-            key=lambda entry: (str(entry.get('created_at') or ''), str(entry.get('message_id') or '')),
-        )
-        return {
-            'messages': messages,
-            'unread_count': int(self._store.count_unread_chatbox_messages(task_id, normalized_node_id)),
-        }
 
     def get_tasks(
         self,

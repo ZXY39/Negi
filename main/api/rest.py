@@ -266,25 +266,37 @@ async def post_task_node_notice(task_id: str, node_id: str, payload: dict | None
 
 
 @router.get('/tasks/{task_id}/nodes/{node_id}/chatbox')
-async def get_task_node_chatbox(task_id: str, node_id: str):
-    """chatbox 线程读数：操作员来信 + 节点回投按时间合并，附未读回投条数。"""
+async def get_task_node_chatbox(task_id: str, node_id: str, reply_to: str = Query('')):
+    """chatbox 回投读数：该节点的回投列表（可选按来信 notification_id 过滤）+ 未读数。
+
+    操作员来信不在响应里——它们本来就在接收列表；前端按行上 `reply_to`
+    把「新回复」图标挂到对应消息行。
+    """
     task_id = _ensure_task_route_id(task_id)
     service = _service()
     await service.startup()
     task_id = service.normalize_task_id(task_id)
-    return await asyncio.to_thread(service.node_chatbox_thread, task_id, node_id)
+    return await asyncio.to_thread(
+        service.node_chatbox_replies,
+        task_id,
+        node_id,
+        str(reply_to or '').strip(),
+    )
 
 
 @router.post('/tasks/{task_id}/nodes/{node_id}/chatbox/read')
-async def post_task_node_chatbox_read(task_id: str, node_id: str):
-    """销账该线程全部未读回投，返回剩余未读数（正常为 0）。"""
+async def post_task_node_chatbox_read(task_id: str, node_id: str, payload: dict | None = Body(default=None)):
+    """销账未读回投：`reply_to` 非空只销那条来信名下的，为空销全部；返回剩余未读。"""
     task_id = _ensure_task_route_id(task_id)
     service = _service()
     await service.startup()
     task_id = service.normalize_task_id(task_id)
-    marked = await asyncio.to_thread(service.mark_node_chatbox_read, task_id, node_id)
-    remaining = await asyncio.to_thread(service.count_unread_node_chatbox_messages, task_id, node_id)
-    return {'marked': marked, 'unread_count': remaining}
+    reply_to = str((payload or {}).get('reply_to') or '').strip()
+    marked = await asyncio.to_thread(service.mark_node_chatbox_read, task_id, node_id, reply_to)
+    remaining = await asyncio.to_thread(
+        service.node_chatbox_replies, task_id, node_id, reply_to
+    )
+    return {'marked': marked, 'unread_count': int(remaining.get('unread_count') or 0)}
 
 
 @router.post('/tasks/{task_id}/nodes/{node_id}/pause')
