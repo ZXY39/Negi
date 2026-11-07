@@ -26,7 +26,7 @@ parameters:
       type: string
       enum: [preview, confirm]
       description: "`preview` returns candidates and a confirmation token; `confirm` performs deletion."
-    任务id列表:
+    task_ids:
       type: array
       items:
         type: string
@@ -34,7 +34,7 @@ parameters:
     confirmation_token:
       type: string
       description: Required in `confirm` mode. Must come from a prior preview of the same batch.
-  required: [mode, 任务id列表]
+  required: [mode, task_ids]
 governance:
   display_name: Task Delete
   description: Preview and delete one or more saved tasks.

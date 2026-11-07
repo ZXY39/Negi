@@ -39,7 +39,7 @@
 
 1. 获取任务事实：先用 `task_failed_nodes` 获取失败节点 id，再用 `task_progress` 获取状态、树状结构、最新节点输出、任务摘要。
 2. 先定位失败节点：结合 `task_progress` 返回的节点树，判断每个失败节点位于哪一层、属于哪条分支，以及是否是验收节点失败、子节点失败上浮、或根节点直接失败。
-3. 逐个分析失败节点：对每个失败节点调用 `task_node_detail(task_id, 节点id)`，查看节点详情、`failure_reason`、`final_output`、`check_result`、`execution_trace` 以及关联工件；如果当前可见信息不足以确认，只能写成“基于节点树/节点详情可见信息推断”。
+3. 逐个分析失败节点：对每个失败节点调用 `task_node_detail(task_id, node_id)`，查看节点详情、`failure_reason`、`final_output`、`check_result`、`execution_trace` 以及关联工件；如果当前可见信息不足以确认，只能写成“基于节点树/节点详情可见信息推断”。
 4. 顺着树往上梳理：沿父子关系向上追溯，说明局部失败如何传导为更高层偏差或最终任务失败。
 5. 提炼可行动结论：给出后续建议，而不是只复述日志。
 

@@ -2,7 +2,7 @@ schema_version: 1
 kind: tool
 display_name: "获取任务"
 name: task_list
-description: List tasks filtered by status and long-term type; rows carry task id, creation time, goal and latest progress. Pass 查询范围=全局 to list across all sessions.
+description: List tasks filtered by status and long-term type; rows carry task id, creation time, goal and latest progress. Pass scope=global to list across all sessions.
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''
@@ -10,11 +10,11 @@ source:
   ref: ''
 current_version:
   summary: >-
-    Resource-local task runtime tool. The numeric 任务类型 enum (1=all, 2=in progress, 3=failed,
-    4=unread) is replaced by 状态 (全部/进行中/成功/失败) plus 长期 and 只看未读 booleans; rows now
-    carry task id, creation time, task goal and latest progress, with 长期/待命/暂停/未读 folded
-    into the status label. Handler and governance live with the resource so discovery can
-    refresh without a host restart.
+    Resource-local task runtime tool. The numeric task-type enum (1=all, 2=in progress, 3=failed,
+    4=unread) is replaced by status (all/in_progress/success/failed) plus long_term and unread_only
+    booleans; rows now carry task id, creation time, task goal and latest progress, with
+    long-term/standby/paused/unread folded into the status label. Handler and governance live with
+    the resource so discovery can refresh without a host restart.
   compare_rule: Treat manifest, main/, parameter contract, or returned payload changes as version-relevant.
   source_of_truth: resource.yaml, main/, and toolskills together define the effective behavior.
 requires:
@@ -27,24 +27,24 @@ permissions:
 parameters:
   type: object
   properties:
-    状态:
+    status:
       type: string
-      enum: ["全部", "进行中", "成功", "失败"]
-      description: "Filter by task status; omit or 全部 = all tasks."
-    长期:
+      enum: ["all", "in_progress", "success", "failed"]
+      description: "Filter by task status; omit or all = all tasks."
+    long_term:
       type: boolean
       description: "true=list only long-term (continuous standby) tasks, false=only one-shot tasks; omit for no filter."
-    只看未读:
+    unread_only:
       type: boolean
       description: "true=list only tasks whose updates the session has not seen yet; omit for no filter."
-    查询范围:
+    scope:
       type: string
-      enum: ["本会话", "全局"]
-      description: "本会话 (default) = only tasks of the current session; 全局 = tasks across all sessions."
+      enum: ["session", "global"]
+      description: "session (default) = only tasks of the current session; global = tasks across all sessions."
   required: []
 governance:
   display_name: Task List
-  description: List tasks filtered by status and long-term type; rows carry task id, creation time, goal and latest progress. Pass 查询范围=全局 to list across all sessions.
+  description: List tasks filtered by status and long-term type; rows carry task id, creation time, goal and latest progress. Pass scope=global to list across all sessions.
   risk_level: low
   destructive: false
   allowed_roles:

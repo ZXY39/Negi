@@ -26,7 +26,7 @@ parameters:
       type: string
       enum: [list, id]
       description: "`list` filters by date range; `id` returns explicit task ids."
-    "任务关键词":
+    task_keywords:
       type: array
       items:
         type: string
@@ -37,7 +37,7 @@ parameters:
     to:
       type: string
       description: "Required in `list` mode. Format `YYYY/M/D`."
-    "任务id列表":
+    task_ids:
       type: array
       items:
         type: string

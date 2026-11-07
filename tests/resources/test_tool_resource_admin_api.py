@@ -1068,15 +1068,15 @@ def test_task_node_detail_tool_parameters_match_resource_contract():
     assert tool.parameters == {
         'type': 'object',
         'properties': {
-            '任务id': {'type': 'string', 'description': '目标任务 id。'},
-            '节点id': {'type': 'string', 'description': '目标节点 id。'},
+            'task_id': {'type': 'string', 'description': '目标任务 id。'},
+            'node_id': {'type': 'string', 'description': '目标节点 id。'},
             'detail_level': {
                 'type': 'string',
                 'enum': ['summary', 'full'],
                 'description': 'summary 返回轻量节点详情与 refs/工件预览；full 返回完整执行轨迹和完整工件列表。',
             },
         },
-        'required': ['任务id', '节点id'],
+        'required': ['task_id', 'node_id'],
     }
 
 

@@ -9080,7 +9080,7 @@ class ReActToolLoop:
     def _is_current_task_progress_call(*, tool_name: str, arguments: dict[str, Any], task_id: str) -> bool:
         if str(tool_name or '').strip() != 'task_progress':
             return False
-        requested_task_id = str(arguments.get('任务id') or arguments.get('task_id') or '').strip()
+        requested_task_id = str(arguments.get('task_id') or '').strip()
         return bool(requested_task_id) and requested_task_id == str(task_id or '').strip()
 
     @classmethod

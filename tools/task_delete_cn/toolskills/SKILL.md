@@ -9,13 +9,13 @@
 
 ## 参数规则
 
-- `任务id列表` 必填，支持批量。
+- `task_ids` 必填，支持批量。
 - `mode="preview"`：
   - 不会删除任何数据
   - 只返回候选任务、状态、摘要、磁盘占用和 `confirmation_token`
 - `mode="confirm"`：
   - 必须带上 `confirmation_token`
-  - `任务id列表` 必须与预览阶段完全一致
+  - `task_ids` 必须与预览阶段完全一致
 
 ## 删除行为
 

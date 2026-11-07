@@ -3760,12 +3760,12 @@ class MainRuntimeService:
         if raw_keywords in (None, ''):
             return []
         if not isinstance(raw_keywords, list):
-            raise ValueError('任务关键词 must be an array')
+            raise ValueError('task_keywords must be an array')
         return [str(item or '').strip() for item in list(raw_keywords or []) if str(item or '').strip()]
 
     def _normalize_task_id_list(self, raw_task_ids: list[str] | None, *, allow_empty: bool) -> list[str]:
         if not isinstance(raw_task_ids, list):
-            raise ValueError('任务id列表 must be an array')
+            raise ValueError('task_ids must be an array')
         normalized: list[str] = []
         seen: set[str] = set()
         for raw_task_id in list(raw_task_ids or []):
@@ -3775,7 +3775,7 @@ class MainRuntimeService:
             seen.add(task_id)
             normalized.append(task_id)
         if not allow_empty and not normalized:
-            raise ValueError('任务id列表 must not be empty')
+            raise ValueError('task_ids must not be empty')
         return normalized
 
     @staticmethod
@@ -14137,33 +14137,28 @@ class MainRuntimeService:
         return enriched
 
     def summary(self, session_id: str | None) -> str:
-        # session_id 传 None/'' = 全局口径（跨会话），由工具层按「查询范围」参数决定。
+        # session_id 传 None/'' = 全局口径（跨会话），由工具层按 scope 参数决定。
         normalized = str(session_id or '').strip()
         return self.query_service.summary(normalized or None).text
 
-    _TASK_LIST_STATUS_FILTERS = {
-        '全部': 'all',
-        '进行中': 'in_progress',
-        '成功': 'success',
-        '失败': 'failed',
-    }
+    _TASK_LIST_STATUS_FILTERS = ('all', 'in_progress', 'success', 'failed')
     _TASK_LIST_STATUS_LABELS = {'in_progress': '进行中', 'success': '成功', 'failed': '失败'}
 
     def get_tasks(
         self,
         session_id: str | None,
         *,
-        status: str = '全部',
+        status: str = 'all',
         long_term: bool | None = None,
         unread_only: bool = False,
     ) -> str:
         normalized = str(session_id or '').strip()
-        status_key = str(status or '全部').strip()
+        status_key = str(status or 'all').strip()
         if status_key not in self._TASK_LIST_STATUS_FILTERS:
             raise ValueError('invalid_status_filter')
         items = self.query_service.get_tasks(
             normalized or None,
-            self._TASK_LIST_STATUS_FILTERS[status_key],
+            status_key,
             long_term=long_term,
             unread_only=bool(unread_only),
         )
@@ -15062,14 +15057,14 @@ def _tool_runtime_payload(runtime: dict[str, Any] | None, kwargs: dict[str, Any]
     return fallback if isinstance(fallback, dict) else {}
 
 
-_TASK_KEYWORDS_PARAM = '\u4efb\u52a1\u5173\u952e\u8bcd'
-_TASK_ID_LIST_PARAM = '\u4efb\u52a1id\u5217\u8868'
-_TASK_SCOPE_PARAM = '查询范围'
-_TASK_SCOPE_GLOBAL = '全局'
+_TASK_KEYWORDS_PARAM = 'task_keywords'
+_TASK_ID_LIST_PARAM = 'task_ids'
+_TASK_SCOPE_PARAM = 'scope'
+_TASK_SCOPE_GLOBAL = 'global'
 
 
 def _tool_session_scope(runtime: dict[str, Any], kwargs: dict[str, Any]) -> str | None:
-    """按「查询范围」参数解析会话口径：全局=None（跨会话全量），缺省=当前会话。"""
+    """按 scope 参数解析会话口径：global=None（跨会话全量），缺省=当前会话。"""
     scope = str(kwargs.get(_TASK_SCOPE_PARAM) or '').strip()
     if scope == _TASK_SCOPE_GLOBAL:
         return None
@@ -15086,7 +15081,7 @@ class TaskSummaryTool(Tool):
 
     @property
     def description(self) -> str:
-        return '返回总任务、进行中（含其中暂停数）、失败任务数量；默认统计当前会话，查询范围=全局时统计所有会话。'
+        return '返回总任务、进行中（含其中暂停数）、失败任务数量；默认统计当前会话，scope=global 时统计所有会话。'
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -15095,8 +15090,8 @@ class TaskSummaryTool(Tool):
             'properties': {
                 _TASK_SCOPE_PARAM: {
                     'type': 'string',
-                    'enum': ['本会话', '全局'],
-                    'description': '本会话（默认）=只统计当前会话创建的任务；全局=统计所有会话的任务。',
+                    'enum': ['session', 'global'],
+                    'description': 'session（默认）=只统计当前会话创建的任务；global=统计所有会话的任务。',
                 },
             },
         }
@@ -15117,30 +15112,30 @@ class GetTasksTool(Tool):
 
     @property
     def description(self) -> str:
-        return '按状态与长期类型返回任务列表（任务id、创建时间、任务目标、最新进展）；默认当前会话，查询范围=全局时跨会话（全局结果逐行附会话归属）。'
+        return '按状态与长期类型返回任务列表（任务id、创建时间、任务目标、最新进展）；默认当前会话，scope=global 时跨会话（全局结果逐行附会话归属）。'
 
     @property
     def parameters(self) -> dict[str, Any]:
         return {
             'type': 'object',
             'properties': {
-                '状态': {
+                'status': {
                     'type': 'string',
-                    'enum': ['全部', '进行中', '成功', '失败'],
-                    'description': '按任务状态过滤，缺省=全部。',
+                    'enum': ['all', 'in_progress', 'success', 'failed'],
+                    'description': '按任务状态过滤，缺省=all。',
                 },
-                '长期': {
+                'long_term': {
                     'type': 'boolean',
                     'description': 'true=只列长期（连续待命）任务，false=只列一次性任务；缺省不过滤。',
                 },
-                '只看未读': {
+                'unread_only': {
                     'type': 'boolean',
                     'description': 'true=只列有会话还没看过的更新的任务；缺省不过滤。',
                 },
                 _TASK_SCOPE_PARAM: {
                     'type': 'string',
-                    'enum': ['本会话', '全局'],
-                    'description': '本会话（默认）=只列当前会话的任务；全局=列所有会话的任务。',
+                    'enum': ['session', 'global'],
+                    'description': 'session（默认）=只列当前会话的任务；global=列所有会话的任务。',
                 },
             },
             'required': [],
@@ -15149,12 +15144,12 @@ class GetTasksTool(Tool):
     async def execute(self, __g3ku_runtime: dict[str, Any] | None = None, **kwargs: Any) -> str:
         runtime = _tool_runtime_payload(__g3ku_runtime, kwargs)
         await self._service.startup()
-        long_term = kwargs.get('长期')
+        long_term = kwargs.get('long_term')
         return self._service.get_tasks(
             _tool_session_scope(runtime, kwargs),
-            status=str(kwargs.get('状态') or '全部').strip(),
+            status=str(kwargs.get('status') or 'all').strip(),
             long_term=None if long_term is None else bool(long_term),
-            unread_only=bool(kwargs.get('只看未读')),
+            unread_only=bool(kwargs.get('unread_only')),
         )
 
 
@@ -15305,123 +15300,14 @@ class TaskFailedNodesTool(Tool):
     def parameters(self) -> dict[str, Any]:
         return {
             'type': 'object',
-            'properties': {'任务id': {'type': 'string', 'description': '目标任务 id。'}},
-            'required': ['任务id'],
+            'properties': {'task_id': {'type': 'string', 'description': '目标任务 id。'}},
+            'required': ['task_id'],
         }
 
     async def execute(self, **kwargs: Any) -> str:
         await self._service.startup()
-        task_id = str(kwargs.get('任务id') or '').strip()
+        task_id = str(kwargs.get('task_id') or '').strip()
         return self._service.failed_node_ids(task_id)
-
-
-class _LegacyTaskNodeDetailToolMojibakeB(Tool):
-    def __init__(self, service: MainRuntimeService):
-        self._service = service
-
-    @property
-    def name(self) -> str:
-        return '_legacy_task_node_detail_removed_b0'
-
-    @property
-    def description(self) -> str:
-        return '按任务 id 和节点 id 返回节点详情及关联工件列表。'
-
-    @property
-    def parameters(self) -> dict[str, Any]:
-        return {
-            'type': 'object',
-            'properties': {
-                '任务id': {'type': 'string', 'description': '目标任务 id。'},
-                '节点id': {'type': 'string', 'description': '目标节点 id。'},
-            },
-            'required': ['任务id', '节点id'],
-        }
-
-    async def execute(self, **kwargs: Any) -> dict[str, Any] | str:
-        await self._service.startup()
-        task_id = str(kwargs.get('任务id') or '').strip()
-        node_id = str(kwargs.get('节点id') or '').strip()
-        return self._service.node_detail(task_id, node_id)
-
-
-class _LegacyTaskNodeDetailToolMojibakeA(Tool):
-    def __init__(self, service: MainRuntimeService):
-        self._service = service
-
-    @property
-    def name(self) -> str:
-        return '_legacy_task_node_detail_removed_b'
-
-    @property
-    def description(self) -> str:
-        return '按任务 id 和节点 id 返回节点详情及关联工件列表。'
-
-    @property
-    def parameters(self) -> dict[str, Any]:
-        return {
-            'type': 'object',
-            'properties': {
-                '浠诲姟id': {'type': 'string', 'description': '目标任务 id。'},
-                '鑺傜偣id': {'type': 'string', 'description': '目标节点 id。'},
-                'detail_level': build_detail_level_schema(
-                    description='summary 返回轻量节点详情与 refs；full 返回完整执行轨迹和完整工件列表。',
-                ),
-            },
-            'required': ['浠诲姟id', '鑺傜偣id'],
-        }
-
-    async def execute(self, **kwargs: Any) -> dict[str, Any] | str:
-        await self._service.startup()
-        task_id = str(kwargs.get('浠诲姟id') or '').strip()
-        node_id = str(kwargs.get('鑺傜偣id') or '').strip()
-        detail_level = str(kwargs.get('detail_level') or 'summary').strip()
-        try:
-            result = self._service.node_detail(task_id, node_id, detail_level=detail_level)
-        except TypeError as exc:
-            if "unexpected keyword argument 'detail_level'" not in str(exc):
-                raise
-            result = self._service.node_detail(task_id, node_id)
-        return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
-
-
-class _TaskNodeDetailToolMojibakeCurrent(Tool):
-    def __init__(self, service: MainRuntimeService):
-        self._service = service
-
-    @property
-    def name(self) -> str:
-        return '_legacy_task_node_detail_removed_a'
-
-    @property
-    def description(self) -> str:
-        return '按任务 id 和节点 id 返回节点详情及关联工件列表。'
-
-    @property
-    def parameters(self) -> dict[str, Any]:
-        return {
-            'type': 'object',
-            'properties': {
-                '任务id': {'type': 'string', 'description': '目标任务 id。'},
-                '节点id': {'type': 'string', 'description': '目标节点 id。'},
-                'detail_level': build_detail_level_schema(
-                    description='summary 返回轻量节点详情与 refs/工件预览；full 返回完整执行轨迹和完整工件列表。',
-                ),
-            },
-            'required': ['任务id', '节点id'],
-        }
-
-    async def execute(self, **kwargs: Any) -> dict[str, Any] | str:
-        await self._service.startup()
-        task_id = str(kwargs.get('任务id') or '').strip()
-        node_id = str(kwargs.get('节点id') or '').strip()
-        detail_level = str(kwargs.get('detail_level') or 'summary').strip()
-        try:
-            return self._service.node_detail(task_id, node_id, detail_level=detail_level)
-        except TypeError as exc:
-            if "unexpected keyword argument 'detail_level'" not in str(exc):
-                raise
-            return self._service.node_detail(task_id, node_id)
 
 
 class TaskNodeDetailTool(Tool):
@@ -15441,19 +15327,19 @@ class TaskNodeDetailTool(Tool):
         return {
             'type': 'object',
             'properties': {
-                '任务id': {'type': 'string', 'description': '目标任务 id。'},
-                '节点id': {'type': 'string', 'description': '目标节点 id。'},
+                'task_id': {'type': 'string', 'description': '目标任务 id。'},
+                'node_id': {'type': 'string', 'description': '目标节点 id。'},
                 'detail_level': build_detail_level_schema(
                     description='summary 返回轻量节点详情与 refs/工件预览；full 返回完整执行轨迹和完整工件列表。',
                 ),
             },
-            'required': ['任务id', '节点id'],
+            'required': ['task_id', 'node_id'],
         }
 
     async def execute(self, **kwargs: Any) -> dict[str, Any] | str:
         await self._service.startup()
-        task_id = str(kwargs.get('任务id') or '').strip()
-        node_id = str(kwargs.get('节点id') or '').strip()
+        task_id = str(kwargs.get('task_id') or '').strip()
+        node_id = str(kwargs.get('node_id') or '').strip()
         detail_level = str(kwargs.get('detail_level') or 'summary').strip()
         try:
             result = self._service.node_detail(task_id, node_id, detail_level=detail_level)

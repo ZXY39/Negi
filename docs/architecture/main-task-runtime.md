@@ -57,7 +57,7 @@
 - **回合收尾**：连续节点的正常收尾是 `enter_wait(waiting_for=["frontdoor"])`。`frontdoor` 是活性声明而不是唤醒判据——任何来源的投递（上游、用户、外部订阅事件、`wake_timer`）都能叫醒它；它真正的作用是让等待图把它当合法无限等待，并作为「设计内待命」的判据。纯文本收尾的打回文案对连续节点只给 `enter_wait` 与 `send_message` 两条出路（`plain_text_reply` 的连续变体）。
 - **父节点被拖住**：连续子节点存活期间，父节点提交会被 `_final_submission_blockers` 拦下（非终态子节点仍存在）；结束整条分支要先让连续子节点请求结束、再 `terminate` 之。
 - **不做什么**：终态仍是最终态——没有归档状态、没有终态复活、所有终态闸门（投递 `target_terminal`、resume `node_terminal` / `task_terminal`、`_run_node_turn` 短路）保持原样。连续任务靠**不进入终态**获得长期生命，而不是靠终态后再打开；结束后的终态是取消，不负责给连续工作评「成功」。
-- **显示**：连续节点停在声明了外部唤醒源的相位上，任务与节点渲染为「待命」而不是「运行/等待」，合同归 `web-and-admin.md`「Task Hall Action Contract」；停滞判定对这一形态的豁免归 `heartbeat-system.md`「Task Stall Detection」。会话侧 `task_list` 的「长期」过滤与行内 `·长期` 标记读的是同一个真值——`SQLiteTaskStore.map_task_root_continuous` 按任务批量取根节点 `metadata.continuous`，不建任务级副本（工具面合同归 `tool-and-skill-system.md` 的 task_list 行）。
+- **显示**：连续节点停在声明了外部唤醒源的相位上，任务与节点渲染为「待命」而不是「运行/等待」，合同归 `web-and-admin.md`「Task Hall Action Contract」；停滞判定对这一形态的豁免归 `heartbeat-system.md`「Task Stall Detection」。会话侧 `task_list` 的 `long_term` 过滤与行内 `·长期` 标记读的是同一个真值——`SQLiteTaskStore.map_task_root_continuous` 按任务批量取根节点 `metadata.continuous`，不建任务级副本（工具面合同归 `tool-and-skill-system.md` 的 task_list 行）。
 
 ## 附录 A：已删除的 distribution epoch（历史说明，勿据此实现）
 

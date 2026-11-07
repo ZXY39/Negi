@@ -1641,7 +1641,7 @@ async def test_current_task_progress_after_spawn_fails_after_three_ignored_repai
                         ToolCallRequest(
                             id=f'call:progress:{self._turn}',
                             name='task_progress',
-                            arguments={'任务id': task_id},
+                            arguments={'task_id': task_id},
                         )
                     ],
                     finish_reason='tool_calls',

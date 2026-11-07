@@ -27,13 +27,13 @@ permissions:
 parameters:
   type: object
   properties:
-    任务id:
+    task_id:
       type: string
       description: Target task id.
-    节点id:
+    node_id:
       type: string
       description: Target node id.
-  required: [任务id, 节点id]
+  required: [task_id, node_id]
 governance:
   display_name: Task Node Detail
   description: 'View a task node''s detail and its related artifacts. Agents always receive the full execution trace: every tool call with its arguments and its resolved output. Large results are externalised to a content ref, so continue with content_search / content_open on that ref instead of expecting the payload inline.'

@@ -1,7 +1,7 @@
 """任务查询工具作用域（本会话/全局）单测。
 
 覆盖：query_service.summary 口径标注与暂停细分、service.get_tasks 全局行格式、
-内嵌 TaskSummaryTool/GetTasksTool 与资源工具 handler 的「查询范围」参数解析。
+内嵌 TaskSummaryTool/GetTasksTool 与资源工具 handler 的 scope 参数解析。
 """
 
 from __future__ import annotations
@@ -89,11 +89,11 @@ def test_get_tasks_rows_carry_time_goal_and_progress(tmp_path) -> None:
     assert '- task:qq1 [成功·未读] 创建于 2026-09-13 10:00 ｜ 目标：title-task:qq1 ｜ 进展：brief-task:qq1' in session_list
     assert '(web:qq)' not in session_list  # 会话口径不带会话归属
 
-    global_failed = service.get_tasks(None, status='失败')
+    global_failed = service.get_tasks(None, status='failed')
     assert global_failed == '- task:web2 [失败] 创建于 2026-09-13 10:00 (web:other) ｜ 目标：title-task:web2 ｜ 进展：brief-task:web2'
 
     # 全局口径逐行附会话归属；in_progress 且 paused 标为 进行中/暂停，不当运行转述。
-    global_in_progress = service.get_tasks(None, status='进行中')
+    global_in_progress = service.get_tasks(None, status='in_progress')
     assert '[进行中/暂停] 创建于 2026-09-13 10:00 (web:qq)' in global_in_progress
     assert '(web:other)' in global_in_progress
     assert 'task:qq1' not in global_in_progress  # success 不在「进行中」
@@ -110,7 +110,7 @@ def test_get_tasks_rejects_unknown_status(tmp_path) -> None:
     _seed(service)
 
     with pytest.raises(ValueError):
-        service.get_tasks('web:qq', status='暂停')
+        service.get_tasks('web:qq', status='paused')
 
 
 class _RecordingService:
@@ -125,7 +125,7 @@ class _RecordingService:
         self.summary_calls.append(session_id)
         return 'ok'
 
-    def get_tasks(self, session_id, *, status='全部', long_term=None, unread_only=False):
+    def get_tasks(self, session_id, *, status='all', long_term=None, unread_only=False):
         self.get_tasks_calls.append((session_id, {'status': status, 'long_term': long_term, 'unread_only': unread_only}))
         return 'ok'
 
@@ -138,23 +138,23 @@ async def test_builtin_tools_scope_param() -> None:
 
     summary_tool = TaskSummaryTool(stub)
     await summary_tool.execute(__g3ku_runtime=runtime)
-    await summary_tool.execute(__g3ku_runtime=runtime, **{'查询范围': '全局'})
-    await summary_tool.execute(__g3ku_runtime=runtime, **{'查询范围': '本会话'})
+    await summary_tool.execute(__g3ku_runtime=runtime, **{'scope': 'global'})
+    await summary_tool.execute(__g3ku_runtime=runtime, **{'scope': 'session'})
     assert stub.summary_calls == ['web:current', None, 'web:current']
-    assert '查询范围' in summary_tool.parameters['properties']
+    assert 'scope' in summary_tool.parameters['properties']
 
     list_tool = GetTasksTool(stub)
     await list_tool.execute(__g3ku_runtime=runtime)
-    await list_tool.execute(__g3ku_runtime=runtime, **{'状态': '进行中', '查询范围': '全局'})
-    await list_tool.execute(__g3ku_runtime=runtime, **{'长期': True, '只看未读': True})
-    await list_tool.execute(__g3ku_runtime=runtime, **{'长期': False})
+    await list_tool.execute(__g3ku_runtime=runtime, **{'status': 'in_progress', 'scope': 'global'})
+    await list_tool.execute(__g3ku_runtime=runtime, **{'long_term': True, 'unread_only': True})
+    await list_tool.execute(__g3ku_runtime=runtime, **{'long_term': False})
     assert stub.get_tasks_calls == [
-        ('web:current', {'status': '全部', 'long_term': None, 'unread_only': False}),
-        (None, {'status': '进行中', 'long_term': None, 'unread_only': False}),
-        ('web:current', {'status': '全部', 'long_term': True, 'unread_only': True}),
-        ('web:current', {'status': '全部', 'long_term': False, 'unread_only': False}),
+        ('web:current', {'status': 'all', 'long_term': None, 'unread_only': False}),
+        (None, {'status': 'in_progress', 'long_term': None, 'unread_only': False}),
+        ('web:current', {'status': 'all', 'long_term': True, 'unread_only': True}),
+        ('web:current', {'status': 'all', 'long_term': False, 'unread_only': False}),
     ]
-    assert {'状态', '长期', '只看未读', '查询范围'} <= set(list_tool.parameters['properties'])
+    assert {'status', 'long_term', 'unread_only', 'scope'} <= set(list_tool.parameters['properties'])
     assert list_tool.parameters['required'] == []
 
 
@@ -174,20 +174,20 @@ async def test_resource_tools_scope_param() -> None:
 
     summary_handler = summary_mod.build(SimpleNamespace(services=SimpleNamespace(main_task_service=stub)))
     await summary_handler.execute(__g3ku_runtime=runtime)
-    await summary_handler.execute(__g3ku_runtime=runtime, **{'查询范围': '全局'})
+    await summary_handler.execute(__g3ku_runtime=runtime, **{'scope': 'global'})
     assert stub.summary_calls == ['ext:qq-official:abc', None]
-    assert '查询范围' in summary_handler.parameters['properties']
+    assert 'scope' in summary_handler.parameters['properties']
 
     list_handler = fetch_mod.build(SimpleNamespace(services=SimpleNamespace(main_task_service=stub)))
     await list_handler.execute(__g3ku_runtime=runtime)
-    await list_handler.execute(__g3ku_runtime=runtime, **{'状态': '成功', '查询范围': '全局'})
-    await list_handler.execute(__g3ku_runtime=runtime, **{'长期': False, '只看未读': True})
+    await list_handler.execute(__g3ku_runtime=runtime, **{'status': 'success', 'scope': 'global'})
+    await list_handler.execute(__g3ku_runtime=runtime, **{'long_term': False, 'unread_only': True})
     assert stub.get_tasks_calls == [
-        ('ext:qq-official:abc', {'status': '全部', 'long_term': None, 'unread_only': False}),
-        (None, {'status': '成功', 'long_term': None, 'unread_only': False}),
-        ('ext:qq-official:abc', {'status': '全部', 'long_term': False, 'unread_only': True}),
+        ('ext:qq-official:abc', {'status': 'all', 'long_term': None, 'unread_only': False}),
+        (None, {'status': 'success', 'long_term': None, 'unread_only': False}),
+        ('ext:qq-official:abc', {'status': 'all', 'long_term': False, 'unread_only': True}),
     ]
-    assert {'状态', '长期', '只看未读', '查询范围'} <= set(list_handler.parameters['properties'])
+    assert {'status', 'long_term', 'unread_only', 'scope'} <= set(list_handler.parameters['properties'])
     assert list_handler.parameters['required'] == []
 
 

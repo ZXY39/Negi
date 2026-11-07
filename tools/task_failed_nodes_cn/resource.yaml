@@ -22,10 +22,10 @@ permissions:
 parameters:
   type: object
   properties:
-    任务id:
+    task_id:
       type: string
       description: Target task id.
-  required: [任务id]
+  required: [task_id]
 governance:
   display_name: Task Failed Nodes
   description: List failed node ids inside a task tree.

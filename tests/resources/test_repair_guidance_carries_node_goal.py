@@ -14,7 +14,7 @@ ANCHOR = '这一节点的交付目标：' + GOAL + '。'
 
 
 def _repeat_call() -> SimpleNamespace:
-    return SimpleNamespace(name='task_progress', arguments={'任务id': 'task:discipline'})
+    return SimpleNamespace(name='task_progress', arguments={'task_id': 'task:discipline'})
 
 
 def _signature(call: SimpleNamespace) -> str:
