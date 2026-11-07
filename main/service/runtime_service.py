@@ -135,7 +135,6 @@ from main.runtime.adaptive_tool_budget import AdaptiveToolBudgetController
 from main.runtime.chat_backend import ChatBackend
 from main.runtime.continuous_node import (
     CONTINUOUS_METADATA_KEY,
-    compose_continuous_acceptance_prompt,
 )
 from main.runtime.debug_recorder import RuntimeDebugRecorder
 from main.runtime.designed_idle import task_is_designed_idle
@@ -1961,14 +1960,12 @@ class MainRuntimeService:
             task_prompt=prompt,
         )
         if continuous:
-            # 连续根节点必过最终验收：验收节点是它唯一的成功出口，条款在创建时定稿。
-            final_acceptance = normalize_final_acceptance_metadata(
-                task_metadata.get('final_acceptance')
-            )
+            # 连续节点没有提交/验收通道：不设最终验收（required 强制 False），
+            # 调用方传入的 final_acceptance_prompt 一并忽略。结束走
+            # 「消息上游 → Master 取消任务」，任务不经验收终态。
             task_metadata['final_acceptance'] = {
-                **final_acceptance.model_dump(mode='json'),
-                'required': True,
-                'prompt': compose_continuous_acceptance_prompt(final_acceptance.prompt),
+                'required': False,
+                'prompt': '',
                 'node_id': '',
                 'status': 'pending',
             }

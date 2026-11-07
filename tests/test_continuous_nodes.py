@@ -1,4 +1,4 @@
-"""连续（待命）节点：标记、验收强制与自动验收条款。"""
+"""连续（待命）节点：标记、无提交/无验收机制与软拒绝回执。"""
 
 from __future__ import annotations
 
@@ -17,9 +17,8 @@ from main.models import (
     TaskRecord,
 )
 from main.runtime.continuous_node import (
-    CONTINUOUS_ACCEPTANCE_CLAUSE,
+    CONTINUOUS_ACCEPTANCE_REJECTION_NOTE,
     CONTINUOUS_METADATA_KEY,
-    compose_continuous_acceptance_prompt,
     is_continuous_metadata,
 )
 from main.runtime.internal_tools import SpawnChildNodesTool
@@ -96,19 +95,12 @@ def _seed_parent(service: MainRuntimeService) -> tuple[TaskRecord, NodeRecord]:
     return task, parent
 
 
-def test_continuous_forces_acceptance_against_explicit_false() -> None:
-    assert _spec_requires_acceptance(_spec(continuous=True, requires_acceptance=False)) is True
-    assert _spec_requires_acceptance(_spec(continuous=True, acceptance_prompt='')) is True
+def test_continuous_never_requires_acceptance_even_against_explicit_true() -> None:
+    assert _spec_requires_acceptance(_spec(continuous=True, requires_acceptance=True)) is False
+    assert _spec_requires_acceptance(_spec(continuous=True, acceptance_prompt='criteria')) is False
+    assert _spec_requires_acceptance(_spec(continuous=True, requires_acceptance=False)) is False
     assert _spec_requires_acceptance(_spec(continuous=False, requires_acceptance=False)) is False
     assert _spec_requires_acceptance(_spec(acceptance_prompt='criteria')) is True
-
-
-def test_compose_clause_is_deterministic_and_prepends() -> None:
-    assert compose_continuous_acceptance_prompt('') == CONTINUOUS_ACCEPTANCE_CLAUSE
-    composed = compose_continuous_acceptance_prompt('只有 A 成立才通过')
-    assert composed.startswith(CONTINUOUS_ACCEPTANCE_CLAUSE)
-    assert '只有 A 成立才通过' in composed
-    assert composed == compose_continuous_acceptance_prompt('只有 A 成立才通过')
 
 
 def test_metadata_predicate() -> None:
@@ -118,29 +110,36 @@ def test_metadata_predicate() -> None:
 
 
 @pytest.mark.asyncio
-async def test_continuous_root_forces_final_acceptance(tmp_path: Path) -> None:
+async def test_continuous_root_has_no_final_acceptance(tmp_path: Path) -> None:
     service = _service(tmp_path)
     task = await service.create_task(
         '长期订阅任务',
         session_id='web:test',
         continuous=True,
-        metadata={'execution_policy': {'mode': 'focus'}},
+        metadata={
+            'execution_policy': {'mode': 'focus'},
+            'final_acceptance': {
+                'required': True,
+                'prompt': '旧的验收判据（必须被忽略）',
+                'node_id': '',
+                'status': 'pending',
+            },
+        },
     )
 
     final_acceptance = task.metadata['final_acceptance']
-    assert final_acceptance['required'] is True
-    assert CONTINUOUS_ACCEPTANCE_CLAUSE in final_acceptance['prompt']
-    assert str(final_acceptance['node_id']).strip()
+    assert final_acceptance['required'] is False
+    assert final_acceptance['prompt'] == ''
+    assert final_acceptance['node_id'] == ''
+    assert not [
+        node
+        for node in service.store.list_children(task.root_node_id)
+        if node.node_kind == 'acceptance'
+    ]
 
     root = service.store.get_node(task.root_node_id)
     assert root is not None
     assert is_continuous_metadata(root.metadata)
-
-    acceptance = service.store.get_node(final_acceptance['node_id'])
-    assert acceptance is not None
-    assert acceptance.node_kind == 'acceptance'
-    assert CONTINUOUS_ACCEPTANCE_CLAUSE in acceptance.metadata['acceptance_prompt_template']
-    assert not is_continuous_metadata(acceptance.metadata)
 
 
 @pytest.mark.asyncio
@@ -177,60 +176,80 @@ def test_execution_child_metadata_carries_continuous(tmp_path: Path) -> None:
     assert CONTINUOUS_METADATA_KEY not in normal_child.metadata
 
 
-def test_spawn_acceptance_injects_clause_when_prompt_missing(tmp_path: Path) -> None:
+def test_spawn_spec_payload_marks_continuous_without_acceptance(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+
+    normal_payload = service.node_runner._spawn_spec_payload(_spec())
+    continuous_payload = service.node_runner._spawn_spec_payload(
+        _spec(continuous=True, acceptance_prompt='criteria')
+    )
+
+    assert 'continuous' not in normal_payload
+    assert continuous_payload['continuous'] is True
+    assert normal_payload['requires_acceptance'] is False
+    # 连续子节点不允许验收：显式给了判据也不进载荷，回执走软拒绝。
+    assert continuous_payload['requires_acceptance'] is False
+
+
+def test_continuous_child_receipt_carries_rejection_note(tmp_path: Path) -> None:
     service = _service(tmp_path)
     task, parent = _seed_parent(service)
     child = service.node_runner._create_execution_child(
         task=task, parent=parent, spec=_spec(continuous=True)
     )
-    cached_payload: dict = {'entries': [{'goal': 'g'}]}
+    entries = [
+        {
+            'goal': 'g',
+            'child_node_id': child.node_id,
+            'acceptance_node_id': '',
+            'acceptance_rejected_reason': 'continuous_no_acceptance',
+        }
+    ]
 
-    acceptance = service.node_runner._ensure_spawn_acceptance_node(
-        task=task,
-        parent=parent,
-        child=child,
-        spec=_spec(continuous=True),
-        cache_key='round-1',
-        cached_payload=cached_payload,
-        index=0,
+    receipts = service.node_runner._spawn_creation_receipts(
+        specs=[_spec(continuous=True)],
+        entries=entries,
     )
 
-    assert acceptance.goal == 'accept:g'
-    assert acceptance.metadata['acceptance_prompt_template'] == CONTINUOUS_ACCEPTANCE_CLAUSE
-    assert cached_payload['entries'][0]['acceptance_node_id'] == acceptance.node_id
+    created = [item for item in receipts if item.state == 'created']
+    assert len(created) == 1
+    assert created[0].acceptance_node_id == ''
+    assert created[0].acceptance_auto_created is False
+    assert created[0].acceptance_note == CONTINUOUS_ACCEPTANCE_REJECTION_NOTE
 
 
-def test_spawn_acceptance_keeps_model_prompt_after_clause(tmp_path: Path) -> None:
+def test_continuous_execution_node_has_no_submit_tool(tmp_path: Path) -> None:
     service = _service(tmp_path)
     task, parent = _seed_parent(service)
-    spec = _spec(continuous=True, acceptance_prompt='只有 A 成立才通过')
-    child = service.node_runner._create_execution_child(task=task, parent=parent, spec=spec)
-
-    acceptance = service.node_runner._ensure_spawn_acceptance_node(
-        task=task,
-        parent=parent,
-        child=child,
-        spec=spec,
-        cache_key='round-1',
-        cached_payload={'entries': [{'goal': 'g'}]},
-        index=0,
+    continuous_child = service.node_runner._create_execution_child(
+        task=task, parent=parent, spec=_spec(continuous=True)
+    )
+    normal_child = service.node_runner._create_execution_child(
+        task=task, parent=parent, spec=_spec()
     )
 
-    template = acceptance.metadata['acceptance_prompt_template']
-    assert template.startswith(CONTINUOUS_ACCEPTANCE_CLAUSE)
-    assert '只有 A 成立才通过' in template
+    continuous_tools = service.node_runner._build_tools(task=task, node=continuous_child)
+    normal_tools = service.node_runner._build_tools(task=task, node=normal_child)
+
+    assert 'submit_final_result' not in continuous_tools
+    assert 'submit_final_result' in normal_tools
+    assert 'enter_wait' in continuous_tools
 
 
-def test_spawn_spec_payload_keeps_legacy_fingerprint(tmp_path: Path) -> None:
+def test_continuous_system_prompt_replaces_submit_protocol(tmp_path: Path) -> None:
     service = _service(tmp_path)
+    task, parent = _seed_parent(service)
+    child = service.node_runner._create_execution_child(
+        task=task, parent=parent, spec=_spec(continuous=True)
+    )
 
-    normal_payload = service.node_runner._spawn_spec_payload(_spec())
-    continuous_payload = service.node_runner._spawn_spec_payload(_spec(continuous=True))
+    prompt = service.node_runner._build_system_prompt(node=child)
 
-    assert 'continuous' not in normal_payload
-    assert continuous_payload['continuous'] is True
-    assert normal_payload['requires_acceptance'] is False
-    assert continuous_payload['requires_acceptance'] is True
+    assert '没有提交与验收通道' in prompt
+    assert 'submit_final_result' not in prompt
+    assert '你的上游是父节点' in prompt
+    normal_prompt = service.node_runner._build_system_prompt(node=parent)
+    assert 'submit_final_result' in normal_prompt
 
 
 def _mark_waiting(service: MainRuntimeService, task_id: str, node_id: str, *, external: bool, phase: str = 'waiting_explicit') -> None:
@@ -356,28 +375,20 @@ def test_node_brief_reports_standby(tmp_path: Path) -> None:
     assert standby_brief['state'] == 'standby'
 
 
-def test_spawn_receipt_marks_auto_acceptance(tmp_path: Path) -> None:
+def test_continuous_spawn_receipt_without_request_stays_empty(tmp_path: Path) -> None:
     service = _service(tmp_path)
     task, parent = _seed_parent(service)
     spec = _spec(continuous=True)
     child = service.node_runner._create_execution_child(task=task, parent=parent, spec=spec)
     cached_payload: dict = {'entries': [{'goal': 'g', 'child_node_id': child.node_id}]}
 
-    acceptance = service.node_runner._ensure_spawn_acceptance_node(
-        task=task,
-        parent=parent,
-        child=child,
-        spec=spec,
-        cache_key='round-1',
-        cached_payload=cached_payload,
-        index=0,
-    )
     receipts = service.node_runner._spawn_creation_receipts(
         specs=[spec], entries=cached_payload['entries']
     )
 
-    assert receipts[0].acceptance_auto_created is True
-    assert acceptance.node_id in receipts[0].acceptance_note
+    assert receipts[0].acceptance_auto_created is False
+    assert receipts[0].acceptance_node_id == ''
+    assert receipts[0].acceptance_note == ''
 
     replay = service.node_runner._spawn_creation_receipts(
         specs=[spec], entries=cached_payload['entries']
@@ -385,28 +396,19 @@ def test_spawn_receipt_marks_auto_acceptance(tmp_path: Path) -> None:
     assert replay[0].model_dump() == receipts[0].model_dump()
 
 
-def test_spawn_receipt_does_not_mark_when_prompt_given(tmp_path: Path) -> None:
+def test_spawn_receipt_rejection_note_requires_marker(tmp_path: Path) -> None:
+    """没有软拒绝标记的回执不得编造拒绝原因；标记由物化调用方在派生循环里落账。"""
     service = _service(tmp_path)
     task, parent = _seed_parent(service)
     spec = _spec(continuous=True, acceptance_prompt='只有 A 成立才通过')
     child = service.node_runner._create_execution_child(task=task, parent=parent, spec=spec)
-    cached_payload: dict = {'entries': [{'goal': 'g', 'child_node_id': child.node_id}]}
+    entries = [{'goal': 'g', 'child_node_id': child.node_id}]
 
-    service.node_runner._ensure_spawn_acceptance_node(
-        task=task,
-        parent=parent,
-        child=child,
-        spec=spec,
-        cache_key='round-1',
-        cached_payload=cached_payload,
-        index=0,
-    )
-    receipts = service.node_runner._spawn_creation_receipts(
-        specs=[spec], entries=cached_payload['entries']
-    )
+    receipts = service.node_runner._spawn_creation_receipts(specs=[spec], entries=entries)
 
     assert receipts[0].acceptance_auto_created is False
     assert receipts[0].acceptance_note == ''
+    assert receipts[0].acceptance_node_id == ''
 
 
 @pytest.mark.asyncio
@@ -457,17 +459,18 @@ async def test_continuous_bootstrap_marks_run_mode_and_prompt(tmp_path: Path) ->
 
     continuous_payload = json.loads(continuous_messages[1]['content'])
     assert continuous_payload['run_mode'] == 'continuous'
-    assert '连续节点收尾契约' in continuous_messages[0]['content']
+    assert '连续（常驻）节点契约' in continuous_messages[0]['content']
 
     normal_payload = json.loads(normal_messages[1]['content'])
     assert 'run_mode' not in normal_payload
-    assert '连续节点收尾契约' not in normal_messages[0]['content']
+    assert '连续（常驻）节点契约' not in normal_messages[0]['content']
 
 
 def test_plain_text_lane_offers_enter_wait_only_to_continuous() -> None:
     continuous = build_node_plain_text_reply_block_message(node_kind='execution', continuous=True)
     assert 'enter_wait(waiting_for=["frontdoor"])' in continuous
-    assert 'submit_final_result' in continuous
+    assert 'send_message' in continuous
+    assert 'submit_final_result' not in continuous
 
     legacy = build_node_plain_text_reply_block_message(node_kind='execution')
     assert 'enter_wait' not in legacy

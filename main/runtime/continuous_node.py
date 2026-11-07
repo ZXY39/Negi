@@ -1,8 +1,11 @@
 """连续（待命）节点的共享判据与文案。
 
 单一真值是节点 metadata 的 `continuous` 位：创建时写定，之后不可变。
-验收条款是确定性常量——它进验收节点 bootstrap、`acceptance_prompt_template`
-与恢复指纹，任何随运行时机变化的内容都会让崩溃重放建出第二颗验收节点。
+
+连续节点没有提交/验收通道（机制层）：`submit_final_result` 不进它们的工具面，
+验收节点也不会为它们派生——包括显式要求。结束职责的唯一通道是把结束请求
+`send_message` 给上游：子节点发给父节点（由父节点 `manage_child_nodes(terminate)`
+结束），根节点发给前门（由 Master 决定是否取消任务）。
 """
 
 from __future__ import annotations
@@ -11,12 +14,12 @@ from typing import Any
 
 CONTINUOUS_METADATA_KEY = 'continuous'
 
-CONTINUOUS_ACCEPTANCE_CLAUSE = (
-    '被检验节点是连续型节点：它的职责是长期待命并按消息/事件响应，不是一次性交付。\n'
-    '判定口径：\n'
-    '- 只有当它明确声明职责已结束、且给出的收尾交付可核验时，裁 pass。\n'
-    '- 若它只是阶段性汇报、或仍在等待外部消息/事件，裁 reject，并在 feedback 里要求它继续待命。\n'
-    '- 首轮不要用 reject_no_progress（该档首轮禁用）。'
+# spawn 回执里的软拒绝文案：调用本身成功返回，不建验收节点，也不报错打断
+# 父节点的派生流程；原因随回执交回，让父节点知道该子节点不走验收。
+CONTINUOUS_ACCEPTANCE_REJECTION_NOTE = (
+    '该子节点是连续节点，不允许验收：本次验收请求未创建，不存在验收节点。'
+    '它完成工作后直接 `enter_wait` 待命；需要结束它的职责时，'
+    '由你调用 `manage_child_nodes(terminate)`（需附 reason）。'
 )
 
 
@@ -24,17 +27,3 @@ def is_continuous_metadata(metadata: Any) -> bool:
     if not isinstance(metadata, dict):
         return False
     return bool(metadata.get(CONTINUOUS_METADATA_KEY))
-
-
-def compose_continuous_acceptance_prompt(prompt: str) -> str:
-    body = str(prompt or '').strip()
-    if not body:
-        return CONTINUOUS_ACCEPTANCE_CLAUSE
-    return f'{CONTINUOUS_ACCEPTANCE_CLAUSE}\n\n{body}'
-
-
-def auto_assigns_acceptance(*, continuous: bool, acceptance_prompt: str) -> bool:
-    """验收是运行时替连续节点补出来的，而不是模型自己写了判据。"""
-    if not bool(continuous):
-        return False
-    return not str(acceptance_prompt or '').strip()

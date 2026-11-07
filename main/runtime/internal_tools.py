@@ -745,9 +745,10 @@ class SpawnChildNodesTool(Tool):
             }
             if bool(getattr(item, 'acceptance_auto_created', False)):
                 created_item['acceptance_auto_created'] = True
-                created_item['acceptance_note'] = str(
-                    getattr(item, 'acceptance_note', '') or ''
-                ).strip()
+            # acceptance_note 与 auto_created 解耦：连续子节点的软拒绝原因也走这一字段。
+            acceptance_note = str(getattr(item, 'acceptance_note', '') or '').strip()
+            if acceptance_note:
+                created_item['acceptance_note'] = acceptance_note
             created.append(created_item)
         if created and wait_all_children:
             summary = (

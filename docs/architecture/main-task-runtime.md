@@ -50,13 +50,13 @@
 
 ## 1.2 连续（待命）节点
 
-- **标记**：节点的 `metadata.continuous` 是唯一真值，创建时写定、之后不可变——可变会让 `tools[]`、验收要求与恢复指纹同时漂移。子节点由 `spawn_child_nodes` 的 child spec `continuous` 写入；根节点由 `create_async_task` 的 `continuous` 写入。验收节点永不继承该标记。
-- **连续 ⇒ 必过验收**：`_spec_requires_acceptance` 对连续子节点无条件返回真，显式 `requires_acceptance=false` 覆盖不了它；根节点连续时 `final_acceptance.required` 在建任务时强制为真。模型没写 `acceptance_prompt` 时运行时自动分配验收节点，并把连续验收条款注入 `acceptance_prompt_template`；模型写了判据时条款叠加在其前。条款是**确定性常量**，注入发生在恢复指纹之前——重放同一 spawn 轮会复用同一个验收节点，不会建出第二颗。
-- **提交是结束请求，不是终态**：连续节点的 `submit_final_result` 仍存在（摘除会让根节点失去唯一成功出口，也会让验收失去可核验载荷），但它只把节点送进 `waiting_acceptance`；只有验收 `pass` 才由 `finalize_inspected_execution_node` 签 `success`，`reject` 带着 feedback 复活节点继续待命。连续节点因此不可能自己终态化。
-- **回合收尾**：连续节点的正常收尾是 `enter_wait(waiting_for=["frontdoor"])`。`frontdoor` 是活性声明而不是唤醒判据——任何来源的投递（上游、用户、外部订阅事件、`wake_timer`）都能叫醒它；它真正的作用是让等待图把它当合法无限等待，并作为「设计内待命」的判据。只有收到明确结束指令才提交。
-- **父节点被拖住**：连续子节点存活期间，父节点提交会被 `_final_submission_blockers` 拦下（非终态子节点仍存在）；结束整条分支要先按上面的方式逐个结束连续子节点。
-- **spawn 回执**：连续子节点没写判据而由运行时自动建验收时，创建回执带 `acceptance_auto_created` 与一句 `acceptance_note`，父节点不会把验收节点当成自己漏写判据的结果。标记与 `acceptance_node_id` 同源落在 spawn entry 上，重放同一 `call_id` 返回同一批回执。
-- **不做什么**：终态仍是最终态——没有归档状态、没有终态复活、所有终态闸门（投递 `target_terminal`、resume `node_terminal` / `task_terminal`、`_run_node_turn` 短路）保持原样。连续任务靠**不进入终态**获得长期生命，而不是靠终态后再打开。
+- **标记**：节点的 `metadata.continuous` 是唯一真值，创建时写定、之后不可变——可变会让 `tools[]`、提示词变体与恢复指纹同时漂移。子节点由 `spawn_child_nodes` 的 child spec `continuous` 写入；根节点由 `create_async_task` 的 `continuous` 写入。验收节点永不继承该标记。
+- **无提交、无验收（机制层）**：`submit_final_result` 不进连续执行节点的工具面（`NodeRunner._build_tools` 按 metadata 过滤，不靠提示词自觉）；验收节点也不为连续节点派生——`_spec_requires_acceptance` 对连续分支无条件返回假，显式 `requires_acceptance=true` 或写了 `acceptance_prompt` 都不建，根节点连续时 `final_acceptance.required` 在建任务时强制为假、调用方传入的判据一并忽略。子节点 spec 显式要验收时，spawn 回执**软拒绝**：调用本身成功返回，entry 落 `acceptance_rejected_reason=continuous_no_acceptance`，`acceptance_note` 带 `CONTINUOUS_ACCEPTANCE_REJECTION_NOTE`（连续节点不允许验收、不存在验收节点、结束走上游），父节点不会把"没有验收节点"误读成漏写判据；重放同一 `call_id` 返回同一批回执。存量连续任务里已创建的验收节点按创建时的旧条款走完。
+- **提示词变体**：节点提示词仍是 `node_execution.md` 一个文件、共用部分共享；连续节点由 `_build_system_prompt` 把完成协议块（`shared_completion_protocol.md`，内嵌提交协议与结束自检）**整块替换**为 `shared_continuous_duty.md`（无提交、无验收、收尾停靠），并注入上游身份一行。替换目标消失即模板漂移，直接报错而不是带旧契约发车。
+- **结束通道是消息，不是提交**：连续节点结束职责的唯一方式是把结束请求 `send_message` 给上游——子节点发给父节点（由父节点 `manage_child_nodes(terminate)` 结束该子树，`reason` 必填），根节点发给前门（由 Master 决定是否取消任务；连续任务的终态形态是「已取消」，不经验收变「成功」）。
+- **回合收尾**：连续节点的正常收尾是 `enter_wait(waiting_for=["frontdoor"])`。`frontdoor` 是活性声明而不是唤醒判据——任何来源的投递（上游、用户、外部订阅事件、`wake_timer`）都能叫醒它；它真正的作用是让等待图把它当合法无限等待，并作为「设计内待命」的判据。纯文本收尾的打回文案对连续节点只给 `enter_wait` 与 `send_message` 两条出路（`plain_text_reply` 的连续变体）。
+- **父节点被拖住**：连续子节点存活期间，父节点提交会被 `_final_submission_blockers` 拦下（非终态子节点仍存在）；结束整条分支要先让连续子节点请求结束、再 `terminate` 之。
+- **不做什么**：终态仍是最终态——没有归档状态、没有终态复活、所有终态闸门（投递 `target_terminal`、resume `node_terminal` / `task_terminal`、`_run_node_turn` 短路）保持原样。连续任务靠**不进入终态**获得长期生命，而不是靠终态后再打开；结束后的终态是取消，不负责给连续工作评「成功」。
 - **显示**：连续节点停在声明了外部唤醒源的相位上，任务与节点渲染为「待命」而不是「运行/等待」，合同归 `web-and-admin.md`「Task Hall Action Contract」；停滞判定对这一形态的豁免归 `heartbeat-system.md`「Task Stall Detection」。会话侧 `task_list` 的「长期」过滤与行内 `·长期` 标记读的是同一个真值——`SQLiteTaskStore.map_task_root_continuous` 按任务批量取根节点 `metadata.continuous`，不建任务级副本（工具面合同归 `tool-and-skill-system.md` 的 task_list 行）。
 
 ## 附录 A：已删除的 distribution epoch（历史说明，勿据此实现）

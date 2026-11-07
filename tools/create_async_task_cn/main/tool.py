@@ -171,7 +171,15 @@ class _CreateAsyncTaskHandler(Tool):
                 },
             },
         )
-        return f'创建任务成功{record.task_id}'
+        receipt = f'创建任务成功{record.task_id}'
+        if bool(kwargs.get('continuous')) and final_acceptance_prompt:
+            # 连续任务不走验收：服务端已忽略 final_acceptance_prompt，回执同步说明，
+            # 让派发方（前门/会话）知道结束通道是「消息上游 → 取消任务」。
+            receipt += (
+                '；连续任务不走验收：final_acceptance_prompt 已忽略，'
+                '该任务不会经验收终态，结束时由节点发消息给上游再取消任务'
+            )
+        return receipt
 
 
 def build(runtime):

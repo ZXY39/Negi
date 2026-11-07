@@ -21,9 +21,9 @@ def build_node_plain_text_reply_block_message(*, node_kind: str, continuous: boo
     elif bool(continuous):
         work = 'call ordinary tools to keep advancing'
         finish = (
-            'if you received an explicit end instruction, call `submit_final_result` to request the end '
-            '(the acceptance node decides whether it holds); otherwise call '
-            '`enter_wait(waiting_for=["frontdoor"])` to stand by for the next message or event'
+            'when the assigned work is done, call `enter_wait(waiting_for=["frontdoor"])` to stand by '
+            'for the next message or event; you have no submit or acceptance channel — to end your duty, '
+            'use `send_message` to your upstream instead of replying plain text'
         )
     else:
         work = 'call ordinary tools (spawn child nodes if needed) to keep advancing'

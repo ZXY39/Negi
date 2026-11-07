@@ -49,8 +49,10 @@ CREATE_ASYNC_TASK_FINAL_ACCEPTANCE_PROMPT_DESCRIPTION = (
 
 CREATE_ASYNC_TASK_CONTINUOUS_DESCRIPTION = (
     "Create a continuous (standby) root that keeps running and wakes on messages or events "
-    "instead of finishing once. A continuous task always gets a final acceptance node; it "
-    "decides whether a submitted result really ends the responsibility. Omit for one-shot tasks."
+    "instead of finishing once. A continuous task has no submit or acceptance channel: it "
+    "never submits results and never gets an acceptance node (any `final_acceptance_prompt` "
+    "is ignored). To end it, the node sends a message to the front door and you cancel the "
+    "task. Omit for one-shot tasks."
 )
 
 

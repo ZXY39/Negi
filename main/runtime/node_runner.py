@@ -70,9 +70,8 @@ from main.runtime.child_tools import (
     ViewNodeTreeTool,
 )
 from main.runtime.continuous_node import (
+    CONTINUOUS_ACCEPTANCE_REJECTION_NOTE,
     CONTINUOUS_METADATA_KEY,
-    auto_assigns_acceptance,
-    compose_continuous_acceptance_prompt,
     is_continuous_metadata,
 )
 from main.runtime.internal_tools import (
@@ -231,13 +230,14 @@ def _spawn_acceptance_goal(goal: str) -> str:
 
 
 def _spec_requires_acceptance(spec: SpawnChildSpec) -> bool:
-    """连续节点无条件要验收；其余按显式开关，未给时看 `acceptance_prompt` 是否非空。
+    """连续节点不允许验收（机制层，排在最前）；其余按显式开关，未给时看 `acceptance_prompt`。
 
-    载荷与建节点必须同源：连续分支排在最前，显式 `requires_acceptance=false`
-    也覆盖不了它。
+    连续分支无条件返回 False：显式 `requires_acceptance=true` 或写了
+    `acceptance_prompt` 都不建验收节点，由 spawn 回执说明原因
+    （`CONTINUOUS_ACCEPTANCE_REJECTION_NOTE` 的软拒绝）。
     """
     if bool(getattr(spec, 'continuous', False)):
-        return True
+        return False
     if spec.requires_acceptance is True:
         return True
     if spec.requires_acceptance is False:
@@ -3333,7 +3333,11 @@ class NodeRunner:
         tools[SCHEDULE_WAKE_TOOL_NAME] = ScheduleWakeTool(
             lambda **payload: self._arm_node_wake(task=task, node=node, **payload)
         )
-        if node.node_kind in {KIND_EXECUTION, KIND_ACCEPTANCE}:
+        if node.node_kind in {KIND_EXECUTION, KIND_ACCEPTANCE} and not (
+            node.node_kind == KIND_EXECUTION and is_continuous_metadata(getattr(node, 'metadata', None))
+        ):
+            # 连续执行节点没有提交/验收通道：submit 不进它们的工具面（机制层，
+            # 不靠提示词自觉）。结束职责走 send_message 给上游（见提示词常驻块）。
             tools['submit_final_result'] = SubmitFinalResultTool(
                 lambda payload: self._submit_final_result(task=task, node=node, payload=payload),
                 node_kind=node.node_kind,
@@ -3446,9 +3450,32 @@ class NodeRunner:
         system_name = 'acceptance_execution.md' if node.node_kind == KIND_ACCEPTANCE else 'node_execution.md'
         prompt = load_prompt(system_name).strip()
         if is_continuous_metadata(getattr(node, 'metadata', None)):
-            # 放在稳定 system 提示词尾部：连续契约整个生命周期不变，不随回合漂移。
-            prompt = f'{prompt}\n\n{load_prompt("shared_continuous_idle.md").strip()}'
+            # 一个模板文件、共用部分共享、差异部分整块替换：连续节点把
+            # 完成协议块（§4 判定/提交协议 + §5 自检，内嵌 submit 协议）整体换成
+            # 常驻职责块（无 submit、无验收、结束走上游）。
+            protocol = load_prompt('shared_completion_protocol.md').strip()
+            duty = load_prompt('shared_continuous_duty.md').strip()
+            if not protocol or protocol not in prompt:
+                # 替换目标消失说明模板结构漂了——显式失败，绝不带着旧契约发车。
+                raise ValueError(
+                    'continuous node prompt: completion protocol block not found for replacement'
+                )
+            prompt = prompt.replace(protocol, duty)
+            prompt = f'{prompt}\n\n{self._continuous_upstream_line(node)}'
         return prompt
+
+    @staticmethod
+    def _continuous_upstream_line(node: NodeRecord) -> str:
+        if str(getattr(node, 'parent_node_id', '') or '').strip():
+            return (
+                f'- 你的上游是父节点 `{node.parent_node_id}`：结束职责的请求用 '
+                f'`send_message` 发给它，由它决定是否调用 '
+                f'`manage_child_nodes(terminate)` 结束你这条子树。'
+            )
+        return (
+            '- 你的上游是前门（Master 所在的会话）：结束职责的请求用 '
+            '`send_message` 发给 `frontdoor`，由 Master 决定是否取消这个任务。'
+        )
 
     def _completion_contract_payload(self, *, task, node: NodeRecord) -> dict[str, Any] | None:
         if node.node_kind != KIND_EXECUTION or node.parent_node_id is not None:
@@ -5870,6 +5897,18 @@ class NodeRunner:
                 )
                 continue
             auto_acceptance = bool(entry.get('acceptance_auto_created'))
+            acceptance_rejected = (
+                str(entry.get('acceptance_rejected_reason') or '').strip() == 'continuous_no_acceptance'
+            )
+            acceptance_note = ''
+            if auto_acceptance and acceptance_node_id:
+                # 存量重放：旧行为里连续子节点由运行时自动补验收的回执原文。
+                acceptance_note = (
+                    f'该子节点是连续节点，运行时已自动为它创建验收节点 {acceptance_node_id}；'
+                    '它提交结果后由验收节点裁定是否结束。'
+                )
+            elif acceptance_rejected:
+                acceptance_note = CONTINUOUS_ACCEPTANCE_REJECTION_NOTE
             receipts.append(
                 SpawnChildResult(
                     goal=goal,
@@ -5877,12 +5916,7 @@ class NodeRunner:
                     child_node_id=child_node_id,
                     acceptance_node_id=acceptance_node_id,
                     acceptance_auto_created=auto_acceptance,
-                    acceptance_note=(
-                        f'该子节点是连续节点，运行时已自动为它创建验收节点 {acceptance_node_id}；'
-                        '它提交结果后由验收节点裁定是否结束。'
-                        if auto_acceptance and acceptance_node_id
-                        else ''
-                    ),
+                    acceptance_note=acceptance_note,
                     seed_tools=self._seed_receipt_for_node(child_node_id),
                 )
             )
@@ -6513,6 +6547,20 @@ class NodeRunner:
                     cached_payload=cached_payload,
                     index=index,
                 )
+            elif bool(getattr(spec, 'continuous', False)) and (
+                str(spec.acceptance_prompt or '').strip() or spec.requires_acceptance is True
+            ):
+                # 连续节点不允许验收：不建验收节点，软拒绝落账——回执带原因，
+                # 父节点不会把"没有验收节点"误读成漏写判据。
+                self._update_spawn_entry(
+                    task_id=task.task_id,
+                    parent_node_id=parent.node_id,
+                    cache_key=cache_key,
+                    cached_payload=cached_payload,
+                    index=index,
+                    acceptance_node_id='',
+                    acceptance_rejected_reason='continuous_no_acceptance',
+                )
             entries = list(cached_payload.get('entries') or [])
 
     def _ensure_spawn_acceptance_node(
@@ -6539,9 +6587,6 @@ class NodeRunner:
         if acceptance is None:
             acceptance_goal = _spawn_acceptance_goal(spec.goal)
             acceptance_prompt = str(spec.acceptance_prompt or '')
-            if bool(getattr(spec, 'continuous', False)):
-                # 注入发生在复用指纹与建节点之前：条款是常量，重放得到同一份 bootstrap。
-                acceptance_prompt = compose_continuous_acceptance_prompt(acceptance_prompt)
             claimed_acceptance_ids = self._claimed_spawn_node_ids(
                 entries=entries,
                 field='acceptance_node_id',
@@ -6579,13 +6624,6 @@ class NodeRunner:
                 index=index,
                 acceptance_node_id=acceptance.node_id,
                 check_status='pending',
-                # 标记与绑定同源落账：回执只从 entry 读，重放才与首次逐字一致。
-                acceptance_auto_created=True
-                if auto_assigns_acceptance(
-                    continuous=bool(getattr(spec, 'continuous', False)),
-                    acceptance_prompt=str(spec.acceptance_prompt or ''),
-                )
-                else None,
             )
         self._stamp_spawn_owner_metadata(
             node_id=acceptance.node_id,
