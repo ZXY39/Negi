@@ -425,7 +425,7 @@ class SendMessageTool(Tool):
         return (
             'Send a message to your parent node, to execution nodes below you, to a sibling, to a '
             'descendant acceptance node, (root or any execution node) to the front-door agent, or '
-            'to the operator chat box (`chatbox`: the web input box on your node detail page — use '
+            'to the Master\'s chat box (`chatbox`: the web input box on your node detail page — use '
             'it when a chat-box message asks you to answer there). Each target is '
             'judged on its own: a terminal target rejects and says so, a paused target still accepts '
             'a machine message (that is how it gets unstuck), a target awaiting acceptance queues a '
@@ -441,7 +441,7 @@ class SendMessageTool(Tool):
     def model_description(self) -> str:
         return (
             'Message your parent, execution descendants, a sibling, a descendant verifier, the '
-            'front door, or the operator chat box. A target awaiting acceptance queues parent '
+            'front door, or the Master\'s chat box. A target awaiting acceptance queues parent '
             'messages without waking it.'
         )
 

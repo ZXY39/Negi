@@ -12982,6 +12982,19 @@ textarea {
     background: color-mix(in srgb, #39c5bb 24%, transparent);
 }
 
+/* 已读不摘按钮：去掉强调色，留一条可重看的灰色读数。 */
+.task-chatbox-reply-chip.is-read {
+    border-color: var(--border-color);
+    background: transparent;
+    color: var(--text-muted);
+}
+
+.task-chatbox-reply-chip.is-read:hover {
+    border-color: var(--border-strong);
+    background: color-mix(in srgb, var(--bg-app) 72%, transparent);
+    color: var(--text-secondary);
+}
+
 .artifact-list {
     display: flex;
     flex-direction: column;

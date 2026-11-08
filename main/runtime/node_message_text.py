@@ -69,9 +69,9 @@ FRONTDOOR_REPLY_TAIL = (
 # 专属线程，而不是 frontdoor 会话。与 FRONTDOOR_REPLY_TAIL 一样按行上的 payload
 # 标记每跳重算，台账正文与 fingerprint 一字不动。
 CHATBOX_REPLY_TAIL = (
-    'This message came from the operator chat box on your node detail page and expects an '
+    "This message came from the Master's chat box on your node detail page and expects an "
     'answer in that same thread: `send_message(to="chatbox", content=...)`. Text you write '
-    'in your own turn does not reach the operator chat box.'
+    "in your own turn does not reach the Master's chat box."
 )
 
 # 验收镜像行的定位说明：正文是被验执行节点收到的原信，镜像行挂在验收节点信箱里，

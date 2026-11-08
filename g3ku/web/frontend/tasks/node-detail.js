@@ -926,11 +926,17 @@ function renderTaskMessageStatus(status) {
     return `<span class="task-message-status" data-status="${esc(status?.statusKey || "unknown")}" data-tone="${esc(status?.key || "info")}" title="${esc(label)}" aria-label="${esc(label)}"><i data-lucide="${esc(icon)}"></i></span>`;
 }
 
-// 「新回复」图标：该消息行名下有未读回投时挂在折叠行右端（interaction-step-side
+// 「新回复」图标：该消息行名下有回投时挂在折叠行右端（interaction-step-side
 // 槽位）。归组来自轮询回投清单（chatboxReplyGroups），点击开文档式查看窗口。
-function renderChatboxReplyChip(replyTo, unread) {
-    const label = unread > 1 ? `新回复·${unread}` : "新回复";
-    return `<button type="button" class="task-chatbox-reply-chip" data-chatbox-open="${esc(replyTo)}" title="查看该消息的节点回复（${unread} 条未读）" aria-label="查看节点回复"><i data-lucide="${esc("corner-down-left")}"></i><span>${esc(label)}</span></button>`;
+// 未读用强调色；销账后保留为灰色读数，按钮不摘、仍可点开重看。
+function renderChatboxReplyChip(replyTo, unread, total = 0) {
+    const pending = unread > 0;
+    const count = pending ? unread : Math.max(0, Number(total) || 0);
+    const label = count > 1 ? `${pending ? "新回复" : "回复"}·${count}` : (pending ? "新回复" : "回复");
+    const title = pending
+        ? `查看该消息的节点回复（${count} 条未读）`
+        : `查看该消息的节点回复（共 ${count} 条）`;
+    return `<button type="button" class="task-chatbox-reply-chip${pending ? "" : " is-read"}" data-chatbox-open="${esc(replyTo)}" title="${esc(title)}" aria-label="${esc(title)}"><i data-lucide="${esc("corner-down-left")}"></i><span>${esc(label)}</span></button>`;
 }
 
 function chatboxReplyChipForEntry(entry) {
@@ -938,8 +944,9 @@ function chatboxReplyChipForEntry(entry) {
     if (!replyTo || typeof chatboxReplyGroups !== "function") return "";
     const groups = chatboxReplyGroups(S.currentTaskId, S.selectedNodeId || S.currentNodeDetail?.node_id);
     const group = groups ? groups[replyTo] : null;
-    const unread = Number(group?.unread || 0);
-    return unread > 0 ? renderChatboxReplyChip(replyTo, unread) : "";
+    const total = Number(group?.total || 0);
+    if (!(total > 0)) return "";
+    return renderChatboxReplyChip(replyTo, Number(group?.unread || 0), total);
 }
 
 function buildNodeMessageListSteps(node = {}) {

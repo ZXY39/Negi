@@ -113,7 +113,8 @@ def test_chatbox_label_renders_and_strips():
     )
     assert text.startswith('来自输入框，内容为：\n请先停一下')
     assert '`send_message(to="chatbox", content=...)`' in text
-    assert 'operator chat box' in text
+    assert "the Master's chat box" in text
+    assert 'operator' not in text.lower()
     # strip 合同只剥一行头，回投尾句随正文保留。
     assert strip_node_message_prefix(text).startswith('请先停一下')
     assert 'send_message(to="chatbox"' not in strip_node_message_prefix(

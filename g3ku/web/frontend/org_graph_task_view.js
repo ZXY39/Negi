@@ -872,7 +872,7 @@ function taskNoticeSettleWindowOpen(now) {
 // 不经过任何 ws 节点补丁。节点详情面板打开期间低频轮询一次回投清单，前端按
 // reply_to 归组：接收列表里那条消息行的右端（interaction-step-side 槽位）出现
 // 「新回复」图标；点击走应用内媒体查看器的 Markdown 渲染档（开窗即销账该条
-// 来信名下的回投），图标在下一拍消失。
+// 来信名下的回投），按钮转为灰色已读态、仍可再点开重看。
 const TASK_CHATBOX_POLL_INTERVAL_MS = 5000;
 let chatboxPollTimer = 0;
 let chatboxPollTaskId = "";
@@ -962,18 +962,28 @@ async function refreshChatboxReplies() {
     }
 }
 
-// 点击「新回复」：销账（异步、不等回执，图标在下一拍消失）后走应用内媒体查看器
-// 的 Markdown 渲染档——与会话里打开 .md 附件同一车道，同源 fetch 取回
-// chatbox/replies.md 的正文用聊天同款 renderMarkdown 排版，不出浏览器弹窗。
+// 点击「新回复」：先把本地读数转成已读（按钮当场转灰、仍可再点开），再异步销账，
+// 走应用内媒体查看器的 Markdown 渲染档——与会话里打开 .md 附件同一车道，同源 fetch
+// 取回 chatbox/replies.md 的正文用聊天同款 renderMarkdown 排版，不出浏览器弹窗。
 function openNodeChatboxReplies(replyTo) {
     const taskId = String(S.currentTaskId || "").trim();
     const nodeId = String(S.selectedNodeId || S.currentNodeDetail?.node_id || "").trim();
     if (!taskId || !nodeId) return;
+    const anchorId = String(replyTo || "").trim();
     const params = new URLSearchParams();
-    if (String(replyTo || "").trim()) params.set("reply_to", String(replyTo).trim());
+    if (anchorId) params.set("reply_to", anchorId);
     const suffix = params.toString() ? `?${params.toString()}` : "";
     if (typeof ApiClient?.markNodeChatboxRead === "function") {
-        void ApiClient.markNodeChatboxRead(taskId, nodeId, String(replyTo || "").trim()).catch(() => null);
+        void ApiClient.markNodeChatboxRead(taskId, nodeId, anchorId).catch(() => null);
+    }
+    // 销账不等回执：先投影本地状态，按钮不必等下一拍轮询才转灰；轮询仍是权威读数。
+    const groups = typeof chatboxReplyGroups === "function" ? chatboxReplyGroups(taskId, nodeId) : null;
+    const group = groups && anchorId ? groups[anchorId] : null;
+    if (group && Number(group.unread || 0) > 0) {
+        group.unread = 0;
+        if (S.currentNodeDetail && typeof renderMessageList === "function") {
+            renderMessageList(S.currentNodeDetail);
+        }
     }
     if (typeof openMediaViewer === "function") {
         const displayId = typeof taskNodeDisplayId === "function" ? taskNodeDisplayId(nodeId) : nodeId;
