@@ -347,6 +347,76 @@ def test_resolve_markers_ignores_inline_mentions(tmp_path):
     assert images == ()
 
 
+def test_marker_glued_to_the_line_tail_still_sends(tmp_path):
+    """模型偶尔把标记写进句子末尾：行尾标记同样发送，语法绝不外泄。"""
+    _write_pack(tmp_path, "atri", {"happy": 6}, theme="t")
+    invalidate_scan_cache()
+
+    reply = resolve_reply_stickers(
+        "还是就想找我唠两句呀？[[sticker:atri/happy]]", root=tmp_path
+    )
+
+    assert reply.text == "还是就想找我唠两句呀？"
+    assert len(reply.images) == 1
+    assert "[[" not in reply.text
+    sent_index = registry.index_of(reply.images[0].name)
+    assert reply.settled_text == (
+        f"还是就想找我唠两句呀？\n[[sticker:atri/happy/{sent_index}]]"
+    )
+
+
+def test_plain_brackets_before_a_tail_marker_are_not_swallowed(tmp_path):
+    """行尾标记只吃掉自己那一枚；正文里的 `[[1]]` 不是标记的一部分。"""
+    _write_pack(tmp_path, "atri", {"happy": 1}, theme="t")
+    invalidate_scan_cache()
+
+    reply = resolve_reply_stickers("看 [[1]] 和 [[sticker:atri/happy]]", root=tmp_path)
+
+    assert reply.text == "看 [[1]] 和"
+    assert len(reply.images) == 1
+    assert strip_markers_for_stream("看 [[1]] 和 [[sticker:atri/happy]]") == "看 [[1]] 和"
+
+
+def test_marker_glued_to_a_middle_line_tail_keeps_the_following_lines(tmp_path):
+    _write_pack(tmp_path, "atri", {"happy": 1}, theme="t")
+    invalidate_scan_cache()
+
+    reply = resolve_reply_stickers(
+        "第一行[[sticker:atri/happy]]\n第二行", root=tmp_path
+    )
+
+    assert reply.text == "第一行\n第二行"
+    assert len(reply.images) == 1
+
+
+def test_unknown_marker_glued_to_the_tail_is_stripped_not_leaked(tmp_path):
+    _write_pack(tmp_path, "atri", {"happy": 1}, theme="t")
+    invalidate_scan_cache()
+
+    reply = resolve_reply_stickers("嗯[[sticker:atri/nope]]", root=tmp_path)
+
+    assert reply.text == "嗯"
+    assert reply.images == ()
+    assert reply.undelivered == ("atri/nope",)
+    assert "[[" not in reply.text
+    # 未发出的形状仍留给投递道剥除，定稿不替它改写。
+    assert reply.settled_text == "嗯\n[[sticker:atri/nope]]"
+
+
+def test_malformed_markers_glued_to_the_tail_are_stripped_not_leaked(tmp_path):
+    _write_pack(tmp_path, "atri", {"happy": 1, "_secret": 1}, theme="t")
+    invalidate_scan_cache()
+
+    reply = resolve_reply_stickers(
+        "嗯[[sticker:atri/_secret]]\n下一句[[sticker:atri/happy/extra]]", root=tmp_path
+    )
+
+    assert reply.text == "嗯\n下一句"
+    assert reply.images == ()
+    assert reply.undelivered == ("atri/_secret", "atri/happy/extra")
+    assert "[[" not in reply.text
+
+
 def test_short_form_picks_are_deterministic_for_the_same_reply(tmp_path):
     """同一段回复两次解析必须取同一张图：实时帧与转录各解析一次。"""
     _write_pack(tmp_path, "atri", {"happy": 5}, theme="t")
@@ -440,8 +510,15 @@ def test_strip_markers_for_stream_removes_complete_and_holds_partial():
     assert strip_markers_for_stream("说完了\n[[sticker:atri/ha") == "说完了\n"
     assert strip_markers_for_stream("说完了\n[[sticker:") == "说完了\n"
     assert strip_markers_for_stream("说完了\n[[") == "说完了\n"
-    # 普通中文里的方括号与提示词里的示例都不动
-    assert strip_markers_for_stream("见 [[1]] 和 [[sticker:x]]") == "见 [[1]] 和 [[sticker:x]]"
+    # 行尾粘连的完整/半截标记同样不能露出来
+    assert strip_markers_for_stream("好耶[[sticker:atri/happy]]") == "好耶"
+    assert strip_markers_for_stream("好耶[[sticker:atri/ha") == "好耶"
+    assert strip_markers_for_stream("好耶[[stic") == "好耶"
+    # 普通中文里的方括号与句中引用的示例都不动
+    assert (
+        strip_markers_for_stream("见 [[1]] 和 [[sticker:x]] 这种写法")
+        == "见 [[1]] 和 [[sticker:x]] 这种写法"
+    )
     assert strip_markers_for_stream("没有标记") == "没有标记"
 
 
@@ -449,6 +526,10 @@ def test_strip_markers_for_stream_is_idempotent():
     once = strip_markers_for_stream("正文\n[[sticker:atri/happy]]\n尾巴\n[[sticker:at")
     twice = strip_markers_for_stream(once)
     assert once == twice == "正文\n尾巴\n"
+
+    inline_once = strip_markers_for_stream("正文[[sticker:atri/happy]]\n尾巴[[sticker:at")
+    assert inline_once == "正文\n尾巴"
+    assert strip_markers_for_stream(inline_once) == inline_once
 
 
 def test_web_reply_delta_frame_never_carries_a_marker():
@@ -548,3 +629,19 @@ def test_settling_only_rewrites_the_markers_that_got_an_image(tmp_path):
     assert "[[sticker:atri/nope]]" in settled
     # 序号形态再过一次定稿必须逐字不动：各车道重复解析不能换图
     assert settle_reply_sticker_markers(settled, root=tmp_path) == settled
+
+
+def test_settling_an_inline_tail_marker_normalises_it_for_every_lane(tmp_path):
+    """行尾标记定稿成独占一行的序号形态，三条投递车道取到同一张图。"""
+    from g3ku.stickers import settle_reply_sticker_markers
+
+    _write_pack(tmp_path, "atri", {"happy": 6}, theme="t")
+    invalidate_scan_cache()
+
+    settled = settle_reply_sticker_markers("好耶[[sticker:atri/happy]]", root=tmp_path)
+    assert settled.startswith("好耶\n[[sticker:atri/happy/")
+    assert settle_reply_sticker_markers(settled, root=tmp_path) == settled
+
+    picks = _lane_picks("好耶[[sticker:atri/happy]]", tmp_path, settle=True)
+    assert picks["push"]
+    assert picks["transcript"] == picks["relay"] == picks["push"]

@@ -4,8 +4,9 @@ Two halves, neither of which touches the transport:
 
 - ``catalog`` scans ``<workspace>/stickers/<pack>/<category>/<image>`` and
   renders the model-facing listing.
-- ``marker`` turns a whole-line ``[[sticker:<pack>/<category>]]`` marker into
-  local image paths, so the existing markdown/attachment egress does the rest.
+- ``marker`` turns a ``[[sticker:<pack>/<category>]]`` marker -- a whole line,
+  or the same token glued to a line's end -- into local image paths, so the
+  existing markdown/attachment egress does the rest.
 """
 
 from __future__ import annotations

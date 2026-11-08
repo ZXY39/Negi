@@ -4,11 +4,15 @@ The model never names a path. It emits a whole line::
 
     [[sticker:atri/happy]]
 
-and this module turns it into local image paths. Two properties matter:
+but models occasionally glue the same token to the end of the sentence
+(``…呀？[[sticker:pack/category]]``). Both shapes resolve here: a marker at a
+line tail is normalised onto its own line before parsing, so every lane sees
+one canonical shape. Two properties matter:
 
 - **A marker never survives.** Every recognised marker line is removed from the
   text, including the ones that fail to resolve. A bad key degrades to "no
-  image", never to a leaked marker or a stray file name.
+  image", never to a leaked marker or a stray file name. The same holds for a
+  marker glued to a line tail and for a half-written marker in a stream.
 - **Resolution is stateless.** ``strip_markers_for_stream`` works on the
   cumulative reply text, so the streaming relay needs no parser state and can
   hold back a half-written marker without remembering anything.
@@ -41,6 +45,9 @@ MARKER_RE = re.compile(rf"^\[\[sticker:({_SEGMENT})/({_SEGMENT})\]\]$")
 INDEX_MARKER_RE = re.compile(rf"^\[\[sticker:({_SEGMENT})/({_SEGMENT})/(\d{{1,3}})\]\]$")
 SHORT_MARKER_RE = re.compile(rf"^\[\[sticker:({_SEGMENT})\]\]$")
 _MARKER_PREFIX = "[[sticker:"
+# 行尾单枚标记：键里不允许方括号，所以最后一个 `]]` 必须直接收在行尾；
+# `[[1]]` 这类普通方括号不会被误当成标记的一部分。
+_TAIL_MARKER_RE = re.compile(re.escape(_MARKER_PREFIX) + r"[^\[\]\r\n]*\]\]$")
 
 
 def _parse_marker_line(
@@ -81,6 +88,65 @@ def _looks_like_marker(line: str) -> bool:
     categories, that shape is reachable.
     """
     return str(line or "").strip().startswith(_MARKER_PREFIX)
+
+
+def _split_line_ending(raw_line: str) -> tuple[str, str]:
+    line = raw_line.rstrip("\r\n")
+    return line, raw_line[len(line):]
+
+
+def _trailing_marker_token(line: str) -> tuple[int, str] | None:
+    """Return ``(offset, token)`` for a marker-like token that ends the line."""
+    match = _TAIL_MARKER_RE.search(line)
+    if match is None:
+        return None
+    return match.start(), match.group(0)
+
+
+def _lift_trailing_markers(text: str) -> str:
+    """Put markers glued to a line's end onto their own line.
+
+    The prompt asks for whole marker lines; a model that appends the token to
+    its sentence must not leak the syntax. Lifting the tail into the canonical
+    shape lets the normal line parser resolve it, record a failed send, or drop
+    an unknown shape -- without a second parsing lane. Only the line tail is
+    lifted: a marker quoted mid-sentence stays prose.
+    """
+    if _MARKER_PREFIX not in text:
+        return text
+    out: list[str] = []
+    for raw_line in text.splitlines(keepends=True):
+        line, ending = _split_line_ending(raw_line)
+        head = line.rstrip()
+        markers: list[str] = []
+        while True:
+            token = _trailing_marker_token(head)
+            if token is None:
+                break
+            at, marker = token
+            if at == 0:
+                break
+            markers.append(marker)
+            head = head[:at].rstrip()
+        if not markers or not head:
+            out.append(raw_line)
+            continue
+        out.append("\n".join([head, *reversed(markers)]) + ending)
+    return "".join(out)
+
+
+def _strip_trailing_markers(line: str) -> str:
+    """Drop marker tokens glued to one line's end, leaving prose untouched."""
+    head = line.rstrip()
+    stripped = False
+    while True:
+        token = _trailing_marker_token(head)
+        if token is None:
+            break
+        at, _marker = token
+        stripped = True
+        head = head[:at].rstrip()
+    return head if stripped else line
 
 
 def _pick_path(
@@ -196,6 +262,9 @@ def resolve_reply_stickers(
         return StickerReply(text="")
     if _MARKER_PREFIX not in text:
         return StickerReply(text=text, context_text=text, settled_text=text)
+    # 行尾粘连的标记先归一成独占一行：解析、配额、未发出读数与定稿都复用同一条
+    # 行车道，投递侧不再需要"行内标记"这第二种形状。
+    text = _lift_trailing_markers(text)
     from g3ku.stickers import config as sticker_config
 
     packs = scan_packs(root)
@@ -311,25 +380,40 @@ def resolve_markers(
 
 
 def _hold_partial_marker(text: str) -> str:
-    """Drop a trailing line that may still grow into a marker."""
+    """Drop a trailing fragment that may still grow into a marker.
+
+    The fragment may follow visible prose on the same line (``好耶[[sticker:at``),
+    so hold from the last ``[[`` instead of discarding the whole line.
+    """
     head, sep, tail = text.rpartition("\n")
-    candidate = tail.strip()
-    if not candidate or "]]" in candidate:
+    candidate = tail.rstrip()
+    if not candidate or candidate.endswith("]]"):
         return text
-    if candidate.startswith(_MARKER_PREFIX) or _MARKER_PREFIX.startswith(candidate):
-        return head + sep if sep else ""
-    return text
+    opener = candidate.rfind("[[")
+    if opener < 0:
+        return text
+    fragment = candidate[opener:]
+    if not (_MARKER_PREFIX.startswith(fragment) or fragment.startswith(_MARKER_PREFIX)):
+        return text
+    # A closed token followed by prose is a mid-sentence mention, not a pending
+    # marker: only a fragment without its ``]]`` is held back.
+    if "]]" in fragment:
+        return text
+    kept_tail = candidate[:opener].rstrip()
+    prefix = head + sep if sep else ""
+    return prefix + kept_tail
 
 
 def strip_markers_for_stream(text: str) -> str:
     """Stream-safe scrub: no complete marker, no half-written marker."""
     if not isinstance(text, str) or "[[" not in text:
         return text
-    kept = [
-        raw_line
-        for raw_line in text.splitlines(keepends=True)
-        if not _looks_like_marker(raw_line.rstrip("\r\n"))
-    ]
+    kept: list[str] = []
+    for raw_line in text.splitlines(keepends=True):
+        line, ending = _split_line_ending(raw_line)
+        if _looks_like_marker(line):
+            continue
+        kept.append(_strip_trailing_markers(line) + ending)
     return _hold_partial_marker("".join(kept))
 
 
