@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from g3ku.audit_events import configure_audit_sink
 from g3ku.deployment.data_root import DATA_DIR_ENV
 from g3ku.deployment.data_root import reset_cache as reset_data_root_cache
 from g3ku.runtime import external_outbox
@@ -27,6 +28,19 @@ def _isolate_pinned_exposure_revision() -> None:
     clear_pinned_exposure_revision_stores()
     yield
     clear_pinned_exposure_revision_stores()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_audit_sink(tmp_path: Path):
+    """audit sink 是进程级全局（``make_agent_loop`` 按工作区配置一次）：任何先跑、
+    以仓库根为工作区建回路的用例会把 sink 留在真实 ``.g3ku/audit.jsonl`` 上，之后
+    每个发审计的管理端点用例都往活审计里写假事件（2026-11-08 实测：qr-bind 用例把
+    app_id 999888777 写进了真实审计）。钉到用例目录下的专属子目录——不占
+    ``tmp_path/.g3ku``，``test_emit_unconfigured_is_noop`` 对那个路径有存在性断言；
+    出用例复位成未配置。"""
+    configure_audit_sink(tmp_path / "audit-isolated")
+    yield
+    configure_audit_sink(None)
 
 
 @pytest.fixture(autouse=True)

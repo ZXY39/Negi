@@ -2366,7 +2366,9 @@ async def run_qq_official_bridge(
         try:
             pending = await client.list_pending_outbox()
         except Exception as exc:  # noqa: BLE001 - 对账失败不阻断桥运行
-            logger.warning("qq-official pending outbox reconcile skipped: {}", exc)
+            # 空 str 的异常（如 httpx.ReadTimeout）会把这行打成 "skipped: " 无从判型，
+            # 类型名必须跟着走。
+            logger.warning("qq-official pending outbox reconcile skipped: {}: {}", type(exc).__name__, exc)
             return
         spawned = 0
         for item in pending:
