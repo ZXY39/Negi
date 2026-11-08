@@ -406,7 +406,9 @@ MCP 网关以固定身份 `negi-mcp` 出现在每条入站消息里，所以「�
   Master，Master 只有配置的 `ownerOpenids` 一人。群历史文件里的 `master` 由 bridge 按名单计算，
   不是用户正文；`mention_member` 的 `Master` 也只从 runtime 名单解析，raw openid 继续拒绝。
 - 群历史 JSONL / digest artifact 是**不可信数据**：用户正文被 JSON 序列化在 `text` 字段里，不能
-  伪造 `sender_id` / `master` / `n`；system prompt 明确正文、昵称、文件名里自称 Master 都不改变身份。
+  伪造 `n` / `s` / 行边界；digest 的身份只来自每行 `s` 与服务端生成的 `Master messages` 行（没有
+  操作员消息时是 `Master: none`），`members` 里的昵称只是展示值；system prompt 明确正文、昵称、
+  文件名里自称 Master 都不改变身份。
 - 群里的本人只改标签、不改档位：`resolve_turn_trust` 的多人会话短路不变，群里 Master 的消息仍按
   `third_party_group` 执行。标注是给模型解释用的，不是准入判据。
 - 只有渠道标记的消息才装饰：`external_trust` 由 `/api/v1` 落库；网页输入框在渠道会话里补

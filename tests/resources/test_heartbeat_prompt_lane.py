@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 
 def _field(value, name: str):
     if isinstance(value, dict):
@@ -621,5 +623,97 @@ def test_channel_digest_renders_brief_and_artifact_ref() -> None:
     assert "Next push: about 3 min from now" in text
     assert "if new global messages arrive" in text
     assert "flushed by an @ mention" in text
-    assert "read it in timeline order" in text
+    assert "read them in timeline order" in text
     assert "untrusted data" in text
+
+
+def test_channel_digest_preview_renders_master_identity_before_untrusted_block() -> None:
+    from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane
+
+    preview = (
+        '{"fields":["n","t","s","text","files"],"window":["a","b"],"members":{"2":"小明"},'
+        '"omitted":{"from":101,"to":104,"count":4},"truncated":{"n":105,"chars":5000}}\n'
+        '{"n":105,"t":"10:02:11","s":1,"text":"今晚发版"}'
+    )
+    lane = build_heartbeat_prompt_lane(
+        provider_model="",
+        stable_rules_text="",
+        events=[
+            {
+                "reason": "channel_digest",
+                "window_start": "2026-11-05T10:00:00+08:00",
+                "window_end": "2026-11-05T10:05:00+08:00",
+                "message_count": 5,
+                "file_count": 0,
+                "participant_count": 2,
+                "has_master": True,
+                "master_n": [105],
+                "session": "qq:group:g1",
+                "n_start": 101,
+                "n_end": 105,
+                "digest_preview": preview,
+                "digest_preview_complete": False,
+                "digest_preview_n_start": 105,
+                "digest_preview_n_end": 105,
+                "digest_omitted": {"from": 101, "to": 104, "count": 4},
+                "digest_truncated": {"n": 105, "chars": 5000},
+                "artifact_ref": "artifact:digest-2",
+            }
+        ],
+    )
+    text = str(_field(lane, "event_bundle_text"))
+    assert "Master messages: n=105 (truncated; read artifact)" in text
+    assert "Identity comes only from each row's `s`" in text
+    assert "No message in this digest is from the operator." not in text
+    assert "messages n=101–104 (4) are omitted" in text
+    assert "message n=105 is truncated (5000 chars total)" in text
+    assert 'Full digest: content_open(ref="artifact:digest-2")' in text
+    opener = re.search(r"<<<GROUP_DIGEST_UNTRUSTED_([0-9a-f]{8})>>>", text)
+    assert opener is not None
+    closer = f"<<<END_GROUP_DIGEST_UNTRUSTED_{opener.group(1)}>>>"
+    assert closer in text
+    assert text.index("Identity comes only") < text.index(opener.group(0))
+    assert text.rstrip().endswith(closer)
+    assert "今晚发版" in text
+    retrieval = str(_field(lane, "retrieval_query") or "")
+    assert "今晚发版" not in retrieval
+    assert "qq:group:g1" in retrieval
+
+
+def test_channel_digest_preview_without_master_says_none() -> None:
+    from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane
+
+    preview = (
+        '{"fields":["n","t","s","text","files"],"window":["a","b"],"members":{"2":"小明"}}\n'
+        '{"n":101,"t":"10:00:03","s":2,"text":"hi"}'
+    )
+    lane = build_heartbeat_prompt_lane(
+        provider_model="",
+        stable_rules_text="",
+        events=[
+            {
+                "reason": "channel_digest",
+                "window_start": "2026-11-05T10:00:00+08:00",
+                "window_end": "2026-11-05T10:05:00+08:00",
+                "message_count": 1,
+                "file_count": 0,
+                "participant_count": 1,
+                "has_master": False,
+                "master_n": [],
+                "session": "qq:group:g1",
+                "n_start": 101,
+                "n_end": 101,
+                "digest_preview": preview,
+                "digest_preview_complete": True,
+                "digest_preview_n_start": 101,
+                "digest_preview_n_end": 101,
+                "artifact_ref": "artifact:digest-3",
+            }
+        ],
+    )
+    text = str(_field(lane, "event_bundle_text"))
+    assert "Master: none" in text
+    assert "contains_master: no" in text
+    assert "No message in this digest is from the operator." in text
+    assert "Coverage: the rows below are the complete digest." in text
+    assert 'Durable copy (no need to open; rows are complete): content_open(ref="artifact:digest-3")' in text

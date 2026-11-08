@@ -1210,6 +1210,199 @@ async def report_qq_official_identity(
     return {"ok": True, "bridge_id": principal.bridge_id, **entry}
 
 
+_CHANNEL_DIGEST_PREVIEW_CHAR_LIMIT = 39_000
+_CHANNEL_DIGEST_TEXT_MAX_CHARS = 512_000
+_CHANNEL_DIGEST_MEMBER_NAME_MAX_CHARS = 64
+_CHANNEL_DIGEST_MEMBERS_MAX = 200
+# 预览头在完整头之上追加 omitted / truncated 两个键；选行时预留这段，避免
+# 选中后又因头部变长把正文顶出窗口。
+_CHANNEL_DIGEST_PREVIEW_HEADER_RESERVE = 512
+_CHANNEL_DIGEST_ROW_FIELDS = ("n", "t", "s", "text", "files")
+
+
+def _digest_label(value: Any, limit: int = _CHANNEL_DIGEST_MEMBER_NAME_MAX_CHARS) -> str:
+    text = " ".join(str(value or "").split())
+    return text[:limit]
+
+
+def _digest_time_text(value: Any, *, same_date: bool) -> str:
+    text = str(value or "").strip()
+    if same_date and len(text) >= 19 and text[10] == "T":
+        return text[11:19]
+    return text
+
+
+def _digest_file_entries(raw: Any) -> list[dict[str, str]]:
+    entries: list[dict[str, str]] = []
+    for item in list(raw or []):
+        if not isinstance(item, dict):
+            continue
+        name = _digest_label(item.get("name"), 256)
+        path = str(item.get("path") or "").strip()
+        if not name and not path:
+            continue
+        entry: dict[str, str] = {}
+        if name:
+            entry["name"] = name
+        if path:
+            entry["path"] = path
+        entries.append(entry)
+    return entries
+
+
+def _digest_row(item: dict[str, Any], *, sender_no: int, same_date: bool) -> dict[str, Any]:
+    row: dict[str, Any] = {"n": int(item.get("n") or 0)}
+    time_text = _digest_time_text(item.get("ts"), same_date=same_date)
+    if time_text:
+        row["t"] = time_text
+    row["s"] = int(sender_no)
+    text = str(item.get("text") or "")
+    if text:
+        row["text"] = text
+    files = _digest_file_entries(item.get("files"))
+    if files:
+        row["files"] = files
+    return row
+
+
+def _digest_json(value: dict[str, Any]) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _digest_header_payload(
+    *,
+    window_start: str,
+    window_end: str,
+    members: dict[str, str],
+    omitted: dict[str, int] | None = None,
+    truncated: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "fields": list(_CHANNEL_DIGEST_ROW_FIELDS),
+        "window": [window_start, window_end],
+    }
+    if members:
+        payload["members"] = members
+    if omitted:
+        payload["omitted"] = omitted
+    if truncated:
+        payload["truncated"] = truncated
+    return payload
+
+
+def _truncate_digest_row(row: dict[str, Any], *, budget: int) -> tuple[str, int] | None:
+    """单条消息自身超过窗口时只截它的 text 字段，行仍是合法 JSON。"""
+    text = str(row.get("text") or "")
+    if not text:
+        return None
+    original_chars = len(text)
+    marker = f"…[truncated: {original_chars} chars total; full message in the digest artifact]"
+    low, high = 0, original_chars
+    best = ""
+    while low <= high:
+        middle = (low + high) // 2
+        candidate = dict(row)
+        candidate["text"] = text[:middle].rstrip() + marker
+        serialized = _digest_json(candidate)
+        if len(serialized) <= budget:
+            best = serialized
+            low = middle + 1
+        else:
+            high = middle - 1
+    if not best:
+        return None
+    return best, original_chars
+
+
+def _digest_preview_text(
+    *,
+    rows: list[dict[str, Any]],
+    window_start: str,
+    window_end: str,
+    members: dict[str, str],
+    limit: int = _CHANNEL_DIGEST_PREVIEW_CHAR_LIMIT,
+) -> tuple[str, dict[str, Any]]:
+    """从最新消息往回取整条，预览只装得下尾部；单条超窗才做字符截断。"""
+    base_header = _digest_header_payload(
+        window_start=window_start,
+        window_end=window_end,
+        members=members,
+    )
+    base_header_line = _digest_json(base_header)
+    row_lines = [_digest_json(row) for row in rows]
+    total = len(base_header_line) + sum(1 + len(line) for line in row_lines)
+    if total <= limit:
+        body = "\n".join([base_header_line, *row_lines]) if row_lines else base_header_line
+        return body, {
+            "complete": True,
+            "n_start": int(rows[0].get("n") or 0) if rows else 0,
+            "n_end": int(rows[-1].get("n") or 0) if rows else 0,
+            "omitted": None,
+            "truncated": None,
+        }
+
+    selection_limit = max(
+        0,
+        limit - min(_CHANNEL_DIGEST_PREVIEW_HEADER_RESERVE, limit // 10),
+    )
+    used = len(base_header_line)
+    selected_lines: list[str] = []
+    selected_rows: list[dict[str, Any]] = []
+    truncated: dict[str, int] | None = None
+    index = len(rows) - 1
+    while index >= 0:
+        row = rows[index]
+        line = row_lines[index]
+        if used + 1 + len(line) <= selection_limit:
+            selected_lines.append(line)
+            selected_rows.append(row)
+            used += 1 + len(line)
+            index -= 1
+            continue
+        if not selected_rows:
+            truncated_row = _truncate_digest_row(row, budget=selection_limit - used - 1)
+            if truncated_row is not None:
+                line, original_chars = truncated_row
+                selected_lines.append(line)
+                selected_rows.append(row)
+                truncated = {"n": int(row.get("n") or 0), "chars": original_chars}
+                index -= 1
+        break
+
+    omitted_rows = rows[: index + 1]
+    omitted = (
+        {
+            "from": int(omitted_rows[0].get("n") or 0),
+            "to": int(omitted_rows[-1].get("n") or 0),
+            "count": len(omitted_rows),
+        }
+        if omitted_rows
+        else None
+    )
+    preview_header = _digest_header_payload(
+        window_start=window_start,
+        window_end=window_end,
+        members=members,
+        omitted=omitted,
+        truncated=truncated,
+    )
+    preview_header_line = _digest_json(preview_header)
+    selected_lines.reverse()
+    selected_rows.reverse()
+    body = (
+        "\n".join([preview_header_line, *selected_lines])
+        if selected_lines
+        else preview_header_line
+    )
+    return body, {
+        "complete": not omitted_rows and truncated is None,
+        "n_start": int(selected_rows[0].get("n") or 0) if selected_rows else 0,
+        "n_end": int(selected_rows[-1].get("n") or 0) if selected_rows else 0,
+        "omitted": omitted,
+        "truncated": truncated,
+    }
+
+
 @router.post("/sessions/{session_id}/digest")
 async def post_external_digest(
     session_id: str,
@@ -1230,6 +1423,9 @@ async def post_external_digest(
     raw_messages = payload.get("messages")
     messages = [item for item in list(raw_messages or []) if isinstance(item, dict)]
     text = str(payload.get("artifact_text") or "").strip()
+    digest_preview = ""
+    digest_preview_meta: dict[str, Any] = {}
+    master_n: list[int] = []
     if messages:
         roster = get_member_roster(entry.session_key)
         trusted_masters = {
@@ -1248,11 +1444,17 @@ async def post_external_digest(
                 for item in messages
             ]
         )
-        rendered: list[str] = []
+        times = [
+            str(item.get("ts") or "").strip()
+            for item in messages
+            if str(item.get("ts") or "").strip()
+        ]
+        same_date = bool(times) and len({time_text[:10] for time_text in times}) == 1
+        rendered_rows: list[dict[str, Any]] = []
+        member_labels: dict[str, str] = {}
         file_count = 0
         sender_ids: set[str] = set()
         has_master = False
-        times: list[str] = []
         numbers: list[int] = []
         for item in messages:
             sender_id = str(item.get("sender_id") or "").strip()
@@ -1262,26 +1464,38 @@ async def post_external_digest(
             if sender_id:
                 sender_ids.add(sender_id)
             file_count += len(list(item.get("files") or []))
-            if item.get("ts"):
-                times.append(str(item.get("ts")))
             if item.get("n"):
                 numbers.append(int(item.get("n")))
             number = 1 if master else int(member.get("number") or 0)
-            row = {
-                "n": int(item.get("n") or 0),
-                "time": str(item.get("ts") or ""),
-                "sender_no": number,
-                "sender_name": "Master" if master else str(member.get("name") or item.get("sender_name") or ""),
-                "role": str(item.get("role") or member.get("role") or ""),
-                "master": master,
-                "text": str(item.get("text") or ""),
-                "files": list(item.get("files") or []),
-            }
-            rendered.append(json.dumps(row, ensure_ascii=False, separators=(",", ":")))
-        text = "\n".join(rendered).strip()
+            rendered_rows.append(_digest_row(item, sender_no=number, same_date=same_date))
+            if master:
+                master_n.append(int(item.get("n") or 0))
+                continue
+            label = _digest_label(member.get("name") or item.get("sender_name"))
+            if number >= 2 and label and label.casefold() != "master":
+                member_labels.setdefault(str(number), label)
+        if len(member_labels) > _CHANNEL_DIGEST_MEMBERS_MAX:
+            member_labels = dict(list(member_labels.items())[:_CHANNEL_DIGEST_MEMBERS_MAX])
+        window_start = min(times) if times else str(payload.get("window_start") or "").strip()
+        window_end = max(times) if times else str(payload.get("window_end") or "").strip()
+        header_line = _digest_json(
+            _digest_header_payload(
+                window_start=window_start,
+                window_end=window_end,
+                members=member_labels,
+            )
+        )
+        row_lines = [_digest_json(row) for row in rendered_rows]
+        text = "\n".join([header_line, *row_lines]) if row_lines else header_line
+        digest_preview, digest_preview_meta = _digest_preview_text(
+            rows=rendered_rows,
+            window_start=window_start,
+            window_end=window_end,
+            members=member_labels,
+        )
         computed_stats = {
-            "window_start": min(times) if times else "",
-            "window_end": max(times) if times else "",
+            "window_start": window_start,
+            "window_end": window_end,
             "message_count": len(messages),
             "file_count": file_count,
             "participant_count": len(sender_ids),
@@ -1291,9 +1505,10 @@ async def post_external_digest(
         }
     else:
         computed_stats = {}
+    master_n = sorted({number for number in master_n if number > 0})
     if not text:
         raise HTTPException(status_code=400, detail="digest_text_required")
-    if len(text) > 512_000:
+    if len(text) > _CHANNEL_DIGEST_TEXT_MAX_CHARS:
         raise HTTPException(status_code=413, detail="digest_text_too_large")
 
     artifact_ref = ""
@@ -1336,10 +1551,19 @@ async def post_external_digest(
         "n_end": int(computed_stats.get("n_end") or payload.get("n_end") or 0),
         "digest_id": str(payload.get("digest_id") or ""),
         "artifact_ref": artifact_ref,
+        "master_n": list(master_n),
+        "digest_preview": digest_preview,
+        "digest_preview_complete": bool(digest_preview_meta.get("complete")),
+        "digest_preview_n_start": int(digest_preview_meta.get("n_start") or 0),
+        "digest_preview_n_end": int(digest_preview_meta.get("n_end") or 0),
         "next_push_in_seconds": next_push_in_seconds,
         "flush_reason": str(payload.get("flush_reason") or "").strip(),
     }
-    if not artifact_ref:
+    if digest_preview_meta.get("omitted"):
+        normalized["digest_omitted"] = dict(digest_preview_meta["omitted"])
+    if digest_preview_meta.get("truncated"):
+        normalized["digest_truncated"] = dict(digest_preview_meta["truncated"])
+    if not artifact_ref and not digest_preview:
         normalized["digest_text"] = text
     queued = bool(enqueue(entry.session_key, normalized))
     return {
