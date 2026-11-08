@@ -279,6 +279,8 @@ const S = {
     taskPageSize: RESOURCE_PAGE_SIZES[0],
     taskSortMode: "time",
     taskLongTermExpanded: false,
+    taskLongTermHintUntil: 0,
+    taskLongTermHintTimer: null,
     taskTerminalReconcileId: null,
     tasksById: {},
     orderedTaskIds: [],

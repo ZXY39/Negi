@@ -169,7 +169,7 @@ test("默认折叠：只渲染一次性任务，折叠条显示长期任务统�
     assert.equal(context.lastMeta.total, 2, "折叠时分页总数只算一次性任务");
 });
 
-test("展开后只渲染长期任务，并收进带底色的面板", () => {
+test("展开后只渲染长期任务，并收进浅灰面板", () => {
     const context = loadRenderModule(tasks);
     context.S.taskLongTermExpanded = true;
     context.renderTasks();
@@ -177,12 +177,27 @@ test("展开后只渲染长期任务，并收进带底色的面板", () => {
     const section = byClass(context, "task-long-term-section");
     const inner = byClass(context, "task-long-term-grid");
     assert.ok(section, "展开态必须有长期任务面板");
+    assert.ok(!String(section.className).includes("is-hint"), "默认不常亮提示色");
     assert.ok(inner, "面板内必须有独立的卡片网格");
     assert.ok(section.children.includes(bar), "折叠条是面板头");
     assert.ok(bar.innerHTML.includes("chevron-up"), bar.innerHTML);
     assert.equal(bar.getAttribute("aria-expanded"), "true");
     assert.deepEqual(cardIds(context), ["lt1", "lt2"], "展开时不得出现一次性任务");
     assert.equal(context.lastMeta.total, 2, "展开时分页总数只算长期任务");
+});
+
+test("展开瞬间才挂提示色，3 秒窗口结束后回到浅灰", () => {
+    const context = loadRenderModule(tasks);
+    context.S.taskLongTermExpanded = true;
+    context.S.taskLongTermHintUntil = Date.now() + 3000;
+    context.renderTasks();
+    assert.ok(byClass(context, "task-long-term-section").className.includes("is-hint"));
+    context.S.taskLongTermHintUntil = 0;
+    context.S.taskGridSignature = "";
+    context.renderTasks();
+    const section = byClass(context, "task-long-term-section");
+    assert.ok(section);
+    assert.ok(!String(section.className).includes("is-hint"));
 });
 
 test("折叠收起后回到一次性任务，长期任务卡片重新隐藏", () => {

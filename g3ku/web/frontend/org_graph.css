@@ -16814,26 +16814,31 @@ textarea {
     box-shadow: 0 0 0 4px color-mix(in srgb, var(--ui-brand) 24%, transparent);
 }
 
-/* 展开态：折叠条变成面板头，长期任务卡片落在带底色的面板里。 */
+/* 展开态：折叠条变成面板头，长期任务卡片落在浅灰面板里；展开瞬间用品牌色闪一次作为提示。 */
 .task-long-term-section {
     grid-column: 1 / -1;
-    border: 1px solid color-mix(in srgb, var(--ui-brand) 26%, var(--ui-border));
+    border: 1px solid var(--ui-border);
     border-radius: var(--ui-radius-card);
-    background: color-mix(in srgb, var(--ui-brand-soft) 72%, var(--ui-bg-surface));
+    background: var(--ui-bg-subtle);
     overflow: hidden;
+    transition: background-color 400ms var(--ui-motion-ease), border-color 400ms var(--ui-motion-ease);
+}
+
+.task-long-term-section.is-hint {
+    border-color: color-mix(in srgb, var(--ui-brand) 26%, var(--ui-border));
+    background: color-mix(in srgb, var(--ui-brand-soft) 72%, var(--ui-bg-surface));
 }
 
 .task-long-term-section .task-long-term-bar {
     min-height: 40px;
     border: 0;
-    border-bottom: 1px solid color-mix(in srgb, var(--ui-brand) 22%, var(--ui-border));
     border-radius: 0;
     background: transparent;
     color: var(--ui-text);
 }
 
 .task-long-term-section .task-long-term-bar:hover {
-    background: color-mix(in srgb, var(--ui-brand-soft) 55%, transparent);
+    background: color-mix(in srgb, var(--ui-neutral-soft) 60%, transparent);
 }
 
 .task-long-term-section .task-long-term-bar:focus-visible {

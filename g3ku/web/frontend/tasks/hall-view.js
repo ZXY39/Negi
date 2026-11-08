@@ -49,7 +49,8 @@ function renderTasks() {
         ? document.createElement("section")
         : null;
     if (longTermSection) {
-        longTermSection.className = "task-long-term-section";
+        const hintActive = Date.now() < Number(S.taskLongTermHintUntil || 0);
+        longTermSection.className = `task-long-term-section${hintActive ? " is-hint" : ""}`;
         U.taskGrid.appendChild(longTermSection);
     }
     if (longTermStats.total) {

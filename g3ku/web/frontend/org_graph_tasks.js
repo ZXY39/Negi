@@ -202,10 +202,32 @@ function setTaskSortMode(mode) {
     resortTaskOrderedIds();
 }
 
+const TASK_LONG_TERM_HINT_MS = 3000;
+
+function clearTaskLongTermHint() {
+    if (S.taskLongTermHintTimer) {
+        window.clearTimeout(S.taskLongTermHintTimer);
+        S.taskLongTermHintTimer = null;
+    }
+    S.taskLongTermHintUntil = 0;
+}
+
+function armTaskLongTermHint() {
+    if (S.taskLongTermHintTimer) window.clearTimeout(S.taskLongTermHintTimer);
+    S.taskLongTermHintUntil = Date.now() + TASK_LONG_TERM_HINT_MS;
+    S.taskLongTermHintTimer = window.setTimeout(() => {
+        S.taskLongTermHintTimer = null;
+        S.taskLongTermHintUntil = 0;
+        U.taskGrid?.querySelector?.(".task-long-term-section.is-hint")?.classList.remove("is-hint");
+    }, TASK_LONG_TERM_HINT_MS);
+}
+
 function setTaskLongTermExpanded(expanded) {
     const next = !!expanded;
     if (S.taskLongTermExpanded === next) return;
     S.taskLongTermExpanded = next;
+    if (next) armTaskLongTermHint();
+    else clearTaskLongTermHint();
     // 两组任务互斥展示：切换后回到第一页并回到列表顶部。
     S.taskPage = 1;
     if (U.taskGrid) U.taskGrid.scrollTop = 0;
