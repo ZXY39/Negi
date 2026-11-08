@@ -23,6 +23,7 @@ from g3ku.resources.tool_settings import MemoryRuntimeSettings, load_tool_settin
 from g3ku.runtime.bootstrap_factory import make_agent_loop as _runtime_make_agent_loop
 from g3ku.runtime.bootstrap_factory import make_provider as _runtime_make_provider
 from g3ku.utils.helpers import resolve_path_in_workspace, sync_workspace_templates
+from g3ku.utils.net_env import normalize_no_proxy_env
 from g3ku.web.launcher import run_worker_runtime
 
 app = typer.Typer(
@@ -191,6 +192,7 @@ def main(
     ),
 ):
     """Negi - Personal AI Assistant."""
+    normalize_no_proxy_env()
     _suppress_noisy_dependency_warnings()
 
 

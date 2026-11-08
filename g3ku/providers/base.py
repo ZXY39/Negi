@@ -9,6 +9,7 @@ from typing import Any
 from loguru import logger
 
 from g3ku.prompt_trace import render_send_data_trace
+from g3ku.utils.net_env import normalize_no_proxy_env
 
 _TRACE_TRUE_VALUES = {"1", "true", "yes", "on", "debug", "log"}
 
@@ -113,6 +114,9 @@ class LLMProvider(ABC):
     """
 
     def __init__(self, api_key: str | None = None, api_base: str | None = None):
+        # HTTP clients read proxy env at construction; a bracketed IPv6
+        # NO_PROXY entry would abort every provider before any request.
+        normalize_no_proxy_env()
         self.api_key = api_key
         self.api_base = api_base
 

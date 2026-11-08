@@ -241,6 +241,14 @@ Responses 协议的请求体只带各家 `/responses` 共同支持的字段：`t
 
 绑定 key 是稳定主键：它唯一标识 `models.catalog[]` 条目，同时被 `models.roles.*` 和 `agents.multi_agent.orchestrator_model_key` 引用。管理面创建 binding 时以记录的 `default_model` 为基底自动生成 key，遇到同名模型时追加数字后缀去重，因此 key 不等于模型名，不同供应商可以添加同名模型。展示标题的优先级是绑定级 `name` > 记录的 `default_model` > `key`：`name` 是 `models.catalog[]` 条目的绑定层字段，空值为「未命名」，展示回退到 `default_model`，写入空 `name`/删除 `name` 即回到回退展示而不改写 key；非空 `name` 在创建/编辑 binding 时做大小写不敏感的全局去重（排除自身），`/api/models` 与 `/api/llm/bindings` 两个视图都读写该字段。编辑 `default_model` 或 `name` 都会更新展示标题而不改写 key；命名与展示职责详见 `web-and-admin.md`「Model Config Page And Admin Contract」。
 
+### 环境代理变量与 HTTP 客户端构造
+
+所有出站 HTTP 客户端（openai SDK 的 httpx2、Responses 车道的 httpx、`web_fetch`、QQ 桥、STT、连接探测与 MCP 客户端）默认 `trust_env=True`，在**构造时**读取进程的 `NO_PROXY`/`no_proxy`，所以代理环境是模型链的隐式依赖。httpx 与 httpx2 的代理绕过解析把带方括号的 IPv6 项（`[::1]`）当成域名，生成 `all://*[::1]` 的绕过键，客户端构造抛 `InvalidURL: Invalid port: ':1]'`；该异常发生在 provider 构造阶段，整条模型链的每一跳都以同一原因失败并落 `ModelProviderExhaustedError`，与本机模型配置、`base_url`、API key 都无关。
+
+运行入口在创建任何客户端之前调用 `g3ku.utils.net_env.normalize_no_proxy_env()`，把 `[::1]`、`[::1]/128` 改写成裸字面量 `::1`、`::1/128`；`[::1]:8080` 丢掉端口（代理绕过键只承载主机）。provider 基类构造时再调用一次，覆盖不经过 CLI 的直连构造（测试、脚本、嵌入式调用）。改写只作用于本进程内存里的环境值，不改磁盘上的用户环境。
+
+排障：所有模型同时失败、错误文本含 `Invalid port: ':1]'` 时，先读启动进程的 `NO_PROXY`/`no_proxy`，不要从模型配置或 `base_url` 排查。
+
 ### 角色路由：有序 fallback 与负载均衡组
 
 一条角色链是**有序 route entry 列表**，链上顺序就是 fallback 优先级。CEO/frontdoor 的 `model_refs` 不被过滤也不按 provider 模板或协议能力重排；只有链首失败后才前进到下一个 entry（重试与轮换预算见 `runtime-overview.md`「Chat provider 超时与重试边界」）。

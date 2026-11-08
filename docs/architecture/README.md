@@ -218,6 +218,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 加了一颗小窗口成员后压缩比预期更早发生、组弹窗里「组内最大上下文对齐」那行跟着变、或同一任务里有的跳塞得下有的被判没人塞得下 → `config-and-models.md`「Frontdoor Context Window Contract」+ `context-and-cache-troubleshooting.md`「节点侧排查要点」
 - 组车道打分看着很闲但链首一直被 429、或某次模型调用的重试轮数不等于任何组的 `maxRetryRounds` → `runtime-overview.md`「节点模型路由与准入绑定」辅助
 - 模型链在预算没跑满时就报"耗尽"、审计里 `retryable: true` 与"链耗尽"同时出现、或错误文案里写着与实绑供应商不匹配的名字 → `runtime-overview.md`「Chat provider 超时与重试边界」（两级判据与"链位进过即耗尽"）车道那条（spawn 送审评审与重复预检刻意不过准入，属维持现状的已知边界）
+- 所有模型调用同时失败、错误链含 `Invalid port: ':1]'` 或整条链报 `ModelProviderExhaustedError` → `config-and-models.md`「环境代理变量与 HTTP 客户端构造」
 - 改了 `ceo_frontdoor.md` 但某个活会话没反应 → `context-and-cache-troubleshooting.md`「系统提示词的重读跟着记忆块与曝光的戳走」
 - 按协议车道判断缓存命中（"这条车道不发 `prompt_cache_key` 所以没命中"）→ `context-and-cache-troubleshooting.md`「Family 与 key 合同」
 - 上下文脑图标只按新输入变化、读数长期低于上一请求的真实输入规模 → `context-and-cache-troubleshooting.md`「同 turn 的 append-only 规则被破坏」+ `web-and-admin.md`「Composer Context Usage Meter」
