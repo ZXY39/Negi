@@ -10852,6 +10852,16 @@ textarea {
     row-gap: var(--ui-space-4);
 }
 
+/* 展开长期任务时把网格盒向左右各扩 16px，并用内边距把内容宽度补回原值：
+   面板外框有外扩空间，卡片列宽仍与折叠态完全一致。 */
+#view-tasks-list .task-list-layout .project-card-grid.is-long-term-expanded {
+    margin-left: -16px;
+    margin-right: -16px;
+    padding-left: 16px;
+    padding-right: 20px;
+    padding-bottom: var(--ui-space-3);
+}
+
 .project-toolbar-group {
     display: flex;
     align-items: center;
@@ -16815,21 +16825,37 @@ textarea {
 }
 
 /* 展开态：折叠条变成面板头，长期任务卡片落在浅灰面板里；展开瞬间用品牌色闪一次作为提示。
-   面板用 outline 画边：不占内容宽度，内部卡片与折叠态外部卡片的列宽、x 坐标完全对齐。 */
+   外框向左右各外扩 12px；展开时网格临时加宽（负外边距+补偿内边距），
+   内部卡片列宽与折叠态外部卡片保持一致。 */
 .task-long-term-section {
     grid-column: 1 / -1;
+    position: relative;
     border: 0;
-    outline: 1px solid var(--ui-border);
-    outline-offset: -1px;
     border-radius: var(--ui-radius-card);
-    background: var(--ui-bg-subtle);
-    overflow: hidden;
-    transition: background-color 400ms var(--ui-motion-ease), outline-color 400ms var(--ui-motion-ease);
+    background: transparent;
+    overflow: visible;
 }
 
-.task-long-term-section.is-hint {
-    outline-color: color-mix(in srgb, var(--ui-brand) 26%, var(--ui-border));
+.task-long-term-section::before {
+    content: "";
+    position: absolute;
+    inset: 0 -12px -12px;
+    z-index: 0;
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-card);
+    background: var(--ui-bg-subtle);
+    transition: background-color 400ms var(--ui-motion-ease), border-color 400ms var(--ui-motion-ease);
+}
+
+.task-long-term-section.is-hint::before {
+    border-color: color-mix(in srgb, var(--ui-brand) 26%, var(--ui-border));
     background: color-mix(in srgb, var(--ui-brand-soft) 72%, var(--ui-bg-surface));
+}
+
+.task-long-term-section .task-long-term-bar,
+.task-long-term-grid {
+    position: relative;
+    z-index: 1;
 }
 
 .task-long-term-section .task-long-term-bar {

@@ -24,6 +24,7 @@ function renderTasks() {
         task_hall_full_render_count: Number(S.taskHallStats?.task_hall_full_render_count || 0) + 1,
     };
     U.taskGrid.innerHTML = "";
+    U.taskGrid.classList?.toggle?.("is-long-term-expanded", longTermExpanded);
     const metricAnimationTaskIds = S.taskMetricAnimationTaskIds || new Set();
     const workerState = normalizeTaskWorkerState(S.tasksWorkerState);
     const workerNotice = taskWorkerNoticeText(workerState);

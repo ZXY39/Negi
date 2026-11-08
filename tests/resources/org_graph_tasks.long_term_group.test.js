@@ -186,10 +186,10 @@ test("展开后只渲染长期任务，并收进浅灰面板", () => {
     assert.equal(context.lastMeta.total, 2, "展开时分页总数只算长期任务");
 });
 
-test("展开瞬间才挂提示色，1 秒窗口结束后回到浅灰", () => {
+test("展开瞬间才挂提示色，500ms 窗口结束后回到浅灰", () => {
     const context = loadRenderModule(tasks);
     context.S.taskLongTermExpanded = true;
-    context.S.taskLongTermHintUntil = Date.now() + 1000;
+    context.S.taskLongTermHintUntil = Date.now() + 500;
     context.renderTasks();
     assert.ok(byClass(context, "task-long-term-section").className.includes("is-hint"));
     context.S.taskLongTermHintUntil = 0;
