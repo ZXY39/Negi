@@ -44,6 +44,14 @@ function renderTasks() {
         diskWarning.textContent = `🚨 磁盘空间不足：运行中任务已自动暂停，新工具调用进入排队等待。请清理磁盘，空间恢复后手动恢复任务。${sinceText ? `（紧急态自 ${sinceText} 起）` : ""}`;
         U.taskGrid.appendChild(diskWarning);
     }
+    // 展开态把长期任务收进一块带底色的面板：条是面板头，卡片在面板内的网格里。
+    const longTermSection = longTermExpanded && longTermStats.total
+        ? document.createElement("section")
+        : null;
+    if (longTermSection) {
+        longTermSection.className = "task-long-term-section";
+        U.taskGrid.appendChild(longTermSection);
+    }
     if (longTermStats.total) {
         const groupBar = document.createElement("button");
         groupBar.type = "button";
@@ -52,7 +60,13 @@ function renderTasks() {
         groupBar.setAttribute("aria-expanded", longTermExpanded ? "true" : "false");
         groupBar.title = longTermExpanded ? "折叠长期任务" : "展开长期任务";
         groupBar.innerHTML = `<span class="task-long-term-text">${esc(taskLongTermGroupText(longTermStats))}</span><i data-lucide="${longTermExpanded ? "chevron-up" : "chevron-down"}" aria-hidden="true"></i>`;
-        U.taskGrid.appendChild(groupBar);
+        (longTermSection || U.taskGrid).appendChild(groupBar);
+    }
+    let cardHost = U.taskGrid;
+    if (longTermSection) {
+        cardHost = document.createElement("div");
+        cardHost.className = "task-long-term-grid";
+        longTermSection.appendChild(cardHost);
     }
     if (!meta.total) {
         const empty = document.createElement("div");
@@ -167,7 +181,7 @@ function renderTasks() {
             }
             void openTask(taskId);
         });
-        U.taskGrid.appendChild(el);
+        cardHost.appendChild(el);
     });
     S.taskMetricSnapshot = nextTaskMetricSnapshot;
     S.pendingTaskCardPatchIds = new Set([...(S.pendingTaskCardPatchIds || new Set())].filter((taskId) => !S.visibleTaskIds.includes(taskId)));

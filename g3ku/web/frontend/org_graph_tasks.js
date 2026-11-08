@@ -159,20 +159,20 @@ function taskLongTermGroupText(stats) {
     return `共 ${stats.total} 个长期任务，运行中 ${stats.running}，待命 ${stats.standby}`;
 }
 
-// 展开时长期任务整体排在一次性任务前面，组内保持当前排序；折叠时只交出一次性任务。
-function taskLongTermOrderedItems(tasks = S.tasks) {
+// 长期（连续）任务与一次性任务互斥展示：折叠时只给一次性任务，展开时只给长期任务。
+function taskLongTermGroups(tasks = S.tasks) {
     const longTerm = [];
     const oneOff = [];
     (Array.isArray(tasks) ? tasks : []).forEach((task) => {
         if (task?.continuous) longTerm.push(task);
         else oneOff.push(task);
     });
-    return { longTerm, oneOff, ordered: [...longTerm, ...oneOff] };
+    return { longTerm, oneOff };
 }
 
 function taskHallGroupedMeta() {
-    const grouped = taskLongTermOrderedItems(orderedTasks(S.tasks));
-    const pageItems = S.taskLongTermExpanded ? grouped.ordered : grouped.oneOff;
+    const grouped = taskLongTermGroups(orderedTasks(S.tasks));
+    const pageItems = S.taskLongTermExpanded ? grouped.longTerm : grouped.oneOff;
     return { grouped, meta: paginateResources(pageItems, S.taskPage, S.taskPageSize) };
 }
 
@@ -206,8 +206,9 @@ function setTaskLongTermExpanded(expanded) {
     const next = !!expanded;
     if (S.taskLongTermExpanded === next) return;
     S.taskLongTermExpanded = next;
-    // 展开后长期任务整体插到最前面：回到第一页才能先看到它们。
-    if (next) S.taskPage = 1;
+    // 两组任务互斥展示：切换后回到第一页并回到列表顶部。
+    S.taskPage = 1;
+    if (U.taskGrid) U.taskGrid.scrollTop = 0;
     S.taskGridSignature = "";
     renderTasksIfVisible();
 }

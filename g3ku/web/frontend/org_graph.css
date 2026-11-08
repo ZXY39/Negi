@@ -10836,6 +10836,22 @@ textarea {
     flex-shrink: 0;
 }
 
+/* 任务大厅：列表贴紧页头，上下留白收紧。 */
+#view-tasks-list .resource-layout.task-list-layout {
+    padding-top: var(--ui-space-3);
+    padding-bottom: var(--ui-space-3);
+}
+
+#view-tasks-list .task-list-layout .project-list-container {
+    padding-top: var(--ui-space-2);
+    padding-bottom: var(--ui-space-2);
+}
+
+#view-tasks-list .task-list-layout .project-card-grid {
+    padding-top: 0;
+    row-gap: var(--ui-space-4);
+}
+
 .project-toolbar-group {
     display: flex;
     align-items: center;
@@ -16796,6 +16812,39 @@ textarea {
 .task-long-term-bar:focus-visible {
     outline: 0;
     box-shadow: 0 0 0 4px color-mix(in srgb, var(--ui-brand) 24%, transparent);
+}
+
+/* 展开态：折叠条变成面板头，长期任务卡片落在带底色的面板里。 */
+.task-long-term-section {
+    grid-column: 1 / -1;
+    border: 1px solid color-mix(in srgb, var(--ui-brand) 26%, var(--ui-border));
+    border-radius: var(--ui-radius-card);
+    background: color-mix(in srgb, var(--ui-brand-soft) 72%, var(--ui-bg-surface));
+    overflow: hidden;
+}
+
+.task-long-term-section .task-long-term-bar {
+    min-height: 40px;
+    border: 0;
+    border-bottom: 1px solid color-mix(in srgb, var(--ui-brand) 22%, var(--ui-border));
+    border-radius: 0;
+    background: transparent;
+    color: var(--ui-text);
+}
+
+.task-long-term-section .task-long-term-bar:hover {
+    background: color-mix(in srgb, var(--ui-brand-soft) 55%, transparent);
+}
+
+.task-long-term-section .task-long-term-bar:focus-visible {
+    box-shadow: inset 0 0 0 3px color-mix(in srgb, var(--ui-brand) 30%, transparent);
+}
+
+.task-long-term-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: var(--ui-space-4) 18px;
+    padding: var(--ui-space-3);
 }
 
 /* lucide 把占位的 <i> 换成 <svg>，两种标签都要吃到靠右与 16px 尺寸。 */
