@@ -202,7 +202,7 @@ function setTaskSortMode(mode) {
     resortTaskOrderedIds();
 }
 
-const TASK_LONG_TERM_HINT_MS = 3000;
+const TASK_LONG_TERM_HINT_MS = 1000;
 
 function clearTaskLongTermHint() {
     if (S.taskLongTermHintTimer) {

@@ -16814,18 +16814,21 @@ textarea {
     box-shadow: 0 0 0 4px color-mix(in srgb, var(--ui-brand) 24%, transparent);
 }
 
-/* 展开态：折叠条变成面板头，长期任务卡片落在浅灰面板里；展开瞬间用品牌色闪一次作为提示。 */
+/* 展开态：折叠条变成面板头，长期任务卡片落在浅灰面板里；展开瞬间用品牌色闪一次作为提示。
+   面板用 outline 画边：不占内容宽度，内部卡片与折叠态外部卡片的列宽、x 坐标完全对齐。 */
 .task-long-term-section {
     grid-column: 1 / -1;
-    border: 1px solid var(--ui-border);
+    border: 0;
+    outline: 1px solid var(--ui-border);
+    outline-offset: -1px;
     border-radius: var(--ui-radius-card);
     background: var(--ui-bg-subtle);
     overflow: hidden;
-    transition: background-color 400ms var(--ui-motion-ease), border-color 400ms var(--ui-motion-ease);
+    transition: background-color 400ms var(--ui-motion-ease), outline-color 400ms var(--ui-motion-ease);
 }
 
 .task-long-term-section.is-hint {
-    border-color: color-mix(in srgb, var(--ui-brand) 26%, var(--ui-border));
+    outline-color: color-mix(in srgb, var(--ui-brand) 26%, var(--ui-border));
     background: color-mix(in srgb, var(--ui-brand-soft) 72%, var(--ui-bg-surface));
 }
 
@@ -16849,7 +16852,8 @@ textarea {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
     gap: var(--ui-space-4) 18px;
-    padding: var(--ui-space-3);
+    /* 左右不留内边距：列宽与折叠态外部卡片一致；上下留出与外部行距相同的 16px。 */
+    padding: var(--ui-space-4) 0;
 }
 
 /* lucide 把占位的 <i> 换成 <svg>，两种标签都要吃到靠右与 16px 尺寸。 */
