@@ -727,7 +727,7 @@ def record_sticker_failures(scope_key: str, failures: Any) -> dict[str, Any]:
     每轮**整表替换**：通知语义是"上一轮"，不是"历史上所有没发出去的键"——上一轮的
     挂账要么已被上一跳投走，要么被这一轮的最新解析结果覆盖（包括空表＝上一轮没有
     失败，把遗留挂账清掉）。来源是 `StickerReply.undelivered` 与 `undelivered_reasons`
-    的逐位配对；配额超限的标记不算失败，本来就不在这两个元组里。
+    的逐位配对；配额超限的标记同样算"没出去"，原因单列（超出每轮发送上限）。
     """
     context = notice_context_for(scope_key)
     context['sticker_failures_pending'] = normalize_sticker_failures(failures)

@@ -1,7 +1,7 @@
 """表情包未发出的原因行与下一轮通知车道。
 
 不变量：
-- 解析失败的键永远带逐位平行的原因行；配额超限不算失败，两个元组里都没有。
+- 没发出去的键（解析失败与配额超限都算）永远带逐位平行的原因行。
 - 轮末整表替换挂账（空表＝清掉遗留），通知只投一次就清，语义是「上一轮」。
 - 通知复用既有 `[RUNTIME_NOTICE]` 消息且节排最前；复读剥离与截断撤账都认这一节。
 """
@@ -86,7 +86,7 @@ def test_undelivered_keys_carry_parallel_reasons(tmp_path: Path):
     assert len(reply.undelivered) == len(reply.undelivered_reasons)
 
 
-def test_cap_exceeded_markers_are_not_failures(tmp_path: Path):
+def test_cap_exceeded_markers_are_reported_with_the_cap_reason(tmp_path: Path):
     _pack(tmp_path, count=3)
 
     reply = resolve_reply_stickers(
@@ -95,7 +95,13 @@ def test_cap_exceeded_markers_are_not_failures(tmp_path: Path):
         max_per_reply=1,
     )
     assert len(reply.delivered) == 1
-    assert reply.undelivered == () and reply.undelivered_reasons == ()
+    assert reply.undelivered == ("demo/happy",)
+    assert reply.undelivered_reasons == ("超出每轮发送上限",)
+
+    # cap=0 是停发开关：全部标记都因超限没出去，通知同样逐条点名。
+    zero = resolve_reply_stickers("[[sticker:demo/happy]]", root=tmp_path, max_per_reply=0)
+    assert zero.delivered == () and zero.undelivered == ("demo/happy",)
+    assert zero.undelivered_reasons == ("超出每轮发送上限",)
 
 
 def test_failure_notice_delivers_once_and_clears():

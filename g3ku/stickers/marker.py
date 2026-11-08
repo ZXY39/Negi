@@ -13,12 +13,12 @@ one canonical shape. Two properties matter:
   text, including the ones that fail to resolve. A bad key degrades to "no
   image", never to a leaked marker or a stray file name. The same holds for a
   marker glued to a line tail and for a half-written marker in a stream.
-- **A failure is not silent.** Every key that failed to resolve is labelled in
+- **A failure is not silent.** Every key that did not go out is labelled in
   ``StickerReply.undelivered`` with a paired short reason in
-  ``undelivered_reasons``; the session close records both into the notice
-  ledger and the next turn carries one ``[RUNTIME_NOTICE]`` section back to the
-  model (see ``g3ku/runtime/skill_roster_notice.py``). Cap-exceeded markers are
-  policy, not failure, and stay out of both tuples.
+  ``undelivered_reasons`` — including cap-exceeded markers, whose reason is
+  ``REASON_CAP_EXCEEDED``. The session close records both into the notice
+  ledger and the next turn carries one ``[RUNTIME_NOTICE]`` section back to
+  the model (see ``g3ku/runtime/skill_roster_notice.py``).
 - **Resolution is stateless.** ``strip_markers_for_stream`` works on the
   cumulative reply text, so the streaming relay needs no parser state and can
   hold back a half-written marker without remembering anything.
@@ -54,6 +54,7 @@ REASON_CATEGORY_EMPTY = "分类没有已注册图片"
 REASON_INDEX_MISSING = "序号不存在"
 REASON_FILE_MISSING = "图片文件不存在"
 REASON_CONTENT_CHANGED = "内容已变更"
+REASON_CAP_EXCEEDED = "超出每轮发送上限"
 
 _SEGMENT = r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}"
 MARKER_RE = re.compile(rf"^\[\[sticker:({_SEGMENT})/({_SEGMENT})\]\]$")
@@ -246,7 +247,7 @@ class StickerReply:
     delivered: tuple[str, ...] = ()
     undelivered: tuple[str, ...] = ()
     # 与 undelivered 逐位平行的原因行（REASON_*，中文短句）；通知车道按键带回，
-    # 记忆面只用 undelivered 本身。配额超限不算失败，两个元组里都没有它。
+    # 记忆面只用 undelivered 本身。配额超限同样算"没出去"，原因单列。
     undelivered_reasons: tuple[str, ...] = ()
 
     @property
@@ -329,14 +330,18 @@ def resolve_reply_stickers(
             undelivered_reasons.append(REASON_AMBIGUOUS)
             settled_kept.append(raw_line)
             continue
+        pack_key, value, index = parsed
         if len(chosen) >= limit:
-            # 配额是策略不是失败：已经在上面记过一次 warning，不再进未发出清单。
+            # 超限的键同样没发出去，也要回执：模型得知道这一轮少发了哪几张。
+            # cap=0（停发开关）时全部标记都落到这里，通知逐条点名。
             logger.warning(
                 "sticker marker dropped: per-reply cap {} already reached", limit
             )
+            label = f"{pack_key}/{value}/{index}" if index is not None else f"{pack_key}/{value}"
+            undelivered.append(label)
+            undelivered_reasons.append(REASON_CAP_EXCEEDED)
             settled_kept.append(raw_line)
             continue
-        pack_key, value, index = parsed
         if index is not None:
             path, reason = _pick_by_index(packs, pack_key, value, index)
         else:
@@ -465,6 +470,7 @@ __all__ = [
     "MARKER_RE",
     "MAX_STICKERS_PER_REPLY",
     "REASON_AMBIGUOUS",
+    "REASON_CAP_EXCEEDED",
     "REASON_CATEGORY_EMPTY",
     "REASON_CATEGORY_MISSING",
     "REASON_CONTENT_CHANGED",
