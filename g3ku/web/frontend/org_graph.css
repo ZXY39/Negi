@@ -16866,9 +16866,7 @@ textarea {
     color: var(--ui-text);
 }
 
-.task-long-term-section .task-long-term-bar:hover {
-    background: color-mix(in srgb, var(--ui-neutral-soft) 60%, transparent);
-}
+/* 面板头不挂 hover 底色：鼠标点开后停在条上，底色的半透明灰会在绿/灰面板上留下方块色差。 */
 
 .task-long-term-section .task-long-term-bar:focus-visible {
     box-shadow: inset 0 0 0 3px color-mix(in srgb, var(--ui-brand) 30%, transparent);
