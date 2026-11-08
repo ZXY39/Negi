@@ -9114,6 +9114,35 @@ textarea {
     font-weight: 600;
 }
 
+/* QQ 扫码注册弹窗：二维码要一眼能扫（白底衬黑码），状态行沿用 Master 弹窗的语义档。 */
+.confirm-dialog.qq-qr-bind-dialog {
+    width: min(420px, calc(calc(100vw / var(--ui-zoom, 1)) - 48px));
+}
+
+.qq-qr-bind-code-row {
+    justify-content: center;
+    padding: 6px 0 2px;
+}
+
+.qq-qr-bind-image {
+    width: 224px;
+    height: 224px;
+    padding: 10px;
+    box-sizing: border-box;
+    border-radius: 12px;
+    background: #fff;
+}
+
+.qq-qr-bind-image-placeholder {
+    width: 224px;
+    height: 224px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 12px;
+    border: 1px dashed var(--border-color);
+}
+
 .confirm-checkbox-row {
     display: flex;
     align-items: flex-start;

@@ -148,6 +148,12 @@ class ApiCore {
                 return "这个会话正在回复或还有待注入的群摘要，等这一轮结束后再清除。";
             case "qq_group_session_required":
                 return "这个会话不是 QQ 官方群会话，没有群历史文件可清除。";
+            case "runtime_locked":
+                return "项目当前已锁定，解锁后再扫码注册。";
+            case "qr_bind_task_not_found":
+                return "扫码绑定任务已失效，请重新生成二维码。";
+            case "qr_bind_upstream_error":
+                return "QQ 开放平台暂时没有响应，稍后再试。";
             default:
                 return "";
         }

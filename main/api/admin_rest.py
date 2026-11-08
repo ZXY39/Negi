@@ -1902,6 +1902,185 @@ async def get_qq_bot_status():
     return {'ok': True, 'accounts': _qq_bridge_service_states()}
 
 
+def _qq_runtime_unlocked() -> bool:
+    from pathlib import Path
+
+    from g3ku.security.bootstrap import get_bootstrap_security_service
+
+    return bool(get_bootstrap_security_service(Path.cwd()).is_unlocked())
+
+
+def _ensure_qq_qr_bind_unlocked() -> None:
+    """扫码注册要把 AppSecret 写进覆盖层；锁定态下 save_config 会把密钥剥掉且无处
+    回填，这扇门必须在任务创建时拦，而不是让操作员扫完码才发现凭据丢了。"""
+    if not _qq_runtime_unlocked():
+        raise HTTPException(
+            status_code=409,
+            detail={'code': 'runtime_locked', 'message': '项目已锁定，解锁后再扫码注册'},
+        )
+
+
+@router.post('/qq-bot/qr-bind')
+async def create_qq_bot_qr_bind():
+    """发起一次 QQ 扫码注册任务；返回端内渲染的二维码与轮询用 task_id。
+
+    凭据由腾讯在扫码授权后加密下发（见 ``g3ku/qq_official/qr_bind.py``），落库
+    发生在轮询端点；本端点只创建任务并渲染二维码。"""
+    _ensure_qq_qr_bind_unlocked()
+    from g3ku.qq_official import qr_bind
+
+    try:
+        task = await qr_bind.create_bind_task()
+    except qr_bind.QrBindUpstreamError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={'code': 'qr_bind_upstream_error', 'message': f'QQ 开放平台未接受绑定任务：{exc}'},
+        ) from exc
+    connect_url = qr_bind.build_connect_url(task.task_id)
+    try:
+        qr_svg = qr_bind.render_qr_svg_data_url(connect_url)
+    except Exception as exc:  # noqa: BLE001 - 渲染失败则本次任务作废，不留孤儿槽位
+        qr_bind.get_qq_qr_bind_registry().consume(task.task_id)
+        raise HTTPException(
+            status_code=502,
+            detail={'code': 'qr_bind_upstream_error', 'message': '二维码生成失败'},
+        ) from exc
+    qr_bind.get_qq_qr_bind_registry().store(task)
+    audit_events.emit_audit_event(
+        'external_api',
+        'warning',
+        'qq_bot_qr_bind_issued',
+        'QQ scan-to-bind task issued',
+        detail={
+            'expires_in_seconds': int(qr_bind.QR_BIND_TASK_TTL_SECONDS),
+            'actor': 'operator',
+        },
+    )
+    return {
+        'ok': True,
+        'task_id': task.task_id,
+        'connect_url': connect_url,
+        'qr_svg_data_url': qr_svg,
+        'expires_in_seconds': int(qr_bind.QR_BIND_TASK_TTL_SECONDS),
+    }
+
+
+@router.get('/qq-bot/qr-bind/status')
+async def get_qq_bot_qr_bind_status(task_id: str = Query('')):
+    """轮询扫码结果；COMPLETED 时就地落库（AppSecret 进覆盖层 + 扫码人登记 owner）。"""
+    from g3ku.qq_official import qr_bind
+
+    registry = qr_bind.get_qq_qr_bind_registry()
+    task = registry.get(task_id)
+    if task is None:
+        raise HTTPException(
+            status_code=404,
+            detail={'code': 'qr_bind_task_not_found', 'message': '绑定任务不存在或已过期，请重新生成二维码'},
+        )
+    try:
+        result = await qr_bind.poll_bind_result(task.task_id)
+    except qr_bind.QrBindUpstreamError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={'code': 'qr_bind_upstream_error', 'message': f'QQ 开放平台查询失败：{exc}'},
+        ) from exc
+    if result.status == 'expired':
+        registry.consume(task.task_id)
+        return {'ok': True, 'status': 'expired'}
+    if result.status != 'completed':
+        return {'ok': True, 'status': 'waiting'}
+    return await _complete_qq_bot_qr_bind(task, result)
+
+
+async def _complete_qq_bot_qr_bind(task: Any, result: Any) -> dict[str, Any]:
+    from g3ku.config.schema import QqBotAccountConfig, _normalize_qq_app_id
+    from g3ku.qq_official import qr_bind
+
+    registry = qr_bind.get_qq_qr_bind_registry()
+    if not _qq_runtime_unlocked():
+        registry.consume(task.task_id)
+        raise HTTPException(
+            status_code=409,
+            detail={'code': 'runtime_locked', 'message': '项目已锁定，请解锁后重新扫码'},
+        )
+    app_id = _normalize_qq_app_id(result.bot_app_id)
+    if not app_id:
+        registry.consume(task.task_id)
+        raise HTTPException(
+            status_code=502,
+            detail={'code': 'qr_bind_upstream_error', 'message': '扫码结果缺少 AppID'},
+        )
+    try:
+        secret = qr_bind.decrypt_secret(result.bot_encrypted_secret, task.key)
+    except qr_bind.QrBindError as exc:
+        registry.consume(task.task_id)
+        raise HTTPException(status_code=exc.status_code, detail={'code': exc.code, 'message': exc.message}) from exc
+    if not secret:
+        registry.consume(task.task_id)
+        raise HTTPException(
+            status_code=502,
+            detail={'code': 'qr_bind_upstream_error', 'message': '扫码结果缺少 AppSecret'},
+        )
+
+    cfg = load_config()
+    q = cfg.qq_bot
+    previous = q.accounts.get(app_id) if isinstance(q.accounts, dict) else None
+    creating = previous is None
+    # 已存在的号只换密钥，label/启停/沙箱都保留操作员的现场；新号给一个可读备注。
+    entry = QqBotAccountConfig(
+        app_secret=secret,
+        sandbox=bool(getattr(previous, 'sandbox', False)),
+        enabled=bool(getattr(previous, 'enabled', True)),
+        label=str(getattr(previous, 'label', '') or ''),
+        owner_openids=list(getattr(previous, 'owner_openids', None) or []),
+    )
+    if creating and not str(entry.label or '').strip():
+        entry.label = '扫码注册'
+    # 扫码即 Master：结果里的 user_openid 是扫码人在该 AppID 下的 c2c 身份。
+    # 已有 owner 的号不换人（换人走注销→绑定码），拿不到/形状不对就跳过，账号照常落库。
+    master = 'kept'
+    sender_masked = ''
+    openid = str(result.user_openid or '').strip()
+    if not entry.owner_openids and openid:
+        if _QQ_OWNER_OPENID_RE.fullmatch(openid):
+            entry.owner_openids = [openid]
+            master = 'registered'
+            sender_masked = _mask_qq_openid(openid)
+        else:
+            master = 'skipped'
+    elif not openid and not entry.owner_openids:
+        master = 'skipped'
+    q.accounts[app_id] = entry
+    if creating and not q.enabled:
+        # 扫码注册的语义是"注册即用"：总开关关着会让新号停在 enabled_off 空转。
+        q.enabled = True
+    # 成功即消费任务槽：同 task_id 的第二次轮询是 404，不会二次落库。
+    registry.consume(task.task_id)
+    save_config(cfg)
+    await _refresh_runtime_after_save('admin_qq_bot_qr_bind_complete')
+    audit_events.emit_audit_event(
+        'external_api',
+        'warning',
+        'qq_bot_qr_registered',
+        'QQ bot account registered via QR scan',
+        detail={
+            'app_id': app_id,
+            'master': master,
+            'sender_id': sender_masked,
+            'actor': 'operator',
+        },
+    )
+    return {
+        'ok': True,
+        'status': 'completed',
+        'app_id': app_id,
+        'bridge_id': _qq_bridge_id(app_id),
+        'master': master,
+        'sender_id_masked': sender_masked,
+        **_qq_bot_payload(cfg),
+    }
+
+
 @router.get('/models')
 async def list_models():
     manager = ModelManager.load()

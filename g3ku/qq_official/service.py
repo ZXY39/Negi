@@ -247,6 +247,11 @@ class QqOfficialService:
         entry = tokens.get(self._bridge_id)
         existing = str(getattr(entry, "token", "") or "").strip()
         if existing:
+            if entry.enabled is False:
+                # 被整表替换判成孤儿而停用的凭证，账号加回来时必须恢复启用：停用态
+                # 在 /api/v1 鉴权里直接跳过匹配，桥拿着这条 token 会一直 401。
+                entry.enabled = True
+                save_config(cfg)
             return existing
         token = secrets.token_urlsafe(32)
         cfg.external_api.tokens[self._bridge_id] = ExternalApiTokenConfig(

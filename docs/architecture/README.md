@@ -33,13 +33,13 @@ Start here when you are new to the repository or when a change crosses subsystem
 - `tool-hydration-and-callable-chain.md`
   Use for what makes a tool callable this hop (contract presence), the delivery hop that returns the contract and stages arguments, the `reuse_args` batch lane, re-read and fingerprints, parameter-error lane, the strict plain-text rejection, externalized result envelope, universal tool timeout, tool rerun-safe declaration for the recovery lane, stage gating, and the context→callable chain.
 - `web-and-admin.md`
-  Use for websocket contracts, frontend/backend responsibility boundaries, the first-run onboarding flow, the persona settings dialog, and operator-visible UI behavior.
+  Use for websocket contracts, frontend/backend responsibility boundaries, the first-run onboarding flow, the persona settings dialog, operator-visible UI behavior, and the QQ scan-to-bind registration dialog on the external access page.
 - `heartbeat-system.md`
   Use for heartbeat turns, task-terminal/stall/distribution-error wakeups, cron at-most-once delivery, and shutdown-resume session wakes.
 - `config-and-models.md`
   Use for config source-of-truth rules and role-to-model resolution.
 - `external-agent-api.md`
-  Use for the channel-agnostic headless API consumed by third-party bridges and the built-in official QQ adapter: auth, external session registry, turn terminal invariant, SSE event mapping, ext outbound routing, and the agent-created external event subscription intake with its durable event states.
+  Use for the channel-agnostic headless API consumed by third-party bridges and the built-in official QQ adapter: auth, external session registry, turn terminal invariant, SSE event mapping, ext outbound routing, the agent-created external event subscription intake with its durable event states, and the q.qq.com scan-to-bind registration protocol.
 - `agent-gateway.md`
   Use for the out-of-the-box agent integration surfaces built on the External Agent API: the OpenAI-compatible chat endpoint (session mapping, wait/timeout and streaming semantics) and the MCP stdio gateway (`negi mcp serve`, tool surface, stdout purity).
 - `speech-to-text.md`

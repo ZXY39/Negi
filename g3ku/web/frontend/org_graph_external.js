@@ -943,6 +943,211 @@ async function _copyQqMasterCode() {
     showToast({ title: "已复制绑定码", text: "用 QQ 私聊发给机器人即可。", kind: "success" });
 }
 
+// ---- QQ 扫码注册 -----------------------------------------------------------
+// 二维码由服务端生成（SVG data URL），前端只负责展示与 2s 轮询。expired 就地
+// 重建任务换新码（不打断操作员）；连续上游失败才停下，把重试交给操作员。
+const QQ_QR_BIND = {
+    taskId: "",
+    connectUrl: "",
+    expiresAt: 0,
+    countdownTimer: null,
+    pollTimer: null,
+    active: false,
+    upstreamFailures: 0,
+};
+
+function _qqQrBindElements() {
+    return {
+        backdrop: document.getElementById("qq-qr-bind-backdrop"),
+        image: document.getElementById("qq-qr-bind-image"),
+        imagePlaceholder: document.getElementById("qq-qr-bind-image-placeholder"),
+        status: document.getElementById("qq-qr-bind-status"),
+        statusText: document.getElementById("qq-qr-bind-status-text"),
+        countdown: document.getElementById("qq-qr-bind-countdown"),
+        openLink: document.getElementById("qq-qr-bind-open-link"),
+        retry: document.getElementById("qq-qr-bind-retry"),
+    };
+}
+
+function _stopQqQrBindTimers() {
+    if (QQ_QR_BIND.countdownTimer) {
+        window.clearInterval(QQ_QR_BIND.countdownTimer);
+        QQ_QR_BIND.countdownTimer = null;
+    }
+    if (QQ_QR_BIND.pollTimer) {
+        window.clearInterval(QQ_QR_BIND.pollTimer);
+        QQ_QR_BIND.pollTimer = null;
+    }
+}
+
+function _setQqQrBindStatus(state, text) {
+    const els = _qqQrBindElements();
+    if (!els.status || !els.statusText) return;
+    els.status.dataset.state = String(state || "");
+    els.statusText.textContent = String(text || "");
+}
+
+function _renderQqQrBindCountdown() {
+    const els = _qqQrBindElements();
+    if (!els.countdown) return;
+    const remaining = Math.max(0, Math.ceil((Number(QQ_QR_BIND.expiresAt || 0) - Date.now()) / 1000));
+    const minutes = Math.floor(remaining / 60);
+    const seconds = remaining % 60;
+    els.countdown.textContent = remaining > 0
+        ? `${minutes}:${String(seconds).padStart(2, "0")}`
+        : "0:00";
+}
+
+function _closeQqQrBindModal() {
+    _stopQqQrBindTimers();
+    QQ_QR_BIND.active = false;
+    QQ_QR_BIND.taskId = "";
+    QQ_QR_BIND.connectUrl = "";
+    const els = _qqQrBindElements();
+    if (els.backdrop) {
+        els.backdrop.hidden = true;
+        els.backdrop.classList.remove("is-open");
+    }
+    if (els.image) {
+        els.image.removeAttribute("src");
+        els.image.hidden = true;
+    }
+    if (els.imagePlaceholder) els.imagePlaceholder.hidden = false;
+    if (els.openLink) els.openLink.hidden = true;
+    if (els.retry) els.retry.hidden = true;
+}
+
+async function _createQqQrBindTask() {
+    // 每次新建都替换服务端的旧任务槽，旧 task_id 随之作废（轮询会 404）。
+    const payload = await ApiClient.createQqQrBind();
+    QQ_QR_BIND.taskId = String(payload?.task_id || "");
+    QQ_QR_BIND.connectUrl = String(payload?.connect_url || "");
+    QQ_QR_BIND.expiresAt = Date.now() + Math.max(1, Number(payload?.expires_in_seconds) || 300) * 1000;
+    QQ_QR_BIND.upstreamFailures = 0;
+    const els = _qqQrBindElements();
+    if (els.image) {
+        els.image.removeAttribute("src");
+        els.image.hidden = !QQ_QR_BIND.taskId;
+        if (QQ_QR_BIND.taskId) {
+            els.image.src = String(payload?.qr_svg_data_url || "");
+            els.image.onerror = () => {
+                els.image.hidden = true;
+                if (els.imagePlaceholder) els.imagePlaceholder.hidden = false;
+            };
+        }
+    }
+    if (els.imagePlaceholder) els.imagePlaceholder.hidden = !!QQ_QR_BIND.taskId;
+    if (els.openLink) {
+        els.openLink.href = QQ_QR_BIND.connectUrl || "#";
+        els.openLink.hidden = !QQ_QR_BIND.connectUrl;
+    }
+    if (els.retry) els.retry.hidden = true;
+    _setQqQrBindStatus("waiting", "等待扫码…");
+    _renderQqQrBindCountdown();
+    if (!QQ_QR_BIND.countdownTimer) {
+        QQ_QR_BIND.countdownTimer = window.setInterval(_renderQqQrBindCountdown, 1000);
+    }
+    if (!QQ_QR_BIND.pollTimer) {
+        QQ_QR_BIND.pollTimer = window.setInterval(() => void _pollQqQrBind(), 2000);
+    }
+    void _pollQqQrBind();
+}
+
+async function _openQqQrRegister() {
+    const els = _qqQrBindElements();
+    if (!els.backdrop || QQ_QR_BIND.active) return;
+    els.backdrop.hidden = false;
+    els.backdrop.classList.add("is-open");
+    QQ_QR_BIND.active = true;
+    _setQqQrBindStatus("waiting", "正在生成二维码…");
+    try {
+        await _createQqQrBindTask();
+    } catch (error) {
+        _stopQqQrBindTimers();
+        _setQqQrBindStatus("failed", ApiClient.friendlyErrorMessage(error) || "二维码生成失败，请重试。");
+        if (els.retry) els.retry.hidden = false;
+    }
+}
+
+async function _retryQqQrBind() {
+    const els = _qqQrBindElements();
+    if (!els.backdrop || !els.backdrop.classList.contains("is-open")) return;
+    if (els.retry) els.retry.hidden = true;
+    QQ_QR_BIND.active = true;
+    _setQqQrBindStatus("waiting", "正在生成二维码…");
+    try {
+        await _createQqQrBindTask();
+    } catch (error) {
+        _stopQqQrBindTimers();
+        _setQqQrBindStatus("failed", ApiClient.friendlyErrorMessage(error) || "二维码生成失败，请重试。");
+        if (els.retry) els.retry.hidden = false;
+    }
+}
+
+function _qqQrBindMasterToast(master, appId) {
+    const idText = `AppID ${appId}`;
+    if (master === "registered") {
+        return { title: "扫码注册成功", text: `${idText} 已入库并连接，扫码人已注册为该号 Master。`, kind: "success" };
+    }
+    if (master === "kept") {
+        return { title: "扫码注册成功", text: `${idText} 已更新密钥；该号保留现有 Master。`, kind: "success" };
+    }
+    return { title: "扫码注册成功", text: `${idText} 已入库并连接；未识别到扫码者身份，可用「注册Master」补绑。`, kind: "success" };
+}
+
+async function _pollQqQrBind() {
+    if (!QQ_QR_BIND.active || !QQ_QR_BIND.taskId) return;
+    try {
+        const payload = await ApiClient.getQqQrBindStatus(QQ_QR_BIND.taskId);
+        if (!QQ_QR_BIND.active) return;
+        QQ_QR_BIND.upstreamFailures = 0;
+        if (payload?.status === "completed") {
+            QQ_QR_BIND.active = false;
+            _stopQqQrBindTimers();
+            _setQqQrBindStatus("success", "已注册，凭据已入库并连接。");
+            const els = _qqQrBindElements();
+            if (els.countdown) els.countdown.textContent = "已完成";
+            _applyQqBotPayload(payload);
+            renderQqBotAccounts();
+            showToast(_qqQrBindMasterToast(String(payload?.master || ""), String(payload?.app_id || "")));
+            window.setTimeout(() => _closeQqQrBindModal(), 1500);
+            return;
+        }
+        if (payload?.status === "expired") {
+            _setQqQrBindStatus("waiting", "二维码已过期，正在刷新…");
+            await _createQqQrBindTask();
+            return;
+        }
+        _setQqQrBindStatus("waiting", "等待扫码…");
+    } catch (error) {
+        if (!QQ_QR_BIND.active) return;
+        const code = String(error?.code || "");
+        if (code === "runtime_locked") {
+            _closeQqQrBindModal();
+            showToast({ title: "无法扫码注册", text: ApiClient.friendlyErrorMessage(error), kind: "error" });
+            return;
+        }
+        if (code === "qr_bind_task_not_found") {
+            // 任务槽被替换或过期：静默重建换新码，操作员无感。
+            _setQqQrBindStatus("waiting", "二维码已刷新…");
+            try {
+                await _createQqQrBindTask();
+            } catch (innerError) {
+                void innerError;
+            }
+            return;
+        }
+        QQ_QR_BIND.upstreamFailures += 1;
+        if (QQ_QR_BIND.upstreamFailures >= 3) {
+            QQ_QR_BIND.upstreamFailures = 0;
+            _stopQqQrBindTimers();
+            _setQqQrBindStatus("failed", ApiClient.friendlyErrorMessage(error) || "QQ 开放平台暂时没有响应。");
+            const els = _qqQrBindElements();
+            if (els.retry) els.retry.hidden = false;
+        }
+    }
+}
+
 function _registerQqMaster(index) {
     const target = _qqBotRowFor(index);
     if (!target) return;
@@ -1044,6 +1249,16 @@ function initQqBotView() {
     const bindBackdrop = document.getElementById("qq-master-bind-backdrop");
     if (bindBackdrop) bindBackdrop.addEventListener("click", (event) => {
         if (event.target === bindBackdrop) _closeQqMasterBindingModal();
+    });
+    const qrRegisterBtn = document.getElementById("qq-bot-qr-register-btn");
+    if (qrRegisterBtn) qrRegisterBtn.addEventListener("click", () => void _openQqQrRegister());
+    const qrClose = document.getElementById("qq-qr-bind-close");
+    if (qrClose) qrClose.addEventListener("click", () => _closeQqQrBindModal());
+    const qrRetry = document.getElementById("qq-qr-bind-retry");
+    if (qrRetry) qrRetry.addEventListener("click", () => void _retryQqQrBind());
+    const qrBackdrop = document.getElementById("qq-qr-bind-backdrop");
+    if (qrBackdrop) qrBackdrop.addEventListener("click", (event) => {
+        if (event.target === qrBackdrop) _closeQqQrBindModal();
     });
     const toggle = document.getElementById("qq-bot-enabled-toggle");
     if (toggle) toggle.addEventListener("click", () => void toggleQqBotEnabled(toggle.getAttribute("aria-pressed") !== "true"));

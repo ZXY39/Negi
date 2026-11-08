@@ -52,6 +52,14 @@
         return this.post("/api/qq-bot/unregister-master", payload || {});
     },
 
+    async createQqQrBind() {
+        return this.post("/api/qq-bot/qr-bind");
+    },
+
+    async getQqQrBindStatus(taskId) {
+        return this.get(`/api/qq-bot/qr-bind/status?task_id=${encodeURIComponent(String(taskId || ""))}`);
+    },
+
     async getQqGroupHistoryUsage(sessionId) {
         return this.get(`/api/qq-bot/history/usage?session_id=${encodeURIComponent(String(sessionId || ""))}`);
     },

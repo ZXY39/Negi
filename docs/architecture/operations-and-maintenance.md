@@ -565,6 +565,7 @@ worker 静默不等于 worker 死亡：空闲 worker 除心跳线程每 1–2s �
 IM 渠道有两条：内置官方 QQ 适配器（`g3ku/qq_official/`，进程内 botpy 桥，见 `external-agent-api.md`）与第三方独立桥接进程（经 `/api/v1` External Agent API 接入）。早期的 china bridge 子系统已下线，配置里出现 `chinaBridge` 会被直接剥掉。先看：
 
 - `docs/architecture/external-agent-api.md`「常见排障入口」
+- QQ 扫码注册失败按响应码定位（409 项目锁定 / 502 上游 / 404 任务过期），判据同在那节
 - 桥接应用自身的日志与配置（如 `bridges/qq-onebot/README.md`）
 - 官方 QQ 全量群消息的历史文件在 `<数据根>/session-workspaces/<会话>/group-inbox/`（`messages.jsonl`、`media/`、`meta.json`）；单群按 `groupHistoryMaxGb`（默认 2GB）淘汰最旧消息。未被心跳消费的历史保留 `groupHistoryRetentionDays`（默认 30 天），被心跳注入消费后保留 `groupConsumedRetentionDays`（默认 7 天）。占用读数与清除入口在群会话输入框上方；清除保留连续编号 `n` 与成员 roster，不删转录/记忆。账号行的「群文件」是各群历史合计，不设预警阈值。
 

@@ -854,8 +854,9 @@
                             <div id="qq-bot-accounts" class="qq-bot-account-list"></div>
                             <div class="external-token-form-actions">
                                 <span id="qq-bot-status-text" class="qq-bot-status"></span>
+                                <button id="qq-bot-qr-register-btn" class="toolbar-btn ghost small" type="button">QQ扫码注册</button>
                                 <a class="toolbar-btn ghost small" href="https://q.qq.com/qqbot/openclaw/login.html"
-                                    target="_blank" rel="noreferrer noopener">申请入口</a>
+                                    target="_blank" rel="noreferrer noopener">进入账号</a>
                                 <button id="qq-bot-account-add-btn" class="toolbar-btn ghost small" type="button">添加账号</button>
                                 <button id="qq-bot-save-btn" class="toolbar-btn success small" type="submit">保存并连接</button>
                             </div>
@@ -1282,6 +1283,29 @@
                     </p>
                     <div class="confirm-actions">
                         <button id="qq-master-bind-close" class="toolbar-btn ghost" type="button">关闭</button>
+                    </div>
+                </section>
+            </div>
+            <div id="qq-qr-bind-backdrop" class="confirm-backdrop" hidden>
+                <section id="qq-qr-bind-dialog" class="confirm-dialog qq-qr-bind-dialog" role="dialog"
+                    aria-modal="true" aria-labelledby="qq-qr-bind-title">
+                    <div class="confirm-header">
+                        <h2 id="qq-qr-bind-title">QQ 扫码注册</h2>
+                    </div>
+                    <p class="confirm-text qq-master-bind-hint">用手机 QQ 扫下方二维码，按提示选择要绑定的机器人。凭据自动入库并连接，扫码人同时注册为该号 Master；已有 Master 的号不换人。</p>
+                    <div class="qq-master-bind-code-row qq-qr-bind-code-row">
+                        <img id="qq-qr-bind-image" class="qq-qr-bind-image" alt="QQ 扫码注册二维码" hidden>
+                        <span id="qq-qr-bind-image-placeholder" class="resource-empty qq-qr-bind-image-placeholder">二维码生成中…</span>
+                    </div>
+                    <p id="qq-qr-bind-status" class="qq-master-bind-status" aria-live="polite">
+                        <span id="qq-qr-bind-status-text">等待扫码…</span>
+                        <span id="qq-qr-bind-countdown" class="qq-master-bind-countdown"></span>
+                    </p>
+                    <div class="confirm-actions">
+                        <a id="qq-qr-bind-open-link" class="toolbar-btn ghost small" href="#" target="_blank"
+                            rel="noreferrer noopener" hidden>浏览器打开</a>
+                        <button id="qq-qr-bind-retry" class="toolbar-btn ghost small" type="button" hidden>重试</button>
+                        <button id="qq-qr-bind-close" class="toolbar-btn ghost" type="button">关闭</button>
                     </div>
                 </section>
             </div>
