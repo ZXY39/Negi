@@ -17,7 +17,7 @@ set -euo pipefail
 
 REPO_OWNER='ZXY39'
 REPO_NAME='Negi'
-REF="${G3KU_REF:-v1.11.17}"
+REF="${G3KU_REF:-v1.11.18}"
 REF_SET=0
 DIR="${G3KU_DIR:-$HOME/Negi}"
 NO_START=0
