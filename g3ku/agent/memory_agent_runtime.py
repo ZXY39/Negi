@@ -772,22 +772,34 @@ class _MemoryToolSession:
         return f"note staged: {normalized}"
 
     def batch_has_mutation(self) -> bool:
+        """True when the staged batch would change anything durable.
+
+        Note writes count: `note_upserts` / `note_edits` land as real file writes, so a
+        batch that only touches notes is a mutating batch and goes through the same
+        preview -> confirm gate. Leaving them out here let a pure-note batch skip the
+        gate entirely - the incident where a persona upsert was refused at confirm as
+        "changes nothing", then overwritten by a garbage resubmit that landed silently.
+        """
         payload = dict(self.applied_batch or {})
         return bool(
             list(payload.get("adds") or [])
             or list(payload.get("rewrites") or [])
             or list(payload.get("deletes") or [])
             or list(payload.get("category_deletes") or [])
+            or dict(payload.get("note_upserts") or {})
+            or dict(payload.get("note_edits") or {})
         )
 
     def confirm_batch(self) -> dict[str, Any]:
-        """Commit gate: a batch that changes memories only lands after this call.
+        """Commit gate: a batch that changes memories or notes only lands after this call.
 
         The model reads its own edit back as a line diff before it commits, so a wrong
         line number is caught here instead of becoming a legal write to the wrong memory.
-        A zero-change batch skips the round entirely - there is nothing to review.
-        Resubmitting stages a new payload and clears this flag, so the diff the model
-        confirmed is always the diff that lands.
+        Note-only batches (note_upserts / note_edits) are mutating batches too - their
+        read-back lives in the preview's `notes_changed` summary. A zero-change batch
+        (noop_reason / already_satisfied) skips the round entirely - there is nothing to
+        review. Resubmitting stages a new payload and clears this flag, so the diff the
+        model confirmed is always the diff that lands.
         """
         if not isinstance(self.applied_batch, dict):
             return {"ok": False, "errors": {"batch": "stage a batch before confirming"}}
@@ -6089,6 +6101,11 @@ class MemoryManager:
             note name works too). It deletes every retired memory filed under that category, so
             the line disappears and nothing else in the block moves. The category note itself
             under `memory/index/` stays - this lane never deletes archive files.
+
+            `note_upserts` writes whole notes ({ref: body}; the persona is `note_persona`);
+            `note_edits` patches spans of existing notes ({ref: [{old_text, new_text}]}).
+            Both are batch mutations: the preview summarizes them under `notes_changed`, and
+            they land only after `memory_apply_confirm`, same as memory-row changes.
             """
 
             replaced_previous = session.previewed
@@ -6134,8 +6151,10 @@ class MemoryManager:
         def memory_apply_confirm() -> dict[str, Any]:
             """Land the staged batch after reviewing its preview. Call once.
 
-            Only a batch that adds, rewrites or deletes memories needs this; a batch that
-            changes nothing (noop_reason / already_satisfied) has already landed.
+            Every mutating batch needs this - memory rows (adds / rewrites / deletes /
+            category_deletes) and note writes (note_upserts / note_edits) alike. Only a
+            batch that changes nothing (noop_reason / already_satisfied) has already
+            landed and needs no confirmation.
             """
 
             return session.confirm_batch()
@@ -6270,7 +6289,15 @@ class MemoryManager:
             result = target.invoke(args)
             if asyncio.iscoroutine(result):
                 result = await result
-            return {"ok": True, "tool": name, "result": result}
+            # The envelope must not outshine the payload: a dict result that already says
+            # ok:false (field errors, a refused confirm) keeps that verdict at the top
+            # level, or a fast model reading only the envelope reads a failed gate as
+            # success and resubmits instead of repairing.
+            inner_ok = bool(result.get("ok", True)) if isinstance(result, dict) else True
+            envelope: dict[str, Any] = {"ok": inner_ok, "tool": name, "result": result}
+            if isinstance(result, dict) and result.get("errors"):
+                envelope["errors"] = result["errors"]
+            return envelope
         except Exception as exc:
             return {"ok": False, "tool": name, "error": str(exc or "memory tool failed").strip()}
 
@@ -6310,6 +6337,16 @@ class MemoryManager:
         after_lines = validated.document_text.splitlines()
         diff = [line for line in difflib.unified_diff(before_lines, after_lines, "当前", "改后", lineterm="", n=0)]
         truncated = max(len(diff) - self.PREVIEW_MAX_DIFF_LINES, 0)
+        # The line diff above only covers resident rows, so a note-only batch would read
+        # as "nothing changed" - name the note writes explicitly, or the model re-reads
+        # an empty diff and resubmits instead of confirming (observed: persona upsert).
+        notes_changed = [
+            {"note_ref": str(ref), "action": "upsert", "chars": len(str(body or ""))}
+            for ref, body in dict(validated.note_upserts or {}).items()
+        ] + [
+            {"note_ref": str(ref), "action": "edit", "edits": len(list(ops or []))}
+            for ref, ops in dict(validated.note_edits or {}).items()
+        ]
         return {
             "status": "built",
             "adds": len(validated.adds),
@@ -6326,6 +6363,7 @@ class MemoryManager:
             "line_count_after": len(after_lines),
             "diff": diff[: self.PREVIEW_MAX_DIFF_LINES],
             "diff_truncated_lines": truncated,
+            "notes_changed": notes_changed,
         }
 
     def _build_validated_write_from_apply_batch(
