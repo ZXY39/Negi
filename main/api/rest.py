@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from fastapi import APIRouter, Body, HTTPException, Query
+from fastapi.responses import PlainTextResponse
 
 from g3ku.content import artifact_ref_from_id
 from g3ku.shells.web import get_agent, is_no_ceo_model_configured_error
@@ -282,6 +283,26 @@ async def get_task_node_chatbox(task_id: str, node_id: str, reply_to: str = Quer
         node_id,
         str(reply_to or '').strip(),
     )
+
+
+@router.get('/tasks/{task_id}/nodes/{node_id}/chatbox/replies.md')
+async def get_task_node_chatbox_replies_markdown(task_id: str, node_id: str, reply_to: str = Query('')):
+    """回投的 Markdown 文档读口：应用内媒体查看器渲染档的同源取数 URL。
+
+    与会话 .md 附件同一车道——查看器 fetch 这份正文后用聊天同款 renderMarkdown
+    排版，不出浏览器弹窗。
+    """
+    task_id = _ensure_task_route_id(task_id)
+    service = _service()
+    await service.startup()
+    task_id = service.normalize_task_id(task_id)
+    body = await asyncio.to_thread(
+        service.node_chatbox_replies_markdown,
+        task_id,
+        node_id,
+        str(reply_to or '').strip(),
+    )
+    return PlainTextResponse(body, media_type='text/markdown; charset=utf-8')
 
 
 @router.post('/tasks/{task_id}/nodes/{node_id}/chatbox/read')

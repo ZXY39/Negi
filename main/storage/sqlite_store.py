@@ -2795,9 +2795,11 @@ class SQLiteTaskStore:
         *,
         reply_to: str = '',
     ) -> list[ChatboxMessage]:
+        # 同秒落库（now_iso 秒级精度）时 message_id 是随机决胜键，读不出真实先后；
+        # rowid 才是插入序——同一秒的多条回投按发送顺序返回。
         rows = self._fetchall(
             'SELECT payload_json FROM task_chatbox_messages '
-            'WHERE task_id = ? AND node_id = ? ORDER BY created_at ASC, message_id ASC',
+            'WHERE task_id = ? AND node_id = ? ORDER BY created_at ASC, rowid ASC',
             (str(task_id or '').strip(), str(node_id or '').strip()),
         )
         records = [self._parse(row['payload_json'], ChatboxMessage) for row in rows]
@@ -2810,7 +2812,7 @@ class SQLiteTaskStore:
         """一台任务里所有「节点回投 chatbox」的行，节点详情发出列表的第三个来源。"""
         rows = self._fetchall(
             'SELECT payload_json FROM task_chatbox_messages '
-            'WHERE task_id = ? ORDER BY created_at ASC, message_id ASC',
+            'WHERE task_id = ? ORDER BY created_at ASC, rowid ASC',
             (str(task_id or '').strip(),),
         )
         return [self._parse(row['payload_json'], ChatboxMessage) for row in rows]

@@ -871,8 +871,8 @@ function taskNoticeSettleWindowOpen(now) {
 // 节点对输入框消息的回投落在 `task_chatbox_messages`（带 reply_to，unread 两态），
 // 不经过任何 ws 节点补丁。节点详情面板打开期间低频轮询一次回投清单，前端按
 // reply_to 归组：接收列表里那条消息行的右端（interaction-step-side 槽位）出现
-// 「新回复」图标；点击开文档式查看窗口（node_chatbox_viewer.html），窗口打开即
-// 销账该条来信名下的回投，图标在下一拍消失。
+// 「新回复」图标；点击走应用内媒体查看器的 Markdown 渲染档（开窗即销账该条
+// 来信名下的回投），图标在下一拍消失。
 const TASK_CHATBOX_POLL_INTERVAL_MS = 5000;
 let chatboxPollTimer = 0;
 let chatboxPollTaskId = "";
@@ -962,13 +962,28 @@ async function refreshChatboxReplies() {
     }
 }
 
-function openNodeChatboxWindow(replyTo) {
+// 点击「新回复」：销账（异步、不等回执，图标在下一拍消失）后走应用内媒体查看器
+// 的 Markdown 渲染档——与会话里打开 .md 附件同一车道，同源 fetch 取回
+// chatbox/replies.md 的正文用聊天同款 renderMarkdown 排版，不出浏览器弹窗。
+function openNodeChatboxReplies(replyTo) {
     const taskId = String(S.currentTaskId || "").trim();
     const nodeId = String(S.selectedNodeId || S.currentNodeDetail?.node_id || "").trim();
     if (!taskId || !nodeId) return;
-    const params = new URLSearchParams({ task_id: taskId, node_id: nodeId });
+    const params = new URLSearchParams();
     if (String(replyTo || "").trim()) params.set("reply_to", String(replyTo).trim());
-    window.open(`node_chatbox_viewer.html?${params.toString()}`, "negi-chatbox-reply", "width=880,height=760");
+    const suffix = params.toString() ? `?${params.toString()}` : "";
+    if (typeof ApiClient?.markNodeChatboxRead === "function") {
+        void ApiClient.markNodeChatboxRead(taskId, nodeId, String(replyTo || "").trim()).catch(() => null);
+    }
+    if (typeof openMediaViewer === "function") {
+        const displayId = typeof taskNodeDisplayId === "function" ? taskNodeDisplayId(nodeId) : nodeId;
+        openMediaViewer({
+            mode: "markdown",
+            url: `/api/tasks/${encodeURIComponent(taskId)}/nodes/${encodeURIComponent(nodeId)}/chatbox/replies.md${suffix}`,
+            title: "节点回复",
+            subtitle: `node ${displayId}`,
+        });
+    }
 }
 
 

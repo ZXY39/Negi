@@ -539,13 +539,13 @@ function bindTaskTraceListInteractions(traceList) {
             jumpToCeoSession(sessionRef.dataset.sessionJump || "");
             return;
         }
-        // 「新回复」图标：打开文档式查看窗口（窗口内销账该条来信名下的回投）。
+        // 「新回复」图标：应用内媒体查看器的 Markdown 渲染档打开回复（开窗即销账）。
         const chatboxChip = target.closest("[data-chatbox-open]");
         if (chatboxChip instanceof HTMLElement) {
             event.preventDefault();
             event.stopPropagation();
-            if (typeof openNodeChatboxWindow === "function") {
-                openNodeChatboxWindow(chatboxChip.dataset.chatboxOpen || "");
+            if (typeof openNodeChatboxReplies === "function") {
+                openNodeChatboxReplies(chatboxChip.dataset.chatboxOpen || "");
             }
             return;
         }
