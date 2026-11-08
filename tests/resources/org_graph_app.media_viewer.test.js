@@ -200,6 +200,16 @@ test("Markdown 附件取回正文后按渲染结果打开，而不是 iframe 原
     assert.equal(mediaViewerState.open, true);
 });
 
+test("Markdown 档把窗宽收到正文栏宽，其他档位不挂该标记", () => {
+    const { openMediaViewer, mediaViewerState } = loadApp();
+
+    openMediaViewer({ mode: "markdown", url: "/notes.md", title: "笔记" });
+    assert.equal(mediaViewerState.drawer.classList.contains("is-markdown"), true);
+
+    openMediaViewer({ mode: "content", title: "完整内容", outputRef: "artifact:x" });
+    assert.equal(mediaViewerState.drawer.classList.contains("is-markdown"), false);
+});
+
 test("Markdown 取数失败时退回 iframe 原文", async () => {
     const { openMediaAnchor, mediaViewerState, document } = loadApp({
         fetchImpl: async () => {

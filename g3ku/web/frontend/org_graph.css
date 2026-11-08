@@ -1713,6 +1713,12 @@ textarea {
     z-index: 1360;
 }
 
+/* Markdown 档按阅读栏收窗：正文栏 920 + 正文区左右内边距 16×2 + 边框 1×2。
+   不收的话正文只有 920 宽、在 1180 的窗里居中，两侧各留一百多像素空白。 */
+#media-viewer-drawer.media-viewer-drawer.is-markdown {
+    width: min(954px, calc(calc(100vw / var(--ui-zoom, 1)) - 32px));
+}
+
 #media-viewer-backdrop.detail-backdrop {
     z-index: 1350;
     backdrop-filter: none;

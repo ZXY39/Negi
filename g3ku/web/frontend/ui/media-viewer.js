@@ -255,6 +255,9 @@ function renderMediaViewerContent(outputRef, title) {
 
 function openMediaViewer({ mode = "image", url = "", title = "内容预览", subtitle = "", outputRef = "", downloadName = "" } = {}) {
     ensureMediaViewerSurface();
+    // Markdown 档按阅读栏宽收窗（CSS .is-markdown），不让固定大窗在正文两侧留白；
+    // 图片档仍由 syncMediaViewerImageSize 逐像素定宽，这里只负责摘掉旧档位的标记。
+    mediaViewerState.drawer.classList.toggle("is-markdown", mode === "markdown");
     // 上一条关闭动画还没走完就重新打开：先撤掉延迟拆除，别把新内容一起清掉。
     if (mediaViewerState.closeTimer) {
         window.clearTimeout(mediaViewerState.closeTimer);
