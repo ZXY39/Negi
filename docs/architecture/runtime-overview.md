@@ -633,12 +633,12 @@ main/ 侧所有持久化写在磁盘满（ENOSPC / SQLITE_FULL）条件下的行
 
 ## 人设块、人设 note 与身份
 
-- 正文：`memory/notes/note_persona.md`，保留名 `note_persona`。`MemoryManager.persona_text()` 只读普通树里的这份文件，不走裸名「普通区先、分类区兜后」的解析；`set_persona()` 是引导页保存与设置页空人设初始化那条直接写入口，走同一把 `_io_lock` 与原子写；引导页提交描述时立即写入（runtime 未就绪就直接写这份保留 note），模型链保存后的 complete 再负责入队复核。
+- 正文：`memory/notes/note_persona.md`，保留名 `note_persona`。`MemoryManager.persona_text()` 只读普通树里的这份文件，不走裸名「普通区先、分类区兜后」的解析；`set_persona()` 是引导页保存与设置页写入（空人设初始化与已有正文覆写同一条端点）那条直接写入口，走同一把 `_io_lock` 与原子写；引导页提交描述时立即写入（runtime 未就绪就直接写这份保留 note），模型链保存后的 complete 再负责入队复核，设置页每次保存都同时记一条 operator action 并在记忆链存在时入队 `persona_settings` 复核。
 - 前门块：`## 我的人设` 是一条稳定 `assistant` 消息，内容是照片目录与「我是谁」；人设为空时「我是谁」渲染成 `未知（在 Negi中运行）`，不把 Negi 写成默认身份。它排在长期记忆块之后：有长期记忆时 index 2，没有时 index 1。会话首请求采纳一次，token 压缩与手动压缩两处重印；两次重印之间字节冻结。
 - 中途变化：`[RUNTIME_NOTICE]` 的 `### Persona updates` 一节带最新正文，人设为空时改带 `目前人设不存在，需要向用户询问自己的人设`；按 `persona_cursor` 的 digest 消费，只投一次。压缩后头部重印、游标对齐，同一条更新只出现一次。头部块仍显示旧值时，以这条通知为准；空人设的询问指令随压缩被丢弃且不重投，询问行为由头部行与前门提示词的定位段持续承担。
 - 合并规则：新的人设信息或照片与当前最新人设大体相同 ⇒ 直接合成一段连续描述，不保留多份参考稿；无法同时成立、无法自行判断的冲突 ⇒ 先问用户保留哪一个，得到答复前不提交人设更新。这条判据住在前门提示词的定位段，正文由前门通过 `memory_update` 交给记忆 agent 写入。
 - 记忆 agent 面：只多一行指针，指针给的是写入用的真实 ref `note_persona`，不是只读句柄，正文按需读；`main/prompts/memory_agent.md` 规定改人设走 `note_edits` / `note_upserts`，key 必须是 `note_persona`，不新增普通记忆。写入前先把 `note_<句柄>` / 裸句柄解析回唯一对应的 note（人设句柄固定归一到 `note_persona`），并在工具结果的 `warnings` 里回报"用了 X、已改成 Y"，不占一次修复轮；只有解析不到的句柄形状才打回，避免静默生成一份无人引用的新 note。
-- 照片：工作区根 `my_image/`。引导页上传直接写在这里；聊天里用户发来的「你的照片」由前门提示词驱动 CEO 用 `filesystem_copy` 复制进来；设置页只读画廊读同一目录。引导流程、状态文件与隐藏 `internal:` 读图会话见 `web-and-admin.md`「First-Run Onboarding And Persona Contract」。
+- 照片：工作区根 `my_image/`。引导页与设置页上传都直接写在这里；聊天里用户发来的「你的照片」由前门提示词驱动 CEO 用 `filesystem_copy` 复制进来；设置页画廊还带删除入口（`DELETE /api/persona/photos`，留审计与 operator action）。照片增删不改人设 note，人设摘要因此不变——会话通过 operator action 得知照片变化，不走 `### Persona updates`。引导流程、状态文件与隐藏 `internal:` 读图会话见 `web-and-admin.md`「First-Run Onboarding And Persona Contract」。
 - 配置包：人设 note 与 `my_image/` 只随人设面走，记忆面不夹带它们；勾选与替换语义见 `config-and-models.md`「Config Bundle Export And Import」。
 
 ## Internal Turn Prompts

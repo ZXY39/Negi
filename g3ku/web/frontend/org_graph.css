@@ -19504,6 +19504,56 @@ textarea {
     color: var(--ui-text-secondary);
 }
 
+.persona-dialog-section-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--ui-space-2);
+    margin-bottom: 6px;
+}
+
+.persona-dialog-section-head h3 {
+    margin: 0;
+}
+
+.persona-photo-item {
+    position: relative;
+    min-width: 0;
+}
+
+.persona-photo-remove {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: 0;
+    border-radius: 999px;
+    background: color-mix(in srgb, #000 55%, transparent);
+    color: #fff;
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+}
+
+.persona-photo-item:hover .persona-photo-remove,
+.persona-photo-remove:focus-visible {
+    opacity: 1;
+}
+
+/* 触屏没有 hover：删除键常驻，否则永远点不到。 */
+@media (hover: none) {
+    .persona-photo-remove {
+        opacity: 1;
+    }
+}
+
 .persona-dialog-description {
     margin: 0;
     max-height: 220px;

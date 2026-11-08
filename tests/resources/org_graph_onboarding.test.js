@@ -20,16 +20,24 @@ const PERSONA_CHAIN_TOAST = "为了使人设生效，主agent和记忆agent模�
 function makeElement(id, { backdrop = false } = {}) {
     const listeners = {};
     const classes = new Set();
+    let innerHTMLValue = "";
     const element = {
         id,
         hidden: backdrop,
         disabled: false,
         value: "",
         textContent: "",
-        innerHTML: "",
         className: "",
         dataset: {},
         children: [],
+        // 真 DOM 里 innerHTML="" 会清空子节点；图格重渲染依赖这一语义。
+        get innerHTML() {
+            return innerHTMLValue;
+        },
+        set innerHTML(value) {
+            innerHTMLValue = value;
+            if (!value) this.children.length = 0;
+        },
         classList: {
             toggle(token, force) {
                 const shouldAdd = typeof force === "boolean" ? force : !classes.has(token);
@@ -56,6 +64,7 @@ function makeElement(id, { backdrop = false } = {}) {
         appendChild(child) {
             this.children.push(child);
         },
+        setAttribute() {},
         focus() {},
         click() {
             listeners.click?.({ target: this, preventDefault() {}, stopPropagation() {} });
@@ -87,11 +96,15 @@ function buildHarness({
         "persona-dialog",
         "persona-dialog-description",
         "persona-dialog-description-empty",
+        "persona-dialog-description-edit",
         "persona-dialog-description-input",
         "persona-dialog-description-actions",
         "persona-dialog-description-save",
         "persona-dialog-description-cancel",
         "persona-dialog-photo-grid",
+        "persona-dialog-photo-input",
+        "persona-dialog-photo-pick",
+        "persona-dialog-photo-status",
         "persona-dialog-close-btn",
         "persona-dialog-close",
         "persona-button-dot",
@@ -118,6 +131,9 @@ function buildHarness({
         toastClosed: 0,
         viewerOpens: [],
         viewerOpen: false,
+        uploadedPhotos: [],
+        deletedPhotoNames: [],
+        confirms: [],
     };
 
     const document = {
@@ -182,9 +198,24 @@ function buildHarness({
             persona.description = description;
             return { ok: true, description };
         },
-        async uploadPersonaPhotos() {
-            return [];
+        async uploadPersonaPhotos(files = []) {
+            const items = [...files].map((file, index) => ({
+                name: `upload-${index}.png`,
+                url: `/media/upload-${index}.png`,
+                thumb_url: `/media/upload-${index}.png`,
+            }));
+            calls.uploadedPhotos.push(items.map((item) => item.name));
+            persona.photos = [...persona.photos, ...items];
+            return items;
         },
+        async deletePersonaPhoto(name) {
+            calls.deletedPhotoNames.push(name);
+            persona.photos = persona.photos.filter((item) => item.name !== name);
+            return persona.photos;
+        },
+    };
+    context.openConfirm = (payload) => {
+        calls.confirms.push(payload);
     };
     context.showToast = (payload) => calls.toasts.push(payload);
     context.closeToast = () => {
@@ -398,7 +429,7 @@ test("empty persona shows red dots and can be initialized from the dialog", asyn
     assert.equal(harness.elements["persona-dialog-description"].hidden, true);
     assert.equal(
         harness.elements["persona-dialog-photo-grid"].children[0].textContent,
-        "图片为空，如果需要增加，请在会话中发送",
+        "图片为空，如果需要增加，请点上方「上传照片」",
     );
     assert.match(
         harness.elements["persona-dialog-photo-grid"].children[0].className,
@@ -534,7 +565,7 @@ test("Escape 先收压在弹窗之上的预览层，再收弹窗自己", async (
     assert.equal(harness.elements["persona-dialog-backdrop"].hidden, true);
 });
 
-test("persona settings dialog initializes an empty description and keeps photos chat-only", () => {
+test("persona settings dialog edits the description and manages photos", () => {
     assert.ok(HTML.includes('id="project-settings-open-persona-btn"'));
     assert.ok(HTML.includes('id="persona-nav-dot"'));
     assert.ok(HTML.includes('id="persona-button-dot"'));
@@ -550,19 +581,22 @@ test("persona settings dialog initializes an empty description and keeps photos 
     const end = HTML.indexOf('id="password-change-backdrop"');
     assert.ok(start > 0 && end > start);
     const personaDialog = HTML.slice(start, end);
-    assert.ok(!/<input\b/i.test(personaDialog), "persona dialog must not contain inputs");
-    assert.ok(!personaDialog.includes("type=\"file\""));
-    assert.ok(!personaDialog.includes("上传"));
-    assert.ok(!personaDialog.includes("删除"));
+    // 文案：展示态 + 空态入口 + 铅笔编辑（非空也可改） + textarea 与保存/取消。
+    assert.ok(personaDialog.includes("persona-dialog-description-edit"));
     assert.ok(personaDialog.includes("persona-dialog-description-empty"));
     assert.ok(personaDialog.includes("persona-dialog-description-input"));
     assert.ok(personaDialog.includes("persona-dialog-description-save"));
     assert.ok(personaDialog.includes("persona-dialog-description"));
+    // 照片：上传控件与状态行在弹窗里，图格由 JS 渲染删除角标。
+    assert.ok(personaDialog.includes('type="file"'));
+    assert.ok(personaDialog.includes("image/png,image/jpeg,image/webp,image/gif,image/bmp"));
+    assert.ok(personaDialog.includes("persona-dialog-photo-pick"));
+    assert.ok(personaDialog.includes("persona-dialog-photo-status"));
+    assert.ok(personaDialog.includes("上传照片"));
     assert.ok(personaDialog.includes("persona-dialog-photo-grid"));
 });
 
-test("frontend scripts keep the page order", () => {
-    const personaApi = HTML.indexOf('src="client_api/persona.js"');
+test("frontend scripts keep the page order", () => {    const personaApi = HTML.indexOf('src="client_api/persona.js"');
     const apiClient = HTML.indexOf('src="api_client.js"');
     const llm = HTML.indexOf('src="org_graph_llm.js"');
     const onboarding = HTML.indexOf('src="org_graph_onboarding.js"');
@@ -575,4 +609,99 @@ test("empty persona photos span the whole grid instead of one narrow column", ()
         CSS,
         /\.persona-photo-grid > \.persona-photo-empty \{[^}]*grid-column:\s*1\s*\/\s*-1;/,
     );
+});
+
+test("a saved persona can be edited and overwritten from the settings dialog", async () => {
+    const harness = buildHarness({
+        status: {
+            should_run: false,
+            completed: true,
+            persona_step_done: true,
+            has_models: true,
+            has_persona: true,
+            has_persona_input: true,
+            description: "旧人设",
+            photos: [],
+            photo_album: [],
+        },
+        persona: { description: "旧人设", photos: [] },
+    });
+    harness.documentListeners.DOMContentLoaded();
+    await flush();
+
+    await harness.context.G3kuOnboarding.openPersonaDialog();
+    assert.equal(harness.elements["persona-dialog-description"].textContent, "旧人设");
+    assert.equal(harness.elements["persona-dialog-description"].hidden, false);
+    assert.equal(harness.elements["persona-dialog-description-empty"].hidden, true);
+
+    // 铅笔编辑对已有正文开放：预填当前正文，保存即覆写（POST /persona 两条状态都收）。
+    harness.elements["persona-dialog-description-edit"].click();
+    assert.equal(harness.elements["persona-dialog-description-input"].hidden, false);
+    assert.equal(harness.elements["persona-dialog-description-input"].value, "旧人设");
+    harness.elements["persona-dialog-description-input"].value = "新设定：回答先给结论。";
+    harness.elements["persona-dialog-description-save"].click();
+    await flush();
+    await flush();
+
+    assert.deepEqual(harness.calls.savedPersona, ["新设定：回答先给结论。"]);
+    assert.equal(harness.elements["persona-dialog-description"].textContent, "新设定：回答先给结论。");
+    assert.equal(harness.elements["persona-dialog-description"].hidden, false);
+    assert.equal(harness.elements["persona-dialog-description-input"].hidden, true);
+});
+
+test("the settings dialog uploads photos and deletes one after confirmation", async () => {
+    const harness = buildHarness({
+        status: {
+            should_run: false,
+            completed: true,
+            persona_step_done: true,
+            has_models: true,
+            has_persona: true,
+            has_persona_input: true,
+            description: "测试人设",
+            photos: [],
+            photo_album: [],
+        },
+        persona: {
+            description: "测试人设",
+            photos: [{ name: "a.png", url: "/media/a.png", thumb_url: "/media/a.png" }],
+        },
+    });
+    harness.documentListeners.DOMContentLoaded();
+    await harness.context.G3kuOnboarding.openPersonaDialog();
+
+    // 图格带删除角标：cell 里 tile 与 remove 并排。
+    const grid = harness.elements["persona-dialog-photo-grid"];
+    assert.equal(grid.children.length, 1);
+    const cell = grid.children[0];
+    assert.equal(cell.children.length, 2);
+    assert.equal(cell.children[1].dataset.personaPhotoName, "a.png");
+
+    // 上传：file input 的 change 驱动，走完刷新后图格出现第二张。
+    harness.elements["persona-dialog-photo-input"].fire("change", { target: { files: [{}] } });
+    await flush();
+    await flush();
+    await flush();
+    assert.equal(harness.calls.uploadedPhotos.length, 1);
+    assert.equal(cell.children.length, 2, "重渲染后旧 cell 被替换");
+    assert.equal(grid.children.length, 2);
+
+    // 删除：角标点击先过确认门，确认后才调 DELETE。
+    const removeBtn = grid.children[0].children[1];
+    assert.equal(removeBtn.dataset.personaPhotoName, "a.png");
+    grid.fire("click", {
+        target: {
+            closest: (selector) =>
+                String(selector).includes("persona-photo-name") ? removeBtn : null,
+        },
+    });
+    assert.equal(harness.calls.deletedPhotoNames.length, 0, "确认前不许发删除请求");
+    assert.equal(harness.calls.confirms.length, 1);
+    assert.match(harness.calls.confirms[0].text, /a\.png/);
+    harness.calls.confirms[0].onConfirm();
+    await flush();
+    await flush();
+
+    assert.deepEqual(harness.calls.deletedPhotoNames, ["a.png"]);
+    assert.equal(grid.children.length, 1);
 });

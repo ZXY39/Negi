@@ -33,7 +33,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - `tool-hydration-and-callable-chain.md`
   Use for what makes a tool callable this hop (contract presence), the delivery hop that returns the contract and stages arguments, the `reuse_args` batch lane, re-read and fingerprints, parameter-error lane, the strict plain-text rejection, externalized result envelope, universal tool timeout, tool rerun-safe declaration for the recovery lane, stage gating, and the context→callable chain.
 - `web-and-admin.md`
-  Use for websocket contracts, frontend/backend responsibility boundaries, the first-run onboarding flow, the read-only persona dialog, and operator-visible UI behavior.
+  Use for websocket contracts, frontend/backend responsibility boundaries, the first-run onboarding flow, the persona settings dialog, and operator-visible UI behavior.
 - `heartbeat-system.md`
   Use for heartbeat turns, task-terminal/stall/distribution-error wakeups, cron at-most-once delivery, and shutdown-resume session wakes.
 - `config-and-models.md`

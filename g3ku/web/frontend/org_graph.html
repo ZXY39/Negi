@@ -1462,7 +1462,13 @@
                     </div>
                     <div class="persona-dialog-body">
                         <section class="persona-dialog-section">
-                            <h3>我是谁</h3>
+                            <div class="persona-dialog-section-head">
+                                <h3>我是谁</h3>
+                                <button id="persona-dialog-description-edit" class="icon-btn" type="button"
+                                    title="编辑人设描述" aria-label="编辑人设描述">
+                                    <i data-lucide="pencil" aria-hidden="true"></i>
+                                </button>
+                            </div>
                             <pre id="persona-dialog-description" class="persona-dialog-description"></pre>
                             <button id="persona-dialog-description-empty" class="persona-dialog-description-empty"
                                 type="button" hidden>点击输入人设描述</button>
@@ -1476,7 +1482,13 @@
                             </div>
                         </section>
                         <section class="persona-dialog-section">
-                            <h3>照片</h3>
+                            <div class="persona-dialog-section-head">
+                                <h3>照片</h3>
+                                <button id="persona-dialog-photo-pick" class="toolbar-btn ghost small" type="button">上传照片</button>
+                            </div>
+                            <input id="persona-dialog-photo-input" type="file"
+                                accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" multiple hidden>
+                            <p id="persona-dialog-photo-status" class="persona-onboarding-status" hidden></p>
                             <div id="persona-dialog-photo-grid" class="persona-photo-grid"></div>
                         </section>
                     </div>

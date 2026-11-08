@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+from pathlib import Path
 
-from fastapi import APIRouter, Body, File, HTTPException, UploadFile
+from fastapi import APIRouter, Body, File, HTTPException, Query, UploadFile
 from loguru import logger
 
-from g3ku.agent.persona import PERSONA_NOTE_REF
+from g3ku import audit_events
+from g3ku.agent.persona import PERSONA_NOTE_REF, PERSONA_PHOTO_SUFFIXES
 from g3ku.core.messages import UserInputMessage
 from g3ku.runtime.persona_onboarding import (
     PERSONA_DESCRIPTION_MAX_CHARS,
@@ -33,6 +35,7 @@ from g3ku.runtime.web_ceo_sessions import (
     ensure_ceo_session_metadata,
     workspace_path,
 )
+from g3ku.utils.helpers import safe_filename
 
 router = APIRouter()
 
@@ -46,8 +49,8 @@ def _store() -> OnboardingStore:
     return OnboardingStore(workspace_path())
 
 
-def _record_persona_operator_action() -> None:
-    """人设是控制台写的：给模型侧通知留一条“操作员做的”，失败不阻塞保存。"""
+def _record_persona_operator_action(action: str = "updated the persona") -> None:
+    """人设面是控制台写的：给模型侧通知留一条“操作员做的”，失败不阻塞保存。"""
     try:
         from g3ku.shells.web import get_agent
         from main.governance.operator_actions import AUDIENCE_FRONTDOOR
@@ -65,10 +68,64 @@ def _record_persona_operator_action() -> None:
             category="persona",
             audience=AUDIENCE_FRONTDOOR,
             scope="",
-            action="updated the persona",
+            action=action,
         )
     except Exception as exc:  # noqa: BLE001 - 通知不是人设写入的前置条件
         logger.warning("persona operator action record failed: {}", exc)
+
+
+def _audit_persona_photo_delete(event_type: str, summary: str, **detail: str) -> None:
+    """不可逆删除留一条审计；上传/改文案可逆或在 note 里可见，不留。"""
+    audit_events.emit_audit_event(
+        "persona",
+        "warning",
+        event_type,
+        summary,
+        detail={key: value for key, value in detail.items() if value not in (None, "")},
+    )
+
+
+def _forget_onboarding_photo(workspace: Path, name: str) -> None:
+    """Best-effort drop the name from the onboarding stage so a pending photo
+    session never attaches a file that is already gone."""
+    try:
+        store = OnboardingStore(workspace)
+        if not store.exists():
+            return
+        state = store.load()
+        photos = [item for item in (state.get("photos") or []) if str(item) != str(name)]
+        if photos != list(state.get("photos") or []):
+            store.update(photos=photos)
+    except Exception as exc:  # noqa: BLE001 - 引导残留清理不是删除的前置条件
+        logger.warning("persona photo onboarding cleanup failed: {}", exc)
+
+
+def _persona_photo_path(workspace: Path, name: str) -> Path:
+    """Resolve one photo name inside `my_image/`, refusing everything else."""
+    clean = safe_filename(str(name or ""))
+    if not clean:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "persona_photo_invalid", "message": "photo name must not be empty"},
+        )
+    directory = persona_photos_dir(workspace).resolve()
+    candidate = (directory / clean).resolve()
+    if candidate.parent != directory:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "persona_photo_invalid", "message": "photo name must stay inside my_image/"},
+        )
+    if candidate.suffix.lower() not in PERSONA_PHOTO_SUFFIXES:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "persona_photo_invalid", "message": "not a supported image name"},
+        )
+    if not candidate.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "persona_photo_not_found", "message": f"no persona photo named {clean}"},
+        )
+    return candidate
 
 
 def _memory_manager():
@@ -307,11 +364,15 @@ async def get_persona():
 
 @router.post("/persona")
 async def save_persona(payload: dict | None = Body(default=None)):
-    """Initialize the persona from the settings dialog when it is still empty.
+    """Write the persona from the settings dialog: initialize an empty one or overwrite.
 
-    A non-empty persona stays read-only in settings; later changes go through the
-    memory agent. This endpoint is the one operator write that can happen before the
-    memory runtime exists (fresh project without models).
+    The settings dialog owns the operator write lane in every state: an empty persona
+    gets initialized here, an existing one gets overwritten here. The body lands
+    immediately (`set_persona`); sessions pick the new text up through the
+    persona-cursor notice on their next hop, and when a memory chain exists the
+    memory agent gets a review request to tidy the note. This endpoint also works
+    before the memory runtime exists (fresh project without models) - it falls back
+    to a direct note write.
     """
     body = dict(payload or {})
     description = str(body.get("description") or "").strip()
@@ -410,4 +471,25 @@ async def upload_persona_photos(files: list[UploadFile] = File(...)):
     store = _store()
     if store.exists():
         append_onboarding_photos(store, [item["name"] for item in items])
+    _record_persona_operator_action(
+        action="updated persona photos: " + ", ".join(str(item["name"]) for item in items)
+    )
     return {"ok": True, "items": items}
+
+
+@router.delete("/persona/photos")
+async def delete_persona_photo(name: str = Query(...)):
+    """Remove one persona photo from `my_image/` (settings dialog delete entry).
+
+    The photo faces are operator-owned files: deleting one is an irreversible file
+    delete, so it leaves an audit event and an operator action for the notice lane.
+    Photo changes do not touch the persona note, so the persona-cursor notice is not
+    involved - sessions learn about this through the operator action alone.
+    """
+    workspace = workspace_path()
+    path = _persona_photo_path(workspace, name)
+    await asyncio.to_thread(path.unlink)
+    _audit_persona_photo_delete("persona_photo_deleted", f"删除人设照片：{path.name}", name=path.name)
+    _record_persona_operator_action(action=f"removed persona photo `{path.name}`")
+    _forget_onboarding_photo(workspace, path.name)
+    return {"ok": True, "photos": list_persona_photos(workspace)}

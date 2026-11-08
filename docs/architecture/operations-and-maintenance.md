@@ -256,10 +256,10 @@
   本地记忆目录；`memory/groups/<scope>/memory/` 是每个群各自的记忆根（同样的 mirror / sqlite / notes / index / queue），由 `MemoryScopeRouter` 按需创建。排障入口详见本文档「Memory Queue Workflow」章节。
 
 - `memory/notes/note_persona.md`（安装根，位于 `memory/notes/`）
-  人设正文的保留 note。它不是 memories 行，不进常驻字数、压缩、退场与行号；孤儿回收、`reconcile-notes` 与 `doctor_report` 都跳过它。描述为空时可以在设置页直接初始化（runtime 未就绪时直接写这份文件）；非空后设置页只读，后续改动走会话里的记忆 agent（`note_edits` / `note_upserts`），也可以在记忆页的 note 编辑面直接改；没有删除入口。配置包的人设面同时带上这份 note 与 `my_image/`，合同见 `config-and-models.md`「Config Bundle Export And Import」。
+  人设正文的保留 note。它不是 memories 行，不进常驻字数、压缩、退场与行号；孤儿回收、`reconcile-notes` 与 `doctor_report` 都跳过它。设置页在空与非空两种状态都可直接写（铅笔编辑覆写，runtime 未就绪时直接写这份文件），每次保存记一条 operator action 并在记忆链存在时入队复核；也可以在会话里让记忆 agent 改（`note_edits` / `note_upserts`），或在记忆页的 note 编辑面直接改；没有删除入口。配置包的人设面同时带上这份 note 与 `my_image/`，合同见 `config-and-models.md`「Config Bundle Export And Import」。
 
 - `my_image/`（工作区根，默认安装根）
-  人设照片目录。引导页上传直接写入；聊天里用户发来的「你的照片」由 CEO 用 `filesystem_copy` 复制进来；设置页只读画廊读这里。它不被任何记忆回收清理，删照片就是删文件。载体与通知规则见 `runtime-overview.md`「人设块、人设 note 与身份」。
+  人设照片目录。引导页与设置页上传直接写入；聊天里用户发来的「你的照片」由 CEO 用 `filesystem_copy` 复制进来；设置页画廊带删除入口（`DELETE /api/persona/photos`，删除不可恢复，留 `persona_photo_deleted` 审计事件与 operator action）。它不被任何记忆回收清理。载体与通知规则见 `runtime-overview.md`「人设块、人设 note 与身份」。
 
 - `sessions/`（安装根）
   会话持久化数据

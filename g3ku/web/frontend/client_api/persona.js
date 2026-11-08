@@ -1,6 +1,6 @@
 "use strict";
 
-// 域模块：初次引导与只读人设。请求体与归一都在这里，页面模块只读状态。
+// 域模块：初次引导与人设（文案读写、照片上传与删除）。请求体与归一都在这里，页面模块只读状态。
 (function () {
     const domains = (window.ApiDomains = window.ApiDomains || {});
     domains.persona = {
@@ -40,6 +40,14 @@
                 timeoutMs: 60000,
             });
             return Array.isArray(data?.items) ? data.items : [];
+        },
+
+        async deletePersonaPhoto(name) {
+            const data = await this.delete("/api/persona/photos", {
+                params: { name: String(name || "") },
+                timeoutMs: 0,
+            });
+            return Array.isArray(data?.photos) ? data.photos : [];
         },
     };
 })();

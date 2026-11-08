@@ -302,6 +302,140 @@ def test_save_persona_rejects_empty_and_over_limit(tmp_path: Path, monkeypatch: 
     assert too_long.value.detail["code"] == "persona_too_long"
 
 
+def test_save_persona_overwrites_an_existing_note_without_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """设置页对已有正文同样可写：第二次保存覆盖第一次，不留旧值。"""
+    monkeypatch.setattr(api, "workspace_path", lambda: tmp_path)
+
+    def _no_runtime():
+        raise api.HTTPException(status_code=503, detail={"code": "memory_manager_unavailable"})
+
+    monkeypatch.setattr(api, "_memory_manager", _no_runtime)
+    import asyncio
+
+    asyncio.run(api.save_persona({"description": "旧人设。"}))
+    asyncio.run(api.save_persona({"description": "新设定：先给结论。"}))
+    note = tmp_path / "memory" / "notes" / "note_persona.md"
+    assert note.read_text(encoding="utf-8").strip() == "新设定：先给结论。"
+
+
+class _FakeUpload:
+    """Minimal UploadFile stand-in: the route only calls read()/close()."""
+
+    def __init__(self, name: str, data: bytes, content_type: str = "image/png") -> None:
+        self.filename = name
+        self.content_type = content_type
+        self._data = data
+
+    async def read(self, size: int) -> bytes:
+        return self._data[:size]
+
+    async def close(self) -> None:
+        return None
+
+
+def test_upload_persona_photos_record_an_operator_action(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(api, "workspace_path", lambda: tmp_path)
+    recorded: list[str] = []
+    monkeypatch.setattr(
+        api, "_record_persona_operator_action", lambda action="updated the persona": recorded.append(action)
+    )
+    import asyncio
+
+    result = asyncio.run(
+        api.upload_persona_photos([_FakeUpload("me.png", _png_bytes()), _FakeUpload("you.jpg", _png_bytes())])
+    )
+    assert result["ok"] is True
+    assert [item["name"] for item in result["items"]] == ["me.png", "you.jpg"]
+    assert recorded == ["updated persona photos: me.png, you.jpg"]
+
+
+def test_delete_persona_photo_removes_the_file_and_reports_the_album(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store_persona_photo(tmp_path, _png_bytes(), filename="me.png", mime_type="image/png")
+    monkeypatch.setattr(api, "workspace_path", lambda: tmp_path)
+    import asyncio
+
+    result = asyncio.run(api.delete_persona_photo(name="me.png"))
+    assert result["ok"] is True
+    assert result["photos"] == []
+    assert not (persona_photos_dir(tmp_path) / "me.png").exists()
+
+
+def test_delete_persona_photo_rejects_unknown_and_unsafe_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store_persona_photo(tmp_path, _png_bytes(), filename="me.png", mime_type="image/png")
+    monkeypatch.setattr(api, "workspace_path", lambda: tmp_path)
+    import asyncio
+
+    with pytest.raises(api.HTTPException) as missing:
+        asyncio.run(api.delete_persona_photo(name="ghost.png"))
+    assert missing.value.status_code == 404
+    assert missing.value.detail["code"] == "persona_photo_not_found"
+
+    # 穿越与子目录名先被 safe_filename 清洗成无害的字面名（../me.png → .._me.png），
+    # 落点永远出不了 my_image/，这里以「不存在」404 收场；后缀违规与空名 422。
+    for missing_name in ("../me.png", "sub/me.png"):
+        with pytest.raises(api.HTTPException) as missing_exc:
+            asyncio.run(api.delete_persona_photo(name=missing_name))
+        assert missing_exc.value.status_code == 404
+    for bad in ("me.txt", ""):
+        with pytest.raises(api.HTTPException) as bad_exc:
+            asyncio.run(api.delete_persona_photo(name=bad))
+        assert bad_exc.value.status_code == 422
+    assert (persona_photos_dir(tmp_path) / "me.png").exists()
+
+
+def test_delete_persona_photo_audits_notifies_and_cleans_the_onboarding_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _store(tmp_path)
+    photo = store_persona_photo(tmp_path, _png_bytes(), filename="me.png", mime_type="image/png")
+    store.update(photos=[photo["name"]])
+    monkeypatch.setattr(api, "workspace_path", lambda: tmp_path)
+    monkeypatch.setattr(api, "_store", lambda: store)
+
+    audit_calls: list[tuple[tuple, dict]] = []
+    monkeypatch.setattr(
+        api,
+        "audit_events",
+        SimpleNamespace(
+            emit_audit_event=lambda *args, **kwargs: audit_calls.append((args, kwargs))
+        ),
+    )
+
+    recorded: list[dict[str, object]] = []
+
+    class _Service:
+        def record_operator_action(self, **kwargs: object) -> None:
+            recorded.append(dict(kwargs))
+
+    monkeypatch.setattr(
+        "g3ku.shells.web.get_agent",
+        lambda: SimpleNamespace(main_task_service=_Service()),
+    )
+    import asyncio
+
+    result = asyncio.run(api.delete_persona_photo(name="me.png"))
+    assert result["ok"] is True
+
+    assert len(audit_calls) == 1
+    args, kwargs = audit_calls[0]
+    assert args[:3] == ("persona", "warning", "persona_photo_deleted")
+    assert "me.png" in args[3]
+    assert kwargs["detail"] == {"name": "me.png"}
+
+    assert recorded == [
+        {"category": "persona", "audience": "frontdoor", "scope": "", "action": "removed persona photo `me.png`"}
+    ]
+    assert store.load()["photos"] == []
+
+
 def test_onboarding_persona_writes_the_note_immediately(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

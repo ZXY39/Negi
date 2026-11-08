@@ -42,11 +42,15 @@
         U.personaDialog = document.getElementById("persona-dialog");
         U.personaDescription = document.getElementById("persona-dialog-description");
         U.personaDescriptionEmpty = document.getElementById("persona-dialog-description-empty");
+        U.personaDescriptionEdit = document.getElementById("persona-dialog-description-edit");
         U.personaDescriptionInput = document.getElementById("persona-dialog-description-input");
         U.personaDescriptionActions = document.getElementById("persona-dialog-description-actions");
         U.personaDescriptionSave = document.getElementById("persona-dialog-description-save");
         U.personaDescriptionCancel = document.getElementById("persona-dialog-description-cancel");
         U.personaPhotoGrid = document.getElementById("persona-dialog-photo-grid");
+        U.personaPhotoInput = document.getElementById("persona-dialog-photo-input");
+        U.personaPhotoPick = document.getElementById("persona-dialog-photo-pick");
+        U.personaPhotoStatus = document.getElementById("persona-dialog-photo-status");
         U.personaClose = document.getElementById("persona-dialog-close-btn");
         U.personaCloseFooter = document.getElementById("persona-dialog-close");
         U.settingsNavButton = document.getElementById("project-settings-btn");
@@ -87,7 +91,7 @@
         backdrop.classList.remove("is-open");
     }
 
-    function renderPhotoGrid(container, photos, emptyText = "还没有照片") {
+    function renderPhotoGrid(container, photos, emptyText = "还没有照片", { allowDelete = false } = {}) {
         if (!container) return;
         const rows = Array.isArray(photos) ? photos : [];
         container.innerHTML = "";
@@ -99,6 +103,8 @@
             return;
         }
         rows.forEach((item) => {
+            const cell = document.createElement("div");
+            cell.className = "persona-photo-item";
             const button = document.createElement("button");
             button.type = "button";
             button.className = "persona-photo-tile";
@@ -112,7 +118,18 @@
             label.textContent = String(item.name || "");
             button.appendChild(image);
             button.appendChild(label);
-            container.appendChild(button);
+            cell.appendChild(button);
+            if (allowDelete && item?.name) {
+                const remove = document.createElement("button");
+                remove.type = "button";
+                remove.className = "persona-photo-remove";
+                remove.dataset.personaPhotoName = String(item.name);
+                remove.textContent = "×";
+                remove.title = "删除这张照片";
+                remove.setAttribute("aria-label", `删除 ${String(item.name)}`);
+                cell.appendChild(remove);
+            }
+            container.appendChild(cell);
         });
     }
 
@@ -125,6 +142,65 @@
             mode: "image",
             url,
             title: String(tile.dataset.personaPhotoTitle || "照片"),
+        });
+    }
+
+    function setPersonaPhotoStatus(message = "", { error = false } = {}) {
+        if (!U.personaPhotoStatus) return;
+        const text = String(message || "");
+        U.personaPhotoStatus.textContent = text;
+        U.personaPhotoStatus.hidden = !text;
+        U.personaPhotoStatus.classList.toggle("is-error", Boolean(error));
+    }
+
+    function renderPersonaDialogPhotos(photos) {
+        renderPhotoGrid(U.personaPhotoGrid, photos, "图片为空，如果需要增加，请点上方「上传照片」", {
+            allowDelete: true,
+        });
+    }
+
+    async function uploadPersonaDialogPhotos(files) {
+        const selected = [...files].filter(Boolean);
+        if (!selected.length) return;
+        setPersonaPhotoStatus(`正在上传 ${selected.length} 张…`);
+        if (U.personaPhotoPick) U.personaPhotoPick.disabled = true;
+        try {
+            const items = await ApiClient.uploadPersonaPhotos(selected);
+            setPersonaPhotoStatus(`已上传 ${items.length} 张`);
+            const data = await ApiClient.getPersona();
+            renderPersonaDialogPhotos(data?.photos || []);
+        } catch (error) {
+            setPersonaPhotoStatus(error?.message || "上传失败", { error: true });
+        } finally {
+            if (U.personaPhotoPick) U.personaPhotoPick.disabled = false;
+            if (U.personaPhotoInput) U.personaPhotoInput.value = "";
+        }
+    }
+
+    async function removePersonaDialogPhoto(name) {
+        if (U.personaPhotoPick) U.personaPhotoPick.disabled = true;
+        setPersonaPhotoStatus("正在删除…");
+        try {
+            const photos = await ApiClient.deletePersonaPhoto(name);
+            renderPersonaDialogPhotos(photos);
+            setPersonaPhotoStatus(`已删除 ${name}`);
+        } catch (error) {
+            setPersonaPhotoStatus(error?.message || "删除失败", { error: true });
+        } finally {
+            if (U.personaPhotoPick) U.personaPhotoPick.disabled = false;
+        }
+    }
+
+    function deletePersonaDialogPhoto(name) {
+        const clean = String(name || "");
+        if (!clean) return;
+        openConfirm({
+            title: "删除人设照片",
+            text: `会从磁盘删掉 ${clean}，不可恢复。`,
+            confirmLabel: "彻底删除",
+            confirmKind: "danger",
+            returnFocus: U.personaPhotoPick,
+            onConfirm: () => void removePersonaDialogPhoto(clean),
         });
     }
 
@@ -154,11 +230,7 @@
             // keeps its bytes.
             if (changed && isPersonaDialogOpen() && !isPersonaDescriptionEditing()) {
                 renderPersonaDescription(text);
-                renderPhotoGrid(
-                    U.personaPhotoGrid,
-                    data?.photos || [],
-                    "图片为空，如果需要增加，请在会话中发送",
-                );
+                renderPersonaDialogPhotos(data?.photos || []);
             }
         } catch (error) {
             void error;
@@ -191,12 +263,12 @@
     }
 
     function startPersonaDescriptionEdit() {
-        if (state.personaDescription) return;
         if (U.personaDescription) U.personaDescription.hidden = true;
         if (U.personaDescriptionEmpty) U.personaDescriptionEmpty.hidden = true;
         if (U.personaDescriptionInput) {
             U.personaDescriptionInput.hidden = false;
-            U.personaDescriptionInput.value = "";
+            // 铅笔编辑在已有正文时同样可用：预填当前正文，保存即覆写（POST /persona 两条状态都收）。
+            U.personaDescriptionInput.value = state.personaDescription || "";
             U.personaDescriptionInput.focus();
         }
         if (U.personaDescriptionActions) U.personaDescriptionActions.hidden = false;
@@ -483,11 +555,7 @@
         try {
             const data = await ApiClient.getPersona();
             renderPersonaDescription(data?.description);
-            renderPhotoGrid(
-                U.personaPhotoGrid,
-                data?.photos || [],
-                "图片为空，如果需要增加，请在会话中发送",
-            );
+            renderPersonaDialogPhotos(data?.photos || []);
             openBackdrop(U.personaBackdrop, U.personaDialog);
         } catch (error) {
             showToast({
@@ -547,6 +615,7 @@
         U.settingsPersonaButton?.addEventListener("click", () => void openPersonaDialog());
         U.settingsNavButton?.addEventListener("click", () => void refreshPersonaIndicator());
         U.personaDescriptionEmpty?.addEventListener("click", startPersonaDescriptionEdit);
+        U.personaDescriptionEdit?.addEventListener("click", startPersonaDescriptionEdit);
         U.personaDescriptionSave?.addEventListener("click", () => void savePersonaDescription());
         U.personaDescriptionCancel?.addEventListener("click", cancelPersonaDescriptionEdit);
         U.personaClose?.addEventListener("click", closePersonaDialog);
@@ -554,7 +623,18 @@
         U.personaBackdrop?.addEventListener("click", (event) => {
             if (event.target === U.personaBackdrop) closePersonaDialog();
         });
-        U.personaPhotoGrid?.addEventListener("click", (event) => openPhotoViewer(U.personaPhotoGrid, event));
+        U.personaPhotoPick?.addEventListener("click", () => U.personaPhotoInput?.click());
+        U.personaPhotoInput?.addEventListener("change", (event) => {
+            void uploadPersonaDialogPhotos(event.target.files || []);
+        });
+        U.personaPhotoGrid?.addEventListener("click", (event) => {
+            const remove = event.target.closest("[data-persona-photo-name]");
+            if (remove) {
+                deletePersonaDialogPhoto(remove.dataset.personaPhotoName);
+                return;
+            }
+            openPhotoViewer(U.personaPhotoGrid, event);
+        });
 
         document.addEventListener("keydown", (event) => {
             if (event.key !== "Escape") return;
