@@ -50,6 +50,11 @@ SESSION_MODE_NOTICE_HEADING = '### Session mode'
 # 控制台操作的一次性声明：写明"这是操作员（用户）做的"，与状态差分行分开。
 OPERATOR_ACTIONS_HEADING = '### Operator actions (from the console)'
 QQ_IDENTITY_NOTICE_HEADING = '### QQ 身份'
+# 上一轮没发出去的表情包：键与原因各一行，整表只投一次就清。与 QQ 身份同一先例，
+# 模型可见文案用中文——键与原因本身就是中文短句，抬头混英文反而割裂。
+STICKER_FAILURE_NOTICE_HEADING = '### 上一轮未发出的表情包'
+STICKER_FAILURE_NOTICE_HINT = '按头部 sticker_packs 目录改成可解析的键后重发即可。'
+_STICKER_FAILURE_MAX_ROWS = 8
 # 头部快照与当刻值的差量：两次重印之间唯一的变化出口。
 RUNTIME_CONTRACT_UPDATE_HEADING = '### Runtime contract updates (supersede the pinned snapshot)'
 # 渲染顺序固定：同一组变化每次投出来的字节稳定，便于模型与测试比对。
@@ -290,7 +295,19 @@ def deliver_for_scope(
         now=now,
         covered_sections=covered_contract_sections,
     )
-    if not pending and not removed_skills and not memory_text and not group_memory_text and not persona_text and not mode_text and not qq_identity_text and not changed_contract and not operator_actions:
+    sticker_failures = pending_sticker_failures(context)
+    if (
+        not pending
+        and not removed_skills
+        and not memory_text
+        and not group_memory_text
+        and not persona_text
+        and not mode_text
+        and not qq_identity_text
+        and not changed_contract
+        and not operator_actions
+        and not sticker_failures
+    ):
         set_notice_context(scope_key, context)
         return None, []
     message = build_notice_message(
@@ -303,6 +320,7 @@ def deliver_for_scope(
         qq_identity_text=qq_identity_text,
         contract_sections=changed_contract,
         operator_actions=operator_actions,
+        sticker_failures=sticker_failures,
     )
     if message is not None:
         if pending:
@@ -317,6 +335,8 @@ def deliver_for_scope(
                 [key for key, _text in changed_contract],
                 now=now,
             )
+        # 挂账只在真投出去的那一刻清：构建失败/本轮没装配到通知，下一跳重投同一条。
+        context['sticker_failures_pending'] = []
         context['memory_cursor'] = cursor
         context['group_memory_cursor'] = group_cursor
     set_notice_context(scope_key, context)
@@ -498,6 +518,9 @@ def normalize_skill_roster_notice_context(payload: Any) -> dict[str, Any]:
             'nickname': ' '.join(str(qq_identity_source.get('nickname') or '').split()).strip()[:128],
             'initialized': bool(qq_identity_source.get('initialized')),
         },
+        'sticker_failures_pending': normalize_sticker_failures(
+            source.get('sticker_failures_pending')
+        ),
         'skill_visibility_cursor': normalize_skill_visibility_cursor(
             source.get('skill_visibility_cursor')
         ),
@@ -516,6 +539,7 @@ def context_has_state(payload: Any) -> bool:
         normalized.get('records')
         or normalized.get('carried_stages')
         or normalized.get('contract_sections')
+        or normalized.get('sticker_failures_pending')
     ):
         return True
     visibility = dict(normalized.get('skill_visibility_cursor') or {})
@@ -677,6 +701,56 @@ def mark_records_delivered(context: Any, skill_ids: list[str], *, now: str) -> d
         if record['skill_id'] in delivered_ids and not record['delivered_at']:
             record['delivered_at'] = stamp
     return normalized
+
+
+def normalize_sticker_failures(payload: Any) -> list[dict[str, str]]:
+    """`{key, reason}` 行的台账形状：按键去重、截断长度、封顶行数。"""
+    rows: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in list(payload or []):
+        if not isinstance(item, dict):
+            continue
+        key = ' '.join(str(item.get('key') or '').split())[:160]
+        reason = ' '.join(str(item.get('reason') or '').split())[:160]
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        rows.append({'key': key, 'reason': reason})
+        if len(rows) >= _STICKER_FAILURE_MAX_ROWS:
+            break
+    return rows
+
+
+def record_sticker_failures(scope_key: str, failures: Any) -> dict[str, Any]:
+    """轮末唯一写入点：把这一轮没发出去的表情包挂进台账，下一跳投一条就清。
+
+    每轮**整表替换**：通知语义是"上一轮"，不是"历史上所有没发出去的键"——上一轮的
+    挂账要么已被上一跳投走，要么被这一轮的最新解析结果覆盖（包括空表＝上一轮没有
+    失败，把遗留挂账清掉）。来源是 `StickerReply.undelivered` 与 `undelivered_reasons`
+    的逐位配对；配额超限的标记不算失败，本来就不在这两个元组里。
+    """
+    context = notice_context_for(scope_key)
+    context['sticker_failures_pending'] = normalize_sticker_failures(failures)
+    return set_notice_context(scope_key, context)
+
+
+def pending_sticker_failures(context: Any) -> list[dict[str, str]]:
+    """还没投出去的挂账行；只读，不改台账。"""
+    return list(
+        normalize_skill_roster_notice_context(context).get('sticker_failures_pending') or []
+    )
+
+
+def render_sticker_failure_lines(failures: list[Any] | None) -> list[str]:
+    """一节三行起：抬头、`- `键` — 原因` 行、一句怎么改的提示。"""
+    rows = normalize_sticker_failures(failures)
+    if not rows:
+        return []
+    return [
+        STICKER_FAILURE_NOTICE_HEADING,
+        *(f"- `{row['key']}` — {row['reason'] or '原因未知'}" for row in rows),
+        STICKER_FAILURE_NOTICE_HINT,
+    ]
 
 
 def _ordered_contract_keys(keys: Any) -> list[str]:
@@ -917,14 +991,20 @@ def build_notice_message(
     qq_identity_text: str = '',
     contract_sections: list[tuple[str, str]] | None = None,
     operator_actions: list[Any] | None = None,
+    sticker_failures: list[Any] | None = None,
 ) -> dict[str, Any] | None:
     """一次性投递那条消息：role=user，落在本轮历史末尾。
 
-    各节共用一条消息：控制台动作在前（先交代是谁改的），skill 名单其次（新增在前、
-    删除/收回紧随），记忆增量居中，群聊专属记忆紧随其后，人设更新在其后，运行时合同
-    变化在最后（最近处，便于模型把"以最新通知为准"落在下一次判断上）；空节省略。
+    各节共用一条消息：上一轮未发出的表情包在最前（那是模型自己上一轮的动作，最
+    就近、最该先看到），控制台动作其次（先交代是谁改的），skill 名单再次（新增在
+    前、删除/收回紧随），记忆增量居中，群聊专属记忆紧随其后，人设更新在其后，
+    运行时合同变化在最后（最近处，便于模型把"以最新通知为准"落在下一次判断上）；
+    空节省略。
     """
     sections: list[str] = []
+    sticker_lines = render_sticker_failure_lines(sticker_failures)
+    if sticker_lines:
+        sections.append('\n'.join(sticker_lines))
     qq_identity_section = str(qq_identity_text or '').strip()
     if qq_identity_section:
         sections.append('\n'.join([QQ_IDENTITY_NOTICE_HEADING, qq_identity_section]))
@@ -1024,7 +1104,11 @@ def strip_skill_roster_notice_echo(text: Any) -> str:
         return normalized.strip()
     marker_index = min(marker_indexes)
     tail = normalized[marker_index:]
-    if not (SKILL_ROSTER_NOTICE_HEADING in tail or SKILL_ROSTER_CARRIED_HEADING in tail):
+    if not (
+        SKILL_ROSTER_NOTICE_HEADING in tail
+        or SKILL_ROSTER_CARRIED_HEADING in tail
+        or STICKER_FAILURE_NOTICE_HEADING in tail
+    ):
         return normalized.strip()
     return normalized[:marker_index].strip()
 
@@ -1046,6 +1130,7 @@ def drop_records_after(context: Any, *, cutoff_iso: str) -> dict[str, Any]:
                 'known_live_skill_ids': [],
                 'known_readable_skill_ids': [],
             },
+            'sticker_failures_pending': [],
             'operator_action_cursor': normalized['operator_action_cursor'],
         }
     kept = [
@@ -1069,6 +1154,9 @@ def drop_records_after(context: Any, *, cutoff_iso: str) -> dict[str, Any]:
             'known_live_skill_ids': [],
             'known_readable_skill_ids': [],
         },
+        # 失败挂账对应的那条回复已随历史回卷：不撤的话下一跳会把一段"不存在的历史"
+        # 当成上一轮报给模型。
+        'sticker_failures_pending': [],
         # 截断只撤历史帧；操作游标保留，避免把截断后、下一跳前发生的动作静默跳过。
         'operator_action_cursor': normalized['operator_action_cursor'],
     }
@@ -1091,6 +1179,8 @@ __all__ = [
     'SKILL_ROSTER_NOTICE_MARKERS',
     'SKILL_ROSTER_NOTICE_ROLE',
     'RUNTIME_NOTICE_MARKER',
+    'STICKER_FAILURE_NOTICE_HEADING',
+    'STICKER_FAILURE_NOTICE_HINT',
     'build_carried_message',
     'build_notice_message',
     'carry_for_scope',
@@ -1109,19 +1199,23 @@ __all__ = [
     'normalize_notice_record',
     'normalize_skill_roster_notice_context',
     'normalize_skill_visibility_cursor',
+    'normalize_sticker_failures',
     'notice_context_for',
     'pending_contract_sections',
     'pending_notice_records',
+    'pending_sticker_failures',
     'readable_skill_items',
     'record_contract_sections',
     'record_live_skills',
     'record_skill_visibility_changes',
+    'record_sticker_failures',
     'render_carried_text',
     'render_contract_update_lines',
     'render_notice_lines',
     'render_notice_text',
     'render_operator_action_lines',
     'render_removal_lines',
+    'render_sticker_failure_lines',
     'reset_contract_sections_for_compaction',
     'reset_memory_cursor',
     'reset_persona_cursor',

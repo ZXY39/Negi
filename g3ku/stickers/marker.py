@@ -13,6 +13,12 @@ one canonical shape. Two properties matter:
   text, including the ones that fail to resolve. A bad key degrades to "no
   image", never to a leaked marker or a stray file name. The same holds for a
   marker glued to a line tail and for a half-written marker in a stream.
+- **A failure is not silent.** Every key that failed to resolve is labelled in
+  ``StickerReply.undelivered`` with a paired short reason in
+  ``undelivered_reasons``; the session close records both into the notice
+  ledger and the next turn carries one ``[RUNTIME_NOTICE]`` section back to the
+  model (see ``g3ku/runtime/skill_roster_notice.py``). Cap-exceeded markers are
+  policy, not failure, and stay out of both tuples.
 - **Resolution is stateless.** ``strip_markers_for_stream`` works on the
   cumulative reply text, so the streaming relay needs no parser state and can
   hold back a half-written marker without remembering anything.
@@ -37,6 +43,17 @@ from g3ku.stickers.catalog import (
 )
 
 MAX_STICKERS_PER_REPLY = 1
+
+# 未发出原因（模型可见）：通知车道把「键 + 原因」逐条带回给模型，措辞要短、
+# 能对上头部 sticker_packs 目录的「包/分类/序号」三段式。
+REASON_SYNTAX = "标记语法不识别"
+REASON_AMBIGUOUS = "分类不存在或多个包重名"
+REASON_PACK_MISSING = "包不存在"
+REASON_CATEGORY_MISSING = "分类不存在"
+REASON_CATEGORY_EMPTY = "分类没有已注册图片"
+REASON_INDEX_MISSING = "序号不存在"
+REASON_FILE_MISSING = "图片文件不存在"
+REASON_CONTENT_CHANGED = "内容已变更"
 
 _SEGMENT = r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}"
 MARKER_RE = re.compile(rf"^\[\[sticker:({_SEGMENT})/({_SEGMENT})\]\]$")
@@ -155,18 +172,18 @@ def _pick_path(
     category_key: str,
     picker: random.Random,
     avoid: set[Path],
-) -> Path | None:
+) -> tuple[Path | None, str]:
     pack = find_pack(packs, pack_key)
     if pack is None:
         logger.warning("sticker pack {!r} is not in the catalog; nothing sent", pack_key)
-        return None
+        return None, REASON_PACK_MISSING
     if pack.category(category_key) is None:
         logger.warning(
             "sticker category {!r} does not exist in pack {!r}; nothing sent",
             category_key,
             pack_key,
         )
-        return None
+        return None, REASON_CATEGORY_MISSING
     registry.ensure_bootstrap(pack.path)
     images = registry.registered_files(pack.path, category_key)
     if not images:
@@ -175,21 +192,23 @@ def _pick_path(
             category_key,
             pack_key,
         )
-        return None
+        return None, REASON_CATEGORY_EMPTY
     # 同一回复里的随机标记自动去重：先从本轮还没发过的图里挑。分类总数小于要发送
     # 的张数时没有可选余地，退回全集——这是唯一允许重复的情形。
     fresh = [path for path in images if path not in avoid]
-    return picker.choice(fresh or images)
+    return picker.choice(fresh or images), ""
 
 
-def _pick_by_index(packs: tuple[Pack, ...], pack_key: str, category_key: str, index: int) -> Path | None:
+def _pick_by_index(
+    packs: tuple[Pack, ...], pack_key: str, category_key: str, index: int
+) -> tuple[Path | None, str]:
     """Resolve ``[[sticker:pack/cat/N]]`` against the pack registry."""
     pack = find_pack(packs, pack_key)
     if pack is None:
         logger.warning("sticker pack {!r} is not in the catalog; nothing sent", pack_key)
-        return None
+        return None, REASON_PACK_MISSING
     registry.ensure_bootstrap(pack.path)
-    path = registry.resolve_index(pack.path, category_key, index)
+    path, reason = registry.resolve_index_with_reason(pack.path, category_key, index)
     if path is None:
         logger.warning(
             "sticker index {}/{} did not resolve in pack {!r}; nothing sent",
@@ -197,7 +216,8 @@ def _pick_by_index(packs: tuple[Pack, ...], pack_key: str, category_key: str, in
             index,
             pack_key,
         )
-    return path
+        return None, reason or REASON_INDEX_MISSING
+    return path, ""
 
 
 def _marker_label(line: str) -> str:
@@ -225,6 +245,9 @@ class StickerReply:
     images: tuple[Path, ...] = ()
     delivered: tuple[str, ...] = ()
     undelivered: tuple[str, ...] = ()
+    # 与 undelivered 逐位平行的原因行（REASON_*，中文短句）；通知车道按键带回，
+    # 记忆面只用 undelivered 本身。配额超限不算失败，两个元组里都没有它。
+    undelivered_reasons: tuple[str, ...] = ()
 
     @property
     def memory_text(self) -> str:
@@ -276,6 +299,7 @@ def resolve_reply_stickers(
     chosen: list[Path] = []
     delivered: list[str] = []
     undelivered: list[str] = []
+    undelivered_reasons: list[str] = []
     dropped = False
     for raw_line in text.splitlines(keepends=True):
         line = raw_line.rstrip("\r\n")
@@ -284,6 +308,7 @@ def resolve_reply_stickers(
             if _looks_like_marker(line):
                 dropped = True
                 undelivered.append(_marker_label(line))
+                undelivered_reasons.append(REASON_SYNTAX)
                 settled_kept.append(raw_line)
                 logger.warning(
                     "sticker marker syntax not recognised; dropped: {!r}", line.strip()[:80]
@@ -301,6 +326,7 @@ def resolve_reply_stickers(
         # 而定稿这一步不许改变"发不出去"的形状（记忆面要靠它记未发出）。
         if parsed == "ambiguous":
             undelivered.append(_marker_label(line))
+            undelivered_reasons.append(REASON_AMBIGUOUS)
             settled_kept.append(raw_line)
             continue
         if len(chosen) >= limit:
@@ -312,12 +338,13 @@ def resolve_reply_stickers(
             continue
         pack_key, value, index = parsed
         if index is not None:
-            path = _pick_by_index(packs, pack_key, value, index)
+            path, reason = _pick_by_index(packs, pack_key, value, index)
         else:
-            path = _pick_path(packs, pack_key, value, picker, set(chosen))
+            path, reason = _pick_path(packs, pack_key, value, picker, set(chosen))
         if path is None:
             label = f"{pack_key}/{value}/{index}" if index is not None else f"{pack_key}/{value}"
             undelivered.append(label)
+            undelivered_reasons.append(reason)
             settled_kept.append(raw_line)
             continue
         chosen.append(path)
@@ -339,6 +366,7 @@ def resolve_reply_stickers(
         images=tuple(chosen),
         delivered=tuple(delivered),
         undelivered=tuple(undelivered),
+        undelivered_reasons=tuple(undelivered_reasons),
     )
 
 
@@ -436,6 +464,14 @@ def render_marker_images(text: str, *, root: Path | None = None) -> str:
 __all__ = [
     "MARKER_RE",
     "MAX_STICKERS_PER_REPLY",
+    "REASON_AMBIGUOUS",
+    "REASON_CATEGORY_EMPTY",
+    "REASON_CATEGORY_MISSING",
+    "REASON_CONTENT_CHANGED",
+    "REASON_FILE_MISSING",
+    "REASON_INDEX_MISSING",
+    "REASON_PACK_MISSING",
+    "REASON_SYNTAX",
     "SHORT_MARKER_RE",
     "StickerReply",
     "render_marker_images",

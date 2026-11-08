@@ -328,7 +328,7 @@ Heartbeat / cron 不在主 CEO/frontdoor 路径上使用单独的短 `ceo_heartb
 
 | family | 载体 | 插入位置 | 寿命 | 压缩策略 | generic strip 的落点 |
 |---|---|---|---|---|---|
-| `runtime_notice` | `[RUNTIME_NOTICE]` user 消息（控制台动作 / skill 名单 / 记忆增量 / 合同增量 / QQ 身份） | 请求尾部；前门排在当轮 user 之后、turn-only 之前，节点排在历史末尾 | 活到下一次压缩 | `drop` + 下一跳状态快照 | `post_compaction` |
+| `runtime_notice` | `[RUNTIME_NOTICE]` user 消息（上一轮未发出的表情包 / 控制台动作 / skill 名单 / 记忆增量 / 合同增量 / QQ 身份） | 请求尾部；前门排在当轮 user 之后、turn-only 之前，节点排在历史末尾 | 活到下一次压缩；表情包挂账只投一次就清，与消息同寿命 | `drop` + 下一跳状态快照 | `post_compaction` |
 | `turn_only_note` | `System note for this turn only:` user 消息 | 请求尾部，每跳重建，单例 | 只活一轮 | `drop` | `durable` / `prompt_tail` / `projection` |
 | `append_notice` | `[NOTICE_TAIL]` + JSON user 消息 | 节点 bootstrap user 之后（system 保持首位） | 未消费 + 最近 N 条已消费留在尾块；其余在压缩边界退场，台账保留可检索 | `carry`；深层 `raw_notice_window` 仅在 live 窗口内原样捞出 | 任何 generic strip 都不许碰 |
 | `notice_index` | `[NOTICE_INDEX]` user 消息 | 请求尾部（turn-only 之前） | 每跳重建 | `drop` | `prompt_tail` / `post_compaction` |

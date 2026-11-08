@@ -282,8 +282,15 @@ def drop_category(pack_dir: Path, category: str) -> None:
         write_registry(pack_dir, payload)
 
 
-def resolve_index(pack_dir: Path, category: str, index: int) -> Path | None:
-    """Index → file, with the full hash re-check: a swapped file must not be sent."""
+def resolve_index_with_reason(
+    pack_dir: Path, category: str, index: int
+) -> tuple[Path | None, str]:
+    """Index → file plus a short failure reason, with the full hash re-check.
+
+    ``resolve_index`` keeps its boolean shape for egress callers; the failure
+    notice needs to tell the model *why* an index did not send, so this variant
+    returns ``(path, reason)`` — an empty reason on success.
+    """
     rows = category_rows(pack_dir, category)
     for filename, row in rows.items():
         if index_of(filename) != int(index) or not isinstance(row, dict):
@@ -292,20 +299,26 @@ def resolve_index(pack_dir: Path, category: str, index: int) -> Path | None:
         resolved = _inside(pack_dir, path)
         if resolved is None:
             logger.warning("sticker {}/{} is gone or escapes; nothing sent", category, filename)
-            return None
+            return None, "图片文件不存在"
         try:
             payload = resolved.read_bytes()
         except OSError:
             logger.warning("sticker {}/{} is gone; nothing sent", category, filename)
-            return None
+            return None, "图片文件不存在"
         expected = str(row.get("sha256") or "")
         if expected and hashlib.sha256(payload).hexdigest() != expected:
             logger.warning(
                 "sticker {}/{} content changed; nothing sent", category, filename
             )
-            return None
-        return resolved
-    return None
+            return None, "内容已变更"
+        return resolved, ""
+    return None, "序号不存在"
+
+
+def resolve_index(pack_dir: Path, category: str, index: int) -> Path | None:
+    """Index → file, with the full hash re-check: a swapped file must not be sent."""
+    resolved, _reason = resolve_index_with_reason(pack_dir, category, index)
+    return resolved
 
 
 _BOOTSTRAPPED: set[str] = set()
@@ -380,6 +393,7 @@ __all__ = [
     "registered_files",
     "registry_path",
     "resolve_index",
+    "resolve_index_with_reason",
     "unregister_image",
     "unregistered_files",
     "visible_categories",

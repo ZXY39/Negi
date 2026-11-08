@@ -4604,6 +4604,20 @@ class RuntimeAgentSession:
                                     "targets": list(review_reply.undelivered),
                                 },
                             )
+                        # 失败不再静默：键与原因挂进通知台账，下一跳由
+                        # _apply_frontdoor_skill_roster_notice 并进 [RUNTIME_NOTICE]
+                        # 的「上一轮未发出的表情包」节。每轮整表替换（空表＝清掉遗留
+                        # 挂账），所以通知语义始终是"上一轮"。
+                        _skill_roster_notice.record_sticker_failures(
+                            _skill_roster_notice.session_scope_key(self._state.session_key),
+                            [
+                                {"key": key, "reason": reason}
+                                for key, reason in zip(
+                                    review_reply.undelivered,
+                                    review_reply.undelivered_reasons,
+                                )
+                            ],
+                        )
                         review_manager = self._memory_review_manager()
                         if review_manager is not None:
                             await review_manager.record_turn_for_review(
