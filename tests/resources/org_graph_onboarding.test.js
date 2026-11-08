@@ -611,6 +611,21 @@ test("empty persona photos span the whole grid instead of one narrow column", ()
     );
 });
 
+test("photo grid scrolls at a height cap, tiles stay uniform, delete badge sits top-left", () => {
+    // 图多时图区自己滚：限高 + 纵向滚动条，不把弹窗撑长。
+    const grid = CSS.match(/\.persona-photo-grid \{[^}]*\}/)[0];
+    assert.match(grid, /max-height:\s*\d+px/);
+    assert.match(grid, /overflow-y:\s*auto/);
+    // 统一显示大小：缩略图固定正方形、cover 裁切，原始比例不撑大格子。
+    const img = CSS.match(/\.persona-photo-tile img \{[^}]*\}/)[0];
+    assert.match(img, /aspect-ratio:\s*1/);
+    assert.match(img, /object-fit:\s*cover/);
+    // 删除角标钉在图片左上角，不许回到右上。
+    const remove = CSS.match(/\.persona-photo-remove \{[^}]*\}/)[0];
+    assert.match(remove, /left:\s*4px/);
+    assert.doesNotMatch(remove, /right:\s*4px/);
+});
+
 test("a saved persona can be edited and overwritten from the settings dialog", async () => {
     const harness = buildHarness({
         status: {
