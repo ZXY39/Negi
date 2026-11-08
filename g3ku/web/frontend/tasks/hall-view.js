@@ -5,7 +5,9 @@ function renderTasks() {
     // innerHTML 清空会把 scrollTop 归零，重建后需还原，避免用户被拽回顶部。
     const prevScrollTop = Number(U.taskGrid?.scrollTop || 0);
     const prevPage = S.taskPage;
-    const meta = paginateResources(orderedTasks(S.tasks), S.taskPage, S.taskPageSize);
+    const { grouped, meta } = taskHallGroupedMeta();
+    const longTermStats = taskLongTermStats(grouped.longTerm);
+    const longTermExpanded = !!S.taskLongTermExpanded;
     S.taskPage = meta.currentPage;
     S.visibleTaskIds = meta.items.map((task) => String(task?.task_id || "").trim()).filter(Boolean);
     syncTaskPagination(meta);
@@ -42,16 +44,25 @@ function renderTasks() {
         diskWarning.textContent = `🚨 磁盘空间不足：运行中任务已自动暂停，新工具调用进入排队等待。请清理磁盘，空间恢复后手动恢复任务。${sinceText ? `（紧急态自 ${sinceText} 起）` : ""}`;
         U.taskGrid.appendChild(diskWarning);
     }
+    if (longTermStats.total) {
+        const groupBar = document.createElement("button");
+        groupBar.type = "button";
+        groupBar.className = "task-long-term-bar";
+        groupBar.dataset.taskLongTermToggle = "true";
+        groupBar.setAttribute("aria-expanded", longTermExpanded ? "true" : "false");
+        groupBar.title = longTermExpanded ? "折叠长期任务" : "展开长期任务";
+        groupBar.innerHTML = `<span class="task-long-term-text">${esc(taskLongTermGroupText(longTermStats))}</span><i data-lucide="${longTermExpanded ? "chevron-up" : "chevron-down"}" aria-hidden="true"></i>`;
+        U.taskGrid.appendChild(groupBar);
+    }
     if (!meta.total) {
-        if (workerNotice) {
-            const empty = document.createElement("div");
-            empty.className = "empty-state";
-            empty.style.gridColumn = "1/-1";
-            empty.textContent = taskSessionEmptyText();
-            U.taskGrid.appendChild(empty);
-        } else {
-            U.taskGrid.innerHTML = `<div class="empty-state" style="grid-column: 1/-1;">${esc(taskSessionEmptyText())}</div>`;
-        }
+        const empty = document.createElement("div");
+        empty.className = "empty-state";
+        empty.style.gridColumn = "1/-1";
+        empty.textContent = longTermStats.total && !longTermExpanded
+            ? "暂无一次性任务"
+            : taskSessionEmptyText();
+        U.taskGrid.appendChild(empty);
+        icons();
         return updateTaskToolbar();
     }
     const nextTaskMetricSnapshot = {};

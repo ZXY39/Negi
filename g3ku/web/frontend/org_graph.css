@@ -11051,16 +11051,16 @@ textarea {
     align-items: center;
     justify-content: flex-end;
     flex-wrap: wrap;
-    gap: 18px;
+    gap: 14px;
     flex: 1 1 620px;
     min-width: min(100%, 520px);
 }
 
-/* 读数只以文字呈现：不吃胶囊边框/底色/内边距，五项像一行读数往右收拢。 */
+/* 读数只以文字呈现：不吃胶囊边框/底色/内边距，四项像一行读数往右收拢。 */
 .task-performance-item {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
     white-space: nowrap;
 }
 
@@ -11079,17 +11079,6 @@ textarea {
     font-weight: 800;
     line-height: 1;
     color: var(--text-primary);
-}
-
-/* 监控新鲜度是一根每 1s 走一步的整数秒表：数字与单位之间留一点呼吸，并用等宽
-   数字 + 两位预留（渲染侧 pad 到两位）保证 9→10→99 秒这些跳变不改变这一项的宽度，
-   否则整条性能条会跟着抖。*/
-.task-performance-age-value {
-    font-variant-numeric: tabular-nums;
-    letter-spacing: 0.01em;
-    padding-inline: 0.12em;
-    /* 个位数前面是留空而不是零，默认的规则会把前导空格吃掉，宽度预留就白做了。 */
-    white-space: pre;
 }
 
 .task-performance-queue-value {
@@ -11540,6 +11529,18 @@ textarea {
 
 .resource-pagination-actions {
     flex: 0 0 auto;
+}
+
+/* 分页栏里的任务排序与「每页 / 上一页 / 下一页」同档：32px 高、同一控制圆角。 */
+.resource-pagination .task-sort-setting {
+    flex: 0 0 auto;
+}
+
+.resource-pagination .task-sort-setting .task-depth-setting-main.task-depth-setting-main {
+    height: 32px;
+    min-height: 32px;
+    padding: 0 var(--ui-space-3);
+    border-radius: var(--ui-radius-control);
 }
 
 .resource-pagination-label {
@@ -16764,6 +16765,46 @@ textarea {
     gap: var(--ui-space-4);
     row-gap: var(--ui-space-6);
     column-gap: 18px;
+}
+
+/* 长期任务折叠条：占满整行，统计读数靠左、折叠箭头靠右。 */
+.task-long-term-bar {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    gap: var(--ui-space-2);
+    width: 100%;
+    min-height: 40px;
+    padding: 0 var(--ui-space-3);
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-card);
+    background: var(--ui-bg-surface);
+    color: var(--ui-text-secondary);
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    text-align: left;
+    cursor: pointer;
+    transition: border-color 160ms var(--ui-motion-ease), background-color 160ms var(--ui-motion-ease);
+}
+
+.task-long-term-bar:hover {
+    border-color: var(--ui-border-strong);
+    background: var(--ui-neutral-soft);
+}
+
+.task-long-term-bar:focus-visible {
+    outline: 0;
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--ui-brand) 24%, transparent);
+}
+
+/* lucide 把占位的 <i> 换成 <svg>，两种标签都要吃到靠右与 16px 尺寸。 */
+.task-long-term-bar i,
+.task-long-term-bar svg {
+    width: 16px;
+    height: 16px;
+    margin-left: auto;
+    color: var(--ui-text-muted);
 }
 
 .project-card.project-card {

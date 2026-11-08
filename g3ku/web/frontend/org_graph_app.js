@@ -278,6 +278,7 @@ const S = {
     taskPage: 1,
     taskPageSize: RESOURCE_PAGE_SIZES[0],
     taskSortMode: "time",
+    taskLongTermExpanded: false,
     taskTerminalReconcileId: null,
     tasksById: {},
     orderedTaskIds: [],
@@ -11839,6 +11840,13 @@ function bindTaskHall() {
     });
     U.taskSortSelect?.addEventListener("change", (e) => {
         setTaskSortMode(String(e.target.value || "time"));
+    });
+    U.taskGrid?.addEventListener("click", (e) => {
+        const toggle = e.target?.closest?.("[data-task-long-term-toggle]");
+        if (!toggle) return;
+        e.preventDefault();
+        e.stopPropagation();
+        setTaskLongTermExpanded(!S.taskLongTermExpanded);
     });
     U.taskPageSize?.addEventListener("change", (e) => setTaskPageSize(e.target.value));
     U.taskPagePrev?.addEventListener("click", () => setTaskPage(S.taskPage - 1));

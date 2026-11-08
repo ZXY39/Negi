@@ -4,15 +4,15 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 const { readFrontendSources } = require("./support/frontend_sources.js");
 
-// 任务大厅性能条两件事：
-// 1)「节点队列」读回合闸，三个数各带标签：运行=占住的闸位（entry_gate_running_total）、
-//    等待=闸口排队（entry_gate_queued_total）、当前容量=闸开多大（entry_gate_limits_total）。
+// 任务大厅性能条：
+// 1)「节点」一项读回合闸，三个数各带标签：运行=占住的闸位（entry_gate_running_total）、
+//    等待=闸口排队（entry_gate_queued_total）、容量=闸开多大（entry_gate_limits_total）。
 //    `node_queue_waiting_count` 量的是过闸之后等模型 permit 的队列，闸收紧时恒 0（实盘
 //    4000 拍里 3986 拍为 0，其中 662 拍闸已贴顶），当不了「等待」的读数；数字也不许叠成
 //    `N/M`——分不清哪个是占用、哪个是天花板。
-// 2)「监控新鲜度」量「距离上一次收到新读数过了多久」：读数身份 pressure_sample_at 一变就归零
-//    重计，身份不变只在本地累加；不切「刚刚更新」这类不带时长的文案。「压力状态」用同一根秒表
-//    判停更（≥15s 才翻），标签带时长。
+// 2) 文案保持紧凑：压力状态→压力、工具队列→工具、节点队列→节点、当前容量→容量，
+//    「监控新鲜度」整项移除（秒表只剩压力一个消费者）。
+// 3) 压力用一根按读数身份归零的秒表判停更（≥15s 才翻），标签带时长。
 
 const TASKS_PATH = "g3ku/web/frontend/org_graph_tasks.js";
 const TASKS_CODE = readFrontendSources(["tasks"]).join("\n");
@@ -67,11 +67,26 @@ const baseMetrics = {
     node_queue_waiting_count: 0,
 };
 
-test("运行/等待/当前容量各自带标签，读数来自 entry_gate_*", () => {
-    const html = section(createPerfBar(baseMetrics).render(), "节点队列");
+test("性能条只剩四项，标签压到最短且监控新鲜度整项移除", () => {
+    const html = createPerfBar(baseMetrics).render();
+    assert.equal((html.match(/class="task-performance-item/g) || []).length, 4);
+    assert.ok(html.includes(">压力<"), html);
+    assert.ok(!html.includes("压力状态"), html);
+    assert.ok(html.includes(">工具<"), html);
+    assert.ok(!html.includes("工具队列"), html);
+    assert.ok(html.includes(">节点<"), html);
+    assert.ok(!html.includes("节点队列"), html);
+    assert.ok(html.includes(">容量<"), html);
+    assert.ok(!html.includes("当前容量"), html);
+    assert.ok(!html.includes("监控新鲜度"), html);
+    assert.ok(!html.includes("task-performance-age-value"), html);
+});
+
+test("运行/等待/容量各自带标签，读数来自 entry_gate_*", () => {
+    const html = section(createPerfBar(baseMetrics).render(), "节点");
     assert.ok(html.includes(">12</span>运行"), html);
     assert.ok(html.includes(">44</span>等待"), html);
-    assert.ok(html.includes(">12</span>当前容量"), html);
+    assert.ok(html.includes(">12</span>容量"), html);
     assert.ok(!html.includes("12/12"), "不得把占用与容量叠成分数");
     assert.ok(!html.includes(">0</span>等待"), "闸口排 44 个时不得显示 0 等待");
     assert.ok(!html.includes(">7</span>运行"), "模型侧运行数不得顶替闸位占用");
@@ -82,10 +97,10 @@ test("闸位读数缺失时三项都显示 --，不回落到模型侧队列", ()
         machine_pressure_available: true,
         node_queue_running_count: 9,
         node_queue_waiting_count: 8,
-    }).render(), "节点队列");
+    }).render(), "节点");
     assert.ok(html.includes(">--</span>运行"), html);
     assert.ok(html.includes(">--</span>等待"), html);
-    assert.ok(html.includes(">--</span>当前容量"), html);
+    assert.ok(html.includes(">--</span>容量"), html);
 });
 
 const BASE_NOW_MS = 1_700_000_000_000;
@@ -99,81 +114,11 @@ const beat = (index) => ({
     pressure_sample_age_ms: SAMPLE_LAG_MS,
 });
 
-function freshness(bar, metrics) {
-    return section(bar.render(metrics), "监控新鲜度");
-}
-
-function freshnessValue(html) {
-    const matched = html.match(/>([ 0-9][0-9](?:秒|分钟|小时)前)</);
-    assert.ok(matched, html.slice(0, 240));
-    return matched[1];
-}
-
-test("刚收到新读数显示 0秒前（前导留空），不再显示「刚刚更新」", () => {
-    const html = freshness(createPerfBar({}), beat(0));
-    assert.ok(html.includes("> 0秒前<"), html);
-    assert.ok(!html.includes("刚刚更新"), html);
-});
-
-test("读数身份没变时本地继续走整数秒，也不换成无时长的说法", () => {
-    const bar = createPerfBar(beat(0));
-    assert.equal(freshnessValue(freshness(bar)), " 0秒前");
-    bar.advanceMs(4_000);
-    const later = freshness(bar);
-    assert.equal(freshnessValue(later), " 4秒前");
-    assert.ok(!later.includes("监控过期"), later);
-    assert.ok(!/\d+\.\d+秒前/.test(later), "新鲜度不显示小数");
-});
-
-test("读数每秒都在更新时新鲜度不会累加成几十秒（实盘 payload 带 pressure_sample_at）", () => {
-    // 回归：旧实现拿"年龄 <1s"当归零条件，而实盘年龄恒 ≥2.4s；又只在年龄变大时重设锚点，
-    // 而新读数只会让年龄变小，于是秒表一路累加，读数明明在更新也显示几分钟前。
-    const bar = createPerfBar(beat(0), BASE_NOW_MS);
-    freshness(bar);
-    const seen = [];
-    for (let index = 1; index <= 30; index += 1) {
-        bar.advanceMs(1_000);
-        seen.push(freshnessValue(freshness(bar, beat(index))));
-    }
-    assert.ok(seen.every((text) => text === " 0秒前"), JSON.stringify(seen));
-});
-
-test("同一份读数越走越旧：没有身份串时只有年龄变小才算新读数", () => {
-    const stale = { ...baseMetrics, pressure_sample_age_ms: 12_000 };
-    const newer = { ...baseMetrics, pressure_sample_age_ms: 2_400 };
-    const bar = createPerfBar(stale, BASE_NOW_MS);
-    assert.equal(freshnessValue(freshness(bar)), " 0秒前");
-    bar.advanceMs(1_000);
-    assert.equal(freshnessValue(freshness(bar, { ...baseMetrics, pressure_sample_age_ms: 13_000 })), " 1秒前");
-    assert.equal(freshnessValue(freshness(bar, newer)), " 0秒前");
-});
-
-test("更久的断供按整数分钟计时；一次读数都没有时才是未采样", () => {
-    const bar = createPerfBar(beat(0), BASE_NOW_MS);
-    freshness(bar);
-    bar.advanceMs(5 * 60_000);
-    assert.equal(freshnessValue(freshness(bar)), " 5分钟前");
-    assert.ok(freshness(bar, { ...baseMetrics }).includes(">未采样<"));
-});
-
-test("9 秒、10 秒与 99 秒渲染出的文本等长：秒表不改变这一项的宽度", () => {
-    const texts = [9_400, 10_400, 99_400].map((elapsedMs) => {
-        const bar = createPerfBar(beat(0), BASE_NOW_MS);
-        freshness(bar);
-        bar.advanceMs(elapsedMs);
-        return freshnessValue(freshness(bar));
-    });
-    assert.deepEqual(texts, [" 9秒前", "10秒前", "99秒前"]);
-    assert.equal(new Set(texts.map((text) => text.length)).size, 1, JSON.stringify(texts));
-});
-
-// 「压力状态」与新鲜度共用同一根按读数身份归零的秒表：服务端那枚 pressure_snapshot_fresh
-// 量的是「年龄 ≤3s」，实盘年龄稳态就有 2.4s，读数一直在更新也会翻成过期。
 function pressureLabel(bar, metrics) {
-    return section(bar.render(metrics), "压力状态").match(/task-performance-value">([^<]*)</)[1];
+    return section(bar.render(metrics), "压力").match(/task-performance-value">([^<]*)</)[1];
 }
 
-test("读数持续更新时压力状态照报状态，不受服务端过期标记影响", () => {
+test("读数持续更新时压力照报状态，不受服务端过期标记影响", () => {
     const bar = createPerfBar({ ...beat(0), pressure_snapshot_fresh: false }, BASE_NOW_MS);
     assert.equal(pressureLabel(bar), "正常");
     for (let index = 1; index <= 6; index += 1) {
@@ -183,14 +128,13 @@ test("读数持续更新时压力状态照报状态，不受服务端过期标�
     assert.ok(!bar.render().includes("监控过期"), "整条性能条不再出现「监控过期」");
 });
 
-test("读数身份 15 秒没变，压力状态改报停更时长", () => {
+test("读数身份 15 秒没变，压力改报停更时长", () => {
     const bar = createPerfBar(beat(0), BASE_NOW_MS);
     assert.equal(pressureLabel(bar), "正常");
     bar.advanceMs(14_000);
     assert.equal(pressureLabel(bar), "正常");
     bar.advanceMs(2_000);
     assert.equal(pressureLabel(bar), "停更16秒");
-    assert.equal(freshnessValue(freshness(bar)), "16秒前");
 });
 
 test("机器资源读数缺失时不谎报停更", () => {

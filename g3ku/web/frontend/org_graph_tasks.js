@@ -142,6 +142,40 @@ function formatTaskNodeCount(value) {
     return String(Math.trunc(count));
 }
 
+// 长期（连续）任务按根节点 continuous 位分组：折叠条常驻，默认折叠时只列一次性任务。
+function taskLongTermStats(tasks = S.tasks) {
+    const stats = { total: 0, running: 0, standby: 0 };
+    (Array.isArray(tasks) ? tasks : []).forEach((task) => {
+        if (!task?.continuous) return;
+        stats.total += 1;
+        const status = taskStatusKey(task);
+        if (status === "standby") stats.standby += 1;
+        else if (status === "in_progress") stats.running += 1;
+    });
+    return stats;
+}
+
+function taskLongTermGroupText(stats) {
+    return `共 ${stats.total} 个长期任务，运行中 ${stats.running}，待命 ${stats.standby}`;
+}
+
+// 展开时长期任务整体排在一次性任务前面，组内保持当前排序；折叠时只交出一次性任务。
+function taskLongTermOrderedItems(tasks = S.tasks) {
+    const longTerm = [];
+    const oneOff = [];
+    (Array.isArray(tasks) ? tasks : []).forEach((task) => {
+        if (task?.continuous) longTerm.push(task);
+        else oneOff.push(task);
+    });
+    return { longTerm, oneOff, ordered: [...longTerm, ...oneOff] };
+}
+
+function taskHallGroupedMeta() {
+    const grouped = taskLongTermOrderedItems(orderedTasks(S.tasks));
+    const pageItems = S.taskLongTermExpanded ? grouped.ordered : grouped.oneOff;
+    return { grouped, meta: paginateResources(pageItems, S.taskPage, S.taskPageSize) };
+}
+
 function taskDiskUsageSortValue(task) {
     const value = Number(task?.disk_usage_bytes);
     return Number.isFinite(value) && value > 0 ? value : 0;
@@ -166,6 +200,16 @@ function setTaskSortMode(mode) {
     S.taskSortMode = normalized;
     if (U.taskSortSelect && U.taskSortSelect.value !== normalized) U.taskSortSelect.value = normalized;
     resortTaskOrderedIds();
+}
+
+function setTaskLongTermExpanded(expanded) {
+    const next = !!expanded;
+    if (S.taskLongTermExpanded === next) return;
+    S.taskLongTermExpanded = next;
+    // 展开后长期任务整体插到最前面：回到第一页才能先看到它们。
+    if (next) S.taskPage = 1;
+    S.taskGridSignature = "";
+    renderTasksIfVisible();
 }
 
 function resortTaskOrderedIds() {
@@ -385,7 +429,7 @@ function flushQueuedTaskCardPatches() {
         renderTasks();
         return;
     }
-    const meta = paginateResources(orderedTasks(S.tasks), S.taskPage, S.taskPageSize);
+    const meta = taskHallGroupedMeta().meta;
     S.taskGridSignature = taskGridRenderSignature(meta);
 }
 
@@ -458,7 +502,7 @@ function taskWorkerStatusMetrics() {
 
 // 读数身份超过 15s 没变才算停更：实盘正常节拍是心跳 1–2s 一拍，WS 断了退到 5s 轮询再叠加
 // 秒级截断也才 7s 上下。旧的「服务端年龄 ≤3s」量的其实是这条流水线本身的多长，读数一直在
-// 更新也会翻成过期，所以压力状态改与新鲜度共用同一根按身份归零的秒表。
+// 更新也会翻成过期，所以压力状态用一根按读数身份归零的秒表。
 const TASK_PRESSURE_STALE_AFTER_MS = 15_000;
 
 function taskWorkerPressureSnapshotFresh(metrics = taskWorkerStatusMetrics()) {
@@ -466,7 +510,7 @@ function taskWorkerPressureSnapshotFresh(metrics = taskWorkerStatusMetrics()) {
     return ageMs != null && ageMs < TASK_PRESSURE_STALE_AFTER_MS;
 }
 
-// 新鲜度量的是「距离上一次收到新读数过了多久」：读数身份（pressure_sample_at）一变就归零重计，
+// 秒表量的是「距离上一次收到新读数过了多久」：读数身份（pressure_sample_at）一变就归零重计，
 // 身份不变只在本地累加；读数断了数字照旧往上走，也不切成「刚刚更新」这类不带时长的说法——
 // 操作员要判断的是断了多久。归零的判据必须是读数的身份，不能拿读数的年龄当阈值：心跳 1–2s 一拍、
 // 时间戳又只有整秒精度，实盘 REST 回来的年龄恒定在 2.4s 上下，「年龄 <1s」永不会命中。
@@ -489,22 +533,13 @@ function taskWorkerSampleAgeMsLive(metrics = taskWorkerStatusMetrics()) {
     return nowMs - anchor.atMs;
 }
 
-// 时长只算一次，两枚胶囊各说各的：新鲜度报「多久之前的读数」，压力状态报「停更多久」。
+// 时长只算一次：压力状态报「停更多久」。
 function taskWorkerAgeParts(ageMs) {
     const seconds = Math.round(ageMs / 1000);
     if (seconds < 100) return { value: seconds, unit: "秒" };
     const minutes = Math.round(seconds / 60);
     if (minutes < 100) return { value: minutes, unit: "分钟" };
     return { value: Math.round(minutes / 60), unit: "小时" };
-}
-
-function formatTaskWorkerSampleFreshness(metrics = taskWorkerStatusMetrics()) {
-    const ageMs = taskWorkerSampleAgeMsLive(metrics);
-    if (ageMs == null) return "未采样";
-    // 每档预留两位数字宽度（99 秒内、59 分内、24 时内都不改胶囊宽度），个位数前面
-    // 留空不补零；等宽数字与前导空格由 CSS 的 tabular-nums + white-space: pre 保住。
-    const parts = taskWorkerAgeParts(ageMs);
-    return `${String(parts.value).padStart(2, " ")}${parts.unit}前`;
 }
 
 function formatTaskWorkerPercent(value) {
@@ -580,7 +615,7 @@ function renderTaskPerformanceBar() {
     const diskStateSuffix = diskEmergency ? " · 紧急" : "";
     const toolRunningText = queueMetricCount(metrics?.tool_queue_running_count);
     const toolWaitingText = queueMetricCount(metrics?.tool_queue_waiting_count);
-    // 「节点队列」这一段量的是回合闸：运行=占住的闸位数，等待=闸口排队数，当前容量=
+    // 「节点」这一段量的是回合闸：运行=占住的闸位数，等待=闸口排队数，容量=
     // 闸现在开多大（不是上限）。node_queue_waiting_count 量的是过闸之后等模型 permit 的
     // 队列，闸收紧时节点还卡在闸口、它恒 0，当不了「等请求位」的读数。三个数各带标签，
     // 不叠成 `N/M`——那样读的人分不清哪个是占用、哪个是天花板。
@@ -590,7 +625,7 @@ function renderTaskPerformanceBar() {
     U.taskPerformanceBar.hidden = false;
     U.taskPerformanceBar.innerHTML = `
         <div class="task-performance-item task-performance-item--state" data-state="${esc(pressureState.key)}">
-            <span class="task-performance-label">压力状态</span>
+            <span class="task-performance-label">压力</span>
             <strong class="task-performance-value">${esc(pressureState.label)}</strong>
         </div>
         <div class="task-performance-item task-performance-item--state" data-state="${esc(diskStateKey)}">
@@ -598,16 +633,12 @@ function renderTaskPerformanceBar() {
             <strong class="task-performance-value">${taskWorkerMetricSpan(cpuText, metrics?.machine_pressure_cpu_percent)} / ${taskWorkerMetricSpan(memoryText, metrics?.machine_pressure_memory_percent)} / ${taskWorkerMetricSpan(diskBusyText, metrics?.machine_pressure_disk_busy_available === false ? Number.NaN : metrics?.machine_pressure_disk_busy_percent)}${esc(diskStateSuffix)}</strong>
         </div>
         <div class="task-performance-item">
-            <span class="task-performance-label">工具队列</span>
+            <span class="task-performance-label">工具</span>
             <strong class="task-performance-value task-performance-queue-value"><span class="task-performance-count task-performance-count--running">${esc(toolRunningText)}</span>运行 / <span class="task-performance-count task-performance-count--waiting">${esc(toolWaitingText)}</span>等待</strong>
         </div>
         <div class="task-performance-item">
-            <span class="task-performance-label">节点队列</span>
-            <strong class="task-performance-value task-performance-queue-value"><span class="task-performance-count task-performance-count--running">${esc(gateRunningText)}</span>运行 / <span class="task-performance-count task-performance-count--waiting">${esc(gateWaitingText)}</span>等待 / <span class="task-performance-count">${esc(gateCapacityText)}</span>当前容量</strong>
-        </div>
-        <div class="task-performance-item">
-            <span class="task-performance-label">监控新鲜度</span>
-            <strong class="task-performance-value task-performance-age-value">${esc(formatTaskWorkerSampleFreshness(metrics))}</strong>
+            <span class="task-performance-label">节点</span>
+            <strong class="task-performance-value task-performance-queue-value"><span class="task-performance-count task-performance-count--running">${esc(gateRunningText)}</span>运行 / <span class="task-performance-count task-performance-count--waiting">${esc(gateWaitingText)}</span>等待 / <span class="task-performance-count">${esc(gateCapacityText)}</span>容量</strong>
         </div>
     `;
 }
@@ -851,6 +882,7 @@ function beginTaskPauseHint(taskId) {
 
 function taskGridRenderSignature(meta) {
     const visibleItems = Array.isArray(meta?.items) ? meta.items : [];
+    const longTermStats = taskLongTermStats(S.tasks);
     return JSON.stringify({
         total: Number(meta?.total || 0),
         currentPage: Number(meta?.currentPage || 1),
@@ -865,6 +897,8 @@ function taskGridRenderSignature(meta) {
         multiSelectMode: !!S.multiSelectMode,
         selectedTaskCount: S.selectedTaskIds.size,
         sortMode: String(S.taskSortMode || "time"),
+        longTermExpanded: !!S.taskLongTermExpanded,
+        longTermStats: [longTermStats.total, longTermStats.running, longTermStats.standby],
         emptyText: taskSessionEmptyText(),
         selectedTaskIds: [...S.selectedTaskIds].map((id) => String(id || "")).sort(),
         items: visibleItems.map((task) => {
