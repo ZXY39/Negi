@@ -7,7 +7,9 @@ from typing import Any
 from main.models import build_execution_policy_schema, normalize_execution_policy_metadata
 
 CREATE_ASYNC_TASK_DESCRIPTION = (
-    "Dispatch the user request into a detached background task. "
+    "Dispatch the user request into a detached background task. Set `continuous` to true "
+    "for a long-term/standby task that keeps running and wakes on messages or events "
+    "instead of finishing once; omit it for one-shot tasks. "
     "The caller must provide a distilled `core_requirement` and an explicit "
     "`execution_policy.mode`. When the task depends on specific files or "
     "artifacts, `file_targets` must carry the exact absolute `path` or exact "

@@ -3,8 +3,8 @@ kind: tool
 display_name: "创建异步任务"
 name: create_async_task
 description: >-
-  Create a background task. `final_acceptance_prompt` or `continuous` opts into acceptance:
-  leaving it empty is not an answer, and self-test is not acceptance.
+  Create a background task. Set `continuous: true` for a long-term/standby task; omit it
+  for one-shot tasks. One-shot acceptance needs `final_acceptance_prompt`.
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''

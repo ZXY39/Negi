@@ -20,6 +20,7 @@ Create a detached background task in the main runtime.
   - Use this when the task depends on specific uploaded files, local files, or artifacts.
   - Use `null` or `[]` when the task does not depend on specific files.
 - `final_acceptance_prompt`: clear acceptance criteria for the final result. Writing them is what creates the final acceptance node; leave it empty when you can verify inline.
+- `continuous`: set `true` for a long-term / standby / keep-alive task that keeps running and wakes on messages or events instead of finishing once. A continuous task never submits results and gets no acceptance node (`final_acceptance_prompt` is ignored). Omit it for one-shot tasks.
 
 ## Task Prompt Requirements
 - Describe the goal, scope, important clues, and expected output.
@@ -31,4 +32,5 @@ Create a detached background task in the main runtime.
 ## Notes
 - `core_requirement` must not be empty.
 - `execution_policy.mode` must be explicit.
-- `final_acceptance_prompt` is the only acceptance opt-in: writing it creates the final acceptance node, leaving it empty means you verify the result inline.
+- `final_acceptance_prompt` is the only acceptance opt-in for one-shot tasks: writing it creates the final acceptance node, leaving it empty means you verify the result inline.
+- `continuous` is not an acceptance opt-in: it only marks the root as long-term/standby. A task that merely calls `enter_wait` without `continuous: true` is still a one-shot task.
