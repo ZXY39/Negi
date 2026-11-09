@@ -71,10 +71,10 @@
 1. 先视为“可修复工具”，不是“彻底不可用”。
 2. 检查 `resource.yaml` 里的：
    - `tool_type`
+   - `requires.tools`
    - `requires.bins`
    - `requires.paths`
    - `requires.env`
-   - 说明：tool 侧的 `requires.tools` 不参与可用性判定（只有 skill 会探测它），工具间依赖要写进 handler 并自己检查
 3. 如果工具是 `callable=true` 但依赖缺失，先把依赖修到满足。
 4. 如果依赖已经满足，但当前 turn 仍没注册上，继续做“刷新与复核”步骤。
 

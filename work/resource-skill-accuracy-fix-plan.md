@@ -271,3 +271,43 @@ python -m pytest tests/resources/test_tool_resource_admin_api.py tests/resources
   1. 资源代检查首拍只记基线，目录在首拍前落盘会被永久吸进基线；
   2. web 与 worker 不共享刷新结果，`/api/resources/reload` 只作用于接收请求的进程；
   3. tool 的 `requires.tools` 被解析但从不探测。
+
+## 10. 运行时缺口修复（2026-11-09 续）
+
+原则不变：先补机制，再补测试与文档；只动这三处，不顺手重构。
+
+### R1 基线为空时不再“只记不比”
+
+- 落点：`main/service/runtime_service.py` 的 `refresh_changed_resources` 与 `maybe_refresh_external_resource_changes`；`g3ku/runtime/bootstrap_bridge.py` 的 `init_resource_runtime`。
+- 改法：
+  1. `refresh_changed_resources` 在基线与调用方快照都为空时，执行一次 `manager.reload_now(trigger=...)`，再做 registry / policy 同步并记基线——不允许“只记录、不重载”。
+  2. `maybe_refresh_external_resource_changes` 在没有基线时走同一条 reconcile 路径，返回 `refreshed=True`，不再直接记基线返回。
+  3. bootstrap 完成 `resource_registry.refresh()` + `sync_default_role_policies()` 后立即记基线，避免正常运行下首个回合多付一次全量重载。
+- 测试：更新 `test_resource_tree_single_walk.py` 的空基线用例；在 `test_resource_generation_check.py` 增加“空基线触发 reconcile”用例。
+- 文档：`docs/architecture/tool-and-skill-system.md` §10 的“首次调用只落基线”改为“无基线必须先 reconcile”。
+
+### R2 `/api/resources/reload` 下发到 worker
+
+- 落点：`main/service/runtime_service.py` 的 worker 命令表与 `reload_resources_async`。
+- 改法：
+  1. 新增 worker 命令类型 `reload_resources`（`task_id=None`，与 `refresh_runtime_config` 同一车道）。
+  2. `reload_resources_async` 在 `execution_mode == 'web'` 时，完成本地 reload 后入队该命令，并在响应里返回 `worker_reload: {requested, command_id, status: pending}`。
+  3. worker 侧执行该命令时调用自身的 `reload_resources`。
+- 测试：新增“web 模式入队 / worker 模式不入队”与“命令分发调用 reload_resources”两条单测。
+- 文档：`docs/architecture/web-and-admin.md` 与 `tool-and-skill-system.md` §10 说明 reload 的进程边界与异步下发。
+
+### R3 tool 的 `requires.tools` 真正参与探测
+
+- 落点：`g3ku/resources/registry.py` 的发现与要求检查；`g3ku/resources/manager.py` 的定向刷新。
+- 改法：
+  1. `_discover_tools` 改为两遍：先建全部 descriptor，再用完整工具名集合检查 `requires.tools`。
+  2. 新增 `apply_tool_requires_tools(descriptor, tool_names)`，缺失时 `available=False` + `missing required tools: ...`，与 skill 侧文案一致。
+  3. 定向刷新在算出 `final_tool_names` 后对本次重建的 tool descriptor 应用同一检查。
+- 测试：新增 `tests/resources/test_tool_requires_tools.py`，覆盖“要求已注册工具 → 可用”“要求缺失工具 → unavailable + warning”。
+- 文档：把 `g3ku-resource-spec.md` 与 `repair-tool` 里“tool 不探测 requires.tools”的临时表述改回“探测”。
+
+### 验收与风险
+
+- 命令：`ruff` + 上述测试文件 + `test_resource_runtime_smoke.py`。
+- 风险：R3 会改变 tool manifest 的实际效果；仓库现有 tool 的 `requires.tools` 全为空，风险集中在第三方工具。R1 会让每个进程在“无基线”时多一次全量扫描（bootstrap 记基线后正常路径不触发）。
+- 生效方式：需要重启 web 与 worker；改完后按运行时验收规范做一次真实对话与节点任务验证。

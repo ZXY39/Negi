@@ -8,10 +8,14 @@ class _Manager:
         self._after_state = after_state
         self.walks = 0
         self.refresh_calls: list[tuple[dict[str, dict[str, str]], str, dict[str, dict[str, str]] | None]] = []
+        self.reload_triggers: list[str] = []
 
     def capture_resource_tree_state(self) -> dict[str, dict[str, str]]:
         self.walks += 1
         return dict(self._after_state)
+
+    def reload_now(self, *, trigger: str = 'manual') -> None:
+        self.reload_triggers.append(trigger)
 
     def refresh_changed_tree_state(
         self,
@@ -64,7 +68,7 @@ def test_explicit_before_state_still_wins_over_the_cached_baseline() -> None:
     assert manager.refresh_calls == [(caller_state, 'admin', after_state)]
 
 
-def test_missing_baseline_records_the_walk_without_claiming_every_root_changed() -> None:
+def test_missing_baseline_reloads_once_instead_of_recording_the_change_away() -> None:
     after_state = {'skills': {'demo_skill': 'new'}, 'tools': {'exec': 'stable'}}
     manager = _Manager(after_state)
     service = _service(manager, None)
@@ -73,4 +77,5 @@ def test_missing_baseline_records_the_walk_without_claiming_every_root_changed()
 
     assert manager.walks == 1
     assert manager.refresh_calls == []
+    assert manager.reload_triggers == ['tool:exec']
     assert service._resource_tree_state_cache == after_state

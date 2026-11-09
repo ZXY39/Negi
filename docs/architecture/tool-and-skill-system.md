@@ -161,6 +161,7 @@ CEO/frontdoor 另有任务生命周期、分发控制与贴纸选图类固定工
 - 例外：运行时还有一条免模型的复开提醒——`exec` 结果发生输出截断（`stdout_truncated` / `stderr_truncated`）时，运行时在这条 exec 结果里注入 `content_open` 的复开方法，让模型直接从"立即可用但截断的 exec"切换到"能按行/字符精确读本地文件的 content_open"，不必先手动 `load_tool_context`。契约不在场时那一次 `content_open` 调用走投递路径，同一跳把契约拿回来。同一结果只注入一次。
 - 节点的可执行对象字典（`_tool_provider` 交付给执行循环的 `tools`）按治理可见集兜底构建，frame 里的候选被写成空时也不塌缩。这一条与上一条是一对：候选决定"能不能被提升"，对象字典决定"提升后能不能真被解析执行"，两者各自按治理可见集取上界，才不会出现"名字可见却调不动"。
 - repair-required 资源从普通候选中剥离：工具进 `repair_required_tools`（不进 agent-facing `candidate_tools`，也从在场判据里剔掉，所以永不进 callable），skill 进 `repair_required_skills`（机器状态，留在合同 payload 里供诊断；渲染行已从尾块删除——skill 待修复的信号由 `load_skill_context` 的 repair 载荷承载）。这些列表不影响 provider-facing `tools[]` 变化。
+- `requires` 是可用性硬探测：skill 查 `tools` / `bins` / `env`，tool 查 `tools` / `bins` / `paths` / `env`。`requires.tools` 在两侧都按已发现工具名比对，缺失即 `available=false` + `missing required tools`；定向刷新在算出本轮工具名全集后，对本次重建的 tool descriptor 复核同一项。
 
 exec 与 memory 工具：
 
@@ -213,7 +214,7 @@ exec 与 memory 工具：
 - 不走契约在场判据（skill 没有 callable 面可摘）
 - 对 CEO/frontdoor，skill 的可读入口是头部钉住块的全量名单（`id | name | description`），加上重印点之间新变为可读时落进历史的一次性提示（见本文「Pinned Static Declarations」）；`load_skill_context(skill_id="...")` 按 id 直读正文，避免模型把它们误读成需要先加载才可用的候选工具
 - repair-required skill 有更强的门控：它仍可作为“待修复资源”出现在 agent-facing `repair_required_skills` 中，但修复完成前 `load_skill_context(...)` / `load_skill_context_v2(...)` 直接返回 repair-required 错误与修复指引（`skill_repair_required` payload 携带 `warnings` / `errors` / `next_actions`），不返回正文；遇到“模型知道这个 skill 存在却无法 load”，先检查 skill 资源本身的 `available` / warnings / errors，而不是先怀疑 selector 没选中
-- 节点运行中的 skill 自愈闭环依赖上面两条语义配合：候选快照在节点派发时定格（persisted frame），中途新装 skill 靠加载门禁的实时治理可见性回退获得真实状态——可加载则返回正文，`available=false`（如 `missing required bins`：`requires.bins` 声明了 `shutil.which` 解析不到的命令）则返回修复指引；节点用 `filesystem_*` 修正 manifest 声明或用 `exec` 补依赖（filesystem mutation 自动触发 `refresh_resource_paths` 重探可用性），再次 load 复核。改 `requires` 的判据只有两条——该项在本机实测已有，或该 skill 正文并不使用该项：可用性正是由这些项逐项算出（`shutil.which` / 环境变量 / 已注册工具），删掉一项等于让 `load_skill_context` 直接返回正文，所以"再 load 一次看有没有正文"这道复核对删声明无效；反删规则同时写在 `ceo_frontdoor.md`「待修复资源」与执行/验收节点共享修复块两处，缺一处就留一条能把真实缺口报成已修复的路径。修复规则文本由 `main/prompts/shared_repair_required.md`（执行/验收节点提示词共享块）、`skills/repair-tool/SKILL.md`（工具待修复信号与处置顺序）、`tools/skill-installer/toolskills/SKILL.md`（安装后三态复核）与 `skills/skill-creator/references/g3ku-resource-spec.md`（创建后三态复核 + `requires` 探测声明规则）承载
+- 节点运行中的 skill 自愈闭环依赖上面两条语义配合：候选快照在节点派发时定格（persisted frame），中途新装 skill 靠加载门禁的实时治理可见性回退获得真实状态——可加载则返回正文，`available=false`（如 `missing required bins`：`requires.bins` 声明了 `shutil.which` 解析不到的命令）则返回修复指引；节点用 `filesystem_*` 修正 manifest 声明或用 `exec` 补依赖（filesystem mutation 自动触发 `refresh_resource_paths` 重探可用性），再次 load 复核。改 `requires` 的判据只有两条——该项在本机实测已有，或该 skill 正文并不使用该项：可用性正是由这些项逐项算出（`shutil.which` / 环境变量 / 已注册工具），删掉一项等于让 `load_skill_context` 直接返回正文，所以"再 load 一次看有没有正文"这道复核对删声明无效；反删规则同时写在 `ceo_frontdoor.md`「待修复资源」与执行/验收节点共享修复块两处，缺一处就留一条能把真实缺口报成已修复的路径。修复规则文本由 `main/prompts/shared_repair_required.md`（执行/验收节点提示词共享块）、`skills/repair-tool/SKILL.md`（工具待修复信号与处置顺序）、`tools/skill-installer/toolskills/SKILL.md`（安装后四态复核）与 `skills/skill-creator/references/g3ku-resource-spec.md`（创建后四态复核 + `requires` 探测声明规则）承载
 
 ### 3.4 契约在场与可调用面
 
@@ -483,10 +484,11 @@ skill / tool 目录可能被编辑器、git 或外部进程直接改动，注册
 - 指纹覆盖目录树里每个文件的相对路径、`mtime_ns` 与字节数，`__pycache__` / `node_modules` / `.git` / `.venv` / `venv` / `env` / `.pytest_cache` / `.ruff_cache` 这些目录整体不参与；软链接目录不进入递归。也就是说"改了正文一个字节"能被发现，而"原地替换成一个同大小且 mtime 未变的文件"不能。
 - 打不开的子树（权限拒绝、路径过长、被占用）不进指纹：扫描对 `os.scandir` 失败只跳过该目录、不抛错——抛错会哑掉整条自动重载车道。代价是那棵子树里的正文改动判不出来，所以失败集合本身必须可见：集合变化时发一条 WARNING 点名根目录与最多 5 个失败路径（并给出总数），全部可读回来时补一条收口，同一失败集合不随每条 `exec` 命令刷屏。排查"改了 skill/tool 正文而运行时毫无反应"时，先在日志里搜 `resource fingerprint:`，有告警就说明差异集里缺一块。
 - 这条扫描跑在 worker 的事件循环线程上，且是每条 `exec` 命令都要付的成本，所以它的单价必须按实盘规模看：skills 60 个目录 1659 个文件 + tools 33 个目录 93 个文件，一次全量扫描实测 45–50 ms。指纹吃 `os.scandir` 随目录枚举一并返回的目录项元数据；改成"先收集路径再逐个 `stat()`"实测回到 132–150 ms。
-- 首次调用只落基线：没有上一份快照就没有可比对象，因此第一拍永远不报刷新。
+- 没有上一份快照时必须先 reconcile，不能只把当前磁盘状态记成基线：`refresh_changed_resources` 在基线为空时执行一次全量 `reload_now`，`maybe_refresh_external_resource_changes` 在没有基线时走同一条路径。只记不比会把"基线之前落盘的改动"永久吸进基线，之后再无 diff。bootstrap 在 `resource_registry.refresh()` + 角色策略同步完成后立即记一次基线，正常路径因此不会在首个回合多付一次全量重载。
 - 三个比对点共用服务侧那一份基线（`_resource_tree_state_cache`）：CEO 前门的节流拍、`exec` 工具每条命令结束（`trigger='tool:exec'`）、管理端显式路径。命令侧不携带自己的快照，所以一条命令只付一次扫描；又因为基线就是"上一次扫描时的树"，命令执行前后之外发生的外部编辑同样会在下一个比对点被抓到，不存在被跳过的变更。
 - 指纹变化时才动作：`refresh_changed_resources(trigger='external-resource-generation-check')` 重建受影响资源，随后清空 `_node_context_selection_cache`（节点上下文选择里缓存着旧的候选与在场结论）。差异集里的 skill / tool 名字只随返回值一起报数：`_sync_catalog_targets` 不回写语义目录，`catalog_synced` 恒为 `False`，所以那个字段的意思是"这里没做同步"，不是"按差异同步过了"。
 - 管理端保存或编辑资源走的是显式路径（`refresh_resource_paths` / `refresh_paths`，trigger 为 `path-change`），它同步刷新注册表并当场重记基线；各条路径共用同一份基线，所以编辑后的一拍不会因为节流而漏掉变化。
+- 管理端 `POST /api/resources/reload` 只在本进程执行 `reload_resources`；在 web 模式下它随后向 worker 下发 `reload_resources` 命令（`task_id=None`，与 `refresh_runtime_config` 同一条 worker 命令车道），响应里带 `worker_reload: {requested, command_id, status}`。worker 执行该命令时调用自身的 `reload_resources`。命令只保证两侧都重载，不改变 web 与 worker 各持一份 generation 与基线的事实。
 - 装载失败留下的 `RepairRequiredTool` 实例不跨刷新存活：下一次刷新（`reload_now` 或定向 `refresh_paths`）按目录重建描述符并重跑 import，源文件修好即放行。唯一把坏实例带过刷新的分支是**这一次刷新时该工具仍有在飞引用且指纹已变**——`_locks.is_busy` 那一支把旧 descriptor 与旧实例原样搬进新快照并 `mark_pending_delete`，于是拒因仍指向第一次失败那条文本，直到引用释放后的那一拍才换掉。这条分支留一行读数：`repair_required tool carried across reload: <name> refs=N pending_delete=True reason='…'`。排查"文件已改好还被 repair_required 拒"先搜这行；没有这行说明卡点不在资源装载道，而在准入名单，按 `tool-hydration-and-callable-chain.md`「契约不在场时发生什么」那组成员位读数判。
 - web 与 worker 各持一份 `ResourceManager`，各自从 1 开始数 generation，并把状态写进同一份 `resources.state.json` —— 文件里的 generation 与 `available` 只描述"最后一个写它的进程"。判"某一次拒绝时那个进程看到什么"要按进程读日志（`console.log` 是 web，`managed-worker.log` 是 worker，两边的 `resources reloaded via <trigger>` 节拍彼此独立）。
 - 维护要点：新增会进入上下文选择的缓存时，必须在这条差异路径上一起失效，否则外部改动的 skill/tool 正文会长期以旧指纹参与候选与描述投影。

@@ -1763,6 +1763,16 @@ class MainRuntimeService:
                     'worker_pid': int(os.getpid()),
                 }
                 success = True
+            elif command_type == 'reload_resources':
+                reload_result = self.reload_resources(
+                    session_id=str(payload.get('session_id') or 'web:shared').strip() or 'web:shared',
+                )
+                result_payload = {
+                    'worker_id': str(self.worker_id or 'worker'),
+                    'worker_pid': int(os.getpid()),
+                    **dict(reload_result or {}),
+                }
+                success = bool(dict(reload_result or {}).get('ok', True))
             else:
                 error_text = f'unsupported_command:{command_type}'
         except Exception as exc:
@@ -8331,6 +8341,10 @@ class MainRuntimeService:
         self._resource_tree_state_cache = dict(state or self._resource_tree_state_snapshot() or {})
         self._resource_tree_state_checked_at = float(time.perf_counter() if checked_at is None else checked_at)
 
+    def record_resource_tree_state_baseline(self) -> None:
+        """把当前磁盘状态记为比对基线；bootstrap 重载完成后调用，保证首个拍点有可比对象。"""
+        self._record_resource_tree_state()
+
     async def _sync_catalog_targets(
         self,
         *,
@@ -8372,9 +8386,17 @@ class MainRuntimeService:
         before_state = dict(getattr(self, '_resource_tree_state_cache', None) or {})
         last_checked_at = float(getattr(self, '_resource_tree_state_checked_at', 0.0) or 0.0)
         if not before_state:
-            self._record_resource_tree_state(checked_at=now)
+            # 没有基线时不能只把当前磁盘状态记成基线：基线之前落盘的改动会被永久
+            # 吸进基线，之后再无 diff。这里先做一次全量重载，把磁盘与快照对齐。
+            refresh_result = self.refresh_changed_resources(
+                {},
+                trigger='external-resource-generation-check',
+                session_id=session_id,
+            )
+            self._node_context_selection_cache = {}
             return {
-                'refreshed': False,
+                'refreshed': True,
+                'resources': refresh_result,
                 'catalog_synced': False,
                 'skill_ids': [],
                 'tool_ids': [],
@@ -10639,6 +10661,10 @@ class MainRuntimeService:
             after_state = self._resource_tree_state_snapshot()
             if baseline:
                 manager.refresh_changed_tree_state(baseline, trigger=trigger, after_state=after_state)
+            elif hasattr(manager, 'reload_now'):
+                # 空基线只记不比会把基线之前落盘的改动永久吸进基线；全量重载一次，
+                # 让“首次拍点”变成 reconcile，而不是盲记。
+                manager.reload_now(trigger=trigger)
             if registry is not None and hasattr(registry, 'refresh_from_current_resources'):
                 skills, tools = registry.refresh_from_current_resources()
                 if policy_engine is not None and hasattr(policy_engine, 'sync_default_role_policies'):
@@ -12514,6 +12540,27 @@ class MainRuntimeService:
             result['catalog'] = sync_result.get('catalog', {'created': 0, 'updated': 0, 'removed': 0})
         else:
             result['catalog'] = {'created': 0, 'updated': 0, 'removed': 0}
+        if str(getattr(self, 'execution_mode', '') or '').strip() == 'web':
+            try:
+                command_id = self._enqueue_task_command(
+                    command_type='reload_resources',
+                    task_id=None,
+                    session_id='web:shared',
+                    payload={'reason': 'admin_reload', 'requested_session_id': session_id},
+                )
+                result['worker_reload'] = {
+                    'requested': True,
+                    'command_id': command_id,
+                    'status': 'pending',
+                }
+            except Exception as exc:
+                result['worker_reload'] = {
+                    'requested': False,
+                    'status': 'failed',
+                    'error': str(exc),
+                }
+        else:
+            result['worker_reload'] = {'requested': False, 'status': 'local'}
         return result
 
     async def get_context_traces(self, *, trace_kind: str, limit: int = 20) -> dict[str, Any]:

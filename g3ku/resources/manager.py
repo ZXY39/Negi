@@ -422,6 +422,9 @@ class ResourceManager:
             for descriptor in discovered_tools_by_root.values()
             if descriptor is not None
         )
+        for descriptor in discovered_tools_by_root.values():
+            if descriptor is not None:
+                self._registry.apply_tool_requires_tools(descriptor, tool_names=final_tool_names)
 
         if changed_tool_names:
             for descriptor in old.skills.values():

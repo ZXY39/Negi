@@ -1070,6 +1070,8 @@ The frontend responsibilities are:
 
 Save payload is `PUT /api/resources/tools/{tool_id}` with `{"enabled": bool, "allowed_roles": [...], "execution_mode": "governed|full_access"?}`; `execution_mode` belongs to `exec` alone.
 
+`POST /api/resources/reload` runs `reload_resources` in the receiving process. In web mode it then enqueues a `reload_resources` worker command (`task_id=None`, the same worker-command lane as `refresh_runtime_config`) and returns `worker_reload: {requested, command_id, status}`; the worker calls its own `reload_resources` when it claims the command. `status: pending` means the worker has not applied it yet, not that the reload failed. Web and worker still keep independent generations and baselines — the command makes both sides reload, it does not merge their state.
+
 The Skill and Tool detail drawers share one save rule: edits persist only when the operator clicks the `保存` button beside `关闭`, and that click is what issues the policy/file write. There is no autosave or debounce, and closing the drawer discards uncommitted edits. New maintainers often misread the draft hint (`有未保存的修改`) as an autosave indicator — it only marks dirty state that a `保存` click must commit.
 
 If an operator reports "save succeeded but reopen restored the roles", first inspect:

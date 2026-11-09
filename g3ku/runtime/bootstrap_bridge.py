@@ -56,6 +56,9 @@ class RuntimeBootstrapBridge:
                 try:
                     service.resource_registry.refresh()
                     service.policy_engine.sync_default_role_policies()
+                    record_baseline = getattr(service, 'record_resource_tree_state_baseline', None)
+                    if callable(record_baseline):
+                        record_baseline()
                 except Exception as refresh_exc:
                     logger.debug('main-runtime resource refresh after bind skipped: {}', refresh_exc)
             logger.info(

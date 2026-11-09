@@ -134,12 +134,12 @@ timeout_policy:            # 可选：统一 timeout 合同行为声明（缺省
 `requires` 不是描述性文字，而是可用性硬探测；资源刷新时运行时逐项校验。两类资源的探测项不同：
 
 - **skill**：`tools` / `bins` / `env`
-- **tool**：`bins` / `paths` / `env`。`requires.tools` 会被解析，但当前不参与 tool 的可用性判定，不要依赖它表达工具间依赖
+- **tool**：`tools` / `bins` / `paths` / `env`。`requires.tools` 按已发现工具名比对，缺失即 `available=false` + `missing required tools`
 
 - `bins`：用 `shutil.which` 按**目标机实际可解析的命令名**探测；任一解析不到 → 资源 `available=false` + `missing required bins` 警告，进入待修复车道
 - `paths`（tool）：工作区相对路径或绝对路径逐个检查存在性；任一不存在 → `available=false` + `missing required paths`
 - `env`：探测 `os.environ`；任一缺失 → `available=false`
-- `tools`（skill）：与已注册工具名比对；任一缺失 → `available=false`
+- `tools`（skill 与 tool）：与已发现工具名比对；任一缺失 → `available=false`
 
 声明规则：
 

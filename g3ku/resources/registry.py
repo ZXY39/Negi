@@ -113,6 +113,7 @@ class ResourceRegistry:
         items: dict[str, ToolResourceDescriptor] = {}
         if not self.tools_dir.exists():
             return items
+        pending: list[ToolResourceDescriptor] = []
         for tool_dir in sorted(path for path in self.tools_dir.iterdir() if path.is_dir()):
             manifest_path = tool_dir / self.manifest_name
             if not manifest_path.exists():
@@ -122,8 +123,11 @@ class ResourceRegistry:
                 descriptor.available = False
                 descriptor.errors.append(f"duplicate tool name: {descriptor.name}")
                 continue
-            self._apply_tool_runtime_requirements(descriptor)
+            pending.append(descriptor)
             items[descriptor.name] = descriptor
+        tool_names = set(items.keys())
+        for descriptor in pending:
+            self._apply_tool_runtime_requirements(descriptor, tool_names=tool_names)
         return items
 
     def _build_skill(self, root: Path, manifest_path: Path) -> SkillResourceDescriptor:
@@ -310,7 +314,14 @@ class ResourceRegistry:
                 "tool_result_delivery_contract=preview_with_ref requires non-empty tool_result_output_ref_paths"
             )
 
-    def _apply_tool_runtime_requirements(self, descriptor: ToolResourceDescriptor) -> None:
+    def _apply_tool_runtime_requirements(
+        self,
+        descriptor: ToolResourceDescriptor,
+        *,
+        tool_names: set[str] | None = None,
+    ) -> None:
+        if tool_names is not None:
+            self.apply_tool_requires_tools(descriptor, tool_names=tool_names)
         if any(shutil.which(name) is None for name in descriptor.requires_bins):
             descriptor.available = False
             descriptor.warnings.append("missing required bins")
@@ -321,6 +332,13 @@ class ResourceRegistry:
         if any(not os.environ.get(name) for name in descriptor.requires_env):
             descriptor.available = False
             descriptor.warnings.append("missing required env")
+
+    @staticmethod
+    def apply_tool_requires_tools(descriptor: ToolResourceDescriptor, *, tool_names: set[str]) -> None:
+        missing_tools = [name for name in descriptor.requires_tools if name not in tool_names]
+        if missing_tools:
+            descriptor.available = False
+            descriptor.warnings.append("missing required tools: " + ", ".join(missing_tools))
 
     def _missing_required_paths(self, paths: list[str]) -> list[str]:
         missing: list[str] = []
