@@ -3000,6 +3000,19 @@ class RuntimeAgentSession:
         # delta 到达再整体覆盖，避免工具执行期间气泡空白。
         self._assistant_segment_open = False
 
+    async def _discard_assistant_text_segment(self) -> None:
+        """丢弃已流出的半截正文（断流重试前调用）：清空可见文本并关闭段边界。
+
+        与 `_begin_assistant_text_segment` 不同：那个只等下一段首帧覆盖，这里要求旧文本
+        立刻从驻留状态和界面上消失。seq 不回退——前端按 seq 排帧。
+        """
+        self._cancel_assistant_stream_flush_task()
+        self._assistant_stream_pending_text = ""
+        self._assistant_stream_last_emitted_text = ""
+        self._assistant_segment_open = False
+        self._state.latest_message = ""
+        await self._emit_state_snapshot()
+
     # --- 思维链实时车道（只服务"这一跳在算什么"的进度显示）-------------------
     # 与正文那条车道刻意不同：正文帧是"整段权威覆盖"，思考帧是 append-only 增量。
     # 按整段口径发思考会把一个回合推到 MB 级（实测一跳 8.6-9.5K 字符 × ~1100 帧），

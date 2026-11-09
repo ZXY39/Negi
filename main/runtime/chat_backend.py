@@ -61,6 +61,9 @@ _MODEL_RETRY_STATUS_ERROR_CHAR_LIMIT = 4096
 # 并按新链重启重试，而不是抛错中止回合。此上限只兜底"链反复变化 + 一直不成功"的
 # 病态抖动，正常一次改链只消耗一次。
 _MAX_CHAIN_CHANGE_RESTARTS = 12
+# 断流重试的硬帽：配置里的 retry_count 可以是 9999999（"永不放弃"档），
+# 直接 max(2, retry_count) 会把一次断流变成对坏槽位的无限重发。
+_STREAM_TRUNCATION_RETRY_CAP = 5
 
 
 def _model_retry_status_error_text(value: Any) -> str:
@@ -95,6 +98,7 @@ class ChatBackend(Protocol):
         window_shortfall_compressor: Any = None,
         on_window_shortfall_compressed: Any = None,
         initial_tried_model_refs: list[str] | None = None,
+        on_visible_text_reset: Any = None,
     ) -> LLMResponse: ...
 
 
@@ -1193,6 +1197,7 @@ class ConfigChatBackend:
         window_shortfall_compressor: Any = None,
         on_window_shortfall_compressed: Any = None,
         initial_tried_model_refs: list[str] | None = None,
+        on_visible_text_reset: Any = None,
     ) -> LLMResponse:
         refs = [str(item or '').strip() for item in list(model_refs or []) if str(item or '').strip()]
         if not refs:
@@ -1711,6 +1716,7 @@ class ConfigChatBackend:
                 restart_with_refreshed_chain = False
                 while True:  # 本模型轮循环：一轮 = 完整轮过该模型所有 key
                     round_retryable_failed = False
+                    last_failure_was_stream_truncation = False
                     # 单轮 = 每个 key 各试一次（retry_count=0 → 单趟 key 遍历）；
                     # 可重试错误的重跑由外层轮预算驱动，不走 slot 轮次。
                     for slot in iter_api_key_retry_slots(api_key_count=getattr(base_target, "api_key_count", 0), retry_count=0, key_indexes=api_key_indexes):
@@ -1861,6 +1867,7 @@ class ConfigChatBackend:
                                 raise  # 内部运行时错误 / API key 配置错误直接上抛
                             if is_retryable_model_error(exc, retry_on=target.retry_on):
                                 round_retryable_failed = True
+                                last_failure_was_stream_truncation = False
                                 continue  # 轮内继续轮过该模型下一个 key
                             continue  # 非可重试：每个 key 各试一次，轮完切下一模型
                         finally:
@@ -1914,6 +1921,34 @@ class ConfigChatBackend:
                                 # 成功终态：清掉该成员的连续不可用计数，但保留 RPM 观测。
                                 node_turn_controller.record_route_outcome(node_turn_lease)
                             return response  # 成功终态（或内部错误响应按原样返回）
+                        if str(getattr(response, "error_kind", "") or "").strip() == "StreamIncomplete":
+                            # 断流不续写：已经流出去的正文按"不留中途文本"丢弃，清空可见
+                            # 气泡后同模型重发；预算 = max(2, retry_count) 并加硬帽，
+                            # 跑满再降级到下一颗。可见文本只有真接到 on_text_delta 才算，
+                            # 节点车道的 provider 标记不算（没人看见过它）。
+                            model_last_response = response
+                            model_last_error = None
+                            model_last_failure_reason = str(
+                                response.error_text or response.content or response.finish_reason or ""
+                            )
+                            if node_turn_controller is not None:
+                                node_turn_controller.record_route_outcome(
+                                    node_turn_lease,
+                                    status_code=_model_error_status_code(response),
+                                    error_text=model_last_failure_reason,
+                                )
+                            if callable(on_visible_text_reset) and callable(on_text_delta) and attempt_visible_text_streamed:
+                                try:
+                                    reset_result = on_visible_text_reset()
+                                    if inspect.isawaitable(reset_result):
+                                        await reset_result
+                                except Exception as reset_exc:
+                                    logger.warning(
+                                        "Visible text reset failed before stream retry: {}", reset_exc
+                                    )
+                            round_retryable_failed = True
+                            last_failure_was_stream_truncation = True
+                            continue  # 轮内继续轮过该模型下一个 key
                         if callable(on_text_delta) and response.visible_text_streamed:
                             # 只有"文字真的外发给了可见 sink"（CEO/渠道的流式投递）才禁止透明
                             # 换槽：重发会把同一篇半截回答再投一遍。节点车道不接 on_text_delta，
@@ -1934,6 +1969,7 @@ class ConfigChatBackend:
                             break
                         if retryable_response:
                             round_retryable_failed = True
+                            last_failure_was_stream_truncation = False
                         continue  # 轮内继续轮过该模型下一个 key
                     if advance_to_next_model:
                         break
@@ -1965,13 +2001,20 @@ class ConfigChatBackend:
                             tried_model_refs.clear()
                             restart_with_refreshed_chain = True
                             break
-                    if round_retryable_failed and rounds_used < budget_rounds:
+                    effective_round_budget = (
+                        min(max(2, budget_rounds), _STREAM_TRUNCATION_RETRY_CAP)
+                        if last_failure_was_stream_truncation
+                        else budget_rounds
+                    )
+                    if round_retryable_failed and rounds_used < effective_round_budget:
                         delay_seconds = model_retry_backoff_seconds(rounds_used)
                         logger.warning(
-                            "Retryable model failure for {} (round {}/{}); retrying in {:.1f}s: {}",
+                            "Stream truncated for {} (round {}/{}); discarded partial reply, retrying in {:.1f}s: {}"
+                            if last_failure_was_stream_truncation
+                            else "Retryable model failure for {} (round {}/{}); retrying in {:.1f}s: {}",
                             ref,
                             rounds_used,
-                            budget_rounds,
+                            effective_round_budget,
                             delay_seconds,
                             model_last_failure_reason,
                         )

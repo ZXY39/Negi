@@ -373,3 +373,32 @@ async def test_stream_abort_keeps_structured_kind_through_graph_call_model(
     assert "响应流未正常终止" in detail
     assert "半截正文" not in detail
     assert "closed before finish_reason" in raised.value.raw_message
+
+
+@pytest.mark.asyncio
+async def test_graph_call_model_wires_visible_text_discard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """断流重试要能把"丢弃半截正文"的回调送到发送层，否则清不掉可见气泡。"""
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    ctx = _make_runner_state(monkeypatch, runner)
+    discarded: list[int] = []
+
+    async def _discard() -> None:
+        discarded.append(1)
+
+    ctx["runtime"].context.session._discard_assistant_text_segment = _discard
+    seen: dict = {}
+
+    async def _call_model_with_tools(**kwargs):
+        seen.update(kwargs)
+        return {"content": "完整正文"}
+
+    monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
+
+    await runner._graph_call_model(ctx["state"], runtime=ctx["runtime"])
+
+    reset = seen.get("on_visible_text_reset")
+    assert callable(reset)
+    await reset()
+    assert discarded == [1]

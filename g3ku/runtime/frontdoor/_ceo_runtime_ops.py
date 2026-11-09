@@ -8383,6 +8383,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         window_shortfall_compressor: Any = None,
         on_window_shortfall_compressed: Any = None,
         initial_tried_model_refs: list[str] | None = None,
+        on_visible_text_reset: Any = None,
     ) -> dict[str, Any]:
         # 压缩 helper 自己也会走这里：递归守卫必须在唯一入口生效，否则压缩请求会被
         # send-layer 再压一次（无限递归）。前门压缩闭包在调用 helper 前置位。
@@ -8409,6 +8410,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             ),
             initial_tried_model_refs=(
                 None if compression_helper_in_progress else initial_tried_model_refs
+            ),
+            on_visible_text_reset=(
+                None if compression_helper_in_progress else on_visible_text_reset
             ),
         )
         return self._model_response_payload_dict(response)
@@ -9238,6 +9242,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         assistant_reasoning_segment_handler = None
         assistant_reasoning_segment_close_handler = None
         model_retry_status_handler = None
+        visible_text_reset_handler = None
         if runtime_session is not None:
             callback = getattr(runtime_session, "_handle_assistant_text_delta", None)
             if callable(callback):
@@ -9254,6 +9259,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             begin_segment = getattr(runtime_session, "_begin_assistant_text_segment", None)
             if callable(begin_segment):
                 begin_segment()
+            discard_segment = getattr(runtime_session, "_discard_assistant_text_segment", None)
+            if callable(discard_segment):
+                visible_text_reset_handler = discard_segment
             async def _handle_frontdoor_model_retry_status(status: dict[str, Any]) -> None:
                 setattr(
                     runtime_session,
@@ -9774,6 +9782,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         initial_tried_model_refs=(
                             list(preflight_skip_model_refs) or None
                         ),
+                        on_visible_text_reset=visible_text_reset_handler,
                     )
                     # 这一跳的模型流到这里就结束了，后面是工具执行。思考段必须在这儿收口，
                     # 否则表要一直走到下一次 attempt 起点（或回合收尾）才停，工具跑多久

@@ -90,11 +90,12 @@ class _DirectProviderChatBackend:
         on_reasoning_delta: Any = None,
         on_reasoning_segment: Any = None,
         on_model_retry_status: Any = None,
+        on_visible_text_reset: Any = None,
     ):
         # 直连 provider 这条道本来就不投正文增量（`on_text_delta` 一直在此吞掉），
         # 所以思考增量同样吞掉——前端在这条道上只剩计时，不会出现半条车道有思考行。
         # 段号仍要起一次，保持与 chat_backend 的调用形状一致。
-        _ = on_text_delta, on_reasoning_delta, on_model_retry_status
+        _ = on_text_delta, on_reasoning_delta, on_model_retry_status, on_visible_text_reset
         if callable(on_reasoning_segment):
             segment_result = on_reasoning_segment()
             if inspect.isawaitable(segment_result):
