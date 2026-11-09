@@ -21,7 +21,6 @@ tools/
     resource.yaml
     main/
       tool.py
-      <upstream_project>/   # 可选
     toolskills/
       SKILL.md
       references/           # 可选

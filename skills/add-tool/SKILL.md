@@ -40,9 +40,9 @@ externaltools/          # 仅当这个工具驱动一份第三方安装时
 约束：
 
 - `tool_id` 使用 `snake_case`。
-- `tools/<tool_id>/` 下只允许 `resource.yaml`、`main/`、`toolskills/`；第三方本体出现在这里会被发现阶段拒绝。
-- 第三方本体安装在 `<workspace>/externaltools/<tool_id>/`，永远不落进 `tools/`（`exec` 侧同一判据，写错会被直接拒）。
-- 下载包、解压中转目录、安装日志、一次性脚本放在 `<workspace>/temp/<tool_id>/`。
+- `tools/<tool_id>/` 的第一层只放 `resource.yaml`、`main/`、`toolskills/`。多出来的根级条目在发现阶段只会得到 `unexpected root entries` 警告，工具仍会注册——这是约定，不是拒绝理由。
+- 第三方本体安装在 `<workspace>/externaltools/<tool_id>/`，永远不落进 `tools/`。`filesystem_*` 的注册面路径策略、`exec` 的下载/安装命令守卫会拒绝一部分指向 `tools/` 的目标，但普通复制命令不保证被拦，所以这条要靠约定守住。
+- 下载包、解压中转目录、安装日志、一次性脚本放在 `{temp}/<tool_id>/`（运行时临时根；不要用项目根的 `temp/`）。
 - `install_dir` 不是清单字段。发现阶段仍会读取它，唯一用途是让一条陈旧记录被删除时连带收走它指向的安装目录；新写的清单不要带。
 
 ## `resource.yaml` 关键字段
@@ -100,7 +100,7 @@ externaltools/          # 仅当这个工具驱动一份第三方安装时
 3. 在 `main/tool.py` 中实现 handler。
 4. 若这个工具驱动一份第三方安装：
    - 先取上游下载地址与更新入口，写进 `source.url` / `source.ref` / `current_version`。
-   - 下载、解压、校验的中间产物放 `<workspace>/temp/<tool_id>/`，本体安装到 `<workspace>/externaltools/<tool_id>/`。
+   - 下载、解压、校验的中间产物放 `{temp}/<tool_id>/`，本体安装到 `<workspace>/externaltools/<tool_id>/`。
    - 在 `toolskills/SKILL.md` 里写清安装、更新，以及如何从安装目录找到真实可执行入口。
 5. 在 `toolskills/SKILL.md` 中写清如何使用；纯仓库内实现要写明它无需额外安装、更新方式是修改 `main/`。
 
@@ -152,7 +152,7 @@ externaltools/          # 仅当这个工具驱动一份第三方安装时
 必须说明：
 
 - `tools/<tool_id>/` 是注册与 handler，`externaltools/<tool_id>/` 是第三方本体所在
-- 临时下载和解压中转位于 `temp/<tool_id>/`
+- 临时下载和解压中转位于 `{temp}/<tool_id>/`
 - 安装命令
 - 更新命令
 - 如何从 `externaltools/<tool_id>/` 找到真实可执行入口
@@ -174,17 +174,42 @@ externaltools/          # 仅当这个工具驱动一份第三方安装时
 
 ## 治理
 
-新工具默认显式填写 `governance`。
+新工具默认显式填写 `governance`，并把 `allowed_roles` 写完整。工具是唯一的治理单位：一个目录 = 一条治理记录 = 一个 `tool_id`，没有 family / actions 分组层，也不要写 action id。
 
-推荐约定：
+```yaml
+governance:
+  display_name: Example Tool
+  description: 一句话说明它做什么。
+  risk_level: medium        # low | medium | high
+  destructive: false
+  allowed_roles:            # 精确白名单；空列表或缺失 = 对该工具一律拒绝
+    - ceo
+    - execution
+```
 
-- 默认 action id 用 `run`
+两条硬规则：
+
+- 显式 `governance` 但 `allowed_roles` 为空或缺失 → 任何人读不到、调不动；
+- 既不写 `governance`、也不在默认治理表（`main/governance/action_mapper.py` 的 `DEFAULT_TOOL_GOVERNANCE`，按工具名一条）里 → 不生成治理记录，工具不进 Tool 管理面与 exposure 名单。
+
+新建工具默认给 `ceo` + `execution`；只面向 CEO 的能力按需收窄。
+
+## 安装后如何让它生效
+
+装完不等于运行中的进程已经装载。当前没有目录 watcher，热更新靠资源拍点：
+
+- 用 `filesystem_write/edit/copy/move/delete` 写注册文件：会定向刷新，目标工具目录当场重载；
+- 用 `exec`（git clone / pip / 解压 / 复制）安装：只有指纹比对道，且进程首次比对只记基线。目录如果在首次比对前落盘，这次变化会被吸进基线，之后不会再触发重载；
+- web 与 worker 各持一份资源管理器：前门（web）刷新不会同步到任务执行进程（worker），反之亦然；`POST /api/resources/reload` 只刷新接收请求的那一侧；
+- 新增工具不会立刻进钉住的 `tools[]`：要先 `load_tool_context` 把契约送进上下文，下一跳才可调用。
+
+验收时要确认目标进程真的装载了它（`available` / `callable` / `repair_required`），不是只看 web 的 Tool 管理页。
 
 ## 交付前检查
 
 - 资源能被发现，handler 能被装载成工具对象
 - `toolskills/SKILL.md` 已同时覆盖“使用 + 安装 + 更新”
-- 驱动第三方安装的工具：本体在 `externaltools/<tool_id>/`，下载 / 缓存 / 解压中转目录在 `temp/<tool_id>/`
+- 驱动第三方安装的工具：本体在 `externaltools/<tool_id>/`，下载 / 缓存 / 解压中转目录在 `{temp}/<tool_id>/`
 - `load_tool_context(tool_id="<tool_id>")` 能取到参数契约与 toolskill 正文
 - 工具执行路径不会阻塞事件循环；长耗时步骤已异步化或移到后台线程 / 子进程
 - 网络、子进程和等待逻辑已设置明确超时，不会把整个项目卡住

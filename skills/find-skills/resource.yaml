@@ -1,7 +1,7 @@
 schema_version: 1
 kind: skill
 name: "find-skills"
-description: "帮助用户发现并安装现成 agent skill（如“有没有能做 X 的 skill”）；需要新建或改写 skill 时转 `skill-creator`。"
+description: "帮助用户发现现成 agent skill，并通过 `skill-installer` 安装到工作区 `skills/`；需要新建或改写 skill 时转 `skill-creator`。"
 trigger:
   keywords:
     - "find-skills"

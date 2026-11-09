@@ -1,6 +1,6 @@
 ---
 name: find-skills
-description: Helps users discover and install agent skills when they ask questions like "how do I do X", "find a skill for X", "is there a skill that can...", or express interest in extending capabilities. This skill should be used when the user is looking for functionality that might exist as an installable skill.
+description: Helps users discover installable agent skills from the open ecosystem and install them into the Negi workspace through the skill-installer tool.
 ---
 
 # Find Skills
@@ -18,18 +18,14 @@ Use this skill when the user:
 - Wants to search for tools, templates, or workflows
 - Mentions they wish they had help with a specific domain (design, testing, deployment, etc.)
 
-## What is the Skills CLI?
+## Discovery vs Installation
 
-The Skills CLI (`npx skills`) is the package manager for the open agent skills ecosystem. Skills are modular packages that extend agent capabilities with specialized knowledge, workflows, and tools.
+In Negi these are two separate steps:
 
-**Key commands:**
+- **Discovery**: look for candidate skills on skills.sh, GitHub, or the open web.
+- **Installation**: a GitHub skill is installed by the `skill-installer` tool. It copies the repo path into `<workspace>/skills/<skill_id>/` and generates a `resource.yaml` when the upstream skill has none.
 
-- `npx skills find [query]` - Search for skills interactively or by keyword
-- `npx skills add <package>` - Install a skill from GitHub or other sources
-- `npx skills check` - Check for skill updates
-- `npx skills update` - Update all installed skills
-
-**Browse skills at:** https://skills.sh/
+Do not use `npx skills add` (especially with `-g`). User-level/global installs live outside `<workspace>/skills/`, and Negi only discovers skills under the workspace skills directory — each installed skill also needs a `resource.yaml`. A package that only exists on a non-GitHub registry should be treated as upstream material and routed to `skill-creator` for adaptation, not installed as-is.
 
 ## How to Help Users Find Skills
 
@@ -43,7 +39,7 @@ When a user asks for help with something, identify:
 
 ### Step 2: Check the Leaderboard First
 
-Before running a CLI search, check the [skills.sh leaderboard](https://skills.sh/) to see if a well-known skill already exists for the domain. The leaderboard ranks skills by total installs, surfacing the most popular and battle-tested options.
+Before searching further, check the [skills.sh leaderboard](https://skills.sh/) to see if a well-known skill already exists for the domain. The leaderboard ranks skills by total installs, surfacing the most popular and battle-tested options.
 
 For example, top skills for web development include:
 - `vercel-labs/agent-skills` — React, Next.js, web design (100K+ installs each)
@@ -51,17 +47,18 @@ For example, top skills for web development include:
 
 ### Step 3: Search for Skills
 
-If the leaderboard doesn't cover the user's need, run the find command:
+Use web search or `web_fetch` to search skills.sh and GitHub. Good queries:
 
-```bash
-npx skills find [query]
-```
+- `"agent skill" <task> site:skills.sh`
+- `"SKILL.md" <task> site:github.com`
 
 For example:
 
-- User asks "how do I make my React app faster?" → `npx skills find react performance`
-- User asks "can you help me with PR reviews?" → `npx skills find pr review`
-- User asks "I need to create a changelog" → `npx skills find changelog`
+- User asks "how do I make my React app faster?" → search for `react performance skill`
+- User asks "can you help me with PR reviews?" → search for `pr review skill`
+- User asks "I need to create a changelog" → search for `changelog skill`
+
+Once you find a candidate, open the repository and locate the directory that contains `SKILL.md`. That directory path is what `skill-installer` needs.
 
 ### Step 4: Verify Quality Before Recommending
 
@@ -77,8 +74,8 @@ When you find relevant skills, present them to the user with:
 
 1. The skill name and what it does
 2. The install count and source
-3. The install command they can run
-4. A link to learn more at skills.sh
+3. The exact GitHub `owner/repo/path` to install
+4. A link to learn more at skills.sh or GitHub
 
 Example response:
 
@@ -87,21 +84,27 @@ I found a skill that might help! The "react-best-practices" skill provides
 React and Next.js performance optimization guidelines from Vercel Engineering.
 (185K installs)
 
-To install it:
-npx skills add vercel-labs/agent-skills@react-best-practices
-
-Learn more: https://skills.sh/vercel-labs/agent-skills/react-best-practices
+It's at: vercel-labs/agent-skills/skills/react-best-practices
 ```
 
-### Step 6: Offer to Install
+### Step 6: Install Through skill-installer
 
-If the user wants to proceed, you can install the skill for them:
+If the user wants to proceed, call the `skill-installer` tool. Two equivalent shapes:
 
-```bash
-npx skills add <owner/repo@skill> -g -y
-```
+- `url`: `https://github.com/<owner>/<repo>/tree/<ref>/<path/to/skill>`
+- `repo`: `<owner>/<repo>`, `path`: `<path/to/skill>`, optional `ref` (default `main`)
 
-The `-g` flag installs globally (user-level) and `-y` skips confirmation prompts.
+Optional parameters:
+
+- `name`: only used when the upstream skill has no `resource.yaml`; it becomes the local skill id.
+- `dest`: must stay inside the current workspace; defaults to `skills/<basename>`.
+- `method`: `auto | download | git` (default `auto`).
+
+After installation, verify before reporting success:
+
+1. Call `load_skill_context(skill_id="<skill_id>")` and handle the four states: `ok=true` (usable), `skill_repair_required` (fix the manifest/dependencies, then reload), `skill_deleted` (registration failed — check `resource_refresh` / `catalog`), `skill_not_permitted` (RBAC role issue — do not reinstall).
+2. Read the install result's `resource_refresh` and `catalog`. A failed `resource_refresh` means the skill is not registered in the calling process; a failed `catalog` must be reported and retried.
+3. Review the generated `resource.yaml`: `description` ≤160 characters, `trigger.keywords` covers real user phrasings, and `requires.*` reflects what is actually installed.
 
 ## Common Skill Categories
 
@@ -129,7 +132,7 @@ If no relevant skills exist:
 
 1. Acknowledge that no existing skill was found
 2. Offer to help with the task directly using your general capabilities
-3. Suggest the user could create their own skill with `npx skills init`
+3. Suggest creating a local skill with `skill-creator` (not `npx skills init`)
 
 Example:
 
@@ -137,6 +140,5 @@ Example:
 I searched for skills related to "xyz" but didn't find any matches.
 I can still help you with this task directly! Would you like me to proceed?
 
-If this is something you do often, you could create your own skill:
-npx skills init my-xyz-skill
+If this is something you do often, we can create a local skill for it with skill-creator.
 ```

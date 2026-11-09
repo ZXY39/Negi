@@ -95,7 +95,7 @@ skills/
 
 至少做一项：
 
-- 实测 `load_skill_context(skill_id="<skill_id>")`，按 `g3ku-resource-spec.md`「创建后复核与修复（三态）」处置：返回正文才算通过；返回修复指引要先修复再复核；返回「运行时未包含」要先补注册再复核
+- 实测 `load_skill_context(skill_id="<skill_id>")`，按 `g3ku-resource-spec.md`「创建后复核与修复（四态）」处置：返回正文才算通过；返回修复指引要先修复再复核；返回 `skill_deleted` 要先补注册、返回 `skill_not_permitted` 要先改角色，两者都不是"稍后自然可用"
 - 资源发现验证
 - 针对性最小运行验证
 - 如果同时生成了开放标准 skill，再运行 `scripts/validate.py`、`scripts/security_scan.py`、`scripts/staleness_check.py` 或 `scripts/export_utils.py`

@@ -16,7 +16,9 @@
 | 一个 handler 全分发（参数 `tool` + `arguments` 字典） | 只占一个名字，但把风险挪到**嵌套 object 参数**——模型会照显示文本把整个 `note:` 块或引号一起传进来，这类形状在本仓已有前科 |
 | 高频的 3–5 个各包成扁平工具，冷门走 `exec` | 名字少、参数扁平、冷门不占预算 |
 
-**默认选第三种。** 判据：一回合内会被点名 2 次以上的远端 tool 才值得占一个 negi 名字；其余在 `toolskills/SKILL.md` 里留一条 `exec` + 安装目录驱动脚本的例子即可。`tools/` 只准 `resource.yaml` / `main/` / `toolskills/`，安装物写进 `tools/` 会被直接拒（`g3ku/agent/tools/filesystem_mutation.py:492`），注册文件写完即触发资源刷新、无需重启（同文件 `:532`）。
+**默认选第三种。** 判据：一回合内会被点名 2 次以上的远端 tool 才值得占一个 negi 名字；其余在 `toolskills/SKILL.md` 里留一条 `exec` + 安装目录驱动脚本的例子即可。第三方本体装在 `externaltools/<tool_id>/`，`tools/<tool_id>/` 只放注册文件与 handler；`filesystem_*` 的注册面路径策略会拒绝把安装物写进 `tools/`，`exec` 的下载/安装命令守卫只覆盖一部分命令，普通复制不保证被拦，所以这条靠约定守住。
+
+注册文件写完是否立即生效，取决于写法：用 `filesystem_write/edit/copy/move/delete` 会触发定向资源刷新，目标目录当场重载；用 `exec`（git clone / pip / 解压 / 复制）只有指纹比对道，首次比对只记基线，目录若在首次比对前落盘就再也不会触发重载，且 web 与 worker 各刷各的——这种装法不要承诺"无需重启"，按 `skills/add-tool/SKILL.md`「安装后如何让它生效」复核。
 
 ## 二、会话生命周期：默认 per-call，有数再缓存
 

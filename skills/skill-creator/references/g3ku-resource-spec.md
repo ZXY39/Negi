@@ -34,18 +34,26 @@ tools/
       assets/
 ```
 
-### External tool
+### 驱动第三方安装的工具
+
+第三方本体不改变工具类型，只改变本体放在哪里：注册目录仍是 `tools/<tool_id>/`，运行时代码仍是 `main/tool.py`，上游本体装到 `externaltools/<tool_id>/`。
 
 ```text
 tools/
   <tool_id>/
     resource.yaml
+    main/
+      tool.py          # handler：定位并驱动 externaltools 里的本体
     toolskills/
       SKILL.md
       references/
       scripts/
       assets/
+externaltools/
+  <tool_id>/           # 上游本体（不属于注册树）
 ```
+
+不存在 external 工具类型：`tool_type` 只接受 `internal`，写其他值会在发现阶段被拒（清单里也不要写 `install_dir` 指向 `tools/` 内）。
 
 ## Tool manifest 关键字段
 
@@ -135,12 +143,13 @@ timeout_policy:            # 可选：统一 timeout 合同行为声明（缺省
 - 禁止照抄上游 README / pyproject 的依赖名，必须先实测再写
 - 可选的重运行时（Go、数据库服务等）不要轻易写进 `requires`——写入即探测，缺失会把整个资源判为待修复；确属必需才写，并在 SKILL.md 里同步给出安装方式
 
-## 创建后复核与修复（三态）
+## 创建后复核与修复（四态）
 
-skill 落盘后必须实测 `load_skill_context(skill_id="<skill_id>")`，按返回三态处置：
+skill 落盘后必须实测 `load_skill_context(skill_id="<skill_id>")`，按返回四态处置：
 
 - **A｜返回正文（`ok=true`）**：可加载，复核通过
 - **B｜返回修复指引**（`error="skill_repair_required"`，带 `warnings` / `errors` / `next_actions`，或合同摘要 `repair_required_skills` 列出了它）：已注册但不可用，处于待修复状态。按 warnings 修复——声明与本机不符就改 `resource.yaml` 的 `requires`（对照上一节声明规则）；真实缺依赖就用 `exec` 安装补齐（filesystem 编辑会自动触发资源刷新）。修复后必须重新 load 复核，直到返回 A，或确认剩余缺口属于需用户安装/决策的运行时
-- **C｜返回「当前运行时技能未包含 `<id>`」**：不在治理注册表。核查落盘是否成功、资源刷新是否生效、（经 `skill-installer` 安装时）`resource_refresh` / `catalog` 字段是否报错，补齐注册后再复核；不要把这个状态当作待修复或搁置
+- **C1｜`error="skill_deleted"`**：注册表里没有这条记录（"Skill 已删除：…"）。核查落盘是否成功、资源刷新是否生效、（经 `skill-installer` 安装时）`resource_refresh` / `catalog` 字段是否报错，补齐注册后再复核；不要把这个状态当作待修复或搁置
+- **C2｜`error="skill_not_permitted"`**：记录存在，但当前 `actor_role` 不在它的 `allowed_roles` 里（"权限不允许…"）。这是 RBAC 问题，不是未注册：去改角色 / 治理记录，重装或改目录名都不会放行
 
 无法自行解决的缺口，要在交付说明里精确列出：缺什么（具体 bin/env/tool 名）、影响哪个资源、已做过哪些修复动作；禁止笼统写“待复核”。tool 侧的对应规则（`【待修复】` 前缀 / `repair_required=true` / `load_tool_context` 修复车道）见 `main/prompts/shared_repair_required.md`。

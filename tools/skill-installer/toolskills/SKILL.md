@@ -70,14 +70,15 @@
 
 默认自动完成安装与 manifest 补齐后，**不要直接把结果视为已经完全可用**。后续必须立刻做两步检查：
 
-1. **实测 `load_skill_context(skill_id="<skill_id>")`，按返回三态判定并处置**
+1. **实测 `load_skill_context(skill_id="<skill_id>")`，按返回四态判定并处置**
 
    - **A｜返回正文（`ok=true`）**：可加载。继续第 2 步。
    - **B｜返回修复指引**（`error="skill_repair_required"`，或合同摘要 `repair_required_skills` 列出了它，或返回带 `warnings` / `errors`）：skill **已注册但当前不可用，处于待修复状态**。按 warnings 定位原因并修复：
      - `missing required bins`：`resource.yaml` 的 `requires.bins` 声明了本机解析不到的命令（运行时用 `shutil.which` 逐个探测）。把声明改成本机实际可解析的等价命令（如 Windows 上 `python3`→`python`；本机只有 Edge 时不要声明 `chrome`，浏览器能力改挂已注册工具），或用 `exec` 安装缺失依赖。**禁止照抄上游 README 的依赖名**。
      - `missing required env` / `missing required tools`：补齐环境变量，或改挂本机已存在的工具。
      - 修复（filesystem 编辑会自动触发资源刷新）后必须重新调用 `load_skill_context` 复核，直到返回 A，或确认剩余缺口属于需用户安装/决策的运行时（如 Go、数据库），此时在交付说明里逐项列明缺什么、影响哪个 skill。
-   - **C｜返回「当前运行时技能未包含 `<id>`」**：该 skill **不在治理注册表里**（运行时对快照滞后已做实时可见性回退，此错误只代表未注册）。依次核查：安装是否真的落盘、`resource_refresh.ok` 是否为 true、`catalog.ok` 是否为 false；补齐注册后再复核。**不允许把这个状态当成“稍后自然会可用”而搁置**。
+   - **C1｜`error="skill_deleted"`**：注册表里没有这条记录（"Skill 已删除：…"）。依次核查：安装是否真的落盘、`resource_refresh.ok` 是否为 true、`catalog.ok` 是否为 false；补齐注册后再复核。**不允许把这个状态当成"稍后自然会可用"而搁置**。
+   - **C2｜`error="skill_not_permitted"`**：记录存在，但当前角色不在它的 `allowed_roles` 里（"权限不允许…"）。这是 RBAC 问题，不是未注册：去改角色 / 治理记录；重装、改名都不会放行。
 
    一旦发现待修复（B），不要继续把它当成正常 skill 使用；先修复，再重新检查。
 
@@ -128,7 +129,7 @@
 - 如果上游结构不标准，先安装可行部分，再交给 `skill-creator` 做二次适配
 - `description_too_long`：上游 or 生成出的 description 超过 160 字符；安装目录已回滚，先把上游 `SKILL.md` 的 description 改写成一句话，再重新安装
 - 如果日志里出现 `WinError 5` 指向临时目录中的 `.git/objects/pack/*`，优先升级到当前修复版本后再重试
-- 安装成功后 `load_skill_context` 不可加载，**不属于安装失败，不要重装**；按「安装后必须复核」的三态（B：待修复→修声明/装依赖后复核；C：未注册→核查 resource_refresh/catalog 并补注册）处置
+- 安装成功后 `load_skill_context` 不可加载，**不属于安装失败，不要重装**；按「安装后必须复核」的四态（B：待修复→修声明/装依赖后复核；C1：未注册→核查 resource_refresh/catalog 并补注册；C2：权限不允许→改角色，不重装）处置
 
 ## 安装与更新
 
