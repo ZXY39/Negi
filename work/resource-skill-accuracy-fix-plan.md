@@ -318,4 +318,10 @@ python -m pytest tests/resources/test_tool_resource_admin_api.py tests/resources
   - 重启后新增两个探针工具，首个前门回合触发 `resources reloaded via external-resource-generation-check: 41 tools`，说明 bootstrap 基线之后的落盘改动能被首个拍点捕获；
   - `reload_probe_ok`（requires `exec`）`available=true`；`reload_probe_bad`（requires 不存在的工具）`available=false` 且 warnings 带 `missing required tools: missing_probe_dependency`；
   - 删除探针并再次 reload 后 `GET /api/resources/tools` 回到 39 条，worker 同步重载。
-- 剩余动作：无。重启后的 web/worker 已运行新代码。
+- 节点级实盘验收（第二次重启 12:55，加载 `fc920a7c`）：
+  - 通过前门创建任务 `task:2239bd3ea663`，根节点 `node:03a5982a240b`；
+  - 节点调用 `load_tool_context(reload_probe_ok)` → `available=true`、`callable=true`、`repair_required=false`；
+  - 节点实际调用 `reload_probe_ok` → 原始回执 `probe ok`；
+  - 节点调用 `load_tool_context(reload_probe_bad)` → `available=false`、`repair_required=true`、warnings `missing required tools: missing_probe_dependency`；
+  - 任务 `success`，清理任务/会话/探针后工具数回到 39。
+- 剩余动作：无。重启后的 web/worker 已运行到 `fc920a7c`。
