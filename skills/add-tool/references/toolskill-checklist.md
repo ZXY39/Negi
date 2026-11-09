@@ -62,4 +62,7 @@
 
 - [ ] 工具可被资源发现，handler 能被装载成工具对象
 - [ ] `load_tool_context` 返回该工具的参数契约与 toolskill 正文
+- [ ] `load_tool_context` 的 `available=true`、`callable=true`、`repair_required=false`（三者缺一不算通过）
+- [ ] 真实调用一次（优先只读动作或 `dry_run`；没有只读入口时至少确认执行束里能解析到实例）
+- [ ] 任务节点车道：确认 worker 进程已完成资源刷新，不是只看 web 的 Tool 管理页
 - [ ] 删除 `tools/<tool_id>/` 后，系统仍可启动

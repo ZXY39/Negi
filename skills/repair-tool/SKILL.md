@@ -28,7 +28,7 @@
 - 不要停在“诊断出问题”。
 - 优先把工具修到 `available=true`。
 - 如果工具应当可调用，还要尽量恢复到当前 turn 的 callable function tool list。
-- 所有临时内容放到 `temp/<tool_id>/`。
+- 所有临时内容放到 `{temp}/<tool_id>/`。
 - 所有第三方工具本体放到 `externaltools/<tool_id>/`。
 
 ## 先做什么
@@ -71,10 +71,10 @@
 1. 先视为“可修复工具”，不是“彻底不可用”。
 2. 检查 `resource.yaml` 里的：
    - `tool_type`
-   - `requires.tools`
    - `requires.bins`
    - `requires.paths`
    - `requires.env`
+   - 说明：tool 侧的 `requires.tools` 不参与可用性判定（只有 skill 会探测它），工具间依赖要写进 handler 并自己检查
 3. 如果工具是 `callable=true` 但依赖缺失，先把依赖修到满足。
 4. 如果依赖已经满足，但当前 turn 仍没注册上，继续做“刷新与复核”步骤。
 
@@ -105,7 +105,7 @@
 
 1. 按 `toolskills/SKILL.md` 写明的安装目录确认本体在 `externaltools/<tool_id>/`。
 2. 若不存在，使用 `exec` 安装到该目录。
-3. 下载、缓存、解压中转统一放到 `temp/<tool_id>/`。
+3. 下载、缓存、解压中转统一放到 `{temp}/<tool_id>/`。
 4. 若本体落到了 `tools/`、用户目录或全局目录，移回工作区内的正确位置，并同步 handler 里拼路径的那一处。
 5. handler 优先从 `externaltools/<tool_id>/` 自动定位本地可执行文件；需要浏览器、模型、运行时等大依赖时同样用工作区内副本，不用用户全局目录。
 6. 同步更新 `toolskills/SKILL.md` 的安装 / 更新说明。
@@ -125,10 +125,10 @@
 
 - 使用 `exec` 时：
   - `working_dir` 显式设到工作区内
-  - 临时目录使用 `temp/<tool_id>/`
+  - 临时目录使用 `{temp}/<tool_id>/`
   - 第三方工具目标目录使用 `externaltools/<tool_id>/`
 - 若要下载、解压或装包，默认顺序是：
-  1. 下载到 `temp/<tool_id>/`
+  1. 下载到 `{temp}/<tool_id>/`
   2. 校验或解压
   3. 安装 / 移动到 `externaltools/<tool_id>/`
 - 如果 `toolskills/SKILL.md` 已经给了安装命令，优先遵循它；不要擅自改成全局安装。
@@ -137,18 +137,21 @@
 
 修完后不要立刻假设主 agent 已经能调用该工具。
 
+刷新有两条道，适用面不同：
+
+- `filesystem_write/edit/copy/move/delete` 改动 `tools/<tool_id>/` 下的文件：走定向刷新，目标工具目录当场重载。
+- 只改 `externaltools/<tool_id>/`：资源指纹只覆盖 `skills/` 与 `tools/`，不会因为本体变化自动刷新。此时对 `resource.yaml` 或 `toolskills/SKILL.md` 做一次真实、有意义的同步编辑来触发定向刷新；不要用 `exec` touch——`exec` 走指纹比对，首次比对可能只记基线。
+- 显式刷新入口 `POST /api/resources/reload` 只刷新接收请求的那个进程：前门在 web，任务节点在 worker，两边要分别刷新，不能只看 web 的 Tool 管理页。
+
 按这个顺序复核：
 
 1. 再次检查本地依赖是否存在：
    - `externaltools/<tool_id>/...`
-   - `temp/<tool_id>/...`（如需要）
+   - `{temp}/<tool_id>/...`（如需要）
 2. 重新读取 `load_tool_context(tool_id="<tool_id>")`，确认：
-   - `available=true`
+   - `available=true`、`callable=true`、`repair_required=false`
    - warnings / errors 已消失或明显减少
-3. 如果工具依赖 `resource.yaml` 中的 availability 判定，而你这次只改了 `externaltools/`，注意：
-   - 资源系统不一定会因为 `externaltools/` 变化而自动刷新
-   - 优先使用平台已有的资源刷新能力
-   - 如果当前环境没有显式刷新入口，就对 `tools/<tool_id>/resource.yaml` 或 `tools/<tool_id>/toolskills/SKILL.md` 做一次必要且真实的同步更新，促使资源快照刷新
+3. 真实调用一次（优先只读动作 / `dry_run`），确认执行束里能解析到实例，而不是只证明读路径可用。
 4. 修完后若进入新一轮对话或新一轮工具选择，确认它已重新出现在 callable function tool list。
 
 ## 何时升级为 add-tool 或 update-tool

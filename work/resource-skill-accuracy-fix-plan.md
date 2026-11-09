@@ -233,7 +233,7 @@ python -m pytest tests/resources/test_tool_resource_admin_api.py tests/resources
 ### 5.2 禁用词 grep（应为 0 命中）
 
 - `action id 用`
-- `npx skills add`
+- `npx skills add`（作为安装指令；`find-skills` 里"不要使用"的否定警示保留，不算违规）
 - `当前运行时技能未包含`
 - `<workspace>/temp/<tool_id>`
 - `### External tool`
@@ -261,3 +261,13 @@ python -m pytest tests/resources/test_tool_resource_admin_api.py tests/resources
 - 执行人只需按第 3 节逐条改、按第 4 节分批、按第 5 节验收；每条都带文件与当前行号。
 - 若中途发现同类问题（其他 skill 也写了旧入口或旧状态），按同样判据追加到对应批次，并在提交说明里列明。
 - 完成后交付：改动文件清单、每批 commit、验收命令输出、以及仍未修复的代码缺口列表（第 6 节三项）。
+
+## 9. 执行记录（2026-11-09）
+
+- 批次 1：commit `a560c7ad`，完成 F1-F6。
+- 批次 2 + 批次 3：同一提交，完成 F7-F13。两批在 `g3ku-resource-spec.md`、`create-skill-workflow.md`、`skill-installer` toolskill 上共用文件，拆开会需要逐 hunk 分期，故合并提交。
+- 验收：`ruff` 通过；`test_tool_resource_admin_api.py` + `test_skill_installer_tool.py` + `test_resource_runtime_smoke.py` 共 243 passed；五个被改 skill 经 `ResourceRegistry.discover()` 复核均为 `available=True`、无 warnings/errors。
+- 未修复的代码缺口（本次只改文档，按计划不改行为）：
+  1. 资源代检查首拍只记基线，目录在首拍前落盘会被永久吸进基线；
+  2. web 与 worker 不共享刷新结果，`/api/resources/reload` 只作用于接收请求的进程；
+  3. tool 的 `requires.tools` 被解析但从不探测。

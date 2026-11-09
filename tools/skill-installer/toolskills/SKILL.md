@@ -64,7 +64,7 @@
 - `resource_refresh`
 - `catalog`
 
-其中 `resource_refresh.ok=false` 表示资源系统刷新失败，新 skill 不会进入治理注册表；`catalog.ok=false`（如 `memory_manager_unavailable`）表示记忆目录同步未完成，属于注册失败信号——它不阻断治理注册，但必须记入交付说明，并在后续轮次重试或上报，不允许当没看见。
+其中 `resource_refresh.ok=false` 表示本次定向刷新失败：调用进程里新 skill 暂时没有进入治理注册表，下一次资源代检查仍可能把它补上，但必须当场核查原因并在后续轮次复核；`catalog.ok=false`（如 `memory_manager_unavailable`）表示记忆目录同步未完成，它不阻断治理注册，但必须记入交付说明，并在后续轮次重试或上报，不允许当没看见。
 
 ## 安装后必须复核
 
@@ -93,7 +93,7 @@
 3. `description` 必须完整、准确、适合检索；不能保留被截断、多行丢失、语义含糊或与真实用途不符的描述；硬上限 160 字符，超限安装会被拒绝并回滚。
 4. `trigger.keywords` 必须覆盖真实触发表达；如果当前关键词不足以让模型稳定想到它，要立即补齐。
 5. `requires.tools / bins / env` 必须反映 skill 的真实依赖；不能因为自动生成时未识别就长期保留空数组。
-6. `content.main` 必须指向 `SKILL.md`；若存在 `references/`、`scripts/`、`assets/`，`content` 中也应显式声明。
+6. `content` 是兼容字段，不是运行时要求：skill 正文固定读 `SKILL.md`，`references/` / `scripts/` / `assets/` 按目录是否存在自动探测。生成器写出来的 `content` 不用手动改，也不要把"content 未声明"当成不合规。
 7. `exposure.agent` 与 `exposure.main_runtime` 必须符合预期使用范围，不能靠默认值蒙混过关。
 8. 若本次导入来自 GitHub，`source.type / url / repo / ref / path` 必须与真实来源一致，便于后续追溯。
 9. 如果 skill 实际上并不适合直接作为 Negi 本地 skill 使用，而只是上游素材，应立刻转 `skill-creator` 做结构适配，而不是带着不合规 manifest 继续使用。

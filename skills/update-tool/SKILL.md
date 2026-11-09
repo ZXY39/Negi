@@ -9,7 +9,7 @@
 - 升级判断来自 `source` 和 `current_version`，不是来自印象。
 - 更新后，代码 / 安装结果、`resource.yaml`、`toolskills/` 三者必须同步；运行时长特征变化时（新增长时编排步骤、改为自持子进程收尾等），同步增删 `resource.yaml -> timeout_policy` 声明；跨调用资源变化时（新增长命客户端 / 进程），同步 `close()` 或调用内起停；写入行为变化时（新加一次落库、一次投递、一次注册），同步撤掉或保住 `resource.yaml -> recovery_policy.rerun_safe` 声明成立的前提。
 - 驱动第三方安装的工具，更新的是 `<workspace>/externaltools/<tool_id>/` 里的真实安装与它的 handler，不得偷偷把上游 vendored 回 `main/`。
-- 安装过程中的下载、缓存、解压、备份中转文件统一放在 `<workspace>/temp/<tool_id>/`。
+- 安装过程中的下载、缓存、解压、备份中转文件统一放在 `{temp}/<tool_id>/`。
 
 ## 通用步骤
 
@@ -33,7 +33,7 @@
 流程：
 
 1. 先按 toolskill 写明的路径确认真实安装位置，应为 `<workspace>/externaltools/<tool_id>/`。
-2. 准备更新时，把下载包、校验文件、解压中转目录放到 `<workspace>/temp/<tool_id>/`。
+2. 准备更新时，把下载包、校验文件、解压中转目录放到 `{temp}/<tool_id>/`。
 3. 按 `source.url` 查询上游最新版本。
 4. 在该安装目录内执行安装 / 升级操作，或把中转目录产物部署到该目录。
 5. 上游本体不得进入 `tools/<tool_id>/`；`main/` 里只放 handler。
@@ -80,7 +80,7 @@
 - toolskill 写明的安装目录不存在时，不要把这个工具判定为“无需处理”；这通常意味着需要修复或重装。
 - 必须继续满足：
   - 第三方本体在 `externaltools/<tool_id>/`
-  - 临时下载 / 解压中转目录在 `temp/<tool_id>/`
+  - 临时下载 / 解压中转目录在 `{temp}/<tool_id>/`
   - `tools/<tool_id>/` 只放注册信息与 handler
 - toolskill 必须继续保留：
   - `## 何时使用`
@@ -94,8 +94,12 @@
 - `resource.yaml` 仍可解析
 - 工具仍能被资源发现，handler 仍能装载成工具对象
 - `load_tool_context` 返回该工具的参数契约与 toolskill 正文
+- `load_tool_context` 的 `available=true`、`callable=true`、`repair_required=false`（三者缺一不算通过；load 成功只证明读路径可用）
+- 真实调用一次（优先只读动作或 `dry_run`；没有只读入口时至少确认执行束里能解析到实例）
+- 任务节点车道：确认 worker 进程已完成资源刷新，不是只看 web 的 Tool 管理页
 - Tool 管理 / API 里该工具状态正常（`available`、`warnings`、`errors` 无新增）
-- 第三方本体仍在 `externaltools/<tool_id>/`，中转目录约定仍是 `temp/<tool_id>/`
+- 第三方本体仍在 `externaltools/<tool_id>/`，中转目录约定仍是 `{temp}/<tool_id>/`
+- 安装与刷新的边界见 `skills/add-tool/SKILL.md`「安装后如何让它生效」；用 `exec` 安装时不要承诺"无需重启"
 
 ## References
 

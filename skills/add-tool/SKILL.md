@@ -210,7 +210,8 @@ governance:
 - 资源能被发现，handler 能被装载成工具对象
 - `toolskills/SKILL.md` 已同时覆盖“使用 + 安装 + 更新”
 - 驱动第三方安装的工具：本体在 `externaltools/<tool_id>/`，下载 / 缓存 / 解压中转目录在 `{temp}/<tool_id>/`
-- `load_tool_context(tool_id="<tool_id>")` 能取到参数契约与 toolskill 正文
+- `load_tool_context(tool_id="<tool_id>")` 能取到参数契约与 toolskill 正文，且 `available=true`、`callable=true`、`repair_required=false`
+- 真实调用一次（优先只读动作或 `dry_run`）；任务节点车道还要确认 worker 已刷新，不是只看 web 的 Tool 管理页
 - 工具执行路径不会阻塞事件循环；长耗时步骤已异步化或移到后台线程 / 子进程
 - 网络、子进程和等待逻辑已设置明确超时，不会把整个项目卡住
 - 长时编排类工具已在 `resource.yaml` 声明 `timeout_policy.exempt_universal`；自持收尾类已声明 `self_enforced` 且 handler 确实消费 `timeout` 入参

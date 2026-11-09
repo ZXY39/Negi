@@ -187,7 +187,7 @@ def build(runtime):
     )
 ```
 
-模板里四处是本仓特有、别处抄不来的：`timeout_seconds` 由运行时注入进模型面（`g3ku/agent/tools/base.py:214-239`，单位是秒，写 `60000` 会被读成 16.6 小时）；`self_enforced_timeout = True` 意味着**外层不再替你兜**，你必须自己 `wait_for`；运行帧从 `kwargs.pop('__g3ku_runtime')` 拿（`g3ku/agent/tools/shell.py:213`），取消标志读 `is_cancelled` / `cancelled`（与 `main/governance/exec_approvals.py:367-379` 同一判据）；子进程环境走 `_spawn_env` 点名注入，理由见那段注释。
+模板里四处是本仓特有、别处抄不来的：`timeout_seconds` 由运行时注入进模型面（`g3ku/agent/tools/base.py::_model_parameters_with_universal_timeout`，单位是秒，写 `60000` 会被读成 16.6 小时）；`self_enforced_timeout = True` 意味着**外层不再替你兜**，你必须自己 `wait_for`；运行帧从 `kwargs.pop('__g3ku_runtime')` 拿（`g3ku/agent/tools/shell.py::execute`），取消标志读 `is_cancelled` / `cancelled`（规范实现见 `g3ku/runtime/cancellation.py` 的 `CancellationToken`）；子进程环境走 `_spawn_env` 点名注入，理由见那段注释。
 
 ## 四、`resource.yaml` 上的差异点
 

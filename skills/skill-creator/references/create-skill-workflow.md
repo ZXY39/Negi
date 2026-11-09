@@ -57,7 +57,7 @@ skills/
 - `description`
 - `trigger.keywords`
 - `requires.tools / bins / env`
-- `content.main`
+- `content.main`（可选兼容字段；运行时固定读 `SKILL.md`，`references/` / `scripts/` / `assets/` 按目录自动探测）
 - `exposure.agent` 与 `exposure.main_runtime`
 
 `description` 既要说明 skill 做什么，也要说明在什么情境下使用它。
@@ -80,7 +80,7 @@ skills/
 - **`scripts/`**：放需要稳定复用的校验器、转换器、导出器、辅助脚本
 - **`assets/`**：放模板、示例文件、静态资源
 
-优先迁移“真正帮助后续 Codex 实例完成任务的资源”，而不是营销材料和演示截图。
+优先迁移“真正帮助后续 agent 实例完成任务的资源”，而不是营销材料和演示截图。
 
 ## 步骤 7：检查完整性
 

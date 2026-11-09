@@ -112,12 +112,12 @@ timeout_policy:            # 可选：统一 timeout 合同行为声明（缺省
 - 必须有 `main/tool.py`
 - `install_dir` 不是清单字段；发现阶段仍读取它，唯一用途是让陈旧记录被删除时连带收走它的安装目录
 - 第三方本体安装在 `externaltools/<tool_id>/`，不得出现在 `tools/` 内
-- `timeout_policy` 可选；与 handler 类属性是 OR 语义（清单只能追加豁免/自持/隐藏，不能撤销代码级合同）。`exempt_universal` 只给运行时长天然无界的长时编排工具，且要求强取消实现完整。合同细节见 `docs/architecture/tool-and-skill-system.md`「统一工具 Timeout 合同」
+- `timeout_policy` 可选；与 handler 类属性是 OR 语义（清单只能追加豁免/自持/隐藏，不能撤销代码级合同）。`exempt_universal` 只给运行时长天然无界的长时编排工具，且要求强取消实现完整。合同细节见 `docs/architecture/tool-hydration-and-callable-chain.md`「统一工具 Timeout 合同」
 
 ## Toolskill 规则
 
 - 所有工具都要提供 `toolskills/SKILL.md`
-- description 硬上限 160 字符：tool 的函数级 description 与 skill 的 `resource.yaml` description 同限，只写一句话作用；超限的新增资源以待修复状态注册，`load_tool_context` / `load_skill_context` 返回 `description_too_long`
+- description 硬上限 160 字符：tool 的函数级 description 与 skill 的 `resource.yaml` description 同限，只写一句话作用；超限的新增资源以待修复状态注册。回执形态按资源类型判读：tool 的 `load_tool_context` 返回 `ok=true` + `repair_required=true` + `available=false`，`description_too_long: …` 落在 `errors` 里；skill 的 `load_skill_context` 返回 `error="skill_repair_required"`，原因在 `warnings` / `errors`。不要去找顶层 `error="description_too_long"`
 - `toolskills/SKILL.md` 需要和 `resource.yaml`、实际实现保持一致；参数、默认行为、输出结构变化时必须同步更新
 - 驱动第三方安装的工具必须说明：
   - 何时使用
@@ -131,11 +131,15 @@ timeout_policy:            # 可选：统一 timeout 合同行为声明（缺省
 
 ## `requires` 声明与可用性探测
 
-`requires.tools / bins / env`（skill 与 tool manifest 通用）不是描述性文字，而是可用性硬探测；资源刷新时运行时逐项校验：
+`requires` 不是描述性文字，而是可用性硬探测；资源刷新时运行时逐项校验。两类资源的探测项不同：
+
+- **skill**：`tools` / `bins` / `env`
+- **tool**：`bins` / `paths` / `env`。`requires.tools` 会被解析，但当前不参与 tool 的可用性判定，不要依赖它表达工具间依赖
 
 - `bins`：用 `shutil.which` 按**目标机实际可解析的命令名**探测；任一解析不到 → 资源 `available=false` + `missing required bins` 警告，进入待修复车道
+- `paths`（tool）：工作区相对路径或绝对路径逐个检查存在性；任一不存在 → `available=false` + `missing required paths`
 - `env`：探测 `os.environ`；任一缺失 → `available=false`
-- `tools`：与已注册工具名比对；任一缺失 → `available=false`
+- `tools`（skill）：与已注册工具名比对；任一缺失 → `available=false`
 
 声明规则：
 
