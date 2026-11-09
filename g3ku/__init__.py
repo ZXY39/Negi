@@ -2,5 +2,5 @@
 Negi - A lightweight AI agent framework
 """
 
-__version__ = "1.11.19"
+__version__ = "1.11.20"
 __logo__ = "🥬"
