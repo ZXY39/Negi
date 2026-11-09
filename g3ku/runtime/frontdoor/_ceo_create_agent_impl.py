@@ -936,6 +936,11 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         """
         setattr(session, "_last_silent_reply", bool(values.get("silent_reply")))
         setattr(session, "_last_silent_reason", str(values.get("silent_reason") or "").strip())
+        setattr(
+            session,
+            "_last_follow_up_interrupt",
+            bool(values.get("follow_up_interrupt") or False),
+        )
         setattr(session, "_last_silent_subject", str(values.get("silent_subject") or "").strip())
         setattr(
             session,

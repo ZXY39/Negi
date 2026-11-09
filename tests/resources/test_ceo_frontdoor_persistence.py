@@ -74,6 +74,31 @@ def _without_pinned_head(messages):
     return normalized
 
 
+def test_ceo_snapshot_carries_follow_up_interrupt_flag() -> None:
+    snapshot = websocket_ceo._build_ceo_snapshot(
+        [
+            {
+                "role": "assistant",
+                "content": "",
+                "turn_id": "turn-cut",
+                "metadata": {"silent_reply": True, "follow_up_interrupt": True},
+            }
+        ],
+        frontdoor_turns=[
+            {
+                "seq": 1,
+                "turn_id": "turn-cut",
+                "text": "",
+                "tools": [{"tool_call_id": "call-1", "tool_name": "filesystem", "status": "success"}],
+            }
+        ],
+    )
+
+    assert snapshot[0]["follow_up_interrupt"] is True
+    assert snapshot[0]["silent_reply"] is True
+    assert snapshot[0]["turns"][0]["tools"][0]["tool_name"] == "filesystem"
+
+
 def test_ceo_snapshot_attaches_turn_ledger_and_compression_payloads() -> None:
     snapshot = websocket_ceo._build_ceo_snapshot(
         [

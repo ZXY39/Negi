@@ -3594,6 +3594,14 @@ class RuntimeAgentSession:
         """本轮是不是"重问过一次仍然只想不写"收的口——同样只由 runner 回填通道判定。"""
         return bool(getattr(self, "_last_reasoning_only_retry_exhausted", False))
 
+    def _resolve_follow_up_interrupt(self) -> bool:
+        """本轮是不是在工具批次边界被待发送补充消息接管而收的口。
+
+        它与"模型选择静默"共用投递闸门（`silent_reply`），但呈现不同：这一轮已经跑过
+        的工具与中途文本要按正常回合留着，不能被画成静默折叠行。
+        """
+        return bool(getattr(self, "_last_follow_up_interrupt", False))
+
     def _silent_reply_metadata(self, output: str) -> tuple[dict[str, Any], str]:
         """静默回合的落盘元数据与痕迹正文；非静默时返回 ``({}, output)``。
 
@@ -3608,6 +3616,9 @@ class RuntimeAgentSession:
             "ui_visible": True,
             "silent_reply": True,
         }
+        if self._resolve_follow_up_interrupt():
+            # 呈现判据：刷新后这一行仍要画成正常结束回合，而不是静默折叠行。
+            metadata["follow_up_interrupt"] = True
         for key, attr in (
             ("silent_reason", "_last_silent_reason"),
             ("silent_subject", "_last_silent_subject"),
@@ -4392,6 +4403,7 @@ class RuntimeAgentSession:
                     text=outbound_text,
                     silent_reply=silent_reply,
                     silent_reason=str(getattr(self, "_last_silent_reason", "") or ""),
+                    follow_up_interrupt=self._resolve_follow_up_interrupt(),
                     heartbeat_internal=heartbeat_internal,
                     heartbeat_reason=str((user_input.metadata or {}).get("heartbeat_reason") or "").strip(),
                     source=internal_source or "user",
@@ -4669,6 +4681,7 @@ class RuntimeAgentSession:
                 text=outbound_text,
                 silent_reply=silent_reply,
                 silent_reason=str(getattr(self, "_last_silent_reason", "") or ""),
+                follow_up_interrupt=self._resolve_follow_up_interrupt(),
                 heartbeat_internal=heartbeat_internal,
                 heartbeat_reason=str((user_input.metadata or {}).get("heartbeat_reason") or "").strip(),
                 source=internal_source or "user",
@@ -5886,6 +5899,7 @@ class RuntimeAgentSession:
                 text=outbound_text,
                 silent_reply=silent_reply,
                 silent_reason=str(getattr(self, "_last_silent_reason", "") or ""),
+                follow_up_interrupt=self._resolve_follow_up_interrupt(),
                 source="user",
                 turn_id=final_turn_id,
                 usage=self._turn_usage_payload(final_turn_id),

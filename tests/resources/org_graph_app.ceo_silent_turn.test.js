@@ -535,6 +535,87 @@ test("历史静默行没有回合轨道时也要渲染折叠行", () => {
     assert.equal(String(labelOf(turn)).startsWith("静默消息"), true, "没有时间时也只写「静默消息」");
 });
 
+// 待发送补充消息在工具批次边界接管本轮（follow_up_interrupt）：投递侧仍然一声不出，
+// 但呈现按"正常结束、只是没有最终正文"——不折叠成「静默消息」，不补兜底文案，
+// 已经跑过的工具轨道与中途文本原样留在回合里，下一轮由补充消息自己开。
+test("被补充消息接管的一轮按正常结束画：不折叠成静默行，也不补兜底文案", () => {
+    const api = setup();
+    const turn = makeTurn({ turnId: "t1" });
+    api.S.ceoSnapshotCache["s1"] = { session_id: "s1", messages: [{ role: "user", content: "q1" }] };
+    api.S.ceoFeedRenderedMessageKeys = ["m:-:user:0"];
+    api.S.ceoPendingTurns = [turn];
+    api.U.ceoFeed = null;
+    api.finalizeCeoTurn("", {
+        source: "user",
+        turn_id: "t1",
+        silent_reply: true,
+        follow_up_interrupt: true,
+        silent_reason: SILENT_REASON,
+        turns: TURN_TRACE,
+        timestamp: SILENT_AT,
+    });
+
+    assert.equal(turn.finalized, true);
+    assert.equal(lineOf(turn), null, "不能画「静默消息」折叠行");
+    assert.equal(String(turn.el.className).includes("ceo-silent-message"), false);
+    assert.equal(turn.flowEl.hidden, false, "已经跑过的工具轨道要留下");
+    assert.equal(String(turn.listEl.innerHTML).includes("inspect repository"), true);
+    assert.equal(turn.textEl.textContent, "", "没有最终正文就留空");
+    assert.equal(String(turn.textEl.textContent).includes("已完成"), false);
+    assert.equal(String(turn.textEl.innerHTML).includes("Done."), false);
+
+    const row = api.S.ceoSnapshotCache["s1"].messages.at(-1);
+    assert.equal(row.role, "assistant");
+    assert.equal(row.content, "", "被接管的一轮没有最终正文");
+    assert.equal(row.follow_up_interrupt, true);
+    assert.equal(row.silent_reply, true, "投递闸门仍然由静默标记关着");
+});
+
+test("历史行带 follow_up_interrupt 时同样按正常结束画，不出现折叠行", () => {
+    const api = setup();
+    const feed = new FeedStub({ children: [], scrollHeight: 400, clientHeight: 300 });
+    api.U.ceoFeed = feed;
+    const pushed = trackPushedTurns(api);
+
+    api.renderPersistedCeoAssistantTurn({
+        role: "assistant",
+        content: "",
+        silent_reply: true,
+        follow_up_interrupt: true,
+        turn_id: "t1",
+        timestamp: SILENT_AT,
+        turns: TURN_TRACE,
+    });
+
+    const turn = pushed.find((item) => item && item.textEl) || null;
+    assert.ok(turn, "有轨道就要建回合元素");
+    assert.equal(lineOf(turn), null);
+    assert.equal(String(turn.el.className).includes("ceo-silent-message"), false);
+    assert.equal(turn.flowEl.hidden, false);
+    assert.equal(String(turn.listEl.innerHTML).includes("inspect repository"), true);
+    assert.equal(turn.textEl.textContent, "");
+    assert.equal(String(turn.textEl.textContent).includes("已暂停"), false, "不是暂停，也不是静默");
+});
+
+test("内部轮被打断且没有轨道可展示时不留空回合", () => {
+    const api = setup();
+    api.S.ceoSnapshotCache["s1"] = { session_id: "s1", messages: [{ role: "user", content: "q1" }] };
+    api.S.ceoFeedRenderedMessageKeys = ["m:-:user:0"];
+    const pushed = trackPushedTurns(api);
+    const feed = new FeedStub({ children: [], scrollHeight: 200, clientHeight: 200 });
+    api.U.ceoFeed = feed;
+
+    api.finalizeCeoTurn("", {
+        source: "heartbeat",
+        turn_id: "turn-hb-cut",
+        follow_up_interrupt: true,
+        silent_reply: true,
+    });
+
+    assert.equal(pushed.length, 0, "无正文无轨道就不补元素");
+    assert.equal(feed.children.length, 0);
+});
+
 // 相邻静默合并：心跳/cron 连着一串静默时只留第一行，行尾读「共N条」；
 // 展开后其余回合逐条显形，每条仍可各自点开正文。
 function countOf(turn) {

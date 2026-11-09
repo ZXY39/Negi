@@ -104,6 +104,7 @@ function normalizeCeoSnapshotMessage(message = {}) {
         if (message?.can_fork_reply === true) next.can_fork_reply = true;
         if (message?.silent_reply === true) next.silent_reply = true;
         if (message?.silent_reason) next.silent_reason = String(message.silent_reason);
+        if (message?.follow_up_interrupt === true) next.follow_up_interrupt = true;
         if (!String(next.content || "").trim() && !turns.length && status !== "paused") return null;
         return next;
     }

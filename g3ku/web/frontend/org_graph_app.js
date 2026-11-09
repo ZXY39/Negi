@@ -3619,6 +3619,11 @@ function finalizePausedCeoTurn(text = "已暂停", { source = null, landTranscri
             inflight_turn: payload.inflight_turn,
         };
     });
+    if (normalizedTurnId && turn?.el) {
+        // 续跑轮复用同一个 turn_id（停机截断的那一半）：登记下来，接管时先摘掉这颗
+        // 暂停气泡，而不是并排再画一条。历史行车道在渲染处已登记，这里覆盖直播暂停。
+        S.ceoPausedArchiveTurns[normalizedTurnId] = turn;
+    }
     return !!turn?.textEl || !!landedRows;
 }
 
@@ -4713,6 +4718,25 @@ function renderCeoSilentTurn(turn, { text = "", timestamp = "" } = {}) {
     const clock = formatCompactTime(timestamp || turn.completedAt || "");
     line.children[0].textContent = clock ? `静默消息 ${clock}` : "静默消息";
     line.setAttribute("aria-expanded", turn.el.classList.contains("ceo-silent-expanded") ? "true" : "false");
+}
+
+// 待发送补充消息在工具批次边界接管本轮时的呈现：按正常结束画，只是没有最终正文。
+// 不折叠、不补"已完成"这类机器文案；已经流出的中途文本与工具轨道原样留在回合里。
+// 与静默回合的差别是语义：静默是模型选择不说，这里是被下一条输入接管。
+function renderCeoInterruptedTurn(turn, { text = "" } = {}) {
+    if (!turn?.textEl || !turn?.el) return;
+    const normalizedText = String(text || "").trim();
+    turn.textEl.hidden = false;
+    turn.textEl.textContent = normalizedText;
+    turn.textEl.classList.remove("pending");
+    turn.textEl.classList.remove("assistant-text-loading");
+    turn.textEl.classList.remove("markdown-content");
+    if (normalizedText) {
+        turn.textEl.innerHTML = renderMarkdown(normalizedText);
+        turn.textEl.classList.add("markdown-content");
+    }
+    syncCeoAssistantLoadingAria(turn.textEl);
+    syncCeoTurnLoadingOnlyState(turn, false);
 }
 
 // 相邻静默回合合并成一行：心跳/cron 连着一串静默时，每轮各占一行会把会话刷成一片
@@ -5830,6 +5854,7 @@ function renderPersistedCeoAssistantTurn(item = {}, options = {}) {
     const content = String(item?.content || "");
     const turns = Array.isArray(item?.turns) ? item.turns : [];
     const silentReply = item?.silent_reply === true;
+    const followUpInterrupt = item?.follow_up_interrupt === true;
     const silentReason = String(item?.silent_reason || "");
     const status = String(item?.status || "").trim().toLowerCase();
     // follow-up 归档半截回合(后端 archive turn_id = `{原 turn_id}:followup:{随机}`)：
@@ -5857,6 +5882,8 @@ function renderPersistedCeoAssistantTurn(item = {}, options = {}) {
     if (status !== "paused" && !turns.length && !silentReply) {
         // 无轨道兜底气泡同样携带元信息(完成时间 + token 用量),同样是点击才显形。
         // 静默回合不走这条：它有自己的折叠行，落到下方共用路径渲染，避免两处装配。
+        // 被接管的那一轮本来就可能没有最终正文：没有正文就不补一个空气泡。
+        if (followUpInterrupt && !content.trim()) return rules.length > 0;
         const el = addMsg(content, "system", { markdown: true, scrollMode: "preserve", timestamp: historyTimestamp, usage: historyUsage, turnId: forkTurnId, canForkReply });
         renderCeoThinkingSummaryFromSnapshot(el, item?.thinking);
         if (rules.length) placeHistoryCompressionAroundElement(el, rules, forkTurnId);
@@ -5898,7 +5925,8 @@ function renderPersistedCeoAssistantTurn(item = {}, options = {}) {
     turn.turnWindowFrom = lastBoundary === null ? null : lastBoundary + 1;
     if (lastBoundary !== null) turn.compressionBoundary = lastBoundary;
     withCeoFeedBatch(() => {
-        if (silentReply) renderCeoSilentTurn(turn, { text: content, timestamp: historyTimestamp });
+        if (followUpInterrupt) renderCeoInterruptedTurn(turn, { text: content });
+        else if (silentReply) renderCeoSilentTurn(turn, { text: content, timestamp: historyTimestamp });
         else renderCeoAssistantTextIntoTurn(turn, content || (status === "paused" ? "已暂停" : ""), { status });
         renderCeoTurnsIntoTurn(turn, turns, { interruptedMarker: isFollowUpArchive });
         turn.flowEl.hidden = false;
@@ -5956,7 +5984,14 @@ function renderPersistedCeoAssistantTurn(item = {}, options = {}) {
     // 用历史值而非当前时间,保证刷新后完成时间稳定。
     // silent_reason 必须一起带上：finalize 走 buildFinalizedCeoTurnPayload 重写缓存行，
     // 缺了它这一行的 silent_reason 就落成空串，刷新后审计面看不到静默理由。
-    finalizeCeoTurn(content, { source: "history", usage: historyUsage, timestamp: historyTimestamp, silent_reply: silentReply, silent_reason: silentReason });
+    finalizeCeoTurn(content, {
+        source: "history",
+        usage: historyUsage,
+        timestamp: historyTimestamp,
+        silent_reply: silentReply,
+        silent_reason: silentReason,
+        follow_up_interrupt: followUpInterrupt,
+    });
     return headEntries.length > 0;
 }
 
@@ -6002,6 +6037,7 @@ function buildFinalizedCeoTurnPayload(sessionId, { normalizedSource = "", normal
     // 元信息(token 用量 + 完成时间)不再依赖服务端快照补齐。
     const completedTimestamp = String(completedAt || "").trim();
     const silentReply = meta?.silent_reply === true;
+    const followUpInterrupt = meta?.follow_up_interrupt === true;
     // 暂停收尾写的这一行必须是「暂停的回复行」而不是「正常的最终回复」：刷新后服务端
     // 归档行带 status=paused，缓存行不带的话，同一回合在暂停后与刷新后是两种画法
     // （前者普通气泡、后者带暂停标记），分组卡的渲染分支也不同。
@@ -6011,8 +6047,10 @@ function buildFinalizedCeoTurnPayload(sessionId, { normalizedSource = "", normal
         role: "assistant",
         // 静默回合的正文要留在缓存行里：那是折叠行「展开」的内容，也是与后端快照
         // 一致的形状（后端已不再抹空）。抹成 "" 会让刷新后折叠行展开出空白。
-        content: String(text || "").trim() || (silentReply ? "" : "Done."),
+        // 被补充消息接管的一轮不补兜底文案：呈现就是"正常结束、无最终正文"。
+        content: String(text || "").trim() || (silentReply || followUpInterrupt ? "" : "Done."),
         ...(silentReply ? { silent_reply: true, silent_reason: String(meta?.silent_reason || "") } : {}),
+        ...(followUpInterrupt ? { follow_up_interrupt: true } : {}),
         ...(rowStatus ? { status: rowStatus } : {}),
         // turn_id 是这一行参与门槛帧（回复行 Fork）与去重（同 turn 的 preserved_turn）
         // 的唯一身份。缺了它，暂停收尾补出来的回复行既等不到 Fork 章，也不会阻止同一
@@ -7670,6 +7708,7 @@ function finalizeCeoTurn(text, meta = {}) {
     const normalizedSource = normalizeCeoTurnSource(meta?.source || "user");
     const normalizedTurnId = normalizeCeoTurnId(meta?.turn_id || "");
     const silentReply = meta?.silent_reply === true;
+    const followUpInterrupt = meta?.follow_up_interrupt === true;
     const finalUserMessages = normalizeCeoSnapshotUserMessages(meta?.user_messages, meta?.user_message);
     let turn = pullActiveCeoTurn(normalizedSource, normalizedTurnId);
     // final 事件带的 turns 优先；缺失时回退到本轮 run 中自己渲染出的那份，
@@ -7726,7 +7765,12 @@ function finalizeCeoTurn(text, meta = {}) {
             // 无元素可收尾。这里按需补一个再画折叠行，让内部轮与用户轮同一种画法——
             // 否则同一轮静默在实时视图里什么都不留、刷新后才冒出来。用户轮保持原样：
             // 它的静默由转录行与快照渲染，找不到元素说明这一轮的元素已被丢弃。
-            if (silentReply && (normalizedSource === "heartbeat" || normalizedSource === "cron")) {
+            if (silentReply && !followUpInterrupt && (normalizedSource === "heartbeat" || normalizedSource === "cron")) {
+                turn = ensureActiveCeoTurn({ source: normalizedSource, turnId: normalizedTurnId });
+            }
+            if (followUpInterrupt && !turn?.textEl && finalTurns.length) {
+                // 被打断的恢复轮同样是内部轮：有轨道要展示时补一个元素，把已经跑过的工具画出来；
+                // 什么都没有（无正文也无轨道）就按正常结束处理，不留空回合。
                 turn = ensureActiveCeoTurn({ source: normalizedSource, turnId: normalizedTurnId });
             }
             if (!turn?.textEl || !turn?.flowEl) {
@@ -7742,17 +7786,25 @@ function finalizeCeoTurn(text, meta = {}) {
         }
         mutateCeoFeed(() => {
             turn.finalized = true;
-            turn.liveStreamText = "";
-            renderCeoLiveStreamTextIntoTurn(turn);
-            if (silentReply) {
-                renderCeoSilentTurn(turn, { text, timestamp: completedAt });
+            if (followUpInterrupt) {
+                // 被补充消息接管：按正常结束画，没有最终正文就留空；中途文本与轨道原样保留。
+                renderCeoInterruptedTurn(turn, {
+                    text: String(displayText || "").trim()
+                        || ceoLiveStreamResidual(turn, turn.lastExecutionTraceSummary),
+                });
             } else {
-                turn.textEl.hidden = false;
-                turn.textEl.innerHTML = renderMarkdown(String(displayText || "").trim() || "已完成。");
-                turn.textEl.classList.remove("pending");
-                turn.textEl.classList.add("markdown-content");
-                turn.textEl.classList.remove("assistant-text-loading");
-                syncCeoAssistantLoadingAria(turn.textEl);
+                turn.liveStreamText = "";
+                renderCeoLiveStreamTextIntoTurn(turn);
+                if (silentReply) {
+                    renderCeoSilentTurn(turn, { text, timestamp: completedAt });
+                } else {
+                    turn.textEl.hidden = false;
+                    turn.textEl.innerHTML = renderMarkdown(String(displayText || "").trim() || "已完成。");
+                    turn.textEl.classList.remove("pending");
+                    turn.textEl.classList.add("markdown-content");
+                    turn.textEl.classList.remove("assistant-text-loading");
+                    syncCeoAssistantLoadingAria(turn.textEl);
+                }
             }
             if (finalTurns.length) {
                 // 收尾帧先摘掉实时行：正式工具这时已经在这组里，留着一份就是同一件事画两遍
@@ -7823,17 +7875,24 @@ function finalizeCeoTurn(text, meta = {}) {
                 }
             });
             turn.finalized = true;
-            turn.liveStreamText = "";
-            renderCeoLiveStreamTextIntoTurn(turn);
-            if (silentReply) {
-                renderCeoSilentTurn(turn, { text, timestamp: completedAt });
+            if (followUpInterrupt) {
+                renderCeoInterruptedTurn(turn, {
+                    text: String(displayText || "").trim()
+                        || ceoLiveStreamResidual(turn, turn.lastExecutionTraceSummary),
+                });
             } else {
-                turn.textEl.hidden = false;
-                turn.textEl.innerHTML = renderMarkdown(String(displayText || "").trim() || "已完成。");
-                turn.textEl.classList.remove("pending");
-                turn.textEl.classList.add("markdown-content");
-                turn.textEl.classList.remove("assistant-text-loading");
-                syncCeoAssistantLoadingAria(turn.textEl);
+                turn.liveStreamText = "";
+                renderCeoLiveStreamTextIntoTurn(turn);
+                if (silentReply) {
+                    renderCeoSilentTurn(turn, { text, timestamp: completedAt });
+                } else {
+                    turn.textEl.hidden = false;
+                    turn.textEl.innerHTML = renderMarkdown(String(displayText || "").trim() || "已完成。");
+                    turn.textEl.classList.remove("pending");
+                    turn.textEl.classList.add("markdown-content");
+                    turn.textEl.classList.remove("assistant-text-loading");
+                    syncCeoAssistantLoadingAria(turn.textEl);
+                }
             }
             if (finalTurns.length) {
                 // 收尾帧先摘掉实时行：正式工具这时已经在这组里，留着一份就是同一件事画两遍

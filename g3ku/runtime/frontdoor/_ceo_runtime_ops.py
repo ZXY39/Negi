@@ -10846,6 +10846,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "silent_reply": silent_reply,
             "route_kind": route_kind,
         }
+        if follow_up_interrupt:
+            # 投递侧继续走静默闸门（这一轮不向任何渠道出声），呈现侧靠这条独立判据把
+            # 它画成"正常结束、只是没有最终正文"。复用静默折叠行会把已经跑过的工具与
+            # 中途文本藏起来，而且与用户主动打断的语义相反：静默是模型选择不说，
+            # 这里是被下一条输入接管。
+            result["follow_up_interrupt"] = True
         if silent_reply:
             # 把判据一路带到转录落盘处，供痕迹行与审计读取；session_agent 侧拿不到
             # 本轮工具调用，只能靠这条回填通道。

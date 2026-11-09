@@ -1203,6 +1203,10 @@ def _build_ceo_snapshot(
                 item['status'] = status
             # 静默回合的空 assistant 行只为承载 turns；没有 turns 就没有可展示的内容，
             # 整行跳过，避免前端渲染出一个空气泡。旧转录里的占位文案同样按静默处理。
+            if metadata.get('follow_up_interrupt') is True:
+                # 被补充消息接管的一轮走静默投递闸门，但呈现是"正常结束、无最终正文"：
+                # 前端据此跳过静默折叠行，把工具轨道与中途文本照常留下。
+                item['follow_up_interrupt'] = True
             if metadata.get('silent_reply') is True or content == _LEGACY_SILENT_REPLY_TEXT:
                 # 保留正文：它是折叠行「展开」要显示的内容，也是模型下一轮的痕迹。
                 # 空正文且无 turns 的行由上方的空行过滤统一跳过。
@@ -1935,6 +1939,7 @@ async def ceo_websocket(websocket: WebSocket):
             # 本回合的工具调用会被整段吞掉。外部渠道仍由 external
             # relay 依据 silent_reply 跳过，不会投递到 QQ。
             silent_reply = bool(payload.get('silent_reply'))
+            follow_up_interrupt = bool(payload.get('follow_up_interrupt'))
             if not silent_reply and not _should_forward_message_end(payload):
                 return
             # 静默回合不再抹正文：那正文就是给模型的痕迹，也是前端折叠行「展开」要显示的
@@ -1973,6 +1978,7 @@ async def ceo_websocket(websocket: WebSocket):
                     'turn_id': turn_id,
                     **({'silent_reply': True} if silent_reply else {}),
                     **({'silent_reason': silent_reason} if silent_reply and silent_reason else {}),
+                    **({'follow_up_interrupt': True} if follow_up_interrupt else {}),
                     **({'user_messages': user_messages} if user_messages else {}),
                     **({'usage': turn_usage} if turn_usage else {}),
                 },

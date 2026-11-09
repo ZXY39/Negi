@@ -605,6 +605,34 @@ async def test_follow_up_at_tools_boundary_ends_the_turn_without_calling_model(m
 
 
 @pytest.mark.asyncio
+async def test_follow_up_interrupt_finalize_marks_the_presentation_lane() -> None:
+    """投递侧仍是静默（不向任何渠道出声），呈现侧另立判据：
+    这一轮按"正常结束、只是没有最终正文"画，不能复用静默回合的折叠行。"""
+    runner = CeoFrontDoorRunner(loop=SimpleNamespace())
+    finalized = await runner._graph_finalize_turn(
+        {
+            "follow_up_interrupt": True,
+            "final_output": "",
+            "messages": [],
+        }
+    )
+
+    assert finalized["silent_reply"] is True
+    assert finalized["follow_up_interrupt"] is True
+    assert finalized["final_output"] == ""
+    assert "由待发送补充接管" in finalized["silent_reason"]
+
+
+@pytest.mark.asyncio
+async def test_model_silence_without_follow_up_keeps_the_presentation_flag_absent() -> None:
+    runner = CeoFrontDoorRunner(loop=SimpleNamespace())
+    finalized = await runner._graph_finalize_turn({"final_output": "", "messages": []})
+
+    assert finalized["silent_reply"] is True, "模型没给正文仍按静默收尾"
+    assert "follow_up_interrupt" not in finalized, "没有补充消息接管就不是打断"
+
+
+@pytest.mark.asyncio
 async def test_follow_up_boundary_keeps_the_next_hop_when_nothing_is_queued(monkeypatch) -> None:
     """队列是空的：边界不做任何决定，照常回到模型继续这一轮。"""
     runner = CeoFrontDoorRunner(loop=SimpleNamespace())
