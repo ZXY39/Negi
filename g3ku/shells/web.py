@@ -23,6 +23,7 @@ from g3ku.runtime.bootstrap_factory import make_provider as _make_provider
 from g3ku.runtime.config_refresh import refresh_loop_runtime_config
 from g3ku.runtime.external_events import (
     get_session_event_hub,
+    record_channel_media_failures,
     resolve_sticker_attachments,
 )
 from g3ku.runtime.external_outbox import (
@@ -416,9 +417,13 @@ def _extract_outbound_media_attachments(
         extract_local_media_attachments,
     )
 
+    failures: list[dict[str, str]] = []
     cleaned, attachments = extract_local_media_attachments(
-        text, allowed_roots=channel_attachment_roots(session_key)
+        text,
+        allowed_roots=channel_attachment_roots(session_key),
+        failures=failures,
     )
+    record_channel_media_failures(session_key, failures)
     return (cleaned if isinstance(cleaned, str) else text), list(attachments or [])
 
 

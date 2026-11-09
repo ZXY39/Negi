@@ -83,6 +83,12 @@ _EXCESS_BLANK_LINES_RE = re.compile(r"\n{3,}")
 _TITLE_RE = re.compile(r'\s+"([^"]*)"$')
 _PLACEHOLDER_RE = re.compile(r"\x00(\d+)\x00")
 
+# 渠道车道把「语法像本地引用、这一发却没出去」的原因带回给模型：下一轮由
+# `[RUNTIME_NOTICE]` 点名（台账见 `g3ku/runtime/skill_roster_notice.py`）。
+MEDIA_REF_MISSING = "file not found"
+MEDIA_REF_UNRESOLVED = "path could not be resolved"
+MEDIA_REF_OUTSIDE_ROOTS = "outside the allowed directories"
+
 
 def guess_media_mime(name: str) -> str:
     suffix = Path(str(name or "")).suffix.lower()
@@ -113,20 +119,24 @@ def channel_attachment_roots(session_key: str = "") -> tuple[Path, ...]:
     degraded to raw markdown: QQ rendered only the alt text, i.e. the file name.
 
     ``<data-root>/output/`` is where the model-facing path anchoring rule puts
-    formal deliverables (``g3ku.utils.helpers.PATH_ANCHOR_RULE_TEXT``). A split
-    data root therefore puts it outside the install workspace, and rejecting it
-    costs the whole reference: the channel receives markdown text instead of the
-    file. Only that delivery directory joins the set — the task DB, logs and
-    config bundles under the same data root stay closed. When the data root and
-    the install directory coincide the workspace root already covers it.
+    formal deliverables (``g3ku.utils.helpers.PATH_ANCHOR_RULE_TEXT``), and
+    ``<data-root>/temp/`` is the default ``exec`` working directory plus the
+    bare-filename anchor (``{data}/temp/ceo/<session>`` and
+    ``{data}/temp/tasks/<task>``). A split data root therefore puts both outside
+    the install workspace, and rejecting them costs the whole reference: the
+    channel receives markdown text instead of the file. Only those two runtime
+    work directories join the set — the task DB, logs and config bundles under
+    the same data root stay closed. When the data root and the install directory
+    coincide the workspace root already covers them.
 
     Web snapshots pass ``None`` instead: the operator is looking at their own
     machine, so restricting there would only break legitimate previews.
     """
     roots: list[Path] = [workspace_path()]
-    delivery_root = Path(data_work_path("output")).resolve()
-    if not delivery_root.is_relative_to(roots[0]):
-        roots.append(delivery_root)
+    for work_dir in (data_work_path("output"), data_work_path("temp")):
+        candidate = Path(work_dir).resolve()
+        if not candidate.is_relative_to(roots[0]):
+            roots.append(candidate)
     normalized = str(session_key or "").strip()
     if normalized:
         try:
@@ -162,33 +172,45 @@ def _file_url_to_path(src: str) -> str:
     return src
 
 
-def _resolve_local_source(raw_src: str, allowed_roots: tuple[Path, ...] | None = None) -> Path | None:
+def _resolve_local_source_detail(
+    raw_src: str, allowed_roots: tuple[Path, ...] | None = None
+) -> tuple[Path | None, str]:
+    """``(path, "")`` when the target resolves, otherwise ``(None, reason)``.
+
+    ``reason`` is empty when the target is not a local file reference at all
+    (http/data/viewer URL, bare text), so the channel lane can tell "not ours"
+    from "a local reference was refused" and report only the latter.
+    """
     src = str(raw_src or "").strip()
     if src.startswith("<") and src.endswith(">"):
         # Markdown 对带空格目标的合法写法：![alt](<C:\path with space.png>)
         src = src[1:-1].strip()
     src = _file_url_to_path(src)
     if not src or src.startswith(("#", "data:")):
-        return None
+        return None, ""
     if src.startswith("/api/ceo/media/original") or src.startswith("/api/ceo/uploads/file"):
-        return None
+        return None, ""
     if not re.match(r"^[A-Za-z]:[\\/]", src) and re.match(r"^[a-z][a-z0-9+.-]*:", src, re.I):
-        return None
+        return None, ""
     candidate = Path(src).expanduser()
     if not candidate.is_absolute():
         candidate = workspace_path() / candidate
     try:
         resolved = candidate.resolve()
     except OSError:
-        return None
+        return None, MEDIA_REF_UNRESOLVED
     if allowed_roots is not None:
         roots = tuple(Path(root).expanduser().resolve() for root in allowed_roots)
         if not any(resolved.is_relative_to(root) for root in roots):
             # 渠道车道对这一发的唯一信号是「正文原样留着、桥侧 attachments=0」：
             # 把路径落一行，排障时不必从产物反推是哪一支根没放行。
             logger.debug("channel media ref outside allowed roots: {}", resolved)
-            return None
-    return resolved
+            return None, MEDIA_REF_OUTSIDE_ROOTS
+    return resolved, ""
+
+
+def _resolve_local_source(raw_src: str, allowed_roots: tuple[Path, ...] | None = None) -> Path | None:
+    return _resolve_local_source_detail(raw_src, allowed_roots)[0]
 
 
 def mint_original_token(path: Path) -> str:
@@ -434,7 +456,10 @@ def rewrite_media_links_signed(
 
 
 def extract_local_media_attachments(
-    content: Any, *, allowed_roots: tuple[Path, ...] | None
+    content: Any,
+    *,
+    allowed_roots: tuple[Path, ...] | None,
+    failures: list[dict[str, str]] | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     """Turn markdown references to existing local files into channel attachments.
 
@@ -460,12 +485,30 @@ def extract_local_media_attachments(
     ``allowed_roots`` is required on purpose (pass ``channel_attachment_roots()``
     for channel-bound text): it is the only thing standing between a
     model-echoed path and a file the recipient should never receive.
+
+    ``failures`` is an optional sink for references that asked for a local file
+    but did not go out (nothing there, or outside every allowed root). Callers
+    hand the rows to the notice ledger so the next turn tells the model what
+    was not sent and why; references that are not local file references at all
+    (http links, bare text) are never recorded.
     """
     if not isinstance(content, str) or not content.strip():
         return (content if isinstance(content, str) else ""), []
 
     attachments: list[dict[str, Any]] = []
     seen: set[str] = set()
+    # 图片语法随后还会被链接正则再扫一遍（`![..](..)` 的外层就是 `[..](..)`）：
+    # 失败的引用按「引用 + 原因」去重，别把同一条没发出去的文件报两次。
+    reported: set[tuple[str, str]] = set()
+
+    def note_failure(raw_src: str, reason: str) -> None:
+        if failures is None or not reason:
+            return
+        key = " ".join(str(raw_src or "").split())
+        if not key or (key, reason) in reported:
+            return
+        reported.add((key, reason))
+        failures.append({"key": key, "reason": reason})
 
     def stash(source: Path, *, inline_media: bool) -> bool:
         key = str(source)
@@ -476,18 +519,24 @@ def extract_local_media_attachments(
         return True
 
     def replace_image(match: re.Match[str]) -> str:
-        source = _resolve_local_source(
-            _TITLE_RE.sub("", match.group(2)).strip(), allowed_roots
-        )
-        if source is None or not source.is_file():
+        raw_src = _TITLE_RE.sub("", match.group(2)).strip()
+        source, reason = _resolve_local_source_detail(raw_src, allowed_roots)
+        if source is None:
+            note_failure(raw_src, reason)
+            return match.group(0)
+        if not source.is_file():
+            note_failure(raw_src, MEDIA_REF_MISSING)
             return match.group(0)
         return "" if stash(source, inline_media=True) else match.group(0)
 
     def replace_link(match: re.Match[str]) -> str:
-        source = _resolve_local_source(
-            _TITLE_RE.sub("", match.group(2)).strip(), allowed_roots
-        )
-        if source is None or not source.is_file():
+        raw_src = _TITLE_RE.sub("", match.group(2)).strip()
+        source, reason = _resolve_local_source_detail(raw_src, allowed_roots)
+        if source is None:
+            note_failure(raw_src, reason)
+            return match.group(0)
+        if not source.is_file():
+            note_failure(raw_src, MEDIA_REF_MISSING)
             return match.group(0)
         return "" if stash(source, inline_media=False) else match.group(0)
 

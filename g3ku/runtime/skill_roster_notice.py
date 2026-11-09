@@ -55,6 +55,14 @@ QQ_IDENTITY_NOTICE_HEADING = '### QQ 身份'
 STICKER_FAILURE_NOTICE_HEADING = '### 上一轮未发出的表情包'
 STICKER_FAILURE_NOTICE_HINT = '按头部 sticker_packs 目录改成可解析的键后重发即可。'
 _STICKER_FAILURE_MAX_ROWS = 8
+# 渠道回复里引用过、却没发出去的本地媒体（文件不存在/在允许目录之外）。与表情包
+# 失败同一条通知、同一处清账；模型可见文案英文。
+MEDIA_FAILURE_NOTICE_HEADING = '### Media files that did not go out'
+MEDIA_FAILURE_NOTICE_HINT = (
+    'Files under the workspace, the data-root output/ or temp/ directory, and this '
+    'session\'s workspace can be sent; copy the file there and reference it again.'
+)
+_MEDIA_FAILURE_MAX_ROWS = 8
 # 头部快照与当刻值的差量：两次重印之间唯一的变化出口。
 RUNTIME_CONTRACT_UPDATE_HEADING = '### Runtime contract updates (supersede the pinned snapshot)'
 # 渲染顺序固定：同一组变化每次投出来的字节稳定，便于模型与测试比对。
@@ -296,6 +304,7 @@ def deliver_for_scope(
         covered_sections=covered_contract_sections,
     )
     sticker_failures = pending_sticker_failures(context)
+    media_failures = pending_media_failures(context)
     if (
         not pending
         and not removed_skills
@@ -307,6 +316,7 @@ def deliver_for_scope(
         and not changed_contract
         and not operator_actions
         and not sticker_failures
+        and not media_failures
     ):
         set_notice_context(scope_key, context)
         return None, []
@@ -321,6 +331,7 @@ def deliver_for_scope(
         contract_sections=changed_contract,
         operator_actions=operator_actions,
         sticker_failures=sticker_failures,
+        media_failures=media_failures,
     )
     if message is not None:
         if pending:
@@ -337,6 +348,7 @@ def deliver_for_scope(
             )
         # 挂账只在真投出去的那一刻清：构建失败/本轮没装配到通知，下一跳重投同一条。
         context['sticker_failures_pending'] = []
+        context['media_failures_pending'] = []
         context['memory_cursor'] = cursor
         context['group_memory_cursor'] = group_cursor
     set_notice_context(scope_key, context)
@@ -521,6 +533,9 @@ def normalize_skill_roster_notice_context(payload: Any) -> dict[str, Any]:
         'sticker_failures_pending': normalize_sticker_failures(
             source.get('sticker_failures_pending')
         ),
+        'media_failures_pending': normalize_media_failures(
+            source.get('media_failures_pending')
+        ),
         'skill_visibility_cursor': normalize_skill_visibility_cursor(
             source.get('skill_visibility_cursor')
         ),
@@ -540,6 +555,7 @@ def context_has_state(payload: Any) -> bool:
         or normalized.get('carried_stages')
         or normalized.get('contract_sections')
         or normalized.get('sticker_failures_pending')
+        or normalized.get('media_failures_pending')
     ):
         return True
     visibility = dict(normalized.get('skill_visibility_cursor') or {})
@@ -750,6 +766,63 @@ def render_sticker_failure_lines(failures: list[Any] | None) -> list[str]:
         STICKER_FAILURE_NOTICE_HEADING,
         *(f"- `{row['key']}` — {row['reason'] or '原因未知'}" for row in rows),
         STICKER_FAILURE_NOTICE_HINT,
+    ]
+
+
+def normalize_media_failures(payload: Any) -> list[dict[str, str]]:
+    """`{key, reason}` 行的台账形状：按引用去重、截断长度、封顶行数。"""
+    rows: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in list(payload or []):
+        if not isinstance(item, dict):
+            continue
+        key = ' '.join(str(item.get('key') or '').split())[:240]
+        reason = ' '.join(str(item.get('reason') or '').split())[:160]
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        rows.append({'key': key, 'reason': reason})
+        if len(rows) >= _MEDIA_FAILURE_MAX_ROWS:
+            break
+    return rows
+
+
+def record_media_failures(scope_key: str, failures: Any) -> dict[str, Any]:
+    """渠道出站唯一写入点：把这一发没出去的本地媒体引用挂进台账。
+
+    与表情包不同，这里**并入**而不是整表替换：渠道出站除回合回复外还有心跳/cron/
+    任务终态的主动推送，两条车道之间没有统一的"轮"收口点，后一发不能把前一发尚未
+    投出的失败抹掉。按引用去重；投递成功后由 `deliver_for_scope` 整表清空。
+    """
+    context = notice_context_for(scope_key)
+    pending = list(context.get('media_failures_pending') or [])
+    context['media_failures_pending'] = normalize_media_failures(
+        [*pending, *list(failures or [])]
+    )
+    return set_notice_context(scope_key, context)
+
+
+def pending_media_failures(context: Any) -> list[dict[str, str]]:
+    """还没投出去的媒体挂账行；只读，不改台账。"""
+    return list(
+        normalize_skill_roster_notice_context(context).get('media_failures_pending') or []
+    )
+
+
+def record_media_failures_for_session(session_key: Any, failures: Any) -> dict[str, Any]:
+    """渠道车道入口：按会话作用域记账；没有会话键时不落账。"""
+    return record_media_failures(session_scope_key(session_key), failures)
+
+
+def render_media_failure_lines(failures: list[Any] | None) -> list[str]:
+    """一节三行起：抬头、`- 引用 — 原因` 行、一句怎么改的提示。"""
+    rows = normalize_media_failures(failures)
+    if not rows:
+        return []
+    return [
+        MEDIA_FAILURE_NOTICE_HEADING,
+        *(f"- `{row['key']}` — {row['reason'] or 'reason unknown'}" for row in rows),
+        MEDIA_FAILURE_NOTICE_HINT,
     ]
 
 
@@ -992,11 +1065,13 @@ def build_notice_message(
     contract_sections: list[tuple[str, str]] | None = None,
     operator_actions: list[Any] | None = None,
     sticker_failures: list[Any] | None = None,
+    media_failures: list[Any] | None = None,
 ) -> dict[str, Any] | None:
     """一次性投递那条消息：role=user，落在本轮历史末尾。
 
     各节共用一条消息：上一轮未发出的表情包在最前（那是模型自己上一轮的动作，最
-    就近、最该先看到），控制台动作其次（先交代是谁改的），skill 名单再次（新增在
+    就近、最该先看到），没发出去的媒体文件紧随其后（同一类事实：引用过、用户没
+    收到），控制台动作其次（先交代是谁改的），skill 名单再次（新增在
     前、删除/收回紧随），记忆增量居中，群聊专属记忆紧随其后，人设更新在其后，
     运行时合同变化在最后（最近处，便于模型把"以最新通知为准"落在下一次判断上）；
     空节省略。
@@ -1005,6 +1080,9 @@ def build_notice_message(
     sticker_lines = render_sticker_failure_lines(sticker_failures)
     if sticker_lines:
         sections.append('\n'.join(sticker_lines))
+    media_lines = render_media_failure_lines(media_failures)
+    if media_lines:
+        sections.append('\n'.join(media_lines))
     qq_identity_section = str(qq_identity_text or '').strip()
     if qq_identity_section:
         sections.append('\n'.join([QQ_IDENTITY_NOTICE_HEADING, qq_identity_section]))
@@ -1108,6 +1186,7 @@ def strip_skill_roster_notice_echo(text: Any) -> str:
         SKILL_ROSTER_NOTICE_HEADING in tail
         or SKILL_ROSTER_CARRIED_HEADING in tail
         or STICKER_FAILURE_NOTICE_HEADING in tail
+        or MEDIA_FAILURE_NOTICE_HEADING in tail
     ):
         return normalized.strip()
     return normalized[:marker_index].strip()
@@ -1131,6 +1210,7 @@ def drop_records_after(context: Any, *, cutoff_iso: str) -> dict[str, Any]:
                 'known_readable_skill_ids': [],
             },
             'sticker_failures_pending': [],
+            'media_failures_pending': [],
             'operator_action_cursor': normalized['operator_action_cursor'],
         }
     kept = [
@@ -1157,6 +1237,7 @@ def drop_records_after(context: Any, *, cutoff_iso: str) -> dict[str, Any]:
         # 失败挂账对应的那条回复已随历史回卷：不撤的话下一跳会把一段"不存在的历史"
         # 当成上一轮报给模型。
         'sticker_failures_pending': [],
+        'media_failures_pending': [],
         # 截断只撤历史帧；操作游标保留，避免把截断后、下一跳前发生的动作静默跳过。
         'operator_action_cursor': normalized['operator_action_cursor'],
     }
@@ -1179,6 +1260,8 @@ __all__ = [
     'SKILL_ROSTER_NOTICE_MARKERS',
     'SKILL_ROSTER_NOTICE_ROLE',
     'RUNTIME_NOTICE_MARKER',
+    'MEDIA_FAILURE_NOTICE_HEADING',
+    'MEDIA_FAILURE_NOTICE_HINT',
     'STICKER_FAILURE_NOTICE_HEADING',
     'STICKER_FAILURE_NOTICE_HINT',
     'build_carried_message',
@@ -1196,21 +1279,26 @@ __all__ = [
     'mark_contract_sections_delivered',
     'mark_records_delivered',
     'normalize_contract_sections',
+    'normalize_media_failures',
     'normalize_notice_record',
     'normalize_skill_roster_notice_context',
     'normalize_skill_visibility_cursor',
     'normalize_sticker_failures',
     'notice_context_for',
     'pending_contract_sections',
+    'pending_media_failures',
     'pending_notice_records',
     'pending_sticker_failures',
     'readable_skill_items',
     'record_contract_sections',
     'record_live_skills',
     'record_skill_visibility_changes',
+    'record_media_failures',
+    'record_media_failures_for_session',
     'record_sticker_failures',
     'render_carried_text',
     'render_contract_update_lines',
+    'render_media_failure_lines',
     'render_notice_lines',
     'render_notice_text',
     'render_operator_action_lines',

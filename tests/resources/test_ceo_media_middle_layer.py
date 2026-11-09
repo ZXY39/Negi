@@ -319,6 +319,59 @@ def test_channel_attachment_roots_cover_the_data_root_output():
     assert any(delivery_root.is_relative_to(root) for root in roots)
 
 
+def test_channel_attachment_roots_cover_the_data_root_temp():
+    """`{data}/temp/` 是 exec 的默认 cwd 与裸文件名落点：截图/中间产物在那里
+    同样要能发出去。"""
+    from g3ku.deployment.data_root import data_work_path
+
+    temp_root = data_work_path("temp").resolve()
+    roots = ceo_media.channel_attachment_roots()
+    assert any(temp_root.is_relative_to(root) for root in roots)
+
+
+def test_data_root_temp_media_is_extracted_for_channels():
+    from g3ku.deployment.data_root import data_work_path
+
+    shot = data_work_path("temp") / "ceo" / "web_ceo-abc" / "shot.png"
+    shot.parent.mkdir(parents=True, exist_ok=True)
+    shot.write_bytes(b"\x89PNG fake")
+
+    text, attachments = ceo_media.extract_local_media_attachments(
+        f"![]({shot})", allowed_roots=ceo_media.channel_attachment_roots()
+    )
+
+    assert text == ""
+    assert [item["name"] for item in attachments] == ["shot.png"]
+
+
+def test_extract_attachments_reports_unsent_local_references(tmp_path):
+    """发不出去的引用要带原因回执：文件不存在的、落在允许目录之外的各一行；
+    http 链接不是本地引用，不算失败。"""
+    from g3ku.deployment.data_root import data_work_path
+
+    ok = data_work_path("output") / "ok.png"
+    ok.parent.mkdir(parents=True, exist_ok=True)
+    ok.write_bytes(b"\x89PNG fake")
+    missing = data_work_path("output") / "gone.png"
+    outside = tmp_path / "secret.png"
+    outside.write_bytes(b"\x89PNG fake")
+
+    failures: list[dict[str, str]] = []
+    text, attachments = ceo_media.extract_local_media_attachments(
+        f"![ok]({ok})\n![gone]({missing})\n![secret]({outside})\n"
+        "![web](https://example.com/x.png)",
+        allowed_roots=ceo_media.channel_attachment_roots(),
+        failures=failures,
+    )
+
+    assert [item["name"] for item in attachments] == ["ok.png"]
+    assert failures == [
+        {"key": str(missing), "reason": ceo_media.MEDIA_REF_MISSING},
+        {"key": str(outside), "reason": ceo_media.MEDIA_REF_OUTSIDE_ROOTS},
+    ]
+    assert str(missing) in text and str(outside) in text
+
+
 def test_data_root_output_media_is_extracted_for_channels():
     from g3ku.deployment.data_root import data_work_path
 

@@ -174,6 +174,25 @@ def _rewrite_media_signed(text: str, *, session_key: str = "") -> str:
     return rewritten if isinstance(rewritten, str) else text
 
 
+def record_channel_media_failures(
+    session_key: str, failures: list[dict[str, str]]
+) -> None:
+    """Queue "referenced but did not go out" rows for the model's next turn.
+
+    Same ledger and notice section as unsent stickers (lazy import for the same
+    reason as the media helpers). Bookkeeping must never break the publish, so
+    any failure here is swallowed with a debug line.
+    """
+    if not failures:
+        return
+    try:
+        from g3ku.runtime import skill_roster_notice
+
+        skill_roster_notice.record_media_failures_for_session(session_key, failures)
+    except Exception:  # noqa: BLE001 - notice bookkeeping never blocks egress
+        logger.debug("channel media failure notice record failed", exc_info=True)
+
+
 def _extract_media_attachments(
     text: str, *, session_key: str = ""
 ) -> tuple[str, list[dict[str, Any]]]:
@@ -182,16 +201,21 @@ def _extract_media_attachments(
     Same lazy-import constraint as ``_rewrite_media_signed``. Extraction runs
     BEFORE the signed rewrite: extracted tokens become structured attachments
     (bridges send them as real file messages); leftovers keep going through
-    the signed-URL rewrite as clickable fallback links.
+    the signed-URL rewrite as clickable fallback links. References that asked
+    for a local file but did not go out are queued for the notice lane.
     """
     from g3ku.runtime.api.ceo_media import (
         channel_attachment_roots,
         extract_local_media_attachments,
     )
 
+    failures: list[dict[str, str]] = []
     cleaned, attachments = extract_local_media_attachments(
-        text, allowed_roots=channel_attachment_roots(session_key)
+        text,
+        allowed_roots=channel_attachment_roots(session_key),
+        failures=failures,
     )
+    record_channel_media_failures(session_key, failures)
     return (cleaned if isinstance(cleaned, str) else text), list(attachments or [])
 
 
