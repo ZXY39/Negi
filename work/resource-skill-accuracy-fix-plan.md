@@ -313,4 +313,9 @@ python -m pytest tests/resources/test_tool_resource_admin_api.py tests/resources
 
 - commit `655e0520`：R1 / R2 / R3 全部落地，含测试与两份架构文档。
 - 验收：`ruff` 通过；资源/管理/安装器/生成检查/单走/requires.tools 共 254 passed；`test_task_web_worker_runtime.py` 222 passed；`scripts/check_architecture_docs.py` 0 error / 0 warning。
-- 剩余动作：重启 web 与 worker 后做真实对话与节点任务验收（进程内旧代码不会自行更新）。
+- 实盘验收（重启后 12:38–12:41）：
+  - `POST /api/resources/reload` 返回 `worker_reload: {requested: true, command_id, status: pending}`，web 与 worker 日志均出现 `resources reloaded via manual`；
+  - 重启后新增两个探针工具，首个前门回合触发 `resources reloaded via external-resource-generation-check: 41 tools`，说明 bootstrap 基线之后的落盘改动能被首个拍点捕获；
+  - `reload_probe_ok`（requires `exec`）`available=true`；`reload_probe_bad`（requires 不存在的工具）`available=false` 且 warnings 带 `missing required tools: missing_probe_dependency`；
+  - 删除探针并再次 reload 后 `GET /api/resources/tools` 回到 39 条，worker 同步重载。
+- 剩余动作：无。重启后的 web/worker 已运行新代码。
