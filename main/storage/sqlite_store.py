@@ -269,6 +269,8 @@ class SQLiteTaskStore:
                 node_id TEXT NOT NULL,
                 node_title TEXT NOT NULL DEFAULT '',
                 error_text TEXT NOT NULL,
+                text_ref TEXT NOT NULL DEFAULT '',
+                kind TEXT NOT NULL DEFAULT 'failure',
                 created_at TEXT NOT NULL
             )
             ''',
@@ -697,7 +699,10 @@ class SQLiteTaskStore:
             self._ensure_column(self._conn, 'task_terminal_outbox', 'rejected_reason', "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(self._conn, 'task_runtime_frames', 'payload_digest', "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(self._conn, 'task_disk_usage', 'db_anchor', "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(self._conn, 'task_error_logs', 'text_ref', "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(self._conn, 'task_error_logs', 'kind', "TEXT NOT NULL DEFAULT 'failure'")
             self._retire_inline_execution_trace_summaries(self._conn)
+            self._mark_legacy_diagnostic_error_rows(self._conn)
             self._node_detail_columns = self._live_columns(self._conn, 'task_node_details')
             self._tool_result_columns = self._live_columns(self._conn, 'task_node_tool_results')
 
@@ -747,6 +752,22 @@ class SQLiteTaskStore:
             )
         except sqlite3.Error as exc:
             logger.warning('detail trace summary retirement skipped: {}', exc)
+
+    # 旧诊断锚点 `model_size_span:` 从未是节点失败：它们只是体积读数，却占着
+    # `task_error_logs`，会把「最后一条错误」和错误计数一起抬高。一次性把它们标成
+    # diagnostic，之后写侧不再产生这类行。幂等执行，不占 `user_version`（那一格归
+    # 明细表瘦身迁移，失败后还要能重试）。
+    @staticmethod
+    def _mark_legacy_diagnostic_error_rows(conn: sqlite3.Connection) -> None:
+        try:
+            rows = conn.execute(
+                "UPDATE task_error_logs SET kind = 'diagnostic' "
+                "WHERE kind = 'failure' AND error_text LIKE 'model_size_span:%'"
+            ).rowcount
+            if rows:
+                logger.info('legacy diagnostic error rows marked: rows={}', rows)
+        except sqlite3.Error as exc:
+            logger.warning('legacy diagnostic error row marking skipped: {}', exc)
 
     @staticmethod
     def _drop_legacy_columns(conn: sqlite3.Connection, table: str, legacy: tuple[str, ...]) -> None:
@@ -2159,8 +2180,8 @@ class SQLiteTaskStore:
     def list_new_error_pauses(self) -> list[dict[str, Any]]:
         rows = self._fetchall(
             "SELECT p.id, p.task_id, p.node_id, p.pause_reason, p.remark, p.delivered, p.created_at, p.updated_at, "
-            "COALESCE((SELECT e.error_text FROM task_error_logs e WHERE e.task_id = p.task_id AND e.node_id = p.node_id ORDER BY e.seq DESC LIMIT 1), '') AS error_text, "
-            "COALESCE((SELECT e.node_title FROM task_error_logs e WHERE e.task_id = p.task_id AND e.node_id = p.node_id ORDER BY e.seq DESC LIMIT 1), '') AS node_title "
+            "COALESCE((SELECT e.error_text FROM task_error_logs e WHERE e.task_id = p.task_id AND e.node_id = p.node_id AND e.kind = 'failure' ORDER BY e.seq DESC LIMIT 1), '') AS error_text, "
+            "COALESCE((SELECT e.node_title FROM task_error_logs e WHERE e.task_id = p.task_id AND e.node_id = p.node_id AND e.kind = 'failure' ORDER BY e.seq DESC LIMIT 1), '') AS node_title "
             "FROM task_node_pauses p JOIN nodes n ON n.node_id = p.node_id "
             "WHERE p.pause_reason = 'error' AND p.delivered = 0 AND n.status = 'in_progress' "
             "AND COALESCE(json_extract(n.payload_json, '$.is_paused'), 0) = 1 "
@@ -2173,38 +2194,111 @@ class SQLiteTaskStore:
         )
         return [dict(row) for row in rows]
 
-    def append_task_error_log(self, *, task_id: str, node_id: str, node_title: str, error_text: str, created_at: str) -> TaskErrorLogRecord:
+    def append_task_error_log(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        node_title: str,
+        error_text: str,
+        created_at: str,
+        kind: str = 'failure',
+        text_ref: str = '',
+    ) -> TaskErrorLogRecord:
+        normalized_kind = str(kind or '').strip().lower() or 'failure'
+        normalized_ref = str(text_ref or '').strip()
+
         def operation(conn: sqlite3.Connection) -> TaskErrorLogRecord:
             cursor = conn.execute(
-                'INSERT INTO task_error_logs (task_id, node_id, node_title, error_text, created_at) VALUES (?, ?, ?, ?, ?)',
-                (str(task_id or '').strip(), str(node_id or '').strip(), str(node_title or ''), str(error_text or ''), str(created_at or '')),
+                'INSERT INTO task_error_logs (task_id, node_id, node_title, error_text, text_ref, kind, created_at) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?)',
+                (
+                    str(task_id or '').strip(),
+                    str(node_id or '').strip(),
+                    str(node_title or ''),
+                    str(error_text or ''),
+                    normalized_ref,
+                    normalized_kind,
+                    str(created_at or ''),
+                ),
             )
-            return TaskErrorLogRecord(seq=int(cursor.lastrowid or 0), task_id=str(task_id or '').strip(), node_id=str(node_id or '').strip(), node_title=str(node_title or ''), error_text=str(error_text or ''), created_at=str(created_at or ''))
+            return TaskErrorLogRecord(
+                seq=int(cursor.lastrowid or 0),
+                task_id=str(task_id or '').strip(),
+                node_id=str(node_id or '').strip(),
+                node_title=str(node_title or ''),
+                error_text=str(error_text or ''),
+                text_ref=normalized_ref,
+                kind=normalized_kind,
+                created_at=str(created_at or ''),
+            )
         return self._run_write(operation)
 
     def list_task_error_logs(self, task_id: str) -> list[TaskErrorLogRecord]:
         rows = self._fetchall(
-            'SELECT seq, task_id, node_id, node_title, error_text, created_at FROM task_error_logs WHERE task_id = ? ORDER BY seq ASC',
+            'SELECT seq, task_id, node_id, node_title, error_text, text_ref, kind, created_at '
+            'FROM task_error_logs WHERE task_id = ? ORDER BY seq ASC',
             (str(task_id or '').strip(),),
         )
-        return [TaskErrorLogRecord(seq=int(row['seq'] or 0), task_id=str(row['task_id'] or ''), node_id=str(row['node_id'] or ''), node_title=str(row['node_title'] or ''), error_text=str(row['error_text'] or ''), created_at=str(row['created_at'] or '')) for row in rows]
+        return [self._task_error_log_record(row) for row in rows]
 
     def list_task_node_error_logs(self, task_id: str, node_id: str) -> list[TaskErrorLogRecord]:
         rows = self._fetchall(
-            'SELECT seq, task_id, node_id, node_title, error_text, created_at FROM task_error_logs WHERE task_id = ? AND node_id = ? ORDER BY seq ASC',
+            'SELECT seq, task_id, node_id, node_title, error_text, text_ref, kind, created_at '
+            'FROM task_error_logs WHERE task_id = ? AND node_id = ? ORDER BY seq ASC',
             (str(task_id or '').strip(), str(node_id or '').strip()),
         )
-        return [
-            TaskErrorLogRecord(
-                seq=int(row['seq'] or 0),
-                task_id=str(row['task_id'] or ''),
-                node_id=str(row['node_id'] or ''),
-                node_title=str(row['node_title'] or ''),
-                error_text=str(row['error_text'] or ''),
-                created_at=str(row['created_at'] or ''),
-            )
+        return [self._task_error_log_record(row) for row in rows]
+
+    @staticmethod
+    def _task_error_log_record(row: Any) -> TaskErrorLogRecord:
+        return TaskErrorLogRecord(
+            seq=int(row['seq'] or 0),
+            task_id=str(row['task_id'] or ''),
+            node_id=str(row['node_id'] or ''),
+            node_title=str(row['node_title'] or ''),
+            error_text=str(row['error_text'] or ''),
+            text_ref=str(row['text_ref'] or ''),
+            kind=str(row['kind'] or 'failure'),
+            created_at=str(row['created_at'] or ''),
+        )
+
+    def count_task_error_logs_by_task(self, task_ids: list[str]) -> dict[str, dict[str, int]]:
+        """每任务的失败错误数与被命中节点数（只算 kind='failure'）。"""
+        normalized = sorted({str(item or '').strip() for item in list(task_ids or []) if str(item or '').strip()})
+        if not normalized:
+            return {}
+        placeholders = ','.join('?' for _ in normalized)
+        rows = self._fetchall(
+            f"SELECT task_id, COUNT(*) AS error_count, COUNT(DISTINCT node_id) AS node_count "
+            f"FROM task_error_logs WHERE kind = 'failure' AND task_id IN ({placeholders}) "
+            f"GROUP BY task_id",
+            tuple(normalized),
+        )
+        return {
+            str(row['task_id'] or ''): {
+                'error_count': int(row['error_count'] or 0),
+                'node_count': int(row['node_count'] or 0),
+            }
             for row in rows
-        ]
+        }
+
+    def count_task_error_logs_by_node(self, task_id: str) -> dict[str, int]:
+        """某任务内每个节点的失败错误数（只算 kind='failure'）。"""
+        rows = self._fetchall(
+            "SELECT node_id, COUNT(*) AS error_count FROM task_error_logs "
+            "WHERE kind = 'failure' AND task_id = ? GROUP BY node_id",
+            (str(task_id or '').strip(),),
+        )
+        return {str(row['node_id'] or ''): int(row['error_count'] or 0) for row in rows}
+
+    def latest_task_error_log(self, task_id: str) -> TaskErrorLogRecord | None:
+        row = self._fetchone(
+            "SELECT seq, task_id, node_id, node_title, error_text, text_ref, kind, created_at "
+            "FROM task_error_logs WHERE task_id = ? AND kind = 'failure' ORDER BY seq DESC LIMIT 1",
+            (str(task_id or '').strip(),),
+        )
+        return self._task_error_log_record(row) if row is not None else None
 
     def get_heartbeat_node_retry_state(self, node_id: str) -> dict[str, Any] | None:
         """读取某节点的心跳重试状态（连续失败计数 / 退避 / 升级标记）。"""

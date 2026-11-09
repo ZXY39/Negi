@@ -2733,6 +2733,9 @@ class TaskLogService:
     def list_node_pauses(self, task_id: str) -> list[TaskNodePauseRecord]:
         return self._store.list_task_node_pauses(task_id)
 
+    # 错误正文超过这个字节数才外置：普通 provider 400 远小于它，行内直接读原文最省事。
+    _ERROR_LOG_INLINE_TEXT_LIMIT = 8192
+
     def append_task_error_log(
         self,
         task_id: str,
@@ -2740,21 +2743,41 @@ class TaskLogService:
         *,
         error_text: str,
         node_title: str = '',
+        kind: str = 'failure',
     ) -> TaskErrorLogRecord:
         node = self._store.get_node(node_id)
         title = str(node_title or (node.goal if node is not None else node_id) or node_id).strip()
+        raw_text = str(error_text or '').strip()
+        stored_text = raw_text
+        text_ref = ''
+        if len(raw_text) > self._ERROR_LOG_INLINE_TEXT_LIMIT:
+            try:
+                stored_text, text_ref = self._summarize_content(
+                    raw_text,
+                    task_id=task_id,
+                    node_id=node_id,
+                    display_name=f'task-error-log:{node_id}',
+                    source_kind='task_error_log',
+                    force=True,
+                )
+            except Exception:
+                # 外置失败退回整段原文：错误记录本身不能被存储层抖动吃掉。
+                stored_text = raw_text
+                text_ref = ''
         record = self._store.append_task_error_log(
             task_id=task_id,
             node_id=node_id,
             node_title=title,
-            error_text=str(error_text or '').strip(),
+            error_text=stored_text,
+            text_ref=text_ref,
+            kind=kind,
             created_at=now_iso(),
         )
         _emit_audit_task_node_error(
             task_id=task_id,
             node_id=node_id,
             node_title=title,
-            error_text=str(error_text or ''),
+            error_text=raw_text,
         )
         return record
 
@@ -2763,6 +2786,15 @@ class TaskLogService:
 
     def list_task_node_error_logs(self, task_id: str, node_id: str) -> list[TaskErrorLogRecord]:
         return self._store.list_task_node_error_logs(task_id, node_id)
+
+    def count_task_error_logs_by_task(self, task_ids: list[str]) -> dict[str, dict[str, int]]:
+        return self._store.count_task_error_logs_by_task(task_ids)
+
+    def count_task_error_logs_by_node(self, task_id: str) -> dict[str, int]:
+        return self._store.count_task_error_logs_by_node(task_id)
+
+    def latest_task_error_log(self, task_id: str) -> TaskErrorLogRecord | None:
+        return self._store.latest_task_error_log(task_id)
 
     def max_observed_request_span_tokens(self, task_id: str, node_id: str) -> int:
         """窗口观测下界：provider 超窗不报错，只能从台账的实测和里取这个数。"""

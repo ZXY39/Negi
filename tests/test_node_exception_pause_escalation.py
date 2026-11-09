@@ -16,7 +16,7 @@ import pytest
 
 from main.errors import NodePausedError
 from main.models import NodeRecord, TaskRecord
-from main.runtime.model_size_span import EXCEPTION_REPORT_ATTR
+from main.runtime.model_failure_facts import EXCEPTION_FACTS_ATTR
 from main.runtime.node_message_kind import KIND_CHILD_ABNORMAL_PAUSE
 from main.service.runtime_service import MainRuntimeService
 
@@ -30,9 +30,14 @@ PROVIDER_TEXT = (
     "{'error': {'message': 'inference request is invalid', 'type': 'invalid_request_error', "
     "'code': '400'}} code=400 status=400"
 )
-SPAN_REPORT = (
-    'model_size_span: sensenova-6.8-flash-lite-2 answered 288,991 tokens and rejected '
-    '325,000 (same send-side ruler; span width 36,009 = 12.5%).'
+FACTS_TEXT = (
+    'provider_error (verbatim):\n'
+    f'{PROVIDER_TEXT}\n\n'
+    'request_facts:\n'
+    'http_status=400 request_shape=yes\n'
+    'member=sensenova-6.8-flash-lite wire_model=sensenova-6.8-flash\n'
+    'send_tokens=288991 declared_window=500000\n'
+    'runtime_action: none (no configuration changed)'
 )
 
 
@@ -137,12 +142,12 @@ async def test_exception_lane_escalates_to_the_parent_mailbox(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_exception_lane_carries_the_size_span_upstream(tmp_path: Path):
-    """The rejected hop has no reply, so the numbers reach the parent on the exception."""
+async def test_exception_lane_carries_the_failure_facts_upstream(tmp_path: Path):
+    """The rejected hop's card reaches both the error row and the parent mailbox unchanged."""
     service = _service(tmp_path)
     _seed(service)
     exc = RuntimeError(PROVIDER_TEXT)
-    setattr(exc, EXCEPTION_REPORT_ATTR, SPAN_REPORT)
+    setattr(exc, EXCEPTION_FACTS_ATTR, FACTS_TEXT)
     service.node_runner._react_loop = _RaisingLoop(exc)
 
     with pytest.raises(NodePausedError):
@@ -155,7 +160,10 @@ async def test_exception_lane_carries_the_size_span_upstream(tmp_path: Path):
     items = _notifications(service, ROOT)
     assert [str(item.get('kind') or '') for item in items] == [KIND_CHILD_ABNORMAL_PAUSE]
     body = str(items[0].get('message') or '')
-    assert SPAN_REPORT in body
+    assert FACTS_TEXT in body
+    logs = service.log_service.list_task_error_logs(TASK)
+    assert logs[-1].error_text == FACTS_TEXT
+    assert logs[-1].kind == 'failure'
 
 
 @pytest.mark.asyncio

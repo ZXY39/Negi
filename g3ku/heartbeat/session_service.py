@@ -1074,6 +1074,8 @@ class WebSessionHeartbeatService:
             previous: list[dict[str, str]] = []
             seen: set[str] = set()
             for record in reversed(logs):
+                if str(getattr(record, "kind", "failure") or "failure").strip().lower() != "failure":
+                    continue
                 text = str(getattr(record, "error_text", "") or "").strip()
                 if not text:
                     continue

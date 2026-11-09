@@ -332,6 +332,8 @@ _TASK_EVENT_BATCH_WINDOW_SECONDS = 0.25
 _TASK_EVENT_BATCH_MAX_ITEMS = 128
 _TASK_EVENT_BATCH_MAX_BYTES = 64 * 1024
 _TASK_EVENT_QUEUE_MAX_ITEMS = 4096
+# 异常暂停要带上 provider 原始错误与本次请求事实；旧上限 1200 会先把参数段截掉。
+_ABNORMAL_PAUSE_REASON_LIMIT = 8192
 # 条数闸门在实盘不够用：一条 live.patch 载荷就是该任务的全量摘要（MB 级），4096 条
 # 的上限允许队列驻留住几 GB。夜里的实测是 `entry_event_queue_depth` 打满 4096、
 # `entry_event_dropped_total` 累计 18715 条被丢，而且没有任何"丢了哪一类"的记录
@@ -6620,6 +6622,12 @@ class MainRuntimeService:
         parent_node_id = str(getattr(node, 'parent_node_id', '') or '').strip()
         goal = str(getattr(node, 'goal', '') or '').strip() or str(node.node_id or '')
         reason_text = str(reason or '').strip() or '节点被判定为无进展并暂停'
+        reason_body = reason_text
+        if len(reason_body) > _ABNORMAL_PAUSE_REASON_LIMIT:
+            reason_body = (
+                f'{reason_body[:_ABNORMAL_PAUSE_REASON_LIMIT]}\n'
+                '[truncated; full text in task_node_detail errors 段 / task_error_logs]'
+            )
         receipt: dict[str, Any] = {'status': 'skipped', 'reason': 'no_parent'}
         parent_error: BaseException | None = None
         if parent_node_id:
@@ -6629,7 +6637,7 @@ class MainRuntimeService:
             ).strip()
             body = (
                 f'子节点「{goal}」已被暂停（异常暂停）。\n'
-                f'原因：{reason_text[:1200]}\n'
+                f'原因：{reason_body}\n'
                 f'节点 id：{node.node_id}。请决定是继续推进、改写要求还是终止这条分支。\n'
                 f'{error_escalation_hint(receiver_is_root=receiver_is_root)}'
             )
@@ -12575,7 +12583,11 @@ class MainRuntimeService:
         task = self.get_task(normalized_task_id)
         if task is None:
             return None
-        items = self.log_service.list_task_error_logs(normalized_task_id)
+        items = [
+            item
+            for item in list(self.log_service.list_task_error_logs(normalized_task_id) or [])
+            if str(getattr(item, 'kind', 'failure') or 'failure').strip().lower() == 'failure'
+        ]
         return {
             'ok': True,
             'task_id': normalized_task_id,
@@ -12588,7 +12600,13 @@ class MainRuntimeService:
         if task is None:
             return None
         normalized_node_id = str(node_id or '').strip()
-        items = self.log_service.list_task_node_error_logs(normalized_task_id, normalized_node_id)
+        items = [
+            item
+            for item in list(
+                self.log_service.list_task_node_error_logs(normalized_task_id, normalized_node_id) or []
+            )
+            if str(getattr(item, 'kind', 'failure') or 'failure').strip().lower() == 'failure'
+        ]
         return {
             'ok': True,
             'task_id': normalized_task_id,
@@ -12715,6 +12733,27 @@ class MainRuntimeService:
         if detail is None:
             return None
         item = self._repair_legacy_display_payload(detail.model_dump(mode='json'))
+        try:
+            error_records = [
+                record
+                for record in list(
+                    self.log_service.list_task_node_error_logs(normalized_task_id, normalized_node_id) or []
+                )
+                if str(getattr(record, 'kind', 'failure') or 'failure').strip().lower() == 'failure'
+            ]
+        except Exception:
+            error_records = []
+        item['error_count'] = len(error_records)
+        item['errors_truncated'] = len(error_records) > 20
+        item['errors'] = [
+            {
+                'seq': int(getattr(record, 'seq', 0) or 0),
+                'created_at': str(getattr(record, 'created_at', '') or ''),
+                'error_text': str(getattr(record, 'error_text', '') or ''),
+                'text_ref': str(getattr(record, 'text_ref', '') or ''),
+            }
+            for record in error_records[-20:]
+        ]
         runtime_node = self.store.get_node(normalized_node_id)
         runtime_metadata = dict((runtime_node.metadata or {}) if runtime_node is not None else {})
         latest_live_distribution_round_id = ''
@@ -14266,6 +14305,8 @@ class MainRuntimeService:
                 line += f' ｜ 目标：{goal}'
             if progress:
                 line += f' ｜ 进展：{progress}'
+            if int(item.error_count or 0) > 0:
+                line += f' ｜ 错误：{int(item.error_count)}（{int(item.error_node_count)} 个节点）'
             lines.append(line)
         return '\n'.join(lines)
 

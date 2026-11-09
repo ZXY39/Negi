@@ -620,6 +620,10 @@ class TaskQueryService:
             node_counts = self._store.count_task_nodes_by_task([item.task_id for item in items])
         except Exception:
             node_counts = {}
+        try:
+            error_counts = self._store.count_task_error_logs_by_task([item.task_id for item in items])
+        except Exception:
+            error_counts = {}
         # 待命（连续节点空闲）是派生态：REST 列表初填也必须带上，否则整页刷新
         # 后卡片回退成「运行」，直到下一次 summary patch 才修正。只对在跑且未
         # 暂停的任务做判定（判据内部读帧与节点行，过滤后通常只剩少数任务）。
@@ -636,6 +640,9 @@ class TaskQueryService:
         for item in items:
             item.disk_usage_bytes = int(disk_usages.get(item.task_id, 0) or 0)
             item.node_count = int(node_counts.get(item.task_id, 0) or 0)
+            error_stats = dict(error_counts.get(item.task_id) or {})
+            item.error_count = int(error_stats.get('error_count') or 0)
+            item.error_node_count = int(error_stats.get('node_count') or 0)
             item.standby = bool(standby_flags.get(item.task_id, False))
         return items
 
@@ -711,6 +718,18 @@ class TaskQueryService:
         live_state = self._projection_live_state(task_id)
         activity_by_node = self._node_activity_labels(task_id)
         final_acceptance_label = self._final_acceptance_display_label(task)
+        try:
+            error_counts_by_node = dict(self._store.count_task_error_logs_by_node(task.task_id) or {})
+        except Exception:
+            error_counts_by_node = {}
+        error_count = sum(int(value or 0) for value in error_counts_by_node.values())
+        error_node_count = len([key for key, value in error_counts_by_node.items() if int(value or 0) > 0])
+        latest_error = None
+        if error_count:
+            try:
+                latest_error = self._store.latest_task_error_log(task.task_id)
+            except Exception:
+                latest_error = None
         tree_text = self._render_projection_tree_text(
             task.task_id,
             root_node_id=str(task.root_node_id or '').strip(),
@@ -719,6 +738,7 @@ class TaskQueryService:
             direct_children=direct_children,
             activity_by_node=activity_by_node,
             final_acceptance_label=final_acceptance_label,
+            error_counts_by_node=error_counts_by_node,
         )
         latest_node = self._with_display_fallback_for_latest_node(
             task_id,
@@ -727,6 +747,11 @@ class TaskQueryService:
         )
         model_calls = self._recent_model_calls(task_id)
         text = f'Task status: {task.status}'
+        if error_count:
+            recent_line = ''
+            if latest_error is not None:
+                recent_line = f'，最近 {latest_error.node_id} @ {latest_error.created_at}'
+            text = f'{text}\n错误: {error_count} 条（{error_node_count} 个节点{recent_line}）'
         header_lines = self._task_progress_activity_lines(
             task,
             live_state=live_state,
@@ -737,6 +762,11 @@ class TaskQueryService:
             text = f'{text}\n' + '\n'.join(header_lines)
         if tree_text:
             text = f'{text}\n{tree_text}'
+        if error_count and latest_error is not None:
+            text = (
+                f'{text}\n错误原文: task_node_detail(task_id={task.task_id}, '
+                f'node_id={latest_error.node_id}) → errors 段'
+            )
         return TaskProgressResult(
             task_id=task.task_id,
             task_status=task.status,
@@ -747,6 +777,9 @@ class TaskQueryService:
             token_usage=token_usage,
             token_usage_by_model=token_usage_by_model,
             model_calls=model_calls,
+            error_count=error_count,
+            error_node_count=error_node_count,
+            error_counts_by_node=error_counts_by_node,
             text=text,
         )
 
@@ -2360,6 +2393,7 @@ class TaskQueryService:
         direct_children: dict[str, list[str]],
         activity_by_node: dict[str, str] | None = None,
         final_acceptance_label: str = '',
+        error_counts_by_node: dict[str, int] | None = None,
     ) -> str:
         normalized_root_node_id = str(root_node_id or '').strip()
         if not normalized_root_node_id or normalized_root_node_id not in node_map:
@@ -2367,6 +2401,7 @@ class TaskQueryService:
         lines: list[str] = []
         progress_by_node = self._node_progress_text_map(task_id)
         activities = dict(activity_by_node or {})
+        error_counts = dict(error_counts_by_node or {})
 
         def _walk(node_id: str, prefix: str = '', *, is_root: bool = False, seen: set[str]) -> None:
             normalized_node_id = str(node_id or '').strip()
@@ -2381,6 +2416,7 @@ class TaskQueryService:
                 progress_by_node,
                 activity_label=activities.get(normalized_node_id, ''),
                 final_acceptance_label=final_acceptance_label,
+                error_count=int(error_counts.get(normalized_node_id, 0) or 0),
             )
             lines.append(label if is_root else f'{prefix}|-{label}')
             child_prefix = '' if is_root else f'{prefix}  '
@@ -2454,6 +2490,7 @@ class TaskQueryService:
         *,
         activity_label: str = '',
         final_acceptance_label: str = '',
+        error_count: int = 0,
     ) -> str:
         node_id = str(getattr(node, 'node_id', '') or '').strip()
         status = cls._tree_pause_display(node)
@@ -2470,6 +2507,8 @@ class TaskQueryService:
             label = f'({node_id},{status},{progress_text}'
         if activity_label:
             label = f'{label},{activity_label}'
+        if int(error_count or 0) > 0:
+            label = f'{label},错误:{int(error_count)}'
         return f'{label})'
 
     def _latest_node(self, nodes: list[NodeRecord]) -> LatestTaskNodeOutput | None:

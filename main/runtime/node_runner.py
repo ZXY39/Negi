@@ -41,7 +41,7 @@ from main.models import (
 )
 from main.prompts import load_prompt
 from main.protocol import now_iso
-from main.runtime import model_size_span
+from main.runtime import model_failure_facts
 from main.runtime.acceptance_handshake import (
     ACCEPTANCE_HANDSHAKE_KEY,
     ACCEPTANCE_STATE_ACCEPTED,
@@ -909,21 +909,19 @@ class NodeRunner:
             terminal_reason = self._task_terminal_reason(task_id, task=latest_task or task)
             if latest_task is not None and (bool(getattr(latest_task, 'cancel_requested', False)) or terminal_reason):
                 return self._mark_failed(task_id, node.node_id, reason=terminal_reason or 'canceled')
-            text = describe_exception(exc)
+            text = model_failure_facts.facts_for(exc) or describe_exception(exc)
             # 磁盘治理（P0）：error_log 与 pause 记录各自独立降级——2026-09-09 事故中
             # 这两行在磁盘满时二次写盘再炸，导致 31 个节点连锁 error-pause。
             # 记录失败绝不阻断 NodePausedError 的控制流（先例：react_loop "Error-history
             # persistence must never break the ReAct loop"）。
             # provider 整条链耗尽是从这里落地的；父节点升级由 `_mark_node_paused`
-            # 统一发出，体积区间读数随升级正文一起上去（实盘 2026-10-26 SPAN-PROBE
-            # task:578bebcdf701 node:20bb6c2ea7d1：子节点 400 耗尽后父节点信箱一条都没收到）。
-            span_report = str(getattr(exc, model_size_span.EXCEPTION_REPORT_ATTR, '') or '').strip()
+            # 统一发出。错误行、父信箱正文、根节点心跳读的是同一份 text。
             self._persist_error_and_pause_best_effort(
                 task_id=task_id,
                 node_id=node.node_id,
                 text=text,
                 node_goal=str(getattr(node, 'goal', '') or ''),
-                escalation_reason=f'{text}\n{span_report}' if span_report else text,
+                escalation_reason=text,
             )
             raise NodePausedError(task_id, node.node_id) from exc
         finally:

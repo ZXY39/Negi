@@ -371,6 +371,10 @@ class TaskErrorLogRecord(Model):
     node_id: str
     node_title: str = ''
     error_text: str = ''
+    # 长正文外置后这里只留摘要正文，全文在 text_ref 指向的内容工件里。
+    text_ref: str = ''
+    # failure = 真正的节点失败；diagnostic = 只读诊断（不参与计数、不当暂停正文）。
+    kind: str = 'failure'
     created_at: str = ''
 
 

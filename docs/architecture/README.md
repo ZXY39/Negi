@@ -58,6 +58,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 节点突然显示 `暂停·异常`（pause_reason=error）而模型没有报错 → 先看 `metadata.watchdog_history`：三条结构判据（重复相同调用 / 工具连续错误 / 超时无事件）见 `main-task-runtime.md`「看门狗」；验收方裁 `reject_no_progress`、回合兜底异常道（provider 整条链耗尽）也落同一暂停形态，理由分别在被验节点 `failure_reason`、该节点错误行与父节点 `child_abnormal_pause` 里。
 - 验收节点选了 `reject_no_progress` 却被工具拒绝 → 首轮无 `metadata.rejection_history` 时该档按设计禁用（`main-task-runtime.md`「验收三档裁决」）。
 - 同一工具反复返回同一条 `Error executing <tool>`、节点长期 `in_progress` 且从不进错误暂停 → `main-task-runtime.md`「Node-Level Pause and Recovery」（`runtime_fault:` 断路器）
+- 节点错误正文把模型名写成成员 key 而不是 wire model、错误行落在没发生失败的那颗节点上、或 `task_list` / `task_progress` 的错误计数把旧诊断也算进去 → `main-task-runtime.md`「节点信箱与唤醒（现行）」+ `context-and-cache-troubleshooting.md`「节点 400 不一定是 payload 畸形」（事实卡只给 provider 原文与请求事实，不判成因；只有 `kind='failure'` 行进升级与计数）
 - 操作员点了暂停、节点 `pause_requested=True` 而 `is_paused` 长期不变 → `main-task-runtime.md`「Node-Level Pause and Recovery」（脱离派发面后的暂停直落）
 - 渠道会话（`ext:`）任务长期静默却收不到失速提醒 → `heartbeat-system.md`「Task Stall Detection」（受众谓词与它要过的两道闸门）
 - 群聊里让它记住某事、跑命令、发文件、读宿主配置 → `sandbox-execution-plane.md` 的「Debugging Entry Points」：先分是信任级判错（注册表 `trust`）、档位名单漏登记，还是读根没下发
@@ -201,7 +202,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 节点/会话设的自设唤醒没响、响得太晚，或一次设闹钟攒出好几份 → `main-task-runtime.md`「节点信箱与唤醒（现行）」+ `heartbeat-system.md`「Cron Reminder Contract」
 - 用户消息在请求体里同时出现原文与带 `[消息送达时间]` 行的两个版本，或装饰后缓存命中率骤降 → `context-and-cache-troubleshooting.md`「用户消息时间装饰破坏前缀稳定或相等性去重」
 - 某配置整条模型链 400「The input messages must contain no more than one system message」（`InternalError.Algo.InvalidParameter`）、换 key 无效 → `context-and-cache-troubleshooting.md`「线体角色合同」
-- 某颗成员反复回通用 400（`inference request is invalid`）而同体量的请求在链上另一颗通过过，或想知道它实际塞得下多大 → `context-and-cache-troubleshooting.md`「节点 400 不一定是 payload 畸形」（`model_size_span:` 那一行报告）+ `config-and-models.md`「Frontdoor Context Window Contract」的观测值清单
+- 某颗成员反复回通用 400（`inference request is invalid`）而同体量的请求在链上另一颗通过过，或想知道它实际塞得下多大 → `context-and-cache-troubleshooting.md`「节点 400 不一定是 payload 畸形」（响应体不携带可信成因；节点暂停时上交 provider 原文与发送事实卡，由读到的人判断）+ `config-and-models.md`「Frontdoor Context Window Contract」的观测值清单
 - 同一段工具结果被上游按内容安全理由拒掉（`400 code=18`、`Inappropriate input/output rejected for security reasons`）、想在发给模型前把词表里的词替换掉 → `tool-hydration-and-callable-chain.md`「内容审查词替换（模型面正文）」+ `web-and-admin.md`「Model Config Page And Admin Contract」
 - 入站到首个 provider 请求发出耗时异常 → `context-and-cache-troubleshooting.md`「Prompt Cache Family 与 Actual Request」
 - 会话/节点疑似卡在 provider 退避重试，但界面没有重试次数与错误信息；或回合长时间不出新内容而连接没断（分不清"退避等待中"与"上游只滴分片不给载荷"） → `runtime-overview.md`「Chat provider 超时与重试边界」+ `web-and-admin.md`「Model Retry Visibility UI Contract」

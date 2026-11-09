@@ -206,6 +206,9 @@ class TaskListItem(Model):
     disk_usage_bytes: int = 0
     # 任务卡片「节点数」：task_nodes 投影行数（一次分组计数，见 get_tasks）。
     node_count: int = 0
+    # 任务错误读数：只算 kind='failure' 的错误行；节点数是被这些错误命中的节点数。
+    error_count: int = 0
+    error_node_count: int = 0
 
 
 class TaskRuntimeSummary(Model):
@@ -412,5 +415,8 @@ class TaskProgressResult(Model):
     token_usage: TokenUsageSummary = Field(default_factory=TokenUsageSummary)
     token_usage_by_model: list[ModelTokenUsageRecord] = Field(default_factory=list)
     model_calls: list[TaskModelCallRecord] = Field(default_factory=list)
+    error_count: int = 0
+    error_node_count: int = 0
+    error_counts_by_node: dict[str, int] = Field(default_factory=dict)
     text: str = ''
 
