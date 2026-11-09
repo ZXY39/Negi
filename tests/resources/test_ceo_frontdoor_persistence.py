@@ -99,6 +99,43 @@ def test_ceo_snapshot_carries_follow_up_interrupt_flag() -> None:
     assert snapshot[0]["turns"][0]["tools"][0]["tool_name"] == "filesystem"
 
 
+def test_ceo_snapshot_orders_interrupted_turn_before_the_follow_up() -> None:
+    """补充消息在排队时就落盘，被打断的那一轮收尾行落在它后面。
+
+    界面按转录行序重放，所以快照必须把这条收尾行挪回它所属回合的末尾，否则中途
+    消息会挤到上一轮上面。
+    """
+    snapshot = websocket_ceo._build_ceo_snapshot(
+        [
+            {"role": "user", "content": "去检查一下", "metadata": {"_transcript_turn_id": "t1"}},
+            {"role": "user", "content": "中途补充", "metadata": {"_transcript_turn_id": "t2"}},
+            {
+                "role": "assistant",
+                "content": "",
+                "turn_id": "t1",
+                "metadata": {"silent_reply": True, "follow_up_interrupt": True},
+            },
+            {"role": "assistant", "content": "已暂停", "turn_id": "t2", "status": "paused"},
+        ],
+        session_id="web:ceo-a",
+        frontdoor_turns=[
+            {
+                "seq": 1,
+                "turn_id": "t1",
+                "text": "",
+                "tools": [{"tool_call_id": "c1", "tool_name": "time", "status": "success"}],
+            }
+        ],
+    )
+
+    assert [(item["role"], item.get("turn_id")) for item in snapshot] == [
+        ("user", "t1"),
+        ("assistant", "t1"),
+        ("user", "t2"),
+        ("assistant", "t2"),
+    ]
+
+
 def test_ceo_snapshot_attaches_turn_ledger_and_compression_payloads() -> None:
     snapshot = websocket_ceo._build_ceo_snapshot(
         [

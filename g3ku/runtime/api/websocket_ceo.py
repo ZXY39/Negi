@@ -1267,7 +1267,40 @@ def _build_ceo_snapshot(
         if marker:
             item['compression_marker'] = marker
         items.append(item)
-    return items
+    return _order_follow_up_interrupt_rows(items)
+
+
+def _order_follow_up_interrupt_rows(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """把"被补充消息打断"的 assistant 行放回它所属回合的末尾。
+
+    补充消息入队时就落 pending 用户行，而被打断的那一轮要到工具批次跑完才收尾落
+    assistant 行，转录的写入顺序因此是 [提问, 补充, 被打断的回复]。界面按行序重放
+    会把中途消息顶到上一轮上面，逻辑顺序应按回合归属算：这条回复紧跟在它自己回合
+    的最后一行之后、在补充消息之前。没有打断行的快照原样返回。
+    """
+    interrupt_ids = {
+        id(item)
+        for item in items
+        if item.get("role") == "assistant"
+        and item.get("follow_up_interrupt") is True
+        and str(item.get("turn_id") or "").strip()
+    }
+    if not interrupt_ids:
+        return items
+    rest = [item for item in items if id(item) not in interrupt_ids]
+    for item in items:
+        if id(item) not in interrupt_ids:
+            continue
+        turn_id = str(item.get("turn_id") or "").strip()
+        anchor = -1
+        for index, other in enumerate(rest):
+            if str(other.get("turn_id") or "").strip() == turn_id:
+                anchor = index
+        if anchor >= 0:
+            rest.insert(anchor + 1, item)
+        else:
+            rest.append(item)
+    return rest
 
 
 def _snapshot_message_turn_id(message: dict[str, Any] | None) -> str:
