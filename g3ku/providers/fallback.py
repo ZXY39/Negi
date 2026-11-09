@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import math
 import random
 import re
 from typing import Any
@@ -38,6 +39,11 @@ DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS = 600.0
 RETRY_BACKOFF_BASE_SECONDS = 1.0
 RETRY_BACKOFF_CAP_SECONDS = 60.0
 RETRY_BACKOFF_JITTER_RATIO = 0.25
+# 退避到顶所需的最小指数。先比指数、再决定要不要做幂运算：`2.0 ** 1024`
+# 越过浮点上限会抛 OverflowError，而配置里的 retry_count 可以是天文数字。
+_RETRY_BACKOFF_CAP_EXPONENT = max(
+    0, math.ceil(math.log2(RETRY_BACKOFF_CAP_SECONDS / RETRY_BACKOFF_BASE_SECONDS))
+)
 # model_retry_status 的 `state` 取值集合。这几个字面量是活状态机的判别值，前门、节点
 # 帧、审计白名单与前端 toast 都在读同一份，判读点必须一起改（漏一处就等于状态到了界面
 # 上被静默抹掉）。`retrying`/`waiting_upstream` 是「还在等上游」的两种，`cleared` 收尾。
@@ -467,7 +473,10 @@ def model_retry_backoff_seconds(attempt_number: int) -> float:
     hammering the same still-exhausted rate window.
     """
     exponent = max(0, int(attempt_number or 1) - 1)
-    delay = min(RETRY_BACKOFF_CAP_SECONDS, RETRY_BACKOFF_BASE_SECONDS * (2.0 ** exponent))
+    if exponent >= _RETRY_BACKOFF_CAP_EXPONENT:
+        delay = RETRY_BACKOFF_CAP_SECONDS
+    else:
+        delay = min(RETRY_BACKOFF_CAP_SECONDS, RETRY_BACKOFF_BASE_SECONDS * (2.0 ** exponent))
     jitter = delay * RETRY_BACKOFF_JITTER_RATIO
     return max(0.1, delay + random.uniform(-jitter, jitter))
 

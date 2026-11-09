@@ -96,6 +96,21 @@ def _patch(monkeypatch, providers: dict[str, ProviderTarget]) -> None:
     monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
 
 
+def test_retry_backoff_stays_finite_for_astronomical_attempt_numbers() -> None:
+    """配置里的 retry_count 可以是天文数字：退避计算先夹指数，不能再抛 OverflowError。"""
+    from g3ku.providers.fallback import (
+        RETRY_BACKOFF_CAP_SECONDS,
+        RETRY_BACKOFF_JITTER_RATIO,
+        model_retry_backoff_seconds,
+    )
+
+    low = RETRY_BACKOFF_CAP_SECONDS * (1.0 - RETRY_BACKOFF_JITTER_RATIO)
+    high = RETRY_BACKOFF_CAP_SECONDS * (1.0 + RETRY_BACKOFF_JITTER_RATIO)
+    for attempt in (1_025, 2 ** 64, 10 ** 9):
+        delay = model_retry_backoff_seconds(attempt)
+        assert low <= delay <= high
+
+
 @pytest.mark.asyncio
 async def test_truncated_visible_reply_is_discarded_and_retried_on_same_model(monkeypatch) -> None:
     events = _Events()
