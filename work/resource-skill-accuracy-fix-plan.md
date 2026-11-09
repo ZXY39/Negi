@@ -267,10 +267,7 @@ python -m pytest tests/resources/test_tool_resource_admin_api.py tests/resources
 - 批次 1：commit `a560c7ad`，完成 F1-F6。
 - 批次 2 + 批次 3：同一提交，完成 F7-F13。两批在 `g3ku-resource-spec.md`、`create-skill-workflow.md`、`skill-installer` toolskill 上共用文件，拆开会需要逐 hunk 分期，故合并提交。
 - 验收：`ruff` 通过；`test_tool_resource_admin_api.py` + `test_skill_installer_tool.py` + `test_resource_runtime_smoke.py` 共 243 passed；五个被改 skill 经 `ResourceRegistry.discover()` 复核均为 `available=True`、无 warnings/errors。
-- 未修复的代码缺口（本次只改文档，按计划不改行为）：
-  1. 资源代检查首拍只记基线，目录在首拍前落盘会被永久吸进基线；
-  2. web 与 worker 不共享刷新结果，`/api/resources/reload` 只作用于接收请求的进程；
-  3. tool 的 `requires.tools` 被解析但从不探测。
+- 运行时缺口（首拍基线、web/worker 刷新隔离、tool 的 `requires.tools`）已按第 10 节续修，commit `655e0520`。
 
 ## 10. 运行时缺口修复（2026-11-09 续）
 
@@ -311,3 +308,9 @@ python -m pytest tests/resources/test_tool_resource_admin_api.py tests/resources
 - 命令：`ruff` + 上述测试文件 + `test_resource_runtime_smoke.py`。
 - 风险：R3 会改变 tool manifest 的实际效果；仓库现有 tool 的 `requires.tools` 全为空，风险集中在第三方工具。R1 会让每个进程在“无基线”时多一次全量扫描（bootstrap 记基线后正常路径不触发）。
 - 生效方式：需要重启 web 与 worker；改完后按运行时验收规范做一次真实对话与节点任务验证。
+
+### 执行记录
+
+- commit `655e0520`：R1 / R2 / R3 全部落地，含测试与两份架构文档。
+- 验收：`ruff` 通过；资源/管理/安装器/生成检查/单走/requires.tools 共 254 passed；`test_task_web_worker_runtime.py` 222 passed；`scripts/check_architecture_docs.py` 0 error / 0 warning。
+- 剩余动作：重启 web 与 worker 后做真实对话与节点任务验收（进程内旧代码不会自行更新）。
