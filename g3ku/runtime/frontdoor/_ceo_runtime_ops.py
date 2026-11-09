@@ -8091,6 +8091,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             ),
             "finish_reason": str(response_view.finish_reason or "stop"),
             "error_text": str(response_view.error_text or ""),
+            # 结构化故障信号必须跟 error_text 一起过白名单：`_graph_normalize_model_output`
+            # 靠 error_kind 选断流分支、靠 code/status 做程序化分类；漏抄会让分支永远走
+            # 通用档，把英文取证串原样投给渠道。
+            "error_kind": str(response_view.error_kind or ""),
+            "error_code": str(response_view.error_code or ""),
+            "error_status": response_view.error_status,
             "reasoning_content": _checkpoint_safe_value(response_view.reasoning_content),
             "thinking_blocks": _checkpoint_safe_value(response_view.thinking_blocks),
             "reasoning_items": _checkpoint_safe_value(response_view.reasoning_items),

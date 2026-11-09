@@ -334,3 +334,42 @@ async def test_graph_call_model_still_returns_cleanly_stopped_empty_response(
     assert len(attempts) == 1
     assert result["empty_response_retry_count"] == 0
     assert result["response_payload"]["stream_incomplete"] is False
+
+
+@pytest.mark.asyncio
+async def test_stream_abort_keeps_structured_kind_through_graph_call_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """断流的结构化信号必须活着穿过图状态，否则中文兜底分支永远命中不了。
+
+    `_graph_call_model` 是这条车道的进口：它用 `_checkpoint_safe_model_response_payload`
+    把 provider 回包写进 state。白名单漏抄 `error_kind` 时，英文取证串会原样投给渠道。
+    """
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    ctx = _make_runner_state(monkeypatch, runner)
+
+    async def _call_model_with_tools(**_kwargs):
+        return {
+            "content": "半截正文",
+            "tool_calls": [],
+            "finish_reason": "error",
+            "error_text": "stream closed before finish_reason after 57 chunks",
+            "error_kind": "StreamIncomplete",
+            "stream_incomplete": True,
+        }
+
+    monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
+
+    result = await runner._graph_call_model(ctx["state"], runtime=ctx["runtime"])
+    payload = result["response_payload"]
+    assert payload["error_kind"] == "StreamIncomplete"
+
+    state = dict(ctx["state"])
+    state["response_payload"] = payload
+    with pytest.raises(ModelProviderExhaustedError) as raised:
+        await runner._graph_normalize_model_output(state, runtime=ctx["runtime"])
+
+    detail = str(raised.value)
+    assert "响应流未正常终止" in detail
+    assert "半截正文" not in detail
+    assert "closed before finish_reason" in raised.value.raw_message
