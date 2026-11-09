@@ -61,9 +61,6 @@ _MODEL_RETRY_STATUS_ERROR_CHAR_LIMIT = 4096
 # 并按新链重启重试，而不是抛错中止回合。此上限只兜底"链反复变化 + 一直不成功"的
 # 病态抖动，正常一次改链只消耗一次。
 _MAX_CHAIN_CHANGE_RESTARTS = 12
-# 断流重试的硬帽：配置里的 retry_count 可以是 9999999（"永不放弃"档），
-# 直接 max(2, retry_count) 会把一次断流变成对坏槽位的无限重发。
-_STREAM_TRUNCATION_RETRY_CAP = 5
 
 
 def _model_retry_status_error_text(value: Any) -> str:
@@ -2002,7 +1999,7 @@ class ConfigChatBackend:
                             restart_with_refreshed_chain = True
                             break
                     effective_round_budget = (
-                        min(max(2, budget_rounds), _STREAM_TRUNCATION_RETRY_CAP)
+                        max(2, budget_rounds)
                         if last_failure_was_stream_truncation
                         else budget_rounds
                     )

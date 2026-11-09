@@ -152,10 +152,10 @@ async def test_truncation_budget_exhausts_then_downgrades_to_next_model(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_truncation_budget_is_capped_for_unbounded_retry_config(monkeypatch) -> None:
+async def test_truncation_budget_follows_configured_retry_count(monkeypatch) -> None:
     events = _Events()
     providers = {
-        "m_a": _target("m_a", _ScriptedProvider("m_a", events, truncations=99), retry_count=9999999),
+        "m_a": _target("m_a", _ScriptedProvider("m_a", events, truncations=99), retry_count=3),
         "m_b": _target("m_b", _ScriptedProvider("m_b", events, truncations=0)),
     }
     _patch(monkeypatch, providers)
@@ -174,8 +174,8 @@ async def test_truncation_budget_is_capped_for_unbounded_retry_config(monkeypatc
     assert response.content == "完整正文"
     calls = [item[1] for item in events.items if item[0] == "call"]
     resets = [item for item in events.items if item[0] == "reset"]
-    assert calls == ["m_a"] * chat_backend_module._STREAM_TRUNCATION_RETRY_CAP + ["m_b"]
-    assert len(resets) == chat_backend_module._STREAM_TRUNCATION_RETRY_CAP
+    assert calls == ["m_a", "m_a", "m_a", "m_b"]
+    assert len(resets) == 3
 
 
 @pytest.mark.asyncio
