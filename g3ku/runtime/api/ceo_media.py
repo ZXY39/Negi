@@ -26,7 +26,9 @@ from urllib.parse import unquote
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
+from loguru import logger
 
+from g3ku.deployment.data_root import data_work_path
 from g3ku.runtime.web_ceo_sessions import upload_dir_for_session, workspace_path
 from g3ku.utils.helpers import safe_filename
 
@@ -110,10 +112,21 @@ def channel_attachment_roots(session_key: str = "") -> tuple[Path, ...]:
     media live). Without that root a reply referencing its own workspace file
     degraded to raw markdown: QQ rendered only the alt text, i.e. the file name.
 
+    ``<data-root>/output/`` is where the model-facing path anchoring rule puts
+    formal deliverables (``g3ku.utils.helpers.PATH_ANCHOR_RULE_TEXT``). A split
+    data root therefore puts it outside the install workspace, and rejecting it
+    costs the whole reference: the channel receives markdown text instead of the
+    file. Only that delivery directory joins the set — the task DB, logs and
+    config bundles under the same data root stay closed. When the data root and
+    the install directory coincide the workspace root already covers it.
+
     Web snapshots pass ``None`` instead: the operator is looking at their own
     machine, so restricting there would only break legitimate previews.
     """
     roots: list[Path] = [workspace_path()]
+    delivery_root = Path(data_work_path("output")).resolve()
+    if not delivery_root.is_relative_to(roots[0]):
+        roots.append(delivery_root)
     normalized = str(session_key or "").strip()
     if normalized:
         try:
@@ -171,6 +184,9 @@ def _resolve_local_source(raw_src: str, allowed_roots: tuple[Path, ...] | None =
     if allowed_roots is not None:
         roots = tuple(Path(root).expanduser().resolve() for root in allowed_roots)
         if not any(resolved.is_relative_to(root) for root in roots):
+            # 渠道车道对这一发的唯一信号是「正文原样留着、桥侧 attachments=0」：
+            # 把路径落一行，排障时不必从产物反推是哪一支根没放行。
+            logger.debug("channel media ref outside allowed roots: {}", resolved)
             return None
     return resolved
 

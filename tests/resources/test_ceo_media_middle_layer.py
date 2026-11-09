@@ -309,9 +309,45 @@ def test_extract_attachments_still_rejects_file_url_outside_allowed_roots(monkey
     assert "file:///" in signed
 
 
-def test_channel_attachment_roots_are_workspace_only():
+def test_channel_attachment_roots_cover_the_data_root_output():
+    """`{data}/output/` 是模型侧正式交付物的默认落点：数据根与安装目录分叉时
+    必须有一支根覆盖它，否则回复里引用自己的交付图会被整条判越界。"""
+    from g3ku.deployment.data_root import data_work_path
+
+    delivery_root = data_work_path("output").resolve()
     roots = ceo_media.channel_attachment_roots()
-    assert roots == (ceo_media.workspace_path(),)
+    assert any(delivery_root.is_relative_to(root) for root in roots)
+
+
+def test_data_root_output_media_is_extracted_for_channels():
+    from g3ku.deployment.data_root import data_work_path
+
+    shot = data_work_path("output") / "shot.png"
+    shot.parent.mkdir(parents=True, exist_ok=True)
+    shot.write_bytes(b"\x89PNG fake")
+
+    text, attachments = ceo_media.extract_local_media_attachments(
+        f"![]({shot})", allowed_roots=ceo_media.channel_attachment_roots()
+    )
+
+    assert text == ""
+    assert [item["name"] for item in attachments] == ["shot.png"]
+    assert attachments[0]["kind"] == "image"
+
+
+def test_channel_attachment_roots_keep_the_rest_of_the_data_root_closed():
+    from g3ku.deployment.data_root import data_root
+
+    transcript = data_root() / "sessions" / "s.jsonl"
+    transcript.parent.mkdir(parents=True, exist_ok=True)
+    transcript.write_text("{}\n", encoding="utf-8")
+
+    text, attachments = ceo_media.extract_local_media_attachments(
+        f"[泄露]({transcript})", allowed_roots=ceo_media.channel_attachment_roots()
+    )
+
+    assert attachments == []
+    assert str(transcript) in text
 
 
 def test_channel_attachment_roots_include_the_session_workspace(monkeypatch, tmp_path):
@@ -350,7 +386,7 @@ def test_session_workspace_media_is_extracted_for_its_own_channel(monkeypatch, t
     assert attachments[0]["name"] == "wave.gif"
     assert attachments[0]["kind"] == "image"
     assert attachments[0]["inline_media"] is True
-    # 没有会话键时白名单仍只有全局工作区，越界路径不放行。
+    # 没有会话键时不带会话工作目录这一支，该目录里的文件仍不放行。
     _, denied = ceo_media.extract_local_media_attachments(
         text, allowed_roots=ceo_media.channel_attachment_roots()
     )
