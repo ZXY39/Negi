@@ -13,7 +13,7 @@
 - [ ] 驱动第三方安装时，下载 / 缓存 / 解压中转目录约定为工作区根目录的 `temp/<tool_id>/`
 - [ ] 已填写 `source`
 - [ ] 已填写 `current_version`
-- [ ] 已填写 `governance`
+- [ ] 已填写 `governance`，且 `allowed_roles` 非空（空或缺失 = 对该工具一律拒绝）
 
 ## 三、主 toolskill
 

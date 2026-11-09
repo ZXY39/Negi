@@ -408,12 +408,30 @@ class ResourceManager:
 
         discovered_tools_by_root: dict[Path, ToolResourceDescriptor | None] = {}
         changed_tool_names: set[str] = set()
-        for root in sorted(tool_roots):
+
+        def _load_tool_root(root: Path) -> None:
             descriptor = self._registry.build_tool_descriptor(root)
             discovered_tools_by_root[root] = descriptor
             changed_tool_names.update(old_tool_names_by_root.get(root, []))
             if descriptor is not None:
                 changed_tool_names.add(descriptor.name)
+
+        for root in sorted(tool_roots):
+            _load_tool_root(root)
+
+        # 依赖方也要跟着重建：requires.tools 命中本轮变化的工具时，它的 available
+        # 判据已经变了。依赖链可能有多层，rebuild 到不动点为止。
+        while True:
+            dependent_roots = {
+                descriptor.root.resolve(strict=False)
+                for descriptor in old.tools.values()
+                if set(descriptor.requires_tools) & changed_tool_names
+                and descriptor.root.resolve(strict=False) not in discovered_tools_by_root
+            }
+            if not dependent_roots:
+                break
+            for root in sorted(dependent_roots):
+                _load_tool_root(root)
 
         final_tool_names = set(old.tools.keys())
         final_tool_names.difference_update(changed_tool_names)
@@ -439,9 +457,9 @@ class ResourceManager:
         services = self._resolved_services()
 
         occupied_tool_names = set(new_tools.keys())
-        for root in tool_roots:
+        for root in discovered_tools_by_root:
             occupied_tool_names.difference_update(old_tool_names_by_root.get(root, []))
-        for root in sorted(tool_roots):
+        for root in sorted(discovered_tools_by_root):
             for name in old_tool_names_by_root.get(root, []):
                 self._remove_tool_name(name, new_tools=new_tools, new_tool_instances=new_tool_instances, old_snapshot=old)
             descriptor = discovered_tools_by_root.get(root)

@@ -161,7 +161,7 @@ CEO/frontdoor 另有任务生命周期、分发控制与贴纸选图类固定工
 - 例外：运行时还有一条免模型的复开提醒——`exec` 结果发生输出截断（`stdout_truncated` / `stderr_truncated`）时，运行时在这条 exec 结果里注入 `content_open` 的复开方法，让模型直接从"立即可用但截断的 exec"切换到"能按行/字符精确读本地文件的 content_open"，不必先手动 `load_tool_context`。契约不在场时那一次 `content_open` 调用走投递路径，同一跳把契约拿回来。同一结果只注入一次。
 - 节点的可执行对象字典（`_tool_provider` 交付给执行循环的 `tools`）按治理可见集兜底构建，frame 里的候选被写成空时也不塌缩。这一条与上一条是一对：候选决定"能不能被提升"，对象字典决定"提升后能不能真被解析执行"，两者各自按治理可见集取上界，才不会出现"名字可见却调不动"。
 - repair-required 资源从普通候选中剥离：工具进 `repair_required_tools`（不进 agent-facing `candidate_tools`，也从在场判据里剔掉，所以永不进 callable），skill 进 `repair_required_skills`（机器状态，留在合同 payload 里供诊断；渲染行已从尾块删除——skill 待修复的信号由 `load_skill_context` 的 repair 载荷承载）。这些列表不影响 provider-facing `tools[]` 变化。
-- `requires` 是可用性硬探测：skill 查 `tools` / `bins` / `env`，tool 查 `tools` / `bins` / `paths` / `env`。`requires.tools` 在两侧都按已发现工具名比对，缺失即 `available=false` + `missing required tools`；定向刷新在算出本轮工具名全集后，对本次重建的 tool descriptor 复核同一项。
+- `requires` 是可用性硬探测：skill 查 `tools` / `bins` / `env`，tool 查 `tools` / `bins` / `paths` / `env`。`requires.tools` 在两侧都按已发现工具名比对，缺失即 `available=false` + `missing required tools`；定向刷新在算出本轮工具名全集后对本次重建的 tool descriptor 复核同一项，`requires.tools` 命中本轮变更的工具会被连带重建，依赖链按不动点展开。
 
 exec 与 memory 工具：
 

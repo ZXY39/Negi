@@ -299,7 +299,7 @@ python -m pytest tests/resources/test_tool_resource_admin_api.py tests/resources
 - 改法：
   1. `_discover_tools` 改为两遍：先建全部 descriptor，再用完整工具名集合检查 `requires.tools`。
   2. 新增 `apply_tool_requires_tools(descriptor, tool_names)`，缺失时 `available=False` + `missing required tools: ...`，与 skill 侧文案一致。
-  3. 定向刷新在算出 `final_tool_names` 后对本次重建的 tool descriptor 应用同一检查。
+  3. 定向刷新在算出 `final_tool_names` 后对本次重建的 tool descriptor 应用同一检查；依赖本轮变更工具名的工具会被连带重建（依赖链到不动点）。
 - 测试：新增 `tests/resources/test_tool_requires_tools.py`，覆盖“要求已注册工具 → 可用”“要求缺失工具 → unavailable + warning”。
 - 文档：把 `g3ku-resource-spec.md` 与 `repair-tool` 里“tool 不探测 requires.tools”的临时表述改回“探测”。
 
