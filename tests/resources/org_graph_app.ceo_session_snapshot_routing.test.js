@@ -812,3 +812,31 @@ test("snapshot.ceo keeps turn-less rows in cache without inventing a rail", () =
     assert.equal(entry?.messages?.[1]?.silent_reply, true);
     assert.equal("turns" in (entry?.messages?.[1] || {}), false);
 });
+
+test("snapshot.ceo caps the cached window at the feed render window", () => {
+    const { S, initCeoWs, getCeoSessionSnapshotCache, __socket } = loadApp();
+
+    S.activeSessionId = "web:shared";
+    initCeoWs();
+
+    const socket = __socket();
+    assert.ok(socket);
+
+    const messages = Array.from({ length: 100 }, (_, index) => ({
+        role: "assistant",
+        content: `m${index + 1}`,
+    }));
+    socket.onmessage({
+        data: JSON.stringify({
+            type: "snapshot.ceo",
+            session_id: "web:shared",
+            data: { messages, inflight_turn: null },
+        }),
+    });
+
+    // 缓存窗口与 CEO_FEED_WINDOW_SIZE 同值：切回已打开过的会话时缓存首屏能铺满一屏。
+    const entry = getCeoSessionSnapshotCache("web:shared");
+    assert.equal(entry?.messages?.length, 80);
+    assert.equal(entry?.messages?.[0]?.content, "m21");
+    assert.equal(entry?.messages?.[79]?.content, "m100");
+});

@@ -27,7 +27,9 @@ const CEO_TOOL_STEP_MAX = 5;
 const TASK_DETAIL_SESSION_KEY = "g3ku.task-detail.session.v1";
 const CEO_SESSION_SNAPSHOT_CACHE_KEY = "g3ku.ceo.session-snapshots.v2";
 const CEO_SESSION_SNAPSHOT_CACHE_LIMIT = 6;
-const CEO_SESSION_SNAPSHOT_MESSAGE_LIMIT = 24;
+// 快照缓存按渲染窗口（CEO_FEED_WINDOW_SIZE）留行：缓存先行渲染要能铺满一屏，
+// 否则切回已打开过的会话时先只画 24 行、其余等权威快照。
+const CEO_SESSION_SNAPSHOT_MESSAGE_LIMIT = 80;
 const CEO_SESSION_SNAPSHOT_TOOL_EVENT_LIMIT = 12;
 // CEO websocket 解析失败后最多强制重连几次（拿到正常快照即清零），避免重连风暴。
 const CEO_WS_PARSE_RESYNC_LIMIT = 3;
