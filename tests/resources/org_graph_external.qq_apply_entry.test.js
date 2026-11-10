@@ -16,10 +16,10 @@ function readFrontend(name) {
     return fs.readFileSync(path.join(FRONTEND, name), "utf8");
 }
 
-test("申请入口是指向 QQ 开放平台的新标签页锚点", () => {
+test("QQ 账号入口是指向 QQ 开放平台的新标签页锚点", () => {
     const html = readFrontend("org_graph.html");
-    const tag = html.match(/<a\b[^>]*href="https:\/\/q\.qq\.com\/qqbot\/openclaw\/login\.html"[^>]*>申请入口<\/a>/)?.[0];
-    assert.ok(tag, `没有指向 ${APPLY_URL} 的「申请入口」锚点`);
+    const tag = html.match(/<a\b[^>]*href="https:\/\/q\.qq\.com\/qqbot\/openclaw\/login\.html"[^>]*>进入账号<\/a>/)?.[0];
+    assert.ok(tag, `没有指向 ${APPLY_URL} 的 QQ 账号入口锚点`);
     assert.match(tag, /\btarget="_blank"/);
     assert.match(tag, /\brel="[^"]*noopener/);
 });
@@ -31,7 +31,7 @@ test("应用里不再有承载申请页的内置窗口", () => {
     }
 });
 
-test("申请入口与同排按钮共用一条文字基线", () => {
+test("外链按钮与同排按钮共用一条文字基线", () => {
     const css = readFrontend("org_graph.css");
     const tier = css.match(/:root \.toolbar-btn \{[^}]*\}/)?.[0];
     assert.ok(tier, "没有 :root .toolbar-btn 这一档的定义");
