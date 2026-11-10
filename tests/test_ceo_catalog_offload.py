@@ -46,8 +46,10 @@ class _Store:
     def __init__(self) -> None:
         self._sessions = {"web:shared": _Session("web:shared", "local reply")}
         self.load_calls: list[str] = []
+        self.list_calls = 0
 
     def list_sessions(self):
+        self.list_calls += 1
         return [{"key": key} for key in self._sessions]
 
     def get_or_create(self, key: str):
@@ -93,6 +95,17 @@ def test_cached_sync_builder_uses_cache_and_populates_it(monkeypatch, tmp_path: 
     second = build_ceo_session_catalog_cached(store, active_session_id="web:shared")
     assert second is first
     assert len(store.load_calls) == calls_after_first
+
+
+def test_catalog_reads_the_transcript_listing_once(monkeypatch, tmp_path: Path) -> None:
+    """本地、china 归档与 ext 孤儿三处曾各读一遍清单：一次构建 = 3 次全量 stat/解码。"""
+    _patch_workspace(monkeypatch, tmp_path)
+    store = _Store()
+
+    catalog = build_ceo_session_catalog(store, active_session_id="web:shared")
+
+    assert store.list_calls == 1
+    assert [item.get("session_id") for item in catalog["items"]] == ["web:shared"]
 
 
 @pytest.mark.asyncio

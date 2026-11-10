@@ -2253,12 +2253,13 @@ def list_local_ceo_sessions(
     active_session_id: str,
     is_running_resolver: Callable[[str], bool] | None = None,
     status_resolver: Callable[[str], str] | None = None,
+    listing: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     depth_limits = main_runtime_depth_limits()
     persisted_keys = {
         str(item.get("key") or "").strip()
-        for item in session_manager.list_sessions()
+        for item in (listing if listing is not None else session_manager.list_sessions())
         if str(item.get("key") or "").strip().startswith("web:")
     }
     inflight_by_session = list_inflight_web_ceo_sessions()
@@ -2306,13 +2307,15 @@ def list_channel_ceo_sessions(
     *,
     active_session_id: str,
     is_running_resolver: Callable[[str], bool] | None = None,
+    listing: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     summaries: dict[str, dict[str, Any]] = {}
+    listing = list(session_manager.list_sessions()) if listing is None else listing
 
     # The China channel subsystem has been removed; only pre-existing
     # ``china:*`` transcripts are listed (read-only archive), there are no
     # config-driven virtual placeholders anymore.
-    for item in session_manager.list_sessions():
+    for item in listing:
         key = str(item.get("key") or "").strip()
         if not key.startswith("china:"):
             continue
@@ -2372,6 +2375,7 @@ def list_channel_ceo_sessions(
         session_manager,
         active_session_id=active_session_id,
         is_running_resolver=is_running_resolver,
+        listing=listing,
     )
 
 
@@ -2535,6 +2539,7 @@ def _list_external_channel_rows(
     *,
     active_session_id: str,
     is_running_resolver: Callable[[str], bool] | None = None,
+    listing: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Read-only catalog rows for live ``ext:*`` external bridge sessions.
 
@@ -2562,7 +2567,7 @@ def _list_external_channel_rows(
                 entries_by_key[session_key] = entry
     session_keys = list(entries_by_key.keys())
     known = set(session_keys)
-    for item in session_manager.list_sessions():
+    for item in (listing if listing is not None else session_manager.list_sessions()):
         key = str(item.get("key") or "").strip()
         if key.startswith("ext:") and key not in known:
             session_keys.append(key)
@@ -2593,16 +2598,21 @@ def build_ceo_session_catalog(
     is_running_resolver: Callable[[str], bool] | None = None,
     status_resolver: Callable[[str], str] | None = None,
 ) -> dict[str, Any]:
+    # 三个子列表原先各读一次转录清单（每份转录读 head + 尾窗两份），
+    # 一次目录构建 = 三遍全量 stat/解码；同一份 listing 传到底。
+    listing = session_manager.list_sessions()
     local_items = list_local_ceo_sessions(
         session_manager,
         active_session_id=active_session_id,
         is_running_resolver=is_running_resolver,
         status_resolver=status_resolver,
+        listing=listing,
     )
     channel_items = list_channel_ceo_sessions(
         session_manager,
         active_session_id=active_session_id,
         is_running_resolver=is_running_resolver,
+        listing=listing,
     )
     grouped: dict[str, dict[str, Any]] = {}
     for item in channel_items:
