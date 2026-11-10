@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import io
 import mimetypes
 import random
@@ -108,6 +109,14 @@ _BOTPY_CORO_QUALNAMES = {
 _MAX_INBOUND_IMAGE_BYTES = 5 * 1024 * 1024
 _MAX_INBOUND_FILE_BYTES = 20 * 1024 * 1024
 _MAX_INBOUND_ATTACHMENTS = 4
+# 入站合并窗：QQ 把用户"一起发的几条"拆成独立事件（实盘文本→文件 2.96~4.69s、
+# 文本→图片 4.69s、附件→附件 0.45~0.79s）。首条若立即提交，回合在后续内容到达
+# 前就已起跑，后面的文件只能由排队车道当下一轮输入。窗内同会话的消息合成一次
+# 提交：正文按到达顺序拼接、附件合并。窗口从窗内首条起算 4s，尾条之后再等 1s，
+# 最长 8s（用户连续发很多条时不会无限推迟）。
+_INBOUND_COALESCE_SECONDS = 4.0
+_INBOUND_COALESCE_QUIET_SECONDS = 1.0
+_INBOUND_COALESCE_MAX_SECONDS = 8.0
 _MEDIA_DOWNLOAD_CHUNK_BYTES = 64 * 1024
 # QQ 媒体 URL 在事件落地的那一瞬间不一定可读（实测同一条语音链接先失败、几分钟后
 # 返回 200 audio/mp3），所以取一次不算数：允许一次短延时重试。
@@ -1102,6 +1111,35 @@ def _install_botpy_group_message_parser() -> bool:
     return True
 
 
+@dataclass
+class _InboundBatch:
+    """合并窗内同一会话的入站消息（提交前只存在于内存）。"""
+
+    first_at: float
+    last_at: float
+    texts: list[str] = field(default_factory=list)
+    attachments: list[dict[str, Any]] = field(default_factory=list)
+    event_ids: list[str] = field(default_factory=list)
+    sender: dict[str, str] = field(default_factory=dict)
+    chat_type: str = ""
+    after_submit: list[Callable[[], Any]] = field(default_factory=list)
+
+
+def _batch_idempotency_key(event_ids: list[str]) -> str:
+    """窗内全部事件 id 决定幂等键：同一批重投（平台重放）才不会绕过服务端去重。
+
+    单条消息沿用 ``qq-<id>`` 的既有形状；多条合并时取窗口内全部 id 的摘要，
+    避免拿首/尾单条 id 当键——那会让同批重投在服务端被当成新消息。
+    """
+    ids = [str(item or "").strip() for item in event_ids if str(item or "").strip()]
+    if not ids:
+        return ""
+    if len(ids) == 1:
+        return idempotency_key_for(ids[0])
+    digest = hashlib.sha1("\x1f".join(ids).encode("utf-8")).hexdigest()[:24]
+    return f"qq-batch-{digest}"
+
+
 async def run_qq_official_bridge(
     *,
     app_id: str,
@@ -1116,8 +1154,13 @@ async def run_qq_official_bridge(
     history_retention_days: int = HISTORY_RETENTION_DAYS,
     consumed_retention_days: int = CONSUMED_RETENTION_DAYS,
     owner_openids: list[str] | None = None,
+    inbound_coalesce_seconds: float | None = None,
 ) -> None:
-    """Run until cancelled/error. ``on_state`` reports coarse status."""
+    """Run until cancelled/error. ``on_state`` reports coarse status.
+
+    ``inbound_coalesce_seconds`` 覆盖合并窗时长；``None`` 用模块默认值，
+    0 表示逐条立即提交（测试与对时延敏感的自定义部署用）。
+    """
     try:
         import botpy
     except Exception as exc:  # noqa: BLE001
@@ -1157,6 +1200,14 @@ async def run_qq_official_bridge(
     digest_tasks: dict[str, asyncio.Task] = {}
     bot_identity: dict[str, str] = {"id": "", "username": ""}
     last_identity_report: tuple[str, str] = ("", "")
+    coalesce_seconds = (
+        _INBOUND_COALESCE_SECONDS
+        if inbound_coalesce_seconds is None
+        else max(0.0, float(inbound_coalesce_seconds))
+    )
+    # 合并窗只活在这一次登录里：桥终止时窗内未提交的消息随 finally 尽力补投。
+    inbound_batches: dict[str, _InboundBatch] = {}
+    inbound_flushers: dict[str, asyncio.Task] = {}
 
     async def _history_cleanup_loop() -> None:
         while True:
@@ -1176,59 +1227,167 @@ async def run_qq_official_bridge(
         attachment_names: list[str] | None = None,
         sender: dict[str, str] | None = None,
         chat_type: str = "",
-    ) -> None:
-        attachment_payloads = list(attachments or [])
-        if voice_lines:
-            # 语音转出的文字并入正文：QQ 语音往往是口语化的独立内容，并入而不是
-            # 另起回合，用户才有"发了一段话 + 一段语音"的连贯语义。
-            text = "\n".join([str(text or "").strip(), *[line for line in voice_lines if line]]).strip()
-        if not text.strip() and not attachment_payloads:
+        after_submit: Callable[[], Any] | None = None,
+    ) -> bool:
+        """并入该会话的合并窗；窗满后一次提交（返回是否已接手 ``after_submit``）。
+
+        QQ 把用户"一起发的几条"拆成独立事件（实盘文本→文件 2.96~4.69s、文本→
+        图片 4.69s、附件→附件 0.45~0.79s）。首条若立即提交，回合在后续内容到达
+        前就已起跑，后面的文件只能由排队车道当下一轮输入——这正是"第一个触发、
+        后面的内容等下一跳"的来源。窗内消息合成一次提交：正文按到达顺序拼接、
+        附件合并、幂等键覆盖窗内全部事件 id。
+
+        ``after_submit`` 在提交之后（含提交失败）执行；群 @ 的未读 digest 冲刷
+        必须排在 @ 回合提交之后，否则心跳可能先起一轮、把 @ 消息挤成下一轮。
+        """
+        parts = [str(text or "").strip()]
+        # 语音转出的文字并入正文：QQ 语音往往是口语化的独立内容，并入而不是
+        # 另起回合，用户才有"发了一段话 + 一段语音"的连贯语义。
+        parts.extend(str(line or "").strip() for line in (voice_lines or []))
+        merged_text = "\n".join(part for part in parts if part)
+        payloads = [item for item in list(attachments or []) if isinstance(item, dict)]
+        if not merged_text and not payloads:
             if attachment_names:
                 # 一条纯附件消息在所有附件都取不到时（QQ 的媒体 URL 带签名且会过期）
                 # 正文与附件同时为空。以前这里直接 return，用户端就是"发了张图，什么
                 # 都没有"。契约要求纯附件消息照常提交，所以补一行点名式的说明再提交；
                 # 混合正文的场景不加注，保持"降级为仅文本提交"原样。
                 named = "、".join([name for name in attachment_names if name][:3]) or f"{len(attachment_names)} 项"
-                text = f"{_ATTACHMENT_FAILURE_PREFIX}{named}：均未能取到"
+                merged_text = f"{_ATTACHMENT_FAILURE_PREFIX}{named}：均未能取到"
             else:
-                return
-        session_id = sessions.get(external_key)
-        if session_id is None:
-            session_id = await client.ensure_session(external_key, chat_type=chat_type or None)
-            sessions[external_key] = session_id
-        # 先记下这条入站消息的 id，回复它的那几发才拿得到被动窗口参数。回合回复通常
-        # 在入站后几秒落地（实盘 9 秒），远在窗口之内；不记就只能走主动消息形状。
-        _note_passive_ref(state, external_key, event_id)
-        # 每次入站都幂等校验 pump 存活：pump 意外终结（如 shutdown 竞态取消）时
-        # 靠下一条用户消息自愈，而不是让该会话的出站永久无人消费。
-        _spawn_pump(session_id, external_key)
-        idem = idempotency_key_for(event_id)
-        # 绝不回退到 external_key 当幂等键：external_key 对同一用户恒定，
-        # 缺事件 id 的消息会用它撞掉该用户第一条消息的幂等位并被永久丢弃。
-        # 没有幂等键时提交不带键的请求，服务端按新消息处理。
-        response = await client.send_message(
-            session_id,
-            text,
-            idempotency_key=idem or None,
-            attachments=attachment_payloads or None,
-            sender=sender,
-            metadata={"chat_type": chat_type} if chat_type else None,
+                # 空消息不建批；但 @ 事件的 digest 冲刷仍要跑（旧行为在 finally 里做）。
+                if after_submit is not None:
+                    await after_submit()
+                return True
+        batch = inbound_batches.get(external_key)
+        if event_id and batch is not None and str(event_id) in batch.event_ids:
+            # 全量档下同一条消息可能被两个事件送到（@ 与普通群消息共用消息 id）：
+            # 窗内按事件 id 去重，避免同一句话进两次提交。
+            if after_submit is not None:
+                batch.after_submit.append(after_submit)
+            return True
+        now = time.monotonic()
+        if batch is None:
+            batch = _InboundBatch(first_at=now, last_at=now)
+            inbound_batches[external_key] = batch
+        batch.last_at = now
+        if merged_text:
+            batch.texts.append(merged_text)
+        if payloads:
+            batch.attachments.extend(payloads)
+        if event_id:
+            batch.event_ids.append(str(event_id))
+        if sender:
+            batch.sender = dict(sender)
+        if chat_type:
+            batch.chat_type = str(chat_type)
+        if after_submit is not None:
+            batch.after_submit.append(after_submit)
+        if coalesce_seconds <= 0.0:
+            inbound_batches.pop(external_key, None)
+            await _submit_inbound_batch(external_key, batch)
+            return True
+        _ensure_inbound_flusher(external_key)
+        return True
+
+    def _ensure_inbound_flusher(external_key: str) -> None:
+        existing = inbound_flushers.get(external_key)
+        if existing is not None and not existing.done():
+            return
+        inbound_flushers[external_key] = asyncio.create_task(
+            _flush_inbound_loop(external_key),
+            name=f"qq-official-inbound:{external_key}",
         )
-        payload = response if isinstance(response, dict) else {}
-        if payload.get("binding"):
-            # 绑定码的确认与排队回执共用 `receipt` 这一个字段，但只有前者要投给用户：
-            # 绑定不创建回合、不入转录，私聊里发完码若一句都不回，操作者无从知道码
-            # 是注册成功、作废了、还是失败了。
-            receipt = str(payload.get("receipt") or "").strip()
-            if receipt:
+
+    async def _flush_inbound_loop(external_key: str) -> None:
+        cancelled = False
+        # 尾条静默窗不短于合并窗本身：短窗（测试/对时延敏感的自定义部署）下
+        # 不该再额外多等 1s。
+        quiet_seconds = min(_INBOUND_COALESCE_QUIET_SECONDS, coalesce_seconds)
+        try:
+            while True:
+                batch = inbound_batches.get(external_key)
+                if batch is None:
+                    return
+                now = time.monotonic()
+                deadline = min(
+                    batch.first_at + _INBOUND_COALESCE_MAX_SECONDS,
+                    max(
+                        batch.first_at + coalesce_seconds,
+                        batch.last_at + quiet_seconds,
+                    ),
+                )
+                if now >= deadline:
+                    break
+                await asyncio.sleep(deadline - now)
+            batch = inbound_batches.pop(external_key, None)
+            if batch is not None:
+                await _submit_inbound_batch(external_key, batch)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        finally:
+            inbound_flushers.pop(external_key, None)
+            # 收口与新消息到达只差一个事件循环 tick：留下未收的批要重新拉起
+            # flusher。取消（桥终止）时留给 finally 里的补投，不在这里续跑。
+            if not cancelled and external_key in inbound_batches:
+                _ensure_inbound_flusher(external_key)
+
+    async def _submit_inbound_batch(external_key: str, batch: _InboundBatch) -> None:
+        try:
+            session_id = sessions.get(external_key)
+            if session_id is None:
+                session_id = await client.ensure_session(external_key, chat_type=batch.chat_type or None)
+                sessions[external_key] = session_id
+            # 先记下窗内最后一条入站消息的 id，回复它的那几发才拿得到被动窗口参数。
+            # 回合回复通常在入站后几秒落地（实盘 9 秒），远在窗口之内；不记就只能
+            # 走主动消息形状。合并窗内后面还有消息时，最后一条才是最新的引用。
+            _note_passive_ref(state, external_key, batch.event_ids[-1] if batch.event_ids else "")
+            # 每次提交都幂等校验 pump 存活：pump 意外终结（如 shutdown 竞态取消）时
+            # 靠下一条用户消息自愈，而不是让该会话的出站永久无人消费。
+            _spawn_pump(session_id, external_key)
+            # 会话正忙、消息已排队（`status:"queued"`）时桥保持静默：排队条目在转录里是
+            # durable 的 `pending` 行，会话回到空闲后由派发通道照常接住，追发的用户已经
+            # 看得见自己那条消息，再回一句机器话只是噪音。`receipt` 仍留在 /api/v1 的
+            # 响应里给对接方读（网页与 MCP 网关用它分辨"追加还是撞车"）。
+            response = await client.send_message(
+                session_id,
+                "\n".join(batch.texts).strip(),
+                # 绝不回退到 external_key 当幂等键：external_key 对同一用户恒定，
+                # 缺事件 id 的消息会用它撞掉该用户第一条消息的幂等位并被永久丢弃。
+                # 没有幂等键时提交不带键的请求，服务端按新消息处理。
+                idempotency_key=_batch_idempotency_key(batch.event_ids) or None,
+                attachments=batch.attachments or None,
+                sender=batch.sender or None,
+                metadata={"chat_type": batch.chat_type} if batch.chat_type else None,
+            )
+            payload = response if isinstance(response, dict) else {}
+            if payload.get("binding"):
+                # 绑定码的确认与排队回执共用 `receipt` 这一个字段，但只有前者要投给用户：
+                # 绑定不创建回合、不入转录，私聊里发完码若一句都不回，操作者无从知道码
+                # 是注册成功、作废了、还是失败了。
+                receipt = str(payload.get("receipt") or "").strip()
+                if receipt:
+                    try:
+                        await deliver(external_key, receipt)
+                    except Exception:  # noqa: BLE001 - 回执失败不影响码本身的处理
+                        logger.warning("qq-official failed to deliver binding receipt to {}", external_key)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - 单批提交失败不能带走泵/桥
+            logger.exception(
+                "qq-official inbound submit failed for {} ({} message(s))",
+                external_key,
+                len(batch.event_ids) or 1,
+            )
+        finally:
+            for callback in batch.after_submit:
                 try:
-                    await deliver(external_key, receipt)
-                except Exception:  # noqa: BLE001 - 回执失败不影响码本身的处理
-                    logger.warning("qq-official failed to deliver binding receipt to {}", external_key)
-        # 会话正忙、消息已排队（`status:"queued"`）时桥保持静默：排队条目在转录里是
-        # durable 的 `pending` 行，会话回到空闲后由派发通道照常接住，追发的用户已经
-        # 看得见自己那条消息，再回一句机器话只是噪音。`receipt` 仍留在 /api/v1 的
-        # 响应里给对接方读（网页与 MCP 网关用它分辨"追加还是撞车"）。
+                    await callback()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # noqa: BLE001 - 冲刷失败不阻断提交通道
+                    logger.exception("qq-official after-submit hook failed for {}", external_key)
 
     async def _store_for_group(external_key: str) -> tuple[GroupHistoryStore, str] | None:
         session_id = sessions.get(external_key)
@@ -1432,6 +1591,13 @@ async def run_qq_official_bridge(
                     await asyncio.wait_for(state["wake"].wait(), timeout=interval_seconds)
                     state["wake"].clear()
                 except asyncio.TimeoutError:
+                    # 入站合并窗未收口时先不推 digest：心跳先起一轮会把窗内的
+                    # @ 消息挤成下一轮（窗本身最长 8s，等它收口即可）。
+                    while any(
+                        sessions.get(pending_key) == session_id
+                        for pending_key in list(inbound_batches)
+                    ):
+                        await asyncio.sleep(0.5)
                     await _send_digest_now(session_id, store, source="timer")
             while state["pending_n"] > 0:
                 consumed = await asyncio.to_thread(store.last_consumed_n)
@@ -2443,9 +2609,16 @@ async def run_qq_official_bridge(
                 )
             on_state("connected", "")
 
-        async def _dispatch(self, external_key: str, message, *, chat_type: str):
+        async def _dispatch(
+            self,
+            external_key: str,
+            message,
+            *,
+            chat_type: str,
+            after_submit: Callable[[], Any] | None = None,
+        ) -> bool:
             attachments, voice_lines = await _collect_attachments(media_client, message)
-            await on_incoming(
+            return await on_incoming(
                 external_key,
                 _normalize_face_markup(
                     _content_of(message),
@@ -2462,15 +2635,27 @@ async def run_qq_official_bridge(
                 ],
                 _sender_of(message, chat_type),
                 chat_type,
+                after_submit,
             )
 
         async def _dispatch_group(self, message):
             external_key = external_key_for_group(getattr(message, "group_openid", ""))
+            handed_off = False
             try:
-                await self._dispatch(external_key, message, chat_type="group")
+                handed_off = await self._dispatch(
+                    external_key,
+                    message,
+                    chat_type="group",
+                    # @ 回合先提交，随后立刻把未读群消息送进心跳；失败不阻断 @ 回合。
+                    # 合并窗把提交推迟到窗满之后，冲刷必须挂在提交之后；否则心跳可能
+                    # 先起一轮，把 @ 消息挤成下一轮。
+                    after_submit=lambda: _flush_group_digest_for_at(external_key),
+                )
             finally:
-                # @ 回合先提交，随后立刻把未读群消息送进心跳；失败不阻断 @ 回合。
-                await _flush_group_digest_for_at(external_key)
+                if not handed_off:
+                    # 入站消息在接手回调之前就失败了（空消息/去重以外的异常路径）：
+                    # 冲刷仍要跑，保持旧车道的兜底语义。
+                    await _flush_group_digest_for_at(external_key)
 
         async def _background_group_message(self, message):
             # 非 @ 消息只做历史记录，不调用 /messages、不创建回合。
@@ -2640,6 +2825,19 @@ async def run_qq_official_bridge(
             await gateway
             raise QqGatewaySessionEndedError("QQ 网关会话全部结束，需重新登录")
     finally:
+        # 合并窗里未提交的入站消息：先停 flusher，再尽力补投一次。窗口本身只有几秒，
+        # 停桥/重登撞上它的概率不低；丢了就是用户那条消息永远没有回合。
+        flushers = list(inbound_flushers.values())
+        for task in flushers:
+            task.cancel()
+        for key, batch in list(inbound_batches.items()):
+            inbound_batches.pop(key, None)
+            if not batch.texts and not batch.attachments:
+                continue
+            try:
+                await asyncio.wait_for(_submit_inbound_batch(key, batch), timeout=3.0)
+            except Exception as exc:  # noqa: BLE001 - 停桥时补投是尽力而为
+                logger.warning("qq-official pending inbound flush failed for {}: {}", key, exc)
         # 对账循环是本模块定义的普通任务，_is_botpy_task 收割器认不出它，
         # 必须显式取消。
         if reconcile_task is not None:
@@ -2659,7 +2857,7 @@ async def run_qq_official_bridge(
         leftovers = [task for task in asyncio.all_tasks(asyncio.get_running_loop()) if _is_botpy_task(task)]
         for task in leftovers:
             task.cancel()
-        reap = list(pumps) + list(digest_tasks.values()) + leftovers + ([reconcile_task] if reconcile_task is not None else []) + ([cleanup_task] if cleanup_task is not None else []) + ([identity_task] if identity_task is not None else [])
+        reap = list(pumps) + list(digest_tasks.values()) + leftovers + flushers + ([reconcile_task] if reconcile_task is not None else []) + ([cleanup_task] if cleanup_task is not None else []) + ([identity_task] if identity_task is not None else [])
         if reap:
             await asyncio.gather(*reap, return_exceptions=True)
         await media_client.aclose()

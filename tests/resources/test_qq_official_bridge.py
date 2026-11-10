@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import io
 import json
 import sys
@@ -215,6 +216,13 @@ def _reset_fake_registries():
     FakeClient.instances.clear()
     FakeExternalApiClient.instances.clear()
     bridge_module.reset_bridge_delivery_state()
+
+
+@pytest.fixture(autouse=True)
+def _instant_inbound(monkeypatch: pytest.MonkeyPatch):
+    """既有用例都按"入站即提交"断言；合并窗由专门用例显式开启。"""
+    monkeypatch.setattr(bridge_module, "_INBOUND_COALESCE_SECONDS", 0.0)
+    yield
 
 
 def _install_fake_botpy(
@@ -678,6 +686,7 @@ async def _start_bridge(
     media_transport: httpx.MockTransport,
     client_cls: type[FakeExternalApiClient] = FakeExternalApiClient,
     sandbox: bool = False,
+    coalesce_seconds: float = 0.0,
 ):
     _install_fake_botpy(monkeypatch)
     monkeypatch.setattr(bridge_module, "ExternalApiClient", client_cls)
@@ -695,6 +704,7 @@ async def _start_bridge(
             token="t",
             base_url="http://127.0.0.1:1/api/v1",
             on_state=lambda state, detail: states.append((state, detail)),
+            inbound_coalesce_seconds=coalesce_seconds,
         ),
         name="test-qq-bridge",
     )
@@ -887,6 +897,166 @@ async def test_bridge_caps_forwarded_attachment_count(monkeypatch: pytest.Monkey
         ext = FakeExternalApiClient.instances[-1]
         await _wait_until(lambda: ext.sent)
         assert len(ext.sent[0][3]) == bridge_module._MAX_INBOUND_ATTACHMENTS
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_bridge_coalesces_messages_sent_together(monkeypatch: pytest.MonkeyPatch) -> None:
+    """同一批发出的多条消息合成一次提交。
+
+    实盘 QQ 把"一起发的几条"拆成独立事件（文本→文件 2.96~4.69s、附件→附件
+    0.45~0.79s）。逐条提交会让第一条先起轮，后面的内容只能由排队车道当下一轮
+    输入；合并窗把整批一次交给运行时，模型一次看到全部内容。
+    """
+    media = _media_transport({})
+    task, client = await _start_bridge(monkeypatch, media, coalesce_seconds=0.2)
+    try:
+        await client.on_c2c_message_create(_c2c_message("第一句", message_id="m1"))
+        await client.on_c2c_message_create(_c2c_message("第二句", message_id="m2"))
+        ext = FakeExternalApiClient.instances[-1]
+        await _wait_until(lambda: ext.sent)
+        await asyncio.sleep(0.05)
+        expected_idem = "qq-batch-" + hashlib.sha1("m1\x1fm2".encode("utf-8")).hexdigest()[:24]
+        assert ext.sent == [
+            ("ext:qq-official:qq:c2c:u9", "第一句\n第二句", expected_idem, [])
+        ]
+        # 被动回复引用窗内最后一条入站消息。
+        delivery = bridge_module.bridge_delivery_state(bridge_module.bridge_id_for_app_id("100"))
+        ref = delivery.passive_refs.get("qq:c2c:u9")
+        assert ref is not None and ref[0] == "m2"
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_bridge_coalesces_text_with_attachment_sent_after(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """文本先到、图片后到（QQ 分两条事件）也必须同批提交：模型一次看到"如图"+图。"""
+    media = _media_transport({"https://cdn.example/img.png": (200, b"img-bytes")})
+    task, client = await _start_bridge(monkeypatch, media, coalesce_seconds=0.2)
+    try:
+        await client.on_c2c_message_create(_c2c_message("如图", message_id="m1"))
+        await asyncio.sleep(0.05)
+        await client.on_c2c_message_create(_c2c_message("", [_image_attachment()], message_id="m2"))
+        ext = FakeExternalApiClient.instances[-1]
+        await _wait_until(lambda: ext.sent)
+        session_id, text, idem, attachments = ext.sent[0]
+        assert (session_id, text) == ("ext:qq-official:qq:c2c:u9", "如图")
+        assert len(attachments) == 1
+        assert attachments[0]["kind"] == "image"
+        assert idem.startswith("qq-batch-")
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_bridge_starts_a_new_batch_after_the_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """窗外的消息仍各起一批：合并窗不能把后续独立发言吞进同一回合。"""
+    media = _media_transport({})
+    task, client = await _start_bridge(monkeypatch, media, coalesce_seconds=0.15)
+    try:
+        await client.on_c2c_message_create(_c2c_message("第一句", message_id="m1"))
+        ext = FakeExternalApiClient.instances[-1]
+        await _wait_until(lambda: ext.sent)
+        await client.on_c2c_message_create(_c2c_message("第二句", message_id="m2"))
+        await _wait_until(lambda: len(ext.sent) == 2)
+        assert [item[1] for item in ext.sent] == ["第一句", "第二句"]
+        assert [item[2] for item in ext.sent] == ["qq-m1", "qq-m2"]
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_bridge_dedupes_duplicate_event_in_the_coalescing_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """全量档下 @ 与普通群消息可能共用同一个消息 id：窗内按 id 去重，同一句只提交一次。"""
+    media = _media_transport({})
+    task, client = await _start_bridge(monkeypatch, media, coalesce_seconds=0.2)
+    try:
+        await client.on_c2c_message_create(_c2c_message("同一句", message_id="m1"))
+        await client.on_c2c_message_create(_c2c_message("同一句", message_id="m1"))
+        ext = FakeExternalApiClient.instances[-1]
+        await _wait_until(lambda: ext.sent)
+        await asyncio.sleep(0.05)
+        assert ext.sent == [("ext:qq-official:qq:c2c:u9", "同一句", "qq-m1", [])]
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+class _OrderedFakeExternalApiClient(FakeExternalApiClient):
+    """记录入站提交与 digest 排队的先后：合并窗把提交推后，冲刷必须仍排在提交之后。"""
+
+    def __init__(self, base_url: str, token: str, transport=None) -> None:
+        super().__init__(base_url, token, transport=transport)
+        self.order: list[str] = []
+
+    async def send_message(self, *args, **kwargs):
+        self.order.append("send")
+        return await super().send_message(*args, **kwargs)
+
+    async def send_digest(self, session_id: str, payload: dict) -> dict:
+        self.order.append("digest")
+        return await super().send_digest(session_id, payload)
+
+
+@pytest.mark.asyncio
+async def test_coalesced_group_at_submits_before_digest_flush(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """@ 消息进合并窗后，未读 digest 的冲刷不能先跑：否则心跳先起一轮，
+    @ 消息会被挤成下一轮。"""
+    _install_fake_botpy(monkeypatch)
+    monkeypatch.setattr(bridge_module, "ExternalApiClient", _OrderedFakeExternalApiClient)
+    monkeypatch.setattr(
+        bridge_module,
+        "group_history_root",
+        lambda session_key, create=False: tmp_path / "group-inbox",
+    )
+    task = asyncio.create_task(
+        bridge_module.run_qq_official_bridge(
+            app_id="100",
+            app_secret="sekrit",
+            sandbox=False,
+            token="t",
+            base_url="http://127.0.0.1:1/api/v1",
+            on_state=lambda state, detail: None,
+            scan_min_minutes=60.0,
+            scan_max_minutes=60.0,
+            inbound_coalesce_seconds=0.2,
+        ),
+        name="test-qq-bridge-coalesced-at",
+    )
+    try:
+        await _wait_until(lambda: FakeClient.instances and FakeClient.instances[-1].started)
+        client = FakeClient.instances[-1]
+        ext = _OrderedFakeExternalApiClient.instances[-1]
+
+        await client.on_group_message_create(
+            SimpleNamespace(group_openid="g-order", content="先发的普通消息", id="m1")
+        )
+        await _wait_until(lambda: ext.ensured)
+
+        await client.on_group_message_create(
+            SimpleNamespace(group_openid="g-order", content="<@BOT12345678> 在吗", id="m2")
+        )
+        await _wait_until(lambda: ext.digests)
+        assert ext.order == ["send", "digest"]
+        assert ext.sent[0][1] == "@机器人 在吗"
     finally:
         task.cancel()
         with suppress(asyncio.CancelledError):
