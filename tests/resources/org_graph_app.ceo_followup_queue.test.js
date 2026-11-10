@@ -729,6 +729,35 @@ test("补充消息被本轮接走之后，迟到的排队读数不得把它画�
     assert.equal(getMergedCeoQueuedFollowUps("web:test").length, 0);
 });
 
+test("被接走的镜像条目也要画出用户气泡（本地 runtime_sent 副本已被并掉）", () => {
+    const api = loadApp();
+    const { U, applyCeoState, promoteRepresentedRuntimeSentCeoFollowUps, getMergedCeoQueuedFollowUps } = api;
+    api.__context.__msgCalls = [];
+    vm.runInContext("addMsg = (text, role) => { __msgCalls.push({ text, role }); };", api.__context);
+
+    // 插话已被服务端受理：镜像帧到达后本地 runtime_sent 副本并进镜像，本地队列里没有它了。
+    applyCeoState({
+        status: "running",
+        is_running: true,
+        queued_follow_up_messages: [
+            { content: "插话的那条", attachments: [], metadata: { _transcript_turn_id: "t-9" } },
+        ],
+    });
+    assert.equal(getMergedCeoQueuedFollowUps("web:test").length, 1);
+
+    // 回合在工具边界收尾、补充由下一轮接走：在飞帧带上同一条（同 turn_id）。
+    const promoted = promoteRepresentedRuntimeSentCeoFollowUps("web:test", [
+        { role: "user", content: "插话的那条", turn_id: "t-9", timestamp: "2026-11-09T12:24:41" },
+    ]);
+
+    assert.equal(api.__context.__msgCalls.length, 1, "镜像条目也必须画出用户气泡，不能只退候选条");
+    assert.equal(api.__context.__msgCalls[0].text, "插话的那条");
+    assert.equal(api.__context.__msgCalls[0].role, "user");
+    assert.equal(promoted.length, 0, "默认返回值仍是本地副本；镜像那半不需要它");
+    assert.equal(getMergedCeoQueuedFollowUps("web:test").length, 0, "候选条要退场");
+    assert.equal(U.ceoFollowUpQueue.hidden, true);
+});
+
 test("失败回合的 ceo.error 带上本批用户消息时，本地在飞副本退场", () => {
     const { S, U, handleCeoError, setCeoQueuedFollowUps, getMergedCeoQueuedFollowUps } = loadApp();
     S.ceoTurnActive = true;

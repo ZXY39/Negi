@@ -5597,7 +5597,7 @@ function renderCeoTurnsIntoTurn(turn, turns = [], { interruptedMarker = false } 
     return turn.steps;
 }
 
-function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "inflight_turn" } = {}) {
+function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "inflight_turn", promoteFollowUps = true } = {}) {
     if (!snapshot || typeof snapshot !== "object") {
         const targetSessionId = String(sessionId || activeSessionId()).trim();
         if (targetSessionId) setCeoSessionSnapshotCache(targetSessionId, { [cacheField]: null });
@@ -5692,11 +5692,17 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "i
         );
         setCeoSessionSnapshotCache(targetSessionId, { [cacheField]: inflightTurn });
         if (cacheField === "inflight_turn") {
-            promoteRepresentedRuntimeSentCeoFollowUps(
-                targetSessionId,
-                normalizeCeoSnapshotUserMessages(inflightTurn?.user_messages, inflightTurn?.user_message),
-                { scrollMode: "preserve", insertBefore: turn?.el || null }
-            );
+            const representedUserMessages = normalizeCeoSnapshotUserMessages(inflightTurn?.user_messages, inflightTurn?.user_message);
+            if (promoteFollowUps) {
+                promoteRepresentedRuntimeSentCeoFollowUps(
+                    targetSessionId,
+                    representedUserMessages,
+                    { scrollMode: "preserve", insertBefore: turn?.el || null }
+                );
+            } else {
+                // 调用方（快照恢复）已经把这一批画成气泡了：只让候选条退场，不再画第二遍。
+                retireCeoTakenFollowUpsFromRepresentedMessages(targetSessionId, representedUserMessages);
+            }
         }
     }
     return true;
@@ -5750,7 +5756,8 @@ function restoreCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = 
         });
         placeCeoUserBubbleByTimestamp(el, timestamp);
     }
-    patchCeoInflightTurn(snapshot, { sessionId, cacheField });
+    // 本批用户行刚刚已画成气泡，这里只退候选条，不再让 promote 画第二遍。
+    patchCeoInflightTurn(snapshot, { sessionId, cacheField, promoteFollowUps: false });
     const status = String(snapshot.status || "").trim().toLowerCase();
     const assistantText = String(snapshot.assistant_text || "").trim();
     if (status === "paused") {

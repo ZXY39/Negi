@@ -833,26 +833,41 @@ function promoteRepresentedRuntimeSentCeoFollowUps(sessionId = activeSessionId()
     if (!key) return [];
     const normalizedRepresented = normalizeCeoSnapshotUserMessages(representedMessages);
     if (!normalizedRepresented.length) return [];
+    // 服务端镜像（`server:<turn_id>`）里的条目同样可能是"这一批被接走的补充"：本地那份
+    // runtime_sent_at 副本在镜像帧到达时就退场了（reconcile 把两份并成一行），只认本地
+    // 副本的话，接走这一刻候选条消失、气泡却永远不画，只能刷新后从转录里补出来。
+    const mirroredTurnIds = new Set(
+        getCeoServerQueuedFollowUps(key)
+            .map((item) => ceoServerQueuedFollowUpTurnId(item?.id))
+            .filter(Boolean)
+    );
     // 这条帧同时负责服务端那一半的退场：本地条目早就被文本去重交给镜像画了，
     // 只摘本地那份的话，消息都进气泡了候选条还挂着。
     retireCeoTakenFollowUpsFromRepresentedMessages(key, normalizedRepresented);
     const current = getCeoQueuedFollowUps(key);
-    const promoted = current.filter((item) => (
+    const promotedEntries = current.filter((item) => (
         String(item?.runtime_sent_at || "").trim()
         && normalizedRepresented.some((message) => ceoSnapshotMessageMatchesQueuedFollowUp(message, item))
     ));
-    if (!promoted.length) return [];
-    promoted.forEach((item) => {
-        // 发送时间优先取服务端快照消息的 timestamp,回退本地记录的 runtime_sent_at。
-        const matched = normalizedRepresented.find((message) => ceoSnapshotMessageMatchesQueuedFollowUp(message, item));
-        addCeoUserMessage(item.text, {
-            attachments: item.uploads,
+    const promotedMessages = normalizedRepresented.filter((message) => {
+        const turnId = String(message?.turn_id || "").trim();
+        if (turnId && mirroredTurnIds.has(turnId)) return true;
+        return promotedEntries.some((item) => ceoSnapshotMessageMatchesQueuedFollowUp(message, item));
+    });
+    if (!promotedMessages.length) return [];
+    promotedMessages.forEach((message) => {
+        // 气泡按快照消息画：正文、附件与时间都是服务端权威那份；队列条目只用来判"该不该画"。
+        addCeoUserMessage(String(message.content || ""), {
+            attachments: normalizeUploadList(message.attachments),
             scrollMode,
             sessionId: key,
-            timestamp: String(matched?.timestamp || item?.runtime_sent_at || ""),
-            senderLabel: String(matched?.sender_label || ""),
-            senderId: String(matched?.sender_id || ""),
+            timestamp: String(message.timestamp || ""),
+            senderLabel: String(message.sender_label || ""),
+            senderId: String(message.sender_id || ""),
         });
+        // 本地副本先于镜像帧画出来时先记下 turn_id：镜像随后到达也不会再画第二遍。
+        const turnId = String(message?.turn_id || "").trim();
+        if (turnId) noteCeoTakenFollowUpTurn(key, turnId);
         // 补充消息应落在当前 live 回合之前,而不是 append 到流式输出之后;
         // 与 finalize 增量路径的 insertBefore 语义保持一致。
         if (U && U.ceoFeed && insertBefore && typeof U.ceoFeed.insertBefore === "function") {
@@ -866,9 +881,9 @@ function promoteRepresentedRuntimeSentCeoFollowUps(sessionId = activeSessionId()
             }
         }
     });
-    const promotedIds = new Set(promoted.map((item) => String(item?.id || "").trim()).filter(Boolean));
+    const promotedIds = new Set(promotedEntries.map((item) => String(item?.id || "").trim()).filter(Boolean));
     setCeoQueuedFollowUps(key, current.filter((item) => !promotedIds.has(String(item?.id || "").trim())));
-    return promoted;
+    return promotedEntries;
 }
 
 function noteCeoTakenFollowUpTurn(sessionId, turnId) {
