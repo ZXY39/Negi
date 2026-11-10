@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import gzip
 import json
+import os
 import re
 import shutil
 import threading
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -52,6 +54,17 @@ TURN_BOUNDARY_SNAPSHOT_KEEP = 12
 FRONTDOOR_REQUEST_ARTIFACT_PRUNE_INTERVAL = 25
 # Per-session counter used only to throttle how often pruning runs.
 _frontdoor_artifact_persist_count: dict[str, int] = {}
+# 请求工件按 turn_id 聚合的进程内索引。每次 CEO 快照构建都会走
+# `read_session_turn_token_usage`，而大会话的请求目录有 300+ 个 ~1MB 工件
+# （实测逐文件 json.loads 约 2s）。工件写一次不再改，所以索引只记目录文件集
+# （name → size/mtime_ns）与已聚合的 turns：首次全量解析，之后每次只 scandir
+# 对账并解析新增文件；同名改写、删除或换目录触发该会话全量重算。
+_USAGE_INDEX_CAP = 64
+_USAGE_INDEX_LOCK = threading.Lock()
+# session_id -> {"dir": str, "files": {name: (size, mtime_ns)}, "turns": {turn_id: usage}}
+_USAGE_INDEX: dict[str, dict[str, Any]] = {}
+_USAGE_SESSION_LOCKS: dict[str, threading.Lock] = {}
+_USAGE_ACCUM_FIELDS = ("input_tokens", "output_tokens", "cache_hit_tokens")
 WEB_CEO_IMAGE_UPLOAD_MAX_BYTES = 5 * 1024 * 1024
 # 语音条只走转写、不落盘，所以这里限的是"能让人烧多少 CPU"：16k/单声道/16bit
 # 约 32KB/s，2MiB 正好覆盖 60 秒，与 stt.max_audio_seconds 同一量级。
@@ -1269,6 +1282,7 @@ def clear_actual_request_history(session_id: str) -> None:
     if request_dir.exists():
         shutil.rmtree(request_dir, ignore_errors=True)
     _frontdoor_artifact_persist_count.pop(str(session_id or "").strip(), None)
+    _usage_index_drop(str(session_id or "").strip())
 
 
 def _referenced_request_artifact_paths(session_id: str) -> set[str]:
@@ -1351,51 +1365,199 @@ def prune_frontdoor_actual_request_artifacts(
     return deleted
 
 
+def _usage_session_lock(session_id: str) -> threading.Lock:
+    with _USAGE_INDEX_LOCK:
+        lock = _USAGE_SESSION_LOCKS.get(session_id)
+        if lock is None:
+            lock = threading.Lock()
+            _USAGE_SESSION_LOCKS[session_id] = lock
+        return lock
+
+
+def _usage_index_get(session_id: str) -> dict[str, Any] | None:
+    """按最近使用顺序取出索引条目；LRU 顺序在读取时刷新。"""
+    with _USAGE_INDEX_LOCK:
+        entry = _USAGE_INDEX.pop(session_id, None)
+        if entry is not None:
+            _USAGE_INDEX[session_id] = entry
+        return entry
+
+
+def _usage_index_store(
+    session_id: str,
+    directory: str,
+    files: dict[str, tuple[int, int]],
+    turns: dict[str, dict[str, int]],
+) -> None:
+    with _USAGE_INDEX_LOCK:
+        _USAGE_INDEX.pop(session_id, None)
+        _USAGE_INDEX[session_id] = {"dir": directory, "files": files, "turns": turns}
+        while len(_USAGE_INDEX) > _USAGE_INDEX_CAP:
+            _USAGE_INDEX.pop(next(iter(_USAGE_INDEX)), None)
+
+
+def _usage_index_drop(session_id: str) -> None:
+    with _USAGE_INDEX_LOCK:
+        _USAGE_INDEX.pop(session_id, None)
+
+
+def reset_turn_usage_index() -> None:
+    """测试用：清空进程内工件用量索引。"""
+    with _USAGE_INDEX_LOCK:
+        _USAGE_INDEX.clear()
+        _USAGE_SESSION_LOCKS.clear()
+
+
+def _scan_request_artifact_files(directory: Path) -> dict[str, tuple[int, int]] | None:
+    """只 stat 目录项，不读文件内容；目录不可读时返回 None。"""
+    files: dict[str, tuple[int, int]] = {}
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                name = entry.name
+                if not name.endswith(".json"):
+                    continue
+                try:
+                    if not entry.is_file():
+                        continue
+                    stat = entry.stat()
+                except OSError:
+                    continue
+                files[name] = (int(stat.st_size), int(stat.st_mtime_ns))
+    except OSError:
+        return None
+    return files
+
+
+def _load_request_artifact_usage(path: Path) -> tuple[str, dict[str, Any]] | None:
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(record, dict):
+        return None
+    turn_id = str(record.get("turn_id") or "").strip()
+    usage = record.get("usage")
+    if not turn_id or not isinstance(usage, dict):
+        return None
+    return turn_id, usage
+
+
+def _merge_artifact_usage(
+    turns: dict[str, dict[str, int]],
+    turn_id: str,
+    usage: dict[str, Any],
+) -> bool:
+    try:
+        deltas = {field: int(usage.get(field) or 0) for field in _USAGE_ACCUM_FIELDS}
+        has_thinking = "thinking_tokens" in usage
+        thinking_delta = int(usage.get("thinking_tokens") or 0) if has_thinking else 0
+    except (TypeError, ValueError):
+        return False
+    entry = turns.get(turn_id)
+    if entry is None:
+        entry = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_hit_tokens": 0,
+            "call_count": 0,
+        }
+        turns[turn_id] = entry
+    for field, delta in deltas.items():
+        entry[field] += delta
+    entry["call_count"] += 1
+    if has_thinking:
+        # 只在 provider 上报过的那几条请求上建键：续跑轮由这份聚合值认领累计器，
+        # 缺键与 0 的区分不能在这里丢掉。
+        entry["thinking_tokens"] = int(entry.get("thinking_tokens") or 0) + thinking_delta
+    return True
+
+
+def _visible_turn_usage(turns: dict[str, dict[str, int]]) -> dict[str, dict[str, int]]:
+    # 逐条复制值对象：调用方（快照、续跑认领）可能把条目挂进自己的结构，
+    # 不能让它和进程内索引共享同一个 dict。
+    return {
+        turn_id: dict(entry)
+        for turn_id, entry in turns.items()
+        if any(entry.get(field) for field in _USAGE_ACCUM_FIELDS)
+    }
+
+
 def read_session_turn_token_usage(session_id: str) -> dict[str, dict[str, int]]:
     """按 turn_id 聚合会话已持久化的 frontdoor 请求 token 用量（历史轮次，供会话重载展示）。
 
     每个可见 frontdoor 模型调用会落一条请求快照（含 ``usage``），同一轮次可能多次调用，
-    这里按 ``turn_id`` 求和。只在会话快照构建时调用一次，不在轮次推进热路径上使用。
+    这里按 ``turn_id`` 求和。结果按请求目录的文件集缓存在进程内：首次全量解析，之后
+    每次只对账新增文件；同名改写、删除或目录变化触发全量重算。解析在会话锁外完成，
+    回写前确认没有别的线程写入更新的索引。
     """
     key = str(session_id or "").strip()
     if not key:
         return {}
     request_dir = actual_request_dir_for_session(key, create=False)
     if not request_dir.exists():
+        _usage_index_drop(key)
         return {}
-    usage_by_turn: dict[str, dict[str, int]] = {}
-    try:
-        paths = sorted(request_dir.glob("*.json"))
-    except Exception:
+    files = _scan_request_artifact_files(request_dir)
+    if files is None:
         return {}
-    for path in paths:
-        try:
-            record = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
+    directory = str(request_dir)
+    session_lock = _usage_session_lock(key)
+
+    with session_lock:
+        cached = _usage_index_get(key)
+        same_dir = cached is not None and str(cached.get("dir") or "") == directory
+        cached_files = dict(cached.get("files") or {}) if same_dir else {}
+        if same_dir:
+            stale = any(
+                name not in files or files[name] != state
+                for name, state in cached_files.items()
+            )
+            new_names = sorted(set(files) - set(cached_files))
+            if not stale and not new_names:
+                return _visible_turn_usage(cached.get("turns") or {})
+        else:
+            stale = True
+            new_names = []
+        if stale:
+            base_turns: dict[str, dict[str, int]] = {}
+            parse_names = sorted(files)
+        else:
+            base_turns = {
+                turn_id: dict(entry)
+                for turn_id, entry in (cached.get("turns") or {}).items()
+            }
+            parse_names = new_names
+
+    turns = base_turns
+    parsed = 0
+    started = time.monotonic()
+    for name in parse_names:
+        record = _load_request_artifact_usage(request_dir / name)
+        if record is None:
             continue
-        if not isinstance(record, dict):
-            continue
-        turn_id = str(record.get("turn_id") or "").strip()
-        usage = record.get("usage")
-        if not turn_id or not isinstance(usage, dict):
-            continue
-        entry = usage_by_turn.setdefault(
-            turn_id,
-            {"input_tokens": 0, "output_tokens": 0, "cache_hit_tokens": 0, "call_count": 0},
-        )
-        entry["input_tokens"] += int(usage.get("input_tokens") or 0)
-        entry["output_tokens"] += int(usage.get("output_tokens") or 0)
-        entry["cache_hit_tokens"] += int(usage.get("cache_hit_tokens") or 0)
-        entry["call_count"] += 1
-        if "thinking_tokens" in usage:
-            # 只在 provider 上报过的那几条请求上建键：续跑轮由这份聚合值认领累计器，
-            # 缺键与 0 的区分不能在这里丢掉。
-            entry["thinking_tokens"] = int(entry.get("thinking_tokens") or 0) + int(usage.get("thinking_tokens") or 0)
-    return {
-        turn_id: entry
-        for turn_id, entry in usage_by_turn.items()
-        if any(entry.get(field) for field in ("input_tokens", "output_tokens", "cache_hit_tokens"))
-    }
+        if _merge_artifact_usage(turns, *record):
+            parsed += 1
+
+    with session_lock:
+        current = _usage_index_get(key)
+        current_same_dir = current is not None and str(current.get("dir") or "") == directory
+        current_files = dict(current.get("files") or {}) if current_same_dir else {}
+        # 别的线程在解析期间写入过不同文件集时放弃回写：它的索引更新，
+        # 下一次调用会按各自文件集重新对账。
+        if not current_same_dir or current_files == cached_files:
+            _usage_index_store(key, directory, dict(files), turns)
+        if parsed:
+            logger.debug(
+                "turn usage index: session={} files={} parsed={} indexed={} ms={:.1f}",
+                key,
+                len(files),
+                parsed,
+                len(turns),
+                (time.monotonic() - started) * 1000.0,
+            )
+    return _visible_turn_usage(turns)
+
 
 
 def is_restorable_inflight_turn_snapshot(snapshot: Any) -> bool:
