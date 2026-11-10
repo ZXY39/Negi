@@ -230,12 +230,12 @@ heartbeat / cron 的维护语义分两条通道：UI 展示通道上前端通过
 - 窗口内完成：走原有结果路径，状态、渲染、账本逐字节不变；job 不落库、不产生事件。
 - 超过窗口：前门给模型返回一条合成结果 `[BACKGROUND] job_id=… tool=… elapsed=… timeout=…`，它仍是这个 `tool_call_id` 的唯一 tool result；回合继续，job 留在 web 进程内跑完。合成结果明确要求模型不要用相同参数重试，完成结果之后经心跳事件到达。
 - 只有真正后台化的调用才写 `tool_jobs` 行。气泡与 `GET /api/ceo/sessions/{id}/tool-jobs` 的 `items` 是两条登记道的并集：工具作业（`kind=tool_job`，只列 `running/stopping`）与该会话 `exec background=true` 起的活进程（`kind=process`，来自盘上的 `owned_processes`，不写 `tool_jobs` 行、不产生 `finished[]`）。同一响应另带保留窗口内的 `finished[]` 供历史工具行回放终态；`POST …/tool-jobs/{job_id}/stop` 对 `tooljob:` 行立即投递 `stopped_by_user` 事件，对 `proc:<pid>` 行走归属表整树终止并投 `kind=process` 的同类事件（API/UI 契约见 `web-and-admin.md`「Background Tool Jobs Bubble And Tool-Jobs API」，事件契约见 `heartbeat-system.md`「Tool Job Heartbeat Events」）。
-- `exec background=true` 的进程自己跑完时也走这条事件车道：exec 把 `Popen` 句柄连同归属条目交给会话（`ToolJobRunner.adopt_owned_process`），一条轮询 task 用非阻塞的 `poll()` 取退出码，退出即投 `kind=process` 的 `success`/`error` 事件（带日志尾部与 `log_path`），随后摘掉归属条目。归属条目是“谁来交代结果”的令牌：`process_kill`、后台气泡停止、scope 回收都会先摘走它，观测器发现条目不在了就闭嘴——一个进程只交代一次。
+- `exec background=true` 的进程自己跑完时也走这条事件车道：exec 把 `Popen` 句柄连同归属条目交给会话（`ToolJobRunner.adopt_owned_process`），一条轮询 task 用非阻塞的 `poll()` 取退出码，退出即投 `kind=process` 的 `success`/`error` 事件（带日志尾部与 `log_path`），随后摘掉归属条目。归属条目是“谁来交代结果”的令牌：`process_kill`、后台气泡停止、scope 回收都会先摘走它，观测器发现条目不在了就闭嘴——一个进程只交代一次。节点道用同一个工具窄回调（`_adopt_background_process`）交给 `MainRuntimeService.adopt_node_owned_process`，终态落节点信箱 `process_exit` 而不是会话心跳；合同见 `main-task-runtime.md`「节点信箱与唤醒」。
 - 作业 deadline 仍是工具自己的 `timeout_seconds`（显式值 > 全局默认 600s）：60s 窗口只决定“什么时候停止等”，不延长、不重置 timeout。工具自身 timeout ≤ 窗口时仍在窗口内返回 timeout/error，不会进入后台；`exempt_universal_timeout` 工具没有 deadline，但同样可以交棒和停止。
 - 状态机：`running → success | error | timeout | interrupted | stopped_by_user`。`stopping` 只活在用户点停止到 task 收尾之间；停止事件在点击时立即入队，不等 task 收尾，收尾不了则放弃跟踪并留一条 warning。
 - 取消边界：会话暂停/停止**不**取消后台 job——交棒时 per-call 取消令牌从会话令牌解绑，`pause()` / `cancel()` 只结束当前回合。只有用户点停止、会话删除、进程退出会结束 job；进程退出后启动恢复把残留的 `running` 行收成 `interrupted` 并补事件。后台是“脱离回合”，不是“脱离进程”：job task 在 web 进程内继续跑，进程被杀时它随之消失。
 - 账本：交棒的工具行 `status=background`、`finished_at` 为空，表示“这一调用仍在后台”；终态只在显示层覆盖工具行图标，不回写账本状态或结果正文。完成结果只经心跳事件回到模型，历史行由 `finished[]` 回放终态（UI 契约见 `web-and-admin.md`「Background Tool Jobs Bubble And Tool-Jobs API」）。
-- 范围只限前门（CEO / `web:` / `ext:` / 渠道会话）。任务节点（`main/runtime/react_loop.py`）的 `run_tool_with_watchdog` 语义不变；工具 schema、模型入参、provider-facing `tools[]` 字节均不变。`exec` 继续使用现有 PIPE 捕获，不需要日志文件或 `background=true`。退出观测同样只在前门接线：runtime context 里没有 `_adopt_background_process` 这条窄回调时（节点道），`exec background=true` 照旧只留归属条目，由节点自己下一步去读日志。
+- 范围覆盖前门（CEO / `web:` / `ext:` / 渠道会话）与执行节点。工具 schema 与 provider-facing `tools[]` 的字节不变；`exec background=true` 在两条车道都要求 `purpose`（`exec` 参数契约变化，不是 provider schema 结构变化），用途写进归属条目并进头部清单/气泡。退出观测在两条车道都接线：前门投会话心跳，节点投本节点信箱；没有可 poll 的 `Popen` 句柄时只留归属条目。运行时崩溃/机器重启留下的条目由启动回收改写成 `.notice`，服务 startup 消费后删除凭证。
 
 相关文件：
 
@@ -659,7 +659,7 @@ Heartbeat 与 cron 内部轮次共享同一内部轮次合同，完整契约详�
 
 ## Runtime Contract Lane
 
-模型面向的运行时合同由两部分组成：首条 system 末尾的 `## Runtime Contract (pinned)` 头部快照（skill 名单、exec 策略、临时目录、路径锚、在挂长期任务清单，只在压缩边界重印），以及两次重印之间一次性投递的 `[RUNTIME_NOTICE]` user 消息（exec 策略/临时目录变化、denied/candidate/repair/附件状态、控制台动作用 `### Operator actions` 一节携带）。旧 `## Runtime Tool Contract` 尾块已退役，识别/剥离函数保留用于旧 transcript（角色合同见 `context-and-cache-troubleshooting.md`「线体角色合同」）。本节记录本文拥有的 canonical 表示规则与运行时边界；控制台动作的写入点、作用域与游标合同归 `tool-and-skill-system.md`「Pinned Static Declarations」。
+模型面向的运行时合同由两部分组成：首条 system 末尾的 `## Runtime Contract (pinned)` 头部快照（skill 名单、exec 策略、临时目录、路径锚、在挂长期任务清单、在跑后台进程清单，只在压缩边界重印），以及两次重印之间一次性投递的 `[RUNTIME_NOTICE]` user 消息（exec 策略/临时目录变化、denied/candidate/repair/附件状态、控制台动作用 `### Operator actions` 一节携带）。旧 `## Runtime Tool Contract` 尾块已退役，识别/剥离函数保留用于旧 transcript（角色合同见 `context-and-cache-troubleshooting.md`「线体角色合同」）。本节记录本文拥有的 canonical 表示规则与运行时边界；控制台动作的写入点、作用域与游标合同归 `tool-and-skill-system.md`「Pinned Static Declarations」。
 
 运行时块的表示规则只有一条：块是"当前轮临时合同"的 summary，以 user 角色落地；它不参与 durable history，也不承担任何历史结构裁剪（历史收缩只由 `token_compression` 与 `user_edit_truncation` 造成）。块的字段集合、尾部只带最新快照与基线剥离规则详见 `tool-and-skill-system.md`「四个概念必须分清」与 `context-and-cache-troubleshooting.md`「append-only 规则」。
 
