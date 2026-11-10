@@ -186,9 +186,16 @@ function ceoBgJobsRow(item) {
     tool.className = "ceo-bg-jobs-tool";
     // exec background=true 起的 OS 进程与超时交棒的工具作业同列一行，来源不同：
     // 前者没有工具终态、只能按 pid 整树终止，行首标成「exec 进程」避免误读。
-    tool.textContent = kind === "process"
-        ? "exec 进程"
-        : (String(item.tool_name || "tool").trim() || "tool");
+    // 进程行优先显示创建时写入的 purpose；命令只在 title 里，不再占第二行。
+    const processPurpose = kind === "process" ? String(item.purpose || "").trim() : "";
+    if (kind === "process") {
+        tool.textContent = processPurpose.length > 48
+            ? `${processPurpose.slice(0, 47)}…`
+            : (processPurpose || "exec 进程");
+        if (processPurpose) tool.title = processPurpose;
+    } else {
+        tool.textContent = String(item.tool_name || "tool").trim() || "tool";
+    }
     label.appendChild(tool);
     // 常驻性质的第二眼标记：交棒的工具作业一定有终态，只有 detach 出去的进程没有。
     if (kind === "process") {
@@ -200,11 +207,15 @@ function ceoBgJobsRow(item) {
     main.appendChild(label);
     const hint = String(item.hint || "").trim();
     if (hint) {
-        const hintEl = document.createElement("span");
-        hintEl.className = "ceo-bg-jobs-hint";
-        hintEl.textContent = hint.length > 48 ? `${hint.slice(0, 47)}…` : hint;
-        hintEl.title = hint;
-        main.appendChild(hintEl);
+        if (kind === "process" && processPurpose) {
+            main.title = hint;
+        } else {
+            const hintEl = document.createElement("span");
+            hintEl.className = "ceo-bg-jobs-hint";
+            hintEl.textContent = hint.length > 48 ? `${hint.slice(0, 47)}…` : hint;
+            hintEl.title = hint;
+            main.appendChild(hintEl);
+        }
     }
 
     const elapsed = document.createElement("span");

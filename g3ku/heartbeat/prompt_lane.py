@@ -895,9 +895,11 @@ def _owned_process_label(event: dict[str, Any]) -> str:
     except (TypeError, ValueError):
         pid = 0
     label = f"Background process pid {pid}" if pid > 0 else "Background process"
+    purpose = _non_empty_text(event.get("purpose"))
     cmd = _non_empty_text(event.get("cmd"))
-    if cmd:
-        label = f"{label} ({cmd})"
+    detail = purpose or cmd
+    if detail:
+        label = f"{label} ({detail})"
     return label
 
 

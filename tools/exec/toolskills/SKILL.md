@@ -20,6 +20,7 @@
 ## 后台进程
 
 - 判据是"下一次调用还要能找到它"，不是"它跑得久"。服务、CDP 浏览器、抓取驱动这类要常驻的进程传 `background: true`；只是慢的命令保持前台调用，慢不是用 `background: true` 的理由。不要自己用 `Start-Process` / `nohup` 手搓 detach：运行时会把 stdout/stderr 落到日志文件、立即返回 `pid` 与 `log_path`，并把这个进程登记进本会话/本任务的归属表。
+- `background: true` 必须同时传 `purpose`：一行、不超过 120 字，写清这个进程服务什么、为什么必须活过本次调用。进程清单、前门气泡和退出提醒都显示这句话，不再靠命令行反推用途；缺 `purpose` 会在启动前被参数校验拒绝。
 - `background: true` 之后 `timeout_seconds` 不再管它，结果也不在那次返回值里：要输出就读 `log_path`，要停它用 `process_kill(pid=<pid>)`。
 - 之后用普通 `exec` 读 `log_path` 看日志，用 `process_kill(pid=<pid>)` 停止它。裸 `kill` / `Stop-Process` / `taskkill` / `pkill` 会被宿主进程保护直接拒绝——那不是权限故障，是让你走这条正规出口。
 - 前台命令若留下持有输出管道的子进程，exec 会在 5s 宽限后杀掉整棵树并截断输出。这不是"后台失败"，是提示你改用 `background: true`。

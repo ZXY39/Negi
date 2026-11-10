@@ -180,6 +180,7 @@ def owned_process_items(session_key: str) -> list[dict[str, Any]]:
                 "turn_id": "",
                 "tool_call_id": "",
                 "hint": str(entry.get("cmd") or ""),
+                "purpose": str(entry.get("label") or ""),
                 "log_path": str(entry.get("log_path") or ""),
             }
         )
@@ -243,6 +244,7 @@ def build_owned_process_event_payload(
         "stopped_by": str(stopped_by or ""),
         "exit_code": exit_code,
         "cmd": str(entry.get("cmd") or ""),
+        "purpose": str(entry.get("label") or ""),
     }
 
 

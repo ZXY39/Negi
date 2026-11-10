@@ -48,6 +48,9 @@ from g3ku.runtime.frontdoor.tool_contract import (
     bump_skill_roster_epoch as _bump_skill_roster_epoch,
 )
 from g3ku.runtime.frontdoor.tool_contract import (
+    frontdoor_owned_process_roster as _frontdoor_owned_process_roster,
+)
+from g3ku.runtime.frontdoor.tool_contract import (
     frontdoor_pinned_contract_text as _frontdoor_pinned_contract_text,
 )
 from g3ku.runtime.frontdoor.tool_contract import (
@@ -574,6 +577,8 @@ class ReActToolLoop:
                 skill_items=skill_roster_items,
                 exec_runtime_policy=node_exec_runtime_policy,
                 session_temp_dir=node_task_temp_dir or None,
+                task_id=str(task.task_id),
+                node_id=str(node.node_id),
             )
             # 每跳只算一次在场索引（D12），下传给这一跳的所有消费点（执行准入、冲动投递、
             # 观测读数）。各消费点各自重算会造出"同一轮里两个答案"，那正是本次要消灭的漂移。
@@ -851,6 +856,8 @@ class ReActToolLoop:
                     skill_items=skill_roster_items,
                     exec_runtime_policy=node_exec_runtime_policy,
                     session_temp_dir=node_task_temp_dir or None,
+                    task_id=str(task.task_id),
+                    node_id=str(node.node_id),
                 )
                 compression_provider_tool_names = self._normalized_name_list(
                     list(tool_schema_selection.get('pinned_provider_tool_names') or [])
@@ -3815,6 +3822,8 @@ class ReActToolLoop:
         skill_items: list[dict[str, str]],
         exec_runtime_policy: dict[str, Any] | None = None,
         session_temp_dir: str | None = None,
+        task_id: str = '',
+        node_id: str = '',
     ) -> list[dict[str, Any]]:
         """把静态声明钉进 system 首条；名单/策略没变时逐字节幂等，追加链不受扰。
 
@@ -3836,6 +3845,11 @@ class ReActToolLoop:
             skill_roster_epoch=epoch,
             session_key=scope_key,
             include_extras=True,
+            owned_processes_provider=(
+                (lambda: _frontdoor_owned_process_roster(task_id=task_id, node_id=node_id))
+                if str(task_id or '').strip() and str(node_id or '').strip()
+                else None
+            ),
         )
         if not roster_text:
             return base_messages

@@ -203,18 +203,41 @@ class ExecTool(Tool):
                         "Detach the command so it keeps running after this call returns; answers pid + "
                         "log_path immediately and then ignores timeout_seconds. Use it only when a later "
                         "call must still find this process (server, browser, crawl driver). A command that "
-                        "is merely slow stays foreground. Stop it with process_kill(pid)."
+                        "is merely slow stays foreground. Stop it with process_kill(pid). When true, "
+                        "purpose is required."
                     ),
-                }
+                },
+                "purpose": {
+                    "type": "string",
+                    "description": (
+                        "Required when background=true. One line (<=120 chars; the process list shows the "
+                        "first 80) saying what this process serves and why it must outlive this call."
+                    ),
+                },
             },
             "required": ["command"]
         }
+
+    def validate_params(self, params: dict[str, Any]) -> list[str]:
+        errors = super().validate_params(params)
+        payload = params if isinstance(params, dict) else {}
+        if bool(payload.get("background")):
+            purpose = str(payload.get("purpose") or "").strip()
+            if not purpose:
+                errors.append(
+                    "purpose is required when background=true: one line (<=120 chars) saying "
+                    "what this process serves and why it must outlive this call."
+                )
+            elif len(purpose) > 120:
+                errors.append("purpose must be <=120 characters; the process list shows at most 80.")
+        return errors
 
     async def execute(
         self,
         command: str,
         working_dir: str | None = None,
         background: bool = False,
+        purpose: str | None = None,
         **kwargs: Any,
     ) -> str:
         runtime = kwargs.pop("__g3ku_runtime", None) or {}
@@ -295,6 +318,7 @@ class ExecTool(Tool):
                 cwd=cwd,
                 env=env,
                 runtime=runtime,
+                purpose=str(purpose or "").strip(),
             )
 
         try:
@@ -790,6 +814,7 @@ class ExecTool(Tool):
         cwd: str,
         env: dict[str, str],
         runtime: dict[str, Any],
+        purpose: str = "",
     ) -> str:
         """启动一个运行时拥有的后台进程，并登记进归属表。
 
@@ -799,6 +824,7 @@ class ExecTool(Tool):
         """
         session_key = str(runtime.get("session_key") or "web:shared").strip() or "web:shared"
         task_id = str(runtime.get("task_id") or "").strip()
+        node_id = str(runtime.get("node_id") or "").strip()
         scope = owned_processes.scope_key(session_key=session_key, task_id=task_id)
         log_path = owned_processes.new_log_path(scope)
         popen_kwargs: dict[str, Any] = {
@@ -832,11 +858,20 @@ class ExecTool(Tool):
             log_path=str(log_path),
             session_key=session_key,
             task_id=task_id,
+            node_id=node_id,
             actor_role=str(runtime.get("actor_role") or ""),
             owner_pid=os.getpid(),
+            label=purpose,
         )
         self._adopt_background_process(runtime, entry=entry, process=process)
         self._notify_background_items_changed(runtime)
+        extra_notes = [
+            f"Background pid {entry['pid']} is owned by this "
+            f"{'task' if task_id else 'session'}; tail `{log_path}` with exec, "
+            f"stop it with process_kill(pid={entry['pid']})."
+        ]
+        if purpose:
+            extra_notes.insert(0, f"Purpose: {purpose}")
         return self._build_payload(
             status="success",
             exit_code=None,
@@ -845,12 +880,9 @@ class ExecTool(Tool):
                 "background": True,
                 "pid": entry["pid"],
                 "log_path": str(log_path),
+                **({"purpose": purpose} if purpose else {}),
             },
-            extra_notes=[
-                f"Background pid {entry['pid']} is owned by this "
-                f"{'task' if task_id else 'session'}; tail `{log_path}` with exec, "
-                f"stop it with process_kill(pid={entry['pid']})."
-            ],
+            extra_notes=extra_notes,
         )
 
     @staticmethod

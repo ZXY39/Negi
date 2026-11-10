@@ -67,6 +67,7 @@ def test_exec_manifest_exposes_background() -> None:
     )
 
     assert "background" in manifest["parameters"]["properties"]
+    assert "purpose" in manifest["parameters"]["properties"]
     assert manifest["parameters"]["required"] == ["command"]
 
 
@@ -83,6 +84,8 @@ def test_register_find_drop_roundtrip(isolated_root: Path) -> None:
         )
         assert entry["pid"] == process.pid
         assert entry["create_time"] > 0
+        assert entry["node_id"] == ""
+        assert entry["owner_create_time"] > 0
 
         found = owned_processes.find(scope, process.pid)
         assert found is not None
@@ -186,6 +189,76 @@ def test_reap_scope_kills_every_owned_process(isolated_root: Path) -> None:
     assert _wait_gone(first.pid)
     assert _wait_gone(second.pid)
     assert owned_processes.list_owned(scope) == []
+
+
+def test_exec_background_requires_purpose() -> None:
+    tool = ExecTool()
+
+    missing = tool.validate_params({"command": "sleep 1", "background": True})
+    assert any("purpose is required" in error for error in missing)
+
+    too_long = tool.validate_params(
+        {"command": "sleep 1", "background": True, "purpose": "x" * 121}
+    )
+    assert any("<=120" in error for error in too_long)
+
+    assert tool.validate_params(
+        {"command": "sleep 1", "background": True, "purpose": "dev server"}
+    ) == []
+    assert tool.validate_params({"command": "sleep 1"}) == []
+
+
+@pytest.mark.asyncio
+async def test_process_kill_is_scoped_to_the_calling_node(isolated_root: Path) -> None:
+    session_key = "web:ceo-1"
+    scope = owned_processes.scope_key(session_key=session_key, task_id="task:abc")
+    process = _spawn_sleeper()
+    try:
+        owned_processes.register(
+            scope=scope,
+            pid=process.pid,
+            cmd="sleep",
+            log_path="",
+            session_key=session_key,
+            task_id="task:abc",
+            node_id="node:a",
+            label="node a service",
+        )
+
+        foreign = json.loads(
+            await ProcessKillTool().execute(
+                pid=process.pid,
+                __g3ku_runtime={
+                    "session_key": session_key,
+                    "task_id": "task:abc",
+                    "node_id": "node:b",
+                    "actor_role": "execution",
+                },
+            )
+        )
+        assert foreign["ok"] is False
+        assert foreign["status"] == "not_owned"
+        assert foreign["owned_processes"] == []
+        assert owned_processes.is_alive(process.pid)
+
+        own = json.loads(
+            await ProcessKillTool().execute(
+                pid=process.pid,
+                __g3ku_runtime={
+                    "session_key": session_key,
+                    "task_id": "task:abc",
+                    "node_id": "node:a",
+                    "actor_role": "execution",
+                },
+            )
+        )
+        assert own["ok"] is True
+        assert own["purpose"] == "node a service"
+        assert _wait_gone(process.pid)
+    finally:
+        owned_processes.drop(scope, process.pid)
+        process.kill()
+        process.wait(timeout=10)
 
 
 def test_reap_orphans_only_touches_dead_owners(isolated_root: Path) -> None:
@@ -294,12 +367,14 @@ async def test_exec_background_registers_pid_and_log(isolated_root: Path) -> Non
         command=f'"{sys.executable}" -c "import time; time.sleep(60)"',
         working_dir=str(workspace),
         background=True,
-        __g3ku_runtime={"session_key": session_key, "actor_role": "ceo"},
+        purpose="probe sleeper for the owned-process test",
+        __g3ku_runtime={"session_key": session_key, "actor_role": "ceo", "node_id": "node:a"},
     )
     payload = json.loads(raw)
 
     assert payload["status"] == "success"
     assert payload["background"] is True
+    assert payload["purpose"] == "probe sleeper for the owned-process test"
     pid = int(payload["pid"])
     log_path = Path(payload["log_path"])
     assert log_path.exists()
@@ -308,6 +383,8 @@ async def test_exec_background_registers_pid_and_log(isolated_root: Path) -> Non
     entry = owned_processes.find(owned_processes.scope_key(session_key=session_key), pid)
     assert entry is not None
     assert entry["pid"] == pid
+    assert entry["node_id"] == "node:a"
+    assert entry["label"] == "probe sleeper for the owned-process test"
 
     kill_payload = json.loads(
         await ProcessKillTool().execute(
@@ -490,6 +567,7 @@ async def test_exec_background_hands_the_process_to_the_adopting_lane(
         command=f'"{sys.executable}" -c "import time; time.sleep(60)"',
         working_dir=str(workspace),
         background=True,
+        purpose="adoption probe",
         __g3ku_runtime={
             "session_key": session_key,
             "actor_role": "ceo",

@@ -278,6 +278,7 @@ test("exec background 进程与工具作业同列一行：行首标来源，进�
             started_at: new Date(Date.now() - 3_000).toISOString(),
             elapsed_seconds: 3,
             hint: "node server.js",
+            purpose: "dev server :3000",
             log_path: "owned-processes/x.log",
         },
         {
@@ -297,9 +298,11 @@ test("exec background 进程与工具作业同列一行：行首标来源，进�
     assert.equal(processRow.dataset.bgJobId, "proc:4242");
     assert.equal(processRow.dataset.bgJobKind, "process");
     const processLabel = processRow.children[0].children[0];
-    assert.equal(processLabel.children[0].textContent, "exec 进程");
+    assert.equal(processLabel.children[0].textContent, "dev server :3000");
     assert.equal(processLabel.children[1].textContent, "常驻进程");
-    assert.equal(processRow.children[0].children[1].textContent, "node server.js");
+    // 有 purpose 时命令行不再占第二行，只留在 title 里。
+    assert.equal(processRow.children[0].children.length, 1);
+    assert.equal(processRow.children[0].title, "node server.js");
 
     // 交棒的工具作业一定有终态，不是常驻：同一行不许长出第二个标记。
     const jobRow = list.children[1];
@@ -307,6 +310,26 @@ test("exec background 进程与工具作业同列一行：行首标来源，进�
     const jobLabel = jobRow.children[0].children[0];
     assert.equal(jobLabel.children.length, 1);
     assert.equal(jobLabel.children[0].textContent, "exec");
+});
+
+test("没有 purpose 的 legacy 进程行回退到命令与 exec 进程", () => {
+    const { context, document } = loadModule();
+    context.ceoBgJobsSetItems([
+        {
+            kind: "process",
+            job_id: "proc:4243",
+            pid: 4243,
+            tool_name: "exec",
+            status: "running",
+            started_at: new Date(Date.now() - 3_000).toISOString(),
+            elapsed_seconds: 3,
+            hint: "node legacy.js",
+        },
+    ], "web:a");
+    const row = document.getElementById("ceo-bg-jobs-list").children[0];
+    const label = row.children[0].children[0];
+    assert.equal(label.children[0].textContent, "exec 进程");
+    assert.equal(row.children[0].children[1].textContent, "node legacy.js");
 });
 
 test("气泡非空时启动对账轮询，清空后停止", () => {

@@ -34,9 +34,10 @@ RUNTIME_APPENDIX_HEADINGS = (FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING,)
 # `load_skill_context` 的三态回执告知原因。
 FRONTDOOR_PINNED_CONTRACT_HEADING = '## Runtime Contract (pinned)'
 FRONTDOOR_PINNED_CONTRACT_KIND = 'frontdoor_runtime_pinned_contract'
+# v6: 头部新增「在跑的后台进程」清单块（按 session/节点冻结，随重印边界刷新）。
 # v5: 头部新增「在挂的长期任务」清单块（随重印边界冻结，不逐跳重画）。版本进重印判据，
 # 存量钉住块上线后重印一次；之后清单只在压缩边界跟着重印。
-PINNED_CONTRACT_RENDERER_VERSION = 'pinned-contract-v5'
+PINNED_CONTRACT_RENDERER_VERSION = 'pinned-contract-v6'
 PINNED_CONTRACT_SNAPSHOT_NOTE = (
     'snapshot_note: this block refreshes only at compaction; later runtime notices '
     'supersede changed values.'
@@ -360,6 +361,84 @@ def render_long_term_task_roster(items: list[Any] | None) -> str:
     return '\n'.join(lines)
 
 
+OWNED_PROCESS_ROSTER_HEADING = '### 在跑的后台进程'
+OWNED_PROCESS_ROSTER_MAX_LINES = 8
+OWNED_PROCESS_PURPOSE_LIMIT = 80
+OWNED_PROCESS_CMD_LIMIT = 200
+
+
+def _collapse_owned_process_text(value: Any) -> str:
+    return ' '.join(str(value or '').split()).replace('|', '｜')
+
+
+def _owned_process_purpose(item: dict[str, Any]) -> str:
+    text = _collapse_owned_process_text(item.get('purpose') or item.get('label'))
+    if len(text) <= OWNED_PROCESS_PURPOSE_LIMIT:
+        return text
+    return text[: OWNED_PROCESS_PURPOSE_LIMIT - 1] + '…'
+
+
+def _owned_process_command(item: dict[str, Any]) -> str:
+    text = _collapse_owned_process_text(item.get('cmd'))
+    if len(text) <= OWNED_PROCESS_CMD_LIMIT:
+        return text
+    head = OWNED_PROCESS_CMD_LIMIT // 2 - 1
+    tail = OWNED_PROCESS_CMD_LIMIT - head - 1
+    return text[:head] + '…' + text[-tail:]
+
+
+def _owned_process_identity_text(item: dict[str, Any]) -> str:
+    purpose = _owned_process_purpose(item)
+    if purpose:
+        return purpose
+    return _owned_process_command(item)
+
+
+def render_owned_process_roster(items: list[Any] | None) -> str:
+    """渲染「在跑的后台进程」小节；空清单返回空串（整节不出现）。
+
+    条目由 `frontdoor_owned_process_roster` 给出：只含活条目，节点道已按
+    `node_id` 过滤。每行 `pid | 用途 | 启动于 | 日志`，用途为空时回退到
+    压缩后的命令；行数有界，按启动时间倒序。
+    """
+    entries: list[tuple[str, int, str, str]] = []
+    for item in list(items or []):
+        if not isinstance(item, dict):
+            continue
+        try:
+            pid = int(item.get('pid') or 0)
+        except (TypeError, ValueError):
+            continue
+        if pid <= 0:
+            continue
+        entries.append(
+            (
+                str(item.get('started_at') or '').strip(),
+                pid,
+                _owned_process_identity_text(item),
+                _collapse_owned_process_text(item.get('log_path')),
+            )
+        )
+    if not entries:
+        return ''
+    entries.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
+    lines = [OWNED_PROCESS_ROSTER_HEADING]
+    visible = entries[:OWNED_PROCESS_ROSTER_MAX_LINES]
+    for started_at, pid, label, log_path in visible:
+        columns = [str(pid)]
+        if label:
+            columns.append(label)
+        if started_at:
+            columns.append(f'启动于 {started_at}')
+        if log_path:
+            columns.append(f'日志 {log_path}')
+        lines.append('- ' + ' | '.join(columns))
+    overflow = len(entries) - len(visible)
+    if overflow > 0:
+        lines.append(f'另有 {overflow} 条更早的未列出')
+    return '\n'.join(lines)
+
+
 def session_mode_state_text(sandbox_tier: Any) -> str:
     """当刻档位叫什么名字——头部快照与合同分节用这一档。
 
@@ -410,6 +489,63 @@ def _long_term_tasks_from_provider(provider: Any) -> list[Any]:
         return []
 
 
+def frontdoor_owned_process_roster(
+    *,
+    session_key: str = '',
+    task_id: str = '',
+    node_id: str = '',
+) -> list[dict[str, Any]]:
+    """本会话/本节点在跑后台进程的取数口（归属表窄读）。
+
+    CEO 道传 `session_key`；节点道传 `task_id` + `node_id`，只留该节点登记的条目。
+    取数失败一律返回空表：清单是观测块，读不出来就整节不渲染，不阻断会话。
+    """
+    normalized_session = str(session_key or '').strip()
+    normalized_task = str(task_id or '').strip()
+    if not normalized_session and not normalized_task:
+        return []
+    normalized_node = str(node_id or '').strip() or None
+    try:
+        from g3ku.runtime import owned_processes
+
+        scope = owned_processes.scope_key(
+            session_key=normalized_session,
+            task_id=normalized_task,
+        )
+        entries = owned_processes.list_owned(scope, node_id=normalized_node)
+    except Exception:
+        return []
+    items: list[dict[str, Any]] = []
+    for entry in list(entries or []):
+        if not isinstance(entry, dict):
+            continue
+        try:
+            pid = int(entry.get('pid') or 0)
+        except (TypeError, ValueError):
+            continue
+        if pid <= 0:
+            continue
+        items.append(
+            {
+                'pid': pid,
+                'purpose': str(entry.get('label') or ''),
+                'cmd': str(entry.get('cmd') or ''),
+                'started_at': str(entry.get('started_at') or ''),
+                'log_path': str(entry.get('log_path') or ''),
+            }
+        )
+    return items
+
+
+def _owned_processes_from_provider(provider: Any) -> list[Any]:
+    if not callable(provider):
+        return []
+    try:
+        return list(provider() or [])
+    except Exception:
+        return []
+
+
 def render_pinned_contract_text(
     *,
     skill_items: list[Any] | None,
@@ -420,6 +556,7 @@ def render_pinned_contract_text(
     sandbox_tier: str = "",
     session_workspace_dir: str | None = None,
     long_term_tasks: list[Any] | None = None,
+    owned_processes: list[Any] | None = None,
 ) -> str:
     """渲染头部钉住块；`include_extras=True` 时即使名单为空也渲静态声明。
 
@@ -439,6 +576,8 @@ def render_pinned_contract_text(
 
     `long_term_tasks` 是同一份快照里的「在挂的长期任务」清单（服务侧窄读结果），
     空表整节不渲染；它不做判重、不改工具参数，只是让模型看见本会话已挂着哪些长期任务。
+    `owned_processes` 是同一份快照里的「在跑的后台进程」清单（CEO 按会话、节点按
+    task+node 过滤），空表整节不渲染；用途取 `exec` 创建时写入的 `label`。
 
     `include_extras=False` 只渲名单本体：节点道若只需要名单可用这一档；
     会话语义下的节点头部现在也走 `include_extras=True`（exec 策略/临时目录/路径锚进头部）。
@@ -480,6 +619,9 @@ def render_pinned_contract_text(
     roster_text = render_long_term_task_roster(long_term_tasks)
     if roster_text:
         lines.append(roster_text)
+    process_roster_text = render_owned_process_roster(owned_processes)
+    if process_roster_text:
+        lines.append(process_roster_text)
     return '\n'.join(lines).strip()
 
 
@@ -610,6 +752,7 @@ def frontdoor_pinned_contract_text(
     session_workspace_dir: str | None = None,
     tool_policy_signature: str = "",
     long_term_tasks_provider: Any = None,
+    owned_processes_provider: Any = None,
 ) -> str:
     """注入侧唯一取数口：命中已钉住的内容就复用原文，否则重钉一次并记下判据键。
 
@@ -619,6 +762,8 @@ def frontdoor_pinned_contract_text(
 
     `long_term_tasks_provider` 只在重钉那一跳调用：清单随原文一起冻结，两次重印之间
     不取数、不重画（头部一改就顶掉身后全部前缀）。取数失败按空表处理，整节不渲染。
+    `owned_processes_provider` 同档：CEO 传 `session_key`，节点传 `task_id`+`node_id`；
+    进程增删本身不触发重印，启动回执与退出消息是两条 delta。
 
     没有载体（既拿不到会话对象又没有 session_key）时返回空串：钉不住就每回合现算，那份
     名单会随每回合的语义挑选变字节，头部每跳都改比不钉糟糕得多（头部一改就顶掉身后全部前缀）。
@@ -674,6 +819,7 @@ def frontdoor_pinned_contract_text(
         sandbox_tier=sandbox_tier,
         session_workspace_dir=session_workspace_dir,
         long_term_tasks=_long_term_tasks_from_provider(long_term_tasks_provider),
+        owned_processes=_owned_processes_from_provider(owned_processes_provider),
     )
     if not fresh:
         return ''

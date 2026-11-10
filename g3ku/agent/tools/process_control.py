@@ -57,6 +57,7 @@ class ProcessKillTool(Tool):
             session_key=str(runtime_payload.get("session_key") or "web:shared"),
             task_id=str(runtime_payload.get("task_id") or ""),
         )
+        node_id = str(runtime_payload.get("node_id") or "").strip()
         try:
             normalized_pid = int(pid)
         except (TypeError, ValueError):
@@ -65,7 +66,7 @@ class ProcessKillTool(Tool):
                 ensure_ascii=False,
             )
 
-        result = owned_processes.kill_owned(scope, normalized_pid)
+        result = owned_processes.kill_owned(scope, normalized_pid, node_id=node_id or None)
         notify = runtime_payload.get("_notify_background_items_changed")
         if callable(notify):
             try:
@@ -79,19 +80,26 @@ class ProcessKillTool(Tool):
         }
         if result.get("message"):
             payload["message"] = str(result["message"])
-            # 名字对不上时给本 scope 的台账，模型不必猜 pid。
+            # 名字对不上时给本节点的台账，模型不必猜 pid；legacy 空归属条目一并带出。
             payload["owned_processes"] = [
                 {
                     "pid": int(entry.get("pid") or 0),
+                    "purpose": str(entry.get("label") or ""),
                     "cmd": str(entry.get("cmd") or "")[:200],
                     "log_path": str(entry.get("log_path") or ""),
                 }
-                for entry in owned_processes.list_owned(scope)[:10]
+                for entry in owned_processes.list_owned(
+                    scope,
+                    node_id=node_id or None,
+                    include_unattributed=True,
+                )[:10]
             ]
         entry = result.get("entry")
         if isinstance(entry, dict):
             payload["cmd"] = str(entry.get("cmd") or "")[:200]
             payload["log_path"] = str(entry.get("log_path") or "")
+            if entry.get("label"):
+                payload["purpose"] = str(entry.get("label") or "")
         if result.get("log_tail"):
             payload["log_tail"] = str(result["log_tail"])
         return json.dumps(payload, ensure_ascii=False)

@@ -55,7 +55,12 @@ parameters:
         answers pid + log_path immediately and then ignores timeout_seconds. Use it
         only when a later call must still find this process (server, browser, crawl
         driver). A command that is merely slow stays foreground. Stop it with
-        process_kill(pid).
+        process_kill(pid). When true, purpose is required.
+    purpose:
+      type: string
+      description: Required when background=true. One line (<=120 chars; the process
+        list shows the first 80) saying what this process serves and why it must
+        outlive this call.
   required:
   - command
 exposure:

@@ -128,12 +128,14 @@ def register(
     log_path: str,
     session_key: str,
     task_id: str = "",
+    node_id: str = "",
     actor_role: str = "",
     owner_pid: int | None = None,
     label: str = "",
 ) -> dict[str, Any]:
     """登记一个后台进程。`create_time` 取不到时按 0 存，kill 侧会拒绝无身份条目。"""
     create_time = process_create_time(pid) or 0.0
+    normalized_owner_pid = int(owner_pid if owner_pid is not None else os.getpid())
     entry = {
         "pid": int(pid),
         "create_time": create_time,
@@ -142,8 +144,10 @@ def register(
         "scope": str(scope or ""),
         "session_key": str(session_key or ""),
         "task_id": str(task_id or ""),
+        "node_id": str(node_id or ""),
         "actor_role": str(actor_role or ""),
-        "owner_pid": int(owner_pid if owner_pid is not None else os.getpid()),
+        "owner_pid": normalized_owner_pid,
+        "owner_create_time": process_create_time(normalized_owner_pid) or 0.0,
         "label": str(label or ""),
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
@@ -177,11 +181,23 @@ def _identity_matches(entry: dict[str, Any]) -> bool:
     return abs(actual - recorded) < 1.0
 
 
-def list_owned(scope: str, *, prune: bool = True) -> list[dict[str, Any]]:
-    """列出该 scope 下仍然有效的条目；死条目与身份不符的条目顺手删掉。"""
+def list_owned(
+    scope: str,
+    *,
+    prune: bool = True,
+    node_id: str | None = None,
+    include_unattributed: bool = False,
+) -> list[dict[str, Any]]:
+    """列出该 scope 下仍然有效的条目；死条目与身份不符的条目顺手删掉。
+
+    `node_id` 给定时按条目归属过滤；`include_unattributed=True` 把迁移前的
+    空 `node_id` 条目一并带出（kill 台账要能收尾这些 legacy 条目）。头部清单
+    不传这个开关，只显示可归属到当前节点的进程。
+    """
     directory = _scope_dir(scope, create=False)
     if not directory.exists():
         return []
+    normalized_node = str(node_id or "").strip()
     entries: list[dict[str, Any]] = []
     for path in sorted(directory.glob(f"*{_ENTRY_SUFFIX}")):
         entry = _load_entry(path)
@@ -191,6 +207,10 @@ def list_owned(scope: str, *, prune: bool = True) -> list[dict[str, Any]]:
         if prune and not _identity_matches(entry):
             path.unlink(missing_ok=True)
             continue
+        if normalized_node:
+            recorded_node = str(entry.get("node_id") or "").strip()
+            if recorded_node != normalized_node and not (include_unattributed and not recorded_node):
+                continue
         entries.append(entry)
     return entries
 
@@ -230,8 +250,11 @@ def read_log_tail(entry: dict[str, Any], *, limit: int = _LOG_TAIL_CHARS) -> str
     return "…" + text[-limit:]
 
 
-def kill_owned(scope: str, pid: int) -> dict[str, Any]:
-    """终止一个已登记的进程；未登记、已死、身份不符都返回 ok=False 并说明原因。"""
+def kill_owned(scope: str, pid: int, *, node_id: str | None = None) -> dict[str, Any]:
+    """终止一个已登记的进程；未登记、已死、身份不符都返回 ok=False 并说明原因。
+
+    `node_id` 给定时只接受该节点登记的条目；空 `node_id` 的 legacy 条目放行一次。
+    """
     entry = find(scope, pid)
     if entry is None:
         return {
@@ -243,6 +266,16 @@ def kill_owned(scope: str, pid: int) -> dict[str, Any]:
                 "session/task. Start long-running work with exec background=true, "
                 "then stop it here."
             ),
+        }
+    normalized_node = str(node_id or "").strip()
+    recorded_node = str(entry.get("node_id") or "").strip()
+    if normalized_node and recorded_node and recorded_node != normalized_node:
+        return {
+            "ok": False,
+            "pid": int(pid),
+            "reason": "not_owned",
+            "message": "This pid belongs to another node of the task.",
+            "entry": entry,
         }
     if not is_alive(int(pid)):
         drop(scope, pid)
