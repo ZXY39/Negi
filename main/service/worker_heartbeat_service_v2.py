@@ -96,6 +96,13 @@ _PERF_HISTORY_FIELDS = (
     'entry_event_dropped_other_total',
     'entry_event_delivery_dropped_total',
     'entry_event_queue_bytes_estimated',
+    # 整机临时端口：连接泄漏把 16384 个端口填满时，内存与 CPU 全正常，只有这几个数
+    # 能在事前读到曲线（11-10 一次 WinError 10055 全机断网就是这么来的）。
+    'machine_tcp_dynamic_ports_available',
+    'machine_tcp_dynamic_ports_used',
+    'machine_tcp_dynamic_ports_capacity',
+    'machine_tcp_dynamic_ports_percent',
+    'machine_tcp_dynamic_ports_top',
 )
 
 

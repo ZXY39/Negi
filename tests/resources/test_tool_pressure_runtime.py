@@ -1720,3 +1720,67 @@ async def test_loopback_and_event_lane_counters_are_published() -> None:
     assert snapshot['entry_event_single_fallback_total'] == 3
     assert snapshot['entry_loopback_pool_total'] == 67
     assert snapshot['entry_loopback_pool_leased'] == 65
+
+
+def test_tcp_dynamic_port_pressure_is_observability_only(monkeypatch) -> None:
+    """整机临时端口占满只进读数，不许改 machine_pressure_state：端口满不等于机器算不动，
+    接进节流会把「建不出连接」升级成「也不许干活」。"""
+    from main.service.worker_heartbeat_service_v2 import _PERF_HISTORY_FIELDS
+
+    store = _FakeStore()
+    controller = AdaptiveToolBudgetController(normal_limit=4, safe_limit=1, step_up=1)
+    monitor = WorkerPressureMonitor(controller=controller, store=store)
+    monitor._tcp_port_range = (49152, 10)
+
+    connections = [
+        SimpleNamespace(laddr=SimpleNamespace(port=49152 + index), status='ESTABLISHED', pid=100 + index)
+        for index in range(8)
+    ]
+    connections += [
+        SimpleNamespace(laddr=SimpleNamespace(port=49152 + index), status='TIME_WAIT', pid=0)
+        for index in range(2)
+    ]
+    connections.append(SimpleNamespace(laddr=SimpleNamespace(port=49160), status='LISTEN', pid=4))
+    connections.append(SimpleNamespace(laddr=SimpleNamespace(port=18790), status='ESTABLISHED', pid=4))
+
+    class _FakePsutil:
+        CONN_LISTEN = 'LISTEN'
+        Process = staticmethod(lambda pid: SimpleNamespace(name=lambda: f'proc{pid}'))
+
+        @staticmethod
+        def net_connections(kind='tcp'):
+            return connections
+
+    monkeypatch.setattr('main.runtime.tool_pressure_monitor.psutil', _FakePsutil)
+
+    payload = monitor._sample_tcp_port_pressure(10.0)
+    assert payload['used'] == 10
+    assert payload['capacity'] == 10
+    assert payload['percent'] == 100.0
+    assert payload['top'].count('=') == 3
+
+    snapshot = monitor.observe_sample(
+        machine_cpu_percent=10.0,
+        machine_memory_percent=20.0,
+        machine_disk_busy_percent=1.0,
+        machine_available=True,
+        event_loop_lag_ms=1.0,
+        writer_queue_depth=0,
+        sqlite_write_wait_ms=0.0,
+        sqlite_query_latency_ms=0.0,
+        process_cpu_ratio=0.1,
+        now_mono=11.0,
+        now_iso='2026-11-10T21:00:00+08:00',
+        tcp_port_pressure=payload,
+    )
+    assert snapshot['machine_tcp_dynamic_ports_used'] == 10
+    assert snapshot['machine_tcp_dynamic_ports_percent'] == 100.0
+    assert snapshot['machine_pressure_state'] == 'normal'
+    assert controller.snapshot()['tool_pressure_state'] == 'normal'
+    for key in (
+        'machine_tcp_dynamic_ports_used',
+        'machine_tcp_dynamic_ports_capacity',
+        'machine_tcp_dynamic_ports_percent',
+        'machine_tcp_dynamic_ports_top',
+    ):
+        assert key in _PERF_HISTORY_FIELDS, f'{key} 没进性能历史，端口爬满在事后读不出来'

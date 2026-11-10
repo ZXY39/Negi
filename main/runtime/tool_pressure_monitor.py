@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 import time
-from collections import deque
+from collections import Counter, deque
 from datetime import datetime
 from typing import Any, Callable, Sequence
 
@@ -23,6 +24,26 @@ except Exception:  # pragma: no cover - handled by runtime fallback
 
 def _now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec='seconds')
+
+
+def _windows_dynamic_tcp_port_range() -> tuple[int, int] | None:
+    """本机临时端口区间 (起始端口, 端口数)。范围是操作员可改的系统设置，不在这里写死。"""
+    if os.name != 'nt':
+        return None
+    try:
+        import winreg
+
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r'SYSTEM\CurrentControlSet\Services\Tcpip\Parameters',
+        ) as key:
+            start = int(winreg.QueryValueEx(key, 'DynamicPortRangeStartPort')[0])
+            count = int(winreg.QueryValueEx(key, 'DynamicPortRangeNumberOfPorts')[0])
+        if start > 0 and count > 0:
+            return start, count
+    except Exception:
+        pass
+    return _WINDOWS_DEFAULT_DYNAMIC_PORT_START, _WINDOWS_DEFAULT_DYNAMIC_PORT_COUNT
 
 
 # 回合闸的余量目标算法常量。压力轴的阈值一律复用上面 observe 用的那一份 warn/safe 线，
@@ -48,6 +69,17 @@ _ENTRY_POOL_KEY = 'pool'
 #   表现是网页打不开 + 模型调用从 363 次/小时掉到 32）。warn 取崩溃点的四成。
 _ENTRY_LOOPBACK_WARN_CONNECTIONS = 2000.0
 _ENTRY_LOOPBACK_CRITICAL_CONNECTIONS = 4000.0
+# - 整机动态端口轴（只观测，不进 pressure_state）：11-10 实测一个长驻脚本每轮新建事件循环，
+#   SDK 按循环缓存客户端 ⇒ 每轮漏一条连接，16 分钟涨 112 条，把 16384 个临时端口填满后
+#   全机建连报 WinError 10055，而内存与 CPU 全程正常。端口满不等于机器算不动，接进节流
+#   反而会把"建不出连接"升级成"也不许干活"，所以这一轴只进读数与告警。
+_TCP_PORT_PRESSURE_WARN_RATIO = 0.80
+_TCP_PORT_PRESSURE_TOP_RATIO = 0.60
+_TCP_PORT_PRESSURE_SAMPLE_SECONDS = 15.0
+_TCP_PORT_PRESSURE_SAMPLE_SECONDS_EXHAUSTED = 60.0
+_TCP_PORT_PRESSURE_WARN_LOG_SECONDS = 300.0
+_WINDOWS_DEFAULT_DYNAMIC_PORT_START = 49152
+_WINDOWS_DEFAULT_DYNAMIC_PORT_COUNT = 16384
 # - 单格内存成本的兜底值：实测 9 格在飞时 worker RSS 1.04 GB，凌晨 27 格时 Private 2.4 GB
 #   （≈89–115 MB/格）。有回归样本时用回归值，没有时用这一档。
 _ENTRY_SLOT_MEMORY_FALLBACK_BYTES = 110 * 1024 * 1024
@@ -184,6 +216,12 @@ class WorkerPressureMonitor:
         # 回环连接观测（第五根积压轴）：读 runtime_service 现数的 ESTABLISHED 条数与
         # 事件队列计数，取不到就当没有这条约束。
         self._loop_observer = loop_observer
+        # 整机动态端口轴：自己的采样缓存与告警节流，和机器压力三轴互不影响。
+        self._tcp_port_range = _windows_dynamic_tcp_port_range()
+        self._tcp_port_pressure_cache: dict[str, Any] = {}
+        self._tcp_port_pressure_at = 0.0
+        self._tcp_port_pressure_warn_at = 0.0
+        self._tcp_port_owner_names: dict[int, str] = {}
         self._process_handle: Any = None
         self._entry_memory_samples: deque[tuple[float, int, int]] = deque()
         self._entry_slot_memory_estimates: deque[tuple[float, int]] = deque()
@@ -268,6 +306,11 @@ class WorkerPressureMonitor:
             'machine_disk_free_bytes': -1,
             'machine_disk_total_bytes': -1,
             'machine_disk_usage_percent': 0.0,
+            'machine_tcp_dynamic_ports_available': False,
+            'machine_tcp_dynamic_ports_used': 0,
+            'machine_tcp_dynamic_ports_capacity': 0,
+            'machine_tcp_dynamic_ports_percent': 0.0,
+            'machine_tcp_dynamic_ports_top': '',
             'disk_emergency_active': False,
             'disk_emergency_since': '',
             'tool_pressure_event_loop_lag_ms': 0.0,
@@ -733,6 +776,7 @@ class WorkerPressureMonitor:
         worker_memory_bytes: int | None = None,
         rate_pressure: dict[str, Any] | None = None,
         loop_stats: dict[str, Any] | None = None,
+        tcp_port_pressure: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         current_mono = float(now_mono if now_mono is not None else time.perf_counter())
         timestamp = str(now_iso or _now_iso()).strip() or _now_iso()
@@ -802,6 +846,12 @@ class WorkerPressureMonitor:
         disk_total = int(machine_disk_total_bytes) if machine_disk_total_bytes is not None and int(machine_disk_total_bytes) > 0 else -1
         disk_watermark_available = disk_free >= 0 and disk_total > 0
         disk_usage_percent = round((disk_total - disk_free) / disk_total * 100.0, 3) if disk_watermark_available else 0.0
+        tcp_pressure = dict(tcp_port_pressure or {})
+        tcp_ports_available = bool(tcp_pressure.get('available'))
+        tcp_ports_used = int(tcp_pressure.get('used') or 0)
+        tcp_ports_capacity = int(tcp_pressure.get('capacity') or 0)
+        tcp_ports_percent = float(tcp_pressure.get('percent') or 0.0)
+        tcp_ports_top = str(tcp_pressure.get('top') or '')
         with self._lock:
             self._sample_mono = current_mono
             self._snapshot = {
@@ -815,6 +865,11 @@ class WorkerPressureMonitor:
                 'machine_disk_free_bytes': disk_free,
                 'machine_disk_total_bytes': disk_total,
                 'machine_disk_usage_percent': disk_usage_percent,
+                'machine_tcp_dynamic_ports_available': tcp_ports_available,
+                'machine_tcp_dynamic_ports_used': tcp_ports_used,
+                'machine_tcp_dynamic_ports_capacity': tcp_ports_capacity,
+                'machine_tcp_dynamic_ports_percent': round(tcp_ports_percent, 3),
+                'machine_tcp_dynamic_ports_top': tcp_ports_top,
                 'tool_pressure_event_loop_lag_ms': round(max(0.0, float(event_loop_lag_ms or 0.0)), 3),
                 'tool_pressure_writer_queue_depth': int(max(0, int(writer_queue_depth or 0))),
                 'tool_pressure_process_cpu_ratio': round(max(0.0, float(process_cpu_ratio or 0.0)), 4),
@@ -1172,6 +1227,7 @@ class WorkerPressureMonitor:
                     worker_memory_bytes=self._sample_worker_memory(),
                     rate_pressure=self._sample_rate_pressure(),
                     loop_stats=self._sample_loop_pressure(),
+                    tcp_port_pressure=self._sample_tcp_port_pressure(current_wall),
                 )
             except Exception:
                 time.sleep(min(1.0, self._sample_seconds))
@@ -1364,6 +1420,84 @@ class WorkerPressureMonitor:
             'disk_read_bytes_per_sec': disk_read_bytes_per_sec,
             'disk_write_bytes_per_sec': disk_write_bytes_per_sec,
         }
+
+
+    def _describe_tcp_port_owners(self, owners: Counter) -> str:
+        parts: list[str] = []
+        for pid, sockets in owners.most_common(3):
+            name = self._tcp_port_owner_names.get(pid)
+            if name is None:
+                try:
+                    name = psutil.Process(pid).name()
+                except Exception:
+                    name = '?'
+                self._tcp_port_owner_names[pid] = name
+            parts.append(f'{name}({pid})={sockets}')
+        return ' '.join(parts)
+
+    def _sample_tcp_port_pressure(self, now_mono: float) -> dict[str, Any]:
+        """整机临时端口占用。只给读数与告警，不改任何压力状态。"""
+        cached = self._tcp_port_pressure_cache
+        interval = (
+            _TCP_PORT_PRESSURE_SAMPLE_SECONDS_EXHAUSTED
+            if float(cached.get('percent') or 0.0) >= 95.0
+            else _TCP_PORT_PRESSURE_SAMPLE_SECONDS
+        )
+        if cached and (now_mono - self._tcp_port_pressure_at) < interval:
+            return cached
+        self._tcp_port_pressure_at = float(now_mono)
+        port_range = self._tcp_port_range
+        if psutil is None or port_range is None:
+            self._tcp_port_pressure_cache = {
+                'available': False,
+                'used': 0,
+                'capacity': 0,
+                'percent': 0.0,
+                'top': '',
+            }
+            return self._tcp_port_pressure_cache
+        start, count = port_range
+        end = start + count - 1
+        used = 0
+        owners: Counter = Counter()
+        try:
+            connections = psutil.net_connections(kind='tcp')
+        except Exception:
+            if cached:
+                return cached
+            return {'available': False, 'used': 0, 'capacity': 0, 'percent': 0.0, 'top': ''}
+        listen = str(getattr(psutil, 'CONN_LISTEN', 'LISTEN') or 'LISTEN')
+        for connection in connections:
+            local = getattr(connection, 'laddr', None)
+            port = getattr(local, 'port', None)
+            if port is None or not (start <= int(port) <= end):
+                continue
+            if str(getattr(connection, 'status', '') or '') == listen:
+                continue
+            used += 1
+            pid = int(getattr(connection, 'pid', 0) or 0)
+            if pid > 0:
+                owners[pid] += 1
+        percent = round(used / count * 100.0, 3) if count else 0.0
+        payload = {
+            'available': True,
+            'used': used,
+            'capacity': count,
+            'percent': percent,
+            'top': self._describe_tcp_port_owners(owners) if percent >= _TCP_PORT_PRESSURE_TOP_RATIO * 100.0 else '',
+        }
+        self._tcp_port_pressure_cache = payload
+        if percent >= _TCP_PORT_PRESSURE_WARN_RATIO * 100.0:
+            if (now_mono - self._tcp_port_pressure_warn_at) >= _TCP_PORT_PRESSURE_WARN_LOG_SECONDS:
+                self._tcp_port_pressure_warn_at = float(now_mono)
+                logger.warning(
+                    'machine TCP dynamic ports nearly exhausted: used={}/{} ({:.1f}%) top={}',
+                    used,
+                    count,
+                    percent,
+                    payload['top'] or 'unknown',
+                )
+        return payload
 
 
 ToolPressureMonitor = WorkerPressureMonitor
