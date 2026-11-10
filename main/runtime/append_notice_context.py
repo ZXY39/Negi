@@ -402,39 +402,14 @@ def live_append_notice_ids(
     }
 
 
-def archived_consumed_notice_count(
+def archived_consumed_notice_span(
     context: Any,
     *,
     consumed_window: int = NODE_NOTICE_CONSUMED_TAIL_WINDOW,
-) -> int:
-    """已消费但已退出尾块窗口的记录数（压缩边界退场的那一批）。"""
-    normalized = normalize_append_notice_context(context)
-    live_ids = live_append_notice_ids(
-        normalized,
-        consumed_window=consumed_window,
-    )
-    return sum(
-        1
-        for item in list(normalized.get('notice_records') or [])
-        if str(item.get('message') or '').strip()
-        and not str(item.get('superseded_at') or '').strip()
-        and str(item.get('notification_id') or '').strip() not in live_ids
-    )
+) -> tuple[int, str]:
+    """窗口外已消费记录的（条数, 最老 received_at）。
 
-
-def is_notice_index_message(message: Any) -> bool:
-    content = str((message or {}).get('content') or '').strip()
-    return content.startswith(f'{NOTICE_INDEX_PREFIX}\n')
-
-
-def build_notice_index_message(
-    context: Any,
-    *,
-    consumed_window: int = NODE_NOTICE_CONSUMED_TAIL_WINDOW,
-) -> dict[str, Any] | None:
-    """一条极小的尾索引：告诉模型有多少已消费通知已退出上下文、怎么取回。
-
-    只报告数量与最老时间，不重投正文；没有退场记录时不产行。
+    台账口径、每次重算一致：压缩重放同一批历史得到的读数相同，不需要累加器。
     """
     normalized = normalize_append_notice_context(context)
     live_ids = live_append_notice_ids(
@@ -448,8 +423,6 @@ def build_notice_index_message(
         and not str(item.get('superseded_at') or '').strip()
         and str(item.get('notification_id') or '').strip() not in live_ids
     ]
-    if not archived:
-        return None
     oldest = min(
         (
             _notice_record_sort_key(item)[0]
@@ -458,20 +431,21 @@ def build_notice_index_message(
         ),
         default='',
     )
-    lines = [
-        NOTICE_INDEX_PREFIX,
-        f'Older consumed notices outside the live window: {len(archived)}'
-        + (f' (oldest {oldest}).' if oldest else '.'),
-        'This is runtime bookkeeping for already-consumed notices. Do not reply to it '
-        'or restate it in your answer; use view_message_history, content_search or '
-        'content_open only when an older notice is actually needed.',
-    ]
-    return {
-        'role': 'user',
-        'content': '\n'.join(lines),
-        # 不给 internal_prompt_kind：那个键会把消息归到 hidden_internal_event 家族。
-        'metadata': {'ui_visible': False},
-    }
+    return len(archived), oldest
+
+
+def archived_consumed_notice_count(
+    context: Any,
+    *,
+    consumed_window: int = NODE_NOTICE_CONSUMED_TAIL_WINDOW,
+) -> int:
+    """已消费但已退出尾块窗口的记录数（压缩边界退场的那一批）。"""
+    return archived_consumed_notice_span(context, consumed_window=consumed_window)[0]
+
+
+def is_notice_index_message(message: Any) -> bool:
+    content = str((message or {}).get('content') or '').strip()
+    return content.startswith(f'{NOTICE_INDEX_PREFIX}\n')
 
 
 def select_uncovered_append_notices(
@@ -733,7 +707,7 @@ __all__ = [
     'append_notice_tail_prefix_match',
     'append_notice_window_notice_ids',
     'archived_consumed_notice_count',
-    'build_notice_index_message',
+    'archived_consumed_notice_span',
     'is_notice_index_message',
     'live_append_notice_ids',
     'NOTICE_ORIGIN_SYSTEM_RELAY',

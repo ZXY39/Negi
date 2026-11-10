@@ -155,8 +155,8 @@ from main.runtime.append_notice_context import (
     append_notice_tail_prefix_match,
     append_notice_window_notice_ids,
     archived_consumed_notice_count,
+    archived_consumed_notice_span,
     build_append_notice_tail_messages,
-    build_notice_index_message,
     dedupe_append_notice_tail_messages,
     live_append_notice_ids,
     normalize_append_notice_context,
@@ -736,12 +736,6 @@ class ReActToolLoop:
             # 内容审查词替换的定稿点：只改模型面正文（工具结果与发起方消息），放在 token
             # 预检之前，压缩 helper 与实际发送读同一份正文。
             request_messages = apply_content_policy(request_messages)
-            # 退场索引插在当前 user 回合之前，而不是作为请求末条：模型会把末条 user
-            # 当成待回应的新消息，每跳都复述一遍"这些旧通知忽略"。
-            request_messages = self._insert_notice_index_before_current_user(
-                request_messages,
-                self._notice_index_message(runtime_context=runtime_context),
-            )
             previous_actual_request_messages = self._prompt_message_records(request_messages)
             pending_request_delta_messages = []
             repair_overlay_text = None
@@ -6621,6 +6615,16 @@ class ReActToolLoop:
             "retained_recent_tail_count": len(list(parts.get("recent_tail") or [])),
             "append_notice_tail_count": len(notice_tail),
         }
+        # 压缩块是唯一"退场事实"的写入点：台账里窗口外的已消费通知在这之后只留在
+        # 检索面里，所以把累计条数与最老一条的时刻冻进块元数据；两次压缩之间
+        # 这几个字节不变，模型按需 view_message_history / content_search 取回。
+        retired_notice_count, oldest_retired_notice_at = archived_consumed_notice_span(
+            append_notice_context
+        )
+        if retired_notice_count:
+            compacted_payload["retired_notice_count"] = retired_notice_count
+            if oldest_retired_notice_at:
+                compacted_payload["oldest_retired_notice_at"] = oldest_retired_notice_at
         if raw_leftover:
             # 分块没压中的原始历史留在请求体里，条数进块元数据：下一跳的规划器按"还没压
             # 的原子组"重算，靠的就是这部分仍然在场。
@@ -10143,47 +10147,6 @@ class ReActToolLoop:
                 f'node={runtime_context.get("node_id")} dropped={dropped} kept={len(kept)}'
             )
         return kept
-
-    def _notice_index_message(self, *, runtime_context: dict[str, Any]) -> dict[str, Any] | None:
-        store = getattr(self._log_service, '_store', None)
-        getter = getattr(store, 'get_node', None) if store is not None else None
-        if not callable(getter):
-            return None
-        node = getter(str(runtime_context.get('node_id') or '').strip())
-        if node is None or not isinstance(getattr(node, 'metadata', None), dict):
-            return None
-        return build_notice_index_message(node.metadata.get(APPEND_NOTICE_CONTEXT_KEY))
-
-    @classmethod
-    def _insert_notice_index_before_current_user(
-        cls,
-        request_messages: list[dict[str, Any]] | None,
-        index_message: dict[str, Any] | None,
-    ) -> list[dict[str, Any]]:
-        """只在请求末条是普通 user 回合时，把退场索引插到它之前。
-
-        工具续跳的末条是工具结果，没有"当前 user 回合"；这时不插，免得索引每跳
-        以最新消息的身份出现并被模型回一句。末条是运行时家族的 user 消息（心跳/
-        回合提醒等）同样不插：那不是用户输入，索引在它前面只会落进深历史。
-        """
-        records = [
-            dict(item)
-            for item in list(request_messages or [])
-            if isinstance(item, dict)
-        ]
-        if index_message is None or not records:
-            return records
-        trailing = records[-1]
-        if str(trailing.get('role') or '').strip().lower() != 'user':
-            return records
-        if _mid_insert.classify_message(trailing) is not None:
-            return records
-        return _mid_insert.insert_mid_messages(
-            records,
-            items=[index_message],
-            position=_mid_insert.POSITION_BEFORE_CURRENT_USER,
-            lane=_mid_insert.LANE_NODE,
-        )
 
     @staticmethod
     def _prompt_message_records(messages: list[dict[str, Any]] | None) -> list[dict[str, Any]]:

@@ -9,7 +9,6 @@ from main.runtime.append_notice_context import (
     APPEND_NOTICE_TAIL_PREFIX,
     NOTICE_INDEX_PREFIX,
     build_append_notice_tail_messages,
-    build_notice_index_message,
     is_notice_index_message,
     live_append_notice_ids,
     prune_append_notice_context_segments,
@@ -264,86 +263,83 @@ def test_deep_raw_window_is_hoisted_only_when_it_is_live() -> None:
     assert dead_block in parts['compressible_history']
 
 
-def test_notice_index_reports_only_archived_consumed() -> None:
+def test_archived_consumed_notice_span_reports_count_and_oldest() -> None:
+    from main.runtime.append_notice_context import archived_consumed_notice_span
+
     context = _context([_record(index) for index in range(7)])
-    message = build_notice_index_message(context)
-    assert message is not None
-    content = str(message['content'])
-    assert content.startswith(f'{NOTICE_INDEX_PREFIX}\n')
-    assert 'outside the live window: 2' in content
-    # 索引是记账行，不许写成待执行的动作，也不许请模型复述。
-    assert 'Do not reply' in content
-    assert 'content_search(ref=' not in content
+    count, oldest = archived_consumed_notice_span(context)
+    assert count == 2
+    assert oldest == '2026-10-01T00:00:00+08:00'
+    assert archived_consumed_notice_span(_context([_record(1)])) == (0, '')
+
+
+def test_token_compaction_block_records_retired_notice_span() -> None:
+    context = _context([_record(index) for index in range(7)])
+    request_messages = [
+        {'role': 'system', 'content': 'sys'},
+        {'role': 'user', 'content': 'bootstrap'},
+        *[
+            {
+                'role': 'user' if index % 2 == 0 else 'assistant',
+                'content': f'history {index}',
+            }
+            for index in range(40)
+        ],
+    ]
+    rewritten, payload = ReActToolLoop._rewrite_request_messages_for_token_compaction(
+        node_id='node:x',
+        request_messages=request_messages,
+        compressed_text='summary',
+        recent_tail_count=4,
+        append_notice_context=context,
+    )
+    assert payload['retired_notice_count'] == 2
+    assert payload['oldest_retired_notice_at'] == '2026-10-01T00:00:00+08:00'
+    block = next(
+        item
+        for item in rewritten
+        if str(item.get('content') or '').startswith('[TOKEN_COMPACT_V2]')
+    )
+    metadata = json.loads(str(block['content']).splitlines()[1])
+    assert metadata['retired_notice_count'] == 2
+    assert metadata['oldest_retired_notice_at'] == '2026-10-01T00:00:00+08:00'
+
+
+def test_token_compaction_block_omits_retired_span_without_archive() -> None:
+    context = _context([_record(index) for index in range(5)])
+    request_messages = [
+        {'role': 'system', 'content': 'sys'},
+        {'role': 'user', 'content': 'bootstrap'},
+        *[
+            {
+                'role': 'user' if index % 2 == 0 else 'assistant',
+                'content': f'history {index}',
+            }
+            for index in range(40)
+        ],
+    ]
+    _rewritten, payload = ReActToolLoop._rewrite_request_messages_for_token_compaction(
+        node_id='node:x',
+        request_messages=request_messages,
+        compressed_text='summary',
+        recent_tail_count=4,
+        append_notice_context=context,
+    )
+    assert 'retired_notice_count' not in payload
+    assert 'oldest_retired_notice_at' not in payload
+
+
+def test_legacy_notice_index_message_is_stripped_from_prompt_tail() -> None:
+    # 索引行不再由任何写入侧产出；存量消息按前缀识别后照旧在 prompt_tail 剥离。
+    message = {
+        'role': 'user',
+        'content': f'{NOTICE_INDEX_PREFIX}\nOlder consumed notices outside the live window: 2',
+        'metadata': {'ui_visible': False},
+    }
     assert is_notice_index_message(message)
     assert mi.classify_message(message) == mi.KIND_NOTICE_INDEX
-    assert build_notice_index_message(_context([_record(1)])) is None
-
-
-def test_notice_index_is_stripped_from_durable_prompt_tail() -> None:
-    context = _context([_record(index) for index in range(7)])
-    message = build_notice_index_message(context)
-    assert message is not None
     assert mi.strip_for_stage(
         [message],
         stage=mi.STAGE_PROMPT_TAIL,
         lane=mi.LANE_NODE,
     ) == []
-
-
-def test_notice_index_sits_before_the_current_user_turn() -> None:
-    context = _context([_record(index) for index in range(7)])
-    message = build_notice_index_message(context)
-    assert message is not None
-    request_messages = [
-        {'role': 'system', 'content': 'sys'},
-        {'role': 'user', 'content': 'bootstrap'},
-        {'role': 'assistant', 'content': '', 'tool_calls': [{'id': 'call_1'}]},
-        {'role': 'tool', 'content': 'tool result'},
-        {'role': 'user', 'content': '[WAIT_NOTE] 等下一轮'},
-    ]
-    rewritten = ReActToolLoop._insert_notice_index_before_current_user(
-        request_messages,
-        message,
-    )
-    assert [item['role'] for item in rewritten] == [
-        'system', 'user', 'assistant', 'tool', 'user', 'user',
-    ]
-    assert rewritten[-2] is not rewritten[-1]
-    assert is_notice_index_message(rewritten[-2])
-    assert rewritten[-1]['content'] == '[WAIT_NOTE] 等下一轮'
-
-
-def test_notice_index_stays_out_of_tool_continuation_hops() -> None:
-    context = _context([_record(index) for index in range(7)])
-    message = build_notice_index_message(context)
-    assert message is not None
-    request_messages = [
-        {'role': 'system', 'content': 'sys'},
-        {'role': 'user', 'content': 'bootstrap'},
-        {'role': 'assistant', 'content': '', 'tool_calls': [{'id': 'call_1'}]},
-        {'role': 'tool', 'content': 'tool result'},
-    ]
-    assert (
-        ReActToolLoop._insert_notice_index_before_current_user(request_messages, message)
-        == request_messages
-    )
-
-
-def test_notice_index_skips_runtime_family_user_tail() -> None:
-    context = _context([_record(index) for index in range(7)])
-    message = build_notice_index_message(context)
-    assert message is not None
-    request_messages = [
-        {'role': 'system', 'content': 'sys'},
-        {'role': 'user', 'content': 'bootstrap'},
-        {'role': 'assistant', 'content': '', 'tool_calls': [{'id': 'call_1'}]},
-        {'role': 'tool', 'content': 'tool result'},
-        {
-            'role': 'user',
-            'content': 'System note for this turn only:\nrepair required',
-        },
-    ]
-    assert (
-        ReActToolLoop._insert_notice_index_before_current_user(request_messages, message)
-        == request_messages
-    )
