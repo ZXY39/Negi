@@ -7,6 +7,8 @@
    「运行」（实机验收 F-2）；
 3. 任务树前端归一化必须保留 `continuous` / `wait_external`，树内「待命」徽标
    才能渲染（实机验收 F-3）。
+4. 待命卡片在「结束」那一格印「最近」，读数取可见输出锚点，REST 列表与 WS
+   摘要同源；`updated_at` 被 `mark_task_read` 等账本动作刷新时不许跟着动。
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from main.service.runtime_service import MainRuntimeService
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STAMP = '2026-11-07T00:00:00+08:00'
+RUN_STAMP = '2026-11-07T03:04:05+08:00'
 
 
 class _DummyChatBackend:
@@ -177,6 +180,85 @@ def test_task_list_items_mark_plain_task_not_standby(tmp_path: Path) -> None:
 
     items = {item.task_id: item for item in service.query_service.get_tasks(None, 'all')}
     assert items['task:plain'].standby is False
+
+
+def test_standby_item_carries_last_run_at_only_in_standby(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    _seed_continuous_root(service)
+    service.log_service.update_task_runtime_meta(
+        'task:standby', last_visible_output_at=RUN_STAMP
+    )
+
+    items = {item.task_id: item for item in service.query_service.get_tasks(None, 'all')}
+    assert items['task:standby'].standby is True
+    assert items['task:standby'].last_run_at == RUN_STAMP
+
+    # 离开待命就不带这一格：卡片只在待命档渲染它，暂停档不该留着旧读数。
+    service.log_service.update_task_control(
+        'task:standby', pause_requested=True, is_paused=True
+    )
+    items = {item.task_id: item for item in service.query_service.get_tasks(None, 'all')}
+    assert items['task:standby'].standby is False
+    assert items['task:standby'].last_run_at == ''
+
+
+def test_last_run_at_survives_mark_task_read_on_both_lanes(tmp_path: Path) -> None:
+    """账本动作刷新 updated_at 时，最近运行读数不许跟着动（REST 与 WS 同源）。"""
+    service = _service(tmp_path)
+    _seed_continuous_root(service)
+    service.log_service.update_task_runtime_meta(
+        'task:standby', last_visible_output_at=RUN_STAMP
+    )
+
+    service.log_service.mark_task_read('task:standby')
+    after = service.store.get_task('task:standby')
+    assert after is not None
+    assert after.is_unread is False
+    # 先证污染前提成立：mark_task_read 确实把 updated_at 推到了锚点之外。
+    assert after.updated_at != RUN_STAMP
+
+    items = {item.task_id: item for item in service.query_service.get_tasks(None, 'all')}
+    assert items['task:standby'].last_run_at == RUN_STAMP
+    # mark_task_read 走的就是摘要发布车道：指纹里的读数必须与 REST 列表逐字相同。
+    fingerprint = _summary_fingerprint(service, 'task:standby')
+    assert fingerprint.get('standby') is True
+    assert fingerprint.get('last_run_at') == RUN_STAMP
+
+
+def test_last_run_at_falls_back_to_created_at_without_anchor(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    _seed_continuous_root(service)
+    service.log_service.update_task_runtime_meta('task:standby', last_visible_output_at='')
+
+    items = {item.task_id: item for item in service.query_service.get_tasks(None, 'all')}
+    assert items['task:standby'].standby is True
+    assert items['task:standby'].last_run_at == STAMP
+
+
+def test_summary_payload_omits_empty_last_run_at(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    task, _parent = _seed_continuous_root(service)
+
+    # 前端是合并语义：非待命档省略字段，不下发空串去清旧值。
+    assert 'last_run_at' not in service.log_service._task_summary_payload(task)
+    payload = service.log_service._task_summary_payload(
+        task, standby=True, last_run_at=RUN_STAMP
+    )
+    assert payload['last_run_at'] == RUN_STAMP
+
+
+def test_summary_fingerprint_covers_last_run_at(tmp_path: Path) -> None:
+    """载荷里印出去的读数必须进指纹，否则"无变化"早退会吞掉新的最近运行时间。"""
+    service = _service(tmp_path)
+    task, _parent = _seed_continuous_root(service)
+
+    first = service.log_service._task_summary_fingerprint(
+        task, standby=True, last_run_at=RUN_STAMP
+    )
+    second = service.log_service._task_summary_fingerprint(
+        task, standby=True, last_run_at='2026-11-07T05:06:07+08:00'
+    )
+    assert first != second
 
 
 def test_tree_frontends_render_standby_badge_from_snapshot_fields() -> None:

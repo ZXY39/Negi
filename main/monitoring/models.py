@@ -200,6 +200,10 @@ class TaskListItem(Model):
     updated_at: str = ''
     # 任务终态时间：仅 success/failed 时有值，供任务卡片「结束」行与总耗时定格。
     finished_at: str = ''
+    # 待命任务的最近一次运行时间：仅 standby 时有值，占卡片「结束」那一格。
+    # 取运行时 meta 的 last_visible_output_at，不能退到 updated_at——mark_task_read
+    # 等账本动作也刷新它，会把「刚查看过」印成「刚运行过」。
+    last_run_at: str = ''
     max_depth: int = 0
     token_usage: TokenUsageSummary = Field(default_factory=TokenUsageSummary)
     # 磁盘治理（P1）：任务磁盘占用（增量记账 + 每小时/终态对账，展示允许 ≤1h 延迟）。

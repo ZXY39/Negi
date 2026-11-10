@@ -420,7 +420,10 @@ function taskMetricValueMarkup(formatted, previousFormatted) {
 
 function taskCardPatchEligible(previousTask, nextTask) {
     if (!previousTask || !nextTask) return false;
+    // 待命翻面时 status 仍是 in_progress，但徽标与「最近」格都换了像素，而增量
+    // 补丁车道只刷标题/占用/节点数/耗时/token，这两处它不重画 ⇒ 必须走整卡重建。
     return String(previousTask.status || "") === String(nextTask.status || "")
+        && !!previousTask.standby === !!nextTask.standby
         && !!previousTask.is_paused === !!nextTask.is_paused
         && !!previousTask.is_unread === !!nextTask.is_unread
         && taskFailureClass(previousTask) === taskFailureClass(nextTask)
@@ -711,6 +714,20 @@ function taskIsTerminal(task) {
 function taskFinishedAtText(task) {
     const raw = String(task?.finished_at || task?.updated_at || "").trim();
     return raw ? formatSessionTime(raw) : "\u6682\u65e0";
+}
+
+// 「开始」后面那一格：终态印结束时间，待命印最近一次运行时间，其余档留空。
+// 待命不是终态，任务还会被外部唤醒接着跑，所以这一格不能借用 finished_at。
+// 标签与「结束」同为两字：实测四字标签会把 370–410px 卡宽这一带的时间挤成省略号，
+// 而终态行在同宽度不裁。截断时全值由 title 兜住。
+function taskCardTimeSlotMarkup(task) {
+    if (taskIsTerminal(task)) {
+        return `<span class="pc-field-label pc-field-label--end">结束</span><span class="pc-field-value" data-task-finished-at>${esc(taskFinishedAtText(task))}</span>`;
+    }
+    if (taskStatusKey(task) !== "standby") return "";
+    const raw = String(task?.last_run_at || "").trim();
+    const text = raw ? formatSessionTime(raw) : "暂无";
+    return `<span class="pc-field-label pc-field-label--end">最近</span><span class="pc-field-value" data-task-last-run-at title="${esc(text)}">${esc(text)}</span>`;
 }
 
 function formatTaskElapsedMs(ms) {

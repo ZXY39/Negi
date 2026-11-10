@@ -4665,8 +4665,8 @@ class TaskLogService:
     def resolve_content_ref(self, ref: str) -> str:
         return self._resolve_content_ref(ref)
 
-    def _task_summary_fingerprint(self, task: TaskRecord, *, standby: bool = False) -> str:
-        payload = self._task_summary_payload(task, standby=standby)
+    def _task_summary_fingerprint(self, task: TaskRecord, *, standby: bool = False, last_run_at: str = '') -> str:
+        payload = self._task_summary_payload(task, standby=standby, last_run_at=last_run_at)
         visible = {
             'title': str(payload.get('title') or ''),
             'brief': str(payload.get('brief') or ''),
@@ -4674,6 +4674,8 @@ class TaskLogService:
             'is_unread': bool(payload.get('is_unread')),
             'is_paused': bool(payload.get('is_paused')),
             'standby': bool(payload.get('standby')),
+            # 载荷里印出去的读数必须进指纹，否则"无变化"早退会把新的最近运行时间吞掉。
+            'last_run_at': str(payload.get('last_run_at') or ''),
             'max_depth': int(payload.get('max_depth') or 0),
             'token_usage': {
                 'input_tokens': int(((payload.get('token_usage') or {}).get('input_tokens') or 0)),
@@ -4711,14 +4713,19 @@ class TaskLogService:
 
     def _publish_task_summary_patch_locked(self, *, task: TaskRecord, previous_task: TaskRecord | None = None) -> bool:
         standby = self._task_standby_for_summary(task)
+        runtime_meta = dict(self._store.get_task_runtime_meta(task.task_id) or self._default_runtime_meta())
+        last_run_at = (
+            self.task_last_run_for_display(task.task_id, fallback_at=task.created_at, runtime_meta=runtime_meta)
+            if standby else ''
+        )
         payload_task = self._task_summary_payload(
             task,
             disk_usage_bytes=self._safe_task_disk_usage(task.task_id),
             node_count=self._safe_task_node_count(task.task_id),
             standby=standby,
+            last_run_at=last_run_at,
         )
-        fingerprint = self._task_summary_fingerprint(task, standby=standby)
-        runtime_meta = dict(self._store.get_task_runtime_meta(task.task_id) or self._default_runtime_meta())
+        fingerprint = self._task_summary_fingerprint(task, standby=standby, last_run_at=last_run_at)
         previous_fingerprint = str(runtime_meta.get('summary_fingerprint') or '').strip()
         if previous_fingerprint and previous_fingerprint == fingerprint:
             self._report_summary_metric('task_summary_skip_unchanged_count')
@@ -5109,6 +5116,7 @@ class TaskLogService:
         disk_usage_bytes: int | None = None,
         node_count: int | None = None,
         standby: bool = False,
+        last_run_at: str = '',
     ) -> dict[str, Any]:
         metadata = dict(task.metadata or {})
         payload: dict[str, Any] = {
@@ -5131,6 +5139,10 @@ class TaskLogService:
             'max_depth': int(task.max_depth or 0),
             'token_usage': task.token_usage.model_dump(mode='json'),
         }
+        # 待命卡片「最近」占「结束」那一格：只在待命档有值，非待命省略字段
+        # （前端合并语义下缺字段不清空旧值，离开待命后该格也不渲染）。
+        if str(last_run_at or '').strip():
+            payload['last_run_at'] = str(last_run_at).strip()
         # 任务卡片的「节点数」随增量 patch 下发；取不到时省略字段
         # （前端合并语义下缺字段不清空旧值）。
         if node_count is not None:
@@ -5187,6 +5199,20 @@ class TaskLogService:
             is_paused=bool(getattr(task, 'is_paused', False)),
             pause_requested=bool(getattr(task, 'pause_requested', False)),
         )
+
+    def task_last_run_for_display(
+        self,
+        task_id: str,
+        *,
+        fallback_at: str = '',
+        runtime_meta: dict[str, Any] | None = None,
+    ) -> str:
+        """待命卡片「最近」格的取值口径：REST 列表与 WS 摘要必须同源，否则整页
+        刷新会换掉读数。可见输出锚点优先，缺失退创建时间；不用 task.updated_at——
+        mark_task_read 等账本动作也刷新它，会把「刚查看过」印成「刚运行过」。
+        调用方已持有 meta 时传进来，避免摘要发布车道多付一次读。"""
+        meta = runtime_meta if isinstance(runtime_meta, dict) else (self.read_task_runtime_meta(task_id) or {})
+        return str(meta.get('last_visible_output_at') or '').strip() or str(fallback_at or '').strip()
 
     def _summary_cache_for_task(self, task_id: str) -> dict[str, tuple[str, dict[str, Any]]]:
         cache = self._summary_frame_cache.get(task_id)

@@ -644,6 +644,11 @@ class TaskQueryService:
             item.error_count = int(error_stats.get('error_count') or 0)
             item.error_node_count = int(error_stats.get('node_count') or 0)
             item.standby = bool(standby_flags.get(item.task_id, False))
+            if item.standby:
+                item.last_run_at = self._log_service.task_last_run_for_display(
+                    item.task_id,
+                    fallback_at=item.created_at,
+                )
         return items
 
     def _task_list_item_from_record(self, item: Any) -> TaskListItem:
