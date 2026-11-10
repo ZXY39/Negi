@@ -378,6 +378,49 @@ async def get_task_node_error_log(task_id: str, node_id: str):
     return payload
 
 
+@router.get('/tasks/{task_id}/processes')
+async def get_task_processes(task_id: str):
+    task_id = _ensure_task_route_id(task_id)
+    service = _service()
+    await service.startup()
+    task_id = service.normalize_task_id(task_id)
+    task = await asyncio.to_thread(service.store.get_task, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail='task_not_found')
+    items = await asyncio.to_thread(service.list_task_owned_processes, task_id)
+    return {
+        'ok': True,
+        'task_id': task_id,
+        'count': len(items),
+        'items': items,
+    }
+
+
+@router.post('/tasks/{task_id}/processes/{pid}/stop')
+async def stop_task_process(task_id: str, pid: int):
+    task_id = _ensure_task_route_id(task_id)
+    service = _service()
+    await service.startup()
+    task_id = service.normalize_task_id(task_id)
+    task = await asyncio.to_thread(service.store.get_task, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail='task_not_found')
+    result = await service.stop_task_owned_process(task_id, pid)
+    status = str(result.get('status') or '').strip()
+    if status == 'invalid_pid':
+        raise HTTPException(status_code=400, detail='invalid_pid')
+    if status == 'not_owned':
+        raise HTTPException(status_code=404, detail='process_not_found')
+    if status == 'already_exited':
+        return {**result, 'ok': True}
+    if not result.get('ok'):
+        raise HTTPException(
+            status_code=409,
+            detail={'code': 'process_stop_failed', 'status': status},
+        )
+    return {'ok': True, **result}
+
+
 @router.post('/tasks/{task_id}/pause')
 async def pause_task(task_id: str):
     task_id = _ensure_task_route_id(task_id)

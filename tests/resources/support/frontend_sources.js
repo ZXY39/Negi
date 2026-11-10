@@ -25,7 +25,7 @@ const FRONTEND_BUNDLES = Object.freeze({
         "api_client.js",
     ],
     bootstrap: ["org_graph_bootstrap.js"],
-    task_view: ["tasks/tree-store.js", "tasks/tree-view.js", "tasks/node-detail-store.js", "tasks/node-detail.js", "org_graph_task_view.js"],
+    task_view: ["tasks/tree-store.js", "tasks/tree-view.js", "tasks/node-detail-store.js", "tasks/node-detail.js", "org_graph_task_view.js", "tasks/task-processes.js"],
     app: [
         "ui/toast.js",
         "ui/confirm.js",

@@ -23,6 +23,7 @@ from main.runtime.node_message_kind import (
     KIND_FRONTDOOR_NOTICE,
     KIND_PARENT_NOTICE,
     KIND_PEER_NOTICE,
+    KIND_PROCESS_EXIT,
     KIND_USER_DIRECT,
     KIND_WAKE_TIMER,
 )
@@ -42,6 +43,9 @@ _LABEL_BY_KIND = {
     # 给新 kind 起一个新前缀（例如「来自定时器」）会让剥前缀那条路认不出这行，
     # 于是同一份唤醒在尾块里既算"原文"又算"未消费通知"。
     KIND_WAKE_TIMER: '来自系统',
+    # 进程退出与唤醒同属"来自系统"家族：前缀行必须落在 _PREFIX_RE 认识的标签里，
+    # 否则尾块去重与剥前缀会认不出这条通知。
+    KIND_PROCESS_EXIT: '来自系统',
 }
 
 _PREFIX_RE = re.compile(

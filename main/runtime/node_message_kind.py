@@ -34,6 +34,9 @@ KIND_PEER_NOTICE: Final = 'peer_notice'
 # `schedule_wake` 到点时由运行时投给自己的唤醒。它只能是运行时报的：模型若能用
 # `send_message` 造出这一档，就等于能给自己发一条"看起来是定时器响了"的假消息。
 KIND_WAKE_TIMER: Final = 'wake_timer'
+# `exec background=true` 起的进程退出时由运行时投给启动它的节点。进程已经不在，
+# 这条消息是收尾的唯一落点；同样只允许运行时代产。
+KIND_PROCESS_EXIT: Final = 'process_exit'
 
 ORIGIN_USER: Final = 'user'
 # 操作员在节点详情页输入框（chatbox）发的消息。与 `user` 同为人工来源：同一套
@@ -56,14 +59,28 @@ VERDICT_REJECT: Final = 'reject'
 VERDICT_REJECT_NO_PROGRESS: Final = 'reject_no_progress'
 VERDICTS: Final = frozenset({VERDICT_PASS, VERDICT_REJECT, VERDICT_REJECT_NO_PROGRESS})
 
-# 只能由运行时产出、模型无法通过 send_message 伪造的四类。
+# 只能由运行时产出、模型无法通过 send_message 伪造的五类。
 SYSTEM_KINDS: Final = frozenset(
-    {KIND_CHILD_FINAL, KIND_CHILD_ABNORMAL_PAUSE, KIND_ACCEPTANCE_VERDICT, KIND_WAKE_TIMER}
+    {
+        KIND_CHILD_FINAL,
+        KIND_CHILD_ABNORMAL_PAUSE,
+        KIND_ACCEPTANCE_VERDICT,
+        KIND_WAKE_TIMER,
+        KIND_PROCESS_EXIT,
+    }
 )
 
 # 无条件唤醒的 kind：收件人必须动作，否则系统或发送方无法推进（P6）。
+# `process_exit` 由操作者本轮指定为 always-waking：节点起的进程退出后，运行时不
+# 替它判断"要不要在意"；暂停闸仍在投递侧优先。
 ALWAYS_WAKING_KINDS: Final = frozenset(
-    {KIND_USER_DIRECT, KIND_CHATBOX_DIRECT, KIND_FRONTDOOR_NOTICE, KIND_CHILD_ABNORMAL_PAUSE}
+    {
+        KIND_USER_DIRECT,
+        KIND_CHATBOX_DIRECT,
+        KIND_FRONTDOOR_NOTICE,
+        KIND_CHILD_ABNORMAL_PAUSE,
+        KIND_PROCESS_EXIT,
+    }
 )
 
 # 验收节点只判“用户/操作员/前门对结果的要求”。节点之间的消息是执行上下文，

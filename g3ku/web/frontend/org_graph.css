@@ -17275,6 +17275,125 @@ textarea {
     font-size: 13px;
 }
 
+/* 任务详情页右上角的后台进程气泡：按钮与 popover 同属一个定位容器。 */
+.task-processes {
+    position: relative;
+    display: inline-flex;
+}
+
+.task-processes-btn {
+    gap: var(--ui-space-2);
+}
+
+.task-processes-count {
+    font-variant-numeric: tabular-nums;
+}
+
+.task-processes-popover {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 30;
+    width: min(440px, calc(100vw - 24px));
+    max-height: min(40vh, 320px);
+    overflow: auto;
+    padding: var(--ui-space-2);
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-card);
+    background: var(--ui-bg-elevated);
+    box-shadow: var(--ui-shadow-md);
+}
+
+.task-processes-popover[hidden] {
+    display: none;
+}
+
+.task-processes-head {
+    padding: 4px 8px 6px;
+    color: var(--ui-text-muted);
+    font-size: 0.72rem;
+}
+
+.task-processes-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.task-processes-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto auto;
+    align-items: center;
+    gap: var(--ui-space-2);
+    padding: 6px 8px;
+    border-radius: var(--ui-radius-control);
+}
+
+.task-processes-row:hover {
+    background: var(--ui-bg-subtle);
+}
+
+.task-processes-main {
+    overflow: hidden;
+    min-width: 0;
+    color: var(--ui-text);
+    font-size: 0.8rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.task-processes-node {
+    max-width: 120px;
+    overflow: hidden;
+    padding: 1px 7px;
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-pill);
+    background: transparent;
+    color: var(--ui-text-secondary);
+    font: inherit;
+    font-size: 0.68rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+.task-processes-node:hover:not(:disabled) {
+    border-color: var(--ui-border-strong);
+    color: var(--ui-text);
+}
+
+.task-processes-node:disabled {
+    cursor: default;
+    opacity: 0.6;
+}
+
+.task-processes-elapsed {
+    color: var(--ui-text-secondary);
+    font-size: 0.75rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.task-processes-stop {
+    padding: 2px 9px;
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-pill);
+    background: transparent;
+    color: var(--ui-text-secondary);
+    font: inherit;
+    font-size: 0.72rem;
+    cursor: pointer;
+}
+
+.task-processes-stop:hover:not(:disabled) {
+    border-color: var(--ui-border-strong);
+    color: var(--ui-text);
+}
+
+.task-processes-stop:disabled {
+    cursor: default;
+    opacity: 0.6;
+}
+
 /* 树节点与搜索框跟随大控件档。 */
 .task-trace-round-chip {
     font-size: 13px;

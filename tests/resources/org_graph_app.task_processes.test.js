@@ -1,0 +1,246 @@
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const vm = require("node:vm");
+
+const MODULE_PATH = path.join(__dirname, "../../g3ku/web/frontend/tasks/task-processes.js");
+const MODULE_CODE = fs.readFileSync(MODULE_PATH, "utf8").replace(/\r\n/g, "\n");
+
+function datasetKey(name) {
+    return name
+        .slice(5)
+        .replace(/-([a-z])/g, (_, ch) => ch.toUpperCase());
+}
+
+class StubElement {
+    constructor(tag = "DIV") {
+        this.tagName = String(tag || "DIV").toUpperCase();
+        this.children = [];
+        this.dataset = {};
+        this.hidden = false;
+        this.disabled = false;
+        this.textContent = "";
+        this.className = "";
+        this.title = "";
+        this.attributes = {};
+        this.listeners = {};
+    }
+
+    get firstChild() {
+        return this.children[0] || null;
+    }
+
+    appendChild(child) {
+        this.children.push(child);
+        return child;
+    }
+
+    removeChild(child) {
+        this.children = this.children.filter((item) => item !== child);
+        return child;
+    }
+
+    setAttribute(name, value) {
+        this.attributes[name] = String(value);
+        if (name.startsWith("data-")) this.dataset[datasetKey(name)] = String(value);
+    }
+
+    getAttribute(name) {
+        return Object.prototype.hasOwnProperty.call(this.attributes, name) ? this.attributes[name] : null;
+    }
+
+    addEventListener(type, handler) {
+        (this.listeners[type] = this.listeners[type] || []).push(handler);
+    }
+
+    contains() {
+        return false;
+    }
+
+    querySelectorAll() {
+        return [];
+    }
+}
+
+class StubDocument {
+    constructor() {
+        this._byId = new Map();
+        [
+            "task-processes",
+            "task-processes-btn",
+            "task-processes-count",
+            "task-processes-popover",
+            "task-processes-list",
+        ].forEach((id) => {
+            const el = new StubElement("DIV");
+            el.id = id;
+            this._byId.set(id, el);
+        });
+    }
+
+    getElementById(id) {
+        return this._byId.get(id) || null;
+    }
+
+    createElement(tag) {
+        return new StubElement(tag);
+    }
+
+    addEventListener() {}
+}
+
+function itemsFixture() {
+    return [
+        {
+            pid: 123,
+            purpose: "dev server :3000",
+            cmd: "node server.js",
+            started_at: new Date(Date.now() - 65_000).toISOString(),
+            log_path: "C:/log/123.log",
+            node_id: "node:a",
+            node_goal: "渲染 ep03",
+            node_status: "in_progress",
+        },
+        {
+            pid: 124,
+            purpose: "",
+            cmd: "node legacy.js",
+            started_at: new Date(Date.now() - 5_000).toISOString(),
+            log_path: "C:/log/124.log",
+            node_id: "",
+            node_goal: "",
+            node_status: "",
+        },
+    ];
+}
+
+function loadModule(overrides = {}) {
+    const calls = [];
+    const toasts = [];
+    const jumps = [];
+    const intervals = new Map();
+    let nextIntervalId = 1;
+    const document = new StubDocument();
+    const ApiClient = {
+        async getTaskProcesses(taskId) {
+            calls.push(["list", taskId]);
+            if (overrides.getError) throw overrides.getError;
+            return { ok: true, items: overrides.items || [] };
+        },
+        async stopTaskProcess(taskId, pid) {
+            calls.push(["stop", taskId, pid]);
+            if (overrides.stopError) throw overrides.stopError;
+            return { ok: true, pid, status: "terminated" };
+        },
+        getErrorCode(error) {
+            return String(error?.code || "");
+        },
+    };
+    const context = {
+        console,
+        Date,
+        Number,
+        String,
+        Array,
+        Set,
+        Math,
+        JSON,
+        document,
+        ApiClient,
+        S: { currentTaskId: "task:abc" },
+        isTaskDetailsViewActive: () => overrides.active !== false,
+        jumpTaskTreeSearchToNode: async (nodeId) => {
+            jumps.push(String(nodeId || ""));
+        },
+        showToast: (options) => toasts.push(options),
+        window: {
+            setInterval(handler) {
+                const id = nextIntervalId++;
+                intervals.set(id, handler);
+                return id;
+            },
+            clearInterval(id) {
+                intervals.delete(id);
+            },
+            addEventListener() {},
+        },
+    };
+    context.window.window = context.window;
+    vm.createContext(context);
+    vm.runInContext(MODULE_CODE, context);
+    return { context, document, calls, toasts, jumps, interruptCount: () => intervals.size };
+}
+
+test("空列表隐藏气泡，有进程时显示计数与 purpose 行", async () => {
+    const { context, document } = loadModule({ items: [] });
+    await context.taskProcessesRefresh();
+    assert.equal(document.getElementById("task-processes").hidden, true);
+    assert.equal(document.getElementById("task-processes-btn").hidden, true);
+
+    const items = itemsFixture();
+    const second = loadModule({ items });
+    await second.context.taskProcessesRefresh();
+    assert.equal(second.document.getElementById("task-processes").hidden, false);
+    assert.equal(second.document.getElementById("task-processes-btn").hidden, false);
+    assert.equal(second.document.getElementById("task-processes-count").textContent, "2");
+    const rows = second.document.getElementById("task-processes-list").children;
+    assert.equal(rows.length, 2);
+    assert.equal(rows[0].children[0].textContent, "dev server :3000");
+    assert.equal(rows[0].children[0].title, "dev server :3000\nnode server.js");
+    assert.equal(rows[0].children[1].textContent, "node:a");
+    assert.equal(rows[0].children[1].dataset.taskProcessNode, "node:a");
+    assert.equal(rows[0].children[2].dataset.taskProcessStarted, items[0].started_at);
+    // legacy 没有 purpose 时回退到命令，没有 node_id 时节点按钮禁用。
+    assert.equal(rows[1].children[0].textContent, "node legacy.js");
+    assert.equal(rows[1].children[1].disabled, true);
+    assert.equal(rows[1].children[1].textContent, "未归属");
+});
+
+test("点开气泡后行内容可见，点节点 id 关闭气泡并走搜索定位入口", async () => {
+    const { context, document, jumps } = loadModule({ items: itemsFixture() });
+    await context.taskProcessesRefresh();
+    context.taskProcessesSetOpen(true);
+    assert.equal(document.getElementById("task-processes-popover").hidden, false);
+
+    context.taskProcessesJumpToNode("node:a");
+    assert.deepEqual(jumps, ["node:a"]);
+    assert.equal(document.getElementById("task-processes-popover").hidden, true);
+});
+
+test("停止调用任务进程 API，成功后 toast 并刷新", async () => {
+    const { context, toasts, calls } = loadModule({ items: itemsFixture() });
+    await context.taskProcessesRefresh();
+    calls.length = 0;
+
+    await context.taskProcessesStop(123);
+
+    assert.deepEqual(calls[0], ["stop", "task:abc", 123]);
+    assert.equal(calls[1][0], "list");
+    assert.equal(toasts[0].title, "已停止进程");
+});
+
+test("停止遇到 404 时提示进程已结束，不当作普通失败", async () => {
+    const error = new Error("not found");
+    error.status = 404;
+    error.code = "process_not_found";
+    const { context, toasts } = loadModule({ items: itemsFixture(), stopError: error });
+    await context.taskProcessesRefresh();
+
+    await context.taskProcessesStop(123);
+
+    assert.equal(toasts[0].title, "进程已结束");
+});
+
+test("任务详情不活跃时不发请求并清空气泡", async () => {
+    const { context, document, calls } = loadModule({ items: itemsFixture(), active: false });
+    await context.taskProcessesRefresh();
+    assert.equal(calls.length, 0);
+    assert.equal(document.getElementById("task-processes").hidden, true);
+});
+
+test("绑定后启动 10 秒对账节拍，且只有详情视图活跃时才拉取", () => {
+    const { context, interruptCount } = loadModule({ items: itemsFixture() });
+    context.bindTaskProcesses();
+    assert.ok(interruptCount() >= 1);
+});

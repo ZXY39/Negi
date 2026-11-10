@@ -10703,6 +10703,12 @@ function switchView(view) {
         el.classList.toggle("active", active);
         el.style.display = active ? "" : "none";
     });
+    if (view === "task-details" && typeof taskProcessesRefresh === "function") {
+        window.setTimeout(() => {
+            if (!U.viewTaskDetails?.classList.contains("active")) return;
+            void taskProcessesRefresh({ quiet: true });
+        }, 0);
+    }
     if (view !== "task-details") {
         // 离开详情视图属于主动关闭，必须摘掉 onclose 防止触发重连。
         // 同时掐掉树加载尾巴：分块整树加载、分支重同步、快照自愈全部失效，
@@ -11983,6 +11989,7 @@ function bindResourcePages() {
 
 function bindGlobalOverlays() {
     bindCeoBackgroundJobs();
+    if (typeof bindTaskProcesses === "function") bindTaskProcesses();
     U.toastClose?.addEventListener("click", closeToast);
     // 行首箭头：先收起 toast，再跑这一次的动作（动作里可能切视图 / 换会话）。
     U.toastAction?.addEventListener("click", () => {

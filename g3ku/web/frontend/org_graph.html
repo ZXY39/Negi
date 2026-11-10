@@ -966,6 +966,19 @@
                         <span class="task-detail-pill-label">展开全部</span>
                     </label>
                     <div class="header-actions">
+                        <div id="task-processes" class="task-processes" hidden>
+                            <button id="task-processes-btn" class="task-detail-pill task-processes-btn" type="button"
+                                title="查看后台进程" aria-expanded="false" aria-controls="task-processes-popover" hidden>
+                                <i data-lucide="terminal"></i>
+                                <span id="task-processes-count" class="task-processes-count">0</span>
+                                <span class="task-detail-pill-label">个后台进程</span>
+                            </button>
+                            <div id="task-processes-popover" class="task-processes-popover" role="dialog"
+                                aria-label="后台进程" hidden>
+                                <div class="task-processes-head">后台进程</div>
+                                <div id="task-processes-list" class="task-processes-list" role="list"></div>
+                            </div>
+                        </div>
                         <button id="task-error-log-btn" class="task-detail-pill task-detail-error-log-btn" type="button" title="查看错误日志">
                             <i data-lucide="triangle-alert"></i>
                             <span>错误日志</span>
@@ -1797,6 +1810,7 @@
     <script src="tasks/node-detail-store.js"></script>
     <script src="tasks/node-detail.js"></script>
     <script src="org_graph_task_view.js"></script>
+    <script src="tasks/task-processes.js"></script>
     <script src="ui/toast.js"></script>
     <script src="ui/confirm.js"></script>
     <script src="ui/drawer.js"></script>

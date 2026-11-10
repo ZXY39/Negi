@@ -236,6 +236,81 @@ def drop(scope: str, pid: int) -> None:
         path.unlink(missing_ok=True)
 
 
+def _entry_paths(scope: str, pid: int) -> list[Path]:
+    directory = _scope_dir(scope, create=False)
+    if not directory.exists():
+        return []
+    return sorted(directory.glob(f"{int(pid)}-*{_ENTRY_SUFFIX}"))
+
+
+def mark_notice(
+    scope: str,
+    pid: int,
+    *,
+    exit_reason: str,
+    exit_code: int | None = None,
+    exited_at: str | None = None,
+    extra: dict[str, Any] | None = None,
+) -> bool:
+    """把活条目改写成待投递的 `.notice` 侧车；普通读取面看不见它。
+
+    进程已经退出/将被回收而运行时还没把结果交给模型时，条目不能静默删掉：
+    它既是"谁还没交代"的凭证，也是重启后消费口的唯一输入。写入走临时文件 +
+    `os.replace`，先落新文件再摘旧 `.json`，读者最坏看到两份，不会看到半份。
+    """
+    paths = _entry_paths(scope, pid)
+    if not paths:
+        return False
+    path = paths[0]
+    entry = _load_entry(path) or {}
+    entry.update(
+        {
+            "exit_reason": str(exit_reason or ""),
+            "exit_code": exit_code,
+            "exited_at": str(exited_at or time.strftime("%Y-%m-%dT%H:%M:%S")),
+            "scope": str(scope or entry.get("scope") or ""),
+        }
+    )
+    if isinstance(extra, dict):
+        entry.update(extra)
+    notice_path = path.with_suffix(".notice")
+    tmp_path = path.with_name(path.name + ".tmp")
+    try:
+        tmp_path.write_text(json.dumps(entry, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp_path, notice_path)
+    except OSError:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
+    path.unlink(missing_ok=True)
+    return True
+
+
+def list_notices() -> list[dict[str, Any]]:
+    """待投递的退出凭证；返回值带内部 `_notice_path` 供消费后删除。"""
+    root = _owned_root()
+    if not root.exists():
+        return []
+    notices: list[dict[str, Any]] = []
+    for path in sorted(root.glob("*/*.notice")):
+        entry = _load_entry(path)
+        if entry is None:
+            path.unlink(missing_ok=True)
+            continue
+        entry["_notice_path"] = str(path)
+        notices.append(entry)
+    return notices
+
+
+def drop_notice(notice_path: str) -> None:
+    try:
+        Path(str(notice_path or "")).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def read_log_tail(entry: dict[str, Any], *, limit: int = _LOG_TAIL_CHARS) -> str:
     raw_path = str(entry.get("log_path") or "").strip()
     if not raw_path:

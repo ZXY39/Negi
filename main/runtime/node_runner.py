@@ -3606,6 +3606,13 @@ class NodeRunner:
                 if callable(getattr(self, '_exec_runtime_policy_supplier', None))
                 else None
             ),
+            # exec background 进程的退出观测口：与 CEO 前门同一个工具回调，
+            # 由主运行时绑定；没有绑定时进程只留归属表条目。
+            **(
+                {'_adopt_background_process': self._adopt_background_process_callback}
+                if callable(getattr(self, '_adopt_background_process_callback', None))
+                else {}
+            ),
         }
 
     def _tool_watchdog_runtime_config(self) -> dict[str, Any]:

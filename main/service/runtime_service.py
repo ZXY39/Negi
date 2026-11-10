@@ -163,6 +163,7 @@ from main.runtime.node_message_kind import (
     KIND_CHATBOX_DIRECT,
     KIND_CHILD_ABNORMAL_PAUSE,
     KIND_CHILD_FINAL,
+    KIND_PROCESS_EXIT,
     KIND_WAKE_TIMER,
     ORIGIN_CHATBOX,
     ORIGIN_FRONTDOOR,
@@ -372,6 +373,12 @@ _LOOP_CENSUS_INTERVAL_SECONDS = 20.0
 # `schedule_wake` 的扫描节拍。5 秒是"唤醒到点后最多晚 5 秒"与"每分钟扫 12 次窄表"之间的取值；
 # 表是按 wake_at_ms 索引的点查，空表时这条查询不碰任何胖行（见 main/storage/sqlite_store 的 timer 段）。
 _NODE_WAKE_TIMER_POLL_SECONDS = 5.0
+# 节点 exec background 进程的退出观测：1 秒拍一次 Popen.poll()，退出后投 process_exit。
+# 投递失败先重试几次，仍失败则把条目改写成 `.notice`，交给下次启动的消费口。
+_NODE_OWNED_PROCESS_EXIT_POLL_SECONDS = 1.0
+_NODE_OWNED_PROCESS_EXIT_DELIVERY_ATTEMPTS = 3
+_NODE_OWNED_PROCESS_EXIT_DELIVERY_BACKOFF_SECONDS = 10.0
+_NODE_OWNED_PROCESS_LOG_TAIL_LIMIT = 800
 # 用户/父节点/前门给“已提交、正等验收”的执行节点发消息：消息落箱但不唤醒，
 # 工具回执必须说清消费时机，否则发送方会以为节点下一回合一定会读到。
 _WAITING_ACCEPTANCE_DELIVERY_NOTICE = (
@@ -915,6 +922,9 @@ class MainRuntimeService:
         # 节点头部快照与一次性通知的 exec 策略取数口：节点不持 service 引用，
         # 与 skill 取数口同一条 side-channel；每跳实时读治理记录（无缓存）。
         self.node_runner._exec_runtime_policy_supplier = self._current_exec_runtime_policy_payload
+        # 节点 exec background 进程的退出观测：与 CEO 前门同一条工具体回调，
+        # 只是终态落在节点信箱而不是会话心跳。
+        self.node_runner._adopt_background_process_callback = self.adopt_node_owned_process
         # 节点侧 `send_message` 的投递口：NodeRunner 没有 service 引用，走同一条 side-channel。
         self.node_runner.node_message_delivery_callback = self._deliver_node_message_from_node
         # 节点侧 `manage_child_nodes` 的控制口：暂停/恢复/终止需要 dispatcher、暂停账本
@@ -1063,6 +1073,8 @@ class MainRuntimeService:
         self._loop_census_task = None
         # 节点自设唤醒的扫描节拍（worker 车道）。
         self._node_wake_timer_task: asyncio.Task[Any] | None = None
+        # 节点 exec background 进程的退出观测任务；条目本身是"谁还没交代"的令牌。
+        self._node_owned_process_tasks: set[asyncio.Task[Any]] = set()
         self._worker_lease_takeover = False
         self._worker_lease_acquired = False
         self._command_poller_task: asyncio.Task[Any] | None = None
@@ -1355,6 +1367,203 @@ class MainRuntimeService:
             'To keep a schedule running, arm the next wake-up now; this one is spent.'
         )
         return '\n'.join(lines)
+
+    def adopt_node_owned_process(self, *, entry: dict[str, Any], process: Any) -> None:
+        """盯一个节点 `exec background=true` 起的进程，退出时往它自己的信箱投终态。
+
+        与 CEO 前门的 `ToolJobRunner.adopt_owned_process` 同一个工具回调，差别只在
+        交付目的地：节点的收件人是节点信箱（`process_exit`），CEO 的是会话心跳。
+        没有可 poll 的句柄、或缺 task/node 归属时不接管：宁可不报，也不凭"进程不在了"猜成败。
+        """
+        poll = getattr(process, "poll", None)
+        if not callable(poll):
+            return
+        try:
+            pid = int(entry.get("pid") or 0)
+        except (TypeError, ValueError):
+            return
+        scope = str(entry.get("scope") or "").strip()
+        task_id = str(entry.get("task_id") or "").strip()
+        node_id = str(entry.get("node_id") or "").strip()
+        if pid <= 0 or not scope or not task_id or not node_id:
+            return
+        try:
+            task = asyncio.create_task(
+                self._watch_node_owned_process_exit(
+                    entry=dict(entry),
+                    poll=poll,
+                    scope=scope,
+                    pid=pid,
+                ),
+                name=f"node-owned-process-exit:{pid}",
+            )
+        except RuntimeError:
+            return
+        self._node_owned_process_tasks.add(task)
+        task.add_done_callback(self._node_owned_process_tasks.discard)
+
+    async def _watch_node_owned_process_exit(
+        self,
+        *,
+        entry: dict[str, Any],
+        poll: Any,
+        scope: str,
+        pid: int,
+    ) -> None:
+        while True:
+            try:
+                exit_code = poll()
+            except Exception:
+                logger.debug("node owned process {} watch lost its handle", pid, exc_info=True)
+                return
+            if exit_code is not None:
+                break
+            await asyncio.sleep(_NODE_OWNED_PROCESS_EXIT_POLL_SECONDS)
+        try:
+            code = int(exit_code)
+        except (TypeError, ValueError):
+            code = None
+        from g3ku.runtime import owned_processes
+
+        # 条目还在盘上＝这个进程是自己退的；被 process_kill / scope 回收摘走时，
+        # 那条道已经把结果交回给模型，这里不能再报一次。
+        current = owned_processes.find(scope, pid)
+        if current is None:
+            return
+        await self._deliver_node_owned_process_exit(
+            current,
+            exit_reason="process_exited",
+            exit_code=code,
+        )
+
+    async def _deliver_node_owned_process_exit(
+        self,
+        entry: dict[str, Any],
+        *,
+        exit_reason: str,
+        exit_code: int | None,
+        stopped_by: str = "",
+    ) -> bool:
+        """把一条退出结果投给启动它的节点；暂停只落箱，节点/任务终态直接收场。"""
+        from g3ku.runtime import owned_processes
+
+        task_id = str(entry.get("task_id") or "").strip()
+        node_id = str(entry.get("node_id") or "").strip()
+        scope = str(entry.get("scope") or "").strip()
+        try:
+            pid = int(entry.get("pid") or 0)
+        except (TypeError, ValueError):
+            pid = 0
+        if not task_id or not node_id or not scope or pid <= 0:
+            return False
+        task = self.store.get_task(task_id)
+        node = self.store.get_node(node_id)
+        if task is None or node is None:
+            owned_processes.drop(scope, pid)
+            return False
+        node_status = str(node.status or "").strip().lower()
+        task_status = str(task.status or "").strip().lower()
+        if node_status in {"success", "failed"} or task_status in {"success", "failed", "canceled"}:
+            owned_processes.drop(scope, pid)
+            return False
+        paused = (
+            bool(getattr(task, "is_paused", False))
+            or bool(getattr(task, "pause_requested", False))
+            or bool(getattr(node, "is_paused", False))
+            or bool(getattr(node, "pause_requested", False))
+        )
+        message = self._node_owned_process_exit_text(
+            entry,
+            exit_reason=exit_reason,
+            exit_code=exit_code,
+            stopped_by=stopped_by,
+        )
+        last_error: Exception | None = None
+        for attempt in range(_NODE_OWNED_PROCESS_EXIT_DELIVERY_ATTEMPTS):
+            try:
+                receipt = await self.deliver_node_message(
+                    task_id=task_id,
+                    target_node_id=node_id,
+                    message=message,
+                    origin=ORIGIN_NODE,
+                    system_kind=KIND_PROCESS_EXIT,
+                    source_node_id=node_id,
+                    wake=not paused,
+                )
+                if isinstance(receipt, dict) and str(receipt.get("status") or "").strip() == "rejected":
+                    logger.info(
+                        "node process exit notice rejected: task={} node={} reason={}",
+                        task_id,
+                        node_id,
+                        str(receipt.get("reason") or ""),
+                    )
+                owned_processes.drop(scope, pid)
+                return True
+            except Exception as exc:  # noqa: BLE001 - 重试有界，兜底交给启动消费口
+                last_error = exc
+                if attempt + 1 < _NODE_OWNED_PROCESS_EXIT_DELIVERY_ATTEMPTS:
+                    await asyncio.sleep(_NODE_OWNED_PROCESS_EXIT_DELIVERY_BACKOFF_SECONDS)
+        logger.warning(
+            "node process exit delivery failed: task={} node={} pid={} error={!r}",
+            task_id,
+            node_id,
+            pid,
+            last_error,
+        )
+        # 活条目转成 `.notice`，交给下次启动的消费口；条目已经不在（例如操作员
+        # 停止已经摘走）时这里什么也不做。
+        owned_processes.mark_notice(
+            scope,
+            pid,
+            exit_reason=exit_reason,
+            exit_code=exit_code,
+            extra={"stopped_by": str(stopped_by or "")} if stopped_by else None,
+        )
+        return False
+
+    @staticmethod
+    def _node_owned_process_exit_text(
+        entry: dict[str, Any],
+        *,
+        exit_reason: str,
+        exit_code: int | None,
+        stopped_by: str = "",
+    ) -> str:
+        """节点面退出通知：英文、稳定（不含 now/相对时长），重试同文才幂等。"""
+        from g3ku.runtime import owned_processes
+
+        try:
+            pid = int(entry.get("pid") or 0)
+        except (TypeError, ValueError):
+            pid = 0
+        purpose = str(entry.get("label") or "").strip()
+        cmd = str(entry.get("cmd") or "").strip()
+        log_path = str(entry.get("log_path") or "").strip()
+        if stopped_by == "operator":
+            headline = f"Background process stopped by the operator: pid {pid}"
+        elif exit_reason == "reaped_after_restart":
+            headline = f"Background process was terminated when the project restarted: pid {pid}"
+        elif exit_reason in {"process_gone", "identity_mismatch"}:
+            headline = f"Background process is no longer running: pid {pid}"
+        else:
+            headline = f"Background process exited: pid {pid}"
+        if purpose:
+            headline += f" ({purpose})"
+        headline += "."
+        lines = [headline]
+        if exit_code is not None:
+            lines.append(f"Exit code: {exit_code}.")
+        if cmd:
+            lines.append(f"Command: {cmd}")
+        if log_path:
+            lines.append(f"Log: {log_path}")
+        tail = owned_processes.read_log_tail(
+            entry, limit=_NODE_OWNED_PROCESS_LOG_TAIL_LIMIT
+        ).strip()
+        if tail:
+            lines.append("Output tail:")
+            lines.append(tail)
+        return "\n".join(lines)
 
     async def _requeue_interrupted_task(self, task_id: str) -> None:
         """引擎级中断任务的尽力即时重排（进程仍活着时）。
@@ -7146,6 +7355,87 @@ class MainRuntimeService:
     def get_task_user_node_supplements(self, task_id: str) -> list[dict[str, str]]:
         """任务期间用户对各节点追加的定向通知（终态心跳附带，会话模型对齐需求用）。"""
         return collect_task_user_node_supplements(str(task_id or '').strip(), store=self.store)
+
+    def list_task_owned_processes(self, task_id: str) -> list[dict[str, Any]]:
+        """任务详情页的进程面板数据：本任务仍活着的 `exec background` 进程。
+
+        只列活条目（`list_owned` 读时 prune）；节点目标/状态是展示补充，不参与判活。
+        """
+        normalized_task_id = self.normalize_task_id(str(task_id or '').strip())
+        if not normalized_task_id:
+            return []
+        try:
+            from g3ku.runtime import owned_processes
+
+            entries = owned_processes.list_owned(
+                owned_processes.scope_key(session_key='', task_id=normalized_task_id)
+            )
+        except Exception:
+            return []
+        items: list[dict[str, Any]] = []
+        for entry in list(entries or []):
+            if not isinstance(entry, dict):
+                continue
+            try:
+                pid = int(entry.get('pid') or 0)
+            except (TypeError, ValueError):
+                continue
+            if pid <= 0:
+                continue
+            node_id = str(entry.get('node_id') or '').strip()
+            node = self.store.get_node(node_id) if node_id else None
+            items.append(
+                {
+                    'pid': pid,
+                    'purpose': str(entry.get('label') or ''),
+                    'cmd': str(entry.get('cmd') or ''),
+                    'started_at': str(entry.get('started_at') or ''),
+                    'log_path': str(entry.get('log_path') or ''),
+                    'node_id': node_id,
+                    'node_goal': str(getattr(node, 'goal', '') or '') if node is not None else '',
+                    'node_status': str(getattr(node, 'status', '') or '') if node is not None else '',
+                }
+            )
+        items.sort(key=lambda item: (str(item.get('started_at') or ''), int(item.get('pid') or 0)), reverse=True)
+        return items
+
+    async def stop_task_owned_process(self, task_id: str, pid: int) -> dict[str, Any]:
+        """操作员从任务详情页停止一个任务级后台进程，并把终态告知创建它的节点。"""
+        from g3ku.runtime import owned_processes
+
+        normalized_task_id = self.normalize_task_id(str(task_id or '').strip())
+        try:
+            normalized_pid = int(pid)
+        except (TypeError, ValueError):
+            return {'ok': False, 'pid': 0, 'status': 'invalid_pid'}
+        if not normalized_task_id or normalized_pid <= 0:
+            return {'ok': False, 'pid': normalized_pid, 'status': 'invalid_pid'}
+        scope = owned_processes.scope_key(session_key='', task_id=normalized_task_id)
+        entry = await asyncio.to_thread(owned_processes.find, scope, normalized_pid)
+        if entry is None:
+            return {'ok': False, 'pid': normalized_pid, 'status': 'not_owned'}
+        result = await asyncio.to_thread(owned_processes.kill_owned, scope, normalized_pid)
+        reason = str(result.get('reason') or '').strip()
+        if result.get('ok'):
+            await self._deliver_node_owned_process_exit(
+                entry,
+                exit_reason='stopped_by_operator',
+                exit_code=None,
+                stopped_by='operator',
+            )
+        elif reason in {'already_exited', 'identity_mismatch'}:
+            await self._deliver_node_owned_process_exit(
+                entry,
+                exit_reason='process_gone' if reason == 'already_exited' else 'identity_mismatch',
+                exit_code=None,
+            )
+        return {
+            'ok': bool(result.get('ok')),
+            'pid': normalized_pid,
+            'status': reason,
+            'purpose': str(entry.get('label') or ''),
+            'log_path': str(entry.get('log_path') or ''),
+        }
 
     def _reap_task_owned_processes(self, task_id: str) -> None:
         """任务终态回收该任务起的后台进程：`exec background` 的所有权随任务结束。"""
@@ -14992,6 +15282,11 @@ class MainRuntimeService:
             'machine_disk_free_bytes': int(merged.get('machine_disk_free_bytes') if merged.get('machine_disk_free_bytes') is not None else -1),
             'machine_disk_total_bytes': int(merged.get('machine_disk_total_bytes') if merged.get('machine_disk_total_bytes') is not None else -1),
             'machine_disk_usage_percent': float(merged.get('machine_disk_usage_percent') or 0.0),
+            # 整机临时端口轴：只读观测，不参与上面任何压力状态。
+            'machine_tcp_dynamic_ports_available': bool(merged.get('machine_tcp_dynamic_ports_available')),
+            'machine_tcp_dynamic_ports_used': int(merged.get('machine_tcp_dynamic_ports_used') or 0),
+            'machine_tcp_dynamic_ports_capacity': int(merged.get('machine_tcp_dynamic_ports_capacity') or 0),
+            'machine_tcp_dynamic_ports_percent': float(merged.get('machine_tcp_dynamic_ports_percent') or 0.0),
             'disk_emergency_active': bool(merged.get('disk_emergency_active')),
             'disk_emergency_since': str(merged.get('disk_emergency_since') or ''),
             'sqlite_write_wait_ms': float(merged.get('sqlite_write_wait_ms') or 0.0),
@@ -15246,6 +15541,17 @@ class MainRuntimeService:
             f"sqlite_query={_perf_duration_text(payload.get('sqlite_query_latency_ms') or 0)} "
             f"event_loop_lag={_perf_duration_text(payload.get('tool_pressure_event_loop_lag_ms') or 0)}"
         )
+        if bool(payload.get('machine_tcp_dynamic_ports_available')):
+            tcp_ports_text = (
+                f"{payload.get('machine_tcp_dynamic_ports_used')}/{payload.get('machine_tcp_dynamic_ports_capacity')} "
+                f"({payload.get('machine_tcp_dynamic_ports_percent')}%)"
+            )
+            tcp_top_text = str(payload.get('machine_tcp_dynamic_ports_top') or '')
+            if tcp_top_text:
+                tcp_ports_text += f" top={tcp_top_text}"
+        else:
+            tcp_ports_text = 'unavailable'
+        lines.append(f"Ports: dynamic_tcp={tcp_ports_text}")
         lines.append(
             f"Tiers: budget={payload.get('budget_state')} machine={payload.get('machine_pressure_state')} "
             f"local={payload.get('local_pressure_state')} throttled_since={payload.get('tool_pressure_throttled_since') or '-'} "

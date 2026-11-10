@@ -82,6 +82,19 @@
         });
     },
 
+    async getTaskProcesses(taskId) {
+        return this._request("GET", `/api/tasks/${taskId}/processes`, {
+            requestKey: `tasks:processes:${taskId}`,
+            timeoutMs: 15000,
+        });
+    },
+
+    async stopTaskProcess(taskId, pid) {
+        return this._request("POST", `/api/tasks/${taskId}/processes/${pid}/stop`, {
+            timeoutMs: 30000,
+        });
+    },
+
     async getTaskNodeErrorLog(taskId, nodeId) {
         return this._request("GET", `/api/tasks/${taskId}/nodes/${nodeId}/error-log`, {
             requestKey: `tasks:node-error-log:${taskId}:${nodeId}`,
