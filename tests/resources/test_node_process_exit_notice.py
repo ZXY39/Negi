@@ -349,3 +349,24 @@ async def test_startup_consumer_keeps_a_notice_when_delivery_fails(
     await service._consume_owned_process_notices()
 
     assert len(owned_processes.list_notices()) == 1
+
+
+@pytest.mark.asyncio
+async def test_startup_consumer_drops_unattributed_legacy_task_notices(
+    isolated_root, tmp_path
+) -> None:
+    scope = "task:task:abc"
+    _register_notice(tmp_path, scope=scope, pid=123, session_key="web:proc", task_id="task:abc")
+
+    def _no_outbox(**kwargs):
+        raise AssertionError("legacy task notices must not become session heartbeat events")
+
+    service = object.__new__(MainRuntimeService)
+    service.store = SimpleNamespace(put_tool_job_outbox=_no_outbox)
+    service._node_owned_process_tasks = set()
+    service.deliver_node_message = _Recorder()
+
+    await service._consume_owned_process_notices()
+
+    assert service.deliver_node_message.calls == []
+    assert owned_processes.list_notices() == []

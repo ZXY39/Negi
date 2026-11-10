@@ -1625,6 +1625,10 @@ class MainRuntimeService:
                 exit_code=exit_code,
                 stopped_by=str(entry.get("stopped_by") or ""),
             )
+        if task_id:
+            # legacy 任务条目没有 node_id：归属不到具体节点，不能冒充会话进程写心跳。
+            # 任务终态/scope 回收负责清理；这里只丢掉凭证。
+            return True
         session_key = str(entry.get("session_key") or "").strip()
         if not session_key:
             return True
