@@ -683,17 +683,6 @@ class ReActToolLoop:
                 dynamic_contract,
             )
             overlay_parts = [repair_overlay_text]
-            index_message = self._notice_index_message(runtime_context=runtime_context)
-            if index_message is not None:
-                # 尾索引只报告"有多少已消费通知退场"，不重投正文；放发送尾段
-                # 让同 turn 链每跳刷新它，同时只重付最后几条。插在 turn-only
-                # note 之前，末位仍是本轮的 user 回合提示。
-                request_messages = _mid_insert.insert_mid_messages(
-                    request_messages,
-                    items=[index_message],
-                    position=_mid_insert.POSITION_TAIL,
-                    lane=_mid_insert.LANE_NODE,
-                )
             assembled_request_messages = self._apply_temporary_system_overlay(
                 request_messages,
                 overlay_text='\n\n'.join(str(part or '').strip() for part in overlay_parts if str(part or '').strip()),
@@ -747,6 +736,12 @@ class ReActToolLoop:
             # 内容审查词替换的定稿点：只改模型面正文（工具结果与发起方消息），放在 token
             # 预检之前，压缩 helper 与实际发送读同一份正文。
             request_messages = apply_content_policy(request_messages)
+            # 退场索引插在当前 user 回合之前，而不是作为请求末条：模型会把末条 user
+            # 当成待回应的新消息，每跳都复述一遍"这些旧通知忽略"。
+            request_messages = self._insert_notice_index_before_current_user(
+                request_messages,
+                self._notice_index_message(runtime_context=runtime_context),
+            )
             previous_actual_request_messages = self._prompt_message_records(request_messages)
             pending_request_delta_messages = []
             repair_overlay_text = None
@@ -10158,6 +10153,37 @@ class ReActToolLoop:
         if node is None or not isinstance(getattr(node, 'metadata', None), dict):
             return None
         return build_notice_index_message(node.metadata.get(APPEND_NOTICE_CONTEXT_KEY))
+
+    @classmethod
+    def _insert_notice_index_before_current_user(
+        cls,
+        request_messages: list[dict[str, Any]] | None,
+        index_message: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        """只在请求末条是普通 user 回合时，把退场索引插到它之前。
+
+        工具续跳的末条是工具结果，没有"当前 user 回合"；这时不插，免得索引每跳
+        以最新消息的身份出现并被模型回一句。末条是运行时家族的 user 消息（心跳/
+        回合提醒等）同样不插：那不是用户输入，索引在它前面只会落进深历史。
+        """
+        records = [
+            dict(item)
+            for item in list(request_messages or [])
+            if isinstance(item, dict)
+        ]
+        if index_message is None or not records:
+            return records
+        trailing = records[-1]
+        if str(trailing.get('role') or '').strip().lower() != 'user':
+            return records
+        if _mid_insert.classify_message(trailing) is not None:
+            return records
+        return _mid_insert.insert_mid_messages(
+            records,
+            items=[index_message],
+            position=_mid_insert.POSITION_BEFORE_CURRENT_USER,
+            lane=_mid_insert.LANE_NODE,
+        )
 
     @staticmethod
     def _prompt_message_records(messages: list[dict[str, Any]] | None) -> list[dict[str, Any]]:

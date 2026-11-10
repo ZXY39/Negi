@@ -268,8 +268,12 @@ def test_notice_index_reports_only_archived_consumed() -> None:
     context = _context([_record(index) for index in range(7)])
     message = build_notice_index_message(context)
     assert message is not None
-    assert str(message['content']).startswith(f'{NOTICE_INDEX_PREFIX}\n')
-    assert 'outside the live window: 2' in str(message['content'])
+    content = str(message['content'])
+    assert content.startswith(f'{NOTICE_INDEX_PREFIX}\n')
+    assert 'outside the live window: 2' in content
+    # 索引是记账行，不许写成待执行的动作，也不许请模型复述。
+    assert 'Do not reply' in content
+    assert 'content_search(ref=' not in content
     assert is_notice_index_message(message)
     assert mi.classify_message(message) == mi.KIND_NOTICE_INDEX
     assert build_notice_index_message(_context([_record(1)])) is None
@@ -284,3 +288,62 @@ def test_notice_index_is_stripped_from_durable_prompt_tail() -> None:
         stage=mi.STAGE_PROMPT_TAIL,
         lane=mi.LANE_NODE,
     ) == []
+
+
+def test_notice_index_sits_before_the_current_user_turn() -> None:
+    context = _context([_record(index) for index in range(7)])
+    message = build_notice_index_message(context)
+    assert message is not None
+    request_messages = [
+        {'role': 'system', 'content': 'sys'},
+        {'role': 'user', 'content': 'bootstrap'},
+        {'role': 'assistant', 'content': '', 'tool_calls': [{'id': 'call_1'}]},
+        {'role': 'tool', 'content': 'tool result'},
+        {'role': 'user', 'content': '[WAIT_NOTE] 等下一轮'},
+    ]
+    rewritten = ReActToolLoop._insert_notice_index_before_current_user(
+        request_messages,
+        message,
+    )
+    assert [item['role'] for item in rewritten] == [
+        'system', 'user', 'assistant', 'tool', 'user', 'user',
+    ]
+    assert rewritten[-2] is not rewritten[-1]
+    assert is_notice_index_message(rewritten[-2])
+    assert rewritten[-1]['content'] == '[WAIT_NOTE] 等下一轮'
+
+
+def test_notice_index_stays_out_of_tool_continuation_hops() -> None:
+    context = _context([_record(index) for index in range(7)])
+    message = build_notice_index_message(context)
+    assert message is not None
+    request_messages = [
+        {'role': 'system', 'content': 'sys'},
+        {'role': 'user', 'content': 'bootstrap'},
+        {'role': 'assistant', 'content': '', 'tool_calls': [{'id': 'call_1'}]},
+        {'role': 'tool', 'content': 'tool result'},
+    ]
+    assert (
+        ReActToolLoop._insert_notice_index_before_current_user(request_messages, message)
+        == request_messages
+    )
+
+
+def test_notice_index_skips_runtime_family_user_tail() -> None:
+    context = _context([_record(index) for index in range(7)])
+    message = build_notice_index_message(context)
+    assert message is not None
+    request_messages = [
+        {'role': 'system', 'content': 'sys'},
+        {'role': 'user', 'content': 'bootstrap'},
+        {'role': 'assistant', 'content': '', 'tool_calls': [{'id': 'call_1'}]},
+        {'role': 'tool', 'content': 'tool result'},
+        {
+            'role': 'user',
+            'content': 'System note for this turn only:\nrepair required',
+        },
+    ]
+    assert (
+        ReActToolLoop._insert_notice_index_before_current_user(request_messages, message)
+        == request_messages
+    )

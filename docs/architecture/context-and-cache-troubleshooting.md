@@ -317,7 +317,7 @@ Heartbeat / cron 不在主 CEO/frontdoor 路径上使用单独的短 `ceo_heartb
 角色合同：`[TOKEN_COMPACT_V2]` 是 **assistant 角色**——其正文是模型直接继续阅读的自然语言会话摘要，语义上属于对话延续，用 user/system 会让模型把摘要当成新的用户指令或顶掉唯一一份首位 system（合同见本文「线体角色合同」）。节点通知块 `[NOTICE_TAIL]` 以 **user** 落地；它的识别只按"前缀 + 换行 + JSON"这个块形判，既不挑角色也不挑拼写——挑角色会让存量 assistant 块从去重视野里消失（同一份通知曾被叠成 36 份），只按裸前缀判又会把正文里提到前缀的用户句子误当块。
 
 - `[TOKEN_COMPACT_V2]` — 内联 LLM 全局压缩。第二行 JSON 为 `{"kind":...,"history_message_count":N}`：kind 为 `frontdoor_token_compaction_llm`（CEO/frontdoor）或 `node_token_compaction_llm`（节点，另带 `node_id` 与各分区计数字段），空行后接压缩摘要正文（语言跟随被压缩历史，不强制中文）：模型直接继续阅读的自然语言会话内容，不是结构化数据，也不是 JSON。第二行必须是可独立解析的 JSON、且与正文之间是真空行——读盘点按「前缀 + 元数据行」取压缩标记；把分隔写成转义字面量就等于永远读不到。识别压缩块只看前缀与 `kind`，正文结构不是判定依据。
-- `[NOTICE_TAIL]` — 追加通知的 live 窗口（`raw_notice_window`）与必须逐条保留的追加要求段，结构见 `main-task-runtime.md`「节点信箱与唤醒（现行）」；它随 `frame.messages` 回写，装配期按逐字节内容去重，同一份只插一次。live 窗口 = 未消费记录 + 最近 `NODE_NOTICE_CONSUMED_TAIL_WINDOW`（默认 5）条已消费记录；超出窗口的已消费记录只在下次压缩边界退场，台账保留供 `view_message_history` 检索。`[NOTICE_INDEX]` 是尾部的一行索引：只报退场条数与最老时间，不重投正文。
+- `[NOTICE_TAIL]` — 追加通知的 live 窗口（`raw_notice_window`）与必须逐条保留的追加要求段，结构见 `main-task-runtime.md`「节点信箱与唤醒（现行）」；它随 `frame.messages` 回写，装配期按逐字节内容去重，同一份只插一次。live 窗口 = 未消费记录 + 最近 `NODE_NOTICE_CONSUMED_TAIL_WINDOW`（默认 5）条已消费记录；超出窗口的已消费记录只在下次压缩边界退场，台账保留供 `view_message_history` 检索。`[NOTICE_INDEX]` 是一行退场索引：只报退场条数与最老时间，不重投正文；它插在**当前 user 回合之前**，该跳请求末条不是普通 user 回合（工具续跳、运行时家族 user 消息）时不产行，文案自述为记账并要求模型不要回应或复述。放在请求末条会让模型把它当成最新 user 消息、每跳回一句"旧通知忽略"。
 - 存量转录里以 `[STAGE_*]` 开头的消息按普通历史消息处理：读侧没有对应的识别端，不会剥离、去重或重渲染，它们随所在历史一起参与 `token_compression`。
 
 ### 4.6 中途插入消息的家族、位置与生命周期
@@ -331,7 +331,7 @@ Heartbeat / cron 不在主 CEO/frontdoor 路径上使用单独的短 `ceo_heartb
 | `runtime_notice` | `[RUNTIME_NOTICE]` user 消息（上一轮未发出的表情包 / 没发出去的媒体文件 / 控制台动作 / skill 名单 / 记忆增量 / 合同增量 / QQ 身份） | 请求尾部；前门排在当轮 user 之后、turn-only 之前，节点排在历史末尾 | 活到下一次压缩；表情包与媒体失败挂账只投一次就清，与消息同寿命 | `drop` + 下一跳状态快照 | `post_compaction` |
 | `turn_only_note` | `System note for this turn only:` user 消息 | 请求尾部，每跳重建，单例 | 只活一轮 | `drop` | `durable` / `prompt_tail` / `projection` |
 | `append_notice` | `[NOTICE_TAIL]` + JSON user 消息 | 节点 bootstrap user 之后（system 保持首位） | 未消费 + 最近 N 条已消费留在尾块；其余在压缩边界退场，台账保留可检索 | `carry`；深层 `raw_notice_window` 仅在 live 窗口内原样捞出 | 任何 generic strip 都不许碰 |
-| `notice_index` | `[NOTICE_INDEX]` user 消息 | 请求尾部（turn-only 之前） | 每跳重建 | `drop` | `prompt_tail` / `post_compaction` |
+| `notice_index` | `[NOTICE_INDEX]` user 消息 | 当前 user 回合之前；该跳请求末条不是普通 user 回合时不插 | 只在带 user 回合的跳重建 | `drop` | `prompt_tail` / `post_compaction` |
 | `retrieval_memory_snapshot` | `## 长期记忆\n` assistant 消息 | stable index 1（system 之后、历史之前） | 每轮重建 | `rebuild` | `durable` / `compaction` / `projection`；`prompt_tail` 保留 |
 | `retrieval_overlay` | `## 长期记忆写入提示` / `## 已检索记忆使用提示` assistant 消息 | 由装配层逐轮重建 | 每轮重建 | `rebuild` | 只在 `projection` |
 | `hidden_internal_event` | metadata `internal_prompt_kind`，内容前缀 `This is a background heartbeat` / `# Heartbeat Rules` / `[SESSION EVENTS]` / `[CRON INTERNAL EVENT]` | 心跳 / cron 的规则行与事件束 | 持久 | `keep`；durable 基线按 `(kind, content)` 折叠重复副本 | 任何 generic strip 都不许碰 |

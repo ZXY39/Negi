@@ -462,8 +462,9 @@ def build_notice_index_message(
         NOTICE_INDEX_PREFIX,
         f'Older consumed notices outside the live window: {len(archived)}'
         + (f' (oldest {oldest}).' if oldest else '.'),
-        'They may not be in this request; use view_message_history to list them, then '
-        'content_search(ref=..., query=...) or content_open(ref=...) to read one.',
+        'This is runtime bookkeeping for already-consumed notices. Do not reply to it '
+        'or restate it in your answer; use view_message_history, content_search or '
+        'content_open only when an older notice is actually needed.',
     ]
     return {
         'role': 'user',
