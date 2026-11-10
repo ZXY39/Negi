@@ -14486,6 +14486,56 @@ class MainRuntimeService:
             return text
         return text[: max(1, limit - 1)] + '…'
 
+    def long_term_task_roster(self, session_id: str | None) -> list[dict[str, Any]]:
+        """头部「在挂的长期任务」清单的取数口：本会话还在跑的连续任务。
+
+        复用 task_list 的窄读（`list_task_summaries` + `map_task_root_continuous`），
+        只留 `in_progress` 且根节点 continuous 的；standby/error/disk 那些派生读不参与。
+        目标取 `TaskRecord.title`（创建时 `task` 前 60 字），不是每轮的 `core_requirement`。
+        取数失败返回空表，调用方整节不渲染（清单是观测块，不阻断会话）。
+        """
+        normalized = str(session_id or '').strip()
+        if not normalized:
+            return []
+        try:
+            summaries = list(self.store.list_task_summaries(normalized) or [])
+        except Exception:
+            return []
+        active = [
+            item
+            for item in summaries
+            if str(item.get('status') or '').strip() == 'in_progress'
+        ]
+        if not active:
+            return []
+        try:
+            continuous = dict(
+                self.store.map_task_root_continuous(
+                    [str(item.get('task_id') or '').strip() for item in active]
+                )
+                or {}
+            )
+        except Exception:
+            return []
+        entries: list[dict[str, Any]] = []
+        for item in active:
+            task_id = str(item.get('task_id') or '').strip()
+            if not task_id or not continuous.get(task_id):
+                continue
+            entries.append(
+                {
+                    'task_id': task_id,
+                    'title': str(item.get('title') or '').strip(),
+                    'paused': bool(item.get('is_paused')) or bool(item.get('pause_requested')),
+                    'created_at': str(item.get('created_at') or ''),
+                }
+            )
+        entries.sort(key=lambda entry: (entry['created_at'], entry['task_id']))
+        return [
+            {'task_id': entry['task_id'], 'title': entry['title'], 'paused': entry['paused']}
+            for entry in entries
+        ]
+
     def failed_node_ids(self, task_id: str) -> str:
         task_id = self.normalize_task_id(task_id)
         failed_node_ids = self.query_service.failed_node_ids(task_id)

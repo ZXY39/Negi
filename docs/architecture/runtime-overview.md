@@ -659,7 +659,7 @@ Heartbeat 与 cron 内部轮次共享同一内部轮次合同，完整契约详�
 
 ## Runtime Contract Lane
 
-模型面向的运行时合同由两部分组成：首条 system 末尾的 `## Runtime Contract (pinned)` 头部快照（skill 名单、exec 策略、临时目录、路径锚，只在压缩边界重印），以及两次重印之间一次性投递的 `[RUNTIME_NOTICE]` user 消息（exec 策略/临时目录变化、denied/candidate/repair/附件状态、控制台动作用 `### Operator actions` 一节携带）。旧 `## Runtime Tool Contract` 尾块已退役，识别/剥离函数保留用于旧 transcript（角色合同见 `context-and-cache-troubleshooting.md`「线体角色合同」）。本节记录本文拥有的 canonical 表示规则与运行时边界；控制台动作的写入点、作用域与游标合同归 `tool-and-skill-system.md`「Pinned Static Declarations」。
+模型面向的运行时合同由两部分组成：首条 system 末尾的 `## Runtime Contract (pinned)` 头部快照（skill 名单、exec 策略、临时目录、路径锚、在挂长期任务清单，只在压缩边界重印），以及两次重印之间一次性投递的 `[RUNTIME_NOTICE]` user 消息（exec 策略/临时目录变化、denied/candidate/repair/附件状态、控制台动作用 `### Operator actions` 一节携带）。旧 `## Runtime Tool Contract` 尾块已退役，识别/剥离函数保留用于旧 transcript（角色合同见 `context-and-cache-troubleshooting.md`「线体角色合同」）。本节记录本文拥有的 canonical 表示规则与运行时边界；控制台动作的写入点、作用域与游标合同归 `tool-and-skill-system.md`「Pinned Static Declarations」。
 
 运行时块的表示规则只有一条：块是"当前轮临时合同"的 summary，以 user 角色落地；它不参与 durable history，也不承担任何历史结构裁剪（历史收缩只由 `token_compression` 与 `user_edit_truncation` 造成）。块的字段集合、尾部只带最新快照与基线剥离规则详见 `tool-and-skill-system.md`「四个概念必须分清」与 `context-and-cache-troubleshooting.md`「append-only 规则」。
 

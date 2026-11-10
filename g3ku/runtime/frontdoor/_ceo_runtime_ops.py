@@ -225,6 +225,7 @@ from .tool_contract import (
     apply_pinned_contract_to_head,
     build_frontdoor_tool_contract,
     bump_skill_roster_epoch,
+    frontdoor_long_term_task_roster,
     frontdoor_pinned_contract_text,
     is_frontdoor_tool_contract_echo_text,
     normalize_frontdoor_candidate_tool_items,
@@ -3919,6 +3920,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 str(getattr(policy, "tool_policy_signature", "") or "")
                 if policy is not None
                 else ""
+            ),
+            long_term_tasks_provider=lambda: frontdoor_long_term_task_roster(
+                self._loop, session_key=normalized_session_key
             ),
         )
         if not pinned_text:

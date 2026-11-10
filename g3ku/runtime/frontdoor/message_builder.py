@@ -30,6 +30,7 @@ from g3ku.runtime.frontdoor.session_temp_dir import ceo_session_temp_dir
 from g3ku.runtime.frontdoor.session_workspace import ceo_session_workspace_dir
 from g3ku.runtime.frontdoor.tool_contract import (
     build_frontdoor_tool_contract,
+    frontdoor_long_term_task_roster,
     frontdoor_pinned_contract_text,
     merge_pinned_contract_into_system_text,
     pinned_contract_is_carried_by_head,
@@ -1808,6 +1809,9 @@ class CeoMessageBuilder:
                 str(getattr(policy, "tool_policy_signature", "") or "")
                 if policy is not None
                 else ""
+            ),
+            long_term_tasks_provider=lambda: frontdoor_long_term_task_roster(
+                self._loop, session_key=session_key
             ),
         )
         if not pinned_text:

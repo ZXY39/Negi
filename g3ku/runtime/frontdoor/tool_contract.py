@@ -34,9 +34,9 @@ RUNTIME_APPENDIX_HEADINGS = (FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING,)
 # `load_skill_context` 的三态回执告知原因。
 FRONTDOOR_PINNED_CONTRACT_HEADING = '## Runtime Contract (pinned)'
 FRONTDOOR_PINNED_CONTRACT_KIND = 'frontdoor_runtime_pinned_contract'
-# v4: 头部新增 sticker_max_per_reply 行（每轮发送预算）。版本进重印判据，
-# 存量钉住块上线后重印一次；之后改设置由 `[RUNTIME_NOTICE]` 的合同分节纠正。
-PINNED_CONTRACT_RENDERER_VERSION = 'pinned-contract-v4'
+# v5: 头部新增「在挂的长期任务」清单块（随重印边界冻结，不逐跳重画）。版本进重印判据，
+# 存量钉住块上线后重印一次；之后清单只在压缩边界跟着重印。
+PINNED_CONTRACT_RENDERER_VERSION = 'pinned-contract-v5'
 PINNED_CONTRACT_SNAPSHOT_NOTE = (
     'snapshot_note: this block refreshes only at compaction; later runtime notices '
     'supersede changed values.'
@@ -299,6 +299,66 @@ _TIER_LABELS = {
     "host_full": "全权限模式",
 }
 
+LONG_TERM_TASK_ROSTER_HEADING = '### 在挂的长期任务'
+LONG_TERM_TASK_ROSTER_MAX_LINES = 8
+LONG_TERM_TASK_ROSTER_TITLE_LIMIT = 60
+
+
+def _long_term_task_goal(title: Any, task_id: str) -> str:
+    """清单里的「目标」：任务标题压成一行、截到 60 字，`|` 换成全角保持列形。
+
+    标题口径与 `task_list` 的「目标」一致（`TaskRecord.title`，创建时取
+    `task` 前 60 字）；`core_requirement` 是每轮内容，不能当长期用途。
+    """
+    text = ' '.join(str(title or '').split())
+    if not text or text == task_id:
+        return ''
+    text = text.replace('|', '｜')
+    if len(text) <= LONG_TERM_TASK_ROSTER_TITLE_LIMIT:
+        return text
+    return text[: LONG_TERM_TASK_ROSTER_TITLE_LIMIT - 1] + '…'
+
+
+def render_long_term_task_roster(items: list[Any] | None) -> str:
+    """渲染「在挂的长期任务」小节；空清单返回空串（整节不出现）。
+
+    条目由服务侧窄读给出：本会话 `status=in_progress` 且根节点 continuous 的任务。
+    状态只有两档：在挂 / 暂停。行数有界，余量指向 `task_list(long_term=true)`。
+    """
+    entries: list[tuple[str, str, str]] = []
+    for item in list(items or []):
+        if not isinstance(item, dict):
+            continue
+        task_id = str(item.get('task_id') or '').strip()
+        if not task_id:
+            continue
+        paused = (
+            bool(item.get('paused'))
+            or bool(item.get('is_paused'))
+            or bool(item.get('pause_requested'))
+        )
+        entries.append(
+            (
+                task_id,
+                _long_term_task_goal(item.get('title'), task_id),
+                '暂停' if paused else '在挂',
+            )
+        )
+    if not entries:
+        return ''
+    lines = [LONG_TERM_TASK_ROSTER_HEADING]
+    visible = entries[:LONG_TERM_TASK_ROSTER_MAX_LINES]
+    for task_id, goal, state in visible:
+        columns = [task_id]
+        if goal:
+            columns.append(goal)
+        columns.append(state)
+        lines.append('- ' + ' | '.join(columns))
+    overflow = len(entries) - len(visible)
+    if overflow > 0:
+        lines.append(f'另有 {overflow} 条，用 task_list(long_term=true) 查看')
+    return '\n'.join(lines)
+
 
 def session_mode_state_text(sandbox_tier: Any) -> str:
     """当刻档位叫什么名字——头部快照与合同分节用这一档。
@@ -322,6 +382,34 @@ def _session_mode_line(sandbox_tier: Any) -> str:
     return f'session_mode: {mode_text}' if mode_text else ""
 
 
+def frontdoor_long_term_task_roster(loop: Any, *, session_key: str | None) -> list[dict[str, Any]]:
+    """本会话在挂长期任务的取数口（主运行时窄读的薄包装）。
+
+    取数失败一律返回空表：清单是观测块，读不出来就整节不渲染，不阻断会话。
+    """
+    key = str(session_key or '').strip()
+    if not key:
+        return []
+    service = getattr(loop, 'main_task_service', None)
+    getter = getattr(service, 'long_term_task_roster', None)
+    if not callable(getter):
+        return []
+    try:
+        items = getter(key)
+    except Exception:
+        return []
+    return [dict(item) for item in list(items or []) if isinstance(item, dict)]
+
+
+def _long_term_tasks_from_provider(provider: Any) -> list[Any]:
+    if not callable(provider):
+        return []
+    try:
+        return list(provider() or [])
+    except Exception:
+        return []
+
+
 def render_pinned_contract_text(
     *,
     skill_items: list[Any] | None,
@@ -331,15 +419,14 @@ def render_pinned_contract_text(
     sticker_items: list[Any] | None = None,
     sandbox_tier: str = "",
     session_workspace_dir: str | None = None,
+    long_term_tasks: list[Any] | None = None,
 ) -> str:
-    """渲染头部钉住块。
+    """渲染头部钉住块；`include_extras=True` 时即使名单为空也渲静态声明。
 
     `sticker_items` 是 `g3ku.stickers.catalog.scan_packs()` 的结果；它在钉住时点被
     冻结进原文，两次重印之间怎么增删表情包都不改这块（增删由 `[RUNTIME_NOTICE]`
     的 `sticker_pack:<pack>` 分节纠正）。`sticker_max_per_reply` 与它同属一节：
     钉住时冻结，改设置由同一条通知的 `sticker_max_per_reply` 分节纠正。
-    """
-    """渲染钉住块；`include_extras=True` 时即使名单为空也渲静态声明。
 
     头部是**快照**：只在重印边界（压缩/手动压缩）用当刻值重渲，两次重印之间逐字节不动。
     执行策略、会话临时目录、路径锚因此必须始终在头部有一份——名单为空就不钉，会让删掉
@@ -349,6 +436,9 @@ def render_pinned_contract_text(
     按 id 排序：钉住的那份是"能加载哪些"的集合声明，不带每回合的语义排名。两次重印
     之间名单会过期——新增的靠一次性持久提示点名，消失的靠
     `load_skill_context` 三态回执告知原因。
+
+    `long_term_tasks` 是同一份快照里的「在挂的长期任务」清单（服务侧窄读结果），
+    空表整节不渲染；它不做判重、不改工具参数，只是让模型看见本会话已挂着哪些长期任务。
 
     `include_extras=False` 只渲名单本体：节点道若只需要名单可用这一档；
     会话语义下的节点头部现在也走 `include_extras=True`（exec 策略/临时目录/路径锚进头部）。
@@ -387,6 +477,9 @@ def render_pinned_contract_text(
     lines.append(_render_exec_runtime_policy(exec_runtime_policy))
     lines.extend(_render_session_temp_dir(session_temp_dir))
     lines.extend(_render_path_anchor())
+    roster_text = render_long_term_task_roster(long_term_tasks)
+    if roster_text:
+        lines.append(roster_text)
     return '\n'.join(lines).strip()
 
 
@@ -516,12 +609,16 @@ def frontdoor_pinned_contract_text(
     sandbox_tier: str = "",
     session_workspace_dir: str | None = None,
     tool_policy_signature: str = "",
+    long_term_tasks_provider: Any = None,
 ) -> str:
     """注入侧唯一取数口：命中已钉住的内容就复用原文，否则重钉一次并记下判据键。
 
     读一次写一次都在同一跳内完成，重复调用幂等（同一判据键返回同一串原文）。
     `include_extras=True` 时名单为空也会渲出静态声明（exec 策略/临时目录/路径锚），
     因此正常情况下不再返回空串；空串只出现在 `include_extras=False` 且名单为空。
+
+    `long_term_tasks_provider` 只在重钉那一跳调用：清单随原文一起冻结，两次重印之间
+    不取数、不重画（头部一改就顶掉身后全部前缀）。取数失败按空表处理，整节不渲染。
 
     没有载体（既拿不到会话对象又没有 session_key）时返回空串：钉不住就每回合现算，那份
     名单会随每回合的语义挑选变字节，头部每跳都改比不钉糟糕得多（头部一改就顶掉身后全部前缀）。
@@ -576,6 +673,7 @@ def frontdoor_pinned_contract_text(
         sticker_items=sticker_items,
         sandbox_tier=sandbox_tier,
         session_workspace_dir=session_workspace_dir,
+        long_term_tasks=_long_term_tasks_from_provider(long_term_tasks_provider),
     )
     if not fresh:
         return ''
