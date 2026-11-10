@@ -2744,12 +2744,10 @@ class SQLiteTaskStore:
     # 消息三态里「还没真正并入模型上下文」的那两格，与
     # `node_runner._notification_awaits_injection` 同口径（delivered 待处理；
     # consumed 而 merged_at 为空 = 已处理待并入）。`merged_at` 在 payload_json 里，
-    # 所以整任务只解一次，不逐节点回表。
+    # 所以整任务只解一次，不逐节点回表。held 位只压制唤醒，不参与这里的判定。
     _NOTIFICATION_AWAITS_INJECTION_SQL = (
         "(TRIM(status) = 'delivered' OR (TRIM(status) = 'consumed' "
-        "AND TRIM(COALESCE(json_extract(payload_json, '$.merged_at'), '')) = '')) "
-        "AND (COALESCE(json_extract(payload_json, '$.held_at'), '') = '' "
-        "OR COALESCE(json_extract(payload_json, '$.released_at'), '') != '')"
+        "AND TRIM(COALESCE(json_extract(payload_json, '$.merged_at'), '')) = ''))"
     )
 
     def upsert_frontdoor_node_message(
@@ -2982,9 +2980,7 @@ class SQLiteTaskStore:
         实盘 1227 节点的任务测得 4.64 s，换成这里的一次读是 17 ms。
         """
         rows = self._fetchall(
-            "SELECT payload_json FROM task_node_notifications WHERE task_id = ? AND TRIM(status) = 'delivered' "
-            "AND (COALESCE(json_extract(payload_json, '$.held_at'), '') = '' "
-            "OR COALESCE(json_extract(payload_json, '$.released_at'), '') != '')",
+            "SELECT payload_json FROM task_node_notifications WHERE task_id = ? AND TRIM(status) = 'delivered'",
             (str(task_id or '').strip(),),
         )
         return [self._parse(row['payload_json'], TaskNodeNotification) for row in rows]

@@ -6330,6 +6330,13 @@ class MainRuntimeService:
             )
         )
         if released:
+            if not self._batch_rows_await_injection(
+                task_id=task_id,
+                node_id=parent_node_id,
+                batch_id=batch_id,
+            ):
+                # 释放只补 released_at；这批行若已在别的回合里消费并入，再唤只会开一个空回合。
+                return released
             parent = self.store.get_node(parent_node_id)
             handshake = normalize_acceptance_handshake(
                 ((parent.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY)
@@ -6348,6 +6355,22 @@ class MainRuntimeService:
                     exc,
                 )
         return released
+
+    def _batch_rows_await_injection(self, *, task_id: str, node_id: str, batch_id: str) -> bool:
+        """批次里还有没有尚未并入上下文的结果；没有就不值得为此唤醒父节点。"""
+        try:
+            rows = list(self.store.list_task_node_notifications(task_id, node_id) or [])
+        except Exception:  # noqa: BLE001 - 读不到按"有"处理，宁可多叫醒一次
+            return True
+        for item in rows:
+            if str(getattr(item, 'batch_id', '') or '').strip() != batch_id:
+                continue
+            status = str(getattr(item, 'status', '') or '').strip()
+            if status == 'delivered':
+                return True
+            if status == 'consumed' and not str(getattr(item, 'merged_at', '') or '').strip():
+                return True
+        return False
 
 
     async def _notify_node_waiters(

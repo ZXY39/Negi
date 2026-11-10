@@ -508,9 +508,8 @@ class ViewMessageHistoryTool(Tool):
             'Read every message this node has received since it was created, as a JSON artifact '
             'reference you can open with content_open/content_search. Includes notices already '
             'consumed and dropped from the live context. Each record carries the receive time, '
-            'sender relationship and node id, message id, content, status (delivered/held/'
-            'consumed/merged/superseded/pending_append) and source. Messages held by a '
-            'wait_all_children batch appear as status=held without content until the batch settles.'
+            'sender relationship and node id, message id, content, status (delivered/'
+            'consumed/merged/superseded/pending_append) and source.'
         )
 
     @property
@@ -553,9 +552,10 @@ class SpawnChildNodesTool(Tool):
             'Create child nodes and hand them to the scheduler. The call returns as soon as they '
             'exist — it does NOT wait for them, and it does not contain their results. Each child '
             'reports its terminal result to you as a child_final message; call enter_wait to be '
-            'woken when a message arrives. `wait_all_children=true` holds this batch\'s child_final '
-            'messages until every created execution child in the batch is terminal, then delivers '
-            'them together; default false delivers each result as it lands. Only mutually independent '
+            'woken when a message arrives. `wait_all_children=true` keeps this batch quiet: each '
+            'child_final still lands in your mailbox and is read on any turn that runs for another '
+            'reason, but the batch does not wake you until its last created execution child is '
+            'terminal; default false lets every result wake you as it lands. Only mutually independent '
             'branches belong in one batch; a node that consumes its siblings\' outputs must be '
             'created in a later call, after you have received those siblings\' results. Write '
             'acceptance criteria in a child\'s `acceptance_prompt` to give that child an acceptance '
@@ -568,8 +568,9 @@ class SpawnChildNodesTool(Tool):
         return (
             'Create child nodes for delegated work and return immediately with their ids. One call = '
             'one batch (no ordering); results arrive later as child_final messages — call enter_wait '
-            'to wait for mail. Set `wait_all_children` to deliver the batch\'s results only after all '
-            'its children finish. Never put a node that consumes its siblings’ outputs in the same '
+            'to wait for mail. Set `wait_all_children` to avoid being woken by individual results: '
+            'they are still read on your next turn, and you are woken once when the last child '
+            'finishes. Never put a node that consumes its siblings’ outputs in the same '
             'batch; create it after you have their results. Optional per-child `seed_tools` seeds '
             'those tool contracts into the child’s first request. Per child, '
             '`acceptance_prompt` alone adds an acceptance node that judges it independently after it '
@@ -654,9 +655,10 @@ class SpawnChildNodesTool(Tool):
                 'wait_all_children': {
                     'type': 'boolean',
                     'description': (
-                        'When true, hold this batch\'s child_final messages until every created execution '
-                        'child in the batch is terminal, then deliver them together. Default false: each '
-                        'child result is delivered as it arrives.'
+                        'When true, this batch does not wake you for individual child_final messages: '
+                        'they are still injected on any turn that runs for another reason, and you are '
+                        'woken when the last created execution child is terminal. Default false: each '
+                        'result wakes you as it arrives.'
                     ),
                 },
             },
@@ -752,8 +754,8 @@ class SpawnChildNodesTool(Tool):
             created.append(created_item)
         if created and wait_all_children:
             summary = (
-                f'已创建 {len(created)} 个子节点；本批结果会在全部子节点结束后一起以 child_final 送达，'
-                '需要停靠时调用 enter_wait，不要轮询。'
+                f'已创建 {len(created)} 个子节点；结果会逐条落信箱但不会逐条唤醒你，任何原因醒来都会读到，'
+                '本批最后一个结束后统一唤醒；需要停靠时调用 enter_wait，不要轮询。'
             )
         elif created:
             summary = (

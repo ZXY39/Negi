@@ -1,4 +1,6 @@
-"""`spawn_child_nodes.wait_all_children` holds child_final rows until the batch settles."""
+"""`spawn_child_nodes.wait_all_children` keeps a batch quiet: every result lands as an ordinary
+mailbox row and is injected on any turn that runs, but the batch itself only wakes the parent
+once its last created execution child is terminal."""
 
 from __future__ import annotations
 
@@ -11,6 +13,8 @@ import pytest
 from main.models import NodeRecord, TaskRecord
 from main.runtime.internal_tools import SpawnChildNodesTool
 from main.runtime.node_mailbox import notification_is_held
+from main.runtime.node_runner import _notification_awaits_injection
+from main.runtime.task_actor_service import TaskActorService
 from main.service.runtime_service import MainRuntimeService
 
 TASK = 'task:wait-all'
@@ -151,6 +155,63 @@ async def test_wait_all_false_delivers_each_row_immediately(tmp_path, monkeypatc
     assert len(rows) == 1
     assert notification_is_held(rows[0]) is False
     assert woke == [PARENT]
+
+
+@pytest.mark.asyncio
+async def test_held_row_is_injectable_but_not_a_wake_source(tmp_path, monkeypatch):
+    """held 只压制"为它开回合"：父节点因别的事运行时，这些结果照常并入。"""
+    service = _service(tmp_path)
+    _seed(service, wait_all=True)
+    woke = _stub_wake(service, monkeypatch)
+
+    await service._deliver_child_final_message(task_id=TASK, node_id=CHILD1)
+    rows = service.store.list_task_node_notifications(TASK, PARENT)
+    assert notification_is_held(rows[0]) is True
+
+    # 注入车道：恢复/在途刷新选中它，任务级待注入计数也认它。
+    assert _notification_awaits_injection(rows[0]) is True
+    pending = service.node_runner._pending_node_notifications(task_id=TASK, node_id=PARENT)
+    assert [item.notification_id for item in pending] == [rows[0].notification_id]
+    assert service.store.map_task_notifications_awaiting_injection(TASK) == {PARENT: 1}
+
+    # 展示读数：它就是一条没读过的消息。
+    assert service.node_runner._unread_from_node(TASK, PARENT) == 1
+    assert len(service.store.list_task_delivered_notifications(TASK)) == 1
+
+    # 唤醒车道：未读复派/派发仍排除 held，停靠的父节点不会被它单独叫醒。
+    actor = object.__new__(TaskActorService)
+    actor._store = service.store
+    assert actor._unread_rows(TASK, PARENT) == []
+    assert woke == []
+
+
+@pytest.mark.asyncio
+async def test_release_skips_wake_when_batch_rows_already_merged(tmp_path, monkeypatch):
+    """批次行已在别的回合里消费并入时，释放只补 released_at，不再开空回合。"""
+    service = _service(tmp_path)
+    _seed(service, wait_all=True)
+    woke = _stub_wake(service, monkeypatch)
+
+    await service._deliver_child_final_message(task_id=TASK, node_id=CHILD1)
+    row = service.store.list_task_node_notifications(TASK, PARENT)[0]
+    service.store.upsert_task_node_notification(
+        row.model_copy(update={'status': 'consumed', 'consumed_at': STAMP, 'merged_at': STAMP})
+    )
+    child2 = service.store.get_node(CHILD2)
+    service.store.upsert_node(
+        child2.model_copy(update={'status': 'success', 'final_output': 'done'})
+    )
+
+    released = await service._release_wait_all_batch_if_settled(
+        task_id=TASK,
+        parent_node_id=PARENT,
+        batch_id='call:batch',
+    )
+
+    assert released is True
+    rows = service.store.list_task_node_notifications(TASK, PARENT)
+    assert all(item.released_at for item in rows)
+    assert woke == []
 
 
 @pytest.mark.asyncio

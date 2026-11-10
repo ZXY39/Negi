@@ -1,4 +1,4 @@
-"""Node message-history tool: all received rows, artifact ref, held contents hidden."""
+"""Node message-history tool: all received rows, artifact ref, quiet rows still readable."""
 
 from __future__ import annotations
 
@@ -71,7 +71,7 @@ def _seed(service):
 
 
 @pytest.mark.asyncio
-async def test_history_returns_artifact_and_hides_held_content(tmp_path, monkeypatch):
+async def test_history_returns_artifact_and_shows_held_content(tmp_path, monkeypatch):
     service = _service(tmp_path)
     _seed(service)
 
@@ -107,8 +107,10 @@ async def test_history_returns_artifact_and_hides_held_content(tmp_path, monkeyp
     assert str(payload['ref']).startswith('artifact:')
     text = service.log_service.resolve_content_ref(payload['ref'])
     assert 'visible body' in text
-    assert 'held body' not in text
-    assert '"status": "held"' in text
+    # held 只压制唤醒；历史工具照常给正文与真实状态。
+    assert 'held body' in text
+    assert '"status": "held"' not in text
+    assert '"status": "delivered"' in text
 
 
 @pytest.mark.asyncio

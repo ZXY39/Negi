@@ -266,8 +266,9 @@ class TaskNodeNotification(Model):
     # 仅 acceptance_verdict：绑定被验的那一份提交（迟到裁决规则唯一判据）。
     submission_id: str = ''
     verdict: str = ''
-    # `spawn_child_nodes.wait_all_children=true` 的批次：child_final 先落箱、
-    # held_at 非空且 released_at 为空时既不注入也不唤醒，批次全部终局后一起释放。
+    # `spawn_child_nodes.wait_all_children=true` 的批次：child_final 照常落箱并可在
+    # 任何已运行的回合里注入；held_at 非空且 released_at 为空只压制唤醒（未读/派发
+    # 车道），批次全部终局后一起补 released_at。
     batch_id: str = ''
     held_at: str = ''
     released_at: str = ''

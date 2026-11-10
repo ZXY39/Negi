@@ -251,10 +251,9 @@ def _notification_awaits_injection(item: Any) -> bool:
 
     delivered = 待处理；consumed 且 merged_at 为空 = 已被控制/决策回合处理、
     等待恢复路径并入（显示「已消费」）；两者都需要被恢复/在途刷新路径看到。
-    held 的行（wait_all_children 批次未齐）既不注入也不唤醒。
+    held 位只压制唤醒、不压制注入：批次未齐时父节点被别的事件叫醒，这些结果
+    照常并入；能不能为此开新回合由未读/唤醒车道上的 `notification_is_held` 判。
     """
-    if notification_is_held(item):
-        return False
     status = str(getattr(item, 'status', '') or '').strip()
     if status == 'delivered':
         return True
@@ -1142,7 +1141,6 @@ class NodeRunner:
         status_rank = {
             'pending_append': 0,
             'delivered': 1,
-            'held': 1,
             'consumed': 2,
             'merged': 3,
             'superseded': 4,
@@ -1183,7 +1181,6 @@ class NodeRunner:
             self._store.list_task_node_notifications(task.task_id, node.node_id) or []
         )
         for row in rows:
-            held = notification_is_held(row)
             kind = str(getattr(row, 'kind', '') or '').strip()
             _add_item(
                 {
@@ -1192,9 +1189,9 @@ class NodeRunner:
                     'source_node_id': str(getattr(row, 'source_node_id', '') or '').strip(),
                     'from': message_label(kind, system_relay=is_system_relay_notice(row)),
                     'kind': kind,
-                    'status': 'held' if held else str(getattr(row, 'status', '') or '').strip(),
-                    'content': '' if held else str(getattr(row, 'message', '') or '').strip(),
-                    'ref': '' if held else str(getattr(row, 'ref', '') or '').strip(),
+                    'status': str(getattr(row, 'status', '') or '').strip(),
+                    'content': str(getattr(row, 'message', '') or '').strip(),
+                    'ref': str(getattr(row, 'ref', '') or '').strip(),
                     'source': 'mailbox',
                 }
             )
@@ -2876,11 +2873,7 @@ class NodeRunner:
             rows = list(self._store.list_task_node_notifications(task_id, node_id) or [])
         except Exception:
             return 0
-        return sum(
-            1
-            for item in rows
-            if str(item.status or '').strip() == 'delivered' and not notification_is_held(item)
-        )
+        return sum(1 for item in rows if str(item.status or '').strip() == 'delivered')
 
     @staticmethod
     def _node_state_label(node: NodeRecord, phase: str) -> str:
