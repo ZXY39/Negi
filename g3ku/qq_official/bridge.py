@@ -112,9 +112,9 @@ _MAX_INBOUND_ATTACHMENTS = 4
 # 入站合并窗：QQ 把用户"一起发的几条"拆成独立事件（实盘文本→文件 2.96~4.69s、
 # 文本→图片 4.69s、附件→附件 0.45~0.79s）。首条若立即提交，回合在后续内容到达
 # 前就已起跑，后面的文件只能由排队车道当下一轮输入。窗内同会话的消息合成一次
-# 提交：正文按到达顺序拼接、附件合并。窗口从窗内首条起算 4s，尾条之后再等 1s，
+# 提交：正文按到达顺序拼接、附件合并。窗口从窗内首条起算 5s，尾条之后再等 1s，
 # 最长 8s（用户连续发很多条时不会无限推迟）。
-_INBOUND_COALESCE_SECONDS = 4.0
+_INBOUND_COALESCE_SECONDS = 5.0
 _INBOUND_COALESCE_QUIET_SECONDS = 1.0
 _INBOUND_COALESCE_MAX_SECONDS = 8.0
 _MEDIA_DOWNLOAD_CHUNK_BYTES = 64 * 1024
