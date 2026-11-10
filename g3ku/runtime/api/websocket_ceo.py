@@ -1096,6 +1096,35 @@ def _snapshot_compression_marker(metadata: Any) -> dict[str, Any]:
     return marker
 
 
+def _artifact_usage_can_cover_row(raw: Any) -> bool:
+    """Whether aggregating request artifacts can supply usage for one row.
+
+    Artifacts are keyed by the plain ``turn_id`` written when a model call
+    runs. Follow-up archive rows carry a composite ``{orig}:followup:{new}``
+    id and runtime-error rows never made a model call, so the scan can never
+    cover either class. The predicate must stay aligned with the reading side
+    (``read_session_turn_token_usage`` keys on the row's own turn_id).
+    """
+    if not isinstance(raw, dict):
+        return False
+    if str(raw.get('role') or '').strip().lower() != 'assistant':
+        return False
+    if isinstance(raw.get('usage'), dict):
+        return False
+    metadata = raw.get('metadata') if isinstance(raw.get('metadata'), dict) else {}
+    turn_id = (
+        str(raw.get('turn_id') or '').strip()
+        or str(metadata.get('_transcript_turn_id') or '').strip()
+    )
+    if not turn_id:
+        return False
+    if turn_id.startswith('followup:') or ':followup:' in turn_id:
+        return False
+    if str(metadata.get('source') or '').strip().lower() == 'runtime_error':
+        return False
+    return True
+
+
 def _build_ceo_snapshot(
     messages: list[dict[str, Any]] | None,
     *,
@@ -1133,20 +1162,9 @@ def _build_ceo_snapshot(
     # 按 turn_id 聚合的请求工件扫描要 glob 整个 artifact 目录并逐文件解析
     # （大会话实测 300+ 文件 / 70MB ≈ 1s+）。transcript 级 usage 自收尾起随每轮
     # 持久化：只有当存在"带 turn_id 却无 usage"的 assistant 行（旧转录）时才付
-    # 这笔扫描。
+    # 这笔扫描。复合 follow-up id 与 runtime_error 行永远匹配不到工件，不触发。
     needs_artifact_usage = any(
-        isinstance(raw, dict)
-        and str(raw.get('role') or '').strip().lower() == 'assistant'
-        and not isinstance(raw.get('usage'), dict)
-        and (
-            str(raw.get('turn_id') or '').strip()
-            or str(
-                (raw.get('metadata') or {}).get('_transcript_turn_id')
-                if isinstance(raw.get('metadata'), dict)
-                else ''
-            ).strip()
-        )
-        for raw in list(messages or [])
+        _artifact_usage_can_cover_row(raw) for raw in list(messages or [])
     )
     usage_by_turn = (
         read_session_turn_token_usage(session_id)

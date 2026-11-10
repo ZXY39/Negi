@@ -2737,3 +2737,42 @@ def test_ceo_snapshot_skips_artifact_usage_scan_when_transcript_usage_complete(m
     legacy_rows = [{"role": "assistant", "content": "old reply", "turn_id": "t0"}]
     websocket_ceo._build_ceo_snapshot(legacy_rows, session_id="web:ceo-a")
     assert calls == ["web:ceo-a"]
+
+
+def test_ceo_snapshot_skips_uncoverable_artifact_usage_rows(monkeypatch) -> None:
+    """复合 follow-up id 与 runtime_error 行永远匹配不到工件，不触发扫描。
+
+    follow-up 归档行落的是 ``{原}:followup:{新}``（或以 ``followup:`` 开头），
+    工件里的 turn_id 永远是普通 id；runtime_error 行没有模型调用，不落工件。
+    这两类行即使缺 usage 也不能把整个 artifact 目录再扫一遍。
+    """
+    calls: list[str] = []
+    monkeypatch.setattr(
+        websocket_ceo,
+        "read_session_turn_token_usage",
+        lambda session_id: calls.append(session_id) or {},
+    )
+    rows = [
+        {"role": "assistant", "content": "archived", "turn_id": "t1:followup:t2"},
+        {"role": "assistant", "content": "orphan archive", "turn_id": "followup:t3"},
+        {
+            "role": "assistant",
+            "content": "failed",
+            "turn_id": "t4",
+            "metadata": {"source": "runtime_error"},
+        },
+    ]
+    snapshot = websocket_ceo._build_ceo_snapshot(rows, session_id="web:ceo-a")
+    assert calls == []
+    assert [item["content"] for item in snapshot] == ["archived", "orphan archive", "failed"]
+
+    manual_pause_rows = [
+        {
+            "role": "assistant",
+            "content": "paused",
+            "turn_id": "t5",
+            "metadata": {"source": "manual_pause_archive"},
+        }
+    ]
+    websocket_ceo._build_ceo_snapshot(manual_pause_rows, session_id="web:ceo-a")
+    assert calls == ["web:ceo-a"]
