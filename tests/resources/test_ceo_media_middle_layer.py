@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import random
 import re
 from pathlib import Path
@@ -82,6 +83,54 @@ def test_thumbnail_idempotent_and_invalidated_on_change(monkeypatch, tmp_path):
     third = ceo_media.rewrite_assistant_media_content("sess_b", content)
     third_thumb = re.search(r'!\[p\]\(([^")]+)', third).group(1)
     assert third_thumb != first_thumb
+
+
+def test_existing_thumbnail_render_does_not_mkdir(monkeypatch, tmp_path):
+    """读路径只查缩略图是否存在：717 行快照行里 439 次 `ensure_dir` 全是多余系统调用。"""
+    monkeypatch.chdir(tmp_path)
+    source = tmp_path / "photo.png"
+    _write_noisy_png(source, size=(320, 240), seed=11)
+    content = f"![p]({source})"
+
+    first = ceo_media.rewrite_assistant_media_content("sess_render", content)
+    thumb = Path(re.search(r'!\[p\]\(([^")]+)', first).group(1))
+    assert thumb.exists()
+    digest_before = hashlib.sha256(thumb.read_bytes()).hexdigest()
+
+    mkdir_calls: list[str] = []
+    real_mkdir = Path.mkdir
+
+    def counting_mkdir(self, *args, **kwargs):
+        mkdir_calls.append(str(self))
+        return real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", counting_mkdir)
+    second = ceo_media.rewrite_assistant_media_content("sess_render", content)
+
+    assert mkdir_calls == []
+    second_thumb = Path(re.search(r'!\[p\]\(([^")]+)', second).group(1))
+    assert second_thumb == thumb
+    assert hashlib.sha256(second_thumb.read_bytes()).hexdigest() == digest_before
+
+
+def test_first_thumbnail_render_still_creates_the_directory(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    source = tmp_path / "fresh.png"
+    _write_noisy_png(source, size=(320, 240), seed=12)
+
+    mkdir_calls: list[str] = []
+    real_mkdir = Path.mkdir
+
+    def counting_mkdir(self, *args, **kwargs):
+        mkdir_calls.append(str(self))
+        return real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", counting_mkdir)
+    rewritten = ceo_media.rewrite_assistant_media_content("sess_first", f"![p]({source})")
+
+    thumb = Path(re.search(r'!\[p\]\(([^")]+)', rewritten).group(1))
+    assert thumb.exists()
+    assert any("inline_media" in call for call in mkdir_calls), mkdir_calls
 
 
 def test_original_endpoint_inline_attachment_and_tamper(monkeypatch, tmp_path, client):

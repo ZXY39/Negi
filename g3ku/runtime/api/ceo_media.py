@@ -287,7 +287,7 @@ def _thumbnail_path_for(session_id: str, source: Path) -> Path:
         f"{source}|{stat.st_size}|{stat.st_mtime_ns}".encode("utf-8")
     ).hexdigest()[:12]
     name = safe_filename(source.stem) or "image"
-    return upload_dir_for_session(session_id) / "inline_media" / f"thumb_{digest}_{name}.jpg"
+    return upload_dir_for_session(session_id, create=False) / "inline_media" / f"thumb_{digest}_{name}.jpg"
 
 
 def _build_thumbnail(source: Path, dest: Path) -> None:
@@ -342,7 +342,7 @@ def _stage_animated_original(session_id: str, source: Path) -> Path | None:
         f"{source}|{stat.st_size}|{stat.st_mtime_ns}".encode("utf-8")
     ).hexdigest()[:12]
     name = safe_filename(source.stem) or "image"
-    dest = upload_dir_for_session(session_id) / "inline_media" / f"anim_{digest}_{name}{suffix}"
+    dest = upload_dir_for_session(session_id, create=False) / "inline_media" / f"anim_{digest}_{name}{suffix}"
     if dest.exists():
         return dest
     try:
