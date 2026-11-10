@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from g3ku.deployment import data_root as data_root_module
 from g3ku.runtime import owned_processes
 from main.runtime.node_message_kind import (
     ALWAYS_WAKING_KINDS,
@@ -30,6 +31,16 @@ class _Recorder:
             raise RuntimeError("mailbox unavailable")
         self.calls.append(dict(kwargs))
         return {"status": "delivered"}
+
+
+@pytest.fixture()
+def isolated_root(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("G3KU_DATA_DIR", str(tmp_path))
+    data_root_module.reset_cache()
+    try:
+        yield tmp_path
+    finally:
+        data_root_module.reset_cache()
 
 
 class _ExitedProcess:
@@ -256,3 +267,85 @@ async def test_operator_stop_notifies_the_node_as_a_process_exit(
     assert call["wake"] is True
     assert "stopped by the operator" in call["message"]
     assert "dev server :3000" in call["message"]
+
+
+def _register_notice(tmp_path, *, scope: str, pid: int, session_key: str, **overrides) -> None:
+    owned_processes.register(
+        scope=scope,
+        pid=pid,
+        cmd=str(overrides.pop("cmd", "node server.js")),
+        log_path=str(overrides.pop("log_path", tmp_path / "process.log")),
+        session_key=session_key,
+        task_id=str(overrides.pop("task_id", "")),
+        node_id=str(overrides.pop("node_id", "")),
+        owner_pid=int(overrides.pop("owner_pid", 999_999_999)),
+        label=str(overrides.pop("label", "dev server :3000")),
+    )
+    assert owned_processes.mark_notice(scope, pid, exit_reason="process_gone")
+
+
+@pytest.mark.asyncio
+async def test_startup_consumer_delivers_node_notice_and_drops_it(
+    isolated_root, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scope = "task:task:abc"
+    _register_notice(tmp_path, scope=scope, pid=123, session_key="web:proc", task_id="task:abc", node_id="node:a")
+    service = _service()
+
+    await service._consume_owned_process_notices()
+
+    assert len(service.deliver_node_message.calls) == 1
+    call = service.deliver_node_message.calls[0]
+    assert call["system_kind"] == KIND_PROCESS_EXIT
+    assert "pid 123" in call["message"]
+    assert "no longer running" in call["message"]
+    assert owned_processes.list_notices() == []
+
+
+@pytest.mark.asyncio
+async def test_startup_consumer_enqueues_a_session_heartbeat_event(
+    isolated_root, tmp_path
+) -> None:
+    scope = "session:web:proc"
+    _register_notice(tmp_path, scope=scope, pid=456, session_key="web:proc")
+
+    class _OutboxRecorder:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def put_tool_job_outbox(self, **kwargs):
+            self.calls.append(dict(kwargs))
+            return {"dedupe_key": kwargs.get("dedupe_key")}
+
+    service = object.__new__(MainRuntimeService)
+    service.store = _OutboxRecorder()
+    service._node_owned_process_tasks = set()
+
+    await service._consume_owned_process_notices()
+
+    assert len(service.store.calls) == 1
+    payload = service.store.calls[0]["payload"]
+    assert payload["kind"] == "process"
+    assert payload["status"] == "interrupted"
+    assert payload["purpose"] == "dev server :3000"
+    assert service.store.calls[0]["session_id"] == "web:proc"
+    assert owned_processes.list_notices() == []
+
+
+@pytest.mark.asyncio
+async def test_startup_consumer_keeps_a_notice_when_delivery_fails(
+    isolated_root, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scope = "task:task:abc"
+    _register_notice(tmp_path, scope=scope, pid=123, session_key="web:proc", task_id="task:abc", node_id="node:a")
+    service = _service(fail=True)
+    monkeypatch.setattr(
+        runtime_service_module,
+        "_NODE_OWNED_PROCESS_EXIT_DELIVERY_BACKOFF_SECONDS",
+        0,
+    )
+    monkeypatch.setattr(owned_processes, "mark_notice", lambda *args, **kwargs: False)
+
+    await service._consume_owned_process_notices()
+
+    assert len(owned_processes.list_notices()) == 1

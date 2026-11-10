@@ -1153,6 +1153,9 @@ class MainRuntimeService:
         self.policy_engine.sync_default_role_policies()
         self._record_resource_tree_state()
         if self.execution_mode in {'embedded', 'worker'}:
+            # 启动回收把死条目改写成 `.notice`；先消费它们，再把任务树恢复/续跑起来，
+            # 这样被恢复的节点第一回合就能在信箱里看到"进程已经不在了"。
+            await self._consume_owned_process_notices()
             shutdown_paused_task_ids = {
                 str(item.get('ref_id') or ''): str(item.get('entry_key') or '')
                 for item in self.store.list_shutdown_pause_entries(kind='task')
@@ -1564,6 +1567,98 @@ class MainRuntimeService:
             lines.append("Output tail:")
             lines.append(tail)
         return "\n".join(lines)
+
+    async def _consume_owned_process_notices(self) -> None:
+        """启动时消费 `.notice`：节点条目投信箱，会话条目写心跳 outbox。
+
+        `.notice` 由启动回收在服务起来之前写入；条目本身是凭证，投递成功才删。
+        失败保留到下一次启动，节点信箱 fingerprint 与 outbox dedupe_key 负责去重。
+        """
+        from g3ku.runtime import owned_processes
+
+        try:
+            notices = await asyncio.to_thread(owned_processes.list_notices)
+        except Exception:
+            logger.exception("owned process notice scan failed")
+            return
+        for entry in notices:
+            notice_path = str(entry.get("_notice_path") or "")
+            try:
+                consumed = await self._consume_owned_process_notice(entry)
+            except Exception:
+                logger.warning(
+                    "owned process notice delivery failed: path={}",
+                    notice_path,
+                    exc_info=True,
+                )
+                continue
+            if consumed:
+                owned_processes.drop_notice(notice_path)
+        try:
+            await asyncio.to_thread(owned_processes.prune_notices)
+        except Exception:
+            logger.debug("owned process notice prune skipped", exc_info=True)
+
+    async def _consume_owned_process_notice(self, entry: dict[str, Any]) -> bool:
+        """一条 `.notice` 的投递；返回 True 表示可以删凭证。"""
+        exit_code = entry.get("exit_code")
+        try:
+            exit_code = int(exit_code) if exit_code is not None else None
+        except (TypeError, ValueError):
+            exit_code = None
+        node_id = str(entry.get("node_id") or "").strip()
+        task_id = str(entry.get("task_id") or "").strip()
+        if node_id:
+            if not task_id:
+                return True
+            task = self.store.get_task(task_id)
+            node = self.store.get_node(node_id)
+            if task is None or node is None:
+                return True
+            if str(node.status or "").strip().lower() in {"success", "failed"}:
+                return True
+            if str(task.status or "").strip().lower() in {"success", "failed", "canceled"}:
+                return True
+            return await self._deliver_node_owned_process_exit(
+                entry,
+                exit_reason=str(entry.get("exit_reason") or "process_gone"),
+                exit_code=exit_code,
+                stopped_by=str(entry.get("stopped_by") or ""),
+            )
+        session_key = str(entry.get("session_key") or "").strip()
+        if not session_key:
+            return True
+        try:
+            from g3ku.runtime.tool_jobs import build_owned_process_event_payload
+
+            payload = build_owned_process_event_payload(
+                entry,
+                session_id=session_key,
+                finished_at=now_iso(),
+                status="interrupted",
+                result_preview=(
+                    "The project process restarted while this background process was "
+                    "running; it is no longer running."
+                ),
+            )
+            dedupe_key = str(payload.get("dedupe_key") or "").strip()
+            if not dedupe_key:
+                return True
+            self.store.put_tool_job_outbox(
+                dedupe_key=dedupe_key,
+                job_id=str(payload.get("job_id") or ""),
+                session_id=session_key,
+                created_at=now_iso(),
+                payload=payload,
+            )
+        except Exception:
+            logger.exception(
+                "failed to enqueue owned process exit event for session={} pid={}",
+                session_key,
+                entry.get("pid"),
+            )
+            return False
+        return True
 
     async def _requeue_interrupted_task(self, task_id: str) -> None:
         """引擎级中断任务的尽力即时重排（进程仍活着时）。

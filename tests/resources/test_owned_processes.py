@@ -288,10 +288,43 @@ def test_reap_orphans_only_touches_dead_owners(isolated_root: Path) -> None:
         assert orphan.pid in killed
         assert _wait_gone(orphan.pid)
         assert owned_processes.is_alive(live.pid)
+        notices = owned_processes.list_notices()
+        assert [(n["pid"], n["exit_reason"]) for n in notices] == [
+            (orphan.pid, "reaped_after_restart")
+        ]
+        # 条目从活表移入 `.notice`：普通读取面看不见，凭证等启动消费口处理。
+        assert owned_processes.find(orphan_scope, orphan.pid) is None
+        for notice in notices:
+            owned_processes.drop_notice(notice["_notice_path"])
     finally:
         owned_processes.drop(live_scope, live.pid)
         live.kill()
         live.wait(timeout=10)
+
+
+def test_reap_orphans_marks_already_exited_processes(isolated_root: Path) -> None:
+    scope = owned_processes.scope_key(session_key="", task_id="task:gone")
+    process = subprocess.Popen([sys.executable, "-c", "print('done')"])
+    process.wait(timeout=30)
+    owned_processes.register(
+        scope=scope,
+        pid=process.pid,
+        cmd="python probe.py",
+        log_path="",
+        session_key="web:old",
+        task_id="task:gone",
+        node_id="node:a",
+        owner_pid=999_999_999,
+        label="already gone",
+    )
+
+    killed = owned_processes.reap_orphans()
+
+    assert process.pid not in killed
+    notices = owned_processes.list_notices()
+    assert [(n["pid"], n["exit_reason"]) for n in notices] == [(process.pid, "process_gone")]
+    for notice in notices:
+        owned_processes.drop_notice(notice["_notice_path"])
 
 
 @pytest.mark.asyncio

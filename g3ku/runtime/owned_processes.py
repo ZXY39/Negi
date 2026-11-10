@@ -388,11 +388,32 @@ def reap_scope(scope: str) -> list[int]:
     return killed
 
 
+def _owner_alive(entry: dict[str, Any]) -> bool:
+    """登记的 owner 是否还是当初那个进程（防止重启后 PID 复用）。
+
+    `owner_create_time` 为 0 的 legacy 条目只能退回 `is_alive`；新条目两者都比。
+    """
+    try:
+        owner_pid = int(entry.get("owner_pid") or 0)
+    except (TypeError, ValueError):
+        return False
+    if owner_pid <= 0 or not is_alive(owner_pid):
+        return False
+    recorded = float(entry.get("owner_create_time") or 0.0)
+    if recorded <= 0:
+        return True
+    actual = process_create_time(owner_pid)
+    if actual is None:
+        return True
+    return abs(actual - recorded) < 1.0
+
+
 def reap_orphans() -> list[int]:
     """回收 owner 运行时已经不在的条目（崩溃/重启后的孤儿）。
 
-    只处理 `owner_pid` 已死的条目：活着的运行时还握着自己的后台进程，不该被别人
-    收走。身份校验照常，PID 复用不会被误杀。
+    只处理 owner 已死的条目：活着的运行时还握着自己的后台进程，不该被别人收走。
+    进程身份匹配时杀掉并标记 `.notice`；进程已经不在（含 PID 复用）时只标记。
+    条目不再静默删除——`.notice` 是启动后消费口唯一的输入，也是"谁还没交代"的凭证。
     """
     root = _owned_root()
     if not root.exists():
@@ -404,22 +425,52 @@ def reap_orphans() -> list[int]:
             if entry is None:
                 path.unlink(missing_ok=True)
                 continue
-            try:
-                owner_pid = int(entry.get("owner_pid") or 0)
-            except (TypeError, ValueError):
-                owner_pid = 0
-            if owner_pid > 0 and is_alive(owner_pid):
-                continue
             scope = str(entry.get("scope") or "").strip()
             pid = int(entry.get("pid") or 0)
             if not scope or pid <= 0:
                 path.unlink(missing_ok=True)
                 continue
-            result = kill_owned(scope, pid)
-            if result.get("ok"):
-                killed.append(pid)
-            elif result.get("reason") in {"already_exited", "identity_mismatch"}:
+            if _owner_alive(entry):
                 continue
+            if _identity_matches(entry):
+                if kill_process_tree_pid(pid):
+                    killed.append(pid)
+                    mark_notice(scope, pid, exit_reason="reaped_after_restart")
+                else:
+                    logger.warning(
+                        "failed to reap orphaned background process pid={} scope={}",
+                        pid,
+                        scope,
+                    )
+                continue
+            exit_reason = "process_gone" if not is_alive(pid) else "identity_mismatch"
+            mark_notice(scope, pid, exit_reason=exit_reason)
     if killed:
         logger.info("owned-process reaper killed orphaned background pids: {}", killed)
     return killed
+
+
+def prune_notices(*, max_age_days: float = 7.0, max_count: int = 500) -> int:
+    """清理长期投不出去的 `.notice`：按年龄和条数双上限，返回删除数。"""
+    root = _owned_root()
+    if not root.exists():
+        return 0
+    path_list = sorted(root.glob("*/*.notice"))
+    now = time.time()
+    removed = 0
+    kept: list[Path] = []
+    for path in path_list:
+        try:
+            age_seconds = now - path.stat().st_mtime
+        except OSError:
+            continue
+        if max_age_days > 0 and age_seconds > max_age_days * 86400:
+            path.unlink(missing_ok=True)
+            removed += 1
+            continue
+        kept.append(path)
+    if max_count > 0 and len(kept) > max_count:
+        for path in kept[: len(kept) - max_count]:
+            path.unlink(missing_ok=True)
+            removed += 1
+    return removed
