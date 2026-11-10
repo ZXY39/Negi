@@ -8225,6 +8225,123 @@ class NodeRunner:
         text = str(reason or node.failure_reason or 'failed by operator').strip() or 'failed by operator'
         return self._mark_failed(task_id, node_id, reason=text, notify_parent=notify_parent)
 
+    def succeed_paused_node(
+        self,
+        task_id: str,
+        node_id: str,
+        remark: str = '',
+        *,
+        notify_parent: bool = True,
+    ) -> NodeFinalResult:
+        """控制面的人工成功收尾：与 fail_paused_node 对称，只落终态、不动运行语义。
+
+        "必须已暂停"由调用方把关（正在跑的回合不接受代签终态）；这里只负责把
+        节点已有的最后有效输出带进终态载荷，让父节点/任务输出不因代签而清空。
+        """
+        node = self._store.get_node(node_id)
+        if node is None or str(node.task_id or '').strip() != str(task_id or '').strip():
+            raise ValueError(f'node not found: {node_id}')
+        if node.status in {STATUS_SUCCESS, STATUS_FAILED}:
+            return self._result_from_record(node)
+        result = self._manual_success_result(node, remark)
+        self._record_manual_success(node, remark)
+        return self._mark_finished(task_id, node_id, result, notify_parent=notify_parent)
+
+    def pass_paused_acceptance_node(
+        self,
+        task_id: str,
+        node_id: str,
+        remark: str = '',
+    ) -> NodeFinalResult:
+        """验收节点的人工判通过：节点成功就是一次裁决，必须同步把握手落成 accepted。
+
+        只写节点行会让任务级最终验收永远停在 pending（`_sync_final_acceptance_state`
+        按握手投影状态），任务结束不了。所以这里复用正常通过的收口路径
+        `_finalize_acceptance_pass`，再把仍非终态的被验执行节点收为成功。
+        这是控制面的显式人工判定，痕迹留在验收节点 `metadata.manual_success`。
+        """
+        node = self._store.get_node(node_id)
+        if node is None or str(node.task_id or '').strip() != str(task_id or '').strip():
+            raise ValueError(f'node not found: {node_id}')
+        if str(node.node_kind or '').strip().lower() != KIND_ACCEPTANCE:
+            raise ValueError(f'not an acceptance node: {node_id}')
+        if node.status in {STATUS_SUCCESS, STATUS_FAILED}:
+            return self._result_from_record(node)
+        task = self._store.get_task(task_id)
+        execution = self._accepted_execution_node(task_id=task_id, acceptance=node) if task is not None else None
+        handshake = normalize_acceptance_handshake(
+            (execution.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY) if execution is not None else {}
+        )
+        result = self._manual_success_result(node, remark, fallback='passed manually by agent').model_copy(
+            update={'submission_id': str(handshake.get('latest_execution_submission_id') or '').strip()}
+        )
+        self._record_manual_success(
+            node,
+            remark,
+            inspected_node_id=str(getattr(execution, 'node_id', '') or ''),
+        )
+        self._mark_finished(task_id, node_id, result, notify_parent=False)
+        latest = self._store.get_node(node_id) or node
+        if task is not None and execution is not None:
+            self._finalize_acceptance_pass(task=task, execution=execution, acceptance=latest, result=result)
+            current = self._store.get_node(execution.node_id)
+            if current is not None and self._normalized_status(current.status) not in {STATUS_SUCCESS, STATUS_FAILED}:
+                if bool(getattr(current, 'is_paused', False)) or bool(getattr(current, 'pause_requested', False)):
+                    # 被验节点已暂停：人工判定直接收为成功（最近载荷即使是失败也不采纳，
+                    # 否则"验收已过、执行未终态/失败"的夹层会与这句通过自相矛盾）。
+                    self.succeed_paused_node(task_id, current.node_id, remark)
+                else:
+                    # 停在等待裁决、且最近提交是成功（服务层守卫保证）：走正常收口，
+                    # 保留提交载荷与 child_final。
+                    self.finalize_inspected_execution_node(task_id=task_id, node_id=current.node_id)
+        else:
+            self._log_service.refresh_task_view(task_id, mark_unread=True)
+        return result
+
+    @staticmethod
+    def _manual_success_result(
+        node: NodeRecord,
+        remark: str,
+        *,
+        fallback: str = 'closed as success by operator',
+    ) -> NodeFinalResult:
+        payload = normalize_result_payload((node.metadata or {}).get('result_payload'))
+        payload_is_success = payload is not None and str(payload.status or '').strip().lower() == STATUS_SUCCESS
+        note = str(remark or '').strip()
+        output = str(node.final_output or '').strip()
+        if not output and payload_is_success:
+            output = str(payload.output or '').strip()
+        summary = note or (str(payload.summary or '').strip() if payload_is_success else '') or output or fallback
+        answer = output or (str(payload.answer or '').strip() if payload_is_success else '') or note
+        return NodeFinalResult(
+            status=STATUS_SUCCESS,
+            delivery_status='final',
+            summary=summary,
+            answer=answer,
+            evidence=list(payload.evidence or []) if payload_is_success else [],
+            remaining_work=[],
+            blocking_reason='',
+        )
+
+    def _record_manual_success(self, node: NodeRecord, remark: str, *, inspected_node_id: str = '') -> None:
+        trace: dict[str, Any] = {
+            'at': now_iso(),
+            'remark': str(remark or '').strip(),
+            'source': 'manage_task_nodes.success',
+            'node_kind': str(node.node_kind or '').strip().lower(),
+        }
+        if inspected_node_id:
+            trace['inspected_node_id'] = inspected_node_id
+
+        def _mutate(metadata: dict[str, Any]) -> dict[str, Any]:
+            metadata['manual_success'] = trace
+            return metadata
+
+        try:
+            self._log_service.update_node_metadata(node.node_id, _mutate)
+        except Exception as exc:  # noqa: BLE001 - 留痕是旁路，不得阻止终态落定
+            logger.debug(f'manual success trace skipped: {node.node_id}: {describe_exception(exc)}')
+
     def _pause_requested(self, task_id: str) -> bool:
         task = self._store.get_task(task_id)
         if task is None:

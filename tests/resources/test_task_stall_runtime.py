@@ -249,8 +249,9 @@ def test_task_stall_guidance_names_the_exits_that_end_the_repetition(tmp_path: P
     assert "the bundle's `Delivery` line counts" in prompt
     assert "action=pause" in prompt
     assert "action=fail" in prompt
+    assert "action=success" in prompt
     assert "subtree_not_fully_paused" in prompt
-    # 模型侧的动作面只有 resume/keep_paused/fail/pause，没有 cancel 工具，提示词不许点名它
+    # 模型侧的动作面只有 resume/keep_paused/fail/success/pause，没有 cancel 工具，提示词不许点名它
     assert "or cancel the task" not in prompt
 
 

@@ -1322,6 +1322,9 @@ class WebSessionHeartbeatService:
                     "To close a task that should not run again: that same pause first, then the whole-task form with "
                     "action=fail and a remark; a fail comes back subtree_not_fully_paused while any non-terminal node of "
                     "the tree is unpaused.",
+                    "To close a task whose work is actually complete: that same pause first, then the whole-task form with "
+                    "action=success and a remark; success closes paused nodes as successful and records a manual pass on "
+                    "verifier nodes. Use fail instead when the work is unfinished or abandoned.",
                     "After any stop decision, explain the likely cause and the next follow-up action.",
                 ]
             )

@@ -1,8 +1,8 @@
 # manage_task_nodes
 
-Use this CEO-only task runtime tool to control task nodes: resume, fail, or keep
-paused nodes, and pause running ones. It is the entry point for acting on
-`task_node_error` (error-pause) decisions.
+Use this CEO-only task runtime tool to control task nodes: resume, fail, succeed,
+or keep paused nodes, and pause running ones. It is the entry point for acting
+on `task_node_error` (error-pause) decisions.
 
 Actions:
 
@@ -18,6 +18,17 @@ Actions:
   `hint`: resume the verifier, and if that is impossible,
   fail the inspected execution node — on a root final acceptance the same hint
   reads fail the inspected execution node, or cancel the task.
+- `success`: close actually paused nodes as successful — use it when the work is
+  really finished but the task cannot finish on its own. On an execution node it
+  is a normal successful terminal (the parent receives `child_final` and the task
+  finishes; the last valid output is kept). On an **acceptance** node it is a
+  **manual pass**: the verifier verdict is recorded as accepted, the inspected
+  execution node is finalized successful, and a root final acceptance is recorded
+  as passed — the task therefore ends as success even though the verifier itself
+  never ran. That bypasses real verification, so the decision is written to the
+  node's `metadata.manual_success` (remark included). Successing a verifier whose
+  inspected execution node already failed is rejected with
+  `inspected_node_failed`.
 - `pause`: request an agent pause for a running or queued node; it takes effect at the next safe boundary.
 
 ## Resume result contract
@@ -41,9 +52,10 @@ worker does not report back in time every node comes back as `queued` with a
 not "已恢复".
 
 `remark` is one batch-wide annotation shared by all entries of the call: the
-failure reason for `fail`, the registration remark for `keep_paused` (required
-there), the annotation for `pause`. Per-entry remarks are not supported — split
-into separate calls if different reasons matter.
+failure reason for `fail`, the manual-pass note for `success` (also its terminal
+summary when the node has no output), the registration remark for `keep_paused`
+(required there), the annotation for `pause`. Per-entry remarks are not
+supported — split into separate calls if different reasons matter.
 
 ## Call shapes (mutually exclusive)
 
@@ -76,8 +88,11 @@ manage_task_nodes(task_id="task:abc", node_ids=["node:root"], action="pause", ca
   paused nodes). Resuming the root likewise only resumes nodes.
 - While the task is paused, `resume` on any node (including the root) is refused
   with `task_paused`. Resume the task first, then resume nodes if needed.
-- A whole-task `fail` terminates the entire task (the two-step recipe below
-  still applies: pause the nodes first, then fail).
+- A whole-task `fail` terminates the entire task as failed (the two-step recipe
+  below still applies: pause the nodes first, then fail).
+- A whole-task `success` closes the entire tree as successful — the task ends as
+  success. Same pause-first recipe; a broken verifier included in the tree is
+  recorded as a manual pass. Use it only when the work is genuinely complete.
 - A whole-task `keep_paused` still requires a non-empty `remark`.
 - An explicit empty `targets` array is rejected rather than treated as
   task-level — omit `targets` entirely to mean the task itself.
@@ -110,8 +125,10 @@ If validation fails, the entire call is rejected and no node changes. Error code
 | `node_not_found` | a target node id does not exist in the task | re-check the ids (e.g. via `task_progress`) |
 | `node_terminal` | a target root is already success/failed | nothing to do — the node is finished |
 | `node_already_paused` | a non-cascade `pause` target is already paused (cascade pause tolerates an already-paused root: the root is skipped and descendants still receive the pause request) | use cascade, or drop the entry |
-| `node_not_paused` | a `resume`/`keep_paused`/`fail` target root is not paused | pause it first, or target the node that is actually paused |
-| `subtree_not_fully_paused` | a cascade `fail` subtree contains non-terminal descendants that are not paused; `blocking_node_ids` lists them | run the two-step flow below |
+| `node_not_paused` | a `resume`/`keep_paused`/`fail`/`success` target root is not paused | pause it first, or target the node that is actually paused |
+| `subtree_not_fully_paused` | a cascade `fail`/`success` subtree contains non-terminal descendants that are not paused; `blocking_node_ids` lists them | run the two-step flow below |
+| `inspected_node_failed` | a verifier `success` targets an acceptance node whose inspected execution node already failed; passing it would not settle the task | nothing to do — create a new task instead |
+| `inspected_node_not_closed` | a verifier `success` targets a verifier whose inspected execution node is still working and has no successful submission | resume the verifier or wait for the delivery to close first |
 
 Within an accepted batch, individual descendants whose state conflicts (terminal,
 already paused, not paused) are skipped per node and reported in `items`; they do
@@ -121,22 +138,27 @@ Cascade `keep_paused` only re-annotates members that are **already paused** (roo
 plus paused descendants); it never pauses running descendants — use cascade
 `pause` for that.
 
-## Failing a whole subtree
+## Closing a whole subtree (fail or success)
 
 Two-step flow, both calls with `cascade=true` on the subtree root:
 
 1. `pause` — flags every non-terminal member immediately; running descendants
    drain at their next safe boundary.
-2. `fail` — issue it right after step 1: the gate accepts pause-requested
-   (still draining) nodes, so no waiting or polling is needed.
+2. `fail` (or `success`) — issue it right after step 1: the gate accepts
+   pause-requested (still draining) nodes, so no waiting or polling is needed.
 
-Never fail a subtree whose descendants carry no pause flag — that batch is
-rejected with `subtree_not_fully_paused`.
+Never bind a terminal action to a subtree whose descendants carry no pause flag —
+that batch is rejected with `subtree_not_fully_paused`.
 
 Warnings:
 
-- Failing the task **root** node (with or without cascade) terminates the whole task.
+- `fail` or `success` on the task **root** node (with or without cascade) lays
+  down the whole task's terminal status: failed for `fail`, success for `success`.
 - Cascade `resume` clears pause state for the entire subtree, including
   error-pause registrations and their heartbeat retry tracking for descendants.
   Cascade `pause` never overwrites an already-paused descendant (its original
   `pause_reason=error` registration is preserved).
+- `success` on a verifier is a manual pass, not a verification run: it approves
+  the delivery as-is. Prefer `resume` on the verifier when a real verdict is
+  possible; use `success` only when the user/operator has decided the delivery is
+  acceptable and the verifier cannot be revived.

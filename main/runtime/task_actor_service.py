@@ -458,6 +458,33 @@ class TaskNodeDispatcher:
             entry.future.set_result(result)
         return result
 
+    async def succeed_node(
+        self,
+        node_id: str,
+        remark: str = '',
+        *,
+        notify_parent: bool = True,
+    ) -> NodeFinalResult:
+        """控制面人工成功收尾的派发口：验收节点走人工判通过，其余走普通成功。
+
+        与 fail_node 一样必须解析本进程持有的 entry future，否则排在该节点 future
+        上的父管线会永远等一个已经落定的终态。
+        """
+        normalized_node_id = str(node_id or '').strip()
+        entry = self._entries.get(normalized_node_id)
+        node = self._store.get_node(normalized_node_id)
+        if node is not None and str(getattr(node, 'node_kind', '') or '').strip().lower() == KIND_ACCEPTANCE:
+            result = self._node_runner.pass_paused_acceptance_node(
+                self._task_id, normalized_node_id, remark
+            )
+        else:
+            result = self._node_runner.succeed_paused_node(
+                self._task_id, normalized_node_id, remark, notify_parent=notify_parent
+            )
+        if entry is not None and not entry.future.done():
+            entry.future.set_result(result)
+        return result
+
     def _entry_frame_phase(self, node_id: str) -> str:
         try:
             frame = self._log_service.read_runtime_frame(self._task_id, node_id)

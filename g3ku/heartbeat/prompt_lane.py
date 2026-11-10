@@ -423,10 +423,11 @@ def _task_node_error_lines(
             '  Resume the verifier with manage_task_nodes(resume, node_ids=[verifier]). '
             'If it cannot be revived, choose a real exit: '
             f'{verifier_recovery_exits(final_acceptance=isinstance(final_acceptance, bool) and final_acceptance)}. '
-            'Do not fail the verifier node itself — a verifier failure does not settle the task.'
+            'Do not fail the verifier node itself — a verifier failure does not settle the task. '
+            'Only when the user has confirmed the delivery is acceptable: manage_task_nodes(success, node_ids=[verifier]) records a manual pass.'
         )
     else:
-        lines.append('  Use manage_task_nodes to resume, keep_paused with a reason, fail, or pause related nodes as appropriate.')
+        lines.append('  Use manage_task_nodes to resume, keep_paused with a reason, fail, succeed, or pause related nodes as appropriate.')
     return lines
 
 

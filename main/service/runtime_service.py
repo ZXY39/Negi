@@ -1738,6 +1738,15 @@ class MainRuntimeService:
                         force=True,
                     )
                 success = True
+            elif command_type == 'success_node':
+                if task_id:
+                    result_payload = await self._apply_success_node_command(
+                        task_id,
+                        node_ids=list(payload.get('node_ids') or []),
+                        reason=str(payload.get('reason') or payload.get('remark') or ''),
+                        force=True,
+                    )
+                success = True
             elif command_type == 'send_node_message':
                 target_node_id = self.normalize_node_id(str(payload.get('target_node_id') or '').strip())
                 delivery = {
@@ -2705,6 +2714,77 @@ class MainRuntimeService:
             results.append({'node_id': node_id, 'result': 'failed', 'status': result.status})
         return {'ok': True, 'task_id': normalized_task_id, 'items': results}
 
+    def _acceptance_success_rejection(self, node) -> dict[str, Any] | None:
+        """验收节点的人工通过必须有可收口的被验执行节点。
+
+        三种形态放行：被验节点已成功（补账）、已暂停（人工判定直接收成功）、
+        或停在等待裁决且最近一份提交是成功（正常通过路径的懒落账）。其余——
+        已失败、或仍在跑且没有成功提交——代签"通过"只会写出自相矛盾的账。
+        """
+        if str(getattr(node, 'node_kind', '') or '').strip().lower() != 'acceptance':
+            return None
+        metadata = getattr(node, 'metadata', None) if isinstance(getattr(node, 'metadata', None), dict) else {}
+        inspected_id = str(
+            (metadata or {}).get('accepted_node_id') or getattr(node, 'parent_node_id', '') or ''
+        ).strip()
+        inspected = self.get_node(inspected_id) if inspected_id else None
+        if inspected is None or str(getattr(inspected, 'node_kind', '') or '').strip().lower() != 'execution':
+            return None
+        status = str(getattr(inspected, 'status', '') or '').strip().lower()
+        if status == 'success':
+            return None
+        if status != 'failed' and (bool(getattr(inspected, 'is_paused', False)) or bool(getattr(inspected, 'pause_requested', False))):
+            return None
+        payload = normalize_result_payload((inspected.metadata or {}).get('result_payload'))
+        if status != 'failed' and payload is not None and str(payload.status or '').strip().lower() == 'success':
+            return None
+        reason = 'inspected_node_failed' if status == 'failed' else 'inspected_node_not_closed'
+        hint = (
+            'The inspected execution node already failed; passing its verifier would not settle the task. '
+            'Create a new task instead.'
+            if status == 'failed'
+            else 'The inspected execution node is still working and has no successful submission; '
+            'resume the verifier or wait for the delivery to close before passing it.'
+        )
+        return {
+            'result': 'conflict',
+            'reason': reason,
+            'inspected_node_id': inspected_id,
+            'hint': hint,
+        }
+
+    async def _apply_success_node_command(self, task_id: str, *, node_ids: list[str], reason: str = '', force: bool = False) -> dict[str, Any]:
+        normalized_task_id = self.normalize_task_id(task_id)
+        task = self.get_task(normalized_task_id)
+        if task is None:
+            return {'ok': False, 'error': 'task_not_found', 'items': []}
+        dispatcher = self.task_actor_service._dispatchers.get(normalized_task_id)
+        results: list[dict[str, Any]] = []
+        for raw_node_id in list(node_ids or []):
+            node_id = self.normalize_node_id(str(raw_node_id or '').strip())
+            node = self.get_node(node_id)
+            if node is None or str(node.task_id or '').strip() != normalized_task_id:
+                results.append({'node_id': node_id, 'result': 'not_found'})
+                continue
+            if str(node.status or '').strip().lower() in {'success', 'failed'} and not (force and dispatcher is not None and node_id in dispatcher._entries):
+                results.append({'node_id': node_id, 'result': 'conflict', 'reason': 'node_terminal'})
+                continue
+            acceptance_rejection = self._acceptance_success_rejection(node)
+            if acceptance_rejection is not None:
+                results.append({'node_id': node_id, **acceptance_rejection})
+                continue
+            if not force and not (bool(node.is_paused) or bool(node.pause_requested)):
+                results.append({'node_id': node_id, 'result': 'conflict', 'reason': 'node_not_paused'})
+                continue
+            if dispatcher is not None:
+                result = await dispatcher.succeed_node(node_id, reason)
+            elif str(node.node_kind or '').strip().lower() == 'acceptance':
+                result = self.node_runner.pass_paused_acceptance_node(normalized_task_id, node_id, reason)
+            else:
+                result = self.node_runner.succeed_paused_node(normalized_task_id, node_id, reason)
+            results.append({'node_id': node_id, 'result': 'success', 'status': result.status})
+        return {'ok': True, 'task_id': normalized_task_id, 'items': results}
+
     async def pause_node(
         self,
         task_id: str,
@@ -2783,8 +2863,8 @@ class MainRuntimeService:
     ) -> dict[str, Any]:
         normalized_task_id = self.normalize_task_id(task_id)
         # 任务级形态：只给 task_id + action（不给任何节点）。pause/resume 是任务动作的
-        # 唯一入口——只写任务旗标，不伪造根节点暂停；fail/keep_paused 不是暂停/恢复
-        # 语义（且 fail 根=终止任务是既有契约），仍按根 + cascade 应用到整棵树。
+        # 唯一入口——只写任务旗标，不伪造根节点暂停；fail/success/keep_paused 不是暂停/恢复
+        # 语义（且 fail/success 根=终止任务是既有契约），仍按根 + cascade 应用到整棵树。
         normalized_action = str(action or '').strip().lower()
         if not list(node_ids or []) and not list(targets or []) and normalized_action:
             scoped_task = self.get_task(normalized_task_id)
@@ -2843,7 +2923,7 @@ class MainRuntimeService:
             ]
             return await self._control_nodes_scoped(normalized_task_id, entries, remark=str(remark or ''))
         action = str(action or '').strip().lower()
-        if action not in {'resume', 'keep_paused', 'fail', 'pause'}:
+        if action not in {'resume', 'keep_paused', 'fail', 'success', 'pause'}:
             raise ValueError('invalid_node_action')
         if action == 'keep_paused' and not str(remark or '').strip():
             raise ValueError('remark_required_for_keep_paused')
@@ -2878,7 +2958,13 @@ class MainRuntimeService:
                 if acceptance_rejection is not None:
                     results.append({'node_id': node_id, **acceptance_rejection})
                     continue
-            if action in {'resume', 'keep_paused', 'fail'} and not paused:
+            if action == 'success':
+                # 同理：被验交付已失败时，"通过它"不是一个可执行的选择，先答这一条。
+                acceptance_rejection = self._acceptance_success_rejection(node)
+                if acceptance_rejection is not None:
+                    results.append({'node_id': node_id, **acceptance_rejection})
+                    continue
+            if action in {'resume', 'keep_paused', 'fail', 'success'} and not paused:
                 results.append({'node_id': node_id, 'result': 'conflict', 'reason': 'node_not_paused'})
                 continue
             if action == 'resume':
@@ -2893,6 +2979,8 @@ class MainRuntimeService:
             applied = await self._apply_resume_node_command(normalized_task_id, node_ids=valid_ids, schedule_if_inactive=self.execution_mode != 'web')
         elif action == 'fail':
             applied = await self._apply_fail_node_command(normalized_task_id, node_ids=valid_ids, reason=remark)
+        elif action == 'success':
+            applied = await self._apply_success_node_command(normalized_task_id, node_ids=valid_ids, reason=remark)
         else:
             for node_id in valid_ids:
                 row = self.store.get_task_node_pause(node_id)
@@ -2905,16 +2993,20 @@ class MainRuntimeService:
         # enqueuing one here previously fell through to fail_node and terminated
         # the node that was meant to stay paused.
         # resume 的 worker 命令由 _apply_resume_node_command 自己入队（它必须把
-        # command_id 先写进意图才能等待同一条命令的结果）；这里只补 pause/fail。
-        if self.execution_mode == 'web' and valid_ids and action in {'pause', 'fail'}:
-            command_type = 'pause_node' if action == 'pause' else 'fail_node'
+        # command_id 先写进意图才能等待同一条命令的结果）；这里只补 pause/fail/success。
+        if self.execution_mode == 'web' and valid_ids and action in {'pause', 'fail', 'success'}:
+            command_type = {
+                'pause': 'pause_node',
+                'fail': 'fail_node',
+                'success': 'success_node',
+            }[action]
             self._enqueue_task_command(
                 command_type=command_type,
                 task_id=normalized_task_id,
                 session_id=task.session_id,
                 payload={
                     'node_ids': valid_ids,
-                    'reason': 'agent' if action == 'pause' else (str(remark or '') if action == 'fail' else ''),
+                    'reason': 'agent' if action == 'pause' else (str(remark or '') if action in {'fail', 'success'} else ''),
                     'remark': str(remark or ''),
                 },
             )
@@ -2957,7 +3049,7 @@ class MainRuntimeService:
         if not entries:
             return {'ok': False, 'error': 'node_ids_required', 'items': []}
         for entry in entries:
-            if entry['action'] not in {'resume', 'keep_paused', 'fail', 'pause'}:
+            if entry['action'] not in {'resume', 'keep_paused', 'fail', 'success', 'pause'}:
                 return {'ok': False, 'error': 'invalid_node_action', 'index': entry['index'], 'node_id': entry['node_id'], 'action': entry['action'], 'items': []}
         if any(entry['action'] == 'keep_paused' for entry in entries) and not str(remark or '').strip():
             return {'ok': False, 'error': 'remark_required_for_keep_paused', 'items': []}
@@ -3022,7 +3114,7 @@ class MainRuntimeService:
                 # 再级联失败」两步配方的入口——根因错误/人工已暂停而后代仍在跑是常态。
                 if not entry['cascade']:
                     return {'ok': False, 'error': 'node_already_paused', 'index': entry['index'], 'node_id': entry['node_id'], 'items': []}
-            elif entry['action'] in {'resume', 'keep_paused', 'fail'} and not paused:
+            elif entry['action'] in {'resume', 'keep_paused', 'fail', 'success'} and not paused:
                 if entry['action'] == 'fail':
                     # 验收节点的 fail 永远不结算任务，这条守卫比"先把它暂停"更该先应答：
                     # 按 node_not_paused 打回会让模型先去暂停一个根本不该被 fail 的节点，
@@ -3032,6 +3124,19 @@ class MainRuntimeService:
                         return {
                             'ok': False,
                             'error': 'acceptance_fail_does_not_settle_task',
+                            'index': entry['index'],
+                            'node_id': entry['node_id'],
+                            'inspected_node_id': acceptance_rejection.get('inspected_node_id', ''),
+                            'hint': acceptance_rejection.get('hint', ''),
+                            'items': [],
+                        }
+                if entry['action'] == 'success':
+                    # 被验交付已失败时，"通过它"不可执行；先答这条再答"没暂停"。
+                    acceptance_rejection = self._acceptance_success_rejection(node)
+                    if acceptance_rejection is not None:
+                        return {
+                            'ok': False,
+                            'error': str(acceptance_rejection.get('reason') or 'inspected_node_failed'),
                             'index': entry['index'],
                             'node_id': entry['node_id'],
                             'inspected_node_id': acceptance_rejection.get('inspected_node_id', ''),
@@ -3053,10 +3158,11 @@ class MainRuntimeService:
                         **settled,
                     }
         for entry, ids in zip(kept_entries, kept_expansions):
-            if entry['action'] != 'fail' or not entry['cascade']:
+            if entry['action'] not in {'fail', 'success'} or not entry['cascade']:
                 continue
-            # 级联 fail 护栏：子树内所有非终态后代必须已暂停，否则整批打回。
-            # 判据与旧路径 fail 门同源（is_paused or pause_requested）。
+            # 级联终态护栏：子树内所有非终态后代必须已暂停，否则整批打回。
+            # 判据与旧路径 fail 门同源（is_paused or pause_requested）；success
+            # 同用这一道，正在跑的回合不得被代签终态。
             blocking: list[str] = []
             for node_id in ids:
                 if node_id == entry['node_id']:
@@ -3206,6 +3312,36 @@ class MainRuntimeService:
                         result = self.node_runner.fail_paused_node(normalized_task_id, node_id, remark)
                     items.append({'node_id': node_id, 'result': 'failed', 'status': result.status, 'target_index': entry['index']})
                     applied_ids.append(node_id)
+            elif action == 'success':
+                # 与 fail 同为根先、后代 BFS 后：根先落成功后，后代醒来的父协程
+                # 读到的已经是终态，残余写由终态短路兜住。
+                for node_id in ids:
+                    node = self.get_node(node_id)
+                    if node is None or str(node.task_id or '').strip() != normalized_task_id:
+                        items.append({'node_id': node_id, 'result': 'not_found', 'target_index': entry['index']})
+                        skipped += 1
+                        continue
+                    if str(node.status or '').strip().lower() in {'success', 'failed'}:
+                        items.append({'node_id': node_id, 'result': 'conflict', 'reason': 'node_terminal', 'target_index': entry['index']})
+                        skipped += 1
+                        continue
+                    acceptance_rejection = self._acceptance_success_rejection(node)
+                    if acceptance_rejection is not None:
+                        items.append({'node_id': node_id, 'target_index': entry['index'], **acceptance_rejection})
+                        skipped += 1
+                        continue
+                    if not (bool(node.is_paused) or bool(node.pause_requested)):
+                        items.append({'node_id': node_id, 'result': 'conflict', 'reason': 'node_not_paused', 'target_index': entry['index']})
+                        skipped += 1
+                        continue
+                    if dispatcher is not None:
+                        result = await dispatcher.succeed_node(node_id, remark)
+                    elif str(node.node_kind or '').strip().lower() == 'acceptance':
+                        result = self.node_runner.pass_paused_acceptance_node(normalized_task_id, node_id, remark)
+                    else:
+                        result = self.node_runner.succeed_paused_node(normalized_task_id, node_id, remark)
+                    items.append({'node_id': node_id, 'result': 'success', 'status': result.status, 'target_index': entry['index']})
+                    applied_ids.append(node_id)
             else:  # keep_paused：leader 本地操作，不产生 worker 命令（沿用旧契约）。
                 for node_id in ids:
                     node = self.get_node(node_id)
@@ -3260,7 +3396,12 @@ class MainRuntimeService:
             for request in enqueue_requests:
                 entry = request['entry']
                 entry_action = entry['action']
-                command_type = 'pause_node' if entry_action == 'pause' else ('resume_node' if entry_action == 'resume' else 'fail_node')
+                command_type = {
+                    'pause': 'pause_node',
+                    'resume': 'resume_node',
+                    'fail': 'fail_node',
+                    'success': 'success_node',
+                }[entry_action]
                 self._enqueue_task_command(
                     command_type=command_type,
                     task_id=normalized_task_id,
@@ -3268,7 +3409,7 @@ class MainRuntimeService:
                     payload={
                         'node_ids': request['node_ids'],
                         'cascade': False,
-                        'reason': 'agent' if entry_action == 'pause' else (str(remark or '') if entry_action == 'fail' else ''),
+                        'reason': 'agent' if entry_action == 'pause' else (str(remark or '') if entry_action in {'fail', 'success'} else ''),
                         'remark': str(remark or ''),
                     },
                 )

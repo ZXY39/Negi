@@ -996,6 +996,285 @@ async def test_control_nodes_cascade_fail_requires_fully_paused_subtree(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_succeeding_paused_child_resolves_parent_waiter_with_success(tmp_path: Path) -> None:
+    service = _make_service(tmp_path)
+    try:
+        record = await service.create_task("succeed child", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None and root is not None
+        child = _execution_child(service, task=task, parent=root, name="child")
+        service.log_service.set_node_pause_state(
+            record.task_id,
+            child.node_id,
+            pause_requested=True,
+            is_paused=True,
+            pause_reason="error",
+            remark="work finished before the pause landed",
+        )
+
+        dispatcher = TaskNodeDispatcher(
+            task_id=record.task_id,
+            store=service.store,
+            log_service=service.log_service,
+            node_runner=service.node_runner,
+        )
+        service.task_actor_service._dispatchers[record.task_id] = dispatcher
+
+        async def fake_run_node(task_id: str, node_id: str) -> NodeFinalResult:
+            if node_id == child.node_id:
+                raise NodePausedError(task_id, node_id)
+            child_result = await dispatcher.execute_node(task_id, child.node_id)
+            assert child_result.status == "success"
+            return _success_result(node_id)
+
+        service.node_runner.run_node = fake_run_node  # type: ignore[method-assign]
+        parent_waiter = asyncio.create_task(dispatcher.execute_node(record.task_id, root.node_id))
+        await _wait_until(lambda: child.node_id in dispatcher._entries and not dispatcher._entries[child.node_id].future.done())
+
+        await service.control_nodes(record.task_id, [child.node_id], "success", remark="工作已完成")
+        result = await asyncio.wait_for(parent_waiter, timeout=2.0)
+        assert result.status == "success"
+        succeeded_child = service.get_node(child.node_id)
+        assert succeeded_child is not None and succeeded_child.status == "success"
+        assert succeeded_child.final_output == "工作已完成"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_control_nodes_success_requires_paused_and_closes_task_as_success(tmp_path: Path) -> None:
+    service = _make_service(tmp_path)
+    try:
+        record = await service.create_task("success closure", session_id="web:shared")
+        root = service.get_node(record.root_node_id)
+        assert root is not None
+
+        refused = await service.control_nodes(record.task_id, [root.node_id], "success", remark="提前收尾")
+        assert refused["items"][0]["result"] == "conflict"
+        assert refused["items"][0]["reason"] == "node_not_paused"
+        latest_root = service.get_node(root.node_id)
+        assert latest_root is not None and latest_root.status == "in_progress"
+
+        _pause_node_state(service, record.task_id, root)
+
+        applied = await service.control_nodes(record.task_id, [root.node_id], "success", remark="工作已完成")
+        assert applied["items"][0]["result"] == "success"
+        latest_root = service.get_node(root.node_id)
+        assert latest_root is not None
+        assert latest_root.status == "success"
+        assert latest_root.pause_requested is False and latest_root.is_paused is False
+        assert latest_root.final_output == "工作已完成"
+        assert latest_root.metadata["manual_success"]["remark"] == "工作已完成"
+        assert service.store.get_task_node_pause(root.node_id) is None
+
+        task = service.get_task(record.task_id)
+        assert task is not None and task.status == "success"
+        assert task.is_paused is False and task.pause_requested is False
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_control_nodes_task_level_success_closes_whole_tree(tmp_path: Path) -> None:
+    service = _make_service(tmp_path)
+    try:
+        record = await service.create_task("whole task success", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None and root is not None
+        child = _execution_child(service, task=task, parent=root, name="child")
+        grandchild = _execution_child(service, task=task, parent=child, name="grandchild")
+        await service.control_nodes(record.task_id, [root.node_id], "pause", cascade=True)
+
+        applied = await service.control_nodes(record.task_id, [], "success", remark="整体完成")
+        assert applied["ok"] is True
+        assert applied.get("scope") == "task"
+        for node_id in (root.node_id, child.node_id, grandchild.node_id):
+            node = service.get_node(node_id)
+            assert node is not None and node.status == "success"
+        latest_task = service.get_task(record.task_id)
+        assert latest_task is not None and latest_task.status == "success"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_control_nodes_cascade_success_requires_fully_paused_subtree(tmp_path: Path) -> None:
+    service = _make_service(tmp_path)
+    try:
+        record = await service.create_task("cascade success gate", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None and root is not None
+        child = _execution_child(service, task=task, parent=root, name="child")
+        grandchild = _execution_child(service, task=task, parent=child, name="grandchild")
+        _pause_node_state(service, record.task_id, root)
+
+        blocked = await service.control_nodes(record.task_id, [root.node_id], "success", remark="完成", cascade=True)
+        assert blocked["ok"] is False
+        assert blocked["error"] == "subtree_not_fully_paused"
+        assert sorted(blocked["blocking_node_ids"]) == sorted([child.node_id, grandchild.node_id])
+        latest_root = service.get_node(root.node_id)
+        assert latest_root is not None and latest_root.status == "in_progress"
+
+        await service.control_nodes(record.task_id, [root.node_id], "pause", cascade=True)
+        applied = await service.control_nodes(record.task_id, [root.node_id], "success", remark="完成", cascade=True)
+        assert applied["ok"] is True
+        for node_id in (root.node_id, child.node_id, grandchild.node_id):
+            node = service.get_node(node_id)
+            assert node is not None and node.status == "success"
+        latest_task = service.get_task(record.task_id)
+        assert latest_task is not None and latest_task.status == "success"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_control_nodes_success_on_verifier_records_manual_pass(tmp_path: Path) -> None:
+    service = _make_service(tmp_path)
+    try:
+        record = await service.create_task(
+            "manual pass",
+            session_id="web:shared",
+            metadata={"final_acceptance": {"required": True, "prompt": "核验交付"}},
+        )
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None and root is not None
+        acceptance_id = str(task.metadata["final_acceptance"]["node_id"])
+        acceptance = service.get_node(acceptance_id)
+        assert acceptance is not None and acceptance.node_kind == "acceptance"
+        _pause_node_state(service, record.task_id, root)
+        _pause_node_state(service, record.task_id, acceptance)
+
+        applied = await service.control_nodes(record.task_id, [acceptance.node_id], "success", remark="用户确认交付")
+        assert applied["items"][0]["result"] == "success"
+        latest_acceptance = service.get_node(acceptance.node_id)
+        assert latest_acceptance is not None and latest_acceptance.status == "success"
+        trace = latest_acceptance.metadata["manual_success"]
+        assert trace["inspected_node_id"] == root.node_id
+        assert trace["remark"] == "用户确认交付"
+
+        latest_root = service.get_node(root.node_id)
+        assert latest_root is not None and latest_root.status == "success"
+        assert latest_root.metadata["acceptance_handshake"]["state"] == "accepted"
+
+        latest_task = service.get_task(record.task_id)
+        assert latest_task is not None and latest_task.status == "success"
+        assert latest_task.metadata["final_acceptance"]["status"] == "passed"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_control_nodes_success_on_verifier_rejects_failed_delivery(tmp_path: Path) -> None:
+    service = _make_service(tmp_path)
+    try:
+        record = await service.create_task(
+            "manual pass failed delivery",
+            session_id="web:shared",
+            metadata={"final_acceptance": {"required": True, "prompt": "核验交付"}},
+        )
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None and root is not None
+        acceptance_id = str(task.metadata["final_acceptance"]["node_id"])
+        acceptance = service.get_node(acceptance_id)
+        assert acceptance is not None
+        _pause_node_state(service, record.task_id, acceptance)
+        service.node_runner._mark_failed(record.task_id, root.node_id, reason="delivery failed")
+
+        refused = await service.control_nodes(record.task_id, [acceptance.node_id], "success", remark="强行通过")
+        assert refused["items"][0]["result"] == "conflict"
+        assert refused["items"][0]["reason"] == "inspected_node_failed"
+        assert refused["items"][0]["inspected_node_id"] == root.node_id
+        latest_acceptance = service.get_node(acceptance.node_id)
+        assert latest_acceptance is not None and latest_acceptance.status == "in_progress"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_control_nodes_success_on_verifier_rejects_unclosed_delivery(tmp_path: Path) -> None:
+    service = _make_service(tmp_path)
+    try:
+        record = await service.create_task(
+            "manual pass unclosed delivery",
+            session_id="web:shared",
+            metadata={"final_acceptance": {"required": True, "prompt": "核验交付"}},
+        )
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None and root is not None
+        acceptance_id = str(task.metadata["final_acceptance"]["node_id"])
+        acceptance = service.get_node(acceptance_id)
+        assert acceptance is not None
+        _pause_node_state(service, record.task_id, acceptance)
+
+        refused = await service.control_nodes(record.task_id, [acceptance.node_id], "success", remark="提前通过")
+        assert refused["items"][0]["result"] == "conflict"
+        assert refused["items"][0]["reason"] == "inspected_node_not_closed"
+        assert refused["items"][0]["inspected_node_id"] == root.node_id
+        latest_acceptance = service.get_node(acceptance.node_id)
+        assert latest_acceptance is not None and latest_acceptance.status == "in_progress"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_control_nodes_success_in_web_mode_enqueues_success_command(tmp_path: Path) -> None:
+    service = _make_service(tmp_path)
+    try:
+        record = await service.create_task("success web payload", session_id="web:shared")
+        root = service.get_node(record.root_node_id)
+        assert root is not None
+        await service.pause_node(record.task_id, root.node_id, reason="manual")
+        await service.control_nodes(record.task_id, [root.node_id], "success", remark="已完成")
+
+        commands = service.store.list_unfinished_task_commands(command_type="success_node", task_id=record.task_id)
+        assert len(commands) == 1
+        row = service.store.get_task_command(commands[0]["command_id"])
+        assert row is not None
+        payload = row["payload"]
+        assert payload.get("reason") == "已完成"
+        assert payload.get("remark") == "已完成"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_worker_success_node_command_falls_back_to_remark(tmp_path: Path) -> None:
+    service = _make_service(tmp_path)
+    try:
+        record = await service.create_task("worker success fallback", session_id="web:shared")
+        node = service.get_node(record.root_node_id)
+        assert node is not None
+        service.log_service.set_node_pause_state(
+            record.task_id,
+            node.node_id,
+            pause_requested=True,
+            is_paused=True,
+            pause_reason="error",
+            remark="work finished before pausing",
+        )
+        await service._process_worker_command(
+            {
+                "command_id": "command:success-regression",
+                "command_type": "success_node",
+                "task_id": record.task_id,
+                "payload": {"node_ids": [node.node_id], "reason": "", "remark": "工作已完成"},
+            }
+        )
+        latest = service.get_node(node.node_id)
+        assert latest is not None and latest.status == "success"
+        assert latest.final_output == "工作已完成"
+        assert latest.metadata["manual_success"]["remark"] == "工作已完成"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_control_nodes_cascade_pause_skips_error_paused_descendants(tmp_path: Path) -> None:
     service = _make_service(tmp_path)
     try:
