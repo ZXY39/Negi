@@ -24,6 +24,7 @@ from main.runtime.node_message_kind import (
     KIND_PARENT_NOTICE,
     KIND_PEER_NOTICE,
     KIND_PROCESS_EXIT,
+    KIND_TOOL_JOB_FINISHED,
     KIND_USER_DIRECT,
     KIND_WAKE_TIMER,
 )
@@ -46,6 +47,9 @@ _LABEL_BY_KIND = {
     # 进程退出与唤醒同属"来自系统"家族：前缀行必须落在 _PREFIX_RE 认识的标签里，
     # 否则尾块去重与剥前缀会认不出这条通知。
     KIND_PROCESS_EXIT: '来自系统',
+    # 节点后台工具作业终态与进程退出同属"来自系统"家族：前缀行必须落在
+    # _PREFIX_RE 认识的标签里，否则尾块去重与剥前缀会认不出这条通知。
+    KIND_TOOL_JOB_FINISHED: '来自系统',
 }
 
 _PREFIX_RE = re.compile(

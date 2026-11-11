@@ -83,6 +83,7 @@ from main.runtime.internal_tools import (
     TimeTool,
     ViewMessageHistoryTool,
 )
+from main.runtime.node_background_jobs import NodeToolJobHandle, node_tool_job_background_active
 from main.runtime.node_mailbox import notification_is_held
 from main.runtime.node_message_kind import (
     ACCEPTANCE_MIRROR_KINDS,
@@ -348,6 +349,12 @@ class NodeRunner:
         self._parallel_child_pipelines_enabled = True
         # 统一工具 timeout 全局默认值（秒），由 runtime_service 从配置注入/热更新。
         self._tool_default_timeout_seconds: float | None = None
+        # 前台等待窗口（秒），由 runtime_service 从 `agents.tool_auto_background_seconds`
+        # 注入/热更新；0 = 关闭节点自动交接。
+        self._tool_auto_background_seconds: float | None = None
+        # 节点后台作业管理器（所有权/准入/停止协调），由 runtime_service 注入；
+        # 缺省 None 时节点保持纯前台，不注入交接边界。
+        self._node_background_job_manager = None
         # 派生闸门：单任务节点总数上限（含验收节点），由 runtime_service 注入。
         self._max_task_nodes = 200
         # H3：节点道单次工具调用的时长上限（秒），由 runtime_service 注入。
@@ -3633,16 +3640,49 @@ class NodeRunner:
                 if callable(getattr(self, '_adopt_background_process_callback', None))
                 else {}
             ),
+            # 节点后台作业准入/等待边界：react_loop 的自动交接与 exec 的后台
+            # 准入门都从这里拿；管理器缺省（web 角色）时不注入，节点保持纯前台。
+            **(
+                {
+                    '_node_tool_job_adapter': NodeToolJobHandle(
+                        self._node_background_job_manager,
+                        task_id=task.task_id,
+                        node_id=node.node_id,
+                    ),
+                    '_node_background_admission': (
+                        lambda current_task_id=task.task_id, current_node_id=node.node_id: (
+                            self._node_background_job_manager.admission_reason(
+                                current_task_id, current_node_id
+                            )
+                        )
+                    ),
+                }
+                if self._node_background_job_manager is not None
+                else {}
+            ),
         }
 
     def _tool_watchdog_runtime_config(self) -> dict[str, Any]:
         """节点运行时工具合同里的统一 timeout 全局默认值入口。"""
+        config: dict[str, Any] = {}
         value = getattr(self, '_tool_default_timeout_seconds', None)
         try:
             parsed = float(value) if value is not None else 0.0
         except (TypeError, ValueError):
-            return {}
-        return {'default_timeout_seconds': parsed} if parsed >= 1 else {}
+            parsed = 0.0
+        if parsed >= 1:
+            config['default_timeout_seconds'] = parsed
+        # 前台等待窗口：复用 `agents.tool_auto_background_seconds`（默认 60 秒；
+        # 0 = 关闭自动交接）。窗口耗尽的不是工具 deadline，deadline 照旧归
+        # timeout_seconds/全局默认/自持与豁免声明决定。
+        auto_background = getattr(self, '_tool_auto_background_seconds', None)
+        try:
+            auto_background_value = float(auto_background) if auto_background is not None else 0.0
+        except (TypeError, ValueError):
+            auto_background_value = 0.0
+        if auto_background_value > 0:
+            config['auto_background_seconds'] = auto_background_value
+        return config
 
     def _workspace_root(self) -> Path:
         getter = self._workspace_root_getter
@@ -6394,6 +6434,11 @@ class NodeRunner:
         frame_exists = self._log_service.read_runtime_frame(task_id, parent_node_id) is not None
         if not frame_exists and not child_pipelines:
             return
+        # 后台 spawn 作业收尾的相位隔离（§3.3）：旧后台操作完成不能把父节点的
+        # 新一跳改回 waiting_children，也不能被下一跳静默 supersede。spawn 轮
+        # 数据照常更新，只有相位覆盖被关掉——父节点的新一跳自己的批后帧写
+        # 会按 child_pipelines 重新裁决相位。
+        background_spawn = node_tool_job_background_active()
 
         def _mutate(frame: dict[str, Any]) -> dict[str, Any]:
             next_frame = dict(frame or {})
@@ -6403,10 +6448,11 @@ class NodeRunner:
             next_frame['child_pipelines'] = child_pipelines
             next_frame['pending_child_specs'] = pending_specs
             next_frame['partial_child_results'] = partial_results
-            if has_active:
-                next_frame['phase'] = 'waiting_children'
-            elif str(next_frame.get('phase') or '').strip() == 'waiting_children':
-                next_frame['phase'] = 'waiting_tool_results' if list(next_frame.get('tool_calls') or []) else 'after_model'
+            if not background_spawn:
+                if has_active:
+                    next_frame['phase'] = 'waiting_children'
+                elif str(next_frame.get('phase') or '').strip() == 'waiting_children':
+                    next_frame['phase'] = 'waiting_tool_results' if list(next_frame.get('tool_calls') or []) else 'after_model'
             return next_frame
 
         self._log_service.update_frame(task_id, parent.node_id, _mutate, publish_snapshot=False)

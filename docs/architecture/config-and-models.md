@@ -34,6 +34,7 @@
 - role iterations / concurrency
 - multi-agent 配置
 - 统一工具 timeout 默认值 `toolDefaultTimeoutSeconds`（默认 600，模型可在单次调用显式传更大的 `timeout_seconds`）
+- 前台等待窗口 `toolAutoBackgroundSeconds`（默认 60）：工具调用在前台等待多久就自动交棒后台。0 = 关闭自动交接（全部前台等待）；非法值按 schema 校验归一到 60，`<=0` 归一到 0。窗口在两条车道生效：前门会话车道见 `runtime-overview.md`「Frontdoor Tool Job Handoff」；节点车道由 `MainRuntimeService._tool_auto_background_seconds` 在构造与配置热刷新两处注入 `NodeRunner`，经 `tool_watchdog` 运行时配置到达 `react_loop` 的交接判定——它不是工具 deadline，deadline 仍归 `toolDefaultTimeoutSeconds` / 单次显式 `timeout_seconds` / 自持与豁免声明决定（分工见 `tool-hydration-and-callable-chain.md`「统一工具 Timeout 合同」）。
 - 前门工具自动转后台的等待窗口 `toolAutoBackgroundSeconds`（默认 60；0 = 关闭，全部前台等待）。它是运行时配置，不是模型入参；行为契约见 `runtime-overview.md`「Frontdoor Tool Job Handoff」
 
 ### `models`

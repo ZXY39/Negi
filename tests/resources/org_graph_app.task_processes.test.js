@@ -143,10 +143,20 @@ function loadModule(overrides = {}) {
             if (overrides.getError) throw overrides.getError;
             return { ok: true, items: overrides.items || [] };
         },
+        async getTaskToolJobs(taskId) {
+            calls.push(["tool-jobs", taskId]);
+            if (overrides.toolJobsError) throw overrides.toolJobsError;
+            return { ok: true, items: overrides.toolJobItems || [] };
+        },
         async stopTaskProcess(taskId, pid) {
             calls.push(["stop", taskId, pid]);
             if (overrides.stopError) throw overrides.stopError;
             return { ok: true, pid, status: "terminated" };
+        },
+        async stopTaskToolJob(taskId, jobId) {
+            calls.push(["stop-tool-job", taskId, jobId]);
+            if (overrides.toolStopError) throw overrides.toolStopError;
+            return { ok: true, job_id: jobId, status: "stopping" };
         },
         getErrorCode(error) {
             return String(error?.code || "");
@@ -198,8 +208,11 @@ test("REST process purposes and legacy commands keep their full text", async () 
     const { context, document } = loadModule({ items });
     await context.taskProcessesRefresh();
     const rows = document.getElementById("task-processes-list").children;
-    assert.equal(rows[0].children[0].textContent, items[0].purpose.trim());
-    assert.equal(rows[1].children[0].textContent, items[1].cmd.trim());
+    // 行结构：[0]=kind 标签，[1]=主列，[2]=节点按钮，[3]=耗时，[4]=停止。
+    // 合并视图按 started_at 新→旧排：fixture 里 pid 124（5s 前）在前。
+    assert.equal(rows[0].children[0].textContent, "进程");
+    assert.equal(rows[0].children[1].textContent, items[1].cmd.trim());
+    assert.equal(rows[1].children[1].textContent, items[0].purpose.trim());
 });
 
 test("button opens a body-mounted panel; inside clicks stay open and outside clicks close", async () => {
@@ -267,15 +280,67 @@ test("空列表隐藏气泡，有进程时显示计数与 purpose 行", async ()
     assert.equal(second.document.getElementById("task-processes-count").textContent, "2");
     const rows = second.document.getElementById("task-processes-list").children;
     assert.equal(rows.length, 2);
-    assert.equal(rows[0].children[0].textContent, "dev server :3000");
-    assert.equal(rows[0].children[0].title, "dev server :3000\nnode server.js");
-    assert.equal(rows[0].children[1].textContent, "node:a");
-    assert.equal(rows[0].children[1].dataset.taskProcessNode, "node:a");
-    assert.equal(rows[0].children[2].dataset.taskProcessStarted, items[0].started_at);
-    // legacy 没有 purpose 时回退到命令，没有 node_id 时节点按钮禁用。
-    assert.equal(rows[1].children[0].textContent, "node legacy.js");
-    assert.equal(rows[1].children[1].disabled, true);
-    assert.equal(rows[1].children[1].textContent, "未归属");
+    // 合并视图新→旧：pid 124（5s 前）在前，pid 123（65s 前）在后。
+    assert.equal(rows[0].children[1].textContent, "node legacy.js");
+    assert.equal(rows[0].children[2].disabled, true);
+    assert.equal(rows[0].children[2].textContent, "未归属");
+    assert.equal(rows[1].children[1].textContent, "dev server :3000");
+    assert.equal(rows[1].children[1].title, "dev server :3000\nnode server.js");
+    assert.equal(rows[1].children[2].textContent, "node:a");
+    assert.equal(rows[1].children[2].dataset.taskProcessNode, "node:a");
+    assert.equal(rows[1].children[3].dataset.taskProcessStarted, items[0].started_at);
+});
+
+test("节点后台工具作业与进程同列显示，kind 标签区分且行不编造 PID", async () => {
+    const toolJobItems = [
+        {
+            kind: "tool_job",
+            job_id: "tooljob:abc123",
+            tool_name: "filesystem_read",
+            status: "running",
+            started_at: new Date(Date.now() - 30_000).toISOString(),
+            hint: "filesystem_read (path=docs/report.md)",
+            node_id: "node:a",
+        },
+    ];
+    const { context, document } = loadModule({ items: itemsFixture(), toolJobItems });
+    await context.taskProcessesRefresh();
+    assert.equal(document.getElementById("task-processes-count").textContent, "3");
+    const rows = document.getElementById("task-processes-list").children;
+    assert.equal(rows.length, 3);
+    const toolRow = rows.find((row) => row.dataset.taskProcessKey === "tool_job:tooljob:abc123");
+    assert.ok(toolRow);
+    assert.equal(toolRow.children[0].textContent, "工具");
+    assert.equal(toolRow.children[1].textContent, "filesystem_read (path=docs/report.md)");
+    assert.equal(toolRow.children[2].textContent, "node:a");
+    assert.equal(toolRow.dataset.taskProcessPid, undefined);
+    const processRow = rows.find((row) => row.dataset.taskProcessKey === "process:123");
+    assert.equal(processRow.children[0].textContent, "进程");
+});
+
+test("工具作业停止走 tool-jobs API，409 提示工具已结束", async () => {
+    const toolJobItems = [
+        {
+            kind: "tool_job",
+            job_id: "tooljob:abc123",
+            tool_name: "exec",
+            status: "running",
+            started_at: new Date(Date.now() - 10_000).toISOString(),
+            hint: "exec (command=poll)",
+            node_id: "node:a",
+        },
+    ];
+    const error = new Error("finished");
+    error.status = 409;
+    error.code = "tool_job_finished";
+    const { context, toasts, calls } = loadModule({ items: [], toolJobItems, toolStopError: error });
+    await context.taskProcessesRefresh();
+    calls.length = 0;
+
+    await context.taskProcessesStop("tool_job:tooljob:abc123");
+
+    assert.deepEqual(calls[0], ["stop-tool-job", "task:abc", "tooljob:abc123"]);
+    assert.equal(toasts[0].title, "工具已结束");
 });
 
 test("点开气泡后行内容可见，点节点 id 关闭气泡并走搜索定位入口", async () => {

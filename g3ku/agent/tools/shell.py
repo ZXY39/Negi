@@ -821,10 +821,32 @@ class ExecTool(Tool):
         与前台车道只差三处：不接管道（stdout/stderr 直接落日志文件）、不等待
         （Popen 后立即返回）、启动即登记。detach 之后它不再受 exec 的超时/取消
         管辖，回收权交给 `process_kill` 与 scope 生命周期。
+
+        节点道的生命周期准入门（`_node_background_admission`）在 Popen 前检查
+        本次调用所属域是否仍开放；Popen 后登记/adopt 前再核对一次——若域恰在
+        启动瞬间被关闭（暂停/终态落地），刚起的进程立即按树终止并计入正在
+        执行的停止批次，不留下一个漏网进程。
         """
         session_key = str(runtime.get("session_key") or "web:shared").strip() or "web:shared"
         task_id = str(runtime.get("task_id") or "").strip()
         node_id = str(runtime.get("node_id") or "").strip()
+        admission = runtime.get("_node_background_admission")
+        if callable(admission):
+            closed_reason = ""
+            try:
+                closed_reason = str(admission() or "")
+            except Exception:
+                closed_reason = ""
+            if closed_reason:
+                return self._build_payload(
+                    status="error",
+                    exit_code=None,
+                    error=(
+                        "Background start rejected: this node's background lane is closed "
+                        f"({closed_reason}). Resume the node or wait for it to finish before "
+                        "starting background work."
+                    ),
+                )
         scope = owned_processes.scope_key(session_key=session_key, task_id=task_id)
         log_path = owned_processes.new_log_path(scope)
         popen_kwargs: dict[str, Any] = {
@@ -863,6 +885,32 @@ class ExecTool(Tool):
             owner_pid=os.getpid(),
             label=purpose,
         )
+        if callable(admission):
+            # Popen 后登记/adopt 前的第二次核对：此前进程快照为空不代表此刻
+            # 仍然开放；关闭则立刻收掉这条刚登记的进程。
+            post_reason = ""
+            try:
+                post_reason = str(admission() or "")
+            except Exception:
+                post_reason = ""
+            if post_reason:
+                try:
+                    owned_processes.drop(scope, int(process.pid))
+                except Exception:
+                    pass
+                try:
+                    kill_process_tree(int(process.pid))
+                except Exception:
+                    pass
+                return self._build_payload(
+                    status="error",
+                    exit_code=None,
+                    error=(
+                        "Background start aborted: the node's background lane closed "
+                        f"({post_reason}) while the process was starting; the freshly "
+                        "started process was terminated."
+                    ),
+                )
         self._adopt_background_process(runtime, entry=entry, process=process)
         self._notify_background_items_changed(runtime)
         extra_notes = [

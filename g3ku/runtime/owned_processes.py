@@ -32,7 +32,7 @@ from typing import Any
 
 from loguru import logger
 
-from g3ku.utils.process_tree import kill_process_tree_pid
+from g3ku.utils.process_tree import kill_process_tree_pid, kill_process_tree_pid_checked
 
 _ENTRY_SUFFIX = ".json"
 _LOG_SUFFIX = ".log"
@@ -329,6 +329,9 @@ def kill_owned(scope: str, pid: int, *, node_id: str | None = None) -> dict[str,
     """终止一个已登记的进程；未登记、已死、身份不符都返回 ok=False 并说明原因。
 
     `node_id` 给定时只接受该节点登记的条目；空 `node_id` 的 legacy 条目放行一次。
+    终止结果按"进程已消失"裁决：taskkill/kill 核对失败时**保留登记**并返回
+    ``kill_failed``（带诊断与仍存活的后代列表），绝不把"命令执行了"冒充成
+    "已经停止"；只有确认退出或确认条目不再对应原进程才退休登记。
     """
     entry = find(scope, pid)
     if entry is None:
@@ -364,28 +367,89 @@ def kill_owned(scope: str, pid: int, *, node_id: str | None = None) -> dict[str,
             "message": "The recorded pid now belongs to a different process; refusing to terminate it.",
             "entry": entry,
         }
-    killed = kill_process_tree_pid(int(pid))
-    drop(scope, pid)
+    checked = kill_process_tree_pid_checked(int(pid))
+    if checked.terminated:
+        drop(scope, pid)
+        return {
+            "ok": True,
+            "pid": int(pid),
+            "reason": "terminated",
+            "entry": entry,
+            "log_tail": read_log_tail(entry),
+            "detail": checked.detail,
+            "leftover_descendants": [],
+        }
+    if checked.reason == "already_gone":
+        # 身份刚校验过、taskkill 报 not found：目标在两次检查之间退出了。
+        drop(scope, pid)
+        return {
+            "ok": False,
+            "pid": int(pid),
+            "reason": "already_exited",
+            "entry": entry,
+            "detail": checked.detail,
+        }
+    # 终止未完成：登记保留在盘上，等真实退出由自然退出观察道或下次停止收尾。
     return {
-        "ok": bool(killed),
+        "ok": False,
         "pid": int(pid),
-        "reason": "terminated" if killed else "kill_failed",
+        "reason": "kill_failed",
         "entry": entry,
         "log_tail": read_log_tail(entry),
+        "detail": checked.detail or checked.reason,
+        "leftover_descendants": list(checked.descendant_leftovers),
     }
 
 
-def reap_scope(scope: str) -> list[int]:
-    """回收该 scope 下全部存活条目（会话清空、任务结束时用）。"""
+def reap_scope(
+    scope: str,
+    *,
+    node_ids: list[str] | set[str] | None = None,
+    include_unattributed: bool = False,
+) -> dict[str, Any]:
+    """回收该 scope 下的存活条目（会话清空、任务终态/删除、范围停止时用）。
+
+    `node_ids` 给定时只回收归属这些节点的条目；`include_unattributed=True`
+    才带出空 `node_id` 的 legacy 条目（单节点清理不传它，全任务动作才收）。
+    返回逐项裁决：``killed`` 是确认终止的 PID，``already_gone`` 是已退出并
+    退休的 PID，``failed`` 保留未完成对象与原因，条目不丢。
+    """
+    normalized_nodes = {str(item or "").strip() for item in (node_ids or []) if str(item or "").strip()}
     killed: list[int] = []
-    for entry in list_owned(scope):
+    already_gone: list[int] = []
+    failed: list[dict[str, Any]] = []
+    items: list[dict[str, Any]] = []
+    entries = list_owned(scope, include_unattributed=include_unattributed)
+    if normalized_nodes:
+        entries = [
+            entry
+            for entry in entries
+            if str(entry.get("node_id") or "").strip() in normalized_nodes
+        ]
+    for entry in entries:
         pid = int(entry.get("pid") or 0)
         if pid <= 0:
             continue
         result = kill_owned(scope, pid)
+        reason = str(result.get("reason") or "")
         if result.get("ok"):
             killed.append(pid)
-    return killed
+            items.append({"pid": pid, "status": "terminated", "node_id": entry.get("node_id") or ""})
+        elif reason in {"already_exited", "identity_mismatch"}:
+            already_gone.append(pid)
+            items.append({"pid": pid, "status": reason, "node_id": entry.get("node_id") or ""})
+        else:
+            failed.append(
+                {
+                    "pid": pid,
+                    "reason": reason or "kill_failed",
+                    "detail": str(result.get("detail") or ""),
+                    "leftover_descendants": list(result.get("leftover_descendants") or []),
+                    "node_id": entry.get("node_id") or "",
+                }
+            )
+            items.append({"pid": pid, "status": "kill_failed", "node_id": entry.get("node_id") or ""})
+    return {"killed": killed, "already_gone": already_gone, "failed": failed, "items": items}
 
 
 def _owner_alive(entry: dict[str, Any]) -> bool:

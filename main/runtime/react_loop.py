@@ -10,6 +10,7 @@ import time
 import traceback
 from collections import deque
 from contextvars import ContextVar
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -121,6 +122,16 @@ from g3ku.runtime.tool_impulse import (
     staged_replay_kind,
     tool_facing_runtime_context,
 )
+from g3ku.runtime.tool_jobs import (
+    TOOL_JOB_STATUS_ERROR,
+    TOOL_JOB_STATUS_INTERRUPTED,
+    TOOL_JOB_STATUS_RUNNING,
+    TOOL_JOB_STATUS_STOPPED_BY_USER,
+    TOOL_JOB_STATUS_STOPPING,
+    TOOL_JOB_STATUS_TIMEOUT,
+    ToolJobOutcome,
+    stable_tool_args_hash,
+)
 from g3ku.runtime.tool_result_status import is_error_like_tool_result
 from g3ku.runtime.tool_visibility import NODE_NEVER_CONTRACT_TOOL_NAMES
 from g3ku.runtime.tool_watchdog import (
@@ -175,6 +186,11 @@ from main.runtime.model_route import (
     LEASE_OUTCOME_CANCELLED,
     LEASE_OUTCOME_SUCCESS,
     RouteCandidateFilters,
+)
+from main.runtime.node_background_jobs import (
+    NodeBackgroundAdmissionClosed,
+    node_tool_job_synthetic_receipt,
+    set_node_tool_job_background,
 )
 from main.runtime.node_message_kind import (
     KIND_CHILD_ABNORMAL_PAUSE,
@@ -382,6 +398,24 @@ class ReActToolLoop:
     _CONTROL_TOOL_NAMES = {'stop_tool_execution'}
     _ORDERED_CONTROL_TOOL_NAMES = ('stop_tool_execution',)
     _EXCLUSIVE_TOOL_TURN_NAMES = {FINAL_RESULT_TOOL_NAME}
+    # 节点自动交接的排除名单：提交/停靠段与微秒级控制、上下文装载工具保持
+    # 即时路径（§3.3 控制提交边界）。spawn_child_nodes 不排除——它的
+    # review/admission 是真实的慢调用，允许交接（相位写入由后台标记隔离）。
+    _NO_AUTO_BACKGROUND_TOOL_NAMES = frozenset(
+        {
+            ENTER_WAIT_TOOL_NAME,
+            FINAL_RESULT_TOOL_NAME,
+            SILENT_TOOL_NAME,
+            TIME_TOOL_NAME,
+            SCHEDULE_WAKE_TOOL_NAME,
+            *_CONTROL_TOOL_NAMES,
+            'load_tool_context',
+            'load_tool_context_v2',
+            'load_skill_context',
+        }
+    )
+    # 交接后该调用的活状态行按真实后台状态展示，不再画成前台"正在等待输出"。
+    _BACKGROUND_LIVE_STATUS = 'background'
     _ALWAYS_CALLABLE_TOOL_NAMES = {
         ENTER_WAIT_TOOL_NAME,
         FINAL_RESULT_TOOL_NAME,
@@ -2215,6 +2249,60 @@ class ReActToolLoop:
 
     _RECORDED_LIVE_STATUSES = frozenset({'success', 'error', 'reused'})
 
+    def _find_node_background_job_row(self, *, task_id: str, node_id: str, tool_call_id: str) -> dict[str, Any] | None:
+        """按逻辑调用身份查节点后台作业的耐久映射（恢复判档先于 rerun 检查）。"""
+        normalized_call = str(tool_call_id or '').strip()
+        if not normalized_call:
+            return None
+        store = getattr(self._log_service, '_store', None)
+        if store is None:
+            return None
+        try:
+            rows = store.list_tool_jobs(
+                owner_kind='node',
+                task_id=str(task_id or ''),
+                node_id=str(node_id or ''),
+                tool_call_id=normalized_call,
+                limit=5,
+            )
+        except Exception:
+            return None
+        return rows[0] if rows else None
+
+    @staticmethod
+    def _node_job_elapsed_seconds(job_row: dict[str, Any]) -> float:
+        raw_started = str(job_row.get('started_at') or '').strip()
+        if not raw_started:
+            return 0.0
+        try:
+            started = datetime.fromisoformat(raw_started)
+        except (TypeError, ValueError):
+            return 0.0
+        now = datetime.now(started.tzinfo) if started.tzinfo is not None else datetime.now()
+        return round(max(0.0, (now - started).total_seconds()), 1)
+
+    def _node_background_job_recovery_content(self, job_row: dict[str, Any], *, tool_name: str) -> str:
+        """交接已落盘但回执未并入回合：补同一份回执；已终态只补终态，不重放参数。"""
+        job_status = str(job_row.get('status') or '').strip().lower()
+        job_id = str(job_row.get('job_id') or '')
+        timeout_seconds = float(job_row.get('timeout_seconds') or 0.0)
+        if job_status in {TOOL_JOB_STATUS_RUNNING, TOOL_JOB_STATUS_STOPPING}:
+            return node_tool_job_synthetic_receipt(
+                job_id=job_id,
+                tool_name=tool_name,
+                elapsed_seconds=self._node_job_elapsed_seconds(job_row),
+                timeout_seconds=timeout_seconds,
+            )
+        preview = str(job_row.get('result_preview') or '').strip()
+        result_ref = str(job_row.get('result_ref') or '').strip()
+        lines = [f'Background tool job {job_id} finished with status={job_status}.']
+        if preview:
+            lines.append(f'result: {preview}')
+        if result_ref:
+            lines.append(f'full result ref: {result_ref}')
+        lines.append('This call was handed off to the background earlier; it was not re-executed.')
+        return '\n'.join(lines)
+
     async def _resume_pending_tool_turn_if_needed(
         self,
         *,
@@ -2266,7 +2354,36 @@ class ReActToolLoop:
             recorded_content = str(live_state.get('result_content') or '').strip()
             recorded_status = str(live_state.get('status') or '').strip().lower()
             reuse_content = ''
-            if recorded_content and recorded_status in self._RECORDED_LIVE_STATUSES:
+            job_row = self._find_node_background_job_row(
+                task_id=task.task_id,
+                node_id=node.node_id,
+                tool_call_id=call_id,
+            )
+            if job_row is not None:
+                # 已交接的调用按耐久映射先于恢复判档（§5.1）：补同一份回执，
+                # 不再执行参数；终态已落库只补终态文本。暂停导致停止的作业
+                # 维持停止原因，resume 不据此自动重放。
+                decision = RecoveryCheckDecision.VERIFIED_DONE
+                job_status = str(job_row.get('status') or '').strip().lower()
+                if job_status in {TOOL_JOB_STATUS_RUNNING, TOOL_JOB_STATUS_STOPPING}:
+                    expected_tool_status = 'success'
+                elif job_status in {TOOL_JOB_STATUS_ERROR, TOOL_JOB_STATUS_TIMEOUT, TOOL_JOB_STATUS_INTERRUPTED, TOOL_JOB_STATUS_STOPPED_BY_USER}:
+                    expected_tool_status = 'error'
+                else:
+                    expected_tool_status = 'success'
+                lost_result_summary = (
+                    'Recovery completed the background tool job handoff receipt from the durable '
+                    f'job mapping (job status={job_status}) instead of re-running the tool.'
+                )
+                evidence = [
+                    {
+                        'kind': 'background_job_mapping',
+                        'path': '',
+                        'note': f'job_id={job_row.get("job_id")} status={job_status}',
+                    }
+                ]
+                reuse_content = self._node_background_job_recovery_content(job_row, tool_name=tool_name)
+            elif recorded_content and recorded_status in self._RECORDED_LIVE_STATUSES:
                 # 这条调用其实已经跑完：`_update_tool_live_state` 在每条返回时把状态与
                 # 结果正文写进帧的活状态，恢复车道此前从不读它。批内其余调用被打断时，
                 # 已完成的那条不是未知——直接复用原结果，既不重放也不问模型。
@@ -4585,7 +4702,15 @@ class ReActToolLoop:
                         controller.release_tool_slot(slot_lease)
                 finished_at = now_iso()
                 elapsed_seconds = round(max(0.0, time.monotonic() - started_monotonic), 1)
-                status = self._tool_message_status(raw_result if raw_result is not None else tool_content)
+                handoff_info = dict(runtime_context.get('tool_background_handoffs') or {}).get(
+                    str(call.id or '')
+                )
+                if handoff_info:
+                    # 交接行不继续显示为前台"正在等待输出"：按真实后台状态展示，
+                    # 终态由 record_node_tool_job_terminal 定位同一 tool_call 覆盖。
+                    status = self._BACKGROUND_LIVE_STATUS
+                else:
+                    status = self._tool_message_status(raw_result if raw_result is not None else tool_content)
                 self._update_tool_live_state(
                     task_id=task.task_id,
                     node_id=node.node_id,
@@ -4643,6 +4768,11 @@ class ReActToolLoop:
                         # 剥壳本身静默，这一格就是它的计数器。
                         **({ARGUMENT_COERCION_FIELD: coerced_arguments} if coerced_arguments else {}),
                         # 只交契约、没执行（冲动投递）：Web 面把该行画成"加载 tool"卡片。
+                        **(
+                            {'background_job_id': str(handoff_info.get('job_id') or '')}
+                            if handoff_info
+                            else {}
+                        ),
                     },
                     'tool_message': {
                         'role': 'tool',
@@ -5429,18 +5559,81 @@ class ReActToolLoop:
             with pinned_read_roots(runtime_context.get('fs_read_roots') or ()):
                 return await tool.execute(**execute_kwargs)
 
+        # 节点自动交接：前台等待窗口耗尽且调用仍在执行时，耐久登记 job 并合成回执，
+        # 节点这一跳释放等待；deadline 从原调用开始算，窗口内结束照旧返回原结果。
+        background_window = self._node_auto_background_window(runtime_context)
+        background_adapter = runtime_context.get('_node_tool_job_adapter')
+        if (
+            background_adapter is not None
+            and background_window > 0
+            and tool_name not in self._NO_AUTO_BACKGROUND_TOOL_NAMES
+        ):
+            handed_off, call_result = await self._execute_tool_call_with_node_background(
+                invoke_tool=_invoke_tool,
+                tool=tool,
+                tool_name=tool_name,
+                arguments=arguments,
+                runtime_context=runtime_context,
+                background_adapter=background_adapter,
+                background_window=background_window,
+                effective_timeout=effective_timeout,
+                self_enforced=self_enforced,
+                timeout_exempt=timeout_exempt,
+            )
+            return call_result
+        return await self._execute_tool_via_watchdog(
+            invoke_tool=_invoke_tool,
+            tool=tool,
+            tool_name=tool_name,
+            arguments=arguments,
+            runtime_context=runtime_context,
+            effective_timeout=effective_timeout,
+            self_enforced=self_enforced,
+            timeout_exempt=timeout_exempt,
+        )
+
+    @staticmethod
+    def _node_auto_background_window(runtime_context: dict[str, Any]) -> float:
+        """前台等待窗口（秒）：复用 `agents.tool_auto_background_seconds`；0 = 关闭。"""
+        try:
+            config = dict(runtime_context.get('tool_watchdog') or {})
+        except Exception:
+            return 0.0
+        try:
+            window = float(config.get('auto_background_seconds') or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+        return window if window > 0 else 0.0
+
+    async def _execute_tool_via_watchdog(
+        self,
+        *,
+        invoke_tool: Any,
+        tool: Tool,
+        tool_name: str,
+        arguments: dict[str, Any],
+        runtime_context: dict[str, Any],
+        effective_timeout: float,
+        self_enforced: bool,
+        timeout_exempt: bool,
+    ) -> Any:
+        """实际执行段（watchdog/自持/硬超时三道 + 参数类异常分类）。
+
+        前台路径与节点后台作业共用同一份执行语义；`runtime_context` 可以是
+        完整上下文，也可以是作业捕获的调用期快照。
+        """
         try:
             if not actor_role_allows_watchdog(runtime_context):
                 if self_enforced or timeout_exempt:
-                    return await _invoke_tool()
+                    return await invoke_tool()
                 return await run_tool_with_hard_timeout(
-                    _invoke_tool(),
+                    invoke_tool(),
                     tool_name=tool_name,
                     timeout_seconds=effective_timeout,
                     cancel_token=runtime_context.get('cancel_token'),
                 )
             outcome = await run_tool_with_watchdog(
-                _invoke_tool(),
+                invoke_tool(),
                 tool_name=tool_name,
                 runtime_context=runtime_context,
                 snapshot_supplier=self._snapshot_supplier(runtime_context),
@@ -5463,6 +5656,162 @@ class ReActToolLoop:
                     runtime_context=runtime_context,
                 )
             raise
+
+    async def _execute_tool_call_with_node_background(
+        self,
+        *,
+        invoke_tool: Any,
+        tool: Tool,
+        tool_name: str,
+        arguments: dict[str, Any],
+        runtime_context: dict[str, Any],
+        background_adapter: Any,
+        background_window: float,
+        effective_timeout: float,
+        self_enforced: bool,
+        timeout_exempt: bool,
+    ) -> tuple[bool, Any]:
+        """把一次调用登记成节点后台作业并按前台等待窗口裁决。
+
+        返回 ``(handed_off, result)``。窗口内完成返回 ``(False, 原结果)``，快路径
+        行为不变（渲染仍由调用方在本跳上下文完成）；窗口耗尽时 job 已耐久登记
+        （先持久成功才允许返回后台回执），本跳返回合成回执并继续下一跳，原调用
+        在后台继续执行，deadline 从原调用开始算。登记失败不谎报已交接：继续
+        等待原调用。渲染在作业的调用上下文内完成（timeout clamp ContextVar
+        只在作业任务里可见），终态消息携带这份渲染结果。
+        """
+        call_id = str(runtime_context.get('current_tool_call_id') or '')
+        # 作业捕获调用期窄快照：可变审计映射与取消域不进作业（§3.2.4）。
+        job_runtime_context = {
+            'task_id': str(runtime_context.get('task_id') or ''),
+            'node_id': str(runtime_context.get('node_id') or ''),
+            'node_kind': str(runtime_context.get('node_kind') or ''),
+            'actor_role': runtime_context.get('actor_role'),
+            'tool_watchdog': dict(runtime_context.get('tool_watchdog') or {}),
+            'tool_snapshot_supplier': runtime_context.get('tool_snapshot_supplier'),
+            'cancel_token': runtime_context.get('cancel_token'),
+            'current_tool_call_id': call_id,
+        }
+        delivery_metadata = self._tool_result_delivery_metadata(
+            tools={tool_name: tool},
+            tool_name=tool_name,
+            arguments=arguments,
+        )
+        job_started_monotonic = time.monotonic()
+        job_timeout_seconds = (
+            0.0 if (self_enforced or timeout_exempt) else max(0.0, float(effective_timeout or 0.0))
+        )
+
+        async def _job_run() -> ToolJobOutcome:
+            set_node_tool_job_background(True)
+            try:
+                raw_result = await self._execute_tool_via_watchdog(
+                    invoke_tool=invoke_tool,
+                    tool=tool,
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    runtime_context=job_runtime_context,
+                    effective_timeout=effective_timeout,
+                    self_enforced=self_enforced,
+                    timeout_exempt=timeout_exempt,
+                )
+                rendered, _status = self._render_tool_message_with_status(
+                    raw_result,
+                    runtime_context=job_runtime_context,
+                    tool_name=tool_name,
+                    delivery_metadata=delivery_metadata,
+                )
+                return ToolJobOutcome(
+                    status='success',
+                    result_text=rendered,
+                    payload=raw_result,
+                )
+            except (TaskPausedError, NodePausedError, asyncio.CancelledError):
+                raise
+            except Exception as exc:
+                if is_parameter_like_tool_exception(exc):
+                    text = append_parameter_error_guidance(
+                        f'Error executing {tool_name}: {exc}',
+                        tool_name=tool_name,
+                        tool=tool,
+                        arguments=arguments,
+                        runtime_context=job_runtime_context,
+                    )
+                    return ToolJobOutcome(
+                        status='error',
+                        result_text=text,
+                        result_preview=text,
+                        payload=text,
+                    )
+                raise
+            finally:
+                set_node_tool_job_background(False)
+
+        try:
+            job, reused = background_adapter.start_tool_job(
+                turn_id=str(runtime_context.get('active_round_id') or ''),
+                tool_call_id=call_id,
+                tool_name=tool_name,
+                args_hash=stable_tool_args_hash(arguments),
+                hint=self._tool_invocation_hint(tool_name=tool_name, arguments=arguments),
+                run=_job_run,
+                timeout_seconds=job_timeout_seconds,
+                recovery_policy='rerun_safe' if getattr(tool, 'rerun_safe', False) else 'model_decide',
+            )
+        except NodeBackgroundAdmissionClosed:
+            # 域在登记瞬间已关闭（暂停/终态刚落地）：按纯前台执行，控制信号
+            # 会在看门狗轮询里冒泡，不登记正在执行的后台作业。
+            return False, await self._execute_tool_via_watchdog(
+                invoke_tool=invoke_tool,
+                tool=tool,
+                tool_name=tool_name,
+                arguments=arguments,
+                runtime_context=runtime_context,
+                effective_timeout=effective_timeout,
+                self_enforced=self_enforced,
+                timeout_exempt=timeout_exempt,
+            )
+        except Exception:
+            # 登记失败不得谎报已交接，也不重新执行：继续等待原调用（§3.5.1）。
+            logger.warning(
+                'title=node_tool_job_admission_failed tool={} call_id={}',
+                tool_name,
+                call_id,
+            )
+            return False, await self._execute_tool_via_watchdog(
+                invoke_tool=invoke_tool,
+                tool=tool,
+                tool_name=tool_name,
+                arguments=arguments,
+                runtime_context=runtime_context,
+                effective_timeout=effective_timeout,
+                self_enforced=self_enforced,
+                timeout_exempt=timeout_exempt,
+            )
+
+        done, outcome = await background_adapter.wait_tool_job(job, background_window)
+        if done:
+            if outcome is None:
+                return False, ''
+            payload = getattr(outcome, 'payload', None)
+            return False, payload if payload is not None else (outcome.result_text or '')
+        elapsed = round(max(0.0, time.monotonic() - job_started_monotonic), 1)
+        receipt = node_tool_job_synthetic_receipt(
+            job_id=job.job_id,
+            tool_name=tool_name,
+            elapsed_seconds=elapsed,
+            timeout_seconds=job_timeout_seconds,
+        )
+        handoffs = dict(runtime_context.get('tool_background_handoffs') or {})
+        handoffs[call_id] = {
+            'job_id': job.job_id,
+            'tool_name': tool_name,
+            'status': 'running',
+            'elapsed_seconds': elapsed,
+            'reused': bool(reused),
+        }
+        runtime_context['tool_background_handoffs'] = handoffs
+        return True, receipt
 
     def _render_tool_message_content(
         self,

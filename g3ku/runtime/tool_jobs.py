@@ -54,6 +54,11 @@ TOOL_JOB_RESULT_PREVIEW_CHARS = 1200
 TOOL_JOB_STOP_ABANDON_GRACE_SECONDS = 5.0
 TOOL_JOB_RETENTION_SECONDS = 7 * 24 * 3600
 
+# owner_kind 分流：session 行归前门会话气泡；node 行归任务节点的后台作业管理器。
+# 节点行的 session_id 列存 task_id（仅作存储键，不参与事件路由）。
+TOOL_JOB_OWNER_KIND_SESSION = "session"
+TOOL_JOB_OWNER_KIND_NODE = "node"
+
 OWNED_PROCESS_JOB_PREFIX = "proc:"
 OWNED_PROCESS_TOOL_NAME = "exec"
 # `Popen.poll()` 非阻塞且能直接给出退出码；异步侧没有可移植的子进程退出回调
@@ -105,6 +110,12 @@ class ToolJob:
     finalized: bool = False
     outcome: ToolJobOutcome | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    owner_kind: str = TOOL_JOB_OWNER_KIND_SESSION
+    owner_task_id: str = ""
+    owner_node_id: str = ""
+    # 范围停止（cancel_all）在取消前标记：终态事件经正常 _finalize 路径发出时
+    # 也带上生命周期来源（node_paused/task_paused/…），不冒充用户手动停止。
+    stop_reason_pending: str = ""
 
 
 def stable_tool_args_hash(arguments: Any) -> str:
@@ -271,7 +282,7 @@ def build_tool_job_event_payload(
         preview_source = outcome.result_preview or outcome.result_text
         result_ref = outcome.result_ref
         log_path = outcome.log_path
-    return {
+    payload: dict[str, Any] = {
         "event_reason": TOOL_JOB_EVENT_REASON,
         "reason": TOOL_JOB_EVENT_REASON,
         "kind": "tool_job",
@@ -291,6 +302,51 @@ def build_tool_job_event_payload(
         "recovery_policy": str(job.recovery_policy or "model_decide"),
         "stopped_by": str(stopped_by or ""),
     }
+    if job.owner_kind == TOOL_JOB_OWNER_KIND_NODE:
+        payload["owner_kind"] = TOOL_JOB_OWNER_KIND_NODE
+        payload["task_id"] = job.owner_task_id
+        payload["node_id"] = job.owner_node_id
+        # 节点行的事件身份带 job_id：穿过"消息已消费"状态仍然有效（外层
+        # deliver_node_message 按 external_event_id 全状态去重）。
+        payload["external_event_id"] = tool_job_dedupe_key(job.job_id, status)
+    return payload
+
+
+def owned_process_task_items(task_id: str) -> list[dict[str, Any]]:
+    """任务 scope 下 `exec background=true` 起的活进程，映射成任务后台面板行。
+
+    与会话侧 `owned_process_items` 同形状，额外带 `node_id` 供"定位到节点"。
+    `list_owned` 读时顺手清掉已退出/身份不符的条目，面板因此能自愈。
+    """
+    scope = owned_processes.scope_key(session_key="", task_id=str(task_id or "").strip())
+    items: list[dict[str, Any]] = []
+    for entry in owned_processes.list_owned(scope):
+        try:
+            pid = int(entry.get("pid") or 0)
+        except (TypeError, ValueError):
+            continue
+        if pid <= 0:
+            continue
+        started_at = str(entry.get("started_at") or "")
+        items.append(
+            {
+                "kind": "process",
+                "job_id": owned_process_job_id(pid),
+                "pid": pid,
+                "tool_name": OWNED_PROCESS_TOOL_NAME,
+                "status": TOOL_JOB_STATUS_RUNNING,
+                "started_at": started_at,
+                "elapsed_seconds": _elapsed_seconds_since(started_at),
+                "turn_id": "",
+                "tool_call_id": "",
+                "hint": str(entry.get("cmd") or ""),
+                "purpose": str(entry.get("label") or ""),
+                "log_path": str(entry.get("log_path") or ""),
+                "node_id": str(entry.get("node_id") or ""),
+            }
+        )
+    items.sort(key=lambda item: (str(item.get("started_at") or ""), int(item.get("pid") or 0)))
+    return items
 
 
 class ToolJobRunner:
@@ -309,6 +365,11 @@ class ToolJobRunner:
         changed_callback: Callable[[list[dict[str, Any]]], Any] | None = None,
         finished_callback: Callable[[dict[str, Any]], Any] | None = None,
         stop_abandon_grace_seconds: float = TOOL_JOB_STOP_ABANDON_GRACE_SECONDS,
+        owner_kind: str = TOOL_JOB_OWNER_KIND_SESSION,
+        owner_task_id: str = "",
+        owner_node_id: str = "",
+        terminal_sink: Callable[[dict[str, Any]], Any] | None = None,
+        control_signals: tuple[type[BaseException], ...] = (),
     ) -> None:
         self._session_key = str(session_key or "").strip()
         self._store_getter = store_getter
@@ -316,6 +377,14 @@ class ToolJobRunner:
         self._changed_callback = changed_callback
         self._finished_callback = finished_callback
         self._stop_abandon_grace_seconds = max(0.0, float(stop_abandon_grace_seconds or 0.0))
+        self._owner_kind = str(owner_kind or TOOL_JOB_OWNER_KIND_SESSION).strip() or TOOL_JOB_OWNER_KIND_SESSION
+        self._owner_task_id = str(owner_task_id or "").strip()
+        self._owner_node_id = str(owner_node_id or "").strip()
+        # 节点终态投递边界：收到事件 payload，完成节点信箱投递后返回真值。
+        # 会话 runner 不注入它，事件照旧走 heartbeat 车道。
+        self._terminal_sink = terminal_sink
+        # 冻结类控制信号（任务/节点暂停）：作业任务里原样上抛，绝不转工具错误。
+        self._control_signals = tuple(control_signals or ())
         self._jobs: dict[str, ToolJob] = {}
         self._inflight: dict[tuple[str, str], str] = {}
         self._finalize_tasks: set[asyncio.Task[Any]] = set()
@@ -373,6 +442,9 @@ class ToolJobRunner:
             timeout_seconds=max(0.0, float(timeout_seconds or 0.0)),
             recovery_policy=str(recovery_policy or "model_decide").strip() or "model_decide",
             cancel_token=cancel_token,
+            owner_kind=self._owner_kind,
+            owner_task_id=self._owner_task_id,
+            owner_node_id=self._owner_node_id,
         )
         job.task = asyncio.create_task(self._run_job(job, run), name=f"tool-job:{normalized_tool_name}")
         self._jobs[job.job_id] = job
@@ -387,6 +459,10 @@ class ToolJobRunner:
                 outcome = ToolJobOutcome(result_text=str(outcome or ""))
             return outcome
         except asyncio.CancelledError:
+            raise
+        except self._control_signals:
+            # 冻结类控制信号（节点/任务暂停）原样上抛：转成 error outcome 会消费
+            # 前台等待里的暂停语义，摧毁同 id 幂等重放通道。
             raise
         except Exception as exc:
             logger.exception("tool job {} failed: {}", job.job_id, exc)
@@ -444,7 +520,7 @@ class ToolJobRunner:
         try:
             store.put_tool_job(
                 job_id=job.job_id,
-                session_id=job.session_key,
+                session_id=job.owner_task_id if job.owner_kind == TOOL_JOB_OWNER_KIND_NODE else job.session_key,
                 turn_id=job.turn_id,
                 tool_call_id=job.tool_call_id,
                 tool_name=job.tool_name,
@@ -457,6 +533,9 @@ class ToolJobRunner:
                 owner_pid=os.getpid(),
                 recovery_policy=job.recovery_policy,
                 payload={"hint": job.hint},
+                owner_kind=job.owner_kind,
+                task_id=job.owner_task_id,
+                node_id=job.owner_node_id,
             )
             job.persisted = True
         except Exception:
@@ -527,7 +606,11 @@ class ToolJobRunner:
                     outcome=outcome,
                     finished_at=finished_at,
                     elapsed_seconds=elapsed,
-                    stopped_by="user" if status == TOOL_JOB_STATUS_STOPPED_BY_USER else "",
+                    stopped_by=(
+                        "user"
+                        if status == TOOL_JOB_STATUS_STOPPED_BY_USER
+                        else str(getattr(job, "stop_reason_pending", "") or "")
+                    ),
                     error_text=error_text,
                 )
             self._persist_terminal(
@@ -609,6 +692,45 @@ class ToolJobRunner:
             payload["result_preview"] = _clip_preview(error_text)
         dedupe_key = tool_job_dedupe_key(job.job_id, status)
         store = self._store()
+        if job.owner_kind == TOOL_JOB_OWNER_KIND_NODE:
+            # 节点行：终态先落 outbox（耐久、幂等），再经注入的 sink 投节点信箱；
+            # 成功后标记 delivered。写序固定「先 outbox、后投递」，崩溃重启按
+            # pending outbox 补投，不重造事件。
+            storage_session = job.owner_task_id
+            if store is not None and job.persisted:
+                try:
+                    store.put_tool_job_outbox(
+                        dedupe_key=dedupe_key,
+                        job_id=job.job_id,
+                        session_id=storage_session,
+                        created_at=finished_at,
+                        payload=payload,
+                        owner_kind=TOOL_JOB_OWNER_KIND_NODE,
+                    )
+                except Exception:
+                    logger.exception("failed to persist node tool job outbox row {}", dedupe_key)
+            sink = self._terminal_sink
+            if callable(sink):
+                try:
+                    result = sink(dict(payload))
+                    if inspect.isawaitable(result):
+                        try:
+                            task = asyncio.create_task(result, name=f"tool-job-sink:{dedupe_key}")
+                        except RuntimeError:
+                            task = None
+                        if task is not None:
+                            self._finalize_tasks.add(task)
+                            task.add_done_callback(self._finalize_tasks.discard)
+                            return
+                    if result:
+                        if store is not None:
+                            try:
+                                store.mark_tool_job_outbox_delivered(dedupe_key, delivered_at=now_iso())
+                            except Exception:
+                                logger.exception("failed to mark node tool job outbox delivered {}", dedupe_key)
+                except Exception:
+                    logger.exception("node tool job terminal sink failed {}", dedupe_key)
+            return
         if store is not None and job.persisted:
             try:
                 store.put_tool_job_outbox(
@@ -811,13 +933,28 @@ class ToolJobRunner:
             )
             self._notify_changed()
 
-    async def cancel_all(self, *, reason: str = "session_deleted", suppress_event: bool = True) -> int:
+    async def cancel_all(
+        self,
+        *,
+        reason: str = "session_deleted",
+        suppress_event: bool = True,
+        stopped_by: str = "",
+    ) -> int:
+        """取消本 runner 的全部在飞 job（会话删除/范围生命周期停止用）。
+
+        `suppress_event=False`（节点范围停止传 False）时按正常终态写序结案：
+        先落 outbox/事件、再收尾持久行，节点信箱经终态 sink 拿到结果。
+        `stopped_by` 写进事件 payload，区分生命周期来源，不冒充用户手动停止。
+        """
         self._cancel_owned_process_watches()
         jobs = list(self._jobs.values())
         if not jobs:
             return 0
         for job in jobs:
             job.suppress_event = bool(suppress_event)
+            # 取消前先标记停止来源：终态若经正常 _finalize 路径发出（任务取消
+            # 先于本方法收尾），payload.stopped_by 仍带生命周期原因。
+            job.stop_reason_pending = str(stopped_by or reason or "")
             token = job.cancel_token
             if token is not None and hasattr(token, "cancel"):
                 try:
@@ -835,6 +972,16 @@ class ToolJobRunner:
             job.finalized = True
             job.status = TOOL_JOB_STATUS_INTERRUPTED
             finished_at = now_iso()
+            if not job.event_emitted and not job.suppress_event:
+                self._emit_terminal_event(
+                    job,
+                    status=TOOL_JOB_STATUS_INTERRUPTED,
+                    outcome=None,
+                    finished_at=finished_at,
+                    elapsed_seconds=max(0.0, time.monotonic() - job.started_monotonic),
+                    stopped_by=stopped_by or reason,
+                    error_text=reason,
+                )
             self._persist_terminal(
                 job,
                 status=TOOL_JOB_STATUS_INTERRUPTED,
@@ -941,7 +1088,10 @@ def recover_tool_jobs(store: Any, *, now: str | None = None) -> dict[str, int]:
     if store is None:
         return {"recovered": 0, "events": 0}
     recovered_at = str(now or now_iso())
-    active_rows = store.list_tool_jobs(statuses=TOOL_JOB_ACTIVE_STATUSES, limit=1000)
+    # owner_kind 分流：节点行由节点后台管理器自己的恢复口处理，不冒充会话事件。
+    active_rows = store.list_tool_jobs(
+        statuses=TOOL_JOB_ACTIVE_STATUSES, limit=1000, owner_kind=TOOL_JOB_OWNER_KIND_SESSION
+    )
     recovered = 0
     events = 0
     for row in active_rows:
@@ -1018,7 +1168,9 @@ def recover_tool_jobs(store: Any, *, now: str | None = None) -> dict[str, int]:
     # outbox。扫最近保留窗口内的终态行，缺事件就补一条；已有任一状态的事件
     # 则跳过，避免重复。
     cutoff = _retention_cutoff_iso()
-    terminal_rows = store.list_tool_jobs(statuses=tuple(TOOL_JOB_TERMINAL_STATUSES), limit=500)
+    terminal_rows = store.list_tool_jobs(
+        statuses=tuple(TOOL_JOB_TERMINAL_STATUSES), limit=500, owner_kind=TOOL_JOB_OWNER_KIND_SESSION
+    )
     for row in terminal_rows:
         updated_at = str(row.get("updated_at") or "")
         if updated_at and updated_at < cutoff:
@@ -1100,6 +1252,8 @@ __all__ = [
     "OWNED_PROCESS_TOOL_NAME",
     "TOOL_JOB_ACTIVE_STATUSES",
     "TOOL_JOB_EVENT_REASON",
+    "TOOL_JOB_OWNER_KIND_NODE",
+    "TOOL_JOB_OWNER_KIND_SESSION",
     "TOOL_JOB_STATUS_ERROR",
     "TOOL_JOB_STATUS_INTERRUPTED",
     "TOOL_JOB_STATUS_RUNNING",
@@ -1118,6 +1272,7 @@ __all__ = [
     "owned_process_event_identity",
     "owned_process_items",
     "owned_process_job_id",
+    "owned_process_task_items",
     "parse_owned_process_job_id",
     "prune_tool_job_rows",
     "recover_tool_jobs",

@@ -201,6 +201,10 @@ class TaskLogService:
         self._task_terminal_listeners: list[Callable[[TaskRecord], None]] = []
         self._task_visible_output_listeners: list[Callable[[str, str], None]] = []
         self._summary_metric_reporters: list[Callable[[str, float], None]] = []
+        # 节点/任务生命周期语义层通知：携带已提交的 node/task 身份与动作，
+        # 节点后台管理器据此关闭准入并发起范围停止。listener 必须是快速同步钩子
+        # （只记录停止意图/关准入/安排异步收尾），不得在任务锁内等待 OS 退出。
+        self._node_lifecycle_listeners: list[Callable[[dict[str, Any]], None]] = []
         self._task_locks: dict[str, threading.RLock] = {}
         self._task_locks_guard = threading.Lock()
         self._event_history_enabled = bool(event_history_enabled)
@@ -232,6 +236,36 @@ class TaskLogService:
     def add_summary_metric_reporter(self, reporter: Callable[[str, float], None]) -> None:
         if callable(reporter):
             self._summary_metric_reporters.append(reporter)
+
+    def add_node_lifecycle_listener(self, listener: Callable[[dict[str, Any]], None]) -> None:
+        """订阅节点/任务生命周期语义事件（暂停/恢复/终态/取消请求）。
+
+        事件形状：``{'action': node_pause|node_resume|node_terminal|task_pause|
+        task_cancel|task_resume|task_terminal, 'task_id': ..., 'node_id': ...,
+        'reason': ...}``。listener 在状态写入的任务锁内同步执行，必须快速返回。
+        """
+        if callable(listener):
+            self._node_lifecycle_listeners.append(listener)
+
+    def _notify_node_lifecycle(
+        self,
+        *,
+        action: str,
+        task_id: str,
+        node_id: str = '',
+        reason: str = '',
+    ) -> None:
+        event = {
+            'action': str(action or ''),
+            'task_id': str(task_id or ''),
+            'node_id': str(node_id or ''),
+            'reason': str(reason or ''),
+        }
+        for listener in list(self._node_lifecycle_listeners):
+            try:
+                listener(event)
+            except Exception:
+                continue
 
     def close(self) -> None:
         pending_task_ids: list[str] = []
@@ -962,6 +996,77 @@ class TaskLogService:
                 self.refresh_task_view(task_id, mark_unread=True)
             return persisted
 
+    def record_node_tool_job_terminal(
+        self,
+        task_id: str,
+        node_id: str,
+        tool_call_id: str,
+        *,
+        status: str,
+        output_preview: str = '',
+        output_ref: str = '',
+        payload_patch: dict[str, Any] | None = None,
+        finished_at: str = '',
+        elapsed_seconds: float | None = None,
+    ) -> bool:
+        """节点后台工具作业终态回写：定位同一 tool_call 的既有行就地覆盖。
+
+        交接回执行的身份是 (task_id, node_id, tool_call_id)；终态覆盖不新增
+        第二条调用记录，原始回执保存在 payload.background_terminal.receipt 里。
+        没有既有行（交接回执还没落盘就终态）时按 order_index 追加一行。
+        """
+        normalized_call = str(tool_call_id or '').strip()
+        if not normalized_call:
+            return False
+        with self._task_lock(task_id):
+            node = self._store.get_node(node_id)
+            if node is None or str(node.task_id or '').strip() != str(task_id or '').strip():
+                return False
+            existing_records = list(self._store.list_task_node_tool_results(task_id, node_id) or [])
+            target = next(
+                (item for item in existing_records if str(item.tool_call_id or '').strip() == normalized_call),
+                None,
+            )
+            merged_payload: dict[str, Any] = dict(target.payload or {}) if target is not None else {}
+            receipt = merged_payload.get('background_terminal') if isinstance(merged_payload.get('background_terminal'), dict) else {}
+            if target is not None and not receipt:
+                # 保留原始交接回执文本，终态覆盖后仍可追溯。
+                merged_payload['background_terminal'] = {
+                    'receipt_status': str(target.status or ''),
+                    'receipt_preview': str(target.output_preview_text or ''),
+                }
+            if isinstance(payload_patch, dict) and payload_patch:
+                merged_payload.update(payload_patch)
+            record = TaskProjectionToolResultRecord(
+                task_id=task_id,
+                node_id=node_id,
+                tool_call_id=normalized_call,
+                order_index=int(target.order_index or 0) if target is not None else (
+                    max([int(item.order_index or 0) for item in existing_records], default=0) + 1
+                ),
+                tool_name=str(target.tool_name or 'tool') if target is not None else 'tool',
+                arguments_text=str(target.arguments_text or '') if target is not None else '',
+                status=str(status or 'success'),
+                started_at=str(target.started_at or '') if target is not None else '',
+                finished_at=str(finished_at or now_iso()),
+                elapsed_seconds=(
+                    float(elapsed_seconds)
+                    if elapsed_seconds is not None
+                    else (float(target.elapsed_seconds or 0) if target is not None else 0.0)
+                ),
+                output_preview_text=str(output_preview or ''),
+                output_ref=str(output_ref or ''),
+                ephemeral=bool(target.ephemeral) if target is not None else False,
+                payload=merged_payload,
+            )
+            self._store.upsert_task_node_tool_result(record)
+            self._sync_node_read_models_locked(node, invalidate_execution_trace_ref=True)
+            task = self._store.get_task(task_id)
+            if task is not None:
+                self._publish_task_node_patch_locked(task=task, node=node)
+                self.refresh_task_view(task_id, mark_unread=True)
+            return True
+
     @staticmethod
     def _tool_result_payload_ref(payload: dict[str, Any]) -> str:
         output_ref = str(
@@ -1597,6 +1702,15 @@ class TaskLogService:
                         self._sync_node_read_models_locked(propagated)
                         self._publish_task_node_patch_locked(task=task, node=propagated)
                 self._notify_task_visible_output(task_id, occurred_at=_precise_now_iso())
+            if updated is not None and str(status or '').strip().lower() in {'success', 'failed'}:
+                # 节点终态已提交：同步通知生命周期层关掉该节点的后台域（快速钩子，
+                # 只关准入并发起异步收尾，不在这里等待 OS 退出）。
+                self._notify_node_lifecycle(
+                    action='node_terminal',
+                    task_id=task_id,
+                    node_id=node_id,
+                    reason=str(failure_reason or final_output or '')[:200],
+                )
             self.refresh_task_view(task_id, mark_unread=True)
             return updated
 
@@ -1847,7 +1961,44 @@ class TaskLogService:
                 # 恢复后没有任何后续活动，卡片会一直停在旧状态直到下一次 touch。
                 # 指纹去重保证与 refresh_task_view 自身的发布重复时无害。
                 self._publish_task_summary_patch_locked(task=refreshed, previous_task=previous)
+                self._notify_task_control_lifecycle_locked(task_id, previous, refreshed)
             return refreshed
+
+    def _notify_task_control_lifecycle_locked(
+        self,
+        task_id: str,
+        previous: TaskRecord | None,
+        updated: TaskRecord,
+    ) -> None:
+        """任务控制旗标翻面：任务暂停/取消请求立即通知后台收尾；恢复重开准入。
+
+        任务暂停/取消不等最后转终态才开始停止后台；恢复只开新准入，不重跑旧后台。
+        """
+        if previous is None:
+            return
+        now_cancel = bool(updated.cancel_requested)
+        now_pause = bool(updated.pause_requested) or bool(updated.is_paused)
+        was_pause = bool(previous.pause_requested) or bool(previous.is_paused)
+        if now_cancel and not bool(previous.cancel_requested):
+            self._notify_node_lifecycle(
+                action='task_cancel',
+                task_id=task_id,
+                reason='task cancel requested',
+            )
+            return
+        if now_pause and not was_pause:
+            self._notify_node_lifecycle(
+                action='task_pause',
+                task_id=task_id,
+                reason='task pause requested',
+            )
+            return
+        if not now_pause and not now_cancel and was_pause:
+            self._notify_node_lifecycle(
+                action='task_resume',
+                task_id=task_id,
+                reason='task resumed',
+            )
 
     def update_task_metadata(self, task_id: str, metadata_mutator: Callable[[dict[str, Any]], dict[str, Any]], *, mark_unread: bool = True) -> TaskRecord | None:
         with self._task_lock(task_id):
@@ -2848,6 +2999,24 @@ class TaskLogService:
             task = self._store.get_task(task_id)
             if task is not None:
                 self._publish_task_node_patch_locked(task=task, node=updated)
+            was_paused = bool(current.pause_requested) or bool(current.is_paused)
+            now_paused = bool(next_requested) or bool(next_paused)
+            if now_paused and not was_paused:
+                # 节点暂停落地（人工/模型/错误/任务派生一致）：关该节点的后台域。
+                self._notify_node_lifecycle(
+                    action='node_pause',
+                    task_id=task_id,
+                    node_id=node_id,
+                    reason=next_reason or remark or 'node paused',
+                )
+            elif not now_paused and was_paused:
+                # 恢复清位：只开启新调用准入，旧后台不复活。
+                self._notify_node_lifecycle(
+                    action='node_resume',
+                    task_id=task_id,
+                    node_id=node_id,
+                    reason='node resumed',
+                )
             self.refresh_task_view(task_id, mark_unread=True)
             return updated
 
@@ -3166,6 +3335,14 @@ class TaskLogService:
                 preserved_execution_trace_ref=str((node.metadata or {}).get('execution_trace_ref') or '').strip(),
             )
             self._publish_task_node_patch_locked(task=task, node=updated)
+            # 残留节点清扫是直接存储更新，不经 update_node_status：
+            # 节点后台域在这里单独通知收尾。
+            self._notify_node_lifecycle(
+                action='node_terminal',
+                task_id=task.task_id,
+                node_id=node.node_id,
+                reason=reason,
+            )
             swept.append(updated)
         return swept
 

@@ -183,12 +183,74 @@ def test_reap_scope_kills_every_owned_process(isolated_root: Path) -> None:
             session_key="web:ceo-1",
         )
 
-    killed = owned_processes.reap_scope(scope)
+    result = owned_processes.reap_scope(scope)
 
-    assert sorted(killed) == sorted([first.pid, second.pid])
+    # 返回逐项裁决：killed 是确认终止的 PID，失败保留对象与原因（逐项合同）。
+    assert sorted(result["killed"]) == sorted([first.pid, second.pid])
+    assert result["failed"] == []
+    assert sorted(item["pid"] for item in result["items"]) == sorted([first.pid, second.pid])
     assert _wait_gone(first.pid)
     assert _wait_gone(second.pid)
     assert owned_processes.list_owned(scope) == []
+
+
+def test_reap_scope_filters_by_node_and_keeps_failures(isolated_root: Path) -> None:
+    """节点集合过滤：只回收归属节点；kill 未完成时保留条目并如实上报失败。"""
+    scope = owned_processes.scope_key(session_key="", task_id="task:reap-filter")
+    first = _spawn_sleeper()
+    second = _spawn_sleeper()
+    owned_processes.register(
+        scope=scope, pid=first.pid, cmd="sleep", log_path="",
+        session_key="", task_id="task:reap-filter", node_id="node:a",
+    )
+    owned_processes.register(
+        scope=scope, pid=second.pid, cmd="sleep", log_path="",
+        session_key="", task_id="task:reap-filter", node_id="node:b",
+    )
+    try:
+        result = owned_processes.reap_scope(scope, node_ids=["node:a"])
+        assert sorted(result["killed"]) == [first.pid]
+        assert second.pid not in [item["pid"] for item in result["items"]]
+        assert _wait_gone(first.pid)
+        assert owned_processes.is_alive(second.pid)
+    finally:
+        second.kill()
+        second.wait(timeout=10)
+
+
+def test_kill_owned_keeps_entry_when_termination_not_confirmed(isolated_root: Path, monkeypatch) -> None:
+    """kill_failed 不得 drop：登记保留在盘上，结果带诊断（§4.4）。"""
+    from g3ku.utils import process_tree
+
+    scope = owned_processes.scope_key(session_key="web:ceo-1")
+    process = _spawn_sleeper()
+    try:
+        owned_processes.register(
+            scope=scope,
+            pid=process.pid,
+            cmd="sleep",
+            log_path="",
+            session_key="web:ceo-1",
+        )
+        monkeypatch.setattr(
+            owned_processes,
+            "kill_process_tree_pid_checked",
+            lambda pid: process_tree.ProcessTreeKillResult(
+                initiated=True,
+                terminated=False,
+                reason="process_still_alive",
+                detail="taskkill exit=0 but verification failed",
+            ),
+        )
+        result = owned_processes.kill_owned(scope, process.pid)
+        assert result["ok"] is False
+        assert result["reason"] == "kill_failed"
+        assert result["detail"]
+        # 条目保留：追踪对象没有被停止失败抹掉。
+        assert owned_processes.find(scope, process.pid) is not None
+    finally:
+        process.kill()
+        process.wait(timeout=10)
 
 
 def test_exec_background_requires_purpose() -> None:

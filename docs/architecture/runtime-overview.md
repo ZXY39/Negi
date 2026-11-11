@@ -235,7 +235,9 @@ heartbeat / cron 的维护语义分两条通道：UI 展示通道上前端通过
 - 状态机：`running → success | error | timeout | interrupted | stopped_by_user`。`stopping` 只活在用户点停止到 task 收尾之间；停止事件在点击时立即入队，不等 task 收尾，收尾不了则放弃跟踪并留一条 warning。
 - 取消边界：会话暂停/停止**不**取消后台 job——交棒时 per-call 取消令牌从会话令牌解绑，`pause()` / `cancel()` 只结束当前回合。只有用户点停止、会话删除、进程退出会结束 job；进程退出后启动恢复把残留的 `running` 行收成 `interrupted` 并补事件。后台是“脱离回合”，不是“脱离进程”：job task 在 web 进程内继续跑，进程被杀时它随之消失。
 - 账本：交棒的工具行 `status=background`、`finished_at` 为空，表示“这一调用仍在后台”；终态只在显示层覆盖工具行图标，不回写账本状态或结果正文。完成结果只经心跳事件回到模型，历史行由 `finished[]` 回放终态（UI 契约见 `web-and-admin.md`「Background Tool Jobs Bubble And Tool-Jobs API」）。
-- 范围覆盖前门（CEO / `web:` / `ext:` / 渠道会话）与执行节点。工具 schema 与 provider-facing `tools[]` 的字节不变；`exec background=true` 在两条车道都要求 `purpose`（`exec` 参数契约变化，不是 provider schema 结构变化），用途写进归属条目并进头部清单/气泡。退出观测在两条车道都接线：前门投会话心跳，节点投本节点信箱；没有可 poll 的 `Popen` 句柄时只留归属条目。运行时崩溃/机器重启留下的条目由启动回收改写成 `.notice`，服务 startup 消费后删除凭证。
+- 会话车道与节点车道共享同一份 `ToolJobRunner` 内核（前台窗口等待、交棒落库、终态裁决与幂等 outbox），但**所有权与停止边界不同**：会话作业归 `session_key`，会话暂停/停止回合不杀已后台化工作；节点作业归创建节点，节点/任务暂停或终态必须同时停——两条车道的分工、生命周期停止矩阵与取消域合同归 `main-task-runtime.md`「节点后台作业：所有权、准入与生命周期停止」。`tool_jobs` 行按 `owner_kind`（session/node）分流，节点行保存真实 `task_id/node_id`，会话读取器与启动恢复（`recover_tool_jobs`）只处理 session 行；节点行的 `session_id` 列存 `task_id`，仅作存储键。
+- 服务关闭顺序的第一刀是停节点后台：`MainRuntimeService.close()` 先 `NodeBackgroundJobManager.close_all`（取消 job task、等 OS 退出确认、耐久结案），再关观察/投递循环，最后关 store；不依赖 Python 退出时 Popen 自动清理。启动则先恢复后台作业账（遗留 running 结案 interrupted + 补投节点信箱）、再消费 `.notice` 进程凭证，最后才恢复任务树。
+- 两条车道分别覆盖：自动交接（工具作业）覆盖前门（CEO / `web:` / `ext:` / 渠道会话）与执行节点；显式后台进程（`exec background=true`）同样两条车道都可起，但终态去向分开——前门投会话心跳，节点投本节点信箱 `process_exit`，工具作业终态在节点侧走 `tool_job_finished`（不冒充进程退出）。工具 schema 与 provider-facing `tools[]` 的字节不变；`exec background=true` 在两条车道都要求 `purpose`（`exec` 参数契约变化，不是 provider schema 结构变化），用途写进归属条目并进头部清单/气泡。退出观测在两条车道都接线；没有可 poll 的 `Popen` 句柄时只留归属条目。运行时崩溃/机器重启留下的条目由启动回收改写成 `.notice`，服务 startup 消费后删除凭证。
 
 相关文件：
 

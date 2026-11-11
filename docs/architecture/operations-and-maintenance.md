@@ -352,6 +352,13 @@
 - 给暂停节点发消息后节点照旧不动、也没有报错：设计内。暂停是粘性状态，任何消息（人工、`child_final`、前门通知、`wake_timer`）都只落箱不清位，唯一例外是父节点执行 `manage_child_nodes(resume)`。操作员恢复用 `manage_task_nodes(resume)`。
 - 信箱投递、看门狗判据与恢复重放的合同字段详见 `main-task-runtime.md`「节点信箱与唤醒（现行）」与「Node-Level Pause and Recovery」。
 
+### 节点后台作业停止与中断排查
+
+- 暂停/终态之后节点名下仍有后台进程或后台工具作业在跑：先分清两条登记道。OS 进程读任务后台气泡（合并视图，见 `web-and-admin.md`「Task Hall Action Contract」的面板条目）与盘上登记表 `data_root/owned-processes/<scope>/`；工具作业读 `tool_jobs` 表（`owner_kind='node'`）。停止失败时条目**保留在盘上**且结果里带 `kill_failed` + 诊断与仍存活的后代 PID 列表——这是合同（"命令执行了"不冒充"已经停止"），不是泄漏；对着列表里的 PID 重试停止，或确认真实退出后由自然退出观察道补报。worker 不在线时 web 侧的停止命令只是入队，不是已执行。
+- 任务删除报 `task_background_stop_failed`：删除前置的后台收尾（`close_scope_and_wait`）没有在预算内确认全部停止。此时任务数据未删、登记保留，按上一条排掉残留后台后重试删除；不要绕过该守卫手删数据文件——那会丢掉唯一可回收的进程身份信息。
+- 重启后节点信箱收到"背景工具作业已中断"（英文，`status=interrupted`）：设计内。节点后台协程不跨 worker 重启续跑，启动恢复把遗留 `running` 行结案为 interrupted 并经 `tool_job_finished` 消息补投；outbox 未送达的行由启动恢复与 replay 补投，消息按 `external_event_id`（`tool-job:{job_id}:{status}`）去重，不会重复注入。
+- 节点工具轨迹里一条 `background` 状态的工具行、之后同一行被终态覆盖：设计内。交接回执与终态共用同一 `tool_call_id` 行（终态覆盖由 `record_node_tool_job_terminal` 就地写入，原始回执文本保留在该行 payload 的 `background_terminal.receipt` 里）；结果正文经 `tool_job_finished` 节点信箱消息到达创建节点，不在轨迹行里回显全文。
+
 如果任务已经创建，但表现为“响应明显变慢”“长时间停在 `model.chat.await_response`”或“前端只看到 task-event 在刷”，优先同时对照：
 
 - `.g3ku/main-runtime/manual-web-run.log`

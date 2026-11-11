@@ -599,6 +599,7 @@ class SQLiteTaskStore:
             '''
             -- 前门后台工具作业：只有真正越过前台等待窗口的调用才落行。
             -- running/stopping 由进程内 runner 接管；进程重启后统一收成 interrupted。
+            -- owner_kind 分流会话作业与节点作业；节点行保存真实 task_id/node_id。
             CREATE TABLE IF NOT EXISTS tool_jobs (
                 job_id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
@@ -618,7 +619,10 @@ class SQLiteTaskStore:
                 result_preview TEXT NOT NULL DEFAULT '',
                 result_ref TEXT NOT NULL DEFAULT '',
                 log_path TEXT NOT NULL DEFAULT '',
-                payload_json TEXT NOT NULL DEFAULT '{}'
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                owner_kind TEXT NOT NULL DEFAULT 'session',
+                task_id TEXT NOT NULL DEFAULT '',
+                node_id TEXT NOT NULL DEFAULT ''
             )
             ''',
             '''
@@ -635,7 +639,8 @@ class SQLiteTaskStore:
                 last_error TEXT NOT NULL,
                 accepted INTEGER,
                 rejected_reason TEXT NOT NULL DEFAULT '',
-                payload_json TEXT NOT NULL
+                payload_json TEXT NOT NULL,
+                owner_kind TEXT NOT NULL DEFAULT 'session'
             )
             ''',
             '''
@@ -673,6 +678,7 @@ class SQLiteTaskStore:
             'CREATE INDEX IF NOT EXISTS idx_task_terminal_outbox_state_created_at ON task_terminal_outbox(delivery_state, created_at)',
             'CREATE INDEX IF NOT EXISTS idx_tool_jobs_session_status ON tool_jobs(session_id, status)',
             'CREATE INDEX IF NOT EXISTS idx_tool_jobs_status_updated_at ON tool_jobs(status, updated_at)',
+            'CREATE INDEX IF NOT EXISTS idx_tool_jobs_owner_task_status ON tool_jobs(owner_kind, task_id, status)',
             'CREATE INDEX IF NOT EXISTS idx_tool_job_outbox_state_created_at ON tool_job_outbox(delivery_state, created_at)',
             'CREATE INDEX IF NOT EXISTS idx_task_stall_outbox_state_created_at ON task_stall_outbox(delivery_state, created_at)',
             'CREATE INDEX IF NOT EXISTS idx_task_distribution_error_outbox_state_created_at ON task_distribution_error_outbox(delivery_state, created_at)',
@@ -701,6 +707,10 @@ class SQLiteTaskStore:
             self._ensure_column(self._conn, 'task_disk_usage', 'db_anchor', "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(self._conn, 'task_error_logs', 'text_ref', "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(self._conn, 'task_error_logs', 'kind', "TEXT NOT NULL DEFAULT 'failure'")
+            self._ensure_column(self._conn, 'tool_jobs', 'owner_kind', "TEXT NOT NULL DEFAULT 'session'")
+            self._ensure_column(self._conn, 'tool_jobs', 'task_id', "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(self._conn, 'tool_jobs', 'node_id', "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(self._conn, 'tool_job_outbox', 'owner_kind', "TEXT NOT NULL DEFAULT 'session'")
             self._retire_inline_execution_trace_summaries(self._conn)
             self._mark_legacy_diagnostic_error_rows(self._conn)
             self._node_detail_columns = self._live_columns(self._conn, 'task_node_details')
@@ -3724,6 +3734,9 @@ class SQLiteTaskStore:
         owner_pid: int,
         recovery_policy: str,
         payload: dict[str, object] | None = None,
+        owner_kind: str = 'session',
+        task_id: str = '',
+        node_id: str = '',
     ) -> dict[str, object]:
         normalized_job_id = str(job_id or '').strip()
         if not normalized_job_id:
@@ -3731,15 +3744,15 @@ class SQLiteTaskStore:
 
         def operation(conn: sqlite3.Connection) -> dict[str, object]:
             row = conn.execute(
-                'SELECT job_id, session_id, turn_id, tool_call_id, tool_name, args_hash, hint, status, started_at, finished_at, updated_at, timeout_seconds, owner_pid, recovery_policy, stop_requested_by_user, result_preview, result_ref, log_path, payload_json '
+                'SELECT job_id, session_id, turn_id, tool_call_id, tool_name, args_hash, hint, status, started_at, finished_at, updated_at, timeout_seconds, owner_pid, recovery_policy, stop_requested_by_user, result_preview, result_ref, log_path, payload_json, owner_kind, task_id, node_id '
                 'FROM tool_jobs WHERE job_id = ?',
                 (normalized_job_id,),
             ).fetchone()
             if row is None:
                 payload_json = json.dumps(payload or {}, ensure_ascii=False)
                 conn.execute(
-                    'INSERT INTO tool_jobs (job_id, session_id, turn_id, tool_call_id, tool_name, args_hash, hint, status, started_at, finished_at, updated_at, timeout_seconds, owner_pid, recovery_policy, stop_requested_by_user, result_preview, result_ref, log_path, payload_json) '
-                    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    'INSERT INTO tool_jobs (job_id, session_id, turn_id, tool_call_id, tool_name, args_hash, hint, status, started_at, finished_at, updated_at, timeout_seconds, owner_pid, recovery_policy, stop_requested_by_user, result_preview, result_ref, log_path, payload_json, owner_kind, task_id, node_id) '
+                    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                     (
                         normalized_job_id,
                         str(session_id or ''),
@@ -3760,10 +3773,13 @@ class SQLiteTaskStore:
                         '',
                         '',
                         payload_json,
+                        str(owner_kind or 'session'),
+                        str(task_id or ''),
+                        str(node_id or ''),
                     ),
                 )
                 row = conn.execute(
-                    'SELECT job_id, session_id, turn_id, tool_call_id, tool_name, args_hash, hint, status, started_at, finished_at, updated_at, timeout_seconds, owner_pid, recovery_policy, stop_requested_by_user, result_preview, result_ref, log_path, payload_json '
+                    'SELECT job_id, session_id, turn_id, tool_call_id, tool_name, args_hash, hint, status, started_at, finished_at, updated_at, timeout_seconds, owner_pid, recovery_policy, stop_requested_by_user, result_preview, result_ref, log_path, payload_json, owner_kind, task_id, node_id '
                     'FROM tool_jobs WHERE job_id = ?',
                     (normalized_job_id,),
                 ).fetchone()
@@ -3773,7 +3789,7 @@ class SQLiteTaskStore:
 
     def get_tool_job(self, job_id: str) -> dict[str, object] | None:
         row = self._fetchone(
-            'SELECT job_id, session_id, turn_id, tool_call_id, tool_name, args_hash, hint, status, started_at, finished_at, updated_at, timeout_seconds, owner_pid, recovery_policy, stop_requested_by_user, result_preview, result_ref, log_path, payload_json '
+            'SELECT job_id, session_id, turn_id, tool_call_id, tool_name, args_hash, hint, status, started_at, finished_at, updated_at, timeout_seconds, owner_pid, recovery_policy, stop_requested_by_user, result_preview, result_ref, log_path, payload_json, owner_kind, task_id, node_id '
             'FROM tool_jobs WHERE job_id = ?',
             (str(job_id or '').strip(),),
         )
@@ -3826,6 +3842,10 @@ class SQLiteTaskStore:
         session_id: str | None = None,
         statuses: tuple[str, ...] | None = None,
         limit: int = 200,
+        owner_kind: str | None = None,
+        task_id: str | None = None,
+        node_id: str | None = None,
+        tool_call_id: str | None = None,
     ) -> list[dict[str, object]]:
         clauses: list[str] = []
         params: list[object] = []
@@ -3833,6 +3853,22 @@ class SQLiteTaskStore:
         if normalized_session_id:
             clauses.append('session_id = ?')
             params.append(normalized_session_id)
+        normalized_owner_kind = str(owner_kind or '').strip()
+        if normalized_owner_kind:
+            clauses.append('owner_kind = ?')
+            params.append(normalized_owner_kind)
+        normalized_task_id = str(task_id or '').strip()
+        if normalized_task_id:
+            clauses.append('task_id = ?')
+            params.append(normalized_task_id)
+        normalized_node_id = str(node_id or '').strip()
+        if normalized_node_id:
+            clauses.append('node_id = ?')
+            params.append(normalized_node_id)
+        normalized_tool_call_id = str(tool_call_id or '').strip()
+        if normalized_tool_call_id:
+            clauses.append('tool_call_id = ?')
+            params.append(normalized_tool_call_id)
         normalized_statuses = tuple(str(item or '').strip() for item in (statuses or ()) if str(item or '').strip())
         if normalized_statuses:
             clauses.append(f'status IN ({", ".join("?" for _ in normalized_statuses)})')
@@ -3840,11 +3876,42 @@ class SQLiteTaskStore:
         where = f'WHERE {" AND ".join(clauses)} ' if clauses else ''
         params.append(max(1, int(limit or 200)))
         rows = self._fetchall(
-            'SELECT job_id, session_id, turn_id, tool_call_id, tool_name, args_hash, hint, status, started_at, finished_at, updated_at, timeout_seconds, owner_pid, recovery_policy, stop_requested_by_user, result_preview, result_ref, log_path, payload_json '
+            'SELECT job_id, session_id, turn_id, tool_call_id, tool_name, args_hash, hint, status, started_at, finished_at, updated_at, timeout_seconds, owner_pid, recovery_policy, stop_requested_by_user, result_preview, result_ref, log_path, payload_json, owner_kind, task_id, node_id '
             f'FROM tool_jobs {where}ORDER BY updated_at DESC LIMIT ?',
             tuple(params),
         )
         return [self._tool_job_row(row) for row in rows]
+
+    def delete_tool_jobs_for_task(self, task_id: str) -> int:
+        """任务删除时按 task_id 清掉节点后台作业行与对应 outbox 行。"""
+        normalized_task_id = str(task_id or '').strip()
+        if not normalized_task_id:
+            return 0
+
+        def operation(conn: sqlite3.Connection) -> int:
+            job_ids = [
+                str(row[0] or '')
+                for row in conn.execute(
+                    'SELECT job_id FROM tool_jobs WHERE owner_kind = ? AND task_id = ?',
+                    ('node', normalized_task_id),
+                ).fetchall()
+            ]
+            deleted = 0
+            if job_ids:
+                placeholders = ', '.join('?' for _ in job_ids)
+                cursor = conn.execute(
+                    f'DELETE FROM tool_jobs WHERE job_id IN ({placeholders})',
+                    tuple(job_ids),
+                )
+                deleted += max(0, int(cursor.rowcount or 0))
+            cursor = conn.execute(
+                "DELETE FROM tool_job_outbox WHERE owner_kind = 'node' AND session_id = ?",
+                (normalized_task_id,),
+            )
+            deleted += max(0, int(cursor.rowcount or 0))
+            return deleted
+
+        return int(self._run_write(operation) or 0)
 
     def prune_tool_jobs(self, *, before_iso: str) -> int:
         cutoff = str(before_iso or '').strip()
@@ -3875,6 +3942,7 @@ class SQLiteTaskStore:
         session_id: str,
         created_at: str,
         payload: dict[str, object],
+        owner_kind: str = 'session',
     ) -> dict[str, object]:
         key = str(dedupe_key or '').strip()
         if not key:
@@ -3882,19 +3950,19 @@ class SQLiteTaskStore:
 
         def operation(conn: sqlite3.Connection) -> dict[str, object]:
             row = conn.execute(
-                'SELECT dedupe_key, job_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, accepted, rejected_reason, payload_json '
+                'SELECT dedupe_key, job_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, accepted, rejected_reason, payload_json, owner_kind '
                 'FROM tool_job_outbox WHERE dedupe_key = ?',
                 (key,),
             ).fetchone()
             if row is None:
                 payload_json = json.dumps(payload, ensure_ascii=False)
                 conn.execute(
-                    'INSERT INTO tool_job_outbox (dedupe_key, job_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, accepted, rejected_reason, payload_json) '
-                    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                    (key, str(job_id or ''), str(session_id or ''), 'pending', created_at, created_at, '', 0, '', '', None, '', payload_json),
+                    'INSERT INTO tool_job_outbox (dedupe_key, job_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, accepted, rejected_reason, payload_json, owner_kind) '
+                    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    (key, str(job_id or ''), str(session_id or ''), 'pending', created_at, created_at, '', 0, '', '', None, '', payload_json, str(owner_kind or 'session')),
                 )
                 row = conn.execute(
-                    'SELECT dedupe_key, job_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, accepted, rejected_reason, payload_json '
+                    'SELECT dedupe_key, job_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, accepted, rejected_reason, payload_json, owner_kind '
                     'FROM tool_job_outbox WHERE dedupe_key = ?',
                     (key,),
                 ).fetchone()
@@ -3904,17 +3972,26 @@ class SQLiteTaskStore:
 
     def get_tool_job_outbox(self, dedupe_key: str) -> dict[str, object] | None:
         row = self._fetchone(
-            'SELECT dedupe_key, job_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, accepted, rejected_reason, payload_json '
+            'SELECT dedupe_key, job_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, accepted, rejected_reason, payload_json, owner_kind '
             'FROM tool_job_outbox WHERE dedupe_key = ?',
             (str(dedupe_key or '').strip(),),
         )
         return self._tool_job_outbox_row(row) if row else None
 
-    def list_pending_tool_job_outbox(self, *, limit: int = 200) -> list[dict[str, object]]:
+    def list_pending_tool_job_outbox(
+        self, *, limit: int = 200, owner_kind: str | None = None
+    ) -> list[dict[str, object]]:
+        clauses = ['delivery_state = ?']
+        params: list[object] = ['pending']
+        normalized_owner_kind = str(owner_kind or '').strip()
+        if normalized_owner_kind:
+            clauses.append('owner_kind = ?')
+            params.append(normalized_owner_kind)
+        params.append(max(1, int(limit or 200)))
         rows = self._fetchall(
-            'SELECT dedupe_key, job_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, accepted, rejected_reason, payload_json '
-            "FROM tool_job_outbox WHERE delivery_state = ? ORDER BY created_at ASC LIMIT ?",
-            ('pending', max(1, int(limit or 200))),
+            'SELECT dedupe_key, job_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, accepted, rejected_reason, payload_json, owner_kind '
+            f'FROM tool_job_outbox WHERE {" AND ".join(clauses)} ORDER BY created_at ASC LIMIT ?',
+            tuple(params),
         )
         return [self._tool_job_outbox_row(row) for row in rows]
 
@@ -5640,8 +5717,9 @@ class SQLiteTaskStore:
     def _tool_job_row(row: sqlite3.Row | None) -> dict[str, object]:
         if row is None:
             return {}
+        keys = set(row.keys())
         payload = json.loads(row['payload_json'])
-        return {
+        item: dict[str, object] = {
             'job_id': row['job_id'],
             'session_id': row['session_id'],
             'turn_id': row['turn_id'],
@@ -5662,14 +5740,22 @@ class SQLiteTaskStore:
             'log_path': row['log_path'],
             'payload': payload if isinstance(payload, dict) else {},
         }
+        if 'owner_kind' in keys:
+            item['owner_kind'] = str(row['owner_kind'] or 'session')
+        if 'task_id' in keys:
+            item['task_id'] = str(row['task_id'] or '')
+        if 'node_id' in keys:
+            item['node_id'] = str(row['node_id'] or '')
+        return item
 
     @staticmethod
     def _tool_job_outbox_row(row: sqlite3.Row | None) -> dict[str, object]:
         if row is None:
             return {}
+        keys = set(row.keys())
         payload = json.loads(row['payload_json'])
         accepted_raw = row['accepted']
-        return {
+        item: dict[str, object] = {
             'dedupe_key': row['dedupe_key'],
             'job_id': row['job_id'],
             'session_id': row['session_id'],
@@ -5684,6 +5770,9 @@ class SQLiteTaskStore:
             'rejected_reason': row['rejected_reason'],
             'payload': payload if isinstance(payload, dict) else {},
         }
+        if 'owner_kind' in keys:
+            item['owner_kind'] = str(row['owner_kind'] or 'session')
+        return item
 
     @staticmethod
     def _task_stall_outbox_row(row: sqlite3.Row | None) -> dict[str, object]:

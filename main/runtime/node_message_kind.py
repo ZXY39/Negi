@@ -37,6 +37,9 @@ KIND_WAKE_TIMER: Final = 'wake_timer'
 # `exec background=true` 起的进程退出时由运行时投给启动它的节点。进程已经不在，
 # 这条消息是收尾的唯一落点；同样只允许运行时代产。
 KIND_PROCESS_EXIT: Final = 'process_exit'
+# 节点自动交接的后台工具作业（无 OS PID）终态时由运行时投给创建它的节点。
+# 与 `process_exit` 分开：工具作业没有 PID，也不冒充进程退出；同样只允许运行时代产。
+KIND_TOOL_JOB_FINISHED: Final = 'tool_job_finished'
 
 ORIGIN_USER: Final = 'user'
 # 操作员在节点详情页输入框（chatbox）发的消息。与 `user` 同为人工来源：同一套
@@ -67,12 +70,14 @@ SYSTEM_KINDS: Final = frozenset(
         KIND_ACCEPTANCE_VERDICT,
         KIND_WAKE_TIMER,
         KIND_PROCESS_EXIT,
+        KIND_TOOL_JOB_FINISHED,
     }
 )
 
 # 无条件唤醒的 kind：收件人必须动作，否则系统或发送方无法推进（P6）。
 # `process_exit` 由操作者本轮指定为 always-waking：节点起的进程退出后，运行时不
-# 替它判断"要不要在意"；暂停闸仍在投递侧优先。
+# 替它判断"要不要在意"；暂停闸仍在投递侧优先。`tool_job_finished` 同理：交出去
+# 的后台工具作业终态后节点要能接着推进；暂停闸仍在投递侧优先。
 ALWAYS_WAKING_KINDS: Final = frozenset(
     {
         KIND_USER_DIRECT,
@@ -80,6 +85,7 @@ ALWAYS_WAKING_KINDS: Final = frozenset(
         KIND_FRONTDOOR_NOTICE,
         KIND_CHILD_ABNORMAL_PAUSE,
         KIND_PROCESS_EXIT,
+        KIND_TOOL_JOB_FINISHED,
     }
 )
 

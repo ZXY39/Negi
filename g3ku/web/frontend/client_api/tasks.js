@@ -117,6 +117,20 @@
         });
     },
 
+    async getTaskToolJobs(taskId) {
+        // 节点后台工具作业（无 PID）；前端与 /processes 按 kind 合并渲染。
+        return this._request("GET", `/api/tasks/${taskId}/tool-jobs`, {
+            requestKey: `tasks:tool-jobs:${taskId}`,
+            timeoutMs: 15000,
+        });
+    },
+
+    async stopTaskToolJob(taskId, jobId) {
+        return this._request("POST", `/api/tasks/${taskId}/tool-jobs/${encodeURIComponent(jobId)}/stop`, {
+            timeoutMs: 30000,
+        });
+    },
+
     async getTaskNodeErrorLog(taskId, nodeId) {
         return this._request("GET", `/api/tasks/${taskId}/nodes/${nodeId}/error-log`, {
             requestKey: `tasks:node-error-log:${taskId}:${nodeId}`,

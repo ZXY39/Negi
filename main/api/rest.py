@@ -443,6 +443,55 @@ async def get_task_processes(task_id: str):
     }
 
 
+@router.get('/tasks/{task_id}/tool-jobs')
+async def get_task_tool_jobs(task_id: str):
+    """任务后台工具作业列表（node tool jobs）；与 `/processes` 按 kind 合并展示。
+
+    工具作业没有 PID：行带稳定的 `job_id`/`kind`，不编造 PID；
+    `/processes` 的"每行都有 PID"合同不变。
+    """
+    task_id = _ensure_task_route_id(task_id)
+    service = _service()
+    await service.startup()
+    task_id = service.normalize_task_id(task_id)
+    task = await asyncio.to_thread(service.store.get_task, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail='task_not_found')
+    payload = await service.list_task_background_items(task_id)
+    job_items = list(payload.get('tool_jobs') or [])
+    return {
+        'ok': True,
+        'task_id': task_id,
+        'count': len(job_items),
+        'items': job_items,
+    }
+
+
+@router.post('/tasks/{task_id}/tool-jobs/{job_id}/stop')
+async def stop_task_tool_job(task_id: str, job_id: str):
+    """停止单个节点后台工具作业；web 角色经 worker 命令车道派发并返回排队回执。"""
+    task_id = _ensure_task_route_id(task_id)
+    service = _service()
+    await service.startup()
+    task_id = service.normalize_task_id(task_id)
+    task = await asyncio.to_thread(service.store.get_task, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail='task_not_found')
+    try:
+        result = await service.stop_task_tool_job(task_id, job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc or 'invalid_tool_job_id'))
+    except Exception as exc:
+        name = type(exc).__name__
+        text = str(exc or '')
+        if 'ToolJobNotFound' in name or 'not_found' in text:
+            raise HTTPException(status_code=404, detail='tool_job_not_found')
+        if 'ToolJobFinished' in name or 'finished' in text:
+            raise HTTPException(status_code=409, detail='tool_job_finished')
+        raise
+    return {'ok': True, **result}
+
+
 @router.post('/tasks/{task_id}/processes/{pid}/stop')
 async def stop_task_process(task_id: str, pid: int):
     task_id = _ensure_task_route_id(task_id)

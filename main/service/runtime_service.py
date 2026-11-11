@@ -59,6 +59,11 @@ from g3ku.runtime.tool_impulse import (
     IMPULSE_STAGED,
     impulse_receipt,
 )
+from g3ku.runtime.tool_jobs import (
+    TOOL_JOB_STATUS_STOPPED_BY_USER,
+    TOOL_JOB_STATUS_STOPPING,
+    TOOL_JOB_STATUS_SUCCESS,
+)
 from g3ku.runtime.tool_visibility import (
     NODE_FIXED_BUILTIN_TOOL_NAMES,
     NODE_NEVER_CONTRACT_TOOL_NAMES,
@@ -144,6 +149,11 @@ from main.runtime.internal_tools import build_detail_level_schema
 from main.runtime.model_key_concurrency import ModelKeyConcurrencyController
 from main.runtime.model_load_balancer import ModelLoadBalancer, quota_bucket_key
 from main.runtime.model_route import build_model_route_plan
+from main.runtime.node_background_jobs import (
+    STOP_REASON_SERVICE_SHUTDOWN,
+    STOP_REASON_TASK_DELETED,
+    NodeBackgroundJobManager,
+)
 from main.runtime.node_mailbox import (
     REJECT_TARGET_LIST_UNPARSED,
     TARGET_LIST_UNPARSED_HINT,
@@ -164,6 +174,7 @@ from main.runtime.node_message_kind import (
     KIND_CHILD_ABNORMAL_PAUSE,
     KIND_CHILD_FINAL,
     KIND_PROCESS_EXIT,
+    KIND_TOOL_JOB_FINISHED,
     KIND_WAKE_TIMER,
     ORIGIN_CHATBOX,
     ORIGIN_FRONTDOOR,
@@ -403,6 +414,9 @@ _STALL_DETAIL_FRAME_LIMIT = 3
 # 删除前等待暂停排空的上限：到期未排空按 task_still_stopping 拒绝，
 # 调用方可在暂停生效后重试；避免无限等待离线/卡死的排空。
 _DELETE_PAUSE_DRAIN_TIMEOUT_SECONDS = 10.0
+# 节点后台停止收尾（取消 job task、等 OS 退出、范围回收）的默认等待上限：
+# 到期未确认的失败项保留登记并如实上报，不无限等待拒绝退出的进程。
+DEFAULT_NODE_BACKGROUND_STOP_WAIT_SECONDS = 10.0
 # web 自身 stdout 落点（negi_bootstrap 把它交给子进程句柄）的长跑封顶：正文写在
 # 一个继承来的 append 句柄上，改名换不掉，所以这里只就地截尾。实盘 187 MB/23h
 # 的那次是 QQ 桥重连风暴把 loguru 全量 traceback 灌进来的量级。
@@ -940,6 +954,15 @@ class MainRuntimeService:
         self.node_runner._tool_default_timeout_seconds = self._tool_default_timeout_seconds(app_config)
         self.node_runner._max_task_nodes = self._max_task_nodes
         self.node_runner._node_tool_timeout_ceiling_seconds = self._node_tool_timeout_ceiling_seconds
+        # 节点后台作业管理器：自动交接的工具作业与 exec 显式后台进程的
+        # 所有权、准入与生命周期停止协调都挂这里；web 角色实例也持有它，
+        # 但它只有读数与停止命令路由，真正的停止发生在持有任务的 worker/embedded。
+        self._node_background_jobs = NodeBackgroundJobManager(
+            store_getter=lambda: self.store,
+            delivery_sink=self._deliver_node_tool_job_event,
+        )
+        self.node_runner._node_background_job_manager = self._node_background_jobs
+        self.node_runner._tool_auto_background_seconds = self._tool_auto_background_seconds(app_config)
         self.task_actor_service = TaskActorService(
             store=self.store,
             log_service=self.log_service,
@@ -1129,6 +1152,12 @@ class MainRuntimeService:
         }
         if self.execution_mode == 'worker':
             self.log_service.add_task_terminal_listener(self._enqueue_task_terminal_callback)
+        # 节点/任务生命周期语义层 → 后台管理器的统一通知：暂停/终态/取消请求
+        # 立即关闭后台域准入并发起范围停止；恢复只重开准入。
+        self.log_service.add_node_lifecycle_listener(self._on_node_lifecycle_event)
+        # 任务终态（真正的成功/失败，含取消映射为 failed）走既有 listener 通道；
+        # 与 worker-only 的进程回收回调并存（回收幂等）。
+        self.log_service.add_task_terminal_listener(self._on_task_terminal_background_stop)
 
     @staticmethod
     def _bool_env(name: str, *, default: bool) -> bool:
@@ -1153,8 +1182,18 @@ class MainRuntimeService:
         self.policy_engine.sync_default_role_policies()
         self._record_resource_tree_state()
         if self.execution_mode in {'embedded', 'worker'}:
-            # 启动回收把死条目改写成 `.notice`；先消费它们，再把任务树恢复/续跑起来，
-            # 这样被恢复的节点第一回合就能在信箱里看到"进程已经不在了"。
+            # 启动先恢复后台作业账（遗留 running 收成 interrupted + 补投节点信箱）、
+            # 再消费 `.notice` 进程凭证，最后才把任务树恢复/续跑起来——被恢复的
+            # 节点第一回合就能在信箱里看到"后台作业/进程已经不在了"。
+            try:
+                recovery = await self._node_background_jobs.recover_after_restart()
+                if recovery.get('recovered'):
+                    logger.info(
+                        'recovered node background tool jobs after restart: {}',
+                        recovery,
+                    )
+            except Exception:
+                logger.exception('node background tool job recovery failed at startup')
             await self._consume_owned_process_notices()
             shutdown_paused_task_ids = {
                 str(item.get('ref_id') or ''): str(item.get('entry_key') or '')
@@ -1567,6 +1606,219 @@ class MainRuntimeService:
             lines.append("Output tail:")
             lines.append(tail)
         return "\n".join(lines)
+
+    # -------------------------------------------------- 节点后台作业管理器接线
+
+    def _on_node_lifecycle_event(self, event: dict[str, Any]) -> None:
+        """LogService 生命周期语义层 → 后台管理器：快速同步钩子，只关准入并安排异步收尾。"""
+        manager = getattr(self, '_node_background_jobs', None)
+        if manager is None:
+            return
+        try:
+            manager.handle_lifecycle_event(
+                task_id=str(event.get('task_id') or ''),
+                node_id=str(event.get('node_id') or ''),
+                action=str(event.get('action') or ''),
+                reason=str(event.get('reason') or ''),
+            )
+        except Exception:
+            logger.exception(
+                'node background lifecycle dispatch failed task={} node={} action={}',
+                event.get('task_id'),
+                event.get('node_id'),
+                event.get('action'),
+            )
+
+    def _on_task_terminal_background_stop(self, task: Any) -> None:
+        """任务终态 listener：全任务范围收尾（含停靠节点与 legacy 空 node_id 进程）。"""
+        manager = getattr(self, '_node_background_jobs', None)
+        if manager is None:
+            return
+        try:
+            manager.handle_lifecycle_event(
+                task_id=str(getattr(task, 'task_id', '') or ''),
+                action='task_terminal',
+                reason=f'task terminal: {getattr(task, "status", "")}',
+            )
+        except Exception:
+            logger.exception('task terminal background stop dispatch failed')
+
+    async def _deliver_node_tool_job_event(self, payload: dict[str, Any]) -> bool:
+        """节点后台工具作业终态的投递边界：节点信箱 + 工具行终态覆盖。
+
+        返回 True 表示已投递或已按终态拒收（结案记录保留在 job 行上，不复活
+        节点、不转投无关会话）；False 表示投递失败，outbox 行留 pending 待补投。
+        """
+        task_id = str(payload.get('task_id') or payload.get('session_id') or '').strip()
+        node_id = str(payload.get('node_id') or '').strip()
+        job_id = str(payload.get('job_id') or '').strip()
+        if not task_id or not node_id:
+            return True
+        task = self.store.get_task(task_id)
+        node = self.store.get_node(node_id)
+        if task is None or node is None:
+            return True
+        node_status = str(node.status or '').strip().lower()
+        task_status = str(task.status or '').strip().lower()
+        if node_status in {'success', 'failed'} or task_status in {'success', 'failed', 'canceled'}:
+            # 节点/任务终态：保留作业结案记录（job 行 + outbox 已落），不复活节点。
+            return True
+        paused = (
+            bool(getattr(task, 'is_paused', False))
+            or bool(getattr(task, 'pause_requested', False))
+            or bool(getattr(node, 'is_paused', False))
+            or bool(getattr(node, 'pause_requested', False))
+        )
+        message = self._node_tool_job_finished_text(payload)
+        external_event_id = str(payload.get('external_event_id') or '').strip() or (
+            f'tool-job:{job_id}:{payload.get("status") or ""}'
+        )
+        tool_call_id = str(payload.get('tool_call_id') or '').strip()
+        delivered = False
+        try:
+            receipt = await self.deliver_node_message(
+                task_id=task_id,
+                target_node_id=node_id,
+                message=message,
+                origin=ORIGIN_NODE,
+                system_kind=KIND_TOOL_JOB_FINISHED,
+                source_node_id=node_id,
+                wake=not paused,
+                external_event_id=external_event_id,
+            )
+            if isinstance(receipt, dict) and str(receipt.get('status') or '').strip() == 'rejected':
+                logger.info(
+                    'node tool job notice rejected: task={} node={} job={} reason={}',
+                    task_id,
+                    node_id,
+                    job_id,
+                    str(receipt.get('reason') or ''),
+                )
+            delivered = True
+        except Exception as exc:
+            logger.warning(
+                'node tool job terminal delivery failed: task={} node={} job={} error={!r}',
+                task_id,
+                node_id,
+                job_id,
+                exc,
+            )
+        if tool_call_id and delivered:
+            # 终态覆盖定位同一 tool_call，不新增第二条调用记录；原始回执保留
+            # 在 payload.background_terminal.receipt 里。
+            job_status = str(payload.get('status') or '').strip().lower() or 'success'
+            row_status = 'success' if job_status == TOOL_JOB_STATUS_SUCCESS else 'error'
+            elapsed_value: float | None = None
+            try:
+                elapsed_value = round(max(0.0, float(payload.get('elapsed_seconds') or 0.0)), 1)
+            except (TypeError, ValueError):
+                elapsed_value = None
+            payload_patch = {
+                'background_terminal': {
+                    'job_id': job_id,
+                    'job_status': job_status,
+                    'stopped_by': str(payload.get('stopped_by') or ''),
+                    'receipt_preview': str(payload.get('result_preview') or '')[:400],
+                }
+            }
+            try:
+                self.log_service.record_node_tool_job_terminal(
+                    task_id,
+                    node_id,
+                    tool_call_id,
+                    status=row_status,
+                    output_preview=str(payload.get('result_preview') or ''),
+                    output_ref=str(payload.get('result_ref') or ''),
+                    payload_patch=payload_patch,
+                    finished_at=str(payload.get('finished_at') or ''),
+                    elapsed_seconds=elapsed_value,
+                )
+            except Exception:
+                logger.exception(
+                    'node tool job terminal row overwrite failed: task={} node={} call={}',
+                    task_id,
+                    node_id,
+                    tool_call_id,
+                )
+        return delivered
+
+    @staticmethod
+    def _node_tool_job_finished_text(payload: dict[str, Any]) -> str:
+        """节点面后台工具作业终态消息：英文、稳定（不含 now/相对时刻）。"""
+        job_id = str(payload.get('job_id') or '').strip()
+        tool_name = str(payload.get('tool_name') or 'tool').strip()
+        status = str(payload.get('status') or '').strip() or 'finished'
+        stopped_by = str(payload.get('stopped_by') or '').strip()
+        elapsed = payload.get('elapsed_seconds')
+        try:
+            elapsed_value = round(max(0.0, float(elapsed or 0.0)), 1)
+        except (TypeError, ValueError):
+            elapsed_value = 0.0
+        stop_note = {
+            'node_paused': 'It was stopped because the node was paused.',
+            'task_paused': 'It was stopped because the task was paused.',
+            'node_terminal': 'It was stopped because the node reached a terminal state.',
+            'task_terminal': 'It was stopped because the task reached a terminal state.',
+            'task_cancelled': 'It was stopped because the task was cancelled.',
+            'task_deleted': 'It was stopped because the task was deleted.',
+            'service_shutdown': 'It was stopped because the service is shutting down.',
+            'restart': 'The project process restarted while it was running.',
+        }.get(stopped_by, '')
+        if status == TOOL_JOB_STATUS_STOPPED_BY_USER and not stop_note:
+            stop_note = 'It was stopped manually by the operator.'
+        headline = f'Background tool job finished: {tool_name} (job {job_id}, status={status}'
+        if elapsed_value > 0:
+            headline += f', elapsed {elapsed_value:g}s'
+        headline += ').'
+        if stop_note:
+            headline += f' {stop_note}'
+        lines = [headline]
+        result_preview = str(payload.get('result_preview') or '').strip()
+        result_ref = str(payload.get('result_ref') or '').strip()
+        log_path = str(payload.get('log_path') or '').strip()
+        if result_preview:
+            lines.append('Result:')
+            lines.append(result_preview)
+        if result_ref:
+            lines.append(f'Full result ref: {result_ref}')
+        if log_path:
+            lines.append(f'Log: {log_path}')
+        return '\n'.join(lines)
+
+    async def list_task_background_items(self, task_id: str) -> dict[str, Any]:
+        """任务后台面板读数：node tool jobs 与 owned processes 合并（kind/job_id 稳定）。"""
+        manager = getattr(self, '_node_background_jobs', None)
+        if manager is None:
+            return {'tool_jobs': [], 'processes': [], 'total': 0}
+        try:
+            return manager.snapshot_task_background(task_id)
+        except Exception:
+            logger.exception('task background snapshot failed task={}', task_id)
+            return {'tool_jobs': [], 'processes': [], 'total': 0}
+
+    async def stop_task_tool_job(self, task_id: str, job_id: str) -> dict[str, Any]:
+        """停止单个节点后台工具作业；web 角色经命令车道派发给持有任务的实例。"""
+        normalized_task_id = str(task_id or '').strip()
+        normalized_job_id = str(job_id or '').strip()
+        if not normalized_task_id or not normalized_job_id:
+            raise ValueError('invalid_tool_job_id')
+        if self.execution_mode == 'web':
+            command_id = self._enqueue_task_command(
+                command_type='stop_task_tool_job',
+                task_id=normalized_task_id,
+                session_id='',
+                payload={'job_id': normalized_job_id},
+            )
+            return {
+                'job_id': normalized_job_id,
+                'status': TOOL_JOB_STATUS_STOPPING,
+                'queued': True,
+                'command_id': command_id,
+            }
+        manager = getattr(self, '_node_background_jobs', None)
+        if manager is None:
+            raise ValueError('background_jobs_unavailable')
+        return await manager.stop_tool_job(normalized_task_id, normalized_job_id)
 
     async def _consume_owned_process_notices(self) -> None:
         """启动时消费 `.notice`：节点条目投信箱，会话条目写心跳 outbox。
@@ -2055,6 +2307,16 @@ class MainRuntimeService:
                         force=True,
                     )
                 success = True
+            elif command_type == 'stop_task_tool_job':
+                if task_id:
+                    job_id = str(payload.get('job_id') or '').strip()
+                    if not job_id:
+                        error_text = 'stop_task_tool_job_missing_job'
+                    else:
+                        result_payload = await self.stop_task_tool_job(task_id, job_id)
+                        success = True
+                else:
+                    error_text = 'stop_task_tool_job_missing_task'
             elif command_type == 'send_node_message':
                 target_node_id = self.normalize_node_id(str(payload.get('target_node_id') or '').strip())
                 delivery = {
@@ -3728,6 +3990,16 @@ class MainRuntimeService:
         if self.execution_mode in {'embedded', 'worker'}:
             self.task_actor_service.request_cancel(task_id)
             await self.global_scheduler.cancel_task(task_id)
+            # web 已写旗标时 worker 侧旗标不再翻面，任务级后台停止在这里直接触发
+            # （幂等；已关闭的节点域跳过，全任务回收覆盖 legacy 空 node_id 条目）。
+            try:
+                self._node_background_jobs.handle_lifecycle_event(
+                    task_id=task_id,
+                    action='task_cancel',
+                    reason='task cancelled',
+                )
+            except Exception:
+                logger.exception('task cancel background stop dispatch failed task={}', task_id)
             current = self.get_task(task_id)
             if current is not None and current.status == 'in_progress':
                 # 暂停中的任务也必须能取消。以前这里带 `not is_paused` 守卫，于是"暂停 → 取消"
@@ -3763,6 +4035,15 @@ class MainRuntimeService:
         if self.execution_mode in {'embedded', 'worker'}:
             self.task_actor_service.request_pause(task_id)
             await self.global_scheduler.cancel_task(task_id)
+            # web 已写旗标时 worker 侧旗标不再翻面：任务级后台停止在这里幂等触发。
+            try:
+                self._node_background_jobs.handle_lifecycle_event(
+                    task_id=task_id,
+                    action='task_pause',
+                    reason='task paused',
+                )
+            except Exception:
+                logger.exception('task pause background stop dispatch failed task={}', task_id)
         else:
             self._assert_worker_available()
             self.log_service.set_pause_state(task_id, pause_requested=True, is_paused=True)
@@ -3890,6 +4171,14 @@ class MainRuntimeService:
         internal_total = len(internal_ids)
         worker_state = self.worker_state()
         draining = self._task_pause_drain_active(task_id, task=task)
+        # 排空读数包含后台剩余项（§6.6）：节点后台工具作业 + owned processes。
+        # web 角色只读持久账（tool_jobs 行 + 盘上进程条目）；worker/embedded
+        # 用本进程的实时管理器，含尚未交接的前台窗口作业。
+        try:
+            background = self._node_background_jobs.snapshot_task_background(task_id)
+            background_total = int(background.get('total') or 0)
+        except Exception:
+            background_total = 0
         return {
             'task_id': task_id,
             'status': str(task.status or ''),
@@ -3898,6 +4187,8 @@ class MainRuntimeService:
             'draining': draining,
             'internal_total': internal_total,
             'internal_stopped': 0 if draining else internal_total,
+            'background_total': background_total,
+            'background_remaining': 0 if draining else background_total,
             'worker_state': str(worker_state or ''),
         }
 
@@ -3909,6 +4200,15 @@ class MainRuntimeService:
                 return None
             self.task_actor_service.clear_pause(task_id)
             await self.global_scheduler.enqueue_task(task_id)
+            # 恢复只开启新调用准入（§2.2）：旧域已取消的后台不复活，新调用照常。
+            try:
+                self._node_background_jobs.handle_lifecycle_event(
+                    task_id=task_id,
+                    action='task_resume',
+                    reason='task resumed',
+                )
+            except Exception:
+                logger.exception('task resume background reopen failed task={}', task_id)
         else:
             self._assert_worker_available()
             task = self.get_task(task_id)
@@ -3955,6 +4255,22 @@ class MainRuntimeService:
         # 未排空统一按「仍在停止」拒绝，调用方可在暂停生效后重试。
         if not await self._await_task_pause_drain(task_id, timeout_seconds=_DELETE_PAUSE_DRAIN_TIMEOUT_SECONDS):
             raise ValueError('task_still_stopping')
+        # 删除前先证明后台写入者已停（§5.3）：actor 已停与后台已停是两个条件。
+        # 停止失败保留登记与失败信息，不进入文件/数据库删除——删掉唯一可回收
+        # 的身份信息等于放弃回收。
+        background_stop = await self._node_background_jobs.close_scope_and_wait(
+            task_id,
+            stop_reason=STOP_REASON_TASK_DELETED,
+            note='task deleted',
+            timeout_seconds=_DELETE_PAUSE_DRAIN_TIMEOUT_SECONDS,
+        )
+        if not background_stop.get('completed'):
+            logger.warning(
+                'task background stop incomplete before delete: task={} result={}',
+                task_id,
+                background_stop,
+            )
+            raise ValueError('task_background_stop_failed')
         await self._wipe_task_data(task, reason='user_delete')
         return task
 
@@ -7544,14 +7860,23 @@ class MainRuntimeService:
         try:
             from g3ku.runtime import owned_processes
 
-            killed = owned_processes.reap_scope(
-                owned_processes.scope_key(session_key='', task_id=normalized_task_id)
+            result = owned_processes.reap_scope(
+                owned_processes.scope_key(session_key='', task_id=normalized_task_id),
+                include_unattributed=True,
             )
+            killed = list(result.get('killed') or [])
+            failures = list(result.get('failed') or [])
             if killed:
                 logger.info(
                     'reaped task-owned background processes task={} pids={}',
                     normalized_task_id,
                     killed,
+                )
+            if failures:
+                logger.warning(
+                    'task-owned background process reap left failures task={} failures={}',
+                    normalized_task_id,
+                    failures,
                 )
         except Exception:
             logger.exception('failed to reap owned background processes for task {}', normalized_task_id)
@@ -8750,6 +9075,20 @@ class MainRuntimeService:
         return max(1.0, value) if value >= 1 else None
 
     @staticmethod
+    def _tool_auto_background_seconds(config: Any | None) -> float | None:
+        """节点前台等待窗口（秒）：复用 `agents.tool_auto_background_seconds`。
+
+        0/未配置返回 None（节点道按关闭自动交接处理）；配置校验已把非法值
+        归一到 60.0、`<=0` 归一到 0.0。
+        """
+        agents = getattr(config, 'agents', None) if config is not None else None
+        try:
+            value = float(getattr(agents, 'tool_auto_background_seconds', 0) or 0)
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
+
+    @staticmethod
     def _node_dispatch_concurrency_settings(config: Any | None) -> dict[str, int]:
         if config is not None and hasattr(config, 'get_node_dispatch_concurrency'):
             try:
@@ -9125,6 +9464,7 @@ class MainRuntimeService:
         self.node_runner._execution_max_concurrency = config.get_role_max_concurrency('execution')
         self.node_runner._acceptance_max_concurrency = config.get_role_max_concurrency('inspection')
         self.node_runner._tool_default_timeout_seconds = self._tool_default_timeout_seconds(config)
+        self.node_runner._tool_auto_background_seconds = self._tool_auto_background_seconds(config)
         dispatch_limits = self._node_dispatch_concurrency_settings(config)
         self.task_actor_service.configure_node_dispatch_limits(
             execution=dispatch_limits['execution'],
@@ -11805,6 +12145,13 @@ class MainRuntimeService:
             pass
         # S5：governance 审批行（含命令明文）。
         stats['governance_rows'] = await asyncio.to_thread(self._wipe_governance_rows, task_id)
+        # S5b：节点后台作业行与对应 outbox 行按 task_id 进删除清单（§5.3）。
+        try:
+            stats['node_tool_job_rows'] = await asyncio.to_thread(
+                self.store.delete_tool_jobs_for_task, task_id
+            )
+        except Exception:
+            logger.exception('node tool job rows cleanup failed for task {}', task_id)
         # S6：完成标记 + 事件。
         try:
             await asyncio.to_thread(self.store.mark_task_delete_wiped, task_id)
@@ -11834,6 +12181,10 @@ class MainRuntimeService:
         )
         # S7：内存缓存。
         self._discard_task_memory_caches(task_id)
+        try:
+            self._node_background_jobs.discard_task(task_id)
+        except Exception:
+            logger.exception('node background scope discard failed for task {}', task_id)
         try:
             await self.registry.forget_task(task.session_id, task_id)
         except Exception:
@@ -14972,6 +15323,20 @@ class MainRuntimeService:
         return payload.text
 
     async def close(self) -> None:
+        # 服务优雅停机的第一刀：先停节点后台工作并持久化结案/中断（§5.2），
+        # 再关观察与投递，最后才关 store——不依赖 Python 退出时 Popen 自动清理。
+        try:
+            shutdown_result = await self._node_background_jobs.close_all(
+                stop_reason=STOP_REASON_SERVICE_SHUTDOWN,
+                timeout_seconds=DEFAULT_NODE_BACKGROUND_STOP_WAIT_SECONDS,
+            )
+            if shutdown_result.get('failures'):
+                logger.warning(
+                    'node background stop left failures at service close: {}',
+                    shutdown_result,
+                )
+        except Exception:
+            logger.exception('node background jobs close failed')
         loop_tasks = [
             self._command_poller_task,
             self._worker_heartbeat_task,
