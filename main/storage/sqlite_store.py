@@ -694,8 +694,10 @@ class SQLiteTaskStore:
             # 旧表瘦身必须在建索引之前：重建会连索引一起丢弃，随后索引段负责再建。
             for table, legacy in self._LEGACY_BODY_COLUMNS:
                 self._drop_legacy_columns(self._conn, table, legacy)
-            for statement in index_statements:
-                self._conn.execute(statement)
+            # 补列也必须在建索引之前：存量库缺列时，引用新列的索引先建会直接抛
+            # no such column，整个 _setup 失败、ensure 永远跑不到（实盘事故：
+            # idx_tool_jobs_owner_task_status 引用 owner_kind，补列提交之前的
+            # 存量库一重启就主运行时初始化失败、任务加载不出来）。
             self._ensure_column(self._conn, 'task_events', 'payload_is_external', "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(self._conn, 'task_events', 'payload_archive_path', "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(self._conn, 'task_events', 'payload_archive_encoding', "TEXT NOT NULL DEFAULT ''")
@@ -712,6 +714,8 @@ class SQLiteTaskStore:
             self._ensure_column(self._conn, 'tool_jobs', 'node_id', "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(self._conn, 'tool_job_outbox', 'owner_kind', "TEXT NOT NULL DEFAULT 'session'")
             self._retire_inline_execution_trace_summaries(self._conn)
+            for statement in index_statements:
+                self._conn.execute(statement)
             self._mark_legacy_diagnostic_error_rows(self._conn)
             self._node_detail_columns = self._live_columns(self._conn, 'task_node_details')
             self._tool_result_columns = self._live_columns(self._conn, 'task_node_tool_results')
