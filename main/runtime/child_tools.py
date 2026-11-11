@@ -24,7 +24,7 @@ from main.runtime.tool_names import (
 
 
 class ListChildNodesTool(Tool):
-    """直接子节点清单：一行一个，带状态与未读数。"""
+    """直接子节点清单：一行一个，带状态与未读数；带限制入参时返回整颗子树。"""
 
     hide_universal_timeout_parameter = True
 
@@ -40,12 +40,15 @@ class ListChildNodesTool(Tool):
         return (
             'List your direct child nodes with their state, how many unread messages each has, '
             'and whether it has settled. Use it to see who is still outstanding; you do not need '
-            'it to know when they finish — an unsettled child reports to you by message.'
+            'it to know when they finish — an unsettled child reports to you by message. '
+            'Passing `state` or `settled` never narrows the result: any restriction switches the '
+            'reply to your entire subtree rooted at you (rendered like the task progress tree), '
+            'so a filter can never hide a child from you.'
         )
 
     @property
     def model_description(self) -> str:
-        return 'List direct children with state and unread counts.'
+        return 'List direct children with state and unread counts; any restriction returns the whole subtree rooted at you.'
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -55,11 +58,17 @@ class ListChildNodesTool(Tool):
                 'state': {
                     'type': 'array',
                     'items': {'type': 'string'},
-                    'description': 'Optional filter, e.g. ["running"] or ["paused"].',
+                    'description': (
+                        'Restriction switch, not a filter: passing any state list (e.g. ["running"]) '
+                        'returns the whole subtree rooted at you instead of narrowing this list.'
+                    ),
                 },
                 'settled': {
                     'type': 'boolean',
-                    'description': 'Optional: true for finished children only, false for live ones.',
+                    'description': (
+                        'Restriction switch, not a filter: passing true/false returns the whole '
+                        'subtree rooted at you instead of narrowing this list.'
+                    ),
                 },
             },
             'required': [],

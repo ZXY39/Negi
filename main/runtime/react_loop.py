@@ -230,6 +230,8 @@ from main.runtime.tool_names import (
 from main.runtime.turn_overlay import (
     build_turn_only_system_note_message,
 )
+from main.runtime.wait_graph import NODE_WAIT_EXTERNAL_KEY
+from main.types import STATUS_FAILED, STATUS_SUCCESS
 
 _ARTIFACT_REF_PATTERN = re.compile(r'artifact:(?:artifact:)?[A-Za-z0-9_-]+')
 _COMPACT_HISTORY_STEP_MAX_CHARS = 160
@@ -331,6 +333,32 @@ _NODE_TOKEN_COMPRESSION_CHUNK_INSTRUCTION_TEMPLATE = (
     + _NODE_TOKEN_COMPRESSION_GUARDRAIL
 )
 _CONTENT_OPEN_IMAGE_CONTEXT_TEXT = "图片已通过 content_open 打开，视觉内容已附带在本轮上下文中"
+# 未终态子节点列表的稳定块段标：压缩时由运行时机器重算写进压缩块（元数据行之后、
+# 摘要正文之前），不依赖摘要器保真。下一跳起随压缩基线驻留在请求体稳定区，
+# 直到下一次压缩用新快照整段重写——旧段随之一起进可压缩历史，不会叠加两份。
+_NODE_UNSETTLED_CHILDREN_HEADING = (
+    '【未终态子节点列表】（压缩时刻快照，只列你直接派生的子节点，孙节点及以下不列；'
+    '它们的终局仍会以 child_final 送达，不要把它们当成已经结束）'
+)
+_NODE_UNSETTLED_CHILD_GOAL_CHARS = 120
+
+def _render_unsettled_children_section(rows: list[dict[str, Any]] | None) -> str:
+    if not rows:
+        return ''
+    lines = [_NODE_UNSETTLED_CHILDREN_HEADING]
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        node_id = str(row.get('node_id') or '').strip()
+        if not node_id:
+            continue
+        created_at = str(row.get('created_at') or '').strip() or '未知'
+        goal = ' '.join(str(row.get('goal') or '').split())
+        if len(goal) > _NODE_UNSETTLED_CHILD_GOAL_CHARS:
+            goal = goal[:_NODE_UNSETTLED_CHILD_GOAL_CHARS] + '…'
+        state = str(row.get('state') or '').strip() or 'running'
+        lines.append(f'- {node_id} | created_at={created_at} | goal={goal or "（无）"} | state={state}')
+    return '\n'.join(lines) if len(lines) > 1 else ''
 _NODE_CONTRACT_ECHO_REPAIR_MESSAGE = (
     '上一次回复把运行时注入的 `## Runtime Tool Contract` 契约原文复述了一遍。'
     '不要输出、总结或引用这份契约；'
@@ -6923,6 +6951,7 @@ class ReActToolLoop:
         live_notice_ids: set[str] | None = None,
         live_notice_tail_messages: list[dict[str, Any]] | None = None,
         append_notice_context: dict[str, Any] | None = None,
+        unsettled_children: list[dict[str, Any]] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         parts = cls._split_request_messages_for_token_compaction(
             request_messages=request_messages,
@@ -6979,12 +7008,24 @@ class ReActToolLoop:
             # 的原子组"重算，靠的就是这部分仍然在场。
             compacted_payload["retained_raw_message_count"] = len(raw_leftover)
         summary_text = str(compressed_text or "").strip()
+        # 未终态直接子节点快照：压缩时机器重算写进稳定块，不依赖摘要器保真；
+        # 行数进块元数据，取证按 unsettled_child_count 读。
+        unsettled_rows = [
+            dict(row)
+            for row in list(unsettled_children or [])
+            if isinstance(row, dict) and str(row.get('node_id') or '').strip()
+        ]
+        if unsettled_rows:
+            compacted_payload["unsettled_child_count"] = len(unsettled_rows)
         # 块形态与前门一致：首行前缀、第二行 JSON 元数据、空行后接摘要正文。元数据行必须
         # 能单独解析回来——落盘点要靠它读收口水位线，写成转义字面量就等于永远读不到。
         block_content = (
             f"{_NODE_TOKEN_COMPACT_MARKER}\n"
             f"{json.dumps(compacted_payload, ensure_ascii=False, sort_keys=True)}"
         )
+        unsettled_section = _render_unsettled_children_section(unsettled_rows)
+        if unsettled_section:
+            block_content = f"{block_content}\n\n{unsettled_section}"
         if summary_text:
             block_content = f"{block_content}\n\n{summary_text}"
         compacted_block = {"role": "assistant", "content": block_content.strip()}
@@ -7027,6 +7068,61 @@ class ReActToolLoop:
                     }
                 )
         return records
+
+    def _node_unsettled_direct_children(self, *, task_id: str, node_id: str) -> list[dict[str, str]]:
+        """压缩稳定块用的未终态直接子节点快照：只列自己派生的直接子节点，孙辈及以下不列。
+
+        终态（success/failed）不列——它们的终局已由 `child_final` 送达；state 与
+        NodeRunner 的 `_node_state_label` 同口径：paused > waiting > standby > running。
+        取数失败返回空表：列表是防遗忘的观测段，不阻断压缩本身。
+        """
+        store = getattr(self._log_service, '_store', None)
+        list_nodes = getattr(store, 'list_nodes', None) if store is not None else None
+        if not callable(list_nodes):
+            return []
+        normalized_node_id = str(node_id or '').strip()
+        normalized_task_id = str(task_id or '').strip()
+        try:
+            records = list(list_nodes(normalized_task_id) or [])
+        except Exception:
+            return []
+        rows: list[dict[str, str]] = []
+        for item in records:
+            if str(getattr(item, 'parent_node_id', '') or '').strip() != normalized_node_id:
+                continue
+            status = str(getattr(item, 'status', '') or '').strip().lower()
+            if status in {STATUS_SUCCESS, STATUS_FAILED}:
+                continue
+            metadata = getattr(item, 'metadata', None)
+            if bool(getattr(item, 'is_paused', False) or getattr(item, 'pause_requested', False)):
+                state = 'paused'
+            else:
+                try:
+                    frame = self._runtime_frame(
+                        normalized_task_id,
+                        str(item.node_id or '').strip(),
+                    )
+                except Exception:
+                    frame = None
+                phase = str((frame or {}).get('phase') or '')
+                if phase in {'waiting_explicit', 'waiting_acceptance'}:
+                    state = 'waiting'
+                elif is_continuous_metadata(metadata) and bool(
+                    (metadata or {}).get(NODE_WAIT_EXTERNAL_KEY)
+                ):
+                    state = 'standby'
+                else:
+                    state = 'running'
+            rows.append(
+                {
+                    'node_id': str(item.node_id or '').strip(),
+                    'created_at': str(getattr(item, 'created_at', '') or '').strip(),
+                    'goal': str(getattr(item, 'goal', '') or '').strip(),
+                    'state': state,
+                }
+            )
+        rows.sort(key=lambda row: (row['created_at'], row['node_id']))
+        return rows
 
     def _node_append_notice_context(self, *, node_id: str) -> dict[str, Any]:
         store = getattr(self._log_service, '_store', None)
@@ -7317,6 +7413,10 @@ class ReActToolLoop:
                 preserved_raw_messages=list(helper_call.get('deferred_raw_messages') or []),
                 live_notice_ids=live_notice_ids,
                 append_notice_context=self._node_append_notice_context(node_id=node_id),
+                unsettled_children=self._node_unsettled_direct_children(
+                    task_id=task_id,
+                    node_id=node_id,
+                ),
             )
             if not rewritten:
                 return {
@@ -8395,6 +8495,10 @@ class ReActToolLoop:
                     preserved_raw_messages=list(compression_helper_call.get('deferred_raw_messages') or []),
                     live_notice_ids=live_notice_ids,
                     append_notice_context=self._node_append_notice_context(node_id=node_id),
+                    unsettled_children=self._node_unsettled_direct_children(
+                        task_id=task_id,
+                        node_id=node_id,
+                    ),
                 )
                 request_messages = rewritten_messages
                 pruned_segments = self._prune_node_notice_context_segments(

@@ -230,6 +230,28 @@ def _spawn_acceptance_goal(goal: str) -> str:
     return _SPAWN_ACCEPTANCE_GOAL_PREFIX + str(goal or '')
 
 
+def _subtree_progress_line(row: dict[str, Any], *, level: int) -> str:
+    """整颗子树视图的一行文本，呈现对齐前门 `task_progress` 的树文本：
+    `|-` 缩进 + `(id,状态,目标...)`；验收节点沿用它的 `([验收...])` 括号形态。"""
+    prefix = '' if level == 0 else '  ' * (level - 1) + '|-'
+    state = str(row.get('state') or '').strip() or 'running'
+    goal = ' '.join(str(row.get('goal') or '').split())
+    if not goal:
+        goal = '暂无目标'
+    if str(row.get('node_kind') or '').strip().lower() == 'acceptance':
+        accepted = str(row.get('accepted_node_id') or '').strip() or '?'
+        label = f'([验收:{accepted}] {row["node_id"]},{state},{goal[:80]}'
+    else:
+        label = f'({row["node_id"]},{state},{goal[:80]}'
+    pause_reason = str(row.get('pause_reason') or '').strip()
+    if pause_reason:
+        label = f'{label},暂停原因:{pause_reason}'
+    unread = int(row.get('unread_count') or 0)
+    if unread > 0:
+        label = f'{label},未读:{unread}'
+    return f'{prefix}{label})'
+
+
 def _spec_requires_acceptance(spec: SpawnChildSpec) -> bool:
     """连续节点不允许验收（机制层，排在最前）；其余按显式开关，未给时看 `acceptance_prompt`。
 
@@ -2947,6 +2969,16 @@ class NodeRunner:
             if isinstance(state, (list, tuple, set))
             else set()
         )
+        if wanted or settled is not None:
+            # 限制入参不缩水：带任何过滤调用时，返回值改为以自己为根的一整颗子树
+            # （信息量与呈现对齐前门 task_progress 的树文本），过滤条件只随返回回显、
+            # 不参与选行——过滤不允许把任何子节点藏出模型视野。
+            return self._subtree_progress_view(
+                task_id=task_id,
+                node=node,
+                requested_state=sorted(wanted),
+                requested_settled=settled,
+            )
         rows: list[dict[str, Any]] = []
         records = self._task_node_records(task_id)
         node_map = {str(item.node_id or '').strip(): item for item in records}
@@ -2965,6 +2997,95 @@ class NodeRunner:
             brief['controllable'] = relationship_node_kind(child) == 'execution'
             rows.append(brief)
         return {'children': rows, 'count': len(rows)}
+
+    def _subtree_progress_view(
+        self,
+        *,
+        task_id: str,
+        node: NodeRecord,
+        requested_state: list[str] | None = None,
+        requested_settled: Any = None,
+    ) -> dict[str, Any]:
+        """限制入参的 `list_child_nodes` 返回：以自己为根的整颗子树。
+
+        呈现对齐前门 `task_progress` 的树文本（一行一节点、`|-` 缩进、
+        `(id,状态,目标...)`），信息量仍取节点行 + 运行帧实测；结构化行与树文本
+        同源。节点总数受 `MAX_TREE_NODES` 封顶，超限置 `truncated` 并给指针。
+        """
+        records = self._task_node_records(task_id)
+        node_map = {str(item.node_id or '').strip(): item for item in records}
+        children_by_parent: dict[str, list[NodeRecord]] = {}
+        for item in records:
+            parent_id = str(getattr(item, 'parent_node_id', '') or '').strip()
+            children_by_parent.setdefault(parent_id, []).append(item)
+        for bucket in children_by_parent.values():
+            bucket.sort(key=lambda item: (str(item.created_at or ''), str(item.node_id or '')))
+        sender_id = str(node.node_id or '').strip()
+        rows: list[dict[str, Any]] = []
+        tree_lines: list[str] = []
+        truncated = False
+
+        def emit(item: NodeRecord, *, level: int, relation: str) -> None:
+            nonlocal truncated
+            if truncated:
+                return
+            if len(rows) >= self.MAX_TREE_NODES:
+                truncated = True
+                return
+            brief = self._node_brief(task_id, item)
+            item_kind = relationship_node_kind(item)
+            _, reject_reason = message_relation(sender=node, target=item, node_map=node_map)
+            is_self = str(item.node_id or '').strip() == sender_id
+            row = {
+                'node_id': brief['node_id'],
+                'level': level,
+                'relation': 'self' if is_self else relation,
+                'state': brief['state'],
+                'state_detail': brief['state_detail'],
+                'node_kind': brief['node_kind'],
+                'goal': brief['goal'],
+                'settled': brief['settled'],
+                'unread_count': brief['unread_count'],
+                'pause_reason': brief['pause_reason'],
+                'acceptance': item_kind == 'acceptance' or execution_has_acceptance(item, node_map),
+                'accepted_node_id': accepted_node_id(item) if item_kind == 'acceptance' else '',
+                'messageable': not is_self and not reject_reason,
+                'controllable': (
+                    item_kind == 'execution'
+                    and str(getattr(item, 'parent_node_id', '') or '').strip() == sender_id
+                ),
+            }
+            rows.append(row)
+            tree_lines.append(_subtree_progress_line(row, level=level))
+
+        def walk(parent_id: str, level: int) -> None:
+            if truncated:
+                return
+            for child in children_by_parent.get(parent_id, []):
+                emit(child, level=level, relation='child' if level == 1 else 'descendant')
+                walk(str(child.node_id or '').strip(), level + 1)
+
+        emit(node, level=0, relation='self')
+        walk(sender_id, 1)
+        return {
+            'ok': True,
+            'root': sender_id,
+            'mode': 'full_subtree',
+            'requested_filter': {
+                'state': list(requested_state or []),
+                'settled': requested_settled,
+            },
+            'filter_applied': False,
+            'note': (
+                'Restrictions never narrow this view: the reply is your whole subtree '
+                '(task-progress style), so a filter cannot hide a child from you.'
+            ),
+            'nodes': rows,
+            'count': len(rows),
+            'tree_text': '\n'.join(tree_lines),
+            'truncated': truncated,
+            'pointer': 'use read_child_progress on a node_id for detail' if truncated else '',
+        }
 
     async def _read_child_progress(
         self,
