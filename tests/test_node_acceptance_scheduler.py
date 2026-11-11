@@ -760,6 +760,126 @@ class TestAcceptanceActivationGate:
         assert service.store.get_node(CHILD).is_paused is False
 
 
+class TestAcceptanceImmediateDispatch:
+    """子节点中途提交时，验收必须立即起跑，不能等根回合收口后的扫描。
+
+    实盘 task:3e62b489c5aa：根节点 spawn 后继续跑自己的长回合，run_task 卡在
+    execute_node(root)，派发扫描迟迟不跑；执行子节点提交的验收节点 0 次模型调用、
+    无帧，delivered 交接单永不消费。spawn 用 dispatch_node_callback 立即起跑执行
+    子节点，验收交接也要对称直派。
+    """
+
+    @pytest.mark.asyncio
+    async def test_child_submission_immediately_dispatches_acceptance(self, tmp_path, monkeypatch):
+        service = _service(tmp_path)
+        try:
+            _seed(service)
+            _capture_calls(service, monkeypatch)
+            # 被验节点此刻仍在被驱动（正在提交），派发扫描的 1460 闸会跳过验收；
+            # 直派必须绕过它，因为提交此刻已闭合。
+            dispatcher = _GateDispatcher({CHILD: True})
+            service.task_actor_service._dispatchers[TASK] = dispatcher
+            task = service.store.get_task(TASK)
+            result = NodeFinalResult(
+                status='success',
+                delivery_status='final',
+                summary='child done',
+                answer='the answer',
+                evidence=[],
+                remaining_work=[],
+                blocking_reason='',
+                submission_id='submission:immediate',
+            )
+
+            handled = await service.node_runner._maybe_start_acceptance_handshake(
+                task=task, node=service.store.get_node(CHILD), result=result,
+            )
+            await _settle(service)
+
+            assert handled is not None and handled.delivery_status == 'partial'
+            assert ACCEPTANCE in dispatcher.scheduled
+        finally:
+            service.task_actor_service._dispatchers.pop(TASK, None)
+            await service.close()
+
+    @pytest.mark.asyncio
+    async def test_root_submission_leaves_final_acceptance_to_the_scan(self, tmp_path, monkeypatch):
+        # 根最终验收不直派：根回合结束即进调度循环，扫描随即派发，无饥饿；
+        # 保持其现有恢复车道不变。
+        service = _service(tmp_path)
+        try:
+            _seed(service)
+            _capture_calls(service, monkeypatch)
+            service.store.update_task(
+                TASK,
+                lambda r: r.model_copy(
+                    update={'metadata': {**dict(r.metadata or {}),
+                                         'final_acceptance': {'required': True, 'node_id': ACCEPTANCE, 'prompt': 'verify'}}}
+                ),
+            )
+            service.store.update_node(
+                ACCEPTANCE,
+                lambda r: r.model_copy(
+                    update={'metadata': {**dict(r.metadata or {}), 'accepted_node_id': ROOT, 'final_acceptance': True}}
+                ),
+            )
+            dispatcher = _GateDispatcher({})
+            service.task_actor_service._dispatchers[TASK] = dispatcher
+            task = service.store.get_task(TASK)
+            result = NodeFinalResult(
+                status='success',
+                delivery_status='final',
+                summary='root done',
+                answer='a',
+                evidence=[],
+                remaining_work=[],
+                blocking_reason='',
+            )
+
+            await service.node_runner._maybe_start_acceptance_handshake(
+                task=task, node=service.store.get_node(ROOT), result=result,
+            )
+            await _settle(service)
+
+            assert ACCEPTANCE not in dispatcher.scheduled
+        finally:
+            service.task_actor_service._dispatchers.pop(TASK, None)
+            await service.close()
+
+    @pytest.mark.asyncio
+    async def test_immediate_dispatch_without_dispatcher_falls_back_to_requeue(self, tmp_path, monkeypatch):
+        # 没有活跃 dispatcher（跨进程/web 角色）：直派静默退回，requeue 仍发出。
+        service = _service(tmp_path)
+        try:
+            _seed(service)
+            _capture_calls(service, monkeypatch)
+            requeued: list[str] = []
+            monkeypatch.setattr(
+                service.node_runner, '_request_acceptance_dispatch',
+                lambda tid: requeued.append(tid),
+            )
+            task = service.store.get_task(TASK)
+            result = NodeFinalResult(
+                status='success',
+                delivery_status='final',
+                summary='child done',
+                answer='a',
+                evidence=[],
+                remaining_work=[],
+                blocking_reason='',
+            )
+
+            handled = await service.node_runner._maybe_start_acceptance_handshake(
+                task=task, node=service.store.get_node(CHILD), result=result,
+            )
+            await _settle(service)
+
+            assert handled is not None
+            assert requeued == [TASK]
+        finally:
+            await service.close()
+
+
 class TestTerminalIsAbsorbing:
     @pytest.mark.asyncio
     async def test_a_late_turn_failure_does_not_rewrite_a_successful_node(self, tmp_path):

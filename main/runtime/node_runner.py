@@ -2539,10 +2539,30 @@ class NodeRunner:
                 f'acceptance handoff not delivered: task={task.task_id} '
                 f'acceptance={acceptance.node_id} result={delivered!r}'
             )
-        # 交接单已落箱，紧接着把任务重新入队跑一趟：验收派发只发生在任务演员的可派发
-        # 扫描里，而交接信不叫醒验收节点。没有这一句，提交之后要等下一次任意事件才有
-        # 人来派验收（实盘 task:4555863a6a49：5 台验收在提交后 38～41 分钟才被同一趟
-        # 扫描一次性拉起）。
+        # 子节点验收立即直派，与 spawn 立即起跑执行子节点对称。验收节点不由消息
+        # 唤醒（wake=False），激活只靠任务演员的可派发扫描看握手态；而扫描只在调度
+        # 循环里周期跑——根节点长跑时 run_task 卡在 execute_node(root)，子节点中途
+        # 提交的验收会一直饿到根回合收口，重排又被单飞调度器推迟（实盘
+        # task:3e62b489c5aa：验收 0 次模型调用、无帧，delivered 交接单永不消费）。
+        # 提交此刻已闭合（握手 waiting_acceptance + result_ref），冻结谓词放行就给
+        # 验收节点一条 entry，不等扫描。根最终验收不走这条直派道：根回合结束即进
+        # 调度循环，扫描随即派发，无饥饿，保持其现有恢复车道不变。
+        if str(node.node_id or '').strip() != str(task.root_node_id or '').strip():
+            if not self.acceptance_dispatch_block_reason(task=task, node=acceptance):
+                dispatch_callback = getattr(self, 'dispatch_node_callback', None)
+                if callable(dispatch_callback):
+                    try:
+                        dispatch_callback(task.task_id, acceptance.node_id)
+                    except Exception as exc:  # noqa: BLE001 - 直派失败由可派发扫描兜底
+                        logger.warning(
+                            'title=acceptance_immediate_dispatch_failed task={} acceptance={} error={}',
+                            task.task_id,
+                            acceptance.node_id,
+                            describe_exception(exc),
+                        )
+        # 重新入队保留作兜底：直派没有活跃 dispatcher（跨进程/web 角色）时，仍由
+        # 下一趟任务演员的可派发扫描拉起验收（实盘 task:4555863a6a49：5 台验收在
+        # 提交后 38～41 分钟才被同一趟扫描一次性拉起）。
         self._request_acceptance_dispatch(task.task_id)
         self._log_service.refresh_task_view(task.task_id, mark_unread=True)
         return NodeFinalResult(
