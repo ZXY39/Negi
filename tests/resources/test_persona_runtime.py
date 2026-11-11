@@ -93,8 +93,8 @@ def test_persona_note_survives_orphan_sweep_reconcile_and_doctor(tmp_path: Path)
         _seed_row(manager)
         manager.set_persona("你是玲音。")
 
-        removed = manager._cleanup_orphan_notes_locked()
-        assert PERSONA_NOTE_REF not in removed
+        records = manager._cleanup_orphan_notes_locked()
+        assert PERSONA_NOTE_REF not in {str(record["note_ref"]) for record in records}
         assert (tmp_path / "memory" / "notes" / f"{PERSONA_NOTE_REF}.md").exists()
 
         reconciled = manager.reconcile_notes(delete_orphans=True)

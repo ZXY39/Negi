@@ -386,9 +386,9 @@ def test_an_ordinary_note_owned_by_a_retired_memory_survives_the_sweep(tmp_path:
         _write_category(manager, "note_tools", "工具技巧\n\n## 备注\n略\n")
         _retire(manager, [memory_id], "note_tools")
 
-        removed = manager._cleanup_orphan_notes_locked()
+        records = manager._cleanup_orphan_notes_locked()
 
-        assert removed == []
+        assert all(record["removed"] != "true" for record in records)
         assert note_path.exists()
     finally:
         manager.close()

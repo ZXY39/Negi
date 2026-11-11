@@ -111,7 +111,14 @@ def test_orphan_sweep_uses_store_ownership_not_rendered_text(tmp_path: Path) -> 
         manager.close()
 
 
-def test_sweep_still_removes_truly_unreferenced_notes(tmp_path: Path) -> None:
+def test_sweep_keeps_unreferenced_notes_readable_and_reports_them(tmp_path: Path) -> None:
+    """A file no row ever owns stays on disk.
+
+    The read paths glob the directory, so a kept orphan is still readable by the name
+    prose mentions, and a later batch can claim it with a row's `note_ref`. Sweeping
+    it the moment it appears is how a note vanished seconds after the same commit
+    wrote it; the sweep therefore only reports this class.
+    """
     module = _load_module()
     manager = module.MemoryManager(tmp_path, _cfg())
     try:
@@ -135,10 +142,15 @@ def test_sweep_still_removes_truly_unreferenced_notes(tmp_path: Path) -> None:
             path.write_text(f"{ref} body\n", encoding="utf-8")
         manager._rebuild_memory_snapshot_from_sqlite(now_iso="2026-04-17T10:00:01+08:00")
 
-        manager._cleanup_orphan_notes_locked()
+        records = manager._cleanup_orphan_notes_locked()
 
+        by_ref = {str(item["note_ref"]): item for item in records}
         assert (tmp_path / "memory" / "notes" / "note_kept.md").exists()
-        assert not (tmp_path / "memory" / "notes" / "note_gone.md").exists()
+        assert (tmp_path / "memory" / "notes" / "note_gone.md").exists(), (
+            "an unowned note is kept on disk; only memory_deleted leaves the namespace"
+        )
+        assert by_ref["note_gone"]["reason"] == "unreferenced"
+        assert by_ref["note_gone"]["removed"] == "false"
     finally:
         manager.close()
 
@@ -146,7 +158,13 @@ def test_sweep_still_removes_truly_unreferenced_notes(tmp_path: Path) -> None:
 def test_reaping_is_recorded_with_the_reason_ownership_went_away(tmp_path: Path) -> None:
     """A note deletion cannot be undone and currently leaves no trace anywhere. The
     terminal ledger has to say which file went away and why, or "were any notes swept
-    by mistake" stays unanswerable."""
+    by mistake" stays unanswerable.
+
+    Only `memory_deleted` removes the file: an explicit row deletion retires the
+    experience, so the note follows. `ref_dropped` keeps the file on disk and reports
+    it, because the rewrite may have dropped the ref without meaning to orphan the
+    note - the model is told, and a later batch can claim the file back.
+    """
     module = _load_module()
     manager = module.MemoryManager(tmp_path, _cfg())
     try:
@@ -202,9 +220,149 @@ def test_reaping_is_recorded_with_the_reason_ownership_went_away(tmp_path: Path)
 
         reasons = {str(item["note_ref"]): str(item["reason"]) for item in validated.reaped_notes}
         assert reasons.get("note_doomed") == "memory_deleted"
-        assert reasons.get("note_old") == "ref_dropped"
         assert not (tmp_path / "memory" / "notes" / "note_doomed.md").exists()
-        assert not (tmp_path / "memory" / "notes" / "note_old.md").exists()
+
+        kept = {str(item["note_ref"]): str(item["reason"]) for item in validated.kept_orphan_notes}
+        assert kept.get("note_old") == "ref_dropped"
+        assert (tmp_path / "memory" / "notes" / "note_old.md").exists()
+        # The feedback reaches the next agent turn, not the confirm receipt: the commit
+        # lands after the turn, so the user prompt is the model's first read afterward.
+        assert any("note_old" in line for line in manager._drain_note_feedback_lines())
+        assert manager._drain_note_feedback_lines() == []
+    finally:
+        manager.close()
+
+
+def test_sweep_never_removes_a_note_the_same_commit_wrote(tmp_path: Path) -> None:
+    """Exemption guard for the one failure that motivated the gate: a batch deletes a
+    row and upserts the same ref in one breath - the write must win over the sweep."""
+    module = _load_module()
+    manager = module.MemoryManager(tmp_path, _cfg())
+    try:
+        manager._memory_repo.apply_mutation(
+            adds=[
+                {
+                    "content": "Owning rule",
+                    "minimal_memory": "own->min",
+                    "decision_source": "user",
+                    "note_ref": "note_fresh",
+                }
+            ],
+            rewrites=None,
+            deletes=None,
+            inspired_memory_ids=None,
+            now_iso="2026-04-17T10:00:00+08:00",
+        )
+        by_body = {str(r["memory_body"]): str(r["memory_id"]) for r in manager._memory_repo.list_memories()}
+        note_path = tmp_path / "memory" / "notes" / "note_fresh.md"
+        note_path.parent.mkdir(parents=True, exist_ok=True)
+        note_path.write_text("note_fresh body\n", encoding="utf-8")
+
+        validated = module._MemoryValidatedWrite(
+            document_text="",
+            note_writes={"note_fresh": "note_fresh rewritten body\n"},
+            note_refs_written=["note_fresh"],
+            memory_chars_after=0,
+            document_preview="",
+            adds=[],
+            rewrites=[],
+            deletes=[by_body["Owning rule"]],
+            note_upserts={},
+            inspired_memory_ids=[],
+            noop_reason="",
+        )
+        manager._commit_validated_write(validated)
+
+        reasons = {str(item["note_ref"]): str(item["reason"]) for item in validated.reaped_notes}
+        assert reasons == {}, "a note this commit wrote must not be reaped by this commit"
+        assert note_path.read_text(encoding="utf-8") == "note_fresh rewritten body\n"
+    finally:
+        manager.close()
+
+
+def test_note_upsert_requires_a_claiming_row_or_an_existing_owner(tmp_path: Path) -> None:
+    """The claim gate: an upsert whose ref nothing owns is refused with the fix spelled
+    out, so a batch can never produce a note whose body outlives any reference to it."""
+    module = _load_module()
+    manager = module.MemoryManager(tmp_path, _cfg())
+    try:
+        owned = {"note_already_owned"}
+        session = module._MemoryToolSession(
+            snapshot_text="",
+            notes_dir=manager.notes_dir,
+            index_dir=manager.index_dir,
+            owned_note_refs_fn=lambda: set(owned),
+        )
+        (manager.notes_dir / "note_already_owned.md").write_text("owned body\n", encoding="utf-8")
+
+        refused = session.apply_batch(
+            adds=[],
+            note_upserts={"note_unclaimed": "body\n"},
+        )
+        assert refused["ok"] is False
+        assert "note_unclaimed" in refused["errors"]["note_upserts.note_unclaimed"]
+        assert "note_ref='note_unclaimed'" in refused["errors"]["note_upserts.note_unclaimed"]
+
+        accepted = session.apply_batch(
+            adds=[
+                {
+                    "content": "Rule carrying the note",
+                    "minimal_memory": "rule->min",
+                    "decision_source": "user",
+                    "note_ref": "note_unclaimed",
+                }
+            ],
+            note_upserts={"note_unclaimed": "body\n"},
+        )
+        assert accepted["ok"] is True
+
+        accepted_owned = session.apply_batch(
+            adds=[],
+            note_upserts={"note_already_owned": "rewritten body\n"},
+        )
+        assert accepted_owned["ok"] is True
+
+        accepted_persona = session.apply_batch(
+            adds=[],
+            note_upserts={module.PERSONA_NOTE_REF: "persona body\n"},
+        )
+        assert accepted_persona["ok"] is True
+    finally:
+        manager.close()
+
+
+def test_doctor_reports_prose_mentions_no_file_answers(tmp_path: Path) -> None:
+    """The block can advertise a name whose file is gone; doctor has to say so instead
+    of leaving readers to discover it as a load failure."""
+    module = _load_module()
+    manager = module.MemoryManager(tmp_path, _cfg())
+    try:
+        manager._memory_repo.apply_mutation(
+            adds=[
+                {
+                    "content": "选题前先读 note_play_gone_benchmarks 与 note_upserts 工具说明",
+                    "minimal_memory": "选题->对标库",
+                    "decision_source": "user",
+                }
+            ],
+            rewrites=None,
+            deletes=None,
+            inspired_memory_ids=None,
+            now_iso="2026-04-17T10:00:00+08:00",
+        )
+        manager._rebuild_memory_snapshot_from_sqlite(now_iso="2026-04-17T10:00:01+08:00")
+
+        report = manager.doctor_report()
+        dangling = report["dangling_note_mentions"]
+        assert list(dangling) == ["note_play_gone_benchmarks"], (
+            "the structural token note_upserts is vocabulary, not a note mention"
+        )
+        check = next(item for item in report["checks"] if item["name"] == "dangling_note_mentions")
+        assert check["ok"] is False
+
+        (manager.notes_dir / "note_play_gone_benchmarks.md").write_text("restored\n", encoding="utf-8")
+        report = manager.doctor_report()
+        assert report["dangling_note_mentions"] == {}
     finally:
         manager.close()
 

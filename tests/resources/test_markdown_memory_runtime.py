@@ -3445,7 +3445,7 @@ async def test_run_due_batch_once_preserves_note_ref_present_only_in_minimal_mem
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["add", "rewrite"])
-async def test_run_due_batch_once_moves_note_link_and_reaps_the_dropped_note(
+async def test_run_due_batch_once_moves_note_link_and_keeps_the_dropped_note(
     tmp_path: Path,
     monkeypatch,
     mode: str,
@@ -3524,7 +3524,10 @@ async def test_run_due_batch_once_moves_note_link_and_reaps_the_dropped_note(
         assert f"(note: {module.note_handle('note_new')})" in manager.snapshot_text()
         assert module.note_handle("old_note") not in manager.snapshot_text()
         assert note_new_path.exists()
-        assert not old_note_path.exists()
+        # A rewrite that moves the link is `ref_dropped`, not `memory_deleted`: the
+        # dropped note stays on disk - readable by name and claimable by a later batch -
+        # and the next agent turn is told, instead of the file vanishing silently.
+        assert old_note_path.exists()
     finally:
         manager.close()
 

@@ -64,6 +64,9 @@ _HANDLE_TOKEN_RE = re.compile(
     rf"^[{re.escape(ORDINARY_HANDLE_PREFIX)}{re.escape(CATEGORY_HANDLE_PREFIX)}][0-9a-f]{{5}}$"
 )
 _HANDLE_SHAPED_NOTE_REF_RE = re.compile(rf"^note_({_HANDLE_TOKEN_RE.pattern[1:-1]})$")
+# A note name quoted in prose (row body or note body). Ownership never comes from these
+# tokens - the doctor uses them only to detect mentions no file answers.
+_PROSE_NOTE_TOKEN_RE = re.compile(r"\bnote_[a-z0-9_]+\b")
 
 # 模型看到的是带行号的正文（`18| 261018:...`），它抄 content 时会把这两段一起带回来。日期和
 # 行号都由系统维护，正文里出现就是重影：`261018:261018:...`。剥掉比打回好——打回要模型再读一遍
@@ -656,6 +659,11 @@ class _MemoryToolSession:
     # Refs this submission auto-corrected. Returned with the staged batch so the model
     # learns the caller's name was wrong without spending a whole repair round on it.
     corrections: list[dict[str, str]] = field(default_factory=list)
+    # Live ownership lookup for the note-claim gate: a note_upserts ref with no owner
+    # and no claim in this batch would land as a file nothing references - the exact
+    # shape the orphan sweep once reaped seconds after writing it. Queried per call so
+    # a later batch in the same turn sees the ownership earlier batches created.
+    owned_note_refs_fn: Callable[[], set[str]] | None = None
 
     def note_directories(self) -> list[Path]:
         return [self.index_dir, self.notes_dir] if self.index_dir is not None else [self.notes_dir]
@@ -974,6 +982,19 @@ class _MemoryToolSession:
         if not isinstance(raw_note_upserts, dict):
             errors["note_upserts"] = "note_upserts must be an object"
         else:
+            # A note exists in the block only through a row's `note_ref` column, so an
+            # upsert whose ref no row owns is a write into the void: the model pays for
+            # the body, nothing ever renders the handle, and before the sweep kept
+            # unowned files the same commit deleted the note it had just written
+            # (2026-11-11 story-series benchmarks). Ownership must therefore be
+            # established in the same breath as the write: either some row already owns
+            # the ref, or an add/rewrite in this batch claims it.
+            claimed_note_refs = {
+                str(item.get("note_ref") or "").strip()
+                for item in [*normalized_adds, *normalized_rewrites]
+                if str(item.get("note_ref") or "").strip()
+            }
+            owned_note_refs = set(self.owned_note_refs_fn()) if self.owned_note_refs_fn else set()
             for raw_ref, raw_body in raw_note_upserts.items():
                 ref = self._normalize_note_ref(
                     str(raw_ref or "").strip(),
@@ -1005,6 +1026,22 @@ class _MemoryToolSession:
                     errors[f"note_upserts.{ref}"] = (
                         f"{ref} is already a category note under memory/index/; "
                         "an ordinary note must use another name"
+                    )
+                    continue
+                # The persona note is owned by the reserved name, not by a memory row.
+                # An existing file passes untouched: overwriting a body on disk (owned
+                # or an orphan/legacy note) creates no new unowned file - the gate only
+                # refuses the ref this write would bring into existence unclaimed.
+                if (
+                    ref != PERSONA_NOTE_REF
+                    and not self._note_exists(ref)
+                    and ref not in claimed_note_refs
+                    and ref not in owned_note_refs
+                ):
+                    errors[f"note_upserts.{ref}"] = (
+                        f"{ref} has no owning memory row and no add/rewrite in this batch claims it; "
+                        f"set note_ref='{ref}' on one add or rewrite in this batch "
+                        "(a note no row owns never shows up in the block, so nobody can read it)"
                     )
                     continue
                 normalized_note_upserts[ref] = body
@@ -1348,6 +1385,10 @@ class _MemoryValidatedWrite:
     # Note files this batch deleted because the store stopped owning them, each with
     # the reason the ownership went away.
     reaped_notes: list[dict[str, Any]] = field(default_factory=list)
+    # Note files ownership no longer claims but the sweep deliberately kept on disk
+    # (`ref_dropped` / `unreferenced`): readable by name, claimable by a later batch,
+    # and invisible in the block until a row's `note_ref` points at them.
+    kept_orphan_notes: list[dict[str, Any]] = field(default_factory=list)
     # Only an explicit operator legacy import may load sqlite from a document.
     adopt_document: bool = False
     # Consolidation lane: category notes to write and the rows that retire into them.
@@ -2221,6 +2262,11 @@ class MemoryManager:
         self._io_lock = threading.RLock()
         self._last_stale_review_sweep_at = 0.0
         self._processed_request_ids_cache: tuple[tuple[int, int], set[str]] | None = None
+        # Post-commit note sweep outcomes (reaped / kept orphans) waiting for the next
+        # memory-agent turn. The commit happens after the model's turn ends, so the
+        # confirm receipt can never carry them; the next turn's user prompt is the
+        # first thing the model reads after its notes changed status behind its back.
+        self._note_feedback_lines: list[str] = []
         self._worker_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._strategy = MemoryStrategyV2(config)
@@ -2861,6 +2907,64 @@ class MemoryManager:
             return False
         return resolved == PERSONA_NOTE_REF
 
+    def _dangling_prose_note_refs(self) -> dict[str, list[str]]:
+        """note_-shaped names prose mentions that no note file answers.
+
+        Ownership is the `note_ref` column, so a body mentioning a note by name binds
+        nothing - but readers still follow the name (`read_note` globs the directory),
+        and a dangling mention is the exact shape the story-series benchmarks incident
+        surfaced as: the block kept advertising a name whose file had been swept.
+        Structural vocabulary (note_ref / note_upserts / ...) is excluded so an entry
+        describing the memory system itself does not count as a note mention.
+        """
+        reserved = {
+            "note_ref",
+            "note_refs",
+            "note_upserts",
+            "note_edits",
+            "note_reaped",
+            "note_writes",
+            "note_stage",
+            "note_staged",
+            "note_index",
+            "note_handle",
+            "note_handles",
+            "note_file",
+            "note_name",
+            "note_names",
+        }
+        dangling: dict[str, list[str]] = {}
+        try:
+            rows = self._memory_repo.list_memories()
+        except Exception:
+            rows = []
+        bodies: list[tuple[str, str]] = [
+            (str(row.get("memory_body") or ""), "row") for row in rows
+        ]
+        for directory, source in ((self.notes_dir, "note"), (self.index_dir, "category")):
+            for path in directory.glob("*.md"):
+                try:
+                    bodies.append((path.read_text(encoding="utf-8"), source))
+                except OSError:
+                    continue
+        for text, source in bodies:
+            for match in _PROSE_NOTE_TOKEN_RE.finditer(str(text)):
+                token = match.group(0)
+                if token in reserved or token == PERSONA_NOTE_REF:
+                    continue
+                if self._note_file_exists_anywhere(token):
+                    continue
+                sources = dangling.setdefault(token, [])
+                if source not in sources:
+                    sources.append(source)
+        return dict(sorted(dangling.items()))
+
+    def _note_file_exists_anywhere(self, ref: str) -> bool:
+        for directory in (self.notes_dir, self.index_dir):
+            if (directory / note_file_name(ref)).exists():
+                return True
+        return False
+
     def doctor_report(
         self,
         *,
@@ -2903,6 +3007,7 @@ class MemoryManager:
         orphan_notes = sorted(
             ref for ref in note_files if ref not in note_refs and ref != PERSONA_NOTE_REF
         )
+        dangling_mentions = self._dangling_prose_note_refs()
         category_rows, broken_categories = self._consolidation_categories()
         name_collisions = self._note_name_collisions()
         queue_rows, queue_parse_errors = self._read_queue_requests_with_diagnostics()
@@ -2952,6 +3057,15 @@ class MemoryManager:
                 "detail": "none" if not orphan_notes else ", ".join(orphan_notes),
             },
             {
+                "name": "dangling_note_mentions",
+                "ok": not dangling_mentions,
+                "detail": "none"
+                if not dangling_mentions
+                else ", ".join(
+                    f"{ref}({'+'.join(sources)})" for ref, sources in dangling_mentions.items()
+                ),
+            },
+            {
                 "name": "broken_category_links",
                 "ok": not broken_categories,
                 "detail": "none" if not broken_categories else ", ".join(broken_categories),
@@ -2999,6 +3113,7 @@ class MemoryManager:
             "memory_note_refs": note_refs,
             "missing_note_refs": missing_note_refs,
             "orphan_notes": orphan_notes,
+            "dangling_note_mentions": dangling_mentions,
             "persona_note_present": self._persona_note_path().exists(),
             "persona_note_chars": len(self.persona_text()),
             "consolidated_categories": len(category_rows),
@@ -3743,6 +3858,7 @@ class MemoryManager:
                 index_dir=self.index_dir,
                 batch_op=str(batch.op or "").strip().lower(),
                 summary_max_chars=int(getattr(self.config.document, "summary_max_chars", 300) or 300),
+                owned_note_refs_fn=lambda: set(self._memory_repo.owned_note_refs()),
             )
             tools = self._memory_agent_tools(session)
             system_prompt = self._memory_agent_system_prompt()
@@ -4568,19 +4684,39 @@ class MemoryManager:
                 if str(row.get("note_ref") or "").strip()
             }
             surviving_ids = {str(row.get("memory_id") or "").strip() for row in self._memory_repo.list_memories()}
+            # Notes this commit wrote never leave in that same commit, whatever the
+            # ownership columns say mid-commit: the write and the claim land together
+            # (the claim gate sees to that), and a same-commit sweep is how a freshly
+            # written note used to vanish without any reader seeing it.
+            commit_written_refs = {
+                str(ref or "").strip() for ref in list(validated.note_refs_written or [])
+            } - {""}
 
-            def _record_reaped(removed_refs: list[str]) -> None:
-                for ref in removed_refs:
-                    owner = prior_owner_by_ref.get(ref, "")
-                    if not owner:
-                        reason = "unreferenced"
-                    elif owner not in surviving_ids:
-                        reason = "memory_deleted"
+            def _record_orphan_fate(records: list[dict[str, str]]) -> None:
+                for record in records:
+                    ref = str(record.get("note_ref") or "").strip()
+                    if not ref:
+                        continue
+                    reason = str(record.get("reason") or "unreferenced")
+                    if record.get("removed") == "true":
+                        validated.reaped_notes.append({"note_ref": ref, "reason": reason})
+                        self._note_feedback_lines.append(
+                            f"- note {ref} 已回收（{reason}）：拥有它的记忆行被删除，note 正文随之退场"
+                        )
                     else:
-                        reason = "ref_dropped"
-                    validated.reaped_notes.append({"note_ref": ref, "reason": reason})
+                        validated.kept_orphan_notes.append({"note_ref": ref, "reason": reason})
+                        self._note_feedback_lines.append(
+                            f"- note {ref} 失去所有者（{reason}），文件保留在 memory/notes/ 但没有任何行的 "
+                            f"note_ref 指向它：要让它可读，就在下一批把某条 add/rewrite 的 note_ref 指到 {ref}"
+                        )
 
-            _record_reaped(self._cleanup_orphan_notes_locked())
+            _record_orphan_fate(
+                self._cleanup_orphan_notes_locked(
+                    exempt_refs=commit_written_refs,
+                    prior_owner_by_ref=prior_owner_by_ref,
+                    surviving_owner_ids=surviving_ids,
+                )
+            )
             # Rows this commit just wrote are exempt from this round's compression: they are
             # the newest bytes in the block, and demoting one here hides the body the model
             # produced before any reader ever saw it.
@@ -4591,7 +4727,18 @@ class MemoryManager:
                 now_iso=now_iso,
                 exclude_ids=written_this_commit,
             )
-            _record_reaped(self._cleanup_orphan_notes_locked())
+            # Compression may delete rows; the second sweep reclassifies against the
+            # post-compression store so a note whose owner was compressed away leaves
+            # with its row instead of drifting unowned.
+            _record_orphan_fate(
+                self._cleanup_orphan_notes_locked(
+                    exempt_refs=commit_written_refs,
+                    prior_owner_by_ref=prior_owner_by_ref,
+                    surviving_owner_ids={
+                        str(row.get("memory_id") or "").strip() for row in self._memory_repo.list_memories()
+                    },
+                )
+            )
             validated.memory_chars_after = self._resident_memory_chars()
             validated.document_preview = self._document_preview(self.snapshot_text())
             validated.compression_triggered = bool(compression_result.get("compression_triggered"))
@@ -5021,26 +5168,62 @@ class MemoryManager:
                 self._atomic_write_text(path, self._normalize_note_text(body))
         return results
 
-    def _cleanup_orphan_notes_locked(self) -> list[str]:
-        """Delete note files the store no longer owns; return the removed refs.
+    def _cleanup_orphan_notes_locked(
+        self,
+        *,
+        exempt_refs: set[str] | None = None,
+        prior_owner_by_ref: dict[str, str] | None = None,
+        surviving_owner_ids: set[str] | None = None,
+    ) -> list[dict[str, str]]:
+        """Decide the fate of note files ownership no longer claims; return the records.
+
+        A file leaves `memory/notes/` only for `memory_deleted`: the model explicitly
+        deleted the row that owned the note, so the experience is retired and the file
+        has to follow it out of the readable namespace (the read paths glob this
+        directory, so anything left behind stays reachable by name). A rewrite that
+        moved the row's ref elsewhere (`ref_dropped`) and a file no row ever owned
+        (`unreferenced`) stay on disk - they remain readable and claimable by a later
+        batch, and a note that the same commit just wrote must never be removed by that
+        commit (the story-series benchmarks note was once reaped seconds after its own
+        batch wrote it). `exempt_refs` carries the refs this commit wrote; those are
+        never swept. Without commit context every orphan classifies as `unreferenced`,
+        so a bare call removes nothing and only reports.
 
         The removal is reported to the caller so it reaches the terminal ledger: an
-        unrecoverable file deletion that leaves no trace cannot be triaged later.
+        unrecoverable file deletion that leaves no trace cannot be triaged later. Kept
+        orphans are reported too, so the next batch can be told which files lost their
+        owner instead of silently drifting outside the block.
         """
         active_refs = set(self._referenced_note_refs())
         # The persona note is owned by the reserved name, not by a memory row; without
         # this it would be reaped on the first commit after it is written.
         active_refs.add(PERSONA_NOTE_REF)
-        removed: list[str] = []
+        exempt = {str(ref or "").strip() for ref in (exempt_refs or set())} - {""}
+        owners = dict(prior_owner_by_ref or {})
+        surviving = set(surviving_owner_ids or ())
+        records: list[dict[str, str]] = []
         for path in self.notes_dir.glob("*.md"):
-            if path.stem in active_refs:
+            ref = path.stem
+            if ref in active_refs:
+                continue
+            owner = owners.get(ref, "")
+            if not owner:
+                reason = "unreferenced"
+            elif owner not in surviving:
+                reason = "memory_deleted"
+            else:
+                reason = "ref_dropped"
+            record = {"note_ref": ref, "reason": reason, "removed": "false"}
+            if reason != "memory_deleted" or ref in exempt:
+                records.append(record)
                 continue
             try:
                 path.unlink()
             except OSError:
                 continue
-            removed.append(path.stem)
-        return removed
+            record["removed"] = "true"
+            records.append(record)
+        return records
 
     @staticmethod
     def _legacy_note_refs_from_text(document_text: str) -> list[str]:
@@ -6188,6 +6371,16 @@ class MemoryManager:
             )
         return numbered
 
+    def _drain_note_feedback_lines(self) -> list[str]:
+        """Take the pending post-commit note reports; each is delivered to one turn."""
+        # getattr over the lock: inspection doubles and partial test managers may not
+        # carry the full init surface, and a missed report line is not worth a crash.
+        lines = getattr(self, "_note_feedback_lines", None)
+        if not lines:
+            return []
+        self._note_feedback_lines = []
+        return list(lines)
+
     def _memory_agent_user_prompt(
         self,
         *,
@@ -6217,6 +6410,17 @@ class MemoryManager:
             1 for line in str(snapshot_text or "").splitlines() if len(line) > summary_limit
         )
         repair_block = f"\n上一轮输出无效：{repair_reason}\n请修复后重试。\n" if repair_reason else ""
+        # Post-commit note sweep outcomes. The commit lands after the model's turn, so
+        # this is the first place the model can react to a note it wrote (or unowned)
+        # being reaped or left behind - none of the earlier repair loops ever saw it.
+        note_feedback_lines = self._drain_note_feedback_lines()
+        note_feedback_block = (
+            "上一批次提交后的 note 回收报告（组批前先读，需要处理就在本批处理）：\n"
+            + "\n".join(note_feedback_lines)
+            + "\n\n"
+            if note_feedback_lines
+            else ""
+        )
         persona_block = (
             f"人设描述：ref={PERSONA_NOTE_REF}（不是普通记忆行，没有行号，正文按需读）。"
             f"改人设只改这份 note：首次用 note_upserts 新建，已有内容用 note_edits，"
@@ -6233,6 +6437,7 @@ class MemoryManager:
         return (
             f"当前记忆正文（每行开头 `N|` 是这一行的行号）：\n"
             f"{self._render_numbered_memory_body(snapshot_text)}\n\n"
+            f"{note_feedback_block}"
             f"{persona_block}\n\n"
             f"现有 note refs：{json.dumps(note_index, ensure_ascii=False)}\n"
             f"字符预算：单条正文上限 {summary_limit} 字，入口行预算约 {shape_budget} 字"
