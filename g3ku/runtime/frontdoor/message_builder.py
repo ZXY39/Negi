@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import time
 from datetime import datetime
@@ -1096,6 +1097,9 @@ class CeoMessageBuilder:
             # 又诱使模型去解码一个它读不了的音频文件。音频只服务气泡回放。
             if str(raw.get('kind') or '').strip().lower() == 'audio':
                 continue
+            # descriptor 带 opened 标记 = 上传方/收尾车道已确认消费，不再当"可重开附件"。
+            if bool(raw.get('opened')):
+                continue
             path = str(raw.get('path') or '').strip()
             ref = str(raw.get('ref') or '').strip()
             if not path and not ref:
@@ -1146,6 +1150,26 @@ class CeoMessageBuilder:
         return ordered
 
     @classmethod
+    def _drop_consumed_attachment_reopen_targets(
+        cls,
+        items: list[dict[str, str]],
+    ) -> list[dict[str, str]]:
+        """把已失效的附件目标从清单里剔除（文件已不存在；已打开的条目由
+        `_attachment_reopen_targets_from_uploads` 按 `opened` 标记摘除——成功打开
+        的瞬间由运行时在 descriptor 上打标记，转录不存工具行、没有可回扫的
+        载体）。清单值自愈后，通知台账的 digest diff 会自动把陈旧条目宣布退役。
+        剔除先于 8 条封顶执行，让名额让给未消费目标。"""
+        kept: list[dict[str, str]] = []
+        for raw in list(items or []):
+            if not isinstance(raw, dict):
+                continue
+            path = str(raw.get('path') or '').strip()
+            if path and not os.path.isfile(path):
+                continue
+            kept.append(raw)
+        return kept
+
+    @classmethod
     def _frontdoor_attachment_reopen_targets(
         cls,
         *,
@@ -1163,7 +1187,9 @@ class CeoMessageBuilder:
             for message in reversed(transcript_messages(persisted_session)):
                 metadata = message_metadata(message)
                 collected.extend(cls._attachment_reopen_targets_from_uploads(metadata.get('web_ceo_uploads')))
-        return cls._normalize_attachment_reopen_targets(collected)
+        return cls._normalize_attachment_reopen_targets(
+            cls._drop_consumed_attachment_reopen_targets(collected)
+        )
 
     @staticmethod
     def _now_iso() -> str:

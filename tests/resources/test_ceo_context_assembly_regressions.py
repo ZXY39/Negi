@@ -3412,3 +3412,196 @@ def test_direct_continuation_reprints_the_system_head_only_at_a_reprint_boundary
     assert reprinted[0]["role"] == "system"
     assert reprinted[0]["content"] == "NEW HEAD"
     assert any(str(item.get("content") or "") == "上一轮问题" for item in reprinted)
+
+
+# ---------------------------------------------------------------------------
+# attachment_reopen_targets 自愈退役（2026-11-11 事故：9 天前的截图通知以同一
+# 字节常驻每次请求尾块，把压缩后失去锚点的模型带去回答别的事）
+# ---------------------------------------------------------------------------
+
+
+def _attachment_upload_descriptor(path: Path, *, name: str = "捕获.PNG") -> dict:
+    return {
+        "path": str(path),
+        "name": name,
+        "mime_type": "image/png",
+        "kind": "image",
+        "size": 10,
+    }
+
+
+def _attachment_fake_session(rows: list[dict]) -> SimpleNamespace:
+    return SimpleNamespace(messages=list(rows), state=SimpleNamespace(session_key="web:shared"))
+
+
+def _collect_attachment_reopen_targets(rows: list[dict]) -> list[dict]:
+    return CeoMessageBuilder._frontdoor_attachment_reopen_targets(
+        persisted_session=_attachment_fake_session(rows),
+        user_metadata=None,
+    )
+
+
+def test_attachment_reopen_marking_on_content_open_success(tmp_path: Path) -> None:
+    """content_open 成功的瞬间，运行时在转录 descriptor 上打 `opened` 标记。
+
+    转录不存工具行——历史扫描没有载体，成功瞬间的标记是唯一持久落点。"""
+    target = tmp_path / "shot.png"
+    target.write_bytes(b"png")
+    descriptor = _attachment_upload_descriptor(target)
+    saved: list[int] = []
+
+    class _Store:
+        def get_or_create(self, _key):
+            return SimpleNamespace(
+                messages=[
+                    {
+                        "role": "user",
+                        "content": "看下这个截图",
+                        "metadata": {"web_ceo_uploads": [descriptor]},
+                    }
+                ]
+            )
+
+        def save(self, _session):
+            saved.append(1)
+
+    from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
+
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(sessions=_Store()))
+    marked = runner._mark_attachment_reopen_targets_opened(
+        state={"session_key": "web:shared"},
+        tool_results=[
+            {
+                "tool_name": "content_open",
+                "status": "success",
+                "raw_result": {"ok": True, "operation": "open", "target": "path", "input_path": str(target)},
+            }
+        ],
+    )
+
+    assert marked == 1
+    assert descriptor["opened"] is True
+    assert saved == [1]
+    # 标记后清单自愈：目标退场。
+    assert _collect_attachment_reopen_targets(
+        [
+            {
+                "role": "user",
+                "content": "看下这个截图",
+                "metadata": {"web_ceo_uploads": [descriptor]},
+            }
+        ]
+    ) == []
+
+
+def test_attachment_reopen_marking_ignores_failure_and_other_tools(tmp_path: Path) -> None:
+    target = tmp_path / "shot2.png"
+    target.write_bytes(b"png")
+    descriptor = _attachment_upload_descriptor(target)
+
+    class _Store:
+        def get_or_create(self, _key):
+            return SimpleNamespace(
+                messages=[
+                    {
+                        "role": "user",
+                        "content": "看下这个截图",
+                        "metadata": {"web_ceo_uploads": [descriptor]},
+                    }
+                ]
+            )
+
+        def save(self, _session):
+            raise AssertionError("失败结果与其他工具不得触发保存")
+
+    from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
+
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(sessions=_Store()))
+    marked = runner._mark_attachment_reopen_targets_opened(
+        state={"session_key": "web:shared"},
+        tool_results=[
+            {"tool_name": "content_open", "status": "error", "raw_result": {"ok": False}},
+            {"tool_name": "exec", "status": "success", "raw_result": {"ok": True, "input_path": str(target)}},
+        ],
+    )
+
+    assert marked == 0
+    assert "opened" not in descriptor
+
+
+def test_attachment_reopen_target_kept_when_never_opened(tmp_path: Path) -> None:
+    target = tmp_path / "fresh.png"
+    target.write_bytes(b"png")
+    rows = [
+        {
+            "role": "user",
+            "content": "新的上传",
+            "metadata": {"web_ceo_uploads": [_attachment_upload_descriptor(target)]},
+        },
+        {"role": "assistant", "content": "收到"},
+    ]
+
+    targets = _collect_attachment_reopen_targets(rows)
+
+    assert [item["path"] for item in targets] == [str(target)]
+
+
+def test_attachment_reopen_target_retired_when_file_missing(tmp_path: Path) -> None:
+    rows = [
+        {
+            "role": "user",
+            "content": "旧上传",
+            "metadata": {
+                "web_ceo_uploads": [_attachment_upload_descriptor(tmp_path / "gone.png")]
+            },
+        },
+        {"role": "assistant", "content": "收到"},
+    ]
+
+    assert _collect_attachment_reopen_targets(rows) == []
+
+
+def test_attachment_reopen_target_opened_flag_short_circuits(tmp_path: Path) -> None:
+    target = tmp_path / "acked.png"
+    target.write_bytes(b"png")
+    descriptor = _attachment_upload_descriptor(target)
+    descriptor["opened"] = True
+    rows = [
+        {
+            "role": "user",
+            "content": "已确认的上传",
+            "metadata": {"web_ceo_uploads": [descriptor]},
+        },
+    ]
+
+    assert _collect_attachment_reopen_targets(rows) == []
+
+
+def test_attachment_reopen_targets_still_capped_after_retirement(tmp_path: Path) -> None:
+    # 剔除先于 8 条封顶：已消费目标让位，未消费目标照常按序保留。
+    paths: list[Path] = []
+    for index in range(CeoMessageBuilder.ATTACHMENT_REOPEN_TARGET_LIMIT + 2):
+        target = tmp_path / f"file-{index}.png"
+        target.write_bytes(b"png")
+        paths.append(target)
+    rows: list[dict] = []
+    for target in paths:
+        descriptor = _attachment_upload_descriptor(target)
+        if target == paths[0]:
+            # 最旧的一条已被打开（运行时在 descriptor 上打了标记）：应被剔除，
+            # 封顶让给其余目标。
+            descriptor["opened"] = True
+        rows.append(
+            {
+                "role": "user",
+                "content": f"上传 {target.name}",
+                "metadata": {"web_ceo_uploads": [descriptor]},
+            }
+        )
+
+    targets = _collect_attachment_reopen_targets(rows)
+
+    assert len(targets) == CeoMessageBuilder.ATTACHMENT_REOPEN_TARGET_LIMIT
+    # 收集按转录倒序（最新在前）：已打开的最旧目标被剔除，封顶后首位是最新上传。
+    assert targets[0]["path"] == str(paths[CeoMessageBuilder.ATTACHMENT_REOPEN_TARGET_LIMIT + 1])
+    assert all(item["path"] != str(paths[0]) for item in targets)

@@ -7,6 +7,7 @@ import copy
 import hashlib
 import json
 import math
+import os
 import re
 import threading
 import time
@@ -150,6 +151,7 @@ from g3ku.runtime.web_ceo_sessions import (
     WEB_CEO_IMAGE_UPLOAD_MAX_BYTES,
     actual_request_dir_for_session,
     fold_internal_prompt_history,
+    internal_prompt_kind,
     is_prompt_visible_message,
     persist_frontdoor_actual_request,
     strip_multimodal_blocks_from_message_records,
@@ -1071,12 +1073,61 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         return records
 
     @staticmethod
-    def _runtime_error_notice_text(turn_id: str, error_row: dict[str, Any]) -> str:
+    def _latest_completed_compression_boundary_timestamp(transcript: list[dict[str, Any]]) -> str:
+        """转录里最后一次完成的上下文压缩的落盘时间，作为失败对账的寿命界。
+
+        摘要落地那一刻起，压缩区里的失败轮就归摘要管；对账再把它补回种子尾部，
+        模型会把陈旧失败当成"最近一条没回答的提问"重新回答甚至重新执行（实盘
+        事故：5 天前的失败轮在每次压缩后被重新补回，用户问"刚才我在问你什么"
+        得到的是那条旧输入）。找不到压缩标记（会话从未压缩过）时返回空串，
+        对账保持原有全量行为。
+        """
+        latest = ""
+        for row in list(transcript or []):
+            if not isinstance(row, dict):
+                continue
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            if str(metadata.get("kind") or "").strip().lower() != "context_compression":
+                continue
+            if str(metadata.get("compression_state") or "").strip().lower() != "completed":
+                continue
+            stamp = str(row.get("timestamp") or "").strip()
+            if stamp and stamp > latest:
+                latest = stamp
+        return latest
+
+    @staticmethod
+    def _row_timestamp_after(text: Any, boundary_iso: str) -> bool:
+        """行时间是否晚于边界；任一侧解析失败按"晚于"处理（保持既有对账行为）。"""
+        value = str(text or "").strip()
+        if not value or not boundary_iso:
+            return True
+        try:
+            return datetime.fromisoformat(value) > datetime.fromisoformat(boundary_iso)
+        except Exception:
+            return True
+
+    @staticmethod
+    def _failure_age_suffix(failure_at: str) -> str:
+        try:
+            age = datetime.now() - datetime.fromisoformat(failure_at)
+        except Exception:
+            return ""
+        if age.days >= 1:
+            return f"（{age.days} 天前）"
+        hours = int(age.total_seconds() // 3600)
+        if hours >= 1:
+            return f"（{hours} 小时前）"
+        return "（刚刚发生）"
+
+    @classmethod
+    def _runtime_error_notice_text(cls, turn_id: str, error_row: dict[str, Any]) -> str:
         """失败回合给模型看的结构化通知。
 
         它在 seed 里以 assistant 角色追加，正文带 `turn_id` 作为幂等键——seed 只存
         `{role, content}`，没有 metadata 可用来判重。错误原文截断，完整文本留在转录
-        与运行时错误文件里。
+        与运行时错误文件里。正文带失败发生时间：对账受压缩边界寿命约束后，这份
+        通知只服务新鲜失败，但时间戳让模型（和排障的人）不必猜"上一回合"是多近。
         """
         metadata = error_row.get("metadata") if isinstance(error_row.get("metadata"), dict) else {}
         code = str(metadata.get("error_code") or "").strip() or "runtime_error"
@@ -1094,6 +1145,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if len(message) > 2000:
             message = message[:2000].rstrip() + "…"
         lines = [f"[上一回合未完成 turn_id={turn_id}] {' '.join(facts)}"]
+        failure_at = str(error_row.get("timestamp") or "").strip()
+        if failure_at:
+            lines.append(f"发生时间：{failure_at}{cls._failure_age_suffix(failure_at)}")
         if message:
             lines.append(message)
         lines.append(
@@ -1115,6 +1169,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         prepare 期就失败、基线还没写进这条消息时，用户消息与通知一起补。锚点是转录里
         `_transcript_state=failed` 的用户行，所以心跳/cron 内部回合的错误不会进来。
         幂等：通知正文带 `turn_id`；冷启动路径已经带原始错误行时按原文判重。
+
+        寿命界：只对账晚于最后一次完成压缩的失败轮。判重靠"文本不在当前种子里"，
+        而每次压缩重建基线都会把它裁掉——没有这条界，陈旧失败会在每次压缩后重新
+        补回种子尾部，模型把它当成最近一条没回答的提问重新处理。压缩过就归摘要管。
         """
         records = [dict(item) for item in list(seed_messages or []) if isinstance(item, dict)]
         transcript = (
@@ -1163,6 +1221,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 error_rows_by_turn.setdefault(turn_id, row)
         if not error_rows_by_turn:
             return records
+        compression_boundary_iso = cls._latest_completed_compression_boundary_timestamp(transcript)
         for message in transcript:
             if not isinstance(message, dict):
                 continue
@@ -1176,6 +1235,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             turn_id = str(metadata.get("_transcript_turn_id") or "").strip()
             error_row = error_rows_by_turn.get(turn_id)
             if not error_row:
+                continue
+            if compression_boundary_iso and not cls._row_timestamp_after(
+                message.get("timestamp"), compression_boundary_iso
+            ):
+                # 失败轮早于最后一次压缩：摘要已覆盖它，对账不再把它拽回请求尾部。
                 continue
             text = strip_arrival_time_stamp(
                 strip_sender_stamp(cls._content_text(message.get("content")).strip())
@@ -1572,6 +1636,81 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             return None
         target = payload.get("runtime_image_target")
         return dict(payload) if isinstance(target, dict) and str(target.get("path") or "").strip() else None
+
+    def _mark_attachment_reopen_targets_opened(
+        self,
+        *,
+        state: CeoGraphState,
+        tool_results: list[dict[str, Any]],
+    ) -> int:
+        """content_open 成功打开的附件目标，在转录 descriptor 上打 `opened` 标记。
+
+        转录只存 user/assistant/system 行——工具结果没有可回扫的持久载体，所以
+        "已打开过"的唯一可靠记录是成功瞬间的这次标记：找到 `web_ceo_uploads`
+        descriptor 里 path/ref 匹配的条目置 `opened=True` 并保存，随转录持久化。
+        下一跳装配重算清单时该条目退场，通知台账按 digest diff 重投一条新值。
+        匹配按 Windows 路径大小写不敏感归一；标记失败只记日志，不影响工具结果。
+        """
+        targets: list[dict[str, str]] = []
+        for result in list(tool_results or []):
+            if str(result.get("tool_name") or "").strip() != "content_open":
+                continue
+            if str(result.get("status") or "").strip() != "success":
+                continue
+            raw = result.get("raw_result")
+            if isinstance(raw, str):
+                try:
+                    raw = json.loads(raw)
+                except Exception:
+                    continue
+            if not isinstance(raw, dict) or not bool(raw.get("ok")):
+                continue
+            entry = {
+                "path": str(raw.get("input_path") or "").strip(),
+                "ref": str(raw.get("ref") or raw.get("resolved_ref") or "").strip(),
+            }
+            if entry["path"] or entry["ref"]:
+                targets.append(entry)
+        if not targets:
+            return 0
+        session_key = str(state.get("session_key") or "").strip()
+        if not session_key:
+            return 0
+        try:
+            persisted = self._loop.sessions.get_or_create(session_key)
+        except Exception:
+            logger.debug("attachment opened mark skipped (no session store) for {}", session_key)
+            return 0
+        marked = 0
+        changed = False
+        for row in list(getattr(persisted, "messages", None) or []):
+            metadata = row.get("metadata") if isinstance(row, dict) else None
+            uploads = metadata.get("web_ceo_uploads") if isinstance(metadata, dict) else None
+            if not isinstance(uploads, list):
+                continue
+            row_changed = False
+            for descriptor in uploads:
+                if not isinstance(descriptor, dict) or descriptor.get("opened"):
+                    continue
+                path = str(descriptor.get("path") or "").strip()
+                ref = str(descriptor.get("ref") or "").strip()
+                hit = any(
+                    (t["path"] and path and os.path.normcase(t["path"]) == os.path.normcase(path))
+                    or (t["ref"] and ref and t["ref"] == ref)
+                    for t in targets
+                )
+                if hit:
+                    descriptor["opened"] = True
+                    row_changed = True
+                    marked += 1
+            if row_changed:
+                changed = True
+        if changed:
+            try:
+                self._loop.sessions.save(persisted)
+            except Exception:
+                logger.debug("attachment opened mark save skipped for {}", session_key)
+        return marked
 
     def _content_open_image_payloads_from_tool_results(
         self,
@@ -2339,6 +2478,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         older_history_messages, dropped_dangling_tool_groups = self._drop_dangling_trailing_tool_call_groups(
             older_history_messages
         )
+        # 当前回合的用户输入行不进压缩区：位置型切分加工具组对齐只保得住工具行，
+        # 本回合 user 行会被摘要吞掉，"当前要答什么"的锚点就此丢失。摘出来原样
+        # 回插到摘要与保留尾之间，见 `_frontdoor_compaction_protected_user_rows`。
+        older_history_messages, protected_user_rows = self._frontdoor_compaction_protected_user_rows(
+            older_history_messages, recent_tail, session
+        )
         # 尾部消息是压缩后请求体的最小不可压缩部分；超大工具结果必须先截断，
         # 否则压缩结果不收敛：压缩检查（final_request_tokens > 窗口）必然失败。
         recent_tail = self._bound_frontdoor_compaction_tail_messages(recent_tail)
@@ -2563,6 +2708,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 *system_prefix,
                 compacted_block,
                 *deferred_messages,
+                *protected_user_rows,
                 *recent_tail,
                 *silent_ledger_messages,
                 *_contract_messages,
@@ -2626,6 +2772,87 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     finish_generation(generation_id)
                 except Exception:
                     pass
+
+    @classmethod
+    def _frontdoor_compaction_protected_user_rows(
+        cls,
+        older_history_messages: list[dict[str, Any]],
+        recent_tail: list[dict[str, Any]],
+        session: Any,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """把当前回合的用户输入行从待压缩区间摘出来，返回 (剩余消息, 摘出的行)。
+
+        token 压缩是位置型切分：保留尾部固定 4 条，工具组对齐又止于 assistant 行
+        （`align_compaction_keep_recent`），回合中跳累计几条工具行之后，本回合的
+        user 行就被划进压缩区、随摘要一起吞掉。摘要散文承载不了"当前要答什么"：
+        锚点一丢，模型就被尾块里的陈旧 mid-insert 带去回答别的事（实盘事故
+        ext:qq-official-1903529517:f8a8001865631301 2026-11-11——压缩后用户行缺席，
+        模型被 9 天前的 attachment_targets 通知接走，答成了内存状态）。摘出的行由
+        调用方原样回插到摘要与保留尾之间，锚点因此跨压缩存活。
+
+        可见轮按批次输入文本匹配（剥来源标注与送达时间戳后比对）；多输入批次在
+        请求体里经 `_merge_prompt_batch_sibling_contents` 合并（内容块列表、同块
+        去重），逐条与合并文本都可能对不上，此时按位置兜底：整段 body 里最后一条
+        既非内部提示词、也非 mid-insert 通知的 user 行就是当前回合的输入，它已落
+        进保留尾时锚点本就保住，不重复保护。内部轮（心跳/cron）批次为空，按内部
+        提示词种子判据（前缀识别，基线行无 metadata）每种保护最后一条。每个保护
+        目标只取待压缩区间里最后一次出现的那一行——远古重复输入不会被拽出压缩区。
+        """
+        records = [dict(item) for item in list(older_history_messages or []) if isinstance(item, dict)]
+        batch_texts: list[str] = []
+        for item in list(getattr(session, "_active_user_batch_inputs", None) or []):
+            text = cls._content_text(getattr(item, "content", "")).strip()
+            if text:
+                batch_texts.append(text)
+        wanted: dict[str, int] = {}
+        if batch_texts:
+            protected_texts = list(batch_texts)
+            combined = "\n\n".join(batch_texts).strip()
+            if combined and combined not in protected_texts:
+                protected_texts.append(combined)
+            for index, item in enumerate(records):
+                if str(item.get("role") or "").strip().lower() != "user":
+                    continue
+                stripped = strip_arrival_time_stamp(
+                    strip_sender_stamp(cls._content_text(item.get("content")).strip())
+                )
+                if stripped and stripped in protected_texts:
+                    wanted[stripped] = index
+            if not wanted:
+                combined_records = [
+                    *records,
+                    *[dict(item) for item in list(recent_tail or []) if isinstance(item, dict)],
+                ]
+                for index in range(len(combined_records) - 1, -1, -1):
+                    item = combined_records[index]
+                    if str(item.get("role") or "").strip().lower() != "user":
+                        continue
+                    text = cls._content_text(item.get("content")).strip()
+                    if not text or cls._internal_or_notice_user_row(text):
+                        continue
+                    if index < len(records):
+                        wanted["__fallback_last_user_row__"] = index
+                    break
+        else:
+            for index, item in enumerate(records):
+                if str(item.get("role") or "").strip().lower() != "user":
+                    continue
+                kind = internal_prompt_kind(item)
+                if kind:
+                    wanted[kind] = index
+        if not wanted:
+            return records, []
+        protected_indexes = set(wanted.values())
+        remaining = [item for index, item in enumerate(records) if index not in protected_indexes]
+        protected = [item for index, item in enumerate(records) if index in protected_indexes]
+        return remaining, protected
+
+    @staticmethod
+    def _internal_or_notice_user_row(text: str) -> bool:
+        """mid-insert 通知行与内部提示词行都长着 user 的脸，但都不是"用户在问什么"。"""
+        if internal_prompt_kind({"role": "user", "content": text}):
+            return True
+        return text.startswith("[SILENT_TRACE_LEDGER]") or text.startswith("[RUNTIME_NOTICE]")
 
     @classmethod
     def _lift_silent_trace_groups(
@@ -10632,6 +10859,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             if isinstance(item, dict)
         ]
         pending_content_open_image_payloads.extend(self._content_open_image_payloads_from_tool_results(tool_results))
+        # content_open 成功打开的附件目标在转录 descriptor 上打 opened 标记：转录不存
+        # 工具行，"历史里已有成功打开记录"没有可扫的载体，成功瞬间的标记是唯一持久
+        # 落点。清单值自愈后，通知台账按 digest diff 自动把陈旧条目宣布退役。
+        self._mark_attachment_reopen_targets_opened(state=state, tool_results=tool_results)
         tool_messages = [dict(item.get("tool_message") or {}) for item in tool_results]
         response_payload = dict(state.get("response_payload") or {})
         assistant_message = {

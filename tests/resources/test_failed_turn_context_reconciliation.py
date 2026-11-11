@@ -22,7 +22,7 @@ def _user_record(text, *, turn_id, state="failed", timestamp=""):
     return row
 
 
-def _error_row(text, *, turn_id, code="legacy_session_error", status=None, recoverable=True):
+def _error_row(text, *, turn_id, code="legacy_session_error", status=None, recoverable=True, timestamp=""):
     metadata = {
         "source": "runtime_error",
         "error_code": code,
@@ -31,7 +31,15 @@ def _error_row(text, *, turn_id, code="legacy_session_error", status=None, recov
     }
     if status is not None:
         metadata["error_status"] = status
-    return {"role": "assistant", "content": f"这一轮处理失败：{text}", "turn_id": turn_id, "metadata": metadata}
+    row = {
+        "role": "assistant",
+        "content": f"这一轮处理失败：{text}",
+        "turn_id": turn_id,
+        "metadata": metadata,
+    }
+    if timestamp:
+        row["timestamp"] = timestamp
+    return row
 
 
 def _reconcile(seed, session, current=None):
@@ -165,3 +173,96 @@ def test_current_turn_user_text_suppresses_only_the_user_echo():
 
     assert _contents(result).count("同一句话") == 1
     assert any("[上一回合未完成 turn_id=turn-6]" in text for text in _contents(result))
+
+
+# ---------------------------------------------------------------------------
+# 失败对账的压缩边界寿命界（2026-11-11 事故：5 天前的失败轮在每次压缩后被
+# 重新补回种子尾部，模型把它当成"最近一条没回答的提问"重新回答并执行）
+# ---------------------------------------------------------------------------
+
+
+def _compression_marker_row(timestamp: str) -> dict:
+    return {
+        "role": "system",
+        "content": "会话已压缩",
+        "timestamp": timestamp,
+        "metadata": {"kind": "context_compression", "compression_state": "completed"},
+    }
+
+
+def test_failed_turn_older_than_last_compression_boundary_is_not_reconciled():
+    session = _FakeSession(
+        [
+            _user_record(
+                "找个好玩的表情包发我",
+                turn_id="turn-old",
+                timestamp="2026-11-06T23:49:45",
+            ),
+            _error_row("BadRequestError 400", turn_id="turn-old"),
+            _compression_marker_row("2026-11-10T21:08:16"),
+        ]
+    )
+
+    result = _reconcile([{"role": "user", "content": "新话题"}], session)
+
+    assert _contents(result) == ["新话题"]
+
+
+def test_failed_turn_newer_than_last_compression_boundary_is_reconciled():
+    session = _FakeSession(
+        [
+            _compression_marker_row("2026-11-10T21:08:16"),
+            _user_record(
+                "新鲜失败的问题",
+                turn_id="turn-new",
+                timestamp="2026-11-11T22:40:58",
+            ),
+            _error_row("boom", turn_id="turn-new"),
+        ]
+    )
+
+    result = _reconcile([{"role": "user", "content": "更早的消息"}], session)
+
+    # 补发的用户行按原始时间重新装饰（送达时间戳），按文本包含断言。
+    assert "新鲜失败的问题" in _contents(result)[-2]
+    assert "[上一回合未完成 turn_id=turn-new]" in _contents(result)[-1]
+
+
+def test_failed_compression_marker_with_pending_state_does_not_bound_reconcile():
+    """只有 completed 的压缩才算"摘要已覆盖"；失败/暂停中的压缩标记不构成寿命界。"""
+    session = _FakeSession(
+        [
+            _user_record(
+                "压缩失败后的失败轮",
+                turn_id="turn-mid",
+                timestamp="2026-11-03T15:20:00",
+            ),
+            _error_row("boom", turn_id="turn-mid"),
+            {
+                "role": "system",
+                "content": "压缩失败",
+                "timestamp": "2026-11-03T15:30:00",
+                "metadata": {"kind": "context_compression", "compression_state": "failed"},
+            },
+        ]
+    )
+
+    result = _reconcile([{"role": "user", "content": "更早的消息"}], session)
+
+    assert "[上一回合未完成 turn_id=turn-mid]" in _contents(result)[-1]
+
+
+def test_runtime_error_notice_carries_failure_timestamp():
+    session = _FakeSession(
+        [
+            _user_record("失败的问题", turn_id="turn-age", timestamp="2026-11-11T22:00:00"),
+            _error_row("boom", turn_id="turn-age", timestamp="2026-11-11T22:00:01"),
+        ]
+    )
+
+    result = _reconcile([{"role": "user", "content": "更早的消息"}], session)
+
+    notice = _contents(result)[-1]
+    # 头行是判重键，保持逐字不变；时间行追加其后。
+    assert notice.startswith("[上一回合未完成 turn_id=turn-age] ")
+    assert "发生时间：2026-11-11T22:00:01" in notice

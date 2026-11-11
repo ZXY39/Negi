@@ -1084,3 +1084,281 @@ async def test_run_frontdoor_llm_token_compression_aligns_tool_pair_tail_boundar
         if str(item.get("role") or "").strip().lower() == "tool"
     ]
     assert tail_result_ids == [f"call_batch_{index}" for index in range(4)]
+
+
+# ---------------------------------------------------------------------------
+# 压缩保护当前轮用户输入行（2026-11-11 ext:…f8a800 事故：回合中压缩把本回合
+# user 行划进压缩区随摘要吞掉，模型失去"当前要答什么"锚点，被尾块里的陈旧
+# mid-insert 带去回答别的事）
+# ---------------------------------------------------------------------------
+
+
+def _protected_rows_compression_runner(monkeypatch: pytest.MonkeyPatch) -> CreateAgentCeoFrontDoorRunner:
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    monkeypatch.setattr(
+        runner,
+        "_resolve_frontdoor_send_model_context_window",
+        lambda **_: {
+            "model_key": "ceo_primary",
+            "provider_model": "openai:gpt-5.2",
+            "context_window_tokens": 32000,
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_estimate_frontdoor_send_total_tokens",
+        lambda **_: 18000,
+        raising=False,
+    )
+    monkeypatch.setattr(runner, "_emit_frontdoor_runtime_snapshot", lambda **_: asyncio.sleep(0))
+    monkeypatch.setattr(
+        runner,
+        "_persist_frontdoor_internal_request_artifact",
+        lambda **kwargs: {"request_id": "internal-request-protected-rows"},
+        raising=False,
+    )
+
+    async def _call_model_with_tools(**kwargs):
+        _ = kwargs
+        return {"content": "[压缩后的较早历史摘要]"}
+
+    monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
+    return runner
+
+
+def _protected_rows_compression_session(**extra) -> SimpleNamespace:
+    return SimpleNamespace(
+        state=SimpleNamespace(session_key="web:shared"),
+        announce_context_compression_boundary=_announce_boundary_noop,
+        _frontdoor_actual_request_path="",
+        _frontdoor_request_body_messages=[
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "visible baseline"},
+        ],
+        _emit_state_snapshot=lambda: None,
+        **extra,
+    )
+
+
+def _compacted_history_message_count(content: str) -> int:
+    payload_line = str(content or "").splitlines()[1]
+    return int(json.loads(payload_line)["history_message_count"])
+
+
+@pytest.mark.asyncio
+async def test_run_frontdoor_llm_token_compression_keeps_current_turn_user_row_out_of_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 事故形状复刻：本回合 user 行之后已累计 5 条工具行，固定 4 条尾部切片加
+    # 工具组对齐保住了工具行、却把 user 行留在压缩区。修复后该行摘出回插到
+    # 摘要与保留尾之间，锚点跨压缩存活。
+    runner = _protected_rows_compression_runner(monkeypatch)
+    current_question = "看一下这个skill有什么不一样的"
+    session = _protected_rows_compression_session(
+        _active_user_batch_inputs=[SimpleNamespace(content=current_question)],
+    )
+    runtime = SimpleNamespace(
+        context=CeoRuntimeContext(loop=None, session=session, session_key="web:shared", on_progress=None)
+    )
+
+    request_messages = [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "older-1"},
+        {"role": "assistant", "content": "older-2"},
+        {"role": "user", "content": "older-3"},
+        {"role": "assistant", "content": "older-4"},
+        {"role": "user", "content": current_question},
+        {"role": "user", "content": "[SILENT_TRACE_LEDGER]\n已记录的静默决定：略"},
+        {"role": "user", "content": "[RUNTIME_NOTICE]\n### Runtime contract updates"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "call-1", "type": "function", "function": {"name": "web_fetch", "arguments": "{}"}}
+            ],
+        },
+        {"role": "tool", "content": "fetched-1", "tool_call_id": "call-1"},
+        {"role": "assistant", "content": "我先读一下它的主文件"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "call-2", "type": "function", "function": {"name": "exec", "arguments": "{}"}}
+            ],
+        },
+        {"role": "tool", "content": "fetched-2", "tool_call_id": "call-2"},
+    ]
+
+    result = await runner._run_frontdoor_llm_token_compression(
+        state={"session_key": "web:shared", "model_refs": ["ceo_primary"]},
+        runtime=runtime,
+        request_messages=request_messages,
+        model_refs=["ceo_primary"],
+        tool_schemas=[],
+    )
+
+    assert result.history_shrink_reason == "token_compression"
+    rewritten = [dict(item) for item in list(result.request_messages or [])]
+    assert rewritten[0]["role"] == "system"
+    assert "[TOKEN_COMPACT_V2]" in str(rewritten[1].get("content") or "")
+    # 当前轮输入原样站在摘要之后、保留尾之前。
+    assert rewritten[2] == {"role": "user", "content": current_question}
+    assert [row.get("role") for row in rewritten[3:]] == [
+        "assistant",
+        "tool",
+        "assistant",
+        "assistant",
+        "tool",
+    ]
+    # 摘要的历史计数不含被保护的行：5 = 4 条旧历史 + 1 条 RUNTIME_NOTICE
+    # （SILENT_TRACE_LEDGER 行由台账机制摘除重建，零静默痕迹时不回插）。
+    assert _compacted_history_message_count(rewritten[1].get("content")) == 5
+
+
+@pytest.mark.asyncio
+async def test_run_frontdoor_llm_token_compression_protects_internal_prompt_rows_for_internal_turns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 心跳/cron 回合批次输入为空，本回合的规则行与事件束行同样不能被摘要吞掉：
+    # 事件束是内部轮唯一的"要处理什么"载体。
+    runner = _protected_rows_compression_runner(monkeypatch)
+    session = _protected_rows_compression_session()
+    runtime = SimpleNamespace(
+        context=CeoRuntimeContext(loop=None, session=session, session_key="web:shared", on_progress=None)
+    )
+
+    rules_row = {
+        "role": "user",
+        "content": "This is a background heartbeat. Do not explain internal mechanics.\n# Heartbeat Rules\n…",
+    }
+    bundle_row = {"role": "user", "content": "[SESSION EVENTS]\n## EVENT BUNDLE\n当前时间…"}
+    request_messages = [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "older-1"},
+        {"role": "assistant", "content": "older-2"},
+        rules_row,
+        bundle_row,
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "hb-1", "type": "function", "function": {"name": "exec", "arguments": "{}"}}],
+        },
+        {"role": "tool", "content": "hb-result-1", "tool_call_id": "hb-1"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "hb-2", "type": "function", "function": {"name": "exec", "arguments": "{}"}}],
+        },
+        {"role": "tool", "content": "hb-result-2", "tool_call_id": "hb-2"},
+    ]
+
+    result = await runner._run_frontdoor_llm_token_compression(
+        state={"session_key": "web:shared", "model_refs": ["ceo_primary"]},
+        runtime=runtime,
+        request_messages=request_messages,
+        model_refs=["ceo_primary"],
+        tool_schemas=[],
+    )
+
+    assert result.history_shrink_reason == "token_compression"
+    rewritten = [dict(item) for item in list(result.request_messages or [])]
+    assert rewritten[2] == rules_row
+    assert rewritten[3] == bundle_row
+    assert _compacted_history_message_count(rewritten[1].get("content")) == 2
+
+
+@pytest.mark.asyncio
+async def test_run_frontdoor_llm_token_compression_protects_merged_batch_row_by_position(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 多输入批次在请求体里合并成一条内容块列表行，逐条与合并文本都对不上：
+    # 按位置兜底——整段 body 最后一条非内部提示词/非通知的 user 行就是当前回合输入。
+    runner = _protected_rows_compression_runner(monkeypatch)
+    session = _protected_rows_compression_session(
+        _active_user_batch_inputs=[
+            SimpleNamespace(content="第一问"),
+            SimpleNamespace(content="第二问"),
+        ],
+    )
+    runtime = SimpleNamespace(
+        context=CeoRuntimeContext(loop=None, session=session, session_key="web:shared", on_progress=None)
+    )
+
+    merged_row = {"role": "user", "content": [{"type": "text", "text": "合并后的批次问题"}]}
+    request_messages = [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "older-1"},
+        {"role": "assistant", "content": "older-2"},
+        merged_row,
+        {"role": "user", "content": "[RUNTIME_NOTICE]\n### Runtime contract updates"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "mb-1", "type": "function", "function": {"name": "exec", "arguments": "{}"}}],
+        },
+        {"role": "tool", "content": "mb-result-1", "tool_call_id": "mb-1"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "mb-2", "type": "function", "function": {"name": "exec", "arguments": "{}"}}],
+        },
+        {"role": "tool", "content": "mb-result-2", "tool_call_id": "mb-2"},
+    ]
+
+    result = await runner._run_frontdoor_llm_token_compression(
+        state={"session_key": "web:shared", "model_refs": ["ceo_primary"]},
+        runtime=runtime,
+        request_messages=request_messages,
+        model_refs=["ceo_primary"],
+        tool_schemas=[],
+    )
+
+    assert result.history_shrink_reason == "token_compression"
+    rewritten = [dict(item) for item in list(result.request_messages or [])]
+    assert rewritten[2] == merged_row
+    assert _compacted_history_message_count(rewritten[1].get("content")) == 3
+
+
+@pytest.mark.asyncio
+async def test_run_frontdoor_llm_token_compression_does_not_duplicate_input_already_in_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 输入已落在保留尾时锚点本就保住：不得再从摘要区补一份造成双份提问。
+    runner = _protected_rows_compression_runner(monkeypatch)
+    current_question = "刚问的这个问题"
+    session = _protected_rows_compression_session(
+        _active_user_batch_inputs=[SimpleNamespace(content=current_question)],
+    )
+    runtime = SimpleNamespace(
+        context=CeoRuntimeContext(loop=None, session=session, session_key="web:shared", on_progress=None)
+    )
+
+    request_messages = [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "older-1"},
+        {"role": "assistant", "content": "older-2"},
+        {"role": "user", "content": "older-3"},
+        {"role": "assistant", "content": "older-4"},
+        {"role": "user", "content": current_question},
+        {"role": "user", "content": "[SILENT_TRACE_LEDGER]\n已记录的静默决定：略"},
+        {"role": "user", "content": "[RUNTIME_NOTICE]\n### Runtime contract updates"},
+    ]
+
+    result = await runner._run_frontdoor_llm_token_compression(
+        state={"session_key": "web:shared", "model_refs": ["ceo_primary"]},
+        runtime=runtime,
+        request_messages=request_messages,
+        model_refs=["ceo_primary"],
+        tool_schemas=[],
+    )
+
+    assert result.history_shrink_reason == "token_compression"
+    rewritten = [dict(item) for item in list(result.request_messages or [])]
+    occurrences = sum(
+        1 for row in rewritten if str(row.get("content") or "") == current_question
+    )
+    assert occurrences == 1
+    # 输入行留在保留尾原位（台账机制摘掉了 SILENT_TRACE_LEDGER 行，尾部少一条）。
+    assert rewritten[-2] == {"role": "user", "content": current_question}
+    assert _compacted_history_message_count(rewritten[1].get("content")) == 3
