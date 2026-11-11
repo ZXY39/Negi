@@ -24,7 +24,11 @@ from main.runtime.acceptance_handshake import (
 )
 from main.runtime.node_mailbox import notification_is_held
 from main.runtime.node_message_kind import KIND_ACCEPTANCE_VERDICT
-from main.runtime.node_runner import SKIPPED_CHECK_RESULT, is_acceptance_pass_hold_result
+from main.runtime.node_runner import (
+    SKIPPED_CHECK_RESULT,
+    _notification_awaits_injection,
+    is_acceptance_pass_hold_result,
+)
 from main.runtime.node_wake import PARKED_PHASES
 from main.runtime.wait_graph import build_wait_nodes, find_all_parked_waits, find_wait_cycles
 from main.types import KIND_ACCEPTANCE, KIND_EXECUTION
@@ -745,6 +749,32 @@ class TaskActorService:
         # 而交接信按设计 `wake=False`。提交后不重排一趟，就没有任何东西会起验收。
         self._node_runner.acceptance_handoff_requeue_callback = self._requeue_interrupted_task_best_effort
 
+    def _pending_notices_wakeable(self, task_id: str, node_id: str) -> bool:
+        """通知复派的开回合判据：信箱里是否还有**能叫醒本节点**的待注入行。
+
+        「待注入」是内容判定（delivered ∪ consumed-未merged），「能叫醒」是唤醒
+        判定——`wait_all_children` 批次的 held 行是内容不是唤醒源（批次静默），
+        它们的注入由批次释放车道负责：释放时若仍有待注入内容会显式唤醒父节点。
+        本道若把"欠注入"直接读成"该叫醒"，重启后就会为一批未释放的 held 行
+        提前开回合并把它们就地消费（实盘 task:8eddc069c91c）。读失败按
+        "可唤醒"处理：宁可多开一回合，不吞真消息。
+        """
+        try:
+            rows = list(self._store.list_task_node_notifications(task_id, node_id) or [])
+        except Exception:
+            return True
+        for item in rows:
+            if _notification_awaits_injection(item) and not notification_is_held(item):
+                return True
+        # 信箱行全是 held 时，根节点 pending 通知那半（root append records）仍可能欠注入。
+        node = self._store.get_node(node_id)
+        if node is None:
+            return False
+        try:
+            return bool(self._node_runner._pending_root_notice_records(node=node))
+        except Exception:
+            return True
+
     async def _resume_pending_notice_nodes(self, task_id: str) -> bool:
         # 通知账本以节点级状态为准（epoch 下线后任务级 meta 不再维护该索引）：
         # “还欠一次上下文注入”的节点就是需要被重新派发的节点。
@@ -761,6 +791,10 @@ class TaskActorService:
         resumed_any = False
         skipped_premature_acceptance = False
         for node_id in pending_node_ids:
+            if not self._pending_notices_wakeable(task_id, node_id):
+                # 批次静默：信箱里只剩 held 行的节点不由本道叫醒，行留给批次释放
+                # 车道注入与唤醒；混有任何一条非 held 待注入行时照常复派。
+                continue
             if self._final_acceptance_awaiting_execution_submission(task_id, node_id):
                 # 门控：被检验执行节点尚未提交结果（握手未进入等待验收）时，
                 # 不得由 notice-resume 抢跑最终验收——否则会对仍在执行的节点

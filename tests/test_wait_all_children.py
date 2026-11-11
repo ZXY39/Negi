@@ -299,3 +299,80 @@ async def test_startup_reconcile_warning_carries_detail(tmp_path, monkeypatch):
     assert 'detail={}' in message
     assert 'pending_entries=' in str(args[-1])
     assert f'{CHILD2}:in_progress' in str(args[-1])
+
+
+def _actor_for(service: MainRuntimeService) -> TaskActorService:
+    actor = object.__new__(TaskActorService)
+    actor._store = service.store
+    actor._node_runner = service.node_runner
+    return actor
+
+
+@pytest.mark.asyncio
+async def test_notice_resume_lane_skips_parked_parent_with_only_held_rows(tmp_path, monkeypatch):
+    """重启复派道不得为未释放的 held 批次行开回合（实盘 task:8eddc069c91c）。
+
+    批次未齐时父节点停靠等释放，信箱里只有 held 的 child_final；「欠注入」读数
+    把它们算作待并入，但它们不是唤醒源——本道若据此执行父节点，停靠的等待档
+    被提前打破，held 行被就地消费，批次静默失效。
+    """
+    service = _service(tmp_path)
+    _seed(service, wait_all=True)
+    woke = _stub_wake(service, monkeypatch)
+    await service._deliver_child_final_message(task_id=TASK, node_id=CHILD1)
+    service.log_service.sync_task_read_models(TASK, force=True)
+
+    # 选择器仍把父节点列进来（欠注入是内容判定，计数认 held 行）；
+    # 但复派道的开回合判据排除它。
+    assert service.node_runner.nodes_with_pending_distribution_notices(task_id=TASK) == [PARENT]
+
+    actor = _actor_for(service)
+    executed: list[str] = []
+
+    async def execute_node(task_id, node_id):
+        executed.append(node_id)
+        return None
+
+    monkeypatch.setattr(actor, '_execute_node', execute_node)
+    assert await actor._resume_pending_notice_nodes(TASK) is False
+    assert executed == []
+    assert woke == []
+
+    # 批次放行后，同一批行回到复派视野：释放唤醒失败时的兜底仍在。
+    child2 = service.store.get_node(CHILD2)
+    service.store.upsert_node(
+        child2.model_copy(update={'status': 'success', 'final_output': 'done'})
+    )
+    await service._deliver_child_final_message(task_id=TASK, node_id=CHILD2)
+    rows = service.store.list_task_node_notifications(TASK, PARENT)
+    assert all(not notification_is_held(item) for item in rows)
+    assert await actor._resume_pending_notice_nodes(TASK) is True
+    assert executed == [PARENT]
+
+
+@pytest.mark.asyncio
+async def test_notice_resume_lane_still_wakes_when_nonheld_row_rides_along(tmp_path, monkeypatch):
+    """held 行不是唤醒源，但混入的普通未读仍是：批次静默不吞真消息。"""
+    service = _service(tmp_path)
+    _seed(service, wait_all=True)
+    _stub_wake(service, monkeypatch)
+    await service._deliver_child_final_message(task_id=TASK, node_id=CHILD1)
+    delivered = await service.deliver_node_message(
+        task_id=TASK,
+        target_node_id=PARENT,
+        message='补充要求：合并时先对齐时间线',
+        origin='user',
+    )
+    assert delivered['status'] == 'delivered'
+    service.log_service.sync_task_read_models(TASK, force=True)
+
+    actor = _actor_for(service)
+    executed: list[str] = []
+
+    async def execute_node(task_id, node_id):
+        executed.append(node_id)
+        return None
+
+    monkeypatch.setattr(actor, '_execute_node', execute_node)
+    assert await actor._resume_pending_notice_nodes(TASK) is True
+    assert executed == [PARENT]

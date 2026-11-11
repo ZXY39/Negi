@@ -51,6 +51,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 
 - Node cache misses, restart-seed continuity, token preflight/compression questions → `context-and-cache-troubleshooting.md` (+ `runtime-overview.md`)
 - 节点信箱投递（`send_message` / 验收驳回 / `child_abnormal_pause`）、`waiting_children` 重放、停在等待档的节点被唤醒 → `main-task-runtime.md`「节点信箱与唤醒（现行）」+ `operations-and-maintenance.md`「节点投递与冻结/复活排查」
+- 重启后设了 `wait_all_children` 的父节点提前醒来、信箱里未释放的 held 行被就地消费（节点详情显示已消费而批次 `released_at` 仍为空）→ `main-task-runtime.md`「节点信箱与唤醒（现行）」的批次静默条（通知复派道不为 held 行开回合，释放车道负责注入与唤醒）
 - 给暂停节点发了消息（网页、前门、`child_final`、`wake_timer` 任一道）、节点照旧不动且没有报错 → 设计内：A5=A 粘性暂停，消息一律落箱不清位；唯一消息型恢复是 `manage_child_nodes(resume)`，操作员用 `manage_task_nodes(resume)`。见 `main-task-runtime.md`「节点信箱与唤醒（现行）」+ `operations-and-maintenance.md`「节点投递与冻结/复活排查」
 - （历史，已删除）追加通知后任务停在 paused / 红色「消息分发失败」横幅 / epoch state=failed：distribution epoch 已整体删除，按 `main-task-runtime.md`「附录 A：已删除的 distribution epoch（历史说明，勿据此实现）」理解旧库数据，不要按它排障。
 - 想知道"每条节点消息走到哪一步"（待处理 / 已消费 / 旧库里的 received·frozen 投影）→ `web-and-admin.md`「Task Message Distribution UI Contract（已删除）」的信箱三态三条 + `main-task-runtime.md`「节点信箱与唤醒（现行）」；节点详情已显示重试中而 toast 不出现 → `web-and-admin.md`「Model Retry Visibility UI Contract」
