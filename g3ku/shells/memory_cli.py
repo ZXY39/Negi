@@ -91,6 +91,15 @@ def build_memory_app(console) -> typer.Typer:
                 f"{', '.join(str(item) for item in broken_categories)}"
             )
 
+        dangling_mentions = report.get("dangling_note_mentions")
+        if isinstance(dangling_mentions, dict) and dangling_mentions:
+            console.print("- Dangling note mentions (named in prose, no file answers):")
+            for mention_ref, mention_sources in list(dangling_mentions.items())[:5]:
+                sources = "+".join(str(item) for item in mention_sources or [])
+                console.print(f"  {mention_ref} ({sources})")
+            if len(dangling_mentions) > 5:
+                console.print(f"  ... plus {len(dangling_mentions) - 5} more")
+
         queue_parse_errors = list(report.get("queue_parse_errors") or [])
         if queue_parse_errors:
             console.print(f"- Queue parse errors: {len(queue_parse_errors)} issue(s) in queue.jsonl")

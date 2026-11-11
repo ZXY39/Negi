@@ -331,6 +331,40 @@ def test_note_upsert_requires_a_claiming_row_or_an_existing_owner(tmp_path: Path
         manager.close()
 
 
+def test_doctor_missing_refs_accept_a_category_file_as_the_answer(tmp_path: Path) -> None:
+    """The read side resolves bare names ordinary-first, category-fallback, so a ref
+    whose file lives in memory/index/ is present, not missing - the doctor check that
+    only globs memory/notes/ turned every row pointing at its retired category note
+    into a phantom missing entry."""
+    module = _load_module()
+    manager = module.MemoryManager(tmp_path, _cfg())
+    try:
+        manager._memory_repo.apply_mutation(
+            adds=[
+                {
+                    "content": "派发异步任务->按规范写说明并验收",
+                    "minimal_memory": "异步任务->规范",
+                    "decision_source": "user",
+                    "note_ref": "note_async_task_ops",
+                }
+            ],
+            rewrites=None,
+            deletes=None,
+            inspired_memory_ids=None,
+            now_iso="2026-04-17T10:00:00+08:00",
+        )
+        category = manager.index_dir / "note_async_task_ops.md"
+        category.parent.mkdir(parents=True, exist_ok=True)
+        category.write_text("## 方法论\n- 规范细节\n", encoding="utf-8")
+
+        report = manager.doctor_report()
+
+        assert report["missing_note_refs"] == []
+        assert report["orphan_notes"] == []
+    finally:
+        manager.close()
+
+
 def test_doctor_reports_prose_mentions_no_file_answers(tmp_path: Path) -> None:
     """The block can advertise a name whose file is gone; doctor has to say so instead
     of leaving readers to discover it as a load failure."""

@@ -148,7 +148,9 @@ def test_memory_doctor_reports_invalid_document_missing_refs_orphans_and_stuck_h
     notes_dir = memory_dir / "notes"
     notes_dir.mkdir(parents=True, exist_ok=True)
     (memory_dir / "MEMORY.md").write_text("broken entry with ref:note_missing\n", encoding="utf-8")
-    (notes_dir / "orphan_note.md").write_text("orphan body\n", encoding="utf-8")
+    (notes_dir / "orphan_note.md").write_text(
+        "orphan body; see note_gone_mention for the retired detail\n", encoding="utf-8"
+    )
     (memory_dir / "queue.jsonl").write_text(
         json.dumps(
             {
@@ -181,6 +183,8 @@ def test_memory_doctor_reports_invalid_document_missing_refs_orphans_and_stuck_h
     assert "invalid" in joined
     assert "missing note refs" in joined
     assert "orphan" in joined
+    assert "dangling note mentions" in joined
+    assert "note_gone_mention" in joined
     assert "stuck processing head" in joined
 
 

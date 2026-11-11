@@ -3003,7 +3003,16 @@ class MemoryManager:
 
         note_refs = self._owned_note_refs()
         note_files = self._note_file_refs()
-        missing_note_refs = sorted(ref for ref in note_refs if ref not in note_files)
+        # A ref a category file answers is not missing: the read side resolves bare
+        # names ordinary-first, category-fallback, so both trees count as present. A
+        # notes_dir-only glob turned every row that points at its retired category note
+        # into a phantom "missing" entry on a store where the ordinary file had already
+        # been folded into memory/index/.
+        missing_note_refs = sorted(
+            ref
+            for ref in note_refs
+            if ref not in note_files and ref not in self._category_note_names()
+        )
         orphan_notes = sorted(
             ref for ref in note_files if ref not in note_refs and ref != PERSONA_NOTE_REF
         )
