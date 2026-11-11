@@ -10692,6 +10692,8 @@ function switchView(view) {
     const map = { ceo: U.viewCeo, tasks: U.viewTasks, skills: U.viewSkills, tools: U.viewTools, stickers: U.viewStickers, memory: U.viewMemory, models: U.viewModels, external: U.viewExternal, sandbox: U.viewSandbox, audit: U.viewAudit, "task-details": U.viewTaskDetails };
     const navView = view === "task-details" ? "tasks" : view;
     const leavingTaskDetails = view !== "task-details" && !!U.viewTaskDetails?.classList.contains("active");
+    if (view !== "task-details" && typeof taskProcessesClose === "function") taskProcessesClose();
+    if (view !== "ceo") ceoBgJobsClose();
     S.view = navView;
     // 沙箱页按需加载：首次进入才挂 iframe，避免主界面一打开就多一份轮询。
     if (view === "sandbox" && U.sandboxFrame && U.sandboxFrame.getAttribute("src") === "about:blank") {
@@ -12012,7 +12014,7 @@ function bindGlobalOverlays() {
         if (!e.target.closest(".ceo-session-actions.toolbar-dropdown")) closeCeoSessionMenus();
         if (!e.target.closest(".toolbar-dropdown")) closeTaskMenus();
         if (!e.target.closest(".project-settings-meta")) closeProjectSettingsQrPopover();
-        if (!e.target.closest("#ceo-bg-jobs")) ceoBgJobsClose();
+        if (!e.target.closest("#ceo-bg-jobs, #ceo-bg-jobs-popover")) ceoBgJobsClose();
     });
     document.addEventListener("keydown", (e) => {
         if (e.key !== "Escape") return;

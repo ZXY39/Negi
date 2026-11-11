@@ -6870,10 +6870,10 @@ textarea {
 }
 
 .ceo-bg-jobs-popover {
+    position: fixed;
+    z-index: 30;
     pointer-events: auto;
-    width: min(360px, calc(100vw - 24px));
-    max-height: min(40vh, 320px);
-    overflow: auto;
+    width: min(440px, calc(100vw / var(--ui-zoom, 1) - 24px));
     padding: var(--ui-space-2);
     border: 1px solid var(--ui-border);
     border-radius: var(--ui-radius-card);
@@ -6889,9 +6889,12 @@ textarea {
     display: flex;
     flex-direction: column;
     gap: 2px;
+    overflow-y: auto;
+    overflow-x: hidden;
 }
 
 .ceo-bg-jobs-row {
+    flex-shrink: 0;
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto auto;
     align-items: center;
@@ -6919,12 +6922,11 @@ textarea {
 }
 
 .ceo-bg-jobs-tool {
-    overflow: hidden;
     min-width: 0;
     color: var(--ui-text);
     font-size: 0.8rem;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
 }
 
 .ceo-bg-jobs-tag {
@@ -6938,11 +6940,10 @@ textarea {
 }
 
 .ceo-bg-jobs-hint {
-    overflow: hidden;
     color: var(--ui-text-muted);
     font-size: 0.72rem;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
 }
 
 .ceo-bg-jobs-elapsed {
@@ -17309,7 +17310,7 @@ textarea {
     font-size: 13px;
 }
 
-/* 任务详情页右上角的后台进程气泡：按钮与 popover 同属一个定位容器。 */
+/* 面板挂到 body，避开任务头部的 overflow 裁切。 */
 .task-processes {
     position: relative;
     display: inline-flex;
@@ -17324,13 +17325,9 @@ textarea {
 }
 
 .task-processes-popover {
-    position: absolute;
-    top: calc(100% + 6px);
-    right: 0;
+    position: fixed;
     z-index: 30;
-    width: min(440px, calc(100vw - 24px));
-    max-height: min(40vh, 320px);
-    overflow: auto;
+    width: min(520px, calc(100vw / var(--ui-zoom, 1) - 24px));
     padding: var(--ui-space-2);
     border: 1px solid var(--ui-border);
     border-radius: var(--ui-radius-card);
@@ -17352,9 +17349,12 @@ textarea {
     display: flex;
     flex-direction: column;
     gap: 2px;
+    overflow-y: auto;
+    overflow-x: hidden;
 }
 
 .task-processes-row {
+    flex-shrink: 0;
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto auto auto;
     align-items: center;
@@ -17368,12 +17368,11 @@ textarea {
 }
 
 .task-processes-main {
-    overflow: hidden;
     min-width: 0;
     color: var(--ui-text);
     font-size: 0.8rem;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
 }
 
 .task-processes-node {

@@ -59,6 +59,8 @@ function loadSwitchView({ detailActive = true } = {}) {
             viewExternal: makeEl(),
             viewTaskDetails: makeEl(),
         },
+        ceoBgJobsClose: record("ceoBgJobsClose"),
+        taskProcessesClose: record("taskProcessesClose"),
         cancelTaskTreeLoading: record("cancelTaskTreeLoading"),
         stashTaskDetailViewState: record("stashTaskDetailViewState"),
         setTaskTokenStatsOpen: record("setTaskTokenStatsOpen"),
@@ -104,6 +106,8 @@ test("箭头返回大厅：点击帧内发起大厅请求并掐掉 live 流，�
     context.switchView("tasks");
     const calls = context.__calls;
     // 点击帧：live 流已掐断、大厅请求已发起，重拆除尚未执行。
+    assert.equal(calls.ceoBgJobsClose, 1);
+    assert.equal(calls.taskProcessesClose, 1);
     assert.equal(calls.closeTaskDetailWs, 1);
     assert.equal(calls.loadTasks, 1);
     assert.equal(calls.initTasksWs, 1);

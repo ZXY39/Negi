@@ -189,9 +189,7 @@ function ceoBgJobsRow(item) {
     // 进程行优先显示创建时写入的 purpose；命令只在 title 里，不再占第二行。
     const processPurpose = kind === "process" ? String(item.purpose || "").trim() : "";
     if (kind === "process") {
-        tool.textContent = processPurpose.length > 48
-            ? `${processPurpose.slice(0, 47)}…`
-            : (processPurpose || "exec 进程");
+        tool.textContent = processPurpose || "exec 进程";
         if (processPurpose) tool.title = processPurpose;
     } else {
         tool.textContent = String(item.tool_name || "tool").trim() || "tool";
@@ -212,7 +210,7 @@ function ceoBgJobsRow(item) {
         } else {
             const hintEl = document.createElement("span");
             hintEl.className = "ceo-bg-jobs-hint";
-            hintEl.textContent = hint.length > 48 ? `${hint.slice(0, 47)}…` : hint;
+            hintEl.textContent = hint;
             hintEl.title = hint;
             main.appendChild(hintEl);
         }
@@ -260,9 +258,21 @@ function ceoBgJobsRender() {
     if (countEl) countEl.textContent = String(items.length);
     const list = ceoBgJobsEl("ceo-bg-jobs-list");
     if (!list) return;
+    const scrollTop = list.scrollTop;
     while (list.firstChild) list.removeChild(list.firstChild);
     items.forEach((item) => list.appendChild(ceoBgJobsRow(item)));
+    ceoBgJobsPosition();
+    list.scrollTop = scrollTop;
     if (CeoBackgroundJobsState.open) ceoBgJobsStartTimer();
+}
+
+function ceoBgJobsPosition() {
+    if (!CeoBackgroundJobsState.open) return;
+    positionListPopover(
+        ceoBgJobsEl("ceo-bg-jobs-toggle"),
+        ceoBgJobsEl("ceo-bg-jobs-popover"),
+        ceoBgJobsEl("ceo-bg-jobs-list"),
+    );
 }
 
 function ceoBgJobsSetOpen(open) {
@@ -273,6 +283,7 @@ function ceoBgJobsSetOpen(open) {
     if (popover) popover.hidden = !next;
     if (toggle) toggle.setAttribute("aria-expanded", next ? "true" : "false");
     if (next) {
+        ceoBgJobsPosition();
         ceoBgJobsStartTimer();
     } else {
         ceoBgJobsStopTimer();
@@ -447,6 +458,7 @@ function bindCeoBackgroundJobs() {
     }
     if (!CeoBackgroundJobsState.lifecycleBound) {
         CeoBackgroundJobsState.lifecycleBound = true;
+        window.addEventListener("resize", ceoBgJobsPosition);
         window.addEventListener("pagehide", ceoBgJobsStopTimer);
         window.addEventListener("pagehide", ceoBgJobsStopReconcile);
     }

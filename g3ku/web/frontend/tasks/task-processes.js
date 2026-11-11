@@ -59,7 +59,7 @@ function taskProcessesRow(item) {
     main.className = "task-processes-main";
     const purpose = String(item?.purpose || "").trim();
     const cmd = String(item?.cmd || "").trim();
-    main.textContent = taskProcessesTruncate(purpose || cmd || `pid ${pid}`, 60);
+    main.textContent = purpose || cmd || `pid ${pid}`;
     main.title = [purpose, cmd].filter(Boolean).join("\n");
 
     const nodeId = String(item?.node_id || "").trim();
@@ -99,8 +99,11 @@ function taskProcessesRow(item) {
 function taskProcessesRenderRows() {
     const list = taskProcessesEl("task-processes-list");
     if (!list) return;
+    const scrollTop = list.scrollTop;
     while (list.firstChild) list.removeChild(list.firstChild);
     TaskProcessesState.items.forEach((item) => list.appendChild(taskProcessesRow(item)));
+    taskProcessesPosition();
+    list.scrollTop = scrollTop;
 }
 
 function taskProcessesRender() {
@@ -122,6 +125,15 @@ function taskProcessesRender() {
     if (TaskProcessesState.open) taskProcessesStartElapsedTimer();
 }
 
+function taskProcessesPosition() {
+    if (!TaskProcessesState.open) return;
+    positionListPopover(
+        taskProcessesEl("task-processes-btn"),
+        taskProcessesEl("task-processes-popover"),
+        taskProcessesEl("task-processes-list"),
+    );
+}
+
 function taskProcessesSetOpen(open) {
     const popover = taskProcessesEl("task-processes-popover");
     const toggle = taskProcessesEl("task-processes-btn");
@@ -130,6 +142,7 @@ function taskProcessesSetOpen(open) {
     if (popover) popover.hidden = !next;
     if (toggle) toggle.setAttribute("aria-expanded", next ? "true" : "false");
     if (next) {
+        taskProcessesPosition();
         taskProcessesStartElapsedTimer();
     } else {
         taskProcessesStopElapsedTimer();
@@ -276,11 +289,13 @@ function bindTaskProcesses() {
         document.addEventListener("click", (event) => {
             if (!TaskProcessesState.open) return;
             if (root && event.target && root.contains?.(event.target)) return;
+            if (taskProcessesEl("task-processes-popover")?.contains(event.target)) return;
             taskProcessesClose();
         });
         document.addEventListener("keydown", (event) => {
             if (String(event?.key || "") === "Escape") taskProcessesClose();
         });
+        window.addEventListener("resize", taskProcessesPosition);
         window.addEventListener("pagehide", () => {
             taskProcessesStopElapsedTimer();
             if (TaskProcessesState.reconcileTimerId) {

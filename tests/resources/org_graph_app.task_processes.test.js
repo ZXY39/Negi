@@ -25,6 +25,14 @@ class StubElement {
         this.title = "";
         this.attributes = {};
         this.listeners = {};
+        this.parentElement = null;
+        this.style = {};
+        this.scrollTop = 0;
+        this.rect = { top: 80, bottom: 112, left: 800, right: 1240, width: 440, height: 32 };
+    }
+
+    getBoundingClientRect() {
+        return this.rect;
     }
 
     get firstChild() {
@@ -32,12 +40,15 @@ class StubElement {
     }
 
     appendChild(child) {
+        child.parentElement?.removeChild(child);
+        child.parentElement = this;
         this.children.push(child);
         return child;
     }
 
     removeChild(child) {
         this.children = this.children.filter((item) => item !== child);
+        child.parentElement = null;
         return child;
     }
 
@@ -54,8 +65,8 @@ class StubElement {
         (this.listeners[type] = this.listeners[type] || []).push(handler);
     }
 
-    contains() {
-        return false;
+    contains(target) {
+        return this === target || this.children.some((child) => child.contains(target));
     }
 
     querySelectorAll() {
@@ -66,6 +77,8 @@ class StubElement {
 class StubDocument {
     constructor() {
         this._byId = new Map();
+        this.body = new StubElement("body");
+        this.listeners = {};
         [
             "task-processes",
             "task-processes-btn",
@@ -87,7 +100,9 @@ class StubDocument {
         return new StubElement(tag);
     }
 
-    addEventListener() {}
+    addEventListener(type, handler) {
+        (this.listeners[type] = this.listeners[type] || []).push(handler);
+    }
 }
 
 function itemsFixture() {
@@ -155,6 +170,9 @@ function loadModule(overrides = {}) {
         },
         showToast: (options) => toasts.push(options),
         window: {
+            innerWidth: 1440,
+            innerHeight: 900,
+            getComputedStyle: (el) => ({ zoom: el.style.zoom || "1", paddingBottom: "8px", borderBottomWidth: "1px" }),
             setInterval(handler) {
                 const id = nextIntervalId++;
                 intervals.set(id, handler);
@@ -168,9 +186,72 @@ function loadModule(overrides = {}) {
     };
     context.window.window = context.window;
     vm.createContext(context);
+    vm.runInContext(fs.readFileSync(path.join(__dirname, "../../g3ku/web/frontend/ui/drawer.js"), "utf8"), context);
     vm.runInContext(MODULE_CODE, context);
     return { context, document, calls, toasts, jumps, interruptCount: () => intervals.size };
 }
+
+test("REST process purposes and legacy commands keep their full text", async () => {
+    const items = itemsFixture();
+    items[0].purpose = "render the complete preview for the next review session; ".repeat(3);
+    items[1].cmd = "node scripts/preview-with-a-very-long-command-name.js ".repeat(3);
+    const { context, document } = loadModule({ items });
+    await context.taskProcessesRefresh();
+    const rows = document.getElementById("task-processes-list").children;
+    assert.equal(rows[0].children[0].textContent, items[0].purpose.trim());
+    assert.equal(rows[1].children[0].textContent, items[1].cmd.trim());
+});
+
+test("button opens a body-mounted panel; inside clicks stay open and outside clicks close", async () => {
+    const { context, document } = loadModule({ items: itemsFixture() });
+    await context.taskProcessesRefresh();
+    context.bindTaskProcesses();
+    const toggle = document.getElementById("task-processes-btn");
+    toggle.listeners.click[0]({ stopPropagation() {} });
+    const popover = document.getElementById("task-processes-popover");
+    assert.equal(popover.hidden, false);
+    assert.equal(popover.parentElement, document.body);
+    assert.equal(toggle.getAttribute("aria-expanded"), "true");
+    for (const handler of document.listeners.click) handler({ target: popover });
+    assert.equal(popover.hidden, false);
+    for (const handler of document.listeners.click) handler({ target: document.body });
+    assert.equal(popover.hidden, true);
+});
+
+test("list height stops at row 20 using measured variable-height rows and viewport space", async () => {
+    const items = Array.from({ length: 21 }, (_, i) => ({ ...itemsFixture()[0], pid: i + 1 }));
+    const { context, document } = loadModule({ items });
+    await context.taskProcessesRefresh();
+    const list = document.getElementById("task-processes-list");
+    let top = 150;
+    list.rect.top = top;
+    list.children.forEach((row, i) => {
+        const height = i % 2 ? 40 : 20;
+        row.rect = { top, bottom: top + height, height };
+        top += height + 2;
+    });
+    context.taskProcessesSetOpen(true);
+    assert.equal(list.children.length, 21);
+    assert.equal(list.style.maxHeight, "638px");
+    context.window.innerHeight = 500;
+    context.taskProcessesSetOpen(true);
+    assert.equal(list.style.maxHeight, "329px");
+});
+
+test("portal coordinates account for app zoom and refresh retains the scroll position", async () => {
+    const { context, document } = loadModule({ items: itemsFixture() });
+    await context.taskProcessesRefresh();
+    document.body.style.zoom = "1.25";
+    context.taskProcessesSetOpen(true);
+    const popover = document.getElementById("task-processes-popover");
+    const list = document.getElementById("task-processes-list");
+    assert.equal(popover.style.left, "640px");
+    assert.equal(popover.style.top, "95.6px");
+    list.scrollTop = 64;
+    await context.taskProcessesRefresh();
+    assert.equal(list.scrollTop, 64);
+    assert.equal(popover.hidden, false);
+});
 
 test("空列表隐藏气泡，有进程时显示计数与 purpose 行", async () => {
     const { context, document } = loadModule({ items: [] });

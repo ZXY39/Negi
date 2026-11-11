@@ -26,6 +26,13 @@ class StubElement {
         this.attributes = {};
         this.listeners = {};
         this.parentElement = null;
+        this.style = {};
+        this.scrollTop = 0;
+        this.rect = { top: 80, bottom: 112, left: 800, right: 1240, width: 440, height: 32 };
+    }
+
+    getBoundingClientRect() {
+        return this.rect;
     }
 
     get firstChild() {
@@ -33,6 +40,7 @@ class StubElement {
     }
 
     appendChild(child) {
+        child.parentElement?.removeChild(child);
         child.parentElement = this;
         this.children.push(child);
         return child;
@@ -80,6 +88,7 @@ class StubElement {
 class StubDocument {
     constructor() {
         this._byId = new Map();
+        this.body = new StubElement("body");
         this._chips = [];
         this._liveRows = [];
         ["ceo-bg-jobs", "ceo-bg-jobs-toggle", "ceo-bg-jobs-count", "ceo-bg-jobs-popover", "ceo-bg-jobs-list"].forEach((id) => {
@@ -142,6 +151,9 @@ function loadModule(overrides = {}) {
         activeSessionId: () => active,
         showToast: (options) => toasts.push(options),
         window: {
+            innerWidth: 1440,
+            innerHeight: 900,
+            getComputedStyle: (el) => ({ zoom: el.style.zoom || "1", paddingBottom: "8px", borderBottomWidth: "1px" }),
             setInterval(handler) {
                 const id = nextIntervalId++;
                 intervals.set(id, handler);
@@ -160,6 +172,7 @@ function loadModule(overrides = {}) {
     };
     context.window.window = context.window;
     vm.createContext(context);
+    vm.runInContext(fs.readFileSync(path.join(__dirname, "../../g3ku/web/frontend/ui/drawer.js"), "utf8"), context);
     vm.runInContext(MODULE_CODE, context);
     return { context, calls, toasts, document };
 }
@@ -184,6 +197,34 @@ function itemsFixture() {
         },
     ];
 }
+
+test("WS process purpose and tool hint keep their full text", () => {
+    const { context, document } = loadModule();
+    const purpose = "render preview and keep the server available for review; ".repeat(3);
+    const hint = "node scripts/preview-with-a-very-long-command-name.js ".repeat(3);
+    context.handleCeoToolJobsFrame({ data: { items: [
+        { ...itemsFixture()[0], kind: "process", job_id: "proc:42", purpose, hint },
+        { ...itemsFixture()[1], hint },
+    ] } }, "web:a");
+    const rows = document.getElementById("ceo-bg-jobs-list").children;
+    assert.equal(rows[0].children[0].children[0].children[0].textContent, purpose.trim());
+    assert.equal(rows[1].children[0].children[1].textContent, hint.trim());
+});
+
+test("open list portals out of the chat wrapper and preserves scroll on refresh", () => {
+    const { context, document } = loadModule();
+    const items = Array.from({ length: 21 }, (_, i) => ({ ...itemsFixture()[0], job_id: `proc:${i}` }));
+    context.ceoBgJobsSetItems(items, "web:a");
+    context.ceoBgJobsSetOpen(true);
+    const popover = document.getElementById("ceo-bg-jobs-popover");
+    const list = document.getElementById("ceo-bg-jobs-list");
+    assert.equal(popover.parentElement, document.body);
+    assert.equal(list.children.length, 21);
+    list.scrollTop = 128;
+    context.ceoBgJobsSetItems(items, "web:a");
+    assert.equal(list.scrollTop, 128);
+    assert.equal(popover.hidden, false);
+});
 
 test("0 条隐藏，2 条显示计数与列表", () => {
     const { context, document } = loadModule();
