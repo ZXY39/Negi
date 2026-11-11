@@ -1420,21 +1420,25 @@
       panel.hidden = true;
       return;
     }
+    // 面板挂在 body 上，body 的 CSS zoom（界面缩放）会再乘一次写入的坐标；
+    // 视口量得的 gBCR/innerWidth 写回前先反除。offsetHeight 是未乘 zoom 的
+    // 布局值，与视口坐标混比会错判翻转时机，先乘回 zoom 再比。
+    const zoom = bodyUiZoomFactor();
     const rect = anchor.getBoundingClientRect();
     const viewportWidth = window.innerWidth || 0;
     const viewportHeight = window.innerHeight || 0;
     if (!rect.width || !viewportWidth) return;
     const width = Math.min(Math.max(rect.width, 280), viewportWidth - 16);
-    const height = panel.offsetHeight || 0;
+    const height = panel.offsetHeight ? panel.offsetHeight * zoom : 0;
     const left = Math.min(Math.max(rect.left, 8), viewportWidth - width - 8);
     let top = rect.bottom + 6;
     if (height && top + height > viewportHeight - 8) {
       const above = rect.top - height - 6;
       top = above >= 8 ? above : Math.max(8, viewportHeight - height - 8);
     }
-    panel.style.width = `${width}px`;
-    panel.style.left = `${Math.max(left, 8)}px`;
-    panel.style.top = `${top}px`;
+    panel.style.width = `${Math.round(width / zoom)}px`;
+    panel.style.left = `${Math.round(Math.max(left, 8) / zoom)}px`;
+    panel.style.top = `${Math.round(top / zoom)}px`;
   }
 
   function renderModelListPanel() {
@@ -2313,6 +2317,9 @@
           const willOpen = popover.hidden;
           closeLlmNotePopovers();
           if (willOpen) {
+            // 挂到 body 后写坐标会被 body 的 CSS zoom（界面缩放）再乘一次，
+            // 量出来的视口坐标写回前先反除。
+            const zoom = bodyUiZoomFactor();
             if (popover.parentElement !== document.body) document.body.appendChild(popover);
             popover.hidden = false;
             const buttonRect = noteToggle.getBoundingClientRect();
@@ -2321,8 +2328,8 @@
             if (top < 8) top = buttonRect.bottom + 10;
             let left = buttonRect.right - popRect.width;
             left = Math.max(8, Math.min(left, window.innerWidth - popRect.width - 8));
-            popover.style.top = `${top}px`;
-            popover.style.left = `${left}px`;
+            popover.style.top = `${Math.round(top / zoom)}px`;
+            popover.style.left = `${Math.round(left / zoom)}px`;
             popover.setAttribute("aria-hidden", "false");
           }
         }

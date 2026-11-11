@@ -74,6 +74,9 @@ global.window = global;
 global.window.addEventListener = () => {};
 global.window.innerWidth = 1440;
 global.window.innerHeight = 900;
+global.getComputedStyle = (el) => ({ zoom: el?.style?.zoom || "1" });
+// drawer.js 只为 bodyUiZoomFactor（浮层定位的反除换算）；positionListPopover/setDrawerOpen 仍用下面的 stub。
+vm.runInThisContext(fs.readFileSync("g3ku/web/frontend/ui/drawer.js", "utf8"));
 
 elements["llm-binding-default-model"] = makeEl("llm-binding-default-model", {
   top: 100, bottom: 138, left: 40, right: 340, width: 300, height: 38,

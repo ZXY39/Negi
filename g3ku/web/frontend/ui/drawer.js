@@ -1,9 +1,26 @@
 "use strict";
 
+// 浏览器轨的界面缩放写在 body 的 CSS zoom 上（桌面壳走 WebView2 宿主缩放，不写它）。
+// CSS zoom 之下 getBoundingClientRect() 给的是已乘 zoom 的视口坐标，而 body 子树里的
+// fixed 浮层写 top/left/width 时坐标会被再乘一次 zoom：视口坐标必须先反除回本地坐标，
+// 否则浮层会按缩放倍数飞出弹窗（放大时偏下偏右，缩小时偏上偏左）。
+// Ctrl+滚轮与宿主缩放不动 body 的 zoom，这里自然返回 1，不参与换算。
+// 所有挂到 body 上手动定位的浮层（resource-select 的 portal 面板、模型列表悬浮、
+// 配置说明 popover、positionListPopover）都走这一个入口。
+function bodyUiZoomFactor() {
+    try {
+        const raw = parseFloat(window.getComputedStyle(document.body)?.zoom ?? "");
+        return Number.isFinite(raw) && raw > 0 ? raw : 1;
+    } catch (error) {
+        void error;
+        return 1;
+    }
+}
+
 function positionListPopover(toggle, popover, list, rowLimit = 20) {
     if (popover.hidden || !list.children.length) return;
     if (popover.parentElement !== document.body) document.body.appendChild(popover);
-    const zoom = parseFloat(window.getComputedStyle(document.body).zoom) || 1;
+    const zoom = bodyUiZoomFactor();
     const edge = 12;
     const triggerRect = toggle.getBoundingClientRect();
     const width = popover.getBoundingClientRect().width / zoom;

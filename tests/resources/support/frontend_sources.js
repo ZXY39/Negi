@@ -55,6 +55,8 @@ const FRONTEND_BUNDLES = Object.freeze({
     resources: ["org_graph_resources.js"],
     stickers: ["org_graph_stickers.js"],
     governance: ["org_graph_ceo_governance.js"],
+    // org_graph_llm.js 依赖页面上更早加载的 ui/drawer.js（bodyUiZoomFactor）；
+    // bundle 必须互斥，VM 单独加载 llm 的测试要在自己的宿主里先挂 drawer.js。
     llm: ["org_graph_llm.js"],
     content_policy: ["models/content-policy.js"],
     onboarding: ["org_graph_onboarding.js"],

@@ -66,6 +66,9 @@ _LLM_HARNESS = r"""
         };
         global.window = global;
         global.window.addEventListener = () => {};
+        global.getComputedStyle = (el) => ({ zoom: el?.style?.zoom || "1" });
+        // drawer.js 只为 bodyUiZoomFactor；positionListPopover/setDrawerOpen 仍用下面的 stub。
+        vm.runInThisContext(fs.readFileSync("g3ku/web/frontend/ui/drawer.js", "utf8"));
         global.toasts = [];
         global.showToast = (payload) => { global.toasts.push(payload || {}); };
         global.esc = (value) => String(value ?? "");

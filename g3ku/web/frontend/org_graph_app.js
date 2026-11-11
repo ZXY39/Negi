@@ -8203,6 +8203,8 @@ const RESOURCE_SELECT_PORTAL_GAP = 10;
 // 展开态的下拉面板默认绝对定位在 .resource-select-shell 里，一旦这个 shell 处在
 // 滚动容器内（模型配置弹窗的 body），面板会把容器撑高、并被聚焦的选中项滚动到可视区，
 // 整张表单就往上跳。带 data-resource-select-portal 的下拉改为挂到 body 上按视口定位。
+// 视口坐标写回 body 子树前先按 body 的 CSS zoom 反除（bodyUiZoomFactor，见 ui/drawer.js），
+// 否则开了界面缩放面板会按倍数飞出弹窗。
 function getResourceSelectMenu(shell) {
     if (!(shell instanceof HTMLElement)) return null;
     const own = shell.querySelector(".resource-select-menu");
@@ -8212,18 +8214,19 @@ function getResourceSelectMenu(shell) {
 }
 
 function positionResourceSelectMenuPortal(trigger, menu) {
+    const zoom = bodyUiZoomFactor();
     const rect = trigger.getBoundingClientRect();
-    menu.style.left = `${Math.round(rect.left)}px`;
-    menu.style.width = `${Math.round(rect.width)}px`;
+    menu.style.left = `${Math.round(rect.left / zoom)}px`;
+    menu.style.width = `${Math.round(rect.width / zoom)}px`;
     menu.style.right = "auto";
     const menuHeight = menu.getBoundingClientRect().height;
     const below = window.innerHeight - rect.bottom;
     if (below < menuHeight + RESOURCE_SELECT_PORTAL_GAP && rect.top > below) {
         menu.style.top = "auto";
-        menu.style.bottom = `${Math.round(window.innerHeight - rect.top + RESOURCE_SELECT_PORTAL_GAP)}px`;
+        menu.style.bottom = `${Math.round((window.innerHeight - rect.top + RESOURCE_SELECT_PORTAL_GAP) / zoom)}px`;
     } else {
         menu.style.bottom = "auto";
-        menu.style.top = `${Math.round(rect.bottom + RESOURCE_SELECT_PORTAL_GAP)}px`;
+        menu.style.top = `${Math.round((rect.bottom + RESOURCE_SELECT_PORTAL_GAP) / zoom)}px`;
     }
 }
 
