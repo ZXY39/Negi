@@ -211,6 +211,53 @@ async def get_task_node_detail(
     return payload
 
 
+@router.get('/tasks/{task_id}/nodes/{node_id}/messages')
+async def get_task_node_messages(task_id: str, node_id: str):
+    """节点消息窄口：只回 message_list + sent_message_list，不解析轨迹。
+
+    settle 轮询的取数道：轮询只判「那条消息落账没」，full 详情的多 MB 轨迹
+    对它是纯浪费；契约见 docs/architecture/web-and-admin.md「Node Detail
+    Trace Turn Window And Narrow Lanes Contract」。
+    """
+    task_id = _ensure_task_route_id(task_id)
+    service = _service()
+    await service.startup()
+    task_id = service.normalize_task_id(task_id)
+    payload = await asyncio.to_thread(service.get_node_messages_payload, task_id, node_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail='node_not_found')
+    return payload
+
+
+@router.get('/tasks/{task_id}/nodes/{node_id}/trace-turns')
+async def get_task_node_trace_turns(
+    task_id: str,
+    node_id: str,
+    before_seq: int = Query(0, ge=0),
+    limit: int = Query(200, ge=1, le=1000),
+):
+    """full 档轮次窗口的分页口：返回 before_seq 之前的最多 limit 轮（老→新）。
+
+    「加载更早轮次」按 execution_trace_ref 现解析轨迹 artifact 切页；
+    `before_seq=0` 退化为最新窗口。契约见 web-and-admin.md「Node Detail
+    Trace Turn Window And Narrow Lanes Contract」。
+    """
+    task_id = _ensure_task_route_id(task_id)
+    service = _service()
+    await service.startup()
+    task_id = service.normalize_task_id(task_id)
+    payload = await asyncio.to_thread(
+        service.get_node_trace_turns_payload,
+        task_id,
+        node_id,
+        before_seq=before_seq,
+        limit=limit,
+    )
+    if payload is None:
+        raise HTTPException(status_code=404, detail='node_not_found')
+    return payload
+
+
 @router.get('/tasks/{task_id}/nodes/{node_id}/latest-context')
 async def get_task_node_latest_context(task_id: str, node_id: str):
     task_id = _ensure_task_route_id(task_id)

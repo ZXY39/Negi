@@ -63,6 +63,19 @@ _LATEST_TOOL_CALLS_FULL_LIMIT = 5
 # 完整出参的安全上限:超过后截断并置 output_truncated,ref 始终保留供按需再取。
 _TOOL_CALL_FULL_OUTPUT_MAX_CHARS = 8000
 
+# full 档轨迹按轮窗口:轮 = 一次模型回合(含其中途文本输出与该轮全部工具调用),
+# 窗口永远按整轮对齐切片,不切半个回合。默认只随包下发最近这么多的轮次;更早的
+# 轮次由前端经 /trace-turns 分页口按 execution_trace_ref 现取。实盘详情响应
+# 1.82 MB 里轨迹占 1.42 MB 且随轮数无上限,这是多轮节点详情打开慢的主因。
+NODE_DETAIL_TRACE_TURN_WINDOW = 1000
+# /trace-turns 分页口单页轮数上限。前端"加载更早轮次"每拍 200 轮,分页按
+# before_seq 向前翻;上限挡住把分页口重新变成整包轨迹的用法。
+_NODE_DETAIL_TRACE_PAGE_MAX_TURNS = 1000
+# full 档尾部全文直出的轮数:窗口内更早的轮保持「预览 + output_ref」(与 summary
+# 档同形,前端已有按 ref 回取的车道),只有最近这几轮把出参解析成全文——操作员
+# 打开详情最先看的就是刚跑完的轮次,这几轮不点开也要能读。
+NODE_DETAIL_TRACE_HYDRATED_TAIL_TURNS = 2
+
 
 def _optional_int(value: Any) -> int | None:
     '''缺失/不可解析的口径保持 None（前端显示 "--"），不要塌成 0。'''
@@ -335,6 +348,22 @@ class TaskQueryService:
             str(item.node_id or '').strip(): str(item.title or item.node_id or '').strip()
             for item in list(self._store.list_task_nodes(task_id) or [])
         }
+        # 同一 epoch 会落在多条消息上（一轮分发给多个来源节点的场景除外），
+        # deliveries 按 (epoch_id, source_node_id) 备忘录化：每条消息一次台账读
+        # 的 N+1 在消息多的节点上叠加得很快，且 settle 窄口每 2.5s 都走这里。
+        deliveries_memo: dict[tuple[str, str], list[dict[str, Any]]] = {}
+
+        def _distribution_deliveries(epoch_id: str) -> list[dict[str, Any]]:
+            key = (str(epoch_id or '').strip(), str(node_id or '').strip())
+            if key not in deliveries_memo:
+                deliveries_memo[key] = self._message_distribution_deliveries(
+                    task_id=task_id,
+                    epoch_id=key[0],
+                    source_node_id=key[1],
+                    node_titles=node_titles,
+                )
+            return deliveries_memo[key]
+
         entries_by_id: dict[str, dict[str, Any]] = {}
 
         def _store_entry(entry: dict[str, Any], *, replace: bool = False) -> None:
@@ -367,12 +396,7 @@ class TaskQueryService:
                 # 旧数据没有 merged_at 字段，用 consumed_at 兜底（免迁移）。
                 'status': 'merged' if (merged_at or consumed_at) else 'consumed',
                 'compression_stage_id': str(item.get('compression_stage_id') or '').strip(),
-                'deliveries': self._message_distribution_deliveries(
-                    task_id=task_id,
-                    epoch_id=epoch_id,
-                    source_node_id=node_id,
-                    node_titles=node_titles,
-                ),
+                'deliveries': _distribution_deliveries(epoch_id),
             }
             _store_entry(entry, replace=True)
 
@@ -392,12 +416,7 @@ class TaskQueryService:
                 # 控制/决策回合处理过（processed_at 有值）→ 已消费；否则待处理。
                 'status': 'consumed' if processed_at else 'pending',
                 'compression_stage_id': '',
-                'deliveries': self._message_distribution_deliveries(
-                    task_id=task_id,
-                    epoch_id=str(item.get('epoch_id') or '').strip(),
-                    source_node_id=node_id,
-                    node_titles=node_titles,
-                ),
+                'deliveries': _distribution_deliveries(str(item.get('epoch_id') or '')),
             }
             _store_entry(entry)
 
@@ -428,12 +447,7 @@ class TaskQueryService:
                 # delivered=待处理；consumed 未 merged=已消费；consumed+merged=已并入上下文。
                 'status': display_status,
                 'compression_stage_id': '',
-                'deliveries': self._message_distribution_deliveries(
-                    task_id=task_id,
-                    epoch_id=epoch_id,
-                    source_node_id=node_id,
-                    node_titles=node_titles,
-                ),
+                'deliveries': _distribution_deliveries(epoch_id),
             }
             _store_entry(entry)
 
@@ -1019,6 +1033,8 @@ class TaskQueryService:
                 execution_trace_summary = self._sanitize_execution_trace_summary(execution_trace_summary)
                 execution_trace_ref = str(payload.get('execution_trace_ref') or detail_record.execution_trace_ref or '').strip()
         execution_trace = {}
+        # 只有 full 档切片，其余档不带窗口读数：零值字典会被读成「切过窗口且节点 0 轮」。
+        trace_window: dict[str, Any] = {}
         if normalized_detail_level == 'full':
             execution_trace = self._resolve_execution_trace(
                 detail_record=detail_record,
@@ -1029,7 +1045,21 @@ class TaskQueryService:
                 execution_trace_summary = self._sanitize_execution_trace_summary(
                     build_execution_trace_summary(execution_trace)
                 )
-            execution_trace = self._hydrate_execution_trace_output_texts(execution_trace)
+            # 按整轮切片:响应体只带最近 NODE_DETAIL_TRACE_TURN_WINDOW 轮,更早的轮次
+            # 经 /trace-turns 分页口按 ref 现取。切片先行,尾部全文水合只花在窗口内。
+            execution_trace, trace_window = self._window_full_execution_trace(
+                execution_trace,
+                window_turns=NODE_DETAIL_TRACE_TURN_WINDOW,
+            )
+            # full 档不再对全部轮次逐步水合出参全文:工具行与 summary 档同形,
+            # 保持「预览 + output_ref」由前端按 ref 回取;只有尾部几轮全文直出,
+            # 且同样按 _TOOL_CALL_FULL_OUTPUT_MAX_CHARS 封顶。实盘每个工具步一次
+            # artifact 读,O(全部轮次工具步) 次 IO 是多轮节点详情打开慢的另一主因。
+            execution_trace = self._hydrate_execution_trace_output_texts(
+                execution_trace,
+                recent_turns=NODE_DETAIL_TRACE_HYDRATED_TAIL_TURNS,
+                max_output_chars=_TOOL_CALL_FULL_OUTPUT_MAX_CHARS,
+            )
         elif not execution_trace_summary or not self._execution_trace_summary_has_content(execution_trace_summary):
             execution_trace = self._resolve_execution_trace(
                 detail_record=detail_record,
@@ -1126,6 +1156,8 @@ class TaskQueryService:
             execution_trace=execution_trace,
             execution_trace_summary=execution_trace_summary,
             execution_trace_ref=execution_trace_ref,
+            execution_trace_total_turns=int(trace_window.get('total_turns') or 0),
+            execution_trace_window=dict(trace_window),
             latest_spawn_round_id=str(payload.get('latest_spawn_round_id') or ''),
             append_notice_messages=append_notice_messages,
             message_list=message_list,
@@ -1186,6 +1218,95 @@ class TaskQueryService:
             # 摘要已带齐（含 latest_tool_calls_full），正文对这一档的读者没有用途。
             detail.execution_trace = {}
         return detail
+
+    def get_node_trace_turns(
+        self,
+        task_id: str,
+        node_id: str,
+        *,
+        before_seq: int = 0,
+        limit: int = 200,
+    ) -> dict[str, Any] | None:
+        """full 档轮次窗口的分页口：返回 `before_seq` 之前（不含）的最多 `limit` 轮，老→新排序。
+
+        「加载更早轮次」的取数道：full 档只随包下发最近窗口的轮次，更早的轮次按
+        `execution_trace_ref` 在这里现解析（每拍一次 artifact 读，显式翻页才发生）。
+        工具步保持「预览 + output_ref」不水合，与 full 档窗口内的行为一致。
+        `before_seq<=0` 退化为最新窗口（同 full 档切片口径），`has_more=false` 表示
+        更早再无轮次，`next_before_seq` 是本页最老一轮的 seq（下一拍用它续翻）。
+        """
+        task = self._store.get_task(task_id)
+        detail_record = self._store.get_task_node_detail(node_id)
+        runtime_node = self._store.get_node(node_id)
+        if task is None or detail_record is None or detail_record.task_id != task.task_id:
+            return None
+        if runtime_node is not None and str(runtime_node.task_id or '').strip() != task.task_id:
+            runtime_node = None
+        payload = dict(detail_record.payload or {})
+        execution_trace_ref = str(payload.get('execution_trace_ref') or detail_record.execution_trace_ref or '').strip()
+        if not execution_trace_ref and runtime_node is not None:
+            refreshed = self._log_service.sync_node_read_model(task.task_id, node_id, externalize_execution_trace=True)
+            if refreshed is not None:
+                detail_record = refreshed
+                payload = dict(detail_record.payload or {})
+        execution_trace = self._resolve_execution_trace(
+            detail_record=detail_record,
+            runtime_node=runtime_node,
+            payload=payload,
+        )
+        turns = [turn for turn in list(execution_trace.get('turns') or []) if isinstance(turn, dict)]
+        turns.sort(key=lambda turn: int(turn.get('seq') or 0))
+        total = len(turns)
+        normalized_limit = min(max(1, int(limit or 200)), _NODE_DETAIL_TRACE_PAGE_MAX_TURNS)
+        anchor = int(before_seq or 0)
+        candidates = [turn for turn in turns if int(turn.get('seq') or 0) < anchor] if anchor > 0 else turns
+        page = candidates[-normalized_limit:]
+        has_more = len(candidates) > len(page)
+        return {
+            'node_id': node_id,
+            'task_id': task.task_id,
+            'total_turns': total,
+            'before_seq': anchor,
+            'limit': normalized_limit,
+            'turns': page,
+            'returned_turns': len(page),
+            'has_more': has_more,
+            'next_before_seq': int(page[0].get('seq') or 0) if page else 0,
+        }
+
+    def get_node_messages(self, task_id: str, node_id: str) -> dict[str, Any] | None:
+        """节点消息窄口：只回 message_list + sent_message_list，不解析轨迹、不水合出参。
+
+        读者是前端发消息后的 settle 轮询（2.5s 一拍，最长 90s）：它只判「那条消息落账没」,
+        过去重拉 full 详情意味着每拍一次全轨迹解析 + 逐步出参水合，多轮节点上把轮询
+        变成最重的请求。节点归属校验与 get_node_detail 同口径。
+        """
+        task = self._store.get_task(task_id)
+        if task is None:
+            return None
+        runtime_node = self._store.get_node(node_id)
+        node_record = self._store.get_task_node(node_id)
+        if runtime_node is None and node_record is None:
+            return None
+        if node_record is not None and str(node_record.task_id or '').strip() != task.task_id:
+            return None
+        if runtime_node is not None and str(runtime_node.task_id or '').strip() != task.task_id:
+            runtime_node = None
+        message_list = self._node_message_list(
+            task_id=task.task_id,
+            node_id=node_id,
+            runtime_node=runtime_node,
+        )
+        sent_message_list = self._node_sent_message_list(
+            task_id=task.task_id,
+            node_id=node_id,
+        )
+        return {
+            'node_id': node_id,
+            'task_id': task.task_id,
+            'message_list': message_list,
+            'sent_message_list': sent_message_list,
+        }
 
     def get_tree_snapshot(
         self,
@@ -1308,7 +1429,21 @@ class TaskQueryService:
             batch.append(entry)
         return batch
 
-    def _hydrate_execution_trace_output_texts(self, execution_trace: dict[str, Any] | None) -> dict[str, Any]:
+    def _hydrate_execution_trace_output_texts(
+        self,
+        execution_trace: dict[str, Any] | None,
+        *,
+        recent_turns: int | None = None,
+        max_output_chars: int | None = None,
+    ) -> dict[str, Any]:
+        """把逐轮工具步的出参从预览换成 ref 解析出的全文。
+
+        `recent_turns` 只水合最后 N 轮（None=全部,summary 档兜底路径仍用全量语义）;
+        flat `tool_steps` 不再在这里水合——窗口后的 full 档与 summary 档一致,
+        工具行保持「预览 + output_ref」由前端按 ref 回取,`latest_tool_calls_full`
+        自己按 ref 解析,都不依赖这里。`max_output_chars` 截断超长全文并置
+        `output_truncated`,ref 始终保留,前端「继续加载」走分页车道。
+        """
         trace = dict(execution_trace or {}) if isinstance(execution_trace, dict) else {}
 
         def _hydrate_step(step: Any) -> None:
@@ -1319,16 +1454,68 @@ class TaskQueryService:
                 str(step.get('output_ref') or ''),
             )
             if hydrated:
-                step['output_text'] = hydrated
+                text = hydrated
+                if max_output_chars is not None and len(text) > max_output_chars:
+                    text = f'{text[: max_output_chars - 3].rstrip()}...'
+                    step['output_truncated'] = True
+                step['output_text'] = text
 
-        for step in list(trace.get('tool_steps') or []):
-            _hydrate_step(step)
-        for turn in list(trace.get('turns') or []):
-            if not isinstance(turn, dict):
-                continue
+        turns = [turn for turn in list(trace.get('turns') or []) if isinstance(turn, dict)]
+        if recent_turns is not None:
+            turns = turns[-max(0, int(recent_turns)):]
+        for turn in turns:
             for step in list(turn.get('tools') or []):
                 _hydrate_step(step)
         return trace
+
+    def _window_full_execution_trace(
+        self,
+        execution_trace: dict[str, Any] | None,
+        *,
+        window_turns: int,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """full 档轨迹按整轮切片:只外发最近 `window_turns` 轮（每轮含中途文本输出与该轮工具）,
+        边界永远落在轮与轮之间,不切半个回合。更早的轮次保留在 execution_trace_ref 指向的
+        artifact 里,由 /trace-turns 分页口现取。
+
+        扁平 `tool_steps` 收敛到窗口内轮次引用的 call id:前端在 turns 在场时不读扁平表,
+        summary 档的 `latest_tool_calls_full` 用的是切片前的完整列表,不受影响。
+        返回 (切片后轨迹, 窗口读数);窗口读数原样进 `execution_trace_window`,
+        总轮数另进 `execution_trace_total_turns`（前端「轮数 N」读总数,不数窗口）。
+        """
+        trace = dict(execution_trace or {}) if isinstance(execution_trace, dict) else {}
+        turns = [turn for turn in list(trace.get('turns') or []) if isinstance(turn, dict)]
+        total = len(turns)
+        limit = max(1, int(window_turns or 1))
+        if total <= limit:
+            return trace, {
+                'total_turns': total,
+                'window_turns': total,
+                'truncated': False,
+                'first_seq': int(turns[0].get('seq') or 0) if turns else 0,
+                'last_seq': int(turns[-1].get('seq') or 0) if turns else 0,
+            }
+        ordered = sorted(turns, key=lambda turn: int(turn.get('seq') or 0))
+        kept = ordered[-limit:]
+        trace['turns'] = kept
+        window_call_ids = {
+            str(step.get('tool_call_id') or '').strip()
+            for turn in kept
+            for step in list(turn.get('tools') or [])
+            if isinstance(step, dict)
+        }
+        flat = [step for step in list(trace.get('tool_steps') or []) if isinstance(step, dict)]
+        trace['tool_steps'] = [
+            step for step in flat
+            if str(step.get('tool_call_id') or '').strip() in window_call_ids
+        ]
+        return trace, {
+            'total_turns': total,
+            'window_turns': len(kept),
+            'truncated': True,
+            'first_seq': int(kept[0].get('seq') or 0),
+            'last_seq': int(kept[-1].get('seq') or 0),
+        }
 
     @staticmethod
     def _preview_text(value: str, *, max_chars: int = 400) -> str:

@@ -222,6 +222,7 @@ const S = {
     taskNodeDetails: {},
     taskNodePatchSummaries: {},
     taskNodeDetailRequests: {},
+    taskTraceEarlierRequests: {},
     taskNodeLatestContexts: {},
     taskNodeLatestContextRequests: {},
     treeRootNodeId: "",

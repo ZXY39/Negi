@@ -1329,6 +1329,7 @@ async function reconcileTaskDetailAfterWsReconnect(taskId) {
 function releaseTaskDetailRetainedState() {
     S.taskNodeDetails = {};
     S.taskNodeDetailRequests = {};
+    S.taskTraceEarlierRequests = {};
     S.taskNodeLatestContexts = {};
     S.taskNodeLatestContextRequests = {};
     S.taskNodePatchSummaries = {};
@@ -1374,6 +1375,7 @@ function resetTaskView() {
     S.taskNodeDetails = {};
     S.taskNodePatchSummaries = {};
     S.taskNodeDetailRequests = {};
+    S.taskTraceEarlierRequests = {};
     S.taskNodeLatestContexts = {};
     S.taskNodeLatestContextRequests = {};
     if (typeof resetTaskTreeSnapshotState === "function") resetTaskTreeSnapshotState();

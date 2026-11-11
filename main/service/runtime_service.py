@@ -13349,6 +13349,36 @@ class MainRuntimeService:
             'item': item,
         }
 
+    def get_node_trace_turns_payload(
+        self,
+        task_id: str,
+        node_id: str,
+        *,
+        before_seq: int = 0,
+        limit: int = 200,
+    ) -> dict[str, Any] | None:
+        """「加载更早轮次」的分页口：full 档窗口之外的更早轮次按 ref 现取一页。"""
+        normalized_task_id = self.normalize_task_id(task_id)
+        normalized_node_id = self.normalize_node_id(node_id)
+        payload = self.query_service.get_node_trace_turns(
+            normalized_task_id,
+            normalized_node_id,
+            before_seq=int(before_seq or 0),
+            limit=int(limit or 200),
+        )
+        if payload is None:
+            return None
+        return {'ok': True, **payload}
+
+    def get_node_messages_payload(self, task_id: str, node_id: str) -> dict[str, Any] | None:
+        """节点消息窄口：settle 轮询的取数道，不解析轨迹、不水合出参。"""
+        normalized_task_id = self.normalize_task_id(task_id)
+        normalized_node_id = self.normalize_node_id(node_id)
+        payload = self.query_service.get_node_messages(normalized_task_id, normalized_node_id)
+        if payload is None:
+            return None
+        return {'ok': True, **payload}
+
     def _node_latest_context_refs(self, task_id: str, node_id: str) -> dict[str, Any] | None:
         """最近一次真实请求的指针与哈希：只读 runtime frame / 节点 metadata，不解析 artifact 正文。"""
         normalized_task_id = self.normalize_task_id(task_id)

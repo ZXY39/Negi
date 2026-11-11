@@ -193,7 +193,8 @@ const MESSAGE_STATUS_LABELS = {
 //（验收节点/终态节点/已结束任务不可作为定向目标，与后端校验一致）。
 // —— 定向通知发送后的局部 settle 轮询 ——
 // 分发链路（epoch 排队 → 分发节点决策回合 → 投递记账）是异步的，提交后新消息
-// 不会立刻出现在 message_list。这里以固定间隔重拉目标节点的 full 详情，一旦
+// 不会立刻出现在 message_list。这里以固定间隔打目标节点的消息窄口
+// （`GET …/nodes/{id}/messages`，只回两份消息列表），一旦
 // 消息落表即局部刷新节点详情；超时（分发失败等）静默退出，由 WS task.node.patch
 // 与手动刷新兜底。轮询只更新缓存与当前选中节点的渲染，不动全局视图。
 const TASK_NOTICE_SETTLE_INTERVAL_MS = 2500;
@@ -547,6 +548,14 @@ function bindTaskTraceListInteractions(traceList) {
             if (typeof openNodeChatboxReplies === "function") {
                 openNodeChatboxReplies(chatboxChip.dataset.chatboxOpen || "");
             }
+            return;
+        }
+        // 「加载更早轮次」：翻窗口之外的更早轮次，前插后走既有重绘道。
+        const earlierBtn = target.closest("[data-trace-earlier]");
+        if (earlierBtn instanceof HTMLElement) {
+            event.preventDefault();
+            event.stopPropagation();
+            void loadEarlierTraceTurns(earlierBtn.dataset.traceEarlier || "");
             return;
         }
         // 展开态的中途输出正文：点文字照常折叠；只有拖选文本或点滚动条时才拦下
@@ -1588,6 +1597,110 @@ function renderInitialPromptBox(step, node) {
     return true;
 }
 
+// 「加载更早轮次」：full 档轨迹按整轮窗口下发，窗口之外的更早轮次按 before_seq
+// 向前翻页现取，前插进缓存详情后走 showAgent 的既有重绘道——展开态与滚动位置由
+// 捕获/还原机制接管。契约见 docs/architecture/web-and-admin.md
+// 「Node Detail Trace Turn Window And Narrow Lanes Contract」。
+const TASK_TRACE_EARLIER_PAGE_TURNS = 200;
+
+function taskTraceEarlierRemainingTurns(node) {
+    const traceWindow = node?.execution_trace_window;
+    if (!traceWindow || typeof traceWindow !== "object" || traceWindow.truncated !== true) return 0;
+    const total = Number(traceWindow.total_turns);
+    const loaded = Number(traceWindow.window_turns);
+    if (total > 0 && total > loaded) return total - loaded;
+    // 没有窗口读数时按最早一轮的 seq 推早轮数（seq 从 1 起）。
+    const firstSeq = Number(traceWindow.first_seq);
+    return firstSeq > 1 ? firstSeq - 1 : 0;
+}
+
+function taskTraceEarlierButtonLabel(remaining, loading) {
+    return loading ? "正在加载更早轮次…" : `加载更早轮次（还剩约 ${remaining} 轮）`;
+}
+
+function renderTraceEarlierTurnsRow(node) {
+    const remaining = taskTraceEarlierRemainingTurns(node);
+    const nodeId = String(node?.node_id || "").trim();
+    if (!(remaining > 0) || !nodeId) return "";
+    const loading = !!S.taskTraceEarlierRequests?.[`${String(S.currentTaskId || "").trim()}:${nodeId}`];
+    return `
+        <div class="task-trace-earlier">
+            <button type="button" class="task-trace-earlier-btn" data-trace-earlier="${esc(nodeId)}" data-remaining-turns="${remaining}"${loading ? " disabled" : ""}>${esc(taskTraceEarlierButtonLabel(remaining, loading))}</button>
+        </div>
+    `;
+}
+
+function paintTaskTraceEarlierButton(nodeId, loading) {
+    const button = U.adFlow?.querySelector(".task-trace-earlier-btn");
+    if (!(button instanceof HTMLElement)) return;
+    if (String(button.dataset.traceEarlier || "").trim() !== String(nodeId || "").trim()) return;
+    button.disabled = loading;
+    button.textContent = taskTraceEarlierButtonLabel(Number(button.dataset.remainingTurns) || 0, loading);
+}
+
+async function loadEarlierTraceTurns(nodeId) {
+    const key = String(nodeId || "").trim();
+    const taskId = String(S.currentTaskId || "").trim();
+    if (!taskId || !key) return false;
+    if (String(S.selectedNodeId || "").trim() !== key) return false;
+    const requestKey = `${taskId}:${key}`;
+    // 在飞防重入：连点只发一拍，翻页锚点由已加载最早一轮决定，并发两拍会取回同一页。
+    if (S.taskTraceEarlierRequests?.[requestKey]) return false;
+    const beforeSeq = Number(S.taskNodeDetails?.[key]?.execution_trace_window?.first_seq);
+    if (!(beforeSeq > 0)) return false;
+    const request = (async () => {
+        try {
+            const payload = await ApiClient.getTaskNodeTraceTurns(taskId, key, {
+                beforeSeq,
+                limit: TASK_TRACE_EARLIER_PAGE_TURNS,
+            });
+            // 换任务/换节点后这一页没有落点：缓存与选中节点都已经不是请求时那个。
+            if (String(S.currentTaskId || "").trim() !== taskId) return false;
+            if (String(S.selectedNodeId || "").trim() !== key) return false;
+            const detail = S.taskNodeDetails?.[key] || null;
+            const traceWindow = detail?.execution_trace_window;
+            const turns = (Array.isArray(payload?.turns) ? payload.turns : [])
+                .filter((turn) => turn && typeof turn === "object");
+            // 在飞期间缓存被更新的全量详情换掉（锚点已变）时丢弃这一页：前插会留下缺口。
+            if (!detail || !traceWindow || Number(traceWindow.first_seq) !== beforeSeq) return false;
+            if (!turns.length) return false;
+            const trace = detail.execution_trace && typeof detail.execution_trace === "object" ? detail.execution_trace : {};
+            const cachedTurns = Array.isArray(trace.turns) ? trace.turns : [];
+            const merged = {
+                ...detail,
+                execution_trace: { ...trace, turns: [...turns, ...cachedTurns] },
+                execution_trace_window: {
+                    ...traceWindow,
+                    first_seq: Number(payload?.next_before_seq) || Number(turns[0]?.seq) || traceWindow.first_seq,
+                    window_turns: turns.length + cachedTurns.length,
+                    truncated: payload?.has_more === true,
+                },
+            };
+            S.taskNodeDetails = { ...S.taskNodeDetails, [key]: merged };
+            if (String(S.currentNodeDetail?.node_id || "").trim() === key) S.currentNodeDetail = merged;
+            if (typeof showAgent === "function") {
+                const selected = (typeof findTreeNode === "function" ? findTreeNode(S.treeView, key) : null)
+                    || { node_id: key, title: key, state: "in_progress" };
+                await showAgent(selected, { preserveViewState: true });
+            }
+            return true;
+        } catch (error) {
+            if (!isAbortLike(error)) {
+                showToast({ title: "更早轮次加载失败", text: error?.message || "Unknown error", kind: "error" });
+            }
+            return false;
+        } finally {
+            const nextRequests = { ...(S.taskTraceEarlierRequests || {}) };
+            if (nextRequests[requestKey] === request) delete nextRequests[requestKey];
+            S.taskTraceEarlierRequests = nextRequests;
+            paintTaskTraceEarlierButton(key, false);
+        }
+    })();
+    S.taskTraceEarlierRequests = { ...(S.taskTraceEarlierRequests || {}), [requestKey]: request };
+    paintTaskTraceEarlierButton(key, true);
+    return request;
+}
+
 function renderExecutionTrace(node, { viewState = null } = {}) {
     if (!U.adFlow) return;
     const effectiveViewState = normalizeTaskDetailViewState(viewState || captureTaskDetailViewState());
@@ -1619,14 +1732,17 @@ function renderExecutionTrace(node, { viewState = null } = {}) {
         U.adFlow.innerHTML = "";
         U.adFlow.appendChild(traceList);
     }
-    const renderSignature = buildTraceRenderSignature(stepDescriptors);
+    // 「加载更早轮次」行落在列表最顶部（初始提示词之上）：它翻的是比已加载最早一轮
+    // 更早的轮次，位置必须与轮次顺序老→新一致。行本身进渲染签名，加载态与剩余数变化才重绘。
+    const earlierRowHtml = renderTraceEarlierTurnsRow(node);
+    const renderSignature = [earlierRowHtml, buildTraceRenderSignature(stepDescriptors)].join("\u0001");
     const renderNodeId = String(node?.node_id || "").trim();
     const shouldReplace = traceList.dataset.renderSignature !== renderSignature
         || traceList.dataset.renderNodeId !== renderNodeId;
     if (shouldReplace) {
-        traceList.innerHTML = steps.length
-            ? steps.join("")
-            : '<div class="empty-state task-trace-empty">暂无执行流程。</div>';
+        const rowsHtml = [earlierRowHtml, ...steps].filter(Boolean).join("");
+        traceList.innerHTML = rowsHtml
+            || '<div class="empty-state task-trace-empty">暂无执行流程。</div>';
         traceList.dataset.renderSignature = renderSignature;
         traceList.dataset.renderNodeId = renderNodeId;
     }

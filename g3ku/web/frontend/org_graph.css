@@ -4669,6 +4669,40 @@ textarea {
     margin: 0;
 }
 
+/* 「加载更早轮次」行：full 档轨迹按整轮窗口下发，这行翻窗口之外的更早轮次。
+   位置在执行流程列表最顶部，边框/圆角与工具卡同一口径，只是不做成可展开卡片。 */
+.task-trace-earlier {
+    display: flex;
+    justify-content: center;
+}
+
+.task-trace-earlier-btn {
+    padding: var(--space-2) var(--space-3);
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
+    background: color-mix(in srgb, var(--bg-app) 72%, transparent);
+    color: var(--text-muted);
+    font-size: 0.78rem;
+    cursor: pointer;
+    transition: border-color var(--transition-fast), color var(--transition-fast), background var(--transition-fast);
+}
+
+.task-trace-earlier-btn:hover:not(:disabled) {
+    color: var(--text-primary);
+    border-color: color-mix(in srgb, var(--brand-primary) 34%, var(--border-color));
+    background: color-mix(in srgb, var(--brand-primary) 10%, var(--bg-app));
+}
+
+.task-trace-earlier-btn:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--brand-primary) 72%, transparent);
+    outline-offset: 2px;
+}
+
+.task-trace-earlier-btn:disabled {
+    cursor: default;
+    opacity: 0.6;
+}
+
 /* 消息分发结果列表：用语义标签 + 图标替代旧的 [delivered]/[consumed] 原始状态文本。
    状态配色走各状态强调变量：待处理=琥珀、已消费=运行中靛蓝、已并入上下文=成功绿、未下发=中性灰。 */
 .notice-delivery-list {

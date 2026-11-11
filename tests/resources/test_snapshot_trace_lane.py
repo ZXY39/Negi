@@ -87,7 +87,7 @@ def _service(monkeypatch) -> tuple[TaskQueryService, list[str]]:
     monkeypatch.setattr(service, '_resolve_execution_trace', _spy_resolve)
     monkeypatch.setattr(service, '_node_message_list', lambda **kwargs: [])
     monkeypatch.setattr(service, '_node_sent_message_list', lambda **kwargs: [])
-    monkeypatch.setattr(service, '_hydrate_execution_trace_output_texts', lambda trace: trace)
+    monkeypatch.setattr(service, '_hydrate_execution_trace_output_texts', lambda trace, **kwargs: trace)
     return service, calls
 
 

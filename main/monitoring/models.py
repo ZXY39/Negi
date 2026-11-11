@@ -261,6 +261,11 @@ class TaskNodeDetail(Model):
     execution_trace: dict[str, Any] = Field(default_factory=dict)
     execution_trace_summary: dict[str, Any] = Field(default_factory=dict)
     execution_trace_ref: str = ''
+    # full 档轨迹按整轮窗口切片后的读数：total_turns 是全量轮数（前端「轮数 N」读它，
+    # 不数窗口），window_turns 是本次随包下发的轮数，truncated=true 时更早的轮次走
+    # /trace-turns 分页口按 execution_trace_ref 现取。
+    execution_trace_total_turns: int = 0
+    execution_trace_window: dict[str, Any] = Field(default_factory=dict)
     latest_spawn_round_id: str = ''
     append_notice_messages: list[dict[str, Any]] = Field(default_factory=list)
     message_list: list[dict[str, Any]] = Field(default_factory=list)

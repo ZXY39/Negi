@@ -1057,16 +1057,29 @@ async function runTaskNoticeSettleTick() {
         return;
     }
     try {
-        const detail = await ApiClient.getTaskNodeDetail(taskId, nodeId, { detailLevel: "full" });
+        // 轮询走消息窄口：只取 message_list/sent_message_list 判「那条消息落账没」。
+        // 多轮节点上 full 详情是多 MB 的轨迹整包 + 逐步出参水合，2.5s 一拍打它会把
+        // 轮询变成整个窗口里最重的请求；两份列表合并进已缓存详情，其余字段不动。
+        const payload = await ApiClient.getTaskNodeMessages(taskId, nodeId);
         if (!S.noticeSettle || !S.noticeSettle.pending.length) return;
         if (String(S.currentTaskId || "").trim() !== taskId) {
             stopTaskNoticeSettle();
             return;
         }
-        if (detail && typeof detail === "object") {
-            S.taskNodeDetails = { ...(S.taskNodeDetails || {}), [nodeId]: detail };
-            if (String(S.selectedNodeId || "").trim() === nodeId) S.currentNodeDetail = detail;
-            const messages = Array.isArray(detail.message_list) ? detail.message_list : [];
+        const messageList = Array.isArray(payload?.message_list) ? payload.message_list : null;
+        const sentMessageList = Array.isArray(payload?.sent_message_list) ? payload.sent_message_list : null;
+        if (messageList || sentMessageList) {
+            const cached = (S.taskNodeDetails || {})[nodeId] || null;
+            if (cached) {
+                const merged = {
+                    ...cached,
+                    ...(messageList ? { message_list: messageList } : {}),
+                    ...(sentMessageList ? { sent_message_list: sentMessageList } : {}),
+                };
+                S.taskNodeDetails = { ...(S.taskNodeDetails || {}), [nodeId]: merged };
+                if (String(S.selectedNodeId || "").trim() === nodeId) S.currentNodeDetail = merged;
+            }
+            const messages = messageList || [];
             const remaining = [];
             let matched = false;
             const now = Date.now();
@@ -1980,7 +1993,12 @@ async function reconcileTaskTreeForNode(nodeId) {
 
 function taskFlowUsageText(node, trace) {
     const parts = typeof buildTokenUsageParts === "function" ? buildTokenUsageParts(node?.token_usage) : [];
-    const turnCount = Array.isArray(trace?.turns) ? trace.turns.length : 0;
+    // 轮数读全量总数：full 档轨迹按整轮窗口下发，数随包 turns 会把多轮节点报成窗口上限。
+    const totalTurns = Number(node?.execution_trace_total_turns);
+    const windowTotalTurns = Number(node?.execution_trace_window?.total_turns);
+    const turnCount = totalTurns > 0
+        ? totalTurns
+        : (windowTotalTurns > 0 ? windowTotalTurns : (Array.isArray(trace?.turns) ? trace.turns.length : 0));
     if (turnCount > 0 && !parts.some((part) => String(part).startsWith("轮数"))) {
         parts.push(`轮数 ${turnCount}`);
     }

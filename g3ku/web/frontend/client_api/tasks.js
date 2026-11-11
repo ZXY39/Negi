@@ -64,6 +64,28 @@
         return data.item || null;
     },
 
+    // 节点消息窄口：settle 轮询的取数道。只回 message_list + sent_message_list，
+    // 不解析轨迹——full 详情的多 MB 轨迹对"判那条消息落账没"是纯浪费。
+    async getTaskNodeMessages(taskId, nodeId) {
+        return this._request("GET", `/api/tasks/${taskId}/nodes/${nodeId}/messages`, {
+            requestKey: `tasks:node-messages:${taskId}:${nodeId}`,
+            timeoutMs: 15000,
+        });
+    },
+
+    // full 档轮次窗口的分页口：取 before_seq 之前的更早轮次（老→新），
+    // 「加载更早轮次」每拍 limit 轮，has_more=false 表示再往前没有了。
+    async getTaskNodeTraceTurns(taskId, nodeId, { beforeSeq = 0, limit = 200 } = {}) {
+        return this._request("GET", `/api/tasks/${taskId}/nodes/${nodeId}/trace-turns`, {
+            params: {
+                before_seq: Number(beforeSeq) > 0 ? Number(beforeSeq) : undefined,
+                limit: Math.max(1, Number(limit) || 200),
+            },
+            requestKey: `tasks:node-trace-turns:${taskId}:${nodeId}:${Number(beforeSeq) || 0}:${Math.max(1, Number(limit) || 200)}`,
+            timeoutMs: 30000,
+        });
+    },
+
     async pauseTaskNode(taskId, nodeId, { cascade = false, remark = "" } = {}) {
         const data = await this._request("POST", `/api/tasks/${taskId}/nodes/${nodeId}/pause`, {
             body: { cascade: !!cascade, remark: String(remark || "") },
