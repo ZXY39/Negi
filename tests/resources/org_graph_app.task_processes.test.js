@@ -208,11 +208,25 @@ test("REST process purposes and legacy commands keep their full text", async () 
     const { context, document } = loadModule({ items });
     await context.taskProcessesRefresh();
     const rows = document.getElementById("task-processes-list").children;
-    // 行结构：[0]=kind 标签，[1]=主列，[2]=节点按钮，[3]=耗时，[4]=停止。
+    // 行结构：[0]=kind 标签，[1]=主列，[2]=耗时，[3]=停止，[4]=节点按钮。
     // 合并视图按 started_at 新→旧排：fixture 里 pid 124（5s 前）在前。
     assert.equal(rows[0].children[0].textContent, "进程");
     assert.equal(rows[0].children[1].textContent, items[1].cmd.trim());
+    assert.match(rows[0].children[1].className, /task-processes-main--command/);
     assert.equal(rows[1].children[1].textContent, items[0].purpose.trim());
+    assert.doesNotMatch(rows[1].children[1].className, /task-processes-main--command/);
+});
+
+test("行版式：来源、时长、停止在第一行，定位节点按钮在停止右侧", async () => {
+    const { context, document } = loadModule({ items: itemsFixture() });
+    await context.taskProcessesRefresh();
+    const row = document.getElementById("task-processes-list").children[1];
+    assert.equal(row.children[0].className, "task-processes-kind");
+    assert.equal(row.children[1].className, "task-processes-main");
+    assert.equal(row.children[2].className, "task-processes-elapsed");
+    assert.equal(row.children[3].className, "task-processes-stop");
+    assert.equal(row.children[4].className, "task-processes-node");
+    assert.equal(row.children[4].dataset.taskProcessNode, "node:a");
 });
 
 test("button opens a body-mounted panel; inside clicks stay open and outside clicks close", async () => {
@@ -282,13 +296,16 @@ test("空列表隐藏气泡，有进程时显示计数与 purpose 行", async ()
     assert.equal(rows.length, 2);
     // 合并视图新→旧：pid 124（5s 前）在前，pid 123（65s 前）在后。
     assert.equal(rows[0].children[1].textContent, "node legacy.js");
-    assert.equal(rows[0].children[2].disabled, true);
-    assert.equal(rows[0].children[2].textContent, "未归属");
+    assert.equal(rows[0].children[2].dataset.taskProcessStarted, items[1].started_at);
+    assert.equal(rows[0].children[3].textContent, "停止");
+    assert.equal(rows[0].children[4].disabled, true);
+    assert.equal(rows[0].children[4].textContent, "未归属");
     assert.equal(rows[1].children[1].textContent, "dev server :3000");
     assert.equal(rows[1].children[1].title, "dev server :3000\nnode server.js");
-    assert.equal(rows[1].children[2].textContent, "node:a");
-    assert.equal(rows[1].children[2].dataset.taskProcessNode, "node:a");
-    assert.equal(rows[1].children[3].dataset.taskProcessStarted, items[0].started_at);
+    assert.equal(rows[1].children[2].dataset.taskProcessStarted, items[0].started_at);
+    assert.equal(rows[1].children[3].className, "task-processes-stop");
+    assert.equal(rows[1].children[4].textContent, "node:a");
+    assert.equal(rows[1].children[4].dataset.taskProcessNode, "node:a");
 });
 
 test("节点后台工具作业与进程同列显示，kind 标签区分且行不编造 PID", async () => {
@@ -312,7 +329,9 @@ test("节点后台工具作业与进程同列显示，kind 标签区分且行不
     assert.ok(toolRow);
     assert.equal(toolRow.children[0].textContent, "工具");
     assert.equal(toolRow.children[1].textContent, "filesystem_read (path=docs/report.md)");
-    assert.equal(toolRow.children[2].textContent, "node:a");
+    assert.equal(toolRow.children[2].className, "task-processes-elapsed");
+    assert.equal(toolRow.children[3].className, "task-processes-stop");
+    assert.equal(toolRow.children[4].textContent, "node:a");
     assert.equal(toolRow.dataset.taskProcessPid, undefined);
     const processRow = rows.find((row) => row.dataset.taskProcessKey === "process:123");
     assert.equal(processRow.children[0].textContent, "进程");

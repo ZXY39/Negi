@@ -185,12 +185,14 @@ function ceoBgJobsRow(item) {
     const tool = document.createElement("span");
     tool.className = "ceo-bg-jobs-tool";
     // exec background=true 起的 OS 进程与超时交棒的工具作业同列一行，来源不同：
-    // 前者没有工具终态、只能按 pid 整树终止，行首标成「exec 进程」避免误读。
-    // 进程行优先显示创建时写入的 purpose；命令只在 title 里，不再占第二行。
+    // 前者没有工具终态、只能按 pid 整树终止，来源文本优先写 purpose。
+    // 没有 purpose 的进程把命令行当来源（只露前两行，完整命令在 title）；两者都空才写「exec 进程」。
     const processPurpose = kind === "process" ? String(item.purpose || "").trim() : "";
+    const processCommand = kind === "process" ? String(item.hint || "").trim() : "";
     if (kind === "process") {
-        tool.textContent = processPurpose || "exec 进程";
-        if (processPurpose) tool.title = processPurpose;
+        tool.textContent = processPurpose || processCommand || "exec 进程";
+        if (!processPurpose && processCommand) tool.className = "ceo-bg-jobs-tool ceo-bg-jobs-command";
+        if (processPurpose || processCommand) tool.title = processPurpose || processCommand;
     } else {
         tool.textContent = String(item.tool_name || "tool").trim() || "tool";
     }
@@ -205,7 +207,7 @@ function ceoBgJobsRow(item) {
     main.appendChild(label);
     const hint = String(item.hint || "").trim();
     if (hint) {
-        if (kind === "process" && processPurpose) {
+        if (kind === "process") {
             main.title = hint;
         } else {
             const hintEl = document.createElement("span");

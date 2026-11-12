@@ -341,6 +341,7 @@ test("exec background 进程与工具作业同列一行：行首标来源，进�
     const processLabel = processRow.children[0].children[0];
     assert.equal(processLabel.children[0].textContent, "dev server :3000");
     assert.equal(processLabel.children[1].textContent, "常驻进程");
+    assert.doesNotMatch(processLabel.children[0].className, /ceo-bg-jobs-command/);
     // 有 purpose 时命令行不再占第二行，只留在 title 里。
     assert.equal(processRow.children[0].children.length, 1);
     assert.equal(processRow.children[0].title, "node server.js");
@@ -353,8 +354,9 @@ test("exec background 进程与工具作业同列一行：行首标来源，进�
     assert.equal(jobLabel.children[0].textContent, "exec");
 });
 
-test("没有 purpose 的 legacy 进程行回退到命令与 exec 进程", () => {
+test("没有 purpose 的 legacy 进程行把命令前两行当来源", () => {
     const { context, document } = loadModule();
+    const command = "$env:PYTHONUTF8=\"1\"\n$w=\"C:/temp/watcher\"\n& python watcher.py --loop";
     context.ceoBgJobsSetItems([
         {
             kind: "process",
@@ -364,13 +366,39 @@ test("没有 purpose 的 legacy 进程行回退到命令与 exec 进程", () => 
             status: "running",
             started_at: new Date(Date.now() - 3_000).toISOString(),
             elapsed_seconds: 3,
-            hint: "node legacy.js",
+            hint: command,
         },
     ], "web:a");
     const row = document.getElementById("ceo-bg-jobs-list").children[0];
-    const label = row.children[0].children[0];
+    const main = row.children[0];
+    const label = main.children[0];
+    assert.equal(label.children[0].textContent, command);
+    assert.match(label.children[0].className, /ceo-bg-jobs-command/);
+    assert.equal(label.children[1].textContent, "常驻进程");
+    // 命令已经作为来源行显示（CSS 两行封顶），不再另起一行；完整命令留在 title。
+    assert.equal(main.children.length, 1);
+    assert.equal(main.title, command);
+    assert.equal(row.children[1].className, "ceo-bg-jobs-elapsed");
+    assert.equal(row.children[2].className, "ceo-bg-jobs-stop");
+});
+
+test("purpose 与命令都缺席时进程行仍写 exec 进程", () => {
+    const { context, document } = loadModule();
+    context.ceoBgJobsSetItems([
+        {
+            kind: "process",
+            job_id: "proc:4244",
+            pid: 4244,
+            tool_name: "exec",
+            status: "running",
+            started_at: new Date(Date.now() - 3_000).toISOString(),
+            elapsed_seconds: 3,
+            hint: "",
+        },
+    ], "web:a");
+    const label = document.getElementById("ceo-bg-jobs-list").children[0].children[0].children[0];
     assert.equal(label.children[0].textContent, "exec 进程");
-    assert.equal(row.children[0].children[1].textContent, "node legacy.js");
+    assert.doesNotMatch(label.children[0].className, /ceo-bg-jobs-command/);
 });
 
 test("气泡非空时启动对账轮询，清空后停止", () => {

@@ -98,6 +98,9 @@ function taskProcessesRow(item) {
     main.className = "task-processes-main";
     const label = String(item?.label || "").trim();
     const detail = String(item?.detail || "").trim();
+    // 进程没有 purpose 时命令行就是它的来源：只露前两行，完整命令留在 title。
+    const commandFallback = item?.kind === "process" && !label && !!detail;
+    if (commandFallback) main.className = "task-processes-main task-processes-main--command";
     main.textContent =
         label
         || detail
@@ -130,11 +133,12 @@ function taskProcessesRow(item) {
     action.disabled = stopping;
     if (stopping) action.setAttribute("aria-busy", "true");
 
+    // 与会话气泡同一版式：来源、时长、停止留在第一行，定位节点按钮排在停止右侧。
     row.appendChild(kind);
     row.appendChild(main);
-    row.appendChild(node);
     row.appendChild(elapsed);
     row.appendChild(action);
+    row.appendChild(node);
     return row;
 }
 
