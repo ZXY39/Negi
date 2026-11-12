@@ -255,6 +255,8 @@ test("面板两列并排：body 是双轨 grid，列头固定、链身列内滚�
     assert.match(bodyBlock, /display:\s*grid/);
     assert.match(bodyBlock, /grid-template-columns:\s*minmax\(0,\s*1fr\)\s+minmax\(0,\s*1fr\)/);
     assert.doesNotMatch(bodyBlock, /flex-direction:\s*column/);
+    // 顶部留白：列头不贴抽屉标题（删列框后靠 body padding 推开）。
+    assert.match(bodyBlock, /padding:\s*16px 24px 16px/);
     const laneStart = css.indexOf(".tmc-lane-scroll {");
     assert.ok(laneStart > 0, "lane scroll rule missing");
     const laneBlock = css.slice(laneStart, css.indexOf("}", laneStart));

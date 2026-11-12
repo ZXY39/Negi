@@ -14518,7 +14518,8 @@ textarea {
 }
 
 /* 执行 / 检验两列并排：列头与模式切换固定，链身在各列内独立滚动，
-   便于左右对照编辑；加载/错误态横跨两列。 */
+   便于左右对照编辑；加载/错误态横跨两列。顶部留白把列头从抽屉标题下推开，
+   避免删掉列框后内容贴顶。 */
 .task-model-config-body {
     flex: 1 1 auto;
     min-height: 0;
@@ -14526,7 +14527,7 @@ textarea {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     gap: 16px;
     overflow: hidden;
-    padding: 0 24px 16px;
+    padding: 16px 24px 16px;
 }
 
 .task-model-config-body > .empty-state {
@@ -14798,7 +14799,7 @@ textarea {
     /* 两列保持并排（对照编辑是这面板的主用途），只收紧内距给链身让宽。 */
     .task-model-config-body {
         gap: 10px;
-        padding: 0 12px 12px;
+        padding: 12px 12px 12px;
     }
 }
 
