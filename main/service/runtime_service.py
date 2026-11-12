@@ -152,7 +152,11 @@ from main.runtime.global_scheduler import GlobalScheduler
 from main.runtime.internal_tools import build_detail_level_schema
 from main.runtime.model_key_concurrency import ModelKeyConcurrencyController
 from main.runtime.model_load_balancer import ModelLoadBalancer, quota_bucket_key
-from main.runtime.model_route import build_model_route_plan
+from main.runtime.model_route import (
+    build_model_route_plan,
+    build_model_route_plan_from_entries,
+    resolve_config_load_balance_groups,
+)
 from main.runtime.node_background_jobs import (
     STOP_REASON_SERVICE_SHUTDOWN,
     STOP_REASON_TASK_DELETED,
@@ -278,6 +282,7 @@ from main.storage.disk_guard import (
 )
 from main.storage.fs_utils import remove_tree
 from main.storage.sqlite_store import SQLiteTaskStore
+from main.types import KIND_ACCEPTANCE
 
 _UNSET = object()
 _WORKER_STATUS_STALE_AFTER_SECONDS = 15.0
@@ -930,6 +935,10 @@ class MainRuntimeService:
             seed_contract_metadata_builder=self.build_node_seed_metadata,
         )
         self._apply_model_route_plans(initial_execution_routes, initial_acceptance_routes, revision=0)
+        # 任务级模型链覆盖的取数口：与 skill 取数口同一条 side-channel。链轮/重试边界
+        # 活读任务行，缓存只存 plan（revision + entries 签名键），不缓存任务行。
+        self._task_model_route_plan_cache: dict[tuple[Any, ...], Any] = {}
+        self.node_runner.task_model_routes_resolver = self._resolve_task_model_routes
         self.node_runner._tool_snapshot_supplier = self._tool_watchdog_snapshot_supplier
         # 节点道 skill 名单的每跳取数口：react_loop 无 service 引用，只能由这里递进去
         # （与 `_tool_snapshot_supplier` 同一条 side-channel）。
@@ -9441,6 +9450,8 @@ class MainRuntimeService:
         if not changed and int(getattr(self, '_runtime_model_revision', 0) or 0) == int(revision or 0):
             return False
         self._app_config = config
+        # 任务覆盖 plan 缓存按 revision 键控，刷新时整表清掉，旧 revision 的 plan 不留存。
+        getattr(self, '_task_model_route_plan_cache', {}).clear()
         if hasattr(self._chat_backend, '_config'):
             self._chat_backend._config = config
         self._default_max_depth = max(0, int(getattr(config.main_runtime, 'default_max_depth', 1) or 0))
@@ -15718,7 +15729,7 @@ class MainRuntimeService:
         self.node_runner._acceptance_model_routes = inspection_routes
         if self.model_load_balancer is not None:
             self.model_load_balancer.configure(
-                groups=self._load_balance_groups_from_plans(),
+                groups=self._load_balance_groups_from_config(),
                 config_revision=int(revision or 0),
             )
 
@@ -15754,6 +15765,63 @@ class MainRuntimeService:
                     continue
                 groups[str(route.group_key)] = group
         return groups
+
+    def _load_balance_groups_from_config(self) -> dict[str, Any]:
+        """组注册面取整份配置；config 不可用时退回全局 plan 引用的子集。
+
+        任务级覆盖链可以引用任何已配置组，注册面因此不能只看全局两条链——
+        未注册的组在准入层以 unknown_group 跳过整条链，节点永远拿不到授予。
+        """
+        config = getattr(self, '_app_config', None)
+        if config is None:
+            return self._load_balance_groups_from_plans()
+        return resolve_config_load_balance_groups(config)
+
+    def _resolve_task_model_routes(self, task_id: str, node_kind: str) -> Any:
+        """任务级覆盖 route plan；None = 该车道跟随全局 plan。
+
+        链轮/重试边界活读任务行（与 node_runner._pause_requested 同一读法）；
+        降级口径（禁用成员跳过、被删组跳过、禁用组空槽、回滚闸门摊平）全部来自
+        与全局链共用的 entry 解析器，不在这里另写一套。
+        """
+        normalized_task_id = str(task_id or '').strip()
+        config = getattr(self, '_app_config', None)
+        if not normalized_task_id or config is None:
+            return None
+        lane = 'inspection' if str(node_kind or '') == KIND_ACCEPTANCE else 'execution'
+        task = self.store.get_task(normalized_task_id)
+        metadata = (task.metadata if task is not None else None) or {}
+        override = normalize_task_model_config(metadata.get(TASK_MODEL_CONFIG_KEY))
+        return self._task_effective_model_routes(normalized_task_id, lane, config, override)
+
+    def _task_effective_model_routes(self, task_id: str, lane: str, config: Any, override: dict[str, Any]) -> Any:
+        revision = int(getattr(self, '_runtime_model_revision', 0) or 0)
+        entries = override[
+            TASK_MODEL_CONFIG_INSPECTION_ENTRIES_KEY if lane == 'inspection' else TASK_MODEL_CONFIG_EXECUTION_ENTRIES_KEY
+        ]
+        if entries:
+            signature = tuple(
+                (str(entry.get('type') or ''), str(entry.get('model_key') or entry.get('group_key') or ''))
+                for entry in entries
+            )
+            cache_key = (task_id, lane, revision, signature)
+            cache = self._task_model_route_plan_cache
+            cached = cache.get(cache_key)
+            if cached is not None:
+                return cached
+            plan = build_model_route_plan_from_entries(config, entries, revision=revision)
+            if not plan.routes:
+                # 整条链解析为空（成员全失效）：回退该车道全局链，不缓存空结果，
+                # 成员重新启用后下一次边界即恢复。
+                return None
+            if len(cache) > 512:
+                cache.clear()
+            cache[cache_key] = plan
+            return plan
+        if lane == 'inspection' and not build_model_route_plan(config, 'inspection', revision=revision).routes:
+            # 全局检验为空（全局层面继承执行）：任务层面同构继承本任务生效的执行链。
+            return self._task_effective_model_routes(task_id, 'execution', config, override)
+        return None
 
     def _resolve_model_limit_payload(self, model_ref: str) -> dict[str, Any]:
         config = self._app_config
