@@ -4,7 +4,7 @@ import json
 from typing import Any
 
 
-def _structured_tool_result_payload(value: Any) -> dict[str, Any] | None:
+def structured_tool_result_payload(value: Any) -> dict[str, Any] | None:
     if isinstance(value, dict):
         return dict(value)
     if not isinstance(value, str):
@@ -22,7 +22,7 @@ def _structured_tool_result_payload(value: Any) -> dict[str, Any] | None:
 def is_error_like_tool_result(value: Any) -> bool:
     if isinstance(value, str) and str(value or "").strip().startswith("Error"):
         return True
-    payload = _structured_tool_result_payload(value)
+    payload = structured_tool_result_payload(value)
     if not isinstance(payload, dict):
         return False
     if payload.get("ok") is False:
@@ -34,6 +34,16 @@ def is_error_like_tool_result(value: Any) -> bool:
     return str(payload.get("status") or "").strip().lower() == "error"
 
 
+def is_parameter_error_tool_result(value: Any) -> bool:
+    """工具自己声明"这次失败属于参数错误"的结构化标记（同形：只读顶层 JSON 字段）。"""
+    payload = structured_tool_result_payload(value)
+    if not isinstance(payload, dict):
+        return False
+    return payload.get("parameter_error") is True
+
+
 __all__ = [
     "is_error_like_tool_result",
+    "is_parameter_error_tool_result",
+    "structured_tool_result_payload",
 ]

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import difflib
+import json
 from pathlib import Path
 from typing import Any
+
+from g3ku.runtime.tool_result_status import structured_tool_result_payload
 
 PARAMETER_ERROR_GUIDANCE_TEMPLATE = (
     '请先调用 load_tool_context(tool_id="{tool_name}") 查看该工具的详细说明、参数契约和示例后，再重新使用该工具。'
@@ -434,11 +437,48 @@ def is_parameter_like_tool_exception(exc: BaseException | None) -> bool:
     return isinstance(exc, (TypeError, ValueError))
 
 
+def append_parameter_error_guidance_to_result(
+    result: Any,
+    *,
+    tool_name: str,
+    tool: Any | None = None,
+    arguments: Any = None,
+    runtime_context: Any = None,
+) -> Any:
+    """Structured parameter-error results keep their JSON shape; guidance joins `error`.
+
+    文本车道可以整段追加，结构化车道的成败判定要重新解析顶层 JSON（`ok: false`）——
+    把引导拼在 JSON 后面会让这份回执从"错误"读成"成功"。`parameter_error` 在引导
+    消费后摘掉：同一次调用重复经过执行道时不再叠加第二份（两条道生成的指针分支可能
+    不同）。异常回执原样透传，本助手只处理带声明字段的结构化结果。
+    """
+    try:
+        payload = structured_tool_result_payload(result)
+        if not isinstance(payload, dict) or payload.get("parameter_error") is not True:
+            return result
+        guidance = parameter_error_guidance(
+            tool_name,
+            tool=tool,
+            arguments=arguments,
+            runtime_context=runtime_context,
+        )
+        if not guidance:
+            return result
+        payload.pop("parameter_error", None)
+        error_text = str(payload.get("error") or "").strip()
+        if guidance not in error_text:
+            payload["error"] = f"{error_text}\n{guidance}" if error_text else guidance
+        return json.dumps(payload, ensure_ascii=False)
+    except Exception:
+        return result
+
+
 __all__ = [
     "PARAMETER_ERROR_GUIDANCE_TEMPLATE",
     "PARAMETER_RECHECK_GUIDANCE_TEMPLATE",
     "PARAMETER_SKILL_REOPEN_GUIDANCE_TEMPLATE",
     "append_parameter_error_guidance",
+    "append_parameter_error_guidance_to_result",
     "availability_hint",
     "format_name_group",
     "format_repair_notice_row",
