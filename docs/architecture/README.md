@@ -144,6 +144,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 弹窗里点列表底部的勾选框后整窗上跳、标题被顶出可视区、底部多出一截空白，换对象重开还在、刷新才恢复 → `web-and-admin.md`「Frontend Theme And Layout Contract」（弹窗外壳不许当滚动口）
 - 验收/节点把合法 PDF（或图片、xlsx 等二进制交付物）判成几十字节空壳、或在其上搜索 `%PDF` 等签名 0 命中 → `tool-hydration-and-callable-chain.md`「外置工具结果信封」（二进制目标的展示契约、字节级搜索与 `filesystem_stat` 只读测量通道）
 - 交付物里「路径 + 行号范围」的证据按被引行号读不回原文（差 1 行、差 `start_line-1`、或差 preview 的上下文行数）→ `tool-hydration-and-callable-chain.md`「外置工具结果信封」（content 车道的行号栏）
+- `content_open` 同时带了行与字符寻址却只拿到行模式摘录（回执顶层的 `selector_conflict` 是怎么来的、`discarded` 里为什么有被丢的字符族），或 content 参数错误回执里的引导段由哪一层渲染 → `tool-and-skill-system.md`「fixed builtin tools」（content 三入口的寻址合同）+ `tool-hydration-and-callable-chain.md`「参数错误与状态分类」（结构化参数错误的引导形态）
 - 节点 error_text 是不带 `Error executing` 前缀的裸异常（`FileNotFoundError: …png` 一类）而对应工具结果显示 success、或 `content_open` 声称图片已打开却没有进上下文 → `tool-and-skill-system.md`「fixed builtin tools」（图片 reopen 的存在性校验与 overlay 单图降级）
 - Token统计窗口打开期间表格不随实时事件变化、搜索/筛选与搜索框内容保留、需点「刷新」才更新、点「刷新」看似没反应或总数与明细都不动、Token统计按钮的 tooltip 比窗口顶部五格多一个缓存命中、顶部五格与逐次明细的命中率对不上、明细行数开着开着变少（跨节点同序号顶行）、模型调用明细按时间倒序/搜索只覆盖窗口或本页的行为疑问、底栏共 N 页但翻页时才发消息、停在历史页收不到新调用或「回到最新」后行数变化、任务级统计有数字却显示「尚无按模型明细」、分发期那一段调用在明细里读不到或「类型」列分不清、模型列显示整条尝试链或只显示真正服务的那颗模型的口径疑问，或总耗时/首 Token 耗时/思考 Token 显示 `--` → `web-and-admin.md`「Task Token Stats Window Contract」
 - Node pause or resume behaves unexpectedly -> `main-task-runtime.md`「Node-Level Pause and Recovery」
