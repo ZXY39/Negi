@@ -44,6 +44,7 @@ def _runner_stub(execution_routes: Any, acceptance_routes: Any, *, execution_ref
     runner._acceptance_model_routes = acceptance_routes
     runner._execution_model_refs = list(execution_refs)
     runner._acceptance_model_refs = list(acceptance_refs)
+    runner.task_model_routes_resolver = None
     return runner
 
 
@@ -210,9 +211,12 @@ def test_worker_bootstrap_registers_groups_without_any_config_refresh(tmp_path: 
 
     payload = service._model_route_snapshot()
 
-    assert [entry['group_key'] for entry in payload['model_route_groups']] == ['g_shared']
+    # 组注册面是整份配置：g_off 没被任何全局链引用，也在 balancer 里（任务级覆盖链
+    # 可以引用任何已配置组，未注册的组会以 unknown_group 冻住节点队列）。
+    assert [entry['group_key'] for entry in payload['model_route_groups']] == ['g_shared', 'g_off']
     assert payload['model_route_config_revision'] == 0
     assert [m['model_key'] for m in payload['model_route_groups'][0]['members']] == ['m_a', 'm_b']
+    assert payload['model_route_groups'][1]['enabled'] is False
     # 启动路径建出的 plan 也要带组，否则连候选展开视图都对不上。
     assert service.node_runner._execution_model_routes.load_balance_group_keys == ['g_shared']
 

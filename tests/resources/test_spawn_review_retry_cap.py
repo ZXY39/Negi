@@ -45,6 +45,7 @@ class _ReviewRunnerStub:
         self._react_loop = type("RL", (), {"_chat_backend": backend})()
         self._acceptance_model_refs = ["test:review-model"]
         self._execution_model_refs: list[str] = []
+        self.task_model_routes_resolver = None
         self.usage_records = 0
 
     def _spawn_review_messages(self, **_kwargs: Any) -> list[dict[str, Any]]:

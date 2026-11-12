@@ -177,36 +177,89 @@ class ModelRouteLease:
 RoutePlanSupplier = Callable[[], ModelRoutePlan]
 
 
+def resolve_load_balance_group(config: Any, group_key: str) -> ResolvedLoadBalanceGroup | None:
+    """把一份组定义解析成运行时视图（完整成员名册，含禁用成员）。
+
+    掩码口径由调用方决定：回滚闸门摊平 direct 链时看 member.enabled，组槽位只在
+    enabled 时取成员。完整名册留在这里，让两种口径共用同一份解析。
+    """
+    key = str(group_key or '').strip()
+    if not key:
+        return None
+    group_config = config.get_load_balance_group(key)
+    if group_config is None:
+        return None
+    members: list[RouteMemberView] = []
+    for member_key in list(group_config.model_keys or []):
+        member = str(member_key or '').strip()
+        if not member:
+            continue
+        members.append(_member_view_for(config, member))
+    return ResolvedLoadBalanceGroup(
+        group_key=key,
+        enabled=bool(getattr(group_config, 'enabled', True)),
+        max_retry_rounds=int(getattr(group_config, 'max_retry_rounds', 1) or 1),
+        members=members,
+    )
+
+
+def resolve_config_load_balance_groups(config: Any) -> dict[str, ResolvedLoadBalanceGroup]:
+    """组注册面是整份配置，不是全局两条链引用的子集。
+
+    任务级覆盖链可以引用任何已配置组；只注册全局链用到的组会让那些 entry 以
+    unknown_group 被准入跳过、节点冻在排队。漂移检查只查组表自洽，多注册未被
+    引用的组不影响既有绑定。禁用组按空名册注册，与全局链上组槽位同口径。
+    """
+    groups: dict[str, ResolvedLoadBalanceGroup] = {}
+    raw = getattr(getattr(config, 'models', None), 'load_balance_groups', None) or {}
+    for group_key in dict(raw):
+        resolved = resolve_load_balance_group(config, group_key)
+        if resolved is None:
+            continue
+        groups[resolved.group_key] = ResolvedLoadBalanceGroup(
+            group_key=resolved.group_key,
+            enabled=resolved.enabled,
+            max_retry_rounds=resolved.max_retry_rounds,
+            members=resolved.members if resolved.enabled else [],
+        )
+    return groups
+
+
 def build_model_route_plan(config: Any, scope: str, *, revision: int = 0) -> ModelRoutePlan:
-    """把配置里的 route entry 解析成运行时 route plan。
+    """把配置里的角色链解析成运行时 route plan（委托 entry 解析器）。"""
+    return build_model_route_plan_from_entries(config, config.get_role_model_routes(scope), revision=revision)
+
+
+def build_model_route_plan_from_entries(config: Any, entries: Any, *, revision: int = 0) -> ModelRoutePlan:
+    """把有序 route entry 解析成运行时 route plan；entry 可以是配置对象或任务覆盖 dict。
 
     成员的能力视图（context window、多模态）在这里一次性解析，调用方不再各自去读
     「链上第一个模型」。禁用成员保留在候选里但会被 direct 链过滤，与既有
     `get_scope_model_chain` 的过滤口径一致。
 
     `mainRuntime.modelRouteLoadBalanceEnabled=false` 是回滚闸门：组被摊平成「按配置顺序
-    的 direct 候选」，准入与 chat 一起回到改造前的有序链语义。
+    的 direct 候选」，准入与 chat 一起回到改造前的有序链语义。任务级覆盖链与全局链
+    共用这一个解析器，降级与回滚口径因此不可能分叉。
     """
     load_balance_enabled = bool(
         getattr(getattr(config, "main_runtime", None), "model_route_load_balance_enabled", True)
     )
     routes: list[ResolvedModelRoute] = []
-    for entry in list(config.get_role_model_routes(scope) or []):
-        entry_type = str(getattr(entry, "type", MODEL_ROUTE_KIND_MODEL) or MODEL_ROUTE_KIND_MODEL)
+    for entry in list(entries or []):
+        if isinstance(entry, dict):
+            entry_type = str(entry.get('type') or MODEL_ROUTE_KIND_MODEL).strip().lower().replace('-', '_')
+            model_key = str(entry.get('model_key') or entry.get('modelKey') or '').strip()
+            group_key = str(entry.get('group_key') or entry.get('groupKey') or '').strip()
+        else:
+            entry_type = str(getattr(entry, 'type', MODEL_ROUTE_KIND_MODEL) or MODEL_ROUTE_KIND_MODEL)
+            model_key = str(getattr(entry, 'model_key', '') or '').strip()
+            group_key = str(getattr(entry, 'group_key', '') or '').strip()
         if entry_type == MODEL_ROUTE_KIND_LOAD_BALANCE:
-            group_key = str(getattr(entry, "group_key", "") or "").strip()
-            group_config = config.get_load_balance_group(group_key)
-            if group_config is None:
+            group = resolve_load_balance_group(config, group_key)
+            if group is None:
                 continue
-            members: list[RouteMemberView] = []
-            for member_key in list(group_config.model_keys or []):
-                key = str(member_key or "").strip()
-                if not key:
-                    continue
-                members.append(_member_view_for(config, key))
-            enabled = bool(getattr(group_config, "enabled", True))
             if not load_balance_enabled:
-                for member in members:
+                for member in group.members:
                     if not member.enabled:
                         continue
                     routes.append(
@@ -218,22 +271,22 @@ def build_model_route_plan(config: Any, scope: str, *, revision: int = 0) -> Mod
                         )
                     )
                 continue
+            effective = ResolvedLoadBalanceGroup(
+                group_key=group.group_key,
+                enabled=group.enabled,
+                max_retry_rounds=group.max_retry_rounds,
+                members=group.members if group.enabled else [],
+            )
             routes.append(
                 ResolvedModelRoute(
                     index=len(routes),
                     kind=MODEL_ROUTE_KIND_LOAD_BALANCE,
-                    group_key=group_key,
-                    group=ResolvedLoadBalanceGroup(
-                        group_key=group_key,
-                        enabled=enabled,
-                        max_retry_rounds=int(getattr(group_config, "max_retry_rounds", 1) or 1),
-                        members=members if enabled else [],
-                    ),
-                    candidates=tuple(member.model_key for member in members) if enabled else (),
+                    group_key=effective.group_key,
+                    group=effective,
+                    candidates=tuple(effective.candidate_model_keys),
                 )
             )
             continue
-        model_key = str(getattr(entry, "model_key", "") or "").strip()
         if not model_key:
             continue
         managed = config.get_managed_model(model_key)

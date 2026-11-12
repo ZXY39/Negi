@@ -392,6 +392,9 @@ class NodeRunner:
         # 活性问持有者，不问投影：派发器是唯一说得出「这个节点此刻有没有人在驱动」的一方。
         # 读 dispatcher entry 是调用方的一跳（见 run_node 上方注释的分层），所以在这里注入。
         self.node_liveness_probe = None
+        # 任务级模型链覆盖取数口（由 runtime_service 注入）：(task_id, node_kind) -> plan | None。
+        # None = 跟随全局 plan；链轮/重试边界经 _model_routes_for 活解析。
+        self.task_model_routes_resolver = None
         self._spawn_operation_locks: dict[str, asyncio.Lock] = {}
         # 同一节点的在飞回合登记表（single-flight）。派发器在 entry.future 已结束而节点
         # 非终态时会丢掉 entry 并允许重派（`TaskNodeDispatcher._get_or_create_entry`），
@@ -3644,7 +3647,15 @@ class NodeRunner:
         return list(self._acceptance_model_refs if node.node_kind == KIND_ACCEPTANCE else self._execution_model_refs)
 
     def _model_routes_for(self, node: NodeRecord) -> Any:
-        return self._acceptance_model_routes if node.node_kind == KIND_ACCEPTANCE else self._execution_model_routes
+        return self._model_routes_for_lane(getattr(node, 'task_id', ''), node.node_kind)
+
+    def _model_routes_for_lane(self, task_id: str, node_kind: str) -> Any:
+        resolver = self.task_model_routes_resolver
+        if callable(resolver):
+            override = resolver(str(task_id or '').strip(), str(node_kind or ''))
+            if override is not None:
+                return override
+        return self._acceptance_model_routes if node_kind == KIND_ACCEPTANCE else self._execution_model_routes
 
     def _has_load_balance_routes(self, node: NodeRecord) -> bool:
         routes = self._model_routes_for(node)
@@ -4826,7 +4837,16 @@ class NodeRunner:
         # 只把 usage 并进父节点聚合，事后无法还原是哪一次评审花的）。
         review_request_chars = sum(len(str(item.get('content') or '')) for item in messages if isinstance(item, dict))
         tools = [self._spawn_review_tool_schema()]
-        model_refs = list(self._acceptance_model_refs or self._execution_model_refs)
+        # 送审评审跟随本任务检验车道的覆盖链（组摊平成候选）；无覆盖时保持旧 refs 口径。
+        # 该车道不过准入（维持现状），覆盖只换候选名单，不引入 lease。
+        model_refs: list[str] = []
+        resolver = self.task_model_routes_resolver
+        if callable(resolver):
+            override_routes = resolver(str(getattr(task, 'task_id', '') or '').strip(), KIND_ACCEPTANCE)
+            if override_routes is not None:
+                model_refs = list(override_routes.candidate_model_keys)
+        if not model_refs:
+            model_refs = list(self._acceptance_model_refs or self._execution_model_refs)
         if not model_refs:
             return self._default_spawn_review_result(
                 specs=specs,
