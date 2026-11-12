@@ -370,8 +370,10 @@ function taskModelConfigLaneMarkup(laneKey) {
                         data-task-model-mode="custom" data-task-model-lane="${esc(laneKey)}">单独配置</button>
                 </div>
             </div>
-            <div class="tmc-chain" data-task-model-chain="${esc(laneKey)}">${chain}</div>
-            ${picker}
+            <div class="tmc-lane-scroll">
+                <div class="tmc-chain" data-task-model-chain="${esc(laneKey)}">${chain}</div>
+                ${picker}
+            </div>
         </section>`;
 }
 

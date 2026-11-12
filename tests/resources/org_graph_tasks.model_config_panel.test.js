@@ -247,6 +247,31 @@ test("保存失败：错误进状态行与 toast，草稿保留", async () => {
     assert.deepEqual(plain(context.S.taskModelConfig.lanes.execution.draftRefs), ["m_a", "m_b"]);
 });
 
+test("面板两列并排：body 是双轨 grid，列头固定、链身列内滚动", () => {
+    const css = fs.readFileSync(resolveFrontendSource("org_graph.css"), "utf8");
+    const bodyStart = css.indexOf(".task-model-config-body {");
+    assert.ok(bodyStart > 0, "body rule missing");
+    const bodyBlock = css.slice(bodyStart, css.indexOf("}", bodyStart));
+    assert.match(bodyBlock, /display:\s*grid/);
+    assert.match(bodyBlock, /grid-template-columns:\s*minmax\(0,\s*1fr\)\s+minmax\(0,\s*1fr\)/);
+    assert.doesNotMatch(bodyBlock, /flex-direction:\s*column/);
+    const laneStart = css.indexOf(".tmc-lane-scroll {");
+    assert.ok(laneStart > 0, "lane scroll rule missing");
+    const laneBlock = css.slice(laneStart, css.indexOf("}", laneStart));
+    assert.match(laneBlock, /overflow-y:\s*auto/);
+    // 渲染结构：两节各自带固定列头与独立滚动区。
+    const context = makeContext();
+    context.applyTaskModelConfigPayload({
+        execution: { follows_global: true, route_entries: [] },
+        inspection: { follows_global: true, route_entries: [] },
+    });
+    context.renderTaskModelConfigPanel();
+    const html = context.U.taskModelConfigBody.innerHTML;
+    assert.equal((html.match(/class="tmc-lane"/g) || []).length, 2);
+    assert.equal((html.match(/class="tmc-lane-scroll"/g) || []).length, 2);
+    assert.equal((html.match(/class="tmc-lane-head"/g) || []).length, 2);
+});
+
 test("client_api 载荷键与面板同形：snake_case entries 进 body，缺席车道不进", async () => {
     const code = fs.readFileSync(resolveFrontendSource("client_api/tasks.js"), "utf8");
     const context = { console };
