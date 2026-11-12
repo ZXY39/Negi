@@ -17,10 +17,10 @@ def _css() -> str:
     return CSS_PATH.read_text(encoding="utf-8")
 
 
-def test_session_bubble_keeps_elapsed_and_stop_on_the_first_line() -> None:
+def test_session_bubble_centers_elapsed_and_stop_against_wrapped_source() -> None:
     row = _rule(_css(), ".ceo-bg-jobs-row")
     assert "grid-template-columns: minmax(0, 1fr) auto auto;" in row
-    assert "align-items: start;" in row
+    assert "align-items: center;" in row
 
 
 def test_session_process_command_fallback_clamps_to_two_lines() -> None:
@@ -29,11 +29,18 @@ def test_session_process_command_fallback_clamps_to_two_lines() -> None:
     assert "line-clamp: 2;" in command
 
 
-def test_task_process_rows_put_node_button_right_of_stop_on_the_first_line() -> None:
+def test_task_process_rows_put_stop_right_of_node_button_at_the_same_height() -> None:
     row = _rule(_css(), ".task-processes-row")
-    # 五列：来源标签 / 主列 / 时长 / 停止 / 定位节点。
-    assert "grid-template-columns: auto minmax(0, 1fr) auto auto auto;" in row
-    assert "align-items: start;" in row
+    # 四列：主列 / 时长 / 定位节点 / 停止。
+    assert "grid-template-columns: minmax(0, 1fr) auto auto auto;" in row
+    assert "align-items: center;" in row
+    # 停止按钮与节点胶囊同高：同字号、同纵向内边距，只保留更宽的点击区。
+    stop = _rule(_css(), ".task-processes-stop")
+    node = _rule(_css(), ".task-processes-node")
+    assert "font-size: 0.68rem;" in stop
+    assert "padding: 1px 9px;" in stop
+    assert "font-size: 0.68rem;" in node
+    assert "padding: 1px 7px;" in node
 
 
 def test_task_process_command_fallback_clamps_to_two_lines() -> None:

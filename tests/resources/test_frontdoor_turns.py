@@ -78,6 +78,48 @@ def test_build_tools_keeps_full_arguments_and_result_text() -> None:
     assert tools[0]["output_text"] == "file.txt"
 
 
+def test_build_tools_defaults_missing_timing_and_derives_elapsed() -> None:
+    """账本行必须带可解析计时：前端头部秒数会回退到"本轮最早工具开始时间"，
+    契约下发/reuse 车道漏带计时空串会让整轮退成 `--`（2026-11-13 实盘事故）。"""
+    started = "2026-11-13T00:16:00+08:00"
+    finished = "2026-11-13T00:16:02+08:00"
+    tools = build_frontdoor_turn_tools(
+        [
+            {"id": "call-timed", "name": "exec"},
+            {"id": "call-untimed", "name": "filesystem_stat"},
+            {"id": "call-error", "name": "exec"},
+            {"id": "call-background", "name": "exec"},
+        ],
+        [
+            {"status": "success", "result_text": "ok", "started_at": started, "finished_at": finished},
+            {"status": "success", "result_text": "reuse result"},
+            {"status": "error", "result_text": "Error: refused"},
+            {"status": "background", "result_text": "dispatched", "started_at": started},
+        ],
+    )
+
+    timed = tools[0]
+    assert timed["started_at"] == started
+    assert timed["finished_at"] == finished
+    assert timed["elapsed_seconds"] == 2.0
+
+    untimed = tools[1]
+    # 无计时已收尾：起点终点都兜成落账时刻（零宽），不给前端"耗时"无限增长的口子。
+    assert untimed["started_at"]
+    assert untimed["finished_at"] == untimed["started_at"]
+    assert untimed["elapsed_seconds"] == 0.0
+
+    errored = tools[2]
+    assert errored["started_at"]
+    assert errored["finished_at"] == errored["started_at"]
+    assert errored["elapsed_seconds"] == 0.0
+
+    background = tools[3]
+    assert background["started_at"] == started
+    assert background["finished_at"] == ""
+    assert background["elapsed_seconds"] is None
+
+
 def test_find_tool_and_turn_filter() -> None:
     turns = append_frontdoor_turn(
         [],

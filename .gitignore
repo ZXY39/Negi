@@ -101,3 +101,6 @@ g3ku/web/frontend/*.py
 !g3ku/web/frontend/memory/**
 # douyin_native tool runtime data (persistent Edge profile holds douyin login state)
 data/douyin_native/
+
+# ZCode workspace config carries the Negi bridge token (secret, never commit)
+.zcode/config.json

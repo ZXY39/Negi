@@ -21,7 +21,11 @@ from g3ku.runtime.tool_error_guidance import (
     is_parameter_like_tool_exception,
 )
 from g3ku.runtime.tool_impulse import PreRenderedToolResult, tool_facing_runtime_context
-from g3ku.runtime.tool_jobs import ToolJobOutcome, stable_tool_args_hash
+from g3ku.runtime.tool_jobs import (
+    ToolJobOutcome,
+    stable_tool_args_hash,
+    tool_job_purpose_from_arguments,
+)
 from g3ku.runtime.tool_result_status import is_error_like_tool_result
 from g3ku.runtime.tool_watchdog import (
     actor_role_allows_watchdog,
@@ -1020,6 +1024,7 @@ class CeoFrontDoorSupport:
                 tool_name=tool_name,
                 args_hash=stable_tool_args_hash(normalized_arguments),
                 hint=self._tool_invocation_hint(tool_name, normalized_arguments),
+                purpose=tool_job_purpose_from_arguments(normalized_arguments),
                 run=_run_tool_and_render,
                 timeout_seconds=job_timeout_seconds,
                 recovery_policy=(

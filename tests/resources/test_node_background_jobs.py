@@ -314,6 +314,65 @@ def test_snapshot_and_count_cover_both_background_kinds(store):
         owned_processes.drop(scope, entry["pid"])
 
 
+@pytest.mark.asyncio
+async def test_tool_job_purpose_flows_to_panel_rows(store):
+    import os
+
+    sink = _DeliveryRecorder()
+    manager = _manager(store, sink)
+    job, _reused = manager.admit_tool_job(
+        task_id="task:demo",
+        node_id="node:e",
+        turn_id="round:node:e:1",
+        tool_call_id="call-e",
+        tool_name="exec",
+        args_hash="hash-purpose",
+        hint="exec (command=..., purpose=rebuild gate, timeout_seconds=900)",
+        purpose="rebuild and re-run check gate",
+        run=_job_run(delay=5.0),
+        timeout_seconds=0.0,
+    )
+    manager._scope("task:demo", "node:e").runner._promote(job)
+    snapshot = manager.snapshot_task_background("task:demo")
+    rows = [item for item in snapshot["tool_jobs"] if item["job_id"] == job.job_id]
+    assert rows and rows[0]["purpose"] == "rebuild and re-run check gate"
+    row = store.get_tool_job(job.job_id)
+    assert row is not None and row["purpose"] == "rebuild and re-run check gate"
+
+    # 孤儿行（进程重启后内存为空、只剩账本行）同样把 purpose 带给面板。
+    store.put_tool_job(
+        job_id="tooljob:orphan",
+        session_id="task:demo",
+        turn_id="round:orphan",
+        tool_call_id="call-orphan",
+        tool_name="exec",
+        args_hash="hash-orphan",
+        hint="exec (command=..., purpose=orphan gate)",
+        status=TOOL_JOB_STATUS_RUNNING,
+        started_at=now_iso(),
+        updated_at=now_iso(),
+        timeout_seconds=0,
+        owner_pid=os.getpid(),
+        recovery_policy="model_decide",
+        owner_kind=TOOL_JOB_OWNER_KIND_NODE,
+        task_id="task:demo",
+        node_id="node:f",
+        purpose="orphan gate",
+    )
+    orphan_snapshot = manager.snapshot_task_background("task:demo")
+    orphan_rows = [item for item in orphan_snapshot["tool_jobs"] if item["job_id"] == "tooljob:orphan"]
+    assert orphan_rows and orphan_rows[0]["purpose"] == "orphan gate"
+    assert orphan_rows[0]["orphaned"] is True
+
+    await manager.close_scope_and_wait(
+        "task:demo",
+        node_id="node:e",
+        stop_reason=STOP_REASON_NODE_TERMINAL,
+        timeout_seconds=3.0,
+    )
+    await _wait_no_active_jobs(manager)
+
+
 def test_log_service_lifecycle_write_points_notify_listener(tmp_path):
     """真实状态写点触发统一通知：节点暂停/终态、任务暂停/恢复、残留清扫。"""
     from main.models import NodeRecord, TaskRecord, TokenUsageSummary

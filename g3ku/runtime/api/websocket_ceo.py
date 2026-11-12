@@ -5,6 +5,7 @@ import copy
 import re
 import shutil
 import uuid
+from datetime import datetime
 from inspect import isawaitable
 from pathlib import Path
 from typing import Any
@@ -543,6 +544,11 @@ def _normalize_client_user_messages(session_id: str, payload: dict[str, Any]) ->
         message = built if isinstance(built, UserInputMessage) else UserInputMessage(content=str(built))
         if channel_session:
             message.metadata = {**dict(message.metadata or {}), 'external_source': WEB_COMPOSER_SOURCE}
+        # 在飞快照的提问行要带上送达时刻：刷新重连后前端头部秒数才能从真正的
+        # 提问时刻起算，而不是落到 `--`。转录行的时间戳仍由落盘路径自己盖
+        # （`session/manager.add_message`），这里只负责快照车道。
+        if not message.timestamp:
+            message.timestamp = datetime.now().isoformat()
         messages.append(message)
     return messages
 

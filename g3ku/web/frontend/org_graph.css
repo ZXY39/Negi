@@ -6897,7 +6897,7 @@ textarea {
     flex-shrink: 0;
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto auto;
-    align-items: start;
+    align-items: center;
     gap: var(--ui-space-2);
     padding: 6px 8px;
     border-radius: var(--ui-radius-control);
@@ -6929,16 +6929,6 @@ textarea {
     overflow-wrap: anywhere;
 }
 
-.ceo-bg-jobs-tag {
-    flex: none;
-    padding: 1px 7px;
-    border: 1px solid var(--ui-border);
-    border-radius: var(--ui-radius-pill);
-    color: var(--ui-text-secondary);
-    font-size: 0.68rem;
-    white-space: nowrap;
-}
-
 .ceo-bg-jobs-hint {
     color: var(--ui-text-muted);
     font-size: 0.72rem;
@@ -6947,7 +6937,7 @@ textarea {
 }
 
 /* 没有 purpose 的进程只能拿命令行当代称：只露前两行，完整命令留在 title。
-   多行启动脚本不再把整行撑高，时间与停止按钮因此留在第一行。 */
+   多行启动脚本不再把整行撑高，时间与停止按钮相对整行保持垂直居中。 */
 .ceo-bg-jobs-command {
     display: -webkit-box;
     -webkit-box-orient: vertical;
@@ -17689,8 +17679,8 @@ textarea {
 .task-processes-row {
     flex-shrink: 0;
     display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto auto auto;
-    align-items: start;
+    grid-template-columns: minmax(0, 1fr) auto auto auto;
+    align-items: center;
     gap: var(--ui-space-2);
     padding: 6px 8px;
     border-radius: var(--ui-radius-control);
@@ -17748,14 +17738,15 @@ textarea {
     font-variant-numeric: tabular-nums;
 }
 
+/* 停止按钮与同行节点胶囊同高：同字号、同纵向内边距，只保留更宽的点击区。 */
 .task-processes-stop {
-    padding: 2px 9px;
+    padding: 1px 9px;
     border: 1px solid var(--ui-border);
     border-radius: var(--ui-radius-pill);
     background: transparent;
     color: var(--ui-text-secondary);
     font: inherit;
-    font-size: 0.72rem;
+    font-size: 0.68rem;
     cursor: pointer;
 }
 

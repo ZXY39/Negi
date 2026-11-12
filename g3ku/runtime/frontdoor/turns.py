@@ -119,6 +119,16 @@ def append_frontdoor_turn(
     return normalize_frontdoor_turns(normalized)
 
 
+def _derived_elapsed_seconds(started_at: str, finished_at: str) -> float | None:
+    if not started_at or not finished_at:
+        return None
+    try:
+        delta = datetime.fromisoformat(finished_at) - datetime.fromisoformat(started_at)
+    except ValueError:
+        return None
+    return max(0.0, delta.total_seconds())
+
+
 def build_frontdoor_turn_tools(
     tool_call_payloads: Any,
     tool_results: Any,
@@ -134,6 +144,17 @@ def build_frontdoor_turn_tools(
             arguments_text = json.dumps(arguments, ensure_ascii=False, indent=2)
         else:
             arguments_text = str(arguments or "")
+        # 咽喉点兜底：任何车道漏带计时都给"落账时刻"锚点——前端的头部秒数会回退到
+        # "本轮最早工具开始时间"，空串会让整轮退成 `--`。已收尾的行没有终点时用
+        # 起点补零宽（不然前端"耗时"徽章会拿 now-started 无限增长）；后台工具
+        # （还没 finished_at）保持 open-ended，不给假终点。
+        status = str(result.get("status") or "success").strip() or "success"
+        open_ended = status in {"background", "background_running", "running"}
+        started_at = str(result.get("started_at") or "") or _now_iso()
+        finished_at = str(result.get("finished_at") or "")
+        if not finished_at and not open_ended:
+            finished_at = started_at
+        elapsed_seconds = _derived_elapsed_seconds(started_at, finished_at)
         tools.append(
             {
                 "tool_call_id": str(payload.get("id") or payload.get("tool_call_id") or "").strip(),
@@ -143,9 +164,9 @@ def build_frontdoor_turn_tools(
                 "arguments_ref": "",
                 "output_text": str(result.get("result_text") or ""),
                 "output_ref": str(result.get("output_ref") or ""),
-                "started_at": str(result.get("started_at") or ""),
-                "finished_at": str(result.get("finished_at") or ""),
-                "elapsed_seconds": None,
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "elapsed_seconds": elapsed_seconds,
                 # 直接调用交付的标记要跟着进账本：会话轨道按它把这一行画成「已加载工具 X」，
                 # 少了它刷新后就只有工具名，读起来像目标工具真的跑了一次。
                 **(

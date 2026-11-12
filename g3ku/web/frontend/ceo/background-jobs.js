@@ -194,16 +194,13 @@ function ceoBgJobsRow(item) {
         if (!processPurpose && processCommand) tool.className = "ceo-bg-jobs-tool ceo-bg-jobs-command";
         if (processPurpose || processCommand) tool.title = processPurpose || processCommand;
     } else {
-        tool.textContent = String(item.tool_name || "tool").trim() || "tool";
+        // 交棒作业行优先显示 purpose（exec 交棒时从入参提取），没有才退回工具名；
+        // 调用摘要 hint 照旧作为下方小字。
+        tool.textContent = String(item.purpose || "").trim()
+            || String(item.tool_name || "tool").trim()
+            || "tool";
     }
     label.appendChild(tool);
-    // 常驻性质的第二眼标记：交棒的工具作业一定有终态，只有 detach 出去的进程没有。
-    if (kind === "process") {
-        const tag = document.createElement("span");
-        tag.className = "ceo-bg-jobs-tag";
-        tag.textContent = "常驻进程";
-        label.appendChild(tag);
-    }
     main.appendChild(label);
     const hint = String(item.hint || "").trim();
     if (hint) {

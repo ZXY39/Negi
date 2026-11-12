@@ -307,8 +307,9 @@ test("切换会话会清掉旧会话的条目", async () => {
     assert.equal(document.getElementById("ceo-bg-jobs-count").textContent, "0");
 });
 
-test("exec background 进程与工具作业同列一行：行首标来源，进程另挂常驻标记", () => {
+test("exec background 进程与工具作业同列一行：来源优先 purpose", () => {
     const { context, document } = loadModule();
+    const jobHint = "exec (command=$ErrorActionPreference='Continue'\\n& 'C:\\Users\\A...', purpose=rebuild gate, timeout_seconds=900)";
     context.ceoBgJobsSetItems([
         {
             kind: "process",
@@ -329,7 +330,8 @@ test("exec background 进程与工具作业同列一行：行首标来源，进�
             status: "running",
             started_at: new Date(Date.now() - 8_000).toISOString(),
             elapsed_seconds: 8,
-            hint: "python probe.py",
+            hint: jobHint,
+            purpose: "rebuild and re-run check gate",
         },
     ], "web:a");
     const list = document.getElementById("ceo-bg-jobs-list");
@@ -340,18 +342,41 @@ test("exec background 进程与工具作业同列一行：行首标来源，进�
     assert.equal(processRow.dataset.bgJobKind, "process");
     const processLabel = processRow.children[0].children[0];
     assert.equal(processLabel.children[0].textContent, "dev server :3000");
-    assert.equal(processLabel.children[1].textContent, "常驻进程");
     assert.doesNotMatch(processLabel.children[0].className, /ceo-bg-jobs-command/);
     // 有 purpose 时命令行不再占第二行，只留在 title 里。
     assert.equal(processRow.children[0].children.length, 1);
     assert.equal(processRow.children[0].title, "node server.js");
+    // 行内不再有「常驻进程」视觉标记。
+    assert.doesNotMatch(processRow.textContent, /常驻进程/);
 
-    // 交棒的工具作业一定有终态，不是常驻：同一行不许长出第二个标记。
+    // 工具作业行优先显示 purpose（交棒时从入参提取），调用摘要降为下方小字。
     const jobRow = list.children[1];
     assert.equal(jobRow.dataset.bgJobKind, "tool_job");
-    const jobLabel = jobRow.children[0].children[0];
+    const jobMain = jobRow.children[0];
+    const jobLabel = jobMain.children[0];
     assert.equal(jobLabel.children.length, 1);
-    assert.equal(jobLabel.children[0].textContent, "exec");
+    assert.equal(jobLabel.children[0].textContent, "rebuild and re-run check gate");
+    assert.equal(jobMain.children.length, 2);
+    assert.equal(jobMain.children[1].className, "ceo-bg-jobs-hint");
+    assert.equal(jobMain.children[1].textContent, jobHint);
+});
+
+test("没有 purpose 的工具作业行退回工具名，调用摘要当来源", () => {
+    const { context, document } = loadModule();
+    context.ceoBgJobsSetItems([
+        {
+            kind: "tool_job",
+            job_id: "tooljob:8",
+            tool_name: "exec",
+            status: "running",
+            started_at: new Date(Date.now() - 5_000).toISOString(),
+            elapsed_seconds: 5,
+            hint: "python probe.py",
+        },
+    ], "web:a");
+    const jobMain = document.getElementById("ceo-bg-jobs-list").children[0].children[0];
+    assert.equal(jobMain.children[0].children[0].textContent, "exec");
+    assert.equal(jobMain.children[1].textContent, "python probe.py");
 });
 
 test("没有 purpose 的 legacy 进程行把命令前两行当来源", () => {
@@ -374,7 +399,6 @@ test("没有 purpose 的 legacy 进程行把命令前两行当来源", () => {
     const label = main.children[0];
     assert.equal(label.children[0].textContent, command);
     assert.match(label.children[0].className, /ceo-bg-jobs-command/);
-    assert.equal(label.children[1].textContent, "常驻进程");
     // 命令已经作为来源行显示（CSS 两行封顶），不再另起一行；完整命令留在 title。
     assert.equal(main.children.length, 1);
     assert.equal(main.title, command);

@@ -10,6 +10,7 @@ from g3ku.runtime.tool_jobs import (
     TOOL_JOB_STATUS_SUCCESS,
     ToolJobOutcome,
     ToolJobRunner,
+    tool_job_purpose_from_arguments,
 )
 from main.protocol import now_iso
 from main.storage.sqlite_store import SQLiteTaskStore
@@ -119,6 +120,40 @@ async def test_slow_job_backgrounds_then_emits_one_terminal_event(store):
     assert finished[0]["tool_call_id"] == "call-1"
     assert finished[0]["status"] == TOOL_JOB_STATUS_SUCCESS
     assert finished[0]["finished_at"]
+
+
+def test_purpose_extraction_reads_exec_arguments_only():
+    assert tool_job_purpose_from_arguments({"command": "x", "purpose": " rebuild gate "}) == "rebuild gate"
+    assert tool_job_purpose_from_arguments({"command": "x"}) == ""
+    assert tool_job_purpose_from_arguments(None) == ""
+    assert tool_job_purpose_from_arguments("oops") == ""
+
+
+async def test_backgrounded_job_persists_and_lists_purpose(store):
+    runner, _heartbeat, _changes, _finished = _runner(store)
+
+    async def slow() -> ToolJobOutcome:
+        await asyncio.sleep(0.15)
+        return await _run_outcome()
+
+    job, _ = runner.start_job(
+        turn_id="turn-1",
+        tool_call_id="call-1",
+        tool_name="exec",
+        args_hash="hash-purpose",
+        hint="exec (command=$ErrorActionPreference='Continue'\\n& 'C:\\Users\\A...', purpose=rebuild gate, timeout_seconds=900)",
+        purpose="rebuild and re-run check gate",
+        run=slow,
+        timeout_seconds=1800,
+    )
+    await runner.wait_first(job, 0.02)
+
+    listed = runner.list_jobs("web:demo")
+    assert listed and listed[0]["purpose"] == "rebuild and re-run check gate"
+    assert listed[0]["hint"].startswith("exec (command=")
+    row = store.get_tool_job(job.job_id)
+    assert row is not None and row["purpose"] == "rebuild and re-run check gate"
+    await asyncio.sleep(0.25)
 
 
 async def test_same_tool_and_args_reuses_the_inflight_job(store):
