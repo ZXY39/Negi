@@ -537,6 +537,7 @@ function renderTaskDetailHeader({ resetPromptDisclosure = false } = {}) {
     }
     if (U.tdStatus) U.tdStatus.textContent = taskDetailStatusLabel(task);
     if (U.tdStatusPill) U.tdStatusPill.dataset.status = taskStatusKey(task);
+    if (typeof syncTaskModelConfigBadge === "function") syncTaskModelConfigBadge();
 }
 
 function syncTaskTreeHeaderState(projectedRoot = null) {

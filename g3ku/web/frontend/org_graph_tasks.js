@@ -1356,6 +1356,7 @@ function releaseTaskDetailRetainedState() {
 function resetTaskView() {
     closeTaskDetailWs();
     clearTaskDetailSession();
+    if (typeof resetTaskModelConfigPanel === "function") resetTaskModelConfigPanel();
     S.currentTask = null;
     S.taskSummary = null;
     S.taskRuntimeSummary = null;

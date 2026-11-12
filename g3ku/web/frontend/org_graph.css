@@ -14480,6 +14480,302 @@ textarea {
     font: 0.82rem/1.55 ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 
+/* ---- 任务模型配置（本任务执行/检验链覆盖，组定义只读） ---- */
+.task-model-config-btn {
+    position: relative;
+    gap: var(--ui-space-2);
+}
+
+.task-model-config-dot {
+    display: none;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--ui-brand);
+}
+
+.task-model-config-btn.has-override {
+    border-color: var(--ui-brand);
+}
+
+.task-model-config-btn.has-override .task-model-config-dot {
+    display: inline-block;
+}
+
+.task-model-config-drawer {
+    display: flex;
+    flex-direction: column;
+    width: min(720px, calc(calc(100vw / var(--ui-zoom, 1)) - 32px));
+    max-height: min(84vh, calc(calc(100dvh / var(--ui-zoom, 1)) - 32px));
+    z-index: 99;
+}
+
+.task-model-config-drawer .panel-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+}
+
+.task-model-config-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding: 0 24px 16px;
+}
+
+.task-model-config-footer {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 12px;
+    padding: 12px 24px;
+    border-top: 1px solid var(--ui-border);
+}
+
+.task-model-config-status {
+    margin-right: auto;
+    font-size: 12px;
+    color: var(--ui-text-secondary);
+}
+
+.task-model-config-status.is-error {
+    color: var(--ui-danger);
+}
+
+.tmc-lane {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 14px;
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-card);
+    background: var(--ui-bg-surface);
+}
+
+.tmc-lane-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.tmc-lane-titles h3 {
+    margin: 0;
+    font-size: 14px;
+}
+
+.tmc-lane-note {
+    margin: 2px 0 0;
+    font-size: 12px;
+    color: var(--ui-text-secondary);
+}
+
+.tmc-mode,
+.tmc-picker-tabs {
+    display: inline-flex;
+    gap: 2px;
+    padding: 2px;
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-control);
+    background: var(--ui-bg-app);
+}
+
+.tmc-mode-btn,
+.tmc-picker-tab {
+    border: 0;
+    background: transparent;
+    color: var(--ui-text-secondary);
+    font-size: 12px;
+    line-height: normal;
+    padding: 5px 12px;
+    border-radius: calc(var(--ui-radius-control) - 2px);
+    cursor: pointer;
+}
+
+.tmc-mode-btn:hover,
+.tmc-picker-tab:hover {
+    color: var(--ui-text-primary);
+}
+
+.tmc-mode-btn.is-active,
+.tmc-picker-tab.is-active {
+    background: var(--ui-bg-surface);
+    color: var(--ui-text-primary);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+
+.tmc-chain {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.tmc-tile {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 10px 12px;
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-card);
+    background: var(--ui-bg-panel);
+}
+
+.tmc-tile[draggable="true"] {
+    cursor: grab;
+}
+
+.tmc-tile.is-dragging {
+    opacity: 0.5;
+}
+
+.tmc-tile.is-drop-target {
+    border-color: var(--ui-brand);
+}
+
+.tmc-tile.is-invalid {
+    border-color: color-mix(in srgb, var(--ui-danger) 50%, transparent);
+}
+
+.tmc-grip {
+    color: var(--ui-text-secondary);
+    font-size: 12px;
+    line-height: 1.6;
+    user-select: none;
+}
+
+.tmc-tile-main {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.tmc-tile-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--ui-text-primary);
+    overflow-wrap: anywhere;
+}
+
+.tmc-tile-sub {
+    font-size: 12px;
+    color: var(--ui-text-secondary);
+    overflow-wrap: anywhere;
+}
+
+.tmc-tile-badges,
+.tmc-tile-members {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+
+.tmc-tile .toolbar-btn {
+    flex: 0 0 auto;
+}
+
+.tmc-lane-actions {
+    display: flex;
+}
+
+.tmc-picker {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    border-top: 1px dashed var(--ui-border);
+    padding-top: 10px;
+}
+
+.tmc-picker-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.tmc-picker-search {
+    flex: 1 1 160px;
+    min-width: 0;
+    height: 32px;
+    padding: 0 10px;
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-control);
+    background: var(--ui-bg-input);
+    color: var(--ui-text-primary);
+    font-size: 13px;
+}
+
+.tmc-picker-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 240px;
+    overflow-y: auto;
+}
+
+.tmc-picker-row {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    text-align: left;
+    padding: 8px 10px;
+    border: 1px solid transparent;
+    border-radius: var(--ui-radius-card);
+    background: transparent;
+    cursor: pointer;
+    font: inherit;
+}
+
+.tmc-picker-row:hover {
+    background: var(--ui-neutral-soft);
+    border-color: var(--ui-border);
+}
+
+.tmc-picker-row.is-disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+.tmc-picker-row-title {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: var(--ui-text-primary);
+}
+
+.tmc-picker-row-sub {
+    font-size: 12px;
+    color: var(--ui-text-secondary);
+    overflow-wrap: anywhere;
+}
+
+/* 窄屏头部恒一行：模型配置折成 40px 图标键，圆点移到右上角。 */
+@media (max-width: 900px) {
+    .task-model-config-btn .task-model-config-label {
+        display: none;
+    }
+
+    .task-model-config-btn.task-model-config-btn {
+        width: 40px;
+        padding: 0;
+        justify-content: center;
+    }
+
+    .task-model-config-btn .task-model-config-dot {
+        position: absolute;
+        top: 6px;
+        right: 6px;
+    }
+}
+
 .node-error-history {
     display: flex;
     flex-direction: column;
