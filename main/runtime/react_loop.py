@@ -5726,6 +5726,9 @@ class ReActToolLoop:
         """
         call_id = str(runtime_context.get('current_tool_call_id') or '')
         # 作业捕获调用期窄快照：可变审计映射与取消域不进作业（§3.2.4）。
+        # `tool_contract_presence` 是只读的逐跳视图，必须带上：终态渲染里的参数
+        # 引导靠它区分"-> toolskill 定点读"与"-> load_tool_context"，缺了就会把
+        # 契约已在场的调用指向重复读守卫。
         job_runtime_context = {
             'task_id': str(runtime_context.get('task_id') or ''),
             'node_id': str(runtime_context.get('node_id') or ''),
@@ -5735,6 +5738,7 @@ class ReActToolLoop:
             'tool_snapshot_supplier': runtime_context.get('tool_snapshot_supplier'),
             'cancel_token': runtime_context.get('cancel_token'),
             'current_tool_call_id': call_id,
+            'tool_contract_presence': runtime_context.get('tool_contract_presence') or {},
         }
         delivery_metadata = self._tool_result_delivery_metadata(
             tools={tool_name: tool},
@@ -5972,6 +5976,18 @@ class ReActToolLoop:
             ),
             'invocation_text': invocation_text,
         }
+
+    @staticmethod
+    def _tool_invocation_hint(tool_name: str, arguments: dict[str, Any]) -> str:
+        """后台作业台账上的调用摘要（前门道同名形状）：工具名 + 前三个入参的短预览。"""
+        parts: list[str] = []
+        for key, value in list(arguments.items())[:3]:
+            preview = str(value or "").replace("\n", "\\n")
+            if len(preview) > 48:
+                preview = preview[:48].rstrip() + "..."
+            parts.append(f"{key}={preview}")
+        suffix = ", ".join(parts)
+        return f"{tool_name} ({suffix})" if suffix else str(tool_name)
 
     @classmethod
     def _overflowed_search_signatures(cls, messages: list[dict[str, Any]]) -> set[str]:
