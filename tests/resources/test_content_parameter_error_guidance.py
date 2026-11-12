@@ -9,6 +9,7 @@ content 家族把参数类失败编码成结构化 `{"ok": false, ...}`，而不
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -181,6 +182,27 @@ async def _run_node(tool: Tool, *, arguments: dict):
     )
 
 
+class _ImmediateJobAdapter:
+    """节点后台作业适配器替身：作业在自己的 task 里跑，按前台等待窗口裁决。"""
+
+    def __init__(self) -> None:
+        self.job = SimpleNamespace(job_id="job-bg-1")
+        self.task: asyncio.Task | None = None
+
+    def start_tool_job(self, **kwargs):
+        self.task = asyncio.create_task(kwargs["run"]())
+        return self.job, False
+
+    async def wait_tool_job(self, job, timeout_seconds):
+        _ = job
+        assert self.task is not None
+        try:
+            outcome = await asyncio.wait_for(asyncio.shield(self.task), timeout_seconds)
+        except asyncio.TimeoutError:
+            return False, None
+        return True, outcome
+
+
 # --- 引导正样本：两条道各一，且同形 -------------------------------------------
 
 
@@ -271,6 +293,42 @@ async def test_node_lane_appends_guidance_for_structured_parameter_error(tmp_pat
     error_text = str(payload.get("error") or "")
     assert ERROR_TEXT in error_text
     assert f'content_open(path="{tool._descriptor.toolskills_main_path}")' in error_text
+
+
+@pytest.mark.asyncio
+async def test_node_background_job_renders_guidance_into_its_terminal_message(
+    tmp_path: Path,
+) -> None:
+    """后台交接把渲染搬进作业任务：终态消息同样带引导，布尔被消费。"""
+    tool = _JsonResultTool(toolskill_path=_toolskill_file(tmp_path))
+    loop = _node_loop()
+    adapter = _ImmediateJobAdapter()
+
+    async def _invoke() -> str:
+        return await tool.execute(path="x.md")
+
+    handed_off, _result = await loop._execute_tool_call_with_node_background(
+        invoke_tool=_invoke,
+        tool=tool,
+        tool_name=TOOL_NAME,
+        arguments={"path": "x.md"},
+        runtime_context={**_node_context(), "current_tool_call_id": "call-bg"},
+        background_adapter=adapter,
+        background_window=5.0,
+        effective_timeout=30.0,
+        self_enforced=False,
+        timeout_exempt=False,
+    )
+
+    assert handed_off is False
+    assert adapter.task is not None
+    outcome = await adapter.task
+    payload = json.loads(outcome.result_text)
+    assert payload.get("ok") is False
+    assert "parameter_error" not in payload
+    assert f'content_open(path="{tool._descriptor.toolskills_main_path}")' in str(
+        payload.get("error") or ""
+    )
 
 
 @pytest.mark.asyncio
