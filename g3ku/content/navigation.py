@@ -876,8 +876,19 @@ class ContentNavigationService:
         has_char_selector = start_char is not None or end_char is not None
         has_range_selector = start_line is not None or end_line is not None
         has_around_selector = around_line is not None or window is not None
+        # 两族数值选择器同时在场时做确定性消歧：行寻址优先（契约自己就写行寻址是默认，
+        # 字符族本是单行/超大内容的兜底；首行超限的字符兜底也让降级停在"更小摘录 +
+        # 续读指引"）。消歧必须留痕：回执其余字段与一次正常行模式调用逐字段相同，
+        # 没有 selector_conflict 模型就无从知道自己的字符请求被丢弃。
+        selector_conflict: dict[str, Any] | None = None
         if has_char_selector and (has_range_selector or has_around_selector):
-            raise ValueError("choose either start_char/end_char or line selectors (start_line/end_line or around_line/window), not both")
+            selector_conflict = {
+                "used": "line",
+                "discarded": {"start_char": start_char, "end_char": end_char},
+            }
+            start_char = None
+            end_char = None
+            has_char_selector = False
         if has_char_selector:
             if start_char is not None and int(start_char) < 1:
                 raise ValueError("start_char must be >= 1")
@@ -905,16 +916,20 @@ class ContentNavigationService:
             half = max(1, span // 2)
             start_line = max(1, int(around_line) - half)
             end_line = max(start_line, int(around_line) + half)
-            return self._excerpt(ref=ref, path=path, start_line=start_line, end_line=end_line, view=view)
-        if has_range_selector:
+            payload = self._excerpt(ref=ref, path=path, start_line=start_line, end_line=end_line, view=view)
+        elif has_range_selector:
             start = max(1, int(start_line or 1))
             finish = max(start, int(end_line or start))
             if (finish - start + 1) > MAX_OPEN_LINES:
                 finish = start + MAX_OPEN_LINES - 1
-            return self._excerpt(ref=ref, path=path, start_line=start, end_line=finish, view=view)
-        # 默认（未传任何 line/char 参数）：从第 1 行起按字符上限行对齐取整，不再
-        # 固定 80 行；小文件可一次读全，密集文件停在最后一个不超限的整行。
-        return self._excerpt(ref=ref, path=path, start_line=1, end_line=None, view=view)
+            payload = self._excerpt(ref=ref, path=path, start_line=start, end_line=finish, view=view)
+        else:
+            # 默认（未传任何 line/char 参数）：从第 1 行起按字符上限行对齐取整，不再
+            # 固定 80 行；小文件可一次读全，密集文件停在最后一个不超限的整行。
+            payload = self._excerpt(ref=ref, path=path, start_line=1, end_line=None, view=view)
+        if selector_conflict is not None:
+            payload["selector_conflict"] = selector_conflict
+        return payload
 
     @staticmethod
     def is_image_mime_type(mime_type: str | None) -> bool:

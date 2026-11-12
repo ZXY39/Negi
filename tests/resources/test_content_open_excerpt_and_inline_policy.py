@@ -165,17 +165,76 @@ def test_open_char_mode_caps_oversized_window(tmp_path: Path) -> None:
     assert "start_char=" in result.get("excerpt")
 
 
-def test_open_char_and_line_selectors_are_mutually_exclusive(tmp_path: Path) -> None:
+# 契约变更（2026-11-12，维护者批准的档 3）：旧合同是"两族同时在场即 ValueError"，
+# 新合同是"行寻址优先、字符族丢弃并在回执里回显 selector_conflict"。本用例由旧合同
+# 的互斥断言改写而来，不是顺手修掉一条陈旧断言：容忍是运行时的事，模型面仍只说用一族。
+def test_open_char_and_line_selectors_resolve_to_line_addressing(tmp_path: Path) -> None:
     service = _make_service(tmp_path)
-    path = tmp_path / "any.txt"
-    path.write_text("line\n", encoding="utf-8")
+    path = tmp_path / "plain.txt"
+    path.write_text("\n".join(f"l{index}" for index in range(1, 11)), encoding="utf-8")
 
-    try:
-        service.open(path=str(path), start_line=1, start_char=1)
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("expected ValueError for mixed line/char selectors")
+    result = service.open(path=str(path), start_line=2, end_line=4, start_char=1, end_char=30_000)
+
+    assert result.get("ok") is True
+    assert result.get("start_line") == 2 and result.get("end_line") == 4
+    assert result.get("excerpt") == "2: l2\n3: l3\n4: l4"
+    assert result.get("selector_conflict") == {
+        "used": "line",
+        "discarded": {"start_char": 1, "end_char": 30_000},
+    }
+
+
+def test_open_single_selector_family_keeps_the_baseline_shape(tmp_path: Path) -> None:
+    """单族与无寻址调用不新增任何字段：消歧落点只在真发生冲突时出现。"""
+    service = _make_service(tmp_path)
+    path = tmp_path / "plain.txt"
+    path.write_text("\n".join(f"l{index}" for index in range(1, 6)), encoding="utf-8")
+
+    line_only = service.open(path=str(path), start_line=2, end_line=3)
+    char_only = service.open(path=str(path), start_char=1, end_char=2)
+    no_selector = service.open(path=str(path))
+
+    assert "selector_conflict" not in line_only
+    assert "selector_conflict" not in char_only
+    assert "selector_conflict" not in no_selector
+    assert line_only.get("excerpt") == "2: l2\n3: l3"
+    assert char_only.get("excerpt") == "l1"
+    assert no_selector.get("excerpt").startswith("1: l1")
+
+
+def test_open_line_priority_with_end_line_one_stays_discoverable(tmp_path: Path) -> None:
+    """A 档已知退化：行区间只取到一行时，事实仍可从 discarded 与整文件读数看出。
+
+    `truncated:false` 说的是"你请求的行区间给全了"，不是"你要的字符区间给全了"；
+    运行时不替模型猜意图，也不把这一条当"已告知少拿"。
+    """
+    service = _make_service(tmp_path)
+    path = tmp_path / "plain.txt"
+    path.write_text("\n".join(f"l{index}" for index in range(1, 51)), encoding="utf-8")
+
+    result = service.open(path=str(path), start_line=1, end_line=1, start_char=1, end_char=20_000)
+
+    assert result.get("ok") is True
+    assert result.get("start_line") == 1 and result.get("end_line") == 1
+    assert result.get("truncated") is False
+    assert result.get("excerpt_remaining_lines") == 0
+    assert result.get("selector_conflict", {}).get("discarded", {}).get("end_char") == 20_000
+    assert result.get("line_count") == 50
+    assert int(result.get("char_count") or 0) > 0
+
+
+def test_open_mixed_selectors_single_line_falls_back_to_char_truncation(tmp_path: Path) -> None:
+    """丢弃字符族后命中单行超长：走行模式的字符兜底，是"更小摘录 + 续读指引"。"""
+    service = _make_service(tmp_path)
+    path = tmp_path / "one-line.txt"
+    path.write_text("x" * 30_000, encoding="utf-8")
+
+    result = service.open(path=str(path), start_line=1, end_line=1, start_char=1, end_char=30_000)
+
+    assert result.get("ok") is True
+    assert result.get("truncated") is True
+    assert result.get("selector_conflict", {}).get("used") == "line"
+    assert "start_char" in (result.get("excerpt") or "")
 
 
 def test_tail_single_line_returns_tail_not_head(tmp_path: Path) -> None:

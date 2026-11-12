@@ -14,7 +14,7 @@ If both `ref` and `path` are provided, the tool attempts both targets and return
 ## How much each call returns
 
 - **No range params** → reads from line 1, returning whole lines up to the line-mode cap of **16000 chars**. It never cuts a line in half, so a small file may be returned in full even if that is more or fewer than a fixed line count.
-- **Line range** (`start_line`/`end_line` or `around_line`/`window`) → same 16000-char line-aligned cap within the range.
+- **Line range** (`start_line`/`end_line`) → same 16000-char line-aligned cap within the range.
 - **Character range** (`start_char`/`end_char`) → slices by raw character offset with a higher cap of **128000 chars**. This is the way to paginate single-line or oversized content that line ranges cannot reach.
 
 If the excerpt hits the cap, the result sets `truncated: true` and appends a notice reporting how many chars/lines were shown vs. remain and how to continue (`start_line=…`, `start_char=…`, or exec). Follow that notice.

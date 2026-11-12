@@ -41,7 +41,7 @@ parameters:
     start_char:
       type: integer
       minimum: 1
-      description: 1-based Unicode code-point start offset (not byte, not 0-based). Mutually exclusive with start_line/end_line/around_line/window. Use for single-line or oversized content where line ranges cannot paginate; prefer line addressing for ordinary multi-line source code.
+      description: 1-based Unicode code-point start offset (not byte, not 0-based). Mutually exclusive with start_line/end_line. Use for single-line or oversized content where line ranges cannot paginate; prefer line addressing for ordinary multi-line source code.
     end_char:
       type: integer
       minimum: 1

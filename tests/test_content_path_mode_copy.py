@@ -54,6 +54,23 @@ def test_combined_target_results_are_documented() -> None:
         assert "targets.ref" in text and "targets.path" in text, tool_id
 
 
+def test_model_facing_content_open_carriers_do_not_name_service_only_selectors() -> None:
+    """`around_line` / `window` 只住在 content navigation service 层。
+
+    模型面载体只留两族寻址；两族同时在场由运行时做确定性消歧（行优先 + 回显），
+    不在提示词里解释容忍规则。载体单独写回 service 层参数名就是给模型一个发不出的参数。
+    """
+    start_char_description = _manifest("content_open")["parameters"]["properties"]["start_char"][
+        "description"
+    ]
+    assert "around_line" not in start_char_description
+    assert "window" not in start_char_description
+
+    skill = _toolskill("content_open")
+    assert "around_line" not in skill
+    assert "`window`" not in skill
+
+
 def test_stat_description_declares_it_does_not_search_contents() -> None:
     """`filesystem_stat` 的模型可见面必须把"不搜正文、不改东西"这条边界说出口。
 
