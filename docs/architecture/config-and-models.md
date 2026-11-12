@@ -178,7 +178,7 @@ cron 调度器没有总时长派发预算：一次 dispatch 的 deadline 只来�
 - revision 对比必须排在预算比较**之前**。嵌在"本轮失败且还没跑满预算"里面时，旧预算=1 的那扇门根本进不去，调大追不上；旧预算=999 时会按旧值一路烧完才让位——这两个方向都是操作员报"改了不生效"的实际形态。
 - 残留的边界是一次 attempt 之内：provider 目标、该模型的 key 轮序、attempt 超时在这些值于槽位入口取一次之后不重读，单次已发出的 HTTP 请求永不热切。操作员可见的最长滞后因此是"当前这一轮"，不是"这一发调用"，更不是"这个回合"。
 
-节点侧的路由结构有两个落地点：worker **启动构造**与管理面的**配置刷新**。两处都重建 `execution` / `inspection` 的 route plan，并且都在同一步把同一份组定义连同 revision 交给负载均衡器（`_apply_model_route_plans`；契约见 `runtime-overview.md`「节点模型路由与准入绑定」）。这个"同一步"是硬约束：准入层对链上每个 `load_balance` entry 都要能在 balancer 里查到那个组，查不到就按 `unknown_group` 跳过整条链，节点永远拿不到授予、队列冻在 waiting。新起的 worker 不会自己跑配置刷新——只有管理面保存下发的 `refresh_runtime_config` 命令才会触发它——所以注册组必须落在启动路径上，链上带组的配置才能在每次重启后继续工作。revision 只作观测，不参与重绑判定：刷新只解绑「绑定成员已被移出组」的那些节点，其余绑定与最近的请求速率、429 惩罚一律保留——那两项描述的是上游，与本地配置有没有被改过无关。因此一次与路由无关的保存（改 prompt、改渠道设置）不会打断任何节点的缓存粘性。
+节点侧的路由结构有两个落地点：worker **启动构造**与管理面的**配置刷新**。两处都重建 `execution` / `inspection` 的 route plan，并且都在同一步把组定义连同 revision 交给负载均衡器（`_apply_model_route_plans`；契约见 `runtime-overview.md`「节点模型路由与准入绑定」）。组注册面是**整份 `models.loadBalanceGroups`**，不是全局两条链引用的子集：任务级覆盖链（见「任务级模型链覆盖」）可以引用任何已配置组，只注册全局链用到的组会让那些 entry 以 `unknown_group` 被准入跳过。这个"同一步"是硬约束：准入层对链上每个 `load_balance` entry 都要能在 balancer 里查到那个组，查不到就按 `unknown_group` 跳过整条链，节点永远拿不到授予、队列冻在 waiting。新起的 worker 不会自己跑配置刷新——只有管理面保存下发的 `refresh_runtime_config` 命令才会触发它——所以注册组必须落在启动路径上，链上带组的配置才能在每次重启后继续工作。revision 只作观测，不参与重绑判定：刷新只解绑「绑定成员已被移出组」的那些节点，其余绑定与最近的请求速率、429 惩罚一律保留——那两项描述的是上游，与本地配置有没有被改过无关。因此一次与路由无关的保存（改 prompt、改渠道设置）不会打断任何节点的缓存粘性。
 
 维护上把这理解成“迭代/重试边界上的重建”，而不是“请求中途热切模型”。如果用户反馈“改完模型链后旧模型还在用”，重点检查：
 
@@ -290,6 +290,23 @@ Leader（CEO/frontdoor）解析本轮模型引用时按三档取值，顺序固�
 - 解析入口是 `CeoFrontDoorSupport._resolve_ceo_model_refs_for_session`（`g3ku/runtime/frontdoor/_ceo_support.py`），`prepare_turn`、迭代/重试边界的链轮换、composer 用量预估与内联工具提醒都走它，因此上下文窗口判定、多模态闸门与实际 provider 请求始终按同一组 refs 计算。
 - 与链变更同一口径：固定/取消固定、会话链增删只作用于边界处重建的下一个请求，不中途热切已在飞的 provider 请求。会话模型的读写接口与前端控件详见 `web-and-admin.md`「Composer Model Mode Panel」。
 - 固定的是 `models.catalog[]` 绑定 key，不是 provider/model 字符串：链路仍是 `key -> binding -> provider target`，删除或重建 binding 等价于删除该 key。
+- 任务侧另有一条同语义但不同形状的覆盖：执行/检验两条车道各自一条与全局同形的 route entry 链，见「任务级模型链覆盖」。会话链是扁平 key（前门进程没有准入层），任务链可以带组槽位（worker 进程有）。
+
+### 任务级模型链覆盖
+
+任务可以单独覆盖执行与检验两条车道的模型链，只作用于该任务；默认跟随全局。设置住在任务行的 `metadata.model_config`，两个键 `execution_route_entries` / `inspection_route_entries`，entry 与全局 `models.roles.*` 的 route entry 同形（`{type: model, model_key}` / `{type: load_balance, group_key}`，有序混排）：
+
+- 空列表＝该车道跟随全局；写侧摘空键、两键皆空摘整键，所以默认态不落 metadata 键。读侧丢畸形 entry、保序、容忍失效引用（校验发生在写入口）。
+- 写入口是 `GET` / `PATCH /api/tasks/{task_id}/model-config`。校验镜像全局写侧口径：direct 成员须存在且启用（404 `model_key_not_found` / 409 `model_key_disabled`），组引用须存在（404 `group_key_not_found`）；禁用组允许保存（解析时槽位保留但候选为空，与全局 builder 一致）。detail 是带 `code` + `model_key`/`group_key` + 可读 message 的对象，不静默过滤。
+- **写入只落任务行**（与暂停旗标同一 mutator 车道），不触碰 `config.json` / `models.roles` / `models.loadBalanceGroups`，也不触发配置刷新。组是全局资源，定义的增删改唯一写点在模型页；任务面板只引用、只读展示组定义。会话面板同理只写会话 metadata。任何"任务面板改完全局变了"的形态都是写串道，判据是保存前后 `config.json` 字节不变。
+- 解析在 worker：`runtime_service._resolve_task_model_routes` 于链轮/重试边界活读任务行（与节点暂停检查同一读法），经 `build_model_route_plan_from_entries` 建 plan——与全局链共用同一个 entry 解析器，禁用成员跳过、被删组跳过、禁用组空槽、回滚闸门摊平这些降级口径因此不可能分叉。plan 缓存键为 `(task_id, lane, revision, entries 签名)`，配置刷新整表清掉；缓存只存 plan 不存任务行。
+- 两条车道独立：执行覆盖不影响检验跟随。检验跟随全局且全局检验链解析为空时，继承**本任务生效的执行链**（与全局层面"检验空继承执行"同构，只是把执行换成本任务生效值）。
+- 失效降级不改存储：整条覆盖链解析为空（成员全失效）时回退该车道全局链；成员重新启用后下一次边界即恢复。
+- 生效时机与全局链变更同一合同：下一个链轮/重试边界重建的请求生效，不热切在飞请求，见「模型链变更何时作用于在途回合」。
+- spawn 送审评审跟随本任务检验车道的覆盖展开候选（该车道不过准入，维持现状）；异步任务重复预检发生在任务创建前，恒按全局链。
+- 界面合同（入口、抽屉、编辑器、保存写点）见 `web-and-admin.md`「Task Model Config Panel Contract」；路由选择点与组注册面见 `runtime-overview.md`「节点模型路由与准入绑定」。
+
+排障：任务链引用组而节点冻在排队（`node_queue_waiting` 涨、无 `Model route selected`）→ 先核该组是否在 balancer 注册面（整份配置口径，读 `GET /api/models/load-balance/status`）；覆盖保存后仍走全局 → 核 resolver 缓存键里的 revision 与 entries 签名是否前进、任务行 metadata 是否真落键；面板显示与实跑不符 → 面板读存储态 + 全局目录合成展示，实跑读 resolver，两者都以任务行为真源。
 
 ### 绑定记录丢失时的降级
 
