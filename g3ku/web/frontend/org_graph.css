@@ -14505,7 +14505,7 @@ textarea {
 .task-model-config-drawer {
     display: flex;
     flex-direction: column;
-    width: min(720px, calc(calc(100vw / var(--ui-zoom, 1)) - 32px));
+    width: min(1160px, calc(calc(100vw / var(--ui-zoom, 1)) - 48px));
     max-height: min(84vh, calc(calc(100dvh / var(--ui-zoom, 1)) - 32px));
     z-index: 99;
 }
@@ -14517,14 +14517,21 @@ textarea {
     gap: 16px;
 }
 
+/* 执行 / 检验两列并排：列头与模式切换固定，链身在各列内独立滚动，
+   便于左右对照编辑；加载/错误态横跨两列。 */
 .task-model-config-body {
     flex: 1 1 auto;
     min-height: 0;
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     gap: 16px;
+    overflow: hidden;
     padding: 0 24px 16px;
+}
+
+.task-model-config-body > .empty-state {
+    grid-column: 1 / -1;
+    align-self: start;
 }
 
 .task-model-config-footer {
@@ -14550,6 +14557,8 @@ textarea {
     display: flex;
     flex-direction: column;
     gap: 10px;
+    min-height: 0;
+    overflow: hidden;
     padding: 14px;
     border: 1px solid var(--ui-border);
     border-radius: var(--ui-radius-card);
@@ -14557,11 +14566,21 @@ textarea {
 }
 
 .tmc-lane-head {
+    flex: 0 0 auto;
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
     gap: 12px;
     flex-wrap: wrap;
+}
+
+.tmc-lane-scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
 }
 
 .tmc-lane-titles h3 {
@@ -14773,6 +14792,16 @@ textarea {
         position: absolute;
         top: 6px;
         right: 6px;
+    }
+
+    /* 两列保持并排（对照编辑是这面板的主用途），只收紧内距给链身让宽。 */
+    .task-model-config-body {
+        gap: 10px;
+        padding: 0 12px 12px;
+    }
+
+    .tmc-lane {
+        padding: 10px;
     }
 }
 
