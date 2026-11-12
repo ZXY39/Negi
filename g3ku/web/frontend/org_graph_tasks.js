@@ -1636,6 +1636,15 @@ function taskModelCallKindLabel(call) {
     return TASK_MODEL_CALL_KIND_LABELS[kind] || "普通回合";
 }
 
+// 一次调用可能沿模型链试过多颗成员，账本为每一跳各留一行；只有真正被服务的那一发
+// 记 call_count=1（其余为 0），模型列与搜索都只认它，避免一次调用在界面上读成
+// "试过的整条链"。旧账本（升级前每跳都记 1）没有这个区分，退回原样。
+function taskModelCallServedRows(call) {
+    const rows = Array.isArray(call?.delta_usage_by_model) ? call.delta_usage_by_model : [];
+    const served = rows.filter((row) => Number(row?.call_count || 0) > 0);
+    return served.length ? served : rows;
+}
+
 function taskModelCallMatchesQuery(call, query) {
     const needle = String(query || "").trim().toLowerCase();
     if (!needle) return true;
@@ -1643,7 +1652,7 @@ function taskModelCallMatchesQuery(call, query) {
     if (String(call?.call_kind || "").toLowerCase().includes(needle)) return true;
     if (taskModelCallKindLabel(call).toLowerCase().includes(needle)) return true;
     if (String(call?.node_id || "").toLowerCase().includes(needle)) return true;
-    return (Array.isArray(call?.delta_usage_by_model) ? call.delta_usage_by_model : []).some((row) =>
+    return taskModelCallServedRows(call).some((row) =>
         [taskModelDisplayName(row), row?.model_key, row?.provider_model, row?.provider_id]
             .some((value) => String(value || "").toLowerCase().includes(needle)));
 }
@@ -1719,7 +1728,7 @@ function renderTaskTokenCallTableMarkup(meta, filteredCalls, query) {
         return `<div class="empty-state task-token-empty">${hasQuery ? "未找到匹配的记录。" : "暂无逐次调用明细。"}</div>`;
     }
     const rows = meta.items.map((item) => {
-        const usageRows = Array.isArray(item.delta_usage_by_model) ? item.delta_usage_by_model : [];
+        const usageRows = taskModelCallServedRows(item);
         const modelNames = usageRows.map((row) => taskModelDisplayName(row)).filter(Boolean).join(", ") || "未提供";
         // 悬停保留账本原始 key：配置改名或删除后仍可据此定位是哪一条配置。
         const modelKeys = usageRows.map((row) => String(row?.model_key || "").trim()).filter(Boolean).join(", ") || modelNames;
