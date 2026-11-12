@@ -17,6 +17,7 @@ from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
 from g3ku.runtime.frontdoor.prompt_builder import CeoPromptBuilder
 from g3ku.runtime.tool_error_guidance import (
     append_parameter_error_guidance,
+    append_parameter_error_guidance_to_result,
     is_parameter_like_tool_exception,
 )
 from g3ku.runtime.tool_impulse import PreRenderedToolResult, tool_facing_runtime_context
@@ -948,6 +949,16 @@ class CeoFrontDoorSupport:
                     payload=(error_text, error_text, "error", started_at, finished_at, elapsed_seconds),
                 )
 
+            # 工具把参数类失败编码成结构化 `{"ok": false, "parameter_error": true}` 时，
+            # 异常对象没机会到这一层；在这里用同一套指引材料补齐引导（资源工具实例、
+            # 本次入参与运行时视图都在手边，指针分支不会退化）。
+            result = append_parameter_error_guidance_to_result(
+                result,
+                tool_name=tool_name,
+                tool=tool,
+                arguments=normalized_arguments,
+                runtime_context=runtime_context,
+            )
             rendered = self._render_tool_message_content(
                 result,
                 runtime_context=runtime_context,

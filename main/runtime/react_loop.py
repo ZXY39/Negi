@@ -88,6 +88,7 @@ from g3ku.runtime.tool_context_presence import (
 )
 from g3ku.runtime.tool_error_guidance import (
     append_parameter_error_guidance,
+    append_parameter_error_guidance_to_result,
     availability_hint,
     format_repair_notice_row,
     is_parameter_like_tool_exception,
@@ -5608,8 +5609,16 @@ class ReActToolLoop:
                 self_enforced=self_enforced,
                 timeout_exempt=timeout_exempt,
             )
-            return call_result
-        return await self._execute_tool_via_watchdog(
+            # 工具把参数类失败编码成结构化回执时异常不会到上一层的 except；引导在
+            # 渲染之前补齐（工具实例 / 本次入参 / 运行时视图都在手边）。
+            return append_parameter_error_guidance_to_result(
+                call_result,
+                tool_name=tool_name,
+                tool=tool,
+                arguments=arguments,
+                runtime_context=runtime_context,
+            )
+        result = await self._execute_tool_via_watchdog(
             invoke_tool=_invoke_tool,
             tool=tool,
             tool_name=tool_name,
@@ -5618,6 +5627,13 @@ class ReActToolLoop:
             effective_timeout=effective_timeout,
             self_enforced=self_enforced,
             timeout_exempt=timeout_exempt,
+        )
+        return append_parameter_error_guidance_to_result(
+            result,
+            tool_name=tool_name,
+            tool=tool,
+            arguments=arguments,
+            runtime_context=runtime_context,
         )
 
     @staticmethod
@@ -5742,6 +5758,13 @@ class ReActToolLoop:
                     effective_timeout=effective_timeout,
                     self_enforced=self_enforced,
                     timeout_exempt=timeout_exempt,
+                )
+                raw_result = append_parameter_error_guidance_to_result(
+                    raw_result,
+                    tool_name=tool_name,
+                    tool=tool,
+                    arguments=arguments,
+                    runtime_context=job_runtime_context,
                 )
                 rendered, _status = self._render_tool_message_with_status(
                     raw_result,

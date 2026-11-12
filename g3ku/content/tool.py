@@ -6,6 +6,7 @@ from typing import Any
 
 from g3ku.content import ContentNavigationService, parse_content_envelope
 from g3ku.resources.tool_settings import ContentToolSettings, runtime_tool_settings
+from g3ku.runtime.tool_error_guidance import is_parameter_like_tool_exception
 from g3ku.utils.helpers import model_data_root, resolve_model_path
 
 
@@ -271,6 +272,11 @@ class ContentTool:
                 raise ValueError(f"unsupported content target: {target}")
         except Exception as exc:
             payload = {"ok": False, "error": str(exc)}
+            # 参数类异常在这里就被结构化成回执，异常对象出不了 content 层；执行道靠这个
+            # 布尔决定是否追加引导（判据与异常车道同一个谓词：PermissionError /
+            # FileNotFoundError 等一律不挂）。
+            if is_parameter_like_tool_exception(exc):
+                payload["parameter_error"] = True
         normalized = dict(payload)
         normalized.setdefault("ok", bool(normalized.get("ref") or normalized.get("hits") or normalized.get("excerpt") or normalized.get("content")))
         normalized["target"] = target
