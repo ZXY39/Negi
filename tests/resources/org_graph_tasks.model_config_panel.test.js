@@ -259,6 +259,12 @@ test("面板两列并排：body 是双轨 grid，列头固定、链身列内滚�
     assert.ok(laneStart > 0, "lane scroll rule missing");
     const laneBlock = css.slice(laneStart, css.indexOf("}", laneStart));
     assert.match(laneBlock, /overflow-y:\s*auto/);
+    // 列不画框：抽屉外壳之外不许第二层嵌套边框/底色（扁平 surface 合同）。
+    const laneBoxStart = css.indexOf(".tmc-lane {");
+    assert.ok(laneBoxStart > 0, "lane rule missing");
+    const laneBox = css.slice(laneBoxStart, css.indexOf("}", laneBoxStart));
+    assert.match(laneBox, /border:\s*0/);
+    assert.match(laneBox, /background:\s*transparent/);
     // 渲染结构：两节各自带固定列头与独立滚动区。
     const context = makeContext();
     context.applyTaskModelConfigPayload({
