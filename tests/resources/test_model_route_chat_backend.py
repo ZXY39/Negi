@@ -798,3 +798,62 @@ async def test_group_member_added_midcall_is_rotated_to_within_the_same_call(mon
 
     assert response.content == "ok"
     assert calls == ["m_a", "m_b"]
+
+
+@pytest.mark.asyncio
+async def test_task_override_flip_midcall_is_picked_at_next_chain_round(monkeypatch) -> None:
+    """任务级覆盖在跳内改写：模型前进边界即按新 plan 准入，不需要配置 revision 前进。
+
+    supplier 接的是 node_runner 的 resolver 活解析口（与生产同一条路）：第一发打旧组
+    被限流（限流发生在 attempt 内，模拟操作员在这一跳进行中保存任务模型配置），组耗尽
+    后的模型前进边界活刷新必须从新组授予成员。revision 保持 1，证明覆盖生效不依赖
+    全局配置刷新。同模型退避轮是 revision 门控（全局链专用），覆盖不 bump revision，
+    因此覆盖的最迟生效点是下一跳装配——见 config-and-models「任务级模型链覆盖」。
+    """
+    from main.runtime.node_runner import NodeRunner
+
+    old_group = _group("m_a", max_rounds=1, group_key="g_old")
+    new_group = _group("m_b", max_rounds=1, group_key="g_new")
+    old_plan = ModelRoutePlan(routes=[_group_route(0, old_group)], config_revision=1)
+    new_plan = ModelRoutePlan(routes=[_group_route(0, new_group)], config_revision=1)
+    turn_controller, controller, balancer, lease = _wiring(old_group, plan=old_plan, extra_groups=(new_group,))
+
+    runner = object.__new__(NodeRunner)
+    runner._execution_model_routes = old_plan
+    runner._acceptance_model_routes = old_plan
+    runner._execution_model_refs = list(old_plan.candidate_model_keys)
+    runner._acceptance_model_refs = list(old_plan.candidate_model_keys)
+    state = {"plan": old_plan}
+    runner.task_model_routes_resolver = lambda task_id, node_kind: state["plan"]
+
+    calls: list[str] = []
+
+    class _FlipThenRateLimit:
+        async def chat(self, **kwargs):
+            calls.append("m_a")
+            state["plan"] = new_plan
+            raise _StatusError("RateLimitError: Error code: 429 - {'error': {'message': 'rpm limit'}}", 429)
+
+    _patch(
+        monkeypatch,
+        {
+            "m_a": _target("m_a", _FlipThenRateLimit()),
+            "m_b": _target("m_b", _OkProvider("m_b", calls)),
+        },
+    )
+    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
+    monkeypatch.setattr(chat_backend_module, "current_runtime_config_revision", lambda: 1)
+
+    response = await _backend().chat(
+        messages=[{"role": "user", "content": "demo"}],
+        tools=None,
+        model_refs=list(old_plan.candidate_model_keys),
+        model_routes=old_plan,
+        model_routes_supplier=lambda: runner._model_routes_for_lane("task:flip", "execution"),
+        node_turn_lease=lease,
+        node_turn_controller=turn_controller,
+        model_concurrency_controller=controller,
+    )
+
+    assert response.content == "ok"
+    assert calls == ["m_a", "m_b"]

@@ -1293,6 +1293,10 @@ class ConfigChatBackend:
             route_slots = new_slots
             model_routes = new_plan
             route_entries_payload = _route_entries_status_payload(new_slots, new_refs)
+            # lease 的 route_plan 必须与在用链同步换：rebind_turn 按 lease.route_plan
+            # 取组，留在旧 plan 上会让跳内跨组改链（全局或任务覆盖）永远重绑旧组。
+            if node_turn_lease is not None and new_plan is not None:
+                node_turn_lease.route_plan = new_plan
 
         last_error: Exception | None = None
         last_response: LLMResponse | None = None
