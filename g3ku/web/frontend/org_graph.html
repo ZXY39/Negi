@@ -955,6 +955,12 @@
                             <span id="td-prompt-text" class="task-prompt-text">正在加载...</span>
                         </summary>
                     </details>
+                    <button id="task-model-config-btn" class="task-detail-pill task-model-config-btn" type="button"
+                        title="模型配置：跟随全局模型链" aria-haspopup="dialog">
+                        <i data-lucide="sliders-horizontal"></i>
+                        <span class="task-detail-pill-label task-model-config-label">模型配置</span>
+                        <span class="task-model-config-dot" aria-hidden="true"></span>
+                    </button>
                     <div class="task-detail-pill task-detail-stat" aria-live="polite">
                         <i data-lucide="play-circle"></i>
                         <span class="task-detail-pill-label">活跃节点</span>
@@ -1020,6 +1026,25 @@
                         </div>
                         <div id="task-error-log-content" class="task-error-log-content">
                             <div class="empty-state">暂无错误日志</div>
+                        </div>
+                    </div>
+
+                    <div id="task-model-config-backdrop" class="detail-backdrop" aria-hidden="true"></div>
+                    <div id="task-model-config-drawer" class="feed-panel panel detail-drawer task-model-config-drawer" role="dialog"
+                        aria-modal="true" aria-labelledby="task-model-config-title" tabindex="-1">
+                        <div class="panel-header">
+                            <div>
+                                <h2 id="task-model-config-title">模型配置</h2>
+                                <div class="subtitle">仅作用于本任务 · 默认跟随全局 · 组定义在模型页维护</div>
+                            </div>
+                            <button id="task-model-config-close" class="toolbar-btn ghost" type="button" data-modal-close>关闭</button>
+                        </div>
+                        <div id="task-model-config-body" class="task-model-config-body">
+                            <div class="empty-state">正在加载模型配置...</div>
+                        </div>
+                        <div class="task-model-config-footer">
+                            <span id="task-model-config-status" class="task-model-config-status" aria-live="polite"></span>
+                            <button id="task-model-config-save" class="toolbar-btn" type="button" disabled>保存</button>
                         </div>
                     </div>
 
@@ -1837,6 +1862,7 @@
     <script src="tasks/hall-store.js"></script>
     <script src="tasks/hall-view.js"></script>
     <script src="tasks/ws-router.js"></script>
+    <script src="tasks/model-config-panel.js"></script>
     <script src="org_graph_tasks.js"></script>
     <script src="org_graph_resources.js"></script>
     <script src="org_graph_stickers.js"></script>

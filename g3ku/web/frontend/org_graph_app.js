@@ -639,6 +639,13 @@ const U = {
     taskErrorLogClose: document.getElementById("task-error-log-close"),
     taskErrorLogSummary: document.getElementById("task-error-log-summary"),
     taskErrorLogContent: document.getElementById("task-error-log-content"),
+    taskModelConfigButton: document.getElementById("task-model-config-btn"),
+    taskModelConfigBackdrop: document.getElementById("task-model-config-backdrop"),
+    taskModelConfigDrawer: document.getElementById("task-model-config-drawer"),
+    taskModelConfigClose: document.getElementById("task-model-config-close"),
+    taskModelConfigBody: document.getElementById("task-model-config-body"),
+    taskModelConfigSave: document.getElementById("task-model-config-save"),
+    taskModelConfigStatus: document.getElementById("task-model-config-status"),
     taskTreeResetRounds: document.getElementById("task-tree-reset-rounds-btn"),
     taskTreeSearch: document.getElementById("task-tree-search"),
     taskTreeSearchInput: document.getElementById("task-tree-search-input"),
@@ -11954,6 +11961,7 @@ function bindTaskHall() {
     U.taskErrorLogButton?.addEventListener("click", () => void openTaskErrorLog());
     U.taskErrorLogClose?.addEventListener("click", () => setTaskErrorLogOpen(false));
     U.taskErrorLogBackdrop?.addEventListener("click", () => setTaskErrorLogOpen(false));
+    if (typeof bindTaskModelConfigPanel === "function") bindTaskModelConfigPanel();
     U.closeAgent?.addEventListener("click", () => clearAgentSelection());
     U.adErrorHistoryRefresh?.addEventListener("click", () => {
         const nodeId = String(S.selectedNodeId || "").trim();
@@ -12055,6 +12063,10 @@ function bindGlobalOverlays() {
         if (closeTaskMenus({ restoreFocus: true })) return;
         if (S.taskErrorLogOpen) {
             setTaskErrorLogOpen(false);
+            return;
+        }
+        if (S.taskModelConfig?.open) {
+            closeTaskModelConfig();
             return;
         }
         if (S.taskTokenStatsOpen) {

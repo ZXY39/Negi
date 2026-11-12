@@ -29,6 +29,27 @@
         });
     },
 
+    async getTaskModelConfig(taskId) {
+        return this._request("GET", `/api/tasks/${taskId}/model-config`, {
+            requestKey: `tasks:model-config:${taskId}`,
+            timeoutMs: 15000,
+        });
+    },
+
+    // 任务级模型链覆盖：只写任务行。缺席的车道不动，空数组＝恢复跟随全局；
+    // 绝不走模型页的保存车道（那条会整份替换全局组字典）。
+    // 载荷键与面板/后端同一形状（snake_case route entries）。
+    async updateTaskModelConfig(taskId, { execution_route_entries = null, inspection_route_entries = null } = {}) {
+        const body = {};
+        if (execution_route_entries !== null) body.execution_route_entries = execution_route_entries;
+        if (inspection_route_entries !== null) body.inspection_route_entries = inspection_route_entries;
+        return this._request("PATCH", `/api/tasks/${taskId}/model-config`, {
+            body,
+            requestKey: `tasks:model-config-save:${taskId}`,
+            timeoutMs: 15000,
+        });
+    },
+
     async getTaskTokenLedger(taskId, { limit = 300 } = {}) {
         // 独立的 requestKey：同 key 的后发请求会 abort 前一条，蹭 tasks:detail:* 会让
         // 点「刷新」打断一次正在加载的大任务详情。
