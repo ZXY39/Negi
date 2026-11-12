@@ -469,6 +469,45 @@ def normalize_execution_policy_metadata(
     return ExecutionPolicyState(mode=mode)
 
 
+TASK_MODEL_CONFIG_KEY = 'model_config'
+TASK_MODEL_CONFIG_EXECUTION_ENTRIES_KEY = 'execution_route_entries'
+TASK_MODEL_CONFIG_INSPECTION_ENTRIES_KEY = 'inspection_route_entries'
+
+
+def normalize_task_model_route_entries(value: Any) -> list[dict[str, str]]:
+    """任务覆盖链 entry：与全局 models.roles.* 的 route entry 同形（direct / load_balance）。
+
+    读侧只做形状归一（丢畸形、保序），不校验 key 存在性：校验发生在写入口，
+    读侧必须容忍失效项（模型/组被删除后由解析侧逐个摘掉）。
+    """
+    entries: list[dict[str, str]] = []
+    for item in value if isinstance(value, (list, tuple)) else []:
+        if not isinstance(item, dict):
+            continue
+        entry_type = str(item.get('type') or 'model').strip().lower().replace('-', '_')
+        if entry_type == 'load_balance':
+            group_key = str(item.get('group_key') or item.get('groupKey') or '').strip()
+            if group_key:
+                entries.append({'type': 'load_balance', 'group_key': group_key})
+            continue
+        model_key = str(item.get('model_key') or item.get('modelKey') or '').strip()
+        if model_key:
+            entries.append({'type': 'model', 'model_key': model_key})
+    return entries
+
+
+def normalize_task_model_config(value: Any) -> dict[str, list[dict[str, str]]]:
+    payload = value if isinstance(value, dict) else {}
+    return {
+        TASK_MODEL_CONFIG_EXECUTION_ENTRIES_KEY: normalize_task_model_route_entries(
+            payload.get(TASK_MODEL_CONFIG_EXECUTION_ENTRIES_KEY, payload.get('executionRouteEntries'))
+        ),
+        TASK_MODEL_CONFIG_INSPECTION_ENTRIES_KEY: normalize_task_model_route_entries(
+            payload.get(TASK_MODEL_CONFIG_INSPECTION_ENTRIES_KEY, payload.get('inspectionRouteEntries'))
+        ),
+    }
+
+
 def build_execution_policy_schema(*, description: str) -> dict[str, Any]:
     return {
         'type': 'object',

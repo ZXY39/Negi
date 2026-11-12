@@ -34,6 +34,9 @@ from main.models import (
     FAILURE_CLASS_BUSINESS_UNPASSED,
     FAILURE_CLASS_ENGINE,
     FAILURE_CLASS_NON_RETRYABLE_BLOCKED,
+    TASK_MODEL_CONFIG_EXECUTION_ENTRIES_KEY,
+    TASK_MODEL_CONFIG_INSPECTION_ENTRIES_KEY,
+    TASK_MODEL_CONFIG_KEY,
     NodeOutputEntry,
     NodeRecord,
     NodeToolFileChange,
@@ -42,6 +45,8 @@ from main.models import (
     TaskRecord,
     normalize_failure_class,
     normalize_final_acceptance_metadata,
+    normalize_task_model_config,
+    normalize_task_model_route_entries,
     normalize_tool_file_changes,
 )
 from main.monitoring.execution_trace import build_execution_trace
@@ -1962,6 +1967,46 @@ class TaskLogService:
                 # 指纹去重保证与 refresh_task_view 自身的发布重复时无害。
                 self._publish_task_summary_patch_locked(task=refreshed, previous_task=previous)
                 self._notify_task_control_lifecycle_locked(task_id, previous, refreshed)
+            return refreshed
+
+    def update_task_model_config(
+        self,
+        task_id: str,
+        *,
+        execution_route_entries: list[dict[str, str]] | None = None,
+        inspection_route_entries: list[dict[str, str]] | None = None,
+    ) -> TaskRecord | None:
+        """任务级模型链覆盖：只写 task.metadata 的 model_config 键，绝不触碰全局配置。
+
+        None＝该车道不动；空列表＝恢复跟随全局（摘键）。与暂停旗标同一写车道
+        （_task_lock + store mutator + 摘要 patch），worker 在下一个链轮边界活读生效。
+        """
+        with self._task_lock(task_id):
+            previous = self._store.get_task(task_id)
+            if previous is None:
+                return None
+
+            def _mutate(task: TaskRecord) -> TaskRecord:
+                metadata = dict(task.metadata or {})
+                config = normalize_task_model_config(metadata.get(TASK_MODEL_CONFIG_KEY))
+                if execution_route_entries is not None:
+                    config[TASK_MODEL_CONFIG_EXECUTION_ENTRIES_KEY] = normalize_task_model_route_entries(execution_route_entries)
+                if inspection_route_entries is not None:
+                    config[TASK_MODEL_CONFIG_INSPECTION_ENTRIES_KEY] = normalize_task_model_route_entries(inspection_route_entries)
+                next_config = {key: entries for key, entries in config.items() if entries}
+                if next_config:
+                    metadata[TASK_MODEL_CONFIG_KEY] = next_config
+                else:
+                    metadata.pop(TASK_MODEL_CONFIG_KEY, None)
+                return task.model_copy(update={'metadata': metadata, 'updated_at': now_iso()})
+
+            updated = self._store.update_task(task_id, _mutate)
+            if updated is None:
+                return None
+            refreshed = self.refresh_task_view(task_id, mark_unread=False) or updated
+            # metadata-only 改动不动摘要指纹，refresh_task_view 的无变化早退会跳过发布，
+            # 这里显式发布一次（指纹去重保证与 refresh 自身发布重复时无害）。
+            self._publish_task_summary_patch_locked(task=refreshed, previous_task=previous)
             return refreshed
 
     def _notify_task_control_lifecycle_locked(

@@ -7,6 +7,7 @@ from fastapi.responses import PlainTextResponse
 
 from g3ku.content import artifact_ref_from_id
 from g3ku.shells.web import get_agent, is_no_ceo_model_configured_error
+from main.errors import TaskModelConfigError
 
 router = APIRouter()
 
@@ -116,6 +117,50 @@ async def get_task(
     if payload is None:
         raise HTTPException(status_code=404, detail='task_not_found')
     return {'ok': True, **payload}
+
+
+@router.get('/tasks/{task_id}/model-config')
+async def get_task_model_config(task_id: str):
+    task_id = _ensure_task_route_id(task_id)
+    service = _service()
+    await service.startup()
+    payload = await asyncio.to_thread(service.get_task_model_config_payload, service.normalize_task_id(task_id))
+    if payload is None:
+        raise HTTPException(status_code=404, detail='task_not_found')
+    return {'ok': True, **payload}
+
+
+@router.patch('/tasks/{task_id}/model-config')
+async def update_task_model_config(task_id: str, payload: dict = Body(...)):
+    task_id = _ensure_task_route_id(task_id)
+    service = _service()
+    await service.startup()
+    body = payload if isinstance(payload, dict) else {}
+    execution = body.get('execution_route_entries', body.get('executionRouteEntries'))
+    inspection = body.get('inspection_route_entries', body.get('inspectionRouteEntries'))
+    try:
+        result = await asyncio.to_thread(
+            service.update_task_model_config,
+            service.normalize_task_id(task_id),
+            execution_route_entries=execution,
+            inspection_route_entries=inspection,
+        )
+    except TaskModelConfigError as exc:
+        if exc.code in {'model_key_not_found', 'group_key_not_found'}:
+            status = 404
+        elif exc.code == 'model_key_disabled':
+            status = 409
+        else:
+            status = 400
+        detail: dict[str, str] = {'code': exc.code, 'message': exc.message}
+        if exc.model_key:
+            detail['model_key'] = exc.model_key
+        if exc.group_key:
+            detail['group_key'] = exc.group_key
+        raise HTTPException(status_code=status, detail=detail) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail='task_not_found')
+    return {'ok': True, **result}
 
 
 @router.get('/tasks/{task_id}/token-ledger')

@@ -76,7 +76,7 @@ from g3ku.update_apply import WEB_LOG_FILE
 from g3ku.utils.api_keys import parse_api_keys, resolve_api_key_concurrency_layout
 from g3ku.utils.helpers import normalize_seed_tool_names, tools_bundle_single_source_enabled
 from g3ku.web.worker_control import managed_worker_snapshot
-from main.errors import TaskPausedError, describe_exception
+from main.errors import TaskModelConfigError, TaskPausedError, describe_exception
 from main.governance import (
     GovernanceStore,
     MainRuntimePolicyEngine,
@@ -113,6 +113,9 @@ from main.governance.tool_context import (
 )
 from main.ids import new_command_id, new_node_id, new_task_id, new_worker_id
 from main.models import (
+    TASK_MODEL_CONFIG_EXECUTION_ENTRIES_KEY,
+    TASK_MODEL_CONFIG_INSPECTION_ENTRIES_KEY,
+    TASK_MODEL_CONFIG_KEY,
     ChatboxMessage,
     FrontdoorNodeMessage,
     NodeRecord,
@@ -123,6 +126,7 @@ from main.models import (
     normalize_execution_policy_metadata,
     normalize_final_acceptance_metadata,
     normalize_result_payload,
+    normalize_task_model_config,
 )
 from main.monitoring.file_store import TaskFileStore
 from main.monitoring.log_service import TaskLogService
@@ -13566,6 +13570,105 @@ class MainRuntimeService:
         if payload is None:
             return None
         return payload
+
+    def get_task_model_config_payload(self, task_id: str) -> dict[str, Any] | None:
+        task_id = self.normalize_task_id(task_id)
+        task = self.get_task(task_id)
+        if task is None:
+            return None
+        config = normalize_task_model_config((task.metadata or {}).get(TASK_MODEL_CONFIG_KEY))
+        return {
+            'task_id': task.task_id,
+            'execution': {
+                'follows_global': not config[TASK_MODEL_CONFIG_EXECUTION_ENTRIES_KEY],
+                'route_entries': config[TASK_MODEL_CONFIG_EXECUTION_ENTRIES_KEY],
+            },
+            'inspection': {
+                'follows_global': not config[TASK_MODEL_CONFIG_INSPECTION_ENTRIES_KEY],
+                'route_entries': config[TASK_MODEL_CONFIG_INSPECTION_ENTRIES_KEY],
+            },
+        }
+
+    def _normalize_and_validate_task_model_entries(self, config: Any, raw: Any) -> list[dict[str, str]]:
+        """写入口形状 + 引用校验，镜像全局写侧口径（schema 的 role/组引用检查）。
+
+        direct 须存在且启用；组引用须存在；禁用组允许保存（解析时槽位保留但候选为空，
+        与全局 builder 行为一致）。畸形 entry 报错而不是静默丢弃——静默丢弃会让面板
+        显示一条比保存时短的链。
+        """
+        if not isinstance(raw, (list, tuple)):
+            raise TaskModelConfigError('invalid_route_entries', '模型链必须是 route entry 数组。')
+        entries: list[dict[str, str]] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                raise TaskModelConfigError('invalid_route_entry', '链 entry 必须是对象。')
+            entry_type = str(item.get('type') or 'model').strip().lower().replace('-', '_')
+            model_key = str(item.get('model_key') or item.get('modelKey') or '').strip()
+            group_key = str(item.get('group_key') or item.get('groupKey') or '').strip()
+            if entry_type == 'load_balance':
+                if not group_key or model_key:
+                    raise TaskModelConfigError('invalid_route_entry', 'load_balance entry 需要 groupKey 且不能带 modelKey。')
+                if config.get_load_balance_group(group_key) is None:
+                    raise TaskModelConfigError(
+                        'group_key_not_found',
+                        f'负载均衡组 {group_key} 不存在，请从链里移除后再保存。',
+                        group_key=group_key,
+                    )
+                entries.append({'type': 'load_balance', 'group_key': group_key})
+                continue
+            if entry_type != 'model':
+                raise TaskModelConfigError('invalid_route_entry', f'未知的链 entry 类型：{entry_type}。')
+            if not model_key or group_key:
+                raise TaskModelConfigError('invalid_route_entry', 'model entry 需要 modelKey 且不能带 groupKey。')
+            managed = config.get_managed_model(model_key)
+            if managed is None:
+                raise TaskModelConfigError(
+                    'model_key_not_found',
+                    f'模型 {model_key} 不存在，请从链里移除后再保存。',
+                    model_key=model_key,
+                )
+            if not bool(getattr(managed, 'enabled', True)):
+                raise TaskModelConfigError(
+                    'model_key_disabled',
+                    f'模型 {model_key} 已禁用，请从链里移除后再保存。',
+                    model_key=model_key,
+                )
+            entries.append({'type': 'model', 'model_key': model_key})
+        return entries
+
+    def update_task_model_config(
+        self,
+        task_id: str,
+        *,
+        execution_route_entries: Any = None,
+        inspection_route_entries: Any = None,
+    ) -> dict[str, Any] | None:
+        """任务级覆盖写入口：校验后只写任务行，不触碰 config.json / models.*。
+
+        None＝该车道不动；空数组＝恢复跟随全局。生效由 worker 在链轮边界活读，
+        这里不触发配置刷新，也不反向同步任何全局链或组定义。
+        """
+        task_id = self.normalize_task_id(task_id)
+        task = self.get_task(task_id)
+        if task is None:
+            return None
+        config, _revision, _changed = get_runtime_config()
+        execution = (
+            self._normalize_and_validate_task_model_entries(config, execution_route_entries)
+            if execution_route_entries is not None else None
+        )
+        inspection = (
+            self._normalize_and_validate_task_model_entries(config, inspection_route_entries)
+            if inspection_route_entries is not None else None
+        )
+        record = self.log_service.update_task_model_config(
+            task_id,
+            execution_route_entries=execution,
+            inspection_route_entries=inspection,
+        )
+        if record is None:
+            return None
+        return self.get_task_model_config_payload(record.task_id)
 
     def get_task_token_ledger_payload(
         self,
