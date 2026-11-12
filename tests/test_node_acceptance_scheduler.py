@@ -26,6 +26,7 @@ from main.runtime.append_notice_context import (
     APPEND_NOTICE_CONTEXT_KEY,
     PENDING_APPEND_NOTICE_RECORDS_KEY,
 )
+from main.runtime.node_mailbox import notification_is_held
 from main.service.runtime_service import MainRuntimeService
 
 TASK = 'task:acceptance-scheduler'
@@ -1521,6 +1522,286 @@ class TestUnreadNoticeMirror:
 
             assert block.count('同一条逻辑通知') == 1
         finally:
+            await service.close()
+
+
+class _RootRoundDispatcher:
+    """根长回合的最小替身：根 entry future 挂在一个测试控制的 future 上。"""
+
+    def __init__(self, driven: dict[str, bool] | None = None) -> None:
+        self.scheduled: list[str] = []
+        self.driven = dict(driven or {})
+        self.activity = asyncio.Event()
+        self.root_future: asyncio.Future = asyncio.get_running_loop().create_future()
+
+    def entry_future(self, node_id: str) -> asyncio.Future:
+        return self.root_future
+
+    async def wait_activity(self, timeout: float = 0.5) -> None:
+        self.activity.clear()
+        try:
+            await asyncio.wait_for(self.activity.wait(), timeout=max(0.05, float(timeout)))
+        except asyncio.TimeoutError:
+            return
+
+    def node_is_being_driven(self, node_id: str):
+        return self.driven.get(node_id)
+
+    def schedule_node(self, node_id: str) -> None:
+        self.scheduled.append(node_id)
+
+    def notify_activity(self) -> None:
+        self.activity.set()
+
+
+def _pass_payload() -> dict:
+    return NodeFinalResult(
+        status='success',
+        delivery_status='final',
+        summary='验收通过',
+        answer='',
+        evidence=[],
+        remaining_work=[],
+        blocking_reason='',
+        verdict='pass',
+        submission_id='submission:pass',
+    ).model_dump(mode='json')
+
+
+def _mark_acceptance_passed(service: MainRuntimeService) -> None:
+    service.store.update_node(
+        ACCEPTANCE,
+        lambda record: record.model_copy(
+            update={
+                'status': 'success',
+                'final_output': '验收通过',
+                'metadata': {**dict(record.metadata or {}), 'result_payload': _pass_payload()},
+            }
+        ),
+    )
+
+
+async def _wait_for_child_success(service: MainRuntimeService) -> None:
+    for _ in range(200):
+        if service.store.get_node(CHILD).status == 'success':
+            return
+        await asyncio.sleep(0.01)
+    assert False, '结算拍未在根回合在飞时结算验收裁决'
+
+
+class TestRootRoundSettlementBeat:
+    """根回合在飞期间，验收裁决落地即结算并提醒上游（实盘 task:f6c64108e01d）。
+
+    根节点连续长回合让 run_task 一直卡在 execute_node(root)，调度循环不跑；
+    三份已通过的验收裁决悬置 15～34 分钟，child_final 迟迟不发，父节点停在
+    空信箱上。结算拍让「裁决落地 → 执行节点终局 → 上游收到提醒」这条链
+    不再等根回合收口。
+    """
+
+    @pytest.mark.asyncio
+    async def test_pass_settles_while_the_root_round_is_still_inflight(self, tmp_path, monkeypatch):
+        service = _service(tmp_path)
+        try:
+            _seed(service)
+            wakes, deliveries = _capture_calls(service, monkeypatch)
+            # 事故形态：验收回合已跑完并落了成功裁决，被验节点还停在 waiting_acceptance。
+            _mark_acceptance_passed(service)
+            dispatcher = _RootRoundDispatcher()
+            service.task_actor_service._dispatchers[TASK] = dispatcher
+
+            beat_task = asyncio.create_task(
+                service.task_actor_service._execute_root_with_settlement_beats(
+                    task_id=TASK, dispatcher=dispatcher, root_node_id=ROOT,
+                )
+            )
+            try:
+                await asyncio.sleep(0.01)  # 让包装器挂到 wait_activity 上
+                assert not dispatcher.root_future.done()
+                dispatcher.notify_activity()  # 验收 entry 收口 → 活动事件
+                await _wait_for_child_success(service)
+                # 结算发生在根回合仍在飞时，这就是本次要钉住的行为。
+                assert not dispatcher.root_future.done(), '根回合必须仍在飞'
+            finally:
+                if not dispatcher.root_future.done():
+                    dispatcher.root_future.set_result(
+                        NodeFinalResult(
+                            status='success',
+                            delivery_status='partial',
+                            summary='root done',
+                            answer='',
+                            evidence=[],
+                            remaining_work=[],
+                            blocking_reason='',
+                        )
+                    )
+            returned = await asyncio.wait_for(beat_task, timeout=5)
+            await _settle(service)
+
+            assert returned.delivery_status == 'partial'
+            child = service.store.get_node(CHILD)
+            assert child.status == 'success'
+            handshake = dict((child.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY) or {})
+            assert handshake['state'] == ACCEPTANCE_STATE_ACCEPTED
+            finals = [item for item in deliveries if item.get('system_kind') == 'child_final']
+            assert finals, 'child_final 必须在根回合收口前投给父节点'
+            assert finals[0]['target_node_id'] == ROOT
+            assert finals[0]['source_node_id'] == CHILD
+            assert wakes == [ROOT]
+            assert dispatcher.scheduled == [], '结算拍不得越权派发'
+        finally:
+            service.task_actor_service._dispatchers.pop(TASK, None)
+            await service.close()
+
+    @pytest.mark.asyncio
+    async def test_beat_never_settles_a_live_acceptance_round(self, tmp_path, monkeypatch):
+        """验收 entry 还在飞时（payload 已落、终态未落的写缝隙），拍不得抢跑结算。"""
+        service = _service(tmp_path)
+        try:
+            _seed(service)
+            _capture_calls(service, monkeypatch)
+            service.store.update_node(
+                ACCEPTANCE,
+                lambda record: record.model_copy(
+                    update={
+                        'metadata': {**dict(record.metadata or {}), 'result_payload': _pass_payload()},
+                    }
+                ),
+            )
+            dispatcher = _RootRoundDispatcher({ACCEPTANCE: True})
+            service.task_actor_service._dispatchers[TASK] = dispatcher
+
+            await service.task_actor_service._run_root_round_settlement_beat(TASK)
+
+            child = service.store.get_node(CHILD)
+            assert child.status == 'in_progress'
+            handshake = dict((child.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY) or {})
+            assert handshake['state'] == ACCEPTANCE_STATE_WAITING_ACCEPTANCE
+
+            # entry 收口后不再被驱动：下一拍正常结算。
+            dispatcher.driven.pop(ACCEPTANCE)
+            await service.task_actor_service._run_root_round_settlement_beat(TASK)
+            await _settle(service)
+            assert service.store.get_node(CHILD).status == 'success'
+        finally:
+            service.task_actor_service._dispatchers.pop(TASK, None)
+            await service.close()
+
+    @pytest.mark.asyncio
+    async def test_wait_all_batch_releases_mid_root_round(self, tmp_path, monkeypatch):
+        """批次档：两个孩子都在根回合在飞时结算，整批放行并唤醒父节点。"""
+        service = _service(tmp_path)
+        try:
+            wakes, deliveries = _capture_calls(service, monkeypatch)
+            child1 = 'node:c1'
+            child2 = 'node:c2'
+            acc1 = 'node:a1'
+            acc2 = 'node:a2'
+            service.store.upsert_task(
+                TaskRecord(
+                    task_id=TASK,
+                    title='t',
+                    user_request='u',
+                    root_node_id=ROOT,
+                    created_at=STAMP,
+                    updated_at=STAMP,
+                )
+            )
+            service.store.upsert_node(_node(ROOT, parent=None))
+            service.store.upsert_node(
+                _node(
+                    'node:parent',
+                    parent=ROOT,
+                    depth=1,
+                )
+            )
+            service.store.update_node(
+                'node:parent',
+                lambda record: record.model_copy(
+                    update={
+                        'metadata': {
+                            'spawn_operations': {
+                                'call:batch': {
+                                    'entries': [
+                                        {'child_node_id': child1},
+                                        {'child_node_id': child2},
+                                    ],
+                                    'completed': False,
+                                    'wait_all_children': True,
+                                }
+                            }
+                        }
+                    }
+                ),
+            )
+            for child_id, acc_id in ((child1, acc1), (child2, acc2)):
+                service.store.upsert_node(
+                    _node(child_id, parent='node:parent', depth=2)
+                )
+                service.store.update_node(
+                    child_id,
+                    lambda record, acc=acc_id: record.model_copy(
+                        update={
+                            'metadata': {
+                                'spawn_owner_round_id': 'call:batch',
+                                'result_payload': NodeFinalResult(
+                                    status='success',
+                                    delivery_status='final',
+                                    summary='child done',
+                                    answer='a',
+                                    evidence=[],
+                                    remaining_work=[],
+                                    blocking_reason='',
+                                    submission_id='submission:pass',
+                                ).model_dump(mode='json'),
+                                ACCEPTANCE_HANDSHAKE_KEY: set_acceptance_handshake_state(
+                                    {},
+                                    state=ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
+                                    acceptance_node_id=acc,
+                                    rejection_count=0,
+                                    latest_execution_result_ref=RESULT_REF,
+                                    latest_execution_result_summary='child done',
+                                    latest_rejection_feedback_ref='',
+                                    latest_rejection_feedback_summary='',
+                                    updated_at=STAMP,
+                                ),
+                            }
+                        }
+                    ),
+                )
+                service.store.upsert_node(
+                    _node(acc_id, parent=child_id, kind='acceptance', depth=3)
+                )
+                service.store.update_node(
+                    acc_id,
+                    lambda record: record.model_copy(
+                        update={
+                            'status': 'success',
+                            'final_output': '验收通过',
+                            'metadata': {**dict(record.metadata or {}), 'result_payload': _pass_payload()},
+                        }
+                    ),
+                )
+            dispatcher = _RootRoundDispatcher()
+            service.task_actor_service._dispatchers[TASK] = dispatcher
+
+            # 两拍：第一拍结算两对裁决并调度终局消息，第二拍对齐 spawn 轮完成度。
+            await service.task_actor_service._run_root_round_settlement_beat(TASK)
+            await _settle(service)
+            await service.task_actor_service._run_root_round_settlement_beat(TASK)
+            await _settle(service)
+
+            assert service.store.get_node(child1).status == 'success'
+            assert service.store.get_node(child2).status == 'success'
+            rows = service.store.list_task_node_notifications(TASK, 'node:parent')
+            assert len(rows) == 2
+            assert all(item.released_at for item in rows), '整批必须在根回合收口前放行'
+            assert all(not notification_is_held(item) for item in rows)
+            # 两次投递各自带一次 release，先到的那次唤醒；重叠竞态下 1～2 次，
+            # 合同是"父节点被唤醒过"，不是精确次数。
+            assert 'node:parent' in wakes
+            assert dispatcher.scheduled == [], '结算拍不得越权派发'
+        finally:
+            service.task_actor_service._dispatchers.pop(TASK, None)
             await service.close()
 
 
