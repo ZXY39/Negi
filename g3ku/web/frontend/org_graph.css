@@ -14553,16 +14553,18 @@ textarea {
     color: var(--ui-danger);
 }
 
+/* 列本身不画框：扁平 surface 合同下重复内容（链 tile）才是唯一框层，
+   抽屉外壳之外不再套第二层边框/底色，避免三层嵌套线条。 */
 .tmc-lane {
     display: flex;
     flex-direction: column;
     gap: 10px;
     min-height: 0;
     overflow: hidden;
-    padding: 14px;
-    border: 1px solid var(--ui-border);
-    border-radius: var(--ui-radius-card);
-    background: var(--ui-bg-surface);
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
 }
 
 .tmc-lane-head {
@@ -14641,7 +14643,7 @@ textarea {
     padding: 10px 12px;
     border: 1px solid var(--ui-border);
     border-radius: var(--ui-radius-card);
-    background: var(--ui-bg-panel);
+    background: var(--ui-bg-surface);
 }
 
 .tmc-tile[draggable="true"] {
@@ -14707,8 +14709,7 @@ textarea {
     display: flex;
     flex-direction: column;
     gap: 8px;
-    border-top: 1px dashed var(--ui-border);
-    padding-top: 10px;
+    padding-top: 2px;
 }
 
 .tmc-picker-head {
@@ -14798,10 +14799,6 @@ textarea {
     .task-model-config-body {
         gap: 10px;
         padding: 0 12px 12px;
-    }
-
-    .tmc-lane {
-        padding: 10px;
     }
 }
 
