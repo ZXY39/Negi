@@ -12,6 +12,17 @@ class NodePausedError(Exception):
         super().__init__(self.task_id, self.node_id)
 
 
+class TaskModelConfigError(ValueError):
+    """任务模型链写入口校验失败：code 决定 HTTP 档位，key/message 原样回面板。"""
+
+    def __init__(self, code: str, message: str, *, model_key: str = '', group_key: str = ''):
+        self.code = str(code or '').strip()
+        self.message = str(message or '').strip()
+        self.model_key = str(model_key or '').strip()
+        self.group_key = str(group_key or '').strip()
+        super().__init__(self.code)
+
+
 def describe_exception(exc: BaseException | None) -> str:
     if exc is None:
         return 'UnknownError'
