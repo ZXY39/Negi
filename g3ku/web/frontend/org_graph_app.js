@@ -10385,6 +10385,14 @@ function updateCheckErrorText(item) {
     return UPDATE_CHECK_ERROR_TEXT[String(item?.error || "").trim()] || "读不到远端标签，稍后再试。";
 }
 
+function updateActionableHintText(item) {
+    // 升不动的原因按档说话：开发检出与缺 git 是两件事，处置也不同。
+    if (String(item?.actionable_lane || "").trim() === "dev_checkout") {
+        return "这是完整历史的开发检出，应用内更新会把工作区从分支上切走（未推送提交留在原分支）。请用 git 自己升级；应用内更新面向浅克隆的装机设备。";
+    }
+    return "这台设备找不着 git，更新跑不起来：把 git 放回 PATH 后重启服务，再点「更新并重启」。";
+}
+
 function updateApplyOutcomeText(item) {
     // apply 端点回的是"已踢起执行体"，不是"升级成功"。执行体把终态写进结果文件，
     // 这里照实说，否则失败时界面永远停在"正在重启"。ok 与没有记录都不占这一行。
@@ -10413,7 +10421,11 @@ function updateSettingsButtonTitle(item) {
     // 主车道失败、发布页读到了：版本号是对的，但这一行要留下"为什么换了车道"的证据，
     // 否则 git 装坏了这类故障在界面上和正常状态长得一模一样。
     if (item?.degraded && item?.detail) parts.push(`主车道没读通，这一版读自发布页：${item.detail}`);
-    if (item?.newer && item?.actionable === false) parts.push("本机更新车道跑不起来：git 不在 PATH 上");
+    if (item?.newer && item?.actionable === false) {
+        parts.push(String(item?.actionable_lane || "").trim() === "dev_checkout"
+            ? "开发检出请用 git 升级"
+            : "本机更新车道跑不起来：git 不在 PATH 上");
+    }
     if (item?.has_ledger) parts.push(`检查于 ${formatUpdateCheckedAt(item.checked_at)}`);
     const apply = item?.last_apply;
     const applyNote = apply && apply.outcome && apply.outcome !== "ok"
@@ -10641,7 +10653,7 @@ function openUpdateReleaseDialog() {
     if (U.updateReleaseHint) {
         U.updateReleaseHint.textContent = actionable
             ? UPDATE_RELEASE_HINT_DEFAULT_TEXT
-            : "这台设备找不着 git，更新跑不起来：把 git 放回 PATH 后重启服务，再点「更新并重启」。";
+            : updateActionableHintText(item);
     }
     if (U.updateReleaseCancel) U.updateReleaseCancel.disabled = false;
     U.updateReleaseBackdrop.hidden = false;

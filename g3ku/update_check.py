@@ -38,6 +38,7 @@ CODE_GIT_MISSING = 'git_missing'
 CODE_REMOTE_UNREACHABLE = 'remote_unreachable'
 CODE_TIMEOUT = 'timeout'
 CODE_NO_RELEASE_TAG = 'no_release_tag'
+CODE_DEV_CHECKOUT = 'dev_checkout'
 REMOTE_UNREACHABLE = CODE_REMOTE_UNREACHABLE
 DEFAULT_REPO_SLUG = 'ZXY39/Negi'
 GIT_TIMEOUT_SECONDS = 2.0
@@ -191,9 +192,24 @@ def upgrade_lane_available(project_root: Path | None = None) -> tuple[bool, str]
     """
     if not is_git_checkout(project_root):
         return True, ""
+    if is_dev_checkout(project_root):
+        return False, CODE_DEV_CHECKOUT
     if git_is_on_path():
         return True, ""
     return False, CODE_GIT_MISSING
+
+
+def is_dev_checkout(project_root: Path | None = None) -> bool:
+    """完整历史的 git 检出视为开发树，应用内更新不接手。
+
+    装机设备是浅克隆（`.git/shallow` 在）；开发树有完整历史，应用内更新的
+    `checkout --detach` 会把它从分支上切走、未推送提交留在原分支——那是真损失。
+    这类树用 git 自己升级。非 git 检出（归档/套件）恒 False。
+    """
+    git_dir = Path(project_root or PROJECT_ROOT) / ".git"
+    if not git_dir.exists():
+        return False
+    return not (git_dir / "shallow").exists()
 
 
 def is_git_checkout(project_root: Path | None = None) -> bool:

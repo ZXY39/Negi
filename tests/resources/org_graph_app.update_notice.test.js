@@ -99,6 +99,7 @@ function loadApp() {
             renderUpdateNavDot,
             updateSettingsButtonTitle,
             updateApplyOutcomeText,
+            updateActionableHintText,
             renderProjectSettingsUpdate,
         };`,
         context
@@ -430,6 +431,20 @@ test("升级终态不回落成\"正在重启\"：失败占行、成功让回版�
 
     // 未知终态兜底：宁可露出原码，也不要显示成"已是最新"
     assert.equal(api.updateApplyOutcomeText({ ...base, last_apply: { outcome: "weird_code" } }), "升级未完成：weird_code");
+});
+
+test("升不动的原因按档说话：开发检出与缺 git 是两件事", () => {
+    const api = loadApp();
+    const base = { has_ledger: true, newer: true, current_version: "1.0.11", latest_tag: "v1.0.12", actionable: false };
+
+    const dev = { ...base, actionable_lane: "dev_checkout" };
+    assert.match(api.updateActionableHintText(dev), /开发检出/);
+    assert.match(api.updateActionableHintText(dev), /git/);
+    assert.match(api.updateSettingsButtonTitle(dev), /开发检出请用 git 升级/);
+
+    const noGit = { ...base, actionable_lane: "git_missing" };
+    assert.match(api.updateActionableHintText(noGit), /找不着 git/);
+    assert.match(api.updateSettingsButtonTitle(noGit), /git 不在 PATH 上/);
 });
 
 function loadWatchContext() {

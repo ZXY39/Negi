@@ -330,7 +330,42 @@ def _preflight(ref: str) -> tuple[bool, str, list[str]]:
     return True, "", []
 
 
-def _upgrade_command(ref: str) -> list[str] | None:
+def _bootstrap_installer(ref: str) -> Path | None:
+    """自举：用目标 ref 的安装脚本，而不是树上这份旧的。
+
+    安装器逻辑随当次升级一起更新——未来的安装器修复不必等设备先升上来才生效，破了
+    "旧安装器坏了→升不上去→拿不到新安装器"的鸡生蛋。脚本不依赖 $PSScriptRoot（一切按
+    -Dir 参数定位），所以从 .g3ku 下的临时副本跑与从树根跑等价。取不到（非 git 检出、
+    没有 git、FETCH_HEAD 缺文件）就回退本地脚本，绝不因此拦下升级。
+    """
+    if not (PROJECT_ROOT / ".git").exists():
+        return None
+    git = shutil.which("git")
+    if not git:
+        return None
+    script_name = "install.ps1" if os.name == "nt" else "install.sh"
+    try:
+        show = subprocess.run(
+            [git, "-C", str(PROJECT_ROOT), "show", f"FETCH_HEAD:{script_name}"],
+            capture_output=True,
+            timeout=30.0,
+            **_no_window_flags(),
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if show.returncode != 0 or not show.stdout:
+        return None
+    target = PROJECT_ROOT / ".g3ku" / f"upgrade-installer-{ref}{Path(script_name).suffix}"
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(show.stdout)
+    except OSError:
+        return None
+    _log(f"bootstrapped installer from {ref}: {target}")
+    return target
+
+
+def _upgrade_command(ref: str, installer: Path | None = None) -> list[str] | None:
     """Upgrade *this* project root.
 
     `-Dir` must be passed explicitly: the installer's own default is
@@ -338,7 +373,7 @@ def _upgrade_command(ref: str) -> list[str] | None:
     different directory while this one restarts unchanged.
     """
     if os.name == "nt":
-        script = PROJECT_ROOT / "install.ps1"
+        script = installer or (PROJECT_ROOT / "install.ps1")
         if not script.exists():
             return None
         return [
@@ -355,7 +390,7 @@ def _upgrade_command(ref: str) -> list[str] | None:
             "-Ref",
             ref,
         ]
-    script = PROJECT_ROOT / "install.sh"
+    script = installer or (PROJECT_ROOT / "install.sh")
     if not script.exists():
         return None
     return ["bash", str(script), "--dir", str(PROJECT_ROOT), "--upgrade", "--no-start", "--ref", ref]
@@ -373,7 +408,7 @@ def _no_window_flags() -> dict[str, int]:
 
 
 def _run_upgrade(ref: str) -> bool:
-    command = _upgrade_command(ref)
+    command = _upgrade_command(ref, _bootstrap_installer(ref))
     if command is None:
         _log("upgrade skipped: no installer script in project root")
         return False

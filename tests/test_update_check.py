@@ -418,7 +418,8 @@ def test_upgrade_output_lands_in_the_log_not_in_a_window(monkeypatch, tmp_path: 
         ]
     )
     monkeypatch.setattr(apply_mod, "LOG_FILE", log_file)
-    monkeypatch.setattr(apply_mod, "_upgrade_command", lambda ref: [sys.executable, "-c", child])
+    monkeypatch.setattr(apply_mod, "_bootstrap_installer", lambda ref: None)
+    monkeypatch.setattr(apply_mod, "_upgrade_command", lambda ref, installer=None: [sys.executable, "-c", child])
 
     outcome: list[bool] = []
     runner = threading.Thread(target=lambda: outcome.append(apply_mod._run_upgrade("v9.9.9")))
@@ -449,10 +450,11 @@ def test_upgrade_reports_nonzero_instead_of_claiming_success(monkeypatch, tmp_pa
 
     log_file = tmp_path / "update-apply.log"
     monkeypatch.setattr(apply_mod, "LOG_FILE", log_file)
+    monkeypatch.setattr(apply_mod, "_bootstrap_installer", lambda ref: None)
     monkeypatch.setattr(
         apply_mod,
         "_upgrade_command",
-        lambda ref: [sys.executable, "-c", "import sys; sys.exit(3)"],
+        lambda ref, installer=None: [sys.executable, "-c", "import sys; sys.exit(3)"],
     )
 
     assert apply_mod._run_upgrade("v9.9.9") is False
@@ -715,6 +717,68 @@ def test_preflight_uv_offline_without_local_uv_is_blocked(monkeypatch):
 
     monkeypatch.setattr(apply_mod, "_local_uv_present", lambda: True)
     assert apply_mod._preflight_uv() == (True, "")
+
+
+def test_bootstrap_installer_uses_the_target_ref_script(tmp_path: Path, monkeypatch):
+    """自举取目标 ref 的安装脚本，而不是树上这份旧的。"""
+    import shutil as _shutil
+
+    import g3ku.update_apply as apply_mod
+
+    git = _shutil.which("git")
+    if not git:
+        pytest.skip("git not available")
+
+    def _git(*args: str) -> None:
+        subprocess.run([git, "-C", str(tmp_path), *args], check=True, capture_output=True, text=True)
+
+    _git("init", "-q")
+    _git("config", "core.hooksPath", "/dev/null")
+    _git("config", "user.name", "t")
+    _git("config", "user.email", "t@t")
+    (tmp_path / "install.ps1").write_text("LOCAL-OLD\n", encoding="utf-8")
+    _git("add", "install.ps1")
+    _git("commit", "-q", "-m", "base")
+    _git("checkout", "-q", "-b", "vtest")
+    (tmp_path / "install.ps1").write_text("REMOTE-NEW\n", encoding="utf-8")
+    _git("commit", "-q", "-am", "new installer")
+    _git("checkout", "-q", "-")
+    _git("remote", "add", "origin", str(tmp_path))
+    _git("fetch", "origin", "vtest")
+    monkeypatch.setattr(apply_mod, "PROJECT_ROOT", tmp_path)
+
+    installer = apply_mod._bootstrap_installer("vtest")
+    assert installer is not None
+    assert installer.read_text(encoding="utf-8") == "REMOTE-NEW\n"
+    # 树上的旧脚本没被动。
+    assert (tmp_path / "install.ps1").read_text(encoding="utf-8") == "LOCAL-OLD\n"
+
+
+def test_bootstrap_installer_falls_back_without_git(tmp_path: Path, monkeypatch):
+    import g3ku.update_apply as apply_mod
+
+    monkeypatch.setattr(apply_mod, "PROJECT_ROOT", tmp_path)  # 没有 .git
+    assert apply_mod._bootstrap_installer("vtest") is None
+
+
+def test_is_dev_checkout_distinguishes_full_history_from_shallow(tmp_path: Path):
+    from g3ku.update_check import is_dev_checkout
+
+    assert is_dev_checkout(tmp_path) is False  # 非 git
+    (tmp_path / ".git").mkdir()
+    assert is_dev_checkout(tmp_path) is True  # 完整历史
+    (tmp_path / ".git" / "shallow").write_text("deadbeef\n", encoding="utf-8")
+    assert is_dev_checkout(tmp_path) is False  # 浅克隆＝装机设备
+
+
+def test_upgrade_lane_refuses_a_dev_checkout(monkeypatch):
+    import g3ku.update_check as check_mod
+
+    monkeypatch.setattr(check_mod, "is_git_checkout", lambda *a, **k: True)
+    monkeypatch.setattr(check_mod, "is_dev_checkout", lambda *a, **k: True)
+    ok, code = check_mod.upgrade_lane_available()
+    assert ok is False
+    assert code == check_mod.CODE_DEV_CHECKOUT
 
 
 def test_spawn_runner_marks_the_attempt_as_started(tmp_path: Path, monkeypatch):

@@ -54,6 +54,7 @@ def _settings() -> tuple[bool, float, str]:
 def _status_payload() -> dict[str, Any]:
     ledger = read_update_ledger()
     enabled, interval_hours, _git_path = _settings()
+    lane_ok, lane_code = upgrade_lane_available()
     return {
         "has_ledger": ledger is not None,
         "newer": ledger_newer_now(ledger),
@@ -70,8 +71,10 @@ def _status_payload() -> dict[str, Any]:
         "detail": str((ledger or {}).get("detail") or ""),
         "degraded": bool((ledger or {}).get("degraded")),
         # actionable 答的是"报出去的这一版这台设备升不升得动"，前端据此决定给不给
-        # 升级入口；每次读都现场判，台账里那次检查的环境可能已经变了。
-        "actionable": upgrade_lane_available()[0],
+        # 升级入口；每次读都现场判，台账里那次检查的环境可能已经变了。actionable_lane
+        # 带上为什么升不动（git_missing / dev_checkout），前端按档说话。
+        "actionable": lane_ok,
+        "actionable_lane": lane_code,
         "enabled": enabled,
         "interval_hours": interval_hours,
         # 执行体自己写的终态：apply 端点回 restarting 时不代表升级成功过。
@@ -146,6 +149,19 @@ async def update_apply(request: Request, payload: dict | None = Body(default=Non
     # 拉回来 —— 用户白等一次停机，终态只剩一句 upgrade_failed。
     lane_ok, lane_code = upgrade_lane_available()
     if not lane_ok:
+        if lane_code == "dev_checkout":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "dev_checkout",
+                    "message": (
+                        "这是完整历史的开发检出，应用内更新会把工作区从分支上切走"
+                        "（未推送的提交留在原分支，是真损失）。开发树请用 git 自己升级；"
+                        "应用内更新面向浅克隆的装机设备。"
+                    ),
+                    "lane": lane_code,
+                },
+            )
         raise HTTPException(
             status_code=409,
             detail={
