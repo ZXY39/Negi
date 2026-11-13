@@ -24,6 +24,7 @@ NO_START=0
 UPGRADE=0
 NO_PATH=0
 NO_SHORTCUT=0
+REFRESH_ENTRY_SURFACE=0
 REPO_GIT="https://github.com/${REPO_OWNER}/${REPO_NAME}.git"
 REPO_ZIP="https://github.com/${REPO_OWNER}/${REPO_NAME}/archive/${REF}.zip"
 UV_INSTALLER='https://astral.sh/uv/install.sh'
@@ -68,6 +69,7 @@ Usage: install.sh [--dir PATH] [--ref TAG] [--no-start] [--upgrade] [--no-path] 
   --upgrade        update the code in an existing install, keep .venv and .g3ku
   --no-path        write the command stub but leave PATH alone
   --no-shortcut    skip the desktop entry
+  --refresh-entry-surface  on --upgrade, also refresh the stub/PATH/desktop entry (install-only by default)
   --mirror         start Python and package downloads on the built-in mirrors
   --no-mirror      only use the direct sources; no automatic mirror retry
   --kit PATH       install fully offline from a release kit (zip or unpacked directory)
@@ -107,6 +109,10 @@ while [ $# -gt 0 ]; do
       ;;
     --no-shortcut)
       NO_SHORTCUT=1
+      shift
+      ;;
+    --refresh-entry-surface)
+      REFRESH_ENTRY_SURFACE=1
       shift
       ;;
     --mirror)
@@ -826,22 +832,30 @@ install_environment
 record_installed_tree
 clear_kit_stage
 
-PATH_ENTRY_ADDED=false
-if path_has_bin_dir; then
-  log "$BIN_DIR is already on PATH"
-elif [ "$NO_PATH" -eq 0 ]; then
-  add_path_entry
+# The entry surface (command stub, PATH, desktop entry) is install-time work. An upgrade
+# only swaps code and syncs the environment; refreshing the entry surface on every upgrade
+# rewrote operator-owned registrations behind their back. First install always runs it;
+# --refresh-entry-surface opts an upgrade back in. register_autostart stays install-only.
+if [ "$UPGRADE" -eq 0 ] || [ "$REFRESH_ENTRY_SURFACE" -eq 1 ]; then
+  PATH_ENTRY_ADDED=false
+  if path_has_bin_dir; then
+    log "$BIN_DIR is already on PATH"
+  elif [ "$NO_PATH" -eq 0 ]; then
+    add_path_entry
+  else
+    log 'leaving PATH alone (--no-path)'
+  fi
+  install_entry_point
+  if [ "$NO_SHORTCUT" -eq 0 ]; then
+    install_desktop_entry
+  else
+    log "skipping the desktop entry (--no-shortcut)"
+  fi
+  register_autostart
+  log 'from any terminal now on: negi'
 else
-  log 'leaving PATH alone (--no-path)'
+  log 'upgrade: entry surface left as installed (--refresh-entry-surface refreshes stub/PATH/desktop entry)'
 fi
-install_entry_point
-if [ "$NO_SHORTCUT" -eq 0 ]; then
-  install_desktop_entry
-else
-  log "skipping the desktop entry (--no-shortcut)"
-fi
-register_autostart
-log 'from any terminal now on: negi'
 
 if [ "$NO_START" -eq 1 ]; then
   log "environment ready at $DIR (--no-start: web not launched)"

@@ -166,6 +166,28 @@ def test_fresh_install_registers_logon_autostart_and_upgrade_does_not() -> None:
     assert "com.negi.web.plist" in uninstall_sh
 
 
+def test_upgrade_leaves_the_entry_surface_alone_unless_asked() -> None:
+    """升级只换代码 + 同步环境；入口面（stub/PATH/快捷方式/卸载项）是安装期工作。
+
+    每次升级都刷新入口面，会把 .NET/COM 调用拖进更新路径（ConstrainedLanguage 下致命），
+    还在操作员背后重写他拥有的登记。两个安装器都把入口面包进"首装或显式刷新"的条件，
+    升级默认跳过；显式开关留给手动全量刷新。
+    """
+    install = INSTALL_PS1.read_text(encoding="utf-8")
+    assert "[switch]$RefreshEntrySurface" in install
+    assert "if ((-not $Upgrade) -or $RefreshEntrySurface) {" in install
+    # 入口面四件事都落在条件块内（块内缩进四格）。
+    assert "    Install-EntryPoint -Root $Dir" in install
+    assert "    if (-not $NoShortcut) { Install-DesktopIcons -Root $Dir -IconPath $icon }" in install
+    assert "    Write-UninstallRegistryEntry -Root $Dir -IconPath $icon" in install
+
+    install_sh = INSTALL_SH.read_text(encoding="utf-8")
+    assert "REFRESH_ENTRY_SURFACE=0" in install_sh
+    assert "--refresh-entry-surface)" in install_sh
+    assert 'if [ "$UPGRADE" -eq 0 ] || [ "$REFRESH_ENTRY_SURFACE" -eq 1 ]; then' in install_sh
+    assert "  install_entry_point" in install_sh
+
+
 def test_version_pins_are_still_compared_before_building() -> None:
     build = BUILD.read_text(encoding="utf-8")
     assert re.search(r"cannot read the \$Ref pin", build)

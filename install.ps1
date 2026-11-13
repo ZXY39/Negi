@@ -21,6 +21,7 @@ param(
     [switch]$NoPath,
     [switch]$NoShortcut,
     [switch]$NoUninstallEntry,
+    [switch]$RefreshEntrySurface,
     [string]$Kit = '',
     [switch]$Mirror,
     [switch]$NoMirror
@@ -913,36 +914,47 @@ Install-Environment -uv $uv -Root $Dir -Kit $resolvedKit
 Invoke-LocalEdits -From $Dir -Root $Dir -Arguments @('record', '--root', $Dir, '--ref', $Ref, '--data-root', (Join-Path $Dir '.g3ku'))
 Clear-LongPathTree -Path $kitStage
 
-$icon = Copy-NegiIcon -Root $Dir
-Install-EntryPoint -Root $Dir
-if (-not $NoShortcut) { Install-DesktopIcons -Root $Dir -IconPath $icon }
-if (-not $Upgrade) { Register-NegiAutostart -Root $Dir }
-$setupExeOwner = Get-SetupExeOwner -Root $Dir
-if ($setupExeOwner) {
-    # The setup program's row already describes this folder. Retire the row an older
-    # install.ps1 wrote for it, but only when that row really points here - a device
-    # that also keeps a script-installed copy elsewhere must not lose its entry.
-    $legacyLocation = ''
-    if (Test-Path -LiteralPath $UninstallKey) {
-        $legacyLocation = Get-RegistryLocation -Path $UninstallKey
+# The entry surface (command stub, user PATH, shortcuts, uninstall registry entry) is
+# install-time work. An upgrade only swaps code and syncs the environment; refreshing the
+# entry surface on every upgrade is what dragged .NET/COM calls into the update path (fatal
+# under ConstrainedLanguage) and rewrote operator-owned registrations behind their back.
+# First install always runs it; -RefreshEntrySurface opts an upgrade back in for a manual
+# full refresh. Register-NegiAutostart stays install-only even on a refresh.
+if ((-not $Upgrade) -or $RefreshEntrySurface) {
+    $icon = Copy-NegiIcon -Root $Dir
+    Install-EntryPoint -Root $Dir
+    if (-not $NoShortcut) { Install-DesktopIcons -Root $Dir -IconPath $icon }
+    if (-not $Upgrade) { Register-NegiAutostart -Root $Dir }
+    $setupExeOwner = Get-SetupExeOwner -Root $Dir
+    if ($setupExeOwner) {
+        # The setup program's row already describes this folder. Retire the row an older
+        # install.ps1 wrote for it, but only when that row really points here - a device
+        # that also keeps a script-installed copy elsewhere must not lose its entry.
+        $legacyLocation = ''
+        if (Test-Path -LiteralPath $UninstallKey) {
+            $legacyLocation = Get-RegistryLocation -Path $UninstallKey
+        }
+        if ($legacyLocation -and ($legacyLocation.TrimEnd('\') -ieq $Dir.TrimEnd('\'))) {
+            Remove-Item -LiteralPath $UninstallKey -Recurse -Force
+            Write-Step "installed-apps row for this folder retired; $setupExeOwner owns uninstalling now"
+        }
+        else {
+            Write-Step "installed apps entry: left to $setupExeOwner"
+        }
     }
-    if ($legacyLocation -and ($legacyLocation.TrimEnd('\') -ieq $Dir.TrimEnd('\'))) {
-        Remove-Item -LiteralPath $UninstallKey -Recurse -Force
-        Write-Step "installed-apps row for this folder retired; $setupExeOwner owns uninstalling now"
+    elseif ($NoUninstallEntry) {
+        # The setup program owns the Add/Remove Programs entry when it drives this
+        # script; writing both would show two "Negi" rows that uninstall differently.
+        Write-Step 'installed-apps entry skipped (-NoUninstallEntry; the setup program owns it)'
     }
     else {
-        Write-Step "installed apps entry: left to $setupExeOwner"
+        Write-UninstallRegistryEntry -Root $Dir -IconPath $icon
     }
-}
-elseif ($NoUninstallEntry) {
-    # The setup program owns the Add/Remove Programs entry when it drives this
-    # script; writing both would show two "Negi" rows that uninstall differently.
-    Write-Step 'installed-apps entry skipped (-NoUninstallEntry; the setup program owns it)'
+    Write-Step 'from any terminal now on: negi'
 }
 else {
-    Write-UninstallRegistryEntry -Root $Dir -IconPath $icon
+    Write-Step 'upgrade: entry surface left as installed (-RefreshEntrySurface refreshes stub/PATH/shortcuts/uninstall entry)'
 }
-Write-Step 'from any terminal now on: negi'
 
 if ($NoStart) {
     Write-Step "environment ready at $Dir (-NoStart: web not launched)"
