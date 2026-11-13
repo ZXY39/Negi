@@ -245,16 +245,12 @@ async def test_root_error_pause_keeps_actor_alive_until_children_settle(
         child_a = _execution_child(service, task=task, parent=root, name="a")
         child_b = _execution_child(service, task=task, parent=root, name="b")
 
-        original_execute = TaskNodeDispatcher.execute_node
-
-        async def execute_node(self, task_id: str, node_id: str):
+        # 根暂停的注入缝是 run_node：run_task 走结算拍包装后不再直接 await
+        # execute_node，而 NodePausedError 在生产里本来就是 `_run_entry` 从
+        # run_node 捕获后落到根 entry future 上的（对根不吞）。
+        async def fake_run_node(task_id: str, node_id: str):
             if node_id == root.node_id:
                 raise NodePausedError(task_id, node_id)
-            return await original_execute(self, task_id, node_id)
-
-        monkeypatch.setattr(TaskNodeDispatcher, "execute_node", execute_node)
-
-        async def fake_run_node(task_id: str, node_id: str):
             await asyncio.sleep(0.02)
             service.log_service.update_node_status(
                 task_id, node_id, status="success", final_output="done"

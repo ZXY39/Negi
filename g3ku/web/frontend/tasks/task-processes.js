@@ -68,11 +68,17 @@ function taskProcessesNormalizeProcess(item) {
 
 function taskProcessesNormalizeToolJob(item) {
     const jobId = String(item?.job_id || "").trim();
+    // purpose 是交棒时从 exec 入参提取的一等字段；没有就用调用摘要 hint 兜底，
+    // 都空才退回工具名。完整摘要保留在 hint 里进 title。
+    const purpose = String(item?.purpose || "").trim();
+    const hint = String(item?.hint || "").trim();
     return {
         kind: "tool_job",
         key: `tool_job:${jobId}`,
         jobId,
-        label: String(item?.hint || "").trim() || String(item?.tool_name || "tool"),
+        purpose,
+        hint,
+        label: purpose || hint || String(item?.tool_name || "tool"),
         detail: String(item?.tool_name || "tool").trim(),
         nodeId: String(item?.node_id || "").trim(),
         nodeGoal: "",
@@ -90,14 +96,11 @@ function taskProcessesRow(item) {
         row.dataset.taskProcessPid = String(item?.pid || 0);
     }
 
-    const kind = document.createElement("span");
-    kind.className = "task-processes-kind";
-    kind.textContent = item?.kind === "tool_job" ? "工具" : "进程";
-
     const main = document.createElement("span");
     main.className = "task-processes-main";
     const label = String(item?.label || "").trim();
     const detail = String(item?.detail || "").trim();
+    const hint = String(item?.hint || "").trim();
     // 进程没有 purpose 时命令行就是它的来源：只露前两行，完整命令留在 title。
     const commandFallback = item?.kind === "process" && !label && !!detail;
     if (commandFallback) main.className = "task-processes-main task-processes-main--command";
@@ -105,7 +108,13 @@ function taskProcessesRow(item) {
         label
         || detail
         || (item?.kind === "process" ? `pid ${Number(item?.pid) || 0}` : detail || "tool");
-    main.title = [item?.kind === "tool_job" ? `tool: ${detail}` : "", label, detail]
+    main.title = [
+        item?.kind === "tool_job" ? `tool: ${detail}` : "",
+        label,
+        // 工具作业行 label 是 purpose 时，完整调用摘要降级进 title；进程行照旧带 cmd。
+        item?.kind === "tool_job" && hint && hint !== label ? hint : "",
+        item?.kind === "tool_job" ? "" : detail,
+    ]
         .filter(Boolean)
         .join("\n");
 
@@ -133,12 +142,12 @@ function taskProcessesRow(item) {
     action.disabled = stopping;
     if (stopping) action.setAttribute("aria-busy", "true");
 
-    // 与会话气泡同一版式：来源、时长、停止留在第一行，定位节点按钮排在停止右侧。
-    row.appendChild(kind);
+    // 与会话气泡同一版式：来源、时长、定位节点按钮、停止从左到右单行排布，
+    // 停止排在节点按钮右侧并与它同高（样式同 padding/字号），行内垂直居中。
     row.appendChild(main);
     row.appendChild(elapsed);
-    row.appendChild(action);
     row.appendChild(node);
+    row.appendChild(action);
     return row;
 }
 

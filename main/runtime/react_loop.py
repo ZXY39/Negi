@@ -132,6 +132,7 @@ from g3ku.runtime.tool_jobs import (
     TOOL_JOB_STATUS_TIMEOUT,
     ToolJobOutcome,
     stable_tool_args_hash,
+    tool_job_purpose_from_arguments,
 )
 from g3ku.runtime.tool_result_status import is_error_like_tool_result
 from g3ku.runtime.tool_visibility import NODE_NEVER_CONTRACT_TOOL_NAMES
@@ -5809,6 +5810,7 @@ class ReActToolLoop:
                 tool_name=tool_name,
                 args_hash=stable_tool_args_hash(arguments),
                 hint=self._tool_invocation_hint(tool_name=tool_name, arguments=arguments),
+                purpose=tool_job_purpose_from_arguments(arguments),
                 run=_job_run,
                 timeout_seconds=job_timeout_seconds,
                 recovery_policy='rerun_safe' if getattr(tool, 'rerun_safe', False) else 'model_decide',

@@ -143,11 +143,11 @@ def _context(session, *, auto_background_seconds: float, cancel_token=None) -> d
     }
 
 
-async def _run_tool(harness: _Harness, tool: Tool, context: dict):
+async def _run_tool(harness: _Harness, tool: Tool, context: dict, arguments: dict | None = None):
     return await harness._execute_tool_call_with_raw_result(
         tool=tool,
         tool_name=tool.name,
-        arguments={},
+        arguments=arguments if arguments is not None else {},
         runtime_context=context,
         on_progress=None,
         tool_call_id="call-1",
@@ -227,6 +227,32 @@ async def test_slow_tool_returns_synthetic_result_and_finishes_in_background(sto
     assert len(heartbeat.events) == 1
     assert heartbeat.events[0]["status"] == "success"
     assert heartbeat.events[0]["result_preview"] == "slow-result"
+
+
+@pytest.mark.asyncio
+async def test_slow_tool_hands_off_with_purpose_extracted_from_arguments(store):
+    heartbeat = _FakeHeartbeat()
+    session = _FakeRuntimeSession(store, heartbeat)
+    harness = _Harness(_FakeLoop())
+
+    _raw, _rendered, status, _started_at, _finished_at, _elapsed = await _run_tool(
+        harness,
+        _SlowTool(0.2),
+        _context(session, auto_background_seconds=0.02),
+        arguments={
+            "command": "$ErrorActionPreference='Continue'\n& 'C:\\\\tools\\\\check.ps1'",
+            "purpose": "rebuild and re-run check gate",
+            "timeout_seconds": 900,
+        },
+    )
+
+    assert status == "background"
+    rows = store.list_tool_jobs(limit=10)
+    assert len(rows) == 1
+    assert rows[0]["purpose"] == "rebuild and re-run check gate"
+    listed = session.list_tool_jobs()
+    assert listed and listed[0]["purpose"] == "rebuild and re-run check gate"
+    await asyncio.sleep(0.3)
 
 
 @pytest.mark.asyncio

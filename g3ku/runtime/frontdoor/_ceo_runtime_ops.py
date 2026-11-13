@@ -10692,6 +10692,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         event_kind="tool_result",
                         event_data=impulse_event_data,
                     )
+                    delivery_at = now_iso()
                     return {
                         "tool_call_id": str(payload.get("id") or "").strip(),
                         "tool_name": tool_name,
@@ -10700,12 +10701,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         "result_text": impulse_content,
                         CONTRACT_DELIVERY_FIELD: kind,
                         **_impulse_ledger_fields(),
+                        # 这一跳没有执行可计时，但账本行仍要可解析的锚点（下发时刻零宽）：
+                        # 前端头部秒数会回退到"本轮最早工具开始时间"，空串会让整轮退到 `--`。
                         "tool_message": self._tool_result_message(
                             tool_call_id=str(payload.get("id") or ""),
                             tool_name=tool_name or "tool",
                             content=impulse_content,
-                            started_at="",
-                            finished_at="",
+                            started_at=delivery_at,
+                            finished_at=delivery_at,
                             elapsed_seconds=None,
                         ),
                     }
@@ -10743,14 +10746,30 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     tool_name in refused_repair_reasons,
                 )
                 return await _error_result(payload, f"tool not available: {tool_name}" + (f"\n{hint}" if hint else ""))
+            # 复用车道真实执行了工具，执行侧的计时不能在这里丢——账本行要有起止，
+            # 前端的"最早工具开始时间"兜底也靠它。多份暂存回放聚合：最早 start / 最晚 finish。
+            reuse_timing: dict[str, str] = {}
+
+            def _record_reuse_timing(started_at: Any, finished_at: Any) -> None:
+                started_text = str(started_at or "").strip()
+                finished_text = str(finished_at or "").strip()
+                if started_text:
+                    current = str(reuse_timing.get("started_at") or "").strip()
+                    if not current or started_text < current:
+                        reuse_timing["started_at"] = started_text
+                if finished_text:
+                    current = str(reuse_timing.get("finished_at") or "").strip()
+                    if not current or finished_text > current:
+                        reuse_timing["finished_at"] = finished_text
+
             async def _reuse_execute_one(call_arguments: dict[str, Any]) -> tuple[str, str]:
                 async with semaphore:
                     (
                         _raw_result,
                         reuse_text,
                         status,
-                        _started_at,
-                        _finished_at,
+                        started_at,
+                        finished_at,
                         _elapsed,
                     ) = await self._execute_tool_call_with_raw_result(
                         tool=tool,
@@ -10760,6 +10779,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         on_progress=on_progress,
                         tool_call_id=str(payload.get("id") or "").strip() or None,
                     )
+                _record_reuse_timing(started_at, finished_at)
                 return str(reuse_text or ""), str(status or "success")
 
             reuse_content = await self._frontdoor_reuse_args_execution(
@@ -10784,8 +10804,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         tool_call_id=str(payload.get("id") or ""),
                         tool_name=tool_name or "tool",
                         content=reuse_content,
-                        started_at="",
-                        finished_at="",
+                        started_at=str(reuse_timing.get("started_at") or ""),
+                        finished_at=str(reuse_timing.get("finished_at") or ""),
                         elapsed_seconds=None,
                     ),
                 }

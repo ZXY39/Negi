@@ -5418,6 +5418,20 @@ function buildCeoRequestedAtByTurn(messages = []) {
     return map;
 }
 
+// 在飞快照的提问行时间戳：优先快照 user_messages 自带的 timestamp；行里没带时
+// （旧版后端还在飞、或行还没落转录），按 turn_id 从本会话已提交的快照缓存里兜底
+// 回填——起点缺失时头部秒数才会落成 `--`。快照自带的时间戳始终优先。
+function resolveCeoInflightRequestedAt({ snapshot = null, turnId = "", sessionId = "" } = {}) {
+    const requestedAt = ceoSnapshotRequestedAt(snapshot);
+    if (requestedAt) return requestedAt;
+    const normalizedTurnId = normalizeCeoTurnId(turnId);
+    if (!normalizedTurnId) return "";
+    const cachedRequestedMs = buildCeoRequestedAtByTurn(
+        getCeoSessionSnapshotCache(String(sessionId || "").trim())?.messages || [],
+    ).get(normalizedTurnId);
+    return Number.isFinite(cachedRequestedMs) ? new Date(cachedRequestedMs).toISOString() : "";
+}
+
 const CEO_FLOW_DOT_LIFT_CACHE = { key: "", lift: null };
 const CEO_FLOW_INK_CACHE = { key: "", half: null };
 const CEO_FLOW_DOT_GEOMETRY_LAST = { y: "" };
@@ -5659,7 +5673,8 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "i
     }
     // 本轮第一条请求的时刻优先取服务端快照里的提问行时间戳：刷新重连后头部秒数
     // 才能从真正的请求时刻起算，而不是从第一个工具开始的时间起算。
-    const requestedAt = ceoSnapshotRequestedAt(snapshot);
+    // 快照行没带 timestamp 时再按 turn_id 从会话快照缓存兜底（见 resolveCeoInflightRequestedAt）。
+    const requestedAt = resolveCeoInflightRequestedAt({ snapshot, turnId, sessionId: targetSessionId });
     if (requestedAt && !turn.requestedAt) turn.requestedAt = requestedAt;
     if (turnId) {
         turn.turnId = turnId;

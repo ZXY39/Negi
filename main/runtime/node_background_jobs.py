@@ -139,6 +139,7 @@ class NodeToolJobHandle:
         tool_name: str,
         args_hash: str,
         hint: str,
+        purpose: str = "",
         run: Callable[[], Awaitable[Any]],
         timeout_seconds: float,
         recovery_policy: str = "model_decide",
@@ -151,6 +152,7 @@ class NodeToolJobHandle:
             tool_name=tool_name,
             args_hash=args_hash,
             hint=hint,
+            purpose=purpose,
             run=run,
             timeout_seconds=timeout_seconds,
             recovery_policy=recovery_policy,
@@ -276,6 +278,7 @@ class NodeBackgroundJobManager:
         tool_name: str,
         args_hash: str,
         hint: str,
+        purpose: str = "",
         run: Callable[[], Awaitable[Any]],
         timeout_seconds: float,
         recovery_policy: str = "model_decide",
@@ -284,6 +287,7 @@ class NodeBackgroundJobManager:
 
         返回 ``(job, reused)``。``run`` 在当前 asyncio context 里被包成 task，
         ContextVar（runtime context / read roots / timeout clamp）随之继承。
+        ``purpose`` 是交棒时从工具入参提取的 purpose 原文，落库后台面板行优先显示。
         """
         reason = self.admission_reason(task_id, node_id)
         if reason:
@@ -309,6 +313,7 @@ class NodeBackgroundJobManager:
             tool_name=tool_name,
             args_hash=args_hash,
             hint=hint,
+            purpose=purpose,
             run=run,
             timeout_seconds=timeout_seconds,
             recovery_policy=recovery_policy,
@@ -698,6 +703,7 @@ class NodeBackgroundJobManager:
                         "turn_id": str(row.get("turn_id") or ""),
                         "tool_call_id": str(row.get("tool_call_id") or ""),
                         "hint": str(row.get("hint") or ""),
+                        "purpose": str(row.get("purpose") or ""),
                         "node_id": str(row.get("node_id") or ""),
                         "orphaned": True,
                     }

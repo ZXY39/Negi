@@ -561,6 +561,11 @@ async def test_graph_execute_tools_marks_direct_contract_delivery(
     ledger_tool = result["frontdoor_turns"][-1]["tools"][0]
     assert ledger_tool["tool_name"] == "filesystem_edit"
     assert ledger_tool["contract_delivery"] == "staged"
+    # 这一跳没有执行可计时，但账本行必须带可解析锚点（下发时刻零宽）：前端头部
+    # 秒数会回退到"本轮最早工具开始时间"，空串会让整轮退成 `--`。
+    assert ledger_tool["started_at"]
+    assert ledger_tool["finished_at"] == ledger_tool["started_at"]
+    assert ledger_tool["elapsed_seconds"] == 0.0
 
 
     delivery_events = [
@@ -570,6 +575,91 @@ async def test_graph_execute_tools_marks_direct_contract_delivery(
     assert len(delivery_events) == 1
     assert delivery_events[0]["kind"] == "tool_result"
     assert delivery_events[0]["data"]["contract_delivery"] == "staged"
+
+
+@pytest.mark.asyncio
+async def test_graph_execute_tools_keeps_reuse_lane_timing(monkeypatch) -> None:
+    """复用车道真实执行了工具：执行侧计时必须落进 tool_message 与账本行。
+
+    2026-11-13 实盘（web:ceo-4a6a04a00fad）reuse 行 started_at 全空——执行元组被
+    `_reuse_execute_one` 丢弃、tool_message 硬编码空串，前端"最早工具开始时间"
+    兜底失效，头部秒数整轮退成 `--`。这里只钉计时接线；复用判定本身由
+    test_reuse_args_execution 覆盖，所以 planner 直接打桩。"""
+    session = SimpleNamespace(session_key="web:shared", _frontdoor_tool_arg_stash={})
+    started = "2026-11-13T00:16:00+08:00"
+    finished = "2026-11-13T00:16:02+08:00"
+
+    async def _fake_execute(**kwargs):
+        _ = kwargs
+        return "raw", "reuse result", "success", started, finished, 2.0
+
+    async def _fake_reuse_execution(self, *, execute_one, **kwargs):
+        _ = self, kwargs
+        text, _status = await execute_one({"path": "/a"})
+        return text
+
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+    monkeypatch.setattr(runner, "_execute_tool_call_with_raw_result", _fake_execute)
+    monkeypatch.setattr(
+        create_agent_impl.CreateAgentCeoFrontDoorRunner,
+        "_frontdoor_reuse_args_execution",
+        _fake_reuse_execution,
+    )
+
+    def _registered_tools_for_state(state):
+        _ = state
+        return {"filesystem_stat": SimpleNamespace()}
+
+    async def _on_progress(content, *, tool_hint=False, event_kind=None, event_data=None):
+        _ = content, tool_hint
+
+    monkeypatch.setattr(runner, "_registered_tools_for_state", _registered_tools_for_state)
+    monkeypatch.setattr(
+        runner,
+        "_build_tool_runtime_context",
+        lambda **kwargs: {
+            "on_progress": _on_progress,
+            "runtime_session": session,
+            "session_key": "web:shared",
+            "actor_role": "ceo",
+        },
+    )
+
+    result = await runner._graph_execute_tools(
+        {
+            "messages": [],
+            "tool_names": ["filesystem_stat"],
+            "candidate_tool_names": ["filesystem_stat"],
+            "visible_skill_ids": [],
+            "candidate_skill_ids": [],
+            "rbac_visible_tool_names": ["filesystem_stat"],
+            "rbac_visible_skill_ids": [],
+            "tool_call_payloads": [
+                {"id": "call-reuse-1", "name": "filesystem_stat", "arguments": {"reuse_args": True}}
+            ],
+            "used_tools": [],
+            "route_kind": "direct_reply",
+            "parallel_enabled": False,
+            "max_parallel_tool_calls": 1,
+            "synthetic_tool_calls_used": False,
+            "response_payload": {"content": "", "tool_calls": []},
+            "session_key": "web:shared",
+        },
+        runtime=SimpleNamespace(context=SimpleNamespace(session=session)),
+    )
+
+    tool_message = next(
+        dict(message)
+        for message in list(result["messages"])
+        if str(message.get("role") or "").strip().lower() == "tool"
+    )
+    assert tool_message.get("started_at") == started
+    assert tool_message.get("finished_at") == finished
+
+    ledger_tool = result["frontdoor_turns"][-1]["tools"][0]
+    assert ledger_tool["started_at"] == started
+    assert ledger_tool["finished_at"] == finished
+    assert ledger_tool["elapsed_seconds"] == 2.0
 
 
 

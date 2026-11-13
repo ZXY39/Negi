@@ -113,6 +113,9 @@ class ToolJob:
     owner_kind: str = TOOL_JOB_OWNER_KIND_SESSION
     owner_task_id: str = ""
     owner_node_id: str = ""
+    # exec 交棒时从 arguments 原样提取的 purpose：后台面板行优先显示它，
+    # hint 只是调用摘要兜底。空串表示调用没带 purpose（非 exec 或未传）。
+    purpose: str = ""
     # 范围停止（cancel_all）在取消前标记：终态事件经正常 _finalize 路径发出时
     # 也带上生命周期来源（node_paused/task_paused/…），不冒充用户手动停止。
     stop_reason_pending: str = ""
@@ -131,6 +134,17 @@ def stable_tool_args_hash(arguments: Any) -> str:
     except Exception:
         text = repr(arguments)
     return hashlib.sha1(text.encode("utf-8", errors="replace")).hexdigest()[:16]
+
+
+def tool_job_purpose_from_arguments(arguments: Any) -> str:
+    """交棒登记时从工具入参提取 purpose 原文（exec 声明该参数），没有就返回空串。
+
+    自动交棒不经过工具的 background 分支，arguments 里的 purpose 只有这里消费：
+    登记时提取一次落库，后台面板行优先显示它；hint 继续当调用摘要兜底。
+    """
+    if not isinstance(arguments, dict):
+        return ""
+    return str(arguments.get("purpose") or "").strip()
 
 
 def tool_job_dedupe_key(job_id: str, status: str) -> str:
@@ -410,6 +424,7 @@ class ToolJobRunner:
         tool_name: str,
         args_hash: str,
         hint: str,
+        purpose: str = "",
         run: Callable[[], Awaitable[ToolJobOutcome]],
         timeout_seconds: float,
         recovery_policy: str = "model_decide",
@@ -437,6 +452,7 @@ class ToolJobRunner:
             tool_name=normalized_tool_name,
             args_hash=normalized_hash,
             hint=str(hint or "").strip(),
+            purpose=str(purpose or "").strip(),
             started_at=now_iso(),
             started_monotonic=time.monotonic(),
             timeout_seconds=max(0.0, float(timeout_seconds or 0.0)),
@@ -526,6 +542,7 @@ class ToolJobRunner:
                 tool_name=job.tool_name,
                 args_hash=job.args_hash,
                 hint=job.hint,
+                purpose=job.purpose,
                 status=TOOL_JOB_STATUS_RUNNING,
                 started_at=job.started_at,
                 updated_at=now_iso(),
@@ -834,6 +851,7 @@ class ToolJobRunner:
                     "turn_id": job.turn_id,
                     "tool_call_id": job.tool_call_id,
                     "hint": job.hint,
+                    "purpose": job.purpose,
                 }
             )
         items.sort(key=lambda item: (str(item.get("started_at") or ""), str(item.get("job_id") or "")))

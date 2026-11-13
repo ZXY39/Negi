@@ -46,6 +46,10 @@ _ROOT_INFLIGHT_PHASES = frozenset({'before_model', 'waiting_tool_results', 'afte
 # 同一个 run_task 内最多就地重派根几次；用完仍回到同一形态就 park 给人看，
 # 避免"启动→消失→再启动"每次烧一轮模型的热循环。
 _ROOT_STRANDED_REVIVAL_ATTEMPTS = 2
+# 根回合在飞期间结算拍的兜底节拍（秒）：活动事件一置位立即开拍，超时只防
+# clear-then-wait 的竞态漏拍，不是轮询节奏。取值高于调度循环 0.5s 的稳态拍，
+# 保证结算拍比既有循环更轻。
+_ROOT_ROUND_BEAT_TIMEOUT_SECONDS = 5.0
 _CURRENT_DISPATCH_LEASE: ContextVar['_DispatchLease | None'] = ContextVar(
     'task_node_dispatch_lease',
     default=None,
@@ -309,6 +313,15 @@ class TaskNodeDispatcher:
         # B5：同 wait_for——外层（run_task/控制回合驱动）被取消时不得顺带
         # 取消 entry future；生命周期由 dispatcher.close()/cancel_nodes 权威管理。
         return await asyncio.shield(entry.future)
+
+    def entry_future(self, node_id: str) -> 'asyncio.Future[NodeFinalResult]':
+        """同步取（或建）entry 的 future，不等待它。
+
+        `execute_node` 是"入队+等待"一体；run_task 的结算拍包装需要把两步拆开——
+        入队时机必须与直接 await 相同（同步），等待才可以让位给活动事件。取自
+        `_get_or_create_entry` 的同一入口，生命周期归 dispatcher 权威管理。
+        """
+        return self._get_or_create_entry(str(node_id or '').strip()).future
 
     def node_is_being_driven(self, node_id: str) -> bool | None:
         """这个节点此刻是不是本进程在驱动。三态，且每一态都可据此做不同的事。
@@ -1066,7 +1079,13 @@ class TaskActorService:
                         )
                     else:
                         try:
-                            result = await dispatcher.execute_node(task_id, root_node.node_id)
+                            # 结算拍包装：根回合在飞期间验收裁决落地即结算并提醒上游，
+                            # 不再等根回合收口（实盘 task:f6c64108e01d）。
+                            result = await self._execute_root_with_settlement_beats(
+                                task_id=task_id,
+                                dispatcher=dispatcher,
+                                root_node_id=root_node.node_id,
+                            )
                         except NodePausedError as exc:
                             # 根在回合中暂停（error/manual/agent）：落暂停，根停着，
                             # actor 继续把非根节点驱动到静止，而不是直接 return 让
@@ -1246,6 +1265,15 @@ class TaskActorService:
             if named_node_id and named_node_id != str(node.node_id or '').strip():
                 continue
             if not node_terminal:
+                # 验收 entry 还在飞时不实时结算：这个分支本来只为崩溃窗口设计
+                # （写结果→落终态之间被杀）。结算拍会把它实时观察到——活回合
+                # 的 payload 写入与终态落库之间可能有 await 缝隙，抢跑会与回合
+                # 自己的收口交叠。跳过；entry 收口必触发活动事件，下一拍再读。
+                beat_dispatcher = self._dispatchers.get(str(task_id or '').strip())
+                if beat_dispatcher is not None and beat_dispatcher.node_is_being_driven(
+                    str(node.node_id or '').strip()
+                ) is True:
+                    continue
                 # 裁决已落盘、节点行还没收口（pass 后被重放回路重置，或进程在
                 # “写结果→落终态”之间被杀）：只认绑定当前提交的裁决，陈旧载荷不得
                 # 被当成本次裁定。
@@ -1338,6 +1366,57 @@ class TaskActorService:
                     or 'acceptance rejected without retry',
                 )
         return progressed
+
+    async def _run_root_round_settlement_beat(self, task_id: str) -> None:
+        """根回合在飞期间的结算拍（实盘 task:f6c64108e01d）。
+
+        run_task 阻塞在 `execute_node(root)` 等根回合收口时调度循环不运行，
+        验收裁决的结算随之悬置——子验收早已 pass 并终局，被验执行节点却停在
+        `waiting_acceptance`，`child_final` 与上游唤醒（默认档即时、批次档
+        全部完成才放行）一并迟到。结算拍借 dispatcher 活动事件在这段窗口里
+        跑与调度循环序言相同的三步：冲刷终局消息（批次放行由 `child_final`
+        投递内的 `release_wait_all_batch_if_settled` 驱动，随投递及时）、对齐
+        spawn 轮完成度、收验收裁决。
+
+        拍内只做结算：可派发扫描、等待图破环、全员停靠不变量仍归调度循环，
+        根回合收口后照常执行。拍内异常只记日志，绝不打断根回合等待。
+        """
+        try:
+            await self._node_runner.wait_pending_terminal_messages()
+            self._node_runner.reconcile_spawn_round_completion(task_id)
+            await self._drain_acceptance_verdicts(task_id)
+        except Exception:
+            logger.exception('root-round settlement beat failed: task={}', task_id)
+
+    async def _execute_root_with_settlement_beats(
+        self,
+        *,
+        task_id: str,
+        dispatcher: 'TaskNodeDispatcher',
+        root_node_id: str,
+    ) -> NodeFinalResult:
+        """`execute_node(root)` 的结算拍包装：等根回合的同时及时结算验收裁决。
+
+        入队必须同步（`entry_future`，与直接 await 同一时机）——若用
+        `ensure_future(execute_node(...))` 推迟一拍，恢复路径先建的 entry 会在
+        缝隙里跑完，`_get_or_create_entry` 看到"future 已解析 + 节点非终态"就
+        弹出重建，根被跑两轮（test_task_paused_root_runs_in_the_same_pickup
+        抓到的回归）。等待让位给活动事件：验收 entry 一收口立即返回并跑一拍；
+        `wait_activity` 是 clear-then-wait，超时兜底防竞态漏拍。调度循环此刻
+        尚未启动，本协程是唯一等待者。取消语义与 `await shield(...)` 一致：
+        取消只打断等待，entry future 由 dispatcher 权威管理。
+        """
+        entry_future = dispatcher.entry_future(root_node_id)
+        while not entry_future.done():
+            activity_wait = asyncio.ensure_future(
+                dispatcher.wait_activity(timeout=_ROOT_ROUND_BEAT_TIMEOUT_SECONDS)
+            )
+            await asyncio.wait({entry_future, activity_wait}, return_when=asyncio.FIRST_COMPLETED)
+            activity_wait.cancel()
+            if entry_future.done():
+                break
+            await self._run_root_round_settlement_beat(task_id)
+        return entry_future.result()
 
     def schedule_node_nowait(self, task_id: str, node_id: str) -> bool:
         """NodeRunner 的子节点立即派发口。没有活跃 dispatcher 时返回 False，
