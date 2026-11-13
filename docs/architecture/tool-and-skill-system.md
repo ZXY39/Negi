@@ -479,6 +479,8 @@ provider-facing schema 刻意保持最小：
 
 skill / tool 目录可能被编辑器、git 或外部进程直接改动，注册表不会自己收到通知，所以运行时按节拍做一次"代"比对：
 
+**活资源住数据根，代码树只是种子。** 生产侧资源管理器的 workspace 统一取 `resource_workspace()`（＝`data_root()`，见 `g3ku/deployment/data_root.py`），所以 `skills/`、`tools/` 落在数据根——升级永不触碰（数据根与 `.venv`/`.git` 同属受保护项）。代码树里的 `skills/`、`tools/` 退化为内置种子，由启动播种 `seed_workspace_resources(data_root(), seed_root=<安装根>)` 迁移到数据根：首迁把代码树资源（含用户自建，此刻它们还在代码树里）全量带过去；之后按指纹台账 `<数据根>/.g3ku/resource-seed-ledger.json` 三方判定传播内置更新——目标内容==新种子即最新、目标==上次播下的种子指纹（用户没改）则覆盖为新版、其余（用户改过/首迁即不同）保留用户那份并记冲突日志，**绝不无声覆盖**。容器车道用 `G3KU_RESOURCE_SEED_ROOT` 指只读代码镜像，env 优先于显式种子源。资源管理器的 workspace 抽象不变（单测仍按 tmp workspace 构造），只是生产调用方把它路由到数据根。
+
 重载按指纹重建实例；被替换的实例在丢弃前调用 `close()`，这是工具释放跨调用资源（驱动 / 连接 / 子进程）的唯一挂点。
 
 - 节拍由 `resources.reload.poll_interval_ms`（JSON 侧 `resources.reload.pollIntervalMs`）节流，默认 1000ms；配成 0 表示每个调用点都允许比对。

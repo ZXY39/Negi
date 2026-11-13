@@ -270,6 +270,8 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 装了但终端里 `negi` 不出现、图标点了没反应、系统「已安装的应用」里没有 Negi、卸载后重装说目录非空、或卸载只该删程序却连数据一起没了 → `operations-and-maintenance.md`「新设备首次安装与升级」+「首选一键启动脚本」
 - 应用管理里点卸载后进度条一直不动、或卸完了程序还在 → `operations-and-maintenance.md`「卸载与安装面回收」；逐项落点读 `%TEMP%` 里的 `negi-uninstall-<UTC>.log` 与 `Negi Uninstallation Log`
 - 设置按钮红点不亮或误亮、没查过/查失败也被点亮成"有新版"、「重启并更新」点了服务没回来、「手动安装」那枚链接不开或开的是另一家的发布页、或明明能上 GitHub 却一直"读不到远端标签"（`git_missing` 说的是这台设备的形态，不是网络） → `web-and-admin.md`「Update Notification And Restart-And-Upgrade Contract」+ `operations-and-maintenance.md`「自动检查新版本与「重启并更新」」
+- 点更新提示「更新未完成」但服务没停（`preflight_failed`，撞行文件列在 `conflict_paths`）、开发机上点更新被拒（`dev_checkout`）、受管设备更新卡在 uv/「此语言模式仅支持核心类型的方法调用」、或卡死设备要一次性恢复（recovery 脚本） → `operations-and-maintenance.md`「自动检查新版本与「重启并更新」」「升级可靠性与受管设备兼容」+ `web-and-admin.md`「Update Notification And Restart-And-Upgrade Contract」
+- 升级后用户自建的 skill/tool 还在不在、内置 skill 更新有没有传播到数据根、或资源到底住在代码树还是数据根 → `tool-and-skill-system.md`「资源目录代检查与语义目录新鲜度」
 - 更新后用户说"我改的东西不见了"、设置里那一行只报数量而清单在按钮 title 上、`交给 Negi 解决` 为什么只准备会话不自动发送，或 `copy-overwrite` 与 `merge-conflict` 分不清 → `operations-and-maintenance.md`「换码没能保住的本地改动」+ `web-and-admin.md`「Update Notification And Restart-And-Upgrade Contract」
 - 界面上的动作想把消息送进某条指定会话，结果落进了另一条（含真实对外渠道会话）→ `web-and-admin.md`「CEO Composer Runtime」
 - 升级已经成功红点仍亮到下一次检查、或没人改过目录却被判成"有本地改动"而白跑一次 stash → `web-and-admin.md`「Update Notification And Restart-And-Upgrade Contract」+「Frontend Vendor Asset Update Contract」
