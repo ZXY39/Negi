@@ -39,6 +39,15 @@ $RepoName = 'Negi'
 $RepoGit = "https://github.com/$RepoOwner/$RepoName.git"
 $RepoZip = "https://github.com/$RepoOwner/$RepoName/archive/${Ref}.zip"
 $UvInstaller = 'https://astral.sh/uv/install.ps1'
+# ConstrainedLanguage-safe uv bootstrap: the astral installer above is `irm | iex` of a
+# script that calls non-core .NET methods, which that language mode refuses. The zip lane
+# downloads the same official release artifact with cmdlets only. Pinned version; the
+# astral CDN is tried first and GitHub second (same order the astral installer itself uses).
+$UvVersion = '0.13.8'
+$UvZipMirrors = @(
+    "https://releases.astral.sh/github/uv/releases/download/$UvVersion",
+    "https://github.com/astral-sh/uv/releases/download/$UvVersion"
+)
 # Mirrors are only used after the direct source fails, unless -Mirror asks for
 # them up front. UV_DEFAULT_INDEX / UV_PYTHON_INSTALL_MIRROR keep working and
 # suppress the automatic retry (they are an explicit choice already).
@@ -214,14 +223,80 @@ function Resolve-OfflineKit {
     }
 }
 
+function Test-ConstrainedLanguage {
+    # Reading the session's language mode is a property read, allowed even when the mode
+    # itself refuses non-core .NET method calls. Used to pick cmdlet-only lanes.
+    return ($ExecutionContext.SessionState.LanguageMode -eq 'ConstrainedLanguage')
+}
+
+function Install-UvFromZip {
+    # Cmdlet-only uv bootstrap for ConstrainedLanguage machines (and a fallback when the
+    # astral installer fails). Downloads the official release zip and unpacks it with
+    # Expand-Archive, persisting the binaries to the Get-UvCommand probe location so later
+    # installs/upgrades hit uv locally and never bootstrap again. Avoids [System.IO.Path]
+    # (a non-core type whose methods the mode refuses); $env:TEMP and [Guid] are safe.
+    $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'aarch64' } else { 'x86_64' }
+    $asset = "uv-$arch-pc-windows-msvc.zip"
+    $bin = Join-Path $env:USERPROFILE '.local\bin'
+    New-Item -ItemType Directory -Force -Path $bin | Out-Null
+    $tmp = Join-Path $env:TEMP ('negi-uv-' + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+    $zip = Join-Path $tmp $asset
+    $ok = $false
+    foreach ($base in $UvZipMirrors) {
+        try {
+            Write-Step "downloading uv $UvVersion from $base"
+            Invoke-WebRequest -Uri "$base/$asset" -OutFile $zip -UseBasicParsing
+            $ok = $true
+            break
+        }
+        catch {
+            Write-Step ("uv download failed from " + $base + ": " + $_)
+        }
+    }
+    if (-not $ok) {
+        Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Error "[install] could not download uv $UvVersion ($asset) from any source; put uv.exe in $bin and rerun"
+    }
+    Expand-Archive -LiteralPath $zip -DestinationPath $tmp -Force
+    foreach ($name in @('uv.exe', 'uvx.exe', 'uvw.exe')) {
+        $src = Join-Path $tmp $name
+        if (Test-Path -LiteralPath $src) {
+            Copy-Item -LiteralPath $src -Destination (Join-Path $bin $name) -Force
+        }
+    }
+    Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Step "uv $UvVersion installed to $bin"
+}
+
 function Ensure-Uv {
     $uv = Get-UvCommand
     if ($uv) {
         Write-Step "using uv: $uv"
         return $uv
     }
-    Write-Step 'uv not found, installing it from astral.sh'
-    Invoke-Checked @('powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', "irm $UvInstaller | iex") -Where 'installer'
+    if (Test-ConstrainedLanguage) {
+        Write-Step 'uv not found; ConstrainedLanguage detected, installing uv from the official release zip'
+        Install-UvFromZip
+    }
+    else {
+        Write-Step 'uv not found, installing it from astral.sh'
+        # Relax the preference so a failed astral run can fall back to the zip lane instead
+        # of terminating; the exit code is the only failure signal (uv writes progress to stderr).
+        $saved = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            & powershell -NoProfile -ExecutionPolicy Bypass -Command "irm $UvInstaller | iex" 2>&1 | ForEach-Object { [string]$_ } | Out-Host
+            $astralCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $saved
+        }
+        if ($astralCode -ne 0) {
+            Write-Step "astral installer exited $astralCode; falling back to the official release zip"
+            Install-UvFromZip
+        }
+    }
     $uv = Get-UvCommand
     if (-not $uv) {
         Write-Error '[install] uv installer finished but uv is still not reachable. Add %USERPROFILE%\.local\bin to PATH and rerun.'
@@ -686,6 +761,14 @@ function Get-TreeSizeBytes {
     # EstimatedSize and the uninstall dialog both need a real number; a .NET
     # stack walk stays in the seconds range on a 14k-file .venv, where
     # Get-ChildItem -Recurse | Measure-Object builds an object per file.
+    if (Test-ConstrainedLanguage) {
+        # The .NET stack walk uses non-core types the mode refuses; the cmdlet pipeline is
+        # slower but legal. The number only feeds the uninstall dialog's size display.
+        $sum = (Get-ChildItem -LiteralPath $Path -Recurse -File -Force -ErrorAction SilentlyContinue |
+            Measure-Object -Property Length -Sum).Sum
+        if ($sum) { return [int64]$sum }
+        return 0
+    }
     $total = 0
     $stack = New-Object 'System.Collections.Generic.Stack[string]'
     $stack.Push($Path)
@@ -706,10 +789,31 @@ function Add-UserPathEntry {
     param([string]$Directory)
     # Returns $true only when this install is the one that added the entry, so
     # uninstall can take it back without touching a PATH the operator edited.
+    $wanted = $Directory.TrimEnd('\')
+    if (Test-ConstrainedLanguage) {
+        # [Environment]::Get/SetEnvironmentVariable are non-core methods the mode refuses.
+        # Read the raw (unexpanded) user PATH with reg.exe so %VAR% entries the operator
+        # keeps are preserved verbatim, then write it back through the registry provider as
+        # REG_EXPAND_SZ. The WM_SETTINGCHANGE broadcast .NET does is unavailable here, so
+        # new terminals pick the entry up after a sign-out / Explorer restart.
+        $current = ''
+        $query = & reg.exe query 'HKCU\Environment' /v Path 2>$null
+        foreach ($line in $query) {
+            if ($line -match '^\s*Path\s+REG_(?:EXPAND_)?SZ\s+(.*)$') { $current = $Matches[1]; break }
+        }
+        $parts = @()
+        if ($current) { $parts = @($current -split ';' | Where-Object { $_ }) }
+        foreach ($part in $parts) {
+            if ($part.TrimEnd('\') -ieq $wanted) { return $false }
+        }
+        Set-ItemProperty -Path 'HKCU:\Environment' -Name Path -Type ExpandString -Value (($parts + $wanted) -join ';')
+        $env:Path = "$env:Path;$wanted"
+        Write-Step 'PATH updated in the registry; open a new terminal after sign-out or restarting Explorer to pick it up'
+        return $true
+    }
     $current = [Environment]::GetEnvironmentVariable('Path', 'User')
     $parts = @()
     if ($current) { $parts = @($current -split ';' | Where-Object { $_ }) }
-    $wanted = $Directory.TrimEnd('\')
     foreach ($part in $parts) {
         if ($part.TrimEnd('\') -ieq $wanted) { return $false }
     }
@@ -807,6 +911,13 @@ function Register-NegiAutostart {
 
 function Install-DesktopIcons {
     param([string]$Root, [string]$IconPath)
+    if (Test-ConstrainedLanguage) {
+        # Shortcuts need [Environment]::GetFolderPath and the WScript.Shell COM object,
+        # both refused by the mode. Skip them explicitly: the service still starts and the
+        # negi command still works; the operator can pin a shortcut to negi.cmd by hand.
+        Write-Step 'shortcuts skipped (ConstrainedLanguage refuses COM); start Negi with the negi command or start-negi.cmd'
+        return
+    }
     $pythonw = Join-Path $Root '.venv\Scripts\pythonw.exe'
     if (-not (Test-Path $pythonw)) {
         Write-Step "no pythonw.exe under $Root, skipping shortcuts"
