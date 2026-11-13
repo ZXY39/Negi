@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -64,8 +65,9 @@ def _record(
 
     `apply` 端点在踢起执行体那一刻只能回 `restarting: true`；之后执行体无论停在
     哪一步，前端都看不见（实盘两次都是"正在重启"挂在那里，真相在日志里 2 秒就
-    结束了）。终态码：started / ok / upgrade_failed / exit_refused / port_busy /
-    port_unknown / not_this_service。
+    结束了）。终态码：started / ok / upgrade_failed / preflight_failed / exit_refused /
+    port_busy / port_unknown / not_this_service。`preflight_failed` 是停机前预检（冲突 /
+    uv 可得性）不过，服务从未退出。
 
     中间阶段一律带 `outcome="started"` 再配一个 `stage`：单飞闸门判的就是
     `outcome == "started"`，把阶段写成新终态会让用户在升级途中再踢一次执行体。
@@ -196,6 +198,136 @@ def _wait_for_release(port: int) -> bool:
             return True
         time.sleep(EXIT_POLL_SECONDS)
     return False
+
+
+# uv 预检的钉住版本与下载源，与 install.ps1 的 $UvVersion / $UvZipMirrors 同源；
+# 改一处要同步另一处。预检只在本机无 uv 时探下载源可达性（B 车道会自愈 uv）。
+_UV_VERSION = "0.13.8"
+_UV_ZIP_BASES = (
+    "https://releases.astral.sh/github/uv/releases/download",
+    "https://github.com/astral-sh/uv/releases/download",
+)
+_PREFLIGHT_FETCH_TIMEOUT = 120.0
+
+
+def _run_git(git: str, *args: str, timeout: float = 30.0) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [git, "-C", str(PROJECT_ROOT), *args],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+        **_no_window_flags(),
+    )
+
+
+def _merge_tree_conflict_paths(git: str, stash_sha: str) -> list[str] | None:
+    """精确预判本地改动与目标 ref 是否撞行。[] = 干净；路径列表 = 撞行；None = 预判工具出错。
+
+    `git stash create` 只造一个 commit 对象、不动工作树也不进 stash 列表；merge-tree 拿它
+    与 FETCH_HEAD 做虚拟合并，退出码 1 即冲突。冲突文件信息行形如
+    `<mode> <object> <stage>\\t<path>`，每个文件按 stage 1/2/3 出现三次，按路径去重。
+    """
+    try:
+        mt = _run_git(git, "merge-tree", "--write-tree", "FETCH_HEAD", stash_sha)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if mt.returncode == 0:
+        return []
+    if mt.returncode != 1:
+        return None
+    paths: list[str] = []
+    for line in (mt.stdout or "").splitlines():
+        if "\t" not in line:
+            continue
+        head, _, path = line.partition("\t")
+        parts = head.split()
+        if len(parts) == 3 and parts[2] in ("1", "2", "3") and path and path not in paths:
+            paths.append(path)
+    return paths
+
+
+def _intersect_conflict_paths(git: str) -> list[str]:
+    """merge-tree 不可用时的保守回退：本地改过的文件 ∩ 新版改过的文件（可能误报，宁拦勿覆盖）。"""
+    try:
+        local = _run_git(git, "diff", "--name-only", "HEAD")
+        incoming = _run_git(git, "diff", "--name-only", "HEAD", "FETCH_HEAD")
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    local_set = {p.strip() for p in (local.stdout or "").splitlines() if p.strip()}
+    incoming_set = {p.strip() for p in (incoming.stdout or "").splitlines() if p.strip()}
+    return sorted(local_set & incoming_set)
+
+
+def _preflight_conflicts(git: str, ref: str) -> tuple[bool, str, list[str]]:
+    """停机前证本地改动不会与新版撞行。服务还活着，失败就不停机。"""
+    try:
+        fetch = _run_git(git, "fetch", "origin", ref, timeout=_PREFLIGHT_FETCH_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return False, f"停机前取 {ref} 超时（{_PREFLIGHT_FETCH_TIMEOUT:g}s），网络恢复后再点（服务未停）", []
+    except OSError as exc:
+        return False, f"停机前 git fetch 失败：{exc}（服务未停）", []
+    if fetch.returncode != 0:
+        return False, f"停机前取 {ref} 失败：{(fetch.stderr or '').strip()[:200]}（服务未停）", []
+    # tracked 改动判据与 Update-GitCheckout 同源：含 --cached、忽略行尾差。
+    try:
+        dirty = _run_git(git, "diff", "--quiet", "--ignore-cr-at-eol", "HEAD")
+        dirty_cached = _run_git(git, "diff", "--quiet", "--ignore-cr-at-eol", "--cached")
+    except (subprocess.TimeoutExpired, OSError):
+        return True, "", []
+    if dirty.returncode == 0 and dirty_cached.returncode == 0:
+        return True, "", []
+    stash_sha = (_run_git(git, "stash", "create").stdout or "").strip()
+    if not stash_sha:
+        return True, "", []
+    paths = _merge_tree_conflict_paths(git, stash_sha)
+    if paths is None:
+        paths = _intersect_conflict_paths(git)
+    if paths:
+        return False, f"本地改动与 {ref} 撞行，先处理这些文件再更新（服务未停）", paths
+    return True, "", []
+
+
+def _local_uv_present() -> bool:
+    if shutil.which("uv"):
+        return True
+    home = Path(os.environ.get("USERPROFILE") or str(Path.home()))
+    return any((home / rel).exists() for rel in (".local/bin/uv.exe", ".cargo/bin/uv.exe"))
+
+
+def _preflight_uv() -> tuple[bool, str]:
+    if os.name != "nt" or _local_uv_present():
+        return True, ""
+    arch = "aarch64" if os.environ.get("PROCESSOR_ARCHITECTURE") == "ARM64" else "x86_64"
+    asset = f"uv-{arch}-pc-windows-msvc.zip"
+    for base in _UV_ZIP_BASES:
+        url = f"{base}/{_UV_VERSION}/{asset}"
+        try:
+            request = urllib.request.Request(url, method="HEAD")
+            with urllib.request.urlopen(request, timeout=10.0) as response:
+                if response.status < 400:
+                    return True, ""
+        except Exception:
+            continue
+    return False, (
+        "本机没有 uv 且取不到官方下载源（离线？）；先放 uv.exe 到 %USERPROFILE%\\.local\\bin "
+        "或恢复网络再点（服务未停）"
+    )
+
+
+def _preflight(ref: str) -> tuple[bool, str, list[str]]:
+    """所有可预检的失败都移到停机之前：冲突、uv 可得性。任何一项不过就不动服务。"""
+    if (PROJECT_ROOT / ".git").exists():
+        git = shutil.which("git")
+        if git:
+            ok, detail, paths = _preflight_conflicts(git, ref)
+            if not ok:
+                return ok, detail, paths
+    ok, detail = _preflight_uv()
+    if not ok:
+        return False, detail, []
+    return True, "", []
 
 
 def _upgrade_command(ref: str) -> list[str] | None:
@@ -397,6 +529,13 @@ def run(ref: str, *, port: int | None = None, pause_running_work: bool = True) -
         _record("not_this_service", ref, f"port {resolved}")
         return 5
     time.sleep(STARTUP_GRACE_SECONDS)
+    _stage(ref, "preflight", "停机前检查本地改动冲突与 uv")
+    ok, detail, paths = _preflight(ref)
+    if not ok:
+        _log(f"preflight failed; leaving the running service alone: {detail}")
+        extra = {"conflict_paths": paths, "conflict_count": len(paths)} if paths else None
+        _record("preflight_failed", ref, detail, stage="preflight_failed", extra=extra)
+        return 7
     _stage(ref, "requesting_exit", f"port={resolved}")
     label = _request_exit(resolved, pause_running_work)
     _log(f"exit request: {label}")

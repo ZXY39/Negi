@@ -10504,6 +10504,7 @@ function stopUpdateApplyWatch() {
 
 const UPDATE_APPLY_STAGE_TEXT = {
     requested: "已排入更新队列",
+    preflight: "停机前检查本地改动与 uv",
     requesting_exit: "正在暂停进行中的对话与任务",
     waiting_exit: "等待服务退出",
     upgrading: "正在下载新版本并同步依赖",

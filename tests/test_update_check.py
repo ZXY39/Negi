@@ -277,6 +277,7 @@ async def test_apply_requires_a_version_shape_and_rejects_when_current(monkeypat
         "spawn_runner",
         lambda ref, port=None, pause_running_work=True: spawned.append((ref, port, pause_running_work)),
     )
+    monkeypatch.setattr(update_api, "release_in_local_head", lambda ref, **kwargs: None)
     # 服务实际监听端口与 config.web.port 不同（--port 启动）时的回归场景。
     request = _FakeRequest(18999)
 
@@ -386,6 +387,7 @@ async def test_apply_keeps_service_up_when_spawn_fails(monkeypatch, tmp_path: Pa
         raise OSError("spawn refused")
 
     monkeypatch.setattr(update_api, "spawn_runner", _boom)
+    monkeypatch.setattr(update_api, "release_in_local_head", lambda ref, **kwargs: None)
     with pytest.raises(HTTPException) as exc:
         await update_api.update_apply(_FakeRequest(18999), {"ref": "v1.0.2"})
     assert exc.value.status_code == 503
@@ -500,6 +502,7 @@ def test_runner_aborts_before_touching_code_when_exit_refused(tmp_path: Path, mo
 
     upgraded = []
     monkeypatch.setattr(apply_mod, "_probe_self", lambda port: True)
+    monkeypatch.setattr(apply_mod, "_preflight", lambda ref: (True, "", []))
     monkeypatch.setattr(apply_mod, "_request_exit", lambda port, pause: "exit_refused_409")
     monkeypatch.setattr(apply_mod, "_run_upgrade", lambda ref: upgraded.append(ref) or True)
     monkeypatch.setattr(apply_mod, "STARTUP_GRACE_SECONDS", 0.0)
@@ -554,6 +557,7 @@ def test_apply_records_a_refused_exit_as_its_own_terminal_outcome(tmp_path: Path
     monkeypatch.setattr(apply_mod, "LOG_FILE", tmp_path / "apply.log")
     monkeypatch.setattr(apply_mod, "STARTUP_GRACE_SECONDS", 0.0)
     monkeypatch.setattr(apply_mod, "_probe_self", lambda port: True)
+    monkeypatch.setattr(apply_mod, "_preflight", lambda ref: (True, "", []))
     monkeypatch.setattr(apply_mod, "_request_exit", lambda port, pause: "exit_refused_409")
     monkeypatch.setattr(
         apply_mod, "_run_upgrade", lambda ref: (_ for _ in ()).throw(AssertionError("被拒不许动代码"))
@@ -577,6 +581,7 @@ def test_failed_upgrade_is_recorded_even_though_the_service_comes_back(tmp_path:
     monkeypatch.setattr(apply_mod, "LOG_FILE", tmp_path / "apply.log")
     monkeypatch.setattr(apply_mod, "STARTUP_GRACE_SECONDS", 0.0)
     monkeypatch.setattr(apply_mod, "_probe_self", lambda port: True)
+    monkeypatch.setattr(apply_mod, "_preflight", lambda ref: (True, "", []))
     monkeypatch.setattr(apply_mod, "_request_exit", lambda port, pause: "exit_accepted_200")
     monkeypatch.setattr(apply_mod, "_wait_for_release", lambda port: True)
     monkeypatch.setattr(apply_mod, "_run_upgrade", lambda ref: False)
@@ -587,6 +592,129 @@ def test_failed_upgrade_is_recorded_even_though_the_service_comes_back(tmp_path:
     data = json.loads(result_file.read_text(encoding="utf-8"))
     assert data["outcome"] == "upgrade_failed"
     assert "exit_accepted_200" in data["detail"]
+
+
+def test_preflight_failure_never_stops_the_service(tmp_path: Path, monkeypatch):
+    """预检不过（冲突/离线无 uv）⇒ 记 preflight_failed，退出请求与换码都不许发生。"""
+    import json
+
+    import g3ku.update_apply as apply_mod
+
+    result_file = _result_file(tmp_path, monkeypatch)
+    monkeypatch.setattr(apply_mod, "LOG_FILE", tmp_path / "apply.log")
+    monkeypatch.setattr(apply_mod, "STARTUP_GRACE_SECONDS", 0.0)
+    monkeypatch.setattr(apply_mod, "_probe_self", lambda port: True)
+    monkeypatch.setattr(apply_mod, "_preflight", lambda ref: (False, "本地改动与 v1.0.12 撞行", ["a.py", "b.py"]))
+    monkeypatch.setattr(
+        apply_mod, "_request_exit", lambda port, pause: (_ for _ in ()).throw(AssertionError("预检不过不许停服务"))
+    )
+    monkeypatch.setattr(
+        apply_mod, "_run_upgrade", lambda ref: (_ for _ in ()).throw(AssertionError("预检不过不许换码"))
+    )
+
+    assert apply_mod.run("v1.0.12", port=18790) == 7
+    data = json.loads(result_file.read_text(encoding="utf-8"))
+    assert data["outcome"] == "preflight_failed"
+    assert data["conflict_paths"] == ["a.py", "b.py"]
+    assert data["conflict_count"] == 2
+
+
+def test_preflight_success_proceeds_to_the_exit_request(tmp_path: Path, monkeypatch):
+    import g3ku.update_apply as apply_mod
+
+    _result_file(tmp_path, monkeypatch)
+    requested = []
+    monkeypatch.setattr(apply_mod, "LOG_FILE", tmp_path / "apply.log")
+    monkeypatch.setattr(apply_mod, "STARTUP_GRACE_SECONDS", 0.0)
+    monkeypatch.setattr(apply_mod, "_probe_self", lambda port: True)
+    monkeypatch.setattr(apply_mod, "_preflight", lambda ref: (True, "", []))
+    monkeypatch.setattr(apply_mod, "_request_exit", lambda port, pause: requested.append(port) or "exit_refused_409")
+
+    assert apply_mod.run("v1.0.12", port=18790) == 2
+    assert requested == [18790], "预检过了才走到退出请求"
+
+
+def test_merge_tree_conflict_paths_parses_the_stage_lines(monkeypatch):
+    import g3ku.update_apply as apply_mod
+
+    class _Done:
+        returncode = 1
+        stdout = (
+            "e2fa2a08a525bc24982edb9dbedaa7ad5f194390\n"
+            "100644 c0d0fb45c382919737f8d0c20aaf57cf89b74af8 1\tf.txt\n"
+            "100644 19ec3b0cee38acc614d766969d520be2a8f695bf 2\tf.txt\n"
+            "100644 a18dc2effa52e1bf0422a7c0f3e541d02a775333 3\tf.txt\n"
+            "100644 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 1\tdir/g.py\n"
+            "\nAuto-merging f.txt\nCONFLICT (content): Merge conflict in f.txt\n"
+        )
+
+    monkeypatch.setattr(apply_mod, "_run_git", lambda *a, **k: _Done())
+    assert apply_mod._merge_tree_conflict_paths("git", "deadbeef") == ["f.txt", "dir/g.py"]
+
+    class _Clean:
+        returncode = 0
+        stdout = "e2fa2a08a525bc24982edb9dbedaa7ad5f194390\n"
+
+    monkeypatch.setattr(apply_mod, "_run_git", lambda *a, **k: _Clean())
+    assert apply_mod._merge_tree_conflict_paths("git", "deadbeef") == []
+
+
+def test_preflight_conflicts_flags_a_real_collision(tmp_path: Path, monkeypatch):
+    """端到端（离线，本地 origin）：未提交改动与目标 ref 撞行 ⇒ 预检拦下并列出文件。"""
+    import shutil as _shutil
+
+    import g3ku.update_apply as apply_mod
+
+    git = _shutil.which("git")
+    if not git:
+        import pytest
+
+        pytest.skip("git not available")
+
+    def _git(*args: str) -> None:
+        subprocess.run(
+            [git, "-C", str(tmp_path), *args],
+            check=True, capture_output=True, text=True,
+        )
+
+    _git("init", "-q")
+    _git("config", "core.hooksPath", "/dev/null")
+    _git("config", "user.name", "t")
+    _git("config", "user.email", "t@t")
+    (tmp_path / "f.txt").write_text("line1\nline2\n", encoding="utf-8")
+    _git("add", "f.txt")
+    _git("commit", "-q", "-m", "add")
+    _git("checkout", "-q", "-b", "vtest")
+    (tmp_path / "f.txt").write_text("line1\nOTHER\n", encoding="utf-8")
+    _git("commit", "-q", "-am", "other")
+    _git("checkout", "-q", "-")
+    _git("remote", "add", "origin", str(tmp_path))
+    # 未提交的本地改动，与 vtest 撞同一行。
+    (tmp_path / "f.txt").write_text("line1\nLOCAL\n", encoding="utf-8")
+    monkeypatch.setattr(apply_mod, "PROJECT_ROOT", tmp_path)
+
+    ok, detail, paths = apply_mod._preflight_conflicts(git, "vtest")
+    assert ok is False
+    assert paths == ["f.txt"]
+    assert "服务未停" in detail
+
+
+def test_preflight_uv_offline_without_local_uv_is_blocked(monkeypatch):
+    import g3ku.update_apply as apply_mod
+
+    monkeypatch.setattr(apply_mod.os, "name", "nt")
+    monkeypatch.setattr(apply_mod, "_local_uv_present", lambda: False)
+
+    def _dead(url, timeout=0):
+        raise OSError("offline")
+
+    monkeypatch.setattr(apply_mod.urllib.request, "urlopen", _dead)
+    ok, detail = apply_mod._preflight_uv()
+    assert ok is False
+    assert "服务未停" in detail
+
+    monkeypatch.setattr(apply_mod, "_local_uv_present", lambda: True)
+    assert apply_mod._preflight_uv() == (True, "")
 
 
 def test_spawn_runner_marks_the_attempt_as_started(tmp_path: Path, monkeypatch):
@@ -698,6 +826,7 @@ def test_run_writes_a_stage_trail_and_keeps_the_single_flight_gate(monkeypatch, 
     monkeypatch.setattr(apply_mod, "_log", lambda message: None)
     monkeypatch.setattr(apply_mod.time, "sleep", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(apply_mod, "_probe_self", lambda port: True)
+    monkeypatch.setattr(apply_mod, "_preflight", lambda ref: (True, "", []))
     monkeypatch.setattr(apply_mod, "_request_exit", lambda port, pause: "exit_accepted_200")
     monkeypatch.setattr(apply_mod, "_wait_for_release", lambda port: True)
     monkeypatch.setattr(apply_mod, "_run_upgrade", lambda ref: True)
@@ -706,8 +835,8 @@ def test_run_writes_a_stage_trail_and_keeps_the_single_flight_gate(monkeypatch, 
     assert apply_mod.run("v9.9.9", port=18999) == 0
 
     stages = [item.get("stage") for item in written if item.get("stage")]
-    assert stages == ["requesting_exit", "waiting_exit", "upgrading", "relaunching", "ok"]
-    assert [item["outcome"] for item in written] == ["started", "started", "started", "started", "ok"]
+    assert stages == ["preflight", "requesting_exit", "waiting_exit", "upgrading", "relaunching", "ok"]
+    assert [item["outcome"] for item in written] == ["started", "started", "started", "started", "started", "ok"]
     assert all("elapsed_seconds" in item for item in written)
 
 
