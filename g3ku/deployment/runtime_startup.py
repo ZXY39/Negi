@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import shutil
 import tempfile
@@ -79,21 +81,71 @@ def ensure_persistent_workspace_dirs(workspace: Path) -> dict[str, str]:
 
 
 def _resolved_seed_root(seed_root: Path | None = None) -> Path | None:
+    # 环境优先（容器把只读代码镜像指到这里），其次调用方给的代码树（默认安装的安装根）。
+    raw = str(os.getenv(RESOURCE_SEED_ROOT_ENV, "") or "").strip()
+    if raw:
+        return Path(raw).expanduser().resolve(strict=False)
     if seed_root is not None:
         return Path(seed_root).expanduser().resolve(strict=False)
-    raw = str(os.getenv(RESOURCE_SEED_ROOT_ENV, "") or "").strip()
-    if not raw:
-        return None
-    return Path(raw).expanduser().resolve(strict=False)
+    return None
+
+
+def _resource_seed_ledger_path(workspace: Path) -> Path:
+    return Path(workspace) / ".g3ku" / "resource-seed-ledger.json"
+
+
+def _read_seed_ledger(workspace: Path) -> dict[str, str]:
+    try:
+        data = json.loads(_resource_seed_ledger_path(workspace).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    files = data.get("files") if isinstance(data, dict) else None
+    if not isinstance(files, dict):
+        return {}
+    return {str(k): str(v) for k, v in files.items() if isinstance(v, str)}
+
+
+def _write_seed_ledger(workspace: Path, files: dict[str, str]) -> None:
+    target = _resource_seed_ledger_path(workspace)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(target.name + ".tmp")
+        tmp.write_text(json.dumps({"files": files}, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, target)
+    except OSError as exc:
+        logger.warning("resource seed ledger write skipped: {}", exc)
+
+
+def _file_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return ""
+    return digest.hexdigest()
 
 
 def seed_workspace_resources(workspace: Path, *, seed_root: Path | None = None) -> dict[str, list[str]]:
+    """把代码树里的内置 skills/tools 播种到**活资源目录**（数据根），并迁移用户自建资源。
+
+    活资源住在数据根（升级永不触碰），代码树退化为纯种子。三方判定保住用户的修改：
+    - 目标缺失 → 拷种子（首迁时这一步把用户自建资源也一起带过去，因为它们此刻还在代码树里）；
+    - 目标内容 == 新种子 → 已是最新；
+    - 目标内容 == 上次播下的种子指纹（用户没改）→ 覆盖为新版内置；
+    - 其余（用户改过 / 首迁即不同）→ 保留用户那份，记冲突，绝不无声覆盖。
+
+    指纹台账落 `<workspace>/.g3ku/resource-seed-ledger.json`。返回新拷入的文件清单。
+    """
     root = Path(workspace).resolve()
     source_root = _resolved_seed_root(seed_root)
     copied: dict[str, list[str]] = {"skills": [], "tools": []}
     if source_root is None or not source_root.exists():
         return copied
 
+    ledger = _read_seed_ledger(root)
+    conflicts: list[str] = []
     for kind in ("skills", "tools"):
         source_dir = source_root / kind
         target_dir = root / kind
@@ -104,12 +156,29 @@ def seed_workspace_resources(workspace: Path, *, seed_root: Path | None = None) 
             if not source_path.is_file():
                 continue
             relative = source_path.relative_to(source_dir)
+            key = f"{kind}/{relative.as_posix()}"
             target_path = target_dir / relative
-            if target_path.exists():
+            seed_digest = _file_digest(source_path)
+            if not target_path.exists():
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source_path, target_path)
+                ledger[key] = seed_digest
+                copied[kind].append(relative.as_posix())
                 continue
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source_path, target_path)
-            copied[kind].append(relative.as_posix())
+            target_digest = _file_digest(target_path)
+            if target_digest == seed_digest:
+                ledger[key] = seed_digest
+            elif ledger.get(key) and target_digest == ledger[key]:
+                shutil.copy2(source_path, target_path)
+                ledger[key] = seed_digest
+            else:
+                conflicts.append(key)
+    _write_seed_ledger(root, ledger)
+    if conflicts:
+        logger.warning(
+            "resource seed kept {} user-modified file(s) (not overwritten): {}",
+            len(conflicts), ", ".join(conflicts[:20]),
+        )
     return copied
 
 

@@ -93,6 +93,49 @@ def test_seed_workspace_resources_copies_missing_files_without_overwriting(tmp_p
     assert (tmp_path / "skills" / "demo" / "SKILL.md").read_text(encoding="utf-8") == "local-skill\n"
 
 
+def test_seed_migrates_user_added_resources_and_propagates_builtin_updates(tmp_path: Path) -> None:
+    """首迁把用户自建资源一起带到数据根；之后内置资源更新能传播，用户改过的绝不覆盖。"""
+    seed_root = tmp_path / "seed"
+    live = tmp_path / "live"
+    (seed_root / "skills" / "builtin").mkdir(parents=True)
+    (seed_root / "skills" / "user-made").mkdir(parents=True)
+    (seed_root / "skills" / "builtin" / "SKILL.md").write_text("builtin-v1\n", encoding="utf-8")
+    (seed_root / "skills" / "user-made" / "SKILL.md").write_text("mine\n", encoding="utf-8")
+
+    # 首迁：活目录空，内置与自建都拷过去。
+    copied = seed_workspace_resources(live, seed_root=seed_root)
+    assert "builtin/SKILL.md" in copied["skills"]
+    assert "user-made/SKILL.md" in copied["skills"]
+    assert (live / "skills" / "user-made" / "SKILL.md").read_text(encoding="utf-8") == "mine\n"
+
+    # 用户改了内置；种子升级到 v2。
+    (live / "skills" / "builtin" / "SKILL.md").write_text("user-edited\n", encoding="utf-8")
+    (seed_root / "skills" / "builtin" / "SKILL.md").write_text("builtin-v2\n", encoding="utf-8")
+    seed_workspace_resources(live, seed_root=seed_root)
+    # 用户改过的保留，不被 v2 覆盖。
+    assert (live / "skills" / "builtin" / "SKILL.md").read_text(encoding="utf-8") == "user-edited\n"
+
+    # 另一个未改的内置资源：种子升级后应传播到活目录。
+    (seed_root / "skills" / "clean").mkdir(parents=True)
+    (seed_root / "skills" / "clean" / "SKILL.md").write_text("clean-v1\n", encoding="utf-8")
+    seed_workspace_resources(live, seed_root=seed_root)
+    (seed_root / "skills" / "clean" / "SKILL.md").write_text("clean-v2\n", encoding="utf-8")
+    seed_workspace_resources(live, seed_root=seed_root)
+    assert (live / "skills" / "clean" / "SKILL.md").read_text(encoding="utf-8") == "clean-v2\n"
+
+
+def test_resource_workspace_is_the_data_root(monkeypatch, tmp_path: Path) -> None:
+    from g3ku.deployment.data_root import resource_workspace
+
+    data_dir = tmp_path / "D-data"
+    monkeypatch.setenv(DATA_DIR_ENV, str(data_dir))
+    reset_data_root_cache()
+    try:
+        assert resource_workspace() == data_dir
+    finally:
+        reset_data_root_cache()
+
+
 def test_auto_unlock_from_env_uses_password_when_master_key_is_absent(monkeypatch) -> None:
     security = _SecurityStub()
     monkeypatch.setenv(BOOTSTRAP_PASSWORD_ENV, "demo-password")
@@ -152,7 +195,7 @@ def test_prepare_web_server_start_primes_workspace_and_attempts_env_unlock(monke
     monkeypatch.setattr(launcher, "_resolve_web_bind", lambda host, port: ("0.0.0.0", 18790))
     monkeypatch.setattr(launcher, "_acquire_web_start_lock", lambda root, port: None)
     monkeypatch.setattr(launcher, "ensure_persistent_workspace_dirs", lambda root: calls.append(f"dirs:{root}"))
-    monkeypatch.setattr(launcher, "seed_workspace_resources", lambda root: calls.append(f"seed:{root}"))
+    monkeypatch.setattr(launcher, "seed_workspace_resources", lambda root, **kwargs: calls.append(f"seed:{root}"))
     monkeypatch.setattr(launcher, "auto_unlock_from_env", lambda workspace=None: calls.append(f"unlock:{workspace}") or "password")
 
     launcher.prepare_web_server_start(host=None, port=None, reload=False, with_worker=False)
@@ -250,7 +293,7 @@ def test_run_worker_runtime_uses_env_auto_unlock(monkeypatch, tmp_path: Path) ->
     monkeypatch.setattr(launcher, "configure_openai_sdk_logging", lambda: None)
     monkeypatch.setattr(launcher, "ensure_startup_config_ready", lambda: False)
     monkeypatch.setattr(launcher, "ensure_persistent_workspace_dirs", lambda root: calls.append(f"dirs:{root}"))
-    monkeypatch.setattr(launcher, "seed_workspace_resources", lambda root: calls.append(f"seed:{root}"))
+    monkeypatch.setattr(launcher, "seed_workspace_resources", lambda root, **kwargs: calls.append(f"seed:{root}"))
     monkeypatch.setattr(launcher, "auto_unlock_from_env", lambda workspace=None: calls.append(f"unlock:{workspace}") or "password")
     monkeypatch.setattr(
         launcher,

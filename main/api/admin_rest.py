@@ -22,7 +22,7 @@ from g3ku import audit_events
 from g3ku.config.loader import load_config, save_config
 from g3ku.config.model_manager import _UNSET, VALID_SCOPES, ModelManager
 from g3ku.config.schema import Config, ExternalApiTokenConfig, _normalize_external_token_id
-from g3ku.deployment.data_root import data_root
+from g3ku.deployment.data_root import data_root, resource_workspace
 from g3ku.resources import get_shared_resource_manager
 from g3ku.resources.models import ResourceKind
 from g3ku.resources.retired_schemas import record_tool_schema
@@ -171,7 +171,7 @@ class _ResourceMutationBlockedError(ValueError):
 class _StandaloneResourceService:
     def __init__(self, cfg: Config):
         self._cfg = cfg
-        self._workspace = Path(cfg.workspace_path).resolve(strict=False)
+        self._workspace = resource_workspace()
         self._resource_manager = get_shared_resource_manager(self._workspace, app_config=cfg)
         self._resource_manager.start()
         self._resource_manager.reload_now(trigger='admin_resource_read')

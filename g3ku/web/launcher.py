@@ -12,6 +12,7 @@ from pathlib import Path
 import typer
 
 from g3ku.config.loader import ensure_startup_config_ready, load_config
+from g3ku.deployment.data_root import data_root
 from g3ku.deployment.runtime_startup import (
     auto_unlock_from_env,
     ensure_persistent_workspace_dirs,
@@ -273,7 +274,7 @@ def prepare_web_server_start(
     configure_openai_sdk_logging()
     ensure_startup_config_ready()
     ensure_persistent_workspace_dirs(root)
-    seed_workspace_resources(root)
+    seed_workspace_resources(data_root(), seed_root=root)
     auto_unlock_from_env(workspace=root)
     _ensure_frontend_ready()
     resolved_host, resolved_port = _resolve_web_bind(host, port)
@@ -372,7 +373,7 @@ async def run_worker_runtime() -> None:
     root = _resolve_project_root()
     configure_openai_sdk_logging()
     ensure_persistent_workspace_dirs(root)
-    seed_workspace_resources(root)
+    seed_workspace_resources(data_root(), seed_root=root)
     auto_unlock_from_env(workspace=root)
     os.environ["G3KU_TASK_RUNTIME_ROLE"] = "worker"
     master_key = str(os.environ.pop(BOOTSTRAP_MASTER_KEY_ENV, "")).strip()

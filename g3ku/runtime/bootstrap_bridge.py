@@ -41,8 +41,10 @@ class RuntimeBootstrapBridge:
             return
         try:
             self.init_main_runtime()
+            from g3ku.deployment.data_root import resource_workspace
+
             manager = get_shared_resource_manager(
-                self._loop.workspace,
+                resource_workspace(),
                 app_config=getattr(self._loop, 'app_config', None),
                 service_getter=self._resource_services,
                 on_change=self._on_resource_snapshot,

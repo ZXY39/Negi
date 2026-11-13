@@ -115,6 +115,15 @@ def data_work_path(*parts: str, create: bool = False) -> Path:
     return ensure_dir(path) if create else path
 
 
+def resource_workspace() -> Path:
+    """活资源（skills/tools）的承载目录＝数据根。
+
+    升级永不触碰数据根，代码树里的 skills/tools 退化为种子，由启动播种迁移到这里。
+    所有生产侧资源管理器都用它做 workspace，保证共享同一个实例与同一份资源。
+    """
+    return data_root()
+
+
 def resolve_data_path(raw: str | Path | None, *, default: str = "") -> Path:
     """存储串解析：相对值挂到数据根，绝对值原样保留。"""
     text = str(raw or "").strip() or str(default or "").strip()

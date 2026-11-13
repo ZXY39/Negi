@@ -14,7 +14,9 @@ class SkillsLoader:
 
     def __init__(self, workspace: Path, resource_manager: ResourceManager | None = None, app_config=None):
         self.workspace = Path(workspace)
-        self.resource_manager = resource_manager or get_shared_resource_manager(self.workspace, app_config=app_config)
+        from g3ku.deployment.data_root import resource_workspace
+
+        self.resource_manager = resource_manager or get_shared_resource_manager(resource_workspace(), app_config=app_config)
 
     def list_skills(self, filter_unavailable: bool = True) -> list[dict[str, str]]:
         skills = []

@@ -10,8 +10,10 @@ def build_resource_app(console) -> typer.Typer:
     app = typer.Typer(help="Inspect and reload root-level skills/tools resources.")
 
     def _manager():
+        from g3ku.deployment.data_root import resource_workspace
+
         config = load_config()
-        manager = get_shared_resource_manager(config.workspace_path, app_config=config)
+        manager = get_shared_resource_manager(resource_workspace(), app_config=config)
         return manager
 
     @app.command("list")
