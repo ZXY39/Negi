@@ -424,6 +424,31 @@ def test_provider_capabilities():
     assert provider.get_default_model() == "claude-sonnet-4-5"
 
 
+def test_messages_url_suffix():
+    from g3ku.providers.anthropic_protocol_helpers import anthropic_messages_suffix
+
+    # 官方 base 含 /v1；百炼 base 不含 /v1（官方文档：apps/anthropic + /v1/messages）。
+    assert anthropic_messages_suffix("https://api.anthropic.com/v1") == "/messages"
+    assert anthropic_messages_suffix("https://dashscope.aliyuncs.com/apps/anthropic") == "/v1/messages"
+    assert anthropic_messages_suffix("https://x.com/v1/messages") == ""
+
+
+def test_probe_bailian_endpoint():
+    draft = ProviderConfigDraft(
+        provider_id="anthropic",
+        api_key="sk-ant-test",
+        base_url="https://dashscope.aliyuncs.com/apps/anthropic",
+        default_model="qwen3.8-flash",
+        parameters={"context_window_tokens": 390000},
+    )
+    normalized, errors = normalize_draft(draft, TemplateRegistry())
+    assert not errors
+    endpoint, _ = _build_openai_fallback_payload(normalized)
+    from g3ku.llm_config.probe_strategies import _join_url
+
+    assert _join_url(normalized.base_url, endpoint) == "https://dashscope.aliyuncs.com/apps/anthropic/v1/messages"
+
+
 def test_provider_registration_consistency():
     """每个注册的 provider 模板必须被所有配置守卫接受。
 

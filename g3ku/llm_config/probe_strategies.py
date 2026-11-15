@@ -11,6 +11,7 @@ from g3ku.json_schema_utils import (
     normalize_responses_tool_definitions,
 )
 from g3ku.providers.anthropic_protocol_helpers import _convert_tools as _convert_anthropic_tools
+from g3ku.providers.anthropic_protocol_helpers import anthropic_messages_suffix
 from g3ku.utils.api_keys import parse_api_keys, should_switch_api_key_for_http_status
 
 from .enums import AuthMode, ProbeStatus, ProtocolAdapter
@@ -176,7 +177,7 @@ def _build_openai_fallback_payload(config: NormalizedProviderConfig) -> tuple[st
             "tools": _convert_anthropic_tools([PROBE_TOOL]),
             "tool_choice": {"type": "auto"},
         }
-        return "/messages", payload
+        return anthropic_messages_suffix(config.base_url), payload
     if config.protocol_adapter == ProtocolAdapter.OPENAI_RESPONSES:
         payload: dict[str, Any] = {
             "model": config.default_model,
@@ -300,6 +301,9 @@ def _should_switch_api_key_for_probe_result(result: ProbeResult) -> bool:
 
 
 def _probe_openai_compatible(client: httpx.Client, config: NormalizedProviderConfig) -> ProbeResult:
+    if config.protocol_adapter == ProtocolAdapter.ANTHROPIC_MESSAGES:
+        # 百炼等 Anthropic 网关不提供 /v1/models（模型发现 404）；直接发真实形状推理 ping。
+        return _probe_openai_inference_envelope(client, config, label="Envelope")
     headers = _build_openai_headers(config)
     start = time.perf_counter()
     response = client.get(_join_url(config.base_url, "/models"), headers=headers)

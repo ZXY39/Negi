@@ -22,6 +22,7 @@ from g3ku.providers.anthropic_protocol_helpers import (
     _convert_messages,
     _convert_tools,
     _friendly_error,
+    anthropic_messages_suffix,
 )
 from g3ku.providers.base import RETRYABLE_STATUS_CODES, LLMProvider, LLMResponse
 from g3ku.providers.fallback import normalize_forced_function_tool_choice
@@ -227,9 +228,8 @@ class AnthropicProvider(LLMProvider):
         if self.extra_headers:
             headers.update(self.extra_headers)
 
-        url = self.api_base or "https://api.anthropic.com/v1"
-        if not url.endswith("/messages"):
-            url = url.rstrip("/") + "/messages"
+        base = (self.api_base or "https://api.anthropic.com/v1").rstrip("/")
+        url = base + anthropic_messages_suffix(base)
         provider_request_meta, provider_request_body = self._capture_request_payload(
             provider="anthropic",
             endpoint=url,

@@ -32,6 +32,21 @@ _TOOL_ID_INVALID = re.compile(r"[^a-zA-Z0-9_-]")
 _TOOL_ID_MAX = 64
 
 
+def anthropic_messages_suffix(api_base: str) -> str:
+    """Suffix to append to a base URL to reach the Messages endpoint.
+
+    官方 base 含 /v1（api.anthropic.com/v1）→ /messages；百炼 base 不含 /v1
+    （dashscope.aliyuncs.com/apps/anthropic）→ /v1/messages。base 已含 /messages 时返回 ""。
+    provider 与连接探测共用，保证两处拼出的 URL 一致。
+    """
+    base = str(api_base or "").rstrip("/")
+    if base.endswith("/messages"):
+        return ""
+    if base.endswith("/v1"):
+        return "/messages"
+    return "/v1/messages"
+
+
 def _normalize_tool_call_id(value: Any) -> str:
     raw = extract_call_id(value)
     if not raw:
