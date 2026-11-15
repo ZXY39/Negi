@@ -139,6 +139,9 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 任务树过大打不开（`Failed to open task: Request timeout`）、打开时长时间无树或「加载中(x/xx)」进度异常、从任务树返回任务大厅后长时间卡顿 → `web-and-admin.md`「Task Tree Chunked Load Contract」
 - `/api/tasks` 系列请求长时间挂起、任务大厅列表或 worker-status 数据迟迟不到、浏览器标签页唤醒/切回任务大厅后整个页面短暂失联 → `web-and-admin.md`「Web Event Loop Contract」
 - 真实回合 HTTP 400 而这份配置从没跑过 `测试连接`（保存与手改、迁移都不探测），或要确认探测到底发了什么字段 → `config-and-models.md`「llm_config 子系统」
+- 加了 Anthropic 绑定后启动报 `Model binding references a removed provider` / `Unsupported protocol adapter` / `'ProvidersConfig' object has no attribute 'anthropic'` → `config-and-models.md`「llm_config 子系统」（新增协议须同步模板/registry/migration/schema 四处注册面，一致性测试钉住）
+- Anthropic 回合 404、或百炼绑定发到了 `compatible-mode`（OpenAI 端点）而非 `apps/anthropic` → `config-and-models.md`「llm_config 子系统」（端点拼接：官方 base 含 /v1 拼 /messages，百炼 base 不含 /v1 拼 /v1/messages；百炼无 /v1/models）
+- Anthropic 回合 400 报 tool_result/tool_use 邻接、或思考块跨模型后报错 → `config-and-models.md`「llm_config 子系统」（tool_result 邻接校验）+ `runtime-overview.md`「思考内容（reasoning）的上下文回放」（thinking 签名模型绑定、缺签名降级 text）
 - 模型配置弹窗里一打开下拉，整张表单就往上跳或弹窗变高 → `web-and-admin.md`「Frontend Theme And Layout Contract」（展开面板必须脱离滚动容器挂到 body）
 - 组弹窗点完确定还要再去右上角点一次保存、保存后组卡又回到旧值、或确认键没随窗口内容变色 → `web-and-admin.md`「Model Config Page And Admin Contract」（确定的写点、adoptLlmModelCatalog、`.is-dirty` 判据）
 - 弹窗里点列表底部的勾选框后整窗上跳、标题被顶出可视区、底部多出一截空白，换对象重开还在、刷新才恢复 → `web-and-admin.md`「Frontend Theme And Layout Contract」（弹窗外壳不许当滚动口）
