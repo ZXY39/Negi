@@ -422,3 +422,24 @@ def test_provider_capabilities():
     assert provider.supports_reasoning_delta_streaming
     assert provider.manages_request_timeout_internally
     assert provider.get_default_model() == "claude-sonnet-4-5"
+
+
+def test_provider_registration_consistency():
+    """每个注册的 provider 模板必须被所有配置守卫接受。
+
+    回归：anthropic 接入时 migration（provider 白名单）/ loader（protocol 白名单）/
+    schema（ProvidersConfig 字段）三处硬编码漏改，存量 anthropic 记录让启动直接失败。
+    此测试把"模板注册面"与三道守卫钉成一致，未来加协议漏改任一处即红。
+    """
+    from g3ku.config.schema import ProvidersConfig
+    from g3ku.llm_config.enums import ProtocolAdapter
+    from g3ku.llm_config.migration import _SUPPORTED_PROVIDER_IDS
+    from g3ku.llm_config.provider_snapshots import PROVIDER_TEMPLATES
+    from g3ku.providers.registry import PROVIDERS
+
+    template_ids = {t.provider_id for t in PROVIDER_TEMPLATES}
+    assert template_ids <= _SUPPORTED_PROVIDER_IDS, "migration provider 白名单漏注册"
+    assert template_ids <= set(ProvidersConfig.model_fields.keys()), "ProvidersConfig 缺字段"
+    assert template_ids <= {p.name for p in PROVIDERS}, "registry 漏注册"
+    enum_adapters = {a.value for a in ProtocolAdapter}
+    assert {t.protocol_adapter.value for t in PROVIDER_TEMPLATES} <= enum_adapters

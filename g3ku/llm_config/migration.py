@@ -17,7 +17,9 @@ if TYPE_CHECKING:
 
 
 _MEMORY_KEYS = {"memory_embedding_default", "memory_rerank_default"}
-_SUPPORTED_PROVIDER_IDS = {"openai", "responses"}
+# 必须与 provider_snapshots.py 的模板注册面同步：漏一个协议会让该协议的存量记录在
+# 加载迁移时被当成"已移除 provider"拒绝（anthropic 接入时实测踩到）。
+_SUPPORTED_PROVIDER_IDS = {"openai", "responses", "anthropic"}
 _LEGACY_MAX_TOKENS_DEFAULT = 4096
 _LEGACY_TEMPERATURE_DEFAULTS = {0.1, 0.2}
 _LEGACY_TIMEOUT_DEFAULT = 8
@@ -165,7 +167,7 @@ def _delete_unsupported_repository_records(
                 "Model binding references a removed provider.\n"
                 f"Original record: config_id={summary.config_id!r}, "
                 f"provider={summary.provider_id!r}, model={summary.default_model!r}\n"
-                "Supported providers: openai (OpenAI Chat Completions), responses (OpenAI Responses).\n"
+                "Supported providers: openai (OpenAI Chat Completions), responses (OpenAI Responses), anthropic (Anthropic Messages).\n"
                 "Example fix: rebind this model key to an 'openai' or 'responses' record "
                 "pointing at the same endpoint."
             )
@@ -197,7 +199,7 @@ def _build_record(
         raise ValueError(
             "Unsupported provider in legacy model catalog binding.\n"
             f"Original provider_model: '{provider_id}:{model_id}'\n"
-            "Supported providers: openai (OpenAI Chat Completions), responses (OpenAI Responses).\n"
+            "Supported providers: openai (OpenAI Chat Completions), responses (OpenAI Responses), anthropic (Anthropic Messages).\n"
             f"Example fix: rebind this catalog entry to 'openai:{model_id}' "
             "and keep the same api_base in the llm-config record."
         )

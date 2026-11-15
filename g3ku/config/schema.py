@@ -726,13 +726,15 @@ class ProviderConfig(Base):
 class ProvidersConfig(Base):
     """Configuration for LLM providers.
 
-    Only the two supported OpenAI protocol entries:
+    The supported protocol entries:
     - openai:    Chat Completions protocol (/v1/chat/completions)
     - responses: Responses protocol (/v1/responses)
+    - anthropic: Anthropic Messages protocol (/v1/messages)
     """
 
     openai: ProviderConfig = Field(default_factory=ProviderConfig)
     responses: ProviderConfig = Field(default_factory=ProviderConfig)
+    anthropic: ProviderConfig = Field(default_factory=ProviderConfig)
 
 
 class WebConfig(Base):

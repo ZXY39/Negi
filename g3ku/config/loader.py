@@ -299,9 +299,12 @@ def _ensure_no_removed_gateway_config(raw_data: dict[str, Any]) -> None:
 
 def _ensure_supported_llm_records(workspace: Path) -> None:
     """Fail fast when remaining llm-config records use removed protocols."""
+    from g3ku.llm_config.enums import ProtocolAdapter
     from g3ku.llm_config.facade import LLMConfigFacade
 
-    supported_adapters = {"openai-completions", "openai-responses"}
+    # 从枚举派生，新增协议车道时不会漏（硬编码白名单曾在 anthropic 接入时拒绝存量记录）。
+    supported_adapters = {adapter.value for adapter in ProtocolAdapter}
+    supported_list = ", ".join(sorted(supported_adapters))
     try:
         facade = LLMConfigFacade(workspace)
         summaries = facade.repository.list_summaries()
@@ -316,16 +319,16 @@ def _ensure_supported_llm_records(workspace: Path) -> None:
                 "Unsupported llm-config record left by an older install.\n"
                 f"Original record: config_id={summary.config_id!r}, "
                 f"provider={summary.provider_id!r}, model={summary.default_model!r}\n"
-                "Supported providers: openai (OpenAI Chat Completions), responses (OpenAI Responses).\n"
-                "Example fix: delete this record and create an 'openai' or 'responses' record "
+                f"Supported protocol adapters: {supported_list}.\n"
+                "Example fix: delete this record and recreate it from a current provider template "
                 "for the same endpoint."
             ) from exc
         if adapter not in supported_adapters:
             raise ValueError(
                 "Unsupported protocol adapter in llm-config record.\n"
                 f"Original record: config_id={summary.config_id!r}, protocol_adapter={adapter!r}\n"
-                "Supported protocol adapters: openai-completions, openai-responses.\n"
-                "Example fix: recreate this record from the 'openai' or 'responses' template."
+                f"Supported protocol adapters: {supported_list}.\n"
+                "Example fix: recreate this record from a current provider template."
             )
 
 
