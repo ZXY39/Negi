@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from .enums import ProtocolAdapter
 from .models import ProviderTemplate
-from .template_builders import build_openai_compatible_template
+from .template_builders import build_anthropic_template, build_openai_compatible_template
 
 PROVIDER_TEMPLATES: list[ProviderTemplate] = [
     build_openai_compatible_template(
@@ -22,4 +22,5 @@ PROVIDER_TEMPLATES: list[ProviderTemplate] = [
         default_api_mode=ProtocolAdapter.OPENAI_RESPONSES,
         category="direct",
     ),
+    build_anthropic_template(),
 ]

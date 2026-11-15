@@ -64,6 +64,10 @@ def _runtime_model_parameters(parameters: dict[str, Any] | None) -> dict[str, An
             resolved_timeout = 0.0
         if resolved_timeout > 0:
             result["request_timeout_seconds"] = resolved_timeout
+    # auth_header 决定密钥走 Authorization Bearer 还是 x-api-key（Anthropic 默认后者）。
+    # 只供 provider 构造读，_resolve_model_request_parameters 不会把它带进请求体。
+    if "auth_header" in payload:
+        result["auth_header"] = bool(payload.get("auth_header"))
     return result
 
 

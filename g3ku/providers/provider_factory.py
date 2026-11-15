@@ -6,6 +6,7 @@ from typing import Any
 from g3ku.config.schema import Config
 from g3ku.llm_config.enums import ProtocolAdapter
 from g3ku.llm_config.runtime_resolver import resolve_chat_target
+from g3ku.providers.anthropic_provider import AnthropicProvider
 from g3ku.providers.base import LLMProvider
 from g3ku.providers.openai_chat_provider import OpenAIChatProvider
 from g3ku.providers.responses_provider import ResponsesProvider
@@ -136,14 +137,27 @@ def build_provider_from_model_key(
             default_model=model_id,
             extra_headers=extra_headers,
         )
+    elif adapter == ProtocolAdapter.ANTHROPIC_MESSAGES.value:
+        provider = AnthropicProvider(
+            api_key=_require_non_empty_api_key(
+                provider_id=provider_id,
+                model_key=provider_ref,
+                config_id=str(getattr(target, 'config_id', '') or ''),
+                api_key=api_key,
+            ),
+            api_base=api_base or 'https://api.anthropic.com/v1',
+            default_model=model_id,
+            extra_headers=extra_headers,
+            auth_header=bool(model_parameters.get('auth_header', False)),
+        )
     else:
         raise ValueError(
             "Unsupported protocol adapter for managed model binding.\n"
             f"Model key: {provider_ref}\n"
             f"Protocol adapter: {adapter or '<empty>'}\n"
             "Supported protocol adapters: openai-completions (Chat Completions), "
-            "openai-responses (Responses).\n"
-            "Fix: rebind this model key to the `openai` or `responses` provider "
+            "openai-responses (Responses), anthropic-messages (Anthropic Messages).\n"
+            "Fix: rebind this model key to the `openai`, `responses` or `anthropic` provider "
             "with a matching protocol adapter."
         )
     return ProviderTarget(

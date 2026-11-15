@@ -368,7 +368,7 @@ def normalize_usage_payload(raw_usage: Any) -> dict[str, int]:
 
     direct_cache_tokens = 0
     direct_cache_found = False
-    for path in (("cache_hit_tokens",), ("cache_read_tokens",), ("cached_tokens",)):
+    for path in (("cache_hit_tokens",), ("cache_read_tokens",), ("cache_read_input_tokens",), ("cached_tokens",)):
         found, value = _usage_lookup(raw_usage, *path)
         if not found:
             continue
@@ -395,6 +395,17 @@ def normalize_usage_payload(raw_usage: Any) -> dict[str, int]:
         payload["cache_hit_tokens"] = breakdown_cache_tokens
         if input_found:
             payload["input_tokens"] = max(0, input_total - breakdown_cache_tokens)
+
+    # Anthropic 写缓存单独计费（cache_creation_input_tokens），与读缓存分开记成
+    # cache_write_tokens 供台账/Token统计读。Anthropic 的 input_tokens 已不含读/写缓存，
+    # 故 direct_cache 分支不改 input_tokens；effective_input 是否并入写缓存由上层口径定。
+    # 缺失时不写键（与 thinking_tokens 同口径：区分「无写缓存」与「未上报」）。
+    for path in (("cache_creation_input_tokens",), ("cache_write_tokens",)):
+        found, value = _usage_lookup(raw_usage, *path)
+        if not found:
+            continue
+        payload["cache_write_tokens"] = _coerce_usage_int(value)
+        break
 
     # 思考/推理 token 是输出 token 的细分项（各家命名不一）：只在 provider 明确上报时
     # 才写键，缺失时不写 0——否则上层无法区分「没思考」与「provider 未上报」。

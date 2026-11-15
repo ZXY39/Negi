@@ -232,3 +232,76 @@ def build_openai_compatible_template(
         template_version=TEMPLATE_VERSION,
     )
 
+
+def build_anthropic_template(
+    *,
+    provider_id: str = "anthropic",
+    display_name: str = "Anthropic",
+    default_base_url: str = "https://api.anthropic.com/v1",
+    default_model: str = "claude-sonnet-4-5",
+    suggested_models: list[str] | None = None,
+    category: str = "anthropic",
+    default_headers: dict[str, str] | None = None,
+    capability: Capability = Capability.CHAT,
+    auth_mode: AuthMode = AuthMode.API_KEY,
+) -> ProviderTemplate:
+    """Anthropic Messages protocol template.
+
+    Differences from the OpenAI-compatible builder: no organization/project derived
+    headers (OpenAI-only), ``auth_header`` defaults to False so the key rides
+    ``x-api-key`` (Anthropic's scheme), and ``anthropic-version`` is a default header.
+    The reasoning_effort select keeps Negi's six managed levels; the provider maps
+    them to Anthropic thinking budgets.
+    """
+    suggested_models = list(suggested_models or ["claude-sonnet-4-5", "claude-opus-4-1"])
+    fields = _base_fields(default_base_url, default_model, capability=capability)
+    for entry in fields:
+        if entry.key == "default_model":
+            entry.options = [option(model) for model in suggested_models]
+    fields.extend(
+        [
+            field(
+                key="reasoning_effort",
+                label="Reasoning Effort",
+                input_type=FieldInputType.SELECT,
+                required=False,
+                advanced=True,
+                default=None,
+                options=[
+                    option("none"),
+                    option("low"),
+                    option("medium"),
+                    option("high"),
+                    option("xhigh"),
+                    option("max"),
+                ],
+            ),
+            field(
+                key="auth_header",
+                label="Use Authorization Header",
+                input_type=FieldInputType.BOOLEAN,
+                required=False,
+                advanced=True,
+                default=False,
+                help_text="Off (default) sends x-api-key, Anthropic's scheme. On sends Authorization: Bearer for gateways that require it.",
+            ),
+        ]
+    )
+    headers = {"anthropic-version": "2023-06-01"}
+    headers.update(default_headers or {})
+    return ProviderTemplate(
+        provider_id=provider_id,
+        display_name=display_name,
+        protocol_adapter=ProtocolAdapter.ANTHROPIC_MESSAGES,
+        capability=capability,
+        auth_mode=auth_mode,
+        category=category,
+        default_base_url=default_base_url,
+        default_model=default_model,
+        suggested_models=suggested_models,
+        default_headers=headers,
+        fields=fields,
+        extra_options_schema={"type": "object", "additionalProperties": True},
+        template_version=TEMPLATE_VERSION,
+    )
+

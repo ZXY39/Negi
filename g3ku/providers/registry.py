@@ -1,14 +1,16 @@
 """
 Provider Registry — single source of truth for LLM provider metadata.
 
-The project supports exactly two OpenAI protocol entries:
+The project supports three protocol entries:
 
   - `openai`:    OpenAI Chat Completions protocol (/v1/chat/completions)
   - `responses`: OpenAI Responses protocol (/v1/responses)
+  - `anthropic`: Anthropic Messages protocol (/v1/messages)
 
-Any OpenAI-compatible endpoint binds through either entry with a custom base_url.
-Adding a provider means adding a ProviderSpec below plus a template in
-g3ku/llm_config/provider_snapshots.py.
+Any OpenAI-compatible endpoint binds through either OpenAI entry with a custom
+base_url; Anthropic-compatible endpoints (Claude, DeepSeek Messages, gateways)
+bind through `anthropic`. Adding a provider means adding a ProviderSpec below
+plus a template in g3ku/llm_config/provider_snapshots.py.
 """
 
 from __future__ import annotations
@@ -50,6 +52,12 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         name="responses",
         keywords=("responses",),
         display_name="OpenAI Responses",
+        supports_prompt_caching=True,
+    ),
+    ProviderSpec(
+        name="anthropic",
+        keywords=("anthropic", "claude"),
+        display_name="Anthropic",
         supports_prompt_caching=True,
     ),
 )

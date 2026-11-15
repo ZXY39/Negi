@@ -6,6 +6,7 @@ from enum import Enum
 class ProtocolAdapter(str, Enum):
     OPENAI_COMPLETIONS = "openai-completions"
     OPENAI_RESPONSES = "openai-responses"
+    ANTHROPIC_MESSAGES = "anthropic-messages"
 
 
 class FieldInputType(str, Enum):

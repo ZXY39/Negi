@@ -16,7 +16,7 @@ DERIVED_HEADER_FIELDS = {
 }
 
 NON_PARAMETER_FIELDS = {"api_key", "base_url", "default_model", "extra_headers", "extra_options"}
-COMMON_ENDPOINT_SUFFIXES = ("/chat/completions", "/responses", "/models")
+COMMON_ENDPOINT_SUFFIXES = ("/chat/completions", "/responses", "/models", "/messages")
 
 
 def normalize_provider_id(provider_id: str) -> str:

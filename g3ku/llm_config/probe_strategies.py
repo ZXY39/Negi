@@ -10,6 +10,7 @@ from g3ku.json_schema_utils import (
     normalize_openai_tool_definitions,
     normalize_responses_tool_definitions,
 )
+from g3ku.providers.anthropic_protocol_helpers import _convert_tools as _convert_anthropic_tools
 from g3ku.utils.api_keys import parse_api_keys, should_switch_api_key_for_http_status
 
 from .enums import AuthMode, ProbeStatus, ProtocolAdapter
@@ -162,6 +163,20 @@ def _build_openai_fallback_payload(config: NormalizedProviderConfig) -> tuple[st
     so a backend that rejects one of those fields fails 测试连接 instead of failing the
     first real turn.
     """
+    if config.protocol_adapter == ProtocolAdapter.ANTHROPIC_MESSAGES:
+        # Anthropic ping shaped like the real sender: top-level system absent, user
+        # ping, a placeholder tool through the same input_schema normalizer, thinking
+        # disabled (P0). anthropic-version rides config.headers (template default).
+        payload: dict[str, Any] = {
+            "model": config.default_model,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 16,
+            "stream": True,
+            "thinking": {"type": "disabled"},
+            "tools": _convert_anthropic_tools([PROBE_TOOL]),
+            "tool_choice": {"type": "auto"},
+        }
+        return "/messages", payload
     if config.protocol_adapter == ProtocolAdapter.OPENAI_RESPONSES:
         payload: dict[str, Any] = {
             "model": config.default_model,
