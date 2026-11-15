@@ -69,6 +69,31 @@ def _anthropic_tool_choice(tool_choice: Any) -> dict[str, Any]:
     return {"type": "auto"}
 
 
+# Negi 六档思考力度 → Anthropic thinking 预算（budget 模式，官方与百炼 qwen 通用）。
+_THINKING_BUDGETS = {"low": 2048, "medium": 8192, "high": 16384, "xhigh": 32768, "max": 65536}
+_EFFORT_LEVELS = {"low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": "max"}
+
+
+def _build_thinking(
+    reasoning_effort: str | None, max_tokens: int | None, thinking_mode: str
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Return (thinking, output_config) for the Anthropic request body.
+
+    - budget（默认）：thinking.enabled + budget_tokens，官方与百炼 qwen 都支持。
+    - effort：thinking.enabled + output_config.effort（百炼推荐，budget_tokens 将废弃）。
+    none/空 → thinking.disabled。budget 须 < max_tokens（Anthropic 硬合同），夹一刀。
+    """
+    level = str(reasoning_effort or "").strip().lower()
+    if not level or level == "none":
+        return {"type": "disabled"}, None
+    if thinking_mode == "effort":
+        return {"type": "enabled"}, {"effort": _EFFORT_LEVELS.get(level, "high")}
+    budget = _THINKING_BUDGETS.get(level, 8192)
+    cap = max(1, int(max_tokens)) if max_tokens is not None else _DEFAULT_MAX_TOKENS
+    budget = max(1024, min(budget, cap - 1024))
+    return {"type": "enabled", "budget_tokens": budget}, None
+
+
 class _AnthropicSSEProxy:
     """Wrap a streamed SSE response with per-line timeouts plus diagnostics."""
 
@@ -152,11 +177,15 @@ class AnthropicProvider(LLMProvider):
         default_model: str = "claude-sonnet-4-5",
         extra_headers: dict[str, str] | None = None,
         auth_header: bool = False,
+        thinking_mode: str = "budget",
+        cache_control: bool = False,
     ):
         super().__init__(api_key=api_key, api_base=api_base)
         self.default_model = default_model
         self.extra_headers = dict(extra_headers or {})
         self.auth_header = bool(auth_header)
+        self.thinking_mode = str(thinking_mode or "budget").strip().lower()
+        self.cache_control = bool(cache_control)
 
     @property
     def manages_request_timeout_internally(self) -> bool:
@@ -191,29 +220,35 @@ class AnthropicProvider(LLMProvider):
         on_reasoning_delta: Any = None,
         on_upstream_wait: Any = None,
     ) -> LLMResponse:
-        del reasoning_effort, parallel_tool_calls, prompt_cache_key
-        # P0: thinking disabled. reasoning_effort -> thinking budget mapping is P1.
-        # prompt_cache_key is an OpenAI hint; Anthropic caches via explicit cache_control (P1).
+        del parallel_tool_calls, prompt_cache_key
+        # prompt_cache_key 是 OpenAI 提示；Anthropic 靠自动前缀缓存或显式 cache_control。
         model = model or self.default_model
         api_key = str(self.api_key or "").strip()
         if not api_key:
             raise ValueError("Missing API key for Anthropic provider; refusing to send an empty x-api-key header.")
 
-        system_text, input_messages = _convert_messages(messages)
+        resolved_max_tokens = max(1, int(max_tokens)) if max_tokens is not None else _DEFAULT_MAX_TOKENS
+        thinking, output_config = _build_thinking(reasoning_effort, resolved_max_tokens, self.thinking_mode)
+        system_text, input_messages = _convert_messages(messages, model=model, cache_control=self.cache_control)
         body: dict[str, Any] = {
             "model": model,
             "messages": input_messages,
-            "max_tokens": max(1, int(max_tokens)) if max_tokens is not None else _DEFAULT_MAX_TOKENS,
+            "max_tokens": resolved_max_tokens,
             "stream": True,
-            "thinking": {"type": "disabled"},
+            "thinking": thinking,
         }
+        if output_config:
+            body["output_config"] = output_config
         if system_text:
-            body["system"] = system_text
-        # Temperature is incompatible with extended thinking; P0 thinking is disabled so it is allowed.
-        if temperature is not None:
+            if self.cache_control:
+                body["system"] = [{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}]
+            else:
+                body["system"] = system_text
+        # 开思考禁 temperature（Anthropic 硬合同）；disabled 时才允许。
+        if temperature is not None and thinking.get("type") == "disabled":
             body["temperature"] = float(temperature)
         if tools:
-            body["tools"] = _convert_tools(tools)
+            body["tools"] = _convert_tools(tools, cache_control=self.cache_control)
             body["tool_choice"] = _anthropic_tool_choice(tool_choice)
 
         headers = {

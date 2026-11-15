@@ -9148,6 +9148,13 @@ class ReActToolLoop:
         ]
         if items:
             field['reasoning_items'] = items
+        thinking_blocks = [
+            dict(item)
+            for item in list(getattr(response, 'thinking_blocks', None) or [])
+            if isinstance(item, dict)
+        ]
+        if thinking_blocks:
+            field['thinking_blocks'] = thinking_blocks
         return field
 
     def _rejected_tool_turn_delta_messages(

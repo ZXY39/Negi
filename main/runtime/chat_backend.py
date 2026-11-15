@@ -427,6 +427,13 @@ def sanitize_provider_messages(
             ]
             if reasoning_items:
                 payload['reasoning_items'] = reasoning_items
+            thinking_blocks = [
+                entry
+                for entry in list(item.get('thinking_blocks') or [])
+                if isinstance(entry, dict)
+            ]
+            if thinking_blocks:
+                payload['thinking_blocks'] = thinking_blocks
             tool_calls = _normalize_provider_tool_calls(item.get('tool_calls'))
             if tool_calls:
                 payload['tool_calls'] = tool_calls

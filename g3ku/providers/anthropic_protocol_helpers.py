@@ -72,8 +72,9 @@ def _system_text(content: Any) -> str:
 def _text_blocks_from_content(content: Any) -> list[dict[str, Any]]:
     """Convert user/tool string-or-list content into Anthropic text/image blocks.
 
-    P0 handles text; image blocks are skipped (the imageMultimodalEnabled gate keeps
-    pixels out of the request by default). P1 adds URL->base64 image sources.
+    图片：data URL → base64 source；http(s) URL → url source（百炼支持 url，官方 Anthropic
+    亦支持 url source）；已是 Anthropic source 形状的原样透传。受 imageMultimodalEnabled
+    闸门控制（默认关，像素不进请求）。
     """
     if isinstance(content, str):
         return [{"type": "text", "text": content}] if content else []
@@ -89,7 +90,22 @@ def _text_blocks_from_content(content: Any) -> list[dict[str, Any]]:
             if isinstance(text, str) and text:
                 blocks.append({"type": "text", "text": text})
             continue
-        # image_url / input_image: P1 (base64 source). Skipped in P0.
+        if item_type in {"image_url", "input_image", "image"}:
+            source = item.get("source")
+            if isinstance(source, dict) and source.get("type"):
+                blocks.append({"type": "image", "source": source})
+                continue
+            image_value = item.get("image_url")
+            url = image_value.get("url") if isinstance(image_value, dict) else (image_value or item.get("url"))
+            if isinstance(url, str) and url:
+                if url.startswith("data:"):
+                    header, _, data = url.partition(",")
+                    mime = header[5:].split(";")[0] or "image/png"
+                    if data:
+                        blocks.append({"type": "image", "source": {"type": "base64", "media_type": mime, "data": data}})
+                else:
+                    blocks.append({"type": "image", "source": {"type": "url", "url": url}})
+            continue
     return blocks
 
 
@@ -155,14 +171,45 @@ def _sanitize_tool_history(messages: list[dict[str, Any]]) -> list[dict[str, Any
     return sanitized
 
 
-def _assistant_blocks(msg: dict[str, Any]) -> list[dict[str, Any]]:
+def _replayable_thinking_blocks(msg: dict[str, Any], model: str | None) -> list[dict[str, Any]]:
+    """Replay stored thinking blocks for the target model (signature is model-bound).
+
+    只回给签发模型（g3ku_reasoning_model 戳匹配）；无戳或跨模型一律不回放（fail-closed，
+    同 Responses reasoning_items）。缺签名的 thinking 降级成 text（pi-ai 同形）：保住内容
+    但丢原生思考连续性。redacted_thinking 原样回。
+    """
+    out: list[dict[str, Any]] = []
+    for raw in list(msg.get("thinking_blocks") or []):
+        if not isinstance(raw, dict):
+            continue
+        source = str(raw.get("g3ku_reasoning_model") or "").strip()
+        if not source or (model and source != str(model).strip()):
+            continue
+        btype = raw.get("type")
+        if btype == "redacted_thinking":
+            data = raw.get("data")
+            if data:
+                out.append({"type": "redacted_thinking", "data": data})
+            continue
+        if btype == "thinking":
+            thinking = str(raw.get("thinking") or "")
+            signature = str(raw.get("signature") or "")
+            if signature.strip():
+                out.append({"type": "thinking", "thinking": thinking, "signature": signature})
+            elif thinking.strip():
+                out.append({"type": "text", "text": thinking})
+    return out
+
+
+def _assistant_blocks(msg: dict[str, Any], model: str | None = None) -> list[dict[str, Any]]:
     blocks: list[dict[str, Any]] = []
+    # thinking 块必须在 assistant 消息最前（Anthropic 顺序合同：thinking 先于 text/tool_use）。
+    blocks.extend(_replayable_thinking_blocks(msg, model))
     content = msg.get("content")
     if isinstance(content, str) and content.strip():
         blocks.append({"type": "text", "text": content})
     elif isinstance(content, list):
         blocks.extend(_text_blocks_from_content(content))
-    # P1: replay thinking_blocks (with model-bound signature) here, before text/tool_use.
     for call in list(msg.get("tool_calls") or []):
         function = call.get("function") if isinstance(call.get("function"), dict) else {}
         name = str(function.get("name") or call.get("name") or "").strip()
@@ -180,7 +227,9 @@ def _assistant_blocks(msg: dict[str, Any]) -> list[dict[str, Any]]:
     return blocks
 
 
-def _convert_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
+def _convert_messages(
+    messages: list[dict[str, Any]], *, model: str | None = None, cache_control: bool = False
+) -> tuple[str, list[dict[str, Any]]]:
     """Convert chat-shaped history into (system_text, anthropic_messages).
 
     Enforces Anthropic's structural contracts: top-level system, alternating
@@ -218,7 +267,7 @@ def _convert_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[st
             push("user", _text_blocks_from_content(content))
             continue
         if role == "assistant":
-            push("assistant", _assistant_blocks(msg))
+            push("assistant", _assistant_blocks(msg, model))
             continue
         if role == "tool":
             call_id = _normalize_tool_call_id(msg.get("tool_call_id"))
@@ -240,6 +289,9 @@ def _convert_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[st
             msg["content"] = results + rest
 
     _enforce_tool_adjacency(converted)
+    # 滚动缓存断点：末条 user 消息末块（system/tools 的固定断点在 provider 侧打）。
+    if cache_control and converted and converted[-1]["role"] == "user" and converted[-1]["content"]:
+        converted[-1]["content"][-1]["cache_control"] = {"type": "ephemeral"}
     return "\n\n".join(system_parts), converted
 
 
@@ -279,7 +331,7 @@ def _enforce_tool_adjacency(converted: list[dict[str, Any]]) -> None:
     converted[:] = merged
 
 
-def _convert_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+def _convert_tools(tools: list[dict[str, Any]] | None, *, cache_control: bool = False) -> list[dict[str, Any]]:
     """Convert shared tool schemas into Anthropic ``input_schema`` form.
 
     Reuses the OpenAI normalizer (which already strips root anyOf/oneOf/allOf via
@@ -309,6 +361,9 @@ def _convert_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
                 "input_schema": input_schema,
             }
         )
+    # 固定缓存断点：末项工具（与 system 尾、末条 user 一起构成稳定前缀，≤4 断点）。
+    if cache_control and converted:
+        converted[-1]["cache_control"] = {"type": "ephemeral"}
     return converted
 
 
@@ -345,12 +400,14 @@ async def _consume_sse(
     finish_reason = "stop"
     usage: dict[str, int] = {}
     raw_usage: dict[str, Any] = {}
+    response_model = ""
 
     async for event in _iter_sse(response):
         event_type = event.get("type")
         if event_type == "message_start":
             message = event.get("message") or {}
             raw_usage.update(message.get("usage") or {})
+            response_model = str(message.get("model") or "").strip()
         elif event_type == "content_block_start":
             index = event.get("index")
             block = event.get("content_block") or {}
@@ -431,6 +488,10 @@ async def _consume_sse(
 
     if not usage:
         usage = normalize_usage_payload(raw_usage)
+    # 思考签名模型绑定：打戳供回放侧只回给签发模型（同 Responses reasoning_items）。
+    if response_model:
+        for block in thinking_blocks:
+            block["g3ku_reasoning_model"] = response_model
     return "".join(content_parts), tool_calls, finish_reason, usage, thinking_blocks
 
 

@@ -8365,6 +8365,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         ]
         if items:
             field["reasoning_items"] = items
+        thinking_blocks = [
+            dict(item)
+            for item in list(response_payload.get("thinking_blocks") or [])
+            if isinstance(item, dict)
+        ]
+        if thinking_blocks:
+            field["thinking_blocks"] = thinking_blocks
         return field
 
     @staticmethod

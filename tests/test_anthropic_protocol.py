@@ -468,3 +468,120 @@ def test_provider_registration_consistency():
     assert template_ids <= {p.name for p in PROVIDERS}, "registry 漏注册"
     enum_adapters = {a.value for a in ProtocolAdapter}
     assert {t.protocol_adapter.value for t in PROVIDER_TEMPLATES} <= enum_adapters
+
+
+# --------------------------------------------------------------------------- #
+# P1: thinking config / replay / cache / images
+# --------------------------------------------------------------------------- #
+
+def test_build_thinking_budget_and_effort():
+    from g3ku.providers.anthropic_provider import _build_thinking
+
+    assert _build_thinking("none", 65536, "budget") == ({"type": "disabled"}, None)
+    assert _build_thinking(None, 65536, "budget") == ({"type": "disabled"}, None)
+    assert _build_thinking("high", 65536, "budget") == ({"type": "enabled", "budget_tokens": 16384}, None)
+    assert _build_thinking("high", 65536, "effort") == ({"type": "enabled"}, {"effort": "high"})
+    # budget 须 < max_tokens，夹到 max_tokens-1024 且不低于 1024。
+    thinking, _ = _build_thinking("max", 2048, "budget")
+    assert thinking["budget_tokens"] == 1024
+
+
+def test_thinking_replay_same_model_with_signature():
+    from g3ku.providers.anthropic_protocol_helpers import _convert_messages
+
+    msgs = [
+        {"role": "user", "content": "go"},
+        {
+            "role": "assistant",
+            "content": "answer",
+            "thinking_blocks": [
+                {"type": "thinking", "thinking": "reasoned", "signature": "sig", "g3ku_reasoning_model": "claude-x"}
+            ],
+        },
+    ]
+    _, out = _convert_messages(msgs, model="claude-x")
+    assistant = out[1]["content"]
+    assert assistant[0] == {"type": "thinking", "thinking": "reasoned", "signature": "sig"}
+    assert assistant[1] == {"type": "text", "text": "answer"}
+
+
+def test_thinking_replay_cross_model_dropped():
+    from g3ku.providers.anthropic_protocol_helpers import _convert_messages
+
+    msgs = [
+        {"role": "user", "content": "go"},
+        {
+            "role": "assistant",
+            "content": "answer",
+            "thinking_blocks": [
+                {"type": "thinking", "thinking": "reasoned", "signature": "sig", "g3ku_reasoning_model": "claude-x"}
+            ],
+        },
+    ]
+    _, out = _convert_messages(msgs, model="claude-y")
+    assert all(b.get("type") != "thinking" for b in out[1]["content"])
+
+
+def test_thinking_missing_signature_degrades_to_text():
+    from g3ku.providers.anthropic_protocol_helpers import _convert_messages
+
+    msgs = [
+        {"role": "user", "content": "go"},
+        {
+            "role": "assistant",
+            "content": "",
+            "thinking_blocks": [
+                {"type": "thinking", "thinking": "reasoned", "signature": "", "g3ku_reasoning_model": "claude-x"}
+            ],
+        },
+    ]
+    _, out = _convert_messages(msgs, model="claude-x")
+    assert {"type": "text", "text": "reasoned"} in out[1]["content"]
+    assert all(b.get("type") != "thinking" for b in out[1]["content"])
+
+
+def test_cache_control_breakpoints():
+    from g3ku.providers.anthropic_protocol_helpers import _convert_messages, _convert_tools
+
+    msgs = [{"role": "user", "content": "go"}]
+    _, out = _convert_messages(msgs, cache_control=True)
+    assert out[-1]["content"][-1].get("cache_control") == {"type": "ephemeral"}
+    tools = [{"type": "function", "function": {"name": "t", "description": "", "parameters": {"type": "object", "properties": {}}}}]
+    converted = _convert_tools(tools, cache_control=True)
+    assert converted[-1].get("cache_control") == {"type": "ephemeral"}
+    # 默认不打断点。
+    _, out2 = _convert_messages(msgs)
+    assert "cache_control" not in out2[-1]["content"][-1]
+
+
+def test_image_blocks_conversion():
+    from g3ku.providers.anthropic_protocol_helpers import _convert_messages
+
+    msgs = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+                {"type": "image_url", "image_url": {"url": "https://example.com/x.jpg"}},
+                {"type": "text", "text": "describe"},
+            ],
+        }
+    ]
+    _, out = _convert_messages(msgs)
+    blocks = out[0]["content"]
+    assert {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}} in blocks
+    assert {"type": "image", "source": {"type": "url", "url": "https://example.com/x.jpg"}} in blocks
+
+
+def test_sanitize_passes_thinking_blocks():
+    from main.runtime.chat_backend import sanitize_provider_messages
+
+    msgs = [
+        {
+            "role": "assistant",
+            "content": "hi",
+            "thinking_blocks": [{"type": "thinking", "thinking": "t", "signature": "s", "g3ku_reasoning_model": "m"}],
+        }
+    ]
+    out = sanitize_provider_messages(msgs)
+    assert out[0]["thinking_blocks"] == msgs[0]["thinking_blocks"]

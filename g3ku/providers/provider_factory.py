@@ -138,6 +138,7 @@ def build_provider_from_model_key(
             extra_headers=extra_headers,
         )
     elif adapter == ProtocolAdapter.ANTHROPIC_MESSAGES.value:
+        anthropic_options = dict(getattr(target, 'extra_options', {}) or {})
         provider = AnthropicProvider(
             api_key=_require_non_empty_api_key(
                 provider_id=provider_id,
@@ -149,6 +150,8 @@ def build_provider_from_model_key(
             default_model=model_id,
             extra_headers=extra_headers,
             auth_header=bool(model_parameters.get('auth_header', False)),
+            thinking_mode=str(anthropic_options.get('thinking_mode', 'budget')),
+            cache_control=bool(anthropic_options.get('cache_control', False)),
         )
     else:
         raise ValueError(
