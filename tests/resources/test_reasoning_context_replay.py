@@ -18,10 +18,15 @@ from g3ku.providers.responses_protocol_helpers import (
 )
 from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
 from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
+from g3ku.runtime.frontdoor.prompt_cache_contract import build_frontdoor_prompt_contract
 from main.models import NodeOutputEntry, NodeRecord, TaskRecord, TokenUsageSummary
 from main.monitoring.file_store import TaskFileStore
 from main.monitoring.log_service import TaskLogService
 from main.runtime.chat_backend import (
+    build_actual_request_diagnostics,
+    build_prompt_cache_diagnostics,
+    deepseek_api_base_family,
+    deepseek_reasoning_pad_required,
     model_chain_replays_reasoning,
     sanitize_provider_messages,
 )
@@ -420,3 +425,152 @@ def test_node_ledger_call_site_wires_the_thinking_fields() -> None:
 
     assert "reasoning_content=str(ledger_reasoning_field.get('reasoning_content') or '')," in writer
     assert "reasoning_items=list(ledger_reasoning_field.get('reasoning_items') or [])," in writer
+
+
+# --- 发送侧目标限定补空（DeepSeek 思考模式 400 兼容，pi-ai 同形） -------------------------
+# 合同与实测边界见 work/deepseek-reasoning-compat-plan.md §1：DeepSeek 只查字段存在、不查
+# 内容，缺字段的 assistant 补 "" 即过；触发校验的不一定是末条，须补全部缺失行。
+
+
+class _PadStubConfig:
+    """谓词夹具：profile 闸门 + api_base 目标族，不依赖真实 Config。"""
+
+    def __init__(self, profiles, api_bases=None):
+        self._profiles = profiles
+        self._api_bases = dict(api_bases or {})
+
+    def get_model_runtime_profile(self, model_key=None):
+        return self._profiles.get(str(model_key or "").strip())
+
+    def get_api_base(self, model_key=None):
+        return self._api_bases.get(str(model_key or "").strip())
+
+
+_DEEPSEEK_BASE = "https://api.deepseek.com/v1"
+
+
+def _poisoned_history():
+    """仿 DSH #11029 毒历史：缺字段 assistant 在历史中段（非末条），尾随 tool 结果。"""
+    return [
+        {"role": "system", "content": "你是 Negi"},
+        {"role": "user", "content": "查一下天气"},
+        {
+            "role": "assistant", "content": "", "reasoning_content": "先取日期",
+            "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "get_date", "arguments": "{}"}}],
+        },
+        {"role": "tool", "tool_call_id": "c1", "content": "2026-11-14"},
+        # 倒数第二条 assistant：带 tool_calls、缺 reasoning_content —— 实测触发校验的那条。
+        {
+            "role": "assistant", "content": "",
+            "tool_calls": [{"id": "c2", "type": "function", "function": {"name": "get_weather", "arguments": "{}"}}],
+        },
+        {"role": "tool", "tool_call_id": "c2", "content": "晴 7~13°C"},
+        {"role": "assistant", "content": "今天晴，7~13°C。"},
+    ]
+
+
+def test_pad_fills_every_missing_assistant_field_and_keeps_real_text() -> None:
+    rows = _poisoned_history()
+    padded = sanitize_provider_messages(rows, pad_reasoning=True)
+    assistants = [m for m in padded if m["role"] == "assistant"]
+    assert all("reasoning_content" in m for m in assistants)
+    assert assistants[0]["reasoning_content"] == "先取日期"  # 真文本原样，绝不截断
+    assert assistants[1]["reasoning_content"] == ""  # 中段缺字段补空
+    assert assistants[2]["reasoning_content"] == ""  # 轮末行也补
+    assert all("reasoning_content" not in m for m in padded if m["role"] != "assistant")
+    # 幂等：同一 pad 值再过一遍不变（诊断与线上体走同一投影）。
+    assert sanitize_provider_messages(padded, pad_reasoning=True) == padded
+    # pad=False 与今天逐字节一致：缺的仍缺。
+    plain = sanitize_provider_messages(rows)
+    assert "reasoning_content" not in plain[4]
+    assert plain == sanitize_provider_messages(plain)
+
+
+def test_pad_preserves_reasoning_items_and_whitespace_becomes_empty() -> None:
+    rows = [
+        {"role": "assistant", "content": "x", "reasoning_content": "   ", "reasoning_items": [_REASONING_ITEM]},
+        {"role": "assistant", "content": "y"},
+    ]
+    padded = sanitize_provider_messages(rows, pad_reasoning=True)
+    assert padded[0]["reasoning_content"] == ""
+    assert padded[0]["reasoning_items"] == [_REASONING_ITEM]
+    assert padded[1]["reasoning_content"] == ""
+    assert "reasoning_items" not in padded[1]
+
+
+def test_pad_predicate_is_target_scoped_and_fail_closed() -> None:
+    cfg = _PadStubConfig(
+        {"ds": _profile(True), "off": _profile(False), "other": _profile(True)},
+        {"ds": _DEEPSEEK_BASE, "off": _DEEPSEEK_BASE, "other": "https://api.example.com/v1"},
+    )
+    assert deepseek_reasoning_pad_required(cfg, "ds") is True
+    assert deepseek_reasoning_pad_required(cfg, "off") is False  # flag-off 绝不补
+    assert deepseek_reasoning_pad_required(cfg, "other") is False  # 非 DeepSeek 域
+    assert deepseek_reasoning_pad_required(cfg, "missing") is False  # profile 解析不到＝fail-closed
+    assert deepseek_reasoning_pad_required(cfg, "") is False
+    # target.api_base 优先（发送侧拿 target，合同侧拿 config，两者解析同一绑定）。
+    target = SimpleNamespace(api_base=_DEEPSEEK_BASE, model_id="deepseek-chat")
+    assert deepseek_reasoning_pad_required(_PadStubConfig({"ds": _profile(True)}, {}), "ds", target) is True
+    # 网关 served 的 DeepSeek 靠 wire 模型名盖住（本机 catalog 全走网关，host 不含 deepseek.com）。
+    gw_cfg = _PadStubConfig({"ds": _profile(True)}, {"ds": "https://gateway.internal/v1"})
+    ds_via_gw = SimpleNamespace(api_base="https://gateway.internal/v1", model_id="deepseek-v4-flash")
+    assert deepseek_reasoning_pad_required(gw_cfg, "ds", ds_via_gw) is True
+    # 名字误导但实跑 qwen 的绑定不补：wire 模型名才是判据，不是 binding key。
+    qwen_via_gw = SimpleNamespace(api_base="https://maas.aliyuncs.com/v1", model_id="qwen3.8-flash")
+    assert deepseek_reasoning_pad_required(gw_cfg, "ds", qwen_via_gw) is False
+    # 合同侧 target=None 经 resolve_chat_target 取模型名；stub 无 workspace_path ⇒ 解析失败 fail-closed。
+    assert deepseek_reasoning_pad_required(gw_cfg, "ds") is False
+    assert deepseek_api_base_family(_DEEPSEEK_BASE) is True
+    assert deepseek_api_base_family("https://api.example.com") is False
+    assert deepseek_api_base_family("") is False
+
+
+def test_pad_model_name_branch_is_same_source_between_send_and_contract(monkeypatch) -> None:
+    import main.runtime.chat_backend as cb
+
+    cfg = _PadStubConfig({"ds": _profile(True)}, {"ds": "https://gateway.internal/v1"})
+    monkeypatch.setattr(
+        cb, "resolve_chat_target", lambda config, ref: SimpleNamespace(resolved_model="deepseek-v4-flash")
+    )
+    send_side = SimpleNamespace(api_base="https://gateway.internal/v1", model_id="deepseek-v4-flash")
+    # 发送侧（target.model_id）与合同侧（resolver.resolved_model）必须同判。
+    assert cb.deepseek_reasoning_pad_required(cfg, "ds", send_side) is True
+    assert cb.deepseek_reasoning_pad_required(cfg, "ds") is True
+
+
+def test_pad_keeps_wire_hash_and_diagnostics_same_source() -> None:
+    rows = _poisoned_history()
+    padded = sanitize_provider_messages(rows, pad_reasoning=True)
+    direct = build_actual_request_diagnostics(request_messages=rows, pad_reasoning=True)
+    via_cache = build_prompt_cache_diagnostics(
+        stable_messages=rows, tool_schemas=None, provider_model="deepseek-chat",
+        scope="ceo_frontdoor", pad_reasoning=True,
+    )
+    assert direct["actual_request_hash"] == via_cache["actual_request_hash"]
+    # 哈希侧与线上体同源：诊断哈希 == 补空投影再诊断的哈希。
+    assert direct["actual_request_hash"] == build_actual_request_diagnostics(
+        request_messages=padded, pad_reasoning=True
+    )["actual_request_hash"]
+    # 补空改变字节：pad=True 与 pad=False 哈希不同（一次性缓存断点的来源）。
+    plain = build_actual_request_diagnostics(request_messages=rows, pad_reasoning=False)
+    assert plain["actual_request_hash"] != direct["actual_request_hash"]
+
+
+def test_frontdoor_contract_pads_projection_identically() -> None:
+    rows = _poisoned_history()
+    contract = build_frontdoor_prompt_contract(
+        scope="ceo_frontdoor", provider_model="deepseek-chat",
+        stable_messages=rows, dynamic_appendix_messages=[], tool_schemas=[],
+        cache_family_revision=None, pad_reasoning=True,
+    )
+    assistants = [m for m in contract.request_messages if m.get("role") == "assistant"]
+    assert assistants and all("reasoning_content" in m for m in assistants)
+    wire = build_actual_request_diagnostics(request_messages=rows, pad_reasoning=True)
+    assert contract.diagnostics["actual_request_hash"] == wire["actual_request_hash"]
+    plain = build_frontdoor_prompt_contract(
+        scope="ceo_frontdoor", provider_model="deepseek-chat",
+        stable_messages=rows, dynamic_appendix_messages=[], tool_schemas=[],
+        cache_family_revision=None,
+    )
+    plain_assistants = [m for m in plain.request_messages if m.get("role") == "assistant"]
+    assert "reasoning_content" not in plain_assistants[1]

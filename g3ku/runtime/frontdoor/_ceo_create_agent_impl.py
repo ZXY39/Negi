@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 from g3ku.core.messages import UserInputMessage
+from main.runtime.chat_backend import deepseek_reasoning_pad_required
 
 from ._ceo_runtime_ops import _NO_RESUME, CeoFrontDoorRuntimeOps
 from .prompt_cache_contract import DEFAULT_CACHE_FAMILY_REVISION, build_frontdoor_prompt_contract
@@ -332,9 +333,14 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         session_key: str | None = None,
         overlay_section_count: int | None = None,
     ):
+        pad_reasoning = deepseek_reasoning_pad_required(
+            self._frontdoor_runtime_config(),
+            str((list(state.get("model_refs") or []) or [""])[0] or "").strip(),
+        )
         return build_frontdoor_prompt_contract(
             scope="ceo_frontdoor",
             provider_model=provider_model,
+            pad_reasoning=pad_reasoning,
             stable_messages=self._stable_message_records_for_state(
                 state=state,
                 fallback_system_message=fallback_system_message,

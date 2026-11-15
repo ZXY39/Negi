@@ -41,7 +41,11 @@ from g3ku.runtime.web_ceo_sessions import (
 )
 from g3ku.utils.path_roots import pinned_read_roots
 from main.protocol import now_iso
-from main.runtime.chat_backend import ConfigChatBackend, sanitize_provider_messages
+from main.runtime.chat_backend import (
+    ConfigChatBackend,
+    deepseek_api_base_family,
+    sanitize_provider_messages,
+)
 from main.runtime.tool_call_repair import format_xml_repair_failure_reason
 from main.runtime.turn_overlay import (
     build_turn_only_system_note_message,
@@ -107,7 +111,10 @@ class _DirectProviderChatBackend:
                 await segment_result
         model = str(model_refs[0] if model_refs else "").strip() or None
         kwargs: dict[str, Any] = {
-            "messages": sanitize_provider_messages(messages),
+            "messages": sanitize_provider_messages(
+                messages,
+                pad_reasoning=deepseek_api_base_family(getattr(self._provider, "api_base", "")),
+            ),
             "tools": tools,
             "model": model,
             "tool_choice": "auto",

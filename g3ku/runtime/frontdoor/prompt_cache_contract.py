@@ -214,10 +214,11 @@ def build_frontdoor_prompt_contract(
     live_request_messages: list[dict[str, Any]] | None = None,
     overlay_text: str | None = None,
     overlay_section_count: int | None = None,
+    pad_reasoning: bool = False,
 ) -> FrontdoorPromptContract:
-    normalized_stable_messages = sanitize_provider_messages(stable_messages)
-    normalized_dynamic_appendix_messages = sanitize_provider_messages(dynamic_appendix_messages)
-    normalized_live_request_messages = sanitize_provider_messages(live_request_messages)
+    normalized_stable_messages = sanitize_provider_messages(stable_messages, pad_reasoning=pad_reasoning)
+    normalized_dynamic_appendix_messages = sanitize_provider_messages(dynamic_appendix_messages, pad_reasoning=pad_reasoning)
+    normalized_live_request_messages = sanitize_provider_messages(live_request_messages, pad_reasoning=pad_reasoning)
     normalized_scope = str(scope or "").strip()
     normalized_provider_model = str(provider_model or "").strip()
     normalized_cache_family_revision = (
@@ -263,6 +264,7 @@ def build_frontdoor_prompt_contract(
         cache_family_revision=normalized_cache_family_revision,
         actual_request_messages=normalized_request_messages,
         actual_tool_schemas=list(tool_schemas or []),
+        pad_reasoning=pad_reasoning,
     )
     return FrontdoorPromptContract(
         request_messages=normalized_request_messages,

@@ -49,6 +49,7 @@ from g3ku.security.content_policy import apply_content_policy
 from main.prompts import load_prompt
 from main.runtime.chat_backend import (
     build_actual_request_diagnostics,
+    deepseek_reasoning_pad_required,
     resolve_send_model_context_window_info,
 )
 from main.runtime.send_token_preflight import estimate_runtime_provider_request_preview_tokens
@@ -5621,6 +5622,10 @@ class MemoryManager:
             "actual_request_diagnostics": build_actual_request_diagnostics(
                 request_messages=request_messages,
                 tool_schemas=None,
+                pad_reasoning=deepseek_reasoning_pad_required(
+                    self.config,
+                    str((list(model_chain or []) or [""])[0] or "").strip(),
+                ),
             ),
             "provider_request_id": provider_metadata["provider_request_id"],
             "provider_request_meta": provider_metadata["provider_request_meta"],

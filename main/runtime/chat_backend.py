@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Protocol
+from urllib.parse import urlparse
 
 from loguru import logger
 
@@ -18,6 +19,7 @@ from g3ku.config.schema import (
     normalize_reasoning_effort,
 )
 from g3ku.json_schema_utils import normalize_openai_tool_definitions
+from g3ku.llm_config.runtime_resolver import resolve_chat_target
 from g3ku.prompt_trace import render_model_chain_trace
 from g3ku.providers.base import LLMModelAttempt, LLMResponse, normalize_usage_payload
 from g3ku.providers.fallback import (
@@ -255,6 +257,7 @@ def build_send_provider_request_preview(
     reasoning_effort: str | None = None,
     parallel_tool_calls: bool | None = None,
     prompt_cache_key: str | None = None,
+    pad_reasoning: bool | None = None,
 ) -> dict[str, Any]:
     """
     Shared provider-request preview surface for node/runtime sends.
@@ -267,7 +270,12 @@ def build_send_provider_request_preview(
     if not refs:
         raise ValueError("model_refs must not be empty")
     target = build_provider_from_model_key(config, refs[0])
-    request_messages = sanitize_provider_messages(messages)
+    pad = (
+        deepseek_reasoning_pad_required(config, refs[0], target)
+        if pad_reasoning is None
+        else bool(pad_reasoning)
+    )
+    request_messages = sanitize_provider_messages(messages, pad_reasoning=pad)
     normalized_tools = normalize_openai_tool_definitions(tools)
     stable_prompt_cache_key = str(
         prompt_cache_key
@@ -327,15 +335,15 @@ def _message_content_signature(message: dict) -> str:
     return _json_compact(content)
 
 
-def _dynamic_appendix_hash(messages: list[dict[str, Any]] | None) -> str:
-    normalized = sanitize_provider_messages(messages)
+def _dynamic_appendix_hash(messages: list[dict[str, Any]] | None, *, pad_reasoning: bool = False) -> str:
+    normalized = sanitize_provider_messages(messages, pad_reasoning=pad_reasoning)
     if not normalized:
         return ''
     return hashlib.sha256(_json_compact(normalized).encode('utf-8')).hexdigest()
 
 
-def _request_messages_hash(messages: list[dict[str, Any]] | None) -> str:
-    normalized = sanitize_provider_messages(messages)
+def _request_messages_hash(messages: list[dict[str, Any]] | None, *, pad_reasoning: bool = False) -> str:
+    normalized = sanitize_provider_messages(messages, pad_reasoning=pad_reasoning)
     if not normalized:
         return ''
     return hashlib.sha256(_json_compact(normalized).encode('utf-8')).hexdigest()
@@ -374,7 +382,11 @@ def _normalize_provider_tool_calls(tool_calls: Any) -> list[dict[str, Any]]:
     return normalized
 
 
-def sanitize_provider_messages(messages: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+def sanitize_provider_messages(
+    messages: list[dict[str, Any]] | None,
+    *,
+    pad_reasoning: bool = False,
+) -> list[dict[str, Any]]:
     sanitized: list[dict[str, Any]] = []
     for item in list(messages or []):
         if not isinstance(item, dict):
@@ -399,12 +411,15 @@ def sanitize_provider_messages(messages: list[dict[str, Any]] | None) -> list[di
             continue
         if role == 'assistant':
             payload['content'] = content
-            # 思考内容按原位置随行重发。这里不带模型策略参数、只做无条件透传，是为了让
-            # actual_request_hash / dynamic_appendix_hash / preflight 估算与线上体同源；
-            # 决定「写不写进行」的闸门在落盘点，不在这条咽喉点。
+            # 真思考按原位置随行无条件透传；决定「写不写进行」的闸门在落盘点。
+            # pad_reasoning 是目标族投影（DeepSeek 思考模式只查字段存在、不查内容）：
+            # 缺字段补 ""。哈希 / preflight / 线上体必须同值传入以保持同源，绝不在此
+            # 按模型自行判定。
             reasoning = item.get('reasoning_content')
             if isinstance(reasoning, str) and reasoning.strip():
                 payload['reasoning_content'] = reasoning
+            elif pad_reasoning:
+                payload['reasoning_content'] = ''
             reasoning_items = [
                 entry
                 for entry in list(item.get('reasoning_items') or [])
@@ -412,9 +427,6 @@ def sanitize_provider_messages(messages: list[dict[str, Any]] | None) -> list[di
             ]
             if reasoning_items:
                 payload['reasoning_items'] = reasoning_items
-            # 思考内容按原位置随行重发。这里不带模型策略参数、只做无条件透传，是为了让
-            # actual_request_hash / dynamic_appendix_hash / preflight 估算与线上体同源；
-            # 决定「写不写进行」的闸门在落盘点，不在这条咽喉点。
             tool_calls = _normalize_provider_tool_calls(item.get('tool_calls'))
             if tool_calls:
                 payload['tool_calls'] = tool_calls
@@ -461,6 +473,54 @@ def model_chain_replays_reasoning(config: Config, model_refs: list[str] | None) 
         if profile is None or not bool(getattr(profile, 'reasoning_context_enabled', False)):
             return False
     return True
+
+
+def deepseek_api_base_family(api_base: Any) -> bool:
+    """api_base 是否落在 DeepSeek 官方域（思考模式硬合同的目标族判据）。"""
+    host = (urlparse(str(api_base or '').strip()).hostname or '').lower()
+    return 'deepseek.com' in host
+
+
+def deepseek_reasoning_pad_required(
+    config: Config,
+    model_ref: str | None,
+    target: Any = None,
+) -> bool:
+    """这一发要不要给 assistant 行补空 reasoning_content：目标族是 DeepSeek 且绑定不拒收。
+
+    DeepSeek 思考模式（默认开）对带 tools 的请求硬校验历史每条 assistant 行带
+    reasoning_content，但只查字段存在、不查内容（DSH #11029 / OpenClaw #71050 实测）。
+    补空目标限定：flag-off 绑定语义是「网关拒收该字段」，一个字段都不加；profile 解析
+    不到按关处理（fail-closed，与写入闸门同口径）。判定结果必须同值喂给哈希 / preflight /
+    线上体三处投影，绝不各算各的。目标族＝api_base 官方域 OR wire 模型名以 deepseek 起头
+    （后者盖住经网关 served 的 DeepSeek——本机 catalog 全走网关）；发送侧取 target.model_id、
+    合同侧经 resolve_chat_target 取同一 resolved_model，两者同源。flag-off 与解析失败一律不补。
+    """
+    ref = str(model_ref or '').strip()
+    if not ref:
+        return False
+    profile_of = getattr(config, 'get_model_runtime_profile', None)
+    if not callable(profile_of):
+        return False
+    profile = profile_of(ref)
+    if profile is None or not bool(getattr(profile, 'reasoning_context_enabled', False)):
+        return False
+    api_base = str(getattr(target, 'api_base', '') or '').strip()
+    if not api_base:
+        api_base = str(getattr(getattr(target, 'provider', None), 'api_base', '') or '').strip()
+    if not api_base:
+        getter = getattr(config, 'get_api_base', None)
+        if callable(getter):
+            api_base = str(getter(ref) or '').strip()
+    if deepseek_api_base_family(api_base):
+        return True
+    model_id = str(getattr(target, 'model_id', '') or '').strip()
+    if not model_id:
+        try:
+            model_id = str(resolve_chat_target(config, ref).resolved_model or '').strip()
+        except Exception:
+            return False
+    return model_id.lower().startswith('deepseek')
 
 
 def _tool_signature(tools: list[dict] | None) -> list[dict[str, object]]:
@@ -531,10 +591,11 @@ def build_actual_request_diagnostics(
     *,
     request_messages: list[dict[str, Any]] | None,
     tool_schemas: list[dict[str, Any]] | None = None,
+    pad_reasoning: bool = False,
 ) -> dict[str, object]:
-    normalized_request_messages = sanitize_provider_messages(request_messages)
+    normalized_request_messages = sanitize_provider_messages(request_messages, pad_reasoning=pad_reasoning)
     return {
-        'actual_request_hash': _request_messages_hash(normalized_request_messages),
+        'actual_request_hash': _request_messages_hash(normalized_request_messages, pad_reasoning=pad_reasoning),
         'actual_request_message_count': len(normalized_request_messages),
         'actual_tool_schema_hash': _tool_signature_hash(tool_schemas),
     }
@@ -577,6 +638,7 @@ def build_prompt_cache_diagnostics(
     prefix_invalidation_reason: str | None = None,
     actual_request_messages: list[dict] | None = None,
     actual_tool_schemas: list[dict] | None = None,
+    pad_reasoning: bool = False,
 ) -> dict[str, object]:
     normalized_messages = list(stable_messages or [])
     normalized_tools = list(tool_schemas or []) or None
@@ -586,7 +648,7 @@ def build_prompt_cache_diagnostics(
         for section in normalized_overlay.split('\n\n')
         if section.strip()
     ]
-    normalized_dynamic_messages = sanitize_provider_messages(dynamic_appendix_messages)
+    normalized_dynamic_messages = sanitize_provider_messages(dynamic_appendix_messages, pad_reasoning=pad_reasoning)
     if not normalized_dynamic_messages and normalized_overlay:
         normalized_dynamic_messages = [
             {
@@ -602,18 +664,20 @@ def build_prompt_cache_diagnostics(
     )
     resolved_dynamic_appendix_hash = (
         str(dynamic_appendix_hash or '').strip()
-        or _dynamic_appendix_hash(normalized_dynamic_messages)
+        or _dynamic_appendix_hash(normalized_dynamic_messages, pad_reasoning=pad_reasoning)
     )
     normalized_actual_request_messages = sanitize_provider_messages(
         actual_request_messages
         if actual_request_messages is not None
-        else [*normalized_messages, *normalized_dynamic_messages]
+        else [*normalized_messages, *normalized_dynamic_messages],
+        pad_reasoning=pad_reasoning,
     )
     normalized_actual_tool_schemas = list(actual_tool_schemas or normalized_tools or []) or None
     tool_signature_hash = _tool_signature_hash(normalized_tools)
     actual_request_diagnostics = build_actual_request_diagnostics(
         request_messages=normalized_actual_request_messages,
         tool_schemas=normalized_actual_tool_schemas,
+        pad_reasoning=pad_reasoning,
     )
     return {
         'scope': str(scope or '').strip(),
@@ -1686,6 +1750,7 @@ class ConfigChatBackend:
                 # 改值时这一发才追得上。
                 budget_rounds = _model_round_budget(route_slot, base_target)
                 model_retry_on = list(getattr(base_target, "retry_on", []) or [])
+                pad_reasoning = deepseek_reasoning_pad_required(self._config, ref, base_target)
                 preview_payload = build_send_provider_request_preview(
                     config=self._config,
                     messages=messages,
@@ -1697,8 +1762,11 @@ class ConfigChatBackend:
                     reasoning_effort=reasoning_effort,
                     parallel_tool_calls=parallel_tool_calls,
                     prompt_cache_key=prompt_cache_key,
+                    pad_reasoning=pad_reasoning,
                 )
-                request_messages = sanitize_provider_messages(preview_payload.get("messages"))
+                request_messages = sanitize_provider_messages(
+                    preview_payload.get("messages"), pad_reasoning=pad_reasoning
+                )
                 request_tools = list(preview_payload.get("tools") or []) or None
                 # 图片能力按**这一发落到的这颗模型**判：装配层（前门/节点拼图道）手里有上传
                 # 路径，能就地给出"路径 + 原因"；这里兜住其余车道与"链前进到不收图的成员"。

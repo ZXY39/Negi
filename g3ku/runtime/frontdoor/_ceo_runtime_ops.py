@@ -183,6 +183,7 @@ from main.runtime import mid_insert as _mid_insert
 from main.runtime.chat_backend import (
     build_actual_request_diagnostics,
     build_prompt_cache_diagnostics,
+    deepseek_reasoning_pad_required,
     resolve_send_model_context_window_info,
 )
 from main.runtime.internal_tools import ScheduleWakeTool, SilentTool, TimeTool
@@ -3229,6 +3230,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     prompt_cache_key="",
                     actual_request_messages=list(messages),
                     actual_tool_schemas=[],
+                    pad_reasoning=deepseek_reasoning_pad_required(
+                        self._frontdoor_runtime_config(),
+                        str((list(current_model_refs or []) or [""])[0] or "").strip(),
+                    ),
                 ),
                 parallel_tool_calls=None,
                 provider_request_meta=(
@@ -9255,9 +9260,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 )
                 if seeded_provider_tool_names:
                     runtime_visible_tool_names = list(seeded_provider_tool_names)
+        pad_reasoning = deepseek_reasoning_pad_required(
+            self._frontdoor_runtime_config(),
+            str((list(state.get("model_refs") or []) or [""])[0] or "").strip(),
+        )
         contract = build_frontdoor_prompt_contract(
             scope=prompt_scope,
             provider_model=provider_model,
+            pad_reasoning=pad_reasoning,
             stable_messages=stable_messages,
             dynamic_appendix_messages=dynamic_appendix_messages,
             live_request_messages=live_request_messages,
