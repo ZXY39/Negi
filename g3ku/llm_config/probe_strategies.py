@@ -214,28 +214,28 @@ def _build_openai_fallback_payload(config: NormalizedProviderConfig) -> tuple[st
     return "/chat/completions", payload
 
 
-def _protocol_url_mismatch_hint(config: NormalizedProviderConfig) -> str:
-    """协议与请求地址明显错配时给一条可操作提示（防呆）。
+def _protocol_url_mismatch_hint(config: NormalizedProviderConfig, http_status: int | None = None) -> str:
+    """协议与请求地址错配的通用防呆提示（不绑定具体网关）。
 
-    不做静默自动转换：OpenAI 与 Anthropic 在网关上是不同 API 根（百炼 compatible-mode/v1
-    vs apps/anthropic），无法通用互转，静默改写会掩盖配置错误。改为在探测失败时点明错配，
-    让操作员按所选协议改对地址。
+    探测失败（尤其 404/400 这类路径/形状错误）时点明所选协议对应的端点，提示核对地址与
+    协议匹配。不做静默 URL 自动转换：不同网关的 OpenAI/Anthropic 端点根路径不同，无法通用
+    互转，静默改写会掩盖配置错误。鉴权类失败（401/403）不追加此提示。
     """
-    base = str(config.base_url or "").lower().rstrip("/")
+    if http_status is not None and http_status not in (400, 404):
+        return ""
     adapter = config.protocol_adapter
     if adapter == ProtocolAdapter.ANTHROPIC_MESSAGES:
-        if "compatible-mode" in base or base.endswith("/chat/completions"):
-            return (
-                " 防呆提示：所选协议是 Anthropic，但地址像 OpenAI 端点。百炼 Anthropic 协议请用 "
-                "https://dashscope.aliyuncs.com/apps/anthropic（compatible-mode/v1 是 OpenAI 端点，"
-                "Anthropic 请求发到那里会 404）。"
-            )
-    elif adapter in (ProtocolAdapter.OPENAI_COMPLETIONS, ProtocolAdapter.OPENAI_RESPONSES):
-        if "apps/anthropic" in base or base.endswith("/messages"):
-            return (
-                " 防呆提示：所选协议是 OpenAI，但地址像 Anthropic 端点。百炼 OpenAI 协议请用 "
-                "https://dashscope.aliyuncs.com/compatible-mode/v1（apps/anthropic 是 Anthropic 端点）。"
-            )
+        return (
+            " 防呆提示：Anthropic 协议请求 /v1/messages 端点。若 base_url 指向 OpenAI 兼容端点"
+            "（/chat/completions）会 404；请确认地址与所选协议匹配。"
+        )
+    if adapter == ProtocolAdapter.OPENAI_COMPLETIONS:
+        return (
+            " 防呆提示：Chat Completions 协议请求 /chat/completions 端点。若 base_url 指向 Anthropic"
+            " 端点（/v1/messages）会 404；请确认地址与所选协议匹配。"
+        )
+    if adapter == ProtocolAdapter.OPENAI_RESPONSES:
+        return " 防呆提示：Responses 协议请求 /responses 端点。请确认 base_url 与所选协议匹配。"
     return ""
 
 
@@ -296,7 +296,7 @@ def _probe_openai_inference_envelope(
         status=ProbeStatus.INVALID_RESPONSE,
         http_status=http_status,
         latency_ms=int((time.perf_counter() - start) * 1000),
-        message=f"{label} request failed: {detail}{_protocol_url_mismatch_hint(config)}",
+        message=f"{label} request failed: {detail}{_protocol_url_mismatch_hint(config, http_status)}",
         diagnostics={**(extra_diagnostics or {}), "upstream_detail": detail},
     )
 

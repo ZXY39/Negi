@@ -638,7 +638,7 @@ def test_anthropic_converter_isolates_own_field():
 def test_protocol_url_mismatch_hint():
     from g3ku.llm_config.probe_strategies import _protocol_url_mismatch_hint
 
-    def _cfg(provider_id, base_url):
+    def _cfg(provider_id, base_url="https://example.com/v1"):
         draft = ProviderConfigDraft(
             provider_id=provider_id, api_key="sk-x", base_url=base_url,
             default_model="m", parameters={"context_window_tokens": 200000},
@@ -647,12 +647,12 @@ def test_protocol_url_mismatch_hint():
         assert not errors
         return normalized
 
-    # Anthropic 协议 + OpenAI 地址 → 提示改 apps/anthropic。
-    hint = _protocol_url_mismatch_hint(_cfg("anthropic", "https://dashscope.aliyuncs.com/compatible-mode/v1"))
-    assert "apps/anthropic" in hint
-    # OpenAI 协议 + Anthropic 地址 → 提示改 compatible-mode。
-    hint2 = _protocol_url_mismatch_hint(_cfg("openai", "https://dashscope.aliyuncs.com/apps/anthropic"))
-    assert "compatible-mode" in hint2
-    # 正确配置 → 无提示。
-    assert _protocol_url_mismatch_hint(_cfg("anthropic", "https://dashscope.aliyuncs.com/apps/anthropic")) == ""
-    assert _protocol_url_mismatch_hint(_cfg("openai", "https://dashscope.aliyuncs.com/compatible-mode/v1")) == ""
+    # 通用：不绑定具体网关，按协议点明端点。404/400 触发，鉴权/服务端错误不触发。
+    assert "/v1/messages" in _protocol_url_mismatch_hint(_cfg("anthropic"), 404)
+    assert "/chat/completions" in _protocol_url_mismatch_hint(_cfg("openai"), 404)
+    assert "/responses" in _protocol_url_mismatch_hint(_cfg("responses"), 400)
+    assert _protocol_url_mismatch_hint(_cfg("anthropic"), 500) == ""
+    assert _protocol_url_mismatch_hint(_cfg("anthropic"), 401) == ""
+    # 不含百炼特定 URL。
+    assert "dashscope" not in _protocol_url_mismatch_hint(_cfg("anthropic"), 404)
+    assert "compatible-mode" not in _protocol_url_mismatch_hint(_cfg("anthropic"), 404)
