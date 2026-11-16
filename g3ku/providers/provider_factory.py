@@ -152,6 +152,8 @@ def build_provider_from_model_key(
             auth_header=bool(model_parameters.get('auth_header', False)),
             thinking_mode=str(anthropic_options.get('thinking_mode', 'budget')),
             cache_control=bool(anthropic_options.get('cache_control', False)),
+            reasoning_input_mode=str(model_parameters.get('reasoning_input_mode', 'level')),
+            reasoning_budget_tokens=model_parameters.get('reasoning_budget_tokens'),
         )
     else:
         raise ValueError(

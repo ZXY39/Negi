@@ -68,6 +68,19 @@ def _runtime_model_parameters(parameters: dict[str, Any] | None) -> dict[str, An
     # 只供 provider 构造读，_resolve_model_request_parameters 不会把它带进请求体。
     if "auth_header" in payload:
         result["auth_header"] = bool(payload.get("auth_header"))
+    # Anthropic 思考输入模式（level 档位 / token 自填预算）与自定义预算。同样只供 provider
+    # 构造读，不进请求体参数解析。token 值切回 level 时保留不生效（前端不清空）。
+    raw_input_mode = str(payload.get("reasoning_input_mode") or "").strip().lower()
+    if raw_input_mode in ("level", "token"):
+        result["reasoning_input_mode"] = raw_input_mode
+    raw_budget = payload.get("reasoning_budget_tokens")
+    if raw_budget not in (None, ""):
+        try:
+            budget = int(raw_budget)
+        except (TypeError, ValueError):
+            budget = 0
+        if budget > 0:
+            result["reasoning_budget_tokens"] = budget
     return result
 
 

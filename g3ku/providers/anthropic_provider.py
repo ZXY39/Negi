@@ -72,24 +72,42 @@ def _anthropic_tool_choice(tool_choice: Any) -> dict[str, Any]:
 # Negi 六档思考力度 → Anthropic thinking 预算（budget 模式，官方与百炼 qwen 通用）。
 _THINKING_BUDGETS = {"low": 2048, "medium": 8192, "high": 16384, "xhigh": 32768, "max": 65536}
 _EFFORT_LEVELS = {"low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": "max"}
+# Token 模式默认预算取 medium 档（用户切到 Token 自填时的初值）。
+DEFAULT_REASONING_BUDGET_TOKENS = _THINKING_BUDGETS["medium"]
 
 
 def _build_thinking(
-    reasoning_effort: str | None, max_tokens: int | None, thinking_mode: str
+    reasoning_effort: str | None,
+    max_tokens: int | None,
+    thinking_mode: str,
+    reasoning_input_mode: str = "level",
+    reasoning_budget_tokens: int | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     """Return (thinking, output_config) for the Anthropic request body.
 
-    - budget（默认）：thinking.enabled + budget_tokens，官方与百炼 qwen 都支持。
-    - effort：thinking.enabled + output_config.effort（百炼推荐，budget_tokens 将废弃）。
-    none/空 → thinking.disabled。budget 须 < max_tokens（Anthropic 硬合同），夹一刀。
+    输入模式（reasoning_input_mode）：
+    - level（默认）：六档 reasoning_effort 映射。budget 模式 thinking.enabled+budget_tokens；
+      effort 模式 thinking.enabled+output_config.effort。none/空 → disabled。
+    - token：用户自填 budget_tokens（默认 medium=8192），忽略档位；<=0 → disabled。
+      token 模式本质是预算制，恒走 budget_tokens（不走 effort）。
+    budget 须 < max_tokens（Anthropic 硬合同），夹到 max_tokens-1024、下限 1024。
     """
+    cap = max(1, int(max_tokens)) if max_tokens is not None else _DEFAULT_MAX_TOKENS
+    if str(reasoning_input_mode or "level").strip().lower() == "token":
+        try:
+            budget = int(reasoning_budget_tokens)
+        except (TypeError, ValueError):
+            budget = 0
+        if budget <= 0:
+            return {"type": "disabled"}, None
+        budget = max(1024, min(budget, cap - 1024))
+        return {"type": "enabled", "budget_tokens": budget}, None
     level = str(reasoning_effort or "").strip().lower()
     if not level or level == "none":
         return {"type": "disabled"}, None
     if thinking_mode == "effort":
         return {"type": "enabled"}, {"effort": _EFFORT_LEVELS.get(level, "high")}
     budget = _THINKING_BUDGETS.get(level, 8192)
-    cap = max(1, int(max_tokens)) if max_tokens is not None else _DEFAULT_MAX_TOKENS
     budget = max(1024, min(budget, cap - 1024))
     return {"type": "enabled", "budget_tokens": budget}, None
 
@@ -179,6 +197,8 @@ class AnthropicProvider(LLMProvider):
         auth_header: bool = False,
         thinking_mode: str = "budget",
         cache_control: bool = False,
+        reasoning_input_mode: str = "level",
+        reasoning_budget_tokens: int | None = None,
     ):
         super().__init__(api_key=api_key, api_base=api_base)
         self.default_model = default_model
@@ -186,6 +206,8 @@ class AnthropicProvider(LLMProvider):
         self.auth_header = bool(auth_header)
         self.thinking_mode = str(thinking_mode or "budget").strip().lower()
         self.cache_control = bool(cache_control)
+        self.reasoning_input_mode = str(reasoning_input_mode or "level").strip().lower()
+        self.reasoning_budget_tokens = reasoning_budget_tokens
 
     @property
     def manages_request_timeout_internally(self) -> bool:
@@ -228,7 +250,10 @@ class AnthropicProvider(LLMProvider):
             raise ValueError("Missing API key for Anthropic provider; refusing to send an empty x-api-key header.")
 
         resolved_max_tokens = max(1, int(max_tokens)) if max_tokens is not None else _DEFAULT_MAX_TOKENS
-        thinking, output_config = _build_thinking(reasoning_effort, resolved_max_tokens, self.thinking_mode)
+        thinking, output_config = _build_thinking(
+            reasoning_effort, resolved_max_tokens, self.thinking_mode,
+            self.reasoning_input_mode, self.reasoning_budget_tokens,
+        )
         system_text, input_messages = _convert_messages(messages, model=model, cache_control=self.cache_control)
         body: dict[str, Any] = {
             "model": model,

@@ -7997,6 +7997,35 @@ textarea {
     grid-template-columns: minmax(0, 1fr);
 }
 
+.llm-reasoning-label-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+}
+.llm-reasoning-mode-toggle {
+    display: inline-flex;
+    flex: none;
+    border: 1px solid color-mix(in srgb, var(--text-secondary) 30%, transparent);
+    border-radius: 6px;
+    overflow: hidden;
+}
+.llm-reasoning-mode-btn {
+    appearance: none;
+    border: 0;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1;
+    padding: 3px 9px;
+    cursor: pointer;
+}
+.llm-reasoning-mode-btn.is-active {
+    background: var(--brand-primary);
+    color: var(--text-inverse);
+    font-weight: 600;
+}
+
 .llm-image-checkbox-field {
     min-width: 0;
     justify-content: flex-end;

@@ -15,6 +15,9 @@
     xhigh: "xhigh（更深思考）",
     max: "max（最强思考）",
   };
+  // Anthropic 深度思考输入模式：level 走六档映射，token 自填预算。Token 初值取 medium 档。
+  const DEFAULT_REASONING_INPUT_MODE = "level";
+  const DEFAULT_REASONING_BUDGET_TOKENS = 8192;
   const SCOPE_LABELS = { ceo: "主Agent", execution: "执行Agent", inspection: "检验Agent", memory: "记忆Agent" };
 
 
@@ -48,6 +51,10 @@
       initialImageMultimodalEnabled: false,
       reasoningEffort: DEFAULT_REASONING_EFFORT,
       initialReasoningEffort: DEFAULT_REASONING_EFFORT,
+      reasoningInputMode: DEFAULT_REASONING_INPUT_MODE,
+      initialReasoningInputMode: DEFAULT_REASONING_INPUT_MODE,
+      reasoningBudgetTokens: String(DEFAULT_REASONING_BUDGET_TOKENS),
+      initialReasoningBudgetTokens: String(DEFAULT_REASONING_BUDGET_TOKENS),
       maxOutputTokens: String(DEFAULT_MAX_OUTPUT_TOKENS),
       initialMaxOutputTokens: String(DEFAULT_MAX_OUTPUT_TOKENS),
       requestTimeoutSeconds: "",
@@ -466,6 +473,10 @@
       initialImageMultimodalEnabled: false,
       reasoningEffort: validReasoningEffortValue(draft?.parameters?.reasoning_effort) || DEFAULT_REASONING_EFFORT,
       initialReasoningEffort: validReasoningEffortValue(draft?.parameters?.reasoning_effort) || DEFAULT_REASONING_EFFORT,
+      reasoningInputMode: reasoningInputModeFromDraft(draft),
+      initialReasoningInputMode: reasoningInputModeFromDraft(draft),
+      reasoningBudgetTokens: reasoningBudgetTextFromDraft(draft),
+      initialReasoningBudgetTokens: reasoningBudgetTextFromDraft(draft),
       maxOutputTokens: Number.isInteger(validMaxOutputTokensValue(draft?.parameters?.max_tokens))
         ? String(validMaxOutputTokensValue(draft?.parameters?.max_tokens))
         : String(DEFAULT_MAX_OUTPUT_TOKENS),
@@ -531,6 +542,10 @@
       initialImageMultimodalEnabled: Boolean(binding.image_multimodal_enabled),
       reasoningEffort: validReasoningEffortValue(draft?.parameters?.reasoning_effort) || DEFAULT_REASONING_EFFORT,
       initialReasoningEffort: validReasoningEffortValue(draft?.parameters?.reasoning_effort) || DEFAULT_REASONING_EFFORT,
+      reasoningInputMode: reasoningInputModeFromDraft(draft),
+      initialReasoningInputMode: reasoningInputModeFromDraft(draft),
+      reasoningBudgetTokens: reasoningBudgetTextFromDraft(draft),
+      initialReasoningBudgetTokens: reasoningBudgetTextFromDraft(draft),
       maxOutputTokens: Number.isInteger(validMaxOutputTokensValue(draft?.parameters?.max_tokens))
         ? String(validMaxOutputTokensValue(draft?.parameters?.max_tokens))
         : String(DEFAULT_MAX_OUTPUT_TOKENS),
@@ -583,6 +598,7 @@
     const contextWindowTokensInput = document.getElementById("llm-binding-context-window-tokens");
     const imageMultimodalEnabledInput = document.getElementById("llm-binding-image-multimodal-enabled");
     const reasoningEffortInput = document.getElementById("llm-binding-reasoning-effort");
+    const reasoningBudgetInput = document.getElementById("llm-binding-reasoning-budget");
     const maxOutputTokensInput = document.getElementById("llm-binding-max-output-tokens");
     const requestTimeoutSecondsInput = document.getElementById("llm-binding-request-timeout-seconds");
     if (modelKeyInput) editor.modelKey = trim(modelKeyInput.value || editor.modelKey);
@@ -606,6 +622,8 @@
     if (contextWindowTokensInput) editor.contextWindowTokens = trim(contextWindowTokensInput.value || "");
     if (imageMultimodalEnabledInput) editor.imageMultimodalEnabled = Boolean(imageMultimodalEnabledInput.checked);
     if (reasoningEffortInput) editor.reasoningEffort = trim(reasoningEffortInput.value || "");
+    // Token 输入仅在 token 模式渲染；level 模式下元素不存在，editor.reasoningBudgetTokens 保留原值（不生效但不清空）。
+    if (reasoningBudgetInput) editor.reasoningBudgetTokens = trim(reasoningBudgetInput.value || "");
     if (maxOutputTokensInput) editor.maxOutputTokens = trim(maxOutputTokensInput.value || "");
     if (requestTimeoutSecondsInput) editor.requestTimeoutSeconds = trim(requestTimeoutSecondsInput.value || "");
     return editor;
@@ -655,6 +673,15 @@
   function validReasoningEffortValue(raw) {
     const value = trim(raw).toLowerCase();
     return REASONING_EFFORT_LEVELS.includes(value) ? value : null;
+  }
+
+  function reasoningInputModeFromDraft(draft) {
+    return draft?.parameters?.reasoning_input_mode === "token" ? "token" : DEFAULT_REASONING_INPUT_MODE;
+  }
+
+  function reasoningBudgetTextFromDraft(draft) {
+    const raw = Number(draft?.parameters?.reasoning_budget_tokens);
+    return String(Number.isInteger(raw) && raw > 0 ? raw : DEFAULT_REASONING_BUDGET_TOKENS);
   }
 
   function validMaxOutputTokensValue(raw) {
@@ -1183,6 +1210,21 @@
     draft.parameters = draft.parameters && typeof draft.parameters === "object" && !Array.isArray(draft.parameters) ? draft.parameters : {};
     draft.parameters.context_window_tokens = contextWindowTokens;
     draft.parameters.reasoning_effort = reasoningEffort;
+    // Anthropic 思考输入模式（档位/Token）与自定义预算。token 值切回档位时保留不生效，
+    // 故两字段恒落盘（budget 缺省取 medium=8192），由 provider 按 mode 决定哪个生效。
+    if (trim(editor?.providerId) === "anthropic") {
+      draft.parameters.reasoning_input_mode = editor?.reasoningInputMode === "token" ? "token" : "level";
+      const budgetRaw = trim(editor?.reasoningBudgetTokens);
+      let budget = DEFAULT_REASONING_BUDGET_TOKENS;
+      if (budgetRaw) {
+        const parsedBudget = parseTokenScaleValue(budgetRaw);
+        if (!Number.isInteger(parsedBudget) || parsedBudget < 1) {
+          throw new Error("思考预算Token必须是不小于 1 的整数（或带 K / M，如 8K）");
+        }
+        budget = parsedBudget;
+      }
+      draft.parameters.reasoning_budget_tokens = budget;
+    }
     draft.parameters.max_tokens = maxOutputTokens;
     if (requestTimeoutSeconds === null) {
       delete draft.parameters.request_timeout_seconds;
@@ -1294,13 +1336,33 @@
 
   function renderReasoningField(editor) {
     const value = validReasoningEffortValue(editor?.reasoningEffort) || DEFAULT_REASONING_EFFORT;
-    return `
-        <label class="resource-field">
-          <span class="resource-field-label">深度思考（Reasoning Effort）</span>
+    const selectHtml = `
           <select id="llm-binding-reasoning-effort" class="resource-search resource-select" data-resource-select-label="Reasoning effort" data-resource-select-portal="true">
             ${REASONING_EFFORT_LEVELS.map((level) => `<option value="${escv(level)}"${level === value ? " selected" : ""}>${escv(REASONING_EFFORT_LABELS[level] || level)}</option>`).join("")}
-          </select>
+          </select>`;
+    // 档位/Token 切换仅 Anthropic 有预算 token 概念；其余协议保持档位下拉。
+    if (trim(editor?.providerId) !== "anthropic") {
+      return `
+        <label class="resource-field">
+          <span class="resource-field-label">深度思考（Reasoning Effort）</span>
+          ${selectHtml}
         </label>`;
+    }
+    const mode = editor?.reasoningInputMode === "token" ? "token" : "level";
+    const budgetValue = trim(editor?.reasoningBudgetTokens) || String(DEFAULT_REASONING_BUDGET_TOKENS);
+    const toggleHtml = `
+          <span class="llm-reasoning-mode-toggle" role="group" aria-label="思考预算输入模式">
+            <button type="button" class="llm-reasoning-mode-btn${mode === "level" ? " is-active" : ""}" data-llm-action="set-reasoning-mode" data-reasoning-mode="level" aria-pressed="${mode === "level"}">档位</button>
+            <button type="button" class="llm-reasoning-mode-btn${mode === "token" ? " is-active" : ""}" data-llm-action="set-reasoning-mode" data-reasoning-mode="token" aria-pressed="${mode === "token"}">Token</button>
+          </span>`;
+    const inputHtml = mode === "token"
+      ? `<input id="llm-binding-reasoning-budget" class="resource-search" type="text" inputmode="numeric" autocomplete="off" value="${escv(budgetValue)}" placeholder="默认 ${DEFAULT_REASONING_BUDGET_TOKENS}（medium），支持 8K" title="自定义思考预算 token 数，须小于最大输出TOKEN。切回档位时此值保留但不生效。">`
+      : selectHtml;
+    return `
+        <div class="resource-field">
+          <span class="resource-field-label llm-reasoning-label-row"><span>深度思考（Reasoning Effort）</span>${toggleHtml}</span>
+          ${inputHtml}
+        </div>`;
   }
 
   function renderMaxOutputTokensField(editor) {
@@ -1755,6 +1817,8 @@
     draft = withThinkingOutputParameterDefaults(draft);
     state.editor.jsonText = JSON.stringify(draft, null, 2);
     state.editor.reasoningEffort = validReasoningEffortValue(draft?.parameters?.reasoning_effort) || DEFAULT_REASONING_EFFORT;
+    state.editor.reasoningInputMode = reasoningInputModeFromDraft(draft);
+    state.editor.reasoningBudgetTokens = reasoningBudgetTextFromDraft(draft);
     state.editor.maxOutputTokens = Number.isInteger(validMaxOutputTokensValue(draft?.parameters?.max_tokens))
       ? String(validMaxOutputTokensValue(draft?.parameters?.max_tokens))
       : String(DEFAULT_MAX_OUTPUT_TOKENS);
@@ -2341,6 +2405,15 @@
       if (action === "hide-api-key") { hideEditorApiKey(); return; }
       if (action === "close") { closeEditor(); return; }
       if (action === "edit-name") { enterModelNameEditMode(); return; }
+      if (action === "set-reasoning-mode") {
+        const editor = llmState().editor;
+        if (!editor) return;
+        syncBindingInputs();
+        const modeNode = event.target.closest("[data-reasoning-mode]");
+        editor.reasoningInputMode = modeNode?.dataset.reasoningMode === "token" ? "token" : "level";
+        renderAll();
+        return;
+      }
       if (action === "name-cancel") { cancelModelNameEdit(); return; }
       if (action === "toggle-concurrency-test") {
         const field = event.target.closest(".resource-field");

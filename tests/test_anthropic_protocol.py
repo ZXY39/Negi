@@ -486,6 +486,24 @@ def test_build_thinking_budget_and_effort():
     assert thinking["budget_tokens"] == 1024
 
 
+def test_build_thinking_token_mode():
+    from g3ku.providers.anthropic_provider import DEFAULT_REASONING_BUDGET_TOKENS, _build_thinking
+
+    assert DEFAULT_REASONING_BUDGET_TOKENS == 8192  # medium 档
+    # token 模式用自填预算，忽略档位（high 档本应 16384，这里用 5000）。
+    assert _build_thinking("high", 65536, "budget", "token", 5000) == ({"type": "enabled", "budget_tokens": 5000}, None)
+    # token 模式恒走 budget（即使 thinking_mode=effort）。
+    assert _build_thinking("high", 65536, "effort", "token", 5000) == ({"type": "enabled", "budget_tokens": 5000}, None)
+    # <=0 / 缺省 → disabled。
+    assert _build_thinking("high", 65536, "budget", "token", 0) == ({"type": "disabled"}, None)
+    assert _build_thinking("high", 65536, "budget", "token", None) == ({"type": "disabled"}, None)
+    # 夹取 < max_tokens。
+    thinking, _ = _build_thinking("high", 4096, "budget", "token", 99999)
+    assert thinking["budget_tokens"] == 3072
+    # level 模式：token 值保留但不生效（仍按档位 high=16384）。
+    assert _build_thinking("high", 65536, "budget", "level", 5000) == ({"type": "enabled", "budget_tokens": 16384}, None)
+
+
 def test_thinking_replay_same_model_with_signature():
     from g3ku.providers.anthropic_protocol_helpers import _convert_messages
 
