@@ -101,6 +101,29 @@ def _structured_error_fields(exc: BaseException) -> dict[str, Any]:
     return {"error_code": code, "error_status": status, "error_kind": kind}
 
 
+def _strip_foreign_reasoning_fields(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop other protocols' reasoning fields from assistant rows before the Chat wire.
+
+    混合链跨协议降级时，历史行可能带着别的车道写的思考字段：Responses 的 `reasoning_items`、
+    Anthropic 的 `thinking_blocks`。OpenAI SDK 会把未知字段原样透传进请求体，官方 OpenAI 拒收
+    这些字段（400）。Chat 车道只认 `reasoning_content`（DeepSeek 方言），其余思考字段一律剥掉。
+    Responses/Anthropic 车道不受影响——它们的转换器重建协议结构、只取自己的字段。浅拷贝被改
+    的行，不改写共享历史（落盘行仍保留原字段供同协议回放）。
+    """
+    projected: list[dict[str, Any]] = []
+    for msg in messages:
+        if isinstance(msg, dict) and msg.get("role") == "assistant" and (
+            "reasoning_items" in msg or "thinking_blocks" in msg
+        ):
+            clean = dict(msg)
+            clean.pop("reasoning_items", None)
+            clean.pop("thinking_blocks", None)
+            projected.append(clean)
+        else:
+            projected.append(msg)
+    return projected
+
+
 class OpenAIChatProvider(LLMProvider):
 
     def __init__(
@@ -152,7 +175,7 @@ class OpenAIChatProvider(LLMProvider):
         tool_choice = normalize_forced_function_tool_choice(tool_choice, protocol="chat")
         kwargs: dict[str, Any] = {
             "model": model or self.default_model,
-            "messages": self._sanitize_empty_content(messages),
+            "messages": _strip_foreign_reasoning_fields(self._sanitize_empty_content(messages)),
         }
         if max_tokens is not None:
             kwargs["max_tokens"] = max(1, int(max_tokens))

@@ -585,3 +585,51 @@ def test_sanitize_passes_thinking_blocks():
     ]
     out = sanitize_provider_messages(msgs)
     assert out[0]["thinking_blocks"] == msgs[0]["thinking_blocks"]
+
+
+# --------------------------------------------------------------------------- #
+# 跨协议混合链：思考字段不得跨协议泄漏（中途切换适配）
+# --------------------------------------------------------------------------- #
+
+def _mixed_history_row():
+    return {
+        "role": "assistant",
+        "content": "answer",
+        "reasoning_content": "chat-text",
+        "reasoning_items": [{"type": "reasoning", "id": "r1", "encrypted_content": "enc", "g3ku_reasoning_model": "m"}],
+        "thinking_blocks": [{"type": "thinking", "thinking": "t", "signature": "s", "g3ku_reasoning_model": "m"}],
+    }
+
+
+def test_chat_wire_strips_foreign_reasoning():
+    from g3ku.providers.openai_chat_provider import _strip_foreign_reasoning_fields
+
+    row = _mixed_history_row()
+    out = _strip_foreign_reasoning_fields([{"role": "user", "content": "hi"}, row])
+    assistant = out[1]
+    assert "reasoning_items" not in assistant
+    assert "thinking_blocks" not in assistant
+    assert assistant["reasoning_content"] == "chat-text"  # chat 方言保留
+    assert "thinking_blocks" in row  # 不改写共享历史
+
+
+def test_responses_converter_isolates_own_field():
+    from g3ku.providers.responses_protocol_helpers import _convert_messages as responses_convert
+
+    _, items = responses_convert([{"role": "user", "content": "hi"}, _mixed_history_row()], model="m")
+    flat = json.dumps(items, ensure_ascii=False)
+    assert "thinking_blocks" not in flat
+    assert "reasoning_content" not in flat
+    # reasoning_items 回放成 type=reasoning 项（同模型）。
+    assert any(isinstance(it, dict) and it.get("type") == "reasoning" for it in items)
+
+
+def test_anthropic_converter_isolates_own_field():
+    _, messages = _convert_messages([{"role": "user", "content": "hi"}, _mixed_history_row()], model="m")
+    flat = json.dumps(messages, ensure_ascii=False)
+    assert "reasoning_items" not in flat
+    assert "encrypted_content" not in flat
+    # thinking_blocks 回放成 thinking 块（同模型）；reasoning_content 文本不进 assistant 块。
+    assistant = messages[1]["content"]
+    assert any(b.get("type") == "thinking" for b in assistant)
+    assert not any(b.get("type") == "text" and b.get("text") == "chat-text" for b in assistant)
