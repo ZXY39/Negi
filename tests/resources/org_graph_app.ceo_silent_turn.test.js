@@ -196,6 +196,30 @@ const TURN_TRACE = [{
     tools: [{ tool_call_id: "c1", tool_name: "filesystem", status: "success", output_text: "ok" }],
 }];
 
+function silentToolStep(overrides = {}) {
+    return {
+        tool_call_id: "call-silent",
+        tool_name: "silent",
+        status: "success",
+        output_text: '{"silenced": true}',
+        ...overrides,
+    };
+}
+
+function execToolStep(overrides = {}) {
+    return {
+        tool_call_id: "call-exec",
+        tool_name: "exec",
+        status: "success",
+        output_text: "ok",
+        ...overrides,
+    };
+}
+
+function traceTurn(tools, { seq = 1, text = "" } = {}) {
+    return { seq, turn_id: `t${seq}`, text, created_at: "", status: "completed", tools };
+}
+
 function makeTurn({ turnId = "", source = "user" } = {}) {
     // 真实结构是 .message > .msg-content.ceo-turn-content > [assistant-text, usage,
     // interaction-flow, reminder]，静默折叠行与原因行都挂在 content 上，
@@ -533,6 +557,83 @@ test("历史静默行没有回合轨道时也要渲染折叠行", () => {
     const turn = pushed.find((item) => item && item.textEl) || null;
     assert.ok(turn);
     assert.equal(String(labelOf(turn)).startsWith("静默消息"), true, "没有时间时也只写「静默消息」");
+});
+
+// `silent` 是回合终态控制信号，不是一次工具活动：账本留它（模型要看自己上次的选择），
+// 但会话的工具调用记录不画它——轨道、组数/调用数、展开面板都按没有这次调用计。
+test("silent 调用不进会话轨道，组数与调用数按没有它计", () => {
+    const api = setup();
+    const turn = makeTurn({ turnId: "t1" });
+    finalizeSilent(api, turn, {
+        turns: [traceTurn([execToolStep(), silentToolStep()], { text: "先跑一次命令" })],
+    });
+
+    const html = String(turn.listEl.innerHTML || "");
+    assert.ok(html.includes("exec"), "同轮其它工具照常画");
+    assert.equal(html.includes("silent"), false, "silent 调用不得出现在轨道里");
+    assert.deepEqual(
+        Array.from(turn.railTurns?.[0]?.tools || [], (tool) => tool.tool_name),
+        ["exec"],
+        "轨道账本里也不留这次调用"
+    );
+    assert.equal(turn.railMetaLabel, "1 组 · 1 次调用");
+    assert.equal(turn.flowEl.hidden, false);
+});
+
+test("整轮只有 silent 时轨道不留空组，静默折叠行照常", () => {
+    const api = setup();
+    const turn = makeTurn({ turnId: "t1" });
+    finalizeSilent(api, turn, { turns: [traceTurn([silentToolStep()])] });
+
+    assert.equal(turn.listEl.innerHTML, "");
+    assert.equal(turn.steps, 0);
+    assert.equal(turn.flowEl.hidden, true, "没有可画的工具就不出现执行流程框");
+    assert.ok(lineOf(turn), "静默本身仍由折叠行表达");
+});
+
+test("历史静默行里的 silent 调用同样不进轨道", () => {
+    const api = setup();
+    const feed = new FeedStub({ children: [], scrollHeight: 400, clientHeight: 300 });
+    api.U.ceoFeed = feed;
+    const pushed = trackPushedTurns(api);
+
+    api.renderPersistedCeoAssistantTurn({
+        role: "assistant",
+        content: SILENT_TEXT,
+        silent_reply: true,
+        turn_id: "t1",
+        timestamp: SILENT_AT,
+        turns: [traceTurn([silentToolStep(), execToolStep()])],
+    });
+
+    const turn = pushed.find((item) => item && item.textEl) || null;
+    assert.ok(turn);
+    const html = String(turn.listEl.innerHTML || "");
+    assert.ok(html.includes("exec"));
+    assert.equal(html.includes("silent"), false);
+    assert.equal(turn.flowEl.hidden, false);
+});
+
+test("历史静默行整轮只有 silent 时不留空执行流程框", () => {
+    const api = setup();
+    const feed = new FeedStub({ children: [], scrollHeight: 400, clientHeight: 300 });
+    api.U.ceoFeed = feed;
+    const pushed = trackPushedTurns(api);
+
+    api.renderPersistedCeoAssistantTurn({
+        role: "assistant",
+        content: SILENT_TEXT,
+        silent_reply: true,
+        turn_id: "t1",
+        timestamp: SILENT_AT,
+        turns: [traceTurn([silentToolStep()])],
+    });
+
+    const turn = pushed.find((item) => item && item.textEl) || null;
+    assert.ok(turn);
+    assert.equal(turn.listEl.innerHTML, "");
+    assert.equal(turn.flowEl.hidden, true);
+    assert.ok(lineOf(turn));
 });
 
 // 待发送补充消息在工具批次边界接管本轮（follow_up_interrupt）：投递侧仍然一声不出，

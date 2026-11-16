@@ -5300,6 +5300,25 @@ function splitCeoStickerSheetTurns(turns = []) {
     return { railTurns, replyTexts };
 }
 
+// `silent` 是回合终态控制信号，不是一次工具活动：账本保留这次调用（模型后续轮次
+// 靠它看见自己上次的静默选择），但会话的工具调用记录不画它——组数、调用数、展开
+// 面板都按没有这次调用计；整轮只剩 silent 且没有正文时这一轮整条离开轨道。
+function filterCeoSilentToolTurns(turns = []) {
+    const filtered = [];
+    (Array.isArray(turns) ? turns : []).forEach((turn) => {
+        if (!turn || typeof turn !== "object") return;
+        const tools = Array.isArray(turn.tools) ? turn.tools : [];
+        const keptTools = tools.filter((tool) => !isCeoSilentToolName(tool?.tool_name));
+        if (keptTools.length === tools.length) {
+            filtered.push(turn);
+            return;
+        }
+        if (!keptTools.length && !String(turn?.text || "").trim()) return;
+        filtered.push({ ...turn, tools: keptTools });
+    });
+    return filtered;
+}
+
 // 拼接顺序就是先后：表情轮在最终答复之前发生，所以前置；最终正文里已经含着这段
 // （收尾帧已由服务端拼好、或攒全正文的车道）时不再重复，同一段出现两次也只留一份。
 function ceoAssistantTextWithStickerSheetTurns(text = "", replyTexts = []) {
@@ -5558,7 +5577,9 @@ function syncCeoFlowGuideLength(turn) {
 function renderCeoTurnsIntoTurn(turn, turns = [], { interruptedMarker = false } = {}) {
     if (!turn?.listEl || !turn?.flowEl) return 0;
     if (typeof buildTurnGroupDescriptors !== "function" || typeof renderTraceStep !== "function") return 0;
-    const visibleTurns = sliceCeoRailTurns(Array.isArray(turns) ? turns : [], turn);
+    const visibleTurns = filterCeoSilentToolTurns(
+        sliceCeoRailTurns(Array.isArray(turns) ? turns : [], turn)
+    );
     // 表情轮的工具行与标题都不进轨道；它的正文提升到气泡里与最终回复拼接。
     const stickerSplit = splitCeoStickerSheetTurns(visibleTurns);
     stickerSplit.replyTexts.forEach((text) => rememberCeoStickerSheetStreamText(turn, text));
@@ -5962,7 +5983,8 @@ function renderPersistedCeoAssistantTurn(item = {}, options = {}) {
         else if (silentReply) renderCeoSilentTurn(turn, { text: content, timestamp: historyTimestamp });
         else renderCeoAssistantTextIntoTurn(turn, content || (status === "paused" ? "已暂停" : ""), { status });
         renderCeoTurnsIntoTurn(turn, turns, { interruptedMarker: isFollowUpArchive });
-        turn.flowEl.hidden = false;
+        // 轨道被显示过滤成空时（整轮只有 silent / 成功的表情分类调用）不留空流程框。
+        turn.flowEl.hidden = !(turn.steps > 0);
         setCeoTurnUsage(turn, historyUsage, { completedAt: historyTimestamp });
         setCeoTurnUsageCollapsed(turn, true);
         renderCeoThinkingSummaryFromSnapshot(turn.el, item?.thinking);
