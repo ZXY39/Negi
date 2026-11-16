@@ -57,6 +57,24 @@ STOP_REASON_TASK_CANCELLED = "task_cancelled"
 STOP_REASON_TASK_DELETED = "task_deleted"
 STOP_REASON_SERVICE_SHUTDOWN = "service_shutdown"
 
+# 暂停/停机属于运行时生命周期轴：owned OS 进程原地继续跑，由下次启动的认领车道
+# 接管（见 owned_processes.readopt_orphans）；只有终态/取消/删除才结束所有权。
+_PROCESS_KEEP_STOP_REASONS = frozenset(
+    {STOP_REASON_NODE_PAUSED, STOP_REASON_TASK_PAUSED, STOP_REASON_SERVICE_SHUTDOWN}
+)
+
+# 已关闭的域再收到停止请求时，理由只升不降：先暂停后终态的节点必须落到终态档，
+# 否则 owned 进程会按暂停档被保活，所有权永远不结束。
+_STOP_REASON_FINALITY = {
+    STOP_REASON_NODE_PAUSED: 0,
+    STOP_REASON_TASK_PAUSED: 0,
+    STOP_REASON_SERVICE_SHUTDOWN: 1,
+    STOP_REASON_NODE_TERMINAL: 2,
+    STOP_REASON_TASK_TERMINAL: 2,
+    STOP_REASON_TASK_CANCELLED: 2,
+    STOP_REASON_TASK_DELETED: 3,
+}
+
 DEFAULT_STOP_WAIT_SECONDS = 8.0
 
 # 该调用当前是否在节点后台作业的任务上下文里执行。
@@ -369,10 +387,17 @@ class NodeBackgroundJobManager:
     ) -> None:
         """关闭节点域准入并立即发起取消（可在任务锁内同步调用）。"""
         state = self._scope(task_id, node_id)
+        new_reason = str(stop_reason or STOP_REASON_NODE_PAUSED)
         if not state.closed:
             state.closed = True
-            state.close_reason = str(stop_reason or STOP_REASON_NODE_PAUSED)
+            state.close_reason = new_reason
             state.close_note = str(note or "")
+        elif _STOP_REASON_FINALITY.get(new_reason, 2) >= _STOP_REASON_FINALITY.get(
+            state.close_reason, 2
+        ):
+            state.close_reason = new_reason
+            if note:
+                state.close_note = str(note)
         if not state.stop_pending:
             state.stop_pending = True
             if state.stop_event is None or state.stop_event.is_set():
@@ -473,7 +498,10 @@ class NodeBackgroundJobManager:
                         "detail": "tool jobs still active after cancel_all",
                     }
                 )
-        if state.node_id:
+        keep_processes = state.close_reason in _PROCESS_KEEP_STOP_REASONS
+        if keep_processes:
+            reap: dict[str, Any] = {"killed": [], "already_gone": [], "failed": [], "items": []}
+        elif state.node_id:
             reap = await asyncio.to_thread(self._reap_node_processes, state.task_id, [state.node_id])
         else:
             reap = await asyncio.to_thread(self._reap_task_processes, state.task_id)
@@ -488,6 +516,7 @@ class NodeBackgroundJobManager:
             "stopped_tool_jobs": stopped_jobs,
             "confirmed_processes": confirmed,
             "already_gone_processes": already_gone,
+            "processes_kept": keep_processes,
             "failures": failures,
             "completed": not failures,
         }
@@ -593,6 +622,7 @@ class NodeBackgroundJobManager:
         stopped_jobs = 0
         confirmed = 0
         already_gone = 0
+        processes_kept = False
         failures: list[dict[str, Any]] = []
         for key in keys:
             state = self._scope_for_read(*key)
@@ -602,11 +632,13 @@ class NodeBackgroundJobManager:
             stopped_jobs += int(last.get("stopped_tool_jobs") or 0)
             confirmed += int(last.get("confirmed_processes") or 0)
             already_gone += int(last.get("already_gone_processes") or 0)
+            processes_kept = processes_kept or bool(last.get("processes_kept"))
             failures.extend(last.get("failures") or [])
         return {
             "stopped_tool_jobs": stopped_jobs,
             "confirmed_processes": confirmed,
             "already_gone_processes": already_gone,
+            "processes_kept": processes_kept,
             "failures": failures,
         }
 

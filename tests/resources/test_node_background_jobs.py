@@ -10,9 +10,14 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
+import sys
+import time
 
 import pytest
 
+from g3ku.deployment import data_root as data_root_module
+from g3ku.runtime import owned_processes
 from g3ku.runtime.tool_jobs import (
     TOOL_JOB_OWNER_KIND_NODE,
     TOOL_JOB_OWNER_KIND_SESSION,
@@ -27,6 +32,7 @@ from main.protocol import now_iso
 from main.runtime.node_background_jobs import (
     STOP_REASON_NODE_PAUSED,
     STOP_REASON_NODE_TERMINAL,
+    STOP_REASON_SERVICE_SHUTDOWN,
     STOP_REASON_TASK_PAUSED,
     NodeBackgroundAdmissionClosed,
     NodeBackgroundJobManager,
@@ -159,6 +165,90 @@ async def test_scope_stop_close_and_wait_reports_confirmed_processes(store):
     assert result["stopped_tool_jobs"] == 1
     assert result["failures"] == []
     await _wait_no_active_jobs(manager)
+
+
+def _spawn_sleeper() -> subprocess.Popen:
+    return subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _wait_gone(pid: int, timeout: float = 15.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not owned_processes.is_alive(pid):
+            return True
+        time.sleep(0.1)
+    return False
+
+
+@pytest.mark.asyncio
+async def test_pause_and_shutdown_keep_owned_processes_until_terminal(
+    store, tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    """暂停/停机只关准入不杀 owned 进程；终态才结束所有权（脱离运行时生命周期轴）。"""
+    monkeypatch.setenv("G3KU_DATA_DIR", str(tmp_path / "data"))
+    data_root_module.reset_cache()
+    scope = owned_processes.scope_key(session_key="", task_id="task:demo")
+    process = _spawn_sleeper()
+    sink = _DeliveryRecorder()
+    manager = _manager(store, sink)
+    try:
+        owned_processes.register(
+            scope=scope,
+            pid=process.pid,
+            cmd="sleeper",
+            log_path="",
+            session_key="",
+            task_id="task:demo",
+            node_id="node:a",
+        )
+
+        paused = await manager.close_scope_and_wait(
+            "task:demo",
+            node_id="node:a",
+            stop_reason=STOP_REASON_NODE_PAUSED,
+            timeout_seconds=3.0,
+        )
+        assert paused["completed"] is True
+        assert paused["processes_kept"] is True
+        assert owned_processes.is_alive(process.pid)
+        assert owned_processes.find(scope, process.pid) is not None
+
+        task_paused = await manager.close_scope_and_wait(
+            "task:demo",
+            stop_reason=STOP_REASON_TASK_PAUSED,
+            timeout_seconds=3.0,
+        )
+        assert task_paused["processes_kept"] is True
+        assert owned_processes.is_alive(process.pid)
+
+        shutdown = await manager.close_all(
+            stop_reason=STOP_REASON_SERVICE_SHUTDOWN, timeout_seconds=3.0
+        )
+        assert shutdown["completed"] is True
+        assert owned_processes.is_alive(process.pid)
+        assert owned_processes.find(scope, process.pid) is not None
+
+        terminal = await manager.close_scope_and_wait(
+            "task:demo",
+            node_id="node:a",
+            stop_reason=STOP_REASON_NODE_TERMINAL,
+            timeout_seconds=3.0,
+        )
+        assert terminal["completed"] is True
+        assert terminal["processes_kept"] is False
+        assert terminal["confirmed_processes"] == 1
+        assert _wait_gone(process.pid)
+        assert owned_processes.find(scope, process.pid) is None
+    finally:
+        if owned_processes.is_alive(process.pid):
+            process.kill()
+        process.wait(timeout=10)
+        data_root_module.reset_cache()
 
 
 @pytest.mark.asyncio
