@@ -357,6 +357,90 @@ def test_reveal_flow_prompts_for_password_only_when_the_window_is_closed() -> No
     assert "5 分钟内可免密码查看 Apikey" in str(result["toast"])
 
 
+def test_wrong_password_keeps_the_dialog_open_for_a_retry() -> None:
+    result = _run_node_script(
+        _LLM_HARNESS
+        + r"""
+        bootLlm(detailEditor());
+        let confirmOptions = null;
+        global.openConfirm = (options) => { confirmOptions = options; };
+        global.U.confirmInput = { value: "", focused: false, focus() { this.focused = true; } };
+        const attempts = [];
+        global.ApiClient.revealLlmConfigApiKey = async (configId, password) => {
+          attempts.push({ configId, password });
+          if (!password) {
+            const error = new Error("查看 Apikey 需要项目解锁口令。");
+            error.code = "api_key_password_required";
+            throw error;
+          }
+          if (password === "wrong-pass") {
+            const error = new Error("项目解锁口令不正确。");
+            error.code = "api_key_password_invalid";
+            throw error;
+          }
+          return { item: { auth: { type: "api_key", api_key: "sk-plain" } }, expiresInSeconds: 300 };
+        };
+
+        async function main() {
+          let applied = null;
+          const promise = window.__llmTestHooks.requestEditorApiKeyReveal().then((value) => {
+            applied = value;
+            return value;
+          });
+          for (let index = 0; index < 20 && !confirmOptions; index += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 0));
+          }
+          const inlineErrors = Boolean(confirmOptions?.inlineErrors);
+
+          global.U.confirmInput.value = "wrong-pass";
+          let rejectedCode = "";
+          try {
+            await confirmOptions.onConfirm({ value: "wrong-pass" });
+          } catch (error) {
+            rejectedCode = error.code || "";
+          }
+          const afterWrong = {
+            inputValue: global.U.confirmInput.value,
+            focused: global.U.confirmInput.focused,
+            rejectedCode,
+            pending: applied === null,
+            masked: global.S.llmCenter.editor.apiKeyMasked,
+          };
+
+          global.U.confirmInput.value = "owner-password";
+          await confirmOptions.onConfirm({ value: "owner-password" });
+          const appliedValue = await promise;
+          console.log(JSON.stringify({
+            inlineErrors,
+            attempts,
+            afterWrong,
+            appliedValue,
+            apiKey: global.S.llmCenter.editor.apiKey,
+          }));
+        }
+        main();
+        """
+    )
+
+    assert result["inlineErrors"] is True
+    assert result["attempts"] == [
+        {"configId": "cfg-1", "password": ""},
+        {"configId": "cfg-1", "password": "wrong-pass"},
+        {"configId": "cfg-1", "password": "owner-password"},
+    ]
+    # 错口令：窗口不被判定为完成（promise 仍挂起）、口令框被清空并拿回焦点，掩码留在原地。
+    assert result["afterWrong"] == {
+        "inputValue": "",
+        "focused": True,
+        "rejectedCode": "api_key_password_invalid",
+        "pending": True,
+        "masked": True,
+    }
+    # 同一个窗口里直接重试正确口令即可完成查看。
+    assert result["appliedValue"] is True
+    assert result["apiKey"] == "sk-plain"
+
+
 def test_reveal_flow_cancel_leaves_the_mask_in_place() -> None:
     result = _run_node_script(
         _LLM_HARNESS

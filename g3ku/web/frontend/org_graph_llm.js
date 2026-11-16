@@ -1067,12 +1067,22 @@
         confirmKind: "",
         input: { label: "项目解锁口令", type: "password", placeholder: "输入后显示 Apikey", required: true },
         inputPlain: true,
+        // 口令错误不关窗：错误就地显示在窗口里，清掉这一格让操作员直接重输。
+        inlineErrors: true,
         onConfirm: async ({ value }) => {
           const password = String(value || "");
           if (!password) throw new Error("请输入项目解锁口令。");
-          const result = await ApiClient.revealLlmConfigApiKey(configId, password);
-          settled = true;
-          resolve(result);
+          try {
+            const result = await ApiClient.revealLlmConfigApiKey(configId, password);
+            settled = true;
+            resolve(result);
+          } catch (error) {
+            if (U.confirmInput) {
+              U.confirmInput.value = "";
+              U.confirmInput.focus?.();
+            }
+            throw error;
+          }
         },
         onClose: () => {
           if (!settled) resolve(null);

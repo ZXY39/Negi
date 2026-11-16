@@ -2428,20 +2428,19 @@ async def reveal_llm_config_api_key(config_id: str, payload: dict | None = Body(
     password = str(body.get('password') or body.get('unlock_password') or '')
     facade = _llm_facade()
     grant = _LLM_SECRET_REVEAL_GRANT
-    authenticated_now = False
-    if not grant.active():
-        if password:
-            if not facade.verify_reveal_password(password):
-                raise HTTPException(status_code=403, detail=dict(_LLM_API_KEY_PASSWORD_INVALID))
-        elif not facade.passwordless_secret_reveal_allowed():
-            raise HTTPException(status_code=403, detail=dict(_LLM_API_KEY_PASSWORD_REQUIRED))
-        authenticated_now = True
+    grant_active = grant.active()
+    # 带口令的调用一律核对：免密窗口省的是重复输入，不让错口令也拿到明文。
+    if password:
+        if not facade.verify_reveal_password(password):
+            raise HTTPException(status_code=403, detail=dict(_LLM_API_KEY_PASSWORD_INVALID))
+    elif not grant_active and not facade.passwordless_secret_reveal_allowed():
+        raise HTTPException(status_code=403, detail=dict(_LLM_API_KEY_PASSWORD_REQUIRED))
     try:
         item = facade.get_config_record(config_id, include_secrets=True)
     except Exception as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     # 免密窗口是固定的：窗口内的再次查看只复用剩余时间，不滑动续期。
-    if authenticated_now:
+    if not grant_active:
         grant.grant()
     return {
         'ok': True,

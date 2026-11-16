@@ -132,6 +132,21 @@ def test_reveal_with_password_opens_a_five_minute_passwordless_window(reveal_env
     assert unredacted_read.json()["item"]["auth"]["api_key"] == REAL_KEY
 
 
+def test_reveal_verifies_a_supplied_password_even_inside_the_open_window(reveal_env) -> None:
+    """错口令不能借免密窗口过关：带口令就必核，错了照旧 403，窗口本身不重开也不缩短。"""
+    client, _facade = reveal_env
+
+    assert client.post("/api/llm/configs/cfg-reveal/reveal", json={"password": PASSWORD}).status_code == 200
+    wrong = client.post("/api/llm/configs/cfg-reveal/reveal", json={"password": "wrong"})
+    assert wrong.status_code == 403
+    assert wrong.json()["detail"]["code"] == "api_key_password_invalid"
+
+    # 错口令不影响已开的窗口：不带口令的查看继续走免密窗口。
+    passwordless = client.post("/api/llm/configs/cfg-reveal/reveal", json={})
+    assert passwordless.status_code == 200
+    assert passwordless.json()["item"]["auth"]["api_key"] == REAL_KEY
+
+
 def test_reveal_window_closes_without_asking_again(reveal_env, monkeypatch: pytest.MonkeyPatch) -> None:
     client, _facade = reveal_env
     clock = {"now": 1000.0}

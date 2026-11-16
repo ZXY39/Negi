@@ -30,11 +30,14 @@ function makeInput() {
 function loadUi() {
     const dialog = { classList: makeClassList() };
     const input = makeInput();
+    const confirmError = { textContent: "", hidden: true };
+    const toasts = [];
     const U = {
         confirmTitle: { textContent: "" },
         confirmText: { textContent: "" },
         confirmInputRow: { hidden: true },
         confirmInput: input,
+        confirmError,
         confirmInputLabel: { textContent: "" },
         confirmOptions: { hidden: true },
         confirmCheckbox: { checked: false, disabled: false },
@@ -52,12 +55,12 @@ function loadUi() {
         console,
         document: { getElementById: (id) => (id === "confirm-dialog" ? dialog : null) },
         window: { requestAnimationFrame: (cb) => cb() },
-        showToast: () => {},
+        showToast: (payload) => toasts.push(payload || {}),
     };
     vm.createContext(context);
     vm.runInContext(`${CODE}
         this.__t = { openConfirm, closeConfirm, acceptConfirm };`, context);
-    return { t: context.__t, input, U, S };
+    return { t: context.__t, input, U, S, toasts };
 }
 
 test("确认框：占位符跟着本次调用走，不沿用上一个弹窗的", () => {
@@ -93,6 +96,40 @@ function askConfirm(ui, title) {
         });
     });
 }
+
+test("确认框：内联报错在失败时保持窗口打开，重试前自动清掉旧错误", async () => {
+    const { t, U, S, toasts } = loadUi();
+    t.openConfirm({
+        title: "查看 Apikey",
+        text: "输入项目解锁口令",
+        input: { label: "项目解锁口令", type: "password" },
+        inlineErrors: true,
+        onConfirm: async () => { throw new Error("项目解锁口令不正确。"); },
+    });
+    await t.acceptConfirm();
+    // 口令错误不关窗、不叠加 toast：错误留在窗口里，操作员可以就地重输。
+    assert.equal(U.confirmBackdrop.hidden, false);
+    assert.equal(S.confirmState?.accepted, false);
+    assert.equal(U.confirmError.hidden, false);
+    assert.equal(U.confirmError.textContent, "项目解锁口令不正确。");
+    assert.equal(toasts.length, 0);
+
+    await t.acceptConfirm(); // 再试一次：上一轮的错误先收掉
+    assert.equal(U.confirmBackdrop.hidden, false);
+
+    t.closeConfirm();
+    assert.equal(U.confirmError.hidden, true);
+    assert.equal(U.confirmError.textContent, "");
+
+    // 未声明 inlineErrors 的弹窗保持原状：失败仍走错误 toast。
+    t.openConfirm({ title: "其他确认", text: "无就地报错", onConfirm: async () => { throw new Error("boom"); } });
+    await t.acceptConfirm();
+    assert.equal(toasts.length, 1);
+    assert.equal(toasts[0].title, "操作失败");
+    assert.equal(toasts[0].text, "boom");
+    assert.equal(U.confirmBackdrop.hidden, false);
+    t.closeConfirm();
+});
 
 test("确认框：串联的第二张弹窗不被上一张的收尾关掉", async () => {
     const ui = loadUi();

@@ -738,6 +738,7 @@ const U = {
     confirmInputRow: document.getElementById("confirm-input-row"),
     confirmInputLabel: document.getElementById("confirm-input-label"),
     confirmInput: document.getElementById("confirm-input"),
+    confirmError: document.getElementById("confirm-error"),
     confirmCheckbox: document.getElementById("confirm-checkbox"),
     confirmCheckboxLabel: document.getElementById("confirm-checkbox-label"),
     confirmCheckboxHint: document.getElementById("confirm-checkbox-hint"),

@@ -1,5 +1,14 @@
 "use strict";
 
+// 弹窗内联报错：失败文案写回窗口里，而不是只活 4 秒的 toast 里说一次。
+function setConfirmError(text) {
+    if (!U.confirmError) return false;
+    const message = String(text || "").trim();
+    U.confirmError.textContent = message;
+    U.confirmError.hidden = !message;
+    return true;
+}
+
 // 共享确认框：保留全局入口与 S.confirmState 结构，页面在 app.js 之前加载本文件。
 function openConfirm({
     title,
@@ -13,6 +22,7 @@ function openConfirm({
     input = null,
     textFull = false,
     inputPlain = false,
+    inlineErrors = false,
 }) {
     const dialog = document.getElementById("confirm-dialog");
     if (dialog) {
@@ -26,8 +36,10 @@ function openConfirm({
         returnFocus,
         checkbox: checkbox && typeof checkbox === "object" ? checkbox : null,
         input: input && typeof input === "object" ? input : null,
+        inlineErrors: !!inlineErrors,
         accepted: false,
     };
+    setConfirmError("");
     U.confirmTitle.textContent = title;
     U.confirmText.textContent = text;
     if (U.confirmInputRow && U.confirmInput) {
@@ -125,6 +137,7 @@ function closeConfirm({ restoreFocus = true } = {}) {
         U.confirmCheckbox.disabled = false;
     }
     if (U.confirmCheckboxHint) U.confirmCheckboxHint.textContent = "";
+    setConfirmError("");
     U.confirmBackdrop.hidden = true;
     U.confirmBackdrop.classList.remove("is-open");
     const dialog = document.getElementById("confirm-dialog");
@@ -145,6 +158,8 @@ async function acceptConfirm() {
     U.confirmAccept.disabled = true;
     U.confirmCancel.disabled = true;
     if (U.confirmCheckbox) U.confirmCheckbox.disabled = true;
+    // 重试时先收掉上一次的内联错误；错误本身不会关窗。
+    if (state.inlineErrors) setConfirmError("");
     try {
         state.accepted = true;
         await state.onConfirm({ checked: !!U.confirmCheckbox?.checked, value: String(U.confirmInput?.value || "") });
@@ -154,7 +169,11 @@ async function acceptConfirm() {
         if (S.confirmState === state) closeConfirm();
     } catch (error) {
         if (S.confirmState === state) state.accepted = false;
-        showToast({ title: "操作失败", text: error?.message || "Unknown error", kind: "error" });
+        const message = error?.message || "Unknown error";
+        // 开了内联报错的弹窗把错误写在窗口里并保持打开；其余弹窗照旧走错误 toast。
+        if (!(state.inlineErrors && setConfirmError(message))) {
+            showToast({ title: "操作失败", text: message, kind: "error" });
+        }
     } finally {
         U.confirmAccept.disabled = false;
         U.confirmCancel.disabled = false;

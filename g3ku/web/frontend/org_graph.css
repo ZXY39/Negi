@@ -9112,6 +9112,15 @@ textarea {
     width: 100%;
 }
 
+/* 输入类确认框的就地报错：窗口不关，失败文案贴在输入行下面（见 openConfirm 的 inlineErrors）。 */
+.confirm-error {
+    margin: -16px 0 0;
+    color: var(--danger, #d64545);
+    font-size: 0.9rem;
+    line-height: 1.5;
+    white-space: pre-wrap;
+}
+
 /* 纯文本确认（沙箱开/关的安全影响说明）：正文不限高、不出滚动条；
    口令行去掉外层框，只留输入框本身。两者都由 openConfirm 的选项挂类。 */
 .confirm-dialog.is-text-full .confirm-text {
