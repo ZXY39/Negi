@@ -2,8 +2,9 @@
 
 公司受管设备把 PowerShell 锁进 ConstrainedLanguage（机器级 __PSLockdownPolicy=4），
 非核心 .NET / COM 方法全拒。安装器因此为 uv 获取、用户 PATH、尺寸测量、快捷方式各备了
-一条 cmdlet-only 车道。这里钉两件事：文本上车道存在且用对了构造；功能上把子进程的
-__PSLockdownPolicy 设成 4 真跑一遍，确认锁定模式下尺寸车道给出正确数字。
+一条 cmdlet-only 车道。这里钉两件事：文本上车道存在且用对了构造；功能上在子进程里把
+语言模式切到 ConstrainedLanguage 再加载 install.ps1 的函数，确认锁定模式下尺寸车道给出
+正确数字。
 
 只在有 powershell 的 Windows 上跑功能段；其余平台只跑文本断言。
 """
@@ -71,6 +72,9 @@ def test_size_lane_runs_under_constrained_language(tmp_path: Path) -> None:
 
     script = tmp_path / "probe.ps1"
     script.write_text(
+        # 先切模式再 dot-source：函数体在锁定模式下解析，与受管设备上整份脚本被锁同形。
+        # 靠子进程环境的 __PSLockdownPolicy 只在装了 AppLocker 策略的机器上生效。
+        "$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'\n"
         ". (Join-Path $PSScriptRoot 'funcs.ps1')\n"
         "$ErrorActionPreference = 'Stop'\n"
         "'constrained=' + (Test-ConstrainedLanguage)\n"
@@ -78,10 +82,9 @@ def test_size_lane_runs_under_constrained_language(tmp_path: Path) -> None:
         "'size=' + $size\n",
         encoding="utf-8",
     )
-    env = {**os.environ, "__PSLockdownPolicy": "4"}
     done = subprocess.run(
         [str(POWERSHELL), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
-        capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, check=False,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
     )
     assert done.returncode == 0, done.stdout + done.stderr
     assert "constrained=True" in done.stdout, done.stdout + done.stderr
