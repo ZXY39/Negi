@@ -191,19 +191,39 @@ class TaskStallNotifier:
         self._service.log_service.update_task_runtime_meta(task.task_id, **meta_update)
         self._schedule(task.task_id)
 
+    def record_visible_output(self, task_id: str, *, occurred_at: str | None = None) -> None:
+        """可见输出监听入口：静默锚点与卡片展示锚点（`last_run_at`）一起推进。
+
+        展示锚点只随真实可见输出前进；本类其余重锚写点（恢复暂停、待命重锚、
+        启动恢复）只移动静默锚点，不碰它——否则任务卡「最近」在重启后会全部
+        变成启动时刻。
+        """
+        self._reset_visible_output(task_id, occurred_at=occurred_at, record_display=True)
+
     def reset_visible_output(self, task_id: str, *, occurred_at: str | None = None) -> None:
+        self._reset_visible_output(task_id, occurred_at=occurred_at, record_display=False)
+
+    def _reset_visible_output(
+        self,
+        task_id: str,
+        *,
+        occurred_at: str | None = None,
+        record_display: bool,
+    ) -> None:
         task = self._service.get_task(task_id)
         if task is None or not self._has_notice_audience(self._service, task):
             self.cancel_task(task_id)
             return
         reset_at = str(occurred_at or "").strip() or self._service._stall_now_iso()
-        self._service.log_service.update_task_runtime_meta(
-            task.task_id,
-            last_visible_output_at=reset_at,
-            last_stall_notice_bucket_minutes=0,
+        meta_update: dict[str, Any] = {
+            "last_visible_output_at": reset_at,
+            "last_stall_notice_bucket_minutes": 0,
             # 可见输出即待命结束：熄表标记一并清掉（正常情况下已被 start_task 消费）。
             **{STALL_STANDBY_DISARMED_META_KEY: ""},
-        )
+        }
+        if record_display:
+            meta_update["last_run_at"] = reset_at
+        self._service.log_service.update_task_runtime_meta(task.task_id, **meta_update)
         self._schedule(task.task_id)
 
     def pause_task(self, task_id: str) -> None:

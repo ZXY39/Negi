@@ -709,6 +709,9 @@ class TaskLogService:
         return {
             'updated_at': now_iso(),
             'last_visible_output_at': str(last_visible_output_at or '').strip(),
+            # 展示锚点：只随真实可见输出前进；重启恢复、恢复暂停、待命重锚只移动
+            # 上面的静默锚点，不得改写它。
+            'last_run_at': '',
             'last_stall_notice_bucket_minutes': 0,
             'stall_notice_anchor': '',
             'stall_delivery_count': 0,
@@ -778,9 +781,11 @@ class TaskLogService:
             self._store.upsert_task(task)
             self._store.upsert_node(root)
             self._sync_node_read_models_locked(root)
+            created_anchor = _precise_now_iso()
             self.update_task_runtime_meta(
                 task.task_id,
-                last_visible_output_at=_precise_now_iso(),
+                last_visible_output_at=created_anchor,
+                last_run_at=created_anchor,
                 last_stall_notice_bucket_minutes=0,
             )
             self.upsert_frame(
@@ -3395,8 +3400,19 @@ class TaskLogService:
         with self._task_lock(task_id):
             task = self._require_task(task_id)
             current = dict(self._store.get_task_runtime_meta(task.task_id) or self._default_runtime_meta())
+            previous_visible_anchor = str(current.get('last_visible_output_at') or '').strip()
             if 'last_visible_output_at' in payload:
                 current['last_visible_output_at'] = str(payload.get('last_visible_output_at') or '').strip()
+            if 'last_run_at' in payload:
+                current['last_run_at'] = str(payload.get('last_run_at') or '').strip()
+            elif (
+                'last_visible_output_at' in payload
+                and previous_visible_anchor
+                and not str(current.get('last_run_at') or '').strip()
+            ):
+                # 升级前的行只有静默锚点：在它第一次被恢复/重锚改写前，把旧值
+                # 抄给展示锚点，卡片「最近」才不会从空掉回创建时间。
+                current['last_run_at'] = previous_visible_anchor
             if 'last_stall_notice_bucket_minutes' in payload:
                 try:
                     current['last_stall_notice_bucket_minutes'] = max(0, int(payload.get('last_stall_notice_bucket_minutes') or 0))
@@ -3543,6 +3559,7 @@ class TaskLogService:
         current['task_id'] = task.task_id
         current.setdefault('updated_at', now_iso())
         current.setdefault('last_visible_output_at', '')
+        current.setdefault('last_run_at', '')
         current.setdefault('dispatch_limits', {'execution': 0, 'inspection': 0})
         current.setdefault('dispatch_running', {'execution': 0, 'inspection': 0})
         current.setdefault('dispatch_queued', {'execution': 0, 'inspection': 0})
@@ -5430,11 +5447,17 @@ class TaskLogService:
         runtime_meta: dict[str, Any] | None = None,
     ) -> str:
         """待命卡片「最近」格的取值口径：REST 列表与 WS 摘要必须同源，否则整页
-        刷新会换掉读数。可见输出锚点优先，缺失退创建时间；不用 task.updated_at——
-        mark_task_read 等账本动作也刷新它，会把「刚查看过」印成「刚运行过」。
+        刷新会换掉读数。主取 `last_run_at`——只随真实可见输出前进的展示锚点；
+        重启恢复、恢复暂停、待命重锚都会改写 `last_visible_output_at`（静默锚点），
+        把它当展示值会让所有卡片在重启后变成启动时刻，所以只作旧数据回退。
+        可见输出锚点也缺失时退创建时间；不用 task.updated_at——mark_task_read
+        等账本动作也刷新它，会把「刚查看过」印成「刚运行过」。
         调用方已持有 meta 时传进来，避免摘要发布车道多付一次读。"""
         meta = runtime_meta if isinstance(runtime_meta, dict) else (self.read_task_runtime_meta(task_id) or {})
-        return str(meta.get('last_visible_output_at') or '').strip() or str(fallback_at or '').strip()
+        display_anchor = str(meta.get('last_run_at') or '').strip()
+        if not display_anchor:
+            display_anchor = str(meta.get('last_visible_output_at') or '').strip()
+        return display_anchor or str(fallback_at or '').strip()
 
     def _summary_cache_for_task(self, task_id: str) -> dict[str, tuple[str, dict[str, Any]]]:
         cache = self._summary_frame_cache.get(task_id)
@@ -5566,6 +5589,7 @@ class TaskLogService:
     def _sanitize_runtime_state(cls, payload: dict[str, Any]) -> dict[str, Any]:
         state = dict(payload or {})
         state['last_visible_output_at'] = str(state.get('last_visible_output_at') or '').strip()
+        state['last_run_at'] = str(state.get('last_run_at') or '').strip()
         try:
             state['last_stall_notice_bucket_minutes'] = max(0, int(state.get('last_stall_notice_bucket_minutes') or 0))
         except (TypeError, ValueError):

@@ -7,8 +7,10 @@
    「运行」（实机验收 F-2）；
 3. 任务树前端归一化必须保留 `continuous` / `wait_external`，树内「待命」徽标
    才能渲染（实机验收 F-3）。
-4. 待命卡片在「结束」那一格印「最近」，读数取可见输出锚点，REST 列表与 WS
-   摘要同源；`updated_at` 被 `mark_task_read` 等账本动作刷新时不许跟着动。
+4. 待命卡片在「结束」那一格印「最近」，读数取展示锚点 `last_run_at`（只随真实
+   可见输出前进），REST 列表与 WS 摘要同源；`updated_at` 被 `mark_task_read` 等
+   账本动作刷新时不许跟着动，重启恢复/恢复暂停改写静默锚点 `last_visible_output_at`
+   时也不许跟着动。
 """
 
 from __future__ import annotations
@@ -186,7 +188,7 @@ def test_standby_item_carries_last_run_at_only_in_standby(tmp_path: Path) -> Non
     service = _service(tmp_path)
     _seed_continuous_root(service)
     service.log_service.update_task_runtime_meta(
-        'task:standby', last_visible_output_at=RUN_STAMP
+        'task:standby', last_run_at=RUN_STAMP
     )
 
     items = {item.task_id: item for item in service.query_service.get_tasks(None, 'all')}
@@ -207,7 +209,7 @@ def test_last_run_at_survives_mark_task_read_on_both_lanes(tmp_path: Path) -> No
     service = _service(tmp_path)
     _seed_continuous_root(service)
     service.log_service.update_task_runtime_meta(
-        'task:standby', last_visible_output_at=RUN_STAMP
+        'task:standby', last_run_at=RUN_STAMP
     )
 
     service.log_service.mark_task_read('task:standby')
@@ -233,6 +235,76 @@ def test_last_run_at_falls_back_to_created_at_without_anchor(tmp_path: Path) -> 
     items = {item.task_id: item for item in service.query_service.get_tasks(None, 'all')}
     assert items['task:standby'].standby is True
     assert items['task:standby'].last_run_at == STAMP
+
+
+def test_last_run_at_falls_back_to_legacy_visible_anchor(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    _seed_continuous_root(service)
+    service.log_service.update_task_runtime_meta(
+        'task:standby', last_visible_output_at=RUN_STAMP
+    )
+
+    items = {item.task_id: item for item in service.query_service.get_tasks(None, 'all')}
+    assert items['task:standby'].last_run_at == RUN_STAMP
+
+
+def test_restart_reauthors_silence_anchor_without_touching_last_run_at(tmp_path: Path) -> None:
+    """重启恢复/恢复暂停只移动静默锚点；卡片「最近」必须停在最后可见输出。"""
+    restart_stamp = '2026-11-08T09:00:00+00:00'
+    service = _service(tmp_path)
+    _seed_continuous_root(service)
+    service.log_service.update_task_runtime_meta(
+        'task:standby', last_run_at=RUN_STAMP
+    )
+
+    # 与 `_recover_interrupted_task` / `clear_pause` 同形：只改写静默锚点。
+    service.log_service.update_task_runtime_meta(
+        'task:standby', last_visible_output_at=restart_stamp
+    )
+
+    meta = service.store.get_task_runtime_meta('task:standby') or {}
+    assert meta.get('last_visible_output_at') == restart_stamp
+    assert meta.get('last_run_at') == RUN_STAMP
+    items = {item.task_id: item for item in service.query_service.get_tasks(None, 'all')}
+    assert items['task:standby'].last_run_at == RUN_STAMP
+    service.log_service.mark_task_read('task:standby')
+    assert _summary_fingerprint(service, 'task:standby').get('last_run_at') == RUN_STAMP
+
+
+def test_legacy_visible_anchor_is_preserved_on_first_rewrite(tmp_path: Path) -> None:
+    """升级前的行只有静默锚点：它被恢复改写前要把旧值抄给展示锚点。"""
+    service = _service(tmp_path)
+    _seed_continuous_root(service)
+    service.log_service.update_task_runtime_meta(
+        'task:standby', last_visible_output_at=RUN_STAMP
+    )
+
+    service.log_service.update_task_runtime_meta(
+        'task:standby', last_visible_output_at='2026-11-08T09:00:00+00:00'
+    )
+
+    meta = service.store.get_task_runtime_meta('task:standby') or {}
+    assert meta.get('last_run_at') == RUN_STAMP
+
+
+def test_visible_output_listener_advances_both_anchors(tmp_path: Path) -> None:
+    """真实可见输出同时推进静默锚点与展示锚点；纯重锚不推进展示锚点。"""
+    service = _service(tmp_path)
+    task, _parent = _seed_continuous_root(service)
+    task = task.model_copy(update={'session_id': 'web:shared'})
+    service.store.upsert_task(task)
+
+    service.task_stall_notifier.record_visible_output('task:standby', occurred_at=RUN_STAMP)
+    meta = service.store.get_task_runtime_meta('task:standby') or {}
+    assert meta.get('last_visible_output_at') == RUN_STAMP
+    assert meta.get('last_run_at') == RUN_STAMP
+
+    service.task_stall_notifier.reset_visible_output(
+        'task:standby', occurred_at='2026-11-08T09:00:00+00:00'
+    )
+    meta = service.store.get_task_runtime_meta('task:standby') or {}
+    assert meta.get('last_visible_output_at') == '2026-11-08T09:00:00+00:00'
+    assert meta.get('last_run_at') == RUN_STAMP
 
 
 def test_summary_payload_omits_empty_last_run_at(tmp_path: Path) -> None:

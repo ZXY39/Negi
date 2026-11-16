@@ -765,7 +765,7 @@ class MainRuntimeService:
         self.log_service.add_live_snapshot_publisher(self._publish_live_snapshot)
         self.log_service.add_summary_metric_reporter(self._increment_summary_stat)
         self.task_stall_notifier = TaskStallNotifier(service=self)
-        self.log_service.add_task_visible_output_listener(self.task_stall_notifier.reset_visible_output)
+        self.log_service.add_task_visible_output_listener(self.task_stall_notifier.record_visible_output)
         self.log_service.add_task_terminal_listener(self._cleanup_terminal_task_temp_dir_if_empty)
         # 磁盘治理（P0）：终态即清中间产物（temp/tasks 草稿 + 中间 artifact）。
         self._terminal_cleanup_inflight: set[str] = set()
