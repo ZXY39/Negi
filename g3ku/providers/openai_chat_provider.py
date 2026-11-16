@@ -101,6 +101,17 @@ def _structured_error_fields(exc: BaseException) -> dict[str, Any]:
     return {"error_code": code, "error_status": status, "error_kind": kind}
 
 
+def _openai_thinking_budget(reasoning_input_mode: str | None, reasoning_budget_tokens: Any) -> int | None:
+    """token 模式返回正整数思考预算（OpenAI 系走 thinking_budget），否则 None（走档位）。"""
+    if str(reasoning_input_mode or "level").strip().lower() != "token":
+        return None
+    try:
+        budget = int(reasoning_budget_tokens)
+    except (TypeError, ValueError):
+        return None
+    return budget if budget > 0 else None
+
+
 def _strip_foreign_reasoning_fields(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Drop other protocols' reasoning fields from assistant rows before the Chat wire.
 
@@ -132,10 +143,14 @@ class OpenAIChatProvider(LLMProvider):
         api_base: str = "http://localhost:8000/v1",
         default_model: str = "default",
         extra_headers: dict[str, str] | None = None,
+        reasoning_input_mode: str = "level",
+        reasoning_budget_tokens: int | None = None,
     ):
         super().__init__(api_key, api_base)
         self.default_model = default_model
         self.extra_headers = dict(extra_headers or {})
+        self.reasoning_input_mode = str(reasoning_input_mode or "level").strip().lower()
+        self.reasoning_budget_tokens = reasoning_budget_tokens
         self._client = AsyncOpenAI(
             api_key=api_key,
             base_url=api_base,
@@ -183,7 +198,12 @@ class OpenAIChatProvider(LLMProvider):
             kwargs["temperature"] = float(temperature)
         if self.extra_headers:
             kwargs["extra_headers"] = dict(self.extra_headers)
-        if reasoning_effort and str(reasoning_effort).strip().lower() != "none":
+        budget = _openai_thinking_budget(self.reasoning_input_mode, self.reasoning_budget_tokens)
+        if budget is not None:
+            # OpenAI 系网关（Qwen/DashScope compatible-mode）按 thinking_budget 控制思考量；
+            # token 模式取代档位，不再发 reasoning_effort。
+            kwargs["thinking_budget"] = budget
+        elif reasoning_effort and str(reasoning_effort).strip().lower() != "none":
             kwargs["reasoning_effort"] = str(reasoning_effort).strip()
         if tools:
             kwargs.update(

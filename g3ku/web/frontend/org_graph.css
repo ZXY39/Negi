@@ -8006,18 +8006,23 @@ textarea {
 .llm-reasoning-mode-toggle {
     display: inline-flex;
     flex: none;
-    border: 1px solid color-mix(in srgb, var(--text-secondary) 30%, transparent);
-    border-radius: 6px;
+    width: 96px;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
     overflow: hidden;
+    background: color-mix(in srgb, var(--bg-app) 78%, transparent);
 }
 .llm-reasoning-mode-btn {
     appearance: none;
     border: 0;
+    flex: 1 1 0;
+    min-width: 0;
     background: transparent;
     color: var(--text-secondary);
     font-size: 12px;
     line-height: 1;
-    padding: 3px 9px;
+    padding: 5px 0;
+    text-align: center;
     cursor: pointer;
 }
 .llm-reasoning-mode-btn.is-active {

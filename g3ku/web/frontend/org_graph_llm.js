@@ -1210,21 +1210,19 @@
     draft.parameters = draft.parameters && typeof draft.parameters === "object" && !Array.isArray(draft.parameters) ? draft.parameters : {};
     draft.parameters.context_window_tokens = contextWindowTokens;
     draft.parameters.reasoning_effort = reasoningEffort;
-    // Anthropic 思考输入模式（档位/Token）与自定义预算。token 值切回档位时保留不生效，
+    // 思考输入模式（档位/Token）与自定义预算，全协议通用。token 值切回档位时保留不生效，
     // 故两字段恒落盘（budget 缺省取 medium=8192），由 provider 按 mode 决定哪个生效。
-    if (trim(editor?.providerId) === "anthropic") {
-      draft.parameters.reasoning_input_mode = editor?.reasoningInputMode === "token" ? "token" : "level";
-      const budgetRaw = trim(editor?.reasoningBudgetTokens);
-      let budget = DEFAULT_REASONING_BUDGET_TOKENS;
-      if (budgetRaw) {
-        const parsedBudget = parseTokenScaleValue(budgetRaw);
-        if (!Number.isInteger(parsedBudget) || parsedBudget < 1) {
-          throw new Error("思考预算Token必须是不小于 1 的整数（或带 K / M，如 8K）");
-        }
-        budget = parsedBudget;
+    draft.parameters.reasoning_input_mode = editor?.reasoningInputMode === "token" ? "token" : "level";
+    const budgetRaw = trim(editor?.reasoningBudgetTokens);
+    let budget = DEFAULT_REASONING_BUDGET_TOKENS;
+    if (budgetRaw) {
+      const parsedBudget = parseTokenScaleValue(budgetRaw);
+      if (!Number.isInteger(parsedBudget) || parsedBudget < 1) {
+        throw new Error("思考预算Token必须是不小于 1 的整数（或带 K / M，如 8K）");
       }
-      draft.parameters.reasoning_budget_tokens = budget;
+      budget = parsedBudget;
     }
+    draft.parameters.reasoning_budget_tokens = budget;
     draft.parameters.max_tokens = maxOutputTokens;
     if (requestTimeoutSeconds === null) {
       delete draft.parameters.request_timeout_seconds;
@@ -1340,14 +1338,7 @@
           <select id="llm-binding-reasoning-effort" class="resource-search resource-select" data-resource-select-label="Reasoning effort" data-resource-select-portal="true">
             ${REASONING_EFFORT_LEVELS.map((level) => `<option value="${escv(level)}"${level === value ? " selected" : ""}>${escv(REASONING_EFFORT_LABELS[level] || level)}</option>`).join("")}
           </select>`;
-    // 档位/Token 切换仅 Anthropic 有预算 token 概念；其余协议保持档位下拉。
-    if (trim(editor?.providerId) !== "anthropic") {
-      return `
-        <label class="resource-field">
-          <span class="resource-field-label">深度思考（Reasoning Effort）</span>
-          ${selectHtml}
-        </label>`;
-    }
+    // 档位/Token 切换全协议通用：Anthropic 走 budget_tokens，OpenAI 系走 thinking_budget。
     const mode = editor?.reasoningInputMode === "token" ? "token" : "level";
     const budgetValue = trim(editor?.reasoningBudgetTokens) || String(DEFAULT_REASONING_BUDGET_TOKENS);
     const toggleHtml = `

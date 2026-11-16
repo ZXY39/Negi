@@ -653,6 +653,18 @@ def test_anthropic_converter_isolates_own_field():
     assert not any(b.get("type") == "text" and b.get("text") == "chat-text" for b in assistant)
 
 
+def test_openai_thinking_budget_helper():
+    from g3ku.providers.openai_chat_provider import _openai_thinking_budget
+
+    # token 模式正整数 → 预算；level/缺省/<=0/非法 → None（走档位）。
+    assert _openai_thinking_budget("token", 5000) == 5000
+    assert _openai_thinking_budget("level", 5000) is None
+    assert _openai_thinking_budget("token", None) is None
+    assert _openai_thinking_budget("token", 0) is None
+    assert _openai_thinking_budget("token", "abc") is None
+    assert _openai_thinking_budget(None, 5000) is None
+
+
 def test_protocol_url_mismatch_hint():
     from g3ku.llm_config.probe_strategies import _protocol_url_mismatch_hint
 

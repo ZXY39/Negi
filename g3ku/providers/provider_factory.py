@@ -129,6 +129,8 @@ def build_provider_from_model_key(
             api_base=api_base or '',
             default_model=model_id,
             extra_headers=extra_headers,
+            reasoning_input_mode=str(model_parameters.get('reasoning_input_mode', 'level')),
+            reasoning_budget_tokens=model_parameters.get('reasoning_budget_tokens'),
         )
     elif adapter in _CHAT_PROTOCOL_ADAPTERS:
         provider = OpenAIChatProvider(
@@ -136,6 +138,8 @@ def build_provider_from_model_key(
             api_base=api_base or 'http://localhost:8000/v1',
             default_model=model_id,
             extra_headers=extra_headers,
+            reasoning_input_mode=str(model_parameters.get('reasoning_input_mode', 'level')),
+            reasoning_budget_tokens=model_parameters.get('reasoning_budget_tokens'),
         )
     elif adapter == ProtocolAdapter.ANTHROPIC_MESSAGES.value:
         anthropic_options = dict(getattr(target, 'extra_options', {}) or {})

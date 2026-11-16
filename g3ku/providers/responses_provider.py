@@ -12,6 +12,7 @@ from loguru import logger
 
 from g3ku.providers.base import RETRYABLE_STATUS_CODES, LLMProvider, LLMResponse
 from g3ku.providers.fallback import normalize_forced_function_tool_choice
+from g3ku.providers.openai_chat_provider import _openai_thinking_budget
 from g3ku.providers.responses_protocol_helpers import (
     _consume_sse,
     _convert_messages,
@@ -156,10 +157,14 @@ class ResponsesProvider(LLMProvider):
         api_base: str,
         default_model: str = "gpt-5.3-codex",
         extra_headers: dict[str, str] | None = None,
+        reasoning_input_mode: str = "level",
+        reasoning_budget_tokens: int | None = None,
     ):
         super().__init__(api_key=api_key, api_base=api_base)
         self.default_model = default_model
         self.extra_headers = dict(extra_headers or {})
+        self.reasoning_input_mode = str(reasoning_input_mode or "level").strip().lower()
+        self.reasoning_budget_tokens = reasoning_budget_tokens
 
     @property
     def manages_request_timeout_internally(self) -> bool:
@@ -233,7 +238,11 @@ class ResponsesProvider(LLMProvider):
             body["max_output_tokens"] = max(1, int(max_tokens))
         if temperature is not None:
             body["temperature"] = float(temperature)
-        if reasoning_effort and str(reasoning_effort).strip().lower() != "none":
+        budget = _openai_thinking_budget(self.reasoning_input_mode, self.reasoning_budget_tokens)
+        if budget is not None:
+            # OpenAI 系网关（Qwen）按 thinking_budget 控制思考量；token 模式取代档位。
+            body["thinking_budget"] = budget
+        elif reasoning_effort and str(reasoning_effort).strip().lower() != "none":
             body["reasoning"] = {"effort": str(reasoning_effort).strip()}
 
         if tools:
