@@ -684,6 +684,14 @@
     return String(Number.isInteger(raw) && raw > 0 ? raw : DEFAULT_REASONING_BUDGET_TOKENS);
   }
 
+  // 保存口径：空值按默认预算落盘，认不出的数交给保存校验报错（null）。
+  function reasoningBudgetDraftValue(text) {
+    const raw = trim(text);
+    if (!raw) return DEFAULT_REASONING_BUDGET_TOKENS;
+    const parsed = parseTokenScaleValue(raw);
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  }
+
   function validMaxOutputTokensValue(raw) {
     const parsed = parseTokenScaleValue(raw);
     return Number.isInteger(parsed) && parsed >= 1 ? parsed : null;
@@ -737,6 +745,10 @@
     const next = { ...draft };
     next.parameters = next.parameters && typeof next.parameters === "object" && !Array.isArray(next.parameters) ? next.parameters : {};
     next.parameters.reasoning_effort = validReasoningEffortValue(next.parameters.reasoning_effort) || DEFAULT_REASONING_EFFORT;
+    // 档位/Token 与预算两格同样在草稿里落默认值：打开时就带着它们，切过去再切回来
+    // 草稿文本回到原样，确认键不会因为显式写了一遍默认值而一直亮着。
+    next.parameters.reasoning_input_mode = reasoningInputModeFromDraft(next);
+    next.parameters.reasoning_budget_tokens = Number(reasoningBudgetTextFromDraft(next));
     if (Number.isInteger(validMaxOutputTokensValue(next.parameters.max_tokens))) {
       next.parameters.max_tokens = validMaxOutputTokensValue(next.parameters.max_tokens);
     } else {
@@ -777,6 +789,36 @@
       }
     }
     return true;
+  }
+
+  function syncReasoningInputModeFromDraft(draft) {
+    const editor = llmState().editor;
+    if (!editor) return false;
+    const mode = reasoningInputModeFromDraft(draft);
+    if (mode === (editor.reasoningInputMode === "token" ? "token" : "level")) return false;
+    editor.reasoningInputMode = mode;
+    // 只换这一格的 DOM：整页重绘会把焦点从 JSON 编辑区踢走。
+    const holder = document.getElementById("llm-reasoning-field");
+    if (!holder) return true;
+    const template = document.createElement("template");
+    template.innerHTML = renderReasoningField(editor);
+    const next = template.content.firstElementChild;
+    if (!next) return true;
+    holder.replaceWith(next);
+    if (typeof enhanceResourceSelects === "function") enhanceResourceSelects();
+    return true;
+  }
+
+  function syncReasoningBudgetFromDraft(draft) {
+    const editor = llmState().editor;
+    if (!editor) return false;
+    const resolved = Number(reasoningBudgetTextFromDraft(draft));
+    const normalized = tokenScaleDisplayText(editor.reasoningBudgetTokens, resolved);
+    const changed = normalized !== String(editor.reasoningBudgetTokens ?? "");
+    editor.reasoningBudgetTokens = normalized;
+    const input = document.getElementById("llm-binding-reasoning-budget");
+    if (input && String(input.value || "") !== normalized) input.value = normalized;
+    return changed;
   }
 
   function syncMaxOutputTokensInputValue(value) {
@@ -937,6 +979,27 @@
     syncParameterIntoJsonEditor(["reasoning_effort"], resolved);
   }
 
+  function handleBindingReasoningBudgetInput() {
+    const editor = llmState().editor;
+    if (!editor) return;
+    const input = document.getElementById("llm-binding-reasoning-budget");
+    editor.reasoningBudgetTokens = trim(input?.value || "");
+    const parsed = reasoningBudgetDraftValue(editor.reasoningBudgetTokens);
+    if (Number.isInteger(parsed)) syncParameterIntoJsonEditor(["reasoning_budget_tokens"], parsed);
+  }
+
+  // 档位/Token 是草稿里的一行参数而不是独立输入格：只改 state 不写草稿，保存就会读成
+  // 「没有需要应用的修改」。连接测试同样按草稿发探测体，所以这条同步也喂它。
+  function applyReasoningInputMode(rawMode) {
+    const editor = llmState().editor;
+    if (!editor) return;
+    syncBindingInputs();
+    const mode = rawMode === "token" ? "token" : "level";
+    editor.reasoningInputMode = mode;
+    syncParameterIntoJsonEditor(["reasoning_input_mode"], mode);
+    renderAll();
+  }
+
   function handleBindingMaxOutputTokensInput() {
     const editor = llmState().editor;
     if (!editor) return;
@@ -980,6 +1043,8 @@
       if (Number.isInteger(resolved)) syncContextWindowTokensInputValue(resolved);
       const resolvedReasoning = validReasoningEffortValue(draft?.parameters?.reasoning_effort);
       syncReasoningEffortInputValue(resolvedReasoning || DEFAULT_REASONING_EFFORT);
+      syncReasoningInputModeFromDraft(draft);
+      syncReasoningBudgetFromDraft(draft);
       const resolvedMaxTokens = validMaxOutputTokensValue(draft?.parameters?.max_tokens);
       syncMaxOutputTokensInputValue(Number.isInteger(resolvedMaxTokens) ? resolvedMaxTokens : DEFAULT_MAX_OUTPUT_TOKENS);
       const resolvedRequestTimeout = validRequestTimeoutSecondsValue(draft?.parameters?.request_timeout_seconds);
@@ -1360,7 +1425,7 @@
       ? `<input id="llm-binding-reasoning-budget" class="resource-search" type="text" inputmode="numeric" autocomplete="off" value="${escv(budgetValue)}" placeholder="默认 ${DEFAULT_REASONING_BUDGET_TOKENS}（medium），支持 8K" title="自定义思考预算 token 数，须小于最大输出TOKEN。切回档位时此值保留但不生效。">`
       : selectHtml;
     return `
-        <div class="resource-field">
+        <div class="resource-field" id="llm-reasoning-field">
           <span class="resource-field-label llm-reasoning-label-row"><span>深度思考（Reasoning Effort）</span>${toggleHtml}</span>
           ${inputHtml}
         </div>`;
@@ -2111,6 +2176,10 @@
     if (String(editor.contextWindowTokens || "") !== String(editor.initialContextWindowTokens || "")) return true;
     if (Boolean(editor.imageMultimodalEnabled) !== Boolean(editor.initialImageMultimodalEnabled)) return true;
     if (String(editor.reasoningEffort || "") !== String(editor.initialReasoningEffort || "")) return true;
+    const reasoningMode = editor.reasoningInputMode === "token" ? "token" : "level";
+    const initialReasoningMode = editor.initialReasoningInputMode === "token" ? "token" : "level";
+    if (reasoningMode !== initialReasoningMode) return true;
+    if (reasoningBudgetDraftValue(editor.reasoningBudgetTokens) !== reasoningBudgetDraftValue(editor.initialReasoningBudgetTokens)) return true;
     if (String(editor.maxOutputTokens || "") !== String(editor.initialMaxOutputTokens || "")) return true;
     if (String(editor.requestTimeoutSeconds || "") !== String(editor.initialRequestTimeoutSeconds || "")) return true;
     if (editor.mode === "create") return Boolean(trim(String(editor.createName || "")));
@@ -2146,7 +2215,14 @@
     const jsonText = document.getElementById("llm-json-editor")?.value || state.editor.jsonText;
     state.editor.jsonText = jsonText;
     const draft = bindingDraft.draft;
-    const configChanged = trim(jsonText) !== trim(state.editor.initialJsonText || "");
+    const reasoningModeChanged = (state.editor.reasoningInputMode === "token" ? "token" : "level")
+      !== (state.editor.initialReasoningInputMode === "token" ? "token" : "level");
+    // 预算按解析后的数比：8K 与 8192 是同一份配置，不能因此发一次空写入。
+    const reasoningBudgetChanged = reasoningBudgetDraftValue(state.editor.reasoningBudgetTokens)
+      !== reasoningBudgetDraftValue(state.editor.initialReasoningBudgetTokens);
+    const configChanged = trim(jsonText) !== trim(state.editor.initialJsonText || "")
+      || reasoningModeChanged
+      || reasoningBudgetChanged;
     if (configChanged && effectiveApiKeyCount(draft.api_key) > 1) {
       const message = "每个配置只允许一个 API Key（单 key 模式）；需要多个模型或容灾回退时，请添加多个配置并组成模型链。";
       state.error = message;
@@ -2326,6 +2402,10 @@
         handleBindingMaxOutputTokensInput();
         return;
       }
+      if (targetId === "llm-binding-reasoning-budget") {
+        handleBindingReasoningBudgetInput();
+        return;
+      }
       if (targetId === "llm-binding-request-timeout-seconds") {
         handleBindingRequestTimeoutSecondsInput();
         return;
@@ -2407,12 +2487,7 @@
       if (action === "close") { closeEditor(); return; }
       if (action === "edit-name") { enterModelNameEditMode(); return; }
       if (action === "set-reasoning-mode") {
-        const editor = llmState().editor;
-        if (!editor) return;
-        syncBindingInputs();
-        const modeNode = event.target.closest("[data-reasoning-mode]");
-        editor.reasoningInputMode = modeNode?.dataset.reasoningMode === "token" ? "token" : "level";
-        renderAll();
+        applyReasoningInputMode(event.target.closest("[data-reasoning-mode]")?.dataset.reasoningMode);
         return;
       }
       if (action === "name-cancel") { cancelModelNameEdit(); return; }
@@ -2545,6 +2620,8 @@
     normalizeBindingNameText,
     withThinkingOutputParameterDefaults,
     handleBindingJsonEditorInput,
+    handleBindingReasoningBudgetInput,
+    applyReasoningInputMode,
     handleTest,
     handleFetchModelList,
     handleTestMaxConcurrency,
