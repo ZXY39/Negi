@@ -633,3 +633,26 @@ def test_anthropic_converter_isolates_own_field():
     assistant = messages[1]["content"]
     assert any(b.get("type") == "thinking" for b in assistant)
     assert not any(b.get("type") == "text" and b.get("text") == "chat-text" for b in assistant)
+
+
+def test_protocol_url_mismatch_hint():
+    from g3ku.llm_config.probe_strategies import _protocol_url_mismatch_hint
+
+    def _cfg(provider_id, base_url):
+        draft = ProviderConfigDraft(
+            provider_id=provider_id, api_key="sk-x", base_url=base_url,
+            default_model="m", parameters={"context_window_tokens": 200000},
+        )
+        normalized, errors = normalize_draft(draft, TemplateRegistry())
+        assert not errors
+        return normalized
+
+    # Anthropic 协议 + OpenAI 地址 → 提示改 apps/anthropic。
+    hint = _protocol_url_mismatch_hint(_cfg("anthropic", "https://dashscope.aliyuncs.com/compatible-mode/v1"))
+    assert "apps/anthropic" in hint
+    # OpenAI 协议 + Anthropic 地址 → 提示改 compatible-mode。
+    hint2 = _protocol_url_mismatch_hint(_cfg("openai", "https://dashscope.aliyuncs.com/apps/anthropic"))
+    assert "compatible-mode" in hint2
+    # 正确配置 → 无提示。
+    assert _protocol_url_mismatch_hint(_cfg("anthropic", "https://dashscope.aliyuncs.com/apps/anthropic")) == ""
+    assert _protocol_url_mismatch_hint(_cfg("openai", "https://dashscope.aliyuncs.com/compatible-mode/v1")) == ""

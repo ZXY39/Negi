@@ -214,6 +214,31 @@ def _build_openai_fallback_payload(config: NormalizedProviderConfig) -> tuple[st
     return "/chat/completions", payload
 
 
+def _protocol_url_mismatch_hint(config: NormalizedProviderConfig) -> str:
+    """协议与请求地址明显错配时给一条可操作提示（防呆）。
+
+    不做静默自动转换：OpenAI 与 Anthropic 在网关上是不同 API 根（百炼 compatible-mode/v1
+    vs apps/anthropic），无法通用互转，静默改写会掩盖配置错误。改为在探测失败时点明错配，
+    让操作员按所选协议改对地址。
+    """
+    base = str(config.base_url or "").lower().rstrip("/")
+    adapter = config.protocol_adapter
+    if adapter == ProtocolAdapter.ANTHROPIC_MESSAGES:
+        if "compatible-mode" in base or base.endswith("/chat/completions"):
+            return (
+                " 防呆提示：所选协议是 Anthropic，但地址像 OpenAI 端点。百炼 Anthropic 协议请用 "
+                "https://dashscope.aliyuncs.com/apps/anthropic（compatible-mode/v1 是 OpenAI 端点，"
+                "Anthropic 请求发到那里会 404）。"
+            )
+    elif adapter in (ProtocolAdapter.OPENAI_COMPLETIONS, ProtocolAdapter.OPENAI_RESPONSES):
+        if "apps/anthropic" in base or base.endswith("/messages"):
+            return (
+                " 防呆提示：所选协议是 OpenAI，但地址像 Anthropic 端点。百炼 OpenAI 协议请用 "
+                "https://dashscope.aliyuncs.com/compatible-mode/v1（apps/anthropic 是 Anthropic 端点）。"
+            )
+    return ""
+
+
 def _extract_upstream_error_detail(raw_text: str) -> str:
     text = str(raw_text or "").strip()
     if not text:
@@ -271,7 +296,7 @@ def _probe_openai_inference_envelope(
         status=ProbeStatus.INVALID_RESPONSE,
         http_status=http_status,
         latency_ms=int((time.perf_counter() - start) * 1000),
-        message=f"{label} request failed: {detail}",
+        message=f"{label} request failed: {detail}{_protocol_url_mismatch_hint(config)}",
         diagnostics={**(extra_diagnostics or {}), "upstream_detail": detail},
     )
 
