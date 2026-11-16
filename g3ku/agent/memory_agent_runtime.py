@@ -2805,7 +2805,7 @@ class MemoryManager:
                     "memory_id": target_id,
                     "changed": False,
                     "resident_chars_after": self._resident_memory_chars(),
-                    "compress_trigger_chars": int(getattr(self.config.document, "compress_trigger_chars", 16000) or 16000),
+                    "compress_trigger_chars": int(getattr(self.config.document, "compress_trigger_chars", 39000) or 39000),
                     "document_max_chars": int(getattr(self.config.document, "document_max_chars", 42000) or 42000),
                 }
             rows_before = repo.list_memories()
@@ -2824,7 +2824,7 @@ class MemoryManager:
             "memory_id": target_id,
             "changed": True,
             "resident_chars_after": self._resident_memory_chars(),
-            "compress_trigger_chars": int(getattr(self.config.document, "compress_trigger_chars", 16000) or 16000),
+            "compress_trigger_chars": int(getattr(self.config.document, "compress_trigger_chars", 39000) or 39000),
             "document_max_chars": int(getattr(self.config.document, "document_max_chars", 42000) or 42000),
         }
 
@@ -4964,8 +4964,8 @@ class MemoryManager:
         that follows the write would hide the full body before any reader ever saw it.
         """
         effective_now = str(now_iso or self._now_iso()).strip()
-        trigger = int(getattr(self.config.document, "compress_trigger_chars", 16000) or 16000)
-        target = int(getattr(self.config.document, "compress_target_chars", 13000) or 13000)
+        trigger = int(getattr(self.config.document, "compress_trigger_chars", 39000) or 39000)
+        target = int(getattr(self.config.document, "compress_target_chars", 27000) or 27000)
         result: dict[str, Any] = {
             "compression_triggered": False,
             "compressed_memory_ids": [],
@@ -6951,7 +6951,7 @@ class MemoryManager:
             # model's output did not change, the library made room for it. The compression
             # stands even if this batch later fails for another reason; it is the same move
             # the post-commit lane would have made on its own.
-            target = int(getattr(self.config.document, "compress_target_chars", 13000) or 13000)
+            target = int(getattr(self.config.document, "compress_target_chars", 27000) or 27000)
             compressed = self._compress_pool_to_target(now_iso=self._now_iso(), target=target)
             if not compressed:
                 raise
@@ -7489,8 +7489,8 @@ class MemoryManager:
         and an uncapped retry loop would spin this batch against it forever - which is exactly
         how the provider-error requeue lane behaved before it got a bound.
         """
-        trigger = int(getattr(self.config.document, "compress_trigger_chars", 16000) or 16000)
-        target = int(getattr(self.config.document, "compress_target_chars", 13000) or 13000)
+        trigger = int(getattr(self.config.document, "compress_trigger_chars", 39000) or 39000)
+        target = int(getattr(self.config.document, "compress_target_chars", 27000) or 27000)
         counts = self._reset_queue_requests_for_replay([item.request_id for item in batch.items])
         replays = max(counts) if counts else CAPACITY_REPLAY_LIMIT
         error_text = str(result.get("error") or "").strip()
@@ -7682,7 +7682,7 @@ class MemoryManager:
             with self._io_lock:
                 degraded = self._compress_pool_to_target(
                     now_iso=now,
-                    target=int(getattr(self.config.document, "compress_target_chars", 13000) or 13000),
+                    target=int(getattr(self.config.document, "compress_target_chars", 27000) or 27000),
                 )
             if degraded:
                 record["compression_fallback_ids"] = [str(item.get("memory_id") or "") for item in degraded]
