@@ -16,6 +16,7 @@ import g3ku.config.model_manager as model_manager
 import g3ku.runtime.web_ceo_sessions as web_ceo_sessions
 from g3ku.config.loader import ensure_startup_config_ready
 from g3ku.content.navigation import _artifact_id_from_ref
+from g3ku.deployment.data_root import data_root
 from g3ku.llm_config.enums import ProbeStatus
 from g3ku.llm_config.facade import LLMConfigFacade
 from g3ku.resources import ResourceManager
@@ -5038,9 +5039,11 @@ def test_resource_read_endpoints_work_without_configured_models(tmp_path: Path, 
     workspace.mkdir(parents=True, exist_ok=True)
     monkeypatch.chdir(workspace)
     ensure_startup_config_ready()
-    _write_skill(workspace, name='demo_skill')
-    _write_installed_tool(workspace, name='installed_tool')
-    _copy_repo_tools(workspace, 'memory_note', 'memory_update', 'memory_runtime')
+    # 活资源挂在数据根（G3KU_DATA_DIR，用例里是 tmp_path），代码树的同名资源只是种子。
+    resource_root = data_root()
+    _write_skill(resource_root, name='demo_skill')
+    _write_installed_tool(resource_root, name='installed_tool')
+    _copy_repo_tools(resource_root, 'memory_note', 'memory_update', 'memory_runtime')
 
     app = FastAPI()
     app.include_router(admin_rest.router, prefix='/api')
@@ -5082,8 +5085,9 @@ def test_resource_write_endpoints_work_without_configured_models(tmp_path: Path,
     workspace.mkdir(parents=True, exist_ok=True)
     monkeypatch.chdir(workspace)
     ensure_startup_config_ready()
-    _write_skill(workspace, name='demo_skill')
-    _write_installed_tool(workspace, name='installed_tool')
+    resource_root = data_root()
+    _write_skill(resource_root, name='demo_skill')
+    _write_installed_tool(resource_root, name='installed_tool')
 
     app = FastAPI()
     app.include_router(admin_rest.router, prefix='/api')
