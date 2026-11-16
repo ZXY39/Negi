@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 import sys
 import time
@@ -459,7 +460,7 @@ async def test_exec_background_registers_pid_and_log(isolated_root: Path) -> Non
     )
 
     raw = await tool.execute(
-        command=f'"{sys.executable}" -c "import time; time.sleep(60)"',
+        command=f'& "{sys.executable}" -c "import time; time.sleep(60)"',
         working_dir=str(workspace),
         background=True,
         purpose="probe sleeper for the owned-process test",
@@ -480,6 +481,7 @@ async def test_exec_background_registers_pid_and_log(isolated_root: Path) -> Non
     assert entry["pid"] == pid
     assert entry["node_id"] == "node:a"
     assert entry["label"] == "probe sleeper for the owned-process test"
+    assert owned_processes.is_alive(pid)
 
     kill_payload = json.loads(
         await ProcessKillTool().execute(
@@ -659,7 +661,7 @@ async def test_exec_background_hands_the_process_to_the_adopting_lane(
     )
 
     raw = await tool.execute(
-        command=f'"{sys.executable}" -c "import time; time.sleep(60)"',
+        command=f'& "{sys.executable}" -c "import time; time.sleep(60)"',
         working_dir=str(workspace),
         background=True,
         purpose="adoption probe",
@@ -673,10 +675,21 @@ async def test_exec_background_hands_the_process_to_the_adopting_lane(
     pid = int(payload["pid"])
     process = captured.get("process")
 
-    assert callable(getattr(process, "poll", None))
+    if os.name == "nt":
+        # broker 中转后目标已脱离父树/job，运行时手里没有句柄，观察走存活轮询。
+        assert process is None
+    else:
+        assert callable(getattr(process, "poll", None))
     assert captured["entry"]["pid"] == pid
     assert captured["entry"]["log_path"] == payload["log_path"]
     assert captured["entry"]["scope"] == owned_processes.scope_key(session_key=session_key)
+    assert owned_processes.is_alive(pid)
 
-    process.kill()
-    process.wait(timeout=20)
+    if process is not None:
+        process.kill()
+        process.wait(timeout=20)
+    else:
+        result = owned_processes.kill_owned(
+            owned_processes.scope_key(session_key=session_key), pid
+        )
+        assert result["ok"] is True

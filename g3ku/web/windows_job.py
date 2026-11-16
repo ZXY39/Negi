@@ -7,6 +7,9 @@ from ctypes import wintypes
 from typing import Any
 
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+# 后台长期进程（exec background）出生即带 CREATE_BREAKAWAY_FROM_JOB 出逃，
+# 重启/停机时不随 job 关闭连坐；前台子进程不带该 flag，照旧留在 job 内。
+JOB_OBJECT_LIMIT_BREAKAWAY_OK = 0x00000800
 JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 PROCESS_SET_QUOTA = 0x0100
@@ -83,7 +86,9 @@ def _ensure_job_handle(kernel32) -> Any | None:
         return None
 
     info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
-    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    info.BasicLimitInformation.LimitFlags = (
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK
+    )
     ok = kernel32.SetInformationJobObject(
         job_handle,
         JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
@@ -151,6 +156,7 @@ def assign_process_to_kill_on_close_job(process: Any) -> bool:
 
 
 __all__ = [
+    "JOB_OBJECT_LIMIT_BREAKAWAY_OK",
     "JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE",
     "assign_process_to_kill_on_close_job",
     "close_kill_on_close_job",

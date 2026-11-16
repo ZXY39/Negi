@@ -181,6 +181,11 @@ def _identity_matches(entry: dict[str, Any]) -> bool:
     return abs(actual - recorded) < 1.0
 
 
+def identity_matches(entry: dict[str, Any]) -> bool:
+    """条目指向的进程是否还是当初那一个（防 PID 复用）；公开给观察/认领车道。"""
+    return _identity_matches(entry)
+
+
 def list_owned(
     scope: str,
     *,

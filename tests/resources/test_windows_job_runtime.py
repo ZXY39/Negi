@@ -1,11 +1,48 @@
 from __future__ import annotations
 
+import ctypes
 import os
 from pathlib import Path
 from types import SimpleNamespace
 
 import g3ku.web.windows_job as windows_job
 import g3ku.web.worker_control as worker_control
+
+
+def test_windows_job_allows_breakaway_for_background_processes(monkeypatch) -> None:
+    """job 必须放行 BREAKAWAY：后台进程带 CREATE_BREAKAWAY_FROM_JOB 出逃才不连坐。"""
+    seen_flags: list[int] = []
+
+    class _Kernel32:
+        def CreateJobObjectW(self, _attrs, _name):
+            return 101
+
+        def SetInformationJobObject(self, _job, _cls, info_ptr, _size):
+            info = ctypes.cast(
+                info_ptr, ctypes.POINTER(windows_job.JOBOBJECT_EXTENDED_LIMIT_INFORMATION)
+            ).contents
+            seen_flags.append(int(info.BasicLimitInformation.LimitFlags))
+            return 1
+
+        def OpenProcess(self, _access, _inherit, _pid):
+            return 202
+
+        def AssignProcessToJobObject(self, _job, _handle):
+            return 1
+
+        def CloseHandle(self, _handle):
+            return 1
+
+    monkeypatch.setattr(windows_job, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(windows_job, "_get_kernel32", lambda: _Kernel32())
+    monkeypatch.setattr(windows_job, "_JOB_HANDLE", None)
+    monkeypatch.setattr(windows_job, "_JOB_ATEXIT_REGISTERED", False)
+    monkeypatch.setattr(windows_job.atexit, "register", lambda func: None)
+
+    assert windows_job.assign_process_to_kill_on_close_job(SimpleNamespace(pid=777)) is True
+    assert seen_flags == [
+        windows_job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | windows_job.JOB_OBJECT_LIMIT_BREAKAWAY_OK
+    ]
 
 
 def test_windows_job_assigns_process_to_kill_on_close_job(monkeypatch) -> None:

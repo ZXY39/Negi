@@ -5,6 +5,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -39,6 +40,22 @@ _EXEC_INLINE_CHAR_LIMIT = 5_000
 # 这个宽限，到点后杀进程树释放管道并返回已抢救的部分输出（带 drain_timed_out 标记）。
 # 与超时路径 _collect_terminated_process_output 的 5s 排空宽限保持一致。
 _POST_EXIT_DRAIN_GRACE_SECONDS = 5.0
+
+# Windows 后台车道的 broker 回执等待上限（秒）。broker 起完目标即退出，正常毫秒级返回。
+_BACKGROUND_BROKER_TIMEOUT_SECONDS = 20.0
+# broker 脚本：stdin 收 JSON spec（argv/cwd/log_path/creationflags），起目标后把目标 pid
+# 写回 stdout 单行 JSON 并立即退出。目标父 PID 随之指向死进程，bootstrap reaper 的
+# `taskkill /T` 活进程树遍历够不着它；creationflags 由调用方传入（含 BREAKAWAY_FROM_JOB）。
+_BACKGROUND_BROKER_SCRIPT = (
+    "import json,subprocess,sys\n"
+    "spec=json.loads(sys.stdin.read())\n"
+    "log=open(spec['log_path'],'ab',buffering=0)\n"
+    "p=subprocess.Popen(spec['argv'],cwd=spec.get('cwd') or None,"
+    "stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,"
+    "creationflags=int(spec.get('creationflags') or 0))\n"
+    "sys.stdout.write(json.dumps({'pid':p.pid})+'\\n')\n"
+    "sys.stdout.flush()\n"
+)
 
 _DRAIN_TIMEOUT_NOTE = (
     "命令主进程已退出，但其输出管道仍未关闭——有后台子/孙进程仍持有 stdout/stderr 写端。"
@@ -807,6 +824,70 @@ class ExecTool(Tool):
         )
         return "\n".join(lines)
 
+    def _start_background_windows_broker(
+        self,
+        *,
+        command: str,
+        cwd: str,
+        env: dict[str, str],
+        log_path: str,
+    ) -> tuple[int | None, str]:
+        """经短命 broker 起目标，断掉 job 与父树两重连坐；返回 (目标 pid, 错误文本)。
+
+        broker 本身留在 job 里、不登记，起完目标即退出，是一次性中继。目标带
+        `CREATE_BREAKAWAY_FROM_JOB` 出生（job 已设 `BREAKAWAY_OK`，见
+        `g3ku/web/windows_job.py`），停机关 job 不连坐；父 PID 指向已退出的 broker，
+        `taskkill /T` 够不着。登记用目标 pid，create_time 由调用方现取。
+        """
+        argv = self._windows_shell_argv(command)
+        target_flags = (
+            getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x01000000)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+            | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        )
+        spec = json.dumps(
+            {"argv": argv, "cwd": cwd, "log_path": log_path, "creationflags": target_flags}
+        )
+        broker_argv = [sys.executable, "-u", "-c", _BACKGROUND_BROKER_SCRIPT]
+        try:
+            broker = subprocess.Popen(
+                broker_argv,
+                cwd=cwd,
+                env=env,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception as exc:
+            return None, f"Failed to start background broker: {exc}"
+        try:
+            out, err = broker.communicate(
+                input=spec.encode("utf-8"), timeout=_BACKGROUND_BROKER_TIMEOUT_SECONDS
+            )
+        except subprocess.TimeoutExpired:
+            broker.kill()
+            broker.communicate()
+            return None, "Background broker timed out before reporting the target pid."
+        except Exception as exc:
+            return None, f"Background broker failed: {exc}"
+        pid = 0
+        for line in reversed((out or b"").decode("utf-8", errors="replace").splitlines()):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                pid = int(json.loads(line).get("pid") or 0)
+            except Exception:
+                pid = 0
+            break
+        if broker.returncode != 0 or pid <= 0:
+            detail = (err or b"").decode("utf-8", errors="replace").strip()[-500:]
+            return None, (
+                f"Background broker did not start the target (exit={broker.returncode}). {detail}"
+            ).strip()
+        return pid, ""
+
     def _start_background(
         self,
         *,
@@ -819,8 +900,11 @@ class ExecTool(Tool):
         """启动一个运行时拥有的后台进程，并登记进归属表。
 
         与前台车道只差三处：不接管道（stdout/stderr 直接落日志文件）、不等待
-        （Popen 后立即返回）、启动即登记。detach 之后它不再受 exec 的超时/取消
-        管辖，回收权交给 `process_kill` 与 scope 生命周期。
+        （起后立即返回）、启动即登记。detach 之后它不再受 exec 的超时/取消
+        管辖，回收权交给 `process_kill` 与 scope 生命周期。Windows 经短命 broker
+        中转出生（断 job 与父树连坐，见 `_start_background_windows_broker`），
+        因此没有可 poll 的句柄，退出观察走存活轮询；POSIX 用 `start_new_session`
+        脱离进程组，仍保留 Popen 句柄。
 
         节点道的生命周期准入门（`_node_background_admission`）在 Popen 前检查
         本次调用所属域是否仍开放；Popen 后登记/adopt 前再核对一次——若域恰在
@@ -849,33 +933,37 @@ class ExecTool(Tool):
                 )
         scope = owned_processes.scope_key(session_key=session_key, task_id=task_id)
         log_path = owned_processes.new_log_path(scope)
-        popen_kwargs: dict[str, Any] = {
-            "cwd": cwd,
-            "env": env,
-            "stdin": subprocess.DEVNULL,
-            "stderr": subprocess.STDOUT,
-        }
-        argv: Any
+        process: Any = None
         if os.name == "nt":
-            argv = self._windows_shell_argv(command)
-            popen_kwargs["creationflags"] = (
-                getattr(subprocess, "CREATE_NO_WINDOW", 0)
-                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            target_pid, broker_error = self._start_background_windows_broker(
+                command=command, cwd=cwd, env=env, log_path=str(log_path)
             )
+            if broker_error or not target_pid:
+                return self._build_payload(
+                    status="error",
+                    exit_code=None,
+                    error=broker_error or "Failed to start background process.",
+                )
         else:
-            argv = command
-            popen_kwargs["shell"] = True
-            popen_kwargs["start_new_session"] = True
-        try:
-            with open(log_path, "ab", buffering=0) as log_handle:
-                popen_kwargs["stdout"] = log_handle
-                process = subprocess.Popen(argv, **popen_kwargs)
-        except Exception as exc:
-            message = f"Failed to start background process: {exc}"
-            return self._build_payload(status="error", exit_code=None, error=message)
+            popen_kwargs: dict[str, Any] = {
+                "cwd": cwd,
+                "env": env,
+                "stdin": subprocess.DEVNULL,
+                "stderr": subprocess.STDOUT,
+                "shell": True,
+                "start_new_session": True,
+            }
+            try:
+                with open(log_path, "ab", buffering=0) as log_handle:
+                    popen_kwargs["stdout"] = log_handle
+                    process = subprocess.Popen(command, **popen_kwargs)
+            except Exception as exc:
+                message = f"Failed to start background process: {exc}"
+                return self._build_payload(status="error", exit_code=None, error=message)
+            target_pid = int(process.pid)
         entry = owned_processes.register(
             scope=scope,
-            pid=int(process.pid),
+            pid=int(target_pid),
             cmd=command,
             log_path=str(log_path),
             session_key=session_key,
@@ -895,11 +983,11 @@ class ExecTool(Tool):
                 post_reason = ""
             if post_reason:
                 try:
-                    owned_processes.drop(scope, int(process.pid))
+                    owned_processes.drop(scope, int(entry["pid"]))
                 except Exception:
                     pass
                 try:
-                    kill_process_tree(int(process.pid))
+                    kill_process_tree(int(entry["pid"]))
                 except Exception:
                     pass
                 return self._build_payload(

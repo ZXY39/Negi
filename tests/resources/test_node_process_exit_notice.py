@@ -209,6 +209,73 @@ async def test_delivery_failure_marks_a_notice_for_the_startup_consumer(
     assert notices[0]["exit_code"] == 3
 
 
+@pytest.mark.asyncio
+async def test_handleless_watcher_reports_gone_without_exit_code(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows broker 车道 / 重启认领的进程没有句柄：存活轮询发现消失，报 process_gone。"""
+    entry = _entry(tmp_path)
+    service = _service()
+    monkeypatch.setattr(owned_processes, "find", lambda scope, pid: entry)
+    monkeypatch.setattr(owned_processes, "is_alive", lambda pid: False)
+    monkeypatch.setattr(owned_processes, "drop", lambda scope, pid: None)
+
+    service.adopt_node_owned_process(entry=entry, process=None)
+    await asyncio.gather(*list(service._node_owned_process_tasks))
+
+    assert len(service.deliver_node_message.calls) == 1
+    call = service.deliver_node_message.calls[0]
+    assert call["system_kind"] == KIND_PROCESS_EXIT
+    assert call["wake"] is True
+    assert "no longer running" in call["message"]
+    assert "Exit code" not in call["message"]
+
+
+@pytest.mark.asyncio
+async def test_handleless_watcher_polls_until_the_process_disappears(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entry = _entry(tmp_path)
+    service = _service()
+    monkeypatch.setattr(owned_processes, "find", lambda scope, pid: entry)
+    monkeypatch.setattr(owned_processes, "identity_matches", lambda item: True)
+    monkeypatch.setattr(owned_processes, "drop", lambda scope, pid: None)
+    monkeypatch.setattr(
+        runtime_service_module, "_NODE_OWNED_PROCESS_EXIT_POLL_SECONDS", 0
+    )
+    polls = {"n": 0}
+
+    def _alive(pid):
+        polls["n"] += 1
+        return polls["n"] < 3
+
+    monkeypatch.setattr(owned_processes, "is_alive", _alive)
+
+    service.adopt_node_owned_process(entry=entry, process=None)
+    await asyncio.gather(*list(service._node_owned_process_tasks))
+
+    assert polls["n"] >= 3
+    assert len(service.deliver_node_message.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_handleless_watcher_treats_pid_reuse_as_gone(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entry = _entry(tmp_path)
+    service = _service()
+    monkeypatch.setattr(owned_processes, "find", lambda scope, pid: entry)
+    monkeypatch.setattr(owned_processes, "is_alive", lambda pid: True)
+    monkeypatch.setattr(owned_processes, "identity_matches", lambda item: False)
+    monkeypatch.setattr(owned_processes, "drop", lambda scope, pid: None)
+
+    service.adopt_node_owned_process(entry=entry, process=None)
+    await asyncio.gather(*list(service._node_owned_process_tasks))
+
+    assert len(service.deliver_node_message.calls) == 1
+    assert "no longer running" in service.deliver_node_message.calls[0]["message"]
+
+
 def test_list_task_owned_processes_maps_purpose_and_node(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

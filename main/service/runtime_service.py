@@ -1428,11 +1428,12 @@ class MainRuntimeService:
 
         与 CEO 前门的 `ToolJobRunner.adopt_owned_process` 同一个工具回调，差别只在
         交付目的地：节点的收件人是节点信箱（`process_exit`），CEO 的是会话心跳。
-        没有可 poll 的句柄、或缺 task/node 归属时不接管：宁可不报，也不凭"进程不在了"猜成败。
+        有可 poll 的句柄时按句柄判退出（带退出码）；Windows broker 车道与重启认领
+        的进程没有句柄，退化为存活+身份轮询（无退出码）。缺 task/node 归属时不接管。
         """
         poll = getattr(process, "poll", None)
         if not callable(poll):
-            return
+            poll = None
         try:
             pid = int(entry.get("pid") or 0)
         except (TypeError, ValueError):
@@ -1465,21 +1466,30 @@ class MainRuntimeService:
         scope: str,
         pid: int,
     ) -> None:
-        while True:
-            try:
-                exit_code = poll()
-            except Exception:
-                logger.debug("node owned process {} watch lost its handle", pid, exc_info=True)
-                return
-            if exit_code is not None:
-                break
-            await asyncio.sleep(_NODE_OWNED_PROCESS_EXIT_POLL_SECONDS)
-        try:
-            code = int(exit_code)
-        except (TypeError, ValueError):
-            code = None
         from g3ku.runtime import owned_processes
 
+        handleless = poll is None
+        exit_code: int | None = None
+        while True:
+            if handleless:
+                if not owned_processes.is_alive(pid):
+                    break
+                current_entry = owned_processes.find(scope, pid)
+                if current_entry is None or not owned_processes.identity_matches(current_entry):
+                    break
+            else:
+                try:
+                    exit_code = poll()
+                except Exception:
+                    logger.debug("node owned process {} watch lost its handle", pid, exc_info=True)
+                    return
+                if exit_code is not None:
+                    break
+            await asyncio.sleep(_NODE_OWNED_PROCESS_EXIT_POLL_SECONDS)
+        try:
+            code = int(exit_code) if exit_code is not None else None
+        except (TypeError, ValueError):
+            code = None
         # 条目还在盘上＝这个进程是自己退的；被 process_kill / scope 回收摘走时，
         # 那条道已经把结果交回给模型，这里不能再报一次。
         current = owned_processes.find(scope, pid)
@@ -1487,7 +1497,7 @@ class MainRuntimeService:
             return
         await self._deliver_node_owned_process_exit(
             current,
-            exit_reason="process_exited",
+            exit_reason="process_gone" if handleless else "process_exited",
             exit_code=code,
         )
 
