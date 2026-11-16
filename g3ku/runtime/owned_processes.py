@@ -6,7 +6,8 @@
 
 这里补上"归属"这一格，登记是**持久**的（每个进程一个 json，落在数据根下），
 不是进程内内存：运行时崩溃/被强杀之后，条目仍在盘上，下次启动按 `owner_pid`
-是否存活就能判定孤儿并回收。
+是否存活判定接管——活进程由新运行时认领（`readopt_orphans`），死进程转
+`.notice` 交消费口主动激活模型。
 
 三条硬规矩：
 
@@ -32,7 +33,7 @@ from typing import Any
 
 from loguru import logger
 
-from g3ku.utils.process_tree import kill_process_tree_pid, kill_process_tree_pid_checked
+from g3ku.utils.process_tree import kill_process_tree_pid_checked
 
 _ENTRY_SUFFIX = ".json"
 _LOG_SUFFIX = ".log"
@@ -256,12 +257,15 @@ def mark_notice(
     exit_code: int | None = None,
     exited_at: str | None = None,
     extra: dict[str, Any] | None = None,
+    keep_entry: bool = False,
 ) -> bool:
     """把活条目改写成待投递的 `.notice` 侧车；普通读取面看不见它。
 
     进程已经退出/将被回收而运行时还没把结果交给模型时，条目不能静默删掉：
     它既是"谁还没交代"的凭证，也是重启后消费口的唯一输入。写入走临时文件 +
     `os.replace`，先落新文件再摘旧 `.json`，读者最坏看到两份，不会看到半份。
+    `keep_entry=True` 用于非终态告知（如 survived_restart）：进程还活着，
+    条目保留，notice 只是待投递的凭证。
     """
     paths = _entry_paths(scope, pid)
     if not paths:
@@ -289,7 +293,8 @@ def mark_notice(
         except OSError:
             pass
         return False
-    path.unlink(missing_ok=True)
+    if not keep_entry:
+        path.unlink(missing_ok=True)
     return True
 
 
@@ -477,17 +482,20 @@ def _owner_alive(entry: dict[str, Any]) -> bool:
     return abs(actual - recorded) < 1.0
 
 
-def reap_orphans() -> list[int]:
-    """回收 owner 运行时已经不在的条目（崩溃/重启后的孤儿）。
+def readopt_orphans(new_owner_pid: int) -> list[dict[str, Any]]:
+    """认领 owner 运行时已不在、但进程仍活着的条目（崩溃/重启后的幸存者）。
 
-    只处理 owner 已死的条目：活着的运行时还握着自己的后台进程，不该被别人收走。
-    进程身份匹配时杀掉并标记 `.notice`；进程已经不在（含 PID 复用）时只标记。
-    条目不再静默删除——`.notice` 是启动后消费口唯一的输入，也是"谁还没交代"的凭证。
+    后台进程脱离运行时生命周期轴：重启不杀它们，新运行时改写 owner 接管，
+    退出观察与 `process_kill` 归属照常。进程已死（含 PID 复用）的条目照旧
+    `mark_notice`，交启动消费口主动激活模型——死进程绝不自动重拉。
+    返回认领成功的条目列表；调用方负责挂观察器与投存活告知。
     """
     root = _owned_root()
     if not root.exists():
         return []
-    killed: list[int] = []
+    normalized_owner = int(new_owner_pid)
+    owner_create_time = process_create_time(normalized_owner) or 0.0
+    readopted: list[dict[str, Any]] = []
     for directory in sorted(path for path in root.iterdir() if path.is_dir()):
         for path in sorted(directory.glob(f"*{_ENTRY_SUFFIX}")):
             entry = _load_entry(path)
@@ -502,21 +510,35 @@ def reap_orphans() -> list[int]:
             if _owner_alive(entry):
                 continue
             if _identity_matches(entry):
-                if kill_process_tree_pid(pid):
-                    killed.append(pid)
-                    mark_notice(scope, pid, exit_reason="reaped_after_restart")
-                else:
+                entry["owner_pid"] = normalized_owner
+                entry["owner_create_time"] = owner_create_time
+                tmp_path = path.with_name(path.name + ".tmp")
+                try:
+                    tmp_path.write_text(
+                        json.dumps(entry, ensure_ascii=False, indent=2), encoding="utf-8"
+                    )
+                    os.replace(tmp_path, path)
+                except OSError:
+                    try:
+                        tmp_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
                     logger.warning(
-                        "failed to reap orphaned background process pid={} scope={}",
+                        "failed to rewrite owner for readopted process pid={} scope={}",
                         pid,
                         scope,
                     )
+                    continue
+                readopted.append(entry)
                 continue
             exit_reason = "process_gone" if not is_alive(pid) else "identity_mismatch"
             mark_notice(scope, pid, exit_reason=exit_reason)
-    if killed:
-        logger.info("owned-process reaper killed orphaned background pids: {}", killed)
-    return killed
+    if readopted:
+        logger.info(
+            "owned-process readopt took over {} surviving background process(es)",
+            len(readopted),
+        )
+    return readopted
 
 
 def prune_notices(*, max_age_days: float = 7.0, max_count: int = 500) -> int:

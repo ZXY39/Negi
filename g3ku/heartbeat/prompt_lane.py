@@ -964,6 +964,12 @@ def tool_job_lines(
             f"- {subject} was stopped by the user (用户手动停止) "
             f"after {elapsed:.0f}s. Do not restart it unless the user asks; inspect any partial output first."
         )
+    elif status == "survived_restart":
+        header = (
+            f"- {subject} survived the project process restart and is still running "
+            f"(uptime {elapsed:.0f}s). Its pid, log and process_kill ownership are unchanged; "
+            "do not start a duplicate."
+        )
     else:
         header = f"- {subject} ended after {elapsed:.0f}s (status: {status})."
     lines = [header]

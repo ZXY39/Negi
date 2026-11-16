@@ -355,7 +355,13 @@ class WebSessionHeartbeatService:
         session_id = str(normalized.get("session_id") or "").strip()
         job_id = str(normalized.get("job_id") or "").strip()
         status = str(normalized.get("status") or "").strip().lower()
-        if not session_id or not job_id or status not in TOOL_JOB_TERMINAL_STATUSES:
+        # survived_restart 是唯一的非终态事件：进程挺过重启、还活着，同样要主动激活。
+        survived_process = (
+            str(normalized.get("kind") or "") == "process" and status == "survived_restart"
+        )
+        if not session_id or not job_id or (
+            status not in TOOL_JOB_TERMINAL_STATUSES and not survived_process
+        ):
             return False
         normalized["event_reason"] = "tool_job"
         normalized["reason"] = "tool_job"

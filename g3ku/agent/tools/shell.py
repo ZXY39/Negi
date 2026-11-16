@@ -220,8 +220,9 @@ class ExecTool(Tool):
                         "Detach the command so it keeps running after this call returns; answers pid + "
                         "log_path immediately and then ignores timeout_seconds. Use it only when a later "
                         "call must still find this process (server, browser, crawl driver). A command that "
-                        "is merely slow stays foreground. Stop it with process_kill(pid). When true, "
-                        "purpose is required."
+                        "is merely slow stays foreground. Stop it with process_kill(pid). It survives "
+                        "project restarts: the runtime re-adopts it and notifies you; if it dies you are "
+                        "woken to decide whether to restart it. When true, purpose is required."
                     ),
                 },
                 "purpose": {

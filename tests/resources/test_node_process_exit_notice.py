@@ -276,6 +276,177 @@ async def test_handleless_watcher_treats_pid_reuse_as_gone(
     assert "no longer running" in service.deliver_node_message.calls[0]["message"]
 
 
+@pytest.mark.asyncio
+async def test_startup_consumer_delivers_survived_notice_and_keeps_entry(
+    isolated_root, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scope = "task:task:abc"
+    # survived 凭证由认领道落：条目保留，进程还活着。
+    owned_processes.register(
+        scope=scope,
+        pid=123,
+        cmd="node server.js",
+        log_path=str(tmp_path / "process.log"),
+        session_key="web:proc",
+        task_id="task:abc",
+        node_id="node:a",
+        owner_pid=888_888_888,
+        label="dev server :3000",
+    )
+    assert owned_processes.mark_notice(
+        scope, 123, exit_reason="survived_restart", keep_entry=True
+    )
+    service = _service()
+
+    await service._consume_owned_process_notices()
+
+    assert len(service.deliver_node_message.calls) == 1
+    call = service.deliver_node_message.calls[0]
+    assert call["system_kind"] == KIND_PROCESS_EXIT
+    assert call["wake"] is True
+    assert "survived the project restart" in call["message"]
+    assert "still running" in call["message"]
+    assert owned_processes.find(scope, 123) is not None
+    assert owned_processes.list_notices() == []
+
+
+@pytest.mark.asyncio
+async def test_startup_consumer_enqueues_session_survived_event(
+    isolated_root, tmp_path
+) -> None:
+    scope = "session:web:proc"
+    owned_processes.register(
+        scope=scope,
+        pid=456,
+        cmd="node server.js",
+        log_path=str(tmp_path / "process.log"),
+        session_key="web:proc",
+        owner_pid=999_999_999,
+        label="dev server :3000",
+    )
+    assert owned_processes.mark_notice(
+        scope, 456, exit_reason="survived_restart", keep_entry=True
+    )
+
+    class _OutboxRecorder:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def put_tool_job_outbox(self, **kwargs):
+            self.calls.append(dict(kwargs))
+            return {"dedupe_key": kwargs.get("dedupe_key")}
+
+    service = object.__new__(MainRuntimeService)
+    service.store = _OutboxRecorder()
+    service._node_owned_process_tasks = set()
+
+    await service._consume_owned_process_notices()
+
+    assert len(service.store.calls) == 1
+    payload = service.store.calls[0]["payload"]
+    assert payload["kind"] == "process"
+    assert payload["status"] == "survived_restart"
+    assert ":g" in payload["dedupe_key"]
+    assert owned_processes.find(scope, 456) is not None
+    assert owned_processes.list_notices() == []
+
+
+@pytest.mark.asyncio
+async def test_readopt_pass_adopts_live_process_and_marks_survived(
+    isolated_root, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    scope = owned_processes.scope_key(session_key="", task_id="task:abc")
+    process = _SleeperProcess()
+    try:
+        owned_processes.register(
+            scope=scope,
+            pid=process.pid,
+            cmd="sleeper",
+            log_path="",
+            session_key="",
+            task_id="task:abc",
+            node_id="node:a",
+            owner_pid=999_999_999,
+        )
+        service = _service()
+
+        await service._readopt_owned_background_processes()
+
+        entry = owned_processes.find(scope, process.pid)
+        assert entry is not None
+        assert entry["owner_pid"] == os.getpid()
+        assert len(service._node_owned_process_tasks) == 1
+        notices = owned_processes.list_notices()
+        assert [(n["pid"], n["exit_reason"]) for n in notices] == [
+            (process.pid, "survived_restart")
+        ]
+        for notice in notices:
+            owned_processes.drop_notice(notice["_notice_path"])
+    finally:
+        for task in list(service._node_owned_process_tasks):
+            task.cancel()
+        owned_processes.drop(scope, process.pid)
+        process.kill()
+        process.wait(timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_readopt_pass_reaps_processes_of_terminal_tasks(
+    isolated_root, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scope = owned_processes.scope_key(session_key="", task_id="task:abc")
+    process = _SleeperProcess()
+    try:
+        owned_processes.register(
+            scope=scope,
+            pid=process.pid,
+            cmd="sleeper",
+            log_path="",
+            session_key="",
+            task_id="task:abc",
+            node_id="node:a",
+            owner_pid=999_999_999,
+        )
+        service = _service(node_status="success")
+
+        await service._readopt_owned_background_processes()
+
+        deadline = asyncio.get_running_loop().time() + 15
+        while owned_processes.is_alive(process.pid) and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.1)
+        assert not owned_processes.is_alive(process.pid)
+        assert owned_processes.find(scope, process.pid) is None
+        assert owned_processes.list_notices() == []
+    finally:
+        if owned_processes.is_alive(process.pid):
+            process.kill()
+        process.wait(timeout=10)
+
+
+class _SleeperProcess:
+    """真实 sleeper 子进程：认领/终态守卫测试要验真杀真活。"""
+
+    def __init__(self) -> None:
+        import subprocess
+        import sys
+
+        self._proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.pid = self._proc.pid
+
+    def kill(self) -> None:
+        self._proc.kill()
+
+    def wait(self, timeout: float | None = None):
+        return self._proc.wait(timeout=timeout)
+
+
 def test_list_task_owned_processes_maps_purpose_and_node(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

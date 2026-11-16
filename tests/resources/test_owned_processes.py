@@ -324,7 +324,7 @@ async def test_process_kill_is_scoped_to_the_calling_node(isolated_root: Path) -
         process.wait(timeout=10)
 
 
-def test_reap_orphans_only_touches_dead_owners(isolated_root: Path) -> None:
+def test_readopt_orphans_takes_over_live_processes_of_dead_owners(isolated_root: Path) -> None:
     orphan_scope = owned_processes.scope_key(session_key="web:old")
     live_scope = owned_processes.scope_key(session_key="web:live")
     orphan = _spawn_sleeper()
@@ -346,26 +346,29 @@ def test_reap_orphans_only_touches_dead_owners(isolated_root: Path) -> None:
             session_key="web:live",
         )
 
-        killed = owned_processes.reap_orphans()
+        readopted = owned_processes.readopt_orphans(os.getpid())
 
-        assert orphan.pid in killed
-        assert _wait_gone(orphan.pid)
+        assert [entry["pid"] for entry in readopted] == [orphan.pid]
+        assert owned_processes.is_alive(orphan.pid)
         assert owned_processes.is_alive(live.pid)
-        notices = owned_processes.list_notices()
-        assert [(n["pid"], n["exit_reason"]) for n in notices] == [
-            (orphan.pid, "reaped_after_restart")
-        ]
-        # 条目从活表移入 `.notice`：普通读取面看不见，凭证等启动消费口处理。
-        assert owned_processes.find(orphan_scope, orphan.pid) is None
-        for notice in notices:
-            owned_processes.drop_notice(notice["_notice_path"])
+        # 活进程不杀：条目保留，owner 改写成新运行时；不产生退出凭证。
+        entry = owned_processes.find(orphan_scope, orphan.pid)
+        assert entry is not None
+        assert entry["owner_pid"] == os.getpid()
+        assert owned_processes.list_notices() == []
+        live_entry = owned_processes.find(live_scope, live.pid)
+        assert live_entry is not None
+        assert live_entry["owner_pid"] == os.getpid()
     finally:
+        owned_processes.drop(orphan_scope, orphan.pid)
         owned_processes.drop(live_scope, live.pid)
+        orphan.kill()
+        orphan.wait(timeout=10)
         live.kill()
         live.wait(timeout=10)
 
 
-def test_reap_orphans_marks_already_exited_processes(isolated_root: Path) -> None:
+def test_readopt_orphans_marks_already_exited_processes(isolated_root: Path) -> None:
     scope = owned_processes.scope_key(session_key="", task_id="task:gone")
     process = subprocess.Popen([sys.executable, "-c", "print('done')"])
     process.wait(timeout=30)
@@ -381,13 +384,43 @@ def test_reap_orphans_marks_already_exited_processes(isolated_root: Path) -> Non
         label="already gone",
     )
 
-    killed = owned_processes.reap_orphans()
+    readopted = owned_processes.readopt_orphans(os.getpid())
 
-    assert process.pid not in killed
+    assert readopted == []
     notices = owned_processes.list_notices()
     assert [(n["pid"], n["exit_reason"]) for n in notices] == [(process.pid, "process_gone")]
     for notice in notices:
         owned_processes.drop_notice(notice["_notice_path"])
+
+
+def test_mark_notice_keep_entry_preserves_a_live_process(isolated_root: Path) -> None:
+    scope = owned_processes.scope_key(session_key="web:survivor")
+    process = _spawn_sleeper()
+    try:
+        owned_processes.register(
+            scope=scope,
+            pid=process.pid,
+            cmd="sleep",
+            log_path="",
+            session_key="web:survivor",
+            owner_pid=999_999_999,
+        )
+
+        assert owned_processes.mark_notice(
+            scope, process.pid, exit_reason="survived_restart", keep_entry=True
+        )
+
+        assert owned_processes.find(scope, process.pid) is not None
+        notices = owned_processes.list_notices()
+        assert [(n["pid"], n["exit_reason"]) for n in notices] == [
+            (process.pid, "survived_restart")
+        ]
+        for notice in notices:
+            owned_processes.drop_notice(notice["_notice_path"])
+    finally:
+        owned_processes.drop(scope, process.pid)
+        process.kill()
+        process.wait(timeout=10)
 
 
 @pytest.mark.asyncio

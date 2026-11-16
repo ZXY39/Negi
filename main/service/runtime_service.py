@@ -1207,6 +1207,7 @@ class MainRuntimeService:
                     )
             except Exception:
                 logger.exception('node background tool job recovery failed at startup')
+            await self._readopt_owned_background_processes()
             await self._consume_owned_process_notices()
             shutdown_paused_task_ids = {
                 str(item.get('ref_id') or ''): str(item.get('entry_key') or '')
@@ -1508,8 +1509,13 @@ class MainRuntimeService:
         exit_reason: str,
         exit_code: int | None,
         stopped_by: str = "",
+        keep_entry: bool = False,
     ) -> bool:
-        """把一条退出结果投给启动它的节点；暂停只落箱，节点/任务终态直接收场。"""
+        """把一条退出结果投给启动它的节点；暂停只落箱，节点/任务终态直接收场。
+
+        `keep_entry=True` 用于非终态告知（survived_restart）：进程还活着，
+        投递成功也不摘条目，所有权与观察继续。
+        """
         from g3ku.runtime import owned_processes
 
         task_id = str(entry.get("task_id") or "").strip()
@@ -1524,12 +1530,14 @@ class MainRuntimeService:
         task = self.store.get_task(task_id)
         node = self.store.get_node(node_id)
         if task is None or node is None:
-            owned_processes.drop(scope, pid)
+            if not keep_entry:
+                owned_processes.drop(scope, pid)
             return False
         node_status = str(node.status or "").strip().lower()
         task_status = str(task.status or "").strip().lower()
         if node_status in {"success", "failed"} or task_status in {"success", "failed", "canceled"}:
-            owned_processes.drop(scope, pid)
+            if not keep_entry:
+                owned_processes.drop(scope, pid)
             return False
         paused = (
             bool(getattr(task, "is_paused", False))
@@ -1562,7 +1570,8 @@ class MainRuntimeService:
                         node_id,
                         str(receipt.get("reason") or ""),
                     )
-                owned_processes.drop(scope, pid)
+                if not keep_entry:
+                    owned_processes.drop(scope, pid)
                 return True
             except Exception as exc:  # noqa: BLE001 - 重试有界，兜底交给启动消费口
                 last_error = exc
@@ -1576,13 +1585,14 @@ class MainRuntimeService:
             last_error,
         )
         # 活条目转成 `.notice`，交给下次启动的消费口；条目已经不在（例如操作员
-        # 停止已经摘走）时这里什么也不做。
+        # 停止已经摘走）时这里什么也不做。非终态告知保留条目，进程还活着。
         owned_processes.mark_notice(
             scope,
             pid,
             exit_reason=exit_reason,
             exit_code=exit_code,
             extra={"stopped_by": str(stopped_by or "")} if stopped_by else None,
+            keep_entry=keep_entry,
         )
         return False
 
@@ -1608,6 +1618,8 @@ class MainRuntimeService:
             headline = f"Background process stopped by the operator: pid {pid}"
         elif exit_reason == "reaped_after_restart":
             headline = f"Background process was terminated when the project restarted: pid {pid}"
+        elif exit_reason == "survived_restart":
+            headline = f"Background process survived the project restart: pid {pid}"
         elif exit_reason in {"process_gone", "identity_mismatch"}:
             headline = f"Background process is no longer running: pid {pid}"
         else:
@@ -1616,6 +1628,13 @@ class MainRuntimeService:
             headline += f" ({purpose})"
         headline += "."
         lines = [headline]
+        if exit_reason == "survived_restart":
+            lines.append(
+                "It is still running; pid, log file and process_kill ownership are unchanged."
+            )
+            lines.append(
+                f"Restart generation marker: {float(entry.get('owner_create_time') or 0.0):.0f}."
+            )
         if exit_code is not None:
             lines.append(f"Exit code: {exit_code}.")
         if cmd:
@@ -1843,6 +1862,58 @@ class MainRuntimeService:
             raise ValueError('background_jobs_unavailable')
         return await manager.stop_tool_job(normalized_task_id, normalized_job_id)
 
+    async def _readopt_owned_background_processes(self) -> None:
+        """认领上次运行时留下的活后台进程，并落 survived 告知凭证。
+
+        后台进程脱离运行时生命周期轴：重启不杀它们。owner 已死但身份匹配的
+        条目由 `readopt_orphans` 改写 owner 接管；这里给节点条目挂无句柄观察器，
+        再落 `survived_restart` notice（保留条目），交同一启动消费口主动激活模型。
+        任务/节点已终态的条目所有权已结束：认领改为回收，不投存活告知。
+        """
+        from g3ku.runtime import owned_processes
+
+        try:
+            readopted = await asyncio.to_thread(owned_processes.readopt_orphans, os.getpid())
+        except Exception:
+            logger.exception('owned background process readopt failed at startup')
+            return
+        for entry in readopted:
+            scope = str(entry.get('scope') or '').strip()
+            try:
+                pid = int(entry.get('pid') or 0)
+            except (TypeError, ValueError):
+                continue
+            task_id = str(entry.get('task_id') or '').strip()
+            node_id = str(entry.get('node_id') or '').strip()
+            if not scope or pid <= 0:
+                continue
+            if task_id and node_id:
+                task = self.store.get_task(task_id)
+                node = self.store.get_node(node_id)
+                terminal = (
+                    task is None
+                    or node is None
+                    or str(getattr(node, 'status', '') or '').strip().lower() in {'success', 'failed'}
+                    or str(getattr(task, 'status', '') or '').strip().lower()
+                    in {'success', 'failed', 'canceled'}
+                )
+                if terminal:
+                    await asyncio.to_thread(owned_processes.kill_owned, scope, pid)
+                    continue
+                self.adopt_node_owned_process(entry=entry, process=None)
+            try:
+                await asyncio.to_thread(
+                    owned_processes.mark_notice,
+                    scope,
+                    pid,
+                    exit_reason='survived_restart',
+                    keep_entry=True,
+                )
+            except Exception:
+                logger.warning(
+                    'survived notice mark failed pid={} scope={}', pid, scope, exc_info=True
+                )
+
     async def _consume_owned_process_notices(self) -> None:
         """启动时消费 `.notice`：节点条目投信箱，会话条目写心跳 outbox。
 
@@ -1894,11 +1965,13 @@ class MainRuntimeService:
                 return True
             if str(task.status or "").strip().lower() in {"success", "failed", "canceled"}:
                 return True
+            exit_reason = str(entry.get("exit_reason") or "process_gone")
             return await self._deliver_node_owned_process_exit(
                 entry,
-                exit_reason=str(entry.get("exit_reason") or "process_gone"),
+                exit_reason=exit_reason,
                 exit_code=exit_code,
                 stopped_by=str(entry.get("stopped_by") or ""),
+                keep_entry=exit_reason == "survived_restart",
             )
         if task_id:
             # legacy 任务条目没有 node_id：归属不到具体节点，不能冒充会话进程写心跳。
@@ -1910,16 +1983,24 @@ class MainRuntimeService:
         try:
             from g3ku.runtime.tool_jobs import build_owned_process_event_payload
 
+            survived = str(entry.get("exit_reason") or "") == "survived_restart"
             payload = build_owned_process_event_payload(
                 entry,
                 session_id=session_key,
                 finished_at=now_iso(),
-                status="interrupted",
+                status="survived_restart" if survived else "interrupted",
                 result_preview=(
-                    "The project process restarted while this background process was "
+                    "The project process restarted; this background process survived "
+                    "and is still running."
+                    if survived
+                    else "The project process restarted while this background process was "
                     "running; it is no longer running."
                 ),
             )
+            if survived:
+                # 每个重启世代只报一次：dedupe 带新 owner 的出生时间，跨世代不互吞。
+                generation = float(entry.get("owner_create_time") or 0.0)
+                payload["dedupe_key"] = f"{payload.get('dedupe_key')}:g{generation:.0f}"
             dedupe_key = str(payload.get("dedupe_key") or "").strip()
             if not dedupe_key:
                 return True
