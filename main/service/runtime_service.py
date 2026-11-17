@@ -2560,7 +2560,7 @@ class MainRuntimeService:
             return
         if settled:
             logger.info(
-                'task command claims settled as orphaned: worker=%s count=%s',
+                'task command claims settled as orphaned: worker={} count={}',
                 worker_id,
                 settled,
             )
