@@ -3423,6 +3423,8 @@ function syncCeoInputHeight() {
     if (!U.ceoInput) return;
     // 拖出来的高度是用户的显式意图：不再按内容重排，内容超出时靠 overflow-y 滚动。
     if (S.ceoInputManualHeight) return;
+    // 支持 field-sizing 的浏览器由 CSS 按内容增高、min/max-height 封顶；inline height 会覆盖它。
+    if (typeof CSS !== "undefined" && CSS.supports("field-sizing", "content")) return;
     U.ceoInput.style.height = "auto";
     U.ceoInput.style.height = `${Math.min(U.ceoInput.scrollHeight, 200)}px`;
 }

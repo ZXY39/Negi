@@ -7272,6 +7272,7 @@ textarea {
     padding: 10px var(--ui-space-3) 52px;
     color: var(--ui-text);
     resize: none;
+    field-sizing: content;
     min-height: 120px;
     max-height: 180px;
     overflow-y: auto;
