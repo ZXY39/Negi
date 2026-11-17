@@ -1,5 +1,6 @@
 import asyncio
 import atexit
+import hashlib
 import mimetypes
 import os
 import signal
@@ -11,7 +12,7 @@ from pathlib import Path
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from loguru import logger
 
 from g3ku.deployment.runtime_startup import auto_unlock_from_env
@@ -311,8 +312,13 @@ async def serve_frontend_root():
     return _frontend_index_response()
 
 
+def _frontend_asset_etag(stat_result: os.stat_result) -> str:
+    etag_base = f'{stat_result.st_mtime}-{stat_result.st_size}'
+    return f'"{hashlib.md5(etag_base.encode(), usedforsecurity=False).hexdigest()}"'
+
+
 @app.get('/{full_path:path}')
-async def serve_frontend_file(full_path: str):
+async def serve_frontend_file(full_path: str, request: Request):
     if full_path == 'api' or full_path.startswith('api/'):
         raise HTTPException(status_code=404, detail='Not found')
     candidate = (FRONTEND_DIR / full_path).resolve()
@@ -325,6 +331,11 @@ async def serve_frontend_file(full_path: str):
         and candidate.is_file()
         and candidate.suffix.lower() in FRONTEND_ASSET_SUFFIXES
     ):
+        # Starlette FileResponse 只发 ETag 头、不答条件请求，304 车道须在这里补。
+        etag = _frontend_asset_etag(candidate.stat())
+        offered = request.headers.get('if-none-match', '')
+        if any(tag.strip().removeprefix('W/') == etag for tag in offered.split(',')):
+            return Response(status_code=304, headers={**FRONTEND_ASSET_CACHE_HEADERS, 'ETag': etag})
         return FileResponse(str(candidate), headers=FRONTEND_ASSET_CACHE_HEADERS)
     return _frontend_index_response()
 
