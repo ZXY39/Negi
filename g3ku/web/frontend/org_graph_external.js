@@ -1325,7 +1325,7 @@ function initQqBotView() {
         listEl.addEventListener("keydown", (event) => {
             const input = event.target instanceof Element ? event.target.closest(".qq-bot-label-inline") : null;
             if (!input) return;
-            if (event.key === "Enter") {
+            if (event.key === "Enter" && !event.isComposing && event.keyCode !== 229) {
                 event.preventDefault();
                 void _commitQqBotLabel(Number(input.dataset.inlineLabel), input.value);
             } else if (event.key === "Escape") {

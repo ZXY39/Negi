@@ -2797,7 +2797,7 @@ function buildTaskDepthCustomOptionRow(shell, row) {
         S.taskDefaults.customDraft = String(input.value ?? "");
     });
     input.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") {
+        if (e.key === "Enter" && !e.isComposing && e.keyCode !== 229) {
             e.preventDefault();
             e.stopPropagation();
             void submitCustomTaskDepth(input.value);
@@ -11497,7 +11497,7 @@ function bindCeoSessionsPanel() {
     U.renameSessionCancel?.addEventListener("click", handleRenameCancel);
     U.renameSessionAccept?.addEventListener("click", handleRenameAccept);
     U.renameSessionInput?.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") handleRenameAccept();
+        if (e.key === "Enter" && !e.isComposing && e.keyCode !== 229) handleRenameAccept();
         if (e.key === "Escape") handleRenameCancel();
     });
     U.ceoSessionList?.addEventListener("click", (e) => {
@@ -11664,7 +11664,7 @@ function bindCeoComposerAndFeedActions() {
         syncActiveCeoComposerDraft();
     });
     U.ceoInput?.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" && !e.shiftKey) {
+        if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
             e.preventDefault();
             handleCeoPrimaryAction();
         }

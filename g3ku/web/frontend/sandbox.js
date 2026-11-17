@@ -994,7 +994,7 @@ function bindEvents() {
   });
   $('manual-session-btn').addEventListener('click', loadSessionDetail);
   $('manual-session').addEventListener('keydown', (event) => {
-    if (event.key === 'Enter') loadSessionDetail();
+    if (event.key === 'Enter' && !event.isComposing && event.keyCode !== 229) loadSessionDetail();
   });
 
   $('save-mode-btn').addEventListener('click', onSave);
@@ -1007,7 +1007,7 @@ function bindEvents() {
   $('mode-confirm-cancel').addEventListener('click', closeModeConfirm);
   $('mode-confirm-accept').addEventListener('click', applyModeChange);
   $('mode-confirm-password').addEventListener('keydown', (event) => {
-    if (event.key === 'Enter') applyModeChange();
+    if (event.key === 'Enter' && !event.isComposing && event.keyCode !== 229) applyModeChange();
   });
   $('mode-confirm-backdrop').addEventListener('click', (event) => {
     if (event.target === $('mode-confirm-backdrop')) closeModeConfirm();
