@@ -10,6 +10,7 @@ from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from loguru import logger
 
@@ -158,6 +159,8 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title='G3ku Web GUI', lifespan=lifespan)
+# 先于下面所有 @app.middleware 注册：后声明者在最外层，慢请求计时须包住压缩花销。
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 app.include_router(main_router, prefix='/api')
 app.include_router(runtime_router, prefix='/api')
 app.include_router(sandbox_router, prefix='/api')
@@ -278,6 +281,11 @@ FRONTEND_NO_CACHE_HEADERS = {
     'Pragma': 'no-cache',
     'Expires': '0',
 }
+# 资产允许存储但每次校验：FileResponse 自带 ETag/Last-Modified，no-store 会让它们失效、
+# 每次刷新全量重下整份前端；no-cache 保留 304 车道且更新即生效。
+FRONTEND_ASSET_CACHE_HEADERS = {
+    'Cache-Control': 'no-cache',
+}
 
 
 def _safe_child_file(base_dir: Path, relative_path: str) -> Path:
@@ -317,7 +325,7 @@ async def serve_frontend_file(full_path: str):
         and candidate.is_file()
         and candidate.suffix.lower() in FRONTEND_ASSET_SUFFIXES
     ):
-        return FileResponse(str(candidate), headers=FRONTEND_NO_CACHE_HEADERS)
+        return FileResponse(str(candidate), headers=FRONTEND_ASSET_CACHE_HEADERS)
     return _frontend_index_response()
 
 
