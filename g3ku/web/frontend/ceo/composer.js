@@ -433,9 +433,18 @@ function watchCeoComposerInset() {
     const area = U.ceoInput?.closest(".chat-input-area");
     const wrapper = area?.closest(".chat-wrapper");
     if (!area || !wrapper || !window.ResizeObserver) return;
-    const apply = () => wrapper.style.setProperty("--ceo-composer-inset", `${area.offsetHeight + 24}px`);
+    // 叠加控件是绝对定位：它们随文本间距长高时 area/row 的高度不变，
+    // 所以观察器必须同时挂控件，底留白按实测 band 高度单写（52px 只是无观察器时的 fallback）。
+    const controls = [...area.querySelectorAll(".ceo-input-row button")];
+    const apply = () => {
+        wrapper.style.setProperty("--ceo-composer-inset", `${area.offsetHeight + 24}px`);
+        const band = controls.reduce((max, el) => Math.max(max, el.offsetHeight), 40);
+        U.ceoInput.style.setProperty("--ceo-input-band-pad", `${band + 12}px`);
+    };
     apply();
-    new ResizeObserver(apply).observe(area);
+    const observer = new ResizeObserver(apply);
+    observer.observe(area);
+    controls.forEach((el) => observer.observe(el));
 }
 
 function normalizeCeoQueuedFollowUpEntry(entry = {}) {

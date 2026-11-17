@@ -3574,7 +3574,7 @@ textarea {
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    height: 24px;
+    min-height: 24px;
     box-sizing: border-box;
     line-height: 1;
     padding: 4px var(--msg-action-pad-x);
@@ -5083,7 +5083,6 @@ textarea {
 
 #ceo-send-btn {
     flex: none;
-    height: 40px;
     min-height: 40px;
     padding: 0 var(--ui-space-3);
     gap: var(--ui-space-2);
@@ -7290,7 +7289,7 @@ textarea {
     background: var(--ui-bg-input);
     border: 1px solid var(--ui-border);
     border-radius: var(--ui-radius-control);
-    padding: 10px var(--ui-space-3) 52px;
+    padding: 10px var(--ui-space-3) var(--ceo-input-band-pad, 52px);
     color: var(--ui-text);
     resize: none;
     field-sizing: content;
@@ -7306,7 +7305,7 @@ textarea {
 /* 全局 textarea 规则在活动层里是 (0,1,1) 且在基础表之后，本表必须用 id 压住
    输入框的 52px 控件带与 13px 字号，否则文字会排到按钮底下。 */
 #ceo-input {
-    padding: 10px var(--ui-space-3) 52px;
+    padding: 10px var(--ui-space-3) var(--ceo-input-band-pad, 52px);
     color: var(--ui-text);
     font-size: 13px;
     line-height: 20px;
@@ -7324,7 +7323,7 @@ textarea {
 .btn-primary {
     min-width: 120px;
     padding: 0 22px;
-    height: 58px;
+    min-height: 58px;
     background-color: var(--brand-primary);
     color: white;
     border-radius: 22px;
@@ -11685,7 +11684,6 @@ textarea {
    原生替身的 38px 属于输入档，两者都不进列表页脚。 */
 .resource-pagination .resource-select-trigger,
 .resource-pagination .resource-pagination-group select {
-    height: 32px;
     min-height: 32px;
 }
 
@@ -11704,7 +11702,6 @@ textarea {
 }
 
 .resource-pagination .task-sort-setting .task-depth-setting-main.task-depth-setting-main {
-    height: 32px;
     min-height: 32px;
     padding: 0 var(--ui-space-3);
     border-radius: var(--ui-radius-control);
@@ -11712,7 +11709,6 @@ textarea {
 
 .resource-pagination .task-sort-setting .resource-select-trigger,
 .resource-pagination .task-sort-setting select.task-depth-select {
-    height: 32px;
     min-height: 32px;
     padding: 0 var(--ui-space-3);
 }
@@ -12720,7 +12716,6 @@ textarea {
 /* 页脚只是计数行，跟工具条同高的按钮会把它顶成一条带；三块面板各吃一份。
    v2 主题给 .toolbar-btn 同时钉了 height 与 min-height，这里要一起压。 */
 .memory-layout .memory-footer .toolbar-btn {
-    height: 28px;
     min-height: 28px;
     padding: 0 10px;
     font-size: 0.78rem;
@@ -15204,7 +15199,6 @@ textarea {
 
 .external-token-actions .resource-select-shell select,
 .external-token-actions .resource-select-trigger {
-    height: 32px;
     min-height: 32px;
 }
 
@@ -16182,7 +16176,6 @@ textarea {
 
 /* 9. 按钮 */
 :root .toolbar-btn {
-    height: 32px;
     min-height: 32px;
     padding: 0 var(--ui-space-3);
     gap: var(--ui-space-2);
@@ -16235,7 +16228,6 @@ textarea {
 }
 
 :root .toolbar-btn.small {
-    height: 32px;
     min-height: 32px;
     padding: 0 10px;
     font-size: 13px;
@@ -16318,7 +16310,6 @@ textarea {
 :root input[type="number"],
 :root input[type="url"],
 :root select {
-    height: 38px;
     min-height: 38px;
     padding: 0 var(--ui-space-3);
     border: 1px solid var(--ui-border);
@@ -16664,7 +16655,6 @@ textarea {
 #view-tools .content-header .resource-select-trigger,
 #view-tasks-list .content-header .resource-select-trigger,
 #view-tasks-list .content-header select.task-depth-select {
-    height: 40px;
     min-height: 40px;
     padding: 0 var(--ui-space-3);
     border: 1px solid var(--ui-border);
@@ -16681,7 +16671,6 @@ textarea {
 /* 头部里所有 toolbar-btn 都吃 40px 档；基础层的 .toolbar-btn.small 是 (0,2,0)
    且在本规则之后，叠一个同名类把特异性抬到 (0,3,0) 才能压住。 */
 .content-header .toolbar-btn.toolbar-btn.toolbar-btn {
-    height: 40px;
     min-height: 40px;
     padding: 0 var(--ui-space-3);
     border: 1px solid var(--ui-border);
@@ -16716,7 +16705,6 @@ textarea {
 .content-header #external-refresh-btn,
 .content-header #sticker-refresh-btn,
 .content-header #audit-refresh-btn {
-    height: 40px;
     min-height: 40px;
 }
 
@@ -16725,7 +16713,6 @@ textarea {
 .content-header #memory-search-input,
 .content-header #sticker-search-input,
 .content-header #model-search-input {
-    height: 40px;
     min-height: 40px;
     padding: 0 var(--ui-space-3);
     border: 1px solid var(--ui-border);
@@ -16761,7 +16748,6 @@ textarea {
 }
 
 .resource-select-trigger {
-    height: 40px;
     min-height: 40px;
     border-radius: var(--ui-radius-control);
     font-size: 13px;
@@ -16942,7 +16928,6 @@ textarea {
 .memory-op-chip {
     display: inline-flex;
     align-items: center;
-    height: 24px;
     min-height: 24px;
     padding: 2px 10px;
     gap: 5px;
@@ -17228,14 +17213,12 @@ textarea {
 }
 
 .llm-image-checkbox-control--inline {
-    height: 34px;
     min-height: 34px;
     padding: 0 var(--ui-space-2);
 }
 
 .model-config-shell .resource-select-trigger.resource-select-trigger,
 .model-config-shell .llm-fetch-btn.llm-fetch-btn {
-    height: 38px;
     min-height: 38px;
 }
 
@@ -17666,7 +17649,6 @@ textarea {
 /* 头部控件统一 40px 高、控制圆角、表面底。 */
 .task-detail-header .task-detail-pill:not(.status-badge):not(.task-prompt-disclosure),
 .task-detail-header .task-detail-back-btn {
-    height: 40px;
     min-height: 40px;
     padding: 0 var(--ui-space-3);
     border: 1px solid var(--ui-border);
@@ -17689,7 +17671,6 @@ textarea {
 
 /* 状态胶囊挂 .status-badge 的 24px 标签档，这里只抬盒子；底色与描边由生命周期色给出。 */
 .task-detail-header .status-badge.status-badge {
-    height: 40px;
     min-height: 40px;
     padding: 0 var(--ui-space-3);
     border-radius: var(--ui-radius-control);
@@ -18037,7 +18018,6 @@ textarea {
     align-items: center;
     justify-content: center;
     width: 100%;
-    height: 40px;
     min-height: 40px;
     padding: 0;
     border: 1px solid var(--ui-border);
@@ -18063,7 +18043,6 @@ textarea {
 .ceo-shell.is-session-panel-expanded .ceo-new-session-btn {
     width: 40px;
     min-width: 40px;
-    height: 40px;
     min-height: 40px;
     padding: 0;
 }
@@ -18112,7 +18091,6 @@ textarea {
 }
 
 .ceo-shell.is-session-panel-expanded .ceo-session-bulk-toggle {
-    height: 40px;
     min-height: 40px;
 }
 
@@ -18705,7 +18683,6 @@ textarea {
 
 #project-settings-dialog .project-settings-scale-value {
     width: 78px;
-    height: 36px;
     min-height: 36px;
     padding: 0 22px 0 var(--ui-space-3);
     border: 1px solid var(--ui-border);
@@ -19287,14 +19264,12 @@ textarea {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    height: 24px;
     min-height: 24px;
     padding: 0 10px;
     flex: 0 0 auto;
 }
 
 .pc-topbar .pc-task-id-chip {
-    height: 24px;
     min-height: 24px;
     padding: 0 10px;
     font: inherit;
