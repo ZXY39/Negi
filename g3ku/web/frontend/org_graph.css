@@ -3494,8 +3494,8 @@ textarea {
 /* 气泡复制按钮:与元信息同一档出现的裸图标(不给徽章边框和底色),只在点击消息后显形,
    点击后短暂换成 check/x 作为反馈。轨道回合与普通气泡共用同一份样式。 */
 .msg-copy-btn {
-    width: 18px;
-    height: 18px;
+    width: 24px;
+    height: 24px;
     flex-shrink: 0;
     display: inline-flex;
     align-items: center;
@@ -3572,6 +3572,9 @@ textarea {
     display: inline-flex;
     align-items: center;
     gap: 5px;
+    height: 24px;
+    box-sizing: border-box;
+    line-height: 1;
     padding: 4px var(--msg-action-pad-x);
     /* 描边默认不画，移到按钮上才显形。透明边框继续占位，
        免得显形那一刻按钮长出一圈、顶动会话流。 */
@@ -4465,6 +4468,8 @@ textarea {
 .task-trace-round-chip-title {
     font-size: calc(0.85rem * var(--reading-font-scale));
     font-weight: 600;
+    /* 无单位行高：normal 的行盒随标题字形起伏（实测 18/21px），同条 chip 会高低不齐。 */
+    line-height: 1.2;
     min-width: 0;
     white-space: nowrap;
     overflow: hidden;
@@ -10540,10 +10545,12 @@ textarea {
     display: inline-flex;
     align-items: center;
     gap: 8px;
+    /* 继承的 1.6 行高会把胶囊撑到 28px，压过 24px 档；行高收 1，高度交给 min-height。 */
+    line-height: 1;
     flex: 1 1 auto;
     max-width: min(100%, 220px);
     min-width: 0;
-    min-height: 28px;
+    min-height: 24px;
     padding: 0 10px;
     border-radius: 999px;
     border: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
@@ -10591,10 +10598,10 @@ textarea {
 }
 
 .pc-card-menu-trigger {
-    width: 30px;
-    min-width: 30px;
-    height: 30px;
-    min-height: 30px;
+    width: 24px;
+    min-width: 24px;
+    height: 24px;
+    min-height: 24px;
     flex-shrink: 0;
     border: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
     background: color-mix(in srgb, var(--bg-panel) 88%, var(--bg-app) 12%);
@@ -11681,6 +11688,13 @@ textarea {
     min-height: 32px;
     padding: 0 var(--ui-space-3);
     border-radius: var(--ui-radius-control);
+}
+
+.resource-pagination .task-sort-setting .resource-select-trigger,
+.resource-pagination .task-sort-setting select.task-depth-select {
+    height: 32px;
+    min-height: 32px;
+    padding: 0 var(--ui-space-3);
 }
 
 .resource-pagination-label {
@@ -15298,7 +15312,7 @@ textarea {
     display: inline-flex;
     align-items: center;
     gap: var(--ui-space-2);
-    min-height: 34px;
+    min-height: 32px;
     padding: 0 var(--ui-space-3);
     border: 1px solid var(--ui-border);
     border-radius: 999px;
@@ -16625,7 +16639,9 @@ textarea {
 .content-header .resource-search,
 .content-header .task-depth-setting-main,
 #view-skills .content-header .resource-select-trigger,
-#view-tools .content-header .resource-select-trigger {
+#view-tools .content-header .resource-select-trigger,
+#view-tasks-list .content-header .resource-select-trigger,
+#view-tasks-list .content-header select.task-depth-select {
     height: 40px;
     min-height: 40px;
     padding: 0 var(--ui-space-3);
@@ -19247,17 +19263,18 @@ textarea {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    height: 30px;
-    min-height: 30px;
+    height: 24px;
+    min-height: 24px;
     padding: 0 10px;
     flex: 0 0 auto;
 }
 
 .pc-topbar .pc-task-id-chip {
-    height: 30px;
-    min-height: 30px;
+    height: 24px;
+    min-height: 24px;
     padding: 0 10px;
     font: inherit;
+    line-height: 1;
     text-align: left;
     cursor: pointer;
 }
@@ -19288,10 +19305,10 @@ textarea {
 }
 
 .pc-topbar .pc-card-menu-trigger.pc-card-menu-trigger {
-    width: 30px;
-    min-width: 30px;
-    height: 30px;
-    min-height: 30px;
+    width: 24px;
+    min-width: 24px;
+    height: 24px;
+    min-height: 24px;
 }
 
 .pc-topbar .project-select-toggle:not(.is-visible) {
