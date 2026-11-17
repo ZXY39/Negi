@@ -1777,7 +1777,7 @@ textarea {
     padding: 4px 12px 28px;
     color: var(--text-primary);
     font-size: 15px;
-    overflow-wrap: anywhere;
+    overflow-wrap: break-word;
 }
 
 .media-viewer-markdown-raw {
@@ -3417,6 +3417,7 @@ textarea {
 }
 
 .ceo-turn-usage {
+    font-variant-numeric: tabular-nums;
     font-size: calc(0.76rem * var(--reading-font-scale));
     line-height: 1.4;
     color: var(--text-muted);
@@ -3448,6 +3449,7 @@ textarea {
    行的显隐由上面那组点击门管,行本身一直占位。助手行复制打头、读数随后;用户行读数吃左、
    复制与编辑收在行尾。 */
 .msg-meta {
+    font-variant-numeric: tabular-nums;
     display: flex;
     align-items: center;
     justify-content: flex-end;
@@ -3735,6 +3737,7 @@ textarea {
 .markdown-content h4 {
     letter-spacing: -0.02em;
     line-height: 1.24;
+    text-wrap: balance;
 }
 
 .markdown-content h1 {
@@ -3756,6 +3759,19 @@ textarea {
 .markdown-content td,
 .markdown-content th {
     line-height: 1.72;
+    text-wrap: pretty;
+}
+
+/* 长正文消孤行：pretty 只挂散文块，不挂 *（指南性能约束）；不支持的浏览器自动忽略。 */
+.media-viewer-markdown p,
+.media-viewer-markdown li,
+.media-viewer-markdown blockquote,
+.memory-note-preview-body,
+.task-trace-message-body,
+.spawn-node-text,
+.interaction-step-detail,
+.ceo-thinking-line-pane {
+    text-wrap: pretty;
 }
 
 .markdown-content ul,
@@ -4097,7 +4113,7 @@ textarea {
 .task-trace-step--turn-text[open] .interaction-step-title {
     display: block;
     white-space: normal;
-    overflow-wrap: anywhere;
+    overflow-wrap: break-word;
     word-break: break-word;
     text-overflow: clip;
     /* 16.5 行视窗：max-height 而不是 height，短正文不预占空白。 */
@@ -6388,7 +6404,7 @@ textarea {
     height: auto;
     line-height: 1.5;
     white-space: pre-wrap;
-    overflow-wrap: anywhere;
+    overflow-wrap: break-word;
     overflow-x: hidden;
     overflow-y: auto;
     max-height: 160px;
@@ -10302,7 +10318,7 @@ textarea {
     font-size: calc(0.92rem * var(--reading-font-scale));
     line-height: 1.6;
     white-space: pre-wrap;
-    overflow-wrap: anywhere;
+    overflow-wrap: break-word;
 }
 
 .memory-note-preview-trail {
@@ -10692,6 +10708,7 @@ textarea {
 }
 
 .pc-metric {
+    font-variant-numeric: tabular-nums;
     display: flex;
     flex-direction: column;
     gap: 6px;
@@ -11194,6 +11211,7 @@ textarea {
 }
 
 .task-performance-bar {
+    font-variant-numeric: tabular-nums;
     display: flex;
     align-items: center;
     justify-content: flex-end;
@@ -11248,6 +11266,7 @@ textarea {
 
 @media (max-width: 1320px) {
     .task-performance-bar {
+    font-variant-numeric: tabular-nums;
         flex-basis: 100%;
         min-width: 100%;
     }
@@ -11255,6 +11274,7 @@ textarea {
 
 @media (max-width: 1100px) {
     .task-performance-bar {
+    font-variant-numeric: tabular-nums;
         justify-content: flex-start;
     }
 }
@@ -13005,6 +13025,7 @@ textarea {
 }
 
 .pc-token-stats {
+    font-variant-numeric: tabular-nums;
     margin-top: var(--space-2);
     font-size: 0.84rem;
     color: var(--text-secondary);
@@ -13429,6 +13450,7 @@ textarea {
 /* 13 列表格：靠收紧内边距/字号让整表落在模态宽度内，而不是让右列被挤掉。
    窄屏仍由 wrap 的横向滚动兜底（去掉旧的 1020px 硬下限，它会让列更早溢出）。 */
 .task-token-call-table {
+    font-variant-numeric: tabular-nums;
     width: 100%;
     border-collapse: collapse;
     min-width: 100%;
@@ -17406,6 +17428,7 @@ textarea {
 }
 
 .pc-metric {
+    font-variant-numeric: tabular-nums;
     min-height: 62px;
     padding: 10px 12px;
     gap: 2px;
@@ -17603,6 +17626,7 @@ textarea {
     }
 
     #view-tasks-list .task-performance-bar {
+    font-variant-numeric: tabular-nums;
         flex: 1 1 auto;
         min-width: 0;
         flex-wrap: nowrap;
@@ -19435,7 +19459,7 @@ textarea {
 /* 消息条目展开后只留正文：不铺底、不描边，框就是文字本身。 */
 .task-trace-message-body {
     white-space: pre-wrap;
-    overflow-wrap: anywhere;
+    overflow-wrap: break-word;
     word-break: break-word;
     color: var(--text-primary);
     font-size: calc(0.86rem * var(--reading-font-scale));
@@ -19527,7 +19551,7 @@ textarea {
 
 .spawn-node-text {
     white-space: pre-wrap;
-    overflow-wrap: anywhere;
+    overflow-wrap: break-word;
     word-break: break-word;
     max-height: calc(220px * var(--reading-font-scale));
     overflow-y: auto;
