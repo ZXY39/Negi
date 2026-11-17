@@ -161,7 +161,7 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title='G3ku Web GUI', lifespan=lifespan)
 # 先于下面所有 @app.middleware 注册：后声明者在最外层，慢请求计时须包住压缩花销。
-app.add_middleware(GZipMiddleware, minimum_size=1024)
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
 app.include_router(main_router, prefix='/api')
 app.include_router(runtime_router, prefix='/api')
 app.include_router(sandbox_router, prefix='/api')
