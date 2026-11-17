@@ -949,7 +949,7 @@ function renderQueuedCeoFollowUps(sessionId = activeSessionId()) {
     const items = getMergedCeoQueuedFollowUps(key);
     U.ceoFollowUpQueue.hidden = !items.length;
     if (!items.length) {
-        U.ceoFollowUpQueue.innerHTML = "";
+        U.ceoFollowUpQueue.replaceChildren();
         return;
     }
     U.ceoFollowUpQueue.innerHTML = `
@@ -1180,7 +1180,7 @@ function renderPendingCeoUploads() {
     U.ceoUploadList.hidden = !uploads.length && !S.ceoUploadBusy;
     U.ceoUploadList.setAttribute("aria-busy", S.ceoUploadBusy ? "true" : "false");
     if (!uploads.length && !S.ceoUploadBusy) {
-        U.ceoUploadList.innerHTML = "";
+        U.ceoUploadList.replaceChildren();
     } else {
         const status = S.ceoUploadBusy ? '<div class="ceo-upload-status">附件上传中...</div>' : "";
         U.ceoUploadList.innerHTML = `

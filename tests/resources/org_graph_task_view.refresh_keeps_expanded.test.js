@@ -76,6 +76,15 @@ class StubHTMLElement extends StubElement {
         });
     }
 
+    replaceChildren(...nodes) {
+        for (const child of this.children) {
+            if (child && child.parentElement === this) child.parentElement = null;
+        }
+        this.children = [];
+        this._html = "";
+        for (const node of nodes) this.appendChild(node);
+    }
+
     setAttribute(name, value) {
         this.attributes[name] = String(value);
     }

@@ -2672,7 +2672,7 @@ function renderTaskDepthControl() {
     const editingCustomValue = !!S.taskDefaults.customMode;
     const select = U.taskDepthSelect;
 
-    select.innerHTML = "";
+    select.replaceChildren();
     TASK_DEPTH_PRESET_VALUES.forEach((depth) => {
         const option = document.createElement("option");
         option.value = String(depth);
@@ -4154,7 +4154,7 @@ function renderCeoEditResendBanner() {
     const active = !!S.ceoEditResend;
     banner.hidden = !active;
     if (!active) {
-        banner.innerHTML = "";
+        banner.replaceChildren();
         return;
     }
     banner.innerHTML = `
@@ -4537,7 +4537,7 @@ function handleCeoSkillRosterNotice(payload = {}) {
 
 function resetCeoFeed() {
     if (!U.ceoFeed) return;
-    U.ceoFeed.innerHTML = "";
+    U.ceoFeed.replaceChildren();
     S.ceoPendingTurns = [];
     S.ceoPausedArchiveTurns = {};
 }
@@ -5110,7 +5110,7 @@ function queueCeoReplyDelta(payload = {}, { sessionId = activeSessionId() } = {}
 
 function resetCeoToolFlow(turn) {
     if (!turn?.listEl || !turn?.flowEl) return;
-    turn.listEl.innerHTML = "";
+    turn.listEl.replaceChildren();
     turn.steps = 0;
     turn.hasError = false;
     turn.historyExpanded = false;
@@ -6802,7 +6802,7 @@ function hideCeoContextLoadNotice() {
     const noticeEl = U.ceoContextLoadNotice;
     if (!noticeEl) return;
     Array.from(noticeEl.children || []).forEach((item) => item?.remove?.());
-    noticeEl.innerHTML = "";
+    noticeEl.replaceChildren();
     syncCeoContextLoadNoticeVisibility();
 }
 
@@ -8147,7 +8147,7 @@ function rebuildResourceSelectOptions(select) {
         .map((option) => `${String(option.value)}\u0000${String(option.textContent || "").trim()}`)
         .join("\u0001");
     if (menu.dataset.optionsSignature === signature) return;
-    menu.innerHTML = "";
+    menu.replaceChildren();
     [...select.options].forEach((option) => {
         const optionButton = buildResourceSelectOptionButton(select, shell, option);
         if (optionButton) menu.appendChild(optionButton);

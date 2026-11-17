@@ -1346,10 +1346,10 @@ function releaseTaskDetailRetainedState() {
     S.taskRuntimeSummary = null;
     S.liveFrameMap = {};
     if (typeof resetTaskTreeSnapshotState === "function") resetTaskTreeSnapshotState();
-    if (U.tree) U.tree.innerHTML = "";
-    if (U.adFlow) U.adFlow.innerHTML = "";
-    if (U.adMessages) U.adMessages.innerHTML = "";
-    if (U.artifactList) U.artifactList.innerHTML = "";
+    if (U.tree) U.tree.replaceChildren();
+    if (U.adFlow) U.adFlow.replaceChildren();
+    if (U.adMessages) U.adMessages.replaceChildren();
+    if (U.artifactList) U.artifactList.replaceChildren();
     if (U.artifactContent) U.artifactContent.textContent = "";
 }
 

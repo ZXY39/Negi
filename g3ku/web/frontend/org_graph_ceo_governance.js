@@ -1189,7 +1189,7 @@ function renderCeoApprovalFlow() {
     const shouldShow = hasActiveCeoApprovalBlockingState(activeSessionId());
     viewport.hidden = !shouldShow;
     if (!shouldShow) {
-        viewport.innerHTML = "";
+        viewport.replaceChildren();
         renderCeoApprovalArgsModal();
         return;
     }
@@ -1203,7 +1203,7 @@ function renderCeoApprovalFlow() {
     }
     const item = activeApprovalItem(flow);
     if (!item) {
-        viewport.innerHTML = "";
+        viewport.replaceChildren();
         return;
     }
     const currentIndex = Math.min((flow.reviewItems?.length || 1) - 1, Math.max(0, Number(flow.currentIndex) || 0));
@@ -1557,8 +1557,8 @@ function renderExecApprovalWaitValue() {
 }
 
 function renderExecWhitelistEmptyLists() {
-    if (U.execApprovalList) U.execApprovalList.innerHTML = "";
-    if (U.execWhitelistList) U.execWhitelistList.innerHTML = "";
+    if (U.execApprovalList) U.execApprovalList.replaceChildren();
+    if (U.execWhitelistList) U.execWhitelistList.replaceChildren();
 }
 
 function renderExecApprovalList(items) {

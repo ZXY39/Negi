@@ -23,6 +23,10 @@ function makeStubEl() {
         innerHTML: "",
         textContent: "",
         appendChild: () => {},
+        replaceChildren(...nodes) {
+            this.innerHTML = "";
+            for (const node of nodes) this.appendChild(node);
+        },
         addEventListener: () => {},
         setAttribute: () => {},
         querySelector: () => null,
@@ -73,7 +77,15 @@ function loadModule(tasks) {
             taskCardPatchQueuedAt: {},
         },
         U: {
-            taskGrid: { innerHTML: "", scrollTop: 0, appendChild: () => {} },
+            taskGrid: {
+                innerHTML: "",
+                scrollTop: 0,
+                appendChild: () => {},
+                replaceChildren(...nodes) {
+                    this.innerHTML = "";
+                    for (const node of nodes) this.appendChild(node);
+                },
+            },
             viewTasks: { classList: { contains: () => true } },
         },
         paginateResources: (items, page) => ({ currentPage: Number(page), items, total: items.length }),

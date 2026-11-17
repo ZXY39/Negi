@@ -88,7 +88,7 @@ function renderExternalTokenList() {
         listEl.innerHTML = '<div class="resource-empty">还没有桥接 token。点击右上角「签发桥接 token」为外部桥接应用创建第一个。</div>';
         return;
     }
-    listEl.innerHTML = "";
+    listEl.replaceChildren();
     for (const item of items) {
         const row = document.createElement("div");
         row.className = "resource-list-item external-token-item";
@@ -499,7 +499,7 @@ function renderQqBotAccounts() {
         listEl.innerHTML = '<div class="resource-empty">还没有 QQ 账号，点下方「添加账号」。</div>';
         return;
     }
-    listEl.innerHTML = "";
+    listEl.replaceChildren();
     QQ_BOT_STATE.rows.forEach((row, index) => {
         const status = _qqBotRowStatus(row);
         const el = document.createElement("div");

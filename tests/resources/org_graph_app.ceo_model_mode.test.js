@@ -69,6 +69,10 @@ class StubHTMLElement extends StubElement {
     querySelectorAll() {
         return [];
     }
+    replaceChildren(...nodes) {
+        this.innerHTML = "";
+        for (const node of nodes) this.appendChild(node);
+    }
     appendChild() {}
     insertBefore() {}
     remove() {}

@@ -20,6 +20,10 @@ function makeStubEl() {
         innerHTML: "",
         textContent: "",
         appendChild: () => {},
+        replaceChildren(...nodes) {
+            this.innerHTML = "";
+            for (const node of nodes) this.appendChild(node);
+        },
         addEventListener: () => {},
         querySelector: () => null,
         querySelectorAll: () => [],
@@ -49,7 +53,15 @@ function loadRenderModule({ diskMetrics = null } = {}) {
             visibleTaskIds: [],
         },
         U: {
-            taskGrid: { innerHTML: "", scrollTop: 0, appendChild: () => {} },
+            taskGrid: {
+                innerHTML: "",
+                scrollTop: 0,
+                appendChild: () => {},
+                replaceChildren(...nodes) {
+                    this.innerHTML = "";
+                    for (const node of nodes) this.appendChild(node);
+                },
+            },
         },
         paginateResources: (items, page) => ({ currentPage: Number(page), items, total: items.length }),
         orderedTasks: (items) => items || [],

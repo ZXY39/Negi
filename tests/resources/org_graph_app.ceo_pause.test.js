@@ -48,7 +48,16 @@ class StubDocument {
                 }
                 if (selector === ".interaction-flow") return { hidden: true, open: false };
                 if (selector === ".interaction-flow-meta") return { textContent: "" };
-                if (selector === ".interaction-flow-list") return { innerHTML: "", querySelectorAll: () => [] };
+                if (selector === ".interaction-flow-list") {
+                    return {
+                        innerHTML: "",
+                        querySelectorAll: () => [],
+                        replaceChildren(...nodes) {
+                            this.innerHTML = "";
+                            for (const node of nodes) this.appendChild?.(node);
+                        },
+                    };
+                }
                 if (selector === ".interaction-flow-footer") return { hidden: true };
                 if (selector === ".interaction-flow-toggle") return { textContent: "", setAttribute() {}, addEventListener() {} };
                 return null;
@@ -82,7 +91,14 @@ function makeTurn({ text = PROCESSING_LABEL, source = "user", steps = 1 } = {}) 
         },
         flowEl: { hidden: false, open: true },
         metaEl: { textContent: "" },
-        listEl: { innerHTML: "", querySelectorAll: () => [] },
+        listEl: {
+            innerHTML: "",
+            querySelectorAll: () => [],
+            replaceChildren(...nodes) {
+                this.innerHTML = "";
+                for (const node of nodes) this.appendChild?.(node);
+            },
+        },
         footerEl: { hidden: false },
         toggleEl: { textContent: "", setAttribute() {} },
         el: { remove() {} },
@@ -181,6 +197,10 @@ function loadApp() {
         appendChild(element) {
             this.appended.push(element);
             return element;
+        },
+        replaceChildren(...nodes) {
+            this.appended = [];
+            for (const node of nodes) this.appendChild(node);
         },
     };
     context.__testExports.S.activeSessionId = "web:test";

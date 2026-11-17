@@ -69,6 +69,15 @@ class StubHTMLElement extends StubElement {
         this._innerHTML = String(value);
     }
 
+    replaceChildren(...nodes) {
+        for (const child of this.children) {
+            if (child && child.parentElement === this) child.parentElement = null;
+        }
+        this.children = [];
+        this._innerHTML = "";
+        for (const node of nodes) this.appendChild(node);
+    }
+
     get lastElementChild() {
         return this.children.length ? this.children[this.children.length - 1] : null;
     }
@@ -171,6 +180,14 @@ class FeedStub extends StubHTMLElement {
 
     get innerHTML() {
         return this._innerHTML;
+    }
+
+    replaceChildren(...nodes) {
+        for (const child of this.children) {
+            if (child && child.parentElement === this) child.parentElement = null;
+        }
+        this.innerHTML = "";
+        for (const node of nodes) this.appendChild(node);
     }
 
     querySelectorAll(selector) {

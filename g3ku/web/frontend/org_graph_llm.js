@@ -1537,7 +1537,7 @@
     const panel = modelListPanel();
     if (!panel) return;
     panel.hidden = true;
-    panel.innerHTML = "";
+    panel.replaceChildren();
   }
 
   function positionModelListPanel() {
@@ -1621,7 +1621,7 @@
     const state = llmState();
     if (!U.llmEditorShell || !U.llmEditorPanel || !U.llmEditorBackdrop) return;
     if (!state.editor.open) {
-      U.llmEditorShell.innerHTML = "";
+      U.llmEditorShell.replaceChildren();
       closeModelListPanel();
       setDrawerOpen(U.llmEditorBackdrop, U.llmEditorPanel, false);
       return;

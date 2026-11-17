@@ -22,6 +22,7 @@ function makeElement() {
         _html: "",
         get innerHTML() { return this._html; },
         set innerHTML(value) { this._html = String(value); this.children = []; },
+        replaceChildren(...nodes) { this._html = ""; this.children = []; for (const node of nodes) this.appendChild(node); },
         appendChild(child) { this.children.push(child); return child; },
         addEventListener() {},
         setAttribute(name, value) { this.attrs[String(name)] = String(value); },

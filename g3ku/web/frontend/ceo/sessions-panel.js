@@ -431,7 +431,7 @@ function renderCeoSessions() {
     if (!U.ceoSessionList) return;
     const sessions = visibleCeoSessions();
     if (U.ceoSessionCurrent) {
-        U.ceoSessionCurrent.innerHTML = "";
+        U.ceoSessionCurrent.replaceChildren();
         U.ceoSessionCurrent.hidden = true;
     }
     if (!sessions.length) {

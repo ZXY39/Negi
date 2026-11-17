@@ -52,6 +52,12 @@ class StubElement {
         return child;
     }
 
+    replaceChildren(...nodes) {
+        for (const child of [...this.children]) this.removeChild(child);
+        this.innerHTML = "";
+        for (const node of nodes) this.appendChild(node);
+    }
+
     setAttribute(name, value) {
         this.attributes[name] = String(value);
         if (name.startsWith("data-")) this.dataset[datasetKey(name)] = String(value);

@@ -428,7 +428,7 @@
 
             function render() {
                 const items = filteredIcons();
-                iconGrid.innerHTML = "";
+                iconGrid.replaceChildren();
                 const fragment = document.createDocumentFragment();
 
                 items.forEach((name) => {

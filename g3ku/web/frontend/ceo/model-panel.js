@@ -321,7 +321,7 @@ function renderCeoModelPicker() {
     const sessionId = String(activeSessionId() || "").trim();
     const selection = ceoModelSelectionFor(sessionId);
     if (!selection || !selection.panelOpen || !selection.pickerOpen) {
-        U.ceoModelPickerList.innerHTML = "";
+        U.ceoModelPickerList.replaceChildren();
         return;
     }
     const appendMode = selection.pickerPurpose === "append";
@@ -450,7 +450,7 @@ function renderCeoModelChainPane() {
     const selection = ceoModelSelectionFor(sessionId);
     const visible = !!selection?.panelOpen && !selection?.pickerOpen;
     const editing = !!selection?.chainEditing;
-    U.ceoModelChainList.innerHTML = "";
+    U.ceoModelChainList.replaceChildren();
     if (U.ceoModelChainHint) U.ceoModelChainHint.hidden = true;
     if (U.ceoModelChainEmpty) U.ceoModelChainEmpty.hidden = true;
     if (U.ceoModelChainActions) U.ceoModelChainActions.hidden = true;

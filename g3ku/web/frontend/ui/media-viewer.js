@@ -197,7 +197,7 @@ function renderMediaViewerMarkdown(url, title, openToken = 0) {
     const isCurrent = () => mediaViewerState.open === true && mediaViewerState.openToken === openToken;
     const fallbackToRaw = () => {
         if (!isCurrent()) return;
-        mediaViewerState.body.innerHTML = "";
+        mediaViewerState.body.replaceChildren();
         renderMediaViewerEmbed(url, title);
         resetMediaViewerSize();
         if (typeof icons === "function") icons(true);
@@ -205,7 +205,7 @@ function renderMediaViewerMarkdown(url, title, openToken = 0) {
     if (typeof fetch !== "function") {
         // 没有 fetch 的环境没有渲染档可言，直接回到原文内嵌；这一步发生在 reveal 之前，
         // 不能走 isCurrent 闸门（那时窗还没标记为打开）。
-        mediaViewerState.body.innerHTML = "";
+        mediaViewerState.body.replaceChildren();
         renderMediaViewerEmbed(url, title);
         return article;
     }
@@ -268,7 +268,7 @@ function openMediaViewer({ mode = "image", url = "", title = "内容预览", sub
     mediaViewerState.title.textContent = title;
     mediaViewerState.subtitle.textContent = subtitle;
     if (mediaViewerState.subtitle) mediaViewerState.subtitle.hidden = !subtitle;
-    mediaViewerState.body.innerHTML = "";
+    mediaViewerState.body.replaceChildren();
     // content 模式（轨迹续读）没有文件 URL，此时不该出现「保存到本地」。
     mediaViewerState.url = mode === "content" ? "" : String(url || "");
     mediaViewerState.name = String(downloadName || title || "").trim();
@@ -311,7 +311,7 @@ function closeMediaViewer() {
         mediaViewerState.closeTimer = 0;
         if (mediaViewerState.open) return;
         resetMediaViewerSize();
-        if (mediaViewerState.body) mediaViewerState.body.innerHTML = "";
+        if (mediaViewerState.body) mediaViewerState.body.replaceChildren();
     }, 200);
     return true;
 }

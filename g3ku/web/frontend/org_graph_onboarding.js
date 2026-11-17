@@ -94,7 +94,7 @@
     function renderPhotoGrid(container, photos, emptyText = "还没有照片", { allowDelete = false } = {}) {
         if (!container) return;
         const rows = Array.isArray(photos) ? photos : [];
-        container.innerHTML = "";
+        container.replaceChildren();
         if (!rows.length) {
             const empty = document.createElement("div");
             empty.className = "empty-state compact persona-photo-empty";

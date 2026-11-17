@@ -253,6 +253,10 @@ function stubElement(extra = {}) {
         addEventListener(type, handler) { (this.listeners[type] ||= []).push(handler); },
         // 事件委托类缺陷只能真投递：把同一个 event 交给这个容器上挂过的处理器。
         dispatch(type, event) { (this.listeners[type] || []).forEach((handler) => handler(event)); },
+        replaceChildren(...nodes) {
+            this.innerHTML = "";
+            for (const node of nodes) this.appendChild(node);
+        },
         appendChild() {},
         insertBefore() {},
         remove() {},

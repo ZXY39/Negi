@@ -55,6 +55,10 @@ class StubNode {
         this.children = [];
     }
     get innerHTML() { return this._innerHTML; }
+    replaceChildren(...nodes) {
+        this.innerHTML = "";
+        for (const node of nodes) this.appendChild(node);
+    }
     setAttribute(name, value) {
         this.attributes[name] = String(value);
         if (name === "data-ceo-key") this.dataset.ceoKey = String(value);

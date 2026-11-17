@@ -124,7 +124,7 @@ function renderModelGroupDialog() {
         backdrop.hidden = true;
         backdrop.classList.remove("is-open");
         U.modelGroupDialog?.setAttribute("aria-hidden", "true");
-        body.innerHTML = "";
+        body.replaceChildren();
         syncLoadBalanceGroupConfirmAffordance();
         return;
     }
@@ -306,7 +306,7 @@ function renderModelDetail() {
     const current = isCreate ? null : modelRefItem(S.modelCatalog.selectedModelKey);
     if (!isCreate && !current) {
         U.modelDetailEmpty.style.display = "none";
-        U.modelDetail.innerHTML = "";
+        U.modelDetail.replaceChildren();
         setDrawerOpen(U.modelBackdrop, U.modelDrawer, false);
         return;
     }
@@ -456,5 +456,5 @@ function renderRoleLimitsBar() {
     const bar = U.modelRoleLimitsBar;
     if (!bar) return;
     bar.hidden = true;
-    bar.innerHTML = "";
+    bar.replaceChildren();
 }

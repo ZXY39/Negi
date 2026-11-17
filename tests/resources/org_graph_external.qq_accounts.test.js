@@ -30,7 +30,18 @@ function makeRowEl() {
         innerHTML: "",
         fields: {},
         querySelector(sel) {
-            return Object.prototype.hasOwnProperty.call(this.fields, sel) ? this.fields[sel] : null;
+            if (Object.prototype.hasOwnProperty.call(this.fields, sel)) return this.fields[sel];
+            // 真实 DOM 会把 innerHTML 解析成节点：整表重建后，渲染产物里的隐藏输入框
+            // 也要能按类名读到值，否则 collect 读不到已保存行的 AppID。
+            const token = String(sel).replace(/^\./, "");
+            if (!token) return null;
+            for (const match of String(this.innerHTML || "").matchAll(/<input\b[^>]*>/g)) {
+                const cls = /class="([^"]*)"/.exec(match[0]);
+                if (!cls || !cls[1].split(/\s+/).includes(token)) continue;
+                const value = /value="([^"]*)"/.exec(match[0]);
+                return { value: value ? value[1] : "" };
+            }
+            return null;
         },
     };
 }
@@ -52,6 +63,11 @@ function makeListEl() {
         appendChild(node) {
             this.children.push(node);
             return node;
+        },
+        replaceChildren(...nodes) {
+            this.children = [];
+            this.innerHTML = "";
+            for (const node of nodes) this.appendChild(node);
         },
         querySelectorAll() {
             return this.children;

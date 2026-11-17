@@ -78,7 +78,7 @@ function displayEnabledLabel(enabled, available = true, repairRequired = false) 
 }
 
 function renderSkills() {
-    U.skillList.innerHTML = "";
+    U.skillList.replaceChildren();
     const meta = paginateResources(filterSkills(), ResourcesState.skillPage, ResourcesState.skillPageSize);
     ResourcesState.skillPage = meta.currentPage;
     ResourcesState.skillPageSize = meta.pageSize;
@@ -164,7 +164,7 @@ function filterTools() {
 }
 
 function renderTools() {
-    U.toolList.innerHTML = "";
+    U.toolList.replaceChildren();
     const meta = paginateResources(filterTools(), ResourcesState.toolPage, ResourcesState.toolPageSize);
     ResourcesState.toolPage = meta.currentPage;
     ResourcesState.toolPageSize = meta.pageSize;
@@ -227,7 +227,7 @@ function queueToolAutosave(delayMs = 300) {
 function renderSkillDetail() {
     if (!ResourcesState.selectedSkill) {
         U.skillEmpty.style.display = "block";
-        U.skillDetail.innerHTML = "";
+        U.skillDetail.replaceChildren();
         setDrawerOpen(U.skillBackdrop, U.skillDrawer, false);
         renderSkillActions();
         return;
@@ -618,7 +618,7 @@ async function performDeleteSkill(skillId, displayName) {
 function renderToolDetail() {
     if (!ResourcesState.selectedTool) {
         U.toolEmpty.style.display = "block";
-        U.toolDetail.innerHTML = "";
+        U.toolDetail.replaceChildren();
         setDrawerOpen(U.toolBackdrop, U.toolDrawer, false);
         renderToolActions();
         return;

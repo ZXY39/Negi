@@ -64,6 +64,11 @@ function makeElement(id, { backdrop = false } = {}) {
         appendChild(child) {
             this.children.push(child);
         },
+        replaceChildren(...nodes) {
+            innerHTMLValue = "";
+            this.children.length = 0;
+            for (const node of nodes) this.appendChild(node);
+        },
         setAttribute() {},
         focus() {},
         click() {

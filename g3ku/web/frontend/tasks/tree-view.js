@@ -21,7 +21,7 @@ function renderTree() {
     if (!S.treeView) {
         // 根节点缺失通常是增量合并损坏了缓存：空态之外再触发一次整表自愈重载。
         scheduleTaskTreeSnapshotSelfHeal();
-        U.tree.innerHTML = "";
+        U.tree.replaceChildren();
         const emptyState = document.createElement("div");
         emptyState.className = "empty-state";
         emptyState.textContent = "No nodes to display.";
@@ -160,7 +160,7 @@ function renderTree() {
     wrapper.appendChild(rootList);
     wrapper.style.transformOrigin = "0 0";
     wrapper.style.transform = `translate(${Math.round(S.treePan.offsetX)}px, ${Math.round(S.treePan.offsetY)}px) scale(${S.treePan.scale})`;
-    U.tree.innerHTML = "";
+    U.tree.replaceChildren();
     mountTerminalFilterToggle();
     U.tree.appendChild(wrapper);
     if (typeof enhanceResourceSelects === "function") enhanceResourceSelects();

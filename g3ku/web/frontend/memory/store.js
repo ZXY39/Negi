@@ -28,7 +28,7 @@ function renderMemoryScopeOptions() {
     const select = document.getElementById("memory-scope-select");
     if (!select) return;
     const current = S.memoryScope;
-    select.innerHTML = "";
+    select.replaceChildren();
     for (const item of S.memoryScopes) {
         const option = document.createElement("option");
         option.value = String(item?.scope || "");

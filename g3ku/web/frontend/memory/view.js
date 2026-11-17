@@ -1889,7 +1889,7 @@ function renderMemoryAdminActions() {
     if (!U.memoryAdminActions) return;
     U.memoryAdminActions.hidden = true;
     U.memoryAdminActions.setAttribute("aria-hidden", "true");
-    U.memoryAdminActions.innerHTML = "";
+    U.memoryAdminActions.replaceChildren();
 }
 
 function renderMemoryMetaItem(label, value) {

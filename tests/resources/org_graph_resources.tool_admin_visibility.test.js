@@ -84,6 +84,12 @@ class StubElement {
         this.children.length = 0;
     }
 
+    replaceChildren(...nodes) {
+        this._innerHTML = "";
+        this.children.length = 0;
+        for (const node of nodes) this.appendChild(node);
+    }
+
     appendChild(child) {
         this.children.push(child);
         return child;

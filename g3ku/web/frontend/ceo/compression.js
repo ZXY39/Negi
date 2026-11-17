@@ -373,7 +373,7 @@ function settleCeoCompressionHeadText(turn) {
     const textEl = turn?.textEl;
     if (!textEl) return;
     if (!String(textEl.textContent || "").trim()) {
-        textEl.innerHTML = "";
+        textEl.replaceChildren();
         textEl.hidden = true;
         return;
     }

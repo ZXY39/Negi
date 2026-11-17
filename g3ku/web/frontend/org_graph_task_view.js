@@ -1551,7 +1551,7 @@ function renderTaskTreeSearchResults() {
     if (!input || !results) return;
     const trimmed = String(input.value || "").trim();
     const previousActiveIndex = Number(results.dataset.activeIndex || -1);
-    results.innerHTML = "";
+    results.replaceChildren();
     if (!trimmed) {
         results.hidden = true;
         results.dataset.activeIndex = "-1";
@@ -1769,7 +1769,7 @@ function renderArtifacts() {
     if (!U.artifactList) return;
     const visibleFiles = getFileChangesForSelectedNode();
     const emptyText = S.selectedNodeId ? "This node has no tracked file changes yet." : "Select a node to view file changes.";
-    U.artifactList.innerHTML = "";
+    U.artifactList.replaceChildren();
     if (!visibleFiles.length) {
         U.artifactList.innerHTML = `<div class="empty-state" style="padding: 10px;">${esc(emptyText)}</div>`;
         renderArtifactHeading(0);

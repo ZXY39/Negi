@@ -150,6 +150,12 @@ class StubHTMLElement extends StubElement {
         for (const node of nodes) this.appendChild(node);
     }
 
+    replaceChildren(...nodes) {
+        for (const child of [...this.children]) this.removeChild(child);
+        this._innerHTML = "";
+        this.append(...nodes);
+    }
+
     insertBefore(child, ref) {
         if (!ref) return this.appendChild(child);
         const index = this.children.indexOf(ref);

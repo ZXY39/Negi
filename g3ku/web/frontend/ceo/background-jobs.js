@@ -258,7 +258,7 @@ function ceoBgJobsRender() {
     const list = ceoBgJobsEl("ceo-bg-jobs-list");
     if (!list) return;
     const scrollTop = list.scrollTop;
-    while (list.firstChild) list.removeChild(list.firstChild);
+    list.replaceChildren();
     items.forEach((item) => list.appendChild(ceoBgJobsRow(item)));
     ceoBgJobsPosition();
     list.scrollTop = scrollTop;

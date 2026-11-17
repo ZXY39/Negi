@@ -39,6 +39,11 @@ class StubElement {
         delete this.attributes[name];
     }
 
+    replaceChildren(...nodes) {
+        this.innerHTML = "";
+        for (const node of nodes) this.appendChild?.(node);
+    }
+
     addEventListener() {}
 
     querySelector() {

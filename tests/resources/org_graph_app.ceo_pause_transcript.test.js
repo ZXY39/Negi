@@ -56,6 +56,12 @@ class StubHTMLElement extends StubElement {
 
     set innerHTML(value) { this._innerHTML = String(value); }
 
+    replaceChildren(...nodes) {
+        this.children = [];
+        this._innerHTML = "";
+        for (const node of nodes) this.appendChild(node);
+    }
+
     get lastElementChild() {
         return this.children.length ? this.children[this.children.length - 1] : null;
     }
@@ -121,6 +127,11 @@ class FeedStub extends StubHTMLElement {
     }
 
     get innerHTML() { return this._innerHTML; }
+
+    replaceChildren(...nodes) {
+        this.innerHTML = "";
+        for (const node of nodes) this.appendChild(node);
+    }
 
     querySelectorAll(selector) {
         if ([".ceo-turn-message", ".task-trace-step", "img", ".interaction-step"].includes(selector)) return [];

@@ -84,6 +84,12 @@ class StubHTMLElement extends StubElement {
     set innerHTML(value) {
         this._innerHTML = String(value);
     }
+
+    replaceChildren(...nodes) {
+        this.innerHTML = "";
+        this._children.length = 0;
+        for (const node of nodes) this.appendChild(node);
+    }
 }
 
 class StubHTMLButtonElement extends StubHTMLElement {}

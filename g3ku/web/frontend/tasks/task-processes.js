@@ -155,7 +155,7 @@ function taskProcessesRenderRows() {
     const list = taskProcessesEl("task-processes-list");
     if (!list) return;
     const scrollTop = list.scrollTop;
-    while (list.firstChild) list.removeChild(list.firstChild);
+    list.replaceChildren();
     TaskProcessesState.items.forEach((item) => list.appendChild(taskProcessesRow(item)));
     taskProcessesPosition();
     list.scrollTop = scrollTop;

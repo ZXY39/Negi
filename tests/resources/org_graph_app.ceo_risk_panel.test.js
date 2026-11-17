@@ -61,6 +61,15 @@ class StubElement {
     }
 
     querySelectorAll() { return []; }
+
+    replaceChildren(...nodes) {
+        this.innerHTML = "";
+        this._children.length = 0;
+        for (const node of nodes) {
+            node.parentElement = this;
+            this._children.push(node);
+        }
+    }
 }
 
 class StubBody {

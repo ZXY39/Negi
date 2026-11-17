@@ -1208,7 +1208,7 @@ function renderMessageList(node, { viewState = null } = {}) {
     if (!(traceList instanceof HTMLElement)) {
         traceList = document.createElement("div");
         traceList.className = "task-trace-list";
-        U.adMessages.innerHTML = "";
+        U.adMessages.replaceChildren();
         U.adMessages.appendChild(traceList);
     }
     const renderSignature = `${isOutbox ? "outbox" : "inbox"}:${buildTraceRenderSignature(stepDescriptors)}`;
@@ -1263,7 +1263,7 @@ function renderSpawnReviewTrace(node, { viewState = null } = {}) {
     if (!(traceList instanceof HTMLElement)) {
         traceList = document.createElement("div");
         traceList.className = "task-trace-list";
-        U.adSpawnReviews.innerHTML = "";
+        U.adSpawnReviews.replaceChildren();
         U.adSpawnReviews.appendChild(traceList);
     }
     const renderSignature = buildTraceRenderSignature(stepDescriptors);
@@ -1729,7 +1729,7 @@ function renderExecutionTrace(node, { viewState = null } = {}) {
     if (!(traceList instanceof HTMLElement)) {
         traceList = document.createElement("div");
         traceList.className = "task-trace-list";
-        U.adFlow.innerHTML = "";
+        U.adFlow.replaceChildren();
         U.adFlow.appendChild(traceList);
     }
     // 「加载更早轮次」行落在列表最顶部（初始提示词之上）：它翻的是比已加载最早一轮
