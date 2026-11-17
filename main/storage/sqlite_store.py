@@ -2640,7 +2640,7 @@ class SQLiteTaskStore:
             conditions.append('task_id = ?')
             params.append(normalized_task_id)
         rows = self._fetchall(
-            f"SELECT command_id, task_id, session_id, command_type, status, claimed_at "
+            f"SELECT command_id, task_id, session_id, command_type, status, claimed_at, worker_id "
             f"FROM task_commands WHERE {' AND '.join(conditions)} ORDER BY created_at ASC",
             tuple(params),
         )
@@ -2665,6 +2665,35 @@ class SQLiteTaskStore:
                 command_id,
             ),
         )
+
+    def settle_orphaned_task_commands(
+        self,
+        *,
+        worker_id: str,
+        finished_at: str,
+        error_text: str = 'orphaned_claim_previous_worker',
+    ) -> int:
+        """Settle claims held by previous worker generations as failed.
+
+        `claim_pending_task_commands` only picks `pending` rows, and a hard-killed
+        worker never runs the `finally` that finishes its claim, so those rows
+        would stay `claimed` forever. Acquiring the lease proves the previous
+        generation is gone; a row it claimed can never be processed by the
+        current process. Returns the number of settled rows.
+        """
+        normalized_worker_id = str(worker_id or '').strip()
+        if not normalized_worker_id:
+            raise ValueError('worker_id_required')
+
+        def operation(conn: sqlite3.Connection) -> int:
+            cursor = conn.execute(
+                "UPDATE task_commands SET status = 'failed', finished_at = ?, error_text = ?, result_json = '' "
+                "WHERE status = 'claimed' AND TRIM(COALESCE(worker_id, '')) <> ?",
+                (str(finished_at or ''), str(error_text or ''), normalized_worker_id),
+            )
+            return int(cursor.rowcount or 0)
+
+        return self._run_write(operation)
 
     def upsert_task_message_distribution_epoch(
         self,

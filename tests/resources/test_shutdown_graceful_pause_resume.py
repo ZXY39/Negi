@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -610,6 +611,27 @@ async def test_wait_shutdown_pause_commands_drained_ignores_other_command_types(
         timeout_s=0.3,
     )
     assert drained is True
+
+
+@pytest.mark.asyncio
+async def test_shutdown_drain_ignores_previous_generation_claims(tmp_path: Path) -> None:
+    """死代际的滞留领取不为关停空等：只剩它时不进轮询，立即返回。"""
+    service = _make_web_service_with_paused_task(tmp_path)
+    _mark_worker_online(service)
+    _enqueue_pause_command(service)
+    service.store.claim_pending_task_commands(worker_id="worker:dead", claimed_at=now_iso())
+
+    started = time.monotonic()
+    drained = await web_shell.wait_shutdown_pause_commands_drained(
+        service,
+        task_ids={"task:ui-pause"},
+        timeout_s=0.5,
+    )
+    elapsed = time.monotonic() - started
+
+    assert drained is True
+    assert elapsed < 0.2
+    await service.close()
 
 
 # ---------------------------------------------------------------------------

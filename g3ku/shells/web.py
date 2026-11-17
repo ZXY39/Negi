@@ -861,22 +861,35 @@ async def wait_shutdown_pause_commands_drained(
     (which awaits the actor unwinding). Poll the shared command table so
     shutdown does not declare victory — or kill the worker — while a model
     call or long tool is still executing in the background.
+
+    The authoritative unsettled set comes from
+    `service.list_unsettled_pause_commands` when the service exposes it:
+    pending commands plus claims held by the current live worker generation.
+    A claim left behind by a dead generation cannot be executed anymore and is
+    not waited for.
     """
     normalized_ids = {str(item or '').strip() for item in list(task_ids or []) if str(item or '').strip()}
+    if not normalized_ids:
+        return True
+    list_unsettled = getattr(service, 'list_unsettled_pause_commands', None)
     store = getattr(service, 'store', None)
     list_unfinished = getattr(store, 'list_unfinished_task_commands', None)
-    if not normalized_ids or not callable(list_unfinished):
+    use_service = callable(list_unsettled)
+    if not use_service and not callable(list_unfinished):
         return True
     worker_state = getattr(service, 'worker_state', None)
     deadline = asyncio.get_running_loop().time() + max(0.0, float(timeout_s or 0.0))
     while asyncio.get_running_loop().time() < deadline:
         try:
-            unfinished = [
-                item
-                for item in list_unfinished()
-                if str(item.get('command_type') or '').strip() == 'pause_task'
-                and str(item.get('task_id') or '').strip() in normalized_ids
-            ]
+            if use_service:
+                unfinished = list(list_unsettled(task_ids=normalized_ids) or [])
+            else:
+                unfinished = [
+                    item
+                    for item in list_unfinished()
+                    if str(item.get('command_type') or '').strip() == 'pause_task'
+                    and str(item.get('task_id') or '').strip() in normalized_ids
+                ]
         except Exception:
             return True
         if not unfinished:
@@ -890,8 +903,9 @@ async def wait_shutdown_pause_commands_drained(
                 # No live worker will drain these commands; the durable flags
                 # plus the shutdown ledger already cover the restart.
                 return True
-            # 'online' / 'starting' / 'stale' keep waiting: a stale row may
-            # still belong to a live but busy worker.
+            # 'online' / 'starting' / 'stale' keep waiting: the service-side
+            # predicate already dropped claims from dead generations, so what
+            # remains may still belong to a live but busy worker.
         await asyncio.sleep(_SHUTDOWN_PAUSE_DRAIN_POLL_S)
     logger.warning(
         "shutdown pause drain timed out after {:.1f}s; {} pause commander(s) still unfinished",

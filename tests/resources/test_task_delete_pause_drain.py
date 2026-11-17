@@ -146,6 +146,165 @@ async def test_delete_task_refused_while_pause_drain_active(tmp_path, monkeypatc
     assert deleted == [], "排空未完成前绝不允许删除任务记录/文件"
 
 
+# ---------------------------------------------------------------------------
+# orphaned claims from previous worker generations
+# ---------------------------------------------------------------------------
+
+def _seed_drain_task(service: MainRuntimeService, task_id: str = "task:gen") -> None:
+    from main.models import TaskRecord
+    from main.protocol import now_iso
+
+    stamp = now_iso()
+    service.store.upsert_task(
+        TaskRecord(
+            task_id=task_id,
+            session_id="web:demo",
+            title="t",
+            user_request="r",
+            root_node_id="node:gen-root",
+            status="in_progress",
+            created_at=stamp,
+            updated_at=stamp,
+            is_paused=True,
+            pause_requested=True,
+        )
+    )
+
+
+def _enqueue_and_claim_pause(service: MainRuntimeService, task_id: str, worker_id: str, command_id: str) -> None:
+    from main.protocol import now_iso
+
+    stamp = now_iso()
+    service.store.enqueue_task_command(
+        command_id=command_id,
+        task_id=task_id,
+        session_id="web:demo",
+        command_type="pause_task",
+        created_at=stamp,
+        payload={"task_id": task_id},
+    )
+    claimed = service.store.claim_pending_task_commands(worker_id=worker_id, claimed_at=stamp)
+    assert [item["command_id"] for item in claimed] == [command_id]
+
+
+def _mark_live_worker(service: MainRuntimeService, worker_id: str = "worker:live") -> None:
+    from main.protocol import now_iso
+
+    service.store.upsert_worker_status(
+        worker_id=worker_id,
+        role="task_worker",
+        status="running",
+        updated_at=now_iso(),
+        payload={"execution_mode": "worker"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_drain_ignores_claim_from_previous_worker_generation(tmp_path, monkeypatch) -> None:
+    """死代际的滞留领取是死账：不阻断删除，卡片也不再报「暂停中」。"""
+    service = _make_web_service(tmp_path)
+    _seed_drain_task(service, "task:gen")
+    _enqueue_and_claim_pause(service, "task:gen", "worker:dead", "cmd:gen-old")
+    _mark_live_worker(service, "worker:live")
+
+    assert service._task_pause_drain_active("task:gen") is False
+    payload = service.get_task_pause_state_payload("task:gen")
+    assert payload is not None and payload["draining"] is False
+
+    monkeypatch.setattr(runtime_service_module, "_DELETE_PAUSE_DRAIN_TIMEOUT_SECONDS", 0.3)
+    wiped: list[str] = []
+
+    async def _noop_wipe(task, *, reason):
+        wiped.append(reason)
+        return {}
+
+    async def _background_stop(*args, **kwargs):
+        return {"completed": True}
+
+    service._wipe_task_data = _noop_wipe  # type: ignore[method-assign]
+    service._node_background_jobs.close_scope_and_wait = _background_stop  # type: ignore[method-assign]
+
+    deleted = await service.delete_task("task:gen")
+
+    assert deleted is not None
+    assert wiped == ["user_delete"]
+
+
+@pytest.mark.asyncio
+async def test_drain_blocks_when_claim_owned_by_live_worker(tmp_path, monkeypatch) -> None:
+    """正控：领取者就是当前存活代际时，删除照旧被挡。"""
+    service = _make_web_service(tmp_path)
+    _seed_drain_task(service, "task:gen")
+    _enqueue_and_claim_pause(service, "task:gen", "worker:live", "cmd:gen-live")
+    _mark_live_worker(service, "worker:live")
+
+    assert service._task_pause_drain_active("task:gen") is True
+    payload = service.get_task_pause_state_payload("task:gen")
+    assert payload is not None and payload["draining"] is True
+
+    monkeypatch.setattr(runtime_service_module, "_DELETE_PAUSE_DRAIN_TIMEOUT_SECONDS", 0.3)
+    with pytest.raises(ValueError) as excinfo:
+        await service.delete_task("task:gen")
+    assert str(excinfo.value) == "task_still_stopping"
+
+
+def test_drain_counts_legacy_claims_without_owner(tmp_path) -> None:
+    """无归属的历史行无从证明是死账，保守计入。"""
+    service = _make_web_service(tmp_path)
+    _seed_drain_task(service, "task:gen")
+    _enqueue_and_claim_pause(service, "task:gen", "worker:dead", "cmd:gen-legacy")
+    _mark_live_worker(service, "worker:live")
+    service.store._execute_write(
+        "UPDATE task_commands SET worker_id = NULL WHERE command_id = ?",
+        ("cmd:gen-legacy",),
+    )
+
+    assert service._task_pause_drain_active("task:gen") is True
+
+
+def test_settle_orphaned_task_commands_only_previous_generations(tmp_path) -> None:
+    from main.protocol import now_iso
+    from main.storage.sqlite_store import SQLiteTaskStore
+
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    stamp = now_iso()
+
+    def _enqueue(command_id: str) -> None:
+        store.enqueue_task_command(
+            command_id=command_id,
+            task_id="task:settle",
+            session_id="web:demo",
+            command_type="pause_task",
+            created_at=stamp,
+            payload={},
+        )
+
+    try:
+        _enqueue("cmd:old")
+        store.claim_pending_task_commands(worker_id="worker:old", claimed_at=stamp)
+        _enqueue("cmd:self")
+        store.claim_pending_task_commands(worker_id="worker:self", claimed_at=stamp)
+        _enqueue("cmd:pending")
+        _enqueue("cmd:done")
+        store.finish_task_command("cmd:done", finished_at=stamp, success=True)
+
+        assert store.settle_orphaned_task_commands(worker_id="worker:self", finished_at=stamp) == 1
+
+        old = store.get_task_command("cmd:old")
+        assert old is not None
+        assert old["status"] == "failed"
+        assert old["error_text"] == "orphaned_claim_previous_worker"
+        assert store.get_task_command("cmd:self")["status"] == "claimed"
+        assert store.get_task_command("cmd:pending")["status"] == "pending"
+        assert store.get_task_command("cmd:done")["status"] == "completed"
+        # 幂等：同一代际再启动一次不结算任何行。
+        assert store.settle_orphaned_task_commands(worker_id="worker:self", finished_at=stamp) == 0
+        with pytest.raises(ValueError, match="worker_id_required"):
+            store.settle_orphaned_task_commands(worker_id="  ", finished_at=stamp)
+    finally:
+        store.close()
+
+
 def _make_worker_service(tmp_path) -> MainRuntimeService:
     return MainRuntimeService(
         chat_backend=_DummyChatBackend(),

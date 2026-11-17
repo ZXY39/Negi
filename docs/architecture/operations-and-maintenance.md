@@ -455,6 +455,19 @@ Provider retry troubleshooting note:
 - 会话侧的自动恢复走 heartbeat `shutdown_resume` 内部轮（`heartbeat-system.md`「Shutdown Resume Wake」）：会话尾气泡会再现一条由系统恢复产生的回复；若没有出现，查启动日志里 `resume_shutdown_paused_sessions` / `auto-resumed` 与 heartbeat 事件投递日志。
 - 异常中断（不是优雅暂停）时，正在跑的 CEO 主回合走 `turn_interrupted` 唤醒：启动顺序是心跳服务 → `resume_shutdown_paused_sessions` → `recover_interrupted_turns` → queued follow-up replay。恢复扫描转录里的 `pending` / `interrupted` 用户行，把主输入标 `interrupted` 并投一条带 `last_activity_at` 的心跳事件；queued replay 会跳过这些会话，避免并发起第二个回合。排查“重启后同一条用户消息又发了一次”：先看转录用户行 `_transcript_state` 是否已从 `pending` 变成 `interrupted`，再看 `interrupted turn recovery` / `turn_interrupted` 启动与心跳日志；仍停在 pending 时检查 inflight snapshot 是否存在、以及是否被 paused context 挡住。
 
+### 任务删不掉：提示「任务仍在停止中」
+
+`DELETE /api/tasks/{task_id}` 在暂停排空未结束时拒绝（前端 toast「任务仍在停止中，请稍后再删」），任务卡的暂停提示也可能长期停在 `暂停中`。反查顺序：
+
+1. 读该任务的未结算命令：`SELECT command_id, status, worker_id, claimed_at FROM task_commands WHERE task_id = '<task_id>' AND command_type = 'pause_task' AND status IN ('pending','claimed');`
+2. `pending`：活 worker 还没取走，等它消费；worker 已死时，下一个 worker 启动会在 `startup()` 里按代际清扫结算这些行。
+3. `claimed`：比较该行 `worker_id` 与 `SELECT worker_id, status, updated_at FROM worker_status WHERE role = 'task_worker' ORDER BY updated_at DESC LIMIT 1;` 的 `worker_id`：
+   - 相等：领取者就是当前存活代际，actor 可能仍在收尾。活 worker 处理 `pause_task` 会等 actor 收尾，时长无上界，只能等。
+   - 不相等：上一代 worker 被硬杀留下的死账（`finally` 结算没跑）。它不阻断删除，也不该让卡片显示 `暂停中`；下一个 worker 启动时把它结算为 `failed`（`error_text='orphaned_claim_previous_worker'`）。
+4. 急用：先取消任务（cancel 把任务落终态），终态任务的删除不受排空门限制；或重启服务让下一任 worker 在启动时结算，无需手工 SQL。停机状态下手工把该行置 `failed` 也可以，服务运行中不要改——消费方可能正在用这行。
+
+判据与代际清扫的合同见 `main-task-runtime.md`「任务删除前的暂停排空与命令代际清扫」。
+
 ### 界面停在初始化向导（看着像新项目）但 `memory/` 与 `sessions/` 都有东西
 
 先分清"没数据"与"打不开数据"：`GET /api/bootstrap/status` 的 `mode` 是 `setup` 而 `key_store.state` 是 `lost` 时，丢的是凭据而不是项目——没有主密钥就没人能解锁记录，运行时不启动，会话列表因此空着，形态上和从没配过一模一样。

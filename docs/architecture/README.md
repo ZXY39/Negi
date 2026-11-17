@@ -160,6 +160,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 停机或暂停打断一批工具调用后，已完成的那条被重新执行一遍（重复外部动作）、或新加的工具在恢复时被自动重放／该重放的只读调用被白问一次模型 → `main-task-runtime.md`「Node-Level Pause and Recovery」（帧活状态留痕与恢复逐条判档）+ `tool-hydration-and-callable-chain.md`「工具可重放声明」
 - 任务树节点已显示暂停但任务大厅仍显示处理中（含根节点「暂停·异常」而任务卡显示进行中）、或全局恢复后大厅卡在已暂停 -> `main-task-runtime.md`「Node-Level Pause and Recovery」+ `web-and-admin.md`「Task Hall Action Contract」（状态胶囊判读）
 - 重启后任务未自动恢复、优雅重启后仍停在 paused、恢复跑过一次却又落回暂停（上一个进程遗留的 `pause_task` 命令被新 worker 迟到应用）、或出现「本任务遇到异常停止」toast → `main-task-runtime.md`「Graceful Shutdown Pause and Startup Auto-Resume」+ `operations-and-maintenance.md`「重启后任务未自动恢复 / 出现“异常停止”toast」
+- 删除任务被 `task_still_stopping` 拒绝、任务卡长期停在「暂停中」，而该任务的 `pause_task` 命令是上一代 worker 被硬杀留下的 `claimed` 行 → `main-task-runtime.md`「任务删除前的暂停排空与命令代际清扫」+ `operations-and-maintenance.md`「任务删不掉：提示「任务仍在停止中」」
 - 验收节点长期停在「待检验」、被检验的执行节点却在一轮轮重跑（半截验收回合无人接手）→ `main-task-runtime.md`「验收节点：提前创建、激活与握手重派发」（最终验收的两个派发选择器：通知账本 + 握手承诺重派发），worker 日志锚点 `handshake-driven acceptance dispatch: … entry=none`
 - 验收节点下了「交付物不存在」的结论、而被检验的执行节点从没提交过结果（批量恢复节点后尤其成串），或一份旧拒收被当成本轮裁定 → `main-task-runtime.md`「验收节点：提前创建、激活与握手重派发」（闭合提交冻结闸门 + 派验前前置检查与消费点退回 + 终态判词作废）
 - 验收节点被操作员/peer 消息或 `schedule_wake` 到点带起来、或给正在等验收的执行节点发消息后它又自己跑起来 → 设计内：验收节点只由绑定执行节点的待裁定提交派发；给 `waiting_acceptance` 执行节点的用户/父级/前门消息只落箱——派发扫描与通知复派同样不因未读开回合，只有 `acceptance_verdict` 会唤醒它。见 `main-task-runtime.md`「验收节点：提前创建、激活与握手重派发」与「节点信箱与唤醒（现行）」

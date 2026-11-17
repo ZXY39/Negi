@@ -1190,6 +1190,7 @@ class MainRuntimeService:
             # 探针要在租约与任务 pickup 之前起：要观测的就是恢复风暴那一刻的分配驻留。
             self._mem_probe = start_mem_probe(runtime_dir=self.store.path.parent)
             self._acquire_worker_lease_or_raise()
+            self._settle_orphaned_task_command_claims()
             self.worker_heartbeat_service.start_background()
         self.resource_registry.refresh_from_current_resources()
         self.policy_engine.sync_default_role_policies()
@@ -2536,6 +2537,33 @@ class MainRuntimeService:
         holder = str(lease.get('worker_id') or '').strip() or 'unknown'
         expires_at = str(lease.get('expires_at') or '').strip()
         raise RuntimeError(f'worker_lease_unavailable:{holder}:{expires_at}')
+
+    def _settle_orphaned_task_command_claims(self) -> None:
+        """代际清扫：新 worker 取得租约后，把上一代未结算的 claimed 行结算为 failed。
+
+        稳态不变量：`task_commands` 里 `status='claimed'` 的行只可能属于当前
+        worker 代际。被硬杀的 worker 不会跑到 `finally` 里的 `finish_task_command`，
+        而 `claim_pending_task_commands` 只捞 `pending`，这些行没有其他回收路径。
+        """
+        if self.execution_mode != 'worker':
+            return
+        worker_id = str(self.worker_id or '').strip()
+        if not worker_id:
+            return
+        try:
+            settled = self.store.settle_orphaned_task_commands(
+                worker_id=worker_id,
+                finished_at=now_iso(),
+            )
+        except Exception:
+            logger.exception('orphaned task command settlement failed at startup')
+            return
+        if settled:
+            logger.info(
+                'task command claims settled as orphaned: worker=%s count=%s',
+                worker_id,
+                settled,
+            )
 
     def _renew_worker_lease_from_thread(self, heartbeat_at: str, payload: dict[str, Any]) -> None:
         if self.execution_mode != 'worker' or not self._worker_lease_acquired:
@@ -4206,6 +4234,65 @@ class MainRuntimeService:
         logger.info("task worker lease released during graceful shutdown (worker_id={})", worker_id)
         return True
 
+    def _command_claim_counts_as_unsettled(
+        self,
+        item: dict[str, Any],
+        *,
+        worker_state: str,
+        live_worker_id: str,
+    ) -> bool:
+        """一条未结算命令是否可能仍在写盘。
+
+        pending：活 worker 可能马上执行 → 算。claimed：只有当前存活 worker
+        代际持有的才算；`starting` 时最新 worker_status 行必属上一代（本代
+        际尚未写入任何行），其领取一律作废。无归属的历史行保守计入。
+        """
+        if str(item.get('status') or '').strip().lower() != 'claimed':
+            return True
+        claimed_by = str(item.get('worker_id') or '').strip()
+        if not claimed_by:
+            return True
+        if worker_state == _WORKER_STATE_STARTING:
+            return False
+        if not live_worker_id:
+            return True
+        return claimed_by == live_worker_id
+
+    def list_unsettled_pause_commands(self, *, task_ids: set[str] | None = None) -> list[dict[str, Any]]:
+        """未排空的 `pause_task` 命令：pending，或由当前存活 worker 代际领取且未结算。
+
+        死代际的滞留领取（孤儿 claim）没有回收路径，也不可能被再次执行，
+        因此不构成删除阻断或关停等待的对象。worker_status 只读一拍：最新行
+        即当前代际身份，`starting` 窗口内它属于上一代。
+        """
+        try:
+            rows = [dict(item) for item in self.store.list_unfinished_task_commands(command_type='pause_task')]
+        except Exception:
+            return []
+        normalized_ids = {
+            str(item or '').strip()
+            for item in list(task_ids or set())
+            if str(item or '').strip()
+        }
+        if normalized_ids:
+            rows = [item for item in rows if str(item.get('task_id') or '').strip() in normalized_ids]
+        if not rows:
+            return []
+        if not any(str(item.get('status') or '').strip().lower() == 'claimed' for item in rows):
+            return rows
+        status_item = self.latest_worker_status()
+        state = self.worker_state(item=status_item)
+        live_worker_id = str((status_item or {}).get('worker_id') or '').strip()
+        return [
+            item
+            for item in rows
+            if self._command_claim_counts_as_unsettled(
+                item,
+                worker_state=state,
+                live_worker_id=live_worker_id,
+            )
+        ]
+
     def _task_pause_drain_active(self, task_id: str, task: TaskRecord | None = None) -> bool:
         """任务是否处于「暂停排空」中：暂停标志已置位，但 worker 尚未消费
         完 pause_task 命令，actor 可能仍在运行并写任务文件。
@@ -4226,14 +4313,10 @@ class MainRuntimeService:
         if self.worker_state() not in {_WORKER_STATE_ONLINE, _WORKER_STATE_STARTING}:
             return False
         try:
-            unfinished = [
-                item
-                for item in self.store.list_unfinished_task_commands(command_type='pause_task')
-                if str(item.get('task_id') or '').strip() == task_id
-            ]
+            unsettled = self.list_unsettled_pause_commands(task_ids={task_id})
         except Exception:
-            unfinished = []
-        return bool(unfinished)
+            unsettled = []
+        return bool(unsettled)
 
     async def _await_task_pause_drain(
         self,
@@ -4253,13 +4336,15 @@ class MainRuntimeService:
     def get_task_pause_state_payload(self, task_id: str) -> dict[str, Any] | None:
         """Pause-drain visibility for the task-card synchronous pause hint.
 
-        `draining` is true only while this task's `pause_task` command is
-        still unfinished AND a live worker (online/starting) can process it —
-        i.e. actors may still be running even though the durable paused flags
-        are already set. A stale/offline worker never drains, so the durable
-        flags are the truth there. `internal_total` counts non-terminal
-        runtime frames (active ∪ runnable ∪ waiting); frame rows persist for
-        resume, so `internal_stopped` mirrors the total once draining ends.
+        `draining` is true only while this task has an unsettled `pause_task`
+        command — `pending`, or `claimed` by the current live worker generation
+        — AND a live worker (online/starting) can process it, i.e. actors may
+        still be running even though the durable paused flags are already set.
+        Claims left by a dead worker generation are dead ledger rows and never
+        drain. A stale/offline worker never drains, so the durable flags are
+        the truth there. `internal_total` counts non-terminal runtime frames
+        (active ∪ runnable ∪ waiting); frame rows persist for resume, so
+        `internal_stopped` mirrors the total once draining ends.
         """
         task_id = self.normalize_task_id(task_id)
         task = self.get_task(task_id)
