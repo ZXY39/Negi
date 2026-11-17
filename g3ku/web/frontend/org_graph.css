@@ -1776,7 +1776,7 @@ textarea {
     width: min(100%, 920px);
     padding: 4px 12px 28px;
     color: var(--text-primary);
-    font-size: 15px;
+    font-size: calc(0.875rem * var(--reading-font-scale));
     overflow-wrap: break-word;
 }
 

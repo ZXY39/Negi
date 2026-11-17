@@ -30,6 +30,7 @@ READING_RULES = (
     ".msg-meta",
     ".ceo-silent-line",
     ".ceo-thinking-line",
+    ".media-viewer-markdown",
 )
 
 # 控件与页面框架：字号档位不许碰它们，否则按钮/侧栏会跟正文脱节。
