@@ -20679,3 +20679,20 @@ textarea {
     cursor: not-allowed;
     opacity: 1;
 }
+
+/* 触摸档（WCAG 2.5.5）：粗指针下所有控件目标 ≥44×44，两档高度合同在此让位。
+   组件层用 class 特异性钉 min-height，:where 压不住，故_floor 用 important；
+   只作用于 pointer:coarse，桌面档不受影响。徽标/纯标签不是控件，不在名单里。 */
+@media (pointer: coarse) {
+    button,
+    select,
+    textarea,
+    input:not([type="checkbox"], [type="radio"], [type="hidden"]),
+    [role="button"],
+    a.toolbar-btn,
+    label:has([type="checkbox"]),
+    label:has([type="radio"]) {
+        min-block-size: 44px !important;
+        min-inline-size: 44px !important;
+    }
+}
