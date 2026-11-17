@@ -11950,12 +11950,6 @@ function bindModelPage() {
             }
         }
     });
-    U.modelDetail?.addEventListener("change", (e) => {
-        const toggle = e.target.closest(".role-toggle");
-        if (toggle && e.target instanceof HTMLInputElement && e.target.type === "checkbox") {
-            toggle.classList.toggle("checked", e.target.checked);
-        }
-    });
 }
 
 

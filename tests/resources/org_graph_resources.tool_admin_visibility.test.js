@@ -418,7 +418,7 @@ test("renderToolDetail renders one role visibility group driven by the tool's ow
     const roles = [...html.matchAll(/data-role="(ceo|execution|inspection)"/g)].map((match) => match[1]);
     assert.deepEqual(roles, ["ceo", "execution", "inspection"]);
     assert.equal(html.includes("data-action="), false);
-    assert.match(html, /class="role-toggle tool-role-toggle checked">\s*<input type="checkbox" class="tool-role tool-role-input" data-role="ceo"/);
+    assert.match(html, /class="role-toggle tool-role-toggle">\s*<input type="checkbox" class="tool-role tool-role-input" data-role="ceo"/);
     assert.match(html, /data-role="execution"[^>]*checked/);
     assert.doesNotMatch(html, /data-role="inspection"[^>]*checked/);
     assert.doesNotMatch(html, /当前工具对所有角色禁用。/);

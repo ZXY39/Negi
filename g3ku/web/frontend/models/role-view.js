@@ -9,7 +9,6 @@ function syncModelDetailScopeToggles() {
         if (!(input instanceof HTMLInputElement)) return;
         const checked = modelScopeContains(key, selectedKey);
         input.checked = checked;
-        input.closest(".role-toggle")?.classList.toggle("checked", checked);
     });
 }
 

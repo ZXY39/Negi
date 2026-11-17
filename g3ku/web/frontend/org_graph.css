@@ -9507,7 +9507,7 @@ textarea {
     pointer-events: none;
 }
 
-.role-toggle.checked {
+.role-toggle:has(input:checked) {
     border-color: color-mix(in srgb, var(--brand-primary) 40%, var(--border-color));
     background: color-mix(in srgb, var(--brand-primary) 12%, var(--bg-app));
     color: var(--text-primary);

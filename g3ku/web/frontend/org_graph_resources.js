@@ -282,7 +282,7 @@ function renderSkillDetail() {
                     <h3>角色可见性</h3>
                     <div class="resource-filter-row">
                         ${roles.map((role) => `
-                            <label class="role-toggle ${allowedRoles.includes(role) ? "checked" : ""}">
+                            <label class="role-toggle">
                                 <input type="checkbox" class="skill-role" data-role="${role}" ${allowedRoles.includes(role) ? "checked" : ""}>
                                 <span>${esc(displayRoleLabel(role))}</span>
                             </label>
@@ -676,11 +676,11 @@ function renderToolDetail() {
                     </div>
                     <div class="tool-permission-card">
                         <div class="tool-role-toggle-group">
-                            <label class="role-toggle tool-role-toggle ${execMode === "governed" ? "checked" : ""}">
+                            <label class="role-toggle tool-role-toggle">
                                 <input type="radio" class="exec-mode-input" name="exec-mode" value="governed" ${execMode === "governed" ? "checked" : ""}>
                                 <span>${esc(execToolModeLabel("governed"))}</span>
                             </label>
-                            <label class="role-toggle tool-role-toggle ${execMode === "full_access" ? "checked" : ""}">
+                            <label class="role-toggle tool-role-toggle">
                                 <input type="radio" class="exec-mode-input" name="exec-mode" value="full_access" ${execMode === "full_access" ? "checked" : ""}>
                                 <span>${esc(execToolModeLabel("full_access"))}</span>
                             </label>
@@ -715,7 +715,7 @@ function renderToolDetail() {
                     <div class="tool-permission-card">
                         <div class="tool-role-toggle-group">
                             ${roles.map((role) => `
-                                <label class="role-toggle tool-role-toggle ${allowedRoles.includes(role) ? "checked" : ""}">
+                                <label class="role-toggle tool-role-toggle">
                                     <input type="checkbox" class="tool-role tool-role-input" data-role="${role}" aria-label="${esc(displayRoleLabel(role))}" ${allowedRoles.includes(role) ? "checked" : ""}>
                                     <span>${esc(displayRoleLabel(role))}</span>
                                 </label>
@@ -764,7 +764,6 @@ function renderToolDetail() {
         if (e.target.checked) set.add(e.target.dataset.role);
         else set.delete(e.target.dataset.role);
         ResourcesState.selectedTool.allowed_roles = [...set];
-        e.target.closest(".role-toggle")?.classList.toggle("checked", e.target.checked);
         setToolDirty(true);
     }));
     renderToolActions();
