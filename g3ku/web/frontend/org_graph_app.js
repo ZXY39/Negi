@@ -8664,6 +8664,8 @@ function syncProjectSettingsQrImage() {
         apply(image.naturalWidth > 0);
         return;
     }
+    // lazy 图片在弹层打开前不会发起加载：占位先显形，load/error 再翻面。
+    if (U.projectSettingsQrPlaceholder) U.projectSettingsQrPlaceholder.hidden = false;
     image.addEventListener("load", () => apply(true), { once: true });
     image.addEventListener("error", () => apply(false), { once: true });
 }

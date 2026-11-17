@@ -9,7 +9,6 @@
     <link rel="stylesheet" href="vendor/fonts/google-fonts.css">
     <link rel="stylesheet" href="org_graph.css">
     <link rel="stylesheet" href="models/content-policy.css">
-    <script src="vendor/lucide.min.js"></script>
 </head>
 
 <body>
@@ -1381,7 +1380,7 @@
                                     role="dialog" aria-label="交流QQ群二维码" hidden>
                                     <img id="project-settings-qq-qr-image" class="project-settings-qr-image"
                                         src="assets/qq-group-qrcode.png" alt="交流QQ群 629681546 二维码" width="196"
-                                        height="196" hidden>
+                                        height="196" loading="lazy" decoding="async" hidden>
                                     <div id="project-settings-qq-qr-placeholder" class="project-settings-qr-placeholder"
                                         hidden>
                                         <i data-lucide="qr-code" aria-hidden="true"></i>
@@ -1872,6 +1871,7 @@
     <script src="models/content-policy.js"></script>
     <script src="org_graph_external.js"></script>
     <script src="org_graph_onboarding.js"></script>
+    <script src="vendor/lucide.min.js"></script>
     <script>
         if (window.lucide && typeof window.lucide.createIcons === "function") {
             window.lucide.createIcons();
