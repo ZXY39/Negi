@@ -92,7 +92,7 @@ function renderSkills() {
         const subtitle = desc ? (desc.length > 50 ? desc.slice(0, 47) + "..." : desc) : skill.skill_id;
         el.innerHTML = `
             <div class="resource-list-title">${esc(skill.display_name)}</div>
-            <div class="resource-list-subtitle">${esc(subtitle)}</div>
+            <div class="resource-list-subtitle" title="${esc(subtitle)}">${esc(subtitle)}</div>
             <div class="resource-list-meta">
                 <span class="meta-tag risk-${String(skill.risk_level || 'low').toLowerCase()}">${esc(displayRiskLabel(skill.risk_level))}</span>
                 <span class="meta-tag status-${resourceAvailabilityStatus(skill)}">${esc(displayEnabledLabel(skill.enabled, skill.available))}</span>
@@ -178,7 +178,7 @@ function renderTools() {
         const subtitle = desc ? (desc.length > 50 ? desc.slice(0, 47) + "..." : desc) : tool.tool_id;
         el.innerHTML = `
             <div class="resource-list-title">${esc(tool.display_name)}</div>
-            <div class="resource-list-subtitle">${esc(subtitle)}</div>
+            <div class="resource-list-subtitle" title="${esc(subtitle)}">${esc(subtitle)}</div>
             <div class="resource-list-meta">
                 <span class="meta-tag status-${resourceAvailabilityStatus(tool)}">${esc(displayEnabledLabel(tool.enabled, tool.available, toolRepairRequired(tool)))}</span>
                 <span class="meta-tag risk-${String(tool.risk_level || "medium").trim().toLowerCase()}">${esc(displayRiskLabel(tool.risk_level || "medium"))}</span>

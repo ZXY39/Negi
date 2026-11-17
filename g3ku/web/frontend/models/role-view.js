@@ -72,7 +72,7 @@ function renderModelGroupChainTile(scopeKey, groupKey, index) {
         <article class="model-chain-slide is-group-tile is-editing${members.length ? "" : " is-incomplete"}" draggable="true" data-model-chain-ref="${esc(groupRefToken(groupKey))}" data-scope="${esc(scopeKey)}" data-group-key="${esc(groupKey)}" data-group-edit="${esc(groupKey)}">
             <div class="model-chain-main">
                 <span class="resource-list-title">${esc(groupKey)}</span>
-                <span class="resource-list-subtitle">组内平级 · 按综合负载选成员 · 节点绑定后粘滞</span>
+                <span class="resource-list-subtitle" title="组内平级 · 按综合负载选成员 · 节点绑定后粘滞">组内平级 · 按综合负载选成员 · 节点绑定后粘滞</span>
                 <span class="model-inline-meta">
                     <span class="policy-chip risk-low">组</span>
                     ${index === 0 ? '<span class="policy-chip risk-low">链首</span>' : ""}
@@ -228,7 +228,7 @@ function renderModelRoleEditors() {
                         <button type="button" class="model-chain-handle" aria-label="拖动调整顺序"><span class="model-chain-grip" aria-hidden="true">&#9776;</span></button>
                         <button type="button" class="model-chain-main" data-model-open="${esc(modelKey)}">
                             <span class="resource-list-title">${esc(modelKey)}</span>
-                            <span class="resource-list-subtitle">${esc(item?.provider_model || ref)}</span>
+                            <span class="resource-list-subtitle" title="${esc(item?.provider_model || ref)}">${esc(item?.provider_model || ref)}</span>
                             <span class="model-inline-meta">${badges.join("")}</span>
                         </button>
                         <button type="button" class="toolbar-btn ghost small" data-model-chain-action="remove" data-scope="${scope.key}" data-index="${index}">移除</button>
@@ -289,7 +289,7 @@ function renderModelList() {
                 <div class="model-shared-item-head">
                     <button type="button" class="model-available-main" data-model-open="${esc(item.key)}">
                         <span class="resource-list-title">${esc(item.key)}</span>
-                        <span class="resource-list-subtitle">${esc(item.provider_model)}</span>
+                        <span class="resource-list-subtitle" title="${esc(item.provider_model)}">${esc(item.provider_model)}</span>
                     </button>
                     <button type="button" class="toolbar-btn ghost small" data-model-open="${esc(item.key)}">配置</button>
                 </div>

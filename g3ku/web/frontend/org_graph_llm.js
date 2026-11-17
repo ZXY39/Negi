@@ -1755,7 +1755,7 @@
         <article class="llm-binding-card model-available-item${trim(item.key) === trim(llmState().editor.bindingKey) ? " is-selected" : ""}" data-model-available-key="${escv(item.key)}" data-model-open="${escv(item.key)}" draggable="true">
           <button type="button" class="model-available-main" data-model-open="${escv(item.key)}">
             <span class="resource-list-title">${escv(bindingTitle(item))}</span>
-            <span class="resource-list-subtitle">${escv(item.api_base || "")}</span>
+            <span class="resource-list-subtitle" title="${escv(item.api_base || "")}">${escv(item.api_base || "")}</span>
           </button>
           ${metaRow}
         </article>`;
@@ -1788,7 +1788,7 @@
                 : '<span class="policy-chip neutral">候选</span>'];
               if (item && item.enabled === false) badges.push('<span class="policy-chip neutral">已禁用</span>');
               if (!item) badges.push('<span class="policy-chip neutral">未托管</span>');
-              return `<article class="model-chain-slide is-editing" draggable="true" data-model-chain-ref="${escv(key)}" data-scope="${scope.key}"><button type="button" class="model-chain-main" data-model-open="${escv(key)}"><span class="resource-list-title">${escv(bindingTitle(item) || key)}</span><span class="resource-list-subtitle">${escv(item?.api_base || "")}</span><span class="model-inline-meta">${badges.join("")}</span></button><button type="button" class="model-chain-remove" data-model-chain-action="remove" data-scope="${scope.key}" data-index="${index}" title="移除" aria-label="移除模型"><i data-lucide="x"></i></button></article>`;
+              return `<article class="model-chain-slide is-editing" draggable="true" data-model-chain-ref="${escv(key)}" data-scope="${scope.key}"><button type="button" class="model-chain-main" data-model-open="${escv(key)}"><span class="resource-list-title">${escv(bindingTitle(item) || key)}</span><span class="resource-list-subtitle" title="${escv(item?.api_base || "")}">${escv(item?.api_base || "")}</span><span class="model-inline-meta">${badges.join("")}</span></button><button type="button" class="model-chain-remove" data-model-chain-action="remove" data-scope="${scope.key}" data-index="${index}" title="移除" aria-label="移除模型"><i data-lucide="x"></i></button></article>`;
             }).join("") : `<div class="empty-state compact">把左侧模型拖到这里，编排当前角色链。</div>`}</div>
           </div>
         </section>`;
