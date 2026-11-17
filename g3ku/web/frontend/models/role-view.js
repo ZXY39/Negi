@@ -31,7 +31,7 @@ function loadBalanceGroupWindowSummary(members) {
         })
         .filter((entry) => entry.key && entry.window > 0);
     if (!windows.length) return null;
-    const sorted = [...windows].sort((left, right) => left.window - right.window);
+    const sorted = windows.toSorted((left, right) => left.window - right.window);
     return {
         minKey: sorted[0].key,
         minWindow: sorted[0].window,

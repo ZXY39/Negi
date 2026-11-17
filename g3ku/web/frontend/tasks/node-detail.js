@@ -588,7 +588,7 @@ function buildTurnGroupDescriptors(turns) {
             });
         }
         if (!tools.length) return;
-        let target = [...entries].reverse().find((entry) => entry.kind === "text");
+        let target = entries.findLast((entry) => entry.kind === "text");
         if (!target) {
             target = entries.find((entry) => entry.kind === "preamble");
             if (!target) {

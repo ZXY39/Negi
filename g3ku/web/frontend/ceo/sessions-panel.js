@@ -28,7 +28,7 @@ function rebuildCeoSessionIndex() {
 }
 
 function sortCeoSessionsByTime(items = []) {
-    return [...(Array.isArray(items) ? items : [])].sort((left, right) => {
+    return (Array.isArray(items) ? items : []).toSorted((left, right) => {
         // 手动位次优先；没有位次的（拖动之后新建的）会话仍按创建时间倒序浮在手动区之上。
         const leftRank = ceoSessionManualRank(left?.session_id);
         const rightRank = ceoSessionManualRank(right?.session_id);

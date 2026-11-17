@@ -1007,7 +1007,7 @@ function ceoSessionManualRank(sessionId) {
 
 function sortChannelGroupItems(items = []) {
     const typeOrder = { dm: 0, group: 1, thread: 2 };
-    return [...(Array.isArray(items) ? items : [])].sort((left, right) => {
+    return (Array.isArray(items) ? items : []).toSorted((left, right) => {
         const leftType = String(left?.chat_type || "dm").trim();
         const rightType = String(right?.chat_type || "dm").trim();
         const typeDiff = (typeOrder[leftType] ?? 9) - (typeOrder[rightType] ?? 9);
@@ -2132,7 +2132,7 @@ function dedupeInflightUserMessageAgainstMessages(messages = [], inflightTurn = 
             return ceoNeedsAssistantTurn(deduped) ? deduped : null;
         }
     }
-    const lastUserMessage = [...normalizedMessages].reverse().find((item) => String(item?.role || "").trim().toLowerCase() === "user");
+    const lastUserMessage = normalizedMessages.findLast((item) => String(item?.role || "").trim().toLowerCase() === "user");
     if (!lastUserMessage || !normalizedInflight?.user_message) return normalizedInflight;
     const userContent = String(normalizedInflight.user_message?.content || "");
     const userAttachments = normalizeUploadList(normalizedInflight.user_message?.attachments);
@@ -2839,7 +2839,7 @@ function orderedTasks(tasks = S.tasks) {
             .map((taskId) => S.tasksById?.[taskId] || null)
             .filter(Boolean);
     }
-    return [...(Array.isArray(tasks) ? tasks : [])].sort((left, right) => {
+    return (Array.isArray(tasks) ? tasks : []).toSorted((left, right) => {
         const timeDiff = taskCreatedSortValue(right) - taskCreatedSortValue(left);
         if (timeDiff !== 0) return timeDiff;
         const rightCreatedAt = String(right?.created_at || "");
@@ -6001,7 +6001,7 @@ function renderPersistedCeoAssistantTurn(item = {}, options = {}) {
             });
             const firstEl = headEntries[0]?.head?.el || turn.el;
             // 倒序插到 firstEl 之前，最终顺序仍是升序。
-            [...segments.before].reverse().forEach((rule) => {
+            segments.before.toReversed().forEach((rule) => {
                 const divider = buildHistoryCompressionDivider(rule, historyTurnId);
                 if (divider) parent.insertBefore(divider, firstEl);
             });

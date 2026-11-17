@@ -800,7 +800,7 @@ function placeHistoryCompressionAroundElement(el, rules, turnId) {
     if (!el?.parentNode || !rules?.length) return false;
     const segments = planHistoryCompressionSegments([], rules);
     const parent = el.parentNode;
-    [...segments.before].reverse().forEach((rule) => {
+    segments.before.toReversed().forEach((rule) => {
         const divider = buildHistoryCompressionDivider(rule, turnId);
         if (divider) parent.insertBefore(divider, el);
     });
