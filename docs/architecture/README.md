@@ -17,6 +17,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 11. `agent-gateway.md` when the change touches the OpenAI-compatible endpoint (`/api/v1/chat/completions`) or the MCP stdio gateway (`negi mcp serve`)
 12. `speech-to-text.md` when the change touches local voice transcription: the composer mic button, inbound channel voice, the `stt` config section, or the vendored whisper.cpp binary
 13. `sandbox-execution-plane.md` when the change touches session trust, third-party channel gating, the limited tier, per-session tool allowlists, or the read/write-root boundary
+14. `session-messaging.md` when the change touches session links, peer-session messaging, session aliases, the reachable-session roster, or the `session_message` heartbeat lane
 
 ## Topic Guide
 
@@ -46,6 +47,8 @@ Start here when you are new to the repository or when a change crosses subsystem
   Use for local voice-to-text: the whisper.cpp subprocess engine and why it is not kept resident, audio normalization and silence gating, binary/model provisioning, and what the model tier choice trades in latency and accuracy.
 - `sandbox-execution-plane.md`
   Use for the trust tier of a session (owner vs third party), the install-state-driven tier model (`restricted` / `unrestricted` resolving to `limited` / `jailed` / `host_full`), the limited-mode per-session tool allowlist (fixed primitives, default set, optional exec/process/task tools), the session workspace and read/write-root boundary, control-plane rejection on the synthetic lane, the memory gate's four intake points, and the third-party sender stamp in the model-visible projection.
+- `session-messaging.md`
+  Use for session-to-session communication: the symmetric link edges and their operator maintenance, the never-reused `s{seq}` aliases over frozen canonical keys, `send_message` session addressing and ACL receipts, the per-recipient durable inbox with its pause/hop wake gates and injection-time consumption, the pinned reachable-session roster and its non-waking `[RUNTIME_NOTICE]` delta, and session-delete/unlink lifecycle.
 
 ## Debugging Entry Points
 
@@ -63,6 +66,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 操作员点了暂停、节点 `pause_requested=True` 而 `is_paused` 长期不变 → `main-task-runtime.md`「Node-Level Pause and Recovery」（脱离派发面后的暂停直落）
 - 渠道会话（`ext:`）任务长期静默却收不到失速提醒 → `heartbeat-system.md`「Task Stall Detection」（受众谓词与它要过的两道闸门）
 - 群聊里让它记住某事、跑命令、发文件、读宿主配置 → `sandbox-execution-plane.md` 的「Debugging Entry Points」：先分是信任级判错（注册表 `trust`）、档位名单漏登记，还是读根没下发
+- 会话间消息发不出（`session_not_linked`）、对方没醒、名册里没有新关联的会话、重启后别名对不上 → `session-messaging.md`「常见排障入口」：先查关联边，再按信箱 pending → 暂停闸 → hop 闸 → 扫描器 → 注入 dedupe 读链
 - 群里/私聊里模型认不出发言人、气泡上没有来源标签、渠道会话的 system prompt 少了说明块、或第三方在索要 Master 的私人信息 → `sandbox-execution-plane.md`「来源标注」（`[来源]` 六态、会话内编号、`ownerOpenids` 跨账号并集、本地会话不加标注与说明块）
 - 点「清除历史文件」没反应、两次确认里第二张一闪而没、清除请求根本没发到后端，或清除报 `session_busy` 这类裸码 → `web-and-admin.md`「External Access Page Contract」（串联确认的收尾只认自己那一张、进度与失败回执、不设客户端超时）
 - 父节点在验收节点仍非终态时提前进入 `before_model`、或出现意外 `superseded by newer spawn round`（含节点被 resume 后白跑一段再落该原因）、或 `resume` 返回 `entry_settled`、或工具行是 `Error executing spawn_child_nodes` 而它绑定的子节点还在跑、或同一个执行节点在任务树上挂出两颗检验节点（其中一颗的 FAILED 只是清扫疤、从没下过判词）、或一批子节点在存储抖动时刻整批被记成 `Error: CancelledError`（其中有的其实早已成功）、或节点 `failure_reason` 写着 `orphan reaped at task resume` → `operations-and-maintenance.md`「spawn 轮次过早完成或子节点被意外 supersede」+ `main-task-runtime.md`「Node-Level Pause and Recovery」「验收节点：提前创建、激活与握手重派发」+ `tool-hydration-and-callable-chain.md`「统一工具 Timeout 合同」「验收节点：提前创建、激活与握手重派发」
@@ -320,4 +324,5 @@ These rules prevent the docs from re-accumulating redundancy. Every edit to this
 | Agent gateway contract: OpenAI-compatible endpoint (`/api/v1/chat/completions`, session mapping, wait/200-honest-text policy, streaming diff) and MCP stdio gateway (`negi mcp serve`, tool surface, stdout purity) | `agent-gateway.md` |
 | Local speech-to-text contract: whisper.cpp subprocess engine and slot serialization, audio normalization and silence/language gating, traditional→simplified post-pass, binary/model provisioning (`stt` defaults' measured basis), voice-clip storage and the model-visibility exclusion, known latency and accuracy envelope | `speech-to-text.md` |
 | Sandbox execution plane: session trust tiers and their derivation (`owner` / `third_party_dm` / `third_party_group`, sticky downgrade, fail-closed on unknown), install-state-driven tier model (`restricted` / `unrestricted` → `limited` / `jailed` / `host_full`), limited-mode per-session tool allowlist and fixed primitives, session workspace with read/write roots, optional `exec` grant with `governed` clamp, control-plane rejection on the synthetic lane, memory gate intake points and read-side suppression, third-party sender stamp | `sandbox-execution-plane.md` |
+| Session links and peer messaging: symmetric link edges (`session_links`) and operator maintenance, never-reused `s{seq}` aliases (`session_aliases`, AUTOINCREMENT, rows never deleted) over frozen canonical keys, `send_message` session addressing (node→task→alias resolution, `session_not_linked` / `session_missing` / `reply_to_unknown` receipts, alias `legal_targets`), per-recipient inbox (`frontdoor_session_messages`) with fingerprint dedupe and runtime-stamped chain/hop (`SESSION_MESSAGE_HOP_CAP`), `SessionMessageScanner` pause/hop wake gates and `session_message` heartbeat rendering/injection consumption, pinned reachable-session roster (`pinned-contract-v7`) and non-waking `session_link_cursor` delta, `list_sessions` overflow tool, delete/unlink lifecycle | `session-messaging.md` |
 | Startup/deploy/troubleshooting order, the post-install entry surface (`negi` command stub, install-root pointer, desktop/Start Menu shortcuts, logon autostart registration, uninstall entry and its keep/purge guards), install root vs data root storage layout (which paths hang on which root, where to read the effective data root) and data-root resolution order, memory CLI, Docker compose | `operations-and-maintenance.md` |

@@ -240,6 +240,16 @@ credential, storage and target contract are owned by `external-agent-api.md`「A
   does not re-deliver; the event bundle remains in context and later turns handle it. This lane
   guarantees delivery to the model context, not successful handling or a visible reply.
 
+## Session Message Events
+
+- `reason=session_message`（source=`session_link`）是会话间点对点来信车道：
+  `SessionMessageScanner` 扫 `frontdoor_session_messages` 的 pending 行入队，
+  dedupe key `session-message:{message_id}`，注入后才销账。两道闸只在本车道：
+  暂停目标不入队（行留 pending），续链到顶（`wakeable=False`）入队但不请求唤醒。
+  渲染带运行时签名（别名/标题/信任档）、不可信注记与 `reply_to` 回投指引。
+  车道本体（寻址、ACL、chain/hop、名册 delta、生命周期）见
+  `session-messaging.md`「唤醒矩阵与心跳车道」。
+
 ## Channel Digest Heartbeat Events
 
 - The official QQ bridge writes non-@ group messages to a per-group history file and enqueues one `channel_digest` event through `POST /api/v1/sessions/{id}/digest`. Source is `external_api`; dedupe key is `channel-digest:<session_key>:<n_end>`.

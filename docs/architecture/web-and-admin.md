@@ -924,6 +924,13 @@ If an operator reports "switching sessions makes the whole Leader sidebar unusab
 
 Do not treat `ceoSessionBusy` as equivalent to "all session-list mutations must be locked". That coupling is a UX regression for the Leader session rail.
 
+### Session Link Dialog And API Contract
+
+- 会话卡片 `⋯` 菜单在「命名」与「删除」之间带「关联其他会话」（`data-session-link`，委托在 `#ceo-session-list`）。它进 `syncCeoSessionActions` 的置灰选择器，与命名/删除同档：目录不可写或批量模式下禁用。关系语义（对称边、短别名、ACL、生命周期）归 `session-messaging.md`「关系模型与短别名」。
+- 弹窗（`#ceo-session-link-backdrop`，抄免审白名单骨架）候选取 `S.ceoSessions`（本地 + 渠道可见行），排除自身与 `internal:`；当前关联预勾。**有保存键**：勾选只改草稿，保存才 `PUT /api/ceo/sessions/{id}/links` body `{links:[session_key,...]}`，整集差集替换、双向生效。保存中禁用保存键；失败留在窗内，内联错误行读 `error.data.reason`/`target`（`session_not_linkable` / `session_missing`）；成功关窗 + toast。关闭键与点 backdrop 自身都关窗。
+- `GET /api/ceo/sessions/{id}/links` 返回 `{ok, session_id, linked:[key,...]}`；PUT 另带 `added`/`removed`。两端点都先验源会话存在（本地转录或 ext 注册表条目），不存在 404 `session_missing`；目标逐个校验，非法 400 detail 是 `{reason, target}` 对象。423 解锁闸由全局中间件覆盖，无额外口令。
+- 写成功后记一条 operator action（category `session_links`、scope `session:<key>`）并发 `ceo.sessions.snapshot` 全局广播（多页面同步）；无变化（added/removed 皆空）不记不广播。候选列表不另开端点，复用页面加载时的目录。
+
 ### Channel Session Clear Contract
 
 - Deletion refuses before touching anything while a turn of that session is still running: `_session_is_running` gates the very first step of `_delete_single_ceo_session` and answers `409 ceo_turn_in_progress` (same code the edit lane uses, so the rail already renders it as 「回合进行中，请等待结束或先暂停后再操作」). The reason is order, not policy: the transcript, sidecars and uploads are removed first and `cancel_session_tasks` runs after them, so an in-flight turn would write its own row back under a session key that was just deleted and the card would reappear. `bulk-delete` keeps its per-item shape — that session is reported `result: failed / error: ceo_turn_in_progress` and the rest of the batch still deletes.

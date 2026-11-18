@@ -220,6 +220,24 @@ Focus on:
 - Where to look when it breaks
 - What changes are high risk
 
+### `docs/architecture/session-messaging.md`
+
+Update when touching:
+
+- `main/storage/sqlite_store.py` session-link tables (`session_links`, `session_aliases`, `frontdoor_session_messages`)
+- `main/service/runtime_service.py` session addressing/delivery (`deliver_session_message`, `_deliver_frontdoor_session_target`, `replace_session_links`)
+- `g3ku/heartbeat/session_message_scanner.py` and the `session_message` event lane
+- `g3ku/runtime/frontdoor/tool_contract.py` reachable-session roster, `g3ku/runtime/skill_roster_notice.py` `session_link_cursor`
+- `tools/send_message/` session namespace, `tools/list_sessions/`
+- `g3ku/runtime/api/ceo_sessions.py` link endpoints and delete cleanup
+
+Focus on:
+
+- Symmetric link edges as ACL, never-reused aliases over frozen canonical keys
+- Per-recipient inbox durability, pause/hop wake gates, injection-time consumption
+- Roster pinning vs non-waking delta, compaction/truncation cursor resets
+- Session-delete vs channel-hide lifecycle split
+
 ### `docs/architecture/README.md`
 
 Update this file if any of the following change:
