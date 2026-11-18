@@ -5922,6 +5922,45 @@ textarea {
     overflow-wrap: anywhere;
 }
 
+/* 会话关联弹窗：本地/渠道卡片切换在左，排序互斥两档在右；样式从 aria-pressed 取，
+   视觉与无障碍态同源。列表只投影当前 tab，勾选草稿跨 tab/排序存活在 JS 集合里。 */
+.ceo-session-link-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin: 2px 0 10px;
+}
+
+.ceo-session-link-tabs {
+    display: flex;
+    gap: 6px;
+}
+
+.ceo-session-link-tab,
+.ceo-session-link-sort-btn {
+    padding: 4px 12px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
+    border-radius: 999px;
+    background: transparent;
+    font-size: 0.74rem;
+    line-height: 1.4;
+    color: var(--text-muted);
+    cursor: pointer;
+}
+
+.ceo-session-link-tab[aria-pressed="true"],
+.ceo-session-link-sort-btn[aria-pressed="true"] {
+    border-color: color-mix(in srgb, var(--text-secondary) 55%, transparent);
+    background: color-mix(in srgb, var(--text-secondary) 12%, transparent);
+    color: var(--text-primary);
+}
+
+.ceo-session-link-sort {
+    display: flex;
+    gap: 6px;
+}
+
 .ceo-input-row > textarea {
     width: 100%;
     display: block;

@@ -482,6 +482,8 @@ const U = {
     renameSessionAccept: document.getElementById("rename-session-accept"),
     ceoSessionLinkBackdrop: document.getElementById("ceo-session-link-backdrop"),
     ceoSessionLinkDialog: document.getElementById("ceo-session-link-dialog"),
+    ceoSessionLinkTabs: document.getElementById("ceo-session-link-tabs"),
+    ceoSessionLinkSort: document.getElementById("ceo-session-link-sort"),
     ceoSessionLinkList: document.getElementById("ceo-session-link-list"),
     ceoSessionLinkError: document.getElementById("ceo-session-link-error"),
     ceoSessionLinkSaveBtn: document.getElementById("ceo-session-link-save-btn"),
@@ -9508,7 +9510,16 @@ async function performDeleteCeoSession(sessionId, { deleteTaskRecords = false, r
     }
 }
 
-const ceoSessionLinkState = { sessionId: "", linked: [], saving: false };
+const CEO_SESSION_LINK_SORT_KEY = "g3ku.ui.ceo.session-link-sort.v1";
+const ceoSessionLinkState = {
+    sessionId: "",
+    linked: [],
+    saving: false,
+    tab: "local",
+    // 未保存草稿跨 tab/排序存活：DOM 只投影当前 tab，切走前把勾选合并回这份集合。
+    draft: new Set(),
+    sort: readStoredUiPreference(CEO_SESSION_LINK_SORT_KEY) === "created" ? "created" : "active",
+};
 
 function ceoSessionLinkCandidates() {
     const selfId = ceoSessionLinkState.sessionId;
@@ -9519,29 +9530,94 @@ function ceoSessionLinkCandidates() {
     });
 }
 
+function ceoSessionLinkTimestamp(item, mode) {
+    const primary = mode === "created" ? item?.created_at : item?.updated_at;
+    const fallback = mode === "created" ? item?.updated_at : item?.created_at;
+    return String(primary || fallback || "").trim();
+}
+
+function sortCeoSessionLinkItems(items) {
+    const mode = ceoSessionLinkState.sort;
+    return [...items].sort((a, b) => {
+        const byTime = ceoSessionLinkTimestamp(b, mode).localeCompare(ceoSessionLinkTimestamp(a, mode));
+        if (byTime !== 0) return byTime;
+        return String(a?.title || "").localeCompare(String(b?.title || ""))
+            || String(a?.session_id || "").localeCompare(String(b?.session_id || ""));
+    });
+}
+
+function syncCeoSessionLinkDraftFromDom() {
+    const host = U.ceoSessionLinkList;
+    if (!host?.querySelectorAll) return;
+    host.querySelectorAll(".ceo-session-link-input").forEach((input) => {
+        const id = String(input.getAttribute?.("data-link-session-id") || "").trim();
+        if (!id) return;
+        if (input.checked) ceoSessionLinkState.draft.add(id);
+        else ceoSessionLinkState.draft.delete(id);
+    });
+}
+
+function ceoSessionLinkRow(item, checked, tagLabel) {
+    const id = String(item?.session_id || "");
+    const title = String(item?.title || id);
+    return `
+        <label class="ceo-risk-whitelist-item">
+            <input type="checkbox" class="ui-checkbox-input ceo-session-link-input"
+                data-link-session-id="${esc(id)}" ${checked ? "checked" : ""}>
+            <span class="ui-checkbox-box" aria-hidden="true"></span>
+            <span class="ceo-risk-tool-name">${esc(title)}</span>
+            <span class="meta-tag">${esc(tagLabel)}</span>
+        </label>
+    `;
+}
+
 function renderCeoSessionLinkList() {
     const host = U.ceoSessionLinkList;
     if (!host) return;
-    const candidates = ceoSessionLinkCandidates();
-    if (!candidates.length) {
-        host.innerHTML = '<div class="empty-state">没有可关联的其他会话。</div>';
+    const channelTab = ceoSessionLinkState.tab === "channel";
+    const items = sortCeoSessionLinkItems(
+        ceoSessionLinkCandidates().filter((item) => isChannelSessionItem(item) === channelTab),
+    );
+    if (!items.length) {
+        host.innerHTML = `<div class="empty-state">${channelTab ? "没有可关联的渠道会话。" : "没有可关联的本地会话。"}</div>`;
         return;
     }
-    const linked = new Set(ceoSessionLinkState.linked);
-    host.innerHTML = candidates.map((item) => {
-        const id = String(item?.session_id || "");
-        const title = String(item?.title || id);
-        const family = item?.session_family === "channel" ? "渠道" : "本地";
-        return `
-            <label class="ceo-risk-whitelist-item">
-                <input type="checkbox" class="ui-checkbox-input ceo-session-link-input"
-                    data-link-session-id="${esc(id)}" ${linked.has(id) ? "checked" : ""}>
-                <span class="ui-checkbox-box" aria-hidden="true"></span>
-                <span class="ceo-risk-tool-name">${esc(title)}</span>
-                <span class="meta-tag">${esc(family)}</span>
-            </label>
-        `;
-    }).join("");
+    host.innerHTML = items.map((item) => ceoSessionLinkRow(
+        item,
+        ceoSessionLinkState.draft.has(String(item.session_id)),
+        channelTab ? (displayChannelGroupLabel(deriveCeoChannelId(item)) || "渠道") : "本地",
+    )).join("");
+}
+
+function syncCeoSessionLinkTabButtons() {
+    U.ceoSessionLinkTabs?.querySelectorAll("[data-link-tab]")?.forEach((button) => {
+        button.setAttribute("aria-pressed", button.getAttribute("data-link-tab") === ceoSessionLinkState.tab ? "true" : "false");
+    });
+}
+
+function syncCeoSessionLinkSortButtons() {
+    U.ceoSessionLinkSort?.querySelectorAll("[data-link-sort]")?.forEach((button) => {
+        button.setAttribute("aria-pressed", button.getAttribute("data-link-sort") === ceoSessionLinkState.sort ? "true" : "false");
+    });
+}
+
+function setCeoSessionLinkTab(tab) {
+    const next = tab === "channel" ? "channel" : "local";
+    if (next === ceoSessionLinkState.tab) return;
+    syncCeoSessionLinkDraftFromDom();
+    ceoSessionLinkState.tab = next;
+    syncCeoSessionLinkTabButtons();
+    renderCeoSessionLinkList();
+}
+
+function setCeoSessionLinkSort(mode) {
+    const next = mode === "created" ? "created" : "active";
+    if (next === ceoSessionLinkState.sort) return;
+    syncCeoSessionLinkDraftFromDom();
+    ceoSessionLinkState.sort = next;
+    writeStoredUiPreference(CEO_SESSION_LINK_SORT_KEY, next);
+    syncCeoSessionLinkSortButtons();
+    renderCeoSessionLinkList();
 }
 
 async function openCeoSessionLinkDialog(sessionId) {
@@ -9551,6 +9627,8 @@ async function openCeoSessionLinkDialog(sessionId) {
     ceoSessionLinkState.sessionId = id;
     ceoSessionLinkState.saving = false;
     ceoSessionLinkState.linked = [];
+    ceoSessionLinkState.tab = "local";
+    ceoSessionLinkState.draft = new Set();
     if (U.ceoSessionLinkError) {
         U.ceoSessionLinkError.hidden = true;
         U.ceoSessionLinkError.textContent = "";
@@ -9563,6 +9641,9 @@ async function openCeoSessionLinkDialog(sessionId) {
     try {
         const payload = await ApiClient.getSessionLinks(id);
         ceoSessionLinkState.linked = Array.isArray(payload?.linked) ? payload.linked : [];
+        ceoSessionLinkState.draft = new Set(ceoSessionLinkState.linked);
+        syncCeoSessionLinkTabButtons();
+        syncCeoSessionLinkSortButtons();
         renderCeoSessionLinkList();
     } catch (error) {
         if (U.ceoSessionLinkList) {
@@ -9582,12 +9663,8 @@ function closeCeoSessionLinkDialog() {
 }
 
 function readCheckedSessionLinkIds() {
-    const host = U.ceoSessionLinkList;
-    if (!host?.querySelectorAll) return [];
-    return Array.from(host.querySelectorAll(".ceo-session-link-input"))
-        .filter((input) => input.checked)
-        .map((input) => String(input.getAttribute?.("data-link-session-id") || "").trim())
-        .filter(Boolean);
+    syncCeoSessionLinkDraftFromDom();
+    return Array.from(ceoSessionLinkState.draft);
 }
 
 async function saveCeoSessionLinks() {
@@ -11700,6 +11777,14 @@ function bindCeoSessionsPanel() {
         }
     });
     U.ceoSessionLinkSaveBtn?.addEventListener("click", () => void saveCeoSessionLinks());
+    U.ceoSessionLinkTabs?.addEventListener("click", (e) => {
+        const button = e.target.closest("[data-link-tab]");
+        if (button) setCeoSessionLinkTab(button.getAttribute("data-link-tab"));
+    });
+    U.ceoSessionLinkSort?.addEventListener("click", (e) => {
+        const button = e.target.closest("[data-link-sort]");
+        if (button) setCeoSessionLinkSort(button.getAttribute("data-link-sort"));
+    });
     U.ceoSessionLinkDialog?.addEventListener("click", (e) => {
         if (e.target.closest("[data-modal-close]")) closeCeoSessionLinkDialog();
     });

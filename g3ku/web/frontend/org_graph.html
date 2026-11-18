@@ -1736,6 +1736,16 @@
                         <h2 id="ceo-session-link-dialog-title">关联其他会话</h2>
                     </div>
                     <p class="ceo-risk-whitelist-hint">保存后双方会话可互发消息（模型面用短别名寻址）；关联变化只随下一轮通知，不唤醒会话。</p>
+                    <div class="ceo-session-link-toolbar">
+                        <div id="ceo-session-link-tabs" class="ceo-session-link-tabs" role="tablist" aria-label="会话类型">
+                            <button type="button" class="ceo-session-link-tab" data-link-tab="local" aria-pressed="true">本地</button>
+                            <button type="button" class="ceo-session-link-tab" data-link-tab="channel" aria-pressed="false">渠道</button>
+                        </div>
+                        <div id="ceo-session-link-sort" class="ceo-session-link-sort" role="group" aria-label="排序方式">
+                            <button type="button" class="ceo-session-link-sort-btn" data-link-sort="active" aria-pressed="true">最新活跃</button>
+                            <button type="button" class="ceo-session-link-sort-btn" data-link-sort="created" aria-pressed="false">创建时间</button>
+                        </div>
+                    </div>
                     <div id="ceo-session-link-list" class="ceo-risk-whitelist-list" aria-live="polite"></div>
                     <p id="ceo-session-link-error" class="ceo-risk-whitelist-hint" hidden></p>
                     <div class="confirm-actions">
