@@ -58,7 +58,11 @@ def test_process_kill_manifest_is_a_candidate_granted_to_ceo_and_execution() -> 
     # 走水合：作为候选工具暴露，不进常驻 tools[]。
     assert manifest["exposure"] == {"agent": True, "main_runtime": True}
     assert manifest["governance"]["allowed_roles"] == ["ceo", "execution"]
-    assert manifest["parameters"]["required"] == ["pid"]
+    assert manifest["parameters"]["required"] == []
+    properties = manifest["parameters"]["properties"]
+    assert properties["pid"]["type"] == "integer"
+    assert properties["pids"]["type"] == "array"
+    assert properties["pids"]["items"]["type"] == "integer"
     assert (REPO_ROOT / "tools" / "process_kill" / "toolskills" / "SKILL.md").exists()
 
 
@@ -477,6 +481,181 @@ async def test_process_kill_tool_rejects_foreign_pid_and_lists_owned(isolated_ro
         owned_processes.drop(scope, process.pid)
         process.kill()
         process.wait(timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_process_kill_tool_stops_a_batch_of_owned_pids(isolated_root: Path) -> None:
+    session_key = "web:ceo-1"
+    scope = owned_processes.scope_key(session_key=session_key)
+    first = _spawn_sleeper()
+    second = _spawn_sleeper()
+    try:
+        for index, process in enumerate((first, second), start=1):
+            owned_processes.register(
+                scope=scope,
+                pid=process.pid,
+                cmd="sleep",
+                log_path="",
+                session_key=session_key,
+                label=f"batch service {index}",
+            )
+
+        payload = json.loads(
+            await ProcessKillTool().execute(
+                pids=[first.pid, second.pid, first.pid],
+                __g3ku_runtime={"session_key": session_key, "actor_role": "ceo"},
+            )
+        )
+
+        assert payload["ok"] is True
+        assert payload["status"] == "terminated"
+        assert payload["pids"] == [first.pid, second.pid]
+        assert [(item["pid"], item["status"]) for item in payload["results"]] == [
+            (first.pid, "terminated"),
+            (second.pid, "terminated"),
+        ]
+        assert [item["purpose"] for item in payload["results"]] == [
+            "batch service 1",
+            "batch service 2",
+        ]
+        assert _wait_gone(first.pid)
+        assert _wait_gone(second.pid)
+    finally:
+        owned_processes.drop(scope, first.pid)
+        owned_processes.drop(scope, second.pid)
+        first.kill()
+        first.wait(timeout=10)
+        second.kill()
+        second.wait(timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_process_kill_tool_batch_does_not_short_circuit_on_a_foreign_pid(
+    isolated_root: Path,
+) -> None:
+    session_key = "web:ceo-1"
+    scope = owned_processes.scope_key(session_key=session_key)
+    foreign_scope = owned_processes.scope_key(session_key="web:ceo-2")
+    owned = _spawn_sleeper()
+    foreign = _spawn_sleeper()
+    try:
+        owned_processes.register(
+            scope=scope,
+            pid=owned.pid,
+            cmd="sleep",
+            log_path="",
+            session_key=session_key,
+        )
+        owned_processes.register(
+            scope=foreign_scope,
+            pid=foreign.pid,
+            cmd="sleep",
+            log_path="",
+            session_key="web:ceo-2",
+        )
+
+        payload = json.loads(
+            await ProcessKillTool().execute(
+                pids=[foreign.pid, owned.pid],
+                __g3ku_runtime={"session_key": session_key, "actor_role": "ceo"},
+            )
+        )
+
+        assert payload["ok"] is False
+        assert payload["status"] == "partial"
+        assert [(item["pid"], item["status"]) for item in payload["results"]] == [
+            (foreign.pid, "not_owned"),
+            (owned.pid, "terminated"),
+        ]
+        assert "owned_processes" in payload
+        assert _wait_gone(owned.pid)
+        assert owned_processes.is_alive(foreign.pid)
+    finally:
+        owned_processes.drop(scope, owned.pid)
+        owned_processes.drop(foreign_scope, foreign.pid)
+        owned.kill()
+        owned.wait(timeout=10)
+        foreign.kill()
+        foreign.wait(timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_process_kill_resource_wrapper_accepts_pids(isolated_root: Path) -> None:
+    from g3ku.resources.loader import ResourceLoader
+    from g3ku.resources.registry import ResourceRegistry
+
+    session_key = "web:ceo-wrapper"
+    scope = owned_processes.scope_key(session_key=session_key)
+    first = _spawn_sleeper()
+    second = _spawn_sleeper()
+    try:
+        for index, process in enumerate((first, second), start=1):
+            owned_processes.register(
+                scope=scope,
+                pid=process.pid,
+                cmd="sleep",
+                log_path="",
+                session_key=session_key,
+                label=f"wrapper service {index}",
+            )
+        registry = ResourceRegistry(
+            REPO_ROOT,
+            skills_dir=REPO_ROOT / "skills",
+            tools_dir=REPO_ROOT / "tools",
+        )
+        descriptor = registry.build_tool_descriptor(REPO_ROOT / "tools" / "process_kill")
+        assert descriptor is not None
+        tool = ResourceLoader(REPO_ROOT).load_tool(descriptor)
+        assert tool is not None
+
+        assert tool.validate_params({"pids": [first.pid, second.pid]}) == []
+        raw = await tool.execute(
+            pids=[first.pid, second.pid],
+            __g3ku_runtime={"session_key": session_key, "actor_role": "ceo"},
+        )
+        payload = json.loads(raw)
+
+        assert payload["ok"] is True
+        assert payload["status"] == "terminated"
+        assert [item["pid"] for item in payload["results"]] == [first.pid, second.pid]
+        assert _wait_gone(first.pid)
+        assert _wait_gone(second.pid)
+    finally:
+        owned_processes.drop(scope, first.pid)
+        owned_processes.drop(scope, second.pid)
+        first.kill()
+        first.wait(timeout=10)
+        second.kill()
+        second.wait(timeout=10)
+
+
+def test_process_kill_accepts_pid_or_pids() -> None:
+    tool = ProcessKillTool()
+
+    assert tool.validate_params({"pid": 1}) == []
+    assert tool.validate_params({"pids": [1, 2]}) == []
+    assert tool.validate_params({}) == ["pid or pids is required"]
+    assert tool.validate_params({"pids": ["1"]}) != []
+
+
+@pytest.mark.asyncio
+async def test_process_kill_rejects_empty_or_non_positive_pids(isolated_root: Path) -> None:
+    tool = ProcessKillTool()
+
+    empty = json.loads(await tool.execute(pids=[], __g3ku_runtime={}))
+    assert empty["ok"] is False
+    assert empty["status"] == "invalid_pid"
+    assert "at least one" in empty["message"]
+
+    non_positive = json.loads(await tool.execute(pids=[0], __g3ku_runtime={}))
+    assert non_positive["ok"] is False
+    assert non_positive["status"] == "invalid_pid"
+    assert "pids[0]" in non_positive["message"]
+
+    missing = json.loads(await tool.execute(__g3ku_runtime={}))
+    assert missing["ok"] is False
+    assert missing["status"] == "invalid_pid"
+    assert "pid or pids" in missing["message"]
 
 
 @pytest.mark.asyncio

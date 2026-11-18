@@ -2,7 +2,9 @@ schema_version: 1
 kind: tool
 name: process_kill
 display_name: Process Kill
-description: Stop a pid started by exec background=true; only pids owned by this session/task are accepted.
+description: Stop one or more pids started by exec background=true; only pids owned by
+  this session/task are accepted. Pass pid for a single process or pids for a batch;
+  a batch judges every pid independently and reports one result per pid.
 tool_result_delivery_contract: runtime_managed
 protocol: mcp
 mcp:
@@ -20,14 +22,22 @@ parameters:
   properties:
     pid:
       type: integer
+      minimum: 1
       description: The pid returned by exec when it started the background process.
         Only pids owned by the current session/task are accepted; a pid from another
         session, another task, or the runtime itself is rejected.
-  required:
-  - pid
+    pids:
+      type: array
+      minItems: 1
+      items:
+        type: integer
+        minimum: 1
+      description: Several pids returned by exec background=true calls. Every pid is
+        judged independently; one failure does not stop the rest.
+  required: []
 governance:
   display_name: Process Kill
-  description: Stop a background process owned by the current session/task.
+  description: Stop one or more background processes owned by the current session/task.
   risk_level: medium
   destructive: true
   allowed_roles:

@@ -1,7 +1,7 @@
 # process_kill
 
-Stop a background process that **this session/task** started through `exec` with
-`background: true`.
+Stop one or more background processes that **this session/task** started through `exec`
+with `background: true`. Pass `pid` for one process or `pids` for a batch.
 
 ## When to use it
 
@@ -16,15 +16,33 @@ and the runtime's own processes are not in the ownership table and are rejected.
 
 - `pid`: the exact number returned by the `exec` result (`"pid": 1234`). Do not guess
   or reuse a pid from an earlier session; pids get recycled by the OS.
+- `pids`: a list of such pids, for stopping several processes in one call. Duplicates
+  are collapsed and every pid is judged on its own — one `not_owned` or `kill_failed`
+  does not stop the rest of the batch.
+
+Pass one or the other; with both, the union is treated as a batch.
 
 ## What you get back
 
-- `ok` / `status` (`terminated`, `already_exited`, `identity_mismatch`, `not_owned`)
+Single `pid` call:
+
+- `ok` / `status` (`terminated`, `already_exited`, `identity_mismatch`, `not_owned`,
+  `kill_failed`)
 - `cmd` and `log_path` of the process
 - `log_tail`: the last ~2000 characters of its output, so you can explain why it
   exited or failed
 - On `not_owned`, the current session/task's owned pids (bounded list) so you can
   pick the right one instead of guessing
+
+`pids` call:
+
+- `results`: one entry per pid, each with the single-call fields above
+- `ok`: true only when every pid was terminated
+- `status`: `terminated` (all stopped), `partial` (some stopped), the shared failure
+  status when every pid failed for the same reason (e.g. `not_owned`), or `failed`
+  for mixed failure reasons
+- `owned_processes` appears once when any pid was rejected, so you can correct the
+  batch without guessing
 
 ## Ownership rules
 
