@@ -118,6 +118,7 @@ from main.models import (
     TASK_MODEL_CONFIG_KEY,
     ChatboxMessage,
     FrontdoorNodeMessage,
+    FrontdoorSessionMessage,
     NodeRecord,
     TaskArtifactRecord,
     TaskNodeNotification,
@@ -7176,6 +7177,79 @@ class MainRuntimeService:
                 continue
             try:
                 self.store.mark_frontdoor_node_message_consumed(
+                    normalized, consumed_at=consumed_at
+                )
+            except Exception:
+                continue
+
+    # ---- 会话关联（session links）：对称边 + 短别名 + 点对点信箱 ----
+
+    def list_session_links(self, session_key: str) -> list[str]:
+        return list(self.store.list_session_links(str(session_key or '').strip()) or [])
+
+    def has_session_link(self, a: str, b: str) -> bool:
+        return bool(self.store.has_session_link(a, b))
+
+    def replace_session_links(self, session_key: str, targets: list[str]) -> dict[str, list[str]]:
+        """Diff-replace one session's neighbor set; edges are symmetric.
+
+        Returns the added/removed peer keys. Aliases are assigned for every
+        endpoint of a newly created edge (both sides), never for removals.
+        Target existence/authorization is the caller's job (REST layer).
+        """
+        normalized = str(session_key or '').strip()
+        current = set(self.list_session_links(normalized))
+        wanted: set[str] = set()
+        for target in list(targets or []):
+            peer = str(target or '').strip()
+            if peer and peer != normalized:
+                wanted.add(peer)
+        added = sorted(wanted - current)
+        removed = sorted(current - wanted)
+        created_at = now_iso()
+        for peer in added:
+            if self.store.add_session_link(normalized, peer, created_at=created_at):
+                self.store.get_or_create_session_alias(normalized, created_at=created_at)
+                self.store.get_or_create_session_alias(peer, created_at=created_at)
+        for peer in removed:
+            self.store.remove_session_link(normalized, peer)
+        return {'added': added, 'removed': removed}
+
+    def ensure_session_alias(self, session_key: str) -> str:
+        return str(self.store.get_or_create_session_alias(session_key, created_at=now_iso()) or '')
+
+    def get_session_alias(self, session_key: str) -> str:
+        return str(self.store.get_session_alias(session_key) or '')
+
+    def resolve_session_alias(self, alias: str) -> str:
+        return str(self.store.resolve_session_alias(alias) or '')
+
+    def reachable_session_roster(self, session_key: str) -> list[dict[str, str]]:
+        """Alias + canonical key per linked peer; titles are enriched caller-side."""
+        roster: list[dict[str, str]] = []
+        for peer in self.list_session_links(session_key):
+            roster.append({'session_key': peer, 'alias': self.get_session_alias(peer)})
+        return roster
+
+    def purge_session_link_data(self, session_key: str) -> None:
+        """Session-delete cleanup: edges and mailbox rows go; alias rows stay."""
+        normalized = str(session_key or '').strip()
+        if not normalized:
+            return
+        self.store.delete_session_links_for(normalized)
+        self.store.delete_frontdoor_session_messages_for(normalized)
+
+    def list_frontdoor_session_messages(self, session_id: str) -> list[FrontdoorSessionMessage]:
+        return list(self.store.list_frontdoor_session_messages(str(session_id or '').strip()) or [])
+
+    def mark_frontdoor_session_messages_consumed(self, message_ids: list[str]) -> None:
+        consumed_at = now_iso()
+        for message_id in list(message_ids or []):
+            normalized = str(message_id or '').strip()
+            if not normalized:
+                continue
+            try:
+                self.store.mark_frontdoor_session_message_consumed(
                     normalized, consumed_at=consumed_at
                 )
             except Exception:

@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from main.models import (
     ChatboxMessage,
     FrontdoorNodeMessage,
+    FrontdoorSessionMessage,
     NodeRecord,
     TaskArtifactRecord,
     TaskErrorLogRecord,
@@ -651,6 +652,39 @@ class SQLiteTaskStore:
                 payload_json TEXT NOT NULL
             )
             ''',
+            '''
+            -- 会话关联：对称无向边，写入前规范化 a<b。操作员在会话菜单维护，
+            -- 模型面只读名册；关联变化走不唤醒的 [RUNTIME_NOTICE] delta。
+            CREATE TABLE IF NOT EXISTS session_links (
+                a TEXT NOT NULL,
+                b TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (a, b)
+            )
+            ''',
+            '''
+            -- 会话短别名：模型面寻址用 s{seq}，规范 session key 不动。
+            -- AUTOINCREMENT 保证删除后永不复用；别名行永不删除
+            -- （ext 同 key 回归拿回原别名）。
+            CREATE TABLE IF NOT EXISTS session_aliases (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_key TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL
+            )
+            ''',
+            '''
+            -- 会话间点对点信箱：每收件人一行，消费态各自独立；
+            -- 心跳注入后才销账（同 frontdoor_node_messages 三件套）。
+            CREATE TABLE IF NOT EXISTS frontdoor_session_messages (
+                message_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                source_session_key TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                consumed_at TEXT NOT NULL,
+                payload_json TEXT NOT NULL
+            )
+            ''',
             'CREATE INDEX IF NOT EXISTS idx_nodes_task_id ON nodes(task_id)',
             'CREATE INDEX IF NOT EXISTS idx_nodes_parent_node_id ON nodes(parent_node_id)',
             'CREATE INDEX IF NOT EXISTS idx_task_node_pauses_task_id ON task_node_pauses(task_id)',
@@ -685,6 +719,10 @@ class SQLiteTaskStore:
             'CREATE INDEX IF NOT EXISTS idx_task_distribution_error_outbox_state_created_at ON task_distribution_error_outbox(delivery_state, created_at)',
             'CREATE INDEX IF NOT EXISTS idx_task_worker_status_outbox_state_updated_at ON task_worker_status_outbox(delivery_state, updated_at)',
             'CREATE INDEX IF NOT EXISTS idx_task_summary_outbox_state_updated_at ON task_summary_outbox(delivery_state, updated_at)',
+            'CREATE INDEX IF NOT EXISTS idx_session_links_b ON session_links(b)',
+            'CREATE INDEX IF NOT EXISTS idx_frontdoor_session_messages_session_status ON frontdoor_session_messages(session_id, status)',
+            'CREATE INDEX IF NOT EXISTS idx_frontdoor_session_messages_pending ON frontdoor_session_messages(status, created_at)',
+            'CREATE INDEX IF NOT EXISTS idx_frontdoor_session_messages_source ON frontdoor_session_messages(source_session_key)',
         ]
         with self._conn:
             index_statements = [item for item in statements if item.lstrip().upper().startswith('CREATE INDEX')]
@@ -2890,6 +2928,237 @@ class SQLiteTaskStore:
                 update={'status': 'consumed', 'consumed_at': str(consumed_at or '').strip()}
             )
         )
+
+    # ---- 会话关联（session links）：对称无向边 + 短别名 + 点对点信箱 ----
+
+    @staticmethod
+    def _normalized_link_pair(a: str, b: str) -> tuple[str, str]:
+        left = str(a or '').strip()
+        right = str(b or '').strip()
+        if not left or not right or left == right:
+            return '', ''
+        return (left, right) if left < right else (right, left)
+
+    def add_session_link(self, a: str, b: str, *, created_at: str) -> bool:
+        """True when the edge was newly created; False for self/duplicate/empty."""
+        left, right = self._normalized_link_pair(a, b)
+        if not left:
+            return False
+
+        def operation(conn: sqlite3.Connection) -> bool:
+            cursor = conn.execute(
+                'INSERT OR IGNORE INTO session_links (a, b, created_at) VALUES (?, ?, ?)',
+                (left, right, str(created_at or '').strip()),
+            )
+            return cursor.rowcount > 0
+
+        return self._run_write(operation)
+
+    def remove_session_link(self, a: str, b: str) -> bool:
+        left, right = self._normalized_link_pair(a, b)
+        if not left:
+            return False
+
+        def operation(conn: sqlite3.Connection) -> bool:
+            cursor = conn.execute(
+                'DELETE FROM session_links WHERE a = ? AND b = ?', (left, right)
+            )
+            return cursor.rowcount > 0
+
+        return self._run_write(operation)
+
+    def has_session_link(self, a: str, b: str) -> bool:
+        left, right = self._normalized_link_pair(a, b)
+        if not left:
+            return False
+        rows = self._fetchall(
+            'SELECT 1 FROM session_links WHERE a = ? AND b = ? LIMIT 1', (left, right)
+        )
+        return bool(rows)
+
+    def list_session_links(self, session_key: str) -> list[str]:
+        """Neighbor session keys of one session (both edge directions)."""
+        normalized = str(session_key or '').strip()
+        if not normalized:
+            return []
+        rows = self._fetchall(
+            'SELECT b AS peer FROM session_links WHERE a = ? '
+            'UNION SELECT a AS peer FROM session_links WHERE b = ? '
+            'ORDER BY peer ASC',
+            (normalized, normalized),
+        )
+        return [str(row['peer']) for row in rows]
+
+    def delete_session_links_for(self, session_key: str) -> int:
+        normalized = str(session_key or '').strip()
+        if not normalized:
+            return 0
+
+        def operation(conn: sqlite3.Connection) -> int:
+            cursor = conn.execute(
+                'DELETE FROM session_links WHERE a = ? OR b = ?', (normalized, normalized)
+            )
+            return cursor.rowcount
+
+        return self._run_write(operation)
+
+    def get_or_create_session_alias(self, session_key: str, *, created_at: str) -> str:
+        """Stable model-facing alias ``s{seq}``; assigned once, never reused."""
+        normalized = str(session_key or '').strip()
+        if not normalized:
+            return ''
+
+        def operation(conn: sqlite3.Connection) -> str:
+            row = conn.execute(
+                'SELECT seq FROM session_aliases WHERE session_key = ?', (normalized,)
+            ).fetchone()
+            if row is not None:
+                return f"s{int(row['seq'])}"
+            cursor = conn.execute(
+                'INSERT INTO session_aliases (session_key, created_at) VALUES (?, ?)',
+                (normalized, str(created_at or '').strip()),
+            )
+            return f"s{int(cursor.lastrowid)}"
+
+        return self._run_write(operation)
+
+    def get_session_alias(self, session_key: str) -> str:
+        rows = self._fetchall(
+            'SELECT seq FROM session_aliases WHERE session_key = ?',
+            (str(session_key or '').strip(),),
+        )
+        return f"s{int(rows[0]['seq'])}" if rows else ''
+
+    def resolve_session_alias(self, alias: str) -> str:
+        """Alias -> canonical session key; empty when the alias names nothing."""
+        text = str(alias or '').strip().lower()
+        if not text.startswith('s') or not text[1:].isdigit():
+            return ''
+        rows = self._fetchall(
+            'SELECT session_key FROM session_aliases WHERE seq = ?', (int(text[1:]),)
+        )
+        return str(rows[0]['session_key']) if rows else ''
+
+    def upsert_frontdoor_session_message(
+        self,
+        payload: FrontdoorSessionMessage | dict[str, Any],
+    ) -> FrontdoorSessionMessage:
+        record = (
+            payload
+            if isinstance(payload, FrontdoorSessionMessage)
+            else FrontdoorSessionMessage.model_validate(payload)
+        )
+        payload_json = record.model_dump_json()
+
+        def operation(conn: sqlite3.Connection) -> FrontdoorSessionMessage:
+            conn.execute(
+                'INSERT INTO frontdoor_session_messages '
+                '(message_id, session_id, source_session_key, status, created_at, consumed_at, payload_json) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?) '
+                'ON CONFLICT(message_id) DO UPDATE SET '
+                'session_id = excluded.session_id, source_session_key = excluded.source_session_key, '
+                'status = excluded.status, created_at = excluded.created_at, '
+                'consumed_at = excluded.consumed_at, payload_json = excluded.payload_json',
+                (
+                    record.message_id,
+                    record.session_id,
+                    record.source_session_key,
+                    record.status,
+                    record.created_at,
+                    record.consumed_at,
+                    payload_json,
+                ),
+            )
+            return record
+
+        return self._run_write(operation)
+
+    def get_frontdoor_session_message(self, message_id: str) -> FrontdoorSessionMessage | None:
+        rows = self._fetchall(
+            'SELECT payload_json FROM frontdoor_session_messages WHERE message_id = ?',
+            (str(message_id or '').strip(),),
+        )
+        return self._parse(rows[0]['payload_json'], FrontdoorSessionMessage) if rows else None
+
+    def list_frontdoor_session_messages(
+        self,
+        session_id: str,
+        *,
+        status: str = '',
+    ) -> list[FrontdoorSessionMessage]:
+        normalized_session = str(session_id or '').strip()
+        normalized_status = str(status or '').strip()
+        if normalized_status:
+            rows = self._fetchall(
+                'SELECT payload_json FROM frontdoor_session_messages '
+                'WHERE session_id = ? AND status = ? ORDER BY created_at ASC, message_id ASC',
+                (normalized_session, normalized_status),
+            )
+        else:
+            rows = self._fetchall(
+                'SELECT payload_json FROM frontdoor_session_messages '
+                'WHERE session_id = ? ORDER BY created_at ASC, message_id ASC',
+                (normalized_session,),
+            )
+        return [self._parse(row['payload_json'], FrontdoorSessionMessage) for row in rows]
+
+    def list_pending_frontdoor_session_messages(self, *, limit: int = 500) -> list[FrontdoorSessionMessage]:
+        rows = self._fetchall(
+            "SELECT payload_json FROM frontdoor_session_messages WHERE status = 'pending' "
+            'ORDER BY created_at ASC, message_id ASC LIMIT ?',
+            (max(1, int(limit or 500)),),
+        )
+        return [self._parse(row['payload_json'], FrontdoorSessionMessage) for row in rows]
+
+    def find_unconsumed_session_message_by_fingerprint(
+        self,
+        session_id: str,
+        source_session_key: str,
+        fingerprint: str,
+    ) -> FrontdoorSessionMessage | None:
+        """Same-shape dedupe arm: only an unconsumed row absorbs a repeat send."""
+        rows = self._fetchall(
+            "SELECT payload_json FROM frontdoor_session_messages "
+            "WHERE session_id = ? AND source_session_key = ? AND status = 'pending' "
+            "AND json_extract(payload_json, '$.payload.fingerprint') = ? "
+            'ORDER BY created_at ASC, message_id ASC LIMIT 1',
+            (
+                str(session_id or '').strip(),
+                str(source_session_key or '').strip(),
+                str(fingerprint or '').strip(),
+            ),
+        )
+        return self._parse(rows[0]['payload_json'], FrontdoorSessionMessage) if rows else None
+
+    def mark_frontdoor_session_message_consumed(
+        self,
+        message_id: str,
+        *,
+        consumed_at: str,
+    ) -> None:
+        record = self.get_frontdoor_session_message(message_id)
+        if record is None:
+            return
+        self.upsert_frontdoor_session_message(
+            record.model_copy(
+                update={'status': 'consumed', 'consumed_at': str(consumed_at or '').strip()}
+            )
+        )
+
+    def delete_frontdoor_session_messages_for(self, session_key: str) -> int:
+        """Drop both inbox rows and sent rows of a deleted session."""
+        normalized = str(session_key or '').strip()
+        if not normalized:
+            return 0
+
+        def operation(conn: sqlite3.Connection) -> int:
+            cursor = conn.execute(
+                'DELETE FROM frontdoor_session_messages WHERE session_id = ? OR source_session_key = ?',
+                (normalized, normalized),
+            )
+            return cursor.rowcount
+
+        return self._run_write(operation)
 
     def upsert_chatbox_message(
         self,

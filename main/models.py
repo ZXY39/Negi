@@ -290,6 +290,25 @@ class FrontdoorNodeMessage(Model):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
+class FrontdoorSessionMessage(Model):
+    """A peer-session message in the session-links inbox (one row per recipient).
+
+    会话间点对点车道的信箱行，形状同 FrontdoorNodeMessage：注入后才销账。
+    签名与链信息（source_alias/source_title/source_trust/chain_id/hop/reply_to/
+    expects_reply/fingerprint）住 payload，运行时写入，模型传不了。
+    """
+
+    message_id: str
+    session_id: str
+    source_session_key: str = ''
+    content: str = ''
+    ref: str = ''
+    status: str = 'pending'
+    created_at: str = ''
+    consumed_at: str = ''
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
 class ChatboxMessage(Model):
     """A node's reply addressed to the operator chat box (node detail page thread).
 
