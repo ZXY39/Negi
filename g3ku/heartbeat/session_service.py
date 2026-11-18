@@ -134,6 +134,7 @@ class WebSessionHeartbeatService:
         self._node_error_scanner = None
         self._task_node_error_failure_streaks: dict[str, int] = {}
         self._frontdoor_message_scanner = None
+        self._session_message_scanner = None
         # 非 node_error 事件失败的内存计数保底（键为 (session_key, reasons)）。node_error
         # 路径已改为按 node 持久计数（heartbeat_node_retry_state 表），本字典仅用于
         # stall/task_terminal 等无 node 维度事件的有界退避（计划 2.2）。
@@ -163,6 +164,15 @@ class WebSessionHeartbeatService:
                 interval_seconds=15.0,
             )
             await self._frontdoor_message_scanner.start()
+            from g3ku.heartbeat.session_message_scanner import SessionMessageScanner
+            self._session_message_scanner = SessionMessageScanner(
+                main_task_service=self._main_task_service,
+                heartbeat=self,
+                runtime_manager=self._runtime_manager,
+                session_manager=self._session_manager,
+                interval_seconds=15.0,
+            )
+            await self._session_message_scanner.start()
 
     async def stop(self) -> None:
         self._started = False
@@ -174,6 +184,10 @@ class WebSessionHeartbeatService:
         self._frontdoor_message_scanner = None
         if frontdoor_scanner is not None:
             await frontdoor_scanner.stop()
+        session_scanner = self._session_message_scanner
+        self._session_message_scanner = None
+        if session_scanner is not None:
+            await session_scanner.stop()
         await self._wake.close()
         prompt_tasks = list(self._prompt_tasks.values())
         self._prompt_tasks.clear()
@@ -567,6 +581,43 @@ class WebSessionHeartbeatService:
         if event is None:
             return False
         if self._started:
+            self._wake.request(key, delay_s=0.25)
+        return True
+
+    def enqueue_session_message_payload(
+        self,
+        session_id: str,
+        item: dict[str, Any] | None,
+    ) -> bool:
+        """Peer-session inbox lane. wakeable=False（续链到顶）只入队不请求唤醒，
+
+        事件随下一次别的唤醒并入上下文；暂停闸在扫描器侧（行留 pending）。
+        """
+        key = str(session_id or '').strip()
+        raw = dict(item or {})
+        message_id = str(raw.get('message_id') or '').strip()
+        if not key or not message_id:
+            return False
+        dedupe_key = str(raw.get('dedupe_key') or f'session-message:{message_id}').strip()
+        wakeable = bool(raw.get('wakeable', True))
+        payload = {
+            **raw,
+            'message_id': message_id,
+            'wakeable': wakeable,
+            'event_reason': 'session_message',
+            'dedupe_key': dedupe_key,
+        }
+        event = self._events.enqueue(
+            session_id=key,
+            source='session_link',
+            reason='session_message',
+            dedupe_key=dedupe_key,
+            payload=payload,
+            delay_seconds=0.0,
+        )
+        if event is None:
+            return False
+        if self._started and wakeable:
             self._wake.request(key, delay_s=0.25)
         return True
 
@@ -1467,6 +1518,11 @@ class WebSessionHeartbeatService:
             try:
                 if reason == "frontdoor_node_message":
                     mark = getattr(store, "mark_frontdoor_node_message_consumed", None)
+                    message_id = str(payload.get("message_id") or "").strip()
+                    if callable(mark) and message_id:
+                        mark(message_id, consumed_at=now_iso())
+                elif reason == "session_message":
+                    mark = getattr(store, "mark_frontdoor_session_message_consumed", None)
                     message_id = str(payload.get("message_id") or "").strip()
                     if callable(mark) and message_id:
                         mark(message_id, consumed_at=now_iso())
