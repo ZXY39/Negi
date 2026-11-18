@@ -318,7 +318,7 @@ function syncCeoSessionActions() {
         input.indeterminate = !allSelected && selectedCount > 0;
         input.disabled = bulkSelectionDisabled || groupIds.length <= 0;
     });
-    U.ceoSessionList?.querySelectorAll("[data-session-menu-toggle], [data-session-rename], [data-session-delete]")?.forEach((button) => {
+    U.ceoSessionList?.querySelectorAll("[data-session-menu-toggle], [data-session-rename], [data-session-link], [data-session-delete]")?.forEach((button) => {
         button.disabled = mutationDisabled;
     });
     if (mutationDisabled || S.ceoBulkMode) closeCeoSessionMenus();
@@ -419,6 +419,7 @@ function renderCeoSessionCard(item, { allowActions = false, index = -1 } = {}) {
                             <span class="ceo-session-menu-info-row"><span>创建时间</span><code>${esc(createdText || "-")}</code></span>
                         </div>
                         ${item?.can_rename === false ? "" : `<button type="button" class="toolbar-menu-item" data-session-rename="${esc(sessionId)}" role="menuitem">命名</button>`}
+                        <button type="button" class="toolbar-menu-item" data-session-link="${esc(sessionId)}" role="menuitem">关联其他会话</button>
                         ${item?.can_delete === false ? "" : `<button type="button" class="toolbar-menu-item danger" data-session-delete="${esc(sessionId)}" role="menuitem">删除</button>`}
                     </div>
                 </div>

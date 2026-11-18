@@ -480,6 +480,12 @@ const U = {
     renameSessionInput: document.getElementById("rename-session-input"),
     renameSessionCancel: document.getElementById("rename-session-cancel"),
     renameSessionAccept: document.getElementById("rename-session-accept"),
+    ceoSessionLinkBackdrop: document.getElementById("ceo-session-link-backdrop"),
+    ceoSessionLinkDialog: document.getElementById("ceo-session-link-dialog"),
+    ceoSessionLinkList: document.getElementById("ceo-session-link-list"),
+    ceoSessionLinkError: document.getElementById("ceo-session-link-error"),
+    ceoSessionLinkSaveBtn: document.getElementById("ceo-session-link-save-btn"),
+    ceoSessionLinkCloseBtn: document.getElementById("ceo-session-link-close-btn"),
     ceoFeed: document.getElementById("ceo-chat-feed"),
     ceoScrollToLatestBtn: document.getElementById("ceo-scroll-to-latest-btn"),
     ceoInput: document.getElementById("ceo-input"),
@@ -9502,6 +9508,123 @@ async function performDeleteCeoSession(sessionId, { deleteTaskRecords = false, r
     }
 }
 
+const ceoSessionLinkState = { sessionId: "", linked: [], saving: false };
+
+function ceoSessionLinkCandidates() {
+    const selfId = ceoSessionLinkState.sessionId;
+    const all = Array.isArray(S.ceoSessions) ? S.ceoSessions : [];
+    return all.filter((item) => {
+        const id = String(item?.session_id || "").trim();
+        return id && id !== selfId && !id.startsWith("internal:");
+    });
+}
+
+function renderCeoSessionLinkList() {
+    const host = U.ceoSessionLinkList;
+    if (!host) return;
+    const candidates = ceoSessionLinkCandidates();
+    if (!candidates.length) {
+        host.innerHTML = '<div class="empty-state">没有可关联的其他会话。</div>';
+        return;
+    }
+    const linked = new Set(ceoSessionLinkState.linked);
+    host.innerHTML = candidates.map((item) => {
+        const id = String(item?.session_id || "");
+        const title = String(item?.title || id);
+        const family = item?.session_family === "channel" ? "渠道" : "本地";
+        return `
+            <label class="ceo-risk-whitelist-item">
+                <input type="checkbox" class="ui-checkbox-input ceo-session-link-input"
+                    data-link-session-id="${esc(id)}" ${linked.has(id) ? "checked" : ""}>
+                <span class="ui-checkbox-box" aria-hidden="true"></span>
+                <span class="ceo-risk-tool-name">${esc(title)}</span>
+                <span class="meta-tag">${esc(family)}</span>
+            </label>
+        `;
+    }).join("");
+}
+
+async function openCeoSessionLinkDialog(sessionId) {
+    const id = String(sessionId || "").trim();
+    const backdrop = U.ceoSessionLinkBackdrop;
+    if (!id || !backdrop) return;
+    ceoSessionLinkState.sessionId = id;
+    ceoSessionLinkState.saving = false;
+    ceoSessionLinkState.linked = [];
+    if (U.ceoSessionLinkError) {
+        U.ceoSessionLinkError.hidden = true;
+        U.ceoSessionLinkError.textContent = "";
+    }
+    backdrop.hidden = false;
+    backdrop.classList.add("is-open");
+    if (U.ceoSessionLinkList) {
+        U.ceoSessionLinkList.innerHTML = '<div class="empty-state">加载关联列表…</div>';
+    }
+    try {
+        const payload = await ApiClient.getSessionLinks(id);
+        ceoSessionLinkState.linked = Array.isArray(payload?.linked) ? payload.linked : [];
+        renderCeoSessionLinkList();
+    } catch (error) {
+        if (U.ceoSessionLinkList) {
+            U.ceoSessionLinkList.innerHTML =
+                `<div class="empty-state error">加载失败：${esc(error?.message || "未知错误")}</div>`;
+        }
+    }
+    window.requestAnimationFrame(() => U.ceoSessionLinkCloseBtn?.focus?.());
+}
+
+function closeCeoSessionLinkDialog() {
+    const backdrop = U.ceoSessionLinkBackdrop;
+    if (!backdrop) return;
+    backdrop.hidden = true;
+    backdrop.classList.remove("is-open");
+    ceoSessionLinkState.sessionId = "";
+}
+
+function readCheckedSessionLinkIds() {
+    const host = U.ceoSessionLinkList;
+    if (!host?.querySelectorAll) return [];
+    return Array.from(host.querySelectorAll(".ceo-session-link-input"))
+        .filter((input) => input.checked)
+        .map((input) => String(input.getAttribute?.("data-link-session-id") || "").trim())
+        .filter(Boolean);
+}
+
+async function saveCeoSessionLinks() {
+    const id = ceoSessionLinkState.sessionId;
+    if (!id || ceoSessionLinkState.saving) return;
+    ceoSessionLinkState.saving = true;
+    const saveBtn = U.ceoSessionLinkSaveBtn;
+    if (saveBtn) saveBtn.disabled = true;
+    if (U.ceoSessionLinkError) {
+        U.ceoSessionLinkError.hidden = true;
+        U.ceoSessionLinkError.textContent = "";
+    }
+    try {
+        const payload = await ApiClient.putSessionLinks(id, readCheckedSessionLinkIds());
+        ceoSessionLinkState.linked = Array.isArray(payload?.linked) ? payload.linked : [];
+        closeCeoSessionLinkDialog();
+        showToast({
+            title: "会话关联已保存",
+            text: `当前可交流 ${ceoSessionLinkState.linked.length} 个会话。`,
+            kind: "success",
+            durationMs: 2400,
+        });
+    } catch (error) {
+        const data = error?.data;
+        const text = data && typeof data === "object" && data.reason
+            ? `${data.reason}${data.target ? `：${data.target}` : ""}`
+            : (error?.message || "未知错误");
+        if (U.ceoSessionLinkError) {
+            U.ceoSessionLinkError.textContent = `保存失败：${text}`;
+            U.ceoSessionLinkError.hidden = false;
+        }
+    } finally {
+        ceoSessionLinkState.saving = false;
+        if (saveBtn) saveBtn.disabled = false;
+    }
+}
+
 async function requestDeleteCeoSession(sessionId) {
     const current = (S.ceoSessions || []).find((item) => String(item?.session_id || "") === String(sessionId || "").trim());
     if (!current) return;
@@ -11562,12 +11685,26 @@ function bindCeoSessionsPanel() {
             void renameCeoSession(rename.dataset.sessionRename);
             return;
         }
+        const link = e.target.closest("[data-session-link]");
+        if (link) {
+            e.stopPropagation();
+            closeCeoSessionMenus();
+            void openCeoSessionLinkDialog(link.dataset.sessionLink);
+            return;
+        }
         const remove = e.target.closest("[data-session-delete]");
         if (remove) {
             e.stopPropagation();
             closeCeoSessionMenus();
             requestDeleteCeoSession(remove.dataset.sessionDelete);
         }
+    });
+    U.ceoSessionLinkSaveBtn?.addEventListener("click", () => void saveCeoSessionLinks());
+    U.ceoSessionLinkDialog?.addEventListener("click", (e) => {
+        if (e.target.closest("[data-modal-close]")) closeCeoSessionLinkDialog();
+    });
+    U.ceoSessionLinkBackdrop?.addEventListener("click", (e) => {
+        if (e.target === U.ceoSessionLinkBackdrop) closeCeoSessionLinkDialog();
     });
     U.ceoSessionList?.addEventListener("dragstart", (event) => beginCeoSessionCardDrag(event));
     U.ceoSessionList?.addEventListener("dragover", (event) => updateCeoSessionCardDropTarget(event));

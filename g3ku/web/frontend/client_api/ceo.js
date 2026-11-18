@@ -113,6 +113,16 @@
         });
     },
 
+    async getSessionLinks(sessionId) {
+        return this._request("GET", `/api/ceo/sessions/${encodeURIComponent(sessionId)}/links`);
+    },
+
+    async putSessionLinks(sessionId, links = []) {
+        return this._request("PUT", `/api/ceo/sessions/${encodeURIComponent(sessionId)}/links`, {
+            body: { links: Array.isArray(links) ? links : [] },
+        });
+    },
+
     async getCeoSessionDeleteCheck(sessionId) {
         // 预检要扫该会话名下的任务记录，会话删除的耗时同一量级；默认 10 秒会掐在
         // 成功前一刻。与批量预检（bulk check）用同一个预算。

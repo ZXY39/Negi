@@ -1729,6 +1729,23 @@
                 </section>
             </div>
 
+            <div id="ceo-session-link-backdrop" class="confirm-backdrop" hidden>
+                <section id="ceo-session-link-dialog" class="confirm-dialog ceo-risk-whitelist-dialog" role="dialog"
+                    aria-modal="true" aria-labelledby="ceo-session-link-dialog-title" tabindex="-1">
+                    <div class="confirm-header">
+                        <h2 id="ceo-session-link-dialog-title">关联其他会话</h2>
+                    </div>
+                    <p class="ceo-risk-whitelist-hint">保存后双方会话可互发消息（模型面用短别名寻址）；关联变化只随下一轮通知，不唤醒会话。</p>
+                    <div id="ceo-session-link-list" class="ceo-risk-whitelist-list" aria-live="polite"></div>
+                    <p id="ceo-session-link-error" class="ceo-risk-whitelist-hint" hidden></p>
+                    <div class="confirm-actions">
+                        <button id="ceo-session-link-save-btn" class="toolbar-btn success" type="button">保存</button>
+                        <button id="ceo-session-link-close-btn" class="toolbar-btn ghost" type="button"
+                            data-modal-close>关闭</button>
+                    </div>
+                </section>
+            </div>
+
             <div id="ceo-risk-tools-backdrop" class="confirm-backdrop" hidden>
                 <section id="ceo-risk-tools-dialog" class="confirm-dialog ceo-risk-whitelist-dialog" role="dialog"
                     aria-modal="true" aria-labelledby="ceo-risk-tools-dialog-title" tabindex="-1">
