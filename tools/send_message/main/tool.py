@@ -38,7 +38,7 @@ class _FrontdoorSendMessageHandler(Tool):
             errors.append('content must not be empty')
         return errors
 
-    async def execute(self, to: Any = None, content: str = '', ref: str = '', **kwargs: Any) -> str:
+    async def execute(self, to: Any = None, content: str = '', ref: str = '', reply_to: str = '', **kwargs: Any) -> str:
         runtime = _runtime_payload(kwargs)
         session_id = str(runtime.get('session_key') or runtime.get('session_id') or 'web:shared').strip()
         await self._service.startup()
@@ -47,6 +47,7 @@ class _FrontdoorSendMessageHandler(Tool):
             to=to,
             content=str(content or '').strip(),
             ref=str(ref or '').strip(),
+            reply_to=str(reply_to or '').strip(),
         )
         return json.dumps(result, ensure_ascii=False, sort_keys=True)
 

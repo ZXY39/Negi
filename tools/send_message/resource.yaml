@@ -2,7 +2,7 @@ schema_version: 1
 kind: tool
 display_name: "发送节点消息"
 name: send_message
-description: Send a message to a task's root node or to execution nodes in this session's tasks; under-acceptance targets queue without waking.
+description: Send a message to task nodes in this session's tasks, or to linked peer sessions by alias; one-to-many via a list.
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''
@@ -26,7 +26,7 @@ parameters:
       type: [string, array]
       items:
         type: string
-      description: Task id (delivers to that task's root node) or execution node id, or a list of either. `task:` / `node:` prefixes and stray spaces are accepted.
+      description: Task id (delivers to that task's root node), execution node id, peer session alias (like s2) or session:<alias|key>, or a list of them. `task:` / `node:` / `session:` prefixes and stray spaces are accepted.
       minLength: 1
     content:
       type: string
@@ -35,6 +35,9 @@ parameters:
     ref:
       type: string
       description: Optional pointer to a large artifact; keep content a summary then.
+    reply_to:
+      type: string
+      description: Optional message_id of an incoming peer-session message you are answering; continues its chain. Session targets only.
   required: [to, content]
 governance:
   display_name: Send Message

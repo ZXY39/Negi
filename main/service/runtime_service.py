@@ -221,6 +221,7 @@ from main.runtime.node_wake import (
 )
 from main.runtime.node_watchdog import NodeWatchdog
 from main.runtime.react_loop import ReActToolLoop
+from main.runtime.session_links import SESSION_MESSAGE_HOP_CAP
 from main.runtime.task_actor_service import TaskActorService
 from main.runtime.tool_pressure_monitor import WorkerPressureMonitor
 from main.runtime.wait_graph import NODE_WAIT_TARGETS_KEY
@@ -6991,12 +6992,15 @@ class MainRuntimeService:
         to: Any,
         content: str,
         ref: str = '',
+        reply_to: str = '',
     ) -> dict[str, Any]:
-        """Frontdoor → nodes in this session's tasks, or any task by task id.
+        """Frontdoor → nodes in this session's tasks, any task by task id, or linked peer sessions.
 
-        ``to`` accepts a task id, a node id, or a list of either. A task id lands
-        on that task's root node; a bare id resolves as a node first, then as a
-        task. The two namespaces are not shared, so explicit prefixes win.
+        ``to`` accepts a task id, a node id, a peer session alias (``s2``) or
+        ``session:<alias|key>``, or a list of them. A task id lands on that task's
+        root node; a bare id resolves as a node first, then a task, then a session
+        alias. The namespaces are not shared, so explicit prefixes win.
+        ``reply_to`` continues a peer-session chain (session targets only).
         """
         normalized_session = str(session_id or '').strip()
         body = str(content or '').strip()
@@ -7015,13 +7019,15 @@ class MainRuntimeService:
                     target=target,
                     content=body,
                     ref=ref,
+                    reply_to=str(reply_to or '').strip(),
                 )
             )
         legal_targets: list[str] = []
         legal_truncated = False
         if any(
             str(item.get('reason') or '').strip()
-            in {'target_not_in_task', 'target_list_unparsed', 'not_session_task'}
+            in {'target_not_in_task', 'target_list_unparsed', 'not_session_task',
+                'session_not_linked', 'session_missing'}
             for item in results
         ):
             legal_targets, legal_truncated = self._frontdoor_legal_targets(normalized_session)
@@ -7039,6 +7045,7 @@ class MainRuntimeService:
         target: str,
         content: str,
         ref: str,
+        reply_to: str = '',
     ) -> dict[str, Any]:
         namespace, value = split_address_target(target)
         if namespace == 'task':
@@ -7055,6 +7062,11 @@ class MainRuntimeService:
             return await self._deliver_frontdoor_node_target(
                 session_id=session_id, target=target, node=node, content=content, ref=ref
             )
+        if namespace == 'session':
+            return await self._deliver_frontdoor_session_target(
+                session_id=session_id, target=target, value=value,
+                content=content, ref=ref, reply_to=reply_to,
+            )
         if namespace:
             return self._frontdoor_target_rejection(target, unresolved_target_reason(target))
 
@@ -7068,7 +7080,132 @@ class MainRuntimeService:
             return await self._deliver_frontdoor_task_target(
                 target=target, task=task, content=content, ref=ref
             )
+        if value and self.store.resolve_session_alias(value):
+            return await self._deliver_frontdoor_session_target(
+                session_id=session_id, target=target, value=value,
+                content=content, ref=ref, reply_to=reply_to,
+            )
+        lowered = value.lower()
+        if lowered.startswith('s') and lowered[1:].isdigit():
+            return self._frontdoor_target_rejection(target, 'session_missing')
         return self._frontdoor_target_rejection(target, unresolved_target_reason(target))
+
+    async def _deliver_frontdoor_session_target(
+        self,
+        *,
+        session_id: str,
+        target: str,
+        value: str,
+        content: str,
+        ref: str,
+        reply_to: str,
+    ) -> dict[str, Any]:
+        key = self.store.resolve_session_alias(value)
+        if not key:
+            # Explicit canonical keys are accepted too; the roster only shows aliases.
+            if value.startswith(('web:', 'ext:')):
+                key = value
+            else:
+                return self._frontdoor_target_rejection(target, 'session_missing')
+        return await self.deliver_session_message(
+            session_id=session_id,
+            target_session_key=key,
+            target_token=target,
+            content=content,
+            ref=ref,
+            reply_to=reply_to,
+        )
+
+    async def deliver_session_message(
+        self,
+        *,
+        session_id: str,
+        target_session_key: str,
+        target_token: str,
+        content: str,
+        ref: str = '',
+        reply_to: str = '',
+    ) -> dict[str, Any]:
+        """会话 → 会话点对点信箱（持久、运行时签名）。
+
+        ACL 就是关联边：删除会话会清边，所以无边即不可达（`session_not_linked`）。
+        链信息运行时盖章：reply_to 命中发送者信箱里的一条来信才继承 chain/hop，
+        模型传不了伪造的 hop。到顶（SESSION_MESSAGE_HOP_CAP）的来信落箱不唤醒，
+        由扫描器侧闸执行；回执先告诉发送者这一档。
+        """
+        sender = str(session_id or '').strip()
+        recipient = str(target_session_key or '').strip()
+        body = str(content or '').strip()
+        if not sender or not recipient:
+            return {'target': target_token, 'status': 'rejected', 'reason': 'session_missing'}
+        if not body:
+            return {'target': target_token, 'status': 'rejected', 'reason': 'content_required'}
+        if not self.store.has_session_link(sender, recipient):
+            return {'target': target_token, 'status': 'rejected', 'reason': 'session_not_linked'}
+        chain_id = ''
+        hop = 0
+        reply_token = str(reply_to or '').strip()
+        if reply_token:
+            prior = self.store.get_frontdoor_session_message(reply_token)
+            if prior is None or prior.session_id != sender:
+                return {'target': target_token, 'status': 'rejected', 'reason': 'reply_to_unknown'}
+            chain_id = str(prior.payload.get('chain_id') or prior.message_id)
+            hop = int(prior.payload.get('hop') or 0) + 1
+        fingerprint = message_fingerprint(
+            kind='session_message', source_node_id=sender, message=body, ref=ref
+        )
+        existing = self.store.find_unconsumed_session_message_by_fingerprint(
+            recipient, sender, fingerprint
+        )
+        if existing is not None:
+            return {
+                'target': target_token,
+                'target_kind': 'session',
+                'resolved_session_key': recipient,
+                'status': 'deduplicated',
+                'message_id': existing.message_id,
+                'wake': 'session_inbox',
+                'reason': '',
+            }
+        message_id = new_command_id().replace('command:', 'smsg:', 1)
+        if not chain_id:
+            chain_id = message_id
+        wakeable = hop < SESSION_MESSAGE_HOP_CAP
+        record = FrontdoorSessionMessage(
+            message_id=message_id,
+            session_id=recipient,
+            source_session_key=sender,
+            content=body,
+            ref=str(ref or '').strip(),
+            status='pending',
+            created_at=now_iso(),
+            payload={
+                'fingerprint': fingerprint,
+                'chain_id': chain_id,
+                'hop': hop,
+                'reply_to': reply_token,
+                'source_alias': self.get_session_alias(sender),
+                'wakeable': wakeable,
+            },
+        )
+        self.store.upsert_frontdoor_session_message(record)
+        receipt: dict[str, Any] = {
+            'target': target_token,
+            'target_kind': 'session',
+            'resolved_session_key': recipient,
+            'status': 'delivered',
+            'message_id': message_id,
+            'wake': 'session_inbox' if wakeable else 'session_inbox_no_wake',
+            'chain_id': chain_id,
+            'hop': hop,
+            'reason': '',
+        }
+        if not wakeable:
+            receipt['notice'] = (
+                'Reply chain reached its wake budget; this message landed without waking the '
+                'recipient. Send a new message without reply_to to continue explicitly.'
+            )
+        return receipt
 
     async def _deliver_frontdoor_node_target(
         self,
@@ -7164,6 +7301,15 @@ class MainRuntimeService:
                     break
                 seen.add(normalized)
                 targets.append(normalized)
+        for peer in self.store.list_session_links(session_id):
+            alias = str(self.store.get_session_alias(peer) or '').strip()
+            if not alias or alias in seen:
+                continue
+            if len(targets) >= limit:
+                truncated = True
+                break
+            seen.add(alias)
+            targets.append(alias)
         return targets, truncated
 
     def list_frontdoor_node_messages(self, session_id: str) -> list[FrontdoorNodeMessage]:
