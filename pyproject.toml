@@ -1,6 +1,6 @@
 [project]
 name = "g3ku-ai"
-version = "1.11.24"
+version = "1.11.25"
 description = "A lightweight personal AI assistant framework"
 requires-python = ">=3.12"
 license = {text = "MIT"}
