@@ -76,6 +76,7 @@ from g3ku.shells.web import (
     get_web_heartbeat_service,
     is_no_ceo_model_configured_error,
 )
+from main.governance.operator_actions import AUDIENCE_FRONTDOOR, session_scope
 from main.protocol import build_envelope, now_iso
 
 router = APIRouter()
@@ -525,6 +526,13 @@ async def _delete_single_ceo_session(
     heartbeat = get_web_heartbeat_service(agent)
     if heartbeat is not None:
         heartbeat.clear_session(session_key)
+    # 会话真删（本地删除 / 渠道注销）清关系边与点对点信箱；渠道「清历史留身份」
+    # 保留关系（同一 peer 入站即回来）。别名行永不删除，注销后同键回归拿回原别名。
+    if not is_channel_session or forgets_identity:
+        try:
+            service.purge_session_link_data(session_key)
+        except Exception:
+            logger.exception('failed to purge session link data for {}', session_key)
     deleted_task_count = 0
     if delete_task_records:
         deleted_task_count = await service.delete_task_records_for_session(session_key)
@@ -804,6 +812,104 @@ async def create_ceo_session(payload: dict | None = Body(default=None)):
         "channel_groups": catalog.get("channel_groups") or [],
         "active_session_id": session.key,
         "active_session_family": catalog.get("active_session_family") or "local",
+    }
+
+
+def _link_session_exists(session_manager, registry, key: str) -> bool:
+    if key.startswith('web:'):
+        return bool(session_manager.has_transcript(key))
+    if key.startswith('ext:'):
+        return registry is not None and registry.get_by_session_key(key) is not None
+    return False
+
+
+def _require_link_session(session_manager, session_id: str) -> str:
+    key = str(session_id or '').strip()
+    registry = get_external_session_registry(session_manager.workspace)
+    if not _link_session_exists(session_manager, registry, key):
+        raise HTTPException(status_code=404, detail='session_missing')
+    return key
+
+
+def _link_target_problem(session_manager, registry, target: str, *, self_key: str) -> str:
+    """Rejection reason for one link target; '' when linkable.
+
+    隐藏 ext 条目不候选（操作员已隐藏的先尊重）；internal: 隐藏会话与 china:
+    归档（无投递路径）不可关联；自身不成边。
+    """
+    key = str(target or '').strip()
+    if not key or key == self_key:
+        return 'session_not_linkable'
+    if key.startswith('web:'):
+        return '' if session_manager.has_transcript(key) else 'session_missing'
+    if key.startswith('ext:'):
+        entry = registry.get_by_session_key(key) if registry is not None else None
+        if entry is None:
+            return 'session_missing'
+        if bool(getattr(entry, 'hidden', False)):
+            return 'session_not_linkable'
+        return ''
+    return 'session_not_linkable'
+
+
+def _record_link_operator_action(service, session_key: str, result: dict) -> None:
+    try:
+        added = [service.get_session_alias(k) or k for k in result.get('added') or []]
+        removed = [service.get_session_alias(k) or k for k in result.get('removed') or []]
+        parts = []
+        if added:
+            parts.append('linked session(s) ' + ', '.join(added) + ' to this session')
+        if removed:
+            parts.append('unlinked session(s) ' + ', '.join(removed) + ' from this session')
+        if not parts:
+            return
+        service.record_operator_action(
+            category='session_links',
+            audience=AUDIENCE_FRONTDOOR,
+            scope=session_scope(session_key),
+            action=' and '.join(parts),
+        )
+    except Exception as exc:  # noqa: BLE001 - 通知不是写操作的前置条件
+        logger.warning('session link operator action record failed: {}', exc)
+
+
+@router.get("/ceo/sessions/{session_id}/links")
+async def get_ceo_session_links(session_id: str):
+    agent, session_manager, _runtime_manager, _state_store = _sessions()
+    key = _require_link_session(session_manager, session_id)
+    service = await _task_service(agent)
+    return {"ok": True, "session_id": key, "linked": service.list_session_links(key)}
+
+
+@router.put("/ceo/sessions/{session_id}/links")
+async def put_ceo_session_links(session_id: str, payload: dict = Body(...)):
+    agent, session_manager, runtime_manager, state_store = _sessions()
+    key = _require_link_session(session_manager, session_id)
+    raw_links = (payload or {}).get('links')
+    if not isinstance(raw_links, list):
+        raise HTTPException(status_code=400, detail='links_list_required')
+    registry = get_external_session_registry(session_manager.workspace)
+    targets: list[str] = []
+    for item in raw_links:
+        target = str(item or '').strip()
+        if not target:
+            continue
+        problem = _link_target_problem(session_manager, registry, target, self_key=key)
+        if problem:
+            raise HTTPException(status_code=400, detail={'reason': problem, 'target': target})
+        if target not in targets:
+            targets.append(target)
+    service = await _task_service(agent)
+    result = service.replace_session_links(key, targets)
+    if result['added'] or result['removed']:
+        _record_link_operator_action(service, key, result)
+        _publish_ceo_sessions_snapshot(agent, session_manager, runtime_manager, state_store)
+    return {
+        "ok": True,
+        "session_id": key,
+        "linked": service.list_session_links(key),
+        "added": result['added'],
+        "removed": result['removed'],
     }
 
 
