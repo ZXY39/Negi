@@ -63,6 +63,14 @@ MEDIA_FAILURE_NOTICE_HINT = (
     'session\'s workspace can be sent; copy the file there and reference it again.'
 )
 _MEDIA_FAILURE_MAX_ROWS = 8
+# 会话关联名册的变化出口：头部钉住块只在压缩边界重印，两次重印之间的增删
+# 由这两节宣布一次（不唤醒会话，随下一跳装配并入）。模型面只出现短别名。
+SESSION_LINKS_ADDED_HEADING = 'Sessions newly reachable in this session:'
+SESSION_LINKS_REMOVED_HEADING = 'Sessions no longer reachable in this session:'
+SESSION_LINKS_NOTICE_HINT = (
+    'Use send_message(to="<alias>", content=...) to talk to a reachable session. '
+    'The pinned roster may lag until the next compaction; this notice is the current set.'
+)
 # 头部快照与当刻值的差量：两次重印之间唯一的变化出口。
 RUNTIME_CONTRACT_UPDATE_HEADING = '### Runtime contract updates (supersede the pinned snapshot)'
 # 渲染顺序固定：同一组变化每次投出来的字节稳定，便于模型与测试比对。
@@ -131,6 +139,8 @@ def deliver_for_scope(
     qq_identity_provider: Any = None,
     contract_sections: dict[str, Any] | None = None,
     covered_contract_sections: dict[str, Any] | None = None,
+    session_links_provider: Any = None,
+    covered_session_aliases: list[Any] | None = None,
 ) -> tuple[dict[str, Any] | None, list[dict[str, str]]]:
     """每跳唯一动作：记账 + 有未宣布的就投一条。
 
@@ -261,6 +271,43 @@ def deliver_for_scope(
             if next_nickname:
                 qq_identity_cursor = {'nickname': next_nickname[:128], 'initialized': True}
     context['qq_identity_cursor'] = qq_identity_cursor
+    session_links_added: list[dict[str, str]] = []
+    session_links_removed: list[str] = []
+    link_cursor = dict(context.get('session_link_cursor') or {})
+    if callable(session_links_provider):
+        try:
+            link_delta = session_links_provider(
+                known_aliases=list(link_cursor.get('known') or []),
+                initialized=bool(link_cursor.get('initialized')),
+            )
+        except Exception:
+            link_delta = None
+        if isinstance(link_delta, dict):
+            live_entries = [
+                dict(item)
+                for item in list(link_delta.get('reachable') or [])
+                if isinstance(item, dict) and str(item.get('alias') or '').strip()
+            ]
+            titles = {
+                str(item['alias']).strip(): str(item.get('title') or '').strip()
+                for item in live_entries
+            }
+            live_aliases = sorted(titles)
+            if link_cursor.get('initialized'):
+                known = {str(alias or '').strip() for alias in list(link_cursor.get('known') or [])}
+            else:
+                # 首跳以头部名册为初值：钉住时已说过的名字不重播。
+                known = {
+                    str(alias or '').strip()
+                    for alias in list(covered_session_aliases or [])
+                    if str(alias or '').strip()
+                }
+            session_links_added = [
+                {'alias': alias, 'title': titles.get(alias, '')}
+                for alias in sorted(set(live_aliases) - known)
+            ]
+            session_links_removed = sorted(known - set(live_aliases))
+            context['session_link_cursor'] = {'known': live_aliases, 'initialized': True}
     operator_actions: list[dict[str, Any]] = []
     operator_cursor = dict(context.get('operator_action_cursor') or {})
     operator_cursor_id = max(int(operator_cursor.get('id') or 0), 0)
@@ -317,6 +364,8 @@ def deliver_for_scope(
         and not operator_actions
         and not sticker_failures
         and not media_failures
+        and not session_links_added
+        and not session_links_removed
     ):
         set_notice_context(scope_key, context)
         return None, []
@@ -332,6 +381,8 @@ def deliver_for_scope(
         operator_actions=operator_actions,
         sticker_failures=sticker_failures,
         media_failures=media_failures,
+        session_links_added=session_links_added,
+        session_links_removed=session_links_removed,
     )
     if message is not None:
         if pending:
@@ -493,6 +544,11 @@ def normalize_skill_roster_notice_context(payload: Any) -> dict[str, Any]:
         if isinstance(source.get('qq_identity_cursor'), dict)
         else {}
     )
+    session_link_source = (
+        source.get('session_link_cursor')
+        if isinstance(source.get('session_link_cursor'), dict)
+        else {}
+    )
 
     def _cursor_value(name: str, cursor: dict[str, Any] | None = None) -> int:
         active = cursor if isinstance(cursor, dict) else cursor_source
@@ -539,6 +595,16 @@ def normalize_skill_roster_notice_context(payload: Any) -> dict[str, Any]:
         'skill_visibility_cursor': normalize_skill_visibility_cursor(
             source.get('skill_visibility_cursor')
         ),
+        'session_link_cursor': {
+            'known': sorted(
+                {
+                    str(alias or '').strip()
+                    for alias in list(session_link_source.get('known') or [])
+                    if str(alias or '').strip()
+                }
+            ),
+            'initialized': bool(session_link_source.get('initialized')),
+        },
         'contract_sections': normalize_contract_sections(source.get('contract_sections')),
     }
 
@@ -570,6 +636,7 @@ def context_has_state(payload: Any) -> bool:
             'mode_cursor',
             'operator_action_cursor',
             'qq_identity_cursor',
+            'session_link_cursor',
         )
     )
 
@@ -968,6 +1035,8 @@ def reset_contract_sections_for_compaction(scope_key: str, *, now: str = '') -> 
         'known_live_skill_ids': [],
         'known_readable_skill_ids': [],
     }
+    # 头部名册已按当刻关联重印；游标归零，下一跳以新头部重新播种，不重播。
+    context['session_link_cursor'] = {'known': [], 'initialized': False}
     _ = now
     set_notice_context(scope_key, context)
     return context
@@ -1053,6 +1122,39 @@ def render_operator_action_lines(actions: list[Any] | None) -> list[str]:
     return [OPERATOR_ACTIONS_HEADING, *rows]
 
 
+def render_session_link_lines(
+    added: list[Any] | None,
+    *,
+    removed: list[Any] | None = None,
+) -> list[str]:
+    """会话关联变化一节：新增带标题，移除只列别名；末句给寻址入口。"""
+    added_rows: list[str] = []
+    for item in list(added or []):
+        if isinstance(item, dict):
+            alias = str(item.get('alias') or '').strip()
+            title = ' '.join(str(item.get('title') or '').split()).replace('|', '｜')
+        else:
+            alias = str(item or '').strip()
+            title = ''
+        if not alias:
+            continue
+        added_rows.append(f'- {alias}' + (f' | {title}' if title else ''))
+    removed_rows = [
+        f'- {str(alias or "").strip()}'
+        for alias in list(removed or [])
+        if str(alias or '').strip()
+    ]
+    if not added_rows and not removed_rows:
+        return []
+    lines: list[str] = []
+    if added_rows:
+        lines.extend([SESSION_LINKS_ADDED_HEADING, *added_rows])
+    if removed_rows:
+        lines.extend([SESSION_LINKS_REMOVED_HEADING, *removed_rows])
+    lines.append(SESSION_LINKS_NOTICE_HINT)
+    return lines
+
+
 def build_notice_message(
     records: list[Any],
     *,
@@ -1066,6 +1168,8 @@ def build_notice_message(
     operator_actions: list[Any] | None = None,
     sticker_failures: list[Any] | None = None,
     media_failures: list[Any] | None = None,
+    session_links_added: list[Any] | None = None,
+    session_links_removed: list[Any] | None = None,
 ) -> dict[str, Any] | None:
     """一次性投递那条消息：role=user，落在本轮历史末尾。
 
@@ -1096,6 +1200,11 @@ def build_notice_message(
     removal_lines = render_removal_lines(removed_skills)
     if removal_lines:
         sections.append('\n'.join(removal_lines))
+    session_link_lines = render_session_link_lines(
+        session_links_added, removed=session_links_removed
+    )
+    if session_link_lines:
+        sections.append('\n'.join(session_link_lines))
     memory_section = str(memory_text or '').strip()
     if memory_section:
         sections.append('\n'.join([MEMORY_NOTICE_HEADING, memory_section]))
@@ -1187,6 +1296,8 @@ def strip_skill_roster_notice_echo(text: Any) -> str:
         or SKILL_ROSTER_CARRIED_HEADING in tail
         or STICKER_FAILURE_NOTICE_HEADING in tail
         or MEDIA_FAILURE_NOTICE_HEADING in tail
+        or SESSION_LINKS_ADDED_HEADING in tail
+        or SESSION_LINKS_REMOVED_HEADING in tail
     ):
         return normalized.strip()
     return normalized[:marker_index].strip()
@@ -1262,6 +1373,9 @@ __all__ = [
     'RUNTIME_NOTICE_MARKER',
     'MEDIA_FAILURE_NOTICE_HEADING',
     'MEDIA_FAILURE_NOTICE_HINT',
+    'SESSION_LINKS_ADDED_HEADING',
+    'SESSION_LINKS_REMOVED_HEADING',
+    'SESSION_LINKS_NOTICE_HINT',
     'STICKER_FAILURE_NOTICE_HEADING',
     'STICKER_FAILURE_NOTICE_HINT',
     'build_carried_message',
@@ -1281,6 +1395,7 @@ __all__ = [
     'normalize_contract_sections',
     'normalize_media_failures',
     'normalize_notice_record',
+    'render_session_link_lines',
     'normalize_skill_roster_notice_context',
     'normalize_skill_visibility_cursor',
     'normalize_sticker_failures',

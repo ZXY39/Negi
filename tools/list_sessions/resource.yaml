@@ -1,0 +1,37 @@
+schema_version: 1
+kind: tool
+display_name: "可交流会话列表"
+name: list_sessions
+description: List peer sessions this session can message (alias | title | trust); read-only, the overflow entry of the pinned reachable-session roster.
+tool_result_delivery_contract: runtime_managed
+source:
+  type: ''
+  url: ''
+  ref: ''
+current_version:
+  summary: Read-only reachable-session listing for the session-links lane.
+  compare_rule: Treat manifest, main/, parameter contract, or returned payload changes as version-relevant.
+  source_of_truth: resource.yaml and main/tool.py define the effective behavior.
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties: {}
+  required: []
+governance:
+  display_name: List Sessions
+  description: List reachable peer sessions (read-only).
+  risk_level: low
+  destructive: false
+  allowed_roles:
+    - ceo
+exposure:
+  agent: true
+  main_runtime: false
+toolskill:
+  enabled: true

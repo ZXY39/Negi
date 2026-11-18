@@ -34,6 +34,7 @@ from g3ku.runtime.frontdoor.tool_contract import (
     frontdoor_long_term_task_roster,
     frontdoor_owned_process_roster,
     frontdoor_pinned_contract_text,
+    frontdoor_reachable_session_roster,
     merge_pinned_contract_into_system_text,
     pinned_contract_is_carried_by_head,
     pinned_skill_ids_for,
@@ -1842,6 +1843,9 @@ class CeoMessageBuilder:
             ),
             owned_processes_provider=lambda: frontdoor_owned_process_roster(
                 session_key=session_key
+            ),
+            reachable_sessions_provider=lambda: frontdoor_reachable_session_roster(
+                self._loop, session_key=session_key
             ),
         )
         if not pinned_text:

@@ -231,12 +231,14 @@ from .tool_contract import (
     frontdoor_long_term_task_roster,
     frontdoor_owned_process_roster,
     frontdoor_pinned_contract_text,
+    frontdoor_reachable_session_roster,
     is_frontdoor_tool_contract_echo_text,
     normalize_frontdoor_candidate_tool_items,
     pinned_contract_is_carried_by_head,
     pinned_contract_section_values,
     pinned_contract_state,
     pinned_skill_ids_for,
+    reachable_session_aliases_from_text,
     session_mode_state_text,
     session_mode_switch_text,
     skill_roster_epoch_for,
@@ -4160,6 +4162,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             owned_processes_provider=lambda: frontdoor_owned_process_roster(
                 session_key=normalized_session_key
             ),
+            reachable_sessions_provider=lambda: frontdoor_reachable_session_roster(
+                self._loop, session_key=normalized_session_key
+            ),
         )
         if not pinned_text:
             return "", []
@@ -4605,6 +4610,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 session_key=normalized_session_key,
             ),
             covered_contract_sections=covered_sections,
+            session_links_provider=lambda **kwargs: {
+                'reachable': frontdoor_reachable_session_roster(
+                    self._loop, session_key=normalized_session_key
+                )
+            },
+            covered_session_aliases=reachable_session_aliases_from_text(
+                pinned_contract_state(None, session_key=normalized_session_key)[0]
+            ),
         )
         if message is None:
             return base_messages

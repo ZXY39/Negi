@@ -34,10 +34,11 @@ RUNTIME_APPENDIX_HEADINGS = (FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING,)
 # `load_skill_context` 的三态回执告知原因。
 FRONTDOOR_PINNED_CONTRACT_HEADING = '## Runtime Contract (pinned)'
 FRONTDOOR_PINNED_CONTRACT_KIND = 'frontdoor_runtime_pinned_contract'
+# v7: 头部新增「可交流的会话」名册块（会话关联的短别名清单，随重印边界冻结）。
 # v6: 头部新增「在跑的后台进程」清单块（按 session/节点冻结，随重印边界刷新）。
 # v5: 头部新增「在挂的长期任务」清单块（随重印边界冻结，不逐跳重画）。版本进重印判据，
 # 存量钉住块上线后重印一次；之后清单只在压缩边界跟着重印。
-PINNED_CONTRACT_RENDERER_VERSION = 'pinned-contract-v6'
+PINNED_CONTRACT_RENDERER_VERSION = 'pinned-contract-v7'
 PINNED_CONTRACT_SNAPSHOT_NOTE = (
     'snapshot_note: this block refreshes only at compaction; later runtime notices '
     'supersede changed values.'
@@ -546,6 +547,131 @@ def _owned_processes_from_provider(provider: Any) -> list[Any]:
         return []
 
 
+REACHABLE_SESSION_ROSTER_HEADING = '### 可交流的会话'
+REACHABLE_SESSION_ROSTER_MAX_LINES = 8
+REACHABLE_SESSION_ROSTER_TITLE_LIMIT = 60
+
+
+def _reachable_session_title(item: dict[str, Any]) -> str:
+    text = ' '.join(str(item.get('title') or '').split()).replace('|', '｜')
+    if len(text) <= REACHABLE_SESSION_ROSTER_TITLE_LIMIT:
+        return text
+    return text[: REACHABLE_SESSION_ROSTER_TITLE_LIMIT - 1] + '…'
+
+
+def render_reachable_session_roster(items: list[Any] | None) -> str:
+    """渲染「可交流的会话」小节；空清单返回空串（整节不出现）。
+
+    条目由 `frontdoor_reachable_session_roster` 给出：本会话关联边的对端，
+    每行 `短别名 | 标题`。模型寻址一律用别名（规范 key 长且易抄错）。
+    行数有界，余量指向 `list_sessions`。关联变化不重印头部，由
+    `[RUNTIME_NOTICE]` 的 session links 节纠正。
+    """
+    entries: list[tuple[str, str]] = []
+    for item in list(items or []):
+        if not isinstance(item, dict):
+            continue
+        alias = str(item.get('alias') or '').strip()
+        if not alias:
+            continue
+        entries.append((alias, _reachable_session_title(item)))
+    if not entries:
+        return ''
+    lines = [REACHABLE_SESSION_ROSTER_HEADING]
+    visible = entries[:REACHABLE_SESSION_ROSTER_MAX_LINES]
+    for alias, title in visible:
+        lines.append('- ' + (f'{alias} | {title}' if title else alias))
+    overflow = len(entries) - len(visible)
+    if overflow > 0:
+        lines.append(f'另有 {overflow} 条，用 list_sessions 查看')
+    return '\n'.join(lines)
+
+
+def reachable_session_aliases_from_text(pinned_text: Any) -> list[str]:
+    """头部名册节已覆盖的别名（delta 台账初值，首跳不重播已钉住的名字）。"""
+    aliases: list[str] = []
+    in_section = False
+    for line in str(pinned_text or '').splitlines():
+        stripped = line.strip()
+        if stripped == REACHABLE_SESSION_ROSTER_HEADING:
+            in_section = True
+            continue
+        if not in_section:
+            continue
+        if stripped.startswith('#'):
+            break
+        if stripped.startswith('- '):
+            alias = stripped[2:].split('|')[0].strip()
+            if alias:
+                aliases.append(alias)
+        elif stripped and not stripped.startswith('另有'):
+            break
+    return aliases
+
+
+def _session_title_for_roster(key: str) -> str:
+    try:
+        from g3ku.runtime.web_ceo_sessions import workspace_path
+        from g3ku.session.manager import SessionManager
+
+        session = SessionManager(workspace_path()).get_or_create(key)
+        metadata = getattr(session, 'metadata', None) or {}
+        title = str(metadata.get('title') or '').strip()
+        if title:
+            return title
+    except Exception:
+        pass
+    if key.startswith('ext:'):
+        try:
+            from g3ku.runtime.external_sessions import get_external_session_registry
+            from g3ku.runtime.web_ceo_sessions import workspace_path
+
+            entry = get_external_session_registry(workspace_path()).get_by_session_key(key)
+            if entry is not None:
+                return str(getattr(entry, 'title', '') or '').strip()
+        except Exception:
+            pass
+    return ''
+
+
+def frontdoor_reachable_session_roster(loop: Any, *, session_key: str | None) -> list[dict[str, Any]]:
+    """本会话可交流会话的取数口（关联边窄读 + 标题补全）。
+
+    取数失败一律返回空表：名册是观测块，读不出来就整节不渲染，不阻断会话。
+    只在重钉那一跳调用；标题读转录 metadata，ext 回退注册表标题。
+    """
+    key = str(session_key or '').strip()
+    if not key:
+        return []
+    service = getattr(loop, 'main_task_service', None)
+    getter = getattr(service, 'reachable_session_roster', None)
+    if not callable(getter):
+        return []
+    try:
+        items = getter(key)
+    except Exception:
+        return []
+    result: list[dict[str, Any]] = []
+    for item in list(items or []):
+        if not isinstance(item, dict):
+            continue
+        peer = str(item.get('session_key') or '').strip()
+        alias = str(item.get('alias') or '').strip()
+        if not peer or not alias:
+            continue
+        result.append({'session_key': peer, 'alias': alias, 'title': _session_title_for_roster(peer)})
+    return result
+
+
+def _reachable_sessions_from_provider(provider: Any) -> list[Any]:
+    if not callable(provider):
+        return []
+    try:
+        return list(provider() or [])
+    except Exception:
+        return []
+
+
 def render_pinned_contract_text(
     *,
     skill_items: list[Any] | None,
@@ -557,6 +683,7 @@ def render_pinned_contract_text(
     session_workspace_dir: str | None = None,
     long_term_tasks: list[Any] | None = None,
     owned_processes: list[Any] | None = None,
+    reachable_sessions: list[Any] | None = None,
 ) -> str:
     """渲染头部钉住块；`include_extras=True` 时即使名单为空也渲静态声明。
 
@@ -622,6 +749,9 @@ def render_pinned_contract_text(
     process_roster_text = render_owned_process_roster(owned_processes)
     if process_roster_text:
         lines.append(process_roster_text)
+    session_roster_text = render_reachable_session_roster(reachable_sessions)
+    if session_roster_text:
+        lines.append(session_roster_text)
     return '\n'.join(lines).strip()
 
 
@@ -753,6 +883,7 @@ def frontdoor_pinned_contract_text(
     tool_policy_signature: str = "",
     long_term_tasks_provider: Any = None,
     owned_processes_provider: Any = None,
+    reachable_sessions_provider: Any = None,
 ) -> str:
     """注入侧唯一取数口：命中已钉住的内容就复用原文，否则重钉一次并记下判据键。
 
@@ -820,6 +951,7 @@ def frontdoor_pinned_contract_text(
         session_workspace_dir=session_workspace_dir,
         long_term_tasks=_long_term_tasks_from_provider(long_term_tasks_provider),
         owned_processes=_owned_processes_from_provider(owned_processes_provider),
+        reachable_sessions=_reachable_sessions_from_provider(reachable_sessions_provider),
     )
     if not fresh:
         return ''
