@@ -25,6 +25,7 @@ RUNTIME_CONSOLE_LOG_FILE = RUNTIME_LOG_DIR / "console.log"
 RUNTIME_CONSOLE_LOG_MAX_BYTES = 50 * 1024 * 1024
 RUNTIME_CONSOLE_LOG_RETENTION_SECONDS = 7 * 24 * 3600
 PYTHON_PIN_FILE = PROJECT_ROOT / ".python-version"
+BOOTSTRAP_LOG_FILE = RUNTIME_LOG_DIR / "bootstrap.log"
 MIN_PYTHON = (3, 11)
 DEFAULT_WEB_PORT = 18790
 READY_WAIT_SECONDS = 180
@@ -56,12 +57,10 @@ def _run(command: list[str], *, cwd: Path) -> None:
     subprocess.run(command, cwd=str(cwd), check=True, **_no_window_flags())
 
 
-def _is_runnable_python(python_path: Path) -> bool:
-    if not python_path.exists():
-        return False
+def _argv_is_runnable_python(argv: list[str]) -> bool:
     try:
         completed = subprocess.run(
-            [str(python_path), "-c", "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)"],
+            [*argv, "-c", "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)"],
             cwd=str(PROJECT_ROOT),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -71,6 +70,12 @@ def _is_runnable_python(python_path: Path) -> bool:
     except OSError:
         return False
     return completed.returncode == 0
+
+
+def _is_runnable_python(python_path: Path) -> bool:
+    if not python_path.exists():
+        return False
+    return _argv_is_runnable_python([str(python_path)])
 
 
 def _reset_venv() -> None:
@@ -143,6 +148,71 @@ def _ensure_host_python_supported() -> None:
         raise SystemExit(
             f"[negi] Python {required}+ is required to bootstrap this project. Current interpreter: {current} ({sys.executable})"
         )
+
+
+def _running_inside_venv() -> bool:
+    try:
+        return Path(sys.executable).resolve().is_relative_to(VENV_DIR.resolve())
+    except (OSError, ValueError):
+        return False
+
+
+def _external_python_candidates() -> list[list[str]]:
+    """能跑本 bootstrap 的 venv 外解释器，按优先级；全部实测可运行才入选。"""
+    candidates: list[list[str]] = []
+    runtime_python = (
+        PROJECT_ROOT / ".runtime" / "negi-python" / ("python.exe" if os.name == "nt" else "bin/python3")
+    )
+    if _is_runnable_python(runtime_python):
+        candidates.append([str(runtime_python)])
+    if os.name == "nt" and shutil.which("py") and _argv_is_runnable_python(["py", "-3"]):
+        candidates.append(["py", "-3"])
+    try:
+        venv_root = VENV_DIR.resolve()
+    except (OSError, ValueError):
+        venv_root = VENV_DIR
+    for name in ("python3", "python"):
+        resolved = shutil.which(name)
+        if not resolved:
+            continue
+        try:
+            if Path(resolved).resolve().is_relative_to(venv_root):
+                continue
+        except (OSError, ValueError):
+            continue
+        if _argv_is_runnable_python([resolved]):
+            candidates.append([resolved])
+    return candidates
+
+
+def _delegate_env_repair(args: list[str]) -> int | None:
+    """venv 需要修复而本进程正跑在 venv 里时，把整条引导交给外部解释器。
+
+    uv sync 在 pin 错配时整环境替换 .venv；Windows 锁着运行中的 python.exe，
+    venv 内的 bootstrap 永远完不成替换（实测：venv 内 exit 2，venv 外成功）。
+    返回 None 表示不适用委托，调用方继续原流程。委托出去的解释器在 venv 外，
+    不会再次触发委托（无循环）。
+    """
+    if not _running_inside_venv():
+        return None
+    if _marker_matches_current() and _venv_has_runtime_deps():
+        return None
+    for candidate in _external_python_candidates():
+        print(f"[negi] environment needs repair; handing off to {' '.join(candidate)}", flush=True)
+        argv = [*candidate, str(Path(__file__).resolve()), *args]
+        if sys.stdout is None:
+            # pythonw（旧形状图标/自启）没有控制台可继承：修复输出落盘留证据。
+            RUNTIME_LOG_DIR.mkdir(parents=True, exist_ok=True)
+            with BOOTSTRAP_LOG_FILE.open("a", encoding="utf-8") as stream:
+                completed = subprocess.run(
+                    argv, cwd=str(PROJECT_ROOT), stdout=stream, stderr=subprocess.STDOUT,
+                    **_no_window_flags(),
+                )
+        else:
+            completed = subprocess.run(argv, cwd=str(PROJECT_ROOT), **_no_window_flags())
+        return int(completed.returncode or 0)
+    print("[negi] environment needs repair but no interpreter outside .venv was found; trying in place", flush=True)
+    return None
 
 
 def _ensure_venv() -> None:
@@ -822,6 +892,9 @@ def main(argv: list[str] | None = None) -> int:
         fingerprint = _write_installed_marker()
         print(f"[negi] recorded the installed environment ({fingerprint})", flush=True)
         return 0
+    delegated = _delegate_env_repair(early)
+    if delegated is not None:
+        return delegated
     _ensure_venv()
     _ensure_project_installed()
     args = list(argv if argv is not None else sys.argv[1:])

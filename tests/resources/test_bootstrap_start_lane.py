@@ -31,6 +31,8 @@ def _patch_env(monkeypatch, config=None):
     monkeypatch.setattr(negi_bootstrap, '_ensure_project_installed', lambda: None)
     monkeypatch.setattr(negi_bootstrap, '_rotate_runtime_console_log', lambda: None)
     monkeypatch.setattr(negi_bootstrap, '_load_bootstrap_config', lambda: dict(config or {}))
+    # 委托修复读的是真实 marker 与真实外部解释器；main() 的车道测试不测它，隔离掉。
+    monkeypatch.setattr(negi_bootstrap, '_delegate_env_repair', lambda args: None)
 
 
 def test_uv_probe_falls_back_to_the_installer_locations(monkeypatch, tmp_path) -> None:
@@ -320,6 +322,7 @@ def test_probe_children_are_quiet_and_the_command_handoff_is_not(monkeypatch) ->
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(negi_bootstrap.subprocess, 'run', _fake_run)
+    monkeypatch.setattr(negi_bootstrap, '_delegate_env_repair', lambda args: None)
     negi_bootstrap.main(['status'])
     assert 'creationflags' not in captured['kwargs']
 
