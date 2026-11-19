@@ -142,6 +142,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 网页刷新打不开（服务端一条 `GET /` 都没记下来，而 `/api/*` 仍照常 200）、日志刷 `WinError 10055`、模型调用频率同时塌下去 → `runtime-overview.md`「worker→web 事件回流车道」（回环连接攒满内核缓冲的取证与判读口径都在那里）
 - web 进程运行一段时间自己消失、`console.log` 尾部 `WinError 995 → InvalidStateError`、或想确认崩溃重生有没有发生 → `operations-and-maintenance.md`「web 进程消失 / console.log 尾部 WinError 995 → InvalidStateError」（三个日志锚点与审计栈判读）+「首选一键启动脚本」（`--supervise` 监督车道）
 - 升级后服务没回来、`update-apply-result.json` 卡在 `started`、或升级日志报 `No module named 'encodings'` / os error 448 → `operations-and-maintenance.md`「升级可靠性与受管设备兼容」（解释器预检、监督重拉与探活验证、健康解释器复用）
+- 通知区域没有 Negi 图标、托盘「退出」没反应、或服务停了图标还在 → `operations-and-maintenance.md`「首选一键启动脚本」的状态栏托盘条（fail-closed、探活自退、二次确认、为何不用 PowerShell NotifyIcon）
 - 节点失败但无系统报错、模型回复疑似被输出上限截断(无工具调用、顶格 output_tokens) → `web-and-admin.md`「Node Detail Error History」+ `config-and-models.md`「Model Request Parameter Defaults」
 - 任务树过大打不开（`Failed to open task: Request timeout`）、打开时长时间无树或「加载中(x/xx)」进度异常、从任务树返回任务大厅后长时间卡顿 → `web-and-admin.md`「Task Tree Chunked Load Contract」
 - `/api/tasks` 系列请求长时间挂起、任务大厅列表或 worker-status 数据迟迟不到、浏览器标签页唤醒/切回任务大厅后整个页面短暂失联 → `web-and-admin.md`「Web Event Loop Contract」
