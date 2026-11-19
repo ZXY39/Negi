@@ -10597,6 +10597,7 @@ const UPDATE_APPLY_OUTCOME_TEXT = {
     port_busy: "升级未完成：服务没退干净",
     port_unknown: "升级未完成：端口未知",
     not_this_service: "升级未完成：端口上没有本服务",
+    interpreter_unhealthy: "升级未完成：本机解释器起不了子进程，服务未动",
 };
 
 // 检查失败的每一档各说一句各的话：只有"没通/超时"配得上"稍后再试"。结构性失败

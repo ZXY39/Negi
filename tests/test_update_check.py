@@ -531,11 +531,14 @@ def test_relaunched_web_output_lands_in_the_app_log_not_the_apply_log(tmp_path: 
     monkeypatch.setattr(
         apply_mod.subprocess, "Popen", lambda cmd, **kwargs: handles.append(kwargs["stdout"])
     )
+    monkeypatch.setattr(apply_mod, "_probe_self", lambda port: True)
 
     apply_mod._relaunch_web(18790)
     assert Path(handles[-1].name).name == "console.log"
     anchors = apply_log.read_text(encoding="utf-8")
-    assert "relaunch web -m g3ku web --port 18790" in anchors, "执行体自己的锚点仍要留在这里"
+    assert "relaunch web via bootstrap:" in anchors, "执行体自己的锚点仍要留在这里"
+    assert "--supervise" in anchors and "--port 18790" in anchors
+    assert "relaunch verified" in anchors
 
     apply_mod.spawn_runner("v1.0.2", port=18790)
     assert Path(handles[-1].name).name == "update-apply.log", "执行体自身的输出不许跑偏"
