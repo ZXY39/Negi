@@ -498,3 +498,57 @@ async def test_drain_strips_unresolvable_sticker_marker_without_image(
         assert "attachments" not in event
     finally:
         await _stop(task)
+
+
+class _BrokenBus:
+    """consume 反复抛错——bus 损坏或被跨循环复用时的形态。"""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def consume_outbound(self):
+        self.calls += 1
+        raise RuntimeError("outbound queue bound to a different event loop")
+
+
+class _FlakyBus(MessageBus):
+    def __init__(self, fail_times: int) -> None:
+        super().__init__()
+        self._fail_times = fail_times
+        self.calls = 0
+
+    async def consume_outbound(self):
+        self.calls += 1
+        if self.calls <= self._fail_times:
+            raise RuntimeError("transient bus fault")
+        return await super().consume_outbound()
+
+
+@pytest.mark.asyncio
+async def test_drain_backs_off_when_bus_keeps_raising() -> None:
+    bus = _BrokenBus()
+    task = _start_outbound_drain(bus)
+    try:
+        # 无退避时 0.5s 会刷成千上万次 consume；退避后首发失败即睡 1s，窗口内至多一两次。
+        await asyncio.sleep(0.5)
+        assert 1 <= bus.calls <= 2, f"drain tight-looped: {bus.calls} consume calls in 0.5s"
+        assert not task.done(), "backoff must keep the drain alive, not crash it"
+    finally:
+        await _stop(task)
+
+
+@pytest.mark.asyncio
+async def test_drain_recovers_after_transient_bus_fault(ext_registry) -> None:
+    entry, _ = ext_registry.resolve_or_create(bridge_id="qq", external_key="qq:dm:1")
+    bus = _FlakyBus(fail_times=1)
+    task = _start_outbound_drain(bus)
+    try:
+        await bus.publish_outbound(
+            OutboundMessage(channel="ext", chat_id=entry.session_key, content="after fault")
+        )
+        hub = get_session_event_hub(entry.session_key)
+        await _wait_until(lambda: hub.last_seq >= 1, timeout=5.0)
+        assert hub.replay(0)[0]["text"] == "after fault"
+        assert not task.done()
+    finally:
+        await _stop(task)

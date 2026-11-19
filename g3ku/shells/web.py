@@ -544,6 +544,7 @@ def _start_outbound_drain(bus: MessageBus) -> asyncio.Task:
 
     async def _drain_outbound() -> None:
         pending: OutboundMessage | None = None
+        failure_delay = 0.0
         while True:
             try:
                 if pending is None:
@@ -554,6 +555,7 @@ def _start_outbound_drain(bus: MessageBus) -> asyncio.Task:
                 if pending.channel == EXTERNAL_OUTBOUND_CHANNEL:
                     await _route_external_outbound(pending)
                     pending = None
+                    failure_delay = 0.0
                     continue
                 logger.warning(
                     "outbound drain skipped non-external message channel={} chat_id={}",
@@ -561,6 +563,7 @@ def _start_outbound_drain(bus: MessageBus) -> asyncio.Task:
                     pending.chat_id,
                 )
                 pending = None
+                failure_delay = 0.0
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -571,6 +574,10 @@ def _start_outbound_drain(bus: MessageBus) -> asyncio.Task:
                     exc,
                 )
                 pending = None
+                # bus 损坏或被跨循环复用时 consume 会反复抛错；无退避就是烧 CPU、
+                # 刷日志的紧循环。封顶指数退避把错误率结构性限死，成功处理一条即复位。
+                failure_delay = min(30.0, max(1.0, failure_delay * 2))
+                await asyncio.sleep(failure_delay)
 
     return asyncio.create_task(_drain_outbound())
 
