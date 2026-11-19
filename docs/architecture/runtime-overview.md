@@ -290,6 +290,7 @@ chat 调用有两类边界：**单次（单轮）provider 请求的响应时间�
 - 已经出现可见流式文本的发送不做透明重试/回退（一个可见气泡不得由多个 provider/model attempt 拼接）。
 - 链位顺序还受**尺寸筛**约束（`chat(required_context_window_tokens=…)`）：调用方把本轮请求体的大小交给发送层——节点跳传压缩后的预检估算，前门传它 `frontdoor_token_preflight_diagnostics` 里的 `estimated_total_tokens`——声明窗口小于它的成员在发送前先按**这颗成员自己的声明窗口**补压一次（压缩器由节点/前门注入；预检的 0.8× 提前量只负责链首的提前压，压缩尺子合同见 `context-and-cache-troubleshooting.md`「节点侧排查要点」）。压不下来或没有压缩器时该成员按"本次请求重试耗尽"跳过：写一行 WARN（成员、声明窗口、要求窗口、chunk 号、provider 原话）并前进到下一个成员；**不保留"全试完后回头强发最宽一颗"的第二轮**。全链没有成员能装下时 `chat()` 返回结构化 `NoModelFitsWindow` 错误，正文带 `required` / `widest_declared` / 每个被跳过成员的原因与 chunk 号；前门把该错误直接报出，节点落预检拒发暂停/心跳并带同一组字段。声明窗口填大、provider 仍拒收或静默裁输出时不做真实上限探测或补偿：错误按 provider 原文上抛；节点侧把 provider 原文与本发请求事实拼成事实卡并在暂停时上交，不判定 400 的成因（见 `main-task-runtime.md`「节点信箱与唤醒（现行）」与 `context-and-cache-troubleshooting.md`「节点 400 不一定是 payload 畸形」）。窗口读 provider target 的 `model_parameters.context_window_tokens`，与压缩尺子同一本；读不到（0）一律不拦，判不出来时不改行为。不传（0）就是原链序，压缩 helper、派生审查等没有体量读数的车道保持原行为。组车道这道筛本来在准入层（同一个数、同一个 `RouteCandidateFilters`），这里补的是 direct 链与前门这两条没有准入的路。
 - **真实走过的链位随回包交出**（`LLMResponse.attempted_model_chain`，只有 `g3ku/providers/fallback.py` 这条链式包装车道填）：每前进到一个新链位记一次（含解析不出 provider target 的那一位），回包带按序去重后的这份账，末位就是答下这一发的那颗，**长度 > 1 即这一发跨模型降级过**。抛错的链耗尽路径不填：那条路上整条链都走过，配置链本身已经是答案。消费方是记忆车道，它把这份账按批次累计进终态台账（见「Memory Runtime State」）——只有配置整条链的读数分不出"链首就答上了"和"走到第四位才答上"。节点/会话车道的同一件事由 `LLMResponse.attempts` 与重试状态里的 `attempted_model_keys` 承担，两套读数形状不同、不互换。
+- **provider 客户端生命周期**：`LLMProvider.aclose()` 是实例级传输资源的释放契约，默认 no-op（无状态 provider 不持有连接）。`OpenAIChatProvider` 每实例持有一个 `AsyncOpenAI`（内含 httpx 连接池），`aclose()` 关闭它；`FallbackProvider` 在每个链位的 try/finally 里关闭该链位构造过的全部 target（含换 key 重建的），成功返回、抛错、换模型、链刷新重启都经过这道关闭。anthropic/responses 车道每请求 `async with httpx.AsyncClient(...)` 即关，不持有实例级池。这条契约的存在理由：泄漏的连接池留在已销毁的临时循环上，GC 在任意线程走 `__del__` 收尾，正是「Windows IOCP 事件循环硬化」审计要抓的跨线程套接字操作面；超时取消的流也由 aclose 确定性收掉，不留给 GC。
 
 维护判断上要记住：
 
@@ -340,6 +341,15 @@ worker 进程（任务执行侧）把任务态变化推给 web 进程（浏览�
 - **超时是被同一个卡住的循环判的，所以放宽超时不是修法**：census 的引用者标签把这些孤儿 transport 一律点成 `method<_loop_reading>`（32/32），而池一条都不认账——看起来像"握手被取消留下的半条连接"。把 connect 一档抬到 5 s 的改动（`db724884`）因此被自己的计数当场否掉——`open_connection` 在握手完成前被取消时不会关 transport（Windows proactor），于是每次 connect 超时留下一条两端都 ESTABLISHED、服务端永远不会记 access 行的连接。那次改动被自己的计数当场否掉：`ConnectTimeout` 仍按 ~5 次/分发生（35 次/7 分钟），与抬档前同一量级——循环停到 6 s 量级时 5 s 的预算只是换个更晚的时刻输，还让排空口多等 3.5 s；四档超时于是继续一起用调用方给的值（单条 1.5 s / 批量 2.0 s）。对端也量过：同窗口 web 进程 25 s 只取到 94 个样本，而 worker 同一窗口 1382 个，接受侧不忙。要动的是循环本身（见本文「运行时里的状态与持久化」的读侧契约几条）。判据：`entry_callback_error_total` 与 `entry_loopback_established` 的增速应当一起趋零，只降一个说明归因还缺一半。
 
 排障入口：`perf_samples` 的 `entry_loopback_established` / `entry_loopback_pool_total` / `entry_loopback_pool_leased` / `entry_callback_error_total` / `entry_event_delivery_dropped_total` / `entry_event_queue_depth` / `entry_event_dropped_total` / `entry_event_single_fallback_total`；日志锚点 `loopback connection census`、`internal callback delivery errors`、`task event callback delivery dropped`。分"循环卡了"与"池满了"：把 `entry_callback_error_total` 的跳变拍与同拍的 `tool_pressure_event_loop_lag_ms`、`entry_loopback_pool_total` / `entry_loopback_pool_leased` 对齐看——实盘的 ConnectTimeout 全部落在 lag 达到秒级的同一拍上，而池同时只有 1 条且 `leased=1`；只比 `entry_loopback_established` 会把这种形状读成 socket 漏（那条的警戒线是 2 000）。现场取证用 `Get-NetTCPConnection -State Established -RemotePort <web端口>`（`netstat` 的文本 grep 在分钟尺度上会被噪声盖住，实测会给出"已停止增长"的假结论），它带 `CreationTime`，可以和 access 行里的客户端端口 join 出"每条卡住的连接最后请求的是哪个路径"——**join 前必须先把 access 行截到当前这个 web 进程实例**：`.g3ku/logs/console.log` 一次覆盖里带着当天所有重启的记录，且 ephemeral 端口会被复用，跨实例 join 会把上一世进程的请求算到这一世的 socket 上。池榜与 socket 反查靠标记文件开：数据根放 `loop-census.on`，每 5 拍做一次 gc 全扫（持 GIL 一两秒），输出的 `lane.owners` 里挂起点会写成 `method<recv_into>` / `method<sendall>` 这样的**未完成 proactor 操作名**——等响应、请求体没写完、没连上三种形状修法不同，只报类型名分不出来。
+
+### 5.4 Windows IOCP 事件循环硬化（gh-149123 形态）
+
+Windows 的 ProactorEventLoop 有一个上游不修的竞态（CPython gh-149123，维护者按"应用层跨线程操作 asyncio 对象"关闭）：`Overlapped.getresult()` 释放 GIL 的窗口里，另一个线程完成/取消了同一个 future，`_poll` 恢复后 `set_exception` 抛 `InvalidStateError`，穿透 `run_forever` 炸掉整个进程。典型前置是 `WinError 995`（被中止的套接字 I/O 完成）。`g3ku/utils/iocp_guard.py` 的 `install_iocp_hardening()` 在 web 与 worker 两个进程入口（`g3ku/cli/commands.py`）各装一次，仅 Windows 生效、幂等，两层：
+
+- **poll 守卫**：`IocpProactor._poll` 抛出的 `InvalidStateError` 被接住并落一行 `IOCP completion race survived`，循环继续转。该 future 的等待方由置终态的一侧负责，守卫只保进程不死。
+- **跨线程审计**：`_OverlappedFuture` 的 `cancel` / `set_result` / `set_exception` 发生在非 loop 线程时落 `IOCP cross-thread future mutation` WARNING，带肇事线程名与调用栈（按栈去重，进程内上限 100 条）。loop 不在跑（`_thread_id` 为空）时无从判起、跳过。审计只覆盖这三个终态方法；经由其他 asyncio 对象的跨线程变更不在覆盖面内，守卫仍保进程不死。
+
+判读口径：审计零记录 = 跨线程变更面已消除；守卫接住而审计为零 = 竞态来自审计覆盖不到的路径，按守卫日志取证分析。`G3KU_IOCP_GUARD=0` 同时关掉两层，仅供 A/B 对照。安装成功的锚点是 `IOCP hardening installed`。消除竞态面的两条本体修复：记忆工作线程的单一常驻循环（见「Memory Runtime State」）与 provider 客户端的确定性关闭（见「Chat provider 超时与重试边界」）。
 
 
 
@@ -590,6 +600,7 @@ main/ 侧所有持久化写在磁盘满（ENOSPC / SQLITE_FULL）条件下的行
 - `is_compressed` 只改变投影的渲染形态：决定这一行在投影里显示 `minimal_memory` 还是 `memory_body`，两者在库里各自独立保存，压缩动作不写 `memory_body`。**回暖只有操作员能做**（`negi memory uncompress <id>`、`POST /memory/current/uncompress`、管理页那颗「回暖」），运行时自己永不清这个标志——自动回弹等于把刚做出的容量决策撤销，会在触发线上来回抖。回暖往常驻块里**加**字符，所以它走同一道镜像校验：顶到 `document_max_chars` 就整笔回滚（回到本轮开始时的行集合，不是回到零），返回体带 `resident_chars_after` 与触发线/硬顶三个读数。
 - 写侧因此有一条配对约束：`minimal_memory` 的字数**不得超过该行的 `content`**（等长合法，更长当场打回，`adds` 与 `rewrites` 两处都判、rewrite 判的是这一对**新**值）。它是"降级只会让常驻变短"这个不变量的唯一维护者；等长档放过的是存量 60/90 行 `minimal == body`（旧写回事故压平的残留，正文已不存在），取严格"必须更短"会把三分之二的库存判成非法形状。提示词（`main/prompts/memory_agent.md`）与运行时校验各写一处，同一个判据两个载体。`minimal_memory` 还必须是**一行**：参数门口就按字段名报 `minimal_memory must be one line`（打回文案点名字段是有意的——写成"正文"会让模型去改 `content`，摘要照旧非法），漏网的换行在规范化那步同样按字段名打回，永远不留到渲染期才炸。
 - 队列消费跨进程单活：每次 `run_due_batch_once()` 必须先拿 workspace 级 memory-worker 文件锁；拿不到锁的进程保持队列不动并报告 `worker_lease_unavailable`。`request_id` 是持久幂等键：处理批次前会丢弃 `memory/ops.jsonl` 中已出现过 `request_id` 的队列行。该集合在进程内按台账文件的 `(size, mtime_ns)` 缓存——台账的每次写（终态落行、7 天剪枝、管理员放弃）都重写整个文件，这两个值必变，所以别的进程的写入同样让下一次读失效；缓存只是把"每次节拍全量读+解析台账"换成"台账动过才读"（实盘 20 行就 1.69 MB，每行连批次正文一起存），幂等判据本身不变。
+- 记忆工作线程整个生命周期骑**一个常驻事件循环**（`run_memory_worker_loop` 用 `asyncio.Runner` 跨批复用同一个循环，线程退出时才关一次，关前完成 asyncgen/executor 收尾）。每秒 `asyncio.run()` 建/毁一个 ProactorEventLoop 的形态会在本线程取消缓存套接字 future、关 IOCP 句柄，与主循环并发即「Windows IOCP 事件循环硬化」描述的跨线程竞态面。批次异常跳过当轮 sweep 的语义不变；`close()` 置 stop 事件 + join 2s 的停机合同不变。
 
 ### 队列状态机与失败停车语义
 

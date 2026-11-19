@@ -2,17 +2,37 @@
 setlocal
 set "SCRIPT_DIR=%~dp0"
 set "BOOTSTRAP=%SCRIPT_DIR%negi_bootstrap.py"
-set "PY=%SCRIPT_DIR%.venv\Scripts\python.exe"
-if not exist "%PY%" set "PY=py -3"
+set "VENV_PYTHON=%SCRIPT_DIR%.venv\Scripts\python.exe"
 
 if not exist "%BOOTSTRAP%" (
   echo [negi] Missing bootstrap script: %BOOTSTRAP%
   exit /b 1
 )
 
-rem Deliberately no PowerShell here: a .ps1 can be refused before it runs (measured: an
-rem unsigned script with a low-integrity label is rejected even under RemoteSigned), and
-rem this entry must still boot. Defaults come first so an operator-supplied -Port /
-rem -BindHost in %* wins; negi_bootstrap.py translates the switch names (one table).
-"%PY%" "%BOOTSTRAP%" web -BindHost 127.0.0.1 -Port 18790 %*
+rem Same probe as negi.cmd: existence is not enough - a venv whose base interpreter
+rem moved still has python.exe on disk but dies before running any code.
+if exist "%VENV_PYTHON%" (
+  "%VENV_PYTHON%" -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)" >nul 2>nul
+  if not errorlevel 1 goto run_venv_python
+)
+
+where py >nul 2>nul
+if %ERRORLEVEL%==0 goto run_py_launcher
+
+where python >nul 2>nul
+if %ERRORLEVEL%==0 goto run_python_path
+
+echo [negi] Python not found. Install Python or create a local .venv first.
+exit /b 1
+
+:run_venv_python
+"%VENV_PYTHON%" "%BOOTSTRAP%" web --supervise %*
+exit /b %ERRORLEVEL%
+
+:run_py_launcher
+py -3 "%BOOTSTRAP%" web --supervise %*
+exit /b %ERRORLEVEL%
+
+:run_python_path
+python "%BOOTSTRAP%" web --supervise %*
 exit /b %ERRORLEVEL%

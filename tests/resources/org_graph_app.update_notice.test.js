@@ -429,6 +429,12 @@ test("升级终态不回落成\"正在重启\"：失败占行、成功让回版�
     // 执行体刚起来：只说执行中，不谎报完成
     assert.equal(api.updateApplyOutcomeText({ ...base, last_apply: { outcome: "started", detail: "port=18790" } }), "升级执行中");
 
+    // 解释器预检不过：服务从未退出，文案要说清"服务未动"
+    assert.equal(
+        api.updateApplyOutcomeText({ ...base, last_apply: { outcome: "interpreter_unhealthy" } }),
+        "升级未完成：本机解释器起不了子进程，服务未动"
+    );
+
     // 未知终态兜底：宁可露出原码，也不要显示成"已是最新"
     assert.equal(api.updateApplyOutcomeText({ ...base, last_apply: { outcome: "weird_code" } }), "升级未完成：weird_code");
 });
@@ -711,6 +717,18 @@ test("手动安装是一颗真的外链，开在弹窗之外", () => {
         html.indexOf('id="update-release-apply-btn"') < at,
         "它写在「更新并重启」旁边，不是另起一处",
     );
+});
+
+test("手动安装与按钮文字共用一条轴线，字号小一档也不被行盒顶高", () => {
+    // 实盘读数：`<a>` 继承 body 的 1.6 行高，19.2px 行盒把 12px 的字抬到墨迹中心
+    // 545.0，而旁边 13px 按钮文字在 547.5——高 2.5px，看着像没对齐。行高交回字体、
+    // 自身按按钮同一套机制（撑满动作行 + 居中盒）排队后，两处墨迹中心 547.5 / 548.0。
+    const css = fs.readFileSync("g3ku/web/frontend/org_graph.css", "utf8");
+    const rule = css.match(/\.update-release-manual\s*\{([^}]*)\}/);
+    assert.ok(rule, "org_graph.css 缺了 .update-release-manual 规则");
+    assert.match(rule[1], /display:\s*inline-flex/);
+    assert.match(rule[1], /align-items:\s*center/);
+    assert.match(rule[1], /line-height:\s*normal/);
 });
 
 test("换车道读到的版本仍点亮，但 title 留下为什么换了车道", () => {

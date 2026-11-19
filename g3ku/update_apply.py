@@ -39,6 +39,8 @@ STARTUP_GRACE_SECONDS = 3.0
 # apply 单飞闸门：`started` 记录在这么多秒内视为上一次还在跑，拒掉第二个执行体。
 # 上限取"最慢一次升级"的量级（下载 + uv sync 实测到 2 分钟级），留足余量。
 APPLY_IN_FLIGHT_SECONDS = 600.0
+# 重拉后的探活验证预算：bootstrap 要等端口静默、可能还要 uv sync，之后才轮到服务监听。
+RELAUNCH_VERIFY_SECONDS = 90.0
 
 # 执行体自己的起点，用于把"已等多少秒"写进阶段记录；0 = 还没进 run()。
 _RUN_STARTED_MONOTONIC = 0.0
@@ -66,8 +68,9 @@ def _record(
     `apply` 端点在踢起执行体那一刻只能回 `restarting: true`；之后执行体无论停在
     哪一步，前端都看不见（实盘两次都是"正在重启"挂在那里，真相在日志里 2 秒就
     结束了）。终态码：started / ok / upgrade_failed / preflight_failed / exit_refused /
-    port_busy / port_unknown / not_this_service。`preflight_failed` 是停机前预检（冲突 /
-    uv 可得性）不过，服务从未退出。
+    port_busy / port_unknown / not_this_service / interpreter_unhealthy。`preflight_failed`
+    是停机前预检（冲突 / uv 可得性）不过，`interpreter_unhealthy` 是 sys.executable
+    生不出子解释器，两者服务都从未退出。
 
     中间阶段一律带 `outcome="started"` 再配一个 `stage`：单飞闸门判的就是
     `outcome == "started"`，把阶段写成新终态会让用户在升级途中再踢一次执行体。
@@ -162,6 +165,21 @@ def _probe_self(port: int) -> bool:
     except Exception:
         return False
     return isinstance(payload, dict) and payload.get("ok") is True and isinstance(payload.get("item"), dict)
+
+
+def _interpreter_healthy() -> bool:
+    # runner 与重拉起的 web 都骑 sys.executable；先证明它生得出孩子，
+    # 再请求活服务退出（实盘：基解释器损坏时 runner 派生即死，服务被白白停掉）。
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", "import encodings, sys; print(sys.prefix)"],
+            capture_output=True,
+            timeout=30,
+            **_no_window_flags(),
+        )
+        return completed.returncode == 0
+    except Exception:
+        return False
 
 
 def _port_busy(port: int) -> bool:
@@ -494,15 +512,22 @@ def _spawn_detached(*args: str, sink_path: Path | None = None) -> None:
                 pass
 
 
-def _relaunch_web(port: int | None = None) -> None:
-    """Bring the service back on the port it was serving, so a device that moved
-    off the default port does not come back somewhere the browser is not looking.
+def _relaunch_web(port: int) -> None:
+    """Bring the service back under supervision on the port it was serving.
+
+    经 bootstrap 而不是裸 `-m g3ku web`：回收残留、等端口静默、日志轮转与
+    --supervise 重生都只在 bootstrap 车道上存在。
     """
-    args = ["-m", "g3ku", "web"]
-    if port:
-        args += ["--port", str(int(port))]
-    _log(f"relaunch web {' '.join(args)}")
+    args = [str(PROJECT_ROOT / "negi_bootstrap.py"), "web", "--supervise", "--port", str(int(port))]
+    _log(f"relaunch web via bootstrap: {' '.join(args)}")
     _spawn_detached(*args, sink_path=WEB_LOG_FILE)
+    deadline = time.monotonic() + RELAUNCH_VERIFY_SECONDS
+    while time.monotonic() < deadline:
+        if _probe_self(port):
+            _log("relaunch verified: bootstrap endpoint answering")
+            return
+        time.sleep(2.0)
+    _log("relaunch unverified: no bootstrap answer within grace; check the web log")
 
 
 def apply_in_flight(window_seconds: float = APPLY_IN_FLIGHT_SECONDS) -> dict[str, Any] | None:
@@ -563,6 +588,12 @@ def run(ref: str, *, port: int | None = None, pause_running_work: bool = True) -
         _log(f"apply aborted: no Negi bootstrap endpoint answering on port {resolved}")
         _record("not_this_service", ref, f"port {resolved}")
         return 5
+    # 解释器预检放在预检与停机之前：它坏了连 preflight 的子进程都跑不动，
+    # 更不该让活服务退出（服务从未停止是本档位的合同）。
+    if not _interpreter_healthy():
+        _log("apply aborted: sys.executable cannot start a child interpreter; leaving the running service alone")
+        _record("interpreter_unhealthy", ref, f"port={resolved}", stage="interpreter_unhealthy")
+        return 6
     time.sleep(STARTUP_GRACE_SECONDS)
     _stage(ref, "preflight", "停机前检查本地改动冲突与 uv")
     ok, detail, paths = _preflight(ref)

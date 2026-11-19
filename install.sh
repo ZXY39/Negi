@@ -759,15 +759,11 @@ if [ -z "\${G3KU_HOME:-}" ]; then
   echo "[negi] Negi install root is unknown. Set G3KU_HOME to the Negi folder, or run install.sh again." >&2
   exit 1
 fi
-NEGI_PYTHON="\$G3KU_HOME/.venv/bin/python"
-if [ ! -x "\$NEGI_PYTHON" ]; then
-  NEGI_PYTHON="\$G3KU_HOME/.venv/Scripts/python.exe"
-fi
-if [ ! -x "\$NEGI_PYTHON" ]; then
-  echo "[negi] no interpreter under \$G3KU_HOME/.venv. Run install.sh again to rebuild the environment." >&2
+if [ ! -f "\$G3KU_HOME/negi.sh" ]; then
+  echo "[negi] \$G3KU_HOME/negi.sh is missing. Run install.sh again to restore the entry scripts." >&2
   exit 1
 fi
-exec "\$NEGI_PYTHON" "\$G3KU_HOME/negi_bootstrap.py" "\$@"
+exec /bin/sh "\$G3KU_HOME/negi.sh" "\$@"
 EOF
   chmod +x "$BIN_DIR/negi"
   printf 'G3KU_HOME=%s\n' "$DIR" >"$STATE_DIR/install-root.env"

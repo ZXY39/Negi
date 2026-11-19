@@ -648,6 +648,26 @@ function Invoke-UvCapture {
     return @{ Code = $code }
 }
 
+function Test-ProjectPythonHealthy {
+    param([string]$Root, [string]$Pin)
+    # A missing or broken .venv is a normal "no" (fresh install, or the base
+    # interpreter moved away): Get-VenvPython Write-Errors on absence and a
+    # damaged redirector can refuse to spawn, so neither may escape as a
+    # terminating error under $ErrorActionPreference = 'Stop'.
+    $saved = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $venvPython = Get-VenvPython -Root $Root 2>$null
+        if (-not $venvPython -or -not (Test-Path -LiteralPath $venvPython)) { return $false }
+        & $venvPython -c "import sys; raise SystemExit(0 if '.'.join(map(str, sys.version_info[:2])) == '$Pin' else 1)" 2>$null | Out-Null
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    } finally {
+        $ErrorActionPreference = $saved
+    }
+}
+
 function Install-ProjectPython {
     param([string]$uv, [string]$Pin)
     Write-Step "uv python install $Pin"
@@ -734,7 +754,13 @@ function Install-Environment {
         return
     }
     $pin = Get-ProjectPin -Root $Root
-    if ($pin) { Install-ProjectPython -uv $uv -Pin $pin }
+    if ($pin) {
+        if (Test-ProjectPythonHealthy -Root $Root -Pin $pin) {
+            Write-Step "reusing healthy Python $pin already in .venv (skipping uv python install)"
+        } else {
+            Install-ProjectPython -uv $uv -Pin $pin
+        }
+    }
     Push-Location -LiteralPath $Root
     try {
         Sync-ProjectEnvironment -uv $uv
@@ -848,12 +874,11 @@ function Install-EntryPoint {
 setlocal
 if not defined G3KU_HOME if exist "%~dp0negi-root.cmd" call "%~dp0negi-root.cmd"
 if not defined G3KU_HOME goto :noroot
-set "NEGI_PYTHON=%G3KU_HOME%\.venv\Scripts\python.exe"
-if not exist "%NEGI_PYTHON%" goto :nopython
-"%NEGI_PYTHON%" "%G3KU_HOME%\negi_bootstrap.py" %*
+if not exist "%G3KU_HOME%\negi.cmd" goto :nocmd
+call "%G3KU_HOME%\negi.cmd" %*
 exit /b %ERRORLEVEL%
-:nopython
-echo [negi] %NEGI_PYTHON% is missing. Run install.ps1 again to rebuild the environment.
+:nocmd
+echo [negi] %G3KU_HOME%\negi.cmd is missing. Run install.ps1 again to restore the entry scripts.
 exit /b 1
 :noroot
 echo [negi] Negi install root is unknown. Set G3KU_HOME to the Negi folder, or run install.ps1 again.
@@ -918,11 +943,9 @@ function Install-DesktopIcons {
         Write-Step 'shortcuts skipped (ConstrainedLanguage refuses COM); start Negi with the negi command or start-negi.cmd'
         return
     }
-    $pythonw = Join-Path $Root '.venv\Scripts\pythonw.exe'
-    if (-not (Test-Path $pythonw)) {
-        Write-Step "no pythonw.exe under $Root, skipping shortcuts"
-        return
-    }
+    $vbs = Join-Path $Root 'negi-start.vbs'
+    $wscript = Join-Path $env:SystemRoot 'System32\wscript.exe'
+    $useVbs = (Test-Path -LiteralPath $vbs) -and (Test-Path -LiteralPath $wscript)
     $targets = @()
     $desktop = [Environment]::GetFolderPath('Desktop')
     if ($desktop) { $targets += (Join-Path $desktop "$AppDisplayName.lnk") }
@@ -931,12 +954,17 @@ function Install-DesktopIcons {
     $shell = New-Object -ComObject WScript.Shell
     foreach ($target in $targets) {
         $link = $shell.CreateShortcut($target)
-        # pythonw allocates no console, so the icon starts Negi without the
-        # window flash a .cmd or -WindowStyle Hidden would still show. The icon
-        # opens the browser: the desktop shell stays available through
-        # `negi window`, but the default entry must not depend on WebView2.
-        $link.TargetPath = $pythonw
-        $link.Arguments = """$Root\negi_bootstrap.py"" start"
+        if ($useVbs) {
+            # wscript is a GUI host and the VBS runs negi.cmd with window style 0:
+            # no console flash, and the full venv->py->python fallback chain runs
+            # even when the venv interpreter itself is broken.
+            $link.TargetPath = $wscript
+            $link.Arguments = """$vbs"" start"
+        }
+        else {
+            $link.TargetPath = Join-Path $Root 'negi.cmd'
+            $link.Arguments = 'start'
+        }
         $link.WorkingDirectory = $Root
         $link.Description = 'Start Negi and open the browser'
         if ($IconPath) { $link.IconLocation = "$IconPath,0" }

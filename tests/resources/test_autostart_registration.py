@@ -2,8 +2,10 @@
 
 钉住三件事：
 
-* 命令形状 = ``negi_bootstrap.py start --no-browser``。走 start 是因为它先探端口，
-  登录时不会把正在工作的实例收割重启；带 --no-browser 是因为登录不该弹页签。
+* 命令形状 = 入口脚本托管 ``start --no-browser``（Windows wscript+negi-start.vbs，
+  POSIX /bin/sh negi.sh）。走 start 是因为它先探端口，登录时不会把正在工作的实例
+  收割重启；带 --no-browser 是因为登录不该弹页签。宿主不是 venv 解释器：venv 坏掉时
+  登记面仍要能跑到入口脚本的回落链。
 * 容器与没有登记面的机器报"不支持 + 原因"，绝不假装成功，也不在系统里留下半条登记。
 * 接口回的是重读一遍的登记事实，不是请求的那个值。
 """
@@ -18,7 +20,7 @@ from fastapi.testclient import TestClient
 import g3ku.deployment.autostart as autostart
 from main.api import bootstrap_rest
 
-COMMAND = [r"C:\Negi\.venv\Scripts\pythonw.exe", r"C:\Negi\negi_bootstrap.py", "start", "--no-browser"]
+COMMAND = [r"C:\Windows\System32\wscript.exe", r"C:\Negi\negi-start.vbs", "start", "--no-browser"]
 
 
 class _FakeKey:
@@ -69,7 +71,9 @@ class _FakeWinreg:
 def test_launcher_command_uses_the_start_lane_without_a_browser():
     argv = autostart.launcher_command(root=Path(r"C:\Negi"))
 
-    assert argv[1:] == [r"C:\Negi\negi_bootstrap.py", "start", "--no-browser"]
+    assert argv[-2:] == ["start", "--no-browser"]
+    # 宿主必须是入口脚本而不是 venv 解释器：venv 全死时登记面仍要能跑到回落链。
+    assert ".venv" not in argv[0]
 
 
 def test_windows_install_and_remove_the_run_value():
@@ -80,7 +84,7 @@ def test_windows_install_and_remove_the_run_value():
 
     assert backend.is_installed(COMMAND) is True
     # 路径带空格时注册表里必须整段加引号，否则登录时这条值起不来。
-    assert fake.values["Negi"].startswith('"C:\\Negi\\.venv\\Scripts\\pythonw.exe"')
+    assert fake.values["Negi"].startswith('"C:\\Windows\\System32\\wscript.exe"')
 
     backend.uninstall()
 

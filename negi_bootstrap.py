@@ -24,9 +24,14 @@ RUNTIME_LOG_DIR = PROJECT_ROOT / ".g3ku" / "logs"
 RUNTIME_CONSOLE_LOG_FILE = RUNTIME_LOG_DIR / "console.log"
 RUNTIME_CONSOLE_LOG_MAX_BYTES = 50 * 1024 * 1024
 RUNTIME_CONSOLE_LOG_RETENTION_SECONDS = 7 * 24 * 3600
+PYTHON_PIN_FILE = PROJECT_ROOT / ".python-version"
+BOOTSTRAP_LOG_FILE = RUNTIME_LOG_DIR / "bootstrap.log"
 MIN_PYTHON = (3, 11)
 DEFAULT_WEB_PORT = 18790
 READY_WAIT_SECONDS = 180
+SUPERVISE_MAX_RESPAWNS = 5
+SUPERVISE_WINDOW_SECONDS = 600.0
+SUPERVISE_BACKOFF_SECONDS = (1.0, 2.0, 5.0, 10.0, 30.0)
 RUNTIME_IMPORT_PROBES = (
     "fastapi",
     "aiosqlite",
@@ -55,12 +60,10 @@ def _run(command: list[str], *, cwd: Path) -> None:
     subprocess.run(command, cwd=str(cwd), check=True, **_no_window_flags())
 
 
-def _is_runnable_python(python_path: Path) -> bool:
-    if not python_path.exists():
-        return False
+def _argv_is_runnable_python(argv: list[str]) -> bool:
     try:
         completed = subprocess.run(
-            [str(python_path), "-c", "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)"],
+            [*argv, "-c", "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)"],
             cwd=str(PROJECT_ROOT),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -72,9 +75,23 @@ def _is_runnable_python(python_path: Path) -> bool:
     return completed.returncode == 0
 
 
+def _is_runnable_python(python_path: Path) -> bool:
+    if not python_path.exists():
+        return False
+    return _argv_is_runnable_python([str(python_path)])
+
+
 def _reset_venv() -> None:
     if VENV_DIR.exists():
         shutil.rmtree(VENV_DIR)
+
+
+def _read_python_pin() -> str | None:
+    try:
+        text = PYTHON_PIN_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return text or None
 
 
 def _pyproject_fingerprint() -> str:
@@ -136,12 +153,89 @@ def _ensure_host_python_supported() -> None:
         )
 
 
+def _running_inside_venv() -> bool:
+    try:
+        return Path(sys.executable).resolve().is_relative_to(VENV_DIR.resolve())
+    except (OSError, ValueError):
+        return False
+
+
+def _external_python_candidates() -> list[list[str]]:
+    """能跑本 bootstrap 的 venv 外解释器，按优先级；全部实测可运行才入选。"""
+    candidates: list[list[str]] = []
+    runtime_python = (
+        PROJECT_ROOT / ".runtime" / "negi-python" / ("python.exe" if os.name == "nt" else "bin/python3")
+    )
+    if _is_runnable_python(runtime_python):
+        candidates.append([str(runtime_python)])
+    if os.name == "nt" and shutil.which("py") and _argv_is_runnable_python(["py", "-3"]):
+        candidates.append(["py", "-3"])
+    try:
+        venv_root = VENV_DIR.resolve()
+    except (OSError, ValueError):
+        venv_root = VENV_DIR
+    for name in ("python3", "python"):
+        resolved = shutil.which(name)
+        if not resolved:
+            continue
+        try:
+            if Path(resolved).resolve().is_relative_to(venv_root):
+                continue
+        except (OSError, ValueError):
+            continue
+        if _argv_is_runnable_python([resolved]):
+            candidates.append([resolved])
+    return candidates
+
+
+def _delegate_env_repair(args: list[str]) -> int | None:
+    """venv 需要修复而本进程正跑在 venv 里时，把整条引导交给外部解释器。
+
+    uv sync 在 pin 错配时整环境替换 .venv；Windows 锁着运行中的 python.exe，
+    venv 内的 bootstrap 永远完不成替换（实测：venv 内 exit 2，venv 外成功）。
+    返回 None 表示不适用委托，调用方继续原流程。委托出去的解释器在 venv 外，
+    不会再次触发委托（无循环）。
+    """
+    if not _running_inside_venv():
+        return None
+    if _marker_matches_current() and _venv_has_runtime_deps():
+        return None
+    for candidate in _external_python_candidates():
+        print(f"[negi] environment needs repair; handing off to {' '.join(candidate)}", flush=True)
+        argv = [*candidate, str(Path(__file__).resolve()), *args]
+        if sys.stdout is None:
+            # pythonw（旧形状图标/自启）没有控制台可继承：修复输出落盘留证据。
+            RUNTIME_LOG_DIR.mkdir(parents=True, exist_ok=True)
+            with BOOTSTRAP_LOG_FILE.open("a", encoding="utf-8") as stream:
+                completed = subprocess.run(
+                    argv, cwd=str(PROJECT_ROOT), stdout=stream, stderr=subprocess.STDOUT,
+                    **_no_window_flags(),
+                )
+        else:
+            completed = subprocess.run(argv, cwd=str(PROJECT_ROOT), **_no_window_flags())
+        return int(completed.returncode or 0)
+    print("[negi] environment needs repair but no interpreter outside .venv was found; trying in place", flush=True)
+    return None
+
+
 def _ensure_venv() -> None:
     _ensure_host_python_supported()
     if _is_runnable_python(VENV_PYTHON):
         return
     if VENV_DIR.exists():
         print(f"[negi] Recreating stale virtualenv at {VENV_DIR}")
+        _reset_venv()
+    # 重建必须尊重 .python-version：裸 sys.executable 会造出与 pin 错配的 venv，
+    # 下一次 uv sync 就要整环境替换——而 Windows 锁着运行中的 python.exe，替换必失败。
+    uv = _uv_executable()
+    pin = _read_python_pin()
+    if uv is not None and pin:
+        try:
+            _run([uv, "venv", "--relocatable", "--python", pin, str(VENV_DIR)], cwd=PROJECT_ROOT)
+            if _is_runnable_python(VENV_PYTHON):
+                return
+        except subprocess.CalledProcessError:
+            print("[negi] uv venv failed; falling back to the host interpreter", flush=True)
         _reset_venv()
     _run([sys.executable, "-m", "venv", str(VENV_DIR)], cwd=PROJECT_ROOT)
 
@@ -602,6 +696,60 @@ def _wait_for_web_ready(child: object, port: int) -> bool:
     return False
 
 
+def _supervise_web_child(
+    child,
+    web_args,
+    *,
+    port,
+    hidden,
+    console_log_stream,
+    spawn=None,
+    wait_ready=None,
+    sleep=time.sleep,
+    clock=time.monotonic,
+):
+    """异常退出重生，干净退出（0）收工。
+
+    退出码 0 覆盖 UI 退出按钮、信号与 update-apply 交接——在那里重生会跟
+    操作员或升级 runner 打架。日志流所有权随监督走：_launch_web 的 finally
+    不再关它，监督收工时关。
+    """
+    if spawn is None:
+
+        def spawn():
+            return _spawn_web_runtime(web_args, hidden=hidden, console_log_stream=console_log_stream)
+
+    if wait_ready is None:
+        wait_ready = _wait_for_web_ready
+    crashes: list[float] = []
+    try:
+        while True:
+            code = int(child.wait() or 0)
+            if code == 0:
+                return 0
+            now = clock()
+            crashes = [t for t in crashes if now - t <= SUPERVISE_WINDOW_SECONDS]
+            if len(crashes) >= SUPERVISE_MAX_RESPAWNS:
+                print(
+                    f"[negi] web exited with code {code} {SUPERVISE_MAX_RESPAWNS} times within "
+                    f"{int(SUPERVISE_WINDOW_SECONDS)}s; supervision stops, check {RUNTIME_CONSOLE_LOG_FILE}",
+                    flush=True,
+                )
+                return code
+            delay = SUPERVISE_BACKOFF_SECONDS[min(len(crashes), len(SUPERVISE_BACKOFF_SECONDS) - 1)]
+            print(f"[negi] web exited with code {code}; respawning in {delay:.0f}s", flush=True)
+            sleep(delay)
+            crashes.append(clock())
+            child = spawn()
+            wait_ready(child, port)
+    finally:
+        if console_log_stream is not None:
+            try:
+                console_log_stream.close()
+            except Exception:
+                pass
+
+
 def _open_desktop_window(port: int) -> bool:
     """Hand the window to the desktop shell instead of a browser tab.
 
@@ -632,7 +780,7 @@ def _open_desktop_window(port: int) -> bool:
     return True
 
 
-def _launch_web(web_args: list[str], *, port: int, open_browser: bool, hidden: bool, open_window: bool = False) -> int:
+def _launch_web(web_args: list[str], *, port: int, open_browser: bool, hidden: bool, open_window: bool = False, supervise: bool = False) -> int:
     console_log_stream = _open_runtime_console_log_stream()
     if console_log_stream is not None:
         print(f"[negi] web runtime stdout/stderr appending to {RUNTIME_CONSOLE_LOG_FILE}", flush=True)
@@ -649,6 +797,17 @@ def _launch_web(web_args: list[str], *, port: int, open_browser: bool, hidden: b
             _open_desktop_window(port)
         elif open_browser:
             _open_browser(_web_url(port))
+        if supervise:
+            print("[negi] supervising the web runtime; abnormal exit respawns, clean exit stops", flush=True)
+            stream_for_supervisor = console_log_stream
+            console_log_stream = None  # 所有权移交监督循环，finally 不许再关
+            return _supervise_web_child(
+                child,
+                web_args,
+                port=port,
+                hidden=hidden,
+                console_log_stream=stream_for_supervisor,
+            )
         if hidden:
             # Nobody owns this console: the server keeps running after this
             # process exits, and stopping it is the web UI's exit button.
@@ -699,6 +858,7 @@ WEB_ENTRY_SWITCH_ALIASES: dict[str, str] = {
     "-promptlog": "--prompt-log",
     "-keepworker": "--keep-worker",
     "-reload": "--reload",
+    "-supervise": "--supervise",
 }
 WEB_ENTRY_HELP_SWITCHES = frozenset({"-h", "-help", "--help"})
 
@@ -710,6 +870,7 @@ WEB_ENTRY_USAGE = """Usage: start-negi [-BindHost HOST] [-Port PORT] [-OpenBrows
   -PromptLog     Enable G3KU_PROMPT_TRACE=1
   -Reload        Web auto-reload (managed worker auto-start is disabled)
   -KeepWorker    Leave the managed worker running when the web server exits
+  --supervise    Stay resident and respawn the web runtime on abnormal exit
 """
 
 
@@ -758,10 +919,13 @@ def _print_reap_lines(lines: list[str]) -> None:
 
 def _run_start(extra_args: list[str]) -> int:
     # `--hidden` is still consumed so a shortcut written by an earlier install
-    # keeps working, but start always detaches: a server the operator launched by
-    # typing `negi` must outlive the window it was started from. Watching the
-    # process itself is what `negi web` is for. `--window` swaps the browser tab
-    # for the desktop shell; the server lane is identical either way.
+    # keeps working. The web child always detaches (CREATE_NEW_PROCESS_GROUP): a
+    # server the operator launched by typing `negi` must outlive the window it was
+    # started from. By default start also supervises that child (respawn on abnormal
+    # exit), so the bootstrap stays resident as the supervisor; closing the launching
+    # window stops the supervisor but the detached child keeps running. `--no-supervise`
+    # opts back out to fire-and-forget. `--window` swaps the browser tab for the
+    # desktop shell; the server lane is identical either way.
     # `--no-browser` is what the autostart登记 uses: a logon must not end in a
     # browser tab, and the port probe below is why logon cannot reap a live server.
     web_args, _ = _take_hidden_flag(list(extra_args))
@@ -770,6 +934,11 @@ def _run_start(extra_args: list[str]) -> int:
     # 三态都要区分——没写＝开浏览器（今天的默认），写了 --no-browser＝不开。
     want_browser = "--no-browser" not in web_args
     web_args = [part for part in web_args if part != "--no-browser"]
+    # start 默认带监督：图标/自启/手敲起的进程崩溃都要能重生。web 子进程仍是脱离态
+    # （CREATE_NEW_PROCESS_GROUP），关掉启动窗口杀的是监督进程、服务照跑；--no-supervise
+    # 显式退回无监督后台化。三态判据与 --no-browser 同形（_take_bool_flag 分不开没写与写了 --no-x）。
+    want_supervise = "--no-supervise" not in web_args
+    web_args = [part for part in web_args if part not in ("--supervise", "--no-supervise")]
     port = _web_bind_port(_port_override(web_args))
     if _probe_web_ready(port):
         url = _web_url(port)
@@ -786,6 +955,7 @@ def _run_start(extra_args: list[str]) -> int:
         open_browser=want_browser and not want_window,
         hidden=True,
         open_window=want_window,
+        supervise=want_supervise,
     )
 
 
@@ -801,6 +971,9 @@ def main(argv: list[str] | None = None) -> int:
         fingerprint = _write_installed_marker()
         print(f"[negi] recorded the installed environment ({fingerprint})", flush=True)
         return 0
+    delegated = _delegate_env_repair(early)
+    if delegated is not None:
+        return delegated
     _ensure_venv()
     _ensure_project_installed()
     args = list(argv if argv is not None else sys.argv[1:])
@@ -817,6 +990,7 @@ def main(argv: list[str] | None = None) -> int:
             # 跑不起来（未签名的 .ps1 被拒），`negi.cmd` / `negi web` 这条道仍要能起，且三条道
             # 必须同一语义。
             web_args, want_browser, wants_help = _apply_web_entry_flags(args[1:])
+            web_args, want_supervise = _take_bool_flag(web_args, "--supervise")
             if wants_help:
                 print(WEB_ENTRY_USAGE, flush=True)
                 return 0
@@ -843,6 +1017,7 @@ def main(argv: list[str] | None = None) -> int:
                 port=port,
                 open_browser=want_browser,
                 hidden=False,
+                supervise=want_supervise,
             )
         completed = subprocess.run(
             [str(VENV_PYTHON), "-m", "g3ku", *args],

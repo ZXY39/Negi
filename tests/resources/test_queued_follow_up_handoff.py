@@ -7,7 +7,7 @@ web-and-admin.md「Queued Follow-Ups」）：
 - 一次空闲排水会连续接走多批；中途失败/暂停/审批/压缩立即停手。
 - 失败批次只恢复转录里仍是 pending 的条目；已落 failed 的不重投。
 - 取消给每个已发 started 的批次补一个终态，整批不重投。
-- 手动暂停后的空闲排水不自动起回合。
+- 手动暂停后的空闲排水不自动起回合；暂停自己请求的那一次接棒例外，否则插话条目两侧都没归属。
 - 接棒任务在会话内单实例，并登记到 `_active_tasks` 的会话键上（pause/cancel/shutdown 可停）。
 - 外部会话的排队批次进 `ExternalTurnService` 登记，状态/暂停接口按同一 turn_id 找得到。
 """
@@ -29,6 +29,7 @@ from g3ku.runtime.external_sessions import ExternalSessionEntry
 from g3ku.runtime.session_agent import (
     _TRANSCRIPT_STATE_FAILED,
     _TRANSCRIPT_STATE_PENDING,
+    QUEUED_FOLLOW_UP_MANUAL_PAUSE_SOURCE,
     RuntimeAgentSession,
 )
 from g3ku.session.manager import SessionManager
@@ -356,6 +357,43 @@ async def test_pause_guard_refuses_to_auto_start_after_a_manual_pause(tmp_path: 
     session.prompt_batch = _prompt_batch  # type: ignore[method-assign]
     result = await session.dispatch_queued_follow_ups_if_idle(source="ws_reconnect")
     assert result["dispatched"] == 1
+
+
+@pytest.mark.asyncio
+async def test_manual_pause_handoff_dispatches_what_the_pause_guard_blocks(
+    tmp_path: Path,
+) -> None:
+    """暂停正是排队条目在等的"本轮结束"：web 暂停车道请求的那一次接棒必须放行。
+
+    不放行时那条消息两侧都没有归属——服务端等下一次可见回合复位 `_last_stop_reason`，
+    浏览器的空闲派发只发没有 runtime_sent_at 的本地草稿——插话条目于是永远挂在
+    输入区上方，状态字还写着"本轮结束后发送"。
+    """
+    active: dict[str, set[asyncio.Task]] = {}
+    session = _session(tmp_path, "ext:test-bridge:pause-handoff", active_tasks=active)
+    await session.queue_follow_up_batch(["插话之后按了暂停"], persist_transcript=False)
+    session._last_stop_reason = "user_pause"
+
+    sent: list[list[str]] = []
+
+    async def _prompt_batch(messages, **_kwargs):
+        sent.append([str(item.content) for item in messages])
+        return SimpleNamespace(output="ok")
+
+    session.prompt_batch = _prompt_batch  # type: ignore[method-assign]
+
+    idle = await session.dispatch_queued_follow_ups_if_idle(source="ws_reconnect")
+    assert idle["reason"] == "paused"
+    assert idle["started"] == 0
+    assert sent == []
+    assert len(session._state.queued_follow_up_messages) == 1
+
+    task = session.request_queued_follow_up_dispatch(source=QUEUED_FOLLOW_UP_MANUAL_PAUSE_SOURCE)
+    assert task is not None
+    await task
+
+    assert sent == [["插话之后按了暂停"]]
+    assert list(session._state.queued_follow_up_messages or []) == []
 
 
 # -- e) 接棒任务单实例、可被会话停止 -------------------------------------------

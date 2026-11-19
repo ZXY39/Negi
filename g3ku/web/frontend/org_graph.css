@@ -4492,6 +4492,31 @@ textarea {
     text-overflow: ellipsis;
 }
 
+/* exec 带 purpose 的工具卡标题是 `exec:<一句话动机>`，动机要完整读出来：这一格换成
+   可折行、不省略号。横滚轨道给不了它宽度（nowrap 下要么被兄弟卡挤成竖排、要么把
+   整条推去滚动），所以含这一格的轨道改成可折行，让它独占一行读满，同轮其它工具卡
+   换到下一行继续横排。只有带 purpose 的那一轮换布局，其它轮仍是原来那条横滚轨道。 */
+.task-trace-round-strip:has(.task-trace-round-chip.has-purpose) {
+    flex-wrap: wrap;
+}
+
+.task-trace-round-chip.has-purpose {
+    flex: 1 1 100%;
+    min-width: 0;
+    align-items: flex-start;
+}
+
+.task-trace-round-chip.has-purpose .task-trace-round-chip-label {
+    align-items: flex-start;
+}
+
+.task-trace-round-chip.has-purpose .task-trace-round-chip-title {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
+}
+
 /* 加载 skill / 加载 tool 的图标按资源风险度取色，与会话提醒的风险圆点同一套色值。 */
 .context-load-icon {
     display: inline-flex;
@@ -18918,9 +18943,13 @@ textarea {
 }
 
 /* 「手动安装」贴在「更新并重启」旁边：那颗按钮被 actionable 禁用时它是这一步仅剩的入口，
-   所以它不跟着禁用、也不许被同一颗按钮的样式吃掉。字号与提示行同级，动作行仍归按钮。 */
+   所以它不跟着禁用、也不许被同一颗按钮的样式吃掉。字号与提示行同级，动作行仍归按钮。
+   字形要落在按钮文字那条线上：`<a>` 继承 body 的 1.6 行高，19.2px 行盒会把 12px 的字
+   在盒内顶高一档；这里按按钮同一套机制排队——撑满动作行、行高 normal、自身居中盒。 */
 .update-release-manual {
-    align-self: center;
+    display: inline-flex;
+    align-items: center;
+    line-height: normal;
     color: var(--ui-text-secondary);
     font-size: 12px;
     text-decoration: none;

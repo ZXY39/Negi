@@ -31,6 +31,8 @@ def _patch_env(monkeypatch, config=None):
     monkeypatch.setattr(negi_bootstrap, '_ensure_project_installed', lambda: None)
     monkeypatch.setattr(negi_bootstrap, '_rotate_runtime_console_log', lambda: None)
     monkeypatch.setattr(negi_bootstrap, '_load_bootstrap_config', lambda: dict(config or {}))
+    # 委托修复读的是真实 marker 与真实外部解释器；main() 的车道测试不测它，隔离掉。
+    monkeypatch.setattr(negi_bootstrap, '_delegate_env_repair', lambda args: None)
 
 
 def test_uv_probe_falls_back_to_the_installer_locations(monkeypatch, tmp_path) -> None:
@@ -105,7 +107,9 @@ def test_start_binds_the_url_to_loopback_even_when_config_binds_all(monkeypatch)
 
 
 def test_cold_start_detaches_so_the_window_can_close(monkeypatch) -> None:
-    # 他要求的语义：敲 `negi` 起的服务不依附这个终端，关掉窗口项目照跑。
+    # 他要求的语义：敲 `negi` 起的服务不依附这个终端，关掉窗口项目照跑。web 子进程
+    # 始终是脱离态（hidden=True）；start 默认还带监督（见下两条），关窗口杀的是监督
+    # 进程、子进程照跑。
     spawned = {}
     opened = []
     monkeypatch.setattr(negi_bootstrap, '_load_bootstrap_config', lambda: {})
@@ -125,6 +129,32 @@ def test_cold_start_detaches_so_the_window_can_close(monkeypatch) -> None:
     assert spawned['args'] == ['web', '--port', '9555']
     assert spawned['hidden'] is True
     assert opened == ['http://127.0.0.1:9555/']
+
+
+def _patch_cold_start(monkeypatch, child):
+    monkeypatch.setattr(negi_bootstrap, '_load_bootstrap_config', lambda: {})
+    monkeypatch.setattr(negi_bootstrap, '_probe_web_ready', lambda port: False)
+    monkeypatch.setattr(negi_bootstrap, '_open_runtime_console_log_stream', lambda: None)
+    monkeypatch.setattr(negi_bootstrap, '_open_browser', lambda _url: True)
+    monkeypatch.setattr(negi_bootstrap, '_wait_for_web_ready', lambda child, port: True)
+    monkeypatch.setattr(negi_bootstrap, '_spawn_web_runtime', lambda args, **kwargs: child)
+
+
+def test_start_supervises_the_child_by_default(monkeypatch) -> None:
+    # 图标/自启/手敲 start 默认带崩溃重生：监督循环会 wait 子进程（假子进程退 0 即收工）。
+    child = _FakeChild(returncode=0)
+    _patch_cold_start(monkeypatch, child)
+
+    assert negi_bootstrap._run_start(['--port', '9557']) == 0
+    assert child.wait_calls >= 1, "default start must supervise (wait on the child), not fire-and-forget"
+
+
+def test_no_supervise_flag_restores_fire_and_forget(monkeypatch) -> None:
+    child = _FakeChild(returncode=0)
+    _patch_cold_start(monkeypatch, child)
+
+    assert negi_bootstrap._run_start(['--no-supervise', '--port', '9558']) == 0
+    assert child.wait_calls == 0, "--no-supervise detaches without waiting on the child"
 
 
 def test_no_browser_flag_starts_the_server_without_touching_a_browser(monkeypatch) -> None:
@@ -246,8 +276,8 @@ def test_main_routes_web_with_its_own_port_and_no_browser(monkeypatch) -> None:
     seen = {}
     _patch_env(monkeypatch)
 
-    def _capture(web_args, *, port, open_browser, hidden):
-        seen.update(args=list(web_args), port=port, open_browser=open_browser, hidden=hidden)
+    def _capture(web_args, *, port, open_browser, hidden, supervise=False):
+        seen.update(args=list(web_args), port=port, open_browser=open_browser, hidden=hidden, supervise=supervise)
         return 0
 
     monkeypatch.setattr(negi_bootstrap, '_launch_web', _capture)
@@ -260,6 +290,7 @@ def test_main_routes_web_with_its_own_port_and_no_browser(monkeypatch) -> None:
         'port': 9123,
         'open_browser': False,
         'hidden': False,
+        'supervise': False,
     }
 
 
@@ -320,6 +351,7 @@ def test_probe_children_are_quiet_and_the_command_handoff_is_not(monkeypatch) ->
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(negi_bootstrap.subprocess, 'run', _fake_run)
+    monkeypatch.setattr(negi_bootstrap, '_delegate_env_repair', lambda args: None)
     negi_bootstrap.main(['status'])
     assert 'creationflags' not in captured['kwargs']
 

@@ -318,3 +318,33 @@ def test_tool_event_serializes_contract_delivery_marker():
     )
     assert plain is not None
     assert "contract_delivery" not in plain
+
+
+def test_tool_event_serializes_exec_purpose():
+    """exec 的一句话动机要透传到实时帧：前端把在飞工具行画成 `exec:<purpose>`。
+
+    实时帧的 `arguments_text` 是截断的调用摘要（前 3 个键、值砍到 48 字），
+    purpose 排在后面或写长一点就不在里面，所以它走自己的字段；不带时不凭空造键。
+    """
+    with_purpose = wcz._serialize_tool_event(
+        AgentEvent(
+            type="tool_execution_start",
+            timestamp="2026-11-19T00:00:00",
+            payload={
+                "tool_name": "exec",
+                "data": {"tool_purpose": "启动本地开发服务器并保持运行"},
+            },
+        )
+    )
+    assert with_purpose is not None
+    assert with_purpose["tool_purpose"] == "启动本地开发服务器并保持运行"
+
+    without_purpose = wcz._serialize_tool_event(
+        AgentEvent(
+            type="tool_execution_start",
+            timestamp="2026-11-19T00:00:00",
+            payload={"tool_name": "exec", "data": {}},
+        )
+    )
+    assert without_purpose is not None
+    assert "tool_purpose" not in without_purpose

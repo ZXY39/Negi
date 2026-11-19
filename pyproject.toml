@@ -62,6 +62,10 @@ dependencies = [
     # 浏览器内核。带 sys_platform 标记，Linux / macOS 的安装不会被它和它的 .NET
     # 互操作依赖（pythonnet）拖到。
     "pywebview>=6.2.0,<7.0.0; sys_platform == 'win32'",
+    # 状态栏托盘图标（negi tray）：Windows 后端走 ctypes 调 user32/shell32，受管机器
+    # ConstrainedLanguage 不拦 Python ctypes（区别于被禁的 PowerShell .NET NotifyIcon）。
+    # 图标图像用已核心的 Pillow 读 favicon.ico。带 sys_platform 标记，POSIX 安装不拖入。
+    "pystray>=0.19,<0.20; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
