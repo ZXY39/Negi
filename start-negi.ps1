@@ -7,6 +7,7 @@ param(
     [switch]$PromptLog,
     [switch]$Reload,
     [switch]$KeepWorker,
+    [switch]$Supervise,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$ExtraArgs
 )
@@ -31,6 +32,7 @@ Common options:
   -PromptLog     Enable G3KU_PROMPT_TRACE=1
   -Reload        Enable web reload mode (managed worker auto-start is disabled)
   -KeepWorker    Keep the managed worker running after web exit
+  -Supervise     Respawn the web runtime on abnormal exit
   -h, --help     Show this help text and exit
 "@ | Write-Output
 }
@@ -50,6 +52,10 @@ $webArgs = @("web", "--host", $BindHost, "--port", "$Port")
 
 if ($Reload) {
     $webArgs += "--reload"
+}
+
+if ($Supervise) {
+    $webArgs += "--supervise"
 }
 
 if ($PromptLog) {
