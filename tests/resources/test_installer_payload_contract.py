@@ -136,7 +136,8 @@ def test_icon_and_postinstall_launch_the_browser() -> None:
     shell, so the default entry never depends on it.
     """
     install = INSTALL_PS1.read_text(encoding="utf-8")
-    assert '$link.Arguments = """$Root\\negi_bootstrap.py"" start"' in install
+    assert '$link.Arguments = """$vbs"" start"' in install
+    assert "$link.Arguments = 'start'" in install
     assert "start --window" not in install
     iss = ISS.read_text(encoding="utf-8")
     assert 'Parameters: "start"; Description: "启动 Negi（浏览器）"' in iss
