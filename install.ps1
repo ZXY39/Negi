@@ -648,6 +648,26 @@ function Invoke-UvCapture {
     return @{ Code = $code }
 }
 
+function Test-ProjectPythonHealthy {
+    param([string]$Root, [string]$Pin)
+    # A missing or broken .venv is a normal "no" (fresh install, or the base
+    # interpreter moved away): Get-VenvPython Write-Errors on absence and a
+    # damaged redirector can refuse to spawn, so neither may escape as a
+    # terminating error under $ErrorActionPreference = 'Stop'.
+    $saved = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $venvPython = Get-VenvPython -Root $Root 2>$null
+        if (-not $venvPython -or -not (Test-Path -LiteralPath $venvPython)) { return $false }
+        & $venvPython -c "import sys; raise SystemExit(0 if '.'.join(map(str, sys.version_info[:2])) == '$Pin' else 1)" 2>$null | Out-Null
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    } finally {
+        $ErrorActionPreference = $saved
+    }
+}
+
 function Install-ProjectPython {
     param([string]$uv, [string]$Pin)
     Write-Step "uv python install $Pin"
@@ -734,7 +754,13 @@ function Install-Environment {
         return
     }
     $pin = Get-ProjectPin -Root $Root
-    if ($pin) { Install-ProjectPython -uv $uv -Pin $pin }
+    if ($pin) {
+        if (Test-ProjectPythonHealthy -Root $Root -Pin $pin) {
+            Write-Step "reusing healthy Python $pin already in .venv (skipping uv python install)"
+        } else {
+            Install-ProjectPython -uv $uv -Pin $pin
+        }
+    }
     Push-Location -LiteralPath $Root
     try {
         Sync-ProjectEnvironment -uv $uv
