@@ -62,6 +62,7 @@ _global_outbound_drain_task: Optional[asyncio.Task] = None
 _global_task_worker_watchdog_task: Optional[asyncio.Task] = None
 _global_outbox_reconcile_task: Optional[asyncio.Task] = None
 _global_qq_official_services: dict[str, Any] = {}
+_global_tray_process = None
 _global_runtime_services_lock: Optional[asyncio.Lock] = None
 _global_qq_official_sync_lock: Optional[asyncio.Lock] = None
 # 启动体进度。completed 只在启动体完整跑完一遍后置真；in_flight 标记此刻有协程在跑
@@ -589,6 +590,39 @@ def _ensure_outbound_drain_running() -> None:
         return
     if _global_outbound_drain_task is None or _global_outbound_drain_task.done():
         _global_outbound_drain_task = _start_outbound_drain(_global_bus)
+
+
+def _ensure_tray_icon_running() -> None:
+    """Spawn the Windows tray icon process once the runtime is up (best-effort).
+
+    fail-closed：非 Windows、pystray 不在、或派生失败都只跳过，绝不挡启动。托盘是
+    独立脱离进程，自带探活看门狗（服务停了自退），shutdown 另会主动收它。
+    """
+    global _global_tray_process
+    if os.name != "nt":
+        return
+    if _global_tray_process is not None and _global_tray_process.poll() is None:
+        return
+    try:
+        import pystray  # noqa: F401 — 只作 fail-closed 闸门
+    except Exception:
+        return
+    try:
+        import subprocess
+        import sys
+
+        port = int(get_runtime_config()[0].web.port)
+        _global_tray_process = subprocess.Popen(
+            [sys.executable, "-m", "g3ku", "tray", "--port", str(port)],
+            cwd=os.getcwd(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP,
+        )
+        logger.info("tray icon process spawned (pid={})", _global_tray_process.pid)
+    except Exception:
+        logger.debug("tray icon spawn skipped", exc_info=True)
 
 
 def _outbox_replay_message(record: dict[str, Any]) -> OutboundMessage:
@@ -1352,6 +1386,7 @@ async def ensure_web_runtime_services(agent: AgentLoop | None = None) -> None:
             except Exception:
                 logger.exception("external event service startup skipped")
             await _sync_qq_official_service()
+            _ensure_tray_icon_running()
             _global_runtime_services_boot_completed = True
         finally:
             _global_runtime_services_boot_in_flight = False
@@ -1362,6 +1397,7 @@ async def shutdown_web_runtime() -> None:
     global _global_outbound_drain_task, _global_task_worker_watchdog_task, _global_qq_official_services
     global _global_outbox_reconcile_task, _global_queued_follow_up_replay_task
     global _global_runtime_services_boot_completed, _global_runtime_services_boot_in_flight
+    global _global_tray_process
 
     from g3ku.runtime.external_event_service import (
         get_external_event_service,
@@ -1375,6 +1411,7 @@ async def shutdown_web_runtime() -> None:
     set_external_event_service(None)
     cron_service = getattr(agent, "cron_service", None) if agent is not None else None
     outbound_drain_task = _global_outbound_drain_task
+    tray_process = _global_tray_process
     task_worker_watchdog_task = _global_task_worker_watchdog_task
     outbox_reconcile_task = _global_outbox_reconcile_task
     queued_follow_up_replay_task = _global_queued_follow_up_replay_task
@@ -1385,6 +1422,7 @@ async def shutdown_web_runtime() -> None:
     _global_runtime_manager = None
     _global_web_heartbeat = None
     _global_outbound_drain_task = None
+    _global_tray_process = None
     _global_task_worker_watchdog_task = None
     _global_outbox_reconcile_task = None
     _global_queued_follow_up_replay_task = None
@@ -1432,6 +1470,12 @@ async def shutdown_web_runtime() -> None:
             await heartbeat.stop()
         except Exception:
             logger.debug('web heartbeat stop skipped during shutdown')
+
+    if tray_process is not None:
+        try:
+            tray_process.terminate()
+        except Exception:
+            logger.debug("tray icon terminate skipped during shutdown")
 
     await _cancel_background_task(outbound_drain_task)
     await _cancel_background_task(task_worker_watchdog_task)

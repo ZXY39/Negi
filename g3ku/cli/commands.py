@@ -370,6 +370,16 @@ def window(
 
 
 @app.command()
+def tray(
+    port: int = typer.Option(18790, "--port", "-p", help="Web port the tray icon opens and exits."),
+):
+    """Show the Windows tray icon (open Negi / confirmed exit) for a running web service."""
+    from g3ku.shells.tray import run_tray
+
+    raise typer.Exit(code=run_tray(port))
+
+
+@app.command()
 def worker():
     """Start the background task worker."""
     from g3ku.deployment.runtime_startup import anchor_process_temp_dir
