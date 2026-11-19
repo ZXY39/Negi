@@ -125,6 +125,9 @@ class LLMProvider(ABC):
         """Whether the provider enforces its own streaming timeout semantics."""
         return False
 
+    async def aclose(self) -> None:
+        """释放实例级传输资源；无状态 provider 默认 no-op。"""
+
     @property
     def supports_streaming(self) -> bool:
         """Whether the provider can prefer streaming output by default."""

@@ -157,6 +157,9 @@ class OpenAIChatProvider(LLMProvider):
             default_headers=self.extra_headers or None,
         )
 
+    async def aclose(self) -> None:
+        await self._client.close()
+
     @property
     def manages_request_timeout_internally(self) -> bool:
         return True

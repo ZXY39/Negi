@@ -601,175 +601,187 @@ class FallbackProvider(LLMProvider):
                         model_chain=list(chain),
                     ) from exc
                 raise
-            configured_api_key_indexes = getattr(base_target, "api_key_indexes", None)
-            if configured_api_key_indexes is None:
-                api_key_indexes = list(range(max(1, int(getattr(base_target, "api_key_count", 0) or 0))))
-            else:
-                api_key_indexes = [int(item) for item in configured_api_key_indexes]
-            if int(getattr(base_target, "api_key_count", 0) or 0) > 0 and not api_key_indexes:
-                raise APIKeyConfigurationError(f"All configured API keys are disabled for model {model_key}")
+            # 本链位构造过的全部 target（含换 key 重建的）：链位结束统一关闭，
+            # 不把 AsyncOpenAI 连接池留给 GC 在任意线程收尾（gh-149123 竞态面）。
+            model_targets: list[Any] = [base_target]
+            try:
+                configured_api_key_indexes = getattr(base_target, "api_key_indexes", None)
+                if configured_api_key_indexes is None:
+                    api_key_indexes = list(range(max(1, int(getattr(base_target, "api_key_count", 0) or 0))))
+                else:
+                    api_key_indexes = [int(item) for item in configured_api_key_indexes]
+                if int(getattr(base_target, "api_key_count", 0) or 0) > 0 and not api_key_indexes:
+                    raise APIKeyConfigurationError(f"All configured API keys are disabled for model {model_key}")
 
-            target_parameters = dict(getattr(base_target, "model_parameters", {}) or {})
-            if target_parameters.get("max_tokens") is None and getattr(base_target, "max_tokens_limit", None) is not None:
-                target_parameters["max_tokens"] = getattr(base_target, "max_tokens_limit", None)
-            if target_parameters.get("temperature") is None and getattr(base_target, "default_temperature", None) is not None:
-                target_parameters["temperature"] = getattr(base_target, "default_temperature", None)
-            if not str(target_parameters.get("reasoning_effort") or "").strip() and getattr(base_target, "default_reasoning_effort", None) is not None:
-                target_parameters["reasoning_effort"] = getattr(base_target, "default_reasoning_effort", None)
-            # Per-model parameters from the llm-config record win over the
-            # engine-global defaults; when neither is configured the global
-            # output default applies so requests always carry an explicit cap.
-            effective_max_tokens = (
-                max(1, int(target_parameters["max_tokens"]))
-                if target_parameters.get("max_tokens") is not None
-                else max(1, int(max_tokens))
-                if max_tokens is not None
-                else max(1, int(DEFAULT_MAX_OUTPUT_TOKENS))
-            )
-            effective_temperature = (
-                float(temperature)
-                if temperature is not None
-                else float(target_parameters["temperature"])
-                if target_parameters.get("temperature") is not None
-                else None
-            )
-            configured_reasoning = str(target_parameters.get("reasoning_effort") or "").strip()
-            effective_reasoning = (
-                normalize_reasoning_effort(configured_reasoning)
-                if configured_reasoning
-                else normalize_reasoning_effort(reasoning_effort)
-                if reasoning_effort is not None and str(reasoning_effort).strip()
-                else normalize_reasoning_effort(DEFAULT_REASONING_EFFORT)
-            )
-            if str(effective_reasoning or "").strip().lower() == "none":
-                effective_reasoning = None
+                target_parameters = dict(getattr(base_target, "model_parameters", {}) or {})
+                if target_parameters.get("max_tokens") is None and getattr(base_target, "max_tokens_limit", None) is not None:
+                    target_parameters["max_tokens"] = getattr(base_target, "max_tokens_limit", None)
+                if target_parameters.get("temperature") is None and getattr(base_target, "default_temperature", None) is not None:
+                    target_parameters["temperature"] = getattr(base_target, "default_temperature", None)
+                if not str(target_parameters.get("reasoning_effort") or "").strip() and getattr(base_target, "default_reasoning_effort", None) is not None:
+                    target_parameters["reasoning_effort"] = getattr(base_target, "default_reasoning_effort", None)
+                # Per-model parameters from the llm-config record win over the
+                # engine-global defaults; when neither is configured the global
+                # output default applies so requests always carry an explicit cap.
+                effective_max_tokens = (
+                    max(1, int(target_parameters["max_tokens"]))
+                    if target_parameters.get("max_tokens") is not None
+                    else max(1, int(max_tokens))
+                    if max_tokens is not None
+                    else max(1, int(DEFAULT_MAX_OUTPUT_TOKENS))
+                )
+                effective_temperature = (
+                    float(temperature)
+                    if temperature is not None
+                    else float(target_parameters["temperature"])
+                    if target_parameters.get("temperature") is not None
+                    else None
+                )
+                configured_reasoning = str(target_parameters.get("reasoning_effort") or "").strip()
+                effective_reasoning = (
+                    normalize_reasoning_effort(configured_reasoning)
+                    if configured_reasoning
+                    else normalize_reasoning_effort(reasoning_effort)
+                    if reasoning_effort is not None and str(reasoning_effort).strip()
+                    else normalize_reasoning_effort(DEFAULT_REASONING_EFFORT)
+                )
+                if str(effective_reasoning or "").strip().lower() == "none":
+                    effective_reasoning = None
 
-            # 本模型的可重试轮数预算：绑定 retry_count 即配置页「重试次数」，按字面值取，
-            # 0＝不重烧（首发那一趟仍然发）。一轮 = 完整轮过该模型所有 key。
-            budget_rounds = normalized_retry_count(getattr(base_target, "retry_count", 0))
-            model_retry_on = list(getattr(base_target, "retry_on", []) or [])
-            rounds_used = 0
-            model_last_error: Exception | None = None
-            model_last_response: LLMResponse | None = None
-            model_last_failure_reason: Any = None
-            advance_to_next_model = False
-            restart_with_refreshed_chain = False
-            while True:  # 本模型的轮循环
-                round_retryable_failed = False
-                # 单轮 = 每个 key 各试一次（retry_count=0 → 单趟 key 遍历）。
-                for slot in iter_api_key_retry_slots(api_key_count=getattr(base_target, "api_key_count", 0), retry_count=0, key_indexes=api_key_indexes):
-                    target = base_target
-                    selected_key_index = int(slot.key_index)
-                    try:
-                        target = base_target if slot.attempt_number == 1 else _build_provider_target_compat(
-                            build_provider_from_model_key,
-                            self._config,
-                            model_key,
-                            api_key_index=selected_key_index,
-                        )
-                        provider_kwargs: dict[str, Any] = {
-                            "messages": messages,
-                            "tools": tools,
-                            "model": target.model_id,
-                            "tool_choice": tool_choice,
-                            "parallel_tool_calls": parallel_tool_calls,
-                            "prompt_cache_key": prompt_cache_key,
-                            "request_timeout_seconds": request_timeout_seconds,
-                        }
-                        if effective_max_tokens is not None:
-                            provider_kwargs["max_tokens"] = effective_max_tokens
-                        if effective_temperature is not None:
-                            provider_kwargs["temperature"] = effective_temperature
-                        if effective_reasoning:
-                            provider_kwargs["reasoning_effort"] = effective_reasoning
-                        outer_attempt_timeout_seconds = None if bool(getattr(target.provider, "manages_request_timeout_internally", False)) else request_timeout_seconds
-                        response = await wait_for_model_attempt(
-                            target.provider.chat(
-                                **provider_kwargs,
-                            ),
-                            timeout_seconds=outer_attempt_timeout_seconds,
-                            model_ref=str(getattr(target, "provider_ref", model_key) or model_key),
-                            provider_id=str(getattr(target, "provider_id", "") or ""),
-                            provider_model=str(getattr(target, "model_id", "") or ""),
-                            key_index=selected_key_index,
-                        )
-                    except Exception as exc:
-                        last_error = model_last_error = exc
-                        model_last_response = None
-                        if is_request_shape_error(exc):
-                            # 请求形状错误（结构化 400/422）：换 key 修不了畸形
-                            # payload，直接切下一模型，不消耗重试轮。
-                            advance_to_next_model = True
-                            model_last_failure_reason = exception_chain_display_text(exc)
-                            break
-                        if not should_fallback_model_error(exc):
-                            raise  # 内部运行时错误 / API key 配置错误直接上抛
-                        if is_retryable_model_error(exc, retry_on=target.retry_on):
-                            round_retryable_failed = True
-                            model_last_failure_reason = exception_chain_display_text(exc)
-                            continue  # 轮内继续轮过该模型下一个 key
-                        logger.warning(
-                            "Model key rotation for {} (key {}/{}): {}",
-                            model_key,
-                            slot.key_position + 1,
-                            slot.key_count,
-                            exc,
-                        )
-                        model_last_failure_reason = exception_chain_display_text(exc)
-                        continue  # 非可重试：每个 key 各试一次，轮完切下一模型
-                    response.attempted_model_chain = list(attempted_chain)
-                    retryable_response = response_requires_retry(response, retry_on=target.retry_on)
-                    fallback_response = response_requires_fallback(response)
-                    if not fallback_response:
-                        return response  # 成功终态（或内部错误响应按原样返回）
-                    last_response = model_last_response = response
-                    model_last_error = None
-                    model_last_failure_reason = str(response.error_text or response.content or response.finish_reason or "")
-                    if is_request_shape_error(response):
-                        advance_to_next_model = True
-                        break
-                    if retryable_response:
-                        round_retryable_failed = True
-                    continue  # 轮内继续轮过该模型下一个 key
-                if advance_to_next_model:
-                    break
-                rounds_used += 1
-                if round_retryable_failed and rounds_used < budget_rounds:
-                    if current_runtime_config_revision() != start_revision:
-                        # 链在重试途中被改写：按新链重启重试，而不是抛错中止回合。
-                        # 只有真的解析出新链（且未超过病态抖动上限）才重启；否则只
-                        # 刷新 revision 基线并继续既有重试账本，避免空转。
-                        refreshed_chain = self._resolve_current_chain()
-                        if refreshed_chain and refreshed_chain != chain and chain_restart_count < DEFAULT_MAX_CHAIN_CHANGE_RESTARTS:
-                            chain_restart_count += 1
-                            logger.warning(
-                                "Model chain changed during retry for {}; restarting chain {} -> {} (restart {}/{})",
+                # 本模型的可重试轮数预算：绑定 retry_count 即配置页「重试次数」，按字面值取，
+                # 0＝不重烧（首发那一趟仍然发）。一轮 = 完整轮过该模型所有 key。
+                budget_rounds = normalized_retry_count(getattr(base_target, "retry_count", 0))
+                model_retry_on = list(getattr(base_target, "retry_on", []) or [])
+                rounds_used = 0
+                model_last_error: Exception | None = None
+                model_last_response: LLMResponse | None = None
+                model_last_failure_reason: Any = None
+                advance_to_next_model = False
+                restart_with_refreshed_chain = False
+                while True:  # 本模型的轮循环
+                    round_retryable_failed = False
+                    # 单轮 = 每个 key 各试一次（retry_count=0 → 单趟 key 遍历）。
+                    for slot in iter_api_key_retry_slots(api_key_count=getattr(base_target, "api_key_count", 0), retry_count=0, key_indexes=api_key_indexes):
+                        target = base_target
+                        selected_key_index = int(slot.key_index)
+                        try:
+                            target = base_target if slot.attempt_number == 1 else _build_provider_target_compat(
+                                build_provider_from_model_key,
+                                self._config,
                                 model_key,
-                                ", ".join(chain),
-                                ", ".join(refreshed_chain),
-                                chain_restart_count,
-                                DEFAULT_MAX_CHAIN_CHANGE_RESTARTS,
+                                api_key_index=selected_key_index,
                             )
-                            chain = list(refreshed_chain)
-                            start_revision = current_runtime_config_revision()
-                            restart_with_refreshed_chain = True
+                            if target is not base_target:
+                                model_targets.append(target)
+                            provider_kwargs: dict[str, Any] = {
+                                "messages": messages,
+                                "tools": tools,
+                                "model": target.model_id,
+                                "tool_choice": tool_choice,
+                                "parallel_tool_calls": parallel_tool_calls,
+                                "prompt_cache_key": prompt_cache_key,
+                                "request_timeout_seconds": request_timeout_seconds,
+                            }
+                            if effective_max_tokens is not None:
+                                provider_kwargs["max_tokens"] = effective_max_tokens
+                            if effective_temperature is not None:
+                                provider_kwargs["temperature"] = effective_temperature
+                            if effective_reasoning:
+                                provider_kwargs["reasoning_effort"] = effective_reasoning
+                            outer_attempt_timeout_seconds = None if bool(getattr(target.provider, "manages_request_timeout_internally", False)) else request_timeout_seconds
+                            response = await wait_for_model_attempt(
+                                target.provider.chat(
+                                    **provider_kwargs,
+                                ),
+                                timeout_seconds=outer_attempt_timeout_seconds,
+                                model_ref=str(getattr(target, "provider_ref", model_key) or model_key),
+                                provider_id=str(getattr(target, "provider_id", "") or ""),
+                                provider_model=str(getattr(target, "model_id", "") or ""),
+                                key_index=selected_key_index,
+                            )
+                        except Exception as exc:
+                            last_error = model_last_error = exc
+                            model_last_response = None
+                            if is_request_shape_error(exc):
+                                # 请求形状错误（结构化 400/422）：换 key 修不了畸形
+                                # payload，直接切下一模型，不消耗重试轮。
+                                advance_to_next_model = True
+                                model_last_failure_reason = exception_chain_display_text(exc)
+                                break
+                            if not should_fallback_model_error(exc):
+                                raise  # 内部运行时错误 / API key 配置错误直接上抛
+                            if is_retryable_model_error(exc, retry_on=target.retry_on):
+                                round_retryable_failed = True
+                                model_last_failure_reason = exception_chain_display_text(exc)
+                                continue  # 轮内继续轮过该模型下一个 key
+                            logger.warning(
+                                "Model key rotation for {} (key {}/{}): {}",
+                                model_key,
+                                slot.key_position + 1,
+                                slot.key_count,
+                                exc,
+                            )
+                            model_last_failure_reason = exception_chain_display_text(exc)
+                            continue  # 非可重试：每个 key 各试一次，轮完切下一模型
+                        response.attempted_model_chain = list(attempted_chain)
+                        retryable_response = response_requires_retry(response, retry_on=target.retry_on)
+                        fallback_response = response_requires_fallback(response)
+                        if not fallback_response:
+                            return response  # 成功终态（或内部错误响应按原样返回）
+                        last_response = model_last_response = response
+                        model_last_error = None
+                        model_last_failure_reason = str(response.error_text or response.content or response.finish_reason or "")
+                        if is_request_shape_error(response):
+                            advance_to_next_model = True
                             break
-                        start_revision = current_runtime_config_revision()
-                    delay_seconds = model_retry_backoff_seconds(rounds_used)
-                    reason_text = str(model_last_failure_reason or "")
-                    logger.warning(
-                        "Retryable model failure for {} (round {}/{}); retrying in {:.1f}s: {}",
-                        model_key,
-                        rounds_used,
-                        budget_rounds,
-                        delay_seconds,
-                        reason_text,
-                    )
-                    # 可重试退避重试发彩色 RETRY trace 保持可观测性。
-                    _log_model_chain_retry(model_ref=model_key, reason=reason_text)
-                    await asyncio.sleep(delay_seconds)
-                    continue  # 同模型重跑一轮
-                break  # 预算耗尽或本轮无可重试失败 → 本模型耗尽
+                        if retryable_response:
+                            round_retryable_failed = True
+                        continue  # 轮内继续轮过该模型下一个 key
+                    if advance_to_next_model:
+                        break
+                    rounds_used += 1
+                    if round_retryable_failed and rounds_used < budget_rounds:
+                        if current_runtime_config_revision() != start_revision:
+                            # 链在重试途中被改写：按新链重启重试，而不是抛错中止回合。
+                            # 只有真的解析出新链（且未超过病态抖动上限）才重启；否则只
+                            # 刷新 revision 基线并继续既有重试账本，避免空转。
+                            refreshed_chain = self._resolve_current_chain()
+                            if refreshed_chain and refreshed_chain != chain and chain_restart_count < DEFAULT_MAX_CHAIN_CHANGE_RESTARTS:
+                                chain_restart_count += 1
+                                logger.warning(
+                                    "Model chain changed during retry for {}; restarting chain {} -> {} (restart {}/{})",
+                                    model_key,
+                                    ", ".join(chain),
+                                    ", ".join(refreshed_chain),
+                                    chain_restart_count,
+                                    DEFAULT_MAX_CHAIN_CHANGE_RESTARTS,
+                                )
+                                chain = list(refreshed_chain)
+                                start_revision = current_runtime_config_revision()
+                                restart_with_refreshed_chain = True
+                                break
+                            start_revision = current_runtime_config_revision()
+                        delay_seconds = model_retry_backoff_seconds(rounds_used)
+                        reason_text = str(model_last_failure_reason or "")
+                        logger.warning(
+                            "Retryable model failure for {} (round {}/{}); retrying in {:.1f}s: {}",
+                            model_key,
+                            rounds_used,
+                            budget_rounds,
+                            delay_seconds,
+                            reason_text,
+                        )
+                        # 可重试退避重试发彩色 RETRY trace 保持可观测性。
+                        _log_model_chain_retry(model_ref=model_key, reason=reason_text)
+                        await asyncio.sleep(delay_seconds)
+                        continue  # 同模型重跑一轮
+                    break  # 预算耗尽或本轮无可重试失败 → 本模型耗尽
+            finally:
+                for _target in model_targets:
+                    try:
+                        await _target.provider.aclose()
+                    except Exception:
+                        logger.debug("provider aclose skipped for {}", model_key)
 
             if restart_with_refreshed_chain:
                 # 链在重试途中被改写：已按新链更新 chain，回到外层从新链链首重新评估。
