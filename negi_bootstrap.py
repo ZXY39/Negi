@@ -24,6 +24,7 @@ RUNTIME_LOG_DIR = PROJECT_ROOT / ".g3ku" / "logs"
 RUNTIME_CONSOLE_LOG_FILE = RUNTIME_LOG_DIR / "console.log"
 RUNTIME_CONSOLE_LOG_MAX_BYTES = 50 * 1024 * 1024
 RUNTIME_CONSOLE_LOG_RETENTION_SECONDS = 7 * 24 * 3600
+PYTHON_PIN_FILE = PROJECT_ROOT / ".python-version"
 MIN_PYTHON = (3, 11)
 DEFAULT_WEB_PORT = 18790
 READY_WAIT_SECONDS = 180
@@ -75,6 +76,14 @@ def _is_runnable_python(python_path: Path) -> bool:
 def _reset_venv() -> None:
     if VENV_DIR.exists():
         shutil.rmtree(VENV_DIR)
+
+
+def _read_python_pin() -> str | None:
+    try:
+        text = PYTHON_PIN_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return text or None
 
 
 def _pyproject_fingerprint() -> str:
@@ -142,6 +151,18 @@ def _ensure_venv() -> None:
         return
     if VENV_DIR.exists():
         print(f"[negi] Recreating stale virtualenv at {VENV_DIR}")
+        _reset_venv()
+    # 重建必须尊重 .python-version：裸 sys.executable 会造出与 pin 错配的 venv，
+    # 下一次 uv sync 就要整环境替换——而 Windows 锁着运行中的 python.exe，替换必失败。
+    uv = _uv_executable()
+    pin = _read_python_pin()
+    if uv is not None and pin:
+        try:
+            _run([uv, "venv", "--relocatable", "--python", pin, str(VENV_DIR)], cwd=PROJECT_ROOT)
+            if _is_runnable_python(VENV_PYTHON):
+                return
+        except subprocess.CalledProcessError:
+            print("[negi] uv venv failed; falling back to the host interpreter", flush=True)
         _reset_venv()
     _run([sys.executable, "-m", "venv", str(VENV_DIR)], cwd=PROJECT_ROOT)
 
