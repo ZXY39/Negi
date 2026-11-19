@@ -26,13 +26,13 @@ echo [negi] Python not found. Install Python or create a local .venv first.
 exit /b 1
 
 :run_venv_python
-"%VENV_PYTHON%" "%BOOTSTRAP%" web -BindHost 127.0.0.1 -Port 18790 %*
+"%VENV_PYTHON%" "%BOOTSTRAP%" web --supervise %*
 exit /b %ERRORLEVEL%
 
 :run_py_launcher
-py -3 "%BOOTSTRAP%" web -BindHost 127.0.0.1 -Port 18790 %*
+py -3 "%BOOTSTRAP%" web --supervise %*
 exit /b %ERRORLEVEL%
 
 :run_python_path
-python "%BOOTSTRAP%" web -BindHost 127.0.0.1 -Port 18790 %*
+python "%BOOTSTRAP%" web --supervise %*
 exit /b %ERRORLEVEL%

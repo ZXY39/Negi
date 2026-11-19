@@ -1,13 +1,13 @@
 param(
     [Alias("h")]
     [switch]$Help,
-    [string]$BindHost = "127.0.0.1",
-    [int]$Port = 18790,
+    [string]$BindHost = "",
+    [int]$Port = 0,
     [switch]$OpenBrowser,
     [switch]$PromptLog,
     [switch]$Reload,
     [switch]$KeepWorker,
-    [switch]$Supervise,
+    [switch]$NoSupervise,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$ExtraArgs
 )
@@ -20,19 +20,19 @@ $bootstrapScript = Join-Path $scriptDir "negi.ps1"
 
 function Show-Usage {
     @"
-Usage: .\start-negi.ps1 [-BindHost HOST] [-Port PORT] [-OpenBrowser] [-PromptLog] [-Reload] [-KeepWorker] [-h|--help]
+Usage: .\start-negi.ps1 [-BindHost HOST] [-Port PORT] [-OpenBrowser] [-PromptLog] [-Reload] [-KeepWorker] [-NoSupervise] [-h|--help]
 
 Quick start:
   .\start-negi.ps1          (or start-negi.cmd, which needs no PowerShell script permission)
 
 Common options:
-  -BindHost      Web bind host. Default: 127.0.0.1
-  -Port          Web bind port. Default: 18790
+  -BindHost      Web bind host. Default: from project config (web.host)
+  -Port          Web bind port. Default: from project config (web.port)
   -OpenBrowser   Open the browser after startup
   -PromptLog     Enable G3KU_PROMPT_TRACE=1
   -Reload        Enable web reload mode (managed worker auto-start is disabled)
   -KeepWorker    Keep the managed worker running after web exit
-  -Supervise     Respawn the web runtime on abnormal exit
+  -NoSupervise   Disable crash respawn (supervision is on by default)
   -h, --help     Show this help text and exit
 "@ | Write-Output
 }
@@ -48,14 +48,22 @@ if ($Help -or ($ExtraArgs -contains "--help")) {
 # refused before it runs (measured: an unsigned script with a low-integrity label is rejected
 # even under RemoteSigned), and the recovery would disappear with it - while `negi.cmd` /
 # `negi web` never pass here.
-$webArgs = @("web", "--host", $BindHost, "--port", "$Port")
+# Supervision is on by default (aligns with the icon / `negi` start lane); -NoSupervise
+# opts out. Bind host/port are only forwarded when explicitly given, otherwise the
+# bootstrap reads web.host / web.port from project config.
+$webArgs = @("web")
+if (-not $NoSupervise) {
+    $webArgs += "--supervise"
+}
+if ($BindHost) {
+    $webArgs += @("--host", $BindHost)
+}
+if ($Port) {
+    $webArgs += @("--port", "$Port")
+}
 
 if ($Reload) {
     $webArgs += "--reload"
-}
-
-if ($Supervise) {
-    $webArgs += "--supervise"
 }
 
 if ($PromptLog) {
@@ -86,7 +94,11 @@ if ($Reload) {
 } else {
     Write-Host "[negi] Task worker will start after project unlock."
 }
-Write-Host "[negi] Starting web server on http://${BindHost}:$Port ..."
+if ($BindHost -and $Port) {
+    Write-Host "[negi] Starting web server on http://${BindHost}:$Port ..."
+} else {
+    Write-Host "[negi] Starting web server (bind host/port from project config) ..."
+}
 
 & $bootstrapScript @webArgs
 $webExitCode = if ($LASTEXITCODE -is [int]) { $LASTEXITCODE } else { 0 }
