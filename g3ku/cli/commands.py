@@ -338,6 +338,10 @@ def web(
 
     anchor_process_temp_dir()
 
+    from g3ku.utils.iocp_guard import install_iocp_hardening
+
+    install_iocp_hardening()
+
     from g3ku.shells.web import run_web_shell
 
     run_web_shell(
@@ -371,6 +375,10 @@ def worker():
     from g3ku.deployment.runtime_startup import anchor_process_temp_dir
 
     anchor_process_temp_dir()
+
+    from g3ku.utils.iocp_guard import install_iocp_hardening
+
+    install_iocp_hardening()
 
     asyncio.run(run_worker_runtime())
 
