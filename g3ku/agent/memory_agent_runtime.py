@@ -2228,6 +2228,22 @@ def _emit_audit_memory_parked(record: dict[str, Any], *, trigger: str = "initial
         pass
 
 
+def run_memory_worker_loop(stop_event, run_batch, run_sweep) -> None:
+    # 单循环常驻：每秒 asyncio.run() 的建/毁会在本线程取消缓存套接字 future、
+    # 关 IOCP 句柄，与主循环并发即 gh-149123 的跨线程竞态面。Runner 跨批复用
+    # 同一个循环，线程退出时才关一次。
+    with asyncio.Runner() as runner:
+        while not stop_event.wait(1.0):
+            try:
+                runner.run(run_batch())
+            except Exception:
+                continue
+            try:
+                runner.run(run_sweep())
+            except Exception:
+                continue
+
+
 class MemoryManager:
     _PROCESSED_BATCH_RETENTION_DAYS = 7
 
@@ -3495,15 +3511,9 @@ class MemoryManager:
         return self._strategy.prioritize_existing_entries(entries)
 
     def _worker_loop(self) -> None:
-        while not self._stop_event.wait(1.0):
-            try:
-                asyncio.run(self.run_due_batch_once())
-            except Exception:
-                continue
-            try:
-                asyncio.run(self.sweep_stale_review_windows())
-            except Exception:
-                continue
+        run_memory_worker_loop(
+            self._stop_event, self.run_due_batch_once, self.sweep_stale_review_windows
+        )
 
     def _normalize_queue_request(self, request: MemoryQueueRequest) -> MemoryQueueRequest:
         return MemoryQueueRequest(
