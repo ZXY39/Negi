@@ -8,6 +8,9 @@ const { readFrontendSources } = require("./support/frontend_sources.js");
 // 不挂“已运行 N 秒”；本轮总时长只由流程头部秒数表达。
 
 const APP_CODE = readFrontendSources(["app"]).join("\n");
+// 实时行的标题与账本工具卡共用 tasks/node-detail.js 里的 toolDisplayTitle /
+// normalizeToolPurposeText（`exec:<purpose>` 那一条），所以这里要连 task_view 一起装。
+const TASK_VIEW_CODE = readFrontendSources(["task_view"]).join("\n");
 const CSS = fs.readFileSync("g3ku/web/frontend/org_graph.css", "utf8").replace(/\r\n/g, "\n");
 
 const LIVE_ROW_SELECTORS = [
@@ -129,7 +132,7 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${APP_CODE}\nthis.__testExports = { ceoFriendlyToolName, applyCeoToolEventToTurn, resolveCeoToolEventStatus, HTMLElement };`,
+        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { ceoFriendlyToolName, applyCeoToolEventToTurn, resolveCeoToolEventStatus, HTMLElement };`,
         context
     );
     return context.__testExports;

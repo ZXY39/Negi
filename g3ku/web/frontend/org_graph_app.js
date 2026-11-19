@@ -7391,7 +7391,7 @@ function toggleCeoToolHistory(turn) {
     }, { scrollMode: "preserve" });
 }
 
-function applyCeoToolStepState(item, { status = "running", toolName = "tool", detail = "", toolCallId = "", kind = "", allowEmptyOutput = false } = {}) {
+function applyCeoToolStepState(item, { status = "running", toolName = "tool", purpose = "", detail = "", toolCallId = "", kind = "", allowEmptyOutput = false } = {}) {
     if (!(item instanceof HTMLElement)) return;
     const statusLabel = ({ running: "进行中", success: "完成", error: "出错", background: "后台运行", background_running: "后台运行" })[status] || "更新";
     item.className = `interaction-step ${status}`;
@@ -7404,7 +7404,12 @@ function applyCeoToolStepState(item, { status = "running", toolName = "tool", de
     const statusEl = item.querySelector(".interaction-step-status");
     const iconWrap = item.querySelector(".tool-status-icon");
     // 标题用原始 tool_id：与账本里工具卡（chip 标题）同字，运行中与完成后不换名字。
-    if (titleEl) titleEl.textContent = String(toolName || "tool").trim() || "tool";
+    // exec 带 purpose 时两边都拼成 `exec:<purpose>`（toolDisplayTitle）。purpose 只有
+    // 开跑帧带，后台收尾那条路重贴状态时不带，所以记在行上，后续帧不会把标题擦回去。
+    const incomingPurpose = normalizeToolPurposeText(purpose);
+    if (incomingPurpose) item.dataset.toolPurpose = incomingPurpose;
+    const purposeText = incomingPurpose || String(item.dataset.toolPurpose || "").trim();
+    if (titleEl) titleEl.textContent = toolDisplayTitle(toolName, purposeText);
     if (startedEl instanceof HTMLElement) {
         const startedLabel = formatCompactTime(item.dataset.startedAt || "");
         startedEl.hidden = !startedLabel;
@@ -7722,6 +7727,7 @@ function applyCeoToolEventToTurn(turn, event = {}) {
     applyCeoToolStepState(item, {
         status,
         toolName,
+        purpose: event.tool_purpose,
         detail,
         toolCallId,
         kind: eventKind,

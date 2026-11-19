@@ -345,11 +345,50 @@ function renderTraceToolStatusIcon(status) {
     return `<span class="tool-status-icon ${tone}" aria-hidden="true"><i data-lucide="${name}"></i></span>`;
 }
 
+// exec 的 purpose 是模型自己写的一句话动机，比工具名更能说明这一跳在干什么，
+// 所以标题画成 `exec:<purpose>` 并且完整读出（见 CSS 里 .has-purpose 那格）。
+// 入参有三种档：账本存的整份 JSON、被压平截断的摘要 preview、实时帧那条
+// `exec (k=v, ...)` 提示串（不带引号，purpose 也常被 48 字上限砍掉——那一档由
+// tool_start 事件的 tool_purpose 字段兜）。前两档都能在这里取到。
+// purpose 按 schema 是"一句话"，但模型可能塞进换行；标题是一行读物，压成单空格。
+function normalizeToolPurposeText(value) {
+    return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function execPurposeFromStep(step) {
+    if (String(step?.tool_name || "").trim() !== "exec") return "";
+    const raw = String(step?.arguments_full ?? step?.arguments_text ?? "");
+    if (!raw.trim()) return "";
+    try {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            return normalizeToolPurposeText(parsed.purpose);
+        }
+    } catch (_error) {
+        // 不是整份 JSON：落到下面的宽松提取，摘要档把换行压平后仍是同一形状。
+    }
+    const match = raw.match(/"purpose"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+    if (!match) return "";
+    return normalizeToolPurposeText(
+        match[1].replace(/\\(.)/g, (_all, escaped) => (escaped === "n" ? " " : escaped)),
+    );
+}
+
+// 实时工具行与账本工具卡共用这一份拼法，运行中与落地后标题不换字。
+function toolDisplayTitle(toolName, purposeText) {
+    const name = String(toolName || "tool").trim() || "tool";
+    const purpose = String(purposeText || "").trim();
+    return purpose ? `${name}:${purpose}` : name;
+}
+
 function renderExecutionRoundToolChip(round, step, toolIndex) {
     const toolKey = buildExecutionRoundToolKey(round, step, toolIndex);
     const status = String(step?.status || "info").trim() || "info";
     const contextLoad = contextLoadDisplayFor(step);
-    const titleText = contextLoad ? contextLoad.title : (String(step?.tool_name || "tool").trim() || "tool");
+    const purposeText = contextLoad ? "" : execPurposeFromStep(step);
+    const titleText = contextLoad
+        ? contextLoad.title
+        : toolDisplayTitle(step?.tool_name, purposeText);
     // 加载器卡保留类型图标（风险度配色在那颗图标上），只有跑挂了才让位给 ！；
     // 普通工具卡没有类型图标，整格就是状态位。
     const contextLoadIconHtml = renderContextLoadIcon(contextLoad);
@@ -362,7 +401,7 @@ function renderExecutionRoundToolChip(round, step, toolIndex) {
     return `
         <button
             type="button"
-            class="task-trace-round-chip ${esc(status)}${contextLoad ? ` is-context-load is-${esc(contextLoad.kind)}` : ""}"
+            class="task-trace-round-chip ${esc(status)}${contextLoad ? ` is-context-load is-${esc(contextLoad.kind)}` : ""}${purposeText ? " has-purpose" : ""}"
             data-tool-key="${esc(toolKey)}"
             data-tool-call-id="${esc(String(step?.tool_call_id || "").trim())}"
             aria-pressed="false"${titleAttr}
@@ -797,7 +836,9 @@ function buildExecutionTraceSteps(trace, node) {
             const contextLoad = contextLoadDisplayFor(step);
             return {
                 traceKey: `tool:${step.tool_call_id || index}:${step.tool_name || "tool"}`,
-                title: contextLoad ? contextLoad.title : `Tool - ${step.tool_name || "tool"}`,
+                title: contextLoad
+                    ? contextLoad.title
+                    : `Tool - ${toolDisplayTitle(step.tool_name, execPurposeFromStep(step))}`,
                 leadHtml: renderContextLoadIcon(contextLoad),
                 status: step.status || "info",
                 open: false,

@@ -476,6 +476,18 @@ class CeoFrontDoorSupport:
         suffix = ", ".join(parts)
         return f"{tool_name} ({suffix})" if suffix else tool_name
 
+    @staticmethod
+    def _tool_display_purpose(tool_name: str, arguments: dict[str, Any]) -> str:
+        """exec 的 purpose 原样外发：前端把这一跳的标题画成 `exec:<purpose>`。
+
+        实时帧的 `arguments_text` 是 `_tool_invocation_hint` 那条截断串（前 3 个键、
+        值砍到 48 字），purpose 排在后面或写得长一点就不在里面了，所以单独带一个字段。
+        """
+        if str(tool_name or "").strip() != "exec":
+            return ""
+        payload = arguments if isinstance(arguments, dict) else {}
+        return " ".join(str(payload.get("purpose") or "").split())
+
     async def _emit_progress(
         self,
         on_progress,
@@ -830,6 +842,7 @@ class CeoFrontDoorSupport:
                     "resolved to a host instance. Nothing was executed."
                 )
                 return error_text, error_text, "error", "", "", None
+        tool_purpose = self._tool_display_purpose(tool_name, normalized_arguments)
         await self._emit_progress(
             on_progress,
             self._tool_invocation_hint(tool_name, normalized_arguments),
@@ -837,6 +850,7 @@ class CeoFrontDoorSupport:
             event_data={
                 "tool_name": tool_name,
                 "arguments_text": self._tool_invocation_hint(tool_name, normalized_arguments),
+                **({"tool_purpose": tool_purpose} if tool_purpose else {}),
                 **({"tool_call_id": normalized_tool_call_id} if normalized_tool_call_id else {}),
             },
         )
