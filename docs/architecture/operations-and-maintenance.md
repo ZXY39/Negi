@@ -35,7 +35,7 @@
 - Inno 侧的编码判据与 PowerShell 侧相反：`.iss` 里的中文消息安全，Inno Setup 6.7 即使无 BOM 也按 UTF-8 解码脚本（编译期用 ISPP `SaveStringToFile` 把中文字面量落盘、逐字节对过 UTF-8 输出）。合法 flag 集与 `[Tasks]` 默认勾选这些细节报错时只有一行 `Parameter "Flags" includes an unknown flag`，改一处编一次是唯一稳的排法。`PrivilegesRequired=lowest` 全程不提权；排障用 `/VERYSILENT /DIR="<目录>" /LOG=<文件>`，`SetupLogging=yes` 让 `[Code]` 里 `Log()` 的那些 `[uninstall]` 行不用带 `/LOG` 也落盘。卸载侧的 API 形状有实测边界：`WizardSilent` 在卸载段调用是 fatal internal error，只能用 `UninstallSilent`；6.7.3 **没有** `CancelUninstall`，所以唯一干净的中止是 `InitializeUninstall` 返回 False（它跑在"确定要卸载吗"之前，实测此时一个文件都没删、`*_is1` 行也还在）；`Exec(..., ewWaitUntilTerminated, Code)` 拿得到子进程返回码，但 **`mbError` 消息框在 `/SILENT` 下照样等一次点击**，所以失败提示只在非静默时弹，静默只写日志。注意 setup.exe 与 unins000.exe 都会把自己复制成 `.tmp` 再跑（卸载侧是 `is-*-uninstall.tmp\_unins.tmp`），父进程先退出或只是等着，所以"双击没反应"要看的是 `.tmp` 那个进程
 - 装完的入口面由安装器落五样：`~/.local/bin` 里的命令桩（该目录不在 PATH 上时补这一条，并把"是我们加的"记进指针）、安装根指针文件、桌面与开始菜单图标、`HKCU\...\CurrentVersion\Uninstall\Negi` 卸载项，以及这台机器的登录自启登记（见「开机自启登记」）。桩不硬编码安装根，按 `G3KU_HOME` → 指针文件解析，因为 `--Dir` 是任意位置；每次安装无条件覆写桩与指针，桩体不含版本号，所以升级不需要重写它
 - 隐藏窗口的启动没有控制台所有者：停止服务只有网页「设置」里的退出按钮（`org_graph.html` → `POST /api/bootstrap/exit`，见下节与 `web-and-admin.md`「Local Startup And Launcher Contract」）。界面进不去时的兜底仍是 `start-negi.*` 的"先优雅退出再强杀"
-- 图标与命令桩都不自己启动服务：`.lnk` 的 TargetPath 是 `.venv\Scripts\pythonw.exe`（不分配控制台，所以没有黑窗闪现），参数是 `negi_bootstrap.py start`（`start` 本身就 detach）。**bootstrap 自己起的每一个探测子进程都必须带 `CREATE_NO_WINDOW`**：pythonw 没有控制台可继承，解释器版本探测、依赖探测、`uv sync` 每个都会另开一个黑窗，用户看到的就是连弹几下才出浏览器；真终端下加这个标记不改变行为（子进程仍继承父控制台）。`negi` / 手敲命令的窗口因此保持原样——它本来就是用户自己的终端，bootstrap 只是打印完就退出，不隐藏它。**这条约束不止于 bootstrap**：图标起的 web 进程同样没有控制台可继承，它自己 spawn 的任何东西（版本探测的 `git ls-remote`、托管 worker、工具子进程）不带 `CREATE_NO_WINDOW` 就会在服务起来后另开一个黑窗，看起来像"静默启动没做到"。快捷方式图标用仓库里已跟踪的 `g3ku/web/frontend/favicon.ico` 复制一份到 `%LOCALAPPDATA%\Negi`，安装期不做图像转换；不放安装根是因为 `-Upgrade` 按顶层覆盖那棵树
+- 图标与命令桩都不自己启动服务，宿主是入口脚本而不是 venv 解释器：`.lnk` 的 TargetPath 是 `wscript.exe`，参数是 `"<安装根>\negi-start.vbs" start`（VBS 以窗口样式 0 转调 `negi.cmd`，没有黑窗闪现；wscript 或 VBS 缺席时回落 `negi.cmd start`，允许短暂窗口）；命令桩转调安装根里的 `negi.cmd`（POSIX 是 `negi.sh`）。venv 解释器损坏杀不死图标、自启与命令桩——venv→py→python 回落链在入口脚本里，不在解释器里。`start` 本身就 detach。**bootstrap 自己起的每一个探测子进程都必须带 `CREATE_NO_WINDOW`**：pythonw 没有控制台可继承，解释器版本探测、依赖探测、`uv sync` 每个都会另开一个黑窗，用户看到的就是连弹几下才出浏览器；真终端下加这个标记不改变行为（子进程仍继承父控制台）。`negi` / 手敲命令的窗口因此保持原样——它本来就是用户自己的终端，bootstrap 只是打印完就退出，不隐藏它。**这条约束不止于 bootstrap**：图标起的 web 进程同样没有控制台可继承，它自己 spawn 的任何东西（版本探测的 `git ls-remote`、托管 worker、工具子进程）不带 `CREATE_NO_WINDOW` 就会在服务起来后另开一个黑窗，看起来像"静默启动没做到"。快捷方式图标用仓库里已跟踪的 `g3ku/web/frontend/favicon.ico` 复制一份到 `%LOCALAPPDATA%\Negi`，安装期不做图像转换；不放安装根是因为 `-Upgrade` 按顶层覆盖那棵树
 - 取码一律先检出到临时目录再逐顶层合并。`git clone` 对着非空目录直接 fatal，而"保留数据"的卸载留下的正是非空目录，所以认领不是可选项；目标里已有 `.g3ku/config.json` 时报一句认领（配置、会话与密钥沿用），不重新初始化项目
 - `install.ps1` **不带 UTF-8 BOM，且整份文件纯 ASCII**。一行指令是 `iwr ... | iex`：PowerShell 5.1 把下载到的字节按客户端码页解成文本再交给 `iex`，BOM 于是变成 `#requires` 之前的垃圾字符，`param(` 不是首条语句，安装会在第一个参数行报 `InvalidLeftHandSide`。而**无 BOM 的中文注释同样致命**：PS 5.1 按机器 ANSI 码页读脚本文件，中文解码后可能以反引号（续行符）结尾，把下一条语句静默吞进注释——实测 `Install-CodeInto` 的 `$stageRoot` 赋值就这么没了，报 `VariableIsUndefined`。注意这条**零个解析错误**，只有真跑一遍或保持 ASCII 才拦得住。`uninstall.ps1` 只经 `-File` 执行（永远到不了 `iex` 那条道），所以它按同一条口径保持纯 ASCII，并额外带一份 BOM 作为兜底——将来谁往它里面写中文，BOM 就是那条不崩的保险。这几条由 `tests/resources/test_start_scripts_and_readme.py` 钉住
 - 换源是**失败触发的重试**，不是测速：`uv python install` 先直连，失败且 `UV_PYTHON_INSTALL_MIRROR` 未设置时改走内置的 python-build-standalone 镜像再试一次；`uv sync --frozen` 同理，失败且 `UV_DEFAULT_INDEX` 未设置时改走内置 PyPI 镜像。操作员设置的环境变量优先，脚本不覆盖；`-Mirror` 从镜像起步，`-NoMirror` 禁止重试。两次尝试与最终选源都写在安装输出里（exe 通道见 `setup.log`，网页升级见 `update-apply.log`）。镜像只解决「连不上或超时」，直连能通但很慢的网络要靠 `-Mirror` 主动选择
@@ -64,7 +64,8 @@
 
 登记的是**"这个用户登录时把服务拉起来"**，三个平台各写各的登记面：Windows 写 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 里名为 `Negi` 的值、Linux 写 `~/.config/systemd/user/negi.service` 并 `systemctl --user enable`、macOS 写 `~/Library/LaunchAgents/com.negi.web.plist`。实现只有一份——`g3ku/deployment/autostart.py`，三个调用者都走它：CLI（`negi autostart status|on|off`）、网页设置窗口底部那颗勾选、以及安装器在全新安装时打的默认开。没有第二套写法，因此不存在"界面说开着而登记里没有"。
 
-- **命令形状固定为 `negi_bootstrap.py start --no-browser`**。走 `start` 而不是 `web`，因为 `start` 先探端口：登录时如果已经有实例在跑（操作员自己点过图标），它只报地址，不把正在工作的服务收割重启；带 `--no-browser` 是因为登录不该弹一个页签。用 `pythonw.exe`（Windows）起步，所以没有控制台窗口。
+- **命令形状固定为入口脚本托管 `start --no-browser`**：Windows 是 `wscript.exe "<安装根>\negi-start.vbs" start --no-browser`（wscript 或 VBS 缺席时回落 `negi.cmd`），POSIX 是 `/bin/sh <安装根>/negi.sh start --no-browser`。宿主不是 venv 解释器：venv 坏掉时登记面仍要能跑到入口脚本的回落链，而不是在解释器初始化阶段静默死掉。走 `start` 而不是 `web`，因为 `start` 先探端口：登录时如果已经有实例在跑（操作员自己点过图标），它只报地址，不把正在工作的服务收割重启；带 `--no-browser` 是因为登录不该弹一个页签。wscript+VBS 以隐藏窗口转调，所以没有控制台窗口。
+- **旧形状的一次性迁移**：修复前的登记是 venv 解释器直接托管 `negi_bootstrap.py`（`legacy_launcher_command()` 是那份旧形状的唯一定义，只用于迁移判定）。web 启动时 `g3ku/deployment/entry_repair.py` 的 `repair_entries()` 经 `registered_argv()` 读原始登记，只改写与旧形状精确匹配的自启登记（Windows 按小写比），以及 TargetPath 落在本安装根 `.venv\Scripts` 下、参数含 `negi_bootstrap.py` 的桌面/开始菜单快捷方式；操作员自定义形状、未登记、读不动的一律不动，任何失败都不挡启动。迁移是幂等的：改写过的新形状与旧形状比对不上，下一次启动自然跳过。旧形状在新 `launcher_command()` 下形状比对不上、`describe()` 会显示未开启，迁移把它改写成新形状后勾选框恢复真实。
 - **读数一律是重读一遍的登记事实**，接口与界面都不缓存意图：操作员自己用注册表编辑器删掉那条值之后，界面立刻跟着变。反过来，登记读不动时（注册表策略、只读家目录）报"读取失败 + 原因"，**不报"已关闭"**——把读不动说成操作员的决定是更坏的答案。
 - **默认开只发生在全新安装**：`-Upgrade` / `--upgrade` 不替操作员动系统登记，已经存在的登记（可能是别的命令形状）也不重写，判据是 `ensure_enabled_on_fresh_install`。想关就在设置窗口取消勾选，或 `negi autostart off`；卸载无条件清掉它（合同见「卸载与安装面回收」）。
 - **这一格不管"无人登录也要起"**。那种形态在 Windows 上是带 ONSTART 触发器、勾"不管用户是否登录都要运行"的计划任务，在 Linux 上要 `loginctl enable-linger`，都需要管理员权限或提权框——与"出厂默认开启且不弹框"不能同时成立，所以出厂不做，需要时由操作员自己登记。
@@ -121,6 +122,8 @@
 维护上要记住：
 
 - 这些入口脚本是普通用户首选入口
+- 入口脚本查的是"可运行"而不是"存在"：`negi.cmd` 与 `start-negi.cmd` 同一条探测（venv python 实跑 `sys.version_info >= (3, 11)`，失败依次回落 `py -3`、PATH 上的 `python`），`negi.sh` 是 POSIX 同形。venv 的 base 解释器被挪走时 `python.exe` 仍在盘上、却在 `import encodings` 阶段即死，只查存在性会让入口静默死亡。`start-negi.cmd` 的默认端口在前、操作员 `%*` 在后（`_port_override` 取最后一次出现）。
+- bootstrap 的环境修复分两层。`_ensure_venv` 重建时尊重 `.python-version`：优先 `uv venv --relocatable --python <pin>`，失败回落 stdlib `venv`——裸 `sys.executable` 重建会造出与 pin 错配的 venv，下一次 `uv sync` 就要整环境替换。bootstrap 正跑在 `.venv` 里且环境需要修复（marker 不匹配或运行依赖缺失）时，`_delegate_env_repair` 把整条引导交给 venv 外的解释器（候选按 `.runtime/negi-python` → `py -3` → PATH 上的 python3/python 排序，全部实测可运行才入选，venv 内的一律排除）：Windows 锁着运行中的 python.exe，venv 内的 `uv sync` 永远完不成整环境替换（实测 venv 内 exit 2、venv 外成功）。pythonw 宿主（`sys.stdout is None`）下修复输出落 `.g3ku/logs/bootstrap.log`；找不到 venv 外解释器时打印一行并就地继续。委托出去的解释器在 venv 外，不会再次触发委托。
 - 回收既有进程由**解释器**执行：`negi_bootstrap.reap_existing_runtime_processes`，`start-negi.cmd` / `start-negi.ps1` / `negi web` 共用这一处；`start-negi.sh` 保留自己的 POSIX 实现（同一端点、同一超时、同样先优雅后强杀）。`negi.ps1` / `negi.sh` / `install.ps1` / `install.sh` 自己不杀进程。回收不能挂在 `.ps1` 上：`.ps1` 可能在执行前就被整份拒掉（实测：带低完整性标签的未签名脚本，即使策略是 RemoteSigned 也报 `UnauthorizedAccess`），入口一被拦，回收逻辑也跟着消失；`.cmd` 直接 exec `negi_bootstrap.py`，不经过 PowerShell，所以它在这类环境里仍然起得来。三个必须知道的判据：
   - **不能把启动器自己算进名单**：`.cmd` 用绝对路径调 `negi_bootstrap.py`，启动器自己的命令行同时命中「checkout 根」与 `negi_bootstrap.py web`。要排除的是一对 PID（venv 的 `python.exe` 是重定向器，cmdline 命中的是父进程，真正执行代码的是它的子进程）；漏掉任何一个，强杀那一步都会打死回收者本身——入口以 exit 1 静默消失、一个字都不打印，看起来像"脚本起不来"。
   - **优雅退出的端口要按候选找**：回收按 checkout 收、不按端口收。操作者这次换了 `-Port` 时旧实例还听在旧端口上，只打目标端口等于没发请求、回收会退化成强杀（异常中断）。候选顺序是目标端口 → 旧实例记下的端口（`.g3ku/internal-callback.json` 里的回调地址，web 启动时由 launcher 写入）→ 配置端口 → 默认 `18790`。
@@ -313,6 +316,15 @@
 新增运行时测试时，`MainRuntimeService` 构造要显式传 `workspace_root=tmp_path`，把任务临时目录隔离进 pytest 临时目录；`tests/resources/conftest.py` 的 autouse fixture 对漏传的用例兜底替换 cwd 回退。判断测试是否泄漏了真实工作区的快速办法：跑完测试后 `.venv/Scripts/python.exe scripts/cleanup_orphan_task_temp_dirs.py` 只看空孤儿数量是否增长。
 
 ## 5. 推荐的排障顺序
+
+### 双击图标无反应 / No module named encodings / uv sync exit 2
+
+这一族症状是 venv 损坏或版本错配；入口与环境的修复机制见「首选一键启动脚本」与「开机自启登记」。排查顺序：
+
+1. 读 `.g3ku/logs/console.log` 与 `.g3ku/logs/bootstrap.log`：pythonw 宿主下委托修复的输出落在后者，前者是 web 子进程的落点。
+2. 比对 `.venv/pyvenv.cfg` 的 `home` 与 `.runtime/negi-python` 的实际布局：kit 解释器目录布局变化会让 `home` 悬空，venv python 在 `import encodings` 阶段即死，任何 Python 自愈代码都没机会运行——这正是入口宿主必须是入口脚本而不是 venv 解释器的原因。
+3. 从 venv **外**跑 `uv sync --frozen`：venv 内跑会撞 Windows 对运行中 python.exe 的文件锁，稳定 exit 2。bootstrap 的委托机制（见「首选一键启动脚本」）就是把这一步自动化。
+4. 确认 `.python-version` 与 venv 实际版本一致：错配时 `uv sync` 要整环境替换 `.venv`，而重建必须按 pin 来（`_ensure_venv` 优先 `uv venv --python <pin>`），否则修完一轮下一轮又错配。
 
 ### 会话无回复
 
