@@ -326,6 +326,14 @@ def run_web_server_entrypoint(
     )
     _print_update_reminder()
     try:
+        from g3ku.deployment.entry_repair import repair_entries
+
+        report = repair_entries()
+        if report.get("autostart") != "untouched" or report.get("shortcuts"):
+            typer.echo(f"[negi] entry-surface repair: {report}")
+    except Exception as exc:  # noqa: BLE001 - 入口面修复绝不挡启动
+        typer.echo(f"[negi] entry-surface repair skipped: {exc}")
+    try:
         if with_worker and reload:
             typer.echo(
                 "[negi] worker auto-start is disabled when --reload is enabled; "
