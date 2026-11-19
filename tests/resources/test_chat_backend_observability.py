@@ -18,6 +18,9 @@ class _AlwaysFailProvider:
         # （可重试错误改走整链退避重试，不再产生 FALLBACK 事件）。
         raise RuntimeError('HTTP 503: Upstream request failed')
 
+    async def aclose(self) -> None:
+        return None
+
 
 class _RetryThenSuccessProvider:
     def __init__(self) -> None:
@@ -30,11 +33,17 @@ class _RetryThenSuccessProvider:
             raise RuntimeError('HTTP 502: Upstream request failed')
         return LLMResponse(content='ok', finish_reason='stop')
 
+    async def aclose(self) -> None:
+        return None
+
 
 class _SuccessProvider:
     async def chat(self, **kwargs):
         _ = kwargs
         return LLMResponse(content='ok', finish_reason='stop')
+
+    async def aclose(self) -> None:
+        return None
 
 
 def _capture_logger(target_module, sink: list[str], monkeypatch) -> None:
@@ -46,7 +55,11 @@ def _capture_logger(target_module, sink: list[str], monkeypatch) -> None:
             rendered = str(template)
         sink.append(rendered)
 
-    monkeypatch.setattr(target_module, 'logger', SimpleNamespace(info=_record, warning=_record, error=_record))
+    monkeypatch.setattr(
+        target_module,
+        'logger',
+        SimpleNamespace(debug=_record, info=_record, warning=_record, error=_record),
+    )
 
 
 def test_render_model_chain_trace_uses_ansi_color() -> None:
