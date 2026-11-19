@@ -19,9 +19,9 @@ from __future__ import annotations
 
 import os
 import platform
+import shlex
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 from typing import Any, Callable
 
@@ -60,17 +60,66 @@ def container_detected() -> bool:
 
 
 def launcher_command(root: Path | None = None) -> list[str]:
-    """The command an autostart登记 must run: the `start` lane, without a browser."""
+    """The command an autostart登记 must run: the `start` lane, without a browser.
+
+    宿主是入口脚本而不是 venv 解释器：venv 坏掉时登记面必须仍能跑到回落链
+    （negi.cmd / negi.sh 的 venv→py→python），而不是在解释器初始化阶段静默死掉。
+    Windows 用 wscript+VBS 隐藏窗口，保持"登录无黑窗"合同；wscript 不可用时
+    回落 negi.cmd（ShellExecute 直接执行 .cmd，允许短暂窗口）。
+    """
+    root = root or RUNTIME_ROOT
+    if os.name == "nt":
+        wscript = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "wscript.exe"
+        vbs = root / "negi-start.vbs"
+        if wscript.is_file() and vbs.is_file():
+            return [str(wscript), str(vbs), "start", "--no-browser"]
+        return [str(root / "negi.cmd"), "start", "--no-browser"]
+    return ["/bin/sh", str(root / "negi.sh"), "start", "--no-browser"]
+
+
+def legacy_launcher_command(root: Path | None = None) -> list[str]:
+    """修复前的旧形状：venv 解释器直接托管 negi_bootstrap.py。只用于迁移判定。"""
     root = root or RUNTIME_ROOT
     if os.name == "nt":
         interpreter = root / ".venv" / "Scripts" / "pythonw.exe"
-        if not interpreter.is_file():
-            interpreter = Path(sys.executable)
     else:
         interpreter = root / ".venv" / "bin" / "python"
-        if not interpreter.is_file():
-            interpreter = Path(sys.executable)
     return [str(interpreter), str(root / "negi_bootstrap.py"), "start", "--no-browser"]
+
+
+def registered_argv(*, winreg_module: Any | None = None) -> list[str] | None:
+    """当前登记的原始 argv；没登记/读不动返回 None。
+
+    与 describe() 不同：不拿 launcher_command() 比对——迁移车道需要看见旧形状本身。
+    """
+    name = _backend_name()
+    if name == _BACKEND_WINDOWS:
+        try:
+            raw = _WindowsRegistryBackend(winreg_module).read()
+        except OSError:
+            return None
+        if not raw.strip():
+            return None
+        return [token.strip('"') for token in shlex.split(raw, posix=False)]
+    if name == _BACKEND_SYSTEMD:
+        try:
+            text = _SystemdUserBackend().unit_path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        for line in text.splitlines():
+            if line.startswith("ExecStart="):
+                return shlex.split(line[len("ExecStart="):])
+        return None
+    if name == _BACKEND_LAUNCHD:
+        import plistlib  # noqa: PLC0415 - stdlib, mac-only path
+
+        try:
+            payload = plistlib.loads(_LaunchdBackend().plist_path.read_bytes())
+        except (OSError, ValueError):
+            return None
+        argv = payload.get("ProgramArguments")
+        return [str(item) for item in argv] if isinstance(argv, list) else None
+    return None
 
 
 def _windows_command_string(argv: list[str]) -> str:
