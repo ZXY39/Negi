@@ -798,6 +798,7 @@ def _launch_web(web_args: list[str], *, port: int, open_browser: bool, hidden: b
         elif open_browser:
             _open_browser(_web_url(port))
         if supervise:
+            print("[negi] supervising the web runtime; abnormal exit respawns, clean exit stops", flush=True)
             stream_for_supervisor = console_log_stream
             console_log_stream = None  # 所有权移交监督循环，finally 不许再关
             return _supervise_web_child(
@@ -918,10 +919,13 @@ def _print_reap_lines(lines: list[str]) -> None:
 
 def _run_start(extra_args: list[str]) -> int:
     # `--hidden` is still consumed so a shortcut written by an earlier install
-    # keeps working, but start always detaches: a server the operator launched by
-    # typing `negi` must outlive the window it was started from. Watching the
-    # process itself is what `negi web` is for. `--window` swaps the browser tab
-    # for the desktop shell; the server lane is identical either way.
+    # keeps working. The web child always detaches (CREATE_NEW_PROCESS_GROUP): a
+    # server the operator launched by typing `negi` must outlive the window it was
+    # started from. By default start also supervises that child (respawn on abnormal
+    # exit), so the bootstrap stays resident as the supervisor; closing the launching
+    # window stops the supervisor but the detached child keeps running. `--no-supervise`
+    # opts back out to fire-and-forget. `--window` swaps the browser tab for the
+    # desktop shell; the server lane is identical either way.
     # `--no-browser` is what the autostart登记 uses: a logon must not end in a
     # browser tab, and the port probe below is why logon cannot reap a live server.
     web_args, _ = _take_hidden_flag(list(extra_args))
@@ -930,7 +934,11 @@ def _run_start(extra_args: list[str]) -> int:
     # 三态都要区分——没写＝开浏览器（今天的默认），写了 --no-browser＝不开。
     want_browser = "--no-browser" not in web_args
     web_args = [part for part in web_args if part != "--no-browser"]
-    web_args, want_supervise = _take_bool_flag(web_args, "--supervise")
+    # start 默认带监督：图标/自启/手敲起的进程崩溃都要能重生。web 子进程仍是脱离态
+    # （CREATE_NEW_PROCESS_GROUP），关掉启动窗口杀的是监督进程、服务照跑；--no-supervise
+    # 显式退回无监督后台化。三态判据与 --no-browser 同形（_take_bool_flag 分不开没写与写了 --no-x）。
+    want_supervise = "--no-supervise" not in web_args
+    web_args = [part for part in web_args if part not in ("--supervise", "--no-supervise")]
     port = _web_bind_port(_port_override(web_args))
     if _probe_web_ready(port):
         url = _web_url(port)
