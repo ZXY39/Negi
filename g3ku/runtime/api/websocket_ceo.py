@@ -46,6 +46,7 @@ from g3ku.runtime.sender_stamp import (
     sender_identity,
     sender_number_map,
 )
+from g3ku.runtime.session_agent import QUEUED_FOLLOW_UP_MANUAL_PAUSE_SOURCE
 from g3ku.runtime.session_keys import (
     EXTERNAL_SESSION_KEY_PREFIX,
     is_channel_session_key,
@@ -2180,6 +2181,14 @@ async def ceo_websocket(websocket: WebSocket):
             if message_type == 'client.pause_turn':
                 if _current_session_is_running():
                     await session.pause(manual=True)
+                    # 暂停就是排队条目一直在等的"本轮结束"：pause 里的 cancel_session_tasks
+                    # 已经掐掉了这条回合链，链尾那次 drain 不会再跑，所以这里自己请一次接棒。
+                    # 只有这条车道用 manual_pause 这个来源名（它是绕过手动暂停闸门的唯一
+                    # 凭据）；关机的 pause 直接调 session.pause，闸门照旧不自动起回合。
+                    has_queued = getattr(session, 'has_queued_follow_up_messages', None)
+                    request_pause_handoff = getattr(session, 'request_queued_follow_up_dispatch', None)
+                    if callable(has_queued) and has_queued() and callable(request_pause_handoff):
+                        request_pause_handoff(source=QUEUED_FOLLOW_UP_MANUAL_PAUSE_SOURCE)
                 else:
                     await _push_stream_event('ceo.control_ack', {'action': 'pause', 'accepted': False, 'reason': 'no_active_turn'})
                 continue

@@ -84,6 +84,11 @@ MANUAL_COMPRESSION_FAILED = "failed"
 # 发起下一个可见用户回合（或重新发起压缩）。只在内存里：它挡的是同进程里的自动排水
 # （压缩收尾 / WS 重连），durable 队列本身保持原样。
 QUEUED_FOLLOW_UP_COMPRESSION_FAILURE_HOLD_ATTR = "_queued_follow_up_compression_failure_hold"
+# 操作员按下暂停之后那一次接棒用的来源名。只有它绕过手动暂停闸门：暂停正是排队条目
+# 一直在等的"本轮结束"，不放行它，条目会永远挂在输入区上方（服务端等下一次可见回合，
+# 浏览器只发没有 runtime_sent_at 的本地草稿）。其余"回到空闲"的缝——重连、心跳/cron
+# 唤醒、压缩收尾、关机后的启动重放——照旧不自动起回合。
+QUEUED_FOLLOW_UP_MANUAL_PAUSE_SOURCE = "manual_pause"
 # 待重印的 provider tools[] 标记：手动压缩跑在回合外、够不到 preflight，所以由 api 层挂
 # 一个标记，下一跳的清单定形把它当成重印边界消费掉（内联压缩自带 token_compression 信号）。
 PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR = "_pending_provider_bundle_recommit"
@@ -5322,13 +5327,18 @@ class RuntimeAgentSession:
         """下一个可见用户回合或新一轮压缩解除失败保持。"""
         setattr(self, QUEUED_FOLLOW_UP_COMPRESSION_FAILURE_HOLD_ATTR, False)
 
-    def _queued_follow_up_dispatch_blocker(self) -> str:
+    def _queued_follow_up_dispatch_blocker(self, *, source: str = "") -> str:
         """空闲排水此刻为什么不能起回合。空串=可以。
 
         顺序即优先级：运行中/压缩/锁被持有 → 压缩失败保持 → 审批 → 手动暂停。
         手动暂停的判据要留到下一次可见回合：`pause(manual=True)` 收尾会把
         `_state.paused` 清回 false，只靠状态位判不出来；`_last_stop_reason`
         由下一个可见回合在 `_prompt_locked` 开头复位。
+        手动暂停那两档只挡"回到空闲"的自动接棒，不挡暂停自己那一次
+        （source=QUEUED_FOLLOW_UP_MANUAL_PAUSE_SOURCE）：操作员点暂停之前用插话交给
+        运行时的条目，等的就是本轮结束，而 `pause` 已经通过 `cancel_session_tasks`
+        停掉了 WS 回合链，链尾那次 drain 不会再跑。放行它，暂停才是这一轮真正的结束；
+        不放行，那条消息在服务端与浏览器两侧都没有归属，只会一直挂在输入区上方。
         """
         hold = self.frontdoor_inbound_hold()
         if hold:
@@ -5337,6 +5347,8 @@ class RuntimeAgentSession:
             return "held:compression_failed"
         if list(self._state.pending_interrupts or []):
             return "tool_approval_pending"
+        if str(source or "").strip() == QUEUED_FOLLOW_UP_MANUAL_PAUSE_SOURCE:
+            return ""
         if bool(getattr(self._state, "paused", False)) or str(
             getattr(self._state, "status", "") or ""
         ).strip().lower() == "paused":
@@ -5354,7 +5366,9 @@ class RuntimeAgentSession:
         排队的消息会一直躺在队列里。这里补第三条通道：谁让会话变空闲，谁在自己的收尾调用它。
 
         一次调用会连续接走多批：正常收尾后复查队列，期间新到的消息立刻成为下一批；
-        一批失败、被暂停/审批/压缩挡住就停手，不把失败批次当热重试。
+        一批失败、被暂停/审批/压缩挡住就停手，不把失败批次当热重试。手动暂停那档只挡
+        自动接棒：`source=QUEUED_FOLLOW_UP_MANUAL_PAUSE_SOURCE`（操作员按下暂停后由
+        web 车道请求的那一次）放行，让已经交给运行时的插话条目接着成为新一轮的输入。
 
         出站沿用渠道自己那条路：`make_session_event_relay` 只要 session_key 和 turn_id
         就能把 reply.final 发到该会话的 hub，QQ 桥的 SSE pump 照收（cron 就是这个形状）。
@@ -5377,7 +5391,7 @@ class RuntimeAgentSession:
         turn_ids: list[str] = []
         output = ""
         while True:
-            blocker = self._queued_follow_up_dispatch_blocker()
+            blocker = self._queued_follow_up_dispatch_blocker(source=source)
             if blocker:
                 return self._queued_follow_up_dispatch_result(
                     counters,
