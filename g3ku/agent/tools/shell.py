@@ -1494,7 +1494,8 @@ class ExecTool(Tool):
             notes.append(
                 "完整输出已外置（本结果 ref 背后就是全量，不是头尾摘录）："
                 "用 content_search(ref=<本结果 ref>, query=…) 定位行号，再 "
-                "content_open(ref=…, around_line=<行号>, window=…) 取上下文；不要为了看中段重跑命令。"
+                "content_open(ref=…, start_line=<行号-3>, end_line=<行号+3>) 取上下文；"
+                "不要为了看中段重跑命令。"
             )
 
         captured_body = combined_head
