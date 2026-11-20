@@ -19,7 +19,7 @@ from loguru import logger
 
 from g3ku.agent.tools.base import Tool
 from g3ku.config.live_runtime import get_runtime_config
-from g3ku.content import content_summary_and_ref, parse_content_envelope
+from g3ku.content import artifact_ref_from_id, content_summary_and_ref, parse_content_envelope
 from g3ku.providers.base import (
     ToolCallRequest,
     provider_body_output_cap,
@@ -361,6 +361,44 @@ def _render_unsettled_children_section(rows: list[dict[str, Any]] | None) -> str
         state = str(row.get('state') or '').strip() or 'running'
         lines.append(f'- {node_id} | created_at={created_at} | goal={goal or "（无）"} | state={state}')
     return '\n'.join(lines) if len(lines) > 1 else ''
+_NODE_EXTERNALIZED_REFS_HEADING = (
+    '【已外置结果索引】（压缩时刻快照，机器重算，只列本节点产出的外置工具结果；'
+    'ref 背后是完整内容，按需才开——不要为了"看一眼"逐个打开，也不要重跑产出它们的工具）'
+)
+_NODE_EXTERNALIZED_REFS_MAX_ROWS = 20
+_NODE_EXTERNALIZED_REF_LABEL_CHARS = 60
+
+
+def _render_externalized_refs_section(rows: list[dict[str, Any]] | None, *, omitted: int = 0) -> str:
+    """外置结果索引段：与未终态子节点快照同形，压缩时机器重算，不依赖摘要器保真。
+
+    摘要规则同时要求"保留重要引用"和"丢弃纯工具调用流水"，ref 保不保本来取决于
+    摘要器判断；这一段把 ref 钉在稳定区，摘要器丢不丢都不影响它在场。
+    """
+    if not rows:
+        return ''
+    lines = [_NODE_EXTERNALIZED_REFS_HEADING]
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        ref = str(row.get('ref') or '').strip()
+        if not ref:
+            continue
+        label = ' '.join(str(row.get('label') or '').split())
+        if len(label) > _NODE_EXTERNALIZED_REF_LABEL_CHARS:
+            label = label[:_NODE_EXTERNALIZED_REF_LABEL_CHARS] + '…'
+        lines.append(
+            f"- {ref} | {label or '（无标题）'} | {int(row.get('size_bytes') or 0)} bytes"
+        )
+    if len(lines) <= 1:
+        return ''
+    if int(omitted or 0) > 0:
+        lines.append(
+            f'- 另有 {int(omitted)} 条更早的外置结果未列出：用 content_search 按关键词找。'
+        )
+    return '\n'.join(lines)
+
+
 _NODE_CONTRACT_ECHO_REPAIR_MESSAGE = (
     '上一次回复把运行时注入的 `## Runtime Tool Contract` 契约原文复述了一遍。'
     '不要输出、总结或引用这份契约；'
@@ -6997,6 +7035,7 @@ class ReActToolLoop:
         live_notice_tail_messages: list[dict[str, Any]] | None = None,
         append_notice_context: dict[str, Any] | None = None,
         unsettled_children: list[dict[str, Any]] | None = None,
+        externalized_refs: tuple[list[dict[str, Any]], int] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         parts = cls._split_request_messages_for_token_compaction(
             request_messages=request_messages,
@@ -7062,6 +7101,17 @@ class ReActToolLoop:
         ]
         if unsettled_rows:
             compacted_payload["unsettled_child_count"] = len(unsettled_rows)
+        # 外置结果索引同样机器重算：条数与未列出条数进块元数据，取证按这两个键读。
+        refs_rows_raw, refs_omitted = externalized_refs if isinstance(externalized_refs, tuple) else ([], 0)
+        refs_rows = [
+            dict(row)
+            for row in list(refs_rows_raw or [])
+            if isinstance(row, dict) and str(row.get('ref') or '').strip()
+        ]
+        refs_omitted = int(refs_omitted or 0)
+        if refs_rows:
+            compacted_payload["externalized_ref_count"] = len(refs_rows)
+            compacted_payload["externalized_ref_omitted"] = refs_omitted
         # 块形态与前门一致：首行前缀、第二行 JSON 元数据、空行后接摘要正文。元数据行必须
         # 能单独解析回来——落盘点要靠它读收口水位线，写成转义字面量就等于永远读不到。
         block_content = (
@@ -7071,6 +7121,9 @@ class ReActToolLoop:
         unsettled_section = _render_unsettled_children_section(unsettled_rows)
         if unsettled_section:
             block_content = f"{block_content}\n\n{unsettled_section}"
+        refs_section = _render_externalized_refs_section(refs_rows, omitted=refs_omitted)
+        if refs_section:
+            block_content = f"{block_content}\n\n{refs_section}"
         if summary_text:
             block_content = f"{block_content}\n\n{summary_text}"
         compacted_block = {"role": "assistant", "content": block_content.strip()}
@@ -7113,6 +7166,46 @@ class ReActToolLoop:
                     }
                 )
         return records
+
+    def _node_externalized_artifact_refs(self, *, task_id: str, node_id: str) -> tuple[list[dict[str, Any]], int]:
+        """压缩稳定块用的外置结果索引：只列本节点产出的 `tool_result:*` artifact。
+
+        内部产物（node_input / task_runtime_messages / task_execution_trace 等单例）不是
+        模型面结果，列进来只是噪声。不可读条目剔掉，避免指向已被清理的 ref。取最近
+        N 条，返回 (rows, omitted)。取数失败返回空表：索引是防遗忘的观测段，不阻断压缩。
+
+        规模读数用 `size_bytes`（记录里现成的磁盘事实）：artifact 行不带行数/字符数，
+        为印这两个数去整读文件会把"轻量索引"变成一次大读。
+        """
+        service = getattr(self, 'main_task_service', None)
+        store = getattr(service, 'artifact_store', None) if service is not None else None
+        list_for_node = getattr(store, 'list_artifacts_for_node', None)
+        if not callable(list_for_node):
+            return [], 0
+        try:
+            records = list(list_for_node(str(task_id or '').strip(), str(node_id or '').strip() or None) or [])
+        except Exception:
+            return [], 0
+        readable = getattr(store, '_artifact_is_readable', None)
+        rows: list[dict[str, Any]] = []
+        for item in records:
+            kind = str(getattr(item, 'kind', '') or '').strip()
+            if not kind.startswith('tool_result:'):
+                continue
+            if callable(readable) and not readable(item):
+                continue
+            ref = artifact_ref_from_id(getattr(item, 'artifact_id', ''))
+            if not ref:
+                continue
+            rows.append({
+                'ref': ref,
+                'label': str(getattr(item, 'title', '') or '').strip() or kind,
+                'size_bytes': int(getattr(item, 'size_bytes', 0) or 0),
+                'created_at': str(getattr(item, 'created_at', '') or '').strip(),
+            })
+        rows.sort(key=lambda row: str(row.get('created_at') or ''))
+        kept = rows[-_NODE_EXTERNALIZED_REFS_MAX_ROWS:]
+        return kept, max(0, len(rows) - len(kept))
 
     def _node_unsettled_direct_children(self, *, task_id: str, node_id: str) -> list[dict[str, str]]:
         """压缩稳定块用的未终态直接子节点快照：只列自己派生的直接子节点，孙辈及以下不列。
@@ -7459,6 +7552,10 @@ class ReActToolLoop:
                 live_notice_ids=live_notice_ids,
                 append_notice_context=self._node_append_notice_context(node_id=node_id),
                 unsettled_children=self._node_unsettled_direct_children(
+                    task_id=task_id,
+                    node_id=node_id,
+                ),
+                externalized_refs=self._node_externalized_artifact_refs(
                     task_id=task_id,
                     node_id=node_id,
                 ),
@@ -8541,6 +8638,10 @@ class ReActToolLoop:
                     live_notice_ids=live_notice_ids,
                     append_notice_context=self._node_append_notice_context(node_id=node_id),
                     unsettled_children=self._node_unsettled_direct_children(
+                        task_id=task_id,
+                        node_id=node_id,
+                    ),
+                    externalized_refs=self._node_externalized_artifact_refs(
                         task_id=task_id,
                         node_id=node_id,
                     ),
