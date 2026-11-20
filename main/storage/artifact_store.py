@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 import errno
 import gzip
 import hashlib
@@ -21,6 +22,8 @@ _REPLACE_CONTENTION_WINERRORS = frozenset({5, 32})
 _REPLACE_CONTENTION_ERRNOS = frozenset({errno.EACCES, errno.EPERM, errno.EBUSY})
 _REPLACE_ATTEMPTS = 4
 _REPLACE_RETRY_SECONDS = 0.025
+# 流式登记的单趟读块：内存占用与文件大小无关，只与这个块大小有关。
+_FILE_STREAM_CHUNK_BYTES = 1024 * 1024
 
 
 def _is_replace_contention(exc: BaseException) -> bool:
@@ -150,6 +153,135 @@ class TaskArtifactStore:
         self._content_index[(task_id, content_hash)] = persisted
         self._note_disk_written(task_id, size_bytes)
         return persisted
+
+    def create_text_artifact_from_file(
+        self,
+        *,
+        task_id: str,
+        node_id: str | None,
+        kind: str,
+        title: str,
+        source_path: Path | str,
+        source_encoding: str = 'utf-8',
+        extension: str = '.txt',
+        mime_type: str = 'text/plain',
+    ) -> tuple[TaskArtifactRecord, int, int]:
+        """把一份大文本文件流式登记成 artifact，返回 (record, line_count, char_count)。
+
+        与 `create_text_artifact` 的分工：那条吃 str，适合工具当场凑出的正文；这条吃
+        文件路径，适合 exec 这类"输出可能远大于内存预算"的来源——哈希、行数、字符数
+        与 preview 在同一趟流式扫描里算出，全程不把整份内容读进内存。
+
+        两处口径与 str 入口不同，都是有意的：
+        - 去重只按 (content_hash, size_bytes) 比，并跳过没有哈希的存量行：不对大文件
+          调 `_legacy_content_hash` 整读回算。
+        - 强制 plain，不走 gzip 阈值。这类 artifact 的用途之一是让模型在 exec 里用
+          rg / Select-String 直接搜全量；gzip 会堵死那条路（导航读端能解压，shell 搜不动）。
+
+        行数按换行符计（`\\n` 计数 + 末尾非换行补一行），与 `str.splitlines()` 在
+        `\\n` / `\\r\\n` 输出上一致；源文件按 `source_encoding` 增量解码后以 UTF-8 落盘。
+        """
+        source = Path(source_path)
+        if not source.is_file():
+            raise FileNotFoundError(f"source file not found: {source}")
+        try:
+            decoder_factory = codecs.getincrementaldecoder(source_encoding)
+        except LookupError:
+            decoder_factory = codecs.getincrementaldecoder('utf-8')
+        decoder = decoder_factory(errors='replace')
+
+        artifact_id, path = self._allocate_artifact_path(task_id=task_id, extension=extension)
+        tmp = path.with_name(path.name + '.tmp')
+        hasher = hashlib.sha256()
+        size_bytes = 0
+        char_count = 0
+        line_count = 0
+        preview = ''
+        last_char = ''
+
+        def consume(text: str) -> None:
+            nonlocal size_bytes, char_count, line_count, preview, last_char
+            if not text:
+                return
+            encoded = text.encode('utf-8')
+            out.write(text)
+            hasher.update(encoded)
+            size_bytes += len(encoded)
+            char_count += len(text)
+            line_count += text.count('\n')
+            if len(preview) < 400:
+                preview = (preview + text)[:400]
+            last_char = text[-1]
+
+        try:
+            with source.open('rb') as src, tmp.open('w', encoding='utf-8', newline='') as out:
+                while True:
+                    chunk = src.read(_FILE_STREAM_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    consume(decoder.decode(chunk))
+                consume(decoder.decode(b'', final=True))
+            if char_count and last_char != '\n':
+                line_count += 1
+            content_hash = hasher.hexdigest()
+
+            existing = self._find_existing_file_artifact(
+                task_id=task_id, content_hash=content_hash, size_bytes=size_bytes,
+            )
+            if existing is not None:
+                tmp.unlink(missing_ok=True)
+                return existing, line_count, char_count
+
+            _replace_atomically(tmp, path)
+            record = TaskArtifactRecord(
+                artifact_id=artifact_id,
+                task_id=task_id,
+                node_id=node_id,
+                kind=kind,
+                title=title,
+                path=str(path),
+                mime_type=mime_type,
+                preview_text=preview,
+                created_at=now_iso(),
+                size_bytes=size_bytes,
+                content_encoding='plain',
+                content_hash=content_hash,
+            )
+            persisted = self._store.upsert_artifact(record)
+            self._content_index[(task_id, content_hash)] = persisted
+            self._note_disk_written(task_id, size_bytes)
+            return persisted, line_count, char_count
+        except OSError as exc:
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
+            raise classify_write_error(exc) from exc
+
+    def _find_existing_file_artifact(
+        self, *, task_id: str, content_hash: str, size_bytes: int,
+    ) -> TaskArtifactRecord | None:
+        """按 (哈希, 字节数) 查重，候选集由 SQL 侧筛；没有哈希的存量行直接跳过。
+
+        不复用 `_find_existing_text_artifact`：那条会对缺哈希的行整读文件回算哈希，
+        大文件上等于把流式登记省下的内存与耗时又付一遍。
+        """
+        cached = self._content_index.get((task_id, content_hash))
+        if cached is not None and int(cached.size_bytes or 0) == size_bytes and self._artifact_is_readable(cached):
+            return cached
+        for row in self._store.find_artifact_dedupe_candidates(task_id, content_hash):
+            recorded = str(row['content_hash'] or '').strip()
+            if not recorded or recorded != content_hash:
+                continue
+            if int(row['size_bytes'] or 0) != size_bytes:
+                continue
+            artifact = self._store.get_artifact(str(row['artifact_id'] or '').strip())
+            if artifact is None or not self._artifact_is_readable(artifact):
+                continue
+            self._content_index[(task_id, content_hash)] = artifact
+            return artifact
+        return None
 
     def create_json_artifact(
         self,

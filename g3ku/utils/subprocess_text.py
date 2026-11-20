@@ -30,10 +30,7 @@ def _oem_encoding() -> str:
     return f'cp{code_page}' if code_page > 0 else ''
 
 
-def decode_subprocess_output(data: bytes | None) -> str:
-    if not data:
-        return ''
-
+def _candidate_encodings() -> list[str]:
     candidate_encodings = ['utf-8', 'utf-8-sig']
     oem_encoding = _oem_encoding()
     if oem_encoding:
@@ -55,6 +52,31 @@ def decode_subprocess_output(data: bytes | None) -> str:
             continue
         seen.add(key)
         unique_encodings.append(text)
+    return unique_encodings
+
+
+def sniff_subprocess_encoding(data: bytes | None) -> str:
+    """按与 `decode_subprocess_output` 同一张候选表嗅出可整段解码的编码名。
+
+    流式转码必须先定编码再增量解码（整缓冲嗅探不可流式），所以采样头部字节定档，
+    之后全程用增量解码器。解不出时回 utf-8，由解码器的 replace 兜底。
+    """
+    if not data:
+        return 'utf-8'
+    for encoding in _candidate_encodings():
+        try:
+            data.decode(encoding)
+            return encoding
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return 'utf-8'
+
+
+def decode_subprocess_output(data: bytes | None) -> str:
+    if not data:
+        return ''
+
+    unique_encodings = _candidate_encodings()
 
     for encoding in unique_encodings:
         try:
@@ -71,4 +93,4 @@ def decode_subprocess_output(data: bytes | None) -> str:
     return data.decode('utf-8', errors='replace')
 
 
-__all__ = ['decode_subprocess_output', 'enrich_subprocess_env_for_text']
+__all__ = ['decode_subprocess_output', 'enrich_subprocess_env_for_text', 'sniff_subprocess_encoding']
