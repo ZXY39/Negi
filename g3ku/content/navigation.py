@@ -72,6 +72,19 @@ SEARCH_PREVIEW_CHAR_LIMIT = 2000
 # 字符模式（start_char/end_char）与二进制/图片占位正文不加栏：前者不是整行，后者
 # 的行数本来就不是文件事实。
 LINE_GUTTER_SEPARATOR = ": "
+# 导航读端（content_open / content_search / content_describe）单次整读的目标体积上限。
+# 读端是「整份读进内存再切片/逐行扫」，没有流式路径，所以目标体积直接决定内存峰值。
+# 8 MiB 的口径：高于已知最大正常用例（task_node_detail(detail_level="full") 实测
+# 7,024,971 字符），不误伤既有行为；exec 全量输出登记成 artifact 后上限抬到 64 MiB，
+# 没有这道守卫时一次 content_search(ref) 就能吃掉数百 MB RAM。
+CONTENT_READ_SIZE_LIMIT_BYTES = 8 * 1024 * 1024
+CONTENT_SIZE_LIMIT_HINT = (
+    "target exceeds the navigation read limit: {target} ({size_bytes} bytes > {limit_bytes} bytes). "
+    "content_open / content_search read a target whole, so they cannot serve this one at any range. "
+    "Use exec instead: rg -n <pattern> <path> for line numbers, rg -n -C 5 <pattern> <path> for "
+    "context (Windows: Select-String -Pattern <pattern> -Path <path> -Context 5), or write the "
+    "needed slice to a smaller file and open that file."
+)
 
 
 def _numbered_line(line_number: int, text: str) -> str:
@@ -247,6 +260,27 @@ def _externalized_tool_result_preview(
     if len(preview) <= max_chars:
         return preview
     return preview[:max_chars].rstrip() + "..."
+
+
+def _full_output_hint(value: Any) -> dict[str, Any] | None:
+    """读出工具载荷里声明的「全量输出已登记成 artifact」事实（exec 的 tee 产物）。
+
+    有它时信封的 ref 指向那份全量 artifact，而不是把残缺载荷再存一份：载荷里的
+    头尾摘录仍作预览，但 ref 与规模读数都以全量为准。没有它时一切照旧。
+    """
+    payload = _parsed_json_payload(value)
+    if not isinstance(payload, dict):
+        return None
+    ref = str(payload.get("full_output_ref") or "").strip()
+    if not ref.startswith("artifact:"):
+        return None
+    return {
+        "ref": ref,
+        "line_count": int(payload.get("full_output_line_count") or 0),
+        "char_count": int(payload.get("full_output_char_count") or 0),
+        "size_bytes": int(payload.get("full_output_size_bytes") or 0),
+        "truncated": bool(payload.get("full_output_truncated")),
+    }
 
 
 def _tool_result_externalization_summary(
@@ -670,6 +704,46 @@ class ContentNavigationService:
             artifact_lookup=self._artifact_lookup,
         )
 
+    def register_full_output_file(
+        self,
+        *,
+        source_path: Any,
+        runtime: dict[str, Any] | None = None,
+        display_name: str = "exec full output",
+        source_kind: str = "tool_result:exec",
+        source_encoding: str = "utf-8",
+    ) -> dict[str, Any] | None:
+        """把一份远超内存预算的全量输出文件登记成 artifact，返回 ref 与规模读数。
+
+        工具（exec）只负责把原始字节 tee 到文件并嗅出编码；登记归这里，因为 task/node
+        归属口径（`_runtime_task_id` 的 adhoc 兜底）与 artifact store 都在本服务手上。
+        登记走流式入口，全程不把整份内容读进内存。失败返回 None，调用方据此如实
+        退回「中段未保留」，不谎报有全量。
+        """
+        register = getattr(self._artifact_store, "create_text_artifact_from_file", None)
+        if not callable(register):
+            return None
+        try:
+            record, line_count, char_count = register(
+                task_id=_runtime_task_id(runtime),
+                node_id=_runtime_node_id(runtime),
+                kind=source_kind,
+                title=display_name,
+                source_path=source_path,
+                source_encoding=source_encoding,
+            )
+        except Exception:
+            return None
+        ref = artifact_ref_from_id(getattr(record, "artifact_id", ""))
+        if not ref:
+            return None
+        return {
+            "ref": ref,
+            "line_count": int(line_count or 0),
+            "char_count": int(char_count or 0),
+            "size_bytes": int(getattr(record, "size_bytes", 0) or 0),
+        }
+
     def maybe_externalize_text(
         self,
         value: Any,
@@ -695,6 +769,45 @@ class ContentNavigationService:
             return None
         display = _display_name(display_name, source_kind=source_kind, fallback=source_kind)
         origin_ref = _extract_origin_ref(value)
+        invocation_text = str((delivery_metadata or {}).get("invocation_text") or "").strip()
+        full_output = _full_output_hint(value)
+        if full_output is not None:
+            # ref 指向已登记的全量 artifact，不再把残缺载荷存成第二份。预览仍取载荷
+            # 头部（与其他工具同形），但行数/字符数/体积换成全量的读数，否则信封会
+            # 把头尾摘录的规模说成整份输出的规模。
+            artifact_id = _artifact_id_from_ref(full_output["ref"])
+            artifact = self._lookup_artifact(artifact_id)
+            handle = self._build_handle(
+                ref=full_output["ref"],
+                artifact_id=artifact_id,
+                uri=str(getattr(artifact, "path", "") or ""),
+                source_kind=source_kind,
+                display_name=display,
+                mime_type=mime_type,
+                origin_ref=origin_ref,
+                invocation_text=invocation_text,
+                text=text,
+                file_size_bytes=full_output["size_bytes"] or None,
+            )
+            handle.line_count = int(full_output["line_count"])
+            handle.char_count = int(full_output["char_count"])
+            handle.requested_ref = handle.ref
+            handle.resolved_ref = handle.ref
+            summary = _tool_result_externalization_summary(
+                handle,
+                call_status=str((delivery_metadata or {}).get("tool_status") or ""),
+                preview=_externalized_tool_result_preview(text),
+            )
+            if full_output["truncated"]:
+                summary = (
+                    f"{summary}\nFull output file was itself capped; content beyond the cap was not retained."
+                )
+            return ContentEnvelope(
+                summary=summary,
+                ref=handle.ref,
+                resolved_ref=handle.ref,
+                handle=handle,
+            )
         handle = self._persist_text(
             text,
             runtime=runtime,
@@ -702,7 +815,7 @@ class ContentNavigationService:
             source_kind=source_kind,
             mime_type=mime_type,
             origin_ref=origin_ref,
-            invocation_text=str((delivery_metadata or {}).get("invocation_text") or "").strip(),
+            invocation_text=invocation_text,
         )
         resolved_ref, nested_depth = self._resolved_ref_and_depth_from_value(value)
         handle = self._apply_handle_refs(
@@ -1446,6 +1559,23 @@ class ContentNavigationService:
             payload["end_char"] = end_char
         return payload
 
+    def _enforce_read_size_limit(self, target: Path, *, size_bytes: int | None = None) -> None:
+        """整读前钉住内存上界：超限给可行动出路，不静默截断后假装读全。
+
+        守卫对任何区间都生效——读端没有流式路径，`start_line/end_line` 再窄也是整份
+        读进内存后切片，所以"只读一小段"绕不过它。出路是 exec 定向提取。
+        gzip artifact 用记录里的原始字节数判（磁盘上是压缩后的体积，判它会漏）。
+        """
+        if not target.exists():
+            return
+        size = int(size_bytes or 0) or self._path_file_size(target)
+        if size > CONTENT_READ_SIZE_LIMIT_BYTES:
+            raise ValueError(
+                CONTENT_SIZE_LIMIT_HINT.format(
+                    target=target, size_bytes=size, limit_bytes=CONTENT_READ_SIZE_LIMIT_BYTES,
+                )
+            )
+
     def _read_text_for_content_display(self, file_path: Path) -> tuple[str, str, bool]:
         """Read file text for content display without crashing on binary files.
 
@@ -1483,6 +1613,7 @@ class ContentNavigationService:
                 raise FileNotFoundError(f"path not found: {path}")
             if not file_path.is_file():
                 raise ValueError(DIRECTORY_PATH_ERROR_HINT.format(target=path))
+            self._enforce_read_size_limit(file_path)
             text, mime_type, display_replaced = self._read_text_for_content_display(file_path)
             try:
                 ref_path = str(file_path.relative_to(self._workspace)).replace("\\", "/")
@@ -1517,6 +1648,7 @@ class ContentNavigationService:
                 raise FileNotFoundError(f"path not found: {normalized_ref[5:]}")
             if not file_path.is_file():
                 raise ValueError(DIRECTORY_PATH_ERROR_HINT.format(target=normalized_ref[5:]))
+            self._enforce_read_size_limit(file_path)
             text, mime_type, display_replaced = self._read_text_for_content_display(file_path)
             try:
                 ref_path = str(file_path.relative_to(self._workspace)).replace("\\", "/")
@@ -1564,6 +1696,9 @@ class ContentNavigationService:
         if artifact is None or not getattr(artifact, "path", None):
             raise FileNotFoundError(_artifact_not_found_message(artifact_id))
         artifact_path = Path(str(artifact.path))
+        self._enforce_read_size_limit(
+            artifact_path, size_bytes=int(getattr(artifact, "size_bytes", 0) or 0),
+        )
         # 磁盘治理（P0）：gzip artifact 必须解压读取，否则会显示为 "[二进制文件]"；
         # 延迟导入避免 g3ku↔main 模块级循环。plain 路径保持原行为（含二进制占位符）。
         if artifact_path.suffix == ".gz" or str(getattr(artifact, "content_encoding", "") or "").strip().lower() == "gzip":

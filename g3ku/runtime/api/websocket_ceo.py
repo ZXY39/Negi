@@ -1302,6 +1302,10 @@ def _order_follow_up_interrupt_rows(items: list[dict[str, Any]]) -> list[dict[st
     assistant 行，转录的写入顺序因此是 [提问, 补充, 被打断的回复]。界面按行序重放
     会把中途消息顶到上一轮上面，逻辑顺序应按回合归属算：这条回复紧跟在它自己回合
     的最后一行之后、在补充消息之前。没有打断行的快照原样返回。
+
+    回合的提问行不可见时（心跳/定时注入的 ui_visible=false 用户行）快照里没有可用的
+    锚点：这一行保持转录原位，不能追加到 feed 尾部——那会把几天前的旧回合顶到最新
+    位置，且每条快照都重放一次。
     """
     interrupt_ids = {
         id(item)
@@ -1312,20 +1316,30 @@ def _order_follow_up_interrupt_rows(items: list[dict[str, Any]]) -> list[dict[st
     }
     if not interrupt_ids:
         return items
-    rest = [item for item in items if id(item) not in interrupt_ids]
+    anchor_turn_ids = {
+        str(item.get("turn_id") or "").strip()
+        for item in items
+        if id(item) not in interrupt_ids and str(item.get("turn_id") or "").strip()
+    }
+    rebuilt: list[dict[str, Any]] = []
+    anchored: list[dict[str, Any]] = []
     for item in items:
         if id(item) not in interrupt_ids:
+            rebuilt.append(item)
             continue
+        if str(item.get("turn_id") or "").strip() in anchor_turn_ids:
+            anchored.append(item)
+        else:
+            rebuilt.append(item)
+    # 锚点必然在 rebuilt 里；搜索含已插入的锚定行，同一回合多条时按转录先后接在彼此后面。
+    for item in anchored:
         turn_id = str(item.get("turn_id") or "").strip()
         anchor = -1
-        for index, other in enumerate(rest):
+        for index, other in enumerate(rebuilt):
             if str(other.get("turn_id") or "").strip() == turn_id:
                 anchor = index
-        if anchor >= 0:
-            rest.insert(anchor + 1, item)
-        else:
-            rest.append(item)
-    return rest
+        rebuilt.insert(anchor + 1, item)
+    return rebuilt
 
 
 def _snapshot_message_turn_id(message: dict[str, Any] | None) -> str:

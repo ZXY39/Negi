@@ -1,6 +1,7 @@
 """Shell execution tool."""
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -18,7 +19,11 @@ from g3ku.runtime.project_environment import apply_project_environment, resolve_
 from g3ku.runtime.tool_watchdog import coerce_timeout_argument, resolve_tool_watchdog_config
 from g3ku.utils.helpers import expand_path_anchor_tokens, model_data_root
 from g3ku.utils.process_tree import kill_process_tree
-from g3ku.utils.subprocess_text import decode_subprocess_output, enrich_subprocess_env_for_text
+from g3ku.utils.subprocess_text import (
+    decode_subprocess_output,
+    enrich_subprocess_env_for_text,
+    sniff_subprocess_encoding,
+)
 from main.governance.exec_tool_policy import (
     EXEC_TOOL_ID,
     EXECUTION_MODE_FULL_ACCESS,
@@ -29,6 +34,8 @@ from main.governance.exec_tool_policy import (
 
 _STREAM_READ_CHUNK_SIZE = 4096
 _STREAM_CAPTURE_BYTE_LIMIT = 64 * 1024
+# 全量 tee 的单文件上限：超过它停止写盘并如实标注，避免一条 `cat 大文件` 写穿磁盘。
+_EXEC_FULL_OUTPUT_BYTE_LIMIT = 64 * 1024 * 1024
 # exec 正文的内联额度：捕获到的正文不超过它时整篇交付给模型。额度必须低于工具结果的
 # 通用外置闸门（`content.navigation.INLINE_CHAR_LIMIT` = 6000，按序列化后的载荷长度判），
 # 否则 exec 自己刚凑齐的正文会被信封换成 800 字符预览。超限时 exec 不自己切割、也不自带
@@ -106,6 +113,13 @@ class _BoundedStreamCapture:
     truncated: bool = False
     _head: bytearray = field(default_factory=bytearray)
     _tail: bytearray = field(default_factory=bytearray)
+    # 全量 tee：内存环只保头尾，原始字节另落一份文件，供事后登记成 artifact。
+    # sink 由调用方打开与关闭；这里只负责写与停写判据。
+    sink: Any = None
+    sink_path: str = ""
+    sink_bytes: int = 0
+    sink_truncated: bool = False
+    sink_failed: bool = False
 
     def append(self, chunk: bytes | None) -> None:
         if not chunk:
@@ -119,6 +133,28 @@ class _BoundedStreamCapture:
         if len(self._tail) > self.byte_limit:
             del self._tail[:-self.byte_limit]
         self.truncated = self.total_bytes > self.byte_limit
+        self._write_sink(data)
+
+    def _write_sink(self, data: bytes) -> None:
+        """写盘失败或超单文件上限都只停 tee，不影响捕获与命令本身。
+
+        交付侧据此如实退回「中段未保留」，不谎报有全量。
+        """
+        if self.sink is None or self.sink_failed or self.sink_truncated:
+            return
+        remaining = _EXEC_FULL_OUTPUT_BYTE_LIMIT - self.sink_bytes
+        if remaining <= 0:
+            self.sink_truncated = True
+            return
+        piece = data[:remaining]
+        try:
+            self.sink.write(piece)
+            self.sink_bytes += len(piece)
+        except OSError:
+            self.sink_failed = True
+            return
+        if len(data) > remaining:
+            self.sink_truncated = True
 
     @classmethod
     def from_bytes(cls, data: bytes | None, *, byte_limit: int = _STREAM_CAPTURE_BYTE_LIMIT) -> "_BoundedStreamCapture":
@@ -339,6 +375,7 @@ class ExecTool(Tool):
                 purpose=str(purpose or "").strip(),
             )
 
+        tee: tuple[Any, str] | None = None
         try:
             if os.name == "nt":
                 process = await asyncio.create_subprocess_exec(
@@ -358,10 +395,12 @@ class ExecTool(Tool):
                     start_new_session=True,
                 )
 
+            tee = self._open_exec_tee(runtime)
             try:
                 stdout_capture, stderr_capture, drain_timed_out = await self._collect_process_output(
                     process,
                     timeout=effective_timeout,
+                    tee=tee,
                 )
             except asyncio.CancelledError:
                 kill_process_tree(process)
@@ -378,7 +417,7 @@ class ExecTool(Tool):
                     await asyncio.wait_for(process.wait(), timeout=5.0)
                 except asyncio.TimeoutError:
                     pass
-                stdout_capture, stderr_capture = await self._collect_terminated_process_output(process)
+                stdout_capture, stderr_capture = await self._collect_terminated_process_output(process, tee=tee)
                 _secs_text = (
                     f"{effective_timeout:.2f}".rstrip("0").rstrip(".")
                     if effective_timeout < 1
@@ -396,6 +435,12 @@ class ExecTool(Tool):
                     stderr_capture=stderr_capture,
                     stderr_text=timeout_message,
                     error=timeout_message,
+                    full_output=self._finalize_full_output(
+                        tee,
+                        stdout_capture=stdout_capture,
+                        stderr_capture=stderr_capture,
+                        runtime=runtime,
+                    ),
                 )
 
             extra_notes: list[str] = []
@@ -410,6 +455,12 @@ class ExecTool(Tool):
                 stderr_capture=stderr_capture,
                 error="" if process.returncode == 0 else f"Exit code: {process.returncode}",
                 extra_notes=extra_notes,
+                full_output=self._finalize_full_output(
+                    tee,
+                    stdout_capture=stdout_capture,
+                    stderr_capture=stderr_capture,
+                    runtime=runtime,
+                ),
             )
 
         except Exception as e:
@@ -421,6 +472,9 @@ class ExecTool(Tool):
                 error=f"Error executing command: {str(e)}",
             )
         finally:
+            # 正常路径已在 _finalize_full_output 里关闭并删除；这里兜住取消/异常路径，
+            # 不让临时文件留在数据根里无人回收。
+            self._discard_tee(tee)
             self._notify_resource_change(runtime=runtime, trigger="tool:exec")
 
     async def _collect_process_output(
@@ -428,7 +482,9 @@ class ExecTool(Tool):
         process: Any,
         *,
         timeout: float,
+        tee: tuple[Any, str] | None = None,
     ) -> tuple[_BoundedStreamCapture, _BoundedStreamCapture, bool]:
+        sink, sink_path = tee if tee is not None else (None, "")
         if getattr(process, "stdout", None) is None and getattr(process, "stderr", None) is None:
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
             return (
@@ -436,8 +492,8 @@ class ExecTool(Tool):
                 _BoundedStreamCapture.from_bytes(stderr),
                 False,
             )
-        stdout_task = asyncio.create_task(self._capture_stream(process.stdout))
-        stderr_task = asyncio.create_task(self._capture_stream(process.stderr))
+        stdout_task = asyncio.create_task(self._capture_stream(process.stdout, sink=sink, sink_path=sink_path))
+        stderr_task = asyncio.create_task(self._capture_stream(process.stderr, sink=sink, sink_path=sink_path))
         try:
             await asyncio.wait_for(process.wait(), timeout=timeout)
         except BaseException:
@@ -454,18 +510,24 @@ class ExecTool(Tool):
             kill_process_tree(process)
         return stdout_capture, stderr_capture, drain_timed_out
 
-    async def _collect_terminated_process_output(self, process: Any) -> tuple[_BoundedStreamCapture, _BoundedStreamCapture]:
+    async def _collect_terminated_process_output(
+        self,
+        process: Any,
+        *,
+        tee: tuple[Any, str] | None = None,
+    ) -> tuple[_BoundedStreamCapture, _BoundedStreamCapture]:
+        sink, sink_path = tee if tee is not None else (None, "")
         if getattr(process, "stdout", None) is None and getattr(process, "stderr", None) is None:
             return _BoundedStreamCapture(), _BoundedStreamCapture()
-        stdout_task = asyncio.create_task(self._capture_stream(process.stdout))
-        stderr_task = asyncio.create_task(self._capture_stream(process.stderr))
+        stdout_task = asyncio.create_task(self._capture_stream(process.stdout, sink=sink, sink_path=sink_path))
+        stderr_task = asyncio.create_task(self._capture_stream(process.stderr, sink=sink, sink_path=sink_path))
         stdout_capture, stderr_capture, _drain_timed_out = await self._await_capture_tasks(
             stdout_task, stderr_task, timeout=_POST_EXIT_DRAIN_GRACE_SECONDS
         )
         return stdout_capture, stderr_capture
 
-    async def _capture_stream(self, stream: Any) -> _BoundedStreamCapture:
-        capture = _BoundedStreamCapture()
+    async def _capture_stream(self, stream: Any, *, sink: Any = None, sink_path: str = "") -> _BoundedStreamCapture:
+        capture = _BoundedStreamCapture(sink=sink, sink_path=sink_path)
         if stream is None:
             return capture
         try:
@@ -1301,6 +1363,98 @@ class ExecTool(Tool):
         posix_paths = re.findall(r"(?:^|[\s|>])(/[^\s\"'>]+)", command) # POSIX: /absolute only
         return win_paths + posix_paths
 
+    def _open_exec_tee(self, runtime: dict[str, Any]) -> tuple[Any, str] | None:
+        """打开本次前台 exec 的全量 tee 落点；打不开返回 None（退回现状语义）。
+
+        落数据根而不是工作区：它是运行时自有产物，不该进用户工作区或版本库。
+        不复用 owned_processes 的日志目录——那里与后台进程登记表同寿命，前台产物
+        会被后台条目的清理误删。从第一个 chunk 就写：等超阈值再写会丢头部。
+        """
+        try:
+            scope = owned_processes.scope_key(
+                session_key=str(runtime.get("session_key") or ""),
+                task_id=str(runtime.get("task_id") or ""),
+            )
+            # scope 键含冒号（task:… / session:…），Windows 路径分量非法；
+            # 沿用 owned_processes._scope_dir 的 sha1 目录口径。
+            digest = hashlib.sha1(scope.encode("utf-8")).hexdigest()[:16]
+            directory = data_g3ku_path("exec-tmp", digest, create=True)
+            path = directory / f"exec-{os.urandom(6).hex()}.log"
+            return open(path, "wb", buffering=0), str(path)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _discard_tee(tee: tuple[Any, str] | None) -> None:
+        if tee is None:
+            return
+        handle, path = tee
+        try:
+            handle.close()
+        except OSError:
+            pass
+        try:
+            Path(path).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def _finalize_full_output(
+        self,
+        tee: tuple[Any, str] | None,
+        *,
+        stdout_capture: _BoundedStreamCapture | None,
+        stderr_capture: _BoundedStreamCapture | None,
+        runtime: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """关 tee；只有捕获环真丢过中段才把全量登记成 artifact。
+
+        未超捕获上限时环里已是全量，登记只会多一份副本，所以直接删临时文件。
+        登记失败同样删临时文件并返回 None——交付侧退回「中段未保留」，不谎报有全量。
+        store 是流式读源文件另写 artifact，不搬源文件，所以登记后删源是安全的。
+        """
+        if tee is None:
+            return None
+        handle, path = tee
+        try:
+            handle.close()
+        except OSError:
+            pass
+        try:
+            captures = [item for item in (stdout_capture, stderr_capture) if item is not None]
+            if not any(item.truncated for item in captures):
+                return None
+            if any(item.sink_failed for item in captures):
+                return None
+            if max((item.sink_bytes for item in captures), default=0) <= 0:
+                return None
+            register = getattr(self.content_store, "register_full_output_file", None)
+            if not callable(register):
+                return None
+            head_bytes = b"".join(bytes(item._head) for item in captures)
+            info = register(
+                source_path=path,
+                runtime=runtime,
+                display_name="exec full output",
+                source_kind="tool_result:exec",
+                source_encoding=sniff_subprocess_encoding(head_bytes),
+            )
+            if not isinstance(info, dict) or not str(info.get("ref") or "").strip():
+                return None
+            return {
+                "ref": str(info["ref"]),
+                "line_count": int(info.get("line_count") or 0),
+                "char_count": int(info.get("char_count") or 0),
+                "size_bytes": int(info.get("size_bytes") or 0),
+                "truncated": any(item.sink_truncated for item in captures),
+            }
+        except Exception:
+            return None
+        finally:
+            try:
+                Path(path).unlink(missing_ok=True)
+            except OSError:
+                pass
+
     def _build_payload(
         self,
         *,
@@ -1313,6 +1467,7 @@ class ExecTool(Tool):
         stderr_capture: _BoundedStreamCapture | None = None,
         extra_notes: list[str] | None = None,
         extra_fields: dict[str, Any] | None = None,
+        full_output: dict[str, Any] | None = None,
     ) -> str:
         def _merge(primary: str, fallback: str) -> str:
             normalized_primary = str(primary or "").strip()
@@ -1335,11 +1490,32 @@ class ExecTool(Tool):
 
         # 反应式指引/告警：既进 tail_preview（模型一定会看工具结果），也单列 notes 字段。
         notes = [str(note).strip() for note in (extra_notes or []) if str(note or "").strip()]
+        if full_output:
+            notes.append(
+                "完整输出已外置（本结果 ref 背后就是全量，不是头尾摘录）："
+                "用 content_search(ref=<本结果 ref>, query=…) 定位行号，再 "
+                "content_open(ref=…, start_line=<行号-3>, end_line=<行号+3>) 取上下文；"
+                "不要为了看中段重跑命令。"
+            )
 
         captured_body = combined_head
-        if ((stdout_capture is not None and stdout_capture.truncated)
-                or (stderr_capture is not None and stderr_capture.truncated)) and combined_tail:
-            captured_body = f"{combined_head}\n…（超出捕获上限，中段未保留）…\n{combined_tail}".strip()
+        ring_truncated = (
+            (stdout_capture is not None and stdout_capture.truncated)
+            or (stderr_capture is not None and stderr_capture.truncated)
+        )
+        if ring_truncated and combined_tail:
+            # 三态如实：有全量 / 全量自身被上限截断 / 真的没有全量。
+            # 「中段未保留」只允许在第三种情况出现。
+            if full_output and full_output.get("truncated"):
+                middle_note = (
+                    f"…（超出捕获上限，中段未内联；完整输出已外置，但全量文件自身只写到 "
+                    f"{_EXEC_FULL_OUTPUT_BYTE_LIMIT} 字节上限，其后未保留）…"
+                )
+            elif full_output:
+                middle_note = "…（超出捕获上限，中段未内联；完整输出已外置，按本结果 ref 复开即可读到中段）…"
+            else:
+                middle_note = "…（超出捕获上限，中段未保留）…"
+            captured_body = f"{combined_head}\n{middle_note}\n{combined_tail}".strip()
         # 整篇交付；超限只打标，切割与外置归统一信封（它负责给 ref）。
         head_preview = captured_body
         tail_preview = ""
@@ -1358,6 +1534,13 @@ class ExecTool(Tool):
             "stderr_captured_bytes": int(stderr_capture.total_bytes if stderr_capture is not None else len(stderr_text.encode('utf-8'))),
             "output_truncated": len(captured_body) > _EXEC_INLINE_CHAR_LIMIT,
         }
+        if full_output:
+            # 投递道据此把信封 ref 指向全量 artifact，而不是把残缺载荷再存一份。
+            payload["full_output_ref"] = str(full_output.get("ref") or "")
+            payload["full_output_line_count"] = int(full_output.get("line_count") or 0)
+            payload["full_output_char_count"] = int(full_output.get("char_count") or 0)
+            payload["full_output_size_bytes"] = int(full_output.get("size_bytes") or 0)
+            payload["full_output_truncated"] = bool(full_output.get("truncated"))
         if notes:
             payload["notes"] = notes
         if extra_fields:
