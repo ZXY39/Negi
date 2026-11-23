@@ -927,10 +927,10 @@ Do not treat `ceoSessionBusy` as equivalent to "all session-list mutations must 
 
 ### Session Link Dialog And API Contract
 
-- 会话卡片 `⋯` 菜单在「命名」与「删除」之间带「关联其他会话」（`data-session-link`，委托在 `#ceo-session-list`）。它进 `syncCeoSessionActions` 的置灰选择器，与命名/删除同档：目录不可写或批量模式下禁用。关系语义（对称边、短别名、ACL、生命周期）归 `session-messaging.md`「关系模型与短别名」。
+- 会话卡片 `⋯` 菜单在「命名」与「删除」之间带「关联其他会话」（`data-session-link`，委托在 `#ceo-session-list`）。它进 `syncCeoSessionActions` 的置灰选择器，与命名/删除同档：目录不可写或批量模式下禁用。关系语义（对称边、短标识、懒创建、ACL、生命周期）归 `session-messaging.md`「关系模型与短标识」。
 - 弹窗（`#ceo-session-link-backdrop`，抄免审白名单骨架）候选取 `S.ceoSessions`，排除自身与 `internal:`。**本地/渠道是卡片切换**（`role=tablist` + `aria-pressed`，同会话面板 tab 形状），列表只投影当前 tab；渠道行标签走 `displayChannelGroupLabel`。**排序在工具行右侧**，互斥两档「最新活跃 / 创建时间」（`aria-pressed`，样式从该属性取），默认最新活跃；`updated_at` 为空（从未活跃）回退创建时间。排序偏好存 `g3ku.ui.ceo.session-link-sort.v1`（浏览器本地，同手动顺序/渠道折叠先例）；tab 不持久，每次开弹窗回本地。**未保存草稿跨 tab/排序存活**：DOM 只是当前 tab 的投影，切换前把勾选合并进 `ceoSessionLinkState.draft` 集合，保存发的是草稿全集而非当前 DOM。**有保存键**：保存才 `PUT /api/ceo/sessions/{id}/links` body `{links:[session_key,...]}`，整集差集替换、双向生效。保存中禁用保存键；失败留在窗内，内联错误行读 `error.data.reason`/`target`（`session_not_linkable` / `session_missing`）；成功关窗 + toast。关闭键与点 backdrop 自身都关窗。
-- `GET /api/ceo/sessions/{id}/links` 返回 `{ok, session_id, linked:[key,...]}`；PUT 另带 `added`/`removed`。两端点都先验源会话存在（本地转录或 ext 注册表条目），不存在 404 `session_missing`；目标逐个校验，非法 400 detail 是 `{reason, target}` 对象。423 解锁闸由全局中间件覆盖，无额外口令。
-- 写成功后记一条 operator action（category `session_links`、scope `session:<key>`）并发 `ceo.sessions.snapshot` 全局广播（多页面同步）；无变化（added/removed 皆空）不记不广播。候选列表不另开端点，复用页面加载时的目录。
+- `GET /api/ceo/sessions/{id}/links` 返回 `{ok, session_id, linked:[key,...], short_ids:{key:短标识}}`；PUT 另带 `added`/`removed`。`short_ids` 覆盖可关联候选（含未关联的），弹窗每行标题右侧据此挂一枚 mono 短标识标签（`.ceo-session-link-short-id`，行网格扩成四列），操作员能把模型记忆里的号对回具体会话；没有号的行不挂空标签。两端点都先验源会话存在（本地转录或 ext 注册表条目），不存在 404 `session_missing`；目标逐个校验，非法 400 detail 是 `{reason, target}` 对象。423 解锁闸由全局中间件覆盖，无额外口令。
+- 写成功后记一条 operator action（category `session_links`、scope `session:<key>`，正文用短标识）并发 `ceo.sessions.snapshot` 全局广播（多页面同步）；无变化（added/removed 皆空）不记不广播。候选列表不另开端点，复用页面加载时的目录。模型侧投递自动建立的边不记 operator action，但下一次目录/弹窗读得到（判据见 `session-messaging.md`「寻址与投递」）。
 
 ### Channel Session Clear Contract
 
