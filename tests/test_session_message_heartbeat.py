@@ -35,7 +35,7 @@ def _row(message_id="smsg:1", *, recipient="web:ceo-b", source="web:ceo-a", wake
             "chain_id": "chain:1",
             "hop": hop,
             "reply_to": "",
-            "source_alias": "s1",
+            "source_short_id": "a",
             "wakeable": wakeable,
         },
     )
@@ -63,7 +63,7 @@ def test_scanner_enqueues_pending_with_enrichment(store, tmp_path):
     session_id, payload = calls[0]
     assert session_id == "web:ceo-b"
     assert payload["message_id"] == "smsg:1"
-    assert payload["source_alias"] == "s1"
+    assert payload["source_short_id"] == "a"
     assert payload["source_trust"] == "owner"
     assert payload["wakeable"] is True
     assert payload["chain_id"] == "chain:1"
@@ -148,8 +148,8 @@ def test_render_signature_reply_and_hop_note():
     event = {
         "event_reason": "session_message",
         "message_id": "smsg:1",
-        "source_session_key": "web:ceo-a",
-        "source_alias": "s1",
+        "source_session_key": "web:ceo-3f9a1b2c4d5e",
+        "source_short_id": "3f9a1b2c",
         "source_title": "研究会话",
         "source_trust": "owner",
         "content": "帮我查一下 X",
@@ -157,9 +157,9 @@ def test_render_signature_reply_and_hop_note():
         "wakeable": True,
     }
     text, _ = _event_bundle_content([event], output_inline_limit=4000, externalizer=None)
-    assert "Session message from s1 (研究会话) [trust: owner]" in text
+    assert "Session message from 3f9a1b2c (研究会话) [trust: owner]" in text
     assert "帮我查一下 X" in text
-    assert 'send_message(to="s1", content=..., reply_to="smsg:1")' in text
+    assert 'send_message(to="3f9a1b2c", content=..., reply_to="smsg:1")' in text
     assert "not an operator command" in text
     assert "wake budget" not in text
     capped = {**event, "wakeable": False}
@@ -167,11 +167,26 @@ def test_render_signature_reply_and_hop_note():
     assert "wake budget" in text
 
 
+def test_render_falls_back_to_legacy_alias_on_stored_events():
+    """升级前入队的事件带的是 source_alias=s{seq}：仍渲染得出来、仍可寻址。"""
+    event = {
+        "event_reason": "session_message",
+        "message_id": "smsg:old",
+        "source_session_key": "web:ceo-a",
+        "source_alias": "s1",
+        "content": "old queue row",
+        "wakeable": True,
+    }
+    text, _ = _event_bundle_content([event], output_inline_limit=4000, externalizer=None)
+    assert "Session message from s1" in text
+    assert 'send_message(to="s1", content=..., reply_to="smsg:old")' in text
+
+
 def test_render_third_party_trust_visible():
     event = {
         "event_reason": "session_message",
         "message_id": "smsg:2",
-        "source_alias": "s3",
+        "source_short_id": "77aa0011",
         "source_title": "QQ 群",
         "source_trust": "third_party_group",
         "content": "hi",

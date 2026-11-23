@@ -9520,6 +9520,7 @@ const CEO_SESSION_LINK_SORT_KEY = "g3ku.ui.ceo.session-link-sort.v1";
 const ceoSessionLinkState = {
     sessionId: "",
     linked: [],
+    shortIds: {},
     saving: false,
     tab: "local",
     // 未保存草稿跨 tab/排序存活：DOM 只投影当前 tab，切走前把勾选合并回这份集合。
@@ -9566,12 +9567,14 @@ function syncCeoSessionLinkDraftFromDom() {
 function ceoSessionLinkRow(item, checked, tagLabel) {
     const id = String(item?.session_id || "");
     const title = String(item?.title || id);
+    const shortId = String(ceoSessionLinkState.shortIds?.[id] || "").trim();
     return `
-        <label class="ceo-risk-whitelist-item">
+        <label class="ceo-risk-whitelist-item ceo-session-link-item">
             <input type="checkbox" class="ui-checkbox-input ceo-session-link-input"
                 data-link-session-id="${esc(id)}" ${checked ? "checked" : ""}>
             <span class="ui-checkbox-box" aria-hidden="true"></span>
             <span class="ceo-risk-tool-name">${esc(title)}</span>
+            ${shortId ? `<span class="meta-tag ceo-session-link-short-id" title="模型面会话短标识">${esc(shortId)}</span>` : ""}
             <span class="meta-tag">${esc(tagLabel)}</span>
         </label>
     `;
@@ -9633,6 +9636,7 @@ async function openCeoSessionLinkDialog(sessionId) {
     ceoSessionLinkState.sessionId = id;
     ceoSessionLinkState.saving = false;
     ceoSessionLinkState.linked = [];
+    ceoSessionLinkState.shortIds = {};
     ceoSessionLinkState.tab = "local";
     ceoSessionLinkState.draft = new Set();
     if (U.ceoSessionLinkError) {
@@ -9647,6 +9651,9 @@ async function openCeoSessionLinkDialog(sessionId) {
     try {
         const payload = await ApiClient.getSessionLinks(id);
         ceoSessionLinkState.linked = Array.isArray(payload?.linked) ? payload.linked : [];
+        ceoSessionLinkState.shortIds = (payload?.short_ids && typeof payload.short_ids === "object")
+            ? payload.short_ids
+            : {};
         ceoSessionLinkState.draft = new Set(ceoSessionLinkState.linked);
         syncCeoSessionLinkTabButtons();
         syncCeoSessionLinkSortButtons();

@@ -2,7 +2,7 @@ schema_version: 1
 kind: tool
 display_name: "发送节点消息"
 name: send_message
-description: Send a message to task nodes in this session's tasks, or to linked peer sessions by alias; one-to-many via a list.
+description: Send a message to task nodes in this session's tasks, or to peer sessions by short id; one-to-many via a list. Messaging an unlinked session id links it automatically.
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''
@@ -26,7 +26,7 @@ parameters:
       type: [string, array]
       items:
         type: string
-      description: Task id (delivers to that task's root node), execution node id, peer session alias (like s2) or session:<alias|key>, or a list of them. `task:` / `node:` / `session:` prefixes and stray spaces are accepted.
+      description: Task id (delivers to that task's root node), execution node id, peer session short id (like 3f9a1b2c) or session:<short id|key>, or a list of them. `task:` / `node:` / `session:` prefixes and stray spaces are accepted. A session id that is not linked yet is linked on delivery.
       minLength: 1
     content:
       type: string

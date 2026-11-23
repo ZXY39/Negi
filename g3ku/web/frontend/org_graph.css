@@ -5929,6 +5929,24 @@ textarea {
     justify-self: end;
 }
 
+/* 关联弹窗行多一枚短标识：模型面用的号，操作员据此把记忆里的号对回具体会话。 */
+.ceo-session-link-item {
+    grid-template-columns: 18px minmax(0, 1fr) auto auto;
+}
+
+.ceo-session-link-item > .ceo-session-link-short-id {
+    grid-column: 3;
+    grid-row: 1;
+    justify-self: end;
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    font-weight: 500;
+    color: var(--text-secondary);
+}
+
+.ceo-session-link-item > .meta-tag:not(.ceo-session-link-short-id) {
+    grid-column: 4;
+}
+
 .ceo-risk-tool-name {
     grid-column: 2;
     grid-row: 1;

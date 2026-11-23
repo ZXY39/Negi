@@ -41,7 +41,7 @@ from g3ku.resources.tool_settings import (
     raw_tool_settings_from_descriptor,
     validate_tool_settings,
 )
-from g3ku.runtime import tool_arg_stash
+from g3ku.runtime import session_link_policy, tool_arg_stash
 from g3ku.runtime.context.execution_tool_selection import build_execution_tool_selection
 from g3ku.runtime.context.node_context_selection import (
     NodeContextSelectionResult,
@@ -6994,12 +6994,12 @@ class MainRuntimeService:
         ref: str = '',
         reply_to: str = '',
     ) -> dict[str, Any]:
-        """Frontdoor → nodes in this session's tasks, any task by task id, or linked peer sessions.
+        """Frontdoor → nodes in this session's tasks, any task by task id, or peer sessions.
 
-        ``to`` accepts a task id, a node id, a peer session alias (``s2``) or
-        ``session:<alias|key>``, or a list of them. A task id lands on that task's
-        root node; a bare id resolves as a node first, then a task, then a session
-        alias. The namespaces are not shared, so explicit prefixes win.
+        ``to`` accepts a task id, a node id, a peer session short id or
+        ``session:<short id|key>``, or a list of them. A task id lands on that
+        task's root node; a bare id resolves as a node first, then a task, then a
+        session address. The namespaces are not shared, so explicit prefixes win.
         ``reply_to`` continues a peer-session chain (session targets only).
         """
         normalized_session = str(session_id or '').strip()
@@ -7027,7 +7027,7 @@ class MainRuntimeService:
         if any(
             str(item.get('reason') or '').strip()
             in {'target_not_in_task', 'target_list_unparsed', 'not_session_task',
-                'session_not_linked', 'session_missing'}
+                'session_not_linked', 'session_not_linkable', 'session_missing'}
             for item in results
         ):
             legal_targets, legal_truncated = self._frontdoor_legal_targets(normalized_session)
@@ -7080,7 +7080,7 @@ class MainRuntimeService:
             return await self._deliver_frontdoor_task_target(
                 target=target, task=task, content=content, ref=ref
             )
-        if value and self.store.resolve_session_alias(value):
+        if value and self.resolve_session_address(value):
             return await self._deliver_frontdoor_session_target(
                 session_id=session_id, target=target, value=value,
                 content=content, ref=ref, reply_to=reply_to,
@@ -7100,13 +7100,9 @@ class MainRuntimeService:
         ref: str,
         reply_to: str,
     ) -> dict[str, Any]:
-        key = self.store.resolve_session_alias(value)
+        key = self.resolve_session_address(value)
         if not key:
-            # Explicit canonical keys are accepted too; the roster only shows aliases.
-            if value.startswith(('web:', 'ext:')):
-                key = value
-            else:
-                return self._frontdoor_target_rejection(target, 'session_missing')
+            return self._frontdoor_target_rejection(target, 'session_missing')
         return await self.deliver_session_message(
             session_id=session_id,
             target_session_key=key,
@@ -7128,7 +7124,9 @@ class MainRuntimeService:
     ) -> dict[str, Any]:
         """会话 → 会话点对点信箱（持久、运行时签名）。
 
-        ACL 就是关联边：删除会话会清边，所以无边即不可达（`session_not_linked`）。
+        关联边懒创建：owner 信任档的会话向一个可关联的会话 id 投递时，无边即建边
+        （对称，两端各分配短标识），回执带 `auto_linked`。第三方发送方仍要操作员
+        先勾（`session_not_linked`）——关联边是 ACL，那道批准门只对第三方保留。
         链信息运行时盖章：reply_to 命中发送者信箱里的一条来信才继承 chain/hop，
         模型传不了伪造的 hop。到顶（SESSION_MESSAGE_HOP_CAP）的来信落箱不唤醒，
         由扫描器侧闸执行；回执先告诉发送者这一档。
@@ -7140,8 +7138,18 @@ class MainRuntimeService:
             return {'target': target_token, 'status': 'rejected', 'reason': 'session_missing'}
         if not body:
             return {'target': target_token, 'status': 'rejected', 'reason': 'content_required'}
+        auto_linked = False
         if not self.store.has_session_link(sender, recipient):
-            return {'target': target_token, 'status': 'rejected', 'reason': 'session_not_linked'}
+            if not session_link_policy.may_auto_link(sender):
+                return {'target': target_token, 'status': 'rejected', 'reason': 'session_not_linked'}
+            problem = session_link_policy.session_link_problem(recipient, self_key=sender)
+            if problem:
+                return {'target': target_token, 'status': 'rejected', 'reason': problem}
+            linked_at = now_iso()
+            if self.store.add_session_link(sender, recipient, created_at=linked_at):
+                self.store.get_or_create_session_short_id(sender, created_at=linked_at)
+                self.store.get_or_create_session_short_id(recipient, created_at=linked_at)
+            auto_linked = True
         chain_id = ''
         hop = 0
         reply_token = str(reply_to or '').strip()
@@ -7184,7 +7192,7 @@ class MainRuntimeService:
                 'chain_id': chain_id,
                 'hop': hop,
                 'reply_to': reply_token,
-                'source_alias': self.get_session_alias(sender),
+                'source_short_id': self.session_short_id(sender),
                 'wakeable': wakeable,
             },
         )
@@ -7200,6 +7208,8 @@ class MainRuntimeService:
             'hop': hop,
             'reason': '',
         }
+        if auto_linked:
+            receipt['auto_linked'] = True
         if not wakeable:
             receipt['notice'] = (
                 'Reply chain reached its wake budget; this message landed without waking the '
@@ -7302,14 +7312,14 @@ class MainRuntimeService:
                 seen.add(normalized)
                 targets.append(normalized)
         for peer in self.store.list_session_links(session_id):
-            alias = str(self.store.get_session_alias(peer) or '').strip()
-            if not alias or alias in seen:
+            short_id = self.session_short_id(peer)
+            if not short_id or short_id in seen:
                 continue
             if len(targets) >= limit:
                 truncated = True
                 break
-            seen.add(alias)
-            targets.append(alias)
+            seen.add(short_id)
+            targets.append(short_id)
         return targets, truncated
 
     def list_frontdoor_node_messages(self, session_id: str) -> list[FrontdoorNodeMessage]:
@@ -7328,7 +7338,7 @@ class MainRuntimeService:
             except Exception:
                 continue
 
-    # ---- 会话关联（session links）：对称边 + 短别名 + 点对点信箱 ----
+    # ---- 会话关联（session links）：对称边 + 短标识 + 点对点信箱 ----
 
     def list_session_links(self, session_key: str) -> list[str]:
         return list(self.store.list_session_links(str(session_key or '').strip()) or [])
@@ -7339,7 +7349,7 @@ class MainRuntimeService:
     def replace_session_links(self, session_key: str, targets: list[str]) -> dict[str, list[str]]:
         """Diff-replace one session's neighbor set; edges are symmetric.
 
-        Returns the added/removed peer keys. Aliases are assigned for every
+        Returns the added/removed peer keys. Short ids are allocated for every
         endpoint of a newly created edge (both sides), never for removals.
         Target existence/authorization is the caller's job (REST layer).
         """
@@ -7355,26 +7365,44 @@ class MainRuntimeService:
         created_at = now_iso()
         for peer in added:
             if self.store.add_session_link(normalized, peer, created_at=created_at):
-                self.store.get_or_create_session_alias(normalized, created_at=created_at)
-                self.store.get_or_create_session_alias(peer, created_at=created_at)
+                self.store.get_or_create_session_short_id(normalized, created_at=created_at)
+                self.store.get_or_create_session_short_id(peer, created_at=created_at)
         for peer in removed:
             self.store.remove_session_link(normalized, peer)
         return {'added': added, 'removed': removed}
 
-    def ensure_session_alias(self, session_key: str) -> str:
-        return str(self.store.get_or_create_session_alias(session_key, created_at=now_iso()) or '')
+    def session_short_id(self, session_key: str) -> str:
+        """模型面短标识：首次取数时分配，此后冻结（永不改号、永不复用）。"""
+        normalized = str(session_key or '').strip()
+        if not normalized:
+            return ''
+        existing = str(self.store.get_session_short_id(normalized) or '')
+        if existing:
+            return existing
+        return str(
+            self.store.get_or_create_session_short_id(normalized, created_at=now_iso()) or ''
+        )
 
-    def get_session_alias(self, session_key: str) -> str:
-        return str(self.store.get_session_alias(session_key) or '')
-
-    def resolve_session_alias(self, alias: str) -> str:
-        return str(self.store.resolve_session_alias(alias) or '')
+    def resolve_session_address(self, token: str) -> str:
+        """短 id / 存量 s{seq} / 规范 key → 规范 key；对不上返回空。"""
+        text = str(token or '').strip()
+        if not text:
+            return ''
+        key = self.store.resolve_session_short_id(text)
+        if key:
+            return key
+        key = self.store.resolve_session_alias(text)
+        if key:
+            return key
+        if text.startswith(session_link_policy.SESSION_ADDRESS_PREFIXES):
+            return text
+        return ''
 
     def reachable_session_roster(self, session_key: str) -> list[dict[str, str]]:
-        """Alias + canonical key per linked peer; titles are enriched caller-side."""
+        """Short id + canonical key per linked peer; titles are enriched caller-side."""
         roster: list[dict[str, str]] = []
         for peer in self.list_session_links(session_key):
-            roster.append({'session_key': peer, 'alias': self.get_session_alias(peer)})
+            roster.append({'session_key': peer, 'short_id': self.session_short_id(peer)})
         return roster
 
     def purge_session_link_data(self, session_key: str) -> None:

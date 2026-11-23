@@ -38,7 +38,7 @@ FRONTDOOR_PINNED_CONTRACT_KIND = 'frontdoor_runtime_pinned_contract'
 # v6: 头部新增「在跑的后台进程」清单块（按 session/节点冻结，随重印边界刷新）。
 # v5: 头部新增「在挂的长期任务」清单块（随重印边界冻结，不逐跳重画）。版本进重印判据，
 # 存量钉住块上线后重印一次；之后清单只在压缩边界跟着重印。
-PINNED_CONTRACT_RENDERER_VERSION = 'pinned-contract-v7'
+PINNED_CONTRACT_RENDERER_VERSION = 'pinned-contract-v8'
 PINNED_CONTRACT_SNAPSHOT_NOTE = (
     'snapshot_note: this block refreshes only at compaction; later runtime notices '
     'supersede changed values.'
@@ -563,7 +563,8 @@ def render_reachable_session_roster(items: list[Any] | None) -> str:
     """渲染「可交流的会话」小节；空清单返回空串（整节不出现）。
 
     条目由 `frontdoor_reachable_session_roster` 给出：本会话关联边的对端，
-    每行 `短别名 | 标题`。模型寻址一律用别名（规范 key 长且易抄错）。
+    每行 `短标识 | 标题`。模型寻址一律用短标识（规范 key 长且易抄错），它是
+    规范 key 尾段的前几位，写进记忆也能对回具体会话。
     行数有界，余量指向 `list_sessions`。关联变化不重印头部，由
     `[RUNTIME_NOTICE]` 的 session links 节纠正。
     """
@@ -571,25 +572,25 @@ def render_reachable_session_roster(items: list[Any] | None) -> str:
     for item in list(items or []):
         if not isinstance(item, dict):
             continue
-        alias = str(item.get('alias') or '').strip()
-        if not alias:
+        short_id = str(item.get('short_id') or '').strip()
+        if not short_id:
             continue
-        entries.append((alias, _reachable_session_title(item)))
+        entries.append((short_id, _reachable_session_title(item)))
     if not entries:
         return ''
     lines = [REACHABLE_SESSION_ROSTER_HEADING]
     visible = entries[:REACHABLE_SESSION_ROSTER_MAX_LINES]
-    for alias, title in visible:
-        lines.append('- ' + (f'{alias} | {title}' if title else alias))
+    for short_id, title in visible:
+        lines.append('- ' + (f'{short_id} | {title}' if title else short_id))
     overflow = len(entries) - len(visible)
     if overflow > 0:
         lines.append(f'另有 {overflow} 条，用 list_sessions 查看')
     return '\n'.join(lines)
 
 
-def reachable_session_aliases_from_text(pinned_text: Any) -> list[str]:
-    """头部名册节已覆盖的别名（delta 台账初值，首跳不重播已钉住的名字）。"""
-    aliases: list[str] = []
+def reachable_session_ids_from_text(pinned_text: Any) -> list[str]:
+    """头部名册节已覆盖的短标识（delta 台账初值，首跳不重播已钉住的名字）。"""
+    short_ids: list[str] = []
     in_section = False
     for line in str(pinned_text or '').splitlines():
         stripped = line.strip()
@@ -601,12 +602,12 @@ def reachable_session_aliases_from_text(pinned_text: Any) -> list[str]:
         if stripped.startswith('#'):
             break
         if stripped.startswith('- '):
-            alias = stripped[2:].split('|')[0].strip()
-            if alias:
-                aliases.append(alias)
+            short_id = stripped[2:].split('|')[0].strip()
+            if short_id:
+                short_ids.append(short_id)
         elif stripped and not stripped.startswith('另有'):
             break
-    return aliases
+    return short_ids
 
 
 def _session_title_for_roster(key: str) -> str:
@@ -656,10 +657,12 @@ def frontdoor_reachable_session_roster(loop: Any, *, session_key: str | None) ->
         if not isinstance(item, dict):
             continue
         peer = str(item.get('session_key') or '').strip()
-        alias = str(item.get('alias') or '').strip()
-        if not peer or not alias:
+        short_id = str(item.get('short_id') or '').strip()
+        if not peer or not short_id:
             continue
-        result.append({'session_key': peer, 'alias': alias, 'title': _session_title_for_roster(peer)})
+        result.append(
+            {'session_key': peer, 'short_id': short_id, 'title': _session_title_for_roster(peer)}
+        )
     return result
 
 

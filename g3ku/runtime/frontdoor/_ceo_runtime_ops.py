@@ -238,7 +238,7 @@ from .tool_contract import (
     pinned_contract_section_values,
     pinned_contract_state,
     pinned_skill_ids_for,
-    reachable_session_aliases_from_text,
+    reachable_session_ids_from_text,
     session_mode_state_text,
     session_mode_switch_text,
     skill_roster_epoch_for,
@@ -4610,12 +4610,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 session_key=normalized_session_key,
             ),
             covered_contract_sections=covered_sections,
-            session_links_provider=lambda **kwargs: {
-                'reachable': frontdoor_reachable_session_roster(
-                    self._loop, session_key=normalized_session_key
-                )
-            },
-            covered_session_aliases=reachable_session_aliases_from_text(
+            session_links_provider=lambda **kwargs: self._frontdoor_session_link_provider(
+                session_key=normalized_session_key, **kwargs
+            ),
+            covered_session_ids=reachable_session_ids_from_text(
                 pinned_contract_state(None, session_key=normalized_session_key)[0]
             ),
         )
@@ -4823,6 +4821,37 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         else:
             text = f"你在 QQ 的昵称是「{nickname}」。"
         return {"nickname": nickname, "text": text}
+
+    def _frontdoor_session_link_provider(
+        self,
+        *,
+        session_key: str,
+        known_short_ids: list[Any] | None = None,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        """可达会话名册的当刻值 + 归一后的台账初值。
+
+        存量台账里可能还是 s{seq}（换短标识之前记的）：先解析回规范 key 再取
+        短标识，免得换标识那一版的首跳把整套名册当成「全移除 + 全新增」播一遍。
+        """
+        reachable = frontdoor_reachable_session_roster(self._loop, session_key=session_key)
+        service = getattr(self._loop, "main_task_service", None)
+        resolver = getattr(service, "resolve_session_address", None)
+        getter = getattr(service, "session_short_id", None)
+        known: list[str] = []
+        for token in list(known_short_ids or []):
+            text = str(token or "").strip()
+            if not text:
+                continue
+            mapped = ""
+            if callable(resolver) and callable(getter):
+                try:
+                    key = resolver(text)
+                    mapped = str(getter(key) or "") if key else ""
+                except Exception:
+                    mapped = ""
+            known.append(mapped or text)
+        return {"reachable": reachable, "known": known}
 
     def _frontdoor_operator_action_provider(
         self,

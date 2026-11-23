@@ -64,11 +64,12 @@ MEDIA_FAILURE_NOTICE_HINT = (
 )
 _MEDIA_FAILURE_MAX_ROWS = 8
 # 会话关联名册的变化出口：头部钉住块只在压缩边界重印，两次重印之间的增删
-# 由这两节宣布一次（不唤醒会话，随下一跳装配并入）。模型面只出现短别名。
+# 由这两节宣布一次（不唤醒会话，随下一跳装配并入）。模型面只出现短标识。
 SESSION_LINKS_ADDED_HEADING = 'Sessions newly reachable in this session:'
 SESSION_LINKS_REMOVED_HEADING = 'Sessions no longer reachable in this session:'
 SESSION_LINKS_NOTICE_HINT = (
-    'Use send_message(to="<alias>", content=...) to talk to a reachable session. '
+    'Use send_message(to="<short_id>", content=...) to talk to a session. '
+    'Messaging a session id links it automatically, so an id you hold stays usable. '
     'The pinned roster may lag until the next compaction; this notice is the current set.'
 )
 # 头部快照与当刻值的差量：两次重印之间唯一的变化出口。
@@ -140,7 +141,7 @@ def deliver_for_scope(
     contract_sections: dict[str, Any] | None = None,
     covered_contract_sections: dict[str, Any] | None = None,
     session_links_provider: Any = None,
-    covered_session_aliases: list[Any] | None = None,
+    covered_session_ids: list[Any] | None = None,
 ) -> tuple[dict[str, Any] | None, list[dict[str, str]]]:
     """每跳唯一动作：记账 + 有未宣布的就投一条。
 
@@ -277,7 +278,7 @@ def deliver_for_scope(
     if callable(session_links_provider):
         try:
             link_delta = session_links_provider(
-                known_aliases=list(link_cursor.get('known') or []),
+                known_short_ids=list(link_cursor.get('known') or []),
                 initialized=bool(link_cursor.get('initialized')),
             )
         except Exception:
@@ -286,28 +287,41 @@ def deliver_for_scope(
             live_entries = [
                 dict(item)
                 for item in list(link_delta.get('reachable') or [])
-                if isinstance(item, dict) and str(item.get('alias') or '').strip()
+                if isinstance(item, dict) and str(item.get('short_id') or '').strip()
             ]
             titles = {
-                str(item['alias']).strip(): str(item.get('title') or '').strip()
+                str(item['short_id']).strip(): str(item.get('title') or '').strip()
                 for item in live_entries
             }
-            live_aliases = sorted(titles)
-            if link_cursor.get('initialized'):
-                known = {str(alias or '').strip() for alias in list(link_cursor.get('known') or [])}
+            live_short_ids = sorted(titles)
+            # provider 可以把台账里的存量 s{seq} 归一成短标识再交回来：
+            # 换标识那一版不让每条会话白播一场「全移除 + 全新增」。
+            normalized_known = link_delta.get('known')
+            if isinstance(normalized_known, list):
+                known = {
+                    str(item or '').strip()
+                    for item in normalized_known
+                    if str(item or '').strip()
+                }
+            elif link_cursor.get('initialized'):
+                known = {
+                    str(short_id or '').strip()
+                    for short_id in list(link_cursor.get('known') or [])
+                    if str(short_id or '').strip()
+                }
             else:
                 # 首跳以头部名册为初值：钉住时已说过的名字不重播。
                 known = {
-                    str(alias or '').strip()
-                    for alias in list(covered_session_aliases or [])
-                    if str(alias or '').strip()
+                    str(short_id or '').strip()
+                    for short_id in list(covered_session_ids or [])
+                    if str(short_id or '').strip()
                 }
             session_links_added = [
-                {'alias': alias, 'title': titles.get(alias, '')}
-                for alias in sorted(set(live_aliases) - known)
+                {'short_id': short_id, 'title': titles.get(short_id, '')}
+                for short_id in sorted(set(live_short_ids) - known)
             ]
-            session_links_removed = sorted(known - set(live_aliases))
-            context['session_link_cursor'] = {'known': live_aliases, 'initialized': True}
+            session_links_removed = sorted(known - set(live_short_ids))
+            context['session_link_cursor'] = {'known': live_short_ids, 'initialized': True}
     operator_actions: list[dict[str, Any]] = []
     operator_cursor = dict(context.get('operator_action_cursor') or {})
     operator_cursor_id = max(int(operator_cursor.get('id') or 0), 0)
@@ -598,9 +612,9 @@ def normalize_skill_roster_notice_context(payload: Any) -> dict[str, Any]:
         'session_link_cursor': {
             'known': sorted(
                 {
-                    str(alias or '').strip()
-                    for alias in list(session_link_source.get('known') or [])
-                    if str(alias or '').strip()
+                    str(short_id or '').strip()
+                    for short_id in list(session_link_source.get('known') or [])
+                    if str(short_id or '').strip()
                 }
             ),
             'initialized': bool(session_link_source.get('initialized')),
@@ -1127,22 +1141,22 @@ def render_session_link_lines(
     *,
     removed: list[Any] | None = None,
 ) -> list[str]:
-    """会话关联变化一节：新增带标题，移除只列别名；末句给寻址入口。"""
+    """会话关联变化一节：新增带标题，移除只列短标识；末句给寻址入口。"""
     added_rows: list[str] = []
     for item in list(added or []):
         if isinstance(item, dict):
-            alias = str(item.get('alias') or '').strip()
+            short_id = str(item.get('short_id') or '').strip()
             title = ' '.join(str(item.get('title') or '').split()).replace('|', '｜')
         else:
-            alias = str(item or '').strip()
+            short_id = str(item or '').strip()
             title = ''
-        if not alias:
+        if not short_id:
             continue
-        added_rows.append(f'- {alias}' + (f' | {title}' if title else ''))
+        added_rows.append(f'- {short_id}' + (f' | {title}' if title else ''))
     removed_rows = [
-        f'- {str(alias or "").strip()}'
-        for alias in list(removed or [])
-        if str(alias or '').strip()
+        f'- {str(short_id or "").strip()}'
+        for short_id in list(removed or [])
+        if str(short_id or '').strip()
     ]
     if not added_rows and not removed_rows:
         return []
