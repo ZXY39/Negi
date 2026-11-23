@@ -663,13 +663,14 @@ class SQLiteTaskStore:
             )
             ''',
             '''
-            -- 会话短别名：模型面寻址用 s{seq}，规范 session key 不动。
-            -- AUTOINCREMENT 保证删除后永不复用；别名行永不删除
-            -- （ext 同 key 回归拿回原别名）。
+            -- 会话短标识：模型面寻址用 short_id（规范 key 尾段前 8 字符，撞号延长），
+            -- 规范 session key 不动。标识行永不删除（ext 同 key 回归拿回原标识），
+            -- short_id 一旦分配永不改、永不复用。seq 与 s{seq} 只服务存量数据的读解析。
             CREATE TABLE IF NOT EXISTS session_aliases (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_key TEXT NOT NULL UNIQUE,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                short_id TEXT NOT NULL DEFAULT ''
             )
             ''',
             '''
@@ -720,14 +721,17 @@ class SQLiteTaskStore:
             'CREATE INDEX IF NOT EXISTS idx_task_worker_status_outbox_state_updated_at ON task_worker_status_outbox(delivery_state, updated_at)',
             'CREATE INDEX IF NOT EXISTS idx_task_summary_outbox_state_updated_at ON task_summary_outbox(delivery_state, updated_at)',
             'CREATE INDEX IF NOT EXISTS idx_session_links_b ON session_links(b)',
+            # 存量行补列后 short_id 先是空串，唯一性只约束已分配的那些。
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_session_aliases_short_id "
+            "ON session_aliases(short_id) WHERE short_id <> ''",
             'CREATE INDEX IF NOT EXISTS idx_frontdoor_session_messages_session_status ON frontdoor_session_messages(session_id, status)',
             'CREATE INDEX IF NOT EXISTS idx_frontdoor_session_messages_pending ON frontdoor_session_messages(status, created_at)',
             'CREATE INDEX IF NOT EXISTS idx_frontdoor_session_messages_source ON frontdoor_session_messages(source_session_key)',
         ]
         with self._conn:
-            index_statements = [item for item in statements if item.lstrip().upper().startswith('CREATE INDEX')]
+            index_statements = [item for item in statements if self._is_index_statement(item)]
             for statement in statements:
-                if statement.lstrip().upper().startswith('CREATE INDEX'):
+                if self._is_index_statement(statement):
                     continue
                 self._conn.execute(statement)
             # 旧表瘦身必须在建索引之前：重建会连索引一起丢弃，随后索引段负责再建。
@@ -753,12 +757,17 @@ class SQLiteTaskStore:
             self._ensure_column(self._conn, 'tool_jobs', 'node_id', "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(self._conn, 'tool_jobs', 'purpose', "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(self._conn, 'tool_job_outbox', 'owner_kind', "TEXT NOT NULL DEFAULT 'session'")
+            self._ensure_column(self._conn, 'session_aliases', 'short_id', "TEXT NOT NULL DEFAULT ''")
             self._retire_inline_execution_trace_summaries(self._conn)
             for statement in index_statements:
                 self._conn.execute(statement)
             self._mark_legacy_diagnostic_error_rows(self._conn)
             self._node_detail_columns = self._live_columns(self._conn, 'task_node_details')
             self._tool_result_columns = self._live_columns(self._conn, 'task_node_tool_results')
+
+    @staticmethod
+    def _is_index_statement(statement: str) -> bool:
+        return statement.lstrip().upper().startswith(('CREATE INDEX', 'CREATE UNIQUE INDEX'))
 
     @staticmethod
     def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -2929,7 +2938,7 @@ class SQLiteTaskStore:
             )
         )
 
-    # ---- 会话关联（session links）：对称无向边 + 短别名 + 点对点信箱 ----
+    # ---- 会话关联（session links）：对称无向边 + 短标识 + 点对点信箱 ----
 
     @staticmethod
     def _normalized_link_pair(a: str, b: str) -> tuple[str, str]:
@@ -3002,26 +3011,102 @@ class SQLiteTaskStore:
 
         return self._run_write(operation)
 
-    def get_or_create_session_alias(self, session_key: str, *, created_at: str) -> str:
-        """Stable model-facing alias ``s{seq}``; assigned once, never reused."""
+    _SHORT_ID_LENGTHS = (8, 12)
+
+    @staticmethod
+    def _session_short_id_tail(session_key: str) -> str:
+        """规范 key 的标识尾段：剥掉命名空间前缀，只留小写字母数字。"""
+        text = str(session_key or '').strip()
+        if text.startswith('web:ceo-'):
+            text = text[len('web:ceo-'):]
+        elif text.startswith('web:'):
+            text = text[len('web:'):]
+        elif text.startswith('ext:'):
+            text = text[len('ext:'):].split(':', 1)[-1]
+        tail = re.sub(r'[^a-z0-9]', '', text.lower())
+        return tail or hashlib.sha256(text.encode('utf-8')).hexdigest()
+
+    @classmethod
+    def _session_short_id_candidates(cls, session_key: str) -> list[str]:
+        """短号候选，从短到长：撞号时延长而不是改已分配的号。"""
+        tail = cls._session_short_id_tail(session_key)
+        ordered: list[str] = []
+        for length in cls._SHORT_ID_LENGTHS:
+            candidate = tail[:length]
+            if candidate and candidate not in ordered:
+                ordered.append(candidate)
+        if tail not in ordered:
+            ordered.append(tail)
+        return ordered
+
+    @staticmethod
+    def _short_id_taken(conn: sqlite3.Connection, candidate: str) -> bool:
+        row = conn.execute(
+            'SELECT 1 FROM session_aliases WHERE short_id = ? LIMIT 1', (candidate,)
+        ).fetchone()
+        return row is not None
+
+    @classmethod
+    def _allocate_session_short_id(cls, conn: sqlite3.Connection, session_key: str) -> str:
+        candidates = cls._session_short_id_candidates(session_key)
+        for candidate in candidates:
+            if not cls._short_id_taken(conn, candidate):
+                return candidate
+        suffix = 2
+        while True:
+            candidate = f'{candidates[-1]}-{suffix}'
+            if not cls._short_id_taken(conn, candidate):
+                return candidate
+            suffix += 1
+
+    def get_or_create_session_short_id(self, session_key: str, *, created_at: str) -> str:
+        """Stable model-facing short id; allocated once, never changed or reused."""
         normalized = str(session_key or '').strip()
         if not normalized:
             return ''
 
         def operation(conn: sqlite3.Connection) -> str:
             row = conn.execute(
-                'SELECT seq FROM session_aliases WHERE session_key = ?', (normalized,)
+                'SELECT seq, short_id FROM session_aliases WHERE session_key = ?', (normalized,)
             ).fetchone()
             if row is not None:
-                return f"s{int(row['seq'])}"
-            cursor = conn.execute(
-                'INSERT INTO session_aliases (session_key, created_at) VALUES (?, ?)',
-                (normalized, str(created_at or '').strip()),
+                existing = str(row['short_id'] or '').strip()
+                if existing:
+                    return existing
+                short_id = self._allocate_session_short_id(conn, normalized)
+                conn.execute(
+                    'UPDATE session_aliases SET short_id = ? WHERE seq = ?',
+                    (short_id, int(row['seq'])),
+                )
+                return short_id
+            short_id = self._allocate_session_short_id(conn, normalized)
+            conn.execute(
+                'INSERT INTO session_aliases (session_key, created_at, short_id) VALUES (?, ?, ?)',
+                (normalized, str(created_at or '').strip(), short_id),
             )
-            return f"s{int(cursor.lastrowid)}"
+            return short_id
 
         return self._run_write(operation)
 
+    def get_session_short_id(self, session_key: str) -> str:
+        rows = self._fetchall(
+            'SELECT short_id FROM session_aliases WHERE session_key = ?',
+            (str(session_key or '').strip(),),
+        )
+        return str(rows[0]['short_id'] or '') if rows else ''
+
+    def resolve_session_short_id(self, short_id: str) -> str:
+        """Short id -> canonical session key; empty when it names nothing."""
+        text = str(short_id or '').strip().lower()
+        if not text:
+            return ''
+        rows = self._fetchall(
+            'SELECT session_key FROM session_aliases WHERE short_id = ?', (text,)
+        )
+        return str(rows[0]['session_key']) if rows else ''
+
+    # 存量数据（旧信箱行的 source_alias、旧钉住头部、旧记忆条目）带的是 s{seq}。
+    # 这两个读口只服务那批数据，不再有新分配。
     def get_session_alias(self, session_key: str) -> str:
         rows = self._fetchall(
             'SELECT seq FROM session_aliases WHERE session_key = ?',
@@ -3030,7 +3115,7 @@ class SQLiteTaskStore:
         return f"s{int(rows[0]['seq'])}" if rows else ''
 
     def resolve_session_alias(self, alias: str) -> str:
-        """Alias -> canonical session key; empty when the alias names nothing."""
+        """Legacy alias -> canonical session key; empty when it names nothing."""
         text = str(alias or '').strip().lower()
         if not text.startswith('s') or not text[1:].isdigit():
             return ''
