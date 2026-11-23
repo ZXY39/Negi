@@ -294,8 +294,9 @@ class FrontdoorSessionMessage(Model):
     """A peer-session message in the session-links inbox (one row per recipient).
 
     会话间点对点车道的信箱行，形状同 FrontdoorNodeMessage：注入后才销账。
-    签名与链信息（source_alias/source_title/source_trust/chain_id/hop/reply_to/
-    expects_reply/fingerprint）住 payload，运行时写入，模型传不了。
+    签名与链信息（source_short_id/source_title/source_trust/chain_id/hop/reply_to/
+    expects_reply/fingerprint）住 payload，运行时写入，模型传不了。存量行的签名键
+    是 source_alias（s{seq}），扫描器读侧归一成短标识。
     """
 
     message_id: str

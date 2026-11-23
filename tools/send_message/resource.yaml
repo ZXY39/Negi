@@ -2,7 +2,7 @@ schema_version: 1
 kind: tool
 display_name: "发送节点消息"
 name: send_message
-description: Send a message to task nodes in this session's tasks, or to peer sessions by short id; one-to-many via a list. Messaging an unlinked session id links it automatically.
+description: Send a message to task nodes in this session's tasks or to peer sessions by short id; a list is one-to-many; unlinked ids link on delivery.
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''
