@@ -202,7 +202,14 @@
   数据根清单；已压短描述、恢复数据根、reload 复核 available=True（提交 ae2733d0）。
 - 验收脚本两处自身 fault 已修并留 observation：payload_json 是整条记录（签名/链在
   `.payload` 子对象）；驱模型回合前须等目标空闲，否则并进在飞心跳回合 silent 收尾。
-- 先存失败（非本次改动，单列）：`tests/resources/test_node_sent_message_frontdoor_lane.py`
-  3 例（`_Store` 桩缺 `list_chatbox_messages_by_task`，两文件最后改动 60a1cc96）；
-  `test_description_budget.py::test_repo_tool_manifests_fit_the_description_budget`
-  因 `process_kill` 227 字符红（ca9df26b 引入）。
+- 先存失败（非本次改动，单列）：`tests/resources` 全量 5723 例中 72 红
+  （5636 passed / 15 skipped）。在 b06de1f7 detached worktree 上按模块整批复跑，
+  失败集合与本次**逐条相同**（72=72，comm diff 为空）→ 零回归。分布：
+  offline_kit_consumer_lane 11、llm_frontend_* 27、setup_exe_lane 7、
+  task_tree_frontend_sync 5（DOM 桩缺 `replaceChildren`）、web_frontend_asset_gate 4、
+  sticker_admin 3、node_sent_message_frontdoor_lane 3（`_Store` 桩缺
+  `list_chatbox_messages_by_task`，最后改动 60a1cc96）、filesystem_stat_tool 2、
+  其余单例含 description_budget 的 `process_kill` 227 字符（ca9df26b 引入）。
+  对照日志：work/resources-full-rerun.log、work/baseline-batch2.log、
+  work/baseline-tasktree.log；基线 worktree 已移除。
+- 前端全量：`node --test tests/resources/org_graph_app.*.test.js` 799/799 绿。
