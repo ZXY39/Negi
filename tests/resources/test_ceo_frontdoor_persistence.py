@@ -136,6 +136,34 @@ def test_ceo_snapshot_orders_interrupted_turn_before_the_follow_up() -> None:
     ]
 
 
+def test_ceo_snapshot_keeps_anchorless_interrupted_row_in_place() -> None:
+    """心跳提问行被快照过滤后，收尾行不能被追加到 feed 尾部。"""
+    snapshot = websocket_ceo._build_ceo_snapshot(
+        [
+            {
+                "role": "user",
+                "content": "[SESSION EVENTS]",
+                "metadata": {"heartbeat_internal": True, "_transcript_turn_id": "t-hb"},
+            },
+            {"role": "user", "content": "中途补充", "metadata": {"_transcript_turn_id": "t-user"}},
+            {
+                "role": "assistant",
+                "content": "已回执工作群",
+                "turn_id": "t-hb",
+                "metadata": {"silent_reply": True, "follow_up_interrupt": True},
+            },
+            {"role": "assistant", "content": "后续回复", "turn_id": "t-user"},
+        ],
+        session_id="web:ceo-a",
+    )
+
+    assert [(item["role"], item.get("turn_id")) for item in snapshot] == [
+        ("user", "t-user"),
+        ("assistant", "t-hb"),
+        ("assistant", "t-user"),
+    ]
+
+
 def test_ceo_snapshot_attaches_turn_ledger_and_compression_payloads() -> None:
     snapshot = websocket_ceo._build_ceo_snapshot(
         [
