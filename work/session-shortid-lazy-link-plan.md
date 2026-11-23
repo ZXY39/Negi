@@ -184,3 +184,25 @@
   `D:\Project\Negi\sessions\`，侧车在数据根 `D:\NEGI\.g3ku\`）。
 - 已核实的落点行号见 §0；动手前若发现行号漂移，以符号名为准重新定位。
 - 完成判据：§3 全绿 + 文档已更新并在最终小结里点名。
+
+## 6. 验收结果（2026-11-23）
+
+- 离线：`tests/`（除 resources）1333 passed / 6 skipped；session-link 四件套 +
+  heartbeat 车道 + 预算测试 + 前端 JS 9/9 全绿；ruff 全仓干净；
+  `scripts/check_architecture_docs.py` 0 error。
+- 真机：`work/session-shortid-lazy-link-result.json` **36 checks / 0 failed**
+  （phase1 25 + phase2 10 + v8 重印触发 1）。含：无预关联按短 id 投递即双向建边 +
+  `auto_linked` 回执、信箱短 id 签名、B 心跳回投 hop=1 同 chain、delta 不播假移除、
+  压缩后头部名册 `- 2064a458 | 标题`、**记忆条目真机落盘带短 id**、解除关联后再发
+  重新建边、重启后短 id/边稳定、删除清边留标识行、数据根清单与仓库逐字节一致、
+  21 份存量 v7 侧车在 v8 下任何 tier/epoch 都复现不出旧键（下一跳必重印）。
+- 第三方信任闸离线钉住（`test_third_party_sender_still_needs_operator_link` 等），
+  真机不伪造第三方渠道身份。
+- 过程中修掉一个自造缺陷：新描述超 160 字符预算 → 真机 repair_required，模型自改
+  数据根清单；已压短描述、恢复数据根、reload 复核 available=True（提交 ae2733d0）。
+- 验收脚本两处自身 fault 已修并留 observation：payload_json 是整条记录（签名/链在
+  `.payload` 子对象）；驱模型回合前须等目标空闲，否则并进在飞心跳回合 silent 收尾。
+- 先存失败（非本次改动，单列）：`tests/resources/test_node_sent_message_frontdoor_lane.py`
+  3 例（`_Store` 桩缺 `list_chatbox_messages_by_task`，两文件最后改动 60a1cc96）；
+  `test_description_budget.py::test_repo_tool_manifests_fit_the_description_budget`
+  因 `process_kill` 227 字符红（ca9df26b 引入）。
