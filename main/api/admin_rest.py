@@ -2093,13 +2093,32 @@ async def list_models():
 
 @router.get('/models/load-balance/status')
 async def get_model_load_balance_status():
-    """负载均衡运行态：读 worker 心跳里带上来的快照（balancer 活在 worker 进程内）。
+    """负载均衡运行态：worker 心跳快照（节点车道）+ web 本地 balancer 快照（CEO/记忆车道）。
 
     只输出计数与桶序号；endpoint/密钥指纹不外泄，`unresolved_bucket_count` 非 0 表示
-    该 worker 解析不到密钥材料（未解锁），配额分布未知。
+    该进程解析不到密钥材料（未解锁），配额分布未知。CEO/记忆接入组后 web 进程也有本地
+    balancer，其绑定/观测单独列在 `web_local`，与 worker 侧并列而非互相覆盖。
     """
     service = _service()
     payload = service.worker_status_payload()
+    web_local = None
+    balancer = getattr(service, 'model_load_balancer', None)
+    if balancer is not None and getattr(service, 'execution_mode', '') == 'web':
+        try:
+            snap = dict(balancer.snapshot() or {})
+            web_groups = [
+                {'group_key': str(key), **dict(value)}
+                for key, value in dict(snap.get('groups') or {}).items()
+            ]
+            web_local = {
+                'config_revision': int(snap.get('config_revision') or 0),
+                'binding_count': len(list(snap.get('node_bindings') or [])),
+                'group_drift_count': int(snap.get('group_drift_count') or 0),
+                'groups': web_groups,
+                'bindings': list(snap.get('node_bindings') or []),
+            }
+        except Exception:
+            web_local = None
     return {
         'ok': True,
         'worker_online': bool(payload.get('worker_online')),
@@ -2110,6 +2129,7 @@ async def get_model_load_balance_status():
         'group_drift_count': int(payload.get('model_route_group_drift_count') or 0),
         'group_drift_findings': list(payload.get('model_route_group_drift_findings') or []),
         'groups': list(payload.get('model_route_groups') or []),
+        'web_local': web_local,
     }
 
 

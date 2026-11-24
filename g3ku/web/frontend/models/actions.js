@@ -607,9 +607,11 @@ function buildModelRoleChainUpdates(
         normalizeModelRoleChain(roleSource[scope] || []),
         chainGroupRewrites,
     );
-    // 组是全局资源，但只有 execution / inspection 能引用它。没有任何链用到组时，把整份
-    // 集合挂在第一个可承载的 scope 上，「刚建好还没拖进链」的组才不会丢。
-    const groupCarrier = targets.find((scope) => LOAD_BALANCE_ROUTE_SCOPES.includes(scope));
+    // 组是全局资源，四条车道都能引用它。没有任何链用到组时，把整份集合挂在第一个可承载
+    // 的 scope 上，「刚建好还没拖进链」的组才不会丢。承载点优先 execution/inspection（保持
+    // 既有落盘形状），它们不在 targets 时才退到其它可承载车道。
+    const groupCarrier = targets.find((scope) => scope === "execution" || scope === "inspection")
+        || targets.find((scope) => LOAD_BALANCE_ROUTE_SCOPES.includes(scope));
     const anyChainUsesGroup = targets.some((scope) => chainUsesGroup(scopeChain(scope)));
     return Object.fromEntries(targets.map((scope) => {
         const chain = scopeChain(scope);

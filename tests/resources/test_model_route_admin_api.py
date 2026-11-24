@@ -314,7 +314,7 @@ def test_group_max_retry_rounds_zero_is_accepted(tmp_path: Path, monkeypatch) ->
     assert response.status_code == 200, response.text
 
 
-def test_ceo_chain_rejects_group_reference(tmp_path: Path, monkeypatch) -> None:
+def test_ceo_chain_accepts_group_reference(tmp_path: Path, monkeypatch) -> None:
     _write_config(tmp_path, roles=_LEGACY_ROLES, groups={'g_shared': {'modelKeys': ['m_a']}})
     monkeypatch.chdir(tmp_path)
 
@@ -323,8 +323,7 @@ def test_ceo_chain_rejects_group_reference(tmp_path: Path, monkeypatch) -> None:
         json={'route_entries': [{'type': 'load_balance', 'groupKey': 'g_shared'}]},
     )
 
-    assert response.status_code == 400
-    assert '负载均衡组当前仅支持' in response.text
+    assert response.status_code == 200, response.text
 
 
 def test_route_entry_and_legacy_chain_cannot_be_mixed(tmp_path: Path, monkeypatch) -> None:
