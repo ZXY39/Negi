@@ -12,7 +12,8 @@ from typing import Any, Callable, Coroutine
 
 from loguru import logger
 
-from g3ku.cron.timezones import resolve_timezone, validate_timezone_name
+from g3ku.cron.schedule_math import compute_next_run
+from g3ku.cron.timezones import validate_timezone_name
 from g3ku.cron.types import (
     CRON_STORE_VERSION,
     CronJob,
@@ -41,30 +42,8 @@ def _format_local_time_ms(now_ms: int) -> str:
 
 
 def _compute_next_run(schedule: CronSchedule, now_ms: int) -> int | None:
-    """Compute next run time in ms."""
-    if schedule.kind == "at":
-        return schedule.at_ms if schedule.at_ms and schedule.at_ms > now_ms else None
-
-    if schedule.kind == "every":
-        if not schedule.every_ms or schedule.every_ms <= 0:
-            return None
-        # Next interval from now
-        return now_ms + schedule.every_ms
-
-    if schedule.kind == "cron" and schedule.expr:
-        try:
-            from croniter import croniter
-            # Use caller-provided reference time for deterministic scheduling
-            base_time = now_ms / 1000
-            tz = resolve_timezone(schedule.tz)
-            base_dt = datetime.fromtimestamp(base_time, tz=tz)
-            cron = croniter(schedule.expr, base_dt)
-            next_dt = cron.get_next(datetime)
-            return int(next_dt.timestamp() * 1000)
-        except Exception:
-            return None
-
-    return None
+    """Compute next run time in ms (delegates to the shared schedule math)."""
+    return compute_next_run(schedule, now_ms)
 
 
 def _validate_schedule_for_add(schedule: CronSchedule) -> None:
