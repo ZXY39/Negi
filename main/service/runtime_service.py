@@ -27,6 +27,8 @@ from g3ku.config.live_runtime import get_runtime_config
 from g3ku.config.loader import get_config_path
 from g3ku.content import ContentNavigationService, artifact_ref_from_id
 from g3ku.content.navigation import RESOURCE_URI_SCHEME
+from g3ku.cron.schedule_math import compute_next_run
+from g3ku.cron.types import CronSchedule
 from g3ku.deployment.data_root import data_root, data_work_path, ensure_dir, resolve_data_path
 from g3ku.llm_config.runtime_resolver import resolve_chat_target
 from g3ku.resources.models import ResourceKind
@@ -1348,13 +1350,15 @@ class MainRuntimeService:
             fired += 1
             task_id = str(timer.task_id or '').strip()
             node_id = str(timer.node_id or '').strip()
+            kind = str(timer.kind or 'once').strip() or 'once'
+            recurring = kind == 'recurring'
             task = self.store.get_task(task_id)
             node = self.store.get_node(node_id)
             if task is None or node is None or str(node.status or '').strip().lower() in {'success', 'failed'}:
-                self.store.delete_task_node_timer(task_id=task_id, node_id=node_id)
+                self.store.delete_task_node_timer(task_id=task_id, node_id=node_id, kind=kind)
                 continue
             if str(task.status or '').strip().lower() in {'success', 'failed', 'canceled'}:
-                self.store.delete_task_node_timer(task_id=task_id, node_id=node_id)
+                self.store.delete_task_node_timer(task_id=task_id, node_id=node_id, kind=kind)
                 continue
             paused = (
                 bool(getattr(task, 'is_paused', False))
@@ -1363,6 +1367,10 @@ class MainRuntimeService:
                 or bool(getattr(node, 'pause_requested', False))
             )
             current_ms = wall_now_ms()
+            if recurring and paused:
+                # 暂停期静默推进到下一未来槽，不落箱：长暂停不攒一箱未读 wake_timer。
+                self._rearm_recurring_timer(timer, current_ms)
+                continue
             late_ms = max(0, current_ms - int(timer.wake_at_ms or 0))
             try:
                 receipt = await self.deliver_node_message(
@@ -1374,6 +1382,7 @@ class MainRuntimeService:
                         now_ms=current_ms,
                         late_ms=late_ms,
                         paused=paused,
+                        recurring=recurring,
                     ),
                     origin='node',
                     system_kind=KIND_WAKE_TIMER,
@@ -1389,17 +1398,48 @@ class MainRuntimeService:
                     exc,
                 )
                 continue
-            self.store.delete_task_node_timer(task_id=task_id, node_id=node_id)
+            if recurring:
+                # 投递成功（含停机过期补发一次）后重臂到下一未来槽，不删行。
+                self._rearm_recurring_timer(timer, current_ms)
+            else:
+                self.store.delete_task_node_timer(task_id=task_id, node_id=node_id, kind=kind)
             logger.info(
-                'node wake timer fired: task={} node={} due={} late_ms={} wake={} status={}',
+                'node wake timer fired: task={} node={} kind={} due={} late_ms={} wake={} status={}',
                 task_id,
                 node_id,
+                kind,
                 iso_from_ms(int(timer.wake_at_ms or 0)),
                 late_ms,
                 (not paused),
                 str(receipt.get('status') or '') if isinstance(receipt, dict) else '',
             )
         return fired
+
+    def _rearm_recurring_timer(self, timer: Any, current_ms: int) -> None:
+        """周期档重臂：按递推参数现算下一未来槽，更新时刻并清领取凭证。
+
+        停机跨过多个触发点时只补发一次（投递已在调用方发生），这里直接跳到下一未来槽，
+        不补发成一串。算不出下一跳（递推参数损坏）时删行并告警，避免一条坏行热循环。
+        """
+        schedule = CronSchedule(
+            kind=str(timer.schedule_kind or 'every'),
+            every_ms=int(timer.every_ms or 0) or None,
+            expr=str(timer.cron_expr or '') or None,
+            tz=str(timer.tz or '') or None,
+        )
+        next_ms = compute_next_run(schedule, int(current_ms))
+        if not next_ms or next_ms <= current_ms:
+            logger.warning(
+                'node recurring wake cannot rearm, dropping: task={} node={} schedule_kind={}',
+                timer.task_id,
+                timer.node_id,
+                timer.schedule_kind,
+            )
+            self.store.delete_task_node_timer(task_id=timer.task_id, node_id=timer.node_id, kind='recurring')
+            return
+        self.store.rearm_task_node_timer(
+            task_id=timer.task_id, node_id=timer.node_id, kind='recurring', wake_at_ms=int(next_ms),
+        )
 
     @staticmethod
     def _node_wake_notice_text(
@@ -1409,6 +1449,7 @@ class MainRuntimeService:
         now_ms: int,
         late_ms: int,
         paused: bool,
+        recurring: bool = False,
     ) -> str:
         """唤醒通知的模型可见正文：英文，并说清"这是你自己设的"。"""
         lines = [
@@ -1426,9 +1467,15 @@ class MainRuntimeService:
                 'This node is paused, so the notice is only filed here: nothing woke up. '
                 'It reaches the model when the operator resumes this node.'
             )
-        lines.append(
-            'To keep a schedule running, arm the next wake-up now; this one is spent.'
-        )
+        if recurring:
+            lines.append(
+                'This is a recurring schedule you armed; it re-arms itself for the next slot. '
+                'You do not need to arm it again — just do this turn\'s work.'
+            )
+        else:
+            lines.append(
+                'To keep a schedule running, arm the next wake-up now; this one is spent.'
+            )
         return '\n'.join(lines)
 
     def adopt_node_owned_process(self, *, entry: dict[str, Any], process: Any) -> None:

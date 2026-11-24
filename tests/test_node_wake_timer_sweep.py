@@ -128,6 +128,21 @@ def _arm(service: MainRuntimeService, *, wake_at_ms: int, note: str = '播报下
     )
 
 
+def _arm_recurring(
+    service: MainRuntimeService, *, wake_at_ms: int, every_ms: int = 60_000, note: str = '每日采集',
+) -> None:
+    service.store.upsert_task_node_timer(
+        task_id=TASK,
+        node_id=CHILD,
+        wake_at_ms=wake_at_ms,
+        note=note,
+        armed_at='2026-10-26T08:00:00+08:00',
+        kind='recurring',
+        schedule_kind='every',
+        every_ms=every_ms,
+    )
+
+
 class TestSweep:
     @pytest.mark.asyncio
     async def test_due_wake_lands_a_notice_and_wakes_the_parked_node(self, tmp_path, monkeypatch):
@@ -234,3 +249,93 @@ class TestSweep:
         _seed(service)
         _stub_wake(monkeypatch, service)
         assert await service.sweep_due_node_wakes() == 0
+
+
+class TestRecurringSweep:
+    @pytest.mark.asyncio
+    async def test_recurring_fires_and_rearms_to_next_slot(self, tmp_path, monkeypatch):
+        service = _service(tmp_path)
+        _seed(service)
+        calls = _stub_wake(monkeypatch, service)
+        _arm_recurring(service, wake_at_ms=now_ms() - 1)
+        assert await service.sweep_due_node_wakes() == 1
+        rows = service.store.list_task_node_notifications(TASK, CHILD)
+        assert len(rows) == 1 and rows[0].kind == KIND_WAKE_TIMER
+        assert 'recurring' in rows[0].message and 're-arms itself' in rows[0].message
+        assert calls == [(TASK, CHILD)]
+        # 行不删，重臂到下一未来槽，领取凭证清掉。
+        timer = service.store.get_task_node_timer(TASK, CHILD, kind='recurring')
+        assert timer is not None
+        assert timer.wake_at_ms > now_ms()
+        assert timer.claimed_by == '' and timer.claimed_at_ms == 0
+        assert timer.every_ms == 60_000
+
+    @pytest.mark.asyncio
+    async def test_recurring_paused_silently_advances_without_filing(self, tmp_path, monkeypatch):
+        service = _service(tmp_path)
+        _seed(service, paused=True)
+        calls = _stub_wake(monkeypatch, service)
+        _arm_recurring(service, wake_at_ms=now_ms() - 1)
+        assert await service.sweep_due_node_wakes() == 1
+        assert calls == []
+        # 暂停期不投递、不攒未读，只静默推进到下一未来槽。
+        assert service.store.list_task_node_notifications(TASK, CHILD) == []
+        timer = service.store.get_task_node_timer(TASK, CHILD, kind='recurring')
+        assert timer is not None and timer.wake_at_ms > now_ms()
+        assert bool(service.store.get_node(CHILD).is_paused)
+
+    @pytest.mark.asyncio
+    async def test_recurring_terminal_drops_row(self, tmp_path, monkeypatch):
+        service = _service(tmp_path)
+        _seed(service, node_status='success')
+        _stub_wake(monkeypatch, service)
+        _arm_recurring(service, wake_at_ms=now_ms() - 1)
+        assert await service.sweep_due_node_wakes() == 1
+        assert service.store.get_task_node_timer(TASK, CHILD, kind='recurring') is None
+        assert service.store.list_task_node_notifications(TASK, CHILD) == []
+
+    @pytest.mark.asyncio
+    async def test_recurring_downtime_catchup_once_then_jumps_to_future(self, tmp_path, monkeypatch):
+        service = _service(tmp_path)
+        _seed(service)
+        _stub_wake(monkeypatch, service)
+        # 停机一小时，跨过多个 60s 槽：只补发一次，随后跳到下一未来槽，不补发成一串。
+        _arm_recurring(service, wake_at_ms=now_ms() - 3_600_000)
+        assert await service.sweep_due_node_wakes() == 1
+        assert len(service.store.list_task_node_notifications(TASK, CHILD)) == 1
+        timer = service.store.get_task_node_timer(TASK, CHILD, kind='recurring')
+        assert timer is not None and now_ms() < timer.wake_at_ms <= now_ms() + 61_000
+        # 下一拍立刻扫：下一槽在未来，不应再投。
+        assert await service.sweep_due_node_wakes() == 0
+        assert len(service.store.list_task_node_notifications(TASK, CHILD)) == 1
+
+    @pytest.mark.asyncio
+    async def test_recurring_failed_delivery_keeps_claim(self, tmp_path, monkeypatch):
+        service = _service(tmp_path)
+        _seed(service)
+        _stub_wake(monkeypatch, service)
+        _arm_recurring(service, wake_at_ms=now_ms() - 1)
+
+        async def raise_delivery(**kwargs):
+            raise RuntimeError('disk full')
+
+        monkeypatch.setattr(service, 'deliver_node_message', raise_delivery)
+        assert await service.sweep_due_node_wakes() == 1
+        timer = service.store.get_task_node_timer(TASK, CHILD, kind='recurring')
+        assert timer is not None and timer.claimed_by
+        # 失败不重臂：时刻仍在过去，凭证留着，下一拍不重投。
+        assert timer.wake_at_ms < now_ms()
+        assert await service.sweep_due_node_wakes() == 0
+
+    @pytest.mark.asyncio
+    async def test_once_and_recurring_are_independent(self, tmp_path, monkeypatch):
+        service = _service(tmp_path)
+        _seed(service)
+        _stub_wake(monkeypatch, service)
+        _arm(service, wake_at_ms=now_ms() - 1)
+        _arm_recurring(service, wake_at_ms=now_ms() - 1)
+        assert await service.sweep_due_node_wakes() == 2
+        # 一次性删行，周期重臂保留。
+        assert service.store.get_task_node_timer(TASK, CHILD, kind='once') is None
+        assert service.store.get_task_node_timer(TASK, CHILD, kind='recurring') is not None
+        assert len(service.store.list_task_node_notifications(TASK, CHILD)) == 2
