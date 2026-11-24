@@ -7404,7 +7404,7 @@ function applyCeoToolStepState(item, { status = "running", toolName = "tool", pu
     const statusEl = item.querySelector(".interaction-step-status");
     const iconWrap = item.querySelector(".tool-status-icon");
     // 标题用原始 tool_id：与账本里工具卡（chip 标题）同字，运行中与完成后不换名字。
-    // exec 带 purpose 时两边都拼成 `exec:<purpose>`（toolDisplayTitle）。purpose 只有
+    // exec 带 purpose 时两边都只画那一句动机（toolDisplayTitle）。purpose 只有
     // 开跑帧带，后台收尾那条路重贴状态时不带，所以记在行上，后续帧不会把标题擦回去。
     const incomingPurpose = normalizeToolPurposeText(purpose);
     if (incomingPurpose) item.dataset.toolPurpose = incomingPurpose;

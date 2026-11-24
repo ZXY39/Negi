@@ -321,7 +321,7 @@ def test_tool_event_serializes_contract_delivery_marker():
 
 
 def test_tool_event_serializes_exec_purpose():
-    """exec 的一句话动机要透传到实时帧：前端把在飞工具行画成 `exec:<purpose>`。
+    """exec 的一句话动机要透传到实时帧：前端把在飞工具行标题画成这一句动机。
 
     实时帧的 `arguments_text` 是截断的调用摘要（前 3 个键、值砍到 48 字），
     purpose 排在后面或写长一点就不在里面，所以它走自己的字段；不带时不凭空造键。

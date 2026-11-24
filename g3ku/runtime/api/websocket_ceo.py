@@ -1416,7 +1416,7 @@ def _serialize_tool_event(event: AgentEvent) -> dict[str, Any] | None:
         'is_update': is_update,
         'kind': str(payload.get('kind') or '').strip(),
         'source': source,
-        # exec 的一句话动机：实时工具行据此画成 `exec:<purpose>`。只有开跑帧带它，
+        # exec 的一句话动机：实时工具行带 purpose 时标题只画这一句。只有开跑帧带它，
         # 收尾帧不带，前端把它记在行上，别在收尾时把标题擦回光工具名。
         **(
             {'tool_purpose': str(data.get('tool_purpose') or '').strip()}

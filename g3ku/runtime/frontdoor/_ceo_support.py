@@ -478,7 +478,7 @@ class CeoFrontDoorSupport:
 
     @staticmethod
     def _tool_display_purpose(tool_name: str, arguments: dict[str, Any]) -> str:
-        """exec 的 purpose 原样外发：前端把这一跳的标题画成 `exec:<purpose>`。
+        """exec 的 purpose 原样外发：前端带 purpose 时把这一跳的标题画成这一句动机。
 
         实时帧的 `arguments_text` 是 `_tool_invocation_hint` 那条截断串（前 3 个键、
         值砍到 48 字），purpose 排在后面或写得长一点就不在里面了，所以单独带一个字段。
