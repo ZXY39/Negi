@@ -119,6 +119,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 会话转录里明明有回复正文、拉取式读口却报 `no_final_written` / `unconsumed_replies:0` → `agent-gateway.md`「等待契约（wait_for_external_reply）」+ `external-agent-api.md`「持久 outbox」（心跳来源的回合只产 `outbound.created`；销账方与可取集合判据都在那里）
 - 渠道会话在网页目录里删了还在、删过的卡片对方再发消息也不回来、清过历史的行仍显示可发消息、删掉正打开的渠道会话后弹「连接失败」、或注销身份被拒（`outbox_pending` / `scheduled_target`）→ `web-and-admin.md`「Channel Session Clear Contract」+「CEO Session List Interaction Contract」+ `external-agent-api.md`「会话注册表与 key 命名空间」
 - 官方 QQ 机器人面板报错、不连接或收不到消息 → `external-agent-api.md`「内置官方 QQ 适配器」+「常见排障入口」
+- Master 注册成功（网页显示已注册、审计有 `qq_master_registered`）但 QQ 私聊收不到注册回执，日志同时缺 `delivered` / `send failed` / `failed to deliver binding receipt`（三分静默）→ `external-agent-api.md`「内置官方 QQ 适配器」的生命周期与消息流条：owner 不入重启签名、绑定回执由入站任务拿到响应后补发，配置刷新不得取消该任务；这不是平台拒投。
 - 群管理开启「获取群内全部消息」后群里反而全部静默（连 @ 机器人也不回），`console.log` 报 `_parser unknown event group_message_create.` → `external-agent-api.md`「内置官方 QQ 适配器」+「常见排障入口」
 - 群聊非 @ 消息没有回复、群历史文件不增长、digest 心跳不触发或重复触发、群文件占用与清除 → `external-agent-api.md`「内置官方 QQ 适配器」+ `heartbeat-system.md`「Channel Digest Heartbeat Events」+ `web-and-admin.md`「External Access Page Contract」
 - 对接方问"我派的任务结清了没 / 我断开这段时间错过了哪份回复"没有一口可读，或状态读数在最需要的时候整包失败 → `external-agent-api.md`「唤醒读数」+「会话状态读数」

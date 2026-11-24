@@ -590,6 +590,9 @@ class _BridgeDeliveryState:
     passive_refs: OrderedDict[str, list] = field(default_factory=OrderedDict)
     # 主动消息的分钟档与日档计数（被动回复不过这里）
     pacer: _SendPacer = field(default_factory=_SendPacer)
+    # 本号 Master openid 集合（小写）：service.sync 与桥共享、跨登录存活。owner
+    # 变更由 sync 直接刷新而不重启桥；群历史 is_master 读它，不读启动拷贝。
+    owner_ids: set[str] = field(default_factory=set)
 
 
 _DELIVERY_STATES: dict[str, _BridgeDeliveryState] = {}
@@ -1191,11 +1194,14 @@ async def run_qq_official_bridge(
     # pump 句柄属于这一轮登录，随桥的 finally 一起取消，绝不跨登录复用任务。
     pumps: set[asyncio.Task] = set()
     pump_tasks: dict[str, asyncio.Task] = {}
-    owner_ids = {
+    # owner 视图按号共享、跨登录存活：启动灌入一次（直接 run 桥的测试不经 service），
+    # 运行期由 service.sync_from_config 刷新；is_master 读 state.owner_ids 而非局部拷贝。
+    state.owner_ids.clear()
+    state.owner_ids.update(
         str(item or "").strip().lower()
         for item in list(owner_openids or [])
         if str(item or "").strip()
-    }
+    )
     history_stores: dict[str, GroupHistoryStore] = {}
     digest_tasks: dict[str, asyncio.Task] = {}
     bot_identity: dict[str, str] = {"id": "", "username": ""}
@@ -1455,7 +1461,7 @@ async def run_qq_official_bridge(
             sender_id=sender_id,
             sender_name=str(sender.get("name") or ""),
             role=str(sender.get("role") or ""),
-            is_master=sender_id.lower() in owner_ids,
+            is_master=sender_id.lower() in state.owner_ids,
             files=media,
             message_id=str(getattr(message, "id", "") or ""),
         )

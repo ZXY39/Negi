@@ -288,6 +288,142 @@ async def test_repeated_sync_with_unchanged_config_keeps_bridge_alive(
 
 
 @pytest.mark.asyncio
+async def test_owner_only_change_does_not_restart_bridge(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """注册 Master 把 owner 从 [] 改成 [x]。owner 只影响群历史的 is_master 标注，
+    不影响连接与凭证，不得成为重启理由：否则注册刷新会在 HTTP 响应返回之前 await
+    stop()，取消正在等 /api/v1 响应的入站任务，绑定回执永远发不出去（2026-11-23 实盘）。"""
+    _enable_qq_config(workspace)
+
+    entries = {"n": 0}
+
+    async def fake_bridge(**kwargs) -> None:
+        entries["n"] += 1
+        kwargs["on_state"]("connected", "")
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(qq_bridge, "run_qq_official_bridge", fake_bridge)
+
+    service = QqOfficialService(app_id=APP_ID)
+    await service.sync_from_config(account=_account(), global_enabled=True)
+    first_task = service._task
+    assert first_task is not None
+    await asyncio.sleep(0.01)
+    assert entries["n"] == 1
+
+    account = _account()
+    account.owner_openids = ["f208f636c394dca795d031ede16b8c5e"]
+    await service.sync_from_config(account=account, global_enabled=True)
+    assert service._task is first_task, "owner-only change must not restart the bridge"
+    assert entries["n"] == 1
+
+    await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_owner_change_refreshes_shared_owner_view(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """owner 变更必须即时进按号共享的 owner 视图（群历史 is_master 读它），且刷新
+    落在签名比较之前：签名去掉 owner 段后，注册那次 sync 签名不变会走早退，刷新若
+    在早退之后就永远不生效。"""
+    _enable_qq_config(workspace)
+
+    async def fake_bridge(**kwargs) -> None:
+        kwargs["on_state"]("connected", "")
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(qq_bridge, "run_qq_official_bridge", fake_bridge)
+    qq_bridge.reset_bridge_delivery_state()
+
+    service = QqOfficialService(app_id=APP_ID)
+    await service.sync_from_config(account=_account(), global_enabled=True)
+    await asyncio.sleep(0.01)
+    view = qq_bridge.bridge_delivery_state(BRIDGE_ID)
+    assert view.owner_ids == set()
+
+    account = _account()
+    account.owner_openids = ["F208F636C394DCA795D031EDE16B8C5E"]
+    await service.sync_from_config(account=account, global_enabled=True)
+    assert "f208f636c394dca795d031ede16b8c5e" in view.owner_ids
+
+    await service.stop()
+    qq_bridge.reset_bridge_delivery_state()
+
+
+@pytest.mark.asyncio
+async def test_owner_refresh_does_not_cancel_inflight_binding_receipt(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """端到端：入站绑定码的提交在飞（等 /api/v1 响应）时发生 owner 变更刷新，桥不得
+    被重启，响应回来后回执必须照常投出。这是事故现场的可重复离线复现。"""
+    from tests.resources.test_qq_official_bridge import (
+        FakeClient,
+        FakeExternalApiClient,
+        _c2c_message,
+        _install_fake_botpy,
+        _media_transport,
+        _wait_until,
+    )
+
+    _enable_qq_config(workspace)
+    _install_fake_botpy(monkeypatch)
+    # 正合并窗：提交走独立的 flusher 任务（桥 finally 取消的正是它），入站事件本身
+    # 立即返回；0 窗会把提交内联进 on_c2c_message_create，阻塞 client 会卡住该 await。
+    monkeypatch.setattr(qq_bridge, "_INBOUND_COALESCE_SECONDS", 0.05)
+    monkeypatch.setattr(
+        qq_bridge, "_create_media_client", lambda: httpx.AsyncClient(transport=_media_transport({}))
+    )
+    qq_bridge.reset_bridge_delivery_state()
+    FakeClient.instances.clear()
+    FakeExternalApiClient.instances.clear()
+
+    release = asyncio.Event()
+
+    class _BlockingClient(FakeExternalApiClient):
+        async def send_message(self, session_id, text, **kwargs):
+            await super().send_message(session_id, text, **kwargs)
+            await release.wait()
+            return {
+                "ok": True,
+                "status": "queued",
+                "binding": True,
+                "receipt": "已注册为 Master。",
+            }
+
+    monkeypatch.setattr(qq_bridge, "ExternalApiClient", _BlockingClient)
+
+    service = QqOfficialService(app_id=APP_ID)
+    await service.sync_from_config(account=_account(), global_enabled=True)
+    first_task = service._task
+    try:
+        await _wait_until(lambda: FakeClient.instances and FakeClient.instances[-1].started)
+        client = FakeClient.instances[-1]
+        await client.on_c2c_message_create(
+            _c2c_message("NEGI-MASTER-AAAA-BBBB-CCCC-DDDD", [], message_id="b1")
+        )
+        ext = FakeExternalApiClient.instances[-1]
+        await _wait_until(lambda: ext.sent)  # 提交在飞，阻塞在 release 上
+
+        account = _account()
+        account.owner_openids = ["f208f636c394dca795d031ede16b8c5e"]
+        await service.sync_from_config(account=account, global_enabled=True)
+        assert service._task is first_task, "owner refresh must not restart the bridge mid-submit"
+
+        release.set()
+        await _wait_until(lambda: client.api.calls)
+        assert client.api.calls == [
+            ("post_c2c_message", {"openid": "u9", "markdown": {"content": "已注册为 Master。"}, "msg_type": 2}),
+        ]
+        assert not first_task.cancelled()
+    finally:
+        release.set()
+        await service.stop()
+        qq_bridge.reset_bridge_delivery_state()
+
+
+@pytest.mark.asyncio
 async def test_stop_cancels_bridge_retry_loop(
     workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
