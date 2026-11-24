@@ -13256,6 +13256,33 @@ textarea {
     overflow-wrap: anywhere;
 }
 
+/* 工件文件可点击打开：整行是媒体锚点（created/modified），路径读作链接色，
+   悬停时边框/底色与下划线给出落指反馈；deleted 行仍是纯文本 div，不挂这些。 */
+a.artifact-item-link {
+    cursor: pointer;
+    text-decoration: none;
+    color: inherit;
+    transition: border-color 140ms ease, background-color 140ms ease;
+}
+
+a.artifact-item-link .artifact-item-path {
+    color: var(--brand-primary);
+}
+
+a.artifact-item-link:hover {
+    border-color: var(--brand-primary);
+    background: var(--bg-hover);
+}
+
+a.artifact-item-link:hover .artifact-item-path {
+    text-decoration: underline;
+}
+
+a.artifact-item-link:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--brand-primary) 68%, transparent);
+    outline-offset: 2px;
+}
+
 .artifact-item-state {
     flex-shrink: 0;
     width: 1.9rem;

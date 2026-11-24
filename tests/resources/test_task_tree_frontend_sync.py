@@ -2798,19 +2798,33 @@ def test_render_artifacts_uses_status_icons_instead_of_plain_change_text() -> No
           callback();
           return 1;
         };
+        const makeEl = (tag) => {
+          const attrs = {};
+          return {
+            tagName: String(tag || "").toUpperCase(),
+            className: "",
+            dataset: {},
+            innerHTML: "",
+            title: "",
+            setAttribute(name, value) { attrs[String(name)] = String(value); },
+            getAttribute(name) {
+              return Object.prototype.hasOwnProperty.call(attrs, String(name)) ? attrs[String(name)] : null;
+            },
+          };
+        };
         const artifactList = {
           innerHTML: "",
           children: [],
           appendChild(node) {
             this.children.push(node);
           },
+          replaceChildren() {
+            this.children = [];
+            this.innerHTML = "";
+          },
         };
         global.document = {
-          createElement: () => ({
-            className: "",
-            dataset: {},
-            innerHTML: "",
-          }),
+          createElement: (tag) => makeEl(tag),
         };
         global.S = {
           selectedNodeId: "node:1",
@@ -2859,6 +2873,14 @@ def test_render_artifacts_uses_status_icons_instead_of_plain_change_text() -> No
           noPlainCreatedText: !createdHtml.includes(">created<"),
           noPlainModifiedText: !modifiedHtml.includes(">modified<"),
           noPlainDeletedText: !deletedHtml.includes(">deleted<"),
+          createdTag: artifactList.children[0]?.tagName || "",
+          modifiedTag: artifactList.children[1]?.tagName || "",
+          deletedTag: artifactList.children[2]?.tagName || "",
+          createdHref: artifactList.children[0]?.getAttribute("href") || "",
+          createdHrefEncoded: (artifactList.children[0]?.getAttribute("href") || "").includes(encodeURIComponent("D:/tmp/created.txt")),
+          createdMediaOpen: artifactList.children[0]?.getAttribute("data-media-open") || "",
+          createdMediaName: artifactList.children[0]?.getAttribute("data-media-name") || "",
+          deletedHref: artifactList.children[2]?.getAttribute("href"),
         }));
         """
     )
@@ -2878,6 +2900,15 @@ def test_render_artifacts_uses_status_icons_instead_of_plain_change_text() -> No
     assert result["noPlainCreatedText"] is True
     assert result["noPlainModifiedText"] is True
     assert result["noPlainDeletedText"] is True
+    # created/modified 行是媒体锚点（整行可点击打开），deleted 行仍是纯文本 div。
+    assert result["createdTag"] == "A"
+    assert result["modifiedTag"] == "A"
+    assert result["deletedTag"] == "DIV"
+    assert result["createdHref"].startswith("/api/content/file?path=")
+    assert result["createdHrefEncoded"] is True
+    assert result["createdMediaOpen"] == "auto"
+    assert result["createdMediaName"] == "created.txt"
+    assert result["deletedHref"] is None
 
 
 def test_ensure_task_node_detail_refetches_stale_flattened_summary_cache() -> None:
