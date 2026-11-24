@@ -114,6 +114,7 @@ def _balancer(
     balancer = ModelLoadBalancer(
         permit_source=permits if permits is not None else _FakePermits(),
         monotonic=clock,
+        clock=clock,
         resolve_quota_buckets=(lambda model_key: list(buckets.get(model_key, [f"key:{model_key}"])) if buckets else None),
     )
     balancer.configure(groups={group.group_key: group for group in groups}, config_revision=revision)

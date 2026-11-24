@@ -398,6 +398,9 @@ _LOOP_CENSUS_INTERVAL_SECONDS = 20.0
 # `schedule_wake` 的扫描节拍。5 秒是"唤醒到点后最多晚 5 秒"与"每分钟扫 12 次窄表"之间的取值；
 # 表是按 wake_at_ms 索引的点查，空表时这条查询不碰任何胖行（见 main/storage/sqlite_store 的 timer 段）。
 _NODE_WAKE_TIMER_POLL_SECONDS = 5.0
+# web 共享上游观测同步节拍：上报本地事件批 + 消费 worker 合并视图。对齐心跳 1–2s 拍，
+# 新鲜度 ~1–2s 相对 60s 窗口/半衰期足够。balancer 缺席（P0）时循环空转。
+_MODEL_ROUTE_OBSERVATION_POLL_SECONDS = 1.0
 # 节点 exec background 进程的退出观测：1 秒拍一次 Popen.poll()，退出后投 process_exit。
 # 投递失败先重试几次，仍失败则把条目改写成 `.notice`，交给下次启动的消费口。
 _NODE_OWNED_PROCESS_EXIT_POLL_SECONDS = 1.0
@@ -1123,6 +1126,8 @@ class MainRuntimeService:
         self._worker_lease_acquired = False
         self._command_poller_task: asyncio.Task[Any] | None = None
         self._worker_heartbeat_task: asyncio.Task[Any] | None = None
+        # web 进程共享上游观测同步循环：上报本地 CEO/记忆事件 + 消费 worker 合并视图。
+        self._model_route_observation_task: asyncio.Task[Any] | None = None
         # 磁盘治理（P1）：对账循环、紧急态自动暂停互斥与边沿状态。
         self._task_disk_reconcile_task: asyncio.Task[Any] | None = None
         # 分发驱动器接管对账循环（子树屏障不能只靠驱动器自己活着）。
@@ -1294,6 +1299,12 @@ class MainRuntimeService:
             self._schedule_pending_task_terminal_callbacks()
             self._schedule_pending_task_stall_callbacks()
             self._schedule_pending_task_distribution_error_callbacks()
+        if self.execution_mode == 'web':
+            if self._model_route_observation_task is None or self._model_route_observation_task.done():
+                self._model_route_observation_task = asyncio.create_task(
+                    self._model_route_observation_loop(),
+                    name='main-runtime-model-route-observation:web',
+                )
 
     def _start_worker_loops(self) -> None:
         if self._command_poller_task is None or self._command_poller_task.done():
@@ -1327,6 +1338,52 @@ class MainRuntimeService:
             except Exception as exc:  # noqa: BLE001 - 节拍死掉等于所有已设唤醒静默失效
                 logger.warning(f'node wake timer sweep failed: {exc!r}')
                 await asyncio.sleep(_NODE_WAKE_TIMER_POLL_SECONDS * 4)
+
+    async def _model_route_observation_loop(self) -> None:
+        """web 进程共享上游观测节拍：上报本地 CEO/记忆事件 + 消费 worker 合并视图。
+
+        balancer 缺席时（尚未接入组的进程形态）整条循环空转，不产命令、不改任何状态。
+        """
+        while True:
+            try:
+                await asyncio.sleep(_MODEL_ROUTE_OBSERVATION_POLL_SECONDS)
+                self._sync_model_route_observation()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - 观测同步失败不该拖垮 web 事件循环
+                logger.warning(f'model route observation sync failed: {exc!r}')
+                await asyncio.sleep(_MODEL_ROUTE_OBSERVATION_POLL_SECONDS * 4)
+
+    def _sync_model_route_observation(self) -> None:
+        balancer = getattr(self, 'model_load_balancer', None)
+        if balancer is None:
+            return
+        # 上报：把本地 CEO/记忆请求启动/429 事件批投给 worker 汇总权威。
+        try:
+            events = balancer.drain_outbound_events()
+        except Exception:
+            events = []
+        if events:
+            try:
+                self._enqueue_task_command(
+                    command_type='model_route_observation',
+                    task_id=None,
+                    session_id='web:shared',
+                    payload={'events': events},
+                )
+            except Exception:
+                logger.warning('model route observation report enqueue failed')
+        # 消费：worker 在线时读它回播的每成员合并 rpm/惩罚喂本地 balancer；离线则不刷新，
+        # 让视图自然陈旧退回本地观测（此时无节点贡献负载，本地即全部真源）。
+        try:
+            current = self.latest_worker_status()
+            if current and self.worker_state(item=current) == _WORKER_STATE_ONLINE:
+                payload = dict(current.get('payload') or {})
+                view = payload.get('model_route_member_upstream')
+                if isinstance(view, dict):
+                    balancer.set_remote_upstream_view(view)
+        except Exception:
+            logger.debug('model route observation consume skipped', exc_info=True)
 
     async def sweep_due_node_wakes(self) -> int:
         """投出所有到点的节点唤醒，返回处理条数。
@@ -2512,6 +2569,13 @@ class MainRuntimeService:
                     **dict(reload_result or {}),
                 }
                 success = bool(dict(reload_result or {}).get('ok', True))
+            elif command_type == 'model_route_observation':
+                # web 进程把 CEO/记忆的请求启动/429 事件批上报，worker 作汇总权威并入桶。
+                balancer = getattr(self, 'model_load_balancer', None)
+                events = list(payload.get('events') or [])
+                ingested = balancer.ingest_remote_events(events) if balancer is not None else 0
+                result_payload = {'ingested': int(ingested), 'received': len(events)}
+                success = True
             else:
                 error_text = f'unsupported_command:{command_type}'
         except Exception as exc:
@@ -16037,6 +16101,7 @@ class MainRuntimeService:
             self._node_wake_timer_task,
             self._task_disk_reconcile_task,
             self._terminal_outbox_reconcile_task,
+            self._model_route_observation_task,
         ]
         for task in loop_tasks:
             if task is not None and not task.done():
@@ -16198,6 +16263,9 @@ class MainRuntimeService:
             # 非 0 就意味着日志里的 group= 与台账的档位归因不再可信，必须先查它。
             'model_route_group_drift_count': int(raw.get('group_drift_count') or 0),
             'model_route_group_drift_findings': list(raw.get('group_drift_findings') or []),
+            # 共享上游观测：每成员合并 rpm/惩罚（含 web 上报的 CEO/记忆事件），web 进程的
+            # balancer 读这份打分，CEO/记忆与节点共用同一配额桶时不分裂。只给 model_key 与计数。
+            'model_route_member_upstream': dict(balancer.upstream_view() or {}),
         }
 
     def _node_turn_snapshot(self) -> dict[str, Any]:
