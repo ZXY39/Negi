@@ -1,6 +1,6 @@
 # 记忆车道：主动合批 / 复核单行 / 砍收口跳 / 合并条数显示
 
-状态：待批（未动代码）。
+状态：已实现并本机验收通过（提交 c0332bc5）。节点接入另立计划。
 靶子来源：本机会话讨论（2026-11-24）+ 本机活体读数 `memory/ops.jsonl`、`memory/queue.jsonl`、`memory/review_state.json`、`.g3ku/memory-requests/`。
 
 ## 1. 为什么做这四件，以及为什么不做吞吐档
@@ -150,7 +150,7 @@ active 分支的发车判据从"队首年龄 ≥ 固定窗"改为"**最后一条
 - `docs/architecture/runtime-overview.md`「Memory Runtime State」运行时合同：改写"专用内部 memory agent 以 FIFO 同-op 批次消费队列"那条为车道分类 + 主动优先 + 公平例外；补收口跳终止判据与发数口径。
 - 同文「队列状态机与失败停车语义」：队首语义变化（主动插队、公平例外、consolidate 仍最前）。
 - `docs/architecture/web-and-admin.md`「Memory Management Page And Admin Contract」：「合并 N 条」与「请求数」两个读数的区分。
-- `docs/architecture/config-and-models.md`：`queue.max_wait_seconds` 语义为主动道空闲封口阈值。
+- `docs/architecture/config-and-models.md`：**实际无需改**——该文档不收录 `queue.max_wait_seconds` / `batch_max_chars` 这类记忆队列调参字段，空闲封口语义的归属地是 `runtime-overview.md`「Memory Runtime State」，已在那里写清；按"一个合同一个家"不另开小节。
 - `docs/architecture/README.md`：预计不需要改（无新主题、无边界移动、无阅读顺序变化）；实现后按 skill 清单复核。
 - 就地改写、不追加附录；跑 `python scripts/check_architecture_docs.py`。
 
@@ -161,3 +161,24 @@ active 分支的发车判据从"队首年龄 ≥ 固定窗"改为"**最后一条
 - 提交信息用英文；提交身份用 `-c` 临时指定历史作者，不改 git config；共享工作树只 add 自己的文件。
 - 每完成一个 P0 子项即提交，不中途停；长任务按批 commit。
 - 若上下文耗尽：先更新本文件的状态行与已完成子项，再开新会话续跑。
+
+## 13. 本机验收实测（2026-11-24，端口 18790，新 worker `worker:b8e284269a8a`）
+
+脚本：`work/_live_memory_acceptance.py`、`work/_live_memory_turn_acceptance.py`；结果：同名 `*_result.json` / `*_turn.json`。
+
+| 场景 | 台账读数 | 结论 |
+| --- | --- | --- |
+| 管理页连发 3 条编辑（真实 HTTP，正文原样不改） | 1 批，`request_count=3`，`trigger_sources=[admin_ui_edit]`，**1 跳**，noop | 主动合批 + 零变更单跳成立；三条正文比对未变，常驻仍 45 条 |
+| 真对话让模型记一条临时条目（WS `/api/ws/ceo`） | 1 批，`memory_update_tool`，`request_count=1`，**2 跳**，changes=1 | 变更批由基线 3 跳降为 2 跳 |
+| 删除该临时会话 | 1 批，`session_boundary`，`request_count=1`，**1 跳**，noop | 复核恒单行成立，未与主动行混批 |
+| 管理页删除该临时条目 | 1 批，`admin_ui_delete`，op=delete，**2 跳**，changes=1 | 删除车道同样省掉收口跳 |
+
+收尾：临时标记 `ML-ACCEPT-20261124` 已不在常驻块，常驻回到 45 条，活动会话恢复为 `web:ceo-739a31050bf8`，验收用的两个临时会话均已删除。
+
+浏览器实测（Chrome DevTools，真实页面非 VM）：已处理列表渲染出 `合并 3 条` 徽标（历史两条 `request_count=2` 的旧记录也正确显示 `合并 2 条`）；点开该批抽屉，`请求数 1` 与 `合并条数 3 条队列请求` 并列且互不冒充。
+
+测试与 lint：`ruff check .` 全通过；`test_markdown_memory_runtime.py` 105 通过、`test_memory_note_confirm_gate.py` 12 通过、其余记忆子集 + smoke 198 通过。`test_memory_management_frontend.py::test_memory_management_view_keeps_admin_mutations_hidden_by_default` 失败，已在 detached worktree 基线复核为**先存失败**，与本次改动无关。
+
+未做实机强制的两项，如实记明：
+- **公平例外（600 秒）**：由单测覆盖（含归并/processing 头不被顶掉的顺序守卫），实机未构造背压场景。
+- **压缩轮 inline 冲刷与头部版本更新顺序**：本次未改该路径，相关记忆测试子集全通过；未在实机强制触发一次真实压缩。
