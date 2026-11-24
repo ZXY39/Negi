@@ -247,7 +247,12 @@ class SQLiteTaskStore:
                 armed_at TEXT NOT NULL,
                 claimed_by TEXT NOT NULL DEFAULT '',
                 claimed_at_ms INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (task_id, node_id)
+                kind TEXT NOT NULL DEFAULT 'once',
+                schedule_kind TEXT NOT NULL DEFAULT '',
+                every_ms INTEGER NOT NULL DEFAULT 0,
+                cron_expr TEXT NOT NULL DEFAULT '',
+                tz TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (task_id, node_id, kind)
             )
             ''',
             '''
@@ -758,6 +763,8 @@ class SQLiteTaskStore:
             self._ensure_column(self._conn, 'tool_jobs', 'purpose', "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(self._conn, 'tool_job_outbox', 'owner_kind', "TEXT NOT NULL DEFAULT 'session'")
             self._ensure_column(self._conn, 'session_aliases', 'short_id', "TEXT NOT NULL DEFAULT ''")
+            # 周期唤醒重建（PK 加 kind）必须在建索引之前：重建连索引一起丢，索引段随后再建。
+            self._migrate_task_node_timers_recurrence(self._conn)
             self._retire_inline_execution_trace_summaries(self._conn)
             for statement in index_statements:
                 self._conn.execute(statement)
@@ -775,6 +782,45 @@ class SQLiteTaskStore:
         if str(column or '') in columns:
             return
         conn.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
+
+    @staticmethod
+    def _migrate_task_node_timers_recurrence(conn: sqlite3.Connection) -> None:
+        """把存量一次性唤醒表重建成"一次性 + 周期"两档共存的形状。
+
+        SQLite 不能 ALTER 主键，所以整表重建：新 PK `(task_id, node_id, kind)`，存量行
+        全部落 `kind='once'`（语义不变）。按 `kind` 列是否在場判要不要跑——幂等、与启动
+        顺序无关，不占 `user_version`（那一格归明细表瘦身迁移）。失败只告警不阻断启动：
+        写侧按实际列集取值，该表维持旧形状（一次性档仍可用，周期档 arm 会在写侧失败）。
+        """
+        columns = {str(row[1]) for row in conn.execute('PRAGMA table_info(task_node_timers)').fetchall()}
+        if 'kind' in columns:
+            return
+        staging = 'task_node_timers__rec'
+        try:
+            conn.execute(f'DROP TABLE IF EXISTS {staging}')
+            conn.execute(
+                f'CREATE TABLE {staging} ('
+                'task_id TEXT NOT NULL, node_id TEXT NOT NULL, wake_at_ms INTEGER NOT NULL, '
+                "note TEXT NOT NULL DEFAULT '', armed_at TEXT NOT NULL, "
+                "claimed_by TEXT NOT NULL DEFAULT '', claimed_at_ms INTEGER NOT NULL DEFAULT 0, "
+                "kind TEXT NOT NULL DEFAULT 'once', schedule_kind TEXT NOT NULL DEFAULT '', "
+                "every_ms INTEGER NOT NULL DEFAULT 0, cron_expr TEXT NOT NULL DEFAULT '', "
+                "tz TEXT NOT NULL DEFAULT '', PRIMARY KEY (task_id, node_id, kind))"
+            )
+            conn.execute(
+                f'INSERT INTO {staging} '
+                '(task_id, node_id, wake_at_ms, note, armed_at, claimed_by, claimed_at_ms, kind) '
+                "SELECT task_id, node_id, wake_at_ms, note, armed_at, claimed_by, claimed_at_ms, 'once' "
+                'FROM task_node_timers'
+            )
+            conn.execute('DROP TABLE task_node_timers')
+            conn.execute(f'ALTER TABLE {staging} RENAME TO task_node_timers')
+        except sqlite3.Error:
+            logger.warning('task_node_timers recurrence migration skipped', exc_info=True)
+            try:
+                conn.execute(f'DROP TABLE IF EXISTS {staging}')
+            except sqlite3.Error:
+                pass
 
     # 一次性迁移的版本号写在 SQLite 头里（PRAGMA user_version）：判"要不要跑"必须
     # 是 O(1)，不能靠扫明细表——要迁的正是那些大字节的行。
@@ -2131,6 +2177,11 @@ class SQLiteTaskStore:
     # 扫描领走，否则重启就把它吞了，而"重启也认"正是这张表存在的理由。
     _WAKE_CLAIM_STALE_MS = 120_000
 
+    _NODE_TIMER_SELECT_COLUMNS = (
+        'task_id, node_id, wake_at_ms, note, armed_at, claimed_by, claimed_at_ms, '
+        'kind, schedule_kind, every_ms, cron_expr, tz'
+    )
+
     def upsert_task_node_timer(
         self,
         *,
@@ -2139,15 +2190,28 @@ class SQLiteTaskStore:
         wake_at_ms: int,
         note: str,
         armed_at: str,
+        kind: str = 'once',
+        schedule_kind: str = '',
+        every_ms: int = 0,
+        cron_expr: str = '',
+        tz: str = '',
     ) -> TaskNodeTimerRecord:
-        """设一次唤醒：每个节点只留最新一份，重新设连领取凭证一起清掉。"""
+        """设一份唤醒：同档（`kind`）每个节点只留最新一份，重新设连领取凭证一起清掉。
+
+        一次性（`once`）与周期（`recurring`）是两档，PK 含 `kind`，互不覆盖。
+        """
+        normalized_kind = str(kind or 'once').strip() or 'once'
+
         def operation(conn: sqlite3.Connection) -> TaskNodeTimerRecord:
             conn.execute(
-                'INSERT INTO task_node_timers (task_id, node_id, wake_at_ms, note, armed_at, claimed_by, claimed_at_ms) '
-                'VALUES (?, ?, ?, ?, ?, ?, ?) '
-                'ON CONFLICT(task_id, node_id) DO UPDATE SET wake_at_ms=excluded.wake_at_ms, '
+                'INSERT INTO task_node_timers '
+                '(task_id, node_id, wake_at_ms, note, armed_at, claimed_by, claimed_at_ms, '
+                'kind, schedule_kind, every_ms, cron_expr, tz) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) '
+                'ON CONFLICT(task_id, node_id, kind) DO UPDATE SET wake_at_ms=excluded.wake_at_ms, '
                 'note=excluded.note, armed_at=excluded.armed_at, claimed_by=excluded.claimed_by, '
-                'claimed_at_ms=excluded.claimed_at_ms',
+                'claimed_at_ms=excluded.claimed_at_ms, schedule_kind=excluded.schedule_kind, '
+                'every_ms=excluded.every_ms, cron_expr=excluded.cron_expr, tz=excluded.tz',
                 (
                     str(task_id or '').strip(),
                     str(node_id or '').strip(),
@@ -2156,27 +2220,34 @@ class SQLiteTaskStore:
                     str(armed_at or ''),
                     '',
                     0,
+                    normalized_kind,
+                    str(schedule_kind or ''),
+                    int(every_ms or 0),
+                    str(cron_expr or ''),
+                    str(tz or ''),
                 ),
             )
             row = conn.execute(
-                'SELECT task_id, node_id, wake_at_ms, note, armed_at, claimed_by, claimed_at_ms '
-                'FROM task_node_timers WHERE task_id = ? AND node_id = ?',
-                (str(task_id or '').strip(), str(node_id or '').strip()),
+                f'SELECT {self._NODE_TIMER_SELECT_COLUMNS} '
+                'FROM task_node_timers WHERE task_id = ? AND node_id = ? AND kind = ?',
+                (str(task_id or '').strip(), str(node_id or '').strip(), normalized_kind),
             ).fetchone()
             return self._parse_task_node_timer(row)
         return self._run_write(operation)
 
-    def get_task_node_timer(self, task_id: str, node_id: str) -> TaskNodeTimerRecord | None:
+    def get_task_node_timer(
+        self, task_id: str, node_id: str, kind: str = 'once',
+    ) -> TaskNodeTimerRecord | None:
         row = self._fetchone(
-            'SELECT task_id, node_id, wake_at_ms, note, armed_at, claimed_by, claimed_at_ms '
-            'FROM task_node_timers WHERE task_id = ? AND node_id = ?',
-            (str(task_id or '').strip(), str(node_id or '').strip()),
+            f'SELECT {self._NODE_TIMER_SELECT_COLUMNS} '
+            'FROM task_node_timers WHERE task_id = ? AND node_id = ? AND kind = ?',
+            (str(task_id or '').strip(), str(node_id or '').strip(), str(kind or 'once').strip() or 'once'),
         )
         return self._parse_task_node_timer(row) if row is not None else None
 
     def list_task_node_timers(self, task_id: str) -> list[TaskNodeTimerRecord]:
         rows = self._fetchall(
-            'SELECT task_id, node_id, wake_at_ms, note, armed_at, claimed_by, claimed_at_ms '
+            f'SELECT {self._NODE_TIMER_SELECT_COLUMNS} '
             'FROM task_node_timers WHERE task_id = ? ORDER BY wake_at_ms ASC',
             (str(task_id or '').strip(),),
         )
@@ -2212,7 +2283,7 @@ class SQLiteTaskStore:
                 f'   WHERE wake_at_ms <= ? AND {claimable}'
                 '   ORDER BY wake_at_ms ASC LIMIT ?'
                 f') AND {claimable} '
-                'RETURNING task_id, node_id, wake_at_ms, note, armed_at, claimed_by, claimed_at_ms',
+                f'RETURNING {self._NODE_TIMER_SELECT_COLUMNS}',
                 (
                     token, current,
                     current, '', stale_floor, bound,
@@ -2222,11 +2293,38 @@ class SQLiteTaskStore:
             return [self._parse_task_node_timer(row) for row in rows]
         return self._run_write(operation)
 
-    def delete_task_node_timer(self, *, task_id: str, node_id: str) -> None:
+    def delete_task_node_timer(self, *, task_id: str, node_id: str, kind: str = 'once') -> None:
         self._execute_write(
-            'DELETE FROM task_node_timers WHERE task_id = ? AND node_id = ?',
-            (str(task_id or '').strip(), str(node_id or '').strip()),
+            'DELETE FROM task_node_timers WHERE task_id = ? AND node_id = ? AND kind = ?',
+            (str(task_id or '').strip(), str(node_id or '').strip(), str(kind or 'once').strip() or 'once'),
         )
+
+    def rearm_task_node_timer(
+        self, *, task_id: str, node_id: str, kind: str, wake_at_ms: int,
+    ) -> TaskNodeTimerRecord | None:
+        """周期档投递成功后重臂到下一跳：更新时刻、清领取凭证，递推参数不动。
+
+        与 upsert 分开是为了不误清 `schedule_kind` / `every_ms` / `cron_expr` / `tz`——
+        重臂只换"下一次什么时候响"，不换"按什么节奏响"。
+        """
+        normalized_kind = str(kind or 'once').strip() or 'once'
+
+        def operation(conn: sqlite3.Connection) -> TaskNodeTimerRecord | None:
+            conn.execute(
+                'UPDATE task_node_timers SET wake_at_ms = ?, claimed_by = ?, claimed_at_ms = ? '
+                'WHERE task_id = ? AND node_id = ? AND kind = ?',
+                (
+                    int(wake_at_ms or 0), '', 0,
+                    str(task_id or '').strip(), str(node_id or '').strip(), normalized_kind,
+                ),
+            )
+            row = conn.execute(
+                f'SELECT {self._NODE_TIMER_SELECT_COLUMNS} '
+                'FROM task_node_timers WHERE task_id = ? AND node_id = ? AND kind = ?',
+                (str(task_id or '').strip(), str(node_id or '').strip(), normalized_kind),
+            ).fetchone()
+            return self._parse_task_node_timer(row) if row is not None else None
+        return self._run_write(operation)
 
     @staticmethod
     def _parse_task_node_timer(row: Any) -> TaskNodeTimerRecord:
@@ -2238,6 +2336,11 @@ class SQLiteTaskStore:
             armed_at=str(row['armed_at'] or ''),
             claimed_by=str(row['claimed_by'] or ''),
             claimed_at_ms=int(row['claimed_at_ms'] or 0),
+            kind=str(row['kind'] or 'once'),
+            schedule_kind=str(row['schedule_kind'] or ''),
+            every_ms=int(row['every_ms'] or 0),
+            cron_expr=str(row['cron_expr'] or ''),
+            tz=str(row['tz'] or ''),
         )
 
     def list_new_error_pauses(self) -> list[dict[str, Any]]:
