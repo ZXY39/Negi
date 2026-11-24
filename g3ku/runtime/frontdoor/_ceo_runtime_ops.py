@@ -187,6 +187,11 @@ from main.runtime.chat_backend import (
     resolve_send_model_context_window_info,
 )
 from main.runtime.internal_tools import ScheduleWakeTool, SilentTool, TimeTool
+from main.runtime.model_route import (
+    LEASE_OUTCOME_SUCCESS,
+    RouteCandidateFilters,
+    build_model_route_plan,
+)
 from main.runtime.send_token_preflight import (
     build_runtime_estimated_input_truth,
     build_runtime_hybrid_send_token_estimate,
@@ -8662,13 +8667,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         on_window_shortfall_compressed: Any = None,
         initial_tried_model_refs: list[str] | None = None,
         on_visible_text_reset: Any = None,
+        session_key: str | None = None,
     ) -> dict[str, Any]:
         # 压缩 helper 自己也会走这里：递归守卫必须在唯一入口生效，否则压缩请求会被
         # send-layer 再压一次（无限递归）。前门压缩闭包在调用 helper 前置位。
         compression_helper_in_progress = bool(
             getattr(self, "_frontdoor_compression_in_progress", False)
         )
-        response = await self._resolve_chat_backend().chat(
+        chat_kwargs: dict[str, Any] = dict(
             messages=[dict(item) for item in list(messages or []) if isinstance(item, dict)],
             tools=list(tool_schemas or []) or None,
             model_refs=list(model_refs or []),
@@ -8693,7 +8699,74 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 None if compression_helper_in_progress else on_visible_text_reset
             ),
         )
-        return self._model_response_payload_dict(response)
+        backend = self._resolve_chat_backend()
+        group = await self._resolve_frontdoor_group_route(
+            session_key=session_key,
+            required_context_window_tokens=int(required_context_window_tokens or 0),
+        )
+        if group is None:
+            response = await backend.chat(**chat_kwargs)
+            return self._model_response_payload_dict(response)
+        route_plan, lease, turn_controller, concurrency_controller = group
+        # 含组的链以 route plan 为真源：refs 用 plan 的候选展开，保证「一槽一位」对齐。
+        chat_kwargs["model_refs"] = list(route_plan.candidate_model_keys)
+        try:
+            response = await backend.chat(
+                **chat_kwargs,
+                model_routes=route_plan,
+                node_turn_lease=lease,
+                node_turn_controller=turn_controller,
+                model_concurrency_controller=concurrency_controller,
+            )
+            return self._model_response_payload_dict(response)
+        finally:
+            turn_controller.release_turn(lease, outcome=LEASE_OUTCOME_SUCCESS)
+
+    async def _resolve_frontdoor_group_route(
+        self,
+        *,
+        session_key: str | None,
+        required_context_window_tokens: int,
+    ) -> Any:
+        """CEO 全局链含组且无会话覆盖时，按 session_key 取粘滞 lease；否则 None（走扁平链）。
+
+        会话固定模型/会话链优先且扁平，不引入组。拿不到候选返回 None，调用方降级扁平发送，
+        不阻塞交互。选人与 permit 本地（web 进程），跨进程共享的只是上游观测。
+        """
+        key = str(session_key or "").strip()
+        if not key:
+            return None
+        service = getattr(self._loop, "main_task_service", None)
+        turn_controller = getattr(service, "frontdoor_turn_controller", None)
+        balancer = getattr(service, "model_load_balancer", None)
+        concurrency_controller = getattr(service, "model_key_concurrency_controller", None)
+        if turn_controller is None or balancer is None:
+            return None
+        if self._session_pinned_model_ref(key) or self._session_model_chain_refs(key):
+            return None
+        config = getattr(self._loop, "app_config", None)
+        if config is None:
+            return None
+        try:
+            plan = build_model_route_plan(config, "ceo", revision=self._frontdoor_runtime_config_revision())
+        except Exception:
+            return None
+        if not plan.load_balance_group_keys:
+            return None
+        filters = RouteCandidateFilters(required_context_window_tokens=int(required_context_window_tokens or 0))
+        try:
+            lease = await turn_controller.acquire_turn(
+                task_id="frontdoor",
+                node_id=key,
+                route_plan=plan,
+                filters=filters,
+            )
+        except Exception:
+            logger.debug("frontdoor group lease acquisition skipped for {}", key, exc_info=True)
+            return None
+        if lease is None:
+            return None
+        return plan, lease, turn_controller, concurrency_controller
 
     def _build_frontdoor_window_shortfall_compressor(
         self,
@@ -10066,6 +10139,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                             list(preflight_skip_model_refs) or None
                         ),
                         on_visible_text_reset=visible_text_reset_handler,
+                        session_key=str(state_for_request.get("session_key") or "").strip(),
                     )
                     # 这一跳的模型流到这里就结束了，后面是工具执行。思考段必须在这儿收口，
                     # 否则表要一直走到下一次 attempt 起点（或回合收尾）才停，工具跑多久

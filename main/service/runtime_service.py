@@ -152,6 +152,7 @@ from main.runtime.continuous_node import (
 from main.runtime.debug_recorder import RuntimeDebugRecorder
 from main.runtime.designed_idle import task_is_designed_idle
 from main.runtime.execution_trace_compaction import compact_tool_step_for_summary
+from main.runtime.frontdoor_turn_controller import FrontdoorTurnController
 from main.runtime.global_scheduler import GlobalScheduler
 from main.runtime.internal_tools import build_detail_level_schema
 from main.runtime.model_key_concurrency import ModelKeyConcurrencyController
@@ -857,6 +858,9 @@ class MainRuntimeService:
         self._pressure_gate_close_on_machine_critical = bool(adaptive_budget_settings['gate_close_on_machine_critical'])
         node_dispatch_limits = self._node_dispatch_concurrency_settings(app_config)
         execution_runtime_enabled = self.execution_mode == 'worker'
+        # CEO/记忆接入组：web 进程也要本地 balancer + permit controller——选人与 permit 本地、
+        # 不排节点准入队（交互不延迟）。NodeTurnController 仍 worker-only（它强绑 task/node 队列语义）。
+        model_route_enabled = self.execution_mode in {'worker', 'web'}
         execution_max_concurrency = (
             app_config.get_role_max_concurrency('execution')
             if app_config is not None and hasattr(app_config, 'get_role_max_concurrency')
@@ -880,16 +884,30 @@ class MainRuntimeService:
         self._chat_backend = chat_backend
         self.model_key_concurrency_controller = ModelKeyConcurrencyController(
             resolve_model_limits=self._resolve_model_limit_payload,
-        ) if execution_runtime_enabled else None
-        # 全局负载均衡器与并发控制器同生命周期：同一个 worker 进程内的所有任务、节点和
-        # 两条车道共享组状态。controller 缺失（embedded/web 角色）时 balancer 为 None，
-        # 选择层退化成「无并发计数的直连绑定」，不让节点因为没有 balancer 而报错。
+        ) if model_route_enabled else None
+        # 全局负载均衡器与并发控制器同生命周期：同一进程内的所有任务、节点和两条车道共享组状态。
+        # controller 缺失（embedded 角色）时 balancer 为 None，选择层退化成「无并发计数的直连绑定」，
+        # 不让节点因为没有 balancer 而报错。web 进程同样构造，供 CEO/记忆车道本地选人。
         self.model_load_balancer = (
             ModelLoadBalancer(
                 permit_source=self.model_key_concurrency_controller,
                 resolve_quota_buckets=self._resolve_quota_buckets,
             )
             if self.model_key_concurrency_controller is not None
+            else None
+        )
+        # web 是观测上报方：开启本地事件缓冲供同步循环批上报 worker。worker 是汇总权威，
+        # 只 ingest 不缓冲上报。
+        if self.model_load_balancer is not None and self.execution_mode == 'web':
+            self.model_load_balancer.set_share_observation(True)
+        # 前门/记忆车道的轻量回合控制器：直接 select、不排节点准入队（交互不延迟）。
+        # 复用 NodeTurnController 的组内换人/释放/观测，仅首次授予改同步。仅 web 需要。
+        self.frontdoor_turn_controller = (
+            FrontdoorTurnController(
+                model_concurrency_controller=self.model_key_concurrency_controller,
+                balancer=self.model_load_balancer,
+            )
+            if self.execution_mode == 'web' and self.model_key_concurrency_controller is not None
             else None
         )
         self.node_turn_controller = NodeTurnController(

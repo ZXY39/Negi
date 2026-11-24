@@ -71,8 +71,9 @@ def require_non_negative_retry_count(value: Any, *, field: str) -> int:
         )
     return rounds
 
-# 第一阶段只允许这两条车道使用负载均衡组。
-LOAD_BALANCE_ROUTE_SCOPES = ("execution", "inspection")
+# 允许使用负载均衡组的车道。CEO/记忆按当时上游负载/限流健康动态选成员（平级容灾），
+# 替代固定顺序 fallback；选人与 permit 本地，跨进程共享上游观测（见 model_load_balancer）。
+LOAD_BALANCE_ROUTE_SCOPES = ("ceo", "execution", "inspection")
 
 DEFAULT_MAX_OUTPUT_TOKENS = 65536
 VALID_REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
@@ -1311,15 +1312,15 @@ class Config(BaseSettings):
                         f"models.loadBalanceGroups.{group_key} references disabled model key: {member}"
                     )
 
-        # 组引用检查覆盖全部四个 scope：`memory` 不在 REQUIRED_MODEL_ROLES 里，但第一
-        # 阶段同样不允许它用组（记忆车道有固定单并发与 chat capability 契约）。
+        # 组引用检查覆盖全部四个 scope：`memory` 不在 REQUIRED_MODEL_ROLES 里，且暂不
+        # 允许它用组（记忆车道有固定单并发与 chat capability 契约，接入另立阶段）。
         for scope in ("ceo", "execution", "inspection", "memory"):
             for entry in self.get_role_model_routes(scope):
                 if entry.type != "load_balance":
                     continue
                 if scope not in LOAD_BALANCE_ROUTE_SCOPES:
                     raise ValueError(
-                        f"负载均衡组当前仅支持 execution/inspection，models.roles.{scope} "
+                        f"负载均衡组当前仅支持 {'/'.join(LOAD_BALANCE_ROUTE_SCOPES)}，models.roles.{scope} "
                         f"不能引用 groupKey: {entry.group_key}"
                     )
                 group_key = str(entry.group_key or "").strip()
