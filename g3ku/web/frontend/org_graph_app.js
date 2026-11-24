@@ -9101,8 +9101,8 @@ async function submitConfigBundleImport() {
 const GROUP_REF_PREFIX = "group:";
 // 新建组弹窗里的默认值；配置侧不填时后端按 1 处理。上限刻意不设。
 const GROUP_DEFAULT_MAX_RETRY_ROUNDS = 3;
-// 与后端 LOAD_BALANCE_ROUTE_SCOPES 同步：这些车道能引用组（CEO 已接入；记忆另立阶段）。
-const LOAD_BALANCE_ROUTE_SCOPES = ["ceo", "execution", "inspection"];
+// 与后端 LOAD_BALANCE_ROUTE_SCOPES 同步：四条车道都能引用组（按当时上游健康动态选成员）。
+const LOAD_BALANCE_ROUTE_SCOPES = ["ceo", "execution", "inspection", "memory"];
 
 const groupRefToken = (key) => `${GROUP_REF_PREFIX}${String(key || "").trim()}`;
 const isGroupRef = (ref) => String(ref || "").startsWith(GROUP_REF_PREFIX);

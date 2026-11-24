@@ -901,15 +901,29 @@ class MainRuntimeService:
         if self.model_load_balancer is not None and self.execution_mode == 'web':
             self.model_load_balancer.set_share_observation(True)
         # 前门/记忆车道的轻量回合控制器：直接 select、不排节点准入队（交互不延迟）。
-        # 复用 NodeTurnController 的组内换人/释放/观测，仅首次授予改同步。仅 web 需要。
+        # 复用 NodeTurnController 的组内换人/释放/观测，仅首次授予改同步。web 与 worker 都需要
+        # （记忆 worker 两进程各起一份，谁拿文件锁谁消费）。
         self.frontdoor_turn_controller = (
             FrontdoorTurnController(
                 model_concurrency_controller=self.model_key_concurrency_controller,
                 balancer=self.model_load_balancer,
             )
-            if self.execution_mode == 'web' and self.model_key_concurrency_controller is not None
+            if model_route_enabled and self.model_key_concurrency_controller is not None
             else None
         )
+        # 记忆车道进程级路由源：记忆 attempt 读它取 balancer/控制器，按当时上游健康动态选成员。
+        if self.frontdoor_turn_controller is not None:
+            from types import SimpleNamespace
+
+            from g3ku.agent.memory_agent_runtime import set_memory_model_route_source
+
+            set_memory_model_route_source(
+                SimpleNamespace(
+                    balancer=self.model_load_balancer,
+                    turn_controller=self.frontdoor_turn_controller,
+                    concurrency_controller=self.model_key_concurrency_controller,
+                )
+            )
         self.node_turn_controller = NodeTurnController(
             model_concurrency_controller=self.model_key_concurrency_controller,
             balancer=self.model_load_balancer,

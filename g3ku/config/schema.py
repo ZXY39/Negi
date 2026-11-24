@@ -73,7 +73,7 @@ def require_non_negative_retry_count(value: Any, *, field: str) -> int:
 
 # 允许使用负载均衡组的车道。CEO/记忆按当时上游负载/限流健康动态选成员（平级容灾），
 # 替代固定顺序 fallback；选人与 permit 本地，跨进程共享上游观测（见 model_load_balancer）。
-LOAD_BALANCE_ROUTE_SCOPES = ("ceo", "execution", "inspection")
+LOAD_BALANCE_ROUTE_SCOPES = ("ceo", "execution", "inspection", "memory")
 
 DEFAULT_MAX_OUTPUT_TOKENS = 65536
 VALID_REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")

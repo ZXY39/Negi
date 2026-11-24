@@ -48,11 +48,31 @@ from g3ku.runtime.context.summarizer import estimate_tokens
 from g3ku.security.content_policy import apply_content_policy
 from main.prompts import load_prompt
 from main.runtime.chat_backend import (
+    ConfigChatBackend,
     build_actual_request_diagnostics,
     deepseek_reasoning_pad_required,
     resolve_send_model_context_window_info,
 )
+from main.runtime.model_route import (
+    LEASE_OUTCOME_SUCCESS,
+    RouteCandidateFilters,
+    build_model_route_plan,
+)
 from main.runtime.send_token_preflight import estimate_runtime_provider_request_preview_tokens
+
+# 记忆车道进程级模型路由源（balancer + 轻量回合控制器 + 并发控制器），由 runtime_service
+# 构造时设置。记忆 worker 两进程各起一份，attempt 读它按当时上游健康动态选成员；缺席时
+# 退回 build_chat_model 的固定顺序链（行为保持）。沿用 memory_scope_router 的进程全局模式。
+_MEMORY_MODEL_ROUTE_SOURCE: Any = None
+
+
+def set_memory_model_route_source(source: Any) -> None:
+    global _MEMORY_MODEL_ROUTE_SOURCE
+    _MEMORY_MODEL_ROUTE_SOURCE = source
+
+
+def get_memory_model_route_source() -> Any:
+    return _MEMORY_MODEL_ROUTE_SOURCE
 
 # 只服务**入站文本**的两处：legacy import 的候选校验与存量迁移的剥离。新写路径的关系落在
 # `note_ref` 列，渲染出来的是从名字派生的句柄，任何判据都不再扫正文里的 `ref:` / `见noteid:`。
@@ -3941,6 +3961,80 @@ class MemoryManager:
             if ref and ref not in target:
                 target.append(ref)
 
+    def _memory_route_binding_key(self) -> str:
+        # 按 scope 粘滞：本地 manager 与各群 manager 各有独立绑定键，互不干扰。
+        return f"memory:{self.scope_label or 'local'}"
+
+    @staticmethod
+    def _memory_attempted_refs(response: Any) -> list[str]:
+        """台账桥接：FallbackProvider 填 attempted_model_chain；ConfigChatBackend 填 attempts。
+
+        两套形状不互换，这里统一成按序的 model_key 列表，保住「这一批真实走过哪些模型」。
+        """
+        refs = getattr(response, "attempted_model_chain", None)
+        if refs:
+            return list(refs)
+        return [
+            str(getattr(attempt, "model_key", "") or "").strip()
+            for attempt in list(getattr(response, "attempts", None) or [])
+        ]
+
+    async def _build_memory_chat_call(self, runtime_config: Any, tool_schemas: list[Any]):
+        """返回 (chat_call, release)。含组且路由源在场时走 ConfigChatBackend + 每批动态选成员；
+        否则退回 build_chat_model 固定顺序链（行为保持）。
+
+        记忆每批按当时上游负载/429 健康选成员（短上下文，换成员缓存代价小）：release 释放
+        lease 并解绑，下一批重新选。provider 错误仍批内停车，组内轮换只发生在单发 chat 内部。
+        """
+        source = get_memory_model_route_source()
+        turn_controller = getattr(source, "turn_controller", None)
+        balancer = getattr(source, "balancer", None)
+        concurrency = getattr(source, "concurrency_controller", None)
+        plan = None
+        if turn_controller is not None and balancer is not None:
+            try:
+                plan = build_model_route_plan(runtime_config, "memory", revision=0)
+            except Exception:
+                plan = None
+        if plan is not None and plan.load_balance_group_keys:
+            binding_key = self._memory_route_binding_key()
+            try:
+                lease = await turn_controller.acquire_turn(
+                    task_id="memory",
+                    node_id=binding_key,
+                    route_plan=plan,
+                    filters=RouteCandidateFilters(),
+                )
+            except Exception:
+                lease = None
+            if lease is not None:
+                backend = ConfigChatBackend(runtime_config)
+                model_refs = list(plan.candidate_model_keys)
+
+                async def group_chat_call(request_messages: list[dict[str, Any]]) -> Any:
+                    return await backend.chat(
+                        messages=request_messages,
+                        tools=tool_schemas or None,
+                        model_refs=model_refs,
+                        model_routes=plan,
+                        node_turn_lease=lease,
+                        node_turn_controller=turn_controller,
+                        model_concurrency_controller=concurrency,
+                    )
+
+                def release_group_route() -> None:
+                    turn_controller.release_turn(lease, outcome=LEASE_OUTCOME_SUCCESS)
+                    turn_controller.forget_route_binding(binding_key)
+
+                return group_chat_call, release_group_route
+
+        model = build_chat_model(runtime_config, role="memory")
+
+        async def direct_chat_call(request_messages: list[dict[str, Any]]) -> Any:
+            return await model.chat(request_messages, tools=tool_schemas or None)
+
+        return direct_chat_call, (lambda: None)
+
     async def _run_memory_agent_attempt(
         self,
         *,
@@ -3983,7 +4077,7 @@ class MemoryManager:
                 repair_reason=repair_reason,
             )
         tool_schemas = [item.openai_schema() for item in list(tools or [])]
-        model = build_chat_model(runtime_config, role="memory")
+        chat_call, release_memory_route = await self._build_memory_chat_call(runtime_config, tool_schemas)
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
             {
@@ -3997,78 +4091,81 @@ class MemoryManager:
         round_limit = int(runtime_config.get_role_max_iterations("memory") or 8)
         round_limit = max(round_limit, 1)
         final_text = ""
-        for _ in range(round_limit):
-            request_messages = apply_content_policy(self._memory_request_messages(messages))
-            self._memory_window_guard(
-                runtime_config=runtime_config,
-                model_chain=list(model_chain or []),
-                request_messages=request_messages,
-                tool_schemas=tool_schemas,
-                usage_total=usage_total,
-                request_artifacts=request_artifacts,
-            )
-            response = await model.chat(request_messages, tools=tool_schemas or None)
-            self._merge_attempted_model_chain(attempted_chain, getattr(response, "attempted_model_chain", None))
-            round_usage = self._extract_usage(response)
-            self._merge_usage(usage_total, round_usage)
-            artifact = self._persist_memory_request_artifact(
-                phase="agent",
-                batch_op=batch.op,
-                queue_request_ids=queue_request_ids,
-                model_chain=model_chain,
-                request_messages=request_messages,
-                response=response,
-                usage_delta=round_usage,
-            )
-            if artifact is not None:
-                request_artifacts.append(artifact)
-            # Provider 错误响应（429/超时/上游错误被 provider 层转为 finish_reason="error"
-            # 的正常返回值）必须在这里显式识别：否则它会伪装成"模型没调工具"的协议违规，
-            # 真实根因被校验错误掩盖，usage/工件也全为空。
-            provider_error_text = self._provider_error_text(response)
-            if provider_error_text:
-                raise _MemoryProviderError(
-                    provider_error_text,
-                    usage=usage_total,
+        try:
+            for _ in range(round_limit):
+                request_messages = apply_content_policy(self._memory_request_messages(messages))
+                self._memory_window_guard(
+                    runtime_config=runtime_config,
+                    model_chain=list(model_chain or []),
+                    request_messages=request_messages,
+                    tool_schemas=tool_schemas,
+                    usage_total=usage_total,
                     request_artifacts=request_artifacts,
                 )
-            final_text = self._response_text(response)
-            tool_calls = self._normalize_tool_calls(response)
-            if not tool_calls:
-                break
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": final_text,
-                    # provider 要求 arguments 是 JSON 字符串；这一跳以前由适配壳完成，
-                    # 直连后由落盘侧自己规范成 OpenAI 形状（与 worker 车道同一做法）。
-                    "tool_calls": [
-                        {
-                            "id": call.get("id"),
-                            "type": "function",
-                            "function": {
-                                "name": str(call.get("name") or ""),
-                                "arguments": json.dumps(call.get("args") or {}, ensure_ascii=False),
-                            },
-                        }
-                        for call in tool_calls
-                    ],
-                }
-            )
-            hop_results: list[dict[str, Any]] = []
-            for tool_call in tool_calls:
-                result = await self._execute_memory_tool(tools, tool_call)
-                hop_results.append(result)
+                response = await chat_call(request_messages)
+                self._merge_attempted_model_chain(attempted_chain, self._memory_attempted_refs(response))
+                round_usage = self._extract_usage(response)
+                self._merge_usage(usage_total, round_usage)
+                artifact = self._persist_memory_request_artifact(
+                    phase="agent",
+                    batch_op=batch.op,
+                    queue_request_ids=queue_request_ids,
+                    model_chain=model_chain,
+                    request_messages=request_messages,
+                    response=response,
+                    usage_delta=round_usage,
+                )
+                if artifact is not None:
+                    request_artifacts.append(artifact)
+                # Provider 错误响应（429/超时/上游错误被 provider 层转为 finish_reason="error"
+                # 的正常返回值）必须在这里显式识别：否则它会伪装成"模型没调工具"的协议违规，
+                # 真实根因被校验错误掩盖，usage/工件也全为空。
+                provider_error_text = self._provider_error_text(response)
+                if provider_error_text:
+                    raise _MemoryProviderError(
+                        provider_error_text,
+                        usage=usage_total,
+                        request_artifacts=request_artifacts,
+                    )
+                final_text = self._response_text(response)
+                tool_calls = self._normalize_tool_calls(response)
+                if not tool_calls:
+                    break
                 messages.append(
                     {
-                        "role": "tool",
-                        "content": json.dumps(result, ensure_ascii=False),
-                        "tool_call_id": str(tool_call.get("id") or ""),
-                        "name": str(tool_call.get("name") or ""),
+                        "role": "assistant",
+                        "content": final_text,
+                        # provider 要求 arguments 是 JSON 字符串；这一跳以前由适配壳完成，
+                        # 直连后由落盘侧自己规范成 OpenAI 形状（与 worker 车道同一做法）。
+                        "tool_calls": [
+                            {
+                                "id": call.get("id"),
+                                "type": "function",
+                                "function": {
+                                    "name": str(call.get("name") or ""),
+                                    "arguments": json.dumps(call.get("args") or {}, ensure_ascii=False),
+                                },
+                            }
+                            for call in tool_calls
+                        ],
                     }
                 )
-            if self._memory_batch_is_final(session, hop_results, consolidation=consolidation):
-                break
+                hop_results: list[dict[str, Any]] = []
+                for tool_call in tool_calls:
+                    result = await self._execute_memory_tool(tools, tool_call)
+                    hop_results.append(result)
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "content": json.dumps(result, ensure_ascii=False),
+                            "tool_call_id": str(tool_call.get("id") or ""),
+                            "name": str(tool_call.get("name") or ""),
+                        }
+                    )
+                if self._memory_batch_is_final(session, hop_results, consolidation=consolidation):
+                    break
+        finally:
+            release_memory_route()
         return _MemoryAttemptResult(
             session=session,
             usage=usage_total,
