@@ -194,6 +194,19 @@ function memoryUsageCountedRequestText(item) {
     return Number.isFinite(count) ? String(count) : "-";
 }
 
+function memoryMergedRequestCount(item) {
+    // 合并条数＝并入这一批的队列请求条数，与「请求数」（模型发数）是两回事：一批可以
+    // 合并 8 条要求却只发 2 次模型。单条批次不显示，免得每条记录都挂一颗无信息的徽标。
+    const count = Number(item?.request_count);
+    return Number.isFinite(count) && count > 1 ? count : 0;
+}
+
+function renderMemoryMergedChip(item) {
+    const count = memoryMergedRequestCount(item);
+    if (!count) return "";
+    return `<span class="memory-merged-chip" title="这一批合并了 ${count} 条队列请求">合并 ${count} 条</span>`;
+}
+
 function memoryProcessedIsNoChange(item) {
     const normalized = String(item?.status || "").trim().toLowerCase();
     // 容量停车那一级一行都没写：载荷原文留在失败区，台账这行只是把"停在哪一级"记下来。
@@ -1132,6 +1145,9 @@ function openMemoryDetailPreview(kind, key) {
             { label: "处理时间", value: formatCompactTime(source?.processed_at) || String(source?.processed_at || "-") },
             { label: "模型链", value: memoryAttemptedChainText(source) },
             { label: "请求数", value: memoryUsageCountedRequestText(source) },
+            ...(memoryMergedRequestCount(source)
+                ? [{ label: "合并条数", value: `${memoryMergedRequestCount(source)} 条队列请求` }]
+                : []),
             { label: "输入", value: String(usage.input_tokens || 0) },
             { label: "输出", value: String(usage.output_tokens || 0) },
         ]
@@ -1993,6 +2009,7 @@ function renderMemoryProcessedCard(item) {
                     <div class="memory-card-minimal-status">
                         ${statusSlot}
                         <span class="memory-scope-chip" data-memory-scope-kind="${esc(scopeKindLabel)}">${esc(scopeKindLabel)}</span>
+                        ${renderMemoryMergedChip(item)}
                     </div>
                     <div class="memory-card-minimal-trailing">
                         <span class="memory-card-time">${esc(processedAt || "-")}</span>

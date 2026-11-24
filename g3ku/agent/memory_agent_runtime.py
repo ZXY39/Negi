@@ -175,6 +175,35 @@ _MEMORY_WINDOW_SPLIT_RATIO = 0.5
 COMPRESSIBLE_SACRIFICE_SHARE_NUM = 7
 COMPRESSIBLE_SACRIFICE_SHARE_DEN = 10
 
+# 主动提交（操作员/CEO 点名要记的）与复核冲刷（运行时按轮次/龄/压缩/边界倒出来的）
+# 是两条车道：前者合批，后者恒单行。分类只有这一份判据。
+_ACTIVE_TRIGGER_SOURCES = frozenset(
+    {
+        "memory_update_tool",
+        "admin_ui_edit",
+        "admin_ui_delete",
+        "persona_settings",
+    }
+)
+# 空闲封口的硬顶：连续主动流会一直续等空闲窗，到顶必须发车。
+_ACTIVE_SEAL_MAX_SECONDS = 30
+# 主动优先的公平例外：复核行等够这么久就插到主动前面，否则持续对话会把复核饿死。
+_REVIEW_FAIRNESS_MAX_WAIT_SECONDS = 600
+
+
+def _memory_request_lane(*, op: str, trigger_source: str) -> str:
+    """Batching lane of one queue row: `active` merges, `review` and `runtime` stay single.
+
+    An unrecognized trigger source falls to `review` on purpose: a new enqueue door that
+    forgets to register itself then loses merging instead of silently joining somebody
+    else's batch.
+    """
+    if str(op or "").strip().lower() == "consolidate":
+        return "runtime"
+    if str(trigger_source or "").strip() in _ACTIVE_TRIGGER_SOURCES:
+        return "active"
+    return "review"
+
 # 增量里"这行不再有效"的小节标题；模型可见文案统一英文。
 MEMORY_DELETED_HEADING = "Deleted memories:"
 # 一批业务请求最多因"库装不下"被放回队列几次：每次都排一次归并在它前面。归并可能拒收
@@ -2742,6 +2771,61 @@ class MemoryManager:
         rows.insert(0, self._normalize_queue_request(request))
         self._write_queue_requests(rows)
 
+    def _insert_queue_request_active(self, request: MemoryQueueRequest) -> None:
+        """Put an operator/CEO submission ahead of the review backlog.
+
+        Never ahead of a batch already in flight or a consolidation that must run first:
+        the queue's single-in-flight invariant is "the processing row is rows[0]".
+        """
+        rows = self._read_queue_requests()
+        index = len(rows)
+        for position, row in enumerate(rows):
+            if str(row.status or "").strip() == "processing":
+                continue
+            if str(row.op or "").strip().lower() == "consolidate":
+                continue
+            if _memory_request_lane(op=row.op, trigger_source=row.trigger_source) != "active":
+                index = position
+                break
+        rows.insert(index, self._normalize_queue_request(request))
+        self._write_queue_requests(rows)
+
+    def _promote_aged_review_row(self, *, now_iso: str) -> bool:
+        """Move a review row that waited past the fairness window in front of the active lane.
+
+        Without it a continuous conversation starves the review backlog forever, and the
+        age-based flush exists precisely to guarantee short sessions still land. The row is
+        moved rather than selected because a batch may only be taken from the head.
+        """
+        rows = self._read_queue_requests()
+        aged_index: int | None = None
+        aged_seconds = -1
+        for position, row in enumerate(rows):
+            if str(row.status or "pending").strip() != "pending":
+                continue
+            if _memory_request_lane(op=row.op, trigger_source=row.trigger_source) != "review":
+                continue
+            waited = self._seconds_since(row.created_at, now_iso)
+            if waited >= _REVIEW_FAIRNESS_MAX_WAIT_SECONDS and waited > aged_seconds:
+                aged_index, aged_seconds = position, waited
+        if aged_index is None:
+            return False
+        target = 0
+        for position, row in enumerate(rows):
+            if str(row.status or "").strip() == "processing":
+                target = position + 1
+                continue
+            if str(row.op or "").strip().lower() == "consolidate":
+                target = position + 1
+                continue
+            break
+        if aged_index == target:
+            return False
+        promoted = rows.pop(aged_index)
+        rows.insert(target, promoted)
+        self._write_queue_requests(rows)
+        return True
+
     async def list_queue(self, *, limit: int = 20, offset: int = 0) -> list[dict[str, Any]]:
         rows = self._read_queue_requests()
         start = max(int(offset or 0), 0)
@@ -3326,6 +3410,11 @@ class MemoryManager:
                 items.append(row)
             return MemoryBatch(op=head.op, items=items) if items else None
 
+        # 复核冲刷与归并恒单行：一条处理记录就是它自己，不与任何别的请求同批。归属因此
+        # 可读（一条记录 = 一个会话的一次冲刷），代价是批次数比混批时略多。
+        if _memory_request_lane(op=head.op, trigger_source=head.trigger_source) != "active":
+            return MemoryBatch(op=head.op, items=[head])
+
         max_chars = int(getattr(self.config.queue, "batch_max_chars", 50000) or 50000)
         current_chars = 0
         hit_char_boundary = False
@@ -3334,6 +3423,8 @@ class MemoryManager:
             if str(row.status or "pending").strip() != "pending":
                 break
             if row.op != head.op:
+                break
+            if _memory_request_lane(op=row.op, trigger_source=row.trigger_source) != "active":
                 break
             next_chars = current_chars + len(str(row.payload_text or ""))
             if items and next_chars > max_chars:
@@ -3344,11 +3435,15 @@ class MemoryManager:
 
         if not items:
             return None
-        waited_seconds = self._seconds_since(head.created_at, now_iso)
+        if hit_char_boundary or current_chars >= max_chars:
+            return MemoryBatch(op=head.op, items=items)
+        # 空闲封口：等这一轮 burst 不再有新行到达，而不是等队首躺够固定窗。固定窗会把
+        # 同一轮的并行提交切成两批，内部 agent 因此多跑一轮并重复付一次常驻记忆块。
+        idle_seconds = self._seconds_since(items[-1].created_at, now_iso)
+        head_age = self._seconds_since(head.created_at, now_iso)
         if (
-            not hit_char_boundary
-            and current_chars < max_chars
-            and waited_seconds < int(getattr(self.config.queue, "max_wait_seconds", 3) or 3)
+            idle_seconds < int(getattr(self.config.queue, "max_wait_seconds", 3) or 3)
+            and head_age < _ACTIVE_SEAL_MAX_SECONDS
         ):
             return None
         return MemoryBatch(op=head.op, items=items)
@@ -3960,8 +4055,10 @@ class MemoryManager:
                     ],
                 }
             )
+            hop_results: list[dict[str, Any]] = []
             for tool_call in tool_calls:
                 result = await self._execute_memory_tool(tools, tool_call)
+                hop_results.append(result)
                 messages.append(
                     {
                         "role": "tool",
@@ -3970,6 +4067,8 @@ class MemoryManager:
                         "name": str(tool_call.get("name") or ""),
                     }
                 )
+            if self._memory_batch_is_final(session, hop_results, consolidation=consolidation):
+                break
         return _MemoryAttemptResult(
             session=session,
             usage=usage_total,
@@ -3977,6 +4076,41 @@ class MemoryManager:
             request_artifacts=request_artifacts,
             attempted_chain=attempted_chain,
         )
+
+    @staticmethod
+    def _memory_batch_is_final(
+        session: Any,
+        results: list[dict[str, Any]],
+        *,
+        consolidation: bool,
+    ) -> bool:
+        """True when this hop already produced the batch's final staged state.
+
+        Asking the model for one more hop after the commit gate passed bought nothing: the
+        batch verdict downstream is read from the staged session, and that closing hop's
+        text has no consumer. A staged-but-unconfirmed preview is NOT final - the confirm
+        gate is the only place a wrong line number is still catchable.
+        """
+        for envelope in results:
+            if not isinstance(envelope, dict) or not envelope.get("ok"):
+                continue
+            inner = envelope.get("result")
+            if not isinstance(inner, dict):
+                continue
+            tool = str(envelope.get("tool") or "").strip()
+            if consolidation:
+                if tool == "memory_consolidation_apply" and inner.get("status") == "batch_staged":
+                    return True
+                continue
+            if tool == "memory_apply_confirm" and inner.get("status") == "batch_confirmed":
+                return True
+            if (
+                tool == "memory_apply_batch"
+                and inner.get("status") == "batch_staged"
+                and not session.batch_has_mutation()
+            ):
+                return True
+        return False
 
     def _memory_agent_system_prompt(self) -> str:
         return load_prompt("memory_agent.md").strip()
@@ -6203,7 +6337,10 @@ class MemoryManager:
             trigger_source=str(trigger_source or "").strip(),
             request_id=self._request_id(normalized_op),
         )
-        await self._append_queue_request(request)
+        if _memory_request_lane(op=request.op, trigger_source=request.trigger_source) == "active":
+            self._insert_queue_request_active(request)
+        else:
+            await self._append_queue_request(request)
         return {"ok": True, "request_id": request.request_id, "status": "queued"}
 
     async def enqueue_write_request(
@@ -7188,6 +7325,7 @@ class MemoryManager:
                 processed_request_ids=processed_request_ids,
             )
             effective_now = str(now_iso or self._now_iso()).strip()
+            self._promote_aged_review_row(now_iso=effective_now)
             batch = await self.collect_due_batch(now_iso=effective_now)
             if batch is None or not batch.items:
                 if dropped_request_ids:

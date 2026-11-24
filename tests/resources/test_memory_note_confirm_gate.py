@@ -237,3 +237,98 @@ def test_tool_envelope_reflects_an_inner_failure(tmp_path: Path) -> None:
         assert read.get("result") == "正文\n", read
     finally:
         manager.close()
+
+
+def _envelope(tool: str, result: dict) -> dict:
+    return {"ok": bool(result.get("ok", True)), "tool": tool, "result": result}
+
+
+def test_previewed_batch_is_not_terminal_until_confirmed(tmp_path: Path) -> None:
+    module = _module()
+    manager = _manager(tmp_path)
+    try:
+        session = _session(manager)
+        tools = _tools(manager, session)
+        staged = tools["memory_apply_batch"].invoke({"note_upserts": {"note_persona": "人设正文"}})
+        assert staged.get("status") == "batch_previewed", staged
+
+        assert module.MemoryManager._memory_batch_is_final(
+            session, [_envelope("memory_apply_batch", staged)], consolidation=False
+        ) is False
+
+        confirmed = tools["memory_apply_confirm"].invoke({})
+        assert module.MemoryManager._memory_batch_is_final(
+            session, [_envelope("memory_apply_confirm", confirmed)], consolidation=False
+        ) is True
+    finally:
+        manager.close()
+
+
+def test_zero_change_exit_is_terminal_without_confirm(tmp_path: Path) -> None:
+    module = _module()
+    manager = _manager(tmp_path)
+    try:
+        session = _session(manager)
+        staged = session.apply_batch(noop_reason="这一轮没有值得长期保留的内容")
+        assert staged.get("ok") is True, staged
+        assert staged.get("status") == "batch_staged", staged
+        assert session.batch_has_mutation() is False
+
+        assert module.MemoryManager._memory_batch_is_final(
+            session, [_envelope("memory_apply_batch", staged)], consolidation=False
+        ) is True
+    finally:
+        manager.close()
+
+
+def test_refused_and_unbuildable_results_are_not_terminal(tmp_path: Path) -> None:
+    module = _module()
+    manager = _manager(tmp_path)
+    try:
+        session = _session(manager)
+        tools = _tools(manager, session)
+        refused = tools["memory_apply_confirm"].invoke({})
+        assert refused.get("ok") is False, refused
+        unbuildable = tools["memory_apply_batch"].invoke({"deletes": [3]})
+        assert unbuildable.get("ok") is False, unbuildable
+
+        assert module.MemoryManager._memory_batch_is_final(
+            session,
+            [_envelope("memory_apply_confirm", refused), _envelope("memory_apply_batch", unbuildable)],
+            consolidation=False,
+        ) is False
+    finally:
+        manager.close()
+
+
+def test_terminal_verdict_ignores_call_order_within_one_hop(tmp_path: Path) -> None:
+    module = _module()
+    manager = _manager(tmp_path)
+    try:
+        session = _session(manager)
+        tools = _tools(manager, session)
+        staged = tools["memory_apply_batch"].invoke({"note_upserts": {"note_persona": "人设正文"}})
+        confirmed = tools["memory_apply_confirm"].invoke({})
+        read = {"ok": True, "tool": "memory_read_note", "result": "正文"}
+
+        assert module.MemoryManager._memory_batch_is_final(
+            session,
+            [read, _envelope("memory_apply_batch", staged), _envelope("memory_apply_confirm", confirmed)],
+            consolidation=False,
+        ) is True
+    finally:
+        manager.close()
+
+
+def test_consolidation_staged_batch_is_terminal_only_in_its_own_lane(tmp_path: Path) -> None:
+    module = _module()
+    manager = _manager(tmp_path)
+    try:
+        session = _session(manager)
+        staged = {"ok": True, "status": "batch_staged"}
+        envelope = _envelope("memory_consolidation_apply", staged)
+
+        assert module.MemoryManager._memory_batch_is_final(session, [envelope], consolidation=True) is True
+        assert module.MemoryManager._memory_batch_is_final(session, [envelope], consolidation=False) is False
+    finally:
+        manager.close()

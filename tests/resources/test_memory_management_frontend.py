@@ -1621,3 +1621,45 @@ def test_memory_processed_card_marks_the_selected_scope() -> None:
     assert ">群</span>" in str(result["groupCard"])
     assert 'data-memory-scope-kind="本地"' in str(result["localCard"])
     assert ">本地</span>" in str(result["localCard"])
+
+
+def test_memory_processed_surfaces_mark_merged_batches_separately_from_round_count() -> None:
+    """合并条数＝并入这一批的队列请求条数，请求数＝模型发数，两个读数不许互相冒充。
+
+    单条批次不挂徽标：每条记录都挂一颗"合并 1 条"等于没有信息。
+    """
+    result = _run_app_script(
+        """
+        vm.runInContext("renderMemoryDetailPreview = () => {};", context);
+        const __ex = context.__testExports;
+        __ex.S.memoryProcessedItems = [
+          { batch_id: "merged_demo", op: "write", status: "applied",
+            processed_at: "2026-11-24T10:00:00+08:00", request_count: 8,
+            payload_texts: ["甲"], usage_counted_requests: 2 },
+          { batch_id: "single_demo", op: "write", status: "applied",
+            processed_at: "2026-11-24T10:00:00+08:00", request_count: 1,
+            payload_texts: ["乙"], usage_counted_requests: 2 },
+        ];
+        __out.mergedCard = __ex.renderMemoryProcessedCard(__ex.S.memoryProcessedItems[0]);
+        __out.singleCard = __ex.renderMemoryProcessedCard(__ex.S.memoryProcessedItems[1]);
+        const field = (key, label) => {
+          __ex.openMemoryDetailPreview("processed", key);
+          const found = __ex.S.memoryDetailPreview.fields.find((item) => item.label === label);
+          return found ? found.value : null;
+        };
+        __out.mergedRounds = field("merged_demo", "请求数");
+        __out.mergedCount = field("merged_demo", "合并条数");
+        __out.singleCount = field("single_demo", "合并条数");
+        """,
+        ["renderMemoryProcessedCard", "openMemoryDetailPreview", "S"],
+    )
+
+    assert "memory-merged-chip" in str(result["mergedCard"])
+    assert "合并 8 条" in str(result["mergedCard"])
+    assert "memory-merged-chip" not in str(result["singleCard"])
+    assert str(result["mergedRounds"]) == "2"
+    assert str(result["mergedCount"]) == "8 条队列请求"
+    assert result["singleCount"] is None
+
+    css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
+    assert ".memory-merged-chip {" in css

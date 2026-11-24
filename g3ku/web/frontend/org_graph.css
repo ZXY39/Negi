@@ -17082,6 +17082,21 @@ a.artifact-item-link:focus-visible {
     white-space: nowrap;
 }
 
+/* 合并条数徽标：只在 request_count > 1 时渲染，说的是队列请求条数，不是模型发数。 */
+.memory-merged-chip {
+    display: inline-flex;
+    align-items: center;
+    height: 24px;
+    padding: 2px 10px;
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-control);
+    color: var(--ui-text-secondary);
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1.25;
+    white-space: nowrap;
+}
+
 .memory-op-chip[data-op="delete"],
 .memory-op-chip[data-op="category_purge"] {
     color: var(--ui-danger);
