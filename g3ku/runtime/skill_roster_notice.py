@@ -126,6 +126,33 @@ def drop_notice_scope(scope_key: str) -> None:
     _CONTEXT_STORES.pop(str(scope_key or '').strip(), None)
 
 
+def memory_notice_delta_from(
+    manager: Any,
+    *,
+    since_rev: int,
+    initialized: bool,
+) -> dict[str, Any] | None:
+    """一个记忆管理器的增量读数，会话道与节点道共用这一份判据。
+
+    首次投递只对齐到当前修订：头部基座已经是那份文档，再投一遍整篇等于把同一份内容
+    放两次。对齐把 `initialized` 记为真，所以"首跳时还没有任何修订"不会漏掉第一条真实修订。
+    """
+    if manager is None or not callable(getattr(manager, 'memory_notice_delta', None)):
+        return None
+    try:
+        latest = int(manager.latest_memory_revision() or 0)
+    except Exception:
+        return None
+    if not initialized:
+        return {'rev': latest, 'from_rev': 0, 'text': '', 'rebase': False, 'align': True}
+    if latest <= int(since_rev or 0):
+        return {'rev': latest, 'from_rev': int(since_rev), 'text': '', 'rebase': False}
+    try:
+        return manager.memory_notice_delta(since_rev=int(since_rev))
+    except Exception:
+        return None
+
+
 def deliver_for_scope(
     scope_key: str,
     live_skills: list[Any],

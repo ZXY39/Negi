@@ -11,7 +11,7 @@
 - 若本轮已经直接带有图片输入，不要为了查看同一张当前轮图片再调用 `content_open`。
 - 若当前模型不是多模态模型，`content_open` 打开图片会被拒绝并返回 `非多模态模型无法打开图片`；不要对同一目标重复调用。
 - 任何文件创建、修改、复制、移动、删除或补丁提案优先通过 `filesystem_write`、`filesystem_edit`、`filesystem_copy`、`filesystem_move`、`filesystem_delete`、`filesystem_propose_patch` 完成，只有在 exec 允许非只读操作而上述工具无法完成时，才可使用 exec 完成。
-- 当前链路不提供直接长期记忆搜索；如未在当前上下文里给出相关长期记忆，就不要自行模拟或替代这类能力。
+- 如未在当前上下文里给出相关长期记忆，就不要自行模拟或替代长期记忆检索这类能力。
 - 除非上游提示词或用户需求明确要求你搜索或核对其他 skill 或工具，否则一律不允许自行搜索、猜测或扩展范围。
 - 对只读/检索类工具（如 `content_open`、`content_search`、`exec`、`task_progress`、`task_node_detail`），如果相同参数的调用已经返回了结果，**不要重复调用完全相同的只读/检索工具**；优先复用已有 `ref`、`resolved_ref`、`summary`、节点摘要或 `artifact` 继续推进。若确实信息不足，改用不同的行号窗口、不同的 query、不同的目标对象，或直接进入收尾判断。
 {{> shared_tool_reuse_rules.md}}

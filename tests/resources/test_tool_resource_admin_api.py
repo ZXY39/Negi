@@ -5543,8 +5543,10 @@ async def test_tool_resources_mark_core_tools_and_keep_skill_context_tools_indep
             'memory_note',
             'memory_runtime',
         }
-        assert items['memory_update'].allowed_roles == ['ceo']
-        assert items['memory_note'].allowed_roles == ['ceo']
+        # 角色粒度到 execution；"只有 continuous 根节点看得见"那道种类门在
+        # MainRuntimeService._node_memory_tools_allowed，不在治理默认表里。
+        assert items['memory_update'].allowed_roles == ['ceo', 'execution']
+        assert items['memory_note'].allowed_roles == ['ceo', 'execution']
         assert items['memory_update'].agent_visible is True
         assert items['memory_update'].admin_mode == 'editable'
         assert items['memory_note'].agent_visible is True
@@ -5605,7 +5607,12 @@ async def test_tool_resources_mark_core_tools_and_keep_skill_context_tools_indep
             'memory_note',
             'memory_update',
         }
-        assert execution_visible == {'load_skill_context', 'load_tool_context'}
+        assert execution_visible == {
+            'load_skill_context',
+            'load_tool_context',
+            'memory_note',
+            'memory_update',
+        }
         assert inspection_visible == {'load_skill_context', 'load_tool_context'}
 
         # 两条记录各自独立的 allowed_roles：改一条不影响另一条。

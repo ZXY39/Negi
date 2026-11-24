@@ -145,6 +145,7 @@ from main.runtime.adaptive_tool_budget import AdaptiveToolBudgetController
 from main.runtime.chat_backend import ChatBackend
 from main.runtime.continuous_node import (
     CONTINUOUS_METADATA_KEY,
+    is_continuous_metadata,
 )
 from main.runtime.debug_recorder import RuntimeDebugRecorder
 from main.runtime.designed_idle import task_is_designed_idle
@@ -945,6 +946,9 @@ class MainRuntimeService:
         # 节点道 skill 名单的每跳取数口：react_loop 无 service 引用，只能由这里递进去
         # （与 `_tool_snapshot_supplier` 同一条 side-channel）。
         self.node_runner._skill_roster_supplier = self._node_skill_roster_supplier
+        # 长期记忆投影的同一条 side-channel：只有 continuous 根节点拿得到正文。
+        self.node_runner._memory_snapshot_supplier = self._node_memory_snapshot_supplier
+        self.node_runner._memory_notice_provider = self._node_memory_notice_provider
         # 控制台操作的一次性通知取数口：节点只收工具/skill 的全局动作，与 skill 取数口
         # 同一条 side-channel（react_loop 没有 service 引用）。
         self.node_runner._operator_action_supplier = self._node_operator_action_supplier
@@ -11106,7 +11110,9 @@ class MainRuntimeService:
         session_id = str(getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared'
         actor_role = self._actor_role_for_node(node)
         visible_names = self._normalized_tool_name_list(
-            list(visible_tool_names or self.list_effective_tool_names(actor_role=actor_role, session_id=session_id) or [])
+            list(visible_tool_names)
+            if visible_tool_names
+            else self._node_visible_tool_names(node=node, actor_role=actor_role, session_key=session_id)
         )
         visible_name_set = set(visible_names)
         callable_names: list[str] = []
@@ -13611,6 +13617,7 @@ class MainRuntimeService:
         task,
         node_kind: str,
         declared: list[str] | None,
+        node: Any = None,
     ) -> dict[str, Any]:
         """派发方声明的工具名 → 预置契约消息 + 回执。纯读，不落任何跨跳状态。
 
@@ -13631,6 +13638,9 @@ class MainRuntimeService:
             for name in list(self.list_effective_tool_names(actor_role=actor_role, session_id=session_id) or [])
             if str(name or '').strip()
         }
+        if node is not None and not self._node_memory_tools_allowed(node):
+            # 首跳构建才有节点记录：种类门在这里落地，派发时那份预解析只是观测。
+            visible_names -= self.NODE_MEMORY_TOOL_NAMES
         candidates: list[dict[str, Any]] = []
         dropped: list[dict[str, str]] = []
         for name in names:
@@ -14598,6 +14608,33 @@ class MainRuntimeService:
             )
         return items
 
+    def _node_memory_snapshot_supplier(self, *, task, node: NodeRecord) -> str | None:
+        """continuous 根节点的长期记忆投影；别的节点种类返回空串。
+
+        节点道没有前门视图，按 originating session_key 问进程内活动路由：群源＝本地＋本群，
+        第三方私聊源＝只读本地。`None` 专指这次取数失败，调用侧据此保留上一份冻结值——
+        把失败读成"记忆为空"会在头部抹掉整块字节，等于每次读盘抖动都破一次缓存。
+        冻结与重印边界由 react_loop 按 roster epoch 管，这里只取当刻值。
+        """
+        if not self._node_memory_tools_allowed(node):
+            return ''
+        session_key = str(getattr(task, 'session_id', '') or '').strip()
+        if not session_key:
+            return ''
+        from g3ku.runtime.memory_scope_router import active_memory_scope_router
+
+        try:
+            router = active_memory_scope_router()
+            if router is not None:
+                return str(router.view_for_session(session_key).snapshot_text() or '').strip()
+            manager = self.memory_manager
+            reader = getattr(manager, 'snapshot_text', None)
+            if callable(reader):
+                return str(reader() or '').strip()
+        except Exception:
+            return None
+        return ''
+
     @staticmethod
     def _node_context_selection_cache_key(
         *,
@@ -14729,8 +14766,8 @@ class MainRuntimeService:
         session_key = str(getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared'
         actor_role = self._actor_role_for_node(node)
         visible_skills = list(self.list_contract_visible_skill_resources(actor_role=actor_role, session_id=session_key) or [])
-        visible_tool_names = self._normalized_tool_name_list(
-            list(self.list_effective_tool_names(actor_role=actor_role, session_id=session_key) or [])
+        visible_tool_names = self._node_visible_tool_names(
+            node=node, actor_role=actor_role, session_key=session_key
         )
         resource_registry = getattr(self, 'resource_registry', None)
         registry_skills = (
@@ -15059,12 +15096,81 @@ class MainRuntimeService:
             'selection': selection,
         }
 
+    NODE_MEMORY_TOOL_NAMES = frozenset({'memory_update', 'memory_note'})
+
+    def _node_memory_tools_allowed(self, node: NodeRecord) -> bool:
+        """只有 continuous 根节点看得见记忆工具。
+
+        RBAC 是角色粒度：放开到 execution 会让所有执行节点都看见它，所以种类门必须另加
+        一道，且在**可见集**层面排除——不是进了名单再在调用时拒。
+        """
+        return bool(
+            is_continuous_metadata(getattr(node, 'metadata', None))
+            and not str(getattr(node, 'parent_node_id', '') or '').strip()
+            and str(getattr(node, 'node_kind', '') or '').strip().lower() != 'acceptance'
+        )
+
+    def _node_visible_tool_names(self, *, node: NodeRecord, actor_role: str, session_key: str) -> list[str]:
+        """节点可见工具名的唯一取数口：角色可见集再过一道记忆工具种类门。"""
+        names = self._normalized_tool_name_list(
+            list(self.list_effective_tool_names(actor_role=actor_role, session_id=session_key) or [])
+        )
+        if self._node_memory_tools_allowed(node):
+            return names
+        return [name for name in names if name not in self.NODE_MEMORY_TOOL_NAMES]
+
+    def _node_memory_notice_provider(
+        self,
+        *,
+        task,
+        node: NodeRecord,
+        group: bool = False,
+        since_rev: int = 0,
+        base_rev: int = 0,
+        initialized: bool = False,
+    ) -> dict[str, Any] | None:
+        """continuous 根节点的记忆增量：本地与群各一条游标，判据与会话道共用同一份。
+
+        节点头部基座在两次重印之间冻结，中途变化只能由这条一次性通知纠正；没有它，
+        节点会带着旧记忆一直跑到下一次压缩。
+        """
+        _ = base_rev
+        if not self._node_memory_tools_allowed(node):
+            return None
+        session_key = str(getattr(task, 'session_id', '') or '').strip()
+        if not session_key:
+            return None
+        from g3ku.runtime.memory_scope_router import active_memory_scope_router
+        from g3ku.runtime.skill_roster_notice import memory_notice_delta_from
+
+        try:
+            router = active_memory_scope_router()
+            view = router.view_for_session(session_key) if router is not None else None
+        except Exception:
+            view = None
+        if group:
+            manager = getattr(view, 'group_manager', None) if view is not None else None
+        else:
+            manager = getattr(view, 'local_manager', None) if view is not None else self.memory_manager
+        return memory_notice_delta_from(
+            manager, since_rev=int(since_rev or 0), initialized=bool(initialized)
+        )
+
     def _node_context_selection_inputs(self, *, task, node: NodeRecord) -> dict[str, Any]:
         session_key = str(getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared'
         actor_role = self._actor_role_for_node(node)
         visible_skills = list(self.list_contract_visible_skill_resources(actor_role=actor_role, session_id=session_key) or [])
         visible_tool_records = list(self.list_visible_tools(actor_role=actor_role, session_id=session_key) or [])
-        visible_tool_names = list(self.list_effective_tool_names(actor_role=actor_role, session_id=session_key) or [])
+        visible_tool_names = self._node_visible_tool_names(
+            node=node, actor_role=actor_role, session_key=session_key
+        )
+        if not self._node_memory_tools_allowed(node):
+            allowed_names = set(visible_tool_names)
+            visible_tool_records = [
+                record
+                for record in visible_tool_records
+                if str(getattr(record, 'name', '') or '').strip() in allowed_names
+            ]
         return {
             'session_key': session_key,
             'actor_role': actor_role,
@@ -15156,7 +15262,9 @@ class MainRuntimeService:
         task = self.store.get_task(node.task_id)
         session_id = task.session_id if task is not None else 'web:shared'
         actor_role = self._actor_role_for_node(node)
-        visible_tool_names = list(self.list_effective_tool_names(actor_role=actor_role, session_id=session_id) or [])
+        visible_tool_names = self._node_visible_tool_names(
+            node=node, actor_role=actor_role, session_key=session_id
+        )
         selected_visible = set(
             self._callable_tool_names_for_node(
                 task=(task or SimpleNamespace(task_id=node.task_id, session_id=session_id)),
@@ -15533,6 +15641,7 @@ class MainRuntimeService:
             task=task,
             node_kind=str(getattr(node, 'node_kind', '') or ''),
             declared=declared,
+            node=node,
         )
         seed_messages = [dict(item) for item in list(resolved.get('messages') or []) if isinstance(item, dict)]
         # 构建期只补新出现的丢弃，派发时那一份要留着：两个时刻的 reason 合在一起才是这条名单

@@ -360,6 +360,21 @@ class GovernanceStore:
             'text': str(text or ''),
         }
 
+    def has_tool_policy_operator_action(self, tool_id: str) -> bool:
+        """操作员是否亲手改过这个工具的策略。
+
+        一次性角色迁移据此跳过刻意收窄的工具：默认值与操作员选择长得一样时，
+        审计记录是唯一能分开两者的证据。记录有保留期，过期后无法区分（残留风险）。
+        """
+        normalized = str(tool_id or '').strip()
+        if not normalized:
+            return False
+        row = self._fetchone(
+            "SELECT action_id FROM operator_actions WHERE category = 'tool' AND text LIKE ? LIMIT 1",
+            (f'%`{normalized}`%',),
+        )
+        return row is not None
+
     def list_operator_actions(
         self,
         *,

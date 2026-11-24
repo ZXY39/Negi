@@ -4936,20 +4936,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         since_rev: int,
         initialized: bool,
     ) -> dict[str, Any] | None:
-        if manager is None or not callable(getattr(manager, "memory_notice_delta", None)):
-            return None
-        try:
-            latest = int(manager.latest_memory_revision() or 0)
-        except Exception:
-            return None
-        if not initialized:
-            return {"rev": latest, "from_rev": 0, "text": "", "rebase": False, "align": True}
-        if latest <= int(since_rev or 0):
-            return {"rev": latest, "from_rev": int(since_rev), "text": "", "rebase": False}
-        try:
-            return manager.memory_notice_delta(since_rev=int(since_rev))
-        except Exception:
-            return None
+        return _skill_roster_notice.memory_notice_delta_from(
+            manager, since_rev=since_rev, initialized=initialized
+        )
 
     def _frontdoor_persona_notice_provider(
         self,

@@ -3754,6 +3754,24 @@ class NodeRunner:
                 if callable(getattr(self, '_skill_roster_supplier', None))
                 else None
             ),
+            # 长期记忆投影的取数口：只有 continuous 根节点拿得到正文，其余节点返回空串。
+            # 冻结与重印边界由 react_loop 按 roster epoch 管，这里只负责取当刻值。
+            'memory_snapshot_supplier': (
+                (lambda: self._memory_snapshot_supplier(task=task, node=node))
+                if callable(getattr(self, '_memory_snapshot_supplier', None))
+                else None
+            ),
+            # 记忆增量的一次性通知取数口：本地与群各一条游标，头部冻结期间的变化靠它纠正。
+            'memory_notice_provider': (
+                (lambda **kwargs: self._memory_notice_provider(task=task, node=node, group=False, **kwargs))
+                if callable(getattr(self, '_memory_notice_provider', None))
+                else None
+            ),
+            'group_memory_notice_provider': (
+                (lambda **kwargs: self._memory_notice_provider(task=task, node=node, group=True, **kwargs))
+                if callable(getattr(self, '_memory_notice_provider', None))
+                else None
+            ),
             # 控制台操作的一次性通知：节点只收工具/skill 的全局动作，按游标取增量。
             'operator_action_supplier': (
                 (lambda **kwargs: self._operator_action_supplier(**kwargs))
