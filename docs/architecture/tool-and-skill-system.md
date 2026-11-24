@@ -275,6 +275,8 @@ exec 与 memory 工具：
 - `tools/<name>/resource.yaml` 一个目录 = 一个工具 = 一条治理记录 = 一个 `tool_id` = 一个可调用执行器。
 - Tool 管理台一行一个工具；RBAC（`allowed_roles`）、启停（`enabled`）、删除、核心保护全部按这一条判。
 - 同一个名字同时是治理记录 id、注册表实例名与模型面调用名，三者不换拼写。
+- **RBAC 只到角色粒度，节点种类门是另一道**：`memory_update` / `memory_note` 的默认 `allowed_roles` 是 `['ceo','execution']`，但只有 **continuous 根节点**看得见它们——`MainRuntimeService._node_memory_tools_allowed`（`is_continuous_metadata` 且无 `parent_node_id`、且非验收节点）在**可见集**层面排除，不是进了名单再在调用时拒。判据只有一处，`_node_visible_tool_names` 是节点可见工具名的唯一取数口（选择输入、live 快照、`_tool_provider`、首跳 seed 契约都走它）。这两个工具在节点道走**候选 → 契约在场 → 可调用**那条路，不在 `NODE_FIXED_BUILTIN_TOOL_NAMES` 里，所以节点第一次记东西要先 `load_tool_context`。
+- **存量角色由一次性迁移放宽，且不许覆盖操作员的选择**：`_merge_tools` 用持久化角色覆盖新发现的默认值，所以改默认表对存量安装无效。迁移由 meta 门 `memory_tool_node_role_widening_v1_applied` 把守，只在「持久化角色恰好等于历史默认 `['ceo']`」**且**该工具没有 `category='tool'` 的操作员策略审计记录时放宽；读不到审计就当作被改过（fail-closed）。迁移自己留的痕迹记在 `category='tool_migration'`，不会被守卫读成操作员改过策略。审计有保留期，过期后无法区分"历史默认"与"操作员刻意收窄"，这是已知残留风险。
 
 模型面没有“分组调用”这条路：`load_tool_context` 与 provider `tools[]` 只认工具名。递一个目录名之外的名字（例如历史文本里的 `filesystem`、`task_runtime`、`skill_access`）取不到治理记录，按“当前运行时未将其暴露为可加载工具”拒绝，并在错误里给出本轮候选与 RBAC 可见两份名单；不要靠再加一层别名把族名接回来，那等于把已经取消的第二名字空间偷偷放回模型面。
 

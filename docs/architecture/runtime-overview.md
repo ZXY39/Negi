@@ -649,6 +649,14 @@ main/ 侧所有持久化写在磁盘满（ENOSPC / SQLITE_FULL）条件下的行
   写到哪里由作用域决定。会话删除时的边界冲刷也按同一路由取 manager（群聊冲本群，
   第三方私聊没有可写 manager 就跳过）；群目录不随会话删除，管理页按注册表与磁盘目录继续列出它。
   人设只有 `memory/notes/note_persona.md` 这一份，没有按会话隔离的第三方人设。
+- **continuous 根节点**按任务的 originating session_key（`task.session_id`）问进程内活动路由
+  （`active_memory_scope_router()`）取同一份视图：群源任务读本地 + 本群、写进本群，第三方私聊源
+  只读本地。节点道不携带前门视图，也不在 `main/` 里直接持有记忆管理器——投影文本由
+  `MainRuntimeService._node_memory_snapshot_supplier` 经 side-channel 递给节点道。
+  **只有 continuous 根节点**（`is_continuous_metadata` 且无 `parent_node_id`、且非验收节点）
+  拿得到记忆块与记忆工具；子节点与验收节点两者都没有。节点**不接复核窗口**：它只通过
+  `memory_update` 主动入队，因此入队量由模型调用决定，不随节点轮数线性膨胀。
+  节点侧的基座冻结与重印边界归 `context-and-cache-troubleshooting.md`「跨普通 fresh turn 的 tool schema churn」。
 
 ## 人设块、人设 note 与身份
 

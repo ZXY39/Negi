@@ -1,6 +1,6 @@
 # 节点接入长期记忆（只 continuous 根节点）
 
-状态：待批（未动代码）。
+状态：已实现并本机验收通过（提交 604d5d97）。
 靶子来源：用户第一轮要求「长期任务根节点和本地会话一样会同步本地记忆在上下文，同时拥有记忆更新工具，但是没有 5 回合自动入队」；本机实测 `memory/MEMORY.md`、`D:\NEGI\.g3ku\main-runtime\runtime.sqlite3` 的 `task_model_calls`、`.g3ku/main-runtime/governance.sqlite3`。
 前置：记忆车道合批/砍收口跳已交付（`c0332bc5` / `213d849a`），本计划依赖其主动道合批与空闲封口。
 
@@ -165,3 +165,20 @@
 - 冻结标识符不得改：`g3ku` 包名、`G3KU_*` 环境变量、`.g3ku` 数据根、上下文协议标记、`negi_*` 工具名。
 - 提交信息英文；提交身份用 `-c` 临时指定历史作者；共享工作树只 add 自己的文件；每完成一个 P0 子项即提交。
 - 若上下文耗尽：先更新本文件状态行与已完成子项，再开新会话续跑。
+
+## 11. 本机验收实测（2026-11-24，端口 18790）
+
+脚本：`work/_node_accept_stage1.py` / `_node_accept_stage2.py`；结果：`_node_accept_stage1.json`。
+
+- **角色迁移**：活库在**数据根** `D:\NEGI\.g3ku\main-runtime\governance.sqlite3`（仓库里那份是旧副本，查它会误判"迁移没生效"）。`memory_update` 与 `memory_note` 均为 `['ceo','execution']`，meta 门 `memory_tool_node_role_widening_v1_applied=true`，两条 `category='tool_migration'` 留痕，`category='tool'` 的操作员策略记录为 0（守卫正确放行），日志两行 `memory tool node role widened`。
+- **continuous 根节点**（`task:bf80a3084cfa` / `node:970070534e76`）：provider-facing 工件里 `## 长期记忆` 块与 `memory/MEMORY.md` **逐字节相同（5249 字符）**；三跳 `prompt_cache_key_hash` 全为 `029e4edd64309eb1`，**非压缩边界零轮转**。
+- **节点主动入队**：台账新增一行 `trigger_sources=['memory_update_tool']`、`request_count=1`、**1 跳**。记忆 agent 判 noop（它认为该临时标记不值得常驻），所以标记未落 `MEMORY.md`——这是内容判定，不是机制失败。
+- **复核隔离**：`review_state.json` 无该任务/节点条目，节点未产生任何复核来源队列行。
+- **阴性对照**（普通一次性任务 `task:1a3a5840319e`）：节点消息投影无 `## 长期记忆`、无连续节点契约块，正常 `submit_final_result` 收尾。其 provider-facing 工件在盘上已被清理，所以阴性证据是投影 + 单测的种类门守卫，如实记明。
+- **收尾**：两个验收任务已取消并删除，临时会话已删除，活动会话恢复 `web:ceo-739a31050bf8`；删除会话触发的 `session_boundary` 复核批已正常落账（台账 32 行），队列 0 字节、停车区 0 字节、常驻 45 条。
+
+测试与 lint：`ruff check .` 全通过；新增 `tests/resources/test_node_memory_access.py` 14 通过；`test_tool_resource_admin_api.py` 两处钉住旧默认角色的断言按新契约更新；continuous/记忆/治理/节点压缩与通知子集共 577 通过。
+
+未做实机强制的两项：**压缩边界重印**（未构造真实节点压缩，由单测覆盖头部冻结与 epoch 跳变）与**群源/第三方私聊源节点**（本机无此类在跑任务，由单测覆盖作用域与只读拒绝）。
+
+顺手归正的相邻漂移：节点每跳尾块契约已退役，`context-and-cache-troubleshooting.md` 与 `tool-hydration-and-callable-chain.md` 里仍写"尾部恰好 1 份当前契约"的两处已就地改写为当前合同。
