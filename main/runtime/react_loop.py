@@ -239,6 +239,8 @@ _ARTIFACT_REF_PATTERN = re.compile(r'artifact:(?:artifact:)?[A-Za-z0-9_-]+')
 _COMPACT_HISTORY_STEP_MAX_CHARS = 160
 _ORPHAN_TOOL_RESULT_THRESHOLD = 3
 _SPAWN_CHILDREN_TOOL_NAME = 'spawn_child_nodes'
+# 节点记忆基座在钉住块里的小节标题，与会话道 index 1 那块同名：模型读到的形状一致。
+NODE_MEMORY_HEAD_HEADING = '## 长期记忆'
 # exec 截断提醒的幂等标记：这句只出现在这里注入的提醒开头，同一结果第二次注入按它判。
 # 文案不许写"已自动加载"——台账删除后没有任何东西被自动加载，契约要模型自己取。
 _EXEC_TRUNCATION_REOPEN_MARKER = '⚠️ exec 输出未整篇交付到本轮上下文。'
@@ -681,6 +683,7 @@ class ReActToolLoop:
                 session_temp_dir=node_task_temp_dir or None,
                 task_id=str(task.task_id),
                 node_id=str(node.node_id),
+                memory_snapshot_supplier=runtime_context.get('memory_snapshot_supplier'),
             )
             # 每跳只算一次在场索引（D12），下传给这一跳的所有消费点（执行准入、冲动投递、
             # 观测读数）。各消费点各自重算会造出"同一轮里两个答案"，那正是本次要消灭的漂移。
@@ -763,6 +766,8 @@ class ReActToolLoop:
                     _pinned_contract_state(None, session_key=skill_roster_scope)[0]
                 ),
                 operator_actions_provider=runtime_context.get('operator_action_supplier'),
+                memory_notice_provider=runtime_context.get('memory_notice_provider'),
+                group_memory_notice_provider=runtime_context.get('group_memory_notice_provider'),
             )
             selected_skill_ids = self._normalized_name_list(
                 [
@@ -949,6 +954,7 @@ class ReActToolLoop:
                     session_temp_dir=node_task_temp_dir or None,
                     task_id=str(task.task_id),
                     node_id=str(node.node_id),
+                    memory_snapshot_supplier=runtime_context.get('memory_snapshot_supplier'),
                 )
                 compression_provider_tool_names = self._normalized_name_list(
                     list(tool_schema_selection.get('pinned_provider_tool_names') or [])
@@ -3998,11 +4004,14 @@ class ReActToolLoop:
         session_temp_dir: str | None = None,
         task_id: str = '',
         node_id: str = '',
+        memory_snapshot_supplier: Any = None,
     ) -> list[dict[str, Any]]:
         """把静态声明钉进 system 首条；名单/策略没变时逐字节幂等，追加链不受扰。
 
         头部是快照：只在重印边界（token 压缩）用当刻值重渲；两次重印之间 exec 策略
         变化不重印，由一次性通知纠正。临时目录/路径锚与 skill 名单同在一份块里。
+        长期记忆基座走同一份块、同一个边界：它属于 cache key 输入，提前重印
+        等于每次记忆提交都破一次节点缓存。
         """
         base_messages = list(messages or [])
         if not base_messages:
@@ -4025,6 +4034,13 @@ class ReActToolLoop:
                 else None
             ),
         )
+        memory_text = self._node_memory_head_text(
+            scope_key=scope_key,
+            supplier=memory_snapshot_supplier,
+            epoch=epoch,
+        )
+        if memory_text:
+            roster_text = f'{roster_text}\n\n{NODE_MEMORY_HEAD_HEADING}\n{memory_text}'
         if not roster_text:
             return base_messages
         new_head = dict(head)
@@ -4032,6 +4048,40 @@ class ReActToolLoop:
         if new_head['content'] == head.get('content'):
             return base_messages
         return [new_head, *base_messages[1:]]
+
+    def _node_memory_head_text(self, *, scope_key: str, supplier: Any, epoch: Any) -> str:
+        """记忆基座在两次重印之间逐字节冻结，只在 roster epoch 跳变那一跳取新值。
+
+        进程载体空了（worker 重启、钉住表 LRU 顶掉）时先从已恢复的头部原文里读回那一段，
+        而不是重新取数：重取会改掉刚恢复的字节，等于重启后额外破一次缓存。取数失败保留
+        上一份冻结值——把失败读成"记忆为空"会在头部抹掉整块字节。
+        """
+        key = str(scope_key or '').strip()
+        cache = getattr(self, '_node_memory_head_cache', None)
+        if cache is None:
+            cache = {}
+            self._node_memory_head_cache = cache
+        cached = cache.get(key)
+        if cached is not None and cached[0] == epoch:
+            return cached[1]
+        text: str | None = None
+        if cached is None:
+            carrier_text = str(self._node_pinned_head_carrier(key).get('text') or '')
+            marker = f'\n\n{NODE_MEMORY_HEAD_HEADING}\n'
+            index = carrier_text.find(marker)
+            if index >= 0:
+                text = carrier_text[index + len(marker):]
+        if text is None and callable(supplier):
+            try:
+                supplied = supplier()
+            except Exception:  # noqa: BLE001 - 取数失败不得炸回合
+                supplied = None
+            if isinstance(supplied, str):
+                text = supplied
+        if text is None:
+            return cached[1] if cached is not None else ''
+        cache[key] = (epoch, text)
+        return text
 
     @staticmethod
     def _node_exec_runtime_policy_payload(runtime_context: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -4255,6 +4305,8 @@ class ReActToolLoop:
         contract_sections: dict[str, str] | None = None,
         covered_contract_sections: dict[str, str] | None = None,
         operator_actions_provider: Any = None,
+        memory_notice_provider: Any = None,
+        group_memory_notice_provider: Any = None,
     ) -> list[dict[str, Any]]:
         """一次性提示：落在本轮历史末尾，投过就不再投。skill 与合同增量共用一条。
 
@@ -4279,6 +4331,8 @@ class ReActToolLoop:
             contract_sections=contract_sections,
             covered_contract_sections=covered_contract_sections,
             operator_actions_provider=operator_actions_provider,
+            memory_provider=memory_notice_provider,
+            group_memory_provider=group_memory_notice_provider,
         )
         if message is None:
             return base_messages
@@ -4364,6 +4418,9 @@ class ReActToolLoop:
             return base_messages
         self._hydrate_node_skill_roster_notice(node=node)
         _skill_roster_notice.reset_contract_sections_for_compaction(scope, now=now_iso())
+        # 记忆基座在这一跳重印，本地与群两条游标都要归零：只清本地会让群增量在压缩后
+        # 永久不再出现（合同台账那份重置不含群游标）。
+        _skill_roster_notice.reset_memory_cursor(scope)
         self._persist_node_skill_roster_notice(node=node)
         return _mid_insert.strip_after_compaction(
             base_messages,

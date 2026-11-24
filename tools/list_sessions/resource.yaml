@@ -2,14 +2,14 @@ schema_version: 1
 kind: tool
 display_name: "可交流会话列表"
 name: list_sessions
-description: List peer sessions this session can message (alias | title | trust); read-only, the overflow entry of the pinned reachable-session roster.
+description: List peer sessions by short id with title, trust and linked flag; owner callers also see unlinked candidates, which link on first message.
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''
   url: ''
   ref: ''
 current_version:
-  summary: Read-only reachable-session listing for the session-links lane.
+  summary: Read-only session directory for the session-links lane; linked peers plus unlinked candidates for owner-trust callers.
   compare_rule: Treat manifest, main/, parameter contract, or returned payload changes as version-relevant.
   source_of_truth: resource.yaml and main/tool.py define the effective behavior.
 requires:
@@ -25,7 +25,7 @@ parameters:
   required: []
 governance:
   display_name: List Sessions
-  description: List reachable peer sessions (read-only).
+  description: List peer sessions and linkable candidates by short id (read-only).
   risk_level: low
   destructive: false
   allowed_roles:

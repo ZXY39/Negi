@@ -294,8 +294,9 @@ class FrontdoorSessionMessage(Model):
     """A peer-session message in the session-links inbox (one row per recipient).
 
     会话间点对点车道的信箱行，形状同 FrontdoorNodeMessage：注入后才销账。
-    签名与链信息（source_alias/source_title/source_trust/chain_id/hop/reply_to/
-    expects_reply/fingerprint）住 payload，运行时写入，模型传不了。
+    签名与链信息（source_short_id/source_title/source_trust/chain_id/hop/reply_to/
+    expects_reply/fingerprint）住 payload，运行时写入，模型传不了。存量行的签名键
+    是 source_alias（s{seq}），扫描器读侧归一成短标识。
     """
 
     message_id: str
@@ -367,13 +368,16 @@ class TaskNodeResumeIntentRecord(Model):
 
 
 class TaskNodeTimerRecord(Model):
-    """节点自己设的一次性唤醒（`schedule_wake`）。
+    """节点自己设的唤醒（`schedule_wake`），一次性或周期。
 
-    每个节点至多一份待触发唤醒：`(task_id, node_id)` 是主键，重新设就是覆盖。唤醒时刻存
+    每个节点至多一份一次性（`kind='once'`）+ 至多一份周期（`kind='recurring'`），
+    `(task_id, node_id, kind)` 是主键，同档重新设就是覆盖、两档互不覆盖。唤醒时刻存
     epoch 毫秒而不是 ISO 串——它只用来和时钟比大小，而 `time` 工具把同一个数以两种写法还给
-    模型。`claimed_by` / `claimed_at_ms` 是多 worker 下的一次性领取凭证：领取后投递成功即删行；
-    进程在中间死掉时，过期（`_WAKE_CLAIM_STALE_MS`）的领取被下一个扫描重新领走——这张表存在
-    的意义就是"重启也认"，所以丢掉一条领了一半的凭证等于回到 `exec Start-Sleep` 的老故障。
+    模型。`claimed_by` / `claimed_at_ms` 是多 worker 下的一次性领取凭证：领取后投递成功即删行
+    （once）或重臂到下一跳（recurring）；进程在中间死掉时，过期（`_WAKE_CLAIM_STALE_MS`）的
+    领取被下一个扫描重新领走——这张表存在的意义就是"重启也认"，所以丢掉一条领了一半的凭证
+    等于回到 `exec Start-Sleep` 的老故障。周期档的递推参数住 `schedule_kind` / `every_ms` /
+    `cron_expr` / `tz`，重臂时由共享 schedule math 现算下一跳。
     """
 
     task_id: str
@@ -383,6 +387,11 @@ class TaskNodeTimerRecord(Model):
     armed_at: str = ''
     claimed_by: str = ''
     claimed_at_ms: int = 0
+    kind: str = 'once'
+    schedule_kind: str = ''
+    every_ms: int = 0
+    cron_expr: str = ''
+    tz: str = ''
 
 
 class TaskErrorLogRecord(Model):

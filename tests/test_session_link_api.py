@@ -79,10 +79,16 @@ def env(tmp_path, monkeypatch):
 def test_get_links_empty(env):
     response = env.client.get("/api/ceo/sessions/web:ceo-a/links")
     assert response.status_code == 200, response.text
-    assert response.json() == {"ok": True, "session_id": "web:ceo-a", "linked": []}
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["session_id"] == "web:ceo-a"
+    assert payload["linked"] == []
+    # The dialog renders the model-facing short id next to each candidate title.
+    assert payload["short_ids"]["web:ceo-b"] == env.service.session_short_id("web:ceo-b")
+    assert "web:ceo-a" not in payload["short_ids"]
 
 
-def test_put_links_symmetric_and_aliases(env):
+def test_put_links_symmetric_and_short_ids(env):
     response = env.client.put("/api/ceo/sessions/web:ceo-a/links", json={"links": ["web:ceo-b"]})
     assert response.status_code == 200, response.text
     payload = response.json()
@@ -91,12 +97,12 @@ def test_put_links_symmetric_and_aliases(env):
     # Symmetric: the peer side sees the edge without its own write.
     peer = env.client.get("/api/ceo/sessions/web:ceo-b/links").json()
     assert peer["linked"] == ["web:ceo-a"]
-    assert env.service.get_session_alias("web:ceo-a") == "s1"
-    assert env.service.get_session_alias("web:ceo-b") == "s2"
-    # Operator attribution recorded once for the change.
+    assert env.service.session_short_id("web:ceo-a") == "a"
+    assert env.service.session_short_id("web:ceo-b") == "b"
+    # Operator attribution recorded once for the change, in model-facing ids.
     assert len(env.actions) == 1
     assert env.actions[0]["scope"] == "session:web:ceo-a"
-    assert "s2" in env.actions[0]["action"]
+    assert " b" in env.actions[0]["action"]
 
 
 def test_put_links_noop_records_nothing(env):
@@ -113,8 +119,8 @@ def test_put_links_removal_clears_both_sides(env):
     response = env.client.put("/api/ceo/sessions/web:ceo-a/links", json={"links": []})
     assert response.json()["removed"] == ["web:ceo-b"]
     assert env.client.get("/api/ceo/sessions/web:ceo-b/links").json()["linked"] == []
-    # Alias rows survive unlinking.
-    assert env.service.get_session_alias("web:ceo-b") == "s2"
+    # Identifier rows survive unlinking.
+    assert env.service.session_short_id("web:ceo-b") == "b"
 
 
 @pytest.mark.parametrize(
@@ -207,8 +213,8 @@ def test_local_delete_purges_links_and_mailbox(env, monkeypatch):
     assert result["deleted"] is True
     assert env.client.get("/api/ceo/sessions/web:ceo-b/links").json()["linked"] == []
     assert env.service.store.list_pending_frontdoor_session_messages() == []
-    # Alias rows stay (never reused, never deleted).
-    assert env.service.get_session_alias("web:ceo-a") == "s1"
+    # Identifier rows stay (never reused, never deleted).
+    assert env.service.session_short_id("web:ceo-a") == "a"
 
 
 def test_channel_hide_keeps_links(env, monkeypatch):

@@ -131,6 +131,25 @@ test("link dialog defaults to local tab, prechecks linked, excludes self/interna
     assert.ok(checkedB, "linked peer must be prechecked");
 });
 
+test("link rows carry the model-facing short id when the API supplies it", async () => {
+    const { S, U, openCeoSessionLinkDialog, setCeoSessionLinkTab } = loadApp({
+        getSessionLinks: async () => ({
+            ok: true,
+            linked: ["web:ceo-b"],
+            short_ids: { "web:ceo-b": "bbbb2222", "ext:qq-official:abc123": "abc12345" },
+        }),
+    });
+    S.ceoSessions = SESSIONS;
+    await openCeoSessionLinkDialog("web:ceo-a");
+    let html = String(U.ceoSessionLinkList.innerHTML);
+    assert.ok(html.includes(">bbbb2222</span>"), "local row shows its short id");
+    assert.equal(html.split("ceo-session-link-short-id").length - 1, 1, "only rows with an id get a tag");
+    U.ceoSessionLinkList.querySelectorAll = () => [];
+    setCeoSessionLinkTab("channel");
+    html = String(U.ceoSessionLinkList.innerHTML);
+    assert.ok(html.includes(">abc12345</span>"), "channel row shows its short id too");
+});
+
 test("channel tab shows channel rows with bridge label; draft survives tab switches", async () => {
     const calls = [];
     const { S, U, openCeoSessionLinkDialog, setCeoSessionLinkTab, saveCeoSessionLinks, ceoSessionLinkState } = loadApp({

@@ -346,7 +346,7 @@ function renderTraceToolStatusIcon(status) {
 }
 
 // exec 的 purpose 是模型自己写的一句话动机，比工具名更能说明这一跳在干什么，
-// 所以标题画成 `exec:<purpose>` 并且完整读出（见 CSS 里 .has-purpose 那格）。
+// 所以带 purpose 时标题只画这一句（不带 `exec:` 前缀），并且完整读出（见 CSS 里 .has-purpose 那格）。
 // 入参有三种档：账本存的整份 JSON、被压平截断的摘要 preview、实时帧那条
 // `exec (k=v, ...)` 提示串（不带引号，purpose 也常被 48 字上限砍掉——那一档由
 // tool_start 事件的 tool_purpose 字段兜）。前两档都能在这里取到。
@@ -378,7 +378,9 @@ function execPurposeFromStep(step) {
 function toolDisplayTitle(toolName, purposeText) {
     const name = String(toolName || "tool").trim() || "tool";
     const purpose = String(purposeText || "").trim();
-    return purpose ? `${name}:${purpose}` : name;
+    if (!purpose) return name;
+    // exec 的动机本身就是这一跳的人话说明，标题只留它，不再挂工具名前缀。
+    return name === "exec" ? purpose : `${name}:${purpose}`;
 }
 
 function renderExecutionRoundToolChip(round, step, toolIndex) {

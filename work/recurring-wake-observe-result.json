@@ -1,0 +1,27 @@
+{
+  "task_id": "task:6ebf8a5f59ed",
+  "node_id": "node:76789423f856",
+  "started_at": "2026-11-24T16:11:54",
+  "armed": {
+    "schedule_kind": "every",
+    "every_ms": 60000,
+    "baseline_wake_at_ms": 1795507943998,
+    "baseline_notices": 10
+  },
+  "fire": {
+    "new_notices": 1,
+    "excerpt": "Scheduled wake-up for: recurring-probe\nYou armed it for 2026-11-24T16:12:23+08:00. It is now 2026-11-24T16:12:24+08:00.\nThis is a recurring schedule you armed; it re-arms itself for the next slot. You do not need to arm it again — just do this turn's work.",
+    "rearmed_wake_at_ms": 1795508004112,
+    "claim_cleared": true,
+    "schedule_preserved": true
+  },
+  "pause_ok": true,
+  "paused_silent_advance": {
+    "advanced": true,
+    "new_notices": 0,
+    "wake_before": 1795508004112,
+    "wake_after": 1795508064209
+  },
+  "cleanup_deleted": true,
+  "pass": true
+}

@@ -548,13 +548,14 @@ def extract_local_media_attachments(
     return text, attachments
 
 
-@router.get("/ceo/media/original")
-async def get_ceo_media_original(token: str = Query(...)):
-    path = verify_original_token(token)
-    if path is None:
-        raise HTTPException(status_code=403, detail="invalid_media_token")
-    if not path.is_file():
-        raise HTTPException(status_code=404, detail="media_file_not_found")
+def media_file_response(path: Path) -> FileResponse:
+    """Serve a validated local file with the viewer's inline/attachment contract.
+
+    One home for the MIME + disposition decision: images (svg excepted), pdf and
+    text/* render inline; the ``_INLINE_TEXT_SUFFIXES`` family is forced to
+    text/plain so code/json/yaml display in an iframe instead of downloading.
+    Callers must resolve and root-validate ``path`` before handing it here.
+    """
     mime = guess_media_mime(path.name)
     suffix = path.suffix.lower()
     if suffix in _INLINE_TEXT_SUFFIXES and not mime.startswith("text/"):
@@ -570,3 +571,13 @@ async def get_ceo_media_original(token: str = Query(...)):
         filename=path.name,
         content_disposition_type="inline" if inline else "attachment",
     )
+
+
+@router.get("/ceo/media/original")
+async def get_ceo_media_original(token: str = Query(...)):
+    path = verify_original_token(token)
+    if path is None:
+        raise HTTPException(status_code=403, detail="invalid_media_token")
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="media_file_not_found")
+    return media_file_response(path)

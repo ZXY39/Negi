@@ -194,3 +194,91 @@ class TestWakeTimerKindCannotBeForged:
 def test_time_tool_needs_no_lane_wiring():
     """时钟不依赖任何注入：两条车道拿到的必须是同一份形状。"""
     assert set(json.loads(asyncio.run(TimeTool().execute()))) == {'epoch_ms', 'now', 'utc', 'utc_offset', 'weekday'}
+
+
+class TestRecurringWake:
+    def _task(self):
+        return SimpleNamespace(task_id=TASK, status='in_progress', is_paused=False, pause_requested=False)
+
+    def test_recurring_arm_lands_recurring_row(self):
+        store = _Store(_node())
+        runner = _runner(store=store)
+        raw = asyncio.run(
+            runner._arm_node_wake(
+                task=self._task(), node=_node(), wake_at_ms=now_ms() + 60_000, note='每日采集',
+                kind='recurring', schedule_kind='every', every_ms=60_000,
+            )
+        )
+        assert raw['kind'] == 'recurring'
+        assert store.timer['kind'] == 'recurring'
+        assert store.timer['schedule_kind'] == 'every' and store.timer['every_ms'] == 60_000
+
+    def test_acceptance_node_refuses_recurring(self):
+        store = _Store(_node(kind='acceptance'))
+        runner = _runner(store=store)
+        raw = asyncio.run(
+            runner._arm_node_wake(
+                task=self._task(), node=_node(kind='acceptance'), wake_at_ms=now_ms() + 60_000,
+                note='x', kind='recurring', schedule_kind='every', every_ms=60_000,
+            )
+        )
+        assert raw == {'error': 'acceptance_no_recurring'}
+        assert store.timer is None
+
+    def test_acceptance_node_still_allows_once(self):
+        store = _Store(_node(kind='acceptance'))
+        runner = _runner(store=store)
+        raw = asyncio.run(
+            runner._arm_node_wake(task=self._task(), node=_node(kind='acceptance'), wake_at_ms=now_ms() + 60_000, note='x')
+        )
+        assert raw['scope'] == 'node' and store.timer is not None
+
+    def test_tool_routes_recurring_to_arm(self):
+        store = _Store(_node())
+        runner = _runner(store=store)
+        tool = ScheduleWakeTool(
+            lambda **payload: runner._arm_node_wake(task=self._task(), node=_node(), **payload),
+            allow_recurring=True,
+        )
+        parsed = json.loads(asyncio.run(tool.execute(note='每日采集', every_seconds=120)))
+        assert parsed['armed'] is True and parsed['kind'] == 'recurring'
+        assert store.timer['kind'] == 'recurring' and store.timer['every_ms'] == 120_000
+
+    def test_tool_recurring_disabled_on_session_lane(self):
+        async def _arm(**payload):
+            raise AssertionError('session lane must not arm a recurring wake')
+
+        tool = ScheduleWakeTool(_arm, allow_recurring=False)
+        parsed = json.loads(asyncio.run(tool.execute(note='x', every_seconds=120)))
+        assert parsed['armed'] is False and 'task nodes' in parsed['error']
+
+    def test_tool_four_choice_conflict_rejected(self):
+        store = _Store(_node())
+        runner = _runner(store=store)
+        tool = ScheduleWakeTool(
+            lambda **payload: runner._arm_node_wake(task=self._task(), node=_node(), **payload),
+            allow_recurring=True,
+        )
+        parsed = json.loads(asyncio.run(tool.execute(note='x', after_seconds=30, every_seconds=120)))
+        assert parsed['armed'] is False and 'exactly one' in parsed['error']
+        assert store.timer is None
+
+    def test_tool_recurring_below_floor_rejected(self):
+        store = _Store(_node())
+        runner = _runner(store=store)
+        tool = ScheduleWakeTool(
+            lambda **payload: runner._arm_node_wake(task=self._task(), node=_node(), **payload),
+            allow_recurring=True,
+        )
+        parsed = json.loads(asyncio.run(tool.execute(note='x', every_seconds=5)))
+        assert parsed['armed'] is False
+        assert store.timer is None
+
+    def test_parameters_schema_gates_recurring(self):
+        async def _arm(**payload):
+            return {}
+
+        node_props = ScheduleWakeTool(_arm, allow_recurring=True).parameters['properties']
+        session_props = ScheduleWakeTool(_arm, allow_recurring=False).parameters['properties']
+        assert {'every_seconds', 'cron_expr', 'tz'} <= set(node_props)
+        assert {'every_seconds', 'cron_expr', 'tz'}.isdisjoint(set(session_props))

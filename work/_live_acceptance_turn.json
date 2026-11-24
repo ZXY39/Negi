@@ -1,0 +1,48 @@
+{
+  "session_id": "web:ceo-7c54024e2b3d",
+  "after_turn": [
+    {
+      "batch_id": "write_19472e53e367",
+      "op": "write",
+      "request_count": 1,
+      "trigger_sources": [
+        "memory_update_tool"
+      ],
+      "rounds": 2,
+      "artifacts": 2,
+      "changes": 1,
+      "noop": false
+    }
+  ],
+  "marker_memory_id": "ULt3TzOK",
+  "after_session_delete": [
+    {
+      "batch_id": "write_4c5cd3c39495",
+      "op": "write",
+      "request_count": 1,
+      "trigger_sources": [
+        "session_boundary"
+      ],
+      "rounds": 1,
+      "artifacts": 1,
+      "changes": 0,
+      "noop": true
+    }
+  ],
+  "after_memory_delete": [
+    {
+      "batch_id": "delete_fbb1d3bdf0d5",
+      "op": "delete",
+      "request_count": 1,
+      "trigger_sources": [
+        "admin_ui_delete"
+      ],
+      "rounds": 2,
+      "artifacts": 2,
+      "changes": 1,
+      "noop": false
+    }
+  ],
+  "marker_still_present": false,
+  "resident_final": 45
+}

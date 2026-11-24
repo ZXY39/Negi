@@ -116,3 +116,49 @@ def test_sibling_content_routes_map_dead_ref_to_404(harness: _Harness, route: st
     response = harness.client.get(route, params=params)
     assert response.status_code == 404
     assert response.json()['detail']['code'] == 'content_not_found'
+
+
+def test_file_serves_live_markdown_inline(harness: _Harness) -> None:
+    live = harness.workspace / 'temp' / 'tasks' / 'task_dead' / 'note.md'
+    live.write_text('# 标题\n\n正文', encoding='utf-8')
+    response = harness.client.get('/api/content/file', params={'path': str(live)})
+    assert response.status_code == 200
+    assert 'text/markdown' in response.headers['content-type']
+    assert 'inline' in response.headers.get('content-disposition', '')
+    assert response.content == live.read_bytes()
+
+
+def test_file_serves_image_inline(harness: _Harness) -> None:
+    img = harness.workspace / 'temp' / 'tasks' / 'task_dead' / 'pic.png'
+    img.write_bytes(b'\x89PNG\r\n\x1a\n' + b'\x00' * 16)
+    response = harness.client.get('/api/content/file', params={'path': str(img)})
+    assert response.status_code == 200
+    assert response.headers['content-type'].startswith('image/png')
+    assert 'inline' in response.headers.get('content-disposition', '')
+
+
+def test_file_maps_pruned_ref_to_404(harness: _Harness) -> None:
+    response = harness.client.get('/api/content/file', params={'ref': PRUNED_REF})
+    assert response.status_code == 404
+    assert response.json()['detail']['code'] == 'content_not_found'
+
+
+def test_file_maps_directory_to_400(harness: _Harness) -> None:
+    response = harness.client.get('/api/content/file', params={'path': 'temp/tasks/task_dead'})
+    assert response.status_code == 400
+    assert response.json()['detail']['code'] == 'content_ref_invalid'
+
+
+def test_file_outside_allowed_root_maps_to_403(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    inside = tmp_path / 'ws'
+    inside.mkdir()
+    service = _RealContentService(ContentNavigationService(workspace=inside, allowed_dir=inside))
+    monkeypatch.setattr(api_rest, '_service', lambda: service)
+    app = FastAPI()
+    app.include_router(api_rest.router, prefix='/api')
+    client = TestClient(app, raise_server_exceptions=False)
+    outside = tmp_path / 'secret.txt'
+    outside.write_text('secret', encoding='utf-8')
+    response = client.get('/api/content/file', params={'path': str(outside)})
+    assert response.status_code == 403
+    assert response.json()['detail']['code'] == 'path_outside_allowed_roots'

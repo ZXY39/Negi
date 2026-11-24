@@ -321,8 +321,10 @@ class ScheduleWakeTool(Tool):
     rerun_safe = True
     NOTE_LIMIT = 500
 
-    def __init__(self, arm: Callable[..., Awaitable[dict[str, Any]]]) -> None:
+    def __init__(self, arm: Callable[..., Awaitable[dict[str, Any]]], *, allow_recurring: bool = False) -> None:
         self._arm = arm
+        # 周期档只开节点道：会话道的自醒仍走 cron 一次性 `at`（合同不变）。
+        self._allow_recurring = bool(allow_recurring)
 
     @property
     def name(self) -> str:
@@ -330,11 +332,20 @@ class ScheduleWakeTool(Tool):
 
     @property
     def description(self) -> str:
+        modes = '`after_seconds` or `at`'
+        repeat = 'You keep at most one pending one-shot wake-up — arming again replaces it, and nothing repeats unless you arm it again.'
+        if self._allow_recurring:
+            modes = '`after_seconds`, `at`, `every_seconds`, or `cron_expr`'
+            repeat = (
+                'You keep at most one pending one-shot wake-up and one recurring schedule; arming '
+                'again replaces only the same kind, and the two never overwrite each other. A '
+                'recurring schedule (`every_seconds` >= 60, or a minute-grained `cron_expr` with '
+                'optional `tz`) re-arms itself after each fire — you do not arm it again.'
+            )
         return (
-            'Arm one wake-up for yourself: `note` (what to do when it fires) plus exactly one of '
-            '`after_seconds` or `at`. Take `at` from the time tool instead of computing it, and it '
-            'must still be in the future. You keep at most one pending wake-up — arming again '
-            'replaces it, and nothing repeats unless you arm it again. Arming does not end this turn '
+            f'Arm a wake-up for yourself: `note` (what to do when it fires) plus exactly one of '
+            f'{modes}. Take `at` from the time tool instead of computing it, and it '
+            f'must still be in the future. {repeat} Arming does not end this turn '
             'and does not make you wait: stop working when you have nothing left to do until it '
             'fires. The deadline is durable, so it still fires when this process restarts first — '
             'that is what it replaces sleeping inside a long-running command, whose deadline is lost.'
@@ -342,6 +353,12 @@ class ScheduleWakeTool(Tool):
 
     @property
     def model_description(self) -> str:
+        if self._allow_recurring:
+            return (
+                'Arm a self-wake with exactly one of `after_seconds`, a future `at`, `every_seconds` '
+                '(>= 60), or `cron_expr` (optional `tz`); one-shot and recurring are kept separately, '
+                'recurring re-arms itself, it does not end this turn, and survives a restart.'
+            )
         return (
             'Arm one self-wake with exactly one of `after_seconds` or a future `at` (take `at` from '
             'the time tool, never compute it); it replaces your previous pending wake-up, does not '
@@ -350,25 +367,40 @@ class ScheduleWakeTool(Tool):
 
     @property
     def parameters(self) -> dict[str, Any]:
+        properties: dict[str, Any] = {
+            'note': {
+                'type': 'string',
+                'minLength': 1,
+                'maxLength': self.NOTE_LIMIT,
+                'description': 'What to do when it fires. Delivered to you verbatim.',
+            },
+            'after_seconds': {
+                'type': 'integer',
+                'minimum': 1,
+                'description': 'Delay from now, in seconds.',
+            },
+            'at': {
+                'type': 'string',
+                'description': 'Absolute future time, written the way the time tool prints it.',
+            },
+        }
+        if self._allow_recurring:
+            properties['every_seconds'] = {
+                'type': 'integer',
+                'minimum': 60,
+                'description': 'Recurring interval in seconds (at least 60). Re-arms itself after each fire.',
+            }
+            properties['cron_expr'] = {
+                'type': 'string',
+                'description': 'Recurring cron expression, e.g. "0 6 * * *" (minute-grained). Re-arms itself.',
+            }
+            properties['tz'] = {
+                'type': 'string',
+                'description': 'IANA time zone for cron_expr only, e.g. "Asia/Shanghai".',
+            }
         return {
             'type': 'object',
-            'properties': {
-                'note': {
-                    'type': 'string',
-                    'minLength': 1,
-                    'maxLength': self.NOTE_LIMIT,
-                    'description': 'What to do when it fires. Delivered to you verbatim.',
-                },
-                'after_seconds': {
-                    'type': 'integer',
-                    'minimum': 1,
-                    'description': 'Delay from now, in seconds.',
-                },
-                'at': {
-                    'type': 'string',
-                    'description': 'Absolute future time, written the way the time tool prints it.',
-                },
-            },
+            'properties': properties,
             'required': ['note'],
         }
 
@@ -377,6 +409,9 @@ class ScheduleWakeTool(Tool):
         note: str = '',
         at: Any = None,
         after_seconds: Any = None,
+        every_seconds: Any = None,
+        cron_expr: Any = None,
+        tz: Any = None,
         **kwargs: Any,
     ) -> str:
         _ = kwargs
@@ -393,10 +428,53 @@ class ScheduleWakeTool(Tool):
                 ensure_ascii=False,
                 sort_keys=True,
             )
-        wake_at_ms, refusal = resolve_wake_moment(at=at, after_seconds=after_seconds)
-        if refusal:
-            return json.dumps({'armed': False, 'error': refusal}, ensure_ascii=False, sort_keys=True)
-        payload = dict(await self._arm(wake_at_ms=int(wake_at_ms), note=body) or {})
+
+        has_recurring = every_seconds not in (None, '') or bool(str(cron_expr or '').strip())
+        has_once = at not in (None, '') or after_seconds not in (None, '')
+        if has_recurring and has_once:
+            return json.dumps(
+                {
+                    'armed': False,
+                    'error': 'Give exactly one of `at`, `after_seconds`, `every_seconds`, `cron_expr`.',
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+
+        if has_recurring:
+            if not self._allow_recurring:
+                return json.dumps(
+                    {
+                        'armed': False,
+                        'error': 'Recurring schedules are only available on task nodes; here arm a one-shot `at`/`after_seconds`.',
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            from g3ku.cron.schedule_math import resolve_recurring_wake
+
+            schedule, wake_at_ms, refusal = resolve_recurring_wake(
+                every_seconds=every_seconds, cron_expr=cron_expr, tz=tz,
+            )
+            if refusal:
+                return json.dumps({'armed': False, 'error': refusal}, ensure_ascii=False, sort_keys=True)
+            payload = dict(
+                await self._arm(
+                    wake_at_ms=int(wake_at_ms),
+                    note=body,
+                    kind='recurring',
+                    schedule_kind=str(schedule.kind),
+                    every_ms=int(schedule.every_ms or 0),
+                    cron_expr=str(schedule.expr or ''),
+                    tz=str(schedule.tz or ''),
+                ) or {}
+            )
+        else:
+            wake_at_ms, refusal = resolve_wake_moment(at=at, after_seconds=after_seconds)
+            if refusal:
+                return json.dumps({'armed': False, 'error': refusal}, ensure_ascii=False, sort_keys=True)
+            payload = dict(await self._arm(wake_at_ms=int(wake_at_ms), note=body) or {})
+
         payload.setdefault('armed', str(payload.get('error') or '').strip() == '')
         if truncated:
             payload['note_truncated'] = True

@@ -1971,6 +1971,7 @@ async def test_collect_due_batch_stops_at_mixed_operation_boundary(tmp_path: Pat
                 decision_source="user",
                 payload_text="A" * 10,
                 created_at="2026-04-17T10:00:00+08:00",
+                trigger_source="memory_update_tool",
             )
         )
         await manager._append_queue_request(
@@ -1979,6 +1980,7 @@ async def test_collect_due_batch_stops_at_mixed_operation_boundary(tmp_path: Pat
                 decision_source="self",
                 payload_text="B" * 10,
                 created_at="2026-04-17T10:00:01+08:00",
+                trigger_source="memory_update_tool",
             )
         )
         await manager._append_queue_request(
@@ -2805,10 +2807,12 @@ async def test_run_due_batch_once_records_successful_processed_batch_with_usage_
         assert processed[0]["model_chain"] == ["memory-primary"]
         assert processed[0]["request_ids"] == ["write_1"]
         assert processed[0]["usage"] == {
-            "input_tokens": 10,
-            "output_tokens": 4,
+            "input_tokens": 8,
+            "output_tokens": 3,
             "cache_read_tokens": 2,
         }
+        # 确认成功即终态：不再向模型多要一跳收尾文本，那一跳的产出没有消费方。
+        assert len(fake_model.calls) == 1
         assert processed[0]["note_refs_written"] == ["note_policy"]
     finally:
         manager.close()
@@ -3831,5 +3835,284 @@ async def test_flush_review_window_splits_oversized_window_into_queue_rows(
                 usage_total={"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0},
                 request_artifacts=[],
             )
+    finally:
+        manager.close()
+
+
+def _lane_row(module, *, payload: str, created_at: str, trigger: str, op: str = "write", status: str = "pending"):
+    return module.MemoryQueueRequest(
+        op=op,
+        decision_source="self",
+        payload_text=payload,
+        created_at=created_at,
+        trigger_source=trigger,
+        status=status,
+    )
+
+
+@pytest.mark.asyncio
+async def test_collect_due_batch_keeps_review_rows_single(tmp_path: Path) -> None:
+    # 一条复核记录就是一个会话的一次冲刷：同 op 也不合并，归属才读得出来。
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        await manager._append_queue_request(
+            _lane_row(module, payload="review a", created_at="2026-04-17T10:00:00+08:00", trigger="session_boundary")
+        )
+        await manager._append_queue_request(
+            _lane_row(module, payload="review b", created_at="2026-04-17T10:00:01+08:00", trigger="stale_buffer")
+        )
+
+        batch = await manager.collect_due_batch(now_iso="2026-04-17T10:00:30+08:00")
+
+        assert batch is not None
+        assert [item.payload_text for item in batch.items] == ["review a"]
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_collect_due_batch_unknown_trigger_source_fails_closed_to_review(tmp_path: Path) -> None:
+    # 新入队口忘了归类时只许少合并，不许悄悄混进别人的批次。
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        for index, trigger in enumerate(("", "brand_new_door")):
+            await manager._append_queue_request(
+                _lane_row(
+                    module,
+                    payload=f"unknown {index}",
+                    created_at=f"2026-04-17T10:00:0{index}+08:00",
+                    trigger=trigger,
+                )
+            )
+
+        batch = await manager.collect_due_batch(now_iso="2026-04-17T10:00:30+08:00")
+
+        assert batch is not None
+        assert len(batch.items) == 1
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_collect_due_batch_merges_active_lane_and_stops_at_review(tmp_path: Path) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        await manager._append_queue_request(
+            _lane_row(module, payload="A" * 10, created_at="2026-04-17T10:00:00+08:00", trigger="memory_update_tool")
+        )
+        await manager._append_queue_request(
+            _lane_row(module, payload="B" * 10, created_at="2026-04-17T10:00:01+08:00", trigger="admin_ui_edit")
+        )
+        await manager._append_queue_request(
+            _lane_row(module, payload="review", created_at="2026-04-17T10:00:02+08:00", trigger="session_boundary")
+        )
+
+        batch = await manager.collect_due_batch(now_iso="2026-04-17T10:00:30+08:00")
+
+        assert batch is not None
+        assert [item.payload_text for item in batch.items] == ["A" * 10, "B" * 10]
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_active_idle_seal_waits_for_the_last_row_of_a_burst(tmp_path: Path) -> None:
+    # 固定窗会把同一轮的并行提交切成两批；封口看的是"还有没有新行到达"。
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        await manager._append_queue_request(
+            _lane_row(module, payload="first", created_at="2026-04-17T10:00:00+08:00", trigger="memory_update_tool")
+        )
+        await manager._append_queue_request(
+            _lane_row(module, payload="second", created_at="2026-04-17T10:00:02+08:00", trigger="memory_update_tool")
+        )
+
+        assert await manager.collect_due_batch(now_iso="2026-04-17T10:00:03+08:00") is None
+
+        batch = await manager.collect_due_batch(now_iso="2026-04-17T10:00:05+08:00")
+        assert batch is not None
+        assert [item.payload_text for item in batch.items] == ["first", "second"]
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_active_seal_hard_cap_fires_while_rows_keep_arriving(tmp_path: Path) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        await manager._append_queue_request(
+            _lane_row(module, payload="head", created_at="2026-04-17T10:00:00+08:00", trigger="memory_update_tool")
+        )
+        await manager._append_queue_request(
+            _lane_row(module, payload="tail", created_at="2026-04-17T10:00:29+08:00", trigger="memory_update_tool")
+        )
+
+        batch = await manager.collect_due_batch(now_iso="2026-04-17T10:00:31+08:00")
+
+        assert batch is not None
+        assert len(batch.items) == 2
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_active_char_boundary_fires_without_waiting(tmp_path: Path) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        await manager._append_queue_request(
+            _lane_row(module, payload="A" * 40, created_at="2026-04-17T10:00:00+08:00", trigger="memory_update_tool")
+        )
+        await manager._append_queue_request(
+            _lane_row(module, payload="B" * 40, created_at="2026-04-17T10:00:00+08:00", trigger="memory_update_tool")
+        )
+
+        batch = await manager.collect_due_batch(now_iso="2026-04-17T10:00:00+08:00")
+
+        assert batch is not None
+        assert [item.payload_text for item in batch.items] == ["A" * 40]
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_active_submission_jumps_the_review_backlog(tmp_path: Path) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        await manager.enqueue_operator_request(
+            op="write",
+            decision_source="self",
+            payload_text="review backlog",
+            trigger_source="session_boundary",
+        )
+        await manager.enqueue_operator_request(
+            op="write",
+            decision_source="user",
+            payload_text="operator submission",
+            trigger_source="memory_update_tool",
+        )
+
+        rows = manager._read_queue_requests()
+        assert [row.payload_text for row in rows] == ["operator submission", "review backlog"]
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_active_submission_never_jumps_consolidate_or_in_flight_head(tmp_path: Path) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        await manager._append_queue_request(
+            _lane_row(
+                module,
+                payload="consolidate",
+                created_at="2026-04-17T10:00:00+08:00",
+                trigger="compression_trigger",
+                op="consolidate",
+            )
+        )
+        await manager._append_queue_request(
+            _lane_row(
+                module,
+                payload="in flight",
+                created_at="2026-04-17T10:00:01+08:00",
+                trigger="session_boundary",
+                status="processing",
+            )
+        )
+        await manager.enqueue_operator_request(
+            op="write",
+            decision_source="user",
+            payload_text="operator submission",
+            trigger_source="memory_update_tool",
+        )
+
+        rows = manager._read_queue_requests()
+        assert [row.payload_text for row in rows] == ["consolidate", "in flight", "operator submission"]
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_aged_review_row_is_promoted_ahead_of_the_active_lane(tmp_path: Path) -> None:
+    # 主动优先不许把复核饿死：等够公平窗的复核行插到主动前面。
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        await manager._append_queue_request(
+            _lane_row(module, payload="active", created_at="2026-04-17T10:00:00+08:00", trigger="memory_update_tool")
+        )
+        await manager._append_queue_request(
+            _lane_row(module, payload="aged review", created_at="2026-04-17T09:50:00+08:00", trigger="session_boundary")
+        )
+
+        assert manager._promote_aged_review_row(now_iso="2026-04-17T10:00:30+08:00") is True
+        batch = await manager.collect_due_batch(now_iso="2026-04-17T10:00:30+08:00")
+
+        assert batch is not None
+        assert [item.payload_text for item in batch.items] == ["aged review"]
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_fairness_promotion_keeps_consolidate_and_in_flight_first(tmp_path: Path) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        await manager._append_queue_request(
+            _lane_row(
+                module,
+                payload="consolidate",
+                created_at="2026-04-17T10:00:00+08:00",
+                trigger="compression_trigger",
+                op="consolidate",
+            )
+        )
+        await manager._append_queue_request(
+            _lane_row(
+                module,
+                payload="in flight",
+                created_at="2026-04-17T10:00:01+08:00",
+                trigger="session_boundary",
+                status="processing",
+            )
+        )
+        await manager._append_queue_request(
+            _lane_row(module, payload="active", created_at="2026-04-17T10:00:02+08:00", trigger="memory_update_tool")
+        )
+        await manager._append_queue_request(
+            _lane_row(module, payload="aged review", created_at="2026-04-17T09:50:00+08:00", trigger="stale_buffer")
+        )
+
+        assert manager._promote_aged_review_row(now_iso="2026-04-17T10:00:30+08:00") is True
+
+        rows = manager._read_queue_requests()
+        assert [row.payload_text for row in rows] == ["consolidate", "in flight", "aged review", "active"]
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_fresh_review_row_is_not_promoted(tmp_path: Path) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        await manager._append_queue_request(
+            _lane_row(module, payload="active", created_at="2026-04-17T10:00:00+08:00", trigger="memory_update_tool")
+        )
+        await manager._append_queue_request(
+            _lane_row(module, payload="fresh review", created_at="2026-04-17T09:59:00+08:00", trigger="session_boundary")
+        )
+
+        assert manager._promote_aged_review_row(now_iso="2026-04-17T10:00:30+08:00") is False
+        assert [row.payload_text for row in manager._read_queue_requests()] == ["active", "fresh review"]
     finally:
         manager.close()

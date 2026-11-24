@@ -355,8 +355,11 @@ class SessionManager:
             return None
         if not isinstance(data, dict) or data.get("_type") != "metadata":
             return None
+        metadata = data.get("metadata")
+        title = str(metadata.get("title") or "").strip() if isinstance(metadata, dict) else ""
         return {
             "key": data.get("key") or path.stem.replace("_", ":", 1),
+            "title": title,
             "created_at": data.get("created_at"),
             "updated_at": data.get("updated_at"),
             "path": str(path),
@@ -381,6 +384,7 @@ class SessionManager:
         tail_entry = self._metadata_entry(tail_lines[-1] if tail_lines else "", path)
         if tail_entry and head_entry:
             tail_entry["created_at"] = tail_entry.get("created_at") or head_entry.get("created_at")
+            tail_entry["title"] = tail_entry.get("title") or head_entry.get("title")
         return tail_entry or head_entry
 
     def list_sessions(self) -> list[dict[str, Any]]:

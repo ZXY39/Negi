@@ -1,0 +1,27 @@
+{
+  "baseline_total": 26,
+  "request_ids": [
+    "write_df8f94832af4",
+    "write_e4b974b267e4",
+    "write_1c219bf32986"
+  ],
+  "new_batches": [
+    {
+      "batch_id": "write_f98977f82fed",
+      "request_count": 3,
+      "trigger_sources": [
+        "admin_ui_edit"
+      ],
+      "request_ids": [
+        "write_df8f94832af4",
+        "write_e4b974b267e4",
+        "write_1c219bf32986"
+      ],
+      "usage_counted_requests": 1,
+      "artifact_count": 1,
+      "change_count": 0,
+      "noop": true
+    }
+  ],
+  "bodies_changed": []
+}

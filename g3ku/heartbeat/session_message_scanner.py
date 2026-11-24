@@ -91,6 +91,23 @@ class SessionMessageScanner:
                 pass
         return ''
 
+    def _source_short_id(self, payload_extra: dict[str, Any], source_key: str) -> str:
+        """来信签名的短标识；存量行盖的是 s{seq}，解析回规范 key 再取号。"""
+        stamped = str(payload_extra.get('source_short_id') or '').strip()
+        if stamped:
+            return stamped
+        service = self._main_task_service
+        resolver = getattr(service, 'resolve_session_address', None)
+        getter = getattr(service, 'session_short_id', None)
+        if not callable(resolver) or not callable(getter):
+            return ''
+        legacy = str(payload_extra.get('source_alias') or '').strip()
+        try:
+            key = resolver(legacy) if legacy else source_key
+            return str(getter(key) or '') if key else ''
+        except Exception:
+            return ''
+
     async def scan_once(self) -> int:
         store = getattr(self._main_task_service, 'store', None)
         list_pending = getattr(store, 'list_pending_frontdoor_session_messages', None)
@@ -108,12 +125,7 @@ class SessionMessageScanner:
             if self._session_is_paused(session_id):
                 continue
             payload_extra = dict(getattr(row, 'payload', None) or {})
-            source_alias = str(payload_extra.get('source_alias') or '').strip()
-            if not source_alias:
-                try:
-                    source_alias = str(store.get_session_alias(source_key) or '').strip()
-                except Exception:
-                    source_alias = ''
+            source_short_id = self._source_short_id(payload_extra, source_key)
             try:
                 from g3ku.runtime.session_trust import session_trust
 
@@ -123,7 +135,7 @@ class SessionMessageScanner:
             payload = {
                 'message_id': message_id,
                 'source_session_key': source_key,
-                'source_alias': source_alias,
+                'source_short_id': source_short_id,
                 'source_title': self._source_title(source_key),
                 'source_trust': trust,
                 'content': str(getattr(row, 'content', '') or ''),

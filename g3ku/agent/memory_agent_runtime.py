@@ -48,11 +48,31 @@ from g3ku.runtime.context.summarizer import estimate_tokens
 from g3ku.security.content_policy import apply_content_policy
 from main.prompts import load_prompt
 from main.runtime.chat_backend import (
+    ConfigChatBackend,
     build_actual_request_diagnostics,
     deepseek_reasoning_pad_required,
     resolve_send_model_context_window_info,
 )
+from main.runtime.model_route import (
+    LEASE_OUTCOME_SUCCESS,
+    RouteCandidateFilters,
+    build_model_route_plan,
+)
 from main.runtime.send_token_preflight import estimate_runtime_provider_request_preview_tokens
+
+# 记忆车道进程级模型路由源（balancer + 轻量回合控制器 + 并发控制器），由 runtime_service
+# 构造时设置。记忆 worker 两进程各起一份，attempt 读它按当时上游健康动态选成员；缺席时
+# 退回 build_chat_model 的固定顺序链（行为保持）。沿用 memory_scope_router 的进程全局模式。
+_MEMORY_MODEL_ROUTE_SOURCE: Any = None
+
+
+def set_memory_model_route_source(source: Any) -> None:
+    global _MEMORY_MODEL_ROUTE_SOURCE
+    _MEMORY_MODEL_ROUTE_SOURCE = source
+
+
+def get_memory_model_route_source() -> Any:
+    return _MEMORY_MODEL_ROUTE_SOURCE
 
 # 只服务**入站文本**的两处：legacy import 的候选校验与存量迁移的剥离。新写路径的关系落在
 # `note_ref` 列，渲染出来的是从名字派生的句柄，任何判据都不再扫正文里的 `ref:` / `见noteid:`。
@@ -174,6 +194,35 @@ _MEMORY_WINDOW_SPLIT_RATIO = 0.5
 # 分母只算 gain>0 的行：已压行占着字节却省不出字，用全量当分母会让预算先被它们吃光。
 COMPRESSIBLE_SACRIFICE_SHARE_NUM = 7
 COMPRESSIBLE_SACRIFICE_SHARE_DEN = 10
+
+# 主动提交（操作员/CEO 点名要记的）与复核冲刷（运行时按轮次/龄/压缩/边界倒出来的）
+# 是两条车道：前者合批，后者恒单行。分类只有这一份判据。
+_ACTIVE_TRIGGER_SOURCES = frozenset(
+    {
+        "memory_update_tool",
+        "admin_ui_edit",
+        "admin_ui_delete",
+        "persona_settings",
+    }
+)
+# 空闲封口的硬顶：连续主动流会一直续等空闲窗，到顶必须发车。
+_ACTIVE_SEAL_MAX_SECONDS = 30
+# 主动优先的公平例外：复核行等够这么久就插到主动前面，否则持续对话会把复核饿死。
+_REVIEW_FAIRNESS_MAX_WAIT_SECONDS = 600
+
+
+def _memory_request_lane(*, op: str, trigger_source: str) -> str:
+    """Batching lane of one queue row: `active` merges, `review` and `runtime` stay single.
+
+    An unrecognized trigger source falls to `review` on purpose: a new enqueue door that
+    forgets to register itself then loses merging instead of silently joining somebody
+    else's batch.
+    """
+    if str(op or "").strip().lower() == "consolidate":
+        return "runtime"
+    if str(trigger_source or "").strip() in _ACTIVE_TRIGGER_SOURCES:
+        return "active"
+    return "review"
 
 # 增量里"这行不再有效"的小节标题；模型可见文案统一英文。
 MEMORY_DELETED_HEADING = "Deleted memories:"
@@ -2742,6 +2791,61 @@ class MemoryManager:
         rows.insert(0, self._normalize_queue_request(request))
         self._write_queue_requests(rows)
 
+    def _insert_queue_request_active(self, request: MemoryQueueRequest) -> None:
+        """Put an operator/CEO submission ahead of the review backlog.
+
+        Never ahead of a batch already in flight or a consolidation that must run first:
+        the queue's single-in-flight invariant is "the processing row is rows[0]".
+        """
+        rows = self._read_queue_requests()
+        index = len(rows)
+        for position, row in enumerate(rows):
+            if str(row.status or "").strip() == "processing":
+                continue
+            if str(row.op or "").strip().lower() == "consolidate":
+                continue
+            if _memory_request_lane(op=row.op, trigger_source=row.trigger_source) != "active":
+                index = position
+                break
+        rows.insert(index, self._normalize_queue_request(request))
+        self._write_queue_requests(rows)
+
+    def _promote_aged_review_row(self, *, now_iso: str) -> bool:
+        """Move a review row that waited past the fairness window in front of the active lane.
+
+        Without it a continuous conversation starves the review backlog forever, and the
+        age-based flush exists precisely to guarantee short sessions still land. The row is
+        moved rather than selected because a batch may only be taken from the head.
+        """
+        rows = self._read_queue_requests()
+        aged_index: int | None = None
+        aged_seconds = -1
+        for position, row in enumerate(rows):
+            if str(row.status or "pending").strip() != "pending":
+                continue
+            if _memory_request_lane(op=row.op, trigger_source=row.trigger_source) != "review":
+                continue
+            waited = self._seconds_since(row.created_at, now_iso)
+            if waited >= _REVIEW_FAIRNESS_MAX_WAIT_SECONDS and waited > aged_seconds:
+                aged_index, aged_seconds = position, waited
+        if aged_index is None:
+            return False
+        target = 0
+        for position, row in enumerate(rows):
+            if str(row.status or "").strip() == "processing":
+                target = position + 1
+                continue
+            if str(row.op or "").strip().lower() == "consolidate":
+                target = position + 1
+                continue
+            break
+        if aged_index == target:
+            return False
+        promoted = rows.pop(aged_index)
+        rows.insert(target, promoted)
+        self._write_queue_requests(rows)
+        return True
+
     async def list_queue(self, *, limit: int = 20, offset: int = 0) -> list[dict[str, Any]]:
         rows = self._read_queue_requests()
         start = max(int(offset or 0), 0)
@@ -3326,6 +3430,11 @@ class MemoryManager:
                 items.append(row)
             return MemoryBatch(op=head.op, items=items) if items else None
 
+        # 复核冲刷与归并恒单行：一条处理记录就是它自己，不与任何别的请求同批。归属因此
+        # 可读（一条记录 = 一个会话的一次冲刷），代价是批次数比混批时略多。
+        if _memory_request_lane(op=head.op, trigger_source=head.trigger_source) != "active":
+            return MemoryBatch(op=head.op, items=[head])
+
         max_chars = int(getattr(self.config.queue, "batch_max_chars", 50000) or 50000)
         current_chars = 0
         hit_char_boundary = False
@@ -3334,6 +3443,8 @@ class MemoryManager:
             if str(row.status or "pending").strip() != "pending":
                 break
             if row.op != head.op:
+                break
+            if _memory_request_lane(op=row.op, trigger_source=row.trigger_source) != "active":
                 break
             next_chars = current_chars + len(str(row.payload_text or ""))
             if items and next_chars > max_chars:
@@ -3344,11 +3455,15 @@ class MemoryManager:
 
         if not items:
             return None
-        waited_seconds = self._seconds_since(head.created_at, now_iso)
+        if hit_char_boundary or current_chars >= max_chars:
+            return MemoryBatch(op=head.op, items=items)
+        # 空闲封口：等这一轮 burst 不再有新行到达，而不是等队首躺够固定窗。固定窗会把
+        # 同一轮的并行提交切成两批，内部 agent 因此多跑一轮并重复付一次常驻记忆块。
+        idle_seconds = self._seconds_since(items[-1].created_at, now_iso)
+        head_age = self._seconds_since(head.created_at, now_iso)
         if (
-            not hit_char_boundary
-            and current_chars < max_chars
-            and waited_seconds < int(getattr(self.config.queue, "max_wait_seconds", 3) or 3)
+            idle_seconds < int(getattr(self.config.queue, "max_wait_seconds", 3) or 3)
+            and head_age < _ACTIVE_SEAL_MAX_SECONDS
         ):
             return None
         return MemoryBatch(op=head.op, items=items)
@@ -3846,6 +3961,80 @@ class MemoryManager:
             if ref and ref not in target:
                 target.append(ref)
 
+    def _memory_route_binding_key(self) -> str:
+        # 按 scope 粘滞：本地 manager 与各群 manager 各有独立绑定键，互不干扰。
+        return f"memory:{self.scope_label or 'local'}"
+
+    @staticmethod
+    def _memory_attempted_refs(response: Any) -> list[str]:
+        """台账桥接：FallbackProvider 填 attempted_model_chain；ConfigChatBackend 填 attempts。
+
+        两套形状不互换，这里统一成按序的 model_key 列表，保住「这一批真实走过哪些模型」。
+        """
+        refs = getattr(response, "attempted_model_chain", None)
+        if refs:
+            return list(refs)
+        return [
+            str(getattr(attempt, "model_key", "") or "").strip()
+            for attempt in list(getattr(response, "attempts", None) or [])
+        ]
+
+    async def _build_memory_chat_call(self, runtime_config: Any, tool_schemas: list[Any]):
+        """返回 (chat_call, release)。含组且路由源在场时走 ConfigChatBackend + 每批动态选成员；
+        否则退回 build_chat_model 固定顺序链（行为保持）。
+
+        记忆每批按当时上游负载/429 健康选成员（短上下文，换成员缓存代价小）：release 释放
+        lease 并解绑，下一批重新选。provider 错误仍批内停车，组内轮换只发生在单发 chat 内部。
+        """
+        source = get_memory_model_route_source()
+        turn_controller = getattr(source, "turn_controller", None)
+        balancer = getattr(source, "balancer", None)
+        concurrency = getattr(source, "concurrency_controller", None)
+        plan = None
+        if turn_controller is not None and balancer is not None:
+            try:
+                plan = build_model_route_plan(runtime_config, "memory", revision=0)
+            except Exception:
+                plan = None
+        if plan is not None and plan.load_balance_group_keys:
+            binding_key = self._memory_route_binding_key()
+            try:
+                lease = await turn_controller.acquire_turn(
+                    task_id="memory",
+                    node_id=binding_key,
+                    route_plan=plan,
+                    filters=RouteCandidateFilters(),
+                )
+            except Exception:
+                lease = None
+            if lease is not None:
+                backend = ConfigChatBackend(runtime_config)
+                model_refs = list(plan.candidate_model_keys)
+
+                async def group_chat_call(request_messages: list[dict[str, Any]]) -> Any:
+                    return await backend.chat(
+                        messages=request_messages,
+                        tools=tool_schemas or None,
+                        model_refs=model_refs,
+                        model_routes=plan,
+                        node_turn_lease=lease,
+                        node_turn_controller=turn_controller,
+                        model_concurrency_controller=concurrency,
+                    )
+
+                def release_group_route() -> None:
+                    turn_controller.release_turn(lease, outcome=LEASE_OUTCOME_SUCCESS)
+                    turn_controller.forget_route_binding(binding_key)
+
+                return group_chat_call, release_group_route
+
+        model = build_chat_model(runtime_config, role="memory")
+
+        async def direct_chat_call(request_messages: list[dict[str, Any]]) -> Any:
+            return await model.chat(request_messages, tools=tool_schemas or None)
+
+        return direct_chat_call, (lambda: None)
+
     async def _run_memory_agent_attempt(
         self,
         *,
@@ -3888,7 +4077,7 @@ class MemoryManager:
                 repair_reason=repair_reason,
             )
         tool_schemas = [item.openai_schema() for item in list(tools or [])]
-        model = build_chat_model(runtime_config, role="memory")
+        chat_call, release_memory_route = await self._build_memory_chat_call(runtime_config, tool_schemas)
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
             {
@@ -3902,74 +4091,81 @@ class MemoryManager:
         round_limit = int(runtime_config.get_role_max_iterations("memory") or 8)
         round_limit = max(round_limit, 1)
         final_text = ""
-        for _ in range(round_limit):
-            request_messages = apply_content_policy(self._memory_request_messages(messages))
-            self._memory_window_guard(
-                runtime_config=runtime_config,
-                model_chain=list(model_chain or []),
-                request_messages=request_messages,
-                tool_schemas=tool_schemas,
-                usage_total=usage_total,
-                request_artifacts=request_artifacts,
-            )
-            response = await model.chat(request_messages, tools=tool_schemas or None)
-            self._merge_attempted_model_chain(attempted_chain, getattr(response, "attempted_model_chain", None))
-            round_usage = self._extract_usage(response)
-            self._merge_usage(usage_total, round_usage)
-            artifact = self._persist_memory_request_artifact(
-                phase="agent",
-                batch_op=batch.op,
-                queue_request_ids=queue_request_ids,
-                model_chain=model_chain,
-                request_messages=request_messages,
-                response=response,
-                usage_delta=round_usage,
-            )
-            if artifact is not None:
-                request_artifacts.append(artifact)
-            # Provider 错误响应（429/超时/上游错误被 provider 层转为 finish_reason="error"
-            # 的正常返回值）必须在这里显式识别：否则它会伪装成"模型没调工具"的协议违规，
-            # 真实根因被校验错误掩盖，usage/工件也全为空。
-            provider_error_text = self._provider_error_text(response)
-            if provider_error_text:
-                raise _MemoryProviderError(
-                    provider_error_text,
-                    usage=usage_total,
+        try:
+            for _ in range(round_limit):
+                request_messages = apply_content_policy(self._memory_request_messages(messages))
+                self._memory_window_guard(
+                    runtime_config=runtime_config,
+                    model_chain=list(model_chain or []),
+                    request_messages=request_messages,
+                    tool_schemas=tool_schemas,
+                    usage_total=usage_total,
                     request_artifacts=request_artifacts,
                 )
-            final_text = self._response_text(response)
-            tool_calls = self._normalize_tool_calls(response)
-            if not tool_calls:
-                break
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": final_text,
-                    # provider 要求 arguments 是 JSON 字符串；这一跳以前由适配壳完成，
-                    # 直连后由落盘侧自己规范成 OpenAI 形状（与 worker 车道同一做法）。
-                    "tool_calls": [
-                        {
-                            "id": call.get("id"),
-                            "type": "function",
-                            "function": {
-                                "name": str(call.get("name") or ""),
-                                "arguments": json.dumps(call.get("args") or {}, ensure_ascii=False),
-                            },
-                        }
-                        for call in tool_calls
-                    ],
-                }
-            )
-            for tool_call in tool_calls:
-                result = await self._execute_memory_tool(tools, tool_call)
+                response = await chat_call(request_messages)
+                self._merge_attempted_model_chain(attempted_chain, self._memory_attempted_refs(response))
+                round_usage = self._extract_usage(response)
+                self._merge_usage(usage_total, round_usage)
+                artifact = self._persist_memory_request_artifact(
+                    phase="agent",
+                    batch_op=batch.op,
+                    queue_request_ids=queue_request_ids,
+                    model_chain=model_chain,
+                    request_messages=request_messages,
+                    response=response,
+                    usage_delta=round_usage,
+                )
+                if artifact is not None:
+                    request_artifacts.append(artifact)
+                # Provider 错误响应（429/超时/上游错误被 provider 层转为 finish_reason="error"
+                # 的正常返回值）必须在这里显式识别：否则它会伪装成"模型没调工具"的协议违规，
+                # 真实根因被校验错误掩盖，usage/工件也全为空。
+                provider_error_text = self._provider_error_text(response)
+                if provider_error_text:
+                    raise _MemoryProviderError(
+                        provider_error_text,
+                        usage=usage_total,
+                        request_artifacts=request_artifacts,
+                    )
+                final_text = self._response_text(response)
+                tool_calls = self._normalize_tool_calls(response)
+                if not tool_calls:
+                    break
                 messages.append(
                     {
-                        "role": "tool",
-                        "content": json.dumps(result, ensure_ascii=False),
-                        "tool_call_id": str(tool_call.get("id") or ""),
-                        "name": str(tool_call.get("name") or ""),
+                        "role": "assistant",
+                        "content": final_text,
+                        # provider 要求 arguments 是 JSON 字符串；这一跳以前由适配壳完成，
+                        # 直连后由落盘侧自己规范成 OpenAI 形状（与 worker 车道同一做法）。
+                        "tool_calls": [
+                            {
+                                "id": call.get("id"),
+                                "type": "function",
+                                "function": {
+                                    "name": str(call.get("name") or ""),
+                                    "arguments": json.dumps(call.get("args") or {}, ensure_ascii=False),
+                                },
+                            }
+                            for call in tool_calls
+                        ],
                     }
                 )
+                hop_results: list[dict[str, Any]] = []
+                for tool_call in tool_calls:
+                    result = await self._execute_memory_tool(tools, tool_call)
+                    hop_results.append(result)
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "content": json.dumps(result, ensure_ascii=False),
+                            "tool_call_id": str(tool_call.get("id") or ""),
+                            "name": str(tool_call.get("name") or ""),
+                        }
+                    )
+                if self._memory_batch_is_final(session, hop_results, consolidation=consolidation):
+                    break
+        finally:
+            release_memory_route()
         return _MemoryAttemptResult(
             session=session,
             usage=usage_total,
@@ -3977,6 +4173,41 @@ class MemoryManager:
             request_artifacts=request_artifacts,
             attempted_chain=attempted_chain,
         )
+
+    @staticmethod
+    def _memory_batch_is_final(
+        session: Any,
+        results: list[dict[str, Any]],
+        *,
+        consolidation: bool,
+    ) -> bool:
+        """True when this hop already produced the batch's final staged state.
+
+        Asking the model for one more hop after the commit gate passed bought nothing: the
+        batch verdict downstream is read from the staged session, and that closing hop's
+        text has no consumer. A staged-but-unconfirmed preview is NOT final - the confirm
+        gate is the only place a wrong line number is still catchable.
+        """
+        for envelope in results:
+            if not isinstance(envelope, dict) or not envelope.get("ok"):
+                continue
+            inner = envelope.get("result")
+            if not isinstance(inner, dict):
+                continue
+            tool = str(envelope.get("tool") or "").strip()
+            if consolidation:
+                if tool == "memory_consolidation_apply" and inner.get("status") == "batch_staged":
+                    return True
+                continue
+            if tool == "memory_apply_confirm" and inner.get("status") == "batch_confirmed":
+                return True
+            if (
+                tool == "memory_apply_batch"
+                and inner.get("status") == "batch_staged"
+                and not session.batch_has_mutation()
+            ):
+                return True
+        return False
 
     def _memory_agent_system_prompt(self) -> str:
         return load_prompt("memory_agent.md").strip()
@@ -6203,7 +6434,10 @@ class MemoryManager:
             trigger_source=str(trigger_source or "").strip(),
             request_id=self._request_id(normalized_op),
         )
-        await self._append_queue_request(request)
+        if _memory_request_lane(op=request.op, trigger_source=request.trigger_source) == "active":
+            self._insert_queue_request_active(request)
+        else:
+            await self._append_queue_request(request)
         return {"ok": True, "request_id": request.request_id, "status": "queued"}
 
     async def enqueue_write_request(
@@ -7188,6 +7422,7 @@ class MemoryManager:
                 processed_request_ids=processed_request_ids,
             )
             effective_now = str(now_iso or self._now_iso()).strip()
+            self._promote_aged_review_row(now_iso=effective_now)
             batch = await self.collect_due_batch(now_iso=effective_now)
             if batch is None or not batch.items:
                 if dropped_request_ids:

@@ -1938,7 +1938,8 @@ textarea {
     min-height: 0;
     overflow: auto;
     scrollbar-gutter: stable;
-    padding: var(--space-4) var(--space-5) var(--space-5);
+    /* 两侧留白取通用档的三倍（60px）：拉开外层与内层滚动条的落指间距 */
+    padding: var(--space-4) calc(var(--space-5) * 3) var(--space-5);
     display: flex;
     flex-direction: column;
     gap: var(--space-4);
@@ -4492,7 +4493,7 @@ textarea {
     text-overflow: ellipsis;
 }
 
-/* exec 带 purpose 的工具卡标题是 `exec:<一句话动机>`，动机要完整读出来：这一格换成
+/* exec 带 purpose 的工具卡标题只有那一句话动机（不带 `exec:` 前缀），动机要完整读出来：这一格换成
    可折行、不省略号。横滚轨道给不了它宽度（nowrap 下要么被兄弟卡挤成竖排、要么把
    整条推去滚动），所以含这一格的轨道改成可折行，让它独占一行读满，同轮其它工具卡
    换到下一行继续横排。只有带 purpose 的那一轮换布局，其它轮仍是原来那条横滚轨道。 */
@@ -5927,6 +5928,24 @@ textarea {
     grid-column: 3;
     grid-row: 1;
     justify-self: end;
+}
+
+/* 关联弹窗行多一枚短标识：模型面用的号，操作员据此把记忆里的号对回具体会话。 */
+.ceo-session-link-item {
+    grid-template-columns: 18px minmax(0, 1fr) auto auto;
+}
+
+.ceo-session-link-item > .ceo-session-link-short-id {
+    grid-column: 3;
+    grid-row: 1;
+    justify-self: end;
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    font-weight: 500;
+    color: var(--text-secondary);
+}
+
+.ceo-session-link-item > .meta-tag:not(.ceo-session-link-short-id) {
+    grid-column: 4;
 }
 
 .ceo-risk-tool-name {
@@ -10299,6 +10318,17 @@ textarea {
     z-index: 96;
 }
 
+/* 节点详情抽屉比通用抽屉宽：正文里多层内嵌滚动框（轨迹/消息列表/消息正文）
+   各自带滚动条，窗口与两侧留白加宽后，相邻滚动条才有足够的落指间距。 */
+.detail-drawer.task-detail-drawer {
+    width: min(1120px, calc(calc(100vw / var(--ui-zoom, 1)) - 48px));
+}
+
+.detail-drawer.task-detail-drawer .panel-header {
+    padding-left: calc(var(--space-5) * 3);
+    padding-right: calc(var(--space-5) * 3);
+}
+
 .detail-drawer.is-open,
 .model-detail-dialog.is-open {
     opacity: 1;
@@ -13224,6 +13254,33 @@ textarea {
     min-width: 0;
     line-height: 1.45;
     overflow-wrap: anywhere;
+}
+
+/* 工件文件可点击打开：整行是媒体锚点（created/modified），路径读作链接色，
+   悬停时边框/底色与下划线给出落指反馈；deleted 行仍是纯文本 div，不挂这些。 */
+a.artifact-item-link {
+    cursor: pointer;
+    text-decoration: none;
+    color: inherit;
+    transition: border-color 140ms ease, background-color 140ms ease;
+}
+
+a.artifact-item-link .artifact-item-path {
+    color: var(--brand-primary);
+}
+
+a.artifact-item-link:hover {
+    border-color: var(--brand-primary);
+    background: var(--bg-hover);
+}
+
+a.artifact-item-link:hover .artifact-item-path {
+    text-decoration: underline;
+}
+
+a.artifact-item-link:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--brand-primary) 68%, transparent);
+    outline-offset: 2px;
 }
 
 .artifact-item-state {
@@ -17025,6 +17082,21 @@ textarea {
     white-space: nowrap;
 }
 
+/* 合并条数徽标：只在 request_count > 1 时渲染，说的是队列请求条数，不是模型发数。 */
+.memory-merged-chip {
+    display: inline-flex;
+    align-items: center;
+    height: 24px;
+    padding: 2px 10px;
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-control);
+    color: var(--ui-text-secondary);
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1.25;
+    white-space: nowrap;
+}
+
 .memory-op-chip[data-op="delete"],
 .memory-op-chip[data-op="category_purge"] {
     color: var(--ui-danger);
@@ -19730,6 +19802,23 @@ textarea {
 .interaction-flow-list.task-trace-list {
     max-height: calc(16.5 * 48px + 16 * var(--space-3));
     overflow-y: auto;
+}
+
+/* 节点详情三个内嵌列表的右侧落指沟：列表自身封顶滚动，卡片里的消息正文 /
+   工具输出框又各自封顶滚动，两条滚动条只隔列表右留白 + 卡片右内边距。
+   两者同步加宽（卡片左内边距本就是 18px），相邻滚动条之间才有足够间距，
+   卡内左右也保持平衡。CEO 回合轨共用 .task-trace-list，不在这一档里。 */
+#ad-input .task-trace-list,
+#ad-messages .task-trace-list,
+#ad-spawn-reviews .task-trace-list {
+    padding-left: 24px;
+    padding-right: 24px;
+}
+
+#ad-input .task-trace-step,
+#ad-messages .task-trace-step,
+#ad-spawn-reviews .task-trace-step {
+    padding-right: 30px;
 }
 
 /* 提交输出 / 验收结果：15 行视窗，右上角一个裸图标复制按钮（滚动时浮在框上，空态不画）。 */

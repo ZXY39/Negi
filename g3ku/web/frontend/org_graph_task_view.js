@@ -1778,11 +1778,24 @@ function renderArtifacts() {
     }
     visibleFiles.forEach((item) => {
         const changeVisual = describeFileChange(item?.change_type);
-        const row = document.createElement("div");
-        row.className = "artifact-item";
+        const path = String(item?.path || "");
+        const name = path.split(/[\\/]/).pop() || path;
+        // 已删除的文件盘上已不在，点击只会 404：保留纯文本行，不给打开入口。
+        const clickable = changeVisual.type !== "deleted" && !!path;
+        const row = document.createElement(clickable ? "a" : "div");
+        row.className = clickable ? "artifact-item artifact-item-link" : "artifact-item";
         row.dataset.changeType = changeVisual.type;
+        if (clickable) {
+            // 走应用内媒体查看器：href 供原始字节，data-media-name 的扩展名决定
+            // 图片预览 / md 渲染 / pdf·文本内嵌 / 其余下载（bindMediaViewer 文档级委托）。
+            row.setAttribute("href", `/api/content/file?path=${encodeURIComponent(path)}`);
+            row.setAttribute("data-media-open", "auto");
+            row.setAttribute("data-media-name", name);
+            row.setAttribute("data-media-title", name);
+            row.title = path;
+        }
         row.innerHTML = `
-            <strong class="artifact-item-path" title="${esc(item?.path || "")}">${esc(item?.path || "")}</strong>
+            <span class="artifact-item-path">${esc(path)}</span>
             <span class="artifact-item-state artifact-item-state--${esc(changeVisual.type)}" role="img" aria-label="${esc(changeVisual.label)}" title="${esc(changeVisual.label)}">
                 ${changeVisual.iconSvg}
             </span>

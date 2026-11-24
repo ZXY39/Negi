@@ -247,7 +247,12 @@ class SQLiteTaskStore:
                 armed_at TEXT NOT NULL,
                 claimed_by TEXT NOT NULL DEFAULT '',
                 claimed_at_ms INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (task_id, node_id)
+                kind TEXT NOT NULL DEFAULT 'once',
+                schedule_kind TEXT NOT NULL DEFAULT '',
+                every_ms INTEGER NOT NULL DEFAULT 0,
+                cron_expr TEXT NOT NULL DEFAULT '',
+                tz TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (task_id, node_id, kind)
             )
             ''',
             '''
@@ -663,13 +668,14 @@ class SQLiteTaskStore:
             )
             ''',
             '''
-            -- 会话短别名：模型面寻址用 s{seq}，规范 session key 不动。
-            -- AUTOINCREMENT 保证删除后永不复用；别名行永不删除
-            -- （ext 同 key 回归拿回原别名）。
+            -- 会话短标识：模型面寻址用 short_id（规范 key 尾段前 8 字符，撞号延长），
+            -- 规范 session key 不动。标识行永不删除（ext 同 key 回归拿回原标识），
+            -- short_id 一旦分配永不改、永不复用。seq 与 s{seq} 只服务存量数据的读解析。
             CREATE TABLE IF NOT EXISTS session_aliases (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_key TEXT NOT NULL UNIQUE,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                short_id TEXT NOT NULL DEFAULT ''
             )
             ''',
             '''
@@ -720,14 +726,17 @@ class SQLiteTaskStore:
             'CREATE INDEX IF NOT EXISTS idx_task_worker_status_outbox_state_updated_at ON task_worker_status_outbox(delivery_state, updated_at)',
             'CREATE INDEX IF NOT EXISTS idx_task_summary_outbox_state_updated_at ON task_summary_outbox(delivery_state, updated_at)',
             'CREATE INDEX IF NOT EXISTS idx_session_links_b ON session_links(b)',
+            # 存量行补列后 short_id 先是空串，唯一性只约束已分配的那些。
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_session_aliases_short_id "
+            "ON session_aliases(short_id) WHERE short_id <> ''",
             'CREATE INDEX IF NOT EXISTS idx_frontdoor_session_messages_session_status ON frontdoor_session_messages(session_id, status)',
             'CREATE INDEX IF NOT EXISTS idx_frontdoor_session_messages_pending ON frontdoor_session_messages(status, created_at)',
             'CREATE INDEX IF NOT EXISTS idx_frontdoor_session_messages_source ON frontdoor_session_messages(source_session_key)',
         ]
         with self._conn:
-            index_statements = [item for item in statements if item.lstrip().upper().startswith('CREATE INDEX')]
+            index_statements = [item for item in statements if self._is_index_statement(item)]
             for statement in statements:
-                if statement.lstrip().upper().startswith('CREATE INDEX'):
+                if self._is_index_statement(statement):
                     continue
                 self._conn.execute(statement)
             # 旧表瘦身必须在建索引之前：重建会连索引一起丢弃，随后索引段负责再建。
@@ -753,6 +762,9 @@ class SQLiteTaskStore:
             self._ensure_column(self._conn, 'tool_jobs', 'node_id', "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(self._conn, 'tool_jobs', 'purpose', "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(self._conn, 'tool_job_outbox', 'owner_kind', "TEXT NOT NULL DEFAULT 'session'")
+            self._ensure_column(self._conn, 'session_aliases', 'short_id', "TEXT NOT NULL DEFAULT ''")
+            # 周期唤醒重建（PK 加 kind）必须在建索引之前：重建连索引一起丢，索引段随后再建。
+            self._migrate_task_node_timers_recurrence(self._conn)
             self._retire_inline_execution_trace_summaries(self._conn)
             for statement in index_statements:
                 self._conn.execute(statement)
@@ -761,11 +773,54 @@ class SQLiteTaskStore:
             self._tool_result_columns = self._live_columns(self._conn, 'task_node_tool_results')
 
     @staticmethod
+    def _is_index_statement(statement: str) -> bool:
+        return statement.lstrip().upper().startswith(('CREATE INDEX', 'CREATE UNIQUE INDEX'))
+
+    @staticmethod
     def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
         columns = {str(row[1]) for row in conn.execute(f'PRAGMA table_info({table})').fetchall()}
         if str(column or '') in columns:
             return
         conn.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
+
+    @staticmethod
+    def _migrate_task_node_timers_recurrence(conn: sqlite3.Connection) -> None:
+        """把存量一次性唤醒表重建成"一次性 + 周期"两档共存的形状。
+
+        SQLite 不能 ALTER 主键，所以整表重建：新 PK `(task_id, node_id, kind)`，存量行
+        全部落 `kind='once'`（语义不变）。按 `kind` 列是否在場判要不要跑——幂等、与启动
+        顺序无关，不占 `user_version`（那一格归明细表瘦身迁移）。失败只告警不阻断启动：
+        写侧按实际列集取值，该表维持旧形状（一次性档仍可用，周期档 arm 会在写侧失败）。
+        """
+        columns = {str(row[1]) for row in conn.execute('PRAGMA table_info(task_node_timers)').fetchall()}
+        if 'kind' in columns:
+            return
+        staging = 'task_node_timers__rec'
+        try:
+            conn.execute(f'DROP TABLE IF EXISTS {staging}')
+            conn.execute(
+                f'CREATE TABLE {staging} ('
+                'task_id TEXT NOT NULL, node_id TEXT NOT NULL, wake_at_ms INTEGER NOT NULL, '
+                "note TEXT NOT NULL DEFAULT '', armed_at TEXT NOT NULL, "
+                "claimed_by TEXT NOT NULL DEFAULT '', claimed_at_ms INTEGER NOT NULL DEFAULT 0, "
+                "kind TEXT NOT NULL DEFAULT 'once', schedule_kind TEXT NOT NULL DEFAULT '', "
+                "every_ms INTEGER NOT NULL DEFAULT 0, cron_expr TEXT NOT NULL DEFAULT '', "
+                "tz TEXT NOT NULL DEFAULT '', PRIMARY KEY (task_id, node_id, kind))"
+            )
+            conn.execute(
+                f'INSERT INTO {staging} '
+                '(task_id, node_id, wake_at_ms, note, armed_at, claimed_by, claimed_at_ms, kind) '
+                "SELECT task_id, node_id, wake_at_ms, note, armed_at, claimed_by, claimed_at_ms, 'once' "
+                'FROM task_node_timers'
+            )
+            conn.execute('DROP TABLE task_node_timers')
+            conn.execute(f'ALTER TABLE {staging} RENAME TO task_node_timers')
+        except sqlite3.Error:
+            logger.warning('task_node_timers recurrence migration skipped', exc_info=True)
+            try:
+                conn.execute(f'DROP TABLE IF EXISTS {staging}')
+            except sqlite3.Error:
+                pass
 
     # 一次性迁移的版本号写在 SQLite 头里（PRAGMA user_version）：判"要不要跑"必须
     # 是 O(1)，不能靠扫明细表——要迁的正是那些大字节的行。
@@ -2122,6 +2177,11 @@ class SQLiteTaskStore:
     # 扫描领走，否则重启就把它吞了，而"重启也认"正是这张表存在的理由。
     _WAKE_CLAIM_STALE_MS = 120_000
 
+    _NODE_TIMER_SELECT_COLUMNS = (
+        'task_id, node_id, wake_at_ms, note, armed_at, claimed_by, claimed_at_ms, '
+        'kind, schedule_kind, every_ms, cron_expr, tz'
+    )
+
     def upsert_task_node_timer(
         self,
         *,
@@ -2130,15 +2190,28 @@ class SQLiteTaskStore:
         wake_at_ms: int,
         note: str,
         armed_at: str,
+        kind: str = 'once',
+        schedule_kind: str = '',
+        every_ms: int = 0,
+        cron_expr: str = '',
+        tz: str = '',
     ) -> TaskNodeTimerRecord:
-        """设一次唤醒：每个节点只留最新一份，重新设连领取凭证一起清掉。"""
+        """设一份唤醒：同档（`kind`）每个节点只留最新一份，重新设连领取凭证一起清掉。
+
+        一次性（`once`）与周期（`recurring`）是两档，PK 含 `kind`，互不覆盖。
+        """
+        normalized_kind = str(kind or 'once').strip() or 'once'
+
         def operation(conn: sqlite3.Connection) -> TaskNodeTimerRecord:
             conn.execute(
-                'INSERT INTO task_node_timers (task_id, node_id, wake_at_ms, note, armed_at, claimed_by, claimed_at_ms) '
-                'VALUES (?, ?, ?, ?, ?, ?, ?) '
-                'ON CONFLICT(task_id, node_id) DO UPDATE SET wake_at_ms=excluded.wake_at_ms, '
+                'INSERT INTO task_node_timers '
+                '(task_id, node_id, wake_at_ms, note, armed_at, claimed_by, claimed_at_ms, '
+                'kind, schedule_kind, every_ms, cron_expr, tz) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) '
+                'ON CONFLICT(task_id, node_id, kind) DO UPDATE SET wake_at_ms=excluded.wake_at_ms, '
                 'note=excluded.note, armed_at=excluded.armed_at, claimed_by=excluded.claimed_by, '
-                'claimed_at_ms=excluded.claimed_at_ms',
+                'claimed_at_ms=excluded.claimed_at_ms, schedule_kind=excluded.schedule_kind, '
+                'every_ms=excluded.every_ms, cron_expr=excluded.cron_expr, tz=excluded.tz',
                 (
                     str(task_id or '').strip(),
                     str(node_id or '').strip(),
@@ -2147,27 +2220,34 @@ class SQLiteTaskStore:
                     str(armed_at or ''),
                     '',
                     0,
+                    normalized_kind,
+                    str(schedule_kind or ''),
+                    int(every_ms or 0),
+                    str(cron_expr or ''),
+                    str(tz or ''),
                 ),
             )
             row = conn.execute(
-                'SELECT task_id, node_id, wake_at_ms, note, armed_at, claimed_by, claimed_at_ms '
-                'FROM task_node_timers WHERE task_id = ? AND node_id = ?',
-                (str(task_id or '').strip(), str(node_id or '').strip()),
+                f'SELECT {self._NODE_TIMER_SELECT_COLUMNS} '
+                'FROM task_node_timers WHERE task_id = ? AND node_id = ? AND kind = ?',
+                (str(task_id or '').strip(), str(node_id or '').strip(), normalized_kind),
             ).fetchone()
             return self._parse_task_node_timer(row)
         return self._run_write(operation)
 
-    def get_task_node_timer(self, task_id: str, node_id: str) -> TaskNodeTimerRecord | None:
+    def get_task_node_timer(
+        self, task_id: str, node_id: str, kind: str = 'once',
+    ) -> TaskNodeTimerRecord | None:
         row = self._fetchone(
-            'SELECT task_id, node_id, wake_at_ms, note, armed_at, claimed_by, claimed_at_ms '
-            'FROM task_node_timers WHERE task_id = ? AND node_id = ?',
-            (str(task_id or '').strip(), str(node_id or '').strip()),
+            f'SELECT {self._NODE_TIMER_SELECT_COLUMNS} '
+            'FROM task_node_timers WHERE task_id = ? AND node_id = ? AND kind = ?',
+            (str(task_id or '').strip(), str(node_id or '').strip(), str(kind or 'once').strip() or 'once'),
         )
         return self._parse_task_node_timer(row) if row is not None else None
 
     def list_task_node_timers(self, task_id: str) -> list[TaskNodeTimerRecord]:
         rows = self._fetchall(
-            'SELECT task_id, node_id, wake_at_ms, note, armed_at, claimed_by, claimed_at_ms '
+            f'SELECT {self._NODE_TIMER_SELECT_COLUMNS} '
             'FROM task_node_timers WHERE task_id = ? ORDER BY wake_at_ms ASC',
             (str(task_id or '').strip(),),
         )
@@ -2203,7 +2283,7 @@ class SQLiteTaskStore:
                 f'   WHERE wake_at_ms <= ? AND {claimable}'
                 '   ORDER BY wake_at_ms ASC LIMIT ?'
                 f') AND {claimable} '
-                'RETURNING task_id, node_id, wake_at_ms, note, armed_at, claimed_by, claimed_at_ms',
+                f'RETURNING {self._NODE_TIMER_SELECT_COLUMNS}',
                 (
                     token, current,
                     current, '', stale_floor, bound,
@@ -2213,11 +2293,38 @@ class SQLiteTaskStore:
             return [self._parse_task_node_timer(row) for row in rows]
         return self._run_write(operation)
 
-    def delete_task_node_timer(self, *, task_id: str, node_id: str) -> None:
+    def delete_task_node_timer(self, *, task_id: str, node_id: str, kind: str = 'once') -> None:
         self._execute_write(
-            'DELETE FROM task_node_timers WHERE task_id = ? AND node_id = ?',
-            (str(task_id or '').strip(), str(node_id or '').strip()),
+            'DELETE FROM task_node_timers WHERE task_id = ? AND node_id = ? AND kind = ?',
+            (str(task_id or '').strip(), str(node_id or '').strip(), str(kind or 'once').strip() or 'once'),
         )
+
+    def rearm_task_node_timer(
+        self, *, task_id: str, node_id: str, kind: str, wake_at_ms: int,
+    ) -> TaskNodeTimerRecord | None:
+        """周期档投递成功后重臂到下一跳：更新时刻、清领取凭证，递推参数不动。
+
+        与 upsert 分开是为了不误清 `schedule_kind` / `every_ms` / `cron_expr` / `tz`——
+        重臂只换"下一次什么时候响"，不换"按什么节奏响"。
+        """
+        normalized_kind = str(kind or 'once').strip() or 'once'
+
+        def operation(conn: sqlite3.Connection) -> TaskNodeTimerRecord | None:
+            conn.execute(
+                'UPDATE task_node_timers SET wake_at_ms = ?, claimed_by = ?, claimed_at_ms = ? '
+                'WHERE task_id = ? AND node_id = ? AND kind = ?',
+                (
+                    int(wake_at_ms or 0), '', 0,
+                    str(task_id or '').strip(), str(node_id or '').strip(), normalized_kind,
+                ),
+            )
+            row = conn.execute(
+                f'SELECT {self._NODE_TIMER_SELECT_COLUMNS} '
+                'FROM task_node_timers WHERE task_id = ? AND node_id = ? AND kind = ?',
+                (str(task_id or '').strip(), str(node_id or '').strip(), normalized_kind),
+            ).fetchone()
+            return self._parse_task_node_timer(row) if row is not None else None
+        return self._run_write(operation)
 
     @staticmethod
     def _parse_task_node_timer(row: Any) -> TaskNodeTimerRecord:
@@ -2229,6 +2336,11 @@ class SQLiteTaskStore:
             armed_at=str(row['armed_at'] or ''),
             claimed_by=str(row['claimed_by'] or ''),
             claimed_at_ms=int(row['claimed_at_ms'] or 0),
+            kind=str(row['kind'] or 'once'),
+            schedule_kind=str(row['schedule_kind'] or ''),
+            every_ms=int(row['every_ms'] or 0),
+            cron_expr=str(row['cron_expr'] or ''),
+            tz=str(row['tz'] or ''),
         )
 
     def list_new_error_pauses(self) -> list[dict[str, Any]]:
@@ -2929,7 +3041,7 @@ class SQLiteTaskStore:
             )
         )
 
-    # ---- 会话关联（session links）：对称无向边 + 短别名 + 点对点信箱 ----
+    # ---- 会话关联（session links）：对称无向边 + 短标识 + 点对点信箱 ----
 
     @staticmethod
     def _normalized_link_pair(a: str, b: str) -> tuple[str, str]:
@@ -3002,26 +3114,102 @@ class SQLiteTaskStore:
 
         return self._run_write(operation)
 
-    def get_or_create_session_alias(self, session_key: str, *, created_at: str) -> str:
-        """Stable model-facing alias ``s{seq}``; assigned once, never reused."""
+    _SHORT_ID_LENGTHS = (8, 12)
+
+    @staticmethod
+    def _session_short_id_tail(session_key: str) -> str:
+        """规范 key 的标识尾段：剥掉命名空间前缀，只留小写字母数字。"""
+        text = str(session_key or '').strip()
+        if text.startswith('web:ceo-'):
+            text = text[len('web:ceo-'):]
+        elif text.startswith('web:'):
+            text = text[len('web:'):]
+        elif text.startswith('ext:'):
+            text = text[len('ext:'):].split(':', 1)[-1]
+        tail = re.sub(r'[^a-z0-9]', '', text.lower())
+        return tail or hashlib.sha256(text.encode('utf-8')).hexdigest()
+
+    @classmethod
+    def _session_short_id_candidates(cls, session_key: str) -> list[str]:
+        """短号候选，从短到长：撞号时延长而不是改已分配的号。"""
+        tail = cls._session_short_id_tail(session_key)
+        ordered: list[str] = []
+        for length in cls._SHORT_ID_LENGTHS:
+            candidate = tail[:length]
+            if candidate and candidate not in ordered:
+                ordered.append(candidate)
+        if tail not in ordered:
+            ordered.append(tail)
+        return ordered
+
+    @staticmethod
+    def _short_id_taken(conn: sqlite3.Connection, candidate: str) -> bool:
+        row = conn.execute(
+            'SELECT 1 FROM session_aliases WHERE short_id = ? LIMIT 1', (candidate,)
+        ).fetchone()
+        return row is not None
+
+    @classmethod
+    def _allocate_session_short_id(cls, conn: sqlite3.Connection, session_key: str) -> str:
+        candidates = cls._session_short_id_candidates(session_key)
+        for candidate in candidates:
+            if not cls._short_id_taken(conn, candidate):
+                return candidate
+        suffix = 2
+        while True:
+            candidate = f'{candidates[-1]}-{suffix}'
+            if not cls._short_id_taken(conn, candidate):
+                return candidate
+            suffix += 1
+
+    def get_or_create_session_short_id(self, session_key: str, *, created_at: str) -> str:
+        """Stable model-facing short id; allocated once, never changed or reused."""
         normalized = str(session_key or '').strip()
         if not normalized:
             return ''
 
         def operation(conn: sqlite3.Connection) -> str:
             row = conn.execute(
-                'SELECT seq FROM session_aliases WHERE session_key = ?', (normalized,)
+                'SELECT seq, short_id FROM session_aliases WHERE session_key = ?', (normalized,)
             ).fetchone()
             if row is not None:
-                return f"s{int(row['seq'])}"
-            cursor = conn.execute(
-                'INSERT INTO session_aliases (session_key, created_at) VALUES (?, ?)',
-                (normalized, str(created_at or '').strip()),
+                existing = str(row['short_id'] or '').strip()
+                if existing:
+                    return existing
+                short_id = self._allocate_session_short_id(conn, normalized)
+                conn.execute(
+                    'UPDATE session_aliases SET short_id = ? WHERE seq = ?',
+                    (short_id, int(row['seq'])),
+                )
+                return short_id
+            short_id = self._allocate_session_short_id(conn, normalized)
+            conn.execute(
+                'INSERT INTO session_aliases (session_key, created_at, short_id) VALUES (?, ?, ?)',
+                (normalized, str(created_at or '').strip(), short_id),
             )
-            return f"s{int(cursor.lastrowid)}"
+            return short_id
 
         return self._run_write(operation)
 
+    def get_session_short_id(self, session_key: str) -> str:
+        rows = self._fetchall(
+            'SELECT short_id FROM session_aliases WHERE session_key = ?',
+            (str(session_key or '').strip(),),
+        )
+        return str(rows[0]['short_id'] or '') if rows else ''
+
+    def resolve_session_short_id(self, short_id: str) -> str:
+        """Short id -> canonical session key; empty when it names nothing."""
+        text = str(short_id or '').strip().lower()
+        if not text:
+            return ''
+        rows = self._fetchall(
+            'SELECT session_key FROM session_aliases WHERE short_id = ?', (text,)
+        )
+        return str(rows[0]['session_key']) if rows else ''
+
+    # 存量数据（旧信箱行的 source_alias、旧钉住头部、旧记忆条目）带的是 s{seq}。
+    # 这两个读口只服务那批数据，不再有新分配。
     def get_session_alias(self, session_key: str) -> str:
         rows = self._fetchall(
             'SELECT seq FROM session_aliases WHERE session_key = ?',
@@ -3030,7 +3218,7 @@ class SQLiteTaskStore:
         return f"s{int(rows[0]['seq'])}" if rows else ''
 
     def resolve_session_alias(self, alias: str) -> str:
-        """Alias -> canonical session key; empty when the alias names nothing."""
+        """Legacy alias -> canonical session key; empty when it names nothing."""
         text = str(alias or '').strip().lower()
         if not text.startswith('s') or not text[1:].isdigit():
             return ''

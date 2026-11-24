@@ -1,8 +1,10 @@
 """设计内待命：所有非终态执行节点都停在带外部唤醒源的停靠相位。
 
 判据与等待图同源：有人声明了 `frontdoor`（`node_wait_external`）才是合法的无限
-等待；只等任务内节点的停靠仍按失速处理，否则会掩盖真死锁。读法走
-`frame_mode='stall'` 的列（`node_phases`），不搬帧正文。
+等待；只等任务内节点的停靠仍按失速处理，否则会掩盖真死锁。在臂的周期闹钟
+（`kind='recurring'` 的 timer 行）同样算外部唤醒源——时钟本就是合法唤醒源，每日档
+节点常态停靠 24h，不算它会每 10 分钟档误报失速。读法走 `frame_mode='stall'` 的列
+（`node_phases`），不搬帧正文。
 """
 
 from __future__ import annotations
@@ -34,6 +36,15 @@ def task_is_designed_idle(
         records = list(store.list_nodes(task_id) or [])
     except Exception:
         return False
+    recurring_node_ids: set[str] = set()
+    list_timers = getattr(store, 'list_task_node_timers', None)
+    if callable(list_timers):
+        try:
+            for timer in list_timers(task_id) or []:
+                if str(getattr(timer, 'kind', '') or '').strip() == 'recurring':
+                    recurring_node_ids.add(str(getattr(timer, 'node_id', '') or '').strip())
+        except Exception:
+            recurring_node_ids = set()
     execution_count = 0
     external = False
     for node in records:
@@ -56,7 +67,7 @@ def task_is_designed_idle(
         if phase not in _PARKED_PHASES:
             return False
         metadata = dict(getattr(node, 'metadata', None) or {})
-        if bool(metadata.get(NODE_WAIT_EXTERNAL_KEY)):
+        if bool(metadata.get(NODE_WAIT_EXTERNAL_KEY)) or node_id in recurring_node_ids:
             external = True
         if check_unread and node_has_unread_notifications(store=store, task_id=task_id, node_id=node_id):
             # 有可注入未读意味着派发车道马上要开回合；把"该醒没醒"藏进待命会漏报。

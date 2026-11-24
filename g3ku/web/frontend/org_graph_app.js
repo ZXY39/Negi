@@ -7404,7 +7404,7 @@ function applyCeoToolStepState(item, { status = "running", toolName = "tool", pu
     const statusEl = item.querySelector(".interaction-step-status");
     const iconWrap = item.querySelector(".tool-status-icon");
     // 标题用原始 tool_id：与账本里工具卡（chip 标题）同字，运行中与完成后不换名字。
-    // exec 带 purpose 时两边都拼成 `exec:<purpose>`（toolDisplayTitle）。purpose 只有
+    // exec 带 purpose 时两边都只画那一句动机（toolDisplayTitle）。purpose 只有
     // 开跑帧带，后台收尾那条路重贴状态时不带，所以记在行上，后续帧不会把标题擦回去。
     const incomingPurpose = normalizeToolPurposeText(purpose);
     if (incomingPurpose) item.dataset.toolPurpose = incomingPurpose;
@@ -9101,8 +9101,8 @@ async function submitConfigBundleImport() {
 const GROUP_REF_PREFIX = "group:";
 // 新建组弹窗里的默认值；配置侧不填时后端按 1 处理。上限刻意不设。
 const GROUP_DEFAULT_MAX_RETRY_ROUNDS = 3;
-// 与后端 LOAD_BALANCE_ROUTE_SCOPES 同步：只有这两条车道能引用组。
-const LOAD_BALANCE_ROUTE_SCOPES = ["execution", "inspection"];
+// 与后端 LOAD_BALANCE_ROUTE_SCOPES 同步：四条车道都能引用组（按当时上游健康动态选成员）。
+const LOAD_BALANCE_ROUTE_SCOPES = ["ceo", "execution", "inspection", "memory"];
 
 const groupRefToken = (key) => `${GROUP_REF_PREFIX}${String(key || "").trim()}`;
 const isGroupRef = (ref) => String(ref || "").startsWith(GROUP_REF_PREFIX);
@@ -9520,6 +9520,7 @@ const CEO_SESSION_LINK_SORT_KEY = "g3ku.ui.ceo.session-link-sort.v1";
 const ceoSessionLinkState = {
     sessionId: "",
     linked: [],
+    shortIds: {},
     saving: false,
     tab: "local",
     // 未保存草稿跨 tab/排序存活：DOM 只投影当前 tab，切走前把勾选合并回这份集合。
@@ -9566,12 +9567,14 @@ function syncCeoSessionLinkDraftFromDom() {
 function ceoSessionLinkRow(item, checked, tagLabel) {
     const id = String(item?.session_id || "");
     const title = String(item?.title || id);
+    const shortId = String(ceoSessionLinkState.shortIds?.[id] || "").trim();
     return `
-        <label class="ceo-risk-whitelist-item">
+        <label class="ceo-risk-whitelist-item ceo-session-link-item">
             <input type="checkbox" class="ui-checkbox-input ceo-session-link-input"
                 data-link-session-id="${esc(id)}" ${checked ? "checked" : ""}>
             <span class="ui-checkbox-box" aria-hidden="true"></span>
             <span class="ceo-risk-tool-name">${esc(title)}</span>
+            ${shortId ? `<span class="meta-tag ceo-session-link-short-id" title="模型面会话短标识">${esc(shortId)}</span>` : ""}
             <span class="meta-tag">${esc(tagLabel)}</span>
         </label>
     `;
@@ -9633,6 +9636,7 @@ async function openCeoSessionLinkDialog(sessionId) {
     ceoSessionLinkState.sessionId = id;
     ceoSessionLinkState.saving = false;
     ceoSessionLinkState.linked = [];
+    ceoSessionLinkState.shortIds = {};
     ceoSessionLinkState.tab = "local";
     ceoSessionLinkState.draft = new Set();
     if (U.ceoSessionLinkError) {
@@ -9647,6 +9651,9 @@ async function openCeoSessionLinkDialog(sessionId) {
     try {
         const payload = await ApiClient.getSessionLinks(id);
         ceoSessionLinkState.linked = Array.isArray(payload?.linked) ? payload.linked : [];
+        ceoSessionLinkState.shortIds = (payload?.short_ids && typeof payload.short_ids === "object")
+            ? payload.short_ids
+            : {};
         ceoSessionLinkState.draft = new Set(ceoSessionLinkState.linked);
         syncCeoSessionLinkTabButtons();
         syncCeoSessionLinkSortButtons();

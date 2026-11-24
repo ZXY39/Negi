@@ -67,7 +67,7 @@ def _pinned(*, session=None, session_key="web:roster", epoch=None, provider=None
 
 
 def test_version_bumped_for_session_roster() -> None:
-    assert PINNED_CONTRACT_RENDERER_VERSION == 'pinned-contract-v7'
+    assert PINNED_CONTRACT_RENDERER_VERSION == 'pinned-contract-v8'
 
 
 def test_render_roster_uses_purpose_and_falls_back_to_command() -> None:

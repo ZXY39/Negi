@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from fastapi import APIRouter, Body, HTTPException, Query
 from fastapi.responses import PlainTextResponse
@@ -805,6 +806,36 @@ async def read_content(
             view=view,
         ),
     }
+
+
+@router.get('/content/file')
+async def read_content_file(
+    ref: str | None = Query(None),
+    path: str | None = Query(None),
+):
+    """Raw bytes for a node artifact / trace target, served to the in-app media viewer.
+
+    Resolution and the read-root boundary are the content store's own
+    (``open_target_descriptor``), identical to ``/content/open`` — this route only
+    swaps the JSON excerpt for a ``FileResponse`` so images preview, markdown renders
+    and pdf/text embed instead of the operator reading a bare filesystem path.
+    """
+    service = _service()
+    await service.startup()
+    from g3ku.runtime.api.ceo_media import media_file_response
+
+    try:
+        descriptor = service.content_store.open_target_descriptor(ref=ref, path=path, view='raw')
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail={'code': 'path_outside_allowed_roots', 'message': str(exc)}) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail={'code': 'content_not_found', 'message': str(exc)}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={'code': 'content_ref_invalid', 'message': str(exc)}) from exc
+    file_path = Path(str(descriptor.get('path') or ''))
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail={'code': 'content_not_found', 'message': 'file not found'})
+    return media_file_response(file_path)
 
 
 @router.post('/tasks/{task_id}/artifacts/{artifact_id}/apply')

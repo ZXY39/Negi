@@ -44,6 +44,7 @@ class QqOfficialService:
         self._state = "stopped"
         self._detail = ""
         self._config_signature = ""
+        self._config_parts: dict[str, str] = {}
 
     @property
     def app_id(self) -> str:
@@ -66,6 +67,42 @@ class QqOfficialService:
         return f"http://127.0.0.1:{port}/api/v1"
 
     @staticmethod
+    def _signature_parts(
+        app_id: str,
+        account: QqBotAccountConfig | None,
+        *,
+        global_enabled: bool,
+        group_settings: Any = None,
+    ) -> dict[str, str]:
+        """影响连接与凭证的字段，按名分项以便重启归因。
+
+        owner 列表刻意不入签名：它只影响群历史的 ``is_master`` 标注，由按号共享的
+        运行时视图刷新（见 ``sync_from_config``）。让它成为重启理由会使注册刷新在
+        HTTP 响应返回前停桥，取消正在等响应的入站任务，绑定回执永远发不出去
+        （2026-11-23 实盘）。
+        """
+        if account is None:
+            return {}
+        # 密钥摘要必须进签名：签名相等时 sync 直接返回，改过 AppSecret 的号
+        # 会永远停在旧凭证的重试循环里。摘要只取前 12 位十六进制，密钥原文不进日志与状态。
+        secret_digest = hashlib.sha256(str(account.app_secret or "").encode("utf-8")).hexdigest()[:12]
+        parts = {
+            "enabled": str(bool(global_enabled and account.enabled)),
+            "app_id": str(app_id).strip(),
+            "sandbox": str(bool(account.sandbox)),
+            "secret": secret_digest,
+        }
+        if group_settings is not None:
+            parts["group_scan"] = (
+                f"{float(getattr(group_settings, 'group_scan_min_minutes', 2.0) or 0.0):.3f}"
+                f"|{float(getattr(group_settings, 'group_scan_max_minutes', 5.0) or 0.0):.3f}"
+                f"|{int(getattr(group_settings, 'group_history_retention_days', 30) or 30)}"
+                f"|{int(getattr(group_settings, 'group_consumed_retention_days', 7) or 7)}"
+                f"|{float(getattr(group_settings, 'group_history_max_gb', 2.0) or 2.0):.3f}"
+            )
+        return parts
+
+    @staticmethod
     def _signature(
         app_id: str,
         account: QqBotAccountConfig | None,
@@ -73,28 +110,10 @@ class QqOfficialService:
         global_enabled: bool,
         group_settings: Any = None,
     ) -> str:
-        if account is None:
-            return ""
-        # 密钥摘要必须进签名：签名相等时 sync 直接返回，改过 AppSecret 的号
-        # 会永远停在旧凭证的重试循环里（旧签名只含 enabled/appId/sandbox，
-        # 单号时代靠重启蒙对，多号并跑后"改密钥救号"是常规操作）。摘要只取
-        # 前 12 位十六进制，密钥原文不进日志与状态。
-        secret_digest = hashlib.sha256(str(account.app_secret or "").encode("utf-8")).hexdigest()[:12]
-        group_digest = (
-            f"|{float(getattr(group_settings, 'group_scan_min_minutes', 2.0) or 0.0):.3f}"
-            f"|{float(getattr(group_settings, 'group_scan_max_minutes', 5.0) or 0.0):.3f}"
-            f"|{int(getattr(group_settings, 'group_history_retention_days', 30) or 30)}"
-            f"|{int(getattr(group_settings, 'group_consumed_retention_days', 7) or 7)}"
-            f"|{float(getattr(group_settings, 'group_history_max_gb', 2.0) or 2.0):.3f}"
-            if group_settings is not None
-            else ""
+        parts = QqOfficialService._signature_parts(
+            app_id, account, global_enabled=global_enabled, group_settings=group_settings
         )
-        return (
-            f"{bool(global_enabled and account.enabled)}|{str(app_id).strip()}"
-            f"|{bool(account.sandbox)}|{secret_digest}"
-            f"|{','.join(sorted(str(item or '').strip().lower() for item in (getattr(account, 'owner_openids', None) or [])))}"
-            f"{group_digest}"
-        )
+        return "|".join(parts.values())
 
     def _set(self, state: str, detail: str = "") -> None:
         self._state = state
@@ -117,13 +136,36 @@ class QqOfficialService:
             await self.stop()
             return
 
-        signature = self._signature(
+        # owner 只影响群历史 is_master 标注，不影响连接/凭证：先无条件刷新按号共享
+        # 的 owner 视图（同一事件循环内 clear+update，无 await、无竞态），再比签名。
+        # 签名不含 owner，注册那次 sync 签名不变会走下面的早退——刷新必须落在早退
+        # 之前，否则 owner 变更永不生效。
+        from g3ku.qq_official.bridge import bridge_delivery_state
+
+        owner_view = bridge_delivery_state(self._bridge_id).owner_ids
+        owner_view.clear()
+        owner_view.update(
+            str(item or "").strip().lower()
+            for item in (getattr(account, "owner_openids", None) or [])
+            if str(item or "").strip()
+        )
+
+        parts = self._signature_parts(
             self._app_id, account, global_enabled=global_enabled, group_settings=cfg.qq_bot
         )
+        signature = "|".join(parts.values())
         if signature == self._config_signature and self._task is not None and not self._task.done():
             return  # config unchanged and still running
 
+        if self._task is not None and not self._task.done():
+            changed = [name for name, value in parts.items() if self._config_parts.get(name) != value]
+            changed += [name for name in self._config_parts if name not in parts]
+            logger.info(
+                "qq-official bridge restart app={} changed={}",
+                self._app_id, ",".join(changed) or "config",
+            )
         self._config_signature = signature
+        self._config_parts = parts
         self._base_url = self._effective_base_url(cfg)
         await self._restart(account, group_settings=cfg.qq_bot)
 

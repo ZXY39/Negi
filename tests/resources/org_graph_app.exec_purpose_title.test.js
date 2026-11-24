@@ -123,7 +123,7 @@ function stubToolRow() {
 
 const PURPOSE = "启动本地开发服务器并保持运行，后面的验收步骤还要连它";
 
-test("exec 带 purpose 时工具卡标题是 exec:<purpose>，并挂上可折行的 has-purpose", () => {
+test("exec 带 purpose 时工具卡标题只留 purpose，不挂 exec: 前缀，并挂上可折行的 has-purpose", () => {
     const { renderExecutionRoundToolChip } = loadApp();
     const step = {
         tool_call_id: "call-1",
@@ -137,7 +137,8 @@ test("exec 带 purpose 时工具卡标题是 exec:<purpose>，并挂上可折行
         ),
     };
     const html = renderExecutionRoundToolChip({ round_id: "r1" }, step, 0);
-    assert.ok(html.includes(`exec:${PURPOSE}`), html);
+    assert.ok(html.includes(`<span class="task-trace-round-chip-title">${PURPOSE}</span>`), html);
+    assert.ok(!html.includes("exec:"), html);
     assert.ok(html.includes("has-purpose"), html);
 });
 
@@ -181,12 +182,12 @@ test("在飞的工具行用 event 里的 purpose 拼标题，收尾帧不带也�
     const { applyCeoToolStepState } = loadApp();
     const { item, titleEl } = stubToolRow();
     applyCeoToolStepState(item, { status: "running", toolName: "exec", purpose: PURPOSE, toolCallId: "call-1" });
-    assert.equal(titleEl.textContent, `exec:${PURPOSE}`);
+    assert.equal(titleEl.textContent, PURPOSE);
     // 匹配在飞步骤靠的是原始 tool_id，不能跟着标题一起变。
     assert.equal(item.dataset.toolName, "exec");
     assert.equal(item.dataset.toolPurpose, PURPOSE);
 
     // background-jobs.js 收尾时重贴状态，不带 purpose。
     applyCeoToolStepState(item, { status: "background", toolName: "exec", toolCallId: "call-1" });
-    assert.equal(titleEl.textContent, `exec:${PURPOSE}`);
+    assert.equal(titleEl.textContent, PURPOSE);
 });

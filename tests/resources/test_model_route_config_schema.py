@@ -122,12 +122,15 @@ def test_route_entry_shape_validation() -> None:
         ModelRouteEntry.model_validate({"type": "round_robin", "modelKey": "m_a"})
 
 
-def test_ceo_and_memory_reject_group_entries() -> None:
-    for scope in ("ceo", "memory"):
+def test_all_scopes_accept_group_entries() -> None:
+    # CEO/记忆均已接入组：含组的链合法，候选展开为组成员。
+    for scope in ("ceo", "execution", "inspection", "memory"):
         roles = {"ceo": ["m_x"], "execution": ["m_a"], "inspection": ["m_b"], "memory": ["m_x"]}
         roles[scope] = [{"type": "load_balance", "groupKey": "g1"}]
-        with pytest.raises(ValueError, match="负载均衡组当前仅支持 execution/inspection"):
-            Config.model_validate(_config_payload(loadBalanceGroups={"g1": {"modelKeys": ["m_a"]}}, roles=roles))
+        cfg = Config.model_validate(
+            _config_payload(loadBalanceGroups={"g1": {"modelKeys": ["m_a", "m_b"]}}, roles=roles)
+        )
+        assert cfg.get_role_model_keys(scope) == ["m_a", "m_b"]
 
 
 def test_group_reference_and_member_validation_messages() -> None:

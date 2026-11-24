@@ -3327,14 +3327,23 @@ class NodeRunner:
         node: NodeRecord,
         wake_at_ms: int = 0,
         note: str = '',
+        kind: str = 'once',
+        schedule_kind: str = '',
+        every_ms: int = 0,
+        cron_expr: str = '',
+        tz: str = '',
     ) -> dict[str, Any]:
-        """`schedule_wake` 的节点侧写点：把唤醒时刻落进 timer 表，每个节点只留最新一份。
+        """`schedule_wake` 的节点侧写点：把唤醒时刻落进 timer 表，同档每个节点只留最新一份。
 
         这里**不**停靠，也**不**开协程等：停靠是 `enter_wait` 的事，而"等"由 worker 的扫描按
         表里的时刻投一条 `wake_timer` 通知。活在协程里的期限会被任何重启吞掉（实盘那条
         `exec Start-Sleep 5400` 就是这个形状：08:30 设的 10:00 被 09:02 的重启推成 10:33）。
+
+        一次性（`once`）与周期（`recurring`）是两档，互不覆盖。周期档对验收节点拒收：
+        `wake_timer` 永不唤醒验收节点，周期档对它是纯噪声。
         """
         normalized_task_id = str(getattr(task, 'task_id', '') or '').strip()
+        normalized_kind = str(kind or 'once').strip() or 'once'
         latest = self._store.get_node(node.node_id)
         if latest is None:
             return {'error': 'node_missing'}
@@ -3342,6 +3351,8 @@ class NodeRunner:
             return {'error': 'node_terminal'}
         if str(getattr(task, 'status', '') or '').strip().lower() in {'success', 'failed', 'canceled'}:
             return {'error': 'task_terminal'}
+        if normalized_kind == 'recurring' and node.node_kind == KIND_ACCEPTANCE:
+            return {'error': 'acceptance_no_recurring'}
         moment = int(wake_at_ms or 0)
         if moment <= 0:
             return {'error': 'wake_at_ms_required'}
@@ -3351,9 +3362,15 @@ class NodeRunner:
             wake_at_ms=moment,
             note=str(note or '').strip(),
             armed_at=now_iso(),
+            kind=normalized_kind,
+            schedule_kind=str(schedule_kind or ''),
+            every_ms=int(every_ms or 0),
+            cron_expr=str(cron_expr or ''),
+            tz=str(tz or ''),
         )
         return {
             'scope': 'node',
+            'kind': normalized_kind,
             'wake_at': iso_from_ms(record.wake_at_ms),
             'epoch_ms': int(record.wake_at_ms),
             'from_now': describe_delay(wake_at_ms=record.wake_at_ms, current_ms=wake_now_ms()),
@@ -3473,7 +3490,8 @@ class NodeRunner:
         # 节点重交时也不能靠空等——`enter_wait` 只能被消息叫醒，没有期限这一档。
         tools[TIME_TOOL_NAME] = TimeTool()
         tools[SCHEDULE_WAKE_TOOL_NAME] = ScheduleWakeTool(
-            lambda **payload: self._arm_node_wake(task=task, node=node, **payload)
+            lambda **payload: self._arm_node_wake(task=task, node=node, **payload),
+            allow_recurring=True,
         )
         if node.node_kind in {KIND_EXECUTION, KIND_ACCEPTANCE} and not (
             node.node_kind == KIND_EXECUTION and is_continuous_metadata(getattr(node, 'metadata', None))
@@ -3752,6 +3770,24 @@ class NodeRunner:
             'live_skill_roster_supplier': (
                 (lambda: self._skill_roster_supplier(task=task, node=node))
                 if callable(getattr(self, '_skill_roster_supplier', None))
+                else None
+            ),
+            # 长期记忆投影的取数口：只有 continuous 根节点拿得到正文，其余节点返回空串。
+            # 冻结与重印边界由 react_loop 按 roster epoch 管，这里只负责取当刻值。
+            'memory_snapshot_supplier': (
+                (lambda: self._memory_snapshot_supplier(task=task, node=node))
+                if callable(getattr(self, '_memory_snapshot_supplier', None))
+                else None
+            ),
+            # 记忆增量的一次性通知取数口：本地与群各一条游标，头部冻结期间的变化靠它纠正。
+            'memory_notice_provider': (
+                (lambda **kwargs: self._memory_notice_provider(task=task, node=node, group=False, **kwargs))
+                if callable(getattr(self, '_memory_notice_provider', None))
+                else None
+            ),
+            'group_memory_notice_provider': (
+                (lambda **kwargs: self._memory_notice_provider(task=task, node=node, group=True, **kwargs))
+                if callable(getattr(self, '_memory_notice_provider', None))
                 else None
             ),
             # 控制台操作的一次性通知：节点只收工具/skill 的全局动作，按游标取增量。

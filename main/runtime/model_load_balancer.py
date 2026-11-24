@@ -23,6 +23,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
+from uuid import uuid4
 
 from loguru import logger
 
@@ -54,6 +55,14 @@ UNRESOLVED_BUCKET_PREFIX = "unresolved:"
 # 一次 9.9 ms，而 snapshot 每次 worker 状态发布都要扫。换 key 只写 overlay、不 bump
 # config_revision，所以除重绑时的整表清空外，再给一条一分钟的重解析上限。
 QUOTA_BUCKET_CACHE_TTL_SECONDS = 60.0
+
+# 跨进程共享上游观测（CEO/记忆与节点共用同一配额桶时不分裂）：web 把本地请求启动/429
+# 事件批上报 worker，worker 汇总后随心跳回播每成员的合并 rpm/惩罚，web 打分读这份合并
+# 视图。合并视图超过这个秒数没刷新（worker 离线）就退回 web 本地观测——此时无节点贡献
+# 负载，本地即全部真源。桶事件时间戳用墙钟（跨进程可比），本地缓存 TTL 仍用 monotonic。
+REMOTE_UPSTREAM_VIEW_STALE_SECONDS = 5.0
+# 上报事件去重窗口：按 (source, seq) 幂等，容忍命令重投。有界，逐出最旧。
+REMOTE_INGEST_SEEN_CAP = 20000
 
 THROTTLE_DIMENSION_RPM = "rpm"
 THROTTLE_DIMENSION_TPM = "tpm"
@@ -197,11 +206,17 @@ class ModelLoadBalancer:
         permit_source: PermitSource | None = None,
         resolve_quota_buckets: QuotaBucketResolver | None = None,
         monotonic: Callable[[], float] = time.monotonic,
+        clock: Callable[[], float] = time.time,
+        source_id: str = "",
     ) -> None:
         self._lock = threading.RLock()
         self._permit_source = permit_source
         self._resolve_quota_buckets = resolve_quota_buckets if callable(resolve_quota_buckets) else None
         self._monotonic = monotonic
+        # 桶事件（request_starts/penalty_events/completions）的时间戳与窗口/衰减一律用墙钟，
+        # 这样跨进程上报的事件可与本地事件直接并集；monotonic 每进程各自、跨进程不可比。
+        self._clock = clock
+        self._source_id = str(source_id or "").strip() or uuid4().hex
         self._groups: dict[str, ResolvedLoadBalanceGroup] = {}
         self._config_revision = 0
         self._selection_seq = 0
@@ -211,6 +226,14 @@ class ModelLoadBalancer:
         self._bindings: dict[str, _NodeBinding] = {}
         self._quota_bucket_cache: dict[str, tuple[float, list[str]]] = {}
         self._group_drift_findings: list[str] = []
+        # 共享观测态：share_observation 开启时本地事件才进出站缓冲（无消费者时不白攒）。
+        self._share_observation = False
+        self._event_seq = 0
+        self._outbound_events: deque[dict[str, Any]] = deque()
+        self._ingest_seen_ids: set[str] = set()
+        self._ingest_seen_order: deque[str] = deque()
+        self._remote_upstream_view: dict[str, dict[str, float]] = {}
+        self._remote_upstream_view_at = 0.0
 
     # ------------------------------------------------------------------ 配置
 
@@ -466,11 +489,12 @@ class ModelLoadBalancer:
             lease.request_started = True
             state = self._state(lease.model_key)
             state.reserved = max(0, int(state.reserved) - 1)
-            now = self._monotonic()
+            now = self._clock()
             for bucket_key in self._buckets_for(lease.model_key):
                 bucket = self._bucket(bucket_key)
                 bucket.request_starts.append(now)
                 self._trim(bucket.request_starts, RPM_WINDOW_SECONDS)
+                self._buffer_outbound_event(bucket_key, "start", now, "")
 
     def record_outcome(self, lease: ModelRouteLease, *, status_code: int | None = None, error_text: str = "") -> None:
         """失败归因：只有上游限流留记忆，记成衰减惩罚并按维度留痕。
@@ -482,14 +506,16 @@ class ModelLoadBalancer:
             return
         if not is_rate_limited(status_code, error_text):
             return
-        now = self._monotonic()
+        now = self._clock()
+        dimension = classify_throttle_dimension(error_text)
         with self._lock:
             for bucket_key in self._buckets_for(lease.model_key):
                 bucket = self._bucket(bucket_key)
                 bucket.penalty_events.append(now)
-                bucket.throttle_events.append((now, classify_throttle_dimension(error_text)))
+                bucket.throttle_events.append((now, dimension))
                 self._trim(bucket.penalty_events, PENALTY_RETENTION_SECONDS)
                 self._trim(bucket.throttle_events, PENALTY_RETENTION_SECONDS)
+                self._buffer_outbound_event(bucket_key, "throttle", now, dimension)
 
     def release(self, lease: ModelRouteLease, *, outcome: str = LEASE_OUTCOME_SUCCESS, error: str = "") -> None:
         """exactly-once 释放：归还 permit，并把未派发出去的 reserved 归零。"""
@@ -507,7 +533,7 @@ class ModelLoadBalancer:
             # 完成量只在真的发过请求且这一发换来了回答时计一次；没发出去的 lease
             # （组内提前耗尽）与失败释放都不算，否则这条轴又会把重试计成产出。
             if str(outcome or '') == LEASE_OUTCOME_SUCCESS and lease.request_started:
-                now = self._monotonic()
+                now = self._clock()
                 for bucket_key in self._buckets_for(lease.model_key):
                     bucket = self._bucket(bucket_key)
                     bucket.completions.append(now)
@@ -525,6 +551,111 @@ class ModelLoadBalancer:
         with self._lock:
             binding = self._bindings.get(str(node_id or "").strip())
             return str(binding.model_key) if binding is not None else ""
+
+    # ------------------------------------------------------------------ 共享上游观测
+
+    def set_share_observation(self, enabled: bool) -> None:
+        """开启后本地请求启动/429 事件才进出站缓冲，供跨进程上报。无消费者时不白攒。"""
+        with self._lock:
+            self._share_observation = bool(enabled)
+            if not enabled:
+                self._outbound_events.clear()
+
+    def _buffer_outbound_event(self, bucket_key: str, kind: str, ts: float, dimension: str) -> None:
+        if not self._share_observation:
+            return
+        self._event_seq += 1
+        self._outbound_events.append(
+            {
+                'id': f"{self._source_id}:{self._event_seq}",
+                'source': self._source_id,
+                'seq': int(self._event_seq),
+                'ts': float(ts),
+                'bucket_key': str(bucket_key),
+                'kind': str(kind),
+                'dimension': str(dimension or ''),
+            }
+        )
+
+    def drain_outbound_events(self) -> list[dict[str, Any]]:
+        """取走待上报的本地事件（web→worker 批上报用）。取走即清，下一拍重新攒。"""
+        with self._lock:
+            events = list(self._outbound_events)
+            self._outbound_events.clear()
+            return events
+
+    def ingest_remote_events(self, events: Any) -> int:
+        """汇总权威（worker）并入其他进程上报的桶事件。按 (source, seq) 幂等去重，容忍重投。
+
+        事件时间戳是墙钟，直接落进对应桶，与本地事件同窗口/同衰减口径。返回新并入条数。
+        """
+        ingested = 0
+        with self._lock:
+            for raw in list(events or []):
+                if not isinstance(raw, dict):
+                    continue
+                event_id = str(raw.get('id') or '').strip()
+                bucket_key = str(raw.get('bucket_key') or '').strip()
+                kind = str(raw.get('kind') or '').strip()
+                if not event_id or not bucket_key or kind not in ('start', 'throttle'):
+                    continue
+                if event_id in self._ingest_seen_ids:
+                    continue
+                try:
+                    ts = float(raw.get('ts'))
+                except (TypeError, ValueError):
+                    continue
+                self._ingest_seen_ids.add(event_id)
+                self._ingest_seen_order.append(event_id)
+                while len(self._ingest_seen_order) > REMOTE_INGEST_SEEN_CAP:
+                    oldest = self._ingest_seen_order.popleft()
+                    self._ingest_seen_ids.discard(oldest)
+                bucket = self._bucket(bucket_key)
+                if kind == 'start':
+                    bucket.request_starts.append(ts)
+                    self._trim(bucket.request_starts, RPM_WINDOW_SECONDS)
+                else:
+                    dimension = str(raw.get('dimension') or '') or THROTTLE_DIMENSION_UNKNOWN
+                    bucket.penalty_events.append(ts)
+                    bucket.throttle_events.append((ts, dimension))
+                    self._trim(bucket.penalty_events, PENALTY_RETENTION_SECONDS)
+                    self._trim(bucket.throttle_events, PENALTY_RETENTION_SECONDS)
+                ingested += 1
+        return ingested
+
+    def set_remote_upstream_view(self, view: Any, *, observed_at: float | None = None) -> None:
+        """web 消费 worker 回播的每成员合并 rpm/惩罚。observed_at 缺省取当前墙钟。"""
+        normalized: dict[str, dict[str, float]] = {}
+        for model_key, entry in dict(view or {}).items():
+            key = str(model_key or '').strip()
+            if not key or not isinstance(entry, dict):
+                continue
+            normalized[key] = {
+                'rolling_rpm_60s': float(entry.get('rolling_rpm_60s') or 0),
+                'penalty_429': float(entry.get('penalty_429') or 0.0),
+            }
+        with self._lock:
+            self._remote_upstream_view = normalized
+            self._remote_upstream_view_at = float(observed_at) if observed_at is not None else self._clock()
+
+    def upstream_view(self) -> dict[str, dict[str, float]]:
+        """汇总权威广播用：每成员（按 model_key 去重）的合并 rpm/惩罚。
+
+        只给 model_key 与计数，不给桶指纹——model_key 本就是管理面可见的绑定键。
+        """
+        view: dict[str, dict[str, float]] = {}
+        with self._lock:
+            for group in self._groups.values():
+                for member in group.members:
+                    model_key = str(member.model_key or '').strip()
+                    if not model_key or model_key in view:
+                        continue
+                    metrics = self._metrics(model_key)
+                    view[model_key] = {
+                        'rolling_rpm_60s': float(metrics.rolling_rpm or 0),
+                        'penalty_429': round(float(metrics.penalty or 0.0), 6),
+                    }
+        return view
 
     # ------------------------------------------------------------------ 诊断
 
@@ -687,7 +818,7 @@ class ModelLoadBalancer:
         return lease
 
     def _metrics(self, model_key: str) -> _MemberMetrics:
-        now = self._monotonic()
+        now = self._clock()
         rolling = 0
         completions = 0
         penalty = 0.0
@@ -695,9 +826,18 @@ class ModelLoadBalancer:
             bucket = self._buckets.get(bucket_key)
             if bucket is None:
                 continue
-            rolling += sum(1 for started in bucket.request_starts if now - float(started) <= RPM_WINDOW_SECONDS)
-            completions += sum(1 for done in bucket.completions if now - float(done) <= RPM_WINDOW_SECONDS)
+            rolling += sum(1 for started in bucket.request_starts if 0 <= now - float(started) <= RPM_WINDOW_SECONDS)
+            completions += sum(1 for done in bucket.completions if 0 <= now - float(done) <= RPM_WINDOW_SECONDS)
             penalty += sum(_decay(now - float(at), PENALTY_HALF_LIFE_SECONDS) for at in bucket.penalty_events)
+
+        # 共享上游观测：合并视图新鲜时，rpm/惩罚读 worker 汇总的那份（含本进程上报的事件），
+        # 而不是只算本地——CEO/记忆与节点共用同一配额桶时由此不分裂。本地 in-flight 仍本地。
+        # 视图陈旧（worker 离线）退回上面的本地计算，此时无节点贡献负载，本地即全部真源。
+        if self._remote_upstream_view and (now - self._remote_upstream_view_at) <= REMOTE_UPSTREAM_VIEW_STALE_SECONDS:
+            entry = self._remote_upstream_view.get(str(model_key or '').strip())
+            if entry is not None:
+                rolling = int(entry.get('rolling_rpm_60s') or 0)
+                penalty = float(entry.get('penalty_429') or 0.0)
 
         metrics = _MemberMetrics(
             rolling_rpm=rolling,
@@ -733,7 +873,7 @@ class ModelLoadBalancer:
 
     def _trim(self, items: deque[Any], retention_seconds: float) -> None:
         """按保留窗口修剪队列。`throttle_events` 存的是 (时刻, 维度) 元组。"""
-        cutoff = self._monotonic() - retention_seconds
+        cutoff = self._clock() - retention_seconds
         while items:
             head = items[0]
             started_at = float(head[0]) if isinstance(head, tuple) else float(head)

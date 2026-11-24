@@ -225,13 +225,15 @@ async def test_set_scope_chain_limits_only_leaves_chain_untouched(workspace: Pat
     assert _saved_config(workspace)["agents"]["roleIterations"]["execution"] == 22
 
 
-async def test_ceo_scope_rejects_group_entry(workspace: Path) -> None:
-    with pytest.raises(ValueError, match="负载均衡组当前仅支持"):
-        await _call(
-            action="set_scope_chain",
-            scope="ceo",
-            route_entries=[{"type": "load_balance", "group_key": "g1"}],
-        )
+async def test_ceo_scope_accepts_group_entry(workspace: Path) -> None:
+    await _call(
+        action="set_scope_chain",
+        scope="ceo",
+        route_entries=[{"type": "load_balance", "group_key": "g1"}],
+    )
+    result = await _call(action="get_scope_chain", scope="ceo")
+    assert [entry["type"] for entry in result["route_entries"]] == ["load_balance"]
+    assert result["model_keys"] == ["m1", "m2"]
 
 
 async def test_set_scope_chain_rejects_unknown_group(workspace: Path) -> None:

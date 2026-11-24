@@ -39,14 +39,16 @@ DEFAULT_TOOL_GOVERNANCE: dict[str, dict[str, Any]] = {
         'description': 'Queue a natural-language request to remember, revise, or forget long-term memory.',
         'risk_level': 'medium',
         'destructive': True,
-        'allowed_roles': ['ceo'],
+        # 角色粒度只到 execution；"只有 continuous 根节点看得见"那道种类门在
+        # MainRuntimeService._node_memory_tools_allowed，不在这里。
+        'allowed_roles': WRITE_ALLOWED_ROLES,
     },
     'memory_note': {
         'display_name': 'Load Memory Note',
         'description': 'Load a detailed memory note by short ref.',
         'risk_level': 'low',
         'destructive': False,
-        'allowed_roles': ['ceo'],
+        'allowed_roles': WRITE_ALLOWED_ROLES,
     },
     'memory_runtime': {
         'display_name': 'Memory Runtime',

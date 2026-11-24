@@ -746,7 +746,11 @@ def _session_message_lines(
     externalizer: EventTextExternalizer | None,
 ) -> list[str]:
     source_key = _non_empty_text(event.get("source_session_key"))
-    alias = _non_empty_text(event.get("source_alias")) or source_key
+    short_id = (
+        _non_empty_text(event.get("source_short_id"))
+        or _non_empty_text(event.get("source_alias"))
+        or source_key
+    )
     title = _non_empty_text(event.get("source_title"))
     trust = _non_empty_text(event.get("source_trust"))
     message_id = _non_empty_text(event.get("message_id"))
@@ -763,11 +767,11 @@ def _session_message_lines(
         retrieval_parts,
         "session_message",
         title,
-        alias,
+        short_id,
         source_key,
         retrieval,
     )
-    sender = f"{alias} ({title})" if title else alias
+    sender = f"{short_id} ({title})" if title else short_id
     if trust:
         sender = f"{sender} [trust: {trust}]"
     lines = [
@@ -782,11 +786,11 @@ def _session_message_lines(
     )
     if message_id:
         lines.append(
-            f"  To answer, send_message(to=\"{alias}\", content=..., reply_to=\"{message_id}\"); "
-            "the alias is signed, so use it rather than guessing."
+            f"  To answer, send_message(to=\"{short_id}\", content=..., reply_to=\"{message_id}\"); "
+            "the id is signed, so use it rather than guessing."
         )
     else:
-        lines.append(f"  To answer, send_message(to=\"{alias}\", content=...); the alias is signed.")
+        lines.append(f"  To answer, send_message(to=\"{short_id}\", content=...); the id is signed.")
     if not bool(event.get("wakeable", True)):
         lines.append(
             "  This reply chain reached its wake budget and was delivered without a wake-up; "

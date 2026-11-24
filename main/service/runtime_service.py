@@ -27,6 +27,8 @@ from g3ku.config.live_runtime import get_runtime_config
 from g3ku.config.loader import get_config_path
 from g3ku.content import ContentNavigationService, artifact_ref_from_id
 from g3ku.content.navigation import RESOURCE_URI_SCHEME
+from g3ku.cron.schedule_math import compute_next_run
+from g3ku.cron.types import CronSchedule
 from g3ku.deployment.data_root import data_root, data_work_path, ensure_dir, resolve_data_path
 from g3ku.llm_config.runtime_resolver import resolve_chat_target
 from g3ku.resources.models import ResourceKind
@@ -41,7 +43,7 @@ from g3ku.resources.tool_settings import (
     raw_tool_settings_from_descriptor,
     validate_tool_settings,
 )
-from g3ku.runtime import tool_arg_stash
+from g3ku.runtime import session_link_policy, tool_arg_stash
 from g3ku.runtime.context.execution_tool_selection import build_execution_tool_selection
 from g3ku.runtime.context.node_context_selection import (
     NodeContextSelectionResult,
@@ -145,10 +147,12 @@ from main.runtime.adaptive_tool_budget import AdaptiveToolBudgetController
 from main.runtime.chat_backend import ChatBackend
 from main.runtime.continuous_node import (
     CONTINUOUS_METADATA_KEY,
+    is_continuous_metadata,
 )
 from main.runtime.debug_recorder import RuntimeDebugRecorder
 from main.runtime.designed_idle import task_is_designed_idle
 from main.runtime.execution_trace_compaction import compact_tool_step_for_summary
+from main.runtime.frontdoor_turn_controller import FrontdoorTurnController
 from main.runtime.global_scheduler import GlobalScheduler
 from main.runtime.internal_tools import build_detail_level_schema
 from main.runtime.model_key_concurrency import ModelKeyConcurrencyController
@@ -395,6 +399,9 @@ _LOOP_CENSUS_INTERVAL_SECONDS = 20.0
 # `schedule_wake` 的扫描节拍。5 秒是"唤醒到点后最多晚 5 秒"与"每分钟扫 12 次窄表"之间的取值；
 # 表是按 wake_at_ms 索引的点查，空表时这条查询不碰任何胖行（见 main/storage/sqlite_store 的 timer 段）。
 _NODE_WAKE_TIMER_POLL_SECONDS = 5.0
+# web 共享上游观测同步节拍：上报本地事件批 + 消费 worker 合并视图。对齐心跳 1–2s 拍，
+# 新鲜度 ~1–2s 相对 60s 窗口/半衰期足够。balancer 缺席（P0）时循环空转。
+_MODEL_ROUTE_OBSERVATION_POLL_SECONDS = 1.0
 # 节点 exec background 进程的退出观测：1 秒拍一次 Popen.poll()，退出后投 process_exit。
 # 投递失败先重试几次，仍失败则把条目改写成 `.notice`，交给下次启动的消费口。
 _NODE_OWNED_PROCESS_EXIT_POLL_SECONDS = 1.0
@@ -851,6 +858,9 @@ class MainRuntimeService:
         self._pressure_gate_close_on_machine_critical = bool(adaptive_budget_settings['gate_close_on_machine_critical'])
         node_dispatch_limits = self._node_dispatch_concurrency_settings(app_config)
         execution_runtime_enabled = self.execution_mode == 'worker'
+        # CEO/记忆接入组：web 进程也要本地 balancer + permit controller——选人与 permit 本地、
+        # 不排节点准入队（交互不延迟）。NodeTurnController 仍 worker-only（它强绑 task/node 队列语义）。
+        model_route_enabled = self.execution_mode in {'worker', 'web'}
         execution_max_concurrency = (
             app_config.get_role_max_concurrency('execution')
             if app_config is not None and hasattr(app_config, 'get_role_max_concurrency')
@@ -874,10 +884,10 @@ class MainRuntimeService:
         self._chat_backend = chat_backend
         self.model_key_concurrency_controller = ModelKeyConcurrencyController(
             resolve_model_limits=self._resolve_model_limit_payload,
-        ) if execution_runtime_enabled else None
-        # 全局负载均衡器与并发控制器同生命周期：同一个 worker 进程内的所有任务、节点和
-        # 两条车道共享组状态。controller 缺失（embedded/web 角色）时 balancer 为 None，
-        # 选择层退化成「无并发计数的直连绑定」，不让节点因为没有 balancer 而报错。
+        ) if model_route_enabled else None
+        # 全局负载均衡器与并发控制器同生命周期：同一进程内的所有任务、节点和两条车道共享组状态。
+        # controller 缺失（embedded 角色）时 balancer 为 None，选择层退化成「无并发计数的直连绑定」，
+        # 不让节点因为没有 balancer 而报错。web 进程同样构造，供 CEO/记忆车道本地选人。
         self.model_load_balancer = (
             ModelLoadBalancer(
                 permit_source=self.model_key_concurrency_controller,
@@ -886,6 +896,34 @@ class MainRuntimeService:
             if self.model_key_concurrency_controller is not None
             else None
         )
+        # web 是观测上报方：开启本地事件缓冲供同步循环批上报 worker。worker 是汇总权威，
+        # 只 ingest 不缓冲上报。
+        if self.model_load_balancer is not None and self.execution_mode == 'web':
+            self.model_load_balancer.set_share_observation(True)
+        # 前门/记忆车道的轻量回合控制器：直接 select、不排节点准入队（交互不延迟）。
+        # 复用 NodeTurnController 的组内换人/释放/观测，仅首次授予改同步。web 与 worker 都需要
+        # （记忆 worker 两进程各起一份，谁拿文件锁谁消费）。
+        self.frontdoor_turn_controller = (
+            FrontdoorTurnController(
+                model_concurrency_controller=self.model_key_concurrency_controller,
+                balancer=self.model_load_balancer,
+            )
+            if model_route_enabled and self.model_key_concurrency_controller is not None
+            else None
+        )
+        # 记忆车道进程级路由源：记忆 attempt 读它取 balancer/控制器，按当时上游健康动态选成员。
+        if self.frontdoor_turn_controller is not None:
+            from types import SimpleNamespace
+
+            from g3ku.agent.memory_agent_runtime import set_memory_model_route_source
+
+            set_memory_model_route_source(
+                SimpleNamespace(
+                    balancer=self.model_load_balancer,
+                    turn_controller=self.frontdoor_turn_controller,
+                    concurrency_controller=self.model_key_concurrency_controller,
+                )
+            )
         self.node_turn_controller = NodeTurnController(
             model_concurrency_controller=self.model_key_concurrency_controller,
             balancer=self.model_load_balancer,
@@ -945,6 +983,9 @@ class MainRuntimeService:
         # 节点道 skill 名单的每跳取数口：react_loop 无 service 引用，只能由这里递进去
         # （与 `_tool_snapshot_supplier` 同一条 side-channel）。
         self.node_runner._skill_roster_supplier = self._node_skill_roster_supplier
+        # 长期记忆投影的同一条 side-channel：只有 continuous 根节点拿得到正文。
+        self.node_runner._memory_snapshot_supplier = self._node_memory_snapshot_supplier
+        self.node_runner._memory_notice_provider = self._node_memory_notice_provider
         # 控制台操作的一次性通知取数口：节点只收工具/skill 的全局动作，与 skill 取数口
         # 同一条 side-channel（react_loop 没有 service 引用）。
         self.node_runner._operator_action_supplier = self._node_operator_action_supplier
@@ -1117,6 +1158,8 @@ class MainRuntimeService:
         self._worker_lease_acquired = False
         self._command_poller_task: asyncio.Task[Any] | None = None
         self._worker_heartbeat_task: asyncio.Task[Any] | None = None
+        # web 进程共享上游观测同步循环：上报本地 CEO/记忆事件 + 消费 worker 合并视图。
+        self._model_route_observation_task: asyncio.Task[Any] | None = None
         # 磁盘治理（P1）：对账循环、紧急态自动暂停互斥与边沿状态。
         self._task_disk_reconcile_task: asyncio.Task[Any] | None = None
         # 分发驱动器接管对账循环（子树屏障不能只靠驱动器自己活着）。
@@ -1288,6 +1331,12 @@ class MainRuntimeService:
             self._schedule_pending_task_terminal_callbacks()
             self._schedule_pending_task_stall_callbacks()
             self._schedule_pending_task_distribution_error_callbacks()
+        if self.execution_mode == 'web':
+            if self._model_route_observation_task is None or self._model_route_observation_task.done():
+                self._model_route_observation_task = asyncio.create_task(
+                    self._model_route_observation_loop(),
+                    name='main-runtime-model-route-observation:web',
+                )
 
     def _start_worker_loops(self) -> None:
         if self._command_poller_task is None or self._command_poller_task.done():
@@ -1322,6 +1371,52 @@ class MainRuntimeService:
                 logger.warning(f'node wake timer sweep failed: {exc!r}')
                 await asyncio.sleep(_NODE_WAKE_TIMER_POLL_SECONDS * 4)
 
+    async def _model_route_observation_loop(self) -> None:
+        """web 进程共享上游观测节拍：上报本地 CEO/记忆事件 + 消费 worker 合并视图。
+
+        balancer 缺席时（尚未接入组的进程形态）整条循环空转，不产命令、不改任何状态。
+        """
+        while True:
+            try:
+                await asyncio.sleep(_MODEL_ROUTE_OBSERVATION_POLL_SECONDS)
+                self._sync_model_route_observation()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - 观测同步失败不该拖垮 web 事件循环
+                logger.warning(f'model route observation sync failed: {exc!r}')
+                await asyncio.sleep(_MODEL_ROUTE_OBSERVATION_POLL_SECONDS * 4)
+
+    def _sync_model_route_observation(self) -> None:
+        balancer = getattr(self, 'model_load_balancer', None)
+        if balancer is None:
+            return
+        # 上报：把本地 CEO/记忆请求启动/429 事件批投给 worker 汇总权威。
+        try:
+            events = balancer.drain_outbound_events()
+        except Exception:
+            events = []
+        if events:
+            try:
+                self._enqueue_task_command(
+                    command_type='model_route_observation',
+                    task_id=None,
+                    session_id='web:shared',
+                    payload={'events': events},
+                )
+            except Exception:
+                logger.warning('model route observation report enqueue failed')
+        # 消费：worker 在线时读它回播的每成员合并 rpm/惩罚喂本地 balancer；离线则不刷新，
+        # 让视图自然陈旧退回本地观测（此时无节点贡献负载，本地即全部真源）。
+        try:
+            current = self.latest_worker_status()
+            if current and self.worker_state(item=current) == _WORKER_STATE_ONLINE:
+                payload = dict(current.get('payload') or {})
+                view = payload.get('model_route_member_upstream')
+                if isinstance(view, dict):
+                    balancer.set_remote_upstream_view(view)
+        except Exception:
+            logger.debug('model route observation consume skipped', exc_info=True)
+
     async def sweep_due_node_wakes(self) -> int:
         """投出所有到点的节点唤醒，返回处理条数。
 
@@ -1344,13 +1439,15 @@ class MainRuntimeService:
             fired += 1
             task_id = str(timer.task_id or '').strip()
             node_id = str(timer.node_id or '').strip()
+            kind = str(timer.kind or 'once').strip() or 'once'
+            recurring = kind == 'recurring'
             task = self.store.get_task(task_id)
             node = self.store.get_node(node_id)
             if task is None or node is None or str(node.status or '').strip().lower() in {'success', 'failed'}:
-                self.store.delete_task_node_timer(task_id=task_id, node_id=node_id)
+                self.store.delete_task_node_timer(task_id=task_id, node_id=node_id, kind=kind)
                 continue
             if str(task.status or '').strip().lower() in {'success', 'failed', 'canceled'}:
-                self.store.delete_task_node_timer(task_id=task_id, node_id=node_id)
+                self.store.delete_task_node_timer(task_id=task_id, node_id=node_id, kind=kind)
                 continue
             paused = (
                 bool(getattr(task, 'is_paused', False))
@@ -1359,6 +1456,10 @@ class MainRuntimeService:
                 or bool(getattr(node, 'pause_requested', False))
             )
             current_ms = wall_now_ms()
+            if recurring and paused:
+                # 暂停期静默推进到下一未来槽，不落箱：长暂停不攒一箱未读 wake_timer。
+                self._rearm_recurring_timer(timer, current_ms)
+                continue
             late_ms = max(0, current_ms - int(timer.wake_at_ms or 0))
             try:
                 receipt = await self.deliver_node_message(
@@ -1370,6 +1471,7 @@ class MainRuntimeService:
                         now_ms=current_ms,
                         late_ms=late_ms,
                         paused=paused,
+                        recurring=recurring,
                     ),
                     origin='node',
                     system_kind=KIND_WAKE_TIMER,
@@ -1385,17 +1487,48 @@ class MainRuntimeService:
                     exc,
                 )
                 continue
-            self.store.delete_task_node_timer(task_id=task_id, node_id=node_id)
+            if recurring:
+                # 投递成功（含停机过期补发一次）后重臂到下一未来槽，不删行。
+                self._rearm_recurring_timer(timer, current_ms)
+            else:
+                self.store.delete_task_node_timer(task_id=task_id, node_id=node_id, kind=kind)
             logger.info(
-                'node wake timer fired: task={} node={} due={} late_ms={} wake={} status={}',
+                'node wake timer fired: task={} node={} kind={} due={} late_ms={} wake={} status={}',
                 task_id,
                 node_id,
+                kind,
                 iso_from_ms(int(timer.wake_at_ms or 0)),
                 late_ms,
                 (not paused),
                 str(receipt.get('status') or '') if isinstance(receipt, dict) else '',
             )
         return fired
+
+    def _rearm_recurring_timer(self, timer: Any, current_ms: int) -> None:
+        """周期档重臂：按递推参数现算下一未来槽，更新时刻并清领取凭证。
+
+        停机跨过多个触发点时只补发一次（投递已在调用方发生），这里直接跳到下一未来槽，
+        不补发成一串。算不出下一跳（递推参数损坏）时删行并告警，避免一条坏行热循环。
+        """
+        schedule = CronSchedule(
+            kind=str(timer.schedule_kind or 'every'),
+            every_ms=int(timer.every_ms or 0) or None,
+            expr=str(timer.cron_expr or '') or None,
+            tz=str(timer.tz or '') or None,
+        )
+        next_ms = compute_next_run(schedule, int(current_ms))
+        if not next_ms or next_ms <= current_ms:
+            logger.warning(
+                'node recurring wake cannot rearm, dropping: task={} node={} schedule_kind={}',
+                timer.task_id,
+                timer.node_id,
+                timer.schedule_kind,
+            )
+            self.store.delete_task_node_timer(task_id=timer.task_id, node_id=timer.node_id, kind='recurring')
+            return
+        self.store.rearm_task_node_timer(
+            task_id=timer.task_id, node_id=timer.node_id, kind='recurring', wake_at_ms=int(next_ms),
+        )
 
     @staticmethod
     def _node_wake_notice_text(
@@ -1405,6 +1538,7 @@ class MainRuntimeService:
         now_ms: int,
         late_ms: int,
         paused: bool,
+        recurring: bool = False,
     ) -> str:
         """唤醒通知的模型可见正文：英文，并说清"这是你自己设的"。"""
         lines = [
@@ -1422,9 +1556,15 @@ class MainRuntimeService:
                 'This node is paused, so the notice is only filed here: nothing woke up. '
                 'It reaches the model when the operator resumes this node.'
             )
-        lines.append(
-            'To keep a schedule running, arm the next wake-up now; this one is spent.'
-        )
+        if recurring:
+            lines.append(
+                'This is a recurring schedule you armed; it re-arms itself for the next slot. '
+                'You do not need to arm it again — just do this turn\'s work.'
+            )
+        else:
+            lines.append(
+                'To keep a schedule running, arm the next wake-up now; this one is spent.'
+            )
         return '\n'.join(lines)
 
     def adopt_node_owned_process(self, *, entry: dict[str, Any], process: Any) -> None:
@@ -2461,6 +2601,13 @@ class MainRuntimeService:
                     **dict(reload_result or {}),
                 }
                 success = bool(dict(reload_result or {}).get('ok', True))
+            elif command_type == 'model_route_observation':
+                # web 进程把 CEO/记忆的请求启动/429 事件批上报，worker 作汇总权威并入桶。
+                balancer = getattr(self, 'model_load_balancer', None)
+                events = list(payload.get('events') or [])
+                ingested = balancer.ingest_remote_events(events) if balancer is not None else 0
+                result_payload = {'ingested': int(ingested), 'received': len(events)}
+                success = True
             else:
                 error_text = f'unsupported_command:{command_type}'
         except Exception as exc:
@@ -6994,12 +7141,12 @@ class MainRuntimeService:
         ref: str = '',
         reply_to: str = '',
     ) -> dict[str, Any]:
-        """Frontdoor → nodes in this session's tasks, any task by task id, or linked peer sessions.
+        """Frontdoor → nodes in this session's tasks, any task by task id, or peer sessions.
 
-        ``to`` accepts a task id, a node id, a peer session alias (``s2``) or
-        ``session:<alias|key>``, or a list of them. A task id lands on that task's
-        root node; a bare id resolves as a node first, then a task, then a session
-        alias. The namespaces are not shared, so explicit prefixes win.
+        ``to`` accepts a task id, a node id, a peer session short id or
+        ``session:<short id|key>``, or a list of them. A task id lands on that
+        task's root node; a bare id resolves as a node first, then a task, then a
+        session address. The namespaces are not shared, so explicit prefixes win.
         ``reply_to`` continues a peer-session chain (session targets only).
         """
         normalized_session = str(session_id or '').strip()
@@ -7027,7 +7174,7 @@ class MainRuntimeService:
         if any(
             str(item.get('reason') or '').strip()
             in {'target_not_in_task', 'target_list_unparsed', 'not_session_task',
-                'session_not_linked', 'session_missing'}
+                'session_not_linked', 'session_not_linkable', 'session_missing'}
             for item in results
         ):
             legal_targets, legal_truncated = self._frontdoor_legal_targets(normalized_session)
@@ -7080,7 +7227,7 @@ class MainRuntimeService:
             return await self._deliver_frontdoor_task_target(
                 target=target, task=task, content=content, ref=ref
             )
-        if value and self.store.resolve_session_alias(value):
+        if value and self.resolve_session_address(value):
             return await self._deliver_frontdoor_session_target(
                 session_id=session_id, target=target, value=value,
                 content=content, ref=ref, reply_to=reply_to,
@@ -7100,13 +7247,9 @@ class MainRuntimeService:
         ref: str,
         reply_to: str,
     ) -> dict[str, Any]:
-        key = self.store.resolve_session_alias(value)
+        key = self.resolve_session_address(value)
         if not key:
-            # Explicit canonical keys are accepted too; the roster only shows aliases.
-            if value.startswith(('web:', 'ext:')):
-                key = value
-            else:
-                return self._frontdoor_target_rejection(target, 'session_missing')
+            return self._frontdoor_target_rejection(target, 'session_missing')
         return await self.deliver_session_message(
             session_id=session_id,
             target_session_key=key,
@@ -7128,7 +7271,9 @@ class MainRuntimeService:
     ) -> dict[str, Any]:
         """会话 → 会话点对点信箱（持久、运行时签名）。
 
-        ACL 就是关联边：删除会话会清边，所以无边即不可达（`session_not_linked`）。
+        关联边懒创建：owner 信任档的会话向一个可关联的会话 id 投递时，无边即建边
+        （对称，两端各分配短标识），回执带 `auto_linked`。第三方发送方仍要操作员
+        先勾（`session_not_linked`）——关联边是 ACL，那道批准门只对第三方保留。
         链信息运行时盖章：reply_to 命中发送者信箱里的一条来信才继承 chain/hop，
         模型传不了伪造的 hop。到顶（SESSION_MESSAGE_HOP_CAP）的来信落箱不唤醒，
         由扫描器侧闸执行；回执先告诉发送者这一档。
@@ -7140,8 +7285,18 @@ class MainRuntimeService:
             return {'target': target_token, 'status': 'rejected', 'reason': 'session_missing'}
         if not body:
             return {'target': target_token, 'status': 'rejected', 'reason': 'content_required'}
+        auto_linked = False
         if not self.store.has_session_link(sender, recipient):
-            return {'target': target_token, 'status': 'rejected', 'reason': 'session_not_linked'}
+            if not session_link_policy.may_auto_link(sender):
+                return {'target': target_token, 'status': 'rejected', 'reason': 'session_not_linked'}
+            problem = session_link_policy.session_link_problem(recipient, self_key=sender)
+            if problem:
+                return {'target': target_token, 'status': 'rejected', 'reason': problem}
+            linked_at = now_iso()
+            if self.store.add_session_link(sender, recipient, created_at=linked_at):
+                self.store.get_or_create_session_short_id(sender, created_at=linked_at)
+                self.store.get_or_create_session_short_id(recipient, created_at=linked_at)
+            auto_linked = True
         chain_id = ''
         hop = 0
         reply_token = str(reply_to or '').strip()
@@ -7184,7 +7339,7 @@ class MainRuntimeService:
                 'chain_id': chain_id,
                 'hop': hop,
                 'reply_to': reply_token,
-                'source_alias': self.get_session_alias(sender),
+                'source_short_id': self.session_short_id(sender),
                 'wakeable': wakeable,
             },
         )
@@ -7200,6 +7355,8 @@ class MainRuntimeService:
             'hop': hop,
             'reason': '',
         }
+        if auto_linked:
+            receipt['auto_linked'] = True
         if not wakeable:
             receipt['notice'] = (
                 'Reply chain reached its wake budget; this message landed without waking the '
@@ -7302,14 +7459,14 @@ class MainRuntimeService:
                 seen.add(normalized)
                 targets.append(normalized)
         for peer in self.store.list_session_links(session_id):
-            alias = str(self.store.get_session_alias(peer) or '').strip()
-            if not alias or alias in seen:
+            short_id = self.session_short_id(peer)
+            if not short_id or short_id in seen:
                 continue
             if len(targets) >= limit:
                 truncated = True
                 break
-            seen.add(alias)
-            targets.append(alias)
+            seen.add(short_id)
+            targets.append(short_id)
         return targets, truncated
 
     def list_frontdoor_node_messages(self, session_id: str) -> list[FrontdoorNodeMessage]:
@@ -7328,7 +7485,7 @@ class MainRuntimeService:
             except Exception:
                 continue
 
-    # ---- 会话关联（session links）：对称边 + 短别名 + 点对点信箱 ----
+    # ---- 会话关联（session links）：对称边 + 短标识 + 点对点信箱 ----
 
     def list_session_links(self, session_key: str) -> list[str]:
         return list(self.store.list_session_links(str(session_key or '').strip()) or [])
@@ -7339,7 +7496,7 @@ class MainRuntimeService:
     def replace_session_links(self, session_key: str, targets: list[str]) -> dict[str, list[str]]:
         """Diff-replace one session's neighbor set; edges are symmetric.
 
-        Returns the added/removed peer keys. Aliases are assigned for every
+        Returns the added/removed peer keys. Short ids are allocated for every
         endpoint of a newly created edge (both sides), never for removals.
         Target existence/authorization is the caller's job (REST layer).
         """
@@ -7355,26 +7512,44 @@ class MainRuntimeService:
         created_at = now_iso()
         for peer in added:
             if self.store.add_session_link(normalized, peer, created_at=created_at):
-                self.store.get_or_create_session_alias(normalized, created_at=created_at)
-                self.store.get_or_create_session_alias(peer, created_at=created_at)
+                self.store.get_or_create_session_short_id(normalized, created_at=created_at)
+                self.store.get_or_create_session_short_id(peer, created_at=created_at)
         for peer in removed:
             self.store.remove_session_link(normalized, peer)
         return {'added': added, 'removed': removed}
 
-    def ensure_session_alias(self, session_key: str) -> str:
-        return str(self.store.get_or_create_session_alias(session_key, created_at=now_iso()) or '')
+    def session_short_id(self, session_key: str) -> str:
+        """模型面短标识：首次取数时分配，此后冻结（永不改号、永不复用）。"""
+        normalized = str(session_key or '').strip()
+        if not normalized:
+            return ''
+        existing = str(self.store.get_session_short_id(normalized) or '')
+        if existing:
+            return existing
+        return str(
+            self.store.get_or_create_session_short_id(normalized, created_at=now_iso()) or ''
+        )
 
-    def get_session_alias(self, session_key: str) -> str:
-        return str(self.store.get_session_alias(session_key) or '')
-
-    def resolve_session_alias(self, alias: str) -> str:
-        return str(self.store.resolve_session_alias(alias) or '')
+    def resolve_session_address(self, token: str) -> str:
+        """短 id / 存量 s{seq} / 规范 key → 规范 key；对不上返回空。"""
+        text = str(token or '').strip()
+        if not text:
+            return ''
+        key = self.store.resolve_session_short_id(text)
+        if key:
+            return key
+        key = self.store.resolve_session_alias(text)
+        if key:
+            return key
+        if text.startswith(session_link_policy.SESSION_ADDRESS_PREFIXES):
+            return text
+        return ''
 
     def reachable_session_roster(self, session_key: str) -> list[dict[str, str]]:
-        """Alias + canonical key per linked peer; titles are enriched caller-side."""
+        """Short id + canonical key per linked peer; titles are enriched caller-side."""
         roster: list[dict[str, str]] = []
         for peer in self.list_session_links(session_key):
-            roster.append({'session_key': peer, 'alias': self.get_session_alias(peer)})
+            roster.append({'session_key': peer, 'short_id': self.session_short_id(peer)})
         return roster
 
     def purge_session_link_data(self, session_key: str) -> None:
@@ -11078,7 +11253,9 @@ class MainRuntimeService:
         session_id = str(getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared'
         actor_role = self._actor_role_for_node(node)
         visible_names = self._normalized_tool_name_list(
-            list(visible_tool_names or self.list_effective_tool_names(actor_role=actor_role, session_id=session_id) or [])
+            list(visible_tool_names)
+            if visible_tool_names
+            else self._node_visible_tool_names(node=node, actor_role=actor_role, session_key=session_id)
         )
         visible_name_set = set(visible_names)
         callable_names: list[str] = []
@@ -13583,6 +13760,7 @@ class MainRuntimeService:
         task,
         node_kind: str,
         declared: list[str] | None,
+        node: Any = None,
     ) -> dict[str, Any]:
         """派发方声明的工具名 → 预置契约消息 + 回执。纯读，不落任何跨跳状态。
 
@@ -13603,6 +13781,9 @@ class MainRuntimeService:
             for name in list(self.list_effective_tool_names(actor_role=actor_role, session_id=session_id) or [])
             if str(name or '').strip()
         }
+        if node is not None and not self._node_memory_tools_allowed(node):
+            # 首跳构建才有节点记录：种类门在这里落地，派发时那份预解析只是观测。
+            visible_names -= self.NODE_MEMORY_TOOL_NAMES
         candidates: list[dict[str, Any]] = []
         dropped: list[dict[str, str]] = []
         for name in names:
@@ -14570,6 +14751,33 @@ class MainRuntimeService:
             )
         return items
 
+    def _node_memory_snapshot_supplier(self, *, task, node: NodeRecord) -> str | None:
+        """continuous 根节点的长期记忆投影；别的节点种类返回空串。
+
+        节点道没有前门视图，按 originating session_key 问进程内活动路由：群源＝本地＋本群，
+        第三方私聊源＝只读本地。`None` 专指这次取数失败，调用侧据此保留上一份冻结值——
+        把失败读成"记忆为空"会在头部抹掉整块字节，等于每次读盘抖动都破一次缓存。
+        冻结与重印边界由 react_loop 按 roster epoch 管，这里只取当刻值。
+        """
+        if not self._node_memory_tools_allowed(node):
+            return ''
+        session_key = str(getattr(task, 'session_id', '') or '').strip()
+        if not session_key:
+            return ''
+        from g3ku.runtime.memory_scope_router import active_memory_scope_router
+
+        try:
+            router = active_memory_scope_router()
+            if router is not None:
+                return str(router.view_for_session(session_key).snapshot_text() or '').strip()
+            manager = self.memory_manager
+            reader = getattr(manager, 'snapshot_text', None)
+            if callable(reader):
+                return str(reader() or '').strip()
+        except Exception:
+            return None
+        return ''
+
     @staticmethod
     def _node_context_selection_cache_key(
         *,
@@ -14701,8 +14909,8 @@ class MainRuntimeService:
         session_key = str(getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared'
         actor_role = self._actor_role_for_node(node)
         visible_skills = list(self.list_contract_visible_skill_resources(actor_role=actor_role, session_id=session_key) or [])
-        visible_tool_names = self._normalized_tool_name_list(
-            list(self.list_effective_tool_names(actor_role=actor_role, session_id=session_key) or [])
+        visible_tool_names = self._node_visible_tool_names(
+            node=node, actor_role=actor_role, session_key=session_key
         )
         resource_registry = getattr(self, 'resource_registry', None)
         registry_skills = (
@@ -15031,12 +15239,81 @@ class MainRuntimeService:
             'selection': selection,
         }
 
+    NODE_MEMORY_TOOL_NAMES = frozenset({'memory_update', 'memory_note'})
+
+    def _node_memory_tools_allowed(self, node: NodeRecord) -> bool:
+        """只有 continuous 根节点看得见记忆工具。
+
+        RBAC 是角色粒度：放开到 execution 会让所有执行节点都看见它，所以种类门必须另加
+        一道，且在**可见集**层面排除——不是进了名单再在调用时拒。
+        """
+        return bool(
+            is_continuous_metadata(getattr(node, 'metadata', None))
+            and not str(getattr(node, 'parent_node_id', '') or '').strip()
+            and str(getattr(node, 'node_kind', '') or '').strip().lower() != 'acceptance'
+        )
+
+    def _node_visible_tool_names(self, *, node: NodeRecord, actor_role: str, session_key: str) -> list[str]:
+        """节点可见工具名的唯一取数口：角色可见集再过一道记忆工具种类门。"""
+        names = self._normalized_tool_name_list(
+            list(self.list_effective_tool_names(actor_role=actor_role, session_id=session_key) or [])
+        )
+        if self._node_memory_tools_allowed(node):
+            return names
+        return [name for name in names if name not in self.NODE_MEMORY_TOOL_NAMES]
+
+    def _node_memory_notice_provider(
+        self,
+        *,
+        task,
+        node: NodeRecord,
+        group: bool = False,
+        since_rev: int = 0,
+        base_rev: int = 0,
+        initialized: bool = False,
+    ) -> dict[str, Any] | None:
+        """continuous 根节点的记忆增量：本地与群各一条游标，判据与会话道共用同一份。
+
+        节点头部基座在两次重印之间冻结，中途变化只能由这条一次性通知纠正；没有它，
+        节点会带着旧记忆一直跑到下一次压缩。
+        """
+        _ = base_rev
+        if not self._node_memory_tools_allowed(node):
+            return None
+        session_key = str(getattr(task, 'session_id', '') or '').strip()
+        if not session_key:
+            return None
+        from g3ku.runtime.memory_scope_router import active_memory_scope_router
+        from g3ku.runtime.skill_roster_notice import memory_notice_delta_from
+
+        try:
+            router = active_memory_scope_router()
+            view = router.view_for_session(session_key) if router is not None else None
+        except Exception:
+            view = None
+        if group:
+            manager = getattr(view, 'group_manager', None) if view is not None else None
+        else:
+            manager = getattr(view, 'local_manager', None) if view is not None else self.memory_manager
+        return memory_notice_delta_from(
+            manager, since_rev=int(since_rev or 0), initialized=bool(initialized)
+        )
+
     def _node_context_selection_inputs(self, *, task, node: NodeRecord) -> dict[str, Any]:
         session_key = str(getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared'
         actor_role = self._actor_role_for_node(node)
         visible_skills = list(self.list_contract_visible_skill_resources(actor_role=actor_role, session_id=session_key) or [])
         visible_tool_records = list(self.list_visible_tools(actor_role=actor_role, session_id=session_key) or [])
-        visible_tool_names = list(self.list_effective_tool_names(actor_role=actor_role, session_id=session_key) or [])
+        visible_tool_names = self._node_visible_tool_names(
+            node=node, actor_role=actor_role, session_key=session_key
+        )
+        if not self._node_memory_tools_allowed(node):
+            allowed_names = set(visible_tool_names)
+            visible_tool_records = [
+                record
+                for record in visible_tool_records
+                if str(getattr(record, 'name', '') or '').strip() in allowed_names
+            ]
         return {
             'session_key': session_key,
             'actor_role': actor_role,
@@ -15128,7 +15405,9 @@ class MainRuntimeService:
         task = self.store.get_task(node.task_id)
         session_id = task.session_id if task is not None else 'web:shared'
         actor_role = self._actor_role_for_node(node)
-        visible_tool_names = list(self.list_effective_tool_names(actor_role=actor_role, session_id=session_id) or [])
+        visible_tool_names = self._node_visible_tool_names(
+            node=node, actor_role=actor_role, session_key=session_id
+        )
         selected_visible = set(
             self._callable_tool_names_for_node(
                 task=(task or SimpleNamespace(task_id=node.task_id, session_id=session_id)),
@@ -15505,6 +15784,7 @@ class MainRuntimeService:
             task=task,
             node_kind=str(getattr(node, 'node_kind', '') or ''),
             declared=declared,
+            node=node,
         )
         seed_messages = [dict(item) for item in list(resolved.get('messages') or []) if isinstance(item, dict)]
         # 构建期只补新出现的丢弃，派发时那一份要留着：两个时刻的 reason 合在一起才是这条名单
@@ -15853,6 +16133,7 @@ class MainRuntimeService:
             self._node_wake_timer_task,
             self._task_disk_reconcile_task,
             self._terminal_outbox_reconcile_task,
+            self._model_route_observation_task,
         ]
         for task in loop_tasks:
             if task is not None and not task.done():
@@ -16014,6 +16295,9 @@ class MainRuntimeService:
             # 非 0 就意味着日志里的 group= 与台账的档位归因不再可信，必须先查它。
             'model_route_group_drift_count': int(raw.get('group_drift_count') or 0),
             'model_route_group_drift_findings': list(raw.get('group_drift_findings') or []),
+            # 共享上游观测：每成员合并 rpm/惩罚（含 web 上报的 CEO/记忆事件），web 进程的
+            # balancer 读这份打分，CEO/记忆与节点共用同一配额桶时不分裂。只给 model_key 与计数。
+            'model_route_member_upstream': dict(balancer.upstream_view() or {}),
         }
 
     def _node_turn_snapshot(self) -> dict[str, Any]:

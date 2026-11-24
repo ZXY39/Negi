@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from fastapi import APIRouter, BackgroundTasks, Body, HTTPException
 from loguru import logger
 
-from g3ku.runtime import owned_processes
+from g3ku.runtime import owned_processes, session_link_policy
 from g3ku.runtime import skill_roster_notice as _skill_roster_notice
 from g3ku.runtime.ceo_catalog_offload import (
     build_ceo_session_catalog_async,
@@ -831,31 +831,10 @@ def _require_link_session(session_manager, session_id: str) -> str:
     return key
 
 
-def _link_target_problem(session_manager, registry, target: str, *, self_key: str) -> str:
-    """Rejection reason for one link target; '' when linkable.
-
-    隐藏 ext 条目不候选（操作员已隐藏的先尊重）；internal: 隐藏会话与 china:
-    归档（无投递路径）不可关联；自身不成边。
-    """
-    key = str(target or '').strip()
-    if not key or key == self_key:
-        return 'session_not_linkable'
-    if key.startswith('web:'):
-        return '' if session_manager.has_transcript(key) else 'session_missing'
-    if key.startswith('ext:'):
-        entry = registry.get_by_session_key(key) if registry is not None else None
-        if entry is None:
-            return 'session_missing'
-        if bool(getattr(entry, 'hidden', False)):
-            return 'session_not_linkable'
-        return ''
-    return 'session_not_linkable'
-
-
 def _record_link_operator_action(service, session_key: str, result: dict) -> None:
     try:
-        added = [service.get_session_alias(k) or k for k in result.get('added') or []]
-        removed = [service.get_session_alias(k) or k for k in result.get('removed') or []]
+        added = [service.session_short_id(k) or k for k in result.get('added') or []]
+        removed = [service.session_short_id(k) or k for k in result.get('removed') or []]
         parts = []
         if added:
             parts.append('linked session(s) ' + ', '.join(added) + ' to this session')
@@ -878,7 +857,18 @@ async def get_ceo_session_links(session_id: str):
     agent, session_manager, _runtime_manager, _state_store = _sessions()
     key = _require_link_session(session_manager, session_id)
     service = await _task_service(agent)
-    return {"ok": True, "session_id": key, "linked": service.list_session_links(key)}
+    # 弹窗每行要显示模型面用的短标识，操作员才能把记忆里的号对回具体会话。
+    candidates, _truncated = session_link_policy.linkable_session_candidates(key, limit=1000)
+    short_ids = {
+        str(item['session_key']): service.session_short_id(str(item['session_key']))
+        for item in candidates
+    }
+    return {
+        "ok": True,
+        "session_id": key,
+        "linked": service.list_session_links(key),
+        "short_ids": short_ids,
+    }
 
 
 @router.put("/ceo/sessions/{session_id}/links")
@@ -888,13 +878,12 @@ async def put_ceo_session_links(session_id: str, payload: dict = Body(...)):
     raw_links = (payload or {}).get('links')
     if not isinstance(raw_links, list):
         raise HTTPException(status_code=400, detail='links_list_required')
-    registry = get_external_session_registry(session_manager.workspace)
     targets: list[str] = []
     for item in raw_links:
         target = str(item or '').strip()
         if not target:
             continue
-        problem = _link_target_problem(session_manager, registry, target, self_key=key)
+        problem = session_link_policy.session_link_problem(target, self_key=key)
         if problem:
             raise HTTPException(status_code=400, detail={'reason': problem, 'target': target})
         if target not in targets:
