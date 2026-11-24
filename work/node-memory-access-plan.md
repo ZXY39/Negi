@@ -1,15 +1,15 @@
-# 节点接入长期记忆（默认只 continuous 根节点）
+# 节点接入长期记忆（只 continuous 根节点）
 
 状态：待批（未动代码）。
 靶子来源：用户第一轮要求「长期任务根节点和本地会话一样会同步本地记忆在上下文，同时拥有记忆更新工具，但是没有 5 回合自动入队」；本机实测 `memory/MEMORY.md`、`D:\NEGI\.g3ku\main-runtime\runtime.sqlite3` 的 `task_model_calls`、`.g3ku/main-runtime/governance.sqlite3`。
 前置：记忆车道合批/砍收口跳已交付（`c0332bc5` / `213d849a`），本计划依赖其主动道合批与空闲封口。
 
-## 0. 两个待确认的默认值（用户可否决，不改机制）
+## 0. 已定档的范围（用户 2026-11-24 确认）
 
-- **覆盖面**：默认只 `continuous` 根节点（`is_continuous_metadata(node.metadata)` 且无 `parent_node_id`）。子节点与验收节点不变。
-- **人设**：默认不注入 `## 我的人设`。人设是 CEO 前台身份，节点是执行体。
+- **覆盖面**：只 `continuous` 根节点（`is_continuous_metadata(node.metadata)` 且无 `parent_node_id`）。子节点与验收节点不变。
+- **人设**：不注入 `## 我的人设`。人设是 CEO 前台身份，节点是执行体。
 
-范围问题已异步问出，尚未收到答复；本计划按上述默认写，翻档只改 §4 的门判据，不动 §2 的机制。
+两项与计划默认一致，机制与落点无需调整。范围门落在 §4，翻档只改那一处判据，不动 §2 的机制。
 
 ## 1. 现状：要求里的三条都不成立
 
@@ -53,12 +53,12 @@
 
 ## 4. 范围门与非目标
 
-**RBAC 是角色粒度，不是节点粒度。** 把 `memory_update` 放开到 `execution` 会让所有执行节点都看得见它。要限到 continuous 根，必须在节点工具判据上再加一道门——先例是 `_execution_control_tool_names(node_kind=..., can_spawn_children=...)`（`main/service/runtime_service.py:11062-11066`）。默认门：`is_continuous_metadata` 且无 `parent_node_id`；不满足则该工具不进可见集（不是进了再拒）。
+**RBAC 是角色粒度，不是节点粒度。** 把 `memory_update` 放开到 `execution` 会让所有执行节点都看得见它。要限到 continuous 根，必须在节点工具判据上再加一道门——先例是 `_execution_control_tool_names(node_kind=..., can_spawn_children=...)`（`main/service/runtime_service.py:11062-11066`）。门判据：`is_continuous_metadata` 且无 `parent_node_id`；不满足则该工具不进可见集（不是进了再拒）。
 
 非目标：
 
 - **不接复核窗口**（硬约束）。节点不调 `record_turn_for_review`，不产生 `ordinary_turn_window` / `stale_buffer` / `token_compression` / `session_boundary` 行。节点入队量只由模型主动调用决定，不随节点轮数线性膨胀。加守卫测试钉住这条。
-- 不注入人设块（默认）。
+- 不注入人设块。
 - 不动 `NODE_FIXED_BUILTIN_TOOL_NAMES`（见 P0-e 的取舍）。
 - 不做节点侧记忆压缩/归并的新判据——容量梯子、压缩、归并全部沿用记忆车道现有合同。
 - 不改会话车道任何行为。
@@ -84,7 +84,7 @@
 
 - 节点通知调用点传 `memory_provider`（`react_loop.py:4273-4282`），游标用 `memory_cursor`；群源另接 `group_memory_cursor`。
 - 压缩后游标对齐到最新修订（`_reset_node_runtime_notice_after_compaction`，`:4349-4371`），增量不重投。
-- 人设游标默认不接（§0）。
+- 人设游标不接（§0）。
 
 ### P0-d RBAC 放开与存量角色一次性迁移
 
