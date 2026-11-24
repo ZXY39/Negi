@@ -15,6 +15,10 @@ let ceoVoicePreparing = null;
 // 在 runtime 的 turn_id 尚未随 state 帧回来之前就被编辑/删除的在飞条目：已经从上方拿走，
 // 等镜像帧把它带回 turn_id 时再补一次服务端撤回。键是会话 id。
 const ceoPendingFollowUpWithdrawals = new Map();
+// runtime 已受理、还没画成气泡的补充 turn_id（镜像帧一报回来就登记）。接走那一刻
+// drain 先广播空队列 state、新回合的在飞帧后到，镜像届时已清空；画气泡的识别凭这份
+// 账而不是当时的镜像，气泡才不会只剩刷新这一条出路。画成气泡/撤回/接走即销账。
+const ceoArmedFollowUpTurnIds = new Map();
 
 function normalizeCeoComposerDraftEntry(sessionId, entry = {}) {
     const key = String(sessionId || entry?.session_id || "").trim();
@@ -621,6 +625,18 @@ function adoptCeoServerQueuedFollowUpsFromState(state = {}, sessionId = activeSe
     // 只存原样数组，读的时候再规范化：存规范化结果会让第二次读把已规范化的条目再过滤一遍
     // （它们没有 content 字段），候选条于是自己把自己清空。
     const next = Array.isArray(state?.queued_follow_up_messages) ? state.queued_follow_up_messages : [];
+    // 镜像报回来的 turn_id 先登记进 armed 账：队列被接走时镜像随空队列帧清空，
+    // 画气泡的识别要靠这份账活过那一刻。已接走的账是永久的，迟到的旧帧不得重新登记。
+    let armed = ceoArmedFollowUpTurnIds.get(key);
+    next.forEach((item) => {
+        const turnId = String(item?.metadata?.["_transcript_turn_id"] || "").trim();
+        if (!turnId || isCeoTakenFollowUpTurn(key, turnId)) return;
+        if (!armed) {
+            armed = new Set();
+            ceoArmedFollowUpTurnIds.set(key, armed);
+        }
+        armed.add(turnId);
+    });
     const current = Array.isArray(S.ceoServerQueuedFollowUps?.[key]) ? S.ceoServerQueuedFollowUps[key] : [];
     if (JSON.stringify(next) === JSON.stringify(current)) return false;
     S.ceoServerQueuedFollowUps = { ...(S.ceoServerQueuedFollowUps || {}), [key]: next };
@@ -845,11 +861,15 @@ function promoteRepresentedRuntimeSentCeoFollowUps(sessionId = activeSessionId()
     // 服务端镜像（`server:<turn_id>`）里的条目同样可能是"这一批被接走的补充"：本地那份
     // runtime_sent_at 副本在镜像帧到达时就退场了（reconcile 把两份并成一行），只认本地
     // 副本的话，接走这一刻候选条消失、气泡却永远不画，只能刷新后从转录里补出来。
-    const mirroredTurnIds = new Set(
+    // 镜像本身也不可靠：drain 接走队列后先广播空队列 state、新回合的在飞帧后到，
+    // 这一帧到达时镜像往往已经清空，所以识别再并上 armed 账（镜像登记、画泡才销）。
+    const recognizedTurnIds = new Set(
         getCeoServerQueuedFollowUps(key)
             .map((item) => ceoServerQueuedFollowUpTurnId(item?.id))
             .filter(Boolean)
     );
+    const armedTurnIds = ceoArmedFollowUpTurnIds.get(key);
+    if (armedTurnIds) armedTurnIds.forEach((turnId) => recognizedTurnIds.add(turnId));
     // 这条帧同时负责服务端那一半的退场：本地条目早就被文本去重交给镜像画了，
     // 只摘本地那份的话，消息都进气泡了候选条还挂着。
     retireCeoTakenFollowUpsFromRepresentedMessages(key, normalizedRepresented);
@@ -860,7 +880,7 @@ function promoteRepresentedRuntimeSentCeoFollowUps(sessionId = activeSessionId()
     ));
     const promotedMessages = normalizedRepresented.filter((message) => {
         const turnId = String(message?.turn_id || "").trim();
-        if (turnId && mirroredTurnIds.has(turnId)) return true;
+        if (turnId && recognizedTurnIds.has(turnId)) return true;
         return promotedEntries.some((item) => ceoSnapshotMessageMatchesQueuedFollowUp(message, item));
     });
     if (!promotedMessages.length) return [];
@@ -903,6 +923,8 @@ function noteCeoTakenFollowUpTurn(sessionId, turnId) {
     if (taken.has(target)) return false;
     taken.add(target);
     ceoTakenFollowUpTurnIds.set(key, taken);
+    // 接走即销 armed 账：无论是画成气泡、收尾帧证明还是失败结算，都不许再画第二遍。
+    ceoArmedFollowUpTurnIds.get(key)?.delete(target);
     return true;
 }
 
@@ -1042,21 +1064,27 @@ function pruneCeoServerQueuedFollowUpByTurn(sessionId, turnId) {
         ...(S.ceoServerQueuedFollowUps || {}),
         [serverKey]: remaining,
     };
+    // 撤回的条目不会再被任何回合接走：armed 账一起销掉，别留给后面的帧误画。
+    ceoArmedFollowUpTurnIds.get(serverKey)?.delete(String(turnId || "").trim());
 }
 
 function retireCeoTakenFollowUpsFromRepresentedMessages(sessionId = activeSessionId(), representedMessages = []) {
     const key = String(sessionId || "").trim();
     if (!key) return false;
-    const mirrored = new Set(
+    // 与 promote 同一套识别：镜像 ∪ armed。失败结算/快照恢复走到这里时镜像可能已被
+    // 空队列帧清空，只认镜像会让 armed 账销不掉。
+    const recognized = new Set(
         normalizeCeoServerQueuedFollowUpList(S.ceoServerQueuedFollowUps?.[key] || [])
             .map((item) => ceoServerQueuedFollowUpTurnId(item?.id))
             .filter(Boolean)
     );
-    if (!mirrored.size) return false;
+    const armed = ceoArmedFollowUpTurnIds.get(key);
+    if (armed) armed.forEach((turnId) => recognized.add(turnId));
+    if (!recognized.size) return false;
     let retired = false;
     (Array.isArray(representedMessages) ? representedMessages : []).forEach((message) => {
         const turnId = String(message?.turn_id || "").trim();
-        if (!turnId || !mirrored.has(turnId)) return;
+        if (!turnId || !recognized.has(turnId)) return;
         if (noteCeoTakenFollowUpTurn(key, turnId)) retired = true;
     });
     if (!retired) return false;

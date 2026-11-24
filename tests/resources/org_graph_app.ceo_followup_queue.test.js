@@ -763,6 +763,92 @@ test("被接走的镜像条目也要画出用户气泡（本地 runtime_sent 副
     assert.equal(U.ceoFollowUpQueue.hidden, true);
 });
 
+test("真实发帧顺序：drain 的空队列 state 先到、在飞帧后到，也要画出用户气泡", () => {
+    const api = loadApp();
+    const { U, applyCeoState, promoteRepresentedRuntimeSentCeoFollowUps, getMergedCeoQueuedFollowUps } = api;
+    api.__context.__msgCalls = [];
+    vm.runInContext("addMsg = (text, role) => { __msgCalls.push({ text, role }); };", api.__context);
+
+    // 插话受理：镜像帧带着 turn_id 到达，本地 runtime_sent 副本并进镜像。
+    applyCeoState({
+        status: "running",
+        is_running: true,
+        queued_follow_up_messages: [
+            { content: "插话的那条", attachments: [], metadata: { _transcript_turn_id: "t-9" } },
+        ],
+    });
+
+    // 回合链尾 drain 取走队列后先广播空队列 state，新回合的在飞帧还在后面
+    // （websocket_ceo.py 的 _run_user_turn 循环）：候选条退场，但识别不能跟着失明。
+    applyCeoState({ status: "idle", is_running: false, queued_follow_up_messages: [] });
+    assert.equal(getMergedCeoQueuedFollowUps("web:test").length, 0, "候选条随空队列退场");
+
+    promoteRepresentedRuntimeSentCeoFollowUps("web:test", [
+        { role: "user", content: "插话的那条", turn_id: "t-9", timestamp: "2026-11-24T12:00:00" },
+    ]);
+    assert.equal(api.__context.__msgCalls.length, 1, "空队列帧先到也不许吞掉用户气泡");
+    assert.equal(api.__context.__msgCalls[0].text, "插话的那条");
+    assert.equal(api.__context.__msgCalls[0].role, "user");
+    assert.equal(U.ceoFollowUpQueue.hidden, true);
+});
+
+test("armed 账画过即销：迟到的排队读数与重复在飞帧不得重画气泡", () => {
+    const api = loadApp();
+    const { applyCeoState, promoteRepresentedRuntimeSentCeoFollowUps, getMergedCeoQueuedFollowUps } = api;
+    api.__context.__msgCalls = [];
+    vm.runInContext("addMsg = (text, role) => { __msgCalls.push({ text, role }); };", api.__context);
+
+    applyCeoState({
+        status: "running",
+        is_running: true,
+        queued_follow_up_messages: [
+            { content: "插话的那条", attachments: [], metadata: { _transcript_turn_id: "t-9" } },
+        ],
+    });
+    applyCeoState({ status: "idle", is_running: false, queued_follow_up_messages: [] });
+    promoteRepresentedRuntimeSentCeoFollowUps("web:test", [
+        { role: "user", content: "插话的那条", turn_id: "t-9" },
+    ]);
+    assert.equal(api.__context.__msgCalls.length, 1);
+
+    // 迟到的旧 state 又把这条报回队列，随后又一帧在飞 patch 带同一条：只许有一个气泡。
+    applyCeoState({
+        status: "running",
+        is_running: true,
+        queued_follow_up_messages: [
+            { content: "插话的那条", attachments: [], metadata: { _transcript_turn_id: "t-9" } },
+        ],
+    });
+    promoteRepresentedRuntimeSentCeoFollowUps("web:test", [
+        { role: "user", content: "插话的那条", turn_id: "t-9" },
+    ]);
+    assert.equal(api.__context.__msgCalls.length, 1, "接走账是永久的，不许重画");
+    assert.equal(getMergedCeoQueuedFollowUps("web:test").length, 0, "迟到读数也不许画回候选条");
+});
+
+test("撤回的补充销掉 armed 账：后续帧不得把它画成气泡", async () => {
+    const api = loadApp();
+    const { applyCeoState, discardCeoQueuedFollowUp, promoteRepresentedRuntimeSentCeoFollowUps } = api;
+    api.__context.__msgCalls = [];
+    vm.runInContext("addMsg = (text, role) => { __msgCalls.push({ text, role }); };", api.__context);
+
+    applyCeoState({
+        status: "running",
+        is_running: true,
+        queued_follow_up_messages: [
+            { content: "插话的那条", attachments: [], metadata: { _transcript_turn_id: "t-9" } },
+        ],
+    });
+    const released = await discardCeoQueuedFollowUp("server:t-9");
+    assert.equal(released, true);
+
+    applyCeoState({ status: "idle", is_running: false, queued_follow_up_messages: [] });
+    promoteRepresentedRuntimeSentCeoFollowUps("web:test", [
+        { role: "user", content: "插话的那条", turn_id: "t-9" },
+    ]);
+    assert.equal(api.__context.__msgCalls.length, 0, "撤回过的条目没有资格再画气泡");
+});
+
 test("失败回合的 ceo.error 带上本批用户消息时，本地在飞副本退场", () => {
     const { S, U, handleCeoError, setCeoQueuedFollowUps, getMergedCeoQueuedFollowUps } = loadApp();
     S.ceoTurnActive = true;
