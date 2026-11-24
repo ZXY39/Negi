@@ -1938,8 +1938,8 @@ textarea {
     min-height: 0;
     overflow: auto;
     scrollbar-gutter: stable;
-    /* 两侧留白翻倍：从 20px 增至 40px，拉开外层与内层滚动条间距 */
-    padding: var(--space-4) calc(var(--space-5) * 2) var(--space-5);
+    /* 两侧留白取通用档的三倍（60px）：拉开外层与内层滚动条的落指间距 */
+    padding: var(--space-4) calc(var(--space-5) * 3) var(--space-5);
     display: flex;
     flex-direction: column;
     gap: var(--space-4);
@@ -10325,8 +10325,8 @@ textarea {
 }
 
 .detail-drawer.task-detail-drawer .panel-header {
-    padding-left: calc(var(--space-5) * 2);
-    padding-right: calc(var(--space-5) * 2);
+    padding-left: calc(var(--space-5) * 3);
+    padding-right: calc(var(--space-5) * 3);
 }
 
 .detail-drawer.is-open,
@@ -19769,14 +19769,14 @@ textarea {
 #ad-input .task-trace-list,
 #ad-messages .task-trace-list,
 #ad-spawn-reviews .task-trace-list {
-    padding-left: 16px;
-    padding-right: 16px;
+    padding-left: 24px;
+    padding-right: 24px;
 }
 
 #ad-input .task-trace-step,
 #ad-messages .task-trace-step,
 #ad-spawn-reviews .task-trace-step {
-    padding-right: 20px;
+    padding-right: 30px;
 }
 
 /* 提交输出 / 验收结果：15 行视窗，右上角一个裸图标复制按钮（滚动时浮在框上，空态不画）。 */
