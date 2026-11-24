@@ -221,6 +221,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 交付物/脚本出现在项目根以外的意外目录（尤其 `C:\Users\<近似拼写的用户名>\...` 这种镜像树）、或模型传的相对路径落点与预期不符 → `tool-and-skill-system.md`「Model Path Anchoring Contract」+ `config-and-models.md`「`agents`」
 - 模型报告的日期/时间与事实不符（心算毫秒时间戳出错、引用陈旧时间、日报归属日期错误），或模型压根没有"现在是几点"的读数 → `tool-and-skill-system.md`「fixed builtin tools」的 `time` 一条 + `heartbeat-system.md`「Internal-turn time anchors」+ `runtime-overview.md`「用户消息时间锚点」
 - 节点/会话设的自设唤醒没响、响得太晚，或一次设闹钟攒出好几份 → `main-task-runtime.md`「节点信箱与唤醒（现行）」+ `heartbeat-system.md`「Cron Reminder Contract」
+- 节点周期闹钟（`every_seconds`/`cron_expr`）没响、暂停期不落箱、重启后只补发一次、验收节点设周期被拒、或每日档节点长停靠却收失速提醒 → `main-task-runtime.md`「节点周期闹钟（wake_timer 周期档）」+ `heartbeat-system.md`「Task Stall Detection」
 - 用户消息在请求体里同时出现原文与带 `[消息送达时间]` 行的两个版本，或装饰后缓存命中率骤降 → `context-and-cache-troubleshooting.md`「用户消息时间装饰破坏前缀稳定或相等性去重」
 - 某配置整条模型链 400「The input messages must contain no more than one system message」（`InternalError.Algo.InvalidParameter`）、换 key 无效 → `context-and-cache-troubleshooting.md`「线体角色合同」
 - 某颗成员反复回通用 400（`inference request is invalid`）而同体量的请求在链上另一颗通过过，或想知道它实际塞得下多大 → `context-and-cache-troubleshooting.md`「节点 400 不一定是 payload 畸形」（响应体不携带可信成因；节点暂停时上交 provider 原文与发送事实卡，由读到的人判断）+ `config-and-models.md`「Frontdoor Context Window Contract」的观测值清单
