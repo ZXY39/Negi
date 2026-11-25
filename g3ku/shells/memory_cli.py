@@ -211,6 +211,28 @@ def build_memory_app(console) -> typer.Typer:
             manager.close()
         console.print_json(json.dumps(report, ensure_ascii=False))
 
+    @app.command('dream')
+    def memory_dream(
+        once: bool = typer.Option(False, '--once', help='Force one dream cluster and consume it once'),
+        scope: str = _scope_option,
+    ):
+        """Force one incremental memory-organization cluster through the normal preview/confirm path."""
+        if not once:
+            console.print('[yellow]Use --once to run one dream cluster.[/yellow]')
+            raise typer.Exit(2)
+        _config, mem_cfg, manager = _load_runtime_manager(scope=scope)
+        if not mem_cfg.enabled:
+            _disabled()
+            raise typer.Exit(1)
+        try:
+            report = asyncio.run(manager.run_due_batch_once(force_dream=True))
+            state = manager._read_dream_state()
+        finally:
+            manager.close()
+        output = dict(report)
+        output.setdefault('dream_cluster_key', str(state.get('last_cluster_key') or ''))
+        console.print_json(json.dumps(output, ensure_ascii=False))
+
     @app.command('doctor')
     def memory_doctor(
         now_iso: str = typer.Option('', '--now-iso', help='Override the current timestamp for deterministic checks'),

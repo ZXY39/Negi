@@ -1228,7 +1228,7 @@ def test_reformat_store_folds_multiline_rows_and_the_second_pass_changes_nothing
         manager.close()
 
 
-def test_v2_memory_agent_tools_expose_read_note_and_apply_batch_only(tmp_path: Path) -> None:
+def test_v2_memory_agent_tools_expose_read_and_apply_surface(tmp_path: Path) -> None:
     module = _load_memory_agent_runtime_module()
     manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
@@ -1237,7 +1237,14 @@ def test_v2_memory_agent_tools_expose_read_note_and_apply_batch_only(tmp_path: P
     finally:
         manager.close()
 
-    assert tool_names == ["memory_read_note", "memory_apply_batch", "memory_apply_confirm"]
+    assert tool_names == [
+        "memory_read_note",
+        "memory_read_entry",
+        "memory_note_index",
+        "memory_read_notes",
+        "memory_apply_batch",
+        "memory_apply_confirm",
+    ]
 
 
 def test_memory_agent_delete_batch_rejects_noop_reason_and_points_at_already_satisfied(tmp_path: Path) -> None:

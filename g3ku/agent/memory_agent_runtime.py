@@ -112,6 +112,83 @@ def _first_note_ref(text: str) -> str:
     return str(match.group("ref") or "").strip() if match else ""
 
 
+def _note_anchor_span(body: str, anchor: str) -> tuple[int, int, list[int], str]:
+    value = str(anchor or "").strip()
+    if not value:
+        return 0, 0, [], "anchor must not be empty"
+    lines = str(body or "").splitlines(keepends=True)
+    matches = [index for index, line in enumerate(lines) if line.strip() == value]
+    if not matches:
+        return 0, 0, [], f"anchor not found in note: {value}"
+    if len(matches) > 1:
+        return 0, 0, [index + 1 for index in matches], (
+            f"anchor matches {len(matches)} lines; provide a unique line or section heading"
+        )
+    start = matches[0]
+    heading = re.match(r"^(#{1,6})\s+", lines[start].strip())
+    end = len(lines)
+    if heading:
+        level = len(heading.group(1))
+        for index in range(start + 1, len(lines)):
+            candidate = re.match(r"^(#{1,6})\s+", lines[index].strip())
+            if candidate and len(candidate.group(1)) <= level:
+                end = index
+                break
+    return start, end, [start + 1], ""
+
+
+def _apply_note_edit_ops_to_body(
+    body: str, *, ref: str, ops: list[dict[str, str]]
+) -> tuple[str, list[dict[str, Any]]]:
+    results: list[dict[str, Any]] = []
+    current = str(body or "")
+    for op_index, op in enumerate(list(ops or [])):
+        old_text = str(op.get("old_text") or "")
+        anchor = str(op.get("anchor") or "")
+        new_text = str(op.get("new_text") or "")
+        record: dict[str, Any] = {
+            "note_ref": ref,
+            "op_index": op_index,
+            "old_text": old_text,
+            "new_text": new_text,
+        }
+        if anchor:
+            record["anchor"] = anchor
+            lines = current.splitlines(keepends=True)
+            start, end, candidates, error = _note_anchor_span(current, anchor)
+            if error:
+                record["applied"] = False
+                record["error"] = error
+                record["candidates"] = candidates
+                results.append(record)
+                continue
+            original = "".join(lines[start:end])
+            replacement = new_text
+            if replacement and not replacement.endswith(("\n", "\r")):
+                replacement += "\n"
+            record["old_text"] = original
+            record["anchor_scope_lines"] = end - start
+            current = "".join(lines[:start]) + replacement + "".join(lines[end:])
+            record["applied"] = True
+            results.append(record)
+            continue
+        occurrences = current.count(old_text) if old_text else 0
+        if occurrences == 0:
+            record["applied"] = False
+            record["error"] = f"old_text not found in note {ref}. Verify the note content."
+        elif occurrences > 1:
+            record["applied"] = False
+            record["error"] = (
+                f"old_text matches {occurrences} places in note {ref}; "
+                "provide a longer old_text that matches exactly once"
+            )
+        else:
+            current = current.replace(old_text, new_text, 1)
+            record["applied"] = True
+        results.append(record)
+    return current, results
+
+
 def entry_over_budget_error(*, entry: str, chars: int, limit: int, note_ref: str) -> str:
     """Field error for a staged entry whose body no longer fits one resident line.
 
@@ -212,14 +289,17 @@ _REVIEW_FAIRNESS_MAX_WAIT_SECONDS = 600
 
 
 def _memory_request_lane(*, op: str, trigger_source: str) -> str:
-    """Batching lane of one queue row: `active` merges, `review` and `runtime` stay single.
+    """Batching lane of one queue row: only `active` merges; every other lane is single.
 
     An unrecognized trigger source falls to `review` on purpose: a new enqueue door that
     forgets to register itself then loses merging instead of silently joining somebody
     else's batch.
     """
-    if str(op or "").strip().lower() == "consolidate":
+    normalized_op = str(op or "").strip().lower()
+    if normalized_op == "consolidate":
         return "runtime"
+    if normalized_op == "dream":
+        return "dream"
     if str(trigger_source or "").strip() in _ACTIVE_TRIGGER_SOURCES:
         return "active"
     return "review"
@@ -714,6 +794,11 @@ class _MemoryToolSession:
     # shape the orphan sweep once reaped seconds after writing it. Queried per call so
     # a later batch in the same turn sees the ownership earlier batches created.
     owned_note_refs_fn: Callable[[], set[str]] | None = None
+    dream_context_loaded: bool = False
+    dream_cluster_key: str = ""
+    dream_base_revision: int = 0
+    dream_memory_ids: set[str] = field(default_factory=set)
+    dream_note_refs: set[str] = field(default_factory=set)
 
     def note_directories(self) -> list[Path]:
         return [self.index_dir, self.notes_dir] if self.index_dir is not None else [self.notes_dir]
@@ -1097,8 +1182,8 @@ class _MemoryToolSession:
                 normalized_note_upserts[ref] = body
 
         # Incremental note editing, on purpose shaped like the ordinary file edit tool:
-        # flat old_text/new_text per op, `new_text` empty means delete that span, and
-        # `old_text` has to match exactly once. Rewriting a whole note to change one
+        # old_text/new_text or a unique anchor/new_text per op; empty new_text deletes
+        # that span, and old_text has to match exactly once. Rewriting a whole note to change one
         # line costs the full body on the output side every time and can silently drop
         # paragraphs nobody re-read - measured, the largest note here is 2964 chars.
         raw_note_edits = dict(note_edits or {})
@@ -1125,14 +1210,22 @@ class _MemoryToolSession:
                 ops: list[dict[str, str]] = []
                 for index, raw_op in enumerate(raw_ops):
                     if not isinstance(raw_op, dict):
-                        errors[f"note_edits.{ref}[{index}]"] = "each edit must be an object with old_text and new_text"
+                        errors[f"note_edits.{ref}[{index}]"] = (
+                            "each edit must be an object with old_text or anchor, and new_text"
+                        )
                         continue
                     old_text = str(raw_op.get("old_text") or "")
+                    anchor = str(raw_op.get("anchor") or "")
                     new_text = str(raw_op.get("new_text") or "")
-                    if not old_text.strip():
-                        errors[f"note_edits.{ref}[{index}]"] = "old_text must not be empty"
+                    if bool(old_text.strip()) == bool(anchor.strip()):
+                        errors[f"note_edits.{ref}[{index}]"] = (
+                            "provide exactly one of old_text or anchor"
+                        )
                         continue
-                    ops.append({"old_text": old_text, "new_text": new_text})
+                    if old_text.strip():
+                        ops.append({"old_text": old_text, "new_text": new_text})
+                    else:
+                        ops.append({"anchor": anchor, "new_text": new_text})
                 if ops:
                     normalized_note_edits[ref] = ops
 
@@ -1567,6 +1660,7 @@ class _MemorySqliteRepository:
                     added_ids TEXT NOT NULL DEFAULT '[]',
                     changed_ids TEXT NOT NULL DEFAULT '[]',
                     retired_ids TEXT NOT NULL DEFAULT '[]',
+                    changed_note_refs TEXT NOT NULL DEFAULT '[]',
                     rendered TEXT NOT NULL DEFAULT '',
                     chars INTEGER NOT NULL DEFAULT 0
                 )
@@ -1578,6 +1672,11 @@ class _MemorySqliteRepository:
             for column in ("note_ref", "consolidated_into"):
                 if column not in present:
                     conn.execute(f"ALTER TABLE memories ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+            revision_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(memory_revisions)")}
+            if "changed_note_refs" not in revision_columns:
+                conn.execute(
+                    "ALTER TABLE memory_revisions ADD COLUMN changed_note_refs TEXT NOT NULL DEFAULT '[]'"
+                )
             conn.commit()
         finally:
             conn.close()
@@ -1591,6 +1690,7 @@ class _MemorySqliteRepository:
         changed_ids: list[str],
         retired_ids: list[str],
         rendered: str,
+        changed_note_refs: list[str] | None = None,
     ) -> int:
         conn = self._connect()
         try:
@@ -1598,8 +1698,8 @@ class _MemorySqliteRepository:
                 cursor = conn.execute(
                     """
                     INSERT INTO memory_revisions(
-                        created_at, op, added_ids, changed_ids, retired_ids, rendered, chars
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        created_at, op, added_ids, changed_ids, retired_ids, changed_note_refs, rendered, chars
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         str(created_at or ""),
@@ -1607,6 +1707,16 @@ class _MemorySqliteRepository:
                         json.dumps(sorted({str(item or "").strip() for item in added_ids if str(item or "").strip()}), ensure_ascii=False),
                         json.dumps(sorted({str(item or "").strip() for item in changed_ids if str(item or "").strip()}), ensure_ascii=False),
                         json.dumps(sorted({str(item or "").strip() for item in retired_ids if str(item or "").strip()}), ensure_ascii=False),
+                        json.dumps(
+                            sorted(
+                                {
+                                    str(item or "").strip()
+                                    for item in list(changed_note_refs or [])
+                                    if str(item or "").strip()
+                                }
+                            ),
+                            ensure_ascii=False,
+                        ),
                         str(rendered or ""),
                         len(str(rendered or "")),
                     ),
@@ -1631,12 +1741,20 @@ class _MemorySqliteRepository:
         try:
             try:
                 rows = conn.execute(
-                    "SELECT rev, created_at, op, added_ids, changed_ids, retired_ids, rendered, chars"
+                    "SELECT rev, created_at, op, added_ids, changed_ids, retired_ids, changed_note_refs, rendered, chars"
                     " FROM memory_revisions WHERE rev > ? ORDER BY rev",
                     (int(rev or 0),),
                 ).fetchall()
             except sqlite3.OperationalError:
-                return []
+                try:
+                    rows = conn.execute(
+                        "SELECT rev, created_at, op, added_ids, changed_ids, retired_ids, "
+                        "'[]' AS changed_note_refs, rendered, chars"
+                        " FROM memory_revisions WHERE rev > ? ORDER BY rev",
+                        (int(rev or 0),),
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    return []
             return [dict(row) for row in rows]
         finally:
             conn.close()
@@ -2325,6 +2443,10 @@ class MemoryManager:
             getattr(config.queue, "failed_file", "") or "memory/failed.jsonl"
         )
         self.review_state_file = self.mem_dir / "review_state.json"
+        dream_cfg = getattr(config, "dream", None)
+        self.dream_state_file = self.workspace / str(
+            getattr(dream_cfg, "state_file", "") or "memory/dream_state.json"
+        )
         self._io_lock = threading.RLock()
         self._last_stale_review_sweep_at = 0.0
         self._processed_request_ids_cache: tuple[tuple[int, int], set[str]] | None = None
@@ -2484,6 +2606,7 @@ class MemoryManager:
         op: str,
         rows_before: list[dict[str, Any]],
         rows_after: list[dict[str, Any]],
+        changed_note_refs: list[str] | None = None,
     ) -> int:
         """记下这次提交对**居民行**造成的可见变化；没有净变化就不写修订。
 
@@ -2500,7 +2623,10 @@ class MemoryManager:
             if memory_id in before and after[memory_id] != before[memory_id]
         ]
         retired = [memory_id for memory_id in before if memory_id not in after]
-        if not (added or changed or retired):
+        normalized_note_refs = sorted(
+            {str(item or "").strip() for item in list(changed_note_refs or []) if str(item or "").strip()}
+        )
+        if not (added or changed or retired or normalized_note_refs):
             return 0
         visible = set(added) | set(changed)
         parts: list[str] = []
@@ -2523,6 +2649,7 @@ class MemoryManager:
             added_ids=added,
             changed_ids=changed,
             retired_ids=retired,
+            changed_note_refs=normalized_note_refs,
             rendered=rendered,
         )
 
@@ -4069,13 +4196,35 @@ class MemoryManager:
                 summary_max_chars=int(getattr(self.config.document, "summary_max_chars", 300) or 300),
                 owned_note_refs_fn=lambda: set(self._memory_repo.owned_note_refs()),
             )
+            if session.batch_op == "dream" and batch.items:
+                payload = self._dream_payload_from_item(batch.items[0])
+                session.dream_context_loaded = True
+                session.dream_cluster_key = str(payload.get("cluster_key") or "")
+                session.dream_base_revision = self._dream_payload_base_revision(payload)
+                session.dream_memory_ids = {
+                    str(item or "").strip() for item in list(payload.get("memory_ids") or []) if str(item or "").strip()
+                }
+                session.dream_note_refs = {
+                    str(item or "").strip() for item in list(payload.get("note_refs") or []) if str(item or "").strip()
+                }
+                session.dream_note_refs = self._dream_related_note_refs(
+                    memory_ids=session.dream_memory_ids,
+                    note_refs=session.dream_note_refs,
+                )
             tools = self._memory_agent_tools(session)
-            system_prompt = self._memory_agent_system_prompt()
-            user_prompt = self._memory_agent_user_prompt(
-                batch=batch,
-                snapshot_text=before_text,
-                repair_reason=repair_reason,
-            )
+            system_prompt = self._memory_agent_system_prompt(batch_op=session.batch_op)
+            if session.batch_op == "dream":
+                user_prompt = self._dream_agent_user_prompt(
+                    batch=batch,
+                    snapshot_text=before_text,
+                    repair_reason=repair_reason,
+                )
+            else:
+                user_prompt = self._memory_agent_user_prompt(
+                    batch=batch,
+                    snapshot_text=before_text,
+                    repair_reason=repair_reason,
+                )
         tool_schemas = [item.openai_schema() for item in list(tools or [])]
         chat_call, release_memory_route = await self._build_memory_chat_call(runtime_config, tool_schemas)
         messages: list[dict[str, Any]] = [
@@ -4209,8 +4358,9 @@ class MemoryManager:
                 return True
         return False
 
-    def _memory_agent_system_prompt(self) -> str:
-        return load_prompt("memory_agent.md").strip()
+    def _memory_agent_system_prompt(self, *, batch_op: str = "write") -> str:
+        prompt_name = "memory_agent_dream.md" if str(batch_op or "").strip().lower() == "dream" else "memory_agent.md"
+        return load_prompt(prompt_name).strip()
 
     def _consolidation_agent_system_prompt(self) -> str:
         return load_prompt("memory_consolidator.md").strip()
@@ -4778,6 +4928,11 @@ class MemoryManager:
             op="consolidate",
             rows_before=rows_before,
             rows_after=self._memory_repo.list_memories(),
+            changed_note_refs=[
+                str(write.get("note_ref") or "").strip()
+                for write in writes
+                if str(write.get("note_ref") or "").strip()
+            ],
         )
         if not validated.retirements:
             # The compress lane already ran before this consolidation was ever queued, so
@@ -5009,6 +5164,7 @@ class MemoryManager:
                 op="write",
                 rows_before=rows_before,
                 rows_after=self._memory_repo.list_memories(),
+                changed_note_refs=sorted(changed_note_refs),
             )
 
     @classmethod
@@ -5385,38 +5541,16 @@ class MemoryManager:
                             "applied": False,
                             "error": f"note not found: {ref}",
                             "old_text": str(_op.get("old_text") or ""),
+                            "anchor": str(_op.get("anchor") or ""),
                             "new_text": str(_op.get("new_text") or ""),
                         }
                     )
                 continue
             body = path.read_text(encoding="utf-8")
-            changed = False
-            for op_index, op in enumerate(list(ops or [])):
-                old_text = str(op.get("old_text") or "")
-                new_text = str(op.get("new_text") or "")
-                occurrences = body.count(old_text) if old_text else 0
-                record: dict[str, Any] = {
-                    "note_ref": ref,
-                    "op_index": op_index,
-                    "old_text": old_text,
-                    "new_text": new_text,
-                }
-                if occurrences == 0:
-                    record["applied"] = False
-                    record["error"] = f"old_text not found in note {ref}. Verify the note content."
-                elif occurrences > 1:
-                    record["applied"] = False
-                    record["error"] = (
-                        f"old_text matches {occurrences} places in note {ref}; "
-                        "provide a longer old_text that matches exactly once"
-                    )
-                else:
-                    body = body.replace(old_text, new_text, 1)
-                    record["applied"] = True
-                    changed = True
-                results.append(record)
-            if changed:
-                self._atomic_write_text(path, self._normalize_note_text(body))
+            updated, edit_results = _apply_note_edit_ops_to_body(body, ref=ref, ops=list(ops or []))
+            results.extend(edit_results)
+            if updated != body:
+                self._atomic_write_text(path, self._normalize_note_text(updated))
         return results
 
     def _cleanup_orphan_notes_locked(
@@ -5965,6 +6099,7 @@ class MemoryManager:
             # 与上面的 usage 合计同源：只数 provider 回包里真给了 token 的那几发。
             "usage_counted_requests": int(usage_counted_requests or 0),
         }
+        payload.update(self._dream_metadata_from_batch(batch))
         # 按龄冲刷与轮次窗口/压缩冲刷共用同一条入队出口，没有这个字段就数不出"靠龄倒了几次"。
         trigger_sources = sorted(
             {str(item.trigger_source or "").strip() for item in batch.items if str(item.trigger_source or "").strip()}
@@ -6195,13 +6330,8 @@ class MemoryManager:
         flush()
         return pieces or [value]
 
-    def _memory_window_split_target_tokens(self) -> int:
-        """拆片目标 = 记忆链上**最小**声明窗口 × `_MEMORY_WINDOW_SPLIT_RATIO`。
-
-        发送闸门按"这一发落到的那颗模型"的窗口算容量，而批次真正发出时落点可能已经
-        前进过链位，所以这里取整条链最小的一半：任何一次链前进都还在容量内，
-        而不是赌它一定落在链首。拿不到配置就返回 0，表示不拆（闸门那条路照常）。
-        """
+    def _memory_window_split_target_tokens(self, ratio: float = _MEMORY_WINDOW_SPLIT_RATIO) -> int:
+        """拆片目标 = 记忆链上最小声明窗口 × 调用方给定比例；拿不到配置时返回 0。"""
 
         try:
             runtime_config, _revision, _changed = get_runtime_config()
@@ -6218,7 +6348,546 @@ class MemoryManager:
                 windows.append(value)
         if not windows:
             return 0
-        return int(min(windows) * _MEMORY_WINDOW_SPLIT_RATIO)
+        return int(min(windows) * max(float(ratio or 0.0), 0.01))
+
+    def _read_dream_state(self) -> dict[str, Any]:
+        default = {
+            "last_seen_revision": 0,
+            "pending_memory_ids": [],
+            "pending_note_refs": [],
+            "pending_since": "",
+            "last_attempted_at": "",
+            "last_succeeded_at": "",
+            "last_succeeded_revision": 0,
+            "round_robin_cursor": 0,
+            "last_cluster_key": "",
+            "last_error": "",
+        }
+        try:
+            payload = json.loads(self.dream_state_file.read_text(encoding="utf-8") or "{}")
+        except (OSError, ValueError):
+            return default
+        if not isinstance(payload, dict):
+            return default
+        state = dict(default)
+        for key in ("last_seen_revision", "last_succeeded_revision", "round_robin_cursor"):
+            try:
+                state[key] = max(int(payload.get(key, 0) or 0), 0)
+            except (TypeError, ValueError):
+                pass
+        for key in ("pending_memory_ids", "pending_note_refs"):
+            state[key] = sorted(
+                {
+                    str(item or "").strip()
+                    for item in list(payload.get(key) or [])
+                    if str(item or "").strip()
+                }
+            )
+        for key in ("pending_since", "last_attempted_at", "last_succeeded_at", "last_cluster_key", "last_error"):
+            state[key] = str(payload.get(key) or "").strip()
+        return state
+
+    def _write_dream_state(self, state: dict[str, Any]) -> None:
+        self.dream_state_file.parent.mkdir(parents=True, exist_ok=True)
+        self._atomic_write_text(
+            self.dream_state_file,
+            json.dumps(dict(state or {}), ensure_ascii=False, indent=2) + "\n",
+        )
+
+    @staticmethod
+    def _dream_payload_from_item(item: MemoryQueueRequest) -> dict[str, Any]:
+        try:
+            payload = json.loads(str(item.payload_text or ""))
+        except (TypeError, ValueError):
+            return {}
+        return dict(payload) if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _dream_payload_base_revision(payload: dict[str, Any]) -> int:
+        try:
+            return max(int(payload.get("base_revision", 0) or 0), 0)
+        except (TypeError, ValueError):
+            return 0
+
+    @classmethod
+    def _dream_metadata_from_batch(cls, batch: MemoryBatch) -> dict[str, Any]:
+        if str(batch.op or "").strip().lower() != "dream" or not batch.items:
+            return {}
+        payload = cls._dream_payload_from_item(batch.items[0])
+        metadata = {
+            "dream_cluster_key": str(payload.get("cluster_key") or "").strip(),
+            "dream_base_revision": cls._dream_payload_base_revision(payload),
+            "dream_reason": str(payload.get("reason") or "").strip(),
+        }
+        return {
+            key: value
+            for key, value in metadata.items()
+            if key == "dream_base_revision" or value != ""
+        }
+
+    @staticmethod
+    def _note_summary_text(body: str) -> str:
+        lines = [line.strip() for line in str(body or "").splitlines() if line.strip()]
+        if not lines:
+            return ""
+        headings = [line for line in lines[1:] if re.match(r"^#{1,6}\s+", line)]
+        return "\n".join([lines[0], *headings])
+
+    def _dream_note_index(self, refs: set[str] | None = None) -> list[dict[str, Any]]:
+        rows = self._memory_repo.list_memories()
+        ordinary_names = self._ordinary_note_names()
+        category_names = self._category_note_names()
+        selected = set(refs) if refs is not None else ordinary_names | category_names
+        report = self.doctor_report()
+        dangling = dict(report.get("dangling_note_mentions") or {})
+        result: list[dict[str, Any]] = []
+        for ref in sorted(selected):
+            kind = "category" if ref in category_names else "ordinary"
+            path = (self.index_dir if kind == "category" else self.notes_dir) / note_file_name(ref)
+            try:
+                body = path.read_text(encoding="utf-8")
+            except OSError:
+                body = ""
+            scope_line = next((line.strip() for line in body.splitlines() if line.strip()), "")
+            owners = [row for row in rows if str(row.get("note_ref") or "").strip() == ref]
+            findings: list[str] = []
+            if ref in report.get("missing_note_refs", []):
+                findings.append("missing_note_ref")
+            if kind == "ordinary" and ref in report.get("orphan_notes", []):
+                findings.append("orphan_note")
+            if kind == "category" and ref in report.get("broken_category_links", []):
+                findings.append("broken_category_link")
+            if ref in dangling:
+                findings.append("dangling_note_mention")
+            result.append(
+                {
+                    "ref": ref,
+                    "kind": kind,
+                    "scope_line": scope_line,
+                    "owner_count": len(owners),
+                    "latest_owner_updated_at": max(
+                        (str(row.get("updated_at") or "") for row in owners), default=""
+                    ),
+                    "doctor_findings": findings,
+                }
+            )
+        return result
+
+    def _dream_read_entry(self, line: int) -> dict[str, Any]:
+        number = int(line or 0)
+        entries = self.resident_lines()
+        if number < 1 or number > len(entries):
+            raise ValueError(f"line {number} is outside the memory block ({len(entries)} lines)")
+        entry = entries[number - 1]
+        row = next(
+            (item for item in self._memory_repo.list_memories() if str(item.get("memory_id") or "") == entry.memory_id),
+            {},
+        )
+        return {
+            "line": number,
+            "memory_id": entry.memory_id,
+            "memory_body": str(row.get("memory_body") or ""),
+            "minimal_memory": str(row.get("minimal_memory") or ""),
+            "source": str(row.get("source") or ""),
+            "updated_at": str(row.get("updated_at") or ""),
+            "is_compressed": bool(row.get("is_compressed")),
+            "note_ref": str(row.get("note_ref") or ""),
+        }
+
+    def _dream_entry_view(
+        self,
+        row: dict[str, Any],
+        *,
+        line_by_id: dict[str, int],
+        include_full_body: bool,
+    ) -> dict[str, Any]:
+        memory_id = str(row.get("memory_id") or "")
+        line = line_by_id.get(memory_id, 0)
+        return {
+            "line": line,
+            "global_line": f"{line}|" if line else "",
+            "memory_id": memory_id,
+            "source": str(row.get("source") or ""),
+            "updated_at": str(row.get("updated_at") or ""),
+            "is_compressed": bool(row.get("is_compressed")),
+            "note_ref": str(row.get("note_ref") or ""),
+            "memory_body": str(row.get("memory_body") or "") if include_full_body else "",
+            "minimal_memory": str(row.get("minimal_memory") or ""),
+        }
+
+    def _dream_related_note_refs(self, *, memory_ids: set[str], note_refs: set[str]) -> set[str]:
+        related = {str(item or "").strip() for item in note_refs if str(item or "").strip()}
+        rows_by_id = {str(row.get("memory_id") or ""): row for row in self._memory_repo.list_memories()}
+        bodies: list[str] = []
+        for memory_id in memory_ids:
+            row = rows_by_id.get(memory_id)
+            if row is not None:
+                bodies.append(str(row.get("memory_body") or ""))
+        for ref in list(related):
+            path = (self.index_dir if ref in self._category_note_names() else self.notes_dir) / note_file_name(ref)
+            try:
+                bodies.append(path.read_text(encoding="utf-8"))
+            except OSError:
+                pass
+        for body in bodies:
+            related.update(match.group(0) for match in _PROSE_NOTE_TOKEN_RE.finditer(body))
+        return related
+
+    def _dream_doctor_summary(
+        self, *, memory_ids: set[str], note_refs: set[str]
+    ) -> list[dict[str, Any]]:
+        report = self.doctor_report()
+        summary: list[dict[str, Any]] = []
+        dangling = dict(report.get("dangling_note_mentions") or {})
+        for ref in sorted(self._dream_related_note_refs(memory_ids=memory_ids, note_refs=note_refs)):
+            if ref in report.get("missing_note_refs", []):
+                summary.append({"kind": "missing_note_ref", "ref": ref})
+            if ref in report.get("orphan_notes", []):
+                summary.append({"kind": "orphan_note", "ref": ref})
+            if ref in report.get("broken_category_links", []):
+                summary.append({"kind": "broken_category_link", "ref": ref})
+            if ref in dangling:
+                summary.append({"kind": "dangling_note_mention", "ref": ref, "sources": dangling[ref]})
+        rows_by_id = {str(row.get("memory_id") or ""): row for row in self._memory_repo.list_memories()}
+        limit = int(getattr(self.config.document, "summary_max_chars", 300) or 300)
+        for memory_id in sorted(memory_ids):
+            row = rows_by_id.get(memory_id)
+            if row is None:
+                continue
+            rendered_summary = str(
+                row.get("minimal_memory") if row.get("is_compressed") else row.get("memory_body")
+                or ""
+            ).strip()
+            if len(rendered_summary) > limit:
+                summary.append({"kind": "over_cap_line", "memory_id": memory_id, "chars": len(rendered_summary)})
+        return summary
+
+    def _select_dream_cluster_locked(
+        self, *, now_iso: str, state: dict[str, Any], force: bool = False
+    ) -> dict[str, Any] | None:
+        rows = [
+            row
+            for row in self._memory_repo.list_memories()
+            if not str(row.get("consolidated_into") or "").strip()
+        ]
+        row_by_id = {str(row.get("memory_id") or ""): row for row in rows}
+        line_by_id = {str(entry.memory_id): index + 1 for index, entry in enumerate(self.resident_lines())}
+        pending_ids = set(state.get("pending_memory_ids") or [])
+        pending_refs = set(state.get("pending_note_refs") or [])
+        if force:
+            pending_ids = set(row_by_id)
+            pending_refs = self._ordinary_note_names() | self._category_note_names()
+
+        def _group(key: str, reason: str) -> dict[str, Any]:
+            return {
+                "cluster_key": key,
+                "reason": reason,
+                "memory_ids": set(),
+                "note_refs": set(),
+                "updated_at": "",
+            }
+
+        recent: dict[str, dict[str, Any]] = {}
+        for memory_id in sorted(pending_ids):
+            row = row_by_id.get(memory_id)
+            note_ref = str((row or {}).get("note_ref") or "").strip()
+            key = f"note:{note_ref}" if note_ref else f"memory:{memory_id}"
+            group = recent.setdefault(key, _group(key, "recent_revision_family"))
+            group["memory_ids"].add(memory_id)
+            if note_ref:
+                group["note_refs"].add(note_ref)
+            updated = str((row or {}).get("updated_at") or "")
+            group["updated_at"] = max(group["updated_at"], updated)
+
+        doctor_groups: dict[str, dict[str, Any]] = {}
+        report = self.doctor_report()
+        dangling = dict(report.get("dangling_note_mentions") or {})
+        doctor_refs = set(report.get("orphan_notes") or []) | set(report.get("broken_category_links") or []) | set(dangling)
+        for ref in sorted(doctor_refs):
+            key = f"doctor:{ref}"
+            group = doctor_groups.setdefault(key, _group(key, "doctor_findings"))
+            group["note_refs"].add(ref)
+            for row in rows:
+                if str(row.get("note_ref") or "").strip() == ref or ref in str(row.get("memory_body") or ""):
+                    group["memory_ids"].add(str(row.get("memory_id") or ""))
+                    group["updated_at"] = max(group["updated_at"], str(row.get("updated_at") or ""))
+        limit = int(getattr(self.config.document, "summary_max_chars", 300) or 300)
+        for row in rows:
+            rendered_summary = str(
+                row.get("minimal_memory") if row.get("is_compressed") else row.get("memory_body")
+                or ""
+            ).strip()
+            if len(rendered_summary) <= limit:
+                continue
+            memory_id = str(row.get("memory_id") or "")
+            note_ref = str(row.get("note_ref") or "").strip()
+            key = f"doctor:{note_ref}" if note_ref else f"doctor:{memory_id}"
+            group = doctor_groups.setdefault(key, _group(key, "doctor_findings"))
+            group["memory_ids"].add(memory_id)
+            if note_ref:
+                group["note_refs"].add(note_ref)
+            group["updated_at"] = max(group["updated_at"], str(row.get("updated_at") or ""))
+
+        note_groups: dict[str, dict[str, Any]] = {}
+        for ref in sorted(pending_refs):
+            key = f"note:{ref}"
+            group = note_groups.setdefault(key, _group(key, "note_round_robin"))
+            group["note_refs"].add(ref)
+            for row in rows:
+                if str(row.get("note_ref") or "").strip() == ref:
+                    group["memory_ids"].add(str(row.get("memory_id") or ""))
+                    group["updated_at"] = max(group["updated_at"], str(row.get("updated_at") or ""))
+
+        chosen: dict[str, Any] | None = None
+        cursor = int(state.get("round_robin_cursor", 0) or 0)
+        last_key = str(state.get("last_cluster_key") or "").strip()
+        for family_index, family in enumerate((recent, doctor_groups, note_groups)):
+            candidates = sorted(
+                family.values(),
+                key=lambda item: (str(item.get("updated_at") or ""), str(item.get("cluster_key") or "")),
+                reverse=True,
+            )
+            if last_key and state.get("last_error"):
+                alternatives = [item for item in candidates if item.get("cluster_key") != last_key]
+                if not alternatives:
+                    continue
+                candidates = alternatives
+            elif last_key and len(candidates) > 1:
+                alternatives = [item for item in candidates if item.get("cluster_key") != last_key]
+                if alternatives:
+                    candidates = alternatives
+            if not candidates:
+                continue
+            position = cursor % len(candidates) if force or family_index == 2 else 0
+            chosen = candidates[position]
+            break
+        if chosen is None:
+            return None
+
+        target_tokens = self._memory_window_split_target_tokens(
+            float(getattr(self.config.dream, "cluster_window_ratio", 0.5) or 0.5)
+        )
+        include_full_body = bool(getattr(self.config.dream, "include_full_body", True))
+        selected_rows: list[dict[str, Any]] = []
+        used_tokens = 0
+        candidates = sorted(
+            (row_by_id[memory_id] for memory_id in chosen["memory_ids"] if memory_id in row_by_id),
+            key=lambda row: (str(row.get("updated_at") or ""), str(row.get("memory_id") or "")),
+            reverse=True,
+        )
+        for row in candidates:
+            view_text = json.dumps(
+                self._dream_entry_view(row, line_by_id=line_by_id, include_full_body=include_full_body),
+                ensure_ascii=False,
+            )
+            tokens = estimate_tokens(view_text)
+            if selected_rows and target_tokens > 0 and used_tokens + tokens > target_tokens:
+                break
+            selected_rows.append(row)
+            used_tokens += tokens
+        selected_note_refs = set(chosen["note_refs"])
+        selected_note_refs.update(str(row.get("note_ref") or "").strip() for row in selected_rows)
+        selected_note_refs.discard("")
+        included_note_refs: list[str] = []
+        for ref in sorted(selected_note_refs):
+            path = (self.index_dir if ref in self._category_note_names() else self.notes_dir) / note_file_name(ref)
+            try:
+                summary = self._note_summary_text(path.read_text(encoding="utf-8"))
+            except OSError:
+                summary = ""
+            tokens = estimate_tokens(summary)
+            if included_note_refs and target_tokens > 0 and used_tokens + tokens > target_tokens:
+                continue
+            included_note_refs.append(ref)
+            used_tokens += tokens
+        memory_ids = [str(row.get("memory_id") or "") for row in selected_rows]
+        if not memory_ids:
+            memory_ids = sorted(str(item) for item in chosen["memory_ids"] if str(item) not in row_by_id)
+        if not memory_ids and not included_note_refs:
+            return None
+        return {
+            "cluster_key": str(chosen["cluster_key"]),
+            "memory_ids": memory_ids,
+            "note_refs": included_note_refs,
+            "reason": str(chosen["reason"]),
+            "target_tokens": target_tokens,
+            "estimated_tokens": used_tokens,
+        }
+
+    async def _maybe_enqueue_dream_locked(
+        self, now_iso: str, *, force: bool = False
+    ) -> MemoryQueueRequest | None:
+        dream_cfg = getattr(self.config, "dream", None)
+        if dream_cfg is None or (not bool(getattr(dream_cfg, "enabled", False)) and not force):
+            return None
+        if self._read_queue_requests():
+            return None
+        with self._io_lock:
+            state = self._read_dream_state()
+            revisions = self._memory_repo.revisions_after(int(state.get("last_seen_revision", 0) or 0))
+            rows_by_id = {str(row.get("memory_id") or ""): row for row in self._memory_repo.list_memories()}
+            pending_ids = set(state.get("pending_memory_ids") or [])
+            pending_refs = set(state.get("pending_note_refs") or [])
+            first_pending_at = ""
+            state_changed = False
+            for revision in revisions:
+                first_pending_at = first_pending_at or str(revision.get("created_at") or "")
+                for field_name in ("added_ids", "changed_ids", "retired_ids"):
+                    try:
+                        values = json.loads(str(revision.get(field_name) or "[]"))
+                    except (TypeError, ValueError):
+                        values = []
+                    for raw_id in list(values or []):
+                        memory_id = str(raw_id or "").strip()
+                        if not memory_id:
+                            continue
+                        pending_ids.add(memory_id)
+                        note_ref = str((rows_by_id.get(memory_id) or {}).get("note_ref") or "").strip()
+                        if note_ref:
+                            pending_refs.add(note_ref)
+                try:
+                    changed_refs = json.loads(str(revision.get("changed_note_refs") or "[]"))
+                except (TypeError, ValueError):
+                    changed_refs = []
+                pending_refs.update(str(item or "").strip() for item in list(changed_refs or []) if str(item or "").strip())
+            if revisions:
+                state["last_seen_revision"] = max(int(item.get("rev", 0) or 0) for item in revisions)
+                state_changed = True
+            state["pending_memory_ids"] = sorted(pending_ids)
+            state["pending_note_refs"] = sorted(pending_refs)
+            if (pending_ids or pending_refs) and not state.get("pending_since"):
+                state["pending_since"] = first_pending_at or now_iso
+                state_changed = True
+            if not (pending_ids or pending_refs) and state.get("pending_since"):
+                state["pending_since"] = ""
+                state_changed = True
+
+            trigger_changes = max(int(getattr(dream_cfg, "trigger_changes", 20) or 20), 1)
+            min_interval = max(int(getattr(dream_cfg, "min_interval_seconds", 60) or 0), 0)
+            max_interval = max(int(getattr(dream_cfg, "max_interval_seconds", 0) or 0), 0)
+            last_attempt = self._parse_optional_iso(state.get("last_attempted_at"))
+            interval_ok = last_attempt is None or self._seconds_since(state["last_attempted_at"], now_iso) >= min_interval
+            count_trigger = len(pending_ids) + len(pending_refs) >= trigger_changes
+            pending_since = self._parse_optional_iso(state.get("pending_since"))
+            time_trigger = bool(
+                max_interval > 0
+                and (pending_ids or pending_refs)
+                and pending_since is not None
+                and self._seconds_since(state["pending_since"], now_iso) >= max_interval
+            )
+            if not force and not (interval_ok and (count_trigger or time_trigger)):
+                if state_changed:
+                    self._write_dream_state(state)
+                return None
+            cluster = self._select_dream_cluster_locked(now_iso=now_iso, state=state, force=force)
+            if cluster is None:
+                if state_changed:
+                    self._write_dream_state(state)
+                return None
+            payload = {
+                "cluster_key": cluster["cluster_key"],
+                "memory_ids": cluster["memory_ids"],
+                "note_refs": cluster["note_refs"],
+                "reason": cluster["reason"],
+                "base_revision": int(state.get("last_seen_revision", 0) or 0),
+            }
+            request = MemoryQueueRequest(
+                op="dream",
+                decision_source="self",
+                payload_text=json.dumps(payload, ensure_ascii=False),
+                created_at=now_iso,
+                request_id=self._request_id("dream"),
+                trigger_source="dream_cli" if force else "dream_scheduler",
+            )
+            await self._append_queue_request(request)
+            state["last_attempted_at"] = now_iso
+            state["last_cluster_key"] = str(cluster["cluster_key"])
+            state["last_error"] = ""
+            self._write_dream_state(state)
+            return request
+
+    async def enqueue_dream_request(
+        self,
+        *,
+        cluster_key: str,
+        memory_ids: list[str],
+        note_refs: list[str],
+        reason: str,
+        base_revision: int,
+        trigger_source: str = "dream_scheduler",
+    ) -> dict[str, Any]:
+        payload = {
+            "cluster_key": str(cluster_key or "").strip(),
+            "memory_ids": sorted({str(item or "").strip() for item in list(memory_ids or []) if str(item or "").strip()}),
+            "note_refs": sorted({str(item or "").strip() for item in list(note_refs or []) if str(item or "").strip()}),
+            "reason": str(reason or "").strip(),
+            "base_revision": max(int(base_revision or 0), 0),
+        }
+        if not payload["cluster_key"]:
+            raise ValueError("dream cluster_key is required")
+        request = MemoryQueueRequest(
+            op="dream",
+            decision_source="self",
+            payload_text=json.dumps(payload, ensure_ascii=False),
+            created_at=self._now_iso(),
+            request_id=self._request_id("dream"),
+            trigger_source=str(trigger_source or "dream_scheduler").strip() or "dream_scheduler",
+        )
+        await self._append_queue_request(request)
+        return {"ok": True, "request_id": request.request_id, "status": "queued"}
+
+    def _settle_dream_batch(self, batch: MemoryBatch | MemoryQueueRequest, *, status: str, now_iso: str) -> None:
+        if isinstance(batch, MemoryQueueRequest):
+            item = batch
+        else:
+            if str(batch.op or "").strip().lower() != "dream" or not batch.items:
+                return
+            item = batch.items[0]
+        if str(item.op or "").strip().lower() != "dream":
+            return
+        payload = self._dream_payload_from_item(item)
+        with self._io_lock:
+            state = self._read_dream_state()
+            if status == "applied":
+                base_revision = self._dream_payload_base_revision(payload)
+                changed_after_ids: set[str] = set()
+                changed_after_refs: set[str] = set()
+                rows_by_id = {str(row.get("memory_id") or ""): row for row in self._memory_repo.list_memories()}
+                for revision in self._memory_repo.revisions_after(base_revision):
+                    for field_name in ("added_ids", "changed_ids", "retired_ids"):
+                        try:
+                            values = json.loads(str(revision.get(field_name) or "[]"))
+                        except (TypeError, ValueError):
+                            values = []
+                        for raw_id in list(values or []):
+                            memory_id = str(raw_id or "").strip()
+                            if not memory_id:
+                                continue
+                            changed_after_ids.add(memory_id)
+                            note_ref = str((rows_by_id.get(memory_id) or {}).get("note_ref") or "").strip()
+                            if note_ref:
+                                changed_after_refs.add(note_ref)
+                    try:
+                        changed_refs = json.loads(str(revision.get("changed_note_refs") or "[]"))
+                    except (TypeError, ValueError):
+                        changed_refs = []
+                    changed_after_refs.update(str(item or "").strip() for item in list(changed_refs or []) if str(item or "").strip())
+                cluster_ids = {str(item or "").strip() for item in list(payload.get("memory_ids") or []) if str(item or "").strip()}
+                cluster_refs = {str(item or "").strip() for item in list(payload.get("note_refs") or []) if str(item or "").strip()}
+                pending_ids = set(state.get("pending_memory_ids") or []) - (cluster_ids - changed_after_ids)
+                pending_refs = set(state.get("pending_note_refs") or []) - (cluster_refs - changed_after_refs)
+                pending_ids.update(changed_after_ids)
+                pending_refs.update(changed_after_refs)
+                state["pending_memory_ids"] = sorted(pending_ids)
+                state["pending_note_refs"] = sorted(pending_refs)
+                state["pending_since"] = state.get("pending_since", "") if pending_ids or pending_refs else ""
+                state["last_succeeded_at"] = now_iso
+                state["last_succeeded_revision"] = self.latest_memory_revision()
+                state["round_robin_cursor"] = int(state.get("round_robin_cursor", 0) or 0) + 1
+                state["last_error"] = ""
+            else:
+                state["last_error"] = str(status or "failed")
+            self._write_dream_state(state)
 
     async def _enqueue_review_window_requests(
         self,
@@ -6512,6 +7181,31 @@ class MemoryManager:
 
             return session.read_note(ref)
 
+        def memory_read_entry(line: int) -> dict[str, Any]:
+            """Read one resident memory by its global 1-based line, including the uncompressed body."""
+
+            return self._dream_read_entry(line)
+
+        def memory_note_index() -> list[dict[str, Any]]:
+            """List ordinary and category notes with scope, owners, freshness, and doctor findings."""
+
+            return self._dream_note_index()
+
+        def memory_read_notes(refs: list[str]) -> dict[str, Any]:
+            """Read several notes in one call; a missing ref is reported without dropping the others."""
+
+            notes: dict[str, str] = {}
+            errors: dict[str, str] = {}
+            for raw_ref in list(refs or []):
+                ref = str(raw_ref or "").strip()
+                if not ref:
+                    continue
+                try:
+                    notes[ref] = session.read_note(ref)
+                except Exception as exc:
+                    errors[ref] = str(exc or "memory note read failed").strip()
+            return {"notes": notes, "errors": errors}
+
         def memory_apply_batch(
             adds: list[dict[str, Any]] | None = None,
             rewrites: list[dict[str, Any]] | None = None,
@@ -6544,9 +7238,12 @@ class MemoryManager:
             under `memory/index/` stays - this lane never deletes archive files.
 
             `note_upserts` writes whole notes ({ref: body}; the persona is `note_persona`);
-            `note_edits` patches spans of existing notes ({ref: [{old_text, new_text}]}).
-            Both are batch mutations: the preview summarizes them under `notes_changed`, and
-            they land only after `memory_apply_confirm`, same as memory-row changes.
+            `note_edits` patches existing notes with either `{old_text, new_text}` or
+            `{anchor, new_text}`. An anchor is one unique line or section heading; an empty
+            `new_text` deletes that line or section.
+            Both are batch mutations: the preview summarizes them under `notes_changed` and
+            `note_edit_preview` (per-op match, anchor scope, candidates, and resulting note
+            size), and they land only after `memory_apply_confirm`, same as memory-row changes.
             """
 
             replaced_previous = session.previewed
@@ -6579,6 +7276,14 @@ class MemoryManager:
                     return failure
                 staged["status"] = "batch_previewed"
                 staged["preview"] = preview
+                failed_note_edits = [
+                    item for item in preview.get("note_edit_preview", []) if not item.get("applied")
+                ]
+                if failed_note_edits:
+                    staged.setdefault("warnings", []).append(
+                        f"note_edit_preview has {len(failed_note_edits)} failed op(s); "
+                        "fix them before memory_apply_confirm"
+                    )
                 session.previewed = True
                 staged["replaced_previous"] = replaced_previous
                 staged["next_step"] = (
@@ -6602,6 +7307,9 @@ class MemoryManager:
 
         return [
             _build_memory_tool(name="memory_read_note", fn=memory_read_note),
+            _build_memory_tool(name="memory_read_entry", fn=memory_read_entry),
+            _build_memory_tool(name="memory_note_index", fn=memory_note_index),
+            _build_memory_tool(name="memory_read_notes", fn=memory_read_notes),
             _build_memory_tool(name="memory_apply_batch", fn=memory_apply_batch),
             _build_memory_tool(name="memory_apply_confirm", fn=memory_apply_confirm),
         ]
@@ -6638,6 +7346,57 @@ class MemoryManager:
             return []
         self._note_feedback_lines = []
         return list(lines)
+
+    def _dream_agent_user_prompt(
+        self,
+        *,
+        batch: MemoryBatch,
+        snapshot_text: str,
+        repair_reason: str,
+    ) -> str:
+        payload = self._dream_payload_from_item(batch.items[0]) if batch.items else {}
+        memory_ids = {
+            str(item or "").strip() for item in list(payload.get("memory_ids") or []) if str(item or "").strip()
+        }
+        note_refs = {
+            str(item or "").strip() for item in list(payload.get("note_refs") or []) if str(item or "").strip()
+        }
+        rows_by_id = {str(row.get("memory_id") or ""): row for row in self._memory_repo.list_memories()}
+        line_by_id = {str(entry.memory_id): index + 1 for index, entry in enumerate(self.resident_lines())}
+        include_full_body = bool(getattr(self.config.dream, "include_full_body", True))
+        entries = [
+            self._dream_entry_view(rows_by_id[memory_id], line_by_id=line_by_id, include_full_body=include_full_body)
+            for memory_id in sorted(memory_ids)
+            if memory_id in rows_by_id and not str(rows_by_id[memory_id].get("consolidated_into") or "").strip()
+        ]
+        stale_ids = sorted(memory_ids - {str(item.get("memory_id") or "") for item in entries})
+        related_note_refs = self._dream_related_note_refs(memory_ids=memory_ids, note_refs=note_refs)
+        note_index = self._dream_note_index(related_note_refs)
+        doctor_summary = self._dream_doctor_summary(memory_ids=memory_ids, note_refs=related_note_refs)
+        categories = [
+            item
+            for item in self._category_note_index()
+            if str(item.get("note_ref") or "") in note_refs
+        ]
+        repair_block = f"\n上一轮输出无效：{repair_reason}\n请修复后重试。\n" if repair_reason else ""
+        return (
+            f"Dream cluster：{payload.get('cluster_key') or '(unknown)'}\n"
+            f"原因：{payload.get('reason') or ''}\n"
+            f"base_revision：{payload.get('base_revision', 0)}\n\n"
+            "## Cluster 行视图\n"
+            f"{json.dumps(entries, ensure_ascii=False, indent=2)}\n\n"
+            f"已不在常驻块的 cluster id：{json.dumps(stale_ids, ensure_ascii=False)}\n\n"
+            "## 相关 note 索引\n"
+            f"{json.dumps(note_index, ensure_ascii=False, indent=2)}\n\n"
+            "## 相关 doctor findings\n"
+            f"{json.dumps(doctor_summary, ensure_ascii=False, indent=2)}\n\n"
+            "## 本 cluster 已有归并分类\n"
+            f"{json.dumps(categories, ensure_ascii=False, indent=2)}\n\n"
+            "完整 MEMORY.md 投影只用于确认全局行号，不要求扫描 cluster 外内容。\n"
+            "先按需用 memory_read_entry / memory_note_index / memory_read_notes 读正文，"
+            "再用一次 memory_apply_batch 提交本 cluster 的整理结果；无需整理时用 noop_reason。\n"
+            f"{repair_block}"
+        )
 
     def _memory_agent_user_prompt(
         self,
@@ -6723,8 +7482,9 @@ class MemoryManager:
             "单独提交 already_satisfied 说明已满足，不要提交 noop_reason。\n"
             "- note_upserts 只写需要新增或整体重写的 note，新建的名字必须以 `note_` 开头"
             "（方法论用 `note_play_` 前缀）。\n"
-            "- note_edits 改已有 note 的局部：{note名: [{old_text, new_text}]}，old_text 必须唯一命中一次，"
-            "new_text 留空即删掉这段。改一两个段落用 note_edits，不要用 note_upserts 重交整份。\n"
+            "- note_edits 改已有 note 的局部：{note名: [{old_text, new_text}]}，old_text 必须唯一命中一次；"
+            "也可用 {anchor, new_text}，anchor 必须是唯一一行或唯一 section heading。"
+            "new_text 留空即删掉对应行/小节。改一两个段落用 note_edits，不要用 note_upserts 重交整份。\n"
             "- 归并区列出的分类 note 也可以这样改（内容错误或过时时）；不要新建分类 note，"
             "也不要让记忆从归并区退场，退场只由归并环节做。\n"
             "- 整个分类要摘掉时把它那一行末尾括号里的句柄放进 category_deletes（写分类名也算命中）；"
@@ -6782,7 +7542,19 @@ class MemoryManager:
                 MemoryQueueRequest(
                     op=session.batch_op or "write",
                     decision_source="self",
-                    payload_text="",
+                    payload_text=(
+                        json.dumps(
+                            {
+                                "cluster_key": session.dream_cluster_key,
+                                "memory_ids": sorted(session.dream_memory_ids),
+                                "note_refs": sorted(session.dream_note_refs),
+                                "base_revision": session.dream_base_revision,
+                            },
+                            ensure_ascii=False,
+                        )
+                        if session.batch_op == "dream" and session.dream_context_loaded
+                        else ""
+                    ),
                     created_at=self._now_iso(),
                     request_id="preview",
                 )
@@ -6810,6 +7582,21 @@ class MemoryManager:
             {"note_ref": str(ref), "action": "edit", "edits": len(list(ops or []))}
             for ref, ops in dict(validated.note_edits or {}).items()
         ]
+        note_edit_preview: list[dict[str, Any]] = []
+        for ref, ops in dict(validated.note_edits or {}).items():
+            try:
+                body = str(
+                    validated.note_upserts[ref]
+                    if ref in validated.note_upserts
+                    else session.read_note(ref)
+                )
+            except Exception:
+                body = ""
+            updated, edit_results = _apply_note_edit_ops_to_body(body, ref=str(ref), ops=list(ops or []))
+            for record in edit_results:
+                record["body_chars_before"] = len(body)
+                record["body_chars_after"] = len(updated)
+                note_edit_preview.append(record)
         return {
             "status": "built",
             "adds": len(validated.adds),
@@ -6827,6 +7614,7 @@ class MemoryManager:
             "diff": diff[: self.PREVIEW_MAX_DIFF_LINES],
             "diff_truncated_lines": truncated,
             "notes_changed": notes_changed,
+            "note_edit_preview": note_edit_preview,
         }
 
     def _build_validated_write_from_apply_batch(
@@ -6863,6 +7651,25 @@ class MemoryManager:
             raise _MemoryAgentValidationError(_DELETE_NOOP_RULE)
         if batch.op != "delete" and already_satisfied:
             raise _MemoryAgentValidationError("already_satisfied is only valid for delete batches")
+        dream_note_refs: set[str] = set()
+        dream_memory_ids: set[str] = set()
+        dream_scope_enforced = False
+        if batch.op == "dream":
+            if already_satisfied:
+                raise _MemoryAgentValidationError("dream batches may not use already_satisfied")
+            if session.dream_context_loaded:
+                dream_note_refs = set(session.dream_note_refs)
+                dream_memory_ids = set(session.dream_memory_ids)
+                dream_scope_enforced = True
+            elif batch.items:
+                payload = self._dream_payload_from_item(batch.items[0])
+                dream_note_refs = {
+                    str(item or "").strip() for item in list(payload.get("note_refs") or []) if str(item or "").strip()
+                }
+                dream_memory_ids = {
+                    str(item or "").strip() for item in list(payload.get("memory_ids") or []) if str(item or "").strip()
+                }
+                dream_scope_enforced = "memory_ids" in payload
         if noop_reason and (adds or rewrites or deletes or note_upserts or note_edits):
             raise _MemoryAgentValidationError(
                 "noop_reason may not be combined with add, rewrite, delete, note_upsert or note_edits"
@@ -6892,7 +7699,10 @@ class MemoryManager:
 
         delete_ids: set[str] = set()
         for index, item in enumerate(deletes):
-            delete_ids.add(_entry_at_line("deletes", index, item).memory_id)
+            memory_id = _entry_at_line("deletes", index, item).memory_id
+            if dream_scope_enforced and memory_id not in dream_memory_ids:
+                raise _MemoryAgentValidationError(f"deletes[{index}]: line is outside this dream cluster")
+            delete_ids.add(memory_id)
 
         # The consolidation navigation is the one thing in the block a line number cannot
         # reach: the rows behind it left the resident block, so they have no line. The token
@@ -6904,6 +7714,13 @@ class MemoryManager:
         elif not isinstance(raw_category_deletes, list):
             raise _MemoryAgentValidationError("category_deletes must be a list")
         category_names = {path.stem for path in self.index_dir.glob("*.md")}
+        if batch.op == "dream" and dream_scope_enforced:
+            existing_note_refs = {path.stem for path in self.notes_dir.glob("*.md")} | category_names
+            for ref in sorted(set(note_upserts) | set(note_edits)):
+                if ref in existing_note_refs and ref not in dream_note_refs:
+                    raise _MemoryAgentValidationError(
+                        f"note change for {ref} is outside this dream cluster"
+                    )
         retired_by_category: dict[str, list[str]] = {}
         for row in self._memory_repo.list_memories():
             category = str(row.get("consolidated_into") or "").strip()
@@ -6914,6 +7731,10 @@ class MemoryManager:
         purged_ids: set[str] = set()
         for index, token in enumerate(raw_category_deletes):
             name = resolve_note_token(str(token or "").strip(), set(), category_names)
+            if batch.op == "dream" and name not in dream_note_refs:
+                raise _MemoryAgentValidationError(
+                    f"category_deletes[{index}]: {token} is outside this dream cluster"
+                )
             already_purged = next((item for item in purged_categories if item["note_ref"] == name), None)
             if already_purged is not None:
                 continue
@@ -6936,6 +7757,10 @@ class MemoryManager:
             if not isinstance(item, dict):
                 raise _MemoryAgentValidationError("rewrite item must be an object")
             memory_id = _entry_at_line("rewrites", rewrite_index, item.get("line")).memory_id
+            if dream_scope_enforced and memory_id not in dream_memory_ids:
+                raise _MemoryAgentValidationError(
+                    f"rewrites[{rewrite_index}]: line is outside this dream cluster"
+                )
             rewrite_line_by_id[memory_id], _ = coerce_memory_line(item.get("line"))
             content = self._normalize_memory_content_text(str(item.get("content") or ""))
             minimal_memory = self._normalize_minimal_memory_text(
@@ -6951,7 +7776,12 @@ class MemoryManager:
 
         inspired_lines_as_ids: list[str] = []
         for index, item in enumerate(inspired_lines):
-            inspired_lines_as_ids.append(_entry_at_line("inspired_lines", index, item).memory_id)
+            memory_id = _entry_at_line("inspired_lines", index, item).memory_id
+            if dream_scope_enforced and memory_id not in dream_memory_ids:
+                raise _MemoryAgentValidationError(
+                    f"inspired_lines[{index}]: line is outside this dream cluster"
+                )
+            inspired_lines_as_ids.append(memory_id)
         inspired_memory_ids = inspired_lines_as_ids
 
         existing_ids = set(existing_by_id)
@@ -7411,7 +8241,9 @@ class MemoryManager:
             "usage_counted_requests": self._usage_counted_request_count(request_artifacts),
         }
 
-    async def run_due_batch_once(self, *, now_iso: str | None = None) -> dict[str, Any]:
+    async def run_due_batch_once(
+        self, *, now_iso: str | None = None, force_dream: bool = False
+    ) -> dict[str, Any]:
         worker_lease = self._try_acquire_memory_worker_lease()
         if worker_lease is None:
             return {"ok": True, "status": "worker_lease_unavailable", "processed": 0}
@@ -7424,6 +8256,10 @@ class MemoryManager:
             effective_now = str(now_iso or self._now_iso()).strip()
             self._promote_aged_review_row(now_iso=effective_now)
             batch = await self.collect_due_batch(now_iso=effective_now)
+            if batch is None or not batch.items:
+                dream_request = await self._maybe_enqueue_dream_locked(effective_now, force=force_dream)
+                if dream_request is not None:
+                    batch = await self.collect_due_batch(now_iso=effective_now)
             if batch is None or not batch.items:
                 if dropped_request_ids:
                     return {
@@ -7449,6 +8285,7 @@ class MemoryManager:
             precheck_error = self._precheck_batch_for_processing(batch)
             if precheck_error:
                 self._drop_request_ids({item.request_id for item in batch.items})
+                self._settle_dream_batch(batch, status=f"precheck_failed: {precheck_error}", now_iso=effective_now)
                 processed_at = self._now_iso()
                 self._append_terminal_history(
                     batch=batch,
@@ -7473,10 +8310,13 @@ class MemoryManager:
             try:
                 runtime_config, _revision, _changed = get_runtime_config()
             except Exception as exc:
-                return self._mark_batch_error(batch, effective_now, str(exc or "memory runtime config unavailable"))
+                error_text = str(exc or "memory runtime config unavailable")
+                self._settle_dream_batch(batch, status=f"config_error: {error_text}", now_iso=effective_now)
+                return self._mark_batch_error(batch, effective_now, error_text)
 
             model_chain = self._memory_model_chain(runtime_config)
             if not model_chain:
+                self._settle_dream_batch(batch, status="blocked: memory role not configured", now_iso=effective_now)
                 return self._mark_batch_blocked(batch, effective_now, "memory role not configured")
 
             try:
@@ -7501,6 +8341,7 @@ class MemoryManager:
                     trigger="exception",
                     now_iso=effective_now,
                 )
+                self._settle_dream_batch(batch, status="provider_error: agent_exception", now_iso=effective_now)
                 return self._parked_batch_report(batch, failed_record, discard_reason="agent_exception")
 
             if bool(result.get("capacity_replay")):
@@ -7547,6 +8388,11 @@ class MemoryManager:
                     trigger="initial",
                     now_iso=effective_now,
                 )
+                self._settle_dream_batch(
+                    batch,
+                    status=f"{category}: {str(result.get('error') or '').strip()}",
+                    now_iso=effective_now,
+                )
                 return self._parked_batch_report(
                     batch,
                     failed_record,
@@ -7565,6 +8411,7 @@ class MemoryManager:
             # 这批"记住/修改/忘记"既没停车记录也没终态行，无痕消失——库里回滚了、请求
             # 却没了。反向窗口（提交成功、销行前崩溃）只是一次重放，代价小一个量级。
             self._commit_validated_write(result["validated"])
+            self._settle_dream_batch(batch, status="applied", now_iso=self._now_iso())
             self._drop_request_ids({item.request_id for item in batch.items})
             # 成功信号：清掉本批 request_id 对应的停车记录（终于成功了），
             # 并把停车区里最早的一条 provider/瞬时错误批次重新入队尾（无成功信号则永不自动重试）。
@@ -7619,6 +8466,7 @@ class MemoryManager:
                 "provider_request_ids": list(processed_payload["provider_request_ids"]),
                 "request_artifact_paths": list(processed_payload["request_artifact_paths"]),
                 "processed_at": processed_at,
+                **self._dream_metadata_from_batch(batch),
                 **({"noop_reason": str(processed_payload.get("noop_reason") or "").strip()} if str(processed_payload.get("noop_reason") or "").strip() else {}),
                 **(
                     {"already_satisfied": str(processed_payload.get("already_satisfied") or "").strip()}
@@ -7780,6 +8628,7 @@ class MemoryManager:
             trigger="capacity",
             now_iso=now_iso,
         )
+        self._settle_dream_batch(batch, status=f"capacity: {error_text}", now_iso=now_iso)
         # A capacity park is a decision the operator has to be able to find without opening
         # the failure surface: the ledger row names the rung the ladder stopped on.
         self._append_terminal_history(

@@ -849,11 +849,11 @@ For the queued Markdown memory runtime, the first operator checks should be:
 
 1. Inspect `memory/memory_state.sqlite3` for the authoritative memory rows, `refresh_count`, `passed_count`, `is_compressed`, and `from_user` state.
 2. Inspect `memory/MEMORY.md` for the prompt projection currently injected into CEO/frontdoor. It is regenerated from sqlite and never feeds back into it, so a difference between the two is a damaged projection, not lost memory. Any content the store does not produce is archived first as `memory/MEMORY.md.bak.<YYYYMMDD-HHMMSS>` before the file is repainted — read those to recover a hand edit or a torn write, and treat a growing count of them as evidence that something outside the runtime is writing into the memory directory.
-3. Inspect `memory/queue.jsonl` for pending `write` / `delete` requests.
+3. Inspect `memory/queue.jsonl` for pending `write` / `delete` requests and internally generated `consolidate` / `dream` rows. For dream, also inspect `memory/dream_state.json`: `last_seen_revision` and pending ids/refs show whether change accumulation is progressing, while `last_cluster_key` / `last_error` show which cluster stalled.
 4. Inspect `memory/failed.jsonl` for parked failed batches: each row carries `category` (`provider_error` / `window_refusal` / `protocol` / `agent_fault` / `capacity` / `capacity_noop`), `status` (`parked` / `requeued`), retry counters and a full `error_history`. A non-empty file means some turns of memory are waiting for a success signal or an operator decision. `capacity` is the ladder's last rung: that batch never fit, its payload is held verbatim, and the queue kept flowing. `capacity_noop` is a consolidation that ran clean and declared these rows have no category - discarding it is what re-arms consolidation for that same candidate set, so leaving it parked is a deliberate "stop asking", not a forgotten failure. `agent_fault` is a deterministic write fault (the batch could not be turned into a document at all): retrying it asks the model again rather than replaying the same answer, and it never rejoins the queue on its own; read `last_error_text` for the reason.
 5. Inspect `memory/ops.jsonl` for the latest terminal batch history (`applied`, `precheck_failed`, `operator_discarded`). Note files removed by the orphan sweep appear as `note_reaped` change entries carrying the reason the store stopped owning them (`memory_deleted` / `ref_dropped` / `unreferenced`) — that is the only evidence trail for a note that is not on disk. A user saying "it did not remember" is diagnosed here, not in the worker log: every request that entered the queue ends as exactly one terminal row, so a missing row means the request never reached the queue.
 6. If a processed row exposes `request_artifact_paths`, inspect the referenced files under `.g3ku/memory-requests/` before blaming prompt assembly or the provider adapter.
-7. Use `negi memory current`, `negi memory queue`, and `negi memory flush` when you need a quick operator view without manually opening files. Group memory uses the same commands with `--scope <群作用域键>` (keys and titles come from `GET /api/memory/scopes`), and `negi memory doctor` scans the local scope plus every group under `memory/groups/` by default.
+7. Use `negi memory current`, `negi memory queue`, `negi memory flush`, and `negi memory dream --once` when you need a quick operator view without manually opening files. Group memory uses the same commands with `--scope <群作用域键>` (keys and titles come from `GET /api/memory/scopes`), and `negi memory doctor` scans the local scope plus every group under `memory/groups/` by default.
 8. If the queue head is stuck in `processing`, inspect `.g3ku/config.json -> models.roles.memory` before debugging the frontend.
 
 Operator workflow for parked failed batches:
@@ -887,6 +887,7 @@ The memory CLI keeps only the queued Markdown runtime operator surface:
 - `negi memory current`
 - `negi memory queue`
 - `negi memory flush`
+- `negi memory dream --once` (`--scope <scope>` selects one memory domain)
 - `negi memory uncompress <memory-id>` (`--all` warms every downgraded row)
 - `negi memory doctor`
 - `negi memory reconcile-notes`
@@ -894,7 +895,9 @@ The memory CLI keeps only the queued Markdown runtime operator surface:
 - `negi memory import-legacy <path>`
 - `negi memory cleanup-legacy`
 
-The active memory operator surface is `negi memory` with `current` / `queue` / `flush` / `uncompress` / `doctor` / `reconcile-notes` / `reformat` / `import-legacy` / `cleanup-legacy`; there is no reset subcommand, and legacy-only commands (runtime stats/trace/explain, decay, pending-fact review) are not part of the operator contract.
+The active memory operator surface is `negi memory` with `current` / `queue` / `flush` / `dream` / `uncompress` / `doctor` / `reconcile-notes` / `reformat` / `import-legacy` / `cleanup-legacy`; there is no reset subcommand, and legacy-only commands (runtime stats/trace/explain, decay, pending-fact review) are not part of the operator contract.
+
+`negi memory dream --once` force-selects one cluster and consumes it through the normal memory-agent preview/confirm path. It is an acceptance and troubleshooting entry, not an extra approval step. Automatic dream remains controlled by `tools/memory_runtime/resource.yaml -> settings.dream`; the scheduler contract and state fields live in `runtime-overview.md`「Memory Runtime State」.
 
 `negi memory uncompress` is the only way to undo a capacity downgrade: the runtime never re-promotes a row on its own, because automatic warming would cancel the decision the ladder just made and oscillate against the trigger line. Warming puts characters **back** into the resident block, so it goes through the same hard-cap validation as any other write and rolls the row back whole when the document would not fit - the report carries `resident_chars_after` next to the trigger line and the cap, which is how much headroom the action consumed.
 

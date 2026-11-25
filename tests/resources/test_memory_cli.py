@@ -535,6 +535,7 @@ def test_memory_cli_help_exposes_only_queued_markdown_commands() -> None:
     assert "current" in top_output
     assert "queue" in top_output
     assert "flush" in top_output
+    assert "dream" in top_output
     assert "doctor" in top_output
     assert "reconcile-notes" in top_output
     assert "import-legacy" in top_output
@@ -602,6 +603,36 @@ def test_memory_cli_routes_supported_commands_to_runtime_manager(
         "runtime.flush",
         "runtime.close",
     ]
+
+
+def test_memory_dream_once_forces_one_cluster_and_prints_report(monkeypatch, tmp_path: Path) -> None:
+    memory_cli = _memory_cli_module()
+    calls: dict[str, object] = {}
+
+    class _StubManager:
+        async def run_due_batch_once(self, *, force_dream: bool = False) -> dict[str, object]:
+            calls["force_dream"] = force_dream
+            return {"ok": True, "status": "applied", "op": "dream", "processed": 1}
+
+        def _read_dream_state(self) -> dict[str, object]:
+            return {"last_cluster_key": "note:test"}
+
+        def close(self) -> None:
+            calls["closed"] = True
+
+    monkeypatch.setattr(memory_cli.config_loader, "load_config", lambda: SimpleNamespace(workspace_path=tmp_path))
+    monkeypatch.setattr(memory_cli, "load_tool_settings_from_manifest", lambda *args, **kwargs: SimpleNamespace(enabled=True))
+    monkeypatch.setattr(memory_cli.memory_agent_runtime, "MemoryManager", lambda workspace, cfg: _StubManager())
+
+    console = _ConsoleStub()
+    app = memory_cli.build_memory_app(console)
+    result = CliRunner().invoke(app, ["dream", "--once"])
+
+    assert result.exit_code == 0
+    assert calls == {"force_dream": True, "closed": True}
+    report = json.loads(console.messages[-1])
+    assert report["dream_cluster_key"] == "note:test"
+    assert report["op"] == "dream"
 
 
 def test_memory_doctor_reads_ownership_from_the_store(monkeypatch, tmp_path: Path) -> None:
