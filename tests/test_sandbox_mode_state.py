@@ -290,6 +290,19 @@ async def test_sandbox_tools_api_roundtrip(
     assert item["allowed_tools_customized"] is False
     default_tools = list(item["default_allowed_tools"])
     assert "search_session_history" in default_tools
+    assert "mention_member" in default_tools
+    assert "schedule_wake" in default_tools
+    # 合成常驻工具没有 resource.yaml：注册表目录里没有它们，UI 靠这份元数据补行。
+    metadata = item["tool_metadata"]
+    assert metadata["mention_member"]["display_name"]
+    assert metadata["schedule_wake"]["display_name"]
+    assert metadata["mention_member"]["risk_level"] in {"low", "medium", "high"}
+    # 派发族在受限档是结构性硬拒：列表可见但不可勾选，理由随读数一起下发。
+    hard_denied = item["hard_denied_tools"]
+    assert "create_async_task" in hard_denied["names"]
+    assert "send_message" in hard_denied["names"]
+    assert hard_denied["prefixes"] == ["task_"]
+    assert hard_denied["reason"]
 
     with pytest.raises(Exception) as missing:
         await sandbox_api.patch_session_sandbox_tools(
@@ -315,6 +328,9 @@ async def test_sandbox_tools_api_roundtrip(
     policy = session_policy(entry.session_key)
     assert policy.exec_allowed is True
     assert policy.exec_requires_governed is True
+    # 自定义名单里没有的默认可选工具照旧被拒——这正是本次事故的形状。
+    assert policy.tool_allowed("mention_member") is False
+    assert policy.tool_allowed("schedule_wake") is False
     stored = sandbox_state.get_session_allowed_tools(entry.session_key)
     assert "exec" in stored
     assert "silent" in stored  # 固定项自动补入
@@ -324,11 +340,42 @@ async def test_sandbox_tools_api_roundtrip(
         {"allowed_tools": default_tools, "unlock_password": "right"},
     )
     assert restored["item"]["allowed_tools_customized"] is False
+    restored_policy = session_policy(entry.session_key)
+    assert restored_policy.tool_allowed("mention_member") is True
+    assert restored_policy.tool_allowed("schedule_wake") is True
     assert saved["item"]["effective_from"] == "next_turn"
     assert sandbox_state.get_session_allowed_tools(entry.session_key) == []
 
     owner = await sandbox_api.get_session_sandbox_tools("web:ceo-1")
     assert owner["item"]["applicable"] is False
+    # host_full 没有白名单判据，派发族不是"硬拒"。
+    assert owner["item"]["hard_denied_tools"]["names"] == []
+
+
+def test_non_registry_default_tools_carry_synthetic_metadata() -> None:
+    """默认集合里没有 `resource.yaml` 的可选工具必须有展示元数据。
+
+    工具列表 UI 的目录来自资源注册表；没有 `resource.yaml` 的名字只能靠
+    `tool_metadata` 补行，漏一条就是"默认允许但 UI 没有复选框"，保存一次即被写掉。
+    """
+    from g3ku.sandbox.policy import (
+        LIMITED_DEFAULT_TOOL_NAMES,
+        LIMITED_FIXED_TOOL_NAMES,
+        LIMITED_SYNTHETIC_TOOL_METADATA,
+    )
+
+    repo_root = Path(__file__).resolve().parents[1]
+    missing = [
+        name
+        for name in sorted(LIMITED_DEFAULT_TOOL_NAMES)
+        if name not in LIMITED_FIXED_TOOL_NAMES
+        and not (repo_root / "tools" / name / "resource.yaml").is_file()
+        and name not in LIMITED_SYNTHETIC_TOOL_METADATA
+    ]
+    assert missing == []
+    for name, meta in LIMITED_SYNTHETIC_TOOL_METADATA.items():
+        assert str(meta.get("display_name") or "").strip(), name
+        assert str(meta.get("risk_level") or "").strip().lower() in {"low", "medium", "high"}, name
 
 
 def test_session_workspace_is_stable_and_isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

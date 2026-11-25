@@ -42,9 +42,12 @@ from g3ku.sandbox.installer import (
 from g3ku.sandbox.policy import (
     LIMITED_DEFAULT_TOOL_NAMES,
     LIMITED_FIXED_TOOL_NAMES,
+    LIMITED_SYNTHETIC_TOOL_METADATA,
     LIMITED_TOOL_WARNINGS,
     MODE_RESTRICTED,
     MODE_UNRESTRICTED,
+    TASK_DISPATCH_TOOL_NAMES,
+    TASK_TOOL_PREFIX,
     TIER_HOST_FULL,
     TIER_JAILED,
     TIER_LIMITED,
@@ -144,6 +147,17 @@ def _session_exists(session_key: str) -> bool:
         return False
 
 
+def _hard_denied_tools(policy: Any) -> dict[str, Any]:
+    """受限档结构性拒绝的族：名单里有没有都一样，UI 据此禁用复选框。"""
+    if not bool(getattr(policy, "restricted", False)):
+        return {"names": [], "prefixes": [], "reason": ""}
+    return {
+        "names": sorted(TASK_DISPATCH_TOOL_NAMES),
+        "prefixes": [TASK_TOOL_PREFIX],
+        "reason": "任务派发在受限档/沙箱档一律拒绝，勾选不会生效。",
+    }
+
+
 def _session_item(session_key: str) -> dict[str, Any]:
     reading = install_state()
     policy = session_policy(session_key)
@@ -169,6 +183,12 @@ def _session_item(session_key: str) -> dict[str, Any]:
         "default_allowed_tools": sorted(LIMITED_DEFAULT_TOOL_NAMES | LIMITED_FIXED_TOOL_NAMES),
         "fixed_tools": sorted(LIMITED_FIXED_TOOL_NAMES),
         "tool_warnings": dict(LIMITED_TOOL_WARNINGS),
+        # 合成常驻工具没有 `resource.yaml`，注册表目录里没有它们；工具列表 UI 用这份
+        # 元数据把它们补成可渲染行（可见、可取消、可重新勾选），前端不维护硬编码名单。
+        "tool_metadata": dict(LIMITED_SYNTHETIC_TOOL_METADATA),
+        # 受限档里派发族过不了 `SessionPolicy.tool_allowed`（结构性硬拒，与名单无关）：
+        # 列表里照常可见，但复选框禁用并标注不可用。host_full 没有这条判据，回空集合。
+        "hard_denied_tools": _hard_denied_tools(policy),
         "exec_allowed": bool(getattr(policy, "exec_allowed", False)),
         "exec_requires_governed": bool(getattr(policy, "exec_requires_governed", False)),
         "install_state": str(reading.get("state") or ""),

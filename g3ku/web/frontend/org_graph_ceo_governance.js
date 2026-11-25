@@ -978,6 +978,40 @@ function ceoRiskToolsState() {
     return governanceModeState();
 }
 
+// 合成常驻工具（`mention_member` / `schedule_wake` 等）没有 `resource.yaml`，注册表目录里
+// 没有它们；保存只读已渲染的复选框，少画一行就等于用户把它取消勾选。补行来源是服务端给的
+// 默认集合与当前生效集合，前端不维护硬编码名字；固定项由服务端恒并回，不补可操作行。
+function ceoRiskToolsCatalogWithDefaults(registryTools, item) {
+    const all = Array.isArray(registryTools) ? registryTools : [];
+    const byId = new Map();
+    for (const tool of all) {
+        const toolId = String(tool?.tool_id || "").trim();
+        if (toolId && !byId.has(toolId)) byId.set(toolId, tool);
+    }
+    const catalog = all.filter((tool) => tool?.agent_visible !== false);
+    const seen = new Set(catalog.map((tool) => String(tool?.tool_id || "").trim()).filter(Boolean));
+    const fixed = new Set(Array.isArray(item?.fixed_tools) ? item.fixed_tools : []);
+    const metadata = item?.tool_metadata && typeof item.tool_metadata === "object" ? item.tool_metadata : {};
+    const wanted = [
+        ...(Array.isArray(item?.default_allowed_tools) ? item.default_allowed_tools : []),
+        ...(Array.isArray(item?.allowed_tools) ? item.allowed_tools : []),
+    ];
+    for (const rawName of wanted) {
+        const name = String(rawName || "").trim();
+        if (!name || seen.has(name) || fixed.has(name)) continue;
+        const meta = metadata[name] && typeof metadata[name] === "object" ? metadata[name] : {};
+        const record = byId.get(name) || {};
+        catalog.push({
+            tool_id: name,
+            display_name: String(meta.display_name || record.display_name || name),
+            risk_level: String(meta.risk_level || record.risk_level || "medium"),
+            agent_visible: true,
+        });
+        seen.add(name);
+    }
+    return catalog;
+}
+
 function renderCeoRiskToolsList() {
     const state = ceoRiskToolsState();
     const host = U.ceoRiskToolsList;
@@ -987,6 +1021,15 @@ function renderCeoRiskToolsList() {
     const fixed = new Set(Array.isArray(context.fixed_tools) ? context.fixed_tools : []);
     const warnings = context.tool_warnings && typeof context.tool_warnings === "object" ? context.tool_warnings : {};
     const selected = new Set(Array.isArray(state.toolsDraft) ? state.toolsDraft : []);
+    const hardDenied = context.hard_denied_tools && typeof context.hard_denied_tools === "object" ? context.hard_denied_tools : {};
+    const hardDeniedNames = new Set(Array.isArray(hardDenied.names) ? hardDenied.names : []);
+    const hardDeniedPrefixes = (Array.isArray(hardDenied.prefixes) ? hardDenied.prefixes : [])
+        .map((prefix) => String(prefix || ""))
+        .filter(Boolean);
+    const hardDeniedReason = String(hardDenied.reason || "");
+    const isHardDenied = (toolId) => (
+        hardDeniedNames.has(toolId) || hardDeniedPrefixes.some((prefix) => toolId.startsWith(prefix))
+    );
     if (!catalog.length) {
         host.innerHTML = '<div class="empty-state">没有可选的 Tool。</div>';
         return;
@@ -995,15 +1038,17 @@ function renderCeoRiskToolsList() {
         const toolId = String(tool?.tool_id || "").trim();
         if (!toolId) return "";
         const isFixed = fixed.has(toolId);
+        const isBlocked = isHardDenied(toolId);
         const risk = String(tool?.risk_level || "medium").trim().toLowerCase();
-        const warning = String(warnings[toolId] || "").trim();
+        const warning = String(warnings[toolId] || (isBlocked ? hardDeniedReason : "") || "").trim();
         const checked = isFixed || selected.has(toolId);
+        const disabled = isFixed || isBlocked;
         return `
             <label class="ceo-risk-whitelist-item">
                 <input type="checkbox" class="ui-checkbox-input ceo-risk-tool-input" data-tool-id="${esc(toolId)}"
-                    ${checked ? "checked" : ""} ${isFixed ? "disabled" : ""}>
+                    ${checked ? "checked" : ""} ${disabled ? "disabled" : ""}>
                 <span class="ui-checkbox-box" aria-hidden="true"></span>
-                <span class="ceo-risk-tool-name">${esc(tool?.display_name || toolId)}${isFixed ? "（固定）" : ""}</span>
+                <span class="ceo-risk-tool-name">${esc(tool?.display_name || toolId)}${isFixed ? "（固定）" : ""}${isBlocked ? "（受限档不可用）" : ""}</span>
                 <span class="meta-tag risk-${esc(risk)}">${esc(displayRiskLabel(risk))}</span>
                 ${warning ? `<span class="ceo-risk-tool-warning">${esc(warning)}</span>` : ""}
             </label>
@@ -1036,10 +1081,9 @@ async function openCeoRiskToolsDialog() {
         const tools = await ApiClient.getTools(0, 300);
         state.toolsContext = item;
         state.toolsDraft = Array.isArray(item.allowed_tools) ? item.allowed_tools.slice() : [];
-        // 会话工具列表只列模型可见的工具；memory_runtime 是设置锚点（agent_visible=false），不是可选工具。
-        state.toolsCatalog = (Array.isArray(tools) ? tools : []).filter(
-            (tool) => tool?.agent_visible !== false
-        );
+        // 目录 = 注册表里模型可见的工具 + 默认集合/当前生效集合里缺行的合成工具；
+        // 只列模型可见的工具（memory_runtime 这类设置锚点 agent_visible=false 不画）。
+        state.toolsCatalog = ceoRiskToolsCatalogWithDefaults(tools, item);
         state.toolsOpen = true;
         if (U.ceoRiskToolsList) U.ceoRiskToolsList.innerHTML = '<div class="empty-state">加载 Tool 列表…</div>';
         if (U.ceoRiskToolsBackdrop) {

@@ -561,3 +561,157 @@ test("会话工具列表过滤 agent_visible=false 的系统锚点", async () =>
     assert.match(html, /search_session_history/);
     assert.doesNotMatch(html, /memory_runtime/);
 });
+
+const RISK_TOOLS_DIALOG_IDS = [
+    "ceo-risk-tools-backdrop",
+    "ceo-risk-tools-dialog",
+    "ceo-risk-tools-list",
+    "ceo-risk-tools-password",
+    "ceo-risk-tools-save-btn",
+    "ceo-risk-tools-reset-btn",
+    "ceo-risk-tools-close-btn",
+];
+
+function riskToolsItem(overrides = {}) {
+    return {
+        session_id: "web:shared",
+        trust: "third_party_group",
+        mode: "restricted",
+        resolved_tier: "limited",
+        install_state: "not_installed",
+        applicable: true,
+        allowed_tools: ["content_open", "mention_member", "schedule_wake", "silent"],
+        default_allowed_tools: ["content_open", "mention_member", "schedule_wake", "silent"],
+        fixed_tools: ["silent", "time"],
+        tool_warnings: {},
+        tool_metadata: {
+            mention_member: { display_name: "群内 @ 成员", risk_level: "medium" },
+            schedule_wake: { display_name: "定时唤醒自己", risk_level: "low" },
+        },
+        hard_denied_tools: {
+            names: ["create_async_task", "send_message"],
+            prefixes: ["task_"],
+            reason: "任务派发在受限档/沙箱档一律拒绝，勾选不会生效。",
+        },
+        ...overrides,
+    };
+}
+
+function stubRiskToolsFetch(ctx, item) {
+    const patched = [];
+    ctx.fetch = async (_url, options = {}) => {
+        if (!options.method || options.method === "GET") {
+            return { ok: true, json: async () => ({ ok: true, item }) };
+        }
+        patched.push(JSON.parse(options.body));
+        return { ok: true, json: async () => ({ ok: true, item }) };
+    };
+    return patched;
+}
+
+function riskToolInput(id, checked) {
+    const input = new StubElement(`${id}-input`);
+    input.checked = checked;
+    input.setAttribute("data-tool-id", id);
+    return input;
+}
+
+async function openRiskTools(ctx) {
+    await ctx.openCeoRiskToolsDialog();
+    await settle();
+    return ctx.elements.get("ceo-risk-tools-list");
+}
+
+function loadRiskToolsContext(tools) {
+    return loadGovernance({
+        governanceItem: { enabled: false, mode: "all_pass", whitelist_tools: [], whitelist_customized: false },
+        tools,
+        extraIds: RISK_TOOLS_DIALOG_IDS,
+    });
+}
+
+test("受限档工具列表把默认集合里的合成工具补成可勾选行，派发族禁用", async () => {
+    const ctx = loadRiskToolsContext([
+        { tool_id: "content_open", display_name: "Content Open", risk_level: "low", agent_visible: true },
+        { tool_id: "create_async_task", display_name: "Create Async Task", risk_level: "high", agent_visible: true },
+        { tool_id: "task_list", display_name: "Task List", risk_level: "low", agent_visible: true },
+        { tool_id: "memory_runtime", display_name: "Memory Runtime", risk_level: "low", agent_visible: false },
+    ]);
+    stubRiskToolsFetch(ctx, riskToolsItem());
+    const list = await openRiskTools(ctx);
+
+    // 合成常驻工具没有 resource.yaml：旧目录里没有行，保存一次就被当成取消勾选。
+    assert.match(list.innerHTML, /data-tool-id="mention_member"[^>]*checked/);
+    assert.match(list.innerHTML, /群内 @ 成员/);
+    assert.match(list.innerHTML, /data-tool-id="schedule_wake"[^>]*checked/);
+    assert.match(list.innerHTML, /定时唤醒自己/);
+    // 固定项由服务端恒并回，不补可操作行。
+    assert.doesNotMatch(list.innerHTML, /data-tool-id="silent"/);
+    // 派发族可见但不可勾选，并标注原因（勾选不会生效）。
+    assert.match(list.innerHTML, /data-tool-id="create_async_task"[^>]*disabled/);
+    assert.match(list.innerHTML, /data-tool-id="task_list"[^>]*disabled/);
+    assert.match(list.innerHTML, /受限档不可用/);
+    // agent_visible=false 的系统锚点仍然不画。
+    assert.doesNotMatch(list.innerHTML, /memory_runtime/);
+});
+
+test("合成默认工具按 DOM 勾选提交：不改动保住，取消后不再回补", async () => {
+    const ctx = loadRiskToolsContext([
+        { tool_id: "content_open", display_name: "Content Open", risk_level: "low", agent_visible: true },
+    ]);
+    const patched = stubRiskToolsFetch(ctx, riskToolsItem());
+    const list = await openRiskTools(ctx);
+
+    // 渲染后的 DOM 现状：什么都不动，保存必须字面保住两条名单。
+    list.querySelectorAll = () => [
+        riskToolInput("content_open", true),
+        riskToolInput("mention_member", true),
+        riskToolInput("schedule_wake", true),
+    ];
+    ctx.elements.get("ceo-risk-tools-password").value = "pw";
+    await ctx.saveCeoRiskTools();
+    assert.deepEqual(plain(patched), [{
+        allowed_tools: ["content_open", "mention_member", "schedule_wake"],
+        unlock_password: "pw",
+    }]);
+    assert.equal(ctx.elements.get("ceo-risk-tools-backdrop").hidden, true);
+
+    // 显式取消 mention_member 后再保存：用户确实能关闭它，服务端不替它回补。
+    await ctx.openCeoRiskToolsDialog();
+    await settle();
+    list.querySelectorAll = () => [
+        riskToolInput("content_open", true),
+        riskToolInput("schedule_wake", true),
+    ];
+    ctx.elements.get("ceo-risk-tools-password").value = "pw";
+    await ctx.saveCeoRiskTools();
+    assert.deepEqual(plain(patched)[1], {
+        allowed_tools: ["content_open", "schedule_wake"],
+        unlock_password: "pw",
+    });
+});
+
+test("恢复默认把合成工具重新勾上，保存提交完整默认集合", async () => {
+    const ctx = loadRiskToolsContext([
+        { tool_id: "content_open", display_name: "Content Open", risk_level: "low", agent_visible: true },
+    ]);
+    const patched = stubRiskToolsFetch(ctx, riskToolsItem({
+        // 历史坏名单：默认集合里有的合成工具已经被写掉。
+        allowed_tools: ["content_open", "silent"],
+    }));
+    const list = await openRiskTools(ctx);
+    assert.doesNotMatch(list.innerHTML, /data-tool-id="mention_member"[^>]*checked/);
+
+    ctx.resetCeoRiskToolsDraft();
+    assert.match(list.innerHTML, /data-tool-id="mention_member"[^>]*checked/);
+    assert.match(list.innerHTML, /data-tool-id="schedule_wake"[^>]*checked/);
+
+    list.querySelectorAll = () => [
+        riskToolInput("content_open", true),
+        riskToolInput("mention_member", true),
+        riskToolInput("schedule_wake", true),
+    ];
+    ctx.elements.get("ceo-risk-tools-password").value = "pw";
+    await ctx.saveCeoRiskTools();
+    assert.deepEqual(plain(patched)[0].allowed_tools, ["content_open", "mention_member", "schedule_wake"]);
+});
