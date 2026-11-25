@@ -5310,6 +5310,44 @@ textarea {
     line-height: 1.25;
 }
 
+/* 组瓦片：与模型行同一表面，组名后跟成员数；组的定义只在模型配置页改。 */
+.ceo-model-chain-row.is-group .ceo-model-chain-title {
+    flex: none;
+    max-width: 60%;
+    font-weight: 600;
+}
+
+.ceo-model-chain-sub {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.72rem;
+    color: var(--text-muted);
+}
+
+.ceo-model-chain-chip {
+    flex: none;
+    padding: 1px 7px;
+    border-radius: 999px;
+    font-size: 0.68rem;
+    color: var(--text-muted);
+    background: var(--bg-hover);
+}
+
+.ceo-model-picker-section {
+    padding: 8px 10px 4px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: var(--text-muted);
+}
+
+.ceo-model-picker-item.is-group .ceo-model-picker-item-title {
+    font-weight: 600;
+}
+
 /* 移除控件只在悬停/聚焦时加重，常驻的 × 会让整条链读起来像一列待删项。 */
 .ceo-model-chain-remove {
     flex: none;
