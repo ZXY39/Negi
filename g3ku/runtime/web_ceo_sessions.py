@@ -807,19 +807,77 @@ def _normalize_model_chain_keys(raw: Any) -> list[str]:
     return keys
 
 
+_SESSION_GROUP_REF_PREFIX = "group:"
+
+
+def _session_ref_to_entry(ref: Any) -> dict[str, str] | None:
+    """链记号（模型 key 或 group:<key>）→ route entry。与任务面板/模型页同一形状。"""
+    text = str(ref or "").strip()
+    if not text:
+        return None
+    if text.startswith(_SESSION_GROUP_REF_PREFIX):
+        group_key = text[len(_SESSION_GROUP_REF_PREFIX):].strip()
+        return {"type": "load_balance", "group_key": group_key} if group_key else None
+    return {"type": "model", "model_key": text}
+
+
+def _session_entry_to_ref(entry: Any) -> str:
+    if not isinstance(entry, dict):
+        return ""
+    if str(entry.get("type") or "").strip() == "load_balance":
+        return f"{_SESSION_GROUP_REF_PREFIX}{str(entry.get('group_key') or '').strip()}"
+    return str(entry.get("model_key") or "").strip()
+
+
+def _normalize_session_route_entries(source: dict[str, Any]) -> list[dict[str, str]]:
+    """会话链归一成有序 route entries（含组槽位）。
+
+    优先吃显式 `route_entries`；缺省时从 `model_keys`（可含 group: 记号）派生，旧纯 direct
+    会话链因此零迁移。只做形状归一与去重保序，存在性校验在写入口。
+    """
+    raw_entries = source.get("route_entries", source.get("routeEntries"))
+    if isinstance(raw_entries, (list, tuple)):
+        items: list[Any] = list(raw_entries)
+    else:
+        items = [_session_ref_to_entry(ref) for ref in _normalize_model_chain_keys(source.get("model_keys", source.get("modelKeys")))]
+    entries: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in items:
+        if isinstance(item, dict):
+            entry_type = str(item.get("type") or "model").strip().lower().replace("-", "_")
+            if entry_type == "load_balance":
+                group_key = str(item.get("group_key", item.get("groupKey")) or "").strip()
+                entry = {"type": "load_balance", "group_key": group_key} if group_key else None
+            else:
+                model_key = str(item.get("model_key", item.get("modelKey")) or "").strip()
+                entry = {"type": "model", "model_key": model_key} if model_key else None
+        else:
+            entry = _session_ref_to_entry(item)
+        if not entry:
+            continue
+        identity = (entry["type"], entry.get("group_key") or entry.get("model_key") or "")
+        if identity in seen:
+            continue
+        seen.add(identity)
+        entries.append(entry)
+    return entries
+
+
 def normalize_model_selection(payload: Any) -> dict[str, Any]:
     """会话模型模式：默认模型链；指定模式下必须带非空模型 key。
 
-    `model_keys` 是会话链：非空时本会话按它走，空时跟随 `models.roles.ceo`。固定模型与
+    会话链以 `route_entries` 为权威（可含组槽位），`model_keys` 是同一链的记号视图（模型 key
+    或 group:<key>），供前端渲染与旧客户端兼容。空链跟随 `models.roles.ceo`。固定模型与
     会话链互斥，由这里保证，不依赖调用方自觉。
     """
     source = payload if isinstance(payload, dict) else {}
     mode = str(source.get("mode", source.get("modelSelectionMode", "")) or "").strip().lower()
     model_key = str(source.get("model_key", source.get("modelKey", "")) or "").strip()
     if mode == SESSION_MODEL_SELECTION_MODE_MODEL and model_key:
-        return {"mode": SESSION_MODEL_SELECTION_MODE_MODEL, "model_key": model_key, "model_keys": []}
-    chain_keys = _normalize_model_chain_keys(source.get("model_keys", source.get("modelKeys")))
-    return {"mode": SESSION_MODEL_SELECTION_MODE_CHAIN, "model_key": "", "model_keys": chain_keys}
+        return {"mode": SESSION_MODEL_SELECTION_MODE_MODEL, "model_key": model_key, "model_keys": [], "route_entries": []}
+    entries = _normalize_session_route_entries(source)
+    refs = [_session_entry_to_ref(entry) for entry in entries]
+    return {"mode": SESSION_MODEL_SELECTION_MODE_CHAIN, "model_key": "", "model_keys": refs, "route_entries": entries}
 
 
 def ceo_session_model_selection(metadata: Any) -> dict[str, Any]:
@@ -840,6 +898,14 @@ def ceo_session_model_chain_keys(metadata: Any) -> list[str]:
     if selection["mode"] != SESSION_MODEL_SELECTION_MODE_CHAIN:
         return []
     return list(selection.get("model_keys") or [])
+
+
+def ceo_session_model_route_entries(metadata: Any) -> list[dict[str, str]]:
+    """会话链的有序 route entries（含组槽位）；空表示跟随全局。前门据此建会话 route plan。"""
+    selection = ceo_session_model_selection(metadata)
+    if selection["mode"] != SESSION_MODEL_SELECTION_MODE_CHAIN:
+        return []
+    return [dict(entry) for entry in list(selection.get("route_entries") or []) if isinstance(entry, dict)]
 
 
 def normalize_ceo_metadata(

@@ -52,6 +52,7 @@ from g3ku.runtime.web_ceo_sessions import (
     build_ceo_session_catalog,
     ceo_session_family,
     ceo_session_model_selection,
+    ceo_session_model_route_entries,
     ceo_session_task_defaults_scope,
     channel_session_hides_on_delete,
     create_web_ceo_session,
@@ -1252,8 +1253,25 @@ def _model_selection_response(config, session) -> dict:
     selection = ceo_session_model_selection(getattr(session, "metadata", None))
     model_key = selection["model_key"]
     chain_keys = list(selection.get("model_keys") or [])
+    route_entries = list(selection.get("route_entries") or [])
     # 模型链模式没有可失效的固定项。
     pinned_available = True if not model_key else _model_key_available(config, model_key)
+    # 链上已被删除或禁用的成员（组引用展开到成员逐个点名）。运行时按剩余成员继续。
+    unavailable: list[str] = []
+    for entry in route_entries:
+        if str(entry.get("type") or "") == "load_balance":
+            group_key = str(entry.get("group_key") or "").strip()
+            group = config.get_load_balance_group(group_key)
+            if group is None or not getattr(group, "enabled", True):
+                unavailable.append(f"group:{group_key}")
+                continue
+            for member in getattr(group, "model_keys", []) or []:
+                if not _model_key_available(config, member):
+                    unavailable.append(str(member))
+        else:
+            member = str(entry.get("model_key") or "").strip()
+            if member and not _model_key_available(config, member):
+                unavailable.append(member)
     return {
         "ok": True,
         "session_id": str(getattr(session, "key", "") or ""),
@@ -1263,9 +1281,10 @@ def _model_selection_response(config, session) -> dict:
         "pinned_available": pinned_available,
         # 会话链：空数组表示跟随全局 CEO 角色链，非空表示这条链只作用于本会话。
         "model_keys": chain_keys,
+        # 有序 route entries（含组槽位）：前端编辑/保存与运行时路由的权威形状。
+        "route_entries": route_entries,
         "is_session_chain": bool(chain_keys),
-        # 链上已被删除或禁用的成员。运行时按剩余成员继续，前端据此点名提示。
-        "chain_unavailable_keys": [key for key in chain_keys if not _model_key_available(config, key)],
+        "chain_unavailable_keys": unavailable,
     }
 
 
@@ -1344,21 +1363,36 @@ async def update_ceo_session_model_selection(session_id: str, payload: dict = Bo
         if not getattr(managed, "enabled", True):
             raise HTTPException(status_code=409, detail="model_key_disabled")
     else:
-        # 会话链逐个点名校验：静默过滤会让面板显示一条比保存时短的链。
-        for chain_key in selection["model_keys"]:
-            managed = config.get_managed_model(chain_key)
-            if managed is None:
-                raise HTTPException(
-                    status_code=404,
-                    detail={"code": "model_key_not_found", "model_key": chain_key,
-                            "message": f"模型 {chain_key} 不存在，请从链里移除后再保存。"},
-                )
-            if not getattr(managed, "enabled", True):
-                raise HTTPException(
-                    status_code=409,
-                    detail={"code": "model_key_disabled", "model_key": chain_key,
-                            "message": f"模型 {chain_key} 已禁用，请从链里移除后再保存。"},
-                )
+        # 会话链逐 entry 点名校验：静默过滤会让面板显示一条比保存时短的链。组引用展开到成员。
+        for entry in selection["route_entries"]:
+            if str(entry.get("type") or "") == "load_balance":
+                group_key = str(entry.get("group_key") or "").strip()
+                group = config.get_load_balance_group(group_key)
+                if group is None:
+                    raise HTTPException(
+                        status_code=404,
+                        detail={"code": "group_key_not_found", "group_key": group_key,
+                                "message": f"负载均衡组 {group_key} 不存在，请从链里移除后再保存。"},
+                    )
+                members = list(getattr(group, "model_keys", []) or [])
+            else:
+                members = [str(entry.get("model_key") or "").strip()]
+            for chain_key in members:
+                if not chain_key:
+                    continue
+                managed = config.get_managed_model(chain_key)
+                if managed is None:
+                    raise HTTPException(
+                        status_code=404,
+                        detail={"code": "model_key_not_found", "model_key": chain_key,
+                                "message": f"模型 {chain_key} 不存在，请从链里移除后再保存。"},
+                    )
+                if not getattr(managed, "enabled", True):
+                    raise HTTPException(
+                        status_code=409,
+                        detail={"code": "model_key_disabled", "model_key": chain_key,
+                                "message": f"模型 {chain_key} 已禁用，请从链里移除后再保存。"},
+                    )
     _write_session_model_selection(session_manager, session, selection)
     return _model_selection_response(config, session)
 

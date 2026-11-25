@@ -370,19 +370,32 @@ def test_model_selection_normalization():
         "mode": "model",
         "model_key": "a",
         "model_keys": [],
+        "route_entries": [],
     }
     # 指定模式缺 key 视为模型链，不产生半配置状态。
-    assert wcs.normalize_model_selection({"mode": "model"}) == {"mode": "chain", "model_key": "", "model_keys": []}
-    assert wcs.normalize_model_selection(None) == {"mode": "chain", "model_key": "", "model_keys": []}
+    assert wcs.normalize_model_selection({"mode": "model"}) == {"mode": "chain", "model_key": "", "model_keys": [], "route_entries": []}
+    assert wcs.normalize_model_selection(None) == {"mode": "chain", "model_key": "", "model_keys": [], "route_entries": []}
     # 会话链：去重保序，空白项丢弃。
     assert wcs.normalize_model_selection({"mode": "chain", "model_keys": [" b ", "b", "", " a "]}) == {
         "mode": "chain",
         "model_key": "",
         "model_keys": ["b", "a"],
+        "route_entries": [{"type": "model", "model_key": "b"}, {"type": "model", "model_key": "a"}],
     }
+    # 组记号与显式 route_entries 归一到同一形状（会话链可含组）。
+    expected_group = {
+        "mode": "chain",
+        "model_key": "",
+        "model_keys": ["group:flash", "a"],
+        "route_entries": [{"type": "load_balance", "group_key": "flash"}, {"type": "model", "model_key": "a"}],
+    }
+    assert wcs.normalize_model_selection({"mode": "chain", "model_keys": ["group:flash", "a"]}) == expected_group
+    assert wcs.normalize_model_selection({"mode": "chain", "route_entries": [{"type": "load_balance", "group_key": "flash"}, {"type": "model", "model_key": "a"}]}) == expected_group
     assert wcs.ceo_session_pinned_model_key({"model_selection": {"mode": "model", "model_key": "a"}}) == "a"
     assert wcs.ceo_session_pinned_model_key({"model_selection": {"mode": "chain"}}) == ""
     assert wcs.ceo_session_pinned_model_key(None) == ""
     assert wcs.ceo_session_model_chain_keys({"model_selection": {"mode": "chain", "model_keys": ["b", "a"]}}) == ["b", "a"]
     assert wcs.ceo_session_model_chain_keys({"model_selection": {"mode": "model", "model_key": "a", "model_keys": ["b"]}}) == []
     assert wcs.ceo_session_model_chain_keys(None) == []
+    assert wcs.ceo_session_model_route_entries({"model_selection": {"mode": "chain", "model_keys": ["group:flash", "a"]}}) == [{"type": "load_balance", "group_key": "flash"}, {"type": "model", "model_key": "a"}]
+    assert wcs.ceo_session_model_route_entries({"model_selection": {"mode": "model", "model_key": "a"}}) == []
