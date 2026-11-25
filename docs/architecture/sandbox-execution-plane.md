@@ -371,18 +371,23 @@ MCP 网关以固定身份 `negi-mcp` 出现在每条入站消息里，所以「�
 | 会话 | 读 | 写 |
 |---|---|---|
 | 本地 / 操作员 | 本地记忆 + 人设 | 本地 manager |
-| 群聊 | 本地记忆 + 本群块 + 人设 | 仅本群 manager（`memory/groups/<scope>/`） |
+| 群聊 | 本群块 + 人设（本地长期记忆与本地笔记不可见） | 仅本群 manager（`memory/groups/<scope>/`） |
 | 第三方私聊 | 本地记忆 + 人设 | 无：`memory_update` 返回可读拒绝（`ok=false`） |
 
 - `record_turn_for_review` / `flush_review_window` / 队列消费都作用在 `view.review_manager` 上；
   第三方私聊没有管理器，轮次不进复核窗口。
 - 入队请求的 `session_key` 如实记录来源：记忆管理页的编辑/删除用 `internal:memory_admin`，
   人设引导页与设置页的整理请求用 `internal:persona_memory`，渠道会话的自主复核带真实 `ext:` 键。
-- 群聊看得到本地记忆是产品决定：第三方索要私人信息的拒绝只能靠提示词与工具闸兜底，
-  所以本地记忆里不应放不可对群暴露的凭据类内容。
+- 群会话的读侧只有本群块：`MemoryScopeView.snapshot_text()` 不拼本地记忆，`read_note`
+  只查群域，本地长期记忆与本地笔记（含 `note_persona`）都进不了上下文；本地记忆增量
+  （`memory_cursor`）也不投群会话，群只收 `group_memory_cursor`。人设块仍取本地那一份——
+  人设是共享身份，不属于本地长期记忆。
 - 群记忆的写入按内容价值判断，不按发送者身份：普通群成员的请求同样进入本群 manager；
-  披露拒绝只约束 Master 的私人信息（本地记忆、人设、私聊内容），不阻止群级约定/事实入群块。
+  披露拒绝只约束 Master 的私人信息（人设、私聊内容等），不阻止群级约定/事实入群块。
 - 群 manager 不读人设 note（`persona_enabled=False`）；人设只有 `note_persona` 这一份。
+- 群判定走 `session_trust.is_multi_party_chat`：注册表 `chat_type` 为 `group` / `guild`
+  即群；缺 `chat_type` 时按 `external_key` 的 `qq:group:` / `qq:guild:` 前缀回退，
+  与信任分级同一判据。
 
 ## 来源标注
 
@@ -444,6 +449,9 @@ MCP 网关以固定身份 `negi-mcp` 出现在每条入站消息里，所以「�
 
 - 群里让它"记住 X"后全局记忆变了 → 先看 `memory/ops.jsonl` 的 `session_key` 与
   `memory/review_state.json`；四处闸门任一漏改都会表现成"只有某一条车道漏了"。
+- 群会话里能看到操作员的本地记忆或本地笔记 → 先确认该会话视图的 `kind`：注册表
+  `chat_type` 缺失且 `external_key` 不带 `qq:group:` / `qq:guild:` 前缀时会落成
+  `readonly_local`（能读本地）。群视图的 `snapshot_text` 只含本群块、`read_note` 只查群域。
 - 群里让它读 `config.json` / `master.key` → 看该会话的 `external_trust` 是否为第三方、
   工具是否落在会话允许列表里、`fs_read_roots` / `fs_write_roots` 是否下发
   （前门 `_sandbox_read_roots` / `_sandbox_write_roots`）。

@@ -637,10 +637,11 @@ main/ 侧所有持久化写在磁盘满（ENOSPC / SQLITE_FULL）条件下的行
 `MemoryScopeRouter` / `MemoryScopeView`，每个会话一个视图：
 
 - 本地会话（`web:` / `internal:` / CLI）：读写工作区本地 manager。
-- 群聊会话（外部会话注册表 `chat_type` 为 `group` / `guild`）：读本地 + 本群；写只进本群
-  manager，根在 `<workspace>/memory/groups/<safe-scope>-<hash>/`（配置深拷贝，路径相对群根，
-  因此每个群有自己的 sqlite、`MEMORY.md`、notes、index、queue 与 worker）。模型可见块 =
-  本地记忆 + `## 群聊长期记忆` 一节；人设仍取本地那一份。作用域键只由
+- 群聊会话（`session_trust.is_multi_party_chat`：注册表 `chat_type` 为 `group` / `guild`，
+  缺 `chat_type` 时按 `external_key` 前缀回退）：只读本群块；写只进本群 manager，根在
+  `<workspace>/memory/groups/<safe-scope>-<hash>/`（配置深拷贝，路径相对群根，因此每个群
+  有自己的 sqlite、`MEMORY.md`、notes、index、queue 与 worker）。模型可见块 =
+  `## 群聊长期记忆` 一节；本地长期记忆与本地笔记不加载。人设仍取本地那一份。作用域键只由
   `bridge_id:external_key` 决定，与设备及转录会话键无关：同一桥账号 + 同一群在新设备上
   解析到同一目录，配置包导入的群记忆随该群重新出现而继续生效；不同桥账号即使
   `external_key` 相同也是不同作用域。
@@ -651,16 +652,16 @@ main/ 侧所有持久化写在磁盘满（ENOSPC / SQLITE_FULL）条件下的行
   不按发送者身份拒绝，写入按群级内容表述、不写成操作员的个人偏好。
 - manager 实例按作用域 LRU 缓存（上限 32，逐出即 `close()`）；管理面 `list_scopes()` 只读
   注册表与磁盘上的群目录（导入的群在注册表还没有会话时也可查看/整理），不创建实例。
-- 通知车道有两条游标：`memory_cursor`（本地增量，投给所有能读本地记忆的会话）与
-  `group_memory_cursor`（群增量，只投给该群，渲染为 `### Group memory updates`）；
-  压缩跳两者同时归零。人设增量对所有会话同源投递。
+- 通知车道有两条游标：`memory_cursor`（本地增量，只投给读本地记忆的会话：本地与
+  第三方私聊）与 `group_memory_cursor`（群增量，只投给该群，渲染为
+  `### Group memory updates`）；压缩跳两者同时归零。人设增量对所有会话同源投递。
 - 会话复核、冲刷与 `run_due_batch_once` 都走 `view.review_manager`；写侧没有额外的信任门，
   写到哪里由作用域决定。会话删除时的边界冲刷也按同一路由取 manager（群聊冲本群，
   第三方私聊没有可写 manager 就跳过）；群目录不随会话删除，管理页按注册表与磁盘目录继续列出它。
   人设只有 `memory/notes/note_persona.md` 这一份，没有按会话隔离的第三方人设。
 - **continuous 根节点**按任务的 originating session_key（`task.session_id`）问进程内活动路由
-  （`active_memory_scope_router()`）取同一份视图：群源任务读本地 + 本群、写进本群，第三方私聊源
-  只读本地。节点道不携带前门视图，也不在 `main/` 里直接持有记忆管理器——投影文本由
+  （`active_memory_scope_router()`）取同一份视图：群源任务只读本群、写进本群，本地与
+  第三方私聊源只读本地。节点道不携带前门视图，也不在 `main/` 里直接持有记忆管理器——投影文本由
   `MainRuntimeService._node_memory_snapshot_supplier` 经 side-channel 递给节点道。
   **只有 continuous 根节点**（`is_continuous_metadata` 且无 `parent_node_id`、且非验收节点）
   拿得到记忆块与记忆工具；子节点与验收节点两者都没有。节点**不接复核窗口**：它只通过

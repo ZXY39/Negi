@@ -87,6 +87,7 @@ from g3ku.runtime.frontdoor.turns import (
     build_frontdoor_turn_tools,
     normalize_frontdoor_turns,
 )
+from g3ku.runtime.memory_scope_router import view_reads_local_memory
 from g3ku.runtime.message_token_estimation import estimate_message_tokens
 from g3ku.runtime.project_environment import current_project_environment
 from g3ku.runtime.sender_stamp import (
@@ -4907,9 +4908,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         这份文档，再投一遍整篇会把同一份内容放两次。对齐也把 `initialized` 记为真，
         所以"首跳时还没有任何修订"的会话不会因此漏掉第一条真实修订。
 
-        所有会话（含群聊）都读这一份：群聊头部块是本地 + 群块，本地变了同样要通知。
+        本地会话与第三方私聊读这一份；群会话的读侧只有本群块，本地增量不投。
         """
         view = _memory_view_for_session(self._loop, session_key)
+        if not view_reads_local_memory(view):
+            return None
         manager = (
             getattr(view, "local_manager", None)
             if view is not None

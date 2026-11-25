@@ -117,7 +117,7 @@ def _read_memory_snapshot_text(
     """读当份文档快照；None 表示这次读取失败（与"文档确实为空"的 "" 区分开）。"""
     try:
         if memory_view is not None:
-            # 群聊：本地记忆 + 本群专属块；第三方私聊：只读本地。
+            # 群聊：只读本群专属块；本地/第三方私聊：只读本地。
             return str(memory_view.snapshot_text() or '').strip()
         reader = getattr(memory_manager, "snapshot_text", None)
         if not callable(reader):

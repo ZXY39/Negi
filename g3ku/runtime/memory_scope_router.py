@@ -2,8 +2,10 @@
 
 Owner/local sessions read and write the existing workspace manager. Group
 sessions get a dedicated manager under ``<workspace>/memory/groups/<scope>``
-and write only there; their model-visible block is local + group. Third-party
-DMs read local memory but have no writable manager (local memory is owner-only).
+and write only there; their model-visible block is the group's own block plus
+the shared persona, and local long-term memory plus local notes stay invisible.
+Third-party DMs read local memory but have no writable manager (local memory is
+owner-only).
 
 The router is deliberately a thin routing layer: the memory runtime itself
 (sqlite, mirror, notes, queue, worker) is unchanged. Each group manager is a
@@ -21,7 +23,11 @@ from typing import Any
 
 from loguru import logger
 
-from g3ku.runtime.session_trust import TRUST_OWNER, session_trust
+from g3ku.runtime.session_trust import (
+    TRUST_OWNER,
+    is_multi_party_chat,
+    session_trust,
+)
 from g3ku.utils.helpers import safe_filename
 
 GROUP_MEMORY_DIRNAME = "groups"
@@ -64,37 +70,29 @@ class MemoryScopeView:
     def writable_manager(self) -> Any | None:
         return self.review_manager
 
+    @property
+    def reads_local_memory(self) -> bool:
+        """群会话的读侧不含本地长期记忆与本地笔记；其余视图读本地。"""
+        return self.kind != "group"
+
     def snapshot_text(self) -> str:
-        local_text = str(self.local_manager.snapshot_text() or "").strip()
-        group_text = (
-            str(self.group_manager.snapshot_text() or "").strip()
-            if self.group_manager is not None
-            else ""
-        )
-        if local_text and group_text:
-            return f"{local_text}\n\n## 群聊长期记忆\n{group_text}"
-        if group_text:
-            return f"## 群聊长期记忆\n{group_text}"
-        return local_text
+        if self.kind == "group":
+            group_text = (
+                str(self.group_manager.snapshot_text() or "").strip()
+                if self.group_manager is not None
+                else ""
+            )
+            return f"## 群聊长期记忆\n{group_text}" if group_text else ""
+        return str(self.local_manager.snapshot_text() or "").strip()
 
     def persona_text(self) -> str:
         return str(self.local_manager.persona_text() or "")
 
     def read_note(self, ref: str) -> str:
-        managers = [manager for manager in (self.group_manager, self.local_manager) if manager is not None]
-        last_error: Exception | None = None
-        for manager in managers:
-            try:
-                return manager.load_note(str(ref or "").strip())
-            except FileNotFoundError as exc:
-                last_error = exc
-                continue
-            except OSError as exc:
-                last_error = exc
-                continue
-        if last_error is not None:
-            raise last_error
-        raise FileNotFoundError(str(ref or ""))
+        manager = self.group_manager if self.kind == "group" else self.local_manager
+        if manager is None:
+            raise FileNotFoundError(str(ref or ""))
+        return manager.load_note(str(ref or "").strip())
 
 
 class MemoryScopeRouter:
@@ -325,8 +323,23 @@ class MemoryScopeRouter:
                 logger.warning("memory group manager close failed: {}", exc)
 
 
+def view_reads_local_memory(view: Any) -> bool:
+    """该会话视图是否读本地长期记忆；群视图不读（只有本群块）。"""
+    if view is None:
+        return True
+    value = getattr(view, "reads_local_memory", None)
+    if isinstance(value, bool):
+        return value
+    return str(getattr(view, "kind", "") or "").strip() != "group"
+
+
 def _is_group_entry(entry: Any) -> bool:
-    return str(getattr(entry, "chat_type", "") or "").strip().lower() in {"group", "guild"}
+    if entry is None:
+        return False
+    return is_multi_party_chat(
+        chat_type=getattr(entry, "chat_type", ""),
+        external_key=getattr(entry, "external_key", ""),
+    )
 
 
 def _group_key_for_entry(entry: Any, *, fallback: str) -> str:
@@ -381,4 +394,5 @@ __all__ = [
     "active_memory_scope_router",
     "group_scope_name_ok",
     "set_active_memory_scope_router",
+    "view_reads_local_memory",
 ]

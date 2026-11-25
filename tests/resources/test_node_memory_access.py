@@ -97,6 +97,40 @@ def test_snapshot_supplier_returns_empty_for_other_nodes(tmp_path: Path) -> None
     assert service._node_memory_snapshot_supplier(task=task, node=_node(parent="node:p")) == ""
 
 
+def test_group_origin_node_reads_and_notifies_only_the_group_scope(tmp_path: Path, monkeypatch) -> None:
+    service = _service(tmp_path)
+    task = SimpleNamespace(session_id="ext:qq-official-1:group-a")
+    local_manager = SimpleNamespace(
+        latest_memory_revision=lambda: 2,
+        memory_notice_delta=lambda since_rev: {"rev": 2, "text": "本地增量", "rebase": False},
+    )
+    group_manager = SimpleNamespace(
+        latest_memory_revision=lambda: 2,
+        memory_notice_delta=lambda since_rev: {"rev": 2, "text": "群增量", "rebase": False},
+    )
+    view = SimpleNamespace(
+        kind="group",
+        local_manager=local_manager,
+        group_manager=group_manager,
+        snapshot_text=lambda: "## 群聊长期记忆\n群记忆",
+    )
+    monkeypatch.setattr(
+        "g3ku.runtime.memory_scope_router.active_memory_scope_router",
+        lambda: SimpleNamespace(view_for_session=lambda key: view),
+    )
+    assert service._node_memory_snapshot_supplier(task=task, node=_node()) == "## 群聊长期记忆\n群记忆"
+    assert (
+        service._node_memory_notice_provider(
+            task=task, node=_node(), group=False, since_rev=0, initialized=True
+        )
+        is None
+    )
+    group_delta = service._node_memory_notice_provider(
+        task=task, node=_node(), group=True, since_rev=0, initialized=True
+    )
+    assert group_delta is not None and group_delta["text"] == "群增量"
+
+
 def test_snapshot_supplier_reads_scope_view_and_reports_failure(tmp_path: Path, monkeypatch) -> None:
     service = _service(tmp_path)
     task = SimpleNamespace(session_id="web:x")
