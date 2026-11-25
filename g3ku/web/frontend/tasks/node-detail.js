@@ -599,6 +599,14 @@ function bindTaskTraceListInteractions(traceList) {
             void loadEarlierTraceTurns(earlierBtn.dataset.traceEarlier || "");
             return;
         }
+        // 「加载更多消息」：把消息窗口再放一页（500 条），走既有重绘道。
+        const messageMoreBtn = target.closest("[data-message-more]");
+        if (messageMoreBtn instanceof HTMLElement) {
+            event.preventDefault();
+            event.stopPropagation();
+            loadMoreTaskMessages();
+            return;
+        }
         // 展开态的中途输出正文：点文字照常折叠；只有拖选文本或点滚动条时才拦下
         // <details> 的默认切换，否则用户没法在滚动框里选中/拖动滚动条。
         const turnTitle = target.closest(".task-trace-step--turn-text[open] .interaction-step-title");
@@ -1068,10 +1076,55 @@ function buildNodeSentMessageListSteps(node = {}) {
     });
 }
 
+// 消息列表默认只铺前 500 条：长驻节点的信箱会线性增长，整表一次铺进 DOM 就是
+// 每次刷新重建成千上万行。列表按 新→旧 排序，所以这 500 条就是最新的 500 条；
+// 更旧的消息由列表底部按钮按 500 条一页放出。窗口读数按 任务/节点/收发方向
+// 各自记账，切 tab、重绘与 settle 轮询都保留，离开任务详情视图时清空。
+const TASK_MESSAGE_LIST_PAGE_SIZE = 500;
+
+function taskMessageWindowKey(nodeId, mode) {
+    return `${String(S.currentTaskId || "").trim()}:${String(nodeId || "").trim()}:${mode}`;
+}
+
+function taskMessageWindowCount(node, mode, total) {
+    const extraPages = Math.floor(Number(S.taskMessageWindows?.[taskMessageWindowKey(node?.node_id, mode)]) || 0);
+    const windowSize = TASK_MESSAGE_LIST_PAGE_SIZE * (1 + Math.max(0, extraPages));
+    return Math.min(Math.max(0, Number(total) || 0), windowSize);
+}
+
 function activeTaskMessageListSteps(node) {
-    return S.taskMessageViewMode === "outbox"
-        ? buildNodeSentMessageListSteps(node)
-        : buildNodeMessageListSteps(node);
+    const mode = S.taskMessageViewMode === "outbox" ? "outbox" : "inbox";
+    const entries = mode === "outbox"
+        ? (Array.isArray(node?.sent_message_list) ? node.sent_message_list : [])
+        : (Array.isArray(node?.message_list) ? node.message_list : []);
+    const shown = taskMessageWindowCount(node, mode, entries.length);
+    const windowEntries = entries.slice(0, shown);
+    const steps = mode === "outbox"
+        ? buildNodeSentMessageListSteps({ sent_message_list: windowEntries })
+        : buildNodeMessageListSteps({ message_list: windowEntries });
+    return { mode, total: entries.length, shown, steps };
+}
+
+function renderMessageListMoreRow(node, { mode = "inbox", total = 0, shown = 0 } = {}) {
+    const remaining = Math.max(0, (Number(total) || 0) - (Number(shown) || 0));
+    if (!(remaining > 0) || !String(node?.node_id || "").trim()) return "";
+    return `
+        <div class="task-trace-earlier task-trace-more-messages">
+            <button type="button" class="task-trace-earlier-btn" data-message-more="${esc(mode)}" data-remaining-messages="${remaining}">加载更多消息（还剩 ${remaining} 条）</button>
+        </div>
+    `;
+}
+
+function loadMoreTaskMessages() {
+    const node = S.currentNodeDetail;
+    const nodeId = String(node?.node_id || "").trim();
+    if (!nodeId) return false;
+    const mode = S.taskMessageViewMode === "outbox" ? "outbox" : "inbox";
+    const key = taskMessageWindowKey(nodeId, mode);
+    const windows = { ...(S.taskMessageWindows || {}) };
+    windows[key] = (Number(windows[key]) || 0) + 1;
+    S.taskMessageWindows = windows;
+    return renderMessageList(node);
 }
 
 function spawnReviewRoundStatus(round = {}) {
@@ -1234,8 +1287,8 @@ function renderMessageList(node, { viewState = null } = {}) {
     if (typeof syncChatboxReplyState === "function") syncChatboxReplyState();
     const effectiveViewState = normalizeTaskDetailViewState(viewState || captureTaskDetailViewState());
     const preservedScrollTop = Number(effectiveViewState?.messageScrollTop || 0);
-    const stepDescriptors = activeTaskMessageListSteps(node);
-    const isOutbox = S.taskMessageViewMode === "outbox";
+    const { mode: messageMode, total: totalMessages, shown: shownMessages, steps: stepDescriptors } = activeTaskMessageListSteps(node);
+    const isOutbox = messageMode === "outbox";
     const emptyText = isOutbox ? "当前节点暂无发出消息。" : "当前节点暂无消息。";
     const steps = stepDescriptors.map((step, index) => renderTraceStep({
         ...step,
@@ -1247,6 +1300,9 @@ function renderMessageList(node, { viewState = null } = {}) {
             index,
         ),
     }));
+    // 「加载更多消息」行跟在已铺开的窗口之后（列表新→旧，更旧的在底部）。
+    // 它进渲染签名：窗口读数变化会换掉这一行的剩余数，不重绘就会停在旧值上。
+    const moreRowHtml = renderMessageListMoreRow(node, { mode: messageMode, total: totalMessages, shown: shownMessages });
     let traceList = U.adMessages.querySelector(".task-trace-list");
     if (!(traceList instanceof HTMLElement)) {
         traceList = document.createElement("div");
@@ -1254,13 +1310,13 @@ function renderMessageList(node, { viewState = null } = {}) {
         U.adMessages.replaceChildren();
         U.adMessages.appendChild(traceList);
     }
-    const renderSignature = `${isOutbox ? "outbox" : "inbox"}:${buildTraceRenderSignature(stepDescriptors)}`;
+    const renderSignature = `${messageMode}:${moreRowHtml}:${buildTraceRenderSignature(stepDescriptors)}`;
     const renderNodeId = String(node?.node_id || "").trim();
     const shouldReplace = traceList.dataset.renderSignature !== renderSignature
         || traceList.dataset.renderNodeId !== renderNodeId;
     if (shouldReplace) {
         traceList.innerHTML = steps.length
-            ? steps.join("")
+            ? `${steps.join("")}${moreRowHtml}`
             : `<div class="empty-state task-trace-empty">${esc(emptyText)}</div>`;
         traceList.dataset.renderSignature = renderSignature;
         traceList.dataset.renderNodeId = renderNodeId;
@@ -1269,7 +1325,8 @@ function renderMessageList(node, { viewState = null } = {}) {
     }
     bindTaskMessageTabs();
     bindTaskTraceListInteractions(traceList);
-    renderMessageHeading(stepDescriptors.length);
+    // 标题计数读该方向的全量条数，不数窗口：窗口只是渲染预算，不是消息总数。
+    renderMessageHeading(totalMessages);
     syncNoticeComposerState();
     if (shouldReplace) {
         const restoreScroll = () => {

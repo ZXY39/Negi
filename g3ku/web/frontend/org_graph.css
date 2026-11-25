@@ -16570,6 +16570,17 @@ a.artifact-item-link:focus-visible {
     border-color: var(--ui-border);
 }
 
+/* 暂停压过运行色：任务级暂停是前端投影，节点身上的 status 令牌仍是 in_progress /
+   running（树卡片与连线保持生命周期色），徽标只靠 data-paused 这一位换灰；
+   不这么写，抽屉里的「任务暂停」会带着运行中的蓝色读成"还在跑"。
+   节点级暂停的 visual_state 本来就是 paused，这里也一并统一成同一种灰。
+   选择器与上面那条同权重、必须排在其后，顺序就是优先级。 */
+:root .status-badge[data-paused="true"] {
+    background: var(--ui-neutral-soft);
+    color: var(--ui-text-secondary);
+    border-color: var(--ui-border);
+}
+
 /* 13. 空状态 */
 :root .empty-state {
     min-height: 120px;

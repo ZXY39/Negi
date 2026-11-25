@@ -1330,6 +1330,7 @@ function releaseTaskDetailRetainedState() {
     S.taskNodeDetails = {};
     S.taskNodeDetailRequests = {};
     S.taskTraceEarlierRequests = {};
+    S.taskMessageWindows = {};
     S.taskNodeLatestContexts = {};
     S.taskNodeLatestContextRequests = {};
     S.taskNodePatchSummaries = {};
@@ -1377,6 +1378,7 @@ function resetTaskView() {
     S.taskNodePatchSummaries = {};
     S.taskNodeDetailRequests = {};
     S.taskTraceEarlierRequests = {};
+    S.taskMessageWindows = {};
     S.taskNodeLatestContexts = {};
     S.taskNodeLatestContextRequests = {};
     if (typeof resetTaskTreeSnapshotState === "function") resetTaskTreeSnapshotState();
