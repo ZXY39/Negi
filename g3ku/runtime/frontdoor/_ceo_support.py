@@ -339,7 +339,20 @@ class CeoFrontDoorSupport:
         except Exception:
             logger.debug("session model chain plan build skipped; session={}", session_key)
             return []
-        refs = [str(ref or "").strip() for ref in plan.candidate_model_keys if str(ref or "").strip()]
+        # 与固定模型同一条判据：缺失/禁用的成员逐个摘掉（plan 解析只跳禁用，缺失需要这里补），
+        # 剩余为空才回退全局链。
+        refs: list[str] = []
+        for ref in plan.candidate_model_keys:
+            model_key = str(ref or "").strip()
+            if not model_key:
+                continue
+            try:
+                managed = app_config.get_managed_model(model_key)
+            except Exception:
+                managed = None
+            if managed is None or not bool(getattr(managed, "enabled", True)):
+                continue
+            refs.append(model_key)
         if not refs:
             logger.info("CEO session model chain empty after drop; fallback to ceo chain session={}", session_key)
             return []
