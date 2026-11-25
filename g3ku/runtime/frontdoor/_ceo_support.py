@@ -35,7 +35,7 @@ from g3ku.runtime.tool_watchdog import (
 )
 from g3ku.runtime.web_ceo_sessions import (
     SESSION_TASK_DEFAULTS_SCOPE_SESSION,
-    ceo_session_model_chain_keys,
+    ceo_session_model_route_entries,
     ceo_session_pinned_model_key,
     ceo_session_task_defaults_scope,
 )
@@ -46,6 +46,7 @@ from main.runtime.chat_backend import (
     deepseek_api_base_family,
     sanitize_provider_messages,
 )
+from main.runtime.model_route import build_model_route_plan_from_entries
 from main.runtime.tool_call_repair import format_xml_repair_failure_reason
 from main.runtime.turn_overlay import (
     build_turn_only_system_note_message,
@@ -305,11 +306,8 @@ class CeoFrontDoorSupport:
             return chain_refs
         return self._resolve_ceo_model_refs()
 
-    def _session_model_chain_refs(self, session_key: str | None = None) -> list[str]:
-        """会话链的生效视图：逐成员现读配置，摘掉已删除或禁用的项。
-
-        与固定模型同一条判据——链上成员失效不报错也不钉死会话，剩余为空时回退全局角色链。
-        """
+    def _session_model_route_entries(self, session_key: str | None = None) -> list[dict]:
+        """会话覆盖链的有序 route entries（含组槽位）；空表示无会话覆盖（跟随全局）。"""
         key = str(session_key or "").strip()
         if not key:
             return []
@@ -322,34 +320,30 @@ class CeoFrontDoorSupport:
         except Exception:
             logger.debug("session model chain lookup skipped; session={}", key)
             return []
-        stored = ceo_session_model_chain_keys(getattr(record, "metadata", None))
-        if not stored:
+        return ceo_session_model_route_entries(getattr(record, "metadata", None))
+
+    def _session_model_chain_refs(self, session_key: str | None = None) -> list[str]:
+        """会话链的生效视图（候选展开，扁平 model key）：组展开到成员，摘掉已删除/禁用项。
+
+        与固定模型同一条判据——链上成员失效不报错也不钉死会话，剩余为空时回退全局角色链。
+        含组的会话链经 route plan 解析展开，与全局链 `get_role_model_keys` 同口径。
+        """
+        entries = self._session_model_route_entries(session_key)
+        if not entries:
             return []
         app_config = getattr(self._loop, "app_config", None)
         if app_config is None:
             return []
-        refs: list[str] = []
-        dropped: list[str] = []
-        for model_key in stored:
-            try:
-                managed = app_config.get_managed_model(model_key)
-            except Exception:
-                managed = None
-            if managed is None or not bool(getattr(managed, "enabled", True)):
-                dropped.append(model_key)
-                continue
-            refs.append(model_key)
-        if dropped:
-            logger.info(
-                "CEO session model chain dropped members: session={} dropped={} remaining={}",
-                key,
-                ",".join(dropped),
-                ",".join(refs) or "-",
-            )
-        if not refs:
-            logger.info("CEO session model chain empty after drop; fallback to ceo chain session={}", key)
+        try:
+            plan = build_model_route_plan_from_entries(app_config, entries, revision=0)
+        except Exception:
+            logger.debug("session model chain plan build skipped; session={}", session_key)
             return []
-        logger.info("CEO session model chain applied: session={} chain={}", key, ",".join(refs))
+        refs = [str(ref or "").strip() for ref in plan.candidate_model_keys if str(ref or "").strip()]
+        if not refs:
+            logger.info("CEO session model chain empty after drop; fallback to ceo chain session={}", session_key)
+            return []
+        logger.info("CEO session model chain applied: session={} chain={}", session_key, ",".join(refs))
         return refs
 
     def _session_pinned_model_ref(self, session_key: str | None = None) -> str:

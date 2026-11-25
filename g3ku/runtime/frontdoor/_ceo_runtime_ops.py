@@ -192,6 +192,7 @@ from main.runtime.model_route import (
     LEASE_OUTCOME_SUCCESS,
     RouteCandidateFilters,
     build_model_route_plan,
+    build_model_route_plan_from_entries,
 )
 from main.runtime.send_token_preflight import (
     build_runtime_estimated_input_truth,
@@ -8731,9 +8732,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         session_key: str | None,
         required_context_window_tokens: int,
     ) -> Any:
-        """CEO 全局链含组且无会话覆盖时，按 session_key 取粘滞 lease；否则 None（走扁平链）。
+        """链含组时按 session_key 取粘滞 lease；否则 None（走扁平链）。
 
-        会话固定模型/会话链优先且扁平，不引入组。拿不到候选返回 None，调用方降级扁平发送，
+        会话覆盖链含组时用**会话 plan**（覆盖优先）；无会话覆盖且全局 ceo 链含组时用全局 plan。
+        固定模型与纯 direct 会话链不引入组。拿不到候选返回 None，调用方降级扁平发送，
         不阻塞交互。选人与 permit 本地（web 进程），跨进程共享的只是上游观测。
         """
         key = str(session_key or "").strip()
@@ -8745,13 +8747,18 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         concurrency_controller = getattr(service, "model_key_concurrency_controller", None)
         if turn_controller is None or balancer is None:
             return None
-        if self._session_pinned_model_ref(key) or self._session_model_chain_refs(key):
+        if self._session_pinned_model_ref(key):
             return None
         config = getattr(self._loop, "app_config", None)
         if config is None:
             return None
+        revision = self._frontdoor_runtime_config_revision()
+        session_entries = self._session_model_route_entries(key)
         try:
-            plan = build_model_route_plan(config, "ceo", revision=self._frontdoor_runtime_config_revision())
+            if session_entries:
+                plan = build_model_route_plan_from_entries(config, session_entries, revision=revision)
+            else:
+                plan = build_model_route_plan(config, "ceo", revision=revision)
         except Exception:
             return None
         if not plan.load_balance_group_keys:
