@@ -681,3 +681,54 @@ async def test_run_due_batch_consumes_dream_and_records_cluster_metadata(tmp_pat
         assert queued["request_id"] == report["request_ids"][0]
     finally:
         manager.close()
+
+
+def test_dream_scope_view_resolves_lines_retirement_missing_and_note_trees(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    try:
+        resident_id = _add(manager, "resident body", note_ref="note_play_x")
+        retired_id = _add(manager, "retired body")
+        (manager.notes_dir / "note_play_x.md").write_text("ordinary note", encoding="utf-8")
+        (manager.index_dir / "note_cat_y.md").write_text("category note", encoding="utf-8")
+        manager._memory_repo.mark_consolidated([retired_id], category_ref="note_cat_y")
+        _paint(manager)
+
+        payload = json.dumps({
+            "cluster_key": "memory:test",
+            "memory_ids": [resident_id, retired_id, "deadbeef"],
+            "note_refs": ["note_play_x", "note_cat_y", "note_missing"],
+            "reason": "recent_revision_family",
+            "base_revision": 3,
+        })
+        scope = manager.dream_scope_view(payload)
+        assert scope is not None
+        assert scope["cluster_key"] == "memory:test"
+        assert scope["reason"] == "recent_revision_family"
+        assert scope["base_revision"] == 3
+        by_id = {item["memory_id"]: item for item in scope["memories"]}
+        assert by_id[resident_id]["line"] == 1
+        assert by_id[resident_id]["body"] == "resident body"
+        assert by_id[resident_id]["missing"] is False
+        assert by_id[resident_id]["retired_into"] == ""
+        assert by_id[retired_id]["line"] is None
+        assert by_id[retired_id]["retired_into"] == "note_cat_y"
+        assert by_id["deadbeef"]["missing"] is True
+        notes = {item["ref"]: item for item in scope["notes"]}
+        assert notes["note_play_x"]["kind"] == "ordinary" and notes["note_play_x"]["exists"] is True
+        assert notes["note_cat_y"]["kind"] == "category" and notes["note_cat_y"]["exists"] is True
+        assert notes["note_missing"]["exists"] is False
+
+        # 三个读面投影都对 dream 附加 dream_scope，非 dream 行不附加。
+        queue_row = manager._project_queue_row_for_read({"op": "dream", "payload_text": payload})
+        assert queue_row["dream_scope"]["cluster_key"] == "memory:test"
+        processed_row = manager._project_processed_row_for_read({"op": "dream", "payload_texts": [payload]})
+        assert processed_row["dream_scope"]["cluster_key"] == "memory:test"
+        failed_row = manager._project_failed_record_for_read({"op": "dream", "items": [{"payload_text": payload}]})
+        assert failed_row["dream_scope"]["cluster_key"] == "memory:test"
+        assert "dream_scope" not in manager._project_queue_row_for_read({"op": "write", "payload_text": "hi"})
+
+        # 畸形 / 非 dream 载荷返回 None，读面不挂。
+        assert manager.dream_scope_view("not json") is None
+        assert manager.dream_scope_view(json.dumps({"memory_ids": []})) is None
+    finally:
+        manager.close()
