@@ -52,7 +52,6 @@ from g3ku.runtime.web_ceo_sessions import (
     build_ceo_session_catalog,
     ceo_session_family,
     ceo_session_model_selection,
-    ceo_session_model_route_entries,
     ceo_session_task_defaults_scope,
     channel_session_hides_on_delete,
     create_web_ceo_session,
