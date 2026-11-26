@@ -181,6 +181,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - cron 定时任务到点不触发、`jobs.json` 停在 `running`/`timeout`/`interrupted`、`negi cron` 里改过的提醒被服务进程覆盖回旧值、调度器长时间静默或某次投递疑似挂死 → `heartbeat-system.md`「Cron Reminder Contract」+ `operations-and-maintenance.md`「任务没创建或没推进」
 - 记忆复核批次什么时候入队（攒满轮数 / 缓冲躺够 1 小时 / 压缩轮末 / 会话边界），或某段历史的工具明细只剩名字没有原文 → `runtime-overview.md`「Memory Runtime State」（四个冲刷时点、进批次的工具记录按原子组装载、按轮次指纹摘除的写回）
 - 看到 `memory/MEMORY.md.bak.*`，或库里条目与投影不一致 → `runtime-overview.md`「Memory Runtime State」（投影只由库再生、外部改动先留证再重绘）+ `operations-and-maintenance.md`「Memory Queue Workflow」
+- dream 一直不入队、重复整理同一 cluster 或整理后新修订消失 → `runtime-overview.md`「Memory Runtime State」的 `dream_state.json` 水位与结算合同 + `operations-and-maintenance.md`「Memory Queue Workflow」的 `negi memory dream --once` 排障口
 - 限流/上游故障期间某轮记忆没写进去、`memory/failed.jsonl` 有停车记录、或医生检查报 `failed_parked` → `runtime-overview.md`「队列状态机与失败停车语义」+ `operations-and-maintenance.md`「Memory Queue Workflow」
 - 记忆页点重试/放弃提示失败、或弹条正文是 `Request timeout` → `web-and-admin.md`「Memory Management Page And Admin Contract」（四条失败正文各自的指向与 30s 客户端超时）
 - 用户说「记住/忘掉」但模型照旧，或某轮命中前缀在第二条消息就分叉 → `runtime-overview.md`「Memory Runtime State」（头部基座的压缩边界更新与修订增量）+ `context-and-cache-troubleshooting.md`「长期记忆的头部基座与增量」
@@ -191,6 +192,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 隐藏的 `internal:persona_photo` 会话出现在网页会话列表或记忆复核里 → `web-and-admin.md`「First-Run Onboarding And Persona Contract」
 - 某条记忆从长期记忆块里消失了、`memory/index/` 出现新文件、归并区的一整节摘不掉，或医生检查报 `broken_category_links` → `runtime-overview.md`「Memory Runtime State」（退场写 `consolidated_into`、归并区派生、摘整节按句柄寻址、机器压缩只降级不删除）
 - 记忆批次停在停车区而错误文本是 `memory_apply_confirm is required`、`line N is outside the memory block`、`line N is outside the candidate list`、`names no category with retired memories` → `runtime-overview.md`「Memory Runtime State」（两次提交那道门与行号的解释时刻）
+- note 新鲜度显示 unknown、doctor 报 `note_meta_stale` / `note_section_meta_stale`，或怀疑一次删除缺权威依据 → `runtime-overview.md`「Memory Runtime State」+ `operations-and-maintenance.md`「Memory Queue Workflow」（note meta、section 权威、删除意图与 `deletion_impact` 取证）
 - 日志审计侧栏角标不更新、原始日志为空或翻页停在空白页、时间显示与事件时间戳不一致、`/api/audit` 503 → `web-and-admin.md`「Log Audit Page And Event Contract」
 - Broken image icons, file-route 400s, snapshot path mismatch → `web-and-admin.md`「Inline Markdown Image Rendering And Media Middle Layer」
 - 模型重复处理已回答的问题、连续请求尾部反复出现同一条无回复的用户消息、渠道会话里旧提问冒到最新回复下面（像用户重发）；或反向——某轮失败后用户发"继续"，模型答的是上一件成功的事 → `context-and-cache-troubleshooting.md`「残留 paused / pending 转录条目与未回答的用户输入」

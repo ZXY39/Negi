@@ -180,7 +180,10 @@ def test_prompt_numbers_resident_lines_and_leaves_navigation_unnumbered(tmp_path
     markdown = importlib.import_module("g3ku.agent.markdown_memory")
     manager = _manager(tmp_path)
     try:
-        snapshot = "261018:第一条\n261018:第二条\n" + markdown.render_consolidation_block(
+        _add(manager, body="第一条", minimal="一->条")
+        _add(manager, body="第二条", minimal="二->条")
+        _paint(manager)
+        snapshot = manager.snapshot_text() + "\n" + markdown.render_consolidation_block(
             [("分类说明", "note_cat")]
         )
         prompt = manager._memory_agent_user_prompt(
@@ -189,11 +192,11 @@ def test_prompt_numbers_resident_lines_and_leaves_navigation_unnumbered(tmp_path
             repair_reason="",
         )
 
-        assert "1| 261018:第一条" in prompt
-        assert "2| 261018:第二条" in prompt
+        assert "1 " in prompt and "memory_body: 第一条" in prompt
+        assert "2 " in prompt and "memory_body: 第二条" in prompt
         assert "以下归并区没有行号" in prompt
         assert "## 归并记忆" in prompt
-        assert not re.search(r"^\d+\|\s*分类说明", prompt, re.MULTILINE), "归并区的行没有行号可指，不能编号"
+        assert not re.search(r"^\d+\s+分类说明", prompt, re.MULTILINE), "归并区的行没有行号可指，不能编号"
     finally:
         manager.close()
 

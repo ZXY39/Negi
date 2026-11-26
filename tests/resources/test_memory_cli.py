@@ -535,6 +535,7 @@ def test_memory_cli_help_exposes_only_queued_markdown_commands() -> None:
     assert "current" in top_output
     assert "queue" in top_output
     assert "flush" in top_output
+    assert "dream" in top_output
     assert "doctor" in top_output
     assert "reconcile-notes" in top_output
     assert "import-legacy" in top_output
@@ -604,6 +605,36 @@ def test_memory_cli_routes_supported_commands_to_runtime_manager(
     ]
 
 
+def test_memory_dream_once_forces_one_cluster_and_prints_report(monkeypatch, tmp_path: Path) -> None:
+    memory_cli = _memory_cli_module()
+    calls: dict[str, object] = {}
+
+    class _StubManager:
+        async def run_due_batch_once(self, *, force_dream: bool = False) -> dict[str, object]:
+            calls["force_dream"] = force_dream
+            return {"ok": True, "status": "applied", "op": "dream", "processed": 1}
+
+        def _read_dream_state(self) -> dict[str, object]:
+            return {"last_cluster_key": "note:test"}
+
+        def close(self) -> None:
+            calls["closed"] = True
+
+    monkeypatch.setattr(memory_cli.config_loader, "load_config", lambda: SimpleNamespace(workspace_path=tmp_path))
+    monkeypatch.setattr(memory_cli, "load_tool_settings_from_manifest", lambda *args, **kwargs: SimpleNamespace(enabled=True))
+    monkeypatch.setattr(memory_cli.memory_agent_runtime, "MemoryManager", lambda workspace, cfg: _StubManager())
+
+    console = _ConsoleStub()
+    app = memory_cli.build_memory_app(console)
+    result = CliRunner().invoke(app, ["dream", "--once"])
+
+    assert result.exit_code == 0
+    assert calls == {"force_dream": True, "closed": True}
+    report = json.loads(console.messages[-1])
+    assert report["dream_cluster_key"] == "note:test"
+    assert report["op"] == "dream"
+
+
 def test_memory_doctor_reads_ownership_from_the_store(monkeypatch, tmp_path: Path) -> None:
     """只读检查也得看得见库：否则每份有人拥有的 note 都被报成孤儿，删档建议就来自一条假读数。"""
     memory_cli = _memory_cli_module()
@@ -623,6 +654,7 @@ def test_memory_doctor_reads_ownership_from_the_store(monkeypatch, tmp_path: Pat
         notes_dir = tmp_path / "memory" / "notes"
         notes_dir.mkdir(parents=True, exist_ok=True)
         (notes_dir / "note_proxy_ports.md").write_text("端口笔记正文" + chr(10), encoding="utf-8")
+        writer._initialize_note_sections()
     finally:
         writer.close()
 
@@ -671,6 +703,7 @@ def test_memory_doctor_keeps_the_category_axis_off_the_note_checks(monkeypatch, 
         (memory_dir / "notes" / "note_ports.md").write_text("端口笔记正文" + chr(10), encoding="utf-8")
         category_file = memory_dir / "index" / "note_tasks.md"
         category_file.write_text("异步任务:派发、验收" + chr(10), encoding="utf-8")
+        writer._initialize_note_sections()
         writer._memory_repo.mark_consolidated(
             [str(retired["memory_id"])],
             category_ref="note_tasks",
@@ -695,3 +728,32 @@ def test_memory_doctor_keeps_the_category_axis_off_the_note_checks(monkeypatch, 
     assert exit_code == 1, joined
     assert "missing note refs: none" in joined
     assert "retired memories pointing at missing category notes: note_tasks" in joined
+
+
+def test_memory_doctor_prints_stale_note_sections(monkeypatch, tmp_path: Path) -> None:
+    memory_cli = _memory_cli_module()
+    runtime = _memory_agent_runtime_module()
+    _mount_real_memory_manager(monkeypatch, tmp_path)
+    writer = runtime.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        writer._memory_repo.create_memory(
+            memory_body="owner",
+            minimal_memory="owner",
+            source="self",
+            from_user=False,
+            now_iso="2026-04-17T09:00:00+08:00",
+            note_ref="note_section_stale",
+        )
+        note = tmp_path / "memory" / "notes" / "note_section_stale.md"
+        note.write_text("## A\noriginal\n", encoding="utf-8")
+        writer._initialize_note_sections()
+        note.write_text("## A\nexternal\n", encoding="utf-8")
+    finally:
+        writer.close()
+
+    console = _ConsoleStub()
+    result = CliRunner().invoke(memory_cli.build_memory_app(console), ["doctor"])
+    joined = chr(10).join(console.messages).lower()
+    assert result.exit_code == 1
+    assert "stale note section metadata" in joined
+    assert "note_section_stale" in joined

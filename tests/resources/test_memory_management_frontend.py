@@ -390,7 +390,7 @@ def test_memory_management_view_keeps_admin_mutations_hidden_by_default() -> Non
     assert "function renderMemoryAdminActions()" in app_js
     assert "U.memoryAdminActions.hidden = true;" in app_js
     assert 'U.memoryAdminActions.setAttribute("aria-hidden", "true");' in app_js
-    assert 'U.memoryAdminActions.innerHTML = "";' in app_js
+    assert "U.memoryAdminActions.replaceChildren();" in app_js
     assert "renderMemoryAdminActions();" in app_js
     assert "data-memory-admin-action" not in app_js
     assert '"/api/memory/admin/retry-head"' not in app_js
@@ -1313,6 +1313,102 @@ def test_memory_processed_card_renders_actual_operations_in_change_order() -> No
     assert mixed_html.count('class="memory-op-chip"') == 4
     assert "混合变更" not in mixed_html
     assert str(result["mixedLabel"]) == "删除 / 增加 / 修改 / 更新 Note"
+
+
+def test_delete_reason_renders_from_ops_json_and_stays_hidden_for_history(tmp_path: Path) -> None:
+    import importlib
+
+    module = importlib.import_module("g3ku.agent.memory_agent_runtime")
+    schema = importlib.import_module("g3ku.config.schema")
+    cfg = schema.MemoryToolsConfig()
+    cfg.document.compress_trigger_chars = 1_000_000
+    cfg.document.compress_target_chars = 900_000
+    manager = module.MemoryManager(tmp_path, cfg)
+    try:
+        old = manager._memory_repo.create_memory(
+            memory_body="被删除的旧规则", minimal_memory="旧->规则", source="user",
+            from_user=True, now_iso="2026-11-19T10:00:00+08:00",
+        )
+        manager._memory_repo.create_memory(
+            memory_body="保留的新规则", minimal_memory="新->规则", source="user",
+            from_user=True, now_iso="2026-11-20T10:00:00+08:00",
+        )
+        manager._rebuild_memory_snapshot_from_sqlite(now_iso="2026-11-26T09:00:00+08:00")
+        session = module._MemoryToolSession(
+            snapshot_text=manager.snapshot_text(), notes_dir=manager.notes_dir,
+            index_dir=manager.index_dir, batch_op="write",
+        )
+        staged = session.apply_batch(
+            deletes=[1],
+            delete_reasons=[{
+                "line": 1, "reason": "新规则完整覆盖旧规则的作用域与例外",
+                "replacement_line": 2, "authority_basis": "explicit_supersession",
+                "scope_match": True, "evidence": "用户明确要求改用新规则",
+            }],
+        )
+        assert staged["ok"] is True, staged
+        session.confirm_batch()
+        batch = module.MemoryBatch(
+            op="write",
+            items=[module.MemoryQueueRequest(
+                op="write", decision_source="user", payload_text="删除旧规则",
+                created_at="2026-11-26T09:00:00+08:00", request_id="delete_reason_ui",
+            )],
+        )
+        validated = manager._build_validated_write_from_apply_batch(
+            before_text=manager.snapshot_text(), session=session, batch=batch,
+        )
+        manager._commit_validated_write(validated)
+        manager._append_terminal_history(
+            batch=batch, status="applied", op="write",
+            processed_at="2026-11-26T09:30:00+08:00", validated=validated,
+        )
+        ops = [json.loads(line) for line in manager.ops_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+        delete_change = next(change for change in ops[-1]["changes"] if change["type"] == "delete")
+        assert delete_change["memory_id"] == old["memory_id"]
+        assert delete_change["delete_reason"] == "新规则完整覆盖旧规则的作用域与例外"
+    finally:
+        manager.close()
+
+    result = _run_app_script(
+        f"""
+        const item = {{ changes: [{json.dumps(delete_change, ensure_ascii=False)}] }};
+        const historical = {{ changes: [{{ type: "delete", memory_id: "old", original_content: "旧规则" }}] }};
+        __out.html = context.__testExports.renderMemoryChangeList(item.changes);
+        __out.historicalHtml = context.__testExports.renderMemoryChangeList(historical.changes);
+        """,
+        ["renderMemoryChangeList"],
+    )
+    rendered = str(result["html"])
+    assert rendered.index("删除原因") < rendered.index("删除的内容")
+    assert "新规则完整覆盖旧规则的作用域与例外" in rendered
+    assert "删除原因" not in str(result["historicalHtml"])
+
+
+def test_note_section_change_renders_status_scope_and_evidence() -> None:
+    result = _run_app_script(
+        """
+        const change = {
+          type: "note_section",
+          note_ref: "note_reply_policy",
+          section_id: "s12ab34cd56ef",
+          section_key: "账号与回评硬约束",
+          status: "superseded",
+          scope_key: "realstory:douyin:reply",
+          superseded_by: "s98ab76cd54ef",
+          decision_at: "2026-11-20T20:09:00+08:00",
+          evidence: "用户明确改为分级选择性回评",
+        };
+        __out.html = context.__testExports.renderMemoryChangeList([change]);
+        """,
+        ["renderMemoryChangeList"],
+    )
+    rendered = str(result["html"])
+    assert "Note 段落" in rendered
+    assert "账号与回评硬约束" in rendered
+    assert "realstory:douyin:reply" in rendered
+    assert "用户明确改为分级选择性回评" in rendered
+    assert "s98ab76cd54ef" in rendered
 
 
 def test_consolidation_records_survive_into_the_memory_surfaces() -> None:

@@ -100,6 +100,21 @@ def build_memory_app(console) -> typer.Typer:
             if len(dangling_mentions) > 5:
                 console.print(f"  ... plus {len(dangling_mentions) - 5} more")
 
+        note_meta_stale = list(report.get("note_meta_stale") or [])
+        if note_meta_stale:
+            console.print("- Stale note metadata:")
+            for item in note_meta_stale[:5]:
+                console.print(f"  {item.get('ref') or '(unknown)'} ({item.get('kind') or 'unknown'})")
+
+        note_section_meta_stale = list(report.get("note_section_meta_stale") or [])
+        if note_section_meta_stale:
+            console.print("- Stale note section metadata:")
+            for item in note_section_meta_stale[:8]:
+                console.print(
+                    f"  {item.get('note_key') or '(unknown)'}:{item.get('section_id') or '(unknown)'} "
+                    f"({item.get('reason') or 'unknown'})"
+                )
+
         queue_parse_errors = list(report.get("queue_parse_errors") or [])
         if queue_parse_errors:
             console.print(f"- Queue parse errors: {len(queue_parse_errors)} issue(s) in queue.jsonl")
@@ -210,6 +225,28 @@ def build_memory_app(console) -> typer.Typer:
         finally:
             manager.close()
         console.print_json(json.dumps(report, ensure_ascii=False))
+
+    @app.command('dream')
+    def memory_dream(
+        once: bool = typer.Option(False, '--once', help='Force one dream cluster and consume it once'),
+        scope: str = _scope_option,
+    ):
+        """Force one incremental memory-organization cluster through the normal preview/confirm path."""
+        if not once:
+            console.print('[yellow]Use --once to run one dream cluster.[/yellow]')
+            raise typer.Exit(2)
+        _config, mem_cfg, manager = _load_runtime_manager(scope=scope)
+        if not mem_cfg.enabled:
+            _disabled()
+            raise typer.Exit(1)
+        try:
+            report = asyncio.run(manager.run_due_batch_once(force_dream=True))
+            state = manager._read_dream_state()
+        finally:
+            manager.close()
+        output = dict(report)
+        output.setdefault('dream_cluster_key', str(state.get('last_cluster_key') or ''))
+        console.print_json(json.dumps(output, ensure_ascii=False))
 
     @app.command('doctor')
     def memory_doctor(

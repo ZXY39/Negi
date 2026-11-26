@@ -410,6 +410,7 @@ function memoryChangeTypeLabel(type) {
     if (normalized === "delete") return "删除";
     if (normalized === "note_upsert") return "更新 Note";
     if (normalized === "note_edit") return "编辑 Note";
+    if (normalized === "note_section") return "Note 段落";
     if (normalized === "note_reaped") return "回收 Note";
     if (normalized === "category_note") return "归并记忆";
     if (normalized === "consolidate") return "记忆退场";
@@ -426,6 +427,7 @@ function renderMemoryChangeBlock(change) {
     const content = String(change?.content || "");
     const original = String(change?.original_content || "");
     const originalMissing = Boolean(change?.original_missing);
+    const deleteReason = String(change?.delete_reason || "").trim();
 
     let bodyHtml = "";
     if (type === "rewrite") {
@@ -454,8 +456,13 @@ function renderMemoryChangeBlock(change) {
         const deletedHtml = original.trim()
             ? `<div class="memory-change-text">${renderMemoryTextWithNoteRefs(original)}</div>`
             : `<div class="memory-change-text memory-change-missing">${originalMissing ? "历史批次未保留被删内容，仅记录了 ID" : "-"}</div>`;
+        const reasonHtml = deleteReason
+            ? `<div class="memory-change-col-label">删除原因</div>
+               <div class="memory-change-text">${renderMemoryTextWithNoteRefs(deleteReason)}</div>`
+            : "";
         bodyHtml = `
             <div class="memory-change-col">
+                ${reasonHtml}
                 <div class="memory-change-col-label">删除的内容</div>
                 ${deletedHtml}
             </div>
@@ -487,6 +494,21 @@ function renderMemoryChangeBlock(change) {
                 </div>
             </div>
         `;
+    } else if (type === "note_section") {
+        const status = String(change?.status || "unknown");
+        const sectionKey = String(change?.section_key || change?.section_id || "-");
+        const scopeKey = String(change?.scope_key || "").trim();
+        const supersededBy = String(change?.superseded_by || "").trim();
+        const evidence = String(change?.evidence || "").trim();
+        bodyHtml = `
+            <div class="memory-change-col">
+                <div class="memory-change-col-label">段落状态</div>
+                <div class="memory-change-text">${esc(sectionKey)} · ${esc(status)}</div>
+                ${scopeKey ? `<div class="memory-change-col-label">作用域</div><div class="memory-change-text">${esc(scopeKey)}</div>` : ""}
+                ${supersededBy ? `<div class="memory-change-col-label">替代段落</div><div class="memory-change-text">${esc(supersededBy)}</div>` : ""}
+                ${evidence ? `<div class="memory-change-col-label">依据</div><div class="memory-change-text">${esc(evidence)}</div>` : ""}
+            </div>
+        `;
     } else if (type === "category_note") {
         const edits = Array.isArray(change?.edits) ? change.edits : [];
         const editsHtml = edits.length
@@ -511,8 +533,13 @@ function renderMemoryChangeBlock(change) {
             </div>
         `;
     } else if (type === "category_purge") {
+        const reasonHtml = deleteReason
+            ? `<div class="memory-change-col-label">删除原因</div>
+               <div class="memory-change-text">${renderMemoryTextWithNoteRefs(deleteReason)}</div>`
+            : "";
         bodyHtml = `
             <div class="memory-change-col">
+                ${reasonHtml}
                 <div class="memory-change-col-label">从「${esc(String(change?.note_ref || "-"))}」摘下的正文</div>
                 <div class="memory-change-text">${renderMemoryTextWithNoteRefs(original) || "-"}</div>
             </div>

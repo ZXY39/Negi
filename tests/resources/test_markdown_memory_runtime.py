@@ -1228,7 +1228,7 @@ def test_reformat_store_folds_multiline_rows_and_the_second_pass_changes_nothing
         manager.close()
 
 
-def test_v2_memory_agent_tools_expose_read_note_and_apply_batch_only(tmp_path: Path) -> None:
+def test_v2_memory_agent_tools_expose_read_and_apply_surface(tmp_path: Path) -> None:
     module = _load_memory_agent_runtime_module()
     manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
@@ -1237,7 +1237,14 @@ def test_v2_memory_agent_tools_expose_read_note_and_apply_batch_only(tmp_path: P
     finally:
         manager.close()
 
-    assert tool_names == ["memory_read_note", "memory_apply_batch", "memory_apply_confirm"]
+    assert tool_names == [
+        "memory_read_note",
+        "memory_read_entry",
+        "memory_note_index",
+        "memory_read_notes",
+        "memory_apply_batch",
+        "memory_apply_confirm",
+    ]
 
 
 def test_memory_agent_delete_batch_rejects_noop_reason_and_points_at_already_satisfied(tmp_path: Path) -> None:
@@ -3138,7 +3145,15 @@ async def test_run_due_batch_once_applies_delete_batch_via_memory_agent(
                         {
                             "id": "call-1",
                             "name": "memory_apply_batch",
-                            "args": {"deletes": [1]},
+                            "args": {
+                                    "deletes": [1],
+                                    "delete_reasons": [{
+                                        "line": 1,
+                                        "reason": "operator requested deletion",
+                                        "authority_basis": "operator_request",
+                                        "scope_match": True,
+                                    }],
+                                },
                         }
                     ],
                     usage={"input_tokens": 4, "output_tokens": 1, "cache_read_tokens": 0},
@@ -3208,7 +3223,15 @@ async def test_run_due_batch_once_delete_only_removes_visible_snapshot_items(
                         {
                             "id": "call-1",
                             "name": "memory_apply_batch",
-                            "args": {"deletes": [1]},
+                            "args": {
+                                    "deletes": [1],
+                                    "delete_reasons": [{
+                                        "line": 1,
+                                        "reason": "operator requested deletion",
+                                        "authority_basis": "operator_request",
+                                        "scope_match": True,
+                                    }],
+                                },
                         }
                     ],
                     usage={"input_tokens": 4, "output_tokens": 1, "cache_read_tokens": 0},
@@ -3278,7 +3301,15 @@ async def test_run_due_batch_once_repairs_delete_batch_that_keeps_non_snapshot_b
                         {
                             "id": "call-2",
                             "name": "memory_apply_batch",
-                            "args": {"deletes": [1]},
+                            "args": {
+                                    "deletes": [1],
+                                    "delete_reasons": [{
+                                        "line": 1,
+                                        "reason": "operator requested deletion",
+                                        "authority_basis": "operator_request",
+                                        "scope_match": True,
+                                    }],
+                                },
                         }
                     ],
                     usage={"input_tokens": 5, "output_tokens": 1, "cache_read_tokens": 0},
@@ -3346,6 +3377,12 @@ async def test_run_due_batch_once_cleans_up_orphan_notes_after_commit(
                                     }
                                 ],
                                 "deletes": [1],
+                                "delete_reasons": [{
+                                    "line": 1,
+                                    "reason": "operator requested deletion",
+                                    "authority_basis": "operator_request",
+                                    "scope_match": True,
+                                }],
                             },
                         }
                     ],

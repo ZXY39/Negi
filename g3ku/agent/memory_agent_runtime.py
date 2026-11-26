@@ -112,6 +112,83 @@ def _first_note_ref(text: str) -> str:
     return str(match.group("ref") or "").strip() if match else ""
 
 
+def _note_anchor_span(body: str, anchor: str) -> tuple[int, int, list[int], str]:
+    value = str(anchor or "").strip()
+    if not value:
+        return 0, 0, [], "anchor must not be empty"
+    lines = str(body or "").splitlines(keepends=True)
+    matches = [index for index, line in enumerate(lines) if line.strip() == value]
+    if not matches:
+        return 0, 0, [], f"anchor not found in note: {value}"
+    if len(matches) > 1:
+        return 0, 0, [index + 1 for index in matches], (
+            f"anchor matches {len(matches)} lines; provide a unique line or section heading"
+        )
+    start = matches[0]
+    heading = re.match(r"^(#{1,6})\s+", lines[start].strip())
+    end = len(lines)
+    if heading:
+        level = len(heading.group(1))
+        for index in range(start + 1, len(lines)):
+            candidate = re.match(r"^(#{1,6})\s+", lines[index].strip())
+            if candidate and len(candidate.group(1)) <= level:
+                end = index
+                break
+    return start, end, [start + 1], ""
+
+
+def _apply_note_edit_ops_to_body(
+    body: str, *, ref: str, ops: list[dict[str, str]]
+) -> tuple[str, list[dict[str, Any]]]:
+    results: list[dict[str, Any]] = []
+    current = str(body or "")
+    for op_index, op in enumerate(list(ops or [])):
+        old_text = str(op.get("old_text") or "")
+        anchor = str(op.get("anchor") or "")
+        new_text = str(op.get("new_text") or "")
+        record: dict[str, Any] = {
+            "note_ref": ref,
+            "op_index": op_index,
+            "old_text": old_text,
+            "new_text": new_text,
+        }
+        if anchor:
+            record["anchor"] = anchor
+            lines = current.splitlines(keepends=True)
+            start, end, candidates, error = _note_anchor_span(current, anchor)
+            if error:
+                record["applied"] = False
+                record["error"] = error
+                record["candidates"] = candidates
+                results.append(record)
+                continue
+            original = "".join(lines[start:end])
+            replacement = new_text
+            if replacement and not replacement.endswith(("\n", "\r")):
+                replacement += "\n"
+            record["old_text"] = original
+            record["anchor_scope_lines"] = end - start
+            current = "".join(lines[:start]) + replacement + "".join(lines[end:])
+            record["applied"] = True
+            results.append(record)
+            continue
+        occurrences = current.count(old_text) if old_text else 0
+        if occurrences == 0:
+            record["applied"] = False
+            record["error"] = f"old_text not found in note {ref}. Verify the note content."
+        elif occurrences > 1:
+            record["applied"] = False
+            record["error"] = (
+                f"old_text matches {occurrences} places in note {ref}; "
+                "provide a longer old_text that matches exactly once"
+            )
+        else:
+            current = current.replace(old_text, new_text, 1)
+            record["applied"] = True
+        results.append(record)
+    return current, results
+
+
 def entry_over_budget_error(*, entry: str, chars: int, limit: int, note_ref: str) -> str:
     """Field error for a staged entry whose body no longer fits one resident line.
 
@@ -212,14 +289,17 @@ _REVIEW_FAIRNESS_MAX_WAIT_SECONDS = 600
 
 
 def _memory_request_lane(*, op: str, trigger_source: str) -> str:
-    """Batching lane of one queue row: `active` merges, `review` and `runtime` stay single.
+    """Batching lane of one queue row: only `active` merges; every other lane is single.
 
     An unrecognized trigger source falls to `review` on purpose: a new enqueue door that
     forgets to register itself then loses merging instead of silently joining somebody
     else's batch.
     """
-    if str(op or "").strip().lower() == "consolidate":
+    normalized_op = str(op or "").strip().lower()
+    if normalized_op == "consolidate":
         return "runtime"
+    if normalized_op == "dream":
+        return "dream"
     if str(trigger_source or "").strip() in _ACTIVE_TRIGGER_SOURCES:
         return "active"
     return "review"
@@ -714,6 +794,11 @@ class _MemoryToolSession:
     # shape the orphan sweep once reaped seconds after writing it. Queried per call so
     # a later batch in the same turn sees the ownership earlier batches created.
     owned_note_refs_fn: Callable[[], set[str]] | None = None
+    dream_context_loaded: bool = False
+    dream_cluster_key: str = ""
+    dream_base_revision: int = 0
+    dream_memory_ids: set[str] = field(default_factory=set)
+    dream_note_refs: set[str] = field(default_factory=set)
 
     def note_directories(self) -> list[Path]:
         return [self.index_dir, self.notes_dir] if self.index_dir is not None else [self.notes_dir]
@@ -846,6 +931,7 @@ class _MemoryToolSession:
             or list(payload.get("category_deletes") or [])
             or dict(payload.get("note_upserts") or {})
             or dict(payload.get("note_edits") or {})
+            or list(payload.get("note_section_updates") or [])
         )
 
     def confirm_batch(self) -> dict[str, Any]:
@@ -874,8 +960,10 @@ class _MemoryToolSession:
         adds: list[dict[str, Any]] | None = None,
         rewrites: list[dict[str, Any]] | None = None,
         deletes: list[int] | None = None,
+        delete_reasons: list[dict[str, Any]] | None = None,
         note_upserts: dict[str, str] | None = None,
         note_edits: dict[str, list[dict[str, str]]] | None = None,
+        note_section_updates: list[dict[str, Any]] | None = None,
         inspired_lines: list[int] | None = None,
         category_deletes: list[str] | None = None,
         noop_reason: str | None = None,
@@ -883,10 +971,12 @@ class _MemoryToolSession:
     ) -> dict[str, Any]:
         errors: dict[str, str] = {}
         normalized_adds: list[dict[str, str]] = []
-        normalized_rewrites: list[dict[str, str]] = []
+        normalized_rewrites: list[dict[str, Any]] = []
         normalized_deletes: list[int] = []
+        normalized_delete_reasons: list[dict[str, Any]] = []
         normalized_note_upserts: dict[str, str] = {}
         normalized_note_edits: dict[str, list[dict[str, str]]] = {}
+        normalized_note_section_updates: list[dict[str, Any]] = []
         normalized_inspired_lines: list[int] = []
         normalized_category_deletes: list[str] = []
         budget_rows: list[dict[str, Any]] = []
@@ -982,7 +1072,8 @@ class _MemoryToolSession:
                     continue
                 line, line_error = coerce_memory_line(item.get("line"))
                 content = str(item.get("content") or "").strip()
-                minimal_memory = str(item.get("minimal_memory") or "").strip()
+                minimal_supplied = "minimal_memory" in item and item.get("minimal_memory") is not None
+                minimal_memory = str(item.get("minimal_memory") or "").strip() if minimal_supplied else ""
                 note_ref = self._normalize_note_ref(
                     str(item.get("note_ref") or "").strip(),
                     field=f"rewrites[{index}].note_ref",
@@ -991,7 +1082,7 @@ class _MemoryToolSession:
                     errors[f"rewrites[{index}].line"] = line_error
                 if not content:
                     errors[f"rewrites[{index}].content"] = "content must not be empty"
-                if content and not minimal_memory:
+                if content and minimal_supplied and not minimal_memory:
                     errors[f"rewrites[{index}].minimal_memory"] = "minimal_memory must not be empty"
                 if minimal_memory and ("\n" in minimal_memory or "\r" in minimal_memory):
                     errors[f"rewrites[{index}].minimal_memory"] = (
@@ -1006,13 +1097,13 @@ class _MemoryToolSession:
                     hint = self._unresolved_note_ref_hint(note_ref)
                     if hint:
                         errors[f"rewrites[{index}].note_ref"] = hint
-                if line and content and minimal_memory:
+                if line and content:
                     price(f"rewrites[{index}] (line {line})", content, note_ref)
                     normalized_rewrites.append(
                         {
                             "line": line,
                             "content": content,
-                            "minimal_memory": minimal_memory,
+                            "minimal_memory": minimal_memory if minimal_supplied else None,
                             "note_ref": note_ref,
                         }
                     )
@@ -1027,6 +1118,65 @@ class _MemoryToolSession:
                     errors[f"deletes[{index}]"] = line_error
                     continue
                 normalized_deletes.append(line)
+
+        if delete_reasons is not None and not isinstance(delete_reasons, list):
+            errors["delete_reasons"] = "delete_reasons must be a list"
+            raw_delete_reasons: list[Any] = []
+        else:
+            raw_delete_reasons = list(delete_reasons or [])
+            seen_reason_lines: set[int] = set()
+            for index, item in enumerate(raw_delete_reasons):
+                if not isinstance(item, dict):
+                    errors[f"delete_reasons[{index}]"] = "delete reason must be an object"
+                    continue
+                line, line_error = coerce_memory_line(item.get("line"))
+                reason = str(item.get("reason") or "").strip()
+                basis = str(item.get("authority_basis") or "").strip().lower()
+                evidence = str(item.get("evidence") or "").strip()
+                replacement_raw = item.get("replacement_line")
+                replacement_line = 0
+                if replacement_raw is not None and str(replacement_raw).strip():
+                    replacement_line, replacement_error = coerce_memory_line(replacement_raw)
+                    if replacement_error:
+                        errors[f"delete_reasons[{index}].replacement_line"] = replacement_error
+                if line_error:
+                    errors[f"delete_reasons[{index}].line"] = line_error
+                if line in seen_reason_lines:
+                    errors[f"delete_reasons[{index}].line"] = "duplicate delete reason line"
+                seen_reason_lines.add(line)
+                if not reason:
+                    errors[f"delete_reasons[{index}].reason"] = "reason must not be empty"
+                if basis not in {"explicit_supersession", "newer_timestamp", "duplicate", "operator_request"}:
+                    errors[f"delete_reasons[{index}].authority_basis"] = (
+                        "authority_basis must be explicit_supersession, newer_timestamp, duplicate, or operator_request"
+                    )
+                if item.get("scope_match") is not True:
+                    errors[f"delete_reasons[{index}].scope_match"] = "scope_match must be true"
+                if basis in {"explicit_supersession", "newer_timestamp", "duplicate"} and not replacement_line:
+                    errors[f"delete_reasons[{index}].replacement_line"] = (
+                        "replacement_line is required for this authority_basis"
+                    )
+                if basis in {"explicit_supersession", "duplicate"} and not evidence:
+                    errors[f"delete_reasons[{index}].evidence"] = (
+                        "evidence must not be empty for this authority_basis"
+                    )
+                if line and reason and basis and item.get("scope_match") is True:
+                    normalized_delete_reasons.append(
+                        {
+                            "line": line,
+                            "reason": reason,
+                            "replacement_line": replacement_line or None,
+                            "authority_basis": basis,
+                            "scope_match": True,
+                            "evidence": evidence,
+                        }
+                    )
+            delete_lines = set(normalized_deletes)
+            reason_lines = {item["line"] for item in normalized_delete_reasons}
+            if delete_lines != reason_lines:
+                errors["delete_reasons"] = "every deleted line must have exactly one matching delete reason"
+            if normalized_delete_reasons and not delete_lines:
+                errors["delete_reasons"] = "delete_reasons may not be used without deletes"
 
         raw_note_upserts = dict(note_upserts or {})
         if not isinstance(raw_note_upserts, dict):
@@ -1097,8 +1247,8 @@ class _MemoryToolSession:
                 normalized_note_upserts[ref] = body
 
         # Incremental note editing, on purpose shaped like the ordinary file edit tool:
-        # flat old_text/new_text per op, `new_text` empty means delete that span, and
-        # `old_text` has to match exactly once. Rewriting a whole note to change one
+        # old_text/new_text or a unique anchor/new_text per op; empty new_text deletes
+        # that span, and old_text has to match exactly once. Rewriting a whole note to change one
         # line costs the full body on the output side every time and can silently drop
         # paragraphs nobody re-read - measured, the largest note here is 2964 chars.
         raw_note_edits = dict(note_edits or {})
@@ -1125,16 +1275,63 @@ class _MemoryToolSession:
                 ops: list[dict[str, str]] = []
                 for index, raw_op in enumerate(raw_ops):
                     if not isinstance(raw_op, dict):
-                        errors[f"note_edits.{ref}[{index}]"] = "each edit must be an object with old_text and new_text"
+                        errors[f"note_edits.{ref}[{index}]"] = (
+                            "each edit must be an object with old_text or anchor, and new_text"
+                        )
                         continue
                     old_text = str(raw_op.get("old_text") or "")
+                    anchor = str(raw_op.get("anchor") or "")
                     new_text = str(raw_op.get("new_text") or "")
-                    if not old_text.strip():
-                        errors[f"note_edits.{ref}[{index}]"] = "old_text must not be empty"
+                    if bool(old_text.strip()) == bool(anchor.strip()):
+                        errors[f"note_edits.{ref}[{index}]"] = (
+                            "provide exactly one of old_text or anchor"
+                        )
                         continue
-                    ops.append({"old_text": old_text, "new_text": new_text})
+                    if old_text.strip():
+                        ops.append({"old_text": old_text, "new_text": new_text})
+                    else:
+                        ops.append({"anchor": anchor, "new_text": new_text})
                 if ops:
                     normalized_note_edits[ref] = ops
+
+        if note_section_updates is not None and not isinstance(note_section_updates, list):
+            errors["note_section_updates"] = "note_section_updates must be a list"
+        else:
+            for index, item in enumerate(list(note_section_updates or [])):
+                if not isinstance(item, dict):
+                    errors[f"note_section_updates[{index}]"] = "note section update must be an object"
+                    continue
+                ref = str(item.get("ref") or "").strip()
+                section_id = str(item.get("section_id") or "").strip()
+                section_key = str(item.get("section_key") or "").strip()
+                status = str(item.get("status") or "").strip().lower()
+                scope_key = str(item.get("scope_key") or "").strip()
+                superseded_by = str(item.get("superseded_by") or "").strip()
+                evidence = str(item.get("evidence") or "").strip()
+                try:
+                    note_file_name(ref)
+                except Exception as exc:
+                    errors[f"note_section_updates[{index}].ref"] = str(exc or "invalid note ref")
+                if bool(section_id) == bool(section_key):
+                    errors[f"note_section_updates[{index}]"] = (
+                        "provide exactly one of section_id or section_key"
+                    )
+                if status not in {"unknown", "active", "superseded"}:
+                    errors[f"note_section_updates[{index}].status"] = (
+                        "status must be unknown, active, or superseded"
+                    )
+                if ref and (section_id or section_key) and status:
+                    normalized_note_section_updates.append(
+                        {
+                            "ref": ref,
+                            "section_id": section_id,
+                            "section_key": section_key,
+                            "status": status,
+                            "scope_key": scope_key,
+                            "superseded_by": superseded_by,
+                            "evidence": evidence,
+                        }
+                    )
 
         raw_inspired_lines = inspired_lines
         if raw_inspired_lines is None:
@@ -1174,9 +1371,10 @@ class _MemoryToolSession:
             or normalized_category_deletes
             or normalized_note_upserts
             or normalized_note_edits
+            or normalized_note_section_updates
         )
         if normalized_noop_reason and has_mutation:
-            errors["noop_reason"] = "noop_reason may not be combined with add, rewrite, delete, category delete, or note change"
+            errors["noop_reason"] = "noop_reason may not be combined with add, rewrite, delete, category delete, note change, or note section update"
         if normalized_already_satisfied and (has_mutation or normalized_noop_reason):
             errors["already_satisfied"] = (
                 "already_satisfied may not be combined with add, rewrite, delete, category delete, note change, or noop_reason"
@@ -1187,7 +1385,7 @@ class _MemoryToolSession:
             errors["already_satisfied"] = "already_satisfied is only valid for delete batches"
         if not normalized_noop_reason and not normalized_already_satisfied and not has_mutation:
             errors["batch"] = (
-                "at least one add, rewrite, delete, category_delete, note_upsert, note_edits, noop_reason, or already_satisfied is required"
+                "at least one add, rewrite, delete, category_delete, note_upsert, note_edits, note_section_update, noop_reason, or already_satisfied is required"
             )
 
         if errors:
@@ -1207,8 +1405,10 @@ class _MemoryToolSession:
             "adds": normalized_adds,
             "rewrites": normalized_rewrites,
             "deletes": normalized_deletes,
+            "delete_reasons": normalized_delete_reasons,
             "note_upserts": normalized_note_upserts,
             "note_edits": normalized_note_edits,
+            "note_section_updates": normalized_note_section_updates,
             "inspired_lines": normalized_inspired_lines,
             "category_deletes": normalized_category_deletes,
             "noop_reason": normalized_noop_reason,
@@ -1421,8 +1621,11 @@ class _MemoryValidatedWrite:
     adds: list[dict[str, str]] = field(default_factory=list)
     rewrites: list[dict[str, str]] = field(default_factory=list)
     deletes: list[str] = field(default_factory=list)
+    delete_reasons: dict[str, dict[str, Any]] = field(default_factory=dict)
     note_upserts: dict[str, str] = field(default_factory=dict)
     note_edits: dict[str, list[dict[str, str]]] = field(default_factory=dict)
+    note_section_updates: list[dict[str, Any]] = field(default_factory=list)
+    note_section_results: list[dict[str, Any]] = field(default_factory=list)
     # Per-op outcome of the incremental note edits, recorded so a failed span is
     # visible instead of quietly leaving the note unchanged.
     note_edit_results: list[dict[str, Any]] = field(default_factory=list)
@@ -1567,9 +1770,48 @@ class _MemorySqliteRepository:
                     added_ids TEXT NOT NULL DEFAULT '[]',
                     changed_ids TEXT NOT NULL DEFAULT '[]',
                     retired_ids TEXT NOT NULL DEFAULT '[]',
+                    changed_note_refs TEXT NOT NULL DEFAULT '[]',
                     rendered TEXT NOT NULL DEFAULT '',
                     chars INTEGER NOT NULL DEFAULT 0
                 )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memory_note_meta (
+                    note_key TEXT PRIMARY KEY,
+                    ref TEXT NOT NULL,
+                    kind TEXT NOT NULL CHECK(kind IN ('ordinary', 'category')),
+                    updated_at TEXT NOT NULL DEFAULT '',
+                    content_sha256 TEXT NOT NULL DEFAULT ''
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS note_section_meta (
+                    note_key TEXT NOT NULL,
+                    section_id TEXT NOT NULL,
+                    section_key TEXT NOT NULL,
+                    heading_path TEXT NOT NULL DEFAULT '',
+                    anchor TEXT NOT NULL DEFAULT '',
+                    ordinal INTEGER NOT NULL DEFAULT 0,
+                    scope_key TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'unknown'
+                        CHECK(status IN ('unknown', 'active', 'superseded')),
+                    superseded_by TEXT NOT NULL DEFAULT '',
+                    decision_at TEXT NOT NULL DEFAULT '',
+                    evidence TEXT NOT NULL DEFAULT '',
+                    content_sha256 TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY (note_key, section_id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_note_section_active_scope
+                ON note_section_meta(note_key, scope_key)
+                WHERE status = 'active' AND scope_key != ''
                 """
             )
             # Stores created before these columns existed get them in place; SQLite has
@@ -1578,7 +1820,275 @@ class _MemorySqliteRepository:
             for column in ("note_ref", "consolidated_into"):
                 if column not in present:
                     conn.execute(f"ALTER TABLE memories ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+            revision_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(memory_revisions)")}
+            if "changed_note_refs" not in revision_columns:
+                conn.execute(
+                    "ALTER TABLE memory_revisions ADD COLUMN changed_note_refs TEXT NOT NULL DEFAULT '[]'"
+                )
             conn.commit()
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _note_meta_key(ref: str, kind: str) -> str:
+        normalized_ref = str(ref or "").strip()
+        normalized_kind = str(kind or "").strip().lower()
+        if not normalized_ref:
+            raise ValueError("note ref is required")
+        if normalized_kind not in {"ordinary", "category"}:
+            raise ValueError("note kind must be ordinary or category")
+        return f"{normalized_kind}:{normalized_ref}"
+
+    def mark_note_updated(
+        self,
+        ref: str,
+        kind: str,
+        updated_at: str,
+        content_sha256: str,
+    ) -> None:
+        normalized_ref = str(ref or "").strip()
+        normalized_kind = str(kind or "").strip().lower()
+        note_key = self._note_meta_key(normalized_ref, normalized_kind)
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO memory_note_meta(note_key, ref, kind, updated_at, content_sha256)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(note_key) DO UPDATE SET
+                        ref = excluded.ref,
+                        kind = excluded.kind,
+                        updated_at = excluded.updated_at,
+                        content_sha256 = excluded.content_sha256
+                    """,
+                    (
+                        note_key,
+                        normalized_ref,
+                        normalized_kind,
+                        str(updated_at or ""),
+                        str(content_sha256 or ""),
+                    ),
+                )
+        finally:
+            conn.close()
+
+    def read_note_meta(self, ref: str, kind: str) -> dict[str, Any] | None:
+        note_key = self._note_meta_key(ref, kind)
+        conn = self._connect()
+        try:
+            try:
+                row = conn.execute(
+                    "SELECT note_key, ref, kind, updated_at, content_sha256 "
+                    "FROM memory_note_meta WHERE note_key = ?",
+                    (note_key,),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                return None
+            return dict(row) if row is not None else None
+        finally:
+            conn.close()
+
+    def delete_note_meta(self, ref: str, kind: str) -> None:
+        note_key = self._note_meta_key(ref, kind)
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute("DELETE FROM memory_note_meta WHERE note_key = ?", (note_key,))
+        finally:
+            conn.close()
+
+    def list_note_meta(self) -> list[dict[str, Any]]:
+        conn = self._connect()
+        try:
+            try:
+                rows = conn.execute(
+                    "SELECT note_key, ref, kind, updated_at, content_sha256 "
+                    "FROM memory_note_meta ORDER BY kind, ref"
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return []
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    def list_note_sections(self, note_key: str | None = None) -> list[dict[str, Any]]:
+        conn = self._connect()
+        try:
+            try:
+                if note_key is None:
+                    rows = conn.execute(
+                        "SELECT * FROM note_section_meta ORDER BY note_key, ordinal, section_id"
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT * FROM note_section_meta WHERE note_key = ? ORDER BY ordinal, section_id",
+                        (str(note_key),),
+                    ).fetchall()
+            except sqlite3.OperationalError:
+                return []
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    def read_note_section(self, note_key: str, section_id: str) -> dict[str, Any] | None:
+        conn = self._connect()
+        try:
+            try:
+                row = conn.execute(
+                    "SELECT * FROM note_section_meta WHERE note_key = ? AND section_id = ?",
+                    (str(note_key), str(section_id)),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                return None
+            return dict(row) if row is not None else None
+        finally:
+            conn.close()
+
+    def upsert_note_section(
+        self,
+        *,
+        note_key: str,
+        section_id: str,
+        section_key: str,
+        heading_path: str = "",
+        anchor: str = "",
+        ordinal: int = 0,
+        scope_key: str = "",
+        status: str = "unknown",
+        superseded_by: str = "",
+        decision_at: str = "",
+        evidence: str = "",
+        content_sha256: str = "",
+    ) -> None:
+        normalized_status = str(status or "unknown").strip().lower()
+        if normalized_status not in {"unknown", "active", "superseded"}:
+            raise ValueError("note section status must be unknown, active, or superseded")
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO note_section_meta(
+                        note_key, section_id, section_key, heading_path, anchor, ordinal,
+                        scope_key, status, superseded_by, decision_at, evidence, content_sha256
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(note_key, section_id) DO UPDATE SET
+                        section_key = excluded.section_key,
+                        heading_path = excluded.heading_path,
+                        anchor = excluded.anchor,
+                        ordinal = excluded.ordinal,
+                        scope_key = excluded.scope_key,
+                        status = excluded.status,
+                        superseded_by = excluded.superseded_by,
+                        decision_at = excluded.decision_at,
+                        evidence = excluded.evidence,
+                        content_sha256 = excluded.content_sha256
+                    """,
+                    (
+                        str(note_key),
+                        str(section_id),
+                        str(section_key),
+                        str(heading_path or ""),
+                        str(anchor or ""),
+                        int(ordinal or 0),
+                        str(scope_key or ""),
+                        normalized_status,
+                        str(superseded_by or ""),
+                        str(decision_at or ""),
+                        str(evidence or ""),
+                        str(content_sha256 or ""),
+                    ),
+                )
+        finally:
+            conn.close()
+
+    def delete_note_sections(self, note_key: str) -> None:
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute("DELETE FROM note_section_meta WHERE note_key = ?", (str(note_key),))
+        finally:
+            conn.close()
+
+    def sync_note_sections(
+        self,
+        *,
+        note_key: str,
+        sections: list[dict[str, Any]],
+        now_iso: str = "",
+        operator_removed: bool = False,
+        refresh_existing: bool = True,
+    ) -> None:
+        conn = self._connect()
+        try:
+            with conn:
+                existing = {
+                    str(row["section_id"]): dict(row)
+                    for row in conn.execute(
+                        "SELECT * FROM note_section_meta WHERE note_key = ?",
+                        (str(note_key),),
+                    ).fetchall()
+                }
+                current_ids: set[str] = set()
+                for section in sections:
+                    section_id = str(section.get("section_id") or "")
+                    if not section_id:
+                        continue
+                    current_ids.add(section_id)
+                    current = existing.get(section_id)
+                    if current is None:
+                        conn.execute(
+                            """
+                            INSERT INTO note_section_meta(
+                                note_key, section_id, section_key, heading_path, anchor, ordinal,
+                                scope_key, status, superseded_by, decision_at, evidence, content_sha256
+                            ) VALUES (?, ?, ?, ?, ?, ?, '', 'unknown', '', '', '', ?)
+                            """,
+                            (
+                                str(note_key),
+                                section_id,
+                                str(section.get("section_key") or ""),
+                                str(section.get("heading_path") or ""),
+                                str(section.get("anchor") or ""),
+                                int(section.get("ordinal") or 0),
+                                str(section.get("content_sha256") or ""),
+                            ),
+                        )
+                    elif refresh_existing:
+                        conn.execute(
+                            """
+                            UPDATE note_section_meta
+                            SET section_key = ?, heading_path = ?, anchor = ?, ordinal = ?, content_sha256 = ?
+                            WHERE note_key = ? AND section_id = ?
+                            """,
+                            (
+                                str(section.get("section_key") or ""),
+                                str(section.get("heading_path") or ""),
+                                str(section.get("anchor") or ""),
+                                int(section.get("ordinal") or 0),
+                                str(section.get("content_sha256") or ""),
+                                str(note_key),
+                                section_id,
+                            ),
+                        )
+                if operator_removed:
+                    for section_id, row in existing.items():
+                        if section_id in current_ids or row.get("status") == "superseded":
+                            continue
+                        conn.execute(
+                            """
+                            UPDATE note_section_meta
+                            SET status = 'superseded', superseded_by = '', decision_at = ?, evidence = ?
+                            WHERE note_key = ? AND section_id = ?
+                            """,
+                            (
+                                str(now_iso),
+                                "operator note edit removed section",
+                                str(note_key),
+                                section_id,
+                            ),
+                        )
         finally:
             conn.close()
 
@@ -1591,6 +2101,7 @@ class _MemorySqliteRepository:
         changed_ids: list[str],
         retired_ids: list[str],
         rendered: str,
+        changed_note_refs: list[str] | None = None,
     ) -> int:
         conn = self._connect()
         try:
@@ -1598,8 +2109,8 @@ class _MemorySqliteRepository:
                 cursor = conn.execute(
                     """
                     INSERT INTO memory_revisions(
-                        created_at, op, added_ids, changed_ids, retired_ids, rendered, chars
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        created_at, op, added_ids, changed_ids, retired_ids, changed_note_refs, rendered, chars
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         str(created_at or ""),
@@ -1607,6 +2118,16 @@ class _MemorySqliteRepository:
                         json.dumps(sorted({str(item or "").strip() for item in added_ids if str(item or "").strip()}), ensure_ascii=False),
                         json.dumps(sorted({str(item or "").strip() for item in changed_ids if str(item or "").strip()}), ensure_ascii=False),
                         json.dumps(sorted({str(item or "").strip() for item in retired_ids if str(item or "").strip()}), ensure_ascii=False),
+                        json.dumps(
+                            sorted(
+                                {
+                                    str(item or "").strip()
+                                    for item in list(changed_note_refs or [])
+                                    if str(item or "").strip()
+                                }
+                            ),
+                            ensure_ascii=False,
+                        ),
                         str(rendered or ""),
                         len(str(rendered or "")),
                     ),
@@ -1631,12 +2152,20 @@ class _MemorySqliteRepository:
         try:
             try:
                 rows = conn.execute(
-                    "SELECT rev, created_at, op, added_ids, changed_ids, retired_ids, rendered, chars"
+                    "SELECT rev, created_at, op, added_ids, changed_ids, retired_ids, changed_note_refs, rendered, chars"
                     " FROM memory_revisions WHERE rev > ? ORDER BY rev",
                     (int(rev or 0),),
                 ).fetchall()
             except sqlite3.OperationalError:
-                return []
+                try:
+                    rows = conn.execute(
+                        "SELECT rev, created_at, op, added_ids, changed_ids, retired_ids, "
+                        "'[]' AS changed_note_refs, rendered, chars"
+                        " FROM memory_revisions WHERE rev > ? ORDER BY rev",
+                        (int(rev or 0),),
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    return []
             return [dict(row) for row in rows]
         finally:
             conn.close()
@@ -2039,7 +2568,7 @@ class _MemorySqliteRepository:
                             refresh_count = refresh_count + 1,
                             passed_count = 0,
                             is_compressed = 0,
-                            updated_at = ?
+                            updated_at = CASE WHEN memory_body != ? THEN ? ELSE updated_at END
                         WHERE memory_id = ?
                         """,
                         (
@@ -2047,6 +2576,7 @@ class _MemorySqliteRepository:
                             str(item.get("minimal_memory") or ""),
                             rewrite_note_ref,
                             rewrite_note_ref,
+                            str(item.get("content") or ""),
                             now_iso,
                             memory_id,
                         ),
@@ -2159,33 +2689,6 @@ class _MemorySqliteRepository:
         finally:
             conn.close()
         return flattened
-
-    def touch_rows_for_notes(self, note_refs: list[str], *, now_iso: str) -> list[str]:
-        """Move `updated_at` on the rows that own the given notes.
-
-        A resident line points at its detail; rewriting that detail changes what the
-        memory says even though the line itself still reads the same, so its date has to
-        move. Rows are matched through the `note_ref` column - nothing here scans text.
-        """
-
-        wanted = {str(ref or "").strip() for ref in list(note_refs or []) if str(ref or "").strip()}
-        if not wanted:
-            return []
-        touched: list[str] = []
-        conn = self._connect()
-        try:
-            for memory_id, current_ref in conn.execute("SELECT memory_id, note_ref FROM memories WHERE note_ref != ''"):
-                if str(current_ref or "").strip() not in wanted:
-                    continue
-                conn.execute(
-                    "UPDATE memories SET updated_at = ? WHERE memory_id = ?",
-                    (str(now_iso or ""), str(memory_id)),
-                )
-                touched.append(str(memory_id))
-            conn.commit()
-        finally:
-            conn.close()
-        return touched
 
     def mark_uncompressed(self, memory_id: str) -> bool:
         """Operator-only: put a row back at its full body in the resident block.
@@ -2325,6 +2828,10 @@ class MemoryManager:
             getattr(config.queue, "failed_file", "") or "memory/failed.jsonl"
         )
         self.review_state_file = self.mem_dir / "review_state.json"
+        dream_cfg = getattr(config, "dream", None)
+        self.dream_state_file = self.workspace / str(
+            getattr(dream_cfg, "state_file", "") or "memory/dream_state.json"
+        )
         self._io_lock = threading.RLock()
         self._last_stale_review_sweep_at = 0.0
         self._processed_request_ids_cache: tuple[tuple[int, int], set[str]] | None = None
@@ -2354,6 +2861,8 @@ class MemoryManager:
             document_text=preserved_document,
             note_bodies=preserved_notes,
         )
+        self._initialize_note_meta()
+        self._initialize_note_sections()
         # sqlite is the only authoritative store, so the mirror is reconciled at boot
         # rather than on the next commit. Reconcile (not a bare repaint) because a
         # non-empty mirror that sqlite does not produce is orphan text: it has to be
@@ -2414,6 +2923,342 @@ class MemoryManager:
                 continue
             note_path.parent.mkdir(parents=True, exist_ok=True)
             self._atomic_write_text(note_path, str(body or ""))
+
+    @staticmethod
+    def _format_memory_time_minute(value: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return "unknown"
+        try:
+            return datetime.fromisoformat(text).strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            return "unknown"
+
+    @staticmethod
+    def _note_content_sha256(path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    @staticmethod
+    def _read_note_body_exact(path: Path) -> str:
+        return path.read_bytes().decode("utf-8")
+
+    @staticmethod
+    def _note_kind_for_path(path: Path, index_dir: Path) -> str:
+        return "category" if path.parent == index_dir else "ordinary"
+
+    def _initialize_note_meta(self) -> None:
+        repo = getattr(self, "_memory_repo", None)
+        if repo is None or self._read_only_init:
+            return
+        existing = {(str(item.get("kind") or ""), str(item.get("ref") or "")) for item in repo.list_note_meta()}
+        for directory, kind in ((self.notes_dir, "ordinary"), (self.index_dir, "category")):
+            for path in directory.glob("*.md"):
+                if (kind, path.stem) not in existing:
+                    repo.mark_note_updated(path.stem, kind, "", self._note_content_sha256(path))
+
+    def _sync_note_meta_from_file(self, path: Path, *, now_iso: str) -> bool:
+        repo = getattr(self, "_memory_repo", None)
+        if repo is None or not path.exists():
+            return False
+        kind = self._note_kind_for_path(path, self.index_dir)
+        digest = self._note_content_sha256(path)
+        current = repo.read_note_meta(path.stem, kind)
+        if current is None:
+            repo.mark_note_updated(path.stem, kind, "", digest)
+            return False
+        if str(current.get("content_sha256") or "") == digest:
+            return False
+        repo.mark_note_updated(path.stem, kind, now_iso, digest)
+        return True
+
+    def _write_note_text(
+        self,
+        path: Path,
+        text: str,
+        *,
+        now_iso: str,
+        operator_removed: bool = False,
+    ) -> bool:
+        normalized = str(text or "")
+        previous = path.read_text(encoding="utf-8") if path.exists() else None
+        if previous == normalized:
+            repo = getattr(self, "_memory_repo", None)
+            if repo is not None and repo.read_note_meta(path.stem, self._note_kind_for_path(path, self.index_dir)) is None:
+                repo.mark_note_updated(
+                    path.stem,
+                    self._note_kind_for_path(path, self.index_dir),
+                    "",
+                    self._note_content_sha256(path),
+                )
+            return False
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._atomic_write_text(path, normalized)
+        repo = getattr(self, "_memory_repo", None)
+        if repo is not None:
+            repo.mark_note_updated(
+                path.stem,
+                self._note_kind_for_path(path, self.index_dir),
+                now_iso,
+                self._note_content_sha256(path),
+            )
+        self._sync_note_sections_for_path(path, now_iso=now_iso, operator_removed=operator_removed)
+        return True
+
+    def _note_meta_stale(self) -> list[dict[str, Any]]:
+        repo = getattr(self, "_memory_repo", None)
+        if repo is None:
+            return []
+        meta_by_key = {
+            (str(item.get("kind") or ""), str(item.get("ref") or "")): item
+            for item in repo.list_note_meta()
+        }
+        stale: list[dict[str, Any]] = []
+        for directory, kind in ((self.notes_dir, "ordinary"), (self.index_dir, "category")):
+            for path in directory.glob("*.md"):
+                meta = meta_by_key.get((kind, path.stem))
+                if meta is None:
+                    continue
+                actual = self._note_content_sha256(path)
+                expected = str(meta.get("content_sha256") or "")
+                if expected != actual:
+                    stale.append(
+                        {
+                            "ref": path.stem,
+                            "kind": kind,
+                            "expected_sha256": expected,
+                            "actual_sha256": actual,
+                        }
+                    )
+        return sorted(stale, key=lambda item: (item["kind"], item["ref"]))
+
+    @staticmethod
+    def _parse_note_sections(body: str) -> list[dict[str, Any]]:
+        text = str(body or "")
+        if not text.strip():
+            return []
+        lines = text.splitlines(keepends=True)
+        headings: list[tuple[int, str, str, int]] = []
+        stack: list[tuple[int, str]] = []
+        sibling_counts: dict[tuple[str, str], int] = {}
+        for index, line in enumerate(lines):
+            stripped = line.strip()
+            match = re.match(r"^(#{1,6})\s+(.+)$", stripped)
+            if match is None:
+                continue
+            level = len(match.group(1))
+            title = match.group(2).strip()
+            while stack and stack[-1][0] >= level:
+                stack.pop()
+            parent_key = " > ".join(title for _level, title in stack)
+            sibling_key = (parent_key, title)
+            occurrence = sibling_counts.get(sibling_key, 0) + 1
+            sibling_counts[sibling_key] = occurrence
+            key_title = title if occurrence == 1 else f"{title}#{occurrence}"
+            heading_path = " > ".join([*(title for _level, title in stack), key_title])
+            headings.append((index, heading_path, stripped, level))
+            stack.append((level, title))
+
+        sections: list[dict[str, Any]] = []
+
+        def append_section(section_key: str, heading_path: str, anchor: str, ordinal: int, content: str) -> None:
+            if not content.strip():
+                return
+            section_id = "s" + hashlib.sha1(section_key.encode("utf-8")).hexdigest()[:12]
+            sections.append(
+                {
+                    "section_id": section_id,
+                    "section_key": section_key,
+                    "heading_path": heading_path,
+                    "anchor": anchor,
+                    "ordinal": ordinal,
+                    "content": content,
+                    "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                }
+            )
+
+        first_heading = headings[0][0] if headings else len(lines)
+        preamble = "".join(lines[:first_heading])
+        append_section("(preamble)", "", "", 0, preamble)
+        for position, (start, heading_path, anchor, _level) in enumerate(headings):
+            end = headings[position + 1][0] if position + 1 < len(headings) else len(lines)
+            append_section(heading_path, heading_path, anchor, position + 1, "".join(lines[start:end]))
+        cursor = 0
+        for section in sections:
+            start = text.find(section["content"], cursor)
+            if start < 0:
+                continue
+            end = start + len(section["content"])
+            section["start_char"] = start
+            section["end_char"] = end
+            cursor = end
+        return sections
+
+    def _initialize_note_sections(self) -> None:
+        repo = getattr(self, "_memory_repo", None)
+        if repo is None or self._read_only_init:
+            return
+        for directory, kind in ((self.notes_dir, "ordinary"), (self.index_dir, "category")):
+            for path in directory.glob("*.md"):
+                repo.sync_note_sections(
+                    note_key=f"{kind}:{path.stem}",
+                    sections=self._parse_note_sections(self._read_note_body_exact(path)),
+                    refresh_existing=False,
+                )
+
+    def _sync_note_sections_for_path(
+        self,
+        path: Path,
+        *,
+        now_iso: str,
+        operator_removed: bool = False,
+    ) -> None:
+        repo = getattr(self, "_memory_repo", None)
+        if repo is None or not path.exists():
+            return
+        kind = self._note_kind_for_path(path, self.index_dir)
+        repo.sync_note_sections(
+            note_key=f"{kind}:{path.stem}",
+            sections=self._parse_note_sections(self._read_note_body_exact(path)),
+            now_iso=now_iso,
+            operator_removed=operator_removed,
+        )
+
+    @staticmethod
+    def _note_section_evidence_hints(body: str) -> dict[str, list[str]]:
+        hints: dict[str, list[str]] = {}
+        for section in MemoryManager._parse_note_sections(body):
+            matched = [
+                " ".join(line.split()).strip(" -")
+                for line in str(section.get("content") or "").splitlines()
+                if re.search(r"作废|改为|不再使用|取代|替代|定版", line)
+            ]
+            if matched:
+                hints[str(section["section_id"])] = matched[:3]
+        return hints
+
+    def _note_section_review_candidates(self, body: str) -> list[dict[str, Any]]:
+        sections = self._parse_note_sections(body)
+        hints = self._note_section_evidence_hints(body)
+        candidates: list[dict[str, Any]] = []
+        for source in sections:
+            source_id = str(source["section_id"])
+            if source_id not in hints:
+                continue
+            source_terms = self._memory_request_terms(str(source.get("content") or ""))
+            scored: list[tuple[int, int, dict[str, Any]]] = []
+            for target in sections:
+                target_id = str(target["section_id"])
+                if target_id == source_id:
+                    continue
+                target_terms = self._memory_request_terms(str(target.get("content") or ""))
+                shared = source_terms & target_terms
+                if shared:
+                    scored.append((len(shared), int(target.get("ordinal") or 0), target))
+            scored.sort(key=lambda item: (-item[0], item[1]))
+            for score, _ordinal, target in scored[:2]:
+                candidates.append(
+                    {
+                        "hint_section_id": source_id,
+                        "hint_section_key": str(source["section_key"]),
+                        "other_section_id": str(target["section_id"]),
+                        "other_section_key": str(target["section_key"]),
+                        "shared_terms": sorted((source_terms & self._memory_request_terms(str(target.get("content") or ""))))[:8],
+                        "evidence_hints": hints[source_id],
+                        "score": score,
+                    }
+                )
+        return candidates
+
+    def _note_section_cards(self, note_key: str, *, body: str | None = None) -> list[dict[str, Any]]:
+        hints = self._note_section_evidence_hints(body or "")
+        return [
+            {
+                "section_id": str(row.get("section_id") or ""),
+                "section_key": str(row.get("section_key") or ""),
+                "status": str(row.get("status") or "unknown"),
+                "scope_key": str(row.get("scope_key") or ""),
+                "superseded_by": str(row.get("superseded_by") or ""),
+                "decision_at": self._format_memory_time_minute(str(row.get("decision_at") or "")),
+                "evidence": str(row.get("evidence") or ""),
+                "evidence_hints": hints.get(str(row.get("section_id") or ""), []),
+            }
+            for row in self._memory_repo.list_note_sections(note_key)
+        ]
+
+    def _note_section_meta_stale(self) -> list[dict[str, Any]]:
+        repo = getattr(self, "_memory_repo", None)
+        if repo is None:
+            return []
+        parsed_by_note: dict[str, dict[str, dict[str, Any]]] = {}
+        for directory, kind in ((self.notes_dir, "ordinary"), (self.index_dir, "category")):
+            for path in directory.glob("*.md"):
+                note_key = f"{kind}:{path.stem}"
+                parsed_by_note[note_key] = {
+                    str(section["section_id"]): section
+                    for section in self._parse_note_sections(self._read_note_body_exact(path))
+                }
+        rows = repo.list_note_sections()
+        rows_by_id = {
+            (str(row.get("note_key") or ""), str(row.get("section_id") or "")): row
+            for row in rows
+        }
+        by_note: dict[str, set[str]] = {}
+        for row in rows:
+            by_note.setdefault(str(row.get("note_key") or ""), set()).add(str(row.get("section_id") or ""))
+        stale: list[dict[str, Any]] = []
+        for row in rows:
+            note_key = str(row.get("note_key") or "")
+            section_id = str(row.get("section_id") or "")
+            parsed = parsed_by_note.get(note_key, {}).get(section_id)
+            if row.get("status") == "superseded":
+                replacement = rows_by_id.get((note_key, str(row.get("superseded_by") or "")))
+                if row.get("superseded_by") and replacement is None:
+                    stale.append(
+                        {
+                            "note_key": note_key,
+                            "section_id": section_id,
+                            "reason": "broken_supersession_reference",
+                        }
+                    )
+                continue
+            if parsed is None:
+                stale.append(
+                    {
+                        "note_key": note_key,
+                        "section_id": section_id,
+                        "reason": "section_missing",
+                    }
+                )
+                continue
+            if str(row.get("content_sha256") or "") != str(parsed.get("content_sha256") or ""):
+                stale.append(
+                    {
+                        "note_key": note_key,
+                        "section_id": section_id,
+                        "reason": "content_hash_mismatch",
+                        "expected_sha256": str(row.get("content_sha256") or ""),
+                        "actual_sha256": str(parsed.get("content_sha256") or ""),
+                    }
+                )
+            elif str(row.get("section_key") or "") != str(parsed.get("section_key") or ""):
+                stale.append(
+                    {
+                        "note_key": note_key,
+                        "section_id": section_id,
+                        "reason": "anchor_mismatch",
+                    }
+                )
+        for note_key, parsed in parsed_by_note.items():
+            known = by_note.get(note_key, set())
+            for section_id in sorted(set(parsed) - known):
+                stale.append(
+                    {
+                        "note_key": note_key,
+                        "section_id": section_id,
+                        "reason": "section_not_indexed",
+                    }
+                )
+        return sorted(stale, key=lambda item: (item["note_key"], item["section_id"], item["reason"]))
 
     def start(self) -> None:
         if self._worker_thread is not None and self._worker_thread.is_alive():
@@ -2484,6 +3329,7 @@ class MemoryManager:
         op: str,
         rows_before: list[dict[str, Any]],
         rows_after: list[dict[str, Any]],
+        changed_note_refs: list[str] | None = None,
     ) -> int:
         """记下这次提交对**居民行**造成的可见变化；没有净变化就不写修订。
 
@@ -2500,7 +3346,10 @@ class MemoryManager:
             if memory_id in before and after[memory_id] != before[memory_id]
         ]
         retired = [memory_id for memory_id in before if memory_id not in after]
-        if not (added or changed or retired):
+        normalized_note_refs = sorted(
+            {str(item or "").strip() for item in list(changed_note_refs or []) if str(item or "").strip()}
+        )
+        if not (added or changed or retired or normalized_note_refs):
             return 0
         visible = set(added) | set(changed)
         parts: list[str] = []
@@ -2523,6 +3372,7 @@ class MemoryManager:
             added_ids=added,
             changed_ids=changed,
             retired_ids=retired,
+            changed_note_refs=normalized_note_refs,
             rendered=rendered,
         )
 
@@ -2536,8 +3386,8 @@ class MemoryManager:
     def memory_notice_delta(self, *, since_rev: int, now_iso: str | None = None) -> dict[str, Any]:
         """会话通知车道用的一跳增量：`since_rev` 之后的可见变化。
 
-        只投增量（新增/改写行 + `Deleted memories:` 行）。整份文档只在基座初始化与
-        压缩边界出现，这里不再按大小或归并类型改投整篇。
+        只投增量（新增/改写行 + `Deleted memories:` 行 + note 新鲜度）。整份文档只在
+        基座初始化与压缩边界出现，这里不再按大小或归并类型改投整篇。
         """
         latest = self.latest_memory_revision()
         since = max(int(since_rev or 0), 0)
@@ -2546,6 +3396,7 @@ class MemoryManager:
             return {"rev": latest, "from_rev": since, "text": "", "rebase": False}
         visible: list[str] = []
         deleted: list[str] = []
+        changed_note_refs: set[str] = set()
         seen: set[str] = set()
         for item in revisions:
             for line in str(item.get("rendered") or "").splitlines():
@@ -2554,11 +3405,33 @@ class MemoryManager:
                     continue
                 seen.add(key)
                 (deleted if key.startswith("- ") else visible).append(key)
+            try:
+                refs = json.loads(str(item.get("changed_note_refs") or "[]"))
+            except (TypeError, ValueError):
+                refs = []
+            if isinstance(refs, list):
+                changed_note_refs.update(str(ref or "").strip() for ref in refs if str(ref or "").strip())
         parts: list[str] = []
         if visible:
             parts.append("\n".join(visible))
         if deleted:
             parts.append("\n".join([MEMORY_DELETED_HEADING, *deleted]))
+        updated_notes: list[str] = []
+        removed_notes: list[str] = []
+        category_names = self._category_note_names()
+        for ref in sorted(changed_note_refs):
+            kind = "category" if ref in category_names else "ordinary"
+            path = (self.index_dir if kind == "category" else self.notes_dir) / note_file_name(ref)
+            if not path.exists():
+                removed_notes.append(f"- {ref} ({kind})")
+                continue
+            meta = self._memory_repo.read_note_meta(ref, kind) or {}
+            updated_at = self._format_memory_time_minute(str(meta.get("updated_at") or ""))
+            updated_notes.append(f"- {ref} ({kind}, updated_at={updated_at})")
+        if updated_notes:
+            parts.append("\n".join(["Updated notes:", *updated_notes]))
+        if removed_notes:
+            parts.append("\n".join(["Removed notes:", *removed_notes]))
         return {"rev": latest, "from_rev": since, "text": "\n".join(parts).strip(), "rebase": False}
 
     def reformat_store(self, *, now_iso: str | None = None) -> dict[str, Any]:
@@ -2961,11 +3834,22 @@ class MemoryManager:
                 path = self._note_path(normalized_ref)
             except FileNotFoundError as exc:
                 raise KeyError(f"memory note not found: {normalized_ref}") from exc
-            self._atomic_write_text(path, new_body)
+            now_iso = self._now_iso()
+            changed = self._write_note_text(path, new_body, now_iso=now_iso, operator_removed=True)
+            if changed:
+                rows = self._memory_repo.list_memories()
+                self._record_memory_revision_locked(
+                    now_iso=now_iso,
+                    op="write",
+                    rows_before=rows,
+                    rows_after=rows,
+                    changed_note_refs=[path.stem],
+                )
+            meta = self._memory_repo.read_note_meta(path.stem, self._note_kind_for_path(path, self.index_dir)) or {}
         return {
             "ref": path.stem,
             "body": new_body,
-            "updated_at": self._now_iso(),
+            "updated_at": str(meta.get("updated_at") or ""),
         }
 
     def _persona_note_path(self) -> Path:
@@ -3003,13 +3887,23 @@ class MemoryManager:
             raise ValueError("persona text must not be empty")
         with self._io_lock:
             path = self._persona_note_path()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            self._atomic_write_text(path, self._normalize_note_text(body))
+            now_iso = self._now_iso()
+            changed = self._write_note_text(path, self._normalize_note_text(body), now_iso=now_iso)
+            if changed:
+                rows = self._memory_repo.list_memories()
+                self._record_memory_revision_locked(
+                    now_iso=now_iso,
+                    op="write",
+                    rows_before=rows,
+                    rows_after=rows,
+                    changed_note_refs=[PERSONA_NOTE_REF],
+                )
+            meta = self._memory_repo.read_note_meta(PERSONA_NOTE_REF, "ordinary") or {}
         return {
             "ref": PERSONA_NOTE_REF,
             "body": body,
             "digest": persona_digest(body),
-            "updated_at": self._now_iso(),
+            "updated_at": str(meta.get("updated_at") or ""),
         }
 
     def _is_persona_note_ref(self, ref: str) -> bool:
@@ -3140,6 +4034,8 @@ class MemoryManager:
         dangling_mentions = self._dangling_prose_note_refs()
         category_rows, broken_categories = self._consolidation_categories()
         name_collisions = self._note_name_collisions()
+        note_meta_stale = self._note_meta_stale()
+        note_section_meta_stale = self._note_section_meta_stale()
         queue_rows, queue_parse_errors = self._read_queue_requests_with_diagnostics()
         stuck_processing_head = self._stuck_processing_head(
             queue_rows=queue_rows,
@@ -3206,6 +4102,23 @@ class MemoryManager:
                 "detail": "none" if not name_collisions else ", ".join(name_collisions),
             },
             {
+                "name": "note_meta_stale",
+                "ok": not note_meta_stale,
+                "detail": "none"
+                if not note_meta_stale
+                else ", ".join(f"{item['ref']}({item['kind']})" for item in note_meta_stale),
+            },
+            {
+                "name": "note_section_meta_stale",
+                "ok": not note_section_meta_stale,
+                "detail": "none"
+                if not note_section_meta_stale
+                else ", ".join(
+                    f"{item['note_key']}:{item['section_id']}({item['reason']})"
+                    for item in note_section_meta_stale[:8]
+                ),
+            },
+            {
                 "name": "queue_parse_errors",
                 "ok": not queue_parse_errors,
                 "detail": "none"
@@ -3249,6 +4162,8 @@ class MemoryManager:
             "consolidated_categories": len(category_rows),
             "broken_category_links": broken_categories,
             "note_name_collisions": name_collisions,
+            "note_meta_stale": note_meta_stale,
+            "note_section_meta_stale": note_section_meta_stale,
             "consolidation_chars": len(consolidation_text),
             "queue_depth": len(queue_rows),
             "queue_head": asdict(queue_rows[0]) if queue_rows else None,
@@ -3272,6 +4187,7 @@ class MemoryManager:
         created_notes: list[str] = []
         deleted_notes: list[str] = []
         skipped_collisions: list[str] = []
+        now_iso = self._now_iso()
 
         for ref in missing_note_refs:
             if ref in category_names:
@@ -3282,11 +4198,12 @@ class MemoryManager:
                 continue
             note_path = self.notes_dir / note_file_name(ref)
             note_path.parent.mkdir(parents=True, exist_ok=True)
-            self._atomic_write_text(
+            self._write_note_text(
                 note_path,
                 self._normalize_note_text(
                     f"Placeholder note created by reconcile-notes for ref:{ref}."
                 ),
+                now_iso=now_iso,
             )
             created_notes.append(ref)
 
@@ -3299,8 +4216,19 @@ class MemoryManager:
                     note_path.unlink()
                 except OSError:
                     continue
+                self._memory_repo.delete_note_meta(ref, "ordinary")
+                self._memory_repo.delete_note_sections(f"ordinary:{ref}")
                 deleted_notes.append(ref)
 
+        if created_notes or deleted_notes:
+            rows = self._memory_repo.list_memories()
+            self._record_memory_revision_locked(
+                now_iso=now_iso,
+                op="write",
+                rows_before=rows,
+                rows_after=rows,
+                changed_note_refs=[*created_notes, *deleted_notes],
+            )
         return {
             "ok": True,
             "status": "reconciled",
@@ -4069,13 +4997,35 @@ class MemoryManager:
                 summary_max_chars=int(getattr(self.config.document, "summary_max_chars", 300) or 300),
                 owned_note_refs_fn=lambda: set(self._memory_repo.owned_note_refs()),
             )
+            if session.batch_op == "dream" and batch.items:
+                payload = self._dream_payload_from_item(batch.items[0])
+                session.dream_context_loaded = True
+                session.dream_cluster_key = str(payload.get("cluster_key") or "")
+                session.dream_base_revision = self._dream_payload_base_revision(payload)
+                session.dream_memory_ids = {
+                    str(item or "").strip() for item in list(payload.get("memory_ids") or []) if str(item or "").strip()
+                }
+                session.dream_note_refs = {
+                    str(item or "").strip() for item in list(payload.get("note_refs") or []) if str(item or "").strip()
+                }
+                session.dream_note_refs = self._dream_related_note_refs(
+                    memory_ids=session.dream_memory_ids,
+                    note_refs=session.dream_note_refs,
+                )
             tools = self._memory_agent_tools(session)
-            system_prompt = self._memory_agent_system_prompt()
-            user_prompt = self._memory_agent_user_prompt(
-                batch=batch,
-                snapshot_text=before_text,
-                repair_reason=repair_reason,
-            )
+            system_prompt = self._memory_agent_system_prompt(batch_op=session.batch_op)
+            if session.batch_op == "dream":
+                user_prompt = self._dream_agent_user_prompt(
+                    batch=batch,
+                    snapshot_text=before_text,
+                    repair_reason=repair_reason,
+                )
+            else:
+                user_prompt = self._memory_agent_user_prompt(
+                    batch=batch,
+                    snapshot_text=before_text,
+                    repair_reason=repair_reason,
+                )
         tool_schemas = [item.openai_schema() for item in list(tools or [])]
         chat_call, release_memory_route = await self._build_memory_chat_call(runtime_config, tool_schemas)
         messages: list[dict[str, Any]] = [
@@ -4209,8 +5159,9 @@ class MemoryManager:
                 return True
         return False
 
-    def _memory_agent_system_prompt(self) -> str:
-        return load_prompt("memory_agent.md").strip()
+    def _memory_agent_system_prompt(self, *, batch_op: str = "write") -> str:
+        prompt_name = "memory_agent_dream.md" if str(batch_op or "").strip().lower() == "dream" else "memory_agent.md"
+        return load_prompt(prompt_name).strip()
 
     def _consolidation_agent_system_prompt(self) -> str:
         return load_prompt("memory_consolidator.md").strip()
@@ -4418,7 +5369,8 @@ class MemoryManager:
         for memory_id in list(validated.deletes or []):
             normalized_id = str(memory_id or "").strip()
             if normalized_id:
-                parts.append(f"删除 {normalized_id}")
+                reason = str((validated.delete_reasons or {}).get(normalized_id, {}).get("reason") or "").strip()
+                parts.append(f"删除 {normalized_id}：{reason}" if reason else f"删除 {normalized_id}")
         for ref, body in sorted(dict(validated.note_upserts or {}).items()):
             normalized_ref = str(ref or "").strip()
             body_preview = self._inline_preview_text(body or "")
@@ -4426,6 +5378,11 @@ class MemoryManager:
                 parts.append(f"更新 note ref:{normalized_ref}：{body_preview}")
             elif normalized_ref:
                 parts.append(f"更新 note ref:{normalized_ref}")
+        for item in list(validated.note_section_updates or []):
+            ref = str(item.get("ref") or "").strip()
+            key = str(item.get("section_key") or item.get("section_id") or "").strip()
+            if ref and key:
+                parts.append(f"Note 段落 {ref}/{key}：{item.get('before_status') or 'new'}→{item.get('status') or 'unknown'}")
         if not parts:
             return ""
         return self._inline_preview_text("；".join(parts), max_chars=400)
@@ -4519,25 +5476,36 @@ class MemoryManager:
             normalized_id = str(memory_id or "").strip()
             if not normalized_id:
                 continue
+            reason_meta = dict((validated.delete_reasons or {}).get(normalized_id) or {})
             if normalized_id in purged_by_id:
                 # Not a memory that left the block: a whole navigation section being
                 # dropped. It needs its own chip, or the ledger reads it as an ordinary delete.
-                changes.append(
-                    {
-                        "type": "category_purge",
-                        "memory_id": normalized_id,
-                        "note_ref": purged_by_id[normalized_id],
-                        "original_content": original_bodies.get(normalized_id, ""),
-                    }
-                )
-                continue
-            changes.append(
-                {
-                    "type": "delete",
+                change = {
+                    "type": "category_purge",
                     "memory_id": normalized_id,
+                    "note_ref": purged_by_id[normalized_id],
                     "original_content": original_bodies.get(normalized_id, ""),
                 }
-            )
+                if reason_meta.get("reason"):
+                    change["delete_reason"] = reason_meta["reason"]
+                changes.append(change)
+                continue
+            change = {
+                "type": "delete",
+                "memory_id": normalized_id,
+                "original_content": original_bodies.get(normalized_id, ""),
+            }
+            if reason_meta.get("reason"):
+                change.update(
+                    {
+                        "delete_reason": reason_meta["reason"],
+                        "authority_basis": reason_meta.get("authority_basis", ""),
+                        "replacement_memory_id": reason_meta.get("replacement_memory_id", ""),
+                        "scope_match": reason_meta.get("scope_match", True),
+                        "evidence": reason_meta.get("evidence", ""),
+                    }
+                )
+            changes.append(change)
         for ref, body in sorted(dict(validated.note_upserts or {}).items()):
             normalized_ref = str(ref or "").strip()
             if not normalized_ref:
@@ -4564,6 +5532,25 @@ class MemoryManager:
                     "new_text": str(item.get("new_text") or ""),
                     "applied": bool(item.get("applied")),
                     "error": str(item.get("error") or ""),
+                }
+            )
+        for item in list(validated.note_section_results or []):
+            normalized_ref = str(item.get("ref") or "").strip()
+            if not normalized_ref:
+                continue
+            changes.append(
+                {
+                    "type": "note_section",
+                    "note_ref": normalized_ref,
+                    "section_id": str(item.get("section_id") or ""),
+                    "section_key": str(item.get("section_key") or ""),
+                    "status": str(item.get("status") or "unknown"),
+                    "scope_key": str(item.get("scope_key") or ""),
+                    "superseded_by": str(item.get("superseded_by") or ""),
+                    "decision_at": str(item.get("decision_at") or ""),
+                    "evidence": str(item.get("evidence") or ""),
+                    "old_content": str(item.get("old_content") or ""),
+                    "replacement_content": str(item.get("replacement_content") or ""),
                 }
             )
         for item in list(validated.reaped_notes or []):
@@ -4734,26 +5721,47 @@ class MemoryManager:
         stays readable, the note the row owns stays alive, and the mapping stays auditable.
         """
         writes = list(validated.consolidation_writes or [])
+        touched_refs = {
+            str(write.get("note_ref") or "").strip() for write in writes
+        } | {
+            str(item.get("note_ref") or "").strip() for item in list(validated.retirements or [])
+        }
+        touched_paths = {
+            ref: self.index_dir / note_file_name(ref)
+            for ref in touched_refs
+            if ref
+        }
+        hashes_before = {
+            ref: self._note_content_sha256(path) if path.exists() else ""
+            for ref, path in touched_paths.items()
+        }
         for write in writes:
             ref = str(write.get("note_ref") or "").strip()
             body = write.get("body")
             if not ref or body is None:
                 continue
             path = self.index_dir / note_file_name(ref)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            self._atomic_write_text(path, self._normalize_note_text(str(body or "")))
+            self._write_note_text(path, self._normalize_note_text(str(body or "")), now_iso=now_iso)
         edits_by_ref = {
             str(write.get("note_ref") or "").strip(): list(write.get("edits") or [])
             for write in writes
             if str(write.get("note_ref") or "").strip() and list(write.get("edits") or [])
         }
-        validated.note_edit_results = self._apply_note_edits_locked(edits_by_ref, directory=self.index_dir)
+        validated.note_edit_results = self._apply_note_edits_locked(
+            edits_by_ref, directory=self.index_dir, now_iso=now_iso
+        )
         validated.note_line_stamps = self.stamp_retired_note_lines(
             [
                 {"memory_id": str(item.get("memory_id") or "").strip(), "note_ref": str(item.get("note_ref") or "").strip()}
                 for item in list(validated.retirements or [])
             ]
         )
+        changed_note_refs: list[str] = []
+        for ref, path in touched_paths.items():
+            self._sync_note_meta_from_file(path, now_iso=now_iso)
+            self._sync_note_sections_for_path(path, now_iso=now_iso)
+            if path.exists() and self._note_content_sha256(path) != hashes_before[ref]:
+                changed_note_refs.append(ref)
         self._reconcile_mirror_with_sqlite_locked(now_iso=now_iso)
         rows_before = self._memory_repo.list_memories()
         try:
@@ -4778,6 +5786,7 @@ class MemoryManager:
             op="consolidate",
             rows_before=rows_before,
             rows_after=self._memory_repo.list_memories(),
+            changed_note_refs=changed_note_refs,
         )
         if not validated.retirements:
             # The compress lane already ran before this consolidation was ever queued, so
@@ -4871,17 +5880,42 @@ class MemoryManager:
             changed_note_refs: set[str] = set()
             for ref, body in validated.note_writes.items():
                 note_path = self._note_write_path(ref)
-                note_path.parent.mkdir(parents=True, exist_ok=True)
-                previous = note_path.read_text(encoding="utf-8") if note_path.exists() else None
-                if previous != body:
+                if self._write_note_text(note_path, body, now_iso=now_iso):
                     changed_note_refs.add(str(ref or "").strip())
-                self._atomic_write_text(note_path, body)
-            validated.note_edit_results = self._apply_note_edits_locked(validated.note_edits)
-            changed_note_refs.update(
-                str(result.get("note_ref") or "").strip()
-                for result in list(validated.note_edit_results or [])
-                if result.get("applied")
+            edit_paths = {
+                str(ref): self._note_edit_target(str(ref))
+                for ref in dict(validated.note_edits or {})
+            }
+            edit_hashes_before = {
+                ref: self._note_content_sha256(path) if path.exists() else ""
+                for ref, path in edit_paths.items()
+            }
+            validated.note_edit_results = self._apply_note_edits_locked(
+                validated.note_edits, now_iso=now_iso
             )
+            for ref, path in edit_paths.items():
+                if path.exists() and self._note_content_sha256(path) != edit_hashes_before[ref]:
+                    changed_note_refs.add(ref)
+            section_body_writes = {
+                str(item.get("ref") or ""): str(item.get("note_body_after") or "")
+                for item in list(validated.note_section_updates or [])
+                if str(item.get("ref") or "")
+            }
+            for ref, body in section_body_writes.items():
+                path = self._note_edit_target(ref)
+                normalized_body = str(body or "").replace("\r\n", "\n").replace("\r", "\n")
+                if self._write_note_text(path, normalized_body, now_iso=now_iso):
+                    changed_note_refs.add(ref)
+            self._apply_note_section_updates_locked(validated, now_iso=now_iso)
+            changed_note_refs.update(
+                str(item.get("ref") or "").strip()
+                for item in list(validated.note_section_results or [])
+                if str(item.get("ref") or "").strip()
+            )
+            for ref in sorted(changed_note_refs):
+                path = self._note_edit_target(ref)
+                if path.exists():
+                    self._sync_note_sections_for_path(path, now_iso=now_iso)
             self._reconcile_mirror_with_sqlite_locked(now_iso=now_iso)
             # Capture the original bodies of rewritten/deleted memories before the
             # mutation is applied so the processed record can show before/after text.
@@ -4913,11 +5947,6 @@ class MemoryManager:
                         now_iso=now_iso,
                     )
                 self._rebuild_memory_snapshot_from_sqlite(now_iso=now_iso)
-                if changed_note_refs:
-                    self._memory_repo.touch_rows_for_notes(
-                        sorted(changed_note_refs), now_iso=now_iso
-                    )
-                    self._rebuild_memory_snapshot_from_sqlite(now_iso=now_iso)
             except Exception:
                 # The mirror is the last gate. When it refuses a document (over the hard
                 # cap, or an entry that no longer round-trips) sqlite must go back to
@@ -4951,6 +5980,7 @@ class MemoryManager:
                     reason = str(record.get("reason") or "unreferenced")
                     if record.get("removed") == "true":
                         validated.reaped_notes.append({"note_ref": ref, "reason": reason})
+                        changed_note_refs.add(ref)
                         self._note_feedback_lines.append(
                             f"- note {ref} 已回收（{reason}）：拥有它的记忆行被删除，note 正文随之退场"
                         )
@@ -5009,6 +6039,7 @@ class MemoryManager:
                 op="write",
                 rows_before=rows_before,
                 rows_after=self._memory_repo.list_memories(),
+                changed_note_refs=sorted(changed_note_refs),
             )
 
     @classmethod
@@ -5361,6 +6392,7 @@ class MemoryManager:
         note_edits: dict[str, list[dict[str, str]]] | None,
         *,
         directory: Path | None = None,
+        now_iso: str,
     ) -> list[dict[str, Any]]:
         """Apply incremental note edits after whole-file writes, one op at a time.
 
@@ -5385,39 +6417,46 @@ class MemoryManager:
                             "applied": False,
                             "error": f"note not found: {ref}",
                             "old_text": str(_op.get("old_text") or ""),
+                            "anchor": str(_op.get("anchor") or ""),
                             "new_text": str(_op.get("new_text") or ""),
                         }
                     )
                 continue
             body = path.read_text(encoding="utf-8")
-            changed = False
-            for op_index, op in enumerate(list(ops or [])):
-                old_text = str(op.get("old_text") or "")
-                new_text = str(op.get("new_text") or "")
-                occurrences = body.count(old_text) if old_text else 0
-                record: dict[str, Any] = {
-                    "note_ref": ref,
-                    "op_index": op_index,
-                    "old_text": old_text,
-                    "new_text": new_text,
-                }
-                if occurrences == 0:
-                    record["applied"] = False
-                    record["error"] = f"old_text not found in note {ref}. Verify the note content."
-                elif occurrences > 1:
-                    record["applied"] = False
-                    record["error"] = (
-                        f"old_text matches {occurrences} places in note {ref}; "
-                        "provide a longer old_text that matches exactly once"
-                    )
-                else:
-                    body = body.replace(old_text, new_text, 1)
-                    record["applied"] = True
-                    changed = True
-                results.append(record)
-            if changed:
-                self._atomic_write_text(path, self._normalize_note_text(body))
+            updated, edit_results = _apply_note_edit_ops_to_body(body, ref=ref, ops=list(ops or []))
+            results.extend(edit_results)
+            if updated != body:
+                self._write_note_text(path, self._normalize_note_text(updated), now_iso=now_iso)
         return results
+
+    def _apply_note_section_updates_locked(
+        self,
+        validated: _MemoryValidatedWrite,
+        *,
+        now_iso: str,
+    ) -> None:
+        results: list[dict[str, Any]] = []
+        ordered = sorted(
+            list(validated.note_section_updates or []),
+            key=lambda item: 1 if str(item.get("status") or "") == "active" else 0,
+        )
+        for update in ordered:
+            self._memory_repo.upsert_note_section(
+                note_key=str(update.get("note_key") or ""),
+                section_id=str(update.get("section_id") or ""),
+                section_key=str(update.get("section_key") or ""),
+                heading_path=str(update.get("heading_path") or ""),
+                anchor=str(update.get("anchor") or ""),
+                ordinal=int(update.get("ordinal") or 0),
+                scope_key=str(update.get("scope_key") or ""),
+                status=str(update.get("status") or "unknown"),
+                superseded_by=str(update.get("superseded_by") or ""),
+                decision_at=str(update.get("decision_at") or now_iso),
+                evidence=str(update.get("evidence") or ""),
+                content_sha256=str(update.get("content_sha256") or ""),
+            )
+            results.append(dict(update))
+        validated.note_section_results = results
 
     def _cleanup_orphan_notes_locked(
         self,
@@ -5472,6 +6511,8 @@ class MemoryManager:
                 path.unlink()
             except OSError:
                 continue
+            self._memory_repo.delete_note_meta(ref, "ordinary")
+            self._memory_repo.delete_note_sections(f"ordinary:{ref}")
             record["removed"] = "true"
             records.append(record)
         return records
@@ -5965,6 +7006,7 @@ class MemoryManager:
             # 与上面的 usage 合计同源：只数 provider 回包里真给了 token 的那几发。
             "usage_counted_requests": int(usage_counted_requests or 0),
         }
+        payload.update(self._dream_metadata_from_batch(batch))
         # 按龄冲刷与轮次窗口/压缩冲刷共用同一条入队出口，没有这个字段就数不出"靠龄倒了几次"。
         trigger_sources = sorted(
             {str(item.trigger_source or "").strip() for item in batch.items if str(item.trigger_source or "").strip()}
@@ -6195,13 +7237,8 @@ class MemoryManager:
         flush()
         return pieces or [value]
 
-    def _memory_window_split_target_tokens(self) -> int:
-        """拆片目标 = 记忆链上**最小**声明窗口 × `_MEMORY_WINDOW_SPLIT_RATIO`。
-
-        发送闸门按"这一发落到的那颗模型"的窗口算容量，而批次真正发出时落点可能已经
-        前进过链位，所以这里取整条链最小的一半：任何一次链前进都还在容量内，
-        而不是赌它一定落在链首。拿不到配置就返回 0，表示不拆（闸门那条路照常）。
-        """
+    def _memory_window_split_target_tokens(self, ratio: float = _MEMORY_WINDOW_SPLIT_RATIO) -> int:
+        """拆片目标 = 记忆链上最小声明窗口 × 调用方给定比例；拿不到配置时返回 0。"""
 
         try:
             runtime_config, _revision, _changed = get_runtime_config()
@@ -6218,7 +7255,567 @@ class MemoryManager:
                 windows.append(value)
         if not windows:
             return 0
-        return int(min(windows) * _MEMORY_WINDOW_SPLIT_RATIO)
+        return int(min(windows) * max(float(ratio or 0.0), 0.01))
+
+    def _read_dream_state(self) -> dict[str, Any]:
+        default = {
+            "last_seen_revision": 0,
+            "pending_memory_ids": [],
+            "pending_note_refs": [],
+            "pending_since": "",
+            "last_attempted_at": "",
+            "last_succeeded_at": "",
+            "last_succeeded_revision": 0,
+            "round_robin_cursor": 0,
+            "last_cluster_key": "",
+            "last_error": "",
+        }
+        try:
+            payload = json.loads(self.dream_state_file.read_text(encoding="utf-8") or "{}")
+        except (OSError, ValueError):
+            return default
+        if not isinstance(payload, dict):
+            return default
+        state = dict(default)
+        for key in ("last_seen_revision", "last_succeeded_revision", "round_robin_cursor"):
+            try:
+                state[key] = max(int(payload.get(key, 0) or 0), 0)
+            except (TypeError, ValueError):
+                pass
+        for key in ("pending_memory_ids", "pending_note_refs"):
+            state[key] = sorted(
+                {
+                    str(item or "").strip()
+                    for item in list(payload.get(key) or [])
+                    if str(item or "").strip()
+                }
+            )
+        for key in ("pending_since", "last_attempted_at", "last_succeeded_at", "last_cluster_key", "last_error"):
+            state[key] = str(payload.get(key) or "").strip()
+        return state
+
+    def _write_dream_state(self, state: dict[str, Any]) -> None:
+        self.dream_state_file.parent.mkdir(parents=True, exist_ok=True)
+        self._atomic_write_text(
+            self.dream_state_file,
+            json.dumps(dict(state or {}), ensure_ascii=False, indent=2) + "\n",
+        )
+
+    @staticmethod
+    def _dream_payload_from_item(item: MemoryQueueRequest) -> dict[str, Any]:
+        try:
+            payload = json.loads(str(item.payload_text or ""))
+        except (TypeError, ValueError):
+            return {}
+        return dict(payload) if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _dream_payload_base_revision(payload: dict[str, Any]) -> int:
+        try:
+            return max(int(payload.get("base_revision", 0) or 0), 0)
+        except (TypeError, ValueError):
+            return 0
+
+    @classmethod
+    def _dream_metadata_from_batch(cls, batch: MemoryBatch) -> dict[str, Any]:
+        if str(batch.op or "").strip().lower() != "dream" or not batch.items:
+            return {}
+        payload = cls._dream_payload_from_item(batch.items[0])
+        metadata = {
+            "dream_cluster_key": str(payload.get("cluster_key") or "").strip(),
+            "dream_base_revision": cls._dream_payload_base_revision(payload),
+            "dream_reason": str(payload.get("reason") or "").strip(),
+        }
+        return {
+            key: value
+            for key, value in metadata.items()
+            if key == "dream_base_revision" or value != ""
+        }
+
+    @staticmethod
+    def _note_summary_text(body: str) -> str:
+        lines = [line.strip() for line in str(body or "").splitlines() if line.strip()]
+        if not lines:
+            return ""
+        headings = [line for line in lines[1:] if re.match(r"^#{1,6}\s+", line)]
+        return "\n".join([lines[0], *headings])
+
+    def _dream_note_index(self, refs: set[str] | None = None) -> list[dict[str, Any]]:
+        rows = self._memory_repo.list_memories()
+        ordinary_names = self._ordinary_note_names()
+        category_names = self._category_note_names()
+        selected = set(refs) if refs is not None else ordinary_names | category_names
+        report = self.doctor_report()
+        dangling = dict(report.get("dangling_note_mentions") or {})
+        stale_refs = {str(item.get("ref") or "") for item in report.get("note_meta_stale", [])}
+        result: list[dict[str, Any]] = []
+        for ref in sorted(selected):
+            kind = "category" if ref in category_names else "ordinary"
+            path = (self.index_dir if kind == "category" else self.notes_dir) / note_file_name(ref)
+            try:
+                body = path.read_text(encoding="utf-8")
+            except OSError:
+                body = ""
+            scope_line = next((line.strip() for line in body.splitlines() if line.strip()), "")
+            owners = [row for row in rows if str(row.get("note_ref") or "").strip() == ref]
+            findings: list[str] = []
+            if ref in report.get("missing_note_refs", []):
+                findings.append("missing_note_ref")
+            if kind == "ordinary" and ref in report.get("orphan_notes", []):
+                findings.append("orphan_note")
+            if kind == "category" and ref in report.get("broken_category_links", []):
+                findings.append("broken_category_link")
+            if ref in dangling:
+                findings.append("dangling_note_mention")
+            if ref in stale_refs:
+                findings.append("note_meta_stale")
+            meta = self._memory_repo.read_note_meta(ref, kind) or {}
+            result.append(
+                {
+                    "ref": ref,
+                    "kind": kind,
+                    "scope_line": scope_line,
+                    "owner_count": len(owners),
+                    "note_updated_at": self._format_memory_time_minute(str(meta.get("updated_at") or "")),
+                    "sections": self._note_section_cards(f"{kind}:{ref}", body=body),
+                    "section_review_candidates": self._note_section_review_candidates(body),
+                    "doctor_findings": findings,
+                }
+            )
+        return result
+
+    def _memory_entry_view(self, row: dict[str, Any], *, line: int) -> dict[str, Any]:
+        memory_id = str(row.get("memory_id") or "")
+        source = str(row.get("source") or "") or "unknown"
+        created_at = self._format_memory_time_minute(str(row.get("created_at") or ""))
+        updated_at = self._format_memory_time_minute(str(row.get("updated_at") or ""))
+        body = str(row.get("memory_body") or "").strip()
+        note_ref = str(row.get("note_ref") or "").strip()
+        if note_ref:
+            has_address = re.search(
+                rf"(?<![A-Za-z0-9_]){re.escape(note_ref)}(?![A-Za-z0-9_])",
+                body,
+            ) is not None
+            if not has_address:
+                body = f"{body} (note: {note_ref})".strip()
+        card = (
+            f"{line} {memory_id} {source} "
+            f"created_at={created_at} updated_at={updated_at}\n"
+            f"memory_body: {body}"
+        )
+        return {
+            "line": line,
+            "memory_id": memory_id,
+            "source": source,
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "memory_body": body,
+            "card": card,
+        }
+
+    def _memory_row_card(self, row: dict[str, Any], *, line_by_id: dict[str, int]) -> str:
+        return self._memory_entry_view(
+            row, line=line_by_id.get(str(row.get("memory_id") or ""), 0)
+        )["card"]
+
+    def _dream_read_entry(self, line: int) -> dict[str, Any]:
+        number = int(line or 0)
+        entries = self.resident_lines()
+        if number < 1 or number > len(entries):
+            raise ValueError(f"line {number} is outside the memory block ({len(entries)} lines)")
+        entry = entries[number - 1]
+        row = next(
+            (item for item in self._memory_repo.list_memories() if str(item.get("memory_id") or "") == entry.memory_id),
+            {},
+        )
+        return self._memory_entry_view(row, line=number)
+
+    def _dream_entry_view(
+        self,
+        row: dict[str, Any],
+        *,
+        line_by_id: dict[str, int],
+    ) -> dict[str, Any]:
+        return self._memory_entry_view(row, line=line_by_id.get(str(row.get("memory_id") or ""), 0))
+
+    def _dream_related_note_refs(self, *, memory_ids: set[str], note_refs: set[str]) -> set[str]:
+        related = {str(item or "").strip() for item in note_refs if str(item or "").strip()}
+        rows_by_id = {str(row.get("memory_id") or ""): row for row in self._memory_repo.list_memories()}
+        bodies: list[str] = []
+        for memory_id in memory_ids:
+            row = rows_by_id.get(memory_id)
+            if row is not None:
+                bodies.append(str(row.get("memory_body") or ""))
+        for ref in list(related):
+            path = (self.index_dir if ref in self._category_note_names() else self.notes_dir) / note_file_name(ref)
+            try:
+                bodies.append(path.read_text(encoding="utf-8"))
+            except OSError:
+                pass
+        for body in bodies:
+            related.update(match.group(0) for match in _PROSE_NOTE_TOKEN_RE.finditer(body))
+        return related
+
+    def _dream_doctor_summary(
+        self, *, memory_ids: set[str], note_refs: set[str]
+    ) -> list[dict[str, Any]]:
+        report = self.doctor_report()
+        summary: list[dict[str, Any]] = []
+        dangling = dict(report.get("dangling_note_mentions") or {})
+        stale_note_refs = {str(item.get("ref") or "") for item in report.get("note_meta_stale", [])}
+        stale_section_refs = {
+            str(item.get("note_key") or "").split(":", 1)[-1]
+            for item in report.get("note_section_meta_stale", [])
+        }
+        for ref in sorted(self._dream_related_note_refs(memory_ids=memory_ids, note_refs=note_refs)):
+            if ref in report.get("missing_note_refs", []):
+                summary.append({"kind": "missing_note_ref", "ref": ref})
+            if ref in report.get("orphan_notes", []):
+                summary.append({"kind": "orphan_note", "ref": ref})
+            if ref in report.get("broken_category_links", []):
+                summary.append({"kind": "broken_category_link", "ref": ref})
+            if ref in dangling:
+                summary.append({"kind": "dangling_note_mention", "ref": ref, "sources": dangling[ref]})
+            if ref in stale_note_refs:
+                summary.append({"kind": "note_meta_stale", "ref": ref})
+            if ref in stale_section_refs:
+                summary.append({"kind": "note_section_meta_stale", "ref": ref})
+        rows_by_id = {str(row.get("memory_id") or ""): row for row in self._memory_repo.list_memories()}
+        limit = int(getattr(self.config.document, "summary_max_chars", 300) or 300)
+        for memory_id in sorted(memory_ids):
+            row = rows_by_id.get(memory_id)
+            if row is None:
+                continue
+            rendered_summary = str(
+                row.get("minimal_memory") if row.get("is_compressed") else row.get("memory_body")
+                or ""
+            ).strip()
+            if len(rendered_summary) > limit:
+                summary.append({"kind": "over_cap_line", "memory_id": memory_id, "chars": len(rendered_summary)})
+        return summary
+
+    def _select_dream_cluster_locked(
+        self, *, now_iso: str, state: dict[str, Any], force: bool = False
+    ) -> dict[str, Any] | None:
+        rows = [
+            row
+            for row in self._memory_repo.list_memories()
+            if not str(row.get("consolidated_into") or "").strip()
+        ]
+        row_by_id = {str(row.get("memory_id") or ""): row for row in rows}
+        line_by_id = {str(entry.memory_id): index + 1 for index, entry in enumerate(self.resident_lines())}
+        pending_ids = set(state.get("pending_memory_ids") or [])
+        pending_refs = set(state.get("pending_note_refs") or [])
+        if force:
+            pending_ids = set(row_by_id)
+            pending_refs = self._ordinary_note_names() | self._category_note_names()
+
+        def _group(key: str, reason: str) -> dict[str, Any]:
+            return {
+                "cluster_key": key,
+                "reason": reason,
+                "memory_ids": set(),
+                "note_refs": set(),
+                "updated_at": "",
+            }
+
+        recent: dict[str, dict[str, Any]] = {}
+        for memory_id in sorted(pending_ids):
+            row = row_by_id.get(memory_id)
+            note_ref = str((row or {}).get("note_ref") or "").strip()
+            key = f"note:{note_ref}" if note_ref else f"memory:{memory_id}"
+            group = recent.setdefault(key, _group(key, "recent_revision_family"))
+            group["memory_ids"].add(memory_id)
+            if note_ref:
+                group["note_refs"].add(note_ref)
+            updated = str((row or {}).get("updated_at") or "")
+            group["updated_at"] = max(group["updated_at"], updated)
+
+        doctor_groups: dict[str, dict[str, Any]] = {}
+        report = self.doctor_report()
+        dangling = dict(report.get("dangling_note_mentions") or {})
+        doctor_refs = set(report.get("orphan_notes") or []) | set(report.get("broken_category_links") or []) | set(dangling)
+        for ref in sorted(doctor_refs):
+            key = f"doctor:{ref}"
+            group = doctor_groups.setdefault(key, _group(key, "doctor_findings"))
+            group["note_refs"].add(ref)
+            for row in rows:
+                if str(row.get("note_ref") or "").strip() == ref or ref in str(row.get("memory_body") or ""):
+                    group["memory_ids"].add(str(row.get("memory_id") or ""))
+                    group["updated_at"] = max(group["updated_at"], str(row.get("updated_at") or ""))
+        limit = int(getattr(self.config.document, "summary_max_chars", 300) or 300)
+        for row in rows:
+            rendered_summary = str(
+                row.get("minimal_memory") if row.get("is_compressed") else row.get("memory_body")
+                or ""
+            ).strip()
+            if len(rendered_summary) <= limit:
+                continue
+            memory_id = str(row.get("memory_id") or "")
+            note_ref = str(row.get("note_ref") or "").strip()
+            key = f"doctor:{note_ref}" if note_ref else f"doctor:{memory_id}"
+            group = doctor_groups.setdefault(key, _group(key, "doctor_findings"))
+            group["memory_ids"].add(memory_id)
+            if note_ref:
+                group["note_refs"].add(note_ref)
+            group["updated_at"] = max(group["updated_at"], str(row.get("updated_at") or ""))
+
+        note_groups: dict[str, dict[str, Any]] = {}
+        for ref in sorted(pending_refs):
+            key = f"note:{ref}"
+            group = note_groups.setdefault(key, _group(key, "note_round_robin"))
+            group["note_refs"].add(ref)
+            for row in rows:
+                if str(row.get("note_ref") or "").strip() == ref:
+                    group["memory_ids"].add(str(row.get("memory_id") or ""))
+                    group["updated_at"] = max(group["updated_at"], str(row.get("updated_at") or ""))
+
+        chosen: dict[str, Any] | None = None
+        cursor = int(state.get("round_robin_cursor", 0) or 0)
+        last_key = str(state.get("last_cluster_key") or "").strip()
+        for family_index, family in enumerate((recent, doctor_groups, note_groups)):
+            candidates = sorted(
+                family.values(),
+                key=lambda item: (str(item.get("updated_at") or ""), str(item.get("cluster_key") or "")),
+                reverse=True,
+            )
+            if last_key and state.get("last_error"):
+                alternatives = [item for item in candidates if item.get("cluster_key") != last_key]
+                if not alternatives:
+                    continue
+                candidates = alternatives
+            elif last_key and len(candidates) > 1:
+                alternatives = [item for item in candidates if item.get("cluster_key") != last_key]
+                if alternatives:
+                    candidates = alternatives
+            if not candidates:
+                continue
+            position = cursor % len(candidates) if force or family_index == 2 else 0
+            chosen = candidates[position]
+            break
+        if chosen is None:
+            return None
+
+        target_tokens = self._memory_window_split_target_tokens(
+            float(getattr(self.config.dream, "cluster_window_ratio", 0.5) or 0.5)
+        )
+        selected_rows: list[dict[str, Any]] = []
+        used_tokens = 0
+        candidates = sorted(
+            (row_by_id[memory_id] for memory_id in chosen["memory_ids"] if memory_id in row_by_id),
+            key=lambda row: (str(row.get("updated_at") or ""), str(row.get("memory_id") or "")),
+            reverse=True,
+        )
+        for row in candidates:
+            view_text = self._dream_entry_view(row, line_by_id=line_by_id)["card"]
+            tokens = estimate_tokens(view_text)
+            if selected_rows and target_tokens > 0 and used_tokens + tokens > target_tokens:
+                break
+            selected_rows.append(row)
+            used_tokens += tokens
+        selected_note_refs = set(chosen["note_refs"])
+        selected_note_refs.update(str(row.get("note_ref") or "").strip() for row in selected_rows)
+        selected_note_refs.discard("")
+        included_note_refs: list[str] = []
+        for ref in sorted(selected_note_refs):
+            path = (self.index_dir if ref in self._category_note_names() else self.notes_dir) / note_file_name(ref)
+            try:
+                summary = self._note_summary_text(path.read_text(encoding="utf-8"))
+            except OSError:
+                summary = ""
+            tokens = estimate_tokens(summary)
+            if included_note_refs and target_tokens > 0 and used_tokens + tokens > target_tokens:
+                continue
+            included_note_refs.append(ref)
+            used_tokens += tokens
+        memory_ids = [str(row.get("memory_id") or "") for row in selected_rows]
+        if not memory_ids:
+            memory_ids = sorted(str(item) for item in chosen["memory_ids"] if str(item) not in row_by_id)
+        if not memory_ids and not included_note_refs:
+            return None
+        return {
+            "cluster_key": str(chosen["cluster_key"]),
+            "memory_ids": memory_ids,
+            "note_refs": included_note_refs,
+            "reason": str(chosen["reason"]),
+            "target_tokens": target_tokens,
+            "estimated_tokens": used_tokens,
+        }
+
+    async def _maybe_enqueue_dream_locked(
+        self, now_iso: str, *, force: bool = False
+    ) -> MemoryQueueRequest | None:
+        dream_cfg = getattr(self.config, "dream", None)
+        if dream_cfg is None or (not bool(getattr(dream_cfg, "enabled", False)) and not force):
+            return None
+        if self._read_queue_requests():
+            return None
+        with self._io_lock:
+            state = self._read_dream_state()
+            revisions = self._memory_repo.revisions_after(int(state.get("last_seen_revision", 0) or 0))
+            rows_by_id = {str(row.get("memory_id") or ""): row for row in self._memory_repo.list_memories()}
+            pending_ids = set(state.get("pending_memory_ids") or [])
+            pending_refs = set(state.get("pending_note_refs") or [])
+            first_pending_at = ""
+            state_changed = False
+            for revision in revisions:
+                first_pending_at = first_pending_at or str(revision.get("created_at") or "")
+                for field_name in ("added_ids", "changed_ids", "retired_ids"):
+                    try:
+                        values = json.loads(str(revision.get(field_name) or "[]"))
+                    except (TypeError, ValueError):
+                        values = []
+                    for raw_id in list(values or []):
+                        memory_id = str(raw_id or "").strip()
+                        if not memory_id:
+                            continue
+                        pending_ids.add(memory_id)
+                        note_ref = str((rows_by_id.get(memory_id) or {}).get("note_ref") or "").strip()
+                        if note_ref:
+                            pending_refs.add(note_ref)
+                try:
+                    changed_refs = json.loads(str(revision.get("changed_note_refs") or "[]"))
+                except (TypeError, ValueError):
+                    changed_refs = []
+                pending_refs.update(str(item or "").strip() for item in list(changed_refs or []) if str(item or "").strip())
+            if revisions:
+                state["last_seen_revision"] = max(int(item.get("rev", 0) or 0) for item in revisions)
+                state_changed = True
+            state["pending_memory_ids"] = sorted(pending_ids)
+            state["pending_note_refs"] = sorted(pending_refs)
+            if (pending_ids or pending_refs) and not state.get("pending_since"):
+                state["pending_since"] = first_pending_at or now_iso
+                state_changed = True
+            if not (pending_ids or pending_refs) and state.get("pending_since"):
+                state["pending_since"] = ""
+                state_changed = True
+
+            trigger_changes = max(int(getattr(dream_cfg, "trigger_changes", 20) or 20), 1)
+            min_interval = max(int(getattr(dream_cfg, "min_interval_seconds", 60) or 0), 0)
+            max_interval = max(int(getattr(dream_cfg, "max_interval_seconds", 0) or 0), 0)
+            last_attempt = self._parse_optional_iso(state.get("last_attempted_at"))
+            interval_ok = last_attempt is None or self._seconds_since(state["last_attempted_at"], now_iso) >= min_interval
+            count_trigger = len(pending_ids) + len(pending_refs) >= trigger_changes
+            pending_since = self._parse_optional_iso(state.get("pending_since"))
+            time_trigger = bool(
+                max_interval > 0
+                and (pending_ids or pending_refs)
+                and pending_since is not None
+                and self._seconds_since(state["pending_since"], now_iso) >= max_interval
+            )
+            if not force and not (interval_ok and (count_trigger or time_trigger)):
+                if state_changed:
+                    self._write_dream_state(state)
+                return None
+            cluster = self._select_dream_cluster_locked(now_iso=now_iso, state=state, force=force)
+            if cluster is None:
+                if state_changed:
+                    self._write_dream_state(state)
+                return None
+            payload = {
+                "cluster_key": cluster["cluster_key"],
+                "memory_ids": cluster["memory_ids"],
+                "note_refs": cluster["note_refs"],
+                "reason": cluster["reason"],
+                "base_revision": int(state.get("last_seen_revision", 0) or 0),
+            }
+            request = MemoryQueueRequest(
+                op="dream",
+                decision_source="self",
+                payload_text=json.dumps(payload, ensure_ascii=False),
+                created_at=now_iso,
+                request_id=self._request_id("dream"),
+                trigger_source="dream_cli" if force else "dream_scheduler",
+            )
+            await self._append_queue_request(request)
+            state["last_attempted_at"] = now_iso
+            state["last_cluster_key"] = str(cluster["cluster_key"])
+            state["last_error"] = ""
+            self._write_dream_state(state)
+            return request
+
+    async def enqueue_dream_request(
+        self,
+        *,
+        cluster_key: str,
+        memory_ids: list[str],
+        note_refs: list[str],
+        reason: str,
+        base_revision: int,
+        trigger_source: str = "dream_scheduler",
+    ) -> dict[str, Any]:
+        payload = {
+            "cluster_key": str(cluster_key or "").strip(),
+            "memory_ids": sorted({str(item or "").strip() for item in list(memory_ids or []) if str(item or "").strip()}),
+            "note_refs": sorted({str(item or "").strip() for item in list(note_refs or []) if str(item or "").strip()}),
+            "reason": str(reason or "").strip(),
+            "base_revision": max(int(base_revision or 0), 0),
+        }
+        if not payload["cluster_key"]:
+            raise ValueError("dream cluster_key is required")
+        request = MemoryQueueRequest(
+            op="dream",
+            decision_source="self",
+            payload_text=json.dumps(payload, ensure_ascii=False),
+            created_at=self._now_iso(),
+            request_id=self._request_id("dream"),
+            trigger_source=str(trigger_source or "dream_scheduler").strip() or "dream_scheduler",
+        )
+        await self._append_queue_request(request)
+        return {"ok": True, "request_id": request.request_id, "status": "queued"}
+
+    def _settle_dream_batch(self, batch: MemoryBatch | MemoryQueueRequest, *, status: str, now_iso: str) -> None:
+        if isinstance(batch, MemoryQueueRequest):
+            item = batch
+        else:
+            if str(batch.op or "").strip().lower() != "dream" or not batch.items:
+                return
+            item = batch.items[0]
+        if str(item.op or "").strip().lower() != "dream":
+            return
+        payload = self._dream_payload_from_item(item)
+        with self._io_lock:
+            state = self._read_dream_state()
+            if status == "applied":
+                base_revision = self._dream_payload_base_revision(payload)
+                changed_after_ids: set[str] = set()
+                changed_after_refs: set[str] = set()
+                rows_by_id = {str(row.get("memory_id") or ""): row for row in self._memory_repo.list_memories()}
+                for revision in self._memory_repo.revisions_after(base_revision):
+                    for field_name in ("added_ids", "changed_ids", "retired_ids"):
+                        try:
+                            values = json.loads(str(revision.get(field_name) or "[]"))
+                        except (TypeError, ValueError):
+                            values = []
+                        for raw_id in list(values or []):
+                            memory_id = str(raw_id or "").strip()
+                            if not memory_id:
+                                continue
+                            changed_after_ids.add(memory_id)
+                            note_ref = str((rows_by_id.get(memory_id) or {}).get("note_ref") or "").strip()
+                            if note_ref:
+                                changed_after_refs.add(note_ref)
+                    try:
+                        changed_refs = json.loads(str(revision.get("changed_note_refs") or "[]"))
+                    except (TypeError, ValueError):
+                        changed_refs = []
+                    changed_after_refs.update(str(item or "").strip() for item in list(changed_refs or []) if str(item or "").strip())
+                cluster_ids = {str(item or "").strip() for item in list(payload.get("memory_ids") or []) if str(item or "").strip()}
+                cluster_refs = {str(item or "").strip() for item in list(payload.get("note_refs") or []) if str(item or "").strip()}
+                pending_ids = set(state.get("pending_memory_ids") or []) - (cluster_ids - changed_after_ids)
+                pending_refs = set(state.get("pending_note_refs") or []) - (cluster_refs - changed_after_refs)
+                pending_ids.update(changed_after_ids)
+                pending_refs.update(changed_after_refs)
+                state["pending_memory_ids"] = sorted(pending_ids)
+                state["pending_note_refs"] = sorted(pending_refs)
+                state["pending_since"] = state.get("pending_since", "") if pending_ids or pending_refs else ""
+                state["last_succeeded_at"] = now_iso
+                state["last_succeeded_revision"] = self.latest_memory_revision()
+                state["round_robin_cursor"] = int(state.get("round_robin_cursor", 0) or 0) + 1
+                state["last_error"] = ""
+            else:
+                state["last_error"] = str(status or "failed")
+            self._write_dream_state(state)
 
     async def _enqueue_review_window_requests(
         self,
@@ -6512,12 +8109,50 @@ class MemoryManager:
 
             return session.read_note(ref)
 
+        def memory_read_entry(line: int) -> dict[str, Any]:
+            """Read one resident memory as the same full row card used in ordinary and dream input."""
+
+            return self._dream_read_entry(line)
+
+        def memory_note_index() -> list[dict[str, Any]]:
+            """List ordinary and category notes with scope, owners, freshness, section authority, evidence hints, and doctor findings."""
+
+            return self._dream_note_index()
+
+        def memory_read_notes(refs: list[str]) -> dict[str, Any]:
+            """Read several note bodies with section metadata and review candidates; a missing ref is reported without dropping the others."""
+
+            notes: dict[str, str] = {}
+            errors: dict[str, str] = {}
+            section_meta: dict[str, list[dict[str, Any]]] = {}
+            section_review_candidates: dict[str, list[dict[str, Any]]] = {}
+            for raw_ref in list(refs or []):
+                ref = str(raw_ref or "").strip()
+                if not ref:
+                    continue
+                try:
+                    notes[ref] = session.read_note(ref)
+                    resolved = self.resolve_note_ref(ref)
+                    kind = "category" if resolved in self._category_note_names() else "ordinary"
+                    section_meta[ref] = self._note_section_cards(f"{kind}:{resolved}", body=notes[ref])
+                    section_review_candidates[ref] = self._note_section_review_candidates(notes[ref])
+                except Exception as exc:
+                    errors[ref] = str(exc or "memory note read failed").strip()
+            return {
+                "notes": notes,
+                "section_meta": section_meta,
+                "section_review_candidates": section_review_candidates,
+                "errors": errors,
+            }
+
         def memory_apply_batch(
             adds: list[dict[str, Any]] | None = None,
             rewrites: list[dict[str, Any]] | None = None,
             deletes: list[int] | None = None,
+            delete_reasons: list[dict[str, Any]] | None = None,
             note_upserts: dict[str, str] | None = None,
             note_edits: dict[str, list[dict[str, str]]] | None = None,
+            note_section_updates: list[dict[str, Any]] | None = None,
             inspired_lines: list[int] | None = None,
             category_deletes: list[str] | None = None,
             noop_reason: str | None = None,
@@ -6525,13 +8160,14 @@ class MemoryManager:
         ) -> dict[str, Any]:
             """Stage one complete memory mutation batch.
 
-            The memory block shows one line per memory as `YYMMDD:text`, with its 1-based
-            line number printed in front (`18| YYMMDD:text`); that number is how a memory is
-            named. `rewrites` takes `{line, content, minimal_memory, note_ref?}`; `deletes`
-            takes a list of line numbers; `inspired_lines` takes the line numbers this
-            request actually decided on. Lines outside the block are refused per item, the
-            rest of the batch still stands. Do not write a date into `content` - the backend
-            owns the prefix.
+            The model sees one full row card per memory: `line memory_id source
+            created_at=... updated_at=...` followed by `memory_body: ...`. `rewrites` takes
+            `{line, content, minimal_memory?, note_ref?}`; omit `minimal_memory` only when
+            content is unchanged. `deletes` takes line numbers and every line needs a
+            matching `delete_reasons` entry with reason, authority_basis and scope_match.
+            `inspired_lines` takes the line numbers this request actually decided on. Lines
+            outside the block are refused per item, the rest of the batch still stands. Do
+            not write a date, id or row-card prefix into `content` - the backend owns them.
 
             Submitting again replaces the staged batch and voids its confirmation: use that
             to correct a preview you do not accept, then read the new diff and confirm that
@@ -6544,9 +8180,19 @@ class MemoryManager:
             under `memory/index/` stays - this lane never deletes archive files.
 
             `note_upserts` writes whole notes ({ref: body}; the persona is `note_persona`);
-            `note_edits` patches spans of existing notes ({ref: [{old_text, new_text}]}).
-            Both are batch mutations: the preview summarizes them under `notes_changed`, and
-            they land only after `memory_apply_confirm`, same as memory-row changes.
+            `note_edits` patches existing notes with either `{old_text, new_text}` or
+            `{anchor, new_text}`. An anchor is one unique line or section heading; an empty
+            `new_text` deletes that line or section.
+            Both are batch mutations: the preview summarizes them under `notes_changed` and
+            `note_edit_preview` (per-op match, anchor scope, candidates, and resulting note
+            size), and they land only after `memory_apply_confirm`, same as memory-row changes.
+
+            `note_section_updates` declares paragraph authority: each item names a ref and
+            exactly one of section_id/section_key, then sets unknown/active/superseded.
+            Superseding requires scope_key, superseded_by, and evidence; the replacement must
+            exist in the submitted note body. A confirmed supersession removes the old
+            paragraph automatically; use note_edits only when the replacement text also needs
+            editing. The preview's `note_section_preview` shows both full paragraphs.
             """
 
             replaced_previous = session.previewed
@@ -6554,8 +8200,10 @@ class MemoryManager:
                 adds=adds,
                 rewrites=rewrites,
                 deletes=deletes,
+                delete_reasons=delete_reasons,
                 note_upserts=note_upserts,
                 note_edits=note_edits,
+                note_section_updates=note_section_updates,
                 inspired_lines=inspired_lines,
                 category_deletes=category_deletes,
                 noop_reason=noop_reason,
@@ -6579,6 +8227,14 @@ class MemoryManager:
                     return failure
                 staged["status"] = "batch_previewed"
                 staged["preview"] = preview
+                failed_note_edits = [
+                    item for item in preview.get("note_edit_preview", []) if not item.get("applied")
+                ]
+                if failed_note_edits:
+                    staged.setdefault("warnings", []).append(
+                        f"note_edit_preview has {len(failed_note_edits)} failed op(s); "
+                        "fix them before memory_apply_confirm"
+                    )
                 session.previewed = True
                 staged["replaced_previous"] = replaced_previous
                 staged["next_step"] = (
@@ -6602,32 +8258,111 @@ class MemoryManager:
 
         return [
             _build_memory_tool(name="memory_read_note", fn=memory_read_note),
+            _build_memory_tool(name="memory_read_entry", fn=memory_read_entry),
+            _build_memory_tool(name="memory_note_index", fn=memory_note_index),
+            _build_memory_tool(name="memory_read_notes", fn=memory_read_notes),
             _build_memory_tool(name="memory_apply_batch", fn=memory_apply_batch),
             _build_memory_tool(name="memory_apply_confirm", fn=memory_apply_confirm),
         ]
 
     @staticmethod
-    def _render_numbered_memory_body(snapshot_text: str) -> str:
-        """The block as the model reads it: every resident line prefixed with its number.
+    def _memory_request_terms(text: str) -> set[str]:
+        terms: set[str] = set()
+        for match in re.finditer(r"[A-Za-z0-9_]{2,}", str(text or "").lower()):
+            terms.add(match.group(0))
+        for match in re.finditer(r"[\u4e00-\u9fff]{2,}", str(text or "")):
+            value = match.group(0)
+            if len(value) <= 12:
+                terms.add(value)
+            terms.update(value[index : index + 2] for index in range(len(value) - 1))
+        return terms
 
-        The line number is the only address the batch tools accept, and counting 20+ long
-        Chinese lines by eye is where a batch goes wrong - observed: one rewrite aimed at
-        line 18 landed on 17 in one attempt and on 19 in the next. Printing the number turns
-        the task from counting into reading. The consolidation navigation is printed verbatim
-        and unnumbered: those rows have no line, `category_deletes` is their address.
-        """
+    def _memory_prompt_rows(
+        self,
+        *,
+        batch: MemoryBatch,
+        snapshot_text: str,
+    ) -> tuple[str, list[int], bool]:
+        rows = [
+            row
+            for row in self._memory_repo.list_memories()
+            if not str(row.get("consolidated_into") or "").strip()
+        ]
+        line_by_id = {str(row.get("memory_id") or ""): index + 1 for index, row in enumerate(rows)}
+        rows_by_id = {str(row.get("memory_id") or ""): row for row in rows}
+        cards = [self._memory_row_card(row, line_by_id=line_by_id) for row in rows]
+        if not cards:
+            return "(empty)", [], False
+        target_tokens = self._memory_window_split_target_tokens(0.5)
+        request_text = "\n".join(str(item.payload_text or "") for item in batch.items)
+        card_budget = (
+            max(target_tokens - estimate_tokens(request_text), 1)
+            if target_tokens > 0
+            else 0
+        )
+        full_text = "\n".join(cards)
+        if target_tokens <= 0 or estimate_tokens(full_text) <= card_budget:
+            return full_text, [], False
 
-        resident_text, consolidation_text = split_consolidation_block(str(snapshot_text or ""))
-        lines = resident_text.splitlines()
-        if not lines:
-            return "(empty)"
-        numbered = "\n".join(f"{index}| {line}" for index, line in enumerate(lines, 1))
-        if consolidation_text.strip():
-            numbered += (
-                "\n\n以下归并区没有行号，不能写进 rewrites/deletes/inspired_lines；"
-                "要摘掉整类用 category_deletes：\n" + consolidation_text.strip()
+        terms = self._memory_request_terms(request_text)
+        referenced_lines: set[int] = set()
+        for match in re.finditer(r"(?:第\s*(\d+)\s*行|\bline\s*(\d+)\b)", request_text, re.IGNORECASE):
+            referenced_lines.add(int(match.group(1) or match.group(2)))
+        mentioned_notes = {match.group(0) for match in _PROSE_NOTE_TOKEN_RE.finditer(request_text)}
+        mandatory_ids = {
+            str(row.get("memory_id") or "")
+            for row in rows
+            if line_by_id.get(str(row.get("memory_id") or "")) in referenced_lines
+            or str(row.get("note_ref") or "").strip() in mentioned_notes
+        }
+        scored: list[tuple[int, str, str]] = []
+        for row in rows:
+            memory_id = str(row.get("memory_id") or "")
+            row_terms = self._memory_request_terms(
+                f"{row.get('memory_body') or ''} {row.get('note_ref') or ''}"
             )
-        return numbered
+            score = len(terms & row_terms)
+            scored.append((score, str(row.get("updated_at") or ""), memory_id))
+        scored.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+
+        selected_ids: set[str] = set()
+        used_tokens = 0
+        for row in rows:
+            memory_id = str(row.get("memory_id") or "")
+            if memory_id not in mandatory_ids:
+                continue
+            selected_ids.add(memory_id)
+            used_tokens += estimate_tokens(self._memory_row_card(row, line_by_id=line_by_id))
+        for _score, _updated_at, memory_id in scored:
+            if memory_id in selected_ids:
+                continue
+            card = self._memory_row_card(rows_by_id[memory_id], line_by_id=line_by_id)
+            tokens = estimate_tokens(card)
+            if selected_ids and used_tokens + tokens > card_budget:
+                continue
+            selected_ids.add(memory_id)
+            used_tokens += tokens
+        selected_cards = [
+            self._memory_row_card(row, line_by_id=line_by_id)
+            for row in rows
+            if str(row.get("memory_id") or "") in selected_ids
+        ]
+        omitted = [
+            line_by_id[str(row.get("memory_id") or "")]
+            for row in rows
+            if str(row.get("memory_id") or "") not in selected_ids
+        ]
+        return "\n".join(selected_cards) or "(no expanded rows)", omitted, True
+
+    @staticmethod
+    def _render_consolidation_navigation(snapshot_text: str) -> str:
+        _resident_text, consolidation_text = split_consolidation_block(str(snapshot_text or ""))
+        if not consolidation_text.strip():
+            return ""
+        return (
+            "以下归并区没有行号，不能写进 rewrites/deletes/inspired_lines；"
+            "要摘掉整类用 category_deletes：\n" + consolidation_text.strip()
+        )
 
     def _drain_note_feedback_lines(self) -> list[str]:
         """Take the pending post-commit note reports; each is delivered to one turn."""
@@ -6638,6 +8373,62 @@ class MemoryManager:
             return []
         self._note_feedback_lines = []
         return list(lines)
+
+    def _dream_agent_user_prompt(
+        self,
+        *,
+        batch: MemoryBatch,
+        snapshot_text: str,
+        repair_reason: str,
+    ) -> str:
+        payload = self._dream_payload_from_item(batch.items[0]) if batch.items else {}
+        memory_ids = {
+            str(item or "").strip() for item in list(payload.get("memory_ids") or []) if str(item or "").strip()
+        }
+        note_refs = {
+            str(item or "").strip() for item in list(payload.get("note_refs") or []) if str(item or "").strip()
+        }
+        rows_by_id = {str(row.get("memory_id") or ""): row for row in self._memory_repo.list_memories()}
+        line_by_id = {str(entry.memory_id): index + 1 for index, entry in enumerate(self.resident_lines())}
+        active_ids = {
+            memory_id
+            for memory_id in memory_ids
+            if memory_id in rows_by_id
+            and not str(rows_by_id[memory_id].get("consolidated_into") or "").strip()
+        }
+        entries = [
+            self._dream_entry_view(rows_by_id[memory_id], line_by_id=line_by_id)["card"]
+            for memory_id in sorted(active_ids)
+        ]
+        stale_ids = sorted(memory_ids - active_ids)
+        related_note_refs = self._dream_related_note_refs(memory_ids=memory_ids, note_refs=note_refs)
+        note_index = self._dream_note_index(related_note_refs)
+        doctor_summary = self._dream_doctor_summary(memory_ids=memory_ids, note_refs=related_note_refs)
+        categories = [
+            item
+            for item in self._category_note_index()
+            if str(item.get("note_ref") or "") in note_refs
+        ]
+        repair_block = f"\n上一轮输出无效：{repair_reason}\n请修复后重试。\n" if repair_reason else ""
+        row_view = "\n".join(entries) if entries else "(empty)"
+        return (
+            f"Dream cluster：{payload.get('cluster_key') or '(unknown)'}\n"
+            f"原因：{payload.get('reason') or ''}\n"
+            f"base_revision：{payload.get('base_revision', 0)}\n\n"
+            "## Cluster 行视图\n"
+            f"{row_view}\n\n"
+            f"已不在常驻块的 cluster id：{json.dumps(stale_ids, ensure_ascii=False)}\n\n"
+            "## 相关 note 索引\n"
+            f"{json.dumps(note_index, ensure_ascii=False, indent=2)}\n\n"
+            "## 相关 doctor findings\n"
+            f"{json.dumps(doctor_summary, ensure_ascii=False, indent=2)}\n\n"
+            "## 本 cluster 已有归并分类\n"
+            f"{json.dumps(categories, ensure_ascii=False, indent=2)}\n\n"
+            "完整 MEMORY.md 投影只用于确认全局行号，不要求扫描 cluster 外内容。\n"
+            "先按需用 memory_read_entry / memory_note_index / memory_read_notes 读正文，"
+            "再用一次 memory_apply_batch 提交本 cluster 的整理结果；无需整理时用 noop_reason。\n"
+            f"{repair_block}"
+        )
 
     def _memory_agent_user_prompt(
         self,
@@ -6665,7 +8456,10 @@ class MemoryManager:
         summary_limit = int(getattr(self.config.document, "summary_max_chars", 300) or 300)
         shape_budget = max(summary_limit // 2, 1)
         over_limit_lines = sum(
-            1 for line in str(snapshot_text or "").splitlines() if len(line) > summary_limit
+            1
+            for row in self._memory_repo.list_memories()
+            if not str(row.get("consolidated_into") or "").strip()
+            and len(str(row.get("memory_body") or "").strip()) > summary_limit
         )
         repair_block = f"\n上一轮输出无效：{repair_reason}\n请修复后重试。\n" if repair_reason else ""
         # Post-commit note sweep outcomes. The commit lands after the model's turn, so
@@ -6692,12 +8486,53 @@ class MemoryManager:
                 "不要写成操作员的个人偏好。"
             )
         )
+        row_text, omitted_lines, selective = self._memory_prompt_rows(
+            batch=batch, snapshot_text=snapshot_text
+        )
+        selection_block = (
+            "为控制窗口，只展开候选与相关行；未展开行号："
+            + json.dumps(omitted_lines, ensure_ascii=False)
+            + "。需要操作未展开行时先用 memory_read_entry 读完整行卡。\n\n"
+            if selective
+            else ""
+        )
+        navigation = self._render_consolidation_navigation(snapshot_text)
+        navigation_block = f"{navigation}\n\n" if navigation else ""
+        request_text = "\n".join(str(item.payload_text or "") for item in batch.items)
+        mentioned_note_refs = {
+            match.group(0) for match in _PROSE_NOTE_TOKEN_RE.finditer(request_text)
+        }
+        note_section_index: dict[str, list[dict[str, Any]]] = {}
+        note_section_candidates: dict[str, list[dict[str, Any]]] = {}
+        for ref in sorted(mentioned_note_refs):
+            resolved = self.resolve_note_ref(ref)
+            if resolved not in note_index:
+                continue
+            kind = "category" if resolved in self._category_note_names() else "ordinary"
+            try:
+                section_body = self._read_note_body_exact(self._note_path(resolved))
+            except FileNotFoundError:
+                section_body = ""
+            note_section_index[ref] = self._note_section_cards(f"{kind}:{resolved}", body=section_body)
+            note_section_candidates[ref] = self._note_section_review_candidates(section_body)
+        section_block = (
+            "相关 note section 卡：\n"
+            + json.dumps(note_section_index, ensure_ascii=False, indent=2)
+            + "\n相关 section 候选对（只是线索，不是权威结论）：\n"
+            + json.dumps(note_section_candidates, ensure_ascii=False, indent=2)
+            + "\n\n"
+            if note_section_index
+            else ""
+        )
         return (
-            f"当前记忆正文（每行开头 `N|` 是这一行的行号）：\n"
-            f"{self._render_numbered_memory_body(snapshot_text)}\n\n"
+            f"当前记忆完整行卡（每张卡第一行是全局行号、memory_id、来源与双时间）：\n"
+            f"{row_text}\n\n"
+            f"{selection_block}"
+            f"{navigation_block}"
             f"{note_feedback_block}"
             f"{persona_block}\n\n"
             f"现有 note refs：{json.dumps(note_index, ensure_ascii=False)}\n"
+            f"{section_block}"
             f"字符预算：单条正文上限 {summary_limit} 字，入口行预算约 {shape_budget} 字"
             f"（上限按入口形状的 2 倍定）；"
             f"当前正文超过上限的行共 {over_limit_lines} 条——批里碰到这些行时，"
@@ -6707,7 +8542,7 @@ class MemoryManager:
             f"待处理请求：\n{json.dumps(requests, ensure_ascii=False, indent=2)}\n"
             "提交要求：\n"
             "- 所有修改用一次 memory_apply_batch 交清；预览不对可以改完重交，后一版覆盖前一版并作废它的确认。\n"
-            "- 行号就是正文每行开头的 `N|`，填进 rewrites/deletes/inspired_lines，不要把它抄进 content。\n"
+            "- 行号是每张完整行卡第一行开头的整数，填进 rewrites/deletes/inspired_lines，不要把它抄进 content。\n"
             "- adds 条目必须包含 content、minimal_memory 和 decision_source。\n"
             "- content 写法按类型分：用户偏好写成陈述句（用户偏好什么、某对象是什么），"
             "不要写成给自己的命令；经验教训写成条件+要求（当……时，要……）；"
@@ -6716,15 +8551,21 @@ class MemoryManager:
             "note 里有什么」，不存在「够短就不挂」这一档。\n"
             "- decision_source 照实填（user=用户本轮亲口给的，self=你复核提炼的），"
             "它只决定来源标记，不决定写法，也不决定存活。\n"
-            "- rewrites 条目必须包含 line（正文行首那个行号）、content 和 minimal_memory；"
+            "- rewrites 条目必须包含 line（完整行卡第一行开头的行号）和 content；"
+            "content 与原正文相同时可省略 minimal_memory，变化时必须显式给新值；"
             "系统保留原来源并维护该行的日期。\n"
+            "- 每个 deletes 行必须在 delete_reasons 里有同 line 的 reason、authority_basis 与 scope_match=true；"
+            "explicit_supersession/duplicate 还要 replacement_line+evidence，newer_timestamp 还要 replacement_line。\n"
             "- delete 请求要解析成当前正文里的行号，并把这些行号放进 deletes。\n"
             "- delete 批次没有零变更出口：目标内容已不在当前正文里（已被改写或被更早的批次删掉）时，"
             "单独提交 already_satisfied 说明已满足，不要提交 noop_reason。\n"
             "- note_upserts 只写需要新增或整体重写的 note，新建的名字必须以 `note_` 开头"
             "（方法论用 `note_play_` 前缀）。\n"
-            "- note_edits 改已有 note 的局部：{note名: [{old_text, new_text}]}，old_text 必须唯一命中一次，"
-            "new_text 留空即删掉这段。改一两个段落用 note_edits，不要用 note_upserts 重交整份。\n"
+            "- note_edits 改已有 note 的局部：{note名: [{old_text, new_text}]}，old_text 必须唯一命中一次；"
+            "也可用 {anchor, new_text}，anchor 必须是唯一一行或唯一 section heading。"
+            "new_text 留空即删掉对应行/小节。改一两个段落用 note_edits，不要用 note_upserts 重交整份。\n"
+            "- note 段落的 active/superseded/unknown 用 note_section_updates 声明；"
+            "superseded 必须给 scope_key、superseded_by 与 evidence，确认后自动删除旧段；需要改替代段正文时再用 note_edits。\n"
             "- 归并区列出的分类 note 也可以这样改（内容错误或过时时）；不要新建分类 note，"
             "也不要让记忆从归并区退场，退场只由归并环节做。\n"
             "- 整个分类要摘掉时把它那一行末尾括号里的句柄放进 category_deletes（写分类名也算命中）；"
@@ -6782,7 +8623,19 @@ class MemoryManager:
                 MemoryQueueRequest(
                     op=session.batch_op or "write",
                     decision_source="self",
-                    payload_text="",
+                    payload_text=(
+                        json.dumps(
+                            {
+                                "cluster_key": session.dream_cluster_key,
+                                "memory_ids": sorted(session.dream_memory_ids),
+                                "note_refs": sorted(session.dream_note_refs),
+                                "base_revision": session.dream_base_revision,
+                            },
+                            ensure_ascii=False,
+                        )
+                        if session.batch_op == "dream" and session.dream_context_loaded
+                        else ""
+                    ),
                     created_at=self._now_iso(),
                     request_id="preview",
                 )
@@ -6810,11 +8663,84 @@ class MemoryManager:
             {"note_ref": str(ref), "action": "edit", "edits": len(list(ops or []))}
             for ref, ops in dict(validated.note_edits or {}).items()
         ]
+        note_edit_preview: list[dict[str, Any]] = []
+        for ref, ops in dict(validated.note_edits or {}).items():
+            try:
+                body = str(
+                    validated.note_upserts[ref]
+                    if ref in validated.note_upserts
+                    else session.read_note(ref)
+                )
+            except Exception:
+                body = ""
+            updated, edit_results = _apply_note_edit_ops_to_body(body, ref=str(ref), ops=list(ops or []))
+            for record in edit_results:
+                record["body_chars_before"] = len(body)
+                record["body_chars_after"] = len(updated)
+                note_edit_preview.append(record)
+        stored_rows = {
+            str(row.get("memory_id") or ""): row for row in self._memory_repo.list_memories()
+        }
+        line_by_id = {
+            str(entry.memory_id): index + 1 for index, entry in enumerate(self.resident_lines())
+        }
+        deletion_impact: list[dict[str, Any]] = []
+        for memory_id, reason in sorted(
+            dict(validated.delete_reasons or {}).items(),
+            key=lambda item: line_by_id.get(item[0], 0),
+        ):
+            target = stored_rows.get(memory_id, {})
+            replacement_id = str(reason.get("replacement_memory_id") or "")
+            replacement = stored_rows.get(replacement_id, {})
+            replacement_body = str(replacement.get("memory_body") or "")
+            replacement_note_refs = set(
+                match.group(0) for match in _PROSE_NOTE_TOKEN_RE.finditer(replacement_body)
+            )
+            if str(replacement.get("note_ref") or "").strip():
+                replacement_note_refs.add(str(replacement.get("note_ref") or "").strip())
+            deletion_impact.append(
+                {
+                    "target_line": line_by_id.get(memory_id, int(reason.get("line") or 0)),
+                    "target_memory_id": memory_id,
+                    "target_source": str(target.get("source") or ""),
+                    "target_created_at": str(target.get("created_at") or ""),
+                    "target_updated_at": str(target.get("updated_at") or ""),
+                    "target_body": str(target.get("memory_body") or ""),
+                    "replacement_line": line_by_id.get(replacement_id, int(reason.get("replacement_line") or 0)),
+                    "replacement_memory_id": replacement_id,
+                    "replacement_body": replacement_body,
+                    "authority_basis": str(reason.get("authority_basis") or ""),
+                    "scope_match": bool(reason.get("scope_match")),
+                    "evidence": str(reason.get("evidence") or ""),
+                    "scope_hints": {
+                        "target": self._scope_hints(str(target.get("memory_body") or "")),
+                        "replacement": self._scope_hints(replacement_body),
+                    },
+                    "replacement_note_refs": sorted(replacement_note_refs),
+                }
+            )
+        note_section_preview = [
+            {
+                "ref": str(item.get("ref") or ""),
+                "section_id": str(item.get("section_id") or ""),
+                "section_key": str(item.get("section_key") or ""),
+                "before_status": str(item.get("before_status") or "new"),
+                "status": str(item.get("status") or ""),
+                "scope_key": str(item.get("scope_key") or ""),
+                "superseded_by": str(item.get("superseded_by") or ""),
+                "evidence": str(item.get("evidence") or ""),
+                "old_content": str(item.get("old_content") or ""),
+                "replacement_content": str(item.get("replacement_content") or ""),
+            }
+            for item in list(validated.note_section_updates or [])
+        ]
         return {
             "status": "built",
             "adds": len(validated.adds),
             "rewrites": len(validated.rewrites),
             "deletes": len(validated.deletes),
+            "deletion_impact": deletion_impact,
+            "note_section_preview": note_section_preview,
             # The diff above compares resident lines only, so a purged navigation line is
             # invisible in it - without this field the model would confirm without seeing it.
             "purged_categories": [
@@ -6827,7 +8753,278 @@ class MemoryManager:
             "diff": diff[: self.PREVIEW_MAX_DIFF_LINES],
             "diff_truncated_lines": truncated,
             "notes_changed": notes_changed,
+            "note_edit_preview": note_edit_preview,
         }
+
+    @staticmethod
+    def _authority_time_key(row: dict[str, Any]) -> tuple[datetime, datetime]:
+        def parse(value: str) -> datetime:
+            parsed = datetime.fromisoformat(str(value or "").strip())
+            return parsed if parsed.tzinfo is not None else parsed.astimezone()
+
+        return parse(str(row.get("updated_at") or "")), parse(str(row.get("created_at") or ""))
+
+    @staticmethod
+    def _scope_hints(text: str) -> list[str]:
+        hints: list[str] = []
+        for line in str(text or "").splitlines():
+            clean = " ".join(line.split()).strip(" -")
+            if not clean:
+                continue
+            if re.search(
+                r"当|在|处理|仅|只|如果|若|项目|仓库|系列|渠道|账号|环境|例外|禁止|不得|时间",
+                clean,
+            ):
+                hints.append(clean)
+            if len(hints) >= 8:
+                break
+        return hints
+
+    def _build_note_section_updates(
+        self,
+        *,
+        session: _MemoryToolSession,
+        note_upserts: dict[str, str],
+        note_edits: dict[str, list[dict[str, str]]],
+        raw_updates: list[dict[str, Any]],
+        now_iso: str,
+        allowed_note_refs: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        if not raw_updates:
+            return []
+        upserts_by_ref = {
+            self.resolve_note_ref(str(ref)): str(body or "")
+            for ref, body in note_upserts.items()
+        }
+        edits_by_ref = {
+            self.resolve_note_ref(str(ref)): list(ops or [])
+            for ref, ops in note_edits.items()
+        }
+        existing_by_note: dict[str, dict[str, dict[str, Any]]] = {}
+        proposed_by_note: dict[str, dict[str, dict[str, Any]]] = {}
+        current_by_note: dict[str, dict[str, dict[str, Any]]] = {}
+        body_by_note: dict[str, str] = {}
+        normalized: list[dict[str, Any]] = []
+
+        for index, raw in enumerate(raw_updates):
+            if not isinstance(raw, dict):
+                raise _MemoryAgentValidationError(f"note_section_updates[{index}] must be an object")
+            ref = self.resolve_note_ref(str(raw.get("ref") or "").strip())
+            if not ref:
+                raise _MemoryAgentValidationError(f"note_section_updates[{index}].ref is invalid")
+            if allowed_note_refs is not None and ref not in allowed_note_refs:
+                raise _MemoryAgentValidationError(
+                    f"note_section_updates[{index}].ref is outside this dream cluster"
+                )
+            kind = "category" if ref in self._category_note_names() else "ordinary"
+            note_key = f"{kind}:{ref}"
+            if note_key not in existing_by_note:
+                existing_by_note[note_key] = {
+                    str(row["section_id"]): row
+                    for row in self._memory_repo.list_note_sections(note_key)
+                }
+                try:
+                    current_body = self._read_note_body_exact(self._note_path(ref))
+                except FileNotFoundError:
+                    current_body = ""
+                current_by_note[note_key] = {
+                    str(section["section_id"]): section
+                    for section in self._parse_note_sections(current_body)
+                }
+                proposed_body = upserts_by_ref.get(ref, current_body)
+                if ref in edits_by_ref:
+                    proposed_body, _results = _apply_note_edit_ops_to_body(
+                        proposed_body,
+                        ref=ref,
+                        ops=edits_by_ref[ref],
+                    )
+                body_by_note[note_key] = proposed_body
+                proposed_by_note[note_key] = {
+                    str(section["section_id"]): section
+                    for section in self._parse_note_sections(proposed_body)
+                }
+
+            existing = existing_by_note[note_key]
+            proposed = proposed_by_note[note_key]
+            current = current_by_note[note_key]
+            section_id = str(raw.get("section_id") or "").strip()
+            section_key = str(raw.get("section_key") or "").strip()
+            if bool(section_id) == bool(section_key):
+                raise _MemoryAgentValidationError(
+                    f"note_section_updates[{index}] requires exactly one of section_id or section_key"
+                )
+            if section_id:
+                target = existing.get(section_id) or proposed.get(section_id)
+            else:
+                target = next((row for row in proposed.values() if row["section_key"] == section_key), None)
+                if target is None:
+                    target = next((row for row in existing.values() if row["section_key"] == section_key), None)
+            if target is None:
+                raise _MemoryAgentValidationError(
+                    f"note_section_updates[{index}] names a section that does not exist"
+                )
+            target_id = str(target["section_id"])
+            target_key = str(target.get("section_key") or section_key)
+            status = str(raw.get("status") or "").strip().lower()
+            if status not in {"unknown", "active", "superseded"}:
+                raise _MemoryAgentValidationError(
+                    f"note_section_updates[{index}].status must be unknown, active, or superseded"
+                )
+            scope_key = str(raw.get("scope_key") or "").strip()
+            evidence = str(raw.get("evidence") or "").strip()
+            superseded_by_raw = str(raw.get("superseded_by") or "").strip()
+            if status == "unknown":
+                scope_key = ""
+                evidence = ""
+                superseded_by_raw = ""
+            replacement: dict[str, Any] | None = None
+            if status == "active" and not scope_key:
+                raise _MemoryAgentValidationError(
+                    f"note_section_updates[{index}].scope_key is required for active"
+                )
+            if status != "superseded" and target_id not in proposed:
+                raise _MemoryAgentValidationError(
+                    f"note_section_updates[{index}] active/unknown section must exist in the submitted note body"
+                )
+            if status == "superseded":
+                if not scope_key or not superseded_by_raw or not evidence:
+                    raise _MemoryAgentValidationError(
+                        f"note_section_updates[{index}] requires scope_key, superseded_by, and evidence"
+                    )
+                replacement = proposed.get(superseded_by_raw)
+                if replacement is None:
+                    replacement = next(
+                        (row for row in proposed.values() if row["section_key"] == superseded_by_raw),
+                        None,
+                    )
+                if replacement is None:
+                    raise _MemoryAgentValidationError(
+                        f"note_section_updates[{index}].superseded_by must exist in the submitted note body"
+                    )
+                if str(replacement["section_id"]) == target_id:
+                    raise _MemoryAgentValidationError(
+                        f"note_section_updates[{index}] may not supersede itself"
+                    )
+            before = existing.get(target_id, {})
+            current_section = current.get(target_id, {})
+            proposed_section = proposed.get(target_id, {})
+            normalized.append(
+                {
+                    "ref": ref,
+                    "note_key": note_key,
+                    "section_id": target_id,
+                    "section_key": target_key,
+                    "heading_path": str(proposed_section.get("heading_path") or before.get("heading_path") or ""),
+                    "anchor": str(proposed_section.get("anchor") or before.get("anchor") or ""),
+                    "ordinal": int(proposed_section.get("ordinal") or before.get("ordinal") or 0),
+                    "status": status,
+                    "scope_key": scope_key,
+                    "superseded_by": str(replacement["section_id"]) if replacement is not None else "",
+                    "superseded_by_key": str(replacement["section_key"]) if replacement is not None else "",
+                    "decision_at": now_iso if status != "unknown" else "",
+                    "evidence": evidence if status == "superseded" else "",
+                    "content_sha256": str(
+                        proposed_section.get("content_sha256")
+                        or current_section.get("content_sha256")
+                        or before.get("content_sha256")
+                        or ""
+                    ),
+                    "before_status": str(before.get("status") or "new"),
+                    "old_content": str(current_section.get("content") or ""),
+                    "replacement_content": str(replacement.get("content") or "") if replacement is not None else "",
+                }
+            )
+
+        for note_key, body in list(body_by_note.items()):
+            parsed = {
+                str(section["section_id"]): section
+                for section in self._parse_note_sections(body)
+            }
+            removals = [
+                (int(parsed[update["section_id"]]["start_char"]), int(parsed[update["section_id"]]["end_char"]))
+                for update in normalized
+                if update["note_key"] == note_key
+                and update["status"] == "superseded"
+                and update["section_id"] in parsed
+            ]
+            for start, end in sorted(removals, reverse=True):
+                body = body[:start] + body[end:]
+            final_parsed = {
+                str(section["section_id"]): section
+                for section in self._parse_note_sections(body)
+            }
+            for update in (item for item in normalized if item["note_key"] == note_key):
+                update["note_body_after"] = body
+                final_section = final_parsed.get(update["section_id"])
+                if update["status"] == "superseded":
+                    if final_section is not None:
+                        raise _MemoryAgentValidationError(
+                            f"note {note_key} superseded section {update['section_id']} still exists after removal"
+                        )
+                    continue
+                if final_section is None:
+                    raise _MemoryAgentValidationError(
+                        f"note {note_key} active/unknown section {update['section_id']} is missing after section updates"
+                    )
+                update["heading_path"] = str(final_section.get("heading_path") or "")
+                update["anchor"] = str(final_section.get("anchor") or "")
+                update["ordinal"] = int(final_section.get("ordinal") or 0)
+                update["content_sha256"] = str(final_section.get("content_sha256") or "")
+            body_by_note[note_key] = body
+
+        final_by_note: dict[str, dict[str, dict[str, Any]]] = {
+            note_key: {section_id: dict(row) for section_id, row in rows.items()}
+            for note_key, rows in existing_by_note.items()
+        }
+        for update in normalized:
+            final_by_note[update["note_key"]][update["section_id"]] = update
+        for note_key, rows in final_by_note.items():
+            active_scopes: dict[str, str] = {}
+            for section_id, row in rows.items():
+                if row.get("status") != "active":
+                    continue
+                scope_key = str(row.get("scope_key") or "")
+                if not scope_key:
+                    continue
+                if scope_key in active_scopes:
+                    raise _MemoryAgentValidationError(
+                        f"note {note_key} has two active sections for scope {scope_key}"
+                    )
+                active_scopes[scope_key] = section_id
+            for section_id, row in rows.items():
+                if row.get("status") != "superseded":
+                    continue
+                if (
+                    not str(row.get("superseded_by") or "")
+                    and str(row.get("evidence") or "") == "operator note edit removed section"
+                ):
+                    continue
+                seen: set[str] = set()
+                current_id = section_id
+                while True:
+                    if current_id in seen:
+                        raise _MemoryAgentValidationError(
+                            f"note {note_key} has a note section supersession cycle"
+                        )
+                    seen.add(current_id)
+                    replacement_id = str(rows.get(current_id, {}).get("superseded_by") or "")
+                    if not replacement_id:
+                        raise _MemoryAgentValidationError(
+                            f"note {note_key} section {current_id} has no active replacement"
+                        )
+                    replacement = rows.get(replacement_id)
+                    if replacement is None:
+                        raise _MemoryAgentValidationError(
+                            f"note {note_key} section {current_id} has a missing replacement"
+                        )
+                    current_id = replacement_id
+                    if replacement.get("status") == "active":
+                        break
+                if rows.get(current_id, {}).get("status") != "active":
+                    raise _MemoryAgentValidationError(
+                        f"note {note_key} section {section_id} replacement must be active"
+                    )
+        return normalized
 
     def _build_validated_write_from_apply_batch(
         self,
@@ -6842,11 +9039,13 @@ class MemoryManager:
         adds = list(payload.get("adds") or [])
         rewrites = list(payload.get("rewrites") or [])
         deletes = list(payload.get("deletes") or [])
+        raw_delete_reasons = list(payload.get("delete_reasons") or [])
         note_upserts = dict(payload.get("note_upserts") or {})
         note_edits = {
             str(ref): [dict(op) for op in list(ops or [])]
             for ref, ops in dict(payload.get("note_edits") or {}).items()
         }
+        raw_note_section_updates = list(payload.get("note_section_updates") or [])
         raw_inspired_lines = payload.get("inspired_lines")
         if raw_inspired_lines is None:
             inspired_lines: list[object] = []
@@ -6863,20 +9062,44 @@ class MemoryManager:
             raise _MemoryAgentValidationError(_DELETE_NOOP_RULE)
         if batch.op != "delete" and already_satisfied:
             raise _MemoryAgentValidationError("already_satisfied is only valid for delete batches")
-        if noop_reason and (adds or rewrites or deletes or note_upserts or note_edits):
+        dream_note_refs: set[str] = set()
+        dream_memory_ids: set[str] = set()
+        dream_scope_enforced = False
+        if batch.op == "dream":
+            if already_satisfied:
+                raise _MemoryAgentValidationError("dream batches may not use already_satisfied")
+            if session.dream_context_loaded:
+                dream_note_refs = set(session.dream_note_refs)
+                dream_memory_ids = set(session.dream_memory_ids)
+                dream_scope_enforced = True
+            elif batch.items:
+                payload = self._dream_payload_from_item(batch.items[0])
+                dream_note_refs = {
+                    str(item or "").strip() for item in list(payload.get("note_refs") or []) if str(item or "").strip()
+                }
+                dream_memory_ids = {
+                    str(item or "").strip() for item in list(payload.get("memory_ids") or []) if str(item or "").strip()
+                }
+                dream_scope_enforced = "memory_ids" in payload
+        if noop_reason and (adds or rewrites or deletes or note_upserts or note_edits or raw_note_section_updates):
             raise _MemoryAgentValidationError(
-                "noop_reason may not be combined with add, rewrite, delete, note_upsert or note_edits"
+                "noop_reason may not be combined with add, rewrite, delete, note_upsert, note_edits, or note_section_updates"
             )
-        if already_satisfied and (adds or rewrites or deletes or note_upserts or note_edits or noop_reason):
+        if already_satisfied and (
+            adds or rewrites or deletes or note_upserts or note_edits or raw_note_section_updates or noop_reason
+        ):
             raise _MemoryAgentValidationError(
-                "already_satisfied may not be combined with add, rewrite, delete, note_upsert, note_edits or noop_reason"
+                "already_satisfied may not be combined with add, rewrite, delete, note_upsert, note_edits, note_section_updates, or noop_reason"
             )
 
-        # Line numbers, not ids: the block does not print ids any more, so the model points at
-        # the line it means and this snapshot is the only thing that says which row that is.
+        # Line numbers are the write address. Row cards expose ids for comparison, but the
+        # batch boundary resolves each line against this snapshot before any mutation.
         before_entries = self.resident_lines()
         line_by_number = {index + 1: entry for index, entry in enumerate(before_entries)}
         existing_by_id = {entry.memory_id: entry for entry in before_entries}
+        stored_rows_by_id = {
+            str(row.get("memory_id") or ""): row for row in self._memory_repo.list_memories()
+        }
 
         def _entry_at_line(field: str, index: int, value: object) -> MemoryEntry:
             try:
@@ -6890,9 +9113,101 @@ class MemoryManager:
                 )
             return entry
 
+        delete_reason_by_line: dict[int, dict[str, Any]] = {}
+        for index, raw_reason in enumerate(raw_delete_reasons):
+            if not isinstance(raw_reason, dict):
+                raise _MemoryAgentValidationError(f"delete_reasons[{index}] must be an object")
+            line, line_error = coerce_memory_line(raw_reason.get("line"))
+            if line_error:
+                raise _MemoryAgentValidationError(f"delete_reasons[{index}].line: {line_error}")
+            if line in delete_reason_by_line:
+                raise _MemoryAgentValidationError(f"delete_reasons[{index}].line is duplicated")
+            reason = str(raw_reason.get("reason") or "").strip()
+            basis = str(raw_reason.get("authority_basis") or "").strip().lower()
+            evidence = str(raw_reason.get("evidence") or "").strip()
+            replacement_line = 0
+            if raw_reason.get("replacement_line") is not None:
+                replacement_line, replacement_error = coerce_memory_line(raw_reason.get("replacement_line"))
+                if replacement_error:
+                    raise _MemoryAgentValidationError(
+                        f"delete_reasons[{index}].replacement_line: {replacement_error}"
+                    )
+            if not reason:
+                raise _MemoryAgentValidationError(f"delete_reasons[{index}].reason must not be empty")
+            if basis not in {"explicit_supersession", "newer_timestamp", "duplicate", "operator_request"}:
+                raise _MemoryAgentValidationError(f"delete_reasons[{index}].authority_basis is invalid")
+            if raw_reason.get("scope_match") is not True:
+                raise _MemoryAgentValidationError(f"delete_reasons[{index}].scope_match must be true")
+            if basis in {"explicit_supersession", "newer_timestamp", "duplicate"} and not replacement_line:
+                raise _MemoryAgentValidationError(
+                    f"delete_reasons[{index}].replacement_line is required for {basis}"
+                )
+            if basis in {"explicit_supersession", "duplicate"} and not evidence:
+                raise _MemoryAgentValidationError(
+                    f"delete_reasons[{index}].evidence must not be empty for {basis}"
+                )
+            if basis == "operator_request" and batch.op == "dream":
+                raise _MemoryAgentValidationError("operator_request is not allowed in dream batches")
+            delete_reason_by_line[line] = {
+                "line": line,
+                "reason": reason,
+                "replacement_line": replacement_line or None,
+                "authority_basis": basis,
+                "scope_match": True,
+                "evidence": evidence,
+            }
+
         delete_ids: set[str] = set()
+        delete_reason_by_id: dict[str, dict[str, Any]] = {}
         for index, item in enumerate(deletes):
-            delete_ids.add(_entry_at_line("deletes", index, item).memory_id)
+            entry = _entry_at_line("deletes", index, item)
+            number, _ = coerce_memory_line(item)
+            memory_id = entry.memory_id
+            if dream_scope_enforced and memory_id not in dream_memory_ids:
+                raise _MemoryAgentValidationError(f"deletes[{index}]: line is outside this dream cluster")
+            reason = delete_reason_by_line.get(number)
+            if reason is None:
+                raise _MemoryAgentValidationError(
+                    f"deletes[{index}]: every deleted line requires a matching delete_reasons entry"
+                )
+            replacement_entry = line_by_number.get(reason["replacement_line"] or 0)
+            if reason["replacement_line"] and replacement_entry is None:
+                raise _MemoryAgentValidationError(
+                    f"delete_reasons[{index}].replacement_line is outside the memory block"
+                )
+            if replacement_entry is not None:
+                if replacement_entry.memory_id == memory_id:
+                    raise _MemoryAgentValidationError(
+                        f"delete_reasons[{index}].replacement_line must name a different memory"
+                    )
+                if dream_scope_enforced and replacement_entry.memory_id not in dream_memory_ids:
+                    raise _MemoryAgentValidationError(
+                        f"delete_reasons[{index}].replacement_line is outside this dream cluster"
+                    )
+            if reason["authority_basis"] == "newer_timestamp":
+                try:
+                    target_time = self._authority_time_key(stored_rows_by_id[memory_id])
+                    replacement_time = self._authority_time_key(stored_rows_by_id[replacement_entry.memory_id])
+                except (KeyError, TypeError, ValueError):
+                    raise _MemoryAgentValidationError(
+                        f"delete_reasons[{index}]: newer_timestamp requires valid stored timestamps"
+                    ) from None
+                if replacement_time <= target_time:
+                    raise _MemoryAgentValidationError(
+                        f"delete_reasons[{index}]: newer_timestamp replacement is not newer by (updated_at, created_at)"
+                    )
+            normalized_reason = dict(reason)
+            normalized_reason["delete_reason"] = reason["reason"]
+            normalized_reason["replacement_memory_id"] = (
+                replacement_entry.memory_id if replacement_entry is not None else ""
+            )
+            delete_reason_by_id[memory_id] = normalized_reason
+            delete_ids.add(memory_id)
+        extra_reason_lines = sorted(set(delete_reason_by_line) - {coerce_memory_line(item)[0] for item in deletes})
+        if extra_reason_lines:
+            raise _MemoryAgentValidationError(
+                f"delete_reasons name lines that are not in deletes: {extra_reason_lines}"
+            )
 
         # The consolidation navigation is the one thing in the block a line number cannot
         # reach: the rows behind it left the resident block, so they have no line. The token
@@ -6904,6 +9219,13 @@ class MemoryManager:
         elif not isinstance(raw_category_deletes, list):
             raise _MemoryAgentValidationError("category_deletes must be a list")
         category_names = {path.stem for path in self.index_dir.glob("*.md")}
+        if batch.op == "dream" and dream_scope_enforced:
+            existing_note_refs = {path.stem for path in self.notes_dir.glob("*.md")} | category_names
+            for ref in sorted(set(note_upserts) | set(note_edits)):
+                if ref in existing_note_refs and ref not in dream_note_refs:
+                    raise _MemoryAgentValidationError(
+                        f"note change for {ref} is outside this dream cluster"
+                    )
         retired_by_category: dict[str, list[str]] = {}
         for row in self._memory_repo.list_memories():
             category = str(row.get("consolidated_into") or "").strip()
@@ -6914,6 +9236,10 @@ class MemoryManager:
         purged_ids: set[str] = set()
         for index, token in enumerate(raw_category_deletes):
             name = resolve_note_token(str(token or "").strip(), set(), category_names)
+            if batch.op == "dream" and name not in dream_note_refs:
+                raise _MemoryAgentValidationError(
+                    f"category_deletes[{index}]: {token} is outside this dream cluster"
+                )
             already_purged = next((item for item in purged_categories if item["note_ref"] == name), None)
             if already_purged is not None:
                 continue
@@ -6936,12 +9262,24 @@ class MemoryManager:
             if not isinstance(item, dict):
                 raise _MemoryAgentValidationError("rewrite item must be an object")
             memory_id = _entry_at_line("rewrites", rewrite_index, item.get("line")).memory_id
+            if dream_scope_enforced and memory_id not in dream_memory_ids:
+                raise _MemoryAgentValidationError(
+                    f"rewrites[{rewrite_index}]: line is outside this dream cluster"
+                )
             rewrite_line_by_id[memory_id], _ = coerce_memory_line(item.get("line"))
             content = self._normalize_memory_content_text(str(item.get("content") or ""))
-            minimal_memory = self._normalize_minimal_memory_text(
-                str(item.get("minimal_memory") or ""),
-                summary_max_chars=summary_limit,
-            )
+            stored_row = stored_rows_by_id.get(memory_id, {})
+            if item.get("minimal_memory") is None:
+                if content != str(stored_row.get("memory_body") or "").strip():
+                    raise _MemoryAgentValidationError(
+                        f"rewrites[{rewrite_index}].minimal_memory is required when content changes"
+                    )
+                minimal_memory = str(stored_row.get("minimal_memory") or "")
+            else:
+                minimal_memory = self._normalize_minimal_memory_text(
+                    str(item.get("minimal_memory") or ""),
+                    summary_max_chars=summary_limit,
+                )
             rewrite_by_id[memory_id] = content
             rewrite_minimal_by_id[memory_id] = minimal_memory
             rewrite_note_ref = str(item.get("note_ref") or "").strip()
@@ -6951,7 +9289,12 @@ class MemoryManager:
 
         inspired_lines_as_ids: list[str] = []
         for index, item in enumerate(inspired_lines):
-            inspired_lines_as_ids.append(_entry_at_line("inspired_lines", index, item).memory_id)
+            memory_id = _entry_at_line("inspired_lines", index, item).memory_id
+            if dream_scope_enforced and memory_id not in dream_memory_ids:
+                raise _MemoryAgentValidationError(
+                    f"inspired_lines[{index}]: line is outside this dream cluster"
+                )
+            inspired_lines_as_ids.append(memory_id)
         inspired_memory_ids = inspired_lines_as_ids
 
         existing_ids = set(existing_by_id)
@@ -7116,6 +9459,14 @@ class MemoryManager:
                 if str(entry.memory_id or "").strip() and str(entry.memory_id or "").strip() not in after_entry_ids
             }
         )
+        note_section_updates = self._build_note_section_updates(
+            session=session,
+            note_upserts=normalized_note_upserts,
+            note_edits=dict(note_edits),
+            raw_updates=raw_note_section_updates,
+            now_iso=self._now_iso(),
+            allowed_note_refs=(dream_note_refs | submitted_note_refs) if dream_scope_enforced else None,
+        )
         return _MemoryValidatedWrite(
             document_text=self._normalize_document_text(document_text),
             note_writes=normalized_note_upserts,
@@ -7125,8 +9476,14 @@ class MemoryManager:
             adds=effective_adds,
             rewrites=effective_rewrites,
             deletes=sorted(set(effective_delete_ids) | purged_ids),
+            delete_reasons=delete_reason_by_id,
+            original_bodies=self._memory_repo.fetch_bodies(
+                [str(item.get("id") or "") for item in effective_rewrites]
+                + sorted(set(effective_delete_ids) | purged_ids)
+            ),
             note_upserts=normalized_note_upserts,
             note_edits=dict(note_edits),
+            note_section_updates=note_section_updates,
             inspired_memory_ids=list(inspired_memory_ids),
             purged_categories=purged_categories,
             write_mode=self._validated_write_mode(
@@ -7134,6 +9491,7 @@ class MemoryManager:
                 rewrites=rewrites,
                 deletes=deletes,
                 note_upserts=note_upserts,
+                note_section_updates=raw_note_section_updates,
                 noop_reason=noop_reason,
                 already_satisfied=already_satisfied,
             ),
@@ -7148,6 +9506,7 @@ class MemoryManager:
         rewrites: list[Any],
         deletes: list[Any],
         note_upserts: dict[str, Any],
+        note_section_updates: list[Any],
         noop_reason: str,
         already_satisfied: str = "",
     ) -> str:
@@ -7155,7 +9514,11 @@ class MemoryManager:
             return ""
         has_adds = bool(list(adds or []))
         has_rewrites_or_deletes = bool(list(rewrites or []) or list(deletes or []))
-        has_note_only_mutation = bool(dict(note_upserts or {})) and not has_adds and not has_rewrites_or_deletes
+        has_note_only_mutation = (
+            bool(dict(note_upserts or {}) or list(note_section_updates or []))
+            and not has_adds
+            and not has_rewrites_or_deletes
+        )
         has_existing_mutations = has_rewrites_or_deletes or has_note_only_mutation
         if has_adds and has_existing_mutations:
             return "mixed"
@@ -7411,7 +9774,9 @@ class MemoryManager:
             "usage_counted_requests": self._usage_counted_request_count(request_artifacts),
         }
 
-    async def run_due_batch_once(self, *, now_iso: str | None = None) -> dict[str, Any]:
+    async def run_due_batch_once(
+        self, *, now_iso: str | None = None, force_dream: bool = False
+    ) -> dict[str, Any]:
         worker_lease = self._try_acquire_memory_worker_lease()
         if worker_lease is None:
             return {"ok": True, "status": "worker_lease_unavailable", "processed": 0}
@@ -7424,6 +9789,10 @@ class MemoryManager:
             effective_now = str(now_iso or self._now_iso()).strip()
             self._promote_aged_review_row(now_iso=effective_now)
             batch = await self.collect_due_batch(now_iso=effective_now)
+            if batch is None or not batch.items:
+                dream_request = await self._maybe_enqueue_dream_locked(effective_now, force=force_dream)
+                if dream_request is not None:
+                    batch = await self.collect_due_batch(now_iso=effective_now)
             if batch is None or not batch.items:
                 if dropped_request_ids:
                     return {
@@ -7449,6 +9818,7 @@ class MemoryManager:
             precheck_error = self._precheck_batch_for_processing(batch)
             if precheck_error:
                 self._drop_request_ids({item.request_id for item in batch.items})
+                self._settle_dream_batch(batch, status=f"precheck_failed: {precheck_error}", now_iso=effective_now)
                 processed_at = self._now_iso()
                 self._append_terminal_history(
                     batch=batch,
@@ -7473,10 +9843,13 @@ class MemoryManager:
             try:
                 runtime_config, _revision, _changed = get_runtime_config()
             except Exception as exc:
-                return self._mark_batch_error(batch, effective_now, str(exc or "memory runtime config unavailable"))
+                error_text = str(exc or "memory runtime config unavailable")
+                self._settle_dream_batch(batch, status=f"config_error: {error_text}", now_iso=effective_now)
+                return self._mark_batch_error(batch, effective_now, error_text)
 
             model_chain = self._memory_model_chain(runtime_config)
             if not model_chain:
+                self._settle_dream_batch(batch, status="blocked: memory role not configured", now_iso=effective_now)
                 return self._mark_batch_blocked(batch, effective_now, "memory role not configured")
 
             try:
@@ -7501,6 +9874,7 @@ class MemoryManager:
                     trigger="exception",
                     now_iso=effective_now,
                 )
+                self._settle_dream_batch(batch, status="provider_error: agent_exception", now_iso=effective_now)
                 return self._parked_batch_report(batch, failed_record, discard_reason="agent_exception")
 
             if bool(result.get("capacity_replay")):
@@ -7547,6 +9921,11 @@ class MemoryManager:
                     trigger="initial",
                     now_iso=effective_now,
                 )
+                self._settle_dream_batch(
+                    batch,
+                    status=f"{category}: {str(result.get('error') or '').strip()}",
+                    now_iso=effective_now,
+                )
                 return self._parked_batch_report(
                     batch,
                     failed_record,
@@ -7565,6 +9944,7 @@ class MemoryManager:
             # 这批"记住/修改/忘记"既没停车记录也没终态行，无痕消失——库里回滚了、请求
             # 却没了。反向窗口（提交成功、销行前崩溃）只是一次重放，代价小一个量级。
             self._commit_validated_write(result["validated"])
+            self._settle_dream_batch(batch, status="applied", now_iso=self._now_iso())
             self._drop_request_ids({item.request_id for item in batch.items})
             # 成功信号：清掉本批 request_id 对应的停车记录（终于成功了），
             # 并把停车区里最早的一条 provider/瞬时错误批次重新入队尾（无成功信号则永不自动重试）。
@@ -7619,6 +9999,7 @@ class MemoryManager:
                 "provider_request_ids": list(processed_payload["provider_request_ids"]),
                 "request_artifact_paths": list(processed_payload["request_artifact_paths"]),
                 "processed_at": processed_at,
+                **self._dream_metadata_from_batch(batch),
                 **({"noop_reason": str(processed_payload.get("noop_reason") or "").strip()} if str(processed_payload.get("noop_reason") or "").strip() else {}),
                 **(
                     {"already_satisfied": str(processed_payload.get("already_satisfied") or "").strip()}
@@ -7780,6 +10161,7 @@ class MemoryManager:
             trigger="capacity",
             now_iso=now_iso,
         )
+        self._settle_dream_batch(batch, status=f"capacity: {error_text}", now_iso=now_iso)
         # A capacity park is a decision the operator has to be able to find without opening
         # the failure surface: the ledger row names the rung the ladder stopped on.
         self._append_terminal_history(
