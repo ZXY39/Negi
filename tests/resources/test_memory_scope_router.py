@@ -2,9 +2,9 @@
 
 不变量：
 - 本地会话读写本地 manager；群会话读写本群 manager；第三方私聊只读本地。
-- 群会话模型可见块 = 本地记忆 + 「## 群聊长期记忆」。
+- 群会话模型可见块 = 「## 群聊长期记忆」；本地长期记忆与本地笔记都不可见。
 - 群 manager 不碰人设 note；群写入不落本地 manager。
-- 群记忆增量走独立游标与独立小节，压缩跳同时归零。
+- 群记忆增量走独立游标与独立小节，压缩跳同时归零；本地记忆增量不投群会话。
 """
 
 from __future__ import annotations
@@ -121,16 +121,19 @@ def test_review_manager_for_session_routes_scope_without_creating_empty_group(tm
         local.close()
 
 
-def test_group_snapshot_is_local_plus_group_block(tmp_path, monkeypatch) -> None:
-    router, local = _router(tmp_path, monkeypatch, entries=[_group_entry()])
+def test_group_snapshot_is_the_group_block_only(tmp_path, monkeypatch) -> None:
+    router, local = _router(tmp_path, monkeypatch, entries=[_group_entry(), _dm_entry()])
     try:
         local.memory_file.write_text("本地规则：回答先给结论。\n", encoding="utf-8")
         view = router.view_for_session("ext:qq-official-1:group-a")
         view.group_manager.memory_file.write_text("群规则：这个群只看周报。\n", encoding="utf-8")
         text = view.snapshot_text()
-        assert "本地规则" in text
-        assert text.index("本地规则") < text.index("## 群聊长期记忆") < text.index("群规则")
-        # 私聊看到的只有本地那一份
+        assert "本地规则" not in text
+        assert text == "## 群聊长期记忆\n群规则：这个群只看周报。"
+        # 群块为空时也不回落到本地：本地记忆对群会话不可见。
+        view.group_manager.memory_file.write_text("", encoding="utf-8")
+        assert view.snapshot_text() == ""
+        # 私聊仍然只读本地那一份
         dm = router.view_for_session("ext:qq-official-1:dm-a")
         assert dm.snapshot_text() == "本地规则：回答先给结论。"
     finally:
@@ -167,8 +170,8 @@ def test_group_manager_is_isolated_from_local_memory_and_persona(tmp_path, monke
         local.close()
 
 
-def test_group_note_read_falls_back_to_local(tmp_path, monkeypatch) -> None:
-    router, local = _router(tmp_path, monkeypatch, entries=[_group_entry()])
+def test_group_note_read_stays_in_the_group_scope(tmp_path, monkeypatch) -> None:
+    router, local = _router(tmp_path, monkeypatch, entries=[_group_entry(), _dm_entry()])
     try:
         local.notes_dir.mkdir(parents=True, exist_ok=True)
         (local.notes_dir / "note_local1.md").write_text("本地笔记正文", encoding="utf-8")
@@ -177,10 +180,70 @@ def test_group_note_read_falls_back_to_local(tmp_path, monkeypatch) -> None:
         (view.group_manager.notes_dir / "note_group1.md").write_text("群笔记正文", encoding="utf-8")
 
         assert "群笔记正文" in view.read_note("note_group1")
-        assert "本地笔记正文" in view.read_note("note_local1")
+        with pytest.raises(FileNotFoundError):
+            view.read_note("note_local1")
+        # 私聊仍可读本地 note。
+        dm = router.view_for_session("ext:qq-official-1:dm-a")
+        assert "本地笔记正文" in dm.read_note("note_local1")
     finally:
         router.close()
         local.close()
+
+
+def test_group_entry_without_chat_type_is_still_a_group_scope(tmp_path, monkeypatch) -> None:
+    entry = SimpleNamespace(
+        bridge_id="qq-official-1",
+        external_key="qq:group:missing-shape",
+        session_key="ext:qq-official-1:group-x",
+        title="",
+        chat_type="",
+        trust="",
+    )
+    router, local = _router(tmp_path, monkeypatch, entries=[entry])
+    try:
+        local.memory_file.write_text("本地规则\n", encoding="utf-8")
+        view = router.view_for_session(entry.session_key)
+        assert view.kind == "group"
+        assert view.snapshot_text() == ""
+    finally:
+        router.close()
+        local.close()
+
+
+def test_frontdoor_local_memory_delta_is_not_delivered_to_group_sessions() -> None:
+    from g3ku.runtime.frontdoor._ceo_runtime_ops import CeoFrontDoorRuntimeOps
+
+    local_manager = SimpleNamespace(
+        latest_memory_revision=lambda: 3,
+        memory_notice_delta=lambda since_rev: {"rev": 3, "text": "本地增量", "rebase": False},
+    )
+    group_view = SimpleNamespace(kind="group", local_manager=local_manager, group_manager=None)
+    dm_view = SimpleNamespace(kind="readonly_local", local_manager=local_manager, group_manager=None)
+
+    def _view_for(key: str):
+        return group_view if "group" in str(key) else dm_view
+
+    ops = object.__new__(CeoFrontDoorRuntimeOps)
+    ops._loop = SimpleNamespace(
+        memory_scope_router=SimpleNamespace(view_for_session=_view_for),
+        memory_manager=local_manager,
+    )
+    assert (
+        ops._frontdoor_memory_notice_provider(
+            since_rev=2,
+            base_rev=2,
+            initialized=True,
+            session_key="ext:qq-official-1:group-a",
+        )
+        is None
+    )
+    dm_delta = ops._frontdoor_memory_notice_provider(
+        since_rev=2,
+        base_rev=2,
+        initialized=True,
+        session_key="ext:qq-official-1:dm-a",
+    )
+    assert dm_delta is not None and dm_delta["text"] == "本地增量"
 
 
 def test_router_lists_scopes_and_resolves_admin_scope(tmp_path, monkeypatch) -> None:

@@ -106,13 +106,16 @@ function loadApp(apiClientOverrides = {}) {
         },
         updateCeoSessionModelSelection: async (sessionId, payload) => {
             calls.push(["patch", sessionId, payload]);
-            const modelKeys = Array.isArray(payload.model_keys) ? [...payload.model_keys] : [];
+            const entries = Array.isArray(payload.route_entries) ? payload.route_entries : [];
+            const refs = entries.map((e) => (e.type === "load_balance" ? `group:${e.group_key}` : e.model_key)).filter(Boolean);
+            const modelKeys = Array.isArray(payload.model_keys) ? [...payload.model_keys] : refs;
             return {
                 ok: true,
                 session_id: sessionId,
                 mode: payload.mode,
                 model_key: payload.model_key || "",
                 model_keys: modelKeys,
+                route_entries: entries,
                 is_session_chain: modelKeys.length > 0,
                 chain_unavailable_keys: [],
                 pinned_available: true,
@@ -733,7 +736,8 @@ test("点保存把会话链提交到本会话，不写全局角色链，并回�
     for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
 
     // 只打会话端点：全局角色链接口一次都没被调用，writesOf 里不该出现 "chain"。
-    assert.deepEqual(writesOf(app).map((call) => [call[0], call[1], call[2].mode, call[2].model_keys]), [
+    // 链以 route_entries 提交（含组槽位的权威形状）。
+    assert.deepEqual(writesOf(app).map((call) => [call[0], call[1], call[2].mode, (call[2].route_entries || []).map((e) => e.model_key)]), [
         ["patch", "web:test", "chain", ["beta", "alpha", "gamma"]],
     ]);
     assert.deepEqual(Array.from(app.ceoModelChainBaseline()), ["beta", "alpha", "gamma"]);
@@ -875,6 +879,7 @@ test("点行上的移除只改草稿，不提前发写请求", () => {
 test("加入模型走真实点击：截断冒泡、回到链栏、只改草稿", () => {
     const app = loadApp();
     mountControl(app, { chain: ["alpha"] });
+    app.S.modelCatalog.loadBalanceGroups = {};
     app.bindCeoModelModeControls();
     app.openCeoModelModePanel();
     app.U.ceoModelChainEdit.listeners.click[0]({ stopPropagation() {} });
@@ -1000,7 +1005,7 @@ test("同步成全局底稿后再动一手，保存才落这条会话链", async
     app.U.ceoModelChainApply.listeners.click[0]();
     for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
 
-    assert.deepEqual(writesOf(app).map((call) => [call[2].mode, call[2].model_keys]), [["chain", ["gamma"]]]);
+    assert.deepEqual(writesOf(app).map((call) => [call[2].mode, (call[2].route_entries || []).map((e) => e.model_key)]), [["chain", ["gamma"]]]);
     assert.equal(app.S.ceoModelSelection.isSessionChain, true);
     assert.equal(app.U.ceoModelModeChain.textContent, "模型链（此会话）");
 });
@@ -1098,4 +1103,47 @@ test("切回模型链板块不丢掉刚加入的草稿", () => {
     assert.ok(app.ceoModelChainDraft().includes("beta"));
     assert.equal(app.ceoModelChainDirty(), true);
     assert.equal(app.U.ceoModelChainApply.disabled, false);
+});
+
+test("会话链分类管理组：组瓦片渲染、picker 加组、保存走 route_entries", async () => {
+    const app = loadApp();
+    mountControl(app, { chain: ["group:g1", "gamma"] });
+    app.S.modelCatalog.loadBalanceGroups = {
+        g1: { enabled: true, max_retry_rounds: 2, model_keys: ["alpha", "beta"] },
+        g2: { enabled: true, max_retry_rounds: 1, model_keys: ["gamma"] },
+    };
+    app.bindCeoModelModeControls();
+    app.openCeoModelModePanel();
+    app.enterCeoModelChainEdit();
+
+    // 组引用渲染成组瓦片（组名 + 成员数），不是裸 group: 文本。
+    app.renderCeoModelChainPane();
+    const chainMarkup = app.U.ceoModelChainList.innerHTML;
+    assert.ok(chainMarkup.includes("is-group"), "组引用应渲染组瓦片");
+    assert.ok(chainMarkup.includes("g1"), "组瓦片印组名");
+    assert.ok(chainMarkup.includes("2 个成员"), "组瓦片印成员数");
+
+    // 加入模式分类列出未在链里的组（g2），点击把 group:g2 加进草稿。
+    app.openCeoModelModePicker("append");
+    const pickerMarkup = app.U.ceoModelPickerList.innerHTML;
+    assert.ok(pickerMarkup.includes('data-ceo-group-pick="g2"'), "picker 应列出可加入的组");
+    assert.equal(pickerMarkup.includes('data-ceo-group-pick="g1"'), false, "已在链里的组不再列出");
+    const item = new StubHTMLElement();
+    item.attributes = { "data-ceo-group-pick": "g2" };
+    item.getAttribute = (name) => (Object.prototype.hasOwnProperty.call(item.attributes, name) ? item.attributes[name] : null);
+    item.closest = (selector) => (selector.includes("data-ceo-group-pick") ? item : null);
+    const handlers = app.U.ceoModelPickerList.listeners.click || [];
+    handlers[handlers.length - 1]({ target: item, stopPropagation() {} });
+    assert.deepEqual(Array.from(app.ceoModelChainDraft()), ["group:g1", "gamma", "group:g2"]);
+
+    // 保存含组链：route_entries 带 load_balance 槽位（不是扁平 model_keys）。
+    app.U.ceoModelChainApply.listeners.click[0]();
+    for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    const writes = writesOf(app);
+    assert.equal(writes.length, 1);
+    assert.deepEqual(writes[0][2].route_entries, [
+        { type: "load_balance", group_key: "g1" },
+        { type: "model", model_key: "gamma" },
+        { type: "load_balance", group_key: "g2" },
+    ]);
 });

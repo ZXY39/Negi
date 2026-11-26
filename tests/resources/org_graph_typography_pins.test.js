@@ -52,6 +52,19 @@ test("活数字容器等宽数字", () => {
     }
 });
 
+test("节点消息正文：代码块折行、封顶框内子块不收缩", () => {
+    // 长行「原文」不再横向滚动，按卡宽折行铺开。
+    const pre = ruleBody(".task-trace-message-body.markdown-content pre {");
+    assert.match(pre, /white-space: pre-wrap/);
+    assert.match(pre, /overflow-wrap: anywhere/);
+    const code = ruleBody(".task-trace-message-body.markdown-content pre code {");
+    assert.match(code, /min-width: 0/);
+    // 正文框是 flex 列 + max-height 封顶：可滚动子块的自动最小高度为 0，
+    // 不禁止收缩就会把代码块/表格压成一条缝，正文框自己却不滚。
+    const child = ruleBody(".task-trace-message-body.markdown-content > * {");
+    assert.match(child, /flex-shrink: 0/);
+});
+
 test("散文 break-word，窄块与代码串保留 anywhere", () => {
     for (const selector of [
         ".media-viewer-markdown {",

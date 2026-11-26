@@ -10500,6 +10500,65 @@ class MemoryManager:
         )
         return {"text": window["text"], "char_count": window["char_count"]}
 
+    def dream_scope_view(self, payload_text: str) -> dict[str, Any] | None:
+        """把 dream 载荷的地址簿解析成用户可读的整理范围（读侧增强，不改存储）。
+
+        dream 载荷只记「整理哪一簇」（id / note / 选择依据 / 水位），正文不在其中；这里按 id
+        回 sqlite 展开完整行卡并标出当前行号、退场去向与缺失，note 标出所在树与是否存在。
+        任何解析失败返回 None，读面永不因一条畸形载荷挂掉。
+        """
+        try:
+            payload = json.loads(str(payload_text or ""))
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(payload, dict) or not str(payload.get("cluster_key") or "").strip():
+            return None
+        repo = getattr(self, "_memory_repo", None)
+        rows = repo.list_memories() if repo is not None else []
+        row_by_id = {str(row.get("memory_id") or ""): row for row in rows}
+        line_by_id = {str(entry.memory_id): index + 1 for index, entry in enumerate(self.resident_lines())}
+        ordinary = self._ordinary_note_names()
+        category = self._category_note_names()
+
+        memories: list[dict[str, Any]] = []
+        for raw_id in list(payload.get("memory_ids") or []):
+            memory_id = str(raw_id or "").strip()
+            if not memory_id:
+                continue
+            row = row_by_id.get(memory_id)
+            retired_into = str((row or {}).get("consolidated_into") or "").strip()
+            memories.append({
+                "memory_id": memory_id,
+                "line": line_by_id.get(memory_id),
+                "body": str((row or {}).get("memory_body") or ""),
+                "minimal_memory": str((row or {}).get("minimal_memory") or ""),
+                "note_ref": str((row or {}).get("note_ref") or "").strip(),
+                "retired_into": retired_into,
+                "missing": row is None,
+                "updated_at": str((row or {}).get("updated_at") or ""),
+            })
+
+        notes: list[dict[str, Any]] = []
+        for raw_ref in list(payload.get("note_refs") or []):
+            ref = str(raw_ref or "").strip()
+            if not ref:
+                continue
+            kind = "ordinary" if ref in ordinary else ("category" if ref in category else "unknown")
+            try:
+                self._note_path(ref)
+                exists = True
+            except (FileNotFoundError, ValueError):
+                exists = False
+            notes.append({"ref": ref, "kind": kind, "exists": exists})
+
+        return {
+            "cluster_key": str(payload.get("cluster_key") or "").strip(),
+            "reason": str(payload.get("reason") or "").strip(),
+            "base_revision": int(payload.get("base_revision") or 0),
+            "memories": memories,
+            "notes": notes,
+        }
+
     def _project_failed_record_for_read(self, record: dict[str, Any]) -> dict[str, Any]:
         """读侧投影：`items[].payload_text` 只留首屏，整份载荷仍留在停车区文件里供回队。"""
 
@@ -10512,6 +10571,10 @@ class MemoryManager:
             projected_items.append(item)
         projected = dict(record)
         projected["items"] = projected_items
+        if str(record.get("op") or "").strip().lower() == "dream":
+            original_items = [item for item in list(record.get("items") or []) if isinstance(item, dict)]
+            if original_items:
+                projected["dream_scope"] = self.dream_scope_view(str(original_items[0].get("payload_text") or ""))
         return projected
 
     def _project_processed_row_for_read(self, row: dict[str, Any]) -> dict[str, Any]:
@@ -10525,6 +10588,10 @@ class MemoryManager:
         windows = [self._project_payload_for_read(str(text or "")) for text in list(row.get("payload_texts") or [])]
         projected["payload_texts"] = [window["text"] for window in windows]
         projected["payload_char_counts"] = [window["char_count"] for window in windows]
+        if str(row.get("op") or row.get("source_op") or "").strip().lower() == "dream":
+            original_texts = [str(text or "") for text in list(row.get("payload_texts") or [])]
+            if original_texts:
+                projected["dream_scope"] = self.dream_scope_view(original_texts[0])
         return projected
 
     def _project_queue_row_for_read(self, row: dict[str, Any]) -> dict[str, Any]:
@@ -10532,6 +10599,8 @@ class MemoryManager:
         window = self._project_payload_for_read(str(row.get("payload_text") or ""))
         projected["payload_text"] = window["text"]
         projected["payload_char_count"] = window["char_count"]
+        if str(row.get("op") or "").strip().lower() == "dream":
+            projected["dream_scope"] = self.dream_scope_view(str(row.get("payload_text") or ""))
         return projected
 
     def _locate_memory_payload_text(self, kind: str, key: str, request_id: str) -> tuple[str, str]:

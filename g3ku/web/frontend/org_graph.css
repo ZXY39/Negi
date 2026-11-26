@@ -5310,6 +5310,44 @@ textarea {
     line-height: 1.25;
 }
 
+/* 组瓦片：与模型行同一表面，组名后跟成员数；组的定义只在模型配置页改。 */
+.ceo-model-chain-row.is-group .ceo-model-chain-title {
+    flex: none;
+    max-width: 60%;
+    font-weight: 600;
+}
+
+.ceo-model-chain-sub {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.72rem;
+    color: var(--text-muted);
+}
+
+.ceo-model-chain-chip {
+    flex: none;
+    padding: 1px 7px;
+    border-radius: 999px;
+    font-size: 0.68rem;
+    color: var(--text-muted);
+    background: var(--bg-hover);
+}
+
+.ceo-model-picker-section {
+    padding: 8px 10px 4px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: var(--text-muted);
+}
+
+.ceo-model-picker-item.is-group .ceo-model-picker-item-title {
+    font-weight: 600;
+}
+
 /* 移除控件只在悬停/聚焦时加重，常驻的 × 会让整条链读起来像一列待删项。 */
 .ceo-model-chain-remove {
     flex: none;
@@ -12213,6 +12251,86 @@ textarea {
     margin-top: 10px;
 }
 
+/* Dream 整理范围：把 id 地址簿渲染成可读的行卡，原始 JSON 折叠保留作取证 */
+.memory-dream-scope {
+    display: grid;
+    gap: 12px;
+}
+
+.memory-dream-scope-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.memory-dream-trigger {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 0.78rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    background: color-mix(in srgb, var(--bg-panel) 70%, var(--bg-app) 30%);
+    border: 1px solid color-mix(in srgb, var(--border-color) 80%, transparent);
+}
+
+.memory-dream-reason {
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+}
+
+.memory-dream-row {
+    display: grid;
+    gap: 6px;
+    padding: 12px 14px;
+    border-radius: 14px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 84%, transparent);
+    background: color-mix(in srgb, var(--bg-surface-inner) 86%, var(--bg-panel) 14%);
+}
+
+.memory-dream-row-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.memory-dream-line {
+    font-size: 0.78rem;
+    font-weight: 700;
+    color: var(--text-secondary);
+}
+
+.memory-dream-body {
+    color: var(--text-primary);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.memory-dream-notes {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.memory-dream-notes-label {
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+}
+
+.memory-dream-raw {
+    margin-top: 4px;
+}
+
+.memory-dream-raw > summary {
+    cursor: pointer;
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+}
+
 /* Structured per-memory change blocks (processed-memory 变更内容) */
 .memory-change-list {
     display: grid;
@@ -16570,6 +16688,17 @@ a.artifact-item-link:focus-visible {
     border-color: var(--ui-border);
 }
 
+/* 暂停压过运行色：任务级暂停是前端投影，节点身上的 status 令牌仍是 in_progress /
+   running（树卡片与连线保持生命周期色），徽标只靠 data-paused 这一位换灰；
+   不这么写，抽屉里的「任务暂停」会带着运行中的蓝色读成"还在跑"。
+   节点级暂停的 visual_state 本来就是 paused，这里也一并统一成同一种灰。
+   选择器与上面那条同权重、必须排在其后，顺序就是优先级。 */
+:root .status-badge[data-paused="true"] {
+    background: var(--ui-neutral-soft);
+    color: var(--ui-text-secondary);
+    border-color: var(--ui-border);
+}
+
 /* 13. 空状态 */
 :root .empty-state {
     min-height: 120px;
@@ -19581,6 +19710,24 @@ a.artifact-item-link:focus-visible {
     line-height: 1.65;
     max-height: calc(320px * var(--reading-font-scale));
     overflow-y: auto;
+}
+
+/* 正文框是「flex 列 + 封顶滚动」：可滚动子块（代码块/表格）的自动最小高度是 0，
+   内容一旦超过封顶就会被纵向压成一条缝，正文框自己却不滚。禁止子项收缩，
+   超高统一交给正文框的 overflow-y。 */
+.task-trace-message-body.markdown-content > * {
+    flex-shrink: 0;
+}
+
+/* 消息正文的代码块按卡宽折行：节点来信的「原文」常是一条长行摘录，代码块默认
+   横向滚动会把引用压成一条窄缝；换行后整段引用直接铺开可读（缩进仍按 pre-wrap 保留）。 */
+.task-trace-message-body.markdown-content pre {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.task-trace-message-body.markdown-content pre code {
+    min-width: 0;
 }
 
 .spawn-node-list {

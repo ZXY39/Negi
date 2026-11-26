@@ -219,6 +219,7 @@ def test_third_party_limited_is_a_whitelist(registry) -> None:
         "memory_update",
         "cron",
         "schedule_wake",
+        "mention_member",
         "web_fetch",
     ):
         assert policy.tool_allowed(allowed), allowed

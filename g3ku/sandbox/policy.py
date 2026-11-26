@@ -122,10 +122,20 @@ READONLY_THIRD_PARTY_TOOL_NAMES = LIMITED_DEFAULT_TOOL_NAMES
 LIMITED_TOOL_WARNINGS: dict[str, str] = {
     "exec": "命令行执行会触达宿主；本档强制 governed（形态守卫 + 路径策略 + 命令行风险拦截）。",
     "process_kill": "可终止宿主进程；只应在本会话确实需要时打开。",
-    "create_async_task": "任务在独立 worker 执行，不受本会话工作目录约束。",
+    "create_async_task": "受限档一律拒绝任务派发，勾选不会生效：任务在独立 worker 执行，不受本会话工作目录约束。",
     "skill-installer": "会安装工具到工作区，不受本会话工作目录约束。",
     "register_stickers": "会写全局表情包注册表，不受本会话工作目录约束。",
     "search_session_history": "仅操作员会话可检索转录；第三方群聊/私聊调用会被工具内拒绝。",
+}
+
+# 合成常驻工具的展示元数据。它们没有 `tools/<name>/resource.yaml`，资源注册表目录里
+# 没有它们；按会话工具列表 UI 用本表补出可渲染行，前端不再维护第二份硬编码名单。
+# `risk_level` 与工具表同口径（low/medium/high），只表达后果级别，不是准入判据。
+LIMITED_SYNTHETIC_TOOL_METADATA: dict[str, dict[str, str]] = {
+    "time": {"display_name": "读取当前时间", "risk_level": "low"},
+    "silent": {"display_name": "静默回复", "risk_level": "low"},
+    "schedule_wake": {"display_name": "定时唤醒自己", "risk_level": "low"},
+    "mention_member": {"display_name": "群内 @ 成员", "risk_level": "medium"},
 }
 
 # register_stickers 会改名并写 registry.json，属于全局写入，默认不进受限集合。
@@ -146,7 +156,7 @@ WRITE_TOOL_NAMES: frozenset[str] = frozenset(
 NETWORK_WRITE_TOOL_NAMES: frozenset[str] = frozenset({"skill-installer"})
 NETWORK_TOOL_NAMES: frozenset[str] = frozenset({"web_fetch"})
 PROCESS_TOOL_NAMES: frozenset[str] = frozenset({"exec", "process_kill"})
-_TASK_TOOL_PREFIX = "task_"
+TASK_TOOL_PREFIX = "task_"
 # 调度类与派发类分开：`cron` / `schedule_wake` 在受限/沙盒档可用，任务派发仍拒。
 SCHEDULE_TOOL_NAMES: frozenset[str] = frozenset({"cron", "schedule_wake"})
 TASK_DISPATCH_TOOL_NAMES: frozenset[str] = frozenset({"create_async_task", "send_message"})
@@ -167,7 +177,7 @@ def is_task_tool_name(tool_name: Any) -> bool:
     name = str(tool_name or "").strip()
     if not name:
         return False
-    return name in TASK_TOOL_NAMES or name.startswith(_TASK_TOOL_PREFIX)
+    return name in TASK_TOOL_NAMES or name.startswith(TASK_TOOL_PREFIX)
 
 
 def is_task_dispatch_tool_name(tool_name: Any) -> bool:
@@ -175,7 +185,7 @@ def is_task_dispatch_tool_name(tool_name: Any) -> bool:
     name = str(tool_name or "").strip()
     if not name:
         return False
-    return name in TASK_DISPATCH_TOOL_NAMES or name.startswith(_TASK_TOOL_PREFIX)
+    return name in TASK_DISPATCH_TOOL_NAMES or name.startswith(TASK_TOOL_PREFIX)
 
 
 def default_mode_for_trust(trust: Any) -> str:
@@ -400,6 +410,7 @@ __all__ = [
     "INSTALL_RUNTIME_MISSING",
     "LIMITED_DEFAULT_TOOL_NAMES",
     "LIMITED_FIXED_TOOL_NAMES",
+    "LIMITED_SYNTHETIC_TOOL_METADATA",
     "LIMITED_TOOL_WARNINGS",
     "MODE_RESTRICTED",
     "MODE_UNRESTRICTED",
@@ -411,6 +422,7 @@ __all__ = [
     "SessionPolicy",
     "TASK_DISPATCH_TOOL_NAMES",
     "TASK_TOOL_NAMES",
+    "TASK_TOOL_PREFIX",
     "TIER_HOST_FULL",
     "TIER_JAILED",
     "TIER_LIMITED",

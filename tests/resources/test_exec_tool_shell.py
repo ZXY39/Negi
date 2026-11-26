@@ -102,6 +102,56 @@ def test_exec_tool_host_process_safety_allows_read_only_process_inspection() -> 
     assert tool._enforce_host_process_safety('Get-Process | Where-Object {$_.Name -like "python*"}') is None
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        'Get-Help Stop-Process',
+        'Get-Command taskkill',
+        'Select-String -Pattern "Stop-Process" app.log',
+        'Get-Content .\\taskkill.log',
+        'Write-Output "please kill it"',
+        'grep kill app.log',
+        'Get-Process | Where-Object {$_.Name -eq "taskkill"}',
+        '# Stop-Process -Name python',
+        'Stop-Process -Name explorer -Force',
+        'taskkill /F /IM explorer.exe',
+        'Stop-Process -Id 999999',
+        'kill -0 12345',
+        'Stop-Process -Name explorer -WhatIf',
+        'taskkill /?',
+        'Get-Process explorer | Format-Table | Out-String ; taskkill /F /IM explorer.exe',
+    ],
+)
+def test_exec_tool_host_guard_allows_non_negi_and_inert(command: str) -> None:
+    tool = ExecTool()
+
+    assert tool._enforce_host_process_safety(command) is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'Get-Process python | Stop-Process -Force',
+        'taskkill /F /IM python.exe',
+        'Stop-Process -Name python',
+        'Stop-Process -Id (Get-Process python).Id',
+        'taskkill /F /IM *',
+        'powershell -Command "Get-Process python | Stop-Process"',
+        'iex "Stop-Process -Name python"',
+        'xargs kill',
+        'Get-Process python | % { $_.Kill() }',
+        'pkill -f g3ku',
+        'Stop-Process -Id 0',
+        'kill -9 -1',
+        f'Stop-Process -Id {os.getpid()}',
+    ],
+)
+def test_exec_tool_host_guard_blocks_negi_or_ambiguous(command: str) -> None:
+    tool = ExecTool()
+
+    assert tool._enforce_host_process_safety(command) is not None
+
+
 @pytest.mark.asyncio
 async def test_exec_tool_safety_guard_enabled_by_default() -> None:
     # 默认开启破坏性命令黑名单：命中且无审批服务时直接拒绝（保持旧错误文本）。

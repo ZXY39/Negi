@@ -128,7 +128,7 @@ function execToolModeLabel(mode) {
 function execToolModeSummary(mode) {
     return ({
         governed: "exec 将继续应用 exec 侧护栏，包括只读、路径与安全限制。",
-        full_access: "exec 将以全权限模式执行 shell 命令，不再应用 exec 侧护栏。",
+        full_access: "exec 将以全权限模式执行 shell 命令，不再应用 exec 侧护栏。此时命令白名单不生效。",
     }[String(mode || "").trim().toLowerCase()] || "exec 将继续应用 exec 侧护栏，包括只读、路径与安全限制。");
 }
 

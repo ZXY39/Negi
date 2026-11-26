@@ -232,23 +232,24 @@ function modelChainImageIncapableNames(chain) {
 
 async function saveCeoModelChain(keys) {
     const sessionId = String(activeSessionId() || "").trim();
-    const modelKeys = normalizeModelRoleChain(keys);
+    const refs = normalizeModelRoleChain(keys);
     if (!sessionId || S.ceoModelSelection.saving) return null;
-    // 草稿与此刻的全局链逐位相同就不必再存一份副本：发不带 model_keys 的 chain 载荷，后端摘掉
+    // 草稿与此刻的全局链逐位相同就不必再存一份副本：发不带链的 chain 载荷，后端摘掉
     // 会话链键，本会话继续随全局自动更新。在这份底稿上再动过手（增删/换位）才会落显式链。
-    const followsGlobal = !modelKeys.length
-        || modelKeys.join("\n") === normalizeModelRoleChain(ceoModelChainKeys()).join("\n");
+    const followsGlobal = !refs.length
+        || refs.join("\n") === normalizeModelRoleChain(ceoModelChainKeys()).join("\n");
     // 空数组是同一条 PATCH 的合法载荷：后端会摘掉会话链键，等于本会话恢复全局模型链，
     // 所以「把成员删空」有去处，不会变成一个点了没反应的按钮。
     S.ceoModelSelection = { ...S.ceoModelSelection, saving: true, error: "" };
     syncCeoModelModeControl();
     try {
-        const payload = await ApiClient.updateCeoSessionModelSelection(
-            sessionId,
-            followsGlobal ? { mode: "chain" } : { mode: "chain", model_keys: modelKeys },
-        );
+        // 含组的链必须走 route_entries（与任务面板/模型页同一形状）：扁平 model_keys 表达不了组槽位。
+        const payload = followsGlobal
+            ? { mode: "chain" }
+            : { mode: "chain", route_entries: chainToRouteEntries(refs) };
+        const response = await ApiClient.updateCeoSessionModelSelection(sessionId, payload);
         if (sessionId !== String(activeSessionId() || "").trim()) return null;
-        const applied = applyCeoModelSelectionPayload(sessionId, payload);
+        const applied = applyCeoModelSelectionPayload(sessionId, response);
         // 落盘成功就回到只读态：面板显示的必须是已经生效的那条链，草稿使命已完成。
         S.ceoModelSelection = {
             ...S.ceoModelSelection,
@@ -316,6 +317,20 @@ function filterCeoModelPickerModels() {
     return matched.sort((left, right) => ceoModelDisplayTitle(left).localeCompare(ceoModelDisplayTitle(right), "zh-Hans-CN"));
 }
 
+function filterCeoModelPickerGroups() {
+    const query = String(S.ceoModelSelection.search || "").trim().toLowerCase();
+    const groups = activeLoadBalanceGroups() || {};
+    const inChain = new Set(normalizeModelRoleChain(ceoModelChainDraft()));
+    return Object.keys(groups)
+        .filter((groupKey) => !inChain.has(groupRefToken(groupKey)))
+        .filter((groupKey) => {
+            if (!query) return true;
+            const group = groups[groupKey] || {};
+            return [groupKey, ...(group.model_keys || [])].join("\n").toLowerCase().includes(query);
+        })
+        .sort((left, right) => left.localeCompare(right, "zh-Hans-CN"));
+}
+
 function renderCeoModelPicker() {
     if (!U.ceoModelPickerList) return;
     const sessionId = String(activeSessionId() || "").trim();
@@ -327,13 +342,15 @@ function renderCeoModelPicker() {
     const appendMode = selection.pickerPurpose === "append";
     const pinnedKey = appendMode ? "" : String(selection.modelKey || "");
     const models = filterCeoModelPickerModels();
+    // 加入模式分类管理：模型之外还列负载均衡组（只引用，组的定义在模型配置页）。
+    const groupKeys = appendMode ? filterCeoModelPickerGroups() : [];
     if (U.ceoModelPickerEmpty) {
-        U.ceoModelPickerEmpty.hidden = models.length > 0;
+        U.ceoModelPickerEmpty.hidden = models.length > 0 || groupKeys.length > 0;
         U.ceoModelPickerEmpty.textContent = appendMode && !String(selection.search || "").trim()
-            ? "全部模型配置都已在链里"
+            ? "全部模型与组都已在链里"
             : "没有匹配的模型配置";
     }
-    U.ceoModelPickerList.innerHTML = models.map((item) => {
+    const modelHtml = models.map((item) => {
         const key = String(item.key || "").trim();
         const title = ceoModelDisplayTitle(item) || key;
         const subtitle = String(item.provider_model || "").trim() || key;
@@ -351,6 +368,29 @@ function renderCeoModelPicker() {
                 <i data-lucide="${appendMode ? "plus" : "check"}" class="ceo-model-picker-item-check" aria-hidden="true"></i>
             </button>`;
     }).join("");
+    const groups = activeLoadBalanceGroups() || {};
+    const groupHtml = groupKeys.map((groupKey) => {
+        const group = groups[groupKey] || {};
+        const memberCount = (group.model_keys || []).length;
+        const isDisabled = group.enabled === false;
+        return `
+            <button type="button" class="ceo-model-picker-item is-group" role="option" aria-selected="false"
+                aria-label="${esc(`加入模型链：组 ${groupKey}`)}" data-ceo-group-pick="${esc(groupKey)}">
+                <span class="ceo-model-picker-item-main">
+                    <span class="ceo-model-picker-item-title">${esc(groupKey)}</span>
+                    <span class="ceo-model-picker-item-subtitle">负载均衡组 · ${memberCount} 个成员</span>
+                </span>
+                ${isDisabled ? '<span class="ceo-model-picker-item-chip">已禁用</span>' : ""}
+                <i data-lucide="plus" class="ceo-model-picker-item-check" aria-hidden="true"></i>
+            </button>`;
+    }).join("");
+    const groupSection = groupHtml
+        ? `<div class="ceo-model-picker-section">负载均衡组</div>${groupHtml}`
+        : "";
+    const modelSection = appendMode && modelHtml && groupHtml
+        ? `<div class="ceo-model-picker-section">模型</div>${modelHtml}`
+        : modelHtml;
+    U.ceoModelPickerList.innerHTML = modelSection + groupSection;
     icons();
 }
 
@@ -475,13 +515,27 @@ function renderCeoModelChainPane() {
     if (U.ceoModelChainHint) U.ceoModelChainHint.hidden = !editing;
     if (U.ceoModelChainEmpty) U.ceoModelChainEmpty.hidden = keys.length > 0;
     U.ceoModelChainList.innerHTML = keys.map((key, index) => {
-        const item = ceoModelCatalogItem(key);
-        const title = ceoModelDisplayTitle(item) || key;
         const grip = editing ? '<span class="ceo-model-chain-grip" aria-hidden="true">&#9776;</span>' : "";
         const remove = editing
             ? `<button type="button" class="ceo-model-chain-remove" draggable="false"
-                    data-ceo-chain-remove="${esc(key)}" aria-label="${esc(`从模型链移除 ${title}`)}">&times;</button>`
+                    data-ceo-chain-remove="${esc(key)}" aria-label="${esc(`从模型链移除 ${key}`)}">&times;</button>`
             : "";
+        // 组引用渲染成组瓦片（组名 + 成员数 + 禁用徽标），与模型页/任务面板同一形态；
+        // 组的定义（成员/轮数）只在模型配置页改，这里只引用。
+        if (isGroupRef(key)) {
+            const groupKey = groupKeyFromRef(key);
+            const group = (activeLoadBalanceGroups() || {})[groupKey] || {};
+            const memberCount = (group.model_keys || []).length;
+            const disabled = group.enabled === false ? '<span class="ceo-model-chain-chip">已禁用</span>' : "";
+            return `
+                <article class="ceo-model-chain-row is-group"${editing ? ' draggable="true"' : ""} role="listitem"
+                    data-ceo-chain-index="${index}" data-ceo-chain-key="${esc(key)}">
+                    ${grip}<span class="ceo-model-chain-title">${esc(groupKey)}</span>
+                    <span class="ceo-model-chain-sub">${memberCount} 个成员</span>${disabled}${remove}
+                </article>`;
+        }
+        const item = ceoModelCatalogItem(key);
+        const title = ceoModelDisplayTitle(item) || key;
         return `
             <article class="ceo-model-chain-row"${editing ? ' draggable="true"' : ""} role="listitem"
                 data-ceo-chain-index="${index}" data-ceo-chain-key="${esc(key)}">
@@ -885,13 +939,19 @@ function bindCeoModelModeControls() {
         renderCeoModelPicker();
     });
     U.ceoModelPickerList?.addEventListener("click", (event) => {
-        const target = event.target instanceof Element ? event.target.closest("[data-ceo-model-pick]") : null;
+        const target = event.target instanceof Element ? event.target.closest("[data-ceo-model-pick],[data-ceo-group-pick]") : null;
         if (!target || target.disabled) return;
         // 加入模式会在处理中重画这份列表，事件目标随即脱离文档；而「点了面板外面就关面板」
         // 那条全局判定用的是 e.target.closest("#ceo-model-mode-panel")，目标一脱离就一律
         // 返回 null，于是这一下点击会被当成面板外，整个面板被关掉、草稿也被丢弃。
         // 所以这里必须截断冒泡，而不是指望渲染时机。
         event.stopPropagation();
+        const pickedGroup = target.getAttribute("data-ceo-group-pick");
+        if (pickedGroup) {
+            // 组只引用：把 group:<key> 记号加进链草稿，组的定义仍在模型配置页。
+            appendCeoModelChainMember(groupRefToken(pickedGroup));
+            return;
+        }
         const pickedKey = target.getAttribute("data-ceo-model-pick");
         if (S.ceoModelSelection.pickerPurpose === "append") appendCeoModelChainMember(pickedKey);
         else void saveCeoModelSelection("model", pickedKey);

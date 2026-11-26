@@ -590,6 +590,8 @@ test("applyExecToolExecutionMode updates localized summary for immediate rerende
     assert.equal(execToolModeLabel("full_access"), "全权限模式");
     assert.match(execToolModeSummary("governed"), /继续应用 exec 侧护栏/);
     assert.match(execToolModeSummary("full_access"), /不再应用 exec 侧护栏/);
+    assert.match(execToolModeSummary("full_access"), /此时命令白名单不生效/);
+    assert.doesNotMatch(execToolModeSummary("governed"), /白名单不生效/);
     // 没有 policy 也没有 metadata 时回落 governed。
     assert.equal(execToolExecutionMode(toolRecord({ tool_id: "exec" })), "governed");
 

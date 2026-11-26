@@ -5192,6 +5192,24 @@ def test_detail_boxes_are_line_capped_and_outputs_have_copy_buttons() -> None:
     assert "background: #39c5bb" in css
 
 
+def test_paused_status_badge_uses_neutral_tier() -> None:
+    """抽屉里「任务暂停」的胶囊必须是灰的，不能带运行中的蓝色。
+
+    任务级暂停是前端投影，节点自身的 status 令牌仍是 in_progress / running，
+    所以灰色只能由 data-paused 单独给出；该规则与生命周期色同权重，必须排在
+    `:root .status-badge[data-status="in_progress"]` 之后才能盖住它。
+    """
+    css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
+    paused_rule = ':root .status-badge[data-paused="true"]'
+    assert paused_rule in css
+    assert css.index(paused_rule) > css.index(':root .status-badge[data-status="in_progress"]')
+    match = re.search(re.escape(paused_rule) + r"\s*\{(?P<body>[^}]*)\}", css)
+    assert match, paused_rule
+    body = match.group("body")
+    assert "--ui-neutral-soft" in body
+    assert "--ui-text-secondary" in body
+
+
 def test_tree_node_pause_chip_sits_inside_top_left_and_title_yields() -> None:
     """节点行的暂停钮占卡片左上内侧，标题首行为它让位。
 

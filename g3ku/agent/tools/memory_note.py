@@ -59,6 +59,6 @@ class MemoryNoteTool(Tool):
             except Exception:
                 view = None
         if view is not None and callable(getattr(view, "read_note", None)):
-            # 群聊：先群块、再本地；本地/第三方私聊：本地。引用跨域也读得到。
+            # 群聊只查本群；本地/第三方私聊查本地。群视图不回落读本地 note。
             return view.read_note(str(ref or "").strip())
         return self._manager.load_note(str(ref or "").strip())

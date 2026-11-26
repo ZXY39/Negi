@@ -14754,8 +14754,8 @@ class MainRuntimeService:
     def _node_memory_snapshot_supplier(self, *, task, node: NodeRecord) -> str | None:
         """continuous 根节点的长期记忆投影；别的节点种类返回空串。
 
-        节点道没有前门视图，按 originating session_key 问进程内活动路由：群源＝本地＋本群，
-        第三方私聊源＝只读本地。`None` 专指这次取数失败，调用侧据此保留上一份冻结值——
+        节点道没有前门视图，按 originating session_key 问进程内活动路由：群源＝只读本群，
+        本地与第三方私聊源＝只读本地。`None` 专指这次取数失败，调用侧据此保留上一份冻结值——
         把失败读成"记忆为空"会在头部抹掉整块字节，等于每次读盘抖动都破一次缓存。
         冻结与重印边界由 react_loop 按 roster epoch 管，这里只取当刻值。
         """
@@ -15275,7 +15275,7 @@ class MainRuntimeService:
         """continuous 根节点的记忆增量：本地与群各一条游标，判据与会话道共用同一份。
 
         节点头部基座在两次重印之间冻结，中途变化只能由这条一次性通知纠正；没有它，
-        节点会带着旧记忆一直跑到下一次压缩。
+        节点会带着旧记忆一直跑到下一次压缩。群源节点只投群增量：它的读侧不含本地记忆。
         """
         _ = base_rev
         if not self._node_memory_tools_allowed(node):
@@ -15283,7 +15283,10 @@ class MainRuntimeService:
         session_key = str(getattr(task, 'session_id', '') or '').strip()
         if not session_key:
             return None
-        from g3ku.runtime.memory_scope_router import active_memory_scope_router
+        from g3ku.runtime.memory_scope_router import (
+            active_memory_scope_router,
+            view_reads_local_memory,
+        )
         from g3ku.runtime.skill_roster_notice import memory_notice_delta_from
 
         try:
@@ -15294,6 +15297,8 @@ class MainRuntimeService:
         if group:
             manager = getattr(view, 'group_manager', None) if view is not None else None
         else:
+            if not view_reads_local_memory(view):
+                return None
             manager = getattr(view, 'local_manager', None) if view is not None else self.memory_manager
         return memory_notice_delta_from(
             manager, since_rev=int(since_rev or 0), initialized=bool(initialized)

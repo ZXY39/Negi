@@ -181,9 +181,9 @@ pinned contract 同时带 `session_mode` 与受限档的 `session_workspace_dir:
 
 | 端点 | 契约 |
 |---|---|
-| `GET /api/ceo/sessions/{id}/sandbox` | 返回 `{trust, mode, stored_mode, default_mode, resolved_tier, tier_label, install_state, backend, enforcement, ui_labels, unlock_required, operator_unlock, tasks_allowed, writable_roots, allowed_tools, allowed_tools_customized, default_allowed_tools, fixed_tools, tool_warnings, exec_allowed, exec_requires_governed}` |
+| `GET /api/ceo/sessions/{id}/sandbox` | 返回 `{trust, mode, stored_mode, default_mode, resolved_tier, tier_label, install_state, backend, enforcement, ui_labels, unlock_required, operator_unlock, tasks_allowed, writable_roots, allowed_tools, allowed_tools_customized, default_allowed_tools, fixed_tools, tool_warnings, tool_metadata, hard_denied_tools, exec_allowed, exec_requires_governed}` |
 | `PATCH /api/ceo/sessions/{id}/sandbox` | 改意图：`{mode?, sandbox?, unlock_password?, writable_roots?}`；**任何信任级的模式切换或进/出沙箱**（`mode` 或 `sandbox` 与当前值不同）都必须带项目解锁口令（`unwrap_with_password` 只读校验），通过后记 `operator_unlock` + 审计；两个值都没变或只传 `writable_roots` 时不走口令闸。`sandbox` 只收布尔，且要求目标是 `restricted`（`unrestricted` 上开沙箱回 400）；`mode` 切到 `unrestricted` 时服务端同时清掉沙箱意图。`writable_roots` 只对 owner 开放（D14：交付目录常在工作区外），third_party 传了直接 403；返回体带 `effective_from: "next_turn"` |
-| `GET/PATCH /api/ceo/sessions/{id}/sandbox/tools` | 受限模式的按会话工具列表。GET 返回生效集合、默认集合、运行时固定项、逐工具 warning 与 `exec_allowed`；PATCH（`{allowed_tools, unlock_password}`）必须带项目解锁口令，写入 session state 并写 `sandbox_tools_changed` 审计；与默认集合完全一致时清掉 override。返回 `effective_from: "next_turn"` |
+| `GET/PATCH /api/ceo/sessions/{id}/sandbox/tools` | 受限模式的按会话工具列表。GET 返回生效集合、默认集合、运行时固定项、逐工具 warning、`tool_metadata`（合成常驻工具的展示名与风险级）、`hard_denied_tools`（受限档结构性拒绝的派发族：`names` / `prefixes` / `reason`）与 `exec_allowed`；PATCH（`{allowed_tools, unlock_password}`）必须带项目解锁口令，写入 session state 并写 `sandbox_tools_changed` 审计；与默认集合完全一致时清掉 override。返回 `effective_from: "next_turn"` |
 | `GET /api/sandbox/status` | 全局安装态、后端、逐维度强制力、`ui_labels`；`?refresh=1` 重探 |
 | `POST /api/sandbox/refresh` | 重探并返回新读数 |
 | `GET /api/sandbox/install/plan` | 安装计划（要执行的步骤、是否提权、是否可能重启、卸载命令） |
@@ -205,9 +205,10 @@ pinned contract 同时带 `session_mode` 与受限档的 `session_workspace_dir:
 （禁用）。未安装或不在受限档时整颗按钮不出现。进/出沙箱各自弹二次确认并要项目解锁口令，
 退出文案明确"回到受限模式：数据面回宿主执行，只保留白名单与 exec 守卫"。
 受限模式下同一面板显示「允许使用的工具列表」；「命令行风险拦截设置」只在 `unrestricted`
-或受限且生效工具包含 `exec` 时显示。工具列表对话框列出 CEO 可见工具，运行时固定项勾选且
-不可改，危险工具（`exec` / `process_kill` / `create_async_task` / `skill-installer` /
-`register_stickers`）默认不勾选但可勾选并附后果说明；保存必须输入项目解锁口令。
+或受限且生效工具包含 `exec` 时显示。工具列表对话框列出 CEO 可见工具与合成默认工具
+（目录组装、合成工具补行与派发族置灰的界面合同见 `web-and-admin.md`
+「Composer Risk Panel」），运行时固定项勾选且不可改，危险工具（`exec` / `process_kill` /
+`skill-installer` / `register_stickers`）默认不勾选但可勾选并附后果说明；保存必须输入项目解锁口令。
 **开和关都弹二次确认**（`openConfirm` 的 password 输入，`textFull` + `inputPlain`：影响说明
 整段展示不出滚动条、口令行不带外层框），确认里逐条写工具面 / 缓存 / 安全的变化；模式切换的
 标题固定用「进入受限模式 / 切到全权限模式」，装好沙箱后也不改口。成功后停在
@@ -311,6 +312,18 @@ MCP 网关以固定身份 `negi-mcp` 出现在每条入站消息里，所以「�
 - **按会话工具列表**：`<数据根>/sandbox/session-modes.json` 的 `allowed_tools` 保存 override；
   未设置 = 默认集合。`GET/PATCH /api/ceo/sessions/{id}/sandbox/tools` 读写这份列表；
   PATCH 必须带项目解锁口令并审计。固定基础工具始终并入，不能取消。
+- **列表目录必须覆盖每个可取消的生效项**：保存只提交渲染出来的复选框，因此
+  **一次保存不得移除未出现在目录里的既有授权项**——操作员没看见的格子不能被当成
+  "已取消勾选"。合成常驻工具（`mention_member` / `schedule_wake`，没有
+  `resource.yaml`）不在资源注册表目录里，响应用 `tool_metadata` 给它们补展示名与
+  风险级；前端不维护硬编码名单，将来新增的合成默认工具自动获得入口。固定项不补
+  可操作行（服务端恒并回）。目录组装规则见 `web-and-admin.md`「Composer Risk Panel」。
+- **派发族可见但不可勾选**：`create_async_task` / `send_message` / `task_*` 在受限档被
+  `SessionPolicy.tool_allowed` 的结构性判据拒绝，与名单无关。响应里的
+  `hard_denied_tools`（`names` + `prefixes` + `reason`）供 UI 把复选框置灰并标
+  "受限档不可用"；勾了不生效不是权限故障，是档位结构。
+- **"恢复默认"**：草稿置为 `default_allowed_tools` 后按同一目录重画，保存时提交完整
+  默认集合，服务端清掉 override，后续默认集合调整自动跟随。
 - **`web_fetch` 默认允许**：受限档默认拥有一个外发通道；不需要的群由 operator 取消。
 - **`exec` 默认不允许，但可显式打开**：打开后 `exec_requires_governed=True`，命令行形态守卫、
   路径策略与“命令行风险拦截设置”的全局治理继续生效；只有 operator 保存过口令的会话才可达。
@@ -371,18 +384,23 @@ MCP 网关以固定身份 `negi-mcp` 出现在每条入站消息里，所以「�
 | 会话 | 读 | 写 |
 |---|---|---|
 | 本地 / 操作员 | 本地记忆 + 人设 | 本地 manager |
-| 群聊 | 本地记忆 + 本群块 + 人设 | 仅本群 manager（`memory/groups/<scope>/`） |
+| 群聊 | 本群块 + 人设（本地长期记忆与本地笔记不可见） | 仅本群 manager（`memory/groups/<scope>/`） |
 | 第三方私聊 | 本地记忆 + 人设 | 无：`memory_update` 返回可读拒绝（`ok=false`） |
 
 - `record_turn_for_review` / `flush_review_window` / 队列消费都作用在 `view.review_manager` 上；
   第三方私聊没有管理器，轮次不进复核窗口。
 - 入队请求的 `session_key` 如实记录来源：记忆管理页的编辑/删除用 `internal:memory_admin`，
   人设引导页与设置页的整理请求用 `internal:persona_memory`，渠道会话的自主复核带真实 `ext:` 键。
-- 群聊看得到本地记忆是产品决定：第三方索要私人信息的拒绝只能靠提示词与工具闸兜底，
-  所以本地记忆里不应放不可对群暴露的凭据类内容。
+- 群会话的读侧只有本群块：`MemoryScopeView.snapshot_text()` 不拼本地记忆，`read_note`
+  只查群域，本地长期记忆与本地笔记（含 `note_persona`）都进不了上下文；本地记忆增量
+  （`memory_cursor`）也不投群会话，群只收 `group_memory_cursor`。人设块仍取本地那一份——
+  人设是共享身份，不属于本地长期记忆。
 - 群记忆的写入按内容价值判断，不按发送者身份：普通群成员的请求同样进入本群 manager；
-  披露拒绝只约束 Master 的私人信息（本地记忆、人设、私聊内容），不阻止群级约定/事实入群块。
+  披露拒绝只约束 Master 的私人信息（人设、私聊内容等），不阻止群级约定/事实入群块。
 - 群 manager 不读人设 note（`persona_enabled=False`）；人设只有 `note_persona` 这一份。
+- 群判定走 `session_trust.is_multi_party_chat`：注册表 `chat_type` 为 `group` / `guild`
+  即群；缺 `chat_type` 时按 `external_key` 的 `qq:group:` / `qq:guild:` 前缀回退，
+  与信任分级同一判据。
 
 ## 来源标注
 
@@ -444,6 +462,9 @@ MCP 网关以固定身份 `negi-mcp` 出现在每条入站消息里，所以「�
 
 - 群里让它"记住 X"后全局记忆变了 → 先看 `memory/ops.jsonl` 的 `session_key` 与
   `memory/review_state.json`；四处闸门任一漏改都会表现成"只有某一条车道漏了"。
+- 群会话里能看到操作员的本地记忆或本地笔记 → 先确认该会话视图的 `kind`：注册表
+  `chat_type` 缺失且 `external_key` 不带 `qq:group:` / `qq:guild:` 前缀时会落成
+  `readonly_local`（能读本地）。群视图的 `snapshot_text` 只含本群块、`read_note` 只查群域。
 - 群里让它读 `config.json` / `master.key` → 看该会话的 `external_trust` 是否为第三方、
   工具是否落在会话允许列表里、`fs_read_roots` / `fs_write_roots` 是否下发
   （前门 `_sandbox_read_roots` / `_sandbox_write_roots`）。

@@ -313,7 +313,7 @@ route plan 的来源在 `_model_routes_for` 有一个任务级前置选择：`no
 
 绑定的粒度是**节点**：一个节点在其生命周期内沿用同一成员，换人只有三条事实会触发——本次请求的过滤条件不匹配（上下文窗口；图像能力不在这里过滤——它按"这一发落到的那颗模型"判，带图请求因此不会成为换成员的理由，见 `web-and-admin.md`「Image Upload Gating」）、绑定成员拿不出 permit、绑定成员被移出组（配置刷新按节点逐个摘除：减成员只解绑正用它的那些节点，加成员不动任何既有绑定）。**429 惩罚不在这三条里**：惩罚只决定一次新绑定选谁，从不拆掉已有绑定——被限流的成员让位走组内轮换那条既有车道（跑满该成员的 `maxRetryRounds` 才换人，见下一段），与旧模型链同一口径。把惩罚接进准入重绑换来的是"风暴期每个回合都重绑"：上游按网关整体打回 429 时组内每个成员都带着同样的惩罚，换成员得不到任何配额缓解，只把同一节点的上下文在成员之间来回搬。回合推进不换人：绑定跨回合保留。节点落终态时清除绑定。逐回合按负载重选会把同一节点的上下文在成员之间来回搬，而换 `model_key` 等于换前缀缓存命名空间，断点之后的整段存活上下文都要重传（取证口径见 `context-and-cache-troubleshooting.md`「Family 与 key 合同」）。
 
-CEO 与记忆的绑定粒度不同：**CEO 按会话键粘滞**（`FrontdoorTurnController.acquire_turn` 以 session_key 为绑定身份），动态出口是失败轮换、压缩边界重选、成员被移出组——不逐回合重选，保长会话前缀缓存；会话固定模型/会话链覆盖优先且扁平，该会话不走组。接线在唯一发送咽喉点 `_call_model_with_tools`：全局 ceo 链含组且无会话覆盖时取 lease，把 route plan + lease 传进 `ConfigChatBackend`，finally 释放。**记忆按 scope 每批动态选**（绑定身份 `memory:<scope_label>`，本地与各群 manager 互不干扰），批末 `release_turn` + `forget_route_binding` 解绑，下一批重新按当时负载选；provider 错误仍批内停车，组内轮换只发生在单发 `chat()` 内部。记忆 attempt 经进程级路由源（`set_memory_model_route_source`，runtime_service 在 web/worker 都设置）取 balancer/控制器，缺席时退回 `build_chat_model` 固定顺序链。台账桥接：`FallbackProvider` 填 `attempted_model_chain`、`ConfigChatBackend` 填 `attempts`，`_memory_attempted_refs` 统一成按序 model_key 列表，保住「这一批真实走过哪些模型」。
+CEO 与记忆的绑定粒度不同：**CEO 按会话键粘滞**（`FrontdoorTurnController.acquire_turn` 以 session_key 为绑定身份），动态出口是失败轮换、压缩边界重选、成员被移出组——不逐回合重选，保长会话前缀缓存；会话固定模型扁平不走组，会话覆盖链含组时用**会话 plan**（覆盖优先），无会话覆盖且全局 ceo 链含组时用全局 plan。接线在唯一发送咽喉点 `_call_model_with_tools`：链含组时取 lease，把 route plan + lease 传进 `ConfigChatBackend`，finally 释放。**记忆按 scope 每批动态选**（绑定身份 `memory:<scope_label>`，本地与各群 manager 互不干扰），批末 `release_turn` + `forget_route_binding` 解绑，下一批重新按当时负载选；provider 错误仍批内停车，组内轮换只发生在单发 `chat()` 内部。记忆 attempt 经进程级路由源（`set_memory_model_route_source`，runtime_service 在 web/worker 都设置）取 balancer/控制器，缺席时退回 `build_chat_model` 固定顺序链。台账桥接：`FallbackProvider` 填 `attempted_model_chain`、`ConfigChatBackend` 填 `attempts`，`_memory_attempted_refs` 统一成按序 model_key 列表，保住「这一批真实走过哪些模型」。
 
 负载打分由三部分组成：本地归一化在飞（running+waiting+reserved 比本地容量）、该配额桶最近 60 秒的请求启动数、按半衰期衰减的 429 惩罚。惩罚按**配额桶**聚合而不是按 binding：同一个 endpoint + 同一把 key（或同一个显式 `quotaPoolKey`）的多条绑定共享一份观测；解析不到密钥材料时每个成员各自记 `unresolved`，绝不互并。桶身份要读配置记录与解锁后的 overlay，web 与 worker 都是解锁方、都能解析，同一颗 binding 在两进程算出的桶键一致（这是跨进程共享观测的 join key）；结果缓存在进程里：重绑时整表失效，其余情况最长一分钟重解析一次——换 key 只写 overlay、不 bump `config_revision`，靠这条 TTL 收敛。缓存同时是心跳车道不占事件循环的前提：worker 每发布一帧状态就要按组扫一遍成员，实盘一组 19 条绑定全扫一次 9.9 ms。**429 是唯一的失败记忆**：其它失败（401/403、密钥被禁、5xx）一律当场交给链 fallback，不留任何跨请求状态——换节点后同样的请求可能就成功，而"这条配置坏了"是操作者按日志处理的问题。限流判据复用模型链自己的 `429` 关键字表（`g3ku/utils/retry_keywords.py`），负载均衡器不另起一套文本，否则同一个错误在两条车道上的归因会漂移。同一份文本还会被分成限流**维度**（`rpm` / `tpm` / `rps` / `token` / `unknown`；同时含 `tpm` 与 `rpm` 的文案单独成 `tpm_rpm` 档，因为按字面顺序判会把这一类误归成 `rpm`），逐跳台账里的 `route_throttle_dimensions` 记的就是它——维度只进观测与台账，不参与选择打分，也不参与任何 fallback 判定（`invalid_request_error` 的文本不是可靠的分类依据）。
 
@@ -571,7 +571,7 @@ main/ 侧所有持久化写在磁盘满（ENOSPC / SQLITE_FULL）条件下的行
 - `memory/ops.jsonl` 是滚动终态历史，不是进行中重试日志，也不是 append-forever 归档：applied 批次、`precheck_failed`（载荷本身不可恢复）与 `operator_discarded`（操作员显式放弃停车记录）等 durable 终态结果连同最终 snapshot / compression 元数据一起落在这里；`type=delete` 另存 `delete_reason`、`authority_basis`、`replacement_memory_id`、`scope_match` 与 `evidence`，管理页在删除正文上方显示原因，历史行没有原因时整行隐藏；`type=note_section` 保存 note_ref、section_id/section_key、status、scope_key、superseded_by、decision_at、evidence、old_content 与 replacement_content，管理页显示段落状态、作用域、替代段与依据；`memory_chars_after` 数的是**常驻条目**，不含归并区；归并批次的行另带 `category_count` 与 `changes[type=consolidate]`（退场记忆的完整正文在 `original_content` 里，这是退场后唯一留有原文的地方）；无变更的 applied 行用 `noop_reason`（write 批次）或 `already_satisfied`（delete 批次）携带原因；处理尝试失败先进失败停车区而非终态历史；超过 7 天的行在正常运行时读写中自动清理。容量动作在同一行里可数：`capacity_action` ∈ `compressed` / `consolidation_queued` / `consolidation_noop` / `parked` 说这一批停在梯子哪一级，`capacity_chars_after` 给动作后的常驻字数，每一行被降级的记忆另在 `changes[]` 里落一条 `compress_for_capacity`（带 `freed_chars`；`0` 表示"标了但没省字"，即那行本来就是 `minimal == body`，标记只为给它开归并的门）。终态行不记录入队侧 `trigger_source`；区分普通窗口批次与压缩冲刷批次要对照会话转录时间线。每行同时带两本模型账：`model_chain` 是当时按 `memory` 角色解析出的整条候选链（批内自修复重排时按新 revision 重读），`attempted_model_chain` 是这一批真实走过的 ref（多轮按序去重，末位=最后一次答话的那颗，长度 > 1 即降级过）；前者是配置读数、后者是执行读数，判据来源见「Chat provider 超时与重试边界」。
 - `memory/review_state.json` 是普通复核窗口的按会话缓冲元数据：缓冲轮次载荷与已上报工具记录 keys；不是已提交的用户记忆。
 - `memory/dream_state.json` 是 dream 整理道的增量水位：`last_seen_revision`、pending 的 distinct `memory_id`/`note_ref`、`pending_since`、最近尝试/成功时间与 revision、轮转 cursor、最近 cluster key 和错误。scheduler 只在 memory worker lease 内、队列完全为空时扫描新 revision；同一 id 多次修订只计一次，dream 在飞期间产生的新修订在结算时保留。成功或 noop 只移除本 cluster 实际处理的 id/ref 并推进 cursor；失败保留 pending 与 cursor，若还有别的 cluster 就换下一条，没有则不重复自旋。
-- `op=dream` 由 `enqueue_dream_request` 专用口入队，payload 记 `cluster_key` / `memory_ids` / `note_refs` / `reason` / `base_revision`。`dream.enabled` 默认关闭；开启后累计 distinct 变更达到 `trigger_changes`（默认 20）且距上次尝试超过 `min_interval_seconds`（默认 60 秒）才入队一个 cluster，`max_interval_seconds=0` 表示没有纯时间兜底。cluster 优先取最近修订族，再取 doctor 问题族，最后按 note 轮转；载荷目标为记忆链最小声明窗口乘 `cluster_window_ratio`（默认 0.5），不写死行数。
+- `op=dream` 由 `enqueue_dream_request` 专用口入队，payload 记 `cluster_key` / `memory_ids` / `note_refs` / `reason` / `base_revision`。`dream.enabled` 默认开启；累计 distinct 变更达到 `trigger_changes`（默认 20）且距上次尝试超过 `min_interval_seconds`（默认 60 秒）才入队一个 cluster，`max_interval_seconds=0` 表示没有纯时间兜底。cluster 优先取最近修订族，再取 doctor 问题族，最后按 note 轮转；载荷目标为记忆链最小声明窗口乘 `cluster_window_ratio`（默认 0.5），不写死行数。
 - dream 使用独立 `memory_agent_dream.md` 提示词，输入只展开 cluster 的完整行卡：全局行号、memory_id、source、`created_at`、`updated_at`、完整 `memory_body`，有 note 时正文必须含真实 ref，已含不重复，缺失才在末尾补 `(note: 真实 ref)`；不展示 `is_compressed` 或 `minimal_memory`。相关 note 索引带 `note_updated_at`、section 卡与 doctor findings；section 卡给 section_id/section_key、status、scope_key、superseded_by、decision_at、evidence 与 evidence_hints；hints 只抽取含取代类字样的候选句；section 候选对按词面重叠给出待核对组合，二者都不参与机器裁决。完整投影仍交给暂存会话做行号和预览校验。模型可 merge/replace 产物 `adds`、改写/删除、改 note，也可修改或摘除本 cluster 已有的归并分类，但不得新建分类、引入新事实或跨 cluster 改行/改已有 note；`already_satisfied` 不是 dream 出口。提交仍走 `memory_apply_batch` → 预览 → `memory_apply_confirm`，不需要人工确认。终态 ops 额外带 `dream_cluster_key` / `dream_base_revision` / `dream_reason`。
 - `.g3ku/memory-requests/` 存暴露请求元数据的 memory 请求 artifact；processed 行可以指向这些路径供后续取证。每份工件在写盘时就带上**这一发自己的 `usage`（input / output / cache_read 三项）与 `usage_counted`**，判据只有一条：provider 回包里三项有任一非 0。`usage_counted` 逐发相加就是终态行与停车记录上的 `usage_counted_requests`，它与同一行的 `usage` 合计同源：429/超时/上游错误被转成 error 回包的那一发不落进这个数，发送前被本地窗口闸门拒发的那一轮连工件都没有、同样不在数里；一次 `chat()` 内部走到的链位与换 key 重发只交出最后那一份回包，前面几发的 token 本来也没进账。它与同一行的 `request_count`（并入这一批的队列请求条数）不同源：一批可以合并多条队列请求却只发一两轮模型（零变更批 1 跳、变更批 2 跳）。管理面把 `usage_counted_requests` 当「请求数」显示、把 `request_count` 当「合并条数」显示，两个读数并列且互不冒充，合同见 `web-and-admin.md`「Memory Management Page And Admin Contract」。
 - `memory/notes/note_persona.md` 是人设正文的唯一载体。它由保留名归属，不是 memories 行，因此不进常驻字数、压缩候选、退场判据与行号定义域；孤儿回收、`reconcile-notes` 与 `doctor_report` 都不把它当孤儿，普通记忆的 `note_ref` 不能指向它，归并环节也不能用同名分类 note 占它。记忆 agent 只看到一行 `人设描述:note <句柄>`，正文按需 `memory_read_note`。
@@ -641,10 +641,11 @@ main/ 侧所有持久化写在磁盘满（ENOSPC / SQLITE_FULL）条件下的行
 `MemoryScopeRouter` / `MemoryScopeView`，每个会话一个视图：
 
 - 本地会话（`web:` / `internal:` / CLI）：读写工作区本地 manager。
-- 群聊会话（外部会话注册表 `chat_type` 为 `group` / `guild`）：读本地 + 本群；写只进本群
-  manager，根在 `<workspace>/memory/groups/<safe-scope>-<hash>/`（配置深拷贝，路径相对群根，
-  因此每个群有自己的 sqlite、`MEMORY.md`、notes、index、queue 与 worker）。模型可见块 =
-  本地记忆 + `## 群聊长期记忆` 一节；人设仍取本地那一份。作用域键只由
+- 群聊会话（`session_trust.is_multi_party_chat`：注册表 `chat_type` 为 `group` / `guild`，
+  缺 `chat_type` 时按 `external_key` 前缀回退）：只读本群块；写只进本群 manager，根在
+  `<workspace>/memory/groups/<safe-scope>-<hash>/`（配置深拷贝，路径相对群根，因此每个群
+  有自己的 sqlite、`MEMORY.md`、notes、index、queue 与 worker）。模型可见块 =
+  `## 群聊长期记忆` 一节；本地长期记忆与本地笔记不加载。人设仍取本地那一份。作用域键只由
   `bridge_id:external_key` 决定，与设备及转录会话键无关：同一桥账号 + 同一群在新设备上
   解析到同一目录，配置包导入的群记忆随该群重新出现而继续生效；不同桥账号即使
   `external_key` 相同也是不同作用域。
@@ -655,16 +656,16 @@ main/ 侧所有持久化写在磁盘满（ENOSPC / SQLITE_FULL）条件下的行
   不按发送者身份拒绝，写入按群级内容表述、不写成操作员的个人偏好。
 - manager 实例按作用域 LRU 缓存（上限 32，逐出即 `close()`）；管理面 `list_scopes()` 只读
   注册表与磁盘上的群目录（导入的群在注册表还没有会话时也可查看/整理），不创建实例。
-- 通知车道有两条游标：`memory_cursor`（本地增量，投给所有能读本地记忆的会话）与
-  `group_memory_cursor`（群增量，只投给该群，渲染为 `### Group memory updates`）；
-  压缩跳两者同时归零。人设增量对所有会话同源投递。
+- 通知车道有两条游标：`memory_cursor`（本地增量，只投给读本地记忆的会话：本地与
+  第三方私聊）与 `group_memory_cursor`（群增量，只投给该群，渲染为
+  `### Group memory updates`）；压缩跳两者同时归零。人设增量对所有会话同源投递。
 - 会话复核、冲刷与 `run_due_batch_once` 都走 `view.review_manager`；写侧没有额外的信任门，
   写到哪里由作用域决定。会话删除时的边界冲刷也按同一路由取 manager（群聊冲本群，
   第三方私聊没有可写 manager 就跳过）；群目录不随会话删除，管理页按注册表与磁盘目录继续列出它。
   人设只有 `memory/notes/note_persona.md` 这一份，没有按会话隔离的第三方人设。
 - **continuous 根节点**按任务的 originating session_key（`task.session_id`）问进程内活动路由
-  （`active_memory_scope_router()`）取同一份视图：群源任务读本地 + 本群、写进本群，第三方私聊源
-  只读本地。节点道不携带前门视图，也不在 `main/` 里直接持有记忆管理器——投影文本由
+  （`active_memory_scope_router()`）取同一份视图：群源任务只读本群、写进本群，本地与
+  第三方私聊源只读本地。节点道不携带前门视图，也不在 `main/` 里直接持有记忆管理器——投影文本由
   `MainRuntimeService._node_memory_snapshot_supplier` 经 side-channel 递给节点道。
   **只有 continuous 根节点**（`is_continuous_metadata` 且无 `parent_node_id`、且非验收节点）
   拿得到记忆块与记忆工具；子节点与验收节点两者都没有。节点**不接复核窗口**：它只通过
