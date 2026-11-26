@@ -390,7 +390,7 @@ def test_memory_management_view_keeps_admin_mutations_hidden_by_default() -> Non
     assert "function renderMemoryAdminActions()" in app_js
     assert "U.memoryAdminActions.hidden = true;" in app_js
     assert 'U.memoryAdminActions.setAttribute("aria-hidden", "true");' in app_js
-    assert 'U.memoryAdminActions.innerHTML = "";' in app_js
+    assert "U.memoryAdminActions.replaceChildren();" in app_js
     assert "renderMemoryAdminActions();" in app_js
     assert "data-memory-admin-action" not in app_js
     assert '"/api/memory/admin/retry-head"' not in app_js
