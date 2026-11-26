@@ -102,7 +102,8 @@ def test_dream_prompt_contains_full_body_global_line_and_note_index(tmp_path: Pa
 
         prompt = manager._dream_agent_user_prompt(batch=batch, snapshot_text=manager.snapshot_text(), repair_reason="")
 
-        assert "1|" in prompt
+        assert "1 " in prompt
+        assert "created_at=" in prompt and "updated_at=" in prompt
         assert memory_id in prompt
         assert "完整正文：先读取 note，再执行部署；旧指针 note_missing。" in prompt
         assert "note_deploy" in prompt
@@ -145,8 +146,10 @@ def test_dream_read_tools_expose_full_entry_note_index_and_batch_reads(tmp_path:
         notes = tools["memory_read_notes"].invoke({"refs": ["note_a", "note_missing", "note_b"]})
 
         assert entry["memory_id"] == memory_id
-        assert entry["is_compressed"] is True
-        assert entry["memory_body"] == "完整正文"
+        assert "is_compressed" not in entry
+        assert "minimal_memory" not in entry
+        assert entry["memory_body"] == "完整正文 (note: note_a)"
+        assert entry["created_at"] == "2026-04-25 00:00"
         assert {item["ref"] for item in index} >= {"note_a", "note_b", "note_category"}
         assert next(item for item in index if item["ref"] == "note_category")["kind"] == "category"
         assert notes["notes"]["note_a"] == "note A body\n"
@@ -159,7 +162,8 @@ def test_dream_read_tools_expose_full_entry_note_index_and_batch_reads(tmp_path:
 def test_dream_allows_merge_adds_and_rejects_already_satisfied(tmp_path: Path) -> None:
     manager = _manager(tmp_path)
     try:
-        _add(manager, "旧规则甲", note_ref="note_merge")
+        _add(manager, "旧规则甲", note_ref="note_merge", now_iso="2026-04-24T00:00:00+08:00")
+        _add(manager, "可保留的替换规则", now_iso="2026-04-25T00:00:00+08:00")
         _paint(manager)
         session = _module()._MemoryToolSession(
             snapshot_text=manager.snapshot_text(),
@@ -172,6 +176,14 @@ def test_dream_allows_merge_adds_and_rejects_already_satisfied(tmp_path: Path) -
         staged = tools["memory_apply_batch"].invoke(
             {
                 "deletes": [1],
+                "delete_reasons": [{
+                    "line": 1,
+                    "reason": "merged into the retained replacement",
+                    "replacement_line": 2,
+                    "authority_basis": "duplicate",
+                    "scope_match": True,
+                    "evidence": "same scope and trigger",
+                }],
                 "adds": [
                     {
                         "content": "合并后的唯一规则",
@@ -413,7 +425,18 @@ def test_dream_line_edits_are_limited_to_cluster_rows(tmp_path: Path) -> None:
         tools = {tool.name: tool for tool in manager._memory_agent_tools(session)}
 
         outside_line = manager.memory_line_for_id(second)
-        rejected = tools["memory_apply_batch"].invoke({"deletes": [outside_line]})
+        inside_line = manager.memory_line_for_id(first)
+        rejected = tools["memory_apply_batch"].invoke({
+            "deletes": [outside_line],
+            "delete_reasons": [{
+                "line": outside_line,
+                "reason": "outside cluster",
+                "replacement_line": inside_line,
+                "authority_basis": "duplicate",
+                "scope_match": True,
+                "evidence": "same scope",
+            }],
+        })
 
         assert rejected["ok"] is False
         assert "outside this dream cluster" in json.dumps(rejected.get("errors") or {})

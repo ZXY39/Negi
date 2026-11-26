@@ -199,7 +199,8 @@ def test_memory_runtime_loads_memory_agent_prompt_from_main_prompts(tmp_path: Pa
     assert "处理规则" in system_prompt
     assert "条件+要求" in system_prompt
     assert "优先使用 rewrite" in system_prompt
-    assert "不得使用 adds" in system_prompt
+    assert "按重复处理" in system_prompt
+    assert "delete_reasons" in system_prompt
     assert "noop_reason" in system_prompt
     assert "already_satisfied" in system_prompt
     assert "入口行预算" in system_prompt
@@ -800,7 +801,15 @@ async def test_v2_run_due_batch_once_delete_batch_removes_memory_by_line(tmp_pat
                         {
                             "id": "call-1",
                             "name": "memory_apply_batch",
-                            "args": {"deletes": [1]},
+                            "args": {
+                                    "deletes": [1],
+                                    "delete_reasons": [{
+                                        "line": 1,
+                                        "reason": "operator requested deletion",
+                                        "authority_basis": "operator_request",
+                                        "scope_match": True,
+                                    }],
+                                },
                         }
                     ],
                     usage={"input_tokens": 4, "output_tokens": 1, "cache_read_tokens": 0},

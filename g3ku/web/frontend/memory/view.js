@@ -426,6 +426,7 @@ function renderMemoryChangeBlock(change) {
     const content = String(change?.content || "");
     const original = String(change?.original_content || "");
     const originalMissing = Boolean(change?.original_missing);
+    const deleteReason = String(change?.delete_reason || "").trim();
 
     let bodyHtml = "";
     if (type === "rewrite") {
@@ -454,8 +455,13 @@ function renderMemoryChangeBlock(change) {
         const deletedHtml = original.trim()
             ? `<div class="memory-change-text">${renderMemoryTextWithNoteRefs(original)}</div>`
             : `<div class="memory-change-text memory-change-missing">${originalMissing ? "历史批次未保留被删内容，仅记录了 ID" : "-"}</div>`;
+        const reasonHtml = deleteReason
+            ? `<div class="memory-change-col-label">删除原因</div>
+               <div class="memory-change-text">${renderMemoryTextWithNoteRefs(deleteReason)}</div>`
+            : "";
         bodyHtml = `
             <div class="memory-change-col">
+                ${reasonHtml}
                 <div class="memory-change-col-label">删除的内容</div>
                 ${deletedHtml}
             </div>
@@ -511,8 +517,13 @@ function renderMemoryChangeBlock(change) {
             </div>
         `;
     } else if (type === "category_purge") {
+        const reasonHtml = deleteReason
+            ? `<div class="memory-change-col-label">删除原因</div>
+               <div class="memory-change-text">${renderMemoryTextWithNoteRefs(deleteReason)}</div>`
+            : "";
         bodyHtml = `
             <div class="memory-change-col">
+                ${reasonHtml}
                 <div class="memory-change-col-label">从「${esc(String(change?.note_ref || "-"))}」摘下的正文</div>
                 <div class="memory-change-text">${renderMemoryTextWithNoteRefs(original) || "-"}</div>
             </div>

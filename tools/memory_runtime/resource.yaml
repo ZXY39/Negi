@@ -48,7 +48,6 @@ settings:
     trigger_changes: 20
     min_interval_seconds: 60
     max_interval_seconds: 0
-    include_full_body: true
     cluster_window_ratio: 0.5
     state_file: memory/dream_state.json
   features:

@@ -74,6 +74,24 @@ def test_compression_alone_leaves_the_modification_time_alone(tmp_path: Path) ->
         manager.close()
 
 
+def test_same_body_rewrite_keeps_the_content_timestamp(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    try:
+        memory_id = _add(manager, body="同正文只换 note 或摘要", minimal="同正文->换关系",
+                         now_iso="2026-04-25T00:00:00+08:00")
+        before = str(_row(manager, memory_id)["updated_at"])
+        manager._memory_repo.apply_mutation(
+            adds=[],
+            rewrites=[{"id": memory_id, "content": "同正文只换 note 或摘要", "minimal_memory": "同正文->新摘要", "note_ref": "note_new"}],
+            deletes=[],
+            inspired_memory_ids=[],
+            now_iso="2026-04-26T09:00:00+08:00",
+        )
+        assert str(_row(manager, memory_id)["updated_at"]) == before
+    finally:
+        manager.close()
+
+
 def test_the_consolidation_payload_numbers_rows_and_the_backend_stamps_the_date(tmp_path: Path) -> None:
     """归并载荷只给编号：时间不靠模型照抄，退场那行由后端按这一行的真实修改日盖上去。"""
     manager = _manager(tmp_path)

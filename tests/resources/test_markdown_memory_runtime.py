@@ -3145,7 +3145,15 @@ async def test_run_due_batch_once_applies_delete_batch_via_memory_agent(
                         {
                             "id": "call-1",
                             "name": "memory_apply_batch",
-                            "args": {"deletes": [1]},
+                            "args": {
+                                    "deletes": [1],
+                                    "delete_reasons": [{
+                                        "line": 1,
+                                        "reason": "operator requested deletion",
+                                        "authority_basis": "operator_request",
+                                        "scope_match": True,
+                                    }],
+                                },
                         }
                     ],
                     usage={"input_tokens": 4, "output_tokens": 1, "cache_read_tokens": 0},
@@ -3215,7 +3223,15 @@ async def test_run_due_batch_once_delete_only_removes_visible_snapshot_items(
                         {
                             "id": "call-1",
                             "name": "memory_apply_batch",
-                            "args": {"deletes": [1]},
+                            "args": {
+                                    "deletes": [1],
+                                    "delete_reasons": [{
+                                        "line": 1,
+                                        "reason": "operator requested deletion",
+                                        "authority_basis": "operator_request",
+                                        "scope_match": True,
+                                    }],
+                                },
                         }
                     ],
                     usage={"input_tokens": 4, "output_tokens": 1, "cache_read_tokens": 0},
@@ -3285,7 +3301,15 @@ async def test_run_due_batch_once_repairs_delete_batch_that_keeps_non_snapshot_b
                         {
                             "id": "call-2",
                             "name": "memory_apply_batch",
-                            "args": {"deletes": [1]},
+                            "args": {
+                                    "deletes": [1],
+                                    "delete_reasons": [{
+                                        "line": 1,
+                                        "reason": "operator requested deletion",
+                                        "authority_basis": "operator_request",
+                                        "scope_match": True,
+                                    }],
+                                },
                         }
                     ],
                     usage={"input_tokens": 5, "output_tokens": 1, "cache_read_tokens": 0},
@@ -3353,6 +3377,12 @@ async def test_run_due_batch_once_cleans_up_orphan_notes_after_commit(
                                     }
                                 ],
                                 "deletes": [1],
+                                "delete_reasons": [{
+                                    "line": 1,
+                                    "reason": "operator requested deletion",
+                                    "authority_basis": "operator_request",
+                                    "scope_match": True,
+                                }],
                             },
                         }
                     ],
