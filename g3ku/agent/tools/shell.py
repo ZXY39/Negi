@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from g3ku.agent.tools import host_process_guard
 from g3ku.agent.tools.base import Tool
 from g3ku.deployment.data_root import data_g3ku_path, data_work_path
 from g3ku.runtime import owned_processes
@@ -597,19 +598,21 @@ class ExecTool(Tool):
 
     @staticmethod
     def _enforce_host_process_safety(command: str) -> str | None:
-        """Block common shell forms that can terminate the runtime host.
+        """Block termination commands whose target could be the Negi host.
 
-        This boundary is deliberately independent of ``execution_mode`` and
-        operator approval. It covers common PowerShell, Windows, POSIX, and
-        Python process-termination spellings. It is not a general OS sandbox:
-        arbitrary native code still requires process/container isolation.
+        The boundary is target-identity, not command shape: a termination whose
+        target is statically provable as non-Negi (exact name/PID) is allowed;
+        ambiguous targets (wildcards, pipeline input, dynamic expressions) and
+        execution sinks stay blocked. It remains independent of ``execution_mode``
+        and operator approval, and is not a general OS sandbox.
         """
         normalized = str(command or "").strip().lower()
         if not normalized:
             return None
-        for pattern in _HOST_PROCESS_TERMINATION_PATTERNS:
-            if re.search(pattern, normalized):
-                return _HOST_PROCESS_TERMINATION_ERROR
+        if not any(re.search(pattern, normalized) for pattern in _HOST_PROCESS_TERMINATION_PATTERNS):
+            return None
+        if host_process_guard.should_block(normalized):
+            return _HOST_PROCESS_TERMINATION_ERROR
         return None
 
     def _enforce_read_only_command(self, command: str) -> str | None:

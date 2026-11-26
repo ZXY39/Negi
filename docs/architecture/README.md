@@ -273,6 +273,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 修好工具源文件后调用仍被 `repair_required` 拒，或某次 `tool not available` 拒得说不出原因 → `tool-and-skill-system.md`「10. 资源目录代检查与语义目录新鲜度」+ `tool-hydration-and-callable-chain.md`「契约不在场时发生什么」（两条读数：`repair_required tool carried across reload` / `frontdoor tool call refused`）
 - 渠道会话（QQ/第三方桥）里某颗工具一调就立刻回一句英文"被拦截"、条件放行档位改了某会话没反应、白名单勾了不生效、或界面按风险度自己派生出一份和后端不一样的免审集合 → `tool-and-skill-system.md`「CEO Regulatory Governance Mode」（档位与名单都是一份全局设置，判据只在服务端派生一次）
 - 会话页语音按钮右边那颗风险按钮找不到、它的黄色出现在条件放行档上、按钮比附件/语音大一圈、面板与模型链面板叠在一起，或 Tool 页头部还在找监管模式开关 / 命令白名单入口 → `web-and-admin.md`「Composer Risk Panel」+「Exec Approval And Allowlist Admin Contract」（命令白名单入口现在在 exec 工具详情的「执行模式」里）
+- exec 终止命令的拦/放不符预期（只读查询带 `Stop-Process` 字样被整条拒、重启 explorer 等非 Negi 进程被拦、或指向 Negi/通配/管道输入却被放行）→ `operations-and-maintenance.md`「任务执行了全局进程清理 / Web 与 worker 同时退出」（宿主护栏按目标身份判定，独立于执行模式与审批）
 - 受限档「允许使用的工具列表」里 `mention_member` / `schedule_wake` 没有勾选框、打开不动保存一次这两颗就从名单消失、或派发族勾了不生效 → `sandbox-execution-plane.md`「受限档（`limited`）」+ `web-and-admin.md`「Composer Risk Panel」
 - 回合卡在半截、下方一直转圈，刷新网页才同步到最终回复（本地与渠道会话同症状，转录里其实已有完整回复）→ `web-and-admin.md`「CEO Websocket Lane Failure Contract」
 - 节点详情页的「加载 skill / 加载 tool / 更新记忆 / 加载笔记」chip 风险色全部同一档、展开看不到正文，或契约不在场时直接调用工具的那一行仍画成普通工具行（会话轨道/节点卡片） → `web-and-admin.md`「Context Loader Notices」
