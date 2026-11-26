@@ -12251,6 +12251,86 @@ textarea {
     margin-top: 10px;
 }
 
+/* Dream 整理范围：把 id 地址簿渲染成可读的行卡，原始 JSON 折叠保留作取证 */
+.memory-dream-scope {
+    display: grid;
+    gap: 12px;
+}
+
+.memory-dream-scope-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.memory-dream-trigger {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 0.78rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    background: color-mix(in srgb, var(--bg-panel) 70%, var(--bg-app) 30%);
+    border: 1px solid color-mix(in srgb, var(--border-color) 80%, transparent);
+}
+
+.memory-dream-reason {
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+}
+
+.memory-dream-row {
+    display: grid;
+    gap: 6px;
+    padding: 12px 14px;
+    border-radius: 14px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 84%, transparent);
+    background: color-mix(in srgb, var(--bg-surface-inner) 86%, var(--bg-panel) 14%);
+}
+
+.memory-dream-row-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.memory-dream-line {
+    font-size: 0.78rem;
+    font-weight: 700;
+    color: var(--text-secondary);
+}
+
+.memory-dream-body {
+    color: var(--text-primary);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.memory-dream-notes {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.memory-dream-notes-label {
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+}
+
+.memory-dream-raw {
+    margin-top: 4px;
+}
+
+.memory-dream-raw > summary {
+    cursor: pointer;
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+}
+
 /* Structured per-memory change blocks (processed-memory 变更内容) */
 .memory-change-list {
     display: grid;

@@ -1759,3 +1759,46 @@ def test_memory_processed_surfaces_mark_merged_batches_separately_from_round_cou
 
     css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
     assert ".memory-merged-chip {" in css
+
+
+def test_dream_rows_render_readable_scope_not_raw_id_json() -> None:
+    result = _run_app_script(
+        """
+        const scope = {
+          cluster_key: "memory:abc",
+          reason: "recent_revision_family",
+          base_revision: 75,
+          memories: [
+            { memory_id: "abc", line: 1, body: "resident body", note_ref: "note_play_x", retired_into: "", missing: false },
+            { memory_id: "def", line: null, body: "retired body", note_ref: "", retired_into: "note_cat_y", missing: false },
+            { memory_id: "gone", line: null, body: "", note_ref: "", retired_into: "", missing: true },
+          ],
+          notes: [ { ref: "note_play_x", kind: "ordinary", exists: true } ],
+        };
+        const item = { op: "dream", trigger_sources: ["dream_cli"], dream_scope: scope, payload_text: JSON.stringify(scope) };
+        __out.scopeHtml = context.__testExports.renderMemoryDreamScope(scope, context.__testExports.memoryDreamTriggerLabel(item));
+        __out.reason = context.__testExports.memoryDreamReasonLabel(scope.reason);
+        __out.trigger = context.__testExports.memoryDreamTriggerLabel(item);
+        __out.queueHtml = context.__testExports.renderMemoryQueueCard(item);
+        """,
+        ["renderMemoryDreamScope", "memoryDreamReasonLabel", "memoryDreamTriggerLabel", "renderMemoryQueueCard"],
+    )
+
+    scope_html = str(result["scopeHtml"])
+    assert "第 1 行" in scope_html
+    assert "resident body" in scope_html
+    assert "已退场→note_cat_y" in scope_html
+    assert "已删除" in scope_html
+    assert 'data-memory-note-ref="note_play_x"' in scope_html
+    assert "最近修订族" in scope_html
+    assert "手动整理" in scope_html
+    assert str(result["reason"]) == "最近修订族"
+    assert str(result["trigger"]) == "手动整理"
+
+    queue_html = str(result["queueHtml"])
+    assert "整理簇：3 条记忆 / 1 份笔记" in queue_html
+    assert "cluster_key" not in queue_html
+
+    css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
+    assert ".memory-dream-scope {" in css
+    assert ".memory-dream-raw" in css

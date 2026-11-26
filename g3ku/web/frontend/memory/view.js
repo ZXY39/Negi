@@ -232,6 +232,62 @@ function memoryProcessedOpLabel(item) {
     return memoryProcessedStatusLabel(item);
 }
 
+function memoryIsDreamItem(item) {
+    const op = String(item?.op || item?.source_op || "").trim().toLowerCase();
+    return op === "dream";
+}
+
+function memoryDreamScopeOf(item) {
+    const scope = item?.dream_scope;
+    return scope && typeof scope === "object" ? scope : null;
+}
+
+function memoryDreamReasonLabel(reason) {
+    const normalized = String(reason || "").trim().toLowerCase();
+    if (normalized === "recent_revision_family") return "最近修订族";
+    if (normalized === "doctor_findings") return "医生问题族";
+    if (normalized === "note_round_robin") return "note 轮转";
+    return normalized || "整理";
+}
+
+function memoryDreamTriggerLabel(item) {
+    const triggers = [
+        String(item?.trigger_source || "").trim().toLowerCase(),
+        ...(Array.isArray(item?.trigger_sources) ? item.trigger_sources : [])
+            .map((value) => String(value || "").trim().toLowerCase()),
+    ];
+    if (triggers.includes("dream_cli")) return "手动整理";
+    if (triggers.includes("dream_scheduler")) return "自动调度";
+    return "整理";
+}
+
+function renderMemoryDreamScope(scope, triggerLabel) {
+    if (!scope) return "";
+    const memories = Array.isArray(scope.memories) ? scope.memories : [];
+    const notes = Array.isArray(scope.notes) ? scope.notes : [];
+    const head = `
+        <div class="memory-dream-scope-head">
+            <span class="memory-dream-trigger">${esc(triggerLabel || "整理")}</span>
+            <span class="memory-dream-reason">选择依据：${esc(memoryDreamReasonLabel(scope.reason))}</span>
+        </div>`;
+    const rows = memories.map((memory) => {
+        const line = Number.isFinite(memory?.line) && memory.line
+            ? `第 ${memory.line} 行`
+            : (memory?.missing ? "已删除" : (memory?.retired_into ? `已退场→${memory.retired_into}` : "不在常驻块"));
+        const noteChip = memory?.note_ref ? renderMemoryNoteOwnershipChip(memory.note_ref) : "";
+        const body = String(memory?.body || memory?.minimal_memory || "").trim();
+        return `
+            <div class="memory-dream-row">
+                <div class="memory-dream-row-head"><span class="memory-dream-line">${esc(line)}</span>${noteChip}</div>
+                <div class="memory-dream-body">${esc(body) || "（无正文）"}</div>
+            </div>`;
+    }).join("");
+    const noteList = notes.length
+        ? `<div class="memory-dream-notes"><span class="memory-dream-notes-label">关联 note：</span>${notes.map((note) => renderMemoryNoteOwnershipChip(note.ref)).join("")}</div>`
+        : "";
+    return `<div class="memory-dream-scope">${head}${rows || '<div class="empty-state compact">这一簇没有记忆行。</div>'}${noteList}</div>`;
+}
+
 function renderMemoryNoteRefChip(noteRef) {
     noteRef = String(noteRef || "").trim();
     if (!noteRef) return "";
@@ -1077,12 +1133,23 @@ function renderMemoryDetailPreview() {
             `;
         }).join("");
     }
+    const dreamStructured = Boolean(preview.isDream && preview.dreamScope);
     if (U.memoryDetailPrimaryTitle) {
-        U.memoryDetailPrimaryTitle.textContent = preview.kind === "processed" ? "原始请求内容" : "请求正文";
+        U.memoryDetailPrimaryTitle.textContent = dreamStructured
+            ? "整理范围"
+            : (preview.kind === "processed" ? "原始请求内容" : "请求正文");
     }
     if (U.memoryDetailPrimary) {
         const blocks = Array.isArray(preview.primaryBlocks) ? preview.primaryBlocks : [];
-        if (blocks.length) {
+        if (dreamStructured) {
+            // dream 行主区给可读的整理范围；原始 JSON 载荷折叠保留作取证，不删存储。
+            const rawHtml = blocks.length
+                ? renderMemoryPayloadBlocks(blocks, String(preview.kind || "").trim(), String(preview.key || "").trim())
+                : "";
+            const html = renderMemoryDreamScope(preview.dreamScope, preview.dreamTriggerLabel)
+                + (rawHtml ? `<details class="memory-dream-raw"><summary>原始载荷（取证）</summary>${rawHtml}</details>` : "");
+            setInnerHtmlPreservingScroll(U.memoryDetailPrimary, html);
+        } else if (blocks.length) {
             setInnerHtmlPreservingScroll(
                 U.memoryDetailPrimary,
                 renderMemoryPayloadBlocks(blocks, String(preview.kind || "").trim(), String(preview.key || "").trim()),
@@ -1163,6 +1230,9 @@ function openMemoryDetailPreview(kind, key) {
     const usage = source?.usage && typeof source.usage === "object" ? source.usage : {};
     const payloadTexts = Array.isArray(source?.payload_texts) ? source.payload_texts : [];
     const noopReason = isProcessed ? memoryProcessedNoopReason(source) : "";
+    const isDream = memoryIsDreamItem(source);
+    const dreamScope = isDream ? memoryDreamScopeOf(source) : null;
+    const dreamTriggerLabel = isDream ? memoryDreamTriggerLabel(source) : "";
     const failedUsage = isFailed && source?.usage_total && typeof source.usage_total === "object" ? source.usage_total : {};
     const fields = isProcessed
         ? [
@@ -1223,6 +1293,9 @@ function openMemoryDetailPreview(kind, key) {
         // 三面正文都按条给块（每块自带 request id、已显示区间与取全文按钮），
         // 正文只投服务端给的首屏，其余留在存储里原样不动。
         primaryBlocks: memoryPayloadBlocksFromRecord(source, normalizedKind),
+        isDream,
+        dreamScope,
+        dreamTriggerLabel,
         primaryText: isProcessed
             ? payloadTexts.join("\n\n---\n\n")
             : String(source?.payload_text || ""),
@@ -1994,10 +2067,18 @@ function renderMemoryQueueCard(item) {
     const requestId = String(item?.request_id || "").trim();
     const statusText = memoryStatusLabel(item?.status);
     const createdAt = formatCompactTime(item?.created_at) || String(item?.created_at || "");
-    const body = String(item?.payload_text || "").replace(/\s+/g, " ").trim();
-    const preview = body.length > MEMORY_QUEUE_BODY_CHARS
-        ? `${body.slice(0, MEMORY_QUEUE_BODY_CHARS)}…`
-        : body;
+    const dreamScope = memoryDreamScopeOf(item);
+    let preview;
+    if (memoryIsDreamItem(item) && dreamScope) {
+        const memoryCount = (Array.isArray(dreamScope.memories) ? dreamScope.memories : []).length;
+        const noteCount = (Array.isArray(dreamScope.notes) ? dreamScope.notes : []).length;
+        preview = `整理簇：${memoryCount} 条记忆 / ${noteCount} 份笔记 · ${memoryDreamReasonLabel(dreamScope.reason)}`;
+    } else {
+        const body = String(item?.payload_text || "").replace(/\s+/g, " ").trim();
+        preview = body.length > MEMORY_QUEUE_BODY_CHARS
+            ? `${body.slice(0, MEMORY_QUEUE_BODY_CHARS)}…`
+            : body;
+    }
     return `
         <article class="memory-card memory-card-queue" data-memory-card="queue" data-memory-detail-open="queue" data-memory-detail-key="${esc(requestId)}" role="button" tabindex="0" aria-label="打开队列请求详情">
             <div class="memory-card-head">
