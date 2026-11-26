@@ -19632,6 +19632,24 @@ a.artifact-item-link:focus-visible {
     overflow-y: auto;
 }
 
+/* 正文框是「flex 列 + 封顶滚动」：可滚动子块（代码块/表格）的自动最小高度是 0，
+   内容一旦超过封顶就会被纵向压成一条缝，正文框自己却不滚。禁止子项收缩，
+   超高统一交给正文框的 overflow-y。 */
+.task-trace-message-body.markdown-content > * {
+    flex-shrink: 0;
+}
+
+/* 消息正文的代码块按卡宽折行：节点来信的「原文」常是一条长行摘录，代码块默认
+   横向滚动会把引用压成一条窄缝；换行后整段引用直接铺开可读（缩进仍按 pre-wrap 保留）。 */
+.task-trace-message-body.markdown-content pre {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.task-trace-message-body.markdown-content pre code {
+    min-width: 0;
+}
+
 .spawn-node-list {
     display: grid;
     gap: var(--space-2);
