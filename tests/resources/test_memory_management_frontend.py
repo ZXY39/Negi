@@ -1802,3 +1802,40 @@ def test_dream_rows_render_readable_scope_not_raw_id_json() -> None:
     css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
     assert ".memory-dream-scope {" in css
     assert ".memory-dream-raw" in css
+
+
+def test_full_dream_rows_render_library_summary_and_trigger_reason() -> None:
+    result = _run_app_script(
+        """
+        const scope = {
+          mode: "full",
+          scope_key: "full",
+          reason: "change_threshold",
+          base_revision: 42,
+          memory_count: 338,
+          note_count: 194,
+        };
+        const item = {
+          op: "dream",
+          trigger_sources: ["dream_scheduler"],
+          dream_scope: scope,
+          payload_text: JSON.stringify({ mode: "full", memory_ids: new Array(338).fill("mem_id"), note_refs: [] }),
+        };
+        __out.reason = context.__testExports.memoryDreamReasonLabel("change_threshold");
+        __out.scopeHtml = context.__testExports.renderMemoryDreamScope(scope, context.__testExports.memoryDreamTriggerLabel(item));
+        __out.queueHtml = context.__testExports.renderMemoryQueueCard(item);
+        """,
+        ["renderMemoryDreamScope", "memoryDreamReasonLabel", "memoryDreamTriggerLabel", "renderMemoryQueueCard"],
+    )
+
+    scope_html = str(result["scopeHtml"])
+    assert "全量整理" in scope_html
+    assert "触发原因：阈值触发" in scope_html
+    assert "338 条常驻记忆 / 194 份笔记" in scope_html
+    assert "自动调度" in scope_html
+    assert str(result["reason"]) == "阈值触发"
+
+    queue_html = str(result["queueHtml"])
+    assert "全量整理：338 条记忆 / 194 份笔记 · 阈值触发" in queue_html
+    assert "memory_id" not in queue_html
+    assert '"mode"' not in queue_html
