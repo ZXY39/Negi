@@ -2109,7 +2109,6 @@ function showTaskNodeLoadingState(node) {
     U.detail.style.display = "flex";
     if (U.nodeEmpty) U.nodeEmpty.style.display = "none";
     setTaskSelectionEmptyVisible(false);
-    if (U.adRole) U.adRole.hidden = true;
     renderTaskNodeDetailStatus(node);
     renderTaskNodeModelRetryToast(null);
     if (U.adTokenSummary) U.adTokenSummary.textContent = "";

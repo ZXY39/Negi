@@ -1052,18 +1052,14 @@
                         aria-modal="true" aria-labelledby="feed-target-name" tabindex="-1">
                         <div class="panel-header">
                             <h2 id="feed-target-name">当前节点</h2>
-                        </div>
-
-                        <div id="agent-detail-view" class="agent-detail-view" style="display: none;">
-                            <div class="agent-detail-header">
-                                <div class="agent-detail-header-copy">
-                                    <h3 id="ad-role" hidden>节点</h3>
-                                </div>
+                            <div class="panel-header-actions">
                                 <span class="status-badge" id="ad-status">STATUS</span>
                                 <button class="toolbar-btn ghost small" id="close-agent-btn" type="button"
                                     data-modal-close>关闭</button>
                             </div>
+                        </div>
 
+                        <div id="agent-detail-view" class="agent-detail-view" style="display: none;">
                             <div id="task-node-model-retry-toast" class="model-retry-toast task-node-model-retry-toast"
                                 role="status" aria-live="polite" aria-hidden="true" hidden>
                                 <span class="model-retry-toast-dot" aria-hidden="true"></span>

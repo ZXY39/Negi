@@ -674,7 +674,6 @@ const U = {
     nodeContextDisclosure: document.getElementById("node-context-disclosure"),
     feedTitle: document.getElementById("feed-target-name"),
     detail: document.getElementById("agent-detail-view"),
-    adRole: document.getElementById("ad-role"),
     adStatus: document.getElementById("ad-status"),
     adTokenSummary: document.getElementById("ad-token-summary"),
     adInitialPrompt: document.getElementById("ad-initial-prompt"),
