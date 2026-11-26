@@ -410,6 +410,7 @@ function memoryChangeTypeLabel(type) {
     if (normalized === "delete") return "删除";
     if (normalized === "note_upsert") return "更新 Note";
     if (normalized === "note_edit") return "编辑 Note";
+    if (normalized === "note_section") return "Note 段落";
     if (normalized === "note_reaped") return "回收 Note";
     if (normalized === "category_note") return "归并记忆";
     if (normalized === "consolidate") return "记忆退场";
@@ -491,6 +492,21 @@ function renderMemoryChangeBlock(change) {
                     <div class="memory-change-col-label">改为</div>
                     ${modifiedHtml}
                 </div>
+            </div>
+        `;
+    } else if (type === "note_section") {
+        const status = String(change?.status || "unknown");
+        const sectionKey = String(change?.section_key || change?.section_id || "-");
+        const scopeKey = String(change?.scope_key || "").trim();
+        const supersededBy = String(change?.superseded_by || "").trim();
+        const evidence = String(change?.evidence || "").trim();
+        bodyHtml = `
+            <div class="memory-change-col">
+                <div class="memory-change-col-label">段落状态</div>
+                <div class="memory-change-text">${esc(sectionKey)} · ${esc(status)}</div>
+                ${scopeKey ? `<div class="memory-change-col-label">作用域</div><div class="memory-change-text">${esc(scopeKey)}</div>` : ""}
+                ${supersededBy ? `<div class="memory-change-col-label">替代段落</div><div class="memory-change-text">${esc(supersededBy)}</div>` : ""}
+                ${evidence ? `<div class="memory-change-col-label">依据</div><div class="memory-change-text">${esc(evidence)}</div>` : ""}
             </div>
         `;
     } else if (type === "category_note") {

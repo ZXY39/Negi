@@ -1385,6 +1385,32 @@ def test_delete_reason_renders_from_ops_json_and_stays_hidden_for_history(tmp_pa
     assert "删除原因" not in str(result["historicalHtml"])
 
 
+def test_note_section_change_renders_status_scope_and_evidence() -> None:
+    result = _run_app_script(
+        """
+        const change = {
+          type: "note_section",
+          note_ref: "note_reply_policy",
+          section_id: "s12ab34cd56ef",
+          section_key: "账号与回评硬约束",
+          status: "superseded",
+          scope_key: "realstory:douyin:reply",
+          superseded_by: "s98ab76cd54ef",
+          decision_at: "2026-11-20T20:09:00+08:00",
+          evidence: "用户明确改为分级选择性回评",
+        };
+        __out.html = context.__testExports.renderMemoryChangeList([change]);
+        """,
+        ["renderMemoryChangeList"],
+    )
+    rendered = str(result["html"])
+    assert "Note 段落" in rendered
+    assert "账号与回评硬约束" in rendered
+    assert "realstory:douyin:reply" in rendered
+    assert "用户明确改为分级选择性回评" in rendered
+    assert "s98ab76cd54ef" in rendered
+
+
 def test_consolidation_records_survive_into_the_memory_surfaces() -> None:
     """A retired memory leaves the resident block; the ledger row saying where it went is
     the only place a maintainer can see it, so both must render."""

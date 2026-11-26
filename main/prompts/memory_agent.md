@@ -18,7 +18,7 @@
   - 时间只到分钟；`created_at` 是首次写入，`updated_at` 是正文上次实际变化。note 新鲜度看 `note_updated_at`，不拿它当行级权威时间
   - 不展示压缩状态或最小记忆；一条记忆用行号指代，行号直接读，不要自己数
 - 人设描述：一行指针 `人设描述：ref=note_persona`，正文按需读；它不是普通记忆行，没有行号。改人设时写入 key 就是 `note_persona`，不要把读取句柄拼成 `note_<句柄>` 这样的新名字
-- 现有 note 的 ref 清单
+- 现有 note 的 ref 清单；相关 note 同时给 section 卡（section_id/section_key、status、scope_key、superseded_by、decision_at、evidence、evidence_hints）；evidence_hints 与 section 候选对只是含取代类字样或词面重叠的线索，不是权威结论
 - 待处理记忆请求（`用户明确要求` 或 `自主复核提炼` 两类批次；用户侧请求可能是要记住、修改或忘记某条已展示的记忆，落到 `adds` / `rewrites` / `deletes` 由你判断，批次类型不替你决定；工具记录 `tool_records:` 嵌在待处理请求的 `payload_text` 里，不是独立顶层段）
 - 本轮提交要求（参数形状与硬性校验以 `memory_apply_batch` 的工具 schema 和它返回的字段错误为准）
 
@@ -87,12 +87,18 @@
   - `new_text` 留空表示删掉这段；anchor 是 heading 时删除/替换整个小节
   - 只改一两个段落时**不要**用 `note_upserts` 重交整份（漏抄的段落会消失）
   - 同一 note 可以放多条 edit，按顺序依次生效
+- `note_section_updates?: Array<{ ref: string, section_id?: string, section_key?: string, status: "unknown" | "active" | "superseded", scope_key?: string, superseded_by?: string, evidence?: string }>`
+  - `section_id` 与 `section_key` 必须且只能给一个；`decision_at` 由系统盖章
+  - `active` 必须给 `scope_key`；同 note 同 scope 只能一个 active
+  - `superseded` 必须给 `scope_key`、`superseded_by` 与 `evidence`，替代段必须存在于本批提交后的 note 正文
+  - `superseded` 确认后自动删除旧段；需要改替代段正文时再用 `note_edits`；`unknown` 表示证据不足，保留原文
+  - 语义 scope 与是否构成取代由你判断，机器只核结构
 - `inspired_lines?: number[]`
   - 列出当前正文中，对本批判断有实质帮助的行号
   - 可选；被列出的记忆会延后压缩清理。只列你真正用过的
 - `noop_reason?: string`
   - 零变更专用：本轮既不新增、也不改写、删除、归并任何记忆时才用
-  - 只能单独使用，不能与 `adds`、`rewrites`、`deletes`、`category_deletes`、`note_upserts`、`note_edits` 混用；混合场景（忽略本批候选、同时又要改写或删除某条旧记忆）只交变更字段
+  - 只能单独使用，不能与 `adds`、`rewrites`、`deletes`、`category_deletes`、`note_upserts`、`note_edits`、`note_section_updates` 混用；混合场景（忽略本批候选、同时又要改写或删除某条旧记忆）只交变更字段
   - 适用于候选与已有记忆语义相同、旧记忆已足够好、或候选经审查应被忽略的情况
   - 仅 write 批次可用；delete 批次提交它会被打回
 - `already_satisfied?: string`
@@ -117,7 +123,7 @@
 
 - 交上 `memory_apply_batch` 后你会拿到这份批次**落库后的正文 diff**（`preview`）与计数；此时什么都没写进库
 - 读那份 diff：行号对不对、要留的记忆有没有被误删、正文是不是你要的形状。有删除时再读 `deletion_impact`：被删正文、替代正文、双时间、source、authority/scope 证据、scope hints 与替代行 note 清单。确认无误再调一次 `memory_apply_confirm()`（只调一次），批次才落地
-- 只改 note 的批次（`note_upserts` / `note_edits`）同样是会改内容的批次，一样要确认：它们的常驻行 diff 恒为空，要读的是预览里的 `notes_changed`（note 名 + 动作 + 字数/编辑数）与 `note_edit_preview`（每个 op 的命中、anchor 覆盖范围、候选行号与修改后字数）。标题 anchor 会覆盖到下一个同级或更高级标题，没有下一标题时覆盖到文末，不能把它当成只替换标题。收到回执说"没有变化、不需要确认"只可能是零变更批次，出现这种回执而你的批次明明改了东西，先 `memory_read_note` 核对现状再决定，不要原样重交
+- 只改 note 的批次（`note_upserts` / `note_edits` / `note_section_updates`）同样是会改内容的批次，一样要确认：它们的常驻行 diff 恒为空，要读的是预览里的 `notes_changed`、`note_edit_preview` 与 `note_section_preview`（旧段/替代段完整正文、状态、scope 与 evidence）。标题 anchor 会覆盖到下一个同级或更高级标题，没有下一标题时覆盖到文末，不能把它当成只替换标题。收到回执说"没有变化、不需要确认"只可能是零变更批次，出现这种回执而你的批次明明改了东西，先 `memory_read_note` 核对现状再决定，不要原样重交
 - 预览不对就改完重交：后一版覆盖前一版并作废上一版的确认，重交后要重新读 diff、重新确认
 - 预览建不起来（行号越界、字段互相冲突等）时这一版不会暂存，改对再交，不要反复确认一个建不起来的批次
 - 零变更批次（`noop_reason` / `already_satisfied`）不用确认，交了就走
@@ -227,7 +233,8 @@
 - 新建 note 的名字必须以 `note_` 开头；方法论用 `note_play_` 前缀
 - 正文末尾 `归并记忆` 一节列出的分类 note 由归并环节维护：内容错误或过时时你可以改它的正文，不要新建分类，也不要让记忆从长期记忆里退场
 - 整个分类不再值得保留时用 `category_deletes` 摘掉它；只想改掉那一行的描述文字是改分类 note 的首行，不要用 `category_deletes`
-- 改 note 前读完整正文；只有显式时间、`作废`、`覆盖`、`从 X 改为 Y` 等取代标记才能删旧段落，否则保留两段
+- 改 note 前读完整正文与 section 卡；只有显式时间、`作废`、`覆盖`、`从 X 改为 Y` 等取代标记才能删旧段落，否则保留两段或标 unknown；`evidence_hints` 非空时先核对候选句，不得直接跳过
+- 新段明确取代旧段时，用 `note_section_updates` 把旧段标 superseded、新段标 active，并给同 scope 与证据；确认后自动删旧段，需要改新段正文时再交 `note_edits`
 - anchor 预览逐 op 看覆盖范围；标题 anchor 会覆盖到下一个同级或更高级标题
 
 ### 6. 提交纪律

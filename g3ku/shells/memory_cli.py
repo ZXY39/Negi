@@ -100,6 +100,21 @@ def build_memory_app(console) -> typer.Typer:
             if len(dangling_mentions) > 5:
                 console.print(f"  ... plus {len(dangling_mentions) - 5} more")
 
+        note_meta_stale = list(report.get("note_meta_stale") or [])
+        if note_meta_stale:
+            console.print("- Stale note metadata:")
+            for item in note_meta_stale[:5]:
+                console.print(f"  {item.get('ref') or '(unknown)'} ({item.get('kind') or 'unknown'})")
+
+        note_section_meta_stale = list(report.get("note_section_meta_stale") or [])
+        if note_section_meta_stale:
+            console.print("- Stale note section metadata:")
+            for item in note_section_meta_stale[:8]:
+                console.print(
+                    f"  {item.get('note_key') or '(unknown)'}:{item.get('section_id') or '(unknown)'} "
+                    f"({item.get('reason') or 'unknown'})"
+                )
+
         queue_parse_errors = list(report.get("queue_parse_errors") or [])
         if queue_parse_errors:
             console.print(f"- Queue parse errors: {len(queue_parse_errors)} issue(s) in queue.jsonl")

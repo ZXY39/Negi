@@ -654,6 +654,7 @@ def test_memory_doctor_reads_ownership_from_the_store(monkeypatch, tmp_path: Pat
         notes_dir = tmp_path / "memory" / "notes"
         notes_dir.mkdir(parents=True, exist_ok=True)
         (notes_dir / "note_proxy_ports.md").write_text("端口笔记正文" + chr(10), encoding="utf-8")
+        writer._initialize_note_sections()
     finally:
         writer.close()
 
@@ -702,6 +703,7 @@ def test_memory_doctor_keeps_the_category_axis_off_the_note_checks(monkeypatch, 
         (memory_dir / "notes" / "note_ports.md").write_text("端口笔记正文" + chr(10), encoding="utf-8")
         category_file = memory_dir / "index" / "note_tasks.md"
         category_file.write_text("异步任务:派发、验收" + chr(10), encoding="utf-8")
+        writer._initialize_note_sections()
         writer._memory_repo.mark_consolidated(
             [str(retired["memory_id"])],
             category_ref="note_tasks",
@@ -726,3 +728,32 @@ def test_memory_doctor_keeps_the_category_axis_off_the_note_checks(monkeypatch, 
     assert exit_code == 1, joined
     assert "missing note refs: none" in joined
     assert "retired memories pointing at missing category notes: note_tasks" in joined
+
+
+def test_memory_doctor_prints_stale_note_sections(monkeypatch, tmp_path: Path) -> None:
+    memory_cli = _memory_cli_module()
+    runtime = _memory_agent_runtime_module()
+    _mount_real_memory_manager(monkeypatch, tmp_path)
+    writer = runtime.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        writer._memory_repo.create_memory(
+            memory_body="owner",
+            minimal_memory="owner",
+            source="self",
+            from_user=False,
+            now_iso="2026-04-17T09:00:00+08:00",
+            note_ref="note_section_stale",
+        )
+        note = tmp_path / "memory" / "notes" / "note_section_stale.md"
+        note.write_text("## A\noriginal\n", encoding="utf-8")
+        writer._initialize_note_sections()
+        note.write_text("## A\nexternal\n", encoding="utf-8")
+    finally:
+        writer.close()
+
+    console = _ConsoleStub()
+    result = CliRunner().invoke(memory_cli.build_memory_app(console), ["doctor"])
+    joined = chr(10).join(console.messages).lower()
+    assert result.exit_code == 1
+    assert "stale note section metadata" in joined
+    assert "note_section_stale" in joined
