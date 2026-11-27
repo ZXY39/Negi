@@ -7037,6 +7037,22 @@ class MemoryManager:
             # 与上面的 usage 合计同源：只数 provider 回包里真给了 token 的那几发。
             "usage_counted_requests": int(usage_counted_requests or 0),
         }
+        # 处理时长：在飞请求有 processing_started_at；未处理就取消的请求退到 created_at，
+        # 读面据此显示"处理时长"而不是把结束时点当开始时间。
+        started_at = ""
+        for item in batch.items:
+            started_at = (
+                str(getattr(item, "processing_started_at", "") or "").strip()
+                or str(item.created_at or "").strip()
+            )
+            if started_at:
+                break
+        if started_at:
+            payload["started_at"] = started_at
+            start_dt = self._parse_optional_iso(started_at)
+            end_dt = self._parse_optional_iso(payload["processed_at"])
+            if start_dt is not None and end_dt is not None:
+                payload["processing_duration_ms"] = max(int((end_dt - start_dt).total_seconds() * 1000), 0)
         payload.update(self._dream_metadata_from_batch(batch))
         # 按龄冲刷与轮次窗口/压缩冲刷共用同一条入队出口，没有这个字段就数不出"靠龄倒了几次"。
         trigger_sources = sorted(

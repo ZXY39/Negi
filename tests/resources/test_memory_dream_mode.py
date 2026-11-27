@@ -1159,3 +1159,32 @@ async def test_legacy_queued_cluster_dream_runs_as_full_sweep(tmp_path: Path) ->
         assert "旧 cluster 外规则" in manager.snapshot_text()
     finally:
         manager.close()
+
+
+def test_terminal_history_records_processing_duration(tmp_path: Path) -> None:
+    module = _module()
+    manager = _manager(tmp_path)
+    try:
+        row = module.MemoryQueueRequest(
+            op="write",
+            decision_source="self",
+            payload_text="记录时长",
+            created_at="2026-11-27T09:00:00+08:00",
+            request_id="write_duration",
+            processing_started_at="2026-11-27T09:01:00+08:00",
+        )
+        batch = module.MemoryBatch(op="write", items=[row])
+
+        manager._append_terminal_history(
+            batch=batch,
+            status="applied",
+            op="write",
+            processed_at="2026-11-27T09:03:30+08:00",
+        )
+
+        ops = [json.loads(line) for line in manager.ops_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+        last = ops[-1]
+        assert last["started_at"] == "2026-11-27T09:01:00+08:00"
+        assert last["processing_duration_ms"] == 150000
+    finally:
+        manager.close()

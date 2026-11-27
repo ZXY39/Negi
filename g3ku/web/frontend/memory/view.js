@@ -207,6 +207,27 @@ function renderMemoryMergedChip(item) {
     return `<span class="memory-merged-chip" title="这一批合并了 ${count} 条队列请求">合并 ${count} 条</span>`;
 }
 
+function memoryProcessedDurationText(item) {
+    let ms = Number(item?.processing_duration_ms);
+    if (!Number.isFinite(ms) || ms < 0) {
+        const start = Date.parse(String(item?.started_at || ""));
+        const end = Date.parse(String(item?.processed_at || ""));
+        ms = Number.isFinite(start) && Number.isFinite(end) ? Math.max(end - start, 0) : null;
+    }
+    if (ms === null || !Number.isFinite(ms)) return "-";
+    const totalSeconds = Math.max(0, Math.round(ms / 1000));
+    if (totalSeconds < 1) return "不到 1 秒";
+    if (totalSeconds < 60) return `${totalSeconds} 秒`;
+    if (totalSeconds < 3600) {
+        const minutes = Math.floor(totalSeconds / 60);
+        const seconds = totalSeconds % 60;
+        return seconds ? `${minutes} 分 ${seconds} 秒` : `${minutes} 分`;
+    }
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    return minutes ? `${hours} 时 ${minutes} 分` : `${hours} 时`;
+}
+
 function memoryProcessedIsNoChange(item) {
     const normalized = String(item?.status || "").trim().toLowerCase();
     // 容量停车那一级一行都没写：载荷原文留在失败区，台账这行只是把"停在哪一级"记下来。
@@ -1263,7 +1284,7 @@ function openMemoryDetailPreview(kind, key) {
             { label: "批次", value: normalizedKey },
             { label: "状态", value: memoryProcessedStatusLabel(source) || "-" },
             { label: "操作", value: memoryProcessedOpLabel(source) || "-" },
-            { label: "处理时间", value: formatCompactTime(source?.processed_at) || String(source?.processed_at || "-") },
+            { label: "处理时长", value: memoryProcessedDurationText(source) },
             { label: "模型链", value: memoryAttemptedChainText(source) },
             { label: "请求数", value: memoryUsageCountedRequestText(source) },
             ...(memoryMergedRequestCount(source)
@@ -2100,15 +2121,18 @@ function memoryQueueLiveProgressText(item) {
 
 function renderMemoryQueueCard(item) {
     const requestId = String(item?.request_id || "").trim();
-    const statusText = memoryStatusLabel(item?.status);
-    const createdAt = formatCompactTime(item?.created_at) || String(item?.created_at || "");
     const isProcessing = String(item?.status || "").trim().toLowerCase() === "processing";
+    const cancelRequested = isProcessing && Boolean(item?.cancel_requested);
+    const statusText = cancelRequested ? "取消中" : memoryStatusLabel(item?.status);
+    const createdAt = formatCompactTime(item?.created_at) || String(item?.created_at || "");
     const cancelBusy = String(S.memoryQueueCancelBusy || "").trim();
-    const cancelDisabled = cancelBusy && cancelBusy === requestId;
-    const cancelLabel = isProcessing ? "取消处理" : "取消请求";
-    const cancelTitle = isProcessing
-        ? "取消处理：当前步骤结束后停止，本次修改回滚到处理前"
-        : "取消这条记忆请求（不再处理）";
+    const cancelDisabled = cancelRequested || (cancelBusy && cancelBusy === requestId);
+    const cancelLabel = cancelRequested ? "取消中" : (isProcessing ? "取消处理" : "取消请求");
+    const cancelTitle = cancelRequested
+        ? "已请求取消：当前步骤结束后停止，本次修改回滚到处理前"
+        : (isProcessing
+            ? "取消处理：当前步骤结束后停止，本次修改回滚到处理前"
+            : "取消这条记忆请求（不再处理）");
     const dreamScope = memoryDreamScopeOf(item);
     let preview;
     if (memoryIsDreamItem(item) && dreamScope) {

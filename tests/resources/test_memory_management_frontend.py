@@ -1855,11 +1855,13 @@ def test_memory_queue_cards_carry_cancel_cross_and_toolbar_has_dream_button() ->
         __ex.S.memoryQueueCancelBusy = "";
         __out.pending = __ex.renderMemoryQueueCard({ request_id: "write_1", op: "write", status: "pending", payload_text: "记住甲", created_at: "2026-11-27T09:00:00+08:00" });
         __out.processing = __ex.renderMemoryQueueCard({ request_id: "write_2", op: "write", status: "processing", payload_text: "记住乙", created_at: "2026-11-27T09:00:00+08:00", live_progress: { rounds: 4, usage: { input_tokens: 1200, output_tokens: 300, cache_read_tokens: 800 } } });
+        __out.cancelling = __ex.renderMemoryQueueCard({ request_id: "write_3", op: "write", status: "processing", cancel_requested: true, payload_text: "记住丙", created_at: "2026-11-27T09:00:00+08:00", live_progress: { rounds: 2, usage: {} } });
         """,
         ["renderMemoryQueueCard", "S"],
     )
     pending = str(result["pending"])
     processing = str(result["processing"])
+    cancelling = str(result["cancelling"])
     # 取消按钮在右下角 footer，不再是头部叉号
     assert "memory-card-footer" in pending
     assert 'data-memory-queue-cancel="write_1"' in pending
@@ -1875,6 +1877,12 @@ def test_memory_queue_cards_carry_cancel_cross_and_toolbar_has_dream_button() ->
     assert "第 4 轮 · 入 1200 / 出 300 / 缓存 800" in processing
     assert "工具调用" not in processing
     assert "memory-card-live" in processing
+    # 已请求取消：状态徽标与按钮都显示「取消中」，按钮禁用
+    assert "取消中" in cancelling
+    assert 'data-status="processing"' in cancelling
+    cancelling_btn = cancelling.split('data-memory-queue-cancel="write_3"')[1].split("</button>")[0]
+    assert " disabled" in cancelling_btn
+    assert ">取消中</button>" in cancelling
 
     css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
     assert ".memory-queue-cancel-btn {" in css
@@ -1886,3 +1894,31 @@ def test_memory_queue_cards_carry_cancel_cross_and_toolbar_has_dream_button() ->
     assert "function requestMemoryQueueCancel(" in app_js
     assert "U.memoryDream?.addEventListener" in app_js
     assert "data-memory-queue-cancel" in app_js
+
+
+def test_processed_detail_shows_processing_duration_instead_of_start_time() -> None:
+    result = _run_app_script(
+        """
+        vm.runInContext("renderMemoryDetailPreview = () => {};", context);
+        const __ex = context.__testExports;
+        __ex.S.memoryProcessedItems = [{
+          batch_id: "b1", op: "write", status: "applied",
+          processed_at: "2026-11-27T10:00:00+08:00",
+          started_at: "2026-11-27T09:58:30+08:00",
+          processing_duration_ms: 90000,
+          payload_texts: ["甲"], usage_counted_requests: 1,
+        }];
+        __ex.openMemoryDetailPreview("processed", "b1");
+        __out.fields = __ex.S.memoryDetailPreview.fields;
+        __out.hour = __ex.memoryProcessedDurationText({ processing_duration_ms: 3723000 });
+        __out.seconds = __ex.memoryProcessedDurationText({ processing_duration_ms: 45000 });
+        __out.fallback = __ex.memoryProcessedDurationText({ started_at: "2026-11-27T09:00:00+08:00", processed_at: "2026-11-27T09:00:20+08:00" });
+        """,
+        ["openMemoryDetailPreview", "memoryProcessedDurationText", "S"],
+    )
+    fields = {item["label"]: item["value"] for item in result["fields"]}
+    assert fields["处理时长"] == "1 分 30 秒"
+    assert "处理时间" not in fields
+    assert result["hour"] == "1 时 2 分"
+    assert result["seconds"] == "45 秒"
+    assert result["fallback"] == "20 秒"
