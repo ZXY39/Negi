@@ -1021,15 +1021,16 @@ class ToolJobRunner:
         return len(jobs)
 
     def adopt_owned_process(self, *, entry: dict[str, Any], process: Any) -> None:
-        """盯一个 `exec background=true` 起的进程，它自己跑完时也给模型投一条终态事件。
+        """盯一个 `exec background=true` 起的进程，它退出时给模型投一条终态事件。
 
         交棒给前台看门狗的调用由 job 收尾并投事件；这条登记道 detach 之后没有任何东西
         在等它——模型只拿到 pid + log_path，进程跑完把输出留在日志里，没人接着处理。
-        没有可 poll 的句柄时不接管：宁可不报，也不凭“进程不在了”猜它是成功还是失败。
+        Windows broker 道拿不到 `Popen` 句柄（目标是 broker 的孤儿），改走存活轮询：
+        死亡照样投终态事件，只是拿不到退出码，不凭“进程不在了”猜它是成功还是失败。
         """
         poll = getattr(process, "poll", None)
         if not callable(poll):
-            return
+            poll = None
         try:
             pid = int(entry.get("pid") or 0)
         except (TypeError, ValueError):
@@ -1051,35 +1052,61 @@ class ToolJobRunner:
         self,
         *,
         entry: dict[str, Any],
-        poll: Callable[[], Any],
+        poll: Callable[[], Any] | None,
         scope: str,
         pid: int,
     ) -> None:
+        handleless = poll is None
+        exit_code: int | None = None
         while True:
-            try:
-                exit_code = poll()
-            except Exception:
-                logger.debug("owned process {} watch lost its handle", pid, exc_info=True)
-                return
-            if exit_code is not None:
-                break
+            if handleless:
+                if not owned_processes.is_alive(pid):
+                    break
+                current_entry = owned_processes.find(scope, pid)
+                if current_entry is None or not owned_processes.identity_matches(current_entry):
+                    break
+            else:
+                try:
+                    exit_code = poll()
+                except Exception:
+                    logger.debug("owned process {} watch lost its handle", pid, exc_info=True)
+                    return
+                if exit_code is not None:
+                    break
             await asyncio.sleep(OWNED_PROCESS_EXIT_POLL_SECONDS)
-        try:
-            code = int(exit_code)
-        except (TypeError, ValueError):
-            code = 0
+        if handleless:
+            code: int | None = None
+        else:
+            try:
+                code = int(exit_code)
+            except (TypeError, ValueError):
+                code = 0
         # 条目还在盘上＝这个进程是自己退的。被 process_kill、后台气泡停止或 scope 回收
         # 摘走时，那条道已经把日志交回给模型或已经投过事件，这里不能再报一次。
         if owned_processes.find(scope, pid) is None:
             self._notify_changed()
             return
         owned_processes.drop(scope, pid)
+        if handleless:
+            # 无句柄道拿不到退出码：只说"已经不在了"，不猜成功还是失败。
+            status = TOOL_JOB_STATUS_INTERRUPTED
+            preview = (
+                "This background process is no longer running; its exit code is unavailable "
+                "(it may have exited on its own or been terminated externally). "
+                "Inspect the log before deciding whether to restart it."
+            )
+            tail = owned_processes.read_log_tail(entry)
+            if tail:
+                preview = f"{preview}\n{tail}"
+        else:
+            status = TOOL_JOB_STATUS_SUCCESS if code == 0 else TOOL_JOB_STATUS_ERROR
+            preview = owned_processes.read_log_tail(entry)
         payload = build_owned_process_event_payload(
             entry,
             session_id=str(entry.get("session_key") or self._session_key),
             finished_at=now_iso(),
-            status=TOOL_JOB_STATUS_SUCCESS if code == 0 else TOOL_JOB_STATUS_ERROR,
-            result_preview=owned_processes.read_log_tail(entry),
+            status=status,
+            result_preview=preview,
             exit_code=code,
         )
         heartbeat = self._heartbeat()

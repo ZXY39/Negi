@@ -23,6 +23,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -35,6 +36,9 @@ class ProcessTreeKillResult:
     detail: str = ""
     descendant_total: int = 0
     descendant_leftovers: list[int] = field(default_factory=list)
+    # 终止前捕获的后代快照（pid/create_time/name）：整树被扫掉时，调用方据此
+    # 告诉上层"被一起收走的是谁"，而不是只报一个总数。
+    descendants: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -88,18 +92,26 @@ def _pid_gone(psutil_mod, pid: int, *, create_time: float | None = None) -> bool
     return False
 
 
-def _capture_descendants(psutil_mod, pid: int) -> list[tuple[int, float]]:
-    """终止前捕获后代（pid, create_time），用于终止后的存活核对。"""
+def _capture_descendants(psutil_mod, pid: int) -> list[dict[str, Any]]:
+    """终止前捕获后代（pid/create_time/name），用于终止后的存活核对与上层回报。"""
     if psutil_mod is None:
         return []
-    captured: list[tuple[int, float]] = []
+    captured: list[dict[str, Any]] = []
     try:
         parent = psutil_mod.Process(pid)
         for child in parent.children(recursive=True):
             try:
-                captured.append((int(child.pid), float(child.create_time())))
+                item: dict[str, Any] = {
+                    "pid": int(child.pid),
+                    "create_time": float(child.create_time()),
+                }
             except Exception:
                 continue
+            try:
+                item["name"] = str(child.name() or "")
+            except Exception:
+                item["name"] = ""
+            captured.append(item)
     except Exception:
         return captured
     return captured
@@ -110,15 +122,17 @@ def _verify_gone(
     pid: int,
     *,
     create_time: float | None,
-    descendants: list[tuple[int, float]],
+    descendants: list[dict[str, Any]],
 ) -> tuple[bool, str, list[int]]:
     """核对目标与已捕获后代是否都消失；返回 (ok, reason, leftover_pids)。"""
     if not _pid_gone(psutil_mod, pid, create_time=create_time):
         return False, "process_still_alive", []
     leftovers: list[int] = []
-    for child_pid, child_create_time in descendants:
-        if child_pid == pid:
+    for child in descendants:
+        child_pid = int(child.get("pid") or 0)
+        if child_pid <= 0 or child_pid == pid:
             continue
+        child_create_time = float(child.get("create_time") or 0.0) or None
         if not _pid_gone(psutil_mod, child_pid, create_time=child_create_time):
             leftovers.append(child_pid)
     if leftovers:
@@ -131,7 +145,7 @@ def _wait_until_gone(
     pid: int,
     *,
     create_time: float | None,
-    descendants: list[tuple[int, float]],
+    descendants: list[dict[str, Any]],
     timeout_seconds: float = 2.0,
 ) -> tuple[bool, str, list[int]]:
     deadline = time.monotonic() + max(0.0, timeout_seconds)
@@ -171,6 +185,7 @@ def kill_process_tree_pid_checked(pid: int | None) -> ProcessTreeKillResult:
     if sys.platform == "win32":
         descendants = _capture_descendants(psutil_mod, normalized_pid)
         result.descendant_total = len(descendants)
+        result.descendants = descendants
         try:
             completed = subprocess.run(
                 ["taskkill", "/T", "/F", "/PID", str(normalized_pid)],
@@ -211,6 +226,7 @@ def kill_process_tree_pid_checked(pid: int | None) -> ProcessTreeKillResult:
 
     descendants = _capture_descendants(psutil_mod, normalized_pid)
     result.descendant_total = len(descendants)
+    result.descendants = descendants
     try:
         pgid = os.getpgid(normalized_pid)
     except (ProcessLookupError, PermissionError, OSError):
@@ -271,15 +287,25 @@ def kill_process_tree_pid(pid: int | None) -> bool:
     return False
 
 
-def kill_process_tree(process: object | None) -> bool:
-    """对 Popen / asyncio.subprocess.Process 对象做整树终止（best-effort）。"""
+def kill_process_tree_checked(process: object | None) -> ProcessTreeKillResult:
+    """对 Popen / asyncio.subprocess.Process 做整树终止，并带回终止前捕获的后代快照。
+
+    调用方需要回答"这一刀还带走了谁"时用它；只要成败判定的仍用
+    ``kill_process_tree``。两者走同一条已校验路径。
+    """
     if process is None:
-        return False
+        return ProcessTreeKillResult()
     pid = getattr(process, "pid", None)
-    tree_killed = kill_process_tree_pid(pid)
+    result = kill_process_tree_pid_checked(pid)
     try:
         if getattr(process, "returncode", None) is None:
             process.kill()
     except Exception:
         pass
-    return tree_killed
+    return result
+
+
+def kill_process_tree(process: object | None) -> bool:
+    """对 Popen / asyncio.subprocess.Process 对象做整树终止（best-effort）。"""
+    result = kill_process_tree_checked(process)
+    return bool(result.initiated and result.terminated)

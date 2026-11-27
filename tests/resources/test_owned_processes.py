@@ -822,6 +822,81 @@ async def test_owned_process_exit_stays_silent_once_another_lane_collected_it(
     assert heartbeat.payloads == []
 
 
+def _spawn_running(log_path: Path, code: str) -> subprocess.Popen:
+    with open(log_path, "ab", buffering=0) as handle:
+        return subprocess.Popen(
+            [sys.executable, "-c", code], stdout=handle, stderr=subprocess.STDOUT
+        )
+
+
+@pytest.mark.asyncio
+async def test_handleless_owned_process_death_reports_interrupted(
+    isolated_root: Path,
+) -> None:
+    """Windows broker 道没有可 poll 的句柄：死亡也要投终态事件，只是没有退出码。"""
+    session_key = "web:ceo-1"
+    scope = owned_processes.scope_key(session_key=session_key)
+    log_path = owned_processes.new_log_path(scope)
+    process = _spawn_running(log_path, "import time; time.sleep(0.4)")
+    try:
+        entry = owned_processes.register(
+            scope=scope,
+            pid=int(process.pid),
+            cmd="python probe.py",
+            log_path=str(log_path),
+            session_key=session_key,
+            actor_role="ceo",
+        )
+        heartbeat = _RecordingHeartbeat()
+        runner = _runner(heartbeat)
+
+        runner.adopt_owned_process(entry=entry, process=None)
+        await _wait_for_watchers(runner)
+
+        assert [payload["status"] for payload in heartbeat.payloads] == ["interrupted"]
+        payload = heartbeat.payloads[0]
+        assert payload["kind"] == "process"
+        assert payload["pid"] == int(process.pid)
+        assert payload["exit_code"] is None
+        assert "no longer running" in payload["result_preview"]
+        assert owned_processes.find(scope, int(process.pid)) is None
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=20)
+
+
+@pytest.mark.asyncio
+async def test_handleless_owned_process_watch_stays_silent_after_entry_collected(
+    isolated_root: Path,
+) -> None:
+    session_key = "web:ceo-1"
+    scope = owned_processes.scope_key(session_key=session_key)
+    log_path = owned_processes.new_log_path(scope)
+    process = _spawn_running(log_path, "import time; time.sleep(30)")
+    try:
+        entry = owned_processes.register(
+            scope=scope,
+            pid=int(process.pid),
+            cmd="python probe.py",
+            log_path=str(log_path),
+            session_key=session_key,
+            actor_role="ceo",
+        )
+        owned_processes.drop(scope, int(process.pid))
+        heartbeat = _RecordingHeartbeat()
+        runner = _runner(heartbeat)
+
+        runner.adopt_owned_process(entry=entry, process=None)
+        await asyncio.sleep(0.3)
+        await _wait_for_watchers(runner)
+
+        assert heartbeat.payloads == []
+    finally:
+        process.kill()
+        process.wait(timeout=20)
+
+
 def test_owned_process_event_identity_survives_pid_reuse() -> None:
     base = {
         "pid": 4242,

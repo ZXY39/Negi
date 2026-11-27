@@ -19,7 +19,7 @@ from g3ku.runtime import owned_processes
 from g3ku.runtime.project_environment import apply_project_environment, resolve_project_environment
 from g3ku.runtime.tool_watchdog import coerce_timeout_argument, resolve_tool_watchdog_config
 from g3ku.utils.helpers import expand_path_anchor_tokens, model_data_root
-from g3ku.utils.process_tree import kill_process_tree
+from g3ku.utils.process_tree import kill_process_tree, kill_process_tree_checked
 from g3ku.utils.subprocess_text import (
     decode_subprocess_output,
     enrich_subprocess_env_for_text,
@@ -79,6 +79,30 @@ _PYTHON_INLINE_SYNTAX_NOTE = (
     "不要把整段脚本塞进 `-c`：嵌套引号、花括号、三引号、中文/Markdown 片段、长 JSON "
     "都极易把真正的 Python 错误混成 shell 解析错误。"
 )
+
+# 手工脱离派生写法（best-effort 文本判据）：命中只追加导流提示，不拦截命令。
+# 这类进程不在归属表里，超时/取消与重启都可能把它一起收走且没有通知。
+_DETACHED_SPAWN_PATTERNS = (
+    r"\bdetached_process\b",
+    r"\bcreate_breakaway_from_job\b",
+    r"\bcreate_new_process_group\b",
+    r"\bstart-process\b",
+    r"\bwmic(?:\.exe)?\s+process\b[^\r\n]*\bcall\s+create\b",
+    r"\bschtasks(?:\.exe)?\b[^\r\n]*\s/create\b",
+    r"\bnohup\b",
+    r"\bsetsid\b",
+    r"\bdisown\b",
+    r"\bsystemd-run\b",
+)
+
+_DETACHED_SPAWN_NOTE = (
+    "检测到手工脱离派生写法（{hit}）。这样起的进程不在运行时的归属表里：运行时重启、"
+    "前台调用超时或取消都可能把它一起终止，而且不会有任何通知。需要常驻的进程请改用 "
+    "`background: true`（purpose 必填）：运行时会把它 detach、登记归属、输出落日志文件，"
+    "并在它退出时主动叫醒你。"
+)
+
+_SWEPT_TREE_DESCENDANT_LIMIT = 8
 
 # exec runs as a child of the Web/worker runtime. A command that terminates
 # processes can therefore kill the host that is waiting for the command result
@@ -366,6 +390,8 @@ class ExecTool(Tool):
                     )
 
         env = self._build_subprocess_env(runtime=runtime, cwd=cwd)
+        # 只对前台调用提示：background=true 就是官方脱离通道，不需要再导流。
+        detach_note = "" if background else self._detached_spawn_note(command)
 
         if background:
             return self._start_background(
@@ -411,7 +437,7 @@ class ExecTool(Tool):
                     pass
                 raise
             except asyncio.TimeoutError:
-                kill_process_tree(process)
+                kill_result = kill_process_tree_checked(process)
                 # Wait for the process to fully terminate so pipes are
                 # drained and file descriptors are released.
                 try:
@@ -429,6 +455,11 @@ class ExecTool(Tool):
                     "如需更长运行时间，请在下一次调用时显式传入更大的 \"timeout_seconds\" 参数（单位：秒，支持小数）。"
                     "命令只是慢，不等于需要常驻：加大 timeout_seconds 就行，不要用 background=true 绕开超时。"
                 )
+                timeout_notes = [
+                    note
+                    for note in (detach_note, self._swept_process_tree_note(kill_result))
+                    if note
+                ]
                 return self._build_payload(
                     status="error",
                     exit_code=None,
@@ -436,6 +467,7 @@ class ExecTool(Tool):
                     stderr_capture=stderr_capture,
                     stderr_text=timeout_message,
                     error=timeout_message,
+                    extra_notes=timeout_notes,
                     full_output=self._finalize_full_output(
                         tee,
                         stdout_capture=stdout_capture,
@@ -444,7 +476,7 @@ class ExecTool(Tool):
                     ),
                 )
 
-            extra_notes: list[str] = []
+            extra_notes: list[str] = [detach_note] if detach_note else []
             if drain_timed_out:
                 extra_notes.append(_DRAIN_TIMEOUT_NOTE)
             if process.returncode != 0 and self._is_python_inline_syntax_failure(command, stderr_capture):
@@ -471,6 +503,7 @@ class ExecTool(Tool):
                 stdout_text="",
                 stderr_text=str(e),
                 error=f"Error executing command: {str(e)}",
+                extra_notes=[detach_note] if detach_note else None,
             )
         finally:
             # 正常路径已在 _finalize_full_output 里关闭并删除；这里兜住取消/异常路径，
@@ -580,6 +613,59 @@ class ExecTool(Tool):
             if legacy is not None:
                 return legacy
         return resolve_tool_watchdog_config(runtime or {}).default_timeout_seconds
+
+    @staticmethod
+    def _detached_spawn_note(command: str) -> str:
+        """命令里出现手工脱离派生写法时给出导流提示；只是提示，不拦截。"""
+        normalized = str(command or "")
+        if not normalized:
+            return ""
+        for pattern in _DETACHED_SPAWN_PATTERNS:
+            match = re.search(pattern, normalized, re.IGNORECASE)
+            if match:
+                return _DETACHED_SPAWN_NOTE.format(hit=match.group(0).strip())
+        return ""
+
+    @staticmethod
+    def _swept_process_tree_note(result: Any) -> str:
+        """超时/取消整树终止后，把"被一起收走的进程"与"未确认退出的残留"如实回报。"""
+        descendants = [
+            item for item in (getattr(result, "descendants", None) or []) if isinstance(item, dict)
+        ]
+        leftovers: list[int] = []
+        for pid in getattr(result, "descendant_leftovers", None) or []:
+            try:
+                normalized = int(pid)
+            except (TypeError, ValueError):
+                continue
+            if normalized > 0:
+                leftovers.append(normalized)
+        if leftovers:
+            shown = ", ".join(f"pid={pid}" for pid in leftovers[:_SWEPT_TREE_DESCENDANT_LIMIT])
+            more = f" 等共 {len(leftovers)} 个" if len(leftovers) > _SWEPT_TREE_DESCENDANT_LIMIT else ""
+            return (
+                f"警告：整树终止后以下子/孙进程仍未确认退出：{shown}{more}。"
+                "它们可能仍在运行，用 process_kill 或再次终止兜底。"
+            )
+        if not descendants:
+            return ""
+        shown_items = []
+        for item in descendants[:_SWEPT_TREE_DESCENDANT_LIMIT]:
+            try:
+                pid = int(item.get("pid") or 0)
+            except (TypeError, ValueError):
+                continue
+            name = str(item.get("name") or "").strip()
+            shown_items.append(f"pid={pid}" + (f" ({name})" if name else ""))
+        if not shown_items:
+            return ""
+        more = f" 等共 {len(descendants)} 个" if len(descendants) > _SWEPT_TREE_DESCENDANT_LIMIT else ""
+        return (
+            "本次调用超时/取消时终止了整棵进程树，其中包括已脱离父进程的子/孙进程："
+            f"{', '.join(shown_items)}{more}。这些进程已不存在；若其中有需要常驻的"
+            "（如 DETACHED_PROCESS / Start-Process / nohup 起的），前台里的分离写法活不过"
+            "超时或取消，请改用 `background: true` 重新拉起。"
+        )
 
     def _resolve_execution_mode(self) -> str:
         service = getattr(self, "main_task_service", None)

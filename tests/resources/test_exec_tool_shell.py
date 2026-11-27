@@ -748,6 +748,118 @@ async def test_exec_tool_bounds_post_exit_drain_and_kills_lingering_tree(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_exec_tool_timeout_reports_swept_process_tree(monkeypatch, tmp_path) -> None:
+    """超时整树终止时，工具结果要写明被一起收走的分离后代，并导流到 background。"""
+    from g3ku.utils.process_tree import ProcessTreeKillResult
+
+    class _TimeoutStubProcess:
+        returncode = None
+        pid = 4321
+
+        def __init__(self) -> None:
+            self.stdout = _ChunkedStream([])
+            self.stderr = _ChunkedStream([])
+            self.killed = asyncio.Event()
+
+        async def communicate(self):
+            raise MemoryError('communicate should not be used here')
+
+        async def wait(self):
+            await self.killed.wait()
+            return -9
+
+        def kill(self):
+            self.returncode = -9
+            self.killed.set()
+
+    process = _TimeoutStubProcess()
+
+    async def _fake_create_subprocess_exec(*args, **kwargs):
+        return process
+
+    def _fake_kill_checked(proc):
+        proc.kill()
+        return ProcessTreeKillResult(
+            initiated=True,
+            terminated=True,
+            descendant_total=2,
+            descendants=[
+                {'pid': 777, 'name': 'python.exe', 'create_time': 1.0},
+                {'pid': 888, 'name': 'msedge.exe', 'create_time': 2.0},
+            ],
+        )
+
+    monkeypatch.setattr(shell_module, 'kill_process_tree_checked', _fake_kill_checked)
+    monkeypatch.setattr(shell_module.asyncio, 'create_subprocess_exec', _fake_create_subprocess_exec)
+    monkeypatch.setattr(shell_module.os, 'name', 'nt', raising=False)
+
+    tool = ExecTool(workspace_root=str(tmp_path))
+    payload = json.loads(
+        await tool.execute(
+            command='python detach_probe.py',
+            timeout_seconds=0.05,
+            __g3ku_runtime={'session_key': 'web:shared'},
+        )
+    )
+
+    notes = ' '.join(payload.get('notes') or [])
+    assert payload['status'] == 'error'
+    assert 'pid=777' in notes and 'python.exe' in notes
+    assert 'pid=888' in notes
+    assert 'background: true' in notes
+
+
+def test_swept_process_tree_note_reports_leftovers() -> None:
+    from g3ku.utils.process_tree import ProcessTreeKillResult
+
+    note = ExecTool._swept_process_tree_note(
+        ProcessTreeKillResult(descendant_leftovers=[99])
+    )
+    assert 'pid=99' in note
+    assert '未确认退出' in note
+    assert ExecTool._swept_process_tree_note(ProcessTreeKillResult()) == ''
+
+
+def test_detached_spawn_note_matches_hand_rolled_patterns() -> None:
+    for command in (
+        'python -c "subprocess.Popen(x, creationflags=DETACHED_PROCESS)"',
+        'Start-Process -FilePath msedge.exe',
+        'nohup python watcher.py > out.log 2>&1 &',
+        'setsid ./run.sh',
+        'schtasks /create /tn watcher /tr "python watcher.py" /sc minute',
+    ):
+        assert ExecTool._detached_spawn_note(command), command
+    assert ExecTool._detached_spawn_note('echo hello') == ''
+    assert ExecTool._detached_spawn_note('schtasks /query /tn watcher') == ''
+
+
+@pytest.mark.asyncio
+async def test_exec_tool_guides_detached_spawn_toward_background(tmp_path) -> None:
+    tool = ExecTool(workspace_root=str(tmp_path))
+    payload = json.loads(
+        await tool.execute(
+            command='echo Start-Process',
+            __g3ku_runtime={'session_key': 'web:shared'},
+        )
+    )
+    notes = ' '.join(payload.get('notes') or [])
+    assert 'background: true' in notes
+
+
+@pytest.mark.asyncio
+async def test_exec_tool_plain_command_has_no_detach_guidance(tmp_path) -> None:
+    tool = ExecTool(workspace_root=str(tmp_path))
+    payload = json.loads(
+        await tool.execute(
+            command='echo hello',
+            __g3ku_runtime={'session_key': 'web:shared'},
+        )
+    )
+    notes = ' '.join(payload.get('notes') or [])
+    assert 'background: true' not in notes
+
+
+@pytest.mark.asyncio
 async def test_exec_tool_appends_guidance_on_python_inline_syntax_error(monkeypatch, tmp_path) -> None:
     """(b) `python -c` 引号/转义失败 → 工具结果就地追加「先落 .py 再跑」纠正指引。"""
 
