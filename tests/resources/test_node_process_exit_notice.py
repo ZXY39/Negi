@@ -84,8 +84,14 @@ def _service(*, node_status: str = "in_progress", paused: bool = False, fail: bo
         is_paused=paused,
         pause_requested=False,
     )
-    service.store = SimpleNamespace(get_task=lambda task_id: task, get_node=lambda node_id: node)
+    outbox: list[dict] = []
+    service.store = SimpleNamespace(
+        get_task=lambda task_id: task,
+        get_node=lambda node_id: node,
+        put_tool_job_outbox=lambda **kwargs: outbox.append(kwargs),
+    )
     service.deliver_node_message = _Recorder(fail=fail)
+    service._test_outbox = outbox
     return service
 
 
@@ -608,3 +614,60 @@ async def test_startup_consumer_drops_unattributed_legacy_task_notices(
 
     assert service.deliver_node_message.calls == []
     assert owned_processes.list_notices() == []
+
+
+def _swept_entry(**overrides) -> dict:
+    entry = {
+        "swept": True,
+        "sweep_id": "abc123",
+        "pid": 0,
+        "create_time": 0.0,
+        "scope": "session:web:ceo-1",
+        "session_key": "web:ceo-1",
+        "task_id": "",
+        "node_id": "",
+        "cmd": "python watcher.py",
+        "started_at": "2026-11-27T10:00:00",
+        "exit_reason": "swept_by_exec_cancel",
+        "swept_pids": [
+            {"pid": 111, "name": "python.exe"},
+            {"pid": 222, "name": "msedge.exe"},
+        ],
+    }
+    entry.update(overrides)
+    return entry
+
+
+@pytest.mark.asyncio
+async def test_swept_notice_routes_to_session_outbox() -> None:
+    service = _service()
+
+    consumed = await service._consume_owned_process_notice(_swept_entry())
+
+    assert consumed is True
+    outbox = service._test_outbox
+    assert len(outbox) == 1
+    assert outbox[0]["session_id"] == "web:ceo-1"
+    payload = outbox[0]["payload"]
+    assert payload["kind"] == "process"
+    assert payload["status"] == "interrupted"
+    assert payload["job_id"] == "proc:swept:abc123"
+    assert payload["dedupe_key"] == "tool-job:proc:swept:abc123:interrupted"
+    assert "pid=111" in payload["result_preview"]
+    assert payload["cmd"] == "python watcher.py"
+
+
+@pytest.mark.asyncio
+async def test_swept_notice_routes_to_node_mailbox() -> None:
+    service = _service()
+    entry = _swept_entry(task_id="task:abc", node_id="node:a", scope="task:task:abc")
+
+    consumed = await service._consume_owned_process_notice(entry)
+
+    assert consumed is True
+    assert len(service.deliver_node_message.calls) == 1
+    call = service.deliver_node_message.calls[0]
+    assert call["system_kind"] == KIND_PROCESS_EXIT
+    assert call["wake"] is True
+    assert "Swept: pid=111 (python.exe), pid=222 (msedge.exe)." in call["message"]
+    assert "python watcher.py" in call["message"]

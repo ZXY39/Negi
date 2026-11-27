@@ -430,7 +430,8 @@ class ExecTool(Tool):
                     tee=tee,
                 )
             except asyncio.CancelledError:
-                kill_process_tree(process)
+                kill_result = kill_process_tree_checked(process)
+                self._record_cancelled_tree(runtime=runtime, command=command, result=kill_result)
                 try:
                     await asyncio.wait_for(process.wait(), timeout=5.0)
                 except asyncio.TimeoutError:
@@ -625,6 +626,35 @@ class ExecTool(Tool):
             if match:
                 return _DETACHED_SPAWN_NOTE.format(hit=match.group(0).strip())
         return ""
+
+    @staticmethod
+    def _record_cancelled_tree(
+        *,
+        runtime: dict[str, Any],
+        command: str,
+        result: Any,
+    ) -> None:
+        """取消没有工具结果可回：把被扫名单落一条聚合凭证，交下次启动的消费口投递。"""
+        descendants = [
+            item for item in (getattr(result, "descendants", None) or []) if isinstance(item, dict)
+        ]
+        if not descendants:
+            return
+        session_key = str(runtime.get("session_key") or "web:shared").strip() or "web:shared"
+        task_id = str(runtime.get("task_id") or "").strip()
+        try:
+            owned_processes.write_swept_notice(
+                scope=owned_processes.scope_key(session_key=session_key, task_id=task_id),
+                session_key=session_key,
+                task_id=task_id,
+                node_id=str(runtime.get("node_id") or "").strip(),
+                actor_role=str(runtime.get("actor_role") or ""),
+                command=command,
+                descendants=descendants,
+            )
+        except Exception:
+            # 取消路径上任何异常都不能覆盖 CancelledError 的传播。
+            pass
 
     @staticmethod
     def _swept_process_tree_note(result: Any) -> str:

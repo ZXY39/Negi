@@ -273,6 +273,60 @@ def build_owned_process_event_payload(
     }
 
 
+def build_swept_process_event_payload(
+    entry: dict[str, Any],
+    *,
+    session_id: str,
+) -> dict[str, Any]:
+    """前台调用取消时整树被扫的聚合事件正文；一次取消一条，不按 pid 刷屏。
+
+    `job_id`/`dedupe_key` 按 `sweep_id` 唯一化：这不是某个进程的生命周期事件，
+    不能与 `proc:<pid>` 事件互相吞掉去重。
+    """
+    sweep_id = str(entry.get("sweep_id") or "").strip()
+    if not sweep_id:
+        return {}
+    pids = [item for item in (entry.get("swept_pids") or []) if isinstance(item, dict)]
+    shown: list[str] = []
+    for item in pids[:12]:
+        try:
+            pid = int(item.get("pid") or 0)
+        except (TypeError, ValueError):
+            continue
+        name = str(item.get("name") or "").strip()
+        shown.append(f"pid={pid}" + (f" ({name})" if name else ""))
+    preview = (
+        f"{len(pids)} foreground exec process(es) were swept when the call was cancelled: "
+        f"{', '.join(shown)}{' (+more)' if len(pids) > 12 else ''}. "
+        "They are gone; if any must keep running, restart it with exec background=true."
+    )
+    return {
+        "event_reason": TOOL_JOB_EVENT_REASON,
+        "reason": TOOL_JOB_EVENT_REASON,
+        "kind": "process",
+        "session_id": str(session_id or "").strip(),
+        "job_id": f"proc:swept:{sweep_id}",
+        "dedupe_key": f"tool-job:proc:swept:{sweep_id}:interrupted",
+        "pid": 0,
+        "tool_name": OWNED_PROCESS_TOOL_NAME,
+        "status": TOOL_JOB_STATUS_INTERRUPTED,
+        "started_at": str(entry.get("started_at") or ""),
+        "finished_at": now_iso(),
+        "elapsed_seconds": 0.0,
+        "timeout_seconds": 0.0,
+        "turn_id": "",
+        "tool_call_id": "",
+        "result_preview": _clip_preview(preview),
+        "result_ref": "",
+        "log_path": "",
+        "recovery_policy": "model_decide",
+        "stopped_by": "",
+        "exit_code": None,
+        "cmd": str(entry.get("cmd") or ""),
+        "purpose": "cancelled exec sweep",
+    }
+
+
 def _clip_preview(text: Any, limit: int = TOOL_JOB_RESULT_PREVIEW_CHARS) -> str:
     value = str(text or "").strip()
     if len(value) <= limit:

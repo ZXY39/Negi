@@ -2090,6 +2090,8 @@ class MainRuntimeService:
 
     async def _consume_owned_process_notice(self, entry: dict[str, Any]) -> bool:
         """一条 `.notice` 的投递；返回 True 表示可以删凭证。"""
+        if bool(entry.get("swept")):
+            return await self._consume_swept_exec_notice(entry)
         exit_code = entry.get("exit_code")
         try:
             exit_code = int(exit_code) if exit_code is not None else None
@@ -2159,6 +2161,80 @@ class MainRuntimeService:
                 "failed to enqueue owned process exit event for session={} pid={}",
                 session_key,
                 entry.get("pid"),
+            )
+            return False
+        return True
+
+    async def _consume_swept_exec_notice(self, entry: dict[str, Any]) -> bool:
+        """投递"前台调用取消时整树被扫"的聚合凭证：节点投信箱，会话写心跳 outbox。
+
+        这条凭证没有真实 pid（进程已不在），`sweep_id` 是唯一身份；投递失败保留
+        到下一次启动，不丢名单。
+        """
+        from g3ku.runtime import owned_processes
+        from g3ku.runtime.tool_jobs import build_swept_process_event_payload
+
+        task_id = str(entry.get("task_id") or "").strip()
+        node_id = str(entry.get("node_id") or "").strip()
+        session_key = str(entry.get("session_key") or "").strip()
+        if node_id:
+            if not task_id:
+                return True
+            task = self.store.get_task(task_id)
+            node = self.store.get_node(node_id)
+            if task is None or node is None:
+                return True
+            if str(node.status or "").strip().lower() in {"success", "failed"}:
+                return True
+            if str(task.status or "").strip().lower() in {"success", "failed", "canceled"}:
+                return True
+            paused = (
+                bool(getattr(task, "is_paused", False))
+                or bool(getattr(task, "pause_requested", False))
+                or bool(getattr(node, "is_paused", False))
+                or bool(getattr(node, "pause_requested", False))
+            )
+            try:
+                await self.deliver_node_message(
+                    task_id=task_id,
+                    target_node_id=node_id,
+                    message=owned_processes.swept_notice_text(entry),
+                    origin=ORIGIN_NODE,
+                    system_kind=KIND_PROCESS_EXIT,
+                    source_node_id=node_id,
+                    wake=not paused,
+                )
+            except Exception:
+                logger.warning(
+                    "swept exec notice delivery failed: task={} node={}",
+                    task_id,
+                    node_id,
+                    exc_info=True,
+                )
+                return False
+            return True
+        if task_id:
+            # legacy 任务条目没有 node_id：归属不到具体节点，不冒充会话进程。
+            return True
+        if not session_key:
+            return True
+        payload = build_swept_process_event_payload(entry, session_id=session_key)
+        dedupe_key = str(payload.get("dedupe_key") or "").strip()
+        if not dedupe_key:
+            return True
+        try:
+            self.store.put_tool_job_outbox(
+                dedupe_key=dedupe_key,
+                job_id=str(payload.get("job_id") or ""),
+                session_id=session_key,
+                created_at=now_iso(),
+                payload=payload,
+            )
+        except Exception:
+            logger.exception(
+                "failed to enqueue swept exec event for session={} sweep={}",
+                session_key,
+                entry.get("sweep_id"),
             )
             return False
         return True

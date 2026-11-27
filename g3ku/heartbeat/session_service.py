@@ -110,6 +110,11 @@ def _derive_session_channel_chat(key: str) -> tuple[str, str]:
     return "web", raw_key
 
 
+# worker 消费 `.notice` 写出的 outbox 行常常落在 web 启动重放之后；pending 行不能
+# 干等下一次重启。周期重放只处理 pending 行，事件队列按 dedupe_key 去重。
+OUTBOX_REPLAY_INTERVAL_SECONDS = 30.0
+
+
 class WebSessionHeartbeatService:
     def __init__(
         self,
@@ -137,6 +142,7 @@ class WebSessionHeartbeatService:
         self._frontdoor_message_scanner = None
         self._session_message_scanner = None
         self._owned_process_scanner = None
+        self._outbox_replay_task: asyncio.Task[Any] | None = None
         # 非 node_error 事件失败的内存计数保底（键为 (session_key, reasons)）。node_error
         # 路径已改为按 node 持久计数（heartbeat_node_retry_state 表），本字典仅用于
         # stall/task_terminal 等无 node 维度事件的有界退避（计划 2.2）。
@@ -177,6 +183,9 @@ class WebSessionHeartbeatService:
             await self._session_message_scanner.start()
             self._owned_process_scanner = SessionOwnedProcessScanner(heartbeat=self)
             await self._owned_process_scanner.start()
+            self._outbox_replay_task = asyncio.create_task(
+                self._outbox_replay_loop(), name="tool-job-outbox-replay"
+            )
 
     async def stop(self) -> None:
         self._started = False
@@ -196,6 +205,11 @@ class WebSessionHeartbeatService:
         self._owned_process_scanner = None
         if owned_scanner is not None:
             await owned_scanner.stop()
+        replay_task = self._outbox_replay_task
+        self._outbox_replay_task = None
+        if replay_task is not None:
+            replay_task.cancel()
+            await asyncio.gather(replay_task, return_exceptions=True)
         await self._wake.close()
         prompt_tasks = list(self._prompt_tasks.values())
         self._prompt_tasks.clear()
@@ -872,6 +886,20 @@ class WebSessionHeartbeatService:
             "task_stall": replayed_stall,
             "tool_job": replayed_tool_job,
         }
+
+    async def _outbox_replay_loop(self) -> None:
+        """周期重放 pending outbox：不依赖重启的投递保底。"""
+        while True:
+            await asyncio.sleep(OUTBOX_REPLAY_INTERVAL_SECONDS)
+            try:
+                replayed = self.replay_pending_outbox()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("periodic outbox replay failed")
+                continue
+            if any(int(value or 0) for value in replayed.values()):
+                logger.info("periodic outbox replay: {}", replayed)
 
     def _session_manual_pause_waiting_reason(
         self,
