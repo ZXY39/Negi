@@ -120,6 +120,7 @@
 - 工具级独立超时配置已并入本合同：`ExecToolSettings.timeout`、`AgentBrowserToolSettings.default_timeout_seconds`、`web_fetch` 的旧 `timeout_ms` 均已移除，统一模型可见参数是运行时注入的 `timeout_seconds`；`web_fetch` 的 `resource.yaml` `parameters` 块声明 `url` / `urls` / `max_chars` / `include_text` / `save_dir`（清单不得自行声明带上限的 timeout）；`skill-installer` 的下载/git 超时与 filesystem 校验子进程超时属于内部操作性超时，不在本合同内。
 - 超时被停止的工具结果必须带延长指引：统一文案 `Error executing {tool}: timed out after {N}s ... 请在下一次调用时显式传入更大的 "timeout_seconds" 参数（单位秒、支持小数）`，亚秒上限按小数渲染（不压成 `0s`），由外层与自持工具共用同一构造器保证口径一致；该文案按 error-lane 处理，但**不**附加 `load_tool_context` 参数修复指引（超时不是参数错误）。
 - `exec` 对手工脱离派生只导流、不拦截：前台命令文本命中 `DETACHED_PROCESS` / `CREATE_BREAKAWAY_FROM_JOB` / `CREATE_NEW_PROCESS_GROUP` / `Start-Process` / `wmic … call create` / `schtasks … /create` / `nohup` / `setsid` / `disown` / `systemd-run` 时，工具结果 notes 附一条改用 `background: true` 的提示（`background=true` 自身不提示）。判据是文本启发式，可被间接写法绕过，因此只承担导流，不承担保证：这类进程不在归属表里，宿主重启、前台超时或取消都可能把它一起收走且不产生任何事件。
+- 取消路径没有工具结果可回：`exec` 被 pause/cancel/shutdown 取消时，把整树终止前捕获的后代名单写成**一条聚合** `.notice`（`swept_by_exec_cancel`，一次取消一条，不按 pid 刷屏），由服务 startup 的消费口投节点信箱 / 会话心跳 outbox，正文列出被扫 pid 与命令；投递成功才删凭证，pending 行由心跳侧周期重放兜底（失败不丢）。超时路径不走这条（已在工具结果里即时回报），两条路径不双报。
 - 已知边界：同步阻塞型工具的超时只能在下一个 await 点生效；模型可传任意大 `timeout_seconds`（无上限是合同的一部分），串行化调度下的队头阻塞由 pause/cancel 兜底。`exec` 的两段等待都已有界（`timeout_seconds` 约束等进程退出、5s 宽限约束退出后排空，孙进程吊管道时到点杀树自愈），但「进程根本不退出」这一段的上限仍等于模型传的 `timeout_seconds`——短命令配大 `timeout_seconds` 会让卡死等到那个上限才自愈，故短命令务必配小值（无进度时长的失速提前告警属另一条防线，尚未接入）。
 
 ### 工具可重放声明（恢复车道档位）
