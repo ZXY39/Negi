@@ -272,6 +272,10 @@ _MEMORY_WINDOW_SPLIT_RATIO = 0.5
 COMPRESSIBLE_SACRIFICE_SHARE_NUM = 7
 COMPRESSIBLE_SACRIFICE_SHARE_DEN = 10
 
+# 全量 dream 一轮要扫全部常驻行并逐份读 note，模型需要的工具轮数比普通批次多；
+# 上限按 memory 角色的 max_iterations 翻倍，不另立一个配置项。
+_DREAM_ROUND_LIMIT_MULTIPLIER = 2
+
 # 主动提交（操作员/CEO 点名要记的）与复核冲刷（运行时按轮次/龄/压缩/边界倒出来的）
 # 是两条车道：前者合批，后者恒单行。分类只有这一份判据。
 _ACTIVE_TRIGGER_SOURCES = frozenset(
@@ -4965,6 +4969,13 @@ class MemoryManager:
 
         return direct_chat_call, (lambda: None)
 
+    def _memory_round_limit(self, runtime_config: Any, *, batch_op: str) -> int:
+        limit = int(runtime_config.get_role_max_iterations("memory") or 8)
+        limit = max(limit, 1)
+        if str(batch_op or "").strip().lower() == "dream":
+            limit *= _DREAM_ROUND_LIMIT_MULTIPLIER
+        return limit
+
     async def _run_memory_agent_attempt(
         self,
         *,
@@ -5029,8 +5040,7 @@ class MemoryManager:
         usage_total = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0}
         attempted_chain: list[str] = []
         request_artifacts: list[dict[str, Any]] = []
-        round_limit = int(runtime_config.get_role_max_iterations("memory") or 8)
-        round_limit = max(round_limit, 1)
+        round_limit = self._memory_round_limit(runtime_config, batch_op=batch.op)
         final_text = ""
         try:
             for _ in range(round_limit):

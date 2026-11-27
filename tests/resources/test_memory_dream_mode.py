@@ -134,6 +134,17 @@ def test_dream_config_defaults_are_disabled_and_change_thresholded() -> None:
     assert not hasattr(cfg.dream, "cluster_window_ratio")
 
 
+def test_dream_round_limit_is_twice_the_memory_role_limit() -> None:
+    manager = _module().MemoryManager.__new__(_module().MemoryManager)
+    runtime = SimpleNamespace(get_role_max_iterations=lambda role: 4)
+    assert manager._memory_round_limit(runtime, batch_op="write") == 4
+    assert manager._memory_round_limit(runtime, batch_op="dream") == 8
+
+    fallback = SimpleNamespace(get_role_max_iterations=lambda role: 0)
+    assert manager._memory_round_limit(fallback, batch_op="write") == 8
+    assert manager._memory_round_limit(fallback, batch_op="dream") == 16
+
+
 def test_dream_prompt_uses_the_ordinary_row_cards_notes_and_no_cluster_blocks(tmp_path: Path) -> None:
     manager = _manager(tmp_path)
     try:
