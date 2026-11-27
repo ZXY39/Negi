@@ -327,8 +327,11 @@ def test_memory_queue_card_keeps_natural_height_and_two_line_body() -> None:
     # .memory-list 是定高滚动容器：卡片允许收缩就会连正文一起被截成半行，
     # 撑不下只能交给列表出滚动条。
     assert "flex: 0 0 auto;" in card
+    assert "gap: var(--ui-space-2);" in card
     assert "-webkit-line-clamp: 2;" in body
-    assert "height: 44px;" in body
+    # 单行预览按实际行数排高，不为第二行留空；取消按钮与正文保持紧凑间距。
+    assert "height: auto;" in body
+    assert "height: 44px;" not in body
     # 正文与首行徽标共用卡片内边距这条左边界，v1 的下内边距和分隔线要摘掉。
     assert "padding: 0;" in body
     assert "border-top: 0;" in body
