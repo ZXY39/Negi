@@ -387,6 +387,8 @@ const S = {
     memoryFailedPageSize: 20,
     memoryFailedMutationsEnabled: false,
     memoryFailedActionBusy: "",
+    memoryDreamBusy: false,
+    memoryQueueCancelBusy: "",
     memoryQueueExpanded: {},
     memoryProcessedExpanded: {},
     memoryDetailPreview: {
@@ -571,6 +573,7 @@ const U = {
     memoryRefresh: document.getElementById("memory-refresh-btn"),
     memoryViewCurrent: document.getElementById("memory-view-current-btn"),
     memoryIndexNotes: document.getElementById("memory-index-notes-btn"),
+    memoryDream: document.getElementById("memory-dream-btn"),
     memoryQueueList: document.getElementById("memory-queue-list"),
     memoryQueueInfo: document.getElementById("memory-queue-info"),
     memoryQueueMore: document.getElementById("memory-queue-more-btn"),
@@ -674,7 +677,6 @@ const U = {
     nodeContextDisclosure: document.getElementById("node-context-disclosure"),
     feedTitle: document.getElementById("feed-target-name"),
     detail: document.getElementById("agent-detail-view"),
-    adRole: document.getElementById("ad-role"),
     adStatus: document.getElementById("ad-status"),
     adTokenSummary: document.getElementById("ad-token-summary"),
     adInitialPrompt: document.getElementById("ad-initial-prompt"),
@@ -11578,6 +11580,7 @@ function bindMemoryAndAudit() {
     U.memoryRefresh?.addEventListener("click", () => void loadMemoryView({ force: true }));
     U.memoryViewCurrent?.addEventListener("click", () => void openMemoryBrowser());
     U.memoryIndexNotes?.addEventListener("click", () => void openMemoryNoteBrowser());
+    U.memoryDream?.addEventListener("click", () => void runMemoryDreamTrigger());
     U.memoryQueueMore?.addEventListener("click", () => void loadMoreMemoryQueue());
     U.memoryProcessedMore?.addEventListener("click", () => void loadMoreMemoryProcessed());
     U.memoryFailedMore?.addEventListener("click", () => void loadMoreMemoryFailed());
@@ -11586,6 +11589,14 @@ function bindMemoryAndAudit() {
     U.auditPageNext?.addEventListener("click", () => void goToAuditPage(S.auditPage + 1));
     U.memoryQueueList?.addEventListener("click", (e) => {
         if (!(e.target instanceof Element)) return;
+        const cancelTrigger = e.target.closest("[data-memory-queue-cancel]");
+        if (cancelTrigger) {
+            e.preventDefault();
+            e.stopPropagation();
+            if (cancelTrigger.disabled) return;
+            requestMemoryQueueCancel(cancelTrigger.dataset.memoryQueueCancel || "");
+            return;
+        }
         const noteTrigger = e.target.closest("[data-memory-note-ref]");
         if (noteTrigger) {
             e.preventDefault();
@@ -11647,6 +11658,7 @@ function bindMemoryAndAudit() {
         if (!(e.target instanceof Element)) return;
         if (e.key !== "Enter" && e.key !== " ") return;
         if (e.target.closest("[data-memory-failed-retry]")) return;
+        if (e.target.closest("[data-memory-queue-cancel]")) return;
         const detailTrigger = e.target.closest("[data-memory-detail-open]");
         if (!detailTrigger) return;
         e.preventDefault();

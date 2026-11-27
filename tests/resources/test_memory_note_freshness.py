@@ -89,7 +89,7 @@ def test_existing_notes_are_registered_with_unknown_freshness(tmp_path: Path) ->
         assert ordinary["content_sha256"]
         assert category["note_key"] == "category:note_category"
         assert category["updated_at"] == ""
-        index = {item["ref"]: item for item in manager._dream_note_index()}
+        index = {item["ref"]: item for item in manager._memory_note_index()}
         assert index["note_old"]["note_updated_at"] == "unknown"
         assert index["note_category"]["note_updated_at"] == "unknown"
     finally:

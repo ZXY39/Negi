@@ -148,3 +148,47 @@ async function runMemoryFailedAction(action, failedId) {
         renderMemoryView();
     }
 }
+
+async function runMemoryDreamTrigger() {
+    if (S.memoryDreamBusy) return;
+    S.memoryDreamBusy = true;
+    renderMemoryView();
+    showToast({ title: "正在触发整理", text: "", kind: "info", durationMs: 0, persistent: true, spin: true });
+    try {
+        const result = await ApiClient.triggerMemoryDream(memoryScopeQuery());
+        const status = String(result?.item?.status || "").trim();
+        showToast({
+            title: status === "already_queued" ? "整理已在队列中" : "已触发整理",
+            text: status === "already_queued"
+                ? "已有一次整理在排队或处理中，不重复触发。"
+                : "全量整理请求已入队，记忆 agent 会尽快处理，结果见「已处理批次」。",
+            kind: "success",
+            durationMs: 4200,
+        });
+        await loadMemoryView({ force: true, quiet: true });
+    } catch (error) {
+        showToast({ title: "触发失败", text: error?.message || "整理请求未成功，请稍后重试", kind: "error", durationMs: 5000 });
+    } finally {
+        S.memoryDreamBusy = false;
+        renderMemoryView();
+    }
+}
+
+async function runMemoryQueueCancel(requestId) {
+    const target = String(requestId || "").trim();
+    if (!target || S.memoryQueueCancelBusy) return;
+    S.memoryQueueCancelBusy = target;
+    renderMemoryView();
+    showToast({ title: "正在取消请求", text: "", kind: "info", durationMs: 0, persistent: true, spin: true });
+    try {
+        await ApiClient.cancelMemoryQueue(target, "manual-ui", memoryScopeQuery());
+        if (String(S.memoryDetailPreview?.key || "").trim() === target) closeMemoryDetailPreview();
+        showToast({ title: "已取消", text: "这条请求已出队、不再处理，本次记忆操作回滚到处理前。", kind: "success" });
+        await loadMemoryView({ force: true, quiet: true });
+    } catch (error) {
+        showToast({ title: "取消失败", text: error?.message || "操作未成功，请稍后重试", kind: "error", durationMs: 5000 });
+    } finally {
+        S.memoryQueueCancelBusy = "";
+        renderMemoryView();
+    }
+}

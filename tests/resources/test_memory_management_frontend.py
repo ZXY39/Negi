@@ -1802,3 +1802,77 @@ def test_dream_rows_render_readable_scope_not_raw_id_json() -> None:
     css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
     assert ".memory-dream-scope {" in css
     assert ".memory-dream-raw" in css
+
+
+def test_full_dream_rows_render_library_summary_and_trigger_reason() -> None:
+    result = _run_app_script(
+        """
+        const scope = {
+          mode: "full",
+          scope_key: "full",
+          reason: "change_threshold",
+          base_revision: 42,
+          memory_count: 338,
+          note_count: 194,
+        };
+        const item = {
+          op: "dream",
+          trigger_sources: ["dream_scheduler"],
+          dream_scope: scope,
+          payload_text: JSON.stringify({ mode: "full", memory_ids: new Array(338).fill("mem_id"), note_refs: [] }),
+        };
+        __out.reason = context.__testExports.memoryDreamReasonLabel("change_threshold");
+        __out.scopeHtml = context.__testExports.renderMemoryDreamScope(scope, context.__testExports.memoryDreamTriggerLabel(item));
+        __out.queueHtml = context.__testExports.renderMemoryQueueCard(item);
+        """,
+        ["renderMemoryDreamScope", "memoryDreamReasonLabel", "memoryDreamTriggerLabel", "renderMemoryQueueCard"],
+    )
+
+    scope_html = str(result["scopeHtml"])
+    assert "全量整理" in scope_html
+    assert "触发原因：阈值触发" in scope_html
+    assert "338 条常驻记忆 / 194 份笔记" in scope_html
+    assert "自动调度" in scope_html
+    assert str(result["reason"]) == "阈值触发"
+
+    queue_html = str(result["queueHtml"])
+    assert "全量整理：338 条记忆 / 194 份笔记 · 阈值触发" in queue_html
+    assert "memory_id" not in queue_html
+    assert '"mode"' not in queue_html
+
+
+def test_memory_queue_cards_carry_cancel_cross_and_toolbar_has_dream_button() -> None:
+    html_source = (REPO_ROOT / "g3ku/web/frontend/org_graph.html").read_text(encoding="utf-8")
+    memory_html = _memory_view_fragment(html_source)
+    assert 'id="memory-dream-btn"' in memory_html
+    assert ">整理记忆</button>" in memory_html
+    assert ">已归并记忆</button>" in memory_html
+    assert ">归并记忆</button>" not in memory_html
+
+    result = _run_app_script(
+        """
+        const __ex = context.__testExports;
+        __ex.S.memoryQueueCancelBusy = "";
+        __out.pending = __ex.renderMemoryQueueCard({ request_id: "write_1", op: "write", status: "pending", payload_text: "记住甲", created_at: "2026-11-27T09:00:00+08:00" });
+        __out.processing = __ex.renderMemoryQueueCard({ request_id: "write_2", op: "write", status: "processing", payload_text: "记住乙", created_at: "2026-11-27T09:00:00+08:00" });
+        """,
+        ["renderMemoryQueueCard", "S"],
+    )
+    pending = str(result["pending"])
+    processing = str(result["processing"])
+    assert 'data-memory-queue-cancel="write_1"' in pending
+    assert "memory-queue-cancel-btn" in pending
+    assert 'data-lucide="x"' in pending
+    pending_btn = pending.split('data-memory-queue-cancel="write_1"')[1].split("</button>")[0]
+    assert " disabled" not in pending_btn
+    processing_btn = processing.split('data-memory-queue-cancel="write_2"')[1].split("</button>")[0]
+    assert " disabled" in processing_btn
+
+    css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
+    assert ".memory-queue-cancel-btn {" in css
+    app_js = _memory_frontend_source()
+    assert "function runMemoryDreamTrigger()" in app_js
+    assert "function runMemoryQueueCancel(" in app_js
+    assert "function requestMemoryQueueCancel(" in app_js
+    assert "U.memoryDream?.addEventListener" in app_js
+    assert "data-memory-queue-cancel" in app_js

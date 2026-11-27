@@ -228,12 +228,12 @@ def build_memory_app(console) -> typer.Typer:
 
     @app.command('dream')
     def memory_dream(
-        once: bool = typer.Option(False, '--once', help='Force one dream cluster and consume it once'),
+        once: bool = typer.Option(False, '--once', help='Force one full-library dream sweep and consume it once'),
         scope: str = _scope_option,
     ):
-        """Force one incremental memory-organization cluster through the normal preview/confirm path."""
+        """Force one full-library memory-organization sweep through the normal preview/confirm path."""
         if not once:
-            console.print('[yellow]Use --once to run one dream cluster.[/yellow]')
+            console.print('[yellow]Use --once to run one full dream sweep.[/yellow]')
             raise typer.Exit(2)
         _config, mem_cfg, manager = _load_runtime_manager(scope=scope)
         if not mem_cfg.enabled:
@@ -241,11 +241,12 @@ def build_memory_app(console) -> typer.Typer:
             raise typer.Exit(1)
         try:
             report = asyncio.run(manager.run_due_batch_once(force_dream=True))
-            state = manager._read_dream_state()
         finally:
             manager.close()
         output = dict(report)
-        output.setdefault('dream_cluster_key', str(state.get('last_cluster_key') or ''))
+        if str(output.get('op') or '').strip().lower() == 'dream':
+            output.setdefault('dream_mode', 'full')
+            output.setdefault('dream_scope_key', 'full')
         console.print_json(json.dumps(output, ensure_ascii=False))
 
     @app.command('doctor')

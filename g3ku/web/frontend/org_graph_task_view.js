@@ -2055,7 +2055,6 @@ async function showAgent(node, { preserveViewState = true, forceRefresh = false 
     U.detail.style.display = "flex";
     if (U.nodeEmpty) U.nodeEmpty.style.display = "none";
     setTaskSelectionEmptyVisible(false);
-    if (U.adRole) U.adRole.hidden = true;
     renderTaskNodeDetailStatus(mergedNode);
     renderTaskNodeModelRetryToast(mergedNode);
     if (U.adTokenSummary) {

@@ -121,7 +121,7 @@ def test_existing_sections_migrate_as_unknown_and_appear_in_note_index(tmp_path:
         rows = manager._memory_repo.list_note_sections("ordinary:note_sections")
         assert rows and all(row["status"] == "unknown" for row in rows)
         assert all(row["decision_at"] == "" for row in rows)
-        index = {item["ref"]: item for item in manager._dream_note_index()}["note_sections"]
+        index = {item["ref"]: item for item in manager._memory_note_index()}["note_sections"]
         assert {item["section_key"] for item in index["sections"]} >= {"标题 > 旧口径", "标题 > 新口径"}
         assert all(item["status"] == "unknown" for item in index["sections"])
         old_section = next(item for item in index["sections"] if item["section_key"] == "标题 > 旧口径")
@@ -230,26 +230,18 @@ def test_machine_rejects_self_cycle_missing_replacement_and_missing_evidence(tmp
         manager.close()
 
 
-def test_dream_rejects_section_updates_outside_cluster(tmp_path: Path) -> None:
+def test_dream_accepts_section_updates_for_any_note(tmp_path: Path) -> None:
     manager = _manager(tmp_path)
     try:
         _seed_note(manager, "note_inside", "## A\n甲\n")
         _seed_note(manager, "note_outside", "## B\n乙\n")
-        module = _module()
-        session = module._MemoryToolSession(
-            snapshot_text=manager.snapshot_text(),
-            notes_dir=manager.notes_dir,
-            index_dir=manager.index_dir,
-            batch_op="dream",
-            dream_context_loaded=True,
-            dream_memory_ids=set(),
-            dream_note_refs={"note_inside"},
-        )
+        session = _session(manager, "dream")
         result = _tools(manager, session)["memory_apply_batch"].invoke(
             {"note_section_updates": [{"ref": "note_outside", "section_key": "B", "status": "active", "scope_key": "topic"}]}
         )
-        assert result["ok"] is False
-        assert "cluster" in json.dumps(result["errors"], ensure_ascii=False).lower()
+        assert result["ok"] is True, result
+        assert result["status"] == "batch_previewed"
+        assert result["preview"]["note_section_preview"][0]["ref"] == "note_outside"
     finally:
         manager.close()
 
@@ -376,7 +368,7 @@ def test_consolidation_category_note_indexes_sections(tmp_path: Path) -> None:
         manager.close()
 
 
-def test_ordinary_and_dream_inputs_expose_related_sections(tmp_path: Path) -> None:
+def test_ordinary_prompt_and_dream_tools_expose_related_sections(tmp_path: Path) -> None:
     manager = _manager(tmp_path)
     try:
         memory_id = _add(manager, note_ref="note_sections")
@@ -395,14 +387,31 @@ def test_ordinary_and_dream_inputs_expose_related_sections(tmp_path: Path) -> No
             items=[module.MemoryQueueRequest(
                 op="dream",
                 decision_source="self",
-                payload_text=json.dumps({"memory_ids": [memory_id], "note_refs": ["note_sections"]}, ensure_ascii=False),
+                payload_text=json.dumps({
+                    "mode": "full",
+                    "scope_key": "full",
+                    "memory_ids": [memory_id],
+                    "note_refs": ["note_sections"],
+                    "reason": "manual",
+                    "base_revision": 0,
+                }, ensure_ascii=False),
                 created_at="2026-11-26T09:00:00+08:00",
                 request_id="dream_sections",
             )],
         )
         dream = manager._dream_agent_user_prompt(batch=dream_batch, snapshot_text=manager.snapshot_text(), repair_reason="")
-        for prompt in (ordinary, dream):
-            assert '"section_key": "A"' in prompt
-            assert '"status": "unknown"' in prompt
+
+        assert '"section_key": "A"' in ordinary
+        assert '"status": "unknown"' in ordinary
+        assert '"section_key"' not in dream
+        assert '"status": "unknown"' not in dream
+
+        session = _session(manager, "dream")
+        tools = _tools(manager, session)
+        index = {item["ref"]: item for item in tools["memory_note_index"].invoke({})}["note_sections"]
+        assert {item["section_key"] for item in index["sections"]} >= {"A", "B"}
+        assert all(item["status"] == "unknown" for item in index["sections"])
+        notes = tools["memory_read_notes"].invoke({"refs": ["note_sections"]})
+        assert {item["section_key"] for item in notes["section_meta"]["note_sections"]} >= {"A", "B"}
     finally:
         manager.close()

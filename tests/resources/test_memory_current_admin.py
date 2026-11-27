@@ -87,6 +87,18 @@ class _StubMemoryManager:
             raise KeyError(f"failed memory record not found: {failed_id}")
         return {"failed_id": failed_id, "status": "discarded", "request_ids": ["write_1"]}
 
+    async def trigger_manual_dream(self):
+        self.calls.append(("trigger_manual_dream", None))
+        return {"ok": True, "status": "queued", "request_id": "dream_1"}
+
+    async def cancel_queue_request(self, request_id: str, *, reason: str = "manual"):
+        self.calls.append(("cancel_queue_request", (request_id, reason)))
+        if request_id == "missing":
+            raise KeyError(f"memory queue request not found: {request_id}")
+        if request_id == "processing":
+            raise ValueError("memory queue request is being processed and cannot be cancelled")
+        return {"request_id": request_id, "status": "cancelled", "op": "write", "batch_id": "write_cancel"}
+
     def list_current_memories(self):
         return [{"memory_id": "Ab12Z9", "memory_body": "旧内容", "minimal_memory": "old->body"}]
 
@@ -564,3 +576,46 @@ def test_index_notes_endpoint_lists_classes_and_keeps_broken_ones(stub_env):
     assert payload["items"][2]["unusable"] is True
     assert ("list_consolidation_categories", ()) in manager.calls
     assert _audit_lines(workspace) == []
+
+
+def test_memory_dream_trigger_endpoint_queues_and_audits(stub_env):
+    workspace, manager, client = stub_env
+
+    response = client.post("/api/memory/dream")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["item"]["status"] == "queued"
+    assert payload["item"]["request_id"] == "dream_1"
+    assert ("trigger_manual_dream", None) in manager.calls
+    audit = _audit_lines(workspace)
+    assert audit[-1]["action"] == "trigger_dream"
+    assert audit[-1]["request_id"] == "dream_1"
+
+
+def test_memory_queue_cancel_endpoint_cancels_and_audits(stub_env):
+    workspace, manager, client = stub_env
+
+    response = client.post("/api/memory/queue/write_1/cancel", json={"reason": "manual-ui"})
+
+    assert response.status_code == 200
+    item = response.json()["item"]
+    assert item["status"] == "cancelled"
+    assert item["request_id"] == "write_1"
+    assert ("cancel_queue_request", ("write_1", "manual-ui")) in manager.calls
+    audit = _audit_lines(workspace)
+    assert audit[-1]["action"] == "cancel_queue_request"
+    assert audit[-1]["reason"] == "manual-ui"
+
+
+def test_memory_queue_cancel_maps_missing_to_404_and_processing_to_409(stub_env):
+    workspace, manager, client = stub_env
+
+    missing = client.post("/api/memory/queue/missing/cancel")
+    assert missing.status_code == 404
+    assert missing.json()["detail"]["code"] == "memory_queue_not_found"
+
+    processing = client.post("/api/memory/queue/processing/cancel")
+    assert processing.status_code == 409
+    assert processing.json()["detail"]["code"] == "memory_queue_processing"

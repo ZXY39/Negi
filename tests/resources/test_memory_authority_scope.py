@@ -71,25 +71,29 @@ def _dream_batch(memory_id: str) -> object:
         items=[
             module.MemoryQueueRequest(
                 op="dream", decision_source="self",
-                payload_text=json.dumps({"memory_ids": [memory_id], "note_refs": ["note_if"]}, ensure_ascii=False),
+                payload_text=json.dumps(
+                    {
+                        "mode": "full",
+                        "scope_key": "full",
+                        "memory_ids": [memory_id],
+                        "note_refs": ["note_if"],
+                        "base_revision": 0,
+                    },
+                    ensure_ascii=False,
+                ),
                 created_at="2026-11-26T09:00:00+08:00", request_id="authority_dream",
             )
         ],
     )
 
 
-def _session(manager, op: str = "write", *, dream_ids: set[str] | None = None):
+def _session(manager, op: str = "write"):
     module = _module()
-    session = module._MemoryToolSession(
+    return module._MemoryToolSession(
         snapshot_text=manager.snapshot_text(), notes_dir=manager.notes_dir,
         index_dir=manager.index_dir, batch_op=op,
         owned_note_refs_fn=lambda: set(manager._memory_repo.owned_note_refs()),
     )
-    if op == "dream":
-        session.dream_context_loaded = True
-        session.dream_memory_ids = set(dream_ids or set())
-        session.dream_note_refs = set()
-    return session
 
 
 def _tools(manager, session):
@@ -120,7 +124,7 @@ def test_row_card_is_shared_by_ordinary_dream_and_read_entry(tmp_path: Path) -> 
         _paint(manager)
         ordinary = manager._memory_agent_user_prompt(batch=_batch(), snapshot_text=manager.snapshot_text(), repair_reason="")
         dream = manager._dream_agent_user_prompt(batch=_dream_batch(memory_id), snapshot_text=manager.snapshot_text(), repair_reason="")
-        session = _session(manager, "dream", dream_ids={memory_id})
+        session = _session(manager, "dream")
         entry = _tools(manager, session)["memory_read_entry"].invoke({"line": 1})
 
         for text in (ordinary, dream):
@@ -268,14 +272,14 @@ def test_scope_match_and_replacement_are_machine_checked(tmp_path: Path) -> None
         manager.close()
 
 
-def test_dream_rejects_operator_request_and_out_of_cluster_replacement(tmp_path: Path) -> None:
+def test_dream_rejects_operator_request_and_accepts_any_replacement(tmp_path: Path) -> None:
     manager = _manager(tmp_path)
     try:
         first = _add(manager, "cluster old", created_at="2026-11-18T10:00:00+08:00")
         second = _add(manager, "cluster new", created_at="2026-11-19T10:00:00+08:00")
         outside = _add(manager, "outside", created_at="2026-11-20T10:00:00+08:00")
         _paint(manager)
-        session = _session(manager, "dream", dream_ids={first, second})
+        session = _session(manager, "dream")
         tools = _tools(manager, session)
         operator = _reason(1, 2, "operator_request")
         refused = tools["memory_apply_batch"].invoke({"deletes": [1], "delete_reasons": [operator]})
@@ -283,10 +287,11 @@ def test_dream_rejects_operator_request_and_out_of_cluster_replacement(tmp_path:
         assert "operator_request" in json.dumps(refused["errors"], ensure_ascii=False)
 
         outside_reason = _reason(1, 3)
-        refused = tools["memory_apply_batch"].invoke({"deletes": [1], "delete_reasons": [outside_reason]})
-        assert refused["ok"] is False
-        assert "cluster" in json.dumps(refused["errors"], ensure_ascii=False)
-        assert outside in {row["memory_id"] for row in manager._memory_repo.list_memories()}
+        accepted = tools["memory_apply_batch"].invoke({"deletes": [1], "delete_reasons": [outside_reason]})
+        assert accepted["ok"] is True, accepted
+        assert accepted["preview"]["deletion_impact"][0]["target_memory_id"] == first
+        assert accepted["preview"]["deletion_impact"][0]["replacement_memory_id"] == outside
+        assert second in {row["memory_id"] for row in manager._memory_repo.list_memories()}
     finally:
         manager.close()
 

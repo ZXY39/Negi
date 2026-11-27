@@ -634,7 +634,7 @@
                 <header class="content-header resource-header compact-resource-header">
                     <div class="resource-header-title">
                         <h1>记忆管理</h1>
-                        <p class="subtitle">查看未出队记忆队列与已成功处理批次；队列与终态记录只读，失败记忆区提供受门控的重试 / 放弃操作。</p>
+                        <p class="subtitle">查看未出队记忆队列与已成功处理批次；队列卡片可取消未处理请求，失败记忆区提供受门控的重试 / 放弃操作。</p>
                     </div>
                     <div class="resource-header-actions compact-resource-header-actions">
                         <label class="memory-scope-setting" for="memory-scope-select">
@@ -644,7 +644,8 @@
                             </select>
                         </label>
                         <button id="memory-view-current-btn" class="toolbar-btn ghost" type="button">查看记忆</button>
-                        <button id="memory-index-notes-btn" class="toolbar-btn ghost" type="button">归并记忆</button>
+                        <button id="memory-index-notes-btn" class="toolbar-btn ghost" type="button">已归并记忆</button>
+                        <button id="memory-dream-btn" class="toolbar-btn ghost" type="button">整理记忆</button>
                         <button id="memory-refresh-btn" class="toolbar-btn ghost" type="button">刷新</button>
                     </div>
                 </header>
@@ -1052,18 +1053,14 @@
                         aria-modal="true" aria-labelledby="feed-target-name" tabindex="-1">
                         <div class="panel-header">
                             <h2 id="feed-target-name">当前节点</h2>
-                        </div>
-
-                        <div id="agent-detail-view" class="agent-detail-view" style="display: none;">
-                            <div class="agent-detail-header">
-                                <div class="agent-detail-header-copy">
-                                    <h3 id="ad-role" hidden>节点</h3>
-                                </div>
+                            <div class="panel-header-actions">
                                 <span class="status-badge" id="ad-status">STATUS</span>
                                 <button class="toolbar-btn ghost small" id="close-agent-btn" type="button"
                                     data-modal-close>关闭</button>
                             </div>
+                        </div>
 
+                        <div id="agent-detail-view" class="agent-detail-view" style="display: none;">
                             <div id="task-node-model-retry-toast" class="model-retry-toast task-node-model-retry-toast"
                                 role="status" aria-live="polite" aria-hidden="true" hidden>
                                 <span class="model-retry-toast-dot" aria-hidden="true"></span>

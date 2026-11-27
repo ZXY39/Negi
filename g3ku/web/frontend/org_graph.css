@@ -1128,6 +1128,7 @@ textarea {
 .panel-header-actions {
     display: flex;
     align-items: center;
+    flex: 0 0 auto;
     gap: var(--space-3);
 }
 
@@ -1943,36 +1944,6 @@ textarea {
     display: flex;
     flex-direction: column;
     gap: var(--space-4);
-}
-
-.agent-detail-header {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: var(--space-3);
-}
-
-.agent-detail-header-copy {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    min-width: 0;
-    flex: 1 1 280px;
-}
-
-.agent-detail-header h3 {
-    font-size: 1.05rem;
-    font-weight: 700;
-    min-width: 0;
-    max-width: 100%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.agent-detail-subtitle {
-    font-size: 0.8rem;
-    color: var(--text-secondary);
 }
 
 .agent-detail-section {
@@ -13139,6 +13110,43 @@ textarea {
     height: 15px;
 }
 
+/* 队列卡片右上角的取消叉号：未处理请求可取消，处理中的禁用 */
+.memory-queue-cancel-btn {
+    width: 24px;
+    height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, #ef4444 36%, var(--border-color));
+    background: color-mix(in srgb, #ef4444 10%, var(--bg-panel));
+    color: color-mix(in srgb, #ef4444 72%, var(--text-primary));
+    cursor: pointer;
+    flex: 0 0 auto;
+    transition: background 0.16s ease, border-color 0.16s ease;
+}
+
+.memory-queue-cancel-btn:hover:not(:disabled) {
+    background: color-mix(in srgb, #ef4444 22%, var(--bg-panel));
+    border-color: color-mix(in srgb, #ef4444 58%, var(--border-color));
+}
+
+.memory-queue-cancel-btn:focus-visible {
+    outline: 2px solid color-mix(in srgb, #ef4444 55%, transparent);
+    outline-offset: 2px;
+}
+
+.memory-queue-cancel-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.memory-queue-cancel-btn svg {
+    width: 13px;
+    height: 13px;
+}
+
 /* 失败记忆详情抽屉底部操作区 */
 .memory-detail-preview-actions {
     display: flex;
@@ -16903,7 +16911,6 @@ a.artifact-item-link:focus-visible {
 .content-header .task-depth-setting-main,
 #view-skills .content-header .resource-select-trigger,
 #view-tools .content-header .resource-select-trigger,
-#view-tasks-list .content-header .resource-select-trigger,
 #view-tasks-list .content-header select.task-depth-select {
     min-height: 40px;
     padding: 0 var(--ui-space-3);

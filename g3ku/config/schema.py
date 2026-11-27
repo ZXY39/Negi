@@ -850,13 +850,12 @@ class MemoryAssemblyConfig(Base):
 
 
 class MemoryDreamConfig(Base):
-    """Incremental memory-organization mode controls."""
+    """Full-library memory-organization mode controls."""
 
     enabled: bool = False
     trigger_changes: int = Field(default=20, ge=1)
     min_interval_seconds: int = Field(default=60, ge=0)
     max_interval_seconds: int = Field(default=0, ge=0)
-    cluster_window_ratio: float = Field(default=0.5, gt=0.0, le=1.0)
     state_file: str = "memory/dream_state.json"
 
 
