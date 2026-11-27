@@ -140,7 +140,7 @@ class ApiCore {
             case "memory_queue_not_found":
                 return "未找到对应的队列请求，可能已被处理，请刷新列表。";
             case "memory_queue_processing":
-                return "这条请求正在处理中，无法取消；请等它结束后再操作。";
+                return "这条请求的状态刚发生变化，请刷新列表后重试。";
             case "memory_queue_cancel_failed":
                 return "队列请求取消未成功，请稍后重试。";
             case "memory_admin_mutation_disabled":

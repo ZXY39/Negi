@@ -252,7 +252,7 @@ async def test_cancel_pending_queue_request_drops_it_and_records_terminal(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_cancel_processing_request_is_refused_and_missing_raises(tmp_path: Path) -> None:
+async def test_cancel_processing_request_flags_cooperative_abort_and_missing_raises(tmp_path: Path) -> None:
     module = _module()
     manager = _manager(tmp_path)
     try:
@@ -267,12 +267,74 @@ async def test_cancel_processing_request_is_refused_and_missing_raises(tmp_path:
             )
         )
 
-        with pytest.raises(ValueError):
-            await manager.cancel_queue_request("write_processing")
-        assert len(manager._read_queue_requests()) == 1
+        result = await manager.cancel_queue_request("write_processing")
+
+        assert result["status"] == "cancel_requested"
+        rows = manager._read_queue_requests()
+        assert len(rows) == 1
+        assert rows[0].cancel_requested is True
+        assert manager._batch_cancel_requested(["write_processing"]) is True
+        assert manager._batch_cancel_requested(["other"]) is False
 
         with pytest.raises(KeyError):
             await manager.cancel_queue_request("missing")
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_finalize_cancelled_batch_records_terminal_without_commit(tmp_path: Path) -> None:
+    module = _module()
+    manager = _manager(tmp_path)
+    try:
+        _add(manager, "规则一")
+        _paint(manager)
+        row = module.MemoryQueueRequest(
+            op="write",
+            decision_source="self",
+            payload_text="处理中",
+            created_at="2026-04-25T00:00:01+08:00",
+            request_id="write_processing",
+            status="processing",
+            cancel_requested=True,
+        )
+        await manager._append_queue_request(row)
+        manager._note_live_round(["write_processing"], {"input_tokens": 5, "output_tokens": 2, "cache_read_tokens": 1})
+        batch = module.MemoryBatch(op="write", items=[row])
+
+        report = manager._finalize_cancelled_batch(
+            batch,
+            {"usage": {"input_tokens": 5, "output_tokens": 2, "cache_read_tokens": 1}, "attempt_count": 1},
+            now_iso="2026-11-27T09:00:09+08:00",
+        )
+
+        assert report["status"] == "cancelled"
+        assert manager._read_queue_requests() == []
+        assert "write_processing" in manager._processed_request_ids()
+        assert manager._live_batch_progress == {}
+        ops = [json.loads(line) for line in manager.ops_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+        assert ops[-1]["discard_reason"] == "operator_cancelled"
+        assert "规则一" in manager.snapshot_text()
+    finally:
+        manager.close()
+
+
+def test_queue_projection_exposes_live_progress_for_processing_rows(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    try:
+        manager._live_batch_progress["write_1"] = {
+            "rounds": 3,
+            "usage": {"input_tokens": 100, "output_tokens": 40, "cache_read_tokens": 60},
+        }
+        processing = manager._project_queue_row_for_read(
+            {"request_id": "write_1", "op": "write", "status": "processing", "payload_text": "x"}
+        )
+        assert processing["live_progress"]["rounds"] == 3
+        assert processing["live_progress"]["usage"]["input_tokens"] == 100
+        pending = manager._project_queue_row_for_read(
+            {"request_id": "write_1", "op": "write", "status": "pending", "payload_text": "x"}
+        )
+        assert "live_progress" not in pending
     finally:
         manager.close()
 

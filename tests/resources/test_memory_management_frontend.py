@@ -1854,22 +1854,32 @@ def test_memory_queue_cards_carry_cancel_cross_and_toolbar_has_dream_button() ->
         const __ex = context.__testExports;
         __ex.S.memoryQueueCancelBusy = "";
         __out.pending = __ex.renderMemoryQueueCard({ request_id: "write_1", op: "write", status: "pending", payload_text: "记住甲", created_at: "2026-11-27T09:00:00+08:00" });
-        __out.processing = __ex.renderMemoryQueueCard({ request_id: "write_2", op: "write", status: "processing", payload_text: "记住乙", created_at: "2026-11-27T09:00:00+08:00" });
+        __out.processing = __ex.renderMemoryQueueCard({ request_id: "write_2", op: "write", status: "processing", payload_text: "记住乙", created_at: "2026-11-27T09:00:00+08:00", live_progress: { rounds: 4, usage: { input_tokens: 1200, output_tokens: 300, cache_read_tokens: 800 } } });
         """,
         ["renderMemoryQueueCard", "S"],
     )
     pending = str(result["pending"])
     processing = str(result["processing"])
+    # 取消按钮在右下角 footer，不再是头部叉号
+    assert "memory-card-footer" in pending
     assert 'data-memory-queue-cancel="write_1"' in pending
-    assert "memory-queue-cancel-btn" in pending
-    assert 'data-lucide="x"' in pending
+    assert ">取消请求</button>" in pending
+    assert "data-lucide=\"x\"" not in pending
     pending_btn = pending.split('data-memory-queue-cancel="write_1"')[1].split("</button>")[0]
     assert " disabled" not in pending_btn
+    # 处理中：按钮为「取消处理」且可点，头部显示实时轮次/token 而非来源文案
+    assert 'data-memory-queue-cancel="write_2"' in processing
+    assert ">取消处理</button>" in processing
     processing_btn = processing.split('data-memory-queue-cancel="write_2"')[1].split("</button>")[0]
-    assert " disabled" in processing_btn
+    assert " disabled" not in processing_btn
+    assert "第 4 轮 · 入 1200 / 出 300 / 缓存 800" in processing
+    assert "工具调用" not in processing
+    assert "memory-card-live" in processing
 
     css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
     assert ".memory-queue-cancel-btn {" in css
+    assert ".memory-card-footer {" in css
+    assert ".memory-card-live {" in css
     app_js = _memory_frontend_source()
     assert "function runMemoryDreamTrigger()" in app_js
     assert "function runMemoryQueueCancel(" in app_js

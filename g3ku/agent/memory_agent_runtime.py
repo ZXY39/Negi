@@ -358,6 +358,10 @@ class MemoryQueueRequest:
     # The candidate set a consolidate row was built from: retirement scope and the noop
     # gate both read this, because the block prints no ids to recover from its payload.
     consolidation_memory_ids: list[str] = field(default_factory=list)
+    # Operator asked to cancel a request that is already in flight. The running attempt
+    # polls this between model rounds and aborts before committing; a pending request is
+    # dropped outright instead.
+    cancel_requested: bool = False
 
 
 @dataclass(slots=True)
@@ -1717,6 +1721,24 @@ class _MemoryProviderError(RuntimeError):
         self.discard_reason = str(discard_reason or "provider_error").strip()
 
 
+class _MemoryBatchCancelledError(RuntimeError):
+    """操作员取消了一条在飞请求：运行循环在轮间发现标记后抛出，提交前中止。
+
+    与 provider 失败不同，这不是故障：上层写 `operator_cancelled` 终态并出队，
+    不停车、不重试、不给 dream 记 last_error。
+    """
+
+    def __init__(
+        self,
+        *,
+        usage: dict[str, int] | None = None,
+        request_artifacts: list[dict[str, Any]] | None = None,
+    ):
+        super().__init__("memory batch cancelled by operator")
+        self.usage = dict(usage or {})
+        self.request_artifacts = list(request_artifacts or [])
+
+
 class _MemorySqliteRepository:
     def __init__(self, path: Path, *, read_only: bool = False):
         self.path = Path(path)
@@ -2846,6 +2868,9 @@ class MemoryManager:
         # confirm receipt can never carry them; the next turn's user prompt is the
         # first thing the model reads after its notes changed status behind its back.
         self._note_feedback_lines: list[str] = []
+        # Live per-request progress for in-flight batches (rounds + token usage), read by
+        # the queue projection so the operator sees a running sweep's cost in real time.
+        self._live_batch_progress: dict[str, dict[str, Any]] = {}
         self._worker_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._strategy = MemoryStrategyV2(config)
@@ -4584,6 +4609,7 @@ class MemoryManager:
                 for item in list(getattr(request, "consolidation_memory_ids", []) or [])
                 if str(item or "").strip()
             ],
+            cancel_requested=bool(getattr(request, "cancel_requested", False)),
         )
 
     def _read_queue_requests(self) -> list[MemoryQueueRequest]:
@@ -5044,6 +5070,9 @@ class MemoryManager:
         final_text = ""
         try:
             for _ in range(round_limit):
+                if self._batch_cancel_requested(queue_request_ids):
+                    raise _MemoryBatchCancelledError(usage=usage_total, request_artifacts=request_artifacts)
+                self._note_live_round(queue_request_ids, usage_total)
                 request_messages = apply_content_policy(self._memory_request_messages(messages))
                 self._memory_window_guard(
                     runtime_config=runtime_config,
@@ -5057,6 +5086,7 @@ class MemoryManager:
                 self._merge_attempted_model_chain(attempted_chain, self._memory_attempted_refs(response))
                 round_usage = self._extract_usage(response)
                 self._merge_usage(usage_total, round_usage)
+                self._set_live_usage(queue_request_ids, usage_total)
                 artifact = self._persist_memory_request_artifact(
                     phase="agent",
                     batch_op=batch.op,
@@ -7614,11 +7644,13 @@ class MemoryManager:
             return {"ok": True, "status": "queued", "request_id": request.request_id}
 
     async def cancel_queue_request(self, request_id: str, *, reason: str = "manual") -> dict[str, Any]:
-        """Cancel a not-yet-processed queue request: drop it and record a terminal row.
+        """Cancel a queue request: drop a pending one, or flag an in-flight one to abort.
 
         A pending request has applied nothing (the agent commits only after preview +
         confirm), so removing it rolls the intended operation back to before processing.
-        A request already in flight cannot be cancelled mid-run; the caller gets a 409.
+        A request already in flight is flagged `cancel_requested`; the running attempt
+        polls that flag between model rounds and aborts before committing, then finalizes
+        the same `operator_cancelled` terminal row.
         """
         target = str(request_id or "").strip()
         if not target:
@@ -7629,7 +7661,14 @@ class MemoryManager:
             if row is None:
                 raise KeyError(f"memory queue request not found: {target}")
             if str(row.status or "pending").strip() == "processing":
-                raise ValueError("memory queue request is being processed and cannot be cancelled")
+                row.cancel_requested = True
+                self._write_queue_requests(rows)
+                return {
+                    "request_id": target,
+                    "status": "cancel_requested",
+                    "op": row.op,
+                    "batch_id": "",
+                }
             batch = MemoryBatch(op=row.op, items=[row])
             terminal = self._append_terminal_history(
                 batch=batch,
@@ -7645,6 +7684,60 @@ class MemoryManager:
                 "op": row.op,
                 "batch_id": str(terminal.get("batch_id") or "").strip(),
             }
+
+    def _batch_cancel_requested(self, request_ids: list[str]) -> bool:
+        wanted = {str(item or "").strip() for item in list(request_ids or []) if str(item or "").strip()}
+        if not wanted:
+            return False
+        for row in self._read_queue_requests():
+            if row.request_id in wanted and bool(getattr(row, "cancel_requested", False)):
+                return True
+        return False
+
+    def _note_live_round(self, request_ids: list[str], usage: dict[str, int]) -> None:
+        for rid in {str(item or "").strip() for item in list(request_ids or []) if str(item or "").strip()}:
+            prog = self._live_batch_progress.setdefault(rid, {"rounds": 0, "usage": {}})
+            prog["rounds"] = int(prog.get("rounds", 0) or 0) + 1
+            prog["usage"] = dict(usage or {})
+
+    def _set_live_usage(self, request_ids: list[str], usage: dict[str, int]) -> None:
+        for rid in {str(item or "").strip() for item in list(request_ids or []) if str(item or "").strip()}:
+            prog = self._live_batch_progress.setdefault(rid, {"rounds": 0, "usage": {}})
+            prog["usage"] = dict(usage or {})
+
+    def _clear_live_progress(self, request_ids: list[str]) -> None:
+        for rid in {str(item or "").strip() for item in list(request_ids or []) if str(item or "").strip()}:
+            self._live_batch_progress.pop(rid, None)
+
+    def _finalize_cancelled_batch(self, batch: MemoryBatch, result: dict[str, Any], *, now_iso: str) -> dict[str, Any]:
+        """An in-flight batch observed its cancel flag: record terminal, drop, no commit.
+
+        Nothing was committed (the abort happens before `_commit_validated_write`), so the
+        library is already at its pre-processing state. Dream state is left untouched: a
+        cancelled sweep is not a failure and must not set `last_error`.
+        """
+        terminal = self._append_terminal_history(
+            batch=batch,
+            status="discarded",
+            op=batch.op,
+            processed_at=now_iso,
+            discard_reason="operator_cancelled",
+            usage=result.get("usage"),
+            model_chain=result.get("model_chain"),
+            attempted_model_chain=result.get("attempted_model_chain"),
+            attempt_count=int(result.get("attempt_count", 0) or 0),
+        )
+        self._drop_request_ids({item.request_id for item in batch.items})
+        self._clear_live_progress([item.request_id for item in batch.items])
+        return {
+            "ok": True,
+            "status": "cancelled",
+            "op": batch.op,
+            "processed": 0,
+            "request_ids": [item.request_id for item in batch.items],
+            "batch_id": str(terminal.get("batch_id") or "").strip(),
+            "processed_at": now_iso,
+        }
 
     def _settle_dream_batch(self, batch: MemoryBatch | MemoryQueueRequest, *, status: str, now_iso: str) -> None:
         if isinstance(batch, MemoryQueueRequest):
@@ -9537,6 +9630,22 @@ class MemoryManager:
                     model_chain=current_model_chain,
                     lane=lane,
                 )
+            except _MemoryBatchCancelledError as exc:
+                self._merge_usage(total_usage, dict(exc.usage or {}))
+                request_artifacts.extend(list(exc.request_artifacts or []))
+                return {
+                    "validated": None,
+                    "usage": total_usage,
+                    "attempt_count": attempt_index + 1,
+                    "assessed_text": None,
+                    "discard_reason": "cancelled",
+                    "error": "operator cancelled",
+                    "model_chain": list(current_model_chain),
+                    "attempted_model_chain": list(batch_attempted_chain),
+                    "provider_request_ids": self._provider_request_ids_from_artifacts(request_artifacts),
+                    "request_artifact_paths": self._request_artifact_paths(request_artifacts),
+                    "usage_counted_requests": self._usage_counted_request_count(request_artifacts),
+                }
             except _MemoryProviderError as exc:
                 # Provider 层失败不做批内修复重试（几秒内的连续尝试只会撞同一个
                 # 限流/故障窗口），直接带真实错误返回，由上层停车等待成功信号或人工重试。
@@ -9577,6 +9686,7 @@ class MemoryManager:
                     "usage_counted_requests": self._usage_counted_request_count(request_artifacts),
                 }
             self._merge_usage(total_usage, attempt.usage)
+            self._set_live_usage(queue_request_ids, total_usage)
             self._merge_attempted_model_chain(batch_attempted_chain, attempt.attempted_chain)
             request_artifacts.extend(list(attempt.request_artifacts or []))
             try:
@@ -9721,6 +9831,7 @@ class MemoryManager:
                 }
             if str(batch.items[0].status or "pending").strip() != "processing":
                 self._mark_batch_processing(batch.items, effective_now)
+            self._clear_live_progress([item.request_id for item in batch.items])
 
             try:
                 runtime_config, _revision, _changed = get_runtime_config()
@@ -9770,7 +9881,11 @@ class MemoryManager:
             discard_reason = str(result.get("discard_reason") or "").strip()
             effective_model_chain = list(result.get("model_chain") or model_chain)
             attempted_model_chain = list(result.get("attempted_model_chain") or [])
+            if discard_reason == "cancelled":
+                self._clear_live_progress([item.request_id for item in batch.items])
+                return self._finalize_cancelled_batch(batch, result, now_iso=effective_now)
             if discard_reason:
+                self._clear_live_progress([item.request_id for item in batch.items])
                 # 处理失败不再写 durable discarded 终态并删行（数据永久丢失），
                 # 而是移入失败停车区 memory/failed.jsonl：
                 # - provider_error（限流/超时等瞬时错误）→ 队列下次成功应用时自动重入队尾
@@ -9825,9 +9940,13 @@ class MemoryManager:
             # worker 只有 `except Exception: continue`。队列行若在提交前就删掉，抛错时
             # 这批"记住/修改/忘记"既没停车记录也没终态行，无痕消失——库里回滚了、请求
             # 却没了。反向窗口（提交成功、销行前崩溃）只是一次重放，代价小一个量级。
+            if self._batch_cancel_requested([item.request_id for item in batch.items]):
+                self._clear_live_progress([item.request_id for item in batch.items])
+                return self._finalize_cancelled_batch(batch, result, now_iso=effective_now)
             self._commit_validated_write(result["validated"])
             self._settle_dream_batch(batch, status="applied", now_iso=self._now_iso())
             self._drop_request_ids({item.request_id for item in batch.items})
+            self._clear_live_progress([item.request_id for item in batch.items])
             # 成功信号：清掉本批 request_id 对应的停车记录（终于成功了），
             # 并把停车区里最早的一条 provider/瞬时错误批次重新入队尾（无成功信号则永不自动重试）。
             self._purge_failed_records_for_request_ids({item.request_id for item in batch.items})
@@ -10496,6 +10615,13 @@ class MemoryManager:
         projected["payload_char_count"] = window["char_count"]
         if str(row.get("op") or "").strip().lower() == "dream":
             projected["dream_scope"] = self.dream_scope_view(str(row.get("payload_text") or ""))
+        if str(row.get("status") or "").strip().lower() == "processing":
+            prog = getattr(self, "_live_batch_progress", {}).get(str(row.get("request_id") or "").strip())
+            if prog:
+                projected["live_progress"] = {
+                    "rounds": int(prog.get("rounds", 0) or 0),
+                    "usage": dict(prog.get("usage") or {}),
+                }
         return projected
 
     def _locate_memory_payload_text(self, kind: str, key: str, request_id: str) -> tuple[str, str]:
