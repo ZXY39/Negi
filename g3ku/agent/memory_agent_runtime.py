@@ -272,9 +272,9 @@ _MEMORY_WINDOW_SPLIT_RATIO = 0.5
 COMPRESSIBLE_SACRIFICE_SHARE_NUM = 7
 COMPRESSIBLE_SACRIFICE_SHARE_DEN = 10
 
-# 全量 dream 一轮要扫全部常驻行并逐份读 note，模型需要的工具轮数比普通批次多；
-# 上限按 memory 角色的 max_iterations 翻倍，不另立一个配置项。
-_DREAM_ROUND_LIMIT_MULTIPLIER = 2
+# 全量 dream 一轮要扫全部常驻行并逐份读 note，固定给 48 轮工具预算（上限，不随
+# memory 角色 max_iterations 变化）；普通批次沿用后者。
+_DREAM_ROUND_LIMIT = 48
 
 # 主动提交（操作员/CEO 点名要记的）与复核冲刷（运行时按轮次/龄/压缩/边界倒出来的）
 # 是两条车道：前者合批，后者恒单行。分类只有这一份判据。
@@ -4996,11 +4996,10 @@ class MemoryManager:
         return direct_chat_call, (lambda: None)
 
     def _memory_round_limit(self, runtime_config: Any, *, batch_op: str) -> int:
-        limit = int(runtime_config.get_role_max_iterations("memory") or 8)
-        limit = max(limit, 1)
         if str(batch_op or "").strip().lower() == "dream":
-            limit *= _DREAM_ROUND_LIMIT_MULTIPLIER
-        return limit
+            return _DREAM_ROUND_LIMIT
+        limit = int(runtime_config.get_role_max_iterations("memory") or 8)
+        return max(limit, 1)
 
     async def _run_memory_agent_attempt(
         self,

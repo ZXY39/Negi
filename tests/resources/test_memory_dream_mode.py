@@ -134,15 +134,15 @@ def test_dream_config_defaults_are_disabled_and_change_thresholded() -> None:
     assert not hasattr(cfg.dream, "cluster_window_ratio")
 
 
-def test_dream_round_limit_is_twice_the_memory_role_limit() -> None:
+def test_dream_round_limit_is_fixed_at_48() -> None:
     manager = _module().MemoryManager.__new__(_module().MemoryManager)
     runtime = SimpleNamespace(get_role_max_iterations=lambda role: 4)
     assert manager._memory_round_limit(runtime, batch_op="write") == 4
-    assert manager._memory_round_limit(runtime, batch_op="dream") == 8
+    assert manager._memory_round_limit(runtime, batch_op="dream") == 48
 
     fallback = SimpleNamespace(get_role_max_iterations=lambda role: 0)
     assert manager._memory_round_limit(fallback, batch_op="write") == 8
-    assert manager._memory_round_limit(fallback, batch_op="dream") == 16
+    assert manager._memory_round_limit(fallback, batch_op="dream") == 48
 
 
 @pytest.mark.asyncio

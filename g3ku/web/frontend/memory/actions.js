@@ -179,18 +179,9 @@ async function runMemoryQueueCancel(requestId) {
     if (!target || S.memoryQueueCancelBusy) return;
     S.memoryQueueCancelBusy = target;
     renderMemoryView();
-    showToast({ title: "正在取消请求", text: "", kind: "info", durationMs: 0, persistent: true, spin: true });
     try {
-        const result = await ApiClient.cancelMemoryQueue(target, "manual-ui", memoryScopeQuery());
-        const status = String(result?.item?.status || "").trim();
+        await ApiClient.cancelMemoryQueue(target, "manual-ui", memoryScopeQuery());
         if (String(S.memoryDetailPreview?.key || "").trim() === target) closeMemoryDetailPreview();
-        showToast({
-            title: status === "cancel_requested" ? "已请求取消处理" : "已取消",
-            text: status === "cancel_requested"
-                ? "会在当前步骤结束后停止，本次修改回滚到处理前；卡片消失即已停止。"
-                : "这条请求已出队、不再处理，本次记忆操作回滚到处理前。",
-            kind: "success",
-        });
         await loadMemoryView({ force: true, quiet: true });
     } catch (error) {
         showToast({ title: "取消失败", text: error?.message || "操作未成功，请稍后重试", kind: "error", durationMs: 5000 });
