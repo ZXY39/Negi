@@ -96,7 +96,7 @@ class _StubMemoryManager:
         if request_id == "missing":
             raise KeyError(f"memory queue request not found: {request_id}")
         if request_id == "processing":
-            raise ValueError("memory queue request is being processed and cannot be cancelled")
+            return {"request_id": request_id, "status": "cancel_requested", "op": "write", "batch_id": ""}
         return {"request_id": request_id, "status": "cancelled", "op": "write", "batch_id": "write_cancel"}
 
     def list_current_memories(self):
@@ -609,7 +609,7 @@ def test_memory_queue_cancel_endpoint_cancels_and_audits(stub_env):
     assert audit[-1]["reason"] == "manual-ui"
 
 
-def test_memory_queue_cancel_maps_missing_to_404_and_processing_to_409(stub_env):
+def test_memory_queue_cancel_maps_missing_to_404_and_processing_to_cooperative(stub_env):
     workspace, manager, client = stub_env
 
     missing = client.post("/api/memory/queue/missing/cancel")
@@ -617,5 +617,5 @@ def test_memory_queue_cancel_maps_missing_to_404_and_processing_to_409(stub_env)
     assert missing.json()["detail"]["code"] == "memory_queue_not_found"
 
     processing = client.post("/api/memory/queue/processing/cancel")
-    assert processing.status_code == 409
-    assert processing.json()["detail"]["code"] == "memory_queue_processing"
+    assert processing.status_code == 200
+    assert processing.json()["item"]["status"] == "cancel_requested"

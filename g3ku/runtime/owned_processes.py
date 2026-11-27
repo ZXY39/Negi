@@ -234,6 +234,37 @@ def find(scope: str, pid: int) -> dict[str, Any] | None:
     return None
 
 
+def list_session_owned() -> list[dict[str, Any]]:
+    """所有会话域的登记条目（`task_id` 为空），供会话道全域退出观察器清扫。
+
+    读面**不 prune**：死条目是"还没交代"的凭证，删掉就没人能报它了。
+    无法解析的条目照旧清掉。节点条目（有 `task_id`）不在这里，它们由
+    认领时挂上的无句柄观察器负责。
+    """
+    root = _owned_root()
+    if not root.exists():
+        return []
+    entries: list[dict[str, Any]] = []
+    for directory in sorted(path for path in root.iterdir() if path.is_dir()):
+        for path in sorted(directory.glob(f"*{_ENTRY_SUFFIX}")):
+            entry = _load_entry(path)
+            if entry is None:
+                path.unlink(missing_ok=True)
+                continue
+            if str(entry.get("task_id") or "").strip():
+                continue
+            if not str(entry.get("session_key") or "").strip():
+                continue
+            try:
+                pid = int(entry.get("pid") or 0)
+            except (TypeError, ValueError):
+                continue
+            if pid <= 0:
+                continue
+            entries.append(entry)
+    return entries
+
+
 def drop(scope: str, pid: int) -> None:
     directory = _scope_dir(scope, create=False)
     if not directory.exists():
@@ -296,6 +327,98 @@ def mark_notice(
     if not keep_entry:
         path.unlink(missing_ok=True)
     return True
+
+
+def write_swept_notice(
+    *,
+    scope: str,
+    session_key: str,
+    task_id: str = "",
+    node_id: str = "",
+    actor_role: str = "",
+    command: str,
+    descendants: list[dict[str, Any]],
+    exit_reason: str = "swept_by_exec_cancel",
+) -> str:
+    """记一条"整树被前台调用取消带走"的聚合凭证。
+
+    取消路径不产生工具结果，逐个 pid 写 notice 会在启动时刷屏；这里一次取消
+    只落一条记录，`swept_pids` 带全部被扫进程。消费口（服务 startup）按节点/
+    会话分流投递后删除。没有任何后代时不写文件，返回空串。
+    """
+    pids: list[dict[str, Any]] = []
+    for item in descendants or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            pid = int(item.get("pid") or 0)
+        except (TypeError, ValueError):
+            continue
+        if pid <= 0:
+            continue
+        pids.append({"pid": pid, "name": str(item.get("name") or "")})
+    if not pids:
+        return ""
+    sweep_id = uuid.uuid4().hex[:12]
+    now = time.strftime("%Y-%m-%dT%H:%M:%S")
+    entry = {
+        "swept": True,
+        "sweep_id": sweep_id,
+        "pid": 0,
+        "create_time": 0.0,
+        "cmd": str(command or ""),
+        "log_path": "",
+        "scope": str(scope or ""),
+        "session_key": str(session_key or ""),
+        "task_id": str(task_id or ""),
+        "node_id": str(node_id or ""),
+        "actor_role": str(actor_role or ""),
+        "owner_pid": os.getpid(),
+        "started_at": now,
+        "exited_at": now,
+        "exit_reason": str(exit_reason or "swept_by_exec_cancel"),
+        "swept_pids": pids,
+    }
+    directory = _scope_dir(scope, create=True)
+    notice_path = directory / f"swept-{sweep_id}.notice"
+    tmp_path = notice_path.with_name(notice_path.name + ".tmp")
+    try:
+        tmp_path.write_text(json.dumps(entry, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp_path, notice_path)
+    except OSError:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return ""
+    return str(notice_path)
+
+
+def swept_notice_text(entry: dict[str, Any]) -> str:
+    """节点面的"取消带走整树"告知：英文、稳定（不含相对时长），重试同文才幂等。"""
+    pids = [item for item in (entry.get("swept_pids") or []) if isinstance(item, dict)]
+    count = len(pids)
+    lines = [
+        f"Foreground exec processes were swept when the call was cancelled: {count} process(es)."
+    ]
+    cmd = str(entry.get("cmd") or "").strip()
+    if cmd:
+        lines.append(f"Command: {cmd}")
+    shown: list[str] = []
+    for item in pids[:12]:
+        try:
+            pid = int(item.get("pid") or 0)
+        except (TypeError, ValueError):
+            continue
+        name = str(item.get("name") or "").strip()
+        shown.append(f"pid={pid}" + (f" ({name})" if name else ""))
+    if shown:
+        more = f" (+{count - 12} more)" if count > 12 else ""
+        lines.append(f"Swept: {', '.join(shown)}{more}.")
+    lines.append(
+        "They are gone. If any of them must keep running, restart it with exec background=true."
+    )
+    return "\n".join(lines)
 
 
 def list_notices() -> list[dict[str, Any]]:

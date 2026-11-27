@@ -207,6 +207,27 @@ function renderMemoryMergedChip(item) {
     return `<span class="memory-merged-chip" title="这一批合并了 ${count} 条队列请求">合并 ${count} 条</span>`;
 }
 
+function memoryProcessedDurationText(item) {
+    let ms = Number(item?.processing_duration_ms);
+    if (!Number.isFinite(ms) || ms < 0) {
+        const start = Date.parse(String(item?.started_at || ""));
+        const end = Date.parse(String(item?.processed_at || ""));
+        ms = Number.isFinite(start) && Number.isFinite(end) ? Math.max(end - start, 0) : null;
+    }
+    if (ms === null || !Number.isFinite(ms)) return "-";
+    const totalSeconds = Math.max(0, Math.round(ms / 1000));
+    if (totalSeconds < 1) return "不到 1 秒";
+    if (totalSeconds < 60) return `${totalSeconds} 秒`;
+    if (totalSeconds < 3600) {
+        const minutes = Math.floor(totalSeconds / 60);
+        const seconds = totalSeconds % 60;
+        return seconds ? `${minutes} 分 ${seconds} 秒` : `${minutes} 分`;
+    }
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    return minutes ? `${hours} 时 ${minutes} 分` : `${hours} 时`;
+}
+
 function memoryProcessedIsNoChange(item) {
     const normalized = String(item?.status || "").trim().toLowerCase();
     // 容量停车那一级一行都没写：载荷原文留在失败区，台账这行只是把"停在哪一级"记下来。
@@ -1263,7 +1284,7 @@ function openMemoryDetailPreview(kind, key) {
             { label: "批次", value: normalizedKey },
             { label: "状态", value: memoryProcessedStatusLabel(source) || "-" },
             { label: "操作", value: memoryProcessedOpLabel(source) || "-" },
-            { label: "处理时间", value: formatCompactTime(source?.processed_at) || String(source?.processed_at || "-") },
+            { label: "处理时长", value: memoryProcessedDurationText(source) },
             { label: "模型链", value: memoryAttemptedChainText(source) },
             { label: "请求数", value: memoryUsageCountedRequestText(source) },
             ...(memoryMergedRequestCount(source)
@@ -2088,14 +2109,30 @@ function memoryQueueSourceLabel(item) {
     return "自动触发";
 }
 
+function memoryQueueLiveProgressText(item) {
+    const prog = item?.live_progress || {};
+    const usage = prog.usage || {};
+    const rounds = Number(prog.rounds || 0) || 0;
+    const input = Number(usage.input_tokens || 0) || 0;
+    const output = Number(usage.output_tokens || 0) || 0;
+    const cache = Number(usage.cache_read_tokens || 0) || 0;
+    return `第 ${rounds} 轮 · 入 ${input} / 出 ${output} / 缓存 ${cache}`;
+}
+
 function renderMemoryQueueCard(item) {
     const requestId = String(item?.request_id || "").trim();
-    const statusText = memoryStatusLabel(item?.status);
-    const createdAt = formatCompactTime(item?.created_at) || String(item?.created_at || "");
     const isProcessing = String(item?.status || "").trim().toLowerCase() === "processing";
+    const cancelRequested = isProcessing && Boolean(item?.cancel_requested);
+    const statusText = cancelRequested ? "取消中" : memoryStatusLabel(item?.status);
+    const createdAt = formatCompactTime(item?.created_at) || String(item?.created_at || "");
     const cancelBusy = String(S.memoryQueueCancelBusy || "").trim();
-    const cancelDisabled = isProcessing || (cancelBusy && cancelBusy === requestId);
-    const cancelTitle = isProcessing ? "正在处理，无法取消" : "取消这条记忆请求（不再处理）";
+    const cancelDisabled = cancelRequested || (cancelBusy && cancelBusy === requestId);
+    const cancelLabel = cancelRequested ? "取消中" : (isProcessing ? "取消处理" : "取消请求");
+    const cancelTitle = cancelRequested
+        ? "已请求取消：当前步骤结束后停止，本次修改回滚到处理前"
+        : (isProcessing
+            ? "取消处理：当前步骤结束后停止，本次修改回滚到处理前"
+            : "取消这条记忆请求（不再处理）");
     const dreamScope = memoryDreamScopeOf(item);
     let preview;
     if (memoryIsDreamItem(item) && dreamScope) {
@@ -2109,20 +2146,23 @@ function renderMemoryQueueCard(item) {
             ? `${body.slice(0, MEMORY_QUEUE_BODY_CHARS)}…`
             : body;
     }
+    const headMeta = isProcessing
+        ? `<span class="memory-card-live" title="实时轮次与 token 消耗">${esc(memoryQueueLiveProgressText(item))}</span>`
+        : `<span class="memory-card-source">${esc(memoryQueueSourceLabel(item))}</span>`;
     return `
         <article class="memory-card memory-card-queue" data-memory-card="queue" data-memory-detail-open="queue" data-memory-detail-key="${esc(requestId)}" role="button" tabindex="0" aria-label="打开队列请求详情">
             <div class="memory-card-head">
                 <div class="memory-card-minimal-status">
                     <span class="status-badge" data-status="${esc(String(item?.status || "pending"))}">${esc(statusText)}</span>
                 </div>
-                <span class="memory-card-source">${esc(memoryQueueSourceLabel(item))}</span>
+                ${headMeta}
                 <span class="memory-card-time">${esc(createdAt || "-")}</span>
-                <button type="button" class="memory-queue-cancel-btn" data-memory-queue-cancel="${esc(requestId)}" title="${esc(cancelTitle)}" aria-label="取消记忆请求 ${esc(requestId)}"${cancelDisabled ? " disabled" : ""}>
-                    <i data-lucide="x" aria-hidden="true"></i>
-                </button>
                 <span class="memory-card-arrow" aria-hidden="true">›</span>
             </div>
             <p class="memory-card-body">${esc(preview || "（无正文）")}</p>
+            <div class="memory-card-footer">
+                <button type="button" class="memory-queue-cancel-btn" data-memory-queue-cancel="${esc(requestId)}" title="${esc(cancelTitle)}" aria-label="${esc(cancelLabel)} ${esc(requestId)}"${cancelDisabled ? " disabled" : ""}>${esc(cancelLabel)}</button>
+            </div>
         </article>
     `;
 }
@@ -2177,10 +2217,15 @@ function requestMemoryFailedDiscard(failedId) {
 function requestMemoryQueueCancel(requestId) {
     const target = String(requestId || "").trim();
     if (!target) return;
+    const item = (Array.isArray(S.memoryQueueItems) ? S.memoryQueueItems : [])
+        .find((entry) => String(entry?.request_id || "").trim() === target) || null;
+    const isProcessing = String(item?.status || "").trim().toLowerCase() === "processing";
     openConfirm({
-        title: "取消记忆请求",
-        text: "取消后这条请求立即从队列删除、不再处理，本次记忆操作回滚到处理前，并写入已处理历史的废弃终态记录。确定取消吗？",
-        confirmLabel: "取消请求",
+        title: isProcessing ? "取消处理" : "取消记忆请求",
+        text: isProcessing
+            ? "取消后会在当前步骤结束时停止这次处理，本次修改回滚到处理前（不写入记忆），并写入废弃终态记录。确定取消处理吗？"
+            : "取消后这条请求立即从队列删除、不再处理，本次记忆操作回滚到处理前，并写入已处理历史的废弃终态记录。确定取消吗？",
+        confirmLabel: isProcessing ? "取消处理" : "取消请求",
         confirmKind: "danger",
         onConfirm: () => void runMemoryQueueCancel(target),
     });

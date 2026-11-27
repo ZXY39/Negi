@@ -1015,11 +1015,15 @@ def tool_job_lines(
         timeout_text = f"{timeout:.0f}s" if timeout > 0 else "its timeout"
         header = f"- {subject} timed out after {timeout_text}."
     elif status == "interrupted":
-        header = (
-            f"- {subject} was interrupted by the project process "
-            f"restart after {elapsed:.0f}s. It may have stopped or may still be running; inspect "
-            "the result/log before retrying."
-        )
+        if is_process:
+            # 无句柄观察道只知道"进程不在了"，不知道死因与退出码；不冒充重启中断。
+            header = f"- {subject} is no longer running (exit code unavailable)."
+        else:
+            header = (
+                f"- {subject} was interrupted by the project process "
+                f"restart after {elapsed:.0f}s. It may have stopped or may still be running; inspect "
+                "the result/log before retrying."
+            )
     elif status == "stopped_by_user":
         header = (
             f"- {subject} was stopped by the user (用户手动停止) "
