@@ -121,7 +121,7 @@ def test_existing_sections_migrate_as_unknown_and_appear_in_note_index(tmp_path:
         rows = manager._memory_repo.list_note_sections("ordinary:note_sections")
         assert rows and all(row["status"] == "unknown" for row in rows)
         assert all(row["decision_at"] == "" for row in rows)
-        index = {item["ref"]: item for item in manager._memory_note_index()}["note_sections"]
+        index = {item["ref"]: item for item in manager._memory_note_index(detail=True)}["note_sections"]
         assert {item["section_key"] for item in index["sections"]} >= {"标题 > 旧口径", "标题 > 新口径"}
         assert all(item["status"] == "unknown" for item in index["sections"])
         old_section = next(item for item in index["sections"] if item["section_key"] == "标题 > 旧口径")
@@ -409,8 +409,9 @@ def test_ordinary_prompt_and_dream_tools_expose_related_sections(tmp_path: Path)
         session = _session(manager, "dream")
         tools = _tools(manager, session)
         index = {item["ref"]: item for item in tools["memory_note_index"].invoke({})}["note_sections"]
-        assert {item["section_key"] for item in index["sections"]} >= {"A", "B"}
-        assert all(item["status"] == "unknown" for item in index["sections"])
+        assert "sections" not in index
+        assert "section_review_candidates" not in index
+        assert index["section_count"] == 2
         notes = tools["memory_read_notes"].invoke({"refs": ["note_sections"]})
         assert {item["section_key"] for item in notes["section_meta"]["note_sections"]} >= {"A", "B"}
     finally:

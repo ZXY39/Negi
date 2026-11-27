@@ -296,7 +296,7 @@ def test_dream_rejects_operator_request_and_accepts_any_replacement(tmp_path: Pa
         manager.close()
 
 
-def test_rewrite_can_keep_minimal_memory_only_when_body_is_unchanged(tmp_path: Path) -> None:
+def test_rewrite_keeps_minimal_when_unchanged_and_falls_back_when_changed(tmp_path: Path) -> None:
     manager = _manager(tmp_path)
     try:
         memory_id = _add(manager, "same body with enough length")
@@ -312,11 +312,21 @@ def test_rewrite_can_keep_minimal_memory_only_when_body_is_unchanged(tmp_path: P
              "note_upserts": {"note_same": "detail\n"}}
         )
         assert kept["ok"] is True, kept
+        assert tools["memory_apply_confirm"].invoke({})["ok"] is True
+        kept_validated = manager._validate_candidate_state(
+            batch=_batch(), before_text=manager.snapshot_text(), session=session,
+        )
+        assert kept_validated.rewrites[0]["minimal_memory"] == "same->summary"
+
         changed = tools["memory_apply_batch"].invoke(
             {"rewrites": [{"line": 1, "content": "changed body"}]}
         )
-        assert changed["ok"] is False
-        assert "minimal_memory" in json.dumps(changed["errors"], ensure_ascii=False)
+        assert changed["ok"] is True, changed
+        assert tools["memory_apply_confirm"].invoke({})["ok"] is True
+        changed_validated = manager._validate_candidate_state(
+            batch=_batch(), before_text=manager.snapshot_text(), session=session,
+        )
+        assert changed_validated.rewrites[0]["minimal_memory"] == "changed body"
     finally:
         manager.close()
 

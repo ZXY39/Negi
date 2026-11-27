@@ -1841,6 +1841,45 @@ def test_full_dream_rows_render_library_summary_and_trigger_reason() -> None:
     assert '"mode"' not in queue_html
 
 
+def test_dream_phase_progress_and_partial_plan_summary_are_visible() -> None:
+    result = _run_app_script(
+        """
+        const __ex = context.__testExports;
+        __ex.S.memoryQueueCancelBusy = "";
+        __out.queue = __ex.renderMemoryQueueCard({
+          request_id: "dream_live",
+          op: "dream",
+          status: "processing",
+          created_at: "2026-11-27T19:00:00+08:00",
+          live_progress: {
+            rounds: 7,
+            usage: { input_tokens: 100, output_tokens: 20, cache_read_tokens: 50 },
+            phase: "apply",
+            group_index: 2,
+            group_total: 5,
+            group_id: "g2",
+          },
+        });
+        __out.processed = __ex.renderMemoryProcessedCard({
+          batch_id: "dream_partial",
+          op: "dream",
+          status: "partially_applied",
+          processed_at: "2026-11-27T19:10:00+08:00",
+          changes: [{ type: "delete", memory_id: "m1", original_content: "old" }],
+          dream_plan_summary: { groups_total: 2, groups_applied: 1, groups_failed: 1 },
+          dream_group_results: [{ group_id: "g1", status: "applied" }],
+        });
+        """,
+        ["renderMemoryQueueCard", "renderMemoryProcessedCard", "S"],
+    )
+    queue_html = str(result["queue"])
+    processed_html = str(result["processed"])
+    assert "落地 2/5" in queue_html
+    assert "已提交的整理组会保留" in queue_html
+    assert "部分应用" in processed_html
+    assert "整理组 1/2" in processed_html
+
+
 def test_memory_queue_cards_carry_cancel_cross_and_toolbar_has_dream_button() -> None:
     html_source = (REPO_ROOT / "g3ku/web/frontend/org_graph.html").read_text(encoding="utf-8")
     memory_html = _memory_view_fragment(html_source)

@@ -181,7 +181,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - cron 定时任务到点不触发、`jobs.json` 停在 `running`/`timeout`/`interrupted`、`negi cron` 里改过的提醒被服务进程覆盖回旧值、调度器长时间静默或某次投递疑似挂死 → `heartbeat-system.md`「Cron Reminder Contract」+ `operations-and-maintenance.md`「任务没创建或没推进」
 - 记忆复核批次什么时候入队（攒满轮数 / 缓冲躺够 1 小时 / 压缩轮末 / 会话边界），或某段历史的工具明细只剩名字没有原文 → `runtime-overview.md`「Memory Runtime State」（四个冲刷时点、进批次的工具记录按原子组装载、按轮次指纹摘除的写回）
 - 看到 `memory/MEMORY.md.bak.*`，或库里条目与投影不一致 → `runtime-overview.md`「Memory Runtime State」（投影只由库再生、外部改动先留证再重绘）+ `operations-and-maintenance.md`「Memory Queue Workflow」
-- dream 一直不入队、失败后反复自旋、全量整理后 pending 不清零或自身修订立刻再次触发 → `runtime-overview.md`「Memory Runtime State」的 `dream_state.json` 水位与结算合同 + `operations-and-maintenance.md`「Memory Queue Workflow」的 `negi memory dream --once` 排障口
+- dream 一直不入队、失败后反复自旋、全量整理后 pending 不清零、自身修订立刻再次触发，或只落地部分 action group → `runtime-overview.md`「Memory Runtime State」的 review/apply、`dream_state.json` 与部分应用结算合同 + `operations-and-maintenance.md`「Memory Queue Workflow」的 `negi memory dream --once` 排障口
 - 限流/上游故障期间某轮记忆没写进去、`memory/failed.jsonl` 有停车记录、或医生检查报 `failed_parked` → `runtime-overview.md`「队列状态机与失败停车语义」+ `operations-and-maintenance.md`「Memory Queue Workflow」
 - 记忆页点重试/放弃提示失败、或弹条正文是 `Request timeout` → `web-and-admin.md`「Memory Management Page And Admin Contract」（四条失败正文各自的指向与 30s 客户端超时）
 - 用户说「记住/忘掉」但模型照旧，或某轮命中前缀在第二条消息就分叉 → `runtime-overview.md`「Memory Runtime State」（头部基座的压缩边界更新与修订增量）+ `context-and-cache-troubleshooting.md`「长期记忆的头部基座与增量」

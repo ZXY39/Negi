@@ -806,6 +806,12 @@ class _MemoryToolSession:
     # the session was opened from (preview and settlement still key off base_revision).
     dream_base_revision: int = 0
     dream_scope_key: str = ""
+    dream_request_id: str = ""
+    dream_phase: str = ""
+    dream_group_id: str = ""
+    dream_plan: dict[str, Any] | None = None
+    allowed_memory_ids: set[str] = field(default_factory=set)
+    allowed_note_refs: set[str] = field(default_factory=set)
 
     def note_directories(self) -> list[Path]:
         return [self.index_dir, self.notes_dir] if self.index_dir is not None else [self.notes_dir]
@@ -966,7 +972,7 @@ class _MemoryToolSession:
         *,
         adds: list[dict[str, Any]] | None = None,
         rewrites: list[dict[str, Any]] | None = None,
-        deletes: list[int] | None = None,
+        deletes: list[int | dict[str, Any]] | None = None,
         delete_reasons: list[dict[str, Any]] | None = None,
         note_upserts: dict[str, str] | None = None,
         note_edits: dict[str, list[dict[str, str]]] | None = None,
@@ -1115,69 +1121,86 @@ class _MemoryToolSession:
                         }
                     )
 
+        def _normalize_delete_reason(item: object, field: str) -> dict[str, Any] | None:
+            if not isinstance(item, dict):
+                errors[field] = "delete reason must be an object"
+                return None
+            line, line_error = coerce_memory_line(item.get("line"))
+            reason = str(item.get("reason") or "").strip()
+            basis = str(item.get("authority_basis") or "").strip().lower()
+            evidence = str(item.get("evidence") or "").strip()
+            replacement_raw = item.get("replacement_line")
+            replacement_line = 0
+            if replacement_raw is not None and str(replacement_raw).strip():
+                replacement_line, replacement_error = coerce_memory_line(replacement_raw)
+                if replacement_error:
+                    errors[f"{field}.replacement_line"] = replacement_error
+            if line_error:
+                errors[f"{field}.line"] = line_error
+            if not reason:
+                errors[f"{field}.reason"] = "reason must not be empty"
+            if basis not in {"explicit_supersession", "newer_timestamp", "duplicate", "operator_request"}:
+                errors[f"{field}.authority_basis"] = (
+                    "authority_basis must be explicit_supersession, newer_timestamp, duplicate, or operator_request"
+                )
+            if item.get("scope_match") is not True:
+                errors[f"{field}.scope_match"] = "scope_match must be true"
+            if basis in {"explicit_supersession", "newer_timestamp", "duplicate"} and not replacement_line:
+                errors[f"{field}.replacement_line"] = "replacement_line is required for this authority_basis"
+            if basis in {"explicit_supersession", "duplicate"} and not evidence:
+                errors[f"{field}.evidence"] = "evidence must not be empty for this authority_basis"
+            if line and reason and basis and item.get("scope_match") is True:
+                return {
+                    "line": line,
+                    "reason": reason,
+                    "replacement_line": replacement_line or None,
+                    "authority_basis": basis,
+                    "scope_match": True,
+                    "evidence": evidence,
+                }
+            return None
+
         raw_deletes = list(deletes or [])
-        if not isinstance(raw_deletes, list):
-            errors["deletes"] = "deletes must be a list"
-        else:
-            for index, item in enumerate(raw_deletes):
+        seen_delete_lines: set[int] = set()
+        for index, item in enumerate(raw_deletes):
+            if isinstance(item, dict):
+                line, line_error = coerce_memory_line(item.get("line"))
+                if line_error:
+                    errors[f"deletes[{index}].line"] = line_error
+                    continue
+                if line in seen_delete_lines:
+                    errors[f"deletes[{index}].line"] = "duplicate delete line"
+                    continue
+                seen_delete_lines.add(line)
+                normalized_deletes.append(line)
+                normalized = _normalize_delete_reason(item, f"deletes[{index}]")
+                if normalized is not None:
+                    normalized_delete_reasons.append(normalized)
+            else:
                 line, line_error = coerce_memory_line(item)
                 if line_error:
                     errors[f"deletes[{index}]"] = line_error
                     continue
+                if line in seen_delete_lines:
+                    errors[f"deletes[{index}]"] = "duplicate delete line"
+                    continue
+                seen_delete_lines.add(line)
                 normalized_deletes.append(line)
 
         if delete_reasons is not None and not isinstance(delete_reasons, list):
             errors["delete_reasons"] = "delete_reasons must be a list"
-            raw_delete_reasons: list[Any] = []
         else:
-            raw_delete_reasons = list(delete_reasons or [])
-            seen_reason_lines: set[int] = set()
-            for index, item in enumerate(raw_delete_reasons):
-                if not isinstance(item, dict):
-                    errors[f"delete_reasons[{index}]"] = "delete reason must be an object"
+            seen_reason_lines = {item["line"] for item in normalized_delete_reasons}
+            for index, item in enumerate(list(delete_reasons or [])):
+                normalized = _normalize_delete_reason(item, f"delete_reasons[{index}]")
+                if normalized is None:
                     continue
-                line, line_error = coerce_memory_line(item.get("line"))
-                reason = str(item.get("reason") or "").strip()
-                basis = str(item.get("authority_basis") or "").strip().lower()
-                evidence = str(item.get("evidence") or "").strip()
-                replacement_raw = item.get("replacement_line")
-                replacement_line = 0
-                if replacement_raw is not None and str(replacement_raw).strip():
-                    replacement_line, replacement_error = coerce_memory_line(replacement_raw)
-                    if replacement_error:
-                        errors[f"delete_reasons[{index}].replacement_line"] = replacement_error
-                if line_error:
-                    errors[f"delete_reasons[{index}].line"] = line_error
+                line = normalized["line"]
                 if line in seen_reason_lines:
                     errors[f"delete_reasons[{index}].line"] = "duplicate delete reason line"
+                    continue
                 seen_reason_lines.add(line)
-                if not reason:
-                    errors[f"delete_reasons[{index}].reason"] = "reason must not be empty"
-                if basis not in {"explicit_supersession", "newer_timestamp", "duplicate", "operator_request"}:
-                    errors[f"delete_reasons[{index}].authority_basis"] = (
-                        "authority_basis must be explicit_supersession, newer_timestamp, duplicate, or operator_request"
-                    )
-                if item.get("scope_match") is not True:
-                    errors[f"delete_reasons[{index}].scope_match"] = "scope_match must be true"
-                if basis in {"explicit_supersession", "newer_timestamp", "duplicate"} and not replacement_line:
-                    errors[f"delete_reasons[{index}].replacement_line"] = (
-                        "replacement_line is required for this authority_basis"
-                    )
-                if basis in {"explicit_supersession", "duplicate"} and not evidence:
-                    errors[f"delete_reasons[{index}].evidence"] = (
-                        "evidence must not be empty for this authority_basis"
-                    )
-                if line and reason and basis and item.get("scope_match") is True:
-                    normalized_delete_reasons.append(
-                        {
-                            "line": line,
-                            "reason": reason,
-                            "replacement_line": replacement_line or None,
-                            "authority_basis": basis,
-                            "scope_match": True,
-                            "evidence": evidence,
-                        }
-                    )
+                normalized_delete_reasons.append(normalized)
             delete_lines = set(normalized_deletes)
             reason_lines = {item["line"] for item in normalized_delete_reasons}
             if delete_lines != reason_lines:
@@ -5039,6 +5062,20 @@ class MemoryManager:
                 payload = self._dream_payload_from_item(batch.items[0])
                 session.dream_base_revision = self._dream_payload_base_revision(payload)
                 session.dream_scope_key = str(payload.get("scope_key") or "").strip() or "full"
+                session.dream_request_id = str(batch.items[0].request_id or "").strip()
+                session.dream_phase = str(payload.get("phase") or "").strip().lower() or "review"
+                session.dream_group_id = str(payload.get("group_id") or "").strip()
+                if session.dream_phase == "apply":
+                    session.allowed_memory_ids = {
+                        str(item or "").strip()
+                        for item in list(payload.get("memory_ids") or [])
+                        if str(item or "").strip()
+                    }
+                    session.allowed_note_refs = {
+                        str(item or "").strip()
+                        for item in list(payload.get("note_refs") or [])
+                        if str(item or "").strip()
+                    }
             tools = self._memory_agent_tools(session)
             system_prompt = self._memory_agent_system_prompt(batch_op=session.batch_op)
             if session.batch_op == "dream":
@@ -5180,6 +5217,8 @@ class MemoryManager:
                     return True
                 continue
             if tool == "memory_apply_confirm" and inner.get("status") == "batch_confirmed":
+                return True
+            if tool == "memory_dream_plan" and inner.get("status") == "plan_staged":
                 return True
             if (
                 tool == "memory_apply_batch"
@@ -6776,12 +6815,6 @@ class MemoryManager:
         normalized = self._normalize_memory_content_text(text, field="minimal_memory")
         if len(normalized) > max(int(summary_max_chars or 0), 1):
             raise _MemoryAgentValidationError(f"minimal_memory exceeds {summary_max_chars} chars")
-        normalized_core = re.sub(r"\s+", " ", normalized).strip()
-        if normalized_core.count("->") != 1:
-            raise _MemoryAgentValidationError("minimal_memory must use 条件->要求关键词")
-        condition_text, keyword_text = [part.strip() for part in normalized_core.split("->", 1)]
-        if not condition_text or not keyword_text:
-            raise _MemoryAgentValidationError("minimal_memory must use 条件->要求关键词")
         return normalized
 
     @staticmethod
@@ -7003,6 +7036,8 @@ class MemoryManager:
         attempted_model_chain: list[str] | None = None,
         attempt_count: int = 0,
         validated: _MemoryValidatedWrite | None = None,
+        validated_writes: list[_MemoryValidatedWrite] | None = None,
+        dream_sweep: dict[str, Any] | None = None,
         provider_request_ids: list[str] | None = None,
         request_artifact_paths: list[str] | None = None,
         usage_counted_requests: int | None = None,
@@ -7068,41 +7103,103 @@ class MemoryManager:
         normalized_fallback = str(fallback or "").strip()
         if normalized_fallback:
             payload["fallback"] = normalized_fallback
-        if validated is not None:
+        if isinstance(dream_sweep, dict):
+            plan_path = str(dream_sweep.get("plan_path") or "").strip()
+            if plan_path:
+                payload["dream_plan_path"] = plan_path
+            summary = dream_sweep.get("summary")
+            if isinstance(summary, dict):
+                payload["dream_plan_summary"] = dict(summary)
+            group_results = dream_sweep.get("group_results")
+            if isinstance(group_results, list):
+                payload["dream_group_results"] = list(group_results)
+        writes = list(validated_writes or [])
+        if validated is not None and not writes:
+            writes = [validated]
+        if writes:
             payload["memory_chars_after"] = self._resident_memory_chars()
-            payload["note_refs_written"] = list(validated.note_refs_written)
+            payload["note_refs_written"] = sorted(
+                {
+                    str(ref or "").strip()
+                    for item in writes
+                    for ref in list(item.note_refs_written or [])
+                    if str(ref or "").strip()
+                }
+            )
             payload["document_preview"] = self._document_preview(self.snapshot_text())
-            change_preview = self._build_change_preview(validated)
+            change_previews = [self._build_change_preview(item) for item in writes]
+            change_preview = "\n\n".join(text for text in change_previews if text)
             if change_preview:
                 payload["change_preview"] = change_preview
-            structured_changes = self._build_structured_changes(validated)
+            structured_changes = [
+                change
+                for item in writes
+                for change in self._build_structured_changes(item)
+            ]
             if structured_changes:
                 payload["changes"] = structured_changes
-            payload["inspired_memory_ids"] = list(validated.inspired_memory_ids)
-            payload["compression_triggered"] = bool(validated.compression_triggered)
-            payload["compressed_memory_ids"] = list(validated.compressed_memory_ids)
-            payload["deleted_by_compression_ids"] = list(validated.deleted_by_compression_ids)
-            if validated.capacity_action:
-                payload["capacity_action"] = validated.capacity_action
+            payload["inspired_memory_ids"] = sorted(
+                {
+                    str(memory_id or "").strip()
+                    for item in writes
+                    for memory_id in list(item.inspired_memory_ids or [])
+                    if str(memory_id or "").strip()
+                }
+            )
+            payload["compression_triggered"] = any(bool(item.compression_triggered) for item in writes)
+            payload["compressed_memory_ids"] = sorted(
+                {
+                    str(memory_id or "").strip()
+                    for item in writes
+                    for memory_id in list(item.compressed_memory_ids or [])
+                    if str(memory_id or "").strip()
+                }
+            )
+            payload["deleted_by_compression_ids"] = sorted(
+                {
+                    str(memory_id or "").strip()
+                    for item in writes
+                    for memory_id in list(item.deleted_by_compression_ids or [])
+                    if str(memory_id or "").strip()
+                }
+            )
+            capacity_actions = [str(item.capacity_action or "").strip() for item in writes if str(item.capacity_action or "").strip()]
+            if capacity_actions:
+                payload["capacity_action"] = capacity_actions[-1]
                 payload["capacity_chars_after"] = self._resident_memory_chars()
-            if validated.is_consolidation:
+            if any(item.is_consolidation for item in writes):
                 payload["category_count"] = len(
                     {
-                        str(item.get("note_ref") or "").strip()
-                        for item in list(validated.consolidation_writes or [])
-                        if str(item.get("note_ref") or "").strip()
+                        str(entry.get("note_ref") or "").strip()
+                        for item in writes
+                        for entry in list(item.consolidation_writes or [])
+                        if str(entry.get("note_ref") or "").strip()
                     }
                 )
-            if validated.consolidation_requested or validated.consolidation_reason:
-                payload["consolidation_requested"] = bool(validated.consolidation_requested)
-                payload["consolidation_reason"] = validated.consolidation_reason
-            normalized_write_mode = str(validated.write_mode or "").strip().lower()
-            if normalized_write_mode:
-                payload["write_mode"] = normalized_write_mode
-            normalized_noop_reason = str(validated.noop_reason or "").strip()
+            consolidation_reasons = sorted(
+                {
+                    str(item.consolidation_reason or "").strip()
+                    for item in writes
+                    if str(item.consolidation_reason or "").strip()
+                }
+            )
+            if any(item.consolidation_requested for item in writes) or consolidation_reasons:
+                payload["consolidation_requested"] = any(bool(item.consolidation_requested) for item in writes)
+                if consolidation_reasons:
+                    payload["consolidation_reason"] = "; ".join(consolidation_reasons)
+            write_modes = sorted({str(item.write_mode or "").strip().lower() for item in writes if str(item.write_mode or "").strip()})
+            if write_modes:
+                payload["write_mode"] = write_modes[0] if len(write_modes) == 1 else "mixed"
+            normalized_noop_reason = next(
+                (str(item.noop_reason or "").strip() for item in writes if str(item.noop_reason or "").strip()),
+                "",
+            )
             if normalized_noop_reason:
                 payload["noop_reason"] = normalized_noop_reason
-            normalized_already_satisfied = str(validated.already_satisfied or "").strip()
+            normalized_already_satisfied = next(
+                (str(item.already_satisfied or "").strip() for item in writes if str(item.already_satisfied or "").strip()),
+                "",
+            )
             if normalized_already_satisfied:
                 payload["already_satisfied"] = normalized_already_satisfied
         self._append_ops_payload(payload)
@@ -7378,7 +7475,9 @@ class MemoryManager:
             if key in ("dream_mode", "dream_scope_key", "dream_base_revision") or value != ""
         }
 
-    def _memory_note_index(self, refs: set[str] | None = None) -> list[dict[str, Any]]:
+    def _memory_note_index(
+        self, refs: set[str] | None = None, *, detail: bool = False
+    ) -> list[dict[str, Any]]:
         rows = self._memory_repo.list_memories()
         ordinary_names = self._ordinary_note_names()
         category_names = self._category_note_names()
@@ -7408,18 +7507,24 @@ class MemoryManager:
             if ref in stale_refs:
                 findings.append("note_meta_stale")
             meta = self._memory_repo.read_note_meta(ref, kind) or {}
-            result.append(
-                {
-                    "ref": ref,
-                    "kind": kind,
-                    "scope_line": scope_line,
-                    "owner_count": len(owners),
-                    "note_updated_at": self._format_memory_time_minute(str(meta.get("updated_at") or "")),
-                    "sections": self._note_section_cards(f"{kind}:{ref}", body=body),
-                    "section_review_candidates": self._note_section_review_candidates(body),
-                    "doctor_findings": findings,
-                }
-            )
+            item = {
+                "ref": ref,
+                "kind": kind,
+                "scope_line": scope_line,
+                "owner_count": len(owners),
+                "note_updated_at": self._format_memory_time_minute(str(meta.get("updated_at") or "")),
+                "doctor_findings": findings,
+            }
+            if detail:
+                item["sections"] = self._note_section_cards(f"{kind}:{ref}", body=body)
+                item["section_review_candidates"] = self._note_section_review_candidates(body)
+            else:
+                hints = self._note_section_evidence_hints(body)
+                candidates = self._note_section_review_candidates(body)
+                item["section_count"] = len(self._parse_note_sections(body))
+                item["has_evidence_hints"] = bool(hints)
+                item["has_section_review_candidates"] = bool(candidates)
+            result.append(item)
         return result
 
     def _memory_entry_view(self, row: dict[str, Any], *, line: int) -> dict[str, Any]:
@@ -7490,11 +7595,19 @@ class MemoryManager:
             return None
         with self._io_lock:
             state = self._read_dream_state()
-            revisions = self._memory_repo.revisions_after(int(state.get("last_seen_revision", 0) or 0))
+            all_revisions = self._memory_repo.revisions_after(int(state.get("last_seen_revision", 0) or 0))
+            revisions = [
+                item
+                for item in all_revisions
+                if str(item.get("op") or "").strip().lower() != "dream"
+            ]
             # A failed sweep keeps its pending set and is retried only when new external
-            # changes arrive (or on an explicit force): otherwise a provider/protocol
-            # failure would re-run the full sweep on every scheduler tick.
+            # changes arrive (or on an explicit force): dream's own committed revisions
+            # advance the watermark but do not re-arm the scheduler.
             if not force and state.get("last_error") and not revisions:
+                if all_revisions:
+                    state["last_seen_revision"] = max(int(item.get("rev", 0) or 0) for item in all_revisions)
+                    self._write_dream_state(state)
                 return None
             rows_by_id = {str(row.get("memory_id") or ""): row for row in self._memory_repo.list_memories()}
             pending_ids = set(state.get("pending_memory_ids") or [])
@@ -7502,8 +7615,6 @@ class MemoryManager:
             first_pending_at = ""
             state_changed = False
             for revision in revisions:
-                if str(revision.get("op") or "").strip().lower() == "dream":
-                    continue
                 first_pending_at = first_pending_at or str(revision.get("created_at") or "")
                 for field_name in ("added_ids", "changed_ids", "retired_ids"):
                     try:
@@ -7523,8 +7634,8 @@ class MemoryManager:
                 except (TypeError, ValueError):
                     changed_refs = []
                 pending_refs.update(str(item or "").strip() for item in list(changed_refs or []) if str(item or "").strip())
-            if revisions:
-                state["last_seen_revision"] = max(int(item.get("rev", 0) or 0) for item in revisions)
+            if all_revisions:
+                state["last_seen_revision"] = max(int(item.get("rev", 0) or 0) for item in all_revisions)
                 state_changed = True
             state["pending_memory_ids"] = sorted(pending_ids)
             state["pending_note_refs"] = sorted(pending_refs)
@@ -7719,6 +7830,26 @@ class MemoryManager:
         for rid in {str(item or "").strip() for item in list(request_ids or []) if str(item or "").strip()}:
             prog = self._live_batch_progress.setdefault(rid, {"rounds": 0, "usage": {}})
             prog["usage"] = dict(usage or {})
+
+    def _set_live_dream_phase(
+        self,
+        request_ids: list[str],
+        *,
+        phase: str,
+        group_index: int = 0,
+        group_total: int = 0,
+        group_id: str = "",
+    ) -> None:
+        for rid in {str(item or "").strip() for item in list(request_ids or []) if str(item or "").strip()}:
+            prog = self._live_batch_progress.setdefault(rid, {"rounds": 0, "usage": {}})
+            prog.update(
+                {
+                    "phase": str(phase or ""),
+                    "group_index": int(group_index or 0),
+                    "group_total": int(group_total or 0),
+                    "group_id": str(group_id or ""),
+                }
+            )
 
     def _clear_live_progress(self, request_ids: list[str]) -> None:
         for rid in {str(item or "").strip() for item in list(request_ids or []) if str(item or "").strip()}:
@@ -8093,6 +8224,201 @@ class MemoryManager:
         self.clear_review_window(session_key=session_key)
         return result
 
+    def _stage_dream_plan(
+        self,
+        session: _MemoryToolSession,
+        *,
+        reviewed_memory_ids: list[str],
+        reviewed_note_refs: list[str],
+        opened_note_refs: list[str],
+        groups: list[dict[str, Any]],
+        uncertain: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        if session.batch_op != "dream" or session.dream_phase != "review":
+            return {"ok": False, "errors": {"batch": "memory_dream_plan is only valid in dream review phase"}}
+        scope = self._dream_full_scope_snapshot()
+        current_ids = set(scope["memory_ids"])
+        current_notes = set(scope["note_refs"])
+        category_notes = set(self._category_note_names())
+        errors: dict[str, str] = {}
+
+        def _ids(raw: object, field: str) -> set[str]:
+            if not isinstance(raw, list):
+                errors[field] = f"{field} must be a list"
+                return set()
+            return {str(item or "").strip() for item in raw if str(item or "").strip()}
+
+        def _refs(raw: object, field: str) -> set[str]:
+            if not isinstance(raw, list):
+                errors[field] = f"{field} must be a list"
+                return set()
+            return {
+                session._normalize_note_ref(str(item or "").strip(), field=field)
+                for item in raw
+                if str(item or "").strip()
+            }
+
+        reviewed_ids = _ids(reviewed_memory_ids, "reviewed_memory_ids")
+        reviewed_refs = _refs(reviewed_note_refs, "reviewed_note_refs")
+        opened_refs = _refs(opened_note_refs, "opened_note_refs")
+        if reviewed_ids != current_ids:
+            errors["reviewed_memory_ids"] = (
+                f"reviewed rows must equal the current resident set; "
+                f"missing={sorted(current_ids - reviewed_ids)[:12]} "
+                f"extra={sorted(reviewed_ids - current_ids)[:12]}"
+            )
+        if reviewed_refs != current_notes:
+            errors["reviewed_note_refs"] = (
+                f"reviewed notes must equal the current note set; "
+                f"missing={sorted(current_notes - reviewed_refs)[:12]} "
+                f"extra={sorted(reviewed_refs - current_notes)[:12]}"
+            )
+        if not opened_refs <= reviewed_refs:
+            errors["opened_note_refs"] = f"opened notes must be reviewed: {sorted(opened_refs - reviewed_refs)[:12]}"
+
+        allowed_kinds = {
+            "duplicate",
+            "explicit_supersession",
+            "rewrite",
+            "note_conflict",
+            "note_cleanup",
+            "category_cleanup",
+        }
+        normalized_groups: list[dict[str, Any]] = []
+        group_ids: set[str] = set()
+        claimed_ids: set[str] = set()
+        claimed_refs: set[str] = set()
+        if not isinstance(groups, list):
+            errors["groups"] = "groups must be a list"
+            groups = []
+        for index, raw_group in enumerate(groups):
+            field = f"groups[{index}]"
+            if not isinstance(raw_group, dict):
+                errors[field] = "group must be an object"
+                continue
+            group_id = str(raw_group.get("group_id") or "").strip()
+            kind = str(raw_group.get("kind") or "").strip().lower()
+            reason = str(raw_group.get("reason") or "").strip()
+            evidence = str(raw_group.get("evidence") or "").strip()
+            replacement = str(raw_group.get("replacement_memory_id") or "").strip()
+            memory_ids = _ids(raw_group.get("memory_ids") or [], f"{field}.memory_ids")
+            note_refs = _refs(raw_group.get("note_refs") or [], f"{field}.note_refs")
+            if not group_id:
+                errors[f"{field}.group_id"] = "group_id is required"
+            elif group_id in group_ids:
+                errors[f"{field}.group_id"] = "group_id is duplicated"
+            group_ids.add(group_id)
+            if kind not in allowed_kinds:
+                errors[f"{field}.kind"] = f"unsupported kind: {kind or '(empty)'}"
+            if not reason:
+                errors[f"{field}.reason"] = "reason is required"
+            if not memory_ids and not note_refs:
+                errors[field] = "group must name at least one memory or note"
+            unknown_ids = memory_ids - current_ids
+            unknown_refs = note_refs - current_notes
+            if unknown_ids:
+                errors[f"{field}.memory_ids"] = f"unknown resident ids: {sorted(unknown_ids)[:12]}"
+            if unknown_refs:
+                errors[f"{field}.note_refs"] = f"unknown note refs: {sorted(unknown_refs)[:12]}"
+            overlap_ids = memory_ids & claimed_ids
+            overlap_refs = note_refs & claimed_refs
+            if overlap_ids:
+                errors[f"{field}.memory_ids"] = f"rows already claimed by another group: {sorted(overlap_ids)[:12]}"
+            if overlap_refs:
+                errors[f"{field}.note_refs"] = f"notes already claimed by another group: {sorted(overlap_refs)[:12]}"
+            if kind in {"duplicate", "explicit_supersession"}:
+                if len(memory_ids) < 2:
+                    errors[f"{field}.memory_ids"] = f"{kind} requires a target and replacement"
+                if replacement not in memory_ids:
+                    errors[f"{field}.replacement_memory_id"] = "replacement must be one of the group memory ids"
+                if not evidence:
+                    errors[f"{field}.evidence"] = "evidence is required"
+            if kind == "category_cleanup" and not (note_refs & category_notes):
+                errors[f"{field}.note_refs"] = "category_cleanup requires a category note"
+            claimed_ids.update(memory_ids)
+            claimed_refs.update(note_refs)
+            normalized_groups.append(
+                {
+                    "group_id": group_id,
+                    "kind": kind,
+                    "memory_ids": sorted(memory_ids),
+                    "note_refs": sorted(note_refs),
+                    "replacement_memory_id": replacement,
+                    "reason": reason,
+                    "evidence": evidence,
+                }
+            )
+
+        normalized_uncertain: list[dict[str, Any]] = []
+        if uncertain is None:
+            uncertain = []
+        if not isinstance(uncertain, list):
+            errors["uncertain"] = "uncertain must be a list"
+            uncertain = []
+        for index, raw_item in enumerate(uncertain):
+            field = f"uncertain[{index}]"
+            if not isinstance(raw_item, dict):
+                errors[field] = "uncertain item must be an object"
+                continue
+            memory_ids = _ids(raw_item.get("memory_ids") or [], f"{field}.memory_ids")
+            note_refs = _refs(raw_item.get("note_refs") or [], f"{field}.note_refs")
+            reason = str(raw_item.get("reason") or "").strip()
+            if not memory_ids and not note_refs:
+                errors[field] = "uncertain item must name a memory or note"
+            if not reason:
+                errors[f"{field}.reason"] = "reason is required"
+            if memory_ids - current_ids:
+                errors[f"{field}.memory_ids"] = f"unknown resident ids: {sorted(memory_ids - current_ids)[:12]}"
+            if note_refs - current_notes:
+                errors[f"{field}.note_refs"] = f"unknown note refs: {sorted(note_refs - current_notes)[:12]}"
+            if memory_ids & claimed_ids or note_refs & claimed_refs:
+                errors[field] = "uncertain item overlaps an action group"
+            normalized_uncertain.append(
+                {"memory_ids": sorted(memory_ids), "note_refs": sorted(note_refs), "reason": reason}
+            )
+
+        if errors:
+            return {"ok": False, "errors": errors}
+        plan = {
+            "version": 1,
+            "reviewed_memory_ids": sorted(reviewed_ids),
+            "reviewed_note_refs": sorted(reviewed_refs),
+            "opened_note_refs": sorted(opened_refs),
+            "groups": normalized_groups,
+            "uncertain": normalized_uncertain,
+        }
+        session.dream_plan = plan
+        return {
+            "ok": True,
+            "status": "plan_staged",
+            "summary": {
+                "resident_rows": len(current_ids),
+                "reviewed_rows": len(reviewed_ids),
+                "notes": len(current_notes),
+                "reviewed_notes": len(reviewed_refs),
+                "opened_notes": len(opened_refs),
+                "groups": len(normalized_groups),
+                "uncertain": len(normalized_uncertain),
+            },
+        }
+
+    def _dream_plan_path(self, request_id: str) -> Path:
+        safe_id = re.sub(r"[^A-Za-z0-9_.-]", "_", str(request_id or "dream")).strip("._") or "dream"
+        return self.request_artifacts_dir / f"dream_plan_{safe_id}.json"
+
+    def _persist_dream_plan(self, session: _MemoryToolSession) -> str:
+        if not isinstance(session.dream_plan, dict) or not session.dream_request_id:
+            return ""
+        path = self._dream_plan_path(session.dream_request_id)
+        payload = {
+            "request_id": session.dream_request_id,
+            "base_revision": session.dream_base_revision,
+            "created_at": self._now_iso(),
+            "plan": session.dream_plan,
+        }
+        self._atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+        return str(path)
+
     def _memory_agent_tools(self, session: _MemoryToolSession) -> list[_MemoryTool]:
         def memory_read_note(ref: str) -> str:
             """Read one existing note by ref without the .md suffix."""
@@ -8105,7 +8431,7 @@ class MemoryManager:
             return self._memory_read_entry(line)
 
         def memory_note_index() -> list[dict[str, Any]]:
-            """List ordinary and category notes with scope, owners, freshness, section authority, evidence hints, and doctor findings."""
+            """List a compact index of ordinary and category notes; use memory_read_notes for section details and review candidates."""
 
             return self._memory_note_index()
 
@@ -8138,7 +8464,7 @@ class MemoryManager:
         def memory_apply_batch(
             adds: list[dict[str, Any]] | None = None,
             rewrites: list[dict[str, Any]] | None = None,
-            deletes: list[int] | None = None,
+            deletes: list[int | dict[str, Any]] | None = None,
             delete_reasons: list[dict[str, Any]] | None = None,
             note_upserts: dict[str, str] | None = None,
             note_edits: dict[str, list[dict[str, str]]] | None = None,
@@ -8152,9 +8478,11 @@ class MemoryManager:
 
             The model sees one full row card per memory: `line memory_id source
             created_at=... updated_at=...` followed by `memory_body: ...`. `rewrites` takes
-            `{line, content, minimal_memory?, note_ref?}`; omit `minimal_memory` only when
-            content is unchanged. `deletes` takes line numbers and every line needs a
-            matching `delete_reasons` entry with reason, authority_basis and scope_match.
+            `{line, content, minimal_memory?, note_ref?}`; omit `minimal_memory` to keep the
+            old summary when content is unchanged, or to use the new content as a safe summary.
+            `deletes` accepts line numbers or objects containing `line`, `reason`,
+            `authority_basis`, `scope_match`, and optional `replacement_line` / `evidence`.
+            The separate `delete_reasons` list remains available for mixed or legacy calls.
             `inspired_lines` takes the line numbers this request actually decided on. Lines
             outside the block are refused per item, the rest of the batch still stands. Do
             not write a date, id or row-card prefix into `content` - the backend owns them.
@@ -8246,14 +8574,40 @@ class MemoryManager:
 
             return session.confirm_batch()
 
-        return [
+        def memory_dream_plan(
+            reviewed_memory_ids: list[str],
+            reviewed_note_refs: list[str],
+            opened_note_refs: list[str],
+            groups: list[dict[str, Any]],
+            uncertain: list[dict[str, Any]] | None = None,
+        ) -> dict[str, Any]:
+            """Stage a full-coverage dream review plan without writing memory."""
+
+            return self._stage_dream_plan(
+                session,
+                reviewed_memory_ids=reviewed_memory_ids,
+                reviewed_note_refs=reviewed_note_refs,
+                opened_note_refs=opened_note_refs,
+                groups=groups,
+                uncertain=uncertain,
+            )
+
+        tools = [
             _build_memory_tool(name="memory_read_note", fn=memory_read_note),
             _build_memory_tool(name="memory_read_entry", fn=memory_read_entry),
             _build_memory_tool(name="memory_note_index", fn=memory_note_index),
             _build_memory_tool(name="memory_read_notes", fn=memory_read_notes),
-            _build_memory_tool(name="memory_apply_batch", fn=memory_apply_batch),
-            _build_memory_tool(name="memory_apply_confirm", fn=memory_apply_confirm),
         ]
+        if session.batch_op == "dream" and session.dream_phase == "review":
+            tools.append(_build_memory_tool(name="memory_dream_plan", fn=memory_dream_plan))
+        else:
+            tools.extend(
+                [
+                    _build_memory_tool(name="memory_apply_batch", fn=memory_apply_batch),
+                    _build_memory_tool(name="memory_apply_confirm", fn=memory_apply_confirm),
+                ]
+            )
+        return tools
 
     @staticmethod
     def _memory_request_terms(text: str) -> set[str]:
@@ -8454,6 +8808,12 @@ class MemoryManager:
         repair_reason: str,
     ) -> str:
         payload = self._dream_payload_from_item(batch.items[0]) if batch.items else {}
+        if str(payload.get("phase") or "").strip().lower() == "apply":
+            return self._dream_apply_agent_user_prompt(
+                batch=batch,
+                snapshot_text=snapshot_text,
+                repair_reason=repair_reason,
+            )
         blocks = self._memory_context_blocks(
             batch=batch,
             snapshot_text=snapshot_text,
@@ -8490,12 +8850,119 @@ class MemoryManager:
             f"改成「触发条件 + 这套做法解决什么 + note 里有什么」并给 note_ref，"
             f"不要指望靠删字压进上限。\n"
             "工作流：\n"
-            "- 先扫描全部行卡，找出明显重复与冲突族，再决定哪些行合并、改写或删除。\n"
-            "- 对涉及的 note 调 memory_note_index / memory_read_notes 读正文与 section 卡；"
+            "- 先扫描全部行卡与紧凑 note 索引，找出重复、冲突、过时或可合并的族。\n"
+            "- 对候选 note 调 memory_read_notes 读正文、section 卡与候选对；"
             "需要补读压缩行全文时调 memory_read_entry。\n"
-            "- 用一次 memory_apply_batch 提交整理结果，读预览确认行号、删除对象与 note 变化后，"
+            "- 调 memory_dream_plan 提交完整覆盖清单、action groups 与 uncertain；"
+            "覆盖集合必须包含当前全部常驻 id 与 note ref。\n"
+            "- 没有可落地变更时也提交完整覆盖计划，groups 留空，由运行时记为 noop。\n"
+            f"{repair_block}"
+        )
+
+    def _dream_apply_group_skeleton(self, payload: dict[str, Any]) -> dict[str, Any]:
+        memory_ids = {
+            str(item or "").strip()
+            for item in list(payload.get("memory_ids") or [])
+            if str(item or "").strip()
+        }
+        note_refs = {
+            str(item or "").strip()
+            for item in list(payload.get("note_refs") or [])
+            if str(item or "").strip()
+        }
+        replacement = str(payload.get("replacement_memory_id") or "").strip()
+        kind = str(payload.get("group_kind") or "").strip().lower()
+        line_by_id = {str(entry.memory_id): index + 1 for index, entry in enumerate(self.resident_lines())}
+        category_names = set(self._category_note_names())
+        authority = "explicit_supersession" if kind == "explicit_supersession" else "duplicate"
+        deletes: list[dict[str, Any]] = []
+        rewrites: list[dict[str, Any]] = []
+        if replacement and replacement in line_by_id:
+            for memory_id in sorted(memory_ids):
+                if memory_id == replacement or memory_id not in line_by_id:
+                    continue
+                deletes.append(
+                    {
+                        "line": line_by_id[memory_id],
+                        "reason": "<删除原因>",
+                        "replacement_line": line_by_id[replacement],
+                        "authority_basis": authority,
+                        "scope_match": True,
+                        "evidence": "<保留替代关系的证据>",
+                    }
+                )
+            rewrites.append(
+                {
+                    "line": line_by_id[replacement],
+                    "content": "<合并或改写后的完整正文>",
+                }
+            )
+        elif kind == "rewrite":
+            for memory_id in sorted(memory_ids):
+                if memory_id in line_by_id:
+                    rewrites.append(
+                        {
+                            "line": line_by_id[memory_id],
+                            "content": "<改写后的完整正文>",
+                        }
+                    )
+        note_edits = {
+            ref: [{"old_text": "<唯一原文>", "new_text": "<新文>"}]
+            for ref in sorted(note_refs)
+        }
+        return {
+            "deletes": deletes,
+            "rewrites": rewrites,
+            "note_edits": note_edits,
+            "note_section_updates": [],
+            "category_deletes": sorted(note_refs & category_names) if kind == "category_cleanup" else [],
+        }
+
+    def _dream_apply_agent_user_prompt(
+        self,
+        *,
+        batch: MemoryBatch,
+        snapshot_text: str,
+        repair_reason: str,
+    ) -> str:
+        payload = self._dream_payload_from_item(batch.items[0]) if batch.items else {}
+        memory_ids = {
+            str(item or "").strip()
+            for item in list(payload.get("memory_ids") or [])
+            if str(item or "").strip()
+        }
+        note_refs = {
+            str(item or "").strip()
+            for item in list(payload.get("note_refs") or [])
+            if str(item or "").strip()
+        }
+        rows_by_id = {str(row.get("memory_id") or ""): row for row in self._memory_repo.list_memories()}
+        line_by_id = {str(entry.memory_id): index + 1 for index, entry in enumerate(self.resident_lines())}
+        cards = [
+            self._memory_entry_view(rows_by_id[memory_id], line=line_by_id[memory_id])["card"]
+            for memory_id in sorted(memory_ids)
+            if memory_id in rows_by_id and memory_id in line_by_id
+        ]
+        note_index = self._memory_note_index(note_refs)
+        skeleton = self._dream_apply_group_skeleton(payload)
+        repair_block = f"\n上一轮输出无效：{repair_reason}\n请修复后重试。\n" if repair_reason else ""
+        return (
+            "Dream 落地\n"
+            f"group_id：{payload.get('group_id') or ''}\n"
+            f"进度：{payload.get('group_index') or ''}/{payload.get('group_total') or ''}\n"
+            f"kind：{payload.get('group_kind') or ''}\n"
+            f"replacement_memory_id：{payload.get('replacement_memory_id') or ''}\n"
+            f"原因：{payload.get('group_reason') or ''}\n"
+            f"依据：{payload.get('group_evidence') or ''}\n\n"
+            "只操作本 group 涉及的行与 note，不修改 group 外对象。\n"
+            "当前相关行卡：\n"
+            f"{chr(10).join(cards) if cards else '(本 group 没有常驻行)'}\n\n"
+            f"相关 note 紧凑索引：\n{json.dumps(note_index, ensure_ascii=False, indent=2)}\n\n"
+            "JSON 骨架（当前行号与替代关系已填好，只替换 `<...>`，不要重算行号；不需要的字段可删除）：\n"
+            f"{json.dumps(skeleton, ensure_ascii=False, indent=2)}\n\n"
+            "需要 note 正文或 section 明细时调 memory_read_notes；行号以当前行卡为准。\n"
+            "用一次 memory_apply_batch 提交本 group 的变更，读预览确认行号、删除对象与 note 变化后，"
             "调用一次 memory_apply_confirm。\n"
-            "- 本轮无需任何变更时提交 noop_reason。\n"
             f"{repair_block}"
         )
 
@@ -8590,7 +9057,8 @@ class MemoryManager:
             "- decision_source 照实填（user=用户本轮亲口给的，self=你复核提炼的），"
             "它只决定来源标记，不决定写法，也不决定存活。\n"
             "- rewrites 条目必须包含 line（完整行卡第一行开头的行号）和 content；"
-            "content 与原正文相同时可省略 minimal_memory，变化时必须显式给新值；"
+            "content 与原正文相同时可省略 minimal_memory，系统保留旧值；变化时可省略，"
+            "系统安全回退为 content，也可以显式给更短的新值；"
             "系统保留原来源并维护该行的日期。\n"
             "- 每个 deletes 行必须在 delete_reasons 里有同 line 的 reason、authority_basis 与 scope_match=true；"
             "explicit_supersession/duplicate 还要 replacement_line+evidence，newer_timestamp 还要 replacement_line。\n"
@@ -8667,6 +9135,10 @@ class MemoryManager:
                                 "mode": "full",
                                 "scope_key": session.dream_scope_key or "full",
                                 "base_revision": session.dream_base_revision,
+                                "phase": session.dream_phase or "review",
+                                "group_id": session.dream_group_id,
+                                "memory_ids": sorted(session.allowed_memory_ids),
+                                "note_refs": sorted(session.allowed_note_refs),
                             },
                             ensure_ascii=False,
                         )
@@ -9078,6 +9550,25 @@ class MemoryManager:
             for ref, ops in dict(payload.get("note_edits") or {}).items()
         }
         raw_note_section_updates = list(payload.get("note_section_updates") or [])
+        apply_group_scope = session.batch_op == "dream" and session.dream_phase == "apply"
+
+        def _ensure_group_memory(memory_id: str, field: str) -> None:
+            if apply_group_scope and memory_id not in session.allowed_memory_ids:
+                raise _MemoryAgentValidationError(f"{field}: memory is outside this dream action group")
+
+        def _ensure_group_note(ref: str, field: str) -> None:
+            if apply_group_scope and ref not in session.allowed_note_refs:
+                raise _MemoryAgentValidationError(f"{field}: note is outside this dream action group")
+
+        if apply_group_scope:
+            for ref in note_upserts:
+                _ensure_group_note(str(ref), "note_upserts")
+            for ref in note_edits:
+                _ensure_group_note(str(ref), "note_edits")
+            for index, item in enumerate(raw_note_section_updates):
+                if not isinstance(item, dict):
+                    raise _MemoryAgentValidationError(f"note_section_updates[{index}] must be an object")
+                _ensure_group_note(str(item.get("ref") or "").strip(), f"note_section_updates[{index}]")
         raw_inspired_lines = payload.get("inspired_lines")
         if raw_inspired_lines is None:
             inspired_lines: list[object] = []
@@ -9178,6 +9669,7 @@ class MemoryManager:
             entry = _entry_at_line("deletes", index, item)
             number, _ = coerce_memory_line(item)
             memory_id = entry.memory_id
+            _ensure_group_memory(memory_id, f"deletes[{index}]")
             reason = delete_reason_by_line.get(number)
             if reason is None:
                 raise _MemoryAgentValidationError(
@@ -9193,6 +9685,7 @@ class MemoryManager:
                     raise _MemoryAgentValidationError(
                         f"delete_reasons[{index}].replacement_line must name a different memory"
                     )
+                _ensure_group_memory(replacement_entry.memory_id, f"delete_reasons[{index}].replacement_line")
             if reason["authority_basis"] == "newer_timestamp":
                 try:
                     target_time = self._authority_time_key(stored_rows_by_id[memory_id])
@@ -9238,6 +9731,7 @@ class MemoryManager:
         purged_ids: set[str] = set()
         for index, token in enumerate(raw_category_deletes):
             name = resolve_note_token(str(token or "").strip(), set(), category_names)
+            _ensure_group_note(name, f"category_deletes[{index}]")
             already_purged = next((item for item in purged_categories if item["note_ref"] == name), None)
             if already_purged is not None:
                 continue
@@ -9260,15 +9754,15 @@ class MemoryManager:
             if not isinstance(item, dict):
                 raise _MemoryAgentValidationError("rewrite item must be an object")
             memory_id = _entry_at_line("rewrites", rewrite_index, item.get("line")).memory_id
+            _ensure_group_memory(memory_id, f"rewrites[{rewrite_index}]")
             rewrite_line_by_id[memory_id], _ = coerce_memory_line(item.get("line"))
             content = self._normalize_memory_content_text(str(item.get("content") or ""))
             stored_row = stored_rows_by_id.get(memory_id, {})
             if item.get("minimal_memory") is None:
                 if content != str(stored_row.get("memory_body") or "").strip():
-                    raise _MemoryAgentValidationError(
-                        f"rewrites[{rewrite_index}].minimal_memory is required when content changes"
-                    )
-                minimal_memory = str(stored_row.get("minimal_memory") or "")
+                    minimal_memory = content
+                else:
+                    minimal_memory = str(stored_row.get("minimal_memory") or "")
             else:
                 minimal_memory = self._normalize_minimal_memory_text(
                     str(item.get("minimal_memory") or ""),
@@ -9278,12 +9772,14 @@ class MemoryManager:
             rewrite_minimal_by_id[memory_id] = minimal_memory
             rewrite_note_ref = str(item.get("note_ref") or "").strip()
             if rewrite_note_ref:
+                _ensure_group_note(rewrite_note_ref, f"rewrites[{rewrite_index}].note_ref")
                 rewrite_note_ref_by_id[memory_id] = rewrite_note_ref
                 submitted_note_refs.add(rewrite_note_ref)
 
         inspired_lines_as_ids: list[str] = []
         for index, item in enumerate(inspired_lines):
             memory_id = _entry_at_line("inspired_lines", index, item).memory_id
+            _ensure_group_memory(memory_id, f"inspired_lines[{index}]")
             inspired_lines_as_ids.append(memory_id)
         inspired_memory_ids = inspired_lines_as_ids
 
@@ -9363,6 +9859,7 @@ class MemoryManager:
                 raise _MemoryAgentValidationError("add decision_source must be user or self")
             add_note_ref = str(item.get("note_ref") or "").strip()
             if add_note_ref:
+                _ensure_group_note(add_note_ref, f"adds[{add_index}].note_ref")
                 submitted_note_refs.add(add_note_ref)
             summary = content
             if len(summary) > summary_limit:
@@ -9449,6 +9946,10 @@ class MemoryManager:
                 if str(entry.memory_id or "").strip() and str(entry.memory_id or "").strip() not in after_entry_ids
             }
         )
+        if apply_group_scope:
+            for memory_id in effective_delete_ids:
+                if memory_id not in purged_ids:
+                    _ensure_group_memory(memory_id, "effective deletes")
         note_section_updates = self._build_note_section_updates(
             session=session,
             note_upserts=normalized_note_upserts,
@@ -9705,6 +10206,26 @@ class MemoryManager:
             self._merge_attempted_model_chain(batch_attempted_chain, attempt.attempted_chain)
             request_artifacts.extend(list(attempt.request_artifacts or []))
             try:
+                if (
+                    lane != "consolidate"
+                    and str(processing_batch.op or "").strip().lower() == "dream"
+                    and getattr(attempt.session, "dream_phase", "") == "review"
+                    and isinstance(getattr(attempt.session, "dream_plan", None), dict)
+                ):
+                    plan_path = self._persist_dream_plan(attempt.session)
+                    return {
+                        "validated": None,
+                        "dream_plan": attempt.session.dream_plan,
+                        "dream_plan_path": plan_path,
+                        "usage": total_usage,
+                        "attempt_count": attempt_index + 1,
+                        "assessed_text": None,
+                        "model_chain": list(current_model_chain),
+                        "attempted_model_chain": list(batch_attempted_chain),
+                        "provider_request_ids": self._provider_request_ids_from_artifacts(request_artifacts),
+                        "request_artifact_paths": self._request_artifact_paths(request_artifacts),
+                        "usage_counted_requests": self._usage_counted_request_count(request_artifacts),
+                    }
                 if lane == "consolidate":
                     validated = self._build_consolidation_write_from_apply_batch(
                         batch=processing_batch,
@@ -9779,6 +10300,467 @@ class MemoryManager:
             "provider_request_ids": self._provider_request_ids_from_artifacts(request_artifacts),
             "request_artifact_paths": self._request_artifact_paths(request_artifacts),
             "usage_counted_requests": self._usage_counted_request_count(request_artifacts),
+        }
+
+    def _dream_apply_batch(
+        self,
+        source: MemoryQueueRequest,
+        *,
+        base_revision: int,
+        group: dict[str, Any],
+        group_index: int,
+        group_total: int,
+    ) -> MemoryBatch:
+        payload = {
+            "mode": "full",
+            "scope_key": "full",
+            "phase": "apply",
+            "base_revision": int(base_revision or 0),
+            "group_id": str(group.get("group_id") or ""),
+            "group_index": int(group_index),
+            "group_total": int(group_total),
+            "group_kind": str(group.get("kind") or ""),
+            "group_reason": str(group.get("reason") or ""),
+            "group_evidence": str(group.get("evidence") or ""),
+            "replacement_memory_id": str(group.get("replacement_memory_id") or ""),
+            "memory_ids": list(group.get("memory_ids") or []),
+            "note_refs": list(group.get("note_refs") or []),
+        }
+        return MemoryBatch(
+            op="dream",
+            items=[
+                MemoryQueueRequest(
+                    op="dream",
+                    decision_source=source.decision_source,
+                    payload_text=json.dumps(payload, ensure_ascii=False),
+                    created_at=source.created_at,
+                    request_id=source.request_id,
+                    trigger_source=source.trigger_source,
+                    session_key=source.session_key,
+                    status=source.status,
+                    processing_started_at=source.processing_started_at,
+                    cancel_requested=source.cancel_requested,
+                )
+            ],
+        )
+
+    async def _run_dream_sweep_batch(
+        self,
+        *,
+        batch: MemoryBatch,
+        runtime_config: Any,
+        runtime_revision: int,
+        model_chain: list[str],
+    ) -> dict[str, Any]:
+        request_ids = [item.request_id for item in batch.items if str(item.request_id or "").strip()]
+        self._set_live_dream_phase(request_ids, phase="review")
+        review = await self._run_memory_agent_batch(
+            batch=batch,
+            runtime_config=runtime_config,
+            runtime_revision=runtime_revision,
+            model_chain=model_chain,
+        )
+        if review.get("discard_reason") == "cancelled":
+            return {
+                **review,
+                "dream_sweep": {
+                    "status": "cancelled",
+                    "plan": {},
+                    "plan_path": "",
+                    "group_results": [],
+                    "summary": {
+                        "resident_rows": 0,
+                        "reviewed_rows": 0,
+                        "notes": 0,
+                        "reviewed_notes": 0,
+                        "opened_notes": 0,
+                        "groups_total": 0,
+                        "groups_applied": 0,
+                        "groups_failed": 0,
+                        "uncertain": 0,
+                    },
+                },
+            }
+        if review.get("discard_reason") or review.get("capacity_replay"):
+            return review
+        plan = review.get("dream_plan")
+        if not isinstance(plan, dict):
+            return {
+                **review,
+                "discard_reason": "rejected",
+                "error": str(review.get("error") or "dream review did not produce a plan"),
+            }
+
+        groups = list(plan.get("groups") or [])
+        plan_path = str(review.get("dream_plan_path") or "")
+        total_usage = dict(review.get("usage") or {})
+        attempted_chain = list(review.get("attempted_model_chain") or [])
+        artifact_paths = list(review.get("request_artifact_paths") or [])
+        provider_ids: list[str] = []
+        seen_provider_ids: set[str] = set()
+        for item in list(review.get("provider_request_ids") or []):
+            value = str(item or "").strip()
+            if value and value not in seen_provider_ids:
+                seen_provider_ids.add(value)
+                provider_ids.append(value)
+        attempt_count = int(review.get("attempt_count", 0) or 0)
+        usage_counted = int(review.get("usage_counted_requests", 0) or 0)
+        current_model_chain = list(review.get("model_chain") or model_chain)
+        committed_writes: list[_MemoryValidatedWrite] = []
+        group_results: list[dict[str, Any]] = []
+
+        def _incomplete_result(
+            status: str,
+            error: str,
+            *,
+            group_id: str = "",
+            discard_reason: str = "",
+            capacity_replay: bool = False,
+        ) -> dict[str, Any]:
+            if group_id:
+                group_results.append({"group_id": group_id, "status": status, "error": error, "changes": 0})
+            result = {
+                "validated": None,
+                "validated_writes": committed_writes,
+                "usage": total_usage,
+                "attempt_count": attempt_count,
+                "model_chain": current_model_chain,
+                "attempted_model_chain": attempted_chain,
+                "provider_request_ids": provider_ids,
+                "request_artifact_paths": artifact_paths,
+                "usage_counted_requests": usage_counted,
+                "error": error,
+                "dream_sweep": {
+                    "status": status,
+                    "plan": plan,
+                    "plan_path": plan_path,
+                    "group_results": group_results,
+                    "summary": {
+                        "resident_rows": len(plan.get("reviewed_memory_ids") or []),
+                        "reviewed_rows": len(plan.get("reviewed_memory_ids") or []),
+                        "notes": len(plan.get("reviewed_note_refs") or []),
+                        "reviewed_notes": len(plan.get("reviewed_note_refs") or []),
+                        "opened_notes": len(plan.get("opened_note_refs") or []),
+                        "groups_total": len(groups),
+                        "groups_applied": len(committed_writes),
+                        "groups_failed": len(groups) - len(committed_writes),
+                        "uncertain": len(plan.get("uncertain") or []),
+                    },
+                },
+            }
+            if discard_reason:
+                result["discard_reason"] = discard_reason
+            if capacity_replay:
+                result["capacity_replay"] = True
+            return result
+
+        if not groups:
+            if self._batch_cancel_requested(request_ids):
+                return _incomplete_result("cancelled", "operator cancelled")
+            snapshot = self.snapshot_text()
+            noop = _MemoryValidatedWrite(
+                document_text=snapshot,
+                note_writes={},
+                note_refs_written=[],
+                memory_chars_after=self._resident_memory_chars(),
+                document_preview=self._document_preview(snapshot),
+                noop_reason="full review found no changes",
+                commit_op="dream",
+            )
+            return {
+                "validated": noop,
+                "validated_writes": [],
+                "usage": total_usage,
+                "attempt_count": attempt_count,
+                "model_chain": current_model_chain,
+                "attempted_model_chain": attempted_chain,
+                "provider_request_ids": provider_ids,
+                "request_artifact_paths": artifact_paths,
+                "usage_counted_requests": usage_counted,
+                "dream_sweep": {
+                    "status": "applied",
+                    "plan": plan,
+                    "plan_path": plan_path,
+                    "group_results": [],
+                    "summary": {
+                        "resident_rows": len(plan.get("reviewed_memory_ids") or []),
+                        "reviewed_rows": len(plan.get("reviewed_memory_ids") or []),
+                        "notes": len(plan.get("reviewed_note_refs") or []),
+                        "reviewed_notes": len(plan.get("reviewed_note_refs") or []),
+                        "opened_notes": len(plan.get("opened_note_refs") or []),
+                        "groups_total": 0,
+                        "groups_applied": 0,
+                        "groups_failed": 0,
+                        "uncertain": len(plan.get("uncertain") or []),
+                    },
+                },
+            }
+
+        source = batch.items[0]
+        base_revision = self._dream_payload_base_revision(self._dream_payload_from_item(source))
+        for index, group in enumerate(groups, 1):
+            group_id = str(group.get("group_id") or f"g{index}")
+            self._set_live_dream_phase(
+                request_ids,
+                phase="apply",
+                group_index=index,
+                group_total=len(groups),
+                group_id=group_id,
+            )
+            apply_batch = self._dream_apply_batch(
+                source,
+                base_revision=base_revision,
+                group=group,
+                group_index=index,
+                group_total=len(groups),
+            )
+            try:
+                part = await self._run_memory_agent_batch(
+                    batch=apply_batch,
+                    runtime_config=runtime_config,
+                    runtime_revision=runtime_revision,
+                    model_chain=current_model_chain,
+                )
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {str(exc or 'dream group call failed').strip()}"
+                status = "partially_applied" if committed_writes else "failed"
+                return _incomplete_result(
+                    status,
+                    error,
+                    group_id=group_id,
+                    discard_reason="" if committed_writes else "provider_error",
+                )
+            self._merge_usage(total_usage, dict(part.get("usage") or {}))
+            self._set_live_usage(request_ids, total_usage)
+            self._merge_attempted_model_chain(attempted_chain, list(part.get("attempted_model_chain") or []))
+            artifact_paths.extend(list(part.get("request_artifact_paths") or []))
+            for item in list(part.get("provider_request_ids") or []):
+                value = str(item or "").strip()
+                if value and value not in seen_provider_ids:
+                    seen_provider_ids.add(value)
+                    provider_ids.append(value)
+            attempt_count += int(part.get("attempt_count", 0) or 0)
+            usage_counted += int(part.get("usage_counted_requests", 0) or 0)
+            if part.get("model_chain"):
+                current_model_chain = list(part.get("model_chain") or current_model_chain)
+
+            discard_reason = str(part.get("discard_reason") or "").strip()
+            if discard_reason or part.get("capacity_replay"):
+                if discard_reason == "cancelled":
+                    status = "cancelled"
+                else:
+                    status = "partially_applied" if committed_writes else "failed"
+                error = str(part.get("error") or discard_reason or "dream group failed")
+                return _incomplete_result(
+                    status,
+                    error,
+                    group_id=group_id,
+                    discard_reason=discard_reason or "rejected",
+                    capacity_replay=bool(part.get("capacity_replay")),
+                )
+
+            validated = part.get("validated")
+            if not isinstance(validated, _MemoryValidatedWrite) or str(validated.noop_reason or "").strip():
+                error = "dream action group did not produce a mutation"
+                status = "partially_applied" if committed_writes else "failed"
+                return _incomplete_result(
+                    status,
+                    error,
+                    group_id=group_id,
+                    discard_reason="rejected" if not committed_writes else "",
+                )
+            if self._batch_cancel_requested(request_ids):
+                return _incomplete_result(
+                    "cancelled",
+                    "operator cancelled",
+                    group_id=group_id,
+                    discard_reason="cancelled" if not committed_writes else "",
+                )
+            try:
+                self._commit_validated_write(validated)
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {str(exc or 'dream group commit failed').strip()}"
+                status = "partially_applied" if committed_writes else "failed"
+                return _incomplete_result(
+                    status,
+                    error,
+                    group_id=group_id,
+                    discard_reason="agent_fault" if not committed_writes else "",
+                )
+            committed_writes.append(validated)
+            group_results.append(
+                {
+                    "group_id": group_id,
+                    "status": "applied",
+                    "changes": len(self._build_structured_changes(validated)),
+                }
+            )
+
+        return {
+            "validated": None,
+            "validated_writes": committed_writes,
+            "usage": total_usage,
+            "attempt_count": attempt_count,
+            "model_chain": current_model_chain,
+            "attempted_model_chain": attempted_chain,
+            "provider_request_ids": provider_ids,
+            "request_artifact_paths": artifact_paths,
+            "usage_counted_requests": usage_counted,
+            "dream_sweep": {
+                "status": "applied",
+                "plan": plan,
+                "plan_path": plan_path,
+                "group_results": group_results,
+                "summary": {
+                    "resident_rows": len(plan.get("reviewed_memory_ids") or []),
+                    "reviewed_rows": len(plan.get("reviewed_memory_ids") or []),
+                    "notes": len(plan.get("reviewed_note_refs") or []),
+                    "reviewed_notes": len(plan.get("reviewed_note_refs") or []),
+                    "opened_notes": len(plan.get("opened_note_refs") or []),
+                    "groups_total": len(groups),
+                    "groups_applied": len(committed_writes),
+                    "groups_failed": 0,
+                    "uncertain": len(plan.get("uncertain") or []),
+                },
+            },
+        }
+
+    def _finalize_dream_sweep_batch(
+        self,
+        batch: MemoryBatch,
+        result: dict[str, Any],
+        *,
+        now_iso: str,
+    ) -> dict[str, Any]:
+        request_ids = [item.request_id for item in batch.items]
+        self._clear_live_progress(request_ids)
+        sweep = dict(result.get("dream_sweep") or {})
+        status = str(sweep.get("status") or "").strip().lower()
+        writes = list(result.get("validated_writes") or [])
+        if not writes and isinstance(result.get("validated"), _MemoryValidatedWrite):
+            writes = [result["validated"]]
+        processed_at = self._now_iso()
+        effective_model_chain = list(result.get("model_chain") or [])
+        attempted_chain = list(result.get("attempted_model_chain") or [])
+        usage = dict(result.get("usage") or {})
+        artifact_paths = list(result.get("request_artifact_paths") or [])
+        provider_ids = list(result.get("provider_request_ids") or [])
+        attempt_count = int(result.get("attempt_count", 0) or 0)
+        usage_counted = int(result.get("usage_counted_requests", 0) or 0)
+
+        if status == "applied":
+            self._settle_dream_batch(batch, status="applied", now_iso=processed_at)
+            self._drop_request_ids(set(request_ids))
+            self._purge_failed_records_for_request_ids(set(request_ids))
+            requeued_failed = self._requeue_next_parked_on_success(now_iso=now_iso)
+            terminal = self._append_terminal_history(
+                batch=batch,
+                status="applied",
+                op=batch.op,
+                processed_at=processed_at,
+                usage=usage,
+                model_chain=effective_model_chain,
+                attempted_model_chain=attempted_chain,
+                attempt_count=attempt_count,
+                validated=result.get("validated"),
+                validated_writes=writes,
+                dream_sweep=sweep,
+                provider_request_ids=provider_ids,
+                request_artifact_paths=artifact_paths,
+                usage_counted_requests=usage_counted,
+            )
+            return {
+                "ok": True,
+                "status": "applied",
+                "op": batch.op,
+                "processed": len(batch.items),
+                "request_ids": request_ids,
+                "attempt_count": attempt_count,
+                "usage": dict(terminal["usage"]),
+                "model_chain": effective_model_chain,
+                "provider_request_ids": provider_ids,
+                "request_artifact_paths": artifact_paths,
+                "processed_at": processed_at,
+                **self._dream_metadata_from_batch(batch),
+                **({"noop_reason": str(terminal.get("noop_reason") or "").strip()} if str(terminal.get("noop_reason") or "").strip() else {}),
+                "dream_plan_summary": dict(sweep.get("summary") or {}),
+                "dream_group_results": list(sweep.get("group_results") or []),
+                "dream_plan_path": str(sweep.get("plan_path") or ""),
+                **({"requeued_failed_id": str(requeued_failed.get("failed_id") or "")} if requeued_failed else {}),
+            }
+
+        if status == "cancelled":
+            self._settle_dream_batch(batch, status="operator_cancelled", now_iso=processed_at)
+            self._drop_request_ids(set(request_ids))
+            terminal = self._append_terminal_history(
+                batch=batch,
+                status="discarded",
+                op=batch.op,
+                processed_at=processed_at,
+                discard_reason="operator_cancelled",
+                usage=usage,
+                model_chain=effective_model_chain,
+                attempted_model_chain=attempted_chain,
+                attempt_count=attempt_count,
+                validated_writes=writes,
+                dream_sweep=sweep,
+                provider_request_ids=provider_ids,
+                request_artifact_paths=artifact_paths,
+                usage_counted_requests=usage_counted,
+            )
+            return {
+                "ok": True,
+                "status": "cancelled",
+                "op": batch.op,
+                "processed": len(batch.items),
+                "request_ids": request_ids,
+                "attempt_count": attempt_count,
+                "usage": dict(terminal["usage"]),
+                "model_chain": effective_model_chain,
+                "provider_request_ids": provider_ids,
+                "request_artifact_paths": artifact_paths,
+                "processed_at": processed_at,
+                "discard_reason": "operator_cancelled",
+                "dream_plan_summary": dict(sweep.get("summary") or {}),
+                "dream_group_results": list(sweep.get("group_results") or []),
+                "dream_plan_path": str(sweep.get("plan_path") or ""),
+            }
+
+        error = str(result.get("error") or sweep.get("error") or "dream sweep failed").strip()
+        self._settle_dream_batch(batch, status=f"partially_applied: {error}", now_iso=processed_at)
+        self._drop_request_ids(set(request_ids))
+        terminal = self._append_terminal_history(
+            batch=batch,
+            status="partially_applied",
+            op=batch.op,
+            processed_at=processed_at,
+            error=error,
+            usage=usage,
+            model_chain=effective_model_chain,
+            attempted_model_chain=attempted_chain,
+            attempt_count=attempt_count,
+            validated_writes=writes,
+            dream_sweep=sweep,
+            provider_request_ids=provider_ids,
+            request_artifact_paths=artifact_paths,
+            usage_counted_requests=usage_counted,
+        )
+        return {
+            "ok": False,
+            "status": "partially_applied",
+            "op": batch.op,
+            "processed": len(batch.items),
+            "request_ids": request_ids,
+            "attempt_count": attempt_count,
+            "usage": dict(terminal["usage"]),
+            "model_chain": effective_model_chain,
+            "provider_request_ids": provider_ids,
+            "request_artifact_paths": artifact_paths,
+            "processed_at": processed_at,
+            "error": error,
+            "dream_plan_summary": dict(sweep.get("summary") or {}),
+            "dream_group_results": list(sweep.get("group_results") or []),
+            "dream_plan_path": str(sweep.get("plan_path") or ""),
         }
 
     async def run_due_batch_once(
@@ -9861,12 +10843,20 @@ class MemoryManager:
                 return self._mark_batch_blocked(batch, effective_now, "memory role not configured")
 
             try:
-                result = await self._run_memory_agent_batch(
-                    batch=batch,
-                    runtime_config=runtime_config,
-                    runtime_revision=int(_revision or 0),
-                    model_chain=model_chain,
-                )
+                if str(batch.op or "").strip().lower() == "dream":
+                    result = await self._run_dream_sweep_batch(
+                        batch=batch,
+                        runtime_config=runtime_config,
+                        runtime_revision=int(_revision or 0),
+                        model_chain=model_chain,
+                    )
+                else:
+                    result = await self._run_memory_agent_batch(
+                        batch=batch,
+                        runtime_config=runtime_config,
+                        runtime_revision=int(_revision or 0),
+                        model_chain=model_chain,
+                    )
             except Exception as exc:
                 # 运行时异常（含 provider 抛出的链路耗尽错误）按瞬时失败停车：
                 # 离开主队列、保留完整载荷与错误，等成功信号或人工重试，不再队头无限自旋。
@@ -9884,6 +10874,13 @@ class MemoryManager:
                 )
                 self._settle_dream_batch(batch, status="provider_error: agent_exception", now_iso=effective_now)
                 return self._parked_batch_report(batch, failed_record, discard_reason="agent_exception")
+
+            sweep_result = result.get("dream_sweep")
+            if isinstance(sweep_result, dict) and (
+                str(sweep_result.get("status") or "").strip().lower() in {"applied", "cancelled", "partially_applied"}
+                or bool(result.get("validated_writes"))
+            ):
+                return self._finalize_dream_sweep_batch(batch, result, now_iso=effective_now)
 
             if bool(result.get("capacity_replay")):
                 return await self._replay_capacity_batch(
@@ -10636,6 +11633,10 @@ class MemoryManager:
                 projected["live_progress"] = {
                     "rounds": int(prog.get("rounds", 0) or 0),
                     "usage": dict(prog.get("usage") or {}),
+                    "phase": str(prog.get("phase") or ""),
+                    "group_index": int(prog.get("group_index", 0) or 0),
+                    "group_total": int(prog.get("group_total", 0) or 0),
+                    "group_id": str(prog.get("group_id") or ""),
                 }
         return projected
 

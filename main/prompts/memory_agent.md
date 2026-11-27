@@ -60,20 +60,20 @@
   - 用于改写已有记忆
   - `line` 是完整行卡第一行开头的行号；越界会整批打回
   - 不要把行号、memory_id、时间或 `memory_body:` 抄进 `content`
-  - `content` 与原正文相同时可省略 `minimal_memory`，系统保留旧值；`content` 变化时必须显式给新的 `minimal_memory`
+  - `content` 与原正文相同时可省略 `minimal_memory`，系统保留旧值；`content` 变化时可省略，系统安全回退为 `content`，也可以显式给更短的新值
   - 系统保留这条记忆的 id 与 source，并按正文是否真的变了刷新它的日期；**不要在 `content` 里写日期**
   - `note_ref` 不给就沿用这条记忆原有的 note；要换挂才写新名字
   - 当候选与旧记忆同槽位但新表述更准确、更规范、更完整时，优先使用 rewrite
-- `deletes?: number[]`
-  - 传入要删除的记忆**行号**；该记忆独占引用的 note 会被回收，被其他记忆共享引用的 note 保留
-  - 每个 deletes 行必须在 `delete_reasons` 里有同 line 的删除意图
+- `deletes?: Array<number | { line: number, reason: string, replacement_line?: number, authority_basis: "explicit_supersession" | "newer_timestamp" | "duplicate" | "operator_request", scope_match: true, evidence?: string }>`
+  - 可只传行号，也可直接传带删除意图的对象；该记忆独占引用的 note 会被回收，被其他记忆共享引用的 note 保留
   - 操作员用 id 提的请求已在入队时翻译成行号；只按行号提交。
 - `delete_reasons?: Array<{ line: number, reason: string, replacement_line?: number, authority_basis: "explicit_supersession" | "newer_timestamp" | "duplicate" | "operator_request", scope_match: true, evidence?: string }>`
+  - 旧形状或混合提交仍可用；不要与 deletes 对象里的同 line 原因重复。
   - `reason` 写清删除原因；`scope_match` 只能为 true
   - `explicit_supersession` 与 `duplicate` 必须给 `replacement_line` 和 `evidence`
   - `newer_timestamp` 必须给 `replacement_line`；系统按库里的 `(updated_at, created_at)` 核真实顺序
   - `operator_request` 只用于普通回合的操作员删除要求，dream 禁用
-  - 语义 scope 与显式取代由你判断；机器只核行号、时间顺序、domain/cluster 与字段完整性
+  - 语义 scope 与显式取代由你判断；机器只核行号、时间顺序、domain/action group 与字段完整性
 - `category_deletes?: string[]`
   - 摘掉正文末尾 `归并记忆` 一节的**整个分类**：填那一行末尾括号里的句柄，写分类名同样算命中
   - 分类行没有行号可指，只能用这个字段

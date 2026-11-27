@@ -96,14 +96,18 @@ def _dream_batch(
     )
 
 
-def _dream_session(manager):
-    return _module()._MemoryToolSession(
+def _dream_session(manager, *, phase: str = "", request_id: str = "dream_test"):
+    session = _module()._MemoryToolSession(
         snapshot_text=manager.snapshot_text(),
         notes_dir=manager.notes_dir,
         index_dir=manager.index_dir,
         batch_op="dream",
         owned_note_refs_fn=lambda: set(manager._memory_repo.owned_note_refs()),
     )
+    session.dream_phase = phase
+    session.dream_request_id = request_id
+    session.dream_scope_key = "full"
+    return session
 
 
 def _write_batch():
@@ -120,6 +124,78 @@ def _write_batch():
             )
         ],
     )
+
+
+def _fake_review_result(manager, *, groups: list[dict] | None = None):
+    scope = manager._dream_full_scope_snapshot()
+    plan = {
+        "version": 1,
+        "reviewed_memory_ids": list(scope["memory_ids"]),
+        "reviewed_note_refs": list(scope["note_refs"]),
+        "opened_note_refs": [],
+        "groups": list(groups or []),
+        "uncertain": [],
+    }
+    return {
+        "validated": None,
+        "dream_plan": plan,
+        "dream_plan_path": "",
+        "usage": {"input_tokens": 1, "output_tokens": 1, "cache_read_tokens": 0},
+        "attempt_count": 1,
+        "model_chain": ["memory-primary"],
+        "attempted_model_chain": ["memory-primary"],
+        "provider_request_ids": [],
+        "request_artifact_paths": [],
+        "usage_counted_requests": 0,
+    }
+
+
+def _real_group_apply_result(manager, batch):
+    payload = json.loads(batch.items[0].payload_text)
+    session = _module()._MemoryToolSession(
+        snapshot_text=manager.snapshot_text(),
+        notes_dir=manager.notes_dir,
+        index_dir=manager.index_dir,
+        batch_op="dream",
+        owned_note_refs_fn=lambda: set(manager._memory_repo.owned_note_refs()),
+    )
+    session.dream_phase = "apply"
+    session.dream_group_id = str(payload.get("group_id") or "")
+    session.dream_base_revision = int(payload.get("base_revision") or 0)
+    session.allowed_memory_ids = set(payload.get("memory_ids") or [])
+    session.allowed_note_refs = set(payload.get("note_refs") or [])
+    line_by_id = {entry.memory_id: index + 1 for index, entry in enumerate(manager.resident_lines())}
+    replacement = str(payload.get("replacement_memory_id") or "")
+    target = next(memory_id for memory_id in payload["memory_ids"] if memory_id != replacement)
+    tools = {tool.name: tool for tool in manager._memory_agent_tools(session)}
+    staged = tools["memory_apply_batch"].invoke({
+        "deletes": [line_by_id[target]],
+        "delete_reasons": [{
+            "line": line_by_id[target],
+            "reason": "duplicate in the same action group",
+            "replacement_line": line_by_id[replacement],
+            "authority_basis": "duplicate",
+            "scope_match": True,
+            "evidence": "replacement retains the target",
+        }],
+    })
+    assert staged["ok"] is True, staged
+    assert tools["memory_apply_confirm"].invoke({})["ok"] is True
+    validated = manager._validate_candidate_state(
+        batch=batch,
+        before_text=manager.snapshot_text(),
+        session=session,
+    )
+    return {
+        "validated": validated,
+        "usage": {"input_tokens": 2, "output_tokens": 2, "cache_read_tokens": 0},
+        "attempt_count": 1,
+        "model_chain": ["memory-primary"],
+        "attempted_model_chain": ["memory-primary"],
+        "provider_request_ids": [],
+        "request_artifact_paths": [],
+        "usage_counted_requests": 0,
+    }
 
 
 def test_dream_lane_is_single_row() -> None:
@@ -392,7 +468,7 @@ def test_dream_system_prompt_is_separate_from_write_prompt(tmp_path: Path) -> No
     manager = _manager(tmp_path)
     try:
         assert manager._memory_agent_system_prompt(batch_op="dream") != manager._memory_agent_system_prompt(batch_op="write")
-        assert "noop_reason" in manager._memory_agent_system_prompt(batch_op="dream")
+        assert "memory_dream_plan" in manager._memory_agent_system_prompt(batch_op="dream")
     finally:
         manager.close()
 
@@ -420,9 +496,279 @@ def test_dream_read_tools_expose_full_entry_note_index_and_batch_reads(tmp_path:
         assert entry["created_at"] == "2026-04-25 00:00"
         assert {item["ref"] for item in index} >= {"note_a", "note_b", "note_category"}
         assert next(item for item in index if item["ref"] == "note_category")["kind"] == "category"
+        assert all("sections" not in item and "section_review_candidates" not in item for item in index)
+        assert all("section_count" in item and "has_evidence_hints" in item for item in index)
         assert notes["notes"]["note_a"] == "note A body\n"
         assert notes["notes"]["note_b"] == "note B body\n"
         assert "note_missing" in notes["errors"]
+    finally:
+        manager.close()
+
+
+def test_dream_plan_requires_full_coverage_and_stages_groups(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    try:
+        first = _add(manager, "重复规则甲", note_ref="note_plan")
+        second = _add(manager, "重复规则乙", note_ref="note_plan")
+        (manager.notes_dir / "note_plan.md").write_text("# 规则\n正文\n", encoding="utf-8")
+        _paint(manager)
+        scope = manager._dream_full_scope_snapshot()
+        session = _dream_session(manager, phase="review")
+        tools = {tool.name: tool for tool in manager._memory_agent_tools(session)}
+
+        staged = tools["memory_dream_plan"].invoke({
+            "reviewed_memory_ids": scope["memory_ids"],
+            "reviewed_note_refs": scope["note_refs"],
+            "opened_note_refs": ["note_plan"],
+            "groups": [{
+                "group_id": "g1",
+                "kind": "duplicate",
+                "memory_ids": [first, second],
+                "note_refs": ["note_plan"],
+                "replacement_memory_id": second,
+                "reason": "same scope and trigger",
+                "evidence": "second retains the first",
+            }],
+            "uncertain": [],
+        })
+
+        assert staged["ok"] is True
+        assert staged["status"] == "plan_staged"
+        assert staged["summary"]["reviewed_rows"] == 2
+        assert staged["summary"]["groups"] == 1
+        assert session.dream_plan["groups"][0]["group_id"] == "g1"
+        path = manager._persist_dream_plan(session)
+        assert Path(path).exists()
+        assert json.loads(Path(path).read_text(encoding="utf-8"))["request_id"] == "dream_test"
+    finally:
+        manager.close()
+
+
+def test_dream_plan_rejects_missing_coverage_and_overlapping_groups(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    try:
+        first = _add(manager, "规则甲")
+        second = _add(manager, "规则乙")
+        _paint(manager)
+        scope = manager._dream_full_scope_snapshot()
+        session = _dream_session(manager, phase="review")
+        tools = {tool.name: tool for tool in manager._memory_agent_tools(session)}
+
+        missing = tools["memory_dream_plan"].invoke({
+            "reviewed_memory_ids": [first],
+            "reviewed_note_refs": scope["note_refs"],
+            "opened_note_refs": [],
+            "groups": [],
+        })
+        assert missing["ok"] is False
+        assert "reviewed_memory_ids" in missing["errors"]
+
+        overlap = tools["memory_dream_plan"].invoke({
+            "reviewed_memory_ids": scope["memory_ids"],
+            "reviewed_note_refs": scope["note_refs"],
+            "opened_note_refs": [],
+            "groups": [
+                {"group_id": "g1", "kind": "rewrite", "memory_ids": [first], "note_refs": [], "reason": "a"},
+                {"group_id": "g2", "kind": "rewrite", "memory_ids": [first, second], "note_refs": [], "reason": "b"},
+            ],
+        })
+        assert overlap["ok"] is False
+        assert "groups[1].memory_ids" in overlap["errors"]
+    finally:
+        manager.close()
+
+
+def test_dream_apply_prompt_provides_group_json_skeleton(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    try:
+        first = _add(manager, "重复规则甲", note_ref="note_group", now_iso="2026-04-24T00:00:00+08:00")
+        second = _add(manager, "重复规则乙", note_ref="note_group", now_iso="2026-04-25T00:00:00+08:00")
+        (manager.notes_dir / "note_group.md").write_text("# 规则\n正文\n", encoding="utf-8")
+        _paint(manager)
+        line_by_id = {entry.memory_id: index + 1 for index, entry in enumerate(manager.resident_lines())}
+        source = _dream_batch(manager).items[0]
+        batch = manager._dream_apply_batch(
+            source,
+            base_revision=manager.latest_memory_revision(),
+            group={
+                "group_id": "g1",
+                "kind": "duplicate",
+                "memory_ids": [first, second],
+                "note_refs": ["note_group"],
+                "replacement_memory_id": second,
+                "reason": "duplicate",
+                "evidence": "second keeps first",
+            },
+            group_index=1,
+            group_total=1,
+        )
+        payload = json.loads(batch.items[0].payload_text)
+        skeleton = manager._dream_apply_group_skeleton(payload)
+        assert skeleton["deletes"][0]["line"] == line_by_id[first]
+        assert skeleton["deletes"][0]["replacement_line"] == line_by_id[second]
+        assert skeleton["deletes"][0]["authority_basis"] == "duplicate"
+        assert skeleton["deletes"][0]["scope_match"] is True
+        assert skeleton["rewrites"][0]["line"] == line_by_id[second]
+        assert "minimal_memory" not in skeleton["rewrites"][0]
+        assert "note_group" in skeleton["note_edits"]
+        prompt = manager._dream_apply_agent_user_prompt(
+            batch=batch,
+            snapshot_text=manager.snapshot_text(),
+            repair_reason="",
+        )
+        assert "JSON 骨架" in prompt
+        assert f'"line": {line_by_id[first]}' in prompt
+        assert f'"replacement_line": {line_by_id[second]}' in prompt
+    finally:
+        manager.close()
+
+
+def test_dream_rewrite_without_minimal_memory_uses_content_fallback(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    try:
+        memory_id = _add(manager, "旧正文", now_iso="2026-04-24T00:00:00+08:00")
+        _paint(manager)
+        line = next(index + 1 for index, entry in enumerate(manager.resident_lines()) if entry.memory_id == memory_id)
+        session = _dream_session(manager)
+        tools = {tool.name: tool for tool in manager._memory_agent_tools(session)}
+        staged = tools["memory_apply_batch"].invoke({
+            "rewrites": [{"line": line, "content": "新正文"}],
+        })
+        assert staged["ok"] is True, staged
+        assert tools["memory_apply_confirm"].invoke({})["ok"] is True
+        validated = manager._validate_candidate_state(
+            batch=_dream_batch(manager),
+            before_text=manager.snapshot_text(),
+            session=session,
+        )
+        assert validated.rewrites[0]["minimal_memory"] == "新正文"
+    finally:
+        manager.close()
+
+
+def test_dream_rewrite_accepts_minimal_memory_without_arrow_style(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    try:
+        memory_id = _add(manager, "旧正文", now_iso="2026-04-24T00:00:00+08:00")
+        _paint(manager)
+        line = next(index + 1 for index, entry in enumerate(manager.resident_lines()) if entry.memory_id == memory_id)
+        tools = {tool.name: tool for tool in manager._memory_agent_tools(_dream_session(manager))}
+        staged = tools["memory_apply_batch"].invoke({
+            "rewrites": [{"line": line, "content": "新正文", "minimal_memory": "短摘要"}],
+        })
+        assert staged["ok"] is True, staged
+    finally:
+        manager.close()
+
+
+def test_dream_delete_accepts_inline_reason_objects(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    try:
+        first = _add(manager, "重复规则甲", now_iso="2026-04-24T00:00:00+08:00")
+        second = _add(manager, "重复规则乙", now_iso="2026-04-25T00:00:00+08:00")
+        _paint(manager)
+        line_by_id = {entry.memory_id: index + 1 for index, entry in enumerate(manager.resident_lines())}
+        tools = {tool.name: tool for tool in manager._memory_agent_tools(_dream_session(manager))}
+        staged = tools["memory_apply_batch"].invoke({
+            "deletes": [{
+                "line": line_by_id[first],
+                "reason": "duplicate retained by replacement",
+                "replacement_line": line_by_id[second],
+                "authority_basis": "duplicate",
+                "scope_match": True,
+                "evidence": "same scope and trigger",
+            }],
+        })
+        assert staged["ok"] is True, staged
+        assert staged["preview"]["deletes"] == 1
+    finally:
+        manager.close()
+
+
+def test_dream_delete_rejects_duplicate_inline_and_separate_reason(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    try:
+        first = _add(manager, "重复规则甲", now_iso="2026-04-24T00:00:00+08:00")
+        second = _add(manager, "重复规则乙", now_iso="2026-04-25T00:00:00+08:00")
+        _paint(manager)
+        line_by_id = {entry.memory_id: index + 1 for index, entry in enumerate(manager.resident_lines())}
+        tools = {tool.name: tool for tool in manager._memory_agent_tools(_dream_session(manager))}
+        reason = {
+            "line": line_by_id[first],
+            "reason": "duplicate retained by replacement",
+            "replacement_line": line_by_id[second],
+            "authority_basis": "duplicate",
+            "scope_match": True,
+            "evidence": "same scope and trigger",
+        }
+        staged = tools["memory_apply_batch"].invoke({
+            "deletes": [reason],
+            "delete_reasons": [reason],
+        })
+        assert staged["ok"] is False
+        assert "duplicate delete reason line" in json.dumps(staged.get("errors") or {})
+    finally:
+        manager.close()
+
+
+def test_dream_apply_group_rejects_rows_outside_the_group(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    try:
+        first = _add(manager, "组内规则")
+        outside = _add(manager, "组外规则")
+        _paint(manager)
+        session = _dream_session(manager, phase="apply")
+        session.allowed_memory_ids = {first}
+        tools = {tool.name: tool for tool in manager._memory_agent_tools(session)}
+        outside_line = next(index + 1 for index, entry in enumerate(manager.resident_lines()) if entry.memory_id == outside)
+        staged = tools["memory_apply_batch"].invoke({
+            "rewrites": [{
+                "line": outside_line,
+                "content": "组外规则->不应修改",
+                "minimal_memory": "组外规则->不应修改",
+            }],
+        })
+        assert staged["ok"] is False
+        assert "outside this dream action group" in json.dumps(staged.get("errors") or {})
+    finally:
+        manager.close()
+
+
+def test_dream_apply_group_rejects_dedup_deletion_of_outside_row(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    try:
+        _add(manager, "组内旧正文")
+        _add(manager, "组外目标正文->保留完整规则与触发条件，并且记录所有例外与边界条件，确保内容足够长")
+        _paint(manager)
+        entries = manager.resident_lines()
+        inside = entries[0].memory_id
+        outside = entries[1].memory_id
+        outside_body = next(row["memory_body"] for row in manager._memory_repo.list_memories() if row["memory_id"] == outside)
+        session = _dream_session(manager, phase="apply")
+        session.allowed_memory_ids = {inside}
+        tools = {tool.name: tool for tool in manager._memory_agent_tools(session)}
+        staged = tools["memory_apply_batch"].invoke({
+            "rewrites": [{
+                "line": 1,
+                "content": outside_body,
+                "minimal_memory": "摘要",
+            }],
+        })
+        assert staged["ok"] is False
+        assert "outside this dream action group" in json.dumps(staged.get("errors") or {})
+    finally:
+        manager.close()
+
+
+def test_dream_plan_tool_is_only_exposed_in_review_phase(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    try:
+        review_tools = {tool.name for tool in manager._memory_agent_tools(_dream_session(manager, phase="review"))}
+        apply_tools = {tool.name for tool in manager._memory_agent_tools(_dream_session(manager, phase="apply"))}
+        assert "memory_dream_plan" in review_tools
+        assert "memory_apply_batch" not in review_tools
+        assert "memory_dream_plan" not in apply_tools
+        assert "memory_apply_batch" in apply_tools
     finally:
         manager.close()
 
@@ -888,24 +1234,7 @@ async def test_idle_worker_tick_auto_enqueues_and_consumes_threshold_dream(tmp_p
         monkeypatch.setattr(module, "get_runtime_config", lambda force=False: (runtime, 1, False), raising=False)
 
         async def fake_run(**kwargs):
-            validated = module._MemoryValidatedWrite(
-                document_text=manager.snapshot_text(),
-                note_writes={},
-                note_refs_written=[],
-                memory_chars_after=manager._resident_memory_chars(),
-                document_preview=manager.snapshot_text(),
-                noop_reason="already tidy",
-            )
-            return {
-                "validated": validated,
-                "usage": {"input_tokens": 1, "output_tokens": 1, "cache_read_tokens": 0},
-                "attempt_count": 1,
-                "model_chain": ["memory-primary"],
-                "attempted_model_chain": ["memory-primary"],
-                "provider_request_ids": [],
-                "request_artifact_paths": [],
-                "usage_counted_requests": 0,
-            }
+            return _fake_review_result(manager)
 
         monkeypatch.setattr(manager, "_run_memory_agent_batch", fake_run)
         report = await manager.run_due_batch_once(now_iso="2026-04-25T00:00:10+08:00")
@@ -934,24 +1263,7 @@ async def test_run_due_batch_consumes_dream_and_records_full_metadata(tmp_path: 
         monkeypatch.setattr(module, "get_runtime_config", lambda force=False: (runtime, 1, False), raising=False)
 
         async def fake_run(**kwargs):
-            validated = module._MemoryValidatedWrite(
-                document_text=manager.snapshot_text(),
-                note_writes={},
-                note_refs_written=[],
-                memory_chars_after=manager._resident_memory_chars(),
-                document_preview=manager.snapshot_text(),
-                noop_reason="library is already tidy",
-            )
-            return {
-                "validated": validated,
-                "usage": {"input_tokens": 1, "output_tokens": 1, "cache_read_tokens": 0},
-                "attempt_count": 1,
-                "model_chain": ["memory-primary"],
-                "attempted_model_chain": ["memory-primary"],
-                "provider_request_ids": [],
-                "request_artifact_paths": [],
-                "usage_counted_requests": 0,
-            }
+            return _fake_review_result(manager)
 
         monkeypatch.setattr(manager, "_run_memory_agent_batch", fake_run)
         queued = await manager.enqueue_dream_request(
@@ -972,10 +1284,351 @@ async def test_run_due_batch_consumes_dream_and_records_full_metadata(tmp_path: 
         assert ops[-1]["dream_scope_key"] == "full"
         assert ops[-1]["dream_base_revision"] == 0
         assert "dream_cluster_key" not in ops[-1]
-        assert ops[-1]["noop_reason"] == "library is already tidy"
+        assert ops[-1]["noop_reason"] == "full review found no changes"
         assert queued["request_id"] == report["request_ids"][0]
         assert manager._read_queue_requests() == []
         assert "规则一" in manager.snapshot_text()
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_dream_sweep_applies_multiple_groups_with_refreshed_lines(tmp_path: Path, monkeypatch) -> None:
+    module = _module()
+    manager = _manager(tmp_path)
+    try:
+        a1 = _add(manager, "重复甲一", now_iso="2026-04-24T00:00:00+08:00")
+        a2 = _add(manager, "重复甲二", now_iso="2026-04-25T00:00:00+08:00")
+        b1 = _add(manager, "重复乙一", now_iso="2026-04-24T00:00:00+08:00")
+        b2 = _add(manager, "重复乙二", now_iso="2026-04-25T00:00:00+08:00")
+        _paint(manager)
+        groups = [
+            {"group_id": "g1", "kind": "duplicate", "memory_ids": [a1, a2], "note_refs": [], "replacement_memory_id": a2, "reason": "a", "evidence": "a2 keeps a1"},
+            {"group_id": "g2", "kind": "duplicate", "memory_ids": [b1, b2], "note_refs": [], "replacement_memory_id": b2, "reason": "b", "evidence": "b2 keeps b1"},
+        ]
+        runtime = SimpleNamespace(get_role_model_keys=lambda role: ["memory-primary"] if role == "memory" else [])
+        monkeypatch.setattr(module, "get_runtime_config", lambda force=False: (runtime, 1, False), raising=False)
+
+        async def fake_run(**kwargs):
+            payload = json.loads(kwargs["batch"].items[0].payload_text)
+            if payload.get("phase") == "apply":
+                return _real_group_apply_result(manager, kwargs["batch"])
+            return _fake_review_result(manager, groups=groups)
+
+        monkeypatch.setattr(manager, "_run_memory_agent_batch", fake_run)
+        queued = await manager.trigger_manual_dream()
+        report = await manager.run_due_batch_once(now_iso="2026-04-25T00:00:10+08:00")
+
+        assert report["status"] == "applied"
+        assert queued["request_id"] == report["request_ids"][0]
+        snapshot = manager.snapshot_text()
+        assert "重复甲一" not in snapshot and "重复乙一" not in snapshot
+        assert "重复甲二" in snapshot and "重复乙二" in snapshot
+        ops = [json.loads(line) for line in manager.ops_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+        assert ops[-1]["status"] == "applied"
+        assert [item["group_id"] for item in ops[-1]["dream_group_results"]] == ["g1", "g2"]
+        assert ops[-1]["dream_plan_summary"]["groups_applied"] == 2
+        assert len(ops[-1]["changes"]) == 2
+        assert manager._read_queue_requests() == []
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_dream_sweep_partial_failure_keeps_committed_group(tmp_path: Path, monkeypatch) -> None:
+    module = _module()
+    manager = _manager(tmp_path, trigger_changes=1)
+    try:
+        a1 = _add(manager, "重复甲一", now_iso="2026-04-24T00:00:00+08:00")
+        a2 = _add(manager, "重复甲二", now_iso="2026-04-25T00:00:00+08:00")
+        b1 = _add(manager, "重复乙一", now_iso="2026-04-24T00:00:00+08:00")
+        b2 = _add(manager, "重复乙二", now_iso="2026-04-25T00:00:00+08:00")
+        _paint(manager)
+        _revision(manager, 1, changed_ids=[a1])
+        groups = [
+            {"group_id": "g1", "kind": "duplicate", "memory_ids": [a1, a2], "note_refs": [], "replacement_memory_id": a2, "reason": "a", "evidence": "a2 keeps a1"},
+            {"group_id": "g2", "kind": "duplicate", "memory_ids": [b1, b2], "note_refs": [], "replacement_memory_id": b2, "reason": "b", "evidence": "b2 keeps b1"},
+        ]
+        runtime = SimpleNamespace(get_role_model_keys=lambda role: ["memory-primary"] if role == "memory" else [])
+        monkeypatch.setattr(module, "get_runtime_config", lambda force=False: (runtime, 1, False), raising=False)
+
+        async def fake_run(**kwargs):
+            payload = json.loads(kwargs["batch"].items[0].payload_text)
+            if payload.get("phase") == "apply":
+                if payload.get("group_id") == "g2":
+                    return {
+                        "validated": None,
+                        "discard_reason": "provider_error",
+                        "error": "provider unavailable",
+                        "usage": {"input_tokens": 3, "output_tokens": 1, "cache_read_tokens": 0},
+                        "attempt_count": 1,
+                        "model_chain": ["memory-primary"],
+                        "attempted_model_chain": ["memory-primary"],
+                        "provider_request_ids": [],
+                        "request_artifact_paths": [],
+                        "usage_counted_requests": 0,
+                    }
+                return _real_group_apply_result(manager, kwargs["batch"])
+            return _fake_review_result(manager, groups=groups)
+
+        monkeypatch.setattr(manager, "_run_memory_agent_batch", fake_run)
+        queued = await manager._maybe_enqueue_dream_locked("2026-04-25T00:00:02+08:00")
+        assert queued is not None
+        report = await manager.run_due_batch_once(now_iso="2026-04-25T00:00:10+08:00")
+
+        assert report["status"] == "partially_applied"
+        snapshot = manager.snapshot_text()
+        assert "重复甲一" not in snapshot
+        assert "重复乙一" in snapshot
+        ops = [json.loads(line) for line in manager.ops_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+        assert ops[-1]["status"] == "partially_applied"
+        assert [item["status"] for item in ops[-1]["dream_group_results"]] == ["applied", "partially_applied"]
+        assert ops[-1]["dream_plan_summary"]["groups_applied"] == 1
+        assert manager._read_queue_requests() == []
+        state = manager._read_dream_state()
+        assert a1 in state["pending_memory_ids"]
+        assert "provider unavailable" in state["last_error"]
+        assert await manager._maybe_enqueue_dream_locked("2026-04-25T00:01:03+08:00") is None
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_dream_group_exception_after_commit_records_partial_progress(tmp_path: Path, monkeypatch) -> None:
+    module = _module()
+    manager = _manager(tmp_path, trigger_changes=1)
+    try:
+        first = _add(manager, "重复甲一", now_iso="2026-04-24T00:00:00+08:00")
+        second = _add(manager, "重复甲二", now_iso="2026-04-25T00:00:00+08:00")
+        third = _add(manager, "重复乙一", now_iso="2026-04-24T00:00:00+08:00")
+        fourth = _add(manager, "重复乙二", now_iso="2026-04-25T00:00:00+08:00")
+        _paint(manager)
+        _revision(manager, 1, changed_ids=[first])
+        groups = [
+            {"group_id": "g1", "kind": "duplicate", "memory_ids": [first, second], "note_refs": [], "replacement_memory_id": second, "reason": "a", "evidence": "second keeps first"},
+            {"group_id": "g2", "kind": "duplicate", "memory_ids": [third, fourth], "note_refs": [], "replacement_memory_id": fourth, "reason": "b", "evidence": "fourth keeps third"},
+        ]
+        runtime = SimpleNamespace(get_role_model_keys=lambda role: ["memory-primary"] if role == "memory" else [])
+        monkeypatch.setattr(module, "get_runtime_config", lambda force=False: (runtime, 1, False), raising=False)
+
+        async def fake_run(**kwargs):
+            payload = json.loads(kwargs["batch"].items[0].payload_text)
+            if payload.get("phase") == "apply":
+                if payload.get("group_id") == "g2":
+                    raise RuntimeError("unexpected group failure")
+                return _real_group_apply_result(manager, kwargs["batch"])
+            return _fake_review_result(manager, groups=groups)
+
+        monkeypatch.setattr(manager, "_run_memory_agent_batch", fake_run)
+        queued = await manager._maybe_enqueue_dream_locked("2026-04-25T00:00:02+08:00")
+        assert queued is not None
+        report = await manager.run_due_batch_once(now_iso="2026-04-25T00:00:10+08:00")
+        assert report["status"] == "partially_applied"
+        assert "重复甲一" not in manager.snapshot_text()
+        assert "重复乙一" in manager.snapshot_text()
+        ops = [json.loads(line) for line in manager.ops_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+        assert ops[-1]["status"] == "partially_applied"
+        assert ops[-1]["dream_plan_summary"]["groups_applied"] == 1
+        assert manager._read_failed_records() == []
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_dream_first_group_provider_failure_parks_normally(tmp_path: Path, monkeypatch) -> None:
+    module = _module()
+    manager = _manager(tmp_path, trigger_changes=1)
+    try:
+        first = _add(manager, "重复甲一", now_iso="2026-04-24T00:00:00+08:00")
+        second = _add(manager, "重复甲二", now_iso="2026-04-25T00:00:00+08:00")
+        _paint(manager)
+        _revision(manager, 1, changed_ids=[first])
+        groups = [{
+            "group_id": "g1",
+            "kind": "duplicate",
+            "memory_ids": [first, second],
+            "note_refs": [],
+            "replacement_memory_id": second,
+            "reason": "duplicate",
+            "evidence": "second keeps first",
+        }]
+        runtime = SimpleNamespace(get_role_model_keys=lambda role: ["memory-primary"] if role == "memory" else [])
+        monkeypatch.setattr(module, "get_runtime_config", lambda force=False: (runtime, 1, False), raising=False)
+
+        async def fake_run(**kwargs):
+            payload = json.loads(kwargs["batch"].items[0].payload_text)
+            if payload.get("phase") == "apply":
+                return {
+                    "validated": None,
+                    "discard_reason": "provider_error",
+                    "error": "provider unavailable",
+                    "usage": {"input_tokens": 1, "output_tokens": 0, "cache_read_tokens": 0},
+                    "attempt_count": 1,
+                    "model_chain": ["memory-primary"],
+                    "attempted_model_chain": ["memory-primary"],
+                    "provider_request_ids": [],
+                    "request_artifact_paths": [],
+                    "usage_counted_requests": 0,
+                }
+            return _fake_review_result(manager, groups=groups)
+
+        monkeypatch.setattr(manager, "_run_memory_agent_batch", fake_run)
+        queued = await manager._maybe_enqueue_dream_locked("2026-04-25T00:00:02+08:00")
+        assert queued is not None
+        report = await manager.run_due_batch_once(now_iso="2026-04-25T00:00:10+08:00")
+        assert report["status"] == "parked"
+        assert report["discard_reason"] == "provider_error"
+        assert manager._read_queue_requests() == []
+        failed = manager._read_failed_records()
+        assert len(failed) == 1
+        assert failed[0]["category"] == "provider_error"
+        assert "重复甲一" in manager.snapshot_text()
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_dream_sweep_cancel_after_group_keeps_committed_work(tmp_path: Path, monkeypatch) -> None:
+    module = _module()
+    manager = _manager(tmp_path, trigger_changes=1)
+    try:
+        first = _add(manager, "重复甲一", now_iso="2026-04-24T00:00:00+08:00")
+        second = _add(manager, "重复甲二", now_iso="2026-04-25T00:00:00+08:00")
+        third = _add(manager, "重复乙一", now_iso="2026-04-24T00:00:00+08:00")
+        fourth = _add(manager, "重复乙二", now_iso="2026-04-25T00:00:00+08:00")
+        _paint(manager)
+        _revision(manager, 1, changed_ids=[first])
+        groups = [
+            {"group_id": "g1", "kind": "duplicate", "memory_ids": [first, second], "note_refs": [], "replacement_memory_id": second, "reason": "a", "evidence": "second keeps first"},
+            {"group_id": "g2", "kind": "duplicate", "memory_ids": [third, fourth], "note_refs": [], "replacement_memory_id": fourth, "reason": "b", "evidence": "fourth keeps third"},
+        ]
+        runtime = SimpleNamespace(get_role_model_keys=lambda role: ["memory-primary"] if role == "memory" else [])
+        monkeypatch.setattr(module, "get_runtime_config", lambda force=False: (runtime, 1, False), raising=False)
+
+        async def fake_run(**kwargs):
+            payload = json.loads(kwargs["batch"].items[0].payload_text)
+            if payload.get("phase") == "apply":
+                if payload.get("group_id") == "g2":
+                    return {
+                        "validated": None,
+                        "discard_reason": "cancelled",
+                        "error": "operator cancelled",
+                        "usage": {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0},
+                        "attempt_count": 1,
+                        "model_chain": ["memory-primary"],
+                        "attempted_model_chain": ["memory-primary"],
+                        "provider_request_ids": [],
+                        "request_artifact_paths": [],
+                        "usage_counted_requests": 0,
+                    }
+                return _real_group_apply_result(manager, kwargs["batch"])
+            return _fake_review_result(manager, groups=groups)
+
+        monkeypatch.setattr(manager, "_run_memory_agent_batch", fake_run)
+        queued = await manager._maybe_enqueue_dream_locked("2026-04-25T00:00:02+08:00")
+        assert queued is not None
+        report = await manager.run_due_batch_once(now_iso="2026-04-25T00:00:10+08:00")
+
+        assert report["status"] == "cancelled"
+        assert "重复甲一" not in manager.snapshot_text()
+        assert "重复乙一" in manager.snapshot_text()
+        ops = [json.loads(line) for line in manager.ops_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+        assert ops[-1]["status"] == "discarded"
+        assert ops[-1]["discard_reason"] == "operator_cancelled"
+        assert [item["status"] for item in ops[-1]["dream_group_results"]] == ["applied", "cancelled"]
+        state = manager._read_dream_state()
+        assert first in state["pending_memory_ids"]
+        assert state["last_error"] == "operator_cancelled"
+        assert manager._read_queue_requests() == []
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_dream_review_cancel_suppresses_automatic_retry(tmp_path: Path, monkeypatch) -> None:
+    module = _module()
+    manager = _manager(tmp_path, trigger_changes=1)
+    try:
+        memory_id = _add(manager, "待整理规则")
+        _paint(manager)
+        _revision(manager, 1, changed_ids=[memory_id])
+        runtime = SimpleNamespace(get_role_model_keys=lambda role: ["memory-primary"] if role == "memory" else [])
+        monkeypatch.setattr(module, "get_runtime_config", lambda force=False: (runtime, 1, False), raising=False)
+
+        async def fake_run(**kwargs):
+            return {
+                "validated": None,
+                "discard_reason": "cancelled",
+                "error": "operator cancelled",
+                "usage": {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0},
+                "attempt_count": 1,
+                "model_chain": ["memory-primary"],
+                "attempted_model_chain": ["memory-primary"],
+                "provider_request_ids": [],
+                "request_artifact_paths": [],
+                "usage_counted_requests": 0,
+            }
+
+        monkeypatch.setattr(manager, "_run_memory_agent_batch", fake_run)
+        queued = await manager._maybe_enqueue_dream_locked("2026-04-25T00:00:02+08:00")
+        assert queued is not None
+        report = await manager.run_due_batch_once(now_iso="2026-04-25T00:00:10+08:00")
+        assert report["status"] == "cancelled"
+        state = manager._read_dream_state()
+        assert state["last_error"] == "operator_cancelled"
+        assert memory_id in state["pending_memory_ids"]
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_dream_noop_review_honors_cancel_before_settlement(tmp_path: Path, monkeypatch) -> None:
+    module = _module()
+    manager = _manager(tmp_path, trigger_changes=1)
+    try:
+        memory_id = _add(manager, "已经干净的规则")
+        _paint(manager)
+        _revision(manager, 1, changed_ids=[memory_id])
+        runtime = SimpleNamespace(get_role_model_keys=lambda role: ["memory-primary"] if role == "memory" else [])
+        monkeypatch.setattr(module, "get_runtime_config", lambda force=False: (runtime, 1, False), raising=False)
+
+        async def fake_run(**kwargs):
+            await manager.cancel_queue_request(kwargs["batch"].items[0].request_id)
+            return _fake_review_result(manager, groups=[])
+
+        monkeypatch.setattr(manager, "_run_memory_agent_batch", fake_run)
+        queued = await manager._maybe_enqueue_dream_locked("2026-04-25T00:00:02+08:00")
+        assert queued is not None
+        report = await manager.run_due_batch_once(now_iso="2026-04-25T00:00:10+08:00")
+        assert report["status"] == "cancelled"
+        state = manager._read_dream_state()
+        assert memory_id in state["pending_memory_ids"]
+        assert state["last_error"] == "operator_cancelled"
+    finally:
+        manager.close()
+
+
+def test_queue_projection_exposes_dream_phase_and_group_progress(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    try:
+        manager._live_batch_progress["dream_live"] = {
+            "rounds": 3,
+            "usage": {"input_tokens": 10, "output_tokens": 2, "cache_read_tokens": 0},
+            "phase": "apply",
+            "group_index": 2,
+            "group_total": 5,
+            "group_id": "g2",
+        }
+        projected = manager._project_queue_row_for_read({
+            "op": "dream",
+            "status": "processing",
+            "request_id": "dream_live",
+            "payload_text": "{}",
+        })
+        assert projected["live_progress"]["phase"] == "apply"
+        assert projected["live_progress"]["group_index"] == 2
+        assert projected["live_progress"]["group_total"] == 5
+        assert projected["live_progress"]["group_id"] == "g2"
     finally:
         manager.close()
 

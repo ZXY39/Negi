@@ -1506,13 +1506,13 @@ def test_memory_agent_apply_batch_rejects_minimal_memory_without_condition_arrow
         )
 
         assert result["ok"] is True
-        with pytest.raises(ValueError, match="minimal_memory must use 条件->要求关键词"):
-            session.confirm_batch()  # the model's second call: a mutating batch lands only after it reads the preview
-            manager._build_validated_write_from_apply_batch(
-                before_text=manager.snapshot_text(),
-                session=session,
-                batch=batch,
-            )
+        session.confirm_batch()
+        validated = manager._build_validated_write_from_apply_batch(
+            before_text=manager.snapshot_text(),
+            session=session,
+            batch=batch,
+        )
+        assert validated.adds[0]["minimal_memory"] == "headings"
     finally:
         manager.close()
 

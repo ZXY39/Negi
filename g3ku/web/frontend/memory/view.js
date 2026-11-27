@@ -239,6 +239,7 @@ function memoryProcessedStatusLabel(item) {
     const normalizedStatus = String(item?.status || "").trim().toLowerCase();
     // 停下来的批次既不写变更也不是"看过决定不写"：状态位要说清它停在梯子的哪一级。
     if (normalizedStatus === "parked") return "已停车";
+    if (normalizedStatus === "partially_applied") return "部分应用";
     if (memoryProcessedIsNoChange(item)) return "无变更";
     const normalized = normalizedStatus;
     if (normalized === "discarded") return "已废弃";
@@ -276,6 +277,18 @@ function memoryDreamReasonLabel(reason) {
 
 function memoryDreamIsFullScope(scope) {
     return String(scope?.mode || "").trim().toLowerCase() === "full";
+}
+
+function renderMemoryDreamPlanChip(item) {
+    if (!memoryIsDreamItem(item)) return "";
+    const summary = item?.dream_plan_summary;
+    if (!summary || typeof summary !== "object") return "";
+    const total = Number(summary.groups_total || 0) || 0;
+    const applied = Number(summary.groups_applied || 0) || 0;
+    const failed = Number(summary.groups_failed || 0) || 0;
+    const label = total > 0 ? `整理组 ${applied}/${total}` : "全量审查完成";
+    const title = failed > 0 ? `${failed} 组未完成` : "本轮计划已处理";
+    return `<span class="memory-merged-chip" title="${esc(title)}">${esc(label)}</span>`;
 }
 
 function memoryDreamTriggerLabel(item) {
@@ -2116,7 +2129,14 @@ function memoryQueueLiveProgressText(item) {
     const input = Number(usage.input_tokens || 0) || 0;
     const output = Number(usage.output_tokens || 0) || 0;
     const cache = Number(usage.cache_read_tokens || 0) || 0;
-    return `第 ${rounds} 轮 · 入 ${input} / 出 ${output} / 缓存 ${cache}`;
+    const phase = String(prog.phase || "").trim().toLowerCase();
+    const groupIndex = Number(prog.group_index || 0) || 0;
+    const groupTotal = Number(prog.group_total || 0) || 0;
+    const phaseText = phase === "apply" && groupTotal > 0
+        ? `落地 ${groupIndex}/${groupTotal}`
+        : (phase === "review" ? "审查中" : "");
+    const prefix = phaseText ? `${phaseText} · ` : "";
+    return `${prefix}第 ${rounds} 轮 · 入 ${input} / 出 ${output} / 缓存 ${cache}`;
 }
 
 function renderMemoryQueueCard(item) {
@@ -2128,10 +2148,15 @@ function renderMemoryQueueCard(item) {
     const cancelBusy = String(S.memoryQueueCancelBusy || "").trim();
     const cancelDisabled = cancelRequested || (cancelBusy && cancelBusy === requestId);
     const cancelLabel = cancelRequested ? "取消中" : (isProcessing ? "取消处理" : "取消请求");
+    const isDream = memoryIsDreamItem(item);
     const cancelTitle = cancelRequested
-        ? "已请求取消：当前步骤结束后停止，本次修改回滚到处理前"
+        ? (isDream
+            ? "已请求取消：当前组结束后停止，已提交的整理组会保留"
+            : "已请求取消：当前步骤结束后停止，本次修改回滚到处理前")
         : (isProcessing
-            ? "取消处理：当前步骤结束后停止，本次修改回滚到处理前"
+            ? (isDream
+                ? "取消处理：当前组结束后停止，已提交的整理组会保留"
+                : "取消处理：当前步骤结束后停止，本次修改回滚到处理前")
             : "取消这条记忆请求（不再处理）");
     const dreamScope = memoryDreamScopeOf(item);
     let preview;
@@ -2189,8 +2214,12 @@ function renderMemoryProcessedCard(item) {
                 <div class="memory-card-minimal-row">
                     <div class="memory-card-minimal-status">
                         ${statusSlot}
+                        ${String(item?.status || "").trim().toLowerCase() === "partially_applied"
+                            ? '<span class="memory-op-chip" data-op="partial"><i data-lucide="rotate-ccw" aria-hidden="true"></i>部分应用</span>'
+                            : ""}
                         <span class="memory-scope-chip" data-memory-scope-kind="${esc(scopeKindLabel)}">${esc(scopeKindLabel)}</span>
                         ${renderMemoryMergedChip(item)}
+                        ${renderMemoryDreamPlanChip(item)}
                     </div>
                     <div class="memory-card-minimal-trailing">
                         <span class="memory-card-time">${esc(processedAt || "-")}</span>
