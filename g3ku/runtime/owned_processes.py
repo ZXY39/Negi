@@ -234,6 +234,37 @@ def find(scope: str, pid: int) -> dict[str, Any] | None:
     return None
 
 
+def list_session_owned() -> list[dict[str, Any]]:
+    """所有会话域的登记条目（`task_id` 为空），供会话道全域退出观察器清扫。
+
+    读面**不 prune**：死条目是"还没交代"的凭证，删掉就没人能报它了。
+    无法解析的条目照旧清掉。节点条目（有 `task_id`）不在这里，它们由
+    认领时挂上的无句柄观察器负责。
+    """
+    root = _owned_root()
+    if not root.exists():
+        return []
+    entries: list[dict[str, Any]] = []
+    for directory in sorted(path for path in root.iterdir() if path.is_dir()):
+        for path in sorted(directory.glob(f"*{_ENTRY_SUFFIX}")):
+            entry = _load_entry(path)
+            if entry is None:
+                path.unlink(missing_ok=True)
+                continue
+            if str(entry.get("task_id") or "").strip():
+                continue
+            if not str(entry.get("session_key") or "").strip():
+                continue
+            try:
+                pid = int(entry.get("pid") or 0)
+            except (TypeError, ValueError):
+                continue
+            if pid <= 0:
+                continue
+            entries.append(entry)
+    return entries
+
+
 def drop(scope: str, pid: int) -> None:
     directory = _scope_dir(scope, create=False)
     if not directory.exists():

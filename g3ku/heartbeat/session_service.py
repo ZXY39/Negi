@@ -11,6 +11,7 @@ from loguru import logger
 
 from g3ku.core.events import AgentEvent
 from g3ku.core.messages import UserInputMessage
+from g3ku.heartbeat.owned_process_scanner import SessionOwnedProcessScanner
 from g3ku.heartbeat.prompt_lane import (
     build_heartbeat_prompt_lane,
     format_local_timestamp,
@@ -135,6 +136,7 @@ class WebSessionHeartbeatService:
         self._task_node_error_failure_streaks: dict[str, int] = {}
         self._frontdoor_message_scanner = None
         self._session_message_scanner = None
+        self._owned_process_scanner = None
         # 非 node_error 事件失败的内存计数保底（键为 (session_key, reasons)）。node_error
         # 路径已改为按 node 持久计数（heartbeat_node_retry_state 表），本字典仅用于
         # stall/task_terminal 等无 node 维度事件的有界退避（计划 2.2）。
@@ -173,6 +175,8 @@ class WebSessionHeartbeatService:
                 interval_seconds=15.0,
             )
             await self._session_message_scanner.start()
+            self._owned_process_scanner = SessionOwnedProcessScanner(heartbeat=self)
+            await self._owned_process_scanner.start()
 
     async def stop(self) -> None:
         self._started = False
@@ -188,6 +192,10 @@ class WebSessionHeartbeatService:
         self._session_message_scanner = None
         if session_scanner is not None:
             await session_scanner.stop()
+        owned_scanner = self._owned_process_scanner
+        self._owned_process_scanner = None
+        if owned_scanner is not None:
+            await owned_scanner.stop()
         await self._wake.close()
         prompt_tasks = list(self._prompt_tasks.values())
         self._prompt_tasks.clear()
