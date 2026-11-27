@@ -4465,6 +4465,105 @@ async def discard_memory_failed_record(request: Request, failed_id: str, payload
     return {'ok': True, 'item': item}
 
 
+@router.post('/memory/dream')
+async def trigger_memory_dream(request: Request, payload: dict | None = Body(default=None)):
+    """操作员手动触发一次全量整理：入队一条 dream，由记忆 worker 尽快消费。"""
+    manager = _runtime_memory_manager(_memory_scope_from_request(request))
+    method = getattr(manager, 'trigger_manual_dream', None)
+    if not callable(method):
+        raise HTTPException(
+            status_code=503,
+            detail={'code': 'memory_dream_unavailable', 'message': 'memory dream trigger is unavailable'},
+        )
+    try:
+        result = await method()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={'code': 'memory_dream_failed', 'message': str(exc or 'memory dream trigger failed')},
+        ) from exc
+    item = dict(result or {})
+    try:
+        _append_memory_admin_audit_event(
+            manager,
+            {
+                'action': 'trigger_dream',
+                'status': str(item.get('status') or ''),
+                'request_id': str(item.get('request_id') or ''),
+                'result': 'ok',
+                'timestamp': now_iso(),
+            },
+        )
+        item['audit_logged'] = True
+    except Exception as exc:
+        item['audit_logged'] = False
+        item['audit_error'] = str(exc or 'memory admin audit write failed').strip()
+    _record_console_action(
+        category='memory',
+        audience=AUDIENCE_FRONTDOOR,
+        scope=memory_scope(_memory_scope_from_request(request)),
+        action='triggered a full memory dream sweep',
+    )
+    return {'ok': True, 'item': item}
+
+
+@router.post('/memory/queue/{request_id}/cancel')
+async def cancel_memory_queue_request(request: Request, request_id: str, payload: dict | None = Body(default=None)):
+    """取消一条尚未处理的队列请求：立即出队、不再处理，并写废弃终态记录。"""
+    manager = _runtime_memory_manager(_memory_scope_from_request(request))
+    reason = str((payload or {}).get('reason') or 'manual').strip() or 'manual'
+    method = getattr(manager, 'cancel_queue_request', None)
+    if not callable(method):
+        raise HTTPException(
+            status_code=503,
+            detail={'code': 'memory_queue_cancel_unavailable', 'message': 'memory queue cancel is unavailable'},
+        )
+    try:
+        result = await method(request_id, reason=reason)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={'code': 'memory_queue_not_found', 'message': str(exc or 'memory queue request not found')},
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={'code': 'memory_queue_processing', 'message': str(exc or 'memory queue request is being processed')},
+        ) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={'code': 'memory_queue_cancel_failed', 'message': str(exc or 'memory queue cancel failed')},
+        ) from exc
+    item = dict(result or {})
+    try:
+        _append_memory_admin_audit_event(
+            manager,
+            {
+                'action': 'cancel_queue_request',
+                'reason': reason,
+                'request_id': str(item.get('request_id') or request_id),
+                'result': 'ok',
+                'timestamp': now_iso(),
+            },
+        )
+        item['audit_logged'] = True
+    except Exception as exc:
+        item['audit_logged'] = False
+        item['audit_error'] = str(exc or 'memory admin audit write failed').strip()
+    _record_console_action(
+        category='memory',
+        audience=AUDIENCE_FRONTDOOR,
+        scope=memory_scope(_memory_scope_from_request(request)),
+        action='cancelled a queued memory request',
+    )
+    return {'ok': True, 'item': item}
+
+
 @router.get('/memory/runtime-stats')
 async def get_memory_runtime_stats():
     agent = get_agent()

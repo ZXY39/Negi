@@ -7566,6 +7566,86 @@ class MemoryManager:
         await self._append_queue_request(request)
         return {"ok": True, "request_id": request.request_id, "status": "queued"}
 
+    async def trigger_manual_dream(self) -> dict[str, Any]:
+        """Operator-triggered full sweep: enqueue one dream ahead of the waiting backlog.
+
+        Dedupes against an already queued/in-flight dream so repeated clicks do not stack
+        sweeps. The row is inserted behind any processing/consolidate head, keeping the
+        queue's single-in-flight invariant ("the processing row is rows[0]").
+        """
+        with self._io_lock:
+            rows = self._read_queue_requests()
+            for row in rows:
+                if str(row.op or "").strip().lower() == "dream":
+                    return {"ok": True, "status": "already_queued", "request_id": row.request_id}
+            scope = self._dream_full_scope_snapshot()
+            now_iso = self._now_iso()
+            payload = {
+                "mode": "full",
+                "scope_key": "full",
+                "base_revision": self.latest_memory_revision(),
+                "reason": "manual",
+                "memory_ids": scope["memory_ids"],
+                "note_refs": scope["note_refs"],
+            }
+            request = MemoryQueueRequest(
+                op="dream",
+                decision_source="self",
+                payload_text=json.dumps(payload, ensure_ascii=False),
+                created_at=now_iso,
+                request_id=self._request_id("dream"),
+                trigger_source="dream_cli",
+            )
+            index = 0
+            for position, row in enumerate(rows):
+                if str(row.status or "").strip() == "processing":
+                    index = position + 1
+                    continue
+                if str(row.op or "").strip().lower() == "consolidate":
+                    index = position + 1
+                    continue
+                break
+            rows.insert(index, self._normalize_queue_request(request))
+            self._write_queue_requests(rows)
+            state = self._read_dream_state()
+            state["last_attempted_at"] = now_iso
+            state["last_error"] = ""
+            self._write_dream_state(state)
+            return {"ok": True, "status": "queued", "request_id": request.request_id}
+
+    async def cancel_queue_request(self, request_id: str, *, reason: str = "manual") -> dict[str, Any]:
+        """Cancel a not-yet-processed queue request: drop it and record a terminal row.
+
+        A pending request has applied nothing (the agent commits only after preview +
+        confirm), so removing it rolls the intended operation back to before processing.
+        A request already in flight cannot be cancelled mid-run; the caller gets a 409.
+        """
+        target = str(request_id or "").strip()
+        if not target:
+            raise KeyError("memory queue request not found: (empty)")
+        with self._io_lock:
+            rows = self._read_queue_requests()
+            row = next((item for item in rows if item.request_id == target), None)
+            if row is None:
+                raise KeyError(f"memory queue request not found: {target}")
+            if str(row.status or "pending").strip() == "processing":
+                raise ValueError("memory queue request is being processed and cannot be cancelled")
+            batch = MemoryBatch(op=row.op, items=[row])
+            terminal = self._append_terminal_history(
+                batch=batch,
+                status="discarded",
+                op=row.op,
+                processed_at=self._now_iso(),
+                discard_reason="operator_cancelled",
+            )
+            self._drop_request_ids({target})
+            return {
+                "request_id": target,
+                "status": "cancelled",
+                "op": row.op,
+                "batch_id": str(terminal.get("batch_id") or "").strip(),
+            }
+
     def _settle_dream_batch(self, batch: MemoryBatch | MemoryQueueRequest, *, status: str, now_iso: str) -> None:
         if isinstance(batch, MemoryQueueRequest):
             item = batch

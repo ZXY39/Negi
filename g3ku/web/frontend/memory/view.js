@@ -2074,6 +2074,7 @@ function renderMemoryView() {
     if (U.memoryQueueMore) U.memoryQueueMore.disabled = S.memoryBusy || !S.memoryQueueHasMore;
     if (U.memoryProcessedMore) U.memoryProcessedMore.disabled = S.memoryBusy || !S.memoryProcessedHasMore;
     if (U.memoryFailedMore) U.memoryFailedMore.disabled = S.memoryBusy || !S.memoryFailedHasMore;
+    if (U.memoryDream) U.memoryDream.disabled = !!S.memoryDreamBusy;
     renderMemoryDetailPreview();
     icons();
 }
@@ -2091,6 +2092,10 @@ function renderMemoryQueueCard(item) {
     const requestId = String(item?.request_id || "").trim();
     const statusText = memoryStatusLabel(item?.status);
     const createdAt = formatCompactTime(item?.created_at) || String(item?.created_at || "");
+    const isProcessing = String(item?.status || "").trim().toLowerCase() === "processing";
+    const cancelBusy = String(S.memoryQueueCancelBusy || "").trim();
+    const cancelDisabled = isProcessing || (cancelBusy && cancelBusy === requestId);
+    const cancelTitle = isProcessing ? "正在处理，无法取消" : "取消这条记忆请求（不再处理）";
     const dreamScope = memoryDreamScopeOf(item);
     let preview;
     if (memoryIsDreamItem(item) && dreamScope) {
@@ -2112,6 +2117,9 @@ function renderMemoryQueueCard(item) {
                 </div>
                 <span class="memory-card-source">${esc(memoryQueueSourceLabel(item))}</span>
                 <span class="memory-card-time">${esc(createdAt || "-")}</span>
+                <button type="button" class="memory-queue-cancel-btn" data-memory-queue-cancel="${esc(requestId)}" title="${esc(cancelTitle)}" aria-label="取消记忆请求 ${esc(requestId)}"${cancelDisabled ? " disabled" : ""}>
+                    <i data-lucide="x" aria-hidden="true"></i>
+                </button>
                 <span class="memory-card-arrow" aria-hidden="true">›</span>
             </div>
             <p class="memory-card-body">${esc(preview || "（无正文）")}</p>
@@ -2163,6 +2171,18 @@ function requestMemoryFailedDiscard(failedId) {
         confirmLabel: "放弃",
         confirmKind: "danger",
         onConfirm: () => void runMemoryFailedAction("discard", target),
+    });
+}
+
+function requestMemoryQueueCancel(requestId) {
+    const target = String(requestId || "").trim();
+    if (!target) return;
+    openConfirm({
+        title: "取消记忆请求",
+        text: "取消后这条请求立即从队列删除、不再处理，本次记忆操作回滚到处理前，并写入已处理历史的废弃终态记录。确定取消吗？",
+        confirmLabel: "取消请求",
+        confirmKind: "danger",
+        onConfirm: () => void runMemoryQueueCancel(target),
     });
 }
 

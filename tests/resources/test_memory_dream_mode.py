@@ -145,6 +145,138 @@ def test_dream_round_limit_is_twice_the_memory_role_limit() -> None:
     assert manager._memory_round_limit(fallback, batch_op="dream") == 16
 
 
+@pytest.mark.asyncio
+async def test_manual_dream_trigger_enqueues_full_sweep_ahead_of_backlog_and_dedupes(tmp_path: Path) -> None:
+    module = _module()
+    manager = _manager(tmp_path)
+    try:
+        _add(manager, "规则一")
+        _paint(manager)
+        await manager._append_queue_request(
+            module.MemoryQueueRequest(
+                op="write",
+                decision_source="self",
+                payload_text="普通请求",
+                created_at="2026-04-25T00:00:01+08:00",
+                request_id="write_1",
+            )
+        )
+
+        result = await manager.trigger_manual_dream()
+
+        assert result["status"] == "queued"
+        rows = manager._read_queue_requests()
+        assert rows[0].op == "dream"
+        assert rows[1].request_id == "write_1"
+        payload = json.loads(rows[0].payload_text)
+        assert payload["mode"] == "full"
+        assert payload["scope_key"] == "full"
+        assert payload["reason"] == "manual"
+        assert rows[0].trigger_source == "dream_cli"
+
+        again = await manager.trigger_manual_dream()
+        assert again["status"] == "already_queued"
+        assert again["request_id"] == result["request_id"]
+        assert len(manager._read_queue_requests()) == 2
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_manual_dream_stays_behind_a_processing_head(tmp_path: Path) -> None:
+    module = _module()
+    manager = _manager(tmp_path)
+    try:
+        _add(manager, "规则一")
+        _paint(manager)
+        await manager._append_queue_request(
+            module.MemoryQueueRequest(
+                op="write",
+                decision_source="self",
+                payload_text="处理中",
+                created_at="2026-04-25T00:00:01+08:00",
+                request_id="write_processing",
+                status="processing",
+            )
+        )
+        await manager._append_queue_request(
+            module.MemoryQueueRequest(
+                op="write",
+                decision_source="self",
+                payload_text="等待中",
+                created_at="2026-04-25T00:00:02+08:00",
+                request_id="write_pending",
+            )
+        )
+
+        await manager.trigger_manual_dream()
+
+        rows = manager._read_queue_requests()
+        assert rows[0].request_id == "write_processing"
+        assert rows[1].op == "dream"
+        assert rows[2].request_id == "write_pending"
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_pending_queue_request_drops_it_and_records_terminal(tmp_path: Path) -> None:
+    module = _module()
+    manager = _manager(tmp_path)
+    try:
+        _add(manager, "规则一")
+        _paint(manager)
+        await manager._append_queue_request(
+            module.MemoryQueueRequest(
+                op="write",
+                decision_source="user",
+                payload_text="记住甲",
+                created_at="2026-04-25T00:00:01+08:00",
+                request_id="write_1",
+            )
+        )
+
+        result = await manager.cancel_queue_request("write_1", reason="manual-ui")
+
+        assert result["status"] == "cancelled"
+        assert result["request_id"] == "write_1"
+        assert manager._read_queue_requests() == []
+        assert "write_1" in manager._processed_request_ids()
+        ops = [json.loads(line) for line in manager.ops_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+        assert ops[-1]["status"] == "discarded"
+        assert ops[-1]["discard_reason"] == "operator_cancelled"
+        assert ops[-1]["request_ids"] == ["write_1"]
+        assert "规则一" in manager.snapshot_text()
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_processing_request_is_refused_and_missing_raises(tmp_path: Path) -> None:
+    module = _module()
+    manager = _manager(tmp_path)
+    try:
+        await manager._append_queue_request(
+            module.MemoryQueueRequest(
+                op="write",
+                decision_source="self",
+                payload_text="处理中",
+                created_at="2026-04-25T00:00:01+08:00",
+                request_id="write_processing",
+                status="processing",
+            )
+        )
+
+        with pytest.raises(ValueError):
+            await manager.cancel_queue_request("write_processing")
+        assert len(manager._read_queue_requests()) == 1
+
+        with pytest.raises(KeyError):
+            await manager.cancel_queue_request("missing")
+    finally:
+        manager.close()
+
+
 def test_dream_prompt_uses_the_ordinary_row_cards_notes_and_no_cluster_blocks(tmp_path: Path) -> None:
     manager = _manager(tmp_path)
     try:

@@ -13110,6 +13110,43 @@ textarea {
     height: 15px;
 }
 
+/* 队列卡片右上角的取消叉号：未处理请求可取消，处理中的禁用 */
+.memory-queue-cancel-btn {
+    width: 24px;
+    height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, #ef4444 36%, var(--border-color));
+    background: color-mix(in srgb, #ef4444 10%, var(--bg-panel));
+    color: color-mix(in srgb, #ef4444 72%, var(--text-primary));
+    cursor: pointer;
+    flex: 0 0 auto;
+    transition: background 0.16s ease, border-color 0.16s ease;
+}
+
+.memory-queue-cancel-btn:hover:not(:disabled) {
+    background: color-mix(in srgb, #ef4444 22%, var(--bg-panel));
+    border-color: color-mix(in srgb, #ef4444 58%, var(--border-color));
+}
+
+.memory-queue-cancel-btn:focus-visible {
+    outline: 2px solid color-mix(in srgb, #ef4444 55%, transparent);
+    outline-offset: 2px;
+}
+
+.memory-queue-cancel-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.memory-queue-cancel-btn svg {
+    width: 13px;
+    height: 13px;
+}
+
 /* 失败记忆详情抽屉底部操作区 */
 .memory-detail-preview-actions {
     display: flex;

@@ -147,6 +147,24 @@
             body: { reason },
             timeoutMs: 30000,
         });
+    },
+
+    // 手动触发一次全量整理：服务端入队一条 dream，由记忆 worker 消费（可能耗时数分钟）。
+    async triggerMemoryDream(scope = "") {
+        return this._request("POST", "/api/memory/dream", {
+            params: scopeParams(scope),
+            body: {},
+            timeoutMs: 30000,
+        });
+    },
+
+    // 取消一条尚未处理的队列请求：立即出队、不再处理，写废弃终态记录。
+    async cancelMemoryQueue(requestId, reason = "manual-ui", scope = "") {
+        return this._request("POST", `/api/memory/queue/${encodeURIComponent(requestId)}/cancel`, {
+            params: scopeParams(scope),
+            body: { reason },
+            timeoutMs: 30000,
+        });
     }
     };
 })();

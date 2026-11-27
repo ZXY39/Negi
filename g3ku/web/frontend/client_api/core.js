@@ -131,6 +131,18 @@ class ApiCore {
                 return "失败记忆记录 ID 无效。";
             case "memory_failed_mutation_failed":
                 return "失败记忆操作未成功，请稍后重试。";
+            case "memory_dream_unavailable":
+                return "整理记忆暂不可用，请稍后刷新。";
+            case "memory_dream_failed":
+                return "整理记忆触发未成功，请稍后重试。";
+            case "memory_queue_cancel_unavailable":
+                return "队列取消暂不可用，请稍后刷新。";
+            case "memory_queue_not_found":
+                return "未找到对应的队列请求，可能已被处理，请刷新列表。";
+            case "memory_queue_processing":
+                return "这条请求正在处理中，无法取消；请等它结束后再操作。";
+            case "memory_queue_cancel_failed":
+                return "队列请求取消未成功，请稍后重试。";
             case "memory_admin_mutation_disabled":
                 return "记忆运维变更未启用：请在服务端设置环境变量 G3KU_ENABLE_MEMORY_ADMIN_MUTATIONS 后重试。";
             case "memory_admin_audit_failed":
