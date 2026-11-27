@@ -2,9 +2,8 @@ schema_version: 1
 kind: tool
 name: process_kill
 display_name: Process Kill
-description: Stop one or more pids started by exec background=true; only pids owned by
-  this session/task are accepted. Pass pid for a single process or pids for a batch;
-  a batch judges every pid independently and reports one result per pid.
+description: Stop one or more exec background=true processes owned by this session or
+  task; pass pid for one process, or pids for a batch, each judged separately.
 tool_result_delivery_contract: runtime_managed
 protocol: mcp
 mcp:
