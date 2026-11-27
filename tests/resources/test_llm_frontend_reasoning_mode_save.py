@@ -56,7 +56,7 @@ const elements = {
   "llm-binding-request-timeout-seconds": { value: "" },
   "llm-create-name-input": { value: "demo-config", addEventListener: () => {} },
   "llm-bindings-list": { innerHTML: "", addEventListener: () => {} },
-  "llm-editor-shell": { innerHTML: "", addEventListener: () => {}, querySelectorAll: () => [] },
+  "llm-editor-shell": { innerHTML: "", replaceChildren() { this.innerHTML = ""; }, addEventListener: () => {}, querySelectorAll: () => [] },
   "llm-editor-backdrop": { addEventListener: () => {} },
   "model-roles-cancel-btn": {},
 };

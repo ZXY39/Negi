@@ -22,6 +22,7 @@ function makeEl() {
     classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
     querySelector() { return null; },
     querySelectorAll() { return []; },
+    replaceChildren() { this.innerHTML = ""; },
     setAttribute() {}, getAttribute() { return null; },
     append() {}, replaceWith() {}, remove() {}, focus() {}, select() {},
     getBoundingClientRect() { return { top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 }; },

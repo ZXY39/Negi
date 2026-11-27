@@ -754,6 +754,7 @@ class SpawnChildNodesTool(Tool):
                     description='How broadly the child should explore the task.',
                 ),
                 'acceptance_prompt': {'type': 'string'},
+                'continuous': {'type': 'boolean'},
                 'seed_tools': {
                     'type': 'array',
                     'items': {'type': 'string'},

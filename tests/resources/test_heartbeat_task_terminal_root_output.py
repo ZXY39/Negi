@@ -535,7 +535,7 @@ async def test_heartbeat_reply_renders_sticker_marker_for_transcript_and_web_fra
     # 缩略图 staging 落 tmp：假 PNG 会让 PIL 失败并回落成原 markdown，真实数据根不该被写。
     monkeypatch.setattr(
         "g3ku.runtime.api.ceo_media.upload_dir_for_session",
-        lambda session_id: tmp_path / "uploads",
+        lambda session_id, **kwargs: tmp_path / "uploads",
     )
 
     session_id = "web:ceo-heartbeat-sticker-reply"

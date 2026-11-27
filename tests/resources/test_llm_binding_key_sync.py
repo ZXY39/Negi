@@ -184,6 +184,7 @@ const elements = {
   // 脏位表现由 org_graph_app.model_route_editor.test.js 钉）。
   "llm-editor-shell": {
     innerHTML: "",
+    replaceChildren() { this.innerHTML = ""; },
     addEventListener: () => {},
     querySelectorAll: (selector) => (selector === "[data-llm-action]" ? llmEditorActionNodes : []),
   },

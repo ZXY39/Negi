@@ -52,14 +52,15 @@ def _fresh_scan_cache():
 
 
 def test_scan_admin_packs_keeps_disabled_packs_and_empty_categories(tmp_path: Path):
-    _pack(tmp_path, "demo", categories=("happy", "awkward"))
-    _pack(tmp_path, "_parked", categories=("calm",))
-    (tmp_path / "demo" / "empty").mkdir()
+    root = tmp_path / "stickers"
+    _pack(root, "demo", categories=("happy", "awkward"))
+    _pack(root, "_parked", categories=("calm",))
+    (root / "demo" / "empty").mkdir()
     # 保留名与禁用名不是包：界面不该把它们列成一个可以管理的包。
-    _write(tmp_path / "semantic" / "x" / "a.png")
-    _write(tmp_path / "build" / "x" / "a.png")
+    _write(root / "semantic" / "x" / "a.png")
+    _write(root / "build" / "x" / "a.png")
 
-    packs = sticker_admin.scan_admin_packs(root=tmp_path)
+    packs = sticker_admin.scan_admin_packs(root=root)
 
     assert [pack.dir_name for pack in packs] == ["_parked", "demo"]
     parked, demo = packs
@@ -71,14 +72,15 @@ def test_scan_admin_packs_keeps_disabled_packs_and_empty_categories(tmp_path: Pa
 
 
 def test_scan_admin_packs_caps_images_but_keeps_true_count(tmp_path: Path):
-    pack = tmp_path / "demo"
+    root = tmp_path / "stickers"
+    pack = root / "demo"
     for index in range(5):
         _write(pack / "happy" / f"{index}.png")
 
-    counts = sticker_admin.scan_admin_packs(root=tmp_path, per_category=0)
+    counts = sticker_admin.scan_admin_packs(root=root, per_category=0)
     assert (counts[0].categories[0].count, counts[0].categories[0].images) == (5, ())
 
-    capped = sticker_admin.scan_admin_packs(root=tmp_path, per_category=2)
+    capped = sticker_admin.scan_admin_packs(root=root, per_category=2)
     assert (capped[0].categories[0].count, len(capped[0].categories[0].images)) == (5, 2)
 
 
@@ -449,11 +451,12 @@ def test_delete_category_prunes_manifest(tmp_path: Path):
 
 
 def test_delete_pack_counts_and_removes(tmp_path: Path):
-    _pack(tmp_path, "demo", categories=("happy", "awkward"))
-    deleted = sticker_admin.delete_pack("demo", root=tmp_path)
+    root = tmp_path / "stickers"
+    _pack(root, "demo", categories=("happy", "awkward"))
+    deleted = sticker_admin.delete_pack("demo", root=root)
     assert deleted == {"images": 2, "files": 2}
-    assert not (tmp_path / "demo").exists()
-    assert sticker_admin.scan_admin_packs(root=tmp_path) == ()
+    assert not (root / "demo").exists()
+    assert sticker_admin.scan_admin_packs(root=root) == ()
 
 
 def test_delete_pack_cannot_reach_outside_root(tmp_path: Path):

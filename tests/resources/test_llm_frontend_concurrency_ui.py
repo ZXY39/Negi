@@ -537,6 +537,7 @@ def test_llm_create_editor_renders_new_connection_and_policy_fields() -> None:
             classList: { add() {}, remove() {}, contains() { return false; } },
             querySelector() { return null; },
             querySelectorAll() { return []; },
+            replaceChildren() { this.innerHTML = ""; },
             setAttribute() {},
             getAttribute() { return null; },
             addEventListener() {},
@@ -711,6 +712,7 @@ def test_handle_provider_change_preserves_entered_values() -> None:
             classList: { add() {}, remove() {}, contains() { return false; } },
             querySelector() { return null; },
             querySelectorAll() { return []; },
+            replaceChildren() { this.innerHTML = ""; },
             setAttribute() {}, getAttribute() { return null; },
             addEventListener() {},
           };

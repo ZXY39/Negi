@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+from starlette.requests import Request
+
 import g3ku.web.main as web_main
 
 
@@ -13,7 +15,8 @@ def _serve(tmp_path: Path, monkeypatch, name: str):
     (tmp_path / "search.py").write_text("print(1)", encoding="utf-8")
     monkeypatch.setattr(web_main, "FRONTEND_DIR", tmp_path)
     monkeypatch.setattr(web_main, "FRONTEND_ENTRY", tmp_path / "org_graph.html")
-    return asyncio.run(web_main.serve_frontend_file(name))
+    request = Request({"type": "http", "method": "GET", "path": f"/{name}", "headers": []})
+    return asyncio.run(web_main.serve_frontend_file(name, request))
 
 
 def test_stray_text_file_falls_back_to_spa(tmp_path, monkeypatch):

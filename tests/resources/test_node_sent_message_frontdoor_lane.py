@@ -76,6 +76,9 @@ class _Store:
     def list_task_notifications(self, task_id):
         return self._notifications
 
+    def list_chatbox_messages_by_task(self, task_id):
+        return []
+
     def list_frontdoor_node_messages_by_task(self, task_id):
         return self._frontdoor
 

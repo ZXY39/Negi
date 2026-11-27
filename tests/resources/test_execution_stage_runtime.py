@@ -171,6 +171,7 @@ def _tool_record(
     metadata: dict | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
+        name=tool_id,
         tool_id=tool_id,
         display_name=display_name or tool_id,
         description=description,
@@ -418,7 +419,7 @@ async def test_enrich_node_messages_moves_repair_required_tools_and_skills_into_
                 }
             ),
         ],
-        visible_tool_names=[],
+        visible_tool_names=["agent_browser"],
         tool_instances={},
     )
 

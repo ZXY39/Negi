@@ -2025,6 +2025,7 @@ async def test_worker_startup_replays_pending_worker_status_outbox(tmp_path: Pat
     )
     scheduled: list[str] = []
     service._start_worker_loops = lambda: None
+    service.worker_heartbeat_service.start_background = lambda: None
     service._schedule_task_worker_status_delivery = lambda worker_id: scheduled.append(str(worker_id))
     service.store.put_task_worker_status_outbox(
         worker_id="worker:pending",
@@ -2707,8 +2708,6 @@ def test_task_live_patch_history_persists_latest_payload_after_window(tmp_path: 
             publish_snapshot=True,
         )
 
-    time.sleep(1.3)
-
     # 单份快照契约：live.patch 不再写 task_events 行，最新 payload 覆盖写 latest.json.gz
     live_events = [
         item for item in service.store.list_task_events(after_seq=after_seq, task_id=record.task_id, limit=10_000)
@@ -2723,9 +2722,15 @@ def test_task_live_patch_history_persists_latest_payload_after_window(tmp_path: 
         / service.store._safe_path_component(record.task_id)
         / "latest.json.gz"
     )
-    assert snapshot_path.exists()
-    with gzip.open(snapshot_path, "rt", encoding="utf-8") as handle:
-        snapshot = json.loads(handle.read())
+    deadline = time.monotonic() + 5
+    while True:
+        if snapshot_path.exists():
+            with gzip.open(snapshot_path, "rt", encoding="utf-8") as handle:
+                snapshot = json.loads(handle.read())
+            if snapshot["frame"]["await_marker"] == "progress-19":
+                break
+        assert time.monotonic() < deadline, "latest live patch snapshot did not settle in time"
+        time.sleep(0.05)
     assert snapshot["frame"]["await_marker"] == "progress-19"
 
 

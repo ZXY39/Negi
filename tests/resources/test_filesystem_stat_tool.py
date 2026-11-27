@@ -41,12 +41,14 @@ async def test_measures_real_file_size_and_mtime(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_directory_aggregates_cover_whole_tree(tmp_path: Path) -> None:
     tool = _make_tool(tmp_path)
-    (tmp_path / "sub").mkdir()
-    (tmp_path / "small.txt").write_bytes(b"a" * 10)
-    (tmp_path / "big.pdf").write_bytes(b"b" * 5000)
-    (tmp_path / "sub" / "nested.md").write_bytes(b"c" * 100)
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "sub").mkdir()
+    (target / "small.txt").write_bytes(b"a" * 10)
+    (target / "big.pdf").write_bytes(b"b" * 5000)
+    (target / "sub" / "nested.md").write_bytes(b"c" * 100)
 
-    result = await tool.execute(paths=[str(tmp_path)])
+    result = await tool.execute(paths=[str(target)])
 
     item = result["items"][0]
     assert item["kind"] == "directory"
@@ -101,15 +103,17 @@ async def test_restrict_to_workspace_rejects_outside_paths(tmp_path: Path) -> No
 @pytest.mark.asyncio
 async def test_measurement_does_not_modify_targets(tmp_path: Path) -> None:
     tool = _make_tool(tmp_path)
-    target = tmp_path / "keep.pdf"
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    target = target_dir / "keep.pdf"
     target.write_bytes(b"%PDF-1.4\n" + b"y" * 100)
     before = (target.stat().st_size, target.stat().st_mtime_ns)
 
-    await tool.execute(paths=[str(tmp_path), str(target)])
+    await tool.execute(paths=[str(target_dir), str(target)])
 
     after = (target.stat().st_size, target.stat().st_mtime_ns)
     assert before == after
-    assert sorted(path.name for path in tmp_path.iterdir()) == ["keep.pdf"]
+    assert sorted(path.name for path in target_dir.iterdir()) == ["keep.pdf"]
 
 
 def test_manifest_grants_inspection_role_as_a_tool_level_record() -> None:

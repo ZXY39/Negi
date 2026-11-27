@@ -271,7 +271,7 @@ def test_consolidation_note_browser_wires_the_read_only_lane() -> None:
     runtime_py = _source("g3ku/agent/memory_agent_runtime.py")
 
     # 入口在「查看记忆」旁边，读的是同一份 sqlite 派生出的归并区分类
-    assert '<button id="memory-index-notes-btn" class="toolbar-btn ghost" type="button">归并记忆</button>' in html
+    assert '<button id="memory-index-notes-btn" class="toolbar-btn ghost" type="button">已归并记忆</button>' in html
     assert 'memoryIndexNotes: document.getElementById("memory-index-notes-btn")' in app_js
     assert 'U.memoryIndexNotes?.addEventListener("click", () => void openMemoryNoteBrowser());' in app_js
     assert "`memory:index-notes:${scopeKey(scope)}`" in api_js

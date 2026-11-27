@@ -2417,8 +2417,8 @@ async def test_graph_finalize_turn_records_the_sent_sticker_index(tmp_path: Path
     expected = {"role": "assistant", "content": "好耶\n[[sticker:atri/happy/1]]"}
     assert result["messages"][-1] == expected
     assert result["frontdoor_request_body_messages"][-1] == expected
-    # 出站/UI 仍拿原始输出，由 egress 解析成图片。
-    assert result["final_output"] == "好耶\n[[sticker:atri/happy]]"
+    # finalize 定稿一次，出站/UI 与基线都沿用同一序号标记。
+    assert result["final_output"] == "好耶\n[[sticker:atri/happy/1]]"
 
 
 @pytest.mark.asyncio

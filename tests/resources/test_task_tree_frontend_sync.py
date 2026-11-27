@@ -630,9 +630,10 @@ def test_task_status_helpers_treat_unpassed_as_non_failed_without_continue_actio
         global.U = {};
         const appCode = ["g3ku/web/frontend/ui/toast.js", "g3ku/web/frontend/ui/confirm.js", "g3ku/web/frontend/ceo/model-panel.js", "g3ku/web/frontend/ceo/composer.js", "g3ku/web/frontend/ceo/compression.js", "g3ku/web/frontend/ceo/feed-model.js", "g3ku/web/frontend/ceo/feed-view.js", "g3ku/web/frontend/ceo/sessions-panel.js", "g3ku/web/frontend/ceo/session-store.js", "g3ku/web/frontend/ceo/ws-router.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js", "g3ku/web/frontend/models/role-store.js", "g3ku/web/frontend/models/role-view.js", "g3ku/web/frontend/models/actions.js", "g3ku/web/frontend/org_graph_app.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         const pStatusStart = appCode.indexOf("const pStatus");
+        const pStatusEnd = appCode.indexOf(";", pStatusStart) + 1;
         const helperStart = appCode.indexOf("const canPause");
         const helperEnd = appCode.indexOf("function normalizeTokenUsage");
-        vm.runInThisContext(appCode.slice(pStatusStart, helperStart));
+        vm.runInThisContext(appCode.slice(pStatusStart, pStatusEnd));
         vm.runInThisContext(appCode.slice(helperStart, helperEnd));
 
         global.taskWorkerControlsAvailable = () => true;
@@ -696,9 +697,10 @@ def test_task_status_helpers_match_completed_and_unpassed_selection_buckets() ->
         global.U = {};
         const appCode = ["g3ku/web/frontend/ui/toast.js", "g3ku/web/frontend/ui/confirm.js", "g3ku/web/frontend/ceo/model-panel.js", "g3ku/web/frontend/ceo/composer.js", "g3ku/web/frontend/ceo/compression.js", "g3ku/web/frontend/ceo/feed-model.js", "g3ku/web/frontend/ceo/feed-view.js", "g3ku/web/frontend/ceo/sessions-panel.js", "g3ku/web/frontend/ceo/session-store.js", "g3ku/web/frontend/ceo/ws-router.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js", "g3ku/web/frontend/models/role-store.js", "g3ku/web/frontend/models/role-view.js", "g3ku/web/frontend/models/actions.js", "g3ku/web/frontend/org_graph_app.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         const pStatusStart = appCode.indexOf("const pStatus");
+        const pStatusEnd = appCode.indexOf(";", pStatusStart) + 1;
         const helperStart = appCode.indexOf("const canPause");
         const helperEnd = appCode.indexOf("function normalizeTokenUsage");
-        vm.runInThisContext(appCode.slice(pStatusStart, helperStart));
+        vm.runInThisContext(appCode.slice(pStatusStart, pStatusEnd));
         vm.runInThisContext(appCode.slice(helperStart, helperEnd));
 
         const tasksCode = ["g3ku/web/frontend/tasks/hall-store.js", "g3ku/web/frontend/tasks/hall-view.js", "g3ku/web/frontend/tasks/ws-router.js", "g3ku/web/frontend/org_graph_tasks.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
@@ -742,9 +744,10 @@ def test_task_status_helpers_ignore_legacy_continuation_metadata() -> None:
         global.U = {};
         const appCode = ["g3ku/web/frontend/ui/toast.js", "g3ku/web/frontend/ui/confirm.js", "g3ku/web/frontend/ceo/model-panel.js", "g3ku/web/frontend/ceo/composer.js", "g3ku/web/frontend/ceo/compression.js", "g3ku/web/frontend/ceo/feed-model.js", "g3ku/web/frontend/ceo/feed-view.js", "g3ku/web/frontend/ceo/sessions-panel.js", "g3ku/web/frontend/ceo/session-store.js", "g3ku/web/frontend/ceo/ws-router.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js", "g3ku/web/frontend/models/role-store.js", "g3ku/web/frontend/models/role-view.js", "g3ku/web/frontend/models/actions.js", "g3ku/web/frontend/org_graph_app.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         const pStatusStart = appCode.indexOf("const pStatus");
+        const pStatusEnd = appCode.indexOf(";", pStatusStart) + 1;
         const helperStart = appCode.indexOf("const canPause");
         const helperEnd = appCode.indexOf("function normalizeTokenUsage");
-        vm.runInThisContext(appCode.slice(pStatusStart, helperStart));
+        vm.runInThisContext(appCode.slice(pStatusStart, pStatusEnd));
         vm.runInThisContext(appCode.slice(helperStart, helperEnd));
 
         global.taskWorkerControlsAvailable = () => true;
@@ -1828,6 +1831,10 @@ def test_render_tasks_uses_effective_input_tokens_for_task_card_metric() -> None
             if (child && typeof child === "object") child.parentNode = this;
             this.children.push(child);
             return child;
+          }
+          replaceChildren() {
+            this.children = [];
+            this.innerHTML = "";
           }
           setAttribute(name, value) {
             this.attributes[String(name)] = String(value);
