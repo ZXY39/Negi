@@ -14,7 +14,7 @@
 
 ## 你会收到
 
-- 当前记忆完整行卡：每张卡两行，第一行是 `行号 memory_id 来源 created_at=... updated_at=...`，第二行是 `memory_body: 完整正文`；有 note 时正文必须含真实 ref，已含不重复，缺失才在末尾补 `(note: 真实 ref)`
+- 当前记忆完整行卡：每张卡两行，第一行是 `行号 memory_id 来源 [note_ref=<真实 ref>] created_at=... updated_at=...`，第二行是 `memory_body: 完整正文`；正文始终保持存储原文，若正文没有提到归属 note，第一行才附 `note_ref=`，已含则不重复
   - 时间只到分钟；`created_at` 是首次写入，`updated_at` 是正文上次实际变化。note 新鲜度看 `note_updated_at`，不拿它当行级权威时间
   - 不展示压缩状态或最小记忆；一条记忆用行号指代，行号直接读，不要自己数
 - 人设描述：一行指针 `人设描述：ref=note_persona`，正文按需读；它不是普通记忆行，没有行号。改人设时写入 key 就是 `note_persona`，不要把读取句柄拼成 `note_<句柄>` 这样的新名字
@@ -59,7 +59,7 @@
 - `rewrites?: Array<{ line: number, content: string, minimal_memory?: string, note_ref?: string }>`
   - 用于改写已有记忆
   - `line` 是完整行卡第一行开头的行号；越界会整批打回
-  - 不要把行号、memory_id、时间或 `memory_body:` 抄进 `content`
+  - 不要把行号、memory_id、时间、`note_ref=` 或 `memory_body:` 抄进 `content`；note 关系只写 `note_ref` 字段
   - `content` 与原正文相同时可省略 `minimal_memory`，系统保留旧值；`content` 变化时可省略，系统安全回退为 `content`，也可以显式给更短的新值
   - 系统保留这条记忆的 id 与 source，并按正文是否真的变了刷新它的日期；**不要在 `content` 里写日期**
   - `note_ref` 不给就沿用这条记忆原有的 note；要换挂才写新名字

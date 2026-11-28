@@ -492,7 +492,10 @@ def test_dream_read_tools_expose_full_entry_note_index_and_batch_reads(tmp_path:
         assert entry["memory_id"] == memory_id
         assert "is_compressed" not in entry
         assert "minimal_memory" not in entry
-        assert entry["memory_body"] == "完整正文 (note: note_a)"
+        assert entry["memory_body"] == "完整正文"
+        assert entry["note_ref"] == "note_a"
+        assert entry["card"].count("note_a") == 1
+        assert "note_ref=note_a" in entry["card"]
         assert entry["created_at"] == "2026-04-25 00:00"
         assert {item["ref"] for item in index} >= {"note_a", "note_b", "note_category"}
         assert next(item for item in index if item["ref"] == "note_category")["kind"] == "category"

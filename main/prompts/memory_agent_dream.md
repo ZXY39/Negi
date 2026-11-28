@@ -4,7 +4,7 @@
 
 输入包含：
 
-- 当前全部常驻行的完整行卡：全局行号、memory_id、source、created_at、updated_at、完整 memory_body；有 note 时正文必须含真实 ref。
+- 当前全部常驻行的完整行卡：全局行号、memory_id、source、created_at、updated_at、完整 memory_body；正文始终保持存储原文，若正文没有提到归属 note，第一行附 `note_ref=<真实 ref>`，已含则不重复。
 - 全部 note ref 的紧凑索引：类型、scope、owner 数、note_updated_at、section 数量、候选标志与 doctor findings。
 - 人设、归并区导航与上一批 note 回收报告。
 

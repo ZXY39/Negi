@@ -7534,15 +7534,14 @@ class MemoryManager:
         updated_at = self._format_memory_time_minute(str(row.get("updated_at") or ""))
         body = str(row.get("memory_body") or "").strip()
         note_ref = str(row.get("note_ref") or "").strip()
-        if note_ref:
-            has_address = re.search(
-                rf"(?<![A-Za-z0-9_]){re.escape(note_ref)}(?![A-Za-z0-9_])",
-                body,
-            ) is not None
-            if not has_address:
-                body = f"{body} (note: {note_ref})".strip()
+        note_meta = ""
+        if note_ref and re.search(
+            rf"(?<![A-Za-z0-9_]){re.escape(note_ref)}(?![A-Za-z0-9_])",
+            body,
+        ) is None:
+            note_meta = f" note_ref={note_ref}"
         card = (
-            f"{line} {memory_id} {source} "
+            f"{line} {memory_id} {source}{note_meta} "
             f"created_at={created_at} updated_at={updated_at}\n"
             f"memory_body: {body}"
         )
@@ -7550,6 +7549,7 @@ class MemoryManager:
             "line": line,
             "memory_id": memory_id,
             "source": source,
+            "note_ref": note_ref,
             "created_at": created_at,
             "updated_at": updated_at,
             "memory_body": body,
@@ -8477,15 +8477,18 @@ class MemoryManager:
             """Stage one complete memory mutation batch.
 
             The model sees one full row card per memory: `line memory_id source
-            created_at=... updated_at=...` followed by `memory_body: ...`. `rewrites` takes
-            `{line, content, minimal_memory?, note_ref?}`; omit `minimal_memory` to keep the
-            old summary when content is unchanged, or to use the new content as a safe summary.
+            [note_ref=<ref>] created_at=... updated_at=...` followed by `memory_body: ...`.
+            The body stays verbatim; note metadata appears only when the body does not already
+            mention that note. `rewrites` takes `{line, content, minimal_memory?, note_ref?}`;
+            omit `minimal_memory` to keep the old summary when content is unchanged, or to use
+            the new content as a safe summary.
             `deletes` accepts line numbers or objects containing `line`, `reason`,
             `authority_basis`, `scope_match`, and optional `replacement_line` / `evidence`.
             The separate `delete_reasons` list remains available for mixed or legacy calls.
             `inspired_lines` takes the line numbers this request actually decided on. Lines
             outside the block are refused per item, the rest of the batch still stands. Do
-            not write a date, id or row-card prefix into `content` - the backend owns them.
+            not write a date, id, `note_ref=` metadata or row-card prefix into `content` -
+            note ownership belongs in the item's `note_ref` field.
 
             Submitting again replaces the staged batch and voids its confirmation: use that
             to correct a preview you do not accept, then read the new diff and confirm that

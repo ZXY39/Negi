@@ -128,13 +128,16 @@ def test_row_card_is_shared_by_ordinary_dream_and_read_entry(tmp_path: Path) -> 
         entry = _tools(manager, session)["memory_read_entry"].invoke({"line": 1})
 
         for text in (ordinary, dream):
-            assert f"1 {memory_id} user created_at=2026-11-23 01:04 updated_at=2026-11-23 15:34" in text
-            assert "memory_body: 完整正文：只在 IF 线系列使用这套做法，例外保留。 (note: note_if)" in text
+            assert f"1 {memory_id} user note_ref=note_if created_at=2026-11-23 01:04 updated_at=2026-11-23 15:34" in text
+            assert "memory_body: 完整正文：只在 IF 线系列使用这套做法，例外保留。" in text
+            assert " (note: note_if)" not in text
             assert '"minimal_memory":' not in text
             assert "is_compressed" not in text
         assert entry["created_at"] == "2026-11-23 01:04"
         assert entry["updated_at"] == "2026-11-23 15:34"
-        assert entry["memory_body"].endswith("(note: note_if)")
+        assert entry["memory_body"] == "完整正文：只在 IF 线系列使用这套做法，例外保留。"
+        assert entry["note_ref"] == "note_if"
+        assert entry["card"].count("note_if") == 1
         assert "is_compressed" not in entry and "minimal_memory" not in entry
     finally:
         manager.close()
@@ -148,6 +151,7 @@ def test_row_card_does_not_duplicate_a_note_address_already_in_body(tmp_path: Pa
         row = next(item for item in manager._memory_repo.list_memories() if item["memory_id"] == memory_id)
         card = manager._memory_entry_view(row, line=1)["card"]
         assert card.count("note_if") == 1
+        assert "note_ref=" not in card
         assert "(note: note_if)" not in card
     finally:
         manager.close()
