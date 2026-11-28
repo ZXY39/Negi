@@ -435,6 +435,11 @@ test("升级终态不回落成\"正在重启\"：失败占行、成功让回版�
         "升级未完成：本机解释器起不了子进程，服务未动"
     );
 
+    assert.equal(
+        api.updateApplyOutcomeText({ ...base, last_apply: { outcome: "relaunch_failed" } }),
+        "升级未完成：服务未恢复"
+    );
+
     // 未知终态兜底：宁可露出原码，也不要显示成"已是最新"
     assert.equal(api.updateApplyOutcomeText({ ...base, last_apply: { outcome: "weird_code" } }), "升级未完成：weird_code");
 });

@@ -488,28 +488,25 @@ def test_reap_force_kills_only_the_pids_it_asked_to_stop(monkeypatch) -> None:
     assert report['remaining'] == [30]
 
 
-def test_reaper_never_targets_the_launcher_itself(monkeypatch) -> None:
-    # 入口用绝对路径调 `negi_bootstrap.py` 时，启动器自己的命令行同时命中「checkout 根」
-    # 与 `negi_bootstrap.py web` 两条判据。把自己算进回收名单，`taskkill /T` 会在回收途中
-    # 杀掉回收者本身：入口以 exit 1 静默消失、一个字都不打印，看起来像"脚本起不来"
-    # （实测 `start-negi.cmd` 必现；同一个文件用相对路径调用时不带 checkout 根，所以不复现）。
-    # 要排除的是一对 PID：venv 的 python.exe 是重定向器，cmdline 命中判据的是父进程，
-    # 真正跑这段代码的是它的子进程（启动 PID ≠ 运行 PID）。
-    self_pids = [os.getpid(), os.getppid()]
-    other = max(self_pids) + 1000
-    if os.name == 'nt':
-        stdout = ''.join(f'{pid}\r\n' for pid in self_pids) + f'{other}\r\n'
-    else:
-        root = str(negi_bootstrap.PROJECT_ROOT)
-        stdout = ''.join(
-            f'{pid} {root}/.venv/bin/python -m g3ku web\n' for pid in [*self_pids, other]
-        )
+def test_reaper_never_targets_the_launcher_ancestor_chain(monkeypatch) -> None:
+    # Windows venv redirector -> venv interpreter -> delegated interpreter is three
+    # matching Python processes. Protecting only self and direct parent leaves the
+    # redirector in the kill list, and taskkill /T then kills the reaper itself.
+    monkeypatch.setattr(negi_bootstrap.os, 'getpid', lambda: 100)
+    monkeypatch.setattr(negi_bootstrap.os, 'getppid', lambda: 200)
+    root = str(negi_bootstrap.PROJECT_ROOT)
+    line_end = "\r\n" if os.name == 'nt' else "\n"
+    rows = [(100, 200), (200, 300), (300, 999), (400, 888)]
+    stdout = ''.join(
+        f'{pid} {ppid} python.exe {root}/.venv/Scripts/python.exe {root}/negi_bootstrap.py web' + line_end
+        for pid, ppid in rows
+    )
     monkeypatch.setattr(
         negi_bootstrap,
         '_run_capture',
         lambda argv, **_kwargs: subprocess.CompletedProcess(argv, 0, stdout, ''),
     )
-    assert negi_bootstrap._managed_runtime_processes() == [other]
+    assert negi_bootstrap._managed_runtime_processes() == [400]
 
     killed = []
     monkeypatch.setattr(negi_bootstrap, '_request_runtime_exit', lambda _port, **_k: False)
@@ -518,10 +515,37 @@ def test_reaper_never_targets_the_launcher_itself(monkeypatch) -> None:
     )
     monkeypatch.setattr(negi_bootstrap.time, 'sleep', lambda _s: None)
 
-    report = negi_bootstrap.reap_existing_runtime_processes(18790, graceful_timeout=0.0)
+    lines = []
+    report = negi_bootstrap.reap_existing_runtime_processes(18790, graceful_timeout=0.0, print_lines=lines)
 
-    assert report['found'] == [other]
-    assert killed == [other]
+    assert report['found'] == [400]
+    assert killed == [400]
+    assert any('candidates=[400]' in line and 'protected=[100, 200, 300, 999]' in line and 'targets=[400]' in line for line in lines)
+
+
+def test_terminate_refuses_a_protected_ancestor(monkeypatch) -> None:
+    monkeypatch.setattr(negi_bootstrap.os, 'getpid', lambda: 100)
+    monkeypatch.setattr(negi_bootstrap.os, 'getppid', lambda: 200)
+    root = str(negi_bootstrap.PROJECT_ROOT)
+    line_end = "\r\n" if os.name == 'nt' else "\n"
+    rows = [(100, 200), (200, 300), (300, 999)]
+    stdout = ''.join(
+        f'{pid} {ppid} python.exe {root}/.venv/Scripts/python.exe {root}/negi_bootstrap.py web' + line_end
+        for pid, ppid in rows
+    )
+    calls = []
+
+    def fake_capture(argv, **_kwargs):
+        calls.append(argv)
+        if argv[0] == 'taskkill':
+            return subprocess.CompletedProcess(argv, 0, '', '')
+        return subprocess.CompletedProcess(argv, 0, stdout, '')
+
+    monkeypatch.setattr(negi_bootstrap, '_run_capture', fake_capture)
+    monkeypatch.setattr(negi_bootstrap.os, 'kill', lambda *_args: None)
+
+    assert negi_bootstrap._terminate_runtime_process(300) is False
+    assert not any(call[0] == 'taskkill' for call in calls)
 
 
 def test_reap_asks_the_old_port_when_the_operator_changed_the_target_port(monkeypatch) -> None:

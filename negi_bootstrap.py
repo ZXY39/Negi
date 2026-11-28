@@ -445,43 +445,49 @@ def _run_capture(argv: list[str]) -> subprocess.CompletedProcess:
         return subprocess.CompletedProcess(argv, 1, "", f"{type(exc).__name__}:{exc}")
 
 
-def _managed_runtime_processes() -> list[int]:
-    """本 checkout 起着的 web/worker 进程 PID（与启动器旧实现同一判据，但不含自己）。
-
-    入口用绝对路径调这个文件时，**启动器自己的命令行**同时命中「checkout 根」与
-    `negi_bootstrap.py web` 两条判据。把自己算进回收名单，下面的 `taskkill /T` 就会
-    在回收途中杀掉正在回收的进程本身：入口以 exit 1 静默消失、一个字都不打印，看起来
-    像"脚本起不来"（实测：同一个文件用相对路径调用则不复现——相对 argv 不含 checkout 根）。
-
-    要排除的是**一对** PID：venv 的 `python.exe` 是重定向器，真正执行本文件的解释器是
-    它的子进程（实测启动 PID ≠ 运行 PID）。`os.getpid()` 只是那个子进程，cmdline 命中
-    判据的却是父进程，所以父 PID 必须一起排除，否则强杀那一步仍然打到自己。
-    """
-    self_pids = {os.getpid(), os.getppid()}
+def _process_table() -> list[tuple[int, int, str, str]]:
     if os.name == "nt":
-        # PowerShell 单引号里反斜杠是字面量，`.NET` 正则要的 `\s` 原样传即可（多倍成一个
-        # 反斜杠就变成"匹配一个反斜杠再加 s"，扫不到任何进程——看着像"没有旧实例"）。
-        # 根路径用 [regex]::Escape 现算：它含点号与反斜杠，直接塞进正则会被当元字符。
-        escaped_root = str(PROJECT_ROOT).replace("'", "''")
         script = (
-            "$root = [regex]::Escape('" + escaped_root + "')\n"
-            "Get-CimInstance Win32_Process | Where-Object "
-            "{ $_.Name -like 'python*' -and $_.CommandLine -and $_.CommandLine -match $root -and "
-            "$_.CommandLine -match '" + RUNTIME_CMDLINE_PATTERN + "' } "
-            "| ForEach-Object { $_.ProcessId }"
+            "Get-CimInstance Win32_Process | ForEach-Object "
+            "{ \"$($_.ProcessId) $($_.ParentProcessId) $($_.Name) $($_.CommandLine)\" }"
         )
         completed = _run_capture(["powershell.exe", "-NoProfile", "-Command", script])
-        pids = [int(token) for token in completed.stdout.split() if token.strip().isdigit()]
-        return [pid for pid in pids if pid not in self_pids]
-    completed = _run_capture(["ps", "-eo", "pid=,args="])
-    pids: list[int] = []
+    else:
+        completed = _run_capture(["ps", "-eo", "pid=,ppid=,comm=,args="])
+    rows: list[tuple[int, int, str, str]] = []
     for line in completed.stdout.splitlines():
-        parts = line.strip().split(None, 1)
-        if len(parts) != 2 or not parts[0].isdigit():
+        parts = line.strip().split(None, 3)
+        if len(parts) != 4 or not parts[0].isdigit() or not parts[1].isdigit():
             continue
-        if _runtime_cmdline_is_managed(parts[1], root=PROJECT_ROOT):
-            pids.append(int(parts[0]))
-    return [pid for pid in pids if pid not in self_pids]
+        rows.append((int(parts[0]), int(parts[1]), parts[2], parts[3]))
+    return rows
+
+
+def _protected_runtime_pids(process_table: list[tuple[int, int, str, str]] | None = None) -> set[int]:
+    rows = _process_table() if process_table is None else process_table
+    parents = {pid: parent for pid, parent, _name, _command_line in rows}
+    protected: set[int] = set()
+    pid = os.getpid()
+    while pid > 0 and pid not in protected:
+        protected.add(pid)
+        pid = parents.get(pid, os.getppid() if pid == os.getpid() else 0)
+    protected.add(os.getppid())
+    return protected
+
+
+def _managed_runtime_processes() -> list[int]:
+    """Return this checkout's web/worker PIDs, excluding the complete startup chain."""
+    rows = _process_table()
+    protected = _protected_runtime_pids(rows)
+    pids: list[int] = []
+    for pid, _parent, name, command_line in rows:
+        if pid in protected:
+            continue
+        if os.name == "nt" and not name.lower().startswith("python"):
+            continue
+        if _runtime_cmdline_is_managed(command_line, root=PROJECT_ROOT):
+            pids.append(pid)
+    return list(dict.fromkeys(pids))
 
 
 def _request_runtime_exit(port: int, *, timeout: float = 20.0) -> bool:
@@ -501,6 +507,14 @@ def _request_runtime_exit(port: int, *, timeout: float = 20.0) -> bool:
 
 
 def _terminate_runtime_process(pid: int) -> bool:
+    protected = _protected_runtime_pids()
+    if int(pid) in protected:
+        print(
+            f"[negi] Refusing to stop protected startup PID {pid}; "
+            f"protected chain={sorted(protected)}",
+            flush=True,
+        )
+        return False
     if os.name == "nt":
         # `/T` 是必需的：venv 的 `python.exe` 是重定向器，真解释器是它的**子进程**
         # （实测启动 PID != 运行 PID）。只 `/F` 杀父会留下孤儿服务占着端口，然后
@@ -585,7 +599,11 @@ def reap_existing_runtime_processes(
             time.sleep(max(0.05, float(poll)))
     remaining = _managed_runtime_processes()
     if remaining:
-        lines.append("[negi] Force-stopping remaining Negi processes...")
+        protected = _protected_runtime_pids()
+        lines.append(
+            "[negi] Force-stopping remaining Negi processes; "
+            f"candidates={found} protected={sorted(protected)} targets={remaining}"
+        )
     forced: list[int] = []
     failed: list[int] = []
     for pid in remaining:

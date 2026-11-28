@@ -29,7 +29,8 @@ requires_bash = pytest.mark.skipif(BASH is None, reason="bash is only present wh
 BASH_FUNCTIONS = (
     "log", "fail", "find_uv", "device_kit_platform", "sha256_of", "kit_field",
     "kit_wheel_pairs", "resolve_kit", "clear_kit_stage", "install_kit_uv",
-    "install_offline_environment", "exclude_names_from_stream",
+    "install_python", "sync_environment", "install_offline_environment", "install_environment",
+    "exclude_names_from_stream",
     "is_excluded_top_level", "upgrade_python_bin", "run_local_edits",
     "record_installed_tree", "copy_checkout_into_root", "update_code_from_kit",
 )
@@ -227,6 +228,58 @@ def _install_body(kit: Path, root: Path) -> str:
         "install_offline_environment\n"
         'echo DONE\n'
     )
+
+
+def _online_environment_body(root: Path) -> str:
+    return (
+        f'DIR="{root.as_posix()}"\n'
+        'KIT_ROOT=""\n'
+        'NO_MIRROR=1\n'
+        f'UV="{root / "uv"}"\n'
+        f'export UV_LOG="{root / "calls.log"}"\n'
+        "install_environment\n"
+        "echo DONE\n"
+    )
+
+
+@requires_bash
+def test_online_environment_records_marker_after_sync(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    venv_python = root / ".venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text('#!/usr/bin/env bash\necho "python $*" >> "$UV_LOG"\n', encoding="utf-8")
+    venv_python.chmod(0o755)
+    uv = root / "uv"
+    uv.write_text('#!/usr/bin/env bash\necho "uv $*" >> "$UV_LOG"\n', encoding="utf-8")
+    uv.chmod(0o755)
+
+    done = _run_bash(_online_environment_body(root))
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    calls = (root / "calls.log").read_text(encoding="utf-8").splitlines()
+    assert calls[0] == "uv sync --frozen"
+    assert calls[1].endswith("negi_bootstrap.py mark-installed")
+
+
+@requires_bash
+def test_online_environment_fails_when_marker_cannot_be_written(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    venv_python = root / ".venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text(
+        '#!/usr/bin/env bash\n'
+        'if [ "$1" = "negi_bootstrap.py" ] && [ "$2" = "mark-installed" ]; then exit 9; fi\n',
+        encoding="utf-8",
+    )
+    venv_python.chmod(0o755)
+    uv = root / "uv"
+    uv.write_text('#!/usr/bin/env bash\nexit 0\n', encoding="utf-8")
+    uv.chmod(0o755)
+
+    done = _run_bash(_online_environment_body(root))
+
+    assert done.returncode != 0
+    assert "recording the installed environment failed" in done.stderr
 
 
 @requires_bash

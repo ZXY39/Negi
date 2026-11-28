@@ -46,12 +46,36 @@ def test_run_aborts_before_exit_when_interpreter_unhealthy(monkeypatch):
     assert records and records[-1][0][0] == "interpreter_unhealthy"
 
 
+def test_relaunch_reports_failure_when_endpoint_never_answers(monkeypatch):
+    monkeypatch.setattr(ua, "_spawn_detached", lambda *a, **k: None)
+    monkeypatch.setattr(ua, "_probe_self", lambda port: False)
+    monkeypatch.setattr(ua, "RELAUNCH_VERIFY_SECONDS", 0.0)
+    monkeypatch.setattr(ua.time, "sleep", lambda _seconds: None)
+    logs = []
+    monkeypatch.setattr(ua, "_log", logs.append)
+
+    assert ua._relaunch_web(18790) is False
+    assert any("relaunch unverified" in line and "18790" in line for line in logs)
+
+
+def test_relaunch_reports_spawn_failure(monkeypatch):
+    def fail_spawn(*a, **k):
+        raise OSError("cannot spawn")
+
+    monkeypatch.setattr(ua, "_spawn_detached", fail_spawn)
+    logs = []
+    monkeypatch.setattr(ua, "_log", logs.append)
+
+    assert ua._relaunch_web(18790) is False
+    assert any("relaunch spawn failed" in line for line in logs)
+
+
 def test_relaunch_goes_through_bootstrap_supervise(monkeypatch):
     spawned = {}
     monkeypatch.setattr(ua, "_spawn_detached", lambda *a, **k: spawned.update(args=a, kwargs=k))
     monkeypatch.setattr(ua, "_probe_self", lambda port: True)
     monkeypatch.setattr(ua, "_log", lambda msg: None)
-    ua._relaunch_web(18790)
+    assert ua._relaunch_web(18790) is True
     args = spawned["args"]
     assert args[0].endswith("negi_bootstrap.py")
     assert "web" in args and "--supervise" in args

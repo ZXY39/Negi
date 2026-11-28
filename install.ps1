@@ -764,6 +764,8 @@ function Install-Environment {
     Push-Location -LiteralPath $Root
     try {
         Sync-ProjectEnvironment -uv $uv
+        $venvPython = Get-VenvPython -Root $Root
+        Invoke-Checked @($venvPython, (Join-Path $Root 'negi_bootstrap.py'), 'mark-installed') -Where $Root
     }
     finally {
         Pop-Location

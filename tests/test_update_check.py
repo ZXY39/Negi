@@ -590,13 +590,59 @@ def test_failed_upgrade_is_recorded_even_though_the_service_comes_back(tmp_path:
     monkeypatch.setattr(apply_mod, "_request_exit", lambda port, pause: "exit_accepted_200")
     monkeypatch.setattr(apply_mod, "_wait_for_release", lambda port: True)
     monkeypatch.setattr(apply_mod, "_run_upgrade", lambda ref: False)
-    monkeypatch.setattr(apply_mod, "_relaunch_web", lambda port: relaunched.append(port))
+    monkeypatch.setattr(apply_mod, "_relaunch_web", lambda port: relaunched.append(port) or True)
 
     assert apply_mod.run("v1.0.12", port=18790) == 1
     assert relaunched == [18790], "失败也要把服务拉回来"
     data = json.loads(result_file.read_text(encoding="utf-8"))
     assert data["outcome"] == "upgrade_failed"
     assert "exit_accepted_200" in data["detail"]
+
+
+def test_successful_upgrade_with_failed_relaunch_is_not_ok(tmp_path: Path, monkeypatch):
+    import json
+
+    import g3ku.update_apply as apply_mod
+
+    result_file = _result_file(tmp_path, monkeypatch)
+    monkeypatch.setattr(apply_mod, "LOG_FILE", tmp_path / "apply.log")
+    monkeypatch.setattr(apply_mod, "STARTUP_GRACE_SECONDS", 0.0)
+    monkeypatch.setattr(apply_mod, "_probe_self", lambda port: True)
+    monkeypatch.setattr(apply_mod, "_preflight", lambda ref: (True, "", []))
+    monkeypatch.setattr(apply_mod, "_request_exit", lambda port, pause: "exit_accepted_200")
+    monkeypatch.setattr(apply_mod, "_wait_for_release", lambda port: True)
+    monkeypatch.setattr(apply_mod, "_run_upgrade", lambda ref: True)
+    monkeypatch.setattr(apply_mod, "_relaunch_web", lambda port: False)
+    monkeypatch.setattr(apply_mod, "_conflict_extra", lambda since: None)
+
+    assert apply_mod.run("v1.0.12", port=18790) != 0
+    data = json.loads(result_file.read_text(encoding="utf-8"))
+    assert data["outcome"] == "relaunch_failed"
+    assert data["stage"] == "relaunch_failed"
+    assert "port=18790" in data["detail"]
+    assert str(apply_mod.WEB_LOG_FILE) in data["detail"]
+
+
+def test_failed_upgrade_and_failed_relaunch_does_not_claim_recovery(tmp_path: Path, monkeypatch):
+    import json
+
+    import g3ku.update_apply as apply_mod
+
+    result_file = _result_file(tmp_path, monkeypatch)
+    monkeypatch.setattr(apply_mod, "LOG_FILE", tmp_path / "apply.log")
+    monkeypatch.setattr(apply_mod, "STARTUP_GRACE_SECONDS", 0.0)
+    monkeypatch.setattr(apply_mod, "_probe_self", lambda port: True)
+    monkeypatch.setattr(apply_mod, "_preflight", lambda ref: (True, "", []))
+    monkeypatch.setattr(apply_mod, "_request_exit", lambda port, pause: "exit_accepted_200")
+    monkeypatch.setattr(apply_mod, "_wait_for_release", lambda port: True)
+    monkeypatch.setattr(apply_mod, "_run_upgrade", lambda ref: False)
+    monkeypatch.setattr(apply_mod, "_relaunch_web", lambda port: False)
+    monkeypatch.setattr(apply_mod, "_conflict_extra", lambda since: None)
+
+    assert apply_mod.run("v1.0.12", port=18790) != 0
+    data = json.loads(result_file.read_text(encoding="utf-8"))
+    assert data["outcome"] == "relaunch_failed"
+    assert "旧版本已重新拉起" not in data["detail"]
 
 
 def test_preflight_failure_never_stops_the_service(tmp_path: Path, monkeypatch):
@@ -897,7 +943,7 @@ def test_run_writes_a_stage_trail_and_keeps_the_single_flight_gate(monkeypatch, 
     monkeypatch.setattr(apply_mod, "_request_exit", lambda port, pause: "exit_accepted_200")
     monkeypatch.setattr(apply_mod, "_wait_for_release", lambda port: True)
     monkeypatch.setattr(apply_mod, "_run_upgrade", lambda ref: True)
-    monkeypatch.setattr(apply_mod, "_relaunch_web", lambda port=None: None)
+    monkeypatch.setattr(apply_mod, "_relaunch_web", lambda port=None: True)
 
     assert apply_mod.run("v9.9.9", port=18999) == 0
 

@@ -68,7 +68,7 @@ def _record(
     `apply` 端点在踢起执行体那一刻只能回 `restarting: true`；之后执行体无论停在
     哪一步，前端都看不见（实盘两次都是"正在重启"挂在那里，真相在日志里 2 秒就
     结束了）。终态码：started / ok / upgrade_failed / preflight_failed / exit_refused /
-    port_busy / port_unknown / not_this_service / interpreter_unhealthy。`preflight_failed`
+    port_busy / port_unknown / not_this_service / interpreter_unhealthy / relaunch_failed。`preflight_failed`
     是停机前预检（冲突 / uv 可得性）不过，`interpreter_unhealthy` 是 sys.executable
     生不出子解释器，两者服务都从未退出。
 
@@ -512,22 +512,26 @@ def _spawn_detached(*args: str, sink_path: Path | None = None) -> None:
                 pass
 
 
-def _relaunch_web(port: int) -> None:
-    """Bring the service back under supervision on the port it was serving.
-
-    经 bootstrap 而不是裸 `-m g3ku web`：回收残留、等端口静默、日志轮转与
-    --supervise 重生都只在 bootstrap 车道上存在。
-    """
+def _relaunch_web(port: int) -> bool:
+    """Bring the service back under supervision and report whether it answers."""
     args = [str(PROJECT_ROOT / "negi_bootstrap.py"), "web", "--supervise", "--port", str(int(port))]
     _log(f"relaunch web via bootstrap: {' '.join(args)}")
-    _spawn_detached(*args, sink_path=WEB_LOG_FILE)
+    try:
+        _spawn_detached(*args, sink_path=WEB_LOG_FILE)
+    except OSError as exc:
+        _log(f"relaunch spawn failed on port {port}: {exc}")
+        return False
     deadline = time.monotonic() + RELAUNCH_VERIFY_SECONDS
     while time.monotonic() < deadline:
         if _probe_self(port):
             _log("relaunch verified: bootstrap endpoint answering")
-            return
+            return True
         time.sleep(2.0)
-    _log("relaunch unverified: no bootstrap answer within grace; check the web log")
+    _log(
+        f"relaunch unverified: no bootstrap answer on port {port} within "
+        f"{RELAUNCH_VERIFY_SECONDS:g}s; check {WEB_LOG_FILE}"
+    )
+    return False
 
 
 def apply_in_flight(window_seconds: float = APPLY_IN_FLIGHT_SECONDS) -> dict[str, Any] | None:
@@ -620,18 +624,28 @@ def run(ref: str, *, port: int | None = None, pause_running_work: bool = True) -
     if not upgraded:
         _log("upgrade failed; relaunching the previous version")
     _stage(ref, "relaunching", f"port={resolved}")
-    _relaunch_web(resolved)
-    if upgraded:
+    relaunch_verified = _relaunch_web(resolved)
+    if upgraded and relaunch_verified:
         _record("ok", ref, f"relaunched on port {resolved}", stage="ok", extra=conflicts)
-    else:
+        return 0
+    if not relaunch_verified:
         _record(
-            "upgrade_failed",
+            "relaunch_failed",
             ref,
-            f"{label}; install -Upgrade 非零退出，旧版本已重新拉起",
-            stage="upgrade_failed",
+            f"port={resolved}; 服务未在 {RELAUNCH_VERIFY_SECONDS:g} 秒内恢复；"
+            f"安装={'成功' if upgraded else '失败'}；日志={WEB_LOG_FILE}",
+            stage="relaunch_failed",
             extra=conflicts,
         )
-    return 0 if upgraded else 1
+        return 1
+    _record(
+        "upgrade_failed",
+        ref,
+        f"{label}; install -Upgrade 非零退出，旧版本已重新拉起",
+        stage="upgrade_failed",
+        extra=conflicts,
+    )
+    return 1
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -709,6 +709,12 @@ install_environment() {
     fi
   fi
   sync_environment
+  local venv_python
+  venv_python="$DIR/.venv/bin/python"
+  [ -x "$venv_python" ] || venv_python="$DIR/.venv/Scripts/python.exe"
+  [ -x "$venv_python" ] || fail 'the online environment has no interpreter to record as installed'
+  (cd "$DIR" && "$venv_python" negi_bootstrap.py mark-installed) \
+    || fail 'recording the installed environment failed; the next negi run would reach for the network'
 }
 
 BIN_DIR="$HOME/.local/bin"
