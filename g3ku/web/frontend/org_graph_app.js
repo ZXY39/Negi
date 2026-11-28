@@ -6939,8 +6939,8 @@ function buildCeoContextLoadNotice(toolName = "", targetId = "") {
     }
     if (loaderKind === "note") {
         return normalizedTargetId
-            ? `\u5df2\u52a0\u8f7d note:${normalizedTargetId}`
-            : "\u5df2\u52a0\u8f7d\u8bb0\u5fc6\u7b14\u8bb0";
+            ? `\u8bfb\u53d6\u8bb0\u5fc6 ${normalizedTargetId}`
+            : "\u8bfb\u53d6\u8bb0\u5fc6";
     }
     return normalizedTargetId
         ? `\u5df2\u52a0\u8f7d\u5de5\u5177 ${normalizedTargetId}`
@@ -7638,10 +7638,10 @@ function applyCeoToolEventToTurn(turn, event = {}) {
             toolName,
             status,
             detailTexts: [
+                String(event.arguments_text || "").trim(),
                 rawText,
                 String(event.output_text || "").trim(),
                 String(event.output_preview_text || "").trim(),
-                String(event.arguments_text || "").trim(),
             ],
         });
         return null;

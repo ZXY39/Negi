@@ -54,10 +54,12 @@ function load({ contextLoaderKind = () => "" } = {}) {
             sliceAppFunction("formatElapsedDuration"),
             sliceAppFunction("formatTokenCount"),
             sliceAppFunction("thinkingReadingParts"),
+            sliceAppFunction("parseJsonObjectText"),
+            sliceAppFunction("extractCeoContextLoadTarget"),
             STORE_CODE,
             DETAIL_CODE,
             VIEW_CODE,
-            "this.__turns = { buildExecutionTraceSteps, buildNodeExecutionTrace, buildTraceRenderSignature, renderTraceStep, taskRoundThinkingText, contextLoadDisplayFor };",
+            "this.__turns = { buildExecutionTraceSteps, buildNodeExecutionTrace, buildTraceRenderSignature, renderTraceStep, taskRoundThinkingText, contextLoadDisplayFor, renderExecutionRoundToolChip };",
         ].join("\n"),
         context
     );
@@ -190,7 +192,7 @@ test("expanded turn text renders markdown on the same scroll box", () => {
 });
 
 test("memory tools carry their own loader title instead of 加载内容", () => {
-    const { contextLoadDisplayFor } = load({
+    const { contextLoadDisplayFor, renderExecutionRoundToolChip } = load({
         contextLoaderKind: (name) => {
             if (name === "memory_update") return "memory";
             if (name === "memory_note") return "note";
@@ -202,8 +204,21 @@ test("memory tools carry their own loader title instead of 加载内容", () => 
     assert.equal(memory.title, "更新记忆");
     assert.equal(memory.kind, "memory");
 
-    const note = contextLoadDisplayFor({ tool_name: "memory_note", status: "success", output_text: '{"ok":true}' });
-    assert.equal(note.title, "加载笔记");
+    const noteStep = {
+        tool_call_id: "call-note",
+        tool_name: "memory_note",
+        status: "success",
+        arguments_text: '{"ref":"nb16a5"}',
+        output_text: '{"ref":"wrong-note"}',
+    };
+    const note = contextLoadDisplayFor(noteStep);
+    assert.equal(note.targetId, "nb16a5");
+    assert.equal(note.title, "读取记忆 nb16a5");
+    assert.equal(contextLoadDisplayFor({ tool_name: "memory_note", status: "running" }).title, "读取记忆");
+    assert.match(
+        renderExecutionRoundToolChip({ round_id: "r1" }, noteStep, 0),
+        /<span class="task-trace-round-chip-title">读取记忆 nb16a5<\/span>/,
+    );
 });
 
 test("textless rounds stay separate sections instead of one merged strip", () => {

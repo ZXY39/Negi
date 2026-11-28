@@ -280,10 +280,14 @@ function contextLoadDisplayFor(step) {
     if (CONTEXT_LOAD_HIDDEN_STATUSES.has(String(step?.status || "").trim().toLowerCase())) return null;
     let targetId = contractDelivery ? toolName : "";
     if (!targetId && typeof extractCeoContextLoadTarget === "function") {
-        targetId = [step?.output_text, step?.arguments_text]
+        const targetTexts = kind === "note"
+            ? [step?.arguments_text, step?.output_text]
+            : [step?.output_text, step?.arguments_text];
+        targetId = targetTexts
             .map((raw) => String(extractCeoContextLoadTarget(toolName, String(raw || "")) || "").trim())
             .find(Boolean) || "";
     }
+    const baseTitle = CONTEXT_LOAD_TITLES[kind] || "加载内容";
     return {
         kind,
         targetId,
@@ -291,7 +295,7 @@ function contextLoadDisplayFor(step) {
             ? resolveCeoContextLoadNoticeRiskLevel(kind, targetId)
             : "medium",
         iconName: contextLoadIconName(kind),
-        title: CONTEXT_LOAD_TITLES[kind] || "加载内容",
+        title: kind === "note" && targetId ? `${baseTitle} ${targetId}` : baseTitle,
         body: contextLoadBodyFromStep(step),
     };
 }

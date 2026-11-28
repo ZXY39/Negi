@@ -122,7 +122,7 @@ function loadApp() {
     vm.createContext(context);
     vm.runInContext(
         `${APP_CODE}
-        this.__testExports = { S, U, ResourcesState, createPendingCeoTurn, maybeShowCeoContextLoadNotice, showCeoContextLoadNotice, resolveCeoContextLoadNoticeRiskLevel, isCeoContextLoaderToolName, ceoContextLoaderKind };`,
+        this.__testExports = { S, U, ResourcesState, createPendingCeoTurn, maybeShowCeoContextLoadNotice, showCeoContextLoadNotice, resolveCeoContextLoadNoticeRiskLevel, isCeoContextLoaderToolName, ceoContextLoaderKind, applyCeoToolEventToTurn };`,
         context
     );
     context.__testExports.U.ceoContextLoadNotice = new StubHTMLElement();
@@ -217,14 +217,14 @@ test("memory_note loads surface as a note notice instead of a tool row", () => {
     const turn = createPendingCeoTurn("user");
     S.ceoPendingTurns = [turn];
 
-    // 行抑制走的就是这个谓词：实时道与快照道都用它把工具行摘掉
+    // 实时道抑制普通工具行；落账轨道仍由共用 chip 渲染成上下文加载卡。
     assert.equal(ceoContextLoaderKind("memory_note"), "note");
     assert.equal(isCeoContextLoaderToolName("memory_note"), true);
 
     const shown = maybeShowCeoContextLoadNotice(turn, {
         toolName: "memory_note",
         status: "success",
-        detailTexts: ['{"ref":"nb16a5"}'],
+        detailTexts: ['{"ref":"nb16a5"}', '{"ref":"wrong-note"}'],
     });
 
     assert.equal(shown, true);
@@ -232,7 +232,22 @@ test("memory_note loads surface as a note notice instead of a tool row", () => {
     assert.equal(notice.dataset.noticeKind, "note");
     assert.ok(notice.className.split(" ").includes("is-note"), "unexpected classes: " + notice.className);
     assert.equal(notice.children[0].innerHTML, '<i data-lucide="notebook-pen"></i>');
-    assert.equal(notice.children[1].textContent, "已加载 note:nb16a5");
+    assert.equal(notice.children[1].textContent, "读取记忆 nb16a5");
+});
+
+test("live memory_note events take the note name from arguments before note body text", () => {
+    const { applyCeoToolEventToTurn, U } = loadApp();
+    const turn = { source: "user", listEl: new StubHTMLElement(), flowEl: new StubHTMLElement() };
+
+    const item = applyCeoToolEventToTurn(turn, {
+        status: "success",
+        tool_name: "memory_note",
+        arguments_text: '{"ref":"nb16a5"}',
+        output_text: '{"ref":"wrong-note"}',
+    });
+
+    assert.equal(item, null);
+    assert.equal(U.ceoContextLoadNotice.children[0].children[1].textContent, "读取记忆 nb16a5");
 });
 
 test("a failed note read shows no notice and keeps its own target out of the text", () => {
