@@ -238,6 +238,30 @@ test("textless rounds stay separate sections instead of one merged strip", () =>
     assert.equal((steps[1].bodyHtml.match(/task-trace-round-tools/g) || []).length, 3);
 });
 
+test("node detail keeps parallel purpose exec tools in one round strip", () => {
+    const { buildExecutionTraceSteps } = load();
+    const tools = ["检查服务状态", "读取本地端口"].map((purpose, index) => ({
+        tool_call_id: `call-node-exec-${index + 1}`,
+        tool_name: "exec",
+        status: "success",
+        arguments_text: JSON.stringify({ command: `echo ${index + 1}`, purpose }),
+        output_text: "ok",
+    }));
+    const steps = buildExecutionTraceSteps({
+        initial_prompt: "initial",
+        turns: [{ ...turn(1, "", []), tools }],
+        tool_steps: [],
+        stages: [],
+    }, {});
+    const body = steps[1].bodyHtml;
+
+    assert.equal((body.match(/task-trace-round-strip/g) || []).length, 1);
+    assert.equal((body.match(/task-trace-round-group/g) || []).length, 1);
+    assert.equal((body.match(/task-trace-round-chip [^"]*has-purpose/g) || []).length, 2);
+    assert.match(body, /data-tool-call-id="call-node-exec-1"/);
+    assert.match(body, /data-tool-call-id="call-node-exec-2"/);
+});
+
 test("buildNodeExecutionTrace keeps turns from full trace and summary", () => {
     const { buildNodeExecutionTrace } = load();
     const turns = [turn(1, "进展", ["tool-a"]), turn(2, "收尾", ["submit_final_result"])];

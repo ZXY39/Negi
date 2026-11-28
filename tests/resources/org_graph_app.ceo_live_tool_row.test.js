@@ -254,6 +254,7 @@ test("stylesheets give live rows the tool-card shape, not the rail", () => {
     assert.ok(item, "live item override not found");
     assert.match(item[1], /padding:\s*0;/);
     assert.match(item[1], /border-left:\s*0;/);
+    assert.match(item[1], /flex:\s*0 0 auto;/);
 
     // 与 chip 同尺寸：3px 8px 内边距、8px 图标到名字的间距；block 级 flex +
     // line-height normal 让行高与按钮里的 chip 完全一致。
@@ -267,6 +268,7 @@ test("stylesheets give live rows the tool-card shape, not the rail", () => {
     const container = /\.task-trace-live-steps\s*\{([\s\S]*?)\n\}/.exec(CSS);
     assert.ok(container, "live container rule not found");
     assert.match(container[1], /display:\s*flex/);
+    assert.match(container[1], /flex-wrap:\s*nowrap;/);
     assert.match(container[1], /margin-left:\s*-8px;/);
 });
 

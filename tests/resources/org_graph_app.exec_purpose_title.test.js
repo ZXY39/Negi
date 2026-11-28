@@ -123,7 +123,7 @@ function stubToolRow() {
 
 const PURPOSE = "启动本地开发服务器并保持运行，后面的验收步骤还要连它";
 
-test("exec 带 purpose 时工具卡标题只留 purpose，不挂 exec: 前缀，并挂上可折行的 has-purpose", () => {
+test("exec 带 purpose 时工具卡标题只留 purpose，不挂 exec: 前缀，并挂上可横滚的 has-purpose", () => {
     const { renderExecutionRoundToolChip } = loadApp();
     const step = {
         tool_call_id: "call-1",

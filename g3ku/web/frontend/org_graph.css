@@ -4464,29 +4464,23 @@ textarea {
     text-overflow: ellipsis;
 }
 
-/* exec 带 purpose 的工具卡标题只有那一句话动机（不带 `exec:` 前缀），动机要完整读出来：这一格换成
-   可折行、不省略号。横滚轨道给不了它宽度（nowrap 下要么被兄弟卡挤成竖排、要么把
-   整条推去滚动），所以含这一格的轨道改成可折行，让它独占一行读满，同轮其它工具卡
-   换到下一行继续横排。只有带 purpose 的那一轮换布局，其它轮仍是原来那条横滚轨道。 */
-.task-trace-round-strip:has(.task-trace-round-chip.has-purpose) {
-    flex-wrap: wrap;
-}
-
+/* exec 带 purpose 的工具卡标题只有那一句话动机（不带 `exec:` 前缀），动机要完整读出来。
+   purpose 卡按内容定宽、标题单行不省略；同一回合共享 nowrap 横向轨道，超宽时整条滚动，
+   不能因一张卡带 purpose 就把并排工具拆成上下多行。 */
 .task-trace-round-chip.has-purpose {
-    flex: 1 1 100%;
-    min-width: 0;
-    align-items: flex-start;
+    flex: 0 0 auto;
+    width: max-content;
+    max-width: none;
 }
 
 .task-trace-round-chip.has-purpose .task-trace-round-chip-label {
-    align-items: flex-start;
+    min-width: max-content;
 }
 
 .task-trace-round-chip.has-purpose .task-trace-round-chip-title {
-    white-space: normal;
+    white-space: nowrap;
     overflow: visible;
     text-overflow: clip;
-    overflow-wrap: anywhere;
 }
 
 /* 加载 skill / 加载 tool 的图标按资源风险度取色，与会话提醒的风险圆点同一套色值。 */

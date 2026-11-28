@@ -230,6 +230,47 @@ function turnFixture(seq, { withTools = false } = {}) {
     };
 }
 
+function parallelPurposeExecTools() {
+    return ["检查服务状态", "读取本地端口"].map((purpose, index) => ({
+        tool_call_id: `call-exec-${index + 1}`,
+        tool_name: "exec",
+        status: "success",
+        arguments_text: JSON.stringify({ command: `echo ${index + 1}`, purpose }),
+        output_text: "ok",
+    }));
+}
+
+test("同一回合并行 purpose exec 保持一条横向工具条", () => {
+    const { renderCeoTurnsIntoTurn } = loadApp();
+    const turn = makeTurn();
+
+    renderCeoTurnsIntoTurn(turn, [{ ...turnFixture(1), tools: parallelPurposeExecTools() }]);
+
+    const html = turn.listEl.innerHTML;
+    assert.equal((html.match(/class="task-trace-round-strip"/g) || []).length, 1);
+    assert.equal((html.match(/task-trace-round-group/g) || []).length, 1);
+    assert.equal((html.match(/task-trace-round-chip [^"]*has-purpose/g) || []).length, 2);
+    assert.match(html, /data-tool-call-id="call-exec-1"/);
+    assert.match(html, /data-tool-call-id="call-exec-2"/);
+
+    const strip = /\.task-trace-round-strip\s*\{([^}]+)\}/.exec(APP_CSS);
+    assert.ok(strip, "round strip rule not found");
+    assert.match(strip[1], /flex-wrap:\s*nowrap;/);
+    assert.match(strip[1], /overflow-x:\s*auto;/);
+    const wrappingPurposeStrip = /\.task-trace-round-strip:has\(\.task-trace-round-chip\.has-purpose\)\s*\{([^}]+)\}/.exec(APP_CSS);
+    assert.equal(Boolean(wrappingPurposeStrip), false, "purpose exec must not switch the shared strip to wrapping");
+    const purposeChip = /\.task-trace-round-chip\.has-purpose\s*\{([^}]+)\}/.exec(APP_CSS);
+    assert.ok(purposeChip, "purpose chip rule not found");
+    assert.match(purposeChip[1], /flex:\s*0 0 auto;/);
+    assert.match(purposeChip[1], /width:\s*max-content;/);
+    assert.match(purposeChip[1], /max-width:\s*none;/);
+    assert.doesNotMatch(purposeChip[1], /flex:\s*1 1 100%;/);
+
+    const purposeTitle = /\.task-trace-round-chip\.has-purpose \.task-trace-round-chip-title\s*\{([^}]+)\}/.exec(APP_CSS);
+    assert.ok(purposeTitle, "purpose title rule not found");
+    assert.match(purposeTitle[1], /white-space:\s*nowrap;/);
+});
+
 test("直播重建保留用户展开的分组与折叠的 Interaction Flow", () => {
     const { renderCeoTurnsIntoTurn } = loadApp();
     const turn = makeTurn();
